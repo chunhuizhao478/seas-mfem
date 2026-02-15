@@ -43,10 +43,10 @@ list(APPEND SEAS_HEADERS
 #     io/benchmark_output.hpp
 #     io/probe_output.hpp)
 
-# Common infrastructure (for parallel support)
-# list(APPEND SEAS_HEADERS
-#     common/seas_types.hpp
-#     common/mpi_context.hpp)
+# Phase 6: Parallel infrastructure
+list(APPEND SEAS_HEADERS
+    common/mpi_context.hpp
+    common/parallel_utils.hpp)
 
 convert_filenames_to_full_paths(SEAS_HEADERS)
 
@@ -90,6 +90,39 @@ if (MFEM_ENABLE_TESTING)
     COMMAND $<TARGET_FILE:seas_test_antiplane>)
   add_test(NAME seas_test_fault_operator
     COMMAND $<TARGET_FILE:seas_test_fault_operator>)
+endif()
+
+# =============================================================================
+# Phase 6: Parallel Unit Tests (requires MPI)
+# =============================================================================
+
+if (MFEM_USE_MPI)
+  add_mfem_miniapp(seas_test_mpi_context
+    MAIN tests/parallel/test_mpi_context.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_mpi_context PRIVATE SEAS_USE_MPI)
+
+  add_mfem_miniapp(seas_test_parallel_utils
+    MAIN tests/parallel/test_parallel_utils.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_parallel_utils PRIVATE SEAS_USE_MPI)
+
+  if (MFEM_ENABLE_TESTING)
+    add_test(NAME seas_test_mpi_context_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_mpi_context>)
+    add_test(NAME seas_test_mpi_context_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_mpi_context>)
+    add_test(NAME seas_test_parallel_utils_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_parallel_utils>)
+    add_test(NAME seas_test_parallel_utils_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_parallel_utils>)
+  endif()
 endif()
 
 # =============================================================================

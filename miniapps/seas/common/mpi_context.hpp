@@ -106,6 +106,22 @@ public:
 #endif
    }
 
+   /// @brief Global reduction for integer sum
+   ///
+   /// In serial mode, returns the input value unchanged.
+   /// In parallel mode, performs MPI_Allreduce with MPI_SUM.
+   int GlobalSumInt(int local_val) const
+   {
+#ifdef SEAS_USE_MPI
+      int global_val;
+      MPI_Allreduce(&local_val, &global_val, 1, MPI_INT, MPI_SUM,
+                    MPI_COMM_WORLD);
+      return global_val;
+#else
+      return local_val;
+#endif
+   }
+
    /// @brief Barrier synchronization
    ///
    /// In serial mode, this is a no-op.

@@ -81,7 +81,18 @@ SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_H
 SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antiplane \
                seas_test_fault_operator seas_test_quasi_dynamic seas_test_bp2_short \
                seas_test_io seas_bp2_serial_smoke
-PAR_MINIAPPS =
+# Phase 6: Parallel test sources
+TEST_MPI_CONTEXT_SRC = tests/parallel/test_mpi_context.cpp
+TEST_PARALLEL_UTILS_SRC = tests/parallel/test_parallel_utils.cpp
+TEST_MPI_CONTEXT_OBJ = $(TEST_MPI_CONTEXT_SRC:.cpp=.o)
+TEST_PARALLEL_UTILS_OBJ = $(TEST_PARALLEL_UTILS_SRC:.cpp=.o)
+
+# Phase 6: Parallel headers
+PARALLEL_HEADERS = common/mpi_context.hpp \
+                   common/parallel_utils.hpp \
+                   common/seas_types.hpp
+
+PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS)
@@ -96,7 +107,8 @@ MFEM_TESTS = MINIAPPS
 .PHONY: all clean clean-build clean-exec test \
         test-friction test-state-evolution test-antiplane \
         test-fault-operator test-quasi-dynamic test-bp2-short \
-        test-io test-bp2-serial-smoke
+        test-io test-bp2-serial-smoke \
+        test-mpi-context test-parallel-utils test-parallel
 
 all: $(MINIAPPS)
 
@@ -198,6 +210,31 @@ test-io: seas_test_io
 
 test-bp2-serial-smoke: seas_bp2_serial_smoke
 	./seas_bp2_serial_smoke
+
+# Phase 6: Parallel test targets
+seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MPI_CONTEXT_OBJ) $(MFEM_LIBS)
+
+seas_test_parallel_utils: $(TEST_PARALLEL_UTILS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_UTILS_OBJ) $(MFEM_LIBS)
+
+$(TEST_MPI_CONTEXT_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_PARALLEL_UTILS_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-mpi-context: seas_test_mpi_context
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mpi_context
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_mpi_context
+
+test-parallel-utils: seas_test_parallel_utils
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_utils
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_utils
+
+test-parallel: test-mpi-context test-parallel-utils
 
 -include $(MFEM_TEST_MK)
 
