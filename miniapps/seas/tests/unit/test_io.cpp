@@ -274,7 +274,8 @@ void TestBenchmarkOutputIntegration()
    {
       std::ifstream f("test_mfem_bp2qd_z0km.txt");
       std::string line;
-      std::getline(f, line); // header
+      std::getline(f, line); // description header (probe location)
+      std::getline(f, line); // column header
       std::getline(f, line); // first data line
 
       // Should have 5 columns: time, slip, log10(V), tau(MPa), log10(theta)

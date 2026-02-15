@@ -46,6 +46,10 @@ namespace seas
 template <typename MeshType = Mesh>
 class BenchmarkOutput
 {
+   /// Tolerance factor to avoid writing twice at the same time due to
+   /// floating-point rounding in adaptive time stepping.
+   static constexpr real_t kOutputTimeTolerance = 0.99;
+
 public:
    /// @brief Construct benchmark output manager.
    ///
@@ -58,7 +62,6 @@ public:
                    const std::vector<real_t> &probe_depths,
                    const Vector &fault_depths)
       : prefix_(prefix),
-        params_(params),
         probe_depths_(probe_depths),
         interpolator_(fault_depths, probe_depths),
         last_write_time_(-1e30)
@@ -72,10 +75,13 @@ public:
       for (size_t i = 0; i < probe_depths.size(); i++)
       {
          std::string filename = MakeFilename(prefix, probe_depths[i]);
-         auto probe = std::make_unique<ProbeOutput>(filename, columns);
+         real_t depth_km = std::abs(probe_depths[i]) / 1000.0;
 
-         // Write a header comment with probe location
-         // (The ProbeOutput already wrote the column header)
+         std::ostringstream desc;
+         desc << "BP2-QD time series at z = " << depth_km << " km";
+
+         auto probe = std::make_unique<ProbeOutput>(
+            filename, columns, desc.str());
          probes_.push_back(std::move(probe));
       }
    }
@@ -97,7 +103,7 @@ public:
       real_t V_max = fault.GetMaxSlipRate();
       real_t dt_out = OutputInterval(V_max);
 
-      if (time - last_write_time_ < dt_out * 0.99) { return false; }
+      if (time - last_write_time_ < dt_out * kOutputTimeTolerance) { return false; }
 
       // Extract fault quantities
       Vector slip, theta;
@@ -120,6 +126,8 @@ public:
 
       for (int p = 0; p < interpolator_.NumProbes(); p++)
       {
+         MFEM_ASSERT(probe_V(p) >= 0, "Negative slip rate at probe " << p << ": " << probe_V(p));
+         MFEM_ASSERT(probe_theta(p) >= 0, "Negative state variable at probe " << p << ": " << probe_theta(p));
          real_t V = std::max(probe_V(p), 1e-30);
          real_t th = std::max(probe_theta(p), 1e-30);
          real_t tau_total = tau0 + probe_tau(p);
@@ -184,7 +192,6 @@ public:
 
 private:
    std::string prefix_;
-   BP2Params params_;
    std::vector<real_t> probe_depths_;
    ProbeInterpolator interpolator_;
    std::vector<std::unique_ptr<ProbeOutput>> probes_;

@@ -37,14 +37,24 @@ public:
    ///
    /// @param filename Output file path
    /// @param column_names Names for the header comment
+   /// @param filename Output file path
+   /// @param column_names Names for the header comment
+   /// @param description Optional descriptive first line (e.g., probe location)
    ProbeOutput(const std::string &filename,
-               const std::vector<std::string> &column_names)
+               const std::vector<std::string> &column_names,
+               const std::string &description = "")
       : num_columns_(static_cast<int>(column_names.size()))
    {
       file_.open(filename, std::ios::out);
       MFEM_VERIFY(file_.is_open(), "Cannot open probe output file: " << filename);
 
-      // Write header
+      // Write optional description header (e.g., probe location)
+      if (!description.empty())
+      {
+         file_ << "# " << description << "\n";
+      }
+
+      // Write column header
       file_ << "# Columns:";
       for (size_t i = 0; i < column_names.size(); i++)
       {
@@ -231,7 +241,7 @@ private:
          real_t dz = z_hi - z_lo;
          idx_lo_[p] = best_lo;
          idx_hi_[p] = best_hi;
-         weight_[p] = (std::abs(dz) > 1e-30) ? (z_probe - z_lo) / dz : 0.5;
+         weight_[p] = (std::abs(dz) > 1e-30) ? (z_probe - z_lo) / dz : 0.0;
       }
       else
       {

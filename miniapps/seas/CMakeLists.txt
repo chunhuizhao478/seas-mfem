@@ -109,6 +109,19 @@ if (MFEM_USE_MPI)
     LIBRARIES mfem)
   target_compile_definitions(seas_test_parallel_utils PRIVATE SEAS_USE_MPI)
 
+  # Phase 7: Parallel domain operator tests
+  add_mfem_miniapp(seas_test_parallel_domain
+    MAIN tests/parallel/test_parallel_domain.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_parallel_domain PRIVATE SEAS_USE_MPI)
+
+  add_mfem_miniapp(seas_mms_antiplane_parallel
+    MAIN tests/parallel/mms_antiplane_parallel.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_mms_antiplane_parallel PRIVATE SEAS_USE_MPI)
+
   if (MFEM_ENABLE_TESTING)
     add_test(NAME seas_test_mpi_context_np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
@@ -122,6 +135,15 @@ if (MFEM_USE_MPI)
     add_test(NAME seas_test_parallel_utils_np4
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
               $<TARGET_FILE:seas_test_parallel_utils>)
+    add_test(NAME seas_test_parallel_domain_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_parallel_domain>)
+    add_test(NAME seas_test_parallel_domain_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_parallel_domain>)
+    add_test(NAME seas_mms_antiplane_parallel_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_mms_antiplane_parallel>)
   endif()
 endif()
 

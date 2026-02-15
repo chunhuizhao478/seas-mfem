@@ -92,7 +92,14 @@ PARALLEL_HEADERS = common/mpi_context.hpp \
                    common/parallel_utils.hpp \
                    common/seas_types.hpp
 
-PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils
+# Phase 7: Parallel domain test sources
+TEST_PARALLEL_DOMAIN_SRC = tests/parallel/test_parallel_domain.cpp
+MMS_ANTIPLANE_PARALLEL_SRC = tests/parallel/mms_antiplane_parallel.cpp
+TEST_PARALLEL_DOMAIN_OBJ = $(TEST_PARALLEL_DOMAIN_SRC:.cpp=.o)
+MMS_ANTIPLANE_PARALLEL_OBJ = $(MMS_ANTIPLANE_PARALLEL_SRC:.cpp=.o)
+
+PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
+               seas_test_parallel_domain seas_mms_antiplane_parallel
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS)
@@ -108,7 +115,8 @@ MFEM_TESTS = MINIAPPS
         test-friction test-state-evolution test-antiplane \
         test-fault-operator test-quasi-dynamic test-bp2-short \
         test-io test-bp2-serial-smoke \
-        test-mpi-context test-parallel-utils test-parallel
+        test-mpi-context test-parallel-utils test-parallel \
+        test-parallel-domain test-mms-parallel
 
 all: $(MINIAPPS)
 
@@ -234,7 +242,29 @@ test-parallel-utils: seas_test_parallel_utils
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_utils
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_utils
 
-test-parallel: test-mpi-context test-parallel-utils
+# Phase 7: Parallel domain tests
+seas_test_parallel_domain: $(TEST_PARALLEL_DOMAIN_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_DOMAIN_OBJ) $(MFEM_LIBS)
+
+seas_mms_antiplane_parallel: $(MMS_ANTIPLANE_PARALLEL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(MMS_ANTIPLANE_PARALLEL_OBJ) $(MFEM_LIBS)
+
+$(TEST_PARALLEL_DOMAIN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+$(MMS_ANTIPLANE_PARALLEL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-parallel-domain: seas_test_parallel_domain
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_domain
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_domain
+
+test-mms-parallel: seas_mms_antiplane_parallel
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_mms_antiplane_parallel
+
+test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel
 
 -include $(MFEM_TEST_MK)
 
@@ -246,7 +276,7 @@ clean: clean-build clean-exec
 
 clean-build:
 	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS)
-	rm -f tests/unit/*.o tests/verification/*.o
+	rm -f tests/unit/*.o tests/verification/*.o tests/parallel/*.o
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:

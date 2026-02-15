@@ -39,6 +39,10 @@ namespace seas
 template <typename MeshType = Mesh>
 class ParaViewOutput
 {
+   /// Tolerance factor to avoid writing twice at the same time due to
+   /// floating-point rounding in adaptive time stepping.
+   static constexpr real_t kOutputTimeTolerance = 0.99;
+
 public:
    /// @brief Output interval in time steps (write every N steps).
    /// Can be modified directly to change output frequency.
@@ -215,7 +219,7 @@ public:
    bool Save(int cycle, real_t time, real_t V_max)
    {
       real_t dt_out = OutputInterval(V_max);
-      if (time - last_write_time_ < dt_out * 0.99) { return false; }
+      if (time - last_write_time_ < dt_out * kOutputTimeTolerance) { return false; }
 
       return ForceSaveImpl(cycle, time);
    }

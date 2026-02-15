@@ -107,7 +107,7 @@ public:
    /// These indices can be used to apply boundary conditions.
    virtual const Array<int> &GetFaultDOFs() const = 0;
 
-#ifdef SEAS_USE_MPI
+#ifdef MFEM_USE_MPI
    /// Get MPI communicator (parallel only)
    virtual MPI_Comm GetComm() const { return MPI_COMM_WORLD; }
 #endif

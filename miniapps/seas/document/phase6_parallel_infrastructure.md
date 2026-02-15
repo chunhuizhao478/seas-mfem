@@ -67,10 +67,6 @@ using SEASBilinearForm = ParBilinearForm;
 using SEASLinearForm = ParLinearForm;
 using SEASGridFunction = ParGridFunction;
 
-// Parallel solver types
-using SEASSolver = HyprePCG;
-using SEASPreconditioner = HypreBoomerAMG;
-
 // MPI communicator wrapper
 inline MPI_Comm GetSEASComm() { return MPI_COMM_WORLD; }
 inline int GetSEASRank() {
@@ -89,10 +85,6 @@ using SEASFiniteElementSpace = FiniteElementSpace;
 using SEASBilinearForm = BilinearForm;
 using SEASLinearForm = LinearForm;
 using SEASGridFunction = GridFunction;
-
-// Serial solver types
-using SEASSolver = CGSolver;
-using SEASPreconditioner = GSSmoother;
 
 // Serial stubs for MPI functions
 inline int GetSEASRank() { return 0; }
@@ -117,8 +109,8 @@ inline bool IsSEASRoot() { return true; }
 | `LinearForm` | `ParLinearForm` | Parallel vector assembly |
 | `GridFunction` | `ParGridFunction` | Distributed solution vector |
 | `Vector` | `HypreParVector` | Hypre-compatible parallel vectors |
-| `CGSolver` | `HyprePCG` | Parallel Krylov solver |
-| `GSSmoother` | `HypreBoomerAMG` | Algebraic multigrid preconditioner |
+| `CGSolver` | `CGSolver(comm)` | Krylov solver (parallel uses MPI comm) |
+| `GSSmoother` | `HypreSmoother` | Preconditioner (AMG fails on singular DG systems) |
 
 ### 6.2 MPI Context Wrapper
 
@@ -143,6 +135,9 @@ public:
         MPI_Comm_size(MPI_COMM_WORLD, &size_);
     }
     ~MPIContext() { MPI_Finalize(); }
+
+    /// Get MPI communicator
+    MPI_Comm GetComm() const { return MPI_COMM_WORLD; }
 #else
     MPIContext(int *argc, char ***argv) : rank_(0), size_(1) {}
     ~MPIContext() = default;
@@ -207,6 +202,23 @@ public:
 #endif
     }
 
+    /// Broadcast a scalar from root to all processes
+    void Bcast(real_t &value) const {
+#ifdef SEAS_USE_MPI
+        MPI_Bcast(&value, 1, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+#endif
+    }
+
+    /// Broadcast a vector from root to all processes
+    void Bcast(Vector &vec) const {
+#ifdef SEAS_USE_MPI
+        int n = vec.Size();
+        MPI_Bcast(&n, 1, MPI_INT, 0, MPI_COMM_WORLD);
+        if (!IsRoot()) { vec.SetSize(n); }
+        MPI_Bcast(vec.GetData(), n, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+#endif
+    }
+
 private:
     int rank_;
     int size_;
@@ -234,52 +246,64 @@ namespace seas {
 
 #ifdef SEAS_USE_MPI
 
-/// Gather vector data from all ranks to root
-void GatherVectorToRoot(const Vector &local_data,
-                        Vector &global_data,
-                        const Array<int> &recv_counts,
-                        const Array<int> &displacements,
+/// Gather local vectors from all ranks to root
+/// Counts and displacements are computed internally
+void GatherVectorToRoot(const std::vector<real_t> &local,
+                        std::vector<real_t> &global,
                         MPI_Comm comm = MPI_COMM_WORLD);
 
-/// Scatter vector data from root to all ranks
-void ScatterVectorFromRoot(const Vector &global_data,
-                           Vector &local_data,
-                           const Array<int> &send_counts,
-                           const Array<int> &displacements,
+/// Scatter a global vector from root to all ranks
+void ScatterVectorFromRoot(const std::vector<real_t> &global,
+                           const std::vector<int> &counts,
+                           std::vector<real_t> &local,
                            MPI_Comm comm = MPI_COMM_WORLD);
 
-/// Broadcast scalar value from root
+/// Broadcast scalar value from root (type-safe specializations)
 template <typename T>
-void BroadcastFromRoot(T &value, MPI_Comm comm = MPI_COMM_WORLD) {
-    MPI_Bcast(&value, sizeof(T), MPI_BYTE, 0, comm);
+void BroadcastFromRoot(T &value, MPI_Comm comm = MPI_COMM_WORLD);
+
+template <>
+void BroadcastFromRoot<int>(int &value, MPI_Comm comm) {
+    MPI_Bcast(&value, 1, MPI_INT, 0, comm);
 }
 
-/// Check if all ranks have the same value (for debugging)
+template <>
+void BroadcastFromRoot<real_t>(real_t &value, MPI_Comm comm) {
+    MPI_Bcast(&value, 1, MPI_DOUBLE, 0, comm);
+}
+
+/// Check if all ranks have the same value (for debugging, type-safe specializations)
 template <typename T>
-bool AllRanksAgree(T local_value, MPI_Comm comm = MPI_COMM_WORLD) {
-    T min_val, max_val;
-    MPI_Allreduce(&local_value, &min_val, 1, MPI_DOUBLE, MPI_MIN, comm);
-    MPI_Allreduce(&local_value, &max_val, 1, MPI_DOUBLE, MPI_MAX, comm);
-    return (min_val == max_val);
+bool AllRanksAgree(T local_value, MPI_Comm comm = MPI_COMM_WORLD);
+
+template <>
+bool AllRanksAgree<int>(int local_val, MPI_Comm comm) {
+    int global_min, global_max;
+    MPI_Allreduce(&local_val, &global_min, 1, MPI_INT, MPI_MIN, comm);
+    MPI_Allreduce(&local_val, &global_max, 1, MPI_INT, MPI_MAX, comm);
+    return global_min == global_max;
+}
+
+template <>
+bool AllRanksAgree<real_t>(real_t local_val, MPI_Comm comm) {
+    real_t global_min, global_max;
+    MPI_Allreduce(&local_val, &global_min, 1, MPI_DOUBLE, MPI_MIN, comm);
+    MPI_Allreduce(&local_val, &global_max, 1, MPI_DOUBLE, MPI_MAX, comm);
+    return global_min == global_max;
 }
 
 #else
 
 // Serial stubs
-inline void GatherVectorToRoot(const Vector &local_data,
-                               Vector &global_data,
-                               const Array<int> &,
-                               const Array<int> &,
-                               int = 0) {
-    global_data = local_data;
+inline void GatherVectorToRoot(const std::vector<real_t> &local,
+                               std::vector<real_t> &global) {
+    global = local;
 }
 
-inline void ScatterVectorFromRoot(const Vector &global_data,
-                                  Vector &local_data,
-                                  const Array<int> &,
-                                  const Array<int> &,
-                                  int = 0) {
-    local_data = global_data;
+inline void ScatterVectorFromRoot(const std::vector<real_t> &global,
+                                  const std::vector<int> &counts,
+                                  std::vector<real_t> &local) {
+    local = global;
 }
 
 template <typename T>
@@ -414,7 +438,7 @@ endif()
 |        +------------------+------------------+------------------+      |
 |                                 |                                      |
 |                    +------------+------------+                         |
-|                    |   HyprePCG + BoomerAMG  |                         |
+|                    |   CGSolver + HypreSmoother |                      |
 |                    |   (Parallel solve)      |                         |
 |                    +-------------------------+                         |
 |                                                                        |

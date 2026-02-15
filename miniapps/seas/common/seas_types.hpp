@@ -35,9 +35,6 @@ using SEASBilinearForm = ParBilinearForm;
 using SEASLinearForm = ParLinearForm;
 using SEASGridFunction = ParGridFunction;
 
-// Parallel solver types
-using SEASSolver = HyprePCG;
-using SEASPreconditioner = HypreBoomerAMG;
 
 /// Get MPI communicator
 inline MPI_Comm GetSEASComm() { return MPI_COMM_WORLD; }
@@ -70,9 +67,6 @@ using SEASBilinearForm = BilinearForm;
 using SEASLinearForm = LinearForm;
 using SEASGridFunction = GridFunction;
 
-// Serial solver types
-using SEASSolver = CGSolver;
-using SEASPreconditioner = GSSmoother;
 
 // Serial stubs for MPI functions
 inline int GetSEASRank() { return 0; }

@@ -125,6 +125,9 @@ public:
    /// @brief Get the array of fault interior face indices
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
 
+   /// @brief Get the array of fault shared face indices (parallel only)
+   const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+
    /// @brief Get plate rate
    real_t GetPlateRate() const { return Vp_; }
 
@@ -172,6 +175,9 @@ private:
    // Interior fault faces (at x=0)
    Array<int> fault_interior_faces_;
 
+   // Shared fault faces (at x=0, parallel only)
+   Array<int> fault_shared_faces_;
+
    // Fault DOF information (for traction computation and output)
    Array<int> fault_dofs_;
    int num_fault_dofs_;
@@ -197,8 +203,14 @@ private:
    /// Fault extends from z=0 (surface) to z=-Wf (depth)
    bool IsFaultFace(int face) const;
 
+   /// @brief Check if a shared face is on the fault (parallel only)
+   bool IsFaultFaceShared(int shared_face) const;
+
    /// @brief Get the center coordinates of an interior face
    void GetFaceCenter(int face, real_t &x, real_t &z) const;
+
+   /// @brief Get the center coordinates of a shared face (parallel only)
+   void GetFaceCenterShared(int shared_face, real_t &x, real_t &z) const;
 
    // ========================================================================
    // BR2 Lifting Operator
@@ -232,6 +244,14 @@ private:
 
    /// @brief Assemble slip contribution using BR2 method
    void AssembleSlipContributionBR2(Vector &rhs, const Vector &slip_bc) const;
+
+   /// @brief Assemble slip contribution on shared faces using IP method (parallel only)
+   void AssembleSlipContributionIPShared(Vector &rhs, const Vector &slip_bc,
+                                         int interior_face_count) const;
+
+   /// @brief Assemble slip contribution on shared faces using BR2 method (parallel only)
+   void AssembleSlipContributionBR2Shared(Vector &rhs, const Vector &slip_bc,
+                                          int interior_face_count) const;
 };
 
 // ============================================================================
@@ -343,6 +363,45 @@ bool AntiplaneDomainOperator<MeshType>::IsFaultFace(int face) const
 }
 
 template <typename MeshType>
+void AntiplaneDomainOperator<MeshType>::GetFaceCenterShared(
+   int shared_face, real_t &x, real_t &z) const
+{
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      FaceElementTransformations *FTr =
+         mesh_.GetSharedFaceTransformations(shared_face);
+      if (FTr == nullptr) { return; }
+
+      IntegrationPoint ip;
+      ip.x = 0.5;
+
+      FTr->SetAllIntPoints(&ip);
+      Vector coords(mesh_.Dimension());
+      FTr->Face->Transform(ip, coords);
+
+      x = coords(0);
+      z = coords(1);
+#endif
+   }
+}
+
+template <typename MeshType>
+bool AntiplaneDomainOperator<MeshType>::IsFaultFaceShared(int shared_face) const
+{
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      real_t x, z;
+      GetFaceCenterShared(shared_face, x, z);
+      const real_t tol = 1e-10 * std::max(Wf_, 1.0);
+      return std::abs(x) < tol;
+#endif
+   }
+   return false;
+}
+
+template <typename MeshType>
 void AntiplaneDomainOperator<MeshType>::SetupFaultInfo()
 {
    // In full domain, the fault is an interior interface at x = 0.
@@ -364,14 +423,28 @@ void AntiplaneDomainOperator<MeshType>::SetupFaultInfo()
       }
    }
 
+   // Also iterate shared faces in parallel
+   fault_shared_faces_.SetSize(0);
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // Must exchange face neighbor data before accessing shared faces
+      mesh_.ExchangeFaceNbrData();
+      fes_->ExchangeFaceNbrData();
+
+      for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+      {
+         if (IsFaultFaceShared(sf))
+         {
+            fault_shared_faces_.Append(sf);
+         }
+      }
+#endif
+   }
+
    // One fault DOF per face, evaluated at the face midpoint.
-   // Using (order+1) Gauss-Lobatto points would place DOFs at shared
-   // vertices between adjacent faces.  With DG order 1 every DOF sits
-   // at a shared vertex, so two DOFs at the same depth evolve
-   // independently — causing spurious single-DOF nucleation that
-   // cannot propagate.  A single midpoint DOF per face eliminates the
-   // duplication entirely.
-   num_fault_dofs_ = fault_interior_faces_.Size();
+   // Includes both interior and shared fault faces.
+   num_fault_dofs_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
    // Create fault DOF array (these are just indices for the fault state vector)
    fault_dofs_.SetSize(num_fault_dofs_);
@@ -391,18 +464,18 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      // Parallel solver setup using HYPRE
-      auto *amg = new HypreBoomerAMG();
-      amg->SetPrintLevel(0);
+      // Parallel solver: CGSolver with MPI communicator.
+      // We use CGSolver instead of HyprePCG because the system may be singular
+      // (all-Neumann BCs) and HypreBoomerAMG fails on singular systems.
+      // CGSolver handles singular systems correctly when starting from zero.
+      // Preconditioner (HypreSmoother) is created at solve time.
+      auto *cg = new CGSolver(mesh_.GetComm());
+      cg->SetRelTol(1e-12);
+      cg->SetAbsTol(0.0);
+      cg->SetMaxIter(2000);
+      cg->SetPrintLevel(-1);
 
-      auto *pcg = new HyprePCG(mesh_.GetComm());
-      pcg->SetTol(1e-12);
-      pcg->SetMaxIter(500);
-      pcg->SetPrintLevel(0);
-      pcg->SetPreconditioner(*amg);
-
-      prec_.reset(amg);
-      solver_.reset(pcg);
+      solver_.reset(cg);
 #endif
    }
    else
@@ -426,6 +499,7 @@ void AntiplaneDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
       fault_depths_.SetSize(num_fault_dofs_);
 
       int idx = 0;
+      // Interior fault faces
       for (int i = 0; i < fault_interior_faces_.Size(); i++)
       {
          int face = fault_interior_faces_[i];
@@ -434,7 +508,6 @@ void AntiplaneDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
 
          if (FTr == nullptr) { continue; }
 
-         // Single midpoint DOF per face (parametric coordinate 0.5).
          IntegrationPoint ip;
          ip.x = 0.5;
 
@@ -442,8 +515,31 @@ void AntiplaneDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          Vector coords(mesh_.Dimension());
          FTr->Face->Transform(ip, coords);
 
-         // z is the depth (second coordinate in 2D)
          fault_depths_(idx++) = coords(1);
+      }
+
+      // Shared fault faces (parallel only)
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            int sf = fault_shared_faces_[i];
+            FaceElementTransformations *FTr =
+               mesh_.GetSharedFaceTransformations(sf);
+
+            if (FTr == nullptr) { continue; }
+
+            IntegrationPoint ip;
+            ip.x = 0.5;
+
+            FTr->SetAllIntPoints(&ip);
+            Vector coords(mesh_.Dimension());
+            FTr->Face->Transform(ip, coords);
+
+            fault_depths_(idx++) = coords(1);
+         }
+#endif
       }
 
       fault_depths_computed_ = true;
@@ -537,24 +633,53 @@ void AntiplaneDomainOperator<MeshType>::Solve(
       AssembleSlipContributionBR2(rhs, slip_bc);
    }
 
-   // Form the linear system
-   SparseMatrix &A = a.SpMat();
-   B_ = rhs;
-   X_ = 0.0;
-
-   // Solve the system
+   // Add shared face slip contributions (parallel only)
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      solver_->SetOperator(A);
-      solver_->Mult(B_, X_);
+      int interior_count = fault_interior_faces_.Size();
+      if (method_ == DGMethod::IP)
+      {
+         AssembleSlipContributionIPShared(rhs, slip_bc, interior_count);
+      }
+      else
+      {
+         AssembleSlipContributionBR2Shared(rhs, slip_bc, interior_count);
+      }
+#endif
+   }
+
+   X_ = 0.0;
+
+   // Form and solve the linear system
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // Parallel: assemble to HypreParMatrix
+      OperatorHandle Ah;
+      Ah.SetType(Operator::Hypre_ParCSR);
+      a.ParallelAssemble(Ah);
+
+      // RHS: for DG/L2, no shared DOFs, so local vector is the true vector
+      B_ = rhs;
+
+      // Create HypreSmoother preconditioner (works for singular systems,
+      // unlike HypreBoomerAMG which fails on singular matrices)
+      auto smoother = std::make_unique<HypreSmoother>(
+         *Ah.As<HypreParMatrix>());
+
+      auto *cg = static_cast<CGSolver*>(solver_.get());
+      cg->SetPreconditioner(*smoother);
+      cg->SetOperator(*Ah.As<HypreParMatrix>());
+      cg->Mult(B_, X_);
 #endif
    }
    else
    {
-      // For serial, set up preconditioner with the assembled matrix
-      // Store preconditioner as member to ensure it outlives the solve
-      // (CGSolver::SetPreconditioner stores a pointer, not a copy)
+      // Serial path
+      SparseMatrix &A = a.SpMat();
+      B_ = rhs;
+
       serial_prec_ = std::make_unique<GSSmoother>(A);
       static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
       solver_->SetOperator(A);
@@ -617,20 +742,33 @@ void AntiplaneDomainOperator<MeshType>::SolveMMS(
       all_bdr_marker);
    b.Assemble();
 
-   // Form and solve linear system
-   SparseMatrix &A = a.SpMat();
-   B_ = b;
    X_ = 0.0;
 
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      solver_->SetOperator(A);
-      solver_->Mult(B_, X_);
+      // Parallel: assemble to HypreParMatrix
+      OperatorHandle Ah;
+      Ah.SetType(Operator::Hypre_ParCSR);
+      a.ParallelAssemble(Ah);
+
+      B_ = b;
+
+      // Use HypreSmoother as preconditioner for CGSolver
+      auto smoother = std::make_unique<HypreSmoother>(
+         *Ah.As<HypreParMatrix>());
+
+      auto *cg = static_cast<CGSolver*>(solver_.get());
+      cg->SetPreconditioner(*smoother);
+      cg->SetOperator(*Ah.As<HypreParMatrix>());
+      cg->Mult(B_, X_);
 #endif
    }
    else
    {
+      SparseMatrix &A = a.SpMat();
+      B_ = b;
+
       serial_prec_ = std::make_unique<GSSmoother>(A);
       static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
       solver_->SetOperator(A);
@@ -760,6 +898,102 @@ void AntiplaneDomainOperator<MeshType>::ComputeTraction(
 
       traction(idx++) = tau_face;
    }
+
+   // Shared fault faces (parallel only)
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // For shared faces, we need face-neighbor data for Elem2 gradient.
+      // Exchange face-neighbor data first.
+      auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+      ParGridFunction par_u(pfes);
+      par_u = displacement;
+      pfes->ExchangeFaceNbrData();
+      par_u.ExchangeFaceNbrData();
+
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         int sf = fault_shared_faces_[i];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+
+         if (FTr == nullptr) { continue; }
+
+         IntegrationPoint ip;
+         ip.x = 0.5;
+
+         FTr->SetAllIntPoints(&ip);
+         const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+         const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
+
+         // Elem1 gradient (local)
+         Vector grad1(mesh_.Dimension());
+         {
+            const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
+            DenseMatrix dshape(fe1->GetDof(), mesh_.Dimension());
+            fe1->CalcDShape(eip1, dshape);
+
+            DenseMatrix Jinv(mesh_.Dimension());
+            CalcInverse(FTr->Elem1->Jacobian(), Jinv);
+
+            DenseMatrix dshape_phys(fe1->GetDof(), mesh_.Dimension());
+            Mult(dshape, Jinv, dshape_phys);
+
+            Array<int> dofs1;
+            fes_->GetElementDofs(FTr->Elem1No, dofs1);
+            Vector u1(fe1->GetDof());
+            par_u.GetSubVector(dofs1, u1);
+
+            grad1 = 0.0;
+            for (int k = 0; k < fe1->GetDof(); k++)
+            {
+               for (int d = 0; d < mesh_.Dimension(); d++)
+               {
+                  grad1(d) += dshape_phys(k, d) * u1(k);
+               }
+            }
+         }
+
+         // Elem2 gradient (face-neighbor)
+         Vector grad2(mesh_.Dimension());
+         {
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(
+               FTr->Elem2No - mesh_.GetNE());
+            DenseMatrix dshape(fe2->GetDof(), mesh_.Dimension());
+            fe2->CalcDShape(eip2, dshape);
+
+            DenseMatrix Jinv(mesh_.Dimension());
+            CalcInverse(FTr->Elem2->Jacobian(), Jinv);
+
+            DenseMatrix dshape_phys(fe2->GetDof(), mesh_.Dimension());
+            Mult(dshape, Jinv, dshape_phys);
+
+            // Get face-neighbor DOF values
+            Vector u2(fe2->GetDof());
+            int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            Array<int> dofs2;
+            pfes->GetFaceNbrElementVDofs(nbr_idx, dofs2);
+            const Vector &nbr_data = par_u.FaceNbrData();
+            for (int k = 0; k < fe2->GetDof(); k++)
+            {
+               u2(k) = nbr_data(dofs2[k]);
+            }
+
+            grad2 = 0.0;
+            for (int k = 0; k < fe2->GetDof(); k++)
+            {
+               for (int d = 0; d < mesh_.Dimension(); d++)
+               {
+                  grad2(d) += dshape_phys(k, d) * u2(k);
+               }
+            }
+         }
+
+         real_t avg_dudx = 0.5 * (grad1(0) + grad2(0));
+         traction(idx++) = mu_ * avg_dudx;
+      }
+#endif
+   }
 }
 
 // ============================================================================
@@ -808,6 +1042,57 @@ void AntiplaneDomainOperator<MeshType>::PrecomputeMassMatrixInverses() const
       DenseMatrixInverse M_inv(M);
       M_inv.GetInverseMatrix(elem_mass_inv_[i]);
    }
+
+#ifdef MFEM_USE_MPI
+   // In parallel, also compute mass inverses for face-neighbor elements.
+   // These are needed by BR2InteriorFaceIntegrator::AssembleFaceMatrix when
+   // ParBilinearForm::AssembleSharedFaces passes a shared face with
+   // Trans.Elem2No >= mesh.GetNE().
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+      MFEM_VERIFY(pfes, "Expected ParFiniteElementSpace in parallel");
+      pfes->ExchangeFaceNbrData();
+
+      ParMesh *pmesh = pfes->GetParMesh();
+      int nel_nbr = pmesh->GetNFaceNeighborElements();
+      elem_mass_inv_.resize(ne + nel_nbr);
+
+      for (int i = 0; i < nel_nbr; i++)
+      {
+         const FiniteElement *fe = pfes->GetFaceNbrFE(i);
+         ElementTransformation *T = pmesh->GetFaceNbrElementTransformation(i);
+
+         int ndof = fe->GetDof();
+         DenseMatrix M(ndof);
+
+         const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                   2 * fe->GetOrder());
+         Vector shape(ndof);
+         M = 0.0;
+
+         for (int j = 0; j < ir.GetNPoints(); j++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(j);
+            T->SetIntPoint(&ip);
+            fe->CalcShape(ip, shape);
+
+            real_t w = ip.weight * T->Weight();
+            for (int k = 0; k < ndof; k++)
+            {
+               for (int l = 0; l < ndof; l++)
+               {
+                  M(k, l) += w * shape(k) * shape(l);
+               }
+            }
+         }
+
+         elem_mass_inv_[ne + i].SetSize(ndof);
+         DenseMatrixInverse M_inv(M);
+         M_inv.GetInverseMatrix(elem_mass_inv_[ne + i]);
+      }
+   }
+#endif
 
    mass_inv_computed_ = true;
 }
@@ -1280,6 +1565,252 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2(
       {
          rhs(dofs2[k]) += elvec2(k);
       }
+   }
+}
+
+// ============================================================================
+// Shared Face Slip Assembly (Parallel)
+// ============================================================================
+
+template <typename MeshType>
+void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionIPShared(
+   Vector &rhs, const Vector &slip_bc, int interior_face_count) const
+{
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // For shared faces, only Elem1 is local. We assemble one-sided
+      // contributions — the other rank independently handles its Elem1.
+      real_t kappa = (order_ + 1) * (order_ + 1);
+
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         int sf = fault_shared_faces_[i];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+
+         if (FTr == nullptr) { continue; }
+
+         // Slip index: interior faces first, then shared faces
+         int slip_idx = interior_face_count + i;
+         real_t slip_phys = slip_bc(slip_idx);
+         if (std::abs(slip_phys) < 1e-15) { continue; }
+
+         Array<int> dofs1;
+         fes_->GetElementDofs(FTr->Elem1No, dofs1);
+
+         const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
+         int face_order = fe1->GetOrder();
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2*face_order + 1);
+
+         Vector elvec1(dofs1.Size());
+         elvec1 = 0.0;
+
+         for (int p = 0; p < ir.GetNPoints(); p++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(p);
+            FTr->SetAllIntPoints(&ip);
+
+            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+
+            Vector nor(mesh_.Dimension());
+            CalcOrtho(FTr->Jacobian(), nor);
+
+            real_t slip_imposed = (nor(0) > 0) ? -slip_phys : slip_phys;
+
+            Vector shape1(fe1->GetDof());
+            fe1->CalcShape(eip1, shape1);
+
+            DenseMatrix dshape1(fe1->GetDof(), mesh_.Dimension());
+            fe1->CalcDShape(eip1, dshape1);
+
+            DenseMatrix adjJ1(mesh_.Dimension());
+            CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
+
+            DenseMatrix dshape1_adj(fe1->GetDof(), mesh_.Dimension());
+            Mult(dshape1, adjJ1, dshape1_adj);
+
+            Vector dn1(fe1->GetDof());
+            dshape1_adj.Mult(nor, dn1);
+
+            real_t detJ1 = FTr->Elem1->Weight();
+            real_t detJ2 = FTr->Elem2->Weight();
+            // Same weights as serial interior face assembly
+            real_t w1 = ip.weight / (2.0 * detJ1);
+            real_t nor_sq = nor * nor;
+            // Full penalty with both element weights (Elem2 info available via FTr)
+            real_t w2 = ip.weight / (2.0 * detJ2);
+            real_t wq_penalty = kappa * nor_sq * (w1 + w2);
+
+            for (int k = 0; k < dofs1.Size(); k++)
+            {
+               elvec1(k) += sigma_ * dn1(k) * slip_imposed * w1;
+               elvec1(k) += wq_penalty * slip_imposed * shape1(k);
+            }
+         }
+
+         for (int k = 0; k < dofs1.Size(); k++)
+         {
+            rhs(dofs1[k]) += elvec1(k);
+         }
+      }
+#endif
+   }
+}
+
+template <typename MeshType>
+void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
+   Vector &rhs, const Vector &slip_bc, int interior_face_count) const
+{
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // BR2 shared face assembly: one-sided (Elem1 only)
+      int dim = mesh_.Dimension();
+      real_t penalty = br2_penalty_;
+
+      for (int fi = 0; fi < fault_shared_faces_.Size(); fi++)
+      {
+         int sf = fault_shared_faces_[fi];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+
+         if (FTr == nullptr) { continue; }
+
+         int slip_idx = interior_face_count + fi;
+         real_t slip_phys = slip_bc(slip_idx);
+         if (std::abs(slip_phys) < 1e-15) { continue; }
+
+         Array<int> dofs1;
+         fes_->GetElementDofs(FTr->Elem1No, dofs1);
+
+         const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
+         int ndof1 = fe1->GetDof();
+         int face_order = fe1->GetOrder();
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2*face_order + 1);
+         int nqp = ir.GetNPoints();
+
+         const DenseMatrix &Minv1 = GetMassMatrixInverse(FTr->Elem1No);
+
+         // Precompute shapes, normals
+         DenseMatrix shapes1(ndof1, nqp);
+         Vector nor_all(dim * nqp);
+         Vector w_all(nqp);
+         Vector slip_all(nqp);
+
+         for (int q = 0; q < nqp; q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&ip);
+            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+
+            Vector shape1_q(shapes1.GetColumn(q), ndof1);
+            fe1->CalcShape(eip1, shape1_q);
+
+            Vector nor_q(&nor_all[q * dim], dim);
+            CalcOrtho(FTr->Jacobian(), nor_q);
+
+            w_all[q] = ip.weight;
+            slip_all[q] = (nor_q(0) > 0) ? -slip_phys : slip_phys;
+         }
+
+         // One-sided BR2 lifting (Elem1 only)
+         DenseMatrix f_lifted1(ndof1, dim);
+         f_lifted1 = 0.0;
+
+         DenseMatrix face_int1(ndof1, dim);
+         face_int1 = 0.0;
+
+         for (int q = 0; q < nqp; q++)
+         {
+            for (int j = 0; j < dim; j++)
+            {
+               real_t n_j = nor_all[q * dim + j];
+               real_t factor = slip_all[q] * n_j * w_all[q];
+               for (int m = 0; m < ndof1; m++)
+               {
+                  face_int1(m, j) += shapes1(m, q) * factor;
+               }
+            }
+         }
+
+         // Apply mass inverse with factor 0.5 (same as interior)
+         for (int j = 0; j < dim; j++)
+         {
+            Vector fi1_j(ndof1), fl1_j(ndof1);
+            face_int1.GetColumn(j, fi1_j);
+            Minv1.Mult(fi1_j, fl1_j);
+            fl1_j *= 0.5;
+            f_lifted1.SetCol(j, fl1_j);
+         }
+
+         // Compute f_lifted_q (one-sided: only Elem1 contribution, doubled)
+         Vector f_lifted_q(nqp);
+         for (int q = 0; q < nqp; q++)
+         {
+            real_t sum = 0.0;
+            for (int j = 0; j < dim; j++)
+            {
+               real_t n_j = nor_all[q * dim + j];
+               real_t contrib1 = 0.0;
+               for (int l = 0; l < ndof1; l++)
+               {
+                  contrib1 += shapes1(l, q) * f_lifted1(l, j);
+               }
+               // Double the contribution (one-sided approximation)
+               sum += n_j * (2.0 * contrib1);
+            }
+            f_lifted_q[q] = 0.5 * sum;
+         }
+
+         // Assemble RHS (Elem1 only)
+         Vector elvec1(ndof1);
+         elvec1 = 0.0;
+
+         for (int q = 0; q < nqp; q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&ip);
+            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+
+            real_t wq = w_all[q];
+            real_t slip_q = slip_all[q];
+            if (std::abs(slip_q) < 1e-15) { continue; }
+
+            Vector nor_q(dim);
+            for (int j = 0; j < dim; j++)
+            {
+               nor_q[j] = nor_all[q * dim + j];
+            }
+
+            DenseMatrix dshape1_ref(ndof1, dim);
+            fe1->CalcDShape(eip1, dshape1_ref);
+
+            DenseMatrix adjJ1(dim);
+            CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
+
+            DenseMatrix dshape1_adj(ndof1, dim);
+            Mult(dshape1_ref, adjJ1, dshape1_adj);
+
+            Vector dn1(ndof1);
+            dshape1_adj.Mult(nor_q, dn1);
+
+            real_t detJ1 = FTr->Elem1->Weight();
+            real_t c1 = sigma_ * 0.5;
+
+            for (int k = 0; k < ndof1; k++)
+            {
+               elvec1(k) += c1 * wq * dn1(k) * slip_q / detJ1;
+               elvec1(k) += penalty * wq * shapes1(k, q) * f_lifted_q[q];
+            }
+         }
+
+         for (int k = 0; k < ndof1; k++)
+         {
+            rhs(dofs1[k]) += elvec1(k);
+         }
+      }
+#endif
    }
 }
 
