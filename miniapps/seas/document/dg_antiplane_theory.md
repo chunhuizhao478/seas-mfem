@@ -126,10 +126,14 @@ K∇u·n = 0                 FAULT                   K∇u·n = 0
 ### 3.1 Mesh Decomposition
 
 - **Elements**: Ω = ∪_K K (triangulation)
-- **Interior faces**: F_I = faces shared by two elements
+- **Interior faces**: F_I = interior faces shared by two elements, excluding fault faces
+- **Fault faces**: F_F = interior faces with prescribed slip (F_F ⊂ interior faces, F_F ∩ F_I = ∅)
 - **Dirichlet faces**: F_D = faces on Γ_D
 - **Neumann faces**: F_N = faces on Γ_N
-- **Fault faces**: F_F = interior faces with prescribed slip
+
+**Note**: F_I and F_F are disjoint subsets of all interior faces. Following Arnold et al. (2002)
+eq. 3.24, the bilinear form's interior face terms sum over **F_I ∪ F_F** (all interior faces).
+The fault contribution to the RHS provides the inhomogeneous shift to enforce [[u]] = δ.
 
 ### 3.2 Jump and Average Operators
 
@@ -201,6 +205,8 @@ The complete BR2 bilinear form `a(u_h, v_h)` consists of:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+where `a^int` sums over **all** interior faces (F_I ∪ F_F), including fault faces.
+
 ---
 
 #### 4.3.1 Volume Term
@@ -218,15 +224,22 @@ The complete BR2 bilinear form `a(u_h, v_h)` consists of:
 
 ---
 
-#### 4.3.2 Interior Face Terms
+#### 4.3.2 Interior Face Terms (Including Fault Faces)
 
-For each interior face `e ∈ F_I` (excluding fault faces):
+For each interior face `e ∈ F_I ∪ F_F` (all interior faces, including fault):
 
 ```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│  a^int(u_h, v_h) = Σ_{e ∈ F_I} [ a^cons_e + a^sym_e + a^lift_e ]             │
-└───────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  a^int(u_h, v_h) = Σ_{e ∈ F_I ∪ F_F} [ a^cons_e + a^sym_e + a^lift_e ]             │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Note**: Fault faces F_F receive the same bilinear form treatment as regular interior
+faces F_I. This is consistent with Arnold et al. (2002) eq. 3.24, where the face terms
+sum over Γ (all element boundaries), and with Tandem's implementation where
+`assemble_skeleton` is called unconditionally for all interior faces regardless of BC type.
+The fault RHS terms (Section 4.4.2) then shift the penalty enforcement from [[u]] = 0
+to [[u]] = δ.
 
 **Consistency term** (ensures convergence):
 ```
@@ -348,7 +361,8 @@ For prescribed slip `δ` on fault faces F_F:
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Expanding all terms**:
+**Expanding all terms** (following Arnold et al. eq. 3.24, interior face terms sum
+over F_I ∪ F_F):
 
 ```
 BILINEAR FORM (Left-Hand Side):
@@ -357,14 +371,14 @@ BILINEAR FORM (Left-Hand Side):
 [Volume]
   ∫_Ω K ∇u_h · ∇v_h dx
 
-[Interior consistency]
-- Σ_{e ∈ F_I} ∫_e {{K ∇u_h · n}} [[v_h]] ds
+[Interior consistency — all interior faces including fault]
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{K ∇u_h · n}} [[v_h]] ds
 
-[Interior symmetry]
-- Σ_{e ∈ F_I} ∫_e {{K ∇v_h · n}} [[u_h]] ds
+[Interior symmetry — all interior faces including fault]
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{K ∇v_h · n}} [[u_h]] ds
 
-[Interior BR2 lifting]
-+ Σ_{e ∈ F_I} σ ∫ K r_e([[u_h]]) · r_e([[v_h]]) dx
+[Interior BR2 lifting — all interior faces including fault]
++ Σ_{e ∈ F_I ∪ F_F} σ ∫ K r_e([[u_h]]) · r_e([[v_h]]) dx
 
 [Dirichlet consistency]
 - Σ_{e ∈ F_D} ∫_e (K ∇u_h · n) v_h ds
@@ -391,6 +405,17 @@ LINEAR FORM (Right-Hand Side):
 [Fault RHS (lifting)]
 + Σ_{e ∈ F_F} σ ∫ K r_e(δ) · r_e([[v_h]]) dx
 ```
+
+**How fault enforcement works**: On fault faces e ∈ F_F, the bilinear form contributes
+LHS terms with [[u_h]] and the RHS contributes terms with δ. The net effect is:
+
+- Symmetry: -{{K∇v·n}}[[u_h]] (LHS) vs -{{K∇v·n}}δ (RHS) → enforces [[u_h]] → δ
+- Lifting: σ r([[u_h]])·r([[v_h]]) (LHS) vs σ r(δ)·r([[v_h]]) (RHS) → penalizes [[u_h]] - δ
+- Consistency: -{{K∇u·n}}[[v_h]] (LHS only) → provides flux coupling across fault
+
+This is analogous to how Dirichlet BCs are handled: the bilinear form penalizes u toward 0,
+and the RHS shifts the target to g_D. Here, the penalty enforces [[u_h]] toward 0, and the
+fault RHS shifts it to δ.
 
 ---
 
@@ -443,6 +468,8 @@ The complete IP bilinear form `a(u_h, v_h)` consists of:
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
+where `a^int` sums over **all** interior faces (F_I ∪ F_F), including fault faces.
+
 ---
 
 #### 5.2.1 Volume Term
@@ -462,15 +489,18 @@ The complete IP bilinear form `a(u_h, v_h)` consists of:
 
 ---
 
-#### 5.2.2 Interior Face Terms
+#### 5.2.2 Interior Face Terms (Including Fault Faces)
 
-For each interior face `e ∈ F_I` (excluding fault faces):
+For each interior face `e ∈ F_I ∪ F_F` (all interior faces, including fault):
 
 ```
-┌───────────────────────────────────────────────────────────────────────────────┐
-│  a^int(u_h, v_h) = Σ_{e ∈ F_I} [ a^cons_e + a^sym_e + a^pen_e ]              │
-└───────────────────────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────────────────┐
+│  a^int(u_h, v_h) = Σ_{e ∈ F_I ∪ F_F} [ a^cons_e + a^sym_e + a^pen_e ]              │
+└─────────────────────────────────────────────────────────────────────────────────────┘
 ```
+
+**Note**: Same as BR2 — fault faces receive the same bilinear form treatment as regular
+interior faces (see Section 4.3.2 note).
 
 **Consistency term** (same as BR2):
 ```
@@ -584,7 +614,8 @@ For prescribed slip `δ` on fault faces F_F:
 └─────────────────────────────────────────────────────────┘
 ```
 
-**Expanding all terms**:
+**Expanding all terms** (following Arnold et al. eq. 3.24, interior face terms sum
+over F_I ∪ F_F):
 
 ```
 BILINEAR FORM (Left-Hand Side):
@@ -593,14 +624,14 @@ BILINEAR FORM (Left-Hand Side):
 [Volume]
   ∫_Ω K ∇u_h · ∇v_h dx
 
-[Interior consistency]
-- Σ_{e ∈ F_I} ∫_e {{K ∇u_h · n}} [[v_h]] ds
+[Interior consistency — all interior faces including fault]
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{K ∇u_h · n}} [[v_h]] ds
 
-[Interior symmetry]
-- Σ_{e ∈ F_I} ∫_e {{K ∇v_h · n}} [[u_h]] ds
+[Interior symmetry — all interior faces including fault]
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{K ∇v_h · n}} [[u_h]] ds
 
-[Interior IP penalty]
-+ Σ_{e ∈ F_I} (σ_e / h_e) ∫_e [[u_h]] [[v_h]] ds
+[Interior IP penalty — all interior faces including fault]
++ Σ_{e ∈ F_I ∪ F_F} (σ_e / h_e) ∫_e [[u_h]] [[v_h]] ds
 
 [Dirichlet consistency]
 - Σ_{e ∈ F_D} ∫_e (K ∇u_h · n) v_h ds
@@ -627,6 +658,10 @@ LINEAR FORM (Right-Hand Side):
 [Fault RHS (penalty)]
 + Σ_{e ∈ F_F} (σ_e / h_e) ∫_e δ [[v_h]] ds
 ```
+
+**How fault enforcement works**: Same mechanism as BR2 (see Section 4.5 explanation).
+On fault faces, the IP penalty (σ/h)[[u_h]][[v_h]] on the LHS combined with
+(σ/h)δ[[v_h]] on the RHS enforces [[u_h]] → δ.
 
 ---
 

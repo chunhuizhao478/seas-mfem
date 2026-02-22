@@ -291,15 +291,12 @@ private:
             xi = std::sinh(alpha_x * xi) / std::sinh(alpha_x);
          }
 
-         // Apply grading in z (concentrate near z=0, the surface)
-         // zeta is in [-1, 0], so we apply grading to |zeta| and restore sign
+         // Apply grading in z (concentrate near z=0, the surface/fault zone)
+         // zeta is in [-1, 0], sinh grading concentrates elements near zeta=0
          if (params.grading_z != 1.0)
          {
             real_t alpha_z = params.grading_z;
-            // tanh grading concentrates points near 0
-            real_t abs_zeta = -zeta;  // abs_zeta ∈ [0, 1]
-            abs_zeta = std::tanh(alpha_z * abs_zeta) / std::tanh(alpha_z);
-            zeta = -abs_zeta;  // restore negative sign
+            zeta = std::sinh(alpha_z * zeta) / std::sinh(alpha_z);
          }
 
          // Transform back to physical coordinates

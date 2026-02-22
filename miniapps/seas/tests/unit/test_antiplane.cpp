@@ -1413,6 +1413,161 @@ bool test_tandem_ip_penalty_value()
 // Main test runner
 //=============================================================================
 
+// =============================================================================
+// Test: Graded mesh element sizes for 400km Tandem-matching domain
+// =============================================================================
+
+bool test_graded_mesh_400km()
+{
+   std::cout << "\n  Test: Graded mesh element sizes (400km domain)\n";
+
+   // Tandem-matching configuration: 400km x 400km with sinh grading
+   BP2MeshGenerator::Parameters params;
+   params.Lx = 400.0e3;
+   params.Lz = 400.0e3;
+   params.Wf = 40.0e3;
+   params.nx = 25;
+   params.nz = 250;
+   params.grading_x = 7.0;
+   params.grading_z = 4.0;
+
+   auto mesh = BP2MeshGenerator::CreateGraded(params);
+
+   TEST_ASSERT(mesh->GetNE() == 2 * params.nx * params.nz,
+               "Graded mesh has correct element count");
+
+   // Read node coordinates (grading modifies nodes, not vertices)
+   const GridFunction *nodes = mesh->GetNodes();
+   TEST_ASSERT(nodes != nullptr, "Graded mesh has nodes GridFunction");
+   const int dim = mesh->Dimension();
+   const int nnodes = nodes->Size() / dim;
+
+   // Verify domain bounds from nodes
+   real_t x_min = 1e30, x_max = -1e30, z_min = 1e30, z_max = -1e30;
+   for (int i = 0; i < nnodes; i++)
+   {
+      real_t x = (*nodes)(i * dim);
+      real_t z = (*nodes)(i * dim + 1);
+      x_min = std::min(x_min, x);
+      x_max = std::max(x_max, x);
+      z_min = std::min(z_min, z);
+      z_max = std::max(z_max, z);
+   }
+   TEST_ASSERT_NEAR(x_min, -params.Lx, 1.0, "x_min = -Lx");
+   TEST_ASSERT_NEAR(x_max, params.Lx, 1.0, "x_max = +Lx");
+   TEST_ASSERT_NEAR(z_min, -params.Lz, 1.0, "z_min = -Lz");
+   TEST_ASSERT_NEAR(z_max, 0.0, 1.0, "z_max = 0");
+
+   // Measure element sizes near the fault (x=0) and surface (z=0)
+   // Use element transformation to get actual node positions
+   real_t h_fault_x = 1e30;  // smallest x-width near fault
+   real_t h_surface_z = 1e30;  // smallest z-height at surface
+   real_t h_far_x = 0.0;     // largest x-width
+   real_t h_bottom_z = 0.0;  // largest z-height
+
+   for (int e = 0; e < mesh->GetNE(); e++)
+   {
+      // Get element node indices
+      Array<int> dofs;
+      mesh->GetNodalFESpace()->GetElementDofs(e, dofs);
+
+      real_t ex_min = 1e30, ex_max = -1e30;
+      real_t ez_min = 1e30, ez_max = -1e30;
+      for (int d = 0; d < dofs.Size(); d++)
+      {
+         int idx = dofs[d];
+         real_t nx = (*nodes)(idx * dim);
+         real_t nz = (*nodes)(idx * dim + 1);
+         ex_min = std::min(ex_min, nx);
+         ex_max = std::max(ex_max, nx);
+         ez_min = std::min(ez_min, nz);
+         ez_max = std::max(ez_max, nz);
+      }
+
+      real_t hx = ex_max - ex_min;
+      real_t hz = ez_max - ez_min;
+
+      h_far_x = std::max(h_far_x, hx);
+
+      // Element touches the fault (x=0): one edge at x≈0
+      if ((ex_min <= 0.0 && ex_max >= 0.0) ||
+          std::abs(ex_min) < 1000.0 || std::abs(ex_max) < 1000.0)
+      {
+         h_fault_x = std::min(h_fault_x, hx);
+      }
+
+      // Element touches the surface (z=0)
+      if (std::abs(ez_max) < 1.0)
+      {
+         h_surface_z = std::min(h_surface_z, hz);
+      }
+
+      // Track bottom elements
+      if (std::abs(ez_min + params.Lz) < 1000.0)
+      {
+         h_bottom_z = std::max(h_bottom_z, hz);
+      }
+   }
+
+   std::cout << "    Near-fault x-element size: " << h_fault_x << " m\n";
+   std::cout << "    Surface z-element size: " << h_surface_z << " m\n";
+   std::cout << "    Far-field x-element size: " << h_far_x / 1e3 << " km\n";
+   std::cout << "    Bottom z-element size: " << h_bottom_z / 1e3 << " km\n";
+
+   // Key checks: near-fault elements should be ~200m
+   TEST_ASSERT(h_fault_x < 500.0,
+               "Near-fault x-element size < 500m");
+   TEST_ASSERT(h_fault_x > 50.0,
+               "Near-fault x-element size > 50m (sanity)");
+
+   // Surface z-elements should be ~235m
+   TEST_ASSERT(h_surface_z < 500.0,
+               "Surface z-element size < 500m");
+   TEST_ASSERT(h_surface_z > 50.0,
+               "Surface z-element size > 50m (sanity)");
+
+   // Far-field should be much coarser
+   TEST_ASSERT(h_far_x > 10.0e3,
+               "Far-field x-element size > 10km (grading effective)");
+   TEST_ASSERT(h_bottom_z > 2.0e3,
+               "Bottom z-element size > 2km (z-grading effective)");
+
+   // Verify grading ratio (far/near) is substantial
+   real_t x_ratio = h_far_x / h_fault_x;
+   real_t z_ratio = h_bottom_z / h_surface_z;
+   std::cout << "    X grading ratio (far/near): " << x_ratio << "\n";
+   std::cout << "    Z grading ratio (bottom/surface): " << z_ratio << "\n";
+   TEST_ASSERT(x_ratio > 10.0,
+               "X grading ratio > 10 (significant refinement near fault)");
+   TEST_ASSERT(z_ratio > 5.0,
+               "Z grading ratio > 5 (significant refinement near surface)");
+
+   // Verify the fault zone has adequate resolution
+   // Count elements with centroid in z ∈ [-40km, 0] (fault zone)
+   int n_fault_zone = 0;
+   for (int e = 0; e < mesh->GetNE(); e++)
+   {
+      Array<int> dofs;
+      mesh->GetNodalFESpace()->GetElementDofs(e, dofs);
+      real_t z_center = 0.0;
+      for (int d = 0; d < dofs.Size(); d++)
+      {
+         z_center += (*nodes)(dofs[d] * dim + 1);
+      }
+      z_center /= dofs.Size();
+      if (z_center > -40.0e3) { n_fault_zone++; }
+   }
+   // Fault zone is top 10% of domain but should have >> 10% of elements
+   real_t fault_fraction = static_cast<real_t>(n_fault_zone) / mesh->GetNE();
+   std::cout << "    Elements in fault zone (z > -40km): " << n_fault_zone
+             << " / " << mesh->GetNE() << " = "
+             << 100.0 * fault_fraction << "%\n";
+   TEST_ASSERT(fault_fraction > 0.2,
+               "Fault zone has >20% of elements (grading concentrates there)");
+
+   return true;
+}
+
 int main(int argc, char *argv[])
 {
    std::cout << "===============================================" << std::endl;
@@ -1476,6 +1631,11 @@ int main(int argc, char *argv[])
    RUN_TEST(test_solution_antisymmetry);
    RUN_TEST(test_slip_jump_verification);
    RUN_TEST(test_tandem_ip_penalty_value);
+   std::cout << std::endl;
+
+   // Graded mesh tests (Phase 9)
+   std::cout << "--- Graded Mesh Tests ---" << std::endl;
+   RUN_TEST(test_graded_mesh_400km);
    std::cout << std::endl;
 
    // Summary

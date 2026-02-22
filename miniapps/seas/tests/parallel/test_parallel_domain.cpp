@@ -653,6 +653,45 @@ bool test_fault_depth_consistency(MPIContext &ctx)
    return ok;
 }
 
+/// Test: GetGlobalNE() is collective — must be called on all ranks.
+///
+/// ParMesh::GetGlobalNE() calls ReduceInt which is MPI_Allreduce.
+/// Calling it inside if(IsRoot()) causes a deadlock. This test verifies
+/// that calling it on all ranks works and returns the correct count.
+bool test_global_ne_collective(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_global_ne_collective... " << std::flush;
+   }
+
+   BP2MeshGenerator::Parameters params;
+   params.Lx = 10.0e3;
+   params.Lz = 10.0e3;
+   params.nx = 4;
+   params.nz = 4;
+
+   auto serial_mesh = BP2MeshGenerator::Create(params);
+   int expected_ne = serial_mesh->GetNE();  // 32
+
+   ParMesh pmesh(ctx.GetComm(), *serial_mesh);
+
+   // GetGlobalNE() is collective (MPI_Allreduce) — must be called on ALL ranks
+   long long global_ne = pmesh.GetGlobalNE();
+
+   bool ok = (global_ne == expected_ne);
+
+   TEST_CHECK(ctx, "GetGlobalNE() collective returns correct count", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (global_ne=" << global_ne << ", expected=" << expected_ne
+                << ")" << std::endl;
+   }
+   return ok;
+}
+
 int main(int argc, char *argv[])
 {
    MPIContext ctx(&argc, &argv);
@@ -675,6 +714,7 @@ int main(int argc, char *argv[])
    test_parallel_uniform_slip_br2(ctx);
    test_traction_nonuniform_slip(ctx);
    test_fault_depth_consistency(ctx);
+   test_global_ne_collective(ctx);
 
    if (ctx.IsRoot())
    {

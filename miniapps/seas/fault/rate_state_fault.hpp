@@ -18,6 +18,7 @@
 #include "../friction/dieterich_ruina.hpp"
 #include "../friction/state_evolution.hpp"
 #include "../config/bp2_params.hpp"
+#include "../common/mpi_context.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -59,11 +60,13 @@ public:
    RateStateFaultOperator(FaultGeometry<MeshType> *geom,
                           FrictionLaw *friction,
                           StateEvolution *evolution,
-                          const BP2Params &params)
+                          const BP2Params &params,
+                          MPIContext *mpi_ctx = nullptr)
       : geom_(geom),
         friction_(friction),
         evolution_(evolution),
         params_(params),
+        mpi_ctx_(mpi_ctx),
         num_nodes_(geom ? geom->NumFaultDOFs() : 0),
         tau0_(0.0),
         V_max_(0.0)
@@ -297,11 +300,28 @@ public:
    /// Get slip rate from last RHS evaluation.
    const Vector &GetSlipRate() const { return slip_rate_; }
 
-   /// Get maximum slip rate from last RHS evaluation.
+   /// Get maximum slip rate from last RHS evaluation (local).
    real_t GetMaxSlipRate() const { return V_max_; }
+
+   /// Get global maximum slip rate (reduced across all MPI ranks).
+   /// In serial mode, returns the same as GetMaxSlipRate().
+   real_t GetGlobalMaxSlipRate() const
+   {
+      if (mpi_ctx_)
+      {
+         return mpi_ctx_->GlobalMax(V_max_);
+      }
+      return V_max_;
+   }
 
    /// Get pre-stress τ₀ [Pa].
    real_t GetTau0() const { return tau0_; }
+
+   /// @brief Initialize pre-stress from BP2 parameters (for restart).
+   ///
+   /// Normally tau0_ is set by Init() during SetInitialCondition().
+   /// On restart, we skip SetInitialCondition() but still need tau0_.
+   void InitPreStress() { tau0_ = params_.tau0(); }
 
    /// Get fault geometry.
    const FaultGeometry<MeshType> *GetGeometry() const { return geom_; }
@@ -382,11 +402,19 @@ public:
       }
    }
 
+   /// @brief Set cached slip rate from checkpoint data.
+   void SetSlipRate(const Vector &V)
+   {
+      slip_rate_ = V;
+      V_max_ = V.Normlinf();
+   }
+
 private:
    FaultGeometry<MeshType> *geom_;
    FrictionLaw *friction_;
    StateEvolution *evolution_;
    BP2Params params_;
+   MPIContext *mpi_ctx_ = nullptr;
 
    int num_nodes_;      ///< Number of fault DOFs
    real_t tau0_;        ///< Pre-stress [Pa]

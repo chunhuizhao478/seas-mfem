@@ -187,6 +187,45 @@ public:
       }
    }
 
+   /// @brief Write from pre-gathered global data (for parallel output).
+   ///
+   /// Allows parallel code to gather data and pass it directly.
+   void WriteFromGlobalData(real_t time,
+                            const Vector &global_slip,
+                            const Vector &global_theta,
+                            const Vector &global_V,
+                            const Vector &global_traction,
+                            real_t tau0)
+   {
+      Vector probe_slip(interpolator_.NumProbes());
+      Vector probe_theta(interpolator_.NumProbes());
+      Vector probe_V(interpolator_.NumProbes());
+      Vector probe_tau(interpolator_.NumProbes());
+
+      interpolator_.Interpolate(global_slip, probe_slip);
+      interpolator_.Interpolate(global_theta, probe_theta);
+      interpolator_.Interpolate(global_V, probe_V);
+      interpolator_.Interpolate(global_traction, probe_tau);
+
+      for (int p = 0; p < interpolator_.NumProbes(); p++)
+      {
+         real_t V = std::max(probe_V(p), 1e-30);
+         real_t th = std::max(probe_theta(p), 1e-30);
+         real_t tau_total = tau0 + probe_tau(p);
+
+         std::vector<real_t> row = {
+            time,
+            probe_slip(p),
+            std::log10(V),
+            tau_total / 1e6,
+            std::log10(th)
+         };
+         probes_[p]->WriteStep(row);
+      }
+
+      last_write_time_ = time;
+   }
+
    /// Number of probes.
    int NumProbes() const { return static_cast<int>(probes_.size()); }
 

@@ -192,6 +192,16 @@ private:
    mutable std::unique_ptr<GSSmoother> serial_prec_;  // For serial builds - must outlive solve
    mutable Vector X_, B_;
 
+   // Cached stiffness matrix (assembled once, reused across Solve calls)
+   mutable bool stiffness_assembled_ = false;
+   mutable std::unique_ptr<BilinFormType> cached_a_;
+   // Parallel: cached HypreParMatrix and preconditioner
+   mutable OperatorHandle cached_Ah_;
+   mutable std::unique_ptr<Solver> cached_prec_;
+
+   /// @brief Assemble stiffness matrix (once, on first Solve call)
+   void AssembleStiffness() const;
+
    // Setup methods
    void SetupBoundaryMarkers();
    void SetupFESpace();
@@ -549,79 +559,73 @@ void AntiplaneDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
 }
 
 template <typename MeshType>
-void AntiplaneDomainOperator<MeshType>::Solve(
-   real_t time, const Vector &slip_bc, GridFuncType &displacement)
+void AntiplaneDomainOperator<MeshType>::AssembleStiffness() const
 {
-   // Create bilinear form for DG diffusion
-   BilinFormType a(fes_.get());
+   cached_a_ = std::make_unique<BilinFormType>(fes_.get());
 
-   // Domain integrator: standard diffusion (coefficient = 1, we factor out mu)
    ConstantCoefficient one(1.0);
-   a.AddDomainIntegrator(new DiffusionIntegrator(one));
+   cached_a_->AddDomainIntegrator(new DiffusionIntegrator(one));
 
-   // For the bilinear form, use method-specific integrators:
-   // - IP method: Standard SIPG with dimensionless penalty
-   //   MFEM's DGDiffusionIntegrator handles h-scaling internally via |n|²/det(J)
-   // - BR2 method: Use custom BR2 integrator with lifting operators
-   real_t rep_kappa;
    if (method_ == DGMethod::IP)
    {
-      // Standard IP penalty parameter (dimensionless)
-      // MFEM's DGDiffusionIntegrator handles h-scaling internally
-      // This is consistent with MFEM examples (ex14.cpp, ex17.cpp)
-      rep_kappa = (order_ + 1) * (order_ + 1);
-
-      // Interior face integrator for DG continuity (SIPG)
-      a.AddInteriorFaceIntegrator(new DGDiffusionIntegrator(one, sigma_, rep_kappa));
+      real_t rep_kappa = (order_ + 1) * (order_ + 1);
+      cached_a_->AddInteriorFaceIntegrator(
+         new DGDiffusionIntegrator(one, sigma_, rep_kappa));
    }
-   else  // BR2 method
+   else  // BR2
    {
-      // Use true BR2 with lifting operators following Tandem implementation
-      // This implements the BR2 bilinear form:
-      //   a(u,v) = (K∇u, ∇v) - ⟨{{K∇u·n}}, [[v]]⟩ - ε⟨{{K∇v·n}}, [[u]]⟩
-      //          + σ * (E_q[u], L_q[v]) where L_q is the BR2 lifting
-      //
-      // Requires precomputed mass matrix inverses for lifting operators
       if (!mass_inv_computed_)
       {
          PrecomputeMassMatrixInverses();
       }
-
-      // Interior face integrator with BR2 lifting operators
-      a.AddInteriorFaceIntegrator(
-         new BR2InteriorFaceIntegrator(one, sigma_, elem_mass_inv_, mesh_.Dimension()));
-
-      // Set rep_kappa for the linear form integrator (DGDirichletLFIntegrator)
-      // Use BR2 penalty value for consistency
-      rep_kappa = br2_penalty_;
+      cached_a_->AddInteriorFaceIntegrator(
+         new BR2InteriorFaceIntegrator(one, sigma_, elem_mass_inv_,
+                                       mesh_.Dimension()));
    }
 
-   a.Assemble();
-   a.Finalize();
+   cached_a_->Assemble();
+   cached_a_->Finalize();
 
-   // Create linear form for RHS
-   // No boundary Dirichlet terms - all boundaries have Natural BC (zero traction).
-   // Tectonic loading comes from prescribed Vp slip on fault faces below Wf.
+   // Set up solver operator and preconditioner
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      cached_Ah_.SetType(Operator::Hypre_ParCSR);
+      cached_a_->ParallelAssemble(cached_Ah_);
+
+      cached_prec_ = std::make_unique<HypreSmoother>(
+         *cached_Ah_.As<HypreParMatrix>());
+
+      auto *cg = static_cast<CGSolver*>(solver_.get());
+      cg->SetPreconditioner(*cached_prec_);
+      cg->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+#endif
+   }
+   else
+   {
+      SparseMatrix &A = cached_a_->SpMat();
+      serial_prec_ = std::make_unique<GSSmoother>(A);
+      static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
+      solver_->SetOperator(A);
+   }
+
+   stiffness_assembled_ = true;
+}
+
+template <typename MeshType>
+void AntiplaneDomainOperator<MeshType>::Solve(
+   real_t time, const Vector &slip_bc, GridFuncType &displacement)
+{
+   // Assemble stiffness matrix once (it doesn't change between time steps)
+   if (!stiffness_assembled_)
+   {
+      AssembleStiffness();
+   }
+
+   // Build RHS (changes every call due to different slip_bc)
    LinFormType b(fes_.get());
-
-   // Add slip contribution on interior fault faces
-   // The slip is imposed as a jump condition: [[u]] = slip
-   // This requires adding a source term on interior fault faces.
-   //
-   // For DG with interior flux, the slip modifies the numerical flux.
-   // We use a custom integrator approach via interior face linear form.
-
-   // For the antiplane problem with slip δ imposed at x=0:
-   // The solution should satisfy u(0⁺) - u(0⁻) = δ
-   // In the DG framework, this is achieved by modifying the inter-element
-   // flux to account for the prescribed jump.
-
-   // Slip contribution is assembled manually via AssembleSlipContribution*()
-   // on interior fault faces after the linear form is assembled.
-
    b.Assemble();
 
-   // Add slip contribution to RHS using method-specific assembly
    Vector &rhs = b;
 
    if (method_ == DGMethod::IP)
@@ -650,41 +654,10 @@ void AntiplaneDomainOperator<MeshType>::Solve(
    }
 
    X_ = 0.0;
+   B_ = rhs;
 
-   // Form and solve the linear system
-   if constexpr (IsParallelMesh<MeshType>::value)
-   {
-#ifdef MFEM_USE_MPI
-      // Parallel: assemble to HypreParMatrix
-      OperatorHandle Ah;
-      Ah.SetType(Operator::Hypre_ParCSR);
-      a.ParallelAssemble(Ah);
-
-      // RHS: for DG/L2, no shared DOFs, so local vector is the true vector
-      B_ = rhs;
-
-      // Create HypreSmoother preconditioner (works for singular systems,
-      // unlike HypreBoomerAMG which fails on singular matrices)
-      auto smoother = std::make_unique<HypreSmoother>(
-         *Ah.As<HypreParMatrix>());
-
-      auto *cg = static_cast<CGSolver*>(solver_.get());
-      cg->SetPreconditioner(*smoother);
-      cg->SetOperator(*Ah.As<HypreParMatrix>());
-      cg->Mult(B_, X_);
-#endif
-   }
-   else
-   {
-      // Serial path
-      SparseMatrix &A = a.SpMat();
-      B_ = rhs;
-
-      serial_prec_ = std::make_unique<GSSmoother>(A);
-      static_cast<CGSolver*>(solver_.get())->SetPreconditioner(*serial_prec_);
-      solver_->SetOperator(A);
-      solver_->Mult(B_, X_);
-   }
+   // Solve using cached operator
+   solver_->Mult(B_, X_);
 
    // Copy solution to GridFunction
    displacement = X_;

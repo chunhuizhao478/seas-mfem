@@ -16,6 +16,7 @@
 #include "../domain/antiplane_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
+#include "../common/mpi_context.hpp"
 
 #include <memory>
 #include <cmath>
@@ -54,8 +55,10 @@ public:
    ///
    /// @param domain Domain operator (Phase 2) - owned externally
    /// @param fault Fault operator (Phase 3) - owned externally
+   /// @param mpi_ctx MPI context for parallel reductions (optional)
    SEASQuasiDynamicOperator(DomainOpType *domain,
-                             RateStateFaultOperator<MeshType> *fault);
+                             RateStateFaultOperator<MeshType> *fault,
+                             MPIContext *mpi_ctx = nullptr);
 
    /// Destructor
    ~SEASQuasiDynamicOperator() override = default;
@@ -82,11 +85,21 @@ public:
    /// @brief Get current displacement solution.
    const GridFuncType &GetDisplacement() const { return *u_gf_; }
 
+   /// @brief Set displacement from checkpoint data.
+   void SetDisplacement(const Vector &u) { *u_gf_ = u; }
+
    /// @brief Get traction at fault from last evaluation.
    const Vector &GetTraction() const { return traction_; }
 
-   /// @brief Get maximum slip rate from last evaluation.
-   real_t GetMaxSlipRate() const { return fault_->GetMaxSlipRate(); }
+   /// @brief Get maximum slip rate from last evaluation (global in parallel).
+   real_t GetMaxSlipRate() const
+   {
+      if (mpi_ctx_)
+      {
+         return fault_->GetGlobalMaxSlipRate();
+      }
+      return fault_->GetMaxSlipRate();
+   }
 
    /// @brief Get the domain operator.
    const DomainOpType *GetDomain() const { return domain_; }
@@ -97,6 +110,7 @@ public:
 private:
    DomainOpType *domain_;
    RateStateFaultOperator<MeshType> *fault_;
+   MPIContext *mpi_ctx_ = nullptr;
 
    /// Displacement grid function (solution of domain problem)
    std::unique_ptr<GridFuncType> u_gf_;
@@ -113,9 +127,10 @@ private:
 template <typename MeshType>
 SEASQuasiDynamicOperator<MeshType>::SEASQuasiDynamicOperator(
    DomainOpType *domain,
-   RateStateFaultOperator<MeshType> *fault)
+   RateStateFaultOperator<MeshType> *fault,
+   MPIContext *mpi_ctx)
    : TimeDependentOperator(fault->StateSize()),
-     domain_(domain), fault_(fault)
+     domain_(domain), fault_(fault), mpi_ctx_(mpi_ctx)
 {
    MFEM_VERIFY(domain_ != nullptr, "Domain operator must not be null");
    MFEM_VERIFY(fault_ != nullptr, "Fault operator must not be null");
@@ -157,12 +172,18 @@ void SEASQuasiDynamicOperator<MeshType>::SetInitialCondition(Vector &state)
    // Compute RHS to populate slip rates
    Vector rate_temp(fault_->StateSize());
    fault_->ComputeRHS(traction_, state, rate_temp);
-   V_max = fault_->GetMaxSlipRate();
+
+   // Use global V_max in parallel, local in serial
+   V_max = GetMaxSlipRate();
 
    const BP2Params &params = fault_->GetParams();
 
-   // Verify stress equilibrium
+   // Verify stress equilibrium (local check, each rank verifies its own DOFs)
    real_t eq_error = fault_->VerifyStressEquilibrium(traction_, state);
+   if (mpi_ctx_)
+   {
+      eq_error = mpi_ctx_->GlobalMax(eq_error);
+   }
    MFEM_VERIFY(eq_error < 1e-6,
                "Initial stress equilibrium error too large: " << eq_error);
 

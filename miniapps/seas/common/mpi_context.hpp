@@ -28,16 +28,24 @@ class MPIContext
 {
 public:
 #ifdef SEAS_USE_MPI
-   /// Construct and initialize MPI
+   /// Construct and initialize MPI + Hypre.
+   ///
+   /// Uses Mpi::Init and Hypre::Init (not raw MPI_Init) because MFEM's
+   /// ParMesh constructor may launch non-blocking MPI operations.  The Mpi
+   /// singleton ensures those complete before MPI_Finalize.
    MPIContext(int *argc, char ***argv)
    {
-      MPI_Init(argc, argv);
+      if (!Mpi::IsInitialized())
+      {
+         Mpi::Init(*argc, *argv);
+      }
+      Hypre::Init();
       MPI_Comm_rank(MPI_COMM_WORLD, &rank_);
       MPI_Comm_size(MPI_COMM_WORLD, &size_);
    }
 
-   /// Finalize MPI
-   ~MPIContext() { MPI_Finalize(); }
+   /// Destructor — Mpi singleton handles MPI_Finalize.
+   ~MPIContext() = default;
 
    /// Get MPI communicator
    MPI_Comm GetComm() const { return MPI_COMM_WORLD; }
@@ -99,6 +107,32 @@ public:
 #ifdef SEAS_USE_MPI
       real_t global_val;
       MPI_Allreduce(&local_val, &global_val, 1, MPI_DOUBLE, MPI_SUM,
+                    MPI_COMM_WORLD);
+      return global_val;
+#else
+      return local_val;
+#endif
+   }
+
+   /// @brief Global reduction for integer minimum
+   int GlobalMinInt(int local_val) const
+   {
+#ifdef SEAS_USE_MPI
+      int global_val;
+      MPI_Allreduce(&local_val, &global_val, 1, MPI_INT, MPI_MIN,
+                    MPI_COMM_WORLD);
+      return global_val;
+#else
+      return local_val;
+#endif
+   }
+
+   /// @brief Global reduction for integer maximum
+   int GlobalMaxInt(int local_val) const
+   {
+#ifdef SEAS_USE_MPI
+      int global_val;
+      MPI_Allreduce(&local_val, &global_val, 1, MPI_INT, MPI_MAX,
                     MPI_COMM_WORLD);
       return global_val;
 #else

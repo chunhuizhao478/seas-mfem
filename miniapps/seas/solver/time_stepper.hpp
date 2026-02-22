@@ -13,6 +13,7 @@
 #define MFEM_SEAS_TIME_STEPPER_HPP
 
 #include "mfem.hpp"
+#include "../common/mpi_context.hpp"
 #include <algorithm>
 #include <cmath>
 
@@ -163,6 +164,13 @@ public:
    void SetDtMax(real_t dt_max) { dt_max_ = dt_max; }
    void SetDt(real_t dt) { dt_ = dt; }
 
+   /// @brief Set MPI context for parallel error norm reduction.
+   ///
+   /// In parallel, the error norm must be reduced across all ranks
+   /// so that accept/reject decisions are consistent. Without this,
+   /// ranks can diverge, causing deadlock in subsequent MPI collectives.
+   void SetMPIContext(MPIContext *ctx) { mpi_ctx_ = ctx; }
+
    // =========================================================================
    // Initialization
    // =========================================================================
@@ -283,6 +291,14 @@ public:
          }
       }
 
+      // In parallel, reduce err_norm across all ranks so that
+      // accept/reject decisions are consistent. Without this, ranks
+      // can diverge and deadlock in subsequent MPI collectives.
+      if (mpi_ctx_)
+      {
+         err_norm = mpi_ctx_->GlobalMax(err_norm);
+      }
+
       // Compute new dt using standard PI controller formula
       //   dt_new = safety * dt * err_norm^(-1/q), q = min(p, p*) = 5
       real_t dt_new;
@@ -314,7 +330,8 @@ public:
          if (dt <= dt_min_ * 1.5 && dt_new <= dt_min_ * 1.5)
          {
             diag_count_++;
-            if (diag_count_ <= 5 || diag_count_ % 10000 == 0)
+            if ((!mpi_ctx_ || mpi_ctx_->IsRoot()) &&
+                (diag_count_ <= 5 || diag_count_ % 10000 == 0))
             {
                int dof = worst_idx / 2;
                bool is_theta = (worst_idx % 2 == 1);
@@ -343,8 +360,9 @@ public:
          initialized_ = true;  // keep k_[0] from this step start
          total_rejections_++;
 
-         // Diagnostic: log when stuck at dt_min
-         if (dt_ <= dt_min_ * 1.01)
+         // Diagnostic: log when stuck at dt_min (root only)
+         if (dt_ <= dt_min_ * 1.01 &&
+             (!mpi_ctx_ || mpi_ctx_->IsRoot()))
          {
             int dof = worst_idx / 2;
             bool is_theta = (worst_idx % 2 == 1);
@@ -373,7 +391,25 @@ public:
    real_t GetDtMax() const { return dt_max_; }
    int GetTotalRejections() const { return total_rejections_; }
 
+   /// @brief Check if FSAL stage k_[0] is valid from a previous step.
+   bool IsInitialized() const { return initialized_; }
+
+   /// @brief Get the first stage vector (for checkpoint).
+   const Vector &GetK0() const { return k_[0]; }
+
+   /// @brief Restore FSAL state from checkpoint.
+   ///
+   /// Sets k_[0] and marks the integrator as initialized so the next
+   /// Step() reuses k_[0] instead of recomputing it.
+   void RestoreFSAL(const Vector &k0)
+   {
+      k_[0] = k0;
+      initialized_ = true;
+   }
+
 private:
+   MPIContext *mpi_ctx_ = nullptr;  ///< MPI context for parallel error reduction
+
    real_t atol_;           ///< Absolute tolerance
    real_t rtol_;           ///< Relative tolerance
    real_t safety_;         ///< Safety factor for dt adjustment

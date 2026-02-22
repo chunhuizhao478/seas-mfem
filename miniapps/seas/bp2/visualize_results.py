@@ -72,12 +72,31 @@ def mfem_filename(prefix, depth_km):
         return f"{prefix}_z{depth_km:.1f}km.txt"
 
 
-def benchmark_filename(depth_km):
-    """Generate benchmark reference filename for a given depth."""
+def benchmark_filename(depth_km, bench_dir=None):
+    """Generate benchmark reference filename for a given depth.
+
+    Tries two naming conventions:
+      1. bp2-qd-erickson-z{depth}km-res.txt  (Erickson reference data)
+      2. bp2-qd-z{depth}km-res.txt           (generic benchmark data)
+
+    If bench_dir is provided, returns the first file that exists.
+    """
     if abs(depth_km - round(depth_km)) < 1e-6:
-        return f"bp2-qd-z{int(round(depth_km))}km-res.txt"
+        d = f"{int(round(depth_km))}"
     else:
-        return f"bp2-qd-z{depth_km:.1f}km-res.txt"
+        d = f"{depth_km:.1f}"
+
+    candidates = [
+        f"bp2-qd-erickson-z{d}km-res.txt",
+        f"bp2-qd-z{d}km-res.txt",
+    ]
+
+    if bench_dir is not None:
+        for c in candidates:
+            if os.path.exists(os.path.join(bench_dir, c)):
+                return c
+
+    return candidates[0]
 
 
 def plot_station(mfem_data, bench_data, depth_km, save_path=None):
@@ -239,7 +258,9 @@ def main():
 
     for depth_km in depths:
         mfem_path = mfem_filename(args.mfem_prefix, depth_km)
-        bench_path = os.path.join(args.benchmark_dir, benchmark_filename(depth_km))
+        bench_path = os.path.join(
+            args.benchmark_dir,
+            benchmark_filename(depth_km, bench_dir=args.benchmark_dir))
 
         mfem_data = None
         bench_data = None
