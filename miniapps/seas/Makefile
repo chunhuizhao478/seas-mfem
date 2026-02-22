@@ -125,12 +125,16 @@ TEST_SCALING_OBJ = $(TEST_SCALING_SRC:.cpp=.o)
 BP2_VERIFY_SRC = tests/verification/bp2_verification_first_cycle.cpp
 BP2_VERIFY_OBJ = $(BP2_VERIFY_SRC:.cpp=.o)
 
+# Phase 10b: BP2 full multi-cycle simulation (1200 yr)
+BP2_FULL_SRC = tests/verification/bp2_verification_full.cpp
+BP2_FULL_OBJ = $(BP2_FULL_SRC:.cpp=.o)
+
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
                seas_test_parallel_fault seas_pseas \
                seas_test_serial_parallel_consistency \
                seas_bp2_benchmark_parallel seas_test_scaling \
-               seas_bp2_verify
+               seas_bp2_verify seas_bp2_full
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS)
@@ -372,6 +376,14 @@ $(BP2_VERIFY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALL
 
 test-bp2-verify: seas_bp2_verify
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 10 ./seas_bp2_verify
+
+# Phase 10b: BP2 full multi-cycle simulation
+seas_bp2_full: $(BP2_FULL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP2_FULL_OBJ) $(MFEM_LIBS)
+
+$(BP2_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
 
 -include $(MFEM_TEST_MK)
 
