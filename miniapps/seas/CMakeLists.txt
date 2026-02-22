@@ -43,10 +43,19 @@ list(APPEND SEAS_HEADERS
 #     io/benchmark_output.hpp
 #     io/probe_output.hpp)
 
+# Phase 5: I/O
+list(APPEND SEAS_HEADERS
+    io/probe_output.hpp
+    io/benchmark_output.hpp)
+
 # Phase 6: Parallel infrastructure
 list(APPEND SEAS_HEADERS
     common/mpi_context.hpp
     common/parallel_utils.hpp)
+
+# Phase 8: Parallel I/O
+list(APPEND SEAS_HEADERS
+    io/parallel_benchmark_output.hpp)
 
 convert_filenames_to_full_paths(SEAS_HEADERS)
 
@@ -122,6 +131,41 @@ if (MFEM_USE_MPI)
     LIBRARIES mfem)
   target_compile_definitions(seas_mms_antiplane_parallel PRIVATE SEAS_USE_MPI)
 
+  # Phase 8: Parallel fault tests
+  add_mfem_miniapp(seas_test_parallel_fault
+    MAIN tests/parallel/test_parallel_fault.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_parallel_fault PRIVATE SEAS_USE_MPI)
+
+  # Phase 8: Parallel driver
+  add_mfem_miniapp(seas_pseas
+    MAIN pseas.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_pseas PRIVATE SEAS_USE_MPI)
+
+  # Phase 9: Serial-parallel consistency tests
+  add_mfem_miniapp(seas_test_serial_parallel_consistency
+    MAIN tests/parallel/test_serial_parallel_consistency.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_serial_parallel_consistency PRIVATE SEAS_USE_MPI)
+
+  # Phase 9: Parallel BP2 benchmark validation
+  add_mfem_miniapp(seas_bp2_benchmark_parallel
+    MAIN tests/verification/bp2_benchmark_parallel.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_bp2_benchmark_parallel PRIVATE SEAS_USE_MPI)
+
+  # Phase 9: Scaling tests
+  add_mfem_miniapp(seas_test_scaling
+    MAIN tests/parallel/test_scaling.cpp
+    ${SEAS_COMMON_FILES}
+    LIBRARIES mfem)
+  target_compile_definitions(seas_test_scaling PRIVATE SEAS_USE_MPI)
+
   if (MFEM_ENABLE_TESTING)
     add_test(NAME seas_test_mpi_context_np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
@@ -144,6 +188,27 @@ if (MFEM_USE_MPI)
     add_test(NAME seas_mms_antiplane_parallel_np2
       COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
               $<TARGET_FILE:seas_mms_antiplane_parallel>)
+    add_test(NAME seas_test_parallel_fault_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_parallel_fault>)
+    add_test(NAME seas_test_parallel_fault_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_parallel_fault>)
+    add_test(NAME seas_test_serial_parallel_consistency_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_serial_parallel_consistency>)
+    add_test(NAME seas_test_serial_parallel_consistency_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_serial_parallel_consistency>)
+    add_test(NAME seas_bp2_benchmark_parallel_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_bp2_benchmark_parallel>)
+    add_test(NAME seas_test_scaling_np2
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 2
+              $<TARGET_FILE:seas_test_scaling>)
+    add_test(NAME seas_test_scaling_np4
+      COMMAND ${MPIEXEC_EXECUTABLE} ${MPIEXEC_NUMPROC_FLAG} 4
+              $<TARGET_FILE:seas_test_scaling>)
   endif()
 endif()
 
