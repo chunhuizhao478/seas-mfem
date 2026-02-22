@@ -18,6 +18,9 @@
 
 #include <memory>
 #include <cmath>
+#include <vector>
+#include <algorithm>
+#include <fstream>
 
 namespace mfem
 {
@@ -161,6 +164,47 @@ public:
       params.nz = params.nx;
 
       return Create(params);
+   }
+
+   /// @brief Load a Gmsh .msh mesh file and scale coordinates.
+   ///
+   /// The .geo file uses km; this method scales to meters (scale=1000).
+   /// Physical Curve IDs in the .geo file must match BP2BoundaryAttributes.
+   ///
+   /// @param filename Path to .msh file (Gmsh format 2.2)
+   /// @param scale    Coordinate scale factor (default 1000 = km→m)
+   static std::unique_ptr<Mesh> LoadGmshMesh(const std::string &filename,
+                                              real_t scale = 1000.0)
+   {
+      auto mesh = std::make_unique<Mesh>(filename.c_str(), 1, 1, true);
+
+      // Scale coordinates (e.g., km → m)
+      if (std::abs(scale - 1.0) > 1e-14)
+      {
+         for (int i = 0; i < mesh->GetNV(); i++)
+         {
+            real_t *v = mesh->GetVertex(i);
+            for (int d = 0; d < mesh->SpaceDimension(); d++)
+            {
+               v[d] *= scale;
+            }
+         }
+      }
+
+      return mesh;
+   }
+
+   /// @brief Save mesh to VTK format for ParaView visualization
+   static void SaveVTK(Mesh &mesh, const std::string &filename)
+   {
+      std::ofstream vtk_file(filename);
+      if (!vtk_file.is_open())
+      {
+         MFEM_WARNING("Could not open VTK file: " << filename);
+         return;
+      }
+      mesh.PrintVTK(vtk_file);
+      vtk_file.close();
    }
 
    /// @brief Get the x-coordinate of a point and determine if it's on the fault

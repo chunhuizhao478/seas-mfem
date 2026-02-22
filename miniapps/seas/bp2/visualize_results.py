@@ -61,7 +61,7 @@ def load_scec_file(filepath):
 
 
 # SCEC benchmark depth stations (km)
-ALL_DEPTHS_KM = [0, 2.4, 4.8, 7.2, 9.6, 12, 14.4, 16.8, 19.2, 21.6, 24, 36]
+ALL_DEPTHS_KM = [0, 2.4, 4.8, 7.2, 9.6, 12, 14.4, 16.8, 19.2, 24, 28.8, 36]
 
 
 def mfem_filename(prefix, depth_km):
@@ -214,7 +214,7 @@ def main():
     )
     parser.add_argument(
         "--benchmark-dir",
-        default="benchmark_data",
+        default="benchmark_data_200m",
         help="Directory containing benchmark reference files",
     )
     parser.add_argument(

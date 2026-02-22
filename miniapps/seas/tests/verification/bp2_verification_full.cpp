@@ -11,16 +11,17 @@
 
 // BP2 Full Simulation: Multiple Earthquake Cycles
 //
-// Runs a parallel BP2-QD simulation at ~200m resolution for 1200 years
-// (~5-6 earthquake cycles). Outputs SCEC-format time series at 12 probe
-// depths with checkpoint/restart support for long runs.
+// Runs a parallel BP2-QD simulation for 1200 years (~5-6 earthquake cycles).
+// Outputs SCEC-format time series at 12 probe depths with checkpoint/restart.
 //
 // Usage:
-//   ibrun ./seas_bp2_full [options]
+//   mpirun -np N ./seas_bp2_full [options]
 //
 // Options:
+//   --mesh FILE                Load mesh from Gmsh .msh file (recommended)
+//   --mesh-scale S             Coordinate scale factor for mesh (default: 1000 = km->m)
 //   --ref-dir DIR              Reference data directory (default: bp2/benchmark_data_200m)
-//   --output-dir DIR           Output directory for simulation files (default: .)
+//   --output-dir DIR           Output directory (default: .)
 //   --comparison-only          Skip simulation, only compare existing output vs reference
 //   --tfinal T                 Override final time in seconds (default: 1200 years)
 //   --checkpoint-interval N    Write checkpoint every N steps (default: 5000, 0=off)
@@ -491,28 +492,45 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Simulation parameters: ~200m resolution matching Tandem configuration
+   // Simulation parameters
    // =========================================================================
    BP2Params params;
    params.t_final = t_final;
 
-   int mesh_nx = 25;
-   int mesh_nz = 250;
-   real_t grading_x = 7.0;
-   real_t grading_z = 4.0;
-   real_t Lx = 400.0e3;   // 400 km
-   real_t Lz = 400.0e3;   // 400 km
+   std::string mesh_file;          // Gmsh .msh file (recommended)
+   real_t mesh_scale = 1000.0;     // km → m
+
+   // Parse mesh options
+   for (int i = 1; i < argc; i++)
+   {
+      std::string arg(argv[i]);
+      if (arg == "--mesh" && i + 1 < argc)
+      {
+         mesh_file = argv[++i];
+      }
+      if (arg == "--mesh-scale" && i + 1 < argc)
+      {
+         mesh_scale = std::atof(argv[++i]);
+      }
+   }
+
+   if (mesh_file.empty())
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --mesh <file.msh> is required.\n";
+         std::cerr << "Generate mesh with: gmsh -2 mesh/bp2.geo -o bp2.msh\n";
+      }
+      return 1;
+   }
 
    if (mpi.IsRoot())
    {
       std::cout << "BP2 Full Simulation: Multiple Earthquake Cycles\n";
       std::cout << "================================================\n";
       std::cout << "  Ranks: " << mpi.Size() << "\n";
-      std::cout << "  Resolution: ~200m (nx=" << mesh_nx
-                << ", nz=" << mesh_nz << ")\n";
-      std::cout << "  Domain: Lx=" << Lx / 1e3 << "km, Lz="
-                << Lz / 1e3 << "km\n";
-      std::cout << "  Grading: x=" << grading_x << ", z=" << grading_z << "\n";
+      std::cout << "  Mesh file: " << mesh_file << "\n";
+      std::cout << "  Mesh scale: " << mesh_scale << " (units → m)\n";
       std::cout << "  t_final: " << t_final / BP2Params::seconds_per_year
                 << " years\n";
       std::cout << "  Reference dir: " << ref_dir << "\n";
@@ -520,18 +538,21 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Mesh: create serial mesh on all ranks, then distribute
+   // Load mesh from Gmsh .msh file (all ranks need it for ParMesh)
    // =========================================================================
-   BP2MeshGenerator::Parameters mesh_params;
-   mesh_params.Lx = Lx;
-   mesh_params.Lz = Lz;
-   mesh_params.Wf = params.Wf;
-   mesh_params.nx = mesh_nx;
-   mesh_params.nz = mesh_nz;
-   mesh_params.grading_x = grading_x;
-   mesh_params.grading_z = grading_z;
+   auto serial_mesh = BP2MeshGenerator::LoadGmshMesh(mesh_file, mesh_scale);
 
-   auto serial_mesh = BP2MeshGenerator::CreateGraded(mesh_params);
+   if (mpi.IsRoot())
+   {
+      std::cout << "  Serial mesh elements: " << serial_mesh->GetNE() << "\n";
+      std::cout << "  Serial mesh vertices: " << serial_mesh->GetNV() << "\n";
+
+      // Save VTK for ParaView inspection
+      std::string vtk_file = output_dir + "/bp2_mesh.vtk";
+      BP2MeshGenerator::SaveVTK(*serial_mesh, vtk_file);
+      std::cout << "  Mesh saved to: " << vtk_file << "\n";
+   }
+
    ParMesh pmesh(mpi.GetComm(), *serial_mesh);
    serial_mesh.reset();
 

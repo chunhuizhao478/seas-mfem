@@ -83,10 +83,15 @@ CHECKPOINT_HEADERS = io/checkpoint.hpp
 # All headers
 SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS)
 
+# Mesh generation tool
+GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
+GENERATE_MESH_OBJ = $(GENERATE_MESH_SRC:.cpp=.o)
+
 # Targets
 SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antiplane \
                seas_test_fault_operator seas_test_quasi_dynamic seas_test_bp2_short \
-               seas_test_io seas_bp2_serial_smoke seas_test_checkpoint
+               seas_test_io seas_bp2_serial_smoke seas_test_checkpoint \
+               seas_generate_mesh
 # Phase 6: Parallel test sources
 TEST_MPI_CONTEXT_SRC = tests/parallel/test_mpi_context.cpp
 TEST_PARALLEL_UTILS_SRC = tests/parallel/test_parallel_utils.cpp
@@ -199,6 +204,10 @@ seas_bp2_serial_smoke: $(BP2_SERIAL_SMOKE_OBJ)
 seas_test_checkpoint: $(TEST_CHECKPOINT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CHECKPOINT_OBJ) $(MFEM_LIBS)
 
+# Mesh generation tool (serial)
+seas_generate_mesh: $(GENERATE_MESH_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
+
 # Object file rules
 $(TEST_FRICTION_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -233,6 +242,10 @@ $(BP2_SERIAL_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CON
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_CHECKPOINT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
