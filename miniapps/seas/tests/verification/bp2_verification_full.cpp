@@ -648,6 +648,7 @@ int main(int argc, char *argv[])
 
    // Write initial state
    bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
+   bench_out.Flush();
 
    // =========================================================================
    // Time integration (Dormand-Prince RK45)

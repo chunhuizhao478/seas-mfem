@@ -122,13 +122,14 @@ public:
       return true;
    }
 
-   /// @brief Force a write at the current state.
+   /// @brief Force a write at the current state (always flushes to disk).
    void ForceWrite(real_t time, const Vector &state,
                    const RateStateFaultOperator<ParMesh> &fault,
                    const Vector &traction, real_t global_V_max)
    {
       last_write_time_ = -1e30;
       Write(time, state, fault, traction, global_V_max);
+      Flush();
    }
 
    /// Flush all output files.

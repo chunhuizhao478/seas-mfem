@@ -473,6 +473,213 @@ void TestParaViewOutputInterval()
 }
 
 // =============================================================================
+// Test 7: ForceWrite flushes to disk immediately
+// =============================================================================
+
+void TestForceWriteFlushes()
+{
+   std::cout << "\n=== Test: ForceWrite Flushes to Disk ===\n";
+
+   BP2Params params;
+
+   BP2MeshGenerator::Parameters mesh_params;
+   mesh_params.Lx = 50.0e3;
+   mesh_params.Lz = 50.0e3;
+   mesh_params.Wf = params.Wf;
+   mesh_params.nx = 4;
+   mesh_params.nz = 8;
+   auto mesh = BP2MeshGenerator::Create(mesh_params);
+
+   AntiplaneDomainOperator<Mesh> domain(
+      *mesh, 1, params.mu(), params.Vp, params.Wf);
+
+   FaultGeometry<Mesh> fault_geom(domain, params);
+
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = params.V0;  fc.f0 = params.f0;
+   fc.b = params.b;     fc.Dc = params.Dc;
+   DieterichRuinaFriction friction(fc);
+   AgingLaw aging;
+
+   RateStateFaultOperator<Mesh> fault_op(
+      &fault_geom, &friction, &aging, params);
+
+   SEASQuasiDynamicOperator<Mesh> seas_op(&domain, &fault_op);
+
+   Vector state(fault_op.StateSize());
+   seas_op.SetInitialCondition(state);
+
+   Vector fault_depths;
+   domain.GetFaultDepths(fault_depths);
+
+   std::vector<real_t> probe_depths = {0.0, -12000.0};
+   std::string prefix = "test_forcewrite_flush";
+   BenchmarkOutput<Mesh> bench_out(prefix, params, probe_depths, fault_depths);
+
+   // ForceWrite should flush automatically — no explicit Flush() needed
+   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction());
+
+   // Check files are non-empty immediately (data on disk, not just buffered)
+   TEST_ASSERT(FileExistsAndNonEmpty("test_forcewrite_flush_z0km.txt"),
+               "ForceWrite flushes z=0km file to disk");
+   TEST_ASSERT(FileExistsAndNonEmpty("test_forcewrite_flush_z12km.txt"),
+               "ForceWrite flushes z=12km file to disk");
+
+   // Verify data line is present (not just headers)
+   {
+      std::ifstream f("test_forcewrite_flush_z0km.txt");
+      int line_count = 0;
+      std::string line;
+      while (std::getline(f, line))
+      {
+         if (!line.empty()) { line_count++; }
+      }
+      // Should have: description header + column header + 1 data line = 3 lines
+      TEST_ASSERT(line_count >= 3,
+                  "ForceWrite wrote header + data (got " +
+                  std::to_string(line_count) + " lines)");
+   }
+
+   bench_out.Close();
+
+   std::remove("test_forcewrite_flush_z0km.txt");
+   std::remove("test_forcewrite_flush_z12km.txt");
+}
+
+// =============================================================================
+// Test 8: Write respects adaptive output interval
+// =============================================================================
+
+void TestWriteAdaptiveInterval()
+{
+   std::cout << "\n=== Test: Write Adaptive Output Interval ===\n";
+
+   BP2Params params;
+
+   BP2MeshGenerator::Parameters mesh_params;
+   mesh_params.Lx = 50.0e3;
+   mesh_params.Lz = 50.0e3;
+   mesh_params.Wf = params.Wf;
+   mesh_params.nx = 4;
+   mesh_params.nz = 8;
+   auto mesh = BP2MeshGenerator::Create(mesh_params);
+
+   AntiplaneDomainOperator<Mesh> domain(
+      *mesh, 1, params.mu(), params.Vp, params.Wf);
+
+   FaultGeometry<Mesh> fault_geom(domain, params);
+
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = params.V0;  fc.f0 = params.f0;
+   fc.b = params.b;     fc.Dc = params.Dc;
+   DieterichRuinaFriction friction(fc);
+   AgingLaw aging;
+
+   RateStateFaultOperator<Mesh> fault_op(
+      &fault_geom, &friction, &aging, params);
+
+   SEASQuasiDynamicOperator<Mesh> seas_op(&domain, &fault_op);
+
+   Vector state(fault_op.StateSize());
+   seas_op.SetInitialCondition(state);
+
+   Vector fault_depths;
+   domain.GetFaultDepths(fault_depths);
+
+   std::vector<real_t> probe_depths = {0.0};
+   std::string prefix = "test_adaptive_interval";
+   BenchmarkOutput<Mesh> bench_out(prefix, params, probe_depths, fault_depths);
+
+   // ForceWrite at t=0
+   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction());
+
+   // Interseismic: V_max = 1e-9, interval = 0.01 yr ~ 315576 s
+   // Write at t=1000s should be skipped (too soon)
+   bool wrote1 = bench_out.Write(1000.0, state, fault_op, seas_op.GetTraction());
+   TEST_ASSERT(!wrote1, "Write skipped at t=1000s (interseismic, need 0.01yr)");
+
+   // Write at t=0.01yr should succeed
+   real_t t_01yr = 0.01 * BP2Params::seconds_per_year;
+   bool wrote2 = bench_out.Write(t_01yr, state, fault_op, seas_op.GetTraction());
+   TEST_ASSERT(wrote2, "Write accepted at t=0.01yr");
+
+   // Immediately after should be skipped again
+   bool wrote3 = bench_out.Write(t_01yr + 100.0, state, fault_op,
+                                  seas_op.GetTraction());
+   TEST_ASSERT(!wrote3, "Write skipped shortly after previous write");
+
+   // Count data lines in the file
+   bench_out.Close();
+   {
+      std::ifstream f("test_adaptive_interval_z0km.txt");
+      int data_lines = 0;
+      std::string line;
+      while (std::getline(f, line))
+      {
+         if (!line.empty() && line[0] != '#') { data_lines++; }
+      }
+      // Should have exactly 2 data lines: t=0 (ForceWrite) + t=0.01yr (Write)
+      TEST_ASSERT(data_lines == 2,
+                  "File has 2 data lines (got " +
+                  std::to_string(data_lines) + ")");
+   }
+
+   std::remove("test_adaptive_interval_z0km.txt");
+}
+
+// =============================================================================
+// Test 9: ProbeOutput flush guarantees on-disk data
+// =============================================================================
+
+void TestProbeOutputFlush()
+{
+   std::cout << "\n=== Test: ProbeOutput Flush ===\n";
+
+   std::string filename = "test_probe_flush.txt";
+
+   {
+      std::vector<std::string> columns = {"time(s)", "value"};
+      ProbeOutput probe(filename, columns);
+
+      probe.WriteStep({0.0, 1.0});
+
+      // Without flush, file may be empty on disk due to buffering.
+      // After flush, data must be on disk.
+      probe.Flush();
+
+      // Verify file is non-empty while still open
+      {
+         std::ifstream f(filename);
+         f.seekg(0, std::ios::end);
+         TEST_ASSERT(f.tellg() > 0,
+                     "ProbeOutput: file non-empty after Flush()");
+      }
+
+      // Write more data without flushing
+      probe.WriteStep({1.0, 2.0});
+      probe.WriteStep({2.0, 3.0});
+      probe.Flush();
+
+      // Verify all 3 data lines are on disk
+      {
+         std::ifstream f(filename);
+         int data_lines = 0;
+         std::string line;
+         while (std::getline(f, line))
+         {
+            if (!line.empty() && line[0] != '#') { data_lines++; }
+         }
+         TEST_ASSERT(data_lines == 3,
+                     "ProbeOutput: 3 data lines after second Flush()");
+      }
+
+      probe.Close();
+   }
+
+   std::remove(filename.c_str());
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -489,6 +696,9 @@ int main(int argc, char *argv[])
    TestParaViewOutput();
    TestParaViewCombinedOutput();
    TestParaViewOutputInterval();
+   TestForceWriteFlushes();
+   TestWriteAdaptiveInterval();
+   TestProbeOutputFlush();
 
    std::cout << "\n================================================\n";
    std::cout << "Test Summary\n";

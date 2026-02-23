@@ -146,13 +146,14 @@ public:
       return true;
    }
 
-   /// @brief Force a write at the current state (ignoring schedule).
+   /// @brief Force a write at the current state (ignoring schedule, always flushes).
    void ForceWrite(real_t time, const Vector &state,
                    const RateStateFaultOperator<MeshType> &fault,
                    const Vector &traction)
    {
       last_write_time_ = -1e30;  // Reset to force write
       Write(time, state, fault, traction);
+      Flush();
    }
 
    /// Flush all output files.
