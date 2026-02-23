@@ -4,8 +4,8 @@
 #SBATCH -e bp1_25m_%j.err     # stderr
 #SBATCH -p normal             # Queue
 #SBATCH -N 1                  # 1 node
-#SBATCH -n 20                 # MPI tasks
-#SBATCH -t 96:00:00           # wall time (BP1: ~30 EQs over 3000 yr)
+#SBATCH -n 20                 # MPI tasks (~61k elements, 20 cores optimal)
+#SBATCH -t 48:00:00           # wall time (with AMG: ~2x faster than before)
 #SBATCH -A EAR20006           # TACC allocation
 
 export LC_ALL=C
@@ -14,6 +14,14 @@ export LANG=C
 module list
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
+
+# Rebuild with latest optimizations
+make seas_bp1_full
+
+# Generate mesh if not present
+if [ ! -f bp1/mesh/bp1_25m.msh ]; then
+    gmsh -2 bp1/mesh/bp1.geo -o bp1/mesh/bp1_25m.msh -setnumber hf 0.025
+fi
 
 mkdir -p bp1/results_25m
 

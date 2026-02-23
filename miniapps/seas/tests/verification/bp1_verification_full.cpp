@@ -443,6 +443,7 @@ int main(int argc, char *argv[])
    double tfinal_override = 0.0;
    int checkpoint_interval = 5000;   // steps between checkpoints (0 = disabled)
    std::string restart_prefix;       // non-empty = restart from checkpoint
+   bool write_every_step = false;    // write output at every accepted step
 
    for (int i = 1; i < argc; i++)
    {
@@ -462,6 +463,7 @@ int main(int argc, char *argv[])
       {
          restart_prefix = argv[++i];
       }
+      if (arg == "--write-every-step") { write_every_step = true; }
    }
 
    // BP1 probe depths: 15 stations at 2.5 km spacing [m]
@@ -772,8 +774,15 @@ int main(int argc, char *argv[])
          }
       }
 
-      // I/O: write every step
-      bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+      // I/O: adaptive schedule or every step
+      if (write_every_step)
+      {
+         bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+      }
+      else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max))
+      {
+         bench_out.Flush();
+      }
 
       // Checkpoint
       if (checkpoint_interval > 0 && step % checkpoint_interval == 0)

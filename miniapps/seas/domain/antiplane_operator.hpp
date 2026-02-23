@@ -474,13 +474,13 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      // Parallel solver: CGSolver with MPI communicator.
-      // We use CGSolver instead of HyprePCG because the system may be singular
-      // (all-Neumann BCs) and HypreBoomerAMG fails on singular systems.
-      // CGSolver handles singular systems correctly when starting from zero.
-      // Preconditioner (HypreSmoother) is created at solve time.
+      // Parallel solver: CGSolver with BoomerAMG preconditioner.
+      // The DG penalty/stabilization terms make the system SPD even with
+      // all-Neumann BCs, so AMG is safe and much faster than plain smoothing.
+      // Tolerance relaxed to 1e-8: the ODE solver uses AbsTol=1e-7, so
+      // solving the linear system to 1e-12 wastes iterations.
       auto *cg = new CGSolver(mesh_.GetComm());
-      cg->SetRelTol(1e-12);
+      cg->SetRelTol(1e-8);
       cg->SetAbsTol(0.0);
       cg->SetMaxIter(2000);
       cg->SetPrintLevel(-1);
@@ -593,8 +593,9 @@ void AntiplaneDomainOperator<MeshType>::AssembleStiffness() const
       cached_Ah_.SetType(Operator::Hypre_ParCSR);
       cached_a_->ParallelAssemble(cached_Ah_);
 
-      cached_prec_ = std::make_unique<HypreSmoother>(
-         *cached_Ah_.As<HypreParMatrix>());
+      auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
+      amg->SetPrintLevel(0);
+      cached_prec_.reset(amg);
 
       auto *cg = static_cast<CGSolver*>(solver_.get());
       cg->SetPreconditioner(*cached_prec_);
