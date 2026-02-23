@@ -1,9 +1,12 @@
 # Simulation results (large output files)
 bp2/results_*/
 bp2_full_*.txt
+bp1/results_*/
+bp1_full_*.txt
 
 # Plots
 bp2/plots_*/
+bp1/plots/
 bp2_verification_plots/
 bp2/benchmark_data_200m/benchmark_comparison_plots/
 
@@ -15,10 +18,12 @@ seas_generate_mesh
 seas_mms_antiplane_parallel
 seas_pseas
 seas_bp2_full
+seas_bp1_full
 seas_test_*
 
 # Checkpoint files
 bp2_full_checkpoint_*.txt
+bp1_full_checkpoint_*.txt
 
 # Test output
 test_pv_*/
