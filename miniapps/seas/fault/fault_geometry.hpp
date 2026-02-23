@@ -72,9 +72,15 @@ public:
          num_global_fault_dofs_ = num_fault_dofs_;
       }
 
+      if (num_global_fault_dofs_ == 0)
+      {
+         MFEM_WARNING("FaultGeometry: No fault DOFs found on any rank");
+         return;
+      }
+
       if (num_fault_dofs_ == 0)
       {
-         MFEM_WARNING("FaultGeometry: No fault DOFs found in domain operator");
+         // This rank has no fault DOFs — expected with many ranks.
          return;
       }
 
@@ -291,7 +297,15 @@ public:
    void Print(std::ostream &os = mfem::out) const
    {
       os << "Fault Geometry:\n";
-      os << "  Number of DOFs: " << num_fault_dofs_ << "\n";
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         os << "  Local fault DOFs: " << num_local_fault_dofs_ << "\n";
+         os << "  Global fault DOFs: " << num_global_fault_dofs_ << "\n";
+      }
+      else
+      {
+         os << "  Number of DOFs: " << num_fault_dofs_ << "\n";
+      }
 
       if (num_fault_dofs_ > 0)
       {

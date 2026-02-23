@@ -1,0 +1,27 @@
+# Simulation results (large output files)
+bp2/results_*/
+bp2_full_*.txt
+
+# Plots
+bp2/plots_*/
+bp2_verification_plots/
+bp2/benchmark_data_200m/benchmark_comparison_plots/
+
+# Mesh output
+*.vtk
+
+# Binaries
+seas_generate_mesh
+seas_mms_antiplane_parallel
+seas_pseas
+seas_bp2_full
+seas_test_*
+
+# Checkpoint files
+bp2_full_checkpoint_*.txt
+
+# Test output
+test_pv_*/
+
+# Archive
+archive/
