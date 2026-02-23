@@ -552,7 +552,7 @@ int main(int argc, char *argv[])
    ParMesh pmesh(mpi.GetComm(), *serial_mesh);
    serial_mesh.reset();
 
-   // GetGlobalNE() is collective (MPI_Allreduce) — call on all ranks
+   // GetGlobalNE() is collective (MPI_Allreduce) -- call on all ranks
    long long global_ne = pmesh.GetGlobalNE();
    if (mpi.IsRoot())
    {
