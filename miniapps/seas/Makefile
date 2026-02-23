@@ -38,6 +38,8 @@ TEST_IO_SRC = tests/unit/test_io.cpp
 BP2_SERIAL_SMOKE_SRC = tests/verification/bp2_serial_smoke.cpp
 # Phase 11: Checkpoint
 TEST_CHECKPOINT_SRC = tests/unit/test_checkpoint.cpp
+# Psi-space state variable tests
+TEST_PSI_STATE_SRC = tests/unit/test_psi_state.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -49,6 +51,7 @@ TEST_BP2_SHORT_OBJ = $(TEST_BP2_SHORT_SRC:.cpp=.o)
 TEST_IO_OBJ = $(TEST_IO_SRC:.cpp=.o)
 BP2_SERIAL_SMOKE_OBJ = $(BP2_SERIAL_SMOKE_SRC:.cpp=.o)
 TEST_CHECKPOINT_OBJ = $(TEST_CHECKPOINT_SRC:.cpp=.o)
+TEST_PSI_STATE_OBJ = $(TEST_PSI_STATE_SRC:.cpp=.o)
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -91,7 +94,7 @@ GENERATE_MESH_OBJ = $(GENERATE_MESH_SRC:.cpp=.o)
 SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antiplane \
                seas_test_fault_operator seas_test_quasi_dynamic seas_test_bp2_short \
                seas_test_io seas_bp2_serial_smoke seas_test_checkpoint \
-               seas_generate_mesh
+               seas_test_psi_state seas_generate_mesh
 # Phase 6: Parallel test sources
 TEST_MPI_CONTEXT_SRC = tests/parallel/test_mpi_context.cpp
 TEST_PARALLEL_UTILS_SRC = tests/parallel/test_parallel_utils.cpp
@@ -158,7 +161,7 @@ MFEM_TESTS = MINIAPPS
         test-mpi-context test-parallel-utils test-parallel \
         test-parallel-domain test-mms-parallel test-parallel-fault \
         test-serial-parallel test-bp2-parallel test-scaling \
-        test-bp2-verify
+        test-bp2-verify test-psi-state
 
 all: $(MINIAPPS)
 
@@ -204,6 +207,10 @@ seas_bp2_serial_smoke: $(BP2_SERIAL_SMOKE_OBJ)
 seas_test_checkpoint: $(TEST_CHECKPOINT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CHECKPOINT_OBJ) $(MFEM_LIBS)
 
+# Psi-space state variable unit test
+seas_test_psi_state: $(TEST_PSI_STATE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PSI_STATE_OBJ) $(MFEM_LIBS)
+
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
@@ -245,6 +252,10 @@ $(TEST_CHECKPOINT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONF
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_PSI_STATE_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -279,6 +290,9 @@ test-bp2-serial-smoke: seas_bp2_serial_smoke
 
 test-checkpoint: seas_test_checkpoint
 	./seas_test_checkpoint
+
+test-psi-state: seas_test_psi_state
+	./seas_test_psi_state
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)

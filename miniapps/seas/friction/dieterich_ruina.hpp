@@ -288,6 +288,128 @@ public:
    }
 
    // =========================================================================
+   // Psi-space methods (logarithmic state variable)
+   // =========================================================================
+   // psi = f0 + b*ln(V0*theta/Dc)
+   // These methods work directly with psi, avoiding exp/log round-trips.
+
+   /// Convert theta to psi: psi = f0 + b*ln(V0*theta/Dc).
+   real_t ThetaToPsi(real_t theta) const
+   {
+      theta = std::max(theta, theta_min_);
+      return cp_.f0 + cp_.b * std::log(cp_.V0 * theta / cp_.Dc);
+   }
+
+   /// Convert psi to theta: theta = (Dc/V0)*exp((psi - f0)/b).
+   real_t PsiToTheta(real_t psi) const
+   {
+      return (cp_.Dc / cp_.V0) * std::exp((psi - cp_.f0) / cp_.b);
+   }
+
+   /// Friction coefficient in psi-space:
+   /// f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
+   real_t FrictionCoefficientPsi(real_t V, real_t psi, real_t a) const
+   {
+      V = std::max(V, V_min_);
+      real_t sinh_arg = (V / (2.0 * cp_.V0)) * std::exp(psi / a);
+      return a * std::asinh(sinh_arg);
+   }
+
+   /// Derivative df/dV in psi-space:
+   /// df/dV = a / (2V0) * exp(psi/a) / sqrt(1 + [(V/2V0)*exp(psi/a)]^2)
+   real_t FrictionDerivativeVPsi(real_t V, real_t psi, real_t a) const
+   {
+      V = std::max(V, V_min_);
+      real_t exp_val = std::exp(psi / a);
+      real_t sinh_arg = (V / (2.0 * cp_.V0)) * exp_val;
+      real_t d_arg_dV = exp_val / (2.0 * cp_.V0);
+      real_t d_asinh = 1.0 / std::sqrt(1.0 + sinh_arg * sinh_arg);
+      return a * d_asinh * d_arg_dV;
+   }
+
+   /// Solve for slip rate V given stress tau and state psi.
+   ///
+   /// Solves: tau = sigma_n * f(V, psi) + eta * V
+   /// where f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
+   real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
+                           real_t eta, real_t a,
+                           int *iterations = nullptr) const
+   {
+      if (sigma_n <= 0.0)
+      {
+         if (iterations) { *iterations = 0; }
+         if (eta > 0.0) { return tau / eta; }
+         else { return 0.0; }
+      }
+
+      real_t V = cp_.V0;
+      real_t V_lo = V_min_;
+      real_t V_hi = (eta > 1e-6) ? (tau / eta) : 100.0;
+      V_hi = std::min(V_hi, 100.0);
+
+      const int max_iter = 100;
+      const real_t tol = 1.0e-12;
+
+      int iter = 0;
+      for (; iter < max_iter; ++iter)
+      {
+         real_t f = FrictionCoefficientPsi(V, psi, a);
+         real_t df_dV = FrictionDerivativeVPsi(V, psi, a);
+
+         real_t F = sigma_n * f + eta * V - tau;
+         real_t dF_dV = sigma_n * df_dV + eta;
+
+         real_t V_new = V - F / dF_dV;
+
+         if (V_new < V_lo) { V_new = 0.5 * (V + V_lo); }
+         else if (V_new > V_hi) { V_new = 0.5 * (V + V_hi); }
+
+         real_t rel_change = std::abs(V_new - V) / std::max(V, V_min_);
+         V = V_new;
+
+         if (rel_change < tol || std::abs(F) < tol * tau) { break; }
+      }
+
+      if (iterations) { *iterations = iter; }
+      MFEM_ASSERT(iter < max_iter,
+                  "Newton solver failed to converge for slip rate (psi)");
+      return V;
+   }
+
+   /// Compute initial psi from stress equilibrium.
+   ///
+   /// Given tau0 and V_init, solve for psi such that:
+   ///   tau0 = sigma_n * f(V_init, psi) + eta * V_init
+   ///
+   /// f = (tau0 - eta*V_init) / sigma_n
+   /// a * asinh(arg) = f  =>  arg = sinh(f/a)
+   /// (V_init/2V0) * exp(psi/a) = sinh(f/a)
+   /// psi = a * ln[2V0/V_init * sinh(f/a)]
+   real_t InitialStatePsi(real_t tau0, real_t V_init, real_t sigma_n,
+                          real_t eta, real_t a) const
+   {
+      real_t tau_eff = tau0 - eta * V_init;
+      real_t f = tau_eff / sigma_n;
+
+      real_t f_over_a = f / a;
+      real_t sinh_val;
+      if (f_over_a > 700.0)
+      {
+         sinh_val = 0.5 * std::exp(f_over_a);
+      }
+      else
+      {
+         sinh_val = std::sinh(f_over_a);
+      }
+
+      real_t log_arg = (2.0 * cp_.V0 / V_init) * sinh_val;
+      MFEM_ASSERT(log_arg > 0.0,
+                  "Invalid argument for logarithm in InitialStatePsi");
+
+      return a * std::log(log_arg);
+   }
+
+   // =========================================================================
    // Accessors for constants
    // =========================================================================
 

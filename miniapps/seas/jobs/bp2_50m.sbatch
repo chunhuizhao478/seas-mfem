@@ -15,10 +15,10 @@ module list
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 
-mkdir -p bp2_50m_results
+mkdir -p bp2/results_50m
 
 ibrun ./seas_bp2_full \
-      --mesh mesh/bp2_50m.msh \
+      --mesh bp2/mesh/bp2_50m.msh \
       --ref-dir bp2/benchmark_data_200m \
-      --output-dir bp2_50m_results \
+      --output-dir bp2/results_50m \
       --checkpoint-interval 5000

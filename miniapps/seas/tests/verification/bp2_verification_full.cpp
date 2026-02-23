@@ -519,7 +519,7 @@ int main(int argc, char *argv[])
       if (mpi.IsRoot())
       {
          std::cerr << "ERROR: --mesh <file.msh> is required.\n";
-         std::cerr << "Generate mesh with: gmsh -2 mesh/bp2.geo -o bp2.msh\n";
+         std::cerr << "Generate mesh with: gmsh -2 bp2/mesh/bp2.geo -o bp2/mesh/bp2.msh\n";
       }
       return 1;
    }

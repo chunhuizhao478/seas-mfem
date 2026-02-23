@@ -167,6 +167,104 @@ public:
    const char *GetName() const override { return "SlipLaw"; }
 };
 
+/// Aging law in psi-space: dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0]
+///
+/// Psi is the logarithmic state variable: psi = f0 + b*ln(V0*theta/Dc).
+/// This formulation (used by Tandem) integrates over a much narrower range
+/// than theta, potentially improving numerical behavior.
+///
+/// At steady state: psi_ss = f0 + b*ln(V0/V) (where V0/V >> 1 typically).
+class AgingLawPsi : public StateEvolution
+{
+public:
+   AgingLawPsi(real_t b, real_t V0, real_t f0)
+      : b_(b), V0_(V0), f0_(f0) {}
+
+   /// Compute dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0].
+   real_t Rate(real_t V, real_t psi, real_t Dc) const override
+   {
+      return (b_ * V0_ / Dc) * (std::exp((f0_ - psi) / b_) - V / V0_);
+   }
+
+   /// Steady-state psi: psi_ss = f0 + b*ln(V0/V).
+   real_t SteadyState(real_t V, real_t Dc) const override
+   {
+      MFEM_ASSERT(V > 0.0, "Slip rate must be positive for steady state");
+      return f0_ + b_ * std::log(V0_ / V);
+   }
+
+   /// dG/dV = -b/Dc.
+   real_t RateDerivativeV(real_t V, real_t psi, real_t Dc) const override
+   {
+      return -b_ / Dc;
+   }
+
+   /// dG/dpsi = -(V0/Dc) * exp((f0-psi)/b).
+   real_t RateDerivativeTheta(real_t V, real_t psi, real_t Dc) const override
+   {
+      return -(V0_ / Dc) * std::exp((f0_ - psi) / b_);
+   }
+
+   const char *GetName() const override { return "AgingLawPsi"; }
+
+private:
+   real_t b_;
+   real_t V0_;
+   real_t f0_;
+};
+
+/// Slip law in psi-space: dpsi/dt = -(b*V/Dc) * [psi - f0 - b*ln(V0/V)]
+///
+/// Derived from dtheta/dt = -(V*theta/Dc)*ln(V*theta/Dc) via the chain rule
+/// dpsi/dt = (b/theta) * dtheta/dt with theta = (Dc/V0)*exp((psi-f0)/b).
+///
+/// Equivalently: dpsi/dt = -(V*b/Dc) * [psi - psi_ss]
+/// where psi_ss = f0 + b*ln(V0/V).
+class SlipLawPsi : public StateEvolution
+{
+public:
+   SlipLawPsi(real_t b, real_t V0, real_t f0)
+      : b_(b), V0_(V0), f0_(f0) {}
+
+   /// Compute dpsi/dt = -(V/Dc) * [psi - psi_ss].
+   /// Derived via chain rule: dpsi/dt = (b/theta)*dtheta/dt
+   ///   = -(b*V/Dc)*ln(V*theta/Dc) = -(V/Dc)*(psi - psi_ss).
+   real_t Rate(real_t V, real_t psi, real_t Dc) const override
+   {
+      V = std::max(V, 1e-50);
+      real_t psi_ss = f0_ + b_ * std::log(V0_ / V);
+      return -(V / Dc) * (psi - psi_ss);
+   }
+
+   /// Steady-state psi: psi_ss = f0 + b*ln(V0/V).
+   real_t SteadyState(real_t V, real_t Dc) const override
+   {
+      MFEM_ASSERT(V > 0.0, "Slip rate must be positive for steady state");
+      return f0_ + b_ * std::log(V0_ / V);
+   }
+
+   /// dG/dV = -(1/Dc) * [psi - psi_ss + b].
+   real_t RateDerivativeV(real_t V, real_t psi, real_t Dc) const override
+   {
+      V = std::max(V, 1e-50);
+      real_t psi_ss = f0_ + b_ * std::log(V0_ / V);
+      return -(1.0 / Dc) * (psi - psi_ss + b_);
+   }
+
+   /// dG/dpsi = -(V/Dc).
+   real_t RateDerivativeTheta(real_t V, real_t psi, real_t Dc) const override
+   {
+      return -(V / Dc);
+   }
+
+   const char *GetName() const override { return "SlipLawPsi"; }
+
+private:
+   real_t b_;
+   real_t V0_;
+   real_t f0_;
+};
+
 } // namespace seas
 } // namespace mfem
 

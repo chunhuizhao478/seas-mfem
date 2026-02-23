@@ -12,9 +12,22 @@ Usage:
     python visualize_results.py <mfem_prefix> [options]
 
 Examples:
-    python visualize_results.py ../mfem_bp2qd
-    python visualize_results.py ../mfem_bp2qd --depths 0 12 --save
-    python visualize_results.py ../mfem_bp2qd --benchmark-dir benchmark_data --save
+    # MFEM vs Erickson benchmark (default if no benchmark flags given)
+    python visualize_results.py ../mfem_bp2qd --erickson --save
+
+    # MFEM vs both benchmarks
+    python visualize_results.py ../mfem_bp2qd --erickson --unicycle --save
+
+    # MFEM only, no benchmarks
+    python visualize_results.py ../mfem_bp2qd --no-benchmark --save
+
+    # Compare multiple resolutions against Erickson
+    python visualize_results.py results_50m/bp2_full --erickson \
+        --compare 200m:results_200m/bp2_full --compare 100m:results_100m/bp2_full \
+        --save --output-dir plots_comparison
+
+    # Specific depths only
+    python visualize_results.py ../mfem_bp2qd --erickson --depths 0 7.2 12 --save
 """
 
 import argparse
@@ -72,86 +85,71 @@ def mfem_filename(prefix, depth_km):
         return f"{prefix}_z{depth_km:.1f}km.txt"
 
 
-def benchmark_filename(depth_km, bench_dir=None):
-    """Generate benchmark reference filename for a given depth.
+def find_benchmark_file(directory, code, depth_km):
+    """Find benchmark file, handling naming inconsistencies (z24km vs z24.0km).
 
-    Tries two naming conventions:
-      1. bp2-qd-erickson-z{depth}km-res.txt  (Erickson reference data)
-      2. bp2-qd-z{depth}km-res.txt           (generic benchmark data)
-
-    If bench_dir is provided, returns the first file that exists.
+    code: 'erickson' or 'unicycle'
     """
     if abs(depth_km - round(depth_km)) < 1e-6:
-        d = f"{int(round(depth_km))}"
+        candidates = [
+            f"bp2-qd-{code}-z{int(round(depth_km))}km-res.txt",
+            f"bp2-qd-{code}-z{depth_km:.1f}km-res.txt",
+        ]
     else:
-        d = f"{depth_km:.1f}"
-
-    candidates = [
-        f"bp2-qd-erickson-z{d}km-res.txt",
-        f"bp2-qd-z{d}km-res.txt",
-    ]
-
-    if bench_dir is not None:
-        for c in candidates:
-            if os.path.exists(os.path.join(bench_dir, c)):
-                return c
-
-    return candidates[0]
+        candidates = [
+            f"bp2-qd-{code}-z{depth_km:.1f}km-res.txt",
+            f"bp2-qd-{code}-z{int(round(depth_km))}km-res.txt",
+        ]
+    for c in candidates:
+        path = os.path.join(directory, c)
+        if os.path.exists(path):
+            return path
+    return None
 
 
-def plot_station(mfem_data, bench_data, depth_km, save_path=None):
-    """Plot comparison for one depth station.
+def plot_station(datasets, depth_km, save_path=None):
+    """Plot 4-panel comparison for one depth station.
 
-    Shows: slip rate (V), slip, shear stress, state variable (theta)
-    Uses log scale for slip rate and state variable (matching benchmark convention).
+    datasets: list of (label, data_dict, color, linestyle) tuples.
+    Shows: slip rate (V), slip, shear stress, state variable (theta).
     """
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
     fig.suptitle(f"BP2-QD: z = {depth_km} km", fontsize=14, fontweight="bold")
 
-    # Define the 4 panels matching benchmark format
     panels = [
-        ("slip_rate", "Slip Rate V (m/s)", True),  # log y-axis
-        ("slip_m", "Slip (m)", False),  # linear y-axis
-        ("tau_MPa", "Shear Stress (MPa)", False),  # linear y-axis
-        ("theta_s", "State Variable theta (s)", True),  # log y-axis
+        ("slip_rate", "Slip Rate V (m/s)", True),
+        ("slip_m", "Slip (m)", False),
+        ("tau_MPa", "Shear Stress (MPa)", False),
+        ("theta_s", "State Variable \u03b8 (s)", True),
     ]
 
     for ax, (key, ylabel, use_log) in zip(axes.flat, panels):
-        if bench_data is not None:
-            ax.plot(
-                bench_data["time_yr"],
-                bench_data[key],
-                "k-",
-                label="Benchmark",
-                linewidth=0.8,
-            )
-        if mfem_data is not None:
-            ax.plot(
-                mfem_data["time_yr"],
-                mfem_data[key],
-                "r-",
-                label="MFEM",
-                linewidth=0.8,
-                alpha=0.8,
-            )
-
+        for label, data, color, ls in datasets:
+            if data is not None:
+                ax.plot(
+                    data["time_yr"],
+                    data[key],
+                    ls,
+                    color=color,
+                    label=label,
+                    linewidth=0.8,
+                    alpha=0.85,
+                )
         ax.set_xlabel("Time (years)")
         ax.set_ylabel(ylabel)
         if use_log:
             ax.set_yscale("log")
-        ax.legend(fontsize=9, loc="best")
+        ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
 
     plt.tight_layout()
-
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         print(f"  Saved: {save_path}")
     else:
         plt.show()
-
     plt.close()
 
 
@@ -159,7 +157,7 @@ def plot_all_depths_overview(all_results, save_path=None):
     """Plot slip rate time series for all available depths in one figure."""
     import matplotlib.pyplot as plt
 
-    fig, ax = plt.subplots(1, 1, figsize=(12, 6))
+    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
     fig.suptitle("BP2-QD: Slip Rate at All Depths", fontsize=14, fontweight="bold")
 
     cmap = plt.cm.viridis
@@ -168,32 +166,25 @@ def plot_all_depths_overview(all_results, save_path=None):
     for i, res in enumerate(all_results):
         depth_km = res["depth_km"]
         color = cmap(i / max(n - 1, 1))
-
-        if res.get("bench_data") is not None:
-            ax.plot(
-                res["bench_data"]["time_yr"],
-                res["bench_data"]["slip_rate"],
-                "-",
-                color=color,
-                linewidth=0.5,
-                alpha=0.5,
-            )
-        if res.get("mfem_data") is not None:
-            ax.plot(
-                res["mfem_data"]["time_yr"],
-                res["mfem_data"]["slip_rate"],
-                "--",
-                color=color,
-                linewidth=0.8,
-                label=f"z={depth_km} km",
-            )
+        first = True
+        for label, data, _, ls in res["datasets"]:
+            if data is not None:
+                lbl = f"z={depth_km} km" if first else None
+                ax.plot(
+                    data["time_yr"],
+                    data["slip_rate"],
+                    ls,
+                    color=color,
+                    linewidth=0.6,
+                    label=lbl,
+                )
+                first = False
 
     ax.set_xlabel("Time (years)")
     ax.set_ylabel("Slip Rate V (m/s)")
     ax.set_yscale("log")
     ax.legend(fontsize=7, ncol=3, loc="best")
     ax.grid(True, alpha=0.3)
-
     plt.tight_layout()
 
     if save_path:
@@ -201,8 +192,21 @@ def plot_all_depths_overview(all_results, save_path=None):
         print(f"  Saved: {save_path}")
     else:
         plt.show()
-
     plt.close()
+
+
+COLORS = [
+    "#000000",  # black  (first benchmark)
+    "#d62728",  # red    (second benchmark)
+    "#1f77b4",  # blue
+    "#2ca02c",  # green
+    "#9467bd",  # purple
+    "#ff7f0e",  # orange
+    "#8c564b",  # brown
+    "#e377c2",  # pink
+]
+
+LINE_STYLES = ["-"]
 
 
 def main():
@@ -210,12 +214,29 @@ def main():
         description="Visualize MFEM SEAS BP2 output vs benchmark data"
     )
     parser.add_argument(
-        "mfem_prefix", help="MFEM output file prefix (e.g., ../mfem_bp2qd)"
+        "mfem_prefix", help="MFEM output file prefix (e.g., results_50m/bp2_full)"
+    )
+    parser.add_argument(
+        "--erickson",
+        action="store_true",
+        help="Include Erickson (FD) benchmark",
+    )
+    parser.add_argument(
+        "--unicycle",
+        action="store_true",
+        help="Include Unicycle (BEM) benchmark",
     )
     parser.add_argument(
         "--benchmark-dir",
         default="benchmark_data_200m",
         help="Directory containing benchmark reference files",
+    )
+    parser.add_argument(
+        "--compare",
+        action="append",
+        metavar="LABEL:PREFIX",
+        help="Additional MFEM dataset to overlay (e.g., 200m:../bp2_full). "
+        "Can be repeated for multiple comparisons.",
     )
     parser.add_argument(
         "--depths",
@@ -235,67 +256,130 @@ def main():
     )
     args = parser.parse_args()
 
+    # Default: Erickson if no benchmark flags specified and not --no-benchmark
+    if not args.no_benchmark and not args.erickson and not args.unicycle:
+        args.erickson = True
+
     try:
         import matplotlib
+
         if args.save:
             matplotlib.use("Agg")
     except ImportError:
         print("Error: matplotlib is required. Install with: pip install matplotlib")
         return 1
 
+    data_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), args.benchmark_dir
+    )
+    if not os.path.isabs(args.benchmark_dir) and not os.path.isdir(data_dir):
+        data_dir = args.benchmark_dir
+
     depths = args.depths if args.depths else ALL_DEPTHS_KM
+
+    # Build list of data sources: (label, type, extra_info, color, linestyle)
+    sources = []
+    color_idx = 0
+
+    if args.erickson and not args.no_benchmark:
+        sources.append(
+            (
+                "Erickson (FD)",
+                "benchmark",
+                "erickson",
+                COLORS[color_idx],
+                LINE_STYLES[0],
+            )
+        )
+        color_idx += 1
+
+    if args.unicycle and not args.no_benchmark:
+        sources.append(
+            (
+                "Unicycle (BEM)",
+                "benchmark",
+                "unicycle",
+                COLORS[color_idx],
+                LINE_STYLES[1 if color_idx > 0 else 0],
+            )
+        )
+        color_idx += 1
+
+    # Primary MFEM dataset
+    sources.append(
+        (
+            "MFEM",
+            "mfem",
+            args.mfem_prefix,
+            COLORS[color_idx % len(COLORS)],
+            LINE_STYLES[min(color_idx, len(LINE_STYLES) - 1)],
+        )
+    )
+    color_idx += 1
+
+    # Additional --compare MFEM datasets
+    if args.compare:
+        for spec in args.compare:
+            if ":" in spec:
+                label, prefix = spec.split(":", 1)
+            else:
+                label = os.path.basename(spec)
+                prefix = spec
+            ls = LINE_STYLES[min(color_idx, len(LINE_STYLES) - 1)]
+            sources.append(
+                (f"MFEM {label}", "mfem", prefix, COLORS[color_idx % len(COLORS)], ls)
+            )
+            color_idx += 1
 
     print("=" * 60)
     print("BP2-QD Visualization")
     print("=" * 60)
-    print(f"MFEM prefix:   {args.mfem_prefix}")
-    if not args.no_benchmark:
-        print(f"Benchmark dir: {args.benchmark_dir}")
-    print(f"Depths (km):   {depths}")
+    for label, stype, info, color, ls in sources:
+        if stype == "benchmark":
+            print(f"  {label}: {data_dir}/{info}")
+        else:
+            print(f"  {label}: {info}")
+    print(f"  Depths: {depths}")
     print()
 
     all_results = []
 
     for depth_km in depths:
-        mfem_path = mfem_filename(args.mfem_prefix, depth_km)
-        bench_path = os.path.join(
-            args.benchmark_dir,
-            benchmark_filename(depth_km, bench_dir=args.benchmark_dir))
+        # Load data for each source
+        datasets = []  # (label, data, color, linestyle)
+        for label, stype, info, color, ls in sources:
+            data = None
+            if stype == "benchmark":
+                path = find_benchmark_file(data_dir, info, depth_km)
+                if path:
+                    data = load_scec_file(path)
+            else:
+                path = mfem_filename(info, depth_km)
+                if os.path.exists(path):
+                    data = load_scec_file(path)
+            datasets.append((label, data, color, ls))
 
-        mfem_data = None
-        bench_data = None
-
-        if os.path.exists(mfem_path):
-            mfem_data = load_scec_file(mfem_path)
-            if mfem_data is not None:
-                print(
-                    f"z={depth_km:5.1f} km: MFEM {len(mfem_data['time_s'])} pts, "
-                    f"t=[{mfem_data['time_yr'][0]:.1f}, "
-                    f"{mfem_data['time_yr'][-1]:.1f}] yr"
-                )
-        else:
-            print(f"z={depth_km:5.1f} km: MFEM file not found ({mfem_path})")
-
-        if not args.no_benchmark and os.path.exists(bench_path):
-            bench_data = load_scec_file(bench_path)
-
-        if mfem_data is None and bench_data is None:
+        # Skip if no data at this depth
+        if all(d is None for _, d, _, _ in datasets):
             continue
 
-        result = {
-            "depth_km": depth_km,
-            "mfem_data": mfem_data,
-            "bench_data": bench_data,
-        }
+        # Print info
+        pts_info = []
+        for label, data, _, _ in datasets:
+            if data is not None:
+                pts_info.append(f"{label}: {len(data['time_s'])} pts")
+        print(f"  z={depth_km:5.1f} km: {', '.join(pts_info)}")
+
+        result = {"depth_km": depth_km, "datasets": datasets}
         all_results.append(result)
 
-        # Plot individual station
+        # Plot
         if args.save:
             os.makedirs(args.output_dir, exist_ok=True)
             fname = os.path.join(args.output_dir, f"bp2_z{depth_km}km.png")
-            plot_station(mfem_data, bench_data, depth_km, save_path=fname)
+            plot_station(datasets, depth_km, save_path=fname)
         else:
-            plot_station(mfem_data, bench_data, depth_km)
+            plot_station(datasets, depth_km)
 
     # Overview plot
     if len(all_results) > 1:

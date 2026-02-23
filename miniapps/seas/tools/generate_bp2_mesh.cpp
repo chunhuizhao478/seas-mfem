@@ -1,7 +1,7 @@
 // Standalone tool to load a Gmsh BP2 mesh and export VTK for ParaView.
 //
 // Usage:
-//   gmsh -2 mesh/bp2.geo -o bp2.msh
+//   gmsh -2 bp2/mesh/bp2.geo -o bp2/mesh/bp2.msh
 //   ./seas_generate_mesh --mesh bp2.msh [--scale 1000] [--output bp2_mesh.vtk]
 //
 // Outputs a VTK file that can be opened in ParaView to verify:
@@ -38,7 +38,7 @@ int main(int argc, char *argv[])
    {
       std::cerr << "Usage: " << argv[0]
                 << " --mesh <file.msh> [--scale 1000] [--output bp2_mesh.vtk]\n";
-      std::cerr << "\nGenerate mesh first: gmsh -2 mesh/bp2.geo -o bp2.msh\n";
+      std::cerr << "\nGenerate mesh first: gmsh -2 bp2/mesh/bp2.geo -o bp2/mesh/bp2.msh\n";
       return 1;
    }
 
