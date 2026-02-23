@@ -58,7 +58,8 @@ TEST_PSI_STATE_OBJ = $(TEST_PSI_STATE_SRC:.cpp=.o)
 FRICTION_HEADERS = friction/friction_law.hpp \
                    friction/state_evolution.hpp \
                    friction/dieterich_ruina.hpp \
-                   config/bp2_params.hpp
+                   config/bp2_params.hpp \
+                   config/bp1_params.hpp
 
 # Phase 2: Domain operator
 DOMAIN_HEADERS = common/seas_types.hpp \
@@ -137,12 +138,16 @@ BP2_VERIFY_OBJ = $(BP2_VERIFY_SRC:.cpp=.o)
 BP2_FULL_SRC = tests/verification/bp2_verification_full.cpp
 BP2_FULL_OBJ = $(BP2_FULL_SRC:.cpp=.o)
 
+# BP1 full multi-cycle simulation (3000 yr)
+BP1_FULL_SRC = tests/verification/bp1_verification_full.cpp
+BP1_FULL_OBJ = $(BP1_FULL_SRC:.cpp=.o)
+
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
                seas_test_parallel_fault seas_pseas \
                seas_test_serial_parallel_consistency \
                seas_bp2_benchmark_parallel seas_test_scaling \
-               seas_bp2_verify seas_bp2_full
+               seas_bp2_verify seas_bp2_full seas_bp1_full
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS)
@@ -409,6 +414,14 @@ seas_bp2_full: $(BP2_FULL_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP2_FULL_OBJ) $(MFEM_LIBS)
 
 $(BP2_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+# BP1 full multi-cycle simulation
+seas_bp1_full: $(BP1_FULL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP1_FULL_OBJ) $(MFEM_LIBS)
+
+$(BP1_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
 

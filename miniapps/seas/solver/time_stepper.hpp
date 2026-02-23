@@ -139,10 +139,11 @@ class DormandPrinceRK45
 public:
    DormandPrinceRK45()
       : atol_(1e-7),
-        rtol_(1e-7),
+        rtol_(1e-50),           // Match Tandem/PETSc: pure absolute tolerance
         safety_(0.9),
-        growth_max_(5.0),
-        shrink_min_(0.2),
+        reject_safety_(0.5),    // PETSc default: extra shrink after rejection
+        growth_max_(10.0),      // PETSc default clip[1]
+        shrink_min_(0.1),       // PETSc default clip[0]
         dt_min_(1e-6),
         dt_max_(0.1 * 3.15576e7),  // 0.1 year
         dt_(1e3),
@@ -158,6 +159,7 @@ public:
    void SetAbsTol(real_t atol) { atol_ = atol; }
    void SetRelTol(real_t rtol) { rtol_ = rtol; }
    void SetSafety(real_t safety) { safety_ = safety; }
+   void SetRejectSafety(real_t rs) { reject_safety_ = rs; }
    void SetGrowthMax(real_t gmax) { growth_max_ = gmax; }
    void SetShrinkMin(real_t smin) { shrink_min_ = smin; }
    void SetDtMin(real_t dt_min) { dt_min_ = dt_min; }
@@ -299,8 +301,9 @@ public:
          err_norm = mpi_ctx_->GlobalMax(err_norm);
       }
 
-      // Compute new dt using standard PI controller formula
-      //   dt_new = safety * dt * err_norm^(-1/q), q = min(p, p*) = 5
+      // Compute new dt using standard PI controller formula (PETSc TSAdaptBasic)
+      //   dt_new = safety * dt * err_norm^(-1/order), order = 5 for DOPRI5(4)
+      //   Matches PETSc: hfac_lte = safety * enorm^(-1/order)
       real_t dt_new;
       if (err_norm <= 0.0)
       {
@@ -355,8 +358,9 @@ public:
       }
       else
       {
-         // Reject step
-         dt_ = dt_new;
+         // Reject step: apply extra safety factor (PETSc reject_safety)
+         dt_ = dt_new * reject_safety_;
+         dt_ = std::max(dt_min_, dt_);
          initialized_ = true;  // keep k_[0] from this step start
          total_rejections_++;
 
@@ -413,6 +417,7 @@ private:
    real_t atol_;           ///< Absolute tolerance
    real_t rtol_;           ///< Relative tolerance
    real_t safety_;         ///< Safety factor for dt adjustment
+   real_t reject_safety_;  ///< Extra shrink factor after rejection (PETSc default 0.5)
    real_t growth_max_;     ///< Maximum dt growth factor per step
    real_t shrink_min_;     ///< Minimum dt shrink factor per step
    real_t dt_min_;         ///< Minimum allowed dt

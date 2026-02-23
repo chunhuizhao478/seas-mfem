@@ -237,7 +237,7 @@ void test_restart_consistency()
 
       DormandPrinceRK45 solver;
       solver.SetAbsTol(1e-7);
-      solver.SetRelTol(1e-7);
+      solver.SetRelTol(1e-50);  // Match Tandem/PETSc: pure absolute tolerance
       solver.SetDtMin(1e-6);
       solver.SetDtMax(1e8);
       solver.SetDt(1e3);

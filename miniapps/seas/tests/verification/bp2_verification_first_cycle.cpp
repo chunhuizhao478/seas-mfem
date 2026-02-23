@@ -634,7 +634,7 @@ int main(int argc, char *argv[])
    DormandPrinceRK45 ode_solver;
    ode_solver.SetMPIContext(&mpi);
    ode_solver.SetAbsTol(1e-7);
-   ode_solver.SetRelTol(1e-7);
+   ode_solver.SetRelTol(1e-50);  // Match Tandem/PETSc: pure absolute tolerance
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.1 * BP2Params::seconds_per_year);
    ode_solver.SetDt(1e3);

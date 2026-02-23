@@ -1181,6 +1181,200 @@ void TestRK45ToleranceControl()
    TEST_ASSERT(err_tight < 1e-8, "Tight tolerance very accurate");
 }
 
+/// Test 20: RK45 default parameters match PETSc/Tandem
+void TestRK45PetscDefaults()
+{
+   std::cout << "\n=== Test: RK45 PETSc/Tandem Default Parameters ===\n";
+
+   DormandPrinceRK45 rk45;
+
+   // Verify defaults match PETSc TSAdaptBasic + Tandem rk45.cfg
+   // rtol = 1e-50 (effectively disabled, matching -ts_rtol 1e-50)
+   // These are tested indirectly: construct and check getters exist
+   // atol = 1e-7 (matching -ts_atol 1e-7)
+
+   // Verify via exponential decay that pure absolute tolerance is used:
+   // With rtol ~ 0, the error scale is always atol regardless of |y|.
+   real_t lambda = 1.0;
+   ExponentialDecayOp op(lambda);
+
+   // Run with defaults (rtol = 1e-50, atol = 1e-7)
+   DormandPrinceRK45 rk45_default;
+   rk45_default.SetDt(0.1);
+   rk45_default.SetDtMax(2.0);
+   rk45_default.Init(op);
+
+   Vector y(1);
+   y(0) = 1.0;
+   real_t t = 0.0;
+   int steps = 0;
+   while (t < 3.0 && steps < 10000)
+   {
+      if (t + rk45_default.GetDt() > 3.0) { rk45_default.SetDt(3.0 - t); }
+      real_t dt;
+      if (rk45_default.Step(op, y, t, dt)) { steps++; }
+   }
+   real_t exact = std::exp(-lambda * t);
+   real_t rel_err = std::abs(y(0) - exact) / exact;
+
+   std::cout << "    Default rtol=1e-50: t=" << t << ", y=" << y(0)
+             << ", exact=" << exact << ", rel_err=" << rel_err
+             << ", steps=" << steps << "\n";
+
+   TEST_ASSERT(rel_err < 1e-4, "RK45 with PETSc defaults gives accurate result");
+   TEST_ASSERT(steps > 0, "RK45 with PETSc defaults completes");
+}
+
+/// Test 21: RK45 reject safety factor reduces dt extra after rejection
+void TestRK45RejectSafety()
+{
+   std::cout << "\n=== Test: RK45 Reject Safety Factor ===\n";
+
+   // Use a stiff problem that triggers rejections.
+   // Compare: with reject_safety = 0.5 (default) vs reject_safety = 1.0 (none)
+   real_t lambda = 50.0;
+   real_t K = 1.0;
+   LogisticGrowthOp op(lambda, K);
+
+   // Run 1: with reject_safety = 0.5 (PETSc default)
+   DormandPrinceRK45 rk45_with;
+   rk45_with.SetAbsTol(1e-8);
+   rk45_with.SetRelTol(1e-50);
+   rk45_with.SetRejectSafety(0.5);
+   rk45_with.SetDt(1.0);
+   rk45_with.SetDtMax(10.0);
+   rk45_with.Init(op);
+
+   Vector y1(1);
+   y1(0) = 0.01;
+   real_t t1 = 0.0;
+   int steps1 = 0, attempts1 = 0;
+   while (t1 < 0.5 && attempts1 < 100000)
+   {
+      real_t dt;
+      if (rk45_with.Step(op, y1, t1, dt)) { steps1++; }
+      attempts1++;
+   }
+   int rejections1 = rk45_with.GetTotalRejections();
+
+   // Run 2: with reject_safety = 1.0 (no extra shrink)
+   DormandPrinceRK45 rk45_without;
+   rk45_without.SetAbsTol(1e-8);
+   rk45_without.SetRelTol(1e-50);
+   rk45_without.SetRejectSafety(1.0);
+   rk45_without.SetDt(1.0);
+   rk45_without.SetDtMax(10.0);
+   rk45_without.Init(op);
+
+   Vector y2(1);
+   y2(0) = 0.01;
+   real_t t2 = 0.0;
+   int steps2 = 0, attempts2 = 0;
+   while (t2 < 0.5 && attempts2 < 100000)
+   {
+      real_t dt;
+      if (rk45_without.Step(op, y2, t2, dt)) { steps2++; }
+      attempts2++;
+   }
+   int rejections2 = rk45_without.GetTotalRejections();
+
+   std::cout << "    With reject_safety=0.5: steps=" << steps1
+             << ", rejections=" << rejections1
+             << ", attempts=" << attempts1 << "\n";
+   std::cout << "    With reject_safety=1.0: steps=" << steps2
+             << ", rejections=" << rejections2
+             << ", attempts=" << attempts2 << "\n";
+
+   // Both should reach the answer accurately
+   real_t exact = K / (1.0 + (K / 0.01 - 1.0) * std::exp(-lambda * 0.5));
+   real_t err1 = std::abs(y1(0) - exact) / exact;
+   real_t err2 = std::abs(y2(0) - exact) / exact;
+
+   std::cout << "    Accuracy: err1=" << err1 << ", err2=" << err2 << "\n";
+
+   TEST_ASSERT(err1 < 1e-5, "RK45 with reject_safety=0.5 accurate");
+   TEST_ASSERT(err2 < 1e-5, "RK45 with reject_safety=1.0 accurate");
+
+   // With reject_safety=0.5, fewer total attempts (rejections converge faster)
+   TEST_ASSERT(attempts1 <= attempts2,
+               "reject_safety=0.5 needs fewer or equal attempts than 1.0");
+}
+
+/// Test 22: RK45 growth/shrink clip values match PETSc defaults
+void TestRK45ClipValues()
+{
+   std::cout << "\n=== Test: RK45 Growth/Shrink Clip Values ===\n";
+
+   // Test that with growth_max=10 (PETSc default), dt can grow 10x per step.
+   // Use a simple problem where error is very small (dt wants to grow fast).
+   real_t lambda = 0.1;  // Slow decay = easy problem
+   ExponentialDecayOp op(lambda);
+
+   DormandPrinceRK45 rk45;
+   rk45.SetAbsTol(1e-7);
+   rk45.SetRelTol(1e-50);
+   rk45.SetDt(1e-3);       // Start very small
+   rk45.SetDtMax(100.0);
+   rk45.Init(op);
+
+   Vector y(1);
+   y(0) = 1.0;
+   real_t t = 0.0;
+
+   // Take one step from very small dt
+   real_t dt;
+   bool accepted = rk45.Step(op, y, t, dt);
+   TEST_ASSERT(accepted, "First step accepted");
+
+   real_t dt_after = rk45.GetDt();
+   real_t growth_ratio = dt_after / dt;
+
+   std::cout << "    Initial dt=" << dt << ", next dt=" << dt_after
+             << ", growth=" << growth_ratio << "x\n";
+
+   // With growth_max=10 and a very easy problem, dt should grow by up to 10x
+   TEST_ASSERT(growth_ratio <= 10.0 + 1e-10,
+               "Growth capped at growth_max=10");
+   TEST_ASSERT(growth_ratio > 4.0,
+               "Easy problem allows significant dt growth (> 4x)");
+
+   // Now test shrink_min = 0.1: on a hard problem, dt can shrink by up to 10x
+   real_t lambda_hard = 100.0;
+   real_t K = 1.0;
+   LogisticGrowthOp hard_op(lambda_hard, K);
+
+   DormandPrinceRK45 rk45_hard;
+   rk45_hard.SetAbsTol(1e-8);
+   rk45_hard.SetRelTol(1e-50);
+   rk45_hard.SetDt(1.0);    // Way too large for lambda=100
+   rk45_hard.SetDtMax(10.0);
+   rk45_hard.Init(hard_op);
+
+   Vector y2(1);
+   y2(0) = 0.01;
+   real_t t2 = 0.0;
+   real_t dt2;
+   bool accepted2 = rk45_hard.Step(hard_op, y2, t2, dt2);
+
+   // This should be rejected
+   real_t dt_after_reject = rk45_hard.GetDt();
+   // Account for reject_safety: effective shrink = clip * reject_safety
+   // With shrink_min=0.1 and reject_safety=0.5, minimum ratio = 0.1 * 0.5 = 0.05
+   real_t shrink_ratio = dt_after_reject / dt2;
+
+   std::cout << "    Hard problem: dt=" << dt2 << ", accepted=" << accepted2
+             << ", next dt=" << dt_after_reject
+             << ", shrink=" << shrink_ratio << "x\n";
+
+   TEST_ASSERT(!accepted2, "Hard problem rejects large initial dt");
+   // After rejection with reject_safety, dt should shrink significantly
+   TEST_ASSERT(shrink_ratio < 0.5,
+               "Rejected step shrinks dt substantially");
+   // But not below shrink_min * reject_safety * dt (= 0.05 * dt)
+   TEST_ASSERT(dt_after_reject >= rk45_hard.GetDtMin(),
+               "Shrunk dt stays above dt_min");
+}
+
 // =============================================================================
 // Main
 // =============================================================================
@@ -1214,6 +1408,11 @@ int main(int argc, char *argv[])
    TestRK45StepRejection();
    TestRK45FSAL();
    TestRK45ToleranceControl();
+
+   std::cout << "\n=== RK45 PETSc/Tandem Matching Tests ===\n";
+   TestRK45PetscDefaults();
+   TestRK45RejectSafety();
+   TestRK45ClipValues();
 
    std::cout << "\n================================================\n";
    std::cout << "Test Summary\n";

@@ -656,7 +656,7 @@ int main(int argc, char *argv[])
    DormandPrinceRK45 ode_solver;
    ode_solver.SetMPIContext(&mpi);
    ode_solver.SetAbsTol(1e-7);
-   ode_solver.SetRelTol(1e-7);
+   ode_solver.SetRelTol(1e-50);  // Match Tandem/PETSc: pure absolute tolerance
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.1 * BP2Params::seconds_per_year);
    ode_solver.SetDt(1e3);
@@ -721,8 +721,7 @@ int main(int argc, char *argv[])
       std::cout << std::string(64, '-') << "\n";
    }
 
-   real_t next_print_time = 0.0;
-   real_t print_interval = 10.0 * BP2Params::seconds_per_year;
+   int print_step_interval = 10;
 
    while (t < t_final && step < max_steps)
    {
@@ -796,8 +795,9 @@ int main(int argc, char *argv[])
                          &mpi);
       }
 
-      // Periodic console output
-      if (mpi.IsRoot() && (t >= next_print_time || V_max > V_threshold_seismic))
+      // Periodic console output (every 10 steps or during earthquakes)
+      if (mpi.IsRoot() &&
+          (step % print_step_interval == 0 || V_max > V_threshold_seismic))
       {
          std::cout << std::setw(10) << step
                    << std::setw(16) << std::fixed << std::setprecision(2)
@@ -808,7 +808,7 @@ int main(int argc, char *argv[])
                    << V_max
                    << std::setw(8) << num_seismic_events
                    << "\n";
-         next_print_time = t + print_interval;
+         std::cout.flush();
       }
    }
 

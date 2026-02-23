@@ -3,8 +3,8 @@
 #SBATCH -o bp2_50m_%j.out     # stdout (%j = job ID)
 #SBATCH -e bp2_50m_%j.err     # stderr
 #SBATCH -p normal             # Queue
-#SBATCH -N 1                  # 1 node (56 cores)
-#SBATCH -n 48                 # MPI tasks
+#SBATCH -N 1                  # 1 node
+#SBATCH -n 10                 # MPI tasks (31k elements, 10 cores optimal)
 #SBATCH -t 48:00:00           # wall time
 #SBATCH -A EAR20006           # TACC allocation
 
