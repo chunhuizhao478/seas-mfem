@@ -40,7 +40,7 @@ make config \
   MFEM_USE_MUMPS=YES \
   HYPRE_OPT="-I${TACC_HYPRE_INC}" \
   HYPRE_LIB="-L${TACC_HYPRE_LIB} -lHYPRE" \
-  METIS_OPT="-I${TACC_PARMETIS_INC}" \
+  METIS_OPT="-I${TACC_PARMETIS_INC} -DMETIS_EXPORT=" \
   METIS_LIB="-L${TACC_PARMETIS_LIB} -lparmetis -lmetis" \
   MUMPS_OPT="-I${TACC_MUMPS_INC}" \
   MUMPS_LIB="-L${TACC_MUMPS_LIB} -ldmumps -lmumps_common -lpord -L${TACC_MKL_LIB} -lmkl_scalapack_lp64 -lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lmpifort" \
