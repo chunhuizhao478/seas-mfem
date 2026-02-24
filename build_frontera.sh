@@ -6,14 +6,14 @@
 #
 # Prerequisites:
 #   module load hypre/2.31.0
-#   module load mumps/5.8.1
+#   module load mumps/5.3
 #   module load parmetis
 
 set -e
 
 # Load modules if not already loaded
 module load hypre/2.31.0 2>/dev/null || true
-module load mumps/5.8.1 2>/dev/null || true
+module load mumps/5.3 2>/dev/null || true
 module load parmetis 2>/dev/null || true
 
 # Verify modules

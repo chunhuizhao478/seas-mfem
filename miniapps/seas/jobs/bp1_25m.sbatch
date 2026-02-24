@@ -12,7 +12,7 @@ export LC_ALL=C
 export LANG=C
 
 module load hypre/2.31.0
-module load mumps/5.8.1
+module load mumps/5.3
 module load parmetis
 module list
 
