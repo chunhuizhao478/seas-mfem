@@ -43,7 +43,7 @@ make config \
   METIS_OPT="-I${TACC_PARMETIS_INC} -DMETIS_EXPORT=" \
   METIS_LIB="-L${TACC_PARMETIS_LIB} -lparmetis -lmetis" \
   MUMPS_OPT="-I${TACC_MUMPS_INC}" \
-  MUMPS_LIB="-L${TACC_MUMPS_LIB} -ldmumps -lmumps_common -lpord -L${TACC_MKL_LIB} -lmkl_scalapack_lp64 -lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lmpifort -lifcore" \
+  MUMPS_LIB="-L${TACC_MUMPS_LIB} -ldmumps -lmumps_common -lpord -lesmumps -lptscotch -lscotch -lptscotcherr -lscotcherr -L${TACC_MKL_LIB} -lmkl_scalapack_lp64 -lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lmpifort -lifcore" \
   LAPACK_OPT="-I${MKLROOT}/include" \
   LAPACK_LIB="-L${TACC_MKL_LIB} -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread"
 
