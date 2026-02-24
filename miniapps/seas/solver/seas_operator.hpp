@@ -205,6 +205,15 @@ void SEASQuasiDynamicOperator<MeshType>::Mult(
    // 1. Extract slip from state vector
    fault_->GetSlip(state, slip_);
 
+   // Debug: check for NaN in slip before domain solve
+#ifndef NDEBUG
+   for (int i = 0; i < slip_.Size(); i++)
+   {
+      MFEM_VERIFY(std::isfinite(slip_(i)),
+         "NaN/Inf in slip at DOF " << i << ": " << slip_(i));
+   }
+#endif
+
    // 2. Solve domain problem with slip BC
    //    ∇²u = 0 with [[u]] = slip on fault (all x=0 faces)
    domain_->Solve(t, slip_, *u_gf_);

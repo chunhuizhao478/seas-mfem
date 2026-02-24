@@ -18,6 +18,7 @@
 #include <cmath>
 #include <iomanip>
 #include <iostream>
+#include <limits>
 
 namespace mfem
 {
@@ -232,6 +233,15 @@ public:
       op.SetTime(t + c2 * dt);
       op.Mult(y_tmp_, k_[1]);
 
+      // Check for NaN in stage 2 (skip remaining stages on failure)
+      if (!std::isfinite(NormL2(k_[1])))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
+
       // Stage 3
       for (int i = 0; i < n; i++)
       {
@@ -239,6 +249,14 @@ public:
       }
       op.SetTime(t + c3 * dt);
       op.Mult(y_tmp_, k_[2]);
+
+      if (!std::isfinite(NormL2(k_[2])))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
 
       // Stage 4
       for (int i = 0; i < n; i++)
@@ -249,6 +267,14 @@ public:
       op.SetTime(t + c4 * dt);
       op.Mult(y_tmp_, k_[3]);
 
+      if (!std::isfinite(NormL2(k_[3])))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
+
       // Stage 5
       for (int i = 0; i < n; i++)
       {
@@ -257,6 +283,14 @@ public:
       }
       op.SetTime(t + c5 * dt);
       op.Mult(y_tmp_, k_[4]);
+
+      if (!std::isfinite(NormL2(k_[4])))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
 
       // Stage 6
       for (int i = 0; i < n; i++)
@@ -267,6 +301,14 @@ public:
       }
       op.SetTime(t + dt);
       op.Mult(y_tmp_, k_[5]);
+
+      if (!std::isfinite(NormL2(k_[5])))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
 
       // Stage 7 (= 5th-order solution, also next k_[0] via FSAL)
       // y5 = state + dt * (b1*k1 + b3*k3 + b4*k4 + b5*k5 + b6*k6)
@@ -337,6 +379,18 @@ public:
          {
             err_norm = mpi_ctx_->GlobalMax(err_norm);
          }
+      }
+
+      // Guard against NaN in error estimate.
+      // NaN can arise from solver failure (e.g., CG divergence) in any RK stage.
+      // Force rejection with aggressive dt reduction -- do NOT use the PI
+      // controller formula since err_norm is meaningless.
+      if (!std::isfinite(err_norm))
+      {
+         dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;  // Discard FSAL k_[0] -- it may contain NaN
+         total_rejections_++;
+         return false;
       }
 
       // Compute new dt using standard PI controller formula (PETSc TSAdaptBasic)
@@ -446,6 +500,26 @@ private:
    Vector k_[7];  ///< Stage vectors
    Vector y_tmp_; ///< Temporary solution
    Vector err_;   ///< Error estimate
+
+   /// @brief Compute L2 norm, checking for NaN.
+   ///
+   /// In parallel, a local NaN may not show up in the local Norml2()
+   /// because only a subset of DOFs are on each rank. We check locally
+   /// and broadcast via GlobalMax if available.
+   real_t NormL2(const Vector &v) const
+   {
+      real_t local_norm = v.Norml2();
+      if (mpi_ctx_)
+      {
+         // If any rank has NaN, propagate it: max(NaN, x) behavior varies,
+         // so explicitly check and broadcast.
+         int local_nan = std::isfinite(local_norm) ? 0 : 1;
+         int global_nan = mpi_ctx_->GlobalSumInt(local_nan);
+         if (global_nan > 0) { return std::numeric_limits<real_t>::quiet_NaN(); }
+         return mpi_ctx_->GlobalMax(local_norm);
+      }
+      return local_norm;
+   }
 
    // Dormand-Prince 5(4) coefficients
    // Nodes

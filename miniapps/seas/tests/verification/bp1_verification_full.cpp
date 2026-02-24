@@ -735,14 +735,50 @@ int main(int argc, char *argv[])
 
       real_t V_max = seas_op.GetMaxSlipRate();
 
-      // Check for NaN/Inf
-      if (std::isnan(V_max) || std::isinf(V_max))
+      // Check for NaN/Inf in V_max and state vector
+      bool has_nan = !std::isfinite(V_max);
+      if (!has_nan)
+      {
+         for (int i = 0; i < state.Size(); i++)
+         {
+            if (!std::isfinite(state(i))) { has_nan = true; break; }
+         }
+      }
+      // Ensure all ranks agree on NaN detection
+      {
+         int local_nan = has_nan ? 1 : 0;
+         int global_nan = mpi.GlobalSumInt(local_nan);
+         has_nan = (global_nan > 0);
+      }
+      if (has_nan)
       {
          if (mpi.IsRoot())
          {
             std::cerr << "NaN/Inf detected at step " << step
                       << ", t = " << t / BP2Params::seconds_per_year
-                      << " yr\n";
+                      << " yr, V_max = " << V_max << "\n";
+            // Identify which DOFs have NaN
+            int nan_count = 0;
+            for (int i = 0; i < state.Size(); i++)
+            {
+               if (!std::isfinite(state(i)))
+               {
+                  int dof = i / 2;
+                  bool is_psi = (i % 2 == 1);
+                  if (nan_count < 10)
+                  {
+                     std::cerr << "  state(" << i << ") = " << state(i)
+                               << " [DOF " << dof
+                               << (is_psi ? " psi" : " slip") << "]\n";
+                  }
+                  nan_count++;
+               }
+            }
+            if (nan_count > 10)
+            {
+               std::cerr << "  ... and " << (nan_count - 10)
+                         << " more NaN entries\n";
+            }
          }
          break;
       }

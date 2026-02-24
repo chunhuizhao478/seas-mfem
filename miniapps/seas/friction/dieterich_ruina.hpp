@@ -222,9 +222,12 @@ public:
          *iterations = iter;
       }
 
-      // Verify solution
-      MFEM_ASSERT(iter < max_iter,
-                  "Newton solver failed to converge for slip rate");
+      // Verify solution (MFEM_VERIFY fires in release builds too)
+      MFEM_VERIFY(iter < max_iter,
+                  "Newton solver failed to converge for slip rate: "
+                  << "tau=" << tau << " theta=" << theta
+                  << " sigma_n=" << sigma_n << " eta=" << eta
+                  << " a=" << a << " V=" << V);
 
       return V;
    }
@@ -371,8 +374,11 @@ public:
       }
 
       if (iterations) { *iterations = iter; }
-      MFEM_ASSERT(iter < max_iter,
-                  "Newton solver failed to converge for slip rate (psi)");
+      MFEM_VERIFY(iter < max_iter,
+                  "Newton solver failed to converge for slip rate (psi): "
+                  << "tau=" << tau << " psi=" << psi
+                  << " sigma_n=" << sigma_n << " eta=" << eta
+                  << " a=" << a << " V=" << V);
       return V;
    }
 

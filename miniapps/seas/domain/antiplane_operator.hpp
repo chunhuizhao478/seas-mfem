@@ -474,16 +474,17 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      // Parallel solver: CGSolver with BoomerAMG preconditioner.
-      // The DG penalty/stabilization terms make the system SPD even with
-      // all-Neumann BCs, so AMG is safe and much faster than plain smoothing.
+      // Parallel solver: CGSolver with BlockILU preconditioner.
+      // BlockILU is designed for DG discretizations -- it applies ILU(0) per
+      // element block, avoiding the non-SPD coarse-level issues that
+      // BoomerAMG hits on fine DG meshes (50m, 25m).
       // CG tolerance must be much tighter than ODE atol (1e-7) to avoid
       // solver noise contaminating the RK45 error estimate. Tandem uses 1e-12.
       auto *cg = new CGSolver(mesh_.GetComm());
       cg->SetRelTol(1e-12);
       cg->SetAbsTol(0.0);
-      cg->SetMaxIter(2000);
-      cg->SetPrintLevel(-1);
+      cg->SetMaxIter(5000);
+      cg->SetPrintLevel(0);  // Print warning if not converged (was -1: silent)
 
       solver_.reset(cg);
 #endif
@@ -494,8 +495,8 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
       auto *cg = new CGSolver();
       cg->SetRelTol(1e-12);
       cg->SetAbsTol(0.0);
-      cg->SetMaxIter(2000);
-      cg->SetPrintLevel(-1);
+      cg->SetMaxIter(5000);
+      cg->SetPrintLevel(0);  // Print warning if not converged (was -1: silent)
 
       solver_.reset(cg);
    }
@@ -593,9 +594,11 @@ void AntiplaneDomainOperator<MeshType>::AssembleStiffness() const
       cached_Ah_.SetType(Operator::Hypre_ParCSR);
       cached_a_->ParallelAssemble(cached_Ah_);
 
-      auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
-      amg->SetPrintLevel(0);
-      cached_prec_.reset(amg);
+      int block_size = fes_->GetTypicalFE()->GetDof();
+      auto *bilu = new BlockILU(block_size,
+                                BlockILU::Reordering::MINIMUM_DISCARDED_FILL);
+      bilu->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+      cached_prec_.reset(bilu);
 
       auto *cg = static_cast<CGSolver*>(solver_.get());
       cg->SetPreconditioner(*cached_prec_);
@@ -657,8 +660,39 @@ void AntiplaneDomainOperator<MeshType>::Solve(
    X_ = 0.0;
    B_ = rhs;
 
+   // Check for NaN in RHS before solving
+   if (!std::isfinite(B_.Norml2()))
+   {
+      mfem::err << "ERROR: RHS has NaN/Inf before CG solve.\n";
+      for (int i = 0; i < slip_bc.Size(); i++)
+      {
+         if (!std::isfinite(slip_bc(i)))
+         {
+            mfem::err << "  slip_bc(" << i << ") = " << slip_bc(i) << "\n";
+         }
+      }
+   }
+
    // Solve using cached operator
    solver_->Mult(B_, X_);
+
+   // Check CG convergence
+   {
+      auto *cg = dynamic_cast<CGSolver*>(solver_.get());
+      if (cg && !cg->GetConverged())
+      {
+         mfem::err << "WARNING: CG did not converge after "
+                   << cg->GetNumIterations() << " iterations, final norm = "
+                   << cg->GetFinalNorm() << "\n";
+      }
+   }
+
+   // Verify solution is finite
+   if (!std::isfinite(X_.Norml2()))
+   {
+      mfem::err << "WARNING: CG produced NaN/Inf solution.\n";
+      X_ = 0.0;
+   }
 
    // Copy solution to GridFunction
    displacement = X_;
