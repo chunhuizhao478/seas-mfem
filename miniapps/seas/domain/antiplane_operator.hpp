@@ -186,8 +186,8 @@ private:
    mutable Vector fault_depths_;
    mutable bool fault_depths_computed_;
 
-   // Solver components
-   std::unique_ptr<Solver> solver_;
+   // Solver components (mutable: created/configured in const AssembleStiffness)
+   mutable std::unique_ptr<Solver> solver_;
    std::unique_ptr<Solver> prec_;
    mutable std::unique_ptr<GSSmoother> serial_prec_;  // For serial builds - must outlive solve
    mutable Vector X_, B_;
@@ -474,19 +474,9 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      // Parallel solver: CGSolver with BlockILU preconditioner.
-      // BlockILU is designed for DG discretizations -- it applies ILU(0) per
-      // element block, avoiding the non-SPD coarse-level issues that
-      // BoomerAMG hits on fine DG meshes (50m, 25m).
-      // CG tolerance must be much tighter than ODE atol (1e-7) to avoid
-      // solver noise contaminating the RK45 error estimate. Tandem uses 1e-12.
-      auto *cg = new CGSolver(mesh_.GetComm());
-      cg->SetRelTol(1e-12);
-      cg->SetAbsTol(0.0);
-      cg->SetMaxIter(5000);
-      cg->SetPrintLevel(0);  // Print warning if not converged (was -1: silent)
-
-      solver_.reset(cg);
+      // Parallel solver created in AssembleStiffness():
+      // - With MUMPS: MUMPSSolver direct solve (factorize once, O(n) solves)
+      // - Without MUMPS: CG + HypreILU preconditioner
 #endif
    }
    else
@@ -496,7 +486,7 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
       cg->SetRelTol(1e-12);
       cg->SetAbsTol(0.0);
       cg->SetMaxIter(5000);
-      cg->SetPrintLevel(0);  // Print warning if not converged (was -1: silent)
+      cg->SetPrintLevel(0);
 
       solver_.reset(cg);
    }
@@ -594,15 +584,34 @@ void AntiplaneDomainOperator<MeshType>::AssembleStiffness() const
       cached_Ah_.SetType(Operator::Hypre_ParCSR);
       cached_a_->ParallelAssemble(cached_Ah_);
 
-      int block_size = fes_->GetTypicalFE()->GetDof();
-      auto *bilu = new BlockILU(block_size,
-                                BlockILU::Reordering::MINIMUM_DISCARDED_FILL);
-      bilu->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-      cached_prec_.reset(bilu);
+#ifdef MFEM_USE_MUMPS
+      // MUMPS direct solver: factorize once, each Mult() is O(n) triangular
+      // solves. No iterative convergence issues, exact to machine precision.
+      // The stiffness matrix is constant, so the expensive factorization is
+      // paid once and amortized over thousands of time steps.
+      auto *mumps = new MUMPSSolver(mesh_.GetComm());
+      mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
+      mumps->SetPrintLevel(0);
+      mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+      solver_.reset(mumps);
+#else
+      // Fallback: CG + HypreILU preconditioner
+      auto *cg = new CGSolver(mesh_.GetComm());
+      cg->SetRelTol(1e-12);
+      cg->SetAbsTol(0.0);
+      cg->SetMaxIter(5000);
+      cg->SetPrintLevel(0);
 
-      auto *cg = static_cast<CGSolver*>(solver_.get());
+      auto *ilu = new HypreILU();
+      ilu->SetLevelOfFill(1);
+      ilu->SetPrintLevel(0);
+      ilu->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+      cached_prec_.reset(ilu);
+
       cg->SetPreconditioner(*cached_prec_);
       cg->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+      solver_.reset(cg);
+#endif
 #endif
    }
    else
@@ -762,14 +771,21 @@ void AntiplaneDomainOperator<MeshType>::SolveMMS(
 
       B_ = b;
 
-      // Use HypreSmoother as preconditioner for CGSolver
+#ifdef MFEM_USE_MUMPS
+      // MMS uses a different matrix, so create a temporary MUMPS solver
+      MUMPSSolver mms_solver(mesh_.GetComm());
+      mms_solver.SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
+      mms_solver.SetPrintLevel(0);
+      mms_solver.SetOperator(*Ah.As<HypreParMatrix>());
+      mms_solver.Mult(B_, X_);
+#else
       auto smoother = std::make_unique<HypreSmoother>(
          *Ah.As<HypreParMatrix>());
-
       auto *cg = static_cast<CGSolver*>(solver_.get());
       cg->SetPreconditioner(*smoother);
       cg->SetOperator(*Ah.As<HypreParMatrix>());
       cg->Mult(B_, X_);
+#endif
 #endif
    }
    else

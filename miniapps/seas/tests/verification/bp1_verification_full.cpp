@@ -532,7 +532,12 @@ int main(int argc, char *argv[])
       std::cout << "  t_final: " << t_final / BP2Params::seconds_per_year
                 << " years\n";
       std::cout << "  Reference dir: " << ref_dir << "\n";
-      std::cout << "  Output prefix: " << full_prefix << "\n\n";
+      std::cout << "  Output prefix: " << full_prefix << "\n";
+#ifdef MFEM_USE_MUMPS
+      std::cout << "  Solver: MUMPS direct\n\n";
+#else
+      std::cout << "  Solver: CG + HypreILU(1)\n\n";
+#endif
    }
 
    // =========================================================================
