@@ -250,7 +250,7 @@ SimulationResult RunBP2Serial(real_t t_final, int mesh_nx, int mesh_nz,
    ode_solver.SetAbsTol(1e-7);
    ode_solver.SetRelTol(1e-50);  // Match Tandem/PETSc: pure absolute tolerance
    ode_solver.SetDtMin(1e-6);
-   ode_solver.SetDtMax(0.1 * BP2Params::seconds_per_year);  // Max 0.1 yr
+   ode_solver.SetDtMax(0.5 * BP2Params::seconds_per_year);  // Max 0.1 yr
    ode_solver.SetDt(1e3);                                     // Start with 1000 s
    ode_solver.Init(seas_op);
 

@@ -16,6 +16,8 @@
 #include "../common/mpi_context.hpp"
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 
 namespace mfem
 {
@@ -145,7 +147,7 @@ public:
         growth_max_(10.0),      // PETSc default clip[1]
         shrink_min_(0.1),       // PETSc default clip[0]
         dt_min_(1e-6),
-        dt_max_(0.1 * 3.15576e7),  // 0.1 year
+        dt_max_(0.5 * 3.15576e7),  // 0.5 year
         dt_(1e3),
         initialized_(false),
         total_rejections_(0),
@@ -165,6 +167,13 @@ public:
    void SetDtMin(real_t dt_min) { dt_min_ = dt_min; }
    void SetDtMax(real_t dt_max) { dt_max_ = dt_max; }
    void SetDt(real_t dt) { dt_ = dt; }
+
+   /// Enable verbose per-step diagnostics (error norm, worst DOF, etc.)
+   void SetVerbose(bool v) { diag_verbose_ = v; }
+
+   /// Use weighted RMS (2-norm) instead of L-infinity for error norm.
+   /// More robust to outlier DOFs at MPI partition boundaries.
+   void SetUse2Norm(bool v) { use_2norm_ = v; }
 
    /// @brief Set MPI context for parallel error norm reduction.
    ///
@@ -279,26 +288,55 @@ public:
                          + e5 * k_[4](i) + e6 * k_[5](i) + e7 * k_[6](i));
       }
 
-      // Compute weighted L-infinity error norm
+      // Compute weighted error norm
       real_t err_norm = 0.0;
       int worst_idx = 0;
-      for (int i = 0; i < n; i++)
+      if (use_2norm_)
       {
-         real_t scale = atol_ + rtol_ * std::abs(y_tmp_(i));
-         real_t ei = std::abs(err_(i)) / scale;
-         if (ei > err_norm)
+         // Weighted RMS (2-norm): sqrt(1/N * sum((err_i/scale_i)^2))
+         // More robust to outlier DOFs than L-infinity.
+         real_t sum_sq = 0.0;
+         real_t max_ei = 0.0;
+         for (int i = 0; i < n; i++)
          {
-            err_norm = ei;
-            worst_idx = i;
+            real_t scale = atol_ + rtol_ * std::abs(y_tmp_(i));
+            real_t ei = std::abs(err_(i)) / scale;
+            sum_sq += ei * ei;
+            if (ei > max_ei) { max_ei = ei; worst_idx = i; }
+         }
+         if (mpi_ctx_)
+         {
+            // Global sum for 2-norm, global max for worst_idx diagnostic
+            int global_n = mpi_ctx_->GlobalSumInt(n);
+            real_t global_sum = mpi_ctx_->GlobalSum(sum_sq);
+            max_ei = mpi_ctx_->GlobalMax(max_ei);
+            err_norm = std::sqrt(global_sum / global_n);
+         }
+         else
+         {
+            err_norm = (n > 0) ? std::sqrt(sum_sq / n) : 0.0;
          }
       }
-
-      // In parallel, reduce err_norm across all ranks so that
-      // accept/reject decisions are consistent. Without this, ranks
-      // can diverge and deadlock in subsequent MPI collectives.
-      if (mpi_ctx_)
+      else
       {
-         err_norm = mpi_ctx_->GlobalMax(err_norm);
+         // Weighted L-infinity (matches Tandem/PETSc default)
+         for (int i = 0; i < n; i++)
+         {
+            real_t scale = atol_ + rtol_ * std::abs(y_tmp_(i));
+            real_t ei = std::abs(err_(i)) / scale;
+            if (ei > err_norm)
+            {
+               err_norm = ei;
+               worst_idx = i;
+            }
+         }
+
+         // In parallel, reduce err_norm across all ranks so that
+         // accept/reject decisions are consistent.
+         if (mpi_ctx_)
+         {
+            err_norm = mpi_ctx_->GlobalMax(err_norm);
+         }
       }
 
       // Compute new dt using standard PI controller formula (PETSc TSAdaptBasic)
@@ -319,6 +357,24 @@ public:
       dt_new = std::min(dt_new, growth_max_ * dt);
       dt_new = std::max(dt_min_, std::min(dt_max_, dt_new));
 
+      // Verbose diagnostic for every step (enabled by diag_verbose_)
+      if (diag_verbose_ && (!mpi_ctx_ || mpi_ctx_->IsRoot()))
+      {
+         int dof = worst_idx / 2;
+         bool is_theta = (worst_idx % 2 == 1);
+         real_t scale = atol_ + rtol_ * std::abs(y_tmp_(worst_idx));
+         std::cout << (err_norm <= 1.0 ? "[ACCEPT]" : "[REJECT]")
+                   << " dt=" << std::scientific << std::setprecision(3) << dt
+                   << " err=" << err_norm
+                   << " dt_new=" << dt_new
+                   << " worst=DOF" << dof
+                   << (is_theta ? "(theta)" : "(slip)")
+                   << " |err|=" << std::abs(err_(worst_idx))
+                   << " scale=" << scale
+                   << " |y|=" << std::abs(y_tmp_(worst_idx))
+                   << "\n";
+      }
+
       if (err_norm <= 1.0)
       {
          // Accept step
@@ -329,31 +385,7 @@ public:
          // FSAL: k_[6] becomes k_[0] for next step
          k_[0] = k_[6];
 
-         // Diagnostic: log when accepted but dt stuck near dt_min
-         if (dt <= dt_min_ * 1.5 && dt_new <= dt_min_ * 1.5)
-         {
-            diag_count_++;
-            if ((!mpi_ctx_ || mpi_ctx_->IsRoot()) &&
-                (diag_count_ <= 5 || diag_count_ % 10000 == 0))
-            {
-               int dof = worst_idx / 2;
-               bool is_theta = (worst_idx % 2 == 1);
-               std::cout << "[RK45 dt_min] step accepted, dt=" << dt << " s"
-                         << ", err_norm=" << err_norm
-                         << ", dt_new=" << dt_new
-                         << ", worst: DOF " << dof
-                         << (is_theta ? " (theta)" : " (slip)")
-                         << ", |err|=" << std::abs(err_(worst_idx))
-                         << ", |y|=" << std::abs(y_tmp_(worst_idx))
-                         << ", diag_count=" << diag_count_
-                         << "\n";
-            }
-         }
-         else
-         {
-            diag_count_ = 0;
-         }
-
+         diag_count_ = 0;
          return true;
       }
       else
@@ -363,24 +395,6 @@ public:
          dt_ = std::max(dt_min_, dt_);
          initialized_ = true;  // keep k_[0] from this step start
          total_rejections_++;
-
-         // Diagnostic: log when stuck at dt_min (root only)
-         if (dt_ <= dt_min_ * 1.01 &&
-             (!mpi_ctx_ || mpi_ctx_->IsRoot()))
-         {
-            int dof = worst_idx / 2;
-            bool is_theta = (worst_idx % 2 == 1);
-            real_t scale = atol_ + rtol_ * std::abs(y_tmp_(worst_idx));
-            std::cout << "[RK45 STUCK] dt=" << dt << " s"
-                      << ", err_norm=" << err_norm
-                      << ", worst: DOF " << dof
-                      << (is_theta ? " (theta)" : " (slip)")
-                      << ", |err|=" << std::abs(err_(worst_idx))
-                      << ", scale=" << scale
-                      << ", |y|=" << std::abs(y_tmp_(worst_idx))
-                      << ", |k0|=" << std::abs(k_[0](worst_idx))
-                      << "\n";
-         }
 
          return false;
       }
@@ -424,6 +438,8 @@ private:
    real_t dt_max_;         ///< Maximum allowed dt
    real_t dt_;             ///< Current time step
    bool initialized_;      ///< Whether k_[0] is valid from a previous step
+   bool diag_verbose_ = false; ///< Verbose per-step diagnostics
+   bool use_2norm_ = false;    ///< Use RMS (2-norm) instead of L-inf for error
    int total_rejections_;  ///< Total number of rejected steps
    int diag_count_;        ///< Counter for dt_min diagnostic messages
 

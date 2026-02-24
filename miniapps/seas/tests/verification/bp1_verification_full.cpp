@@ -590,10 +590,10 @@ int main(int argc, char *argv[])
    fc.V0 = params.V0;  fc.f0 = params.f0;
    fc.b = params.b;     fc.Dc = params.Dc;
    DieterichRuinaFriction friction(fc);
-   AgingLaw aging;
+   AgingLawPsi aging(params.b, params.V0, params.f0);
 
    RateStateFaultOperator<ParMesh> fault_op(
-      &fault_geom, &friction, &aging, params, &mpi);
+      &fault_geom, &friction, &aging, params, &mpi, /*use_psi=*/true);
 
    // =========================================================================
    // SEAS operator
@@ -656,7 +656,7 @@ int main(int argc, char *argv[])
    ode_solver.SetAbsTol(1e-7);
    ode_solver.SetRelTol(1e-50);  // Match Tandem/PETSc: pure absolute tolerance
    ode_solver.SetDtMin(1e-6);
-   ode_solver.SetDtMax(0.1 * BP2Params::seconds_per_year);
+   ode_solver.SetDtMax(0.5 * BP2Params::seconds_per_year);
    ode_solver.SetDt(1e3);
    ode_solver.Init(seas_op);
 

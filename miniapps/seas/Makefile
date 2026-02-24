@@ -130,6 +130,10 @@ TEST_SERIAL_PARALLEL_OBJ = $(TEST_SERIAL_PARALLEL_SRC:.cpp=.o)
 BP2_BENCHMARK_PARALLEL_OBJ = $(BP2_BENCHMARK_PARALLEL_SRC:.cpp=.o)
 TEST_SCALING_OBJ = $(TEST_SCALING_SRC:.cpp=.o)
 
+# BR2 consistency test
+TEST_BR2_CONSISTENCY_SRC = tests/parallel/test_br2_consistency.cpp
+TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
+
 # Phase 10: BP2 first-cycle verification
 BP2_VERIFY_SRC = tests/verification/bp2_verification_first_cycle.cpp
 BP2_VERIFY_OBJ = $(BP2_VERIFY_SRC:.cpp=.o)
@@ -147,7 +151,8 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_fault seas_pseas \
                seas_test_serial_parallel_consistency \
                seas_bp2_benchmark_parallel seas_test_scaling \
-               seas_bp2_verify seas_bp2_full seas_bp1_full
+               seas_bp2_verify seas_bp2_full seas_bp1_full \
+               seas_test_br2_consistency
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS)
@@ -166,7 +171,7 @@ MFEM_TESTS = MINIAPPS
         test-mpi-context test-parallel-utils test-parallel \
         test-parallel-domain test-mms-parallel test-parallel-fault \
         test-serial-parallel test-bp2-parallel test-scaling \
-        test-bp2-verify test-psi-state
+        test-bp2-verify test-psi-state test-br2-consistency
 
 all: $(MINIAPPS)
 
@@ -397,6 +402,18 @@ test-bp2-parallel: seas_bp2_benchmark_parallel
 test-scaling: seas_test_scaling
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_scaling
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_scaling
+
+# BR2 consistency test
+seas_test_br2_consistency: $(TEST_BR2_CONSISTENCY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BR2_CONSISTENCY_OBJ) $(MFEM_LIBS)
+
+$(TEST_BR2_CONSISTENCY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-br2-consistency: seas_test_br2_consistency
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_br2_consistency
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_br2_consistency
 
 # Phase 10: BP2 first-cycle verification
 seas_bp2_verify: $(BP2_VERIFY_OBJ)

@@ -477,10 +477,10 @@ void AntiplaneDomainOperator<MeshType>::SetupSolver()
       // Parallel solver: CGSolver with BoomerAMG preconditioner.
       // The DG penalty/stabilization terms make the system SPD even with
       // all-Neumann BCs, so AMG is safe and much faster than plain smoothing.
-      // Tolerance relaxed to 1e-8: the ODE solver uses AbsTol=1e-7, so
-      // solving the linear system to 1e-12 wastes iterations.
+      // CG tolerance must be much tighter than ODE atol (1e-7) to avoid
+      // solver noise contaminating the RK45 error estimate. Tandem uses 1e-12.
       auto *cg = new CGSolver(mesh_.GetComm());
-      cg->SetRelTol(1e-8);
+      cg->SetRelTol(1e-12);
       cg->SetAbsTol(0.0);
       cg->SetMaxIter(2000);
       cg->SetPrintLevel(-1);
@@ -1639,9 +1639,11 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      // BR2 shared face assembly: one-sided (Elem1 only)
+      // BR2 shared face assembly: two-sided (Elem1 + Elem2)
       int dim = mesh_.Dimension();
       real_t penalty = br2_penalty_;
+
+      auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
 
       for (int fi = 0; fi < fault_shared_faces_.Size(); fi++)
       {
@@ -1660,14 +1662,21 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
 
          const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
          int ndof1 = fe1->GetDof();
-         int face_order = fe1->GetOrder();
+
+         // Get Elem2 (face-neighbor) data
+         int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+         const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+         int ndof2 = fe2->GetDof();
+
+         int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
          const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2*face_order + 1);
          int nqp = ir.GetNPoints();
 
          const DenseMatrix &Minv1 = GetMassMatrixInverse(FTr->Elem1No);
+         const DenseMatrix &Minv2 = GetMassMatrixInverse(FTr->Elem2No);
 
          // Precompute shapes, normals
-         DenseMatrix shapes1(ndof1, nqp);
+         DenseMatrix shapes1(ndof1, nqp), shapes2(ndof2, nqp);
          Vector nor_all(dim * nqp);
          Vector w_all(nqp);
          Vector slip_all(nqp);
@@ -1677,9 +1686,13 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
             const IntegrationPoint &ip = ir.IntPoint(q);
             FTr->SetAllIntPoints(&ip);
             const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+            const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
 
             Vector shape1_q(shapes1.GetColumn(q), ndof1);
             fe1->CalcShape(eip1, shape1_q);
+
+            Vector shape2_q(shapes2.GetColumn(q), ndof2);
+            fe2->CalcShape(eip2, shape2_q);
 
             Vector nor_q(&nor_all[q * dim], dim);
             CalcOrtho(FTr->Jacobian(), nor_q);
@@ -1688,12 +1701,14 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
             slip_all[q] = (nor_q(0) > 0) ? -slip_phys : slip_phys;
          }
 
-         // One-sided BR2 lifting (Elem1 only)
-         DenseMatrix f_lifted1(ndof1, dim);
+         // Two-sided BR2 lifting (Elem1 + Elem2)
+         DenseMatrix f_lifted1(ndof1, dim), f_lifted2(ndof2, dim);
          f_lifted1 = 0.0;
+         f_lifted2 = 0.0;
 
-         DenseMatrix face_int1(ndof1, dim);
+         DenseMatrix face_int1(ndof1, dim), face_int2(ndof2, dim);
          face_int1 = 0.0;
+         face_int2 = 0.0;
 
          for (int q = 0; q < nqp; q++)
          {
@@ -1705,20 +1720,33 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
                {
                   face_int1(m, j) += shapes1(m, q) * factor;
                }
+               for (int m = 0; m < ndof2; m++)
+               {
+                  face_int2(m, j) += shapes2(m, q) * factor;
+               }
             }
          }
 
          // Apply mass inverse with factor 0.5 (same as interior)
          for (int j = 0; j < dim; j++)
          {
-            Vector fi1_j(ndof1), fl1_j(ndof1);
+            Vector fi1_j(ndof1), fi2_j(ndof2);
+            Vector fl1_j(ndof1), fl2_j(ndof2);
+
             face_int1.GetColumn(j, fi1_j);
+            face_int2.GetColumn(j, fi2_j);
+
             Minv1.Mult(fi1_j, fl1_j);
+            Minv2.Mult(fi2_j, fl2_j);
+
             fl1_j *= 0.5;
+            fl2_j *= 0.5;
+
             f_lifted1.SetCol(j, fl1_j);
+            f_lifted2.SetCol(j, fl2_j);
          }
 
-         // Compute f_lifted_q (one-sided: only Elem1 contribution, doubled)
+         // Compute f_lifted_q (two-sided: Elem1 + Elem2 contributions)
          Vector f_lifted_q(nqp);
          for (int q = 0; q < nqp; q++)
          {
@@ -1726,13 +1754,16 @@ void AntiplaneDomainOperator<MeshType>::AssembleSlipContributionBR2Shared(
             for (int j = 0; j < dim; j++)
             {
                real_t n_j = nor_all[q * dim + j];
-               real_t contrib1 = 0.0;
+               real_t contrib1 = 0.0, contrib2 = 0.0;
                for (int l = 0; l < ndof1; l++)
                {
                   contrib1 += shapes1(l, q) * f_lifted1(l, j);
                }
-               // Double the contribution (one-sided approximation)
-               sum += n_j * (2.0 * contrib1);
+               for (int l = 0; l < ndof2; l++)
+               {
+                  contrib2 += shapes2(l, q) * f_lifted2(l, j);
+               }
+               sum += n_j * (contrib1 + contrib2);
             }
             f_lifted_q[q] = 0.5 * sum;
          }
