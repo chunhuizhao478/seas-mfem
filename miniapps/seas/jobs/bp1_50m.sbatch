@@ -11,6 +11,9 @@
 export LC_ALL=C
 export LANG=C
 
+module load hypre/2.31.0
+module load mumps/5.8.1
+module load parmetis
 module list
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
