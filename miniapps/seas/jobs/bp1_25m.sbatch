@@ -16,6 +16,9 @@ module load mumps/5.3
 module load parmetis
 module list
 
+# Ensure hypre/2.31.0 is found before PETSc's old bundled libHYPRE.so
+export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
+
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 
 # Rebuild with latest optimizations
