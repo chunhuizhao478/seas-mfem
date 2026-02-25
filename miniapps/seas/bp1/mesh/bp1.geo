@@ -26,24 +26,29 @@ d1 = 15;   // VW/VS transition (H)
 d2 = 16;   // Mesh control point
 d3 = 18;   // H + h (end of transition zone)
 d4 = 40;   // Wf (bottom of rate-state fault)
+d5 = 10;   // Grading zone below Wf
+
+// Below-Wf coarsening start size: cap at 100m minimum to avoid dt constraint
+hc = (hf > 0.1) ? hf : 0.1;
 
 // ==== Points ====
 
 // Fault line (x=0): fine resolution
-Point(1)  = {0, 0, 0, hf};      // Surface/fault intersection
-Point(2)  = {0, -d1, 0, hf};    // VW/VS transition
-Point(3)  = {0, -d2, 0, hf};    // Control point
-Point(4)  = {0, -d3, 0, hf};    // End of transition
-Point(5)  = {0, -d4, 0, hf};    // Bottom of rate-state fault (Wf)
-Point(6)  = {0, -D, 0, h};      // Bottom of domain at x=0
+Point(1)  = {0, 0, 0, hf};       // Surface/fault intersection
+Point(2)  = {0, -d1, 0, hf};     // VW/VS transition
+Point(3)  = {0, -d2, 0, hf};     // Control point
+Point(4)  = {0, -d3, 0, hf};     // End of transition
+Point(5)  = {0, -d4, 0, hc};     // Bottom of rate-state fault (Wf)
+Point(11) = {0, -(d4+d5), 0, 1.0}; // End of grading zone
+Point(6)  = {0, -D, 0, h};       // Bottom of domain at x=0
 
 // Right boundary (x = +D): coarse
-Point(7)  = {D, 0, 0, h};       // Top-right
-Point(8)  = {D, -D, 0, h};      // Bottom-right
+Point(7)  = {D, 0, 0, h};        // Top-right
+Point(8)  = {D, -D, 0, h};       // Bottom-right
 
 // Left boundary (x = -D): coarse
-Point(9)  = {-D, 0, 0, h};      // Top-left
-Point(10) = {-D, -D, 0, h};     // Bottom-left
+Point(9)  = {-D, 0, 0, h};       // Top-left
+Point(10) = {-D, -D, 0, h};      // Bottom-left
 
 // ==== Lines ====
 
@@ -66,7 +71,8 @@ Line(7)  = {1, 2};    // Surface to d1
 Line(8)  = {2, 3};    // d1 to d2
 Line(9)  = {3, 4};    // d2 to d3
 Line(10) = {4, 5};    // d3 to Wf
-Line(11) = {5, 6};    // Wf to bottom
+Line(11) = {5, 11};   // Wf to end of grading zone
+Line(12) = {11, 6};   // Grading zone end to bottom
 
 // Force exact hf spacing on the fault (lines 7-10)
 Transfinite Curve{7}  = d1 / hf + 1;
@@ -74,14 +80,21 @@ Transfinite Curve{8}  = (d2 - d1) / hf + 1;
 Transfinite Curve{9}  = (d3 - d2) / hf + 1;
 Transfinite Curve{10} = (d4 - d3) / hf + 1;
 
+// Below Wf: grading zone (hc -> 1km) then uniform 1km.
+// hc = Max(hf, 100m) avoids tiny elements that constrain dt.
+// Geometric progression from hc to ~1km over d5=10km.
+Transfinite Curve{11} = Ceil(Log(1 + d5 * (1.1 - 1) / hc) / Log(1.1)) + 1 Using Progression 1.1;
+// Uniform 1km below grading zone (identical across all resolutions)
+Transfinite Curve{12} = (D - d4 - d5) / 1.0 + 1;
+
 // ==== Surfaces ====
 
 // Right half (x > 0)
-Curve Loop(1) = {2, 3, 4, -11, -10, -9, -8, -7};
+Curve Loop(1) = {2, 3, 4, -12, -11, -10, -9, -8, -7};
 Plane Surface(1) = {1};
 
 // Left half (x < 0)
-Curve Loop(2) = {7, 8, 9, 10, 11, 5, 6, 1};
+Curve Loop(2) = {7, 8, 9, 10, 11, 12, 5, 6, 1};
 Plane Surface(2) = {2};
 
 // ==== Physical groups ====

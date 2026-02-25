@@ -115,7 +115,8 @@ public:
                                           dedup_fields[1],  // theta
                                           dedup_fields[2],  // V
                                           dedup_fields[3],  // traction
-                                          fault.GetTau0());
+                                          fault.GetTau0(),
+                                          fault.GetParams().eta());
       }
 
       last_write_time_ = time;

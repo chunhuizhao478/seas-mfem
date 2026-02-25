@@ -124,19 +124,24 @@ public:
       interpolator_.Interpolate(slip_rate, probe_V);
       interpolator_.Interpolate(traction, probe_tau);
 
+      // SCEC format: output frictional strength σ_n·f(V,θ), not total elastic stress.
+      // Stress balance: τ₀ + τ_qs = σ_n·f(V,θ) + η·V
+      // So: σ_n·f(V,θ) = τ₀ + τ_qs - η·V
+      real_t eta = fault.GetParams().eta();
+
       for (int p = 0; p < interpolator_.NumProbes(); p++)
       {
          MFEM_ASSERT(probe_V(p) >= 0, "Negative slip rate at probe " << p << ": " << probe_V(p));
          MFEM_ASSERT(probe_theta(p) >= 0, "Negative state variable at probe " << p << ": " << probe_theta(p));
          real_t V = std::max(probe_V(p), 1e-30);
          real_t th = std::max(probe_theta(p), 1e-30);
-         real_t tau_total = tau0 + probe_tau(p);
+         real_t tau_friction = (tau0 + probe_tau(p)) - eta * V;
 
          std::vector<real_t> row = {
             time,
             probe_slip(p),
             std::log10(V),
-            tau_total / 1e6,  // Convert Pa to MPa
+            tau_friction / 1e6,  // SCEC shear stress = σ_n·f(V,θ) in MPa
             std::log10(th)
          };
          probes_[p]->WriteStep(row);
@@ -196,7 +201,8 @@ public:
                             const Vector &global_theta,
                             const Vector &global_V,
                             const Vector &global_traction,
-                            real_t tau0)
+                            real_t tau0,
+                            real_t eta)
    {
       Vector probe_slip(interpolator_.NumProbes());
       Vector probe_theta(interpolator_.NumProbes());
@@ -208,17 +214,18 @@ public:
       interpolator_.Interpolate(global_V, probe_V);
       interpolator_.Interpolate(global_traction, probe_tau);
 
+      // SCEC format: output σ_n·f(V,θ) = τ₀ + τ_qs - η·V
       for (int p = 0; p < interpolator_.NumProbes(); p++)
       {
          real_t V = std::max(probe_V(p), 1e-30);
          real_t th = std::max(probe_theta(p), 1e-30);
-         real_t tau_total = tau0 + probe_tau(p);
+         real_t tau_friction = (tau0 + probe_tau(p)) - eta * V;
 
          std::vector<real_t> row = {
             time,
             probe_slip(p),
             std::log10(V),
-            tau_total / 1e6,
+            tau_friction / 1e6,  // SCEC shear stress = σ_n·f(V,θ) in MPa
             std::log10(th)
          };
          probes_[p]->WriteStep(row);

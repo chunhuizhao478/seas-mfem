@@ -876,16 +876,7 @@ void AntiplaneDomainOperator<MeshType>::ComputeTraction(
    const GridFuncType &displacement, const Vector &slip_bc,
    Vector &traction)
 {
-   // DG numerical flux traction on fault faces.
-   //
-   // Following Tandem's grad_u kernel (poisson.py:147-149):
-   //   grad_u = 0.5*(K∇u₁ + K∇u₂) + c0 * ([[u]] - δ) * n̂
-   //   traction = μ * grad_u · n̂
-   //
-   // For IP method: gradient only (penalty residual is too large on coarse mesh)
-   // For BR2 method: include penalty with c0 = -penalty = -(D+1) = -3
-   //   The BR2 lifting produces a much smaller penalty residual than IP,
-   //   making the penalty correction safe even on coarse meshes.
+   // Traction on fault faces from average gradient: τ = μ * {{∂u/∂x}}.
 
    traction.SetSize(num_fault_dofs_);
    traction = 0.0;
@@ -951,9 +942,9 @@ void AntiplaneDomainOperator<MeshType>::ComputeTraction(
          const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
 
          // Elem1 gradient (local)
+         const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
          Vector grad1(mesh_.Dimension());
          {
-            const FiniteElement *fe1 = fes_->GetFE(FTr->Elem1No);
             DenseMatrix dshape(fe1->GetDof(), mesh_.Dimension());
             fe1->CalcDShape(eip1, dshape);
 
@@ -979,10 +970,10 @@ void AntiplaneDomainOperator<MeshType>::ComputeTraction(
          }
 
          // Elem2 gradient (face-neighbor)
+         const FiniteElement *fe2 = pfes->GetFaceNbrFE(
+            FTr->Elem2No - mesh_.GetNE());
          Vector grad2(mesh_.Dimension());
          {
-            const FiniteElement *fe2 = pfes->GetFaceNbrFE(
-               FTr->Elem2No - mesh_.GetNE());
             DenseMatrix dshape(fe2->GetDof(), mesh_.Dimension());
             fe2->CalcDShape(eip2, dshape);
 
@@ -1014,7 +1005,9 @@ void AntiplaneDomainOperator<MeshType>::ComputeTraction(
          }
 
          real_t avg_dudx = 0.5 * (grad1(0) + grad2(0));
-         traction(idx++) = mu_ * avg_dudx;
+         real_t tau_face = mu_ * avg_dudx;
+
+         traction(idx++) = tau_face;
       }
 #endif
    }
