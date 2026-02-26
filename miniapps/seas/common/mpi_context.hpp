@@ -13,7 +13,6 @@
 #define MFEM_SEAS_MPI_CONTEXT_HPP
 
 #include "mfem.hpp"
-#include <utility>  // std::pair for GlobalMaxLoc
 
 namespace mfem
 {
@@ -154,24 +153,6 @@ public:
       return global_val;
 #else
       return local_val;
-#endif
-   }
-
-   /// @brief Global reduction for max value with location (rank).
-   ///
-   /// Returns the global maximum and the rank that holds it.
-   /// Uses MPI_MAXLOC with MPI_DOUBLE_INT.
-   std::pair<real_t, int> GlobalMaxLoc(real_t local_val) const
-   {
-#ifdef SEAS_USE_MPI
-      struct { double val; int rank; } in, out;
-      in.val = local_val;
-      in.rank = rank_;
-      MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MAXLOC,
-                    MPI_COMM_WORLD);
-      return {out.val, out.rank};
-#else
-      return {local_val, 0};
 #endif
    }
 

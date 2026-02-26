@@ -663,9 +663,6 @@ int main(int argc, char *argv[])
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.5 * BP2Params::seconds_per_year);
    ode_solver.SetDt(1e3);
-   ode_solver.SetUse2Norm(true);   // Match PETSc/Tandem: weighted RMS norm
-   // ode_solver.SetVerbose(true);    // Diagnostic: print worst DOF each step
-   // ode_solver.SetDepths(dedup_fault_depths);  // For depth info in diagnostics
    ode_solver.Init(seas_op);
 
    real_t t = 0.0;

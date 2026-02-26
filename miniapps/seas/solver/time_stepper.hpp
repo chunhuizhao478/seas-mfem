@@ -133,11 +133,10 @@ private:
 /// Uses the standard DOPRI5(4) pair (7 stages, FSAL). The 5th-order solution
 /// advances the state; the difference from the 4th-order solution provides
 /// a local truncation error estimate. Step size is adjusted so the weighted
-/// error norm stays below 1. Supports L-infinity (default) or weighted RMS
-/// (2-norm, via SetUse2Norm). PETSc/Tandem uses 2-norm by default.
+/// L-infinity error norm stays below 1.
 ///
 /// Designed following Tandem's approach (PETSc TS with `-ts_rk_type 5dp`,
-/// `-ts_atol 1e-7`).
+/// `-ts_atol 1e-7`, `-ts_adapt_wnormtype infinity`).
 class DormandPrinceRK45
 {
 public:
@@ -176,12 +175,6 @@ public:
    /// Use weighted RMS (2-norm) instead of L-infinity for error norm.
    /// More robust to outlier DOFs at MPI partition boundaries.
    void SetUse2Norm(bool v) { use_2norm_ = v; }
-
-   /// Set fault depths for diagnostic output (optional).
-   /// The depths array should have one entry per fault node.
-   /// State layout is [slip_0, theta_0, slip_1, theta_1, ...],
-   /// so DOF i corresponds to depths[i/2].
-   void SetDepths(const Vector &depths) { depths_ = &depths; }
 
    /// @brief Set MPI context for parallel error norm reduction.
    ///
@@ -368,7 +361,7 @@ public:
       }
       else
       {
-         // Weighted L-infinity norm
+         // Weighted L-infinity (matches Tandem/PETSc default)
          for (int i = 0; i < n; i++)
          {
             real_t scale = atol_ + rtol_ * std::abs(y_tmp_(i));
@@ -418,86 +411,23 @@ public:
       dt_new = std::min(dt_new, growth_max_ * dt);
       dt_new = std::max(dt_min_, std::min(dt_max_, dt_new));
 
-      // Verbose diagnostic (enabled by diag_verbose_).
-      // Throttled: print every 500 accepted steps + every rejected step.
-      // The MPI communication for global worst DOF is only done when printing.
-      bool should_print_diag = diag_verbose_ &&
-         (err_norm > 1.0 || (diag_count_ % 500 == 0));
-      if (should_print_diag)
+      // Verbose diagnostic for every step (enabled by diag_verbose_)
+      if (diag_verbose_ && (!mpi_ctx_ || mpi_ctx_->IsRoot()))
       {
-         // Find the global worst DOF (the rank that holds the max local error).
-         real_t local_max_err = 0.0;
-         int local_worst = 0;
-         for (int i = 0; i < n; i++)
-         {
-            real_t scale_i = atol_ + rtol_ * std::abs(y_tmp_(i));
-            real_t ei = std::abs(err_(i)) / scale_i;
-            if (ei > local_max_err) { local_max_err = ei; local_worst = i; }
-         }
-
-         // Identify which rank holds the global worst DOF
-         int worst_rank = 0;
-         if (mpi_ctx_)
-         {
-            auto [gmax, grank] = mpi_ctx_->GlobalMaxLoc(local_max_err);
-            worst_rank = grank;
-         }
-
-         // The rank with the worst DOF computes depth info, then root prints
-         int worst_dof = local_worst / 2;
-         bool worst_is_theta = (local_worst % 2 == 1);
-         real_t worst_depth_km = 0.0;
-         real_t worst_abs_err = std::abs(err_(local_worst));
-         real_t worst_abs_y = std::abs(y_tmp_(local_worst));
-
-         if (depths_ && worst_dof < depths_->Size())
-         {
-            worst_depth_km = (*depths_)(worst_dof) / 1000.0;
-         }
-
-#ifdef SEAS_USE_MPI
-         if (mpi_ctx_ && mpi_ctx_->Size() > 1)
-         {
-            // Winning rank broadcasts its diagnostic info
-            struct { int dof; int is_theta; double depth_km;
-                     double abs_err; double abs_y; } info;
-            if (mpi_ctx_->Rank() == worst_rank)
-            {
-               info = {worst_dof, worst_is_theta ? 1 : 0,
-                       worst_depth_km, worst_abs_err, worst_abs_y};
-            }
-            MPI_Bcast(&info, sizeof(info), MPI_BYTE, worst_rank,
-                      MPI_COMM_WORLD);
-            worst_dof = info.dof;
-            worst_is_theta = (info.is_theta != 0);
-            worst_depth_km = info.depth_km;
-            worst_abs_err = info.abs_err;
-            worst_abs_y = info.abs_y;
-         }
-#endif
-
-         if (!mpi_ctx_ || mpi_ctx_->IsRoot())
-         {
-            std::cout << (err_norm <= 1.0 ? "[ACCEPT]" : "[REJECT]")
-                      << " step=" << diag_count_
-                      << " dt=" << std::scientific << std::setprecision(3) << dt
-                      << " err=" << err_norm
-                      << " dt_new=" << dt_new
-                      << " worst=DOF" << worst_dof
-                      << (worst_is_theta ? "(theta)" : "(slip)")
-                      << " rank=" << worst_rank;
-            if (depths_)
-            {
-               std::cout << " depth=" << std::fixed << std::setprecision(1)
-                         << worst_depth_km << "km";
-            }
-            std::cout << std::scientific << std::setprecision(3)
-                      << " |err|=" << worst_abs_err
-                      << " |y|=" << worst_abs_y
-                      << "\n";
-         }
+         int dof = worst_idx / 2;
+         bool is_theta = (worst_idx % 2 == 1);
+         real_t scale = atol_ + rtol_ * std::abs(y_tmp_(worst_idx));
+         std::cout << (err_norm <= 1.0 ? "[ACCEPT]" : "[REJECT]")
+                   << " dt=" << std::scientific << std::setprecision(3) << dt
+                   << " err=" << err_norm
+                   << " dt_new=" << dt_new
+                   << " worst=DOF" << dof
+                   << (is_theta ? "(theta)" : "(slip)")
+                   << " |err|=" << std::abs(err_(worst_idx))
+                   << " scale=" << scale
+                   << " |y|=" << std::abs(y_tmp_(worst_idx))
+                   << "\n";
       }
-      if (diag_verbose_) { diag_count_++; }
 
       if (err_norm <= 1.0)
       {
@@ -509,6 +439,7 @@ public:
          // FSAL: k_[6] becomes k_[0] for next step
          k_[0] = k_[6];
 
+         diag_count_ = 0;
          return true;
       }
       else
@@ -563,7 +494,6 @@ private:
    bool initialized_;      ///< Whether k_[0] is valid from a previous step
    bool diag_verbose_ = false; ///< Verbose per-step diagnostics
    bool use_2norm_ = false;    ///< Use RMS (2-norm) instead of L-inf for error
-   const Vector *depths_ = nullptr; ///< Fault node depths for diagnostics
    int total_rejections_;  ///< Total number of rejected steps
    int diag_count_;        ///< Counter for dt_min diagnostic messages
 
