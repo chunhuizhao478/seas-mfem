@@ -146,12 +146,17 @@ BP2_FULL_OBJ = $(BP2_FULL_SRC:.cpp=.o)
 BP1_FULL_SRC = tests/verification/bp1_verification_full.cpp
 BP1_FULL_OBJ = $(BP1_FULL_SRC:.cpp=.o)
 
+# BP1 bottom-boundary Dirichlet loading simulation
+BP1_BDRLOAD_SRC = tests/verification/bp1_bdrload.cpp
+BP1_BDRLOAD_OBJ = $(BP1_BDRLOAD_SRC:.cpp=.o)
+
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
                seas_test_parallel_fault seas_pseas \
                seas_test_serial_parallel_consistency \
                seas_bp2_benchmark_parallel seas_test_scaling \
                seas_bp2_verify seas_bp2_full seas_bp1_full \
+               seas_bp1_bdrload \
                seas_test_br2_consistency
 
 ifeq ($(MFEM_USE_MPI),NO)
@@ -439,6 +444,14 @@ seas_bp1_full: $(BP1_FULL_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP1_FULL_OBJ) $(MFEM_LIBS)
 
 $(BP1_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+# BP1 bottom-boundary Dirichlet loading simulation
+seas_bp1_bdrload: $(BP1_BDRLOAD_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP1_BDRLOAD_OBJ) $(MFEM_LIBS)
+
+$(BP1_BDRLOAD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
 
