@@ -297,7 +297,7 @@ void test_restart_consistency()
 
          DormandPrinceRK45 solver;
          solver.SetAbsTol(1e-7);
-         solver.SetRelTol(1e-7);
+         solver.SetRelTol(1e-50);  // Must match Run A for identical results
          solver.SetDtMin(1e-6);
          solver.SetDtMax(1e8);
          solver.SetDt(1e3);
@@ -384,7 +384,7 @@ void test_restart_consistency()
 
          DormandPrinceRK45 solver;
          solver.SetAbsTol(1e-7);
-         solver.SetRelTol(1e-7);
+         solver.SetRelTol(1e-50);  // Must match Run A for identical results
          solver.SetDtMin(1e-6);
          solver.SetDtMax(1e8);
          solver.SetDt(restart_dt);

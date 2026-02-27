@@ -369,11 +369,13 @@ void TestParaViewCombinedOutput()
 
    const Array<int> &fault_faces = domain.GetFaultInteriorFaces();
    int num_fault_dofs = domain.GetNumFaultDOFs();
-   int dofs_per_face = 1;  // 1 midpoint DOF per fault face
+   // Per-face DOFs: for order 1, each face has 2 independent DOFs (not shared).
+   // Total DOFs = 2 * num_faces.
+   int dofs_per_face = 2;  // Per-face DOFs
 
    TEST_ASSERT(fault_faces.Size() > 0, "Fault interior faces found");
-   TEST_ASSERT(num_fault_dofs == fault_faces.Size() * dofs_per_face,
-               "Fault DOFs = faces * 1 (midpoint)");
+   TEST_ASSERT(num_fault_dofs == 2 * fault_faces.Size(),
+               "Fault DOFs = 2 * num_faces (per-face DOFs)");
 
    // Create displacement GridFunction
    DG_FECollection fec(order, 2, BasisType::GaussLobatto);

@@ -35,9 +35,9 @@ SECONDS_PER_YEAR = 365.25 * 24 * 3600
 ALL_DEPTHS_KM = [0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5, 35]
 
 # Data paths
-RESULTS_100M = "/Users/chunhuizhao/Downloads/seas-mfem/results_100m"
-RESULTS_50M = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m"
-RESULTS_25M = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m"
+RESULTS_100M = "/Users/chunhuizhao/Downloads/seas-mfem/results_100m_bdrload"
+RESULTS_50M = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m_bdrload"
+RESULTS_25M = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m_bdrload"
 
 
 def load_scec_file(filepath):
@@ -81,7 +81,7 @@ def depth_str(depth_km):
 
 def mfem_filepath(results_dir, depth_km):
     """Build MFEM output filepath for a given depth."""
-    return os.path.join(results_dir, f"bp1_full_z{depth_str(depth_km)}km.txt")
+    return os.path.join(results_dir, f"bp1_bdrload_z{depth_str(depth_km)}km.txt")
 
 
 def relative_l2_error(a, b, time_a, time_b):
