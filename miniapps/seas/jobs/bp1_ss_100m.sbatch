@@ -22,7 +22,7 @@ export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 
 # Rebuild with latest optimizations
-make seas_bp1_full
+make seas_bp1_bdrload
 
 # Generate mesh if not present
 if [ ! -f bp1/mesh/bp1_ss_100m.msh ]; then
@@ -31,7 +31,7 @@ fi
 
 mkdir -p bp1/results_ss_100m
 
-ibrun ./seas_bp1_full \
+ibrun ./seas_bp1_bdrload \
       --mesh bp1/mesh/bp1_ss_100m.msh \
       --ref-dir bp1/benchmark_data \
       --output-dir bp1/results_ss_100m \
