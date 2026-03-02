@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 #include "domain_operator.hpp"
 #include "bp2_mesh.hpp"  // For BP2BoundaryAttributes
+#include "seas_boundary_tags.hpp"  // For FaultBoundaryData
 #include "../common/seas_types.hpp"
 #include "../integrator/dg_br2_integrator.hpp"
 
@@ -81,8 +82,12 @@ public:
    /// @param Vp Plate rate [m/s] for far-field boundary condition
    /// @param Wf Fault depth [m] - slip applied from z=0 to z=-Wf (positive value)
    /// @param method DG method (IP or BR2), default is IP
+   /// @param fault_tag Gmsh Physical Curve tag for fault detection.
+   ///                  If >= 1, uses tag-based detection from boundary elements.
+   ///                  If -1 (default), uses legacy coordinate-based detection.
    AntiplaneDomainOperator(MeshType &mesh, int order, real_t mu, real_t Vp,
-                           real_t Wf = 40.0e3, DGMethod method = DGMethod::IP);
+                           real_t Wf = 40.0e3, DGMethod method = DGMethod::IP,
+                           int fault_tag = -1);
 
    /// Destructor
    ~AntiplaneDomainOperator() override = default;
@@ -140,6 +145,9 @@ public:
    /// @brief Get the DG method (IP or BR2)
    DGMethod GetMethod() const { return method_; }
 
+   /// @brief Get the fault tag used for detection (-1 = coordinate-based)
+   int GetFaultTag() const { return fault_tag_; }
+
    /// @brief Interpolate slip BC value at a given depth
    ///
    /// This is used by the DG slip jump coefficient to get the slip
@@ -152,6 +160,9 @@ private:
    real_t mu_;   // Shear modulus
    real_t Vp_;   // Plate rate
    real_t Wf_;   // Fault depth
+
+   // Fault detection: tag-based (>= 1) or coordinate-based (-1)
+   int fault_tag_;
 
    // DG method selection
    DGMethod method_;
@@ -270,8 +281,10 @@ private:
 
 template <typename MeshType>
 AntiplaneDomainOperator<MeshType>::AntiplaneDomainOperator(
-   MeshType &mesh, int order, real_t mu, real_t Vp, real_t Wf, DGMethod method)
+   MeshType &mesh, int order, real_t mu, real_t Vp, real_t Wf, DGMethod method,
+   int fault_tag)
    : mesh_(mesh), order_(order), mu_(mu), Vp_(Vp), Wf_(Wf),
+     fault_tag_(fault_tag),
      method_(method),
      fault_depths_computed_(false),
      mass_inv_computed_(false)
@@ -415,25 +428,38 @@ template <typename MeshType>
 void AntiplaneDomainOperator<MeshType>::SetupFaultInfo()
 {
    // In full domain, the fault is an interior interface at x = 0.
-   // We identify interior faces that lie on x = 0 within the fault zone (z < Wf).
+   // Two detection methods:
+   //   fault_tag_ >= 1: Tag-based (Gmsh Physical Curve/Surface tag)
+   //   fault_tag_ == -1: Legacy coordinate-based (|x| < tol)
    fault_interior_faces_.SetSize(0);
 
-   // Iterate over all interior faces
-   int num_faces = mesh_.GetNumFaces();
-   for (int f = 0; f < num_faces; f++)
+   if (fault_tag_ >= 1)
    {
-      // Check if this is an interior face
-      FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(f);
-      if (FTr == nullptr) { continue; }  // Boundary face
-
-      // Check if face is on the fault
-      if (IsFaultFace(f))
+      // Tag-based detection: scan boundary elements for the fault tag
+      fault_interior_faces_ =
+         FaultBoundaryData::FindFaultInteriorFaces(mesh_, fault_tag_);
+   }
+   else
+   {
+      // Legacy coordinate-based detection
+      int num_faces = mesh_.GetNumFaces();
+      for (int f = 0; f < num_faces; f++)
       {
-         fault_interior_faces_.Append(f);
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (FTr == nullptr) { continue; }
+
+         if (IsFaultFace(f))
+         {
+            fault_interior_faces_.Append(f);
+         }
       }
    }
 
-   // Also iterate shared faces in parallel
+   // Shared faces (parallel): coordinate-based for both paths.
+   // MFEM does not expose boundary attributes on shared faces directly,
+   // so we use coordinate fallback (|x| < tol) which works for axis-aligned
+   // faults at x=0 (BP1/BP2/BP5).
    fault_shared_faces_.SetSize(0);
    if constexpr (IsParallelMesh<MeshType>::value)
    {

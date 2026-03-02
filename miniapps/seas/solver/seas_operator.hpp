@@ -13,6 +13,7 @@
 #define MFEM_SEAS_OPERATOR_HPP
 
 #include "mfem.hpp"
+#include "../domain/domain_operator.hpp"
 #include "../domain/antiplane_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
@@ -44,11 +45,12 @@ namespace seas
 /// 4. Compute fault RHS (slip rate V and dtheta/dt) from stress balance
 ///
 /// @tparam MeshType Either Mesh for serial or ParMesh for parallel
-template <typename MeshType = Mesh>
+/// @tparam DomainOpType Domain operator type (default: AntiplaneDomainOperator)
+template <typename MeshType = Mesh,
+          typename DomainOpType = AntiplaneDomainOperator<MeshType>>
 class SEASQuasiDynamicOperator : public TimeDependentOperator
 {
 public:
-   using DomainOpType = AntiplaneDomainOperator<MeshType>;
    using GridFuncType = typename DomainOpType::GridFuncType;
 
    /// @brief Construct the SEAS quasi-dynamic operator.
@@ -124,8 +126,8 @@ private:
 // Implementation
 // ============================================================================
 
-template <typename MeshType>
-SEASQuasiDynamicOperator<MeshType>::SEASQuasiDynamicOperator(
+template <typename MeshType, typename DomainOpType>
+SEASQuasiDynamicOperator<MeshType, DomainOpType>::SEASQuasiDynamicOperator(
    DomainOpType *domain,
    RateStateFaultOperator<MeshType> *fault,
    MPIContext *mpi_ctx)
@@ -144,8 +146,8 @@ SEASQuasiDynamicOperator<MeshType>::SEASQuasiDynamicOperator(
    traction_.SetSize(fault_->NumNodes());
 }
 
-template <typename MeshType>
-void SEASQuasiDynamicOperator<MeshType>::SetInitialCondition(Vector &state)
+template <typename MeshType, typename DomainOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vector &state)
 {
    MFEM_VERIFY(state.Size() == fault_->StateSize(),
                "State vector size mismatch: got " << state.Size()
@@ -198,8 +200,8 @@ void SEASQuasiDynamicOperator<MeshType>::SetInitialCondition(Vector &state)
                << " by " << V_rel_err * 100 << "%");
 }
 
-template <typename MeshType>
-void SEASQuasiDynamicOperator<MeshType>::Mult(
+template <typename MeshType, typename DomainOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType>::Mult(
    const Vector &state, Vector &rate) const
 {
    // 1. Extract slip from state vector

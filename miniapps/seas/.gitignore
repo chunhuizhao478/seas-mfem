@@ -7,11 +7,13 @@ bp1_full_*.txt
 # Plots
 bp2/plots_*/
 bp1/plots/
+bp1/plots_*/
 bp2_verification_plots/
 bp2/benchmark_data_200m/benchmark_comparison_plots/
 
 # Mesh output
 *.vtk
+bp1/mesh/bp1_ss_12.5m.msh
 
 # Binaries
 seas_generate_mesh

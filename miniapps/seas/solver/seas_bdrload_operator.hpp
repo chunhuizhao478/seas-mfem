@@ -26,6 +26,7 @@
 /// - The domain solve uses the current time `t` for the far-field BC
 
 #include "mfem.hpp"
+#include "../domain/domain_operator.hpp"
 #include "../domain/antiplane_bdrload_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
@@ -332,11 +333,12 @@ private:
 /// State vector layout: [slip_0, theta_0, slip_1, theta_1, ...]
 ///
 /// @tparam MeshType Either Mesh for serial or ParMesh for parallel
-template <typename MeshType = Mesh>
+/// @tparam DomainOpType Domain operator type (default: AntiplaneBdrLoadOperator)
+template <typename MeshType = Mesh,
+          typename DomainOpType = AntiplaneBdrLoadOperator<MeshType>>
 class SEASBdrLoadOperator : public TimeDependentOperator
 {
 public:
-   using DomainOpType = AntiplaneBdrLoadOperator<MeshType>;
    using FaultAdapterType = BdrLoadFaultAdapter<MeshType>;
    using GridFuncType = typename DomainOpType::GridFuncType;
 
@@ -388,8 +390,8 @@ private:
 // Implementation
 // ============================================================================
 
-template <typename MeshType>
-SEASBdrLoadOperator<MeshType>::SEASBdrLoadOperator(
+template <typename MeshType, typename DomainOpType>
+SEASBdrLoadOperator<MeshType, DomainOpType>::SEASBdrLoadOperator(
    DomainOpType *domain,
    FaultAdapterType *fault_adapter,
    MPIContext *mpi_ctx)
@@ -406,8 +408,8 @@ SEASBdrLoadOperator<MeshType>::SEASBdrLoadOperator(
    traction_.SetSize(fault_adapter_->NumNodes());
 }
 
-template <typename MeshType>
-void SEASBdrLoadOperator<MeshType>::SetInitialCondition(Vector &state)
+template <typename MeshType, typename DomainOpType>
+void SEASBdrLoadOperator<MeshType, DomainOpType>::SetInitialCondition(Vector &state)
 {
    MFEM_VERIFY(state.Size() == fault_adapter_->StateSize(),
                "State vector size mismatch: got " << state.Size()
@@ -456,8 +458,8 @@ void SEASBdrLoadOperator<MeshType>::SetInitialCondition(Vector &state)
                << " by " << V_rel_err * 100 << "%");
 }
 
-template <typename MeshType>
-void SEASBdrLoadOperator<MeshType>::Mult(
+template <typename MeshType, typename DomainOpType>
+void SEASBdrLoadOperator<MeshType, DomainOpType>::Mult(
    const Vector &state, Vector &rate) const
 {
    // 1. Extract slip from state

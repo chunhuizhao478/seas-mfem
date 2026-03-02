@@ -222,6 +222,11 @@ def main():
         help="Include BinhaoWang benchmark",
     )
     parser.add_argument(
+        "--tandem",
+        action="store_true",
+        help="Include Tandem benchmark",
+    )
+    parser.add_argument(
         "--benchmark-dir",
         default="benchmark_data",
         help="Directory containing benchmark reference files",
@@ -252,7 +257,7 @@ def main():
     args = parser.parse_args()
 
     # Default: BinhaoWang if no benchmark flags specified and not --no-benchmark
-    if not args.no_benchmark and not args.binhaowang:
+    if not args.no_benchmark and not args.binhaowang and not args.tandem:
         args.binhaowang = True
 
     try:
@@ -282,6 +287,18 @@ def main():
                 "BinhaoWang",
                 "benchmark",
                 "binhaowang",
+                COLORS[color_idx],
+                LINE_STYLES[0],
+            )
+        )
+        color_idx += 1
+
+    if args.tandem and not args.no_benchmark:
+        sources.append(
+            (
+                "Tandem",
+                "benchmark",
+                "tandem",
                 COLORS[color_idx],
                 LINE_STYLES[0],
             )

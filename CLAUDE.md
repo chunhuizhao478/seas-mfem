@@ -16,6 +16,11 @@ Before implementing any feature, check:
 2. Relevant documentation in the seas/document folder
 3. SCEC SEAS benchmark specifications
 
+## Environment Setup
+
+- **Building MFEM/SEAS code (mpicxx, MPI):** `conda activate mfem-dev`
+- **Gmsh mesh generation:** `conda activate pythonenv`
+
 ## Debugging Behavior
 
 When encountering errors or issues:
