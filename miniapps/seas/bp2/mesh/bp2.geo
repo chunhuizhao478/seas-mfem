@@ -11,10 +11,11 @@
 //   gmsh -2 bp2.geo -o bp2.msh -setnumber hf 0.050   # 50m resolution
 //   gmsh -2 bp2.geo -o bp2.msh -setnumber h 100       # 100km far-field
 //
-// Physical Curve IDs match BP2BoundaryAttributes in C++ code:
+// Physical Curve IDs match SEASBoundaryTags in C++ code:
 //   1 = FARFIELD_LEFT  (x = -D)
 //   2 = FARFIELD_RIGHT (x = +D)
 //   3 = FREE_SURFACE   (z = 0)
+//   5 = FAULT          (x = 0, interior interface)
 //   4 = BOTTOM         (z = -D)
 
 DefineConstant[ hf = {0.200, Min 0.01, Max 10, Name "Fault resolution [km]"} ];
@@ -86,11 +87,14 @@ Plane Surface(2) = {2};
 
 // ==== Physical groups ====
 
-// Boundary attributes (must match BP2BoundaryAttributes in C++ code)
+// Boundary attributes (must match SEASBoundaryTags in C++ code)
 Physical Curve(1) = {6};        // FARFIELD_LEFT  (x = -D)
 Physical Curve(2) = {3};        // FARFIELD_RIGHT (x = +D)
 Physical Curve(3) = {1, 2};     // FREE_SURFACE   (z = 0)
 Physical Curve(4) = {4, 5};     // BOTTOM         (z = -D)
+
+// Fault interior interface at x=0
+Physical Curve(5) = {7, 8, 9, 10, 11};  // FAULT (x = 0)
 
 // Two physical surfaces
 Physical Surface(1) = {1};      // Right half

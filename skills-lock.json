@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "skills": {
+    "code-review-expert": {
+      "source": "sanyuan0704/code-review-expert",
+      "sourceType": "github",
+      "computedHash": "11d1a39f1d3be326fcced613c97f300cb98cd36c928dbbf5dcbf66edf4642fcd"
+    }
+  }
+}

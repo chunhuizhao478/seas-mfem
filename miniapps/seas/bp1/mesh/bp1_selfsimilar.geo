@@ -12,7 +12,8 @@
 //   gmsh -2 bp1_selfsimilar.geo -o bp1_ss_50m.msh  -setnumber h 0.05
 //   gmsh -2 bp1_selfsimilar.geo -o bp1_ss_25m.msh  -setnumber h 0.025
 //
-// Physical Curve IDs match BP2BoundaryAttributes in C++ code:
+// Physical Curve IDs match SEASBoundaryTags in C++ code:
+// 5 = FAULT (x = 0, interior interface)
 //   1 = FARFIELD_LEFT  (x = -D)
 //   2 = FARFIELD_RIGHT (x = +D)
 //   3 = FREE_SURFACE   (z = 0)
@@ -186,11 +187,14 @@ Recombine Surface{8};
 
 // ==== Physical groups ====
 
-// Boundary attributes (must match BP2BoundaryAttributes in C++ code)
+// Boundary attributes (must match SEASBoundaryTags in C++ code)
 Physical Curve(1) = {13, 14};           // FARFIELD_LEFT  (x = -D)
 Physical Curve(2) = {21, 22};           // FARFIELD_RIGHT (x = +D)
 Physical Curve(3) = {1, 2, 3, 4};       // FREE_SURFACE   (z = 0)
 Physical Curve(4) = {9, 10, 11, 12};    // BOTTOM         (z = -D)
+
+// Fault interior interface at x=0
+Physical Curve(5) = {17, 18};           // FAULT (x = 0)
 
 // Two physical surfaces (split at x = 0)
 Physical Surface(1) = {3, 4, 7, 8};     // Right half (x > 0)

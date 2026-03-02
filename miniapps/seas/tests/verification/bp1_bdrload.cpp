@@ -422,6 +422,8 @@ int main(int argc, char *argv[])
    int checkpoint_interval = 5000;
    std::string restart_prefix;
    bool write_every_step = false;
+   int fault_tag = -1;
+   std::string dg_method_str = "BR2";
 
    for (int i = 1; i < argc; i++)
    {
@@ -442,6 +444,45 @@ int main(int argc, char *argv[])
          restart_prefix = argv[++i];
       }
       if (arg == "--write-every-step") { write_every_step = true; }
+      if (arg == "--fault-tag" && i + 1 < argc)
+      {
+         fault_tag = std::atoi(argv[++i]);
+      }
+      if (arg == "--dg-method" && i + 1 < argc)
+      {
+         dg_method_str = argv[++i];
+      }
+   }
+
+   DGMethod dg_method = DGMethod::BR2;
+   if (dg_method_str == "IP" || dg_method_str == "ip")
+   {
+      dg_method = DGMethod::IP;
+   }
+   else if (dg_method_str == "BR2" || dg_method_str == "br2")
+   {
+      dg_method = DGMethod::BR2;
+   }
+   else
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "Error: unknown --dg-method '" << dg_method_str
+                   << "'. Valid options: BR2, IP\n";
+      }
+      MPI_Finalize();
+      return 1;
+   }
+
+   if (fault_tag != -1 && fault_tag < 1)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "Error: --fault-tag must be -1 (coordinate-based) "
+                   << "or >= 1 (tag-based), got " << fault_tag << "\n";
+      }
+      MPI_Finalize();
+      return 1;
    }
 
    // BP1 probe depths
@@ -512,6 +553,10 @@ int main(int argc, char *argv[])
                 << " years\n";
       std::cout << "  Reference dir: " << ref_dir << "\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
+      std::cout << "  Fault tag: " << fault_tag
+                << (fault_tag >= 1 ? " (tag-based)" : " (coordinate-based)")
+                << "\n";
+      std::cout << "  DG method: " << dg_method_str << "\n";
 #ifdef MFEM_USE_MUMPS
       std::cout << "  Solver: MUMPS direct\n\n";
 #else
@@ -548,7 +593,8 @@ int main(int argc, char *argv[])
    // =========================================================================
    int order = 1;
    AntiplaneBdrLoadOperator<ParMesh> domain(
-      pmesh, order, params.mu(), params.Vp, params.Wf, DGMethod::BR2);
+      pmesh, order, params.mu(), params.Vp, params.Wf, dg_method,
+      fault_tag);
 
    if (mpi.IsRoot())
    {

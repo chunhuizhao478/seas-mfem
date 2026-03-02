@@ -35,9 +35,15 @@ SECONDS_PER_YEAR = 365.25 * 24 * 3600
 ALL_DEPTHS_KM = [0, 2.5, 5, 7.5, 10, 12.5, 15, 17.5, 20, 22.5, 25, 27.5, 30, 32.5, 35]
 
 # Data paths
-RESULTS_100M = "/Users/chunhuizhao/Downloads/seas-mfem/results_100m_bdrload"
-RESULTS_50M = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m_bdrload"
-RESULTS_25M = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m_bdrload"
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+BENCHMARK_DIR = os.path.join(SCRIPT_DIR, "benchmark_data")
+
+# RESULTS_200M = "/Users/chunhuizhao/Downloads/seas-mfem/results_200m"
+# RESULTS_100M = "/Users/chunhuizhao/Downloads/seas-mfem/results_100m_ss_bdrload"
+RESULTS_75M = "/Users/chunhuizhao/Downloads/seas-mfem/results_75m_ss_bdrload"
+RESULTS_50M = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m_ss_bdrload"
+RESULTS_25M = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m_ss_bdrload"
+RESULTS_12d5M = "/Users/chunhuizhao/Downloads/seas-mfem/results_12.5m_ss_bdrload"
 
 
 def load_scec_file(filepath):
@@ -82,6 +88,19 @@ def depth_str(depth_km):
 def mfem_filepath(results_dir, depth_km):
     """Build MFEM output filepath for a given depth."""
     return os.path.join(results_dir, f"bp1_bdrload_z{depth_str(depth_km)}km.txt")
+
+
+BENCHMARKS = {
+    "tandem": ("Tandem", "bp1-qd-tandem"),
+    "binhaowang": ("Binhao Wang", "bp1-qd-binhaowang"),
+    "ozawa": ("Ozawa", "bp1-qd-ozawa"),
+    "junlejiang": ("Junle Jiang", "bp1-qd-junlejiang"),
+}
+
+
+def benchmark_filepath(depth_km, prefix):
+    """Build benchmark filepath for a given depth and file prefix."""
+    return os.path.join(BENCHMARK_DIR, f"{prefix}-z{depth_str(depth_km)}km-res.txt")
 
 
 def relative_l2_error(a, b, time_a, time_b):
@@ -200,6 +219,16 @@ def main():
         help="Specific depths to plot (km). Default: all 15",
     )
     parser.add_argument(
+        "--no-benchmark", action="store_true", help="Exclude all benchmark data"
+    )
+    parser.add_argument(
+        "--benchmark",
+        nargs="+",
+        default=["tandem"],
+        choices=list(BENCHMARKS.keys()),
+        help="Benchmark datasets to include (default: tandem)",
+    )
+    parser.add_argument(
         "--output-dir", default="plots_convergence", help="Directory for output plots"
     )
     args = parser.parse_args()
@@ -214,16 +243,27 @@ def main():
         print("Error: matplotlib required. Install with: pip install matplotlib")
         return 1
 
-    # Define sources: (label, results_dir, color, linestyle, linewidth)
+    # Define MFEM sources: (label, results_dir, color, linestyle, linewidth)
     resolutions = [
-        ("MFEM 100m", RESULTS_100M, "#d62728", "-", 0.8),  # red solid
-        ("MFEM 50m", RESULTS_50M, "#1f77b4", "-", 0.8),  # blue solid
-        ("MFEM 25m", RESULTS_25M, "#2ca02c", "-", 0.8),  # green solid
+        # ("MFEM 200m", RESULTS_200M, "k", "-", 0.8),
+        # ("MFEM 75m", RESULTS_75M, "#d62728", "-", 0.8),
+        ("MFEM 50m", RESULTS_50M, "#1f77b4", "-", 0.8),
+        ("MFEM 25m", RESULTS_25M, "#2ca02c", "-", 0.8),
+        ("MFEM 12.5m", RESULTS_12d5M, "k", "-", 0.8),
     ]
+
+    # Resolve benchmark list
+    bench_list = []
+    if not args.no_benchmark:
+        for bkey in args.benchmark:
+            label, prefix = BENCHMARKS[bkey]
+            bench_list.append((label, prefix))
 
     print("=" * 60)
     print("BP1-QD Mesh Convergence")
     print("=" * 60)
+    for label, _ in bench_list:
+        print(f"  {label}: {BENCHMARK_DIR}")
     for label, rdir, _, _, _ in resolutions:
         print(f"  {label}: {rdir}")
     print(f"  Depths: {depths}")
@@ -241,7 +281,18 @@ def main():
     for depth_km in depths:
         datasets = []  # (label, data, color, linestyle, linewidth)
 
-        # Load each resolution
+        # Load benchmark data first
+        bench_colors = ["#d62728", "#e377c2", "#8c564b", "#9467bd"]
+        for i, (blabel, bprefix) in enumerate(bench_list):
+            bpath = benchmark_filepath(depth_km, bprefix)
+            bdata = None
+            if os.path.exists(bpath):
+                bdata = load_scec_file(bpath)
+            datasets.append(
+                (blabel, bdata, bench_colors[i % len(bench_colors)], "-", 1.2)
+            )
+
+        # Load each MFEM resolution
         res_data = {}
         for label, rdir, color, ls, lw in resolutions:
             fpath = mfem_filepath(rdir, depth_km)

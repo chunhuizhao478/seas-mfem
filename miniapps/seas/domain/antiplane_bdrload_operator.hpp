@@ -32,6 +32,7 @@
 #include "mfem.hpp"
 #include "domain_operator.hpp"
 #include "bp2_mesh.hpp"
+#include "seas_boundary_tags.hpp"  // For FaultBoundaryData
 #include "../common/seas_types.hpp"
 #include "../integrator/dg_br2_integrator.hpp"
 #include "antiplane_operator.hpp"  // For DGMethod enum
@@ -99,8 +100,12 @@ public:
    /// @param Vp Plate rate [m/s]
    /// @param Wf Fault depth [m] - used for fault geometry, not for loading cutoff
    /// @param method DG method (IP or BR2), default is IP
+   /// @param fault_tag Gmsh Physical Curve tag for fault detection.
+   ///                  If >= 1, uses tag-based detection from boundary elements.
+   ///                  If -1 (default), uses legacy coordinate-based detection.
    AntiplaneBdrLoadOperator(MeshType &mesh, int order, real_t mu, real_t Vp,
-                            real_t Wf = 40.0e3, DGMethod method = DGMethod::IP);
+                            real_t Wf = 40.0e3, DGMethod method = DGMethod::IP,
+                            int fault_tag = -1);
 
    ~AntiplaneBdrLoadOperator() override = default;
 
@@ -133,6 +138,9 @@ public:
    int GetOrder() const { return order_; }
    DGMethod GetMethod() const { return method_; }
 
+   /// @brief Get the fault tag used for detection (-1 = coordinate-based)
+   int GetFaultTag() const { return fault_tag_; }
+
    real_t InterpolateSlipBC(real_t z, const Vector &slip_bc) const;
 
 private:
@@ -141,6 +149,9 @@ private:
    real_t mu_;
    real_t Vp_;
    real_t Wf_;
+
+   // Fault detection: tag-based (>= 1) or coordinate-based (-1)
+   int fault_tag_;
 
    DGMethod method_;
    real_t sigma_;       // SIPG sign (-1)
@@ -210,8 +221,10 @@ private:
 
 template <typename MeshType>
 AntiplaneBdrLoadOperator<MeshType>::AntiplaneBdrLoadOperator(
-   MeshType &mesh, int order, real_t mu, real_t Vp, real_t Wf, DGMethod method)
+   MeshType &mesh, int order, real_t mu, real_t Vp, real_t Wf, DGMethod method,
+   int fault_tag)
    : mesh_(mesh), order_(order), mu_(mu), Vp_(Vp), Wf_(Wf),
+     fault_tag_(fault_tag),
      method_(method),
      fault_depths_computed_(false),
      mass_inv_computed_(false)
@@ -329,18 +342,30 @@ void AntiplaneBdrLoadOperator<MeshType>::SetupFaultInfo()
 {
    fault_interior_faces_.SetSize(0);
 
-   int num_faces = mesh_.GetNumFaces();
-   for (int f = 0; f < num_faces; f++)
+   if (fault_tag_ >= 1)
    {
-      FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(f);
-      if (FTr == nullptr) { continue; }
-
-      if (IsFaultFace(f))
+      // Tag-based detection: scan boundary elements for the fault tag
+      fault_interior_faces_ =
+         FaultBoundaryData::FindFaultInteriorFaces(mesh_, fault_tag_);
+   }
+   else
+   {
+      // Legacy coordinate-based detection
+      int num_faces = mesh_.GetNumFaces();
+      for (int f = 0; f < num_faces; f++)
       {
-         fault_interior_faces_.Append(f);
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (FTr == nullptr) { continue; }
+
+         if (IsFaultFace(f))
+         {
+            fault_interior_faces_.Append(f);
+         }
       }
    }
 
+   // Shared faces: coordinate-based for both paths (see antiplane_operator.hpp)
    fault_shared_faces_.SetSize(0);
    if constexpr (IsParallelMesh<MeshType>::value)
    {
@@ -488,6 +513,10 @@ void AntiplaneBdrLoadOperator<MeshType>::AssembleStiffness() const
       auto *mumps = new MUMPSSolver(mesh_.GetComm());
       mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
       mumps->SetPrintLevel(0);
+      // Note: For large-scale SEAS problems (>1M DOFs), MUMPS may need
+      // ICNTL(14) > 20% to avoid INFOG(1)=-9 workspace errors. The
+      // MUMPSSolver API does not currently expose per-instance ICNTL
+      // overrides; if hits occur, increase the default in linalg/mumps.cpp.
       mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
       solver_.reset(mumps);
 #else

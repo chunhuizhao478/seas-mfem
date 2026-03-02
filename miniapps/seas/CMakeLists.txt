@@ -25,6 +25,8 @@ list(APPEND SEAS_HEADERS
     domain/domain_operator.hpp
     domain/bp2_mesh.hpp
     domain/antiplane_operator.hpp
+    domain/antiplane_bdrload_operator.hpp
+    domain/seas_boundary_tags.hpp
     integrator/dg_br2_integrator.hpp)
 
 # Phase 3: Fault operators
@@ -89,6 +91,18 @@ add_mfem_miniapp(seas_test_fault_operator
   ${SEAS_COMMON_FILES}
   LIBRARIES mfem)
 
+# Phase 1a: Fault detection unit tests
+add_mfem_miniapp(seas_test_fault_detection
+  MAIN tests/unit/test_fault_detection.cpp
+  ${SEAS_COMMON_FILES}
+  LIBRARIES mfem)
+
+# Phase 1b: DomainOperator interface unit tests
+add_mfem_miniapp(seas_test_domain_interface
+  MAIN tests/unit/test_domain_operator_interface.cpp
+  ${SEAS_COMMON_FILES}
+  LIBRARIES mfem)
+
 # Add tests if testing is enabled
 if (MFEM_ENABLE_TESTING)
   add_test(NAME seas_test_friction_law
@@ -99,6 +113,10 @@ if (MFEM_ENABLE_TESTING)
     COMMAND $<TARGET_FILE:seas_test_antiplane>)
   add_test(NAME seas_test_fault_operator
     COMMAND $<TARGET_FILE:seas_test_fault_operator>)
+  add_test(NAME seas_test_fault_detection
+    COMMAND $<TARGET_FILE:seas_test_fault_detection>)
+  add_test(NAME seas_test_domain_interface
+    COMMAND $<TARGET_FILE:seas_test_domain_interface>)
 endif()
 
 # =============================================================================
