@@ -16,6 +16,7 @@
 #include "mfem.hpp"
 #include "../../common/mpi_context.hpp"
 #include "../../domain/antiplane_operator.hpp"
+#include "../../domain/antiplane_bdrload_operator.hpp"
 #include "../../domain/bp2_mesh.hpp"
 #include "../../config/bp2_params.hpp"
 #include "../../common/parallel_utils.hpp"
@@ -240,7 +241,12 @@ bool test_serial_parallel_consistency(MPIContext &ctx)
    return ok;
 }
 
-/// Test: Parallel uniform slip with full-depth fault gives max_u ~ 0.5
+/// Test: Parallel uniform slip with far-field Dirichlet loading gives max_u ~ 0.5
+///
+/// Uses AntiplaneBdrLoadOperator which applies u = ±Vp/2*t on far-field
+/// boundaries, making the system well-posed (unique solution, no constant
+/// null space).  With zero slip at t=0 and unit slip, the solution should
+/// have max |u| ≈ 0.5.
 bool test_parallel_uniform_slip(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -259,20 +265,20 @@ bool test_parallel_uniform_slip(MPIContext &ctx)
 
    BP2Params bp2;
    real_t Wf = params.Lz;  // Full depth fault
-   AntiplaneDomainOperator<ParMesh> op(pmesh, 1, bp2.mu(), bp2.Vp, Wf);
+   AntiplaneBdrLoadOperator<ParMesh> op(pmesh, 1, bp2.mu(), bp2.Vp, Wf);
 
    Vector slip(op.GetNumFaultDOFs());
    slip = 1.0;
 
    ParGridFunction u(&op.GetFESpace());
-   op.Solve(0.0, slip, u);
+   op.Solve(0.0, slip, u);  // t=0: far-field BC = 0
 
    real_t local_max = u.Normlinf();
    real_t global_max = ctx.GlobalMax(local_max);
 
    bool ok = (global_max > 0.35 && global_max < 0.65);
 
-   TEST_CHECK(ctx, "full-depth fault max_u ~ 0.5", ok);
+   TEST_CHECK(ctx, "bdrload full-depth fault max_u ~ 0.5", ok);
 
    if (ctx.IsRoot())
    {
@@ -382,7 +388,7 @@ bool test_parallel_solve_br2(MPIContext &ctx)
    return ok;
 }
 
-/// Test: Parallel BR2 uniform slip with full-depth fault gives max_u ~ 0.5
+/// Test: Parallel BR2 uniform slip with far-field loading gives max_u ~ 0.5
 bool test_parallel_uniform_slip_br2(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -401,21 +407,21 @@ bool test_parallel_uniform_slip_br2(MPIContext &ctx)
 
    BP2Params bp2;
    real_t Wf = params.Lz;  // Full depth fault
-   AntiplaneDomainOperator<ParMesh> op(pmesh, 1, bp2.mu(), bp2.Vp, Wf,
-                                        DGMethod::BR2);
+   AntiplaneBdrLoadOperator<ParMesh> op(pmesh, 1, bp2.mu(), bp2.Vp, Wf,
+                                         DGMethod::BR2);
 
    Vector slip(op.GetNumFaultDOFs());
    slip = 1.0;
 
    ParGridFunction u(&op.GetFESpace());
-   op.Solve(0.0, slip, u);
+   op.Solve(0.0, slip, u);  // t=0: far-field BC = 0
 
    real_t local_max = u.Normlinf();
    real_t global_max = ctx.GlobalMax(local_max);
 
    bool ok = (global_max > 0.35 && global_max < 0.65);
 
-   TEST_CHECK(ctx, "BR2 full-depth fault max_u ~ 0.5", ok);
+   TEST_CHECK(ctx, "BR2 bdrload full-depth fault max_u ~ 0.5", ok);
 
    if (ctx.IsRoot())
    {

@@ -382,6 +382,42 @@ public:
       return V;
    }
 
+   /// Solve for 2-component slip rate given 2-component traction and scalar psi.
+   ///
+   /// Algorithm (following Tandem's DieterichRuinaAgeing::slip_rate):
+   /// 1. tau_abs = ||tau_vec||
+   /// 2. V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a)
+   /// 3. V_vec = -(V_abs / tau_abs) * tau_vec
+   ///
+   /// The negative sign means slip velocity is anti-parallel to traction
+   /// (friction opposes applied stress, slip occurs in stress direction).
+   ///
+   /// @param[in] tau_vec Traction vector (2 components) [Pa]
+   /// @param[in] psi Logarithmic state variable [-]
+   /// @param[in] sigma_n Normal stress [Pa]
+   /// @param[in] eta Radiation damping coefficient [Pa*s/m]
+   /// @param[in] a Rate-and-state direct effect parameter
+   /// @param[out] V_vec Slip rate vector (2 components) [m/s]
+   /// @param[out] iterations Optional: number of iterations used
+   void SolveSlipRateVectorPsi(const real_t tau_vec[2], real_t psi,
+                                real_t sigma_n, real_t eta, real_t a,
+                                real_t V_vec[2],
+                                int *iterations = nullptr) const
+   {
+      real_t tau_abs = std::sqrt(tau_vec[0] * tau_vec[0] +
+                                 tau_vec[1] * tau_vec[1]);
+      if (tau_abs < 1e-30)
+      {
+         V_vec[0] = 0.0;
+         V_vec[1] = 0.0;
+         if (iterations) { *iterations = 0; }
+         return;
+      }
+      real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
+      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
+   }
+
    /// Compute initial psi from stress equilibrium.
    ///
    /// Given tau0 and V_init, solve for psi such that:

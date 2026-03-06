@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 #include "../domain/domain_operator.hpp"
 #include "../domain/antiplane_operator.hpp"
+#include "../domain/elasticity_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
 #include "../common/mpi_context.hpp"
@@ -35,9 +36,6 @@ namespace seas
 /// Inherits from TimeDependentOperator for use with MFEM ODE solvers
 /// (RK4Solver, etc.).
 ///
-/// State vector layout: [slip_0, theta_0, slip_1, theta_1, ..., slip_{n-1}, theta_{n-1}]
-/// Rate vector layout:  [V_0, dtheta_0/dt, V_1, dtheta_1/dt, ..., V_{n-1}, dtheta_{n-1}/dt]
-///
 /// The coupling flow in each Mult() call:
 /// 1. Extract slip from state vector
 /// 2. Solve domain problem with slip BC -> displacement u
@@ -46,8 +44,10 @@ namespace seas
 ///
 /// @tparam MeshType Either Mesh for serial or ParMesh for parallel
 /// @tparam DomainOpType Domain operator type (default: AntiplaneDomainOperator)
+/// @tparam FaultOpType Fault operator type (default: RateStateFaultOperator<MeshType>)
 template <typename MeshType = Mesh,
-          typename DomainOpType = AntiplaneDomainOperator<MeshType>>
+          typename DomainOpType = AntiplaneDomainOperator<MeshType>,
+          typename FaultOpType = RateStateFaultOperator<MeshType>>
 class SEASQuasiDynamicOperator : public TimeDependentOperator
 {
 public:
@@ -59,7 +59,7 @@ public:
    /// @param fault Fault operator (Phase 3) - owned externally
    /// @param mpi_ctx MPI context for parallel reductions (optional)
    SEASQuasiDynamicOperator(DomainOpType *domain,
-                             RateStateFaultOperator<MeshType> *fault,
+                             FaultOpType *fault,
                              MPIContext *mpi_ctx = nullptr);
 
    /// Destructor
@@ -73,15 +73,15 @@ public:
    /// 3. Init: Compute theta from stress equilibrium
    /// 4. Verify initial slip rate matches V_init
    ///
-   /// @param[out] state State vector to initialize [2 * num_fault_dofs]
+   /// @param[out] state State vector to initialize [fault->StateSize()]
    void SetInitialCondition(Vector &state);
 
    /// @brief Compute d(state)/dt = RHS(t, state).
    ///
    /// This is the main ODE function called by MFEM ODE solvers (e.g., RK4Solver).
    ///
-   /// @param[in] state Current state [slip_0, theta_0, slip_1, theta_1, ...]
-   /// @param[out] rate Time derivatives [V_0, dtheta_0/dt, V_1, dtheta_1/dt, ...]
+   /// @param[in] state Current state [StateSize()]
+   /// @param[out] rate Time derivatives [StateSize()]
    void Mult(const Vector &state, Vector &rate) const override;
 
    /// @brief Get current displacement solution.
@@ -107,11 +107,11 @@ public:
    const DomainOpType *GetDomain() const { return domain_; }
 
    /// @brief Get the fault operator.
-   const RateStateFaultOperator<MeshType> *GetFault() const { return fault_; }
+   const FaultOpType *GetFault() const { return fault_; }
 
 private:
    DomainOpType *domain_;
-   RateStateFaultOperator<MeshType> *fault_;
+   FaultOpType *fault_;
    MPIContext *mpi_ctx_ = nullptr;
 
    /// Displacement grid function (solution of domain problem)
@@ -126,10 +126,10 @@ private:
 // Implementation
 // ============================================================================
 
-template <typename MeshType, typename DomainOpType>
-SEASQuasiDynamicOperator<MeshType, DomainOpType>::SEASQuasiDynamicOperator(
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SEASQuasiDynamicOperator(
    DomainOpType *domain,
-   RateStateFaultOperator<MeshType> *fault,
+   FaultOpType *fault,
    MPIContext *mpi_ctx)
    : TimeDependentOperator(fault->StateSize()),
      domain_(domain), fault_(fault), mpi_ctx_(mpi_ctx)
@@ -141,13 +141,13 @@ SEASQuasiDynamicOperator<MeshType, DomainOpType>::SEASQuasiDynamicOperator(
    u_gf_ = std::make_unique<GridFuncType>(&domain_->GetFESpace());
    *u_gf_ = 0.0;
 
-   // Allocate work vectors
-   slip_.SetSize(fault_->NumNodes());
-   traction_.SetSize(fault_->NumNodes());
+   // Allocate work vectors (sized for slip/traction components)
+   slip_.SetSize(fault_->SlipSize());
+   traction_.SetSize(fault_->TractionSize());
 }
 
-template <typename MeshType, typename DomainOpType>
-void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vector &state)
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCondition(Vector &state)
 {
    MFEM_VERIFY(state.Size() == fault_->StateSize(),
                "State vector size mismatch: got " << state.Size()
@@ -163,6 +163,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
 
    // Phase 3: Initialize theta from stress equilibrium
    //   tau0 + traction = sigma_n * f(V_init, theta) + eta * V_init
+   // V_max is recomputed below after the verification re-solve
    real_t V_max = fault_->Init(traction_, state);
 
    // Phase 4: Verify initial slip rate
@@ -178,8 +179,6 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
    // Use global V_max in parallel, local in serial
    V_max = GetMaxSlipRate();
 
-   const BP2Params &params = fault_->GetParams();
-
    // Verify stress equilibrium (local check, each rank verifies its own DOFs)
    real_t eq_error = fault_->VerifyStressEquilibrium(traction_, state);
    if (mpi_ctx_)
@@ -190,18 +189,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
                "Initial stress equilibrium error too large: " << eq_error);
 
    // Verify initial slip rate is close to V_init
-   // Allow generous tolerance since the domain solve with zero slip
-   // gives near-zero traction, so V should be close to V_init
-   real_t V_rel_err = std::abs(V_max - params.V_init) /
-                      std::max(params.V_init, 1e-30);
-   MFEM_VERIFY(V_rel_err < 0.1,
-               "Initial V_max = " << V_max
-               << " differs from V_init = " << params.V_init
-               << " by " << V_rel_err * 100 << "%");
+   fault_->VerifyInitialSlipRate(V_max);
 }
 
-template <typename MeshType, typename DomainOpType>
-void SEASQuasiDynamicOperator<MeshType, DomainOpType>::Mult(
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    const Vector &state, Vector &rate) const
 {
    // 1. Extract slip from state vector
@@ -217,18 +209,28 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::Mult(
 #endif
 
    // 2. Solve domain problem with slip BC
-   //    ∇²u = 0 with [[u]] = slip on fault (all x=0 faces)
    domain_->Solve(t, slip_, *u_gf_);
 
    // 3. Compute traction at fault from displacement
-   //    τ_qs = μ * {{∂u/∂x}} + μ * κ * h⁻¹ * ([[u]] - δ)
    domain_->ComputeTraction(*u_gf_, slip_, traction_);
 
    // 4. Compute fault RHS (slip rate and state rate)
-   //    Stress balance: τ₀ + τ_qs = σ_n * f(V, θ) + η * V
-   //    State evolution: dθ/dt = G(V, θ)
    fault_->ComputeRHS(traction_, state, rate);
 }
+
+// BP2 type alias (uses default template arguments)
+using BP2SEASOp = SEASQuasiDynamicOperator<Mesh>;
+
+// BP5 type aliases
+using BP5DomainOp = ElasticityDomainOperator<Mesh>;
+using BP5SEASOp   = SEASQuasiDynamicOperator<Mesh, BP5DomainOp, BP5FaultOp>;
+
+#ifdef MFEM_USE_MPI
+// Parallel BP5 type alias
+using PBP5SEASOp = SEASQuasiDynamicOperator<ParMesh,
+                      ElasticityDomainOperator<ParMesh>,
+                      RateStateFaultOperator<ParMesh, 2>>;
+#endif
 
 } // namespace seas
 } // namespace mfem

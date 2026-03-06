@@ -14,6 +14,7 @@
 
 #include "mfem.hpp"
 #include "../config/bp2_params.hpp"
+#include "../config/bp5_params.hpp"
 #include "../domain/domain_operator.hpp"
 #include "../common/seas_types.hpp"
 #include "../common/mpi_context.hpp"
@@ -89,6 +90,43 @@ public:
 
       // Compute depth-dependent parameters
       ComputeDepthDependentParams();
+   }
+
+   /// @brief Construct fault geometry for 3D (BP5) with spatially varying params.
+   ///
+   /// @param domain_op Domain operator providing 2D fault coordinates
+   /// @param params BP5 benchmark parameters (2D spatially varying a, L, etc.)
+   FaultGeometry(DomainOperator<MeshType> &domain_op, const BP5Params &params,
+                  MPIContext *mpi_ctx = nullptr)
+      : bp5_params_(params), mpi_ctx_(mpi_ctx), is_bp5_(true)
+   {
+      num_fault_dofs_ = domain_op.GetNumFaultDOFs();
+      num_local_fault_dofs_ = num_fault_dofs_;
+      num_global_fault_dofs_ = num_fault_dofs_;
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         if (mpi_ctx_)
+         {
+            num_global_fault_dofs_ = mpi_ctx_->GlobalSumInt(num_local_fault_dofs_);
+            ComputeGatherInfo();
+         }
+      }
+
+      if (num_fault_dofs_ == 0) { return; }
+
+      // Get 2D fault coordinates
+      domain_op.GetFaultCoords2D(coords_x2_, coords_x3_);
+
+      // Also store depths for compatibility
+      depths_.SetSize(num_fault_dofs_);
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         depths_(i) = coords_x3_(i);
+      }
+
+      // Precompute per-DOF parameters using BP5 2D functions
+      ComputeBP5Params();
    }
 
    /// @brief Number of fault DOFs (local in parallel, total in serial).
@@ -221,6 +259,27 @@ public:
    /// @brief Get the BP2 parameters.
    const BP2Params &GetParams() const { return params_; }
 
+   /// @brief Get the BP5 parameters (only valid if constructed with BP5Params).
+   const BP5Params &GetBP5Params() const { return bp5_params_; }
+
+   /// @brief Whether this was constructed for BP5 (3D, spatially varying).
+   bool IsBP5() const { return is_bp5_; }
+
+   /// @brief Get critical slip distance (Dc/L) at each fault DOF.
+   const Vector &GetDcValues() const { return dc_values_; }
+
+   /// @brief Get pre-stress vector at fault DOFs [2*NumFaultDOFs].
+   /// Layout: [tau_dip_0, tau_strike_0, tau_dip_1, tau_strike_1, ...]
+   const Vector &GetTauPre() const { return tau_pre_; }
+
+   /// @brief Get initial velocity at fault DOFs [2*NumFaultDOFs].
+   /// Layout: [V_dip_0, V_strike_0, V_dip_1, V_strike_1, ...]
+   const Vector &GetVInit() const { return V_init_vec_; }
+
+   /// @brief Get 2D fault coordinates.
+   const Vector &GetCoordsX2() const { return coords_x2_; }
+   const Vector &GetCoordsX3() const { return coords_x3_; }
+
    /// @brief Find the DOF index closest to a target depth.
    ///
    /// @param target_depth Target depth (z coordinate, negative for below surface)
@@ -248,24 +307,39 @@ public:
       return closest_idx;
    }
 
-   /// @brief Check if a depth is in the velocity-weakening zone.
+   /// @brief Check if a DOF is in the velocity-weakening zone.
    ///
-   /// @param z Depth coordinate (negative below surface)
-   /// @return True if a(z) < b (velocity-weakening)
-   bool IsVelocityWeakening(real_t z) const
+   /// Uses precomputed a_values_ which are correct for both BP2 and BP5.
+   ///
+   /// @param dof_idx DOF index
+   /// @return True if a(dof_idx) < b (velocity-weakening)
+   bool IsVelocityWeakening(int dof_idx) const
    {
-      return params_.a_of_z(z) < params_.b;
+      real_t b_val = is_bp5_ ? bp5_params_.b : params_.b;
+      return a_values_(dof_idx) < b_val;
    }
 
    /// @brief Get the VW/VS transition depth (top of transition zone).
    ///
    /// Returns the depth H where the transition from VW to VS begins.
-   real_t GetVWDepth() const { return -params_.H; }
+   /// Only valid for BP2 (1D depth profile). For BP5, the VW zone is 2D.
+   real_t GetVWDepth() const
+   {
+      MFEM_VERIFY(!is_bp5_,
+                   "GetVWDepth() not applicable for BP5 (2D VW zone)");
+      return -params_.H;
+   }
 
    /// @brief Get the full VS depth (bottom of transition zone).
    ///
    /// Returns the depth H+h where fully VS behavior begins.
-   real_t GetVSDepth() const { return -(params_.H + params_.h); }
+   /// Only valid for BP2 (1D depth profile). For BP5, the VS zone is 2D.
+   real_t GetVSDepth() const
+   {
+      MFEM_VERIFY(!is_bp5_,
+                   "GetVSDepth() not applicable for BP5 (2D VW zone)");
+      return -(params_.H + params_.h);
+   }
 
    /// @brief Get indices of DOFs in the velocity-weakening zone.
    void GetVWDOFs(Array<int> &vw_dofs) const
@@ -273,7 +347,7 @@ public:
       vw_dofs.SetSize(0);
       for (int i = 0; i < num_fault_dofs_; i++)
       {
-         if (IsVelocityWeakening(depths_(i)))
+         if (IsVelocityWeakening(i))
          {
             vw_dofs.Append(i);
          }
@@ -286,7 +360,7 @@ public:
       vs_dofs.SetSize(0);
       for (int i = 0; i < num_fault_dofs_; i++)
       {
-         if (!IsVelocityWeakening(depths_(i)))
+         if (!IsVelocityWeakening(i))
          {
             vs_dofs.Append(i);
          }
@@ -316,10 +390,11 @@ public:
             << z_min / 1000.0 << "] km\n";
 
          // Count VW and VS DOFs
+         real_t b_val = is_bp5_ ? bp5_params_.b : params_.b;
          int vw_count = 0;
          for (int i = 0; i < num_fault_dofs_; i++)
          {
-            if (a_values_(i) < params_.b) { vw_count++; }
+            if (a_values_(i) < b_val) { vw_count++; }
          }
          os << "  VW DOFs: " << vw_count << "\n";
          os << "  VS DOFs: " << num_fault_dofs_ - vw_count << "\n";
@@ -336,13 +411,20 @@ public:
 
 private:
    BP2Params params_;
+   BP5Params bp5_params_;
    MPIContext *mpi_ctx_ = nullptr;
+   bool is_bp5_ = false;
    int num_fault_dofs_;
    int num_local_fault_dofs_ = 0;
    int num_global_fault_dofs_ = 0;
    Vector depths_;      // z-coordinates of fault DOFs
-   Vector a_values_;    // a(z) for each DOF
+   Vector a_values_;    // a for each DOF (from depth in BP2, from (x2,x3) in BP5)
    Vector eta_values_;  // η for each DOF
+   Vector dc_values_;   // Dc/L for each DOF (BP5: spatially varying)
+   Vector tau_pre_;     // Pre-stress [2*N for BP5, N for BP2]
+   Vector V_init_vec_;  // Initial velocity [2*N for BP5]
+   Vector coords_x2_;   // Along-strike coordinate
+   Vector coords_x3_;   // Depth coordinate
 
    // MPI gather info (parallel only)
    std::vector<int> recv_counts_;
@@ -492,6 +574,38 @@ private:
       {
          dedup_fields[f].SetSize(m);
          for (int k = 0; k < m; k++) { dedup_fields[f](k) = d_fields[f][k]; }
+      }
+   }
+
+   /// @brief Compute 2D spatially varying parameters for BP5.
+   void ComputeBP5Params()
+   {
+      a_values_.SetSize(num_fault_dofs_);
+      eta_values_.SetSize(num_fault_dofs_);
+      dc_values_.SetSize(num_fault_dofs_);
+      tau_pre_.SetSize(2 * num_fault_dofs_);
+      V_init_vec_.SetSize(2 * num_fault_dofs_);
+
+      real_t eta = bp5_params_.eta();
+
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         real_t x2 = coords_x2_(i);
+         real_t x3 = coords_x3_(i);
+
+         a_values_(i) = bp5_params_.a_of_x2_x3(x2, x3);
+         eta_values_(i) = eta;
+         dc_values_(i) = bp5_params_.Dc_of_x2_x3(x2, x3);
+
+         real_t tau[2];
+         bp5_params_.tau0_vec(x2, x3, tau);
+         tau_pre_(2 * i)     = tau[0];
+         tau_pre_(2 * i + 1) = tau[1];
+
+         real_t Vi[2];
+         bp5_params_.V_init_vec(x2, x3, Vi);
+         V_init_vec_(2 * i)     = Vi[0];
+         V_init_vec_(2 * i + 1) = Vi[1];
       }
    }
 

@@ -172,6 +172,10 @@ public:
    /// Enable verbose per-step diagnostics (error norm, worst DOF, etc.)
    void SetVerbose(bool v) { diag_verbose_ = v; }
 
+   /// Set number of state components per fault node for diagnostic output.
+   /// BP2: 2 (slip, theta), BP5: 3 (slip_dip, slip_strike, psi).
+   void SetStatePerNode(int spn) { state_per_node_ = spn; }
+
    /// Use weighted RMS (2-norm) instead of L-infinity for error norm.
    /// More robust to outlier DOFs at MPI partition boundaries.
    void SetUse2Norm(bool v) { use_2norm_ = v; }
@@ -414,15 +418,16 @@ public:
       // Verbose diagnostic for every step (enabled by diag_verbose_)
       if (diag_verbose_ && (!mpi_ctx_ || mpi_ctx_->IsRoot()))
       {
-         int dof = worst_idx / 2;
-         bool is_theta = (worst_idx % 2 == 1);
+         int dof = worst_idx / state_per_node_;
+         int comp = worst_idx % state_per_node_;
+         const char *comp_name = (comp == state_per_node_ - 1)
+                                    ? "(theta/psi)" : "(slip)";
          real_t scale = atol_ + rtol_ * std::abs(y_tmp_(worst_idx));
          std::cout << (err_norm <= 1.0 ? "[ACCEPT]" : "[REJECT]")
                    << " dt=" << std::scientific << std::setprecision(3) << dt
                    << " err=" << err_norm
                    << " dt_new=" << dt_new
-                   << " worst=DOF" << dof
-                   << (is_theta ? "(theta)" : "(slip)")
+                   << " worst=DOF" << dof << comp_name
                    << " |err|=" << std::abs(err_(worst_idx))
                    << " scale=" << scale
                    << " |y|=" << std::abs(y_tmp_(worst_idx))
@@ -496,6 +501,7 @@ private:
    bool use_2norm_ = false;    ///< Use RMS (2-norm) instead of L-inf for error
    int total_rejections_;  ///< Total number of rejected steps
    int diag_count_;        ///< Counter for dt_min diagnostic messages
+   int state_per_node_ = 2; ///< State components per node (2=BP2, 3=BP5)
 
    Vector k_[7];  ///< Stage vectors
    Vector y_tmp_; ///< Temporary solution

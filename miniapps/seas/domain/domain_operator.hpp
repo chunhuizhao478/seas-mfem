@@ -20,6 +20,9 @@ namespace mfem
 namespace seas
 {
 
+// Forward declaration — only a pointer is returned, no include needed.
+class FaultBasis;
+
 /// @brief Abstract base class for domain operators
 ///
 /// This class defines the interface for solving the domain PDE
@@ -129,6 +132,12 @@ public:
       coords_x2 = 0.0;
       coords_x3 = depths;
    }
+
+   /// @brief Get the per-face fault basis. Returns nullptr by default.
+   ///
+   /// Override in 3D elasticity operators to provide the global-to-local
+   /// coordinate transformation on the fault surface.
+   virtual const FaultBasis *GetFaultBasis() const { return nullptr; }
 
    /// @brief Get off-fault displacement at specified spatial points
    ///

@@ -12,74 +12,31 @@
 /// @file test_domain_operator_interface.cpp
 /// @brief Unit tests for DomainOperator interface methods
 ///
-/// Tests Phase 1b additions to the DomainOperator base class:
+/// Tests Phase 2a additions to the DomainOperator base class:
 /// 1. NumSlipComponents() returns 1 for antiplane
 /// 2. GetFaultCoords2D() returns (0, depths) by default
 /// 3. GetOffFaultDisplacement() returns empty by default
 /// 4. Polymorphic dispatch through base pointer
+/// 5. GetFaultBasis() returns nullptr by default
 
-#include "mfem.hpp"
+#include "test_macros.hpp"
 #include "../../domain/domain_operator.hpp"
 #include "../../domain/antiplane_operator.hpp"
 #include "../../domain/antiplane_bdrload_operator.hpp"
 #include "../../domain/bp2_mesh.hpp"
 #include "../../config/bp2_params.hpp"
 
-#include <iostream>
-#include <cmath>
-#include <vector>
-
 using namespace mfem;
 using namespace mfem::seas;
-
-// =============================================================================
-// Test infrastructure
-// =============================================================================
-
-static int num_tests_passed = 0;
-static int num_tests_failed = 0;
-
-#define TEST_ASSERT(condition, message) \
-   do { \
-      if (!(condition)) { \
-         std::cerr << "FAILED: " << message << std::endl; \
-         std::cerr << "  at " << __FILE__ << ":" << __LINE__ << std::endl; \
-         num_tests_failed++; \
-         return false; \
-      } \
-   } while (0)
-
-#define TEST_ASSERT_NEAR(a, b, tol, message) \
-   do { \
-      real_t diff = std::abs((a) - (b)); \
-      if (diff > tol) { \
-         std::cerr << "FAILED: " << message << std::endl; \
-         std::cerr << "  Expected: " << (b) << ", Got: " << (a) \
-                   << ", Diff: " << diff << ", Tol: " << tol << std::endl; \
-         std::cerr << "  at " << __FILE__ << ":" << __LINE__ << std::endl; \
-         num_tests_failed++; \
-         return false; \
-      } \
-   } while (0)
-
-#define RUN_TEST(test_func) \
-   do { \
-      std::cout << "Running " << #test_func << "... "; \
-      std::cout.flush(); \
-      if (test_func()) { \
-         std::cout << "PASSED" << std::endl; \
-         num_tests_passed++; \
-      } else { \
-         std::cout << "FAILED" << std::endl; \
-      } \
-   } while (0)
 
 // =============================================================================
 // Test: NumSlipComponents() returns 1 for antiplane
 // =============================================================================
 
-bool test_num_slip_components_antiplane()
+void test_num_slip_components_antiplane()
 {
+   std::cout << "\n=== NumSlipComponents Antiplane ===\n";
+
    auto mesh = BP2MeshGenerator::CreateTestMesh();
    TEST_ASSERT(mesh != nullptr, "Mesh creation failed");
 
@@ -91,18 +48,17 @@ bool test_num_slip_components_antiplane()
    AntiplaneDomainOperator<Mesh> domain(*mesh, order, mu, Vp, Wf);
 
    TEST_ASSERT(domain.NumSlipComponents() == 1,
-               "Antiplane should have 1 slip component, got "
-               << domain.NumSlipComponents());
-
-   return true;
+               "Antiplane should have 1 slip component");
 }
 
 // =============================================================================
 // Test: GetFaultCoords2D() default returns (0, depths)
 // =============================================================================
 
-bool test_get_fault_coords_2d_default()
+void test_get_fault_coords_2d_default()
 {
+   std::cout << "\n=== GetFaultCoords2D Default ===\n";
+
    auto mesh = BP2MeshGenerator::CreateTestMesh();
    TEST_ASSERT(mesh != nullptr, "Mesh creation failed");
 
@@ -118,15 +74,15 @@ bool test_get_fault_coords_2d_default()
 
    int n = domain.GetNumFaultDOFs();
    TEST_ASSERT(coords_x2.Size() == n,
-               "coords_x2 size should be " << n << ", got " << coords_x2.Size());
+               "coords_x2 size should match NumFaultDOFs");
    TEST_ASSERT(coords_x3.Size() == n,
-               "coords_x3 size should be " << n << ", got " << coords_x3.Size());
+               "coords_x3 size should match NumFaultDOFs");
 
    // x2 (along-strike) should be all zeros for 2D antiplane
    for (int i = 0; i < n; i++)
    {
-      TEST_ASSERT_NEAR(coords_x2(i), 0.0, 1e-14,
-                        "coords_x2[" << i << "] should be 0");
+      TEST_NEAR(coords_x2(i), 0.0, 1e-14,
+                "coords_x2 should be 0 for antiplane");
    }
 
    // x3 (depth) should match GetFaultDepths
@@ -134,19 +90,19 @@ bool test_get_fault_coords_2d_default()
    domain.GetFaultDepths(depths);
    for (int i = 0; i < n; i++)
    {
-      TEST_ASSERT_NEAR(coords_x3(i), depths(i), 1e-14,
-                        "coords_x3[" << i << "] should match depth");
+      TEST_NEAR(coords_x3(i), depths(i), 1e-14,
+                "coords_x3 should match depth");
    }
-
-   return true;
 }
 
 // =============================================================================
 // Test: GetOffFaultDisplacement() default returns empty
 // =============================================================================
 
-bool test_off_fault_displacement_default()
+void test_off_fault_displacement_default()
 {
+   std::cout << "\n=== GetOffFaultDisplacement Default ===\n";
+
    auto mesh = BP2MeshGenerator::CreateTestMesh();
    TEST_ASSERT(mesh != nullptr, "Mesh creation failed");
 
@@ -169,18 +125,17 @@ bool test_off_fault_displacement_default()
 
    // Default implementation returns empty
    TEST_ASSERT(displacements.Size() == 0,
-               "Default GetOffFaultDisplacement should return empty, got size "
-               << displacements.Size());
-
-   return true;
+               "Default GetOffFaultDisplacement should return empty");
 }
 
 // =============================================================================
 // Test: Polymorphic dispatch through base pointer
 // =============================================================================
 
-bool test_polymorphic_dispatch()
+void test_polymorphic_dispatch()
 {
+   std::cout << "\n=== Polymorphic Dispatch ===\n";
+
    auto mesh = BP2MeshGenerator::CreateTestMesh();
    TEST_ASSERT(mesh != nullptr, "Mesh creation failed");
 
@@ -210,7 +165,11 @@ bool test_polymorphic_dispatch()
    Vector x2, x3;
    base->GetFaultCoords2D(x2, x3);
    TEST_ASSERT(x2.Size() == base->GetNumFaultDOFs(),
-               "GetFaultCoords2D through base: x2 size mismatch");
+               "GetFaultCoords2D through base: x2 size matches");
+
+   // GetFaultBasis through base
+   TEST_ASSERT(base->GetFaultBasis() == nullptr,
+               "GetFaultBasis default should return nullptr");
 
    // GetOffFaultDisplacement through base
    std::vector<Vector> pts;
@@ -218,16 +177,16 @@ bool test_polymorphic_dispatch()
    base->GetOffFaultDisplacement(pts, disp);
    TEST_ASSERT(disp.Size() == 0,
                "GetOffFaultDisplacement through base should return empty");
-
-   return true;
 }
 
 // =============================================================================
 // Test: BdrLoad operator also supports interface methods
 // =============================================================================
 
-bool test_bdrload_interface_methods()
+void test_bdrload_interface_methods()
 {
+   std::cout << "\n=== BdrLoad Interface Methods ===\n";
+
    auto mesh = BP2MeshGenerator::CreateTestMesh();
    TEST_ASSERT(mesh != nullptr, "Mesh creation failed");
 
@@ -245,16 +204,18 @@ bool test_bdrload_interface_methods()
    Vector x2, x3;
    domain.GetFaultCoords2D(x2, x3);
    TEST_ASSERT(x2.Size() == domain.GetNumFaultDOFs(),
-               "BdrLoad GetFaultCoords2D x2 size mismatch");
+               "BdrLoad GetFaultCoords2D x2 size matches");
 
    // All x2 should be zero
    for (int i = 0; i < x2.Size(); i++)
    {
-      TEST_ASSERT_NEAR(x2(i), 0.0, 1e-14,
-                        "BdrLoad coords_x2[" << i << "] should be 0");
+      TEST_NEAR(x2(i), 0.0, 1e-14,
+                "BdrLoad coords_x2 should be 0");
    }
 
-   return true;
+   // GetFaultBasis default
+   TEST_ASSERT(domain.GetFaultBasis() == nullptr,
+               "BdrLoad GetFaultBasis default should return nullptr");
 }
 
 // =============================================================================
@@ -263,18 +224,16 @@ bool test_bdrload_interface_methods()
 
 int main(int argc, char *argv[])
 {
-   std::cout << "=== SEAS DomainOperator Interface Tests ===" << std::endl;
-   std::cout << std::endl;
+   std::cout << "========================================\n";
+   std::cout << "  DomainOperator Interface Tests\n";
+   std::cout << "========================================\n";
 
-   RUN_TEST(test_num_slip_components_antiplane);
-   RUN_TEST(test_get_fault_coords_2d_default);
-   RUN_TEST(test_off_fault_displacement_default);
-   RUN_TEST(test_polymorphic_dispatch);
-   RUN_TEST(test_bdrload_interface_methods);
+   test_num_slip_components_antiplane();
+   test_get_fault_coords_2d_default();
+   test_off_fault_displacement_default();
+   test_polymorphic_dispatch();
+   test_bdrload_interface_methods();
 
-   std::cout << std::endl;
-   std::cout << "=== Results: " << num_tests_passed << " passed, "
-             << num_tests_failed << " failed ===" << std::endl;
-
-   return num_tests_failed > 0 ? 1 : 0;
+   TEST_PRINT_RESULTS();
+   return (num_failed > 0) ? 1 : 0;
 }

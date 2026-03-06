@@ -18,6 +18,7 @@
 #include "../friction/dieterich_ruina.hpp"
 #include "../friction/state_evolution.hpp"
 #include "../config/bp2_params.hpp"
+#include "../config/bp5_params.hpp"
 #include "../common/mpi_context.hpp"
 
 #include <algorithm>
@@ -33,25 +34,31 @@ namespace seas
 /// This class manages the fault state evolution and interfaces with the domain
 /// solver. It follows Tandem's RateAndState.h architecture with key methods:
 /// - PreInit(): Set initial slip values (before domain solve)
-/// - Init(): Compute initial θ from stress equilibrium (after first domain solve)
+/// - Init(): Compute initial theta/psi from stress equilibrium (after first domain solve)
 /// - ComputeRHS(): Compute time derivatives of state variables
 ///
-/// State layout: [slip_0, theta_0, slip_1, theta_1, ...]
-/// - Each fault node has 2 state variables: slip and theta (state variable)
-/// - slip: accumulated fault slip [m]
-/// - theta: state variable from rate-and-state friction law [s]
+/// State layout depends on SlipComponents:
+///   SlipComponents=1 (BP1/BP2): [slip_0, theta_0, slip_1, theta_1, ...]
+///   SlipComponents=2 (BP5):     [s_dip_0, s_strike_0, psi_0, s_dip_1, s_strike_1, psi_1, ...]
 ///
 /// @tparam MeshType Either Mesh for serial or ParMesh for parallel
-template <typename MeshType = Mesh>
+/// @tparam SlipComponents Number of slip components (1 for antiplane, 2 for 3D)
+template <typename MeshType = Mesh, int SlipComponents = 1>
 class RateStateFaultOperator
 {
 public:
    /// State layout constants
-   static constexpr int StatePerNode = 2;  ///< slip + theta per node
-   static constexpr int SlipIndex = 0;     ///< Index of slip in per-node state
-   static constexpr int ThetaIndex = 1;    ///< Index of theta in per-node state
+   static constexpr int NumSlipComp = SlipComponents;
+   static constexpr int StatePerNode = SlipComponents + 1;
+   static constexpr int SlipIndex = 0;     ///< First slip component index
+   static constexpr int ThetaIndex = SlipComponents; ///< Theta/psi index (last)
+   static constexpr int PsiIndex = SlipComponents;   ///< Alias for ThetaIndex
 
-   /// @brief Constructor.
+   // =========================================================================
+   // BP2 Constructor (SlipComponents=1)
+   // =========================================================================
+
+   /// @brief Constructor for antiplane/BP2 (scalar slip).
    ///
    /// @param geom Fault geometry (provides depths and depth-dependent params)
    /// @param friction Friction law (DieterichRuinaFriction)
@@ -76,6 +83,8 @@ public:
         use_psi_(use_psi),
         dr_friction_(dynamic_cast<DieterichRuinaFriction*>(friction))
    {
+      static_assert(SlipComponents == 1,
+                    "BP2Params constructor requires SlipComponents=1");
       if (use_psi_)
       {
          MFEM_ASSERT(dr_friction_ != nullptr,
@@ -89,11 +98,77 @@ public:
    }
 
    // =========================================================================
+   // BP5 Constructor (SlipComponents=2)
+   // =========================================================================
+
+   /// @brief Constructor for 3D elasticity/BP5 (vector slip).
+   ///
+   /// BP5 always uses psi-space integration.
+   ///
+   /// @param geom Fault geometry (provides 2D coordinates and spatially varying params)
+   /// @param friction DieterichRuina friction law (required for vector solver)
+   /// @param evolution State evolution law
+   /// @param params BP5 benchmark parameters
+   /// @param mpi_ctx MPI context (nullptr for serial)
+   RateStateFaultOperator(FaultGeometry<MeshType> *geom,
+                          DieterichRuinaFriction *friction,
+                          StateEvolution *evolution,
+                          const BP5Params &params,
+                          MPIContext *mpi_ctx = nullptr)
+      : geom_(geom),
+        friction_(friction),
+        evolution_(evolution),
+        mpi_ctx_(mpi_ctx),
+        num_nodes_(geom ? geom->NumFaultDOFs() : 0),
+        tau0_(0.0),
+        V_max_(0.0),
+        use_psi_(true),  // BP5 always uses psi
+        dr_friction_(friction),
+        bp5_params_(params),
+        sigma_n_bp5_(params.sigma_n),
+        Vp_bp5_(params.Vp),
+        Wf_bp5_(params.Wf)
+   {
+      static_assert(SlipComponents == 2,
+                    "BP5Params constructor requires SlipComponents=2");
+      MFEM_ASSERT(dr_friction_ != nullptr,
+                  "BP5 requires DieterichRuinaFriction");
+      MFEM_ASSERT(geom_ != nullptr && geom_->IsBP5(),
+                  "BP5 constructor requires BP5 FaultGeometry");
+
+      if (num_nodes_ > 0)
+      {
+         // Slip rate: 2 components per node
+         slip_rate_.SetSize(2 * num_nodes_);
+
+         // Initialize with V_init from geometry
+         const Vector &V_init = geom_->GetVInit();
+         MFEM_ASSERT(V_init.Size() == 2 * num_nodes_,
+                     "V_init size mismatch");
+         for (int i = 0; i < 2 * num_nodes_; i++)
+         {
+            slip_rate_(i) = V_init(i);
+         }
+
+         // Cache per-DOF parameters from FaultGeometry
+         Dc_values_ = geom_->GetDcValues();
+         tau_pre_ = geom_->GetTauPre();
+         V_init_values_ = geom_->GetVInit();
+      }
+   }
+
+   // =========================================================================
    // State size information
    // =========================================================================
 
-   /// Total state vector size (2 values per node: slip + theta)
+   /// Total state vector size (StatePerNode values per node)
    int StateSize() const { return num_nodes_ * StatePerNode; }
+
+   /// Total slip vector size (SlipComponents per node)
+   int SlipSize() const { return num_nodes_ * SlipComponents; }
+
+   /// Total traction vector size (SlipComponents per node)
+   int TractionSize() const { return num_nodes_ * SlipComponents; }
 
    /// Number of fault nodes
    int NumNodes() const { return num_nodes_; }
@@ -105,7 +180,7 @@ public:
    /// @brief Pre-initialize: set initial slip values.
    ///
    /// Called before the first domain solve. Sets initial slip to zero
-   /// and theta to a placeholder value.
+   /// and theta/psi to a placeholder value.
    ///
    /// Following Tandem RateAndState.h pre_init()
    ///
@@ -117,87 +192,145 @@ public:
 
       for (int i = 0; i < num_nodes_; i++)
       {
-         // Initial slip = 0
-         state(i * StatePerNode + SlipIndex) = 0.0;
+         // Initial slip = 0 (all components)
+         for (int c = 0; c < SlipComponents; c++)
+         {
+            state(i * StatePerNode + c) = 0.0;
+         }
 
          // Placeholder state (will be computed in Init after first domain solve)
-         if (use_psi_)
+         if constexpr (SlipComponents == 1)
          {
-            // psi_ss = f0 + b*ln(V0/V_init)
-            state(i * StatePerNode + ThetaIndex) =
-               evolution_->SteadyState(params_.V_init, params_.Dc);
+            if (use_psi_)
+            {
+               // psi_ss = f0 + b*ln(V0/V_init)
+               state(i * StatePerNode + PsiIndex) =
+                  evolution_->SteadyState(params_.V_init, params_.Dc);
+            }
+            else
+            {
+               // theta_ss = Dc/V_init
+               state(i * StatePerNode + ThetaIndex) = params_.Dc / params_.V_init;
+            }
          }
          else
          {
-            // theta_ss = Dc/V_init
-            state(i * StatePerNode + ThetaIndex) = params_.Dc / params_.V_init;
+            // BP5: always psi-space
+            real_t V_abs_init = std::sqrt(
+               V_init_values_(2*i) * V_init_values_(2*i) +
+               V_init_values_(2*i+1) * V_init_values_(2*i+1));
+            real_t Dc = Dc_values_(i);
+            state(i * StatePerNode + PsiIndex) =
+               evolution_->SteadyState(std::max(V_abs_init, 1e-30), Dc);
          }
       }
    }
 
-   /// @brief Initialize: compute initial θ from stress equilibrium.
+   /// @brief Initialize: compute initial theta/psi from stress equilibrium.
    ///
    /// Called after the first domain solve with zero slip. Computes the
-   /// initial state variable θ such that stress equilibrium is satisfied:
-   ///   τ₀ + τ_qs = σ_n · f(V_init, θ) + η · V_init
+   /// initial state variable such that stress equilibrium is satisfied.
    ///
    /// Following Tandem RateAndState.h init()
    ///
-   /// @param[in] traction Traction from domain solve (τ_qs) [NumNodes()]
+   /// @param[in] traction Traction from domain solve [TractionSize()]
    /// @param[in,out] state State vector to update [StateSize()]
    /// @return Maximum initial slip rate
    real_t Init(const Vector &traction, Vector &state)
    {
-      MFEM_ASSERT(traction.Size() == num_nodes_,
+      MFEM_ASSERT(traction.Size() == TractionSize(),
                   "Traction vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(),
                   "State vector has wrong size");
-
-      // Compute pre-stress τ₀ from BP2 parameters
-      tau0_ = params_.tau0();
 
       V_max_ = 0.0;
       const Vector &a_values = geom_->GetAValues();
       const Vector &eta_values = geom_->GetEtaValues();
       const Vector &depths = geom_->GetDepths();
 
-      for (int i = 0; i < num_nodes_; i++)
+      if constexpr (SlipComponents == 1)
       {
-         if (depths(i) < -params_.Wf)
+         // ---- BP2 scalar path (unchanged) ----
+         tau0_ = params_.tau0();
+
+         for (int i = 0; i < num_nodes_; i++)
          {
-            // Below Wf: prescribed plate rate, keep placeholder θ
-            slip_rate_(i) = params_.Vp;
-            continue;
+            if (depths(i) < -params_.Wf)
+            {
+               // Below Wf: prescribed plate rate, keep placeholder theta
+               slip_rate_(i) = params_.Vp;
+               continue;
+            }
+
+            // Total stress = pre-stress + quasi-static traction
+            real_t tau = tau0_ + traction(i);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            if (use_psi_)
+            {
+               // Compute initial psi from stress equilibrium
+               real_t psi0 = dr_friction_->InitialStatePsi(tau, params_.V_init,
+                                                            params_.sigma_n, eta, a);
+               state(i * StatePerNode + ThetaIndex) = psi0;
+
+               real_t V = dr_friction_->SolveSlipRatePsi(tau, psi0,
+                                                          params_.sigma_n, eta, a);
+               slip_rate_(i) = V;
+               V_max_ = std::max(V_max_, V);
+            }
+            else
+            {
+               // Compute initial theta from stress equilibrium
+               real_t theta0 = friction_->InitialState(tau, params_.V_init,
+                                                        params_.sigma_n, eta, a);
+               state(i * StatePerNode + ThetaIndex) = theta0;
+
+               real_t V = friction_->SolveSlipRate(tau, theta0,
+                                                    params_.sigma_n, eta, a);
+               slip_rate_(i) = V;
+               V_max_ = std::max(V_max_, V);
+            }
          }
-
-         // Total stress = pre-stress + quasi-static traction
-         real_t tau = tau0_ + traction(i);
-         real_t a = a_values(i);
-         real_t eta = eta_values(i);
-
-         if (use_psi_)
+      }
+      else
+      {
+         // ---- BP5 vector path ----
+         for (int i = 0; i < num_nodes_; i++)
          {
-            // Compute initial psi from stress equilibrium
-            real_t psi0 = dr_friction_->InitialStatePsi(tau, params_.V_init,
-                                                         params_.sigma_n, eta, a);
-            state(i * StatePerNode + ThetaIndex) = psi0;
+            // Below fault zone check (shouldn't happen with proper fault detection)
+            if (depths(i) > Wf_bp5_ + 1.0)
+            {
+               slip_rate_(2*i) = 0.0;
+               slip_rate_(2*i+1) = Vp_bp5_;
+               continue;
+            }
 
-            real_t V = dr_friction_->SolveSlipRatePsi(tau, psi0,
-                                                       params_.sigma_n, eta, a);
-            slip_rate_(i) = V;
-            V_max_ = std::max(V_max_, V);
-         }
-         else
-         {
-            // Compute initial θ from stress equilibrium
-            real_t theta0 = friction_->InitialState(tau, params_.V_init,
-                                                     params_.sigma_n, eta, a);
-            state(i * StatePerNode + ThetaIndex) = theta0;
+            // Vector stress: tau_pre + elastic traction
+            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
+                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
+                                       tau_vec[1]*tau_vec[1]);
+            real_t V_abs_init = std::sqrt(
+               V_init_values_(2*i) * V_init_values_(2*i) +
+               V_init_values_(2*i+1) * V_init_values_(2*i+1));
 
-            real_t V = friction_->SolveSlipRate(tau, theta0,
-                                                 params_.sigma_n, eta, a);
-            slip_rate_(i) = V;
-            V_max_ = std::max(V_max_, V);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            // Compute initial psi from scalar stress equilibrium
+            real_t psi0 = dr_friction_->InitialStatePsi(
+               tau_abs, V_abs_init, sigma_n_bp5_, eta, a);
+            state(i * StatePerNode + PsiIndex) = psi0;
+
+            // Verify by solving vector equation
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi0, sigma_n_bp5_, eta, a, V_vec);
+            slip_rate_(2*i) = V_vec[0];
+            slip_rate_(2*i+1) = V_vec[1];
+            real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+            V_max_ = std::max(V_max_, V_abs);
          }
       }
 
@@ -206,19 +339,17 @@ public:
 
    /// @brief Compute RHS: time derivatives of state variables.
    ///
-   /// Called during time stepping. Computes:
-   ///   dslip/dt = V (slip rate from stress balance)
-   ///   dtheta/dt = G(V, θ) (from state evolution law)
+   /// Called during time stepping. Computes slip rates and state evolution.
    ///
    /// Following Tandem RateAndState.h rhs()
    ///
-   /// @param[in] traction Traction from domain solve (τ_qs) [NumNodes()]
+   /// @param[in] traction Traction from domain solve [TractionSize()]
    /// @param[in] state Current state vector [StateSize()]
    /// @param[out] rate Time derivatives of state [StateSize()]
    /// @return Maximum slip rate
    real_t ComputeRHS(const Vector &traction, const Vector &state, Vector &rate)
    {
-      MFEM_ASSERT(traction.Size() == num_nodes_,
+      MFEM_ASSERT(traction.Size() == TractionSize(),
                   "Traction vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(),
                   "State vector has wrong size");
@@ -232,43 +363,76 @@ public:
 
       for (int i = 0; i < num_nodes_; i++)
       {
-         if (depths(i) < -params_.Wf)
+         if constexpr (SlipComponents == 1)
          {
-            // Below Wf: prescribed plate rate, no state evolution
-            rate(i * StatePerNode + SlipIndex) = params_.Vp;
-            rate(i * StatePerNode + ThetaIndex) = 0.0;
-            slip_rate_(i) = params_.Vp;
-            continue;
-         }
+            // ---- BP2 scalar path (unchanged) ----
+            if (depths(i) < -params_.Wf)
+            {
+               // Below Wf: prescribed plate rate, no state evolution
+               rate(i * StatePerNode + SlipIndex) = params_.Vp;
+               rate(i * StatePerNode + ThetaIndex) = 0.0;
+               slip_rate_(i) = params_.Vp;
+               continue;
+            }
 
-         // Get current state variable (theta or psi depending on mode)
-         real_t state_var = state(i * StatePerNode + ThetaIndex);
+            real_t state_var = state(i * StatePerNode + ThetaIndex);
+            real_t tau = tau0_ + traction(i);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
 
-         // Total stress = pre-stress + quasi-static traction
-         real_t tau = tau0_ + traction(i);
-         real_t a = a_values(i);
-         real_t eta = eta_values(i);
+            real_t V;
+            if (use_psi_)
+            {
+               V = dr_friction_->SolveSlipRatePsi(tau, state_var,
+                                                   params_.sigma_n, eta, a);
+            }
+            else
+            {
+               V = friction_->SolveSlipRate(tau, state_var,
+                                             params_.sigma_n, eta, a);
+            }
+            slip_rate_(i) = V;
+            V_max_ = std::max(V_max_, V);
 
-         real_t V;
-         if (use_psi_)
-         {
-            V = dr_friction_->SolveSlipRatePsi(tau, state_var,
-                                                params_.sigma_n, eta, a);
+            rate(i * StatePerNode + SlipIndex) = V;
+            rate(i * StatePerNode + ThetaIndex) =
+               evolution_->Rate(V, state_var, params_.Dc);
          }
          else
          {
-            V = friction_->SolveSlipRate(tau, state_var,
-                                          params_.sigma_n, eta, a);
+            // ---- BP5 vector path ----
+            if (depths(i) > Wf_bp5_ + 1.0)
+            {
+               rate(i * StatePerNode + 0) = 0.0;
+               rate(i * StatePerNode + 1) = Vp_bp5_;
+               rate(i * StatePerNode + PsiIndex) = 0.0;
+               slip_rate_(2*i) = 0.0;
+               slip_rate_(2*i+1) = Vp_bp5_;
+               continue;
+            }
+
+            real_t psi = state(i * StatePerNode + PsiIndex);
+            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
+                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+            real_t Dc = Dc_values_(i);
+
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi, sigma_n_bp5_, eta, a, V_vec);
+
+            real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+
+            rate(i * StatePerNode + 0) = V_vec[0];
+            rate(i * StatePerNode + 1) = V_vec[1];
+            rate(i * StatePerNode + PsiIndex) =
+               evolution_->Rate(V_abs, psi, Dc);
+
+            slip_rate_(2*i) = V_vec[0];
+            slip_rate_(2*i+1) = V_vec[1];
+            V_max_ = std::max(V_max_, V_abs);
          }
-         slip_rate_(i) = V;
-         V_max_ = std::max(V_max_, V);
-
-         // dslip/dt = V
-         rate(i * StatePerNode + SlipIndex) = V;
-
-         // d(state_var)/dt from evolution law (works for both theta and psi)
-         rate(i * StatePerNode + ThetaIndex) =
-            evolution_->Rate(V, state_var, params_.Dc);
       }
 
       return V_max_;
@@ -281,21 +445,24 @@ public:
    /// @brief Extract slip from state vector.
    ///
    /// @param[in] state Full state vector [StateSize()]
-   /// @param[out] slip Slip at each node [NumNodes()]
+   /// @param[out] slip Slip at each node [SlipSize()]
    void GetSlip(const Vector &state, Vector &slip) const
    {
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
-      slip.SetSize(num_nodes_);
+      slip.SetSize(SlipSize());
       for (int i = 0; i < num_nodes_; i++)
       {
-         slip(i) = state(i * StatePerNode + SlipIndex);
+         for (int c = 0; c < SlipComponents; c++)
+         {
+            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
+         }
       }
    }
 
    /// @brief Extract theta from state vector.
    ///
    /// In psi-space mode, converts psi -> theta so that I/O output
-   /// always produces physical theta values (SCEC-format log10(theta)).
+   /// always produces physical theta values.
    ///
    /// @param[in] state Full state vector [StateSize()]
    /// @param[out] theta State variable (physical theta) at each node [NumNodes()]
@@ -307,7 +474,7 @@ public:
       {
          for (int i = 0; i < num_nodes_; i++)
          {
-            real_t psi = state(i * StatePerNode + ThetaIndex);
+            real_t psi = state(i * StatePerNode + PsiIndex);
             theta(i) = dr_friction_->PsiToTheta(psi);
          }
       }
@@ -322,15 +489,18 @@ public:
 
    /// @brief Set slip in state vector.
    ///
-   /// @param[in] slip Slip values to set [NumNodes()]
+   /// @param[in] slip Slip values to set [SlipSize()]
    /// @param[out] state State vector to modify [StateSize()]
    void SetSlip(const Vector &slip, Vector &state)
    {
-      MFEM_ASSERT(slip.Size() == num_nodes_, "Slip vector has wrong size");
+      MFEM_ASSERT(slip.Size() == SlipSize(), "Slip vector has wrong size");
       MFEM_ASSERT(state.Size() == StateSize(), "State vector has wrong size");
       for (int i = 0; i < num_nodes_; i++)
       {
-         state(i * StatePerNode + SlipIndex) = slip(i);
+         for (int c = 0; c < SlipComponents; c++)
+         {
+            state(i * StatePerNode + c) = slip(i * SlipComponents + c);
+         }
       }
    }
 
@@ -353,13 +523,14 @@ public:
    // =========================================================================
 
    /// Get slip rate from last RHS evaluation.
+   /// Size: SlipComponents * NumNodes()
    const Vector &GetSlipRate() const { return slip_rate_; }
 
    /// Get maximum slip rate from last RHS evaluation (local).
+   /// For vector case, this is max ||V_i||.
    real_t GetMaxSlipRate() const { return V_max_; }
 
    /// Get global maximum slip rate (reduced across all MPI ranks).
-   /// In serial mode, returns the same as GetMaxSlipRate().
    real_t GetGlobalMaxSlipRate() const
    {
       if (mpi_ctx_)
@@ -369,14 +540,18 @@ public:
       return V_max_;
    }
 
-   /// Get pre-stress τ₀ [Pa].
+   /// Get pre-stress tau0 [Pa] (BP2 only).
    real_t GetTau0() const { return tau0_; }
 
    /// @brief Initialize pre-stress from BP2 parameters (for restart).
-   ///
-   /// Normally tau0_ is set by Init() during SetInitialCondition().
-   /// On restart, we skip SetInitialCondition() but still need tau0_.
-   void InitPreStress() { tau0_ = params_.tau0(); }
+   void InitPreStress()
+   {
+      if constexpr (SlipComponents == 1)
+      {
+         tau0_ = params_.tau0();
+      }
+      // BP5: tau_pre_ is set in constructor, no action needed
+   }
 
    /// Get fault geometry.
    const FaultGeometry<MeshType> *GetGeometry() const { return geom_; }
@@ -387,8 +562,51 @@ public:
    /// Get state evolution law.
    const StateEvolution *GetEvolution() const { return evolution_; }
 
-   /// Get BP2 parameters.
-   const BP2Params &GetParams() const { return params_; }
+   /// Get BP2 parameters (SlipComponents=1 only).
+   const BP2Params &GetParams() const
+   {
+      static_assert(SlipComponents == 1,
+                    "GetParams() is only valid for SlipComponents=1. "
+                    "Use GetBP5Params() for SlipComponents=2.");
+      return params_;
+   }
+
+   /// Get BP5 parameters (SlipComponents=2 only).
+   const BP5Params &GetBP5Params() const { return bp5_params_; }
+
+   /// Get a reference V_init value for verification (scalar).
+   /// For BP5, returns max |V_init| across all DOFs (accounts for nucleation zone).
+   real_t GetReferenceVInit() const
+   {
+      if constexpr (SlipComponents == 1)
+      {
+         return params_.V_init;
+      }
+      else
+      {
+         real_t V_ref = 0.0;
+         for (int i = 0; i < num_nodes_; i++)
+         {
+            real_t V = std::sqrt(V_init_values_(2*i) * V_init_values_(2*i) +
+                                 V_init_values_(2*i+1) * V_init_values_(2*i+1));
+            V_ref = std::max(V_ref, V);
+         }
+         return V_ref;
+      }
+   }
+
+   /// Get normal stress.
+   real_t GetSigmaN() const
+   {
+      if constexpr (SlipComponents == 1)
+      {
+         return params_.sigma_n;
+      }
+      else
+      {
+         return sigma_n_bp5_;
+      }
+   }
 
    // =========================================================================
    // Verification and output
@@ -396,9 +614,7 @@ public:
 
    /// @brief Verify stress equilibrium at each node.
    ///
-   /// Checks that: τ = σ_n · f(V, θ) + η · V for all nodes.
-   ///
-   /// @param[in] traction Traction from domain solve [NumNodes()]
+   /// @param[in] traction Traction from domain solve [TractionSize()]
    /// @param[in] state Current state vector [StateSize()]
    /// @param[in] tol Relative tolerance for equilibrium check
    /// @return Maximum relative error in stress balance
@@ -413,55 +629,118 @@ public:
 
       for (int i = 0; i < num_nodes_; i++)
       {
-         // Skip below-Wf DOFs (prescribed loading, no friction law)
-         if (depths(i) < -params_.Wf) { continue; }
-
-         real_t state_var = state(i * StatePerNode + ThetaIndex);
-         real_t tau = tau0_ + traction(i);
-         real_t a = a_values(i);
-         real_t eta = eta_values(i);
-
-         real_t V, f;
-         if (use_psi_)
+         if constexpr (SlipComponents == 1)
          {
-            V = dr_friction_->SolveSlipRatePsi(tau, state_var,
-                                                params_.sigma_n, eta, a);
-            f = dr_friction_->FrictionCoefficientPsi(V, state_var, a);
+            if (depths(i) < -params_.Wf) { continue; }
+
+            real_t state_var = state(i * StatePerNode + ThetaIndex);
+            real_t tau = tau0_ + traction(i);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            real_t V, f;
+            if (use_psi_)
+            {
+               V = dr_friction_->SolveSlipRatePsi(tau, state_var,
+                                                   params_.sigma_n, eta, a);
+               f = dr_friction_->FrictionCoefficientPsi(V, state_var, a);
+            }
+            else
+            {
+               V = friction_->SolveSlipRate(tau, state_var,
+                                             params_.sigma_n, eta, a);
+               f = friction_->FrictionCoefficient(V, state_var, a);
+            }
+            real_t tau_computed = params_.sigma_n * f + eta * V;
+
+            real_t rel_error = std::abs(tau - tau_computed) /
+                               std::max(std::abs(tau), 1.0);
+            max_rel_error = std::max(max_rel_error, rel_error);
          }
          else
          {
-            V = friction_->SolveSlipRate(tau, state_var,
-                                          params_.sigma_n, eta, a);
-            f = friction_->FrictionCoefficient(V, state_var, a);
-         }
-         real_t tau_computed = params_.sigma_n * f + eta * V;
+            if (depths(i) > Wf_bp5_ + 1.0) { continue; }
 
-         real_t rel_error = std::abs(tau - tau_computed) /
-                            std::max(std::abs(tau), 1.0);
-         max_rel_error = std::max(max_rel_error, rel_error);
+            real_t psi = state(i * StatePerNode + PsiIndex);
+            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
+                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
+                                       tau_vec[1]*tau_vec[1]);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi, sigma_n_bp5_, eta, a, V_vec);
+            real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+            real_t f = dr_friction_->FrictionCoefficientPsi(V_abs, psi, a);
+            real_t tau_computed = sigma_n_bp5_ * f + eta * V_abs;
+
+            real_t rel_error = std::abs(tau_abs - tau_computed) /
+                               std::max(tau_abs, 1.0);
+            max_rel_error = std::max(max_rel_error, rel_error);
+         }
       }
 
       return max_rel_error;
+   }
+
+   /// @brief Verify initial slip rate is reasonable.
+   ///
+   /// @param[in] V_max Maximum slip rate from initialization
+   void VerifyInitialSlipRate(real_t V_max) const
+   {
+      real_t V_ref = GetReferenceVInit();
+      real_t V_rel_err = std::abs(V_max - V_ref) /
+                         std::max(V_ref, 1e-30);
+      MFEM_VERIFY(V_rel_err < 0.5,
+                  "Initial V_max = " << V_max
+                  << " differs from V_init = " << V_ref
+                  << " by " << V_rel_err * 100 << "%");
    }
 
    /// @brief Print fault state information.
    void PrintState(const Vector &state, std::ostream &os = mfem::out) const
    {
       os << "Fault State Summary:\n";
-      os << "  tau0 = " << tau0_ / 1e6 << " MPa\n";
+      if constexpr (SlipComponents == 1)
+      {
+         os << "  tau0 = " << tau0_ / 1e6 << " MPa\n";
+      }
       os << "  V_max = " << V_max_ << " m/s\n";
 
       if (num_nodes_ > 0)
       {
-         // Extract slip and theta
          Vector slip, theta;
          GetSlip(state, slip);
          GetTheta(state, theta);
 
-         os << "  Slip range: [" << slip.Min() << ", " << slip.Max() << "] m\n";
          os << "  Theta range: [" << theta.Min() << ", " << theta.Max() << "] s\n";
-         os << "  Slip rate range: [" << slip_rate_.Min() << ", "
-            << slip_rate_.Max() << "] m/s\n";
+
+         if constexpr (SlipComponents == 1)
+         {
+            os << "  Slip range: [" << slip.Min() << ", " << slip.Max() << "] m\n";
+            os << "  Slip rate range: [" << slip_rate_.Min() << ", "
+               << slip_rate_.Max() << "] m/s\n";
+         }
+         else
+         {
+            real_t slip_min = 1e30, slip_max = 0.0;
+            real_t Vr_min = 1e30, Vr_max = 0.0;
+            for (int i = 0; i < num_nodes_; i++)
+            {
+               real_t s = std::sqrt(slip(2*i)*slip(2*i) +
+                                    slip(2*i+1)*slip(2*i+1));
+               real_t v = std::sqrt(slip_rate_(2*i)*slip_rate_(2*i) +
+                                    slip_rate_(2*i+1)*slip_rate_(2*i+1));
+               slip_min = std::min(slip_min, s);
+               slip_max = std::max(slip_max, s);
+               Vr_min = std::min(Vr_min, v);
+               Vr_max = std::max(Vr_max, v);
+            }
+            os << "  |Slip| range: [" << slip_min << ", " << slip_max << "] m\n";
+            os << "  |V| range: [" << Vr_min << ", " << Vr_max << "] m/s\n";
+         }
       }
    }
 
@@ -469,7 +748,19 @@ public:
    void SetSlipRate(const Vector &V)
    {
       slip_rate_ = V;
-      V_max_ = V.Normlinf();
+      if constexpr (SlipComponents == 1)
+      {
+         V_max_ = V.Normlinf();
+      }
+      else
+      {
+         V_max_ = 0.0;
+         for (int i = 0; i < num_nodes_; i++)
+         {
+            real_t V_abs = std::sqrt(V(2*i)*V(2*i) + V(2*i+1)*V(2*i+1));
+            V_max_ = std::max(V_max_, V_abs);
+         }
+      }
    }
 
    /// Whether psi-space integration is active.
@@ -479,18 +770,33 @@ private:
    FaultGeometry<MeshType> *geom_;
    FrictionLaw *friction_;
    StateEvolution *evolution_;
-   BP2Params params_;
    MPIContext *mpi_ctx_ = nullptr;
 
    int num_nodes_;      ///< Number of fault DOFs
-   real_t tau0_;        ///< Pre-stress [Pa]
+   real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
    DieterichRuinaFriction *dr_friction_ = nullptr;  ///< Downcast for psi methods
 
-   Vector slip_rate_;   ///< Cached slip rate from last RHS [NumNodes()]
+   Vector slip_rate_;   ///< Cached slip rate [SlipComponents * NumNodes()]
+
+   // BP2 parameters (only used when SlipComponents == 1)
+   BP2Params params_;
+
+   // BP5 parameters (only used when SlipComponents == 2)
+   BP5Params bp5_params_;
+   real_t sigma_n_bp5_ = 0.0;
+   real_t Vp_bp5_ = 0.0;
+   real_t Wf_bp5_ = 0.0;
+   Vector Dc_values_;       ///< Per-DOF critical slip distance [NumNodes()]
+   Vector tau_pre_;         ///< Per-DOF pre-stress [2 * NumNodes()] (BP5 only)
+   Vector V_init_values_;   ///< Per-DOF initial velocity [2 * NumNodes()] (BP5 only)
 };
+
+/// Convenience type aliases for common template instantiations.
+using BP2FaultOp = RateStateFaultOperator<Mesh, 1>;
+using BP5FaultOp = RateStateFaultOperator<Mesh, 2>;
 
 } // namespace seas
 } // namespace mfem

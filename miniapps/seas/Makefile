@@ -43,6 +43,20 @@ TEST_PSI_STATE_SRC = tests/unit/test_psi_state.cpp
 # Phase 1a/1b: Fault detection and interface tests
 TEST_FAULT_DETECTION_SRC = tests/unit/test_fault_detection.cpp
 TEST_DOMAIN_INTERFACE_SRC = tests/unit/test_domain_operator_interface.cpp
+# BP5 Phase 1: Parameters and vector friction
+TEST_BP5_PARAMS_SRC = tests/unit/test_bp5_params.cpp
+TEST_VECTOR_FRICTION_SRC = tests/unit/test_vector_friction.cpp
+TEST_FAULT_BASIS_SRC = tests/unit/test_fault_basis.cpp
+# BP5 Phase 2: Elasticity integrator and operator
+TEST_ELASTICITY_BR2_SRC = tests/unit/test_elasticity_br2.cpp
+TEST_ELASTICITY_OPERATOR_SRC = tests/unit/test_elasticity_operator.cpp
+# BP5 Phase 3: BP5 fault operator
+TEST_BP5_FAULT_OPERATOR_SRC = tests/unit/test_bp5_fault_operator.cpp
+# BP5 Phase 4: Integration tests
+TEST_BP5_INTEGRATION_SRC = tests/unit/test_bp5_integration.cpp
+# BP5 Phase 5: Output and mesh tests
+TEST_BP5_OUTPUT_SRC = tests/unit/test_bp5_output.cpp
+TEST_BP5_MESH_SRC = tests/unit/test_bp5_mesh.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -57,6 +71,15 @@ TEST_CHECKPOINT_OBJ = $(TEST_CHECKPOINT_SRC:.cpp=.o)
 TEST_PSI_STATE_OBJ = $(TEST_PSI_STATE_SRC:.cpp=.o)
 TEST_FAULT_DETECTION_OBJ = $(TEST_FAULT_DETECTION_SRC:.cpp=.o)
 TEST_DOMAIN_INTERFACE_OBJ = $(TEST_DOMAIN_INTERFACE_SRC:.cpp=.o)
+TEST_BP5_PARAMS_OBJ = $(TEST_BP5_PARAMS_SRC:.cpp=.o)
+TEST_VECTOR_FRICTION_OBJ = $(TEST_VECTOR_FRICTION_SRC:.cpp=.o)
+TEST_FAULT_BASIS_OBJ = $(TEST_FAULT_BASIS_SRC:.cpp=.o)
+TEST_ELASTICITY_BR2_OBJ = $(TEST_ELASTICITY_BR2_SRC:.cpp=.o)
+TEST_ELASTICITY_OPERATOR_OBJ = $(TEST_ELASTICITY_OPERATOR_SRC:.cpp=.o)
+TEST_BP5_FAULT_OPERATOR_OBJ = $(TEST_BP5_FAULT_OPERATOR_SRC:.cpp=.o)
+TEST_BP5_INTEGRATION_OBJ = $(TEST_BP5_INTEGRATION_SRC:.cpp=.o)
+TEST_BP5_OUTPUT_OBJ = $(TEST_BP5_OUTPUT_SRC:.cpp=.o)
+TEST_BP5_MESH_OBJ = $(TEST_BP5_MESH_SRC:.cpp=.o)
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -64,7 +87,8 @@ FRICTION_HEADERS = friction/friction_law.hpp \
                    friction/state_evolution.hpp \
                    friction/dieterich_ruina.hpp \
                    config/bp2_params.hpp \
-                   config/bp1_params.hpp
+                   config/bp1_params.hpp \
+                   config/bp5_params.hpp
 
 # Phase 2: Domain operator
 DOMAIN_HEADERS = common/seas_types.hpp \
@@ -72,12 +96,16 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/domain_operator.hpp \
                  domain/antiplane_operator.hpp \
                  domain/antiplane_bdrload_operator.hpp \
+                 domain/elasticity_operator.hpp \
                  domain/seas_boundary_tags.hpp \
-                 domain/bp2_mesh.hpp
+                 domain/bp2_mesh.hpp \
+                 integrator/dg_br2_integrator.hpp \
+                 integrator/dg_elasticity_br2_integrator.hpp
 
 # Phase 3: Fault operator
 FAULT_HEADERS = fault/fault_geometry.hpp \
-                fault/rate_state_fault.hpp
+                fault/rate_state_fault.hpp \
+                fault/fault_basis.hpp
 
 # Phase 4: SEAS operator
 SOLVER_HEADERS = solver/seas_operator.hpp \
@@ -99,12 +127,20 @@ SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_H
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
 GENERATE_MESH_OBJ = $(GENERATE_MESH_SRC:.cpp=.o)
 
-# Targets
+# Targets — unit tests (fast, run by `make test` via MFEM test framework)
 SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antiplane \
                seas_test_fault_operator seas_test_quasi_dynamic seas_test_bp2_short \
-               seas_test_io seas_bp2_serial_smoke seas_test_checkpoint \
-               seas_test_psi_state seas_generate_mesh \
-               seas_test_fault_detection seas_test_domain_interface
+               seas_test_io seas_test_checkpoint \
+               seas_test_psi_state \
+               seas_test_fault_detection seas_test_domain_interface \
+               seas_test_bp5_params seas_test_vector_friction \
+               seas_test_fault_basis \
+               seas_test_elasticity_br2 seas_test_elasticity_operator \
+               seas_test_bp5_fault_operator \
+               seas_test_bp5_integration \
+               seas_test_bp5_output seas_test_bp5_mesh
+# Long-running simulations and tools (built by `make all`, not run by `make test`)
+SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
 TEST_MPI_CONTEXT_SRC = tests/parallel/test_mpi_context.cpp
 TEST_PARALLEL_UTILS_SRC = tests/parallel/test_parallel_utils.cpp
@@ -129,7 +165,9 @@ TEST_PARALLEL_FAULT_OBJ = $(TEST_PARALLEL_FAULT_SRC:.cpp=.o)
 PSEAS_OBJ = $(PSEAS_SRC:.cpp=.o)
 
 # Phase 8: Parallel I/O headers
-PARALLEL_IO_HEADERS = io/parallel_benchmark_output.hpp
+PARALLEL_IO_HEADERS = io/parallel_benchmark_output.hpp \
+                      io/bp5_benchmark_output.hpp \
+                      io/bp5_parallel_output.hpp
 
 # Phase 9: Verification and scaling sources
 TEST_SERIAL_PARALLEL_SRC = tests/parallel/test_serial_parallel_consistency.cpp
@@ -159,19 +197,27 @@ BP1_FULL_OBJ = $(BP1_FULL_SRC:.cpp=.o)
 BP1_BDRLOAD_SRC = tests/verification/bp1_bdrload.cpp
 BP1_BDRLOAD_OBJ = $(BP1_BDRLOAD_SRC:.cpp=.o)
 
+# BP5 full multi-cycle simulation
+BP5_FULL_SRC = tests/verification/bp5_verification_full.cpp
+BP5_FULL_OBJ = $(BP5_FULL_SRC:.cpp=.o)
+
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
-               seas_test_parallel_fault seas_pseas \
+               seas_test_parallel_fault \
                seas_test_serial_parallel_consistency \
-               seas_bp2_benchmark_parallel seas_test_scaling \
-               seas_bp2_verify seas_bp2_full seas_bp1_full \
-               seas_bp1_bdrload \
+               seas_test_scaling \
                seas_test_br2_consistency
+# Long-running parallel simulations (built by `make all`, not run by `make test`)
+PAR_LONG = seas_pseas \
+           seas_bp2_benchmark_parallel \
+           seas_bp2_verify seas_bp2_full seas_bp1_full \
+           seas_bp1_bdrload \
+           seas_bp5_full
 
 ifeq ($(MFEM_USE_MPI),NO)
-   MINIAPPS = $(SEQ_MINIAPPS)
+   MINIAPPS = $(SEQ_MINIAPPS) $(SEQ_LONG)
 else
-   MINIAPPS = $(PAR_MINIAPPS) $(SEQ_MINIAPPS)
+   MINIAPPS = $(PAR_MINIAPPS) $(PAR_LONG) $(SEQ_MINIAPPS) $(SEQ_LONG)
 endif
 
 MFEM_TESTS = MINIAPPS
@@ -186,7 +232,12 @@ MFEM_TESTS = MINIAPPS
         test-parallel-domain test-mms-parallel test-parallel-fault \
         test-serial-parallel test-bp2-parallel test-scaling \
         test-bp2-verify test-psi-state test-br2-consistency \
-        test-fault-detection test-domain-interface
+        test-fault-detection test-domain-interface \
+        test-bp5-params test-vector-friction test-fault-basis \
+        test-elasticity-br2 test-elasticity-operator \
+        test-bp5-fault-operator \
+        test-bp5-integration \
+        test-bp5-output test-bp5-mesh
 
 all: $(MINIAPPS)
 
@@ -244,6 +295,42 @@ seas_test_fault_detection: $(TEST_FAULT_DETECTION_OBJ)
 seas_test_domain_interface: $(TEST_DOMAIN_INTERFACE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DOMAIN_INTERFACE_OBJ) $(MFEM_LIBS)
 
+# BP5 Phase 1: Parameter tests
+seas_test_bp5_params: $(TEST_BP5_PARAMS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PARAMS_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 1: Vector friction tests
+seas_test_vector_friction: $(TEST_VECTOR_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VECTOR_FRICTION_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 2a: Fault basis tests
+seas_test_fault_basis: $(TEST_FAULT_BASIS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 2b: Elasticity BR2 integrator tests
+seas_test_elasticity_br2: $(TEST_ELASTICITY_BR2_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ELASTICITY_BR2_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 2b: Elasticity domain operator tests
+seas_test_elasticity_operator: $(TEST_ELASTICITY_OPERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ELASTICITY_OPERATOR_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 3: BP5 fault operator tests
+seas_test_bp5_fault_operator: $(TEST_BP5_FAULT_OPERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_FAULT_OPERATOR_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 4: BP5 integration tests
+seas_test_bp5_integration: $(TEST_BP5_INTEGRATION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_INTEGRATION_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 5: Output unit tests
+seas_test_bp5_output: $(TEST_BP5_OUTPUT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_OUTPUT_OBJ) $(MFEM_LIBS)
+
+# BP5 Phase 5: Mesh unit tests
+seas_test_bp5_mesh: $(TEST_BP5_MESH_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_MESH_OBJ) $(MFEM_LIBS)
+
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
@@ -297,6 +384,42 @@ $(TEST_DOMAIN_INTERFACE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) 
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_BP5_PARAMS_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_VECTOR_FRICTION_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_BASIS_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_ELASTICITY_BR2_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_ELASTICITY_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BP5_FAULT_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BP5_INTEGRATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BP5_OUTPUT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BP5_MESH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -304,7 +427,12 @@ $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONF
 # Testing targets
 test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-quasi-dynamic test-bp2-short test-io test-checkpoint \
-      test-fault-detection test-domain-interface
+      test-fault-detection test-domain-interface \
+      test-bp5-params test-vector-friction test-fault-basis \
+      test-elasticity-br2 test-elasticity-operator \
+      test-bp5-fault-operator \
+      test-bp5-integration \
+      test-bp5-output test-bp5-mesh
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -341,6 +469,33 @@ test-fault-detection: seas_test_fault_detection
 
 test-domain-interface: seas_test_domain_interface
 	./seas_test_domain_interface
+
+test-bp5-params: seas_test_bp5_params
+	./seas_test_bp5_params
+
+test-vector-friction: seas_test_vector_friction
+	./seas_test_vector_friction
+
+test-fault-basis: seas_test_fault_basis
+	./seas_test_fault_basis
+
+test-elasticity-br2: seas_test_elasticity_br2
+	./seas_test_elasticity_br2
+
+test-elasticity-operator: seas_test_elasticity_operator
+	./seas_test_elasticity_operator
+
+test-bp5-fault-operator: seas_test_bp5_fault_operator
+	./seas_test_bp5_fault_operator
+
+test-bp5-integration: seas_test_bp5_integration
+	./seas_test_bp5_integration
+
+test-bp5-output: seas_test_bp5_output
+	./seas_test_bp5_output
+
+test-bp5-mesh: seas_test_bp5_mesh
+	./seas_test_bp5_mesh
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)
@@ -488,7 +643,23 @@ $(BP1_BDRLOAD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARAL
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
 
+# BP5 full multi-cycle simulation
+seas_bp5_full: $(BP5_FULL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP5_FULL_OBJ) $(MFEM_LIBS)
+
+$(BP5_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
 -include $(MFEM_TEST_MK)
+
+# MFEM test framework pattern rules: define %-test-seq and %-test-par
+# targets expected by test.mk for each entry in SEQ_MINIAPPS / PAR_MINIAPPS.
+RUN_MPI = $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(MFEM_MPI_NP)
+%-test-par: %
+	@$(call mfem-test,$<, $(RUN_MPI), SEAS miniapp)
+%-test-seq: %
+	@$(call mfem-test,$<,, SEAS miniapp)
 
 # Generate an error message if the MFEM library is not built and exit
 $(MFEM_LIB_FILE):
