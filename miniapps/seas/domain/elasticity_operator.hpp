@@ -342,6 +342,58 @@ private:
          M_inv.GetInverseMatrix(elem_mass_inv_[e]);
       }
 
+#ifdef MFEM_USE_MPI
+      // In parallel, also compute mass inverses for face-neighbor elements.
+      // These are needed by DGElasticityBR2Integrator::AssembleFaceMatrix when
+      // ParBilinearForm::AssembleSharedFaces passes a shared face with
+      // Trans.Elem2No >= mesh.GetNE().
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         MFEM_VERIFY(pfes, "Expected ParFiniteElementSpace in parallel");
+         pfes->ExchangeFaceNbrData();
+
+         ParMesh *pmesh = pfes->GetParMesh();
+         int nel_nbr = pmesh->GetNFaceNeighborElements();
+         elem_mass_inv_.resize(ne + nel_nbr);
+
+         for (int i = 0; i < nel_nbr; i++)
+         {
+            const FiniteElement *fe = pfes->GetFaceNbrFE(i);
+            ElementTransformation *T =
+               pmesh->GetFaceNbrElementTransformation(i);
+
+            int ndof = fe->GetDof();
+            DenseMatrix M(ndof);
+
+            const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(),
+                                                      2 * fe->GetOrder());
+            Vector shape(ndof);
+            M = 0.0;
+
+            for (int j = 0; j < ir.GetNPoints(); j++)
+            {
+               const IntegrationPoint &ip = ir.IntPoint(j);
+               T->SetIntPoint(&ip);
+               fe->CalcShape(ip, shape);
+
+               real_t w = ip.weight * T->Weight();
+               for (int k = 0; k < ndof; k++)
+               {
+                  for (int l = 0; l < ndof; l++)
+                  {
+                     M(k, l) += w * shape(k) * shape(l);
+                  }
+               }
+            }
+
+            elem_mass_inv_[ne + i].SetSize(ndof);
+            DenseMatrixInverse M_inv(M);
+            M_inv.GetInverseMatrix(elem_mass_inv_[ne + i]);
+         }
+      }
+#endif
+
       mass_inv_computed_ = true;
    }
 
@@ -351,6 +403,18 @@ private:
 
    void AssembleStiffness() const
    {
+      // In parallel, exchange face neighbor data before assembly.
+      // ParBilinearForm::AssembleSharedFaces needs this to access
+      // face neighbor elements and DOFs.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         mesh_.ExchangeFaceNbrData();
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         if (pfes) { pfes->ExchangeFaceNbrData(); }
+#endif
+      }
+
       cached_a_ = std::make_unique<BilinFormType>(fes_.get());
 
       // Volume term: ∫_Ω σ(u):ε(v) dV

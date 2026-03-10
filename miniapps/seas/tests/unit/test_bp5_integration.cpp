@@ -501,6 +501,125 @@ void TestBP5StressBalanceDuringTimeStep()
 }
 
 // =============================================================================
+// Test 8: Traction at t=0 with Zero Slip
+// =============================================================================
+void TestBP5ZeroSlipTraction()
+{
+   std::cout << "\n--- Test: BP5 Traction at t=0 (Zero Slip) ---\n";
+
+   BP5IntegrationFixture fix;
+   if (!fix.Setup())
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   int N = fix.nf;
+
+   // At t=0 with zero slip and zero Dirichlet loading, the domain solve
+   // should produce zero displacement and zero traction.
+   Vector slip(2 * N);
+   slip = 0.0;
+
+   GridFunction u_gf(&fix.domain_op->GetFESpace());
+   u_gf = 0.0;
+
+   fix.domain_op->Solve(0.0, slip, u_gf);
+
+   // Displacement should be zero (no loading at t=0)
+   TEST_NEAR(u_gf.Norml2(), 0.0, 1e-12,
+             "Displacement is zero at t=0 with zero slip");
+
+   // Compute traction from zero displacement
+   Vector traction(2 * N);
+   fix.domain_op->ComputeTraction(u_gf, slip, traction);
+
+   // Traction should be zero (or very small)
+   real_t max_trac = 0.0;
+   for (int i = 0; i < traction.Size(); i++)
+   {
+      max_trac = std::max(max_trac, std::abs(traction(i)));
+   }
+   TEST_NEAR(max_trac, 0.0, 1e-6,
+             "Traction is near-zero at t=0 with zero slip");
+
+   std::cout << "  Max |traction| = " << max_trac << " Pa\n";
+}
+
+// =============================================================================
+// Test 9: Pre-stress + Traction Yields Correct Initial Slip Rate
+// =============================================================================
+void TestBP5InitialSlipRateFromPreStress()
+{
+   std::cout << "\n--- Test: BP5 Pre-stress → Initial Slip Rate ---\n";
+
+   BP5IntegrationFixture fix;
+   if (!fix.Setup())
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   int N = fix.nf;
+   Vector state(fix.fault_op->StateSize());
+   fix.seas_op->SetInitialCondition(state);
+
+   // After initialization, the traction from the domain solve (near-zero at t=0)
+   // combined with tau_pre should produce initial slip rates matching V_init/V_nuc.
+   const Vector &traction = fix.seas_op->GetTraction();
+
+   // Get fault geometry for coordinate-dependent checks
+   const auto &fault_geom = *fix.fault_geom;
+   const Vector &coords_x2 = fault_geom.GetCoordsX2();
+   const Vector &coords_x3 = fault_geom.GetCoordsX3();
+   const Vector &tau_pre = fault_geom.GetTauPre();
+   const Vector &V_init_vals = fault_geom.GetVInit();
+
+   real_t max_V_err = 0.0;
+   int n_checked = 0;
+
+   for (int i = 0; i < N; i++)
+   {
+      // Compute total stress: tau_pre + elastic traction
+      real_t tau_total[2] = {
+         tau_pre(2*i) + traction(2*i),
+         tau_pre(2*i+1) + traction(2*i+1)
+      };
+      real_t tau_abs = std::sqrt(tau_total[0]*tau_total[0] +
+                                  tau_total[1]*tau_total[1]);
+
+      real_t Vi_abs = std::sqrt(V_init_vals(2*i) * V_init_vals(2*i) +
+                                 V_init_vals(2*i+1) * V_init_vals(2*i+1));
+
+      // Verify tau_abs is in physically reasonable range (5-25 MPa)
+      if (tau_abs < 1e3 || tau_abs > 1e8) { continue; }
+
+      real_t a = fault_geom.GetAValues()(i);
+      real_t eta = fault_geom.GetEtaValues()(i);
+
+      // Use the friction solver to get V from tau_abs
+      real_t psi_ss = fix.params.f0 + fix.params.b *
+         std::log(fix.params.V0 / fix.params.Vp);
+
+      real_t V_solved = fix.friction->SolveSlipRatePsi(
+         tau_abs, psi_ss, fix.params.sigma_n, eta, a);
+
+      // V_solved should match Vi_abs within tolerance
+      real_t rel_err = std::abs(V_solved - Vi_abs) /
+         std::max(Vi_abs, 1e-20);
+      max_V_err = std::max(max_V_err, rel_err);
+      n_checked++;
+   }
+
+   TEST_ASSERT(n_checked > 0, "Checked at least one fault DOF");
+   TEST_ASSERT(max_V_err < 1e-4,
+               "Initial slip rate matches V_init from pre-stress (rel err < 1e-4)");
+
+   std::cout << "  Checked " << n_checked << " DOFs, max rel error = "
+             << max_V_err << "\n";
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main()
@@ -516,6 +635,8 @@ int main()
    TestBP5ShortRK4Run();
    TestBP5ShortRK45Run();
    TestBP5StressBalanceDuringTimeStep();
+   TestBP5ZeroSlipTraction();
+   TestBP5InitialSlipRateFromPreStress();
 
    TEST_PRINT_RESULTS();
 

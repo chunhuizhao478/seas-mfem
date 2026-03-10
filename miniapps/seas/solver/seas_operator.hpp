@@ -188,8 +188,21 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
    MFEM_VERIFY(eq_error < 1e-6,
                "Initial stress equilibrium error too large: " << eq_error);
 
-   // Verify initial slip rate is close to V_init
-   fault_->VerifyInitialSlipRate(V_max);
+   // Log initial slip rate comparison (use global V_ref in parallel).
+   // For BP5-QD, the nucleation zone has δτ overstress so V_max > V_nuc
+   // is expected and correct — do not assert.
+   {
+      real_t V_ref = fault_->GetReferenceVInit();
+      if (mpi_ctx_)
+      {
+         V_ref = mpi_ctx_->GlobalMax(V_ref);
+      }
+      if (mpi_ctx_ == nullptr || mpi_ctx_->IsRoot())
+      {
+         mfem::out << "  Initial V_max = " << V_max
+                   << ", V_ref (max V_init) = " << V_ref << "\n";
+      }
+   }
 }
 
 template <typename MeshType, typename DomainOpType, typename FaultOpType>

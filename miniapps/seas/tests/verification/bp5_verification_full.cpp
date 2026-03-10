@@ -549,7 +549,18 @@ int main(int argc, char *argv[])
    ode_solver.SetRelTol(1e-50);
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.5 * BP5Params::seconds_per_year);
-   ode_solver.SetDt(1e3);
+
+   // Initial dt must be small enough for the nucleation zone.
+   // With V_nuc = 0.03 m/s and L = 0.13 m, CFL-like condition:
+   //   dt ~ L / V_max to keep slip increments physically reasonable.
+   real_t dt_init = std::min(1e3, 0.5 * params.L_nuc /
+                             std::max(V_init, 1e-20));
+   ode_solver.SetDt(dt_init);
+   if (mpi.IsRoot())
+   {
+      std::cout << "  Initial dt: " << dt_init << " s"
+                << " (V_init_max = " << V_init << ")\n";
+   }
    ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
    ode_solver.Init(seas_op);
 

@@ -254,7 +254,11 @@ void TestTau0Vec()
                      "Friction solver recovers |V_init| outside nucleation");
    }
 
-   // In nucleation zone
+   // In nucleation zone: BP5-QD has delta_tau overstress (SCEC Eq. 23)
+   // tau0 = sigma_n*a*asinh(Vi/(2V0)*e) + eta*Vi + delta_tau
+   // where delta_tau = eta*Vi for QD. With psi_ss at plate rate, the friction
+   // solver returns V > V_nuc because the nucleation zone is intentionally
+   // overstressed to accelerate nucleation.
    {
       real_t x2 = -25.0e3, x3 = 10.0e3;
       real_t Vi[2];
@@ -277,8 +281,160 @@ void TestTau0Vec()
       real_t V_solved = friction_nuc.SolveSlipRatePsi(
          tau_total_mag, psi_ss, p.sigma_n, p.eta(), p.a_of_x2_x3(x2, x3));
 
-      TEST_REL_NEAR(V_solved, Vi_abs, 1e-6,
-                     "Friction solver recovers |V_init| in nucleation zone");
+      // V_solved > V_nuc due to delta_tau overstress (expected for BP5-QD)
+      TEST_ASSERT(V_solved > Vi_abs,
+                  "V_solved > V_nuc in nucleation (delta_tau overstress)");
+
+      // Without delta_tau, the friction solver should recover V_nuc exactly
+      real_t tau_no_delta = tau_total_mag - p.eta() * Vi_abs;
+      real_t V_no_delta = friction_nuc.SolveSlipRatePsi(
+         tau_no_delta, psi_ss, p.sigma_n, p.eta(), p.a_of_x2_x3(x2, x3));
+      TEST_REL_NEAR(V_no_delta, Vi_abs, 1e-6,
+                     "Without delta_tau, friction solver recovers V_nuc");
+   }
+}
+
+// =============================================================================
+// Test: Quantitative pre-stress magnitude against SCEC analytical values
+// =============================================================================
+void TestTau0VecQuantitative()
+{
+   std::cout << "\n=== tau0_vec Quantitative (SCEC Spec) ===\n";
+
+   BP5Params p;
+   real_t tau[2];
+
+   // Analytical computation:
+   // psi_ss = f0 + b * ln(V0/Vp) = 0.6 + 0.03 * ln(1e-6/1e-9) = 0.807233
+   real_t psi_ss = p.f0 + p.b * std::log(p.V0 / p.Vp);
+   real_t eta = p.eta();
+
+   // ----------- VW zone (a=0.004), outside nucleation -----------
+   // x2=0, x3=10e3 → a=0.004
+   {
+      real_t x2 = 0.0, x3 = 10.0e3;
+      real_t a = p.a_of_x2_x3(x2, x3);
+      TEST_NEAR(a, 0.004, 1e-15, "a(0, 10km) = 0.004 (VW zone)");
+
+      real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_init * p.V_init);
+      real_t e = std::exp(psi_ss / a);
+      real_t expected_tau = p.sigma_n * a *
+         std::asinh((Vi_abs / (2.0 * p.V0)) * e) + eta * Vi_abs;
+
+      p.tau0_vec(x2, x3, tau);
+      real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
+
+      // Expected ~19.49 MPa
+      TEST_REL_NEAR(tau_mag, expected_tau, 1e-10,
+                     "tau0 magnitude matches analytical (VW, a=0.004)");
+      TEST_REL_NEAR(tau_mag / 1e6, 19.49, 1e-2,
+                     "tau0 ~ 19.49 MPa (VW zone)");
+   }
+
+   // ----------- VS zone (a=0.04), outside nucleation -----------
+   // x2=0, x3=30e3 → a=0.04 (deep VS)
+   {
+      real_t x2 = 0.0, x3 = 30.0e3;
+      real_t a = p.a_of_x2_x3(x2, x3);
+      TEST_NEAR(a, 0.04, 1e-15, "a(0, 30km) = 0.04 (VS zone)");
+
+      real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_init * p.V_init);
+      real_t e = std::exp(psi_ss / a);
+      real_t expected_tau = p.sigma_n * a *
+         std::asinh((Vi_abs / (2.0 * p.V0)) * e) + eta * Vi_abs;
+
+      p.tau0_vec(x2, x3, tau);
+      real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
+
+      // Expected ~13.27 MPa
+      TEST_REL_NEAR(tau_mag, expected_tau, 1e-10,
+                     "tau0 magnitude matches analytical (VS, a=0.04)");
+      TEST_REL_NEAR(tau_mag / 1e6, 13.27, 1e-2,
+                     "tau0 ~ 13.27 MPa (VS zone)");
+   }
+
+   // ----------- Nucleation zone (a=0.004), WITH delta_tau -----------
+   // x2=-25e3, x3=10e3 → nucleation zone, a=0.004
+   // BP5-QD Eq. 23: tau_i^0 includes delta_tau = eta * V_i
+   {
+      real_t x2 = -25.0e3, x3 = 10.0e3;
+      real_t a = p.a_of_x2_x3(x2, x3);
+      TEST_NEAR(a, 0.004, 1e-15, "a(-25km, 10km) = 0.004 (nucleation in VW)");
+      TEST_ASSERT(p.IsNucleationZone(x2, x3), "(-25km, 10km) is nucleation");
+
+      real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_nuc * p.V_nuc);
+      real_t e = std::exp(psi_ss / a);
+
+      // Base tau: SCEC Eq. 20
+      real_t base_tau = p.sigma_n * a *
+         std::asinh((Vi_abs / (2.0 * p.V0)) * e) + eta * Vi_abs;
+      // delta_tau for BP5-QD: eta * Vi (SCEC Eq. 23)
+      real_t delta_tau = eta * Vi_abs;
+      real_t expected_tau = base_tau + delta_tau;
+
+      p.tau0_vec(x2, x3, tau);
+      real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
+
+      TEST_REL_NEAR(tau_mag, expected_tau, 1e-10,
+                     "tau0 magnitude matches analytical (nucleation, a=0.004)");
+
+      // Verify delta_tau is non-trivial (eta * V_nuc ~ 0.139 MPa)
+      TEST_ASSERT(delta_tau / 1e6 > 0.1,
+                  "delta_tau > 0.1 MPa (non-trivial overstress)");
+      TEST_REL_NEAR(delta_tau, eta * Vi_abs, 1e-12,
+                     "delta_tau = eta * Vi_abs (SCEC Eq. 23)");
+
+      // Verify nucleation tau > non-nucleation tau (overstressed)
+      real_t tau_non_nuc[2];
+      p.tau0_vec(0.0, 10.0e3, tau_non_nuc);
+      real_t tau_non_nuc_mag = std::sqrt(tau_non_nuc[0]*tau_non_nuc[0] +
+                                          tau_non_nuc[1]*tau_non_nuc[1]);
+      TEST_ASSERT(tau_mag > tau_non_nuc_mag,
+                  "Nucleation tau > non-nucleation tau (overstressed)");
+   }
+}
+
+// =============================================================================
+// Test: Pre-stress → friction solver → V_init round-trip at multiple a values
+// =============================================================================
+void TestPreStressFrictionRoundTrip()
+{
+   std::cout << "\n=== Pre-stress Friction Round-Trip ===\n";
+
+   BP5Params p;
+   real_t psi_ss = p.f0 + p.b * std::log(p.V0 / p.Vp);
+
+   // Test at multiple (x2, x3) points covering VW, transition, and VS zones
+   struct TestPoint { real_t x2, x3; const char *label; };
+   TestPoint points[] = {
+      {      0.0, 10.0e3, "VW center (a=0.004)"},
+      {      0.0,  3.0e3, "Shallow transition"},
+      {      0.0, 19.0e3, "Deep transition"},
+      {      0.0, 30.0e3, "Deep VS (a=0.04)"},
+      {  31.0e3, 10.0e3, "Strike transition"},
+      { -10.0e3, 10.0e3, "VW off-center"},
+   };
+
+   for (auto &pt : points)
+   {
+      real_t a = p.a_of_x2_x3(pt.x2, pt.x3);
+      real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_init * p.V_init);
+
+      real_t tau[2];
+      p.tau0_vec(pt.x2, pt.x3, tau);
+      real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
+
+      DieterichRuinaFriction::Constants fc;
+      fc.V0 = p.V0; fc.f0 = p.f0; fc.b = p.b;
+      fc.Dc = p.L_of_x2_x3(pt.x2, pt.x3);
+      DieterichRuinaFriction friction(fc);
+
+      real_t V_solved = friction.SolveSlipRatePsi(
+         tau_mag, psi_ss, p.sigma_n, p.eta(), a);
+
+      std::string msg = "Round-trip V at " + std::string(pt.label) +
+                        " (a=" + std::to_string(a) + ")";
+      TEST_REL_NEAR(V_solved, Vi_abs, 1e-6, msg.c_str());
    }
 }
 
@@ -495,6 +651,8 @@ int main()
    TestNucleationAndL();
    TestVinitVec();
    TestTau0Vec();
+   TestTau0VecQuantitative();
+   TestPreStressFrictionRoundTrip();
    TestPrint();
    TestADepthSymmetry();
    TestZoneBoundaryEdgeCases();

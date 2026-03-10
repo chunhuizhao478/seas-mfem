@@ -106,8 +106,10 @@ struct BP5Params
    real_t V_zero = 1.0e-20;
 
    /// Nucleation zone initial slip rate [m/s]
-   /// Following Tandem's bp5.lua convention (0.01, not 0.03 from SCEC spec)
-   real_t V_nuc = 0.01;
+   /// SCEC BP5 spec Section 3: V_i = 0.03 m/s in the favorable nucleation zone.
+   /// Same for both BP5-QD and BP5-FD; only δτ in pre-stress differs.
+   /// (Tandem's bp5.lua uses 0.01, which deviates from the SCEC standard.)
+   real_t V_nuc = 0.03;
 
    // =========================================================================
    // Geometric parameters (all in meters)
@@ -257,16 +259,19 @@ struct BP5Params
       }
    }
 
-   /// Compute pre-stress vector tau0(x2, x3) for initial equilibrium.
+   /// Compute pre-stress vector tau0(x2, x3) for initial conditions.
    ///
-   /// Following Tandem's bp5.lua tau_pre():
-   ///   psi_ss = f0 + b * ln(V0 / Vp)  (steady state at plate rate)
-   ///   tau0_scalar = sigma_n * a * asinh((Vi2 / 2V0) * exp(psi_ss / a))
-   ///                 + eta * Vi2
-   ///   tau0_vec = -tau0_scalar * Vi / |Vi|
+   /// SCEC BP5 spec Eq. 20 (outside nucleation zone):
+   ///   tau0 = sigma_n * a * asinh(V_init/(2V0) * exp(psi_ss/a)) + eta*V_init
    ///
-   /// The negative sign means pre-stress opposes the initial velocity direction
-   /// (stress drives slip; friction + radiation damping oppose it).
+   /// SCEC BP5 spec Eq. 23 (inside nucleation zone):
+   ///   tau0_i = sigma_n * a * asinh(V_i/(2V0) * exp(psi_ss/a)) + eta*V_i + delta_tau
+   ///   where delta_tau = eta*V_i for BP5-QD, delta_tau = 0 for BP5-FD
+   ///
+   /// The extra delta_tau in QD means the nucleation zone is initially
+   /// overstressed, driving V above V_i and accelerating nucleation.
+   ///
+   /// Pre-stress direction is anti-parallel to initial velocity.
    ///
    /// @param[in] x2 Along-strike coordinate [m]
    /// @param[in] x3 Depth coordinate [m]
@@ -289,6 +294,12 @@ struct BP5Params
       real_t tau0_scalar = sigma_n * a *
                            std::asinh((Vi_abs / (2.0 * V0)) * e) +
                            eta_val * Vi_abs;
+
+      // BP5-QD: add delta_tau = eta * V_i in nucleation zone (Eq. 23)
+      if (IsNucleationZone(x2, x3))
+      {
+         tau0_scalar += eta_val * Vi_abs;
+      }
 
       // Direction: anti-parallel to initial velocity
       tau[0] = -tau0_scalar * Vi[0] / Vi_abs;

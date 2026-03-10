@@ -310,20 +310,20 @@ public:
       }
    }
 
-   /// @brief Default 10 SCEC BP5 on-fault stations.
+   /// @brief Default 10 SCEC BP5 on-fault stations (Section 4.1 of spec).
    static std::vector<Station> DefaultStations()
    {
       return {
+         {"fltst_strk-36dp+00", -36e3,  0.0},
+         {"fltst_strk-16dp+00", -16e3,  0.0},
+         {"fltst_strk+00dp+00",   0.0,  0.0},
+         {"fltst_strk+16dp+00",  16e3,  0.0},
+         {"fltst_strk+36dp+00",  36e3,  0.0},
          {"fltst_strk-24dp+10", -24e3, 10e3},
          {"fltst_strk-16dp+10", -16e3, 10e3},
-         {"fltst_strk+00dp+00",   0.0,  0.0},
-         {"fltst_strk+00dp+05",   0.0,  5e3},
          {"fltst_strk+00dp+10",   0.0, 10e3},
-         {"fltst_strk+00dp+15",   0.0, 15e3},
-         {"fltst_strk+00dp+20",   0.0, 20e3},
-         {"fltst_strk+00dp+30",   0.0, 30e3},
          {"fltst_strk+16dp+10",  16e3, 10e3},
-         {"fltst_strk+24dp+10",  24e3, 10e3},
+         {"fltst_strk+00dp+22",   0.0, 22e3},
       };
    }
 
