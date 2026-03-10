@@ -45,6 +45,10 @@ RESULTS_50M = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m_ss_bdrload"
 RESULTS_25M = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m_ss_bdrload"
 RESULTS_12d5M = "/Users/chunhuizhao/Downloads/seas-mfem/results_12.5m_ss_bdrload"
 
+RESULTS_50Mip = "/Users/chunhuizhao/Downloads/seas-mfem/results_50m_ip"
+RESULTS_25Mip = "/Users/chunhuizhao/Downloads/seas-mfem/results_25m_ip"
+RESULTS_12d5Mip = "/Users/chunhuizhao/Downloads/seas-mfem/results_12.5m_ip"
+
 
 def load_scec_file(filepath):
     """Load SCEC-format 5-column text file."""
@@ -247,9 +251,12 @@ def main():
     resolutions = [
         # ("MFEM 200m", RESULTS_200M, "k", "-", 0.8),
         # ("MFEM 75m", RESULTS_75M, "#d62728", "-", 0.8),
-        ("MFEM 50m", RESULTS_50M, "#1f77b4", "-", 0.8),
-        ("MFEM 25m", RESULTS_25M, "#2ca02c", "-", 0.8),
-        ("MFEM 12.5m", RESULTS_12d5M, "k", "-", 0.8),
+        # ("MFEM 50m", RESULTS_50M, "#1f77b4", "-", 0.8),
+        # ("MFEM 25m", RESULTS_25M, "#2ca02c", "-", 0.8),
+        # ("MFEM 12.5m", RESULTS_12d5M, "k", "-", 0.8),
+        ("MFEM 50m", RESULTS_50Mip, "k", "-", 0.8),
+        ("MFEM 25m", RESULTS_25Mip, "#2ca02c", "-", 0.8),
+        ("MFEM 12.5m", RESULTS_12d5Mip, "#1f77b4", "-", 0.8),
     ]
 
     # Resolve benchmark list

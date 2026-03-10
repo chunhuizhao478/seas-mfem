@@ -30,6 +30,7 @@
 //   --tfinal T                 Override final time in seconds
 //   --checkpoint-interval N    Checkpoint every N steps (default: 5000, 0=off)
 //   --restart PREFIX           Restart from checkpoint files
+//   --max-steps N              Maximum number of time steps (default: 10M)
 //   --write-every-step         Write output at every accepted step
 
 #include "mfem.hpp"
@@ -424,6 +425,7 @@ int main(int argc, char *argv[])
    bool write_every_step = false;
    int fault_tag = -1;
    std::string dg_method_str = "BR2";
+   int max_steps_override = 0;
 
    for (int i = 1; i < argc; i++)
    {
@@ -451,6 +453,10 @@ int main(int argc, char *argv[])
       if (arg == "--dg-method" && i + 1 < argc)
       {
          dg_method_str = argv[++i];
+      }
+      if (arg == "--max-steps" && i + 1 < argc)
+      {
+         max_steps_override = std::atoi(argv[++i]);
       }
    }
 
@@ -702,7 +708,7 @@ int main(int argc, char *argv[])
 
    real_t t = 0.0;
    int step = 0;
-   int max_steps = 10000000;
+   int max_steps = (max_steps_override > 0) ? max_steps_override : 10000000;
 
    // Earthquake detection
    bool in_seismic_event = false;
@@ -759,6 +765,8 @@ int main(int argc, char *argv[])
    }
 
    int print_step_interval = 10;
+
+   double wall_t0 = MPI_Wtime();
 
    while (t < t_final && step < max_steps)
    {
@@ -887,6 +895,9 @@ int main(int argc, char *argv[])
       }
    }
 
+   double wall_t1 = MPI_Wtime();
+   double wall_elapsed = wall_t1 - wall_t0;
+
    // Final checkpoint
    if (checkpoint_interval > 0)
    {
@@ -914,7 +925,27 @@ int main(int argc, char *argv[])
       std::cout << "  Final time: " << t / BP2Params::seconds_per_year
                 << " years\n";
       std::cout << "  Total steps: " << step << "\n";
-      std::cout << "  Seismic events: " << num_seismic_events << "\n\n";
+      std::cout << "  Seismic events: " << num_seismic_events << "\n";
+      std::cout << "  Wall-clock time: " << std::fixed << std::setprecision(2)
+                << wall_elapsed << " s\n\n";
+
+      // Parseable scaling data line
+      std::string solver_name;
+#ifdef MFEM_USE_MUMPS
+      solver_name = "MUMPS";
+#else
+      solver_name = "CG_HypreILU";
+#endif
+      std::cout << "SCALING_DATA:"
+                << " np=" << mpi.Size()
+                << " elements=" << global_ne
+                << " steps=" << step
+                << " elapsed=" << std::fixed << std::setprecision(4)
+                << wall_elapsed
+                << " mesh=" << mesh_file
+                << " solver=" << solver_name
+                << " dg=" << dg_method_str
+                << "\n";
    }
 
    // =========================================================================
