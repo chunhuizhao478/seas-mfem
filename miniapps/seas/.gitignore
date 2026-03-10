@@ -13,6 +13,7 @@ bp2/benchmark_data_200m/benchmark_comparison_plots/
 
 # Mesh output
 *.vtk
+*.geo_unrolled
 bp1/mesh/bp1_ss_12.5m.msh
 
 # Binaries
