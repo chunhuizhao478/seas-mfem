@@ -202,18 +202,18 @@ private:
 
    void SetupBoundaryMarkers()
    {
-      // Identify Dirichlet boundaries (loading walls at ±x2)
+      // Identify Dirichlet boundaries (loading walls at ±x1, fault-normal)
       // We mark boundaries that will receive Dirichlet loading
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
 
       // Mark Dirichlet boundaries by attribute
-      // Convention: attributes 3,4 are ±x2 walls (Dirichlet loading)
+      // Convention: attributes 1,2 are ±x1 walls (fault-normal, Dirichlet loading)
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr == 3 || attr == 4)
+         if (attr == 1 || attr == 2)
          {
             dirichlet_bdr_marker_[attr - 1] = 1;
          }
@@ -255,7 +255,7 @@ private:
 
          Vector up(3);
          up = 0.0;
-         up(2) = -1.0;  // Depth direction (z points down, up = -z)
+         up(2) = 1.0;  // Up direction (matches Tandem convention)
 
          fault_basis_.Compute(mesh_, fault_interior_faces_, ref_normal, up);
       }
@@ -933,11 +933,15 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // Plate loading on ±x2 walls: u₂ = ±Vp·t/2
+      // Plate loading on ±x1 walls (fault-normal): u₂ = ±Vp·t/2
       // We need to assemble the DG Dirichlet BC contribution.
-      // For each boundary face on the ±x2 walls, add:
+      // For each boundary face on the ±x1 walls, add:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
       //           + penalty * φ_k * u_D_i
+      //
+      // Attr 1 = -x wall (negative fault-normal side) → u_y = -Vp*t/2
+      // Attr 2 = +x wall (positive fault-normal side) → u_y = +Vp*t/2
+      // This creates ∂u_y/∂x → ε_xy → σ_xy which drives shear on the fault.
 
       if (std::abs(time * Vp_) < 1e-30) { return; }
 
@@ -946,12 +950,12 @@ private:
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr != 3 && attr != 4) { continue; }  // Only ±x2 walls
+         if (attr != 1 && attr != 2) { continue; }  // Only ±x1 walls (fault-normal)
 
          // Dirichlet value: u = (0, ±Vp*t/2, 0)
          real_t u_D[3] = {0.0, 0.0, 0.0};
-         if (attr == 3) { u_D[1] = Vp_ * time / 2.0; }   // +x2
-         else           { u_D[1] = -Vp_ * time / 2.0; }   // -x2
+         if (attr == 2) { u_D[1] = Vp_ * time / 2.0; }   // +x1
+         else           { u_D[1] = -Vp_ * time / 2.0; }   // -x1
 
          // Get face transformation
          int face_idx, face_info;

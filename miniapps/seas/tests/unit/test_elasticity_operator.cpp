@@ -598,6 +598,107 @@ void TestDirichletLoading()
 }
 
 // =============================================================================
+// Test 10b: Dirichlet loading at fault-normal walls produces shear traction
+// =============================================================================
+void TestDirichletLoadingShearTraction()
+{
+   std::cout << "\n--- Test: Dirichlet Loading Produces Shear Traction ---\n";
+
+   // Use a mesh large enough to have fault faces
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+
+   real_t Vp = 1.0;
+   real_t lambda = 1.0, mu = 1.0;
+
+   for (int method = 0; method < 2; method++)
+   {
+      DGMethod dg = (method == 0) ? DGMethod::IP : DGMethod::BR2;
+      std::string label = (method == 0) ? "IP" : "BR2";
+
+      ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, Vp, Lz, 2.0 * Ly,
+                                         dg);
+
+      int nf = op.GetNumFaultDOFs();
+      if (nf == 0)
+      {
+         std::cout << "  (Skipped " << label << ": no fault faces)\n";
+         continue;
+      }
+
+      // Zero slip, loading from boundary only at t=1
+      Vector slip_bc(2 * nf);
+      slip_bc = 0.0;
+
+      GridFunction u(&op.GetFESpace());
+      u = 0.0;
+
+      real_t time = 1.0;
+      op.Solve(time, slip_bc, u);
+
+      // Extract traction on the fault
+      Vector traction;
+      op.ComputeTraction(u, slip_bc, traction);
+
+      // Traction layout (Tandem convention): [dip_0, strike_0, dip_1, strike_1, ...]
+      //   traction(2*i)   = tau_local[0] = dip component (tangent1)
+      //   traction(2*i+1) = tau_local[1] = strike component (tangent2)
+      //
+      // Dirichlet loading u_y = ±Vp*t/2 at ±x walls creates σ_xy.
+      // With up=(0,0,1), n=(1,0,0):
+      //   strike = up × n = (0,1,0) → tangent2
+      //   dip = strike × n = (0,0,-1) → tangent1
+      // σ_xy projects onto strike (tangent2), so traction(2*i+1) should dominate.
+
+      // Check traction is non-zero
+      real_t trac_norm = traction.Norml2();
+      TEST_ASSERT(trac_norm > 1e-6,
+                  (label + ": Dirichlet loading produces non-zero traction").c_str());
+
+      // Separate dip (index 2*i) and strike (index 2*i+1) components
+      real_t strike_sum = 0.0, dip_sum = 0.0;
+      for (int i = 0; i < nf; i++)
+      {
+         dip_sum += traction(2 * i) * traction(2 * i);
+         strike_sum += traction(2 * i + 1) * traction(2 * i + 1);
+      }
+      strike_sum = std::sqrt(strike_sum);
+      dip_sum = std::sqrt(dip_sum);
+
+      std::cout << "  " << label << ": |trac_strike| = " << strike_sum
+                << ", |trac_dip| = " << dip_sum << "\n";
+
+      TEST_ASSERT(strike_sum > 1e-6,
+                  (label + ": Strike traction is non-zero from shear loading").c_str());
+
+      // Strike component should dominate over dip for pure shear loading
+      if (dip_sum > 1e-10)
+      {
+         TEST_ASSERT(strike_sum > dip_sum,
+                     (label + ": Strike traction dominates over dip").c_str());
+      }
+      else
+      {
+         TEST_ASSERT(true,
+                     (label + ": Dip traction is negligible (pure shear)").c_str());
+      }
+
+      // Sign check: with up=(0,0,1), strike=(0,1,0), and right-lateral loading,
+      // the strike traction component should be positive.
+      real_t avg_strike = 0.0;
+      for (int i = 0; i < nf; i++)
+      {
+         avg_strike += traction(2 * i + 1);
+      }
+      avg_strike /= nf;
+      std::cout << "  " << label << ": avg strike traction = " << avg_strike << "\n";
+
+      TEST_ASSERT(avg_strike > 0.0,
+                  (label + ": Strike traction sign is positive (right-lateral)").c_str());
+   }
+}
+
+// =============================================================================
 // Test 11: BR2 vs IP comparison — both methods should produce similar results
 // =============================================================================
 void TestBR2vsIP()
@@ -725,6 +826,7 @@ int main()
    TestNonZeroSlipIP();
    TestNonZeroSlipBR2();
    TestDirichletLoading();
+   TestDirichletLoadingShearTraction();
    TestBR2vsIP();
    TestBR2Default();
 
