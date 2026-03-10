@@ -22,6 +22,7 @@ seas_mms_antiplane_parallel
 seas_pseas
 seas_bp2_full
 seas_bp1_full
+seas_bp5_full
 seas_test_*
 
 # Checkpoint files
