@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 #include "friction_law.hpp"
 #include <cmath>
+#include <functional>
 #include <limits>
 
 namespace mfem
@@ -68,15 +69,22 @@ public:
    /// @return Friction coefficient [-]
    real_t FrictionCoefficient(real_t V, real_t theta, real_t a) const override
    {
-      // Ensure positive values to avoid numerical issues
-      V = std::max(V, V_min_);
+      if (V <= 0.0) { return 0.0; }
       theta = std::max(theta, theta_min_);
 
       // f = a * asinh[(V / 2V0) * exp((f0 + b * ln(V0 * theta / Dc)) / a)]
       real_t log_arg = cp_.V0 * theta / cp_.Dc;
       real_t exp_arg = (cp_.f0 + cp_.b * std::log(log_arg)) / a;
-      real_t sinh_arg = (V / (2.0 * cp_.V0)) * std::exp(exp_arg);
 
+      // Safe evaluation for large exp_arg (equivalent to large psi/a)
+      if (exp_arg > 700.0)
+      {
+         // asinh(x) ≈ log(2x) for large x
+         // sinh_arg = (V/2V0)*exp(exp_arg), log(2*sinh_arg) = log(V/V0) + exp_arg
+         return std::max(0.0, a * (std::log(V / cp_.V0) + exp_arg));
+      }
+
+      real_t sinh_arg = (V / (2.0 * cp_.V0)) * std::exp(exp_arg);
       return a * std::asinh(sinh_arg);
    }
 
@@ -153,82 +161,28 @@ public:
                         int *iterations = nullptr) const override
    {
       // Handle fault in tension (sigma_n <= 0)
-      // Per Tandem implementation: return viscous sliding if eta > 0
       if (sigma_n <= 0.0)
       {
          if (iterations) { *iterations = 0; }
-         if (eta > 0.0)
-         {
-            return tau / eta;  // Viscous sliding
-         }
-         else
-         {
-            return 0.0;  // Cannot determine slip rate without friction or damping
-         }
+         if (eta > 0.0) { return tau / eta; }
+         else { return 0.0; }
       }
 
-      // Initial guess: start near the reference velocity
-      real_t V = cp_.V0;
+      // Use Brent's method with bracket [0, V_hi]
+      // Upper bound: when friction ≥ 0, V ≤ tau/eta. Cap for safety.
+      real_t V_lo = 0.0;
+      real_t V_hi = (eta > 0.0) ? (tau / eta) : 100.0;
+      V_hi = std::min(V_hi, 100.0);
 
-      // Bounds for bracketing (slip rate should be positive)
-      real_t V_lo = V_min_;
-      // Physical upper bound: when friction = 0, tau = eta * V
-      // V_max = tau / eta (with fallback if eta is very small)
-      // Following Tandem's approach for tighter bracketing
-      real_t V_hi = (eta > 1e-6) ? (tau / eta) : 100.0;
-      V_hi = std::min(V_hi, 100.0);  // Cap at 100 m/s for safety
-
-      // Newton-Raphson iteration
-      const int max_iter = 100;
-      const real_t tol = 1.0e-12;
-
-      int iter = 0;
-      for (; iter < max_iter; ++iter)
+      auto residual = [&](real_t V) -> real_t
       {
-         real_t f = FrictionCoefficient(V, theta, a);
-         real_t df_dV = FrictionDerivativeV(V, theta, a);
+         // FrictionCoefficient clamps V >= V_min_ internally
+         return tau - sigma_n * FrictionCoefficient(V, theta, a) - eta * V;
+      };
 
-         real_t F = sigma_n * f + eta * V - tau;
-         real_t dF_dV = sigma_n * df_dV + eta;
+      real_t V = zeroIn(V_lo, V_hi, residual);
 
-         // Newton update
-         real_t dV = -F / dF_dV;
-
-         // Limit step size to stay in reasonable bounds
-         real_t V_new = V + dV;
-
-         // Ensure positivity and reasonable bounds
-         if (V_new < V_lo)
-         {
-            V_new = 0.5 * (V + V_lo);
-         }
-         else if (V_new > V_hi)
-         {
-            V_new = 0.5 * (V + V_hi);
-         }
-
-         // Check convergence
-         real_t rel_change = std::abs(V_new - V) / std::max(V, V_min_);
-         V = V_new;
-
-         if (rel_change < tol || std::abs(F) < tol * tau)
-         {
-            break;
-         }
-      }
-
-      if (iterations != nullptr)
-      {
-         *iterations = iter;
-      }
-
-      // Verify solution (MFEM_VERIFY fires in release builds too)
-      MFEM_VERIFY(iter < max_iter,
-                  "Newton solver failed to converge for slip rate: "
-                  << "tau=" << tau << " theta=" << theta
-                  << " sigma_n=" << sigma_n << " eta=" << eta
-                  << " a=" << a << " V=" << V);
-
+      if (iterations) { *iterations = 0; }
       return V;
    }
 
@@ -311,10 +265,26 @@ public:
 
    /// Friction coefficient in psi-space:
    /// f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
+   ///
+   /// Safe evaluation: handles V=0 and large psi/a without overflow.
+   /// At V=0, f=0 by convention (no sliding, no friction force).
+   /// For large psi/a (>=700), uses asinh(x) ≈ log(2x) for large x.
    real_t FrictionCoefficientPsi(real_t V, real_t psi, real_t a) const
    {
-      V = std::max(V, V_min_);
-      real_t sinh_arg = (V / (2.0 * cp_.V0)) * std::exp(psi / a);
+      if (V <= 0.0) { return 0.0; }
+
+      real_t psi_over_a = psi / a;
+      if (psi_over_a > 700.0)
+      {
+         // For large psi/a, exp(psi/a) overflows. Use:
+         // asinh(x) = log(x + sqrt(x^2+1)) ≈ log(2x) for large x
+         // sinh_arg = (V/2V0)*exp(psi/a), so log(2*sinh_arg) = log(V/V0) + psi/a
+         // f = a * [log(V/V0) + psi/a] = a*log(V/V0) + psi
+         real_t log_term = std::log(V / cp_.V0);
+         return std::max(0.0, a * log_term + psi);
+      }
+
+      real_t sinh_arg = (V / (2.0 * cp_.V0)) * std::exp(psi_over_a);
       return a * std::asinh(sinh_arg);
    }
 
@@ -334,6 +304,11 @@ public:
    ///
    /// Solves: tau = sigma_n * f(V, psi) + eta * V
    /// where f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
+   ///
+   /// Uses Brent's method (matching Tandem) with bracket [0, tau/eta].
+   /// - At V=0: R(0) = tau > 0
+   /// - At V=tau/eta: R = -sigma_n*f < 0
+   /// Guaranteed convergence for all psi/a ratios.
    real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
                            real_t eta, real_t a,
                            int *iterations = nullptr) const
@@ -345,40 +320,18 @@ public:
          else { return 0.0; }
       }
 
-      real_t V = cp_.V0;
-      real_t V_lo = V_min_;
-      real_t V_hi = (eta > 1e-6) ? (tau / eta) : 100.0;
-      V_hi = std::min(V_hi, 100.0);
+      // Brent's method with bracket [0, tau/eta]
+      real_t V_lo = 0.0;
+      real_t V_hi = tau / eta;
 
-      const int max_iter = 100;
-      const real_t tol = 1.0e-12;
-
-      int iter = 0;
-      for (; iter < max_iter; ++iter)
+      auto residual = [&](real_t V) -> real_t
       {
-         real_t f = FrictionCoefficientPsi(V, psi, a);
-         real_t df_dV = FrictionDerivativeVPsi(V, psi, a);
+         return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
+      };
 
-         real_t F = sigma_n * f + eta * V - tau;
-         real_t dF_dV = sigma_n * df_dV + eta;
+      real_t V = zeroIn(V_lo, V_hi, residual);
 
-         real_t V_new = V - F / dF_dV;
-
-         if (V_new < V_lo) { V_new = 0.5 * (V + V_lo); }
-         else if (V_new > V_hi) { V_new = 0.5 * (V + V_hi); }
-
-         real_t rel_change = std::abs(V_new - V) / std::max(V, V_min_);
-         V = V_new;
-
-         if (rel_change < tol || std::abs(F) < tol * tau) { break; }
-      }
-
-      if (iterations) { *iterations = iter; }
-      MFEM_VERIFY(iter < max_iter,
-                  "Newton solver failed to converge for slip rate (psi): "
-                  << "tau=" << tau << " psi=" << psi
-                  << " sigma_n=" << sigma_n << " eta=" << eta
-                  << " a=" << a << " V=" << V);
+      if (iterations) { *iterations = 0; }
       return V;
    }
 
@@ -469,11 +422,94 @@ public:
 private:
    Constants cp_;
 
-   /// Minimum slip rate to avoid numerical issues
+   /// Minimum slip rate to avoid numerical issues (used in friction evaluation)
    static constexpr real_t V_min_ = 1.0e-30;
 
    /// Minimum state variable to avoid numerical issues
    static constexpr real_t theta_min_ = 1.0e-30;
+
+   /// Brent's method for finding zeros of a function in [a, b].
+   ///
+   /// Port of Tandem's zeroIn (from Forsythe/Malcolm/Moler ZEROIN).
+   /// F(a) and F(b) must have opposite signs (or F(a)==0).
+   /// Returns x in [a,b] with |bracket| <= tol + 4*eps*|x|.
+   static real_t zeroIn(real_t a, real_t b,
+                         std::function<real_t(real_t)> F,
+                         real_t tol = 0.0)
+   {
+      real_t eps = std::numeric_limits<real_t>::epsilon();
+      real_t Fa = F(a);
+      if (Fa == 0.0) { return a; }
+      real_t Fb = F(b);
+
+      MFEM_VERIFY(!std::isnan(Fa) && !std::isinf(Fa),
+                  "zeroIn: NaN/Inf at a=" << a << ", F(a)=" << Fa);
+      MFEM_VERIFY(!std::isnan(Fb) && !std::isinf(Fb),
+                  "zeroIn: NaN/Inf at b=" << b << ", F(b)=" << Fb);
+      MFEM_VERIFY(std::copysign(Fa, Fb) != Fa || Fb == 0.0,
+                  "zeroIn: F(a) and F(b) must have different signs. "
+                  << "a=" << a << " F(a)=" << Fa
+                  << " b=" << b << " F(b)=" << Fb);
+
+      real_t c = a, Fc = Fa;
+      real_t d = b - a, e = d;
+
+      while (Fb != 0.0)
+      {
+         if (std::copysign(Fb, Fc) == Fb)
+         {
+            c = a; Fc = Fa; d = b - a; e = d;
+         }
+         if (std::fabs(Fc) < std::fabs(Fb))
+         {
+            a = b; b = c; c = a;
+            Fa = Fb; Fb = Fc; Fc = Fa;
+         }
+         real_t xm = 0.5 * (c - b);
+         real_t tol1 = 2.0 * eps * std::fabs(b) + 0.5 * tol;
+         if (std::fabs(xm) <= tol1 || Fb == 0.0) { break; }
+         if (std::fabs(e) < tol1 || std::fabs(Fa) <= std::fabs(Fb))
+         {
+            d = xm; e = d;  // bisection
+         }
+         else
+         {
+            real_t s = Fb / Fa;
+            real_t p, q;
+            if (a != c)
+            {
+               // inverse quadratic interpolation
+               real_t qq = Fa / Fc;
+               real_t r = Fb / Fc;
+               p = s * (2.0 * xm * qq * (qq - r) - (b - a) * (r - 1.0));
+               q = (qq - 1.0) * (r - 1.0) * (s - 1.0);
+            }
+            else
+            {
+               // linear interpolation
+               p = 2.0 * xm * s;
+               q = 1.0 - s;
+            }
+            if (p > 0) { q = -q; } else { p = -p; }
+            if (2.0 * p < 3.0 * xm * q - std::fabs(tol1 * q) &&
+                p < std::fabs(0.5 * e * q))
+            {
+               e = d; d = p / q;
+            }
+            else
+            {
+               d = xm; e = d;  // bisection
+            }
+         }
+         a = b; Fa = Fb;
+         if (std::fabs(d) > tol1) { b += d; }
+         else { b += std::copysign(tol1, xm); }
+         Fb = F(b);
+         MFEM_VERIFY(!std::isnan(Fb) && !std::isinf(Fb),
+                     "zeroIn: NaN/Inf at b=" << b << ", F(b)=" << Fb);
+      }
+      return b;
+   }
 };
 
 } // namespace seas

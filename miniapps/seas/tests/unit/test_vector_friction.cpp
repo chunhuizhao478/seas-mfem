@@ -210,27 +210,38 @@ void TestBP5Values()
                      "BP5 outside nucleation: |V_solved| = |V_init|");
    }
 
-   // In nucleation zone
+   // In nucleation zone — round-trip test
+   // tau0_vec includes a nucleation perturbation (extra eta*Vi term, BP5-QD Eq.23),
+   // so we construct tau directly from the friction equation to test the solver.
    {
       real_t x2 = -25.0e3, x3 = 10.0e3;
 
-      // Use L_nuc for nucleation
       DieterichRuinaFriction::Constants fc_nuc = fc;
       fc_nuc.Dc = p.L_nuc;
       DieterichRuinaFriction friction_nuc(fc_nuc);
 
-      real_t tau[2];
-      p.tau0_vec(x2, x3, tau);
-      real_t neg_tau[2] = {-tau[0], -tau[1]};
+      real_t a = p.a_of_x2_x3(x2, x3);
+      real_t eta_val = p.eta();
 
-      real_t V_vec[2];
-      friction_nuc.SolveSlipRateVectorPsi(neg_tau, psi_ss, p.sigma_n, p.eta(),
-                                           p.a_of_x2_x3(x2, x3), V_vec);
-
-      real_t V_mag = std::sqrt(V_vec[0] * V_vec[0] + V_vec[1] * V_vec[1]);
+      // Get initial velocity in nucleation zone
       real_t Vi[2];
       p.V_init_vec(x2, x3, Vi);
       real_t Vi_mag = std::sqrt(Vi[0] * Vi[0] + Vi[1] * Vi[1]);
+
+      // Construct tau directly: tau = sigma_n * f(Vi_mag, psi_ss) + eta * Vi_mag
+      real_t f_val = friction_nuc.FrictionCoefficientPsi(Vi_mag, psi_ss, a);
+      real_t tau_scalar = p.sigma_n * f_val + eta_val * Vi_mag;
+
+      // Feed as vector anti-parallel to V_init
+      real_t tau_vec[2] = { tau_scalar * Vi[0] / Vi_mag,
+                            tau_scalar * Vi[1] / Vi_mag };
+      real_t neg_tau[2] = {-tau_vec[0], -tau_vec[1]};
+
+      real_t V_vec[2];
+      friction_nuc.SolveSlipRateVectorPsi(neg_tau, psi_ss, p.sigma_n, eta_val,
+                                           a, V_vec);
+
+      real_t V_mag = std::sqrt(V_vec[0] * V_vec[0] + V_vec[1] * V_vec[1]);
 
       TEST_REL_NEAR(V_mag, Vi_mag, 1e-6,
                      "BP5 nucleation zone: |V_solved| = |V_init|");
