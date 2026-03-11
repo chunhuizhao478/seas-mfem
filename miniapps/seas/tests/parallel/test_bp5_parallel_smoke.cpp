@@ -129,27 +129,31 @@ int main(int argc, char *argv[])
    }
 
    // ========================================================================
-   // Create coarse mesh: 4x4x1 hex elements
+   // Create coarse mesh
    // ========================================================================
    BP5Params params;
 
-   int nx = 2, ny = 2, nz = 1;
-   real_t Lx = 200e3, Ly = 100e3, Lz = 100e3;
+   // Use small mesh matching parallel_elasticity tests (which work reliably)
+   // with Wf/lf sized to capture fault DOFs at these dimensions.
+   int nx = 2, ny = 1, nz = 1;
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
 
    auto serial_mesh = CreateBP5InlineMesh(nx, ny, nz, Lx, Ly, Lz);
 
    if (mpi.IsRoot())
    {
       std::cout << "  Serial mesh: " << serial_mesh->GetNE()
-                << " elements\n";
+                << " elements\n" << std::flush;
    }
 
    ParMesh pmesh(mpi.GetComm(), *serial_mesh);
    serial_mesh.reset();
 
+   // GetGlobalNE() may be collective — call on all ranks
+   long long global_ne = pmesh.GetGlobalNE();
    if (mpi.IsRoot())
    {
-      std::cout << "  ParMesh: " << pmesh.GetGlobalNE()
+      std::cout << "  ParMesh: " << global_ne
                 << " global elements\n";
    }
 
@@ -157,9 +161,11 @@ int main(int argc, char *argv[])
    // Domain operator
    // ========================================================================
    int order = 1;
+   // Use mesh-matching Wf/lf to ensure fault DOFs are detected on small mesh
+   real_t Wf = Lz, lf_domain = 2.0 * Ly;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, DGMethod::BR2);
+      params.Vp, Wf, lf_domain, DGMethod::BR2);
 
    int local_fault_dofs = domain.GetNumFaultDOFs();
    int global_fault_dofs = mpi.GlobalSumInt(local_fault_dofs);

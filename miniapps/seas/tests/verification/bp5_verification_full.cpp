@@ -285,6 +285,7 @@ int main(int argc, char *argv[])
    int checkpoint_interval = 5000;
    std::string restart_prefix;
    bool write_every_step = false;
+   bool use_mumps = false;
 
    for (int i = 1; i < argc; i++)
    {
@@ -324,6 +325,7 @@ int main(int argc, char *argv[])
          restart_prefix = argv[++i];
       }
       if (arg == "--write-every-step") { write_every_step = true; }
+      if (arg == "--mumps") { use_mumps = true; }
    }
 
    // Default stations
@@ -405,6 +407,7 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot())
    {
       std::cout << "  Ranks: " << mpi.Size() << "\n";
+      std::cout << "  Solver: " << (use_mumps ? "MUMPS (direct)" : "CG+AMG (iterative)") << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
@@ -427,7 +430,7 @@ int main(int argc, char *argv[])
    int order = 1;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, DGMethod::BR2);
+      params.Vp, params.Wf, params.lf, DGMethod::BR2, use_mumps);
 
    if (mpi.IsRoot())
    {

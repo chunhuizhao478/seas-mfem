@@ -52,10 +52,14 @@ echo "=== Building MFEM library ==="
 make -j8
 
 echo ""
-echo "=== Building SEAS BP1 miniapp ==="
+echo "=== Building SEAS miniapps ==="
 cd miniapps/seas
-make seas_bp1_full -j8
+make seas_bp1_full seas_bp5_full seas_test_parallel_elasticity seas_test_bp5_parallel_smoke -j8
 
 echo ""
 echo "=== Build complete ==="
-echo "Binary: $(pwd)/seas_bp1_full"
+echo "Binaries:"
+echo "  $(pwd)/seas_bp1_full"
+echo "  $(pwd)/seas_bp5_full"
+echo "  $(pwd)/seas_test_parallel_elasticity"
+echo "  $(pwd)/seas_test_bp5_parallel_smoke"

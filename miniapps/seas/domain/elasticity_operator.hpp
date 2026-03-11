@@ -68,14 +68,16 @@ public:
    /// @param Wf Fault depth [m] (rate-state zone)
    /// @param lf Fault length [m] (along-strike extent)
    /// @param method DG method (BR2 default, IP alternative)
+   /// @param use_mumps Use MUMPS direct solver (default: false, uses CG+AMG)
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
-                             DGMethod method = DGMethod::BR2)
+                             DGMethod method = DGMethod::BR2,
+                             bool use_mumps = false)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
-        method_(method),
+        method_(method), use_mumps_(use_mumps),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
         fault_depths_computed_(false),
@@ -149,6 +151,7 @@ private:
    real_t lambda_val_, mu_val_;
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
+   bool use_mumps_;
    real_t epsilon_;  // SIPG sign = -1
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
@@ -521,28 +524,31 @@ private:
          cached_a_->ParallelAssemble(cached_Ah_);
 
 #ifdef MFEM_USE_MUMPS
-         auto *mumps = new MUMPSSolver(mesh_.GetComm());
-         mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-         mumps->SetPrintLevel(0);
-         mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-         solver_.reset(mumps);
-#else
-         auto *cg = new CGSolver(mesh_.GetComm());
-         cg->SetRelTol(1e-12);
-         cg->SetAbsTol(0.0);
-         cg->SetMaxIter(10000);
-         cg->SetPrintLevel(0);
-
-         auto *ilu = new HypreILU();
-         ilu->SetLevelOfFill(1);
-         ilu->SetPrintLevel(0);
-         ilu->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-         cached_prec_.reset(ilu);
-
-         cg->SetPreconditioner(*cached_prec_);
-         cg->SetOperator(*cached_Ah_.As<HypreParMatrix>());
-         solver_.reset(cg);
+         if (use_mumps_)
+         {
+            auto *mumps = new MUMPSSolver(mesh_.GetComm());
+            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
+            mumps->SetPrintLevel(0);
+            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+            solver_.reset(mumps);
+         }
+         else
 #endif
+         {
+            auto *cg = new CGSolver(mesh_.GetComm());
+            cg->SetRelTol(1e-12);
+            cg->SetAbsTol(0.0);
+            cg->SetMaxIter(10000);
+            cg->SetPrintLevel(0);
+
+            auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
+            amg->SetPrintLevel(0);
+            cached_prec_.reset(amg);
+
+            cg->SetPreconditioner(*cached_prec_);
+            cg->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+            solver_.reset(cg);
+         }
 #endif
       }
       else
@@ -1707,6 +1713,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    // Diagnostic: check for RHS blowup
    real_t rhs_final = rhs.Normlinf();
+   real_t slip_max = slip_bc.Normlinf();
    if (rhs_final > 1e15 || std::isnan(rhs_final))
    {
       int rank = 0;
@@ -1718,7 +1725,9 @@ void ElasticityDomainOperator<MeshType>::Solve(
 #endif
       mfem::out << "[Rank " << rank << "] RHS BLOWUP: before_slip="
                 << rhs_before_slip << " after_slip=" << rhs_after_slip
-                << " final=" << rhs_final << "\n";
+                << " final=" << rhs_final
+                << " slip_max=" << slip_max
+                << " time=" << time << "\n";
    }
 
    X_ = 0.0;
@@ -1726,14 +1735,32 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    solver_->Mult(B_, X_);
 
-   // Check convergence
+   // Check convergence and log solver info when RHS is large
    {
       auto *cg = dynamic_cast<CGSolver*>(solver_.get());
-      if (cg && !cg->GetConverged())
+      if (cg)
       {
-         mfem::err << "WARNING: CG did not converge after "
-                   << cg->GetNumIterations() << " iterations, final norm = "
-                   << cg->GetFinalNorm() << "\n";
+         if (!cg->GetConverged())
+         {
+            mfem::err << "WARNING: CG did not converge after "
+                      << cg->GetNumIterations() << " iterations, final norm = "
+                      << cg->GetFinalNorm() << "\n";
+         }
+         if (rhs_final > 1e15)
+         {
+            int rank = 0;
+#ifdef MFEM_USE_MPI
+            if constexpr (IsParallelMesh<MeshType>::value)
+            {
+               MPI_Comm_rank(mesh_.GetComm(), &rank);
+            }
+#endif
+            mfem::out << "[Rank " << rank << "] SOLVER: iters="
+                      << cg->GetNumIterations()
+                      << " converged=" << cg->GetConverged()
+                      << " final_norm=" << cg->GetFinalNorm()
+                      << " ||u||_inf=" << X_.Normlinf() << "\n";
+         }
       }
    }
 
@@ -1971,9 +1998,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          f_lifted2 *= 0.5;
 
          // Evaluate f_lifted_q at centroid with elasticity tensor coupling
-         // Use unnormalized normal (nor) for consistency with BR2 matrix/RHS,
-         // then divide by ||nor||^2 to convert from force to traction.
-         real_t nor_sq = nor * nor;
+         // Use unit normal (basis.normal) for T = C : ε · n̂ (point evaluation of traction)
          for (int i = 0; i < dim; i++)
          {
             real_t sum = 0.0;
@@ -1981,9 +2006,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             {
                for (int s = 0; s < dim; s++)
                {
-                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * nor(i)
-                     + mu_val_ * ((i == u ? 1.0 : 0.0) * nor(s)
-                                + (i == s ? 1.0 : 0.0) * nor(u));
+                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
+                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
+                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
                   real_t eval1 = 0.0, eval2 = 0.0;
                   for (int m = 0; m < ndof1; m++)
                   {
@@ -1996,7 +2021,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   sum += tn * (eval1 + eval2);
                }
             }
-            correction[i] = br2_penalty * 0.5 * sum / nor_sq;
+            correction[i] = br2_penalty * 0.5 * sum;
          }
       }
 
@@ -2200,9 +2225,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             MultABt(face_int2, Minv2, f_lifted2);
             f_lifted2 *= 0.5;
 
-            // Use unnormalized normal (nor) for consistency with BR2
-            // matrix/RHS, then divide by ||nor||^2 to convert to traction.
-            real_t nor_sq = nor * nor;
+            // Use unit normal (basis.normal) for T = C : ε · n̂ (point evaluation of traction)
             for (int ci = 0; ci < dim; ci++)
             {
                real_t sum = 0.0;
@@ -2210,9 +2233,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                {
                   for (int s = 0; s < dim; s++)
                   {
-                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * nor(ci)
-                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * nor(s)
-                                     + (ci == s ? 1.0 : 0.0) * nor(u));
+                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
+                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
+                                     + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
                      real_t eval1 = 0.0, eval2 = 0.0;
                      for (int m = 0; m < ndof1; m++)
                         eval1 += shape1(m) * f_lifted1(u * dim + s, m);
@@ -2221,7 +2244,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      sum += tn * (eval1 + eval2);
                   }
                }
-               correction[ci] = br2_penalty * 0.5 * sum / nor_sq;
+               correction[ci] = br2_penalty * 0.5 * sum;
             }
          }
 
