@@ -285,8 +285,8 @@ void TestBP5ComputeRHS()
    TEST_ASSERT(all_V_positive, "ComputeRHS: all |V| > 0");
    TEST_ASSERT(all_dpsi_finite, "ComputeRHS: all dpsi/dt are finite");
 
-   // Slip rate direction should be anti-parallel to tau_pre
-   // (V_vec = -(V_abs / tau_abs) * tau_vec, so V · tau_pre < 0)
+   // Slip rate direction should be parallel to tau_pre
+   // (V_vec = (V_abs / tau_abs) * tau_vec, so V · tau_pre > 0)
    const Vector &tau_pre = fix.fault_geom->GetTauPre();
    bool direction_ok = true;
    for (int i = 0; i < N; i++)
@@ -298,15 +298,15 @@ void TestBP5ComputeRHS()
 
       // tau_total = tau_pre + traction (traction = 0 here)
       real_t dot = V0 * tp0 + V1 * tp1;
-      // V should be anti-parallel to tau_pre → dot < 0
-      if (dot > 1e-20)
+      // V should be parallel to tau_pre → dot > 0
+      if (dot < -1e-20)
       {
          direction_ok = false;
          break;
       }
    }
    TEST_ASSERT(direction_ok,
-               "ComputeRHS: V direction is anti-parallel to tau_pre");
+               "ComputeRHS: V direction is parallel to tau_pre");
 
    std::cout << "  V_max from RHS: " << V_max << " m/s\n";
 }

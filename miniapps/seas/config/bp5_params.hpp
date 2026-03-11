@@ -271,7 +271,7 @@ struct BP5Params
    /// The extra delta_tau in QD means the nucleation zone is initially
    /// overstressed, driving V above V_i and accelerating nucleation.
    ///
-   /// Pre-stress direction is anti-parallel to initial velocity.
+   /// Pre-stress direction is parallel to initial velocity.
    ///
    /// @param[in] x2 Along-strike coordinate [m]
    /// @param[in] x3 Depth coordinate [m]
@@ -301,9 +301,9 @@ struct BP5Params
          tau0_scalar += eta_val * Vi_abs;
       }
 
-      // Direction: anti-parallel to initial velocity
-      tau[0] = -tau0_scalar * Vi[0] / Vi_abs;
-      tau[1] = -tau0_scalar * Vi[1] / Vi_abs;
+      // Direction: parallel to initial velocity
+      tau[0] = tau0_scalar * Vi[0] / Vi_abs;
+      tau[1] = tau0_scalar * Vi[1] / Vi_abs;
    }
 
    /// Print parameters to output stream.

@@ -46,7 +46,7 @@ void TestDirection()
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      TEST_ASSERT(V_vec[0] < 0.0, "Pure x-stress: V[0] < 0 (anti-parallel)");
+      TEST_ASSERT(V_vec[0] > 0.0, "Pure x-stress: V[0] > 0 (parallel)");
       TEST_NEAR(V_vec[1], 0.0, 1e-30, "Pure x-stress: V[1] = 0");
    }
 
@@ -57,7 +57,7 @@ void TestDirection()
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
       TEST_NEAR(V_vec[0], 0.0, 1e-30, "Pure y-stress: V[0] = 0");
-      TEST_ASSERT(V_vec[1] < 0.0, "Pure y-stress: V[1] < 0 (anti-parallel)");
+      TEST_ASSERT(V_vec[1] > 0.0, "Pure y-stress: V[1] > 0 (parallel)");
    }
 
    // Test 3: 45-degree stress
@@ -67,9 +67,9 @@ void TestDirection()
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      // Both components should be negative (anti-parallel to positive tau)
-      TEST_ASSERT(V_vec[0] < 0.0, "45-deg: V[0] < 0");
-      TEST_ASSERT(V_vec[1] < 0.0, "45-deg: V[1] < 0");
+      // Both components should be positive (parallel to positive tau)
+      TEST_ASSERT(V_vec[0] > 0.0, "45-deg: V[0] > 0");
+      TEST_ASSERT(V_vec[1] > 0.0, "45-deg: V[1] > 0");
 
       // Components should be equal (same magnitude in both directions)
       TEST_REL_NEAR(V_vec[0], V_vec[1], 1e-12,
@@ -82,11 +82,11 @@ void TestDirection()
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      // V should be anti-parallel to tau: V[0] > 0, V[1] < 0
-      TEST_ASSERT(V_vec[0] > 0.0,
-                  "(-,+) stress: V[0] > 0 (anti-parallel)");
-      TEST_ASSERT(V_vec[1] < 0.0,
-                  "(-,+) stress: V[1] < 0 (anti-parallel)");
+      // V should be parallel to tau: V[0] < 0, V[1] > 0
+      TEST_ASSERT(V_vec[0] < 0.0,
+                  "(-,+) stress: V[0] < 0 (parallel)");
+      TEST_ASSERT(V_vec[1] > 0.0,
+                  "(-,+) stress: V[1] > 0 (parallel)");
    }
 }
 
@@ -187,19 +187,14 @@ void TestBP5Values()
       real_t tau[2];
       p.tau0_vec(x2, x3, tau);
 
-      // The vector solver expects the total traction as positive input.
-      // tau0_vec returns negative values (anti-parallel to V).
-      // The solver returns V anti-parallel to input tau.
-      // So -tau fed to solver should give V in the direction of V_init.
-      real_t neg_tau[2] = {-tau[0], -tau[1]};
-
+      // tau0_vec returns positive values (parallel to V).
+      // The solver returns V parallel to input tau.
+      // So tau fed to solver should give V in the direction of V_init.
       real_t V_vec[2];
-      friction.SolveSlipRateVectorPsi(neg_tau, psi_ss, p.sigma_n, p.eta(),
+      friction.SolveSlipRateVectorPsi(tau, psi_ss, p.sigma_n, p.eta(),
                                        p.a_of_x2_x3(x2, x3), V_vec);
 
-      // V_vec should be anti-parallel to neg_tau, i.e., parallel to tau,
-      // which is anti-parallel to V_init. So V_vec should be anti-parallel
-      // to V_init. Actually: -tau (positive) -> solver -> V = -V_init direction.
+      // V_vec should be parallel to tau, which is parallel to V_init.
       // The magnitude should match.
       real_t V_mag = std::sqrt(V_vec[0] * V_vec[0] + V_vec[1] * V_vec[1]);
       real_t Vi[2];
@@ -232,13 +227,12 @@ void TestBP5Values()
       real_t f_val = friction_nuc.FrictionCoefficientPsi(Vi_mag, psi_ss, a);
       real_t tau_scalar = p.sigma_n * f_val + eta_val * Vi_mag;
 
-      // Feed as vector anti-parallel to V_init
+      // Feed as vector parallel to V_init
       real_t tau_vec[2] = { tau_scalar * Vi[0] / Vi_mag,
                             tau_scalar * Vi[1] / Vi_mag };
-      real_t neg_tau[2] = {-tau_vec[0], -tau_vec[1]};
 
       real_t V_vec[2];
-      friction_nuc.SolveSlipRateVectorPsi(neg_tau, psi_ss, p.sigma_n, eta_val,
+      friction_nuc.SolveSlipRateVectorPsi(tau_vec, psi_ss, p.sigma_n, eta_val,
                                            a, V_vec);
 
       real_t V_mag = std::sqrt(V_vec[0] * V_vec[0] + V_vec[1] * V_vec[1]);

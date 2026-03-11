@@ -201,10 +201,10 @@ void TestTau0Vec()
    TEST_ASSERT(tau_mag > 0.0, "|tau0| > 0 outside nucleation");
    TEST_ASSERT(tau_mag < 1e8, "|tau0| < 100 MPa (physically reasonable)");
 
-   // tau should be anti-parallel to V_init
+   // tau should be parallel to V_init
    // V_init = (V_zero, Vp) → nearly pure dip direction
-   // tau should be nearly pure dip direction (negative)
-   TEST_ASSERT(tau[1] < 0.0, "tau[1] < 0 (anti-parallel to positive Vp)");
+   // tau should be nearly pure dip direction (positive)
+   TEST_ASSERT(tau[1] > 0.0, "tau[1] > 0 (parallel to positive Vp)");
 
    // Pre-stress in nucleation zone
    p.tau0_vec(-25.0e3, 10.0e3, tau);
@@ -531,7 +531,7 @@ void TestTau0VecVSZone()
 
    TEST_ASSERT(tau_mag > 0.0, "|tau0| > 0 in VS zone");
    TEST_ASSERT(tau_mag < 1e8, "|tau0| < 100 MPa in VS zone");
-   TEST_ASSERT(tau[1] < 0.0, "tau[1] < 0 in VS zone (anti-parallel to Vp)");
+   TEST_ASSERT(tau[1] > 0.0, "tau[1] > 0 in VS zone (parallel to Vp)");
 
    // Verify a=amax at this point
    TEST_NEAR(p.a_of_x2_x3(0.0, 30.0e3), p.amax, 1e-15,
@@ -571,9 +571,8 @@ void TestTau0VecDirection()
    p.V_init_vec(0.0, 10.0e3, Vi);
    p.tau0_vec(0.0, 10.0e3, tau);
 
-   // tau should be anti-parallel to Vi: tau = -|tau| * Vi/|Vi|
+   // tau should be parallel to Vi: tau = |tau| * Vi/|Vi|
    // So tau[0]/tau[1] should equal Vi[0]/Vi[1]
-   // (both negative, ratio is positive)
    real_t Vi_ratio = Vi[0] / Vi[1];
    real_t tau_ratio = tau[0] / tau[1];
    TEST_REL_NEAR(tau_ratio, Vi_ratio, 1e-10,

@@ -366,10 +366,10 @@ public:
    /// Algorithm (following Tandem's DieterichRuinaAgeing::slip_rate):
    /// 1. tau_abs = ||tau_vec||
    /// 2. V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a)
-   /// 3. V_vec = -(V_abs / tau_abs) * tau_vec
+   /// 3. V_vec = (V_abs / tau_abs) * tau_vec
    ///
-   /// The negative sign means slip velocity is anti-parallel to traction
-   /// (friction opposes applied stress, slip occurs in stress direction).
+   /// Slip velocity is parallel to traction
+   /// (slip occurs in the direction of driving stress).
    ///
    /// @param[in] tau_vec Traction vector (2 components) [Pa]
    /// @param[in] psi Logarithmic state variable [-]
@@ -393,8 +393,8 @@ public:
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
-      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
+      V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
    }
 
    /// Compute initial psi from stress equilibrium.
