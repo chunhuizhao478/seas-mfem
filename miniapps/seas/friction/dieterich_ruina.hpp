@@ -308,7 +308,13 @@ public:
    /// Uses Brent's method (matching Tandem) with bracket [0, tau/eta].
    /// - At V=0: R(0) = tau > 0
    /// - At V=tau/eta: R = -sigma_n*f < 0
-   /// Guaranteed convergence for all psi/a ratios.
+   ///
+   /// When psi is very negative (collapsed state variable during RK45
+   /// intermediate stages), f → 0 and R(V_hi) ≈ 0 may become slightly
+   /// positive due to floating-point error. In this degenerate case,
+   /// friction is negligible and V ≈ tau/eta is returned. This allows
+   /// the adaptive time stepper to compute an error estimate and reject
+   /// the step rather than aborting.
    real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
                            real_t eta, real_t a,
                            int *iterations = nullptr) const
@@ -320,6 +326,12 @@ public:
          else { return 0.0; }
       }
 
+      if (tau <= 0.0)
+      {
+         if (iterations) { *iterations = 0; }
+         return 0.0;
+      }
+
       // Brent's method with bracket [0, tau/eta]
       real_t V_lo = 0.0;
       real_t V_hi = tau / eta;
@@ -328,6 +340,20 @@ public:
       {
          return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
       };
+
+      // Check bracket validity before calling zeroIn.
+      // R(V_lo) = tau > 0 (guaranteed since tau > 0 checked above).
+      // R(V_hi) should be -sigma_n*f(V_hi, psi) < 0, but when psi << 0,
+      // exp(psi/a) underflows → f → 0 → R(V_hi) ≈ 0 and may be slightly
+      // positive due to floating-point roundoff in tau - eta*(tau/eta).
+      real_t Fb = residual(V_hi);
+      if (Fb >= 0.0)
+      {
+         // Friction is negligible (collapsed state variable).
+         // Return V = tau/eta; the RK45 error estimator will reject this step.
+         if (iterations) { *iterations = 0; }
+         return V_hi;
+      }
 
       real_t V = zeroIn(V_lo, V_hi, residual);
 

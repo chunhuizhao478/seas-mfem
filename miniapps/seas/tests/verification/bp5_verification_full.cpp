@@ -553,10 +553,13 @@ int main(int argc, char *argv[])
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.5 * BP5Params::seconds_per_year);
 
-   // Initial dt must be small enough for the nucleation zone.
-   // With V_nuc = 0.03 m/s and L = 0.13 m, CFL-like condition:
-   //   dt ~ L / V_max to keep slip increments physically reasonable.
-   real_t dt_init = std::min(1e3, 0.5 * params.L_nuc /
+   // Initial dt must be small enough for the nucleation zone dynamics.
+   // The nucleation zone has V_nuc = 0.03 m/s with overstressing that
+   // drives acceleration. Using a conservative multiplier (0.01) ensures
+   // the RK45 adaptive controller can resolve the initial transient
+   // without producing intermediate states that blow up. The controller
+   // will quickly ramp up dt during the interseismic period.
+   real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
                              std::max(V_init, 1e-20));
    ode_solver.SetDt(dt_init);
    if (mpi.IsRoot())
