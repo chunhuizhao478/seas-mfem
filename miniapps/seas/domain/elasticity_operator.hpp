@@ -1687,6 +1687,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
    Vector &rhs = b;
 
    // Add slip contributions (interior + shared faces)
+   real_t rhs_before_slip = rhs.Normlinf();
    if (method_ == DGMethod::IP)
    {
       AssembleSlipContributionIP(rhs, slip_bc);
@@ -1699,9 +1700,26 @@ void ElasticityDomainOperator<MeshType>::Solve(
       AssembleSlipContributionBR2Shared(rhs, slip_bc,
                                         fault_interior_faces_.Size());
    }
+   real_t rhs_after_slip = rhs.Normlinf();
 
    // Add Dirichlet loading
    AssembleDirichletLoading(rhs, time);
+
+   // Diagnostic: check for RHS blowup
+   real_t rhs_final = rhs.Normlinf();
+   if (rhs_final > 1e15 || std::isnan(rhs_final))
+   {
+      int rank = 0;
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+      }
+#endif
+      mfem::out << "[Rank " << rank << "] RHS BLOWUP: before_slip="
+                << rhs_before_slip << " after_slip=" << rhs_after_slip
+                << " final=" << rhs_final << "\n";
+   }
 
    X_ = 0.0;
    B_ = rhs;
@@ -1716,6 +1734,25 @@ void ElasticityDomainOperator<MeshType>::Solve(
          mfem::err << "WARNING: CG did not converge after "
                    << cg->GetNumIterations() << " iterations, final norm = "
                    << cg->GetFinalNorm() << "\n";
+      }
+   }
+
+   // Diagnostic: check for displacement blowup
+   {
+      real_t u_max = X_.Normlinf();
+      if (u_max > 1e6 || std::isnan(u_max))
+      {
+         int rank = 0;
+#ifdef MFEM_USE_MPI
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+         }
+#endif
+         mfem::out << "[Rank " << rank << "] DISPLACEMENT BLOWUP: ||u||_inf="
+                   << u_max << "\n";
+         mfem::out << "[Rank " << rank << "] ||RHS||_inf=" << B_.Normlinf()
+                   << "\n";
       }
    }
 
@@ -1934,6 +1971,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          f_lifted2 *= 0.5;
 
          // Evaluate f_lifted_q at centroid with elasticity tensor coupling
+         // Use unnormalized normal (nor) for consistency with BR2 matrix/RHS,
+         // then divide by ||nor||^2 to convert from force to traction.
+         real_t nor_sq = nor * nor;
          for (int i = 0; i < dim; i++)
          {
             real_t sum = 0.0;
@@ -1941,9 +1981,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             {
                for (int s = 0; s < dim; s++)
                {
-                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
-                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
-                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
+                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * nor(i)
+                     + mu_val_ * ((i == u ? 1.0 : 0.0) * nor(s)
+                                + (i == s ? 1.0 : 0.0) * nor(u));
                   real_t eval1 = 0.0, eval2 = 0.0;
                   for (int m = 0; m < ndof1; m++)
                   {
@@ -1956,7 +1996,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   sum += tn * (eval1 + eval2);
                }
             }
-            correction[i] = br2_penalty * 0.5 * sum;
+            correction[i] = br2_penalty * 0.5 * sum / nor_sq;
          }
       }
 
@@ -2160,6 +2200,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             MultABt(face_int2, Minv2, f_lifted2);
             f_lifted2 *= 0.5;
 
+            // Use unnormalized normal (nor) for consistency with BR2
+            // matrix/RHS, then divide by ||nor||^2 to convert to traction.
+            real_t nor_sq = nor * nor;
             for (int ci = 0; ci < dim; ci++)
             {
                real_t sum = 0.0;
@@ -2167,9 +2210,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                {
                   for (int s = 0; s < dim; s++)
                   {
-                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
-                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
-                                     + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
+                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * nor(ci)
+                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * nor(s)
+                                     + (ci == s ? 1.0 : 0.0) * nor(u));
                      real_t eval1 = 0.0, eval2 = 0.0;
                      for (int m = 0; m < ndof1; m++)
                         eval1 += shape1(m) * f_lifted1(u * dim + s, m);
@@ -2178,7 +2221,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      sum += tn * (eval1 + eval2);
                   }
                }
-               correction[ci] = br2_penalty * 0.5 * sum;
+               correction[ci] = br2_penalty * 0.5 * sum / nor_sq;
             }
          }
 
@@ -2192,6 +2235,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
 #endif
    }
+
+   // Diagnostic: check for traction blowup
+#ifdef MFEM_USE_MPI
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      int rank;
+      MPI_Comm_rank(mesh_.GetComm(), &rank);
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         real_t tau_mag = std::sqrt(traction(2*i)*traction(2*i) +
+                                    traction(2*i+1)*traction(2*i+1));
+         if (tau_mag > 1e9 || std::isnan(tau_mag))
+         {
+            mfem::out << "[Rank " << rank << "] TRACTION BLOWUP: DOF " << i
+                      << (i < fault_interior_faces_.Size() ?
+                          " (interior)" : " (shared)")
+                      << " tau_mag=" << tau_mag
+                      << " tau=(" << traction(2*i) << ","
+                      << traction(2*i+1) << ")\n";
+         }
+      }
+   }
+#endif
 }
 
 // Convenience type alias

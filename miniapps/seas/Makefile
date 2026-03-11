@@ -185,6 +185,10 @@ TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
 TEST_PARALLEL_ELAST_SRC = tests/parallel/test_parallel_elasticity.cpp
 TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 
+# BP5 parallel smoke test
+TEST_BP5_SMOKE_SRC = tests/parallel/test_bp5_parallel_smoke.cpp
+TEST_BP5_SMOKE_OBJ = $(TEST_BP5_SMOKE_SRC:.cpp=.o)
+
 # Phase 10: BP2 first-cycle verification
 BP2_VERIFY_SRC = tests/verification/bp2_verification_first_cycle.cpp
 BP2_VERIFY_OBJ = $(BP2_VERIFY_SRC:.cpp=.o)
@@ -211,7 +215,8 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_serial_parallel_consistency \
                seas_test_scaling \
                seas_test_br2_consistency \
-               seas_test_parallel_elasticity
+               seas_test_parallel_elasticity \
+               seas_test_bp5_parallel_smoke
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
 PAR_LONG = seas_pseas \
            seas_bp2_benchmark_parallel \
@@ -242,7 +247,8 @@ MFEM_TESTS = MINIAPPS
         test-elasticity-br2 test-elasticity-operator \
         test-bp5-fault-operator \
         test-bp5-integration \
-        test-bp5-output test-bp5-mesh
+        test-bp5-output test-bp5-mesh \
+        test-bp5-smoke
 
 all: $(MINIAPPS)
 
@@ -624,6 +630,18 @@ $(TEST_PARALLEL_ELAST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 test-parallel-elasticity: seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
+
+# BP5 parallel smoke test
+seas_test_bp5_parallel_smoke: $(TEST_BP5_SMOKE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_SMOKE_OBJ) $(MFEM_LIBS)
+
+$(TEST_BP5_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-bp5-smoke: seas_test_bp5_parallel_smoke
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_bp5_parallel_smoke
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_bp5_parallel_smoke
 
 # Phase 10: BP2 first-cycle verification
 seas_bp2_verify: $(BP2_VERIFY_OBJ)
