@@ -3,8 +3,8 @@
 #SBATCH -o bp5_1000m_%j.out     # stdout (%j = job ID)
 #SBATCH -e bp5_1000m_%j.err     # stderr
 #SBATCH -p normal               # Queue
-#SBATCH -N 2                    # nodes
-#SBATCH -n 100                  # MPI tasks
+#SBATCH -N 4                    # nodes
+#SBATCH -n 224                  # MPI tasks (56 per node)
 #SBATCH -t 48:00:00             # wall time
 #SBATCH -A EAR20006             # TACC allocation
 
