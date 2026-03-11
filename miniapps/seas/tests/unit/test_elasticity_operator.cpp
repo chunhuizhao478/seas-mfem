@@ -807,6 +807,97 @@ void TestBR2Default()
 }
 
 // =============================================================================
+// Test 15: Traction with DG penalty correction
+// =============================================================================
+void TestTractionWithPenaltyCorrection()
+{
+   std::cout << "\n--- Test: Traction With DG Penalty Correction ---\n";
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+   real_t lambda = 1.0, mu = 1.0;
+
+   real_t ip_avg_strike = 0.0, br2_avg_strike = 0.0;
+
+   for (int method = 0; method < 2; method++)
+   {
+      DGMethod dg = (method == 0) ? DGMethod::IP : DGMethod::BR2;
+      std::string label = (method == 0) ? "IP" : "BR2";
+
+      ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, 0.0, Lz, 2*Ly, dg);
+      int nf = op.GetNumFaultDOFs();
+      if (nf == 0)
+      {
+         std::cout << "  (Skipped " << label << ": no fault faces)\n";
+         continue;
+      }
+
+      // --- Sub-test A: Zero slip → zero traction ---
+      {
+         Vector slip0(2 * nf);
+         slip0 = 0.0;
+         GridFunction u0(&op.GetFESpace());
+         u0 = 0.0;
+         op.Solve(0.0, slip0, u0);
+         Vector trac0;
+         op.ComputeTraction(u0, slip0, trac0);
+         real_t trac0_norm = trac0.Norml2();
+         TEST_ASSERT(trac0_norm < 1e-8,
+                     (label + ": Zero slip gives zero traction").c_str());
+         std::cout << "    " << label << " zero-slip traction norm: "
+                   << trac0_norm << "\n";
+      }
+
+      // --- Sub-test B: Uniform strike slip → stress drop ---
+      {
+         Vector slip1(2 * nf);
+         slip1 = 0.0;
+         for (int i = 0; i < nf; i++) { slip1(2*i+1) = 1.0; }  // strike slip
+
+         GridFunction u1(&op.GetFESpace());
+         u1 = 0.0;
+         op.Solve(0.0, slip1, u1);
+         Vector trac1;
+         op.ComputeTraction(u1, slip1, trac1);
+
+         real_t avg_strike = 0.0;
+         for (int i = 0; i < nf; i++) { avg_strike += trac1(2*i+1); }
+         avg_strike /= nf;
+
+         // Positive slip should produce negative traction (stress drop)
+         TEST_ASSERT(avg_strike < 0,
+                     (label + ": Strike slip causes negative traction (stress drop)").c_str());
+         std::cout << "    " << label << " avg strike traction: "
+                   << avg_strike << "\n";
+
+         // Traction should be bounded
+         real_t trac1_max = trac1.Normlinf();
+         TEST_ASSERT(trac1_max < 100.0,
+                     (label + ": Traction is bounded").c_str());
+         std::cout << "    " << label << " max traction: "
+                   << trac1_max << "\n";
+
+         if (method == 0) { ip_avg_strike = avg_strike; }
+         else { br2_avg_strike = avg_strike; }
+      }
+   }
+
+   // --- Sub-test C: IP vs BR2 consistency ---
+   if (std::abs(ip_avg_strike) > 1e-12 && std::abs(br2_avg_strike) > 1e-12)
+   {
+      // Both should have same sign (negative)
+      TEST_ASSERT(ip_avg_strike * br2_avg_strike > 0,
+                  "IP and BR2 strike traction have same sign");
+      // On coarse meshes with order 1, IP has much larger penalty than BR2,
+      // so allow a wide ratio. The key check is same sign (stress drop).
+      real_t ratio = std::abs(ip_avg_strike / br2_avg_strike);
+      TEST_ASSERT(ratio > 0.001 && ratio < 1000.0,
+                  "IP and BR2 strike traction within 3 orders of magnitude");
+      std::cout << "    IP/BR2 ratio: " << ratio << "\n";
+   }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main()
@@ -829,6 +920,7 @@ int main()
    TestDirichletLoadingShearTraction();
    TestBR2vsIP();
    TestBR2Default();
+   TestTractionWithPenaltyCorrection();
 
    TEST_PRINT_RESULTS();
 

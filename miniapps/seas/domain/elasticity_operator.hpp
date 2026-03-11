@@ -1387,6 +1387,142 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
       }
 
+      // === DG penalty correction: T -= penalty * ([[u]] - δ) ===
+      // This matches Tandem's traction formula:
+      //   t = {σ}·n + c0 * (E_q[0]*u[0] - E_q[1]*u[1] - f_q)
+      // where c0 = -penalty, so t = {σ}·n - penalty * ([[u]] - δ)
+
+      // 1. Compute displacement values at face centroid
+      Vector shape1(ndof1), shape2(ndof2);
+      fe1->CalcShape(eip1, shape1);
+      fe2->CalcShape(eip2, shape2);
+
+      real_t u1_val[3] = {0.0, 0.0, 0.0};
+      real_t u2_val[3] = {0.0, 0.0, 0.0};
+      for (int c = 0; c < dim; c++)
+      {
+         for (int k = 0; k < ndof1; k++)
+         {
+            u1_val[c] += shape1(k) * u1_all(c * ndof1 + k);
+         }
+         for (int k = 0; k < ndof2; k++)
+         {
+            u2_val[c] += shape2(k) * u2_all(c * ndof2 + k);
+         }
+      }
+
+      // 2. Displacement jump [[u]] = u1 - u2
+      real_t u_jump[3];
+      for (int c = 0; c < dim; c++)
+      {
+         u_jump[c] = u1_val[c] - u2_val[c];
+      }
+
+      // 3. Prescribed slip in global frame
+      real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
+      real_t delta_u[3];
+      fault_basis_.EmbedSlip(fi, slip_local, delta_u);
+
+      // 4. Sign correction (same convention as slip assembly)
+      Vector nor(dim);
+      CalcOrtho(FTr->Jacobian(), nor);
+      real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
+
+      // 5. Compute penalty correction based on DG method
+      real_t correction[3] = {0.0, 0.0, 0.0};
+
+      if (method_ == DGMethod::IP)
+      {
+         // IP penalty: kappa * |nor|^2 * (1/(2*detJ1) + 1/(2*detJ2))
+         real_t kappa = (order_ + 1) * (order_ + 1);
+         real_t detJ1 = FTr->Elem1->Weight();
+         real_t detJ2 = FTr->Elem2->Weight();
+         real_t nor_sq = nor * nor;
+         real_t penalty = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
+
+         for (int c = 0; c < dim; c++)
+         {
+            correction[c] = penalty * (u_jump[c] - sign * delta_u[c]);
+         }
+      }
+      else  // BR2
+      {
+         if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+
+         Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
+         real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
+                                  ? real_t(dim + 1) : real_t(2 * dim);
+
+         const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
+         const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
+
+         // Compute the jump to penalize: [[u]] - sign * δ
+         real_t jump[3];
+         for (int c = 0; c < dim; c++)
+         {
+            jump[c] = u_jump[c] - sign * delta_u[c];
+         }
+
+         // BR2 lifting at face centroid
+         // face_int[u*dim+s, m] = shape[m] * jump[u] * nor[s]
+         DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
+         face_int1 = 0.0;
+         face_int2 = 0.0;
+         for (int u = 0; u < dim; u++)
+         {
+            for (int s = 0; s < dim; s++)
+            {
+               for (int m = 0; m < ndof1; m++)
+               {
+                  face_int1(u * dim + s, m) = shape1(m) * jump[u] * nor(s);
+               }
+               for (int m = 0; m < ndof2; m++)
+               {
+                  face_int2(u * dim + s, m) = shape2(m) * jump[u] * nor(s);
+               }
+            }
+         }
+
+         // f_lifted = 0.5 * face_int * Minv^T
+         DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
+         MultABt(face_int1, Minv1, f_lifted1);
+         f_lifted1 *= 0.5;
+         MultABt(face_int2, Minv2, f_lifted2);
+         f_lifted2 *= 0.5;
+
+         // Evaluate f_lifted_q at centroid with elasticity tensor coupling
+         for (int i = 0; i < dim; i++)
+         {
+            real_t sum = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               for (int s = 0; s < dim; s++)
+               {
+                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
+                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
+                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
+                  real_t eval1 = 0.0, eval2 = 0.0;
+                  for (int m = 0; m < ndof1; m++)
+                  {
+                     eval1 += shape1(m) * f_lifted1(u * dim + s, m);
+                  }
+                  for (int m = 0; m < ndof2; m++)
+                  {
+                     eval2 += shape2(m) * f_lifted2(u * dim + s, m);
+                  }
+                  sum += tn * (eval1 + eval2);
+               }
+            }
+            correction[i] = br2_penalty * 0.5 * sum;
+         }
+      }
+
+      // 6. Apply correction: T -= penalty * ([[u]] - δ)
+      for (int c = 0; c < dim; c++)
+      {
+         T_global[c] -= correction[c];
+      }
+
       // Project to local frame: (tau_dip, tau_strike)
       real_t tau_local[2];
       fault_basis_.ProjectTraction(fi, T_global, tau_local);
