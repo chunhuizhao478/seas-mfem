@@ -181,6 +181,10 @@ TEST_SCALING_OBJ = $(TEST_SCALING_SRC:.cpp=.o)
 TEST_BR2_CONSISTENCY_SRC = tests/parallel/test_br2_consistency.cpp
 TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
 
+# Parallel elasticity test (shared face support)
+TEST_PARALLEL_ELAST_SRC = tests/parallel/test_parallel_elasticity.cpp
+TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
+
 # Phase 10: BP2 first-cycle verification
 BP2_VERIFY_SRC = tests/verification/bp2_verification_first_cycle.cpp
 BP2_VERIFY_OBJ = $(BP2_VERIFY_SRC:.cpp=.o)
@@ -206,7 +210,8 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_parallel_fault \
                seas_test_serial_parallel_consistency \
                seas_test_scaling \
-               seas_test_br2_consistency
+               seas_test_br2_consistency \
+               seas_test_parallel_elasticity
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
 PAR_LONG = seas_pseas \
            seas_bp2_benchmark_parallel \
@@ -607,6 +612,18 @@ $(TEST_BR2_CONSISTENCY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS
 test-br2-consistency: seas_test_br2_consistency
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_br2_consistency
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_br2_consistency
+
+# Parallel elasticity test (shared face support)
+seas_test_parallel_elasticity: $(TEST_PARALLEL_ELAST_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_ELAST_OBJ) $(MFEM_LIBS)
+
+$(TEST_PARALLEL_ELAST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-parallel-elasticity: seas_test_parallel_elasticity
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_elasticity
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
 
 # Phase 10: BP2 first-cycle verification
 seas_bp2_verify: $(BP2_VERIFY_OBJ)

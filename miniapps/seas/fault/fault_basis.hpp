@@ -153,6 +153,98 @@ public:
       }
    }
 
+   /// Append basis data for shared fault faces (parallel).
+   ///
+   /// Uses GetSharedFaceTransformations instead of GetInteriorFaceTransformations.
+   /// Appends to existing basis_ array computed by Compute().
+   template <typename MeshType>
+   void AppendSharedFaces(MeshType &mesh,
+                          const Array<int> &shared_faces,
+                          const Vector &ref_normal,
+                          const Vector &up)
+   {
+#ifdef MFEM_USE_MPI
+      int ns = shared_faces.Size();
+      if (ns == 0) { return; }
+
+      int old_count = num_faces_;
+      num_faces_ += ns;
+      basis_.resize(num_faces_);
+
+      for (int i = 0; i < ns; i++)
+      {
+         int sf = shared_faces[i];
+         auto *ftr = mesh.GetSharedFaceTransformations(sf);
+         MFEM_VERIFY(ftr != nullptr,
+                     "Shared face " << sf << " returned null transformation");
+
+         const IntegrationPoint &ip =
+            Geometries.GetCenter(ftr->GetGeometryType());
+         ftr->Face->SetIntPoint(&ip);
+
+         const DenseMatrix &J = ftr->Face->Jacobian();
+         Vector n_raw(dim_);
+         CalcOrtho(J, n_raw);
+
+         real_t dot = 0.0;
+         for (int d = 0; d < dim_; d++) { dot += n_raw(d) * ref_normal(d); }
+         if (dot < 0.0) { n_raw.Neg(); }
+
+         real_t n_len = n_raw.Norml2();
+         MFEM_VERIFY(n_len > 0.0, "Zero-length shared face normal");
+         n_raw /= n_len;
+
+         int bi = old_count + i;
+         for (int d = 0; d < 3; d++)
+         {
+            basis_[bi].normal[d] = 0.0;
+            basis_[bi].tangent1[d] = 0.0;
+            basis_[bi].tangent2[d] = 0.0;
+         }
+
+         for (int d = 0; d < dim_; d++)
+         {
+            basis_[bi].normal[d] = n_raw(d);
+         }
+
+         if (dim_ == 3)
+         {
+            real_t s[3];
+            s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
+            s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
+            s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
+
+            real_t s_len = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
+            MFEM_VERIFY(s_len > 1e-12,
+                        "Up vector and normal are nearly collinear (shared)");
+            s[0] /= s_len;
+            s[1] /= s_len;
+            s[2] /= s_len;
+
+            real_t d_vec[3];
+            d_vec[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
+            d_vec[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+            d_vec[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
+
+            for (int d = 0; d < 3; d++)
+            {
+               basis_[bi].tangent1[d] = d_vec[d];
+               basis_[bi].tangent2[d] = s[d];
+            }
+         }
+         else // dim_ == 2
+         {
+            real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
+            MFEM_VERIFY(std::abs(cross) > 1e-12,
+                        "2D: Up and normal nearly collinear (shared)");
+            real_t sign_val = (cross >= 0.0) ? 1.0 : -1.0;
+            basis_[bi].tangent1[0] = -sign_val * n_raw(1);
+            basis_[bi].tangent1[1] =  sign_val * n_raw(0);
+         }
+      }
+#endif
+   }
+
    /// Number of fault faces with computed basis.
    int NumFaces() const { return num_faces_; }
 
