@@ -35,4 +35,5 @@ ibrun ./seas_bp5_full \
       --mesh bp5/mesh/bp5_1000m.msh \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_1000m \
-      --checkpoint-interval 5000
+      --checkpoint-interval 5000 \
+      --mumps
