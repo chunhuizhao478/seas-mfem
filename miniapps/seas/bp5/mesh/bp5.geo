@@ -94,9 +94,40 @@ zbot() = Surface In BoundingBox{-Lx-eps, -Ly-eps, Lz-eps, Lx+eps, Ly+eps, Lz+eps
 // Fault surface (internal, for reference — not a physical boundary)
 fault_surfs() = Surface In BoundingBox{-eps, -l_f/2-eps, -eps, eps, l_f/2+eps, W_f+eps};
 
+// Nucleation refinement zones (post-BooleanFragments)
+// nuc1: outer transition — y in [-(l/2+h_t), l/2+h_t], z in [h_s, h_s+2*h_t+H]
+nuc1_surfs() = Surface In BoundingBox{-eps, -(l/2+h_t)-eps, h_s-eps, eps, (l/2+h_t)+eps, h_s+2*h_t+H+eps};
+// nuc2: VW zone — y in [-l/2, l/2], z in [h_s+h_t, h_s+h_t+H]
+nuc2_surfs() = Surface In BoundingBox{-eps, -l/2-eps, h_s+h_t-eps, eps, l/2+eps, h_s+h_t+H+eps};
+// nuc3: nucleation patch — y in [-l/2, -l/2+w], z in [h_s+h_t, h_s+h_t+H]
+nuc3_surfs() = Surface In BoundingBox{-eps, -l/2-eps, h_s+h_t-eps, eps, -l/2+w+eps, h_s+h_t+H+eps};
+
 // --- Mesh sizing ---
 MeshSize{ PointsOf{Volume{:};} } = res;
+
+// Fault surface: benchmark resolution
 MeshSize{ PointsOf{Surface{fault_surfs()};} } = res_f;
+
+// Nucleation zones: intermediate refinement
+MeshSize{ PointsOf{Surface{nuc1_surfs()};} } = res_f * 2;
+MeshSize{ PointsOf{Surface{nuc2_surfs()};} } = res_f * 1.5;
+MeshSize{ PointsOf{Surface{nuc3_surfs()};} } = res_f;
+
+// Smooth mesh grading from fault surface into the volume
+// Prevents sharp element size jumps that cause DG traction noise
+Field[1] = Distance;
+Field[1].SurfacesList = {fault_surfs()};
+
+Field[2] = Threshold;
+Field[2].InField = 1;
+Field[2].SizeMin = res_f;      // At fault: res_f (1 km)
+Field[2].SizeMax = res;         // Far from fault: res (40 km)
+Field[2].DistMin = 0;           // Start grading at fault
+Field[2].DistMax = 80;          // Reach far-field size at 80 km distance
+
+Field[3] = Min;
+Field[3].FieldsList = {2};
+Background Field = 3;
 
 // --- Physical groups ---
 // Boundary surfaces (MFEM boundary attributes 1-6, 100)

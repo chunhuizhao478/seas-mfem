@@ -282,7 +282,7 @@ def main():
     color_idx = 0
 
     if args.tandem and not args.no_benchmark:
-        sources.append(("Tandem", "tandem", None, COLORS[color_idx], "-"))
+        sources.append(("Tandem", "tandem", None, COLORS[color_idx], "--"))
         color_idx += 1
 
     # Primary MFEM dataset

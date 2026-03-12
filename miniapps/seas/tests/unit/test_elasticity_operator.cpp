@@ -647,7 +647,7 @@ void TestDirichletLoadingShearTraction()
       // Dirichlet loading u_y = ±Vp*t/2 at ±x walls creates σ_xy.
       // With up=(0,0,1), n=(1,0,0):
       //   strike = up × n = (0,1,0) → tangent2
-      //   dip = strike × n = (0,0,-1) → tangent1
+      //   dip = -(strike × n) = (0,0,1) → tangent1 (negated for Tandem/SCEC convention)
       // σ_xy projects onto strike (tangent2), so traction(2*i+1) should dominate.
 
       // Check traction is non-zero
@@ -683,7 +683,7 @@ void TestDirichletLoadingShearTraction()
                      (label + ": Dip traction is negligible (pure shear)").c_str());
       }
 
-      // Sign check: with up=(0,0,1), strike=(0,1,0), and right-lateral loading,
+      // Sign check: with up=(0,0,1), strike=(0,1,0) [unchanged by dip negation],
       // the strike traction component should be positive.
       real_t avg_strike = 0.0;
       for (int i = 0; i < nf; i++)

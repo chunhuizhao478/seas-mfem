@@ -93,10 +93,11 @@ void TestAxisAligned3D()
    TEST_NEAR(b.normal[1], 0.0, 1e-12, "n[1] = 0");
    TEST_NEAR(b.normal[2], 0.0, 1e-12, "n[2] = 0");
 
-   // Expected: tangent1 = dip = (0,0,1)
+   // Expected: tangent1 = dip = (0,0,-1)
+   // Negated from strike x n to match Tandem/SCEC convention (positive dip = downward)
    TEST_NEAR(b.tangent1[0], 0.0, 1e-12, "t1[0] = 0 (dip)");
    TEST_NEAR(b.tangent1[1], 0.0, 1e-12, "t1[1] = 0 (dip)");
-   TEST_NEAR(b.tangent1[2], 1.0, 1e-12, "t1[2] = 1 (dip)");
+   TEST_NEAR(b.tangent1[2], -1.0, 1e-12, "t1[2] = -1 (dip)");
 
    // Expected: tangent2 = strike = (0,-1,0)
    TEST_NEAR(b.tangent2[0], 0.0, 1e-12, "t2[0] = 0 (strike)");
@@ -139,15 +140,15 @@ void TestProjectTraction()
    FaultBasis fb;
    fb.Compute(mesh, fault_faces, ref_normal, up);
 
-   // With n=(1,0,0), t1=dip=(0,0,1), t2=strike=(0,-1,0):
+   // With n=(1,0,0), t1=dip=(0,0,-1), t2=strike=(0,-1,0):
    // Traction (10, 20, 30) MPa
    real_t traction[3] = {10.0, 20.0, 30.0};
    real_t tau_local[2];
    fb.ProjectTraction(0, traction, tau_local);
 
-   // tau_local[0] = traction . t1 = (10,20,30).(0,0,1) = 30
-   TEST_NEAR(tau_local[0], 30.0, 1e-12,
-             "ProjectTraction dip = 30 for (10,20,30)");
+   // tau_local[0] = traction . t1 = (10,20,30).(0,0,-1) = -30
+   TEST_NEAR(tau_local[0], -30.0, 1e-12,
+             "ProjectTraction dip = -30 for (10,20,30)");
    // tau_local[1] = traction . t2 = (10,20,30).(0,-1,0) = -20
    TEST_NEAR(tau_local[1], -20.0, 1e-12,
              "ProjectTraction strike = -20 for (10,20,30)");
@@ -181,15 +182,15 @@ void TestEmbedSlip()
    FaultBasis fb;
    fb.Compute(mesh, fault_faces, ref_normal, up);
 
-   // t1=dip=(0,0,1), t2=strike=(0,-1,0)
+   // t1=dip=(0,0,-1), t2=strike=(0,-1,0)
 
-   // slip_local = (1, 0) → delta_u should be along t1 = (0,0,1)
+   // slip_local = (1, 0) → delta_u should be along t1 = (0,0,-1)
    real_t slip_dip[2] = {1.0, 0.0};
    real_t du[3];
    fb.EmbedSlip(0, slip_dip, du);
    TEST_NEAR(du[0], 0.0, 1e-12, "EmbedSlip(1,0): du[0] = 0");
    TEST_NEAR(du[1], 0.0, 1e-12, "EmbedSlip(1,0): du[1] = 0");
-   TEST_NEAR(du[2], 1.0, 1e-12, "EmbedSlip(1,0): du[2] = 1 (dip)");
+   TEST_NEAR(du[2], -1.0, 1e-12, "EmbedSlip(1,0): du[2] = -1 (dip)");
 
    // slip_local = (0, 1) → delta_u should be along t2 = (0,-1,0)
    real_t slip_strike[2] = {0.0, 1.0};
@@ -198,12 +199,12 @@ void TestEmbedSlip()
    TEST_NEAR(du[1], -1.0, 1e-12, "EmbedSlip(0,1): du[1] = -1 (strike)");
    TEST_NEAR(du[2], 0.0, 1e-12, "EmbedSlip(0,1): du[2] = 0");
 
-   // Mixed slip: (2, 3) → delta_u = 2*(0,0,1) + 3*(0,-1,0) = (0,-3,2)
+   // Mixed slip: (2, 3) → delta_u = 2*(0,0,-1) + 3*(0,-1,0) = (0,-3,-2)
    real_t slip_mixed[2] = {2.0, 3.0};
    fb.EmbedSlip(0, slip_mixed, du);
    TEST_NEAR(du[0], 0.0, 1e-12, "EmbedSlip(2,3): du[0] = 0");
    TEST_NEAR(du[1], -3.0, 1e-12, "EmbedSlip(2,3): du[1] = -3");
-   TEST_NEAR(du[2], 2.0, 1e-12, "EmbedSlip(2,3): du[2] = 2");
+   TEST_NEAR(du[2], -2.0, 1e-12, "EmbedSlip(2,3): du[2] = -2");
 }
 
 // =============================================================================
@@ -226,8 +227,8 @@ void TestRoundTrip()
    fb.Compute(mesh, fault_faces, ref_normal, up);
 
    // Given a purely tangential traction (no normal component):
-   // traction = 5*t1 + 7*t2 = (0,0,5) + (0,-7,0) = (0,-7,5)
-   real_t traction[3] = {0.0, -7.0, 5.0};
+   // traction = 5*t1 + 7*t2 = 5*(0,0,-1) + 7*(0,-1,0) = (0,-7,-5)
+   real_t traction[3] = {0.0, -7.0, -5.0};
    real_t tau_local[2];
    fb.ProjectTraction(0, traction, tau_local);
 
@@ -246,8 +247,8 @@ void TestRoundTrip()
              "Round-trip embed: du[2] matches tangential traction[2]");
 
    // With a traction that has a normal component:
-   // traction2 = (10, -7, 5) → normal part = 10, tangential part = (0,-7,5)
-   real_t traction2[3] = {10.0, -7.0, 5.0};
+   // traction2 = (10, -7, -5) → normal part = 10, tangential part = (0,-7,-5)
+   real_t traction2[3] = {10.0, -7.0, -5.0};
    fb.ProjectTraction(0, traction2, tau_local);
    TEST_NEAR(tau_local[0], 5.0, 1e-12,
              "Round-trip with normal: dip component = 5");
