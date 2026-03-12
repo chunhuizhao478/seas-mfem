@@ -10,12 +10,12 @@
 // Fault plane at x = 0, y in [-lf/2, lf/2], z in [0, Wf]
 //
 // Boundary attributes (MFEM):
-//   1 = x = -Lx  (far-field, natural BC)
-//   2 = x = +Lx  (far-field, natural BC)
-//   3 = y = +Ly  (Dirichlet: plate loading +Vp/2)
-//   4 = y = -Ly  (Dirichlet: plate loading -Vp/2)
+//   1 = x = -Lx  (Dirichlet: u_y = -Vp*t/2)
+//   2 = x = +Lx  (Dirichlet: u_y = +Vp*t/2)
+//   3 = y = +Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
+//   4 = y = -Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
 //   5 = z = 0    (free surface, natural BC)
-//   6 = z = Lz   (deep boundary, natural BC)
+//   6 = z = Lz   (Dirichlet: u_y = sgn(x)*Vp*t/2)
 //
 // Usage:
 //   gmsh -3 bp5.geo -o bp5_coarse.msh               (default: coarse)

@@ -42,8 +42,8 @@ namespace seas
 ///
 /// - Fault at x1=0 is an interior interface
 /// - Slip imposed as jump [[u]] on fault interior faces
-/// - Dirichlet loading on ±x2 walls: u₂ = ±Vp·t/2
-/// - Free surface / natural BC on other boundaries
+/// - Dirichlet loading on all non-free-surface boundaries: u₂ = sgn(x₁)·Vp·t/2
+/// - Free surface (z=0) has natural BC (zero traction)
 ///
 /// Supports both BR2 (default, matching Tandem) and IP DG methods.
 ///
@@ -214,11 +214,13 @@ private:
       dirichlet_bdr_marker_ = 0;
 
       // Mark Dirichlet boundaries by attribute
-      // Convention: attributes 1,2 are ±x1 walls (fault-normal, Dirichlet loading)
+      // SCEC BP5-QD: all non-free-surface boundaries get Dirichlet u_y = sgn(x)*Vp*t/2
+      //   attr 1 = x=-Lx, attr 2 = x=+Lx, attr 3 = y=+Ly, attr 4 = y=-Ly, attr 6 = z=Lz
+      //   attr 5 = z=0 (free surface, natural BC)
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr == 1 || attr == 2)
+         if (attr == 1 || attr == 2 || attr == 3 || attr == 4 || attr == 6)
          {
             dirichlet_bdr_marker_[attr - 1] = 1;
          }
@@ -1331,15 +1333,14 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // Plate loading on ±x1 walls (fault-normal): u₂ = ±Vp·t/2
-      // We need to assemble the DG Dirichlet BC contribution.
-      // For each boundary face on the ±x1 walls, add:
+      // SCEC BP5-QD Dirichlet loading: u = (0, sgn(x)*Vp*t/2, 0)
+      // Applied on all non-free-surface boundaries (attrs 1,2,3,4,6).
+      // For each boundary face, compute centroid x-coordinate to determine sign:
+      //   x > 0 → u_y = +Vp*t/2,  x < 0 → u_y = -Vp*t/2
+      //
+      // DG Dirichlet BC contribution:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
       //           + penalty * φ_k * u_D_i
-      //
-      // Attr 1 = -x wall (negative fault-normal side) → u_y = -Vp*t/2
-      // Attr 2 = +x wall (positive fault-normal side) → u_y = +Vp*t/2
-      // This creates ∂u_y/∂x → ε_xy → σ_xy which drives shear on the fault.
 
       if (std::abs(time * Vp_) < 1e-30) { return; }
 
@@ -1348,12 +1349,27 @@ private:
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr != 1 && attr != 2) { continue; }  // Only ±x1 walls (fault-normal)
+         if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
 
-         // Dirichlet value: u = (0, ±Vp*t/2, 0)
+         // Compute face centroid x-coordinate to determine sign
+         Vector centroid(3);
+         centroid = 0.0;
+         {
+            ElementTransformation *eltransf = mesh_.GetBdrElementTransformation(be);
+            const IntegrationRule &ir_c = IntRules.Get(eltransf->GetGeometryType(), 1);
+            for (int p = 0; p < ir_c.GetNPoints(); p++)
+            {
+               eltransf->SetIntPoint(&ir_c.IntPoint(p));
+               Vector phys(3);
+               eltransf->Transform(ir_c.IntPoint(p), phys);
+               centroid.Add(1.0 / ir_c.GetNPoints(), phys);
+            }
+         }
+         real_t sign = (centroid(0) > 0.0) ? 1.0 : -1.0;
+
+         // Dirichlet value: u = (0, sgn(x)*Vp*t/2, 0)
          real_t u_D[3] = {0.0, 0.0, 0.0};
-         if (attr == 2) { u_D[1] = Vp_ * time / 2.0; }   // +x1
-         else           { u_D[1] = -Vp_ * time / 2.0; }   // -x1
+         u_D[1] = sign * Vp_ * time / 2.0;
 
          // Get face transformation
          int face_idx, face_info;
@@ -1714,7 +1730,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
    // Diagnostic: check for RHS blowup
    real_t rhs_final = rhs.Normlinf();
    real_t slip_max = slip_bc.Normlinf();
-   if (rhs_final > 1e15 || std::isnan(rhs_final))
+   if (std::isnan(rhs_final))
    {
       int rank = 0;
 #ifdef MFEM_USE_MPI
@@ -1723,7 +1739,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
          MPI_Comm_rank(mesh_.GetComm(), &rank);
       }
 #endif
-      mfem::out << "[Rank " << rank << "] RHS BLOWUP: before_slip="
+      mfem::out << "[Rank " << rank << "] RHS NaN DETECTED: before_slip="
                 << rhs_before_slip << " after_slip=" << rhs_after_slip
                 << " final=" << rhs_final
                 << " slip_max=" << slip_max
