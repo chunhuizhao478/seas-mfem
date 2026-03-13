@@ -2,9 +2,9 @@
 #SBATCH -J bp5_v17_medium_cg    # Job name
 #SBATCH -o bp5_v17_medium_cg_%j.out
 #SBATCH -e bp5_v17_medium_cg_%j.err
-#SBATCH -p normal               # Queue
-#SBATCH -N 4                    # nodes
-#SBATCH -n 224                  # MPI tasks (56 per node)
+#SBATCH -p development               # Queue
+#SBATCH -N 8                    # nodes
+#SBATCH -n 400                  # MPI tasks (56 per node)
 #SBATCH -t 12:00:00             # 12 hours (medium run)
 #SBATCH -A EAR20006             # TACC allocation
 
@@ -37,7 +37,7 @@ ibrun ./seas_bp5_full \
       --solver cg \
       --check-residual \
       --monitor-traction 500 \
-      --tfinal 1.575e8 \
+      --tfinal 9.45e8 \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v17_medium_cg \
       --output-prefix bp5_v17_medium_cg \

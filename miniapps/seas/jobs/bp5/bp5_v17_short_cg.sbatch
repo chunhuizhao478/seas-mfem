@@ -3,8 +3,8 @@
 #SBATCH -o bp5_v17_short_cg_%j.out
 #SBATCH -e bp5_v17_short_cg_%j.err
 #SBATCH -p development               # Queue
-#SBATCH -N 4                    # nodes
-#SBATCH -n 224                  # MPI tasks (56 per node)
+#SBATCH -N 8                    # nodes
+#SBATCH -n 400                  # MPI tasks (56 per node)
 #SBATCH -t 02:00:00             # 2 hours (short run)
 #SBATCH -A EAR20006             # TACC allocation
 
