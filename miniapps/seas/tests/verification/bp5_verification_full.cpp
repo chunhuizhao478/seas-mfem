@@ -293,7 +293,7 @@ int main(int argc, char *argv[])
    int checkpoint_interval = 5000;
    std::string restart_prefix;
    bool write_every_step = false;
-   std::string solver_str = "cg";
+   std::string solver_str = "mumps-blr";
    bool check_residual = false;
    int monitor_traction = 0;
    std::string dg_method_str = "BR2";
@@ -372,7 +372,7 @@ int main(int argc, char *argv[])
    }
 
    // Process --solver flag
-   SolverType solver_type = SolverType::CG_AMG;
+   SolverType solver_type = SolverType::MUMPS_BLR;
    if (solver_str == "mumps" || solver_str == "MUMPS")
    {
       solver_type = SolverType::MUMPS;

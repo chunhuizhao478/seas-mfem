@@ -76,7 +76,7 @@ public:
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
                              DGMethod method = DGMethod::BR2,
-                             SolverType solver_type = SolverType::CG_AMG)
+                             SolverType solver_type = SolverType::MUMPS_BLR)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),

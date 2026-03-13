@@ -320,9 +320,9 @@ public:
             real_t a = a_values(i);
             real_t eta = eta_values(i);
 
-            // Compute initial psi from scalar stress equilibrium
-            real_t psi0 = dr_friction_->InitialStatePsi(
-               tau_abs, V_abs_init, sigma_n_bp5_, eta, a);
+            // SCEC Eq. 18: psi(0) = f0 + b*ln(V0/V_init) everywhere
+            // delta_tau is genuine overstress, not absorbed into state
+            real_t psi0 = bp5_params_.psi_init();
             state(i * StatePerNode + PsiIndex) = psi0;
 
             // Verify by solving vector equation
