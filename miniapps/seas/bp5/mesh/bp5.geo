@@ -14,7 +14,7 @@
 //   2 = x = +Lx  (Dirichlet: u_y = +Vp*t/2)
 //   3 = y = +Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
 //   4 = y = -Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
-//   5 = z = 0    (free surface, natural BC)
+//   5 = z = 0    (Dirichlet: u_y = sgn(x)*Vp*t/2, matching Tandem)
 //   6 = z = Lz   (Dirichlet: u_y = sgn(x)*Vp*t/2)
 //
 // Usage:

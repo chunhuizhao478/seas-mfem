@@ -34,7 +34,12 @@
 //   --write-every-step         Write output at every accepted step
 //   --V-nuc VAL                Nucleation slip rate [m/s] (default: 0.03)
 //   --delta-tau-factor VAL     Delta-tau multiplier (default: 1.0, Tandem: 0.0)
+//   --solver mumps|cg           Linear solver (default: cg)
+//   --check-residual           Warn if post-solve ||K*x-b||/||b|| > 1e-8
+//   --monitor-traction N       Log tau_pre/traction/total every N RHS evals
 //   --dump-bdr-vtk             Output boundary attributes to VTK
+//   --diag-vtk                 Output diagnostic VTK: displacement, fault a,
+//                              tau_pre, V_init, and boundary attributes
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -284,15 +289,19 @@ int main(int argc, char *argv[])
    std::string output_prefix = "bp5_full";
    std::string ref_dir = "bp5/benchmark_data";
    bool comparison_only = false;
-   double tfinal_override = 0.0;
+   double tfinal_override = -1.0;
    int checkpoint_interval = 5000;
    std::string restart_prefix;
    bool write_every_step = false;
    bool use_mumps = false;
+   std::string solver_str = "cg";
+   bool check_residual = false;
+   int monitor_traction = 0;
    std::string dg_method_str = "BR2";
    double V_nuc_override = 0.0;
    double delta_tau_factor_override = -1.0;
    bool dump_bdr_vtk = false;
+   bool diag_vtk = false;
 
    for (int i = 1; i < argc; i++)
    {
@@ -333,6 +342,12 @@ int main(int argc, char *argv[])
       }
       if (arg == "--write-every-step") { write_every_step = true; }
       if (arg == "--mumps") { use_mumps = true; }
+      if (arg == "--solver" && i + 1 < argc) { solver_str = argv[++i]; }
+      if (arg == "--check-residual") { check_residual = true; }
+      if (arg == "--monitor-traction" && i + 1 < argc)
+      {
+         monitor_traction = std::atoi(argv[++i]);
+      }
       if (arg == "--dg-method" && i + 1 < argc) { dg_method_str = argv[++i]; }
       if (arg == "--V-nuc" && i + 1 < argc)
       {
@@ -343,6 +358,7 @@ int main(int argc, char *argv[])
          delta_tau_factor_override = std::atof(argv[++i]);
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
+      if (arg == "--diag-vtk") { diag_vtk = true; }
    }
 
    // Parse DG method
@@ -354,6 +370,16 @@ int main(int argc, char *argv[])
    else if (dg_method_str == "BR2" || dg_method_str == "br2")
    {
       dg_method = DGMethod::BR2;
+   }
+
+   // Process --solver flag (overrides --mumps)
+   if (solver_str == "mumps" || solver_str == "MUMPS")
+   {
+      use_mumps = true;
+   }
+   else if (solver_str == "cg" || solver_str == "CG")
+   {
+      use_mumps = false;
    }
 
    // Default stations
@@ -368,7 +394,7 @@ int main(int argc, char *argv[])
    }
    params.Validate();
    double t_final = params.t_final;
-   if (tfinal_override > 0.0) { t_final = tfinal_override; }
+   if (tfinal_override >= 0.0) { t_final = tfinal_override; }
    params.t_final = t_final;
 
    std::string full_prefix = output_dir + "/" + output_prefix;
@@ -477,6 +503,8 @@ int main(int argc, char *argv[])
       pmesh, order, params.lambda(), params.mu(),
       params.Vp, params.Wf, params.lf, dg_method, use_mumps);
 
+   if (check_residual) { domain.SetCheckResidual(true); }
+
    if (mpi.IsRoot())
    {
       std::cout << "  Local fault DOFs: " << domain.GetNumFaultDOFs()
@@ -505,6 +533,11 @@ int main(int argc, char *argv[])
 
    RateStateFaultOperator<ParMesh, 2> fault_op(
       &fault_geom, &friction, &aging, params, &mpi);
+
+   if (monitor_traction > 0)
+   {
+      fault_op.SetTractionMonitoring(monitor_traction);
+   }
 
    // =========================================================================
    // SEAS quasi-dynamic operator
@@ -586,6 +619,206 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot() && global_out)
    {
       global_out->WriteStep({0.0, V_init > 0.0 ? std::log10(V_init) : -300.0});
+   }
+
+   // =========================================================================
+   // Diagnostic VTK output
+   // =========================================================================
+   if (diag_vtk)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "\n=== Diagnostic VTK Output ===\n";
+      }
+
+      // Solve domain at t=1yr with zero slip to show Dirichlet BC pattern
+      real_t diag_t = BP5Params::seconds_per_year;
+      int N_loc = fault_geom.NumLocalFaultDOFs();
+      Vector zero_slip(2 * N_loc);
+      zero_slip = 0.0;
+
+      ParGridFunction u_diag(&domain.GetFESpace());
+      u_diag = 0.0;
+      domain.Solve(diag_t, zero_slip, u_diag);
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Dirichlet BC solve at t=1yr: |u| = "
+                   << u_diag.Norml2() << "\n";
+      }
+
+      // Create L2 p=0 fields for fault parameter visualization
+      L2_FECollection l2_fec(0, 3);
+      ParFiniteElementSpace l2_fes(&pmesh, &l2_fec);
+
+      // --- Centroid-based analytic fields (kept from original) ---
+      ParGridFunction a_field(&l2_fes);
+      a_field = 0.0;
+      ParGridFunction tau_pre_mag(&l2_fes);
+      tau_pre_mag = 0.0;
+      ParGridFunction V_init_field(&l2_fes);
+      V_init_field = 0.0;
+
+      // Map fault parameters to elements adjacent to fault plane (x=0)
+      int n_fault_elem = 0;
+      for (int i = 0; i < pmesh.GetNE(); i++)
+      {
+         Array<int> verts;
+         pmesh.GetElementVertices(i, verts);
+         real_t min_x = 1e30, max_x = -1e30;
+         Vector center(3);
+         center = 0.0;
+         for (int v = 0; v < verts.Size(); v++)
+         {
+            const real_t *coords = pmesh.GetVertex(verts[v]);
+            min_x = std::min(min_x, coords[0]);
+            max_x = std::max(max_x, coords[0]);
+            for (int d = 0; d < 3; d++) { center(d) += coords[d]; }
+         }
+         center /= verts.Size();
+
+         if (min_x > 0.0 || max_x < 0.0) { continue; }
+
+         real_t y = center(1);
+         real_t z = center(2);
+
+         if (std::abs(y) > params.lf / 2.0 || z > params.Wf) { continue; }
+
+         a_field(i) = params.a_of_x2_x3(y, z);
+
+         real_t tau[2];
+         params.tau0_vec(y, z, tau);
+         tau_pre_mag(i) = std::sqrt(tau[0] * tau[0] + tau[1] * tau[1]);
+
+         real_t V[2];
+         params.V_init_vec(y, z, V);
+         V_init_field(i) = std::sqrt(V[0] * V[0] + V[1] * V[1]);
+
+         n_fault_elem++;
+      }
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Fault-adjacent elements (centroid, rank 0): "
+                   << n_fault_elem << "\n";
+      }
+
+      // --- State-based fields via fault face → element mapping ---
+      const Array<int> &fault_int_faces = domain.GetFaultInteriorFaces();
+      int nf_int = fault_int_faces.Size();
+
+      std::vector<int> face_elem1(nf_int), face_elem2(nf_int);
+      for (int i = 0; i < nf_int; i++)
+      {
+         FaceElementTransformations *FTr =
+            pmesh.GetInteriorFaceTransformations(fault_int_faces[i]);
+         face_elem1[i] = FTr->Elem1No;
+         face_elem2[i] = FTr->Elem2No;
+      }
+
+      // Extract fault quantities from state
+      Vector slip, theta;
+      fault_op.GetSlip(state, slip);
+      fault_op.GetTheta(state, theta);
+      const Vector &V_rate = fault_op.GetSlipRate();
+      const Vector &traction = seas_op.GetTraction();
+      const Vector &tau_pre = fault_geom.GetTauPre();
+      const Vector &a_vals = fault_geom.GetAValues();
+      const Vector &dc_vals = fault_geom.GetDcValues();
+
+      // Create L2 p=0 fields for state-based quantities
+      ParGridFunction slip_dip_f(&l2_fes);    slip_dip_f = 0.0;
+      ParGridFunction slip_strike_f(&l2_fes); slip_strike_f = 0.0;
+      ParGridFunction V_dip_f(&l2_fes);       V_dip_f = 0.0;
+      ParGridFunction V_strike_f(&l2_fes);    V_strike_f = 0.0;
+      ParGridFunction V_mag_f(&l2_fes);       V_mag_f = 0.0;
+      ParGridFunction tau_dip_f(&l2_fes);     tau_dip_f = 0.0;
+      ParGridFunction tau_strike_f(&l2_fes);  tau_strike_f = 0.0;
+      ParGridFunction tau_mag_f(&l2_fes);     tau_mag_f = 0.0;
+      ParGridFunction psi_f(&l2_fes);         psi_f = 0.0;
+      ParGridFunction a_state_f(&l2_fes);     a_state_f = 0.0;
+      ParGridFunction dc_f(&l2_fes);          dc_f = 0.0;
+
+      // Map fault DOFs to adjacent elements
+      // DOF ordering: interior faces first (0..nf_int-1), then shared faces
+      for (int i = 0; i < nf_int; i++)
+      {
+         int e1 = face_elem1[i];
+         int e2 = face_elem2[i];
+
+         real_t sd = slip(2 * i);
+         real_t ss = slip(2 * i + 1);
+         slip_dip_f(e1) = sd;    slip_dip_f(e2) = sd;
+         slip_strike_f(e1) = ss; slip_strike_f(e2) = ss;
+
+         real_t vd = V_rate(2 * i);
+         real_t vs = V_rate(2 * i + 1);
+         real_t vm = std::sqrt(vd * vd + vs * vs);
+         V_dip_f(e1) = vd;    V_dip_f(e2) = vd;
+         V_strike_f(e1) = vs; V_strike_f(e2) = vs;
+         V_mag_f(e1) = vm;    V_mag_f(e2) = vm;
+
+         // Total stress = pre-stress + elastic traction
+         real_t td = tau_pre(2 * i) + traction(2 * i);
+         real_t ts = tau_pre(2 * i + 1) + traction(2 * i + 1);
+         real_t tm = std::sqrt(td * td + ts * ts);
+         tau_dip_f(e1) = td;    tau_dip_f(e2) = td;
+         tau_strike_f(e1) = ts; tau_strike_f(e2) = ts;
+         tau_mag_f(e1) = tm;    tau_mag_f(e2) = tm;
+
+         psi_f(e1) = theta(i); psi_f(e2) = theta(i);
+         a_state_f(e1) = a_vals(i); a_state_f(e2) = a_vals(i);
+         dc_f(e1) = dc_vals(i); dc_f(e2) = dc_vals(i);
+      }
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Fault interior faces mapped: " << nf_int << "\n";
+      }
+
+      // Save via ParaViewDataCollection
+      ParaViewDataCollection pv("bp5_diag", &pmesh);
+      pv.SetPrefixPath(output_dir);
+      pv.SetDataFormat(VTKFormat::ASCII);
+      // Volume displacement
+      pv.RegisterField("displacement", &u_diag);
+      // Centroid-based analytic fields
+      pv.RegisterField("fault_a", &a_field);
+      pv.RegisterField("tau_pre_magnitude", &tau_pre_mag);
+      pv.RegisterField("V_init_magnitude", &V_init_field);
+      // State-based fields
+      pv.RegisterField("slip_dip", &slip_dip_f);
+      pv.RegisterField("slip_strike", &slip_strike_f);
+      pv.RegisterField("V_dip", &V_dip_f);
+      pv.RegisterField("V_strike", &V_strike_f);
+      pv.RegisterField("V_magnitude", &V_mag_f);
+      pv.RegisterField("tau_dip", &tau_dip_f);
+      pv.RegisterField("tau_strike", &tau_strike_f);
+      pv.RegisterField("tau_magnitude", &tau_mag_f);
+      pv.RegisterField("state_psi", &psi_f);
+      pv.RegisterField("fault_a_state", &a_state_f);
+      pv.RegisterField("fault_dc", &dc_f);
+      pv.SetCycle(0);
+      pv.SetTime(0.0);
+      pv.Save();
+
+      // Also output boundary attributes
+      pmesh.PrintBdrVTU(output_dir + "/boundary_attributes");
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "  ParaView output: " << output_dir << "/bp5_diag/\n";
+         std::cout << "  Fields: displacement, fault_a, tau_pre_magnitude, "
+                   << "V_init_magnitude\n";
+         std::cout << "  State fields: slip_dip/strike, V_dip/strike/magnitude, "
+                   << "tau_dip/strike/magnitude, state_psi, fault_a_state, "
+                   << "fault_dc\n";
+         std::cout << "  Boundary VTK: " << output_dir
+                   << "/boundary_attributes\n";
+         std::cout << "  Open in ParaView: File > Open > bp5_diag.pvd\n";
+         std::cout << "  To see fault 'a': Threshold filter on fault_a > 0\n";
+         std::cout << "=== Diagnostic VTK Complete ===\n\n";
+      }
    }
 
    // =========================================================================

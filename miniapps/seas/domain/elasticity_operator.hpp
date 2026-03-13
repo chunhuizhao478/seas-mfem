@@ -78,6 +78,7 @@ public:
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), use_mumps_(use_mumps),
+        check_residual_(false),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
         fault_depths_computed_(false),
@@ -145,6 +146,9 @@ public:
    real_t GetFaultLength() const { return lf_; }
    real_t GetLambda() const { return lambda_val_; }
 
+   /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
+   void SetCheckResidual(bool check) { check_residual_ = check; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -152,6 +156,7 @@ private:
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
    bool use_mumps_;
+   bool check_residual_;  // Post-solve residual check
    real_t epsilon_;  // SIPG sign = -1
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
@@ -528,7 +533,7 @@ private:
          {
             auto *mumps = new MUMPSSolver(mesh_.GetComm());
             mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(0);
+            mumps->SetPrintLevel(1);
             mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
             solver_.reset(mumps);
          }
@@ -542,6 +547,7 @@ private:
             cg->SetPrintLevel(0);
 
             auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
+            amg->SetSystemsOptions(3);  // 3D elasticity-aware coarsening
             amg->SetPrintLevel(0);
             cached_prec_.reset(amg);
 
@@ -1751,6 +1757,39 @@ void ElasticityDomainOperator<MeshType>::Solve(
    B_ = rhs;
 
    solver_->Mult(B_, X_);
+
+   // Post-solve residual check: ||K*x - b|| / ||b||
+   if (check_residual_)
+   {
+      Vector R_(B_.Size());
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         cached_Ah_.As<HypreParMatrix>()->Mult(X_, R_);
+#endif
+      }
+      else
+      {
+         cached_a_->SpMat().Mult(X_, R_);
+      }
+      R_ -= B_;
+      real_t res_norm = R_.Norml2();
+      real_t rhs_norm = B_.Norml2();
+      real_t rel_res = (rhs_norm > 0.0) ? res_norm / rhs_norm : res_norm;
+      if (rel_res > 1e-8)
+      {
+         int rank = 0;
+#ifdef MFEM_USE_MPI
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+         }
+#endif
+         mfem::err << "[Rank " << rank
+                   << "] RESIDUAL WARNING: ||K*x-b||/||b|| = " << rel_res
+                   << " (threshold 1e-8)\n";
+      }
+   }
 
    // Check for NaN/Inf in solution
    {

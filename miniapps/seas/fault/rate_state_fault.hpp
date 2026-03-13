@@ -23,6 +23,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
+#include <iostream>
 
 namespace mfem
 {
@@ -435,6 +437,46 @@ public:
          }
       }
 
+      // Traction monitoring (BP5 only)
+      if constexpr (SlipComponents == 2)
+      {
+         if (monitor_interval_ > 0)
+         {
+            monitor_call_count_++;
+            if (monitor_call_count_ % monitor_interval_ == 0)
+            {
+               // Auto-pick stations if not specified
+               std::vector<int> stations = monitor_stations_;
+               if (stations.empty() && num_nodes_ > 0)
+               {
+                  stations.push_back(0);
+                  if (num_nodes_ > 1) { stations.push_back(num_nodes_ / 2); }
+                  if (num_nodes_ > 2) { stations.push_back(num_nodes_ - 1); }
+               }
+               for (int idx : stations)
+               {
+                  if (idx < 0 || idx >= num_nodes_) { continue; }
+                  real_t tp_d = tau_pre_(2*idx);
+                  real_t tp_s = tau_pre_(2*idx+1);
+                  real_t tr_d = traction(2*idx);
+                  real_t tr_s = traction(2*idx+1);
+                  real_t tot_d = tp_d + tr_d;
+                  real_t tot_s = tp_s + tr_s;
+                  std::cout << "[TRACTION] call=" << monitor_call_count_
+                            << " node=" << idx
+                            << " tau_pre=(" << tp_d << "," << tp_s << ")"
+                            << " traction=(" << tr_d << "," << tr_s << ")"
+                            << " total=(" << tot_d << "," << tot_s << ")"
+                            << " |total|=" << std::sqrt(tot_d*tot_d + tot_s*tot_s)
+                            << " V=" << std::sqrt(
+                                 slip_rate_(2*idx)*slip_rate_(2*idx) +
+                                 slip_rate_(2*idx+1)*slip_rate_(2*idx+1))
+                            << "\n";
+               }
+            }
+         }
+      }
+
       return V_max_;
    }
 
@@ -775,6 +817,17 @@ public:
    /// Whether psi-space integration is active.
    bool UsePsi() const { return use_psi_; }
 
+   /// Enable traction monitoring at a few stations every N steps.
+   /// @param interval Log every N calls to ComputeRHS (0 = disabled)
+   /// @param station_indices Fault DOF indices to monitor (empty = auto-pick 3)
+   void SetTractionMonitoring(int interval,
+                               const std::vector<int> &station_indices = {})
+   {
+      monitor_interval_ = interval;
+      monitor_stations_ = station_indices;
+      monitor_call_count_ = 0;
+   }
+
 private:
    FaultGeometry<MeshType> *geom_;
    FrictionLaw *friction_;
@@ -801,6 +854,11 @@ private:
    Vector Dc_values_;       ///< Per-DOF critical slip distance [NumNodes()]
    Vector tau_pre_;         ///< Per-DOF pre-stress [2 * NumNodes()] (BP5 only)
    Vector V_init_values_;   ///< Per-DOF initial velocity [2 * NumNodes()] (BP5 only)
+
+   // Traction monitoring
+   int monitor_interval_ = 0;        ///< Log every N ComputeRHS calls (0=off)
+   mutable int monitor_call_count_ = 0;
+   std::vector<int> monitor_stations_;  ///< Fault DOF indices to monitor
 };
 
 /// Convenience type aliases for common template instantiations.
