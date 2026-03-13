@@ -23,7 +23,8 @@ export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 
-make seas_bp5_full
+make clean-build
+make seas_bp5_full || { echo "BUILD FAILED"; exit 1; }
 
 if [ ! -f bp5/mesh/bp5_1000m.msh ]; then
     gmsh -3 bp5/mesh/bp5.geo -o bp5/mesh/bp5_1000m.msh -setnumber h 1.0
