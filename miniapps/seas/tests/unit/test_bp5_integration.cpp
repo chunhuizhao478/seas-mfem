@@ -98,7 +98,7 @@ struct BP5IntegrationFixture
 
       domain_op = std::make_unique<ElasticityDomainOperator<Mesh>>(
          *mesh, 1, params.lambda(), params.mu(),
-         params.Vp, params.Wf, params.lf, DGMethod::IP);
+         params.Vp, params.Wf, params.lf, DGMethod::BR2);
 
       nf = domain_op->GetNumFaultDOFs();
       if (nf == 0) { return false; }
@@ -346,7 +346,7 @@ void TestBP5ShortRK4Run()
    ode_solver.Init(*fix.seas_op);
 
    real_t t = 0.0;
-   real_t dt = 1e3;
+   real_t dt = 10.0;  // Small dt to avoid blowup on coarse mesh
    int nsteps = 10;
 
    for (int step = 0; step < nsteps; step++)
@@ -407,8 +407,8 @@ void TestBP5ShortRK45Run()
 
    DormandPrinceRK45 rk45;
    rk45.SetAbsTol(1e-7);
-   rk45.SetDt(1e3);
-   rk45.SetDtMax(1e6);
+   rk45.SetDt(10.0);    // Small dt to avoid blowup on coarse mesh
+   rk45.SetDtMax(1e4);
    rk45.SetStatePerNode(3);  // BP5: 3 components per node (slip_dip, slip_strike, psi)
    rk45.Init(*fix.seas_op);
 
@@ -478,7 +478,7 @@ void TestBP5StressBalanceDuringTimeStep()
    ode_solver.Init(*fix.seas_op);
 
    real_t t = 0.0;
-   real_t dt = 1e3;
+   real_t dt = 10.0;  // Small dt to avoid blowup on coarse mesh
    real_t max_eq_error = 0.0;
 
    for (int step = 0; step < 3; step++)

@@ -250,26 +250,26 @@ public:
          real_t slip_dip    = global_slip_dip(dof);
          real_t slip_strike = global_slip_strike(dof);
 
-         real_t V_dip    = std::max(std::abs(global_V_dip(dof)), 1e-30);
-         real_t V_strike = std::max(std::abs(global_V_strike(dof)), 1e-30);
+         real_t V_dip    = std::abs(global_V_dip(dof));
+         real_t V_strike = std::abs(global_V_strike(dof));
 
          real_t tau_dip    = (tau_pre_dip_(dof) +
                               global_trac_dip(dof)) / 1e6;
          real_t tau_strike = (tau_pre_strike_(dof) +
                               global_trac_strike(dof)) / 1e6;
 
-         real_t th = std::max(global_theta(dof), 1e-30);
+         real_t th = global_theta(dof);
 
          // Output: strike first, dip second (SCEC convention)
          std::vector<real_t> row = {
             time,
             slip_strike,
             slip_dip,
-            std::log10(V_strike),
-            std::log10(V_dip),
+            V_strike > 0.0 ? std::log10(V_strike) : -300.0,
+            V_dip > 0.0 ? std::log10(V_dip) : -300.0,
             tau_strike,
             tau_dip,
-            std::log10(th)
+            th > 0.0 ? std::log10(th) : -300.0
          };
          probes_[s]->WriteStep(row);
       }
@@ -355,8 +355,8 @@ private:
          real_t slip_dip    = slip(2 * dof + 0);
          real_t slip_strike = slip(2 * dof + 1);
 
-         real_t V_dip    = std::max(std::abs(slip_rate(2 * dof + 0)), 1e-30);
-         real_t V_strike = std::max(std::abs(slip_rate(2 * dof + 1)), 1e-30);
+         real_t V_dip    = std::abs(slip_rate(2 * dof + 0));
+         real_t V_strike = std::abs(slip_rate(2 * dof + 1));
 
          // Total shear stress = tau_pre + elastic_traction
          real_t tau_dip = (tau_pre(2 * dof + 0) +
@@ -364,18 +364,18 @@ private:
          real_t tau_strike = (tau_pre(2 * dof + 1) +
                               traction(2 * dof + 1)) / 1e6;
 
-         real_t th = std::max(theta(dof), 1e-30);
+         real_t th = theta(dof);
 
          // Output: strike first, dip second (SCEC convention)
          std::vector<real_t> row = {
             time,
             slip_strike,
             slip_dip,
-            std::log10(V_strike),
-            std::log10(V_dip),
+            V_strike > 0.0 ? std::log10(V_strike) : -300.0,
+            V_dip > 0.0 ? std::log10(V_dip) : -300.0,
             tau_strike,
             tau_dip,
-            std::log10(th)
+            th > 0.0 ? std::log10(th) : -300.0
          };
          probes_[s]->WriteStep(row);
       }

@@ -42,8 +42,8 @@ namespace seas
 ///
 /// - Fault at x1=0 is an interior interface
 /// - Slip imposed as jump [[u]] on fault interior faces
-/// - Dirichlet loading on all non-free-surface boundaries: u₂ = sgn(x₁)·Vp·t/2
-/// - Free surface (z=0) has natural BC (zero traction)
+/// - Dirichlet loading on bottom boundary only: u₂ = sgn(x₁)·Vp·t/2
+/// - Free surface (z=0) and x/y boundaries have natural BC (zero traction)
 ///
 /// Supports both BR2 (default, matching Tandem) and IP DG methods.
 ///
@@ -207,20 +207,19 @@ private:
 
    void SetupBoundaryMarkers()
    {
-      // Identify Dirichlet boundaries (loading walls at ±x1, fault-normal)
-      // We mark boundaries that will receive Dirichlet loading
+      // Identify Dirichlet boundaries
+      // SCEC BP5-QD: only bottom boundary gets Dirichlet u_y = sgn(x)*Vp*t/2
+      //   attr 6 = z=Lz (bottom: Dirichlet plate loading)
+      //   attr 5 = z=0 (free surface: Natural BC)
+      //   attrs 1,2,3,4 = x/y boundaries (Natural BC, zero traction)
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
 
-      // Mark Dirichlet boundaries by attribute
-      // SCEC BP5-QD: all non-free-surface boundaries get Dirichlet u_y = sgn(x)*Vp*t/2
-      //   attr 1 = x=-Lx, attr 2 = x=+Lx, attr 3 = y=+Ly, attr 4 = y=-Ly, attr 6 = z=Lz
-      //   attr 5 = z=0 (free surface, natural BC)
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr == 1 || attr == 2 || attr == 3 || attr == 4 || attr == 6)
+         if (attr == 6)
          {
             dirichlet_bdr_marker_[attr - 1] = 1;
          }
@@ -1338,7 +1337,7 @@ private:
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
       // SCEC BP5-QD Dirichlet loading: u = (0, sgn(x)*Vp*t/2, 0)
-      // Applied on all non-free-surface boundaries (attrs 1,2,3,4,6).
+      // Applied on bottom boundary only (attr 6, z=Lz).
       // For each boundary face, compute centroid x-coordinate to determine sign:
       //   x > 0 → u_y = +Vp*t/2,  x < 0 → u_y = -Vp*t/2
       //

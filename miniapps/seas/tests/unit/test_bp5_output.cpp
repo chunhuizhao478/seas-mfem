@@ -312,21 +312,21 @@ void TestBP5BenchmarkOutput_AdaptiveOutput()
 {
    std::cout << "\n=== Test: BP5BenchmarkOutput_AdaptiveOutput ===\n";
 
-   // Coseismic: V > 1e-3 → 0.001 s
+   // Coseismic: V > 1e-3 → 0.1 s (SCEC spec)
    real_t dt1 = BP5BenchmarkOutput<Mesh>::OutputInterval(1.0);
-   TEST_NEAR(dt1, 0.001, 1e-10, "V=1.0 → dt=0.001s (coseismic)");
+   TEST_NEAR(dt1, 0.1, 1e-10, "V=1.0 → dt=0.1s (coseismic)");
 
    real_t dt1b = BP5BenchmarkOutput<Mesh>::OutputInterval(5e-3);
-   TEST_NEAR(dt1b, 0.001, 1e-10, "V=5e-3 → dt=0.001s (coseismic)");
+   TEST_NEAR(dt1b, 0.1, 1e-10, "V=5e-3 → dt=0.1s (coseismic)");
 
    // Nucleation: 1e-6 < V < 1e-3 → 0.1 s
    real_t dt2 = BP5BenchmarkOutput<Mesh>::OutputInterval(1e-4);
    TEST_NEAR(dt2, 0.1, 1e-10, "V=1e-4 → dt=0.1s (nucleation)");
 
-   // Interseismic: V < 1e-6 → 0.01 yr
+   // Interseismic: V < 1e-6 → 0.1 yr (SCEC spec)
    real_t dt3 = BP5BenchmarkOutput<Mesh>::OutputInterval(1e-9);
-   real_t expected = 0.01 * BP5Params::seconds_per_year;
-   TEST_NEAR(dt3, expected, 1.0, "V=1e-9 → dt=0.01yr (interseismic)");
+   real_t expected = 0.1 * BP5Params::seconds_per_year;
+   TEST_NEAR(dt3, expected, 1.0, "V=1e-9 → dt=0.1yr (interseismic)");
 }
 
 // ============================================================================

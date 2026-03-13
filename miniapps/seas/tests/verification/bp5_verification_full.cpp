@@ -554,7 +554,7 @@ int main(int argc, char *argv[])
    bench_out.Flush();
    if (mpi.IsRoot() && global_out)
    {
-      global_out->WriteStep({0.0, std::log10(std::max(V_init, 1e-30))});
+      global_out->WriteStep({0.0, V_init > 0.0 ? std::log10(V_init) : -300.0});
    }
 
    // =========================================================================
@@ -724,7 +724,7 @@ int main(int argc, char *argv[])
       if (mpi.IsRoot() && global_out)
       {
          global_out->WriteStep(
-            {t, std::log10(std::max(V_max, 1e-30))});
+            {t, V_max > 0.0 ? std::log10(V_max) : -300.0});
       }
 
       // Checkpoint
