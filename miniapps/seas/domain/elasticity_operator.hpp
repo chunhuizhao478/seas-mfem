@@ -1758,7 +1758,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    solver_->Mult(B_, X_);
 
-   // Post-solve residual check: ||K*x - b|| / ||b||
+   // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
    if (check_residual_)
    {
       Vector R_(B_.Size());
@@ -1766,28 +1766,37 @@ void ElasticityDomainOperator<MeshType>::Solve(
       {
 #ifdef MFEM_USE_MPI
          cached_Ah_.As<HypreParMatrix>()->Mult(X_, R_);
+         R_ -= B_;
+         // Use global norms (MPI AllReduce) for meaningful relative residual
+         real_t local_res2 = R_ * R_;
+         real_t local_rhs2 = B_ * B_;
+         real_t global_res2 = 0.0, global_rhs2 = 0.0;
+         MPI_Allreduce(&local_res2, &global_res2, 1, MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&local_rhs2, &global_rhs2, 1, MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         real_t global_res = std::sqrt(global_res2);
+         real_t global_rhs = std::sqrt(global_rhs2);
+         real_t rel_res = (global_rhs > 0.0) ? global_res / global_rhs : global_res;
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rel_res > 1e-8 && rank == 0)
+         {
+            mfem::err << "RESIDUAL WARNING: global ||K*x-b||/||b|| = " << rel_res
+                      << " (threshold 1e-8)\n";
+         }
 #endif
       }
       else
       {
          cached_a_->SpMat().Mult(X_, R_);
-      }
-      R_ -= B_;
-      real_t res_norm = R_.Norml2();
-      real_t rhs_norm = B_.Norml2();
-      real_t rel_res = (rhs_norm > 0.0) ? res_norm / rhs_norm : res_norm;
-      if (rel_res > 1e-8)
-      {
-         int rank = 0;
-#ifdef MFEM_USE_MPI
-         if constexpr (IsParallelMesh<MeshType>::value)
+         R_ -= B_;
+         real_t res_norm = R_.Norml2();
+         real_t rhs_norm = B_.Norml2();
+         real_t rel_res = (rhs_norm > 0.0) ? res_norm / rhs_norm : res_norm;
+         if (rel_res > 1e-8)
          {
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            mfem::err << "RESIDUAL WARNING: ||K*x-b||/||b|| = " << rel_res
+                      << " (threshold 1e-8)\n";
          }
-#endif
-         mfem::err << "[Rank " << rank
-                   << "] RESIDUAL WARNING: ||K*x-b||/||b|| = " << rel_res
-                   << " (threshold 1e-8)\n";
       }
    }
 
