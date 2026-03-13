@@ -152,6 +152,57 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
     plt.close()
 
 
+def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1,
+                 save_path=None):
+    """Plot 6-panel comparison zoomed to the first t_max_yr years."""
+    import matplotlib.pyplot as plt
+
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig.suptitle(
+        f"BP5-QD Close-up (0\u2013{t_max_yr:.0f} yr): {station_name}  "
+        f"(x2={x2_km} km, x3={x3_km} km)",
+        fontsize=14, fontweight="bold",
+    )
+
+    panels = [
+        ("slip_strike", "Slip Strike (m)", False),
+        ("slip_dip", "Slip Dip (m)", False),
+        ("V_strike", "Slip Rate V_strike (m/s)", True),
+        ("V_dip", "Slip Rate V_dip (m/s)", True),
+        ("tau_strike", "Shear Stress \u03c4_strike (MPa)", False),
+        ("tau_dip", "Shear Stress \u03c4_dip (MPa)", False),
+    ]
+
+    for ax, (key, ylabel, use_log) in zip(axes.flat, panels):
+        for label, data, color, ls in datasets:
+            if data is not None:
+                mask = data["time_yr"] <= t_max_yr
+                ax.plot(
+                    data["time_yr"][mask],
+                    data[key][mask],
+                    ls,
+                    color=color,
+                    label=label,
+                    linewidth=0.8,
+                    alpha=0.85,
+                )
+        ax.set_xlabel("Time (years)")
+        ax.set_ylabel(ylabel)
+        ax.set_xlim(0, t_max_yr)
+        if use_log:
+            ax.set_yscale("log")
+        ax.legend(fontsize=8, loc="best")
+        ax.grid(True, alpha=0.3)
+
+    plt.tight_layout()
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        print(f"  Saved: {save_path}")
+    else:
+        plt.show()
+    plt.close()
+
+
 def plot_overview(all_results, save_path=None):
     """Plot slip rate (strike component) across all stations."""
     import matplotlib.pyplot as plt
@@ -349,13 +400,22 @@ def main():
         }
         all_results.append(result)
 
-        # Plot
+        # Plot full time range
         if args.save:
             os.makedirs(args.output_dir, exist_ok=True)
             fname = os.path.join(args.output_dir, f"bp5_{station_name}.png")
             plot_station(datasets, station_name, x2_km, x3_km, save_path=fname)
         else:
             plot_station(datasets, station_name, x2_km, x3_km)
+
+        # Plot close-up (first 10 years)
+        if args.save:
+            fname_close = os.path.join(
+                args.output_dir, f"bp5_{station_name}_closeup.png")
+            plot_closeup(datasets, station_name, x2_km, x3_km,
+                         t_max_yr=0.1, save_path=fname_close)
+        else:
+            plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1)
 
     # Overview plot
     if len(all_results) > 1:

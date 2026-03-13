@@ -1997,11 +1997,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             {
                for (int m = 0; m < ndof1; m++)
                {
-                  face_int1(u * dim + s, m) = shape1(m) * jump[u] * nor(s);
+                  face_int1(u * dim + s, m) = shape1(m) * jump[u] * basis.normal[s];
                }
                for (int m = 0; m < ndof2; m++)
                {
-                  face_int2(u * dim + s, m) = shape2(m) * jump[u] * nor(s);
+                  face_int2(u * dim + s, m) = shape2(m) * jump[u] * basis.normal[s];
                }
             }
          }
@@ -2229,9 +2229,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                for (int s = 0; s < dim; s++)
                {
                   for (int m = 0; m < ndof1; m++)
-                     face_int1(u * dim + s, m) = shape1(m) * jump[u] * nor(s);
+                     face_int1(u * dim + s, m) = shape1(m) * jump[u] * basis.normal[s];
                   for (int m = 0; m < ndof2; m++)
-                     face_int2(u * dim + s, m) = shape2(m) * jump[u] * nor(s);
+                     face_int2(u * dim + s, m) = shape2(m) * jump[u] * basis.normal[s];
                }
             }
 

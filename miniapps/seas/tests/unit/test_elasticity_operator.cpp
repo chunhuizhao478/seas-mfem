@@ -898,6 +898,238 @@ void TestTractionWithPenaltyCorrection()
 }
 
 // =============================================================================
+// Test 16: BR2 traction correction consistency — invariant under mesh scaling
+//
+// The BR2 traction correction in ComputeTraction should use unit normals
+// (not CalcOrtho normals), so the correction is independent of face area.
+// We verify this by comparing traction on two meshes with different element
+// sizes but the same physical setup.
+// =============================================================================
+void TestBR2TractionCorrectionConsistency()
+{
+   std::cout << "\n--- Test: BR2 Traction Correction Consistency (Normal Invariance) ---\n";
+
+   real_t lambda = 1.0, mu = 1.0;
+
+   // Mesh 1: small domain
+   real_t Lx1 = 2.0, Ly1 = 2.0, Lz1 = 2.0;
+   Mesh mesh1 = CreateTestMesh3D(1, 1, 1, Lx1, Ly1, Lz1);
+   ElasticityDomainOperator<Mesh> op1(mesh1, 1, lambda, mu, 0.0, Lz1, 2.0 * Ly1,
+                                       DGMethod::BR2);
+
+   // Mesh 2: 2x larger domain (face areas 4x larger)
+   real_t Lx2 = 4.0, Ly2 = 4.0, Lz2 = 4.0;
+   Mesh mesh2 = CreateTestMesh3D(1, 1, 1, Lx2, Ly2, Lz2);
+   ElasticityDomainOperator<Mesh> op2(mesh2, 1, lambda, mu, 0.0, Lz2, 2.0 * Ly2,
+                                       DGMethod::BR2);
+
+   int nf1 = op1.GetNumFaultDOFs();
+   int nf2 = op2.GetNumFaultDOFs();
+   if (nf1 == 0 || nf2 == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   // Apply same unit dip slip on both
+   Vector slip1(2 * nf1), slip2(2 * nf2);
+   slip1 = 0.0; slip2 = 0.0;
+   for (int i = 0; i < nf1; i++) { slip1(2 * i) = 1.0; }
+   for (int i = 0; i < nf2; i++) { slip2(2 * i) = 1.0; }
+
+   GridFunction u1(&op1.GetFESpace()), u2(&op2.GetFESpace());
+   u1 = 0.0; u2 = 0.0;
+   op1.Solve(0.0, slip1, u1);
+   op2.Solve(0.0, slip2, u2);
+
+   Vector trac1, trac2;
+   op1.ComputeTraction(u1, slip1, trac1);
+   op2.ComputeTraction(u2, slip2, trac2);
+
+   // Compare average traction magnitudes per fault DOF
+   real_t avg_trac1 = trac1.Norml2() / std::sqrt(2.0 * nf1);
+   real_t avg_trac2 = trac2.Norml2() / std::sqrt(2.0 * nf2);
+
+   std::cout << "  Mesh1 avg |trac|/DOF = " << avg_trac1
+             << ", Mesh2 avg |trac|/DOF = " << avg_trac2 << "\n";
+
+   // The traction per DOF should be in the same order of magnitude.
+   // With the bug (nor(s) instead of basis.normal[s]), the 2x mesh would
+   // produce 4x larger corrections due to |J_F| scaling.
+   // After the fix, the ratio should be closer to 1 (not exactly 1 due to
+   // different solution fields, but should not be ~4x).
+   if (avg_trac1 > 1e-10 && avg_trac2 > 1e-10)
+   {
+      real_t ratio = avg_trac2 / avg_trac1;
+      std::cout << "  Traction ratio (mesh2/mesh1) = " << ratio << "\n";
+      // With the fix, this ratio should be reasonable (not ~4x from face area scaling)
+      // Allow wide tolerance since the solutions differ on different meshes
+      TEST_ASSERT(ratio < 3.5,
+                  "BR2 traction correction not dominated by face area scaling");
+   }
+}
+
+// =============================================================================
+// Test 17: Patch test — constant strain field gives exact stress with BR2
+//
+// Apply a displacement field u(x) = ε·x corresponding to constant strain.
+// The traction from ComputeTraction should match the analytical stress.
+// =============================================================================
+void TestBR2PatchTestTraction()
+{
+   std::cout << "\n--- Test: BR2 Patch Test (Constant Strain Traction) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+
+   real_t lambda = 1.0, mu = 1.0;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, 0.0, Lz, 2.0 * Ly,
+                                      DGMethod::BR2);
+
+   int nf = op.GetNumFaultDOFs();
+   if (nf == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   // Set displacement to u = (ε_11 * x1, 0, 0) with ε_11 = 1
+   // This gives strain ε = diag(1,0,0), stress σ = diag(λ+2μ, λ, λ)
+   // On fault (normal = ±x1): T = σ · n = ((λ+2μ)·n1, 0, 0)
+   FiniteElementSpace &fes = op.GetFESpace();
+   GridFunction u(&fes);
+   u = 0.0;
+
+   // Get scalar FES info for byNODES ordering
+   int ndof_scalar = fes.GetVSize() / 3;
+
+   // Use DG_FECollection to get element DOFs
+   DG_FECollection fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+
+   for (int e = 0; e < mesh.GetNE(); e++)
+   {
+      const FiniteElement *fe = scalar_fes.GetFE(e);
+      ElementTransformation *T = mesh.GetElementTransformation(e);
+      Array<int> sdofs;
+      scalar_fes.GetElementDofs(e, sdofs);
+      for (int k = 0; k < fe->GetDof(); k++)
+      {
+         const IntegrationPoint &ip = fe->GetNodes().IntPoint(k);
+         T->SetIntPoint(&ip);
+         Vector x(3);
+         T->Transform(ip, x);
+         int dof_idx = sdofs[k];
+         u(dof_idx) = x(0);                    // u_x = x1
+         u(ndof_scalar + dof_idx) = 0.0;       // u_y = 0
+         u(2 * ndof_scalar + dof_idx) = 0.0;   // u_z = 0
+      }
+   }
+
+   // Zero slip — the displacement field represents continuous deformation
+   Vector slip(2 * nf);
+   slip = 0.0;
+
+   Vector traction;
+   op.ComputeTraction(u, slip, traction);
+
+   // For a continuous field with zero slip, the DG penalty correction
+   // should be zero ([[u]] = δ = 0), so traction comes from the
+   // average gradient term only.
+   // Expected: σ·n̂ where σ = diag(λ+2μ, λ, λ) and n̂ ≈ (±1,0,0)
+   // → T = (±(λ+2μ), 0, 0)
+   // Projected to fault frame: dip ≈ T·dip_dir, strike ≈ T·strike_dir
+   // With n=(1,0,0), dip=(0,0,-1), strike=(0,1,0):
+   //   T_dip = 0, T_strike = 0 (since T is along normal)
+   // So both traction components should be approximately zero.
+
+   real_t trac_norm = traction.Norml2();
+   std::cout << "  Patch test traction norm: " << trac_norm << "\n";
+
+   // For DG order 1 on a uniform mesh, the patch test should give
+   // near-zero tangential traction (normal stress only)
+   for (int i = 0; i < nf; i++)
+   {
+      std::cout << "    DOF " << i << ": dip=" << traction(2*i)
+                << " strike=" << traction(2*i+1) << "\n";
+   }
+
+   // The tangential components should be small relative to (λ+2μ)
+   real_t scale = lambda + 2.0 * mu;
+   real_t rel_trac = trac_norm / (scale * std::sqrt(2.0 * nf));
+   TEST_ASSERT(rel_trac < 0.1,
+               "BR2 patch test: tangential traction small for uniaxial strain");
+}
+
+// =============================================================================
+// Test 18: Slip sign convention — positive strike slip → negative traction
+//
+// Verifies that the BR2 traction has the correct sign: positive slip causes
+// a stress drop (negative traction in the slip direction).
+// =============================================================================
+void TestBR2SlipSignConvention()
+{
+   std::cout << "\n--- Test: BR2 Slip Sign Convention ---\n";
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+
+   real_t lambda = 1.0, mu = 1.0;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, 0.0, Lz, 2.0 * Ly,
+                                      DGMethod::BR2);
+
+   int nf = op.GetNumFaultDOFs();
+   if (nf == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   // Apply uniform positive strike slip
+   Vector slip(2 * nf);
+   slip = 0.0;
+   for (int i = 0; i < nf; i++)
+   {
+      slip(2 * i + 1) = 1.0;  // positive strike slip
+   }
+
+   GridFunction u(&op.GetFESpace());
+   u = 0.0;
+   op.Solve(0.0, slip, u);
+
+   Vector traction;
+   op.ComputeTraction(u, slip, traction);
+
+   // Average strike traction should be negative (stress drop)
+   real_t avg_strike = 0.0;
+   for (int i = 0; i < nf; i++)
+   {
+      avg_strike += traction(2 * i + 1);
+   }
+   avg_strike /= nf;
+
+   std::cout << "  BR2 avg strike traction = " << avg_strike << "\n";
+   TEST_ASSERT(avg_strike < 0.0,
+               "BR2: positive strike slip → negative traction (stress drop)");
+
+   // Also check dip direction: with pure strike slip, dip traction should be small
+   real_t avg_dip = 0.0;
+   for (int i = 0; i < nf; i++)
+   {
+      avg_dip += std::abs(traction(2 * i));
+   }
+   avg_dip /= nf;
+
+   std::cout << "  BR2 avg |dip traction| = " << avg_dip << "\n";
+   TEST_ASSERT(avg_dip < std::abs(avg_strike),
+               "BR2: dip traction smaller than strike for pure strike slip");
+
+   // Traction magnitude should be bounded
+   real_t trac_max = traction.Normlinf();
+   TEST_ASSERT(trac_max < 100.0, "BR2: traction is bounded");
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main()
@@ -921,6 +1153,9 @@ int main()
    TestBR2vsIP();
    TestBR2Default();
    TestTractionWithPenaltyCorrection();
+   TestBR2TractionCorrectionConsistency();
+   TestBR2PatchTestTraction();
+   TestBR2SlipSignConvention();
 
    TEST_PRINT_RESULTS();
 
