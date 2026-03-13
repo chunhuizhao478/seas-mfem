@@ -1031,7 +1031,7 @@ int main(int argc, char *argv[])
           (step % print_step_interval == 0 || V_max > V_threshold_seismic))
       {
          std::cout << std::setw(10) << step
-                   << std::setw(16) << std::fixed << std::setprecision(2)
+                   << std::setw(16) << std::scientific << std::setprecision(6)
                    << t / BP5Params::seconds_per_year
                    << std::setw(14) << std::scientific << std::setprecision(3)
                    << ode_solver.GetDt()

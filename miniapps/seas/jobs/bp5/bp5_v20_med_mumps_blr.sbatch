@@ -37,7 +37,7 @@ ibrun ./seas_bp5_full \
       --mesh bp5/mesh/bp5_1000m.msh \
       --solver mumps-blr \
       --check-residual \
-      --monitor-traction 100 \
+      # --monitor-traction 100 \
       --tfinal 9.45e9 \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v20_med_mumps_blr \

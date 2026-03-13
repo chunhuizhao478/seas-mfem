@@ -1,4 +1,4 @@
-# BP5 Debug v20: Fix Initial State Bug & Diagnostic Runs
+# BP5 Debug v20: Fix Initial State Bug & Medium Run
 
 **Date**: 2026-03-13
 **Status**: Implementation
@@ -57,28 +57,24 @@ state(i * StatePerNode + PsiIndex) = psi0;
 
 ---
 
-## 3. Diagnostic Runs
+## 3. Local Verification
 
-### 3a. CG+AMG Comparison
-**Sbatch**: `jobs/bp5/bp5_v20_short_cg.sbatch`
-- Same mesh/params as v19, but `--solver cg`
-- Goal: Confirm nucleation timing change is from psi fix, not solver artifact
+8-rank local test confirms the fix works:
+- **Initial V_max = 0.0493** — above V_nuc (0.03), overstress drives immediate acceleration
+- **V_max increases** in first ~12 steps (0.0495 → 0.0580) — earthquake starts immediately
+- **Earthquake #1 detected at t=0** — no 192s delay
 
-### 3b. Tandem-Compatible Parameters
-**Sbatch**: `jobs/bp5/bp5_v20_short_tandem_compat.sbatch`
-- `--V-nuc 0.01 --delta-tau-factor 0` (matches Tandem defaults)
-- Goal: Direct nucleation timing comparison with Tandem
+Before fix: V_max started at V_nuc=0.03 and decayed (overstress absorbed into psi).
+After fix: V_max starts above V_nuc and accelerates (genuine overstress preserved).
 
 ---
 
-## 4. Expected Results
+## 4. Cluster Run: Medium MUMPS BLR
 
-| Run | Solver | V_nuc | delta_tau | Expected nucleation |
-|-----|--------|-------|-----------|-------------------|
-| v19 (before fix) | MUMPS BLR | 0.03 | yes | ~192s (observed) |
-| v20 MUMPS BLR | MUMPS BLR | 0.03 | yes | ~48-60s |
-| v20 CG | CG+AMG | 0.03 | yes | ~48-60s (same as MUMPS) |
-| v20 Tandem-compat | MUMPS BLR | 0.01 | no | ~48-60s (match Tandem) |
+**Sbatch**: `jobs/bp5/bp5_v20_med_mumps_blr.sbatch`
+- Solver: MUMPS BLR (fastest for this problem)
+- tfinal: 9.45e9 s (~300 years) — goal: capture second seismic event
+- 8 nodes, 400 ranks, 1000m mesh
 
 ---
 
