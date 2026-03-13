@@ -111,6 +111,11 @@ struct BP5Params
    /// (Tandem's bp5.lua uses 0.01, which deviates from the SCEC standard.)
    real_t V_nuc = 0.03;
 
+   /// Delta-tau multiplier for nucleation zone pre-stress.
+   /// SCEC BP5-QD: 1.0 (delta_tau = eta * V_nuc)
+   /// SCEC BP5-FD / Tandem: 0.0
+   real_t delta_tau_factor = 1.0;
+
    // =========================================================================
    // Geometric parameters (all in meters)
    // =========================================================================
@@ -295,10 +300,10 @@ struct BP5Params
                            std::asinh((Vi_abs / (2.0 * V0)) * e) +
                            eta_val * Vi_abs;
 
-      // BP5-QD: add delta_tau = eta * V_i in nucleation zone (Eq. 23)
+      // BP5-QD: add delta_tau = delta_tau_factor * eta * V_i in nucleation zone (Eq. 23)
       if (IsNucleationZone(x2, x3))
       {
-         tau0_scalar += eta_val * Vi_abs;
+         tau0_scalar += delta_tau_factor * eta_val * Vi_abs;
       }
 
       // Direction: parallel to initial velocity
@@ -331,6 +336,7 @@ struct BP5Params
       os << "    Vp     = " << Vp << " m/s\n";
       os << "    V_init = " << V_init << " m/s\n";
       os << "    V_nuc  = " << V_nuc << " m/s\n";
+      os << "    delta_tau_factor = " << delta_tau_factor << "\n";
       os << "  Geometry:\n";
       os << "    hs     = " << hs / 1000.0 << " km\n";
       os << "    ht     = " << ht / 1000.0 << " km\n";

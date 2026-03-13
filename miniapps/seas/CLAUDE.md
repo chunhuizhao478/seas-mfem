@@ -20,5 +20,5 @@ Before implementing any feature, ALWAYS check:
 ## Key Implementation Notes
 
 - Boundary conditions: See `tandem_boundary_condition_analysis.md` for correct BC approach
-- Plate loading is applied at **bottom boundary (z=Lz)**, NOT at far-field x-boundaries
-- Below-fault region (z > Wf) uses Natural BC (zero traction), not Dirichlet
+- Plate loading is applied on **ALL boundaries** (attrs 1-6): u = (0, sgn(x)·Vp·t/2, 0), matching Tandem's `boundary_linear=true`
+- No free surface — consistent with Tandem bp5.lua (H10 fix)

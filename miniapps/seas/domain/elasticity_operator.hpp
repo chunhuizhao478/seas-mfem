@@ -42,8 +42,8 @@ namespace seas
 ///
 /// - Fault at x1=0 is an interior interface
 /// - Slip imposed as jump [[u]] on fault interior faces
-/// - Dirichlet loading on bottom boundary only: u₂ = sgn(x₁)·Vp·t/2
-/// - Free surface (z=0) and x/y boundaries have natural BC (zero traction)
+/// - All-boundary Dirichlet loading: u₂ = sgn(x₁)·Vp·t/2 (matching Tandem)
+/// - No free surface — consistent with Tandem's boundary_linear=true
 ///
 /// Supports both BR2 (default, matching Tandem) and IP DG methods.
 ///
@@ -208,10 +208,9 @@ private:
    void SetupBoundaryMarkers()
    {
       // Identify Dirichlet boundaries
-      // SCEC BP5-QD: only bottom boundary gets Dirichlet u_y = sgn(x)*Vp*t/2
-      //   attr 6 = z=Lz (bottom: Dirichlet plate loading)
-      //   attr 5 = z=0 (free surface: Natural BC)
-      //   attrs 1,2,3,4 = x/y boundaries (Natural BC, zero traction)
+      // BP5: All-boundary Dirichlet loading (matching Tandem bp5.lua)
+      //   All attrs 1-6: u = (0, sgn(x)·Vp·t/2, 0)
+      //   No free surface — consistent with Tandem's boundary_linear=true
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
@@ -219,7 +218,7 @@ private:
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr == 6)
+         if (attr >= 1 && attr <= num_bdr)
          {
             dirichlet_bdr_marker_[attr - 1] = 1;
          }
@@ -1336,10 +1335,9 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // SCEC BP5-QD Dirichlet loading: u = (0, sgn(x)*Vp*t/2, 0)
-      // Applied on bottom boundary only (attr 6, z=Lz).
-      // For each boundary face, compute centroid x-coordinate to determine sign:
-      //   x > 0 → u_y = +Vp*t/2,  x < 0 → u_y = -Vp*t/2
+      // BP5 Dirichlet loading: u = (0, sgn(x)·Vp·t/2, 0)
+      // Applied on ALL boundaries (Tandem-style, boundary_linear=true).
+      // sgn(x) determined from face centroid x-coordinate.
       //
       // DG Dirichlet BC contribution:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)

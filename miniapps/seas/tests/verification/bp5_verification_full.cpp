@@ -32,6 +32,9 @@
 //   --ref-dir DIR              Reference data directory
 //   --comparison-only          Skip simulation, compare only
 //   --write-every-step         Write output at every accepted step
+//   --V-nuc VAL                Nucleation slip rate [m/s] (default: 0.03)
+//   --delta-tau-factor VAL     Delta-tau multiplier (default: 1.0, Tandem: 0.0)
+//   --dump-bdr-vtk             Output boundary attributes to VTK
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -287,6 +290,9 @@ int main(int argc, char *argv[])
    bool write_every_step = false;
    bool use_mumps = false;
    std::string dg_method_str = "BR2";
+   double V_nuc_override = 0.0;
+   double delta_tau_factor_override = -1.0;
+   bool dump_bdr_vtk = false;
 
    for (int i = 1; i < argc; i++)
    {
@@ -328,6 +334,15 @@ int main(int argc, char *argv[])
       if (arg == "--write-every-step") { write_every_step = true; }
       if (arg == "--mumps") { use_mumps = true; }
       if (arg == "--dg-method" && i + 1 < argc) { dg_method_str = argv[++i]; }
+      if (arg == "--V-nuc" && i + 1 < argc)
+      {
+         V_nuc_override = std::atof(argv[++i]);
+      }
+      if (arg == "--delta-tau-factor" && i + 1 < argc)
+      {
+         delta_tau_factor_override = std::atof(argv[++i]);
+      }
+      if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
    }
 
    // Parse DG method
@@ -346,6 +361,11 @@ int main(int argc, char *argv[])
 
    // BP5 parameters
    BP5Params params;
+   if (V_nuc_override > 0.0) { params.V_nuc = V_nuc_override; }
+   if (delta_tau_factor_override >= 0.0)
+   {
+      params.delta_tau_factor = delta_tau_factor_override;
+   }
    params.Validate();
    double t_final = params.t_final;
    if (tfinal_override > 0.0) { t_final = tfinal_override; }
@@ -436,6 +456,17 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot())
    {
       std::cout << "  ParMesh: " << global_ne << " global elements\n";
+   }
+
+   // Dump boundary attributes to VTK for visual verification
+   if (dump_bdr_vtk)
+   {
+      pmesh.PrintBdrVTU(output_dir + "/boundary_attributes");
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Wrote boundary VTK: " << output_dir
+                   << "/boundary_attributes\n";
+      }
    }
 
    // =========================================================================
