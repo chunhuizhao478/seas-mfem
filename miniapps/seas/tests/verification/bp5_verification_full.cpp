@@ -377,6 +377,18 @@ int main(int argc, char *argv[])
    {
       solver_type = SolverType::MUMPS;
    }
+   else if (solver_str == "mumps-blr" || solver_str == "MUMPS-BLR")
+   {
+      solver_type = SolverType::MUMPS_BLR;
+   }
+   else if (solver_str == "superlu" || solver_str == "SUPERLU")
+   {
+      solver_type = SolverType::SUPERLU;
+   }
+   else if (solver_str == "strumpack" || solver_str == "STRUMPACK")
+   {
+      solver_type = SolverType::STRUMPACK;
+   }
    else if (solver_str == "gmres" || solver_str == "GMRES")
    {
       solver_type = SolverType::GMRES_BlockILU;
@@ -473,6 +485,9 @@ int main(int argc, char *argv[])
       std::cout << "  DG method: " << dg_method_str << "\n";
       std::string solver_desc = "CG+AMG (iterative)";
       if (solver_type == SolverType::MUMPS) solver_desc = "MUMPS (direct)";
+      else if (solver_type == SolverType::MUMPS_BLR) solver_desc = "MUMPS BLR (approximate direct)";
+      else if (solver_type == SolverType::SUPERLU) solver_desc = "SuperLU_DIST (direct)";
+      else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
       std::cout << "  Solver: " << solver_desc << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year

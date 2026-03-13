@@ -29,7 +29,7 @@ namespace seas
 {
 
 /// Linear solver type for the elasticity domain operator
-enum class SolverType { CG_AMG, MUMPS, GMRES_BlockILU };
+enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, SUPERLU, STRUMPACK };
 
 /// @brief DG Elasticity domain operator for 3D vector elasticity (BP5)
 ///
@@ -184,6 +184,12 @@ private:
    mutable std::unique_ptr<Solver> solver_;
    mutable Vector X_, B_;
    mutable std::unique_ptr<GSSmoother> serial_prec_;
+#ifdef MFEM_USE_SUPERLU
+   mutable std::unique_ptr<SuperLURowLocMatrix> cached_superlu_mat_;
+#endif
+#ifdef MFEM_USE_STRUMPACK
+   mutable std::unique_ptr<STRUMPACKRowLocMatrix> cached_strumpack_mat_;
+#endif
 
    // Fault data
    Array<int> fault_interior_faces_;
@@ -539,6 +545,47 @@ private:
             mumps->SetPrintLevel(1);
             mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
             solver_.reset(mumps);
+         }
+         else if (solver_type_ == SolverType::MUMPS_BLR)
+         {
+            auto *mumps = new MUMPSSolver(mesh_.GetComm());
+            mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
+            mumps->SetPrintLevel(1);
+            mumps->SetBLRTol(1e-10);
+            mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+            solver_.reset(mumps);
+         }
+         else
+#endif
+#ifdef MFEM_USE_SUPERLU
+         if (solver_type_ == SolverType::SUPERLU)
+         {
+            cached_superlu_mat_.reset(
+               new SuperLURowLocMatrix(*cached_Ah_.As<HypreParMatrix>()));
+            auto *superlu = new SuperLUSolver(mesh_.GetComm());
+            superlu->SetOperator(*cached_superlu_mat_);
+            superlu->SetColumnPermutation(superlu::PARMETIS);
+            superlu->SetIterativeRefine(superlu::SLU_DOUBLE);
+            superlu->SetSymmetricPattern(true);
+            superlu->SetPrintStatistics(true);
+            solver_.reset(superlu);
+         }
+         else
+#endif
+#ifdef MFEM_USE_STRUMPACK
+         if (solver_type_ == SolverType::STRUMPACK)
+         {
+            cached_strumpack_mat_.reset(
+               new STRUMPACKRowLocMatrix(*cached_Ah_.As<HypreParMatrix>()));
+            auto *strumpack = new STRUMPACKSolver(mesh_.GetComm());
+            strumpack->SetOperator(*cached_strumpack_mat_);
+            strumpack->SetCompression(strumpack::CompressionType::BLR);
+            strumpack->SetCompressionRelTol(1e-10);
+            strumpack->SetReorderingStrategy(strumpack::ReorderingStrategy::METIS);
+            strumpack->SetKrylovSolver(strumpack::KrylovSolver::DIRECT);
+            strumpack->SetPrintFactorStatistics(true);
+            strumpack->SetPrintSolveStatistics(true);
+            solver_.reset(strumpack);
          }
          else
 #endif
