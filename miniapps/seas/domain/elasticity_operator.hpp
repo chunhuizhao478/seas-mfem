@@ -547,7 +547,7 @@ private:
             cg->SetPrintLevel(0);
 
             auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
-            amg->SetSystemsOptions(3);  // 3D elasticity-aware coarsening
+            amg->SetElasticityOptions(dynamic_cast<ParFiniteElementSpace*>(fes_.get()));
             amg->SetPrintLevel(0);
             cached_prec_.reset(amg);
 
