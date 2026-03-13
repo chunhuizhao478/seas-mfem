@@ -28,6 +28,9 @@ namespace mfem
 namespace seas
 {
 
+/// Linear solver type for the elasticity domain operator
+enum class SolverType { CG_AMG, MUMPS, GMRES_BlockILU };
+
 /// @brief DG Elasticity domain operator for 3D vector elasticity (BP5)
 ///
 /// Solves the 3D linear elasticity problem:
@@ -68,16 +71,16 @@ public:
    /// @param Wf Fault depth [m] (rate-state zone)
    /// @param lf Fault length [m] (along-strike extent)
    /// @param method DG method (BR2 default, IP alternative)
-   /// @param use_mumps Use MUMPS direct solver (default: false, uses CG+AMG)
+   /// @param solver_type Linear solver: CG_AMG, MUMPS, or GMRES_BlockILU
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
                              DGMethod method = DGMethod::BR2,
-                             bool use_mumps = false)
+                             SolverType solver_type = SolverType::CG_AMG)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
-        method_(method), use_mumps_(use_mumps),
+        method_(method), solver_type_(solver_type),
         check_residual_(false),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
@@ -155,7 +158,7 @@ private:
    real_t lambda_val_, mu_val_;
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
-   bool use_mumps_;
+   SolverType solver_type_;
    bool check_residual_;  // Post-solve residual check
    real_t epsilon_;  // SIPG sign = -1
 
@@ -529,7 +532,7 @@ private:
          cached_a_->ParallelAssemble(cached_Ah_);
 
 #ifdef MFEM_USE_MUMPS
-         if (use_mumps_)
+         if (solver_type_ == SolverType::MUMPS)
          {
             auto *mumps = new MUMPSSolver(mesh_.GetComm());
             mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
@@ -539,6 +542,25 @@ private:
          }
          else
 #endif
+         if (solver_type_ == SolverType::GMRES_BlockILU)
+         {
+            auto *gmres = new GMRESSolver(mesh_.GetComm());
+            gmres->SetRelTol(1e-10);
+            gmres->SetAbsTol(0.0);
+            gmres->SetMaxIter(1000);
+            gmres->SetKDim(50);
+            gmres->SetPrintLevel(0);
+
+            // BlockILU with element-sized blocks — natural for DG
+            int block_size = fes_->GetTypicalFE()->GetDof() * 3;  // vdim=3
+            cached_prec_.reset(new BlockILU(block_size,
+               BlockILU::Reordering::MINIMUM_DISCARDED_FILL));
+
+            gmres->SetPreconditioner(*cached_prec_);
+            gmres->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+            solver_.reset(gmres);
+         }
+         else
          {
             auto *cg = new CGSolver(mesh_.GetComm());
             cg->SetRelTol(1e-10);
@@ -1810,14 +1832,14 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    // Check convergence and log solver info when RHS is large
    {
-      auto *cg = dynamic_cast<CGSolver*>(solver_.get());
-      if (cg)
+      auto *iter_solver = dynamic_cast<IterativeSolver*>(solver_.get());
+      if (iter_solver)
       {
-         if (!cg->GetConverged())
+         if (!iter_solver->GetConverged())
          {
-            mfem::err << "WARNING: CG did not converge after "
-                      << cg->GetNumIterations() << " iterations, final norm = "
-                      << cg->GetFinalNorm() << "\n";
+            mfem::err << "WARNING: iterative solver did not converge after "
+                      << iter_solver->GetNumIterations() << " iterations, final norm = "
+                      << iter_solver->GetFinalNorm() << "\n";
          }
          if (rhs_final > 1e15)
          {
@@ -1829,9 +1851,9 @@ void ElasticityDomainOperator<MeshType>::Solve(
             }
 #endif
             mfem::out << "[Rank " << rank << "] SOLVER: iters="
-                      << cg->GetNumIterations()
-                      << " converged=" << cg->GetConverged()
-                      << " final_norm=" << cg->GetFinalNorm()
+                      << iter_solver->GetNumIterations()
+                      << " converged=" << iter_solver->GetConverged()
+                      << " final_norm=" << iter_solver->GetFinalNorm()
                       << " ||u||_inf=" << X_.Normlinf() << "\n";
          }
       }

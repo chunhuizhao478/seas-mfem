@@ -293,7 +293,6 @@ int main(int argc, char *argv[])
    int checkpoint_interval = 5000;
    std::string restart_prefix;
    bool write_every_step = false;
-   bool use_mumps = false;
    std::string solver_str = "cg";
    bool check_residual = false;
    int monitor_traction = 0;
@@ -341,7 +340,7 @@ int main(int argc, char *argv[])
          restart_prefix = argv[++i];
       }
       if (arg == "--write-every-step") { write_every_step = true; }
-      if (arg == "--mumps") { use_mumps = true; }
+      if (arg == "--mumps") { solver_str = "mumps"; }
       if (arg == "--solver" && i + 1 < argc) { solver_str = argv[++i]; }
       if (arg == "--check-residual") { check_residual = true; }
       if (arg == "--monitor-traction" && i + 1 < argc)
@@ -372,14 +371,19 @@ int main(int argc, char *argv[])
       dg_method = DGMethod::BR2;
    }
 
-   // Process --solver flag (overrides --mumps)
+   // Process --solver flag
+   SolverType solver_type = SolverType::CG_AMG;
    if (solver_str == "mumps" || solver_str == "MUMPS")
    {
-      use_mumps = true;
+      solver_type = SolverType::MUMPS;
+   }
+   else if (solver_str == "gmres" || solver_str == "GMRES")
+   {
+      solver_type = SolverType::GMRES_BlockILU;
    }
    else if (solver_str == "cg" || solver_str == "CG")
    {
-      use_mumps = false;
+      solver_type = SolverType::CG_AMG;
    }
 
    // Default stations
@@ -467,7 +471,10 @@ int main(int argc, char *argv[])
    {
       std::cout << "  Ranks: " << mpi.Size() << "\n";
       std::cout << "  DG method: " << dg_method_str << "\n";
-      std::cout << "  Solver: " << (use_mumps ? "MUMPS (direct)" : "CG+AMG (iterative)") << "\n";
+      std::string solver_desc = "CG+AMG (iterative)";
+      if (solver_type == SolverType::MUMPS) solver_desc = "MUMPS (direct)";
+      else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
+      std::cout << "  Solver: " << solver_desc << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
@@ -501,7 +508,7 @@ int main(int argc, char *argv[])
    int order = 1;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, dg_method, use_mumps);
+      params.Vp, params.Wf, params.lf, dg_method, solver_type);
 
    if (check_residual) { domain.SetCheckResidual(true); }
 
