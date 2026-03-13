@@ -618,9 +618,13 @@ private:
             Vector nor(dim);
             CalcOrtho(FTr->Jacobian(), nor);
 
-            // Determine slip sign based on normal orientation
-            // Normal points from elem1 to elem2; slip jump convention:
-            // [[u]] = u+ - u- = delta_u (from side with n pointing outward)
+            // Convention: [[u]] = u⁻ − u⁺ (n points from K⁻ to K⁺)
+            // delta_u = physical slip (u_right - u_left)
+            // sign converts: sign * delta_u = [[u]] = g^F (prescribed jump)
+            // If nor(0) > 0: n points from left(K⁻) to right(K⁺)
+            //   g^F = u_left - u_right = -delta_u → sign = -1
+            // If nor(0) < 0: n points from right(K⁻) to left(K⁺)
+            //   g^F = u_right - u_left = +delta_u → sign = +1
             real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
 
             // Shapes
@@ -890,7 +894,7 @@ private:
          elvec1 = 0.0;
          elvec2 = 0.0;
 
-         real_t c1 = epsilon_ * 0.5;  // -0.5 for SIPG
+         real_t c1 = epsilon_ * 0.5;  // symmetry data: −∫ g^F · {{σ(v)·n}} ds
 
          for (int q = 0; q < nqp; q++)
          {
@@ -921,7 +925,7 @@ private:
             real_t detJ1 = FTr->Elem1->Weight();
             real_t detJ2 = FTr->Elem2->Weight();
 
-            // Element 1 consistency + BR2
+            // Element 1 symmetry data + BR2 lifting data
             for (int k = 0; k < ndof1; k++)
             {
                real_t grad_dot_n = 0.0;
@@ -947,7 +951,7 @@ private:
                }
             }
 
-            // Element 2 consistency + BR2
+            // Element 2 symmetry data + BR2 lifting data
             for (int k = 0; k < ndof2; k++)
             {
                real_t grad_dot_n = 0.0;
@@ -1265,7 +1269,7 @@ private:
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
 
-            real_t c1 = epsilon_ * 0.5;
+            real_t c1 = epsilon_ * 0.5;  // symmetry data: −∫ g^F · {{σ(v)·n}} ds
 
             for (int q = 0; q < nqp; q++)
             {
@@ -1751,6 +1755,14 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    solver_->Mult(B_, X_);
 
+   // Check for NaN/Inf in solution
+   {
+      real_t u_max = X_.Normlinf();
+      MFEM_VERIFY(std::isfinite(u_max),
+         "Domain solve produced NaN/Inf in displacement (||u||_inf = "
+         << u_max << ")");
+   }
+
    // Check convergence and log solver info when RHS is large
    {
       auto *cg = dynamic_cast<CGSolver*>(solver_.get());
@@ -1987,7 +1999,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
 
          // BR2 lifting at face centroid
-         // face_int[u*dim+s, m] = shape[m] * jump[u] * nor[s]
+         // Approximate the face integral: ∫_F φ_m * g_u * n_s dS
+         //   ≈ w_centroid * φ_m(x_c) * g_u * nor_s(x_c)
+         // where nor = |J_F| * n̂ (unnormalized, from CalcOrtho)
+         // and w_centroid is the 1-point quadrature weight for the reference face.
+         // This matches the bilinear form integrator which uses w_q * nor(s).
+         const IntegrationRule &ir_face =
+            IntRules.Get(FTr->GetGeometryType(), 0);
+         real_t w_centroid = ir_face.IntPoint(0).weight;
+
          DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
          face_int1 = 0.0;
          face_int2 = 0.0;
@@ -1997,11 +2017,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             {
                for (int m = 0; m < ndof1; m++)
                {
-                  face_int1(u * dim + s, m) = shape1(m) * jump[u] * basis.normal[s];
+                  face_int1(u * dim + s, m) =
+                     w_centroid * shape1(m) * jump[u] * nor(s);
                }
                for (int m = 0; m < ndof2; m++)
                {
-                  face_int2(u * dim + s, m) = shape2(m) * jump[u] * basis.normal[s];
+                  face_int2(u * dim + s, m) =
+                     w_centroid * shape2(m) * jump[u] * nor(s);
                }
             }
          }
@@ -2221,6 +2243,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             for (int c = 0; c < dim; c++)
                jump[c] = u_jump[c] - sign * delta_u[c];
 
+            // Face integral approximation (same as interior faces)
+            const IntegrationRule &ir_face =
+               IntRules.Get(FTr->GetGeometryType(), 0);
+            real_t w_centroid = ir_face.IntPoint(0).weight;
+
             DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
             face_int1 = 0.0;
             face_int2 = 0.0;
@@ -2229,9 +2256,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                for (int s = 0; s < dim; s++)
                {
                   for (int m = 0; m < ndof1; m++)
-                     face_int1(u * dim + s, m) = shape1(m) * jump[u] * basis.normal[s];
+                     face_int1(u * dim + s, m) =
+                        w_centroid * shape1(m) * jump[u] * nor(s);
                   for (int m = 0; m < ndof2; m++)
-                     face_int2(u * dim + s, m) = shape2(m) * jump[u] * basis.normal[s];
+                     face_int2(u * dim + s, m) =
+                        w_centroid * shape2(m) * jump[u] * nor(s);
                }
             }
 

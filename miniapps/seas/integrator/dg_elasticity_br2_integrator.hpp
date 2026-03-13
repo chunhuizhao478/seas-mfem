@@ -27,8 +27,9 @@ namespace seas
 ///
 /// The DG bilinear form on each interior face has three terms:
 ///   a(u,v) = -∫_F {{σ(u)·n}} · [[v]] ds              (consistency)
-///          - ε∫_F {{σ(v)·n}} · [[u]] ds              (symmetry, ε=-1 SIPG)
+///          - ∫_F {{σ(v)·n}} · [[u]] ds              (symmetry, SIPG)
 ///          + σ_BR2 ∫_F C:R_h(u) : R_h(v) ds          (BR2 lifting penalty)
+///   where [[·]] = (·)⁻ − (·)⁺ (normal points from K⁻ to K⁺)
 ///
 /// The elasticity tensor coupling in the BR2 lifting is encoded via
 /// the test_normal operator (Tandem's elasticity.py lines 118-120):
@@ -431,11 +432,17 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
    // Actually let's compute it directly:
    //   [σ(φ_k e_i)·n]_u = λ·(∂φ_k/∂x_i)·n_u + μ·(δ_{iu}·(∂φ_k/∂x_s·n_s) + ∂φ_k/∂x_u·n_i)
    //
-   // Sign conventions (same as scalar BR2):
-   //   Block (0,0): c0=-0.5, c1=ε·0.5,  c2=+σ
-   //   Block (0,1): c0=+0.5, c1=ε·0.5,  c2=-σ
-   //   Block (1,0): c0=-0.5, c1=-ε·0.5, c2=-σ
-   //   Block (1,1): c0=+0.5, c1=-ε·0.5, c2=+σ
+   // Sign conventions (with [[·]] = (·)⁻ − (·)⁺):
+   //   c0 = coeff for [σ(φ_test)·n] · φ_trial   (symmetry term)
+   //   c1 = coeff for [σ(φ_trial)·n] · φ_test   (consistency term)
+   //   Block (0,0): c0=-0.5, c1=-0.5,  c2=+σ
+   //   Block (0,1): c0=+0.5, c1=-0.5,  c2=-σ
+   //   Block (1,0): c0=-0.5, c1=+0.5,  c2=-σ
+   //   Block (1,1): c0=+0.5, c1=+0.5,  c2=+σ
+   //
+   // Note: c0 and c1 are named after code variables, not the standard DG terms.
+   // "c0" (test traction) implements the symmetry term −∫{{σ(v)·n}}·[[u]].
+   // "c1" (trial traction) implements the consistency term −∫{{σ(u)·n}}·[[v]].
    // =========================================================================
 
    for (int q = 0; q < nqp; q++)
@@ -500,9 +507,9 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
                                  + dshapes1_phys(l * dim_ + i, q) * n_q(u));
 
                   real_t val = 0.0;
-                  // Consistency: -0.5 * trac_test * φ_l / detJ1
+                  // Symmetry (c0): -0.5 * trac_test * φ_l / detJ1
                   val += (-0.5) * trac_test * shapes1(l, q) * invdetJ1;
-                  // Symmetry: ε * 0.5 * trac_trial * φ_k / detJ1
+                  // Consistency (c1): ε * 0.5 * trac_trial * φ_k / detJ1
                   val += epsilon_ * 0.5 * trac_trial * shapes1(k, q) * invdetJ1;
                   // BR2 lifting: +σ * φ_k * L_q[y=0][(l,i,u),q]
                   val += sigma * shapes1(k, q)
@@ -538,9 +545,9 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
                                  + dshapes2_phys(l * dim_ + i, q) * n_q(u));
 
                   real_t val = 0.0;
-                  // Consistency: +0.5 * trac_test * φ_l / detJ1
+                  // Symmetry (c0): +0.5 * trac_test * φ_l / detJ1
                   val += 0.5 * trac_test * shapes2(l, q) * invdetJ1;
-                  // Symmetry: ε * 0.5 * trac_trial * φ_k / detJ2
+                  // Consistency (c1): ε * 0.5 * trac_trial * φ_k / detJ2
                   val += epsilon_ * 0.5 * trac_trial * shapes1(k, q) * invdetJ2;
                   // BR2 lifting: -σ * φ_k * L_q[y=1][(l,i,u),q]
                   val += (-sigma) * shapes1(k, q)
@@ -576,9 +583,9 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
                                  + dshapes1_phys(l * dim_ + i, q) * n_q(u));
 
                   real_t val = 0.0;
-                  // Consistency: c0 * trac_test * φ_l / detJ2
+                  // Symmetry (c0): -0.5 * trac_test * φ_l / detJ2
                   val += (-0.5) * trac_test * shapes1(l, q) * invdetJ2;
-                  // Symmetry: (-c1) * trac_trial * φ_k / detJ1
+                  // Consistency (c1): -ε * 0.5 * trac_trial * φ_k / detJ1
                   val += (-epsilon_) * 0.5 * trac_trial * shapes2(k, q) * invdetJ1;
                   // BR2 lifting: -σ * φ_k * L_q[y=0][(l,i,u),q]
                   val += (-sigma) * shapes2(k, q)
@@ -612,9 +619,9 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
                                  + dshapes2_phys(l * dim_ + i, q) * n_q(u));
 
                   real_t val = 0.0;
-                  // Consistency: (-c0) * trac_test * φ_l / detJ2
+                  // Symmetry (c0): +0.5 * trac_test * φ_l / detJ2
                   val += 0.5 * trac_test * shapes2(l, q) * invdetJ2;
-                  // Symmetry: (-c1) * trac_trial * φ_k / detJ2
+                  // Consistency (c1): -ε * 0.5 * trac_trial * φ_k / detJ2
                   val += (-epsilon_) * 0.5 * trac_trial * shapes2(k, q) * invdetJ2;
                   // BR2 lifting: +σ * φ_k * L_q[y=1][(l,i,u),q]
                   val += sigma * shapes2(k, q)

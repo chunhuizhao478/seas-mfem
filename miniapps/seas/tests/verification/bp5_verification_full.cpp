@@ -286,6 +286,7 @@ int main(int argc, char *argv[])
    std::string restart_prefix;
    bool write_every_step = false;
    bool use_mumps = false;
+   std::string dg_method_str = "BR2";
 
    for (int i = 1; i < argc; i++)
    {
@@ -326,6 +327,18 @@ int main(int argc, char *argv[])
       }
       if (arg == "--write-every-step") { write_every_step = true; }
       if (arg == "--mumps") { use_mumps = true; }
+      if (arg == "--dg-method" && i + 1 < argc) { dg_method_str = argv[++i]; }
+   }
+
+   // Parse DG method
+   DGMethod dg_method = DGMethod::BR2;
+   if (dg_method_str == "IP" || dg_method_str == "ip")
+   {
+      dg_method = DGMethod::IP;
+   }
+   else if (dg_method_str == "BR2" || dg_method_str == "br2")
+   {
+      dg_method = DGMethod::BR2;
    }
 
    // Default stations
@@ -407,6 +420,7 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot())
    {
       std::cout << "  Ranks: " << mpi.Size() << "\n";
+      std::cout << "  DG method: " << dg_method_str << "\n";
       std::cout << "  Solver: " << (use_mumps ? "MUMPS (direct)" : "CG+AMG (iterative)") << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
@@ -430,7 +444,7 @@ int main(int argc, char *argv[])
    int order = 1;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, DGMethod::BR2, use_mumps);
+      params.Vp, params.Wf, params.lf, dg_method, use_mumps);
 
    if (mpi.IsRoot())
    {

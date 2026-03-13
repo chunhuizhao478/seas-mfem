@@ -898,12 +898,13 @@ void TestTractionWithPenaltyCorrection()
 }
 
 // =============================================================================
-// Test 16: BR2 traction correction consistency — invariant under mesh scaling
+// Test 16: BR2 traction correction consistency — correct scaling under mesh refinement
 //
-// The BR2 traction correction in ComputeTraction should use unit normals
-// (not CalcOrtho normals), so the correction is independent of face area.
-// We verify this by comparing traction on two meshes with different element
-// sizes but the same physical setup.
+// The BR2 traction correction in ComputeTraction uses unnormalized normals
+// (from CalcOrtho) with the centroid quadrature weight for face_int (matching
+// the bilinear form integrator), and unit normals for TestNormal (point eval).
+// The correction scales as μ*g/h, so it should not blow up or vanish with
+// mesh size changes.
 // =============================================================================
 void TestBR2TractionCorrectionConsistency()
 {
@@ -953,19 +954,17 @@ void TestBR2TractionCorrectionConsistency()
    std::cout << "  Mesh1 avg |trac|/DOF = " << avg_trac1
              << ", Mesh2 avg |trac|/DOF = " << avg_trac2 << "\n";
 
-   // The traction per DOF should be in the same order of magnitude.
-   // With the bug (nor(s) instead of basis.normal[s]), the 2x mesh would
-   // produce 4x larger corrections due to |J_F| scaling.
-   // After the fix, the ratio should be closer to 1 (not exactly 1 due to
-   // different solution fields, but should not be ~4x).
+   // The traction per DOF should scale correctly with element size.
+   // The BR2 correction scales as μ*g/h, so for 2x larger mesh the
+   // correction is ~0.5x. Combined with the average gradient term,
+   // the ratio should stay bounded and reasonable.
    if (avg_trac1 > 1e-10 && avg_trac2 > 1e-10)
    {
       real_t ratio = avg_trac2 / avg_trac1;
       std::cout << "  Traction ratio (mesh2/mesh1) = " << ratio << "\n";
-      // With the fix, this ratio should be reasonable (not ~4x from face area scaling)
       // Allow wide tolerance since the solutions differ on different meshes
       TEST_ASSERT(ratio < 3.5,
-                  "BR2 traction correction not dominated by face area scaling");
+                  "BR2 traction correction scaling is reasonable");
    }
 }
 

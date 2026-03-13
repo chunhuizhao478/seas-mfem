@@ -86,7 +86,7 @@ u = g_D      on Γ_D
 
 **Interior fault condition** (prescribed slip jump, no-opening):
 ```
-[[u]] = u⁺ - u⁻ = δ      on Γ_F
+[[u]] = u⁻ - u⁺ = δ      on Γ_F
 ```
 
 where the slip `δ` is constrained to lie in the fault tangent plane:
@@ -184,8 +184,10 @@ For an interior face `e` shared by elements K⁺ and K⁻, with outward normal `
 
 **Jump** (vector):
 ```
-[[v]] = v⁺ - v⁻
+[[v]] = v⁻ - v⁺
 ```
+
+This follows the convention of Arnold et al. (2002) and Uphoff et al. (2023).
 
 **Average** (vector):
 ```
@@ -344,9 +346,10 @@ a^cons_e = -∫_e {{σ(u_h) · n}} · [[v_h]] ds
 
 **Symmetry term** (SIPG, ε = -1, makes bilinear form symmetric):
 ```
-a^sym_e = ε · (-∫_e {{σ(v_h) · n}} · [[u_h]] ds)
-        = +∫_e {{σ(v_h) · n}} · [[u_h]] ds       (for ε = -1)
+a^sym_e = -∫_e {{σ(v_h) · n}} · [[u_h]] ds
 ```
+
+Note: With the convention `[[·]] = (·)⁻ − (·)⁺`, both consistency and symmetry terms carry a minus sign, ensuring the bilinear form is symmetric for SIPG (ε = −1).
 
 **BR2 lifting term** (stabilization via lifted flux with elasticity coupling):
 ```
@@ -355,21 +358,24 @@ a^lift_e = σ^BR2 · ∫_e Σ_{i,u} [Σ_q w_q E_x[k,q] L_q[y][l,i,u,q]] ds
 
 More explicitly, for the face matrix block `(x_elem, y_elem)`, component `(i, u)`:
 ```
-a[(x,k,i), (y,l,u)] = c₀ · ∫ [σ_i(φ_x^k) · n]_u · φ_y^l ds     (consistency)
-                     + c₁ · ∫ [σ_u(φ_y^l) · n]_i · φ_x^k ds     (symmetry)
-                     + c₂ · Σ_q w_q E_x[k,q] L_q[y][l,i,u,q]   (BR2 penalty)
+a[(x,k,i), (y,l,u)] = c_trial_trac · ∫ [σ_u(φ_y^l) · n]_i · φ_x^k ds   (consistency: trial traction)
+                     + c_test_trac  · ∫ [σ_i(φ_x^k) · n]_u · φ_y^l ds   (symmetry: test traction)
+                     + c_penalty    · Σ_q w_q E_x[k,q] L_q[y][l,i,u,q]  (BR2 penalty)
 ```
 
-**Sign conventions** (following Tandem):
+**Sign conventions** (following Tandem, with `[[·]] = (·)⁻ − (·)⁺`):
 
-| Block | c₀ (consistency) | c₁ (symmetry) | c₂ (BR2 penalty) |
-|-------|-------------------|----------------|-------------------|
-| (0,0): elem1←elem1 | -0.5 | ε·0.5 = +0.5 | +σ^BR2 |
-| (0,1): elem1←elem2 | +0.5 | ε·0.5 = +0.5 | -σ^BR2 |
-| (1,0): elem2←elem1 | -0.5 | ε·(-0.5) = +0.5 | -σ^BR2 |
-| (1,1): elem2←elem2 | +0.5 | ε·(-0.5) = +0.5 | +σ^BR2 |
+The consistency term `−∫ {{σ(u)·n}} · [[v]] ds` involves the **trial** traction dotted with the **test** jump.
+The symmetry term `−∫ {{σ(v)·n}} · [[u]] ds` involves the **test** traction dotted with the **trial** jump.
 
-Note: Block (1,0) consistency uses `-0.5` (not `+0.5`) because elem2 has normal sign `+1`, giving the same contribution form as block (0,0). Block (1,1) symmetry uses `ε·(-0.5) = +0.5` because ε = -1 and elem2's test function has the opposite sign convention.
+| Block | c_trial_trac (consistency) | c_test_trac (symmetry) | c_penalty (BR2) |
+|-------|---------------------------|------------------------|-----------------|
+| (0,0): elem1←elem1 | −0.5 | −0.5 | +σ^BR2 |
+| (0,1): elem1←elem2 | −0.5 | +0.5 | −σ^BR2 |
+| (1,0): elem2←elem1 | +0.5 | −0.5 | −σ^BR2 |
+| (1,1): elem2←elem2 | +0.5 | +0.5 | +σ^BR2 |
+
+Note: In the code (`dg_elasticity_br2_integrator.hpp`), the variable `c0` corresponds to `c_test_trac` (symmetry) and `c1` corresponds to `c_trial_trac` (consistency). The computed values are correct; only the code variable names differ from the standard DG labeling.
 
 | Term | File | Class |
 |------|------|-------|
@@ -395,7 +401,7 @@ a^Dir,cons_e = -∫_e (σ(u_h) · n) · v_h ds
 
 **Dirichlet symmetry**:
 ```
-a^Dir,sym_e = ε · (-∫_e (σ(v_h) · n) · u_h ds)
+a^Dir,sym_e = -∫_e (σ(v_h) · n) · u_h ds
 ```
 
 **Dirichlet BR2 lifting** (full factor, no 0.5 averaging for boundary):
@@ -429,7 +435,7 @@ For prescribed displacement `g_D = (0, ±Vp·t/2, 0)` on Γ_D:
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  L^Dir(v_h) = Σ_{e ∈ F_D} [ ε·(-∫_e (σ(v_h) · n) · g_D ds)               │
+│  L^Dir(v_h) = Σ_{e ∈ F_D} [ -∫_e (σ(v_h) · n) · g_D ds                    │
 │                            + σ^BR2 · ∫_K C : r_e(g_D) : r_e(v_h) dx ]     │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -437,7 +443,7 @@ For prescribed displacement `g_D = (0, ±Vp·t/2, 0)` on Γ_D:
 Expanding component-wise for each test function `φ_k` with component `i`:
 
 ```
-L^Dir_k,i = ε · Σ_u [σ_i(φ_k) · n]_u · g_D_u · w
+L^Dir_k,i = -Σ_u [σ_i(φ_k) · n]_u · g_D_u · w
           + σ^BR2 · φ_k · f_lifted_q[i, q] · w
 ```
 
@@ -464,12 +470,12 @@ For prescribed slip `δ` on fault faces F_F, the slip is first embedded from loc
 δ_global = δ_dip · t₁ + δ_strike · t₂
 ```
 
-Then the RHS contribution:
+Then the RHS contribution (where `g^F = [[u]] = u⁻ − u⁺ = δ` on the fault):
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  L^Fault(v_h) = Σ_{e ∈ F_F} [ ε·(-∫_e {{σ(v_h) · n}} · δ ds)             │
-│                              + σ^BR2 · ∫_{K⁻∪K⁺} C:r_e(δ)·r_e([[v_h]]) ] │
+│  L^Fault(v_h) = Σ_{e ∈ F_F} [ -∫_e {{σ(v_h) · n}} · g^F ds               │
+│                              + σ^BR2 · ∫_{K⁻∪K⁺} C:r_e(g^F)·r_e([[v_h]])]│
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -487,7 +493,7 @@ b^fault_{k,i} = c₁ · Σ_u [σ_i(φ_k) · n]_u · sign · δ_u · w / det(J₂
               + (-σ^BR2) · φ_k · f_lifted_q[i, q] · w
 ```
 
-where `c₁ = ε · 0.5 = +0.5` (SIPG symmetry coefficient), `sign` accounts for normal orientation relative to the fault convention, and `f_lifted_q` is the BR2 lifted slip with elasticity tensor coupling.
+where `c₁ = ε · 0.5 = -0.5` (SIPG symmetry data coefficient, corresponding to `−∫ g^F · {{σ(v)·n}} ds`), `sign` converts physical slip `delta_u` to the DG jump `g^F = [[u]] = u⁻ − u⁺`, and `f_lifted_q` is the BR2 lifted slip with elasticity tensor coupling.
 
 The BR2 lifted slip is computed as:
 
@@ -530,8 +536,8 @@ BILINEAR FORM (Left-Hand Side):
 [Interior consistency — all interior faces including fault]
 - Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(u_h) · n}} · [[v_h]] ds
 
-[Interior symmetry — all interior faces including fault]    (ε = -1)
-+ Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(v_h) · n}} · [[u_h]] ds
+[Interior symmetry — all interior faces including fault]
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(v_h) · n}} · [[u_h]] ds
 
 [Interior BR2 lifting — all interior faces including fault]
 + Σ_{e ∈ F_I ∪ F_F} σ^BR2 ∫ C : r_e([[u_h]]) : r_e([[v_h]]) dx
@@ -540,7 +546,7 @@ BILINEAR FORM (Left-Hand Side):
 - Σ_{e ∈ F_D} ∫_e (σ(u_h) · n) · v_h ds
 
 [Dirichlet symmetry]
-+ Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · u_h ds
+- Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · u_h ds
 
 [Dirichlet BR2 lifting]
 + Σ_{e ∈ F_D} σ^BR2 ∫ C : r_e(u_h) : r_e(v_h) dx
@@ -550,22 +556,24 @@ LINEAR FORM (Right-Hand Side):
 ==============================
 
 [Dirichlet RHS (symmetry)]
-+ Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · g_D ds
+- Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · g_D ds
 
 [Dirichlet RHS (BR2 lifting)]
 + Σ_{e ∈ F_D} σ^BR2 ∫ C : r_e(g_D) : r_e(v_h) dx
 
 [Fault RHS (symmetry)]
-+ Σ_{e ∈ F_F} ε · (-∫_e {{σ(v_h) · n}} · δ ds)
+- Σ_{e ∈ F_F} ∫_e {{σ(v_h) · n}} · g^F ds
 
 [Fault RHS (BR2 lifting)]
-+ Σ_{e ∈ F_F} σ^BR2 ∫ C : r_e(δ) : r_e([[v_h]]) dx
++ Σ_{e ∈ F_F} σ^BR2 ∫ C : r_e(g^F) : r_e([[v_h]]) dx
 ```
 
-**How fault enforcement works**: Same mechanism as antiplane. On fault faces `e ∈ F_F`, the bilinear form contributes LHS terms with `[[u_h]]` and the RHS contributes terms with `δ`. The net effect is:
+where `g^F = [[u]] = u⁻ − u⁺ = δ` is the prescribed jump on the fault.
 
-- Symmetry: `+{{σ(v)·n}}·[[u_h]]` (LHS) vs `−{{σ(v)·n}}·δ` (RHS) → enforces `[[u_h]] → δ`
-- Lifting: `σ r_e([[u_h]])·r_e([[v_h]])` (LHS) vs `σ r_e(δ)·r_e([[v_h]])` (RHS) → penalizes `[[u_h]] - δ`
+**How fault enforcement works**: Same mechanism as antiplane. On fault faces `e ∈ F_F`, the bilinear form contributes LHS terms with `[[u_h]]` and the RHS contributes terms with `g^F`. The net effect is:
+
+- Symmetry: `−{{σ(v)·n}}·[[u_h]]` (LHS) vs `−{{σ(v)·n}}·g^F` (RHS) → enforces `[[u_h]] → g^F`
+- Lifting: `σ r_e([[u_h]])·r_e([[v_h]])` (LHS) vs `σ r_e(g^F)·r_e([[v_h]])` (RHS) → penalizes `[[u_h]] - g^F`
 - Consistency: `-{{σ(u)·n}}·[[v_h]]` (LHS only) → provides flux coupling across fault
 
 ---
@@ -614,7 +622,7 @@ a^cons_e = -∫_e {{σ(u_h) · n}} · [[v_h]] ds
 
 **Symmetry** (same as BR2):
 ```
-a^sym_e = ε · (-∫_e {{σ(v_h) · n}} · [[u_h]] ds)
+a^sym_e = -∫_e {{σ(v_h) · n}} · [[u_h]] ds
 ```
 
 **IP penalty** (replaces BR2 lifting):
@@ -650,7 +658,7 @@ a^Dir,pen_e = κ · |n|² · w · ∫_e u_h · v_h ds
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  L^Dir(v_h) = Σ_{e ∈ F_D} [ ε · (-∫_e (σ(v_h) · n) · g_D ds)             │
+│  L^Dir(v_h) = Σ_{e ∈ F_D} [ -∫_e (σ(v_h) · n) · g_D ds                    │
 │                            + κ · |n|² · w · ∫_e g_D · v_h ds ]            │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -659,9 +667,12 @@ a^Dir,pen_e = κ · |n|² · w · ∫_e u_h · v_h ds
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────────┐
-│  L^Fault(v_h) = Σ_{e ∈ F_F} [ ε · (-∫_e {{σ(v_h) · n}} · δ ds)           │
-│                              + κ · |n|² · (w₁+w₂) · ∫_e δ · [[v_h]] ds ] │
+│  L^Fault(v_h) = Σ_{e ∈ F_F} [ -∫_e {{σ(v_h) · n}} · g^F ds                │
+│                              + κ · |n|² · (w₁+w₂) · ∫_e g^F · [[v_h]] ds ]│
 └──────────────────────────────────────────────────────────────────────────────┘
+```
+
+where `g^F = [[u]] = u⁻ − u⁺ = δ`.
 ```
 
 | Term | File | Function |
@@ -683,7 +694,7 @@ BILINEAR FORM (Left-Hand Side):
 - Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(u_h) · n}} · [[v_h]] ds
 
 [Interior symmetry — all interior faces including fault]
-+ Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(v_h) · n}} · [[u_h]] ds
+- Σ_{e ∈ F_I ∪ F_F} ∫_e {{σ(v_h) · n}} · [[u_h]] ds
 
 [Interior IP penalty — all interior faces including fault]
 + Σ_{e ∈ F_I ∪ F_F} κ |n|² (w₁+w₂) ∫_e [[u_h]] · [[v_h]] ds
@@ -692,7 +703,7 @@ BILINEAR FORM (Left-Hand Side):
 - Σ_{e ∈ F_D} ∫_e (σ(u_h) · n) · v_h ds
 
 [Dirichlet symmetry]
-+ Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · u_h ds
+- Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · u_h ds
 
 [Dirichlet IP penalty]
 + Σ_{e ∈ F_D} κ |n|² w ∫_e u_h · v_h ds
@@ -702,16 +713,16 @@ LINEAR FORM (Right-Hand Side):
 ==============================
 
 [Dirichlet RHS (symmetry)]
-+ Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · g_D ds
+- Σ_{e ∈ F_D} ∫_e (σ(v_h) · n) · g_D ds
 
 [Dirichlet RHS (penalty)]
 + Σ_{e ∈ F_D} κ |n|² w ∫_e g_D · v_h ds
 
 [Fault RHS (symmetry)]
-+ Σ_{e ∈ F_F} ε · (-∫_e {{σ(v_h) · n}} · δ ds)
+- Σ_{e ∈ F_F} ∫_e {{σ(v_h) · n}} · g^F ds
 
 [Fault RHS (penalty)]
-+ Σ_{e ∈ F_F} κ |n|² (w₁+w₂) ∫_e δ · [[v_h]] ds
++ Σ_{e ∈ F_F} κ |n|² (w₁+w₂) ∫_e g^F · [[v_h]] ds
 ```
 
 ---
