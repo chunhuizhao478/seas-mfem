@@ -541,7 +541,7 @@ private:
 #endif
          {
             auto *cg = new CGSolver(mesh_.GetComm());
-            cg->SetRelTol(1e-12);
+            cg->SetRelTol(1e-10);
             cg->SetAbsTol(0.0);
             cg->SetMaxIter(10000);
             cg->SetPrintLevel(0);
