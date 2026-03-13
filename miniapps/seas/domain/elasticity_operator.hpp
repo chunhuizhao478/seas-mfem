@@ -1968,16 +1968,32 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
       if (method_ == DGMethod::IP)
       {
-         // IP penalty: kappa * |nor|^2 * (1/(2*detJ1) + 1/(2*detJ2))
+         // IP penalty with elasticity tensor coupling (matches BR2 test_normal)
          real_t kappa = (order_ + 1) * (order_ + 1);
          real_t detJ1 = FTr->Elem1->Weight();
          real_t detJ2 = FTr->Elem2->Weight();
          real_t nor_sq = nor * nor;
-         real_t penalty = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
+         real_t ip_coeff = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
 
+         real_t jump[3];
          for (int c = 0; c < dim; c++)
          {
-            correction[c] = penalty * (u_jump[c] - sign * delta_u[c]);
+            jump[c] = u_jump[c] - sign * delta_u[c];
+         }
+
+         for (int i = 0; i < dim; i++)
+         {
+            correction[i] = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               for (int s = 0; s < dim; s++)
+               {
+                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
+                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
+                                 + (i == s ? 1.0 : 0.0) * basis.normal[u]);
+                  correction[i] += ip_coeff * tn * basis.normal[s] * jump[u];
+               }
+            }
          }
       }
       else  // BR2
@@ -2219,14 +2235,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          if (method_ == DGMethod::IP)
          {
+            // IP penalty with elasticity tensor coupling (matches BR2 test_normal)
             real_t kappa = (order_ + 1) * (order_ + 1);
             real_t detJ1 = FTr->Elem1->Weight();
             real_t detJ2 = FTr->Elem2->Weight();
             real_t nor_sq = nor * nor;
-            real_t pen = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
+            real_t ip_coeff = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
 
+            real_t jump[3];
             for (int c = 0; c < dim; c++)
-               correction[c] = pen * (u_jump[c] - sign * delta_u[c]);
+               jump[c] = u_jump[c] - sign * delta_u[c];
+
+            for (int ci = 0; ci < dim; ci++)
+            {
+               correction[ci] = 0.0;
+               for (int u = 0; u < dim; u++)
+               {
+                  for (int s = 0; s < dim; s++)
+                  {
+                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
+                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
+                                    + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
+                     correction[ci] += ip_coeff * tn * basis.normal[s] * jump[u];
+                  }
+               }
+            }
          }
          else  // BR2
          {

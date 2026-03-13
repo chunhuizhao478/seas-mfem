@@ -565,7 +565,7 @@ int main(int argc, char *argv[])
    ode_solver.SetAbsTol(1e-7);
    ode_solver.SetRelTol(1e-50);
    ode_solver.SetDtMin(1e-6);
-   ode_solver.SetDtMax(0.5 * BP5Params::seconds_per_year);
+   ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
 
    // Initial dt must be small enough for the nucleation zone dynamics.
    // The nucleation zone has V_nuc = 0.03 m/s with overstressing that

@@ -475,7 +475,16 @@ public:
          for (int i = 0; i < num_nodes_; i++)
          {
             real_t psi = state(i * StatePerNode + PsiIndex);
-            theta(i) = dr_friction_->PsiToTheta(psi);
+            if constexpr (SlipComponents == 2)
+            {
+               // BP5: use per-DOF Dc for correct theta conversion
+               real_t Dc = Dc_values_(i);
+               theta(i) = dr_friction_->PsiToTheta(psi, Dc);
+            }
+            else
+            {
+               theta(i) = dr_friction_->PsiToTheta(psi);
+            }
          }
       }
       else

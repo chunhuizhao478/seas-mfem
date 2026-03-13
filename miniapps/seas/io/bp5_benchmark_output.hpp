@@ -298,7 +298,7 @@ public:
    {
       if (V_max > 1e-3)
       {
-         return 0.001;  // Coseismic: every 0.001 s
+         return 0.1;    // Coseismic: every 0.1 s (SCEC spec)
       }
       else if (V_max > 1e-6)
       {
@@ -306,7 +306,7 @@ public:
       }
       else
       {
-         return 0.01 * BP5Params::seconds_per_year;  // Interseismic
+         return 0.1 * BP5Params::seconds_per_year;  // Interseismic: ~0.1 yr (SCEC spec)
       }
    }
 

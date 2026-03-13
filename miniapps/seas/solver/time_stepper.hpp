@@ -148,7 +148,7 @@ public:
         growth_max_(10.0),      // PETSc default clip[1]
         shrink_min_(0.1),       // PETSc default clip[0]
         dt_min_(1e-6),
-        dt_max_(0.5 * 3.15576e7),  // 0.5 year
+        dt_max_(0.1 * 3.15576e7),  // 0.1 year
         dt_(1e3),
         initialized_(false),
         total_rejections_(0),

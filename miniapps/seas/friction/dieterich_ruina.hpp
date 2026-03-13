@@ -263,6 +263,12 @@ public:
       return (cp_.Dc / cp_.V0) * std::exp((psi - cp_.f0) / cp_.b);
    }
 
+   /// Convert psi to theta with per-DOF Dc: theta = (Dc/V0)*exp((psi - f0)/b).
+   real_t PsiToTheta(real_t psi, real_t Dc) const
+   {
+      return (Dc / cp_.V0) * std::exp((psi - cp_.f0) / cp_.b);
+   }
+
    /// Friction coefficient in psi-space:
    /// f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
    ///
@@ -385,14 +391,18 @@ public:
    {
       real_t tau_abs = std::sqrt(tau_vec[0] * tau_vec[0] +
                                  tau_vec[1] * tau_vec[1]);
-      if (tau_abs < 1e-30)
+      if (tau_abs <= 0.0)
       {
+         // Exactly zero traction — no slip. Matches Tandem (no artificial floor).
          V_vec[0] = 0.0;
          V_vec[1] = 0.0;
          if (iterations) { *iterations = 0; }
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
+      // Direction: V parallel to tau (same as Tandem line 119).
+      // The ratio V_abs/tau_abs is well-defined for any tau_abs > 0
+      // because V_abs ∈ [0, tau_abs/eta] from the Brent solver.
       V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
       V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
    }
