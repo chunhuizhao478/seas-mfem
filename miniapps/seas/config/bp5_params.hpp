@@ -357,7 +357,7 @@ struct BP5Params
       MFEM_VERIFY(L_nuc < L0, "BP5: L_nuc should be < L0");
       MFEM_VERIFY(sigma_n > 0, "BP5: sigma_n must be positive");
       MFEM_VERIFY(Vp > 0, "BP5: Vp must be positive");
-      MFEM_VERIFY(V_nuc > V_init, "BP5: V_nuc should exceed V_init");
+      MFEM_VERIFY(V_nuc >= V_init, "BP5: V_nuc must be >= V_init");
    }
 
    /// Steady-state psi at plate rate (initial state variable, same everywhere).
