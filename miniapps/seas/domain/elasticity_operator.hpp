@@ -18,6 +18,7 @@
 #include "../common/seas_types.hpp"
 #include "../fault/fault_basis.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
+#include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
 
 #include <memory>
 #include <cmath>
@@ -573,14 +574,30 @@ private:
       }
       else  // IP
       {
-         real_t kappa = (order_ + 1) * (order_ + 1);
+         // Split IP into two integrators:
+         // 1. Consistency + symmetry (MFEM's DGElasticityIntegrator with kappa=0)
+         // 2. Penalty (custom integrator matching Uphoff et al. 2023 formula)
+         //
+         // The penalty uses: η_F * ∫_F |nor| * [[u]]·[[v]] ds
+         // where η_F = (p0+p1)/4 with p = (D+1)*c_N_1*(A/V)*(c1²/c0)
+         //
+         // This differs from MFEM's built-in DGElasticityIntegrator which uses
+         // κ * |nor|² * {{(λ+2μ)/detJ}} * [[u]]·[[v]].
+
+         // Consistency + symmetry only (kappa=0 → no penalty in this integrator)
          cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, kappa));
+            new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0));
+         // Penalty (material-dependent, |nor| scaling)
+         cached_a_->AddInteriorFaceIntegrator(
+            new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, kappa),
+               new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0),
+               dirichlet_bdr_marker_);
+            cached_a_->AddBdrFaceIntegrator(
+               new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3),
                dirichlet_bdr_marker_);
          }
       }
@@ -780,8 +797,16 @@ private:
             real_t detJ2 = FTr->Elem2->Weight();
             real_t w1 = ip.weight / (2.0 * detJ1);
             real_t w2 = ip.weight / (2.0 * detJ2);
-            real_t nor_sq = nor * nor;
-            real_t wq_penalty = kappa * nor_sq * (w1 + w2);
+
+            // Penalty: match bilinear form integrator formula
+            // penalty = (p0+p1)/4, p = (D+1)*c_N_1*(A/V)*(c1²/c0)
+            real_t nl_q = nor.Norml2();
+            real_t c0_mat = 2.0 * mu_val_;
+            real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+            real_t p0 = (dim + 1) * 1.0 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * 1.0 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+            real_t penalty_ip = (p0 + p1) / 4.0;
+            real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
             // For each element, each DOF k, each component i:
             // Symmetry term: σ * [σ(φ_k e_i)·n]_u * delta_u[u]
@@ -1203,8 +1228,15 @@ private:
                real_t detJ2 = FTr->Elem2->Weight();
                real_t w1 = ip.weight / (2.0 * detJ1);
                real_t w2 = ip.weight / (2.0 * detJ2);
-               real_t nor_sq = nor * nor;
-               real_t wq_penalty = kappa * nor_sq * (w1 + w2);
+
+               // Penalty: match bilinear form integrator formula
+               real_t nl_q = nor.Norml2();
+               real_t c0_mat = 2.0 * mu_val_;
+               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+               real_t p0 = (dim + 1) * 1.0 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+               real_t p1 = (dim + 1) * 1.0 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+               real_t penalty_ip = (p0 + p1) / 4.0;
+               real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
                for (int k = 0; k < ndof1; k++)
                {
@@ -1547,8 +1579,13 @@ private:
 
                real_t detJ = FTr->Elem1->Weight();
                real_t w = ip.weight / detJ;
-               real_t nor_sq = nor * nor;
-               real_t wq_penalty = kappa * nor_sq * w;
+
+               // Penalty: match bilinear form (boundary face: single side)
+               real_t nl_q = nor.Norml2();
+               real_t c0_mat = 2.0 * mu_val_;
+               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+               real_t p0 = (dim + 1) * 1.0 * (nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
+               real_t wq_penalty = p0 * ip.weight * nl_q;
 
                for (int k = 0; k < ndof; k++)
                {

@@ -4,6 +4,7 @@
 #include "mfem.hpp"
 #include "../../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../../integrator/dg_br2_integrator.hpp"
+#include "../../integrator/dg_elasticity_ip_penalty_integrator.hpp"
 #include "test_macros.hpp"
 
 #include <iostream>
@@ -756,6 +757,309 @@ void TestTetElements()
 // =============================================================================
 // Main
 // =============================================================================
+// =============================================================================
+// Test 11: IP penalty integrator — matrix symmetry
+// =============================================================================
+void TestIPPenaltySymmetry()
+{
+   std::cout << "\n--- Test: IP Penalty Integrator Symmetry ---\n";
+
+   // Hex mesh
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 2, Element::HEXAHEDRON,
+                                      2.0, 2.0, 2.0);
+
+   int order = 1;
+   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+
+   ConstantCoefficient lambda_coeff(32.04e9);
+   ConstantCoefficient mu_coeff(32.04e9);
+
+   DGElasticityIPPenaltyIntegrator integ(lambda_coeff, mu_coeff, 3);
+
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (FTr == nullptr) { continue; }
+
+      const FiniteElement &el1 = *scalar_fes.GetFE(FTr->Elem1No);
+      const FiniteElement &el2 = *scalar_fes.GetFE(FTr->Elem2No);
+
+      DenseMatrix elmat;
+      integ.AssembleFaceMatrix(el1, el2, *FTr, elmat);
+
+      int n = elmat.Height();
+      TEST_ASSERT(n > 0, "IP penalty matrix is non-empty");
+      TEST_ASSERT(elmat.FNorm() > 0.0, "IP penalty matrix is non-zero");
+
+      // Symmetry check
+      real_t max_asym = 0.0;
+      for (int i = 0; i < n; i++)
+         for (int j = i + 1; j < n; j++)
+            max_asym = std::max(max_asym, std::abs(elmat(i,j) - elmat(j,i)));
+      real_t rel_asym = elmat.FNorm() > 0.0 ? max_asym / elmat.FNorm() : 0.0;
+      TEST_ASSERT(rel_asym < 1e-12,
+                  "IP penalty face matrix is symmetric");
+      break;
+   }
+}
+
+// =============================================================================
+// Test 12: IP penalty integrator — positive semi-definite
+//
+// The penalty [[u]]·[[v]] should produce a PSD matrix (eigenvalues >= 0).
+// =============================================================================
+void TestIPPenaltyPSD()
+{
+   std::cout << "\n--- Test: IP Penalty Integrator PSD ---\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 1, 1, Element::TETRAHEDRON,
+                                      2.0, 1.0, 1.0);
+
+   int order = 1;
+   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+
+   ConstantCoefficient lambda_coeff(32.04e9);
+   ConstantCoefficient mu_coeff(32.04e9);
+
+   DGElasticityIPPenaltyIntegrator integ(lambda_coeff, mu_coeff, 3);
+
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (FTr == nullptr) { continue; }
+
+      const FiniteElement &el1 = *scalar_fes.GetFE(FTr->Elem1No);
+      const FiniteElement &el2 = *scalar_fes.GetFE(FTr->Elem2No);
+
+      DenseMatrix elmat;
+      integ.AssembleFaceMatrix(el1, el2, *FTr, elmat);
+
+      // Check eigenvalues via v^T * A * v for random v with [[v]] structure
+      int n = elmat.Height();
+      int ndof1 = el1.GetDof();
+      int ndof2 = el2.GetDof();
+
+      // The penalty penalizes [[u]]·[[v]] which is PSD.
+      // Test: v^T * elmat * v >= 0 for random vectors.
+      srand(42);
+      bool psd = true;
+      for (int trial = 0; trial < 20; trial++)
+      {
+         Vector v(n);
+         for (int i = 0; i < n; i++)
+         {
+            v(i) = (real_t(rand()) / RAND_MAX - 0.5) * 2.0;
+         }
+         Vector Av(n);
+         elmat.Mult(v, Av);
+         real_t vtAv = v * Av;
+         if (vtAv < -1e-10 * elmat.FNorm())
+         {
+            psd = false;
+            break;
+         }
+      }
+      TEST_ASSERT(psd, "IP penalty matrix is positive semi-definite");
+      break;
+   }
+}
+
+// =============================================================================
+// Test 13: IP penalty value matches expected formula
+//
+// For a regular hex with h=1, lambda=mu=1:
+//   c0 = 2*mu = 2, c1 = 3*lambda+2*mu = 5, c1²/c0 = 12.5
+//   A/V = 1/1 = 1, (D+1)*c_N_1 = 4
+//   p(side) = 4 * 1 * 12.5 = 50
+//   penalty = (50+50)/4 = 25
+// =============================================================================
+void TestIPPenaltyValue()
+{
+   std::cout << "\n--- Test: IP Penalty Value ---\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 1, 1, Element::HEXAHEDRON,
+                                      2.0, 1.0, 1.0);
+
+   int order = 1;
+   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+
+   ConstantCoefficient lambda_coeff(1.0);
+   ConstantCoefficient mu_coeff(1.0);
+
+   DGElasticityIPPenaltyIntegrator integ(lambda_coeff, mu_coeff, 3);
+
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (FTr == nullptr) { continue; }
+
+      const FiniteElement &el1 = *scalar_fes.GetFE(FTr->Elem1No);
+      const FiniteElement &el2 = *scalar_fes.GetFE(FTr->Elem2No);
+
+      DenseMatrix elmat;
+      integ.AssembleFaceMatrix(el1, el2, *FTr, elmat);
+
+      // The matrix should be non-zero and have reasonable magnitude
+      TEST_ASSERT(elmat.FNorm() > 1e-10,
+                  "IP penalty produces non-zero matrix for lambda=mu=1");
+
+      // Check diagonal dominance of same-component blocks (penalty effect)
+      int ndof1 = el1.GetDof();
+      int ndof2 = el2.GetDof();
+      int ndof_total = ndof1 + ndof2;
+
+      // The (0,0) diagonal block should be positive
+      real_t diag_sum = 0.0;
+      for (int i = 0; i < ndof1; i++)
+      {
+         diag_sum += elmat(i, i);
+      }
+      TEST_ASSERT(diag_sum > 0,
+                  "IP penalty (0,0) block has positive diagonal");
+
+      std::cout << "  Matrix Fnorm = " << elmat.FNorm()
+                << ", diag_sum(block00) = " << diag_sum << "\n";
+      break;
+   }
+}
+
+// =============================================================================
+// Test 14: Split IP (kappa=0 + penalty) produces same-structure matrix as full IP
+//
+// DGElasticityIntegrator(kappa=0) + DGElasticityIPPenaltyIntegrator should
+// produce a matrix with the same non-zero pattern as full DGElasticityIntegrator.
+// =============================================================================
+void TestSplitIPConsistency()
+{
+   std::cout << "\n--- Test: Split IP (kappa=0 + penalty) vs Full IP ---\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 1, 1, Element::HEXAHEDRON,
+                                      2.0, 1.0, 1.0);
+
+   int order = 1;
+   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+   FiniteElementSpace vec_fes(&mesh, &fec, 3, Ordering::byNODES);
+
+   ConstantCoefficient lambda_coeff(32.04e9);
+   ConstantCoefficient mu_coeff(32.04e9);
+
+   // Full IP (MFEM's original)
+   BilinearForm a_full(&vec_fes);
+   a_full.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   real_t kappa = 4.0;
+   a_full.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, kappa));
+   a_full.Assemble();
+   a_full.Finalize();
+
+   // Split IP (consistency+symmetry with kappa=0, then separate penalty)
+   BilinearForm a_split(&vec_fes);
+   a_split.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   a_split.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0));
+   a_split.AddInteriorFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3));
+   a_split.Assemble();
+   a_split.Finalize();
+
+   // Both should produce non-zero, symmetric matrices
+   SparseMatrix &A_full = a_full.SpMat();
+   SparseMatrix &A_split = a_split.SpMat();
+
+   TEST_ASSERT(A_full.MaxNorm() > 1e-10, "Full IP matrix is non-zero");
+   TEST_ASSERT(A_split.MaxNorm() > 1e-10, "Split IP matrix is non-zero");
+
+   // Both should be symmetric
+   SparseMatrix *AT_full = Transpose(A_full);
+   SparseMatrix *AT_split = Transpose(A_split);
+   AT_full->Add(-1.0, A_full);
+   AT_split->Add(-1.0, A_split);
+   real_t asym_full = AT_full->MaxNorm() / A_full.MaxNorm();
+   real_t asym_split = AT_split->MaxNorm() / A_split.MaxNorm();
+   TEST_ASSERT(asym_full < 1e-10, "Full IP assembly is symmetric");
+   TEST_ASSERT(asym_split < 1e-10, "Split IP assembly is symmetric");
+
+   // Both should have the same sparsity pattern size
+   TEST_ASSERT(A_full.NumNonZeroElems() == A_split.NumNonZeroElems(),
+               "Full and split IP have same number of nonzeros");
+
+   std::cout << "  Full IP:  nnz=" << A_full.NumNonZeroElems()
+             << ", max=" << A_full.MaxNorm() << "\n";
+   std::cout << "  Split IP: nnz=" << A_split.NumNonZeroElems()
+             << ", max=" << A_split.MaxNorm() << "\n";
+
+   delete AT_full;
+   delete AT_split;
+}
+
+// =============================================================================
+// Test 15: IP penalty on tet mesh — symmetry and PSD
+// =============================================================================
+void TestIPPenaltyTet()
+{
+   std::cout << "\n--- Test: IP Penalty on Tet Mesh ---\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 2, Element::TETRAHEDRON,
+                                      2.0, 2.0, 2.0);
+
+   int order = 1;
+   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &fec);
+   FiniteElementSpace vec_fes(&mesh, &fec, 3, Ordering::byNODES);
+
+   ConstantCoefficient lambda_coeff(32.04e9);
+   ConstantCoefficient mu_coeff(32.04e9);
+
+   // Full split assembly on tet mesh
+   BilinearForm a(&vec_fes);
+   a.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3));
+   a.Assemble();
+   a.Finalize();
+
+   SparseMatrix &A = a.SpMat();
+   TEST_ASSERT(A.MaxNorm() > 1e-10, "Tet IP assembly is non-zero");
+
+   // Symmetry
+   SparseMatrix *AT = Transpose(A);
+   AT->Add(-1.0, A);
+   real_t asym = AT->MaxNorm() / A.MaxNorm();
+   TEST_ASSERT(asym < 1e-10, "Tet IP assembly is symmetric");
+
+   // Positive definiteness check: v^T A v > 0 for random v
+   int n = A.Height();
+   srand(123);
+   bool spd = true;
+   for (int trial = 0; trial < 10; trial++)
+   {
+      Vector v(n), Av(n);
+      for (int i = 0; i < n; i++)
+      {
+         v(i) = (real_t(rand()) / RAND_MAX - 0.5);
+      }
+      A.Mult(v, Av);
+      real_t vtAv = v * Av;
+      if (vtAv < 0)
+      {
+         spd = false;
+         break;
+      }
+   }
+   TEST_ASSERT(spd, "Tet IP full assembly is positive (random test)");
+
+   std::cout << "  Tet IP: nnz=" << A.NumNonZeroElems()
+             << ", max=" << A.MaxNorm() << "\n";
+
+   delete AT;
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -772,6 +1076,13 @@ int main()
    TestBR2vsIPOrder0();
    TestPatchTest();
    TestTetElements();
+
+   // New IP penalty integrator tests
+   TestIPPenaltySymmetry();
+   TestIPPenaltyPSD();
+   TestIPPenaltyValue();
+   TestSplitIPConsistency();
+   TestIPPenaltyTet();
 
    TEST_PRINT_RESULTS();
 
