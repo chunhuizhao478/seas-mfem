@@ -260,11 +260,60 @@ Earthquake nucleated (V_nuc=0.01 is still seismic). During coseismic phase,
 traction blew up because {{σ·n̂}} alone is unstable without any regularization
 when DG jumps deviate from prescribed slip during fast slip.
 
-### v24 Tests with IP-style penalty (second attempt — PENDING)
+### v24 Test 1 with IP-style penalty: Also blows up
 
-The corrected fix uses `penalty_val * jump` instead of zero. Both sbatch files
-(`bp5_v24_test1_uniform_fix.sbatch`, `bp5_v24_test2_tandem_fix.sbatch`) should
-be resubmitted with the updated code.
+The IP-style correction (`4 * jump ≈ 0.004`) is negligible — the blowup values
+are **identical** to the correction=0 attempt. The problem is in `{{σ·n̂}}` itself.
+
+At t=2.02 yr (step 640), specific DOFs explode:
+```
+[Rank 228] TRACTION BLOWUP: DOF 25 tau_mag=1.00152e+09
+```
+25,581 blowup messages. Station data still shows reasonable values (V/Vp=0.97,
+tau_s=13.25 MPa) — the blowup is localized to specific faces.
+
+### v24 Test 2 with IP-style penalty: Same blowup
+
+Identical pattern. The friction solver reports degenerate cases:
+```
+[WARNING] SolveSlipRatePsi degenerate: tau=2.44e+09 V=tau/eta=528 m/s  (a=0.004, VW zone)
+```
+
+### Key Discovery: The blowup is at SPECIFIC pathological faces
+
+The BR2 correction in the old code was subtracting ~2.4 GPa to bring the net
+traction from ~2.4 GPa down to ~13 MPa. This implies a **37m displacement jump**
+at these faces (even when slip ≈ 0):
+
+```
+BR2_correction = 4 * 0.5 * μ/h * jump = 2.4 GPa
+→ jump = 2.4e9 / (2 × 32e9/1000) = 37 m
+```
+
+A 37m DG displacement jump on a fault face with near-zero slip is a **mesh/element
+quality issue**, not a traction formula problem. These faces are likely at:
+- Fault edges (intersection with z=0 surface, z=40km base, or y=±50km along-strike edges)
+- Coarse-fine mesh transitions near the fault surface
+- Corners of the fault surface
+
+The BR2 traction correction was a **band-aid** masking massive DG jumps at these
+pathological faces. Removing it exposes the underlying mesh issue. But the BR2
+correction also biased ALL other (healthy) faces, causing the VS lockup.
+
+### Next Step: Identify pathological faces by coordinates
+
+Added coordinate output to the TRACTION BLOWUP diagnostic:
+```cpp
+<< " at x=(" << face_center(0) << "," << face_center(1) << "," << face_center(2) << ")"
+<< " slip=(" << slip_bc(2*i) << "," << slip_bc(2*i+1) << ")"
+```
+
+Once we know the locations, the fix is to:
+1. Exclude edge/boundary fault faces from traction (they don't correspond to
+   physical fault nodes in the rate-state friction zone)
+2. OR cap traction at a physical maximum for edge faces
+3. OR improve mesh quality at fault edges
+4. Keep the IP-style correction for ALL other (interior) fault faces
 
 ---
 

@@ -2418,12 +2418,33 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                                     traction(2*i+1)*traction(2*i+1));
          if (tau_mag > 1e9 || std::isnan(tau_mag))
          {
+            // Get face coordinates for diagnostics
+            int face_idx = -1;
+            Vector face_center(3);
+            face_center = 0.0;
+            if (i < fault_interior_faces_.Size())
+            {
+               face_idx = fault_interior_faces_[i];
+               FaceElementTransformations *FTr =
+                  mesh_.GetInteriorFaceTransformations(face_idx);
+               if (FTr)
+               {
+                  const IntegrationPoint &ip =
+                     Geometries.GetCenter(FTr->GetGeometryType());
+                  FTr->Face->SetIntPoint(&ip);
+                  FTr->Face->Transform(ip, face_center);
+               }
+            }
             mfem::out << "[Rank " << rank << "] TRACTION BLOWUP: DOF " << i
                       << (i < fault_interior_faces_.Size() ?
                           " (interior)" : " (shared)")
                       << " tau_mag=" << tau_mag
                       << " tau=(" << traction(2*i) << ","
-                      << traction(2*i+1) << ")\n";
+                      << traction(2*i+1) << ")"
+                      << " at x=(" << face_center(0) << ","
+                      << face_center(1) << "," << face_center(2) << ")"
+                      << " slip=(" << slip_bc(2*i) << ","
+                      << slip_bc(2*i+1) << ")\n";
          }
       }
    }
