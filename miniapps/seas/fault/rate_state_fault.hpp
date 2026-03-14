@@ -320,9 +320,20 @@ public:
             real_t a = a_values(i);
             real_t eta = eta_values(i);
 
-            // SCEC Eq. 18: psi(0) = f0 + b*ln(V0/V_init) everywhere
-            // delta_tau is genuine overstress, not absorbed into state
-            real_t psi0 = bp5_params_.psi_init();
+            real_t psi0;
+            if (scec_psi_init_)
+            {
+               // SCEC Eq. 18: psi(0) = f0 + b*ln(V0/V_init) everywhere
+               // delta_tau is genuine overstress, not absorbed into state
+               psi0 = bp5_params_.psi_init();
+            }
+            else
+            {
+               // Tandem-style: absorb delta_tau into psi via InitialStatePsi
+               // System starts in equilibrium at V = V_init (no immediate earthquake)
+               psi0 = dr_friction_->InitialStatePsi(
+                  tau_abs, V_abs_init, sigma_n_bp5_, eta, a);
+            }
             state(i * StatePerNode + PsiIndex) = psi0;
 
             // Verify by solving vector equation
@@ -817,6 +828,11 @@ public:
    /// Whether psi-space integration is active.
    bool UsePsi() const { return use_psi_; }
 
+   /// Set psi initialization mode for BP5.
+   /// If true (default), use SCEC-correct psi = f0 + b*ln(V0/V_init).
+   /// If false, absorb delta_tau into psi via InitialStatePsi (matches Tandem).
+   void SetScecPsiInit(bool scec) { scec_psi_init_ = scec; }
+
    /// Enable traction monitoring at a few stations every N steps.
    /// @param interval Log every N calls to ComputeRHS (0 = disabled)
    /// @param station_indices Fault DOF indices to monitor (empty = auto-pick 3)
@@ -839,6 +855,7 @@ private:
    real_t V_max_;       ///< Maximum slip rate from last evaluation
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
+   bool scec_psi_init_ = true;  ///< If true, SCEC psi; if false, Tandem InitialStatePsi
    DieterichRuinaFriction *dr_friction_ = nullptr;  ///< Downcast for psi methods
 
    Vector slip_rate_;   ///< Cached slip rate [SlipComponents * NumNodes()]

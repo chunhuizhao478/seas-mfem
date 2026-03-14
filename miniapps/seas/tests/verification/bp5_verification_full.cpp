@@ -302,6 +302,7 @@ int main(int argc, char *argv[])
    bool dump_bdr_vtk = false;
    bool diag_vtk = false;
    std::string bc_mode_str = "far-field";
+   std::string psi_init_mode_str = "scec";  // "scec" or "tandem"
 
    for (int i = 1; i < argc; i++)
    {
@@ -360,6 +361,10 @@ int main(int argc, char *argv[])
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
       if (arg == "--diag-vtk") { diag_vtk = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
+      if (arg == "--psi-init-mode" && i + 1 < argc)
+      {
+         psi_init_mode_str = argv[++i];
+      }
    }
 
    // Parse DG method
@@ -580,6 +585,23 @@ int main(int argc, char *argv[])
    RateStateFaultOperator<ParMesh, 2> fault_op(
       &fault_geom, &friction, &aging, params, &mpi);
 
+   // Set psi initialization mode
+   if (psi_init_mode_str == "tandem" || psi_init_mode_str == "Tandem")
+   {
+      fault_op.SetScecPsiInit(false);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Psi init mode: Tandem (absorb delta_tau into psi)\n";
+      }
+   }
+   else
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Psi init mode: SCEC (genuine delta_tau overstress)\n";
+      }
+   }
+
    if (monitor_traction > 0)
    {
       fault_op.SetTractionMonitoring(monitor_traction);
@@ -691,6 +713,62 @@ int main(int argc, char *argv[])
       {
          std::cout << "  Dirichlet BC solve at t=1yr: |u| = "
                    << u_diag.Norml2() << "\n";
+      }
+
+      // === Test 2 diagnostic: boundary loading traction verification ===
+      // Compute traction at fault from boundary-only solve (zero slip)
+      {
+         Vector diag_traction(2 * N_loc);
+         domain.ComputeTraction(u_diag, zero_slip, diag_traction);
+
+         // Gather to root for analysis
+         Vector local_trac_dip(N_loc), local_trac_strike(N_loc);
+         for (int i = 0; i < N_loc; i++)
+         {
+            local_trac_dip(i) = diag_traction(2 * i);
+            local_trac_strike(i) = diag_traction(2 * i + 1);
+         }
+
+         Vector global_trac_dip, global_trac_strike;
+         fault_geom.GatherToRoot(local_trac_dip, global_trac_dip);
+         fault_geom.GatherToRoot(local_trac_strike, global_trac_strike);
+
+         if (mpi.IsRoot())
+         {
+            // Analytical estimate: tau = mu*Vp*1yr/(2*Lx)
+            real_t mu = params.mu();
+            real_t tau_analytical = mu * params.Vp * BP5Params::seconds_per_year
+                                    / (2.0 * 100e3);
+            std::cout << "\n  === Boundary Loading Traction Verification ===\n";
+            std::cout << "  Analytical estimate (2D antiplane): "
+                      << tau_analytical << " Pa = "
+                      << tau_analytical / 1e6 << " MPa\n";
+
+            int M = global_trac_strike.Size();
+            // Find station nearest to (x2=0, x3=10km) and (x2=0, x3=22km)
+            for (int target_z : {0, 10000, 22000})
+            {
+               int best = -1;
+               real_t best_dist = 1e30;
+               for (int j = 0; j < M; j++)
+               {
+                  real_t d = std::abs(global_x2(j)) +
+                             std::abs(global_x3(j) - target_z);
+                  if (d < best_dist) { best_dist = d; best = j; }
+               }
+               if (best >= 0)
+               {
+                  real_t ts = global_trac_strike(best);
+                  real_t td = global_trac_dip(best);
+                  std::cout << "  z=" << target_z/1000 << "km: trac_strike="
+                            << ts << " Pa (" << ts/1e6 << " MPa)"
+                            << "  trac_dip=" << td << " Pa (" << td/1e6 << " MPa)"
+                            << "  ratio_to_analytical=" << ts/tau_analytical
+                            << "\n";
+               }
+            }
+            std::cout << "\n";
+         }
       }
 
       // Create L2 p=0 fields for fault parameter visualization
