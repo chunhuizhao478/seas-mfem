@@ -175,7 +175,90 @@ potential first event at ~150 yr and verify recurrence.
 
 ---
 
-## 8. Files
+## 8. v23 Test 1 Results: VS Zone Locks Up Without Any Earthquake
+
+**This is the critical finding that changes the entire diagnosis.**
+
+### 8.1 Setup
+
+Completely uniform fault: `--V-nuc 1e-9 --delta-tau-factor 0`. Every node starts
+at V = Vp with SCEC psi. No nucleation zone, no perturbation. No earthquake occurs.
+Ran for 60 years (wall time limited).
+
+### 8.2 Deep VS Zone (z=22km) Locks Up Anyway
+
+| Time (yr) | V/Vp | τ_strike (MPa) | traction (MPa) | θ/θ_ss | slip (m) |
+|-----------|------|-----------------|----------------|--------|----------|
+| 0 | 1.000 | 13.273 | 0.000 | 1.0 | 0.000 |
+| 5 | 0.883 | 13.178 | -0.095 | 1.0 | 0.151 |
+| 10 | 0.681 | 13.023 | -0.250 | 1.2 | 0.276 |
+| 20 | 0.410 | 12.799 | -0.474 | 1.8 | 0.443 |
+| 40 | 0.217 | 12.603 | -0.670 | 3.1 | 0.627 |
+| 58 | **0.157** | 12.536 | **-0.737** | **4.4** | 0.731 |
+
+The VS zone drops to 16% of Vp in 58 years **with no earthquake**.
+
+### 8.3 The Mechanism
+
+1. At t=0, all nodes are in equilibrium at V = Vp
+2. The VW zone (z=4-16km) naturally locks up (V drops rapidly) — **this is correct**
+3. The VS zone (z=18-40km) continues creeping, accumulating slip
+4. Differential slip (VS: 0.73m, VW: 0.11m → diff: 0.62m) transfers stress
+   FROM the VS zone TO the VW zone
+5. The stress transfer rate (~0.013 MPa/yr) exceeds the boundary loading rate
+   (~0.0055 MPa/yr)
+6. Net stress at VS zone **decreases** → V drops → θ grows → locks up
+
+### 8.4 VW Zone Loads Correctly
+
+| Time (yr) | τ_strike (MPa) | traction (MPa) | Loading rate |
+|-----------|-----------------|----------------|--------------|
+| 0 | 19.490 | 0.000 | — |
+| 10 | 19.774 | +0.284 | — |
+| 30 | 20.173 | +0.683 | — |
+| 58 | 20.506 | **+1.016** | **0.0175 MPa/yr** |
+
+The VW zone IS loading (0.0175 MPa/yr), but the loading comes primarily from
+the VS zone unloading itself. This is boundary loading (0.0055 MPa/yr) plus
+stress transfer from VS creep (~0.012 MPa/yr). Once the VS zone locks up,
+only boundary loading remains (as seen in all previous runs: ~0.008 MPa/yr).
+
+### 8.5 Implications
+
+**The premature earthquake is NOT the root cause.** The VS zone locks up from
+the natural VW locking transient alone. The fundamental problem is:
+
+> **The boundary loading rate (0.0055 MPa/yr) is insufficient to compensate
+> for the stress transfer from VS creep to VW locking.**
+
+The VS zone's velocity-strengthening (a-b = 0.01) is too weak to resist
+the stress unloading. Only 0.58 MPa separates V=Vp from V=0.1×Vp in
+steady state, and the stress loss from differential slip exceeds this
+within ~50 years.
+
+### 8.6 Why This Must Work in Tandem
+
+In Tandem (which uses the same physics, geometry, and material parameters),
+the VS zone maintains V ≈ Vp during interseismic. The same VW locking
+transient occurs. The same stress transfer occurs. But Tandem's VS zone
+survives. This means either:
+
+1. **Tandem's DG formulation produces different traction at the VS zone** —
+   either less stress transfer or more boundary loading contribution
+2. **Tandem's initial conditions avoid the uniform-start transient** —
+   perhaps Tandem starts from a checkpoint or uses a spin-up period
+3. **There is a bug in MFEM's traction computation** that overestimates
+   the stress unloading at the VS zone during differential slip
+
+**Recommended next step**: Run the same uniform test in Tandem and compare
+the VS zone evolution. If Tandem's VS zone also locks up from uniform
+initial conditions, the issue is the initial conditions, not the code.
+If Tandem's VS zone survives, there is a traction computation difference
+that needs to be found.
+
+---
+
+## 9. Files
 
 | File | Description |
 |------|-------------|

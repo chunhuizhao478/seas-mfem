@@ -2170,85 +2170,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
       else  // BR2
       {
-         if (!mass_inv_computed_) { PrecomputeMassInverse(); }
-
-         Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
-         real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
-                                  ? real_t(dim + 1) : real_t(2 * dim);
-
-         const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
-         const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
-
-         // Compute the jump to penalize: [[u]] - sign * δ
-         real_t jump[3];
-         for (int c = 0; c < dim; c++)
-         {
-            jump[c] = u_jump[c] - sign * delta_u[c];
-         }
-
-         // BR2 lifting at face centroid
-         // Approximate the face integral: ∫_F φ_m * g_u * n_s dS
-         //   ≈ w_centroid * φ_m(x_c) * g_u * nor_s(x_c)
-         // where nor = |J_F| * n̂ (unnormalized, from CalcOrtho)
-         // and w_centroid is the 1-point quadrature weight for the reference face.
-         // This matches the bilinear form integrator which uses w_q * nor(s).
-         const IntegrationRule &ir_face =
-            IntRules.Get(FTr->GetGeometryType(), 0);
-         real_t w_centroid = ir_face.IntPoint(0).weight;
-
-         DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
-         face_int1 = 0.0;
-         face_int2 = 0.0;
-         for (int u = 0; u < dim; u++)
-         {
-            for (int s = 0; s < dim; s++)
-            {
-               for (int m = 0; m < ndof1; m++)
-               {
-                  face_int1(u * dim + s, m) =
-                     w_centroid * shape1(m) * jump[u] * nor(s);
-               }
-               for (int m = 0; m < ndof2; m++)
-               {
-                  face_int2(u * dim + s, m) =
-                     w_centroid * shape2(m) * jump[u] * nor(s);
-               }
-            }
-         }
-
-         // f_lifted = 0.5 * face_int * Minv^T
-         DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
-         MultABt(face_int1, Minv1, f_lifted1);
-         f_lifted1 *= 0.5;
-         MultABt(face_int2, Minv2, f_lifted2);
-         f_lifted2 *= 0.5;
-
-         // Evaluate f_lifted_q at centroid with elasticity tensor coupling
-         // Use unit normal (basis.normal) for T = C : ε · n̂ (point evaluation of traction)
-         for (int i = 0; i < dim; i++)
-         {
-            real_t sum = 0.0;
-            for (int u = 0; u < dim; u++)
-            {
-               for (int s = 0; s < dim; s++)
-               {
-                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
-                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
-                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
-                  real_t eval1 = 0.0, eval2 = 0.0;
-                  for (int m = 0; m < ndof1; m++)
-                  {
-                     eval1 += shape1(m) * f_lifted1(u * dim + s, m);
-                  }
-                  for (int m = 0; m < ndof2; m++)
-                  {
-                     eval2 += shape2(m) * f_lifted2(u * dim + s, m);
-                  }
-                  sum += tn * (eval1 + eval2);
-               }
-            }
-            correction[i] = br2_penalty * 0.5 * sum;
-         }
+         // Traction = average stress only, no penalty correction.
+         // Per the benchmark document (Algorithm line 15):
+         //   τ_qs = {{C : ∇u}} · n̂
+         // The BR2 stabilization ensures [[u]] ≈ δ through the solve.
+         // Adding a penalty correction here amplifies the DG residual
+         // by μ/h ≈ 3.2e7, introducing a spurious traction bias.
+         // Tandem also uses no penalty correction for BR2 traction
+         // (Elasticity.h: penalty() returns NumFacets=4 dimensionless,
+         // making the IP-style correction negligible).
+         // correction remains {0, 0, 0}.
       }
 
       // 6. Apply correction: T -= penalty * ([[u]] - δ)
@@ -2435,67 +2366,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
          else  // BR2
          {
-            if (!mass_inv_computed_) { PrecomputeMassInverse(); }
-
-            Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
-            real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
-                                     ? real_t(dim + 1) : real_t(2 * dim);
-
-            const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
-            const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
-
-            real_t jump[3];
-            for (int c = 0; c < dim; c++)
-               jump[c] = u_jump[c] - sign * delta_u[c];
-
-            // Face integral approximation (same as interior faces)
-            const IntegrationRule &ir_face =
-               IntRules.Get(FTr->GetGeometryType(), 0);
-            real_t w_centroid = ir_face.IntPoint(0).weight;
-
-            DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
-            face_int1 = 0.0;
-            face_int2 = 0.0;
-            for (int u = 0; u < dim; u++)
-            {
-               for (int s = 0; s < dim; s++)
-               {
-                  for (int m = 0; m < ndof1; m++)
-                     face_int1(u * dim + s, m) =
-                        w_centroid * shape1(m) * jump[u] * nor(s);
-                  for (int m = 0; m < ndof2; m++)
-                     face_int2(u * dim + s, m) =
-                        w_centroid * shape2(m) * jump[u] * nor(s);
-               }
-            }
-
-            DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
-            MultABt(face_int1, Minv1, f_lifted1);
-            f_lifted1 *= 0.5;
-            MultABt(face_int2, Minv2, f_lifted2);
-            f_lifted2 *= 0.5;
-
-            // Use unit normal (basis.normal) for T = C : ε · n̂ (point evaluation of traction)
-            for (int ci = 0; ci < dim; ci++)
-            {
-               real_t sum = 0.0;
-               for (int u = 0; u < dim; u++)
-               {
-                  for (int s = 0; s < dim; s++)
-                  {
-                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
-                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
-                                     + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
-                     real_t eval1 = 0.0, eval2 = 0.0;
-                     for (int m = 0; m < ndof1; m++)
-                        eval1 += shape1(m) * f_lifted1(u * dim + s, m);
-                     for (int m = 0; m < ndof2; m++)
-                        eval2 += shape2(m) * f_lifted2(u * dim + s, m);
-                     sum += tn * (eval1 + eval2);
-                  }
-               }
-               correction[ci] = br2_penalty * 0.5 * sum;
-            }
+            // Traction = average stress only, no penalty correction.
+            // (Same fix as interior faces — see comment above.)
+            // correction remains {0, 0, 0}.
          }
 
          for (int c = 0; c < dim; c++)
