@@ -362,6 +362,27 @@ private:
          std::set<int> vset(face_verts.begin(), face_verts.end());
          if (fault_bdr_vertex_sets.count(vset) > 0)
          {
+            // Post-filter: exclude faces at the fault boundary edges.
+            // In Tandem, these faces are assigned to Natural BC (top/bottom
+            // surfaces), not Fault BC. We approximate this by checking if
+            // the face centroid is within one element size of the fault
+            // rectangle boundary (z=0, z=Wf, y=±lf/2).
+            const IntegrationPoint &cip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&cip);
+            Vector fc(3);
+            FTr->Face->Transform(cip, fc);
+
+            // Derive margin from adjacent element size (cube root of volume)
+            real_t vol = FTr->Elem1->Weight();
+            real_t h_elem = std::cbrt(vol);
+
+            bool at_boundary = (fc(2) < h_elem)             // z ≈ 0
+                            || (fc(2) > Wf_ - h_elem)       // z ≈ Wf
+                            || (std::abs(fc(1)) > lf_ / 2.0 - h_elem);  // y ≈ ±lf/2
+
+            if (at_boundary) { continue; }
+
             fault_tagged_faces_.Append(f);
 
             int e1 = FTr->Elem1No;
@@ -387,8 +408,26 @@ private:
             std::set<int> vset(face_verts.begin(), face_verts.end());
             if (fault_bdr_vertex_sets.count(vset) > 0)
             {
-               // Mark as tagged — store the shared face index
-               // (use negative key to distinguish from interior faces)
+               // Post-filter: exclude boundary edge faces (same as interior)
+               FaceElementTransformations *FTr =
+                  mesh_.GetSharedFaceTransformations(sf);
+               if (FTr == nullptr) { continue; }
+
+               const IntegrationPoint &cip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&cip);
+               Vector fc(3);
+               FTr->Face->Transform(cip, fc);
+
+               real_t vol = FTr->Elem1->Weight();
+               real_t h_elem = std::cbrt(vol);
+
+               bool at_boundary = (fc(2) < h_elem)
+                               || (fc(2) > Wf_ - h_elem)
+                               || (std::abs(fc(1)) > lf_ / 2.0 - h_elem);
+
+               if (at_boundary) { continue; }
+
                fault_shared_tagged_.insert(sf);
             }
          }
