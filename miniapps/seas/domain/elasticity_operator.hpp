@@ -31,6 +31,26 @@ namespace seas
 /// Linear solver type for the elasticity domain operator
 enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, SUPERLU, STRUMPACK };
 
+/// Boundary condition mode for the elasticity domain operator
+///
+/// Controls which boundary faces receive Dirichlet plate-rate loading
+/// vs Natural (zero-traction) BC.
+///
+/// Tandem's BP5 (bp5.geo): top/bottom are Natural, far-field vertical
+/// faces are Dirichlet. The physical surface numbers in Tandem's mesh
+/// ARE the BC enum values (Natural=1, Fault=3, Dirichlet=5).
+enum class BCMode
+{
+   /// Far-field: Dirichlet on attrs 1-4 (x=+-Lx, y=+-Ly),
+   /// Natural on attrs 5-6 (z=0 free surface, z=Lz deep boundary)
+   FarField,
+   /// Antiplane-style: Dirichlet on attrs 1-2 (x=+-Lx) only,
+   /// Natural on attrs 3-6
+   XOnly,
+   /// Legacy: Dirichlet on all attrs 1-6 (previous wrong implementation)
+   AllDirichlet
+};
+
 /// @brief DG Elasticity domain operator for 3D vector elasticity (BP5)
 ///
 /// Solves the 3D linear elasticity problem:
@@ -45,8 +65,10 @@ enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, SUPERLU, STRUM
 ///
 /// - Fault at x1=0 is an interior interface
 /// - Slip imposed as jump [[u]] on fault interior faces
-/// - All-boundary Dirichlet loading: u₂ = sgn(x₁)·Vp·t/2 (matching Tandem)
-/// - No free surface — consistent with Tandem's boundary_linear=true
+/// - Boundary loading controlled by BCMode:
+///   - Tandem (default): Dirichlet on x=+-Lx, y=+-Ly; Natural on z=0, z=Lz
+///   - XOnly: Dirichlet on x=+-Lx only; Natural on all other faces
+///   - AllDirichlet: Dirichlet on all faces (legacy, incorrect)
 ///
 /// Supports both BR2 (default, matching Tandem) and IP DG methods.
 ///
@@ -72,15 +94,18 @@ public:
    /// @param lf Fault length [m] (along-strike extent)
    /// @param method DG method (BR2 default, IP alternative)
    /// @param solver_type Linear solver: CG_AMG, MUMPS, or GMRES_BlockILU
+   /// @param bc_mode Boundary condition mode (FarField default)
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
                              DGMethod method = DGMethod::BR2,
-                             SolverType solver_type = SolverType::MUMPS_BLR)
+                             SolverType solver_type = SolverType::MUMPS_BLR,
+                             BCMode bc_mode = BCMode::FarField)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), solver_type_(solver_type),
+        bc_mode_(bc_mode),
         check_residual_(false),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
@@ -148,6 +173,7 @@ public:
    real_t GetFaultDepthLimit() const { return Wf_; }
    real_t GetFaultLength() const { return lf_; }
    real_t GetLambda() const { return lambda_val_; }
+   BCMode GetBCMode() const { return bc_mode_; }
 
    /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
    void SetCheckResidual(bool check) { check_residual_ = check; }
@@ -159,6 +185,7 @@ private:
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
    SolverType solver_type_;
+   BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
    real_t epsilon_;  // SIPG sign = -1
 
@@ -221,21 +248,52 @@ private:
 
    void SetupBoundaryMarkers()
    {
-      // Identify Dirichlet boundaries
-      // BP5: All-boundary Dirichlet loading (matching Tandem bp5.lua)
-      //   All attrs 1-6: u = (0, sgn(x)·Vp·t/2, 0)
-      //   No free surface — consistent with Tandem's boundary_linear=true
+      // Identify Dirichlet boundaries based on BCMode.
+      //
+      // MFEM boundary attributes (from bp5.geo):
+      //   1 = x = -Lx  (fault-normal, negative side)
+      //   2 = x = +Lx  (fault-normal, positive side)
+      //   3 = y = +Ly  (along-strike far-field)
+      //   4 = y = -Ly  (along-strike far-field)
+      //   5 = z = 0    (Earth's surface / free surface)
+      //   6 = z = Lz   (deep boundary)
+      //
+      // Tandem's BP5 (bp5.geo):
+      //   Physical Surface(1) = {bottom(),top()} → Natural (zero traction)
+      //   Physical Surface(5) = {diri()}         → Dirichlet (plate loading)
+      //   i.e., top (z=0) and bottom (z=-Lz) are Natural, far-field vertical
+      //   faces are Dirichlet. "boundary_linear=true" is just an optimization
+      //   flag, NOT a BC-type selector.
+
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
 
-      for (int be = 0; be < mesh_.GetNBE(); be++)
+      if (bc_mode_ == BCMode::AllDirichlet)
       {
-         int attr = mesh_.GetBdrAttribute(be);
-         if (attr >= 1 && attr <= num_bdr)
+         // Legacy: all attrs Dirichlet (previous wrong implementation)
+         for (int i = 0; i < num_bdr; i++)
          {
-            dirichlet_bdr_marker_[attr - 1] = 1;
+            dirichlet_bdr_marker_[i] = 1;
          }
+      }
+      else if (bc_mode_ == BCMode::FarField)
+      {
+         // Far-field: attrs 1-4 Dirichlet, attrs 5-6 Natural
+         for (int i = 0; i < std::min(num_bdr, 4); i++)
+         {
+            dirichlet_bdr_marker_[i] = 1;
+         }
+         // attrs 5,6 remain 0 → Natural (zero traction)
+      }
+      else if (bc_mode_ == BCMode::XOnly)
+      {
+         // Antiplane-style: only attrs 1-2 (x = +-Lx) Dirichlet
+         for (int i = 0; i < std::min(num_bdr, 2); i++)
+         {
+            dirichlet_bdr_marker_[i] = 1;
+         }
+         // attrs 3-6 remain 0 → Natural (zero traction)
       }
    }
 
@@ -1411,7 +1469,7 @@ private:
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
       // BP5 Dirichlet loading: u = (0, sgn(x)·Vp·t/2, 0)
-      // Applied on ALL boundaries (Tandem-style, boundary_linear=true).
+      // Applied on Dirichlet-marked boundaries only (controlled by BCMode).
       // sgn(x) determined from face centroid x-coordinate.
       //
       // DG Dirichlet BC contribution:

@@ -301,6 +301,7 @@ int main(int argc, char *argv[])
    double delta_tau_factor_override = -1.0;
    bool dump_bdr_vtk = false;
    bool diag_vtk = false;
+   std::string bc_mode_str = "far-field";
 
    for (int i = 1; i < argc; i++)
    {
@@ -358,6 +359,7 @@ int main(int argc, char *argv[])
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
       if (arg == "--diag-vtk") { diag_vtk = true; }
+      if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
    }
 
    // Parse DG method
@@ -396,6 +398,24 @@ int main(int argc, char *argv[])
    else if (solver_str == "cg" || solver_str == "CG")
    {
       solver_type = SolverType::CG_AMG;
+   }
+
+   // Process --bc-mode flag
+   BCMode bc_mode = BCMode::FarField;
+   if (bc_mode_str == "far-field" || bc_mode_str == "farfield" ||
+       bc_mode_str == "FarField")
+   {
+      bc_mode = BCMode::FarField;
+   }
+   else if (bc_mode_str == "x-only" || bc_mode_str == "xonly" ||
+            bc_mode_str == "XOnly")
+   {
+      bc_mode = BCMode::XOnly;
+   }
+   else if (bc_mode_str == "all-dirichlet" || bc_mode_str == "AllDirichlet" ||
+            bc_mode_str == "all")
+   {
+      bc_mode = BCMode::AllDirichlet;
    }
 
    // Default stations
@@ -490,6 +510,10 @@ int main(int argc, char *argv[])
       else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
       std::cout << "  Solver: " << solver_desc << "\n";
+      std::string bc_desc = "FarField (attrs 1-4 Dirichlet, 5-6 Natural)";
+      if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
+      else if (bc_mode == BCMode::AllDirichlet) bc_desc = "AllDirichlet (all attrs Dirichlet, legacy)";
+      std::cout << "  BC mode: " << bc_desc << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
@@ -523,7 +547,7 @@ int main(int argc, char *argv[])
    int order = 1;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, dg_method, solver_type);
+      params.Vp, params.Wf, params.lf, dg_method, solver_type, bc_mode);
 
    if (check_residual) { domain.SetCheckResidual(true); }
 
@@ -940,6 +964,26 @@ int main(int argc, char *argv[])
       bool accepted = ode_solver.Step(seas_op, state, t, dt);
       if (!accepted) { continue; }
       step++;
+
+      // Post-step psi clamping: prevent unphysical state variable values.
+      // The explicit RK45 can overshoot psi during post-earthquake healing
+      // (stiff exp((f0-psi)/b) term). Clamp psi to a physically reasonable
+      // range to prevent the fault from getting trapped at V ≈ 0.
+      {
+         const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+         const int psi_idx = 2;
+         // psi_max: steady-state at V = 1e-20 m/s with generous margin
+         // psi_ss(1e-20) = f0 + b*ln(V0/1e-20) = 0.6 + 0.03*32.2 ≈ 1.57
+         const real_t psi_max = 3.0;   // well above any physical steady state
+         const real_t psi_min = -5.0;  // generous lower bound
+         int n_nodes = state.Size() / spn;
+         for (int i = 0; i < n_nodes; i++)
+         {
+            real_t &psi = state(i * spn + psi_idx);
+            if (psi > psi_max) { psi = psi_max; }
+            else if (psi < psi_min) { psi = psi_min; }
+         }
+      }
 
       real_t V_max = seas_op.GetMaxSlipRate();
 

@@ -355,8 +355,18 @@ public:
       real_t Fb = residual(V_hi);
       if (Fb >= 0.0)
       {
-         // Friction is negligible (collapsed state variable).
-         // Return V = tau/eta; the RK45 error estimator will reject this step.
+         // Friction is negligible (collapsed state variable, psi << 0).
+         // Return V = tau/eta. This is physically correct when friction
+         // vanishes, but may indicate numerical issues if it occurs during
+         // interseismic (psi should be ~0.8, not deeply negative).
+         static int degen_count = 0;
+         if (++degen_count <= 5)
+         {
+            std::cerr << "[WARNING] SolveSlipRatePsi degenerate case #"
+                      << degen_count << ": psi=" << psi
+                      << " a=" << a << " tau=" << tau
+                      << " V=tau/eta=" << V_hi << "\n";
+         }
          if (iterations) { *iterations = 0; }
          return V_hi;
       }

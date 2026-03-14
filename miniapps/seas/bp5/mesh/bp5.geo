@@ -14,8 +14,11 @@
 //   2 = x = +Lx  (Dirichlet: u_y = +Vp*t/2)
 //   3 = y = +Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
 //   4 = y = -Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
-//   5 = z = 0    (Dirichlet: u_y = sgn(x)*Vp*t/2, matching Tandem)
-//   6 = z = Lz   (Dirichlet: u_y = sgn(x)*Vp*t/2)
+//   5 = z = 0    (Natural: zero traction, free surface)
+//   6 = z = Lz   (Natural: zero traction, deep boundary)
+//
+// Tandem BC mapping: attrs 1-4 → Dirichlet, attrs 5-6 → Natural
+// (Tandem Physical Surface 1 = {top,bottom} → Natural; Surface 5 = far-field → Dirichlet)
 //
 // Usage:
 //   gmsh -3 bp5.geo -o bp5_coarse.msh               (default: coarse)
@@ -131,12 +134,12 @@ Background Field = 3;
 
 // --- Physical groups ---
 // Boundary surfaces (MFEM boundary attributes 1-6, 100)
-Physical Surface("xm",   1) = {xm()};           // x = -Lx  (far-field, natural BC)
-Physical Surface("xp",   2) = {xp()};           // x = +Lx  (far-field, natural BC)
-Physical Surface("yp",   3) = {yp()};           // y = +Ly  (Dirichlet: +Vp/2)
-Physical Surface("ym",   4) = {ym()};           // y = -Ly  (Dirichlet: -Vp/2)
-Physical Surface("ztop", 5) = {ztop()};         // z = 0    (free surface)
-Physical Surface("zbot", 6) = {zbot()};         // z = Lz   (deep boundary)
+Physical Surface("xm",   1) = {xm()};           // x = -Lx  (Dirichlet: u_y = -Vp*t/2)
+Physical Surface("xp",   2) = {xp()};           // x = +Lx  (Dirichlet: u_y = +Vp*t/2)
+Physical Surface("yp",   3) = {yp()};           // y = +Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
+Physical Surface("ym",   4) = {ym()};           // y = -Ly  (Dirichlet: u_y = sgn(x)*Vp*t/2)
+Physical Surface("ztop", 5) = {ztop()};         // z = 0    (Natural: free surface)
+Physical Surface("zbot", 6) = {zbot()};         // z = Lz   (Natural: deep boundary)
 Physical Surface("fault", 100) = {fault_surfs()};  // fault plane (internal)
 // Volume (tag 10 — distinct from boundary tags to avoid VTK ambiguity)
 Physical Volume("domain", 10) = {Volume{:}};

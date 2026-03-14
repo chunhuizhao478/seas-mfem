@@ -19,6 +19,9 @@ Before implementing any feature, ALWAYS check:
 
 ## Key Implementation Notes
 
-- Boundary conditions: See `tandem_boundary_condition_analysis.md` for correct BC approach
-- Plate loading is applied on **ALL boundaries** (attrs 1-6): u = (0, sgn(x)·Vp·t/2, 0), matching Tandem's `boundary_linear=true`
-- No free surface — consistent with Tandem bp5.lua (H10 fix)
+- Boundary conditions controlled by `BCMode` enum (default: `Tandem`)
+  - **FarField** (default): Dirichlet on attrs 1-4 (x=+-Lx, y=+-Ly), Natural on attrs 5-6 (z=0, z=Lz)
+  - **XOnly**: Dirichlet on attrs 1-2 (x=+-Lx) only
+  - **AllDirichlet**: Legacy (wrong), Dirichlet on all attrs
+- Tandem's `boundary_linear=true` is an optimization flag (boundary = f(x)*t), NOT a BC-type selector
+- Tandem's BP5 geo: Physical Surface(1) = {top,bottom} → Natural; Surface(5) = far-field → Dirichlet (H25 fix)
