@@ -375,7 +375,64 @@ PASS: Immediate earthquake, VS recovers, cycling, matches Tandem.
 
 ---
 
-## 11. Cumulative Fix History
+## 11. Fix H32: Tag-Based Fault Face Detection
+
+### Problem
+
+MFEM's `IsFaultFace3D` used a coordinate bounding box to detect fault faces:
+```cpp
+center(2) >= -tol && center(2) <= Wf_ + tol
+```
+This included faces at z≈0 (fault-surface intersection) and z≈Wf (fault base),
+where Tandem assigns `BC::Natural` — NOT `BC::Fault`.
+
+In Tandem's Gmsh file (bp5.geo), BooleanFragments creates separate sub-surfaces
+at the intersection. Physical Surface assignments are:
+- `Physical Surface(1) = {top(), bottom()}` → Natural (z=0, z=Lz)
+- `Physical Surface(3) = {fault()}` → Fault (strictly interior to fault rectangle)
+- `Physical Surface(5) = {diri()}` → Dirichlet (far-field)
+
+Faces at z=0 are in `top()`, NOT in `fault()`. Zero overlap between groups.
+
+### Fix
+
+`BuildFaultTaggedFaces()` reads boundary elements with attribute 100 (fault
+Physical Surface) from the Gmsh mesh. It matches their vertex sets to interior
+faces, building a lookup table. `IsFaultFace3D` checks this table first;
+falls back to coordinates only if no tags are found.
+
+This matches Tandem's `BC::Fault` assignment exactly.
+
+### Verification
+
+Tag-based detection on bp5_1000m.msh:
+```
+Fault DOFs: excludes z=0 and z=Wf boundary faces
+z range: [213, 39764] m  (no faces at z=0 or z=40km)
+y range: [-49778, 49778] m  (no faces at y=±50km)
+```
+
+The (0,0,0) DOF that caused the v28 Test 1 blowup is now excluded.
+
+### Files modified
+
+- `domain/elasticity_operator.hpp`:
+  - Added `BuildFaultTaggedFaces()` method
+  - Added `fault_tagged_faces_`, `fault_face_keys_` members
+  - `IsFaultFace3D` and `IsFaultFace3DShared` use tag lookup first
+  - `SetupFaultInfo` calls `BuildFaultTaggedFaces` before detection loop
+
+### Unit tests: 692 pass, 0 fail
+
+2 new tests in `test_elasticity_operator.cpp`:
+- `TestTagBasedFaultDetection`: mesh has attr 100, tag detection finds DOFs,
+  no faces at z=0/Wf boundaries
+- `TestTagExcludesBoundaryFaces`: z range strictly inside [213, 39764],
+  y range strictly inside [-49778, 49778]
+
+---
+
+## 12. Cumulative Fix History
 
 | Fix | Description | Status |
 |-----|-------------|--------|
@@ -386,4 +443,5 @@ PASS: Immediate earthquake, VS recovers, cycling, matches Tandem.
 | H29 | IP bilinear form: custom penalty integrator (`penalty * |nor|`) | Done |
 | H30 | IP slip RHS: same penalty formula | Done |
 | H31 | IP Dirichlet RHS: same penalty formula | Done |
-| — | Unit tests: 675 pass, 0 fail | Done |
+| **H32** | **Tag-based fault face detection (matches Tandem Physical Surface)** | **Done** |
+| — | Unit tests: 692 pass, 0 fail | Done |

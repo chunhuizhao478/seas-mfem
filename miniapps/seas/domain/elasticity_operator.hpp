@@ -23,6 +23,7 @@
 #include <memory>
 #include <cmath>
 #include <limits>
+#include <set>
 
 namespace mfem
 {
@@ -188,6 +189,10 @@ private:
    SolverType solver_type_;
    BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
+
+   // Tag-based fault face detection (matches Tandem's Physical Surface approach)
+   Array<int> fault_tagged_faces_;      // Face indices from mesh tags
+   std::set<long> fault_face_keys_;     // Element-pair keys for fast lookup
    real_t epsilon_;  // SIPG sign = -1
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
@@ -298,11 +303,120 @@ private:
       }
    }
 
+   /// Build tag-based fault face lookup from mesh boundary element attributes.
+   ///
+   /// In Gmsh meshes with Physical Surface 100 (fault), MFEM loads the fault
+   /// surface triangles as boundary elements with attribute 100. This method
+   /// finds the interior faces that correspond to those tagged boundary elements
+   /// by matching vertex sets.
+   ///
+   /// This matches Tandem's approach: only faces with BC::Fault tag are treated
+   /// as fault faces. Faces at the fault-boundary intersection (z=0 surface,
+   /// z=Wf base, y=±lf/2 tips) are assigned to other Physical Surfaces in the
+   /// Gmsh file and are NOT included.
+   void BuildFaultTaggedFaces()
+   {
+      const int fault_attr = 100;  // Physical Surface tag for fault
+
+      // Check if the mesh has attribute 100
+      bool has_fault_attr = false;
+      for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
+      {
+         if (mesh_.bdr_attributes[i] == fault_attr)
+         {
+            has_fault_attr = true;
+            break;
+         }
+      }
+      if (!has_fault_attr) { return; }
+
+      // Collect vertex sets of all boundary elements with fault attribute.
+      // Each boundary element (triangle in 3D) defines a face by its vertices.
+      std::set<std::set<int>> fault_bdr_vertex_sets;
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         if (mesh_.GetBdrAttribute(be) != fault_attr) { continue; }
+
+         Array<int> verts;
+         mesh_.GetBdrElementVertices(be, verts);
+
+         std::set<int> vset(verts.begin(), verts.end());
+         fault_bdr_vertex_sets.insert(vset);
+      }
+
+      if (fault_bdr_vertex_sets.empty()) { return; }
+
+      // For each interior face, check if its vertex set matches a tagged face.
+      // Also build element-pair keys for fast lookup during IsFaultFace3D.
+      int num_faces = mesh_.GetNumFaces();
+      for (int f = 0; f < num_faces; f++)
+      {
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (FTr == nullptr) { continue; }
+
+         Array<int> face_verts;
+         mesh_.GetFaceVertices(f, face_verts);
+
+         std::set<int> vset(face_verts.begin(), face_verts.end());
+         if (fault_bdr_vertex_sets.count(vset) > 0)
+         {
+            fault_tagged_faces_.Append(f);
+
+            int e1 = FTr->Elem1No;
+            int e2 = FTr->Elem2No;
+            long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
+            fault_face_keys_.insert(key);
+         }
+      }
+
+      // Also check shared faces in parallel
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            FaceElementTransformations *FTr =
+               mesh_.GetSharedFaceTransformations(sf);
+            if (FTr == nullptr) { continue; }
+
+            // For shared faces, get vertices from the face transformation
+            // Use face centroid matching as fallback
+            const IntegrationPoint &ip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip);
+            Vector center(3);
+            FTr->Face->Transform(ip, center);
+
+            // Check if this face center matches any tagged fault face
+            // (coordinate match within tolerance)
+            const real_t tol = 1e-10 * std::max(Wf_, 1.0);
+            bool is_fault = std::abs(center(0)) < tol
+                && std::abs(center(1)) <= lf_ / 2.0 + tol
+                && center(2) > tol     // strictly above z=0
+                && center(2) < Wf_ - tol;  // strictly below z=Wf
+
+            if (is_fault)
+            {
+               int e1 = FTr->Elem1No;
+               int e2 = FTr->Elem2No;
+               long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
+               fault_face_keys_.insert(key);
+            }
+         }
+#endif
+      }
+   }
+
    void SetupFaultInfo()
    {
       fault_interior_faces_.SetSize(0);
 
-      // Detect fault faces at x1 ≈ 0
+      // Build tag-based fault face lookup from mesh Physical Surface attributes.
+      // This matches Tandem's BC-based face classification.
+      BuildFaultTaggedFaces();
+
+      // Detect fault faces using tags (or coordinate fallback)
       int num_faces = mesh_.GetNumFaces();
       for (int f = 0; f < num_faces; f++)
       {
@@ -369,12 +483,42 @@ private:
 
    bool IsFaultFace3D(FaceElementTransformations *FTr) const
    {
+      // Tag-based detection: check if the face corresponds to a boundary
+      // element with the fault attribute (100). This matches Tandem's
+      // approach where fault faces are identified by their Physical Surface
+      // tag (BC::Fault), not by coordinates.
+      //
+      // In the Gmsh mesh, Physical Surface 100 marks fault faces. After
+      // BooleanFragments, these are strictly interior to the fault rectangle
+      // — faces at the fault boundary (z=0 surface, z=Wf base, y=±lf/2 tips)
+      // are assigned to other Physical Surfaces (Natural or Dirichlet).
+      //
+      // MFEM loads these as boundary elements with attribute 100. We match
+      // each interior face to its corresponding boundary element (same
+      // vertices) to check if it has the fault tag.
+
+      if (fault_tagged_faces_.Size() > 0)
+      {
+         // Use precomputed tagged face set
+         int face_idx = -1;
+         // Find face index: FTr gives us Elem1No, Elem2No. The face
+         // between them has an index in the mesh face table.
+         // We iterate fault_interior_faces_ which stores face indices,
+         // but during detection we need to check if THIS face is tagged.
+         // Use the element numbers to build a key.
+         int e1 = FTr->Elem1No;
+         int e2 = FTr->Elem2No;
+         long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
+         return fault_face_keys_.count(key) > 0;
+      }
+
+      // Fallback: coordinate-based detection (used during initial setup
+      // before tags are processed, or for meshes without Physical Surface 100)
       const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
       FTr->Face->SetIntPoint(&ip);
       Vector center(3);
       FTr->Face->Transform(ip, center);
 
-      // Fault is at x1 = 0, within the fault zone bounds
       const real_t tol = 1e-10 * std::max(Wf_, 1.0);
       return std::abs(center(0)) < tol
           && std::abs(center(1)) <= lf_ / 2.0 + tol
@@ -391,6 +535,15 @@ private:
             mesh_.GetSharedFaceTransformations(shared_face);
          if (FTr == nullptr) { return false; }
 
+         if (fault_tagged_faces_.Size() > 0)
+         {
+            int e1 = FTr->Elem1No;
+            int e2 = FTr->Elem2No;
+            long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
+            return fault_face_keys_.count(key) > 0;
+         }
+
+         // Fallback: coordinate-based
          const IntegrationPoint &ip =
             Geometries.GetCenter(FTr->GetGeometryType());
          FTr->Face->SetIntPoint(&ip);

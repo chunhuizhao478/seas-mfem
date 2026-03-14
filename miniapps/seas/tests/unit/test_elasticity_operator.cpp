@@ -1131,6 +1131,146 @@ void TestBR2SlipSignConvention()
 // =============================================================================
 // Main
 // =============================================================================
+// =============================================================================
+// Test: Tag-based fault detection on Gmsh mesh with Physical Surface 100
+// =============================================================================
+void TestTagBasedFaultDetection()
+{
+   std::cout << "\n--- Test: Tag-Based Fault Detection ---\n";
+
+   // Load the actual BP5 mesh which has Physical Surface 100 (fault)
+   const std::string mesh_file = "bp5/mesh/bp5_1000m.msh";
+   std::ifstream f(mesh_file);
+   if (!f.good())
+   {
+      std::cout << "  (Skipped: " << mesh_file << " not found)\n";
+      return;
+   }
+   f.close();
+
+   Mesh mesh(mesh_file.c_str(), 1, 1);
+
+   // Scale to meters (mesh is in km)
+   for (int i = 0; i < mesh.GetNV(); i++)
+   {
+      real_t *v = mesh.GetVertex(i);
+      v[0] *= 1000.0;
+      v[1] *= 1000.0;
+      v[2] *= 1000.0;
+   }
+   mesh.SetAttributes();
+
+   // Check that the mesh has attribute 100
+   bool has_100 = false;
+   for (int i = 0; i < mesh.bdr_attributes.Size(); i++)
+   {
+      if (mesh.bdr_attributes[i] == 100) { has_100 = true; break; }
+   }
+   TEST_ASSERT(has_100, "Gmsh mesh has boundary attribute 100 (fault)");
+
+   // Count boundary elements with attr 100
+   int bdr_100_count = 0;
+   for (int be = 0; be < mesh.GetNBE(); be++)
+   {
+      if (mesh.GetBdrAttribute(be) == 100) { bdr_100_count++; }
+   }
+   TEST_ASSERT(bdr_100_count > 0, "Mesh has fault boundary elements (attr 100)");
+   std::cout << "  Fault boundary elements: " << bdr_100_count << "\n";
+
+   // Build the operator (this calls SetupFaultInfo → BuildFaultTaggedFaces)
+   real_t lambda = 32.04e9, mu = 32.04e9;
+   real_t Vp = 1e-9, Wf = 40e3, lf = 100e3;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, Vp, Wf, lf,
+                                       DGMethod::IP);
+
+   int nf = op.GetNumFaultDOFs();
+   TEST_ASSERT(nf > 0, "Tag-based detection found fault DOFs");
+   std::cout << "  Fault DOFs (tag-based): " << nf << "\n";
+
+   // Verify no fault faces at z=0 or z=Wf boundaries
+   Vector depths;
+   op.GetFaultDepths(depths);
+   real_t z_min = depths.Min();
+   real_t z_max = depths.Max();
+   std::cout << "  Fault depth range: [" << z_min << ", " << z_max << "] m\n";
+
+   // z_min should be > 0 (no faces at surface z=0)
+   // z_max should be < Wf (no faces at fault base z=40km)
+   TEST_ASSERT(z_min > 100.0,
+               "No fault faces at z=0 surface (z_min > 100m)");
+   TEST_ASSERT(z_max < Wf - 100.0,
+               "No fault faces at z=Wf base (z_max < Wf-100m)");
+
+   // Tag-based detection should find fewer or equal DOFs compared to
+   // total tagged boundary elements (some tagged faces may not correspond
+   // to interior faces, e.g. at mesh boundaries)
+   TEST_ASSERT(nf > 0 && nf <= bdr_100_count,
+               "Tag detection DOFs <= total tagged boundary elements");
+}
+
+// =============================================================================
+// Test: Tag-based detection excludes fault-boundary intersection faces
+// =============================================================================
+void TestTagExcludesBoundaryFaces()
+{
+   std::cout << "\n--- Test: Tag Detection Excludes Boundary Faces ---\n";
+
+   const std::string mesh_file = "bp5/mesh/bp5_1000m.msh";
+   std::ifstream f(mesh_file);
+   if (!f.good())
+   {
+      std::cout << "  (Skipped: " << mesh_file << " not found)\n";
+      return;
+   }
+   f.close();
+
+   Mesh mesh(mesh_file.c_str(), 1, 1);
+   for (int i = 0; i < mesh.GetNV(); i++)
+   {
+      real_t *v = mesh.GetVertex(i);
+      v[0] *= 1000.0;
+      v[1] *= 1000.0;
+      v[2] *= 1000.0;
+   }
+   mesh.SetAttributes();
+
+   real_t lambda = 32.04e9, mu = 32.04e9;
+   real_t Vp = 1e-9, Wf = 40e3, lf = 100e3;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, Vp, Wf, lf,
+                                       DGMethod::IP);
+
+   // Get fault face coordinates
+   Vector coords_x2, coords_x3;
+   op.GetFaultCoords2D(coords_x2, coords_x3);
+
+   int nf = op.GetNumFaultDOFs();
+   if (nf == 0)
+   {
+      std::cout << "  (Skipped: no fault DOFs found)\n";
+      return;
+   }
+
+   // Check that no fault face is at the boundary edges
+   real_t y_min = coords_x2.Min();
+   real_t y_max = coords_x2.Max();
+   real_t z_min = coords_x3.Min();
+   real_t z_max = coords_x3.Max();
+
+   std::cout << "  y range: [" << y_min << ", " << y_max << "] m\n";
+   std::cout << "  z range: [" << z_min << ", " << z_max << "] m\n";
+
+   // The fault extends y in [-50km, +50km] and z in [0, 40km]
+   // Tagged faces should NOT be at the exact boundary
+   TEST_ASSERT(y_min > -lf/2.0 + 100.0,
+               "No fault faces at y=-lf/2 edge");
+   TEST_ASSERT(y_max < lf/2.0 - 100.0,
+               "No fault faces at y=+lf/2 edge");
+   TEST_ASSERT(z_min > 100.0,
+               "No fault faces at z=0 edge");
+   TEST_ASSERT(z_max < Wf - 100.0,
+               "No fault faces at z=Wf edge");
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -1155,6 +1295,10 @@ int main()
    TestBR2TractionCorrectionConsistency();
    TestBR2PatchTestTraction();
    TestBR2SlipSignConvention();
+
+   // Tag-based fault detection tests
+   TestTagBasedFaultDetection();
+   TestTagExcludesBoundaryFaces();
 
    TEST_PRINT_RESULTS();
 
