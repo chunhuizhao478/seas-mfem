@@ -2170,16 +2170,32 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
       else  // BR2
       {
-         // Traction = average stress only, no penalty correction.
-         // Per the benchmark document (Algorithm line 15):
-         //   τ_qs = {{C : ∇u}} · n̂
-         // The BR2 stabilization ensures [[u]] ≈ δ through the solve.
-         // Adding a penalty correction here amplifies the DG residual
-         // by μ/h ≈ 3.2e7, introducing a spurious traction bias.
-         // Tandem also uses no penalty correction for BR2 traction
-         // (Elasticity.h: penalty() returns NumFacets=4 dimensionless,
-         // making the IP-style correction negligible).
-         // correction remains {0, 0, 0}.
+         // Match Tandem's traction formula for BR2:
+         //   T = {{σ·n̂}} - penalty * ([[u]] - δ)
+         // where penalty = NumFacets (dimensionless, = D+1 for simplices).
+         //
+         // This is an IP-style correction, NOT the BR2 lifting.
+         // Tandem (Elasticity.h line 132-133) returns NumFacets for BR2,
+         // making the correction numerically negligible during interseismic
+         // (penalty × meters ≈ 0 vs MPa-scale stress) but providing
+         // minimal regularization during fast coseismic slip.
+         //
+         // The previous BR2 lifting correction amplified the DG residual
+         // by μ/h ≈ 3.2e7, introducing a spurious traction bias that
+         // caused the deep VS zone to lock up (see bp5_debug_v24.md).
+         Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
+         real_t penalty_val = (geom == Geometry::TETRAHEDRON)
+                                  ? real_t(dim + 1) : real_t(2 * dim);
+
+         real_t jump[3];
+         for (int c = 0; c < dim; c++)
+         {
+            jump[c] = u_jump[c] - sign * delta_u[c];
+         }
+         for (int c = 0; c < dim; c++)
+         {
+            correction[c] = penalty_val * jump[c];
+         }
       }
 
       // 6. Apply correction: T -= penalty * ([[u]] - δ)
@@ -2366,9 +2382,17 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
          else  // BR2
          {
-            // Traction = average stress only, no penalty correction.
-            // (Same fix as interior faces — see comment above.)
-            // correction remains {0, 0, 0}.
+            // Match Tandem: IP-style penalty, not BR2 lifting.
+            // (Same as interior faces — see comment above.)
+            Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
+            real_t penalty_val = (geom == Geometry::TETRAHEDRON)
+                                     ? real_t(dim + 1) : real_t(2 * dim);
+
+            real_t jump[3];
+            for (int c = 0; c < dim; c++)
+               jump[c] = u_jump[c] - sign * delta_u[c];
+            for (int c = 0; c < dim; c++)
+               correction[c] = penalty_val * jump[c];
          }
 
          for (int c = 0; c < dim; c++)

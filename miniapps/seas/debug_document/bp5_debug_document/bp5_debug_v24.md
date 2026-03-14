@@ -174,39 +174,48 @@ average. This is simpler and avoids any systematic bias from the penalty term.
 
 ---
 
-## 5. Proposed Fix: Match Tandem's Traction Formula
+## 5. Fix H26: Match Tandem's Traction Formula
 
-Replace MFEM's BR2-style traction penalty with Tandem's IP-style formula.
-Since Tandem's BR2 penalty is effectively zero, the simplest fix is to
-**skip the penalty correction entirely** for BR2 traction:
+### First attempt: Remove penalty correction entirely (correction = 0)
 
+Setting `correction = {0, 0, 0}` in the BR2 traction path. This matches the
+benchmark document (Algorithm line 15: τ = {{C:∇u}}·n̂ only).
+
+**Result**: Works during interseismic (Test 1 shows V/Vp = 0.97 at 2yr), but
+**traction blows up to 1 GPa during earthquake** (Test 2). Without any penalty
+correction, the average stress {{σ·n̂}} becomes unstable when the DG displacement
+jumps deviate significantly from prescribed slip during fast coseismic slip.
+
+### Second attempt: IP-style penalty matching Tandem (CURRENT FIX)
+
+Use Tandem's exact formula:
 ```cpp
 // In ComputeTraction(), BR2 branch:
-// BEFORE: complex BR2 lifting computation (lines 2171-2251)
-// AFTER:  no penalty correction (just use average stress)
-correction[i] = 0.0;  // Tandem BR2 style: penalty correction is negligible
-```
-
-Or, for a more faithful match, use the IP-style formula:
-```cpp
-// Match Tandem exactly: T = {{σ·n}} - penalty * ([[u]] - δ)
-real_t penalty_val = (geom == Geometry::TETRAHEDRON) ? 4.0 : 6.0;
+Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
+real_t penalty_val = (geom == Geometry::TETRAHEDRON)
+                         ? real_t(dim + 1) : real_t(2 * dim);
+real_t jump[3];
 for (int c = 0; c < dim; c++)
-{
+    jump[c] = u_jump[c] - sign * delta_u[c];
+for (int c = 0; c < dim; c++)
     correction[c] = penalty_val * jump[c];
-}
 ```
 
-The second option is closer to Tandem's code but since penalty=4 (dimensionless)
-× jump (meters) gives a negligible value, both approaches are equivalent.
+This computes `correction = NumFacets * ([[u]] - δ)` where NumFacets = 4 (tet).
 
-### File to modify
+**Properties**:
+- During interseismic: jump ≈ 0.001 m → correction ≈ 0.004 (negligible vs MPa stress)
+- During earthquake: jump may be larger → provides minimal regularization
+- Matches Tandem's `penalty()` return value for BR2 (Elasticity.h line 133)
+- Dimensionally inconsistent (dimensionless × meters) but numerically stable
 
-`domain/elasticity_operator.hpp`, `ComputeTraction()` function, BR2 branch
-(lines 2171-2251). Replace the BR2 lifting computation with the simple formula.
+### Files modified
 
-The same change should be applied to the shared-face traction path
-(lines ~2378-2451).
+`domain/elasticity_operator.hpp`, `ComputeTraction()` function:
+- Interior fault faces BR2 branch (was lines 2171-2251)
+- Shared fault faces BR2 branch (was lines ~2367-2430)
+
+Both replaced with the IP-style `penalty_val * jump` formula.
 
 ---
 
@@ -230,18 +239,32 @@ The same change should be applied to the shared-face traction path
 
 ---
 
-## 7. Diagnostic Test
+## 7. Test Results
 
-### Test 4: Tandem-style traction (no BR2 correction)
+### v24 Test 1: Uniform fault with fix (first attempt — correction=0)
 
-Apply the fix from Section 5, then run the uniform test (V_nuc = Vp, δτ = 0)
-for 300 years. Check if the VS zone maintains V ≈ Vp.
+Ran for 2 years (wall time limited). V/Vp = 0.97 at z=22km — promising but
+inconclusive (need 60+ years). However, the .out file revealed traction blowup
+from the **Test 2** run (V_nuc=0.01, earthquake):
 
-**Pass**: V/Vp stays in [0.5, 2.0] at z=22 km for 300 years.
-**Fail**: VS zone still locks up — indicates additional issues beyond traction.
+```
+[Rank 127] TRACTION BLOWUP: DOF 9 tau_mag=1.00133e+09 tau=(1.09e+08, 9.95e+08)
+```
 
-If Test 4 passes, run the full BP5 simulation (with nucleation) and compare
-against Tandem.
+115,000 blowup messages. Traction reached 1-9 GPa during the earthquake.
+This led to the second attempt (IP-style penalty) described in Section 5.
+
+### v24 Test 2: Tandem params with fix (first attempt — correction=0)
+
+Earthquake nucleated (V_nuc=0.01 is still seismic). During coseismic phase,
+traction blew up because {{σ·n̂}} alone is unstable without any regularization
+when DG jumps deviate from prescribed slip during fast slip.
+
+### v24 Tests with IP-style penalty (second attempt — PENDING)
+
+The corrected fix uses `penalty_val * jump` instead of zero. Both sbatch files
+(`bp5_v24_test1_uniform_fix.sbatch`, `bp5_v24_test2_tandem_fix.sbatch`) should
+be resubmitted with the updated code.
 
 ---
 
