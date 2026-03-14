@@ -383,11 +383,11 @@ public:
 
       if (num_fault_dofs_ > 0)
       {
-         // Find depth range (local)
+         // Local statistics (rank 0 only — global reduction would deadlock
+         // since Print() is called only on root)
          real_t z_min = depths_.Min();
          real_t z_max = depths_.Max();
 
-         // Count VW and VS DOFs (local)
          real_t b_val = is_bp5_ ? bp5_params_.b : params_.b;
          int vw_count = 0;
          for (int i = 0; i < num_fault_dofs_; i++)
@@ -395,27 +395,14 @@ public:
             if (a_values_(i) < b_val) { vw_count++; }
          }
 
-         // a range (local)
          real_t a_min = a_values_.Min();
          real_t a_max = a_values_.Max();
 
-         // Reduce to global statistics in parallel
-         if (mpi_ctx_)
-         {
-            z_min = mpi_ctx_->GlobalMin(z_min);
-            z_max = mpi_ctx_->GlobalMax(z_max);
-            vw_count = mpi_ctx_->GlobalSumInt(vw_count);
-            a_min = mpi_ctx_->GlobalMin(a_min);
-            a_max = mpi_ctx_->GlobalMax(a_max);
-         }
-
-         int total_dofs = mpi_ctx_ ? num_global_fault_dofs_ : num_fault_dofs_;
-
-         os << "  Depth range: [" << z_min / 1000.0 << ", "
-            << z_max / 1000.0 << "] km\n";
-         os << "  VW DOFs: " << vw_count << "\n";
-         os << "  VS DOFs: " << total_dofs - vw_count << "\n";
-         os << "  a range: [" << a_min << ", " << a_max << "]\n";
+         os << "  Depth range: [" << z_max / 1000.0 << ", "
+            << z_min / 1000.0 << "] km (local rank)\n";
+         os << "  VW DOFs: " << vw_count << " (local rank)\n";
+         os << "  VS DOFs: " << num_fault_dofs_ - vw_count << " (local rank)\n";
+         os << "  a range: [" << a_min << ", " << a_max << "] (local rank)\n";
          os << "  eta: " << eta_values_(0) / 1e6 << " MPa·s/m\n";
       }
    }
