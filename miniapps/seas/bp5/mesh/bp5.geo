@@ -20,14 +20,19 @@
 // Tandem BC mapping: attrs 1-4 → Dirichlet, attrs 5-6 → Natural
 // (Tandem Physical Surface 1 = {top,bottom} → Natural; Surface 5 = far-field → Dirichlet)
 //
+// Mesh sizing follows Tandem's approach:
+//   - Uniform res_f on the entire fault surface
+//   - Uniform res on all volume points
+//   - Gmsh handles the grading naturally (no background fields)
+//   - Nuc zones embedded for BooleanFragments geometry only, NOT for mesh sizing
+//
 // Usage:
-//   gmsh -3 bp5.geo -o bp5_coarse.msh               (default: coarse)
-//   gmsh -3 bp5.geo -setnumber res_f 5 -o bp5_med.msh   (medium)
-//   gmsh -3 bp5.geo -setnumber res_f 1 -o bp5_fine.msh  (benchmark)
+//   gmsh -3 bp5.geo -setnumber res_f 1 -o bp5_1000m.msh
+//   gmsh -3 bp5.geo -setnumber res_f 5 -o bp5_5000m.msh
 
 // --- Resolution parameters ---
 DefineConstant[ res   = {40, Min 0, Max 1000, Name "Far-field resolution (km)"} ];
-DefineConstant[ res_f = {10, Min 0, Max 1000, Name "Fault resolution (km)"} ];
+DefineConstant[ res_f = {1,  Min 0, Max 1000, Name "Fault resolution (km)"} ];
 
 // --- Geometric parameters (km, matching SCEC BP5 / Tandem) ---
 // Domain half-sizes
@@ -61,7 +66,7 @@ fault = news;
 Rectangle(fault) = {0, -l_f/2, 0, W_f, l_f};
 Rotate{ {0, 1, 0}, {0, 0, 0}, -Pi/2} { Surface{fault}; }
 
-// Nucleation refinement zones (control mesh transition)
+// Nucleation refinement zones (embedded for geometry subdivision only)
 // nuc1: outer transition — y in [-(l/2+h_t), l/2+h_t], z in [h_s, h_s+2*h_t+H]
 nuc1 = news;
 Rectangle(nuc1) = {h_s, -(l/2+h_t), 0, 2*h_t+H, l+2*h_t};
@@ -94,43 +99,16 @@ ztop() = Surface In BoundingBox{-Lx-eps, -Ly-eps, -eps, Lx+eps, Ly+eps, eps};
 // z = Lz (attr 6, deep boundary)
 zbot() = Surface In BoundingBox{-Lx-eps, -Ly-eps, Lz-eps, Lx+eps, Ly+eps, Lz+eps};
 
-// Fault surface (internal, for reference — not a physical boundary)
+// Fault surface (internal)
 fault_surfs() = Surface In BoundingBox{-eps, -l_f/2-eps, -eps, eps, l_f/2+eps, W_f+eps};
 
-// Nucleation refinement zones (post-BooleanFragments)
-// nuc1: outer transition — y in [-(l/2+h_t), l/2+h_t], z in [h_s, h_s+2*h_t+H]
-nuc1_surfs() = Surface In BoundingBox{-eps, -(l/2+h_t)-eps, h_s-eps, eps, (l/2+h_t)+eps, h_s+2*h_t+H+eps};
-// nuc2: VW zone — y in [-l/2, l/2], z in [h_s+h_t, h_s+h_t+H]
-nuc2_surfs() = Surface In BoundingBox{-eps, -l/2-eps, h_s+h_t-eps, eps, l/2+eps, h_s+h_t+H+eps};
-// nuc3: nucleation patch — y in [-l/2, -l/2+w], z in [h_s+h_t, h_s+h_t+H]
-nuc3_surfs() = Surface In BoundingBox{-eps, -l/2-eps, h_s+h_t-eps, eps, -l/2+w+eps, h_s+h_t+H+eps};
-
-// --- Mesh sizing ---
+// --- Mesh sizing (Tandem-style: uniform on fault, natural grading) ---
+// Set far-field resolution on all volume points
 MeshSize{ PointsOf{Volume{:};} } = res;
 
-// Fault surface: benchmark resolution
+// Set uniform fault resolution on ALL fault surface points
+// NO per-zone sizing — this ensures uniform elements on the fault
 MeshSize{ PointsOf{Surface{fault_surfs()};} } = res_f;
-
-// Nucleation zones: intermediate refinement
-MeshSize{ PointsOf{Surface{nuc1_surfs()};} } = res_f * 2;
-MeshSize{ PointsOf{Surface{nuc2_surfs()};} } = res_f * 1.5;
-MeshSize{ PointsOf{Surface{nuc3_surfs()};} } = res_f;
-
-// Smooth mesh grading from fault surface into the volume
-// Prevents sharp element size jumps that cause DG traction noise
-Field[1] = Distance;
-Field[1].SurfacesList = {fault_surfs()};
-
-Field[2] = Threshold;
-Field[2].InField = 1;
-Field[2].SizeMin = res_f;      // At fault: res_f (1 km)
-Field[2].SizeMax = res;         // Far from fault: res (40 km)
-Field[2].DistMin = 0;           // Start grading at fault
-Field[2].DistMax = 80;          // Reach far-field size at 80 km distance
-
-Field[3] = Min;
-Field[3].FieldsList = {2};
-Background Field = 3;
 
 // --- Physical groups ---
 // Boundary surfaces (MFEM boundary attributes 1-6, 100)
