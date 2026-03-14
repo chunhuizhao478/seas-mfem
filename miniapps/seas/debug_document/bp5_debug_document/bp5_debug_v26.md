@@ -202,7 +202,39 @@ becomes a separate research question rather than a blocking bug.
 
 ---
 
-## 8. Key Data Points
+## 8. v26 Test 1 Result: IP Blows Up Worse Than BR2
+
+The IP method (`--dg-method IP`) + new mesh crashes immediately:
+- tau_mag up to **10¹⁴ Pa** (100 TPa) — far worse than BR2's 10⁹ Pa
+- 89,000 blowup messages across many ranks
+- Job crashed (MPI exit code 1)
+- Blowup is **widespread**, not localized to 1-2 DOFs
+
+Blowup locations are mostly near **fault edges** (y≈±47-50 km, where fault
+terminates at y=±50 km). The IP penalty `κ * |n|² * (1/detJ₁ + 1/detJ₂)`
+amplifies stress at faces where elements transition from fault to non-fault.
+
+This suggests MFEM's IP implementation has issues at fault boundaries that
+Tandem's implementation handles differently. A careful comparison of Tandem's
+IP penalty formula, fault edge treatment, and traction computation is needed.
+
+**Conclusion**: Neither IP nor BR2 (without BR2 lifting in traction) produces
+stable traction. The BR2 method with full BR2 traction correction is the only
+stable configuration, but it causes VS lockup. The problem is deeper than
+the traction formula — it's in how MFEM handles fault face DG penalties
+at boundaries and edges.
+
+### Next step: Deep comparison with Tandem IP implementation
+
+Focus areas:
+1. How does Tandem compute IP penalty at fault edges?
+2. Does Tandem exclude or special-case fault boundary faces?
+3. How does Tandem's `traction_skeleton` handle faces near fault termination?
+4. Does Tandem's mesh avoid creating problematic faces at fault edges?
+
+---
+
+## 9. Key Data Points
 
 ### v25 Test 1 station data (IP traction + new mesh, t=1.95yr)
 

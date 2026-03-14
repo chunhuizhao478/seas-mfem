@@ -2140,32 +2140,43 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
       if (method_ == DGMethod::IP)
       {
-         // IP penalty with elasticity tensor coupling (matches BR2 test_normal)
-         real_t kappa = (order_ + 1) * (order_ + 1);
-         real_t detJ1 = FTr->Elem1->Weight();
-         real_t detJ2 = FTr->Elem2->Weight();
-         real_t nor_sq = nor * nor;
-         real_t ip_coeff = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
+         // Tandem-style IP traction penalty: SCALAR × jump.
+         // Tandem uses: correction = -penalty * (u1 - u2 - slip)
+         // where penalty = (p(0) + p(1)) / 4,
+         //       p(side) = (D+1) * c_N_1 * (area/volume) * (c1²/c0)
+         //
+         // This is a SCALAR penalty applied equally to all jump components.
+         // MFEM's previous tensor-coupled penalty (C:n⊗n · jump) amplified
+         // the normal component 3× more than tangential, causing directional
+         // instability at fault edge faces (see bp5_debug_v27.md).
+
+         // Material stiffness bounds (isotropic)
+         real_t c0_mat = 2.0 * mu_val_;                           // min eigenvalue of C
+         real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;       // max eigenvalue of C
+
+         // Trace constant for p=0 (order-1 DG, PolynomialDegree-1=0)
+         real_t c_N_1 = 1.0;
+
+         // Face area from unnormalized normal: |nor| = face area in physical space
+         real_t face_area = nor.Norml2();
+
+         // Element volumes
+         real_t vol1 = FTr->Elem1->Weight();
+         real_t vol2 = FTr->Elem2->Weight();
+
+         // Tandem penalty formula per side
+         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1) * (c1_mat * c1_mat / c0_mat);
+         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2) * (c1_mat * c1_mat / c0_mat);
+         real_t penalty_ip = (p0 + p1) / 4.0;
 
          real_t jump[3];
          for (int c = 0; c < dim; c++)
          {
             jump[c] = u_jump[c] - sign * delta_u[c];
          }
-
-         for (int i = 0; i < dim; i++)
+         for (int c = 0; c < dim; c++)
          {
-            correction[i] = 0.0;
-            for (int u = 0; u < dim; u++)
-            {
-               for (int s = 0; s < dim; s++)
-               {
-                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
-                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
-                                 + (i == s ? 1.0 : 0.0) * basis.normal[u]);
-                  correction[i] += ip_coeff * tn * basis.normal[s] * jump[u];
-               }
-            }
+            correction[c] = penalty_ip * jump[c];
          }
       }
       else  // BR2
@@ -2354,31 +2365,23 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          if (method_ == DGMethod::IP)
          {
-            // IP penalty with elasticity tensor coupling (matches BR2 test_normal)
-            real_t kappa = (order_ + 1) * (order_ + 1);
-            real_t detJ1 = FTr->Elem1->Weight();
-            real_t detJ2 = FTr->Elem2->Weight();
-            real_t nor_sq = nor * nor;
-            real_t ip_coeff = kappa * nor_sq * (1.0 / (2.0 * detJ1) + 1.0 / (2.0 * detJ2));
+            // Tandem-style scalar IP penalty (same as interior faces)
+            real_t c0_mat = 2.0 * mu_val_;
+            real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+            real_t c_N_1 = 1.0;
+            real_t face_area = nor.Norml2();
+            real_t vol1 = FTr->Elem1->Weight();
+            real_t vol2 = FTr->Elem2->Weight();
+
+            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2) * (c1_mat * c1_mat / c0_mat);
+            real_t penalty_ip = (p0 + p1) / 4.0;
 
             real_t jump[3];
             for (int c = 0; c < dim; c++)
                jump[c] = u_jump[c] - sign * delta_u[c];
-
-            for (int ci = 0; ci < dim; ci++)
-            {
-               correction[ci] = 0.0;
-               for (int u = 0; u < dim; u++)
-               {
-                  for (int s = 0; s < dim; s++)
-                  {
-                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
-                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
-                                    + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
-                     correction[ci] += ip_coeff * tn * basis.normal[s] * jump[u];
-                  }
-               }
-            }
+            for (int c = 0; c < dim; c++)
+               correction[c] = penalty_ip * jump[c];
          }
          else  // BR2
          {
