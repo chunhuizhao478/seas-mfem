@@ -176,6 +176,6 @@ tfinal: 600 years
 | `bp5/mesh/bp5.geo` | H27: Uniform fault sizing, removed per-zone MeshSize and background field |
 | `bp5/mesh/bp5_1000m.msh` | Regenerated with `res_f=1` using new geo |
 | `config/bp5_params.hpp` | V_nuc >= V_init validation (for uniform test) |
-| `fault/fault_geometry.hpp` | Global MPI reduction for Print() statistics |
+| `fault/fault_geometry.hpp` | Print() shows local rank stats (global reduction reverted — deadlock) |
 | `fault/rate_state_fault.hpp` | SetScecPsiInit() flag, Init() branching |
 | `tests/verification/bp5_verification_full.cpp` | --psi-init-mode, --diag-vtk traction output |
