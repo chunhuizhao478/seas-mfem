@@ -2808,16 +2808,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
          const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
-         real_t jump[3];
-         for (int c = 0; c < dim; c++)
-         {
-            jump[c] = u_jump[c] - sign * delta_u[c];
-         }
-
-         // Face integral: ∫_F shape(m) * jump[u] * nor(s) dS
-         // Use order 2*face_order quadrature for accurate integration
-         // of polynomial shapes (needed for p≥2; centroid rule is only
-         // exact for p=1 linear shapes on a triangle).
+         // Face integral: ∫_F shape(m) * ([[u]] - sign*δ) * nor dS
+         // Uses per-quadrature-point displacement jump for accuracy at p≥2
+         // (centroid jump is only exact for p=1).
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
          const IntegrationRule &ir_lift =
             IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
@@ -2825,6 +2818,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
          face_int1 = 0.0;
          face_int2 = 0.0;
+         // Also accumulate face-averaged shapes for evaluation
+         Vector avg_shape1(ndof1), avg_shape2(ndof2);
+         avg_shape1 = 0.0;
+         avg_shape2 = 0.0;
+         real_t sum_w = 0.0;
          for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
          {
             const IntegrationPoint &fip = ir_lift.IntPoint(qp);
@@ -2836,6 +2834,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             fe1->CalcShape(eip1_q, s1q);
             fe2->CalcShape(eip2_q, s2q);
 
+            // Per-quadrature-point displacement jump
+            real_t jump_q[3] = {0.0, 0.0, 0.0};
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++)
+                  u1q += s1q(k) * u1_all(c * ndof1 + k);
+               for (int k = 0; k < ndof2; k++)
+                  u2q += s2q(k) * u2_all(c * ndof2 + k);
+               jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+            }
+
             Vector nor_q(dim);
             CalcOrtho(FTr->Jacobian(), nor_q);
             real_t wq = fip.weight;
@@ -2845,19 +2855,25 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                for (int s = 0; s < dim; s++)
                {
                   for (int m = 0; m < ndof1; m++)
-                  {
                      face_int1(u * dim + s, m) +=
-                        wq * s1q(m) * jump[u] * nor_q(s);
-                  }
+                        wq * s1q(m) * jump_q[u] * nor_q(s);
                   for (int m = 0; m < ndof2; m++)
-                  {
                      face_int2(u * dim + s, m) +=
-                        wq * s2q(m) * jump[u] * nor_q(s);
-                  }
+                        wq * s2q(m) * jump_q[u] * nor_q(s);
                }
             }
+
+            // Accumulate face-averaged shapes
+            for (int m = 0; m < ndof1; m++)
+               avg_shape1(m) += wq * s1q(m);
+            for (int m = 0; m < ndof2; m++)
+               avg_shape2(m) += wq * s2q(m);
+            sum_w += wq;
          }
-         // Restore FTr to centroid for evaluation step below
+         // Normalize to get face-averaged shapes
+         avg_shape1 /= sum_w;
+         avg_shape2 /= sum_w;
+         // Restore FTr to centroid for gradient evaluation
          FTr->SetAllIntPoints(&ip);
 
          DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
@@ -2866,6 +2882,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          MultABt(face_int2, Minv2, f_lifted2);
          f_lifted2 *= 0.5;
 
+         // Evaluate lifted function using face-averaged shapes
+         // (centroid shapes have negative vertex values at p≥2 GaussLobatto,
+         // face-averaged shapes are non-negative and consistent with the
+         // one-DOF-per-face fault system)
          for (int i = 0; i < dim; i++)
          {
             real_t sum = 0.0;
@@ -2878,13 +2898,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                                 + (i == s ? 1.0 : 0.0) * basis.normal[u]);
                   real_t eval1 = 0.0, eval2 = 0.0;
                   for (int m = 0; m < ndof1; m++)
-                  {
-                     eval1 += shape1(m) * f_lifted1(u * dim + s, m);
-                  }
+                     eval1 += avg_shape1(m) * f_lifted1(u * dim + s, m);
                   for (int m = 0; m < ndof2; m++)
-                  {
-                     eval2 += shape2(m) * f_lifted2(u * dim + s, m);
-                  }
+                     eval2 += avg_shape2(m) * f_lifted2(u * dim + s, m);
                   sum += tn * (eval1 + eval2);
                }
             }
@@ -3128,11 +3144,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
-            real_t jump[3];
-            for (int c = 0; c < dim; c++)
-               jump[c] = u_jump[c] - sign * delta_u[c];
-
-            // Face integral with order-dependent quadrature
+            // Face integral with per-quadrature-point displacement jump
             int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
             const IntegrationRule &ir_lift =
                IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
@@ -3140,6 +3152,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
             face_int1 = 0.0;
             face_int2 = 0.0;
+            Vector avg_shape1(ndof1), avg_shape2(ndof2);
+            avg_shape1 = 0.0;
+            avg_shape2 = 0.0;
+            real_t sum_w = 0.0;
             for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
             {
                const IntegrationPoint &fip = ir_lift.IntPoint(qp);
@@ -3151,6 +3167,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                fe1->CalcShape(eip1_q, s1q);
                fe2->CalcShape(eip2_q, s2q);
 
+               // Per-quadrature-point displacement jump
+               real_t jump_q[3] = {0.0, 0.0, 0.0};
+               for (int c = 0; c < dim; c++)
+               {
+                  real_t u1q = 0.0, u2q = 0.0;
+                  for (int k = 0; k < ndof1; k++)
+                     u1q += s1q(k) * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     u2q += s2q(k) * u2_all(c * ndof2 + k);
+                  jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+               }
+
                Vector nor_q(dim);
                CalcOrtho(FTr->Jacobian(), nor_q);
                real_t wq = fip.weight;
@@ -3161,14 +3189,21 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   {
                      for (int m = 0; m < ndof1; m++)
                         face_int1(u * dim + s, m) +=
-                           wq * s1q(m) * jump[u] * nor_q(s);
+                           wq * s1q(m) * jump_q[u] * nor_q(s);
                      for (int m = 0; m < ndof2; m++)
                         face_int2(u * dim + s, m) +=
-                           wq * s2q(m) * jump[u] * nor_q(s);
+                           wq * s2q(m) * jump_q[u] * nor_q(s);
                   }
                }
+
+               for (int m = 0; m < ndof1; m++)
+                  avg_shape1(m) += wq * s1q(m);
+               for (int m = 0; m < ndof2; m++)
+                  avg_shape2(m) += wq * s2q(m);
+               sum_w += wq;
             }
-            // Restore FTr to centroid for evaluation step
+            avg_shape1 /= sum_w;
+            avg_shape2 /= sum_w;
             FTr->SetAllIntPoints(&ip);
 
             DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
@@ -3189,9 +3224,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                                      + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
                      real_t eval1 = 0.0, eval2 = 0.0;
                      for (int m = 0; m < ndof1; m++)
-                        eval1 += shape1(m) * f_lifted1(u * dim + s, m);
+                        eval1 += avg_shape1(m) * f_lifted1(u * dim + s, m);
                      for (int m = 0; m < ndof2; m++)
-                        eval2 += shape2(m) * f_lifted2(u * dim + s, m);
+                        eval2 += avg_shape2(m) * f_lifted2(u * dim + s, m);
                      sum += tn * (eval1 + eval2);
                   }
                }
