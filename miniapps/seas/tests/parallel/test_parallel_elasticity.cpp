@@ -36,8 +36,9 @@ static int num_passed = 0;
       } \
    } while(0)
 
-/// Create a 3D hex mesh: [-Lx,Lx] x [-Ly,Ly] x [0,Lz]
-/// Boundary attrs: 1=-x, 2=+x, 3=+y, 4=-y, 5=z=0, 6=z=Lz
+/// Create a 3D hex mesh: [-Lx,Lx] x [-Ly,Ly] x [-Lz,0]
+/// Boundary attrs: 1=top/bottom (z=0,z=-Lz), 5=far-field (sides)
+/// Matches serial test mesh convention (Tandem: z <= 0 for depth).
 Mesh CreateTestMesh3D(int nx, int ny, int nz,
                        real_t Lx, real_t Ly, real_t Lz)
 {
@@ -45,18 +46,12 @@ Mesh CreateTestMesh3D(int nx, int ny, int nz,
                                       Element::HEXAHEDRON,
                                       2.0 * Lx, 2.0 * Ly, Lz);
 
-   Vector shift(3);
-   shift(0) = -Lx;
-   shift(1) = -Ly;
-   shift(2) = 0.0;
-
    for (int i = 0; i < mesh.GetNV(); i++)
    {
       real_t *v = mesh.GetVertex(i);
-      for (int d = 0; d < 3; d++)
-      {
-         v[d] += shift(d);
-      }
+      v[0] -= Lx;
+      v[1] -= Ly;
+      v[2] -= Lz;  // Z ranges [-Lz, 0]
    }
 
    for (int be = 0; be < mesh.GetNBE(); be++)
@@ -68,12 +63,14 @@ Mesh CreateTestMesh3D(int nx, int ny, int nz,
       T->Transform(ip, center);
 
       real_t tol = 1e-6;
-      if (std::abs(center(0) - (-Lx)) < tol)      { mesh.SetBdrAttribute(be, 1); }
-      else if (std::abs(center(0) - Lx) < tol)     { mesh.SetBdrAttribute(be, 2); }
-      else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 3); }
-      else if (std::abs(center(1) - (-Ly)) < tol)  { mesh.SetBdrAttribute(be, 4); }
-      else if (std::abs(center(2) - 0.0) < tol)    { mesh.SetBdrAttribute(be, 5); }
-      else if (std::abs(center(2) - Lz) < tol)     { mesh.SetBdrAttribute(be, 6); }
+      if (std::abs(center(2)) < tol || std::abs(center(2) + Lz) < tol)
+      {
+         mesh.SetBdrAttribute(be, 1);  // Natural (top/bottom)
+      }
+      else
+      {
+         mesh.SetBdrAttribute(be, 5);  // Dirichlet (far-field)
+      }
    }
 
    mesh.SetAttributes();

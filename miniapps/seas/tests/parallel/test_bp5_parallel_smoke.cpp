@@ -56,6 +56,7 @@ std::unique_ptr<Mesh> CreateBP5InlineMesh(
       real_t *v = mesh->GetVertex(i);
       v[0] -= Lx;
       v[1] -= Ly;
+      v[2] -= Lz;  // Z ranges [-Lz, 0] (Tandem depth convention)
    }
 
    const real_t tol = 1e-6 * std::max({Lx, Ly, Lz});
@@ -76,13 +77,16 @@ std::unique_ptr<Mesh> CreateBP5InlineMesh(
       cz /= vertices.Size();
 
       int attr;
-      if (std::abs(cx - (-Lx)) < tol)      { attr = 1; }
-      else if (std::abs(cx - Lx) < tol)     { attr = 2; }
-      else if (std::abs(cy - Ly) < tol)     { attr = 3; }
-      else if (std::abs(cy - (-Ly)) < tol)  { attr = 4; }
-      else if (std::abs(cz) < tol)          { attr = 5; }
-      else if (std::abs(cz - Lz) < tol)     { attr = 6; }
-      else                                   { attr = 1; }
+      // Tandem convention: top (z=0) and bottom (z=-Lz) → Natural (attr 1)
+      // Far-field sides → Dirichlet (attr 5)
+      if (std::abs(cz) < tol || std::abs(cz + Lz) < tol)
+      {
+         attr = 1;  // Natural (top/bottom)
+      }
+      else
+      {
+         attr = 5;  // Dirichlet (far-field)
+      }
 
       mesh->SetBdrAttribute(i, attr);
    }

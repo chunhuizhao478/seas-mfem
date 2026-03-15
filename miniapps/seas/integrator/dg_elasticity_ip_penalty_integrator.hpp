@@ -106,9 +106,11 @@ public:
          real_t c0 = 2.0 * mu_val;
          real_t c1 = dim_ * lam_val + 2.0 * mu_val;
 
-         // Inverse inequality trace constant for p=0
-         // (polynomial degree - 1 = 0 for order-1 DG)
-         real_t c_N_1 = 1.0;
+         // Inverse inequality trace constant: c_N(p) = p*(p+D-1)/D
+         // (Tandem: InverseInequality.h, trace_constant(PolynomialDegree-1))
+         int p = std::max(el1.GetOrder(),
+                          ndofs2 > 0 ? el2.GetOrder() : el1.GetOrder());
+         real_t c_N_1 = p * (p + dim_ - 1.0) / dim_;
 
          // Element volumes
          real_t vol1 = Trans.Elem1->Weight();

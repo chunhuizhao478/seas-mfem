@@ -310,6 +310,7 @@ int main(int argc, char *argv[])
    bool diag_traction_decomp = false;
    std::string bc_mode_str = "far-field";
    std::string psi_init_mode_str = "scec";  // "scec" or "tandem"
+   int order = 1;
 
    for (int i = 1; i < argc; i++)
    {
@@ -373,6 +374,7 @@ int main(int argc, char *argv[])
       {
          psi_init_mode_str = argv[++i];
       }
+      if (arg == "--order" && i + 1 < argc) { order = std::atoi(argv[++i]); }
    }
 
    // Parse DG method
@@ -515,6 +517,7 @@ int main(int argc, char *argv[])
    if (mpi.IsRoot())
    {
       std::cout << "  Ranks: " << mpi.Size() << "\n";
+      std::cout << "  DG order: " << order << "\n";
       std::cout << "  DG method: " << dg_method_str << "\n";
       std::string solver_desc = "CG+AMG (iterative)";
       if (solver_type == SolverType::MUMPS) solver_desc = "MUMPS (direct)";
@@ -555,9 +558,8 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Domain operator: 3D DG elasticity, order 1
+   // Domain operator: 3D DG elasticity
    // =========================================================================
-   int order = 1;
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
       params.Vp, params.Wf, params.lf, dg_method, solver_type, bc_mode);

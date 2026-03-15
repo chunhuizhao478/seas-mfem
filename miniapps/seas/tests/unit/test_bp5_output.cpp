@@ -194,8 +194,10 @@ void TestBP5BenchmarkOutput_ComponentSwap()
       Vector V_dip(1), V_strike(1);
       Vector trac_dip(1), trac_strike(1);
 
-      slip_dip(0) = 1.0;
-      slip_strike(0) = 2.0;
+      // Internal convention: negative = right-lateral motion.
+      // WriteFromGlobalData negates for SCEC output (positive = right-lateral).
+      slip_dip(0) = -1.0;
+      slip_strike(0) = -2.0;
       theta(0) = 100.0;      // 100 seconds
       V_dip(0) = 1e-6;
       V_strike(0) = 1e-5;
@@ -252,10 +254,12 @@ void TestBP5BenchmarkOutput_StressComputation()
    BP5Params params;
    std::string prefix = "test_bp5stress";
 
-   // Set known tau_pre: dip=5e6 Pa, strike=10e6 Pa
+   // Set known tau_pre: dip=-5e6 Pa, strike=-10e6 Pa
+   // Internal convention: negative = right-lateral shear.
+   // WriteFromGlobalData negates for SCEC output (positive = right-lateral).
    Vector tau_pre_dip(1), tau_pre_strike(1);
-   tau_pre_dip(0) = 5e6;
-   tau_pre_strike(0) = 10e6;
+   tau_pre_dip(0) = -5e6;
+   tau_pre_strike(0) = -10e6;
 
    {
       BP5BenchmarkOutput<Mesh> out(prefix, params, stations, x2, x3);
@@ -268,9 +272,10 @@ void TestBP5BenchmarkOutput_StressComputation()
       slip_dip(0) = 0.0; slip_strike(0) = 0.0;
       theta(0) = 100.0;
       V_dip(0) = 1e-9; V_strike(0) = 1e-9;
-      // Elastic traction: dip=1e6, strike=2e6
-      trac_dip(0) = 1e6;
-      trac_strike(0) = 2e6;
+      // Elastic traction: dip=-1e6, strike=-2e6
+      // Internal convention: negative = right-lateral shear.
+      trac_dip(0) = -1e6;
+      trac_strike(0) = -2e6;
 
       out.WriteFromGlobalData(1.0, slip_dip, slip_strike, theta,
                               V_dip, V_strike, trac_dip, trac_strike);

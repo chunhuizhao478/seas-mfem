@@ -2771,8 +2771,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          real_t c0_mat = 2.0 * mu_val_;                           // min eigenvalue of C
          real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;       // max eigenvalue of C
 
-         // Trace constant for p=0 (order-1 DG, PolynomialDegree-1=0)
-         real_t c_N_1 = 1.0;
+         // Inverse inequality trace constant: c_N(p) = p*(p+D-1)/D
+         // (Tandem: InverseInequality.h, trace_constant(PolynomialDegree-1))
+         real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
 
          // Face area from unnormalized normal: |nor| = face area in physical space
          real_t face_area = nor.Norml2();
@@ -2813,29 +2814,51 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             jump[c] = u_jump[c] - sign * delta_u[c];
          }
 
-         const IntegrationRule &ir_face =
-            IntRules.Get(FTr->GetGeometryType(), 0);
-         real_t w_centroid = ir_face.IntPoint(0).weight;
+         // Face integral: ∫_F shape(m) * jump[u] * nor(s) dS
+         // Use order 2*face_order quadrature for accurate integration
+         // of polynomial shapes (needed for p≥2; centroid rule is only
+         // exact for p=1 linear shapes on a triangle).
+         int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+         const IntegrationRule &ir_lift =
+            IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
 
          DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
          face_int1 = 0.0;
          face_int2 = 0.0;
-         for (int u = 0; u < dim; u++)
+         for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
          {
-            for (int s = 0; s < dim; s++)
+            const IntegrationPoint &fip = ir_lift.IntPoint(qp);
+            FTr->SetAllIntPoints(&fip);
+            const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+            const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+
+            Vector s1q(ndof1), s2q(ndof2);
+            fe1->CalcShape(eip1_q, s1q);
+            fe2->CalcShape(eip2_q, s2q);
+
+            Vector nor_q(dim);
+            CalcOrtho(FTr->Jacobian(), nor_q);
+            real_t wq = fip.weight;
+
+            for (int u = 0; u < dim; u++)
             {
-               for (int m = 0; m < ndof1; m++)
+               for (int s = 0; s < dim; s++)
                {
-                  face_int1(u * dim + s, m) =
-                     w_centroid * shape1(m) * jump[u] * nor(s);
-               }
-               for (int m = 0; m < ndof2; m++)
-               {
-                  face_int2(u * dim + s, m) =
-                     w_centroid * shape2(m) * jump[u] * nor(s);
+                  for (int m = 0; m < ndof1; m++)
+                  {
+                     face_int1(u * dim + s, m) +=
+                        wq * s1q(m) * jump[u] * nor_q(s);
+                  }
+                  for (int m = 0; m < ndof2; m++)
+                  {
+                     face_int2(u * dim + s, m) +=
+                        wq * s2q(m) * jump[u] * nor_q(s);
+                  }
                }
             }
          }
+         // Restore FTr to centroid for evaluation step below
+         FTr->SetAllIntPoints(&ip);
 
          DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
          MultABt(face_int1, Minv1, f_lifted1);
@@ -2916,8 +2939,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             real_t fa = nor.Norml2();
             real_t v1 = FTr->Elem1->Weight();
             real_t v2 = FTr->Elem2->Weight();
-            real_t p0 = (dim + 1) * 1.0 * (fa / v1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * 1.0 * (fa / v2) * (c1_mat * c1_mat / c0_mat);
+            real_t c_N_1_d = order_ * (order_ + dim - 1.0) / dim;
+            real_t p0 = (dim + 1) * c_N_1_d * (fa / v1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1_d * (fa / v2) * (c1_mat * c1_mat / c0_mat);
             mfem::out << " penalty=" << (p0 + p1) / 4.0;
          }
          mfem::out << "\n";
@@ -3078,7 +3102,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             // Tandem-style scalar IP penalty (same as interior faces)
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-            real_t c_N_1 = 1.0;
+            real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
             real_t face_area = nor.Norml2();
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
@@ -3108,25 +3132,44 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             for (int c = 0; c < dim; c++)
                jump[c] = u_jump[c] - sign * delta_u[c];
 
-            const IntegrationRule &ir_face =
-               IntRules.Get(FTr->GetGeometryType(), 0);
-            real_t w_centroid = ir_face.IntPoint(0).weight;
+            // Face integral with order-dependent quadrature
+            int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+            const IntegrationRule &ir_lift =
+               IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
 
             DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
             face_int1 = 0.0;
             face_int2 = 0.0;
-            for (int u = 0; u < dim; u++)
+            for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
             {
-               for (int s = 0; s < dim; s++)
+               const IntegrationPoint &fip = ir_lift.IntPoint(qp);
+               FTr->SetAllIntPoints(&fip);
+               const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+               const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+
+               Vector s1q(ndof1), s2q(ndof2);
+               fe1->CalcShape(eip1_q, s1q);
+               fe2->CalcShape(eip2_q, s2q);
+
+               Vector nor_q(dim);
+               CalcOrtho(FTr->Jacobian(), nor_q);
+               real_t wq = fip.weight;
+
+               for (int u = 0; u < dim; u++)
                {
-                  for (int m = 0; m < ndof1; m++)
-                     face_int1(u * dim + s, m) =
-                        w_centroid * shape1(m) * jump[u] * nor(s);
-                  for (int m = 0; m < ndof2; m++)
-                     face_int2(u * dim + s, m) =
-                        w_centroid * shape2(m) * jump[u] * nor(s);
+                  for (int s = 0; s < dim; s++)
+                  {
+                     for (int m = 0; m < ndof1; m++)
+                        face_int1(u * dim + s, m) +=
+                           wq * s1q(m) * jump[u] * nor_q(s);
+                     for (int m = 0; m < ndof2; m++)
+                        face_int2(u * dim + s, m) +=
+                           wq * s2q(m) * jump[u] * nor_q(s);
+                  }
                }
             }
+            // Restore FTr to centroid for evaluation step
+            FTr->SetAllIntPoints(&ip);
 
             DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
             MultABt(face_int1, Minv1, f_lifted1);
