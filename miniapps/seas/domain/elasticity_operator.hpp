@@ -181,6 +181,11 @@ public:
    /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
    void SetCheckResidual(bool check) { check_residual_ = check; }
 
+   /// Enable/disable traction decomposition diagnostic.
+   /// When enabled, ComputeTraction prints T_stress, T_penalty, jump, and penalty
+   /// for each fault DOF (helps identify stress vs penalty instability sources).
+   void SetDiagTractionDecomp(bool enable) { diag_traction_decomp_ = enable; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -190,6 +195,7 @@ private:
    SolverType solver_type_;
    BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
+   bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -2864,9 +2870,57 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
 
       // 6. Apply correction: T -= penalty * ([[u]] - δ)
+      // Store stress traction before applying correction (for diagnostics)
+      real_t T_stress[3] = {T_global[0], T_global[1], T_global[2]};
       for (int c = 0; c < dim; c++)
       {
          T_global[c] -= correction[c];
+      }
+
+      // Traction decomposition diagnostic
+      if (diag_traction_decomp_)
+      {
+         real_t tau_stress_local[2], tau_corr_local[2];
+         fault_basis_.ProjectTraction(fi, T_stress, tau_stress_local);
+         real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+         fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
+
+         real_t jump_mag = 0.0;
+         if (method_ == DGMethod::IP)
+         {
+            for (int c = 0; c < dim; c++)
+            {
+               real_t jc = u_jump[c] - sign * delta_u[c];
+               jump_mag += jc * jc;
+            }
+            jump_mag = std::sqrt(jump_mag);
+         }
+
+         // Get face coordinates
+         Vector fc(3);
+         FTr->Face->SetIntPoint(&ip);
+         FTr->Face->Transform(ip, fc);
+
+         mfem::out << "  TRAC_DECOMP interior DOF=" << fi
+                   << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                   << " stress_dip=" << tau_stress_local[0]
+                   << " stress_strike=" << tau_stress_local[1]
+                   << " corr_dip=" << tau_corr_local[0]
+                   << " corr_strike=" << tau_corr_local[1]
+                   << " |jump|=" << jump_mag;
+         if (method_ == DGMethod::IP)
+         {
+            // Recompute penalty for printing
+            real_t c0_mat = 2.0 * mu_val_;
+            real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+            real_t fa = nor.Norml2();
+            real_t v1 = FTr->Elem1->Weight();
+            real_t v2 = FTr->Elem2->Weight();
+            real_t p0 = (dim + 1) * 1.0 * (fa / v1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * 1.0 * (fa / v2) * (c1_mat * c1_mat / c0_mat);
+            mfem::out << " penalty=" << (p0 + p1) / 4.0;
+         }
+         mfem::out << "\n";
       }
 
       // Project to local frame: (tau_dip, tau_strike)
@@ -2881,6 +2935,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
    {
 #ifdef MFEM_USE_MPI
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+      int rank;
+      MPI_Comm_rank(mesh_.GetComm(), &rank);
       ParGridFunction par_u(pfes);
       par_u = displacement;
       pfes->ExchangeFaceNbrData();
@@ -3100,8 +3156,58 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             }
          }
 
+         // Store stress traction before correction (for diagnostics)
+         real_t T_stress[3] = {T_global[0], T_global[1], T_global[2]};
          for (int c = 0; c < dim; c++)
             T_global[c] -= correction[c];
+
+         // Traction decomposition diagnostic (shared faces)
+         if (diag_traction_decomp_)
+         {
+            real_t tau_stress_local[2], tau_corr_local[2];
+            fault_basis_.ProjectTraction(trac_idx, T_stress, tau_stress_local);
+            real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+            fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
+
+            real_t jump_mag = 0.0;
+            if (method_ == DGMethod::IP)
+            {
+               for (int c = 0; c < dim; c++)
+               {
+                  real_t jc = u_jump[c] - sign * delta_u[c];
+                  jump_mag += jc * jc;
+               }
+               jump_mag = std::sqrt(jump_mag);
+            }
+
+            // Get face coordinates
+            Vector fc(3);
+            const IntegrationPoint &fip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&fip);
+            FTr->Face->Transform(fip, fc);
+
+            mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
+                      << " rank=" << rank
+                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                      << " stress_dip=" << tau_stress_local[0]
+                      << " stress_strike=" << tau_stress_local[1]
+                      << " corr_dip=" << tau_corr_local[0]
+                      << " corr_strike=" << tau_corr_local[1]
+                      << " |jump|=" << jump_mag;
+            if (method_ == DGMethod::IP)
+            {
+               real_t c0_mat = 2.0 * mu_val_;
+               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+               real_t fa = nor.Norml2();
+               real_t v1 = FTr->Elem1->Weight();
+               real_t v2 = FTr->Elem2->Weight();
+               real_t p0 = (dim + 1) * 1.0 * (fa / v1) * (c1_mat * c1_mat / c0_mat);
+               real_t p1 = (dim + 1) * 1.0 * (fa / v2) * (c1_mat * c1_mat / c0_mat);
+               mfem::out << " penalty=" << (p0 + p1) / 4.0;
+            }
+            mfem::out << "\n";
+         }
 
          real_t tau_local[2];
          fault_basis_.ProjectTraction(trac_idx, T_global, tau_local);

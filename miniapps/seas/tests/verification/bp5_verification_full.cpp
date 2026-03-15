@@ -40,6 +40,8 @@
 //   --dump-bdr-vtk             Output boundary attributes to VTK
 //   --diag-vtk                 Output diagnostic VTK: displacement, fault a,
 //                              tau_pre, V_init, and boundary attributes
+//   --diag-traction-decomp     Print traction decomposition (stress vs penalty
+//                              correction vs jump) for each fault DOF
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -305,6 +307,7 @@ int main(int argc, char *argv[])
    double delta_tau_factor_override = -1.0;
    bool dump_bdr_vtk = false;
    bool diag_vtk = false;
+   bool diag_traction_decomp = false;
    std::string bc_mode_str = "far-field";
    std::string psi_init_mode_str = "scec";  // "scec" or "tandem"
 
@@ -349,6 +352,7 @@ int main(int argc, char *argv[])
       if (arg == "--mumps") { solver_str = "mumps"; }
       if (arg == "--solver" && i + 1 < argc) { solver_str = argv[++i]; }
       if (arg == "--check-residual") { check_residual = true; }
+      if (arg == "--diag-traction-decomp") { diag_traction_decomp = true; }
       if (arg == "--monitor-traction" && i + 1 < argc)
       {
          monitor_traction = std::atoi(argv[++i]);
@@ -559,6 +563,7 @@ int main(int argc, char *argv[])
       params.Vp, params.Wf, params.lf, dg_method, solver_type, bc_mode);
 
    if (check_residual) { domain.SetCheckResidual(true); }
+   if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
 
    if (mpi.IsRoot())
    {
