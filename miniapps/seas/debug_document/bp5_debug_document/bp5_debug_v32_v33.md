@@ -368,6 +368,13 @@ for linear basis) and provide correct evaluation at p≥2.
 
 All 32 unit tests pass (22 serial + 10 parallel) — zero regression at p=1.
 
+**p=1 baseline confirmation**: The p=1 full run with the v33b code (including
+the face-averaged evaluation fix) produces results identical to the previous
+v33 p=1 baseline. This confirms that the fix is truly zero-cost at p=1: the
+face-averaged shapes equal the centroid shapes for linear basis, and the
+per-quadrature-point jump equals the centroid jump for linear displacement
+fields. The recurrence interval, slip profiles, and stress drop are unchanged.
+
 ---
 
 ## 11. Why Antiplane Traction Works Without Penalty Correction

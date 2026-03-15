@@ -1956,8 +1956,9 @@ private:
       // In Tandem's BP5 mesh, Physical Surface(5) includes Y=0 faces
       // outside the fault. These are interior faces in MFEM and need
       // the DG skeleton RHS contribution from both elements.
-      // At Y=0, u_D = sgn(0)*Vp*t/2 = 0, so the practical effect is
-      // zero, but this ensures structural correctness matching Tandem.
+      // Tandem's bp5.lua boundary(): at Y=0, neither y>1 nor y<-1
+      // triggers, so u_D = (Vp*t, 0, 0) — the full plate velocity.
+      // This represents a locked fault (no relative slip).
       // ---------------------------------------------------------------
       for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
       {
@@ -1980,11 +1981,24 @@ private:
                centroid.Add(1.0 / ir_c.GetNPoints(), phys);
             }
          }
+         // Match Tandem's bp5.lua boundary function:
+         //   Vh = Vp * t
+         //   if y > 1: Vh = Vh / 2
+         //   elseif y < -1: Vh = -Vh / 2
+         //   return Vh, 0, 0
+         // At Y=0 (non-fault interior faces), Vh = Vp*t (full plate velocity)
          real_t u_D_int[3] = {0.0, 0.0, 0.0};
          {
-            real_t y_sign = (centroid(1) > 0.0) ? 1.0
-                          : (centroid(1) < 0.0) ? -1.0 : 0.0;
-            u_D_int[0] = y_sign * Vp_ * time / 2.0;
+            real_t Vh = Vp_ * time;
+            if (centroid(1) > 1.0)
+            {
+               Vh = Vh / 2.0;
+            }
+            else if (centroid(1) < -1.0)
+            {
+               Vh = -Vh / 2.0;
+            }
+            u_D_int[0] = Vh;
          }
 
          Array<int> vdofs1, vdofs2;
