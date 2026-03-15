@@ -1,7 +1,10 @@
-// BP5-QD 3D benchmark mesh for MFEM SEAS miniapp
-// Adapted from Tandem: examples/tandem/3d/bp5.geo
+// DEPRECATED: This file uses the old MFEM coordinate convention.
+// Use Tandem's bp5.geo directly instead (examples/tandem/3d/bp5.geo).
+// The SEAS-MFEM code now uses Tandem's coordinate system exclusively:
+//   X = along-strike, Y = fault-normal, Z = depth (negative downward)
+//   Boundary tags: 1=Natural (top+bottom), 3=Fault, 5=Dirichlet (far-field)
 //
-// MFEM coordinate convention:
+// Original MFEM coordinate convention (no longer supported):
 //   x = fault-normal       (Tandem Y)
 //   y = along-strike       (Tandem X)
 //   z = depth, positive down (Tandem -Z)

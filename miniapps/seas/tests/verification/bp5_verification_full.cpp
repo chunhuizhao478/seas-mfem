@@ -75,9 +75,11 @@ using namespace mfem::seas;
 // Inline mesh creation for smoke tests
 // ============================================================================
 
-/// Create a 3D hex mesh for BP5 with proper boundary attributes.
-/// Domain: [-Lx,Lx] x [-Ly,Ly] x [0,Lz]
-/// Boundary attributes: 1=x-, 2=x+, 3=y+, 4=y-, 5=z=0, 6=z=Lz
+/// Create a 3D hex mesh for BP5 with Tandem boundary attributes.
+/// Domain: [-Lx,Lx] x [-Ly,Ly] x [-Lz,0]
+/// Boundary attributes (Tandem tags):
+///   1 = Natural (z=0 top, z=-Lz bottom)
+///   5 = Dirichlet (x=±Lx, y=±Ly far-field)
 std::unique_ptr<Mesh> CreateBP5InlineMesh(
    int nx, int ny, int nz,
    real_t Lx, real_t Ly, real_t Lz)
@@ -92,6 +94,7 @@ std::unique_ptr<Mesh> CreateBP5InlineMesh(
       real_t *v = mesh->GetVertex(i);
       v[0] -= Lx;
       v[1] -= Ly;
+      v[2] -= Lz;  // Z ranges [-Lz, 0]
    }
 
    const real_t tol = 1e-6 * std::max({Lx, Ly, Lz});
@@ -112,13 +115,14 @@ std::unique_ptr<Mesh> CreateBP5InlineMesh(
       cz /= vertices.Size();
 
       int attr;
-      if (std::abs(cx - (-Lx)) < tol)      { attr = 1; }
-      else if (std::abs(cx - Lx) < tol)     { attr = 2; }
-      else if (std::abs(cy - Ly) < tol)     { attr = 3; }
-      else if (std::abs(cy - (-Ly)) < tol)  { attr = 4; }
-      else if (std::abs(cz) < tol)          { attr = 5; }
-      else if (std::abs(cz - Lz) < tol)     { attr = 6; }
-      else                                   { attr = 1; }
+      if (std::abs(cz) < tol || std::abs(cz + Lz) < tol)
+      {
+         attr = 1;  // Natural (top z=0, bottom z=-Lz)
+      }
+      else
+      {
+         attr = 5;  // Dirichlet (far-field x=±Lx, y=±Ly)
+      }
 
       mesh->SetBdrAttribute(i, attr);
    }

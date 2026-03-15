@@ -60,17 +60,18 @@ enum class BCMode
 ///
 /// using DG method with fault slip as interior jump BC.
 ///
-/// Coordinate convention (SCEC BP5):
-///   x1 = fault-normal
-///   x2 = along-strike
-///   x3 = depth (positive downward in SCEC, but mapped to mesh z-axis)
+/// Coordinate convention (matches Tandem / SCEC BP5):
+///   X = along-strike (SCEC x2)
+///   Y = fault-normal (SCEC x1)
+///   Z = depth, negative downward (Z=0 at surface)
 ///
-/// - Fault at x1=0 is an interior interface
+/// - Fault at Y=0 is an interior interface
 /// - Slip imposed as jump [[u]] on fault interior faces
-/// - Boundary loading controlled by BCMode:
-///   - Tandem (default): Dirichlet on x=+-Lx, y=+-Ly; Natural on z=0, z=Lz
-///   - XOnly: Dirichlet on x=+-Lx only; Natural on all other faces
-///   - AllDirichlet: Dirichlet on all faces (legacy, incorrect)
+/// - Boundary loading: u_X = sgn(Y) * Vp * t / 2 on Dirichlet faces
+/// - Boundary conditions (Tandem Physical Surface tags):
+///   - Tag 1 = Natural (top Z=0 + bottom Z=Z0)
+///   - Tag 3 = Fault (Y=0 interior)
+///   - Tag 5 = Dirichlet (far-field: Y=±Y1, X=±X1)
 ///
 /// Supports both BR2 (default, matching Tandem) and IP DG methods.
 ///
@@ -194,6 +195,7 @@ private:
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
    std::set<long> fault_face_keys_;     // Element-pair keys for fast lookup
    std::set<int> fault_shared_tagged_;  // Shared face indices from mesh tags
+
    real_t epsilon_;  // SIPG sign = -1
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
@@ -255,22 +257,10 @@ private:
 
    void SetupBoundaryMarkers()
    {
-      // Identify Dirichlet boundaries based on BCMode.
-      //
-      // MFEM boundary attributes (from bp5.geo):
-      //   1 = x = -Lx  (fault-normal, negative side)
-      //   2 = x = +Lx  (fault-normal, positive side)
-      //   3 = y = +Ly  (along-strike far-field)
-      //   4 = y = -Ly  (along-strike far-field)
-      //   5 = z = 0    (Earth's surface / free surface)
-      //   6 = z = Lz   (deep boundary)
-      //
-      // Tandem's BP5 (bp5.geo):
-      //   Physical Surface(1) = {bottom(),top()} → Natural (zero traction)
-      //   Physical Surface(5) = {diri()}         → Dirichlet (plate loading)
-      //   i.e., top (z=0) and bottom (z=-Lz) are Natural, far-field vertical
-      //   faces are Dirichlet. "boundary_linear=true" is just an optimization
-      //   flag, NOT a BC-type selector.
+      // Tandem Physical Surface tags:
+      //   Tag 1 = Natural (top Z=0 + bottom Z=Z0) → zero traction
+      //   Tag 3 = Fault (Y=0 interior) → handled separately
+      //   Tag 5 = Dirichlet (far-field: Y=±Y1, X=±X1) → plate loading
 
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
@@ -278,48 +268,30 @@ private:
 
       if (bc_mode_ == BCMode::AllDirichlet)
       {
-         // Legacy: all attrs Dirichlet (previous wrong implementation)
          for (int i = 0; i < num_bdr; i++)
          {
             dirichlet_bdr_marker_[i] = 1;
          }
       }
-      else if (bc_mode_ == BCMode::FarField)
+      else if (bc_mode_ == BCMode::FarField || bc_mode_ == BCMode::XOnly)
       {
-         // Far-field: attrs 1-4 Dirichlet, attrs 5-6 Natural
-         for (int i = 0; i < std::min(num_bdr, 4); i++)
+         // Mark only attr 5 as Dirichlet (Tandem tag for far-field faces)
+         for (int i = 0; i < num_bdr; i++)
          {
-            dirichlet_bdr_marker_[i] = 1;
+            int attr = i + 1;
+            if (attr == 5) { dirichlet_bdr_marker_[i] = 1; }
          }
-         // attrs 5,6 remain 0 → Natural (zero traction)
-      }
-      else if (bc_mode_ == BCMode::XOnly)
-      {
-         // Antiplane-style: only attrs 1-2 (x = +-Lx) Dirichlet
-         for (int i = 0; i < std::min(num_bdr, 2); i++)
-         {
-            dirichlet_bdr_marker_[i] = 1;
-         }
-         // attrs 3-6 remain 0 → Natural (zero traction)
       }
    }
 
    /// Build tag-based fault face lookup from mesh boundary element attributes.
    ///
-   /// In Gmsh meshes with Physical Surface 100 (fault), MFEM loads the fault
-   /// surface triangles as boundary elements with attribute 100. This method
-   /// finds the interior faces that correspond to those tagged boundary elements
-   /// by matching vertex sets.
-   ///
-   /// This matches Tandem's approach: only faces with BC::Fault tag are treated
-   /// as fault faces. Faces at the fault-boundary intersection (z=0 surface,
-   /// z=Wf base, y=±lf/2 tips) are assigned to other Physical Surfaces in the
-   /// Gmsh file and are NOT included.
+   /// Tandem mesh: tag 3 = Fault. Only faces with this tag are treated
+   /// as fault faces.
    void BuildFaultTaggedFaces()
    {
-      const int fault_attr = 100;  // Physical Surface tag for fault
-
-      // Check if the mesh has attribute 100
+      // Only support Tandem fault attr 3
+      int fault_attr = 3;
       bool has_fault_attr = false;
       for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
       {
@@ -446,13 +418,18 @@ private:
       // Compute FaultBasis for coordinate transforms
       if (num_fault_dofs_ > 0)
       {
+         // Tandem coordinate system:
+         //   X = along-strike, Y = fault-normal, Z = depth (negative down)
+         //   Fault at Y = 0
+         //   ref_normal = (0, -1, 0) matches Tandem's convention
+         //   Up = (0, 0, 1)
          Vector ref_normal(3);
          ref_normal = 0.0;
-         ref_normal(0) = 1.0;  // x1 is fault-normal
+         ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
 
          Vector up(3);
          up = 0.0;
-         up(2) = 1.0;  // Up direction (matches Tandem convention)
+         up(2) = 1.0;  // +Z = upward
 
          fault_basis_.Compute(mesh_, fault_interior_faces_, ref_normal, up);
 
@@ -470,46 +447,28 @@ private:
    bool IsFaultFace3D(FaceElementTransformations *FTr) const
    {
       // Tag-based detection: check if the face corresponds to a boundary
-      // element with the fault attribute (100). This matches Tandem's
-      // approach where fault faces are identified by their Physical Surface
-      // tag (BC::Fault), not by coordinates.
-      //
-      // In the Gmsh mesh, Physical Surface 100 marks fault faces. After
-      // BooleanFragments, these are strictly interior to the fault rectangle
-      // — faces at the fault boundary (z=0 surface, z=Wf base, y=±lf/2 tips)
-      // are assigned to other Physical Surfaces (Natural or Dirichlet).
-      //
-      // MFEM loads these as boundary elements with attribute 100. We match
-      // each interior face to its corresponding boundary element (same
-      // vertices) to check if it has the fault tag.
-
+      // element with the fault attribute (3 for Tandem mesh, 100 for MFEM mesh).
       if (fault_tagged_faces_.Size() > 0)
       {
-         // Use precomputed tagged face set
-         int face_idx = -1;
-         // Find face index: FTr gives us Elem1No, Elem2No. The face
-         // between them has an index in the mesh face table.
-         // We iterate fault_interior_faces_ which stores face indices,
-         // but during detection we need to check if THIS face is tagged.
-         // Use the element numbers to build a key.
          int e1 = FTr->Elem1No;
          int e2 = FTr->Elem2No;
          long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
          return fault_face_keys_.count(key) > 0;
       }
 
-      // Fallback: coordinate-based detection (used during initial setup
-      // before tags are processed, or for meshes without Physical Surface 100)
+      // Fallback: coordinate-based detection (Tandem convention only).
+      // Fault at Y=0, X in [-lf/2, lf/2], Z in [-Wf, 0]
       const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
       FTr->Face->SetIntPoint(&ip);
       Vector center(3);
       FTr->Face->Transform(ip, center);
 
       const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-      return std::abs(center(0)) < tol
-          && std::abs(center(1)) <= lf_ / 2.0 + tol
-          && center(2) >= -tol
-          && center(2) <= Wf_ + tol;
+
+      return std::abs(center(1)) < tol
+          && std::abs(center(0)) <= lf_ / 2.0 + tol
+          && center(2) >= -Wf_ - tol
+          && center(2) <= tol;
    }
 
    bool IsFaultFace3DShared(int shared_face) const
@@ -517,13 +476,14 @@ private:
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         // Tag-based: check if this shared face was tagged in BuildFaultTaggedFaces
+         // Tag-based: check if this shared face was tagged
          if (!fault_shared_tagged_.empty())
          {
             return fault_shared_tagged_.count(shared_face) > 0;
          }
 
-         // Fallback: coordinate-based (for meshes without Physical Surface 100)
+         // Fallback: coordinate-based (Tandem convention only)
+         // Fault at Y=0, X in [-lf/2,lf/2], Z in [-Wf,0]
          FaceElementTransformations *FTr =
             mesh_.GetSharedFaceTransformations(shared_face);
          if (FTr == nullptr) { return false; }
@@ -535,10 +495,10 @@ private:
          FTr->Face->Transform(ip, center);
 
          const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-         return std::abs(center(0)) < tol
-             && std::abs(center(1)) <= lf_ / 2.0 + tol
-             && center(2) >= -tol
-             && center(2) <= Wf_ + tol;
+
+         return std::abs(center(1)) < tol
+             && std::abs(center(0)) <= lf_ / 2.0 + tol
+             && center(2) >= -Wf_ - tol && center(2) <= tol;
 #endif
       }
       return false;
@@ -910,7 +870,7 @@ private:
             //   g^F = u_left - u_right = -delta_u → sign = -1
             // If nor(0) < 0: n points from right(K⁻) to left(K⁺)
             //   g^F = u_right - u_left = +delta_u → sign = +1
-            real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
+            real_t sign = (nor(1) > 0) ? -1.0 : 1.0;
 
             // Shapes
             Vector shape1(ndof1), shape2(ndof2);
@@ -1085,7 +1045,7 @@ private:
             CalcOrtho(FTr->Jacobian(), nor_q);
 
             w_all[q] = ip.weight;
-            slip_sign_all[q] = (nor_q(0) > 0) ? -1.0 : 1.0;
+            slip_sign_all[q] = (nor_q(1) > 0) ? -1.0 : 1.0;
          }
 
          // ===================================================================
@@ -1347,7 +1307,7 @@ private:
                Vector nor(dim);
                CalcOrtho(FTr->Jacobian(), nor);
 
-               real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
+               real_t sign = (nor(1) > 0) ? -1.0 : 1.0;
 
                Vector shape1(ndof1);
                fe1->CalcShape(eip1, shape1);
@@ -1490,7 +1450,7 @@ private:
                CalcOrtho(FTr->Jacobian(), nor_q);
 
                w_all[q] = ip.weight;
-               slip_sign_all[q] = (nor_q(0) > 0) ? -1.0 : 1.0;
+               slip_sign_all[q] = (nor_q(1) > 0) ? -1.0 : 1.0;
             }
 
             // Two-sided BR2 lifting (both elements contribute to lifting)
@@ -1668,11 +1628,13 @@ private:
                centroid.Add(1.0 / ir_c.GetNPoints(), phys);
             }
          }
-         real_t sign = (centroid(0) > 0.0) ? 1.0 : -1.0;
-
-         // Dirichlet value: u = (0, sgn(x)*Vp*t/2, 0)
+         // Tandem: sign from Y (centroid(1)), loading in X (component 0)
+         //   u_D = (sgn(Y)*Vp*t/2, 0, 0)
          real_t u_D[3] = {0.0, 0.0, 0.0};
-         u_D[1] = sign * Vp_ * time / 2.0;
+         {
+            real_t sign = (centroid(1) > 0.0) ? 1.0 : -1.0;
+            u_D[0] = sign * Vp_ * time / 2.0;
+         }
 
          // Get face transformation
          int face_idx, face_info;
@@ -1911,8 +1873,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          Vector coords(3);
          FTr->Face->Transform(ip, coords);
 
-         // x3 = depth (z-coordinate)
-         fault_depths_(i) = coords(2);
+         // Depth: -Z (Z is negative downward in Tandem, depth is positive)
+         fault_depths_(i) = -coords(2);
       }
 
       // Shared fault faces (parallel only)
@@ -1933,7 +1895,7 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             FTr->Face->Transform(ip, coords);
 
             int idx = fault_interior_faces_.Size() + i;
-            fault_depths_(idx) = coords(2);
+            fault_depths_(idx) = -coords(2);
          }
 #endif
       }
@@ -1966,9 +1928,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
          Vector coords(3);
          FTr->Face->Transform(ip, coords);
 
-         // x2 = along-strike (y-coordinate), x3 = depth (z-coordinate)
-         fault_x2_(i) = coords(1);
-         fault_x3_(i) = coords(2);
+         // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
+         fault_x2_(i) = coords(0);
+         fault_x3_(i) = -coords(2);
       }
 
       // Shared fault faces (parallel only)
@@ -1989,8 +1951,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             FTr->Face->Transform(ip, coords);
 
             int idx = fault_interior_faces_.Size() + i;
-            fault_x2_(idx) = coords(1);
-            fault_x3_(idx) = coords(2);
+            fault_x2_(idx) = coords(0);
+            fault_x3_(idx) = -coords(2);
          }
 #endif
       }
@@ -2307,7 +2269,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       // 4. Sign correction (same convention as slip assembly)
       Vector nor(dim);
       CalcOrtho(FTr->Jacobian(), nor);
-      real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
+      real_t sign = (nor(1) > 0) ? -1.0 : 1.0;
 
       // 5. Compute penalty correction based on DG method
       real_t correction[3] = {0.0, 0.0, 0.0};
@@ -2576,7 +2538,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          Vector nor(dim);
          CalcOrtho(FTr->Jacobian(), nor);
-         real_t sign = (nor(0) > 0) ? -1.0 : 1.0;
+         real_t sign = (nor(1) > 0) ? -1.0 : 1.0;
 
          real_t correction[3] = {0.0, 0.0, 0.0};
 

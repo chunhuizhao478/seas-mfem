@@ -122,14 +122,14 @@ public:
             s[1] /= s_len;
             s[2] /= s_len;
 
-            // dip = -(strike x n)
-            // Negated to match Tandem/SCEC convention where positive dip
-            // points physically downward (into the earth). Without negation,
-            // strike x n points upward in MFEM coords (z = depth positive down).
+            // dip = strike x n (no negation)
+            // Matches Tandem's Curvilinear.cpp:facetBasis().
+            // With ref_normal=(0,-1,0), up=(0,0,1):
+            //   n=(0,-1,0), strike=(1,0,0), dip=(0,0,-1) = downward.
             real_t d_vec[3];
-            d_vec[0] = -(s[1] * n_raw(2) - s[2] * n_raw(1));
-            d_vec[1] = -(s[2] * n_raw(0) - s[0] * n_raw(2));
-            d_vec[2] = -(s[0] * n_raw(1) - s[1] * n_raw(0));
+            d_vec[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
+            d_vec[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+            d_vec[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
 
             // tangent1 = dip, tangent2 = strike (Tandem convention)
             for (int d = 0; d < 3; d++)
@@ -224,11 +224,11 @@ public:
             s[1] /= s_len;
             s[2] /= s_len;
 
-            // dip = -(strike x n), negated for Tandem/SCEC convention
+            // dip = strike x n (no negation, matches Tandem)
             real_t d_vec[3];
-            d_vec[0] = -(s[1] * n_raw(2) - s[2] * n_raw(1));
-            d_vec[1] = -(s[2] * n_raw(0) - s[0] * n_raw(2));
-            d_vec[2] = -(s[0] * n_raw(1) - s[1] * n_raw(0));
+            d_vec[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
+            d_vec[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+            d_vec[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
 
             for (int d = 0; d < 3; d++)
             {

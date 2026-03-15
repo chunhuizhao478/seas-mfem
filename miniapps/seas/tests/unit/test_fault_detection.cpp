@@ -121,16 +121,12 @@ bool test_no_tag_in_mesh()
 
 bool test_boundary_tag_constants()
 {
-   TEST_ASSERT(SEASBoundaryTags::FARFIELD_LEFT == 1,
-               "FARFIELD_LEFT should be 1");
-   TEST_ASSERT(SEASBoundaryTags::FARFIELD_RIGHT == 2,
-               "FARFIELD_RIGHT should be 2");
-   TEST_ASSERT(SEASBoundaryTags::FREE_SURFACE == 3,
-               "FREE_SURFACE should be 3");
-   TEST_ASSERT(SEASBoundaryTags::BOTTOM == 4,
-               "BOTTOM should be 4");
-   TEST_ASSERT(SEASBoundaryTags::FAULT == 5,
-               "FAULT should be 5");
+   TEST_ASSERT(SEASBoundaryTags::NATURAL == 1,
+               "NATURAL should be 1");
+   TEST_ASSERT(SEASBoundaryTags::FAULT == 3,
+               "FAULT should be 3");
+   TEST_ASSERT(SEASBoundaryTags::DIRICHLET == 5,
+               "DIRICHLET should be 5");
 
    return true;
 }

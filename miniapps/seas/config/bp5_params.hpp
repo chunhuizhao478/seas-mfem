@@ -25,10 +25,10 @@ namespace seas
 /// BP5 is a 3D full elasticity problem with vector slip on a 2D fault plane.
 /// Reference: https://strike.scec.org/cvws/seas/download/SEAS_BP5_QD.pdf
 ///
-/// Coordinate convention (SCEC):
-///   x1 = fault-normal
-///   x2 = along-strike
-///   x3 = depth (positive downward)
+/// Coordinate convention (SCEC abstract → Tandem mesh):
+///   x1 = fault-normal  → Y (fault at Y=0)
+///   x2 = along-strike  → X
+///   x3 = depth (positive downward) → -Z (Z=0 at surface, negative down)
 ///
 /// All values are in SI units:
 /// - Length: meters [m]
@@ -306,9 +306,14 @@ struct BP5Params
          tau0_scalar += delta_tau_factor * eta_val * Vi_abs;
       }
 
-      // Direction: parallel to initial velocity
-      tau[0] = tau0_scalar * Vi[0] / Vi_abs;
-      tau[1] = tau0_scalar * Vi[1] / Vi_abs;
+      // Direction: negated to match Tandem convention.
+      // With ref_normal=(0,-1,0), the traction on the fault face for
+      // right-lateral loading is negative in the strike direction.
+      // tau_pre must have the same sign as the elastic traction so that
+      // tau_total = tau_pre + tau_elastic reinforces (not cancels).
+      // Tandem's bp5.lua: return -tau0 * Vi1/Vi, -tau0 * Vi2/Vi
+      tau[0] = -tau0_scalar * Vi[0] / Vi_abs;
+      tau[1] = -tau0_scalar * Vi[1] / Vi_abs;
    }
 
    /// Print parameters to output stream.

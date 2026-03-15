@@ -201,10 +201,9 @@ void TestTau0Vec()
    TEST_ASSERT(tau_mag > 0.0, "|tau0| > 0 outside nucleation");
    TEST_ASSERT(tau_mag < 1e8, "|tau0| < 100 MPa (physically reasonable)");
 
-   // tau should be parallel to V_init
-   // V_init = (V_zero, Vp) → nearly pure dip direction
-   // tau should be nearly pure dip direction (positive)
-   TEST_ASSERT(tau[1] > 0.0, "tau[1] > 0 (parallel to positive Vp)");
+   // tau is negated (Tandem convention: traction on -Y face for right-lateral)
+   // V_init = (V_zero, Vp) → tau = -tau0 * V/|V| → nearly pure negative strike
+   TEST_ASSERT(tau[1] < 0.0, "tau[1] < 0 (negated, Tandem convention)");
 
    // Pre-stress in nucleation zone
    p.tau0_vec(-25.0e3, 10.0e3, tau);
@@ -531,7 +530,7 @@ void TestTau0VecVSZone()
 
    TEST_ASSERT(tau_mag > 0.0, "|tau0| > 0 in VS zone");
    TEST_ASSERT(tau_mag < 1e8, "|tau0| < 100 MPa in VS zone");
-   TEST_ASSERT(tau[1] > 0.0, "tau[1] > 0 in VS zone (parallel to Vp)");
+   TEST_ASSERT(tau[1] < 0.0, "tau[1] < 0 in VS zone (negated, Tandem convention)");
 
    // Verify a=amax at this point
    TEST_NEAR(p.a_of_x2_x3(0.0, 30.0e3), p.amax, 1e-15,
