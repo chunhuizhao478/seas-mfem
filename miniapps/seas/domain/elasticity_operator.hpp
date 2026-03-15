@@ -362,27 +362,6 @@ private:
          std::set<int> vset(face_verts.begin(), face_verts.end());
          if (fault_bdr_vertex_sets.count(vset) > 0)
          {
-            // Post-filter: exclude faces at the fault boundary edges.
-            // In Tandem, these faces are assigned to Natural BC (top/bottom
-            // surfaces), not Fault BC. We approximate this by checking if
-            // the face centroid is within one element size of the fault
-            // rectangle boundary (z=0, z=Wf, y=±lf/2).
-            const IntegrationPoint &cip =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&cip);
-            Vector fc(3);
-            FTr->Face->Transform(cip, fc);
-
-            // Derive margin from adjacent element size (cube root of volume)
-            real_t vol = FTr->Elem1->Weight();
-            real_t h_elem = std::cbrt(vol);
-
-            bool at_boundary = (fc(2) < h_elem)             // z ≈ 0
-                            || (fc(2) > Wf_ - h_elem)       // z ≈ Wf
-                            || (std::abs(fc(1)) > lf_ / 2.0 - h_elem);  // y ≈ ±lf/2
-
-            if (at_boundary) { continue; }
-
             fault_tagged_faces_.Append(f);
 
             int e1 = FTr->Elem1No;
@@ -408,26 +387,6 @@ private:
             std::set<int> vset(face_verts.begin(), face_verts.end());
             if (fault_bdr_vertex_sets.count(vset) > 0)
             {
-               // Post-filter: exclude boundary edge faces (same as interior)
-               FaceElementTransformations *FTr =
-                  mesh_.GetSharedFaceTransformations(sf);
-               if (FTr == nullptr) { continue; }
-
-               const IntegrationPoint &cip =
-                  Geometries.GetCenter(FTr->GetGeometryType());
-               FTr->Face->SetIntPoint(&cip);
-               Vector fc(3);
-               FTr->Face->Transform(cip, fc);
-
-               real_t vol = FTr->Elem1->Weight();
-               real_t h_elem = std::cbrt(vol);
-
-               bool at_boundary = (fc(2) < h_elem)
-                               || (fc(2) > Wf_ - h_elem)
-                               || (std::abs(fc(1)) > lf_ / 2.0 - h_elem);
-
-               if (at_boundary) { continue; }
-
                fault_shared_tagged_.insert(sf);
             }
          }
@@ -2396,31 +2355,74 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
       else  // BR2
       {
-         // Match Tandem's traction formula for BR2:
-         //   T = {{σ·n̂}} - penalty * ([[u]] - δ)
-         // where penalty = NumFacets (dimensionless, = D+1 for simplices).
-         //
-         // This is an IP-style correction, NOT the BR2 lifting.
-         // Tandem (Elasticity.h line 132-133) returns NumFacets for BR2,
-         // making the correction numerically negligible during interseismic
-         // (penalty × meters ≈ 0 vs MPa-scale stress) but providing
-         // minimal regularization during fast coseismic slip.
-         //
-         // The previous BR2 lifting correction amplified the DG residual
-         // by μ/h ≈ 3.2e7, introducing a spurious traction bias that
-         // caused the deep VS zone to lock up (see bp5_debug_v24.md).
+         if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+
          Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
-         real_t penalty_val = (geom == Geometry::TETRAHEDRON)
+         real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
                                   ? real_t(dim + 1) : real_t(2 * dim);
+
+         const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
+         const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
          real_t jump[3];
          for (int c = 0; c < dim; c++)
          {
             jump[c] = u_jump[c] - sign * delta_u[c];
          }
-         for (int c = 0; c < dim; c++)
+
+         const IntegrationRule &ir_face =
+            IntRules.Get(FTr->GetGeometryType(), 0);
+         real_t w_centroid = ir_face.IntPoint(0).weight;
+
+         DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
+         face_int1 = 0.0;
+         face_int2 = 0.0;
+         for (int u = 0; u < dim; u++)
          {
-            correction[c] = penalty_val * jump[c];
+            for (int s = 0; s < dim; s++)
+            {
+               for (int m = 0; m < ndof1; m++)
+               {
+                  face_int1(u * dim + s, m) =
+                     w_centroid * shape1(m) * jump[u] * nor(s);
+               }
+               for (int m = 0; m < ndof2; m++)
+               {
+                  face_int2(u * dim + s, m) =
+                     w_centroid * shape2(m) * jump[u] * nor(s);
+               }
+            }
+         }
+
+         DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
+         MultABt(face_int1, Minv1, f_lifted1);
+         f_lifted1 *= 0.5;
+         MultABt(face_int2, Minv2, f_lifted2);
+         f_lifted2 *= 0.5;
+
+         for (int i = 0; i < dim; i++)
+         {
+            real_t sum = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               for (int s = 0; s < dim; s++)
+               {
+                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
+                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
+                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
+                  real_t eval1 = 0.0, eval2 = 0.0;
+                  for (int m = 0; m < ndof1; m++)
+                  {
+                     eval1 += shape1(m) * f_lifted1(u * dim + s, m);
+                  }
+                  for (int m = 0; m < ndof2; m++)
+                  {
+                     eval2 += shape2(m) * f_lifted2(u * dim + s, m);
+                  }
+                  sum += tn * (eval1 + eval2);
+               }
+            }
+            correction[i] = br2_penalty * 0.5 * sum;
          }
       }
 
@@ -2600,17 +2602,65 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
          else  // BR2
          {
-            // Match Tandem: IP-style penalty, not BR2 lifting.
-            // (Same as interior faces — see comment above.)
+            if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+
             Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
-            real_t penalty_val = (geom == Geometry::TETRAHEDRON)
+            real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
                                      ? real_t(dim + 1) : real_t(2 * dim);
+
+            const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
+            const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
             real_t jump[3];
             for (int c = 0; c < dim; c++)
                jump[c] = u_jump[c] - sign * delta_u[c];
-            for (int c = 0; c < dim; c++)
-               correction[c] = penalty_val * jump[c];
+
+            const IntegrationRule &ir_face =
+               IntRules.Get(FTr->GetGeometryType(), 0);
+            real_t w_centroid = ir_face.IntPoint(0).weight;
+
+            DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
+            face_int1 = 0.0;
+            face_int2 = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               for (int s = 0; s < dim; s++)
+               {
+                  for (int m = 0; m < ndof1; m++)
+                     face_int1(u * dim + s, m) =
+                        w_centroid * shape1(m) * jump[u] * nor(s);
+                  for (int m = 0; m < ndof2; m++)
+                     face_int2(u * dim + s, m) =
+                        w_centroid * shape2(m) * jump[u] * nor(s);
+               }
+            }
+
+            DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
+            MultABt(face_int1, Minv1, f_lifted1);
+            f_lifted1 *= 0.5;
+            MultABt(face_int2, Minv2, f_lifted2);
+            f_lifted2 *= 0.5;
+
+            for (int ci = 0; ci < dim; ci++)
+            {
+               real_t sum = 0.0;
+               for (int u = 0; u < dim; u++)
+               {
+                  for (int s = 0; s < dim; s++)
+                  {
+                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
+                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
+                                     + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
+                     real_t eval1 = 0.0, eval2 = 0.0;
+                     for (int m = 0; m < ndof1; m++)
+                        eval1 += shape1(m) * f_lifted1(u * dim + s, m);
+                     for (int m = 0; m < ndof2; m++)
+                        eval2 += shape2(m) * f_lifted2(u * dim + s, m);
+                     sum += tn * (eval1 + eval2);
+                  }
+               }
+               correction[ci] = br2_penalty * 0.5 * sum;
+            }
          }
 
          for (int c = 0; c < dim; c++)
