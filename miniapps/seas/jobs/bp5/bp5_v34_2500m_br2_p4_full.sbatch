@@ -3,8 +3,8 @@
 #SBATCH -o bp5_v34_p4_full_%j.out
 #SBATCH -e bp5_v34_p4_full_%j.err
 #SBATCH -p normal                    # Queue
-#SBATCH -N 4                         # 4 nodes
-#SBATCH -n 200                       # MPI tasks
+#SBATCH -N 16                        # 16 nodes
+#SBATCH -n 800                       # MPI tasks
 #SBATCH -t 48:00:00                  # 48 hours
 #SBATCH -A EAR20006                  # TACC allocation
 
