@@ -2182,9 +2182,13 @@ private:
             real_t br2_pen = (br2_geom == Geometry::TETRAHEDRON)
                                  ? real_t(dim + 1) : real_t(2 * dim);
 
-            // Elem1 contribution
-            DenseMatrix fl_q1(dim, nqp);
-            fl_q1 = 0.0;
+            // Combined BR2 lifted function evaluation at each quadrature point.
+            // Uses cross-element lifting: f_lifted_q = C:n:(r_1 + r_2)
+            // where r_k = Minv_k * face_int_k is the lift into element k.
+            // The 0.5 factor matches the bilinear form's L_q = 0.5 * sum
+            // structure (face_int already contains the {ψ} average factor 0.5).
+            DenseMatrix f_lifted_q(dim, nqp);
+            f_lifted_q = 0.0;
             for (int q = 0; q < nqp; q++)
             {
                Vector n_q(dim);
@@ -2200,18 +2204,25 @@ private:
                         real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * n_q(i)
                            + mu_val_ * ((i == u ? 1.0 : 0.0) * n_q(s)
                                         + (i == s ? 1.0 : 0.0) * n_q(u));
-                        real_t ev = 0.0;
+
+                        // Cross-element evaluation: sum over BOTH elements
+                        real_t eval1 = 0.0, eval2 = 0.0;
                         for (int m = 0; m < ndof1; m++)
                         {
-                           ev += shapes1(m, q) * f_lifted1(u * dim + s, m);
+                           eval1 += shapes1(m, q) * f_lifted1(u * dim + s, m);
                         }
-                        sum += tn * ev;
+                        for (int m = 0; m < ndof2; m++)
+                        {
+                           eval2 += shapes2(m, q) * f_lifted2(u * dim + s, m);
+                        }
+                        sum += tn * (eval1 + eval2);
                      }
                   }
-                  fl_q1(i, q) = sum;
+                  f_lifted_q(i, q) = 0.5 * sum;
                }
             }
 
+            // Elem1 contribution
             for (int q = 0; q < nqp; q++)
             {
                const IntegrationPoint &ip = ir.IntPoint(q);
@@ -2251,41 +2262,12 @@ private:
 
                      int idx = i * ndof1 + k;
                      elvec1(idx) += epsilon_ * wq * sym_val / (2.0 * detJ);
-                     elvec1(idx) += br2_pen * wq * shapes1(k, q) * fl_q1(i, q);
+                     elvec1(idx) += br2_pen * wq * shapes1(k, q) * f_lifted_q(i, q);
                   }
                }
             }
 
-            // Elem2 contribution
-            DenseMatrix fl_q2(dim, nqp);
-            fl_q2 = 0.0;
-            for (int q = 0; q < nqp; q++)
-            {
-               Vector n_q(dim);
-               for (int d = 0; d < dim; d++) { n_q(d) = nor_arr[q * dim + d]; }
-
-               for (int i = 0; i < dim; i++)
-               {
-                  real_t sum = 0.0;
-                  for (int u = 0; u < dim; u++)
-                  {
-                     for (int s = 0; s < dim; s++)
-                     {
-                        real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * n_q(i)
-                           + mu_val_ * ((i == u ? 1.0 : 0.0) * n_q(s)
-                                        + (i == s ? 1.0 : 0.0) * n_q(u));
-                        real_t ev = 0.0;
-                        for (int m = 0; m < ndof2; m++)
-                        {
-                           ev += shapes2(m, q) * f_lifted2(u * dim + s, m);
-                        }
-                        sum += tn * ev;
-                     }
-                  }
-                  fl_q2(i, q) = sum;
-               }
-            }
-
+            // Elem2 contribution (opposite penalty sign)
             for (int q = 0; q < nqp; q++)
             {
                const IntegrationPoint &ip = ir.IntPoint(q);
@@ -2325,7 +2307,7 @@ private:
 
                      int idx = i * ndof2 + k;
                      elvec2(idx) += epsilon_ * wq * sym_val / (2.0 * detJ);
-                     elvec2(idx) -= br2_pen * wq * shapes2(k, q) * fl_q2(i, q);
+                     elvec2(idx) -= br2_pen * wq * shapes2(k, q) * f_lifted_q(i, q);
                   }
                }
             }
@@ -2638,12 +2620,19 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          mesh_.GetInteriorFaceTransformations(face);
       if (FTr == nullptr) { continue; }
 
-      // Evaluate face centroid
+      // ============================================================
+      // v35: Per-quadrature-point traction evaluation with face averaging
+      //
+      // Previous code evaluated {σ·n̂} at face centroid only and used
+      // face-averaged shapes for BR2 correction. This is exact for p=1
+      // but wrong for p≥2 (stress varies across face, lifted function
+      // has spatial variation). Now we evaluate everything at each face
+      // quadrature point and face-average the result.
+      // ============================================================
+
+      // Face centroid IP (used for diagnostic coordinate output only)
       const IntegrationPoint &ip =
          Geometries.GetCenter(FTr->GetGeometryType());
-      FTr->SetAllIntPoints(&ip);
-      const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-      const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
 
       // Get DOFs
       Array<int> vdofs1, vdofs2;
@@ -2660,159 +2649,122 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       displacement.GetSubVector(vdofs1, u1_all);
       displacement.GetSubVector(vdofs2, u2_all);
 
-      // Compute gradient from each side: grad_u[d1, d2] = du_{d1}/dx_{d2}
-      DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
-      fe1->CalcDShape(eip1, dshape1_ref);
-      fe2->CalcDShape(eip2, dshape2_ref);
-
-      DenseMatrix Jinv1(dim), Jinv2(dim);
-      CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
-      CalcInverse(FTr->Elem2->Jacobian(), Jinv2);
-
-      DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
-      Mult(dshape1_ref, Jinv1, dshape1_phys);
-      Mult(dshape2_ref, Jinv2, dshape2_phys);
-
-      // Compute ∇u on each side (byNODES: u1_all has ndof1*3 entries)
-      // u_component_c at DOF k: u1_all(c * ndof1 + k)
-      DenseMatrix grad1(dim, dim), grad2(dim, dim);
-      grad1 = 0.0;
-      grad2 = 0.0;
-
-      for (int c = 0; c < dim; c++)
-      {
-         for (int d = 0; d < dim; d++)
-         {
-            real_t val1 = 0.0, val2 = 0.0;
-            for (int k = 0; k < ndof1; k++)
-            {
-               val1 += dshape1_phys(k, d) * u1_all(c * ndof1 + k);
-            }
-            for (int k = 0; k < ndof2; k++)
-            {
-               val2 += dshape2_phys(k, d) * u2_all(c * ndof2 + k);
-            }
-            grad1(c, d) = val1;
-            grad2(c, d) = val2;
-         }
-      }
-
-      // Average gradient
-      DenseMatrix avg_grad(dim, dim);
-      for (int i = 0; i < dim; i++)
-         for (int j = 0; j < dim; j++)
-            avg_grad(i, j) = 0.5 * (grad1(i, j) + grad2(i, j));
-
-      // Strain tensor: ε_{ij} = 0.5 * (∂u_i/∂x_j + ∂u_j/∂x_i)
-      DenseMatrix strain(dim, dim);
-      for (int i = 0; i < dim; i++)
-         for (int j = 0; j < dim; j++)
-            strain(i, j) = 0.5 * (avg_grad(i, j) + avg_grad(j, i));
-
-      // Stress tensor: σ_{ij} = λ * tr(ε) * δ_{ij} + 2μ * ε_{ij}
-      real_t tr_eps = strain(0, 0) + strain(1, 1) + strain(2, 2);
-
-      DenseMatrix stress(dim, dim);
-      for (int i = 0; i < dim; i++)
-         for (int j = 0; j < dim; j++)
-            stress(i, j) = lambda_val_ * tr_eps * (i == j ? 1.0 : 0.0)
-                           + 2.0 * mu_val_ * strain(i, j);
-
-      // Traction: T = σ · n (using fault basis normal)
+      // Fault basis and prescribed slip
       const auto &basis = fault_basis_.GetBasis(fi);
-      real_t T_global[3] = {0.0, 0.0, 0.0};
-      for (int i = 0; i < dim; i++)
-      {
-         for (int j = 0; j < dim; j++)
-         {
-            T_global[i] += stress(i, j) * basis.normal[j];
-         }
-      }
-
-      // === DG penalty correction: T -= penalty * ([[u]] - δ) ===
-      // This matches Tandem's traction formula:
-      //   t = {σ}·n + c0 * (E_q[0]*u[0] - E_q[1]*u[1] - f_q)
-      // where c0 = -penalty, so t = {σ}·n - penalty * ([[u]] - δ)
-
-      // 1. Compute displacement values at face centroid
-      Vector shape1(ndof1), shape2(ndof2);
-      fe1->CalcShape(eip1, shape1);
-      fe2->CalcShape(eip2, shape2);
-
-      real_t u1_val[3] = {0.0, 0.0, 0.0};
-      real_t u2_val[3] = {0.0, 0.0, 0.0};
-      for (int c = 0; c < dim; c++)
-      {
-         for (int k = 0; k < ndof1; k++)
-         {
-            u1_val[c] += shape1(k) * u1_all(c * ndof1 + k);
-         }
-         for (int k = 0; k < ndof2; k++)
-         {
-            u2_val[c] += shape2(k) * u2_all(c * ndof2 + k);
-         }
-      }
-
-      // 2. Displacement jump [[u]] = u1 - u2
-      real_t u_jump[3];
-      for (int c = 0; c < dim; c++)
-      {
-         u_jump[c] = u1_val[c] - u2_val[c];
-      }
-
-      // 3. Prescribed slip in global frame
       real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
       real_t delta_u[3];
       fault_basis_.EmbedSlip(fi, slip_local, delta_u);
 
-      // 4. Sign correction (same convention as slip assembly)
+      // Sign correction (same convention as slip assembly)
+      // Use centroid to get face normal for sign determination
+      FTr->SetAllIntPoints(&ip);
       Vector nor(dim);
       CalcOrtho(FTr->Jacobian(), nor);
       real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
 
-      // 5. Compute penalty correction based on DG method
+      // Element Jacobian inverses (constant for linear tets)
+      DenseMatrix Jinv1(dim), Jinv2(dim);
+      CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
+      CalcInverse(FTr->Elem2->Jacobian(), Jinv2);
+
+      // Face quadrature rule
+      int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+      const IntegrationRule &ir_trac = IntRules.Get(
+         FTr->GetGeometryType(), 2 * face_order + 1);
+      int nqp = ir_trac.GetNPoints();
+
+      // Accumulators for face-averaged traction components
+      real_t T_global[3] = {0.0, 0.0, 0.0};
+      real_t T_stress[3] = {0.0, 0.0, 0.0};
       real_t correction[3] = {0.0, 0.0, 0.0};
+      real_t sum_wq = 0.0;
 
       if (method_ == DGMethod::IP)
       {
-         // Tandem-style IP traction penalty: SCALAR × jump.
-         // Tandem uses: correction = -penalty * (u1 - u2 - slip)
-         // where penalty = (p(0) + p(1)) / 4,
-         //       p(side) = (D+1) * c_N_1 * (area/volume) * (c1²/c0)
-         //
-         // This is a SCALAR penalty applied equally to all jump components.
-         // MFEM's previous tensor-coupled penalty (C:n⊗n · jump) amplified
-         // the normal component 3× more than tangential, causing directional
-         // instability at fault edge faces (see bp5_debug_v27.md).
-
-         // Material stiffness bounds (isotropic)
-         real_t c0_mat = 2.0 * mu_val_;                           // min eigenvalue of C
-         real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;       // max eigenvalue of C
-
-         // Inverse inequality trace constant: c_N(p) = p*(p+D-1)/D
-         // (Tandem: InverseInequality.h, trace_constant(PolynomialDegree-1))
+         // IP penalty parameters (constant per face)
+         real_t c0_mat = 2.0 * mu_val_;
+         real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
          real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-
-         // Face area from unnormalized normal: |nor| = face area in physical space
          real_t face_area = nor.Norml2();
-
-         // Element volumes
          real_t vol1 = FTr->Elem1->Weight();
          real_t vol2 = FTr->Elem2->Weight();
-
-         // Tandem penalty formula per side
-         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1) * (c1_mat * c1_mat / c0_mat);
-         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2) * (c1_mat * c1_mat / c0_mat);
+         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+                     * (c1_mat * c1_mat / c0_mat);
+         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+                     * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
-         real_t jump[3];
-         for (int c = 0; c < dim; c++)
+         for (int q = 0; q < nqp; q++)
          {
-            jump[c] = u_jump[c] - sign * delta_u[c];
-         }
-         for (int c = 0; c < dim; c++)
-         {
-            correction[c] = penalty_ip * jump[c];
+            const IntegrationPoint &fip = ir_trac.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+            const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+            const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+            real_t wq = fip.weight;
+
+            // {σ·n̂} at quadrature point q
+            DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+            fe1->CalcDShape(eip1_q, dshape1_ref);
+            fe2->CalcDShape(eip2_q, dshape2_ref);
+            DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
+            Mult(dshape1_ref, Jinv1, dshape1_phys);
+            Mult(dshape2_ref, Jinv2, dshape2_phys);
+
+            DenseMatrix grad1(dim, dim), grad2(dim, dim);
+            grad1 = 0.0; grad2 = 0.0;
+            for (int c = 0; c < dim; c++)
+               for (int d = 0; d < dim; d++)
+               {
+                  for (int k = 0; k < ndof1; k++)
+                     grad1(c, d) += dshape1_phys(k, d)
+                                    * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     grad2(c, d) += dshape2_phys(k, d)
+                                    * u2_all(c * ndof2 + k);
+               }
+
+            real_t T_stress_q[3] = {0.0, 0.0, 0.0};
+            for (int ci = 0; ci < dim; ci++)
+            {
+               for (int cj = 0; cj < dim; cj++)
+               {
+                  real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
+                  real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
+                  real_t eps_ij = 0.5 * (ag + ag_t);
+                  // Accumulate stress(ci, cj) * n_hat(cj) directly
+                  real_t tr_contrib = (ci == cj)
+                     ? lambda_val_ * (0.5*((grad1(0,0)+grad2(0,0))
+                        + (grad1(1,1)+grad2(1,1))
+                        + (grad1(2,2)+grad2(2,2)))) : 0.0;
+                  real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
+                  T_stress_q[ci] += stress_ij * basis.normal[cj];
+               }
+            }
+
+            // Displacement values at q → penalty correction
+            Vector s1q(ndof1), s2q(ndof2);
+            fe1->CalcShape(eip1_q, s1q);
+            fe2->CalcShape(eip2_q, s2q);
+
+            real_t correction_q[3] = {0.0, 0.0, 0.0};
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++)
+                  u1q += s1q(k) * u1_all(c * ndof1 + k);
+               for (int k = 0; k < ndof2; k++)
+                  u2q += s2q(k) * u2_all(c * ndof2 + k);
+               real_t jump_c = (u1q - u2q) - sign * delta_u[c];
+               correction_q[c] = penalty_ip * jump_c;
+            }
+
+            // Accumulate face average
+            for (int c = 0; c < dim; c++)
+            {
+               T_stress[c] += wq * T_stress_q[c];
+               correction[c] += wq * correction_q[c];
+            }
+            sum_wq += wq;
          }
       }
       else  // BR2
@@ -2826,33 +2778,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
          const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
-         // Face integral: ∫_F shape(m) * ([[u]] - sign*δ) * nor dS
-         // Uses per-quadrature-point displacement jump for accuracy at p≥2
-         // (centroid jump is only exact for p=1).
-         int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-         const IntegrationRule &ir_lift =
-            IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
+         // Precompute shapes, normals, and face integrals for BR2 lifting
+         DenseMatrix shapes1(ndof1, nqp), shapes2(ndof2, nqp);
+         Vector nor_arr(dim * nqp), w_arr(nqp);
 
          DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
          face_int1 = 0.0;
          face_int2 = 0.0;
-         // Also accumulate face-averaged shapes for evaluation
-         Vector avg_shape1(ndof1), avg_shape2(ndof2);
-         avg_shape1 = 0.0;
-         avg_shape2 = 0.0;
-         real_t sum_w = 0.0;
-         for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
+
+         for (int q = 0; q < nqp; q++)
          {
-            const IntegrationPoint &fip = ir_lift.IntPoint(qp);
+            const IntegrationPoint &fip = ir_trac.IntPoint(q);
             FTr->SetAllIntPoints(&fip);
             const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
             const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
 
-            Vector s1q(ndof1), s2q(ndof2);
+            Vector s1q(shapes1.GetColumn(q), ndof1);
+            Vector s2q(shapes2.GetColumn(q), ndof2);
             fe1->CalcShape(eip1_q, s1q);
             fe2->CalcShape(eip2_q, s2q);
 
-            // Per-quadrature-point displacement jump
+            Vector nor_q(&nor_arr[q * dim], dim);
+            CalcOrtho(FTr->Jacobian(), nor_q);
+            w_arr[q] = fip.weight;
+
+            // Per-quadrature-point displacement jump for lifting
             real_t jump_q[3] = {0.0, 0.0, 0.0};
             for (int c = 0; c < dim; c++)
             {
@@ -2864,74 +2814,117 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                jump_q[c] = (u1q - u2q) - sign * delta_u[c];
             }
 
-            Vector nor_q(dim);
-            CalcOrtho(FTr->Jacobian(), nor_q);
-            real_t wq = fip.weight;
-
             for (int u = 0; u < dim; u++)
-            {
                for (int s = 0; s < dim; s++)
                {
                   for (int m = 0; m < ndof1; m++)
                      face_int1(u * dim + s, m) +=
-                        wq * s1q(m) * jump_q[u] * nor_q(s);
+                        w_arr[q] * s1q(m) * jump_q[u] * nor_q(s);
                   for (int m = 0; m < ndof2; m++)
                      face_int2(u * dim + s, m) +=
-                        wq * s2q(m) * jump_q[u] * nor_q(s);
+                        w_arr[q] * s2q(m) * jump_q[u] * nor_q(s);
                }
-            }
-
-            // Accumulate face-averaged shapes
-            for (int m = 0; m < ndof1; m++)
-               avg_shape1(m) += wq * s1q(m);
-            for (int m = 0; m < ndof2; m++)
-               avg_shape2(m) += wq * s2q(m);
-            sum_w += wq;
          }
-         // Normalize to get face-averaged shapes
-         avg_shape1 /= sum_w;
-         avg_shape2 /= sum_w;
-         // Restore FTr to centroid for gradient evaluation
-         FTr->SetAllIntPoints(&ip);
 
+         // Lift: f_lifted = 0.5 * Minv * face_int
          DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
          MultABt(face_int1, Minv1, f_lifted1);
          f_lifted1 *= 0.5;
          MultABt(face_int2, Minv2, f_lifted2);
          f_lifted2 *= 0.5;
 
-         // Evaluate lifted function using face-averaged shapes
-         // (centroid shapes have negative vertex values at p≥2 GaussLobatto,
-         // face-averaged shapes are non-negative and consistent with the
-         // one-DOF-per-face fault system)
-         for (int i = 0; i < dim; i++)
+         // Pass 2: evaluate traction at each quadrature point
+         for (int q = 0; q < nqp; q++)
          {
-            real_t sum = 0.0;
-            for (int u = 0; u < dim; u++)
-            {
-               for (int s = 0; s < dim; s++)
+            const IntegrationPoint &fip = ir_trac.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+            const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+            const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+            real_t wq = w_arr[q];
+
+            // {σ·n̂} at quadrature point q
+            DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+            fe1->CalcDShape(eip1_q, dshape1_ref);
+            fe2->CalcDShape(eip2_q, dshape2_ref);
+            DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
+            Mult(dshape1_ref, Jinv1, dshape1_phys);
+            Mult(dshape2_ref, Jinv2, dshape2_phys);
+
+            DenseMatrix grad1(dim, dim), grad2(dim, dim);
+            grad1 = 0.0; grad2 = 0.0;
+            for (int c = 0; c < dim; c++)
+               for (int d = 0; d < dim; d++)
                {
-                  real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[i]
-                     + mu_val_ * ((i == u ? 1.0 : 0.0) * basis.normal[s]
-                                + (i == s ? 1.0 : 0.0) * basis.normal[u]);
-                  real_t eval1 = 0.0, eval2 = 0.0;
-                  for (int m = 0; m < ndof1; m++)
-                     eval1 += avg_shape1(m) * f_lifted1(u * dim + s, m);
-                  for (int m = 0; m < ndof2; m++)
-                     eval2 += avg_shape2(m) * f_lifted2(u * dim + s, m);
-                  sum += tn * (eval1 + eval2);
+                  for (int k = 0; k < ndof1; k++)
+                     grad1(c, d) += dshape1_phys(k, d)
+                                    * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     grad2(c, d) += dshape2_phys(k, d)
+                                    * u2_all(c * ndof2 + k);
+               }
+
+            real_t T_stress_q[3] = {0.0, 0.0, 0.0};
+            for (int ci = 0; ci < dim; ci++)
+            {
+               for (int cj = 0; cj < dim; cj++)
+               {
+                  real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
+                  real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
+                  real_t eps_ij = 0.5 * (ag + ag_t);
+                  real_t tr_contrib = (ci == cj)
+                     ? lambda_val_ * (0.5*((grad1(0,0)+grad2(0,0))
+                        + (grad1(1,1)+grad2(1,1))
+                        + (grad1(2,2)+grad2(2,2)))) : 0.0;
+                  real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
+                  T_stress_q[ci] += stress_ij * basis.normal[cj];
                }
             }
-            correction[i] = br2_penalty * 0.5 * sum;
+
+            // BR2 correction at quadrature point q:
+            // Evaluate lifted function using per-point shapes (not avg_shapes)
+            real_t correction_q[3] = {0.0, 0.0, 0.0};
+            for (int i = 0; i < dim; i++)
+            {
+               real_t sum = 0.0;
+               for (int u = 0; u < dim; u++)
+                  for (int s = 0; s < dim; s++)
+                  {
+                     real_t tn = lambda_val_
+                           * (u == s ? 1.0 : 0.0) * basis.normal[i]
+                        + mu_val_
+                           * ((i == u ? 1.0 : 0.0) * basis.normal[s]
+                              + (i == s ? 1.0 : 0.0) * basis.normal[u]);
+                     real_t eval1 = 0.0, eval2 = 0.0;
+                     for (int m = 0; m < ndof1; m++)
+                        eval1 += shapes1(m, q)
+                                 * f_lifted1(u * dim + s, m);
+                     for (int m = 0; m < ndof2; m++)
+                        eval2 += shapes2(m, q)
+                                 * f_lifted2(u * dim + s, m);
+                     sum += tn * (eval1 + eval2);
+                  }
+               correction_q[i] = br2_penalty * 0.5 * sum;
+            }
+
+            // Accumulate face average
+            for (int c = 0; c < dim; c++)
+            {
+               T_stress[c] += wq * T_stress_q[c];
+               correction[c] += wq * correction_q[c];
+            }
+            sum_wq += wq;
          }
       }
 
-      // 6. Apply correction: T -= penalty * ([[u]] - δ)
-      // Store stress traction before applying correction (for diagnostics)
-      real_t T_stress[3] = {T_global[0], T_global[1], T_global[2]};
-      for (int c = 0; c < dim; c++)
+      // Normalize face average and combine
+      if (sum_wq > 0.0)
       {
-         T_global[c] -= correction[c];
+         for (int c = 0; c < dim; c++)
+         {
+            T_stress[c] /= sum_wq;
+            correction[c] /= sum_wq;
+            T_global[c] = T_stress[c] - correction[c];
+         }
       }
 
       // Traction decomposition diagnostic
@@ -2942,18 +2935,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
          fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
 
-         real_t jump_mag = 0.0;
-         if (method_ == DGMethod::IP)
-         {
-            for (int c = 0; c < dim; c++)
-            {
-               real_t jc = u_jump[c] - sign * delta_u[c];
-               jump_mag += jc * jc;
-            }
-            jump_mag = std::sqrt(jump_mag);
-         }
-
          // Get face coordinates
+         FTr->SetAllIntPoints(&ip);
          Vector fc(3);
          FTr->Face->SetIntPoint(&ip);
          FTr->Face->Transform(ip, fc);
@@ -2963,21 +2946,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                    << " stress_dip=" << tau_stress_local[0]
                    << " stress_strike=" << tau_stress_local[1]
                    << " corr_dip=" << tau_corr_local[0]
-                   << " corr_strike=" << tau_corr_local[1]
-                   << " |jump|=" << jump_mag;
-         if (method_ == DGMethod::IP)
-         {
-            // Recompute penalty for printing
-            real_t c0_mat = 2.0 * mu_val_;
-            real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-            real_t fa = nor.Norml2();
-            real_t v1 = FTr->Elem1->Weight();
-            real_t v2 = FTr->Elem2->Weight();
-            real_t c_N_1_d = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1_d * (fa / v1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1_d * (fa / v2) * (c1_mat * c1_mat / c0_mat);
-            mfem::out << " penalty=" << (p0 + p1) / 4.0;
-         }
+                   << " corr_strike=" << tau_corr_local[1];
          mfem::out << "\n";
       }
 
@@ -3009,11 +2978,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          int trac_idx = fault_interior_faces_.Size() + i;
 
+         // v35: Per-quadrature-point traction (same approach as interior faces)
          const IntegrationPoint &ip =
             Geometries.GetCenter(FTr->GetGeometryType());
-         FTr->SetAllIntPoints(&ip);
-         const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-         const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
 
          // Elem1 (local)
          const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
@@ -3029,7 +2996,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
          int ndof2 = fe2->GetDof();
 
-         // Get face-neighbor DOF values (vector space)
          Array<int> vdofs2;
          pfes->GetFaceNbrElementVDofs(nbr_idx, vdofs2);
          const Vector &nbr_data = par_u.FaceNbrData();
@@ -3039,117 +3005,116 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             u2_all(j) = nbr_data(vdofs2[j]);
          }
 
-         // Compute gradients
-         DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
-         fe1->CalcDShape(eip1, dshape1_ref);
-         fe2->CalcDShape(eip2, dshape2_ref);
-
-         DenseMatrix Jinv1(dim), Jinv2(dim);
-         CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
-         CalcInverse(FTr->Elem2->Jacobian(), Jinv2);
-
-         DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
-         Mult(dshape1_ref, Jinv1, dshape1_phys);
-         Mult(dshape2_ref, Jinv2, dshape2_phys);
-
-         // Compute ∇u on each side (byNODES ordering)
-         DenseMatrix grad1(dim, dim), grad2(dim, dim);
-         grad1 = 0.0;
-         grad2 = 0.0;
-
-         for (int c = 0; c < dim; c++)
-         {
-            for (int d = 0; d < dim; d++)
-            {
-               real_t val1 = 0.0, val2 = 0.0;
-               for (int k = 0; k < ndof1; k++)
-               {
-                  val1 += dshape1_phys(k, d) * u1_all(c * ndof1 + k);
-               }
-               for (int k = 0; k < ndof2; k++)
-               {
-                  val2 += dshape2_phys(k, d) * u2_all(c * ndof2 + k);
-               }
-               grad1(c, d) = val1;
-               grad2(c, d) = val2;
-            }
-         }
-
-         // Average gradient → strain → stress
-         DenseMatrix avg_grad(dim, dim);
-         for (int ci = 0; ci < dim; ci++)
-            for (int cj = 0; cj < dim; cj++)
-               avg_grad(ci, cj) = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
-
-         DenseMatrix strain(dim, dim);
-         for (int ci = 0; ci < dim; ci++)
-            for (int cj = 0; cj < dim; cj++)
-               strain(ci, cj) = 0.5 * (avg_grad(ci, cj) + avg_grad(cj, ci));
-
-         real_t tr_eps = strain(0, 0) + strain(1, 1) + strain(2, 2);
-
-         DenseMatrix stress(dim, dim);
-         for (int ci = 0; ci < dim; ci++)
-            for (int cj = 0; cj < dim; cj++)
-               stress(ci, cj) = lambda_val_ * tr_eps * (ci == cj ? 1.0 : 0.0)
-                                 + 2.0 * mu_val_ * strain(ci, cj);
-
-         // Traction: T = σ · n
+         // Fault basis and prescribed slip
          const auto &basis = fault_basis_.GetBasis(trac_idx);
-         real_t T_global[3] = {0.0, 0.0, 0.0};
-         for (int ci = 0; ci < dim; ci++)
-            for (int cj = 0; cj < dim; cj++)
-               T_global[ci] += stress(ci, cj) * basis.normal[cj];
-
-         // DG penalty correction: T -= penalty * ([[u]] - δ)
-         Vector shape1(ndof1), shape2(ndof2);
-         fe1->CalcShape(eip1, shape1);
-         fe2->CalcShape(eip2, shape2);
-
-         real_t u1_val[3] = {0.0, 0.0, 0.0};
-         real_t u2_val[3] = {0.0, 0.0, 0.0};
-         for (int c = 0; c < dim; c++)
-         {
-            for (int k = 0; k < ndof1; k++)
-               u1_val[c] += shape1(k) * u1_all(c * ndof1 + k);
-            for (int k = 0; k < ndof2; k++)
-               u2_val[c] += shape2(k) * u2_all(c * ndof2 + k);
-         }
-
-         real_t u_jump[3];
-         for (int c = 0; c < dim; c++)
-            u_jump[c] = u1_val[c] - u2_val[c];
-
          real_t slip_local[2] = {slip_bc(2 * trac_idx),
                                  slip_bc(2 * trac_idx + 1)};
          real_t delta_u[3];
          fault_basis_.EmbedSlip(trac_idx, slip_local, delta_u);
 
+         // Sign correction
+         FTr->SetAllIntPoints(&ip);
          Vector nor(dim);
          CalcOrtho(FTr->Jacobian(), nor);
          real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
 
+         // Element Jacobian inverses (constant for linear tets)
+         DenseMatrix Jinv1(dim), Jinv2(dim);
+         CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
+         CalcInverse(FTr->Elem2->Jacobian(), Jinv2);
+
+         // Face quadrature rule
+         int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+         const IntegrationRule &ir_trac = IntRules.Get(
+            FTr->GetGeometryType(), 2 * face_order + 1);
+         int nqp = ir_trac.GetNPoints();
+
+         // Accumulators for face-averaged traction
+         real_t T_global[3] = {0.0, 0.0, 0.0};
+         real_t T_stress[3] = {0.0, 0.0, 0.0};
          real_t correction[3] = {0.0, 0.0, 0.0};
+         real_t sum_wq = 0.0;
 
          if (method_ == DGMethod::IP)
          {
-            // Tandem-style scalar IP penalty (same as interior faces)
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
             real_t face_area = nor.Norml2();
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
-
-            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2) * (c1_mat * c1_mat / c0_mat);
+            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+                        * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+                        * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
 
-            real_t jump[3];
-            for (int c = 0; c < dim; c++)
-               jump[c] = u_jump[c] - sign * delta_u[c];
-            for (int c = 0; c < dim; c++)
-               correction[c] = penalty_ip * jump[c];
+            for (int q = 0; q < nqp; q++)
+            {
+               const IntegrationPoint &fip = ir_trac.IntPoint(q);
+               FTr->SetAllIntPoints(&fip);
+               const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+               const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+               real_t wq = fip.weight;
+
+               DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+               fe1->CalcDShape(eip1_q, dshape1_ref);
+               fe2->CalcDShape(eip2_q, dshape2_ref);
+               DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
+               Mult(dshape1_ref, Jinv1, dshape1_phys);
+               Mult(dshape2_ref, Jinv2, dshape2_phys);
+
+               DenseMatrix grad1(dim, dim), grad2(dim, dim);
+               grad1 = 0.0; grad2 = 0.0;
+               for (int c = 0; c < dim; c++)
+                  for (int d = 0; d < dim; d++)
+                  {
+                     for (int k = 0; k < ndof1; k++)
+                        grad1(c, d) += dshape1_phys(k, d)
+                                       * u1_all(c * ndof1 + k);
+                     for (int k = 0; k < ndof2; k++)
+                        grad2(c, d) += dshape2_phys(k, d)
+                                       * u2_all(c * ndof2 + k);
+                  }
+
+               real_t T_stress_q[3] = {0.0, 0.0, 0.0};
+               for (int ci = 0; ci < dim; ci++)
+                  for (int cj = 0; cj < dim; cj++)
+                  {
+                     real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
+                     real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
+                     real_t eps_ij = 0.5 * (ag + ag_t);
+                     real_t tr_contrib = (ci == cj)
+                        ? lambda_val_ * (0.5*((grad1(0,0)+grad2(0,0))
+                           + (grad1(1,1)+grad2(1,1))
+                           + (grad1(2,2)+grad2(2,2)))) : 0.0;
+                     real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
+                     T_stress_q[ci] += stress_ij * basis.normal[cj];
+                  }
+
+               Vector s1q(ndof1), s2q(ndof2);
+               fe1->CalcShape(eip1_q, s1q);
+               fe2->CalcShape(eip2_q, s2q);
+
+               real_t correction_q[3] = {0.0, 0.0, 0.0};
+               for (int c = 0; c < dim; c++)
+               {
+                  real_t u1q = 0.0, u2q = 0.0;
+                  for (int k = 0; k < ndof1; k++)
+                     u1q += s1q(k) * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     u2q += s2q(k) * u2_all(c * ndof2 + k);
+                  real_t jump_c = (u1q - u2q) - sign * delta_u[c];
+                  correction_q[c] = penalty_ip * jump_c;
+               }
+
+               for (int c = 0; c < dim; c++)
+               {
+                  T_stress[c] += wq * T_stress_q[c];
+                  correction[c] += wq * correction_q[c];
+               }
+               sum_wq += wq;
+            }
          }
          else  // BR2
          {
@@ -3162,30 +3127,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
-            // Face integral with per-quadrature-point displacement jump
-            int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-            const IntegrationRule &ir_lift =
-               IntRules.Get(FTr->GetGeometryType(), 2 * face_order);
+            DenseMatrix shapes1(ndof1, nqp), shapes2(ndof2, nqp);
+            Vector nor_arr(dim * nqp), w_arr(nqp);
 
             DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
             face_int1 = 0.0;
             face_int2 = 0.0;
-            Vector avg_shape1(ndof1), avg_shape2(ndof2);
-            avg_shape1 = 0.0;
-            avg_shape2 = 0.0;
-            real_t sum_w = 0.0;
-            for (int qp = 0; qp < ir_lift.GetNPoints(); qp++)
+
+            for (int q = 0; q < nqp; q++)
             {
-               const IntegrationPoint &fip = ir_lift.IntPoint(qp);
+               const IntegrationPoint &fip = ir_trac.IntPoint(q);
                FTr->SetAllIntPoints(&fip);
                const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
                const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
 
-               Vector s1q(ndof1), s2q(ndof2);
+               Vector s1q(shapes1.GetColumn(q), ndof1);
+               Vector s2q(shapes2.GetColumn(q), ndof2);
                fe1->CalcShape(eip1_q, s1q);
                fe2->CalcShape(eip2_q, s2q);
 
-               // Per-quadrature-point displacement jump
+               Vector nor_q(&nor_arr[q * dim], dim);
+               CalcOrtho(FTr->Jacobian(), nor_q);
+               w_arr[q] = fip.weight;
+
                real_t jump_q[3] = {0.0, 0.0, 0.0};
                for (int c = 0; c < dim; c++)
                {
@@ -3197,32 +3161,17 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   jump_q[c] = (u1q - u2q) - sign * delta_u[c];
                }
 
-               Vector nor_q(dim);
-               CalcOrtho(FTr->Jacobian(), nor_q);
-               real_t wq = fip.weight;
-
                for (int u = 0; u < dim; u++)
-               {
                   for (int s = 0; s < dim; s++)
                   {
                      for (int m = 0; m < ndof1; m++)
                         face_int1(u * dim + s, m) +=
-                           wq * s1q(m) * jump_q[u] * nor_q(s);
+                           w_arr[q] * s1q(m) * jump_q[u] * nor_q(s);
                      for (int m = 0; m < ndof2; m++)
                         face_int2(u * dim + s, m) +=
-                           wq * s2q(m) * jump_q[u] * nor_q(s);
+                           w_arr[q] * s2q(m) * jump_q[u] * nor_q(s);
                   }
-               }
-
-               for (int m = 0; m < ndof1; m++)
-                  avg_shape1(m) += wq * s1q(m);
-               for (int m = 0; m < ndof2; m++)
-                  avg_shape2(m) += wq * s2q(m);
-               sum_w += wq;
             }
-            avg_shape1 /= sum_w;
-            avg_shape2 /= sum_w;
-            FTr->SetAllIntPoints(&ip);
 
             DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
             MultABt(face_int1, Minv1, f_lifted1);
@@ -3230,32 +3179,92 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             MultABt(face_int2, Minv2, f_lifted2);
             f_lifted2 *= 0.5;
 
-            for (int ci = 0; ci < dim; ci++)
+            for (int q = 0; q < nqp; q++)
             {
-               real_t sum = 0.0;
-               for (int u = 0; u < dim; u++)
-               {
-                  for (int s = 0; s < dim; s++)
+               const IntegrationPoint &fip = ir_trac.IntPoint(q);
+               FTr->SetAllIntPoints(&fip);
+               const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
+               const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
+               real_t wq = w_arr[q];
+
+               DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+               fe1->CalcDShape(eip1_q, dshape1_ref);
+               fe2->CalcDShape(eip2_q, dshape2_ref);
+               DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
+               Mult(dshape1_ref, Jinv1, dshape1_phys);
+               Mult(dshape2_ref, Jinv2, dshape2_phys);
+
+               DenseMatrix grad1(dim, dim), grad2(dim, dim);
+               grad1 = 0.0; grad2 = 0.0;
+               for (int c = 0; c < dim; c++)
+                  for (int d = 0; d < dim; d++)
                   {
-                     real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * basis.normal[ci]
-                        + mu_val_ * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
-                                     + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
-                     real_t eval1 = 0.0, eval2 = 0.0;
-                     for (int m = 0; m < ndof1; m++)
-                        eval1 += avg_shape1(m) * f_lifted1(u * dim + s, m);
-                     for (int m = 0; m < ndof2; m++)
-                        eval2 += avg_shape2(m) * f_lifted2(u * dim + s, m);
-                     sum += tn * (eval1 + eval2);
+                     for (int k = 0; k < ndof1; k++)
+                        grad1(c, d) += dshape1_phys(k, d)
+                                       * u1_all(c * ndof1 + k);
+                     for (int k = 0; k < ndof2; k++)
+                        grad2(c, d) += dshape2_phys(k, d)
+                                       * u2_all(c * ndof2 + k);
                   }
+
+               real_t T_stress_q[3] = {0.0, 0.0, 0.0};
+               for (int ci = 0; ci < dim; ci++)
+                  for (int cj = 0; cj < dim; cj++)
+                  {
+                     real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
+                     real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
+                     real_t eps_ij = 0.5 * (ag + ag_t);
+                     real_t tr_contrib = (ci == cj)
+                        ? lambda_val_ * (0.5*((grad1(0,0)+grad2(0,0))
+                           + (grad1(1,1)+grad2(1,1))
+                           + (grad1(2,2)+grad2(2,2)))) : 0.0;
+                     real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
+                     T_stress_q[ci] += stress_ij * basis.normal[cj];
+                  }
+
+               real_t correction_q[3] = {0.0, 0.0, 0.0};
+               for (int ci = 0; ci < dim; ci++)
+               {
+                  real_t sum = 0.0;
+                  for (int u = 0; u < dim; u++)
+                     for (int s = 0; s < dim; s++)
+                     {
+                        real_t tn = lambda_val_
+                              * (u == s ? 1.0 : 0.0) * basis.normal[ci]
+                           + mu_val_
+                              * ((ci == u ? 1.0 : 0.0) * basis.normal[s]
+                                 + (ci == s ? 1.0 : 0.0) * basis.normal[u]);
+                        real_t eval1 = 0.0, eval2 = 0.0;
+                        for (int m = 0; m < ndof1; m++)
+                           eval1 += shapes1(m, q)
+                                    * f_lifted1(u * dim + s, m);
+                        for (int m = 0; m < ndof2; m++)
+                           eval2 += shapes2(m, q)
+                                    * f_lifted2(u * dim + s, m);
+                        sum += tn * (eval1 + eval2);
+                     }
+                  correction_q[ci] = br2_penalty * 0.5 * sum;
                }
-               correction[ci] = br2_penalty * 0.5 * sum;
+
+               for (int c = 0; c < dim; c++)
+               {
+                  T_stress[c] += wq * T_stress_q[c];
+                  correction[c] += wq * correction_q[c];
+               }
+               sum_wq += wq;
             }
          }
 
-         // Store stress traction before correction (for diagnostics)
-         real_t T_stress[3] = {T_global[0], T_global[1], T_global[2]};
-         for (int c = 0; c < dim; c++)
-            T_global[c] -= correction[c];
+         // Normalize face average and combine
+         if (sum_wq > 0.0)
+         {
+            for (int c = 0; c < dim; c++)
+            {
+               T_stress[c] /= sum_wq;
+               correction[c] /= sum_wq;
+               T_global[c] = T_stress[c] - correction[c];
+            }
+         }
 
          // Traction decomposition diagnostic (shared faces)
          if (diag_traction_decomp_)
@@ -3265,23 +3274,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
             fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
 
-            real_t jump_mag = 0.0;
-            if (method_ == DGMethod::IP)
-            {
-               for (int c = 0; c < dim; c++)
-               {
-                  real_t jc = u_jump[c] - sign * delta_u[c];
-                  jump_mag += jc * jc;
-               }
-               jump_mag = std::sqrt(jump_mag);
-            }
-
-            // Get face coordinates
+            FTr->SetAllIntPoints(&ip);
             Vector fc(3);
-            const IntegrationPoint &fip =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&fip);
-            FTr->Face->Transform(fip, fc);
+            FTr->Face->SetIntPoint(&ip);
+            FTr->Face->Transform(ip, fc);
 
             mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
                       << " rank=" << rank
@@ -3289,19 +3285,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                       << " stress_dip=" << tau_stress_local[0]
                       << " stress_strike=" << tau_stress_local[1]
                       << " corr_dip=" << tau_corr_local[0]
-                      << " corr_strike=" << tau_corr_local[1]
-                      << " |jump|=" << jump_mag;
-            if (method_ == DGMethod::IP)
-            {
-               real_t c0_mat = 2.0 * mu_val_;
-               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               real_t fa = nor.Norml2();
-               real_t v1 = FTr->Elem1->Weight();
-               real_t v2 = FTr->Elem2->Weight();
-               real_t p0 = (dim + 1) * 1.0 * (fa / v1) * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * 1.0 * (fa / v2) * (c1_mat * c1_mat / c0_mat);
-               mfem::out << " penalty=" << (p0 + p1) / 4.0;
-            }
+                      << " corr_strike=" << tau_corr_local[1];
             mfem::out << "\n";
          }
 
