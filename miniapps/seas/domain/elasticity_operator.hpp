@@ -1967,48 +1967,43 @@ private:
             mesh_.GetInteriorFaceTransformations(f);
          if (FTr == nullptr) { continue; }
 
-         // Compute u_D as the prescribed JUMP = boundary(elem1) - boundary(elem2).
+         // Prescribed JUMP u_D = u1 - u2 at non-fault Y=0 interior faces.
          //
-         // MFEM's interior Dirichlet assembly enforces [[u]] = u1 - u2 = u_D.
-         // Tandem's boundary function returns an ABSOLUTE displacement at a point,
-         // and uses c00 = 0.5*sign to decompose it correctly for each side.
+         // Tandem's bp5.lua boundary() returns absolute displacement:
+         //   Y > 0: +Vp*t/2,  Y < 0: -Vp*t/2
+         // The jump across Y=0 is ±Vp*t depending on element ordering.
          //
-         // To match Tandem without restructuring the assembly, we evaluate the
-         // boundary function at each element's centroid and take the difference.
-         // For Y=0 faces: elem1 centroid at Y~-h/2, elem2 at Y~+h/2 (or vice
-         // versa), giving u_D = (-Vp*t/2) - (Vp*t/2) = -Vp*t (or +Vp*t).
-         // The sign automatically adapts to the element ordering.
+         // Each element's centroid Y-coordinate determines its side:
+         //   sign1 = sgn(elem1_centroid_Y), sign2 = sgn(elem2_centroid_Y)
+         //   u_D = (sign1 - sign2) * Vp*t/2
+         //
+         // This matches Tandem: each DG element "knows" which side of Y=0
+         // it is on, and the prescribed jump follows from the difference
+         // of the two sides' far-field displacements.
 
-         // Compute element centroids
-         auto eval_boundary = [&](int elem_no) -> real_t
+         auto get_elem_y_sign = [&](int elem_no) -> real_t
          {
-            ElementTransformation *eltrans = mesh_.GetElementTransformation(elem_no);
+            ElementTransformation *eltrans =
+               mesh_.GetElementTransformation(elem_no);
             const IntegrationRule &ir_c = IntRules.Get(
                eltrans->GetGeometryType(), 1);
-            Vector c(3);
-            c = 0.0;
+            real_t y_avg = 0.0;
             for (int p = 0; p < ir_c.GetNPoints(); p++)
             {
                eltrans->SetIntPoint(&ir_c.IntPoint(p));
                Vector phys(3);
                eltrans->Transform(ir_c.IntPoint(p), phys);
-               c.Add(1.0 / ir_c.GetNPoints(), phys);
+               y_avg += phys(1);
             }
-            // Tandem bp5.lua boundary function
-            real_t Vh = Vp_ * time;
-            if (c(1) > 1.0)
-            {
-               Vh = Vh / 2.0;
-            }
-            else if (c(1) < -1.0)
-            {
-               Vh = -Vh / 2.0;
-            }
-            return Vh;
+            y_avg /= ir_c.GetNPoints();
+            return (y_avg > 0.0) ? 1.0 : -1.0;
          };
 
+         real_t sign1 = get_elem_y_sign(FTr->Elem1No);
+         real_t sign2 = get_elem_y_sign(FTr->Elem2No);
+
          real_t u_D_int[3] = {0.0, 0.0, 0.0};
-         u_D_int[0] = eval_boundary(FTr->Elem1No) - eval_boundary(FTr->Elem2No);
+         u_D_int[0] = (sign1 - sign2) * 0.5 * Vp_ * time;
 
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);

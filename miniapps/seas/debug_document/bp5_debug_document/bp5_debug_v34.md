@@ -276,7 +276,57 @@ To match Tandem in MFEM's framework: `u_D = boundary(elem1) - boundary(elem2)`
 
 ---
 
-## 10. Cumulative Fix History
+## 10. Why Not Implement It Exactly Like Tandem?
+
+We could restructure MFEM's assembly to use absolute `f_q` with Tandem's
+`0.5*sign` coefficients. The required changes:
+
+1. Set `u_D = boundary(face_centroid)` — absolute displacement
+2. Flip symmetry sign for elem2: `elvec2 -= epsilon * sym_val * w2`
+   (currently `+=`, needs to match Tandem's `-0.5*f_q` for side 1)
+3. Penalty signs already correct (elem1 `+=`, elem2 `-=` matches
+   Tandem's sign = +1 for side 0, -1 for side 1)
+
+### Why the v34b approach is equivalent
+
+MFEM's assembly structure:
+```cpp
+// Penalty (already matches Tandem's sign convention):
+elvec1 += penalty * u_D * shape1;   // side 0: +penalty * f_q
+elvec2 -= penalty * u_D * shape2;   // side 1: -penalty * f_q
+
+// Symmetry (both += for jump-based u_D):
+elvec1 += epsilon * sym(u_D) * w1;  // 0.5 factor built into w1
+elvec2 += epsilon * sym(u_D) * w2;  // same sign — correct for JUMP u_D
+```
+
+For jump-based u_D, the symmetry term has the SAME sign for both elements.
+This follows from the standard DG formulation where the symmetry involves
+`{{C:∇v·n}} · [[u]]` — the average `{{}}` uses the same normal for both
+sides, giving same-sign contributions.
+
+For absolute f_q (Tandem style), the symmetry needs OPPOSITE signs because
+the BC correction modifies `u_hat - u_self` differently for each side
+(+0.5*f_q for side 0, -0.5*f_q for side 1).
+
+Both formulations are mathematically equivalent. The penalty term dominates
+(stiffness ~μ/h ≈ 3.2×10⁷) and has the correct signs in either approach.
+The symmetry term (order ~μ) is much smaller and primarily affects
+convergence rate, not stability.
+
+### Decision
+
+We use the jump-based approach (v34b) because it works within MFEM's
+existing assembly structure without modifying any signs. The absolute-value
+approach would require restructuring the assembly and could introduce
+sign bugs if applied inconsistently across IP/BR2 paths.
+
+If results are unsatisfactory, we can revisit and restructure to match
+Tandem's assembly exactly.
+
+---
+
+## 11. Cumulative Fix History
 
 | Fix | Description | Status |
 |-----|-------------|--------|
