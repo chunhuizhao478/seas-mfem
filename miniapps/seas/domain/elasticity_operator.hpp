@@ -1967,39 +1967,48 @@ private:
             mesh_.GetInteriorFaceTransformations(f);
          if (FTr == nullptr) { continue; }
 
-         // Compute face centroid to determine u_D
-         Vector centroid(3);
-         centroid = 0.0;
+         // Compute u_D as the prescribed JUMP = boundary(elem1) - boundary(elem2).
+         //
+         // MFEM's interior Dirichlet assembly enforces [[u]] = u1 - u2 = u_D.
+         // Tandem's boundary function returns an ABSOLUTE displacement at a point,
+         // and uses c00 = 0.5*sign to decompose it correctly for each side.
+         //
+         // To match Tandem without restructuring the assembly, we evaluate the
+         // boundary function at each element's centroid and take the difference.
+         // For Y=0 faces: elem1 centroid at Y~-h/2, elem2 at Y~+h/2 (or vice
+         // versa), giving u_D = (-Vp*t/2) - (Vp*t/2) = -Vp*t (or +Vp*t).
+         // The sign automatically adapts to the element ordering.
+
+         // Compute element centroids
+         auto eval_boundary = [&](int elem_no) -> real_t
          {
-            const IntegrationRule &ir_c = IntRules.Get(FTr->FaceGeom, 1);
+            ElementTransformation *eltrans = mesh_.GetElementTransformation(elem_no);
+            const IntegrationRule &ir_c = IntRules.Get(
+               eltrans->GetGeometryType(), 1);
+            Vector c(3);
+            c = 0.0;
             for (int p = 0; p < ir_c.GetNPoints(); p++)
             {
-               const IntegrationPoint &ip = ir_c.IntPoint(p);
-               FTr->SetAllIntPoints(&ip);
+               eltrans->SetIntPoint(&ir_c.IntPoint(p));
                Vector phys(3);
-               FTr->Face->Transform(ip, phys);
-               centroid.Add(1.0 / ir_c.GetNPoints(), phys);
+               eltrans->Transform(ir_c.IntPoint(p), phys);
+               c.Add(1.0 / ir_c.GetNPoints(), phys);
             }
-         }
-         // Match Tandem's bp5.lua boundary function:
-         //   Vh = Vp * t
-         //   if y > 1: Vh = Vh / 2
-         //   elseif y < -1: Vh = -Vh / 2
-         //   return Vh, 0, 0
-         // At Y=0 (non-fault interior faces), Vh = Vp*t (full plate velocity)
-         real_t u_D_int[3] = {0.0, 0.0, 0.0};
-         {
+            // Tandem bp5.lua boundary function
             real_t Vh = Vp_ * time;
-            if (centroid(1) > 1.0)
+            if (c(1) > 1.0)
             {
                Vh = Vh / 2.0;
             }
-            else if (centroid(1) < -1.0)
+            else if (c(1) < -1.0)
             {
                Vh = -Vh / 2.0;
             }
-            u_D_int[0] = Vh;
-         }
+            return Vh;
+         };
+
+         real_t u_D_int[3] = {0.0, 0.0, 0.0};
+         u_D_int[0] = eval_boundary(FTr->Elem1No) - eval_boundary(FTr->Elem2No);
 
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
