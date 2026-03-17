@@ -3052,11 +3052,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
-               // Canonical correction: multiply by sign so the result
-               // is invariant to MFEM element ordering (same fix as
-               // shared faces in v38c — see debug doc Section 7.2).
+               // Canonical correction: sign * maps MFEM ordering to
+               // physical convention. Negated because n̂_fault = (0,-1,0)
+               // reverses the standard DG formula sign on the penalty
+               // term (see v39 debug doc Section 12.2).
                real_t jump_c = (u1q - u2q) - sign * delta_u[c];
-               correction_q[c] = penalty_ip * sign * jump_c;
+               correction_q[c] = -penalty_ip * sign * jump_c;
             }
 
             // Accumulate face average
@@ -3415,8 +3416,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   //   sign * ((u1-u2) - sign*delta_u)
                   //   = sign*(u1-u2) - delta_u
                   // where sign*(u1-u2) is invariant across ranks.
+                  // Negated: n̂_fault = (0,-1,0) reverses the standard
+                  // DG penalty sign (see v39 debug doc Section 12.2).
                   real_t jump_raw = (u1q - u2q) - sign * delta_u[c];
-                  correction_q[c] = penalty_ip * sign * jump_raw;
+                  correction_q[c] = -penalty_ip * sign * jump_raw;
                }
 
                for (int c = 0; c < dim; c++)
