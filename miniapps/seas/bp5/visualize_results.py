@@ -337,7 +337,8 @@ def main():
         color_idx += 1
 
     # Primary MFEM dataset
-    sources.append(("MFEM", "mfem", args.mfem_prefix,
+    primary_label = f"MFEM {os.path.basename(args.mfem_prefix)}"
+    sources.append((primary_label, "mfem", args.mfem_prefix,
                      COLORS[color_idx % len(COLORS)], "-"))
     color_idx += 1
 
