@@ -2146,9 +2146,24 @@ private:
             }
 
             // Compute lifted Dirichlet for skeleton:
-            // face_int1[u*dim+s, m] = sum_q shape1_m(q) * u_D[u] * n[s] * w[q]
-            // face_int2[u*dim+s, m] = sum_q shape2_m(q) * u_D[u] * n[s] * w[q]
-            // (Same u_D on both sides, but lifted through each element's Minv)
+            // face_int_k[u*dim+s, m] = sum_q shape_k_m(q) * u_D[u] * n[s] * w[q] * 0.5
+            //
+            // CRITICAL: Both face_int1 and face_int2 use the SAME sign (+=).
+            // This matches the bilinear form (DGElasticityBR2Integrator) and the
+            // slip assembly (AssembleSlipContributionBR2), which both use:
+            //   IntFace_11 += shapes1 * factor
+            //   IntFace_21 += shapes2 * factor  (same sign)
+            //
+            // The u_D_int is a prescribed JUMP (u1-u2), not a per-element value.
+            // The BR2 lifting of the jump into both elements uses the same
+            // reference normal. The -sign for elem2's penalty is handled later
+            // via "elvec2 -= penalty * ..." (not here in face_int).
+            //
+            // BUG FIX (v37): Previously face_int2 used -= (opposite sign), which:
+            //   - In v34 (no cross-element): pushed elem2 in WRONG direction
+            //     (resisting correct loading, causing delayed recurrence)
+            //   - In v36 (cross-element + 0.5): caused eval1+eval2 cancellation
+            //     → zero penalty → fault lockup
             DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
             face_int1 = 0.0;
             face_int2 = 0.0;
@@ -2167,7 +2182,7 @@ private:
                      }
                      for (int m = 0; m < ndof2; m++)
                      {
-                        face_int2(u * dim + s, m) -= shapes2(m, q) * factor;
+                        face_int2(u * dim + s, m) += shapes2(m, q) * factor;
                      }
                   }
                }
