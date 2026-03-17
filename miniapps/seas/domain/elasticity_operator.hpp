@@ -3052,8 +3052,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
+               // Canonical correction: multiply by sign so the result
+               // is invariant to MFEM element ordering (same fix as
+               // shared faces in v38c — see debug doc Section 7.2).
                real_t jump_c = (u1q - u2q) - sign * delta_u[c];
-               correction_q[c] = penalty_ip * jump_c;
+               correction_q[c] = penalty_ip * sign * jump_c;
             }
 
             // Accumulate face average
