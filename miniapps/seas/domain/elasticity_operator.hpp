@@ -2342,6 +2342,289 @@ private:
             else { rhs(-1 - gj) -= elvec2(j); }
          }
       }
+
+      // ---------------------------------------------------------------
+      // Shared faces with Dirichlet BC (parallel only).
+      // Same skeleton pattern as interior Dirichlet faces, but only
+      // elem1 is local — elem2 is on a neighboring rank.
+      // Each rank contributes its local elem1 side; the neighboring rank
+      // handles that same face's elem2 side as ITS elem1.
+      // ---------------------------------------------------------------
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            int sf = dirichlet_shared_faces_[fi];
+            FaceElementTransformations *FTr =
+               mesh_.GetSharedFaceTransformations(sf);
+            if (FTr == nullptr) { continue; }
+
+            // Compute Y-sign for elem1 (local) from its centroid
+            auto get_elem_y_sign_local = [&](int elem_no) -> real_t
+            {
+               ElementTransformation *eltrans =
+                  mesh_.GetElementTransformation(elem_no);
+               const IntegrationRule &ir_c = IntRules.Get(
+                  eltrans->GetGeometryType(), 1);
+               real_t y_avg = 0.0;
+               for (int p = 0; p < ir_c.GetNPoints(); p++)
+               {
+                  eltrans->SetIntPoint(&ir_c.IntPoint(p));
+                  Vector phys(3);
+                  eltrans->Transform(ir_c.IntPoint(p), phys);
+                  y_avg += phys(1);
+               }
+               y_avg /= ir_c.GetNPoints();
+               return (y_avg > 0.0) ? 1.0 : -1.0;
+            };
+
+            real_t sign1 = get_elem_y_sign_local(FTr->Elem1No);
+            // Elem2 is across Y=0 from elem1, so sign2 = -sign1
+            real_t sign2 = -sign1;
+
+            real_t u_D_int[3] = {0.0, 0.0, 0.0};
+            u_D_int[0] = (sign1 - sign2) * 0.5 * Vp_ * time;
+
+            // Only elem1 is local
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+
+            const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+            int ndof1 = fe1->GetDof();
+
+            // Elem2 (face-neighbor)
+            int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            int ndof2 = fe2->GetDof();
+
+            int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
+                                                      2 * face_order + 1);
+
+            Vector elvec1(vdofs1.Size());
+            elvec1 = 0.0;
+
+            if (method_ == DGMethod::IP)
+            {
+               for (int p = 0; p < ir.GetNPoints(); p++)
+               {
+                  const IntegrationPoint &ip = ir.IntPoint(p);
+                  FTr->SetAllIntPoints(&ip);
+                  const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+
+                  Vector nor(dim);
+                  CalcOrtho(FTr->Jacobian(), nor);
+
+                  Vector shape1(ndof1);
+                  fe1->CalcShape(eip1, shape1);
+
+                  DenseMatrix dshape1_ref(ndof1, dim);
+                  fe1->CalcDShape(eip1, dshape1_ref);
+
+                  DenseMatrix adjJ1(dim);
+                  CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
+
+                  DenseMatrix dshape1_adj(ndof1, dim);
+                  Mult(dshape1_ref, adjJ1, dshape1_adj);
+
+                  real_t detJ1 = FTr->Elem1->Weight();
+                  real_t detJ2 = FTr->Elem2->Weight();
+                  real_t w1 = ip.weight / (2.0 * detJ1);
+
+                  // Skeleton penalty
+                  real_t nl_q = nor.Norml2();
+                  real_t c0_mat = 2.0 * mu_val_;
+                  real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+                  real_t p0 = (dim + 1) * 1.0 * (nl_q / detJ1)
+                              * (c1_mat * c1_mat / c0_mat);
+                  real_t p1 = (dim + 1) * 1.0 * (nl_q / detJ2)
+                              * (c1_mat * c1_mat / c0_mat);
+                  real_t penalty_ip = (p0 + p1) / 4.0;
+                  real_t wq_penalty = penalty_ip * ip.weight * nl_q;
+
+                  // Elem1 contribution only (elem2 handled by neighbor rank)
+                  for (int k = 0; k < ndof1; k++)
+                  {
+                     real_t grad_dot_n = 0.0;
+                     for (int d = 0; d < dim; d++)
+                     {
+                        grad_dot_n += dshape1_adj(k, d) * nor(d);
+                     }
+
+                     for (int i = 0; i < dim; i++)
+                     {
+                        real_t sym_val = 0.0;
+                        for (int u = 0; u < dim; u++)
+                        {
+                           real_t trac = lambda_val_ * dshape1_adj(k, i) * nor(u)
+                              + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                                           + dshape1_adj(k, u) * nor(i));
+                           sym_val += trac * u_D_int[u];
+                        }
+
+                        int idx = i * ndof1 + k;
+                        elvec1(idx) += epsilon_ * sym_val * w1;
+                        elvec1(idx) += wq_penalty * u_D_int[i] * shape1(k);
+                     }
+                  }
+               }
+            }
+            else  // BR2
+            {
+               if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+
+               const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
+               const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
+               int nqp = ir.GetNPoints();
+
+               // Precompute shapes and normals
+               DenseMatrix shapes1(ndof1, nqp), shapes2(ndof2, nqp);
+               Vector nor_arr(dim * nqp), w_arr(nqp);
+
+               for (int q = 0; q < nqp; q++)
+               {
+                  const IntegrationPoint &ip = ir.IntPoint(q);
+                  FTr->SetAllIntPoints(&ip);
+
+                  Vector sq1(shapes1.GetColumn(q), ndof1);
+                  fe1->CalcShape(FTr->GetElement1IntPoint(), sq1);
+
+                  Vector sq2(shapes2.GetColumn(q), ndof2);
+                  fe2->CalcShape(FTr->GetElement2IntPoint(), sq2);
+
+                  Vector nq(&nor_arr[q * dim], dim);
+                  CalcOrtho(FTr->Jacobian(), nq);
+                  w_arr[q] = ip.weight;
+               }
+
+               // Compute lifted Dirichlet for skeleton (both sides)
+               DenseMatrix face_int1(dim * dim, ndof1), face_int2(dim * dim, ndof2);
+               face_int1 = 0.0;
+               face_int2 = 0.0;
+               for (int q = 0; q < nqp; q++)
+               {
+                  real_t wq = w_arr[q];
+                  for (int u = 0; u < dim; u++)
+                  {
+                     for (int s = 0; s < dim; s++)
+                     {
+                        real_t n_s = nor_arr[q * dim + s];
+                        real_t factor = u_D_int[u] * n_s * wq * 0.5;
+                        for (int m = 0; m < ndof1; m++)
+                        {
+                           face_int1(u * dim + s, m) += shapes1(m, q) * factor;
+                        }
+                        for (int m = 0; m < ndof2; m++)
+                        {
+                           face_int2(u * dim + s, m) += shapes2(m, q) * factor;
+                        }
+                     }
+                  }
+               }
+
+               DenseMatrix f_lifted1(dim * dim, ndof1), f_lifted2(dim * dim, ndof2);
+               MultABt(face_int1, Minv1, f_lifted1);
+               MultABt(face_int2, Minv2, f_lifted2);
+
+               // BR2 penalty
+               Geometry::Type br2_geom = mesh_.GetElementGeometry(FTr->Elem1No);
+               real_t br2_pen = (br2_geom == Geometry::TETRAHEDRON)
+                                    ? real_t(dim + 1) : real_t(2 * dim);
+
+               // Cross-element lifted function evaluation
+               DenseMatrix f_lifted_q(dim, nqp);
+               f_lifted_q = 0.0;
+               for (int q = 0; q < nqp; q++)
+               {
+                  Vector n_q(dim);
+                  for (int d = 0; d < dim; d++) { n_q(d) = nor_arr[q * dim + d]; }
+
+                  for (int i = 0; i < dim; i++)
+                  {
+                     real_t sum = 0.0;
+                     for (int u = 0; u < dim; u++)
+                     {
+                        for (int s = 0; s < dim; s++)
+                        {
+                           real_t tn = lambda_val_ * (u == s ? 1.0 : 0.0) * n_q(i)
+                              + mu_val_ * ((i == u ? 1.0 : 0.0) * n_q(s)
+                                           + (i == s ? 1.0 : 0.0) * n_q(u));
+
+                           real_t eval1 = 0.0, eval2 = 0.0;
+                           for (int m = 0; m < ndof1; m++)
+                           {
+                              eval1 += shapes1(m, q) * f_lifted1(u * dim + s, m);
+                           }
+                           for (int m = 0; m < ndof2; m++)
+                           {
+                              eval2 += shapes2(m, q) * f_lifted2(u * dim + s, m);
+                           }
+                           sum += tn * (eval1 + eval2);
+                        }
+                     }
+                     f_lifted_q(i, q) = 0.5 * sum;
+                  }
+               }
+
+               // Elem1 contribution only
+               for (int q = 0; q < nqp; q++)
+               {
+                  const IntegrationPoint &ip = ir.IntPoint(q);
+                  FTr->SetAllIntPoints(&ip);
+                  const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+
+                  real_t wq = w_arr[q];
+                  Vector nor_q(dim);
+                  for (int d = 0; d < dim; d++) { nor_q[d] = nor_arr[q * dim + d]; }
+
+                  DenseMatrix dshape_ref(ndof1, dim);
+                  fe1->CalcDShape(eip1, dshape_ref);
+                  DenseMatrix adjJ(dim);
+                  CalcAdjugate(FTr->Elem1->Jacobian(), adjJ);
+                  DenseMatrix dshape_adj(ndof1, dim);
+                  Mult(dshape_ref, adjJ, dshape_adj);
+                  real_t detJ = FTr->Elem1->Weight();
+
+                  for (int k = 0; k < ndof1; k++)
+                  {
+                     real_t grad_dot_n = 0.0;
+                     for (int d = 0; d < dim; d++)
+                     {
+                        grad_dot_n += dshape_adj(k, d) * nor_q(d);
+                     }
+
+                     for (int i = 0; i < dim; i++)
+                     {
+                        real_t sym_val = 0.0;
+                        for (int u = 0; u < dim; u++)
+                        {
+                           real_t trac = lambda_val_ * dshape_adj(k, i) * nor_q(u)
+                              + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                                           + dshape_adj(k, u) * nor_q(i));
+                           sym_val += trac * u_D_int[u];
+                        }
+
+                        int idx = i * ndof1 + k;
+                        elvec1(idx) += epsilon_ * wq * sym_val / (2.0 * detJ);
+                        elvec1(idx) += br2_pen * wq * shapes1(k, q) * f_lifted_q(i, q);
+                     }
+                  }
+               }
+            }
+
+            // Scatter elem1 to global RHS
+            for (int j = 0; j < vdofs1.Size(); j++)
+            {
+               int gj = vdofs1[j];
+               if (gj >= 0) { rhs(gj) += elvec1(j); }
+               else { rhs(-1 - gj) -= elvec1(j); }
+            }
+         }
+#endif
+      }
    }
 };
 
