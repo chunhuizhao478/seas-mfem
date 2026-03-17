@@ -3621,14 +3621,27 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          if (tau_mag > 1e9 || std::isnan(tau_mag))
          {
             // Get face coordinates for diagnostics
-            int face_idx = -1;
             Vector face_center(3);
             face_center = 0.0;
             if (i < fault_interior_faces_.Size())
             {
-               face_idx = fault_interior_faces_[i];
+               int face_idx = fault_interior_faces_[i];
                FaceElementTransformations *FTr =
                   mesh_.GetInteriorFaceTransformations(face_idx);
+               if (FTr)
+               {
+                  const IntegrationPoint &ip =
+                     Geometries.GetCenter(FTr->GetGeometryType());
+                  FTr->Face->SetIntPoint(&ip);
+                  FTr->Face->Transform(ip, face_center);
+               }
+            }
+            else
+            {
+               int shared_idx = i - fault_interior_faces_.Size();
+               int sf = fault_shared_faces_[shared_idx];
+               FaceElementTransformations *FTr =
+                  mesh_.GetSharedFaceTransformations(sf);
                if (FTr)
                {
                   const IntegrationPoint &ip =
