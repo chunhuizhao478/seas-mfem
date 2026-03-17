@@ -300,6 +300,11 @@ def main():
         action="store_true",
         help="Plot MFEM data only (no benchmark overlay)",
     )
+    parser.add_argument(
+        "--flip-dip",
+        action="store_true",
+        help="Flip sign of slip_dip and tau_dip for MFEM datasets (debug convention mismatch)",
+    )
     args = parser.parse_args()
 
     # Default: Tandem if no benchmark flags specified and not --no-benchmark
@@ -379,6 +384,9 @@ def main():
                 path = mfem_filename(info, station_name)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
+                    if data is not None and args.flip_dip:
+                        data["slip_dip"] = -data["slip_dip"]
+                        data["tau_dip"] = -data["tau_dip"]
             datasets.append((label, data, color, ls))
 
         # Skip if no data at this station
