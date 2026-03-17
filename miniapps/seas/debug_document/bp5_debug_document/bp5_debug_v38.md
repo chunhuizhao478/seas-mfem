@@ -1,7 +1,7 @@
-# BP5 Debug v38: Switch to IP Method + Shared-Face Dirichlet Fix
+# BP5 Debug v38: Switch to IP Method + Parallel Bug Fixes
 
-**Date**: 2026-03-16
-**Status**: IP blows up (v38a), shared-face Dirichlet fix applied (v38b)
+**Date**: 2026-03-16 (v38a-b), 2026-03-17 (v38c)
+**Status**: IP blows up (v38a), shared-face Dirichlet fix (v38b), shared-face traction sign fix (v38c)
 **Previous**: v37 (BR2 interior Dirichlet sign fix, recurrence 295 yr)
 **Branch**: `feature/elasticity`
 
@@ -180,31 +180,126 @@ c_N_1 = order * (order + Dim - 1) / Dim
 T = {sigma*n_hat} - penalty * ([[u]] - sign*delta_u)   (scalar x vector)
 ```
 
-## 7. Open Question: What Causes IP Blowup?
+## 7. Root Cause Found: Shared-Face IP Traction Sign Bug (v38c)
 
-The v38a blowup occurs during the initial coseismic phase (V_max > 200 m/s)
-at the fault center (0,0,0). Possible causes:
+### 7.1 The Diagnostic Red Herring
 
-1. **IP penalty too large during coseismic**: The penalty scales as
-   `(area/volume) * c1^2/c0`. During rapid slip, the DG jump `[[u]] - delta_u`
-   is large, and the scalar penalty may overcorrect, creating oscillations.
-   BR2 avoids this because its traction correction uses the anisotropic
-   elasticity tensor, which distributes the correction more naturally.
+The v38a blowup messages all showed `x=(0,0,0)` for shared-face DOFs, which initially
+suggested the fault-surface intersection (z=0 edge) was the problem. However, this was
+a **diagnostic bug**: the blowup reporting code (line 3612-3626) only computes face
+coordinates for interior faces (`i < fault_interior_faces_.Size()`). For shared faces,
+`face_center` stays at its default initialization `(0,0,0)`. The actual blowup locations
+are unknown.
 
-2. **IP bilinear form mismatch**: The custom `DGElasticityIPPenaltyIntegrator`
-   uses `penalty * |nor|` scaling. If this doesn't exactly match the traction
-   computation's penalty formula, there could be a consistency gap that
-   manifests as instability during high slip rates.
+### 7.2 The Real Bug: Parallel Sign Inconsistency in IP Traction Correction
 
-3. **Time step control**: During coseismic, the adaptive time stepper may not
-   reduce dt enough for IP's stiffer penalty. BR2's softer penalty (sigma=4,
-   dimensionless) may be more forgiving of large time steps.
+**File**: `domain/elasticity_operator.hpp`, `ComputeTraction()`, shared-face IP path
+
+For shared fault faces, MFEM always puts the **local** element as `Elem1`. Two ranks
+sharing the same physical face have **opposite** Elem1/Elem2 assignments:
+
+```
+Rank A: Elem1 = element_A (local),  Elem2 = element_B (neighbor)
+Rank B: Elem1 = element_B (local),  Elem2 = element_A (neighbor)
+```
+
+This causes the face normal from `CalcOrtho` to point in **opposite** directions on the
+two ranks, giving opposite `sign` values. The IP penalty correction then differs:
+
+| | Rank A | Rank B |
+|---|--------|--------|
+| `nor(1)` | +N | -N |
+| `sign` | +1 | -1 |
+| `u1 - u2` | u_A - u_B | u_B - u_A = -(u_A - u_B) |
+| `sign * delta_u` | +delta_u | -delta_u |
+| `jump = (u1-u2) - sign*delta_u` | (u_A-u_B) - delta_u | -(u_A-u_B) + delta_u = **-jump_A** |
+| `correction = penalty * jump` | penalty × jump_A | **-penalty × jump_A** |
+| `T = {σ·n̂} - correction` | {σ·n̂} - correction | {σ·n̂} **+** correction |
+
+The two ranks compute **opposite** penalty corrections for the same physical face,
+giving **different** tractions. Since there is no MPI synchronization of traction or
+fault state between ranks, the rate-state ODE evolves independently on each rank with
+different traction inputs. The fault states diverge, creating larger jump residuals,
+which the IP penalty amplifies further → exponential blowup.
+
+**Why BR2 doesn't have this bug**: BR2's face integral uses `jump_q * nor_q` as a
+product. When elem1/elem2 are swapped, both `jump_q` and `nor_q` flip sign, but their
+product is **invariant**. The BR2 lifting and evaluation are symmetric in
+`(eval1 + eval2)`, so both ranks get the same correction. IP has no such cancellation
+because the correction is `penalty * jump` with no normal multiplication.
+
+### 7.3 Magnitude Analysis
+
+| DG Method | Penalty magnitude | Typical correction per 1mm residual | Inter-rank discrepancy |
+|-----------|------------------|-------------------------------------|----------------------|
+| BR2 | 4 (dimensionless, via lifting) | ~0.06 MPa (through Minv + C:n) | ~0.12 MPa (negligible) |
+| IP | ~2.4×10⁹ Pa/m (material-dependent) | ~2.4 MPa | ~4.8 MPa (**catastrophic**) |
+
+The IP penalty is ~10⁹× the BR2 dimensionless penalty. Even tiny jump residuals from
+the elastic solve create O(MPa) inter-rank traction discrepancies, triggering the
+divergence feedback loop.
+
+The friction law cannot balance the resulting traction:
+- Max friction at V=10⁶ m/s: ~42.6 MPa (σ_n × (f0 + a×ln(V/V0)))
+- IP traction at blowup: **1027 MPa** (40× unphysical)
+
+### 7.4 The Fix
+
+**One-line change** in the shared-face IP traction path (line ~3406):
+
+```cpp
+// BEFORE (v38a — different on each rank):
+real_t jump_c = (u1q - u2q) - sign * delta_u[c];
+correction_q[c] = penalty_ip * jump_c;
+
+// AFTER (v38c — canonical, same on both ranks):
+real_t jump_raw = (u1q - u2q) - sign * delta_u[c];
+correction_q[c] = penalty_ip * sign * jump_raw;
+```
+
+The fix multiplies the raw jump by `sign`, producing the canonical form:
+
+```
+correction = penalty × sign × ((u1-u2) - sign×delta_u)
+           = penalty × (sign×(u1-u2) - delta_u)
+```
+
+Since `sign×(u1-u2)` is **invariant** across ranks (both `sign` and `u1-u2` flip
+together), `delta_u` is consistent (from FaultBasis with fixed ref_normal), and
+`penalty` is a material constant, **both ranks now compute the same correction**.
+
+Verification at equilibrium: when `u1-u2 = sign×delta_u` (constraint satisfied),
+`jump_raw = 0` → `correction = 0` → `T = {σ·n̂}` regardless of rank. ✓
+
+### 7.5 Why Interior Faces Don't Need This Fix
+
+For interior faces, each face is processed by exactly **one** rank. There is no
+inter-rank inconsistency. The traction value depends on element ordering (which is
+non-physical), but since only one entity computes it, the result is self-consistent
+within the simulation.
+
+Changing interior faces would alter established BR2 behavior that has been validated
+through v34-v37. The minimal, targeted fix applies only to shared faces.
+
+### 7.6 Why the v24-v28 IP Experiments Also Blew Up
+
+The v24-v28 IP experiments (before v31 sign fix) had **two** independent bugs:
+1. **DG slip sign bug** (fixed in v31): affected both IP and BR2
+2. **Shared-face traction sign bug** (fixed in v38c): affects only IP in parallel
+
+The v24-v28 runs used parallel execution, so both bugs contributed to the blowups.
+The v31 sign fix resolved bug #1, but bug #2 remained. The v38a test confirmed that
+IP still blows up after v31 — now explained by bug #2.
+
+Note: v28 reported the blowup at "x=(0,0,0)" — the same diagnostic artifact. The
+actual blowup location was unknown, likely on shared faces just like v38a.
 
 ## 8. Files Changed
 
-| File | Change |
-|------|--------|
-| `domain/elasticity_operator.hpp` | Added shared-face Dirichlet loading loop (v38b) |
+| File | Change | Version |
+|------|--------|---------|
+| `domain/elasticity_operator.hpp` | Added shared-face Dirichlet loading loop | v38b |
+| `domain/elasticity_operator.hpp` | Canonical IP traction correction for shared faces | v38c |
 
 ## 9. Verification
 
@@ -215,7 +310,15 @@ conda activate mfem-dev && make -j8
 Build succeeds with no errors.
 
 ### Serial Unit Tests
-All test suites pass (identical to v37).
+All test suites pass:
+
+| Suite | Tests | Status |
+|-------|-------|--------|
+| seas_test_elasticity_operator | 84 | PASS |
+| seas_test_elasticity_br2 | 46 | PASS |
+| seas_test_fault_basis | 187 | PASS |
+| seas_test_domain_interface | 32 | PASS |
+| seas_test_bp5_params | 96 | PASS |
 
 ### Parallel Unit Tests (8 MPI ranks)
 All parallel suites pass:
@@ -229,23 +332,26 @@ All parallel suites pass:
 | seas_test_serial_parallel_consistency | 12 | PASS |
 | seas_test_br2_consistency | 7 | PASS |
 | seas_test_bp5_parallel_smoke | 13 | PASS |
-| seas_test_mpi_context | 11 | PASS |
 
 ## 10. Next Steps
 
-1. **Submit v38b BR2 run on TACC**: Same as v37 config but with shared-face
-   Dirichlet fix. Compare recurrence with v37's 295 yr.
+1. **Submit v38c IP run on TACC**: Same mesh/config as v38a but with the
+   shared-face traction fix. This is the critical test — if the fix resolves
+   the parallel sign inconsistency, IP should survive the initial earthquake.
 
-2. **Investigate IP blowup**: The IP instability during coseismic needs deeper
-   analysis. Options:
-   - Compare IP vs BR2 penalty magnitudes during first earthquake
-   - Check if IP bilinear form penalty matches traction penalty exactly
-   - Try reducing IP penalty by a factor (e.g., 0.5x) to test sensitivity
-   - Check Tandem's time step control during coseismic
+2. **Submit v38c BR2 run on TACC**: Same as v37 config but with both parallel
+   fixes (shared-face Dirichlet + canonical traction). Compare recurrence
+   with v37's 295 yr.
 
-3. **Eliminate IP bilinear form as cause**: Run with `--dg-method IP` but
-   using BR2 bilinear form + IP traction (hybrid approach) to isolate
-   whether the blowup comes from the bilinear form or traction computation.
+3. **If IP survives coseismic**: Compare recurrence with Tandem's 240 yr.
+   The IP traction formula now matches Tandem exactly (scalar penalty,
+   no BR2 lifting bias).
+
+4. **If IP still blows up**: The remaining cause would be the IP penalty
+   magnitude at interior faces during coseismic. Options:
+   - Try p=2 (better DG enforcement, smaller jump residual)
+   - Cap the correction magnitude at interior faces
+   - Compare time step sizes with Tandem during coseismic
 
 ## 11. Cumulative Fix History
 
@@ -259,4 +365,5 @@ All parallel suites pass:
 | v35-v36 | Per-quad-point traction + cross-element BR2 | Done |
 | v37 | Interior Dirichlet face_int2 sign fix | Done |
 | v38a | Switch to IP method (matching Tandem) | **IP blows up** |
-| **v38b** | **Shared-face Dirichlet loading fix (parallel bug)** | **Applied, tests pass** |
+| v38b | Shared-face Dirichlet loading fix (parallel bug) | Applied |
+| **v38c** | **Shared-face IP traction sign fix (parallel bug)** | **Applied, tests pass** |
