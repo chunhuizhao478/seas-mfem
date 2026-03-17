@@ -3402,8 +3402,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
-                  real_t jump_c = (u1q - u2q) - sign * delta_u[c];
-                  correction_q[c] = penalty_ip * jump_c;
+                  // Canonical jump for shared faces: multiply by sign
+                  // to make correction independent of element ordering.
+                  // For shared faces, Elem1 is always the local element,
+                  // so two ranks get opposite (u1-u2) and opposite sign.
+                  // The raw jump = (u1-u2) - sign*delta_u flips between
+                  // ranks. Multiplying by sign makes both ranks compute
+                  // the same canonical correction:
+                  //   sign * ((u1-u2) - sign*delta_u)
+                  //   = sign*(u1-u2) - delta_u
+                  // where sign*(u1-u2) is invariant across ranks.
+                  real_t jump_raw = (u1q - u2q) - sign * delta_u[c];
+                  correction_q[c] = penalty_ip * sign * jump_raw;
                }
 
                for (int c = 0; c < dim; c++)
