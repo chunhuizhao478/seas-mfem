@@ -17,9 +17,9 @@
 #include "antiplane_operator.hpp"  // For DGMethod enum
 #include "../common/seas_types.hpp"
 #include "../fault/fault_basis.hpp"
-#include "../fault/face_quadrature.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
+#include "../fault/face_quadrature.hpp"
 
 #include <memory>
 #include <cmath>
@@ -179,6 +179,10 @@ public:
    real_t GetLambda() const { return lambda_val_; }
    BCMode GetBCMode() const { return bc_mode_; }
 
+   int GetNumFaultFaces() const { return num_fault_faces_; }
+   int GetNbfPerFace() const { return nbf_per_face_; }
+   const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
+
    /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
    void SetCheckResidual(bool check) { check_residual_ = check; }
 
@@ -245,10 +249,13 @@ private:
    Array<int> fault_interior_faces_;
    Array<int> fault_shared_faces_;
    Array<int> fault_dofs_;
-   int num_fault_faces_ = 0;   ///< Total fault faces (interior + shared)
-   int num_fault_dofs_ = 0;    ///< Total fault DOFs = num_fault_faces_ * nbf
+   int num_fault_dofs_ = 0;
    FaultBasis fault_basis_;
-   std::unique_ptr<FaceQuadrature> face_quad_;  ///< v44: multi-DOF face L2 projection
+
+   // Multi-DOF fault discretization (v45, Phase 2)
+   std::unique_ptr<FaceQuadrature> face_quad_;
+   int nbf_per_face_ = 1;   // 1 at p=1, (p+1)(p+2)/2 at p>=2
+   int num_fault_faces_ = 0; // number of fault faces (interior + shared)
 
    mutable Vector fault_depths_;
    mutable bool fault_depths_computed_;
@@ -517,15 +524,15 @@ private:
 
       num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
-      // v44: Multi-DOF fault discretization
-      // At p=1: face_fe_order=0, nbf=1 (constant, identical to face averaging)
-      // At p>=2: face_fe_order=p, nbf=(p+1)(p+2)/2 (matches Tandem)
-      // Tandem has NEVER tested p=1; at p=1 volume stress is constant per element
-      // so intra-face modes (nbf>1) would be unresolvable.
-      int face_fe_order = (order_ >= 2) ? order_ : 0;
-      face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order, order_);
-      int nbf = face_quad_->NumBasisFunctions();
-      num_fault_dofs_ = num_fault_faces_ * nbf;
+      // Multi-DOF fault quadrature (v45, Phase 2)
+      // p=1: face_order=0, nbf=1 -> backward compatible (face average)
+      // p>=2 with IP: face_order=order_, nbf=(order_+1)*(order_+2)/2 -> matches Tandem
+      // p>=2 with BR2: face_order=0, nbf=1 -> BR2 doesn't need multi-DOF
+      int face_fe_order = (method_ == DGMethod::IP && order_ >= 2) ? order_ : 0;
+      face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
+                                                     std::max(order_, 1));
+      nbf_per_face_ = face_quad_->NumBasisFunctions();
+      num_fault_dofs_ = num_fault_faces_ * nbf_per_face_;
 
       fault_dofs_.SetSize(num_fault_dofs_);
       for (int i = 0; i < num_fault_dofs_; i++)
@@ -934,7 +941,7 @@ private:
    void AssembleSlipContributionIP(Vector &rhs, const Vector &slip_bc) const
    {
       int dim = 3;
-      real_t kappa = (order_ + 1) * (order_ + 1);
+      int nbf = nbf_per_face_;
 
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
@@ -943,20 +950,31 @@ private:
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         // v44: Multi-DOF slip — check if all DOFs are zero for early exit
-         const int nbf_ip = face_quad_->NumBasisFunctions();
-         const DenseMatrix &e_q_ip = face_quad_->BasisAtQuadPoints();
-         const auto &basis_ip = fault_basis_.GetBasis(fi);
-
-         real_t max_slip = 0.0;
-         for (int bk = 0; bk < nbf_ip; bk++)
+         // v45 Phase 3: Multi-DOF slip interpolation
+         // Embed per-DOF local slip to 3D nodal values, then interpolate
+         // to quadrature points. At nbf=1 (p=1), this reduces to the
+         // previous constant-per-face behavior.
+         Vector delta_u_nodal(dim * nbf);
+         bool all_zero = true;
+         for (int kk = 0; kk < nbf; kk++)
          {
-            max_slip = std::max(max_slip,
-                                std::abs(slip_bc(2*(fi*nbf_ip+bk))));
-            max_slip = std::max(max_slip,
-                                std::abs(slip_bc(2*(fi*nbf_ip+bk)+1)));
+            int dof_idx = fi * nbf + kk;
+            real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                    slip_bc(2 * dof_idx + 1)};
+            real_t du[3];
+            fault_basis_.EmbedSlip(fi, slip_local, du);
+            for (int c = 0; c < dim; c++)
+            {
+               delta_u_nodal(c * nbf + kk) = du[c];
+               if (std::abs(du[c]) >= 1e-15) { all_zero = false; }
+            }
          }
-         if (max_slip < 1e-15) { continue; }
+         if (all_zero) { continue; }
+
+         // Interpolate to quad points: delta_u_quad[c*nq + q]
+         Vector delta_u_quad;
+         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+         int nq = face_quad_->NumQuadPoints();
 
          // Get DOFs (vector space)
          Array<int> vdofs1, vdofs2;
@@ -970,12 +988,15 @@ private:
 
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
          const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order + 1);
+         MFEM_ASSERT(ir.GetNPoints() == nq,
+                     "Quadrature mismatch: ir has " << ir.GetNPoints()
+                     << " points, FaceQuadrature has " << nq);
 
          Vector elvec1(vdofs1.Size()), elvec2(vdofs2.Size());
          elvec1 = 0.0;
          elvec2 = 0.0;
 
-         for (int p = 0; p < ir.GetNPoints(); p++)
+         for (int p = 0; p < nq; p++)
          {
             const IntegrationPoint &ip = ir.IntPoint(p);
             FTr->SetAllIntPoints(&ip);
@@ -986,24 +1007,14 @@ private:
             Vector nor(dim);
             CalcOrtho(FTr->Jacobian(), nor);
 
-            // Sign convention (see v39 debug doc)
+            // Sign convention: sign * delta_u = [[u]] = g^F (prescribed jump)
             real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
 
-            // v44: Interpolate slip from DOFs to this quad point
-            // At nbf=1 (p=1): delta_u_q = slip_bc(2*fi) * t1 + slip_bc(2*fi+1) * t2
-            //                  = constant (identical to old code)
-            // At nbf>1 (p>=2): polynomial slip variation across face
-            real_t slip_dip_q = 0.0, slip_strike_q = 0.0;
-            for (int bk = 0; bk < nbf_ip; bk++)
+            // Per-quad-point 3D slip (interpolated from face DOFs)
+            real_t delta_u_q[3];
+            for (int c = 0; c < dim; c++)
             {
-               slip_dip_q    += e_q_ip(bk, p) * slip_bc(2*(fi*nbf_ip+bk));
-               slip_strike_q += e_q_ip(bk, p) * slip_bc(2*(fi*nbf_ip+bk)+1);
-            }
-            real_t delta_u[3];
-            for (int d = 0; d < dim; d++)
-            {
-               delta_u[d] = slip_dip_q * basis_ip.tangent1[d]
-                           + slip_strike_q * basis_ip.tangent2[d];
+               delta_u_q[c] = delta_u_quad(c * nq + p);
             }
 
             // Shapes
@@ -1034,24 +1045,19 @@ private:
             real_t nl_q = nor.Norml2();
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-            // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0, correct only at p=1)
-            // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
+            // v42 fix: use order-dependent c_N_1
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+            real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
-            // For each element, each DOF k, each component i:
-            // Symmetry term: σ * [σ(φ_k e_i)·n]_u * delta_u[u]
-            // Penalty term: kappa * φ_k * delta_u[i]
+            // Symmetry + penalty for Elem1
             for (int k = 0; k < ndof1; k++)
             {
                for (int i = 0; i < dim; i++)
                {
                   real_t sym_val = 0.0;
-                  // [σ(φ_k e_i)·n]_u = λ*(∂φ_k/∂x_i)*n_u + μ*(δ_iu*∇φ_k·n + ∂φ_k/∂x_u*n_i)
-                  Vector dn1(1);
                   real_t grad_dot_n = 0.0;
                   for (int d = 0; d < dim; d++)
                   {
@@ -1062,16 +1068,16 @@ private:
                      real_t trac_iu = lambda_val_ * dshape1_adj(k, i) * nor(u)
                         + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
                                      + dshape1_adj(k, u) * nor(i));
-                     sym_val += trac_iu * sign * delta_u[u];
+                     sym_val += trac_iu * sign * delta_u_q[u];
                   }
 
-                  // byNODES ordering: DOF k, component i
                   int idx = i * ndof1 + k;
                   elvec1(idx) += epsilon_ * sym_val * w1;
-                  elvec1(idx) += wq_penalty * sign * delta_u[i] * shape1(k);
+                  elvec1(idx) += wq_penalty * sign * delta_u_q[i] * shape1(k);
                }
             }
 
+            // Symmetry + penalty for Elem2
             for (int k = 0; k < ndof2; k++)
             {
                for (int i = 0; i < dim; i++)
@@ -1087,12 +1093,12 @@ private:
                      real_t trac_iu = lambda_val_ * dshape2_adj(k, i) * nor(u)
                         + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
                                      + dshape2_adj(k, u) * nor(i));
-                     sym_val += trac_iu * sign * delta_u[u];
+                     sym_val += trac_iu * sign * delta_u_q[u];
                   }
 
                   int idx = i * ndof2 + k;
                   elvec2(idx) += epsilon_ * sym_val * w2;
-                  elvec2(idx) -= wq_penalty * sign * delta_u[i] * shape2(k);
+                  elvec2(idx) -= wq_penalty * sign * delta_u_q[i] * shape2(k);
                }
             }
          }
@@ -1122,13 +1128,6 @@ private:
       int dim = 3;
       if (!mass_inv_computed_) { PrecomputeMassInverse(); }
 
-      // v44: BR2 multi-DOF slip interpolation not yet implemented (IP only).
-      // At p=1 (nbf=1), the indexing is compatible. At p>=2, BR2 would need
-      // per-quad-point slip interpolation in the lifting formula.
-      const int nbf_br2 = face_quad_->NumBasisFunctions();
-      MFEM_VERIFY(nbf_br2 == 1 || method_ != DGMethod::BR2,
-                  "BR2 multi-DOF slip interpolation not yet implemented for p>=2");
-
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
          int face = fault_interior_faces_[fi];
@@ -1141,9 +1140,8 @@ private:
          real_t penalty = (geom == Geometry::TETRAHEDRON)
                               ? real_t(dim + 1) : real_t(2 * dim);
 
-         // Embed local slip to global frame (uses first DOF of face = face average at nbf=1)
-         real_t slip_local[2] = {slip_bc(2 * (fi * nbf_br2)),
-                                 slip_bc(2 * (fi * nbf_br2) + 1)};
+         // Embed local slip to global frame
+         real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
          real_t delta_u[3];
          fault_basis_.EmbedSlip(fi, slip_local, delta_u);
 
@@ -1403,7 +1401,7 @@ private:
       {
 #ifdef MFEM_USE_MPI
          int dim = 3;
-         real_t kappa = (order_ + 1) * (order_ + 1);
+         int nbf = nbf_per_face_;
 
          for (int i = 0; i < fault_shared_faces_.Size(); i++)
          {
@@ -1412,23 +1410,28 @@ private:
                mesh_.GetSharedFaceTransformations(sf);
             if (FTr == nullptr) { continue; }
 
-            // Slip index: interior faces first, then shared faces
+            // v45 Phase 3: Multi-DOF slip interpolation (shared faces)
             int slip_idx = interior_face_count + i;
-
-            // v44: Multi-DOF slip — check if all DOFs are zero
-            const int nbf_sh = face_quad_->NumBasisFunctions();
-            const DenseMatrix &e_q_sh = face_quad_->BasisAtQuadPoints();
-            const auto &basis_sh = fault_basis_.GetBasis(slip_idx);
-
-            real_t max_slip_sh = 0.0;
-            for (int bk = 0; bk < nbf_sh; bk++)
+            Vector delta_u_nodal(dim * nbf);
+            bool all_zero = true;
+            for (int kk = 0; kk < nbf; kk++)
             {
-               max_slip_sh = std::max(max_slip_sh,
-                                      std::abs(slip_bc(2*(slip_idx*nbf_sh+bk))));
-               max_slip_sh = std::max(max_slip_sh,
-                                      std::abs(slip_bc(2*(slip_idx*nbf_sh+bk)+1)));
+               int dof_idx = slip_idx * nbf + kk;
+               real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                       slip_bc(2 * dof_idx + 1)};
+               real_t du[3];
+               fault_basis_.EmbedSlip(slip_idx, slip_local, du);
+               for (int c = 0; c < dim; c++)
+               {
+                  delta_u_nodal(c * nbf + kk) = du[c];
+                  if (std::abs(du[c]) >= 1e-15) { all_zero = false; }
+               }
             }
-            if (max_slip_sh < 1e-15) { continue; }
+            if (all_zero) { continue; }
+
+            Vector delta_u_quad;
+            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+            int nq = face_quad_->NumQuadPoints();
 
             // Only Elem1 is local
             Array<int> vdofs1;
@@ -1445,11 +1448,13 @@ private:
             int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
             const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
                                                      2 * face_order + 1);
+            MFEM_ASSERT(ir.GetNPoints() == nq,
+                        "Quadrature mismatch in shared face assembly");
 
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
 
-            for (int p = 0; p < ir.GetNPoints(); p++)
+            for (int p = 0; p < nq; p++)
             {
                const IntegrationPoint &ip = ir.IntPoint(p);
                FTr->SetAllIntPoints(&ip);
@@ -1460,20 +1465,11 @@ private:
 
                real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
 
-               // v44: Interpolate slip from DOFs to this quad point
-               real_t slip_dip_q = 0.0, slip_strike_q = 0.0;
-               for (int bk = 0; bk < nbf_sh; bk++)
+               // Per-quad-point 3D slip
+               real_t delta_u_q[3];
+               for (int c = 0; c < dim; c++)
                {
-                  slip_dip_q    += e_q_sh(bk, p)
-                                 * slip_bc(2*(slip_idx*nbf_sh+bk));
-                  slip_strike_q += e_q_sh(bk, p)
-                                 * slip_bc(2*(slip_idx*nbf_sh+bk)+1);
-               }
-               real_t delta_u[3];
-               for (int d = 0; d < dim; d++)
-               {
-                  delta_u[d] = slip_dip_q * basis_sh.tangent1[d]
-                              + slip_strike_q * basis_sh.tangent2[d];
+                  delta_u_q[c] = delta_u_quad(c * nq + p);
                }
 
                Vector shape1(ndof1);
@@ -1491,17 +1487,14 @@ private:
                real_t detJ1 = FTr->Elem1->Weight();
                real_t detJ2 = FTr->Elem2->Weight();
                real_t w1 = ip.weight / (2.0 * detJ1);
-               real_t w2 = ip.weight / (2.0 * detJ2);
 
                // Penalty: match bilinear form integrator formula
                real_t nl_q = nor.Norml2();
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
-               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -1521,12 +1514,12 @@ private:
                         real_t trac_iu = lambda_val_ * dshape1_adj(k, ci) * nor(u)
                            + mu_val_ * ((ci == u ? 1.0 : 0.0) * grad_dot_n
                                         + dshape1_adj(k, u) * nor(ci));
-                        sym_val += trac_iu * sign * delta_u[u];
+                        sym_val += trac_iu * sign * delta_u_q[u];
                      }
 
                      int idx = ci * ndof1 + k;
                      elvec1(idx) += epsilon_ * sym_val * w1;
-                     elvec1(idx) += wq_penalty * sign * delta_u[ci] * shape1(k);
+                     elvec1(idx) += wq_penalty * sign * delta_u_q[ci] * shape1(k);
                   }
                }
             }
@@ -1565,11 +1558,8 @@ private:
             if (FTr == nullptr) { continue; }
 
             int slip_idx = interior_face_count + fi;
-
-            // v44: BR2 uses first DOF of face (= face average at nbf=1)
-            const int nbf_br2s = face_quad_->NumBasisFunctions();
-            real_t slip_local[2] = {slip_bc(2 * (slip_idx * nbf_br2s)),
-                                    slip_bc(2 * (slip_idx * nbf_br2s) + 1)};
+            real_t slip_local[2] = {slip_bc(2 * slip_idx),
+                                    slip_bc(2 * slip_idx + 1)};
             real_t delta_u[3];
             fault_basis_.EmbedSlip(slip_idx, slip_local, delta_u);
 
@@ -1857,9 +1847,8 @@ private:
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
-               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
                real_t wq_penalty = p0 * ip.weight * nl_q;
 
                for (int k = 0; k < ndof; k++)
@@ -2132,11 +2121,10 @@ private:
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
-               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
+               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
                            * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
+               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
                            * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -2514,11 +2502,10 @@ private:
                   real_t c0_mat = 2.0 * mu_val_;
                   real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                   // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
-                  // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                   real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-                  real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
+                  real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
                               * (c1_mat * c1_mat / c0_mat);
-                  real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
+                  real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
                               * (c1_mat * c1_mat / c0_mat);
                   real_t penalty_ip = (p0 + p1) / 4.0;
                   real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -2717,11 +2704,11 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
    {
       fault_depths_.SetSize(num_fault_dofs_);
 
-      // v44: Evaluate depth at each DOF position within each face.
-      // At nbf=1 (p=1): single point at centroid = same as before.
-      // At nbf>1 (p>=2): evaluate at FaceQuadrature nodal positions.
-      const int nbf = face_quad_->NumBasisFunctions();
-      const IntegrationRule &nodal_ir = face_quad_->GetNodalRule();
+      // Nodal rule for per-DOF coordinate evaluation
+      // At nbf=1 (p=1): single centroid point -> same as old code
+      // At nbf>1 (p>=2): GaussLobatto nodes on reference face
+      const IntegrationRule &nir = face_quad_->GetNodalRule();
+      int nbf = nbf_per_face_;
 
       for (int i = 0; i < fault_interior_faces_.Size(); i++)
       {
@@ -2730,15 +2717,15 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         for (int k = 0; k < nbf; k++)
+         for (int kk = 0; kk < nbf; kk++)
          {
-            const IntegrationPoint &ip = nodal_ir.IntPoint(k);
-            FTr->Face->SetIntPoint(&ip);
+            const IntegrationPoint &nip = nir.IntPoint(kk);
+            FTr->Face->SetIntPoint(&nip);
             Vector coords(3);
-            FTr->Face->Transform(ip, coords);
+            FTr->Face->Transform(nip, coords);
 
-            int dof_idx = i * nbf + k;
-            fault_depths_(dof_idx) = -coords(2);
+            // Depth: -Z (Z is negative downward in Tandem, depth is positive)
+            fault_depths_(i * nbf + kk) = -coords(2);
          }
       }
 
@@ -2754,15 +2741,14 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             if (FTr == nullptr) { continue; }
 
             int face_idx = fault_interior_faces_.Size() + i;
-            for (int k = 0; k < nbf; k++)
+            for (int kk = 0; kk < nbf; kk++)
             {
-               const IntegrationPoint &ip = nodal_ir.IntPoint(k);
-               FTr->Face->SetIntPoint(&ip);
+               const IntegrationPoint &nip = nir.IntPoint(kk);
+               FTr->Face->SetIntPoint(&nip);
                Vector coords(3);
-               FTr->Face->Transform(ip, coords);
+               FTr->Face->Transform(nip, coords);
 
-               int dof_idx = face_idx * nbf + k;
-               fault_depths_(dof_idx) = -coords(2);
+               fault_depths_(face_idx * nbf + kk) = -coords(2);
             }
          }
 #endif
@@ -2783,9 +2769,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
       fault_x2_.SetSize(num_fault_dofs_);
       fault_x3_.SetSize(num_fault_dofs_);
 
-      // v44: Evaluate coordinates at each DOF position within each face
-      const int nbf = face_quad_->NumBasisFunctions();
-      const IntegrationRule &nodal_ir = face_quad_->GetNodalRule();
+      // Nodal rule for per-DOF coordinate evaluation
+      const IntegrationRule &nir = face_quad_->GetNodalRule();
+      int nbf = nbf_per_face_;
 
       for (int i = 0; i < fault_interior_faces_.Size(); i++)
       {
@@ -2794,16 +2780,16 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         for (int k = 0; k < nbf; k++)
+         for (int kk = 0; kk < nbf; kk++)
          {
-            const IntegrationPoint &ip = nodal_ir.IntPoint(k);
-            FTr->Face->SetIntPoint(&ip);
+            const IntegrationPoint &nip = nir.IntPoint(kk);
+            FTr->Face->SetIntPoint(&nip);
             Vector coords(3);
-            FTr->Face->Transform(ip, coords);
+            FTr->Face->Transform(nip, coords);
 
-            int dof_idx = i * nbf + k;
-            fault_x2_(dof_idx) = coords(0);
-            fault_x3_(dof_idx) = -coords(2);
+            // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
+            fault_x2_(i * nbf + kk) = coords(0);
+            fault_x3_(i * nbf + kk) = -coords(2);
          }
       }
 
@@ -2819,16 +2805,15 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             if (FTr == nullptr) { continue; }
 
             int face_idx = fault_interior_faces_.Size() + i;
-            for (int k = 0; k < nbf; k++)
+            for (int kk = 0; kk < nbf; kk++)
             {
-               const IntegrationPoint &ip = nodal_ir.IntPoint(k);
-               FTr->Face->SetIntPoint(&ip);
+               const IntegrationPoint &nip = nir.IntPoint(kk);
+               FTr->Face->SetIntPoint(&nip);
                Vector coords(3);
-               FTr->Face->Transform(ip, coords);
+               FTr->Face->Transform(nip, coords);
 
-               int dof_idx = face_idx * nbf + k;
-               fault_x2_(dof_idx) = coords(0);
-               fault_x3_(dof_idx) = -coords(2);
+               fault_x2_(face_idx * nbf + kk) = coords(0);
+               fault_x3_(face_idx * nbf + kk) = -coords(2);
             }
          }
 #endif
@@ -3045,10 +3030,14 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       displacement.GetSubVector(vdofs1, u1_all);
       displacement.GetSubVector(vdofs2, u2_all);
 
-      // Fault basis (face-constant for flat faces)
+      // Fault basis and prescribed slip
       const auto &basis = fault_basis_.GetBasis(fi);
+      real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
+      real_t delta_u[3];
+      fault_basis_.EmbedSlip(fi, slip_local, delta_u);
 
       // Sign correction (same convention as slip assembly)
+      // Use centroid to get face normal for sign determination
       FTr->SetAllIntPoints(&ip);
       Vector nor(dim);
       CalcOrtho(FTr->Jacobian(), nor);
@@ -3065,37 +3054,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          FTr->GetGeometryType(), 2 * face_order + 1);
       int nqp = ir_trac.GetNPoints();
 
-      // v44: L2 projection accumulators for multi-DOF traction
-      // At nbf=1 (p=1): reduces exactly to face averaging (backward compatible)
-      // At nbf>1 (p>=2): full L2 projection preserving intra-face variation
-      const int nbf = face_quad_->NumBasisFunctions();
-      const DenseMatrix &e_q = face_quad_->BasisAtQuadPoints();
-      const DenseMatrix &Minv = face_quad_->RefMassInverse();
-
-      // T_rhs[k*dim+c] = Σ_q w_q × φ_k(q) × T_q[c]  (L2 projection RHS)
-      Vector T_rhs(nbf * dim);
-      T_rhs = 0.0;
-
-      // Also accumulate face-averaged values for diagnostics
-      real_t T_stress_diag[3] = {0.0, 0.0, 0.0};
-      real_t correction_diag[3] = {0.0, 0.0, 0.0};
+      // Face-averaged accumulators (used for BR2 path and diagnostics)
+      real_t T_global[3] = {0.0, 0.0, 0.0};
+      real_t T_stress[3] = {0.0, 0.0, 0.0};
+      real_t correction[3] = {0.0, 0.0, 0.0};
       real_t sum_wq = 0.0;
 
       if (method_ == DGMethod::IP)
       {
          // IP penalty parameters (constant per face)
-         // v44 fix: multiply by dim to convert face_area/vol to physical A/V
          real_t c0_mat = 2.0 * mu_val_;
          real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
          real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
          real_t face_area = nor.Norml2();
          real_t vol1 = FTr->Elem1->Weight();
          real_t vol2 = FTr->Elem2->Weight();
-         real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
+         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
                      * (c1_mat * c1_mat / c0_mat);
-         real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
+         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
+
+         // Multi-DOF: store per-quad-point traction for L2 projection
+         int nbf = nbf_per_face_;
+         Vector T_quad(dim * nqp);
+         T_quad = 0.0;
 
          for (int q = 0; q < nqp; q++)
          {
@@ -3105,7 +3088,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
             real_t wq = fip.weight;
 
-            // {σ·n̂} at quadrature point q
+            // {sigma . n_hat} at quadrature point q
             DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
             fe1->CalcDShape(eip1_q, dshape1_ref);
             fe2->CalcDShape(eip2_q, dshape2_ref);
@@ -3134,7 +3117,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
                   real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
                   real_t eps_ij = 0.5 * (ag + ag_t);
-                  // Accumulate stress(ci, cj) * n_hat(cj) directly
                   real_t tr_contrib = (ci == cj)
                      ? lambda_val_ * (0.5*((grad1(0,0)+grad2(0,0))
                         + (grad1(1,1)+grad2(1,1))
@@ -3144,24 +3126,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                }
             }
 
-            // Displacement values at q → penalty correction
+            // Displacement values at q -> penalty correction
             Vector s1q(ndof1), s2q(ndof2);
             fe1->CalcShape(eip1_q, s1q);
             fe2->CalcShape(eip2_q, s2q);
-
-            // v44: Interpolate slip from DOFs to this quad point
-            real_t slip_dip_q = 0.0, slip_strike_q = 0.0;
-            for (int bk = 0; bk < nbf; bk++)
-            {
-               slip_dip_q    += e_q(bk, q) * slip_bc(2*(fi*nbf+bk));
-               slip_strike_q += e_q(bk, q) * slip_bc(2*(fi*nbf+bk)+1);
-            }
-            real_t delta_u_q[3];
-            for (int d = 0; d < dim; d++)
-            {
-               delta_u_q[d] = slip_dip_q * basis.tangent1[d]
-                            + slip_strike_q * basis.tangent2[d];
-            }
 
             real_t correction_q[3] = {0.0, 0.0, 0.0};
             for (int c = 0; c < dim; c++)
@@ -3171,28 +3139,77 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
-               // Canonical correction (see v39 debug doc Section 12.2)
-               real_t jump_c = (u1q - u2q) - sign * delta_u_q[c];
+               // Canonical correction: sign * maps MFEM ordering to
+               // physical convention. Negated because n_hat_fault = (0,-1,0)
+               // reverses the standard DG formula sign on the penalty
+               // term (see v39 debug doc Section 12.2).
+               real_t jump_c = (u1q - u2q) - sign * delta_u[c];
                correction_q[c] = -penalty_ip * sign * jump_c;
             }
 
-            // v44: Accumulate L2 projection RHS
-            for (int bk = 0; bk < nbf; bk++)
-            {
-               for (int c = 0; c < dim; c++)
-               {
-                  T_rhs(bk * dim + c) += wq * e_q(bk, q)
-                     * (T_stress_q[c] - correction_q[c]);
-               }
-            }
-
-            // Also accumulate for diagnostics (face-averaged)
+            // Store per-quad-point total traction: T_q = T_stress_q - correction_q
             for (int c = 0; c < dim; c++)
             {
-               T_stress_diag[c] += wq * T_stress_q[c];
-               correction_diag[c] += wq * correction_q[c];
+               T_quad(c * nqp + q) = T_stress_q[c] - correction_q[c];
+            }
+
+            // Also accumulate face-averaged values for diagnostics
+            for (int c = 0; c < dim; c++)
+            {
+               T_stress[c] += wq * T_stress_q[c];
+               correction[c] += wq * correction_q[c];
             }
             sum_wq += wq;
+         }
+
+         // L2 project quad-point traction to per-DOF nodal values
+         // At nbf=1 (p=1): GalerkinProject = face average -> identical to old code
+         Vector T_nodal;
+         face_quad_->GalerkinProject(dim, T_quad, T_nodal);
+
+         // Store per-DOF traction in local frame
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            real_t T_k[3] = {T_nodal(0 * nbf + kk),
+                             T_nodal(1 * nbf + kk),
+                             T_nodal(2 * nbf + kk)};
+            real_t tau_local[2];
+            fault_basis_.ProjectTraction(fi, T_k, tau_local);
+            int dof_idx = fi * nbf_per_face_ + kk;
+            traction(2 * dof_idx)     = tau_local[0];
+            traction(2 * dof_idx + 1) = tau_local[1];
+         }
+
+         // Normalize face-averaged diagnostics
+         if (sum_wq > 0.0)
+         {
+            for (int c = 0; c < dim; c++)
+            {
+               T_stress[c] /= sum_wq;
+               correction[c] /= sum_wq;
+            }
+         }
+
+         // Traction decomposition diagnostic (face-averaged values)
+         if (diag_traction_decomp_)
+         {
+            real_t tau_stress_local[2], tau_corr_local[2];
+            fault_basis_.ProjectTraction(fi, T_stress, tau_stress_local);
+            real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+            fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
+
+            FTr->SetAllIntPoints(&ip);
+            Vector fc(3);
+            FTr->Face->SetIntPoint(&ip);
+            FTr->Face->Transform(ip, fc);
+
+            mfem::out << "  TRAC_DECOMP interior DOF=" << fi
+                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                      << " stress_dip=" << tau_stress_local[0]
+                      << " stress_strike=" << tau_stress_local[1]
+                      << " corr_dip=" << tau_corr_local[0]
+                      << " corr_strike=" << tau_corr_local[1];
+            mfem::out << "\n";
          }
       }
       else  // BR2
@@ -3230,20 +3247,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             CalcOrtho(FTr->Jacobian(), nor_q);
             w_arr[q] = fip.weight;
 
-            // v44: Interpolate slip at this quad point for BR2 traction
-            real_t slip_dip_br2 = 0.0, slip_strike_br2 = 0.0;
-            for (int bk = 0; bk < nbf; bk++)
-            {
-               slip_dip_br2    += e_q(bk, q) * slip_bc(2*(fi*nbf+bk));
-               slip_strike_br2 += e_q(bk, q) * slip_bc(2*(fi*nbf+bk)+1);
-            }
-            real_t delta_u_br2[3];
-            for (int d = 0; d < dim; d++)
-            {
-               delta_u_br2[d] = slip_dip_br2 * basis.tangent1[d]
-                              + slip_strike_br2 * basis.tangent2[d];
-            }
-
             // Per-quadrature-point displacement jump for lifting
             real_t jump_q[3] = {0.0, 0.0, 0.0};
             for (int c = 0; c < dim; c++)
@@ -3253,7 +3256,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
-               jump_q[c] = (u1q - u2q) - sign * delta_u_br2[c];
+               jump_q[c] = (u1q - u2q) - sign * delta_u[c];
             }
 
             for (int u = 0; u < dim; u++)
@@ -3348,79 +3351,57 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                correction_q[i] = br2_penalty * 0.5 * sum;
             }
 
-            // v44: Accumulate L2 projection RHS (same structure as IP)
-            for (int bk = 0; bk < nbf; bk++)
-            {
-               for (int c = 0; c < dim; c++)
-               {
-                  T_rhs(bk * dim + c) += wq * e_q(bk, q)
-                     * (T_stress_q[c] - correction_q[c]);
-               }
-            }
-
-            // Also accumulate for diagnostics (face-averaged)
+            // Accumulate face average
             for (int c = 0; c < dim; c++)
             {
-               T_stress_diag[c] += wq * T_stress_q[c];
-               correction_diag[c] += wq * correction_q[c];
+               T_stress[c] += wq * T_stress_q[c];
+               correction[c] += wq * correction_q[c];
             }
             sum_wq += wq;
          }
       }
 
-      // v44: Apply M_ref_inv to get L2-projected traction DOFs
-      // At nbf=1: T_k = (1/Σw) × Σ wq × T_q = face_average (backward compat)
-      // At nbf>1: full L2 projection capturing intra-face variation
-      if (sum_wq > 0.0)
+      // BR2 path: normalize face average and store (BR2 uses nbf=1 always)
+      if (method_ != DGMethod::IP)
       {
-         // Apply M_ref_inv to T_rhs → get per-DOF traction in global coords
-         // Then project each DOF's traction to fault-local frame
-         for (int bk = 0; bk < nbf; bk++)
+         if (sum_wq > 0.0)
          {
-            real_t T_k[3] = {0.0, 0.0, 0.0};
-            for (int bl = 0; bl < nbf; bl++)
+            for (int c = 0; c < dim; c++)
             {
-               for (int c = 0; c < dim; c++)
-               {
-                  T_k[c] += Minv(bk, bl) * T_rhs(bl * dim + c);
-               }
+               T_stress[c] /= sum_wq;
+               correction[c] /= sum_wq;
+               T_global[c] = T_stress[c] - correction[c];
             }
-
-            // Project to local frame: (tau_dip, tau_strike)
-            int dof_idx = fi * nbf + bk;
-            real_t tau_local[2];
-            fault_basis_.ProjectTraction(fi, T_k, tau_local);
-            traction(2 * dof_idx)     = tau_local[0];
-            traction(2 * dof_idx + 1) = tau_local[1];
          }
-      }
 
-      // Traction decomposition diagnostic (face-averaged for monitoring)
-      if (diag_traction_decomp_)
-      {
-         real_t T_stress_avg[3], corr_avg[3];
-         for (int c = 0; c < dim; c++)
+         // Traction decomposition diagnostic
+         if (diag_traction_decomp_)
          {
-            T_stress_avg[c] = T_stress_diag[c] / sum_wq;
-            corr_avg[c] = correction_diag[c] / sum_wq;
+            real_t tau_stress_local[2], tau_corr_local[2];
+            fault_basis_.ProjectTraction(fi, T_stress, tau_stress_local);
+            real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+            fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
+
+            FTr->SetAllIntPoints(&ip);
+            Vector fc(3);
+            FTr->Face->SetIntPoint(&ip);
+            FTr->Face->Transform(ip, fc);
+
+            mfem::out << "  TRAC_DECOMP interior DOF=" << fi
+                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                      << " stress_dip=" << tau_stress_local[0]
+                      << " stress_strike=" << tau_stress_local[1]
+                      << " corr_dip=" << tau_corr_local[0]
+                      << " corr_strike=" << tau_corr_local[1];
+            mfem::out << "\n";
          }
-         real_t tau_stress_local[2], tau_corr_local[2];
-         fault_basis_.ProjectTraction(fi, T_stress_avg, tau_stress_local);
-         real_t corr_neg[3] = {-corr_avg[0], -corr_avg[1], -corr_avg[2]};
-         fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
 
-         FTr->SetAllIntPoints(&ip);
-         Vector fc(3);
-         FTr->Face->SetIntPoint(&ip);
-         FTr->Face->Transform(ip, fc);
-
-         mfem::out << "  TRAC_DECOMP interior face=" << fi
-                   << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                   << " stress_dip=" << tau_stress_local[0]
-                   << " stress_strike=" << tau_stress_local[1]
-                   << " corr_dip=" << tau_corr_local[0]
-                   << " corr_strike=" << tau_corr_local[1];
-         mfem::out << "\n";
+         // Project to local frame: (tau_dip, tau_strike)
+         // BR2 always has nbf_per_face_=1, so dof_idx = fi
+         real_t tau_local[2];
+         fault_basis_.ProjectTraction(fi, T_global, tau_local);
+         traction(2 * fi)     = tau_local[0];
+         traction(2 * fi + 1) = tau_local[1];
       }
    }
 
@@ -3472,8 +3453,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             u2_all(j) = nbr_data(vdofs2[j]);
          }
 
-         // Fault basis (face-constant for flat faces)
+         // Fault basis and prescribed slip
          const auto &basis = fault_basis_.GetBasis(trac_idx);
+         real_t slip_local[2] = {slip_bc(2 * trac_idx),
+                                 slip_bc(2 * trac_idx + 1)};
+         real_t delta_u[3];
+         fault_basis_.EmbedSlip(trac_idx, slip_local, delta_u);
 
          // Sign correction
          FTr->SetAllIntPoints(&ip);
@@ -3492,32 +3477,30 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             FTr->GetGeometryType(), 2 * face_order + 1);
          int nqp = ir_trac.GetNPoints();
 
-         // v44: L2 projection accumulators (same as interior faces)
-         const int nbf_s = face_quad_->NumBasisFunctions();
-         const DenseMatrix &e_q_s = face_quad_->BasisAtQuadPoints();
-         const DenseMatrix &Minv_s = face_quad_->RefMassInverse();
-
-         Vector T_rhs_s(nbf_s * dim);
-         T_rhs_s = 0.0;
-
-         real_t T_stress_diag_s[3] = {0.0, 0.0, 0.0};
-         real_t correction_diag_s[3] = {0.0, 0.0, 0.0};
+         // Face-averaged accumulators (used for BR2 path and diagnostics)
+         real_t T_global[3] = {0.0, 0.0, 0.0};
+         real_t T_stress[3] = {0.0, 0.0, 0.0};
+         real_t correction[3] = {0.0, 0.0, 0.0};
          real_t sum_wq = 0.0;
 
          if (method_ == DGMethod::IP)
          {
-            // v44 fix: multiply by dim to convert face_area/vol to physical A/V
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
             real_t face_area = nor.Norml2();
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
-            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
+            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
                         * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
+            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
                         * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
+
+            // Multi-DOF: store per-quad-point traction for L2 projection
+            int nbf = nbf_per_face_;
+            Vector T_quad(dim * nqp);
+            T_quad = 0.0;
 
             for (int q = 0; q < nqp; q++)
             {
@@ -3566,20 +3549,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                fe1->CalcShape(eip1_q, s1q);
                fe2->CalcShape(eip2_q, s2q);
 
-               // v44: Interpolate slip from DOFs to this quad point
-               real_t slip_dip_q = 0.0, slip_strike_q = 0.0;
-               for (int bk = 0; bk < nbf_s; bk++)
-               {
-                  slip_dip_q    += e_q_s(bk, q) * slip_bc(2*(trac_idx*nbf_s+bk));
-                  slip_strike_q += e_q_s(bk, q) * slip_bc(2*(trac_idx*nbf_s+bk)+1);
-               }
-               real_t delta_u_q[3];
-               for (int d = 0; d < dim; d++)
-               {
-                  delta_u_q[d] = slip_dip_q * basis.tangent1[d]
-                               + slip_strike_q * basis.tangent2[d];
-               }
-
                real_t correction_q[3] = {0.0, 0.0, 0.0};
                for (int c = 0; c < dim; c++)
                {
@@ -3588,26 +3557,86 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
-                  // Canonical jump for shared faces (see v39 debug doc)
-                  real_t jump_raw = (u1q - u2q) - sign * delta_u_q[c];
+                  // Canonical jump for shared faces: multiply by sign
+                  // to make correction independent of element ordering.
+                  // For shared faces, Elem1 is always the local element,
+                  // so two ranks get opposite (u1-u2) and opposite sign.
+                  // The raw jump = (u1-u2) - sign*delta_u flips between
+                  // ranks. Multiplying by sign makes both ranks compute
+                  // the same canonical correction:
+                  //   sign * ((u1-u2) - sign*delta_u)
+                  //   = sign*(u1-u2) - delta_u
+                  // where sign*(u1-u2) is invariant across ranks.
+                  // Negated: n_hat_fault = (0,-1,0) reverses the standard
+                  // DG penalty sign (see v39 debug doc Section 12.2).
+                  real_t jump_raw = (u1q - u2q) - sign * delta_u[c];
                   correction_q[c] = -penalty_ip * sign * jump_raw;
                }
 
-               // v44: Accumulate L2 projection RHS (shared faces)
-               for (int bk = 0; bk < nbf_s; bk++)
-               {
-                  for (int c = 0; c < dim; c++)
-                  {
-                     T_rhs_s(bk * dim + c) += wq * e_q_s(bk, q)
-                        * (T_stress_q[c] - correction_q[c]);
-                  }
-               }
+               // Store per-quad-point total traction
                for (int c = 0; c < dim; c++)
                {
-                  T_stress_diag_s[c] += wq * T_stress_q[c];
-                  correction_diag_s[c] += wq * correction_q[c];
+                  T_quad(c * nqp + q) = T_stress_q[c] - correction_q[c];
+               }
+
+               // Also accumulate face-averaged values for diagnostics
+               for (int c = 0; c < dim; c++)
+               {
+                  T_stress[c] += wq * T_stress_q[c];
+                  correction[c] += wq * correction_q[c];
                }
                sum_wq += wq;
+            }
+
+            // L2 project quad-point traction to per-DOF nodal values
+            Vector T_nodal;
+            face_quad_->GalerkinProject(dim, T_quad, T_nodal);
+
+            // Store per-DOF traction in local frame
+            int base_dof = trac_idx * nbf_per_face_;
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               real_t T_k[3] = {T_nodal(0 * nbf + kk),
+                                T_nodal(1 * nbf + kk),
+                                T_nodal(2 * nbf + kk)};
+               real_t tau_local[2];
+               fault_basis_.ProjectTraction(trac_idx, T_k, tau_local);
+               int dof_idx = base_dof + kk;
+               traction(2 * dof_idx)     = tau_local[0];
+               traction(2 * dof_idx + 1) = tau_local[1];
+            }
+
+            // Normalize face-averaged diagnostics
+            if (sum_wq > 0.0)
+            {
+               for (int c = 0; c < dim; c++)
+               {
+                  T_stress[c] /= sum_wq;
+                  correction[c] /= sum_wq;
+               }
+            }
+
+            // Traction decomposition diagnostic (face-averaged, shared faces)
+            if (diag_traction_decomp_)
+            {
+               real_t tau_stress_local[2], tau_corr_local[2];
+               fault_basis_.ProjectTraction(trac_idx, T_stress, tau_stress_local);
+               real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+               fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
+
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->SetIntPoint(&ip);
+               FTr->Face->Transform(ip, fc);
+
+               mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
+                         << " rank=" << rank
+                         << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                         << " stress_dip=" << tau_stress_local[0]
+                         << " stress_strike=" << tau_stress_local[1]
+                         << " corr_dip=" << tau_corr_local[0]
+                         << " corr_strike=" << tau_corr_local[1];
+               mfem::out << "\n";
             }
          }
          else  // BR2
@@ -3644,20 +3673,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                CalcOrtho(FTr->Jacobian(), nor_q);
                w_arr[q] = fip.weight;
 
-               // v44: Interpolate slip at quad point for shared BR2 traction
-               real_t slip_dip_br2s = 0.0, slip_strike_br2s = 0.0;
-               for (int bk = 0; bk < nbf_s; bk++)
-               {
-                  slip_dip_br2s    += e_q_s(bk, q) * slip_bc(2*(trac_idx*nbf_s+bk));
-                  slip_strike_br2s += e_q_s(bk, q) * slip_bc(2*(trac_idx*nbf_s+bk)+1);
-               }
-               real_t delta_u_br2s[3];
-               for (int d = 0; d < dim; d++)
-               {
-                  delta_u_br2s[d] = slip_dip_br2s * basis.tangent1[d]
-                                  + slip_strike_br2s * basis.tangent2[d];
-               }
-
                real_t jump_q[3] = {0.0, 0.0, 0.0};
                for (int c = 0; c < dim; c++)
                {
@@ -3666,7 +3681,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
-                  jump_q[c] = (u1q - u2q) - sign * delta_u_br2s[c];
+                  jump_q[c] = (u1q - u2q) - sign * delta_u[c];
                }
 
                for (int u = 0; u < dim; u++)
@@ -3754,135 +3769,113 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   correction_q[ci] = br2_penalty * 0.5 * sum;
                }
 
-               // v44: Accumulate L2 projection RHS (shared BR2)
-               for (int bk = 0; bk < nbf_s; bk++)
-               {
-                  for (int c = 0; c < dim; c++)
-                  {
-                     T_rhs_s(bk * dim + c) += wq * e_q_s(bk, q)
-                        * (T_stress_q[c] - correction_q[c]);
-                  }
-               }
                for (int c = 0; c < dim; c++)
                {
-                  T_stress_diag_s[c] += wq * T_stress_q[c];
-                  correction_diag_s[c] += wq * correction_q[c];
+                  T_stress[c] += wq * T_stress_q[c];
+                  correction[c] += wq * correction_q[c];
                }
                sum_wq += wq;
             }
          }
 
-         // v44: Apply M_ref_inv → per-DOF traction (shared faces)
-         if (sum_wq > 0.0)
+         // BR2 path: normalize face average and store (BR2 uses nbf=1 always)
+         if (method_ != DGMethod::IP)
          {
-            for (int bk = 0; bk < nbf_s; bk++)
+            if (sum_wq > 0.0)
             {
-               real_t T_k[3] = {0.0, 0.0, 0.0};
-               for (int bl = 0; bl < nbf_s; bl++)
+               for (int c = 0; c < dim; c++)
                {
-                  for (int c = 0; c < dim; c++)
-                  {
-                     T_k[c] += Minv_s(bk, bl) * T_rhs_s(bl * dim + c);
-                  }
+                  T_stress[c] /= sum_wq;
+                  correction[c] /= sum_wq;
+                  T_global[c] = T_stress[c] - correction[c];
                }
-
-               int dof_idx = trac_idx * nbf_s + bk;
-               real_t tau_local[2];
-               fault_basis_.ProjectTraction(trac_idx, T_k, tau_local);
-               traction(2 * dof_idx)     = tau_local[0];
-               traction(2 * dof_idx + 1) = tau_local[1];
             }
-         }
 
-         // Traction decomposition diagnostic (shared faces, face-averaged)
-         if (diag_traction_decomp_)
-         {
-            real_t T_stress_avg[3], corr_avg[3];
-            for (int c = 0; c < dim; c++)
+            // Traction decomposition diagnostic (shared faces)
+            if (diag_traction_decomp_)
             {
-               T_stress_avg[c] = T_stress_diag_s[c] / sum_wq;
-               corr_avg[c] = correction_diag_s[c] / sum_wq;
+               real_t tau_stress_local[2], tau_corr_local[2];
+               fault_basis_.ProjectTraction(trac_idx, T_stress, tau_stress_local);
+               real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
+               fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
+
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->SetIntPoint(&ip);
+               FTr->Face->Transform(ip, fc);
+
+               mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
+                         << " rank=" << rank
+                         << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                         << " stress_dip=" << tau_stress_local[0]
+                         << " stress_strike=" << tau_stress_local[1]
+                         << " corr_dip=" << tau_corr_local[0]
+                         << " corr_strike=" << tau_corr_local[1];
+               mfem::out << "\n";
             }
-            real_t tau_stress_local[2], tau_corr_local[2];
-            fault_basis_.ProjectTraction(trac_idx, T_stress_avg, tau_stress_local);
-            real_t corr_neg[3] = {-corr_avg[0], -corr_avg[1], -corr_avg[2]};
-            fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
 
-            FTr->SetAllIntPoints(&ip);
-            Vector fc(3);
-            FTr->Face->SetIntPoint(&ip);
-            FTr->Face->Transform(ip, fc);
-
-            mfem::out << "  TRAC_DECOMP shared face=" << trac_idx
-                      << " rank=" << rank
-                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                      << " stress_dip=" << tau_stress_local[0]
-                      << " stress_strike=" << tau_stress_local[1]
-                      << " corr_dip=" << tau_corr_local[0]
-                      << " corr_strike=" << tau_corr_local[1];
-            mfem::out << "\n";
+            // BR2 always has nbf_per_face_=1, so dof_idx = trac_idx
+            real_t tau_local[2];
+            fault_basis_.ProjectTraction(trac_idx, T_global, tau_local);
+            traction(2 * trac_idx)     = tau_local[0];
+            traction(2 * trac_idx + 1) = tau_local[1];
          }
       }
 #endif
    }
 
    // Diagnostic: check for traction blowup
-   // v44: DOF index maps to face via face_fi = dof_i / nbf
 #ifdef MFEM_USE_MPI
    if constexpr (IsParallelMesh<MeshType>::value)
    {
       int rank;
       MPI_Comm_rank(mesh_.GetComm(), &rank);
-      int nbf_diag = face_quad_ ? face_quad_->NumBasisFunctions() : 1;
       for (int i = 0; i < num_fault_dofs_; i++)
       {
          real_t tau_mag = std::sqrt(traction(2*i)*traction(2*i) +
                                     traction(2*i+1)*traction(2*i+1));
          if (tau_mag > 1e9 || std::isnan(tau_mag))
          {
-            int face_fi = i / nbf_diag;  // face index from DOF index
+            // Get face coordinates for diagnostics
             Vector face_center(3);
             face_center = 0.0;
-            if (face_fi < fault_interior_faces_.Size())
+            if (i < fault_interior_faces_.Size())
             {
-               int face_idx = fault_interior_faces_[face_fi];
+               int face_idx = fault_interior_faces_[i];
                FaceElementTransformations *FTr =
                   mesh_.GetInteriorFaceTransformations(face_idx);
                if (FTr)
                {
-                  const IntegrationPoint &ip_c =
+                  const IntegrationPoint &ip =
                      Geometries.GetCenter(FTr->GetGeometryType());
-                  FTr->Face->SetIntPoint(&ip_c);
-                  FTr->Face->Transform(ip_c, face_center);
+                  FTr->Face->SetIntPoint(&ip);
+                  FTr->Face->Transform(ip, face_center);
                }
             }
             else
             {
-               int shared_idx = face_fi - fault_interior_faces_.Size();
-               if (shared_idx >= 0 && shared_idx < fault_shared_faces_.Size())
+               int shared_idx = i - fault_interior_faces_.Size();
+               int sf = fault_shared_faces_[shared_idx];
+               FaceElementTransformations *FTr =
+                  mesh_.GetSharedFaceTransformations(sf);
+               if (FTr)
                {
-                  int sf = fault_shared_faces_[shared_idx];
-                  FaceElementTransformations *FTr =
-                     mesh_.GetSharedFaceTransformations(sf);
-                  if (FTr)
-                  {
-                     const IntegrationPoint &ip_c =
-                        Geometries.GetCenter(FTr->GetGeometryType());
-                     FTr->Face->SetIntPoint(&ip_c);
-                     FTr->Face->Transform(ip_c, face_center);
-                  }
+                  const IntegrationPoint &ip =
+                     Geometries.GetCenter(FTr->GetGeometryType());
+                  FTr->Face->SetIntPoint(&ip);
+                  FTr->Face->Transform(ip, face_center);
                }
             }
             mfem::out << "[Rank " << rank << "] TRACTION BLOWUP: DOF " << i
-                      << " (face " << face_fi << ")"
-                      << (face_fi < fault_interior_faces_.Size() ?
-                          " interior" : " shared")
+                      << (i < fault_interior_faces_.Size() ?
+                          " (interior)" : " (shared)")
                       << " tau_mag=" << tau_mag
                       << " tau=(" << traction(2*i) << ","
                       << traction(2*i+1) << ")"
                       << " at x=(" << face_center(0) << ","
                       << face_center(1) << "," << face_center(2) << ")"
-                      << "\n";
+                      << " slip=(" << slip_bc(2*i) << ","
+                      << slip_bc(2*i+1) << ")\n";
          }
       }
    }

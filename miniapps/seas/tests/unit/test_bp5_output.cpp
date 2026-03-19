@@ -389,6 +389,181 @@ void TestBP5BenchmarkOutput_DefaultStations()
 }
 
 // ============================================================================
+// Test: Multi-DOF improves station matching (Phase 5)
+//
+// With more DOFs per face (p>=2), station matching should find closer DOFs.
+// Simulate: sparse grid (face centers only) vs dense grid (6 DOFs per face).
+// ============================================================================
+
+void TestProbe2DInterpolator_MultiDOFCloserMatch()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_MultiDOFCloserMatch ===\n";
+
+   // Case 1: 4 faces, 1 DOF per face (face centers) — coarse grid
+   // Face centers at (0, 5e3), (0, 15e3), (20e3, 5e3), (20e3, 15e3)
+   const int nfaces = 4;
+   Vector x2_coarse(nfaces), x3_coarse(nfaces);
+   x2_coarse(0) = 0.0;    x3_coarse(0) = 5e3;
+   x2_coarse(1) = 0.0;    x3_coarse(1) = 15e3;
+   x2_coarse(2) = 20e3;   x3_coarse(2) = 5e3;
+   x2_coarse(3) = 20e3;   x3_coarse(3) = 15e3;
+
+   // Case 2: 4 faces, 6 DOFs per face (p=2) — dense grid
+   // Each face gets 6 DOFs spread within it
+   const int nbf = 6;
+   const int ndofs = nfaces * nbf;
+   Vector x2_fine(ndofs), x3_fine(ndofs);
+   // Face 0 center (0, 5e3): spread DOFs around center
+   real_t offsets_x2[] = {-2e3, 0.0, 2e3, -1e3, 1e3, 0.0};
+   real_t offsets_x3[] = {-2e3, -2e3, -2e3, 0.0, 0.0, 2e3};
+   real_t face_cx2[] = {0.0, 0.0, 20e3, 20e3};
+   real_t face_cx3[] = {5e3, 15e3, 5e3, 15e3};
+   for (int f = 0; f < nfaces; f++)
+   {
+      for (int k = 0; k < nbf; k++)
+      {
+         int idx = f * nbf + k;
+         x2_fine(idx) = face_cx2[f] + offsets_x2[k];
+         x3_fine(idx) = face_cx3[f] + offsets_x3[k];
+      }
+   }
+
+   // Station at (1e3, 6e3) — slightly offset from face 0 center
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"test_nearby", 1e3, 6e3},
+   };
+
+   Probe2DInterpolator interp_coarse(x2_coarse, x3_coarse, stations);
+   Probe2DInterpolator interp_fine(x2_fine, x3_fine, stations);
+
+   real_t dist_coarse = interp_coarse.GetMatchDistance(0);
+   real_t dist_fine = interp_fine.GetMatchDistance(0);
+
+   std::cout << "  Coarse (nbf=1) match distance: " << dist_coarse << " m\n";
+   std::cout << "  Fine   (nbf=6) match distance: " << dist_fine << " m\n";
+
+   // Fine grid should match closer (or equal)
+   TEST_ASSERT(dist_fine <= dist_coarse + 1.0,
+               "Multi-DOF provides equal or closer station match");
+
+   // Both should find a valid DOF
+   TEST_ASSERT(interp_coarse.GetNearestDOF(0) >= 0,
+               "Coarse: valid nearest DOF");
+   TEST_ASSERT(interp_fine.GetNearestDOF(0) >= 0,
+               "Fine: valid nearest DOF");
+}
+
+// ============================================================================
+// Test: BP5BenchmarkOutput works with multi-DOF expanded vectors (Phase 5)
+//
+// Verifies that WriteFromGlobalData correctly indexes multi-DOF data
+// (6 DOFs per face at p=2). The output pipeline uses per-DOF indexing
+// from Probe2DInterpolator, so it should work generically.
+// ============================================================================
+
+void TestBP5BenchmarkOutput_MultiDOFWrite()
+{
+   std::cout << "\n=== Test: BP5BenchmarkOutput_MultiDOFWrite ===\n";
+
+   // 2 faces × 6 DOFs = 12 total DOFs
+   const int nfaces = 2;
+   const int nbf = 6;
+   const int ndofs = nfaces * nbf;
+
+   // DOF coordinates (spread across two faces)
+   Vector x2(ndofs), x3(ndofs);
+   for (int f = 0; f < nfaces; f++)
+   {
+      for (int k = 0; k < nbf; k++)
+      {
+         int idx = f * nbf + k;
+         x2(idx) = f * 10e3 + k * 1e3;  // Spread in x2
+         x3(idx) = 10e3 + k * 0.5e3;    // Spread in x3
+      }
+   }
+
+   // Station near DOF index 3 (face 0, DOF 3)
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"test_mdof", x2(3), x3(3)},
+   };
+
+   BP5Params params;
+   std::string prefix = "test_bp5_mdof";
+
+   Vector tau_pre_dip(ndofs), tau_pre_strike(ndofs);
+   tau_pre_dip = 0.0;
+   tau_pre_strike = 0.0;
+   // Give DOF 3 a known tau_pre
+   tau_pre_dip(3) = -5e6;
+   tau_pre_strike(3) = -13.27e6;
+
+   {
+      BP5BenchmarkOutput<Mesh> out(prefix, params, stations, x2, x3);
+      out.SetTauPre(tau_pre_dip, tau_pre_strike);
+
+      // Create per-DOF data vectors
+      Vector slip_dip(ndofs), slip_strike(ndofs), theta(ndofs);
+      Vector V_dip(ndofs), V_strike(ndofs);
+      Vector trac_dip(ndofs), trac_strike(ndofs);
+
+      // Set DOF 3 with known values, others with different values
+      for (int i = 0; i < ndofs; i++)
+      {
+         slip_dip(i) = -0.01 * (i + 1);
+         slip_strike(i) = -0.02 * (i + 1);
+         theta(i) = 100.0 + i;
+         V_dip(i) = 1e-9 * (i + 1);
+         V_strike(i) = 2e-9 * (i + 1);
+         trac_dip(i) = -1e5 * (i + 1);
+         trac_strike(i) = -2e5 * (i + 1);
+      }
+
+      out.WriteFromGlobalData(1.0, slip_dip, slip_strike, theta,
+                              V_dip, V_strike, trac_dip, trac_strike);
+      out.Flush();
+   }
+
+   // Read output and verify it picked up DOF 3's values
+   std::string filename = prefix + "_test_mdof.txt";
+   std::ifstream file(filename);
+   TEST_ASSERT(file.is_open(), "Multi-DOF output file created");
+
+   if (file.is_open())
+   {
+      std::string line;
+      std::getline(file, line); // header 1
+      std::getline(file, line); // header 2
+      std::getline(file, line); // data
+
+      std::istringstream iss(line);
+      double t, s_strike, s_dip, v_strike, v_dip, tau_s, tau_d, state_val;
+      iss >> t >> s_strike >> s_dip >> v_strike >> v_dip
+          >> tau_s >> tau_d >> state_val;
+
+      // DOF 3 (i=3): slip_strike negated = 0.02*4 = 0.08
+      TEST_NEAR(s_strike, 0.02 * 4, 1e-6,
+                "Multi-DOF: slip_strike from DOF 3");
+      // DOF 3 (i=3): slip_dip negated = 0.01*4 = 0.04
+      TEST_NEAR(s_dip, 0.01 * 4, 1e-6,
+                "Multi-DOF: slip_dip from DOF 3");
+      // DOF 3: V_strike = abs(2e-9*4) = 8e-9, output = log10(8e-9) ≈ -8.097
+      TEST_NEAR(v_strike, std::log10(2e-9 * 4), 0.01,
+                "Multi-DOF: log10(V_strike) from DOF 3");
+      // DOF 3: theta = 103, output = log10(103) ≈ 2.013
+      TEST_NEAR(state_val, std::log10(103.0), 0.01,
+                "Multi-DOF: log10(theta) from DOF 3");
+      // tau_strike = (tau_pre_strike + trac_strike) / 1e6
+      // = (13.27e6 + 2e5*4) / 1e6 = (13.27e6 + 8e5) / 1e6 = 14.07
+      TEST_NEAR(tau_s, 14.07, 0.01,
+                "Multi-DOF: tau_strike = tau_pre + elastic");
+
+      file.close();
+   }
+
+   std::remove(filename.c_str());
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -404,6 +579,10 @@ int main()
    TestBP5BenchmarkOutput_StressComputation();
    TestBP5BenchmarkOutput_AdaptiveOutput();
    TestBP5BenchmarkOutput_DefaultStations();
+
+   // v45 Phase 5: Multi-DOF output tests
+   TestProbe2DInterpolator_MultiDOFCloserMatch();
+   TestBP5BenchmarkOutput_MultiDOFWrite();
 
    TEST_PRINT_RESULTS();
    return num_failed;
