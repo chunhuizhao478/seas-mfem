@@ -60,6 +60,8 @@ TEST_BP5_MESH_SRC = tests/unit/test_bp5_mesh.cpp
 # BP5 v16: Diagnostic VTK and mesh region tests
 TEST_DIAG_VTK_SRC = tests/unit/test_diag_vtk.cpp
 TEST_MESH_REGIONS_SRC = tests/unit/test_bp5_mesh_regions.cpp
+# v44: Multi-DOF fault face quadrature
+TEST_FACE_QUADRATURE_SRC = tests/unit/test_face_quadrature.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -85,6 +87,7 @@ TEST_BP5_OUTPUT_OBJ = $(TEST_BP5_OUTPUT_SRC:.cpp=.o)
 TEST_BP5_MESH_OBJ = $(TEST_BP5_MESH_SRC:.cpp=.o)
 TEST_DIAG_VTK_OBJ = $(TEST_DIAG_VTK_SRC:.cpp=.o)
 TEST_MESH_REGIONS_OBJ = $(TEST_MESH_REGIONS_SRC:.cpp=.o)
+TEST_FACE_QUADRATURE_OBJ = $(TEST_FACE_QUADRATURE_SRC:.cpp=.o)
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -110,7 +113,8 @@ DOMAIN_HEADERS = common/seas_types.hpp \
 # Phase 3: Fault operator
 FAULT_HEADERS = fault/fault_geometry.hpp \
                 fault/rate_state_fault.hpp \
-                fault/fault_basis.hpp
+                fault/fault_basis.hpp \
+                fault/face_quadrature.hpp
 
 # Phase 4: SEAS operator
 SOLVER_HEADERS = solver/seas_operator.hpp \
@@ -144,7 +148,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_bp5_fault_operator \
                seas_test_bp5_integration \
                seas_test_bp5_output seas_test_bp5_mesh \
-               seas_test_diag_vtk seas_test_mesh_regions
+               seas_test_diag_vtk seas_test_mesh_regions \
+               seas_test_face_quadrature
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -357,6 +362,10 @@ seas_test_diag_vtk: $(TEST_DIAG_VTK_OBJ)
 seas_test_mesh_regions: $(TEST_MESH_REGIONS_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MESH_REGIONS_OBJ) $(MFEM_LIBS)
 
+# v44: Face quadrature unit tests
+seas_test_face_quadrature: $(TEST_FACE_QUADRATURE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FACE_QUADRATURE_OBJ) $(MFEM_LIBS)
+
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
@@ -454,6 +463,10 @@ $(TEST_MESH_REGIONS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_FACE_QUADRATURE_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -467,7 +480,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-bp5-fault-operator \
       test-bp5-integration \
       test-bp5-output test-bp5-mesh \
-      test-diag-vtk test-mesh-regions
+      test-diag-vtk test-mesh-regions \
+      test-face-quadrature
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -537,6 +551,9 @@ test-diag-vtk: seas_test_diag_vtk
 
 test-mesh-regions: seas_test_mesh_regions
 	./seas_test_mesh_regions
+
+test-face-quadrature: seas_test_face_quadrature
+	./seas_test_face_quadrature
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)
