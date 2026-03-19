@@ -363,7 +363,103 @@ T_global[c] = T_stress[c];
 
 ---
 
-## 7. Cumulative Fix History
+## 7. CRITICAL DISCOVERY: IP Penalty Is 1/3 of Tandem's (Reference Element Scaling Bug)
+
+### 7.1 The Bug
+
+MFEM's IP penalty uses `nl_q / Weight()` as the face-area / element-volume ratio.
+For **tetrahedra**:
+
+```
+CalcOrtho(J_face, nor):  nl_q = |nor| = |col1 × col2| = 2 × A_phys
+                         (reference triangle area = 1/2)
+
+Weight() = |det(J_vol)| = 6 × V_phys
+           (reference tet volume = 1/6)
+
+nl_q / Weight() = (2A) / (6V) = A / (3V)
+```
+
+**Tandem** computes physical area and volume by quadrature integration:
+```cpp
+// DGCurvilinearCommon.cpp:
+volume_[elNo] = Σ_q w_q × absDetJ(q)     // = V_phys (physical volume)
+area_[fctNo]  = Σ_q w_q × |nor_q|         // = A_phys (physical face area)
+penalty = (D+1) × c_N_1 × (area/volume) × (c1²/c0)   // uses A/V
+```
+
+**MFEM's penalty is exactly 1/3 of Tandem's**: `A/(3V)` vs `A/V`.
+
+### 7.2 Numerical Verification
+
+For a regular tet with edge length h=1000m:
+```
+Physical: A/V = 3/h = 0.003
+MFEM:     nl_q/Wt = 1/h = 0.001
+Ratio:    3.0  (= dim for 3D tetrahedra)
+```
+
+### 7.3 Why This Matters: Imbalanced Bilinear Form
+
+The IP bilinear form has three terms assembled by **two separate integrators**:
+
+1. `DGElasticityIntegrator(kappa=0)` → consistency + symmetry (MFEM standard)
+   - Uses `dshape_adj / detJ` which **correctly cancels** reference scaling
+   - These terms are at **full strength** ✓
+
+2. `DGElasticityIPPenaltyIntegrator` → penalty (our custom code)
+   - Uses `nl_q / vol` which gives `A/(3V)` instead of `A/V`
+   - This term is at **1/3 strength** ✗
+
+The consistency/symmetry terms are correctly scaled but the penalty that must
+counterbalance them is 3× too weak. This makes the bilinear form **under-penalized**.
+
+### 7.4 Impact
+
+- **p=1**: 1/3 penalty is still above the coercivity threshold → stable but inaccurate
+  (20% strike deficit is caused by this weak penalty)
+- **p≥2**: With correctly balanced c_N_1 (v42 fix), the consistency terms grow
+  proportionally with p while the penalty grows proportionally with p but at 1/3
+  strength → insufficient enforcement → larger DG jumps → traction bias → fault locks
+
+### 7.5 All 13 Affected Locations
+
+| # | File | Line | Function |
+|---|------|------|----------|
+| 1 | `dg_elasticity_ip_penalty_integrator.hpp` | 120 | Bilinear form (p0) |
+| 2 | `dg_elasticity_ip_penalty_integrator.hpp` | 126 | Bilinear form (p1) |
+| 3 | `elasticity_operator.hpp` | 1039 | AssembleSlipContributionIP (p0) |
+| 4 | `elasticity_operator.hpp` | 1040 | AssembleSlipContributionIP (p1) |
+| 5 | `elasticity_operator.hpp` | 1501 | AssembleSlipContributionIPShared (p0) |
+| 6 | `elasticity_operator.hpp` | 1502 | AssembleSlipContributionIPShared (p1) |
+| 7 | `elasticity_operator.hpp` | 1859 | AssembleDirichletLoading boundary (p0) |
+| 8 | `elasticity_operator.hpp` | 2133 | AssembleDirichletLoading interior (p0) |
+| 9 | `elasticity_operator.hpp` | 2135 | AssembleDirichletLoading interior (p1) |
+| 10 | `elasticity_operator.hpp` | 2514 | AssembleDirichletLoading shared (p0) |
+| 11 | `elasticity_operator.hpp` | 2516 | AssembleDirichletLoading shared (p1) |
+| 12 | `elasticity_operator.hpp` | 3088-3090 | ComputeTraction interior (p0,p1) |
+| 13 | `elasticity_operator.hpp` | 3509-3511 | ComputeTraction shared (p0,p1) |
+
+### 7.6 The Fix
+
+At each location, multiply `nl_q / detJ` by `dim` to convert from reference to physical:
+```cpp
+// BEFORE (WRONG — gives A/(3V) for tets):
+real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1² / c0);
+
+// AFTER (CORRECT — gives A/V for tets, matching Tandem):
+real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1² / c0);
+```
+
+The factor `dim` = 3 corrects for simplex reference element scaling:
+- Reference tet volume = 1/D!, so Weight() = D! × V_phys
+- Reference triangle area = 1/(D-1)!, so nl_q = (D-1)! × 2 × A_phys ... no:
+- More precisely: nl_q = 2A, Weight() = 6V, so nl_q/Weight() = A/(3V) = A/(D×V)
+- Multiply by D to get A/V
+
+---
+
+## 8. Cumulative Fix History
 
 | Fix | Description | Status |
 |-----|-------------|--------|
@@ -371,30 +467,37 @@ T_global[c] = T_stress[c];
 | v41 | Parametric study: resolution, domain, p-refinement | Done |
 | v42 | IP c_N_1 fix: 1.0 → p(p+D-1)/D at 5 RHS locations | Done |
 | v43 | Multi-DOF fault attempt (reverted — sign bug) | Reverted |
-| **v44** | **Remove IP penalty from fault traction** | **Proposed** |
+| **v44a** | **IP penalty ×3 fix: nl_q/vol → dim×nl_q/vol at all 13 locations** | **Applied** |
+| **v44b** | **Remove IP penalty from fault traction (if still needed)** | **Contingent on v44a results** |
 
 ---
 
-## 8. Files Changed
+## 9. Files Changed
 
 | File | Change |
 |------|--------|
-| `domain/elasticity_operator.hpp` | 2 lines: `T_global = T_stress` instead of `T_stress - correction` |
+| `integrator/dg_elasticity_ip_penalty_integrator.hpp` | 2 lines: multiply by dim in penalty formula |
+| `domain/elasticity_operator.hpp` | 11 lines: multiply by dim in penalty formula |
 
 ---
 
-## 9. Summary
+## 10. Summary
 
-**Root cause**: MFEM uses 2 constant DOFs per fault face while the volume DG
-solution at p≥2 has polynomial variation. The IP penalty (∝ p²) amplifies the
-mismatch between the constant slip representation and the DG solution's
-polynomial displacement jump. Face-averaging the traction (including penalty)
-produces a systematic bias that locks the fault.
+**Two root causes identified for p≥2 failure:**
 
-**Tandem avoids this** with (N+1)(N+2)/2 fault DOFs per face, L2 projection,
-and per-DOF friction evaluation — the slip field naturally develops polynomial
-variation that matches the DG solution.
+1. **Factor-of-3 penalty scaling bug** (Section 7): MFEM uses `nl_q/Weight()` =
+   `A/(3V)` while Tandem uses physical `A/V`. The IP penalty is 1/3 of Tandem's
+   across ALL 13 locations (bilinear form, RHS, traction). This under-penalizes
+   the DG system, explaining the 20% strike deficit at p=1 and contributing to
+   fault locking at p≥2.
 
-**Proposed fix**: Remove the IP penalty correction from fault traction extraction.
-Use T = {σ·n} (stress average only). This matches the SCEC specification,
-eliminates the p²-scaling stiffness, and is a 2-line change.
+2. **Fault DOF mismatch** (Section 2): MFEM uses 2 constant DOFs per face while
+   Tandem uses (p+1)(p+2)/2 DOFs with polynomial variation. At p≥2, the constant
+   slip representation cannot match the DG solution's polynomial jump, and the
+   penalty correction amplifies this mismatch.
+
+**v44 fix strategy**: Fix the factor-of-3 bug first (Section 7.6). This is a
+clear coding error — the penalty formula should produce the same physical value
+as Tandem's. If p≥2 still fails after this fix, the fault DOF mismatch (Section 2)
+is the remaining issue, addressed by removing penalty from fault traction
+(Section 3) or full multi-DOF implementation (Section 4).

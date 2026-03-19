@@ -116,14 +116,17 @@ public:
          real_t vol1 = Trans.Elem1->Weight();
 
          // Penalty per side: p(K) = (D+1) * c_N_1 * (A/V) * (c1²/c0)
-         // Use nl_q as the face-area measure at this quadrature point
-         real_t p0 = (dim_ + 1) * c_N_1 * (nl_q / vol1) * (c1 * c1 / c0);
+         // v44 fix: nl_q/vol = (2A)/(6V) = A/(3V) for tets (reference element
+         // scaling). Multiply by dim to get physical A/V matching Tandem.
+         real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / vol1)
+                     * (c1 * c1 / c0);
 
          real_t penalty;
          if (ndofs2 > 0)
          {
             real_t vol2 = Trans.Elem2->Weight();
-            real_t p1 = (dim_ + 1) * c_N_1 * (nl_q / vol2) * (c1 * c1 / c0);
+            real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / vol2)
+                        * (c1 * c1 / c0);
             penalty = (p0 + p1) / 4.0;
          }
          else

@@ -1035,9 +1035,10 @@ private:
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
             // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0, correct only at p=1)
+            // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -1497,9 +1498,10 @@ private:
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
+               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -1855,8 +1857,9 @@ private:
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
+               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
                real_t wq_penalty = p0 * ip.weight * nl_q;
 
                for (int k = 0; k < ndof; k++)
@@ -2129,10 +2132,11 @@ private:
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
+               // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
                            * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
+               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                            * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -2510,10 +2514,11 @@ private:
                   real_t c0_mat = 2.0 * mu_val_;
                   real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                   // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
+                  // v44 fix: multiply by dim to convert nl_q/detJ to physical A/V
                   real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-                  real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
+                  real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
                               * (c1_mat * c1_mat / c0_mat);
-                  real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
+                  real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                               * (c1_mat * c1_mat / c0_mat);
                   real_t penalty_ip = (p0 + p1) / 4.0;
                   real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -3079,15 +3084,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       if (method_ == DGMethod::IP)
       {
          // IP penalty parameters (constant per face)
+         // v44 fix: multiply by dim to convert face_area/vol to physical A/V
          real_t c0_mat = 2.0 * mu_val_;
          real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
          real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
          real_t face_area = nor.Norml2();
          real_t vol1 = FTr->Elem1->Weight();
          real_t vol2 = FTr->Elem2->Weight();
-         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+         real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                      * (c1_mat * c1_mat / c0_mat);
-         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+         real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
@@ -3500,15 +3506,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          if (method_ == DGMethod::IP)
          {
+            // v44 fix: multiply by dim to convert face_area/vol to physical A/V
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
             real_t face_area = nor.Norml2();
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
-            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                         * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                         * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
 
