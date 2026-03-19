@@ -3030,11 +3030,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       displacement.GetSubVector(vdofs1, u1_all);
       displacement.GetSubVector(vdofs2, u2_all);
 
-      // Fault basis and prescribed slip
+      // Fault basis
       const auto &basis = fault_basis_.GetBasis(fi);
-      real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
-      real_t delta_u[3];
-      fault_basis_.EmbedSlip(fi, slip_local, delta_u);
 
       // Sign correction (same convention as slip assembly)
       // Use centroid to get face normal for sign determination
@@ -3077,6 +3074,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          // Multi-DOF: store per-quad-point traction for L2 projection
          int nbf = nbf_per_face_;
+
+         // v45 fix: Build per-DOF nodal slip and interpolate to quad points.
+         // Must use DOF index (fi * nbf + kk), NOT face index fi, to read
+         // slip_bc. Previous code used slip_bc(2*fi) which is wrong at nbf>1
+         // because it reads from the wrong face's DOFs. This caused the p=2
+         // blowup: the penalty correction saw mismatched slip, creating huge
+         // spurious tractions that drove the instability.
+         Vector delta_u_nodal(dim * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = fi * nbf + kk;
+            real_t sl[2] = {slip_bc(2 * dof_idx),
+                            slip_bc(2 * dof_idx + 1)};
+            real_t du[3];
+            fault_basis_.EmbedSlip(fi, sl, du);
+            for (int c = 0; c < dim; c++)
+            {
+               delta_u_nodal(c * nbf + kk) = du[c];
+            }
+         }
+         Vector delta_u_quad;
+         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+
          Vector T_quad(dim * nqp);
          T_quad = 0.0;
 
@@ -3139,11 +3159,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
+               // Per-quad-point interpolated slip (v45 fix)
+               real_t delta_u_q_c = delta_u_quad(c * nqp + q);
                // Canonical correction: sign * maps MFEM ordering to
                // physical convention. Negated because n_hat_fault = (0,-1,0)
                // reverses the standard DG formula sign on the penalty
                // term (see v39 debug doc Section 12.2).
-               real_t jump_c = (u1q - u2q) - sign * delta_u[c];
+               real_t jump_c = (u1q - u2q) - sign * delta_u_q_c;
                correction_q[c] = -penalty_ip * sign * jump_c;
             }
 
@@ -3214,6 +3236,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
       else  // BR2
       {
+         // BR2 always uses nbf=1, so face-index == DOF-index
+         real_t slip_local_br2[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
+         real_t delta_u[3];
+         fault_basis_.EmbedSlip(fi, slip_local_br2, delta_u);
+
          if (!mass_inv_computed_) { PrecomputeMassInverse(); }
 
          Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
@@ -3453,12 +3480,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             u2_all(j) = nbr_data(vdofs2[j]);
          }
 
-         // Fault basis and prescribed slip
+         // Fault basis
          const auto &basis = fault_basis_.GetBasis(trac_idx);
-         real_t slip_local[2] = {slip_bc(2 * trac_idx),
-                                 slip_bc(2 * trac_idx + 1)};
-         real_t delta_u[3];
-         fault_basis_.EmbedSlip(trac_idx, slip_local, delta_u);
 
          // Sign correction
          FTr->SetAllIntPoints(&ip);
@@ -3499,6 +3522,26 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
             // Multi-DOF: store per-quad-point traction for L2 projection
             int nbf = nbf_per_face_;
+
+            // v45 fix: Build per-DOF nodal slip and interpolate to quad
+            // points (same fix as interior faces — see comment there).
+            Vector delta_u_nodal(dim * nbf);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = trac_idx * nbf + kk;
+               real_t sl[2] = {slip_bc(2 * dof_idx),
+                               slip_bc(2 * dof_idx + 1)};
+               real_t du[3];
+               fault_basis_.EmbedSlip(trac_idx, sl, du);
+               for (int c = 0; c < dim; c++)
+               {
+                  delta_u_nodal(c * nbf + kk) = du[c];
+               }
+            }
+            Vector delta_u_quad;
+            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal,
+                                                delta_u_quad);
+
             Vector T_quad(dim * nqp);
             T_quad = 0.0;
 
@@ -3557,6 +3600,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
+                  // Per-quad-point interpolated slip (v45 fix)
+                  real_t delta_u_q_c = delta_u_quad(c * nqp + q);
                   // Canonical jump for shared faces: multiply by sign
                   // to make correction independent of element ordering.
                   // For shared faces, Elem1 is always the local element,
@@ -3569,7 +3614,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   // where sign*(u1-u2) is invariant across ranks.
                   // Negated: n_hat_fault = (0,-1,0) reverses the standard
                   // DG penalty sign (see v39 debug doc Section 12.2).
-                  real_t jump_raw = (u1q - u2q) - sign * delta_u[c];
+                  real_t jump_raw = (u1q - u2q) - sign * delta_u_q_c;
                   correction_q[c] = -penalty_ip * sign * jump_raw;
                }
 
@@ -3641,6 +3686,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          }
          else  // BR2
          {
+            // BR2 always uses nbf=1, so face-index == DOF-index
+            real_t slip_local_br2[2] = {slip_bc(2 * trac_idx),
+                                        slip_bc(2 * trac_idx + 1)};
+            real_t delta_u[3];
+            fault_basis_.EmbedSlip(trac_idx, slip_local_br2, delta_u);
+
             if (!mass_inv_computed_) { PrecomputeMassInverse(); }
 
             Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);

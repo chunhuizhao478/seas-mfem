@@ -452,14 +452,77 @@ find closer DOFs → lower interpolation error. Verified in unit test:
 
 ---
 
-## 13. Next Steps
+## 13. v45 TACC Results and v46 Fix
+
+### 13.1 v45 TACC Results (2026-03-19)
+
+**v45a (p=1, 1000m, IP):** Job 7604176, 400 ranks, 8 nodes
+- Ran 8046 steps to t = 2.41e-4 yr (76 sec of simulation)
+- V_max peaked at 0.293 m/s (step ~7900), then declining
+- **Identical to v41a through step 8046** — verified step-by-step match
+- This is the initial overstress dissipation phase; EQ #2 at ~250 yr (seen in v41a)
+- **Conclusion: v45a p=1 is correct, just needs more walltime**
+
+**v45b (p=2, 1000m, IP):** Job 7604180, 800 ranks, 16 nodes
+- 56,382 global fault DOFs (9,397 faces × 6)
+- V_max exploded: 0.049 → 0.072 → 0.232 → ... → 196 m/s in 56 steps
+- OOM crash: SIGNAL 9 (killed) on ranks 700-748, SIGNAL 11 (segfault) on rank 719
+- **Classic numerical instability — positive feedback loop in traction**
+
+### 13.2 Root Cause: Slip Indexing Bug in ComputeTraction
+
+**The bug (2 locations in elasticity_operator.hpp):**
+
+```cpp
+// Interior faces (line 3035):
+real_t slip_local[2] = {slip_bc(2 * fi), slip_bc(2 * fi + 1)};
+// Shared faces (line 3458):
+real_t slip_local[2] = {slip_bc(2 * trac_idx), slip_bc(2 * trac_idx + 1)};
+```
+
+These index by **face index** (`fi` or `trac_idx`), but `slip_bc` is laid out by
+**DOF index** (`fi * nbf + kk`). At p=2 (nbf=6), face `fi=1` reads `slip_bc(2)`,
+which is actually DOF 1 of face 0 — not face 1's slip at all!
+
+Additionally, the single `delta_u[3]` was used **constant** across all quad points,
+but multi-DOF slip varies across the face. This created a **mismatch** between:
+- `AssembleSlipContributionIP`: correctly uses per-DOF interpolated slip
+- `ComputeTraction`: uses wrong face's slip, applied as constant
+
+The penalty correction `jump = (u1-u2) - sign*delta_u` sees the wrong slip,
+creating huge spurious tractions → positive feedback → blowup.
+
+**Why p=1 was unaffected:** At nbf=1, `fi * 1 + 0 = fi`, so the indexing is
+coincidentally correct. This is why v45a matched v41a exactly.
+
+### 13.3 v46 Fix
+
+In `ComputeTraction`, both interior and shared IP paths now:
+1. Build per-DOF nodal slip: `slip_bc(2 * (fi * nbf + kk))` for each DOF kk
+2. Embed to 3D: `fault_basis_.EmbedSlip(fi, sl, du)`
+3. Interpolate: `face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad)`
+4. Use per-quad-point slip: `delta_u_quad(c * nqp + q)` in the penalty correction
+
+The BR2 path (always nbf=1) retains the old indexing since face_index = DOF_index.
+
+All 280 unit tests pass after the fix.
+
+### 13.4 v46 TACC Runs
+
+| Job | Config | Nodes | Purpose |
+|-----|--------|-------|---------|
+| v46a | p=1 IP 1000m | 8 (400 ranks) | Regression — must match v41a |
+| v46b | p=2 IP 1000m | 16 (800 ranks) | Critical — must nucleate (V>1 m/s) |
+| v46c | p=4 IP 1000m | 32 (1600 ranks) | Convergence — nbf=15, must nucleate |
+
+## 14. Next Steps
 
 1. ~~Revert source code to v42 baseline~~ Done
 2. ~~Phase 2: L2 traction projection~~ Done
 3. ~~Phase 3: Multi-DOF slip interpolation~~ Done (148 tests pass)
 4. ~~Phase 4: Fault state/geometry expansion~~ Done (253 tests pass)
 5. ~~Phase 5: Output integration + unit tests~~ Done (280+54 tests pass)
-6. **TACC runs at p=2 IP**: The true integration test
-   - Submit p=2 BP5 job on tet mesh
-   - Compare V_max trajectory with Tandem reference
-   - Success criterion: earthquake nucleation (V > 1 m/s)
+6. ~~v45 TACC runs~~ p=2 blew up (slip indexing bug)
+7. ~~v46 fix: ComputeTraction slip indexing~~ Done (280 tests pass)
+8. **v46 TACC runs**: Submit v46a/b/c, await results
+   - Success criterion: earthquake nucleation (V > 1 m/s) at p=2
