@@ -976,11 +976,67 @@ private:
       int dim = 3;
       int nbf = nbf_per_face_;
 
-      // Face consistency diagnostic: fire on 2nd call (non-zero slip)
+      // Face consistency diagnostic: fire on 2nd call, heterogeneous faces only
       diag_face_call_++;
       bool do_face_diag = (diag_face_call_ == 2) && (nbf > 1);
       int diag_count = 0;
       const int diag_max = 3;
+
+      // Pre-scan for heterogeneous faces (nucleation boundary faces)
+      if (do_face_diag)
+      {
+         for (int fi2 = 0; fi2 < fault_interior_faces_.Size() && diag_count < diag_max; fi2++)
+         {
+            real_t smax = 0.0, smin = 1e30;
+            bool has_nonzero = false;
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int di = fi2 * nbf + kk;
+               real_t smag = std::sqrt(slip_bc(2*di)*slip_bc(2*di) +
+                                       slip_bc(2*di+1)*slip_bc(2*di+1));
+               if (smag > 1e-20) { has_nonzero = true; }
+               smax = std::max(smax, smag);
+               smin = std::min(smin, smag);
+            }
+            // Print faces with heterogeneous slip (ratio > 100 between DOFs)
+            if (has_nonzero && (smax > 100.0 * smin + 1e-30))
+            {
+               int face = fault_interior_faces_[fi2];
+               FaceElementTransformations *FTr2 =
+                  mesh_.GetInteriorFaceTransformations(face);
+               if (!FTr2) { continue; }
+               const IntegrationPoint &ip0 = IntRules.Get(
+                  FTr2->FaceGeom, 1).IntPoint(0);
+               FTr2->SetAllIntPoints(&ip0);
+               Vector nor2(3);
+               CalcOrtho(FTr2->Jacobian(), nor2);
+               real_t sign2 = (nor2(1) > 0) ? 1.0 : -1.0;
+               real_t nl2 = nor2.Norml2();
+               real_t detJ1 = FTr2->Elem1->Weight();
+               real_t detJ2 = FTr2->Elem2->Weight();
+               real_t c0m = 2.0*mu_val_;
+               real_t c1m = dim*lambda_val_ + 2.0*mu_val_;
+               real_t cN1 = order_*(order_+dim-1.0)/dim;
+               real_t pp0 = (dim+1)*cN1*(real_t(dim)*nl2/detJ1)*(c1m*c1m/c0m);
+               real_t pp1 = (dim+1)*cN1*(real_t(dim)*nl2/detJ2)*(c1m*c1m/c0m);
+               real_t pen = (pp0+pp1)/4.0;
+               mfem::out << "[SlipRHS-HET] fi=" << fi2 << " face=" << face
+                  << " E1=" << FTr2->Elem1No << " E2=" << FTr2->Elem2No
+                  << " sign=" << sign2 << " penalty=" << pen
+                  << " nor=(" << nor2(0) << "," << nor2(1) << "," << nor2(2) << ")"
+                  << " slip_dofs=[";
+               for (int kk = 0; kk < nbf; kk++)
+               {
+                  int di = fi2 * nbf + kk;
+                  mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
+                  if (kk < nbf-1) { mfem::out << ","; }
+               }
+               mfem::out << "]" << std::endl;
+               diag_count++;
+            }
+         }
+         do_face_diag = false;  // Already printed, skip per-quad-point diag
+      }
 
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
@@ -3131,26 +3187,39 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
-         // Face consistency diagnostic: fire on 2nd call (matches SlipRHS call #2)
-         if (diag_face_call_ == 2 && nbf_per_face_ > 1 && fi < 3)
+         // Face consistency diagnostic: find heterogeneous faces on 2nd call
+         if (diag_face_call_ == 2 && nbf_per_face_ > 1)
          {
-            mfem::out << "[Traction] fi=" << fi
-               << " face=" << fault_interior_faces_[fi]
-               << " E1=" << FTr->Elem1No
-               << " E2=" << FTr->Elem2No << " sign=" << sign
-               << " penalty=" << penalty_ip
-               << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
-               << " face_area=" << face_area << " nqp=" << nqp
-               << " ndof1=" << ndof1 << " ndof2=" << ndof2;
-            // Print per-DOF slip magnitude
-            mfem::out << " slip_dofs=[";
+            real_t smax = 0.0, smin = 1e30;
+            bool has_nz = false;
             for (int kk = 0; kk < nbf_per_face_; kk++)
             {
                int di = fi * nbf_per_face_ + kk;
-               mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
-               if (kk < nbf_per_face_-1) { mfem::out << ","; }
+               real_t sm = std::sqrt(slip_bc(2*di)*slip_bc(2*di) +
+                                     slip_bc(2*di+1)*slip_bc(2*di+1));
+               if (sm > 1e-20) { has_nz = true; }
+               smax = std::max(smax, sm);
+               smin = std::min(smin, sm);
             }
-            mfem::out << "]" << std::endl;
+            if (has_nz && (smax > 100.0 * smin + 1e-30))
+            {
+               mfem::out << "[Traction-HET] fi=" << fi
+                  << " face=" << fault_interior_faces_[fi]
+                  << " E1=" << FTr->Elem1No
+                  << " E2=" << FTr->Elem2No << " sign=" << sign
+                  << " penalty=" << penalty_ip
+                  << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
+                  << " face_area=" << face_area << " nqp=" << nqp
+                  << " ndof1=" << ndof1 << " ndof2=" << ndof2
+                  << " slip_dofs=[";
+               for (int kk = 0; kk < nbf_per_face_; kk++)
+               {
+                  int di = fi * nbf_per_face_ + kk;
+                  mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
+                  if (kk < nbf_per_face_-1) { mfem::out << ","; }
+               }
+               mfem::out << "]" << std::endl;
+            }
          }
 
          // Multi-DOF: store per-quad-point traction for L2 projection
