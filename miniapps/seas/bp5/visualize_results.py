@@ -28,7 +28,6 @@ import sys
 
 import numpy as np
 
-
 # SCEC BP5 standard 10 on-fault stations: (name, x2_km, x3_km)
 SCEC_STATIONS = [
     ("fltst_strk-36dp+00", -36, 0),
@@ -90,9 +89,21 @@ def coord_str(val_km):
     return str(int(val_km))
 
 
-def tandem_filename(directory, x2_km, x3_km):
-    """Generate Tandem benchmark filename for a given station."""
-    fname = f"bp5qd_tandem_x2_{coord_str(x2_km)}_x3_{coord_str(x3_km)}.txt"
+def tandem_filename(directory, x2_km, x3_km, order=4):
+    """Generate Tandem benchmark filename for a given station and polynomial order."""
+    fname = f"bp5qd_tandem_p{order}_x2_{coord_str(x2_km)}_x3_{coord_str(x3_km)}.txt"
+    return os.path.join(directory, fname)
+
+
+def eqsim_filename(directory, x2_km, x3_km):
+    """Generate EQSim benchmark filename for a given station."""
+    fname = f"bp5qd_eqsim_x2_{coord_str(x2_km)}_x3_{coord_str(x3_km)}.txt"
+    return os.path.join(directory, fname)
+
+
+def tribie_filename(directory, x2_km, x3_km):
+    """Generate TriBIE benchmark filename for a given station."""
+    fname = f"bp5qd_tribie_x2_{coord_str(x2_km)}_x3_{coord_str(x3_km)}.txt"
     return os.path.join(directory, fname)
 
 
@@ -102,17 +113,18 @@ def mfem_filename(prefix, station_name):
 
 
 def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
-    """Plot 6-panel comparison for one BP5 station.
+    """Plot 8-panel comparison for one BP5 station.
 
     datasets: list of (label, data_dict, color, linestyle) tuples.
-    Shows: slip_strike, slip_dip, V_strike, V_dip, tau_strike, tau_dip.
+    Shows: slip_strike, slip_dip, V_strike, V_dip, tau_strike, tau_dip, log10(state).
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(4, 2, figsize=(14, 16))
     fig.suptitle(
         f"BP5-QD: {station_name}  (x2={x2_km} km, x3={x3_km} km)",
-        fontsize=14, fontweight="bold",
+        fontsize=14,
+        fontweight="bold",
     )
 
     panels = [
@@ -122,6 +134,7 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
         ("V_dip", "Slip Rate V_dip (m/s)", True),
         ("tau_strike", "Shear Stress \u03c4_strike (MPa)", False),
         ("tau_dip", "Shear Stress \u03c4_dip (MPa)", False),
+        ("log10_theta", "log\u2081\u2080(State) (s)", False),
     ]
 
     for ax, (key, ylabel, use_log) in zip(axes.flat, panels):
@@ -143,6 +156,9 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
 
+    # Hide unused subplot
+    axes[3, 1].set_visible(False)
+
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -152,16 +168,16 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
     plt.close()
 
 
-def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1,
-                 save_path=None):
-    """Plot 6-panel comparison zoomed to the first t_max_yr years."""
+def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1, save_path=None):
+    """Plot 8-panel comparison zoomed to the first t_max_yr years."""
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    fig, axes = plt.subplots(4, 2, figsize=(14, 16))
     fig.suptitle(
         f"BP5-QD Close-up (0\u2013{t_max_yr:.0f} yr): {station_name}  "
         f"(x2={x2_km} km, x3={x3_km} km)",
-        fontsize=14, fontweight="bold",
+        fontsize=14,
+        fontweight="bold",
     )
 
     panels = [
@@ -171,6 +187,7 @@ def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1,
         ("V_dip", "Slip Rate V_dip (m/s)", True),
         ("tau_strike", "Shear Stress \u03c4_strike (MPa)", False),
         ("tau_dip", "Shear Stress \u03c4_dip (MPa)", False),
+        ("log10_theta", "log\u2081\u2080(State) (s)", False),
     ]
 
     for ax, (key, ylabel, use_log) in zip(axes.flat, panels):
@@ -194,6 +211,9 @@ def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1,
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
 
+    # Hide unused subplot
+    axes[3, 1].set_visible(False)
+
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -210,7 +230,8 @@ def plot_overview(all_results, save_path=None):
     fig, ax = plt.subplots(1, 1, figsize=(14, 6))
     fig.suptitle(
         "BP5-QD: Slip Rate (strike) at All Stations",
-        fontsize=14, fontweight="bold",
+        fontsize=14,
+        fontweight="bold",
     )
 
     cmap = plt.cm.tab10
@@ -268,14 +289,34 @@ def main():
         "mfem_prefix", help="MFEM output file prefix (e.g., results_1000m/bp5_full)"
     )
     parser.add_argument(
+        "--tandem-p4",
+        action="store_true",
+        help="Include Tandem p4 benchmark data",
+    )
+    parser.add_argument(
+        "--tandem-p6",
+        action="store_true",
+        help="Include Tandem p6 benchmark data",
+    )
+    parser.add_argument(
         "--tandem",
         action="store_true",
-        help="Include Tandem benchmark data",
+        help="Include both Tandem p4 and p6 benchmark data",
+    )
+    parser.add_argument(
+        "--eqsim",
+        action="store_true",
+        help="Include EQSim benchmark data",
+    )
+    parser.add_argument(
+        "--tribie",
+        action="store_true",
+        help="Include TriBIE benchmark data",
     )
     parser.add_argument(
         "--benchmark-dir",
         default="benchmark_data",
-        help="Directory containing Tandem benchmark files",
+        help="Directory containing benchmark files (Tandem, EQSim)",
     )
     parser.add_argument(
         "--compare",
@@ -307,9 +348,14 @@ def main():
     )
     args = parser.parse_args()
 
-    # Default: Tandem if no benchmark flags specified and not --no-benchmark
-    if not args.no_benchmark and not args.tandem:
-        args.tandem = True
+    # --tandem enables both p4 and p6
+    if args.tandem:
+        args.tandem_p4 = True
+        args.tandem_p6 = True
+
+    # Default: Tandem p4 if no benchmark flags specified and not --no-benchmark
+    if not args.no_benchmark and not args.tandem_p4 and not args.tandem_p6 and not args.eqsim and not args.tribie:
+        args.tandem_p4 = True
 
     try:
         import matplotlib
@@ -328,8 +374,9 @@ def main():
 
     # Select stations
     if args.stations:
-        stations = [SCEC_STATIONS[i - 1] for i in args.stations
-                     if 1 <= i <= len(SCEC_STATIONS)]
+        stations = [
+            SCEC_STATIONS[i - 1] for i in args.stations if 1 <= i <= len(SCEC_STATIONS)
+        ]
     else:
         stations = SCEC_STATIONS
 
@@ -337,15 +384,24 @@ def main():
     sources = []
     color_idx = 0
 
-    if args.tandem and not args.no_benchmark:
-        sources.append(("Tandem", "tandem", None, COLORS[color_idx], "--"))
-        color_idx += 1
+    if args.tandem_p4 and not args.no_benchmark:
+        sources.append(("Tandem p4", "tandem_p4", None, "#000000", "--"))  # black dashed
+
+    if args.tandem_p6 and not args.no_benchmark:
+        sources.append(("Tandem p6", "tandem_p6", None, "#2ca02c", "--"))  # green dashed
+
+    if args.eqsim and not args.no_benchmark:
+        sources.append(("EQSim", "eqsim", None, "#1f77b4", "--"))  # blue dashed
+
+    if args.tribie and not args.no_benchmark:
+        sources.append(("TriBIE", "tribie", None, "#9467bd", "--"))  # purple dashed
 
     # Primary MFEM dataset
     primary_label = f"MFEM {os.path.basename(args.mfem_prefix)}"
-    sources.append((primary_label, "mfem", args.mfem_prefix,
-                     COLORS[color_idx % len(COLORS)], "-"))
-    color_idx += 1
+    sources.append(
+        (primary_label, "mfem", args.mfem_prefix, "#d62728", "-")  # red solid
+    )
+    color_idx = 3
 
     # Additional --compare MFEM datasets
     if args.compare:
@@ -355,15 +411,16 @@ def main():
             else:
                 label = os.path.basename(spec)
                 prefix = spec
-            sources.append((f"MFEM {label}", "mfem", prefix,
-                            COLORS[color_idx % len(COLORS)], "-"))
+            sources.append(
+                (f"MFEM {label}", "mfem", prefix, COLORS[color_idx % len(COLORS)], "-")
+            )
             color_idx += 1
 
     print("=" * 60)
     print("BP5-QD Visualization")
     print("=" * 60)
     for label, stype, info, color, ls in sources:
-        if stype == "tandem":
+        if stype in ("tandem_p4", "tandem_p6", "eqsim", "tribie"):
             print(f"  {label}: {data_dir}/")
         else:
             print(f"  {label}: {info}")
@@ -376,8 +433,20 @@ def main():
         datasets = []
         for label, stype, info, color, ls in sources:
             data = None
-            if stype == "tandem":
-                path = tandem_filename(data_dir, x2_km, x3_km)
+            if stype == "tandem_p4":
+                path = tandem_filename(data_dir, x2_km, x3_km, order=4)
+                if os.path.exists(path):
+                    data = load_bp5_file(path)
+            elif stype == "tandem_p6":
+                path = tandem_filename(data_dir, x2_km, x3_km, order=6)
+                if os.path.exists(path):
+                    data = load_bp5_file(path)
+            elif stype == "tribie":
+                path = tribie_filename(data_dir, x2_km, x3_km)
+                if os.path.exists(path):
+                    data = load_bp5_file(path)
+            elif stype == "eqsim":
+                path = eqsim_filename(data_dir, x2_km, x3_km)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
             else:
@@ -420,9 +489,16 @@ def main():
         # Plot close-up (first 10 years)
         if args.save:
             fname_close = os.path.join(
-                args.output_dir, f"bp5_{station_name}_closeup.png")
-            plot_closeup(datasets, station_name, x2_km, x3_km,
-                         t_max_yr=0.1, save_path=fname_close)
+                args.output_dir, f"bp5_{station_name}_closeup.png"
+            )
+            plot_closeup(
+                datasets,
+                station_name,
+                x2_km,
+                x3_km,
+                t_max_yr=0.1,
+                save_path=fname_close,
+            )
         else:
             plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1)
 
