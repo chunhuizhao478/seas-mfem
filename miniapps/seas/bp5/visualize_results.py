@@ -404,17 +404,18 @@ def main():
     color_idx = 3
 
     # Additional --compare MFEM datasets
+    compare_colors = ["#000000", "#ff7f0e"]  # 1st: black, 2nd: orange
     if args.compare:
-        for spec in args.compare:
+        for i, spec in enumerate(args.compare):
             if ":" in spec:
                 label, prefix = spec.split(":", 1)
             else:
                 label = os.path.basename(spec)
                 prefix = spec
+            color = compare_colors[i] if i < len(compare_colors) else COLORS[(i + 3) % len(COLORS)]
             sources.append(
-                (f"MFEM {label}", "mfem", prefix, COLORS[color_idx % len(COLORS)], "-")
+                (f"MFEM {label}", "mfem", prefix, color, "-")
             )
-            color_idx += 1
 
     print("=" * 60)
     print("BP5-QD Visualization")
