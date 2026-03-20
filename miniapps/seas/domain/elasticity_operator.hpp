@@ -191,6 +191,10 @@ public:
    /// for each fault DOF (helps identify stress vs penalty instability sources).
    void SetDiagTractionDecomp(bool enable) { diag_traction_decomp_ = enable; }
 
+   /// Set MUMPS-BLR tolerance (default 1e-10). Lower = more accurate, more memory.
+   /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
+   void SetBLRTol(real_t tol) { blr_tol_ = tol; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -201,6 +205,7 @@ private:
    BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
+   real_t blr_tol_ = 1e-10;  // MUMPS-BLR factorization tolerance
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -848,7 +853,7 @@ private:
             auto *mumps = new MUMPSSolver(mesh_.GetComm());
             mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
             mumps->SetPrintLevel(1);
-            mumps->SetBLRTol(1e-10);
+            mumps->SetBLRTol(blr_tol_);
             mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
             solver_.reset(mumps);
          }

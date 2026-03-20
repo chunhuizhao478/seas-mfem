@@ -311,6 +311,7 @@ int main(int argc, char *argv[])
    std::string bc_mode_str = "far-field";
    std::string psi_init_mode_str = "tandem";  // "tandem" (default) or "scec"
    int order = 1;
+   double blr_tol = 1e-10;  // MUMPS-BLR tolerance (default 1e-10)
 
    for (int i = 1; i < argc; i++)
    {
@@ -375,6 +376,7 @@ int main(int argc, char *argv[])
          psi_init_mode_str = argv[++i];
       }
       if (arg == "--order" && i + 1 < argc) { order = std::atoi(argv[++i]); }
+      if (arg == "--blr-tol" && i + 1 < argc) { blr_tol = std::atof(argv[++i]); }
    }
 
    // Parse DG method
@@ -570,6 +572,7 @@ int main(int argc, char *argv[])
 
    if (check_residual) { domain.SetCheckResidual(true); }
    if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
+   if (blr_tol != 1e-10) { domain.SetBLRTol(blr_tol); }
 
    if (mpi.IsRoot())
    {
