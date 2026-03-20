@@ -206,7 +206,7 @@ private:
    bool check_residual_;  // Post-solve residual check
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-10;  // MUMPS-BLR factorization tolerance
-   mutable bool diag_face_dumped_ = false;  // One-shot face consistency diagnostic
+   mutable int diag_face_call_ = 0;  // Face consistency diagnostic: trigger on call #2 (non-zero slip)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -976,8 +976,9 @@ private:
       int dim = 3;
       int nbf = nbf_per_face_;
 
-      // One-shot face consistency diagnostic (Section 18.5)
-      bool do_face_diag = !diag_face_dumped_ && (nbf > 1);
+      // Face consistency diagnostic: fire on 2nd call (non-zero slip)
+      diag_face_call_++;
+      bool do_face_diag = (diag_face_call_ == 2) && (nbf > 1);
       int diag_count = 0;
       const int diag_max = 3;
 
@@ -3130,8 +3131,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
-         // One-shot face consistency diagnostic (Section 18.5)
-         if (!diag_face_dumped_ && nbf_per_face_ > 1 && fi < 3)
+         // Face consistency diagnostic: fire on 2nd call (matches SlipRHS call #2)
+         if (diag_face_call_ == 2 && nbf_per_face_ > 1 && fi < 3)
          {
             mfem::out << "[Traction] fi=" << fi
                << " face=" << fault_interior_faces_[fi]
@@ -3150,7 +3151,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                if (kk < nbf_per_face_-1) { mfem::out << ","; }
             }
             mfem::out << "]" << std::endl;
-            if (fi == 2) { diag_face_dumped_ = true; }
          }
 
          // Multi-DOF: store per-quad-point traction for L2 projection
