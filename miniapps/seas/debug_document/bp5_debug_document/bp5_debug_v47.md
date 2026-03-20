@@ -1,7 +1,7 @@
 # BP5 Debug v47: IP Penalty ×3 Correction — Reference Element Scaling Fix
 
 **Date**: 2026-03-20
-**Status**: Resolution is the root cause, not penalty magnitude. Tandem uses p=4 h=2500m (penalty 9.4 GPa/m, LARGER than ours) and nucleates fine. Level 1 fault penalty factor disproved. Running v47g: p=4 h=2500m with correct ×3 penalty to match Tandem.
+**Status**: BUG IN MULTI-DOF IP FAULT COUPLING. p=4 h=2500m (Tandem's config) also blows up — resolution hypothesis disproved. Deep code review found no smoking gun. GaussLobatto vs WarpAndBlend fault DOFs identified as potential difference. Next: uniform V diagnostic (Section 16.6).
 **Previous**: v46 (Tandem initialization defaults + multi-DOF slip indexing fix)
 **Branch**: `feature/elasticity`
 
@@ -1183,17 +1183,13 @@ Higher p on coarser mesh is actually CHEAPER in total DOFs:
 The p=4 h=2500m configuration has **fewer total DOFs** than p=2 h=1000m and matches
 Tandem's reference resolution exactly.
 
-### 15.5 Path Forward: Increase p, Not Patch Penalty
+### 15.5 Path Forward (Original): Increase p, Not Patch Penalty — DISPROVED
 
-The v46 "working" configuration (1/3 penalty everywhere) was a **compensating error**:
-the reduced penalty masked the inaccurate DG residual at p=2. The correct fix is to
-increase resolution so the residual becomes small naturally.
+**v47g** (job 7605354): p=4 h=2500m with correct ×3 penalty. This matched Tandem's
+uphoff.2 submission exactly.
 
-**v47g** (job TBD): p=4 h=2500m with correct ×3 penalty. This matches Tandem's
-uphoff.2 submission exactly. If v47g reproduces Tandem's results:
-1. The ×3 penalty fix is validated at the resolution where it matters
-2. The p=1/p=2 h=1000m failures are confirmed as pure resolution effects
-3. Production runs should use p≥4 on coarser meshes
+**RESULT: IMMEDIATE BLOWUP.** Same pattern as p=2 — GPa-level tractions, meter-scale
+slip with alternating signs, crash before step 1. See Section 16.
 
 ### 15.6 Level 1 Code Reverted
 
@@ -1206,6 +1202,107 @@ clean ×3 penalty everywhere, matching Tandem exactly.
 
 ---
 
+## 16. v47g Blowup: Resolution Hypothesis Disproved
+
+### 16.1 Run Summary
+
+**Job 7605354**: IP p=4, h=2500m, 13503 elements, 400 ranks, MUMPS-BLR.
+Global fault DOFs: 27165 (nbf=15 per face, 1811 fault faces).
+
+```
+    Step       Time [yr]        dt [s]     V_max [m/s]     EQs
+----------------------------------------------------------------
+[Rank 384] TRACTION BLOWUP: DOF 0 (interior) tau_mag=1.89e+09 slip=0.54
+[Rank 384] TRACTION BLOWUP: DOF 1 (interior) tau_mag=5.52e+09 slip=-1.16
+[Rank 399] TRACTION BLOWUP: DOF 135 (shared)  tau_mag=7.75e+09 slip=-1.69
+```
+
+Immediate blowup — same pattern as p=2 h=1000m. Slip 0.3–1.7m with alternating
+signs, traction 1–8 GPa, crash in ComputeTraction before completing step 1.
+
+### 16.2 The Resolution Hypothesis Is Wrong
+
+Section 15 argued that Tandem's p=4 h=2500m works because higher polynomial
+accuracy makes the DG residual negligible. **This is refuted:**
+
+| Config | Penalty | nbf | Tandem | Ours |
+|--------|---------|-----|--------|------|
+| p=2, h=1000m | 7.83 GPa/m | 6 | N/A | **BLOWUP** |
+| p=4, h=2500m | 9.4 GPa/m | 15 | **Works** | **BLOWUP** |
+
+Tandem runs this exact configuration and nucleates fine with an even larger
+penalty. The resolution is identical. The formulas are verified identical
+(Section 10). **There is a bug in our multi-DOF IP fault coupling.**
+
+### 16.3 The Pattern: nbf > 1 Always Blows Up
+
+| Run | p | h | nbf | Method | Result |
+|-----|---|---|-----|--------|--------|
+| v47a | 1 | 1000m | 1 | IP | V decays (stable) |
+| v47b | 2 | 1000m | 6 | IP | **BLOWUP** |
+| v47e | 2 | 1000m | 1 | BR2 | Stable |
+| **v47g** | **4** | **2500m** | **15** | **IP** | **BLOWUP** |
+
+Every IP run with nbf > 1 blows up. Every run with nbf = 1 is stable.
+The bug is specific to the multi-DOF IP fault coupling path.
+
+### 16.4 Deep Code Review: No Smoking Gun Found
+
+Comprehensive review of the multi-DOF code path (ComputeTraction IP,
+AssembleSlipContributionIP, FaceQuadrature) found:
+
+**Confirmed correct:**
+- Slip DOF indexing (fi*nbf+kk) — v46 fix verified
+- InterpolateToQuadPoints math (standard basis evaluation)
+- GalerkinProject math (L2 projection with correct mass matrix inverse)
+- Reference vs physical mass matrix cancellation (valid for flat faces)
+- Penalty formula consistency across K, RHS, traction
+- Sign conventions (sign variable, normal direction)
+- Quadrature rule sufficiency (order 2p+1 for degree-2p integrands)
+- InterpolateToQuadPoints ∘ GalerkinProject = identity for polynomials up to degree p
+
+**Identified differences from Tandem (not yet verified as causing the bug):**
+
+1. **Fault DOF node type**: Tandem uses **WarpAndBlend** for fault DOFs
+   (`RateAndStateBase.cpp`: `WarpAndBlendFactory<DomainDimension-1>`).
+   MFEM uses **GaussLobatto** (`face_quadrature.hpp:58`).
+   At p≤2 these are identical. At p≥3 they differ — WarpAndBlend has lower
+   Lebesgue constant, better interpolation properties.
+
+2. **No other implementation difference found** in the formulas, assembly,
+   or projection. Both codes use the same SIPG, same penalty, same
+   L2 projection approach.
+
+### 16.5 The Remaining Mystery
+
+Tandem at p=4 h=2500m has:
+- Same penalty formula (9.4 GPa/m, even LARGER)
+- Same multi-DOF (15 DOFs/face)
+- Same sharp nucleation boundary (V_nuc/V_init = 10^7)
+- Same SIPG with ε=-1
+- Same mesh geometry
+
+Yet Tandem is stable and we blow up. **Something in our multi-DOF coupling
+is different from Tandem's that the code review did not identify.**
+
+The blowup mechanism (RK-stage V amplification from within-face DOF
+variation, Section 11.5) is a CONSEQUENCE, not a root cause. Something
+in our implementation amplifies this variation more than Tandem's does.
+
+### 16.6 Diagnostic: Uniform V Test
+
+To isolate whether the bug is triggered by within-face V heterogeneity:
+run p=2 with ×3 penalty but **V_nuc = V_init** (uniform initial velocity,
+no nucleation zone boundary cutting across faces).
+
+- If it doesn't blow up: the bug is in how within-face V variation
+  interacts with the multi-DOF coupling (interpolation, projection, or
+  the penalty correction for inhomogeneous slip)
+- If it still blows up: the bug is more fundamental (possibly in the
+  multi-DOF penalty integrator or mass matrix itself)
+
+---
+
 ## 9. Revision History
 
 | Version | Change | Status |
@@ -1214,10 +1311,11 @@ clean ×3 penalty everywhere, matching Tandem exactly.
 | v44 | Penalty ×3 (first attempt) — reverted in v45 due to flawed analysis | Reverted |
 | v45 | Analysis claiming ×3 is wrong + slip indexing bug discovery | Done |
 | v46 | Multi-DOF slip indexing fix + Tandem initialization defaults | Done |
-| **v47** | **Penalty ×3 re-applied — breaks p=1 (stiffness) and p=2 (blowup)** | Resolution issue |
-| v47+ | Deep investigation: confirmed both codes use SIPG with identical formulas. Root cause is resolution-dependent effective stiffness at p=1. Corrected SBP-SAT analysis. | Done |
-| v47++ | dt_init fix: use max(V_init, V_nuc) → dt_init = 0.13s. Tandem uses PETSc auto-detect (~0.05s). | Fix applied |
-| v47+++ | **dt fix does NOT resolve p=2 blowup.** Run 7605297 confirms blowup at dt=0.13s. Slip 0.5–2.9m with oscillating sign → RK-stage V amplification via multi-DOF ×3 penalty feedback. Sections 7.3–7.5 were correct: formulation-resolution issue. | **Confirmed** |
-| v47e | **BR2 p=2 runs stably** (job 7605319). Proves p=2 elastic solver is correct; blowup is IP multi-DOF fault coupling. | Done |
-| v47f | **Level 1 fault penalty factor (α=1/3)**: fixes blowup but V decays to plate rate. K with ×3 is too stiff; patching RHS/traction is insufficient. **Approach disproved.** Level 1 code reverted. | **Disproved** |
-| **v47g** | **p=4 h=2500m with correct ×3 penalty** — match Tandem uphoff.2. Tandem's penalty (9.4 GPa/m) is LARGER than ours (7.83 GPa/m) yet nucleates. Resolution is the fix, not penalty tuning. | **Queued** |
+| **v47** | **Penalty ×3 re-applied — breaks p=1 (stiffness) and p=2 (blowup)** | **Bug hunt** |
+| v47+ | Deep investigation: confirmed both codes use SIPG with identical formulas. | Done |
+| v47++ | dt_init fix: use max(V_init, V_nuc) → dt_init = 0.13s. | Fix applied |
+| v47+++ | dt fix does NOT resolve p=2 blowup. RK-stage V amplification confirmed. | Confirmed |
+| v47e | BR2 p=2 runs stably. Proves p=2 elastic solver correct; blowup is IP multi-DOF. | Done |
+| v47f | Level 1 fault penalty factor (α=1/3): fixes blowup but V decays. K inconsistency. Reverted. | Disproved |
+| **v47g** | **p=4 h=2500m BLOWS UP** — same pattern as p=2. Disproves resolution hypothesis. Tandem runs this config fine. **Bug in multi-DOF IP fault coupling confirmed.** | **CRITICAL** |
+| v47g+ | Deep code review of multi-DOF path: no smoking gun. GaussLobatto vs WarpAndBlend fault DOF nodes identified as potential difference. Next: uniform V diagnostic. | **Investigating** |
