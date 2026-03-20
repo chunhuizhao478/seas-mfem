@@ -976,19 +976,22 @@ int main(int argc, char *argv[])
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
 
-   // Initial dt must be small enough for the nucleation zone dynamics.
-   // The nucleation zone has V_nuc = 0.03 m/s with overstressing that
-   // drives acceleration. Using a conservative multiplier (0.01) ensures
-   // the RK45 adaptive controller can resolve the initial transient
-   // without producing intermediate states that blow up. The controller
-   // will quickly ramp up dt during the interseismic period.
+   // Initial dt must be small enough for the fastest fault dynamics.
+   // Tandem (QD mode) relies on PETSc's adaptive controller to auto-detect
+   // the initial dt by evaluating ||f(t0,y0)||, which naturally accounts
+   // for V_nuc. We emulate this: dt_init = safety * Dc / V_max, where
+   // V_max = max(V_init, V_nuc) captures the nucleation zone velocity.
+   // With V_nuc = 0.01 m/s and Dc = 0.13 m, this gives dt ≈ 0.13 s,
+   // comparable to PETSc's auto-estimate of ~0.05 s.
+   // See bp5_debug_v47.md Section 11 for derivation.
+   real_t V_max_init = std::max(V_init, params.V_nuc);
    real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
-                             std::max(V_init, 1e-20));
+                             std::max(V_max_init, 1e-20));
    ode_solver.SetDt(dt_init);
    if (mpi.IsRoot())
    {
       std::cout << "  Initial dt: " << dt_init << " s"
-                << " (V_init_max = " << V_init << ")\n";
+                << " (V_max_init = " << V_max_init << ")\n";
    }
    ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
    ode_solver.Init(seas_op);
