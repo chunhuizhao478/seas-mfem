@@ -853,25 +853,226 @@ real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
 
 It just doesn't solve the p=2 penalty problem.
 
-### 11.8 Implications
-
-| Run | Status |
-|-----|--------|
-| p=1 with ×3 penalty | V decays — resolution-dependent stiffness (Section 7.4) |
-| p=2 with ×3 penalty | **Blowup confirmed at dt=0.13s** — within-face amplification |
-| p=1 with 1/3 penalty | Works (compensating error) |
-| p=2 with 1/3 penalty | Works (compensating error) |
-
-The correct penalty (×3) breaks BOTH p=1 (too stiff) and p=2 (unstable).
-The 1/3 penalty works at both orders due to compensating error. This
-confirms the analysis in Section 10.6: the issue is resolution-dependent
-effective stiffness, not a formula error.
-
-### 11.7 Note on BP2 and Other Tests
+### 11.8 Note on BP2 and Other Tests
 
 BP2 tests use `SetDt(1e3)` which is correct: BP2 has no nucleation zone
 (V_nuc = V_init). Only BP5 needed the fix. `test_bp5_integration.cpp`
 already uses `SetDt(10.0)` which is small enough.
+
+---
+
+## 12. BR2 p=2 Diagnostic: Isolating the IP Fault Coupling
+
+### 12.1 Motivation
+
+IP p=2 blows up due to multi-DOF within-face V amplification (Section 11.5).
+To determine whether the issue is in the p=2 elastic solver or specifically
+in the IP fault coupling, we ran BR2 at p=2. BR2 differs from IP in two
+critical ways:
+
+| | IP p=2 | BR2 p=2 |
+|--|--------|---------|
+| Penalty formula | p²-dependent: 7.83 GPa/m | Fixed: dim+1 = 4 (dimensionless) |
+| ×3 scaling issue | YES (ref element ratio) | NO (no A/V formula) |
+| nbf per face | 6 (multi-DOF) | 1 (face-averaged) |
+| Within-face DOF oscillation | YES → cascade → blowup | NO → stable |
+
+All 15 locations of the ×3 penalty fix are IP-specific. BR2 code paths are
+completely unaffected by the v47 penalty changes.
+
+### 12.2 Changes Since Last BR2 p=2 Run (v37)
+
+BR2 code paths are largely unchanged since v37. The differences that affect
+this run:
+
+| Change | Version | Impact on BR2 |
+|--------|---------|---------------|
+| Tandem init defaults (V_nuc 0.03→0.01, delta_tau 1→0) | v46 | Different nucleation dynamics (no overstress) |
+| Shared-face Dirichlet loading fix | v38b | Stronger tectonic loading in parallel |
+| dt_init fix (1000s→0.13s) | v47 | Affects both IP and BR2 |
+| IP penalty ×3, traction sign fixes, multi-DOF | v38-v47 | **None** (IP-only paths) |
+
+### 12.3 Results: v47e BR2 p=2 (Job 7605319)
+
+**BR2 p=2 passes the initial stage without blowup.**
+
+```
+DG order: 2
+DG method: BR2
+Global fault DOFs: 9348 (nbf=1, vs 56088 for IP nbf=6)
+Initial dt: 0.13 s (V_max_init = 0.01)
+
+    Step       Time [yr]        dt [s]     V_max [m/s]     EQs
+----------------------------------------------------------------
+       1    6.043491e-10     2.874e-02       1.004e-02       1
+      10    2.772566e-08     1.799e-01       1.148e-02       1
+      20    7.106352e-08     1.913e-01       1.199e-02       1
+      30    1.147227e-07     1.994e-01       1.124e-02       1
+      43    1.773517e-07     2.675e-01       9.855e-03       1
+```
+
+Comparison with IP p=2:
+
+| | IP p=2 (v47b, job 7605297) | BR2 p=2 (v47e, job 7605319) |
+|--|---------------------------|----------------------------|
+| Fault DOFs | 56,088 (nbf=6) | 9,348 (nbf=1) |
+| Step 0 | **BLOWUP** (τ=10 GPa, slip=2.9m) | Clean |
+| Steps completed | 0 | 43+ (still running) |
+| V_max trend | N/A (crash) | 0.01 → 0.012 → 0.0099 (slow decay) |
+| Segfaults | YES (ComputeTraction) | None |
+
+### 12.4 Analysis
+
+**1. The p=2 elastic solver is correct.** BR2 p=2 runs stably with the same
+mesh, same material, same initialization. The DG volume solution at p=2 is
+fine. The blowup is NOT in the elastic formulation.
+
+**2. The blowup is specific to IP multi-DOF fault coupling.** The combination
+of ×3 IP penalty (7.83 GPa/m) + nbf=6 DOFs per face creates the within-face
+V amplification cascade (Section 11.5). BR2 avoids this with:
+- Fixed penalty = 4 (no ×3 scaling issue)
+- nbf=1 (no within-face DOF oscillation)
+
+**3. V_max is slowly decaying** (0.01 → 0.0099 after 43 steps, t ≈ 5s).
+This could be:
+- **Too early to tell**: Tandem init (no overstress) means nucleation takes
+  years, not seconds. t = 1.7×10⁻⁷ yr is negligible.
+- **Stiffness issue**: Similar to IP p=1 with ×3 penalty (V decays, Section 7.4).
+  Need to let the run continue to distinguish.
+
+### 12.5 Historical Context: BR2 p=2 Locks the Fault
+
+The v47e BR2 p=2 V decay is NOT a new finding. Debug documents v34-v36
+documented progressive fault locking with BR2 at increasing p:
+
+| Order | BR2 recurrence (v34) | Status |
+|-------|---------------------|--------|
+| p=1 | ~271 yr | Works |
+| p=2 | ~396 yr | Delayed (nearly locked) |
+| p=4 | No EQs in 1800 yr | **Locked** |
+| p=6 | No EQs in 1291 yr | **Locked** |
+
+v35 diagnosed two bugs (centroid-only traction eval + avg_shapes BR2 correction)
+and v36-v37 fixed them with per-quadrature-point evaluation. However, these fixes
+improved but did not fully resolve the p≥2 locking with nbf=1. The face-averaged
+traction (nbf=1) loses within-face detail at higher p, under-resolving the fault
+coupling relative to the volume discretization.
+
+The v47e run will likely show the same delayed/locked behavior. BR2 p=2 with
+nbf=1 is **not a viable production path** — it was already known to lock the fault.
+Its diagnostic value is confirmed: the p=2 elastic volume solver is correct.
+
+### 12.6 Implications for Path Forward
+
+Since the p=2 elastic solver works, the fix should target the **IP fault
+coupling specifically**. See Section 13 for the detailed plan.
+
+---
+
+## 13. Option A: Reduced IP Fault-Face Penalty
+
+### 13.1 Core Idea
+
+The ×3 penalty is mathematically correct (Section 2) and must be kept on
+**skeleton (non-fault) interior faces** for DG accuracy. But on **fault faces**,
+the full penalty creates excessive effective stiffness that either:
+- Prevents nucleation at p=1 (V decays, Section 7.4)
+- Triggers within-face V amplification at p=2 (blowup, Section 11.5)
+
+The fix: apply a scaling factor `α ∈ [0, 1]` to the penalty on fault faces only:
+
+```
+penalty_fault    = α × (dim+1) × c_N_1 × (dim × nl_q / Weight()) × (c1²/c0)
+penalty_skeleton = 1 × (dim+1) × c_N_1 × (dim × nl_q / Weight()) × (c1²/c0)
+```
+
+At `α = 1/3`: the fault-face penalty equals v46's value (which works at both
+p=1 and p=2), while skeleton faces keep the correct ×3. This is strictly better
+than v46, where ALL faces had the wrong 1/3 penalty.
+
+### 13.2 Two Levels of Implementation
+
+**Level 1 (quick test): Scale penalty in RHS + traction only, keep K unchanged**
+
+Modify 6 fault-specific locations in `elasticity_operator.hpp`:
+- `AssembleSlipContributionIP` p0, p1 (lines 1082-1083)
+- `ComputeTraction` interior p0, p1 (lines 3099, 3101)
+- `ComputeTraction` shared p0, p1 (lines 3548, 3550)
+
+NOT modified: bilinear form integrator (lines 122, 128), far-field/boundary
+Dirichlet RHS (lines 1528, 1529, 1882, 2155, 2157, 2535, 2537).
+
+Inconsistency: K has full ×3 penalty on fault faces, but RHS + traction use
+α×penalty. This means:
+- Displacement u is computed with strong slip enforcement (full penalty in K)
+- Traction T uses weaker penalty correction → lower effective fault stiffness
+- As α→0, traction approaches {σ·n̂} (stress average, physical traction)
+
+This is informative for testing. The inconsistency means the traction doesn't
+exactly correspond to the variational formulation, but:
+- The penalty correction η×(jump(u) - δu) is O(h^p) — a discretization artifact
+- With strong penalty in K, jump(u) ≈ δu, so the correction is small regardless
+- Reducing α removes the artificial stiffness that causes the instability
+
+**Level 2 (consistent): Also modify K on fault faces**
+
+Modify the bilinear form to use α×penalty on fault faces. Requires either:
+- Passing fault face markers to `DGElasticityIPPenaltyIntegrator`
+- Or splitting into two integrators (fault vs skeleton) with face attribute filters
+- Or a custom face-loop assembly
+
+Implement only after Level 1 confirms the approach works.
+
+### 13.3 Test Matrix
+
+| Run | Order | α (fault) | Expected behavior |
+|-----|-------|-----------|-------------------|
+| v47f | p=2 | 1/3 | Should run without blowup (v46-equivalent fault penalty) |
+| v47g | p=2 | 0.0 | Stress-only traction, no penalty correction on fault |
+| v47h | p=1 | 1/3 | Should nucleate (v46-equivalent fault, correct skeleton) |
+
+**Priority**: v47f first. If p=2 runs without blowup AND nucleates → approach works.
+
+### 13.4 Success Criteria
+
+1. **No blowup** at p=2 (no TRACTION BLOWUP, no segfault)
+2. **Nucleation occurs** (V_max > 1 m/s at some point in the simulation)
+3. **p=2 matches benchmark at least as well as v46** (since skeleton penalty is
+   now correct, results should be ≥ v46 quality)
+4. **p-convergence**: p=2 closer to Tandem than p=1
+
+### 13.5 Outcome Interpretation
+
+| Outcome | Interpretation | Next step |
+|---------|---------------|-----------|
+| α=1/3 works, nucleates | Fault penalty was the problem; skeleton fix helps | Implement Level 2, sweep α values |
+| α=1/3 runs but no nucleation | Effective stiffness still too high even at 1/3 | Try α=0, or finer mesh |
+| α=0 works, nucleates | Penalty correction itself causes excessive stiffness | Consider stress-only traction as default |
+| α=0 also blows up | Problem is in multi-DOF interpolation/projection, not penalty | Investigate FaceQuadrature implementation |
+
+### 13.6 Implementation Details
+
+Add member variable and command-line option:
+```cpp
+// elasticity_operator.hpp: member variable
+real_t fault_penalty_factor_ = 1.0;
+
+// bp5_verification_full.cpp: command-line option
+// --fault-penalty-factor 0.333
+```
+
+At each of the 6 fault-face penalty locations, multiply by the factor:
+```cpp
+// BEFORE:
+real_t p0 = (dim+1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat*c1_mat/c0_mat);
+
+// AFTER:
+real_t p0 = (dim+1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * nl_q / detJ1)
+            * (c1_mat*c1_mat/c0_mat);
+```
+
+When `fault_penalty_factor_ = 1.0`: identical to v47 (default, backward compatible).
+When `fault_penalty_factor_ = 1.0/3.0`: fault faces at v46 penalty, skeleton at v47.
 
 ---
 
@@ -887,3 +1088,4 @@ already uses `SetDt(10.0)` which is small enough.
 | v47+ | Deep investigation: confirmed both codes use SIPG with identical formulas. Root cause is resolution-dependent effective stiffness at p=1. Corrected SBP-SAT analysis. | Done |
 | v47++ | dt_init fix: use max(V_init, V_nuc) → dt_init = 0.13s. Tandem uses PETSc auto-detect (~0.05s). | Fix applied |
 | v47+++ | **dt fix does NOT resolve p=2 blowup.** Run 7605297 confirms blowup at dt=0.13s. Slip 0.5–2.9m with oscillating sign → RK-stage V amplification via multi-DOF ×3 penalty feedback. Sections 7.3–7.5 were correct: formulation-resolution issue. | **Confirmed** |
+| v47e | **BR2 p=2 runs stably** (job 7605319). 43+ steps, no blowup. Proves p=2 elastic solver is correct; blowup is IP multi-DOF fault coupling. V_max slowly decaying (too early to assess nucleation). | **Running** |
