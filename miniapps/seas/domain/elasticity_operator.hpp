@@ -206,6 +206,7 @@ private:
    bool check_residual_;  // Post-solve residual check
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-10;  // MUMPS-BLR factorization tolerance
+   mutable bool diag_face_dumped_ = false;  // One-shot face consistency diagnostic
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -975,6 +976,11 @@ private:
       int dim = 3;
       int nbf = nbf_per_face_;
 
+      // One-shot face consistency diagnostic (Section 18.5)
+      bool do_face_diag = !diag_face_dumped_ && (nbf > 1);
+      int diag_count = 0;
+      const int diag_max = 3;
+
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
          int face = fault_interior_faces_[fi];
@@ -1083,6 +1089,28 @@ private:
             real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
+
+            // One-shot face consistency diagnostic (first quad point only)
+            if (do_face_diag && p == 0 && diag_count < diag_max)
+            {
+               mfem::out << "[SlipRHS] fi=" << fi
+                  << " face=" << face << " E1=" << FTr->Elem1No
+                  << " E2=" << FTr->Elem2No << " sign=" << sign
+                  << " penalty=" << penalty_ip
+                  << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
+                  << " nl_q=" << nl_q << " nq=" << nq
+                  << " ndof1=" << ndof1 << " ndof2=" << ndof2;
+               // Print per-DOF slip magnitude
+               mfem::out << " slip_dofs=[";
+               for (int kk = 0; kk < nbf; kk++)
+               {
+                  int di = fi * nbf + kk;
+                  mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
+                  if (kk < nbf-1) { mfem::out << ","; }
+               }
+               mfem::out << "]" << std::endl;
+               diag_count++;
+            }
 
             // Symmetry + penalty for Elem1
             for (int k = 0; k < ndof1; k++)
@@ -3101,6 +3129,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
+
+         // One-shot face consistency diagnostic (Section 18.5)
+         if (!diag_face_dumped_ && nbf_per_face_ > 1 && fi < 3)
+         {
+            mfem::out << "[Traction] fi=" << fi
+               << " face=" << fault_interior_faces_[fi]
+               << " E1=" << FTr->Elem1No
+               << " E2=" << FTr->Elem2No << " sign=" << sign
+               << " penalty=" << penalty_ip
+               << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
+               << " face_area=" << face_area << " nqp=" << nqp
+               << " ndof1=" << ndof1 << " ndof2=" << ndof2;
+            // Print per-DOF slip magnitude
+            mfem::out << " slip_dofs=[";
+            for (int kk = 0; kk < nbf_per_face_; kk++)
+            {
+               int di = fi * nbf_per_face_ + kk;
+               mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
+               if (kk < nbf_per_face_-1) { mfem::out << ","; }
+            }
+            mfem::out << "]" << std::endl;
+            if (fi == 2) { diag_face_dumped_ = true; }
+         }
 
          // Multi-DOF: store per-quad-point traction for L2 projection
          int nbf = nbf_per_face_;

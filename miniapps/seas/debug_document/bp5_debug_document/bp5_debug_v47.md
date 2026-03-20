@@ -1,7 +1,7 @@
 # BP5 Debug v47: IP Penalty ×3 Correction — Reference Element Scaling Fix
 
 **Date**: 2026-03-20
-**Status**: BUG IN MULTI-DOF IP FAULT COUPLING. p=4 h=2500m (Tandem's config) also blows up — resolution hypothesis disproved. Deep code review found no smoking gun. GaussLobatto vs WarpAndBlend fault DOFs identified as potential difference. Next: uniform V diagnostic (Section 16.6).
+**Status**: BUG IN MULTI-DOF IP FAULT COUPLING — triggered by within-face V heterogeneity. Uniform V (v47h) is STABLE. The bug is in how per-DOF slip heterogeneity feeds through the interpolation → elastic solve → penalty correction → traction projection cycle. Investigating how Tandem handles heterogeneous slip DOFs (Section 17).
 **Previous**: v46 (Tandem initialization defaults + multi-DOF slip indexing fix)
 **Branch**: `feature/elasticity`
 
@@ -1303,6 +1303,282 @@ no nucleation zone boundary cutting across faces).
 
 ---
 
+## 17. v47h Uniform V Diagnostic: Bug Isolated to Within-Face Heterogeneity
+
+### 17.1 Run Summary
+
+**Job 7605402**: IP p=2, h=1000m, ×3 penalty, `--V-nuc 1e-9` (V_nuc = V_init = 1e-9).
+All fault DOFs start at V = 1e-9 uniformly. No nucleation zone boundary.
+
+### 17.2 Results: STABLE
+
+```
+    Step       Time [yr]        dt [s]     V_max [m/s]     EQs
+----------------------------------------------------------------
+      10    1.905199e-02     1.253e+05       2.165e-09       0
+      50    8.222183e-02     8.333e+04       2.359e-09       0
+     100    1.582487e-01     8.325e+04       2.531e-09       0
+     130    2.038308e-01     8.317e+04       2.704e-09       0
+```
+
+130 steps completed, no blowup, no TRACTION BLOWUP messages. V_max grows slowly
+from 1e-9 to 2.7e-9 — normal interseismic acceleration from tectonic loading
+(Vp = 1e-9 m/s far-field Dirichlet BC drives stress buildup on the fault).
+
+Note: V_max ≈ 2e-9 (not 1e-9) because tectonic loading accumulates over ~0.2 yr.
+This is expected physics, not a bug.
+
+### 17.3 Definitive Isolation
+
+| Run | V_nuc | nbf | Penalty | Within-face V ratio | Result |
+|-----|-------|-----|---------|---------------------|--------|
+| v47b | 0.01 | 6 | ×3 | **10^7** | **BLOWUP** |
+| v47g | 0.01 | 15 | ×3 | **10^7** | **BLOWUP** |
+| **v47h** | **1e-9** | **6** | **×3** | **1 (uniform)** | **STABLE** |
+
+The multi-DOF IP coupling with ×3 penalty is **stable when all DOFs on a face
+have the same V**. The blowup is triggered specifically by faces where some DOFs
+have V_nuc = 0.01 and others have V_init = 1e-9 — a 10^7 ratio within a single face.
+
+### 17.4 The Bug Is in the Heterogeneous Slip Coupling
+
+The blowup mechanism requires within-face DOF heterogeneity to start the cascade.
+With uniform V, all DOFs evolve identically → no within-face variation → no
+oscillation → no amplification → stable.
+
+Tandem handles the SAME within-face heterogeneity (V_nuc/V_init = 10^7 on faces
+at the nucleation boundary) without blowing up. **Something in how our code
+couples heterogeneous per-DOF slip through the interpolation → elastic solve →
+traction projection cycle amplifies the variation more than Tandem's does.**
+
+### 17.5 Next: Compare Tandem's Heterogeneous Slip Handling
+
+The bug must be in one of these steps where heterogeneous DOF values are processed:
+
+1. **Per-DOF slip → quad-point interpolation** (`InterpolateToQuadPoints`):
+   Does Tandem interpolate the same way, or does it evaluate slip differently?
+
+2. **Slip entering the elastic RHS** (`AssembleSlipContributionIP`):
+   Does Tandem assemble the slip load term-by-term per quad point, or
+   does it pre-integrate/smooth the slip?
+
+3. **Traction at quad points → per-DOF projection** (`GalerkinProject`):
+   Does Tandem use the same L2 projection, or does it evaluate traction
+   directly at DOF nodes?
+
+4. **Per-DOF friction evaluation**:
+   Does Tandem evaluate friction at the same node locations (GaussLobatto
+   vs WarpAndBlend), and does the node placement affect stability?
+
+See Section 18 for the detailed Tandem comparison.
+
+---
+
+## 18. Tandem's Heterogeneous Slip DOF Handling — Detailed Analysis
+
+### 18.1 Tandem's Full Coupling Data Flow
+
+Traced from source code. The cycle for one RHS evaluation:
+
+**A. Slip DOFs → Quadrature Points (evaluate_slip kernel)**
+
+```
+File: elasticity_adapter.py:20-22, ElasticityAdapter.cpp:37-49
+
+slip_q[p,q] = Σ_l Σ_n e_q[l,q] × fault_basis_q[p,o,q] × slip[l,n] × copy_slip[n,o]
+```
+
+Where:
+- `slip[l,n]`: fault state at WarpAndBlend DOF node l, tangential component n
+- `e_q[l,q]`: fault basis function l evaluated at facet quadrature point q
+- `fault_basis_q[p,o,q]`: rotation from Cartesian (o) to fault-local (p) at quad point q
+- `copy_slip[n,o]`: maps D-1 tangential → D Cartesian (zero-pads normal)
+
+**Standard polynomial interpolation + rotation.** For flat faces, rotation is
+constant → commutes with interpolation.
+
+**B. Slip at Quad Points → Elastic RHS (rhs_skeleton)**
+
+```
+File: Elasticity.cpp:574-641
+
+RHS contribution for fault face:
+  - Penalty: penalty_[fctNo] × Σ_q w_q × φ_i(q) × slip_q(q) × nl_q
+  - Symmetry: ε × Σ_q w_q × σ(φ_i)·n × slip_q(q)
+```
+
+Note: `penalty_[fctNo]` is **precomputed once per face** from total face area.
+MFEM computes penalty per-quadrature-point. For flat faces: equivalent.
+
+**C. Elastic Solve → Displacement**
+
+```
+File: SeasQDOperator.cpp:57-67
+
+linear_solver_.update_rhs(*dgop_);  // assemble RHS
+linear_solver_.solve();              // PETSc KSP (MUMPS or iterative)
+```
+
+Same Ku=f forward solve. Matrix-free or assembled.
+
+**D. Displacement → Traction at Quad Points (traction_skeleton)**
+
+```
+File: Elasticity.cpp:948-987
+
+traction_q[o,q] = {σ·n̂}[o,q] - penalty × (u1[o,q] - u2[o,q] - slip_q[o,q])
+```
+
+Standard SIPG numerical flux at each quadrature point.
+
+**E. Traction at Quad Points → DOF Nodes (evaluate_traction kernel)**
+
+```
+File: elasticity_adapter.py:26-27, ElasticityAdapter.cpp:20-34
+
+traction[k,p] = Σ_l minv[l,k] × Σ_q e_q_T[q,l] × w[q] × nl_q[q]
+                × Σ_o traction_q[o,q] × fault_basis_q[o,p,q]
+```
+
+This is: `M_phys_inv × ∫ φ_l × (R^T × T) × |J_s| dξ`
+
+Where:
+- `minv`: **physical mass matrix inverse** (per-face, includes nl_q)
+- `nl_q`: surface Jacobian (normal length at quad point)
+- `fault_basis_q`: rotation from Cartesian → fault-local
+- `e_q_T`: basis functions (transpose)
+
+### 18.2 MFEM's Full Coupling Data Flow
+
+**A. Slip DOFs → Quadrature Points**
+
+```
+File: elasticity_operator.hpp, AssembleSlipContributionIP
+
+1. Read fault-local slip: sl[2] = slip_bc(2*(fi*nbf+kk)), slip_bc(2*(fi*nbf+kk)+1)
+2. Rotate to Cartesian: fault_basis_.EmbedSlip(fi, sl, du) → du[3]
+3. Store in nodal array: delta_u_nodal(c*nbf + kk) = du[c]
+4. Interpolate: face_quad_->InterpolateToQuadPoints(3, delta_u_nodal, delta_u_quad)
+```
+
+Step 4 computes: `delta_u_quad[c,q] = Σ_k e_q[k,q] × delta_u_nodal[c,k]`
+
+**Mathematically equivalent to Tandem** for flat faces (rotation is constant,
+commutes with interpolation).
+
+**B. Slip at Quad Points → Elastic RHS**
+
+```
+File: elasticity_operator.hpp, AssembleSlipContributionIP
+
+penalty per quad point: p0 = (dim+1) × c_N_1 × (dim × nl_q / detJ1) × (c1²/c0)
+wq_penalty = penalty_ip × ip.weight × nl_q
+
+RHS += wq_penalty × sign × delta_u_quad_c × shape1(k)   // penalty
+RHS += epsilon × sym_val × w1                             // symmetry
+```
+
+**Equivalent to Tandem** (penalty per-quad-point vs precomputed cancels for flat faces).
+
+**C. Elastic Solve → Displacement**
+
+Same Ku=f. MUMPS-BLR vs PETSc MUMPS.
+
+**D. Displacement → Traction at Quad Points**
+
+```
+File: elasticity_operator.hpp, ComputeTraction IP
+
+T_stress_q = {σ·n̂} at quad point (unit normal from fault_basis_)
+correction_q = -penalty_ip × sign × ((u1-u2) - sign × delta_u_q)
+T_quad[c,q] = T_stress_q[c] - correction_q[c]
+```
+
+**Equivalent to Tandem.**
+
+**E. Traction at Quad Points → DOF Nodes**
+
+```
+File: elasticity_operator.hpp + face_quadrature.hpp
+
+1. L2 project: face_quad_->GalerkinProject(3, T_quad, T_nodal)
+   T_nodal[c,k] = Σ_l M_ref_inv[k,l] × Σ_q w_q × phi_l(q) × T_quad[c,q]
+
+2. Rotate to fault-local: fault_basis_.ProjectTraction(fi, T_k, tau_local)
+```
+
+### 18.3 Comparison: Where They Differ
+
+For **flat faces** (all BP5 tet faces), both implementations are mathematically
+equivalent at every step:
+
+| Step | Tandem | MFEM | Equivalent? |
+|------|--------|------|-------------|
+| Slip interpolation | e_q × slip × R | InterpolateToQuadPoints(EmbedSlip(slip)) | Yes (R constant) |
+| Penalty formula | Precomputed per-face | Per-quad-point | Yes (nl_q constant) |
+| Elastic solve | PETSc KSP | MUMPS-BLR | Same K, same f |
+| Traction at quad pts | {σ·n̂} - penalty×(jump-δu) | Same formula | Yes |
+| Traction projection | M_phys_inv × ∫φ×T×nl dξ | M_ref_inv × ∫φ×T dξ | Yes (nl cancels) |
+| Rotation in projection | Inside integral (per-q) | After projection (per-DOF) | Yes (R constant) |
+| Fault DOF nodes (p≤2) | WarpAndBlend | GaussLobatto | **Identical** |
+| Fault DOF nodes (p≥3) | WarpAndBlend | GaussLobatto | **DIFFER** |
+
+**At p=2, every component is provably identical.** Yet we blow up and Tandem doesn't.
+
+### 18.4 Remaining Candidates
+
+Since the formulas match but the behavior differs, the bug must be in a
+**subtle interaction** that the component-by-component review missed:
+
+1. **Quadrature point coordinate mapping**: Do FaceQuadrature's quad points
+   match ComputeTraction's quad points in the same coordinate system?
+   Both use `IntRules.Get(TRIANGLE, 2*order+1)`, but the face-to-element
+   mapping via `FaceElementTransformations` could introduce a coordinate
+   mismatch at multi-DOF.
+
+2. **Element1/Element2 consistency across the three paths**: The bilinear form
+   integrator, AssembleSlipContributionIP, and ComputeTraction all process the
+   same fault face but might see different elem1/elem2 orderings. At nbf=1
+   this doesn't matter (sign handles it). At nbf>1, if the shape functions
+   are evaluated in different element coordinate systems across the three
+   paths, the multi-DOF coefficients could be inconsistent.
+
+3. **The bilinear form includes penalty on fault faces, but the RHS slip load
+   is assembled separately**: If the bilinear form's penalty integrator
+   processes fault faces with a DIFFERENT quadrature rule, element ordering,
+   or sign convention than AssembleSlipContributionIP, the Ku=f system would
+   have a mismatch specifically on fault faces. At nbf=1, the mismatch
+   averages out. At nbf>1, it creates per-DOF errors that the penalty
+   amplifies.
+
+**Candidate #3 is the most suspicious.** The bilinear form uses
+`DGElasticityIPPenaltyIntegrator` which processes ALL interior faces through
+MFEM's face loop. The slip RHS uses `AssembleSlipContributionIP` which loops
+over `fault_interior_faces_` and `fault_shared_faces_` separately. If the
+face ordering, element sides, or quadrature point mapping differ between
+these two loops, the penalty in K and the penalty in the RHS would not match
+on a per-DOF basis — creating exactly the kind of oscillation we see.
+
+### 18.5 Next Steps
+
+1. **Verify bilinear form / RHS consistency**: For a specific fault face,
+   print the elem1/elem2 indices, the sign, the penalty value, and the
+   shape function ordering from both the bilinear form integrator and
+   AssembleSlipContributionIP. If they differ, that's the bug.
+
+2. **Test with smoothed nucleation**: Replace the sharp V_nuc/V_init box
+   with a smooth Gaussian transition. If it runs, the polynomial interpolation
+   of the sharp transition is the trigger (not a code bug per se, but a
+   robustness issue that Tandem may handle via better conditioning from
+   WarpAndBlend nodes at p≥3).
+
+3. **Dump the bilinear form penalty contribution on a fault face**: Extract
+   the penalty stiffness matrix entries for a single fault face from K.
+   Compare with the penalty RHS contribution for the same face. They should
+   be related by the prescribed slip: K_penalty × u_prescribed = f_penalty.
+
+---
+
 ## 9. Revision History
 
 | Version | Change | Status |
@@ -1317,5 +1593,6 @@ no nucleation zone boundary cutting across faces).
 | v47+++ | dt fix does NOT resolve p=2 blowup. RK-stage V amplification confirmed. | Confirmed |
 | v47e | BR2 p=2 runs stably. Proves p=2 elastic solver correct; blowup is IP multi-DOF. | Done |
 | v47f | Level 1 fault penalty factor (α=1/3): fixes blowup but V decays. K inconsistency. Reverted. | Disproved |
-| **v47g** | **p=4 h=2500m BLOWS UP** — same pattern as p=2. Disproves resolution hypothesis. Tandem runs this config fine. **Bug in multi-DOF IP fault coupling confirmed.** | **CRITICAL** |
-| v47g+ | Deep code review of multi-DOF path: no smoking gun. GaussLobatto vs WarpAndBlend fault DOF nodes identified as potential difference. Next: uniform V diagnostic. | **Investigating** |
+| v47g | p=4 h=2500m BLOWS UP — disproves resolution hypothesis. | CRITICAL |
+| v47g+ | Deep code review: no smoking gun. GaussLobatto vs WarpAndBlend identified. | Done |
+| **v47h** | **Uniform V (V_nuc=V_init=1e-9): STABLE.** Bug isolated to within-face V heterogeneity. The multi-DOF coupling amplifies per-DOF variation that Tandem handles. | **KEY FINDING** |
