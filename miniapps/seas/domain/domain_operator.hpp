@@ -100,6 +100,17 @@ public:
    /// @brief Get the number of DOFs on the fault boundary
    virtual int GetNumFaultDOFs() const = 0;
 
+   /// @brief Get number of basis functions per fault face.
+   ///
+   /// At p=1: 1 (constant per face). At p>=2: (p+1)(p+2)/2 (multi-DOF).
+   /// Default: 1 (backward compatible with antiplane and p=1 cases).
+   virtual int GetNbfPerFace() const { return 1; }
+
+   /// @brief Get number of fault faces.
+   ///
+   /// Default: same as GetNumFaultDOFs() (assumes 1 DOF per face).
+   virtual int GetNumFaultFaces() const { return GetNumFaultDOFs(); }
+
    /// @brief Get the depth (z-coordinate) at each fault DOF
    ///
    /// This is needed for applying depth-dependent friction parameters.

@@ -106,15 +106,26 @@ struct BP5Params
    real_t V_zero = 1.0e-20;
 
    /// Nucleation zone initial slip rate [m/s]
-   /// SCEC BP5 spec Section 3: V_i = 0.03 m/s in the favorable nucleation zone.
-   /// Same for both BP5-QD and BP5-FD; only δτ in pre-stress differs.
-   /// (Tandem's bp5.lua uses 0.01, which deviates from the SCEC standard.)
-   real_t V_nuc = 0.03;
+   ///
+   /// Tandem default: V_nuc = 0.01 m/s (bp5.lua line 72).
+   /// SCEC BP5 spec Section 3: V_i = 0.03 m/s.
+   ///
+   /// We follow Tandem's value. Tandem's initialization creates exact stress
+   /// equilibrium at V = V_nuc (no overstress), which is essential for stable
+   /// behavior at p>=2 with DG methods. Override with --V-nuc 0.03 for SCEC.
+   real_t V_nuc = 0.01;
 
    /// Delta-tau multiplier for nucleation zone pre-stress.
-   /// SCEC BP5-QD: 1.0 (delta_tau = eta * V_nuc)
-   /// SCEC BP5-FD / Tandem: 0.0
-   real_t delta_tau_factor = 1.0;
+   ///
+   /// Tandem default: 0.0 (bp5.lua has no delta_tau function).
+   /// SCEC BP5-QD: 1.0 (delta_tau = eta * V_nuc creates genuine overstress).
+   ///
+   /// We follow Tandem. With delta_tau_factor = 0, tau_pre is computed for
+   /// exact equilibrium: tau_pre = sn*a*asinh(Vi/(2V0)*exp(psi_ss/a)) + eta*Vi.
+   /// This means psi_init (= f0+b*ln(V0/Vp)) produces V = V_nuc exactly at
+   /// nucleation DOFs — no initial transient, no overstress.
+   /// Override with --delta-tau-factor 1 for SCEC BP5-QD behavior.
+   real_t delta_tau_factor = 0.0;
 
    // =========================================================================
    // Geometric parameters (all in meters)

@@ -101,6 +101,8 @@ public:
       : bp5_params_(params), mpi_ctx_(mpi_ctx), is_bp5_(true)
    {
       num_fault_dofs_ = domain_op.GetNumFaultDOFs();
+      nbf_per_face_ = domain_op.GetNbfPerFace();
+      num_fault_faces_ = domain_op.GetNumFaultFaces();
       num_local_fault_dofs_ = num_fault_dofs_;
       num_global_fault_dofs_ = num_fault_dofs_;
 
@@ -413,6 +415,8 @@ private:
    MPIContext *mpi_ctx_ = nullptr;
    bool is_bp5_ = false;
    int num_fault_dofs_;
+   int nbf_per_face_ = 1;         // basis functions per face (1 at p=1)
+   int num_fault_faces_ = 0;      // number of fault faces
    int num_local_fault_dofs_ = 0;
    int num_global_fault_dofs_ = 0;
    Vector depths_;      // z-coordinates of fault DOFs
@@ -576,6 +580,24 @@ private:
    }
 
    /// @brief Compute 2D spatially varying parameters for BP5.
+   ///
+   /// Following Tandem's approach: ALL parameters are evaluated at each
+   /// individual DOF's physical coordinates (per-DOF evaluation).
+   ///
+   /// Tandem reference: RateAndState.h:36-43 — set_params() iterates over
+   /// all DOFs (numFaultFaces * nbf) and calls the Lua parameter function
+   /// with each DOF's physical (x,y,z) coordinates.
+   ///
+   /// At p>=2 (multi-DOF), DOFs on the same face straddling the nucleation
+   /// zone boundary will get different Dc, V_init, tau_pre values. This
+   /// within-face discontinuity is handled correctly when combined with
+   /// Tandem-style equilibrium initialization (--psi-init tandem), which
+   /// absorbs all stress into psi so no overstress exists.
+   ///
+   /// Note: With SCEC initialization (delta_tau overstress), this per-DOF
+   /// discontinuity combined with IP penalty can trigger instability at p>=2.
+   /// The proper fix is to use --psi-init tandem, not to smooth the
+   /// parameters (see bp5_debug_v46.md for analysis).
    void ComputeBP5Params()
    {
       a_values_.SetSize(num_fault_dofs_);

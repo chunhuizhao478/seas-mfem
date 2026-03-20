@@ -382,40 +382,53 @@ def main():
 
     # Build list of data sources
     sources = []
-    color_idx = 0
+
+    # Benchmark sources (dashed lines)
+    benchmark_colors = {
+        "tandem_p4": "#000000",  # black
+        "tandem_p6": "#2ca02c",  # green
+        "eqsim": "#1f77b4",     # blue
+        "tribie": "#9467bd",     # purple
+    }
+    used_colors = set()
 
     if args.tandem_p4 and not args.no_benchmark:
-        sources.append(("Tandem p4", "tandem_p4", None, "#000000", "--"))  # black dashed
+        sources.append(("Tandem p4", "tandem_p4", None, benchmark_colors["tandem_p4"], "--"))
+        used_colors.add(benchmark_colors["tandem_p4"])
 
     if args.tandem_p6 and not args.no_benchmark:
-        sources.append(("Tandem p6", "tandem_p6", None, "#2ca02c", "--"))  # green dashed
+        sources.append(("Tandem p6", "tandem_p6", None, benchmark_colors["tandem_p6"], "--"))
+        used_colors.add(benchmark_colors["tandem_p6"])
 
     if args.eqsim and not args.no_benchmark:
-        sources.append(("EQSim", "eqsim", None, "#1f77b4", "--"))  # blue dashed
+        sources.append(("EQSim", "eqsim", None, benchmark_colors["eqsim"], "--"))
+        used_colors.add(benchmark_colors["eqsim"])
 
     if args.tribie and not args.no_benchmark:
-        sources.append(("TriBIE", "tribie", None, "#9467bd", "--"))  # purple dashed
+        sources.append(("TriBIE", "tribie", None, benchmark_colors["tribie"], "--"))
+        used_colors.add(benchmark_colors["tribie"])
+
+    # Pool of colors for MFEM datasets, picking those not used by benchmarks
+    mfem_color_pool = [c for c in COLORS if c not in used_colors]
+    mfem_ci = 0
 
     # Primary MFEM dataset
     primary_label = f"MFEM {os.path.basename(args.mfem_prefix)}"
-    sources.append(
-        (primary_label, "mfem", args.mfem_prefix, "#d62728", "-")  # red solid
-    )
-    color_idx = 3
+    primary_color = mfem_color_pool[mfem_ci % len(mfem_color_pool)]
+    sources.append((primary_label, "mfem", args.mfem_prefix, primary_color, "-"))
+    mfem_ci += 1
 
     # Additional --compare MFEM datasets
-    compare_colors = ["#000000", "#ff7f0e"]  # 1st: black, 2nd: orange
     if args.compare:
-        for i, spec in enumerate(args.compare):
+        for spec in args.compare:
             if ":" in spec:
                 label, prefix = spec.split(":", 1)
             else:
                 label = os.path.basename(spec)
                 prefix = spec
-            color = compare_colors[i] if i < len(compare_colors) else COLORS[(i + 3) % len(COLORS)]
-            sources.append(
-                (f"MFEM {label}", "mfem", prefix, color, "-")
-            )
+            color = mfem_color_pool[mfem_ci % len(mfem_color_pool)]
+            sources.append((f"MFEM {label}", "mfem", prefix, color, "-"))
+            mfem_ci += 1
 
     print("=" * 60)
     print("BP5-QD Visualization")

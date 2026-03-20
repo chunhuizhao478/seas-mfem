@@ -253,11 +253,12 @@ void TestTau0Vec()
                      "Friction solver recovers |V_init| outside nucleation");
    }
 
-   // In nucleation zone: BP5-QD has delta_tau overstress (SCEC Eq. 23)
-   // tau0 = sigma_n*a*asinh(Vi/(2V0)*e) + eta*Vi + delta_tau
-   // where delta_tau = eta*Vi for QD. With psi_ss at plate rate, the friction
-   // solver returns V > V_nuc because the nucleation zone is intentionally
-   // overstressed to accelerate nucleation.
+   // In nucleation zone: with Tandem defaults (delta_tau_factor = 0),
+   // tau_pre is computed for exact equilibrium with Vi and psi_ss.
+   // The friction solver should recover V = V_nuc exactly.
+   //
+   // Tandem reference: bp5.lua lines 94-103 — tau_pre = sn*a*asinh(...) + eta*Vi
+   // with NO delta_tau addition.
    {
       real_t x2 = -25.0e3, x3 = 10.0e3;
       real_t Vi[2];
@@ -280,16 +281,16 @@ void TestTau0Vec()
       real_t V_solved = friction_nuc.SolveSlipRatePsi(
          tau_total_mag, psi_ss, p.sigma_n, p.eta(), p.a_of_x2_x3(x2, x3));
 
-      // V_solved > V_nuc due to delta_tau overstress (expected for BP5-QD)
-      TEST_ASSERT(V_solved > Vi_abs,
-                  "V_solved > V_nuc in nucleation (delta_tau overstress)");
+      // With Tandem defaults (delta_tau_factor=0), V_solved == V_nuc (equilibrium)
+      TEST_REL_NEAR(V_solved, Vi_abs, 1e-6,
+                     "Friction solver recovers V_nuc in nucleation (Tandem equilibrium)");
 
-      // Without delta_tau, the friction solver should recover V_nuc exactly
-      real_t tau_no_delta = tau_total_mag - p.eta() * Vi_abs;
-      real_t V_no_delta = friction_nuc.SolveSlipRatePsi(
-         tau_no_delta, psi_ss, p.sigma_n, p.eta(), p.a_of_x2_x3(x2, x3));
-      TEST_REL_NEAR(V_no_delta, Vi_abs, 1e-6,
-                     "Without delta_tau, friction solver recovers V_nuc");
+      // Also verify via InitialStatePsi round-trip:
+      // psi from InitialStatePsi should equal psi_ss
+      real_t psi_from_stress = friction_nuc.InitialStatePsi(
+         tau_total_mag, Vi_abs, p.sigma_n, p.eta(), p.a_of_x2_x3(x2, x3));
+      TEST_REL_NEAR(psi_from_stress, psi_ss, 1e-10,
+                     "InitialStatePsi recovers psi_ss at nucleation (Tandem equilibrium)");
    }
 }
 
@@ -352,9 +353,11 @@ void TestTau0VecQuantitative()
                      "tau0 ~ 13.27 MPa (VS zone)");
    }
 
-   // ----------- Nucleation zone (a=0.004), WITH delta_tau -----------
+   // ----------- Nucleation zone (a=0.004), Tandem defaults (NO delta_tau) ------
    // x2=-25e3, x3=10e3 → nucleation zone, a=0.004
-   // BP5-QD Eq. 23: tau_i^0 includes delta_tau = eta * V_i
+   // With delta_tau_factor=0 (Tandem default):
+   //   tau = sn * a * asinh(Vi/(2V0) * exp(psi_ss/a)) + eta * Vi
+   // No delta_tau added. Matches Tandem bp5.lua lines 94-102.
    {
       real_t x2 = -25.0e3, x3 = 10.0e3;
       real_t a = p.a_of_x2_x3(x2, x3);
@@ -364,32 +367,29 @@ void TestTau0VecQuantitative()
       real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_nuc * p.V_nuc);
       real_t e = std::exp(psi_ss / a);
 
-      // Base tau: SCEC Eq. 20
-      real_t base_tau = p.sigma_n * a *
+      // Equilibrium tau: sn * a * asinh(Vi/(2V0) * e) + eta * Vi
+      // NO delta_tau (delta_tau_factor = 0)
+      real_t expected_tau = p.sigma_n * a *
          std::asinh((Vi_abs / (2.0 * p.V0)) * e) + eta * Vi_abs;
-      // delta_tau for BP5-QD: eta * Vi (SCEC Eq. 23)
-      real_t delta_tau = eta * Vi_abs;
-      real_t expected_tau = base_tau + delta_tau;
 
       p.tau0_vec(x2, x3, tau);
       real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
 
       TEST_REL_NEAR(tau_mag, expected_tau, 1e-10,
-                     "tau0 magnitude matches analytical (nucleation, a=0.004)");
+                     "tau0 magnitude matches analytical (nucleation, no delta_tau)");
 
-      // Verify delta_tau is non-trivial (eta * V_nuc ~ 0.139 MPa)
-      TEST_ASSERT(delta_tau / 1e6 > 0.1,
-                  "delta_tau > 0.1 MPa (non-trivial overstress)");
-      TEST_REL_NEAR(delta_tau, eta * Vi_abs, 1e-12,
-                     "delta_tau = eta * Vi_abs (SCEC Eq. 23)");
+      // Verify delta_tau_factor is 0 (Tandem default)
+      TEST_NEAR(p.delta_tau_factor, 0.0, 1e-15,
+                "delta_tau_factor = 0 (Tandem default, no overstress)");
 
-      // Verify nucleation tau > non-nucleation tau (overstressed)
+      // Verify nucleation tau > non-nucleation tau
+      // (because Vi_nuc=0.01 >> Vi_init=1e-9, so friction is higher)
       real_t tau_non_nuc[2];
       p.tau0_vec(0.0, 10.0e3, tau_non_nuc);
       real_t tau_non_nuc_mag = std::sqrt(tau_non_nuc[0]*tau_non_nuc[0] +
                                           tau_non_nuc[1]*tau_non_nuc[1]);
       TEST_ASSERT(tau_mag > tau_non_nuc_mag,
-                  "Nucleation tau > non-nucleation tau (overstressed)");
+                  "Nucleation tau > non-nucleation tau (higher V_nuc)");
    }
 }
 
@@ -632,7 +632,203 @@ void TestValidate()
    TEST_ASSERT(p.L_nuc < p.L0, "L_nuc < L0");
    TEST_ASSERT(p.sigma_n > 0, "sigma_n > 0");
    TEST_ASSERT(p.Vp > 0, "Vp > 0");
-   TEST_ASSERT(p.V_nuc > p.V_init, "V_nuc > V_init");
+   TEST_ASSERT(p.V_nuc >= p.V_init, "V_nuc >= V_init");
+}
+
+// =============================================================================
+// Test: Tandem initialization produces exact equilibrium everywhere
+// =============================================================================
+void TestTandemInitEquilibrium()
+{
+   std::cout << "\n=== Tandem Init Equilibrium (V = V_init at all DOFs) ===\n";
+
+   BP5Params p;
+   // Verify defaults match Tandem
+   TEST_NEAR(p.V_nuc, 0.01, 1e-15, "V_nuc = 0.01 (Tandem default)");
+   TEST_NEAR(p.delta_tau_factor, 0.0, 1e-15,
+             "delta_tau_factor = 0.0 (Tandem default)");
+
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = p.V0; fc.f0 = p.f0; fc.b = p.b; fc.Dc = p.L0;
+   DieterichRuinaFriction friction(fc);
+
+   real_t psi_ss = p.f0 + p.b * std::log(p.V0 / p.Vp);
+
+   // Test at multiple points: VW center, nucleation zone, VS zone, transition
+   struct TestPoint { real_t x2, x3; const char *label; bool is_nuc; };
+   TestPoint points[] = {
+      {      0.0, 10.0e3, "VW center", false},
+      { -25.0e3, 10.0e3, "nucleation zone center", true},
+      { -30.0e3,  4.0e3, "nucleation zone corner", true},
+      {      0.0, 30.0e3, "deep VS", false},
+      {      0.0,  3.0e3, "shallow transition", false},
+      {  31.0e3, 10.0e3, "strike transition", false},
+   };
+
+   for (auto &pt : points)
+   {
+      real_t Vi[2], tau[2];
+      p.V_init_vec(pt.x2, pt.x3, Vi);
+      p.tau0_vec(pt.x2, pt.x3, tau);
+
+      real_t Vi_abs = std::sqrt(Vi[0]*Vi[0] + Vi[1]*Vi[1]);
+      real_t tau_mag = std::sqrt(tau[0]*tau[0] + tau[1]*tau[1]);
+      real_t a = p.a_of_x2_x3(pt.x2, pt.x3);
+      real_t Dc = p.L_of_x2_x3(pt.x2, pt.x3);
+
+      // Set correct Dc for this point
+      DieterichRuinaFriction::Constants fc_pt;
+      fc_pt.V0 = p.V0; fc_pt.f0 = p.f0; fc_pt.b = p.b; fc_pt.Dc = Dc;
+      DieterichRuinaFriction friction_pt(fc_pt);
+
+      // With psi_ss, friction solver should return V = Vi (equilibrium)
+      real_t V_solved = friction_pt.SolveSlipRatePsi(
+         tau_mag, psi_ss, p.sigma_n, p.eta(), a);
+
+      std::string msg = "V = V_init at " + std::string(pt.label);
+      TEST_REL_NEAR(V_solved, Vi_abs, 1e-6, msg.c_str());
+
+      // Also verify InitialStatePsi gives psi_ss
+      real_t psi_computed = friction_pt.InitialStatePsi(
+         tau_mag, Vi_abs, p.sigma_n, p.eta(), a);
+      msg = "psi_init = psi_ss at " + std::string(pt.label);
+      TEST_REL_NEAR(psi_computed, psi_ss, 1e-10, msg.c_str());
+   }
+}
+
+// =============================================================================
+// Test: Tandem tau_pre matches Tandem's bp5.lua formula exactly
+// =============================================================================
+void TestTandemTauPreFormula()
+{
+   std::cout << "\n=== Tandem tau_pre Formula Match ===\n";
+
+   BP5Params p;
+   real_t eta = p.eta();
+
+   // Tandem's bp5.lua formula:
+   //   e = exp((f0 + b * log(V0 / Vp)) / a)
+   //   tau0 = sn * a * asinh((Vi2 / (2*V0)) * e) + eta * Vi2
+   //   tau_pre = (-tau0 * Vi1/Vi, -tau0 * Vi2/Vi)
+
+   // Test at nucleation zone center: Vi = (1e-20, 0.01)
+   {
+      real_t x2 = -25.0e3, x3 = 10.0e3;
+      real_t a = p.a_of_x2_x3(x2, x3);
+
+      real_t Vi1 = p.V_zero;  // 1e-20
+      real_t Vi2 = p.V_nuc;   // 0.01
+      real_t Vi = std::sqrt(Vi1*Vi1 + Vi2*Vi2);
+
+      // Tandem's formula
+      real_t e = std::exp((p.f0 + p.b * std::log(p.V0 / p.Vp)) / a);
+      real_t tau0_tandem = p.sigma_n * a * std::asinh((Vi2 / (2.0 * p.V0)) * e)
+                          + eta * Vi2;
+      real_t tau_tandem[2] = {-tau0_tandem * Vi1 / Vi,
+                               -tau0_tandem * Vi2 / Vi};
+
+      // Our formula
+      real_t tau_ours[2];
+      p.tau0_vec(x2, x3, tau_ours);
+
+      TEST_REL_NEAR(tau_ours[0], tau_tandem[0], 1e-10,
+                     "tau[0] matches Tandem formula (nucleation)");
+      TEST_REL_NEAR(tau_ours[1], tau_tandem[1], 1e-10,
+                     "tau[1] matches Tandem formula (nucleation)");
+   }
+
+   // Test outside nucleation: Vi = (1e-20, 1e-9)
+   {
+      real_t x2 = 0.0, x3 = 10.0e3;
+      real_t a = p.a_of_x2_x3(x2, x3);
+
+      real_t Vi1 = p.V_zero;
+      real_t Vi2 = p.V_init;
+      real_t Vi = std::sqrt(Vi1*Vi1 + Vi2*Vi2);
+
+      real_t e = std::exp((p.f0 + p.b * std::log(p.V0 / p.Vp)) / a);
+      real_t tau0_tandem = p.sigma_n * a * std::asinh((Vi2 / (2.0 * p.V0)) * e)
+                          + eta * Vi2;
+      real_t tau_tandem[2] = {-tau0_tandem * Vi1 / Vi,
+                               -tau0_tandem * Vi2 / Vi};
+
+      real_t tau_ours[2];
+      p.tau0_vec(x2, x3, tau_ours);
+
+      TEST_REL_NEAR(tau_ours[0], tau_tandem[0], 1e-10,
+                     "tau[0] matches Tandem formula (outside nuc)");
+      TEST_REL_NEAR(tau_ours[1], tau_tandem[1], 1e-10,
+                     "tau[1] matches Tandem formula (outside nuc)");
+   }
+}
+
+// =============================================================================
+// Test: SCEC mode can be recovered with explicit parameter overrides
+// =============================================================================
+void TestScecModeOverride()
+{
+   std::cout << "\n=== SCEC Mode Override ===\n";
+
+   // Create params with SCEC overrides
+   BP5Params p;
+   p.V_nuc = 0.03;
+   p.delta_tau_factor = 1.0;
+   p.Validate();
+
+   real_t tau_nuc[2];
+   p.tau0_vec(-25.0e3, 10.0e3, tau_nuc);
+   real_t tau_nuc_mag = std::sqrt(tau_nuc[0]*tau_nuc[0] + tau_nuc[1]*tau_nuc[1]);
+
+   real_t psi_ss = p.f0 + p.b * std::log(p.V0 / p.Vp);
+
+   DieterichRuinaFriction::Constants fc;
+   fc.V0 = p.V0; fc.f0 = p.f0; fc.b = p.b; fc.Dc = p.L_nuc;
+   DieterichRuinaFriction friction(fc);
+
+   // With SCEC psi (fixed = psi_ss) and delta_tau, V > V_nuc (overstressed)
+   real_t V_solved = friction.SolveSlipRatePsi(
+      tau_nuc_mag, psi_ss, p.sigma_n, p.eta(), p.a_of_x2_x3(-25.0e3, 10.0e3));
+
+   real_t Vi_abs = std::sqrt(p.V_zero * p.V_zero + p.V_nuc * p.V_nuc);
+   TEST_ASSERT(V_solved > Vi_abs,
+               "SCEC mode: V > V_nuc (delta_tau overstress present)");
+
+   // Verify the overstress is significant (~2x V_nuc)
+   TEST_ASSERT(V_solved > 1.5 * Vi_abs,
+               "SCEC mode: V > 1.5 * V_nuc (significant overstress)");
+
+   // Verify InitialStatePsi absorbs the overstress (Tandem psi_init)
+   real_t psi_absorbed = friction.InitialStatePsi(
+      tau_nuc_mag, Vi_abs, p.sigma_n, p.eta(), p.a_of_x2_x3(-25.0e3, 10.0e3));
+   TEST_ASSERT(psi_absorbed > psi_ss,
+               "SCEC mode: InitialStatePsi > psi_ss (absorbs delta_tau)");
+
+   // With the absorbed psi, V should recover V_nuc
+   real_t V_absorbed = friction.SolveSlipRatePsi(
+      tau_nuc_mag, psi_absorbed, p.sigma_n, p.eta(),
+      p.a_of_x2_x3(-25.0e3, 10.0e3));
+   TEST_REL_NEAR(V_absorbed, Vi_abs, 1e-6,
+                  "SCEC mode: absorbed psi recovers V_nuc");
+}
+
+// =============================================================================
+// Test: psi_init() numerical value matches Tandem
+// =============================================================================
+void TestPsiInitNumerical()
+{
+   std::cout << "\n=== psi_init Numerical Value ===\n";
+
+   BP5Params p;
+
+   // Both Tandem and SCEC compute the same value:
+   // psi = f0 + b*ln(V0/Vp) = 0.6 + 0.03*ln(1e-6/1e-9) = 0.6 + 0.03*6.9078 = 0.8072
+   real_t expected = 0.6 + 0.03 * std::log(1e-6 / 1e-9);
+   TEST_REL_NEAR(p.psi_init(), expected, 1e-12,
+                  "psi_init = f0 + b*ln(V0/V_init) = 0.8072");
+
+   // Verify numerical value to 4 decimal places
+   TEST_REL_NEAR(p.psi_init(), 0.80723, 1e-4,
+                  "psi_init ~ 0.8072 (Tandem verified value)");
 }
 
 // =============================================================================
@@ -658,6 +854,10 @@ int main()
    TestTau0VecDirection();
    TestPsiInit();
    TestValidate();
+   TestTandemInitEquilibrium();
+   TestTandemTauPreFormula();
+   TestScecModeOverride();
+   TestPsiInitNumerical();
 
    TEST_PRINT_RESULTS();
    return (num_failed > 0) ? 1 : 0;

@@ -309,7 +309,7 @@ int main(int argc, char *argv[])
    bool diag_vtk = false;
    bool diag_traction_decomp = false;
    std::string bc_mode_str = "far-field";
-   std::string psi_init_mode_str = "scec";  // "scec" or "tandem"
+   std::string psi_init_mode_str = "tandem";  // "tandem" (default) or "scec"
    int order = 1;
 
    for (int i = 1; i < argc; i++)
@@ -409,6 +409,10 @@ int main(int argc, char *argv[])
    else if (solver_str == "gmres" || solver_str == "GMRES")
    {
       solver_type = SolverType::GMRES_BlockILU;
+   }
+   else if (solver_str == "gmres-amg" || solver_str == "GMRES-AMG")
+   {
+      solver_type = SolverType::GMRES_AMG;
    }
    else if (solver_str == "cg" || solver_str == "CG")
    {
@@ -597,19 +601,22 @@ int main(int argc, char *argv[])
       &fault_geom, &friction, &aging, params, &mpi);
 
    // Set psi initialization mode
-   if (psi_init_mode_str == "tandem" || psi_init_mode_str == "Tandem")
+   // Default: Tandem-style (InitialStatePsi from stress equilibrium)
+   // Override: --psi-init-mode scec for SCEC fixed psi with delta_tau overstress
+   if (psi_init_mode_str == "scec" || psi_init_mode_str == "SCEC")
    {
-      fault_op.SetScecPsiInit(false);
+      fault_op.SetScecPsiInit(true);
       if (mpi.IsRoot())
       {
-         std::cout << "  Psi init mode: Tandem (absorb delta_tau into psi)\n";
+         std::cout << "  Psi init mode: SCEC (genuine delta_tau overstress)\n";
       }
    }
    else
    {
+      // Default: Tandem-style (scec_psi_init_ already false by default)
       if (mpi.IsRoot())
       {
-         std::cout << "  Psi init mode: SCEC (genuine delta_tau overstress)\n";
+         std::cout << "  Psi init mode: Tandem (equilibrium psi from stress)\n";
       }
    }
 

@@ -855,7 +855,7 @@ private:
    real_t V_max_;       ///< Maximum slip rate from last evaluation
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
-   bool scec_psi_init_ = true;  ///< If true, SCEC psi; if false, Tandem InitialStatePsi
+   bool scec_psi_init_ = false;  ///< If false (default), Tandem InitialStatePsi; if true, SCEC fixed psi
    DieterichRuinaFriction *dr_friction_ = nullptr;  ///< Downcast for psi methods
 
    Vector slip_rate_;   ///< Cached slip rate [SlipComponents * NumNodes()]

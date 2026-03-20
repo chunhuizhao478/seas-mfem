@@ -32,7 +32,7 @@ namespace seas
 {
 
 /// Linear solver type for the elasticity domain operator
-enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, SUPERLU, STRUMPACK };
+enum class SolverType { CG_AMG, MUMPS, MUMPS_BLR, GMRES_BlockILU, GMRES_AMG, SUPERLU, STRUMPACK };
 
 /// Boundary condition mode for the elasticity domain operator
 ///
@@ -179,8 +179,8 @@ public:
    real_t GetLambda() const { return lambda_val_; }
    BCMode GetBCMode() const { return bc_mode_; }
 
-   int GetNumFaultFaces() const { return num_fault_faces_; }
-   int GetNbfPerFace() const { return nbf_per_face_; }
+   int GetNumFaultFaces() const override { return num_fault_faces_; }
+   int GetNbfPerFace() const override { return nbf_per_face_; }
    const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
 
    /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
@@ -899,6 +899,33 @@ private:
             int block_size = fes_->GetTypicalFE()->GetDof() * 3;  // vdim=3
             cached_prec_.reset(new BlockILU(block_size,
                BlockILU::Reordering::MINIMUM_DISCARDED_FILL));
+
+            gmres->SetPreconditioner(*cached_prec_);
+            gmres->SetOperator(*cached_Ah_.As<HypreParMatrix>());
+            solver_.reset(gmres);
+         }
+         else if (solver_type_ == SolverType::GMRES_AMG)
+         {
+            // GMRES + BoomerAMG: for DG at high p where:
+            //   - MUMPS runs out of memory (dense DG factorization)
+            //   - GMRES+BlockILU doesn't converge (local preconditioner too weak)
+            //   - CG+AMG fails because AMG is non-SPD for DG matrices
+            // GMRES tolerates non-SPD preconditioners while still benefiting
+            // from AMG's multilevel global coarse-grid correction.
+            auto *gmres = new GMRESSolver(mesh_.GetComm());
+            gmres->SetRelTol(1e-10);
+            gmres->SetAbsTol(0.0);
+            gmres->SetMaxIter(2000);
+            gmres->SetKDim(100);
+            gmres->SetPrintLevel(1);
+
+            auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
+            amg->SetPrintLevel(0);
+            // Skip SetElasticityOptions for DG — the near-null-space
+            // setup assumes continuous FEM DOF connectivity and can
+            // produce incorrect coarsening for DG sparsity patterns.
+            // Plain AMG still provides effective multilevel preconditioning.
+            cached_prec_.reset(amg);
 
             gmres->SetPreconditioner(*cached_prec_);
             gmres->SetOperator(*cached_Ah_.As<HypreParMatrix>());

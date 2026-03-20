@@ -8,17 +8,22 @@
 #SBATCH -t 48:00:00                  # 48 hours
 #SBATCH -A EAR20006                  # TACC allocation
 
-# BP5 v46b: IP p=2, 1000m mesh — CRITICAL MULTI-DOF TEST
+# BP5 v46b: IP p=2, 1000m mesh — CRITICAL MULTI-DOF TEST (Tandem initialization)
 #
-# v46 fixes the ComputeTraction penalty slip indexing bug that caused v45b
-# to blow up at p=2. The penalty correction now correctly:
-#   1. Reads per-DOF slip via slip_bc(2 * (fi * nbf + kk))
-#   2. Interpolates slip to quadrature points (InterpolateToQuadPoints)
-#   3. Uses per-quad-point slip in the penalty: jump = (u1-u2) - sign*slip_q
+# v46 changes from previous versions:
+#   1. Slip indexing fix in ComputeTraction IP penalty (v45→v46):
+#      Previously (v45b), penalty used slip_bc(2*fi) — face index instead of
+#      DOF index — reading wrong faces' slip. Created huge spurious traction
+#      forces (V_max 0.049 → 196 m/s in 56 steps, OOM). Now correctly:
+#        - Reads per-DOF slip via slip_bc(2 * (fi * nbf + kk))
+#        - Interpolates slip to quad points (InterpolateToQuadPoints)
+#        - Uses per-quad-point slip in penalty: jump = (u1-u2) - sign*slip_q
 #
-# Previously (v45b), the penalty used slip_bc(2*fi) — the face index instead
-# of the DOF index — reading wrong faces' slip. This created huge spurious
-# traction forces that drove V_max from 0.049 to 196 m/s in 56 steps (OOM).
+#   2. Tandem initialization defaults adopted (v46 Phase 2):
+#      - V_nuc = 0.01 m/s (was 0.03, Tandem bp5.lua:72)
+#      - delta_tau_factor = 0.0 (was 1.0, Tandem has no delta_tau overstress)
+#      - psi_init_mode = "tandem" (equilibrium psi from stress, not fixed 0.8072)
+#      - No initial overstress → cleaner nucleation, matches Tandem exactly
 #
 # Multi-DOF fault discretization:
 #   face_order = 2, nbf = (2+1)(2+2)/2 = 6 DOFs per fault face
