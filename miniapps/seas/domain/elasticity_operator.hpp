@@ -1067,15 +1067,15 @@ private:
             real_t w1 = ip.weight / (2.0 * detJ1);
             real_t w2 = ip.weight / (2.0 * detJ2);
 
-            // Penalty: match bilinear form integrator formula
+            // Penalty: match Tandem's physical A/V ratio
             // penalty = (p0+p1)/4, p = (D+1)*c_N_1*(A/V)*(c1²/c0)
+            // v47 fix: dim * nl_q / detJ = physical A/V (see bp5_debug_v47.md)
             real_t nl_q = nor.Norml2();
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-            // v42 fix: use order-dependent c_N_1
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -1515,13 +1515,13 @@ private:
                real_t detJ2 = FTr->Elem2->Weight();
                real_t w1 = ip.weight / (2.0 * detJ1);
 
-               // Penalty: match bilinear form integrator formula
+               // Penalty: v47 fix — dim * nl_q / detJ = physical A/V
                real_t nl_q = nor.Norml2();
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -1869,13 +1869,12 @@ private:
                real_t detJ = FTr->Elem1->Weight();
                real_t w = ip.weight / detJ;
 
-               // Penalty: match bilinear form (boundary face: single side)
+               // Penalty: v47 fix — dim * nl_q / detJ = physical A/V
                real_t nl_q = nor.Norml2();
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
                real_t wq_penalty = p0 * ip.weight * nl_q;
 
                for (int k = 0; k < ndof; k++)
@@ -2143,15 +2142,14 @@ private:
                real_t w1 = ip.weight / (2.0 * detJ1);
                real_t w2 = ip.weight / (2.0 * detJ2);
 
-               // Skeleton penalty: same as slip contribution
+               // Skeleton penalty: v47 fix — dim * nl_q / detJ = physical A/V
                real_t nl_q = nor.Norml2();
                real_t c0_mat = 2.0 * mu_val_;
                real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
                            * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
+               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                            * (c1_mat * c1_mat / c0_mat);
                real_t penalty_ip = (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -2524,15 +2522,14 @@ private:
                   real_t detJ2 = FTr->Elem2->Weight();
                   real_t w1 = ip.weight / (2.0 * detJ1);
 
-                  // Skeleton penalty
+                  // Skeleton penalty: v47 fix — dim * nl_q / detJ = physical A/V
                   real_t nl_q = nor.Norml2();
                   real_t c0_mat = 2.0 * mu_val_;
                   real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-                  // v42 fix: use order-dependent c_N_1 (was hardcoded 1.0)
                   real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-                  real_t p0 = (dim + 1) * c_N_1 * (nl_q / detJ1)
+                  real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
                               * (c1_mat * c1_mat / c0_mat);
-                  real_t p1 = (dim + 1) * c_N_1 * (nl_q / detJ2)
+                  real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                               * (c1_mat * c1_mat / c0_mat);
                   real_t penalty_ip = (p0 + p1) / 4.0;
                   real_t wq_penalty = penalty_ip * ip.weight * nl_q;
@@ -3093,9 +3090,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          real_t face_area = nor.Norml2();
          real_t vol1 = FTr->Elem1->Weight();
          real_t vol2 = FTr->Elem2->Weight();
-         real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+         // v47 fix: dim * face_area / vol = physical A/V
+         real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                      * (c1_mat * c1_mat / c0_mat);
-         real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+         real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
@@ -3541,9 +3539,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             real_t face_area = nor.Norml2();
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
-            real_t p0 = (dim + 1) * c_N_1 * (face_area / vol1)
+            // v47 fix: dim * face_area / vol = physical A/V
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                         * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (face_area / vol2)
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                         * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
 

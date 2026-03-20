@@ -112,18 +112,20 @@ public:
                           ndofs2 > 0 ? el2.GetOrder() : el1.GetOrder());
          real_t c_N_1 = p * (p + dim_ - 1.0) / dim_;
 
-         // Element volumes
+         // Element volumes (Weight() = |det(J)| = D! × V_phys for simplices)
          real_t vol1 = Trans.Elem1->Weight();
 
          // Penalty per side: p(K) = (D+1) * c_N_1 * (A/V) * (c1²/c0)
-         // Use nl_q as the face-area measure at this quadrature point
-         real_t p0 = (dim_ + 1) * c_N_1 * (nl_q / vol1) * (c1 * c1 / c0);
+         // Physical A/V = dim * nl_q / Weight() (corrects reference element
+         // measure ratio: ref_face/ref_vol = 1/(D-1)! / 1/D! = D)
+         // See bp5_debug_v47.md Section 2 for derivation.
+         real_t p0 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / vol1) * (c1 * c1 / c0);
 
          real_t penalty;
          if (ndofs2 > 0)
          {
             real_t vol2 = Trans.Elem2->Weight();
-            real_t p1 = (dim_ + 1) * c_N_1 * (nl_q / vol2) * (c1 * c1 / c0);
+            real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / vol2) * (c1 * c1 / c0);
             penalty = (p0 + p1) / 4.0;
          }
          else

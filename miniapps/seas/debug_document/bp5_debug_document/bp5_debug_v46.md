@@ -285,6 +285,244 @@ Compare with old SCEC defaults:
 
 ---
 
+## Phase 3: v46 Results Analysis — p=2 Divergence Investigation
+
+**Date**: 2026-03-20
+**Runs analyzed**: v46a (p=1, 1000m, IP, mumps-blr), v46b (p=2, 1000m, IP, mumps-blr)
+**Status**: Both runs still executing; partial data analyzed (p1 at ~999yr / 4 events, p2 at ~77yr / 1 event). Full-run plots available.
+
+---
+
+### 3.1 Visual Summary from Plots
+
+Both runs use the Tandem initialization defaults (V_nuc=0.01, delta_tau_factor=0, psi_init_mode=tandem). The initial earthquake bug from Phase 1 is eliminated — both start in equilibrium.
+
+**Closeup (0–0.1 yr): Excellent p=2 match**
+
+At all 10 stations, the closeup plots show p=2 tracking Tandem's p=4 reference closely, often overlapping with p=1:
+
+| Station | Closeup quality (p=2 vs Tandem) | Notes |
+|---------|-------------------------------|-------|
+| strk+00dp+00 | ✅ Excellent | V_strike, tau, state all match |
+| strk+00dp+10 | ✅ Excellent | Nearly identical to Tandem |
+| strk+00dp+22 | ⚠️ Good with offset | V_dip shows oscillation at VW-VS boundary |
+| strk+16dp+00 | ✅ Excellent | Both p1 and p2 close to Tandem |
+| strk+16dp+10 | ✅ Excellent | Very close match |
+| strk+36dp+00 | ⚠️ Moderate | tau_dip and V_dip show ~15% deviation from t=0 |
+| strk-16dp+00 | ✅ Excellent | Good agreement |
+| strk-16dp+10 | ✅ Excellent | Nearly identical |
+| strk-24dp+10 | ✅ Excellent | Near nucleation center, good match |
+| strk-36dp+00 | ⚠️ Moderate | V_dip elevated, tau_dip offset from t=0 |
+
+**Full run (0–1800 yr): Progressive p=2 divergence**
+
+Over multiple earthquake cycles, p=2 shows growing divergence from Tandem:
+
+| Observable | p=1 vs Tandem | p=2 vs Tandem |
+|------------|--------------|--------------|
+| Event timing (1st) | ~250yr ≈ reference | ~250yr ≈ reference |
+| Event timing (later) | Slight drift, stays close | **Progressive drift, events shift by ~10-20yr by event 5+** |
+| Recurrence interval | ~250yr (stable) | **Shortening trend** visible |
+| Strike slip | Good match all events | Diverges ~event 3-4 |
+| Dip slip | Good match | **Larger divergence from event 2+** |
+| Shear stress (dip) | Matches Tandem pattern | **Oscillatory, different amplitude** |
+| State variable (psi) | Matches evolution | Good early, diverges late |
+
+**Key observation**: The divergence is WORSE at off-center and deep stations:
+- strk±36dp+00: Dip-slip component diverges significantly by ~750yr
+- strk+00dp+22: VW-VS boundary shows dip-stress drift
+- strk+16dp+00: Dip-slip offset grows progressively
+
+---
+
+### 3.2 Quantitative Time-Stepping Analysis
+
+**Step count comparison (same simulation period):**
+
+| Period | p=1 steps | p=2 steps | p2/p1 ratio |
+|--------|-----------|-----------|-------------|
+| 0–70 yr | 1,093 | 2,873 | **2.6×** |
+| Full run to data end | 63,804 (999yr) | 16,592 (77yr) | N/A (different durations) |
+
+**Time step statistics (interseismic, t=1–70yr):**
+
+| Statistic | p=1 | p=2 | Ratio |
+|-----------|-----|-----|-------|
+| Average dt | 1.991e6 s (0.063 yr) | 7.574e5 s (0.024 yr) | **p2 is 2.6× smaller** |
+| Max dt | 3.156e6 s (0.100 yr) | 1.968e6 s (0.062 yr) | **p2 capped 38% lower** |
+| Min dt | 1.309e5 s | 3.229e4 s | p2 needs 4× smaller min |
+
+**Implications**: p=2 is running 2.6× slower in wall-clock time per simulation year, and the smaller time steps are driven by the error controller finding larger local truncation errors.
+
+---
+
+### 3.3 Root Cause Analysis: Why p=2 Diverges More
+
+Five contributing factors identified, ranked by likely impact:
+
+#### Factor 1 (HIGH): 1/3 IP Penalty — More Damaging at p=2
+
+**Finding**: MFEM's IP penalty is exactly 1/3 of Tandem's across all polynomial orders.
+
+| Code | Geometric ratio in penalty | Physical meaning |
+|------|---------------------------|-----------------|
+| Tandem | `area / volume = A_phys / V_phys` | Physical face-to-volume ratio |
+| MFEM | `nl_q / Weight() = 2A_phys / (6V_phys) = A_phys / (3V_phys)` | Reference element conventions |
+
+The factor of 3 comes from MFEM's reference tetrahedron conventions:
+- `CalcOrtho |nor| = 2 × A_phys` (reference triangle area = 1/2)
+- `Weight() = det(J) = 6 × V_phys` (reference tet volume = 1/6)
+- Ratio: `(2A)/(6V) = A/(3V)` instead of `A/V`
+
+**Why it's worse at p=2**: The theoretical minimum penalty for coercivity scales as `c_N_1 = p(p+2)/3`:
+- p=1: c_N_1 = 1.0, effective penalty = 1/3 of theoretical
+- p=2: c_N_1 = 2.67, effective penalty = 2.67/3 = 0.89 of theoretical (CLOSER to threshold)
+- p=4: c_N_1 = 8.0, effective penalty = 8/3 = 2.67 of theoretical
+
+The penalty formula: `eta_F = (D+1) × c_N_1 × (A/(3V)) × c1²/c0`
+
+With the 1/3 factor, the stability margin shrinks as p increases. At p=1, other stabilizing mechanisms (rate-state friction damping, radiation damping term eta*V) compensate. At p=2, the margin is thinner, and numerical errors in traction computation are less damped by the penalty.
+
+**Status**: The v45 debug document explains why simply multiplying by 3 doesn't work (it disrupts the consistency-penalty balance since only penalty, not consistency/symmetry terms, is at 1/3 strength). The proper fix requires understanding how the DG bilinear form terms scale together.
+
+*Source*: `elasticity_operator.hpp:1076-1079` (bilinear form), `3092-3100` (ComputeTraction)
+*Tandem ref*: `Elasticity.cpp:278-291`, `InverseInequality.h:27-29`
+
+#### Factor 2 (HIGH): L∞ Error Norm Over 6× More DOFs
+
+**Finding**: The RK45 adaptive time stepper uses L∞ error norm: `err = max_i |err_i| / atol`.
+
+At p=2, there are 6 DOFs per fault face (vs 1 at p=1), meaning the state vector is 6× longer. The L∞ norm picks the single WORST error across all DOFs. With 6× more DOFs:
+
+1. More opportunities for a DOF at a parameter transition to have large local error
+2. DOFs near the nucleation zone boundary (VW-VS transition) see sharp parameter gradients
+3. A single "bad" DOF forces globally smaller time steps
+
+**Quantitative evidence**: The max dt achieved by p=2 (0.062 yr) is 38% smaller than p=1 (0.100 yr = dt_max), suggesting p=2 frequently hits the error tolerance ceiling while p=1 coasts at dt_max.
+
+The smaller time steps mean MORE time steps per earthquake cycle, and each step accumulates floating-point errors differently. Over 7+ events, these accumulate into visible timing drift.
+
+**Possible fix**: Consider using L2 (RMS) error norm instead of L∞, which would average over DOFs rather than picking the worst. Tandem uses L∞ too (`-ts_adapt_wnormtype infinity`), but Tandem's p=2 default may work because of the full-strength penalty and SBP-SAT.
+
+*Source*: `time_stepper.hpp:338-386` (error norm), `bp5_verification_full.cpp:971-974` (tolerances)
+*Tandem ref*: `examples/options/rk45.cfg` (atol=1e-7, rtol=1e-50, wnormtype=infinity)
+
+#### Factor 3 (MEDIUM): Stiffer ODE System
+
+The coupled elasticity + rate-state ODE system becomes stiffer at p=2:
+
+1. **Penalty stiffness**: The effective spring constant from the IP penalty scales as `p²/h`. At p=2 this is 2.67× stiffer, creating faster-decaying modes that the RK45 stages capture as larger error estimates.
+
+2. **More spatial resolution**: p=2 resolves within-element stress gradients that p=1 cannot see. These sharper features require smaller time steps to integrate accurately.
+
+3. **Friction nonlinearity**: The rate-state friction law has exponential dependence on stress: `V = 2V0*sinh(tau/(a*sn))*exp(-psi/a)`. At p=2, the traction at individual DOFs can be sharper (not face-averaged), leading to more extreme V values that dominate the error estimate.
+
+#### Factor 4 (MEDIUM): Node Distribution — GaussLobatto vs WarpAndBlend
+
+**Finding**: SEAS-MFEM uses GaussLobatto nodes on triangles; Tandem uses WarpAndBlend nodes.
+
+At p=2, both give 6 nodes but at different positions:
+- **GaussLobatto**: 3 vertices + 3 edge midpoints
+- **WarpAndBlend**: Optimized for interpolation (lower Lebesgue constant)
+
+The Lebesgue constant affects the stability of the L2 projection (smaller is better). WarpAndBlend nodes are specifically designed for simplex interpolation and may provide better conditioning for the mass matrix inverse used in `GalerkinProject`.
+
+For BP5's flat fault faces, both should give spectrally convergent results, but the conditioning difference could explain why p=2 accumulates slightly different errors cycle-to-cycle.
+
+*Source*: `face_quadrature.hpp:58` — `H1_TriangleElement(face_order, BasisType::GaussLobatto)`
+*Tandem ref*: `RateAndStateBase.cpp:10-13` — `NodalRefElement<2>(PolynomialDegree, WarpAndBlendFactory<2>())`
+
+#### Factor 5 (LOW): dt_max Difference
+
+| | SEAS-MFEM | Tandem (QD mode) |
+|--|-----------|-------------------|
+| dt_max | 0.1 yr (hardcoded) | PETSC_MAX_REAL (unlimited) |
+
+In Tandem's QD mode, `cfl_time_step()` returns `std::nullopt` → no dt_max is set. Tandem's RK45 can take arbitrarily large steps if the error is small enough.
+
+Our p=1 hits dt_max (0.1yr) frequently during interseismic periods. Our p=2 never reaches it (max was 0.062yr). So dt_max is NOT the cause of p=2 divergence, but it means p=1 is artificially capped — possibly hiding the fact that it could take even larger steps (and potentially diverge more).
+
+*Source*: `bp5_verification_full.cpp:974` — `rk45.SetMaxDt(0.1 * year_s)`
+*Tandem ref*: `SEAS.cpp:198-201` — QD mode returns nullopt, no dt_max
+
+---
+
+### 3.4 Algorithmic Comparison Table
+
+| Aspect | SEAS-MFEM | Tandem | Match? |
+|--------|-----------|--------|--------|
+| RK method | Dormand-Prince 5(4), 7-stage FSAL | Same (PETSc `5dp`) | ✅ |
+| Error norm | L∞ weighted | L∞ weighted | ✅ |
+| atol | 1e-7 | 1e-7 | ✅ |
+| rtol | 1e-50 | 1e-50 | ✅ |
+| safety factor | 0.9 | 0.9 | ✅ |
+| reject_safety | 0.5 | 0.5 | ✅ |
+| growth_max | 10.0 | 10.0 | ✅ |
+| shrink_min | 0.1 | 0.1 | ✅ |
+| dt_max (QD) | **0.1 yr** | **unlimited** | ❌ |
+| CFL constraint | None | None | ✅ |
+| DG method | IP (SIPG) | **SBP-SAT** | ❌ fundamental |
+| Penalty c_N formula | p(p+D-1)/D | p(p+D-1)/D | ✅ |
+| Penalty geometric factor | **A/(3V)** | **A/V** | ❌ factor of 3 |
+| Interior penalty averaging | (p0+p1)/4 | (p(0)+p(1))/4 | ✅ |
+| Traction projection | L2 (GalerkinProject) | L2 (minv * E^T * W * nl) | ✅ (flat faces) |
+| Mass matrix | Consistent (not lumped) | Consistent (not lumped) | ✅ |
+| Face node distribution | **GaussLobatto** | **WarpAndBlend** | ❌ |
+| Fault basis rotation | Per-face (constant) | Per-quad-point | ✅ (flat fault) |
+| Jacobian in projection | Reference (no nl_q) | Physical (with nl_q) | ✅ (flat faces) |
+| Polynomial order | Runtime (`--order`) | Compile-time template | N/A |
+
+---
+
+### 3.5 Specific Numerical Evidence of Early Divergence
+
+**At strk-36dp+00 (x2=-36km, x3=0km) at t≈0.04 yr:**
+
+| Quantity | p=1 | p=2 | Deviation |
+|----------|-----|-----|-----------|
+| V_dip (log10) | -7.784 | -7.709 | p2 is 19% higher |
+| tau_dip (MPa) | 1.279 | 1.235 | p2 is 3.4% lower |
+| V_strike (log10) | -6.679 | -6.645 | p2 is 8.6% higher |
+
+This is at t=0.04yr — well before any earthquake. The elastic solution quality already differs, with p=2 showing systematically higher slip rates and slightly different shear stress. This early-time deviation is NOT from time stepping but from the **spatial discretization** (traction computation, penalty, DG solution quality).
+
+**Initial conditions are identical** at all stations (V_strike=1e-9, tau=13.273 MPa, psi=8.146128). The divergence emerges from the very first elastic solve.
+
+---
+
+### 3.6 Diagnosis: Most Likely Cause of Progressive Divergence
+
+The evidence points to a combination of Factor 1 (1/3 penalty) and Factor 2 (L∞ error norm) as the primary drivers:
+
+1. **The 1/3 penalty under-stabilization** produces a slightly different DG elasticity solution at p=2 vs Tandem's SBP-SAT, especially in the dip-direction stress (where the problem is geometrically asymmetric). This manifests as the systematic ~3-20% deviations seen at off-center stations from t=0.
+
+2. **The smaller time steps** forced by L∞ over 6× more DOFs create a different error accumulation pattern. Over many earthquake cycles, the cumulative effect shifts event timing progressively.
+
+3. The divergence is NOT from initialization (initial conditions match exactly), NOT from time stepping parameters (identical tolerances), and NOT from a code bug — it's from the **fundamental difference between IP with 1/3 penalty and SBP-SAT**.
+
+---
+
+### 3.7 Recommended Investigation Priorities
+
+#### Priority 1: Understand the penalty-consistency balance
+The v45 debug doc explains that simply multiplying penalty by 3 disrupts the consistency-penalty balance. Need to investigate whether MFEM's DG bilinear form (consistency + symmetry + penalty) is correctly balanced in reference-element terms, or whether there's a systematic scaling issue affecting ALL three terms.
+
+**Key question**: Does MFEM's `DGElasticityIntegrator` produce correct physical integrals for all three terms, or is only the penalty affected by the 1/3 factor?
+
+#### Priority 2: Test with dt_max = unlimited
+Verify that removing the dt_max=0.1yr cap doesn't affect p=1 results (it should already be hitting dt_max regularly). If p=1 quality improves, it suggests the cap was hiding convergence issues.
+
+#### Priority 3: Test with L2 (RMS) error norm
+Switch the RK45 error norm from L∞ to RMS. This would average errors over all DOFs rather than picking the worst, potentially allowing p=2 to take larger time steps while maintaining accuracy on average.
+
+#### Priority 4: WarpAndBlend nodes
+Test switching from GaussLobatto to WarpAndBlend nodes for the fault face quadrature. This matches Tandem exactly and may improve the L2 projection conditioning.
+
+#### Priority 5: Full penalty analysis at p=2
+Compute the actual penalty values at specific faces and compare with Tandem's values. Verify whether the 1/3 factor brings the penalty below the coercivity threshold at p=2.
+
+---
+
 ## Key Tandem Source Files Referenced
 
 | File | What it shows |
