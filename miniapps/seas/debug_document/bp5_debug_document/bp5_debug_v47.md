@@ -1,7 +1,7 @@
 # BP5 Debug v47: IP Penalty ×3 Correction — Reference Element Scaling Fix
 
 **Date**: 2026-03-20
-**Status**: p=2 blowup root cause found — dt_init ignores V_nuc (see Section 11). Fix applied.
+**Status**: p=2 blowup is formulation-resolution issue (within-face V amplification at ×3 penalty). dt_init bug fixed but does not resolve blowup. See Section 11.
 **Previous**: v46 (Tandem initialization defaults + multi-DOF slip indexing fix)
 **Branch**: `feature/elasticity`
 
@@ -779,54 +779,93 @@ to eventually find a working dt. At v47's 8× larger penalty (p=2), the intermed
 values are so extreme they may produce Inf/NaN that prevents clean error estimation
 even during rejection.
 
-### 11.4 Why Sections 7.3–7.5 Were Incomplete
+### 11.4 dt Fix Does NOT Resolve p=2 Blowup
 
-The earlier analysis (Sections 7.3–7.5) correctly identified within-face discontinuity
-and resolution-dependent stiffness as contributing factors, but attributed the blowup
-to a **formulation** issue (SIPG + correct penalty = too stiff at coarse resolution).
+**Run v47b_ip_p2 (job 7605297)** with `dt_init = 0.13s` still blows up immediately.
+The output confirms `Initial dt: 0.13 s (V_max_init = 0.01)` but traction blowup
+occurs before the first step completes. Key evidence from the output:
 
-The actual mechanism is simpler: the **initial time step is 20,000× too large**.
-The SIPG formulation with correct ×3 penalty may well work at p=2 once the ODE
-solver starts at a reasonable dt. The "resolution-dependent stiffness" analysis
-(Section 7.4–7.5) remains relevant for the p=1 nucleation failure, which is a
-separate issue from the p=2 step-0 blowup.
+| Rank | DOF | τ (GPa) | slip (m) |
+|------|-----|---------|----------|
+| 316 | 2 | 10.2 | +2.53 |
+| 316 | 4 | 9.63 | +2.92 |
+| 316 | 5 | 4.11 | **-0.92** |
+| 317 | 121 | 3.89 | -0.86 |
+| 317 | 36 | 8.67 | +2.69 |
 
-The BLR paradox (Section 7.2) is also explained: tighter BLR more accurately
-resolves the extreme intermediate states during the rejection loop, producing
-larger (more accurate) GPa-level values before detection, whereas loose BLR
-smooths these out. This is a **solver behavior during overshoot**, not a
-steady-state instability.
+**Critical observations**:
+1. Slip values of 0.5–2.9 m are **2000× larger** than expected from dt=0.13s
+   (V_nuc × dt = 0.01 × 0.13 = 0.0013 m)
+2. Slip **alternates sign** between adjacent DOFs (+2.9, -0.9) — oscillation
+3. Blowup locations are all on the fault plane (y ≈ 0) in the VW/nucleation region
 
-### 11.5 The Fix
+### 11.5 The Actual Mechanism: RK-Stage V Amplification
 
-**File**: `bp5_verification_full.cpp`
+The blowup is a **cascade within the RK45 stages**, not across time steps.
+Even at dt=0.13s, the multi-DOF p=2 system amplifies V through the
+elastic-friction coupling within a single Mult() evaluation:
+
+**Stage 1** (k1): δu=0 → T=0 → V=V_nuc=0.01 → k1_slip = 0.01 m/s
+
+**Stage 2** (k2): δu = dt × a21 × V_nuc = 0.13 × 0.2 × 0.01 = 2.6×10⁻⁴ m
+- Elastic solve with this tiny δu → traction T at p=2 multi-DOF
+- With ×3 penalty (7.83 GPa/m), the traction response has within-face
+  DOF variation (6 DOFs per face, some in nucleation zone, others outside)
+- DOFs at the nucleation boundary see amplified traction from the
+  mismatch between adjacent DOFs → some get V ≈ T/η ≈ **20 m/s**
+- k2_slip ≈ 20 m/s at those DOFs
+
+**Stage 3** (k3): δu ≈ dt × (a31×0.01 + a32×20) ≈ 0.13 × 0.3 × 20 ≈ **0.78 m**
+- Penalty correction: 7.83 × 10⁹ × 0.78 = **6.1 GPa** → catastrophic
+- V at some DOFs → O(1000) m/s → further amplifies slip
+
+**Stage 4+**: Slip reaches 2–3 meters, traction 10 GPa → segfault in
+ComputeTraction (null dereference from corrupted state)
+
+**Why this doesn't happen at p=1**: Only 1 effective DOF per face → no within-face
+oscillation → V responds uniformly → stable (but too stiff to nucleate, per Section 7.4).
+
+**Why this doesn't happen at 1/3 penalty**: Penalty = 0.98 GPa/m → 8× weaker traction
+response → V amplification stays bounded → cascade doesn't start.
+
+### 11.6 Sections 7.3–7.5 Were Correct
+
+The earlier analysis in Sections 7.3 (within-face discontinuity) and 7.5
+(resolution-dependent stiffness) correctly identified the root cause. The dt_init
+fix (Section 11.1–11.3) was a genuine bug that needed fixing (1000s was wrong),
+but it is NOT the cause of the p=2 blowup. The blowup is driven by:
+
+1. **Multi-DOF within-face traction amplification** at the nucleation boundary
+2. **×3 penalty amplifying the DOF-to-DOF variation** by 8× vs v46
+3. **Positive feedback through RK stages** (V → δu → T → V)
+
+This is a **formulation-resolution issue**, not a time step issue.
+
+### 11.7 The dt Fix
+
+The dt_init fix remains correct (the old value WAS a bug):
 
 ```cpp
-// BEFORE (uses V_init = 1e-9, ignores V_nuc = 0.01):
-real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
-                          std::max(V_init, 1e-20));
-// → dt_init = 1000 s
-
-// AFTER (uses max of V_init and V_nuc):
 real_t V_max_init = std::max(V_init, params.V_nuc);
 real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
                           std::max(V_max_init, 1e-20));
-// → dt_init = 0.13 s
 ```
 
-At `dt = 0.13s`, the first RK stage gives:
-- δu_nuc = 0.2 × 0.13 × 0.01 = 2.6×10⁻⁴ m (0.26 mm)
-- Penalty correction ≈ 7.83 GPa/m × 2.6×10⁻⁴ = **2.0 MPa** (8% of σ_n)
+It just doesn't solve the p=2 penalty problem.
 
-This is manageable — comparable to what Tandem sees with its ~0.05s initial dt.
+### 11.8 Implications
 
-### 11.6 Expected Outcomes After Fix
+| Run | Status |
+|-----|--------|
+| p=1 with ×3 penalty | V decays — resolution-dependent stiffness (Section 7.4) |
+| p=2 with ×3 penalty | **Blowup confirmed at dt=0.13s** — within-face amplification |
+| p=1 with 1/3 penalty | Works (compensating error) |
+| p=2 with 1/3 penalty | Works (compensating error) |
 
-| Run | Expected |
-|-----|----------|
-| p=1 with ×3 penalty | May still fail to nucleate (Section 7.4 stiffness analysis). This is a separate resolution issue, not the dt bug. |
-| p=2 with ×3 penalty | **Should no longer blow up at step 0.** Whether nucleation succeeds depends on the effective stiffness at p=2, which is now testable. |
-| p=1 with 1/3 penalty | Unchanged (dt fix doesn't affect the compensating-error regime). |
+The correct penalty (×3) breaks BOTH p=1 (too stiff) and p=2 (unstable).
+The 1/3 penalty works at both orders due to compensating error. This
+confirms the analysis in Section 10.6: the issue is resolution-dependent
+effective stiffness, not a formula error.
 
 ### 11.7 Note on BP2 and Other Tests
 
@@ -846,4 +885,5 @@ already uses `SetDt(10.0)` which is small enough.
 | v46 | Multi-DOF slip indexing fix + Tandem initialization defaults | Done |
 | **v47** | **Penalty ×3 re-applied — breaks p=1 (stiffness) and p=2 (blowup)** | **Investigating** |
 | v47+ | Deep investigation: confirmed both codes use SIPG with identical formulas. Root cause is resolution-dependent effective stiffness at p=1. Corrected SBP-SAT analysis. | Done |
-| v47++ | **Root cause of p=2 blowup: dt_init = 1000s ignores V_nuc = 0.01. Tandem uses PETSc auto-detect (~0.05s). Fix: use max(V_init, V_nuc) → dt_init = 0.13s.** | **Fix applied** |
+| v47++ | dt_init fix: use max(V_init, V_nuc) → dt_init = 0.13s. Tandem uses PETSc auto-detect (~0.05s). | Fix applied |
+| v47+++ | **dt fix does NOT resolve p=2 blowup.** Run 7605297 confirms blowup at dt=0.13s. Slip 0.5–2.9m with oscillating sign → RK-stage V amplification via multi-DOF ×3 penalty feedback. Sections 7.3–7.5 were correct: formulation-resolution issue. | **Confirmed** |
