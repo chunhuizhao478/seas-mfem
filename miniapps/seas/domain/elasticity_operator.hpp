@@ -195,16 +195,6 @@ public:
    /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
 
-   /// Set fault-face penalty scaling factor for IP method.
-   /// Scales the IP penalty on fault faces only (RHS + traction extraction).
-   /// Skeleton (non-fault) faces always use full penalty.
-   ///   α = 1.0: full ×3 penalty on fault faces (default, matches Tandem)
-   ///   α = 1/3: fault faces at v46 penalty, skeleton at correct ×3
-   ///   α = 0.0: stress-only traction, no penalty correction on fault
-   /// See bp5_debug_v47.md Section 13 for rationale.
-   void SetFaultPenaltyFactor(real_t alpha) { fault_penalty_factor_ = alpha; }
-   real_t GetFaultPenaltyFactor() const { return fault_penalty_factor_; }
-
 private:
    MeshType &mesh_;
    int order_;
@@ -216,7 +206,6 @@ private:
    bool check_residual_;  // Post-solve residual check
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-10;  // MUMPS-BLR factorization tolerance
-   real_t fault_penalty_factor_ = 1.0;  // IP penalty scaling on fault faces (Section 13)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -1083,16 +1072,15 @@ private:
             real_t w1 = ip.weight / (2.0 * detJ1);
             real_t w2 = ip.weight / (2.0 * detJ2);
 
-            // Penalty: match Tandem's physical A/V ratio, scaled by fault_penalty_factor_
+            // Penalty: match Tandem's physical A/V ratio
             // penalty = (p0+p1)/4, p = (D+1)*c_N_1*(A/V)*(c1²/c0)
             // v47 fix: dim * nl_q / detJ = physical A/V (see bp5_debug_v47.md)
-            // Section 13: fault_penalty_factor_ scales penalty on fault faces only
             real_t nl_q = nor.Norml2();
             real_t c0_mat = 2.0 * mu_val_;
             real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
@@ -3108,10 +3096,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          real_t vol1 = FTr->Elem1->Weight();
          real_t vol2 = FTr->Elem2->Weight();
          // v47 fix: dim * face_area / vol = physical A/V
-         // Section 13: fault_penalty_factor_ scales penalty on fault faces
-         real_t p0 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * face_area / vol1)
+         real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                      * (c1_mat * c1_mat / c0_mat);
-         real_t p1 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * face_area / vol2)
+         real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
          real_t penalty_ip = (p0 + p1) / 4.0;
 
@@ -3558,10 +3545,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             real_t vol1 = FTr->Elem1->Weight();
             real_t vol2 = FTr->Elem2->Weight();
             // v47 fix: dim * face_area / vol = physical A/V
-            // Section 13: fault_penalty_factor_ scales penalty on fault faces
-            real_t p0 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * face_area / vol1)
+            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
                         * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (fault_penalty_factor_ * real_t(dim) * face_area / vol2)
+            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                         * (c1_mat * c1_mat / c0_mat);
             real_t penalty_ip = (p0 + p1) / 4.0;
 

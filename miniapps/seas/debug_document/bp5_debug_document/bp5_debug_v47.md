@@ -1,7 +1,7 @@
 # BP5 Debug v47: IP Penalty ×3 Correction — Reference Element Scaling Fix
 
 **Date**: 2026-03-20
-**Status**: p=2 blowup is formulation-resolution issue (within-face V amplification at ×3 penalty). dt_init bug fixed but does not resolve blowup. See Section 11.
+**Status**: Resolution is the root cause, not penalty magnitude. Tandem uses p=4 h=2500m (penalty 9.4 GPa/m, LARGER than ours) and nucleates fine. Level 1 fault penalty factor disproved. Running v47g: p=4 h=2500m with correct ×3 penalty to match Tandem.
 **Previous**: v46 (Tandem initialization defaults + multi-DOF slip indexing fix)
 **Branch**: `feature/elasticity`
 
@@ -1076,6 +1076,136 @@ When `fault_penalty_factor_ = 1.0/3.0`: fault faces at v46 penalty, skeleton at 
 
 ---
 
+## 14. v47f Results: Level 1 Fault Penalty Factor — Disproved
+
+### 14.1 Run Summary
+
+**Job 7605329**: IP p=2, h=1000m, `--fault-penalty-factor 0.333333`
+
+Level 1 (Section 13) applied α=1/3 to the penalty in RHS (AssembleSlipContributionIP)
+and traction (ComputeTraction) on fault faces only. The bilinear form K kept full ×3
+penalty on all faces. Skeleton faces kept full ×3 everywhere.
+
+### 14.2 Results: Blowup Fixed, but V Decays to Plate Rate
+
+```
+    Step       Time [yr]        dt [s]     V_max [m/s]     EQs
+----------------------------------------------------------------
+       1    2.015319e-10     1.174e-02       7.753e-03       1
+       2    5.734491e-10     1.884e-02       5.253e-03       1
+       5    4.032135e-09     9.815e-02       1.121e-03       1
+      10    6.371992e-08     1.467e+00       7.065e-05       1
+      20    1.565218e-05     3.633e+02       2.852e-07       1
+      30    3.873433e-03     8.971e+04       1.178e-09       1
+      40    9.100212e-02     4.071e+05       1.208e-09       1
+```
+
+V_max decays monotonically: 0.01 → 7.75e-3 → 5.25e-3 → ... → 1.18e-9 (plate rate)
+by step 30 (t ≈ 0.004 yr). **No nucleation. The fault locks.**
+
+### 14.3 Why Level 1 Fails
+
+Level 1 only reduces penalty in the RHS and traction extraction. The bilinear form K
+retains full ×3 penalty on **all** faces (including fault faces). The displacement
+field `u = K⁻¹ f` is computed with the stiff K, so:
+
+1. **{σ·n}** (the stress average in traction) already reflects the ×3-stiff K
+2. Even with α=1/3 on the penalty correction term, the dominant stress term carries
+   the excessive stiffness from K
+3. The effective fault stiffness k_eff is governed by K, not the traction formula
+
+**Comparison with v46**: v46 had 1/3 penalty in K everywhere → K was softer → k_eff
+below k_crit → nucleation worked. v47f has ×3 in K everywhere → K is 3× stiffer →
+k_eff above k_crit → V decays.
+
+### 14.4 Conclusion
+
+Patching the RHS/traction penalty cannot fix a globally stiff K. Level 1 is
+insufficient. Level 2 (also modify K on fault faces) might help partially, but the
+skeleton faces adjacent to the fault also contribute to K's stiffness — and those
+keep ×3. **The approach of selectively reducing penalty is fundamentally flawed**
+because the problem is resolution, not penalty magnitude.
+
+---
+
+## 15. Key Insight: Tandem's Penalty Is LARGER Than Ours
+
+### 15.1 Penalty Comparison Across Configurations
+
+Tandem's reference runs use coarser meshes with higher polynomial order:
+
+| Config | c_N_1 | A/V (1/m) | p_side (GPa/m) | penalty_ip (GPa/m) | DOFs/face | Accuracy | Nucleates? |
+|--------|-------|-----------|----------------|-------------------|-----------|----------|-----------|
+| **Ours p=2, h=1000m** | 2.67 | 3.67e-3 | 15.7 | **7.83** | 6 | O(h³) | No |
+| Tandem p=4, h=2500m | 8.0 | 1.47e-3 | 18.8 | **9.4** | 15 | O(h⁵) | Yes |
+| Tandem p=6, h=4000m | 16.0 | 9.18e-4 | 23.5 | **11.75** | 28 | O(h⁷) | Yes |
+
+**Tandem's penalty is 20–50% LARGER than ours, yet nucleation works fine.**
+
+### 15.2 The Penalty Magnitude Hypothesis Is Wrong
+
+All previous analysis (Sections 7, 8, 11, 13) was based on the assumption that the
+penalty value was too large, creating excessive artificial stiffness. This is refuted:
+
+- p=4 h=2500m: penalty = 9.4 GPa/m > 7.83 GPa/m → **works**
+- p=6 h=4000m: penalty = 11.75 GPa/m > 7.83 GPa/m → **works**
+
+The penalty INCREASES with p (via c_N_1 ∝ p²), yet nucleation works at higher p.
+No amount of penalty tuning can fix a resolution problem.
+
+### 15.3 The Real Issue: DG Solution Accuracy
+
+The IP penalty enters traction as: `T = {σ·n} - penalty × (u1 - u2 - δu)`
+
+The penalty correction `penalty × (u1 - u2 - δu)` depends on the **DG jump residual**
+`(u1 - u2 - δu)`. This residual is the error in matching the prescribed slip:
+
+| Order | Convergence rate | Residual at h=1000m | penalty × residual |
+|-------|-----------------|--------------------|--------------------|
+| p=2 | O(h³) = O(10⁹) | Large | 7.83 × Large = **dominant** |
+| p=4 | O(h⁵) = O(10¹⁵) | Tiny | 9.4 × Tiny = **negligible** |
+| p=6 | O(h⁷) = O(10²¹) | Negligible | 11.75 × Negligible ≈ **zero** |
+
+At p=4/p=6, the polynomial space is accurate enough that the penalty correction
+vanishes — the traction is essentially `T ≈ {σ·n}` (physical). At p=2, the correction
+is large and dominates the fault coupling, creating artificial stiffness.
+
+### 15.4 DOF Count Comparison
+
+Higher p on coarser mesh is actually CHEAPER in total DOFs:
+
+| Config | Elements | DOFs/elem (scalar) | Total vector DOFs |
+|--------|----------|-------------------|-------------------|
+| p=2, h=1000m | ~63,500 | 10 | ~1.9M |
+| p=4, h=2500m | ~13,500 | 35 | ~1.4M |
+| p=6, h=4000m | ~1,000 | 84 | ~250K |
+
+The p=4 h=2500m configuration has **fewer total DOFs** than p=2 h=1000m and matches
+Tandem's reference resolution exactly.
+
+### 15.5 Path Forward: Increase p, Not Patch Penalty
+
+The v46 "working" configuration (1/3 penalty everywhere) was a **compensating error**:
+the reduced penalty masked the inaccurate DG residual at p=2. The correct fix is to
+increase resolution so the residual becomes small naturally.
+
+**v47g** (job TBD): p=4 h=2500m with correct ×3 penalty. This matches Tandem's
+uphoff.2 submission exactly. If v47g reproduces Tandem's results:
+1. The ×3 penalty fix is validated at the resolution where it matters
+2. The p=1/p=2 h=1000m failures are confirmed as pure resolution effects
+3. Production runs should use p≥4 on coarser meshes
+
+### 15.6 Level 1 Code Reverted
+
+The `fault_penalty_factor_` code (Section 13) has been removed from:
+- `elasticity_operator.hpp`: member variable, setter/getter, 6 penalty formulas
+- `bp5_verification_full.cpp`: CLI option, setter call, logging
+
+All 15 penalty locations retain the correct `real_t(dim) *` fix. The codebase is
+clean ×3 penalty everywhere, matching Tandem exactly.
+
+---
+
 ## 9. Revision History
 
 | Version | Change | Status |
@@ -1084,8 +1214,10 @@ When `fault_penalty_factor_ = 1.0/3.0`: fault faces at v46 penalty, skeleton at 
 | v44 | Penalty ×3 (first attempt) — reverted in v45 due to flawed analysis | Reverted |
 | v45 | Analysis claiming ×3 is wrong + slip indexing bug discovery | Done |
 | v46 | Multi-DOF slip indexing fix + Tandem initialization defaults | Done |
-| **v47** | **Penalty ×3 re-applied — breaks p=1 (stiffness) and p=2 (blowup)** | **Investigating** |
+| **v47** | **Penalty ×3 re-applied — breaks p=1 (stiffness) and p=2 (blowup)** | Resolution issue |
 | v47+ | Deep investigation: confirmed both codes use SIPG with identical formulas. Root cause is resolution-dependent effective stiffness at p=1. Corrected SBP-SAT analysis. | Done |
 | v47++ | dt_init fix: use max(V_init, V_nuc) → dt_init = 0.13s. Tandem uses PETSc auto-detect (~0.05s). | Fix applied |
 | v47+++ | **dt fix does NOT resolve p=2 blowup.** Run 7605297 confirms blowup at dt=0.13s. Slip 0.5–2.9m with oscillating sign → RK-stage V amplification via multi-DOF ×3 penalty feedback. Sections 7.3–7.5 were correct: formulation-resolution issue. | **Confirmed** |
-| v47e | **BR2 p=2 runs stably** (job 7605319). 43+ steps, no blowup. Proves p=2 elastic solver is correct; blowup is IP multi-DOF fault coupling. V_max slowly decaying (too early to assess nucleation). | **Running** |
+| v47e | **BR2 p=2 runs stably** (job 7605319). Proves p=2 elastic solver is correct; blowup is IP multi-DOF fault coupling. | Done |
+| v47f | **Level 1 fault penalty factor (α=1/3)**: fixes blowup but V decays to plate rate. K with ×3 is too stiff; patching RHS/traction is insufficient. **Approach disproved.** Level 1 code reverted. | **Disproved** |
+| **v47g** | **p=4 h=2500m with correct ×3 penalty** — match Tandem uphoff.2. Tandem's penalty (9.4 GPa/m) is LARGER than ours (7.83 GPa/m) yet nucleates. Resolution is the fix, not penalty tuning. | **Queued** |
