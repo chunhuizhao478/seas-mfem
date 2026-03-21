@@ -1582,6 +1582,26 @@ private:
 
                real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
 
+               // Shared face sign diagnostic (v48 Section 3.5 verification)
+               if (p == 0 && i < 3 && diag_face_call_ <= 2)
+               {
+                  // Get face center for identification
+                  Vector fc(dim);
+                  FTr->Face->Transform(ip, fc);
+                  int rank = 0;
+#ifdef MFEM_USE_MPI
+                  auto *pmesh = dynamic_cast<ParMesh*>(&mesh_);
+                  if (pmesh) { MPI_Comm_rank(pmesh->GetComm(), &rank); }
+#endif
+                  mfem::out << "[SHARED-SIGN] rank=" << rank
+                     << " sf=" << sf << " E1=" << FTr->Elem1No
+                     << " E2=" << FTr->Elem2No
+                     << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
+                     << " sign=" << sign
+                     << " face_center=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                     << std::endl << std::flush;
+               }
+
                // Per-quad-point 3D slip
                real_t delta_u_q[3];
                for (int c = 0; c < dim; c++)
@@ -3638,6 +3658,23 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          Vector nor(dim);
          CalcOrtho(FTr->Jacobian(), nor);
          real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
+
+         // Shared face sign diagnostic (v48 verification)
+         if (i < 3 && diag_face_call_ <= 2)
+         {
+            Vector fc(dim);
+            FTr->Face->Transform(ip, fc);
+            int rank = 0;
+            auto *pmesh_diag = dynamic_cast<ParMesh*>(&mesh_);
+            if (pmesh_diag) { MPI_Comm_rank(pmesh_diag->GetComm(), &rank); }
+            mfem::out << "[SHARED-TRAC-SIGN] rank=" << rank
+               << " sf=" << sf << " E1=" << FTr->Elem1No
+               << " E2=" << FTr->Elem2No
+               << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
+               << " sign=" << sign
+               << " face_center=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+               << std::endl << std::flush;
+         }
 
          // Element Jacobian inverses (constant for linear tets)
          DenseMatrix Jinv1(dim), Jinv2(dim);

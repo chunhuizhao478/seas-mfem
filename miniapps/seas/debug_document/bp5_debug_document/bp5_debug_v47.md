@@ -1,7 +1,7 @@
 # BP5 Debug v47: IP Penalty ×3 Correction — Reference Element Scaling Fix
 
 **Date**: 2026-03-20
-**Status**: BUG IN MULTI-DOF IP FAULT COUPLING — triggered by within-face V heterogeneity. Uniform V (v47h) is STABLE. The bug is in how per-DOF slip heterogeneity feeds through the interpolation → elastic solve → penalty correction → traction projection cycle. Investigating how Tandem handles heterogeneous slip DOFs (Section 17).
+**Status**: SHARED FACE BUG CONFIRMED. 2500m mesh: serial (1 rank) STABLE, parallel (48 ranks) BLOWUP — same mesh, same params. Deep code review found no single-line bug; standard MFEM conventions followed. Next: dump K/f values on shared fault face to find the inconsistency (Section 19.5).
 **Previous**: v46 (Tandem initialization defaults + multi-DOF slip indexing fix)
 **Branch**: `feature/elasticity`
 
@@ -1579,6 +1579,91 @@ on a per-DOF basis — creating exactly the kind of oscillation we see.
 
 ---
 
+## 19. Serial vs Parallel: Shared Face Bug Confirmed
+
+### 19.1 The Definitive Test
+
+Used the 2500m mesh (13503 elements, ~10K fault DOFs at p=2). This mesh
+blows up at 400 ranks (v47g at p=4) and 48 ranks (v47m at p=2).
+
+| Run | Mesh | Ranks | Shared faces | Result |
+|-----|------|-------|-------------|--------|
+| **v47l** (job 7605529) | 2500m | **1** | **None** | **STABLE** (V growing 0.010→0.012) |
+| **v47m** (job 7605537) | 2500m | **400** (8 nodes × 50) | **Yes** | **BLOWUP** (immediate, τ=1-2 GPa) |
+
+Same mesh, same code, same parameters. The ONLY difference is whether fault
+faces are interior (serial) or shared (parallel).
+
+Note: the coarse mesh (v47j/k, res=10km) was too coarse to reproduce — the
+nucleation zone boundary barely spans 1-2 faces, insufficient to trigger the
+instability. The 2500m mesh has ~5 faces across the nucleation boundary.
+
+### 19.2 Serial Run Shows Healthy Nucleation
+
+v47l (serial) shows V_max GROWING from 0.010 → 0.012 over 37 steps — healthy
+nucleation acceleration, not the decay seen in other tests. This confirms the
+×3 penalty works correctly on interior faces at p=2 on this mesh.
+
+### 19.3 Parallel Run Blowup Includes Both Interior and Shared DOFs
+
+v47m (48 ranks) shows blowup on BOTH DOF types:
+```
+[Rank 384] TRACTION BLOWUP: DOF 2 (interior) tau_mag=1.15e+09 slip=-0.89
+[Rank 399] TRACTION BLOWUP: DOF 48 (shared) tau_mag=1.19e+09 slip=-0.78
+[Rank 384] TRACTION BLOWUP: DOF 3 (interior) tau_mag=2.03e+09 slip=-1.22
+[Rank 384] TRACTION BLOWUP: DOF 12 (shared) tau_mag=1.04e+09 slip=-0.71
+```
+
+The cascade STARTS at shared faces (where the first inconsistency occurs)
+and PROPAGATES to interior faces through the elastic solve — the corrupted
+displacement field from shared face errors affects all DOFs on the same rank.
+
+### 19.4 Deep Code Review of Shared Face Paths
+
+Comprehensive line-by-line comparison of interior vs shared face code paths
+in both AssembleSlipContributionIP and ComputeTraction.
+
+**Confirmed correct in shared path:**
+- slip_bc indexing: `dof_idx = (interior_face_count + i) * nbf + kk` ✓
+- EmbedSlip face index: `slip_idx = interior_face_count + i` ✓
+- Single-sided assembly (only Elem1, standard MFEM DG convention) ✓
+- Penalty formula: same as interior, uses `Elem2->Weight()` correctly ✓
+- Sign convention: same `CalcOrtho → nor(1) > 0` check ✓
+- Displacement extraction for Elem2: `ExchangeFaceNbrData` + manual extraction ✓
+- Traction DOF index: offset by `interior_face_count * nbf` ✓
+
+**Structural difference identified (not confirmed as the bug):**
+- Bilinear form penalty uses quadrature order **2p**
+- RHS and traction use quadrature order **2p+1**
+- Both are exact for flat-face polynomial integrands (degree 2p)
+- But the number of quadrature points differs (e.g., 6 vs 7 at p=2)
+
+**No definitive single-line bug found.** The shared face code follows
+standard MFEM DG conventions matching the antiplane operator pattern.
+The bug is likely in a subtle interaction between:
+
+1. How `ParBilinearForm::AssembleSharedFaces` assembles K on shared faces
+   (MFEM's internal machinery — penalty integrator called with shared face
+   FaceElementTransformations)
+2. How our `AssembleSlipContributionIP` assembles f on shared faces
+   (our code — loops over `fault_shared_faces_` with our own FTr)
+3. If K and f use slightly different conventions for the same shared face
+   (element ordering, shape function evaluation, quadrature), the mismatch
+   creates per-DOF errors amplified by the ×3 penalty
+
+### 19.5 Next Step: Dump K and f on a Shared Fault Face
+
+To find the exact inconsistency, extract the actual numerical values from K
+and f on a specific shared fault face:
+
+1. For a shared fault face, compute `K_penalty * u_prescribed` (what K expects)
+2. Compare with `f_penalty` (what the RHS provides)
+3. If they differ → the mismatch is the bug
+4. The difference pattern (which DOFs, which components) will identify the
+   code path that's wrong
+
+---
+
 ## 9. Revision History
 
 | Version | Change | Status |
@@ -1595,4 +1680,7 @@ on a per-DOF basis — creating exactly the kind of oscillation we see.
 | v47f | Level 1 fault penalty factor (α=1/3): fixes blowup but V decays. K inconsistency. Reverted. | Disproved |
 | v47g | p=4 h=2500m BLOWS UP — disproves resolution hypothesis. | CRITICAL |
 | v47g+ | Deep code review: no smoking gun. GaussLobatto vs WarpAndBlend identified. | Done |
-| **v47h** | **Uniform V (V_nuc=V_init=1e-9): STABLE.** Bug isolated to within-face V heterogeneity. The multi-DOF coupling amplifies per-DOF variation that Tandem handles. | **KEY FINDING** |
+| v47h | Uniform V (V_nuc=V_init=1e-9): STABLE. Bug isolated to within-face V heterogeneity. | KEY FINDING |
+| **v47l** | **2500m mesh, 1 rank (serial): STABLE.** V growing 0.010→0.012 — healthy nucleation. | **STABLE** |
+| **v47m** | **2500m mesh, 48 ranks (parallel): BLOWUP.** Same mesh, same params. **Shared face bug confirmed.** | **BLOWUP** |
+| v47m+ | Deep review of shared face code: no single-line bug found. Standard MFEM DG conventions followed. Quadrature order mismatch (2p vs 2p+1) identified. Next: dump K/f values on shared fault face. | **Investigating** |
