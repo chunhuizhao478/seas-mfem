@@ -3,8 +3,8 @@
 #SBATCH -o bp5_v48_sign_%j.out
 #SBATCH -e bp5_v48_sign_%j.err
 #SBATCH -p normal                    # Queue
-#SBATCH -N 1                         # 1 node
-#SBATCH -n 4                         # 4 ranks (small count to identify shared faces)
+#SBATCH -N 8                         # 8 nodes
+#SBATCH -n 400                       # 400 ranks (same as v47m that blew up)
 #SBATCH -t 00:30:00                  # 30 min
 #SBATCH -A EAR20006                  # TACC allocation
 
@@ -20,7 +20,7 @@
 #   - If nor and sign are OPPOSITE on both ranks → sign flips, code may be correct,
 #     bug is elsewhere
 #
-# Using 2500m mesh (blows up in parallel), 4 ranks for clarity.
+# Using 2500m mesh, 400 ranks (same as v47m that confirmed blowup).
 
 export LC_ALL=C
 export LANG=C
