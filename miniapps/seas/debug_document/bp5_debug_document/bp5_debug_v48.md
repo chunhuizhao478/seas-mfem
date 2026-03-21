@@ -1,7 +1,7 @@
 # BP5 Debug v48: Root Cause Found — Sign Bug in Shared Face Slip RHS Assembly
 
 **Date**: 2026-03-20
-**Status**: ROOT CAUSE IDENTIFIED. Sign bug in `AssembleSlipContributionIPShared` — both MPI ranks on a shared fault face apply the same `+sign` to the penalty and symmetry terms, but one rank is on the Elem2 side and should use `-sign`. This creates a K-f mismatch that explains ALL observed failures (serial stable / parallel blowup, nbf=1 stable / nbf>1 blowup, stronger penalty worsens blowup, uniform V stable / heterogeneous V blows up).
+**Status**: Sign hypothesis DISPROVED — normals flip correctly between ranks. Root cause still unknown. Serial nucleates, parallel decays. Likely data consistency issue (ExchangeFaceNbrData, MUMPS parallel, or quadrature mismatch). See Section 10.
 **Previous**: v47 (IP penalty ×3 correction, serial vs parallel confirmation)
 **Branch**: `feature/elasticity`
 
@@ -453,26 +453,114 @@ After fix, compare with Tandem reference:
 
 ---
 
-## 10. Summary
+## 10. Sign Hypothesis — DISPROVED
 
-| Finding | Details |
-|---------|---------|
-| **Root cause** | Sign bug in `AssembleSlipContributionIPShared` (lines 1634, 1639) |
-| **Bug description** | Both ranks on a shared face use `+sign` for penalty/symmetry terms, but one rank is physically on the Elem2 side and should use `-sign` |
-| **K assembly** | CORRECT — MFEM's `AssembleSharedFaces` handles element roles properly |
-| **f assembly** | WRONG — always uses Elem1-side convention regardless of which physical side |
-| **Result** | K-f mismatch proportional to `penalty * δu` on shared faces |
-| **PETSc hypothesis** | DISPROVED — PETSc stage checks are NO-OP for Tandem QD |
-| **Fix approach** | Determine which side local element is on, apply `side_sign` correction |
-| **Alternative fix** | Reuse MFEM's DG integrator for shared face RHS (guarantees K-f consistency) |
+### 10.1 Diagnostic Results
+
+Added `[SHARED-SIGN]` and `[SHARED-TRAC-SIGN]` diagnostics that print `nor`, `sign`,
+and `face_center` for shared fault faces from both `AssembleSlipContributionIP` and
+`ComputeTraction`. Ran on 2500m mesh (400 ranks) and 1000m mesh (400 ranks).
+
+### 10.2 The Normal DOES Flip Between Ranks
+
+For every shared face pair, CalcOrtho produces **opposite normals** on the two ranks:
+
+| Face center | Rank A | nor_y | sign | Rank B | nor_y | sign |
+|-------------|--------|-------|------|--------|-------|------|
+| (3137.59,0,-30580.5) | 82 | +4.41e6 | +1 | 86 | -4.41e6 | -1 |
+| (15617.7,0,-10485.1) | 21 | +4.85e6 | +1 | 22 | -4.85e6 | -1 |
+| (-42138.6,0,-28811.9) | 284 | +5.46e6 | +1 | 297 | -5.46e6 | -1 |
+| (-49442.4,e-13,-6250) | 246 | +4.18e6 | +1 | 248 | -4.18e6 | -1 |
+| (-48578.2,e-12,-34947) | 283 | +5.14e6 | +1 | 282 | -5.14e6 | -1 |
+
+MFEM's `GetSharedFaceTransformations` orients the face normal outward from the
+local Elem1 on each rank. Since different ranks have different local Elem1, the
+normal flips. The `sign = (nor(1) > 0) ? 1.0 : -1.0` therefore also flips.
+
+**The code's `+sign * delta_u` convention correctly produces opposite-signed
+penalty loads on the two ranks.** The sign bug hypothesis from Section 3 is WRONG.
+
+### 10.3 Run Results
+
+**v48 sign diag (2500m, 400 ranks, job 7606241):**
+- TRACTION BLOWUP detected on 6 DOFs (ranks 384, 388, 399)
+- But **code survived** — RK45 rejected the step and recovered
+- V_max decayed 0.010 → 0.004 over 346 steps (no nucleation)
+- Compare serial (v47l): V_max GREW 0.010 → 0.012 (nucleation)
+
+**v48a sign diag (1000m, 400 ranks, job 7606244):**
+- TRACTION BLOWUP on 47 DOFs: **22 interior + 25 shared** (~50/50)
+- Code crashed (same as v47b)
+- Blowup concentrated on ranks 314-320 (nucleation zone)
+
+### 10.4 The 50/50 Interior/Shared Blowup Split
+
+The roughly equal split between interior and shared blowup DOFs shows the
+error **propagates from shared faces to adjacent interior faces** through
+the elastic solve. The corrupted displacement solution from shared-face
+errors affects ALL DOFs on neighboring elements, not just shared-face DOFs.
+
+### 10.5 Remaining Mystery
+
+Since the sign is correct, the shared face formulas match the interior formulas,
+and the code review found no single-line bug, the issue must be in **data
+consistency** rather than formulation:
+
+1. **ExchangeFaceNbrData timing**: In `ComputeTraction`, the displacement
+   for Elem2 (face-neighbor) is obtained via `ExchangeFaceNbrData()`. If this
+   data is stale or inconsistent with the current solution u, the penalty
+   correction `(u1-u2-δu)` would be wrong on shared faces. In serial, u1 and
+   u2 come from the same solution vector — always consistent.
+
+2. **MUMPS parallel vs serial factorization**: The distributed BLR factorization
+   may produce slightly different solutions in parallel vs serial, changing the
+   effective stiffness enough to affect nucleation.
+
+3. **Quadrature order mismatch**: The bilinear form uses order 2p, the RHS uses
+   2p+1. Though both are exact for flat-face polynomials, the different number
+   of quadrature points could interact with parallel assembly in subtle ways.
+
+4. **Mesh partitioning asymmetry**: The parallel partitioning breaks the mesh
+   symmetry that the serial run has. Fault faces near partition boundaries have
+   different numerical properties than interior fault faces.
+
+### 10.6 2500m vs 1000m Behavior Difference
+
+| Mesh | Ranks | TRACTION BLOWUP? | Crash? | V_max trend |
+|------|-------|-------------------|--------|-------------|
+| 2500m | 400 | Yes (6 DOFs) | **No** (recovered) | Decaying |
+| 1000m | 400 | Yes (47 DOFs) | **Yes** (crash) | N/A |
+| 2500m | 1 | No | No | **Growing** |
+
+The 2500m mesh in parallel has mild blowup (recoverable) but still wrong physics
+(V decays instead of grows). The 1000m mesh has severe blowup (crash). This
+suggests the issue scales with the number of shared fault faces — more shared
+faces = larger cumulative error = more severe blowup.
 
 ---
 
-## 11. Revision History
+## 11. Summary
+
+| Finding | Details |
+|---------|---------|
+| **Sign hypothesis** | **DISPROVED** — normals flip between ranks, `sign` is correct |
+| **PETSc hypothesis** | DISPROVED — PETSc stage checks are NO-OP for Tandem QD |
+| **K assembly** | CORRECT — `ParBilinearForm::AssembleSharedFaces` handles element roles properly |
+| **f assembly sign** | CORRECT — `+sign * delta_u` produces correct opposite signs on both ranks |
+| **Blowup pattern** | 50/50 interior/shared — error propagates from shared to interior via elastic solve |
+| **Serial vs parallel physics** | Serial: V grows (nucleation). Parallel: V decays (no nucleation). |
+| **Root cause** | UNKNOWN — sign and formulas are correct. Likely data consistency issue (ExchangeFaceNbrData, MUMPS parallel, or quadrature mismatch) |
+| **Next step** | Investigate ExchangeFaceNbrData timing and MUMPS parallel accuracy |
+
+---
+
+## 12. Revision History
 
 | Version | Change | Status |
 |---------|--------|--------|
 | v47 | Penalty ×3 re-applied. Serial stable, parallel blowup confirmed. | Done |
 | v47+ | PETSc time stepper investigation | Disproved |
-| **v48** | **Root cause: sign bug in shared face slip RHS assembly** | **IDENTIFIED** |
-| v48+ (planned) | Implement fix + verification | Pending |
+| v48 | Sign bug hypothesis in shared face slip RHS assembly | **DISPROVED** |
+| v48-sign | CalcOrtho diagnostic: normals flip correctly between ranks | Confirmed |
+| v48a | 1000m mesh with sign diag: crash with 22 interior + 25 shared DOFs | Confirmed |
+| **v48+** | **Root cause still unknown. Sign correct, formulas match. Data consistency suspected.** | **Investigating** |
