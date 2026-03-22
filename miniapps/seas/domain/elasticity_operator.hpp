@@ -205,7 +205,7 @@ private:
    BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
-   real_t blr_tol_ = 1e-10;  // MUMPS-BLR factorization tolerance
+   real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
    mutable int diag_face_call_ = 0;  // Face consistency diagnostic: trigger on call #2 (non-zero slip)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
