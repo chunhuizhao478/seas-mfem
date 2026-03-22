@@ -176,6 +176,9 @@ public:
    /// BP2: 2 (slip, theta), BP5: 3 (slip_dip, slip_strike, psi).
    void SetStatePerNode(int spn) { state_per_node_ = spn; }
 
+   /// v49: Enable per-RK-stage diagnostics (max velocity and slip per stage).
+   void SetDiagRKStages(bool v) { diag_rk_stages_ = v; }
+
    /// Use weighted RMS (2-norm) instead of L-infinity for error norm.
    /// More robust to outlier DOFs at MPI partition boundaries.
    void SetUse2Norm(bool v) { use_2norm_ = v; }
@@ -220,6 +223,37 @@ public:
       const int n = state.Size();
       dt = dt_;
 
+      // v49: RK stage diagnostic helper
+      auto diag_rk_stage = [&](int stage_idx, const Vector &y_ref)
+      {
+         if (!diag_rk_stages_) { return; }
+         int spn = state_per_node_;
+         int n_dofs = k_[stage_idx].Size() / spn;
+         real_t max_V_dip = 0, max_V_str = 0;
+         int max_dip_dof = -1, max_str_dof = -1;
+         for (int i = 0; i < n_dofs; i++)
+         {
+            real_t vd = std::abs(k_[stage_idx](i * spn + 0));
+            real_t vs = std::abs(k_[stage_idx](i * spn + 1));
+            if (vd > max_V_dip) { max_V_dip = vd; max_dip_dof = i; }
+            if (vs > max_V_str) { max_V_str = vs; max_str_dof = i; }
+         }
+         real_t max_slip_dip = 0, max_slip_str = 0;
+         for (int i = 0; i < n_dofs; i++)
+         {
+            max_slip_dip = std::max(max_slip_dip,
+                                    std::abs(y_ref(i * spn + 0)));
+            max_slip_str = std::max(max_slip_str,
+                                    std::abs(y_ref(i * spn + 1)));
+         }
+         mfem::out << "[RK-STAGE " << stage_idx << "] max_V_dip=" << max_V_dip
+            << " (DOF " << max_dip_dof << ")"
+            << " max_V_str=" << max_V_str
+            << " (DOF " << max_str_dof << ")"
+            << " max_slip_dip=" << max_slip_dip
+            << " max_slip_str=" << max_slip_str << "\n";
+      };
+
       // Stage 1: use FSAL from previous step, or compute fresh
       if (!initialized_)
       {
@@ -228,6 +262,7 @@ public:
          initialized_ = true;
       }
       // else k_[0] = k_[6] from previous accepted step (FSAL)
+      diag_rk_stage(0, state);  // Stage 0: use state (y_tmp_ not set yet)
 
       // Stage 2
       for (int i = 0; i < n; i++)
@@ -236,6 +271,7 @@ public:
       }
       op.SetTime(t + c2 * dt);
       op.Mult(y_tmp_, k_[1]);
+      diag_rk_stage(1, y_tmp_);
 
       // Check for NaN in stage 2 (skip remaining stages on failure)
       if (!std::isfinite(NormL2(k_[1])))
@@ -253,6 +289,7 @@ public:
       }
       op.SetTime(t + c3 * dt);
       op.Mult(y_tmp_, k_[2]);
+      diag_rk_stage(2, y_tmp_);
 
       if (!std::isfinite(NormL2(k_[2])))
       {
@@ -270,6 +307,7 @@ public:
       }
       op.SetTime(t + c4 * dt);
       op.Mult(y_tmp_, k_[3]);
+      diag_rk_stage(3, y_tmp_);
 
       if (!std::isfinite(NormL2(k_[3])))
       {
@@ -287,6 +325,7 @@ public:
       }
       op.SetTime(t + c5 * dt);
       op.Mult(y_tmp_, k_[4]);
+      diag_rk_stage(4, y_tmp_);
 
       if (!std::isfinite(NormL2(k_[4])))
       {
@@ -305,6 +344,7 @@ public:
       }
       op.SetTime(t + dt);
       op.Mult(y_tmp_, k_[5]);
+      diag_rk_stage(5, y_tmp_);
 
       if (!std::isfinite(NormL2(k_[5])))
       {
@@ -325,6 +365,7 @@ public:
       }
       op.SetTime(t + dt);
       op.Mult(y_tmp_, k_[6]);
+      diag_rk_stage(6, y_tmp_);
 
       // Error estimate: e = dt * (b - b*) . k
       // e_i = dt * (e1*k1_i + e3*k3_i + e4*k4_i + e5*k5_i + e6*k6_i + e7*k7_i)
@@ -498,6 +539,7 @@ private:
    real_t dt_;             ///< Current time step
    bool initialized_;      ///< Whether k_[0] is valid from a previous step
    bool diag_verbose_ = false; ///< Verbose per-step diagnostics
+   bool diag_rk_stages_ = false; ///< v49: per-stage velocity/slip diagnostics
    bool use_2norm_ = false;    ///< Use RMS (2-norm) instead of L-inf for error
    int total_rejections_;  ///< Total number of rejected steps
    int diag_count_;        ///< Counter for dt_min diagnostic messages

@@ -313,6 +313,13 @@ int main(int argc, char *argv[])
    int order = 1;
    double blr_tol = 1e-10;  // MUMPS-BLR tolerance (default 1e-10)
 
+   // v49 Phase 1 diagnostic flags
+   bool smooth_nucleation = false;
+   bool match_quad_order = false;
+   bool diag_normals = false;
+   bool diag_first_traction = false;
+   bool diag_rk_stages = false;
+
    for (int i = 1; i < argc; i++)
    {
       std::string arg(argv[i]);
@@ -377,6 +384,12 @@ int main(int argc, char *argv[])
       }
       if (arg == "--order" && i + 1 < argc) { order = std::atoi(argv[++i]); }
       if (arg == "--blr-tol" && i + 1 < argc) { blr_tol = std::atof(argv[++i]); }
+      // v49 Phase 1 diagnostic flags
+      if (arg == "--smooth-nucleation") { smooth_nucleation = true; }
+      if (arg == "--match-quad-order") { match_quad_order = true; }
+      if (arg == "--diag-normals") { diag_normals = true; }
+      if (arg == "--diag-first-traction") { diag_first_traction = true; }
+      if (arg == "--diag-rk-stages") { diag_rk_stages = true; }
    }
 
    // Parse DG method
@@ -449,6 +462,7 @@ int main(int argc, char *argv[])
    {
       params.delta_tau_factor = delta_tau_factor_override;
    }
+   if (smooth_nucleation) { params.smooth_nucleation = true; }
    params.Validate();
    double t_final = params.t_final;
    if (tfinal_override >= 0.0) { t_final = tfinal_override; }
@@ -540,6 +554,12 @@ int main(int argc, char *argv[])
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
       params.Print();
+      // v49 Phase 1 diagnostic flags
+      if (smooth_nucleation) { std::cout << "  [v49] Smooth nucleation: ON\n"; }
+      if (match_quad_order) { std::cout << "  [v49] Match quad order (2p): ON\n"; }
+      if (diag_normals) { std::cout << "  [v49] Diag normals: ON\n"; }
+      if (diag_first_traction) { std::cout << "  [v49] Diag first traction: ON\n"; }
+      if (diag_rk_stages) { std::cout << "  [v49] Diag RK stages: ON\n"; }
       std::cout << "\n";
    }
 
@@ -573,6 +593,10 @@ int main(int argc, char *argv[])
    if (check_residual) { domain.SetCheckResidual(true); }
    if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
    if (blr_tol != 1e-10) { domain.SetBLRTol(blr_tol); }
+   // v49 Phase 1 flags
+   if (match_quad_order) { domain.SetMatchQuadOrder(true); }
+   if (diag_normals) { domain.SetDiagNormals(true); }
+   if (diag_first_traction) { domain.SetDiagFirstTraction(true); }
 
    if (mpi.IsRoot())
    {
@@ -994,6 +1018,7 @@ int main(int argc, char *argv[])
                 << " (V_max_init = " << V_max_init << ")\n";
    }
    ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
+   if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
    ode_solver.Init(seas_op);
 
    real_t t = 0.0;

@@ -195,6 +195,16 @@ public:
    /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
 
+   /// v49: Use 2p quadrature instead of 2p+1 for fault face integration.
+   /// Tests whether the extra quad point causes instability at p>=2.
+   void SetMatchQuadOrder(bool v) { match_quad_order_ = v; }
+
+   /// v49: Diagnostic - compare CalcOrtho normals with FaultBasis normals.
+   void SetDiagNormals(bool v) { diag_normals_ = v; }
+
+   /// v49: Diagnostic - dump traction values at first evaluation (zero slip).
+   void SetDiagFirstTraction(bool v) { diag_first_traction_ = v; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -207,6 +217,13 @@ private:
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
    mutable int diag_face_call_ = 0;  // Face consistency diagnostic: trigger on call #2 (non-zero slip)
+
+   // v49 Phase 1 diagnostic flags
+   bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
+   bool diag_normals_ = false;           // Compare CalcOrtho vs FaultBasis normals
+   bool diag_first_traction_ = false;    // Dump traction at first zero-slip evaluation
+   mutable bool diag_normals_done_ = false;
+   mutable bool diag_first_traction_done_ = false;
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -1082,10 +1099,14 @@ private:
          int ndof2 = fe2->GetDof();
 
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order + 1);
-         MFEM_ASSERT(ir.GetNPoints() == nq,
-                     "Quadrature mismatch: ir has " << ir.GetNPoints()
-                     << " points, FaceQuadrature has " << nq);
+         int quad_order = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order);
+         if (!match_quad_order_)
+         {
+            MFEM_ASSERT(ir.GetNPoints() == nq,
+                        "Quadrature mismatch: ir has " << ir.GetNPoints()
+                        << " points, FaceQuadrature has " << nq);
+         }
 
          Vector elvec1(vdofs1.Size()), elvec2(vdofs2.Size());
          elvec1 = 0.0;
@@ -1280,7 +1301,8 @@ private:
          const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order + 1);
+         int quad_order_br2 = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_br2);
          int nqp = ir.GetNPoints();
 
          // Precompute shapes and normals
@@ -1563,10 +1585,13 @@ private:
             const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
 
             int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
-                                                     2 * face_order + 1);
-            MFEM_ASSERT(ir.GetNPoints() == nq,
-                        "Quadrature mismatch in shared face assembly");
+            int quad_order_sh = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_sh);
+            if (!match_quad_order_)
+            {
+               MFEM_ASSERT(ir.GetNPoints() == nq,
+                           "Quadrature mismatch in shared face assembly");
+            }
 
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
@@ -1724,8 +1749,8 @@ private:
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
 
             int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
-                                                     2 * face_order + 1);
+            int quad_order_br2_sh = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_br2_sh);
             int nqp = ir.GetNPoints();
 
             // Precompute shapes and normals
@@ -1949,7 +1974,8 @@ private:
          int ndof = fe->GetDof();
 
          int face_order = fe->GetOrder();
-         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order + 1);
+         int quad_order_bdr = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_bdr);
 
          Vector elvec(vdofs.Size());
          elvec = 0.0;
@@ -2212,8 +2238,8 @@ private:
          int ndof2 = fe2->GetDof();
 
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
-                                                   2 * face_order + 1);
+         int quad_order_dir = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_dir);
 
          Vector elvec1(vdofs1.Size()), elvec2(vdofs2.Size());
          elvec1 = 0.0;
@@ -2599,8 +2625,8 @@ private:
             int ndof2 = fe2->GetDof();
 
             int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom,
-                                                      2 * face_order + 1);
+            int quad_order_dir_sh = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_dir_sh);
 
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
@@ -3128,6 +3154,92 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
    traction.SetSize(2 * num_fault_dofs_);
    traction = 0.0;
 
+   // v49: Diagnostic - compare CalcOrtho normals with FaultBasis normals
+   if (diag_normals_ && !diag_normals_done_)
+   {
+      int rank = 0;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+      }
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         auto *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!FTr) { continue; }
+
+         const IntegrationPoint &ip_diag =
+            Geometries.GetCenter(FTr->GetGeometryType());
+         FTr->SetAllIntPoints(&ip_diag);
+         Vector nor(3);
+         CalcOrtho(FTr->Jacobian(), nor);
+         real_t nl = nor.Norml2();
+
+         const auto &basis = fault_basis_.GetBasis(fi);
+         real_t dot = 0;
+         for (int d = 0; d < 3; d++)
+         {
+            dot += (nor(d) / nl) * basis.normal[d];
+         }
+
+         // Print if normals are not aligned (|dot| != 1) or for first few faces
+         if (std::abs(std::abs(dot) - 1.0) > 1e-10 || fi < 5)
+         {
+            mfem::out << "[NOR-DIAG] rank=" << rank << " fi=" << fi
+               << " CalcOrtho=(" << nor(0)/nl << "," << nor(1)/nl
+               << "," << nor(2)/nl << ")"
+               << " basis.n=(" << basis.normal[0] << ","
+               << basis.normal[1] << "," << basis.normal[2] << ")"
+               << " dot=" << dot
+               << (std::abs(std::abs(dot) - 1.0) > 1e-10
+                   ? " *** MISMATCH ***" : "")
+               << "\n";
+         }
+      }
+      // Also check shared faces if parallel
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         int base_idx = fault_interior_faces_.Size();
+         for (int si = 0; si < fault_shared_faces_.Size(); si++)
+         {
+            int sf = fault_shared_faces_[si];
+            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!FTr) { continue; }
+
+            const IntegrationPoint &ip_diag =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ip_diag);
+            Vector nor(3);
+            CalcOrtho(FTr->Jacobian(), nor);
+            real_t nl = nor.Norml2();
+
+            int trac_idx = base_idx + si;
+            const auto &basis = fault_basis_.GetBasis(trac_idx);
+            real_t dot = 0;
+            for (int d = 0; d < 3; d++)
+            {
+               dot += (nor(d) / nl) * basis.normal[d];
+            }
+
+            if (std::abs(std::abs(dot) - 1.0) > 1e-10 || si < 5)
+            {
+               mfem::out << "[NOR-DIAG] rank=" << rank
+                  << " shared si=" << si
+                  << " CalcOrtho=(" << nor(0)/nl << "," << nor(1)/nl
+                  << "," << nor(2)/nl << ")"
+                  << " basis.n=(" << basis.normal[0] << ","
+                  << basis.normal[1] << "," << basis.normal[2] << ")"
+                  << " dot=" << dot
+                  << (std::abs(std::abs(dot) - 1.0) > 1e-10
+                      ? " *** MISMATCH ***" : "")
+                  << "\n";
+            }
+         }
+      }
+      diag_normals_done_ = true;
+   }
+
    for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
    {
       int face = fault_interior_faces_[fi];
@@ -3181,8 +3293,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
       // Face quadrature rule
       int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+      int quad_order_trac = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
       const IntegrationRule &ir_trac = IntRules.Get(
-         FTr->GetGeometryType(), 2 * face_order + 1);
+         FTr->GetGeometryType(), quad_order_trac);
       int nqp = ir_trac.GetNPoints();
 
       // Face-averaged accumulators (used for BR2 path and diagnostics)
@@ -3683,8 +3796,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 
          // Face quadrature rule
          int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
+         int quad_order_trac_sh = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
          const IntegrationRule &ir_trac = IntRules.Get(
-            FTr->GetGeometryType(), 2 * face_order + 1);
+            FTr->GetGeometryType(), quad_order_trac_sh);
          int nqp = ir_trac.GetNPoints();
 
          // Face-averaged accumulators (used for BR2 path and diagnostics)
@@ -4119,6 +4233,49 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       }
    }
 #endif
+
+   // v49: Diagnostic - dump traction at first evaluation with zero slip
+   if (diag_first_traction_ && !diag_first_traction_done_)
+   {
+      int rank = 0;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+      }
+
+      // Check if this is first stage (all slip ~ 0)
+      real_t max_slip = 0;
+      for (int i = 0; i < slip_bc.Size(); i++)
+      {
+         max_slip = std::max(max_slip, std::abs(slip_bc(i)));
+      }
+
+      if (max_slip < 1e-20)
+      {
+         // First evaluation with zero slip - dump traction
+         int count = 0;
+         for (int i = 0; i < num_fault_dofs_; i++)
+         {
+            real_t tau_dip = traction(2*i);
+            real_t tau_strike = traction(2*i+1);
+            real_t tau_mag = std::sqrt(tau_dip*tau_dip + tau_strike*tau_strike);
+
+            // Print DOFs with non-negligible traction (> 1 Pa)
+            // or first few DOFs for reference
+            if (tau_mag > 1.0 || i < 3)
+            {
+               mfem::out << "[SEED-TRAC] rank=" << rank << " DOF=" << i
+                  << " tau=(" << tau_dip << "," << tau_strike << ")"
+                  << " mag=" << tau_mag << "\n";
+               count++;
+            }
+         }
+         mfem::out << "[SEED-TRAC] rank=" << rank
+            << " total_DOFs_with_tau>1Pa: " << count
+            << " / " << num_fault_dofs_ << "\n";
+         diag_first_traction_done_ = true;
+      }
+   }
 }
 
 // Convenience type alias

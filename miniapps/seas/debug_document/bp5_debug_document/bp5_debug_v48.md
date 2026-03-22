@@ -1,7 +1,7 @@
 # BP5 Debug v48: Root Cause Found — Sign Bug in Shared Face Slip RHS Assembly
 
 **Date**: 2026-03-20
-**Status**: BLR accuracy is ONE factor but NOT sufficient. Tighter BLR (1e-12) fixes 2500m/8-rank but NOT 1000m/400-rank. Root cause is interaction of BLR accuracy × shared face density × ×3 penalty. Testing 1000m/8-rank (v48h) to isolate rank count. See Section 13.8-13.10.
+**Status**: 1000m mesh crashes at p=2 with ×3 penalty EVEN IN SERIAL. Not parallel, not BLR, not shared faces. The 2500m mesh works; the 1000m mesh doesn't. The ×3 penalty + multi-DOF + 1000m mesh creates an instability that is mesh-resolution-dependent. See Section 14.
 **Previous**: v47 (IP penalty ×3 correction, serial vs parallel confirmation)
 **Branch**: `feature/elasticity`
 
@@ -712,7 +712,92 @@ real_t blr_tol_ = 1e-10;
 real_t blr_tol_ = 1e-12;
 ```
 
-This is necessary but not sufficient for production on high-rank configurations.
+This is necessary but not sufficient. See Section 14 for the definitive finding.
+
+---
+
+## 14. Definitive Finding: 1000m Mesh Crashes in Serial
+
+### 14.1 The Missing Test
+
+Throughout the entire investigation (v47-v48), the 1000m mesh was never tested
+in serial at p=2 because it was assumed too large for single-rank MUMPS. All
+conclusions about "shared face bugs" and "parallel issues" were based on the
+2500m mesh, which happened to work.
+
+**v48i (job 7606448)**: 1000m mesh, 1 rank, BLR 1e-12, p=2, ×3 penalty.
+**Result: CRASH. Same blowup as all other 1000m runs.**
+
+### 14.2 The Crash Is Deterministic and Mesh-Independent of Rank Count
+
+| Run | Job | Mesh | Ranks | Solver | Crash DOF | Position | tau_mag | slip |
+|-----|-----|------|-------|--------|-----------|----------|---------|------|
+| v48f | 7606341 | 1000m | 8 | Exact | 1166 | (-500, 0, -2342) | **1.0727e+09** | **(0.00131, -0.237)** |
+| v48h | 7606444 | 1000m | 8 | BLR 1e-12 | 1166 | (-500, 0, -2342) | **1.0727e+09** | **(0.00131, -0.237)** |
+| **v48i** | **7606448** | **1000m** | **1** | **BLR 1e-12** | **8330** | **(-26000, 0, -22619)** | **1.0727e+09** | **(0.00131, -0.237)** |
+
+The tau_mag and slip values are **identical to 6 significant figures** across all
+three runs. Different DOF numbers, different physical locations, different rank
+counts, different solvers — but the SAME blowup magnitude. The instability
+produces a characteristic traction/slip signature that is mesh-dependent, not
+rank-dependent.
+
+The DOF locations differ because different partitions/orderings cause different
+DOFs to exceed the blowup threshold first. But the underlying instability is
+the same.
+
+### 14.3 What This Means
+
+| Hypothesis | Status |
+|-----------|--------|
+| Shared face sign bug | **DISPROVED** (Section 10) |
+| Shared face data consistency | **DISPROVED** (serial crashes too) |
+| MUMPS-BLR accuracy | **DISPROVED** for 1000m (crashes with exact MUMPS too) |
+| Parallel rank count | **DISPROVED** (serial crashes) |
+| **1000m mesh + p=2 + ×3 penalty instability** | **CONFIRMED** |
+
+The 2500m mesh investigation (v48c-e) was valid for that mesh: BLR accuracy
+matters on the 2500m mesh. But it was a **different, secondary issue** that
+masked the primary problem: the 1000m mesh at p=2 with ×3 penalty is
+fundamentally unstable regardless of solver or parallelization.
+
+### 14.4 Comparison Across Meshes
+
+| Mesh | p=2 serial | p=2 parallel | p=1 parallel | Notes |
+|------|-----------|-------------|-------------|-------|
+| 2500m | **STABLE** (v47l) | BLR-dependent (v48c-e) | Not tested | ×3 penalty works |
+| 1000m | **CRASH** (v48i) | CRASH (v47b, v48g, v48h) | Stable (v47a) | ×3 penalty fails |
+| Coarse (10km) | STABLE (v47j) | N/A | N/A | Too coarse to trigger |
+
+The instability exists on the 1000m mesh but NOT on the 2500m mesh. This is
+a **mesh-resolution-dependent** instability, not a code bug in the parallel/
+shared face/solver paths.
+
+### 14.5 Revisiting the Original Problem
+
+This brings the investigation back to the v47 findings (Sections 7, 10):
+- The ×3 penalty is mathematically correct (matches Tandem)
+- But at p=2 on the 1000m mesh, the multi-DOF IP coupling with ×3 penalty
+  creates an instability in the RK stage cascade
+- The 1/3 penalty (v46) avoids this as a compensating error
+- The 2500m mesh avoids this because the coarser elements have lower
+  effective stiffness
+
+The remaining question: **why does Tandem handle this?** Tandem uses the same
+penalty at p=4 on its meshes (even larger penalty values). The difference
+must be in how the multi-DOF interpolation/projection or the RK evaluation
+handles the nucleation zone boundary heterogeneity. This was identified in
+v47 Section 18 but never resolved.
+
+### 14.6 Corrected Understanding of the 2500m Results
+
+The 2500m results (v48c-e) are still valid:
+- On the 2500m mesh, the ×3 penalty WORKS in serial
+- In parallel with BLR 1e-10, BLR error suppresses nucleation (V decays)
+- Tighter BLR (1e-12) or exact MUMPS fixes this secondary issue
+- The BLR tolerance change (1e-10 → 1e-12) is still a useful improvement
+
+But the 2500m results do NOT explain or fix the 1000m mesh instability.
 
 ---
 
@@ -720,14 +805,14 @@ This is necessary but not sufficient for production on high-rank configurations.
 
 | Finding | Details |
 |---------|---------|
-| **×3 penalty fix** | **VALIDATED** — exact MUMPS in parallel reproduces serial physics |
-| **Multi-DOF / shared face code** | **CORRECT** — no bug, normals flip correctly |
-| **MUMPS-BLR accuracy** | Contributes to instability. 1e-12 fixes 2500m/8-rank but not 1000m/400-rank |
-| **Shared face density** | High rank count = many shared faces = accumulated error exceeds stability |
-| **Root cause** | Interaction of BLR accuracy × shared face density × ×3 penalty sensitivity |
-| **BLR tolerance** | Changed default 1e-10 → 1e-12. Necessary but not sufficient at high rank count |
-| **Tandem comparison** | Tandem uses iterative solver (no BLR), avoiding both factors |
-| **Path forward** | Test 1000m/8-rank (v48h). If works, use fewer ranks or switch to iterative solver |
+| **1000m mesh + p=2 + ×3 penalty** | **CRASHES IN SERIAL** — not parallel, not BLR, not shared faces |
+| **2500m mesh + p=2 + ×3 penalty** | Works in serial; needs BLR ≤ 1e-12 in parallel |
+| **Sign hypothesis** | DISPROVED — normals flip correctly |
+| **Shared face code** | CORRECT — serial crash proves it's not a shared face issue |
+| **BLR tolerance** | Secondary issue on 2500m; irrelevant for 1000m crash |
+| **Root cause** | Multi-DOF IP penalty instability at 1000m mesh resolution |
+| **Tandem comparison** | Tandem handles same penalty at higher p — difference unknown |
+| **Path forward** | Investigate why 1000m triggers instability but 2500m doesn't; compare element quality, penalty magnitude, nucleation zone face count |
 
 ---
 
@@ -735,15 +820,16 @@ This is necessary but not sufficient for production on high-rank configurations.
 
 | Version | Change | Status |
 |---------|--------|--------|
-| v47 | Penalty ×3 re-applied. Serial stable, parallel blowup confirmed. | Done |
+| v47 | Penalty ×3 re-applied. Serial stable on 2500m, parallel blowup on 1000m. | Done |
 | v47+ | PETSc time stepper investigation | Disproved |
-| v48 | Sign bug hypothesis in shared face slip RHS assembly | Disproved |
-| v48-sign | CalcOrtho diagnostic: normals flip correctly between ranks | Confirmed |
-| v48a | 1000m mesh with sign diag: crash with 22 interior + 25 shared DOFs | Confirmed |
-| v48b | 2500m, 400 ranks, exact MUMPS: MUMPS errors (too many ranks), inconclusive | Inconclusive |
-| **v48c** | **2500m, 8 ranks, exact MUMPS: V GROWS 0.010→0.019. Identical to serial.** | **KEY RESULT** |
-| v48d | 2500m, 8 ranks, BLR 1e-12: V GROWS 0.010→0.014. Works. | Confirmed |
-| v48e | 2500m, 8 ranks, BLR 1e-14: V GROWS 0.010→0.016. Works. | Confirmed |
-| v48f | 1000m, 8 ranks, exact MUMPS: OOM crash (segfault). | OOM |
-| **v48g** | **1000m, 400 ranks, BLR 1e-12: CRASH. Same blowup as v47b. Tighter BLR not sufficient at high rank count.** | **CRITICAL** |
-| v48h | 1000m, 8 ranks, BLR 1e-12: isolate rank count vs mesh resolution. | **Pending** |
+| v48 | Sign bug hypothesis | Disproved |
+| v48-sign | CalcOrtho diagnostic: normals flip correctly | Confirmed |
+| v48a | 1000m, 400 ranks, sign diag: crash 22 interior + 25 shared DOFs | Confirmed |
+| v48b | 2500m, 400 ranks, exact MUMPS: MUMPS errors | Inconclusive |
+| v48c | 2500m, 8 ranks, exact MUMPS: V GROWS. Identical to serial. | KEY RESULT |
+| v48d | 2500m, 8 ranks, BLR 1e-12: V GROWS. | Confirmed |
+| v48e | 2500m, 8 ranks, BLR 1e-14: V GROWS. | Confirmed |
+| v48f | 1000m, 8 ranks, exact MUMPS: CRASH DOF 1166 at (-500,0,-2342). | CRASH |
+| v48g | 1000m, 400 ranks, BLR 1e-12: CRASH. Same as v47b. | CRASH |
+| v48h | 1000m, 8 ranks, BLR 1e-12: CRASH. Same DOF 1166, same values as v48f. | CRASH |
+| **v48i** | **1000m, 1 rank (SERIAL), BLR 1e-12: CRASH. DOF 8330 at (-26000,0,-22619). Same tau/slip as v48f/h.** | **DEFINITIVE** |

@@ -115,6 +115,11 @@ struct BP5Params
    /// behavior at p>=2 with DG methods. Override with --V-nuc 0.03 for SCEC.
    real_t V_nuc = 0.01;
 
+   /// v49: Use smooth Gaussian taper for nucleation zone boundary instead of
+   /// sharp step. Prevents discontinuous initial conditions that may trigger
+   /// numerical instability at p>=2 on coarse meshes.
+   bool smooth_nucleation = false;
+
    /// Delta-tau multiplier for nucleation zone pre-stress.
    ///
    /// Tandem default: 0.0 (bp5.lua has no delta_tau function).
@@ -265,13 +270,37 @@ struct BP5Params
    void V_init_vec(real_t x2, real_t x3, real_t V[2]) const
    {
       V[0] = V_zero;
-      if (IsNucleationZone(x2, x3))
+      if (smooth_nucleation)
       {
-         V[1] = V_nuc;
+         // v49: Smooth Gaussian taper instead of sharp boundary
+         // Compute signed distance from nucleation zone boundary
+         real_t half_l = l_vw / 2.0;
+         real_t x2_lo = -half_l;
+         real_t x2_hi = -half_l + w_nuc;
+         real_t x3_lo = hs + ht;
+         real_t x3_hi = hs + ht + H;
+
+         // Distance from boundary (positive inside, negative outside)
+         real_t dx2 = std::min(x2 - x2_lo, x2_hi - x2);
+         real_t dx3 = std::min(x3 - x3_lo, x3_hi - x3);
+         real_t dist = std::min(dx2, dx3);  // min distance to any boundary edge
+
+         // Taper width = 2000m (2 elements at 1000m resolution)
+         real_t taper_width = 2000.0;
+         real_t taper = 0.5 * (1.0 + std::tanh(dist / taper_width));
+         V[1] = V_init + (V_nuc - V_init) * taper;
       }
       else
       {
-         V[1] = V_init;
+         // Original sharp boundary
+         if (IsNucleationZone(x2, x3))
+         {
+            V[1] = V_nuc;
+         }
+         else
+         {
+            V[1] = V_init;
+         }
       }
    }
 
@@ -312,7 +341,22 @@ struct BP5Params
                            eta_val * Vi_abs;
 
       // BP5-QD: add delta_tau = delta_tau_factor * eta * V_i in nucleation zone (Eq. 23)
-      if (IsNucleationZone(x2, x3))
+      if (smooth_nucleation)
+      {
+         // v49: Smooth taper for delta_tau consistent with smoothed V_init
+         real_t half_l = l_vw / 2.0;
+         real_t x2_lo = -half_l;
+         real_t x2_hi = -half_l + w_nuc;
+         real_t x3_lo = hs + ht;
+         real_t x3_hi = hs + ht + H;
+         real_t dx2 = std::min(x2 - x2_lo, x2_hi - x2);
+         real_t dx3 = std::min(x3 - x3_lo, x3_hi - x3);
+         real_t dist = std::min(dx2, dx3);
+         real_t taper_width = 2000.0;
+         real_t taper = 0.5 * (1.0 + std::tanh(dist / taper_width));
+         tau0_scalar += delta_tau_factor * eta_val * Vi_abs * taper;
+      }
+      else if (IsNucleationZone(x2, x3))
       {
          tau0_scalar += delta_tau_factor * eta_val * Vi_abs;
       }
