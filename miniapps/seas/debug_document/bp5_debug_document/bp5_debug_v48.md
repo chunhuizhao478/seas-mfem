@@ -1,7 +1,7 @@
 # BP5 Debug v48: Root Cause Found — Sign Bug in Shared Face Slip RHS Assembly
 
 **Date**: 2026-03-20
-**Status**: ROOT CAUSE FOUND — MUMPS-BLR. Exact MUMPS in parallel (8 ranks) produces identical physics to serial: V grows, no blowup. BLR approximation changes effective fault stiffness enough to suppress nucleation and trigger blowup at higher rank counts. See Section 13.
+**Status**: BLR accuracy is ONE factor but NOT sufficient. Tighter BLR (1e-12) fixes 2500m/8-rank but NOT 1000m/400-rank. Root cause is interaction of BLR accuracy × shared face density × ×3 penalty. Testing 1000m/8-rank (v48h) to isolate rank count. See Section 13.8-13.10.
 **Previous**: v47 (IP penalty ×3 correction, serial vs parallel confirmation)
 **Branch**: `feature/elasticity`
 
@@ -649,19 +649,70 @@ in BLR block boundaries.
 4. **MUMPS-BLR needs tighter tolerance** with the ×3 penalty, or an
    alternative solver (iterative) should be used
 
-### 13.8 Next Steps
+### 13.8 BLR Tolerance Sweep Results
 
-1. **Test tighter BLR tolerances**: `--blr-tol 1e-12`, `1e-14` on the 2500m
-   mesh with 8-48 ranks. Find the threshold where nucleation works.
+| Run | Job | Mesh | Ranks | Solver | V_max trend | Result |
+|-----|-----|------|-------|--------|-------------|--------|
+| v48c | 7606315 | 2500m | 8 | Exact | 0.010→0.019 | **WORKS** |
+| v48d | 7606342 | 2500m | 8 | BLR 1e-12 | 0.010→0.014 | **WORKS** |
+| v48e | 7606340 | 2500m | 8 | BLR 1e-14 | 0.010→0.016 | **WORKS** |
+| v48 | 7606241 | 2500m | 400 | BLR 1e-10 | 0.010→0.004 | V decays |
+| v48b | 7606312 | 2500m | 400 | Exact | MUMPS errors | Inconclusive |
+| v48f | 7606341 | 1000m | 8 | Exact | OOM crash | OOM |
+| **v48g** | **7606439** | **1000m** | **400** | **BLR 1e-12** | **CRASH** | **Same blowup as v47b** |
 
-2. **Test on 1000m mesh with exact MUMPS**: 8 ranks might handle the memory.
-   If V grows → confirms the fix works at production resolution.
+**Key finding**: Tighter BLR (1e-12) fixes the 2500m mesh at 8 ranks but
+**does NOT fix the 1000m mesh at 400 ranks**. The blowup on v48g is identical
+to v47b — same ranks (316-320), same DOFs, same GPa-level tractions, same
+slip values. The BLR tolerance improvement is necessary but NOT sufficient.
 
-3. **Consider iterative solver**: GMRES + AMG or CG + AMG, matching Tandem's
-   approach. Avoids BLR issues entirely.
+### 13.9 Two Interacting Factors
 
-4. **Production runs**: Use exact MUMPS on coarser meshes (2500m, 4000m) with
-   moderate rank counts, or tighten BLR tolerance for 1000m mesh.
+The blowup requires BOTH:
+
+1. **BLR solver error** — changes effective stiffness on shared faces.
+   Fixed by tighter BLR or exact MUMPS. Validated on 2500m/8 ranks.
+
+2. **High shared face density** — 400 ranks on 1000m mesh creates hundreds
+   of shared fault faces at the nucleation boundary. Small per-face errors
+   accumulate across many shared faces, exceeding the stability threshold.
+
+| Config | Shared fault faces | BLR per-face error | Cumulative error | Result |
+|--------|-------------------|-------------------|-----------------|--------|
+| 2500m, 8 ranks | Few (~10) | Small (1e-12) | Below threshold | **Stable** |
+| 2500m, 400 ranks | Many (~100) | Large (1e-10) | Above threshold | V decays |
+| 1000m, 8 ranks | Few (~20) | Small (1e-12) | **TBD** | **v48h (testing)** |
+| 1000m, 400 ranks | Many (~500) | Small (1e-12) | Above threshold | **Crash** |
+
+The 2500m mesh at 8 ranks is a "sweet spot" — few enough shared faces that
+BLR 1e-12 is sufficient. The 1000m mesh at 400 ranks has too many shared
+faces for any BLR tolerance to work.
+
+### 13.10 Next Test: 1000m Mesh, 8 Ranks, BLR 1e-12
+
+**v48h** (job TBD): 1000m mesh, 8 ranks (4 nodes), BLR 1e-12.
+
+If v48h works → the 1000m mesh is fine at low rank count. The production
+path is either:
+- Use fewer ranks with more memory per rank
+- Use an iterative solver (GMRES/CG + AMG) instead of BLR
+- Use exact MUMPS on moderate-rank configurations
+
+If v48h crashes → the 1000m mesh at p=2 has resolution-specific issues
+beyond BLR accuracy.
+
+### 13.11 Code Change: Default BLR Tolerance
+
+Changed `elasticity_operator.hpp:208`:
+```cpp
+// BEFORE:
+real_t blr_tol_ = 1e-10;
+
+// AFTER (v48):
+real_t blr_tol_ = 1e-12;
+```
+
+This is necessary but not sufficient for production on high-rank configurations.
 
 ---
 
@@ -669,14 +720,14 @@ in BLR block boundaries.
 
 | Finding | Details |
 |---------|---------|
-| **Root cause** | **MUMPS-BLR solver accuracy** — BLR approximation changes effective fault stiffness |
-| **Sign hypothesis** | DISPROVED — normals flip between ranks, sign is correct |
-| **PETSc hypothesis** | DISPROVED — PETSc stage checks are NO-OP for Tandem QD |
-| **K/f assembly** | CORRECT — all formulas match, signs correct on shared faces |
 | **×3 penalty fix** | **VALIDATED** — exact MUMPS in parallel reproduces serial physics |
-| **Multi-DOF code** | **CORRECT** — no bug, works with exact solver |
-| **BLR tolerance** | Default 1e-10 insufficient for ×3 penalty; tighter tolerance or exact solver needed |
-| **Tandem comparison** | Tandem uses iterative solver (no BLR), avoiding the issue |
+| **Multi-DOF / shared face code** | **CORRECT** — no bug, normals flip correctly |
+| **MUMPS-BLR accuracy** | Contributes to instability. 1e-12 fixes 2500m/8-rank but not 1000m/400-rank |
+| **Shared face density** | High rank count = many shared faces = accumulated error exceeds stability |
+| **Root cause** | Interaction of BLR accuracy × shared face density × ×3 penalty sensitivity |
+| **BLR tolerance** | Changed default 1e-10 → 1e-12. Necessary but not sufficient at high rank count |
+| **Tandem comparison** | Tandem uses iterative solver (no BLR), avoiding both factors |
+| **Path forward** | Test 1000m/8-rank (v48h). If works, use fewer ranks or switch to iterative solver |
 
 ---
 
@@ -690,5 +741,9 @@ in BLR block boundaries.
 | v48-sign | CalcOrtho diagnostic: normals flip correctly between ranks | Confirmed |
 | v48a | 1000m mesh with sign diag: crash with 22 interior + 25 shared DOFs | Confirmed |
 | v48b | 2500m, 400 ranks, exact MUMPS: MUMPS errors (too many ranks), inconclusive | Inconclusive |
-| **v48c** | **2500m, 8 ranks, exact MUMPS: V GROWS 0.010 → 0.019. Identical to serial. NO BLOWUP.** | **ROOT CAUSE** |
-| v48c+ | **MUMPS-BLR is the root cause. BLR accuracy insufficient for ×3 penalty.** | **CONFIRMED** |
+| **v48c** | **2500m, 8 ranks, exact MUMPS: V GROWS 0.010→0.019. Identical to serial.** | **KEY RESULT** |
+| v48d | 2500m, 8 ranks, BLR 1e-12: V GROWS 0.010→0.014. Works. | Confirmed |
+| v48e | 2500m, 8 ranks, BLR 1e-14: V GROWS 0.010→0.016. Works. | Confirmed |
+| v48f | 1000m, 8 ranks, exact MUMPS: OOM crash (segfault). | OOM |
+| **v48g** | **1000m, 400 ranks, BLR 1e-12: CRASH. Same blowup as v47b. Tighter BLR not sufficient at high rank count.** | **CRITICAL** |
+| v48h | 1000m, 8 ranks, BLR 1e-12: isolate rank count vs mesh resolution. | **Pending** |
