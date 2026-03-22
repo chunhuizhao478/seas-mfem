@@ -321,7 +321,8 @@ int main(int argc, char *argv[])
    bool diag_rk_stages = false;
    // v49 Phase 2: CFL-aware dt and V guard
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
-   real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = off)
+   real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
+   bool no_v_guard = false;         // v50: disable V guard (for testing only)
 
    for (int i = 1; i < argc; i++)
    {
@@ -396,6 +397,7 @@ int main(int argc, char *argv[])
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
+      if (arg == "--no-v-guard") { no_v_guard = true; }
    }
 
    // Parse DG method
@@ -573,9 +575,15 @@ int main(int argc, char *argv[])
    serial_mesh.reset();
 
    long long global_ne = pmesh.GetGlobalNE();
+
+   // v50: Compute minimum element size for CFL-aware dt
+   real_t h_min, h_max, kappa_min, kappa_max;
+   pmesh.GetCharacteristics(h_min, h_max, kappa_min, kappa_max);
+
    if (mpi.IsRoot())
    {
       std::cout << "  ParMesh: " << global_ne << " global elements\n";
+      std::cout << "  h_min = " << h_min << " m, h_max = " << h_max << " m\n";
    }
 
    // Dump boundary attributes to VTK for visual verification
@@ -1006,42 +1014,56 @@ int main(int argc, char *argv[])
    ode_solver.SetDtMin(1e-6);
    ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
 
-   // Initial dt must be small enough for the fastest fault dynamics.
-   // Tandem (QD mode) relies on PETSc's adaptive controller to auto-detect
-   // the initial dt by evaluating ||f(t0,y0)||, which naturally accounts
-   // for V_nuc. We emulate this: dt_init = safety * Dc / V_max, where
-   // V_max = max(V_init, V_nuc) captures the nucleation zone velocity.
-   // With V_nuc = 0.01 m/s and Dc = 0.13 m, this gives dt ≈ 0.13 s,
-   // comparable to PETSc's auto-estimate of ~0.05 s.
-   // See bp5_debug_v47.md Section 11 for derivation.
+   // v50: CFL-aware initial dt selection.
+   // The IP penalty creates a CFL-like stability constraint: dt must satisfy
+   //   z = lambda_eff * dt < z_crit  where lambda_eff = beta * mu / (eta * h)
+   // Exceeding z_crit causes exponential RK stage amplification (cascade).
+   // See bp5_debug_v49.md Section 4 for full derivation.
+   //
+   // Two dt limits:
+   //   dt_V   = 0.01 * Dc / V_max        (physics: slip per step << Dc)
+   //   dt_CFL = C * eta * h_min / (beta * mu)  (stability: z < z_crit)
+   // with C=2.0 (safety below empirical z_crit≈2.5-3.0), beta=4.0
    real_t V_max_init = std::max(V_init, params.V_nuc);
-   real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
-                             std::max(V_max_init, 1e-20));
-   // v49 Phase 2: Override dt_init if --dt-init flag provided
+   real_t dt_V = std::min(1e3, 0.01 * params.L_nuc /
+                          std::max(V_max_init, 1e-20));
+   real_t dt_CFL = 2.0 * params.eta() * h_min / (4.0 * params.mu());
+   real_t dt_init = std::min(dt_V, dt_CFL);
+
+   // Manual override if --dt-init flag provided (for testing)
    if (dt_init_override > 0)
    {
       dt_init = dt_init_override;
       if (mpi.IsRoot())
       {
-         std::cout << "  [v49] dt_init override: " << dt_init << " s\n";
+         std::cout << "  [override] dt_init = " << dt_init << " s\n";
       }
    }
    ode_solver.SetDt(dt_init);
    if (mpi.IsRoot())
    {
+      std::cout << "  dt_V = " << dt_V << " s, dt_CFL = " << dt_CFL << " s\n";
       std::cout << "  Initial dt: " << dt_init << " s"
-                << " (V_max_init = " << V_max_init << ")\n";
+                << (dt_init <= dt_CFL ? " (CFL-limited)" : " (V-limited)")
+                << "\n";
    }
    ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
    if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
-   // v49 Phase 2: Enable V guard if --v-guard flag provided
-   if (v_guard_factor > 0)
+
+   // v50: V-guard ON by default (factor=100). Prevents RK cascade overflow.
+   // Use --v-guard <factor> to change threshold, --no-v-guard to disable.
+   if (!no_v_guard)
    {
-      ode_solver.SetVGuard(v_guard_factor);
+      real_t factor = (v_guard_factor > 0) ? v_guard_factor : 100.0;
+      ode_solver.SetVGuard(factor);
       if (mpi.IsRoot())
       {
-         std::cout << "  [v49] V guard: ON (factor=" << v_guard_factor << ")\n";
+         std::cout << "  V-guard: ON (factor=" << factor << ")\n";
       }
+   }
+   else if (mpi.IsRoot())
+   {
+      std::cout << "  V-guard: OFF (--no-v-guard)\n";
    }
    ode_solver.Init(seas_op);
 
