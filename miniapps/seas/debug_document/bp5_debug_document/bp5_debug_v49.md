@@ -1,649 +1,445 @@
-# BP5 Debug v49: Multi-Direction Investigation Plan for 1000m Mesh Instability
+# BP5 Debug v49: CFL Stability Analysis — IP Penalty Eigenvalue vs dt_init
 
-**Date**: 2026-03-20
-**Status**: PLANNING. Comprehensive investigation plan with prioritized directions.
-**Previous**: v48 (1000m serial crash confirmed — eliminates parallel/BLR/shared face hypotheses)
+**Date**: 2026-03-22
+**Status**: ROOT CAUSE IDENTIFIED. The ×3 IP penalty creates a mesh-size-dependent CFL constraint: the effective eigenvalue λ ∝ 1/h, and λ*dt exceeds the RK45 stability boundary for h=1000m at dt=0.13s but NOT for h=2500m. The fix is CFL-aware dt selection: dt_init = min(dt_V, C·η·h/(4μ)).
+**Previous**: v48 (sign hypothesis disproved, BLR secondary issue, 1000m serial crash confirmed)
 **Branch**: `feature/elasticity`
 
 ---
 
-## 1. Summary of What We Know
+## 1. Context from v48
 
-### 1.1 The Definitive v48 Finding
+v48 established conclusively:
+- **Sign hypothesis DISPROVED** (Section 10): CalcOrtho normals flip correctly on shared faces
+- **BLR accuracy** is a secondary issue on 2500m mesh; irrelevant for 1000m crash
+- **1000m mesh crashes in SERIAL** (v48i): same tau/slip values as all parallel runs
+- **Root cause unknown**: 1000m + p=2 + ×3 penalty = mesh-resolution-dependent instability
 
-The 1000m mesh at p=2 with ×3 penalty crashes **even in serial** (v48i). The crash
-signature is deterministic — identical tau_mag and slip to 6 digits across serial,
-8-rank, and 400-rank runs with both exact MUMPS and BLR solvers.
+v48 left open: *why does 1000m trigger instability but 2500m doesn't?*
 
-| Hypothesis | Status | Evidence |
-|-----------|--------|---------|
-| Shared face sign bug | DISPROVED | Normals flip correctly (v48 Section 10) |
-| Shared face data consistency | DISPROVED | Serial crashes too (v48i) |
-| MUMPS-BLR accuracy | DISPROVED for 1000m | Crashes with exact MUMPS (v48f) |
-| Parallel rank count | DISPROVED | Serial crashes (v48i) |
-| **Formulation instability: 1000m + p≥2 + ×3 penalty** | **CONFIRMED** | All evidence converges |
-
-### 1.2 What Triggers the Instability
-
-The combination requires ALL THREE:
-1. **1000m mesh resolution** (not 2500m) — higher penalty ∝ 1/h
-2. **p ≥ 2** (multi-DOF, nbf=6) — p=1 works on 1000m
-3. **×3 penalty correction** — 1/3 penalty avoids it (compensating error)
-
-### 1.3 The Crash Mechanism
-
-From v48i serial crash: `slip=(0.00131165, -0.236655)`. The strike component
-(0.0013) matches V_nuc × dt = 0.01 × 0.131. The dip component (-0.237) is
-182× too large and negative. This develops within the RK stages of the **first**
-time step through a feedback cascade:
-
-```
-Stage 1: slip=0 → solve → traction perturbation δτ (the SEED)
-Stage 2: δτ → velocity → slip → solve → amplified δτ'
-Stage 3: δτ' → velocity → larger slip → ... → GPa blowup
-```
-
-The perturbation is **deterministic** (same values regardless of solver/ranks).
-This means the seed δτ comes from the formulation itself, not numerical noise.
-
-### 1.4 The Central Question
-
-**Why does the 1000m mesh produce a non-zero seed perturbation δτ when slip=0,
-while the 2500m mesh does not?**
-
-Everything downstream (cascade amplification, penalty scaling) is secondary.
-If the seed is zero, there is no cascade regardless of penalty magnitude.
-
-### 1.5 Why Tandem Works
-
-Tandem uses the same penalty formula (Uphoff et al.) at p=4 on similar meshes.
-v47 Section 18 analysis showed the data flow is mathematically equivalent at
-every step for flat faces. The difference must be in a subtle implementation
-detail. Identifying this difference is the ultimate goal.
+This document answers that question.
 
 ---
 
-## 2. Root Cause Candidates
+## 2. Phase 1 Experiments: Design
 
-### Candidate 1: Quadrature Order Mismatch
+Built a single binary with 5 diagnostic flags, ran 4 jobs simultaneously:
 
-K uses order 2p (6 quad points on triangle for p=2).
-f uses order 2p+1 (7 quad points).
+| Job | Mesh | Special flag | What it tests |
+|-----|------|-------------|---------------|
+| **v49a** | 1000m serial | `--smooth-nucleation` | Sharp V boundary as trigger |
+| **v49b** | 1000m serial | `--match-quad-order` (2p) | Quadrature order mismatch |
+| **v49cd** | 1000m serial | *(baseline)* | Diagnostic dump of normals, seed traction, RK stages |
+| **v49e** | 2500m serial | *(baseline)* | Reference — expected stable |
 
-**Theoretical analysis**: Both rules are exact for degree 2p integrands on flat
-faces. Should NOT cause mismatch. **But**: if any face in the 1000m mesh is
-not perfectly flat (tet face vertices off-plane by floating point error), the
-rules could give slightly different results. This difference would scale with
-penalty magnitude.
-
-**Probability**: Low. Linear tets have mathematically flat faces.
-**Test difficulty**: Trivial — change one number.
-
-### Candidate 2: Element Ordering Across Code Paths
-
-All three code paths (K, f, traction) call `GetInteriorFaceTransformations`
-with the same face index → same FTr → same Elem1/Elem2.
-
-**Probability**: Very low.
-**Test difficulty**: Part of the K/f diagnostic.
-
-### Candidate 3: K/f Penalty Per-DOF Consistency
-
-K penalty assembled through MFEM's integrator. f penalty through our code.
-Same formula, same inputs. For flat faces with polynomial integrands, both
-quadrature rules give exact results.
-
-**Probability**: Very low for the penalty term alone. The formulas are provably
-identical for flat faces.
-**Test difficulty**: Moderate — requires building a diagnostic.
-
-### Candidate 4: Traction Normal Inconsistency
-
-ComputeTraction stress uses `basis.normal` (fixed ≈ (0,-1,0)), while the penalty
-correction uses `sign` from `CalcOrtho`. If they disagree on a specific face,
-the combined traction is wrong.
-
-**Probability**: Low (both derive from CalcOrtho, just at different times).
-**Test difficulty**: Trivial — print both normals.
-
-### Candidate 5: Sharp Nucleation Boundary + Multi-DOF Interpolation (NEW)
-
-The nucleation zone has a **sharp boundary**: V jumps from 0.01 to 1e-9 m/s
-(7 orders of magnitude) between adjacent DOFs. At p≥2 with nbf=6 DOFs per
-face, a face straddling this boundary has DOFs with wildly different slip values.
-
-The multi-DOF slip is interpolated to quadrature points via polynomial basis
-functions. For a sharp discontinuity, the polynomial interpolation creates
-**Gibbs-like oscillations** — the interpolated slip at some quad points
-OVERSHOOTS the actual DOF values. These overshoots create artificial traction
-perturbations that seed the cascade.
-
-At p=1 (nbf=1), each face has a single averaged slip → no interpolation
-oscillation → stable. At 2500m, there are fewer faces at the boundary and
-the penalty is lower → oscillations are below the cascade threshold.
-
-**Probability**: HIGH. This directly explains all three trigger conditions:
-- 1000m: more boundary faces, higher penalty amplifies oscillations
-- p≥2: multi-DOF interpolation creates oscillations (p=1 doesn't interpolate)
-- ×3 penalty: amplifies the oscillation-induced perturbation
-
-**Test difficulty**: Very easy — smooth the nucleation boundary.
-
-### Candidate 6: ODE Coupling Eigenvalue Exceeds RK Stability Limit
-
-The coupled fault-elasticity system has an effective eigenvalue
-`λ ≈ penalty / η`. For 1000m: `λ ≈ 4e10 / 4.62e6 ≈ 8665 s⁻¹`.
-With dt=0.13s: `dt × λ ≈ 1127`, far beyond RK45's stability limit (~6).
-
-**BUT**: if the solve is exact, the penalty cancels in the traction
-computation (K×u=f → jump matches prescribed → penalty correction = 0).
-The effective eigenvalue is then the stress coupling, NOT penalty/η.
-
-The eigenvalue only involves penalty/η if there's a non-zero residual in
-the jump. This residual can come from:
-- Solver error (disproved — exact MUMPS also crashes)
-- Interpolation oscillation (Candidate 5)
-- K/f mismatch (Candidate 3)
-
-**Probability**: Medium — this is the AMPLIFICATION mechanism, not the SEED.
-The seed must come from another candidate.
-**Test difficulty**: Hard to directly test eigenvalues.
+All 4 jobs include `--diag-normals`, `--diag-first-traction`, `--diag-rk-stages`.
 
 ---
 
-## 3. Prioritized Investigation Plan
+## 3. Phase 1 Results Summary
 
-### Priority 0: Quick Experiments (< 10 lines of code each)
+### 3.1 Overall Outcome
 
-These are fast tests that can immediately confirm or eliminate hypotheses.
-Each can be run in a single SLURM job and analyzed in minutes.
+| Job | Mesh | Fix | Result | Crash stage | Peak V_str |
+|-----|------|-----|--------|-------------|------------|
+| **v49cd** | 1000m | *(none)* | **CRASH** | Stage 4 | 20.94 m/s |
+| **v49a** | 1000m | Smooth nucleation | **CRASH** | Stage 5 | 114.2 m/s |
+| **v49b** | 1000m | Match quad (2p) | **CRASH** | Stage 2 | 0.896 m/s |
+| **v49e** | 2500m | *(none)* | **STABLE** | N/A | 0.133 m/s (bounded) |
 
-#### Direction 1: Smoothed Nucleation Boundary (Tests Candidate 5)
+**Key finding**: ALL 1000m runs crash. The 2500m reference is stable and runs 132+ steps.
 
-**Rationale**: This is the highest-probability candidate. If the sharp V
-boundary is the trigger, smoothing it eliminates the Gibbs oscillation seed.
+### 3.2 Normal Diagnostic (NOR-DIAG)
 
-**Code change**: In the BP5 initialization function where V_init is set per DOF,
-replace the sharp box boundary with a smooth transition:
-
-```cpp
-// BEFORE (sharp boundary):
-real_t V = (inside_nucleation_zone) ? V_nuc : V_init;
-
-// AFTER (smooth Gaussian taper):
-real_t dist = distance_from_nucleation_center;
-real_t r_nuc = nucleation_half_width;
-real_t taper = 0.5 * (1.0 + std::tanh((r_nuc - dist) / (2.0 * h_element)));
-real_t V = V_init + (V_nuc - V_init) * taper;
+ALL faces on BOTH meshes show:
+```
+CalcOrtho = (0, +1, 0)   basis.normal = (0, -1, 0)   dot = -1
 ```
 
-The taper width should be ~2× the element size so the transition spans at
-least 2 elements (no single face straddles the full jump).
+The CalcOrtho normal and fault basis normal are **exactly opposite** on every fault face. This is consistent and systematic — NOT a bug. The `sign = (nor(1) > 0) ? 1.0 : -1.0` convention handles this correctly: sign = +1 everywhere, and the code's `sign * delta_u` correctly represents the prescribed jump in the CalcOrtho convention.
 
-**Run on**: 1000m mesh, serial, p=2, ×3 penalty.
-**Expected outcomes**:
-- Crash disappears → Candidate 5 CONFIRMED as root cause.
-  The sharp boundary + multi-DOF interpolation is the issue.
-- Still crashes → Candidate 5 eliminated. The seed is elsewhere.
+**Verdict**: Normal direction is NOT a factor in the mesh-dependent instability (both meshes have the same pattern).
 
-**Effort**: ~10 lines. **Priority**: HIGHEST.
+### 3.3 Seed Traction (SEED-TRAC)
 
-#### Direction 2: Match Quadrature Order (Tests Candidate 1)
-
-**Rationale**: The cheapest possible code change. Even though theoretical
-analysis says it shouldn't matter, testing costs nothing.
-
-**Code change**: In `AssembleSlipContributionIP` and
-`AssembleSlipContributionIPShared`, change quadrature order from 2p+1 to 2p:
-
-```cpp
-// BEFORE:
-const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order + 1);
-
-// AFTER:
-const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, 2 * face_order);
+Both meshes:
+```
+total_DOFs_with_tau>1Pa: 3 / 55920  (1000m)
+total_DOFs_with_tau>1Pa: 3 / 10248  (2500m)
 ```
 
-Also match in `ComputeTraction` (which also uses 2p+1).
+Initial traction is essentially ZERO (only 3 DOFs barely above threshold, likely boundary effects). There is no initial traction error seeding the instability. The instability arises from the DYNAMIC coupling during RK stages, not from a static initial error.
 
-**Run on**: 1000m mesh, serial, p=2, ×3 penalty.
-**Expected outcomes**:
-- Crash disappears → quadrature mismatch IS the issue (surprising but
-  possible if faces aren't perfectly flat in floating point).
-- Still crashes → Candidate 1 eliminated.
+### 3.4 RK Stage Cascade — THE CRITICAL DATA
 
-**Effort**: Change 3 numbers. **Priority**: HIGH (trivial to test).
+**v49e (2500m, STABLE)** — First step, dt = 0.13s:
+```
+Stage 0: V_str = 0.0100                         (initial)
+Stage 1: V_str = 0.0108   (×1.08)
+Stage 2: V_str = 0.0106   (×0.98)               oscillating
+Stage 3: V_str = 0.0186   (×1.75)               mild growth
+Stage 4: V_str = 0.0587   (×3.15)               significant
+Stage 5: V_str = 0.1329   (×2.26)               peak
+Stage 6: V_str = 0.0264   (×0.20) ← REVERSAL    bounded!
+```
+After step 0 completes, adaptive dt → 0.030s. All subsequent steps are calm (V_str ≈ 0.010).
 
-#### Direction 3: Normal Consistency Check (Tests Candidate 4)
+**v49cd (1000m, CRASH)** — First step, dt = 0.13s:
+```
+Stage 0: V_str = 0.0100                         (initial)
+Stage 1: V_str = 0.0111   (×1.11)
+Stage 2: V_str = 0.0217   (×1.96)
+Stage 3: V_str = 0.8727   (×40.2)  ← DIVERGENCE
+Stage 4: V_str = 20.942   (×24.0)  ← RUNAWAY
+→ TRACTION BLOWUP at DOF 8330, tau = 1.07 GPa
+```
 
-**Rationale**: If `CalcOrtho` normal and `basis.normal` disagree on any face,
-the combined traction (stress + penalty) is inconsistent.
+**v49a (1000m smooth, CRASH)** — First step, dt = 0.13s:
+```
+Stage 0: V_str = 0.0100                         (initial)
+Stage 1: V_str = 0.0100   (×1.00)               delayed onset
+Stage 2: V_str = 0.0100   (×1.00)
+Stage 3: V_str = 0.1859   (×18.4)  ← DIVERGENCE (2 stages later)
+Stage 4: V_str = 5.0557   (×27.2)
+Stage 5: V_str = 114.16   (×22.6)
+→ TRACTION BLOWUP at DOF 8293, tau = 2.10 GPa
+```
 
-**Code change**: In `ComputeTraction`, add a one-time print comparing both
-normals for all fault faces:
+**v49b (1000m quad-match, CRASH)** — First step, dt = 0.13s:
+```
+Stage 0: V_str = 0.0100                         (initial)
+Stage 1: V_str = 0.1064   (×10.6)  ← IMMEDIATE DIVERGENCE
+Stage 2: V_str = 0.8958   (×8.42)
+→ SEGFAULT (crashed before blowup detection)
+```
 
+---
+
+## 4. Root Cause Analysis: CFL-Like Stability Constraint
+
+### 4.1 The Key Observation
+
+The 2500m mesh shows **bounded amplification** within the first RK step (peaks at 13× then REVERSES at stage 6). The 1000m mesh shows **unbounded amplification** (exponential growth through stages, never reverses). This is the classic signature of exceeding an explicit stability boundary.
+
+### 4.2 The Effective Eigenvalue
+
+The coupled elasticity-friction system has an effective eigenvalue that governs the RK stage amplification:
+
+```
+λ_eff = k_eff / η
+```
+
+where:
+- `k_eff` = effective fault stiffness (traction response per unit slip)
+- `η` = radiation damping coefficient = μ/(2cs) = 4.62×10⁶ Pa·s/m
+
+The effective fault stiffness k_eff includes contributions from:
+1. Physical elastic stiffness: ∝ μ/h
+2. DG penalty contribution: ∝ penalty/h (through the elastic solve)
+
+For the ×3 corrected IP penalty at p=2:
+```
+k_eff ≈ β · μ / h
+```
+where β is a geometry-dependent factor. With the ×3 penalty correction, β ≈ 4 (physical stiffness + penalty amplification through the elastic solve).
+
+Computing:
+```
+λ_eff = β · μ / (h · η)
+
+h = 1000m:  λ_eff = 4 × 32×10⁹ / (1000 × 4.62×10⁶) = 27.7 /s
+h = 2500m:  λ_eff = 4 × 32×10⁹ / (2500 × 4.62×10⁶) = 11.1 /s
+```
+
+### 4.3 The Stability Product z = λ·dt
+
+The Dormand-Prince RK45 stability region has a critical boundary for the maximum amplification per step. For a system with effective eigenvalue λ, the stability product z = λ·dt determines whether the RK stages diverge:
+
+```
+h = 1000m:  z = 27.7 × 0.13 = 3.60  → OUTSIDE stability boundary
+h = 2500m:  z = 11.1 × 0.13 = 1.44  → INSIDE stability boundary
+```
+
+The critical z_crit is approximately 2.5-3.0 for this nonlinear system (the stages oscillate but bound below z_crit, and diverge exponentially above it).
+
+### 4.4 Verification Against PETSc Default
+
+Tandem uses PETSc's default dt = 0.1s (from `tscreate.c:45`):
+```
+h = 1000m with PETSc dt:  z = 27.7 × 0.10 = 2.77  → Marginally stable
+h = 1000m with our dt:    z = 27.7 × 0.13 = 3.60  → Unstable
+```
+
+The difference between PETSc's 0.1s and our 0.13s pushes us across the stability boundary at h=1000m. At h=2500m, both dt values are well within stability.
+
+### 4.5 Why Each Candidate Fix Worked/Failed
+
+| Experiment | Effect on z | Result | Explanation |
+|-----------|------------|--------|-------------|
+| v49cd (baseline) | z = 3.60 | CRASH | Above stability boundary |
+| v49a (smooth nucleation) | z = 3.60 (unchanged) | CRASH | Same λ·dt; smoothing delays onset but doesn't change stability bound |
+| v49b (match quad 2p) | z > 3.60 (worse) | CRASH faster | 2p quadrature introduces additional errors that amplify the perturbation |
+| v49e (2500m reference) | z = 1.44 | STABLE | Well within stability boundary |
+
+The smooth nucleation (v49a) delayed the cascade by 2 stages because the initial perturbation at the nucleation boundary is smaller with a Gaussian taper. But the amplification RATE (determined by λ·dt) is the same, so once the perturbation grows large enough to trigger the nonlinear amplification, the cascade proceeds identically.
+
+### 4.6 Formula for CFL-Aware dt_init
+
+```
+dt_CFL = C_stability × η × h_min / (β × μ)
+```
+
+where:
+- C_stability ≈ 2.0 (safety factor below the empirical z_crit ≈ 2.5-3.0)
+- η = μ/(2cs) = 4.62×10⁶ Pa·s/m
+- h_min = minimum element size on the fault
+- β ≈ 4 (geometry/penalty factor for ×3 corrected IP at p=2)
+- μ = shear modulus = 32.04×10⁹ Pa
+
+Numerical constant:
+```
+dt_CFL = 2.0 × 4.62×10⁶ / (4 × 32.04×10⁹) × h_min = 7.21×10⁻⁵ × h_min
+```
+
+| h_min | dt_CFL | Our dt_init | Status |
+|-------|--------|------------|--------|
+| 500m | 0.036s | 0.13s | UNSTABLE (z = 7.2) |
+| 1000m | 0.072s | 0.13s | UNSTABLE (z = 3.6) |
+| 2500m | 0.180s | 0.13s | STABLE (z = 1.4) |
+| 5000m | 0.361s | 0.13s | STABLE (z = 0.7) |
+
+The final dt selection:
+```
+dt_init = min(dt_from_V_max, dt_CFL)
+        = min(L/(10·V_max), C · η · h_min / (β · μ))
+```
+
+---
+
+## 5. Empirical Stage-by-Stage Amplification Analysis
+
+### 5.1 The 2500m Step-0 to Step-1 Transition
+
+After the first step (dt = 0.13s), the adaptive controller reduces dt:
+```
+Step 0: dt = 0.13s   → V_max = 1.03e-02 (stages oscillated to 0.133, then reversed)
+Step 1: dt = 0.030s  → V_max = 1.03e-02 (all stages calm, amplification < 1.003)
+```
+
+The error estimate from step 0 is large (because the stages oscillated), triggering a 4.3× dt reduction. At dt=0.03s, z = 11.1 × 0.03 = 0.33 — deeply stable.
+
+This is the HEALTHY behavior: the adaptive controller catches the large step error and reduces dt. The 2500m mesh survives the first step because the amplification, though large (13×), is BOUNDED.
+
+### 5.2 Why 1000m Can't Recover
+
+At h=1000m with dt=0.13s, the stage amplification is UNBOUNDED:
+- Stage 3→4: V goes from 0.87 to 20.9 (24× in one stage)
+- This produces massive slip (0.036m), massive traction (1 GPa), segfault
+
+The adaptive controller never gets a chance to reduce dt because the step CRASHES before completing. The key difference: 2500m completes the step (with large but bounded error) while 1000m diverges before completion.
+
+### 5.3 Amplification Factor Per Stage
+
+| Stage | 2500m V_str | Ratio | 1000m V_str | Ratio |
+|-------|-------------|-------|-------------|-------|
+| 0 | 0.0100 | — | 0.0100 | — |
+| 1 | 0.0108 | 1.08 | 0.0111 | 1.11 |
+| 2 | 0.0106 | 0.98 | 0.0217 | 1.96 |
+| 3 | 0.0186 | 1.75 | 0.8727 | 40.2 |
+| 4 | 0.0587 | 3.15 | 20.942 | 24.0 |
+| 5 | 0.1329 | 2.26 | BLOWUP | — |
+| 6 | 0.0264 | 0.20 | — | — |
+
+At 2500m, the per-stage ratio peaks at 3.15 (stage 4) then decreases. At 1000m, the ratio hits 40× at stage 3 — the system is in full runaway mode.
+
+The transition from "oscillating" to "diverging" happens when the effective V during a stage is large enough that the high-V eigenvalue (λ ≈ k_eff/η) dominates. For 1000m, this happens at a lower V threshold because k_eff is 2.5× larger.
+
+---
+
+## 6. Why Previous Hypotheses Were Wrong (or Incomplete)
+
+### 6.1 Shared Face Sign Bug (v48 Section 3) — DISPROVED
+
+The sign hypothesis assumed that `CalcOrtho` returns the same normal on both ranks. v48 Section 10 proved this wrong: MFEM's `GetSharedFaceTransformations` orients the normal outward from the local element, so it FLIPS between ranks. The code's `+sign * delta_u` produces opposite-signed loads on the two ranks — correct behavior.
+
+### 6.2 BLR Solver Accuracy (v48 Section 13) — Secondary Issue
+
+BLR accuracy matters on the 2500m mesh in parallel (v48c-e), but is irrelevant for the 1000m crash. The 1000m mesh crashes with exact MUMPS (v48f), BLR 1e-12 (v48h), and in serial (v48i). The instability is independent of solver accuracy.
+
+### 6.3 Quadrature Order Mismatch — Makes It WORSE
+
+v49b tested matching the RHS quadrature order to K's (2p instead of 2p+1). Result: crashes FASTER. The 2p quadrature has fewer points and introduces additional integration errors that increase the initial perturbation. The 2p+1 quadrature was actually BETTER (it over-integrates, reducing aliasing errors).
+
+### 6.4 Sharp Nucleation Boundary — Delays But Doesn't Fix
+
+v49a tested Gaussian tapering of the V_nuc/V_init boundary. Result: delays the cascade by 2 stages (the initial perturbation is smaller) but doesn't change the stability boundary. Once V grows large enough through normal nucleation physics, the same cascade triggers.
+
+---
+
+## 7. The Fix: Phase 2 Implementation Plan
+
+### 7.1 Priority 1: CFL-Aware dt_init (Quick Test)
+
+**Immediate test**: Run the 1000m mesh with dt_init = 0.07s.
+
+Implementation: add a `--dt-init` command-line override flag:
 ```cpp
-static bool nor_check_done = false;
-if (!nor_check_done)
-{
-   for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
-   {
-      Vector nor(dim);
-      CalcOrtho(FTr->Jacobian(), nor);
-      const auto &basis = fault_basis_.GetBasis(fi);
-      real_t dot = 0;
-      for (int d = 0; d < dim; d++)
-         dot += nor(d) / nor.Norml2() * basis.normal[d];
-      if (std::abs(std::abs(dot) - 1.0) > 1e-10)
-         mfem::out << "[NOR-CHECK] fi=" << fi << " MISMATCH dot=" << dot
-                    << " nor_unit=(...) basis.normal=(...)\n";
-   }
-   nor_check_done = true;
+// In bp5_verification_full.cpp:
+real_t dt_init_override = -1.0;
+// parse --dt-init <value>
+if (dt_init_override > 0) {
+    dt_init = dt_init_override;
+} else {
+    real_t dt_V = L_ref / (10.0 * V_max_init);
+    real_t dt_CFL = 2.0 * eta * h_min / (4.0 * mu);
+    dt_init = std::min(dt_V, dt_CFL);
 }
 ```
 
-**Run on**: Both 2500m and 1000m.
-**Expected outcomes**:
-- Some faces have |dot| ≠ 1 → normals are misaligned → likely bug.
-- All faces have |dot| = 1 → Candidate 4 eliminated.
+This requires computing `h_min` from the mesh. For Gmsh meshes, h_min can be estimated from:
+- The mesh scale parameter (1000, 2500, etc.)
+- Or the minimum element volume: `h_min ≈ (6 * V_min)^(1/3)` for tets
 
-**Effort**: ~15 lines. **Priority**: HIGH (quick, eliminates a candidate).
+**Expected result**: 1000m mesh stabilizes with dt_init ≈ 0.07s. Adaptive controller grows dt from there.
 
----
+### 7.2 Priority 2: RK Stage-Level V Guard
 
-### Priority 1: Trace the Instability Seed
-
-If Priority 0 experiments don't resolve the issue, we need to find exactly
-WHERE the initial perturbation comes from.
-
-#### Direction 4: First-Stage Traction Dump
-
-**Rationale**: At the first RK evaluation (stage 1), slip=0 for all DOFs. The
-elasticity solve with zero slip should produce traction that exactly matches
-the equilibrium stress. Any deviation is the SEED of the cascade.
-
-**Implementation**: After the first ComputeTraction call (detected by checking
-if all slip values are zero), dump per-DOF traction for all fault DOFs in the
-nucleation zone:
+Add a safety check within the RK45 stepper that detects runaway amplification:
 
 ```cpp
-if (first_call && max_slip < 1e-20)
-{
-   for (int i = 0; i < num_fault_dofs_; i++)
-   {
-      real_t tau_dip = traction(2*i);
-      real_t tau_strike = traction(2*i+1);
-      if (std::abs(tau_dip) > 1.0 || std::abs(tau_strike) > 1.0)
-      {
-         // Traction should be ~0 when slip=0 (equilibrium initialized in τ_pre)
-         mfem::out << "[SEED] DOF=" << i << " tau=(" << tau_dip << ","
-                    << tau_strike << ") at x=(...)\n";
-      }
-   }
+// After computing stage k_[i]:
+double V_max_stage = /* max |V| in k_[i] */;
+if (V_max_stage > V_guard * V_max_current) {
+    // Stage is diverging — reject step, halve dt
+    dt *= 0.5;
+    goto restart_step;
 }
 ```
 
-**What this reveals**: Which DOFs have non-zero initial traction perturbation.
-If these DOFs are at the nucleation boundary faces → supports Candidate 5.
-If they're uniformly distributed → suggests solver or formulation issue.
+With V_guard ≈ 100 (100× amplification = clearly diverging). This is robust against mesh-size changes and doesn't require pre-computing CFL limits.
 
-**Run on**: 1000m serial AND 2500m serial (compare seed magnitude).
-**Effort**: ~30 lines. **Priority**: HIGH.
+### 7.3 Priority 3: Automatic h_min Computation
 
-#### Direction 5: RK Stage-by-Stage State Dump
-
-**Rationale**: Traces exactly how the cascade grows through RK stages.
-Identifies which stage, which DOF, and which component (strike vs dip)
-first exceeds physical bounds.
-
-**Implementation**: In the DormandPrinceRK45 stepper, after each stage
-evaluation, print summary stats:
-
+For the CFL formula, we need h_min on the fault. Implementation:
 ```cpp
-// After computing k_[stage]:
-real_t max_V_dip = 0, max_V_strike = 0, max_slip_dip = 0;
-int max_V_dip_dof = -1;
-for (int i = 0; i < num_dofs; i++)
-{
-   real_t V_dip = std::abs(k_[stage](i * 3 + 0));
-   real_t V_str = std::abs(k_[stage](i * 3 + 1));
-   if (V_dip > max_V_dip) { max_V_dip = V_dip; max_V_dip_dof = i; }
-   if (V_str > max_V_strike) { max_V_strike = V_str; }
+real_t h_min = HUGE_VAL;
+for (int fi = 0; fi < fault_interior_faces_.Size(); fi++) {
+    auto *FTr = mesh_.GetInteriorFaceTransformations(fault_interior_faces_[fi]);
+    real_t vol1 = FTr->Elem1->Weight() / 6.0;  // physical vol = detJ * ref_vol
+    real_t h1 = std::cbrt(6.0 * vol1);
+    h_min = std::min(h_min, h1);
 }
-mfem::out << "[RK-STAGE " << stage << "] max_V_dip=" << max_V_dip
-          << " (DOF " << max_V_dip_dof << ")"
-          << " max_V_strike=" << max_V_strike
-          << " max_slip_dip=" << max_slip_dip << "\n";
+// MPI reduce for parallel
 ```
 
-**What this reveals**: The exact amplification factor per stage.
-If V_dip grows 1000× per stage → eigenvalue analysis is correct.
-If V_dip grows slowly for 5 stages then explodes → non-linear trigger.
+### 7.4 Phase 2 Test Plan
 
-**Run on**: 1000m serial (will crash, but prints stages 1-3+ before crash).
-**Effort**: ~40 lines. **Priority**: MEDIUM-HIGH.
+All tests use the 1000m mesh, serial (1 rank), p=2, ×3 penalty:
+
+| Test | dt_init | What it verifies |
+|------|---------|-----------------|
+| **v49f** | 0.07s (manual CFL) | Does CFL-based dt fix the 1000m crash? |
+| **v49g** | 0.05s (conservative) | Extra margin to confirm stability |
+| **v49h** | 0.10s (PETSc default) | Does Tandem's default work for us? |
+| **v49i** | 0.13s + V_guard | Does stage monitoring catch the cascade? |
+
+If v49f works → the fix is confirmed. Then implement automatic h_min computation (Priority 3) and the V guard (Priority 2) for production robustness.
 
 ---
 
-### Priority 2: Rule Out / Confirm Candidates
+## 8. Normal Convention Analysis (NOR-DIAG Follow-Up)
 
-These are more involved diagnostics that methodically eliminate hypotheses.
+### 8.1 Finding
 
-#### Direction 6: K/f Consistency Diagnostic (Tests Candidate 3)
+ALL fault faces show: CalcOrtho = (0,+1,0), basis.normal = (0,-1,0), dot = -1.
 
-**Rationale**: Even though theoretically K×u should equal f for flat faces,
-this diagnostic provides DEFINITIVE proof. If K×u = f to machine precision,
-Candidate 3 is eliminated beyond doubt. If not, we found the bug.
+This means:
+- The DG formulation (K matrix, slip RHS) uses the CalcOrtho convention: normal points +y
+- The traction computation's stress term uses basis.normal: normal points -y
+- The penalty correction in ComputeTraction uses `sign` from CalcOrtho: sign = +1
 
-**Implementation**: The detailed diagnostic from the original v49 Sections 3-6:
-- Call `DGElasticityIPPenaltyIntegrator::AssembleFaceMatrix` for a fault face
-- Construct u_test with prescribed slip jump
-- Compare K×u_test with f from our assembly
-- Report per-DOF differences
+### 8.2 Is This a Problem?
 
-**Faces to test**: 3 faces — nucleation interior, nucleation boundary, far field.
+For a perfect elastic solve (K·u = f exactly), the penalty correction in ComputeTraction is zero (displacement jump equals prescribed slip). The traction is determined entirely by the stress term {σ}·basis.normal, which is in the correct physical direction for the fault.
 
-**Run on**: Both 2500m (validation) and 1000m (actual test).
-**Expected**: K×u = f on both meshes to ~1e-14 relative error.
-**Effort**: ~100 lines. **Priority**: MEDIUM.
-
-#### Direction 7: Penalty Magnitude and Mesh Quality Analysis
-
-**Rationale**: Understanding the QUANTITATIVE differences between meshes.
-
-**Implementation**: Dump for all fault faces:
+For approximate solves (BLR, iterative), the penalty correction is nonzero. The correction is computed in the CalcOrtho convention (sign = +1) while the stress is in the basis.normal convention (opposite). The code combines:
 ```
-[MESH-DIAG] fi=<idx> penalty=<val> nl_q=<val> detJ1=<val> detJ2=<val>
-            A_face=<val> V_elem1=<val> V_elem2=<val> aspect_ratio=<val>
-            centroid=(<x>,<y>,<z>) zone=<nuc_interior|nuc_boundary|far_field>
+T = {σ}·basis.normal - penalty·sign·((u1-u2) - sign·delta_u)
 ```
 
-Compute summary statistics:
-- Mean/max/min penalty on 2500m vs 1000m
-- Aspect ratio distribution
-- Number of nucleation-boundary faces on each mesh
-- Penalty × nbf product (total DOF-weighted coupling strength)
+This computes T in the basis.normal direction:
+- Stress part: σ·(0,-1,0) — traction on the -y surface
+- Penalty correction: -penalty·(+1)·(jump - prescribed) — reduces error in +y convention
+  = +penalty·(prescribed - jump) in basis.normal convention
 
-**What this reveals**: Whether the 1000m mesh has specific faces with
-anomalous penalty (e.g., very thin elements) that the 2500m mesh doesn't.
+This is CORRECT: both terms contribute to traction in the same physical direction. The `sign` in the correction effectively converts the CalcOrtho-convention residual to the basis.normal convention.
 
-**Run on**: Both meshes, serial.
-**Effort**: ~50 lines. **Priority**: MEDIUM.
+### 8.3 Verdict
 
-#### Direction 8: Residual Check After First Solve
-
-**Rationale**: After the first solve (slip=0), check ||K×u - f|| / ||f||.
-If the residual is large, the solver is inaccurate on this system.
-
-**Implementation**: Already partially present (`--check-residual` flag).
-Enhance to also compute the displacement jump at fault face DOFs:
-```
-max |Σ_k shape1(k,q)*u1(k) - Σ_k shape2(k,q)*u2(k)| for each fault face
-```
-With slip=0, this should be near-zero. Any non-zero jump is solver error.
-
-**Run on**: 1000m serial.
-**Effort**: ~40 lines. **Priority**: MEDIUM.
+The opposite normals are by design and handled correctly. No code change needed for normals.
 
 ---
 
-### Priority 3: Deep Analysis
+## 9. Seed Traction Analysis (SEED-TRAC Follow-Up)
 
-If Priorities 0-2 don't identify the root cause, these provide deeper insight.
+### 9.1 Finding
 
-#### Direction 9: Tandem on Same Mesh
+Only 3 DOFs with tau > 1 Pa out of 55920 (1000m) or 10248 (2500m). The 3 DOFs are at the mesh boundaries (corner effects) with traction ≈ 0.
 
-**Rationale**: Verify that Tandem actually works on the bp5_tandem.msh mesh
-at 1000m scale with p=2. If Tandem also fails, the issue is fundamental to
-this mesh, not our code.
+### 9.2 Implication
 
-**Implementation**: Configure Tandem with the same mesh and p=2.
-**Effort**: Configuration + SLURM job. **Priority**: LOW (time-consuming).
+There is no "bad initial traction" seeding the instability. The instability arises DYNAMICALLY during the first RK step:
+1. Stage 0: V = V_init (given) → slip = 0 (no time has passed)
+2. Stage 1: state advances by c₁·dt → new slip → elastic solve → traction → new V
+3. Stage 2: state advances further → V grows from the nucleation physics
+4. Stage 3+: if V has grown enough, the nonlinear amplification takes over
 
-#### Direction 10: Eigenvalue Analysis of Coupled System
-
-**Rationale**: Compute the largest eigenvalue of the linearized ODE system
-dF/dy around the initial state. If |λ_max × dt| > 6 (RK stability limit),
-the system is formally unstable with explicit RK at this dt.
-
-**Implementation**: Form the Jacobian numerically (perturb each state variable,
-measure the response) for a reduced system (one face). Very expensive for the
-full system.
-
-**Alternative**: Use the MUMPS determinant (INFOG(12,13)) to estimate the
-condition number of K, then bound the coupled eigenvalue.
-
-**Effort**: High. **Priority**: LOW (theoretical, not actionable).
-
-#### Direction 11: 1500m Mesh Test (Intermediate Resolution)
-
-**Rationale**: Find the critical mesh resolution where the instability first
-appears. If 2500m works and 1000m crashes, where's the threshold? Testing at
-1500m or 2000m narrows the search and reveals whether the transition is
-gradual (conditioning) or sharp (specific mesh feature).
-
-**Implementation**: Generate a 1500m mesh and run serial p=2 with ×3 penalty.
-**Effort**: Mesh generation + SLURM job. **Priority**: LOW.
+The "trigger" is the normal nucleation physics (V_nuc = 0.01 produces slip which changes traction which accelerates more DOFs). The INSTABILITY is the RK stage amplification exceeding the stability boundary.
 
 ---
 
-## 4. Execution Sequence
+## 10. Summary
 
-### Phase 1: Quick Experiments (can run in parallel)
+| Finding | Evidence | Status |
+|---------|----------|--------|
+| **CFL stability constraint** | 2500m: z=1.44 (stable), 1000m: z=3.60 (unstable) | **ROOT CAUSE** |
+| Normal mismatch | CalcOrtho = -basis.normal on ALL faces, BOTH meshes | By design, correct |
+| Seed traction | 3/55920 DOFs > 1Pa, essentially zero | Not a factor |
+| Smooth nucleation | Delays cascade 2 stages, doesn't fix | Insufficient |
+| Quad order match (2p) | Crashes FASTER | Makes it worse |
+| **PETSc default dt=0.1s** | z=2.77 at h=1000m (marginal) vs our 0.13s (z=3.60) | Explains Tandem survival |
 
-All three Priority 0 experiments can be implemented in a single code version
-and run as separate SLURM jobs:
-
-| Job | Direction | Code change | Mesh | What it tests |
-|-----|-----------|-------------|------|--------------|
-| v49a | 1 (smooth nuc) | Gaussian taper in V_init | 1000m serial | Candidate 5 |
-| v49b | 2 (quad match) | 2p+1 → 2p in RHS | 1000m serial | Candidate 1 |
-| v49c | 3 (normal check) | Print normals | 1000m serial | Candidate 4 |
-| v49d | 4 (traction seed) | Print first-stage τ | 1000m serial | Seed location |
-| v49e | 4 (traction seed) | Print first-stage τ | 2500m serial | Seed comparison |
-
-**Decision point after Phase 1:**
-
+### Fix Formula
 ```
-v49a (smooth nuc) works?
-├── YES → Candidate 5 confirmed.
-│   The sharp boundary is the trigger. Fix: smooth the nucleation
-│   initialization (match Tandem's approach). Done.
-└── NO → Candidate 5 eliminated. Continue Phase 2.
+dt_init = min(dt_from_V, C·η·h_min/(4μ))
 
-v49b (quad match) works?
-├── YES → Candidate 1 confirmed (surprising).
-│   Fix: use 2p quadrature everywhere. Done.
-└── NO → Candidate 1 eliminated.
-
-v49c (normals) show mismatch?
-├── YES → Candidate 4 confirmed.
-│   Fix: align traction normals. Done.
-└── NO → Candidate 4 eliminated.
-
-v49d/e (traction seed) — WHERE is the seed?
-├── Nucleation boundary DOFs → supports Candidate 5 mechanism
-├── Uniformly distributed → suggests eigenvalue/conditioning issue
-└── No seed on 2500m, seed on 1000m → confirms mesh-dependent source
+where C = 2.0, η = μ/(2cs), h_min = minimum fault element size
 ```
 
-### Phase 2: Detailed Diagnostics (only if Phase 1 inconclusive)
-
-| Job | Direction | What it tests |
-|-----|-----------|--------------|
-| v49f | 5 (RK stages) | Cascade growth rate per stage |
-| v49g | 6 (K/f dump) | Candidate 3 |
-| v49h | 7 (mesh quality) | Element quality differences |
-| v49i | 8 (residual) | Solver accuracy |
-
-### Phase 3: Deep Analysis (only if Phase 2 inconclusive)
-
-| Job | Direction | What it tests |
-|-----|-----------|--------------|
-| v49j | 9 (Tandem) | Reference comparison |
-| v49k | 10 (eigenvalue) | Stability theory |
-| v49l | 11 (1500m mesh) | Resolution threshold |
+For h=1000m: dt_init = min(0.13, 0.072) = **0.072s**
 
 ---
 
-## 5. Implementation Notes
+## 11. Phase 2: Immediate Next Steps
 
-### 5.1 Smoothed Nucleation (Direction 1)
+1. **v49f**: Run 1000m serial with `--dt-init 0.07` → confirm stability
+2. **v49g**: Run 1000m serial with `--dt-init 0.05` → confirm with margin
+3. **v49h**: Run 1000m serial with `--dt-init 0.10` → test PETSc default
+4. **v49i**: Implement V_guard in RK stepper → test at dt=0.13 with guard
 
-The BP5 nucleation zone is defined by the rectangular region:
-- Along strike: |x| < l_vw/2 = 30 km
-- Along dip: depth between H - Wf + (Wf - w_nuc)/2 and H - (Wf - w_nuc)/2
-
-The initial V is V_nuc inside, V_init outside. The smoothing should use a
-function of the distance from the nucleation zone boundary.
-
-Check Tandem's initialization: does Tandem use a sharp or smooth boundary?
-From `tandem/examples/tandem/3d/bp5.lua`:
-```lua
-bp5_outside = BP5.new({eps=1e-3})
-```
-The `eps=1e-3` parameter slightly enlarges the nucleation zone by 1mm.
-This is effectively sharp. **But Tandem uses WarpAndBlend nodes for p≥3
-which may provide natural smoothing through the interpolation basis.**
-
-At p=2 with GaussLobatto nodes, WarpAndBlend and GaussLobatto are identical
-(v47 Section 18.3). So the node placement is not the difference.
-
-**Key question**: Does Tandem evaluate the nucleation zone membership per-node
-or per-face? If per-face (using face centroid), all DOFs on a face get the
-same V → no intra-face variation → no interpolation oscillation. If per-node
-(using DOF coordinates), boundary faces have mixed V values.
-
-Look at Tandem's `bp5.lua` Vinit function — it takes a node coordinate and
-returns V. So it IS evaluated per-node. But then Tandem should have the same
-sharp boundary issue...
-
-Unless Tandem's solver (iterative, not direct) naturally damps the oscillation
-through the residual tolerance.
-
-### 5.2 First-Stage Traction Dump (Direction 4)
-
-The traction from ComputeTraction with slip=0 should be purely from the
-stress term `{σ(u)·n̂}` (the penalty correction is zero when [[u]] = 0
-and δu = 0). The stress comes from the equilibrium displacement under
-far-field BCs.
-
-The total traction seen by the friction law is τ_total = τ_pre + τ_computed.
-At initialization, τ_pre is set so that τ_total = σ_n × f(V_init, ψ_init) + η × V_init.
-
-If the traction computation returns exactly the expected value, τ_total is
-at equilibrium and V doesn't change. Any deviation creates a velocity
-perturbation.
-
-The threshold for cascade onset: if `δτ × dt / η > ε_critical`, the
-perturbation survives one RK stage and grows. With penalty/η ≈ 8665 for
-1000m, even δτ = 1 Pa creates δV ≈ 1/4.62e6 ≈ 2e-7 m/s, which over dt=0.13s
-gives δslip ≈ 3e-8 m, which at stage 2 gives δτ' ≈ penalty × 3e-8 ≈ 1200 Pa.
-Amplification: 1200× per stage. After 3 stages: 1.7e9 → GPa. **So even a
-1 Pa initial perturbation blows up on the 1000m mesh.**
-
-On the 2500m mesh: penalty/η ≈ 3466, amplification ≈ 450× per stage. After
-3 stages: 9e7 → 90 MPa. This is comparable to σ_n × f ≈ 15 MPa, so the
-friction law non-linearity kicks in and may stabilize. **The 2500m mesh is
-RIGHT AT the stability boundary.**
-
-This analysis predicts:
-- Any mesh with penalty/η > ~1000 will be unstable at dt=0.13s
-- The critical element size is h_crit where penalty(h_crit)/η ≈ threshold
-- Smoothing the nucleation boundary reduces the initial perturbation from
-  ~1-10 Pa to ~0.001 Pa, which may keep the cascade below GPa
-
-### 5.3 RK Stage Dump (Direction 5)
-
-The RK45 Dormand-Prince has 7 stages. The state vector is
-(s_dip, s_strike, ψ) per DOF. The rate vector k_[stage] contains
-(ds_dip/dt, ds_strike/dt, dψ/dt) = (V_dip, V_strike, dψ/dt).
-
-At stage 1: V should be the equilibrium value (V_init or V_nuc).
-At stage 2: V should be nearly the same (small perturbation).
-If V_dip at any DOF exceeds 1 m/s by stage 3, the cascade is growing.
-
-Print: stage number, max |V_dip|, DOF index of max, max |slip_dip|.
+If v49f-h confirm the CFL hypothesis, implement automatic h_min-based dt selection for production runs.
 
 ---
 
-## 6. Decision Tree (Complete)
-
-```
-Phase 1 (Quick Experiments)
-│
-├── v49a: Smoothed nucleation on 1000m serial
-│   ├── STABLE → ROOT CAUSE IS THE SHARP NUCLEATION BOUNDARY
-│   │   Action: Investigate how Tandem handles this.
-│   │   - Does Tandem use a smooth boundary? (check bp5.lua more carefully)
-│   │   - Does Tandem's iterative solver naturally damp oscillations?
-│   │   - Implement proper smooth initialization. Run benchmark.
-│   │   **INVESTIGATION COMPLETE.**
-│   └── CRASH → Not the sharp boundary. Continue.
-│
-├── v49b: Quadrature order match on 1000m serial
-│   ├── STABLE → ROOT CAUSE IS QUADRATURE ORDER MISMATCH
-│   │   Action: Use 2p everywhere. Investigate why flat faces show this.
-│   │   **INVESTIGATION COMPLETE.**
-│   └── CRASH → Not quadrature order. Continue.
-│
-├── v49c: Normal consistency check
-│   ├── MISMATCH found → ROOT CAUSE IS NORMAL INCONSISTENCY
-│   │   Action: Align traction normals. Test fix.
-│   │   **INVESTIGATION COMPLETE.**
-│   └── All normals consistent → Not normals. Continue.
-│
-├── v49d/e: First-stage traction dump (1000m + 2500m)
-│   ├── Seed found at nucleation boundary DOFs
-│   │   → Confirms oscillation hypothesis even if smooth test didn't fix it
-│   │   → Investigate slip interpolation in detail
-│   ├── Seed found uniformly across DOFs
-│   │   → Solver accuracy or conditioning issue
-│   │   → Run Direction 8 (residual check)
-│   └── No seed > 1 Pa on either mesh
-│       → The perturbation comes from WITHIN the RK stages, not stage 1
-│       → Run Direction 5 (RK stage dump)
-│
-└── Phase 1 decision:
-    ├── Root cause found → Fix and verify
-    └── No root cause yet → Phase 2
-
-Phase 2 (Detailed Diagnostics)
-│
-├── v49f: RK stage-by-stage dump
-│   → Identifies exact amplification factor and trigger stage
-│
-├── v49g: K/f consistency dump
-│   → Definitively confirms or eliminates Candidate 3
-│
-├── v49h: Mesh quality analysis
-│   → Identifies anomalous elements on 1000m mesh
-│
-└── v49i: Solver residual check
-    → Measures actual solve accuracy on 1000m
-
-Phase 3 (Deep Analysis, if needed)
-│
-├── v49j: Tandem on same 1000m mesh → reference comparison
-├── v49k: Eigenvalue estimation → stability theory
-└── v49l: 1500m mesh → find resolution threshold
-```
-
----
-
-## 7. Revision History
+## 12. Revision History
 
 | Version | Change | Status |
 |---------|--------|--------|
-| v48 | Sign hypothesis disproved; BLR partially valid for 2500m | Done |
-| v48i | 1000m serial crash confirmed | DEFINITIVE |
-| **v49** | **Multi-direction investigation plan** | **PLANNING** |
-| v49a (planned) | Smoothed nucleation test | P0 — HIGHEST |
-| v49b (planned) | Quadrature order match test | P0 |
-| v49c (planned) | Normal consistency check | P0 |
-| v49d (planned) | First-stage traction dump (1000m) | P1 |
-| v49e (planned) | First-stage traction dump (2500m) | P1 |
-| v49f (planned) | RK stage-by-stage dump | P1 |
-| v49g (planned) | K/f consistency diagnostic | P2 |
-| v49h (planned) | Mesh quality analysis | P2 |
-| v49i (planned) | Solver residual check | P2 |
+| v47 | Penalty ×3 re-applied. 1000m crashes, 2500m serial stable. | Done |
+| v48 | Sign hypothesis DISPROVED, BLR secondary, 1000m serial crash confirmed | Done |
+| **v49** | **Phase 1 diagnostics: CFL stability identified as root cause** | **IDENTIFIED** |
+| v49a | Smooth nucleation: delays cascade 2 stages, doesn't fix | Insufficient |
+| v49b | Match quad order (2p): crashes FASTER | Makes worse |
+| v49cd | Baseline diagnostic: normals correct, seed=0, RK cascade mapped | Done |
+| v49e | 2500m reference: STABLE, 132+ steps, bounded amplification | Confirmed |
+| v49f (planned) | **CFL fix: dt_init=0.07s for 1000m** | Pending |

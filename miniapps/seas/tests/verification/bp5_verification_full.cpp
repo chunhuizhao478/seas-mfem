@@ -319,6 +319,9 @@ int main(int argc, char *argv[])
    bool diag_normals = false;
    bool diag_first_traction = false;
    bool diag_rk_stages = false;
+   // v49 Phase 2: CFL-aware dt and V guard
+   real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
+   real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = off)
 
    for (int i = 1; i < argc; i++)
    {
@@ -390,6 +393,9 @@ int main(int argc, char *argv[])
       if (arg == "--diag-normals") { diag_normals = true; }
       if (arg == "--diag-first-traction") { diag_first_traction = true; }
       if (arg == "--diag-rk-stages") { diag_rk_stages = true; }
+      // v49 Phase 2: CFL fix and V guard
+      if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
+      if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
    }
 
    // Parse DG method
@@ -1011,6 +1017,15 @@ int main(int argc, char *argv[])
    real_t V_max_init = std::max(V_init, params.V_nuc);
    real_t dt_init = std::min(1e3, 0.01 * params.L_nuc /
                              std::max(V_max_init, 1e-20));
+   // v49 Phase 2: Override dt_init if --dt-init flag provided
+   if (dt_init_override > 0)
+   {
+      dt_init = dt_init_override;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [v49] dt_init override: " << dt_init << " s\n";
+      }
+   }
    ode_solver.SetDt(dt_init);
    if (mpi.IsRoot())
    {
@@ -1019,6 +1034,15 @@ int main(int argc, char *argv[])
    }
    ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
    if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
+   // v49 Phase 2: Enable V guard if --v-guard flag provided
+   if (v_guard_factor > 0)
+   {
+      ode_solver.SetVGuard(v_guard_factor);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [v49] V guard: ON (factor=" << v_guard_factor << ")\n";
+      }
+   }
    ode_solver.Init(seas_op);
 
    real_t t = 0.0;

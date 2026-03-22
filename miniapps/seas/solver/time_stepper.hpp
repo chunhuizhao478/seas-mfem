@@ -179,6 +179,12 @@ public:
    /// v49: Enable per-RK-stage diagnostics (max velocity and slip per stage).
    void SetDiagRKStages(bool v) { diag_rk_stages_ = v; }
 
+   /// v49 Phase 2: Enable stage-level V guard for CFL safety.
+   /// If max |V| in any RK stage exceeds V_guard_factor * V_max_stage0,
+   /// the step is rejected and dt is halved. This catches CFL-violating
+   /// steps before they produce NaN/segfault.
+   void SetVGuard(real_t factor) { v_guard_factor_ = factor; v_guard_enabled_ = true; }
+
    /// Use weighted RMS (2-norm) instead of L-infinity for error norm.
    /// More robust to outlier DOFs at MPI partition boundaries.
    void SetUse2Norm(bool v) { use_2norm_ = v; }
@@ -223,7 +229,45 @@ public:
       const int n = state.Size();
       dt = dt_;
 
-      // v49: RK stage diagnostic helper
+      // v49: RK stage diagnostic helper + V guard
+      real_t v_max_stage0 = 0.0;  // max |V| at stage 0, used by V guard
+
+      // Helper: compute max |V| from a stage vector (V = slip rate components)
+      auto compute_max_V = [&](const Vector &stage_k) -> real_t
+      {
+         int spn = state_per_node_;
+         int n_dofs = stage_k.Size() / spn;
+         real_t max_V = 0.0;
+         for (int i = 0; i < n_dofs; i++)
+         {
+            for (int c = 0; c < spn - 1; c++)  // slip rate components (not psi)
+            {
+               max_V = std::max(max_V, std::abs(stage_k(i * spn + c)));
+            }
+         }
+         if (mpi_ctx_) { max_V = mpi_ctx_->GlobalMax(max_V); }
+         return max_V;
+      };
+
+      // Helper: check V guard — returns true if stage should be rejected
+      auto check_v_guard = [&](int stage_idx, const Vector &stage_k) -> bool
+      {
+         if (!v_guard_enabled_ || v_max_stage0 <= 0.0) { return false; }
+         real_t v_max = compute_max_V(stage_k);
+         if (v_max > v_guard_factor_ * v_max_stage0)
+         {
+            if (!mpi_ctx_ || mpi_ctx_->IsRoot())
+            {
+               mfem::out << "[V-GUARD] Stage " << stage_idx
+                  << " max_V=" << v_max
+                  << " > " << v_guard_factor_ << " * V_stage0="
+                  << v_max_stage0 << " -> rejecting step, halving dt\n";
+            }
+            return true;
+         }
+         return false;
+      };
+
       auto diag_rk_stage = [&](int stage_idx, const Vector &y_ref)
       {
          if (!diag_rk_stages_) { return; }
@@ -263,6 +307,7 @@ public:
       }
       // else k_[0] = k_[6] from previous accepted step (FSAL)
       diag_rk_stage(0, state);  // Stage 0: use state (y_tmp_ not set yet)
+      v_max_stage0 = compute_max_V(k_[0]);  // Capture for V guard
 
       // Stage 2
       for (int i = 0; i < n; i++)
@@ -281,6 +326,14 @@ public:
          total_rejections_++;
          return false;
       }
+      // V guard check for stage 1
+      if (check_v_guard(1, k_[1]))
+      {
+         dt_ = std::max(dt_min_, dt * 0.5);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
 
       // Stage 3
       for (int i = 0; i < n; i++)
@@ -294,6 +347,13 @@ public:
       if (!std::isfinite(NormL2(k_[2])))
       {
          dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
+      if (check_v_guard(2, k_[2]))
+      {
+         dt_ = std::max(dt_min_, dt * 0.5);
          initialized_ = false;
          total_rejections_++;
          return false;
@@ -316,6 +376,13 @@ public:
          total_rejections_++;
          return false;
       }
+      if (check_v_guard(3, k_[3]))
+      {
+         dt_ = std::max(dt_min_, dt * 0.5);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
 
       // Stage 5
       for (int i = 0; i < n; i++)
@@ -330,6 +397,13 @@ public:
       if (!std::isfinite(NormL2(k_[4])))
       {
          dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
+      if (check_v_guard(4, k_[4]))
+      {
+         dt_ = std::max(dt_min_, dt * 0.5);
          initialized_ = false;
          total_rejections_++;
          return false;
@@ -349,6 +423,13 @@ public:
       if (!std::isfinite(NormL2(k_[5])))
       {
          dt_ = std::max(dt_min_, dt * shrink_min_);
+         initialized_ = false;
+         total_rejections_++;
+         return false;
+      }
+      if (check_v_guard(5, k_[5]))
+      {
+         dt_ = std::max(dt_min_, dt * 0.5);
          initialized_ = false;
          total_rejections_++;
          return false;
@@ -540,6 +621,8 @@ private:
    bool initialized_;      ///< Whether k_[0] is valid from a previous step
    bool diag_verbose_ = false; ///< Verbose per-step diagnostics
    bool diag_rk_stages_ = false; ///< v49: per-stage velocity/slip diagnostics
+   bool v_guard_enabled_ = false; ///< v49 Phase 2: stage-level V guard
+   real_t v_guard_factor_ = 100.0; ///< V guard threshold: reject if V > factor * V_max_stage0
    bool use_2norm_ = false;    ///< Use RMS (2-norm) instead of L-inf for error
    int total_rejections_;  ///< Total number of rejected steps
    int diag_count_;        ///< Counter for dt_min diagnostic messages
