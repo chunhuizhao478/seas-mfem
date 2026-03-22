@@ -1,7 +1,7 @@
 # BP5 Debug v49: CFL Stability Analysis — IP Penalty Eigenvalue vs dt_init
 
 **Date**: 2026-03-22
-**Status**: ROOT CAUSE IDENTIFIED. The ×3 IP penalty creates a mesh-size-dependent CFL constraint: the effective eigenvalue λ ∝ 1/h, and λ*dt exceeds the RK45 stability boundary for h=1000m at dt=0.13s but NOT for h=2500m. The fix is CFL-aware dt selection: dt_init = min(dt_V, C·η·h/(4μ)).
+**Status**: ISSUE A (1000m serial crash) SOLVED. CFL-like stability constraint confirmed — dt_init=0.07s and V-guard both fix 1000m. ISSUE B (2500m parallel crash) STILL OPEN — not addressed by Phase 1+2 (all serial tests). Next: test 2500m parallel with V-guard.
 **Previous**: v48 (sign hypothesis disproved, BLR secondary issue, 1000m serial crash confirmed)
 **Branch**: `feature/elasticity`
 
@@ -442,4 +442,278 @@ If v49f-h confirm the CFL hypothesis, implement automatic h_min-based dt selecti
 | v49b | Match quad order (2p): crashes FASTER | Makes worse |
 | v49cd | Baseline diagnostic: normals correct, seed=0, RK cascade mapped | Done |
 | v49e | 2500m reference: STABLE, 132+ steps, bounded amplification | Confirmed |
-| v49f (planned) | **CFL fix: dt_init=0.07s for 1000m** | Pending |
+| v49f | **CFL fix: dt_init=0.07s → STABLE** (cascade V=87, RK rejects, recovers) | **CONFIRMED** |
+| v49g | Conservative dt_init=0.05s → STABLE (cascade V=3.4, RK rejects, recovers) | Confirmed |
+| v49h | PETSc default dt_init=0.10s → **CRASH** (cascade V=129, traction GPa) | Threshold between 0.07-0.10 |
+| v49i | V-guard at dt=0.13s → **STABLE** (guard triggers 2×, halves dt, recovers) | **V-GUARD WORKS** |
+
+---
+
+## 13. Phase 2 Results
+
+### 13.1 Overall Outcome
+
+| Test | dt_init | Max cascade V | Stage of max | Outcome |
+|------|---------|--------------|-------------|---------|
+| **v49f** | 0.07s | 87.1 (stage 6) | All 7 stages complete | **STABLE** — RK error rejects, dt→0.009 |
+| **v49g** | 0.05s | 3.39 (stage 5) | All 7 stages complete | **STABLE** — RK error rejects, dt→0.009 |
+| **v49h** | 0.10s | 129 (stage 5) | Stage 5 triggers blowup | **CRASH** — traction GPa at 5 DOFs |
+| **v49i** | 0.13s + V-guard(100×) | 20.9 (stage 4, caught) | V-guard at stage 4 | **STABLE** — halves dt ×2, then proceeds |
+
+### 13.2 v49f: dt=0.07s (CFL Fix) — STABLE
+
+First step attempt at dt=0.07s shows cascade:
+```
+Stage 0: V_str = 0.0100
+Stage 1: V_str = 0.0106   (×1.06)
+Stage 2: V_str = 0.0122   (×1.15)
+Stage 3: V_str = 0.1417   (×11.6)   ← nonlinear onset
+Stage 4: V_str = 1.969    (×13.9)
+Stage 5: V_str = 21.60    (×11.0)
+Stage 6: V_str = 87.14    (×4.03)   ← still large but ALL 7 stages complete
+```
+
+RK error estimate: huge → step REJECTED. Retries with dt ≈ 0.005s:
+```
+Stage 0: V_str = 0.0100
+Stage 1: V_str = 0.01003  (×1.003)   ← calm
+... all stages < 0.0101
+```
+Step accepted, dt grows adaptively. After step 1 (dt=0.009s), steady progression:
+Steps 2-10: V_max ≈ 0.010, dt growing to 0.017s. **Healthy nucleation.**
+
+### 13.3 v49g: dt=0.05s (Conservative) — STABLE
+
+Same pattern as v49f but milder cascade (peak V=3.39 at stage 5). RK rejects first attempt, retries at dt≈0.005s. Subsequent steps identical to v49f.
+
+### 13.4 v49h: dt=0.10s (PETSc Default) — CRASH
+
+```
+Stage 0: V_str = 0.0100
+Stage 1: V_str = 0.0108   (×1.08)
+Stage 2: V_str = 0.0158   (×1.46)
+Stage 3: V_str = 0.428    (×27.1)   ← runaway
+Stage 4: V_str = 8.155    (×19.1)
+Stage 5: V_str = 129.2    (×15.8)   ← OVERFLOW
+```
+TRACTION BLOWUP at 5 interior DOFs, tau > 1 GPa. Segfault.
+
+**Key: dt=0.10 is ABOVE the 1000m stability threshold.** The CFL estimate of dt_CFL=0.072s is accurate — the threshold is between 0.07 and 0.10.
+
+### 13.5 v49i: V-guard — STABLE
+
+Default dt=0.13s. V-guard factor = 100× (stage V > 100 × V_stage0 → reject and halve):
+```
+Attempt 1 (dt=0.13s):
+  Stage 4: V=20.94 > 100 × 0.01 = 1.0 → REJECTED, dt → 0.065s
+
+Attempt 2 (dt=0.065s):
+  Stage 4: V=1.43 > 100 × 0.01 = 1.0 → REJECTED, dt → 0.0325s
+
+Attempt 3 (dt=0.0325s):
+  All stages complete (max V=0.258 at stage 5) → ACCEPTED by V-guard
+  RK error estimate still large → step rejected by error control
+  Retries at dt ≈ 0.006s → accepted
+```
+After that, step 1 accepted at dt=0.009s. Subsequent steps identical to v49f/v49g.
+
+### 13.6 Stage-by-Stage Amplification Comparison
+
+| Stage | v49g (dt=0.05) | v49f (dt=0.07) | v49h (dt=0.10) | v49cd (dt=0.13) |
+|-------|---------------|---------------|---------------|----------------|
+| 0 | 0.0100 | 0.0100 | 0.0100 | 0.0100 |
+| 1 | 0.0104 | 0.0106 | 0.0108 | 0.0111 |
+| 2 | 0.0108 | 0.0122 | 0.0158 | 0.0217 |
+| 3 | 0.0455 | 0.1417 | 0.428 | 0.873 |
+| 4 | 0.455 | 1.969 | 8.155 | 20.94 |
+| 5 | 3.39 | 21.60 | **129 → CRASH** | **CRASH** |
+| 6 | 3.07 | 87.14 | — | — |
+| **Result** | **RK rejects** | **RK rejects** | **Segfault** | **Segfault** |
+
+The stage 3→4 amplification is the critical nonlinear transition:
+- dt=0.05: 0.045 → 0.455 (10×)
+- dt=0.07: 0.14 → 1.97 (14×)
+- dt=0.10: 0.43 → 8.16 (19×)
+- dt=0.13: 0.87 → 20.9 (24×)
+
+The amplification RATE increases with dt (larger steps feed more energy into the cascade).
+
+### 13.7 Post-Stabilization Convergence
+
+All three stable runs (v49f, v49g, v49i) converge to identical behavior after step 1:
+
+| Step | Time [yr] | dt [s] | V_max [m/s] |
+|------|-----------|--------|-------------|
+| 1 | 1.1e-10 | 0.009 | 0.0101 |
+| 2 | 3.6e-10 | 0.010 | 0.0102 |
+| 3 | 7.1e-10 | 0.014 | 0.0101 |
+| 4 | 1.1e-09 | 0.018 | 0.0102 |
+| 5 | 1.4e-09 | 0.018 | 0.0102 |
+| ... | ... | 0.017-0.021 | 0.010-0.010 |
+
+**The initial dt choice only affects the first step.** Once the adaptive controller finds the right dt (≈0.01-0.02s), the simulation is identical regardless of how it got there.
+
+---
+
+## 14. Two Distinct Issues Confirmed
+
+The Phase 1+2 investigation reveals TWO separate issues:
+
+### 14.1 Issue A: 1000m Serial Crash (SOLVED)
+
+**Root cause**: CFL-like stability constraint. IP penalty stiffness scales as 1/h, making dt_init=0.13s too large for h=1000m.
+
+**Evidence**: Serial runs at dt=0.07s and dt=0.05s are STABLE. V-guard at dt=0.13s is also STABLE. dt=0.10s is still too large (CRASH).
+
+**Fix**: Either CFL-aware dt_init or V-guard in the RK stepper (or both for robustness).
+
+### 14.2 Issue B: 2500m Parallel Crash (v47m — STILL OPEN)
+
+**Root cause**: Unknown. The 2500m serial run (v47l, v49e) is STABLE with the same dt=0.13s. Only the parallel run (v47m, 48 ranks) crashes. This requires shared faces to trigger.
+
+**Not addressed by Phase 1+2**: All v49 tests were serial. The parallel crash is a separate investigation track.
+
+**The v48 shared face sign hypothesis** remains a candidate for Issue B, though Section 6.1 of this document notes that v48 Section 10 disproved the CalcOrtho sign claim. The parallel crash mechanism may involve:
+- K-f mismatch on shared faces (different from the sign direction issue)
+- BLR solver interaction with parallel assembly
+- Face-neighbor data exchange timing
+- Or another undiscovered parallel-specific bug
+
+---
+
+## 15. Recommended Next Steps
+
+### 15.1 Immediate (Issue A — Production Fix)
+
+1. **Implement CFL-aware dt_init** in production code:
+   ```
+   dt_init = min(L/(10·V_max), 2.0 · η · h_min / (4·μ))
+   ```
+   Compute h_min from mesh element volumes on the fault.
+
+2. **Keep V-guard as safety net**: Already implemented and tested in v49i. Factor 100× is conservative but effective.
+
+### 15.2 Next Investigation (Issue B — Parallel)
+
+1. Run 2500m **parallel** with V-guard → does it survive?
+2. If V-guard helps: the parallel crash is also a cascade/dt issue (shared faces may have different effective stiffness)
+3. If V-guard doesn't help: the parallel bug is structural (sign, assembly, or data exchange error) → dump K×u vs f on shared faces
+
+### 15.3 Long-Term
+
+1. Implement automatic h_min computation from mesh
+2. Make dt_init formula the default (no manual --dt-init flag needed)
+3. Add V-guard with configurable factor to production RK45
+4. Profile to ensure the V-guard overhead is negligible
+
+---
+
+## 16. Phase 3: Issue B — Parallel Crash Investigation
+
+### 16.1 Context
+
+Phase 1+2 resolved Issue A (1000m serial crash → CFL/dt stiffness). Issue B remains:
+
+| Run | Mesh | Ranks | dt | Result |
+|-----|------|-------|-----|--------|
+| v47l | 2500m | 1 (serial) | 0.13s | STABLE |
+| v49e | 2500m | 1 (serial) | 0.13s | STABLE (132+ steps) |
+| v47m | 2500m | 48 (parallel) | 0.13s | **CRASH** — GPa traction, SIGNAL 9/11 |
+
+The 2500m serial run shows only mild cascade (peak V=0.13 at stage 5, recovers).
+The 2500m parallel run crashes immediately. The ONLY difference is MPI partitioning,
+which introduces shared faces at partition boundaries.
+
+### 16.2 Key Question
+
+Is the parallel crash:
+- **(A)** A cascade/stiffness issue amplified by shared faces (e.g., shared faces have
+  higher effective stiffness due to face-neighbor coupling), fixable by V-guard/dt?
+- **(B)** A structural parallel bug (sign error, assembly mismatch, data exchange issue)
+  that produces wrong results regardless of dt?
+
+### 16.3 Phase 3 Tests
+
+Three tests targeting the parallel crash:
+
+| Test | Mesh | Ranks | Nodes | Fix applied | What it tests |
+|------|------|-------|-------|------------|---------------|
+| **v49j** | 2500m | 48 | 1 | `--v-guard` | Can V-guard prevent the 2500m parallel cascade? |
+| **v49k** | 2500m | 48 | 1 | `--dt-init 0.05` | Is the 2500m parallel crash dt-dependent? |
+| **v49l** | 1000m | 8 | 4 | `--v-guard` + `--dt-init 0.05` | 1000m parallel — small scale |
+| **v49m** | 1000m | 400 | 8 | `--v-guard` + `--dt-init 0.05` | **PRODUCTION SCALE** — max shared faces |
+
+All include `--diag-rk-stages` for cascade tracing. v49j builds; v49k, v49l, v49m wait for binary.
+
+v49l (8 ranks) is the minimal parallel test for 1000m. v49m (400 ranks) is the
+full production configuration: 63451 tets / 400 ranks ≈ 159 tets/rank, maximizing
+the number of shared faces. If v49l passes but v49m fails, the issue scales with
+partition count (more shared faces = more exposure to the parallel bug).
+
+### 16.4 Decision Tree
+
+```
+v49j (2500m, 48 ranks, V-guard) + v49k (2500m, 48 ranks, dt=0.05):
+├── Both STABLE → Issue B is cascade/CFL at 2500m parallel
+│   └── v49l (1000m, 8 ranks) + v49m (1000m, 400 ranks):
+│       ├── Both STABLE → ALL ISSUES RESOLVED. Production ready.
+│       ├── v49l OK, v49m CRASH → scales with partition count
+│       │                         (more shared faces = stiffer system)
+│       │                         → tighten V-guard or reduce dt further
+│       └── Both CRASH → 1000m parallel has issue beyond cascade
+│                         → K×u vs f diagnostic on 1000m shared faces
+│
+├── v49j STABLE, v49k CRASH → V-guard specifically needed for parallel
+│   └── v49l/v49m should be STABLE (have V-guard)
+│
+└── Both CRASH → **Structural parallel bug confirmed**
+                 → K×u vs f diagnostic on shared faces
+                 → v49l/v49m will also crash (same bug)
+```
+
+### 16.5 If Structural Bug Confirmed: Next Diagnostic
+
+If both v49j and v49k crash, implement a K×u vs f consistency check:
+
+1. On each shared fault face, extract the K penalty rows for Elem1 DOFs
+2. Construct `u_prescribed` such that `[[u]] = sign * delta_u` (the prescribed slip)
+3. Compute `f_from_K = K_face_penalty * u_prescribed`
+4. Compare with `f_from_RHS` from `AssembleSlipContributionIPShared`
+5. Print per-DOF difference: `|f_from_K - f_from_RHS|`
+6. Any nonzero difference reveals the assembly inconsistency
+
+This requires extracting the element stiffness matrix contribution from a single shared
+face, which can be done by calling the DG integrator's `AssembleFaceMatrix` directly
+on the shared face FaceElementTransformations.
+
+### 16.6 Submission
+
+```bash
+# Submit v49j first (builds), then the rest (wait for binary)
+sbatch jobs/bp5/bp5_v49j_2500m_par_vguard.sbatch
+sbatch jobs/bp5/bp5_v49k_2500m_par_dt005.sbatch
+sbatch jobs/bp5/bp5_v49l_1000m_par_vguard.sbatch
+sbatch jobs/bp5/bp5_v49m_1000m_par400_vguard.sbatch
+```
+
+---
+
+## 17. Revision History (Updated)
+
+| Version | Change | Status |
+|---------|--------|--------|
+| v47 | Penalty ×3 re-applied. 1000m crashes, 2500m serial stable. | Done |
+| v48 | Sign hypothesis disproved, BLR secondary, 1000m serial crash confirmed | Done |
+| **v49** | **Phase 1: CFL stability identified as root cause of 1000m crash** | Done |
+| v49a | Smooth nucleation: delays cascade 2 stages, doesn't fix | Insufficient |
+| v49b | Match quad order (2p): crashes FASTER | Makes worse |
+| v49cd | Baseline diagnostic: normals correct, seed=0, RK cascade mapped | Done |
+| v49e | 2500m serial reference: STABLE, 132+ steps, bounded amplification | Confirmed |
+| **v49f** | **CFL fix: dt=0.07s → STABLE** (cascade V=87, RK rejects, recovers) | **CONFIRMED** |
+| **v49g** | **Conservative dt=0.05s → STABLE** (cascade V=3.4, RK rejects) | Confirmed |
+| **v49h** | **PETSc default dt=0.10s → CRASH** (cascade V=129, GPa traction) | Threshold 0.07-0.10 |
+| **v49i** | **V-guard at dt=0.13s → STABLE** (guard triggers 2×, recovers) | **V-GUARD WORKS** |
+| v49j (pending) | 2500m parallel + V-guard → test Issue B | **Submitted** |
+| v49k (pending) | 2500m parallel + dt=0.05 → test Issue B dt-dependence | **Submitted** |
+| v49l (pending) | 1000m parallel 8 ranks + V-guard + dt=0.05 | **Submitted** |
+| v49m (pending) | **1000m parallel 400 ranks + V-guard + dt=0.05 → PRODUCTION SCALE** | **Submitted** |
