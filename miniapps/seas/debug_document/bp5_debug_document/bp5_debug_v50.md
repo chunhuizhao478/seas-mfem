@@ -784,4 +784,97 @@ the penalty in the stiffness matrix assembly.
 | v50f++ | Penalty formulas algebraically identical → Strategy 2 abandoned | DISPROVED |
 | v50f++ | Two new hypotheses: (1) solver accuracy, (2) GaussLobatto vs WarpAndBlend nodes (v46/v47 flagged, never tested) | ANALYZING |
 | v50g | **Phase 0: SMOKING GUN — GL cond(M)=2901 vs Equi=58 at p=4 (50× worse). Lebesgue=46 vs 3.5 (13×)** | **CONFIRMED** |
-| v50g | Phase 1: ClosedUniform nodes at p=4 + BLR tol 1e-14 at p=4 | **NEXT** |
+| v50g | Phase 1: ClosedUniform nodes at p=4 + p=2 regression check | Done |
+| **v50g test** | **p=4 ClosedUniform 200 ranks: V grows 0.01→0.012 — NUCLEATION WORKS** | **FIXED** |
+| v50g2 test | p=2 ClosedUniform 200 ranks: identical to GL p=2 (ratio=1.000000) — no regression | **✓** |
+| **v50g p=4 prod** | **p=4 ClosedUniform 400 ranks: V decays 0.01→0.00017 — FAILS at 400 ranks** | **PARALLEL BUG** |
+| **v50g p=6 prod** | **p=6 ClosedUniform 400 ranks 4000m: V grows 0.01→0.033 — NUCLEATION WORKS** | **✓ BEST MATCH** |
+
+---
+
+## 9. Phase 1 Results: ClosedUniform Node Distribution
+
+### 9.1 Test Matrix Results
+
+| Run | Mesh | Order | Nodes | Ranks | V trajectory | Status |
+|-----|------|-------|-------|-------|-------------|--------|
+| v50g test | 2500m | p=4 | **Equi** | 200 | 0.01 → **0.012** ↑ | **WORKS** ✓ |
+| v50g2 test | 2500m | p=2 | **Equi** | 200 | Identical to GL | **No regression** |
+| v50g p=4 prod | 2500m | p=4 | **Equi** | 400 | 0.01 → **0.00017** ↓ | **FAILS** ✗ |
+| v50g p=6 prod | 4000m | p=6 | **Equi** | 400 | 0.01 → **0.033** ↑ | **WORKS** ✓ |
+
+### 9.2 Key Finding: ClosedUniform Fixes p=4 Serial, Fails p=4 Parallel
+
+The node distribution fix resolves the mass matrix conditioning issue at p=4 (V grows
+at 200 ranks), confirming the root cause. However, at 400 ranks the p=4 nucleation
+still fails — a SEPARATE parallel-specific issue exists.
+
+The p=6 run at 400 ranks WORKS, which means the parallel issue is NOT universal for
+high orders. The difference is the mesh: 2500m mesh with 400 ranks has very few
+elements per rank (~12-15), creating a high ratio of shared faces to interior faces.
+The 4000m mesh with fewer total elements may have a different partition structure.
+
+### 9.3 p=6 4000m vs Tandem p6: Excellent Match
+
+Direct comparison on Tandem's own 4000m mesh, same polynomial order p=6:
+
+**Initial conditions: PERFECT**
+```
+  Our:    V=0.010000, tau=21.1481 MPa, state(log10)=8.113943
+  Tandem: V=0.010000, tau=21.1481 MPa, state(log10)=8.113943
+  tau diff: 0.000005 MPa (6 significant digits)
+```
+
+**Nucleation evolution at (x2=-24, x3=10):**
+
+| t (s) | Our V (m/s) | Tandem V | Ratio | Our slip | Tandem slip | Our tau | Tandem tau |
+|-------|-------------|----------|-------|----------|-------------|---------|-----------|
+| 0 | 0.01000 | 0.01000 | 1.00× | 0 | 0 | 21.15 | 21.15 |
+| 3.0 | 0.01539 | 0.01497 | 1.03× | 0.039 | 0.039 | 20.99 | 20.99 |
+| 8.9 | 0.01892 | 0.01782 | 1.06× | 0.142 | 0.139 | 20.43 | 20.44 |
+| 16.7 | 0.02313 | 0.02165 | 1.07× | 0.301 | 0.290 | 19.55 | 19.61 |
+| 23.4 | **0.03298** | **0.02949** | **1.12×** | 0.489 | 0.456 | 18.56 | 18.71 |
+
+**Event-aligned timing: OUR nucleation is AHEAD of Tandem:**
+- V = 0.016 m/s: Tandem 4.3s → Ours **3.4s** (1.0s faster)
+- V = 0.032 m/s: Tandem 24.6s → Ours **22.8s** (1.8s faster)
+
+**Non-nucleation stations at t=23.4s:**
+- All tau values match to 0.01 MPa or better
+- All V at plate rate (identical)
+- Surface tau: our 13.30 vs Tandem 13.30 (exact)
+
+**Assessment**: This is the **best Tandem match achieved** — 3-12% V agreement, <0.15 MPa
+tau agreement, 1-2 second timing lead (not lag). The slight V excess may be from
+ClosedUniform vs WarpAndBlend nodes or the `dim*` penalty correction.
+
+Tandem's peak V at this station is 0.42 m/s at t=42s. Extrapolating our growth rate,
+we should reach this around t=40-42s — nearly matching Tandem's timing.
+
+### 9.4 1000m p=2 Production — Healing Analysis
+
+The 1000m p=2 run reached t≈70.5s. The first earthquake is in the healing phase:
+
+| Milestone | Tandem (s) | Our extrapolated (s) | Delay |
+|-----------|-----------|---------------------|-------|
+| V < 0.1 | 63.7 | 72.4 | +8.7s |
+| V < 0.05 | 75.2 | 75.3 | +0.1s |
+| V < 0.01 | 77.5 | 77.6 | +0.1s |
+| V < 0.001 | 79.7 | 78.1 | -1.6s |
+
+The healing RATE matches Tandem precisely: -0.0172 m/s² (ours) vs -0.0167 m/s² (Tandem)
+at V=0.13. The ~8s nucleation delay carries through but the physics of healing is correct.
+~4400 more steps needed to complete healing (dt ≈ 0.0016s during coseismic).
+
+### 9.5 Remaining Issues
+
+1. **p=4 parallel failure at 400 ranks** — ClosedUniform fixes serial but not 400-rank
+   parallel on 2500m mesh. The high shared-face ratio (400 ranks ÷ ~5000 elements =
+   ~12 elements/rank) may trigger shared face coupling issues. Test at 200 ranks
+   for production, or investigate the shared face sign bug from v48.
+
+2. **p=6 production run still early** — at t=23.4s, needs to reach t≈42s for first
+   earthquake peak. Running on 48-hour allocation should be sufficient.
+
+3. **1000m p=2 production** — in healing phase, needs ~4400 more steps to complete
+   first earthquake and enter interseismic.
