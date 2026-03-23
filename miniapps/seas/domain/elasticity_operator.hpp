@@ -205,6 +205,10 @@ public:
    /// v49: Diagnostic - dump traction values at first evaluation (zero slip).
    void SetDiagFirstTraction(bool v) { diag_first_traction_ = v; }
 
+   /// v50a: Scale IP penalty by this factor (1.0 = default, <1.0 = reduced).
+   /// Used to diagnose whether over-stiff penalty causes nucleation failure at high p.
+   void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -224,6 +228,7 @@ private:
    bool diag_first_traction_ = false;    // Dump traction at first zero-slip evaluation
    mutable bool diag_normals_done_ = false;
    mutable bool diag_first_traction_done_ = false;
+   real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -834,7 +839,8 @@ private:
             new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0));
          // Penalty (material-dependent, |nor| scaling)
          cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3));
+            new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
+                                                 penalty_factor_));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
@@ -842,7 +848,8 @@ private:
                new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0),
                dirichlet_bdr_marker_);
             cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3),
+               new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
+                                                    penalty_factor_),
                dirichlet_bdr_marker_);
          }
       }
@@ -1165,7 +1172,7 @@ private:
             real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
             real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
             real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
-            real_t penalty_ip = (p0 + p1) / 4.0;
+            real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
             real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
             // One-shot face consistency diagnostic (first quad point only)
@@ -1657,7 +1664,7 @@ private:
                real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
                real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
                real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
-               real_t penalty_ip = (p0 + p1) / 4.0;
+               real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
                for (int k = 0; k < ndof1; k++)
@@ -2287,7 +2294,7 @@ private:
                            * (c1_mat * c1_mat / c0_mat);
                real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                            * (c1_mat * c1_mat / c0_mat);
-               real_t penalty_ip = (p0 + p1) / 4.0;
+               real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
                real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
                // Elem1 contribution
@@ -2667,7 +2674,7 @@ private:
                               * (c1_mat * c1_mat / c0_mat);
                   real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
                               * (c1_mat * c1_mat / c0_mat);
-                  real_t penalty_ip = (p0 + p1) / 4.0;
+                  real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
                   real_t wq_penalty = penalty_ip * ip.weight * nl_q;
 
                   // Elem1 contribution only (elem2 handled by neighbor rank)
@@ -3318,7 +3325,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                      * (c1_mat * c1_mat / c0_mat);
          real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                      * (c1_mat * c1_mat / c0_mat);
-         real_t penalty_ip = (p0 + p1) / 4.0;
+         real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
 
          // Face consistency diagnostic: find heterogeneous faces on 2nd call
          if (diag_face_call_ == 2 && nbf_per_face_ > 1)
@@ -3820,7 +3827,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                         * (c1_mat * c1_mat / c0_mat);
             real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
                         * (c1_mat * c1_mat / c0_mat);
-            real_t penalty_ip = (p0 + p1) / 4.0;
+            real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
 
             // Multi-DOF: store per-quad-point traction for L2 projection
             int nbf = nbf_per_face_;

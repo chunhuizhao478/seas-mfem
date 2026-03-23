@@ -56,8 +56,8 @@ public:
    /// @param mu Shear modulus coefficient
    /// @param dim Spatial dimension (default 3)
    DGElasticityIPPenaltyIntegrator(Coefficient &lambda, Coefficient &mu,
-                                    int dim = 3)
-      : lambda_(lambda), mu_(mu), dim_(dim) {}
+                                    int dim = 3, real_t penalty_factor = 1.0)
+      : lambda_(lambda), mu_(mu), dim_(dim), penalty_factor_(penalty_factor) {}
 
    using BilinearFormIntegrator::AssembleFaceMatrix;
    void AssembleFaceMatrix(const FiniteElement &el1,
@@ -126,11 +126,11 @@ public:
          {
             real_t vol2 = Trans.Elem2->Weight();
             real_t p1 = (dim_ + 1) * c_N_1 * (real_t(dim_) * nl_q / vol2) * (c1 * c1 / c0);
-            penalty = (p0 + p1) / 4.0;
+            penalty = penalty_factor_ * (p0 + p1) / 4.0;
          }
          else
          {
-            penalty = p0;
+            penalty = penalty_factor_ * p0;
          }
 
          // Penalty coefficient per quadrature point:
@@ -232,6 +232,7 @@ private:
    Coefficient &lambda_;
    Coefficient &mu_;
    int dim_;
+   real_t penalty_factor_;
 };
 
 } // namespace seas

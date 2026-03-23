@@ -323,6 +323,8 @@ int main(int argc, char *argv[])
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
    bool no_v_guard = false;         // v50: disable V guard (for testing only)
+   // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
+   real_t penalty_factor = 1.0;
 
    for (int i = 1; i < argc; i++)
    {
@@ -398,6 +400,7 @@ int main(int argc, char *argv[])
       if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
       if (arg == "--no-v-guard") { no_v_guard = true; }
+      if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
    }
 
    // Parse DG method
@@ -611,6 +614,14 @@ int main(int argc, char *argv[])
    if (match_quad_order) { domain.SetMatchQuadOrder(true); }
    if (diag_normals) { domain.SetDiagNormals(true); }
    if (diag_first_traction) { domain.SetDiagFirstTraction(true); }
+   if (penalty_factor != 1.0)
+   {
+      domain.SetPenaltyFactor(penalty_factor);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [v50a] penalty_factor = " << penalty_factor << "\n";
+      }
+   }
 
    if (mpi.IsRoot())
    {
