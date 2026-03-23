@@ -1022,12 +1022,24 @@ int main(int argc, char *argv[])
    //
    // Two dt limits:
    //   dt_V   = 0.01 * Dc / V_max        (physics: slip per step << Dc)
-   //   dt_CFL = C * eta * h_min / (beta * mu)  (stability: z < z_crit)
-   // with C=2.0 (safety below empirical z_crit≈2.5-3.0), beta=4.0
+   //   dt_CFL = C * eta * h_min / (beta(p) * mu)  (stability: z < z_crit)
+   // with C=2.0 (safety below empirical z_crit≈2.5-3.0)
+   //
+   // v50+: beta scales with c_N_1 = p*(p+dim-1)/dim (penalty coefficient).
+   //   beta(p) = beta_ref * c_N_1(p) / c_N_1(p_ref)
+   // where beta_ref=4.0 was calibrated at p_ref=2.
+   //   p=1: c_N_1=1.0   -> beta=1.5
+   //   p=2: c_N_1=2.67  -> beta=4.0
+   //   p=4: c_N_1=8.0   -> beta=12.0
+   //   p=6: c_N_1=16.0  -> beta=24.0
+   int dim = 3;
+   real_t c_N_1 = order * (order + dim - 1.0) / dim;
+   real_t c_N_1_ref = 2.0 * (2.0 + dim - 1.0) / dim;  // c_N_1 at p=2 = 8/3
+   real_t beta = 4.0 * c_N_1 / c_N_1_ref;
    real_t V_max_init = std::max(V_init, params.V_nuc);
    real_t dt_V = std::min(1e3, 0.01 * params.L_nuc /
                           std::max(V_max_init, 1e-20));
-   real_t dt_CFL = 2.0 * params.eta() * h_min / (4.0 * params.mu());
+   real_t dt_CFL = 2.0 * params.eta() * h_min / (beta * params.mu());
    real_t dt_init = std::min(dt_V, dt_CFL);
 
    // Manual override if --dt-init flag provided (for testing)
@@ -1042,6 +1054,8 @@ int main(int argc, char *argv[])
    ode_solver.SetDt(dt_init);
    if (mpi.IsRoot())
    {
+      std::cout << "  CFL: c_N_1=" << c_N_1 << " beta=" << beta
+                << " (order=" << order << ")\n";
       std::cout << "  dt_V = " << dt_V << " s, dt_CFL = " << dt_CFL << " s\n";
       std::cout << "  Initial dt: " << dt_init << " s"
                 << (dt_init <= dt_CFL ? " (CFL-limited)" : " (V-limited)")
