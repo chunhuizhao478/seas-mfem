@@ -420,70 +420,306 @@ The traction recovery method — HOW traction is extracted after the solve — w
 compared. We assumed same-formula consistency; the catastrophic cancellation mechanism
 was not considered.
 
-### 6.11 Fix Strategies (Revised)
+### 6.11 Fix Strategy 1: Stress-Only Traction — TESTED, DISPROVED
 
-**Strategy 1: Stress-only traction (`--traction-stress-only`) — simplest diagnostic**
+**Hypothesis**: The penalty correction in ComputeTraction is the source of cancellation
+error. Dropping it should give accurate traction from `{σ(u)·n}` alone, since the
+MUMPS direct solve enforces `[u] ≈ delta_u` through the penalty in K.
 
-The IP traction is:
+**Implementation**: Added `--traction-stress-only` flag that sets `correction_q = 0`
+in both interior and shared fault face IP traction paths.
+
+**Results** (v50f, v50f2):
+
+| Test | Order | Traction | V trajectory | Status |
+|------|-------|----------|-------------|--------|
+| **v50f** | p=4 | stress-only | 0.01 → **10.2 m/s** in 35 steps | **BLOWUP** |
+| **v50f2** | p=2 | stress-only | 0.01 → **46.5 m/s** in 397 steps | **BLOWUP** |
+
+**Both blow up — at ALL orders.** The penalty correction is ESSENTIAL for stability,
+not just a cancellation artifact. Without it, the DG traction is physically wrong.
+
+**Why**: The penalty correction `penalty * sign * ((u1-u2) - sign*delta_u)` is NOT
+approximately zero. Even with a direct solver, the DG discretization enforces
+`[u] ≈ delta_u` only weakly (through the penalty in K). The residual
+`(u1-u2) - delta_u` is O(h^p / penalty) — small but nonzero. The penalty correction
+multiplies this residual by the penalty, giving an O(h^p) contribution that is
+essential for the DG traction formula to be accurate.
+
+Removing the penalty correction removes the DG flux consistency, causing the
+displacement-to-traction mapping to diverge.
+
+**Conclusion**: Strategy 1 is INVALID. The penalty correction is structurally
+required in the DG traction formula. The fix must KEEP the penalty correction
+but compute it CONSISTENTLY with K.
+
+### 6.12 Revised Root Cause Understanding
+
+The v50f/f2 blowup disproves the "catastrophic cancellation" hypothesis in its
+original form. The corrected understanding:
+
+1. **The penalty correction is NOT approximately zero** — it carries essential DG
+   flux information. Removing it breaks the formulation entirely.
+
+2. **At p=2, the penalty correction is computed accurately enough** by both K assembly
+   and ComputeTraction. The small inconsistency between the two code paths is
+   tolerable because the penalty magnitude is moderate (c_N_1 = 2.67).
+
+3. **At p=4, the penalty is 3× larger** (c_N_1 = 8.0). The inconsistency between
+   K's penalty evaluation and ComputeTraction's penalty evaluation is amplified 3×.
+   This amplified inconsistency produces traction errors large enough to decelerate
+   nucleation.
+
+4. **The fix is NOT to remove the penalty correction** (that breaks everything), but
+   to ensure the penalty correction in ComputeTraction uses the EXACT SAME numerical
+   evaluation as the penalty in K. This is Strategy 2.
+
+### 6.13 Fix Strategy 2: Weak-Form / Consistent-Penalty Traction — NEXT
+
+Instead of re-evaluating the DG traction formula from scratch in ComputeTraction,
+reuse the SAME integrators that assembled K. For each fault face:
+
+1. Call `DGElasticityIntegrator::AssembleFaceMatrix` (consistency + symmetry) → `K_cs`
+2. Call `DGElasticityIPPenaltyIntegrator::AssembleFaceMatrix` (penalty) → `K_pen`
+3. Compute operator application: `(K_cs + K_pen) * u_local`
+4. Subtract the slip RHS for this face: `- f_slip_face`
+5. Result = traction contribution, algebraically consistent with K and f
+
+This keeps the penalty correction (needed for stability) while ensuring it is computed
+by the SAME code path as K (avoiding the inconsistency that kills p=4).
+
+**Why this should work:**
+- v50e (half-penalty) works → reducing the inconsistency helps
+- v50f (no penalty) blows up → the correction is needed
+- Strategy 2 gives FULL penalty with ZERO inconsistency → best of both worlds
+
+### 6.14 Strategy 2 ABANDONED — Penalty Formulas are Algebraically Identical
+
+**Critical finding**: Before implementing Strategy 2, line-by-line analysis of both
+code paths revealed that for flat faces with constant material properties:
+
+**K assembly** (`DGElasticityIPPenaltyIntegrator::AssembleFaceMatrix`):
+```cpp
+penalty = penalty_factor_ * (p0 + p1) / 4.0;              // line 129
+coeff = penalty * ip.weight * nl_q;                         // line 172
+elmat(i,j) += coeff * shape1(i) * shape1(j);               // line 184
 ```
-T_q = {σ(u)·n} - penalty * sign * ((u1-u2) - sign*delta_u)
-      ^^^^^^^^    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-      stress       penalty correction (should be ≈0 for perfect solve)
+
+**ComputeTraction** (`elasticity_operator.hpp`):
+```cpp
+penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;           // line 3337
+correction_q[c] = -penalty_ip * sign * jump_c;              // line 3468
 ```
 
-Since MUMPS solves K*u = f exactly, u already satisfies `[u] ≈ delta_u` on fault faces
-(enforced by the penalty in K). The penalty correction `penalty*(jump - delta_u)` should
-be ≈ 0. If we drop it and use only `{σ(u)·n}`, we get the physical traction without
-any cancellation.
+Both formulas:
+- Use **identical** penalty computation: `(D+1)*c_N_1*(D*nl_q/vol)*(c1²/c0)/4`
+- Use **identical** shape functions: same MFEM `CalcShape` call
+- Use **identical** displacement interpolation: `u_q = Σ shape(k) * u(k)`
+- Use **identical** material constants: `lambda_coeff_` / `mu_coeff_` vs `lambda_val_` / `mu_val_`
+  (both are `ConstantCoefficient`, giving identical numerical values)
 
-**Risk**: Dropping the correction removes DG discretization error information.
-For a perfect direct solve this should be fine. For iterative solvers it would not be.
+For flat faces on linear tets:
+- `nl_q` = constant across face (face Jacobian is constant) → identical at any quad point
+- `vol1`, `vol2` = constant per element → identical
+- Penalty is face-constant → identical regardless of quadrature order (2p vs 2p+1)
 
-**Implementation**: Add flag `--traction-stress-only` that skips the penalty correction
-term in `ComputeTraction` for both interior and shared fault faces.
+**Conclusion: Strategy 2 would produce NUMERICALLY IDENTICAL results to the current
+code. Implementing it would be wasted effort.**
 
-**Strategy 2: Weak-form traction (`--traction-weak-form`) — recommended fix**
+The "K-traction inconsistency" hypothesis is **WRONG** for our geometry. The penalty
+correction in ComputeTraction IS algebraically consistent with K.
 
-Instead of re-evaluating the traction formula from scratch, reuse the SAME DG face
-integrators that K uses. For each fault face:
+### 6.15 Revised Root Cause Hypothesis: Solver Accuracy × Penalty Amplification
 
-1. Call `DGElasticityIntegrator::AssembleFaceMatrix` (consistency + symmetry) on the
-   fault face → get element matrix `K_face`
-2. Call `DGElasticityIPPenaltyIntegrator::AssembleFaceMatrix` (penalty) → get `P_face`
-3. Compute face operator application: `(K_face + P_face) * u_local`
-4. Subtract the slip RHS: `- f_slip_local`
-5. The result is the traction contribution, algebraically consistent with K and f
+Since the penalty formulas are identical, the only remaining source of error is the
+**solve accuracy**. The displacement u from K*u = f has solve error ε that depends on:
+- MUMPS BLR tolerance (currently `1e-12`)
+- System condition number (worse at higher p)
 
-This avoids cancellation because `K_face` and `P_face` are the SAME matrices used in
-the global K assembly. The penalty in the operator and the penalty in the traction
-come from identical code paths and identical numerical evaluations.
+The residual jump on fault faces is:
+```
+[u] - delta_u = O(ε)
+```
 
-**Implementation**: Add flag `--traction-weak-form` that replaces the pointwise
-traction evaluation with face-integrator-based evaluation.
+The penalty correction in the traction is:
+```
+penalty * ([u] - delta_u) = penalty * O(ε)
+```
 
-**Strategy 3: penalty_factor tuning (workaround)**
+At p=4, penalty is 3× larger AND ε is likely larger (worse conditioning). The product
+`penalty * ε` grows faster than linearly with p, potentially producing a correction
+that dominates the friction weakening signal.
 
-Use `--penalty-factor 0.5` for p≥4 runs. Reduces cancellation enough for nucleation.
-Not a proper fix but allows immediate production runs.
+**Key insight**: Both the penalty traction change and friction weakening scale linearly
+with dt, so their ratio is dt-INDEPENDENT:
+```
+K_pen / K_crit = penalty / [(b-a)*σ_n/Dc]
+               ≈ 2e10 / 5e6 = 4000  (p=4)
+               ≈ 6.7e9 / 5e6 = 1340 (p=2)
+```
 
-### 6.12 Test Plan
+Both are >>1, yet p=2 works. This is because the penalty in K ENFORCES `[u] ≈ delta_u`,
+making the penalty correction ≈ 0 for an accurate solve. **The net traction is just
+`{σ·n}`, regardless of penalty magnitude — IF the solve is accurate enough.**
 
-Two parallel tests on 2500m mesh at p=4:
+At p=4, the BLR approximate factorization may not be accurate enough. The residual
+`[u] - delta_u` is larger, and when multiplied by the 3× stronger penalty, produces
+a correction that opposes nucleation.
 
-| Job | Strategy | Flag | What it tests |
-|-----|----------|------|---------------|
-| **v50f** | Stress-only | `--traction-stress-only` | Is penalty correction the culprit? |
-| **v50g** | Weak-form | `--traction-weak-form` | Does algebraic consistency fix p=4? |
+**Evidence supporting this hypothesis:**
+- Half-penalty works → halving the penalty halves the amplification of solve error
+- Full penalty fails → the amplification exceeds the tolerance
+- Stress-only blows up → the correction IS needed (it's not zero), but its SIGN
+  should be determined by the physics, not the solver error
+
+### 6.16 Hypothesis 7: GaussLobatto vs WarpAndBlend Node Distribution (p≥3)
+
+**Background**: From v46 Section 3.3 Factor 4 and v47 Section 18.3, a known
+difference between SEAS-MFEM and Tandem was identified but never tested:
+
+| | SEAS-MFEM | Tandem |
+|--|-----------|--------|
+| Face DOF nodes (p≤2) | GaussLobatto | WarpAndBlend | **Identical** |
+| Face DOF nodes (p≥3) | **GaussLobatto** | **WarpAndBlend** | **DIFFER** |
+
+*Source*: `face_quadrature.hpp:58` — `H1_TriangleElement(face_order, BasisType::GaussLobatto)`
+*Tandem*: `RateAndStateBase.cpp:10-13` — `NodalRefElement<2>(PolynomialDegree, WarpAndBlendFactory<2>())`
+
+At p=4 (15 nodes on triangle):
+- **GaussLobatto**: Nodes cluster at edges/vertices (tensor-product mapped to simplex).
+  3 vertices + 9 edge nodes (3 per edge) + 3 interior nodes.
+- **WarpAndBlend**: Nodes distributed more evenly, optimized for simplex interpolation.
+  ~6 interior nodes, lower Lebesgue constant.
+
+**How this could cause p=4 failure:**
+
+1. **Mass matrix conditioning**: `GalerkinProject` uses `M_ref_inv` to project
+   quad-point traction to face DOFs. Poorly conditioned M_ref amplifies small
+   errors in the traction integral, potentially flipping the sign of individual
+   DOF traction values.
+
+2. **Spatial resolution**: GaussLobatto clusters DOFs at face edges, under-resolving
+   the interior traction. WarpAndBlend provides more interior DOFs, better capturing
+   the traction variation across the face.
+
+3. **Interpolation stability**: The Lebesgue constant for GaussLobatto on triangles
+   is higher than WarpAndBlend at p≥3. Higher Lebesgue constant means the
+   interpolation `InterpolateToQuadPoints` amplifies errors more.
+
+**Why this explains the observations:**
+- At p≤2: nodes are identical → no effect (p=2 works) ✓
+- At p=4: nodes diverge → GaussLobatto conditioning could cause traction errors ✓
+- Half-penalty works → reduces the traction VALUE that the poorly-conditioned
+  M_ref_inv operates on, keeping errors below the nucleation threshold ✓
+- BR2 also fails → BR2 uses the SAME FaceQuadrature with the same nodes ✓
+
+### 6.17 Phase 0 Result: SMOKING GUN — GaussLobatto Catastrophically Ill-Conditioned
+
+Computed mass matrix condition number `cond(M_ref)` and Lebesgue constant on the
+reference triangle for GaussLobatto (our code) vs ClosedUniform (equispaced baseline):
+
+```
+=====================================================================================
+Phase 0: Mass Matrix Conditioning — Reference Triangle
+=====================================================================================
+
+  p=2  nbf=6
+  Basis Type                cond(M)   ||M^-1||_2   Lebesgue      cond(V)
+  GaussLobatto                37.96        97.25      4.062        43.06
+  ClosedUniform               17.21        96.40      1.667        30.97
+
+  p=3  nbf=10
+  GaussLobatto               219.63       229.13     13.342       549.96
+  ClosedUniform               33.97       224.07      2.258       312.45
+
+  p=4  nbf=15
+  GaussLobatto              2900.92       524.50     46.022      7331.02
+  ClosedUniform               57.74       513.79      3.470      3428.96
+
+  p=6  nbf=28
+  GaussLobatto            479657.75      1694.61    531.559   1417706.79
+  ClosedUniform              214.87      1694.94      8.726    470039.02
+```
+
+**Summary table:**
+
+| p | GL cond(M) | GL Lebesgue | Equi cond(M) | Equi Lebesgue | **cond(M) ratio** |
+|---|-----------|-------------|--------------|---------------|-------------------|
+| 2 | 38 | 4.1 | 17 | 1.7 | 2.2× |
+| 3 | 220 | 13.3 | 34 | 2.3 | **6.5×** |
+| **4** | **2,901** | **46.0** | 58 | 3.5 | **50×** |
+| 6 | **479,658** | **531.6** | 215 | 8.7 | **2,232×** |
+
+**Key findings:**
+
+1. **GaussLobatto cond(M) explodes**: 38 → 220 → 2,901 → 479,658 from p=2 to p=6.
+   ClosedUniform grows gently: 17 → 34 → 58 → 215.
+
+2. **Lebesgue constant is catastrophic**: At p=4, GaussLobatto Lebesgue = **46**.
+   This means ANY small error in the traction quadrature integral is amplified
+   **46×** by the L2 projection `M_ref_inv * ∫T·φ dS`. At p=6: amplified **532×**.
+   ClosedUniform at p=4: only 3.5× amplification.
+
+3. **The root cause is the collapsed tensor-product mapping**: MFEM's
+   `H1_TriangleElement(p, GaussLobatto)` maps 1D GaussLobatto points to the
+   triangle via a Duffy-type collapse. This creates severely clustered nodes at
+   the collapsed vertex, destroying interpolation properties on the simplex.
+
+4. **WarpAndBlend (Tandem's choice) has Lebesgue ~ 2-3 at p=4** on triangles
+   (Warburton 2006), similar to equispaced but with better edge properties.
+   Tandem avoids this problem entirely.
+
+**Why this is the root cause:**
+
+The penalty correction in the traction is:
+```
+correction_q = penalty * ((u1_q - u2_q) - sign * delta_u_q)
+```
+
+This is O(h^p) — small but nonzero. When projected to face DOFs via GalerkinProject:
+```
+correction_DOF = M_ref_inv * Σ_q w_q * correction_q * φ_q
+```
+
+With `cond(M_ref) = 2901` and `Lebesgue = 46`, the projected correction at
+individual DOFs can be **46× larger** than the quad-point values, with **wrong sign**
+at some DOFs. This sign-flipped correction opposes the friction weakening, decelerating
+nucleation.
+
+At p=2 (`cond(M) = 38`, `Lebesgue = 4.1`), the amplification is manageable — the
+projected correction maintains the correct sign at all DOFs.
+
+**Why half-penalty works:** Reducing penalty by 0.5× halves the correction magnitude.
+With half the signal going through the 46× amplifier, the amplified error is 23×
+instead of 46× — apparently below the threshold where DOF signs flip.
+
+**Why BR2 also fails:** BR2 uses the SAME `FaceQuadrature` with the same GaussLobatto
+nodes and the same `GalerkinProject`. The ill-conditioned M_ref_inv amplifies the
+BR2 lifting correction just as it amplifies the IP penalty correction.
+
+### 6.18 Combined Test Plan: Node Distribution + Solver Accuracy
+
+**Phase 0: COMPLETED** — conditioning analysis confirms 50× worse mass matrix at p=4
+with GaussLobatto vs equispaced. Lebesgue constant 46 vs 3.5.
+
+**Phase 1: Cluster tests**
+
+| Job | Order | Change | What it tests |
+|-----|-------|--------|---------------|
+| **v50g** | p=4 | ClosedGL nodes | Does better node distribution fix p=4? |
+| **v50g2** | p=4 | BLR tol=1e-14 | Does tighter solver fix p=4? |
+| **v50g3** | p=2 | ClosedGL nodes | Regression check (should match v50d) |
+
+**Phase 2: WarpAndBlend (if Phase 1 confirms)**
+
+If ClosedGL helps or conditioning analysis shows large gap, implement WarpAndBlend
+nodes to match Tandem exactly.
 
 **Decision tree:**
-- v50f works → penalty correction is the problem; stress-only may be sufficient
-- v50g works → algebraic consistency is the proper fix
-- Both work → v50g preferred (more principled, includes DG error info)
-- Both fail → root cause is elsewhere (psi init, friction law, etc.)
-
-Also test both at p=2 to verify they don't break the working case:
-- v50f should reproduce v50d (p=2 same mesh) results
-- v50g should reproduce v50d results
+- v50g (ClosedGL) nucleates → **node distribution is the root cause**
+- v50g2 (BLR 1e-14) nucleates → **solver accuracy is the root cause**
+- Both nucleate → both contribute; use both fixes
+- Neither nucleates → something else; investigate further
 
 ---
 
@@ -539,6 +775,13 @@ the penalty in the stiffness matrix assembly.
 | **v50c** | **2500m p=4 BR2: ALSO FAILS — V decays 0.01→0.00002** | **BUG** |
 | **v50d** | **2500m p=2 IP: WORKS — V grows to 0.32 (nucleation healthy)** | **WORKS** |
 | **v50e** | **2500m p=4 IP half-penalty: WORKS — V grows to 0.017** | **WORKS** |
-| v50+ | Root cause: cancellation in post-processed traction (solve is monolithic, recovery is not) | ANALYZED |
-| v50f | Strategy 1: stress-only traction test at p=4 | Planned |
-| v50g | Strategy 2: weak-form traction test at p=4 | Planned |
+| v50+ | Root cause hypothesis: inconsistent penalty between K assembly and traction post-processing | ANALYZED |
+| **v50f** | **Strategy 1: stress-only traction p=4 → BLOWUP (V=10 m/s in 35 steps)** | **DISPROVED** |
+| **v50f2** | **Strategy 1: stress-only traction p=2 → BLOWUP (V=46 m/s in 397 steps)** | **DISPROVED** |
+| v50f+ | Revised understanding: penalty correction is essential, not cancellation artifact | ANALYZED |
+| v50f++ | **Strategy 2 ABANDONED**: penalty formulas are algebraically identical for flat faces — no inconsistency to fix | **DISPROVED** |
+| v50f++ | **New hypothesis**: solver accuracy (MUMPS BLR) × penalty amplification at p=4 | **ANALYZING** |
+| v50f++ | Penalty formulas algebraically identical → Strategy 2 abandoned | DISPROVED |
+| v50f++ | Two new hypotheses: (1) solver accuracy, (2) GaussLobatto vs WarpAndBlend nodes (v46/v47 flagged, never tested) | ANALYZING |
+| v50g | **Phase 0: SMOKING GUN — GL cond(M)=2901 vs Equi=58 at p=4 (50× worse). Lebesgue=46 vs 3.5 (13×)** | **CONFIRMED** |
+| v50g | Phase 1: ClosedUniform nodes at p=4 + BLR tol 1e-14 at p=4 | **NEXT** |

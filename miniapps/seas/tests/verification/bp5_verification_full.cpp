@@ -328,6 +328,9 @@ int main(int argc, char *argv[])
    // v50f: traction recovery strategies
    bool traction_stress_only = false;  // Skip penalty correction in traction
    bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
+   // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
+   int face_basis_type = BasisType::GaussLobatto;
+   std::string face_basis_str = "GaussLobatto";
 
    for (int i = 1; i < argc; i++)
    {
@@ -406,6 +409,18 @@ int main(int argc, char *argv[])
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
       if (arg == "--traction-stress-only") { traction_stress_only = true; }
       if (arg == "--traction-weak-form") { traction_weak_form = true; }
+      if (arg == "--face-basis-type" && i + 1 < argc)
+      {
+         face_basis_str = argv[++i];
+         if (face_basis_str == "GaussLobatto" || face_basis_str == "gl")
+         { face_basis_type = BasisType::GaussLobatto; face_basis_str = "GaussLobatto"; }
+         else if (face_basis_str == "ClosedUniform" || face_basis_str == "equi")
+         { face_basis_type = BasisType::ClosedUniform; face_basis_str = "ClosedUniform"; }
+         else if (face_basis_str == "ClosedGL" || face_basis_str == "cgl")
+         { face_basis_type = BasisType::ClosedGL; face_basis_str = "ClosedGL"; }
+         else
+         { MFEM_ABORT("Unknown face-basis-type: " << face_basis_str); }
+      }
    }
 
    // Parse DG method
@@ -610,7 +625,8 @@ int main(int argc, char *argv[])
    // =========================================================================
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, dg_method, solver_type, bc_mode);
+      params.Vp, params.Wf, params.lf, dg_method, solver_type, bc_mode,
+      face_basis_type);
 
    if (check_residual) { domain.SetCheckResidual(true); }
    if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
@@ -628,6 +644,10 @@ int main(int argc, char *argv[])
       }
    }
 
+   if (face_basis_type != BasisType::GaussLobatto && mpi.IsRoot())
+   {
+      std::cout << "  [v50g] face-basis-type: " << face_basis_str << "\n";
+   }
    if (traction_stress_only)
    {
       domain.SetTractionStressOnly(true);

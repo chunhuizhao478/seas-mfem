@@ -104,7 +104,8 @@ public:
                              real_t Vp, real_t Wf, real_t lf,
                              DGMethod method = DGMethod::BR2,
                              SolverType solver_type = SolverType::MUMPS_BLR,
-                             BCMode bc_mode = BCMode::FarField)
+                             BCMode bc_mode = BCMode::FarField,
+                             int face_basis_type = BasisType::GaussLobatto)
       : mesh_(mesh), order_(order),
         lambda_val_(lambda), mu_val_(mu),
         Vp_(Vp), Wf_(Wf), lf_(lf),
@@ -114,7 +115,8 @@ public:
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
         fault_depths_computed_(false),
-        fault_coords_computed_(false)
+        fault_coords_computed_(false),
+        face_basis_type_(face_basis_type)
    {
       MFEM_VERIFY(mesh_.Dimension() == 3, "ElasticityDomainOperator requires 3D mesh");
 
@@ -216,6 +218,11 @@ public:
    /// v50f: Use weak-form traction recovery (not yet implemented).
    void SetTractionWeakForm(bool v) { traction_weak_form_ = v; }
 
+   /// v50g: Set face DOF node type for FaceQuadrature.
+   /// Must be called BEFORE Init() (which creates FaceQuadrature).
+   /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
+   void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -238,6 +245,7 @@ private:
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    bool traction_stress_only_ = false;  // v50f: skip penalty correction in traction
    bool traction_weak_form_ = false;    // v50f: weak-form traction (not yet implemented)
+   int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -567,7 +575,9 @@ private:
       // p>=2 with BR2: face_order=0, nbf=1 -> BR2 doesn't need multi-DOF
       int face_fe_order = (method_ == DGMethod::IP && order_ >= 2) ? order_ : 0;
       face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
-                                                     std::max(order_, 1));
+                                                     std::max(order_, 1),
+                                                     Geometry::TRIANGLE,
+                                                     face_basis_type_);
       nbf_per_face_ = face_quad_->NumBasisFunctions();
       num_fault_dofs_ = num_fault_faces_ * nbf_per_face_;
 

@@ -52,10 +52,14 @@ public:
    ///                  the DG face integral rule used in AssembleSlipContribution
    ///                  and ComputeTraction)
    /// @param face_geom Face geometry type (default: TRIANGLE for tet meshes)
+   /// @param basis_type BasisType for face DOF nodes (default: GaussLobatto).
+   ///                   v50g: ClosedUniform has 50× better mass matrix conditioning
+   ///                   at p=4 on triangles (cond=58 vs 2901 for GaussLobatto).
    FaceQuadrature(int face_order, int vol_order,
-                  Geometry::Type face_geom = Geometry::TRIANGLE)
+                  Geometry::Type face_geom = Geometry::TRIANGLE,
+                  int basis_type = BasisType::GaussLobatto)
        : order_(face_order),
-         face_fe_(std::max(face_order, 1), BasisType::GaussLobatto)
+         face_fe_(std::max(face_order, 1), basis_type)
    {
       MFEM_VERIFY(face_order >= 0, "FaceQuadrature requires face_order >= 0");
       MFEM_VERIFY(vol_order >= 1, "FaceQuadrature requires vol_order >= 1");
