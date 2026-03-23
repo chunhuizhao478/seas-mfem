@@ -209,6 +209,13 @@ public:
    /// Used to diagnose whether over-stiff penalty causes nucleation failure at high p.
    void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
 
+   /// v50f: Skip penalty correction in ComputeTraction (stress-only traction).
+   /// Diagnostic: isolates whether penalty term in traction causes nucleation failure.
+   void SetTractionStressOnly(bool v) { traction_stress_only_ = v; }
+
+   /// v50f: Use weak-form traction recovery (not yet implemented).
+   void SetTractionWeakForm(bool v) { traction_weak_form_ = v; }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -229,6 +236,8 @@ private:
    mutable bool diag_normals_done_ = false;
    mutable bool diag_first_traction_done_ = false;
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
+   bool traction_stress_only_ = false;  // v50f: skip penalty correction in traction
+   bool traction_weak_form_ = false;    // v50f: weak-form traction (not yet implemented)
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -3460,16 +3469,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             }
 
             // Store per-quad-point total traction: T_q = T_stress_q - correction_q
+            // v50f: when traction_stress_only_, skip the penalty correction
             for (int c = 0; c < dim; c++)
             {
-               T_quad(c * nqp + q) = T_stress_q[c] - correction_q[c];
+               T_quad(c * nqp + q) = T_stress_q[c]
+                  - (traction_stress_only_ ? 0.0 : correction_q[c]);
             }
 
             // Also accumulate face-averaged values for diagnostics
             for (int c = 0; c < dim; c++)
             {
                T_stress[c] += wq * T_stress_q[c];
-               correction[c] += wq * correction_q[c];
+               correction[c] += wq * (traction_stress_only_ ? 0.0 : correction_q[c]);
             }
             sum_wq += wq;
          }
@@ -3928,16 +3939,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                }
 
                // Store per-quad-point total traction
+               // v50f: when traction_stress_only_, skip the penalty correction
                for (int c = 0; c < dim; c++)
                {
-                  T_quad(c * nqp + q) = T_stress_q[c] - correction_q[c];
+                  T_quad(c * nqp + q) = T_stress_q[c]
+                     - (traction_stress_only_ ? 0.0 : correction_q[c]);
                }
 
                // Also accumulate face-averaged values for diagnostics
                for (int c = 0; c < dim; c++)
                {
                   T_stress[c] += wq * T_stress_q[c];
-                  correction[c] += wq * correction_q[c];
+                  correction[c] += wq * (traction_stress_only_ ? 0.0 : correction_q[c]);
                }
                sum_wq += wq;
             }

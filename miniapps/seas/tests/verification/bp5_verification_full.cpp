@@ -325,6 +325,9 @@ int main(int argc, char *argv[])
    bool no_v_guard = false;         // v50: disable V guard (for testing only)
    // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
    real_t penalty_factor = 1.0;
+   // v50f: traction recovery strategies
+   bool traction_stress_only = false;  // Skip penalty correction in traction
+   bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
 
    for (int i = 1; i < argc; i++)
    {
@@ -401,6 +404,8 @@ int main(int argc, char *argv[])
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
       if (arg == "--no-v-guard") { no_v_guard = true; }
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
+      if (arg == "--traction-stress-only") { traction_stress_only = true; }
+      if (arg == "--traction-weak-form") { traction_weak_form = true; }
    }
 
    // Parse DG method
@@ -620,6 +625,22 @@ int main(int argc, char *argv[])
       if (mpi.IsRoot())
       {
          std::cout << "  [v50a] penalty_factor = " << penalty_factor << "\n";
+      }
+   }
+
+   if (traction_stress_only)
+   {
+      domain.SetTractionStressOnly(true);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [v50f] traction-stress-only: ON\n";
+      }
+   }
+   if (traction_weak_form)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [v50f] traction-weak-form: NOT YET IMPLEMENTED\n";
       }
    }
 
