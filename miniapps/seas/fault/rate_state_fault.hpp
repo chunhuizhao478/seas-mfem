@@ -360,7 +360,8 @@ public:
    /// @param[in] state Current state vector [StateSize()]
    /// @param[out] rate Time derivatives of state [StateSize()]
    /// @return Maximum slip rate
-   real_t ComputeRHS(const Vector &traction, const Vector &state, Vector &rate)
+   real_t ComputeRHS(const Vector &traction, const Vector &state, Vector &rate,
+                     const Vector *normal_traction = nullptr)
    {
       MFEM_ASSERT(traction.Size() == TractionSize(),
                   "Traction vector has wrong size");
@@ -368,6 +369,12 @@ public:
                   "State vector has wrong size");
       MFEM_ASSERT(rate.Size() == StateSize(),
                   "Rate vector has wrong size");
+      if (normal_traction)
+      {
+         MFEM_ASSERT(normal_traction->Size() == num_nodes_,
+                     "Normal traction vector has wrong size: "
+                     << normal_traction->Size() << " vs " << num_nodes_);
+      }
 
       V_max_ = 0.0;
       const Vector &a_values = geom_->GetAValues();
@@ -431,9 +438,20 @@ public:
             real_t eta = eta_values(i);
             real_t Dc = Dc_values_(i);
 
+            // v51: elastic sigma_n feedback (matches Tandem DieterichRuinaAgeing.h:86)
+            // sigma_n_eff = sigma_n_pre + T_n_elastic
+            // NormalStress returns positive for compression → sigma_n stays near 25 MPa
+            real_t sigma_n_eff = sigma_n_bp5_;
+            if (normal_traction)
+            {
+               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
+               // Safety: ensure sigma_n stays positive (physical requirement)
+               sigma_n_eff = std::max(sigma_n_eff, 0.1 * sigma_n_bp5_);
+            }
+
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi, sigma_n_bp5_, eta, a, V_vec);
+               tau_vec, psi, sigma_n_eff, eta, a, V_vec);
 
             real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
 

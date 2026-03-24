@@ -120,6 +120,10 @@ public:
       coseismic_v_threshold_ = v_threshold;
    }
 
+   /// v51: Use elastic normal stress (sigma_n from displacement field)
+   /// instead of constant sigma_n. Matches Tandem's DieterichRuinaAgeing.
+   void SetElasticSigmaN(bool v) { elastic_sigma_n_ = v; }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -131,9 +135,11 @@ private:
    /// Work vectors (mutable for use in const Mult)
    mutable Vector slip_;
    mutable Vector traction_;
+   mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
 
-   // v51 diagnostic flags
+   // v51 flags
    bool zero_dip_traction_ = false;
+   bool elastic_sigma_n_ = false;
    bool diag_coseismic_dip_ = false;
    mutable bool diag_coseismic_dip_done_ = false;
    real_t coseismic_v_threshold_ = 0.1;
@@ -242,7 +248,9 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    domain_->Solve(t, slip_, *u_gf_);
 
    // 3. Compute traction at fault from displacement
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   // v51: optionally compute elastic normal traction for sigma_n feedback
+   domain_->ComputeTraction(*u_gf_, slip_, traction_,
+                             elastic_sigma_n_ ? &normal_traction_ : nullptr);
 
    // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
    if (zero_dip_traction_)
@@ -307,7 +315,9 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    }
 
    // 4. Compute fault RHS (slip rate and state rate)
-   fault_->ComputeRHS(traction_, state, rate);
+   // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
+   fault_->ComputeRHS(traction_, state, rate,
+                       elastic_sigma_n_ ? &normal_traction_ : nullptr);
 }
 
 // BP2 type alias (uses default template arguments)

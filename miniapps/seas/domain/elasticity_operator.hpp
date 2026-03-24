@@ -150,7 +150,8 @@ public:
 
    void ComputeTraction(const GridFuncType &displacement,
                         const Vector &slip_bc,
-                        Vector &traction) override;
+                        Vector &traction,
+                        Vector *normal_traction = nullptr) override;
 
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
@@ -3186,11 +3187,19 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::ComputeTraction(
    const GridFuncType &displacement,
    const Vector &slip_bc,
-   Vector &traction)
+   Vector &traction,
+   Vector *normal_traction)
 {
    int dim = 3;
    traction.SetSize(2 * num_fault_dofs_);
    traction = 0.0;
+
+   // v51: Elastic normal traction for sigma_n feedback
+   if (normal_traction)
+   {
+      normal_traction->SetSize(num_fault_dofs_);
+      *normal_traction = 0.0;
+   }
 
    // v49: Diagnostic - compare CalcOrtho normals with FaultBasis normals
    if (diag_normals_ && !diag_normals_done_)
@@ -3582,6 +3591,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             int dof_idx = fi * nbf_per_face_ + kk;
             traction(2 * dof_idx)     = tau_local[0];
             traction(2 * dof_idx + 1) = tau_local[1];
+            // v51: elastic normal traction for sigma_n feedback
+            if (normal_traction)
+            {
+               (*normal_traction)(dof_idx) = fault_basis_.NormalStress(fi, T_k);
+            }
          }
 
          // Normalize face-averaged diagnostics
@@ -3860,6 +3874,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
          fault_basis_.ProjectTraction(fi, T_global, tau_local);
          traction(2 * fi)     = tau_local[0];
          traction(2 * fi + 1) = tau_local[1];
+         // v51: elastic normal traction for sigma_n feedback
+         if (normal_traction)
+         {
+            (*normal_traction)(fi) = fault_basis_.NormalStress(fi, T_global);
+         }
       }
    }
 
@@ -4101,6 +4120,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                int dof_idx = base_dof + kk;
                traction(2 * dof_idx)     = tau_local[0];
                traction(2 * dof_idx + 1) = tau_local[1];
+               // v51: elastic normal traction for sigma_n feedback
+               if (normal_traction)
+               {
+                  (*normal_traction)(dof_idx) =
+                     fault_basis_.NormalStress(trac_idx, T_k);
+               }
             }
 
             // Normalize face-averaged diagnostics
@@ -4322,6 +4347,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             fault_basis_.ProjectTraction(trac_idx, T_global, tau_local);
             traction(2 * trac_idx)     = tau_local[0];
             traction(2 * trac_idx + 1) = tau_local[1];
+            // v51: elastic normal traction for sigma_n feedback
+            if (normal_traction)
+            {
+               (*normal_traction)(trac_idx) =
+                  fault_basis_.NormalStress(trac_idx, T_global);
+            }
          }
       }
 #endif

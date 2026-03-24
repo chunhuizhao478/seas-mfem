@@ -80,7 +80,8 @@ public:
    /// @param[out] traction Computed traction at fault DOFs
    virtual void ComputeTraction(const GridFuncType &displacement,
                                 const Vector &slip_bc,
-                                Vector &traction) = 0;
+                                Vector &traction,
+                                Vector *normal_traction = nullptr) = 0;
 
    /// @brief Get reference to finite element space
    virtual FESpaceType &GetFESpace() = 0;
