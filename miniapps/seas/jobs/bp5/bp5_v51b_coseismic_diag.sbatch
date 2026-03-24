@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v51b_codiag         # Job name
 #SBATCH -o bp5_v51b_codiag_%j.out
 #SBATCH -e bp5_v51b_codiag_%j.err
-#SBATCH -p normal                    # Queue
+#SBATCH -p development               # Queue (fast turnaround)
 #SBATCH -N 8                         # 8 nodes
 #SBATCH -n 400                       # 400 MPI ranks
-#SBATCH -t 04:00:00                  # 4 hours (just need first earthquake)
+#SBATCH -t 02:00:00                  # 2 hours (just need first earthquake)
 #SBATCH -A EAR20006                  # TACC allocation
 
 # BP5 v51b: Coseismic dip diagnostic — baseline (NO dip zeroing)
@@ -52,4 +52,5 @@ ibrun ./seas_bp5_full \
       --output-dir bp5/results_v51b_codiag \
       --output-prefix bp5_v51b_codiag \
       --write-every-step \
-      --diag-coseismic-dip
+      --diag-coseismic-dip \
+      --dt-init 0.01

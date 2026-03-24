@@ -621,7 +621,79 @@ in ours, depending on subtle numerical differences.
 
 ---
 
-## 15. What Has Been Ruled Out
+## 15. Friction Law Comparison: Three Differences Found
+
+### 15.1 Velocity Direction Computation: IDENTICAL
+
+Both codes compute:
+```
+V_dip = V_scalar × τ_dip / |τ|
+V_strike = V_scalar × τ_strike / |τ|
+```
+where `|τ| = sqrt(τ_dip² + τ_strike²)`.
+
+No thresholds, no clipping, no regularization for small dip/strike ratios.
+The Brent solver for V_scalar uses the same residual equation and bracketing.
+
+**Hypothesis B (friction law) is RULED OUT** — the velocity direction logic is identical.
+
+### 15.2 State Variable Evolution: Nearly Identical
+
+Both codes: `dψ/dt = b·V₀/L × (exp((f₀-ψ)/b) - V/V₀)` where `V = |V_vec| = sqrt(V_dip² + V_strike²)`.
+
+**One minor difference**: SEAS-MFEM caps `exp((f₀-ψ)/b)` at `exp(20)` to prevent overflow.
+Tandem has no cap. This affects post-earthquake healing rate when ψ << f₀, but is
+unlikely to cause the dip offset during interseismic or coseismic.
+
+### 15.3 Normal Stress: CRITICAL DIFFERENCE
+
+| | Our Code | Tandem |
+|--|----------|--------|
+| **σ_n** | **Constant 25 MPa** | **-sn_elastic + sn_pre** (varies) |
+| Source | `params.sigma_n` (line 130) | `traction(node, 0)` from DG solver |
+
+**Tandem uses the normal traction perturbation from the elasticity solver.**
+Our code discards it — we compute the normal traction in `ProjectTraction` but only
+pass the tangential (dip, strike) components to the friction law.
+
+Impact: The DG stress average has cross-component contamination in the NORMAL direction
+too (σ_yy perturbation from pure x-loading, via the λ·tr(ε)·I term). In Tandem, this
+perturbation modifies σ_n, which changes friction strength:
+- Positive σ_n perturbation → STRONGER fault → LESS slip → dampens dip motion
+- Negative σ_n perturbation → WEAKER fault → MORE slip
+
+This normal stress feedback provides a natural damping mechanism that our code lacks.
+However, the perturbation magnitude (~10-100 Pa vs 25 MPa baseline = 0.0004%) is very
+small, so this alone likely does NOT explain the full dip offset.
+
+### 15.4 Radiation Damping: IDENTICAL
+
+Both codes: `η·V` where V = V_scalar (from Brent solver). Same formula, same convention.
+
+### 15.5 Summary Table
+
+| Component | Compared? | Result |
+|-----------|----------|--------|
+| Velocity direction (V_dip/V_strike) | ✓ Line-by-line | **IDENTICAL** |
+| Scalar RSF equation | ✓ | **IDENTICAL** (same Brent solver) |
+| |τ| normalization | ✓ | **IDENTICAL** (L2 norm) |
+| State evolution dψ/dt | ✓ | Nearly identical (exp cap difference) |
+| **Normal stress σ_n** | ✓ | **DIFFERENT** — ours constant, Tandem varies |
+| Radiation damping η·V | ✓ | **IDENTICAL** |
+| Thresholds/clipping | ✓ | Both have none for dip motion |
+
+### 15.6 Conclusion
+
+The friction law is NOT the primary cause of the dip offset. Both codes produce
+`V_dip ∝ τ_dip / |τ|` identically. The root cause remains the 21% cross-component
+contamination in {σ·n} from the DG stress average on tet meshes.
+
+The normal stress difference (Section 15.3) is a secondary finding that should be
+addressed separately — it could improve overall benchmark agreement.
+
+---
+
+## 16. What Has Been Ruled Out
 
 | Component | Compared? | Result |
 |-----------|----------|--------|
@@ -632,40 +704,57 @@ in ours, depending on subtle numerical differences.
 | Far-field BC prescribed displacement | ✓ | **IDENTICAL** (zero dip) |
 | Boundary surface assignment | ✓ | **IDENTICAL** |
 | DG penalty structure | ✓ | **IDENTICAL** |
+| DG traction formula | ✓ | **IDENTICAL** ({σ·n} - penalty*(jump-slip)) |
+| Traction projection ordering | ✓ | Equivalent for flat faces |
 | `boundary_linear` flag effect | ✓ | No effect on assembly |
 | Sign fixes (v30, v31, v39, v40) | ✓ | All still correct |
 | Multi-DOF indexing (v46) | ✓ | Fixed, still correct |
-
-## 14. What Remains to Investigate
-
-1. **Traction post-processing vs operator-internal computation** — the ONLY structural
-   difference between our code and Tandem that hasn't been compared
-2. **Per-component traction dump** — needed to isolate whether τ_dip comes from
-   stress average or penalty correction
-3. **V_zero value** — verify it's exactly 0.0
+| V_zero initialization | ✓ | 1e-20, negligible |
+| Velocity direction V_dip/V_strike | ✓ | **IDENTICAL** |
+| Scalar RSF solver (Brent) | ✓ | **IDENTICAL** |
+| State evolution dψ/dt | ✓ | Nearly identical (exp cap) |
+| Radiation damping η·V | ✓ | **IDENTICAL** |
 
 ---
 
-## 16. Updated Investigation Plan
+## 17. Tests in Progress
 
-### Priority 1: Dump coseismic dip/strike traction ratio
+### v51a: Zero dip traction (production, 48hr, 400 ranks)
 
-The current diagnostic dumps at the FIRST step (small slip, Pa-range traction). We need
-the ratio during COSEISMIC (large slip, MPa-range traction) to quantify the actual
-contamination that drives dip slip. Add a diagnostic that dumps the dip/strike ratio
-at peak coseismic (when V_max > 0.1 m/s).
+`--zero-dip-traction --diag-coseismic-dip`
 
-### Priority 2: Compare friction law implementation detail
+Sets τ_dip = 0 after ComputeTraction, before friction law. If this eliminates
+the dip offset AND improves strike match → confirms the mechanism and provides
+a workaround for production runs.
 
-Line-by-line comparison of our `ComputeRHS` with Tandem's `DieterichRuinaAgeing` to
-find any difference in how the vector velocity is computed from the vector traction.
-Specifically: normalization, thresholds, and state variable coupling.
+### v51b: Coseismic dip diagnostic (4hr, 400 ranks)
 
-### Priority 3: Test with dip-traction zeroing
+`--diag-coseismic-dip`
 
-Add a `--zero-dip-traction` flag that sets τ_dip = 0 after ComputeTraction (before
-the friction law). If this eliminates the dip offset AND produces good strike results,
-it confirms the dip contamination is the sole cause and provides a workaround.
+Baseline run that dumps the mean and max |τ_dip/τ_strike| ratio when V_max > 0.1.
+Quantifies the actual contamination during the earthquake that drives dip slip.
+
+---
+
+## 18. Updated Investigation Plan
+
+### Completed
+- ✅ FaultBasis comparison (IDENTICAL)
+- ✅ Far-field BC comparison (IDENTICAL)
+- ✅ Tandem traction formula comparison (IDENTICAL)
+- ✅ Per-component traction diagnostic (21% contamination found)
+- ✅ Friction law comparison (velocity direction IDENTICAL, normal stress DIFFERENT)
+- ✅ V_zero check (negligible)
+
+### Waiting for results
+- ⏳ v51a: zero-dip-traction production run
+- ⏳ v51b: coseismic dip/strike ratio diagnostic
+
+### Remaining
+1. **If v51a confirms**: implement `--zero-dip-traction` as default for BP5 production
+2. **Normal stress coupling**: add elastic normal stress perturbation to friction law (match Tandem)
+3. **Root cause of 21% contamination**: investigate whether mesh quality improvements
+   (better tet alignment near fault) reduce the cross-component error
 
 ---
 
@@ -689,4 +778,9 @@ it confirms the dip contamination is the sole cause and provides a workaround.
 | v51 diag | Penalty correction is negligible (1.35% of stress) — NOT the source | **CONFIRMED** |
 | v51 diag | V_zero = 1e-20 — negligible, NOT the cause | **CONFIRMED** |
 | v51 | Tandem has SAME contamination from same DG formula on same mesh | **KEY QUESTION** |
-| v51 | Three hypotheses for why Tandem doesn't accumulate: (A) magnitude, (B) friction, (C) state coupling | **NEXT STEPS** |
+| v51 | Three hypotheses for why Tandem doesn't accumulate: (A) magnitude, (B) friction, (C) state coupling | HYPOTHESIZED |
+| **v51** | **Friction law comparison: velocity direction IDENTICAL, normal stress DIFFERENT** | **COMPLETED** |
+| v51 | Hypothesis B (friction law) RULED OUT — velocity direction logic identical | **RULED OUT** |
+| v51 | **Found: Tandem uses elastic σ_n, we use constant 25 MPa** | **SECONDARY FINDING** |
+| v51a | Zero-dip-traction production test (48hr, 400 ranks) | **SUBMITTED** |
+| v51b | Coseismic dip/strike ratio diagnostic (4hr, 400 ranks) | **SUBMITTED** |

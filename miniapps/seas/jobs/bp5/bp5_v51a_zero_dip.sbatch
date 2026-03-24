@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v51a_zero_dip       # Job name
 #SBATCH -o bp5_v51a_zero_dip_%j.out
 #SBATCH -e bp5_v51a_zero_dip_%j.err
-#SBATCH -p normal                    # Queue
+#SBATCH -p development               # Queue (fast turnaround)
 #SBATCH -N 8                         # 8 nodes
-#SBATCH -n 400                       # 400 MPI ranks — production scale
-#SBATCH -t 48:00:00                  # 48 hours
+#SBATCH -n 400                       # 400 MPI ranks
+#SBATCH -t 02:00:00                  # 2 hours (confirm fix, then extend)
 #SBATCH -A EAR20006                  # TACC allocation
 
 # BP5 v51a: Zero dip traction — production run
@@ -42,10 +42,11 @@ ibrun ./seas_bp5_full \
       --solver mumps-blr \
       --blr-tol 1e-12 \
       --check-residual \
-      --tfinal 5.68e10 \
+      --tfinal 200 \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v51a_zero_dip \
       --output-prefix bp5_v51a_zero_dip \
       --write-every-step \
       --zero-dip-traction \
-      --diag-coseismic-dip
+      --diag-coseismic-dip \
+      --dt-init 0.01
