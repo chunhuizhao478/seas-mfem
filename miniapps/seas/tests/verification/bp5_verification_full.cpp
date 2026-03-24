@@ -322,6 +322,7 @@ int main(int argc, char *argv[])
    bool diag_dip_traction = false;   // v51: per-component traction diagnostic
    bool zero_dip_traction = false;   // v51: zero tau_dip after ComputeTraction
    bool diag_coseismic_dip = false;  // v51: dump dip/strike ratio during coseismic
+   real_t coseismic_dip_threshold = 0.1;  // v51: V_max threshold for coseismic dump
    bool diag_uz_fault = false;       // v51: dump u_z at fault faces after solve
    bool elastic_sigma_n = false;     // v51: use elastic sigma_n (matches Tandem)
    // v49 Phase 2: CFL-aware dt and V guard
@@ -410,6 +411,11 @@ int main(int argc, char *argv[])
       if (arg == "--diag-dip-traction") { diag_dip_traction = true; }
       if (arg == "--zero-dip-traction") { zero_dip_traction = true; }
       if (arg == "--diag-coseismic-dip") { diag_coseismic_dip = true; }
+      if (arg == "--diag-coseismic-dip-threshold" && i + 1 < argc)
+      {
+         diag_coseismic_dip = true;
+         coseismic_dip_threshold = std::atof(argv[++i]);
+      }
       if (arg == "--diag-uz-fault") { diag_uz_fault = true; }
       if (arg == "--elastic-sigma-n") { elastic_sigma_n = true; }
       // v49 Phase 2: CFL fix and V guard
@@ -743,8 +749,8 @@ int main(int argc, char *argv[])
    }
    if (diag_coseismic_dip)
    {
-      seas_op.SetDiagCoseismicDip(true, 0.1);
-      if (mpi.IsRoot()) { std::cout << "  [v51] diag-coseismic-dip: ON (threshold=0.1 m/s)\n"; }
+      seas_op.SetDiagCoseismicDip(true, coseismic_dip_threshold);
+      if (mpi.IsRoot()) { std::cout << "  [v51] diag-coseismic-dip: ON (threshold=" << coseismic_dip_threshold << " m/s)\n"; }
    }
    if (elastic_sigma_n)
    {

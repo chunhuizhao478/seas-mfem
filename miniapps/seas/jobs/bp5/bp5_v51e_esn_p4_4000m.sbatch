@@ -53,5 +53,5 @@ ibrun ./seas_bp5_full \
       --face-basis-type equi \
       --write-every-step \
       --elastic-sigma-n \
-      --diag-coseismic-dip \
+      --diag-coseismic-dip-threshold 0.01 \
       --dt-init 0.01
