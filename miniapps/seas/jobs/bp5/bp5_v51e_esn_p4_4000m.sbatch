@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v51e_esn_p4        # Job name
 #SBATCH -o bp5_v51e_esn_p4_%j.out
 #SBATCH -e bp5_v51e_esn_p4_%j.err
-#SBATCH -p development               # Queue
+#SBATCH -p normal                     # Queue
 #SBATCH -N 8                         # 8 nodes
 #SBATCH -n 400                       # 400 ranks
-#SBATCH -t 02:00:00                  # 2 hours
+#SBATCH -t 04:00:00                  # 4 hours
 #SBATCH -A EAR20006                  # TACC allocation
 
 # BP5 v51e: Elastic sigma_n test — 4000m p=4 (Tandem's configuration)
@@ -53,5 +53,4 @@ ibrun ./seas_bp5_full \
       --face-basis-type equi \
       --write-every-step \
       --elastic-sigma-n \
-      --diag-coseismic-dip-threshold 0.01 \
       --dt-init 0.01

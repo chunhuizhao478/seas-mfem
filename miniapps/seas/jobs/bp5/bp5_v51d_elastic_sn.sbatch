@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v51d_esn            # Job name
 #SBATCH -o bp5_v51d_esn_%j.out
 #SBATCH -e bp5_v51d_esn_%j.err
-#SBATCH -p development               # Queue (fast turnaround)
+#SBATCH -p normal                     # Queue
 #SBATCH -N 8                         # 8 nodes
 #SBATCH -n 400                       # 400 ranks — production scale
-#SBATCH -t 02:00:00                  # 2 hours (through first earthquake)
+#SBATCH -t 04:00:00                  # 4 hours (through first earthquake)
 #SBATCH -A EAR20006                  # TACC allocation
 
 # BP5 v51d: Elastic sigma_n test — 1000m p=2
@@ -48,5 +48,4 @@ ibrun ./seas_bp5_full \
       --output-prefix bp5_v51d_esn \
       --write-every-step \
       --elastic-sigma-n \
-      --diag-coseismic-dip-threshold 0.01 \
       --dt-init 0.01
