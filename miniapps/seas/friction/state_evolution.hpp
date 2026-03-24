@@ -182,19 +182,15 @@ public:
 
    /// Compute dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0].
    ///
-   /// The exp argument is capped at exp_arg_max to prevent extreme stiffness
-   /// that an explicit RK45 integrator cannot resolve. Without the cap,
-   /// post-earthquake healing produces dpsi/dt ~ 1e20, causing the integrator
-   /// to overshoot psi to unphysical values. The cap limits the healing rate
-   /// while preserving the physics: healing still completes in seconds,
-   /// instantaneous on the earthquake cycle timescale.
+   /// No cap on the exp argument — matches Tandem and SCEC benchmark exactly.
+   /// The adaptive RK45 time stepper handles the stiffness during post-earthquake
+   /// healing by reducing dt. Previous versions capped at exp(20), which limited
+   /// the healing rate and deviated from the benchmark formulation.
+   /// See bp5_debug_v51.md Section 23.
    real_t Rate(real_t V, real_t psi, real_t Dc) const override
    {
       real_t exp_arg = (f0_ - psi) / b_;
-      real_t exp_term = (exp_arg > exp_arg_max_)
-                           ? std::exp(exp_arg_max_)
-                           : std::exp(exp_arg);
-      return (b_ * V0_ / Dc) * (exp_term - V / V0_);
+      return (b_ * V0_ / Dc) * (std::exp(exp_arg) - V / V0_);
    }
 
    /// Steady-state psi: psi_ss = f0 + b*ln(V0/V).
@@ -214,10 +210,7 @@ public:
    real_t RateDerivativeTheta(real_t V, real_t psi, real_t Dc) const override
    {
       real_t exp_arg = (f0_ - psi) / b_;
-      real_t exp_val = (exp_arg > exp_arg_max_)
-                          ? std::exp(exp_arg_max_)
-                          : std::exp(exp_arg);
-      return -(V0_ / Dc) * exp_val;
+      return -(V0_ / Dc) * std::exp(exp_arg);
    }
 
    const char *GetName() const override { return "AgingLawPsi"; }
@@ -226,10 +219,6 @@ private:
    real_t b_;
    real_t V0_;
    real_t f0_;
-
-   /// Cap on exp((f0-psi)/b) argument to prevent extreme stiffness.
-   /// exp(20) ≈ 4.85e8 → max dpsi/dt ≈ 100/s → healing completes in ~0.02s.
-   static constexpr real_t exp_arg_max_ = 20.0;
 };
 
 /// Slip law in psi-space: dpsi/dt = -(b*V/Dc) * [psi - f0 - b*ln(V0/V)]
