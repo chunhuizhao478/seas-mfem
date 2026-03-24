@@ -222,6 +222,10 @@ public:
    /// non-zero-slip ComputeTraction call. Isolates cross-component coupling source.
    void SetDiagDipTraction(bool v) { diag_dip_traction_ = v; }
 
+   /// v51: Dump z-component of displacement at fault face quad points after solve.
+   /// Tests K-f consistency: for pure strike-slip, u_z should be exactly 0.
+   void SetDiagUzFault(bool v) { diag_uz_fault_ = v; }
+
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -251,6 +255,8 @@ private:
    bool traction_weak_form_ = false;    // v50f: weak-form traction (not yet implemented)
    bool diag_dip_traction_ = false;     // v51: dump per-component traction (global xyz)
    mutable bool diag_dip_traction_done_ = false;
+   bool diag_uz_fault_ = false;         // v51: dump u_z at fault faces after solve
+   mutable bool diag_uz_fault_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
@@ -3308,6 +3314,65 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       displacement.GetSubVector(vdofs1, u1_all);
       displacement.GetSubVector(vdofs2, u2_all);
 
+      // v51: Dump u_z at fault face centroid (one-time diagnostic)
+      if (diag_uz_fault_ && !diag_uz_fault_done_)
+      {
+         // Check if any slip is non-zero
+         bool has_slip = false;
+         int nbf_check = nbf_per_face_;
+         for (int kk = 0; kk < nbf_check; kk++)
+         {
+            int di = fi * nbf_check + kk;
+            if (di * 2 + 1 < slip_bc.Size() &&
+                (std::abs(slip_bc(2*di)) > 1e-20 ||
+                 std::abs(slip_bc(2*di+1)) > 1e-20))
+            { has_slip = true; break; }
+         }
+         if (has_slip || fi == 0)
+         {
+            // Evaluate u at face centroid
+            FTr->SetAllIntPoints(&ip);
+            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+            const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
+
+            Vector shape1(ndof1), shape2(ndof2);
+            fe1->CalcShape(eip1, shape1);
+            fe2->CalcShape(eip2, shape2);
+
+            real_t u1[3] = {0,0,0}, u2[3] = {0,0,0};
+            for (int c = 0; c < dim; c++)
+               for (int k = 0; k < ndof1; k++)
+                  u1[c] += shape1(k) * u1_all(c * ndof1 + k);
+            for (int c = 0; c < dim; c++)
+               for (int k = 0; k < ndof2; k++)
+                  u2[c] += shape2(k) * u2_all(c * ndof2 + k);
+
+            Vector fc(3);
+            FTr->Face->SetIntPoint(&ip);
+            FTr->Face->Transform(ip, fc);
+
+            // u_z is component 2 (dip direction for BP5)
+            // For pure strike-slip, u_z should be exactly 0
+            real_t uz_avg = 0.5 * (u1[2] + u2[2]);
+            real_t uz_jump = u1[2] - u2[2];
+            real_t ux_avg = 0.5 * (u1[0] + u2[0]);
+
+            if (std::abs(uz_avg) > 1e-20 || fi < 5)
+            {
+               mfem::out << "[UZ-FAULT] fi=" << fi
+                  << " loc=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                  << " u1=(" << u1[0] << "," << u1[1] << "," << u1[2] << ")"
+                  << " u2=(" << u2[0] << "," << u2[1] << "," << u2[2] << ")"
+                  << " uz_avg=" << uz_avg
+                  << " uz_jump=" << uz_jump
+                  << " ux_avg=" << ux_avg
+                  << " |uz/ux|=" << (std::abs(ux_avg) > 1e-30 ?
+                     std::abs(uz_avg/ux_avg) : 0.0)
+                  << std::endl;
+            }
+         }
+      }
+
       // Fault basis
       const auto &basis = fault_basis_.GetBasis(fi);
 
@@ -4359,6 +4424,17 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             << " total_DOFs_with_tau>1Pa: " << count
             << " / " << num_fault_dofs_ << "\n";
          diag_first_traction_done_ = true;
+      }
+
+      // v51: Mark u_z diagnostic as done
+      if (diag_uz_fault_ && !diag_uz_fault_done_)
+      {
+         bool any_slip = false;
+         for (int i = 0; i < slip_bc.Size(); i++)
+         {
+            if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
+         }
+         if (any_slip) { diag_uz_fault_done_ = true; }
       }
 
       // v51: Mark dip traction diagnostic as done after first complete pass
