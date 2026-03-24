@@ -1,7 +1,7 @@
 # BP5 Debug v51: Dip-Component Offset — Systematic Cross-Component Coupling Error
 
 **Date**: 2026-03-24
-**Status**: SYSTEMATIC DIP OFFSET IDENTIFIED. All stations show spurious dip-slip, elevated dip V, and dip traction offset from t=0. The offset is immediate (first time step), spatially varying, and contaminates strike components at later times. Root cause under investigation.
+**Status**: u_z = 18.5% of u_x confirmed in elastic solution. Convergence hypothesis DISPROVED: our p=4 on 4000m has 10× worse dip/strike ratio (0.4-8.1%) than Tandem p=4 on the SAME mesh (0.0-0.7%). DG face integrators confirmed identical — the difference must be in volume integrator, boundary face treatment, or quadrature. Investigation ongoing.
 **Previous**: v50 (production defaults, first earthquake, ClosedUniform nodes, p=4/p=6 working)
 **Branch**: `feature/elasticity`
 
@@ -749,12 +749,14 @@ Quantifies the actual contamination during the earthquake that drives dip slip.
 ### Waiting for results
 - ⏳ v51a: zero-dip-traction production run
 - ⏳ v51b: coseismic dip/strike ratio diagnostic
+- ⏳ v51d: p=1 1000m BLR 1e-12 (missed test from v47)
 
 ### Remaining
 1. **If v51a confirms**: implement `--zero-dip-traction` as default for BP5 production
 2. **Normal stress coupling**: add elastic normal stress perturbation to friction law (match Tandem)
-3. **Root cause of 21% contamination**: investigate whether mesh quality improvements
-   (better tet alignment near fault) reduce the cross-component error
+3. **Root cause of 10× worse dip ratio vs Tandem** (Section 19.5): compare volume integrator,
+   boundary face treatment, quadrature orders
+4. **If v51d nucleates**: p=1 with ×3 penalty is viable — revisit dip contamination at p=1
 
 ---
 
@@ -784,3 +786,194 @@ Quantifies the actual contamination during the earthquake that drives dip slip.
 | v51 | **Found: Tandem uses elastic σ_n, we use constant 25 MPa** | **SECONDARY FINDING** |
 | v51a | Zero-dip-traction production test (48hr, 400 ranks) | **SUBMITTED** |
 | v51b | Coseismic dip/strike ratio diagnostic (4hr, 400 ranks) | **SUBMITTED** |
+| **v51d** | **p=1 1000m BLR 1e-12: disambiguate v47a V-decay (BLR artifact vs penalty stiffness)** | **PLANNED** |
+| v51f/f2 | Strategy 1 (stress-only traction): BLOWUP at p=2 and p=4 | **DISPROVED** |
+| **v51c** | **DEFINITIVE: u_z = 18.5% of u_x in the elastic solution itself** | **ROOT CAUSE** |
+| v51c | Source: K-matrix cross-coupling from non-fault interior face DG terms | **ANALYZED** |
+| v51c | f_z = 0 confirmed on fault faces → u_z comes from K_zx coupling | **CONFIRMED** |
+| v51c | Initial conclusion: DG discretization error scaling with p | HYPOTHESIZED |
+| **v51c+** | **DISPROVED: p=4 on 4000m has 10× worse ratio than Tandem p=4 on same mesh** | **CODE DIFF EXISTS** |
+| v51c+ | Tandem ALSO has non-zero dip slip — it's a real 3D effect, but our ratio is 10× too high | **KEY FINDING** |
+| v51c+ | DG face integrators confirmed identical → difference must be in volume/BC/stabilization | **NARROWED** |
+| v51c+ | Next: compare volume integrator, boundary face treatment, quadrature orders | **PLANNED** |
+
+---
+
+## 19. DEFINITIVE FINDING: u_z Contamination in Elastic Solution (v51c)
+
+### 19.1 Setup
+
+Added `--diag-uz-fault` flag: dumps u_x, u_y, u_z at all fault face centroids after
+the first elastic solve with non-zero slip. For pure strike-slip, u_z should be exactly 0.
+
+### 19.2 Results: u_z = 18.5% of u_x
+
+| Component | Max value | Role | Expected |
+|-----------|----------|------|----------|
+| u_y (normal) | 9.24e-5 m | Fault-normal (Poisson) | Non-zero ✓ |
+| u_x (strike) | 2.92e-5 m | Strike displacement | Non-zero ✓ |
+| **u_z (dip)** | **5.39e-6 m** | **Dip displacement** | **Should be 0** ✗ |
+
+**max |u_z / u_x| = 18.5%** — the displacement solution ITSELF has massive dip contamination.
+
+### 19.3 Verified: f_z = 0 on Fault Faces
+
+The RHS has zero z-component on fault faces:
+- **Penalty term**: `penalty * sign * delta_u_q[i=z] * shape(k)` — delta_u_q[z] = 0 for pure x-slip ✓
+- **Symmetry term**: `trac_20 = λ * dshape(k,2) * nor(0) + μ * dshape(k,0) * nor(2)` — both nor(0) = 0 and nor(2) = 0 for fault normal (0, ±n_y, 0) ✓
+
+### 19.4 Source: K-Matrix Cross-Coupling from Interior Faces
+
+The DG bilinear form K includes face integrals on ALL interior faces (not just fault).
+On non-fault interior faces, the face normal n = (n_x, n_y, n_z) has non-zero x,z components.
+The SIPG consistency/symmetry terms:
+
+```
+-∫_F {σ(u)·n} · [v] dS        (consistency)
+-ε ∫_F {σ(v)·n} · [u] dS      (symmetry)
+```
+
+create cross-component coupling K_xz ≠ 0 through the elasticity tensor (λ term couples
+div(u) = ∂u_x/∂x + ∂u_y/∂y + ∂u_z/∂z to all components). With f_z = 0 but K_xz ≠ 0:
+
+```
+K_zz * u_z + K_zx * u_x = 0
+→ u_z = -K_zz⁻¹ * K_zx * u_x ≠ 0
+```
+
+### 19.5 Convergence Hypothesis — DISPROVED by p=4 4000m Results
+
+Initial hypothesis: the cross-coupling is a discretization error scaling with p, and higher p
+would reduce the contamination. This was **DISPROVED** by the p=4 4000m results:
+
+**Same mesh (4000m), same order (p=4) — 10× worse than Tandem:**
+
+| Run | Mesh | Order | Dip/Strike ratio (accumulated) |
+|-----|------|-------|-------------------------------|
+| **Our p=4** | **4000m** | **p=4** | **0.4-8.1%** |
+| **Tandem p=4** | **4000m** | **p=4** | **0.0-0.7%** |
+| **Tandem p=6** | **4000m** | **p=6** | **0.0-0.6%** |
+| Our p=2 | 1000m | p=2 | 0.3-5.7% |
+
+**Station-by-station dip/strike ratio comparison:**
+
+| Station | Our p=2 | Our p=4 | Tandem p=4 | Tandem p=6 |
+|---------|---------|---------|------------|------------|
+| Nucleation (x2=-24, x3=10) | 0.5% | 0.4% | 0.2% | 0.2% |
+| Near-nuc depth (x2=-16, x3=10) | 0.3% | 0.5% | 0.0% | 0.0% |
+| Center depth (x2=0, x3=10) | 0.4% | 2.5% | 0.1% | 0.1% |
+| Center surface (x2=0, x3=0) | 0.8% | **6.8%** | 0.2% | 0.2% |
+| Far depth (x2=16, x3=10) | 0.6% | **2.4%** | 0.2% | 0.3% |
+| Far surface (x2=-36, x3=0) | 5.7% | **8.1%** | 0.7% | 0.6% |
+
+**Critical finding**: Our p=4 on 4000m (0.4-8.1%) is **WORSE** than our p=2 on 1000m
+(0.3-5.7%), and both are much worse than Tandem at the SAME mesh and order (0.0-0.7%).
+
+**Important**: Tandem also has non-zero dip slip — it's a real 3D effect. But Tandem's
+dip/strike ratio is ~10× smaller than ours at the same configuration.
+
+### 19.6 Revised Understanding: NOT Just Convergence — Code Difference Exists
+
+Since Tandem and our code use the same mesh, same order, and the DG face integrators
+have been confirmed mathematically identical (Section 14), there MUST be a code-level
+difference that we have NOT yet identified.
+
+**What has been ruled out:**
+- DG face integrators (consistency, symmetry, penalty) — IDENTICAL (agent comparison)
+- Penalty formula and c_N_1 — IDENTICAL
+- Normal computation — IDENTICAL (CalcOrtho vs cofactor)
+- Fault basis (EmbedSlip, ProjectTraction) — IDENTICAL (Section 7)
+- Far-field BC formula — IDENTICAL (Section 9)
+- Friction law velocity direction — IDENTICAL (Section 15)
+
+**What has NOT been checked:**
+1. **Volume integrator** — MFEM's `ElasticityIntegrator` vs Tandem's `assembleVolume` kernel.
+   The volume integral ∫ σ(u):ε(v) dx creates K_xz coupling through the λ term. If the
+   quadrature order or Jacobian handling differs, K_vol differs → different u_z.
+
+2. **Boundary face integrator** — MFEM uses `w = ip.weight` (no 1/2 factor) on boundary
+   faces. If Tandem uses a different weighting, the boundary stiffness contribution differs.
+
+3. **Quadrature order for volume terms** — MFEM defaults to 2p for volume integrals.
+   Tandem may use a different rule (e.g., 2p+1 or exact integration).
+
+4. **Additional stabilization** — Tandem may have a cross-component penalty or stabilization
+   that we lack, reducing the K_xz / K_zz ratio.
+
+### 19.7 Additional Finding: p=4 Earthquake Did Not Fully Propagate
+
+The p=4 4000m run shows:
+- Nucleation (x2=-24): slip_s = 4.59 m — full earthquake ✓
+- Near-nuc (x2=-16): slip_s = 4.92 m — full earthquake ✓
+- Center depth (x2=0): slip_s = **0.14 m** — earthquake did NOT reach center ✗
+- Far depth (x2=16): slip_s = 2.98 m — partial earthquake
+
+The earthquake propagated from the nucleation zone but did NOT reach the center of the
+fault. This is a separate issue from the dip offset — possibly related to the coarser
+mesh (4000m vs 1000m) providing insufficient resolution to sustain rupture propagation.
+
+### 19.8 Next Steps: Find the Missing Difference
+
+**Priority 1**: Compare volume integrator (MFEM vs Tandem) — quadrature order, Jacobian
+handling, cross-component structure.
+
+**Priority 2**: Compare boundary face integrator — weighting, penalty at boundaries.
+
+**Priority 3**: Check if Tandem has any additional stabilization or post-processing that
+reduces cross-component coupling.
+
+## 20. Missed Test from v47: p=1 1000m with Tight BLR Tolerance
+
+### 20.1 Gap Identified
+
+v47a ran p=1 on 1000m with ×3 penalty and MUMPS-BLR at default tolerance (1e-10).
+Result: V_nuc decayed from 0.01 → 5e-9, no earthquake. This was attributed to the
+×3 penalty making the effective elastic stiffness exceed k_critical.
+
+However, the v47 investigation plan (Section 8.1.2) explicitly called for:
+
+> "p=1 with ×3 penalty + exact MUMPS: Run p=1 (not p=2) with exact MUMPS
+> (smaller system, should fit in memory). If V_nuc still decays → confirms the
+> issue is formulation, not solver. If V_nuc grows → BLR IS the issue at p=1."
+
+**This test was never executed.** The tighter-tolerance tests (v47c at BLR 1e-14,
+v47d exact MUMPS) were done for **p=2 only**. The investigation pivoted to the
+multi-DOF blowup pattern (nbf > 1 at p≥2) and moved on to v48+.
+
+### 20.2 Why This Matters
+
+At p=2, tighter BLR tolerance made the instability **worse** (v47d: BLR 1e-14
+produced larger τ_max than v47b: BLR 1e-10). But p=1 has a fundamentally different
+failure mode (V decay, not blowup) — the BLR interaction could go the other way.
+
+The v47a V-decay diagnosis assumed the cause was "×3 penalty → k_elastic > k_critical"
+(Section 7.4). But BLR at 1e-10 introduces solver error that contaminates the
+displacement field. At p=1 with nbf=1 (no multi-DOF issue), the only variables are:
+1. Penalty magnitude (×3 — correct, matching Tandem)
+2. Solver accuracy (BLR 1e-10 — never tested tighter for p=1)
+
+If p=1 with BLR 1e-12 nucleates successfully, it would mean:
+- The v47a V-decay was a BLR artifact, NOT a penalty stiffness issue
+- p=1 with ×3 penalty is viable at tight tolerance
+- The dip contamination analysis (Section 19) needs revisiting at p=1
+
+### 20.3 Test: v51d — p=1, 1000m, BLR 1e-12
+
+**Configuration**: p=1, 1000m mesh (bp5_tandem.msh), IP method, MUMPS-BLR 1e-12,
+400 ranks, 48hr. All v50 defaults (CFL-aware dt, V-guard ON).
+
+**Job script**: `jobs/bp5/bp5_v51d_1000m_ip_p1_blr12.sbatch`
+
+**Success criterion**: V_nuc grows past 0.01 and earthquake nucleates.
+**Failure criterion**: V_nuc decays as in v47a → confirms penalty stiffness is the cause.
+
+---
+
+## 21. Strategy 1 Result: Stress-Only Traction (v51f/f2 — FAILED)
+
+Tested removing the penalty correction from traction recovery:
+- **v51f (p=4)**: BLOWUP — V = 10 m/s in 35 steps
+- **v51f2 (p=2)**: BLOWUP — V = 46 m/s in 397 steps
+
+The penalty correction is ESSENTIAL for stability. Cannot be removed.
+The dip contamination is in {σ·n} (from u_z), not in the penalty correction.

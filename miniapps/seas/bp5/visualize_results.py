@@ -520,7 +520,7 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=150.0,
+                t_max_yr=1.0,
                 save_path=fname_close,
             )
         else:
