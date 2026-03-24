@@ -218,6 +218,10 @@ public:
    /// v50f: Use weak-form traction recovery (not yet implemented).
    void SetTractionWeakForm(bool v) { traction_weak_form_ = v; }
 
+   /// v51: Dump per-component traction (global x,y,z + local dip,strike) at first
+   /// non-zero-slip ComputeTraction call. Isolates cross-component coupling source.
+   void SetDiagDipTraction(bool v) { diag_dip_traction_ = v; }
+
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -245,6 +249,8 @@ private:
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    bool traction_stress_only_ = false;  // v50f: skip penalty correction in traction
    bool traction_weak_form_ = false;    // v50f: weak-form traction (not yet implemented)
+   bool diag_dip_traction_ = false;     // v51: dump per-component traction (global xyz)
+   mutable bool diag_dip_traction_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
@@ -3544,6 +3550,55 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                       << " corr_strike=" << tau_corr_local[1];
             mfem::out << "\n";
          }
+
+         // v51: Per-component traction diagnostic (global xyz + local dip/strike)
+         // Triggers once at the first call where any slip is non-zero.
+         if (diag_dip_traction_ && !diag_dip_traction_done_)
+         {
+            bool has_slip = false;
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int di = fi * nbf + kk;
+               if (std::abs(slip_bc(2*di)) > 1e-20 ||
+                   std::abs(slip_bc(2*di+1)) > 1e-20)
+               { has_slip = true; break; }
+            }
+            if (has_slip || fi == 0)
+            {
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->SetIntPoint(&ip);
+               FTr->Face->Transform(ip, fc);
+
+               real_t T_total[3];
+               for (int c = 0; c < dim; c++)
+                  T_total[c] = T_stress[c] - correction[c];
+
+               real_t tau_s[2], tau_c[2], tau_t[2];
+               fault_basis_.ProjectTraction(fi, T_stress, tau_s);
+               real_t cn[3] = {-correction[0], -correction[1], -correction[2]};
+               fault_basis_.ProjectTraction(fi, cn, tau_c);
+               fault_basis_.ProjectTraction(fi, T_total, tau_t);
+
+               real_t sl_d = slip_bc(2 * fi * nbf);
+               real_t sl_s = slip_bc(2 * fi * nbf + 1);
+
+               mfem::out << "[DIP-TRAC] fi=" << fi
+                  << " loc=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                  << " Tstress=(" << T_stress[0] << "," << T_stress[1]
+                  << "," << T_stress[2] << ")"
+                  << " Tcorr=(" << correction[0] << "," << correction[1]
+                  << "," << correction[2] << ")"
+                  << " Ttot=(" << T_total[0] << "," << T_total[1]
+                  << "," << T_total[2] << ")"
+                  << " tau_s=(" << tau_s[0] << "," << tau_s[1] << ")"
+                  << " tau_c=(" << tau_c[0] << "," << tau_c[1] << ")"
+                  << " tau_t=(" << tau_t[0] << "," << tau_t[1] << ")"
+                  << " slip=(" << sl_d << "," << sl_s << ")"
+                  << " sign=" << sign << " pen=" << penalty_ip
+                  << std::endl;
+            }
+         }
       }
       else  // BR2
       {
@@ -4304,6 +4359,29 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             << " total_DOFs_with_tau>1Pa: " << count
             << " / " << num_fault_dofs_ << "\n";
          diag_first_traction_done_ = true;
+      }
+
+      // v51: Mark dip traction diagnostic as done after first complete pass
+      if (diag_dip_traction_ && !diag_dip_traction_done_)
+      {
+         // Check if any face had non-zero slip
+         bool any_slip = false;
+         for (int i = 0; i < slip_bc.Size(); i++)
+         {
+            if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
+         }
+         if (any_slip)
+         {
+            diag_dip_traction_done_ = true;
+            if constexpr (IsParallelMesh<MeshType>::value)
+            {
+#ifdef MFEM_USE_MPI
+               int rank;
+               MPI_Comm_rank(mesh_.GetComm(), &rank);
+               mfem::out << "[DIP-TRAC] rank=" << rank << " diagnostic complete\n";
+#endif
+            }
+         }
       }
    }
 }

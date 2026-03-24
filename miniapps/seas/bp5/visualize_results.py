@@ -168,7 +168,7 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
     plt.close()
 
 
-def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1, save_path=None):
+def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=1.0, save_path=None):
     """Plot 8-panel comparison zoomed to the first t_max_yr years."""
     import matplotlib.pyplot as plt
 
@@ -354,7 +354,13 @@ def main():
         args.tandem_p6 = True
 
     # Default: Tandem p4 if no benchmark flags specified and not --no-benchmark
-    if not args.no_benchmark and not args.tandem_p4 and not args.tandem_p6 and not args.eqsim and not args.tribie:
+    if (
+        not args.no_benchmark
+        and not args.tandem_p4
+        and not args.tandem_p6
+        and not args.eqsim
+        and not args.tribie
+    ):
         args.tandem_p4 = True
 
     try:
@@ -387,17 +393,21 @@ def main():
     benchmark_colors = {
         "tandem_p4": "#000000",  # black
         "tandem_p6": "#2ca02c",  # green
-        "eqsim": "#1f77b4",     # blue
-        "tribie": "#9467bd",     # purple
+        "eqsim": "#1f77b4",  # blue
+        "tribie": "#9467bd",  # purple
     }
     used_colors = set()
 
     if args.tandem_p4 and not args.no_benchmark:
-        sources.append(("Tandem p4", "tandem_p4", None, benchmark_colors["tandem_p4"], "--"))
+        sources.append(
+            ("Tandem p4", "tandem_p4", None, benchmark_colors["tandem_p4"], "--")
+        )
         used_colors.add(benchmark_colors["tandem_p4"])
 
     if args.tandem_p6 and not args.no_benchmark:
-        sources.append(("Tandem p6", "tandem_p6", None, benchmark_colors["tandem_p6"], "--"))
+        sources.append(
+            ("Tandem p6", "tandem_p6", None, benchmark_colors["tandem_p6"], "--")
+        )
         used_colors.add(benchmark_colors["tandem_p6"])
 
     if args.eqsim and not args.no_benchmark:
@@ -510,11 +520,11 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=0.1,
+                t_max_yr=150.0,
                 save_path=fname_close,
             )
         else:
-            plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=0.1)
+            plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=1.0)
 
     # Overview plot
     if len(all_results) > 1:

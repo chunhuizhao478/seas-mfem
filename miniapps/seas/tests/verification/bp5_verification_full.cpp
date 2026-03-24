@@ -319,6 +319,7 @@ int main(int argc, char *argv[])
    bool diag_normals = false;
    bool diag_first_traction = false;
    bool diag_rk_stages = false;
+   bool diag_dip_traction = false;   // v51: per-component traction diagnostic
    // v49 Phase 2: CFL-aware dt and V guard
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
@@ -402,6 +403,7 @@ int main(int argc, char *argv[])
       if (arg == "--diag-normals") { diag_normals = true; }
       if (arg == "--diag-first-traction") { diag_first_traction = true; }
       if (arg == "--diag-rk-stages") { diag_rk_stages = true; }
+      if (arg == "--diag-dip-traction") { diag_dip_traction = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
@@ -635,6 +637,7 @@ int main(int argc, char *argv[])
    if (match_quad_order) { domain.SetMatchQuadOrder(true); }
    if (diag_normals) { domain.SetDiagNormals(true); }
    if (diag_first_traction) { domain.SetDiagFirstTraction(true); }
+   if (diag_dip_traction) { domain.SetDiagDipTraction(true); }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);

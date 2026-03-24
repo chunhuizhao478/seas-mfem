@@ -1,0 +1,519 @@
+# BP5 Debug v51: Dip-Component Offset — Systematic Cross-Component Coupling Error
+
+**Date**: 2026-03-24
+**Status**: SYSTEMATIC DIP OFFSET IDENTIFIED. All stations show spurious dip-slip, elevated dip V, and dip traction offset from t=0. The offset is immediate (first time step), spatially varying, and contaminates strike components at later times. Root cause under investigation.
+**Previous**: v50 (production defaults, first earthquake, ClosedUniform nodes, p=4/p=6 working)
+**Branch**: `feature/elasticity`
+
+---
+
+## 1. Problem Statement
+
+The v50 production run (1000m, p=2, 400 ranks) completed the full 1800-year simulation
+with 8+ earthquake cycles. While the **strike-slip component** matches Tandem well for the
+first 1-2 events, the **dip component** shows systematic errors from t=0:
+
+- Dip slip has a **constant offset** (not accumulating — appears immediately)
+- Dip slip rate is **3-5 orders of magnitude too high** (1e-7 vs 1e-11)
+- Dip shear stress has a **systematic offset** (varies by station)
+- State variable (log10 ψ) is **systematically lower** (~0.5-1 units)
+- Strike components start well but **diverge by event 2-3** due to dip contamination
+
+This is the same pattern seen in v46, confirming the issue was never resolved — only
+masked by the focus on CFL stability (v49) and node conditioning (v50).
+
+**Both codes use SIPG (identical formulation).** The difference is NOT in the DG method.
+
+---
+
+## 2. Station-by-Station Analysis (Closeup 0-150 years)
+
+### 2.1 Nucleation Station: strk-24dp+10 (x2=-24km, x3=10km)
+
+**Strike (left column):**
+- Slip: Good match through first event, slight timing drift by event 2
+- V_strike: Matches Tandem envelope, earthquake timing ~5-8s late
+- τ_strike: Initial match (21.15 MPa), ~0.5 MPa drift by t=50yr
+
+**Dip (right column):**
+- **Slip_dip: CONSTANT -0.015m offset from t=0** — flat line, no accumulation
+- **V_dip: ~1e-7 m/s vs Tandem's ~1e-11** — 4 orders of magnitude too high
+- **τ_dip: -0.4 MPa offset** (our code more negative)
+- **State: ~0.5 units lower in log10(ψ)** — weaker fault
+
+### 2.2 Center Depth: strk+00dp+10 (x2=0km, x3=10km)
+
+**Strike:** Good initial match, τ_strike ~1 MPa low from early interseismic.
+**Dip:**
+- **Slip_dip: CONSTANT -0.025m offset from t=0**
+- **V_dip: ~1e-10 vs ~1e-14** — 4 orders too high
+- **τ_dip: -0.15 MPa offset**
+- **State: systematically lower**
+
+### 2.3 Near-Nucleation Depth: strk-16dp+10 (x2=-16km, x3=10km)
+
+**Strike:** Good match, slight timing drift.
+**Dip:**
+- **Slip_dip: CONSTANT -0.015m offset from t=0**
+- **V_dip: elevated by ~4 orders**
+- **τ_dip: +0.1 MPa offset** (opposite sign from center!)
+- **State: lower**
+
+### 2.4 Far Depth: strk+16dp+10 (x2=+16km, x3=10km)
+
+**Strike:** Good match initially, τ_strike ~1 MPa low.
+**Dip:**
+- **Slip_dip: CONSTANT -0.046m offset from t=0** (larger than center)
+- **V_dip: elevated**
+- **τ_dip: +0.1 MPa offset**
+
+### 2.5 Center Surface: strk+00dp+00 (x2=0km, x3=0km)
+
+**Strike:** Reasonable match (surface VS zone, slow dynamics).
+**Dip:**
+- **Slip_dip: CONSTANT -0.05m offset from t=0**
+- **V_dip: ~1e-10 vs ~1e-13** — 3 orders too high
+- **τ_dip: -0.6 MPa offset**
+
+### 2.6 Far Surface: strk+36dp+00 (x2=+36km, x3=0km)
+
+**Strike:** Good match.
+**Dip:**
+- **Slip_dip: -0.12m offset, GROWING over time** (not constant like depth stations)
+- **V_dip: ~1e-10** — elevated
+- **τ_dip: -1.2 MPa offset** (largest offset of any station)
+
+### 2.7 Far Surface Opposite: strk-36dp+00 (x2=-36km, x3=0km)
+
+**Strike:** Reasonable match.
+**Dip:**
+- **Slip_dip: +0.2m offset — OPPOSITE SIGN from all other stations!**
+- **V_dip: ~1e-3** — orders of magnitude too high
+- **τ_dip: +1.0 MPa offset** (also opposite sign)
+- This station has the WORST dip error
+
+---
+
+## 3. Spatial Pattern of the Dip Offset
+
+| Station | Dip slip offset | Dip τ offset | Pattern |
+|---------|----------------|-------------|---------|
+| strk-36dp+00 | **+0.20 m** | **+1.0 MPa** | Positive (anomalous) |
+| strk-24dp+10 | -0.015 m | -0.4 MPa | Negative, small |
+| strk-16dp+10 | -0.015 m | +0.1 MPa | Mixed sign |
+| strk+00dp+10 | -0.025 m | -0.15 MPa | Negative, moderate |
+| strk+00dp+00 | -0.05 m | -0.6 MPa | Negative, larger at surface |
+| strk+16dp+10 | -0.046 m | +0.1 MPa | Mixed sign |
+| strk+36dp+00 | -0.12 m | -1.2 MPa | Negative, largest |
+
+Key observations:
+1. **Offset INCREASES with distance from nucleation zone** — small at x2=-24, large at x2=±36
+2. **Offset is LARGER at surface (x3=0) than at depth (x3=10)**
+3. **strk-36dp+00 has OPPOSITE sign** — suggesting an asymmetry in the fault geometry or BC coupling
+4. **The offset is IMMEDIATE (t=0)** — not accumulated over time
+
+---
+
+## 4. Cascade of Errors
+
+The dip offset creates a cascade that contaminates all components:
+
+```
+Spurious dip displacement (from elastic solve at t=0)
+    ↓
+Non-zero dip traction (from ComputeTraction)
+    ↓
+Elevated dip V (friction law balances η·V = τ_dip)
+    ↓
+Lower state variable ψ (aging law: dψ/dt depends on |V|, not just V_strike)
+    ↓
+Weaker fault (lower ψ → lower friction strength)
+    ↓
+Strike τ deficit (stress redistributes across weaker fault)
+    ↓
+Earlier/different earthquake timing (events 2+ diverge)
+```
+
+---
+
+## 5. Root Cause Analysis
+
+### 5.1 What We Know
+
+1. **Both codes use SIPG** — the DG formulation is identical
+2. **Initial conditions match to 6 digits** (tau, V, psi at t=0)
+3. **The dip offset is IMMEDIATE** — present from the first time step
+4. **The offset is SPATIALLY varying** — not a uniform bias
+5. **The offset depends on position relative to fault boundaries** — largest at edges
+6. **This was also seen in v46** — not a new issue
+
+### 5.2 Hypothesis: Fault Basis / Projection Error
+
+The most likely root cause is in the **FaultBasis** class, which handles:
+- `EmbedSlip(face_idx, slip_local[2], du[3])`: converts (slip_dip, slip_strike) → (Δu_x, Δu_y, Δu_z)
+- `ProjectTraction(face_idx, T_global[3], tau_local[2])`: converts (T_x, T_y, T_z) → (τ_dip, τ_strike)
+
+If the rotation between local (dip, strike) and global (x, y, z) frames has even a small
+error, it would:
+- Mix strike slip into the dip component (creating spurious dip displacement)
+- Mix global traction components into the dip traction
+- The error would be **spatially varying** because the fault geometry varies
+
+Tandem constructs its tangent/normal basis differently. Any difference in:
+- Normal vector direction or sign
+- Tangent vector definition (which direction is "dip" vs "strike")
+- Orthogonalization method
+...would produce exactly this pattern.
+
+### 5.3 Hypothesis: Far-Field BC Coupling into Dip
+
+The spatial pattern (larger offset at edges, opposite sign at strk-36) suggests
+the **far-field Dirichlet BCs** may be coupling into the dip component through the
+3D elasticity tensor. If the prescribed far-field displacement has a non-zero dip
+component (even a tiny one from numerical imprecision), the penalty enforcement
+at far-field boundary faces would create a dip traction that propagates to the fault.
+
+### 5.4 Hypothesis: Initial Elastic Solve Residual
+
+At t=0, slip=0 everywhere, so the elastic solve should give u=0 and traction=0.
+But if there's any numerical residual in the first solve (from the DG formulation,
+solver tolerance, or BC enforcement), it could produce a non-zero dip displacement
+at fault faces. The penalty term in ComputeTraction would then amplify this residual
+into a spurious dip traction.
+
+---
+
+## 6. Investigation Plan
+
+### Priority 1: Verify t=0 traction
+
+Dump the per-DOF traction at the first ODE evaluation (slip=0). The dip traction
+should be EXACTLY zero. If it's not, the error originates in the elastic solve or
+traction computation.
+
+### Priority 2: Compare FaultBasis with Tandem
+
+Line-by-line comparison of:
+- Normal vector construction
+- Tangent1 (dip) and tangent2 (strike) definition
+- EmbedSlip rotation matrix
+- ProjectTraction rotation matrix
+
+Files to compare:
+- Our: `miniapps/seas/fault/fault_basis.hpp`
+- Tandem: `app/form/FacetFunctionalInterior.h` or similar
+
+### Priority 3: Compare far-field BC implementation
+
+Check whether our Dirichlet BC for far-field faces:
+- Prescribes only strike displacement (correct)
+- Or prescribes all 3 components (potentially introducing dip coupling)
+
+Compare with Tandem's `boundary_linear` implementation.
+
+### Priority 4: Dump displacement at t=0
+
+After the first elastic solve (slip=0), dump the displacement field at fault faces.
+Check if there's a non-zero dip component. If so, trace it back to the BC or DG assembly.
+
+---
+
+## 7. FaultBasis Comparison: IDENTICAL — NOT the Root Cause
+
+### 7.1 Line-by-Line Comparison
+
+Comprehensive comparison of fault tangent/normal basis construction between our code
+(`fault_basis.hpp`) and Tandem (`Curvilinear.cpp:facetBasis()`):
+
+**Both codes compute for BP5 (ref_normal=(0,-1,0), up=(0,0,1)):**
+
+| Vector | Formula | Tandem | SEAS-MFEM | Match? |
+|--------|---------|--------|-----------|--------|
+| strike | normalize(up × n) | (1, 0, 0) | (1, 0, 0) | ✓ Identical |
+| dip | strike × n | (0, 0, -1) | (0, 0, -1) | ✓ Identical |
+| normal | ref_normal | (0, -1, 0) | (0, -1, 0) | ✓ Identical |
+
+**Component ordering:**
+
+| Index | Tandem | SEAS-MFEM | Match? |
+|-------|--------|-----------|--------|
+| 0 | dip | tangent1 = dip | ✓ |
+| 1 | strike | tangent2 = strike | ✓ |
+
+**EmbedSlip (both codes):**
+```
+delta_u[d] = slip_local[0] * dip[d] + slip_local[1] * strike[d]
+           = slip_dip * (0,0,-1) + slip_strike * (1,0,0)
+           = (slip_strike, 0, -slip_dip)
+```
+
+**ProjectTraction (both codes):**
+```
+tau_local[0] = T · dip    = T · (0,0,-1) = -T_z     (dip traction)
+tau_local[1] = T · strike = T · (1,0,0)  = T_x      (strike traction)
+```
+
+**Rotation matrix R (columns = dip, strike):**
+```
+R = [ 0  1 ]
+    [ 0  0 ]
+    [-1  0 ]
+```
+R^T × R = I (orthonormal). EmbedSlip uses R, ProjectTraction uses R^T. **No transposition error.**
+
+### 7.2 Only Structural Difference: Sign-Flip Post-Processing
+
+Tandem's `AdapterBase::prepare()` has an additional step: when the raw mesh normal
+disagrees with ref_normal (i.e., `sign_flipped = true`), Tandem flips the entire
+fault_basis_q (all 3 columns negated). This is self-canceling: the negation in
+ProjectTraction cancels with the negation in EmbedSlip, so the friction law sees
+the same physics regardless of face orientation.
+
+SEAS-MFEM handles this differently — it computes tangent vectors from the already-
+corrected normal, so tangent vectors are always consistent. On a planar fault (BP5),
+both approaches give identical results.
+
+### 7.3 Conclusion
+
+**The FaultBasis is NOT the source of the dip offset.** The rotation matrices, component
+ordering, and sign conventions are identical between the two codes. Cross-component
+coupling does not originate from the fault basis projection.
+
+---
+
+## 8. History of Dip-Related Findings in Previous Debug Documents
+
+| Version | What was found | Conclusion at the time | Still valid? |
+|---------|---------------|----------------------|-------------|
+| **v30** | Dip negation bug: `dip = -(s×n)` | **FIXED** to `dip = s×n` | ✓ Fix confirmed correct |
+| **v31** | Interior Dirichlet sign bug → spurious τ_dip | **FIXED** | ✓ Fix confirmed correct |
+| **v34** | τ_dip grows linearly, antisymmetric at edges | "Discretization artifact at p=1" | **✗ Still present at p=2** |
+| **v39/v40** | IP traction sign convention with flipped normal | **FIXED** | ✓ Fix confirmed correct |
+| **v45** | Penalty ×3 from reference element conventions | Analyzed, applied in v47 | ✓ Separate issue |
+| **v46** | Multi-DOF slip indexing bug at p≥2 | **FIXED** | ✓ Fix confirmed correct |
+| **v48** | Shared face normal flips between ranks | "By design, NOT a bug" | ✓ Confirmed correct |
+| **v49** | CalcOrtho=(0,+1,0) vs basis.normal=(0,-1,0) | "Correct by design" | ✓ Confirmed correct |
+
+**Critical re-evaluation of v34:** The v34 conclusion that τ_dip growth is a "discretization
+artifact at p=1, resolved at p=6" was never re-tested at p=2. Our v50 production run IS
+at p=2, and the dip offset is still present with the same spatial pattern (antisymmetric
+at edges, growing with distance from fault center). The v34 explanation is **insufficient**
+— the dip offset is NOT purely a p-refinement issue.
+
+---
+
+## 9. Far-Field BC Comparison: IDENTICAL — NOT the Root Cause
+
+### 9.1 Prescribed Displacement
+
+Both codes prescribe identical far-field displacement:
+
+| Face | Our code | Tandem | Match? |
+|------|----------|--------|--------|
+| Far-field (exterior) | `u_D = (sgn(Y)*Vp*t/2, 0, 0)` | `return Vh, 0, 0` with `Vh = sgn(y)*Vp*t/2` | ✓ |
+| Y=0 non-fault (interior) | `u_D_jump = (Vp*t, 0, 0)` | Same jump via sign flip | ✓ |
+| **Dip component** | **Explicitly zero** | **Explicitly zero** | ✓ |
+
+**The prescribed BC has NO dip (z) component in either code.**
+
+### 9.2 Boundary Surfaces
+
+Both codes apply Dirichlet to the same surfaces:
+- x = ±Lx faces → Dirichlet
+- y = ±Ly faces → Dirichlet
+- Non-fault Y=0 interior faces → Interior Dirichlet (jump-based)
+- z = 0 (top) → Natural (free surface)
+- z = -Lz (bottom) → Natural
+
+Tandem Gmsh: Physical Surface(1)={top,bottom}→Natural, Surface(5)={far-field}→Dirichlet
+Our code: BCMode::FarField matches correctly for Tandem's Gmsh mesh.
+
+### 9.3 DG Penalty Structure
+
+Both codes enforce all 3 components simultaneously:
+- Tandem: `sigma_hat = C:grad(u) + penalty * (u - u_D) * n_unit`
+- Ours: `elvec(idx) += wq_penalty * u_D[i] * shape(k)` for all `i` in dim
+
+Same penalty formula (after v47 ×3 correction).
+
+### 9.4 `boundary_linear` Flag
+
+Tandem's `boundary_linear = true` (bp5.toml) is a mode guard for discrete Green's function
+optimization. It does NOT change the DG assembly. The standard QD mode evaluates the full
+boundary function at each solve.
+
+### 9.5 Conclusion: Far-field BC is NOT the source of dip offset.
+
+---
+
+## 10. Revised Understanding: Dip Slip Accumulates During Earthquakes
+
+### 10.1 Re-interpretation of the "Constant Offset"
+
+The closeup plots (0-150 years) show dip slip that APPEARS constant. But the time
+resolution is years — the dip slip actually accumulates during each **coseismic event**
+(~30 seconds) and then stays constant during the interseismic period (~100 years).
+
+The "constant" offset at the nucleation station (-0.015m) is actually -0.015m of dip
+slip accumulated during the FIRST earthquake.
+
+### 10.2 Mechanism: Vector Friction Law Couples Dip and Strike
+
+In BP5's vector rate-state friction, the slip velocity direction follows the traction:
+```
+V_vec = V_scalar * (τ_vec / |τ_vec|)
+```
+So `V_dip / V_strike = τ_dip / τ_strike`.
+
+If our code computes a spurious τ_dip = 0.15 MPa while τ_strike = 20 MPa:
+```
+V_dip / V_strike = 0.15 / 20 = 0.0075
+```
+During a 30-second earthquake with V_strike ≈ 0.5 m/s:
+```
+V_dip ≈ 0.004 m/s
+dip_slip ≈ 0.004 × 30 ≈ 0.12 m
+```
+This matches the observed offset at far-field stations!
+
+At the nucleation station (smaller τ_dip offset): dip_slip ≈ 0.015m — also matches.
+
+### 10.3 The Root Question
+
+**Where does the ~0.15 MPa spurious τ_dip come from?**
+
+For a pure strike-slip loading on a planar fault with normal n=(0,-1,0):
+- Strike loading creates σ_xy, which produces T_x (strike traction) ✓
+- Strike loading does NOT create σ_zy, so T_z (dip traction) should be ZERO
+- Poisson coupling creates σ_zz from ε_xx, but σ_zz does NOT produce traction on a y-normal face
+
+Yet our ComputeTraction reports non-zero T_z. This can only come from:
+1. **Mesh geometry**: tetrahedral elements are never perfectly aligned — numerical integration
+   produces small cross-component stress gradients
+2. **DG formulation**: the penalty/consistency/symmetry terms in the traction computation
+   amplify these small cross-component errors
+
+Tandem uses the SAME DG formulation on the SAME mesh. If mesh geometry were the sole cause,
+Tandem would have the same τ_dip. **The difference must be in HOW the traction is computed.**
+
+---
+
+## 11. Remaining Hypotheses (FaultBasis + BC Both Ruled Out)
+
+### 11.1 Hypothesis A: Traction Post-Processing Cross-Component Error (MOST LIKELY)
+
+Both codes solve the same K*u = f. The displacement u is identical (same formulation,
+same mesh, same solver). But the TRACTION is computed differently:
+
+**Tandem**: Computes traction WITHIN the DG operator application. The consistency term
+`{σ·n}` and penalty correction are evaluated together as part of the same kernel. The
+cross-component coupling in the elasticity tensor is handled consistently.
+
+**Our code**: Post-processes traction SEPARATELY in ComputeTraction. The stress average
+`{σ·n}` is computed from the displacement gradient, and the penalty correction is subtracted.
+These are separate evaluations that may handle the λ (cross-coupling) term differently.
+
+For a tet mesh with non-aligned faces, the stress gradient ∇u has all 9 components
+non-zero. The traction `{σ·n}` = `{(λ tr(ε)I + 2με)·n}` includes:
+```
+T_z = λ*(ε_xx + ε_yy + ε_zz) * n_z + 2μ * (ε_zx*n_x + ε_zy*n_y + ε_zz*n_z)
+```
+On a y-normal face: n = (0, -1, 0), so:
+```
+T_z = -2μ * ε_zy = -μ * (∂u_z/∂y + ∂u_y/∂z)
+```
+The λ term DROPS OUT for dip traction on a y-normal face. The dip traction depends
+ONLY on the off-diagonal strain ε_zy.
+
+For a perfect strike-slip solution, ∂u_z/∂y = ∂u_y/∂z = 0, so T_z = 0. But numerical
+errors in ∂u_z/∂y (from DG element-wise polynomial approximation of the displacement
+field) produce non-zero T_z.
+
+**Critical question**: Does Tandem's operator-internal traction computation cancel this
+numerical error more effectively than our separate post-processing?
+
+### 11.2 Hypothesis B: Initial Condition — tau_pre Dip Component
+
+In BP5, the pre-stress τ_pre is computed from the steady-state friction law:
+```
+τ_pre = σ_n * [f0 + (a-b) * ln(V_init/V0)]
+```
+This is a SCALAR. The direction is V_init / |V_init|.
+
+V_init = (V_zero, V_init_strike) where V_zero ≈ 0.
+
+If V_zero is EXACTLY 0: τ_pre_dip = 0 (correct)
+If V_zero is tiny but non-zero: τ_pre_dip = τ_pre * V_zero / |V_init| (negligible)
+
+**Need to verify**: What is V_zero set to in our code? If it's 0, this is not the cause.
+
+---
+
+## 12. Updated Investigation Plan
+
+### Priority 1: Dump per-component traction at first coseismic step
+
+At the first ODE evaluation where slip is non-zero (first RK stage of step 1),
+dump for each fault face DOF:
+- `T_global = (T_x, T_y, T_z)` from ComputeTraction
+- `T_stress = {σ·n}` component (stress average only)
+- `T_penalty = penalty * correction` component
+- `tau_dip = T · (0,0,-1)` and `tau_strike = T · (1,0,0)`
+
+If T_z is non-zero: is it from T_stress or T_penalty?
+If T_stress: the displacement gradient has spurious ∂u_z/∂y — DG discretization error
+If T_penalty: the penalty correction has cross-component leakage
+
+### Priority 2: Compare with Tandem's traction at same time
+
+Run Tandem on the same mesh with the same parameters, dump traction components at the
+same time step. If Tandem's T_z = 0 and ours ≠ 0, the difference is in the traction
+computation method. If both have non-zero T_z, the mesh geometry is the cause.
+
+### Priority 3: Check V_zero value
+
+Verify that the dip component of V_init is exactly 0.0 in our initialization.
+
+---
+
+## 13. What Has Been Ruled Out
+
+| Component | Compared? | Result |
+|-----------|----------|--------|
+| FaultBasis (normal, dip, strike vectors) | ✓ Line-by-line | **IDENTICAL** |
+| EmbedSlip rotation matrix | ✓ | **IDENTICAL** |
+| ProjectTraction rotation matrix | ✓ | **IDENTICAL** |
+| Component ordering (index 0=dip, 1=strike) | ✓ | **IDENTICAL** |
+| Far-field BC prescribed displacement | ✓ | **IDENTICAL** (zero dip) |
+| Boundary surface assignment | ✓ | **IDENTICAL** |
+| DG penalty structure | ✓ | **IDENTICAL** |
+| `boundary_linear` flag effect | ✓ | No effect on assembly |
+| Sign fixes (v30, v31, v39, v40) | ✓ | All still correct |
+| Multi-DOF indexing (v46) | ✓ | Fixed, still correct |
+
+## 14. What Remains to Investigate
+
+1. **Traction post-processing vs operator-internal computation** — the ONLY structural
+   difference between our code and Tandem that hasn't been compared
+2. **Per-component traction dump** — needed to isolate whether τ_dip comes from
+   stress average or penalty correction
+3. **V_zero value** — verify it's exactly 0.0
+
+---
+
+## 15. Revision History
+
+| Version | Change | Status |
+|---------|--------|--------|
+| v46 | First observation of dip offset and timing drift | Observed |
+| v47 | Penalty ×3 correction — improved strike, did NOT fix dip | Partial fix |
+| v49 | CFL + V-guard — stabilized parallel runs | Done |
+| v50 | ClosedUniform nodes — fixed p=4 conditioning | Done |
+| v50 prod | Full 1800yr run: 8 earthquakes, good strike match, **dip offset persists** | Confirmed |
+| **v51** | **Dip offset analysis: systematic, spatially varying, accumulates during EQs** | **INVESTIGATING** |
+| v51 | FaultBasis comparison: IDENTICAL to Tandem — NOT the root cause | **RULED OUT** |
+| v51 | Far-field BC comparison: IDENTICAL to Tandem — NOT the root cause | **RULED OUT** |
+| v51 | Previous debug doc review: v30-v49 dip fixes all confirmed correct | **REVIEWED** |
+| v51 | v34 "p=1 artifact" conclusion invalidated — offset persists at p=2 | **RE-EVALUATED** |
+| v51 | Revised understanding: dip slip accumulates during EQs via vector friction | **KEY INSIGHT** |
+| v51 | Root question: where does ~0.15 MPa spurious τ_dip come from? | **NEXT STEP** |
