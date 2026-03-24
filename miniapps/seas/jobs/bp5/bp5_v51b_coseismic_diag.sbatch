@@ -29,13 +29,9 @@ export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 
-# NO BUILD — v51a builds
-for i in $(seq 1 60); do
-   [ -f seas_bp5_full ] && break
-   echo "Waiting for v51a build... ($i/60)"
-   sleep 10
-done
-[ ! -f seas_bp5_full ] && { echo "ERROR: seas_bp5_full not found after 10min"; exit 1; }
+# Build independently
+make clean-build
+make seas_bp5_full || { echo "BUILD FAILED"; exit 1; }
 
 mkdir -p bp5/results_v51b_codiag
 
