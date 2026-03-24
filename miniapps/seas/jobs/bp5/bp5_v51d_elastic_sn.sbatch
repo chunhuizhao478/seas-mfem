@@ -48,4 +48,5 @@ ibrun ./seas_bp5_full \
       --output-prefix bp5_v51d_esn \
       --write-every-step \
       --elastic-sigma-n \
+      --diag-coseismic-dip \
       --dt-init 0.01
