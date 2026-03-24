@@ -320,6 +320,8 @@ int main(int argc, char *argv[])
    bool diag_first_traction = false;
    bool diag_rk_stages = false;
    bool diag_dip_traction = false;   // v51: per-component traction diagnostic
+   bool zero_dip_traction = false;   // v51: zero tau_dip after ComputeTraction
+   bool diag_coseismic_dip = false;  // v51: dump dip/strike ratio during coseismic
    // v49 Phase 2: CFL-aware dt and V guard
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
@@ -404,6 +406,8 @@ int main(int argc, char *argv[])
       if (arg == "--diag-first-traction") { diag_first_traction = true; }
       if (arg == "--diag-rk-stages") { diag_rk_stages = true; }
       if (arg == "--diag-dip-traction") { diag_dip_traction = true; }
+      if (arg == "--zero-dip-traction") { zero_dip_traction = true; }
+      if (arg == "--diag-coseismic-dip") { diag_coseismic_dip = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
@@ -725,6 +729,18 @@ int main(int argc, char *argv[])
    // SEAS quasi-dynamic operator
    // =========================================================================
    PBP5SEASOp seas_op(&domain, &fault_op, &mpi);
+
+   // v51: dip traction diagnostics
+   if (zero_dip_traction)
+   {
+      seas_op.SetZeroDipTraction(true);
+      if (mpi.IsRoot()) { std::cout << "  [v51] zero-dip-traction: ON\n"; }
+   }
+   if (diag_coseismic_dip)
+   {
+      seas_op.SetDiagCoseismicDip(true, 0.1);
+      if (mpi.IsRoot()) { std::cout << "  [v51] diag-coseismic-dip: ON (threshold=0.1 m/s)\n"; }
+   }
 
    Vector state(fault_op.StateSize());
    seas_op.SetInitialCondition(state);

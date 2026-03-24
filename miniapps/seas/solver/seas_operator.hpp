@@ -109,6 +109,17 @@ public:
    /// @brief Get the fault operator.
    const FaultOpType *GetFault() const { return fault_; }
 
+   /// v51: Zero dip traction component after ComputeTraction, before friction law.
+   /// Tests whether the 21% cross-component contamination in {σ·n} causes the dip offset.
+   void SetZeroDipTraction(bool v) { zero_dip_traction_ = v; }
+
+   /// v51: Dump dip/strike traction ratio during coseismic (V_max > threshold).
+   void SetDiagCoseismicDip(bool v, real_t v_threshold = 0.1)
+   {
+      diag_coseismic_dip_ = v;
+      coseismic_v_threshold_ = v_threshold;
+   }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -120,6 +131,12 @@ private:
    /// Work vectors (mutable for use in const Mult)
    mutable Vector slip_;
    mutable Vector traction_;
+
+   // v51 diagnostic flags
+   bool zero_dip_traction_ = false;
+   bool diag_coseismic_dip_ = false;
+   mutable bool diag_coseismic_dip_done_ = false;
+   real_t coseismic_v_threshold_ = 0.1;
 };
 
 // ============================================================================
@@ -226,6 +243,68 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 3. Compute traction at fault from displacement
    domain_->ComputeTraction(*u_gf_, slip_, traction_);
+
+   // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
+   if (zero_dip_traction_)
+   {
+      for (int i = 0; i < traction_.Size() / 2; i++)
+      {
+         traction_(2 * i) = 0.0;  // tau_dip = 0
+      }
+   }
+
+   // v51: Dump dip/strike traction ratio during coseismic phase
+   if (diag_coseismic_dip_ && !diag_coseismic_dip_done_)
+   {
+      // Check if V_max exceeds coseismic threshold
+      real_t v_max = fault_->GetMaxSlipRate();
+      if (mpi_ctx_) { v_max = fault_->GetGlobalMaxSlipRate(); }
+      if (v_max > coseismic_v_threshold_)
+      {
+         int n_dofs = traction_.Size() / 2;
+         real_t sum_ratio = 0.0;
+         real_t max_ratio = 0.0;
+         int count = 0;
+         real_t max_tau_dip = 0.0, max_tau_strike = 0.0;
+         int max_ratio_dof = -1;
+
+         for (int i = 0; i < n_dofs; i++)
+         {
+            real_t td = std::abs(traction_(2*i));      // |tau_dip|
+            real_t ts = std::abs(traction_(2*i + 1));   // |tau_strike|
+            if (ts > 1e3)  // only count DOFs with significant strike traction (> 1 kPa)
+            {
+               real_t ratio = td / ts;
+               sum_ratio += ratio;
+               count++;
+               if (ratio > max_ratio)
+               {
+                  max_ratio = ratio;
+                  max_ratio_dof = i;
+                  max_tau_dip = traction_(2*i);
+                  max_tau_strike = traction_(2*i + 1);
+               }
+            }
+         }
+
+         if (count > 0)
+         {
+            bool is_root = !mpi_ctx_ || mpi_ctx_->IsRoot();
+            if (is_root)
+            {
+               mfem::out << "[COSEISMIC-DIP] V_max=" << v_max
+                  << " n_active=" << count
+                  << " mean_|td/ts|=" << sum_ratio / count
+                  << " max_|td/ts|=" << max_ratio
+                  << " @DOF=" << max_ratio_dof
+                  << " tau_dip=" << max_tau_dip
+                  << " tau_strike=" << max_tau_strike
+                  << std::endl;
+            }
+            diag_coseismic_dip_done_ = true;
+         }
+      }
+   }
 
    // 4. Compute fault RHS (slip rate and state rate)
    fault_->ComputeRHS(traction_, state, rate);

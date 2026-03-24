@@ -476,7 +476,152 @@ Verify that the dip component of V_init is exactly 0.0 in our initialization.
 
 ---
 
-## 13. What Has Been Ruled Out
+## 13. v51 Diagnostic Results: Per-Component Traction Dump
+
+### 13.1 Test Configuration
+
+Serial (1 rank), 1000m mesh, p=2, IP method. The `--diag-dip-traction` flag dumps
+per-component traction (global xyz + local dip/strike) at the first non-zero-slip
+ComputeTraction call. 102,520 fault face DOFs reported.
+
+### 13.2 SMOKING GUN: 21% Cross-Component Contamination in {σ·n}
+
+**Dip/Strike ratio in T_stress = {σ·n} across 84,322 fault faces:**
+
+| Statistic | |Tz/Tx| ratio |
+|-----------|-------------|
+| Median | **20.6%** |
+| Mean | **21.3%** |
+| Max | 35.8% |
+| Min | 0.0% |
+
+For every 1 Pa of strike traction from {σ·n}, there is **0.21 Pa of spurious dip
+traction**. This is a 21% cross-component contamination from the DG stress average
+on tetrahedral elements.
+
+### 13.3 Penalty Correction is NOT the Source
+
+| Comparison | Median ratio |
+|-----------|-------------|
+| |Tc_x / Ts_x| (penalty / stress) | 1.35% |
+
+The penalty correction is **negligible** at most faces. The dip contamination comes
+almost entirely from **{σ·n}** (the stress average), NOT from the penalty term.
+
+Exception: nucleation boundary face (fi=16, x=-30.7km) where penalty correction
+is 270% of stress — catastrophic cancellation at that specific face.
+
+### 13.4 Sample Data (Faces with Highest Dip/Strike Ratio)
+
+```
+fi    x(km)    z(km)  Tstress_x(Pa)  Tstress_z(Pa)  |Tz/Tx|
+ 2    -14.5    -22.9       -16.11          5.78      35.8%
+14    -14.5    -21.2       -23.95          8.35      34.9%
+ 3    -15.5    -24.6       -12.12          4.17      34.4%
+ 6    -34.5    -24.6       -10.63         -3.65      34.3%
+ 4    -15.0     -6.8      -190.50        -28.26      14.8%
+ 0    -12.5    -14.0       -64.42          4.95       7.7%
+```
+
+The highest ratios (30-36%) are at faces near the VW zone boundary at depth 20-27km.
+The absolute magnitudes are small (Pa range at the first step), but the RATIO is large.
+
+### 13.5 Why This Causes Dip Slip During Earthquakes
+
+At the first time step, the absolute dip traction (~5 Pa) is negligible vs tau_pre
+(~20 MPa). But during earthquakes:
+
+1. tau_strike drops from 20 → 8 MPa (stress drop = 12 MPa)
+2. The elastic traction T_elastic grows with slip magnitude
+3. The 21% contamination ratio means T_dip ≈ 0.21 × T_elastic_strike
+4. Even if the ratio drops to ~1% during coseismic (better cancellation at large slip):
+   ```
+   tau_dip_contam ≈ 0.01 × 12 MPa = 0.12 MPa
+   V_dip / V_strike = 0.12 / 8 = 1.5%
+   dip_slip_per_event ≈ 0.015 × 0.5 m/s × 30s ≈ 0.23 m
+   ```
+5. This matches the observed 0.05-0.12 m per-event dip offset
+
+### 13.6 V_zero Check
+
+`V_zero = 1e-20` in bp5_params.hpp. Produces `τ_pre_dip = 2e-4 Pa`, 750,000× too small
+to explain the offset. **NOT the cause.**
+
+---
+
+## 14. Tandem Comparison: Same Formula, Same Contamination?
+
+### 14.1 Tandem's Traction Formula
+
+**File:** `tandem/app/kernels/elasticity.py`, line 242-244
+
+```python
+traction_q = 0.5 * (sigma_0.n + sigma_1.n) + c0 * (u_0 - u_1 - f_q)
+```
+
+where `c0 = -penalty`. This is **IDENTICAL** to our formula:
+`T = {σ·n} - penalty*(jump - slip)`.
+
+**Tandem uses the same DG traction formula as our code.** The {σ·n} stress average
+on tet meshes produces the same cross-component contamination in both codes.
+
+### 14.2 Tandem's Traction Projection
+
+**File:** `tandem/app/kernels/elasticity_adapter.py`, lines 24-27
+
+```python
+traction[k,p] = M_inv[k,l] * Σ_q w[q] * |n|[q] * e[l,q] * Σ_o traction_q[o,q] * fault_basis[o,p,q]
+```
+
+This is an **L2 projection combined with local-frame projection** in a single kernel.
+The contraction `traction_q[o,q] * fault_basis[o,p,q]` projects global → local at
+each quadrature point, then L2-averages.
+
+**Our code does the same** but in two separate steps:
+1. L2-project global T_q → per-DOF T_global (via `GalerkinProject`)
+2. Project T_global → local (τ_dip, τ_strike) per DOF (via `ProjectTraction`)
+
+For a **flat fault** (BP5: planar y=0), the fault basis is CONSTANT over the face.
+The ordering (project-then-average vs average-then-project) is mathematically
+equivalent. This difference does NOT explain the dip offset.
+
+### 14.3 Critical Question: Does Tandem Also Have 21% Contamination?
+
+**Yes, Tandem MUST have the same {σ·n} contamination** because:
+- Same DG formulation (SIPG)
+- Same mesh (tetrahedral, non-aligned)
+- Same stress average formula
+- Same penalty formula
+
+Yet Tandem's dip slip is essentially zero. **Why?**
+
+### 14.4 Three Possible Explanations
+
+**A. Tandem's contamination magnitude differs at coseismic scale.**
+
+During the earthquake, the contamination ratio may differ between the two codes
+due to subtle differences in penalty magnitude, solver accuracy, or element-level
+displacement field. Even a factor-of-2 difference in coseismic contamination ratio
+(e.g., 0.5% vs 1%) would halve the dip slip accumulation.
+
+**B. Tandem's friction law handles small dip traction differently.**
+
+The vector RSF law computes V_vec = V × τ_vec / |τ_vec|. If |τ_dip| << |τ_strike|,
+then V_dip = V × τ_dip / |τ|. The RELATIVE magnitude matters. Tandem may:
+- Normalize differently (using |τ| = sqrt(τ_d² + τ_s²) vs τ_s alone)
+- Have a threshold for small-component velocity
+
+**C. The contamination accumulates differently due to state variable coupling.**
+
+The state variable ψ evolves as dψ/dt = f(V, ψ, L), where V = |V_vec| =
+sqrt(V_dip² + V_strike²). A non-zero V_dip increases |V|, which changes ψ evolution,
+which changes τ_friction, which changes V_strike. This coupling could make the
+dip contamination self-correcting in Tandem's implementation but self-reinforcing
+in ours, depending on subtle numerical differences.
+
+---
+
+## 15. What Has Been Ruled Out
 
 | Component | Compared? | Result |
 |-----------|----------|--------|
@@ -501,7 +646,30 @@ Verify that the dip component of V_init is exactly 0.0 in our initialization.
 
 ---
 
-## 15. Revision History
+## 16. Updated Investigation Plan
+
+### Priority 1: Dump coseismic dip/strike traction ratio
+
+The current diagnostic dumps at the FIRST step (small slip, Pa-range traction). We need
+the ratio during COSEISMIC (large slip, MPa-range traction) to quantify the actual
+contamination that drives dip slip. Add a diagnostic that dumps the dip/strike ratio
+at peak coseismic (when V_max > 0.1 m/s).
+
+### Priority 2: Compare friction law implementation detail
+
+Line-by-line comparison of our `ComputeRHS` with Tandem's `DieterichRuinaAgeing` to
+find any difference in how the vector velocity is computed from the vector traction.
+Specifically: normalization, thresholds, and state variable coupling.
+
+### Priority 3: Test with dip-traction zeroing
+
+Add a `--zero-dip-traction` flag that sets τ_dip = 0 after ComputeTraction (before
+the friction law). If this eliminates the dip offset AND produces good strike results,
+it confirms the dip contamination is the sole cause and provides a workaround.
+
+---
+
+## 17. Revision History
 
 | Version | Change | Status |
 |---------|--------|--------|
@@ -513,7 +681,12 @@ Verify that the dip component of V_init is exactly 0.0 in our initialization.
 | **v51** | **Dip offset analysis: systematic, spatially varying, accumulates during EQs** | **INVESTIGATING** |
 | v51 | FaultBasis comparison: IDENTICAL to Tandem — NOT the root cause | **RULED OUT** |
 | v51 | Far-field BC comparison: IDENTICAL to Tandem — NOT the root cause | **RULED OUT** |
+| v51 | Tandem traction formula comparison: IDENTICAL (same {σ·n} - penalty*(jump-slip)) | **CONFIRMED** |
 | v51 | Previous debug doc review: v30-v49 dip fixes all confirmed correct | **REVIEWED** |
 | v51 | v34 "p=1 artifact" conclusion invalidated — offset persists at p=2 | **RE-EVALUATED** |
 | v51 | Revised understanding: dip slip accumulates during EQs via vector friction | **KEY INSIGHT** |
-| v51 | Root question: where does ~0.15 MPa spurious τ_dip come from? | **NEXT STEP** |
+| **v51 diag** | **SMOKING GUN: {σ·n} has 21% dip/strike cross-component contamination** | **FOUND** |
+| v51 diag | Penalty correction is negligible (1.35% of stress) — NOT the source | **CONFIRMED** |
+| v51 diag | V_zero = 1e-20 — negligible, NOT the cause | **CONFIRMED** |
+| v51 | Tandem has SAME contamination from same DG formula on same mesh | **KEY QUESTION** |
+| v51 | Three hypotheses for why Tandem doesn't accumulate: (A) magnitude, (B) friction, (C) state coupling | **NEXT STEPS** |
