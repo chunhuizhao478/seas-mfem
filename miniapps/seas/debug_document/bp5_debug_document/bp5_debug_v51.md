@@ -1,7 +1,7 @@
 # BP5 Debug v51: Dip-Component Offset — Systematic Cross-Component Coupling Error
 
 **Date**: 2026-03-24
-**Status**: ROOT CAUSE RESOLVED. After exhaustive audit of every K/f component (all IDENTICAL to Tandem), the ONLY implementation difference found: **Tandem uses elastic σ_n = σ_n_pre - T_n_elastic (per node, per step) while we use constant σ_n = 25 MPa**. The elastic σ_n provides self-consistent feedback that suppresses spurious dip accumulation from DG cross-component coupling on tet meshes. Our `FaultBasis::NormalStress()` method exists but is never called. Fix: expand traction to 3 components, pass elastic σ_n to friction law.
+**Status**: ELASTIC σ_n DISPROVED AS FIX. Fair same-time comparison shows elastic σ_n makes dip 2-3× WORSE (not better). Initial "improvement" was artifact of comparing different time points. All K/f components confirmed identical to Tandem. Root cause of 10-30× excess dip at p=2 remains unidentified.
 **Previous**: v50 (production defaults, first earthquake, ClosedUniform nodes, p=4/p=6 working)
 **Branch**: `feature/elasticity`
 
@@ -749,7 +749,8 @@ Quantifies the actual contamination during the earthquake that drives dip slip.
 ### Waiting for results
 - ⏳ v51a: zero-dip-traction production run
 - ⏳ v51b: coseismic dip/strike ratio diagnostic
-- ⏳ v51d: p=1 1000m BLR 1e-12 (missed test from v47)
+- ✅ v51d: p=1 1000m BLR 1e-12 → V decays, penalty stiffness confirmed
+- ✅ v51e: p=1 500m BLR 1e-12 → V decays, p=1 dead end (polynomial order, not h)
 
 ### Remaining
 1. **If v51a confirms**: implement `--zero-dip-traction` as default for BP5 production
@@ -786,8 +787,12 @@ Quantifies the actual contamination during the earthquake that drives dip slip.
 | v51 | **Found: Tandem uses elastic σ_n, we use constant 25 MPa** | **SECONDARY FINDING** |
 | v51a | Zero-dip-traction production test (48hr, 400 ranks) | **SUBMITTED** |
 | v51b | Coseismic dip/strike ratio diagnostic (4hr, 400 ranks) | **SUBMITTED** |
-| **v51d** | **p=1 1000m BLR 1e-12: disambiguate v47a V-decay (BLR artifact vs penalty stiffness)** | **PLANNED** |
+| **v51d** | **p=1 1000m BLR 1e-12: V decays — penalty stiffness CONFIRMED (Section 20.4)** | **COMPLETED** |
+| **v51e** | **p=1 500m BLR 1e-12: V decays — p=1 dead end, p≥2 required (Section 20.5)** | **COMPLETED** |
 | v51 | **IP penalty ×3 first-principles verification: proven correct (Section 21)** | **CONFIRMED** |
+| **v51** | **Benchmark conformance audit: exp cap removed, σ_n constant confirmed (Section 24)** | **CODE CHANGE** |
+| v51a | Zero-dip-traction (2hr dev queue) — failed: walltime + V-guard rejection flood | **FAILED (infra)** |
+| **v51f** | **Zero-dip-traction PRODUCTION (48hr, 400 ranks) — benchmark-correct per Eq. 15b** | **PLANNED** |
 | v51f/f2 | Strategy 1 (stress-only traction): BLOWUP at p=2 and p=4 | **DISPROVED** |
 | **v51c** | **DEFINITIVE: u_z = 18.5% of u_x in the elastic solution itself** | **ROOT CAUSE** |
 | v51c | Source: K-matrix cross-coupling from non-fault interior face DG terms | **ANALYZED** |
@@ -806,6 +811,12 @@ Quantifies the actual contamination during the earthquake that drives dip slip.
 | v51c+++ | Elastic σ_n provides self-consistent feedback suppressing spurious dip accumulation | **MECHANISM** |
 | v51c+++ | FaultBasis::NormalStress() EXISTS in our code but is NEVER CALLED | **FOUND** |
 | v51c+++ | Implementation plan: expand traction to 3 components, pass σ_n_eff to friction | **PLANNED** |
+| **v51d** | **p=1 1000m BLR 1e-12: V decays 0.010→0.0003 — confirms ×3 penalty too stiff at p=1** | **CONFIRMED** |
+| v51d | Tighter BLR (1e-12 vs 1e-10) does NOT help — problem is penalty magnitude, not solver | **RULED OUT** |
+| v51d_esn | p=2 1000m elastic σ_n: initial comparison INVALID (different time points) | **RETRACTED** |
+| v51e_esn | p=4 4000m elastic σ_n: initial comparison INVALID (different time points) | **RETRACTED** |
+| **v51d/e+** | **FAIR same-time comparison: elastic σ_n is 2-3× WORSE than constant σ_n** | **✗ DISPROVED** |
+| v51d/e+ | Elastic T_n has same DG contamination as T_dip → amplifies error, not suppresses | **MECHANISM** |
 
 ---
 
@@ -976,6 +987,72 @@ If p=1 with BLR 1e-12 nucleates successfully, it would mean:
 
 **Success criterion**: V_nuc grows past 0.01 and earthquake nucleates.
 **Failure criterion**: V_nuc decays as in v47a → confirms penalty stiffness is the cause.
+
+### 20.4 Result: V Decays — Penalty Stiffness CONFIRMED
+
+**Job**: `bp5_v51d_ip_p1_blr12_7610045.out`
+
+```
+Step   1: V = 0.01015  ↑
+Step  15: V = 0.01058  ← peak
+Step  50: V = 0.00580  ↓
+Step 150: V = 0.00160  ↓
+Step 300: V = 0.00033  ↓  (dt = 1.16s — entered interseismic regime)
+```
+
+V peaked at step 15 (V=0.0106) then monotonically decayed to 0.0003 by step 300.
+Same pattern as v47a. **Tighter BLR tolerance (1e-12 vs 1e-10) makes no difference.**
+
+**Conclusion**: The v47a nucleation failure at p=1 is caused by the ×3 penalty being
+too stiff, NOT by BLR solver accuracy. The corrected penalty (which IS mathematically
+correct — see Section 21) creates an effective elastic stiffness that overwhelms the
+friction weakening rate at p=1 with DOF spacing = 1000m/1 = 1000m.
+
+**Why p=2 works**: At p=2, DOF spacing = 1000m/2 = 500m. More DOFs per nucleation zone
+(24 vs 12 at p=1) provide better resolution of the nucleation instability. The penalty
+per face is stronger at p=2 (c_N_1=8/3 vs 1.0), but the finer DOF spacing compensates.
+
+**Resolution**: p=1 on 1000m mesh with the correct ×3 penalty is **under-resolved for
+nucleation**. This is NOT a bug — it's a resolution limitation.
+
+This test closes the gap identified in v47's investigation plan.
+
+### 20.5 Result v51e: p=1 500m — ALSO Cannot Nucleate
+
+**Job**: `bp5_v51e_500m_ip_p1_7610108.out`
+
+```
+Step   1: V = 0.01011  ↑
+Step  50: V = 0.01095  ← peak
+Step 100: V = 0.01006  ↓
+Step 150: V = 0.00865  ↓
+Step 188: V = 0.00763  ↓  (walltime, still decaying)
+```
+
+Same pattern as v51d (1000m). V peaked at step 50 (V=0.0110) then monotonically
+decayed. Slightly better than 1000m (peak 0.0110 vs 0.0106, slower decay rate)
+but outcome is identical: **nucleation fails**.
+
+**Key finding: halving h does NOT fix p=1 nucleation.** Both p=1 h=500m and p=2
+h=1000m have the same DOF spacing (500m), but only p=2 nucleates. This proves the
+issue is **polynomial order**, not DOF spacing or mesh resolution.
+
+The linear polynomial (p=1) cannot represent the displacement field accurately
+enough on tet meshes — the DG jump residual remains large regardless of h, keeping
+the effective elastic stiffness above k_crit = 5.77 MPa/m.
+
+**Comparison of p=1 attempts:**
+
+| Run | h | DOF spacing | BLR tol | V peak | Outcome |
+|-----|---|-------------|---------|--------|---------|
+| v47a | 1000m | 1000m | 1e-10 | 0.0106 | Decays |
+| v51d | 1000m | 1000m | 1e-12 | 0.0106 | Decays |
+| **v51e** | **500m** | **500m** | **1e-12** | **0.0110** | **Decays** |
+| v50 (p=2) | 1000m | 500m | 1e-12 | grows | **Nucleates** ✓ |
+
+**Conclusion: p=1 with correct ×3 penalty is a dead end for BP5 nucleation.**
+The minimum viable configuration is p=2 on 1000m. This is consistent with the
+SCEC benchmark suggestion of Δz = Δh/N = 1000m (implying N≥2 for DG methods).
 
 ---
 
@@ -1445,3 +1522,209 @@ eliminated:
 - Tandem ODE pipeline — CLEAN, no filtering (§23)
 
 **The elastic σ_n is the ONLY remaining implementation difference.**
+
+---
+
+## 24. Rate-and-State Benchmark Conformance Audit
+
+### 24.1 Motivation
+
+Line-by-line comparison of SCEC BP5 spec (SEAS_BP5.pdf) equations against our code
+and Tandem, to verify all three are consistent (or document where they diverge).
+
+### 24.2 Equation-by-Equation Comparison
+
+| # | Benchmark | Our Code | Tandem | Status |
+|---|-----------|----------|--------|--------|
+| **Eq. 13** | f = a·asinh[(V/2V₀)·exp((f₀+b·ln(V₀θ/L))/a)] | f = a·asinh[(V/2V₀)·exp(ψ/a)] | Same | ✓ Identical (ψ = f₀+b·ln(V₀θ/L)) |
+| **Eq. 12** | dθ/dt = 1 − Vθ/L | dpsi/dt = (bV₀/L)·[exp((f₀−ψ)/b) − V/V₀] | Same, **no exp cap** | **✓ Fixed** (exp cap removed) |
+| **Eq. 10** | \|τ⁰+Δτ\| = σ_n·f + η·V (QD) | Brent solve on same equation | Same | ✓ Identical |
+| **Eq. 11** | V direction = τ̂ | V = +(V/\|τ\|)·τ | V = **−**(V/\|τ\|)·τ | ✓ Self-consistent (sign conventions differ) |
+| **Sect. 3** | **σ_n = constant** | **Constant 25 MPa** (default) | **−sn + sn_pre** (variable) | **Tandem deviates from spec** |
+| **Eq. 16** | V = [V_init, V_zero] | V = [V_zero, V_init] (dip, strike) | Same | ✓ (component order matches geometry) |
+| **Eq. 18** | θ(0) = L/V_init | ψ = f₀+b·ln(V₀/Vp) = f₀+b·ln(V₀/V_init) | Same | ✓ (Vp = V_init for BP5) |
+| **Eq. 20** | τ⁰ = σ_n·f(V_init,θ) + η·V_init | Same | Same | ✓ Identical |
+| **Eq. 23** | τ⁰_nuc = σ_n·f(V_i,θ) + δτ, δτ=ηV_i | sigma_n·f + η·V_nuc (dtf=0) | Same (dtf=0) | ✓ (δτ IS the η·V term, not added on top) |
+| **Eq. 15** | Outside Ω_f: V₂=Vp, V₃=0 | dslip = (0, Vp, 0) | Same | ✓ Identical |
+| **Table 1** | V_i = 0.03 m/s | V_nuc = 0.01 (Tandem default) | 0.01 | **Both deviate from SCEC** |
+
+### 24.3 Findings and Code Changes
+
+**Finding 1: AgingLawPsi exp cap removed** (this section)
+
+The `AgingLawPsi::Rate()` and `RateDerivativeTheta()` had an `exp_arg_max_ = 20`
+cap that limited `exp((f₀−ψ)/b)` to `exp(20) ≈ 4.85×10⁸`. This deviated from both
+the benchmark (Eq. 12, no cap) and Tandem (no cap).
+
+**Change**: Removed the cap from both methods in `friction/state_evolution.hpp`.
+The adaptive RK45 stepper handles post-earthquake stiffness by reducing dt.
+
+**Affected code**: `AgingLawPsi::Rate()` (line 191) and `RateDerivativeTheta()` (line 214).
+
+**Risk**: During post-earthquake healing, `exp((f₀−ψ)/b)` can reach `exp(100+) ~ 10⁴³`,
+making dpsi/dt ~ 10³⁵. The RK45 stepper must take very small steps (dt ~ 10⁻³⁵ s)
+to resolve this. If the stepper's dt_min is too large, it may fail.
+
+Current `dt_min = 1e-6` in `bp5_verification_full.cpp:1101`. This may need to be
+reduced for the uncapped formulation. Monitor for "dt below minimum" errors.
+
+**Finding 2: σ_n is correctly constant (matching benchmark)**
+
+The SCEC spec explicitly states σ_n remains constant for identical materials.
+Our default (constant 25 MPa) is more faithful to the spec than Tandem's elastic
+σ_n feedback. The `--elastic-sigma-n` flag should NOT be used for benchmark-conforming
+runs. (It may be useful for non-planar or bimaterial extensions.)
+
+**Finding 3: Tandem slip rate sign is negated**
+
+Tandem returns `V = −(V/|τ|)·τ` while the benchmark defines V parallel to τ (Eq. 11).
+This is a self-consistent convention within Tandem (EmbedSlip and traction extraction
+have matching signs). When comparing output plots, Tandem's slip has the opposite sign
+from the benchmark's s_j = u_j(0⁺) − u_j(0⁻) definition.
+
+**Finding 4: delta_tau_factor = 0 is correct**
+
+The benchmark Eq. 23 defines δτ = ηV_i for QD. This δτ IS the radiation damping
+contribution (replacing the +ηV term in Eq. 20), not an overstress on top of it.
+With our code structure (general formula already includes +ηV), setting
+`delta_tau_factor = 0` gives the correct equilibrium initialization.
+Setting `delta_tau_factor = 1` would DOUBLE the radiation damping → incorrect.
+
+---
+
+## 25. Elastic σ_n Test Results: DRAMATIC Improvement (v51d_esn, v51e_esn)
+
+### 25.1 Test Configuration
+
+| Run | Mesh | Order | σ_n mode | Flag | Status |
+|-----|------|-------|----------|------|--------|
+| v51d_esn | 1000m | p=2 | **Elastic** | `--elastic-sigma-n` | Running (48hr) |
+| v51e_esn | 4000m | p=4 | **Elastic** | `--elastic-sigma-n` | Running (48hr) |
+| v50 prod | 1000m | p=2 | Constant 25 MPa | (default) | Complete (223 yr) |
+| v50h | 4000m | p=4 | Constant 25 MPa | (default) | Complete (0.43 yr) |
+
+### 25.2 CORRECTION: Initial Comparison Was INVALID
+
+The initial comparison (below, struck through) compared v50 at t=223 years with v51 at
+t=23 seconds. This was meaningless — dip accumulates during earthquakes (t≈50-80s), so
+any run at t=23s trivially has near-zero dip ratio regardless of σ_n treatment.
+
+~~p=2: dip ratio drops 0.3-5.4% → 0.00-0.03%~~ ← WRONG: different time points
+~~p=4: dip ratio drops 0.4-8.1% → 0.00-0.08%~~ ← WRONG: different time points
+
+### 25.3 FAIR Same-Time Comparison: Elastic σ_n is WORSE
+
+When compared at the SAME time (t=30s for p=2, t=35s for p=4), the elastic σ_n
+correction makes the dip deviation **2-3× worse**, not better.
+
+**p=2 Nucleation station (strk-24dp+10) — same-time comparison:**
+
+| t (s) | v50 slip_d | v51d_esn slip_d | Tandem p6 slip_d | v50 − Tandem | v51d − Tandem | Result |
+|-------|-----------|----------------|-----------------|-------------|--------------|--------|
+| 10 | 4.26e-6 | 1.29e-5 | -4.77e-7 | 4.74e-6 | 1.33e-5 | **✗ 2.8× worse** |
+| 20 | 3.55e-5 | 9.67e-5 | 9.87e-7 | 3.45e-5 | 9.57e-5 | **✗ 2.8× worse** |
+| 30 | 1.34e-4 | 3.29e-4 | 9.99e-6 | 1.24e-4 | 3.19e-4 | **✗ 2.6× worse** |
+
+**p=4 Nucleation station — same-time comparison:**
+
+| t (s) | v50h slip_d | v51e_esn slip_d | Tandem p4 slip_d | v50h − Tandem | v51e − Tandem | Result |
+|-------|-----------|----------------|-----------------|-------------|--------------|--------|
+| 20 | -2.85e-6 | -1.20e-5 | 3.88e-6 | -6.74e-6 | -1.59e-5 | **✗ 2.4× worse** |
+| 30 | -1.18e-5 | -3.33e-5 | 2.51e-5 | -3.69e-5 | -5.84e-5 | **✗ 1.6× worse** |
+| 35 | 1.59e-5 | -1.78e-5 | 6.67e-5 | -5.09e-5 | -8.45e-5 | **✗ 1.7× worse** |
+
+### 25.4 Why Elastic σ_n Makes It Worse
+
+The elastic T_n has the **same DG cross-component contamination** as T_dip (both
+originate from the same tet mesh discretization error in {σ·n}). Adding contaminated
+T_n into σ_n_eff introduces an ADDITIONAL error source into the friction law.
+
+The "self-consistent feedback" hypothesis was wrong:
+- Hypothesis: T_n is correlated with T_dip → σ_n correction opposes T_dip error
+- Reality: T_n adds contaminated noise that AMPLIFIES the dip deviation
+
+The feedback is self-consistent with the WRONG stress field (contaminated by DG
+error on tets), so it reinforces the error rather than canceling it.
+
+### 25.5 Implications
+
+1. **Elastic σ_n is NOT the fix** for the dip offset — it makes things worse
+2. The dip deviation exists at BOTH p=2 and p=4, at 10-30× above Tandem
+3. The deviation starts during nucleation (t≈12s), well before the earthquake
+4. The root cause remains unidentified after exhaustive audit of all K/f components
+
+### 25.6 What's Left to Investigate
+
+After ruling out:
+- Face integrators (identical) ✓
+- Volume integrator (identical) ✓
+- Boundary face treatment (identical) ✓
+- FaultBasis (identical) ✓
+- Friction law (identical) ✓
+- Elastic σ_n (makes it worse) ✓
+- Assembly pipeline (clean) ✓
+- Tandem ODE pipeline (clean) ✓
+
+Remaining possibilities:
+1. **Tandem's matrix-free evaluation** vs our assembled sparse matrix — floating-point
+   accumulation order differs, could systematically reduce cross-component error
+2. **Tandem's element Jacobian caching** — Tandem precomputes and caches Jacobians;
+   our code re-evaluates per quadrature point. Numerical differences accumulate.
+3. **A subtle numerical difference** in how MFEM computes CalcAdjugate/CalcInverse
+   vs Tandem's Jacobian routines — tiny per-element differences that accumulate
+   across thousands of elements into a measurable u_z
+4. **The dip deviation IS inherent** to our DG implementation at p=2 on 1000m tets,
+   and Tandem at p=4/p=6 on 4000m simply has less because the discretization error
+   is smaller at higher effective resolution
+| Far-nuc surface | 5.42% | **0.01%** | 0.61% | **540×** better |
+
+**p=4 (4000m): v50h (constant σ_n) vs v51e_esn (elastic σ_n)**
+
+| Station | v50h |d/s| | v51e |d/s| | Tandem p4 |d/s| | Improvement |
+|---------|-------------|-------------|-----------------|-------------|
+| Nucleation | 0.39% | **0.00%** | 0.19% | **eliminated** |
+| Near-nuc depth | 0.52% | **0.08%** | 0.00% | **6.5×** better |
+| Center depth | 2.51% | **0.01%** | 0.14% | **250×** better |
+| Center surface | 6.78% | **0.00%** | 0.23% | **eliminated** |
+| Far depth | 2.36% | **0.00%** | 0.24% | **eliminated** |
+| Far surface | 3.18% | **0.00%** | 0.66% | **eliminated** |
+| Far-nuc surface | 8.09% | **0.00%** | 0.67% | **eliminated** |
+
+### 25.3 Assessment
+
+The elastic σ_n correction produces **dramatic improvement** at both polynomial orders:
+
+- p=2: dip/strike ratio drops from 0.3-5.4% to **0.00-0.43%** — matching or BETTER than Tandem's 0.02-0.67%
+- p=4: dip/strike ratio drops from 0.4-8.1% to **0.00-0.08%** — ALL stations near zero
+
+**Every station at both orders shows improvement** (except Near-nuc depth at p=2, which shows slight noise at the early time point — likely meaningless).
+
+### 25.4 Caveats
+
+Both v51 runs are still in the **early nucleation phase** (t=23-31s). The dip/strike ratios at this stage are near zero because total slip is tiny. The critical test is whether the improvement **persists through the earthquake and into interseismic**.
+
+However, the comparison is meaningful because:
+1. v50 at the same early times ALSO had tiny slip, yet already showed measurable dip ratios
+2. The absolute dip slip in v51 is orders of magnitude smaller than v50 at comparable times
+3. The elastic σ_n eliminates the **seed** of dip contamination, which should prevent long-term accumulation
+
+The runs are continuing on the 48-hour normal queue. Full earthquake cycle comparison will be available when they complete.
+
+### 25.5 Mechanism Confirmed
+
+The elastic σ_n provides **self-consistent feedback** (Section 23.3):
+- The DG stress field produces correlated T_n, T_dip, T_strike perturbations
+- With constant σ_n: T_dip drives V_dip unchecked → accumulates dip slip
+- With elastic σ_n: T_n modifies σ_n_eff → friction strength adjusts → V_dip suppressed
+
+This is NOT a workaround or filter — it's the **physically correct** implementation that Tandem uses. The SCEC spec assumes constant σ_n for the analytical initial condition (Eq. 20), but the elastic solve naturally produces σ_n perturbations that must be fed back for self-consistency.
+
+### 25.6 Note on Benchmark Conformance
+
+Section 24.2 noted that the SCEC spec defines σ_n as constant. Tandem's elastic σ_n technically deviates from the literal spec. However:
+1. Tandem IS the reference implementation for BP5
+2. The elastic σ_n perturbation is small (~0.1% of 25 MPa during coseismic)
+3. Without elastic σ_n, the DG discretization error produces 10× worse dip contamination
+4. The spec's constant-σ_n assumption is for identical materials on a planar fault — the DG cross-component coupling is an implementation artifact, not a physical feature
+
+**Recommendation**: Use `--elastic-sigma-n` as the **default** for all production runs. The constant-σ_n mode should only be used for strict benchmark conformance testing.
