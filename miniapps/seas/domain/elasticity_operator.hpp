@@ -4627,7 +4627,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
    }
 
    // v52: Print traction coherence summary (MPI-reduced)
-   if (coherence_active && coh_n_qp > 0)
+   // NOTE: ALL ranks must enter this block when coherence_active is true
+   // (coherence_active is globally consistent via MPI_Allreduce above).
+   // Do NOT gate on local coh_n_qp — ranks without fault faces have 0
+   // quad points but must still participate in MPI collectives.
+   if (coherence_active)
    {
       real_t g_stress_dip2 = coh_sum_stress_dip2;
       real_t g_stress_strike2 = coh_sum_stress_strike2;
@@ -4668,7 +4672,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 #endif
       }
 
-      if (is_root)
+      if (is_root && g_n_qp > 0)
       {
          real_t rms_stress_dip = std::sqrt(g_stress_dip2 / g_n_qp);
          real_t rms_stress_strike = std::sqrt(g_stress_strike2 / g_n_qp);
