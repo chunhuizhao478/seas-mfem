@@ -3300,15 +3300,26 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
    // v52: Traction coherence diagnostic accumulators
    bool coherence_active = diag_traction_coherence_ &&
                             !diag_traction_coherence_done_;
-   // Check if slip is non-trivial (skip zero-slip evaluations)
+   // Check if slip is non-trivial (skip zero-slip evaluations).
+   // IMPORTANT: must be globally consistent (all ranks agree) because the
+   // summary section uses MPI collectives. Ranks without fault DOFs have
+   // empty slip_bc, so local-only check would deadlock.
    if (coherence_active)
    {
-      bool any_slip = false;
+      int local_has_slip = 0;
       for (int i = 0; i < slip_bc.Size(); i++)
       {
-         if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
+         if (std::abs(slip_bc(i)) > 1e-20) { local_has_slip = 1; break; }
       }
-      if (!any_slip) { coherence_active = false; }
+      int global_has_slip = local_has_slip;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&local_has_slip, &global_has_slip, 1,
+                        MPI_INT, MPI_MAX, mesh_.GetComm());
+#endif
+      }
+      if (!global_has_slip) { coherence_active = false; }
    }
    // Accumulate across all fault faces (interior + shared)
    real_t coh_sum_stress_dip2 = 0.0, coh_sum_stress_strike2 = 0.0;
