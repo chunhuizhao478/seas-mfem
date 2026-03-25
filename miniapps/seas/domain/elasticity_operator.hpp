@@ -227,6 +227,14 @@ public:
    /// Tests K-f consistency: for pure strike-slip, u_z should be exactly 0.
    void SetDiagUzFault(bool v) { diag_uz_fault_ = v; }
 
+   /// v52: Traction coherence diagnostic.
+   /// Tests whether ComputeTraction is consistent with the solve by measuring:
+   ///   1. Penalty correction magnitude (η*[[u]]-slip) — should be ~0 if solve is exact
+   ///   2. Dip contamination from stress vs penalty separately
+   ///   3. Solver fault residual |[[u]] - slip| per quad point
+   /// Triggers once when slip is non-trivial, prints summary, then done.
+   void SetDiagTractionCoherence(bool v) { diag_traction_coherence_ = v; }
+
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -258,6 +266,8 @@ private:
    mutable bool diag_dip_traction_done_ = false;
    bool diag_uz_fault_ = false;         // v51: dump u_z at fault faces after solve
    mutable bool diag_uz_fault_done_ = false;
+   bool diag_traction_coherence_ = false;  // v52: traction coherence diagnostic
+   mutable bool diag_traction_coherence_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
@@ -3287,6 +3297,37 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
       diag_normals_done_ = true;
    }
 
+   // v52: Traction coherence diagnostic accumulators
+   bool coherence_active = diag_traction_coherence_ &&
+                            !diag_traction_coherence_done_;
+   // Check if slip is non-trivial (skip zero-slip evaluations)
+   if (coherence_active)
+   {
+      bool any_slip = false;
+      for (int i = 0; i < slip_bc.Size(); i++)
+      {
+         if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
+      }
+      if (!any_slip) { coherence_active = false; }
+   }
+   // Accumulate across all fault faces (interior + shared)
+   real_t coh_sum_stress_dip2 = 0.0, coh_sum_stress_strike2 = 0.0;
+   real_t coh_sum_corr_dip2 = 0.0, coh_sum_corr_strike2 = 0.0;
+   real_t coh_sum_res2 = 0.0;  // ||[[u]] - slip||^2 at quad points
+   real_t coh_max_res = 0.0;   // max |[[u]] - slip| component
+   real_t coh_max_corr_dip = 0.0;
+   real_t coh_max_stress_dip = 0.0;
+   int coh_n_qp = 0;
+
+   // Per-face centroid data for station-level reporting
+   struct CohFaceData {
+      real_t x2, x3;               // face centroid in fault coords
+      real_t stress_dip, stress_strike;  // face-averaged stress-only
+      real_t corr_dip, corr_strike;      // face-averaged penalty correction
+      real_t max_res;              // max |[[u]]-slip| on this face
+   };
+   std::vector<CohFaceData> coh_face_data;
+
    for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
    {
       int face = fault_interior_faces_[fi];
@@ -3566,6 +3607,41 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                   - (traction_stress_only_ ? 0.0 : correction_q[c]);
             }
 
+            // v52: Accumulate coherence diagnostic at this quad point
+            if (coherence_active)
+            {
+               // Project stress and correction to dip/strike separately
+               real_t tau_s[2], tau_c[2];
+               fault_basis_.ProjectTraction(fi, T_stress_q, tau_s);
+               real_t corr_neg[3] = {-correction_q[0], -correction_q[1],
+                                     -correction_q[2]};
+               fault_basis_.ProjectTraction(fi, corr_neg, tau_c);
+
+               coh_sum_stress_dip2 += tau_s[0] * tau_s[0];
+               coh_sum_stress_strike2 += tau_s[1] * tau_s[1];
+               coh_sum_corr_dip2 += tau_c[0] * tau_c[0];
+               coh_sum_corr_strike2 += tau_c[1] * tau_c[1];
+               coh_max_stress_dip = std::max(coh_max_stress_dip,
+                                              std::abs(tau_s[0]));
+               coh_max_corr_dip = std::max(coh_max_corr_dip,
+                                            std::abs(tau_c[0]));
+
+               // Solver fault residual: [[u]] - slip at this quad point
+               for (int c = 0; c < dim; c++)
+               {
+                  real_t u1q_c = 0.0, u2q_c = 0.0;
+                  for (int k = 0; k < ndof1; k++)
+                     u1q_c += s1q(k) * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     u2q_c += s2q(k) * u2_all(c * ndof2 + k);
+                  real_t res_c = (u1q_c - u2q_c)
+                                 - sign * delta_u_quad(c * nqp + q);
+                  coh_sum_res2 += res_c * res_c;
+                  coh_max_res = std::max(coh_max_res, std::abs(res_c));
+               }
+               coh_n_qp++;
+            }
+
             // Also accumulate face-averaged values for diagnostics
             for (int c = 0; c < dim; c++)
             {
@@ -3606,6 +3682,53 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
                T_stress[c] /= sum_wq;
                correction[c] /= sum_wq;
             }
+         }
+
+         // v52: Record per-face coherence data for station-level reporting
+         if (coherence_active)
+         {
+            // Get face centroid in fault coords (x2=along-strike, x3=depth)
+            FTr->SetAllIntPoints(&ip);
+            Vector fc(3);
+            FTr->Face->SetIntPoint(&ip);
+            FTr->Face->Transform(ip, fc);
+
+            real_t tau_s_face[2], tau_c_face[2];
+            fault_basis_.ProjectTraction(fi, T_stress, tau_s_face);
+            real_t corr_neg_face[3] = {-correction[0], -correction[1],
+                                        -correction[2]};
+            fault_basis_.ProjectTraction(fi, corr_neg_face, tau_c_face);
+
+            // Find max solver residual on this face from quad-point data
+            real_t face_max_res = 0.0;
+            for (int q = 0; q < nqp; q++)
+            {
+               const IntegrationPoint &fip = ir_trac.IntPoint(q);
+               FTr->SetAllIntPoints(&fip);
+               const IntegrationPoint &eip1_r = FTr->GetElement1IntPoint();
+               const IntegrationPoint &eip2_r = FTr->GetElement2IntPoint();
+               Vector s1r(ndof1), s2r(ndof2);
+               fe1->CalcShape(eip1_r, s1r);
+               fe2->CalcShape(eip2_r, s2r);
+               for (int c = 0; c < dim; c++)
+               {
+                  real_t u1v = 0.0, u2v = 0.0;
+                  for (int k = 0; k < ndof1; k++)
+                     u1v += s1r(k) * u1_all(c * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     u2v += s2r(k) * u2_all(c * ndof2 + k);
+                  real_t rc = (u1v - u2v)
+                              - sign * delta_u_quad(c * nqp + q);
+                  face_max_res = std::max(face_max_res, std::abs(rc));
+               }
+            }
+
+            // fc(0)=x (strike), fc(1)=y (normal≈0), fc(2)=z (depth, negative)
+            // Fault coords: x2=along-strike=fc(0), x3=depth=|fc(2)|
+            coh_face_data.push_back({fc(0), std::abs(fc(2)),
+                                      tau_s_face[0], tau_s_face[1],
+                                      tau_c_face[0], tau_c_face[1],
+                                      face_max_res});
          }
 
          // Traction decomposition diagnostic (face-averaged values)
@@ -4490,6 +4613,215 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
             }
          }
       }
+   }
+
+   // v52: Print traction coherence summary (MPI-reduced)
+   if (coherence_active && coh_n_qp > 0)
+   {
+      real_t g_stress_dip2 = coh_sum_stress_dip2;
+      real_t g_stress_strike2 = coh_sum_stress_strike2;
+      real_t g_corr_dip2 = coh_sum_corr_dip2;
+      real_t g_corr_strike2 = coh_sum_corr_strike2;
+      real_t g_res2 = coh_sum_res2;
+      real_t g_max_res = coh_max_res;
+      real_t g_max_corr_dip = coh_max_corr_dip;
+      real_t g_max_stress_dip = coh_max_stress_dip;
+      int g_n_qp = coh_n_qp;
+      bool is_root = true;
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&coh_sum_stress_dip2, &g_stress_dip2, 1,
+                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&coh_sum_stress_strike2, &g_stress_strike2, 1,
+                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&coh_sum_corr_dip2, &g_corr_dip2, 1,
+                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&coh_sum_corr_strike2, &g_corr_strike2, 1,
+                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&coh_sum_res2, &g_res2, 1,
+                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&coh_max_res, &g_max_res, 1,
+                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
+         MPI_Allreduce(&coh_max_corr_dip, &g_max_corr_dip, 1,
+                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
+         MPI_Allreduce(&coh_max_stress_dip, &g_max_stress_dip, 1,
+                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
+         int local_nqp = coh_n_qp;
+         MPI_Allreduce(&local_nqp, &g_n_qp, 1,
+                        MPI_INT, MPI_SUM, mesh_.GetComm());
+         int rank;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         is_root = (rank == 0);
+#endif
+      }
+
+      if (is_root)
+      {
+         real_t rms_stress_dip = std::sqrt(g_stress_dip2 / g_n_qp);
+         real_t rms_stress_strike = std::sqrt(g_stress_strike2 / g_n_qp);
+         real_t rms_corr_dip = std::sqrt(g_corr_dip2 / g_n_qp);
+         real_t rms_corr_strike = std::sqrt(g_corr_strike2 / g_n_qp);
+         real_t rms_res = std::sqrt(g_res2 / g_n_qp);
+
+         mfem::out << "\n[TRACTION-COHERENCE] Solve vs Traction Extraction "
+                   << "Diagnostic (v52)\n";
+         mfem::out << "  Quad points sampled: " << g_n_qp << "\n";
+         mfem::out << "\n  Stress-only traction {sigma.n} (should carry "
+                   << "physical signal):\n";
+         mfem::out << "    RMS tau_strike(stress) = "
+                   << rms_stress_strike << " Pa\n";
+         mfem::out << "    RMS tau_dip(stress)    = "
+                   << rms_stress_dip << " Pa\n";
+         mfem::out << "    max |tau_dip(stress)|  = "
+                   << g_max_stress_dip << " Pa\n";
+         mfem::out << "    dip/strike ratio (RMS) = "
+                   << (rms_stress_strike > 1e-30 ?
+                       rms_stress_dip / rms_stress_strike * 100.0 : 0.0)
+                   << " %\n";
+         mfem::out << "\n  Penalty correction eta*(jump-slip) (should be "
+                   << "~0 if solve is exact):\n";
+         mfem::out << "    RMS tau_strike(corr)   = "
+                   << rms_corr_strike << " Pa\n";
+         mfem::out << "    RMS tau_dip(corr)      = "
+                   << rms_corr_dip << " Pa\n";
+         mfem::out << "    max |tau_dip(corr)|    = "
+                   << g_max_corr_dip << " Pa\n";
+         mfem::out << "    corr/stress ratio (strike) = "
+                   << (rms_stress_strike > 1e-30 ?
+                       rms_corr_strike / rms_stress_strike * 100.0 : 0.0)
+                   << " %\n";
+         mfem::out << "    corr/stress ratio (dip)    = "
+                   << (rms_stress_dip > 1e-30 ?
+                       rms_corr_dip / rms_stress_dip * 100.0 : 0.0)
+                   << " %\n";
+         mfem::out << "\n  Solver fault residual |[[u]] - slip|:\n";
+         mfem::out << "    RMS residual = " << rms_res << " m\n";
+         mfem::out << "    max residual = " << g_max_res << " m\n";
+         mfem::out << "\n  Interpretation:\n";
+         mfem::out << "    If dip/strike(stress) >> 0: DG solution "
+                   << "itself has cross-component coupling\n";
+         mfem::out << "    If corr/stress >> 0: penalty amplifies "
+                   << "solver residual into spurious traction\n";
+         mfem::out << "    If both are small but total dip is large: "
+                   << "coherence problem in stress evaluation\n";
+      }
+
+      // Per-station nearest-face report
+      // BP5 benchmark stations: (x2 [m], x3 [m])
+      struct StationDef { const char *name; real_t x2; real_t x3; };
+      StationDef stations[] = {
+         {"strk-36dp+00", -36e3,  0.0},
+         {"strk-16dp+00", -16e3,  0.0},
+         {"strk+00dp+00",   0.0,  0.0},
+         {"strk+16dp+00",  16e3,  0.0},
+         {"strk+36dp+00",  36e3,  0.0},
+         {"strk-24dp+10", -24e3, 10e3},
+         {"strk-16dp+10", -16e3, 10e3},
+         {"strk+00dp+10",   0.0, 10e3},
+         {"strk+16dp+10",  16e3, 10e3},
+         {"strk+00dp+22",   0.0, 22e3},
+      };
+      int n_stations = 10;
+
+      // Each rank finds its nearest face to each station
+      // Pack: [dist, stress_dip, stress_strike, corr_dip, corr_strike, max_res]
+      const int n_fields = 6;
+      std::vector<double> local_best(n_stations * n_fields, 1e30);
+      for (int s = 0; s < n_stations; s++)
+      {
+         local_best[s * n_fields + 0] = 1e30;  // distance (sentinel)
+      }
+
+      for (size_t f = 0; f < coh_face_data.size(); f++)
+      {
+         const auto &fd = coh_face_data[f];
+         for (int s = 0; s < n_stations; s++)
+         {
+            real_t dx = fd.x2 - stations[s].x2;
+            real_t dz = fd.x3 - stations[s].x3;
+            real_t dist = std::sqrt(dx*dx + dz*dz);
+            if (dist < local_best[s * n_fields + 0])
+            {
+               local_best[s * n_fields + 0] = dist;
+               local_best[s * n_fields + 1] = fd.stress_dip;
+               local_best[s * n_fields + 2] = fd.stress_strike;
+               local_best[s * n_fields + 3] = fd.corr_dip;
+               local_best[s * n_fields + 4] = fd.corr_strike;
+               local_best[s * n_fields + 5] = fd.max_res;
+            }
+         }
+      }
+
+      // MPI reduce: pick the rank with smallest distance for each station
+      std::vector<double> global_best = local_best;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Use MPI_MINLOC to find rank with smallest distance per station
+         // Pack distance + rank into MPI_DOUBLE_INT struct
+         struct { double val; int rank; } local_dr[10], global_dr[10];
+         int my_rank;
+         MPI_Comm_rank(mesh_.GetComm(), &my_rank);
+         for (int s = 0; s < n_stations; s++)
+         {
+            local_dr[s].val = local_best[s * n_fields + 0];
+            local_dr[s].rank = my_rank;
+         }
+         MPI_Allreduce(local_dr, global_dr, n_stations,
+                        MPI_DOUBLE_INT, MPI_MINLOC, mesh_.GetComm());
+
+         // Broadcast each winning rank's data
+         for (int s = 0; s < n_stations; s++)
+         {
+            MPI_Bcast(&local_best[s * n_fields], n_fields,
+                       MPI_DOUBLE, global_dr[s].rank, mesh_.GetComm());
+         }
+         global_best = local_best;
+#endif
+      }
+
+      if (is_root)
+      {
+         mfem::out << "\n  Per-station decomposition (nearest fault face):\n";
+         mfem::out << "  " << std::setw(16) << "Station"
+                   << std::setw(10) << "dist(m)"
+                   << std::setw(14) << "stress_dip"
+                   << std::setw(14) << "stress_strk"
+                   << std::setw(12) << "dip/strk%"
+                   << std::setw(14) << "corr_dip"
+                   << std::setw(14) << "corr_strk"
+                   << std::setw(12) << "max_res"
+                   << "\n";
+         for (int s = 0; s < n_stations; s++)
+         {
+            double dist = global_best[s * n_fields + 0];
+            double sd   = global_best[s * n_fields + 1];
+            double ss   = global_best[s * n_fields + 2];
+            double cd   = global_best[s * n_fields + 3];
+            double cs   = global_best[s * n_fields + 4];
+            double mr   = global_best[s * n_fields + 5];
+            double ratio = (std::abs(ss) > 1e-30)
+                           ? std::abs(sd) / std::abs(ss) * 100.0 : 0.0;
+            mfem::out << "  " << std::setw(16) << stations[s].name
+                      << std::setw(10) << std::fixed << std::setprecision(0)
+                      << dist
+                      << std::setw(14) << std::scientific << std::setprecision(3)
+                      << sd
+                      << std::setw(14) << ss
+                      << std::setw(12) << std::fixed << std::setprecision(1)
+                      << ratio
+                      << std::setw(14) << std::scientific << std::setprecision(3)
+                      << cd
+                      << std::setw(14) << cs
+                      << std::setw(12) << mr
+                      << "\n";
+         }
+         mfem::out << std::defaultfloat;
+         mfem::out << "\n[TRACTION-COHERENCE] Done.\n\n";
+      }
+      diag_traction_coherence_done_ = true;
    }
 }
 
