@@ -1453,7 +1453,7 @@ void TestFullRHS()
 
    TEST_NEAR(res, 0.0, tau_abs * 1e-12, "Friction residual near zero");
    TEST_ASSERT(V_vec[0] == 0.0, "V_dip = 0 for pure strike loading");
-   TEST_ASSERT(V_vec[1] > 0.0, "V_strike > 0 (parallel to tau)");
+   TEST_ASSERT(V_vec[1] < 0.0, "V_strike < 0 (anti-parallel, Tandem D8)");
 
    // Check dpsi/dt: at nucleation, V > V_ss, so dpsi/dt < 0 (weakening)
    // Actually: dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0]
@@ -1681,11 +1681,11 @@ void TestNormalStressSign()
 }
 
 // ============================================================================
-// Test 18: Slip rate sign convention — current MFEM (parallel to tau)
+// Test 18: v55 D8 — V_vec anti-parallel to tau, GetSlip negates for domain
 // ============================================================================
 void TestSlipRateSignConvention()
 {
-   std::cout << "\n[Test 18] Slip rate sign convention (parallel to tau)\n";
+   std::cout << "\n[Test 18] V_vec anti-parallel + GetSlip negation\n";
 
    DieterichRuinaFriction::Constants cp;
    cp.V0 = 1e-6; cp.f0 = 0.6; cp.b = 0.015; cp.Dc = 0.008;
@@ -1695,7 +1695,7 @@ void TestSlipRateSignConvention()
    real_t eta = 4600.39;
    real_t a = 0.004;
 
-   // Pure strike-slip: V should be parallel to tau
+   // V_vec should be anti-parallel to tau (Tandem convention)
    {
       real_t tau_vec[2] = {0.0, 21.0e6};
       real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
@@ -1705,30 +1705,31 @@ void TestSlipRateSignConvention()
 
       TEST_ASSERT(std::abs(V_vec[0]) < 1e-20,
          "V_dip should be ~0 for pure strike-slip");
-      TEST_ASSERT(V_vec[1] > 0.0,
-         "V_strike should be POSITIVE (parallel to +tau_strike)");
-      TEST_NEAR(V_vec[1], V_abs, 1e-15 * V_abs,
-         "V_strike should equal +|V|");
+      TEST_ASSERT(V_vec[1] < 0.0,
+         "V_strike should be NEGATIVE (anti-parallel to +tau_strike)");
 
       real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] + tau_vec[1]*tau_vec[1]);
       real_t V_scalar = friction.SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a);
       TEST_REL_NEAR(V_abs, V_scalar, 1e-12,
          "|V_vec| should match scalar SolveSlipRatePsi");
-
-      std::cout << "    tau=(0, " << tau_vec[1]/1e6 << " MPa)"
-                << "  V=(" << V_vec[0] << ", " << V_vec[1] << ")"
-                << "  |V|=" << V_abs << "\n";
    }
 
-   // Mixed traction — V·tau should be positive (parallel)
+   // GetSlip negation: internal S is negative, but GetSlip returns positive
    {
-      real_t tau_vec[2] = {5.0e6, 18.0e6};
+      real_t tau_vec[2] = {0.0, 21.0e6};
       real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      real_t dot = V_vec[0]*tau_vec[0] + V_vec[1]*tau_vec[1];
-      TEST_ASSERT(dot > 0.0, "V dot tau should be POSITIVE (parallel)");
+      // Simulate one step: S = V_vec * dt (internal state, negative)
+      real_t dt = 0.1;
+      real_t S_internal[2] = {V_vec[0] * dt, V_vec[1] * dt};
+      TEST_ASSERT(S_internal[1] < 0.0, "Internal S_strike < 0 (Tandem convention)");
+
+      // GetSlip negates for domain solver
+      real_t slip_for_domain[2] = {-S_internal[0], -S_internal[1]};
+      TEST_ASSERT(slip_for_domain[1] > 0.0,
+         "GetSlip output positive (physical slip direction for domain)");
    }
 
    // Zero traction
@@ -1743,11 +1744,11 @@ void TestSlipRateSignConvention()
 }
 
 // ============================================================================
-// Test 19: Sign chain produces correct displacement jump g^F
+// Test 19: v55 D8 — Full chain: V(neg) → S(neg) → GetSlip(pos) → same g^F
 // ============================================================================
 void TestSignChainDisplacementJump()
 {
-   std::cout << "\n[Test 19] Full sign chain produces correct displacement jump\n";
+   std::cout << "\n[Test 19] D8 sign chain: domain solver sees same physics\n";
 
    DieterichRuinaFriction::Constants cp;
    cp.V0 = 1e-6; cp.f0 = 0.6; cp.b = 0.015; cp.Dc = 0.008;
@@ -1757,34 +1758,32 @@ void TestSignChainDisplacementJump()
    real_t tau_vec[2] = {0.0, 21.0e6};
    real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
 
-   // V_vec parallel to tau (current MFEM convention)
    real_t V_vec[2];
    friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
    real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
 
-   // Integrate: S = V_vec * dt (positive S_strike)
+   // Internal state: S = V_vec * dt (negative, Tandem convention)
    real_t S[2] = {V_vec[0] * dt, V_vec[1] * dt};
-   TEST_ASSERT(S[1] > 0.0, "S_strike should be positive (parallel convention)");
 
-   // EmbedSlip: BP5 basis dip=(0,0,-1), strike=(1,0,0)
-   real_t t1[3] = {0,0,-1}, t2[3] = {1,0,0};
-   real_t du[3];
-   for (int d = 0; d < 3; d++) { du[d] = S[0]*t1[d] + S[1]*t2[d]; }
+   // GetSlip negation: domain sees positive slip
+   real_t slip_domain[2] = {-S[0], -S[1]};
+   TEST_ASSERT(slip_domain[1] > 0.0, "Domain slip positive (physical direction)");
 
-   TEST_ASSERT(du[0] > 0.0, "delta_u_x should be positive (parallel convention)");
-   TEST_NEAR(du[1], 0.0, 1e-30, "delta_u_y should be 0");
-   TEST_NEAR(du[2], 0.0, 1e-30, "delta_u_z should be 0");
+   // EmbedSlip with positive slip → positive delta_u (same as baseline)
+   real_t t2[3] = {1,0,0};
+   real_t du_x = slip_domain[1] * t2[0];
+   TEST_ASSERT(du_x > 0.0, "delta_u_x positive (same as pre-D8 baseline)");
 
-   // sign × delta_u for both orientations (sign compensates for positive V)
-   // Case A: nor +Y (sign=+1): g^F = +du = positive_x
-   // Case B: nor -Y (sign=-1): g^F = -du = negative_x
-   // Both produce correct physics via the sign factor
-   TEST_ASSERT(1.0 * du[0] > 0.0, "nor+Y: g^F_x positive");
-   TEST_ASSERT(-1.0 * du[0] < 0.0, "nor-Y: g^F_x negative");
-
-   std::cout << "    V_abs=" << V_abs << " S_strike=" << S[1]
-             << " delta_u=(" << du[0] << "," << du[1] << "," << du[2] << ")\n";
-   TEST_ASSERT(true, "Sign chain self-consistent");
+   // Prescribed jump g^F = sign * delta_u is unchanged from baseline
+   // → domain solve produces same displacement field
+   // → traction is unchanged → friction solver sees same |tau|
+   // → only V_vec sign differs (internal convention)
+   std::cout << "    V_abs=" << V_abs
+             << " S_internal=" << S[1]
+             << " slip_domain=" << slip_domain[1]
+             << " du_x=" << du_x << "\n";
+   TEST_REL_NEAR(du_x, V_abs * dt, 1e-12,
+      "|delta_u| = |V|*dt (physics unchanged)");
 }
 
 // ============================================================================

@@ -149,8 +149,9 @@ static void TandemSlipRateVectorPsi(const real_t tau_vec[2], real_t psi,
    }
 
    const real_t V_abs = friction.SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a);
-   V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
-   V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
+   // v55 D8: anti-parallel to tau (Tandem convention)
+   V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
+   V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
    (void)V0;
 }
 
@@ -329,15 +330,15 @@ void TestBP5ComputeRHS()
 
       // tau_total = tau_pre + traction (traction = 0 here)
       real_t dot = V0 * tp0 + V1 * tp1;
-      // V should be parallel to tau_pre → dot > 0
-      if (dot < -1e-20)
+      // v55 D8: V should be ANTI-parallel to tau_pre (Tandem convention)
+      if (dot > 1e-20)
       {
          direction_ok = false;
          break;
       }
    }
    TEST_ASSERT(direction_ok,
-               "ComputeRHS: V direction is parallel to tau_pre");
+               "ComputeRHS: V direction is anti-parallel to tau_pre");
 
    std::cout << "  V_max from RHS: " << V_max << " m/s\n";
 }
@@ -963,11 +964,11 @@ void TestBP5BelowFault()
       if (depths(i) > Wf_small + 1.0)
       {
          below_count++;
-         // Below-fault DOFs should have rate = (0, Vp, 0)
+         // v55 D8: Below-fault DOFs should have rate = (0, -Vp, 0) (Tandem convention)
          TEST_NEAR(rate(i * 3 + 0), 0.0, 1e-15,
                    "Below-fault: dip rate = 0");
-         TEST_NEAR(rate(i * 3 + 1), params_small_wf.Vp, 1e-20,
-                   "Below-fault: strike rate = Vp");
+         TEST_NEAR(rate(i * 3 + 1), -params_small_wf.Vp, 1e-20,
+                   "Below-fault: strike rate = -Vp");
          TEST_NEAR(rate(i * 3 + 2), 0.0, 1e-15,
                    "Below-fault: dpsi/dt = 0");
       }
