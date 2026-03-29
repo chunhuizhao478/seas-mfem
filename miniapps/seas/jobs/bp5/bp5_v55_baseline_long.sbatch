@@ -10,8 +10,9 @@
 
 # BP5 v55 baseline LONG: pre-D5 code, 48hr run
 #
-# Clones the repo at the baseline commit into $SCRATCH/tmp, builds
-# everything from scratch, and runs. Does NOT touch the main working tree.
+# Copies the existing MFEM build (libmfem.a + headers + config) from
+# the main tree, then checks out only miniapps/seas at the baseline
+# commit and builds the seas binary against the existing library.
 
 export LC_ALL=C
 export LANG=C
@@ -24,26 +25,32 @@ module list
 export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 
 REPO_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem
+SEAS_DIR=$REPO_DIR/miniapps/seas
 BASELINE_COMMIT=d27c9cf
 BUILD_DIR=$SCRATCH/seas_baseline_build_$$
 
-# Clone at baseline commit
-git clone --single-branch --branch feature/elasticity "$REPO_DIR" "$BUILD_DIR"
-cd "$BUILD_DIR"
-git checkout "$BASELINE_COMMIT"
+mkdir -p "$BUILD_DIR"
 
-# Build MFEM library
-cp config/defaults.mk config/config.mk
-# Use the same config as the main build
-cp "$REPO_DIR/config/config.mk" config/config.mk 2>/dev/null || true
-make lib -j8 || { echo "MFEM LIB BUILD FAILED"; exit 1; }
+# Copy the MFEM library and headers from the existing build
+# (the MFEM library itself is identical across our commits)
+cp -a "$REPO_DIR/libmfem.a" "$BUILD_DIR/"
+cp -a "$REPO_DIR/config" "$BUILD_DIR/"
+cp "$REPO_DIR/mfem.hpp" "$BUILD_DIR/"
+cp "$REPO_DIR/mfem-performance.hpp" "$BUILD_DIR/" 2>/dev/null || true
+for dir in general linalg mesh fem; do
+    mkdir -p "$BUILD_DIR/$dir"
+    cp "$REPO_DIR/$dir/"*.hpp "$BUILD_DIR/$dir/" 2>/dev/null || true
+    cp "$REPO_DIR/$dir/"*.h "$BUILD_DIR/$dir/" 2>/dev/null || true
+done
 
-# Build seas
-cd miniapps/seas
-make seas_bp5_full || { echo "SEAS BUILD FAILED"; exit 1; }
+# Extract miniapps/seas from the baseline commit
+cd "$REPO_DIR"
+git archive "$BASELINE_COMMIT" -- miniapps/seas | tar -x -C "$BUILD_DIR"
 
-# Use mesh/data from main tree
-SEAS_DIR=$REPO_DIR/miniapps/seas
+# Build only the seas binary
+cd "$BUILD_DIR/miniapps/seas"
+make seas_bp5_full || { echo "BUILD FAILED"; exit 1; }
+
 mkdir -p bp5/results_v55_baseline_long
 
 ibrun ./seas_bp5_full \
@@ -63,6 +70,4 @@ ibrun ./seas_bp5_full \
 
 # Copy results back
 cp -r bp5/results_v55_baseline_long "$SEAS_DIR/bp5/" 2>/dev/null || true
-
 echo "Results in: $BUILD_DIR/miniapps/seas/bp5/results_v55_baseline_long/"
-echo "Also copied to: $SEAS_DIR/bp5/results_v55_baseline_long/"
