@@ -31,16 +31,15 @@ BUILD_DIR=$SCRATCH/seas_baseline_build_$$
 
 mkdir -p "$BUILD_DIR"
 
-# Copy the MFEM library and headers from the existing build
-# (the MFEM library itself is identical across our commits)
-cp -a "$REPO_DIR/libmfem.a" "$BUILD_DIR/"
-cp -a "$REPO_DIR/config" "$BUILD_DIR/"
+# Copy the MFEM library and all headers from the existing build
+# (the MFEM library itself is identical across our commits —
+# we only changed miniapps/seas/)
+cp "$REPO_DIR/libmfem.a" "$BUILD_DIR/"
 cp "$REPO_DIR/mfem.hpp" "$BUILD_DIR/"
 cp "$REPO_DIR/mfem-performance.hpp" "$BUILD_DIR/" 2>/dev/null || true
+cp -a "$REPO_DIR/config" "$BUILD_DIR/"
 for dir in general linalg mesh fem; do
-    mkdir -p "$BUILD_DIR/$dir"
-    cp "$REPO_DIR/$dir/"*.hpp "$BUILD_DIR/$dir/" 2>/dev/null || true
-    cp "$REPO_DIR/$dir/"*.h "$BUILD_DIR/$dir/" 2>/dev/null || true
+    cp -a "$REPO_DIR/$dir" "$BUILD_DIR/"
 done
 
 # Extract miniapps/seas from the baseline commit
