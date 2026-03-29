@@ -150,6 +150,20 @@ void TestNucleationAndL()
              "L(0, 10km) = L0 (outside nucleation)");
    TEST_NEAR(p.L_of_x2_x3(0.0, 0.0), p.L0, 1e-15,
              "L(0, 0) = L0 (surface)");
+
+   // Tandem stock semantics use bp5_outside with eps=1e-3, so points lying
+   // just outside the nominal rectangle by less than eps are still classified
+   // as inside. Switching eps back to 0 reproduces bp5_exact behavior.
+   TEST_ASSERT(p.IsNucleationZone(-17.9999995e3, 10.0e3),
+               "bp5_outside: point 0.5mm outside strike boundary is still inside");
+   TEST_ASSERT(p.IsNucleationZone(-25.0e3, 16.0000005e3),
+               "bp5_outside: point 0.5mm below depth boundary is still inside");
+
+   p.nucleation_eps = 0.0;
+   TEST_ASSERT(!p.IsNucleationZone(-17.9999995e3, 10.0e3),
+               "bp5_exact: point outside strike boundary is excluded");
+   TEST_ASSERT(!p.IsNucleationZone(-25.0e3, 16.0000005e3),
+               "bp5_exact: point outside depth boundary is excluded");
 }
 
 // =============================================================================

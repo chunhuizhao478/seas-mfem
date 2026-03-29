@@ -132,6 +132,13 @@ struct BP5Params
    /// Override with --delta-tau-factor 1 for SCEC BP5-QD behavior.
    real_t delta_tau_factor = 0.0;
 
+   /// Nucleation-zone inclusion tolerance [m].
+   ///
+   /// Tandem stock BP5 uses `scenario = "bp5_outside"` with `eps = 1e-3`,
+   /// which slightly expands the rectangular nucleation zone so boundary points
+   /// are classified as inside. Set to 0.0 for Tandem's `bp5_exact`.
+   real_t nucleation_eps = 1.0e-3;
+
    // =========================================================================
    // Geometric parameters (all in meters)
    // =========================================================================
@@ -207,7 +214,8 @@ struct BP5Params
 
    /// Check if a point is in the favorable nucleation zone.
    ///
-   /// Nucleation zone: (hs+ht <= x3 <= hs+ht+H) AND (-l/2 <= x2 <= -l/2+w)
+   /// Nucleation zone: (hs+ht <= x3 <= hs+ht+H) AND (-l/2 <= x2 <= -l/2+w),
+   /// with a Tandem-style inclusion tolerance `nucleation_eps`.
    ///
    /// @param[in] x2 Along-strike coordinate [m]
    /// @param[in] x3 Depth coordinate [m] (positive downward)
@@ -215,8 +223,9 @@ struct BP5Params
    bool IsNucleationZone(real_t x2, real_t x3) const
    {
       real_t half_l = l_vw / 2.0;
-      return (x3 >= hs + ht && x3 <= hs + ht + H &&
-              x2 >= -half_l && x2 <= -half_l + w_nuc);
+      real_t eps = nucleation_eps;
+      return (x3 + eps >= hs + ht && x3 - eps <= hs + ht + H &&
+              x2 + eps >= -half_l && x2 - eps <= -half_l + w_nuc);
    }
 
    /// Compute spatially varying critical slip distance L(x2, x3).
@@ -397,6 +406,7 @@ struct BP5Params
       os << "    V_init = " << V_init << " m/s\n";
       os << "    V_nuc  = " << V_nuc << " m/s\n";
       os << "    delta_tau_factor = " << delta_tau_factor << "\n";
+      os << "    nucleation_eps = " << nucleation_eps << " m\n";
       os << "  Geometry:\n";
       os << "    hs     = " << hs / 1000.0 << " km\n";
       os << "    ht     = " << ht / 1000.0 << " km\n";

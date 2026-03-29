@@ -305,6 +305,7 @@ int main(int argc, char *argv[])
    std::string dg_method_str = "BR2";
    double V_nuc_override = 0.0;
    double delta_tau_factor_override = -1.0;
+   double nucleation_eps_override = -1.0;
    bool dump_bdr_vtk = false;
    bool diag_vtk = false;
    bool diag_traction_decomp = false;
@@ -394,6 +395,10 @@ int main(int argc, char *argv[])
       if (arg == "--delta-tau-factor" && i + 1 < argc)
       {
          delta_tau_factor_override = std::atof(argv[++i]);
+      }
+      if (arg == "--nucleation-eps" && i + 1 < argc)
+      {
+         nucleation_eps_override = std::atof(argv[++i]);
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
       if (arg == "--diag-vtk") { diag_vtk = true; }
@@ -512,6 +517,10 @@ int main(int argc, char *argv[])
    if (delta_tau_factor_override >= 0.0)
    {
       params.delta_tau_factor = delta_tau_factor_override;
+   }
+   if (nucleation_eps_override >= 0.0)
+   {
+      params.nucleation_eps = nucleation_eps_override;
    }
    if (smooth_nucleation) { params.smooth_nucleation = true; }
    params.Validate();
