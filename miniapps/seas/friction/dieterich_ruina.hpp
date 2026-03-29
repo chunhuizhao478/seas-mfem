@@ -369,15 +369,13 @@ public:
 
    /// Solve for 2-component slip rate given 2-component traction and scalar psi.
    ///
-   /// Algorithm (matching Tandem's DieterichRuinaBase::slip_rate, line 174):
+   /// Algorithm (following Tandem's DieterichRuinaAgeing::slip_rate):
    /// 1. tau_abs = ||tau_vec||
    /// 2. V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a)
-   /// 3. V_vec = -(V_abs / tau_abs) * tau_vec
+   /// 3. V_vec = (V_abs / tau_abs) * tau_vec
    ///
-   /// Slip velocity is anti-parallel to traction (Tandem convention).
-   /// The fault slides in the direction of driving stress, but the
-   /// convention is that dS/dt = V_vec has the opposite sign to tau,
-   /// so cumulative slip S is negative when tau is positive.
+   /// Slip velocity is parallel to traction
+   /// (slip occurs in the direction of driving stress).
    ///
    /// @param[in] tau_vec Traction vector (2 components) [Pa]
    /// @param[in] psi Logarithmic state variable [-]
@@ -401,9 +399,8 @@ public:
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
-      // Direction: V anti-parallel to tau (Tandem DieterichRuinaBase.h:174).
-      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
+      V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
    }
 
    /// Compute initial psi from stress equilibrium.

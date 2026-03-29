@@ -301,11 +301,10 @@ public:
          for (int i = 0; i < num_nodes_; i++)
          {
             // Below fault zone check (shouldn't happen with proper fault detection)
-            // v55: Negated to match Tandem V_vec convention.
             if (depths(i) > Wf_bp5_ + 1.0)
             {
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;
+               slip_rate_(2*i+1) = Vp_bp5_;
                continue;
             }
 
@@ -425,13 +424,11 @@ public:
             if (depths(i) > Wf_bp5_ + 1.0)
             {
                // Below fault zone: prescribed plate rate.
-               // v55: Negated to match Tandem's V_vec = -(V/|τ|)·τ convention.
-               // For BP5 pure strike-slip with τ_strike > 0, Vi = (0, -Vp).
                rate(i * StatePerNode + 0) = 0.0;
-               rate(i * StatePerNode + 1) = -Vp_bp5_;
+               rate(i * StatePerNode + 1) = Vp_bp5_;
                rate(i * StatePerNode + PsiIndex) = 0.0;
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;
+               slip_rate_(2*i+1) = Vp_bp5_;
                continue;
             }
 

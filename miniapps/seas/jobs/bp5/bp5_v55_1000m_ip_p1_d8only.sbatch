@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v55_d8_p1             # Job name
 #SBATCH -o bp5_v55_d8_p1_%j.out
 #SBATCH -e bp5_v55_d8_p1_%j.err
-#SBATCH -p normal                    # Queue
+#SBATCH -p development               # Queue
 #SBATCH -N 8                         # 8 nodes
 #SBATCH -n 400                       # 400 MPI ranks
-#SBATCH -t 48:00:00                  # 48 hours
+#SBATCH -t 02:00:00                  # 2 hours
 #SBATCH -A EAR20006                  # TACC allocation
 
 # BP5 v55 D8-only: V_vec sign convention matched to Tandem
