@@ -8,14 +8,10 @@
 #SBATCH -t 02:00:00                  # 2 hours
 #SBATCH -A EAR20006                  # TACC allocation
 
-# BP5 v55 baseline LONG run: pre-D5 code, run to t>200s
+# BP5 v55 baseline LONG run: pre-D5 code to t>200s
 #
-# Purpose: determine if the pre-fix code (v53/v54 era) also recovers
-# and nucleates when run long enough. Previous v53 run only reached
-# t=38s at station output before wall-time kill.
-#
-# Uses git worktree to build from the baseline commit (d27c9cf)
-# without modifying the main working tree.
+# Strategy: checkout baseline commit into a temp dir, copy only the
+# miniapps/seas source files, and build against the existing MFEM library.
 
 export LC_ALL=C
 export LANG=C
@@ -28,22 +24,28 @@ module list
 export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 
 SEAS_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
+REPO_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem
 BASELINE_COMMIT=d27c9cf
+BUILD_DIR=/tmp/seas_baseline_$$
 
-# Create a temporary worktree for the baseline commit
-WORKTREE_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem-baseline-worktree
-cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+# Extract only miniapps/seas source from the baseline commit
+mkdir -p "$BUILD_DIR"
+cd "$REPO_DIR"
+git archive "$BASELINE_COMMIT" -- miniapps/seas | tar -x -C "$BUILD_DIR"
 
-# Clean up any previous worktree
-git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
-git worktree add "$WORKTREE_DIR" "$BASELINE_COMMIT"
+cd "$BUILD_DIR/miniapps/seas"
 
-cd "$WORKTREE_DIR/miniapps/seas"
+# Symlink to the existing MFEM library (two levels up from miniapps/seas)
+ln -sf "$REPO_DIR/libmfem.a" ../../libmfem.a
+ln -sf "$REPO_DIR/config" ../../config
+ln -sf "$REPO_DIR/fem" ../../fem
+ln -sf "$REPO_DIR/general" ../../general
+ln -sf "$REPO_DIR/linalg" ../../linalg
+ln -sf "$REPO_DIR/mesh" ../../mesh
 
-make clean-build
+# Build
 make seas_bp5_full || { echo "BUILD FAILED"; exit 1; }
 
-# Use mesh and benchmark data from the main tree
 mkdir -p bp5/results_v55_baseline_long
 
 ibrun ./seas_bp5_full \
@@ -61,6 +63,8 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 1000 \
       --write-every-step
 
-# Clean up worktree after run
-cd /scratch2/10024/zhaochun/seas-project/seas-mfem
-git worktree remove --force "$WORKTREE_DIR" 2>/dev/null || true
+# Copy results back to main tree for easy access
+cp -r bp5/results_v55_baseline_long "$SEAS_DIR/bp5/" 2>/dev/null || true
+
+# Cleanup
+rm -rf "$BUILD_DIR"
