@@ -174,6 +174,11 @@ public:
                                    Vector &jump_residual,
                                    Vector *normal_traction = nullptr);
 
+   /// Assemble only the fault-slip RHS contribution into the DG displacement
+   /// space. This is a test/debug utility for checking K*u against b(slip)
+   /// without Dirichlet loading.
+   void AssembleSlipOnlyRHS(Vector &rhs, const Vector &slip_bc) const;
+
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
 
@@ -3426,6 +3431,27 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
 {
    ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
                        nullptr, nullptr, nullptr);
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::AssembleSlipOnlyRHS(
+   Vector &rhs, const Vector &slip_bc) const
+{
+   rhs.SetSize(fes_->GetVSize());
+   rhs = 0.0;
+
+   if (method_ == DGMethod::IP)
+   {
+      AssembleSlipContributionIP(rhs, slip_bc);
+      AssembleSlipContributionIPShared(rhs, slip_bc,
+                                       fault_interior_faces_.Size());
+   }
+   else
+   {
+      AssembleSlipContributionBR2(rhs, slip_bc);
+      AssembleSlipContributionBR2Shared(rhs, slip_bc,
+                                        fault_interior_faces_.Size());
+   }
 }
 
 template <typename MeshType>

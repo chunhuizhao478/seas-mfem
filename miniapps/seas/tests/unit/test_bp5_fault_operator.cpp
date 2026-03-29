@@ -19,6 +19,8 @@
 #include "../../domain/elasticity_operator.hpp"
 #include "../../friction/dieterich_ruina.hpp"
 #include "../../friction/state_evolution.hpp"
+#include "../../solver/seas_operator.hpp"
+#include "../../solver/time_stepper.hpp"
 #include "../../config/bp5_params.hpp"
 #include "test_macros.hpp"
 
@@ -431,6 +433,230 @@ void TestBP5NodeUpdateMatchesTandemSource()
              "ComputeRHS dpsi/dt matches Tandem-style aging law");
 }
 
+void TestBP5ComputeRHSMatchesTandemSourceAllNodes()
+{
+   std::cout << "\n--- Test: BP5 ComputeRHS vs Tandem Source (all nodes, nonzero traction) ---\n";
+
+   BP5Fixture fix;
+   if (!fix.Setup())
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   const int N = fix.nf;
+   Vector state(fix.fault_op->StateSize());
+   fix.fault_op->PreInit(state);
+
+   Vector traction0(fix.fault_op->TractionSize());
+   traction0 = 0.0;
+   fix.fault_op->Init(traction0, state);
+
+   Vector slip_bc(fix.fault_op->SlipSize());
+   slip_bc = 0.0;
+   for (int i = 0; i < N; i++)
+   {
+      slip_bc(2 * i) = 0.02 * ((i % 3) - 1);
+      slip_bc(2 * i + 1) = -0.5 - 0.05 * i;
+   }
+   fix.fault_op->SetSlip(slip_bc, state);
+
+   GridFunction u(&fix.domain_op->GetFESpace());
+   u = 0.0;
+   fix.domain_op->Solve(0.0, slip_bc, u);
+
+   Vector traction(fix.fault_op->TractionSize());
+   Vector normal_traction(N);
+   fix.domain_op->ComputeTraction(u, slip_bc, traction, &normal_traction);
+
+   Vector rate(fix.fault_op->StateSize());
+   fix.fault_op->ComputeRHS(traction, state, rate, &normal_traction);
+
+   const Vector &a_values = fix.fault_geom->GetAValues();
+   const Vector &eta_values = fix.fault_geom->GetEtaValues();
+   const Vector &dc_values = fix.fault_geom->GetDcValues();
+   const Vector &depths = fix.fault_geom->GetDepths();
+   const Vector &tau_pre = fix.fault_geom->GetTauPre();
+
+   real_t max_V_diff = 0.0;
+   real_t max_dpsi_diff = 0.0;
+   int max_V_node = -1;
+   int max_dpsi_node = -1;
+
+   for (int i = 0; i < N; i++)
+   {
+      real_t V_expected[2];
+      real_t dpsi_expected = 0.0;
+
+      if (depths(i) > fix.params.Wf + 1.0)
+      {
+         V_expected[0] = 0.0;
+         V_expected[1] = fix.params.Vp;
+         dpsi_expected = 0.0;
+      }
+      else
+      {
+         const real_t psi = state(i * 3 + 2);
+         const real_t tau_vec[2] = {
+            tau_pre(2 * i) + traction(2 * i),
+            tau_pre(2 * i + 1) + traction(2 * i + 1)
+         };
+         const real_t a = a_values(i);
+         const real_t eta = eta_values(i);
+         const real_t Dc = dc_values(i);
+
+         real_t sigma_n_eff = fix.params.sigma_n - normal_traction(i);
+         sigma_n_eff = std::max(sigma_n_eff, 0.1 * fix.params.sigma_n);
+
+         TandemSlipRateVectorPsi(tau_vec, psi, sigma_n_eff, eta, a,
+                                 fix.params.V0, *fix.friction, V_expected);
+
+         const real_t V_abs = std::sqrt(V_expected[0] * V_expected[0] +
+                                        V_expected[1] * V_expected[1]);
+         dpsi_expected = fix.params.b * fix.params.V0 / Dc
+            * (std::exp((fix.params.f0 - psi) / fix.params.b)
+               - V_abs / fix.params.V0);
+      }
+
+      const real_t V0_actual = rate(i * 3 + 0);
+      const real_t V1_actual = rate(i * 3 + 1);
+      const real_t dpsi_actual = rate(i * 3 + 2);
+
+      max_V_diff = std::max(max_V_diff, std::abs(V0_actual - V_expected[0]));
+      if (std::abs(V0_actual - V_expected[0]) == max_V_diff) { max_V_node = i; }
+      max_V_diff = std::max(max_V_diff, std::abs(V1_actual - V_expected[1]));
+      if (std::abs(V1_actual - V_expected[1]) == max_V_diff) { max_V_node = i; }
+      if (std::abs(dpsi_actual - dpsi_expected) > max_dpsi_diff)
+      {
+         max_dpsi_diff = std::abs(dpsi_actual - dpsi_expected);
+         max_dpsi_node = i;
+      }
+   }
+
+   std::cout << "  max |dV|    = " << max_V_diff
+             << " at node " << max_V_node << "\n";
+   std::cout << "  max |dpsi|  = " << max_dpsi_diff
+             << " at node " << max_dpsi_node << "\n";
+
+   TEST_ASSERT(std::isfinite(max_V_diff), "All-node V mismatch is finite");
+   TEST_ASSERT(std::isfinite(max_dpsi_diff), "All-node dpsi mismatch is finite");
+   TEST_ASSERT(max_V_diff < 1e-13,
+               "ComputeRHS slip-rate vector matches Tandem-style formulas at all nodes");
+   TEST_ASSERT(max_dpsi_diff < 1e-12,
+               "ComputeRHS dpsi matches Tandem-style formulas at all nodes");
+}
+
+void TestBP5RejectedStepPurity()
+{
+   std::cout << "\n--- Test: BP5/IP Rejected-Step Purity ---\n";
+
+   BP5Fixture fix_reject;
+   BP5Fixture fix_fresh;
+   if (!fix_reject.Setup() || !fix_fresh.Setup())
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   BP5SEASOp seas_reject(fix_reject.domain_op.get(), fix_reject.fault_op.get());
+   BP5SEASOp seas_fresh(fix_fresh.domain_op.get(), fix_fresh.fault_op.get());
+   seas_reject.SetElasticSigmaN(true);
+   seas_fresh.SetElasticSigmaN(true);
+
+   Vector state0(fix_reject.fault_op->StateSize());
+   seas_reject.SetInitialCondition(state0);
+
+   // Use a heterogeneous slip perturbation so the step is nontrivial; the
+   // exact steady initial state can accept even extremely large dt on this
+   // coarse fixture and does not exercise rejection behavior.
+   Vector slip_seed(fix_reject.fault_op->SlipSize());
+   slip_seed = 0.0;
+   for (int i = 0; i < fix_reject.nf; i++)
+   {
+      slip_seed(2 * i) = 0.02 * ((i % 3) - 1);
+      slip_seed(2 * i + 1) = -0.5 - 0.05 * i;
+   }
+   fix_reject.fault_op->SetSlip(slip_seed, state0);
+
+   Vector state_reject = state0;
+   Vector state_fresh = state0;
+
+   DormandPrinceRK45 rk_reject;
+   rk_reject.SetAbsTol(1e-7);
+   rk_reject.SetRelTol(1e-50);
+   rk_reject.SetDt(1.0e6);
+   rk_reject.SetDtMax(1.0e6);
+   rk_reject.SetStatePerNode(3);
+   rk_reject.SetVGuard(1.05);
+   rk_reject.Init(seas_reject);
+
+   real_t t_reject = 0.0;
+   real_t accepted_dt = -1.0;
+   int attempts = 0;
+   while (attempts < 40)
+   {
+      real_t dt_try = 0.0;
+      if (rk_reject.Step(seas_reject, state_reject, t_reject, dt_try))
+      {
+         accepted_dt = dt_try;
+         break;
+      }
+      attempts++;
+   }
+
+   TEST_ASSERT(accepted_dt > 0.0,
+               "Rejected-path solver eventually accepts a BP5/IP step");
+   TEST_ASSERT(rk_reject.GetTotalRejections() > 0,
+               "Rejected-path solver incurred at least one rejection");
+
+   DormandPrinceRK45 rk_fresh;
+   rk_fresh.SetAbsTol(1e-7);
+   rk_fresh.SetRelTol(1e-50);
+   rk_fresh.SetDt(accepted_dt);
+   rk_fresh.SetDtMax(1.0e6);
+   rk_fresh.SetStatePerNode(3);
+   rk_fresh.SetVGuard(1.05);
+   rk_fresh.Init(seas_fresh);
+
+   real_t t_fresh = 0.0;
+   real_t dt_fresh = 0.0;
+   bool accepted_fresh = rk_fresh.Step(seas_fresh, state_fresh, t_fresh, dt_fresh);
+   TEST_ASSERT(accepted_fresh,
+               "Fresh-path solver accepts the same reduced BP5/IP step");
+
+   Vector state_diff(state_reject.Size());
+   state_diff = state_reject;
+   state_diff -= state_fresh;
+   real_t rel_state_diff = state_diff.Norml2() /
+                           std::max(state_reject.Norml2(), 1e-30);
+
+   Vector trac_diff(seas_reject.GetTraction().Size());
+   trac_diff = seas_reject.GetTraction();
+   trac_diff -= seas_fresh.GetTraction();
+   real_t rel_trac_diff = trac_diff.Norml2() /
+                          std::max(seas_reject.GetTraction().Norml2(), 1e-30);
+
+   real_t vmax_reject = seas_reject.GetMaxSlipRate();
+   real_t vmax_fresh = seas_fresh.GetMaxSlipRate();
+   real_t rel_vmax_diff = std::abs(vmax_reject - vmax_fresh) /
+                          std::max(std::abs(vmax_reject), 1e-30);
+
+   std::cout << "  rejected attempts = " << rk_reject.GetTotalRejections()
+             << ", accepted_dt = " << accepted_dt << "\n";
+   std::cout << "  rel_state_diff = " << rel_state_diff
+             << ", rel_trac_diff = " << rel_trac_diff
+             << ", rel_vmax_diff = " << rel_vmax_diff << "\n";
+
+   TEST_ASSERT(std::abs(t_reject - t_fresh) < 1e-12,
+               "Accepted time increment matches after rejection vs fresh path");
+   TEST_ASSERT(rel_state_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted state");
+   TEST_ASSERT(rel_trac_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted traction");
+   TEST_ASSERT(rel_vmax_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted V_max");
+}
+
 
 // =============================================================================
 // Test 5: BP5 State Access Roundtrip — GetSlip/SetSlip, GetTheta/SetTheta
@@ -773,6 +999,8 @@ int main()
    TestBP5Init();
    TestBP5ComputeRHS();
    TestBP5NodeUpdateMatchesTandemSource();
+   TestBP5ComputeRHSMatchesTandemSourceAllNodes();
+   TestBP5RejectedStepPurity();
    TestBP5StateRoundtrip();
    TestBP5StressEquilibrium();
    TestBP5VerifyInitialSlipRate();

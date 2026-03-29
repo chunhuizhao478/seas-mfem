@@ -379,13 +379,15 @@ public:
 
    /// Solve for 2-component slip rate given 2-component traction and scalar psi.
    ///
-   /// Algorithm (following Tandem's DieterichRuinaAgeing::slip_rate):
+   /// Algorithm (matching Tandem's DieterichRuinaBase::slip_rate, line 174):
    /// 1. tau_abs = ||tau_vec||
    /// 2. V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a)
-   /// 3. V_vec = (V_abs / tau_abs) * tau_vec
+   /// 3. V_vec = -(V_abs / tau_abs) * tau_vec
    ///
-   /// Slip velocity is parallel to traction
-   /// (slip occurs in the direction of driving stress).
+   /// Slip velocity is anti-parallel to traction (Tandem convention).
+   /// The fault slides in the direction of driving stress, but the
+   /// convention is that dS/dt = V_vec has the opposite sign to tau,
+   /// so cumulative slip S is negative when tau is positive.
    ///
    /// @param[in] tau_vec Traction vector (2 components) [Pa]
    /// @param[in] psi Logarithmic state variable [-]
@@ -403,18 +405,15 @@ public:
                                  tau_vec[1] * tau_vec[1]);
       if (tau_abs <= 0.0)
       {
-         // Exactly zero traction — no slip. Matches Tandem (no artificial floor).
          V_vec[0] = 0.0;
          V_vec[1] = 0.0;
          if (iterations) { *iterations = 0; }
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
-      // Direction: V parallel to tau (same as Tandem line 119).
-      // The ratio V_abs/tau_abs is well-defined for any tau_abs > 0
-      // because V_abs ∈ [0, tau_abs/eta] from the Brent solver.
-      V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
+      // Direction: V anti-parallel to tau (Tandem DieterichRuinaBase.h:174).
+      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
    }
 
    /// Compute initial psi from stress equilibrium.

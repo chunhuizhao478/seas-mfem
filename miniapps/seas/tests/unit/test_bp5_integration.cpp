@@ -91,14 +91,14 @@ struct BP5IntegrationFixture
    std::unique_ptr<BP5SEASOp> seas_op;
    int nf = 0;
 
-   bool Setup()
+   bool Setup(DGMethod dg = DGMethod::BR2)
    {
       real_t Lx = 50e3, Ly = 60e3, Lz = 40e3;
       mesh = std::make_unique<Mesh>(Create3DMesh(1, 1, 1, Lx, Ly, Lz));
 
       domain_op = std::make_unique<ElasticityDomainOperator<Mesh>>(
          *mesh, 1, params.lambda(), params.mu(),
-         params.Vp, params.Wf, params.lf, DGMethod::BR2);
+         params.Vp, params.Wf, params.lf, dg);
 
       nf = domain_op->GetNumFaultDOFs();
       if (nf == 0) { return false; }
@@ -620,6 +620,108 @@ void TestBP5InitialSlipRateFromPreStress()
 }
 
 // =============================================================================
+// Test 10: Rejected RK45 attempt does not pollute next accepted BP5/IP step
+// =============================================================================
+void TestBP5IPRejectedStepPurity()
+{
+   std::cout << "\n--- Test: BP5/IP Rejected-Step Purity ---\n";
+
+   BP5IntegrationFixture fix_reject;
+   BP5IntegrationFixture fix_fresh;
+   if (!fix_reject.Setup(DGMethod::IP) || !fix_fresh.Setup(DGMethod::IP))
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   fix_reject.seas_op->SetElasticSigmaN(true);
+   fix_fresh.seas_op->SetElasticSigmaN(true);
+
+   Vector state0(fix_reject.fault_op->StateSize());
+   fix_reject.seas_op->SetInitialCondition(state0);
+
+   Vector state_reject = state0;
+   Vector state_fresh = state0;
+
+   DormandPrinceRK45 rk_reject;
+   rk_reject.SetAbsTol(1e-7);
+   rk_reject.SetRelTol(1e-50);
+   rk_reject.SetDt(1e6);
+   rk_reject.SetDtMax(1e6);
+   rk_reject.SetStatePerNode(3);
+   rk_reject.SetVGuard(1.05);
+   rk_reject.Init(*fix_reject.seas_op);
+
+   real_t t_reject = 0.0;
+   real_t accepted_dt = -1.0;
+   int attempts = 0;
+   while (attempts < 40)
+   {
+      real_t dt_try = 0.0;
+      if (rk_reject.Step(*fix_reject.seas_op, state_reject, t_reject, dt_try))
+      {
+         accepted_dt = dt_try;
+         break;
+      }
+      attempts++;
+   }
+
+   TEST_ASSERT(accepted_dt > 0.0,
+               "Rejected-path solver eventually accepts a BP5/IP step");
+   TEST_ASSERT(rk_reject.GetTotalRejections() > 0,
+               "Rejected-path solver incurred at least one rejection");
+
+   DormandPrinceRK45 rk_fresh;
+   rk_fresh.SetAbsTol(1e-7);
+   rk_fresh.SetRelTol(1e-50);
+   rk_fresh.SetDt(accepted_dt);
+   rk_fresh.SetDtMax(1e6);
+   rk_fresh.SetStatePerNode(3);
+   rk_fresh.SetVGuard(1.05);
+   rk_fresh.Init(*fix_fresh.seas_op);
+
+   real_t t_fresh = 0.0;
+   real_t dt_fresh = 0.0;
+   bool accepted_fresh = rk_fresh.Step(*fix_fresh.seas_op, state_fresh,
+                                       t_fresh, dt_fresh);
+   TEST_ASSERT(accepted_fresh,
+               "Fresh-path solver accepts the same reduced BP5/IP step");
+
+   Vector diff(state_reject.Size());
+   diff = state_reject;
+   diff -= state_fresh;
+   real_t rel_state_diff = diff.Norml2() /
+                           std::max(state_reject.Norml2(), 1e-30);
+
+   Vector trac_diff(fix_reject.seas_op->GetTraction().Size());
+   trac_diff = fix_reject.seas_op->GetTraction();
+   trac_diff -= fix_fresh.seas_op->GetTraction();
+   real_t rel_trac_diff = trac_diff.Norml2() /
+                          std::max(fix_reject.seas_op->GetTraction().Norml2(),
+                                   1e-30);
+
+   real_t vmax_reject = fix_reject.seas_op->GetMaxSlipRate();
+   real_t vmax_fresh = fix_fresh.seas_op->GetMaxSlipRate();
+   real_t rel_vmax_diff = std::abs(vmax_reject - vmax_fresh) /
+                          std::max(std::abs(vmax_reject), 1e-30);
+
+   std::cout << "  rejected attempts = " << rk_reject.GetTotalRejections()
+             << ", accepted_dt = " << accepted_dt << "\n";
+   std::cout << "  rel_state_diff = " << rel_state_diff
+             << ", rel_trac_diff = " << rel_trac_diff
+             << ", rel_vmax_diff = " << rel_vmax_diff << "\n";
+
+   TEST_ASSERT(std::abs(t_reject - t_fresh) < 1e-12,
+               "Accepted time increment matches after rejection vs fresh path");
+   TEST_ASSERT(rel_state_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted state");
+   TEST_ASSERT(rel_trac_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted traction");
+   TEST_ASSERT(rel_vmax_diff < 1e-11,
+               "Rejected BP5/IP attempt does not change next accepted V_max");
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main()
@@ -637,6 +739,7 @@ int main()
    TestBP5StressBalanceDuringTimeStep();
    TestBP5ZeroSlipTraction();
    TestBP5InitialSlipRateFromPreStress();
+   TestBP5IPRejectedStepPurity();
 
    TEST_PRINT_RESULTS();
 

@@ -488,5 +488,21 @@ compensating for the correction dominance. MFEM ignores it.
 WORSE. This needs re-investigation with the current v53 3-DOF fix. The v51 test may
 have been on different code.
 
-**Proposed next step**: Re-test `--elastic-sigma-n` with current v53 codebase to see
-if it improves nucleation behavior.
+### 11.2 elastic_sigma_n + Sign Fix Result: NO EFFECT
+
+Run `bp5_v54_esn_p1_7619263.out`: 600 steps, 14.8 seconds, V_max = 1.034→1.018.
+**Same dying behavior as v53.** The elastic normal traction on the production mesh is
+much smaller than on the coarse unit test mesh (37% vs negligible).
+
+The sign fix is correct (matches Tandem), and elastic_sigma_n should stay ON as default.
+But **it is NOT the cause of nucleation failure.**
+
+Disproved hypotheses so far:
+- Solver accuracy (CG vs BLR: identical)
+- Quadrature mismatch (irrelevant for flat p=1)
+- elastic_sigma_n OFF (now ON + sign fixed, no effect)
+- Penalty coefficient (matches Tandem exactly)
+- Slip interpolation (exact round-trip)
+- L2 projection (M_ref correct)
+- State evolution (matches Tandem)
+- Friction solver (accurate to 1e-16)

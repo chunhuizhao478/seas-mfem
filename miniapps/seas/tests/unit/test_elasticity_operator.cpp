@@ -3062,6 +3062,81 @@ void TestIPGlobalSlipRHSMatchesExplicitFormP1()
                "Solved displacement satisfies explicit global slip RHS");
 }
 
+void TestIPGlobalSlipRHSMatchesOperatorAssemblyP1()
+{
+   std::cout << "\n--- Test: IP Global Slip RHS vs Operator Assembly (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   const int ndofs = op.GetNumFaultDOFs();
+   const int nbf = op.GetNbfPerFace();
+   const Array<int> &fault_faces = op.GetFaultInteriorFaces();
+   if (ndofs == 0 || fault_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no interior fault faces found)\n";
+      return;
+   }
+
+   Vector slip_bc(2 * ndofs);
+   slip_bc = 0.0;
+   for (int fi = 0; fi < fault_faces.Size(); fi++)
+   {
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         const int dof = fi * nbf + kk;
+         slip_bc(2 * dof) = 0.05 * (fi + kk);
+         slip_bc(2 * dof + 1) = -1.0 - 0.2 * fi - 0.1 * kk;
+      }
+   }
+
+   GridFunction u(&op.GetFESpace());
+   u = 0.0;
+   op.Solve(0.0, slip_bc, u);
+
+   Vector b_operator;
+   op.AssembleSlipOnlyRHS(b_operator, slip_bc);
+
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   BilinearForm a(&op.GetFESpace());
+   a.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0));
+
+   Array<int> dirichlet_marker(mesh.bdr_attributes.Max());
+   dirichlet_marker = 0;
+   dirichlet_marker[5 - 1] = 1;
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0),
+      dirichlet_marker);
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0),
+      dirichlet_marker);
+   a.Assemble();
+   a.Finalize();
+
+   Vector Au(u.Size());
+   a.SpMat().Mult(u, Au);
+   Vector residual(Au.Size());
+   subtract(Au, b_operator, residual);
+
+   const real_t rel = residual.Norml2() / std::max(b_operator.Norml2(), 1e-30);
+   std::cout << "  ||b_operator|| = " << b_operator.Norml2() << "\n";
+   std::cout << "  ||Au-b||       = " << residual.Norml2() << "\n";
+   std::cout << "  rel mismatch   = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Global operator slip residual mismatch is finite");
+   TEST_ASSERT(rel < 1e-10,
+               "Solved displacement satisfies operator-assembled global slip RHS");
+}
+
 // =============================================================================
 // v45 Phase 4: Multi-DOF Fault State/Geometry Tests (tet mesh, p=2 IP)
 // =============================================================================
@@ -4057,6 +4132,7 @@ int main()
    TestIPStaticJumpResidualP1VsP2();
    TestIPGlobalDirichletRHSMatchesExplicitBoundaryFormP1();
    TestIPGlobalSlipRHSMatchesExplicitFormP1();
+   TestIPGlobalSlipRHSMatchesOperatorAssemblyP1();
 
    // v45 Phase 4: Multi-DOF fault state/geometry tests (tet mesh, p=2)
    TestMultiDOFStateLayoutP1();
