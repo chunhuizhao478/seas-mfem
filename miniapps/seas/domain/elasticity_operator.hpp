@@ -19,6 +19,7 @@
 #include "../fault/fault_basis.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
+#include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
 #include "../fault/face_quadrature.hpp"
 
 #include <memory>
