@@ -327,7 +327,7 @@ private:
 
    // Multi-DOF fault discretization (v45, Phase 2)
    std::unique_ptr<FaceQuadrature> face_quad_;
-   int nbf_per_face_ = 1;   // 1 at p=1, (p+1)(p+2)/2 at p>=2
+   int nbf_per_face_ = 1;   // BR2: 1, IP: (p+1)(p+2)/2 on triangle faces
    int num_fault_faces_ = 0; // number of fault faces (interior + shared)
 
    mutable Vector fault_depths_;
@@ -597,11 +597,11 @@ private:
 
       num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
-      // Multi-DOF fault quadrature (v45, Phase 2)
-      // p=1: face_order=0, nbf=1 -> backward compatible (face average)
-      // p>=2 with IP: face_order=order_, nbf=(order_+1)*(order_+2)/2 -> matches Tandem
-      // p>=2 with BR2: face_order=0, nbf=1 -> BR2 doesn't need multi-DOF
-      int face_fe_order = (method_ == DGMethod::IP && order_ >= 2) ? order_ : 0;
+      // Multi-DOF fault quadrature
+      // IP: use the same nodal triangle order as the volume space, matching
+      // Tandem's fault discretization even at p=1.
+      // BR2: keep the legacy face-averaged path (nbf=1).
+      int face_fe_order = (method_ == DGMethod::IP) ? order_ : 0;
       face_quad_ = std::make_unique<FaceQuadrature>(face_fe_order,
                                                      std::max(order_, 1),
                                                      Geometry::TRIANGLE,
@@ -2918,9 +2918,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
    {
       fault_depths_.SetSize(num_fault_dofs_);
 
-      // Nodal rule for per-DOF coordinate evaluation
-      // At nbf=1 (p=1): single centroid point -> same as old code
-      // At nbf>1 (p>=2): GaussLobatto nodes on reference face
+      // Nodal rule for per-DOF coordinate evaluation.
+      // At nbf=1 (BR2 / order-0 face space): single centroid point.
+      // At nbf>1 (IP nodal fault space): face nodes on the reference triangle.
       const IntegrationRule &nir = face_quad_->GetNodalRule();
       int nbf = nbf_per_face_;
 

@@ -36,8 +36,8 @@ namespace seas
 ///   - face_order ≥ 1  → nbf = (p+1)(p+2)/2 via H1_TriangleElement
 ///
 /// Usage in SEAS:
-///   - p=1 (vol_order=1): face_order=0, nbf=1 → proven stable, backward compatible
-///   - p≥2 (vol_order≥2): face_order=vol_order, nbf=(p+1)(p+2)/2 → matches Tandem
+///   - IP elasticity: face_order=vol_order, nbf=(p+1)(p+2)/2 → matches Tandem
+///   - BR2 elasticity / legacy face-averaged paths: face_order=0, nbf=1
 ///
 /// Math: For flat faces, the physical mass matrix M_phys = |J_face| × M_ref.
 /// Since |J_face| also appears in the projection integral, it cancels:
@@ -83,7 +83,7 @@ public:
       {
          // ================================================================
          // Order 0: single constant basis function φ₀ = 1
-         // This gives nbf=1, equivalent to face-averaged (current v42 behavior).
+         // This gives nbf=1, equivalent to a face-averaged constant fault space.
          // ================================================================
          nbf_ = 1;
 

@@ -736,26 +736,28 @@ void TestBR2vsIP()
    ElasticityDomainOperator<Mesh> op_br2(mesh, 1, lambda, mu, 0.0, Lz, 2.0 * Lx,
                                           DGMethod::BR2);
 
-   int nf_ip = op_ip.GetNumFaultDOFs();
-   int nf_br2 = op_br2.GetNumFaultDOFs();
-   TEST_ASSERT(nf_ip == nf_br2,
+   int nfaces_ip = op_ip.GetNumFaultFaces();
+   int nfaces_br2 = op_br2.GetNumFaultFaces();
+   TEST_ASSERT(nfaces_ip == nfaces_br2,
                "IP and BR2 detect same number of fault faces");
 
-   if (nf_ip == 0 || nf_br2 == 0)
+   int ndofs_ip = op_ip.GetNumFaultDOFs();
+   int ndofs_br2 = op_br2.GetNumFaultDOFs();
+   if (ndofs_ip == 0 || ndofs_br2 == 0)
    {
       std::cout << "  (Skipped: no fault faces found)\n";
       return;
    }
 
    // Apply the same uniform slip
-   Vector slip_ip(2 * nf_ip), slip_br2(2 * nf_br2);
+   Vector slip_ip(2 * ndofs_ip), slip_br2(2 * ndofs_br2);
    slip_ip = 0.0;
    slip_br2 = 0.0;
-   for (int i = 0; i < nf_ip; i++)
+   for (int i = 0; i < ndofs_ip; i++)
    {
       slip_ip(2 * i) = 1.0;
-      slip_br2(2 * i) = 1.0;
    }
+   for (int i = 0; i < ndofs_br2; i++) { slip_br2(2 * i) = 1.0; }
 
    GridFunction u_ip(&op_ip.GetFESpace());
    GridFunction u_br2(&op_br2.GetFESpace());
@@ -1302,13 +1304,13 @@ void TestMultiDOFProperties()
    std::cout << "  nfaces=" << nfaces << " nbf=" << nbf
              << " ndofs=" << ndofs << " nq=" << fq->NumQuadPoints() << "\n";
 
-   // p=1 IP: should have nbf=1 (backward compatible)
+   // p=1 IP: should use Tandem-style nodal triangle fault space
    ElasticityDomainOperator<Mesh> op_p1(mesh, 1, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
                                          DGMethod::IP);
-   TEST_ASSERT(op_p1.GetNbfPerFace() == 1,
-               "p=1 IP has nbf=1 (backward compatible)");
-   TEST_ASSERT(op_p1.GetNumFaultDOFs() == op_p1.GetNumFaultFaces(),
-               "p=1: total DOFs = total faces");
+   TEST_ASSERT(op_p1.GetNbfPerFace() == 3,
+               "p=1 IP has 3 fault DOFs per triangle face");
+   TEST_ASSERT(op_p1.GetNumFaultDOFs() == 3 * op_p1.GetNumFaultFaces(),
+               "p=1: total DOFs = 3 * total faces");
 
    // p=2 BR2: should still have nbf=1 (BR2 doesn't need multi-DOF)
    ElasticityDomainOperator<Mesh> op_br2(mesh, 2, 1.0, 1.0, 0.0, Lz, 2.0 * Lx,
@@ -1410,10 +1412,10 @@ void TestMultiDOFUniformSlip()
    std::cout << "  ||traction||=" << trac_norm << "\n";
 }
 
-// Test: p=1 IP backward compatibility (nbf=1 multi-DOF code matches old behavior)
+// Test: p=1 IP Tandem-style nodal fault space remains usable
 void TestMultiDOFBackwardCompatP1()
 {
-   std::cout << "\n--- Test: Multi-DOF Backward Compat at p=1 IP ---\n";
+   std::cout << "\n--- Test: Multi-DOF Tandem-Style Fault Space at p=1 IP ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
    Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
@@ -1429,7 +1431,7 @@ void TestMultiDOFBackwardCompatP1()
       return;
    }
 
-   TEST_ASSERT(nbf == 1, "p=1 IP has nbf=1");
+   TEST_ASSERT(nbf == 3, "p=1 IP has nbf=3");
 
    // Uniform dip slip = 1.0
    Vector slip_bc(2 * ndofs);
@@ -1444,11 +1446,10 @@ void TestMultiDOFBackwardCompatP1()
    op.Solve(0.0, slip_bc, u);
 
    real_t u_norm = u.Norml2();
-   TEST_ASSERT(std::isfinite(u_norm),
-               "p=1 IP: displacement is finite (backward compat)");
+   TEST_ASSERT(std::isfinite(u_norm), "p=1 IP: displacement is finite");
    TEST_ASSERT(u_norm > 1e-12,
                "p=1 IP: non-zero slip produces non-zero displacement");
-   std::cout << "  ||u||=" << u_norm << " (nbf=1)\n";
+   std::cout << "  ||u||=" << u_norm << " (nbf=" << nbf << ")\n";
 }
 
 // Test: Varying slip across face DOFs at p=2 produces different result than uniform
@@ -1658,10 +1659,10 @@ Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
 // v45 Phase 4: Multi-DOF Fault State/Geometry Tests (tet mesh, p=2 IP)
 // =============================================================================
 
-// Test: State layout sizes at p=1 IP with tet mesh (backward compatible)
+// Test: State layout sizes at p=1 IP with tet mesh (Tandem-style nodal fault space)
 void TestMultiDOFStateLayoutP1()
 {
-   std::cout << "\n--- Test: Multi-DOF State Layout at p=1 (nbf=1) ---\n";
+   std::cout << "\n--- Test: Multi-DOF State Layout at p=1 (nbf=3) ---\n";
 
    real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
    Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
@@ -1682,8 +1683,8 @@ void TestMultiDOFStateLayoutP1()
       return;
    }
 
-   TEST_ASSERT(nbf == 1, "p=1 IP tet: nbf=1");
-   TEST_ASSERT(ndofs == nfaces, "p=1 IP tet: ndofs = nfaces");
+   TEST_ASSERT(nbf == 3, "p=1 IP tet: nbf=3");
+   TEST_ASSERT(ndofs == 3 * nfaces, "p=1 IP tet: ndofs = 3*nfaces");
 
    // Build FaultGeometry and RateStateFaultOperator
    FaultGeometry<Mesh> geom(op, params);
@@ -1698,14 +1699,14 @@ void TestMultiDOFStateLayoutP1()
    RateStateFaultOperator<Mesh, 2> fault_op(
       &geom, &friction, &evolution, params);
 
-   TEST_ASSERT(fault_op.NumNodes() == nfaces,
-               "p=1: NumNodes = nfaces");
-   TEST_ASSERT(fault_op.StateSize() == nfaces * 3,
-               "p=1: StateSize = nfaces * 3");
-   TEST_ASSERT(fault_op.SlipSize() == nfaces * 2,
-               "p=1: SlipSize = nfaces * 2");
-   TEST_ASSERT(fault_op.TractionSize() == nfaces * 2,
-               "p=1: TractionSize = nfaces * 2");
+   TEST_ASSERT(fault_op.NumNodes() == ndofs,
+               "p=1: NumNodes = ndofs");
+   TEST_ASSERT(fault_op.StateSize() == ndofs * 3,
+               "p=1: StateSize = ndofs * 3");
+   TEST_ASSERT(fault_op.SlipSize() == ndofs * 2,
+               "p=1: SlipSize = ndofs * 2");
+   TEST_ASSERT(fault_op.TractionSize() == ndofs * 2,
+               "p=1: TractionSize = ndofs * 2");
 
    std::cout << "  nfaces=" << nfaces << " nbf=" << nbf
              << " NumNodes=" << fault_op.NumNodes() << "\n";
@@ -2419,7 +2420,7 @@ void TestMultiDOFSEASP1Regression()
       return;
    }
 
-   TEST_ASSERT(nbf == 1, "p=1 IP tet: nbf=1 (backward compat)");
+   TEST_ASSERT(nbf == 3, "p=1 IP tet: nbf=3");
 
    auto geom = std::make_unique<FaultGeometry<Mesh>>(*domain_op, params);
 

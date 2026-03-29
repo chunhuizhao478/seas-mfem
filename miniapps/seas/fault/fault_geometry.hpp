@@ -415,7 +415,7 @@ private:
    MPIContext *mpi_ctx_ = nullptr;
    bool is_bp5_ = false;
    int num_fault_dofs_;
-   int nbf_per_face_ = 1;         // basis functions per face (1 at p=1)
+   int nbf_per_face_ = 1;         // basis functions per face
    int num_fault_faces_ = 0;      // number of fault faces
    int num_local_fault_dofs_ = 0;
    int num_global_fault_dofs_ = 0;
