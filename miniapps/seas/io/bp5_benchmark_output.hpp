@@ -374,6 +374,39 @@ public:
       }
    }
 
+   /// Enable writing station files for fault jump residual diagnostics.
+   ///
+   /// Files are written as:
+   ///   <prefix>_jumpres_<station>.txt
+   /// with columns:
+   ///   t, jump_res_strike, jump_res_dip, jump_res_mag
+   void EnableJumpResidualOutput()
+   {
+      if (!jump_res_probes_.empty()) { return; }
+
+      std::vector<std::string> columns = {
+         "time(s)",
+         "jump_res_strike(m)", "jump_res_dip(m)",
+         "jump_res_mag(m)"
+      };
+
+      for (size_t i = 0; i < stations_.size(); i++)
+      {
+         real_t x2_km = stations_[i].x2 / 1000.0;
+         real_t x3_km = stations_[i].x3 / 1000.0;
+
+         std::ostringstream desc;
+         desc << "BP5 jump residual at " << stations_[i].name
+              << " (x2=" << x2_km << "km, x3=" << x3_km << "km)";
+
+         std::string filename =
+            prefix_ + "_jumpres_" + stations_[i].name + ".txt";
+         auto probe = std::make_unique<ProbeOutput>(
+            filename, columns, desc.str());
+         jump_res_probes_.push_back(std::move(probe));
+      }
+   }
+
    /// @brief Write output if adaptive schedule requires it.
    ///
    /// @param time Current simulation time [s]
@@ -510,11 +543,42 @@ public:
       }
    }
 
+   /// Write station-level fault jump residual from globally gathered data.
+   void WriteJumpResidualFromGlobalData(
+      real_t time,
+      const Vector &global_jump_res_dip,
+      const Vector &global_jump_res_strike)
+   {
+      if (jump_res_probes_.empty()) { return; }
+
+      for (int s = 0; s < interpolator_.NumStations(); s++)
+      {
+         int dof = interpolator_.GetNearestDOF(s);
+         if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
+
+         const real_t res_dip =
+            interpolator_.EvaluateScalar(global_jump_res_dip, s);
+         const real_t res_strike =
+            interpolator_.EvaluateScalar(global_jump_res_strike, s);
+         const real_t res_mag =
+            std::sqrt(res_dip * res_dip + res_strike * res_strike);
+
+         std::vector<real_t> row = {
+            time,
+            res_strike,
+            res_dip,
+            res_mag
+         };
+         jump_res_probes_[s]->WriteStep(row);
+      }
+   }
+
    /// Flush all output files.
    void Flush()
    {
       for (auto &p : probes_) { p->Flush(); }
       for (auto &p : decomp_probes_) { p->Flush(); }
+      for (auto &p : jump_res_probes_) { p->Flush(); }
    }
 
    /// Close all output files.
@@ -522,6 +586,7 @@ public:
    {
       for (auto &p : probes_) { p->Close(); }
       for (auto &p : decomp_probes_) { p->Close(); }
+      for (auto &p : jump_res_probes_) { p->Close(); }
    }
 
    /// Number of probes.
@@ -568,6 +633,7 @@ private:
    Probe2DInterpolator interpolator_;
    std::vector<std::unique_ptr<ProbeOutput>> probes_;
    std::vector<std::unique_ptr<ProbeOutput>> decomp_probes_;
+   std::vector<std::unique_ptr<ProbeOutput>> jump_res_probes_;
    real_t last_write_time_;
 
    // Pre-stress components for WriteFromGlobalData path

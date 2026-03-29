@@ -338,6 +338,7 @@ int main(int argc, char *argv[])
    bool traction_stress_only = false;  // Skip penalty correction in traction
    bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
    bool diag_station_traction_decomp = false; // Write station-level stress/correction traction
+   bool diag_station_jump_residual = false;   // Write station-level [[u]]-delta residual
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -437,6 +438,10 @@ int main(int argc, char *argv[])
       if (arg == "--diag-station-traction-decomp")
       {
          diag_station_traction_decomp = true;
+      }
+      if (arg == "--diag-station-jump-residual")
+      {
+         diag_station_jump_residual = true;
       }
       if (arg == "--traction-weak-form") { traction_weak_form = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
@@ -845,6 +850,14 @@ int main(int argc, char *argv[])
          std::cout << "  Diagnostic station traction decomposition: ON\n";
       }
    }
+   if (diag_station_jump_residual)
+   {
+      bench_out.EnableJumpResidualOutput();
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Diagnostic station jump residual: ON\n";
+      }
+   }
 
    // Global output (root only)
    std::unique_ptr<ProbeOutput> global_out;
@@ -1120,21 +1133,46 @@ int main(int argc, char *argv[])
       }
    }
 
-   auto write_station_traction_decomp = [&](real_t time_now)
+   auto write_station_fault_diagnostics = [&](real_t time_now)
    {
-      if (!diag_station_traction_decomp) { return; }
+      if (!diag_station_traction_decomp && !diag_station_jump_residual)
+      {
+         return;
+      }
 
       Vector slip_diag;
       fault_op.GetSlip(state, slip_diag);
 
       Vector traction_diag, traction_stress_diag, traction_corr_diag;
-      domain.ComputeTractionComponents(seas_op.GetDisplacement(), slip_diag,
-                                       traction_diag,
-                                       traction_stress_diag,
-                                       traction_corr_diag);
-      bench_out.WriteTractionDecomposition(time_now,
+      Vector jump_residual_diag;
+      if (diag_station_jump_residual)
+      {
+         domain.ComputeTractionDiagnostics(seas_op.GetDisplacement(),
+                                           slip_diag,
+                                           traction_diag,
                                            traction_stress_diag,
-                                           traction_corr_diag);
+                                           traction_corr_diag,
+                                           jump_residual_diag);
+      }
+      else
+      {
+         domain.ComputeTractionComponents(seas_op.GetDisplacement(),
+                                          slip_diag,
+                                          traction_diag,
+                                          traction_stress_diag,
+                                          traction_corr_diag);
+      }
+
+      if (diag_station_traction_decomp)
+      {
+         bench_out.WriteTractionDecomposition(time_now,
+                                              traction_stress_diag,
+                                              traction_corr_diag);
+      }
+      if (diag_station_jump_residual)
+      {
+         bench_out.WriteJumpResidual(time_now, jump_residual_diag);
+      }
    };
 
    // =========================================================================
@@ -1363,13 +1401,13 @@ int main(int argc, char *argv[])
       {
          bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
                               V_max);
-         write_station_traction_decomp(t);
+         write_station_fault_diagnostics(t);
          bench_out.Flush();
       }
       else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
                                V_max))
       {
-         write_station_traction_decomp(t);
+         write_station_fault_diagnostics(t);
          bench_out.Flush();
       }
 

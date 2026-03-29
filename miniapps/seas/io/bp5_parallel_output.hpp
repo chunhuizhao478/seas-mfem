@@ -85,6 +85,14 @@ public:
       }
    }
 
+   void EnableJumpResidualOutput()
+   {
+      if (mpi_ctx_.IsRoot() && bench_out_)
+      {
+         bench_out_->EnableJumpResidualOutput();
+      }
+   }
+
    /// @brief Write output if adaptive schedule requires it.
    ///
    /// Gathers local fault data to root, then root writes.
@@ -199,6 +207,39 @@ public:
       {
          bench_out_->WriteTractionDecompositionFromGlobalData(
             time, g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike);
+      }
+   }
+
+   /// Write station-level jump residual at the current time.
+   ///
+   /// Input is a local interleaved residual field [2*N_local]:
+   ///   jump_residual = [[u]] - delta projected into local [dip, strike]
+   void WriteJumpResidual(real_t time, const Vector &jump_residual)
+   {
+      if (!bench_out_ && !mpi_ctx_.IsRoot())
+      {
+         // Non-root still participates in gather below.
+      }
+
+      const int N = fault_geom_.NumLocalFaultDOFs();
+      MFEM_ASSERT(jump_residual.Size() == 2 * N,
+                  "jump_residual size mismatch");
+
+      Vector local_res_dip(N), local_res_strike(N);
+      for (int i = 0; i < N; i++)
+      {
+         local_res_dip(i) = jump_residual(2 * i + 0);
+         local_res_strike(i) = jump_residual(2 * i + 1);
+      }
+
+      Vector g_res_dip, g_res_strike;
+      fault_geom_.GatherToRoot(local_res_dip, g_res_dip);
+      fault_geom_.GatherToRoot(local_res_strike, g_res_strike);
+
+      if (mpi_ctx_.IsRoot() && bench_out_)
+      {
+         bench_out_->WriteJumpResidualFromGlobalData(
+            time, g_res_dip, g_res_strike);
       }
    }
 

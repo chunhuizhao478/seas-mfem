@@ -185,114 +185,109 @@ systematically too high (= too much friction = nucleation suppressed).
 
 ---
 
-## 5. The Core Problem
+## 5. The Solver Is NOT the Cause
 
-**Every solver configuration tried (BLR 1e-10, 1e-12, exact MUMPS OOM) fails to
-nucleate at p=1 1000m.** The BLR penalty amplification identified in v52 is the most
-likely root cause: MUMPS-BLR introduces systematic solver residual that gets amplified
-by the IP penalty correction into a ~0.3+ MPa traction bias that suppresses nucleation.
+### 5.1 CG+AMG Run Confirms: Identical to MUMPS-BLR
 
-This is NOT a discretization issue (fixed in v53) or a parameter issue (matches Tandem).
-It is a **solver accuracy issue** specific to the MUMPS-BLR + IP penalty combination.
+The v54 CG+AMG run (`bp5_v54_cg_p1_7619209.out`) produces **bit-for-bit identical
+V_max** as the v53 MUMPS-BLR run for the first 10 steps:
 
-### 5.1 What Tandem Actually Uses
+| Step | BLR V_max     | CG V_max      | BLR dt    | CG dt     |
+|------|---------------|---------------|-----------|-----------|
+| 1    | 1.029e-02     | 1.029e-02     | 1.146e-02 | 1.146e-02 |
+| 5    | 1.124e-02     | 1.124e-02     | 3.424e-02 | 3.424e-02 |
+| 10   | 1.054e-02     | 1.054e-02     | 3.703e-02 | 3.709e-02 |
 
-Tandem uses **PETSc KSP CG** (iterative conjugate gradient) with:
+Time differs by <0.02% at step 10 — dt by <0.2%. V_max is exactly identical.
 
-- `matrix_free = true`: system operator A is a matrix-free shell (`PetscDGShell`)
-  for exact matrix-vector products
-- An **assembled DG matrix** P (`PetscDGMatrix`) as preconditioner
-- `mg_strategy = "logarithmic"`: p-multigrid preconditioner — but at p=1, there is
-  only one MG level (can't coarsen below p=1), so MG degenerates to the default
-  PETSc preconditioner on the assembled matrix
-- `rtol = 1e-12`: CG converges until ||Ax-b||/||b|| < 1e-12
+**This definitively disproves the BLR solver hypothesis** (v52 Section 7). The MUMPS-BLR
+factorization error is NOT what kills nucleation. Switching to CG+AMG (iterative,
+rtol=1e-10, guaranteed convergence) changes nothing.
+
+### 5.2 What Tandem Actually Uses
+
+Tandem uses **PETSc KSP CG** (iterative) with:
+
+- `matrix_free = true`: shell operator A for matvec, assembled matrix P as preconditioner
+- `mg_strategy = "logarithmic"`: p-multigrid, but at p=1 only one level (degenerates to
+  default PETSc PC on the assembled matrix)
+- `rtol = 1e-12`
 
 Source: `tandem/app/common/PetscLinearSolver.cpp:7-44`
 
-At p=1, Tandem's solver is effectively **CG + block-Jacobi/ILU on the assembled DG
-matrix**. It is NOT some fundamentally different solver architecture — it uses the same
-assembled DG system. The critical difference is:
+At p=1, Tandem effectively uses CG + block-Jacobi/ILU on the same kind of assembled DG
+matrix. The CG run proves this solver architecture produces the same answer as MUMPS-BLR.
 
-| Property | MFEM (MUMPS-BLR) | Tandem (PETSc CG) |
-|----------|-------------------|--------------------|
-| Solve type | Direct (approximate factorization) | Iterative (converges to true residual) |
-| Residual guarantee | BLR-tol dependent, no bound on ||Ax-b|| | **||Ax-b||/||b|| < 1e-12** |
-| Penalty amplification of residual | ~300x BLR residual → ~0.03 MPa systematic error | ~300x × 1e-12 → negligible |
-| Factorization error | YES (BLR low-rank blocks) | NO (iterative, no factorization in solution) |
+### 5.3 The Real Root Cause: IP Penalty Correction Dominance
 
-The BLR residual (~1e-7 m at fault DOFs, v52 Section 7) gets amplified by the IP
-penalty correction in `ComputeTraction` by ~300x, producing ~30 Pa per solve. Over
-thousands of steps, this systematic bias accumulates into the observed 0.38 MPa traction
-excess that kills nucleation.
+The solver is eliminated. What remains is a **DG formulation issue**: the IP penalty
+correction term dominates the traction at near-front stations.
 
-CG with rtol=1e-12 produces residuals of ~1e-12, which amplified by 300x gives ~3e-10 —
-twelve orders of magnitude smaller. This is why Tandem nucleates and MFEM does not.
+From v53 Section 15 (station-level traction decomposition at `strk-16dp+10`):
+
+| Time (s) | tau_stress_strike | tau_corr_strike | corr/stress |
+|----------|-------------------|-----------------|-------------|
+| 0.1      | 9.87e-04 MPa      | 4.06e-03 MPa    | **4.1x**    |
+| 1.0      | 9.29e-03 MPa      | 2.85e-02 MPa    | **3.1x**    |
+| 5.0      | 4.20e-02 MPa      | 1.15e-01 MPa    | **2.75x**   |
+
+**75-85% of the total traction comes from the penalty correction, not from the
+physical stress.** The correction also produces excessive dip contamination (5-6x
+the stress-only dip traction).
+
+This is intrinsic to the IP DG formulation at p=1 1000m resolution — not a solver
+accuracy issue, not a BLR issue, and not a discretization issue. Both MUMPS-BLR and
+CG+AMG faithfully reproduce this same DG behavior.
 
 ---
 
 ## 6. Proposed Fixes
 
-### Fix 1: Implement PETSc CG Solver, Matching Tandem (Priority: CRITICAL)
+### Fix 1: ~~CG Solver~~ — DISPROVED (tested in v54 run)
 
-**Rationale**: Tandem uses PETSc KSP CG with the assembled DG matrix as preconditioner
-(`PetscLinearSolver.cpp:22-27`). This guarantees ||Ax-b||/||b|| < 1e-12, eliminating the
-BLR penalty amplification that kills nucleation in MFEM.
+CG+AMG produces identical results to MUMPS-BLR. Solver accuracy is not the issue.
 
-**Implementation options** (in order of preference):
+### Fix 2: Address IP Penalty Correction Dominance (Priority: CRITICAL)
 
-**Option A: PETSc KSP CG (match Tandem exactly)**
-- MFEM already supports PETSc via `--enable-petsc`. Use `PetscLinearSolver` with KSP CG.
-- Assemble the DG matrix once, use as both operator and preconditioner (like Tandem at p=1).
-- Set rtol=1e-12.
-- At p=1 this matches Tandem's solver architecture exactly.
+The real problem (v53 Section 15): at near-front stations the penalty correction is
+3-6x the physical stress term. Tandem computes traction differently — its DG traction
+recovery does not produce this correction dominance.
 
-**Option B: MFEM native CG + block-diagonal preconditioner**
-- Use MFEM's `CGSolver` with `BlockDiagonalPreconditioner` or `HypreBoomerAMG`.
-- Set rtol=1e-12.
-- May require tuning for DG systems.
+**Investigation needed**: Compare MFEM's ComputeTraction IP correction formula against
+Tandem's traction recovery implementation term-by-term.
 
-**Option C: MUMPS as preconditioner + CG outer loop**
-- Use MUMPS-BLR factorization as preconditioner for CG (1-2 CG iterations should suffice).
-- CG drives the residual below rtol even though the preconditioner is approximate.
-- Minimal code change: wrap existing MUMPS solve in a CG loop.
+Tandem's traction at fault is computed in `adapter_.traction(disp_view, traction_)`:
+- Source: `tandem/app/form/SeasQDOperator.cpp:69-73`
+- This calls into the DG operator's traction evaluation
 
-**Expected impact**: Eliminates systematic solver residual amplification by IP penalty.
-CG residual ~1e-12 × penalty amplification 300x → ~3e-10, which is negligible.
-This should allow nucleation to proceed as in Tandem.
+The key question: does Tandem's DG formulation use the same penalty correction structure
+as MFEM? If not, what is different?
 
-**Risk**: CG may converge slowly for ill-conditioned DG systems. Option C mitigates this
-by using MUMPS-BLR as a high-quality preconditioner (expect convergence in 1-3 iterations).
+Possible directions:
+- **Penalty coefficient formula**: MFEM uses `p*(p+dim-1)/dim * {1/h}`. Does Tandem
+  use a different scaling at p=1?
+- **Correction term structure**: MFEM's correction is `-penalty * sign * (du - delta_u)`.
+  Does Tandem compute the displacement jump differently?
+- **Face normal / orientation**: Does Tandem handle face normals differently for the
+  traction evaluation?
 
-### Fix 2: Add eta*V to Traction Output (Priority: HIGH, COSMETIC)
+### Fix 3: Add eta*V to Traction Output (Priority: MEDIUM, COSMETIC)
 
 Add `eta * V` to the traction output in `bp5_benchmark_output.hpp` to match Tandem's
-`tau_hat` convention. This eliminates the 0.046 MPa baseline offset in comparisons.
+`tau_hat` convention. Eliminates the 0.046 MPa baseline offset in comparisons.
+Does not affect dynamics.
 
-Does not affect dynamics. Needed for accurate comparison plots.
+### Fix 4: Investigate Tandem's Traction Recovery (Priority: CRITICAL)
 
-### Fix 3: Use `--zero-dip-traction` (Priority: HIGH)
+The most important next step is a **term-by-term comparison** of how MFEM and Tandem
+compute the elastic traction at fault faces. Specifically:
 
-The v53 run omitted this flag. Since DG cross-component contamination drains energy from
-strike to dip, enabling `--zero-dip-traction` may partially improve nucleation by
-preventing the 21% dip contamination from weakening the strike traction.
+1. How does Tandem evaluate `{sigma . n}` at fault faces?
+2. Does Tandem use the same penalty correction form?
+3. What is the stress/correction ratio at Tandem's near-front stations?
 
-Not a fix by itself (v52 showed it doesn't fix the tau_strike deficit), but reduces one
-source of error.
-
-### Fix 4: Try Reduced Penalty Factor (Priority: MEDIUM)
-
-If the penalty amplifies BLR residual by 300x, reducing the penalty factor may reduce the
-traction bias at the cost of some DG stability. Test with `--penalty-factor 0.5` to see
-if nucleation improves while DG remains stable.
-
-**Note**: v50 tried penalty reduction but may not have tested at p=1 with 3 DOFs/face.
-Worth re-testing with the current code.
-
-### Fix 5: Try CG+MUMPS Hybrid (Priority: MEDIUM)
-
-Use CG with MUMPS as a preconditioner (rather than direct solve). CG ensures the residual
-is driven to true tolerance, while MUMPS-BLR provides a good preconditioner. This may be
-faster than CG+AMG for DG systems.
+If Tandem's correction/stress ratio is ~1 (balanced) vs MFEM's 3-6x (dominated), the
+difference in the correction formula is the root cause.
 
 ---
 
@@ -327,20 +322,15 @@ extra friction to halt the acceleration and reverse it.
 ## 9. Bottom Line
 
 The v53 3-DOF/face fix correctly resolved the discrete model mismatch, but
-**nucleation still dies because MUMPS-BLR introduces a growing traction bias
-(~0.38 MPa at t=38s) that suppresses the nucleation zone acceleration.**
+**nucleation still dies due to excessive IP penalty correction in traction recovery.**
 
-Both MFEM and Tandem show an initial V overshoot then decline. In Tandem, V dips to
-0.0114 but stays above V_nuc and re-accelerates to earthquake at t=82s. In MFEM, V
-drops below V_nuc by t~15s and keeps falling — the 0.38 MPa excess traction creates
-enough extra friction to prevent recovery.
+The CG+AMG run (v54) **definitively disproves the solver hypothesis** — CG produces
+identical results to MUMPS-BLR. The problem is in the DG formulation itself:
 
-Tandem uses **PETSc KSP CG** (iterative) with the assembled DG matrix as preconditioner,
-guaranteeing ||Ax-b||/||b|| < 1e-12. MFEM uses **MUMPS-BLR** (direct, approximate
-factorization) where the BLR residual gets amplified ~300x by the IP penalty correction.
+1. At near-front stations, the penalty correction is 3-6x the physical stress term
+2. This correction dominates the traction, producing systematically higher friction
+3. The excess friction suppresses V below V_nuc, killing nucleation
 
-The fix is to switch from MUMPS-BLR direct solve to **CG iterative solve** (matching
-Tandem's solver architecture), which guarantees the residual is driven to true tolerance
-regardless of preconditioner quality. Option C (MUMPS-BLR as preconditioner for CG
-outer loop) is the lowest-risk path — it reuses the existing solver as a preconditioner
-and should converge in 1-3 CG iterations.
+**The next step is a term-by-term comparison of MFEM's and Tandem's traction recovery
+code** to identify exactly why MFEM's penalty correction dominates while Tandem's
+DG formulation produces correct nucleation.

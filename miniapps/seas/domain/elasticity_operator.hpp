@@ -163,6 +163,17 @@ public:
                                  Vector &traction_correction,
                                  Vector *normal_traction = nullptr);
 
+   /// Compute traction together with stress part, correction part, and
+   /// fault jump residual in the local fault basis.
+   /// jump_residual is stored as [dip, strike] interleaved and has units of m.
+   void ComputeTractionDiagnostics(const GridFuncType &displacement,
+                                   const Vector &slip_bc,
+                                   Vector &traction,
+                                   Vector &traction_stress,
+                                   Vector &traction_correction,
+                                   Vector &jump_residual,
+                                   Vector *normal_traction = nullptr);
+
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
 
@@ -290,7 +301,8 @@ private:
                             Vector &traction,
                             Vector *normal_traction,
                             Vector *traction_stress_out,
-                            Vector *traction_correction_out);
+                            Vector *traction_correction_out,
+                            Vector *jump_residual_out);
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
    Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
@@ -3410,7 +3422,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTraction(
    Vector *normal_traction)
 {
    ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
-                       nullptr, nullptr);
+                       nullptr, nullptr, nullptr);
 }
 
 template <typename MeshType>
@@ -3423,7 +3435,21 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionComponents(
    Vector *normal_traction)
 {
    ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
-                       &traction_stress, &traction_correction);
+                       &traction_stress, &traction_correction, nullptr);
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::ComputeTractionDiagnostics(
+   const GridFuncType &displacement,
+   const Vector &slip_bc,
+   Vector &traction,
+   Vector &traction_stress,
+   Vector &traction_correction,
+   Vector &jump_residual,
+   Vector *normal_traction)
+{
+   ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
+                       &traction_stress, &traction_correction, &jump_residual);
 }
 
 template <typename MeshType>
@@ -3433,7 +3459,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector &traction,
    Vector *normal_traction,
    Vector *traction_stress_out,
-   Vector *traction_correction_out)
+   Vector *traction_correction_out,
+   Vector *jump_residual_out)
 {
    int dim = 3;
    traction.SetSize(2 * num_fault_dofs_);
@@ -3448,6 +3475,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
     {
        traction_correction_out->SetSize(2 * num_fault_dofs_);
        *traction_correction_out = 0.0;
+    }
+    if (jump_residual_out)
+    {
+       jump_residual_out->SetSize(2 * num_fault_dofs_);
+       *jump_residual_out = 0.0;
     }
 
    // v51: Elastic normal traction for sigma_n feedback
@@ -3706,6 +3738,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       real_t T_global[3] = {0.0, 0.0, 0.0};
       real_t T_stress[3] = {0.0, 0.0, 0.0};
       real_t correction[3] = {0.0, 0.0, 0.0};
+      real_t residual_avg[3] = {0.0, 0.0, 0.0};
       real_t sum_wq = 0.0;
 
       if (method_ == DGMethod::IP)
@@ -3787,12 +3820,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          Vector T_quad(dim * nqp);
          T_quad = 0.0;
          Vector T_stress_quad, T_corr_quad;
+         Vector R_quad;
          if (traction_stress_out || traction_correction_out)
          {
             T_stress_quad.SetSize(dim * nqp);
             T_stress_quad = 0.0;
             T_corr_quad.SetSize(dim * nqp);
             T_corr_quad = 0.0;
+         }
+         if (jump_residual_out)
+         {
+            R_quad.SetSize(dim * nqp);
+            R_quad = 0.0;
          }
 
          for (int q = 0; q < nqp; q++)
@@ -3862,6 +3901,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                // term (see v39 debug doc Section 12.2).
                real_t jump_c = (u1q - u2q) - sign * delta_u_q_c;
                correction_q[c] = -penalty_ip * sign * jump_c;
+               if (jump_residual_out)
+               {
+                  R_quad(c * nqp + q) = sign * jump_c;
+               }
             }
 
             // Store per-quad-point total traction: T_q = T_stress_q - correction_q
@@ -3918,6 +3961,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             {
                T_stress[c] += wq * T_stress_q[c];
                correction[c] += wq * (traction_stress_only_ ? 0.0 : correction_q[c]);
+               if (jump_residual_out)
+               {
+                  residual_avg[c] += wq * R_quad(c * nqp + q);
+               }
             }
             sum_wq += wq;
          }
@@ -3927,10 +3974,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          Vector T_nodal;
          face_quad_->GalerkinProject(dim, T_quad, T_nodal);
          Vector T_stress_nodal, T_corr_nodal;
+         Vector R_nodal;
          if (traction_stress_out || traction_correction_out)
          {
             face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
             face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
+         }
+         if (jump_residual_out)
+         {
+            face_quad_->GalerkinProject(dim, R_quad, R_nodal);
          }
 
          // Store per-DOF traction in local frame
@@ -3966,6 +4018,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
                }
             }
+            if (jump_residual_out)
+            {
+               real_t R_k[3] = {R_nodal(0 * nbf + kk),
+                                R_nodal(1 * nbf + kk),
+                                R_nodal(2 * nbf + kk)};
+               real_t res_local[2];
+               fault_basis_.ProjectTraction(fi, R_k, res_local);
+               (*jump_residual_out)(2 * dof_idx) = res_local[0];
+               (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
+            }
             // v51: elastic normal traction for sigma_n feedback
             if (normal_traction)
             {
@@ -3980,6 +4042,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             {
                T_stress[c] /= sum_wq;
                correction[c] /= sum_wq;
+               residual_avg[c] /= sum_wq;
             }
          }
 
@@ -4313,6 +4376,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                (*traction_correction_out)(2 * fi + 1) = tau_corr_local[1];
             }
          }
+         if (jump_residual_out)
+         {
+            real_t res_local[2];
+            fault_basis_.ProjectTraction(fi, residual_avg, res_local);
+            (*jump_residual_out)(2 * fi) = res_local[0];
+            (*jump_residual_out)(2 * fi + 1) = res_local[1];
+         }
          // v51: elastic normal traction for sigma_n feedback
          if (normal_traction)
          {
@@ -4411,6 +4481,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          real_t T_global[3] = {0.0, 0.0, 0.0};
          real_t T_stress[3] = {0.0, 0.0, 0.0};
          real_t correction[3] = {0.0, 0.0, 0.0};
+         real_t residual_avg[3] = {0.0, 0.0, 0.0};
          real_t sum_wq = 0.0;
 
          if (method_ == DGMethod::IP)
@@ -4453,12 +4524,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector T_quad(dim * nqp);
             T_quad = 0.0;
             Vector T_stress_quad, T_corr_quad;
+            Vector R_quad;
             if (traction_stress_out || traction_correction_out)
             {
                T_stress_quad.SetSize(dim * nqp);
                T_stress_quad = 0.0;
                T_corr_quad.SetSize(dim * nqp);
                T_corr_quad = 0.0;
+            }
+            if (jump_residual_out)
+            {
+               R_quad.SetSize(dim * nqp);
+               R_quad = 0.0;
             }
 
             for (int q = 0; q < nqp; q++)
@@ -4532,6 +4609,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   // DG penalty sign (see v39 debug doc Section 12.2).
                   real_t jump_raw = (u1q - u2q) - sign * delta_u_q_c;
                   correction_q[c] = -penalty_ip * sign * jump_raw;
+                  if (jump_residual_out)
+                  {
+                     R_quad(c * nqp + q) = sign * jump_raw;
+                  }
                }
 
                // Store per-quad-point total traction
@@ -4553,6 +4634,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                {
                   T_stress[c] += wq * T_stress_q[c];
                   correction[c] += wq * (traction_stress_only_ ? 0.0 : correction_q[c]);
+                  if (jump_residual_out)
+                  {
+                     residual_avg[c] += wq * R_quad(c * nqp + q);
+                  }
                }
                sum_wq += wq;
             }
@@ -4561,10 +4646,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector T_nodal;
             face_quad_->GalerkinProject(dim, T_quad, T_nodal);
             Vector T_stress_nodal, T_corr_nodal;
+            Vector R_nodal;
             if (traction_stress_out || traction_correction_out)
             {
                face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
                face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
+            }
+            if (jump_residual_out)
+            {
+               face_quad_->GalerkinProject(dim, R_quad, R_nodal);
             }
 
             // Store per-DOF traction in local frame
@@ -4600,6 +4690,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      (*traction_correction_out)(2 * dof_idx) = tau_corr_local[0];
                      (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
                   }
+               }
+               if (jump_residual_out)
+               {
+                  real_t R_k[3] = {R_nodal(0 * nbf + kk),
+                                   R_nodal(1 * nbf + kk),
+                                   R_nodal(2 * nbf + kk)};
+                  real_t res_local[2];
+                  fault_basis_.ProjectTraction(trac_idx, R_k, res_local);
+                  (*jump_residual_out)(2 * dof_idx) = res_local[0];
+                  (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
                }
                // v51: elastic normal traction for sigma_n feedback
                if (normal_traction)
@@ -4796,6 +4896,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                {
                   T_stress[c] /= sum_wq;
                   correction[c] /= sum_wq;
+                  residual_avg[c] /= sum_wq;
                   T_global[c] = T_stress[c] - correction[c];
                }
             }
@@ -4844,6 +4945,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   (*traction_correction_out)(2 * trac_idx) = tau_corr_local[0];
                   (*traction_correction_out)(2 * trac_idx + 1) = tau_corr_local[1];
                }
+            }
+            if (jump_residual_out)
+            {
+               real_t res_local[2];
+               fault_basis_.ProjectTraction(trac_idx, residual_avg, res_local);
+               (*jump_residual_out)(2 * trac_idx) = res_local[0];
+               (*jump_residual_out)(2 * trac_idx + 1) = res_local[1];
             }
             // v51: elastic normal traction for sigma_n feedback
             if (normal_traction)

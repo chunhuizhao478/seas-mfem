@@ -596,3 +596,177 @@ Reason:
   - the stress part,
   - the correction part,
   - or their balance
+
+---
+
+## 15. Result From Station-Level Traction Decomposition
+
+The new decomposition files have now been checked directly from the user's run:
+
+- `bp5_v53a_ip_p1_tracdec_tracdec_fltst_strk-24dp+10.txt`
+- `bp5_v53a_ip_p1_tracdec_tracdec_fltst_strk-16dp+10.txt`
+- `bp5_v53a_ip_p1_tracdec_tracdec_fltst_strk+00dp+10.txt`
+
+### 15.1 Main Finding
+
+At the critical near-front station `strk-16dp+10`, the correction term is not a
+small adjustment.
+
+It dominates both strike and dip traction from the beginning of the run.
+
+Examples from `strk-16dp+10`:
+
+At about `0.106 s`:
+
+- strike:
+  - `tau_stress = 9.87e-04 MPa`
+  - `tau_corr   = 4.06e-03 MPa`
+  - `tau_total  = 5.05e-03 MPa`
+  - correction / stress magnitude = about `4.1`
+
+- dip:
+  - `tau_stress = -2.86e-04 MPa`
+  - `tau_corr   = -1.03e-03 MPa`
+  - `tau_total  = -1.31e-03 MPa`
+  - correction / stress magnitude = about `3.6`
+
+At about `0.984 s`:
+
+- strike:
+  - `tau_stress = 9.29e-03 MPa`
+  - `tau_corr   = 2.85e-02 MPa`
+  - `tau_total  = 3.78e-02 MPa`
+  - correction / stress magnitude = about `3.1`
+
+- dip:
+  - `tau_stress = -1.99e-03 MPa`
+  - `tau_corr   = -9.32e-03 MPa`
+  - `tau_total  = -1.13e-02 MPa`
+  - correction / stress magnitude = about `4.7`
+
+At about `4.99 s`:
+
+- strike:
+  - `tau_stress = 4.20e-02 MPa`
+  - `tau_corr   = 1.15e-01 MPa`
+  - `tau_total  = 1.57e-01 MPa`
+  - correction / stress magnitude = about `2.75`
+
+- dip:
+  - `tau_stress = -7.21e-03 MPa`
+  - `tau_corr   = -4.23e-02 MPa`
+  - `tau_total  = -4.95e-02 MPa`
+  - correction / stress magnitude = about `5.87`
+
+So at `strk-16dp+10`, about `75%` to `85%` of the total traction comes from the
+correction term rather than from the physical stress term.
+
+### 15.2 Contrast With Other Stations
+
+At `strk-24dp+10`:
+
+- early strike traction is still mostly stress-driven
+- for example, at about `0.106 s`, strike correction / stress is only about `0.06`
+- but dip is already strongly correction-dominated
+
+At `strk+00dp+10`:
+
+- both components are much smaller
+- strike correction / stress is only about `0.19` to `0.26`
+- dip correction / stress is about `0.62` to `0.65`
+- so the correction is present, but not dominating the way it does at `-16 km`
+
+### 15.3 Interpretation
+
+This sharpens the diagnosis:
+
+> **The remaining `p=1` mismatch is primarily a front-local traction-balance
+> problem.**
+
+More specifically:
+
+- `strk-24dp+10` nucleation is reasonably stress-driven in strike
+- but one station ahead, `strk-16dp+10`, the correction term overwhelms the
+  physical stress term in both strike and dip
+- that is consistent with the observed mismatch against Tandem at the front
+
+This also explains why `--traction-stress-only` is not a fix:
+
+- without the correction term, the run blows up
+- so the correction is providing essential stabilization
+- but in the current formulation it is also too large near the front, so the
+  stable total traction is not Tandem-like
+
+### 15.4 Updated Conclusion
+
+The most defensible current statement is:
+
+> **The remaining bug is not primarily in MPI/shared-face handling, not in BLR,
+> and not in the already-fixed `p=1` fault discretization.**
+>
+> **It is in the composition of the total traction passed to friction near the
+> rupture front, where the correction term dominates too strongly.**
+
+---
+
+## 16. Next Diagnostic: Jump Residual At Stations
+
+The next missing quantity is the actual fault jump residual that feeds the
+penalty correction:
+
+- `R = [[u]] - delta`
+
+The traction decomposition alone shows that the correction dominates near
+`strk-16dp+10`, but it does not yet tell us whether that happens because:
+
+- the residual `R` itself is large there, or
+- `R` is modest and the penalty scaling is amplifying it too strongly.
+
+### 16.1 Code Change
+
+A new station-level diagnostic has now been added:
+
+- driver flag:
+  - `--diag-station-jump-residual`
+
+- new output files:
+  - `<prefix>_jumpres_<station>.txt`
+
+- columns:
+  - `time(s)`
+  - `jump_res_strike(m)`
+  - `jump_res_dip(m)`
+  - `jump_res_mag(m)`
+
+Implementation notes:
+
+- `ElasticityDomainOperator` now exposes
+  - `ComputeTractionDiagnostics(...)`
+  which returns:
+  - total traction
+  - stress part
+  - correction part
+  - jump residual in local `[dip, strike]` basis
+
+- the BP5 output path and parallel wrapper now support writing the new station
+  files on the same schedule as the traction-decomposition files
+
+- the initial half-finished residual implementation had scope bugs in the IP
+  shared-face/interior code; those have been repaired and the executable now
+  builds again
+
+### 16.2 Verification
+
+Build verification completed:
+
+- `PATH=/Users/chunhuizhao/miniforge/envs/mfem-dev/bin:$PATH make -C miniapps/seas seas_bp5_full`
+
+### 16.3 Purpose
+
+This diagnostic is intended to answer the next concrete question:
+
+> **At `strk-16dp+10`, is the oversized correction caused mainly by a large
+> displacement-jump residual, or by the penalty multiplying a residual that is
+> already small enough that Tandem would not be correction-dominated there?**
+
+That is the next decision point for narrowing the remaining mismatch.
