@@ -326,6 +326,7 @@ int main(int argc, char *argv[])
    bool diag_uz_fault = false;       // v51: dump u_z at fault faces after solve
    bool elastic_sigma_n = false;     // v51: use elastic sigma_n (matches Tandem)
    bool diag_traction_coherence = false; // v52: solve vs traction coherence test
+   bool diag_rhs_z = false;              // v52: dump f_z components of RHS
    // v49 Phase 2: CFL-aware dt and V guard
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
@@ -420,6 +421,7 @@ int main(int argc, char *argv[])
       if (arg == "--diag-uz-fault") { diag_uz_fault = true; }
       if (arg == "--elastic-sigma-n") { elastic_sigma_n = true; }
       if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
+      if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
       if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
@@ -656,6 +658,7 @@ int main(int argc, char *argv[])
    if (diag_dip_traction) { domain.SetDiagDipTraction(true); }
    if (diag_uz_fault) { domain.SetDiagUzFault(true); }
    if (diag_traction_coherence) { domain.SetDiagTractionCoherence(true); }
+   if (diag_rhs_z) { domain.SetDiagRhsZ(true); }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);

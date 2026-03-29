@@ -2,28 +2,33 @@
 """
 BP5 Benchmark Visualization Script
 
-Plots MFEM SEAS miniapp SCEC-format output alongside Tandem reference data.
+Plots MFEM and/or Tandem SCEC-format output alongside benchmark reference data.
 BP5 uses 8-column vector format (3D with strike + dip components):
   time(s), slip_strike(m), slip_dip(m), log10(V_strike)(m/s),
   log10(V_dip)(m/s), tau_strike(MPa), tau_dip(MPa), log10(state)(s)
 
 Usage:
-    python visualize_results.py <mfem_prefix> [options]
+    # MFEM results vs Tandem p4 benchmark
+    python visualize_results.py --mfem results_1000m/bp5_full --tandem --save
 
-Examples:
-    # MFEM vs Tandem benchmark (default)
+    # Tandem cluster results vs benchmark
+    python visualize_results.py --tandem-results /path/to/bp5qd_tandem_p1 --tandem --save
+
+    # Compare MFEM vs Tandem cluster results vs benchmarks
+    python visualize_results.py --mfem results_1000m/bp5_full \\
+        --tandem-results /path/to/bp5qd_tandem_p1 --tandem --save
+
+    # Multiple datasets
+    python visualize_results.py --mfem "1000m:results_1000m/bp5_full" \\
+        --mfem "500m:results_500m/bp5_full" --tandem --save
+
+    # Legacy mode (positional argument)
     python visualize_results.py results_1000m/bp5_full --tandem --save
-
-    # MFEM only, no benchmarks
-    python visualize_results.py results_1000m/bp5_full --no-benchmark --save
-
-    # Compare multiple resolutions against Tandem
-    python visualize_results.py results_250m/bp5_full --tandem \\
-        --compare 500m:results_500m/bp5_full --save --output-dir plots_comparison
 """
 
 import argparse
 import os
+import re
 import sys
 
 import numpy as np
@@ -85,7 +90,7 @@ def load_bp5_file(filepath):
 
 
 def coord_str(val_km):
-    """Format coordinate for Tandem filenames: -36 -> '-36', 0 -> '0', 10 -> '10'."""
+    """Format coordinate for filenames: -36 -> '-36', 0 -> '0', 10 -> '10'."""
     return str(int(val_km))
 
 
@@ -112,11 +117,19 @@ def mfem_filename(prefix, station_name):
     return f"{prefix}_{station_name}.txt"
 
 
+def tandem_results_filename(prefix, x2_km, x3_km):
+    """Generate Tandem results filename from prefix.
+
+    Prefix format: /path/to/bp5qd_tandem_p1
+    -> /path/to/bp5qd_tandem_p1_x2_{x2}_x3_{x3}.txt
+    """
+    return f"{prefix}_x2_{coord_str(x2_km)}_x3_{coord_str(x3_km)}.txt"
+
+
 def plot_station(datasets, station_name, x2_km, x3_km, save_path=None):
     """Plot 8-panel comparison for one BP5 station.
 
     datasets: list of (label, data_dict, color, linestyle) tuples.
-    Shows: slip_strike, slip_dip, V_strike, V_dip, tau_strike, tau_dip, log10(state).
     """
     import matplotlib.pyplot as plt
 
@@ -194,15 +207,16 @@ def plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=1.0, save_path=N
         for label, data, color, ls in datasets:
             if data is not None:
                 mask = data["time_yr"] <= t_max_yr
-                ax.plot(
-                    data["time_yr"][mask],
-                    data[key][mask],
-                    ls,
-                    color=color,
-                    label=label,
-                    linewidth=0.8,
-                    alpha=0.85,
-                )
+                if np.any(mask):
+                    ax.plot(
+                        data["time_yr"][mask],
+                        data[key][mask],
+                        ls,
+                        color=color,
+                        label=label,
+                        linewidth=0.8,
+                        alpha=0.85,
+                    )
         ax.set_xlabel("Time (years)")
         ax.set_ylabel(ylabel)
         ax.set_xlim(0, t_max_yr)
@@ -274,180 +288,186 @@ COLORS = [
     "#d62728",  # red
     "#1f77b4",  # blue
     "#2ca02c",  # green
-    "#9467bd",  # purple
     "#ff7f0e",  # orange
+    "#9467bd",  # purple
     "#8c564b",  # brown
     "#e377c2",  # pink
+    "#17becf",  # cyan
+    "#bcbd22",  # olive
+    "#7f7f7f",  # gray
+    "#aec7e8",  # light blue
 ]
+
+
+def parse_labeled_arg(spec):
+    """Parse 'label:value' or just 'value' -> (label, value)."""
+    if ":" in spec:
+        label, value = spec.split(":", 1)
+        return label, value
+    return None, spec
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize MFEM SEAS BP5 output vs Tandem benchmark data"
+        description="Visualize BP5 output: MFEM, Tandem cluster results, and benchmarks"
+    )
+    # Primary datasets
+    parser.add_argument(
+        "mfem_prefix_positional", nargs="?", default=None,
+        help="(Legacy) MFEM output prefix (e.g., results_1000m/bp5_full)"
     )
     parser.add_argument(
-        "mfem_prefix", help="MFEM output file prefix (e.g., results_1000m/bp5_full)"
+        "--mfem", action="append", metavar="[LABEL:]PREFIX",
+        help="MFEM output prefix. Use 'label:prefix' for custom label. Repeatable."
     )
     parser.add_argument(
-        "--tandem-p4",
-        action="store_true",
-        help="Include Tandem p4 benchmark data",
+        "--tandem-results", action="append", metavar="[LABEL:]PREFIX",
+        help="Tandem results prefix (e.g., 'p1 1000m:/path/to/bp5qd_tandem_p1'). "
+             "Files: {prefix}_x2_{x2}_x3_{x3}.txt. Repeatable."
     )
-    parser.add_argument(
-        "--tandem-p6",
-        action="store_true",
-        help="Include Tandem p6 benchmark data",
-    )
-    parser.add_argument(
-        "--tandem",
-        action="store_true",
-        help="Include both Tandem p4 and p6 benchmark data",
-    )
-    parser.add_argument(
-        "--eqsim",
-        action="store_true",
-        help="Include EQSim benchmark data",
-    )
-    parser.add_argument(
-        "--tribie",
-        action="store_true",
-        help="Include TriBIE benchmark data",
-    )
-    parser.add_argument(
-        "--benchmark-dir",
-        default="benchmark_data",
-        help="Directory containing benchmark files (Tandem, EQSim)",
-    )
-    parser.add_argument(
-        "--compare",
-        action="append",
-        metavar="LABEL:PREFIX",
-        help="Additional MFEM dataset to overlay (e.g., 500m:results_500m/bp5_full). "
-        "Can be repeated for multiple comparisons.",
-    )
-    parser.add_argument(
-        "--stations",
-        nargs="+",
-        type=int,
-        default=None,
-        help="Specific station indices (1-10) to plot. Default: all available",
-    )
-    parser.add_argument(
-        "--save", action="store_true", help="Save plots as PNG (default: display)"
-    )
+
+    # Benchmark references
+    parser.add_argument("--tandem-p4", action="store_true",
+                        help="Include Tandem p4 benchmark data")
+    parser.add_argument("--tandem-p6", action="store_true",
+                        help="Include Tandem p6 benchmark data")
+    parser.add_argument("--tandem", action="store_true",
+                        help="Include both Tandem p4 and p6 benchmark data")
+    parser.add_argument("--eqsim", action="store_true",
+                        help="Include EQSim benchmark data")
+    parser.add_argument("--tribie", action="store_true",
+                        help="Include TriBIE benchmark data")
+    parser.add_argument("--benchmark-dir", default="benchmark_data",
+                        help="Directory containing benchmark files")
+    parser.add_argument("--no-benchmark", action="store_true",
+                        help="Skip all benchmark references")
+
+    # Output options
+    parser.add_argument("--stations", nargs="+", type=int, default=None,
+                        help="Specific station indices (1-10). Default: all")
+    parser.add_argument("--save", action="store_true",
+                        help="Save plots as PNG (default: display)")
     parser.add_argument("--output-dir", default=".", help="Directory for output plots")
-    parser.add_argument(
-        "--no-benchmark",
-        action="store_true",
-        help="Plot MFEM data only (no benchmark overlay)",
-    )
-    parser.add_argument(
-        "--flip-dip",
-        action="store_true",
-        help="Flip sign of slip_dip and tau_dip for MFEM datasets (debug convention mismatch)",
-    )
+    parser.add_argument("--flip-dip", action="store_true",
+                        help="Flip sign of slip_dip and tau_dip for MFEM datasets")
+
+    # Legacy compat
+    parser.add_argument("--compare", action="append", metavar="LABEL:PREFIX",
+                        help="(Legacy) Additional MFEM dataset to overlay")
+
     args = parser.parse_args()
 
-    # --tandem enables both p4 and p6
+    # Handle --tandem shorthand
     if args.tandem:
         args.tandem_p4 = True
         args.tandem_p6 = True
 
-    # Default: Tandem p4 if no benchmark flags specified and not --no-benchmark
-    if (
-        not args.no_benchmark
-        and not args.tandem_p4
-        and not args.tandem_p6
-        and not args.eqsim
-        and not args.tribie
-    ):
+    # Default: Tandem p4 if no benchmark flags and not --no-benchmark
+    if (not args.no_benchmark and not args.tandem_p4 and not args.tandem_p6
+            and not args.eqsim and not args.tribie):
         args.tandem_p4 = True
+
+    # Build ordered source list following command-line order.
+    # Scan sys.argv to determine the order of data source flags.
+    ordered_sources = []  # list of (source_type, spec_or_none)
+    if args.mfem_prefix_positional:
+        ordered_sources.insert(0, ("mfem", args.mfem_prefix_positional))
+
+    mfem_iter = iter(args.mfem or [])
+    tandem_iter = iter(args.tandem_results or [])
+    compare_iter = iter(args.compare or [])
+
+    for i, arg in enumerate(sys.argv[1:]):
+        if arg == "--tandem":
+            ordered_sources.append(("tandem_p4", None))
+            ordered_sources.append(("tandem_p6", None))
+        elif arg == "--tandem-p4":
+            ordered_sources.append(("tandem_p4", None))
+        elif arg == "--tandem-p6":
+            ordered_sources.append(("tandem_p6", None))
+        elif arg == "--eqsim":
+            ordered_sources.append(("eqsim", None))
+        elif arg == "--tribie":
+            ordered_sources.append(("tribie", None))
+        elif arg == "--mfem":
+            ordered_sources.append(("mfem", next(mfem_iter)))
+        elif arg == "--tandem-results":
+            ordered_sources.append(("tandem_results", next(tandem_iter)))
+        elif arg == "--compare":
+            ordered_sources.append(("mfem", next(compare_iter)))
+
+    # Check we have at least one data source
+    if not ordered_sources:
+        parser.error("No data sources specified. Use --mfem, --tandem-results, "
+                     "or benchmark flags (--tandem, --eqsim, etc.)")
 
     try:
         import matplotlib
-
         if args.save:
             matplotlib.use("Agg")
     except ImportError:
-        print("Error: matplotlib is required. Install with: pip install matplotlib")
+        print("Error: matplotlib required. Install with: pip install matplotlib")
         return 1
 
-    data_dir = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)), args.benchmark_dir
-    )
+    # Resolve benchmark directory
+    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            args.benchmark_dir)
     if not os.path.isabs(args.benchmark_dir) and not os.path.isdir(data_dir):
         data_dir = args.benchmark_dir
 
     # Select stations
     if args.stations:
-        stations = [
-            SCEC_STATIONS[i - 1] for i in args.stations if 1 <= i <= len(SCEC_STATIONS)
-        ]
+        stations = [SCEC_STATIONS[i - 1] for i in args.stations
+                     if 1 <= i <= len(SCEC_STATIONS)]
     else:
         stations = SCEC_STATIONS
 
-    # Build list of data sources
+    # Build sources list in command-line order
+    # Each dataset gets a unique color from the shared COLORS pool
+    # Each entry: (label, source_type, extra_info, color, linestyle)
     sources = []
+    ci = 0
 
-    # Benchmark sources (dashed lines)
-    benchmark_colors = {
-        "tandem_p4": "#000000",  # black
-        "tandem_p6": "#2ca02c",  # green
-        "eqsim": "#1f77b4",  # blue
-        "tribie": "#9467bd",  # purple
+    benchmark_types = {"tandem_p4", "tandem_p6", "eqsim", "tribie"}
+    benchmark_labels = {
+        "tandem_p4": "Tandem p4 (ref)",
+        "tandem_p6": "Tandem p6 (ref)",
+        "eqsim": "EQSim (ref)",
+        "tribie": "TriBIE (ref)",
     }
-    used_colors = set()
 
-    if args.tandem_p4 and not args.no_benchmark:
-        sources.append(
-            ("Tandem p4", "tandem_p4", None, benchmark_colors["tandem_p4"], "--")
-        )
-        used_colors.add(benchmark_colors["tandem_p4"])
+    for stype, spec in ordered_sources:
+        if args.no_benchmark and stype in benchmark_types:
+            continue
 
-    if args.tandem_p6 and not args.no_benchmark:
-        sources.append(
-            ("Tandem p6", "tandem_p6", None, benchmark_colors["tandem_p6"], "--")
-        )
-        used_colors.add(benchmark_colors["tandem_p6"])
+        color = COLORS[ci % len(COLORS)]
+        ci += 1
 
-    if args.eqsim and not args.no_benchmark:
-        sources.append(("EQSim", "eqsim", None, benchmark_colors["eqsim"], "--"))
-        used_colors.add(benchmark_colors["eqsim"])
-
-    if args.tribie and not args.no_benchmark:
-        sources.append(("TriBIE", "tribie", None, benchmark_colors["tribie"], "--"))
-        used_colors.add(benchmark_colors["tribie"])
-
-    # Pool of colors for MFEM datasets, picking those not used by benchmarks
-    mfem_color_pool = [c for c in COLORS if c not in used_colors]
-    mfem_ci = 0
-
-    # Primary MFEM dataset
-    primary_label = f"MFEM {os.path.basename(args.mfem_prefix)}"
-    primary_color = mfem_color_pool[mfem_ci % len(mfem_color_pool)]
-    sources.append((primary_label, "mfem", args.mfem_prefix, primary_color, "-"))
-    mfem_ci += 1
-
-    # Additional --compare MFEM datasets
-    if args.compare:
-        for spec in args.compare:
-            if ":" in spec:
-                label, prefix = spec.split(":", 1)
-            else:
-                label = os.path.basename(spec)
-                prefix = spec
-            color = mfem_color_pool[mfem_ci % len(mfem_color_pool)]
+        if stype in benchmark_types:
+            sources.append((benchmark_labels[stype], stype, None, color, "--"))
+        elif stype == "tandem_results":
+            label, prefix = parse_labeled_arg(spec)
+            if label is None:
+                label = os.path.basename(prefix)
+            sources.append((f"Tandem {label}", "tandem_results", prefix, color, "-"))
+        elif stype == "mfem":
+            label, prefix = parse_labeled_arg(spec)
+            if label is None:
+                label = os.path.basename(prefix)
             sources.append((f"MFEM {label}", "mfem", prefix, color, "-"))
-            mfem_ci += 1
 
+    # Print summary
     print("=" * 60)
     print("BP5-QD Visualization")
     print("=" * 60)
     for label, stype, info, color, ls in sources:
+        style = "dashed" if ls == "--" else "solid"
         if stype in ("tandem_p4", "tandem_p6", "eqsim", "tribie"):
-            print(f"  {label}: {data_dir}/")
+            print(f"  [{style}] {label}: {data_dir}/")
+        elif stype == "tandem_results":
+            print(f"  [{style}] {label}: {info}_x2_*_x3_*.txt")
         else:
-            print(f"  {label}: {info}")
+            print(f"  [{style}] {label}: {info}_*.txt")
     print(f"  Stations: {len(stations)}")
     print()
 
@@ -465,15 +485,19 @@ def main():
                 path = tandem_filename(data_dir, x2_km, x3_km, order=6)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
-            elif stype == "tribie":
-                path = tribie_filename(data_dir, x2_km, x3_km)
-                if os.path.exists(path):
-                    data = load_bp5_file(path)
             elif stype == "eqsim":
                 path = eqsim_filename(data_dir, x2_km, x3_km)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
-            else:
+            elif stype == "tribie":
+                path = tribie_filename(data_dir, x2_km, x3_km)
+                if os.path.exists(path):
+                    data = load_bp5_file(path)
+            elif stype == "tandem_results":
+                path = tandem_results_filename(info, x2_km, x3_km)
+                if os.path.exists(path):
+                    data = load_bp5_file(path)
+            elif stype == "mfem":
                 path = mfem_filename(info, station_name)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
@@ -491,7 +515,8 @@ def main():
         pts_info = []
         for label, data, _, _ in datasets:
             if data is not None:
-                pts_info.append(f"{label}: {len(data['time_s'])} pts")
+                t_max = data["time_yr"][-1]
+                pts_info.append(f"{label}: {len(data['time_s'])} pts ({t_max:.1f} yr)")
         print(f"  {station_name} (x2={x2_km}, x3={x3_km}): {', '.join(pts_info)}")
 
         result = {
@@ -510,18 +535,14 @@ def main():
         else:
             plot_station(datasets, station_name, x2_km, x3_km)
 
-        # Plot close-up (first 10 years)
+        # Plot close-up (first year)
         if args.save:
             fname_close = os.path.join(
                 args.output_dir, f"bp5_{station_name}_closeup.png"
             )
             plot_closeup(
-                datasets,
-                station_name,
-                x2_km,
-                x3_km,
-                t_max_yr=1.0,
-                save_path=fname_close,
+                datasets, station_name, x2_km, x3_km,
+                t_max_yr=1.0, save_path=fname_close,
             )
         else:
             plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=1.0)

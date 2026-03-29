@@ -235,6 +235,9 @@ public:
    /// Triggers once when slip is non-trivial, prints summary, then done.
    void SetDiagTractionCoherence(bool v) { diag_traction_coherence_ = v; }
 
+   /// v52: Enable RHS z-component diagnostic (fires once after first non-trivial slip)
+   void SetDiagRhsZ(bool v) { diag_rhs_z_ = v; }
+
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -268,6 +271,8 @@ private:
    mutable bool diag_uz_fault_done_ = false;
    bool diag_traction_coherence_ = false;  // v52: traction coherence diagnostic
    mutable bool diag_traction_coherence_done_ = false;
+   bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
+   mutable bool diag_rhs_z_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    // Tag-based fault face detection (matches Tandem's Physical Surface approach)
@@ -3065,8 +3070,119 @@ void ElasticityDomainOperator<MeshType>::Solve(
    }
    real_t rhs_after_slip = rhs.Normlinf();
 
+   // v52: RHS z-component diagnostic — capture f_z after slip, before Dirichlet
+   // byNODES ordering: rhs[0..N-1]=x, rhs[N..2N-1]=y, rhs[2N..3N-1]=z
+   int N_scalar = fes_->GetNDofs();
+   Vector rhs_slip_snapshot;
+   if (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0)
+   {
+      rhs_slip_snapshot.SetSize(rhs.Size());
+      rhs_slip_snapshot = rhs;
+   }
+
    // Add Dirichlet loading
    AssembleDirichletLoading(rhs, time);
+
+   // v52: RHS z-component diagnostic — fire once after first non-trivial RHS
+   if (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0)
+   {
+      diag_rhs_z_done_ = true;
+
+      // Helper: compute per-component L2 norms (local)
+      auto component_norms = [&](const Vector &v, real_t &nx, real_t &ny, real_t &nz)
+      {
+         nx = ny = nz = 0.0;
+         for (int i = 0; i < N_scalar; i++)
+         {
+            nx += v(i) * v(i);
+            ny += v(N_scalar + i) * v(N_scalar + i);
+            nz += v(2 * N_scalar + i) * v(2 * N_scalar + i);
+         }
+      };
+
+      // Slip-only contribution
+      real_t slip_nx, slip_ny, slip_nz;
+      component_norms(rhs_slip_snapshot, slip_nx, slip_ny, slip_nz);
+
+      // Dirichlet-only contribution (total minus slip)
+      Vector rhs_diri(rhs.Size());
+      subtract(rhs, rhs_slip_snapshot, rhs_diri);
+      real_t diri_nx, diri_ny, diri_nz;
+      component_norms(rhs_diri, diri_nx, diri_ny, diri_nz);
+
+      // Total RHS
+      real_t tot_nx, tot_ny, tot_nz;
+      component_norms(rhs, tot_nx, tot_ny, tot_nz);
+
+      // Also compute max absolute z-values
+      real_t slip_zmax = 0.0, diri_zmax = 0.0, tot_zmax = 0.0;
+      for (int i = 0; i < N_scalar; i++)
+      {
+         slip_zmax = std::max(slip_zmax, std::abs(rhs_slip_snapshot(2 * N_scalar + i)));
+         diri_zmax = std::max(diri_zmax, std::abs(rhs_diri(2 * N_scalar + i)));
+         tot_zmax  = std::max(tot_zmax,  std::abs(rhs(2 * N_scalar + i)));
+      }
+
+      // MPI reduce for global norms
+      bool is_root = true;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         is_root = (rank == 0);
+         // Sum of squares for L2 norms
+         real_t local_vals[9] = {slip_nx, slip_ny, slip_nz,
+                                  diri_nx, diri_ny, diri_nz,
+                                  tot_nx,  tot_ny,  tot_nz};
+         real_t global_vals[9];
+         MPI_Allreduce(local_vals, global_vals, 9, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         slip_nx = global_vals[0]; slip_ny = global_vals[1]; slip_nz = global_vals[2];
+         diri_nx = global_vals[3]; diri_ny = global_vals[4]; diri_nz = global_vals[5];
+         tot_nx  = global_vals[6]; tot_ny  = global_vals[7]; tot_nz  = global_vals[8];
+         // Max for max-abs
+         real_t local_max[3] = {slip_zmax, diri_zmax, tot_zmax};
+         real_t global_max[3];
+         MPI_Allreduce(local_max, global_max, 3, MPI_DOUBLE, MPI_MAX,
+                       mesh_.GetComm());
+         slip_zmax = global_max[0]; diri_zmax = global_max[1]; tot_zmax = global_max[2];
+#endif
+      }
+
+      // Take sqrt for L2 norms
+      slip_nx = std::sqrt(slip_nx); slip_ny = std::sqrt(slip_ny); slip_nz = std::sqrt(slip_nz);
+      diri_nx = std::sqrt(diri_nx); diri_ny = std::sqrt(diri_ny); diri_nz = std::sqrt(diri_nz);
+      tot_nx  = std::sqrt(tot_nx);  tot_ny  = std::sqrt(tot_ny);  tot_nz  = std::sqrt(tot_nz);
+
+      if (is_root)
+      {
+         mfem::out << "\n[DIAG-RHS-Z] RHS z-component diagnostic (t=" << time << " s)\n"
+            << "  DOF ordering: byNODES, N_scalar=" << N_scalar << "\n"
+            << "  Slip contribution (f_slip):\n"
+            << "    ||f_x|| = " << slip_nx << "\n"
+            << "    ||f_y|| = " << slip_ny << "\n"
+            << "    ||f_z|| = " << slip_nz << "\n"
+            << "    ||f_z||/||f_x|| = " << (slip_nx > 0 ? slip_nz / slip_nx : 0.0) << "\n"
+            << "    max|f_z| = " << slip_zmax << "\n"
+            << "  Dirichlet contribution (f_diri):\n"
+            << "    ||f_x|| = " << diri_nx << "\n"
+            << "    ||f_y|| = " << diri_ny << "\n"
+            << "    ||f_z|| = " << diri_nz << "\n"
+            << "    ||f_z||/||f_x|| = " << (diri_nx > 0 ? diri_nz / diri_nx : 0.0) << "\n"
+            << "    max|f_z| = " << diri_zmax << "\n"
+            << "  Total RHS (f_slip + f_diri):\n"
+            << "    ||f_x|| = " << tot_nx << "\n"
+            << "    ||f_y|| = " << tot_ny << "\n"
+            << "    ||f_z|| = " << tot_nz << "\n"
+            << "    ||f_z||/||f_x|| = " << (tot_nx > 0 ? tot_nz / tot_nx : 0.0) << "\n"
+            << "    max|f_z| = " << tot_zmax << "\n"
+            << "  Interpretation:\n"
+            << "    If ||f_z||/||f_x|| >> 0: RHS has z-forcing (assembly bug, Hypothesis A)\n"
+            << "    If ||f_z||/||f_x|| ~ 0: f_z=0, dip comes from solver (Hypothesis B)\n"
+            << std::endl;
+      }
+   }
 
    // Diagnostic: check for RHS blowup
    real_t rhs_final = rhs.Normlinf();
@@ -3140,6 +3256,67 @@ void ElasticityDomainOperator<MeshType>::Solve(
       MFEM_VERIFY(std::isfinite(u_max),
          "Domain solve produced NaN/Inf in displacement (||u||_inf = "
          << u_max << ")");
+   }
+
+   // v52: Solution u_z diagnostic — companion to RHS diagnostic
+   if (diag_rhs_z_ && diag_rhs_z_done_)
+   {
+      // Only fire once: reset the flag to prevent repeat (done_ was set above)
+      // Use a static to fire exactly once
+      static bool u_z_diag_fired = false;
+      if (!u_z_diag_fired)
+      {
+         u_z_diag_fired = true;
+         real_t ux2 = 0.0, uy2 = 0.0, uz2 = 0.0;
+         real_t ux_max = 0.0, uz_max = 0.0;
+         for (int i = 0; i < N_scalar; i++)
+         {
+            ux2 += X_(i) * X_(i);
+            uy2 += X_(N_scalar + i) * X_(N_scalar + i);
+            uz2 += X_(2 * N_scalar + i) * X_(2 * N_scalar + i);
+            ux_max = std::max(ux_max, std::abs(X_(i)));
+            uz_max = std::max(uz_max, std::abs(X_(2 * N_scalar + i)));
+         }
+
+         bool is_root = true;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            int rank;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            is_root = (rank == 0);
+            real_t local_sum[3] = {ux2, uy2, uz2};
+            real_t global_sum[3];
+            MPI_Allreduce(local_sum, global_sum, 3, MPI_DOUBLE, MPI_SUM,
+                          mesh_.GetComm());
+            ux2 = global_sum[0]; uy2 = global_sum[1]; uz2 = global_sum[2];
+            real_t local_mx[2] = {ux_max, uz_max};
+            real_t global_mx[2];
+            MPI_Allreduce(local_mx, global_mx, 2, MPI_DOUBLE, MPI_MAX,
+                          mesh_.GetComm());
+            ux_max = global_mx[0]; uz_max = global_mx[1];
+#endif
+         }
+
+         real_t ux_norm = std::sqrt(ux2);
+         real_t uy_norm = std::sqrt(uy2);
+         real_t uz_norm = std::sqrt(uz2);
+
+         if (is_root)
+         {
+            mfem::out << "[DIAG-RHS-Z] Solution u decomposition (same time step):\n"
+               << "  ||u_x|| = " << ux_norm << "  (along-strike)\n"
+               << "  ||u_y|| = " << uy_norm << "  (fault-normal)\n"
+               << "  ||u_z|| = " << uz_norm << "  (dip/vertical)\n"
+               << "  ||u_z||/||u_x|| = " << (ux_norm > 0 ? uz_norm / ux_norm : 0.0) << "\n"
+               << "  max|u_x| = " << ux_max << "  max|u_z| = " << uz_max << "\n"
+               << "  max|u_z|/max|u_x| = " << (ux_max > 0 ? uz_max / ux_max : 0.0) << "\n"
+               << "  Interpretation:\n"
+               << "    If f_z=0 but u_z>>0: solver introduces dip (Hypothesis B)\n"
+               << "    If f_z>>0 and u_z>>0: assembly bug forces dip (Hypothesis A)\n"
+               << std::endl;
+         }
+      }
    }
 
    // Check convergence and log solver info when RHS is large

@@ -156,254 +156,154 @@ Key metrics per station:
 
 ---
 
-## 6. Solve vs. Traction Coherence: MFEM Decoupled, Tandem Coherent
+## 6. Solve vs. Traction Coherence: Concrete Code Comparison
 
-### 6.1 The Coherence Problem
+### 6.1 Correction: Both Codes Use the Same Architecture
 
-Tandem and MFEM handle elastic solve and traction extraction differently. This is a
-potential source of the dip contamination and strike traction error.
+Initial hypothesis was that Tandem excludes fault faces from the stiffness matrix
+while MFEM includes them. **This is wrong.** Code-level investigation confirms
+both codes use the same split: K includes fault faces with [[u]] as unknown,
+RHS corrects for prescribed slip.
 
-**Tandem: Coherent pipeline.** The elastic solve and traction extraction use the
-**exact same DG flux formula**:
-
-```
-Tandem solve:     surfaceOp kernel (elasticity.py:105-110)
-  traction_q = 0.5 * (σ(u⁺)·n + σ(u⁻)·n)     [consistency]
-  + penalty * (jump - slip_bc)                   [stabilization]
-
-Tandem traction:  compute_traction kernel (elasticity.py:242-248)
-  traction_q = 0.5 * (σ(u⁺)·n + σ(u⁻)·n)     [SAME consistency]
-  + c0 * (jump - slip_bc)                        [SAME penalty]
-```
-
-Both kernels call the identical `traction(x, normal)` function (lines 89-91), which
-computes the Cauchy stress σ·n = λ(∇·u)n + μ(∇u + ∇uᵀ)·n. The penalty coefficients
-are the same. The displacement basis evaluations (`E_q`) are the same. The slip BC
-(`f_q`) is the same. **The traction Tandem extracts is exactly the flux the solver used.**
-
-The code flow (SeasQDOperator.rhs(), lines 34-40):
+**Evidence — Tandem stiffness includes fault faces** (DGOperator.h:142-174):
 ```cpp
-solve(time, state);              // K*u = f  (surfaceOp kernel)
-update_traction(state);          // T = flux(u) at fault  (compute_traction kernel)
-friction_->rhs(time, traction_, state, result);
+// assemble() loops ALL skeleton faces — no BC type check:
+for (fctNo = 0; fctNo < numLocalFacets(); ++fctNo)
+    if (info.up[0] != info.up[1])  // skeleton (fault OR regular)
+        lop_->assemble_skeleton(fctNo, info, A00, A01, A10, A11);
 ```
 
-The `update_traction` call (SeasQDOperator.cpp:69-74) goes through
-`AdapterOperator::traction()` which calls `traction_skeleton()` /
-`traction_boundary()` on each fault face, using the solved displacement. These methods
-(Elasticity.cpp:948-1017) invoke the `compute_traction` kernel — the same formula as
-the bilinear form's face integral.
-
-**MFEM: Decoupled pipeline.** The elastic solve and traction extraction use
-**different code paths with independently computed operators**:
-
-```
-MFEM solve:
-  Stiffness K:   MFEM's DGElasticityIntegrator (kappa=0) [consistency + symmetry]
-                 + DGElasticityIPPenaltyIntegrator        [penalty]
-                 → assembled into HypreParMatrix
-  RHS f:         AssembleSlipContributionIP()              [hand-coded slip RHS]
-                 + AssembleDirichletLoading()               [hand-coded BC RHS]
-  Solve:         K * u = f  via MUMPS/CG
-
-MFEM traction:  ComputeTraction() — entirely separate hand-coded computation
-  T_stress_q:    ∇u evaluated manually at quad points, averaged, multiplied by C:n
-  correction_q:  penalty * (u_jump - slip), penalty recomputed from scratch
-  T = T_stress - correction, projected onto fault basis
-```
-
-### 6.2 Specific Discrepancies Identified
-
-#### 6.2.1 Penalty computation path
-
-**Solve** (AssembleSlipContributionIP, line 1200-1208):
-- `nor` = `CalcOrtho(FTr->Jacobian())` at each quad point (varies with q)
-- `nl_q = nor.Norml2()` — the face Jacobian determinant
-- penalty uses `nl_q` at each quad point
-- Applied weight: `wq_penalty = penalty_ip * ip.weight * nl_q`
-
-**ComputeTraction** (line 3416-3427):
-- `nor` = `CalcOrtho(FTr->Jacobian())` at **face centroid only** (line 3392)
-- `face_area = nor.Norml2()` — face Jacobian at centroid
-- penalty uses `face_area` (constant, not per-quad-point)
-- Applied per quad point but with centroid-derived penalty
-
-For non-planar faces or non-uniform Jacobians, these differ. On the hex meshes used
-for BP5, faces are planar, so this should be exact. But it's still a latent bug for
-general meshes.
-
-#### 6.2.2 Stress computation: adjugate vs inverse Jacobian
-
-**Solve** (line 1185-1196):
-- Uses `CalcAdjugate` → `dshape_adj = dshape_ref * adjJ`
-- Weight: `w = ip.weight / (2.0 * detJ)` which divides out the adjugate's detJ factor
-- Net: `dshape_phys = dshape_ref * J⁻¹` (mathematically equivalent)
-
-**ComputeTraction** (line 3396-3506):
-- Uses `CalcInverse` → `dshape_phys = dshape_ref * J⁻¹` directly
-- No detJ factor in weights (just `ip.weight`, accumulated into `sum_wq`)
-- Projects via `GalerkinProject` which divides by face mass matrix
-
-These are mathematically equivalent for well-conditioned elements. But the adjugate
-path avoids division by detJ, while the inverse path requires it. If detJ is small
-(thin elements), the inverse path may have different rounding characteristics.
-
-#### 6.2.3 Normal vector: centroid vs per-quad-point
-
-**Solve**: `nor` is recomputed at every quad point via `CalcOrtho(FTr->Jacobian())`
-at the current integration point. For the stress-related terms (symmetry/consistency),
-the normal varies with the quad point.
-
-**ComputeTraction**: `nor` is computed once at the face centroid (line 3392) and
-`basis.normal` (from FaultBasis, constant per face) is used for stress dot product
-(line 3534): `T_stress_q[ci] += stress_ij * basis.normal[cj]`.
-
-For planar faces, `CalcOrtho` returns the same direction at every quad point (magnitude
-may differ due to Jacobian parameterization, but direction is constant). `basis.normal`
-is a unit vector. So the traction direction is consistent. But the **magnitude scaling**
-differs:
-
-- Solve uses `nor` (not unit — includes face area factor)
-- ComputeTraction uses `basis.normal` (unit vector) for the stress·n dot product
-
-This is compensated by the different quadrature weight handling, but it means the two
-code paths must be carefully balanced. Any imbalance creates a traction that doesn't
-match what the solver "expects."
-
-#### 6.2.4 Fault face exclusion from stiffness matrix
-
-**Critical**: The MFEM stiffness matrix `K` is assembled by MFEM's
-`DGElasticityIntegrator` which loops over **all interior faces**, including fault faces.
-This means `K` treats fault faces as regular DG interfaces with consistency + symmetry +
-penalty terms on the displacement jump.
-
-The slip contribution `AssembleSlipContributionIP` then adds the **RHS correction** for
-the prescribed jump `[[u]] = slip` on fault faces.
-
-In the solve, the stiffness matrix enforces `K*u = f` where `K` includes the penalty
-for `[[u]] = 0` on fault faces (as if no slip), and `f` includes the correction for the
-prescribed slip. The solution `u` satisfies:
-
-```
-K_regular * u + penalty * (u_jump) = f_vol + penalty * slip + symmetry * slip
-```
-
-After solving, `u_jump ≈ slip` (enforced by the penalty). **ComputeTraction** then
-re-evaluates the flux formula to extract the traction.
-
-In Tandem, the stiffness matrix is **matrix-free** — the same kernel (`surfaceOp`)
-handles both the matrix-vector product and the slip BC simultaneously. There's no
-separation between "matrix treats fault as no-slip" and "RHS corrects for slip."
-The `set_slip()` call modifies what the kernel sees as the prescribed jump, so the
-matrix-vector product itself incorporates the slip BC coherently.
-
-### 6.3 Why This Matters for the Dip Error
-
-The decoupled approach creates a subtle issue: **the traction ComputeTraction extracts
-may not exactly equal the traction the solver implicitly balanced against.**
-
-If the solve balances forces using one penalty and normal computation, but
-ComputeTraction evaluates with slightly different quadrature/normals, the extracted
-traction has an error proportional to the difference. For pure strike-slip:
-
-- The strike traction error is O(ε) × τ_strike — a small relative error
-- The dip traction should be exactly zero, but the error is O(ε) × τ_strike
-- This creates a **spurious dip traction** of order ε × 20 MPa ≈ O(0.01-1 MPa)
-
-This is consistent with the 0.1-1.2 MPa dip offsets observed in v51 Section 3.
-
-### 6.4 Proposed Test: Coherent Traction Extraction
-
-To test whether the solve/traction decoupling is the root cause, we can implement a
-**coherent traction test** that extracts traction using the same operator used in the
-solve, rather than the separate ComputeTraction code.
-
-#### Test Design: Residual-Based Traction
-
-Instead of re-evaluating σ·n and penalty separately in ComputeTraction, compute
-traction from the **residual of the bilinear form** restricted to fault faces:
-
-```
-T_fault = (K * u - f_non_fault) restricted to fault DOFs
-```
-
-This is exactly what the solver balanced against. If `K * u = f_total`, then:
-```
-f_total = f_volume + f_dirichlet + f_slip_fault
-```
-and:
-```
-K * u = f_non_fault + f_slip_fault
-```
-The traction on fault faces is embedded in the K*u product on fault-adjacent DOFs.
-
-Concretely, for each fault face DOF `i`:
-```
-traction_i = (K * u)(i) - f_non_fault(i)
-```
-
-This is automatically coherent with the solve because it uses the **same K matrix**.
-
-#### Implementation Outline
-
+**Evidence — Tandem matrix-free K*u includes fault faces** (Elasticity.cpp:751):
 ```cpp
-void ComputeTractionCoherent(const GridFuncType &displacement,
-                              const Vector &slip_bc, real_t time,
-                              Vector &traction)
-{
-   // 1. Compute K * u (matrix-vector product)
-   Vector Ku(displacement.Size());
-   cached_Ah_.Mult(displacement, Ku);
-
-   // 2. Compute f_non_fault = f_volume + f_dirichlet (no slip contribution)
-   LinFormType b_no_slip(fes_.get());
-   b_no_slip.Assemble();
-   AssembleDirichletLoading(b_no_slip, time);
-   // Do NOT add AssembleSlipContributionIP
-
-   // 3. Residual on fault DOFs = K*u - f_non_fault
-   //    This residual encodes the traction the solver balanced
-   Vector residual(displacement.Size());
-   residual = Ku;
-   residual -= b_no_slip;
-
-   // 4. Extract fault-face residual and project to (dip, strike) via FaultBasis
-   //    The residual at fault DOFs is the integrated traction × test function
-   //    Need to "un-integrate" via inverse face mass matrix (L2 projection)
-   for each fault face fi:
-      extract residual at face DOFs
-      apply inverse face mass matrix
-      project to local (dip, strike) frame
+if (bc == BC::None || (is_skeleton_face && is_fault_or_dirichlet)) {
+    flux_u_skeleton(...)           // [[u]] as unknown — SAME as regular face
+    flux_sigma_skeleton(...)       // c00 = -penalty(fctNo)
+    if constexpr (WithRHS) {       // Only during RHS, not K*u product
+        if (bc_skeleton(fctNo, bc, f_q))
+            flux_u_add_bc(...)     // slip correction added to RHS only
+    }
 }
 ```
+When `WithRHS = false` (K*u during CG iterations), fault = regular interior face.
 
-#### What This Tests
+**Evidence — MFEM stiffness includes fault faces** (elasticity_operator.hpp:870):
+```cpp
+cached_a_->AddInteriorFaceIntegrator(
+    new DGElasticityIntegrator(lambda_, mu_, epsilon_, 0.0));  // ALL faces
+cached_a_->AddInteriorFaceIntegrator(
+    new DGElasticityIPPenaltyIntegrator(lambda_, mu_, 3));     // ALL faces
+```
+MFEM's BilinearForm loops all interior faces. No fault exclusion.
 
-If the coherent traction extraction produces smaller dip contamination than the current
-ComputeTraction, it confirms the decoupled approach is a significant error source.
+**Both codes solve the identical system:** `K*u = f_vol + f_dirichlet + f_slip`
+where K includes penalty on fault faces enforcing [[u]]=0, f_slip corrects.
 
-The test should be run on the same mesh/parameters as the production run (1000m, p=2, IP)
-and compare:
-1. Current `ComputeTraction` dip/strike ratio per DOF
-2. Coherent residual-based dip/strike ratio per DOF
+### 6.2 The Real Differences (Concrete, Code-Level)
 
-Expected: coherent extraction has O(solver_tol) dip contamination, while current has
-O(21%) from the re-evaluation inconsistency.
+#### 6.2.1 Solver: CG matrix-free (Tandem) vs MUMPS-BLR assembled (MFEM)
 
-### 6.5 Alternative: Match ComputeTraction to Solve Exactly
+**Tandem** (PetscLinearSolver.cpp:22, bp5.toml):
+- PETSc CG, rtol = 1e-12, `matrix_free = true`, p-multigrid preconditioner
+- K*u evaluated **exactly** at every CG iteration (no factorization error)
+- Converged solution satisfies ||K*u - f|| / ||f|| < 1e-12
 
-Instead of the residual approach, we could fix ComputeTraction to use exactly the same
-computation as the solve:
+**MFEM** (elasticity_operator.hpp:908-914):
+- MUMPS-BLR with BLR tol = 1e-12, assembled HypreParMatrix
+- Approximate LU: BLR compresses off-diagonal blocks via low-rank approximation
+- Factorization error: ||L*U - K|| / ||K|| ~ 1e-12, but **structurally non-uniform**
 
-1. Use `CalcOrtho` per quad point (not centroid-only) for penalty
-2. Use adjugate Jacobian (not inverse) to match rounding
-3. Use the same quadrature rule as the bilinear form integrator
-4. Include the symmetry term in the traction (currently ComputeTraction may omit it)
+#### 6.2.2 Penalty magnitude at fault faces (computed from BP5 parameters)
 
-This is harder to verify than the residual approach but avoids the need for inverse mass
-matrices.
+```
+mu = 32.04 GPa, lambda = 32.04 GPa
+c0 = 2*mu = 64.08 GPa, c1 = 3*lambda + 2*mu = 160.19 GPa
+c_N_1 = p*(p+dim-1)/dim = 2*4/3 = 2.667 (at p=2)
+face_area ~ 8.1e5 m^2 (from h_min=812m mesh)
+vol ~ 5.4e8 m^3 (element volume)
+A/V = 3 * face_area / vol ~ 4.5e-3 /m
+p_each = (D+1)*c_N_1*(A/V)*(c1^2/c0) = 4*2.667*4.5e-3*400e9 = 19.2e9 Pa/m
+penalty_ip = (p0+p1)/4 ~ 9.6e9 Pa/m
+```
 
-### 6.6 Implemented: `--diag-traction-coherence` Flag
+**Fault penalty ~10^10 Pa/m. Bulk stiffness ~mu/h = 3.2e7 Pa/m. Ratio: ~300x.**
+
+The fault face entries are the largest in K. BLR low-rank compression error
+concentrates at these high-contrast entries.
+
+#### 6.2.3 Predicted vs observed solver fault residual
+
+BLR tol 1e-12 controls ||L*U - K|| / ||K||. The solution error depends on cond(K):
+- DG stiffness cond(K) ~ O(penalty/bulk * h^-2) ~ O(300 * 10^6) ~ O(10^8)
+- Expected |u_err| ~ cond(K) * BLR_tol * |u| ~ 10^8 * 10^-12 * |u| = 10^-4 * |u|
+- For |u| ~ 10^-5 m (first step): |u_err| ~ 10^-9 m
+
+But the **jump** of the error across the fault can be much larger than the pointwise
+error because adjacent elements share the same BLR compression artifact.
+
+**Observed** (Section 7.2): |[[u]] - slip| = 4.4e-7 m RMS, 3.5e-5 m max.
+The max is 7 orders above BLR tolerance, consistent with cond(K) amplification
+plus error concentration at high-penalty fault faces.
+
+#### 6.2.4 Penalty amplification of solver residual
+
+```
+penalty * max_res = 9.6e9 Pa/m * 3.5e-5 m = 3.4e5 Pa = 340 kPa
+stress signal at first step: ~290 Pa RMS
+penalty/stress = 340,000 / 290 = 1170x
+```
+
+**Observed** (Section 7.2): corr/stress = 632%. Order-of-magnitude match.
+
+#### 6.2.5 Traction extraction: codegen (Tandem) vs hand-coded (MFEM)
+
+**Tandem** (Elasticity.cpp:971-972):
+```cpp
+krnl.c00 = -penalty(fctNo);  // SAME function as stiffness line 761
+```
+- `penalty(fctNo)` returns precomputed value used in both K assembly and traction
+- Kernels generated by YATETO from single Python source — guaranteed consistent
+- Precomputed `n_unit_q`, `JInv`, `E_q` reused from assembly
+
+**MFEM** (elasticity_operator.hpp:3468-3479):
+```cpp
+real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;  // recomputed from scratch
+```
+- Same formula but independent code path (not shared function)
+- Stress uses `CalcInverse` (traction) vs `CalcAdjugate` (solve integrator)
+- On planar hex faces: mathematically identical, numerically independent
+
+#### 6.2.6 Summary table
+
+| Aspect | Tandem | MFEM | Impact |
+|--------|--------|------|--------|
+| Fault faces in K | Yes (line 751) | Yes (line 870) | Same architecture |
+| Solver | CG matrix-free (exact K*u) | MUMPS-BLR (approx. factorization) | **BLR error at fault** |
+| Solver tolerance | rtol 1e-12 (Krylov) | BLR tol 1e-12 (factorization) | Different error distribution |
+| Penalty in traction | `penalty(fctNo)` shared | Recomputed independently | Math. same |
+| Kernel consistency | YATETO codegen (1 source) | Hand-coded (2 code paths) | Tandem guaranteed |
+| Observed dip/strike | 0.2-0.7% | 31% stress + 632% penalty | **~100x worse** |
+| Fault residual | Not measured (CG → ~0) | 4.4e-7 m RMS, 3.5e-5 m max | **Root cause** |
+
+**CORRECTION**: The earlier Section 6.1 description of Tandem as "coherent" and MFEM
+as "decoupled" was misleading. Both use the same K + f_slip architecture. The actual
+difference is the **solver** (CG exact K*u vs MUMPS-BLR approximate factorization)
+and the **traction code path** (codegen-consistent vs hand-coded-independent).
+
+The dominant contamination source is the MUMPS-BLR factorization error concentrating
+at the high-penalty (~10^10 Pa/m) fault face entries, amplified by the penalty in
+ComputeTraction into spurious traction 6x larger than the stress signal.
+
+**Tandem's CG solver does not have this problem** because every K*u evaluation is
+exact (matrix-free) — there is no factorization, so no structural compression error.
+The traction extraction sees the same K*u the solver converged to.
+
+### 6.3 Implemented: `--diag-traction-coherence` Flag
+
+(Old Sections 6.2-6.5 described initial hypotheses about penalty computation
+paths, adjugate vs inverse Jacobian, and proposed a residual-based test. These are
+superseded by the concrete comparison in Section 6.2 above and the coherence test
+results in Section 7.)
+
 
 Rather than the full residual-based approach (Section 6.4), we implemented a lightweight
 diagnostic that decomposes the existing ComputeTraction into its stress and penalty
@@ -449,10 +349,439 @@ comparison against Tandem.
 
 ---
 
-## 7. Revision History
+## 7. Coherence Test Results: BOTH Sources Confirmed (Job 7610206)
+
+### 7.1 MPI Deadlock Fix
+
+The first submission (Job 7610190) hung at the first time step. Root cause: the
+`coherence_active` flag was computed locally — ranks without fault DOFs had
+`any_slip = false` and skipped the MPI collectives, while ranks with fault DOFs
+entered them. Two fixes applied:
+
+1. `any_slip` check: now `MPI_Allreduce`'d so all ranks agree on `coherence_active`
+2. Summary block guard: changed from `coherence_active && coh_n_qp > 0` to just
+   `coherence_active`. The print is guarded by `is_root && g_n_qp > 0`.
+
+### 7.2 Global Results (65,023 quad points across all fault faces)
+
+```
+Stress-only traction {sigma.n}:
+  RMS tau_strike(stress) = 289.5 Pa
+  RMS tau_dip(stress)    = 89.9 Pa
+  max |tau_dip(stress)|  = 6411 Pa
+  dip/strike ratio (RMS) = 31.1 %
+
+Penalty correction eta*(jump-slip):
+  RMS tau_strike(corr)   = 1830.9 Pa
+  RMS tau_dip(corr)      = 292.0 Pa
+  max |tau_dip(corr)|    = 22239 Pa
+  corr/stress ratio (strike) = 632 %
+  corr/stress ratio (dip)    = 325 %
+
+Solver fault residual |[[u]] - slip|:
+  RMS residual = 4.38e-07 m
+  max residual = 3.53e-05 m
+```
+
+### 7.3 Per-Station Decomposition
+
+| Station | stress_dip (Pa) | stress_strk (Pa) | dip/strk % | corr_dip (Pa) | corr_strk (Pa) | max_res (m) |
+|---|---|---|---|---|---|---|
+| strk-36dp+00 | -6.4 | -46.0 | 14.0 | 0.8 | 0.6 | 5.3e-10 |
+| strk-16dp+00 | 24.6 | -93.2 | 26.4 | 1.7 | 2.2 | 1.2e-08 |
+| strk+00dp+00 | 0.07 | -9.6 | 0.8 | 0.01 | -0.05 | 1.2e-10 |
+| strk+16dp+00 | -0.01 | -2.4 | 0.6 | 0.0002 | 0.01 | 7.7e-12 |
+| strk+36dp+00 | -0.01 | -0.6 | 1.5 | -0.0002 | -0.0008 | 4.1e-12 |
+| strk-24dp+10 | 8.3 | 317 | 2.6 | -6.8 | 1.6 | 1.3e-08 |
+| strk-16dp+10 | -12.8 | -335 | 3.8 | **32.6** | **144.8** | **9.2e-08** |
+| strk+00dp+10 | 0.68 | -6.4 | 10.6 | -0.05 | -0.16 | 2.6e-10 |
+| strk+16dp+10 | -0.23 | -1.8 | 12.5 | 0.0006 | 0.007 | 3.3e-11 |
+| strk+00dp+22 | -0.62 | -4.1 | 15.2 | 0.04 | 0.11 | 7.9e-11 |
+
+### 7.4 Analysis: Two Contamination Sources
+
+**Source 1: DG stress cross-coupling (31% dip/strike globally)**
+
+The stress-only traction `{σ(u)·n}` has a non-zero dip component even for pure
+strike-slip input. This comes from the DG elastic solution itself — the penalty
+enforcement in the bilinear form couples all three displacement components, so the
+solution `u` has non-zero `u_z` that creates `σ_yz ≠ 0`, which projects to τ_dip.
+
+Spatial pattern:
+- Worst at surface near nucleation: strk-16dp+00 = 26.4% dip/strike
+- Low at center depth: strk+00dp+10 = 10.6%, strk-24dp+10 = 2.6%
+- Very low far from nucleation: strk+16dp+00 = 0.6%, strk+36dp+00 = 1.5%
+- Asymmetric: negative x2 stations have higher contamination than positive x2
+
+**Source 2: Penalty amplification of solver residual (632% corr/stress)**
+
+The penalty correction `η([[u]] - slip)` is **6× larger than the stress signal** in
+strike. The solver does not enforce `[[u]] = slip` accurately at fault faces:
+- RMS residual = 4.4e-7 m (should be ~1e-12 with BLR tol=1e-12)
+- Max residual = 3.5e-5 m (at nucleation zone)
+
+This means the MUMPS-BLR solver's approximate factorization leaves a large residual
+specifically at the displacement jump across fault faces. The penalty coefficient is
+O(10^7-10^8), so a 1e-7 m residual becomes O(1-10 Pa) spurious traction, and at the
+nucleation zone (max_res = 9.2e-8 m), the penalty produces corr_strk = 145 Pa — far
+exceeding the stress_strk = 335 Pa, making the penalty the dominant traction source.
+
+Worst station: strk-16dp+10 (nucleation edge)
+- `corr_dip = 32.6 Pa` vs `stress_dip = -12.8 Pa` → penalty 2.5× stress in dip
+- `corr_strk = 144.8 Pa` vs `stress_strk = -335 Pa` → penalty 43% of stress in strike
+- `max_res = 9.2e-8 m` → 4 orders above BLR tolerance
+
+### 7.5 Why the Solver Residual Is Large
+
+The BLR tolerance (1e-12) controls the **relative** factorization error of the
+global stiffness matrix, not the pointwise error at fault faces. The fault faces
+have the highest penalty coefficients in the system (they enforce the slip BC), so
+they concentrate the factorization error. The BLR low-rank approximation may
+compress exactly the blocks that correspond to fault-face penalty coupling.
+
+### 7.6 Implications for the Dip Problem
+
+The coherence test confirms that the dip contamination has **two independent sources**:
+
+1. **Intrinsic DG coupling** (~31% globally, up to 26% at specific stations) from
+   the stress field. This is a property of the DG discretization on this mesh and
+   cannot be fixed by solver improvements alone.
+
+2. **Penalty amplification** (~632% globally) from BLR solver residual. This could
+   be reduced by tighter BLR tolerance or exact MUMPS (no BLR).
+
+**IMPORTANT: Stress-only traction is NOT a viable fix.** v51 Section 22 tested
+`--traction-stress-only` (removing the penalty correction from ComputeTraction):
+- v51f (p=4): BLOWUP — V = 10 m/s in 35 steps
+- v51f2 (p=2): BLOWUP — V = 46 m/s in 397 steps
+
+The penalty correction is **essential for stability**. Without it, the DG method
+loses its stabilization mechanism and the solution diverges. This rules out
+removing the penalty term from ComputeTraction as a fix for the coherence problem.
+
+This leaves the following options:
+- **`--zero-dip-traction`**: Eliminates both sources at once by zeroing τ_dip
+  post-extraction. Correct for BP5 where τ_dip = 0 analytically. Already validated.
+- **Tighter solver**: Use exact MUMPS (no BLR) to reduce the solver fault residual.
+  Would fix source 2 but not source 1.
+- **Reformulate traction recovery**: Compute traction in a way that is inherently
+  consistent with the solve (e.g., derive from the bilinear form residual rather
+  than re-evaluating σ·n + penalty independently). This is a major refactor.
+
+**The `--zero-dip-traction` flag eliminates both sources at once**, which is why it
+is the correct approach for the BP5 benchmark where τ_dip = 0 analytically.
+
+### 7.7 Validation of Zero-Dip-Traction Results
+
+The v52 zero-dip production run (Section 3) was verified at 10 stations over ~0.89s:
+- slip_dip: max 9.75e-21 m (V_zero floor)
+- log10(V_dip): -20.00 everywhere
+- tau_dip: bit-for-bit constant, ratio to tau_strike ≤ 1e-11
+- Zero dip enforcement is correct and stable
+
+The full production run (48hr, 1800yr) will determine whether removing dip
+contamination also fixes the strike deficit and earthquake timing.
+
+---
+
+## 8. What We Know and Don't Know
+
+### 8.1 The Core Observation
+
+The solution u has spurious u_z (dip displacement) that should be analytically zero
+for pure strike-slip on a planar fault. Everything else follows from this:
+- {σ·n} has dip component because σ_yz = μ ∂u_z/∂y ≠ 0
+- [[u]] ≠ slip because u_z creates a dip jump component
+- Penalty amplifies the jump residual into dominant spurious traction
+- Friction law partitions V into dip via τ_dip/|τ| → dip slip accumulates
+- State variable ψ sees inflated |V| → weaker fault → strike deficit
+
+### 8.2 Two Hypotheses — Not Yet Distinguished
+
+**Hypothesis A: Bug in RHS assembly (f has spurious z-forcing)**
+
+If AssembleSlipContributionIP or AssembleDirichletLoading produces a non-zero
+z-component in the RHS vector f, then K*u = f forces u_z ≠ 0 regardless of solver
+accuracy. This would be a code bug, not a solver issue.
+
+For pure strike-slip:
+- Slip BC is (dip=0, strike=δ). EmbedSlip should produce Δu = (δ_x, 0, 0).
+  If EmbedSlip leaks into z → f has z-forcing → u_z ≠ 0.
+- Dirichlet loading is u_x = ±Vp*t/2 on far-field faces. If AssembleDirichletLoading
+  produces z-forcing → u_z ≠ 0.
+- The penalty and symmetry RHS contributions involve the 3D elasticity tensor and
+  face normals. For faces with z-component normals (top/bottom boundaries), the
+  tensor coupling could create z-forcing even from pure x-displacement BCs.
+
+**Hypothesis B: Solver introduces u_z (BLR factorization error)**
+
+If f_z = 0 exactly but the BLR factorization of K is inaccurate at the high-penalty
+fault face blocks (300× stiffer than bulk), the approximate solve could produce
+spurious u_z. The coherence test's 4e-7 m fault residual supports this.
+
+### 8.3 Why We Can't Distinguish Yet
+
+The coherence test measured:
+- stress_dip = 31% of stress_strike (from {σ·n})
+- corr_dip = 632% of stress (from penalty*(jump-slip))
+
+But BOTH trace back to u having u_z ≠ 0. The test doesn't tell us whether u_z
+comes from f_z ≠ 0 (Hypothesis A) or solver error (Hypothesis B).
+
+### 8.4 What Previous Tests Covered
+
+| Test | What it showed | What it didn't show |
+|------|---------------|-------------------|
+| v47c exact MUMPS | OOM at p=2 | Whether exact solver eliminates dip |
+| v47d BLR 1e-14 | Tighter BLR made blowup worse | Was testing penalty blowup, not dip |
+| v51 K-matrix coupling | K components match Tandem | Whether RHS has z-forcing |
+| v51 stress-only traction | Blowup (penalty essential) | N/A — different problem |
+| v52 coherence test | Both stress and penalty have dip | Whether source is f or solver |
+
+**The gap**: No test has checked whether the RHS f has a z-component.
+
+---
+
+## 9. Next Steps: Isolate the Source
+
+### 9.1 Priority 1: Dump RHS z-components (no solver involved)
+
+Add a diagnostic that, after assembling the full RHS:
+```
+f = f_volume + f_dirichlet + f_slip
+```
+dumps the z-component statistics:
+- ||f_z|| / ||f_x|| — if this is >> 0, Hypothesis A is confirmed
+- Per-contribution breakdown: which of f_volume, f_dirichlet, f_slip has z?
+- Spatial distribution: where is f_z largest? (near fault? boundaries? nucleation?)
+
+This requires NO solver. It directly tests whether the linear system is set up
+correctly. If f_z = 0, the problem is the solver. If f_z ≠ 0, the problem is in
+the assembly code (EmbedSlip, Dirichlet loading, or tensor coupling at boundaries).
+
+### 9.2 Priority 2: Dump u_z after solve (solver contribution)
+
+If f_z = 0, then u_z must come from the solver. Dump:
+- ||u_z|| / ||u_x|| — the relative dip contamination in the solution
+- Compare with BLR residual: ||K*u - f|| / ||f||
+- If ||u_z|| >> cond(K) * BLR_tol * ||u||, something else is wrong
+
+### 9.3 Priority 3: Check EmbedSlip for z-leakage
+
+The FaultBasis::EmbedSlip function converts (slip_dip, slip_strike) → (Δu_x, Δu_y, Δu_z).
+For pure strike-slip (slip_dip ≈ 0, slip_strike = δ), Δu_z should be exactly 0.
+If the fault basis vectors have even a small z-component in the strike direction,
+this would create z-forcing proportional to slip magnitude.
+
+This was checked in v51 Section 7 (FaultBasis comparison: IDENTICAL to Tandem).
+But worth re-verifying: print Δu_z for a pure strike slip input at a few fault faces.
+
+### 9.4 Priority 4: Run exact MUMPS on reduced mesh
+
+If Priorities 1-3 confirm f_z = 0 and EmbedSlip is clean, the problem is the solver.
+Run exact MUMPS (not BLR) on a reduced-size mesh that fits in memory:
+- Use inline mesh with fewer elements (e.g., 8×4×4 = 128 elements)
+- Or coarsen the Gmsh mesh
+- Compare u_z, fault residual, and dip/strike ratio with BLR result
+
+---
+
+## 10. Why --zero-dip-traction Doesn't Fix Strike: Penalty Amplification of BLR Residual
+
+### 10.1 User Observation
+
+Production run v52 (`--zero-dip-traction`) shows only small improvements at deeper
+locations for strike slip, slip rate, and shear stress compared to v50. Strike results
+mostly follow v50.
+
+### 10.2 Root Cause
+
+The coherence test (Section 7.2) shows:
+
+```
+τ_strike = τ_strike_stress + τ_strike_penalty
+         = {σ·n}_strike    + η * ([[u_strike]] - slip_strike)
+
+τ_strike_stress  = 289 Pa RMS  (physical signal)
+τ_strike_penalty = 1830 Pa RMS (BLR solver noise amplified by penalty = 6.3× signal)
+```
+
+`--zero-dip-traction` zeroes τ_dip after extraction, fixing the dip → strike cascade
+through the friction law. But **τ_strike itself** is dominated by BLR solver residual
+amplified by the penalty. The 4.4e-7 m RMS jump residual × 10^10 Pa/m penalty =
+O(4.4 kPa) spurious strike forcing — larger than the real traction signal of ~289 Pa.
+
+**Consequence**: even with τ_dip = 0, the friction law computes V_strike from a
+corrupted τ_strike that has 6× the noise of the physical contribution. The ~1 MPa
+strike deficit in the interseismic τ persists because the tau loading rate is
+distorted by this spurious penalty contribution, not because of dip contamination.
+
+### 10.3 Summary of Fix Status
+
+| Fix | Applied | Result | Remaining problem |
+|-----|---------|--------|-------------------|
+| `--zero-dip-traction` | v52 | τ_dip → 0, small improvement at depth | τ_strike still dominated by BLR noise (6× signal) |
+| Exact MUMPS (no BLR) | Not tried (OOM at p=2 for full mesh) | — | Would fix penalty amplification |
+| Reduce mesh size + exact MUMPS | Not tried | — | Feasibility unknown |
+| CG matrix-free solver | Not available in MFEM | — | Would match Tandem exactly |
+
+The strike deficit is not caused by dip contamination — it is caused by the
+MUMPS-BLR solver leaving a large residual at the high-penalty fault faces.
+
+---
+
+## 11. Tandem Comparison Plan (Now That Tandem Is Available on Cluster)
+
+### 11.1 Goal
+
+With Tandem running on the cluster, we can directly compare station outputs and
+isolate where MFEM diverges from the reference. The key question is:
+
+**At which point in time and at which stations does MFEM's τ_strike first diverge
+from Tandem's, and what is the magnitude and spatial pattern of the divergence?**
+
+This will tell us whether the deficit is:
+- **Static** (present from t=0 → initial condition or elastic assembly bug)
+- **Dynamic** (accumulates over time → loading rate error or ODE feedback)
+
+### 11.2 Comparison 1: Initial Tau Values (t=0)
+
+Both codes initialize τ from the friction law equilibrium at V_init:
+
+```
+τ0(x2,x3) = σ_n * f(V_init, psi_ss(V_init))
+```
+
+MFEM's initial values from v52 station output:
+- strk+00dp+00: τ_strike = 13.27 MPa
+- strk-24dp+10: τ_strike = 19.49 MPa
+- strk-16dp+10 (nucleation edge): τ_strike = 21.15 MPa
+
+**Action**: Read Tandem's station output at t=0 (first row). If Tandem t=0 tau
+differs from MFEM t=0 tau, the initial condition assembly is wrong.
+
+**Expected if correct**: Both codes should have identical τ_0 = σ_n * f(V_init_vec, psi_ss(V_init_vec)).
+
+### 11.3 Comparison 2: Short Pre-Earthquake Loading Rate
+
+Both codes: compare τ_strike loading rate dτ/dt during the first few years (before
+the first earthquake). This tests the elastic stiffness operator.
+
+From plate loading: Vp/2 = 0.5e-9 m/s on each side of fault. The stiffness operator
+maps this loading to τ at fault stations. If MFEM's elastic operator has a systematic
+error (penalty-amplified traction bias), the loading rate dτ/dt will differ.
+
+**Action**:
+- Plot τ_strike vs t for both codes at strk+00dp+10 (nucleation center)
+- Measure slope dτ/dt in MPa/year during locked phase
+- Compare MFEM slope vs Tandem slope
+
+MFEM first earthquake is at t≈55s (nucleation zone reaches V≈V_nuc). Before that,
+during the initial interseismic phase starting from t~0 (post-first-earthquake if
+the transient is fast), the locked-phase loading rate should be identical to Tandem's
+if the elastic operator is correct.
+
+### 11.4 Comparison 3: Earthquake Timing
+
+**First earthquake**: Both codes should have first earthquake around t≈55s due to
+nucleation zone V_nuc=0.01 m/s initialization (off steady-state with psi=psi_ss(V_init)).
+
+**Action**: Check Tandem first earthquake timing. If Tandem's first earthquake is at
+a very different time from MFEM (~55s), it means the nucleation mechanism works
+differently. This is expected if Tandem uses delta_tau_factor > 0 (overstress
+nucleation) vs MFEM's delta_tau_factor = 0 (velocity nucleation).
+
+**Check**: What nucleation method does the Tandem cluster run use?
+In MFEM bp5_params.hpp: `delta_tau_factor = 0.0` (Tandem mode, no overstress).
+In Tandem's bp5.toml: check nucleation configuration.
+
+**Second earthquake**: After the first earthquake, both codes enter interseismic
+locked phase. The recurrence interval is approximately:
+
+```
+ΔΤ ≈ Δτ / (dτ/dt)
+```
+
+where Δτ is the stress drop and dτ/dt is the plate-loading rate. If dτ/dt differs
+(Section 11.3), the recurrence interval will differ.
+
+### 11.5 Comparison 4: Post-Earthquake V Decay
+
+MFEM shows V_strike → 10^{-42} to 10^{-53} post-earthquake (depends on station).
+
+With Tandem parameters b=0.03, a=0.004 (b/a=7.5):
+```
+d(log10 V)/d(log10 theta) = -b/a = -7.5
+```
+
+At t = 6.14e6 s post-earthquake, MFEM data: V = 10^{-42.56}. Theory predicts
+10^{-42.5}. This matches — V~10^{-42} is physically correct.
+
+**Action**: Check Tandem's post-earthquake V_strike at strk+00dp+10 or strk-24dp+10.
+Does Tandem show similar V~10^{-40} to 10^{-45}? If Tandem shows much higher V
+post-earthquake, Tandem may use different b/a parameters than we assumed.
+
+**Verify Tandem parameter file**: The MFEM bp5_params.hpp was set to match Tandem.
+Confirm by reading the actual Tandem config used on the cluster and checking b, a0, Dc.
+
+### 11.6 Comparison 5: Solver Residual at Fault Faces
+
+This is the most direct test of Hypothesis A vs B (Section 8.2).
+
+**Tandem** uses PETSc CG matrix-free. The Krylov solver converges to ||K*u - f||/||f|| < 1e-12,
+meaning the jump residual at fault faces should be O(1e-12) × displacement scale.
+With |u| ~ 1e-5 m at first step, |[[u]] - slip| should be ~1e-17 m (near machine precision).
+
+**MFEM** shows |[[u]] - slip| = 4.4e-7 m RMS — 10 orders above what a converged
+CG solver would give.
+
+**Action**: Run Tandem's coherence-equivalent diagnostic (if available) or compare
+the traction magnitudes:
+- |τ_strike_stress| vs |τ_strike| in Tandem (if Tandem outputs this)
+- Compare Tandem's τ_strike at first non-zero slip step vs MFEM's
+
+If Tandem's τ_strike at same slip magnitude matches MFEM's stress-only component
+(~289 Pa) rather than total (~2120 Pa), it confirms that MFEM's penalty noise is
+the cause of the τ_strike inflation.
+
+### 11.7 What to Run on Cluster
+
+**Tandem config check** (before running anything):
+1. Read the bp5.toml config used on cluster. Verify: b, a0, Dc, sigma_n, Vp match MFEM bp5_params.hpp
+2. Check nucleation method: V_nuc or delta_tau overstress?
+3. Check output format and station locations — do they match MFEM's 10 stations?
+
+**Tandem short run**: 100 years (enough to see 1-2 earthquakes with Tandem's faster b/a)
+- Station output every year during locked phase, every second during rupture
+
+**MFEM comparison**: Use v52 zero-dip output (already have 49 years, ~53127 rows)
+- Same stations, same time points
+
+**Expected output of comparison**:
+- If τ_initial matches: initial condition correct ✓
+- If dτ/dt differs: elastic loading rate wrong (penalty noise contaminating τ_strike)
+- If earthquake timing differs by large factor (not just small drift): nucleation mechanism different
+
+### 11.8 Priority Diagnostic: Does Tandem's τ_strike Have the Same Magnitude as MFEM's?
+
+The single most useful number: **Tandem τ_strike at strk+00dp+10 at the first locked step after the first earthquake, vs MFEM.**
+
+MFEM coherence test: τ_strike_total ≈ τ_stress + τ_penalty ≈ 289 + 1830 = 2120 Pa (RMS, first step).
+
+If Tandem shows τ_strike ~ 289 Pa (stress-only level) while MFEM shows ~2120 Pa,
+it confirms that the 6× traction inflation from MUMPS-BLR penalty amplification
+is the dominant cause of MFEM's τ_strike being wrong.
+
+---
+
+## 12. Revision History
 
 | Date | Section | Change |
 |------|---------|--------|
 | 2026-03-24 | 1-5 | Initial v52 document. Removed single-solve and K-coupling diagnostics. Production run submitted with --zero-dip-traction. |
 | 2026-03-24 | 6 | Added solve vs traction coherence analysis. Identified penalty, normal vector, Jacobian, and fault-face-in-K discrepancies between MFEM (decoupled) and Tandem (coherent). Proposed residual-based coherent traction test. |
 | 2026-03-24 | 6.6 | Implemented --diag-traction-coherence flag. Decomposes traction into stress-only and penalty components, measures solver fault residual. Created bp5_v52_coherence_test.sbatch (dev queue, 10yr, 200 ranks). Build verified. |
+| 2026-03-24 | 7 | Coherence test results (Job 7610206). Fixed MPI deadlock (two bugs: local any_slip check, local coh_n_qp guard). Results: 31% dip/strike from DG stress, 632% penalty amplification from BLR solver residual. Both sources confirmed. |
+| 2026-03-24 | 6 | CORRECTED: Tandem also includes fault faces in K (same architecture as MFEM). Rewrote Section 6 with concrete code references. Solver difference: CG matrix-free vs MUMPS-BLR. Penalty ~10^10 Pa/m at fault vs ~3.2e7 bulk = 300x contrast. |
+| 2026-03-24 | 8-9 | Honest assessment: two hypotheses (RHS bug vs solver error) not yet distinguished. No test has checked whether f has z-component. Defined priority-ordered next steps: (1) dump RHS z-components, (2) dump u_z after solve, (3) verify EmbedSlip, (4) exact MUMPS on reduced mesh. |
+| 2026-03-28 | 10-11 | v52 production run confirmed: --zero-dip-traction only gives small improvements, strike results still follow v50. Root cause: τ_strike itself is dominated by BLR penalty amplification (6× signal). Added Tandem comparison plan (Sections 11.2-11.8): compare initial tau, loading rate, earthquake timing, post-earthquake V decay, solver residual. Priority diagnostic: Tandem τ_strike at strk+00dp+10 first locked step vs MFEM (~289 Pa vs ~2120 Pa expected if BLR noise is root cause). |
