@@ -72,7 +72,11 @@ public:
       elmat.SetSize(nvdofs);
       elmat = 0.0;
 
-      // Integration rule
+      // Integration rule: order 2p.
+      // v54 investigation: tested order 2p+1 to match Tandem, but for flat
+      // elements at p=1 both orders integrate degree-2 integrands exactly,
+      // producing identical K matrices. The correction dominance is inherent
+      // to IP DG weak enforcement of the jump constraint, not a quadrature issue.
       const int order = 2 * std::max(el1.GetOrder(),
                                       ndofs2 ? el2.GetOrder() : 0);
       const IntegrationRule &ir = IntRules.Get(Trans.GetGeometryType(), order);

@@ -911,6 +911,9 @@ private:
          // κ * |nor|² * {{(λ+2μ)/detJ}} * [[u]]·[[v]].
 
          // Consistency + symmetry only (kappa=0 → no penalty in this integrator)
+         // v54 note: tested order 2p+1 to match Tandem's MinQuadOrder, but
+         // for flat elements at p=1, both 2p and 2p+1 give identical K
+         // (degree-2 integrands are exact with either rule). Keeping default.
          cached_a_->AddInteriorFaceIntegrator(
             new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0));
          // Penalty (material-dependent, |nor| scaling)

@@ -42,6 +42,8 @@
 //                              tau_pre, V_init, and boundary attributes
 //   --diag-traction-decomp     Print traction decomposition (stress vs penalty
 //                              correction vs jump) for each fault DOF
+//   --psi-clamp                Enable legacy post-step psi clamping (diagnostic)
+//   --diag-psi-clamp           Print/summary diagnostics for psi clamp activity
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -325,7 +327,8 @@ int main(int argc, char *argv[])
    bool diag_coseismic_dip = false;  // v51: dump dip/strike ratio during coseismic
    real_t coseismic_dip_threshold = 0.1;  // v51: V_max threshold for coseismic dump
    bool diag_uz_fault = false;       // v51: dump u_z at fault faces after solve
-   bool elastic_sigma_n = false;     // v51: use elastic sigma_n (matches Tandem)
+   // v54: elastic sigma_n ON by default (matches Tandem DieterichRuinaBase.h:87)
+   bool elastic_sigma_n = true;
    bool diag_traction_coherence = false; // v52: solve vs traction coherence test
    bool diag_rhs_z = false;              // v52: dump f_z components of RHS
    // v49 Phase 2: CFL-aware dt and V guard
@@ -339,6 +342,8 @@ int main(int argc, char *argv[])
    bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
    bool diag_station_traction_decomp = false; // Write station-level stress/correction traction
    bool diag_station_jump_residual = false;   // Write station-level [[u]]-delta residual
+   bool no_psi_clamp = true;           // Default OFF: match Tandem (no post-step psi clamp)
+   bool diag_psi_clamp = false;        // Report psi clamp activation statistics
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -427,6 +432,7 @@ int main(int argc, char *argv[])
       }
       if (arg == "--diag-uz-fault") { diag_uz_fault = true; }
       if (arg == "--elastic-sigma-n") { elastic_sigma_n = true; }
+      if (arg == "--no-elastic-sigma-n") { elastic_sigma_n = false; }
       if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       // v49 Phase 2: CFL fix and V guard
@@ -443,6 +449,9 @@ int main(int argc, char *argv[])
       {
          diag_station_jump_residual = true;
       }
+      if (arg == "--psi-clamp") { no_psi_clamp = false; }
+      if (arg == "--no-psi-clamp") { no_psi_clamp = true; }
+      if (arg == "--diag-psi-clamp") { diag_psi_clamp = true; }
       if (arg == "--traction-weak-form") { traction_weak_form = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
       {
@@ -620,6 +629,10 @@ int main(int argc, char *argv[])
       if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
       else if (bc_mode == BCMode::AllDirichlet) bc_desc = "AllDirichlet (all attrs Dirichlet, legacy)";
       std::cout << "  BC mode: " << bc_desc << "\n";
+      std::cout << "  Psi clamp: "
+                << (no_psi_clamp ? "OFF (default, Tandem-style)"
+                                 : "ON [-5, 3] (--psi-clamp)")
+                << (diag_psi_clamp ? " [diagnostic]" : "") << "\n";
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
@@ -777,10 +790,13 @@ int main(int argc, char *argv[])
       seas_op.SetDiagCoseismicDip(true, coseismic_dip_threshold);
       if (mpi.IsRoot()) { std::cout << "  [v51] diag-coseismic-dip: ON (threshold=" << coseismic_dip_threshold << " m/s)\n"; }
    }
-   if (elastic_sigma_n)
+   // v54: elastic sigma_n ON by default (Tandem DieterichRuinaBase.h:87)
+   seas_op.SetElasticSigmaN(elastic_sigma_n);
+   if (mpi.IsRoot())
    {
-      seas_op.SetElasticSigmaN(true);
-      if (mpi.IsRoot()) { std::cout << "  [v51] elastic-sigma-n: ON (matching Tandem)\n"; }
+      std::cout << "  [v54] elastic-sigma-n: "
+                << (elastic_sigma_n ? "ON (default, Tandem)" : "OFF (--no-elastic-sigma-n)")
+                << "\n";
    }
 
    Vector state(fault_op.StateSize());
@@ -1261,6 +1277,12 @@ int main(int argc, char *argv[])
    int num_seismic_events = 0;
    real_t V_threshold_seismic = 1e-3;
    real_t V_threshold_interseismic = 1e-6;
+   long long psi_clamp_hits_hi = 0;
+   long long psi_clamp_hits_lo = 0;
+   int psi_clamp_first_step = -1;
+   real_t psi_clamp_first_time = -1.0;
+   real_t psi_clamp_max_hi = -std::numeric_limits<real_t>::infinity();
+   real_t psi_clamp_min_lo = std::numeric_limits<real_t>::infinity();
 
    // =========================================================================
    // Restart from checkpoint (if requested)
@@ -1323,23 +1345,80 @@ int main(int argc, char *argv[])
       if (!accepted) { continue; }
       step++;
 
-      // Post-step psi clamping: prevent unphysical state variable values.
-      // The explicit RK45 can overshoot psi during post-earthquake healing
-      // (stiff exp((f0-psi)/b) term). Clamp psi to a physically reasonable
-      // range to prevent the fault from getting trapped at V ≈ 0.
+      // Post-step psi clamping is MFEM-specific. Tandem does not do this, so
+      // keep it switchable and instrumented while debugging dynamic mismatch.
+      if (!no_psi_clamp)
       {
          const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
          const int psi_idx = 2;
-         // psi_max: steady-state at V = 1e-20 m/s with generous margin
-         // psi_ss(1e-20) = f0 + b*ln(V0/1e-20) = 0.6 + 0.03*32.2 ≈ 1.57
-         const real_t psi_max = 3.0;   // well above any physical steady state
-         const real_t psi_min = -5.0;  // generous lower bound
+         const real_t psi_max = 3.0;
+         const real_t psi_min = -5.0;
+         int local_hi = 0;
+         int local_lo = 0;
+         real_t local_max_hi = -std::numeric_limits<real_t>::infinity();
+         real_t local_min_lo = std::numeric_limits<real_t>::infinity();
          int n_nodes = state.Size() / spn;
          for (int i = 0; i < n_nodes; i++)
          {
             real_t &psi = state(i * spn + psi_idx);
-            if (psi > psi_max) { psi = psi_max; }
-            else if (psi < psi_min) { psi = psi_min; }
+            if (psi > psi_max)
+            {
+               local_hi++;
+               local_max_hi = std::max(local_max_hi, psi);
+               psi = psi_max;
+            }
+            else if (psi < psi_min)
+            {
+               local_lo++;
+               local_min_lo = std::min(local_min_lo, psi);
+               psi = psi_min;
+            }
+         }
+
+         int global_hi = mpi.GlobalSumInt(local_hi);
+         int global_lo = mpi.GlobalSumInt(local_lo);
+         real_t global_max_hi = (global_hi > 0)
+                                  ? mpi.GlobalMax(local_max_hi)
+                                  : -std::numeric_limits<real_t>::infinity();
+         real_t global_min_lo = (global_lo > 0)
+                                  ? mpi.GlobalMin(local_min_lo)
+                                  : std::numeric_limits<real_t>::infinity();
+
+         if (global_hi > 0 || global_lo > 0)
+         {
+            psi_clamp_hits_hi += global_hi;
+            psi_clamp_hits_lo += global_lo;
+            if (global_hi > 0)
+            {
+               psi_clamp_max_hi = std::max(psi_clamp_max_hi, global_max_hi);
+            }
+            if (global_lo > 0)
+            {
+               psi_clamp_min_lo = std::min(psi_clamp_min_lo, global_min_lo);
+            }
+            if (psi_clamp_first_step < 0)
+            {
+               psi_clamp_first_step = step + 1;
+               psi_clamp_first_time = t;
+               if (diag_psi_clamp && mpi.IsRoot())
+               {
+                  std::cout << "  [psi-clamp] first activation at accepted step "
+                            << psi_clamp_first_step
+                            << ", t=" << std::scientific
+                            << std::setprecision(6) << psi_clamp_first_time
+                            << " s, hi_hits=" << global_hi
+                            << ", lo_hits=" << global_lo;
+                  if (global_hi > 0)
+                  {
+                     std::cout << ", max_hi=" << global_max_hi;
+                  }
+                  if (global_lo > 0)
+                  {
+                     std::cout << ", min_lo=" << global_min_lo;
+                  }
+                  std::cout << "\n";
+               }
+            }
          }
       }
 
@@ -1480,6 +1559,29 @@ int main(int argc, char *argv[])
                 << " years\n";
       std::cout << "  Total steps: " << step << "\n";
       std::cout << "  Seismic events: " << num_seismic_events << "\n\n";
+      if (!no_psi_clamp)
+      {
+         std::cout << "  Psi clamp hits (high): " << psi_clamp_hits_hi << "\n";
+         std::cout << "  Psi clamp hits (low):  " << psi_clamp_hits_lo << "\n";
+         if (psi_clamp_first_step >= 0)
+         {
+            std::cout << "  First psi clamp: step " << psi_clamp_first_step
+                      << ", t = " << psi_clamp_first_time << " s\n";
+         }
+         else
+         {
+            std::cout << "  First psi clamp: none\n";
+         }
+         if (psi_clamp_hits_hi > 0)
+         {
+            std::cout << "  Max unclamped psi: " << psi_clamp_max_hi << "\n";
+         }
+         if (psi_clamp_hits_lo > 0)
+         {
+            std::cout << "  Min unclamped psi: " << psi_clamp_min_lo << "\n";
+         }
+         std::cout << "\n";
+      }
    }
 
    // =========================================================================

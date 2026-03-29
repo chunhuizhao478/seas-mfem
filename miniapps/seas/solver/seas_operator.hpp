@@ -139,7 +139,9 @@ private:
 
    // v51 flags
    bool zero_dip_traction_ = false;
-   bool elastic_sigma_n_ = false;
+   // v54: default ON to match Tandem's DieterichRuinaBase.h:87
+   // (sigma_n = -sn_elastic + SnPre). Previously off by default (v51).
+   bool elastic_sigma_n_ = true;
    bool diag_coseismic_dip_ = false;
    mutable bool diag_coseismic_dip_done_ = false;
    real_t coseismic_v_threshold_ = 0.1;

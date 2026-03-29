@@ -62,6 +62,8 @@ TEST_DIAG_VTK_SRC = tests/unit/test_diag_vtk.cpp
 TEST_MESH_REGIONS_SRC = tests/unit/test_bp5_mesh_regions.cpp
 # v44: Multi-DOF fault face quadrature
 TEST_FACE_QUADRATURE_SRC = tests/unit/test_face_quadrature.cpp
+# v54: Cross-verification against Tandem
+TEST_CROSS_VERIFY_SRC = tests/unit/test_cross_verify_tandem.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -88,6 +90,7 @@ TEST_BP5_MESH_OBJ = $(TEST_BP5_MESH_SRC:.cpp=.o)
 TEST_DIAG_VTK_OBJ = $(TEST_DIAG_VTK_SRC:.cpp=.o)
 TEST_MESH_REGIONS_OBJ = $(TEST_MESH_REGIONS_SRC:.cpp=.o)
 TEST_FACE_QUADRATURE_OBJ = $(TEST_FACE_QUADRATURE_SRC:.cpp=.o)
+TEST_CROSS_VERIFY_OBJ = $(TEST_CROSS_VERIFY_SRC:.cpp=.o)
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -366,6 +369,10 @@ seas_test_mesh_regions: $(TEST_MESH_REGIONS_OBJ)
 seas_test_face_quadrature: $(TEST_FACE_QUADRATURE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FACE_QUADRATURE_OBJ) $(MFEM_LIBS)
 
+# v54: Cross-verification against Tandem
+seas_test_cross_verify: $(TEST_CROSS_VERIFY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CROSS_VERIFY_OBJ) $(MFEM_LIBS)
+
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
@@ -467,6 +474,10 @@ $(TEST_FACE_QUADRATURE_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) 
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_CROSS_VERIFY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -554,6 +565,9 @@ test-mesh-regions: seas_test_mesh_regions
 
 test-face-quadrature: seas_test_face_quadrature
 	./seas_test_face_quadrature
+
+test-cross-verify: seas_test_cross_verify
+	./seas_test_cross_verify
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)

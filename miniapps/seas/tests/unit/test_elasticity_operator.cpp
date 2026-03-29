@@ -1655,6 +1655,1413 @@ Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
    return mesh;
 }
 
+// Solve the trace interpolation problem on one tetrahedral face:
+// find element scalar DOF values whose trace matches target values at the
+// face nodal points. For p=1 tets this reduces to the three face vertices,
+// while the opposite vertex DOF is pinned to zero.
+Vector SolveElementTraceDOFs(const FiniteElement &fe,
+                             FaceElementTransformations &FTr,
+                             int elem_side,
+                             const IntegrationRule &face_nodes,
+                             const Vector &target_face_vals)
+{
+   const int ndof = fe.GetDof();
+   const int nbf = face_nodes.GetNPoints();
+   MFEM_ASSERT(target_face_vals.Size() == nbf,
+               "target_face_vals size mismatch");
+
+   DenseMatrix trace_mat(nbf, ndof);
+   trace_mat = 0.0;
+
+   Vector shape(ndof);
+   for (int k = 0; k < nbf; k++)
+   {
+      const IntegrationPoint &fip = face_nodes.IntPoint(k);
+      FTr.SetAllIntPoints(&fip);
+      const IntegrationPoint &eip =
+         (elem_side == 1) ? FTr.GetElement1IntPoint() : FTr.GetElement2IntPoint();
+      fe.CalcShape(eip, shape);
+      for (int j = 0; j < ndof; j++)
+      {
+         trace_mat(k, j) = shape(j);
+      }
+   }
+
+   Array<int> face_cols;
+   int pinned_col = -1;
+   for (int j = 0; j < ndof; j++)
+   {
+      real_t col_sum = 0.0;
+      for (int k = 0; k < nbf; k++)
+      {
+         col_sum += std::abs(trace_mat(k, j));
+      }
+      if (col_sum < 1e-12)
+      {
+         pinned_col = j;
+      }
+      else
+      {
+         face_cols.Append(j);
+      }
+   }
+
+   MFEM_ASSERT(face_cols.Size() == nbf,
+               "Expected exactly nbf active trace columns on tet face");
+
+   DenseMatrix A(nbf);
+   for (int i = 0; i < nbf; i++)
+   {
+      for (int j = 0; j < nbf; j++)
+      {
+         A(i, j) = trace_mat(i, face_cols[j]);
+      }
+   }
+
+   DenseMatrixInverse Ainv(A);
+   DenseMatrix Ainv_mat(nbf);
+   Ainv.GetInverseMatrix(Ainv_mat);
+
+   Vector active_vals(nbf);
+   Ainv_mat.Mult(target_face_vals, active_vals);
+
+   Vector dof_vals(ndof);
+   dof_vals = 0.0;
+   for (int j = 0; j < nbf; j++)
+   {
+      dof_vals(face_cols[j]) = active_vals(j);
+   }
+   if (pinned_col >= 0) { dof_vals(pinned_col) = 0.0; }
+
+   return dof_vals;
+}
+
+// Build the custom local IP slip RHS for one interior fault face.
+Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
+                                   const FiniteElement &fe2,
+                                   FaceElementTransformations &FTr,
+                                   const FaultBasis &fault_basis,
+                                   int fault_face_idx,
+                                   int order,
+                                   real_t lambda,
+                                   real_t mu,
+                                   const Vector &slip_face)
+{
+   constexpr int dim = 3;
+   const int ndof1 = fe1.GetDof();
+   const int ndof2 = fe2.GetDof();
+   const int nbf = slip_face.Size() / 2;
+   MFEM_ASSERT(slip_face.Size() == 2 * nbf, "slip_face size mismatch");
+
+   int face_order = std::max(fe1.GetOrder(), fe2.GetOrder());
+   const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
+
+   FaceQuadrature fq(order, order);
+   MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
+   MFEM_ASSERT(fq.NumQuadPoints() == ir.GetNPoints(), "Quadrature point mismatch");
+
+   Vector delta_u_nodal(dim * nbf);
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      real_t slip_local[2] = {slip_face(2 * kk), slip_face(2 * kk + 1)};
+      real_t du[3];
+      fault_basis.EmbedSlip(fault_face_idx, slip_local, du);
+      for (int c = 0; c < dim; c++)
+      {
+         delta_u_nodal(c * nbf + kk) = du[c];
+      }
+   }
+
+   Vector delta_u_quad;
+   fq.InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+
+   Vector elvec1(dim * ndof1), elvec2(dim * ndof2);
+   elvec1 = 0.0;
+   elvec2 = 0.0;
+
+   for (int p = 0; p < ir.GetNPoints(); p++)
+   {
+      const IntegrationPoint &ip = ir.IntPoint(p);
+      FTr.SetAllIntPoints(&ip);
+      const IntegrationPoint &eip1 = FTr.GetElement1IntPoint();
+      const IntegrationPoint &eip2 = FTr.GetElement2IntPoint();
+
+      Vector nor(dim);
+      CalcOrtho(FTr.Jacobian(), nor);
+      real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+
+      Vector shape1(ndof1), shape2(ndof2);
+      fe1.CalcShape(eip1, shape1);
+      fe2.CalcShape(eip2, shape2);
+
+      DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+      fe1.CalcDShape(eip1, dshape1_ref);
+      fe2.CalcDShape(eip2, dshape2_ref);
+
+      DenseMatrix adjJ1(dim), adjJ2(dim);
+      CalcAdjugate(FTr.Elem1->Jacobian(), adjJ1);
+      CalcAdjugate(FTr.Elem2->Jacobian(), adjJ2);
+
+      DenseMatrix dshape1_adj(ndof1, dim), dshape2_adj(ndof2, dim);
+      Mult(dshape1_ref, adjJ1, dshape1_adj);
+      Mult(dshape2_ref, adjJ2, dshape2_adj);
+
+      real_t detJ1 = FTr.Elem1->Weight();
+      real_t detJ2 = FTr.Elem2->Weight();
+      real_t w1 = ip.weight / (2.0 * detJ1);
+      real_t w2 = ip.weight / (2.0 * detJ2);
+
+      real_t nl_q = nor.Norml2();
+      real_t c0_mat = 2.0 * mu;
+      real_t c1_mat = dim * lambda + 2.0 * mu;
+      real_t c_N_1 = order * (order + dim - 1.0) / dim;
+      real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
+                  * (c1_mat * c1_mat / c0_mat);
+      real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
+                  * (c1_mat * c1_mat / c0_mat);
+      real_t penalty_ip = (p0 + p1) / 4.0;
+      real_t wq_penalty = penalty_ip * ip.weight * nl_q;
+
+      real_t delta_u_q[3];
+      for (int c = 0; c < dim; c++)
+      {
+         delta_u_q[c] = delta_u_quad(c * ir.GetNPoints() + p);
+      }
+
+      for (int k = 0; k < ndof1; k++)
+      {
+         real_t grad_dot_n = 0.0;
+         for (int d = 0; d < dim; d++)
+         {
+            grad_dot_n += dshape1_adj(k, d) * nor(d);
+         }
+
+         for (int i = 0; i < dim; i++)
+         {
+            real_t sym_val = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               real_t trac =
+                  lambda * dshape1_adj(k, i) * nor(u)
+                  + mu * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                          + dshape1_adj(k, u) * nor(i));
+               sym_val += trac * sign * delta_u_q[u];
+            }
+            const int idx = i * ndof1 + k;
+            elvec1(idx) += -1.0 * sym_val * w1;
+            elvec1(idx) += wq_penalty * sign * delta_u_q[i] * shape1(k);
+         }
+      }
+
+      for (int k = 0; k < ndof2; k++)
+      {
+         real_t grad_dot_n = 0.0;
+         for (int d = 0; d < dim; d++)
+         {
+            grad_dot_n += dshape2_adj(k, d) * nor(d);
+         }
+
+         for (int i = 0; i < dim; i++)
+         {
+            real_t sym_val = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               real_t trac =
+                  lambda * dshape2_adj(k, i) * nor(u)
+                  + mu * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                          + dshape2_adj(k, u) * nor(i));
+               sym_val += trac * sign * delta_u_q[u];
+            }
+            const int idx = i * ndof2 + k;
+            elvec2(idx) += -1.0 * sym_val * w2;
+            elvec2(idx) -= wq_penalty * sign * delta_u_q[i] * shape2(k);
+         }
+      }
+   }
+
+   Vector rhs_local(dim * (ndof1 + ndof2));
+   for (int i = 0; i < dim * ndof1; i++) { rhs_local(i) = elvec1(i); }
+   for (int i = 0; i < dim * ndof2; i++) { rhs_local(dim * ndof1 + i) = elvec2(i); }
+   return rhs_local;
+}
+
+DenseMatrix AssembleExplicitIPConsistencyFaceMatrix(const FiniteElement &fe1,
+                                                    const FiniteElement &fe2,
+                                                    FaceElementTransformations &FTr,
+                                                    real_t lambda,
+                                                    real_t mu,
+                                                    real_t epsilon)
+{
+   constexpr int dim = 3;
+   const int ndof1 = fe1.GetDof();
+   const int ndof2 = fe2.GetDof();
+   const int nvdofs = dim * (ndof1 + ndof2);
+
+   DenseMatrix mat(nvdofs);
+   mat = 0.0;
+
+   const int face_order = std::max(fe1.GetOrder(), fe2.GetOrder());
+   const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
+
+   auto idx1 = [ndof1](int comp, int dof) { return comp * ndof1 + dof; };
+   auto idx2 = [ndof1, ndof2, dim](int comp, int dof)
+   {
+      return dim * ndof1 + comp * ndof2 + dof;
+   };
+
+   for (int q = 0; q < ir.GetNPoints(); q++)
+   {
+      const IntegrationPoint &ip = ir.IntPoint(q);
+      FTr.SetAllIntPoints(&ip);
+      const IntegrationPoint &eip1 = FTr.GetElement1IntPoint();
+      const IntegrationPoint &eip2 = FTr.GetElement2IntPoint();
+
+      Vector nor(dim);
+      CalcOrtho(FTr.Jacobian(), nor);
+
+      Vector shape1(ndof1), shape2(ndof2);
+      fe1.CalcShape(eip1, shape1);
+      fe2.CalcShape(eip2, shape2);
+
+      DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+      fe1.CalcDShape(eip1, dshape1_ref);
+      fe2.CalcDShape(eip2, dshape2_ref);
+
+      DenseMatrix adjJ1(dim), adjJ2(dim);
+      CalcAdjugate(FTr.Elem1->Jacobian(), adjJ1);
+      CalcAdjugate(FTr.Elem2->Jacobian(), adjJ2);
+
+      DenseMatrix dshape1_adj(ndof1, dim), dshape2_adj(ndof2, dim);
+      Mult(dshape1_ref, adjJ1, dshape1_adj);
+      Mult(dshape2_ref, adjJ2, dshape2_adj);
+
+      const real_t detJ1 = FTr.Elem1->Weight();
+      const real_t detJ2 = FTr.Elem2->Weight();
+      const real_t c0[2] = {-0.5, 0.5};
+      const real_t c1[2] = {0.5 * epsilon, -0.5 * epsilon};
+
+      auto traction_op = [&](const DenseMatrix &dshape_adj, int ndof,
+                             real_t detJ, int k, int p, int u)
+      {
+         real_t grad_dot_n = 0.0;
+         for (int j = 0; j < dim; j++)
+         {
+            grad_dot_n += (dshape_adj(k, j) / detJ) * nor(j);
+         }
+
+         return lambda * (dshape_adj(k, p) / detJ) * nor(u)
+                + mu * (((p == u) ? 1.0 : 0.0) * grad_dot_n
+                        + (dshape_adj(k, u) / detJ) * nor(p));
+      };
+
+      for (int p = 0; p < dim; p++)
+      {
+         for (int u = 0; u < dim; u++)
+         {
+            for (int k = 0; k < ndof1; k++)
+            {
+               for (int l = 0; l < ndof1; l++)
+               {
+                  mat(idx1(p, k), idx1(u, l))
+                     += c0[0] * shape1(k) * ip.weight
+                           * traction_op(dshape1_adj, ndof1, detJ1, l, u, p)
+                        + c1[0] * shape1(l) * ip.weight
+                           * traction_op(dshape1_adj, ndof1, detJ1, k, p, u);
+               }
+               for (int l = 0; l < ndof2; l++)
+               {
+                  mat(idx1(p, k), idx2(u, l))
+                     += c0[0] * shape1(k) * ip.weight
+                           * traction_op(dshape2_adj, ndof2, detJ2, l, u, p)
+                        + c1[1] * shape2(l) * ip.weight
+                           * traction_op(dshape1_adj, ndof1, detJ1, k, p, u);
+               }
+            }
+
+            for (int k = 0; k < ndof2; k++)
+            {
+               for (int l = 0; l < ndof1; l++)
+               {
+                  mat(idx2(p, k), idx1(u, l))
+                     += c0[1] * shape2(k) * ip.weight
+                           * traction_op(dshape1_adj, ndof1, detJ1, l, u, p)
+                        + c1[0] * shape1(l) * ip.weight
+                           * traction_op(dshape2_adj, ndof2, detJ2, k, p, u);
+               }
+               for (int l = 0; l < ndof2; l++)
+               {
+                  mat(idx2(p, k), idx2(u, l))
+                     += c0[1] * shape2(k) * ip.weight
+                           * traction_op(dshape2_adj, ndof2, detJ2, l, u, p)
+                        + c1[1] * shape2(l) * ip.weight
+                           * traction_op(dshape2_adj, ndof2, detJ2, k, p, u);
+               }
+            }
+         }
+      }
+   }
+
+   return mat;
+}
+
+DenseMatrix AssembleExplicitIPBoundaryConsistencyFaceMatrix(
+   const FiniteElement &fe,
+   FaceElementTransformations &FTr,
+   real_t lambda,
+   real_t mu,
+   real_t epsilon)
+{
+   constexpr int dim = 3;
+   const int ndof = fe.GetDof();
+   DenseMatrix mat(dim * ndof);
+   mat = 0.0;
+
+   const int face_order = fe.GetOrder();
+   const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
+   auto idx = [ndof](int comp, int dof) { return comp * ndof + dof; };
+
+   for (int q = 0; q < ir.GetNPoints(); q++)
+   {
+      const IntegrationPoint &ip = ir.IntPoint(q);
+      FTr.SetAllIntPoints(&ip);
+      const IntegrationPoint &eip = FTr.GetElement1IntPoint();
+
+      Vector nor(dim);
+      CalcOrtho(FTr.Jacobian(), nor);
+
+      Vector shape(ndof);
+      fe.CalcShape(eip, shape);
+
+      DenseMatrix dshape_ref(ndof, dim), adjJ(dim), dshape_adj(ndof, dim);
+      fe.CalcDShape(eip, dshape_ref);
+      CalcAdjugate(FTr.Elem1->Jacobian(), adjJ);
+      Mult(dshape_ref, adjJ, dshape_adj);
+
+      const real_t detJ = FTr.Elem1->Weight();
+
+      auto traction_op = [&](int k, int p, int u)
+      {
+         real_t grad_dot_n = 0.0;
+         for (int j = 0; j < dim; j++)
+         {
+            grad_dot_n += (dshape_adj(k, j) / detJ) * nor(j);
+         }
+
+         return lambda * (dshape_adj(k, p) / detJ) * nor(u)
+                + mu * (((p == u) ? 1.0 : 0.0) * grad_dot_n
+                        + (dshape_adj(k, u) / detJ) * nor(p));
+      };
+
+      for (int p = 0; p < dim; p++)
+      {
+         for (int u = 0; u < dim; u++)
+         {
+            for (int k = 0; k < ndof; k++)
+            {
+               for (int l = 0; l < ndof; l++)
+               {
+                  mat(idx(p, k), idx(u, l))
+                     += -1.0 * shape(k) * ip.weight * traction_op(l, u, p)
+                        + epsilon * shape(l) * ip.weight * traction_op(k, p, u);
+               }
+            }
+         }
+      }
+   }
+
+   return mat;
+}
+
+Vector AssembleExplicitIPBoundaryDirichletFaceRHS(
+   const FiniteElement &fe,
+   FaceElementTransformations &FTr,
+   real_t lambda,
+   real_t mu,
+   real_t epsilon,
+   real_t penalty_factor,
+   int order,
+   const real_t u_D[3])
+{
+   constexpr int dim = 3;
+   const int ndof = fe.GetDof();
+   Vector elvec(dim * ndof);
+   elvec = 0.0;
+
+   const int face_order = fe.GetOrder();
+   const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
+
+   for (int q = 0; q < ir.GetNPoints(); q++)
+   {
+      const IntegrationPoint &ip = ir.IntPoint(q);
+      FTr.SetAllIntPoints(&ip);
+      const IntegrationPoint &eip = FTr.GetElement1IntPoint();
+
+      Vector nor(dim);
+      CalcOrtho(FTr.Jacobian(), nor);
+
+      Vector shape(ndof);
+      fe.CalcShape(eip, shape);
+
+      DenseMatrix dshape_ref(ndof, dim), adjJ(dim), dshape_adj(ndof, dim);
+      fe.CalcDShape(eip, dshape_ref);
+      CalcAdjugate(FTr.Elem1->Jacobian(), adjJ);
+      Mult(dshape_ref, adjJ, dshape_adj);
+
+      const real_t detJ = FTr.Elem1->Weight();
+      const real_t w = ip.weight / detJ;
+
+      const real_t nl_q = nor.Norml2();
+      const real_t c0_mat = 2.0 * mu;
+      const real_t c1_mat = dim * lambda + 2.0 * mu;
+      const real_t c_N_1 = order * (order + dim - 1.0) / dim;
+      const real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ)
+                        * (c1_mat * c1_mat / c0_mat);
+      const real_t wq_penalty = penalty_factor * p0 * ip.weight * nl_q;
+
+      for (int k = 0; k < ndof; k++)
+      {
+         real_t grad_dot_n = 0.0;
+         for (int d = 0; d < dim; d++)
+         {
+            grad_dot_n += dshape_adj(k, d) * nor(d);
+         }
+
+         for (int i = 0; i < dim; i++)
+         {
+            real_t sym_val = 0.0;
+            for (int u = 0; u < dim; u++)
+            {
+               const real_t trac =
+                  lambda * dshape_adj(k, i) * nor(u)
+                  + mu * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                          + dshape_adj(k, u) * nor(i));
+               sym_val += trac * u_D[u];
+            }
+
+            const int idx = i * ndof + k;
+            elvec(idx) += epsilon * sym_val * w;
+            elvec(idx) += wq_penalty * u_D[i] * shape(k);
+         }
+      }
+   }
+
+   return elvec;
+}
+
+void ComputeExplicitIPFaceTractionNodal(
+   const FiniteElement &fe1,
+   const FiniteElement &fe2,
+   FaceElementTransformations &FTr,
+   const FaultBasis &fault_basis,
+   int fault_face_idx,
+   int order,
+   real_t lambda,
+   real_t mu,
+   real_t penalty_factor,
+   const Vector &u1_all,
+   const Vector &u2_all,
+   const Vector &slip_face,
+   Vector &traction_local,
+   Vector *traction_stress_local = nullptr,
+   Vector *traction_corr_local = nullptr)
+{
+   constexpr int dim = 3;
+   const int ndof1 = fe1.GetDof();
+   const int ndof2 = fe2.GetDof();
+   const int nbf = slip_face.Size() / 2;
+   const int face_order = std::max(fe1.GetOrder(), fe2.GetOrder());
+   const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
+   const int nqp = ir.GetNPoints();
+
+   FaceQuadrature fq(order, order);
+   MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
+   MFEM_ASSERT(fq.NumQuadPoints() == nqp, "Quadrature point mismatch");
+
+   Vector delta_u_nodal(dim * nbf);
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      real_t slip_local[2] = {slip_face(2 * kk), slip_face(2 * kk + 1)};
+      real_t du[3];
+      fault_basis.EmbedSlip(fault_face_idx, slip_local, du);
+      for (int c = 0; c < dim; c++)
+      {
+         delta_u_nodal(c * nbf + kk) = du[c];
+      }
+   }
+
+   Vector delta_u_quad;
+   fq.InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+
+   const IntegrationPoint &ip_center = Geometries.GetCenter(FTr.GetGeometryType());
+   FTr.SetAllIntPoints(&ip_center);
+   Vector nor(dim);
+   CalcOrtho(FTr.Jacobian(), nor);
+   const real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+
+   const real_t face_area = nor.Norml2();
+   const real_t vol1 = FTr.Elem1->Weight();
+   const real_t vol2 = FTr.Elem2->Weight();
+   const real_t c0_mat = 2.0 * mu;
+   const real_t c1_mat = dim * lambda + 2.0 * mu;
+   const real_t c_N_1 = order * (order + dim - 1.0) / dim;
+   const real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol1)
+                     * (c1_mat * c1_mat / c0_mat);
+   const real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * face_area / vol2)
+                     * (c1_mat * c1_mat / c0_mat);
+   const real_t penalty_ip = penalty_factor * (p0 + p1) / 4.0;
+
+   DenseMatrix Jinv1(dim), Jinv2(dim);
+   CalcInverse(FTr.Elem1->Jacobian(), Jinv1);
+   CalcInverse(FTr.Elem2->Jacobian(), Jinv2);
+
+   Vector T_quad(dim * nqp);
+   T_quad = 0.0;
+   Vector T_stress_quad(dim * nqp);
+   T_stress_quad = 0.0;
+   Vector T_corr_quad(dim * nqp);
+   T_corr_quad = 0.0;
+
+   for (int q = 0; q < nqp; q++)
+   {
+      const IntegrationPoint &fip = ir.IntPoint(q);
+      FTr.SetAllIntPoints(&fip);
+      const IntegrationPoint &eip1 = FTr.GetElement1IntPoint();
+      const IntegrationPoint &eip2 = FTr.GetElement2IntPoint();
+
+      DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
+      fe1.CalcDShape(eip1, dshape1_ref);
+      fe2.CalcDShape(eip2, dshape2_ref);
+      DenseMatrix dshape1_phys(ndof1, dim), dshape2_phys(ndof2, dim);
+      Mult(dshape1_ref, Jinv1, dshape1_phys);
+      Mult(dshape2_ref, Jinv2, dshape2_phys);
+
+      DenseMatrix grad1(dim, dim), grad2(dim, dim);
+      grad1 = 0.0;
+      grad2 = 0.0;
+      for (int c = 0; c < dim; c++)
+      {
+         for (int d = 0; d < dim; d++)
+         {
+            for (int k = 0; k < ndof1; k++)
+            {
+               grad1(c, d) += dshape1_phys(k, d) * u1_all(c * ndof1 + k);
+            }
+            for (int k = 0; k < ndof2; k++)
+            {
+               grad2(c, d) += dshape2_phys(k, d) * u2_all(c * ndof2 + k);
+            }
+         }
+      }
+
+      real_t T_stress_q[3] = {0.0, 0.0, 0.0};
+      for (int ci = 0; ci < dim; ci++)
+      {
+         for (int cj = 0; cj < dim; cj++)
+         {
+            const real_t ag = 0.5 * (grad1(ci, cj) + grad2(ci, cj));
+            const real_t ag_t = 0.5 * (grad1(cj, ci) + grad2(cj, ci));
+            const real_t eps_ij = 0.5 * (ag + ag_t);
+            const real_t tr_avg =
+               0.5 * ((grad1(0, 0) + grad2(0, 0))
+                    + (grad1(1, 1) + grad2(1, 1))
+                    + (grad1(2, 2) + grad2(2, 2)));
+            const real_t tr_contrib = (ci == cj) ? lambda * tr_avg : 0.0;
+            const real_t stress_ij = tr_contrib + 2.0 * mu * eps_ij;
+            T_stress_q[ci] += stress_ij * fault_basis.GetBasis(fault_face_idx).normal[cj];
+         }
+      }
+
+      Vector s1q(ndof1), s2q(ndof2);
+      fe1.CalcShape(eip1, s1q);
+      fe2.CalcShape(eip2, s2q);
+
+      real_t corr_neg_q[3] = {0.0, 0.0, 0.0};
+      for (int c = 0; c < dim; c++)
+      {
+         real_t u1q = 0.0, u2q = 0.0;
+         for (int k = 0; k < ndof1; k++) { u1q += s1q(k) * u1_all(c * ndof1 + k); }
+         for (int k = 0; k < ndof2; k++) { u2q += s2q(k) * u2_all(c * ndof2 + k); }
+
+         const real_t jump_c = (u1q - u2q) - sign * delta_u_quad(c * nqp + q);
+         const real_t correction_q = -penalty_ip * sign * jump_c;
+         corr_neg_q[c] = -correction_q;
+         T_quad(c * nqp + q) = T_stress_q[c] - correction_q;
+         T_stress_quad(c * nqp + q) = T_stress_q[c];
+         T_corr_quad(c * nqp + q) = corr_neg_q[c];
+      }
+   }
+
+   Vector T_nodal, T_stress_nodal, T_corr_nodal;
+   fq.GalerkinProject(dim, T_quad, T_nodal);
+   fq.GalerkinProject(dim, T_stress_quad, T_stress_nodal);
+   fq.GalerkinProject(dim, T_corr_quad, T_corr_nodal);
+
+   traction_local.SetSize(2 * nbf);
+   traction_local = 0.0;
+   if (traction_stress_local)
+   {
+      traction_stress_local->SetSize(2 * nbf);
+      *traction_stress_local = 0.0;
+   }
+   if (traction_corr_local)
+   {
+      traction_corr_local->SetSize(2 * nbf);
+      *traction_corr_local = 0.0;
+   }
+
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      real_t T_k[3] = {T_nodal(0 * nbf + kk),
+                       T_nodal(1 * nbf + kk),
+                       T_nodal(2 * nbf + kk)};
+      real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
+                         T_stress_nodal(1 * nbf + kk),
+                         T_stress_nodal(2 * nbf + kk)};
+      real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
+                         T_corr_nodal(1 * nbf + kk),
+                         T_corr_nodal(2 * nbf + kk)};
+
+      real_t tau_local[2], tau_stress[2], tau_corr[2];
+      fault_basis.ProjectTraction(fault_face_idx, T_k, tau_local);
+      fault_basis.ProjectTraction(fault_face_idx, T_s_k, tau_stress);
+      fault_basis.ProjectTraction(fault_face_idx, T_c_k, tau_corr);
+
+      traction_local(2 * kk) = tau_local[0];
+      traction_local(2 * kk + 1) = tau_local[1];
+      if (traction_stress_local)
+      {
+         (*traction_stress_local)(2 * kk) = tau_stress[0];
+         (*traction_stress_local)(2 * kk + 1) = tau_stress[1];
+      }
+      if (traction_corr_local)
+      {
+         (*traction_corr_local)(2 * kk) = tau_corr[0];
+         (*traction_corr_local)(2 * kk + 1) = tau_corr[1];
+      }
+   }
+}
+
+void TestIPFaceMatrixSlipRHSConsistencyP1()
+{
+   std::cout << "\n--- Test: IP Face Matrix vs Custom Slip RHS (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   DG_FECollection scalar_fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &scalar_fec);
+
+   const Array<int> &fault_faces = op.GetFaultInteriorFaces();
+   if (fault_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no interior fault faces found)\n";
+      return;
+   }
+
+   const int fi = 0;
+   const int face = fault_faces[fi];
+   FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(face);
+   TEST_ASSERT(FTr != nullptr, "Interior fault face transformation exists");
+
+   const FiniteElement *fe1 = scalar_fes.GetFE(FTr->Elem1No);
+   const FiniteElement *fe2 = scalar_fes.GetFE(FTr->Elem2No);
+   TEST_ASSERT(fe1->GetDof() == 4 && fe2->GetDof() == 4,
+               "p=1 tet scalar elements have 4 DOFs");
+   TEST_ASSERT(op.GetNbfPerFace() == 3, "p=1 IP tet uses 3 fault DOFs per face");
+
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   DGElasticityIntegrator integ_cons(lambda_coeff, mu_coeff, -1.0, 0.0);
+   DGElasticityIPPenaltyIntegrator integ_pen(lambda_coeff, mu_coeff, 3);
+
+   DenseMatrix face_cons, face_pen;
+   integ_cons.AssembleFaceMatrix(*fe1, *fe2, *FTr, face_cons);
+   integ_pen.AssembleFaceMatrix(*fe1, *fe2, *FTr, face_pen);
+   DenseMatrix face_mat(face_cons);
+   face_mat += face_pen;
+
+   FaceQuadrature fq(1, 1);
+   const IntegrationRule &face_nodes = fq.GetNodalRule();
+   TEST_ASSERT(face_nodes.GetNPoints() == 3, "p=1 face has 3 nodal points");
+
+   Vector slip_face(2 * 3);
+   slip_face(0) = 0.10; slip_face(1) = 1.00;
+   slip_face(2) = -0.05; slip_face(3) = 0.35;
+   slip_face(4) = 0.20; slip_face(5) = -0.15;
+
+   const IntegrationPoint &ip_center =
+      Geometries.GetCenter(FTr->GetGeometryType());
+   FTr->SetAllIntPoints(&ip_center);
+   Vector nor(3);
+   CalcOrtho(FTr->Jacobian(), nor);
+   const real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+
+   Vector local_x(3 * (fe1->GetDof() + fe2->GetDof()));
+   local_x = 0.0;
+
+   for (int comp = 0; comp < 3; comp++)
+   {
+      Vector jump_face_vals(3);
+      for (int k = 0; k < 3; k++)
+      {
+         real_t slip_local[2] = {slip_face(2 * k), slip_face(2 * k + 1)};
+         real_t du[3];
+         op.GetFaultBasis()->EmbedSlip(fi, slip_local, du);
+         jump_face_vals(k) = sign * du[comp];
+      }
+
+      Vector elem1_face_vals(3), elem2_face_vals(3);
+      for (int k = 0; k < 3; k++)
+      {
+         elem1_face_vals(k) = 0.5 * jump_face_vals(k);
+         elem2_face_vals(k) = -0.5 * jump_face_vals(k);
+      }
+
+      Vector u1_dofs = SolveElementTraceDOFs(*fe1, *FTr, 1, face_nodes,
+                                             elem1_face_vals);
+      Vector u2_dofs = SolveElementTraceDOFs(*fe2, *FTr, 2, face_nodes,
+                                             elem2_face_vals);
+
+      const int ndof1 = fe1->GetDof();
+      const int ndof2 = fe2->GetDof();
+      const int off1 = comp * ndof1;
+      const int off2 = 3 * ndof1 + comp * ndof2;
+      for (int j = 0; j < ndof1; j++) { local_x(off1 + j) = u1_dofs(j); }
+      for (int j = 0; j < ndof2; j++) { local_x(off2 + j) = u2_dofs(j); }
+   }
+
+   Vector Au_local(face_mat.Height());
+   face_mat.Mult(local_x, Au_local);
+
+   Vector rhs_local = AssembleCustomIPSlipFaceRHS(*fe1, *fe2, *FTr,
+                                                  *op.GetFaultBasis(), fi, 1,
+                                                  params.lambda(), params.mu(),
+                                                  slip_face);
+
+   Vector mismatch(Au_local.Size());
+   subtract(Au_local, rhs_local, mismatch);
+
+   const real_t rhs_norm = rhs_local.Norml2();
+   const real_t mismatch_norm = mismatch.Norml2();
+   const real_t rel = mismatch_norm / std::max(rhs_norm, 1e-30);
+
+   std::cout << "  ||rhs_local|| = " << rhs_norm << "\n";
+   std::cout << "  ||Au-rhs||    = " << mismatch_norm << "\n";
+   std::cout << "  rel mismatch  = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Local IP algebraic mismatch is finite");
+   TEST_ASSERT(rel < 1e-10,
+               "Face-local IP matrix action matches custom slip RHS");
+}
+
+void TestIPConsistencyMatrixMatchesExplicitTandemFormP1()
+{
+   std::cout << "\n--- Test: IP Consistency Matrix vs Explicit Tandem Form (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   DG_FECollection scalar_fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &scalar_fec);
+
+   const Array<int> &fault_faces = op.GetFaultInteriorFaces();
+   if (fault_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no interior fault faces found)\n";
+      return;
+   }
+
+   const int face = fault_faces[0];
+   FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(face);
+   TEST_ASSERT(FTr != nullptr, "Interior fault face transformation exists");
+
+   const FiniteElement *fe1 = scalar_fes.GetFE(FTr->Elem1No);
+   const FiniteElement *fe2 = scalar_fes.GetFE(FTr->Elem2No);
+
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   DGElasticityIntegrator integ_cons(lambda_coeff, mu_coeff, -1.0, 0.0);
+
+   DenseMatrix face_cons_builtin;
+   integ_cons.AssembleFaceMatrix(*fe1, *fe2, *FTr, face_cons_builtin);
+
+   DenseMatrix face_cons_explicit =
+      AssembleExplicitIPConsistencyFaceMatrix(*fe1, *fe2, *FTr,
+                                              params.lambda(), params.mu(),
+                                              -1.0);
+
+   DenseMatrix diff(face_cons_builtin);
+   diff -= face_cons_explicit;
+
+   real_t diff_sq = 0.0;
+   real_t ref_sq = 0.0;
+   for (int i = 0; i < diff.Height(); i++)
+   {
+      for (int j = 0; j < diff.Width(); j++)
+      {
+         diff_sq += diff(i, j) * diff(i, j);
+         ref_sq += face_cons_explicit(i, j) * face_cons_explicit(i, j);
+      }
+   }
+
+   const real_t diff_norm = std::sqrt(diff_sq);
+   const real_t ref_norm = std::sqrt(ref_sq);
+   const real_t rel = diff_norm / std::max(ref_norm, 1e-30);
+
+   std::cout << "  ||A_builtin - A_explicit|| = " << diff_norm << "\n";
+   std::cout << "  ||A_explicit||             = " << ref_norm << "\n";
+   std::cout << "  rel mismatch               = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Consistency matrix mismatch is finite");
+   TEST_ASSERT(rel < 1e-12,
+               "MFEM built-in consistency matrix matches explicit Tandem-style form");
+}
+
+void TestIPBoundaryConsistencyMatrixMatchesExplicitTandemFormP1()
+{
+   std::cout << "\n--- Test: IP Boundary Consistency Matrix vs Explicit Tandem Form (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+   (void)op;
+
+   DG_FECollection scalar_fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &scalar_fec);
+
+   FaceElementTransformations *FTr = nullptr;
+   for (int be = 0; be < mesh.GetNBE(); be++)
+   {
+      if (mesh.GetBdrAttribute(be) != 5) { continue; }
+      int face_idx = -1;
+      int face_info = 0;
+      mesh.GetBdrElementFace(be, &face_idx, &face_info);
+      FTr = mesh.GetFaceElementTransformations(face_idx);
+      if (FTr != nullptr) { break; }
+   }
+   TEST_ASSERT(FTr != nullptr, "Dirichlet boundary face transformation exists");
+
+   const FiniteElement *fe = scalar_fes.GetFE(FTr->Elem1No);
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   DGElasticityIntegrator integ_cons(lambda_coeff, mu_coeff, -1.0, 0.0);
+
+   DenseMatrix face_cons_builtin;
+   integ_cons.AssembleFaceMatrix(*fe, *fe, *FTr, face_cons_builtin);
+
+   DenseMatrix face_cons_explicit =
+      AssembleExplicitIPBoundaryConsistencyFaceMatrix(*fe, *FTr,
+                                                      params.lambda(),
+                                                      params.mu(), -1.0);
+
+   DenseMatrix diff(face_cons_builtin);
+   diff -= face_cons_explicit;
+
+   real_t diff_sq = 0.0;
+   real_t ref_sq = 0.0;
+   for (int i = 0; i < diff.Height(); i++)
+   {
+      for (int j = 0; j < diff.Width(); j++)
+      {
+         diff_sq += diff(i, j) * diff(i, j);
+         ref_sq += face_cons_explicit(i, j) * face_cons_explicit(i, j);
+      }
+   }
+
+   const real_t diff_norm = std::sqrt(diff_sq);
+   const real_t ref_norm = std::sqrt(ref_sq);
+   const real_t rel = diff_norm / std::max(ref_norm, 1e-30);
+
+   std::cout << "  ||A_builtin - A_explicit|| = " << diff_norm << "\n";
+   std::cout << "  ||A_explicit||             = " << ref_norm << "\n";
+   std::cout << "  rel mismatch               = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Boundary consistency matrix mismatch is finite");
+   TEST_ASSERT(rel < 1e-12,
+               "MFEM built-in boundary consistency matrix matches explicit Tandem-style form");
+}
+
+void TestIPTractionMatchesExplicitTandemFormP1()
+{
+   std::cout << "\n--- Test: IP Traction vs Explicit Tandem Form (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   const int ndofs = op.GetNumFaultDOFs();
+   const int nbf = op.GetNbfPerFace();
+   const Array<int> &fault_faces = op.GetFaultInteriorFaces();
+   if (ndofs == 0 || fault_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no interior fault faces found)\n";
+      return;
+   }
+
+   TEST_ASSERT(nbf == 3, "p=1 IP tet uses 3 fault DOFs");
+
+   Vector slip_bc(2 * ndofs);
+   slip_bc = 0.0;
+   const int fi = 0;
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      const int dof_idx = fi * nbf + kk;
+      slip_bc(2 * dof_idx) = 0.05 * (kk - 1);
+      slip_bc(2 * dof_idx + 1) = -1.0 - 0.2 * kk;
+   }
+
+   GridFunction u(&op.GetFESpace());
+   u = 0.0;
+   op.Solve(0.0, slip_bc, u);
+
+   Vector traction, traction_stress, traction_corr;
+   op.ComputeTractionComponents(u, slip_bc, traction, traction_stress,
+                                traction_corr, nullptr);
+
+   FaceElementTransformations *FTr =
+      mesh.GetInteriorFaceTransformations(fault_faces[fi]);
+   TEST_ASSERT(FTr != nullptr, "Interior fault face transformation exists");
+
+   const FiniteElementSpace &fes = op.GetFESpace();
+   Array<int> vdofs1, vdofs2;
+   fes.GetElementVDofs(FTr->Elem1No, vdofs1);
+   fes.GetElementVDofs(FTr->Elem2No, vdofs2);
+
+   Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+   u.GetSubVector(vdofs1, u1_all);
+   u.GetSubVector(vdofs2, u2_all);
+
+   const FiniteElement *fe1 = fes.GetFE(FTr->Elem1No);
+   const FiniteElement *fe2 = fes.GetFE(FTr->Elem2No);
+   TEST_ASSERT(fe1 != nullptr && fe2 != nullptr, "Element finite elements exist");
+
+   Vector slip_face(2 * nbf);
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      const int dof_idx = fi * nbf + kk;
+      slip_face(2 * kk) = slip_bc(2 * dof_idx);
+      slip_face(2 * kk + 1) = slip_bc(2 * dof_idx + 1);
+   }
+
+   Vector traction_local_explicit, traction_stress_local_explicit,
+      traction_corr_local_explicit;
+   ComputeExplicitIPFaceTractionNodal(
+      *fe1, *fe2, *FTr, *op.GetFaultBasis(), fi, 1,
+      params.lambda(), params.mu(), 1.0,
+      u1_all, u2_all, slip_face,
+      traction_local_explicit,
+      &traction_stress_local_explicit,
+      &traction_corr_local_explicit);
+
+   real_t diff_sq = 0.0, ref_sq = 0.0;
+   real_t diff_stress_sq = 0.0, ref_stress_sq = 0.0;
+   real_t diff_corr_sq = 0.0, ref_corr_sq = 0.0;
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      const int dof_idx = fi * nbf + kk;
+      for (int c = 0; c < 2; c++)
+      {
+         const int gi = 2 * dof_idx + c;
+         const int li = 2 * kk + c;
+
+         const real_t d = traction(gi) - traction_local_explicit(li);
+         diff_sq += d * d;
+         ref_sq += traction_local_explicit(li) * traction_local_explicit(li);
+
+         const real_t ds = traction_stress(gi) - traction_stress_local_explicit(li);
+         diff_stress_sq += ds * ds;
+         ref_stress_sq += traction_stress_local_explicit(li)
+                          * traction_stress_local_explicit(li);
+
+         const real_t dc = traction_corr(gi) - traction_corr_local_explicit(li);
+         diff_corr_sq += dc * dc;
+         ref_corr_sq += traction_corr_local_explicit(li)
+                        * traction_corr_local_explicit(li);
+      }
+   }
+
+   const real_t rel =
+      std::sqrt(diff_sq) / std::max(std::sqrt(ref_sq), 1e-30);
+   const real_t rel_stress =
+      std::sqrt(diff_stress_sq) / std::max(std::sqrt(ref_stress_sq), 1e-30);
+   const real_t rel_corr =
+      std::sqrt(diff_corr_sq) / std::max(std::sqrt(ref_corr_sq), 1e-30);
+
+   std::cout << "  rel traction mismatch       = " << rel << "\n";
+   std::cout << "  rel stress-part mismatch    = " << rel_stress << "\n";
+   std::cout << "  rel correction mismatch     = " << rel_corr << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Traction mismatch is finite");
+   TEST_ASSERT(std::isfinite(rel_stress), "Stress-part mismatch is finite");
+   TEST_ASSERT(std::isfinite(rel_corr), "Correction mismatch is finite");
+   TEST_ASSERT(rel < 1e-12,
+               "MFEM traction matches explicit Tandem-style local form");
+   TEST_ASSERT(rel_stress < 1e-12,
+               "MFEM traction stress part matches explicit Tandem-style local form");
+   TEST_ASSERT(rel_corr < 1e-12,
+               "MFEM traction correction matches explicit Tandem-style local form");
+}
+
+void TestIPStaticJumpResidualUniformVsHeterogeneousP1()
+{
+   std::cout << "\n--- Test: IP Static Jump Residual Uniform vs Heterogeneous (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   const int ndofs = op.GetNumFaultDOFs();
+   const int nbf = op.GetNbfPerFace();
+   const int nfaces = op.GetNumFaultFaces();
+   if (ndofs == 0 || nfaces == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   auto solve_and_measure = [&](const Vector &slip_bc, const char *label)
+   {
+      GridFunction u(&op.GetFESpace());
+      u = 0.0;
+      op.Solve(0.0, slip_bc, u);
+
+      Vector traction, traction_stress, traction_corr, jump_residual;
+      op.ComputeTractionDiagnostics(u, slip_bc, traction, traction_stress,
+                                    traction_corr, jump_residual, nullptr);
+
+      real_t slip_norm = slip_bc.Norml2();
+      real_t res_norm = jump_residual.Norml2();
+      real_t rel = res_norm / std::max(slip_norm, 1e-30);
+
+      std::cout << "  " << label
+                << ": ||slip||=" << slip_norm
+                << " ||R||=" << res_norm
+                << " rel=" << rel << "\n";
+      return rel;
+   };
+
+   Vector slip_uniform(2 * ndofs);
+   slip_uniform = 0.0;
+   for (int i = 0; i < ndofs; i++)
+   {
+      slip_uniform(2 * i + 1) = -1.0;
+   }
+
+   Vector slip_hetero(2 * ndofs);
+   slip_hetero = 0.0;
+   for (int f = 0; f < nfaces; f++)
+   {
+      for (int k = 0; k < nbf; k++)
+      {
+         const int dof = f * nbf + k;
+         slip_hetero(2 * dof + 1) = -1.0 - 0.25 * f - 0.15 * k;
+      }
+   }
+
+   const real_t rel_uniform = solve_and_measure(slip_uniform, "uniform");
+   const real_t rel_hetero = solve_and_measure(slip_hetero, "heterogeneous");
+
+   TEST_ASSERT(std::isfinite(rel_uniform), "Uniform jump residual is finite");
+   TEST_ASSERT(std::isfinite(rel_hetero), "Heterogeneous jump residual is finite");
+   TEST_ASSERT(rel_hetero > rel_uniform,
+               "Heterogeneous slip produces larger jump residual than uniform slip");
+}
+
+void TestIPStaticJumpResidualP1VsP2()
+{
+   std::cout << "\n--- Test: IP Static Jump Residual p=1 vs p=2 ---\n";
+
+   auto solve_and_measure = [&](int order, bool heterogeneous)
+   {
+      real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+      Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+      BP5Params params;
+      ElasticityDomainOperator<Mesh> op(mesh, order, params.lambda(),
+                                        params.mu(), 0.0, Lz, 2.0 * Lx,
+                                        DGMethod::IP);
+
+      const int ndofs = op.GetNumFaultDOFs();
+      const int nbf = op.GetNbfPerFace();
+      const int nfaces = op.GetNumFaultFaces();
+      TEST_ASSERT(ndofs > 0 && nfaces > 0, "Fault DOFs found for p comparison");
+
+      Vector slip_bc(2 * ndofs);
+      slip_bc = 0.0;
+      for (int f = 0; f < nfaces; f++)
+      {
+         for (int k = 0; k < nbf; k++)
+         {
+            const int dof = f * nbf + k;
+            slip_bc(2 * dof + 1) = heterogeneous
+               ? (-1.0 - 0.25 * f - 0.15 * k)
+               : -1.0;
+         }
+      }
+
+      GridFunction u(&op.GetFESpace());
+      u = 0.0;
+      op.Solve(0.0, slip_bc, u);
+
+      Vector traction, traction_stress, traction_corr, jump_residual;
+      op.ComputeTractionDiagnostics(u, slip_bc, traction, traction_stress,
+                                    traction_corr, jump_residual, nullptr);
+
+      return jump_residual.Norml2() / std::max(slip_bc.Norml2(), 1e-30);
+   };
+
+   const real_t rel_p1_uniform = solve_and_measure(1, false);
+   const real_t rel_p2_uniform = solve_and_measure(2, false);
+   const real_t rel_p1_hetero = solve_and_measure(1, true);
+   const real_t rel_p2_hetero = solve_and_measure(2, true);
+
+   std::cout << "  uniform:      p=1 rel=" << rel_p1_uniform
+             << " p=2 rel=" << rel_p2_uniform << "\n";
+   std::cout << "  heterogeneous:p=1 rel=" << rel_p1_hetero
+             << " p=2 rel=" << rel_p2_hetero << "\n";
+
+   TEST_ASSERT(std::isfinite(rel_p1_uniform) && std::isfinite(rel_p2_uniform),
+               "Uniform p-comparison residuals are finite");
+   TEST_ASSERT(std::isfinite(rel_p1_hetero) && std::isfinite(rel_p2_hetero),
+               "Heterogeneous p-comparison residuals are finite");
+   TEST_ASSERT(rel_p2_uniform < rel_p1_uniform,
+               "p=2 uniform residual is smaller than p=1");
+   TEST_ASSERT(rel_p2_hetero < rel_p1_hetero,
+               "p=2 heterogeneous residual is smaller than p=1");
+}
+
+void TestIPGlobalDirichletRHSMatchesExplicitBoundaryFormP1()
+{
+   std::cout << "\n--- Test: IP Global Dirichlet RHS vs Explicit Boundary Form (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   const real_t Vp = 1.0;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     Vp, Lz, 2.0 * Lx, DGMethod::IP);
+
+   Vector slip_bc(2 * op.GetNumFaultDOFs());
+   slip_bc = 0.0;
+
+   GridFunction u(&op.GetFESpace());
+   u = 0.0;
+   const real_t time = 1.0;
+   op.Solve(time, slip_bc, u);
+
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   BilinearForm a(&op.GetFESpace());
+   a.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0));
+
+   Array<int> dirichlet_marker(mesh.bdr_attributes.Max());
+   dirichlet_marker = 0;
+   dirichlet_marker[5 - 1] = 1;
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0),
+      dirichlet_marker);
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0),
+      dirichlet_marker);
+   a.Assemble();
+   a.Finalize();
+
+   Vector b_explicit(op.GetFESpace().GetTrueVSize());
+   b_explicit = 0.0;
+
+   const FiniteElementSpace &fes = op.GetFESpace();
+   for (int be = 0; be < mesh.GetNBE(); be++)
+   {
+      if (mesh.GetBdrAttribute(be) != 5) { continue; }
+
+      Vector centroid(3);
+      centroid = 0.0;
+      ElementTransformation *eltransf = mesh.GetBdrElementTransformation(be);
+      const IntegrationRule &ir_c = IntRules.Get(eltransf->GetGeometryType(), 1);
+      for (int p = 0; p < ir_c.GetNPoints(); p++)
+      {
+         eltransf->SetIntPoint(&ir_c.IntPoint(p));
+         Vector phys(3);
+         eltransf->Transform(ir_c.IntPoint(p), phys);
+         centroid.Add(1.0 / ir_c.GetNPoints(), phys);
+      }
+
+      const real_t sign = (centroid(1) > 0.0) ? 1.0 : -1.0;
+      const real_t u_D[3] = {sign * Vp * time / 2.0, 0.0, 0.0};
+
+      int face_idx, face_info;
+      mesh.GetBdrElementFace(be, &face_idx, &face_info);
+      FaceElementTransformations *FTr = mesh.GetFaceElementTransformations(face_idx);
+      TEST_ASSERT(FTr != nullptr, "Boundary face transformation exists");
+
+      const FiniteElement *fe = fes.GetFE(FTr->Elem1No);
+      Array<int> vdofs;
+      fes.GetElementVDofs(FTr->Elem1No, vdofs);
+
+      Vector elvec = AssembleExplicitIPBoundaryDirichletFaceRHS(
+         *fe, *FTr, params.lambda(), params.mu(), -1.0, 1.0, 1, u_D);
+
+      for (int j = 0; j < vdofs.Size(); j++)
+      {
+         int gj = vdofs[j];
+         if (gj >= 0) { b_explicit(gj) += elvec(j); }
+         else { b_explicit(-1 - gj) -= elvec(j); }
+      }
+   }
+
+   Vector Au(u.Size());
+   a.SpMat().Mult(u, Au);
+   Vector residual(Au.Size());
+   subtract(Au, b_explicit, residual);
+
+   const real_t rel = residual.Norml2() / std::max(b_explicit.Norml2(), 1e-30);
+   std::cout << "  ||b_explicit|| = " << b_explicit.Norml2() << "\n";
+   std::cout << "  ||Au-b||       = " << residual.Norml2() << "\n";
+   std::cout << "  rel mismatch   = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Global Dirichlet residual mismatch is finite");
+   TEST_ASSERT(rel < 1e-10,
+               "Solved displacement satisfies explicit Tandem-style boundary RHS");
+}
+
+void TestIPGlobalSlipRHSMatchesExplicitFormP1()
+{
+   std::cout << "\n--- Test: IP Global Slip RHS vs Explicit Form (p=1 tet) ---\n";
+
+   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Lx, DGMethod::IP);
+
+   const int ndofs = op.GetNumFaultDOFs();
+   const int nbf = op.GetNbfPerFace();
+   const Array<int> &fault_faces = op.GetFaultInteriorFaces();
+   if (ndofs == 0 || fault_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no interior fault faces found)\n";
+      return;
+   }
+
+   Vector slip_bc(2 * ndofs);
+   slip_bc = 0.0;
+   for (int fi = 0; fi < fault_faces.Size(); fi++)
+   {
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         const int dof = fi * nbf + kk;
+         slip_bc(2 * dof) = 0.05 * (fi + kk);
+         slip_bc(2 * dof + 1) = -1.0 - 0.2 * fi - 0.1 * kk;
+      }
+   }
+
+   GridFunction u(&op.GetFESpace());
+   u = 0.0;
+   op.Solve(0.0, slip_bc, u);
+
+   ConstantCoefficient lambda_coeff(params.lambda());
+   ConstantCoefficient mu_coeff(params.mu());
+   BilinearForm a(&op.GetFESpace());
+   a.AddDomainIntegrator(new ElasticityIntegrator(lambda_coeff, mu_coeff));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0));
+   a.AddInteriorFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0));
+
+   Array<int> dirichlet_marker(mesh.bdr_attributes.Max());
+   dirichlet_marker = 0;
+   dirichlet_marker[5 - 1] = 1;
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIntegrator(lambda_coeff, mu_coeff, -1.0, 0.0),
+      dirichlet_marker);
+   a.AddBdrFaceIntegrator(
+      new DGElasticityIPPenaltyIntegrator(lambda_coeff, mu_coeff, 3, 1.0),
+      dirichlet_marker);
+   a.Assemble();
+   a.Finalize();
+
+   Vector b_explicit(op.GetFESpace().GetTrueVSize());
+   b_explicit = 0.0;
+
+   DG_FECollection scalar_fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace scalar_fes(&mesh, &scalar_fec);
+   for (int fi = 0; fi < fault_faces.Size(); fi++)
+   {
+      FaceElementTransformations *FTr =
+         mesh.GetInteriorFaceTransformations(fault_faces[fi]);
+      TEST_ASSERT(FTr != nullptr, "Interior fault face transformation exists");
+
+      const FiniteElement *fe1 = scalar_fes.GetFE(FTr->Elem1No);
+      const FiniteElement *fe2 = scalar_fes.GetFE(FTr->Elem2No);
+      Array<int> vdofs1, vdofs2;
+      op.GetFESpace().GetElementVDofs(FTr->Elem1No, vdofs1);
+      op.GetFESpace().GetElementVDofs(FTr->Elem2No, vdofs2);
+
+      Vector slip_face(2 * nbf);
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         const int dof = fi * nbf + kk;
+         slip_face(2 * kk) = slip_bc(2 * dof);
+         slip_face(2 * kk + 1) = slip_bc(2 * dof + 1);
+      }
+
+      Vector elvec = AssembleCustomIPSlipFaceRHS(
+         *fe1, *fe2, *FTr, *op.GetFaultBasis(), fi, 1,
+         params.lambda(), params.mu(), slip_face);
+
+      for (int j = 0; j < vdofs1.Size(); j++)
+      {
+         int gj = vdofs1[j];
+         if (gj >= 0) { b_explicit(gj) += elvec(j); }
+         else { b_explicit(-1 - gj) -= elvec(j); }
+      }
+      const int off = vdofs1.Size();
+      for (int j = 0; j < vdofs2.Size(); j++)
+      {
+         int gj = vdofs2[j];
+         if (gj >= 0) { b_explicit(gj) += elvec(off + j); }
+         else { b_explicit(-1 - gj) -= elvec(off + j); }
+      }
+   }
+
+   Vector Au(u.Size());
+   a.SpMat().Mult(u, Au);
+   Vector residual(Au.Size());
+   subtract(Au, b_explicit, residual);
+
+   const real_t rel = residual.Norml2() / std::max(b_explicit.Norml2(), 1e-30);
+   std::cout << "  ||b_explicit|| = " << b_explicit.Norml2() << "\n";
+   std::cout << "  ||Au-b||       = " << residual.Norml2() << "\n";
+   std::cout << "  rel mismatch   = " << rel << "\n";
+
+   TEST_ASSERT(std::isfinite(rel), "Global slip residual mismatch is finite");
+   TEST_ASSERT(rel < 1e-10,
+               "Solved displacement satisfies explicit global slip RHS");
+}
+
 // =============================================================================
 // v45 Phase 4: Multi-DOF Fault State/Geometry Tests (tet mesh, p=2 IP)
 // =============================================================================
@@ -2643,6 +4050,13 @@ int main()
    TestMultiDOFVaryingSlip();
    TestMultiDOFSlipInterpolation();
    TestMultiDOFProjectInterpolateRoundtrip();
+   TestIPConsistencyMatrixMatchesExplicitTandemFormP1();
+   TestIPBoundaryConsistencyMatrixMatchesExplicitTandemFormP1();
+   TestIPTractionMatchesExplicitTandemFormP1();
+   TestIPStaticJumpResidualUniformVsHeterogeneousP1();
+   TestIPStaticJumpResidualP1VsP2();
+   TestIPGlobalDirichletRHSMatchesExplicitBoundaryFormP1();
+   TestIPGlobalSlipRHSMatchesExplicitFormP1();
 
    // v45 Phase 4: Multi-DOF fault state/geometry tests (tet mesh, p=2)
    TestMultiDOFStateLayoutP1();

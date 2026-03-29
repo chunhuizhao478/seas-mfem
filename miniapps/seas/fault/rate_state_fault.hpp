@@ -438,13 +438,14 @@ public:
             real_t eta = eta_values(i);
             real_t Dc = Dc_values_(i);
 
-            // v51: elastic sigma_n feedback (matches Tandem DieterichRuinaAgeing.h:86)
-            // sigma_n_eff = sigma_n_pre + T_n_elastic
-            // NormalStress returns positive for compression → sigma_n stays near 25 MPa
+            // v54 fix: elastic sigma_n feedback matching Tandem DieterichRuinaBase.h:87
+            //   Tandem: snAbs = -sn + SnPre  (sn = T . n_hat, n_hat = fault normal)
+            //   For compression: sn < 0, so snAbs = SnPre + |sn| > SnPre (correct)
+            // v51 had WRONG SIGN: sigma_n_eff = SnPre + sn (compression decreased sigma_n)
             real_t sigma_n_eff = sigma_n_bp5_;
             if (normal_traction)
             {
-               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
+               sigma_n_eff = sigma_n_bp5_ - (*normal_traction)(i);
                // Safety: ensure sigma_n stays positive (physical requirement)
                sigma_n_eff = std::max(sigma_n_eff, 0.1 * sigma_n_bp5_);
             }

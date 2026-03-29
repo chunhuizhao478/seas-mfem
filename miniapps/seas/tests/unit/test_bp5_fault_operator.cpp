@@ -36,6 +36,7 @@ using namespace mfem::seas;
 static Mesh Create3DMesh(int nx, int ny, int nz,
                           real_t Lx, real_t Ly, real_t Lz)
 {
+   // Match Tandem coordinates: [-Lx, Lx] x [-Ly, Ly] x [-Lz, 0]
    Mesh mesh = Mesh::MakeCartesian3D(2 * nx, 2 * ny, nz,
                                       Element::HEXAHEDRON,
                                       2.0 * Lx, 2.0 * Ly, Lz);
@@ -43,7 +44,7 @@ static Mesh Create3DMesh(int nx, int ny, int nz,
    Vector shift(3);
    shift(0) = -Lx;
    shift(1) = -Ly;
-   shift(2) = 0.0;
+    shift(2) = -Lz;
 
    for (int i = 0; i < mesh.GetNV(); i++)
    {
@@ -68,7 +69,7 @@ static Mesh Create3DMesh(int nx, int ny, int nz,
       else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 3); }
       else if (std::abs(center(1) - (-Ly)) < tol)  { mesh.SetBdrAttribute(be, 4); }
       else if (std::abs(center(2) - 0.0) < tol)    { mesh.SetBdrAttribute(be, 5); }
-      else if (std::abs(center(2) - Lz) < tol)     { mesh.SetBdrAttribute(be, 6); }
+      else if (std::abs(center(2) + Lz) < tol)     { mesh.SetBdrAttribute(be, 6); }
    }
 
    mesh.SetAttributes();
@@ -122,6 +123,34 @@ struct BP5Fixture
       return true;
    }
 };
+
+static real_t TandemPsiInit(real_t tau_abs, real_t V_abs_init, real_t sigma_n,
+                            real_t eta, real_t a, real_t V0)
+{
+   const real_t arg = (tau_abs - eta * V_abs_init) / (a * sigma_n);
+   const real_t s = std::sinh(arg);
+   return a * std::log((2.0 * V0 / V_abs_init) * s);
+}
+
+static void TandemSlipRateVectorPsi(const real_t tau_vec[2], real_t psi,
+                                    real_t sigma_n, real_t eta, real_t a,
+                                    real_t V0, DieterichRuinaFriction &friction,
+                                    real_t V_vec[2])
+{
+   const real_t tau_abs = std::sqrt(tau_vec[0] * tau_vec[0] +
+                                    tau_vec[1] * tau_vec[1]);
+   if (tau_abs <= 0.0)
+   {
+      V_vec[0] = 0.0;
+      V_vec[1] = 0.0;
+      return;
+   }
+
+   const real_t V_abs = friction.SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a);
+   V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
+   V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
+   (void)V0;
+}
 
 // =============================================================================
 // Test 1: BP5 Construction — size queries
@@ -310,6 +339,98 @@ void TestBP5ComputeRHS()
 
    std::cout << "  V_max from RHS: " << V_max << " m/s\n";
 }
+
+// =============================================================================
+// Test 4b: BP5 node update matches explicit Tandem-style formulas
+// =============================================================================
+void TestBP5NodeUpdateMatchesTandemSource()
+{
+   std::cout << "\n--- Test: BP5 Node Update vs Tandem Source Formulas ---\n";
+
+   BP5Fixture fix;
+   if (!fix.Setup())
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   const int N = fix.nf;
+   Vector state(fix.fault_op->StateSize());
+   fix.fault_op->PreInit(state);
+
+   Vector traction(fix.fault_op->TractionSize());
+   traction = 0.0;
+
+   fix.fault_op->Init(traction, state);
+
+   Vector rate(fix.fault_op->StateSize());
+   fix.fault_op->ComputeRHS(traction, state, rate);
+
+   const Vector &a_values = fix.fault_geom->GetAValues();
+   const Vector &eta_values = fix.fault_geom->GetEtaValues();
+   const Vector &dc_values = fix.fault_geom->GetDcValues();
+   const Vector &tau_pre = fix.fault_geom->GetTauPre();
+   const Vector &V_init = fix.fault_geom->GetVInit();
+
+   int node = -1;
+   for (int i = 0; i < N; i++)
+   {
+      real_t V0i = V_init(2 * i);
+      real_t V1i = V_init(2 * i + 1);
+      real_t Vabs = std::sqrt(V0i * V0i + V1i * V1i);
+      if (Vabs > fix.params.V_init * 10.0)
+      {
+         node = i;
+         break;
+      }
+   }
+   if (node < 0) { node = 0; }
+
+   const real_t tau_vec[2] = {tau_pre(2 * node) + traction(2 * node),
+                              tau_pre(2 * node + 1) + traction(2 * node + 1)};
+   const real_t tau_abs = std::sqrt(tau_vec[0] * tau_vec[0] +
+                                    tau_vec[1] * tau_vec[1]);
+   const real_t V_abs_init = std::sqrt(V_init(2 * node) * V_init(2 * node) +
+                                       V_init(2 * node + 1) * V_init(2 * node + 1));
+   const real_t a = a_values(node);
+   const real_t eta = eta_values(node);
+   const real_t Dc = dc_values(node);
+   const real_t sigma_n = fix.params.sigma_n;
+
+   const real_t psi_expected = TandemPsiInit(
+      tau_abs, V_abs_init, sigma_n, eta, a, fix.params.V0);
+   const real_t psi_actual = state(node * 3 + 2);
+
+   real_t V_expected[2];
+   TandemSlipRateVectorPsi(tau_vec, psi_actual, sigma_n, eta, a,
+                           fix.params.V0, *fix.friction, V_expected);
+   const real_t dpsi_expected =
+      fix.params.b * fix.params.V0 / Dc
+      * (std::exp((fix.params.f0 - psi_actual) / fix.params.b)
+         - std::sqrt(V_expected[0] * V_expected[0]
+                     + V_expected[1] * V_expected[1]) / fix.params.V0);
+
+   const real_t V_actual[2] = {rate(node * 3 + 0), rate(node * 3 + 1)};
+   const real_t dpsi_actual = rate(node * 3 + 2);
+
+   std::cout << "  node=" << node
+             << " psi_expected=" << psi_expected
+             << " psi_actual=" << psi_actual << "\n";
+   std::cout << "  V_expected=(" << V_expected[0] << "," << V_expected[1] << ")"
+             << " V_actual=(" << V_actual[0] << "," << V_actual[1] << ")\n";
+   std::cout << "  dpsi_expected=" << dpsi_expected
+             << " dpsi_actual=" << dpsi_actual << "\n";
+
+   TEST_NEAR(psi_actual, psi_expected, 1e-12,
+             "Init psi matches Tandem-style psi_init");
+   TEST_NEAR(V_actual[0], V_expected[0], 1e-15,
+             "ComputeRHS dip rate matches Tandem-style slip_rate");
+   TEST_NEAR(V_actual[1], V_expected[1], 1e-15,
+             "ComputeRHS strike rate matches Tandem-style slip_rate");
+   TEST_NEAR(dpsi_actual, dpsi_expected, 1e-12,
+             "ComputeRHS dpsi/dt matches Tandem-style aging law");
+}
+
 
 // =============================================================================
 // Test 5: BP5 State Access Roundtrip — GetSlip/SetSlip, GetTheta/SetTheta
@@ -651,6 +772,7 @@ int main()
    TestBP5PreInit();
    TestBP5Init();
    TestBP5ComputeRHS();
+   TestBP5NodeUpdateMatchesTandemSource();
    TestBP5StateRoundtrip();
    TestBP5StressEquilibrium();
    TestBP5VerifyInitialSlipRate();
