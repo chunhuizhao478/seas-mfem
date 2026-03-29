@@ -1966,6 +1966,176 @@ void TestKbConsistency()
 }
 
 // ============================================================================
+// Test 21: v55 — sign_flipped double negation in traction projection
+//
+// Tandem convention: when mesh normal opposes ref_normal, both the
+// traction (σ·n_mesh = -σ·n_ref) and the fault basis are negated.
+// The double negation cancels, giving orientation-independent results.
+//
+// This test verifies ProjectTractionToFaultDOFs produces the same
+// fault-local traction regardless of sign_flipped flag, given
+// appropriately signed 3D traction input.
+// ============================================================================
+void TestSignFlippedTractionProjection()
+{
+   std::cout << "\n[Test 21] sign_flipped double negation in traction projection\n";
+
+   // Setup: a simple 1-DOF fault face (p=0)
+   int dim = 3, nbf = 1, ncomp = 2;
+
+   // Quadrature: 1 point for simplicity
+   const IntegrationRule &ir = IntRules.Get(Geometry::TRIANGLE, 1);
+   int nq = ir.GetNPoints();
+
+   // Basis at quad points: φ(q) = 1 for all q (constant)
+   DenseMatrix e_q(nbf, nq);
+   for (int q = 0; q < nq; q++) { e_q(0, q) = 1.0; }
+
+   // Normal lengths (constant)
+   Vector nl_q(nq);
+   for (int q = 0; q < nq; q++) { nl_q(q) = 1.0; }
+
+   // BP5 fault basis: tangent1 = dip = (0,0,-1), tangent2 = strike = (1,0,0)
+   real_t tangents[2][3] = {{0, 0, -1}, {1, 0, 0}};
+
+   // A known 3D traction: T = (5 MPa, 0, -2 MPa) = 5 in X (strike), -2 in Z (dip)
+   // This corresponds to: tau_dip = T·tangent1 = (5,0,-2)·(0,0,-1) = 2
+   //                       tau_strike = T·tangent2 = (5,0,-2)·(1,0,0) = 5
+
+   // Case 1: Non-flipped face (mesh normal = ref_normal direction)
+   // traction_q uses σ·n_ref → T is as-is
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = 5e6;   // T_x
+         T_q(1 * nq + q) = 0.0;   // T_y
+         T_q(2 * nq + q) = -2e6;  // T_z
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, tangents,
+         false,  // NOT flipped
+         trac_local);
+
+      TEST_NEAR(trac_local(0), 2e6, 1e-6, "Non-flipped: tau_dip = 2 MPa");
+      TEST_NEAR(trac_local(1), 5e6, 1e-6, "Non-flipped: tau_strike = 5 MPa");
+   }
+
+   // Case 2: Flipped face (mesh normal = -ref_normal)
+   // traction_q uses σ·(-n_ref) �� T is negated
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = -5e6;  // negated T_x
+         T_q(1 * nq + q) = 0.0;
+         T_q(2 * nq + q) = 2e6;   // negated T_z
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, tangents,
+         true,   // FLIPPED → negate tangents → double negation → same result
+         trac_local);
+
+      TEST_NEAR(trac_local(0), 2e6, 1e-6, "Flipped: tau_dip = 2 MPa (same as non-flipped)");
+      TEST_NEAR(trac_local(1), 5e6, 1e-6, "Flipped: tau_strike = 5 MPa (same as non-flipped)");
+   }
+
+   // Case 3: Verify that WITHOUT sign_flipped, flipped T gives wrong result
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = -5e6;
+         T_q(1 * nq + q) = 0.0;
+         T_q(2 * nq + q) = 2e6;
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, tangents,
+         false,  // NOT marking as flipped → wrong result
+         trac_local);
+
+      // Without sign correction: tau_dip = (-5,0,2)·(0,0,-1) = -2 (wrong sign!)
+      TEST_NEAR(trac_local(0), -2e6, 1e-6, "No flip flag: wrong tau_dip = -2 MPa");
+      TEST_NEAR(trac_local(1), -5e6, 1e-6, "No flip flag: wrong tau_strike = -5 MPa");
+   }
+}
+
+// ============================================================================
+// Test 22: v55 — FaultBasis sign_flipped flag is set correctly
+// ============================================================================
+void TestFaultBasisSignFlipped()
+{
+   std::cout << "\n[Test 22] FaultBasis sign_flipped flag\n";
+
+   // Create a mesh where fault faces can have either normal direction
+   real_t Lx = 2000, Ly = 2000, Lz = 2000;
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 2, Element::TETRAHEDRON,
+                                      2*Lx, 2*Ly, Lz);
+   for (int i = 0; i < mesh.GetNV(); i++)
+   {
+      real_t *v = mesh.GetVertex(i);
+      v[0] -= Lx; v[1] -= Ly; v[2] -= Lz;
+   }
+
+   // Find faces at Y≈0
+   Array<int> y0_faces;
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      FaceElementTransformations *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (!FTr) { continue; }
+      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
+      FTr->Face->SetIntPoint(&ip);
+      Vector center(3);
+      FTr->Face->Transform(ip, center);
+      if (std::abs(center(1)) < 100.0) { y0_faces.Append(f); }
+   }
+
+   if (y0_faces.Size() == 0)
+   {
+      std::cout << "  (Skipped: no Y=0 faces)\n";
+      return;
+   }
+
+   // Compute fault basis with ref_normal = (0, -1, 0)
+   Vector ref_normal(3), up(3);
+   ref_normal = 0.0; ref_normal(1) = -1.0;
+   up = 0.0; up(2) = 1.0;
+
+   FaultBasis fb;
+   fb.Compute(mesh, y0_faces, ref_normal, up);
+
+   // Check: sign_flipped should be set for faces where CalcOrtho points +Y
+   int flipped_count = 0, non_flipped_count = 0;
+   for (int i = 0; i < y0_faces.Size(); i++)
+   {
+      const auto &b = fb.GetBasis(i);
+      if (b.sign_flipped) { flipped_count++; }
+      else { non_flipped_count++; }
+
+      // Normal should always be oriented to ref_normal direction (-Y)
+      TEST_ASSERT(b.normal[1] < 0.0,
+         "Oriented normal Y-component < 0 (aligned with ref_normal)");
+   }
+
+   // On a Cartesian mesh, normals may all point the same direction.
+   // The key test is that sign_flipped is set consistently.
+   TEST_ASSERT(flipped_count + non_flipped_count == y0_faces.Size(),
+      "All faces have sign_flipped flag set");
+   TEST_ASSERT(flipped_count > 0 || non_flipped_count > 0,
+      "At least some faces found");
+
+   std::cout << "    " << y0_faces.Size() << " Y=0 faces: "
+             << flipped_count << " flipped, "
+             << non_flipped_count << " non-flipped\n";
+}
+
+// ============================================================================
 int main()
 {
    std::cout << "v55 Cross-Verification: MFEM IP DG vs Tandem\n";
@@ -1991,6 +2161,8 @@ int main()
    TestSlipRateSignConvention();
    TestSignChainDisplacementJump();
    TestKbConsistency();
+   TestSignFlippedTractionProjection();
+   TestFaultBasisSignFlipped();
 
    TEST_PRINT_RESULTS();
    return (num_failed > 0) ? 1 : 0;

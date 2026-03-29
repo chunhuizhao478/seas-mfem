@@ -3487,8 +3487,98 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       real_t residual_avg[3] = {0.0, 0.0, 0.0};
       real_t sum_wq = 0.0;
 
-      if (method_ == DGMethod::IP)
+      if (method_ == DGMethod::IP &&
+          !traction_stress_out && !traction_correction_out && !jump_residual_out)
       {
+         // v55: Tandem-style traction recovery using combined integrator.
+         // ComputeTractionAtQuadPoints (per-qp geometry, same penalty as K)
+         // + ProjectTractionToFaultDOFs (nl_q-weighted, sign_flipped)
+         int nbf = nbf_per_face_;
+
+         // Build sign-corrected slip at quad points
+         Vector delta_u_nodal_t(dim * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = fi * nbf + kk;
+            real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
+            real_t du[3];
+            fault_basis_.EmbedSlip(fi, sl, du);
+            for (int c = 0; c < dim; c++)
+               delta_u_nodal_t(c * nbf + kk) = du[c];
+         }
+         Vector delta_u_quad_t;
+         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_t, delta_u_quad_t);
+         for (int j = 0; j < delta_u_quad_t.Size(); j++)
+            delta_u_quad_t(j) *= sign;
+
+         // Step 1: Traction at quad points (Tandem compute_traction)
+         DGElasticityIPCombinedIntegrator trac_integ(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         Vector T_quad_new, nl_q_vec;
+         trac_integ.ComputeTractionAtQuadPoints(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
+            T_quad_new, nullptr, &nl_q_vec);
+         int nqp_new = T_quad_new.Size() / dim;
+
+         // Step 2: Project to fault DOFs (Tandem evaluate_traction)
+         int quad_order_new = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+         const IntegrationRule &ir_new = IntRules.Get(
+            FTr->GetGeometryType(), quad_order_new);
+         const DenseMatrix &e_q = face_quad_->BasisAtQuadPoints();
+
+         real_t tangents_arr[2][3] = {
+            {basis.tangent1[0], basis.tangent1[1], basis.tangent1[2]},
+            {basis.tangent2[0], basis.tangent2[1], basis.tangent2[2]}
+         };
+
+         Vector trac_local_new;
+         DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+            dim, 2, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
+            tangents_arr, basis.sign_flipped, trac_local_new);
+
+         // Store per-DOF traction
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = fi * nbf_per_face_ + kk;
+            traction(2 * dof_idx)     = trac_local_new(0 * nbf + kk);
+            traction(2 * dof_idx + 1) = trac_local_new(1 * nbf + kk);
+
+            if (normal_traction)
+            {
+               // Normal stress: project T onto normal direction
+               // Use nl_q-weighted average of T·n_hat at this DOF
+               real_t T_n = 0.0;
+               real_t wn_sum = 0.0;
+               for (int q = 0; q < nqp_new; q++)
+               {
+                  real_t nl = nl_q_vec(q);
+                  real_t wn = ir_new.IntPoint(q).weight * nl * e_q(kk, q);
+
+                  // T · n_hat (unit normal = basis.normal, always oriented)
+                  // For sign_flipped: mesh T is with -n_hat, negate the dot product
+                  real_t T_dot_n = 0.0;
+                  for (int c = 0; c < dim; c++)
+                     T_dot_n += T_quad_new(c * nqp_new + q) * basis.normal[c];
+                  if (basis.sign_flipped) { T_dot_n = -T_dot_n; }
+
+                  T_n += wn * T_dot_n;
+                  wn_sum += wn;
+               }
+               if (std::abs(wn_sum) > 1e-30) { T_n /= wn_sum; }
+               (*normal_traction)(dof_idx) = -T_n;  // positive in compression
+            }
+         }
+
+         // Skip old IP code below (jump to end of IP block)
+         // The old diagnostic/decomposition code is no longer executed.
+         // TODO: Re-implement decomposition diagnostics using the new pipeline.
+      }
+      else if (method_ == DGMethod::IP)
+      {
+         // Old IP traction recovery: used when decomposition diagnostics
+         // (traction_stress_out, traction_correction_out, jump_residual_out)
+         // are requested. The new Tandem-style pipeline above handles the
+         // main traction computation; this fallback provides the decomposition.
          // IP penalty parameters (constant per face)
          real_t c0_mat = 2.0 * mu_val_;
          real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;

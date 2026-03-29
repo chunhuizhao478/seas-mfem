@@ -24,9 +24,14 @@ namespace seas
 /// Per-face orthonormal basis data on fault surface.
 struct FaultBasisData
 {
-   real_t normal[3];    ///< Unit outward normal
+   real_t normal[3];    ///< Unit outward normal (oriented to ref_normal)
    real_t tangent1[3];  ///< First tangent (dip direction for vertical fault)
    real_t tangent2[3];  ///< Second tangent (strike direction for vertical fault)
+   bool sign_flipped;   ///< True if mesh normal was flipped to align with ref_normal
+                        ///< (Tandem AdapterBase convention). When true, the DG
+                        ///< compute_traction uses the OPPOSITE normal, so the
+                        ///< traction projection must negate the fault basis to
+                        ///< compensate (double negation → correct result).
 };
 
 /// Computes and stores per-face local coordinate frames on a fault surface.
@@ -83,10 +88,11 @@ public:
          Vector n_raw(dim_);
          CalcOrtho(J, n_raw);
 
-         // Orient with reference normal
+         // Orient with reference normal (matching Tandem AdapterBase::prepare)
          real_t dot = 0.0;
          for (int d = 0; d < dim_; d++) { dot += n_raw(d) * ref_normal(d); }
-         if (dot < 0.0) { n_raw.Neg(); }
+         basis_[i].sign_flipped = (dot < 0.0);
+         if (basis_[i].sign_flipped) { n_raw.Neg(); }
 
          // Normalize
          real_t n_len = n_raw.Norml2();
@@ -191,13 +197,14 @@ public:
 
          real_t dot = 0.0;
          for (int d = 0; d < dim_; d++) { dot += n_raw(d) * ref_normal(d); }
-         if (dot < 0.0) { n_raw.Neg(); }
+         int bi = old_count + i;
+         basis_[bi].sign_flipped = (dot < 0.0);
+         if (basis_[bi].sign_flipped) { n_raw.Neg(); }
 
          real_t n_len = n_raw.Norml2();
          MFEM_VERIFY(n_len > 0.0, "Zero-length shared face normal");
          n_raw /= n_len;
 
-         int bi = old_count + i;
          for (int d = 0; d < 3; d++)
          {
             basis_[bi].normal[d] = 0.0;
