@@ -3074,7 +3074,22 @@ void ElasticityDomainOperator<MeshType>::Solve(
    // byNODES ordering: rhs[0..N-1]=x, rhs[N..2N-1]=y, rhs[2N..3N-1]=z
    int N_scalar = fes_->GetNDofs();
    Vector rhs_slip_snapshot;
-   if (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0)
+
+   // Synchronize trigger across all ranks to avoid MPI deadlock
+   // (ranks without fault DOFs may have rhs_after_slip == 0)
+   bool diag_rhs_z_trigger = (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0);
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      int local_trigger = diag_rhs_z_trigger ? 1 : 0;
+      int global_trigger = 0;
+      MPI_Allreduce(&local_trigger, &global_trigger, 1, MPI_INT, MPI_MAX,
+                    mesh_.GetComm());
+      diag_rhs_z_trigger = (global_trigger > 0);
+#endif
+   }
+
+   if (diag_rhs_z_trigger)
    {
       rhs_slip_snapshot.SetSize(rhs.Size());
       rhs_slip_snapshot = rhs;
@@ -3084,7 +3099,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
    AssembleDirichletLoading(rhs, time);
 
    // v52: RHS z-component diagnostic — fire once after first non-trivial RHS
-   if (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0)
+   if (diag_rhs_z_trigger)
    {
       diag_rhs_z_done_ = true;
 
