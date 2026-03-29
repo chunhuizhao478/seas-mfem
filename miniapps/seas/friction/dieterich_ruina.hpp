@@ -399,8 +399,9 @@ public:
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
-      V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
+      // v55 D8: anti-parallel to tau, matching Tandem DieterichRuinaBase.h:174.
+      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
    }
 
    /// Compute initial psi from stress equilibrium.

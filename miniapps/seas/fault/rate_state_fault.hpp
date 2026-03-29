@@ -304,7 +304,7 @@ public:
             if (depths(i) > Wf_bp5_ + 1.0)
             {
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = Vp_bp5_;
+               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
                continue;
             }
 
@@ -425,10 +425,10 @@ public:
             {
                // Below fault zone: prescribed plate rate.
                rate(i * StatePerNode + 0) = 0.0;
-               rate(i * StatePerNode + 1) = Vp_bp5_;
+               rate(i * StatePerNode + 1) = -Vp_bp5_;  // v55 D8: Tandem convention
                rate(i * StatePerNode + PsiIndex) = 0.0;
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = Vp_bp5_;
+               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
                continue;
             }
 
@@ -527,7 +527,16 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
+            if constexpr (SlipComponents == 2)
+            {
+               // v55 D8: negate to convert from Tandem internal convention
+               // (S anti-parallel to tau) to physical slip for the domain solver.
+               slip(i * SlipComponents + c) = -state(i * StatePerNode + c);
+            }
+            else
+            {
+               slip(i * SlipComponents + c) = state(i * StatePerNode + c);
+            }
          }
       }
    }
@@ -581,7 +590,15 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            state(i * StatePerNode + c) = slip(i * SlipComponents + c);
+            if constexpr (SlipComponents == 2)
+            {
+               // v55 D8: negate physical slip to internal Tandem convention
+               state(i * StatePerNode + c) = -slip(i * SlipComponents + c);
+            }
+            else
+            {
+               state(i * StatePerNode + c) = slip(i * SlipComponents + c);
+            }
          }
       }
    }
