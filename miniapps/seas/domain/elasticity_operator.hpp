@@ -19,6 +19,7 @@
 #include "../fault/fault_basis.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
+#include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
 #include "../fault/face_quadrature.hpp"
 
 #include <memory>
@@ -905,35 +906,20 @@ private:
       }
       else  // IP
       {
-         // Split IP into two integrators:
-         // 1. Consistency + symmetry (MFEM's DGElasticityIntegrator with kappa=0)
-         // 2. Penalty (custom integrator matching Uphoff et al. 2023 formula)
-         //
-         // The penalty uses: η_F * ∫_F |nor| * [[u]]·[[v]] ds
-         // where η_F = (p0+p1)/4 with p = (D+1)*c_N_1*(A/V)*(c1²/c0)
-         //
-         // This differs from MFEM's built-in DGElasticityIntegrator which uses
-         // κ * |nor|² * {{(λ+2μ)/detJ}} * [[u]]·[[v]].
-
-         // Consistency + symmetry only (kappa=0 → no penalty in this integrator)
-         // v54 note: tested order 2p+1 to match Tandem's MinQuadOrder, but
-         // for flat elements at p=1, both 2p and 2p+1 give identical K
-         // (degree-2 integrands are exact with either rule). Keeping default.
+         // v55: Combined integrator matching Tandem's assembleSurface kernel.
+         // All three DG terms (consistency + symmetry + penalty) computed in
+         // one pass with the same traction operator, same quadrature (2p+1),
+         // and same penalty formula. The slip RHS uses the same integrator's
+         // AssembleSlipFaceRHS to guarantee K-b consistency.
          cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0));
-         // Penalty (material-dependent, |nor| scaling)
-         cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
-                                                 penalty_factor_));
+            new DGElasticityIPCombinedIntegrator(
+               lambda_coeff_, mu_coeff_, 3, epsilon_, penalty_factor_));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0),
-               dirichlet_bdr_marker_);
-            cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
-                                                    penalty_factor_),
+               new DGElasticityIPCombinedIntegrator(
+                  lambda_coeff_, mu_coeff_, 3, epsilon_, penalty_factor_),
                dirichlet_bdr_marker_);
          }
       }
@@ -1083,68 +1069,13 @@ private:
    {
       int dim = 3;
       int nbf = nbf_per_face_;
-
-      // Face consistency diagnostic: fire on 2nd call, heterogeneous faces only
       diag_face_call_++;
-      bool do_face_diag = (diag_face_call_ == 2) && (nbf > 1);
-      int diag_count = 0;
-      const int diag_max = 3;
 
-      // Pre-scan for heterogeneous faces (nucleation boundary faces)
-      if (do_face_diag)
-      {
-         for (int fi2 = 0; fi2 < fault_interior_faces_.Size() && diag_count < diag_max; fi2++)
-         {
-            real_t smax = 0.0, smin = 1e30;
-            bool has_nonzero = false;
-            for (int kk = 0; kk < nbf; kk++)
-            {
-               int di = fi2 * nbf + kk;
-               real_t smag = std::sqrt(slip_bc(2*di)*slip_bc(2*di) +
-                                       slip_bc(2*di+1)*slip_bc(2*di+1));
-               if (smag > 1e-20) { has_nonzero = true; }
-               smax = std::max(smax, smag);
-               smin = std::min(smin, smag);
-            }
-            // Print faces with heterogeneous slip (ratio > 100 between DOFs)
-            if (has_nonzero && (smax > 100.0 * smin + 1e-30))
-            {
-               int face = fault_interior_faces_[fi2];
-               FaceElementTransformations *FTr2 =
-                  mesh_.GetInteriorFaceTransformations(face);
-               if (!FTr2) { continue; }
-               const IntegrationPoint &ip0 = IntRules.Get(
-                  FTr2->FaceGeom, 1).IntPoint(0);
-               FTr2->SetAllIntPoints(&ip0);
-               Vector nor2(3);
-               CalcOrtho(FTr2->Jacobian(), nor2);
-               real_t sign2 = (nor2(1) > 0) ? 1.0 : -1.0;
-               real_t nl2 = nor2.Norml2();
-               real_t detJ1 = FTr2->Elem1->Weight();
-               real_t detJ2 = FTr2->Elem2->Weight();
-               real_t c0m = 2.0*mu_val_;
-               real_t c1m = dim*lambda_val_ + 2.0*mu_val_;
-               real_t cN1 = order_*(order_+dim-1.0)/dim;
-               real_t pp0 = (dim+1)*cN1*(real_t(dim)*nl2/detJ1)*(c1m*c1m/c0m);
-               real_t pp1 = (dim+1)*cN1*(real_t(dim)*nl2/detJ2)*(c1m*c1m/c0m);
-               real_t pen = (pp0+pp1)/4.0;
-               mfem::out << "[SlipRHS-HET] fi=" << fi2 << " face=" << face
-                  << " E1=" << FTr2->Elem1No << " E2=" << FTr2->Elem2No
-                  << " sign=" << sign2 << " penalty=" << pen
-                  << " nor=(" << nor2(0) << "," << nor2(1) << "," << nor2(2) << ")"
-                  << " slip_dofs=[";
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int di = fi2 * nbf + kk;
-                  mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
-                  if (kk < nbf-1) { mfem::out << ","; }
-               }
-               mfem::out << "]" << std::endl;
-               diag_count++;
-            }
-         }
-         do_face_diag = false;  // Already printed, skip per-quad-point diag
-      }
+      // v55: Use the combined integrator's AssembleSlipFaceRHS to guarantee
+      // K-b consistency. The same traction operator formula, quadrature order,
+      // and penalty computation are used for both K and b.
+      DGElasticityIPCombinedIntegrator slip_integrator(
+         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
       for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
       {
@@ -1153,10 +1084,7 @@ private:
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         // v45 Phase 3: Multi-DOF slip interpolation
-         // Embed per-DOF local slip to 3D nodal values, then interpolate
-         // to quadrature points. At nbf=1 (p=1), this reduces to the
-         // previous constant-per-face behavior.
+         // Build per-DOF nodal slip and interpolate to quad points
          Vector delta_u_nodal(dim * nbf);
          bool all_zero = true;
          for (int kk = 0; kk < nbf; kk++)
@@ -1174,165 +1102,39 @@ private:
          }
          if (all_zero) { continue; }
 
-         // Interpolate to quad points: delta_u_quad[c*nq + q]
+         // Interpolate to quad points
          Vector delta_u_quad;
          face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
          int nq = face_quad_->NumQuadPoints();
 
-         // Get DOFs (vector space)
+         // Apply sign correction: sign * delta_u at each quad point
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+
+         // Determine sign from first quad point (constant for flat faces)
+         {
+            const IntegrationPoint &ip0 = IntRules.Get(
+               FTr->FaceGeom, 1).IntPoint(0);
+            FTr->SetAllIntPoints(&ip0);
+            Vector nor0(dim);
+            CalcOrtho(FTr->Jacobian(), nor0);
+            real_t sign = (nor0(1) > 0) ? 1.0 : -1.0;
+            for (int i = 0; i < delta_u_quad.Size(); i++)
+            {
+               delta_u_quad(i) *= sign;
+            }
+         }
+
+         // Assemble slip RHS using the combined integrator
+         Vector elvec1, elvec2;
+         slip_integrator.AssembleSlipFaceRHS(
+            *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
+
+         // Scatter into global RHS
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
          fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
 
-         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
-         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
-         int ndof1 = fe1->GetDof();
-         int ndof2 = fe2->GetDof();
-
-         int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-         int quad_order = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
-         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order);
-         if (!match_quad_order_)
-         {
-            MFEM_ASSERT(ir.GetNPoints() == nq,
-                        "Quadrature mismatch: ir has " << ir.GetNPoints()
-                        << " points, FaceQuadrature has " << nq);
-         }
-
-         Vector elvec1(vdofs1.Size()), elvec2(vdofs2.Size());
-         elvec1 = 0.0;
-         elvec2 = 0.0;
-
-         for (int p = 0; p < nq; p++)
-         {
-            const IntegrationPoint &ip = ir.IntPoint(p);
-            FTr->SetAllIntPoints(&ip);
-            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-            const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
-
-            // Face normal
-            Vector nor(dim);
-            CalcOrtho(FTr->Jacobian(), nor);
-
-            // Sign convention: sign * delta_u = [[u]] = g^F (prescribed jump)
-            real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
-
-            // Per-quad-point 3D slip (interpolated from face DOFs)
-            real_t delta_u_q[3];
-            for (int c = 0; c < dim; c++)
-            {
-               delta_u_q[c] = delta_u_quad(c * nq + p);
-            }
-
-            // Shapes
-            Vector shape1(ndof1), shape2(ndof2);
-            fe1->CalcShape(eip1, shape1);
-            fe2->CalcShape(eip2, shape2);
-
-            // Physical gradients
-            DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
-            fe1->CalcDShape(eip1, dshape1_ref);
-            fe2->CalcDShape(eip2, dshape2_ref);
-
-            DenseMatrix adjJ1(dim), adjJ2(dim);
-            CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
-            CalcAdjugate(FTr->Elem2->Jacobian(), adjJ2);
-
-            DenseMatrix dshape1_adj(ndof1, dim), dshape2_adj(ndof2, dim);
-            Mult(dshape1_ref, adjJ1, dshape1_adj);
-            Mult(dshape2_ref, adjJ2, dshape2_adj);
-
-            real_t detJ1 = FTr->Elem1->Weight();
-            real_t detJ2 = FTr->Elem2->Weight();
-            real_t w1 = ip.weight / (2.0 * detJ1);
-            real_t w2 = ip.weight / (2.0 * detJ2);
-
-            // Penalty: match Tandem's physical A/V ratio
-            // penalty = (p0+p1)/4, p = (D+1)*c_N_1*(A/V)*(c1²/c0)
-            // v47 fix: dim * nl_q / detJ = physical A/V (see bp5_debug_v47.md)
-            real_t nl_q = nor.Norml2();
-            real_t c0_mat = 2.0 * mu_val_;
-            real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-            real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-            real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-            real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
-            real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
-            real_t wq_penalty = penalty_ip * ip.weight * nl_q;
-
-            // One-shot face consistency diagnostic (first quad point only)
-            if (do_face_diag && p == 0 && diag_count < diag_max)
-            {
-               mfem::out << "[SlipRHS] fi=" << fi
-                  << " face=" << face << " E1=" << FTr->Elem1No
-                  << " E2=" << FTr->Elem2No << " sign=" << sign
-                  << " penalty=" << penalty_ip
-                  << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
-                  << " nl_q=" << nl_q << " nq=" << nq
-                  << " ndof1=" << ndof1 << " ndof2=" << ndof2;
-               // Print per-DOF slip magnitude
-               mfem::out << " slip_dofs=[";
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int di = fi * nbf + kk;
-                  mfem::out << "(" << slip_bc(2*di) << "," << slip_bc(2*di+1) << ")";
-                  if (kk < nbf-1) { mfem::out << ","; }
-               }
-               mfem::out << "]" << std::endl;
-               diag_count++;
-            }
-
-            // Symmetry + penalty for Elem1
-            for (int k = 0; k < ndof1; k++)
-            {
-               for (int i = 0; i < dim; i++)
-               {
-                  real_t sym_val = 0.0;
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape1_adj(k, d) * nor(d);
-                  }
-                  for (int u = 0; u < dim; u++)
-                  {
-                     real_t trac_iu = lambda_val_ * dshape1_adj(k, i) * nor(u)
-                        + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                     + dshape1_adj(k, u) * nor(i));
-                     sym_val += trac_iu * sign * delta_u_q[u];
-                  }
-
-                  int idx = i * ndof1 + k;
-                  elvec1(idx) += epsilon_ * sym_val * w1;
-                  elvec1(idx) += wq_penalty * sign * delta_u_q[i] * shape1(k);
-               }
-            }
-
-            // Symmetry + penalty for Elem2
-            for (int k = 0; k < ndof2; k++)
-            {
-               for (int i = 0; i < dim; i++)
-               {
-                  real_t sym_val = 0.0;
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape2_adj(k, d) * nor(d);
-                  }
-                  for (int u = 0; u < dim; u++)
-                  {
-                     real_t trac_iu = lambda_val_ * dshape2_adj(k, i) * nor(u)
-                        + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                     + dshape2_adj(k, u) * nor(i));
-                     sym_val += trac_iu * sign * delta_u_q[u];
-                  }
-
-                  int idx = i * ndof2 + k;
-                  elvec2(idx) += epsilon_ * sym_val * w2;
-                  elvec2(idx) -= wq_penalty * sign * delta_u_q[i] * shape2(k);
-               }
-            }
-         }
-
-         // Add to global RHS
          for (int j = 0; j < vdofs1.Size(); j++)
          {
             int gj = vdofs1[j];
@@ -1347,6 +1149,7 @@ private:
          }
       }
    }
+
 
    // ========================================================================
    // Slip BC assembly — BR2 method
@@ -1633,6 +1436,10 @@ private:
          int dim = 3;
          int nbf = nbf_per_face_;
 
+         // v55: Use combined integrator for K-b consistency (shared faces)
+         DGElasticityIPCombinedIntegrator slip_integrator(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+
          for (int i = 0; i < fault_shared_faces_.Size(); i++)
          {
             int sf = fault_shared_faces_[i];
@@ -1640,7 +1447,6 @@ private:
                mesh_.GetSharedFaceTransformations(sf);
             if (FTr == nullptr) { continue; }
 
-            // v45 Phase 3: Multi-DOF slip interpolation (shared faces)
             int slip_idx = interior_face_count + i;
             Vector delta_u_nodal(dim * nbf);
             bool all_zero = true;
@@ -1661,122 +1467,33 @@ private:
 
             Vector delta_u_quad;
             face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-            int nq = face_quad_->NumQuadPoints();
 
-            // Only Elem1 is local
-            Array<int> vdofs1;
-            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+            // Sign correction
+            {
+               const IntegrationPoint &ip0 = IntRules.Get(
+                  FTr->FaceGeom, 1).IntPoint(0);
+               FTr->SetAllIntPoints(&ip0);
+               Vector nor0(dim);
+               CalcOrtho(FTr->Jacobian(), nor0);
+               real_t sign = (nor0(1) > 0) ? 1.0 : -1.0;
+               for (int j = 0; j < delta_u_quad.Size(); j++)
+               {
+                  delta_u_quad(j) *= sign;
+               }
+            }
 
             const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
-            int ndof1 = fe1->GetDof();
-
-            // Get Elem2 (face-neighbor) FE for detJ2
             auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
             int nbr_idx = FTr->Elem2No - mesh_.GetNE();
             const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
 
-            int face_order = std::max(fe1->GetOrder(), fe2->GetOrder());
-            int quad_order_sh = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
-            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_sh);
-            if (!match_quad_order_)
-            {
-               MFEM_ASSERT(ir.GetNPoints() == nq,
-                           "Quadrature mismatch in shared face assembly");
-            }
+            // Assemble using combined integrator — only use elvec1 (local elem)
+            Vector elvec1, elvec2;
+            slip_integrator.AssembleSlipFaceRHS(
+               *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
 
-            Vector elvec1(vdofs1.Size());
-            elvec1 = 0.0;
-
-            for (int p = 0; p < nq; p++)
-            {
-               const IntegrationPoint &ip = ir.IntPoint(p);
-               FTr->SetAllIntPoints(&ip);
-               const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-
-               Vector nor(dim);
-               CalcOrtho(FTr->Jacobian(), nor);
-
-               real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
-
-               // Shared face sign diagnostic (v48 Section 3.5 verification)
-               if (p == 0 && i < 3 && diag_face_call_ <= 2)
-               {
-                  // Get face center for identification
-                  Vector fc(dim);
-                  FTr->Face->Transform(ip, fc);
-                  int rank = 0;
-#ifdef MFEM_USE_MPI
-                  auto *pmesh = dynamic_cast<ParMesh*>(&mesh_);
-                  if (pmesh) { MPI_Comm_rank(pmesh->GetComm(), &rank); }
-#endif
-                  mfem::out << "[SHARED-SIGN] rank=" << rank
-                     << " sf=" << sf << " E1=" << FTr->Elem1No
-                     << " E2=" << FTr->Elem2No
-                     << " nor=(" << nor(0) << "," << nor(1) << "," << nor(2) << ")"
-                     << " sign=" << sign
-                     << " face_center=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                     << std::endl << std::flush;
-               }
-
-               // Per-quad-point 3D slip
-               real_t delta_u_q[3];
-               for (int c = 0; c < dim; c++)
-               {
-                  delta_u_q[c] = delta_u_quad(c * nq + p);
-               }
-
-               Vector shape1(ndof1);
-               fe1->CalcShape(eip1, shape1);
-
-               DenseMatrix dshape1_ref(ndof1, dim);
-               fe1->CalcDShape(eip1, dshape1_ref);
-
-               DenseMatrix adjJ1(dim);
-               CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
-
-               DenseMatrix dshape1_adj(ndof1, dim);
-               Mult(dshape1_ref, adjJ1, dshape1_adj);
-
-               real_t detJ1 = FTr->Elem1->Weight();
-               real_t detJ2 = FTr->Elem2->Weight();
-               real_t w1 = ip.weight / (2.0 * detJ1);
-
-               // Penalty: v47 fix — dim * nl_q / detJ = physical A/V
-               real_t nl_q = nor.Norml2();
-               real_t c0_mat = 2.0 * mu_val_;
-               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1) * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2) * (c1_mat * c1_mat / c0_mat);
-               real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
-               real_t wq_penalty = penalty_ip * ip.weight * nl_q;
-
-               for (int k = 0; k < ndof1; k++)
-               {
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape1_adj(k, d) * nor(d);
-                  }
-
-                  for (int ci = 0; ci < dim; ci++)
-                  {
-                     real_t sym_val = 0.0;
-                     for (int u = 0; u < dim; u++)
-                     {
-                        real_t trac_iu = lambda_val_ * dshape1_adj(k, ci) * nor(u)
-                           + mu_val_ * ((ci == u ? 1.0 : 0.0) * grad_dot_n
-                                        + dshape1_adj(k, u) * nor(ci));
-                        sym_val += trac_iu * sign * delta_u_q[u];
-                     }
-
-                     int idx = ci * ndof1 + k;
-                     elvec1(idx) += epsilon_ * sym_val * w1;
-                     elvec1(idx) += wq_penalty * sign * delta_u_q[ci] * shape1(k);
-                  }
-               }
-            }
-
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
             for (int j = 0; j < vdofs1.Size(); j++)
             {
                int gj = vdofs1[j];
