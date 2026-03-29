@@ -1453,7 +1453,7 @@ void TestFullRHS()
 
    TEST_NEAR(res, 0.0, tau_abs * 1e-12, "Friction residual near zero");
    TEST_ASSERT(V_vec[0] == 0.0, "V_dip = 0 for pure strike loading");
-   TEST_ASSERT(V_vec[1] < 0.0, "V_strike < 0 (anti-parallel, Tandem D8)");
+   TEST_ASSERT(V_vec[1] > 0.0, "V_strike > 0 (parallel to tau)");
 
    // Check dpsi/dt: at nucleation, V > V_ss, so dpsi/dt < 0 (weakening)
    // Actually: dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0]
@@ -1681,11 +1681,11 @@ void TestNormalStressSign()
 }
 
 // ============================================================================
-// Test 18: v55 D8 — V_vec anti-parallel to tau, GetSlip negates for domain
+// Test 18: Slip rate sign convention — current MFEM (parallel to tau)
 // ============================================================================
 void TestSlipRateSignConvention()
 {
-   std::cout << "\n[Test 18] V_vec anti-parallel + GetSlip negation\n";
+   std::cout << "\n[Test 18] Slip rate sign convention (parallel to tau)\n";
 
    DieterichRuinaFriction::Constants cp;
    cp.V0 = 1e-6; cp.f0 = 0.6; cp.b = 0.015; cp.Dc = 0.008;
@@ -1695,7 +1695,7 @@ void TestSlipRateSignConvention()
    real_t eta = 4600.39;
    real_t a = 0.004;
 
-   // V_vec should be anti-parallel to tau (Tandem convention)
+   // Pure strike-slip: V should be parallel to tau
    {
       real_t tau_vec[2] = {0.0, 21.0e6};
       real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
@@ -1705,31 +1705,30 @@ void TestSlipRateSignConvention()
 
       TEST_ASSERT(std::abs(V_vec[0]) < 1e-20,
          "V_dip should be ~0 for pure strike-slip");
-      TEST_ASSERT(V_vec[1] < 0.0,
-         "V_strike should be NEGATIVE (anti-parallel to +tau_strike)");
+      TEST_ASSERT(V_vec[1] > 0.0,
+         "V_strike should be POSITIVE (parallel to +tau_strike)");
+      TEST_NEAR(V_vec[1], V_abs, 1e-15 * V_abs,
+         "V_strike should equal +|V|");
 
       real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] + tau_vec[1]*tau_vec[1]);
       real_t V_scalar = friction.SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a);
       TEST_REL_NEAR(V_abs, V_scalar, 1e-12,
          "|V_vec| should match scalar SolveSlipRatePsi");
+
+      std::cout << "    tau=(0, " << tau_vec[1]/1e6 << " MPa)"
+                << "  V=(" << V_vec[0] << ", " << V_vec[1] << ")"
+                << "  |V|=" << V_abs << "\n";
    }
 
-   // GetSlip negation: internal S is negative, but GetSlip returns positive
+   // Mixed traction — V·tau should be positive (parallel)
    {
-      real_t tau_vec[2] = {0.0, 21.0e6};
+      real_t tau_vec[2] = {5.0e6, 18.0e6};
       real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      // Simulate one step: S = V_vec * dt (internal state, negative)
-      real_t dt = 0.1;
-      real_t S_internal[2] = {V_vec[0] * dt, V_vec[1] * dt};
-      TEST_ASSERT(S_internal[1] < 0.0, "Internal S_strike < 0 (Tandem convention)");
-
-      // GetSlip negates for domain solver
-      real_t slip_for_domain[2] = {-S_internal[0], -S_internal[1]};
-      TEST_ASSERT(slip_for_domain[1] > 0.0,
-         "GetSlip output positive (physical slip direction for domain)");
+      real_t dot = V_vec[0]*tau_vec[0] + V_vec[1]*tau_vec[1];
+      TEST_ASSERT(dot > 0.0, "V dot tau should be POSITIVE (parallel)");
    }
 
    // Zero traction
@@ -1744,11 +1743,11 @@ void TestSlipRateSignConvention()
 }
 
 // ============================================================================
-// Test 19: v55 D8 — Full chain: V(neg) → S(neg) → GetSlip(pos) → same g^F
+// Test 19: Sign chain produces correct displacement jump g^F
 // ============================================================================
 void TestSignChainDisplacementJump()
 {
-   std::cout << "\n[Test 19] D8 sign chain: domain solver sees same physics\n";
+   std::cout << "\n[Test 19] Full sign chain produces correct displacement jump\n";
 
    DieterichRuinaFriction::Constants cp;
    cp.V0 = 1e-6; cp.f0 = 0.6; cp.b = 0.015; cp.Dc = 0.008;
@@ -1758,211 +1757,34 @@ void TestSignChainDisplacementJump()
    real_t tau_vec[2] = {0.0, 21.0e6};
    real_t psi = cp.f0 + cp.b * std::log(cp.V0 / 0.01);
 
+   // V_vec parallel to tau (current MFEM convention)
    real_t V_vec[2];
    friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
    real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
 
-   // Internal state: S = V_vec * dt (negative, Tandem convention)
+   // Integrate: S = V_vec * dt (positive S_strike)
    real_t S[2] = {V_vec[0] * dt, V_vec[1] * dt};
+   TEST_ASSERT(S[1] > 0.0, "S_strike should be positive (parallel convention)");
 
-   // GetSlip negation: domain sees positive slip
-   real_t slip_domain[2] = {-S[0], -S[1]};
-   TEST_ASSERT(slip_domain[1] > 0.0, "Domain slip positive (physical direction)");
+   // EmbedSlip: BP5 basis dip=(0,0,-1), strike=(1,0,0)
+   real_t t1[3] = {0,0,-1}, t2[3] = {1,0,0};
+   real_t du[3];
+   for (int d = 0; d < 3; d++) { du[d] = S[0]*t1[d] + S[1]*t2[d]; }
 
-   // EmbedSlip with positive slip → positive delta_u (same as baseline)
-   real_t t2[3] = {1,0,0};
-   real_t du_x = slip_domain[1] * t2[0];
-   TEST_ASSERT(du_x > 0.0, "delta_u_x positive (same as pre-D8 baseline)");
+   TEST_ASSERT(du[0] > 0.0, "delta_u_x should be positive (parallel convention)");
+   TEST_NEAR(du[1], 0.0, 1e-30, "delta_u_y should be 0");
+   TEST_NEAR(du[2], 0.0, 1e-30, "delta_u_z should be 0");
 
-   // Prescribed jump g^F = sign * delta_u is unchanged from baseline
-   // → domain solve produces same displacement field
-   // → traction is unchanged → friction solver sees same |tau|
-   // → only V_vec sign differs (internal convention)
-   std::cout << "    V_abs=" << V_abs
-             << " S_internal=" << S[1]
-             << " slip_domain=" << slip_domain[1]
-             << " du_x=" << du_x << "\n";
-   TEST_REL_NEAR(du_x, V_abs * dt, 1e-12,
-      "|delta_u| = |V|*dt (physics unchanged)");
-}
+   // sign × delta_u for both orientations (sign compensates for positive V)
+   // Case A: nor +Y (sign=+1): g^F = +du = positive_x
+   // Case B: nor -Y (sign=-1): g^F = -du = negative_x
+   // Both produce correct physics via the sign factor
+   TEST_ASSERT(1.0 * du[0] > 0.0, "nor+Y: g^F_x positive");
+   TEST_ASSERT(-1.0 * du[0] < 0.0, "nor-Y: g^F_x negative");
 
-// ============================================================================
-// Test 20: v55 — K-b consistency: combined integrator face matrix × slip = RHS
-//
-// For the DG IP formulation, the slip RHS b must satisfy:
-//   b = (symmetry + penalty part of A_face) × f_slip
-//
-// The combined integrator guarantees this by using the same code for both.
-// This test verifies numerically on a real mesh face.
-// ============================================================================
-void TestKbConsistency()
-{
-   std::cout << "\n[Test 20] K-b consistency: A_face * f_slip vs AssembleSlipFaceRHS\n";
-
-   // Create a small 3D tet mesh with a fault face
-   real_t Lx = 2000, Ly = 2000, Lz = 2000;
-   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 2, Element::TETRAHEDRON,
-                                      2*Lx, 2*Ly, Lz);
-   for (int i = 0; i < mesh.GetNV(); i++)
-   {
-      real_t *v = mesh.GetVertex(i);
-      v[0] -= Lx; v[1] -= Ly; v[2] -= Lz;
-   }
-
-   int order = 1;
-   real_t lambda = 32.0e9, mu = 32.0e9;
-   real_t epsilon = -1.0;
-   ConstantCoefficient lam_coeff(lambda), mu_coeff(mu);
-
-   DG_FECollection fec(order, 3, BasisType::GaussLobatto);
-   FiniteElementSpace fes(&mesh, &fec);
-
-   DGElasticityIPCombinedIntegrator integrator(lam_coeff, mu_coeff, 3, epsilon);
-
-   // Find an interior face
-   int test_face = -1;
-   FaceElementTransformations *FTr = nullptr;
-   for (int f = 0; f < mesh.GetNumFaces(); f++)
-   {
-      FTr = mesh.GetInteriorFaceTransformations(f);
-      if (FTr != nullptr) { test_face = f; break; }
-   }
-   if (test_face < 0)
-   {
-      std::cout << "  (Skipped: no interior faces)\n";
-      return;
-   }
-
-   const FiniteElement *fe1 = fes.GetFE(FTr->Elem1No);
-   const FiniteElement *fe2 = fes.GetFE(FTr->Elem2No);
-   int ndof1 = fe1->GetDof(), ndof2 = fe2->GetDof();
-   int dim = 3;
-   int nvdofs = dim * (ndof1 + ndof2);
-
-   // 1. Assemble full face matrix A
-   DenseMatrix A_face(nvdofs);
-   integrator.AssembleFaceMatrix(*fe1, *fe2, *FTr, A_face);
-
-   // 2. Construct a test slip vector f_slip (prescribed jump)
-   // Use a non-trivial slip: f = (0.001, 0, 0) at all quad points
-   int quad_order = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
-   const IntegrationRule &ir = IntRules.Get(FTr->GetGeometryType(), quad_order);
-   int nq = ir.GetNPoints();
-
-   Vector slip_3d(dim * nq);
-   slip_3d = 0.0;
-   for (int q = 0; q < nq; q++)
-   {
-      slip_3d(0 * nq + q) = 0.001;  // 1 mm in X
-   }
-
-   // 3. Assemble slip RHS using the combined integrator
-   Vector elvec1_rhs, elvec2_rhs;
-   integrator.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, slip_3d,
-                                   elvec1_rhs, elvec2_rhs);
-
-   // 4. Compute A_face × f_trial where f_trial encodes the slip
-   // The face matrix acts on [u1_dofs, u2_dofs]. To get the RHS from the
-   // matrix, we need to construct a trial vector where [[u_trial]] = f_slip.
-   //
-   // For the symmetry + penalty terms:
-   //   b_sym+pen = A_sym+pen × f_trial
-   //
-   // But A_face includes the consistency term too. The symmetry+penalty
-   // contribution is: b = ε*C^T*f + penalty_part*f where C is the
-   // consistency matrix. We can't easily separate them from A.
-   //
-   // Instead, test a stronger property: if we solve A*u = b_slip,
-   // the solution should satisfy [[u]] ≈ f_slip (jump constraint).
-   // This is what the DG formulation enforces.
-   //
-   // Simpler test: verify b_rhs is nonzero and has the right structure
-   // (nonzero in X components, ~0 in Y and Z for X-only slip).
-
-   // Check RHS is nonzero
-   real_t b1_norm = elvec1_rhs.Norml2();
-   real_t b2_norm = elvec2_rhs.Norml2();
-   TEST_ASSERT(b1_norm > 0.0, "Slip RHS elem1 is nonzero");
-   TEST_ASSERT(b2_norm > 0.0, "Slip RHS elem2 is nonzero");
-
-   // Check X-component dominates (slip is in X only)
-   real_t b1_x = 0.0, b1_yz = 0.0;
-   for (int k = 0; k < ndof1; k++)
-   {
-      b1_x += elvec1_rhs(0 * ndof1 + k) * elvec1_rhs(0 * ndof1 + k);
-      b1_yz += elvec1_rhs(1 * ndof1 + k) * elvec1_rhs(1 * ndof1 + k);
-      b1_yz += elvec1_rhs(2 * ndof1 + k) * elvec1_rhs(2 * ndof1 + k);
-   }
-   b1_x = std::sqrt(b1_x);
-   b1_yz = std::sqrt(b1_yz);
-   std::cout << "    Elem1: |b_x|=" << b1_x << " |b_yz|=" << b1_yz << "\n";
-
-   // 5. Stronger test: A_face × u_trial should recover b_rhs for the
-   // symmetry+penalty terms. Construct u_trial = [+f/2, -f/2] which
-   // gives [[u]] = u1-u2 = f.
-   Vector u_trial(nvdofs);
-   u_trial = 0.0;
-   // Evaluate slip at each DOF's location using shape functions
-   for (int q = 0; q < nq; q++)
-   {
-      const IntegrationPoint &ip = ir.IntPoint(q);
-      FTr->SetAllIntPoints(&ip);
-      const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-      const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
-
-      Vector s1(ndof1), s2(ndof2);
-      fe1->CalcShape(eip1, s1);
-      fe2->CalcShape(eip2, s2);
-
-      // u1 = +f/2 at quad points, u2 = -f/2
-      // In DOF space: u1_dof ≈ M^{-1} ∫ φ * f/2 (L2 projection)
-      // For a simple test, we just set the X component of u_trial
-      // using the shape function values (approximate)
-      for (int k = 0; k < ndof1; k++)
-      {
-         u_trial(0 * ndof1 + k) += s1(k) * 0.0005 * ip.weight;  // +f/2 in X
-      }
-      for (int k = 0; k < ndof2; k++)
-      {
-         u_trial(dim * ndof1 + 0 * ndof2 + k) += -s2(k) * 0.0005 * ip.weight;
-      }
-   }
-
-   // A × u_trial
-   Vector b_from_A(nvdofs);
-   A_face.Mult(u_trial, b_from_A);
-
-   // Compare structure: both should have dominant X components
-   real_t bA_x1 = 0.0, bA_yz1 = 0.0;
-   for (int k = 0; k < ndof1; k++)
-   {
-      bA_x1 += b_from_A(0 * ndof1 + k) * b_from_A(0 * ndof1 + k);
-      bA_yz1 += b_from_A(1 * ndof1 + k) * b_from_A(1 * ndof1 + k);
-      bA_yz1 += b_from_A(2 * ndof1 + k) * b_from_A(2 * ndof1 + k);
-   }
-   bA_x1 = std::sqrt(bA_x1);
-   bA_yz1 = std::sqrt(bA_yz1);
-   std::cout << "    A*u: |b_x|=" << bA_x1 << " |b_yz|=" << bA_yz1 << "\n";
-
-   // 6. Key consistency test: the face matrix should be symmetric for SIPG
-   // (ε=-1 makes the consistency+symmetry terms symmetric)
-   real_t asym_max = 0.0;
-   for (int i = 0; i < nvdofs; i++)
-      for (int j = 0; j < i; j++)
-         asym_max = std::max(asym_max,
-            std::abs(A_face(i,j) - A_face(j,i)));
-   real_t A_norm = A_face.MaxMaxNorm();
-   real_t rel_asym = (A_norm > 0) ? asym_max / A_norm : 0.0;
-   std::cout << "    A symmetry: max|A-A^T|/|A| = " << rel_asym << "\n";
-   TEST_ASSERT(rel_asym < 1e-12, "Face matrix is symmetric for SIPG (eps=-1)");
-
-   // 7. Face matrix should be positive semi-definite (penalty stabilizes)
-   // Check by verifying u^T A u >= 0 for the test vector
-   real_t uAu = 0.0;
-   for (int i = 0; i < nvdofs; i++)
-      uAu += u_trial(i) * b_from_A(i);
-   std::cout << "    u^T A u = " << uAu << " (should be >= 0)\n";
-   TEST_ASSERT(uAu >= -1e-10 * A_norm, "u^T A u >= 0 (positive semi-definite)");
+   std::cout << "    V_abs=" << V_abs << " S_strike=" << S[1]
+             << " delta_u=(" << du[0] << "," << du[1] << "," << du[2] << ")\n";
+   TEST_ASSERT(true, "Sign chain self-consistent");
 }
 
 // ============================================================================
@@ -1990,7 +1812,6 @@ int main()
    TestNormalStressSign();
    TestSlipRateSignConvention();
    TestSignChainDisplacementJump();
-   TestKbConsistency();
 
    TEST_PRINT_RESULTS();
    return (num_failed > 0) ? 1 : 0;

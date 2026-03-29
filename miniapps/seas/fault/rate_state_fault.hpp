@@ -301,11 +301,10 @@ public:
          for (int i = 0; i < num_nodes_; i++)
          {
             // Below fault zone check (shouldn't happen with proper fault detection)
-            // v55 D8: negated to match Tandem V_vec convention.
             if (depths(i) > Wf_bp5_ + 1.0)
             {
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;
+               slip_rate_(2*i+1) = Vp_bp5_;
                continue;
             }
 
@@ -424,12 +423,12 @@ public:
             // ---- BP5 vector path ----
             if (depths(i) > Wf_bp5_ + 1.0)
             {
-               // v55 D8: negated to match Tandem V_vec convention.
+               // Below fault zone: prescribed plate rate.
                rate(i * StatePerNode + 0) = 0.0;
-               rate(i * StatePerNode + 1) = -Vp_bp5_;
+               rate(i * StatePerNode + 1) = Vp_bp5_;
                rate(i * StatePerNode + PsiIndex) = 0.0;
                slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;
+               slip_rate_(2*i+1) = Vp_bp5_;
                continue;
             }
 
@@ -518,13 +517,6 @@ public:
 
    /// @brief Extract slip from state vector.
    ///
-   /// For BP5 (SlipComponents==2): the internal state S uses Tandem's convention
-   /// where dS/dt = V_vec is anti-parallel to traction (v55 D8). The domain
-   /// solver expects physical slip (parallel to traction). GetSlip negates the
-   /// BP5 slip components so the domain solver sees the correct sign.
-   ///
-   /// For BP2 (SlipComponents==1): no negation (scalar convention unchanged).
-   ///
    /// @param[in] state Full state vector [StateSize()]
    /// @param[out] slip Slip at each node [SlipSize()]
    void GetSlip(const Vector &state, Vector &slip) const
@@ -535,17 +527,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate to convert from Tandem internal convention
-               // (S anti-parallel to tau) to physical slip (parallel to tau)
-               // for the domain solver.
-               slip(i * SlipComponents + c) = -state(i * StatePerNode + c);
-            }
-            else
-            {
-               slip(i * SlipComponents + c) = state(i * StatePerNode + c);
-            }
+            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
          }
       }
    }
@@ -599,15 +581,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate physical slip to internal Tandem convention
-               state(i * StatePerNode + c) = -slip(i * SlipComponents + c);
-            }
-            else
-            {
-               state(i * StatePerNode + c) = slip(i * SlipComponents + c);
-            }
+            state(i * StatePerNode + c) = slip(i * SlipComponents + c);
          }
       }
    }

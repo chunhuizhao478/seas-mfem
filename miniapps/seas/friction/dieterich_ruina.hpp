@@ -311,24 +311,20 @@ public:
    /// Solves: tau = sigma_n * f(V, psi) + eta * V
    /// where f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
    ///
-   /// v55 D4: Brent's method in log10(V) space, matching Tandem's
-   /// DieterichRuinaBase::slip_rate (lines 90-132).
+   /// Uses Brent's method with bracket [0, tau/eta].
+   /// - At V=0: R(0) = tau > 0
+   /// - At V=tau/eta: R = -sigma_n*f < 0
    ///
-   /// Bracket: Ve ∈ [-32, log10(tau/eta)] where Ve = log10(V).
-   /// Provides uniform relative precision across all slip rate magnitudes.
-   /// Fallback bracket: [log10(nextafter(0,1)), log10(tau/eta)].
-   ///
-   /// Edge cases match Tandem exactly:
-   /// - sigma_n <= 0: V = tau/eta (fault in tension)
-   /// - tau <= 0: V = 0
-   /// - eta == 0: direct inversion V = 2*V0*sinh(tau/(sigma_n*a))*exp(-psi/a)
+   /// When psi is very negative (collapsed state variable during RK45
+   /// intermediate stages), f → 0 and R(V_hi) ≈ 0 may become slightly
+   /// positive due to floating-point error. In this degenerate case,
+   /// friction is negligible and V ≈ tau/eta is returned.
    real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
                            real_t eta, real_t a,
                            int *iterations = nullptr) const
    {
       if (sigma_n <= 0.0)
       {
-         // Tandem: DieterichRuinaBase.h:98-102
          if (iterations) { *iterations = 0; }
          if (eta > 0.0) { return tau / eta; }
          else { return 0.0; }
@@ -340,63 +336,35 @@ public:
          return 0.0;
       }
 
-      if (eta == 0.0)
-      {
-         // Tandem: Finv path (DieterichRuinaBase.h:216-224)
-         real_t r = tau / sigma_n;
-         real_t V = cp_.V0 * (std::exp((r - psi) / a)
-                              - std::exp(-(r + psi) / a));
-         if (iterations) { *iterations = 0; }
-         return std::max(V, 0.0);
-      }
+      // Brent's method with bracket [0, tau/eta]
+      real_t V_lo = 0.0;
+      real_t V_hi = tau / eta;
 
-      // Brent's method in log10(V) space (Tandem: lines 105-131)
-      auto fF = [&](real_t Ve) -> real_t
+      auto residual = [&](real_t V) -> real_t
       {
-         real_t V = std::pow(10.0, Ve);
          return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
       };
 
-      real_t Va = -32.0;
-      real_t Vb = std::log10(tau / eta);
-
-      // Primary bracket (Tandem: lines 113-119)
-      real_t lo = std::min(Va, Vb);
-      real_t hi = std::max(Va, Vb);
-      real_t Flo = fF(lo);
-      real_t Fhi = fF(hi);
-
-      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
-      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
-
-      if (std::copysign(Flo, Fhi) != Flo)
+      real_t Fb = residual(V_hi);
+      if (Fb >= 0.0)
       {
-         // Valid bracket — signs differ
-         real_t Ve = zeroIn(lo, hi, fF);
+         // Friction is negligible (collapsed state variable, psi << 0).
+         static int degen_count = 0;
+         if (++degen_count <= 5)
+         {
+            std::cerr << "[WARNING] SolveSlipRatePsi degenerate case #"
+                      << degen_count << ": psi=" << psi
+                      << " a=" << a << " tau=" << tau
+                      << " V=tau/eta=" << V_hi << "\n";
+         }
          if (iterations) { *iterations = 0; }
-         return std::pow(10.0, Ve);
+         return V_hi;
       }
 
-      // Fallback bracket (Tandem: lines 121-129)
-      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));
-      lo = std::min(Va_min, Vb);
-      hi = std::max(Va_min, Vb);
-      Flo = fF(lo);
-      Fhi = fF(hi);
+      real_t V = zeroIn(V_lo, V_hi, residual);
 
-      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
-      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
-
-      if (std::copysign(Flo, Fhi) != Flo)
-      {
-         real_t Ve = zeroIn(lo, hi, fF);
-         if (iterations) { *iterations = 0; }
-         return std::pow(10.0, Ve);
-      }
-
-      // Both brackets failed — return tau/eta as last resort
       if (iterations) { *iterations = 0; }
-      return tau / eta;
+      return V;
    }
 
    /// Solve for 2-component slip rate given 2-component traction and scalar psi.
@@ -431,11 +399,8 @@ public:
          return;
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
-      // v55 D8: anti-parallel to tau, matching Tandem DieterichRuinaBase.h:174.
-      // The negation only affects the internal state variable S (cumulative slip).
-      // GetSlip() negates S back to physical slip before the domain solver sees it.
-      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
+      V_vec[0] = (V_abs / tau_abs) * tau_vec[0];
+      V_vec[1] = (V_abs / tau_abs) * tau_vec[1];
    }
 
    /// Compute initial psi from stress equilibrium.
