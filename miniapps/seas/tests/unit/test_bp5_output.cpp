@@ -10,7 +10,7 @@
 // CONTRIBUTING.md for details.
 
 // Unit tests for BP5 output infrastructure:
-//   - Probe2DInterpolator (2D nearest-DOF matching)
+//   - Probe2DInterpolator (nearest-DOF fallback + exact face interpolation)
 //   - BP5BenchmarkOutput (8-column SCEC format output)
 
 #include "mfem.hpp"
@@ -101,6 +101,43 @@ void TestProbe2DInterpolator_NoFaultDOFs()
                "Empty fault DOFs → nearest DOF = -1");
    TEST_ASSERT(interp.GetMatchDistance(0) > 1e30,
                "Empty fault DOFs → infinite match distance");
+}
+
+// ============================================================================
+// Test: Probe2DInterpolator exact p=1 face interpolation
+// ============================================================================
+
+void TestProbe2DInterpolator_ExactFaceInterpolationP1()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_ExactFaceInterpolationP1 ===\n";
+
+   // Single p=1 triangular fault face with vertices
+   // (0,0), (1000,0), (0,1000) in (x2, x3) coordinates.
+   Vector x2(3), x3(3);
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"inside", 250.0, 250.0},
+   };
+
+   Probe2DInterpolator interp(x2, x3, stations, 3);
+
+   TEST_ASSERT(interp.HasExactMatch(0),
+               "p=1 triangular face supports exact station interpolation");
+   TEST_NEAR(interp.GetMatchDistance(0), 0.0, 1e-12,
+             "Exact face interpolation reports zero match distance");
+
+   Vector field(3);
+   field(0) = 10.0;
+   field(1) = 20.0;
+   field(2) = 40.0;
+
+   // Barycentric weights at (250,250) are [0.5, 0.25, 0.25].
+   real_t expected = 0.5 * 10.0 + 0.25 * 20.0 + 0.25 * 40.0;
+   TEST_NEAR(interp.EvaluateScalar(field, 0), expected, 1e-12,
+             "Exact face interpolation reproduces barycentric value");
 }
 
 // ============================================================================
@@ -564,6 +601,92 @@ void TestBP5BenchmarkOutput_MultiDOFWrite()
 }
 
 // ============================================================================
+// Test: BP5BenchmarkOutput exact p=1 face interpolation at off-node station
+// ============================================================================
+
+void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
+{
+   std::cout << "\n=== Test: BP5BenchmarkOutput_ExactFaceInterpolationP1 ===\n";
+
+   Vector x2(3), x3(3);
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"test_exact_p1", 250.0, 250.0},
+   };
+
+   BP5Params params;
+   std::string prefix = "test_bp5_exact_p1";
+
+   Vector tau_pre_dip(3), tau_pre_strike(3);
+   tau_pre_dip = 0.0;
+   tau_pre_strike = 0.0;
+
+   {
+      BP5BenchmarkOutput<Mesh> out(prefix, params, stations, x2, x3, 3);
+      out.SetTauPre(tau_pre_dip, tau_pre_strike);
+
+      Vector slip_dip(3), slip_strike(3), theta(3);
+      Vector V_dip(3), V_strike(3);
+      Vector trac_dip(3), trac_strike(3);
+
+      // Internal values are negated before SCEC output.
+      slip_dip(0) = -1.0;   slip_strike(0) = -10.0;
+      slip_dip(1) = -2.0;   slip_strike(1) = -20.0;
+      slip_dip(2) = -4.0;   slip_strike(2) = -40.0;
+
+      V_dip(0) = 1e-6;      V_strike(0) = 1e-5;
+      V_dip(1) = 2e-6;      V_strike(1) = 2e-5;
+      V_dip(2) = 4e-6;      V_strike(2) = 4e-5;
+
+      trac_dip = 0.0;
+      trac_strike = 0.0;
+
+      theta(0) = 10.0;
+      theta(1) = 20.0;
+      theta(2) = 40.0;
+
+      out.WriteFromGlobalData(1.0, slip_dip, slip_strike, theta,
+                              V_dip, V_strike, trac_dip, trac_strike);
+      out.Flush();
+   }
+
+   std::string filename = prefix + "_test_exact_p1.txt";
+   std::ifstream file(filename);
+   TEST_ASSERT(file.is_open(), "Exact p=1 BP5 output file created");
+
+   if (file.is_open())
+   {
+      std::string line;
+      std::getline(file, line);
+      std::getline(file, line);
+      std::getline(file, line);
+
+      std::istringstream iss(line);
+      double t, slip_s, slip_d, logV_s, logV_d, tau_s, tau_d, log_theta;
+      iss >> t >> slip_s >> slip_d >> logV_s >> logV_d >> tau_s >> tau_d >> log_theta;
+
+      // Barycentric weights = [0.5, 0.25, 0.25] at (250,250).
+      TEST_NEAR(slip_s, 20.0, 1e-12,
+                "strike slip interpolated exactly on p=1 face");
+      TEST_NEAR(slip_d, 2.0, 1e-12,
+                "dip slip interpolated exactly on p=1 face");
+      TEST_NEAR(logV_s, std::log10(2e-5), 1e-12,
+                "strike slip-rate interpolated exactly on p=1 face");
+      TEST_NEAR(logV_d, std::log10(2e-6), 1e-12,
+                "dip slip-rate interpolated exactly on p=1 face");
+      TEST_NEAR(log_theta, std::log10(20.0), 1e-12,
+                "state variable interpolated exactly on p=1 face");
+
+      file.close();
+   }
+
+   std::remove(filename.c_str());
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -574,6 +697,7 @@ int main()
 
    TestProbe2DInterpolator_NearestDOF();
    TestProbe2DInterpolator_NoFaultDOFs();
+   TestProbe2DInterpolator_ExactFaceInterpolationP1();
    TestBP5BenchmarkOutput_FileCreation();
    TestBP5BenchmarkOutput_ComponentSwap();
    TestBP5BenchmarkOutput_StressComputation();
@@ -583,6 +707,7 @@ int main()
    // v45 Phase 5: Multi-DOF output tests
    TestProbe2DInterpolator_MultiDOFCloserMatch();
    TestBP5BenchmarkOutput_MultiDOFWrite();
+   TestBP5BenchmarkOutput_ExactFaceInterpolationP1();
 
    TEST_PRINT_RESULTS();
    return num_failed;

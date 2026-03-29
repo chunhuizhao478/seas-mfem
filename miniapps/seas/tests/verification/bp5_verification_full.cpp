@@ -337,6 +337,7 @@ int main(int argc, char *argv[])
    // v50f: traction recovery strategies
    bool traction_stress_only = false;  // Skip penalty correction in traction
    bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
+   bool diag_station_traction_decomp = false; // Write station-level stress/correction traction
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -433,6 +434,10 @@ int main(int argc, char *argv[])
       if (arg == "--no-v-guard") { no_v_guard = true; }
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
       if (arg == "--traction-stress-only") { traction_stress_only = true; }
+      if (arg == "--diag-station-traction-decomp")
+      {
+         diag_station_traction_decomp = true;
+      }
       if (arg == "--traction-weak-form") { traction_weak_form = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
       {
@@ -830,7 +835,16 @@ int main(int argc, char *argv[])
 
    ParallelBP5BenchmarkOutput bench_out(
       full_prefix, params, stations, fault_geom, mpi,
-      global_x2, global_x3, global_tp_dip, global_tp_strike);
+      global_x2, global_x3, global_tp_dip, global_tp_strike,
+      domain.GetNbfPerFace(), face_basis_type);
+   if (diag_station_traction_decomp)
+   {
+      bench_out.EnableTractionDecompositionOutput();
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Diagnostic station traction decomposition: ON\n";
+      }
+   }
 
    // Global output (root only)
    std::unique_ptr<ProbeOutput> global_out;
@@ -1106,6 +1120,23 @@ int main(int argc, char *argv[])
       }
    }
 
+   auto write_station_traction_decomp = [&](real_t time_now)
+   {
+      if (!diag_station_traction_decomp) { return; }
+
+      Vector slip_diag;
+      fault_op.GetSlip(state, slip_diag);
+
+      Vector traction_diag, traction_stress_diag, traction_corr_diag;
+      domain.ComputeTractionComponents(seas_op.GetDisplacement(), slip_diag,
+                                       traction_diag,
+                                       traction_stress_diag,
+                                       traction_corr_diag);
+      bench_out.WriteTractionDecomposition(time_now,
+                                           traction_stress_diag,
+                                           traction_corr_diag);
+   };
+
    // =========================================================================
    // Time integration (Dormand-Prince RK45)
    // =========================================================================
@@ -1332,10 +1363,13 @@ int main(int argc, char *argv[])
       {
          bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
                               V_max);
+         write_station_traction_decomp(t);
+         bench_out.Flush();
       }
       else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
                                V_max))
       {
+         write_station_traction_decomp(t);
          bench_out.Flush();
       }
 

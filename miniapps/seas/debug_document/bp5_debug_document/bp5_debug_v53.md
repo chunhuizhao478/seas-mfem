@@ -296,3 +296,303 @@ The critical mismatch is:
 
 The proposed fix is to make MFEM `p=1` use the same nodal fault discretization as Tandem,
 with **three node samples per element face exactly**.
+
+---
+
+## 9. Implemented in Code
+
+### 9.1 Fix 1: p=1 IP Fault Space Now Uses 3 Nodal DOFs per Triangle
+
+This fix has now been implemented.
+
+Current MFEM IP behavior:
+
+- `face_fe_order = order_` for all IP orders, including `p=1`
+- triangular fault faces at `p=1` therefore use `nbf = 3`
+- BP5 parameters are evaluated at those 3 face nodes
+
+This removes the previous MFEM-only special case:
+
+- old: `p=1 -> face_order=0 -> nbf=1`
+- new: `p=1 -> face_order=1 -> nbf=3`
+
+Unit-test status after the change:
+
+- `make test-elasticity-operator`
+- result: **300 passed, 0 failed**
+
+### 9.2 Fix 2: BP5 Nucleation Inclusion Now Matches Tandem `bp5_outside`
+
+This fix has also now been implemented.
+
+MFEM previously used exact rectangular inclusion:
+
+```cpp
+x3 >= hs+ht && x3 <= hs+ht+H &&
+x2 >= -l/2 && x2 <= -l/2+w
+```
+
+Tandem stock BP5 uses:
+
+- `scenario = "bp5_outside"`
+- `eps = 1e-3`
+
+so boundary points are classified with a small outward tolerance.
+
+MFEM now exposes the same behavior through:
+
+- `BP5Params::nucleation_eps = 1e-3` by default
+- CLI override: `--nucleation-eps`
+- `--nucleation-eps 0.0` reproduces the old exact behavior
+
+Unit-test status after the change:
+
+- `make test-bp5-params`
+- result: **123 passed, 0 failed**
+
+Verification build status:
+
+- `make seas_bp5_full`
+- result: build succeeds
+
+---
+
+## 10. Current Outcome After Both Fixes
+
+### 10.1 What Improved
+
+The `p=1` nodal-fault fix clearly improved the initial nucleation behavior.
+
+At the nucleation-front station `strk-24dp+10`, MFEM and Tandem are now close in the
+early phase:
+
+- at `t ~ 1 s`, both are near `log10(V_strike) ~ -1.91`
+- at `t ~ 5 s`, both are near `log10(V_strike) ~ -1.86`
+
+So the local seed behavior is no longer the main failure mode.
+
+### 10.2 What Still Fails
+
+The run still decays relative to Tandem one station ahead of the front.
+
+At `strk-16dp+10`:
+
+- MFEM near `t ~ 1 s`: `log10(V_strike) = -9.056`
+- Tandem near `t ~ 1 s`: `log10(V_strike) = -8.975`
+
+At `t ~ 5 s`:
+
+- MFEM: `log10(V_strike) = -9.139`
+- Tandem: `log10(V_strike) = -8.567`
+
+So the remaining mismatch appears in **stress transfer / front propagation**, not in the
+local nucleation seed itself.
+
+### 10.3 `bp5_outside` Fix Verdict
+
+The `bp5_outside` inclusion fix was worth implementing for consistency, but:
+
+> **It is not sufficient to fix the remaining mismatch.**
+
+The user has already reported that this change is **not helping** the overall `p=1`
+Tandem comparison. The current evidence agrees: the main remaining error is no longer
+boundary-node classification of the seed region.
+
+---
+
+## 11. Updated Diagnosis
+
+After the two implemented fixes:
+
+1. `3x` penalty mismatch  
+   still **disproved**
+
+2. `p=1` face-average vs 3-node fault discretization mismatch  
+   **fixed**
+
+3. `bp5_outside` vs exact nucleation inclusion mismatch  
+   **fixed**, but **not enough**
+
+The leading remaining problem is now:
+
+> **MFEM nucleates locally, but the early propagation/loading transfer toward adjacent
+> stations is weaker than Tandem.**
+
+The most defensible remaining target is now:
+
+- traction recovery / stress transfer beyond the seed
+
+The previously considered alternatives are weaker:
+
+- `elastic_sigma_n` was already addressed and rejected in earlier BP5 debug notes
+- BLR vs exact MUMPS does not change the observed decay in the user's current runs
+- `p=1` IP serial-vs-parallel shared-face inconsistency is not supported by the new test below
+
+---
+
+## 12. New Check: BP5 IP Serial-vs-Parallel Shared-Face Diagnostic
+
+To test whether the production mismatch comes from the parallel shared-face IP path,
+a new diagnostic was added to:
+
+- `miniapps/seas/tests/parallel/test_bp5_parallel_smoke.cpp`
+
+The new check:
+
+- uses `bp5/mesh/reference/bp5_tandem_coarse.msh`
+- runs BP5 with `p=1`, `DGMethod::IP`
+- compares serial vs parallel on the same reference mesh
+- checks both:
+  - shared-face duplicate agreement before deduplication
+  - serial vs parallel fault fields after deduplication
+- evaluates two states:
+  - post-initialization equilibrium state
+  - a deterministic nonuniform slip perturbation state
+
+Verification status:
+
+- `make test-bp5-smoke`
+- result: **passes on both `np=2` and `np=4`**
+
+Observed diagnostic values:
+
+- `np=4`, initialization:
+  - duplicate shared-face keys: `3`
+  - max duplicate relative spread in strike traction / strike slip rate / strike RHS:
+    `0 / 0 / 0`
+- `np=4`, perturbed slip state:
+  - duplicate shared-face keys: `3`
+  - max duplicate relative spread:
+    about `1.7e-14 / 0 / 0`
+  - serial-vs-parallel relative difference in strike traction / strike slip rate /
+    strike RHS:
+    about `9.3e-8 / 6.7e-11 / 6.7e-11`
+
+Verdict:
+
+> **The BP5 `p=1` IP shared-face parallel path is not showing a meaningful
+> serial-vs-parallel inconsistency on the reference coarse mesh.**
+
+So the current Tandem mismatch is **unlikely** to be primarily an MPI shared-face sign
+or assembly bug.
+
+---
+
+## 13. New Check: Dip Contamination Still Persists in `v53`
+
+The new `p=1` fault-space fix improved local nucleation at `strk-24dp+10`, but the
+current `v53` station comparison still shows excessive dip contamination at the next
+station ahead of the front, `strk-16dp+10`.
+
+Comparing MFEM `v53` against Tandem:
+
+At approximately `0.1 s`:
+
+- MFEM:
+  - `tau_dip = -4.35e-4 MPa`
+- Tandem:
+  - `tau_dip = -4.77e-5 MPa`
+- ratio:
+  - MFEM dip traction magnitude is about **9.1x** Tandem
+
+At approximately `1.0 s`:
+
+- MFEM:
+  - `tau_dip = -4.33e-3 MPa`
+- Tandem:
+  - `tau_dip = -2.52e-4 MPa`
+- ratio:
+  - MFEM dip traction magnitude is about **17.2x** Tandem
+
+At approximately `5.0 s`:
+
+- MFEM:
+  - `tau_dip = -2.86e-2 MPa`
+- Tandem:
+  - `tau_dip = +3.33e-3 MPa`
+- ratio:
+  - MFEM dip traction magnitude is still about **8.6x** Tandem
+
+The strike traction stays much closer over the same interval, while dip traction
+diverges strongly.
+
+The dip slip-rate ratio shows the same pattern:
+
+- at `~1.0 s`, `|V_dip / V_strike|`:
+  - MFEM: about `2.2e-4`
+  - Tandem: about `1.6e-5`
+  - MFEM is about **14x** larger
+
+Verdict:
+
+> **The remaining `p=1` mismatch is still most consistent with traction
+> contamination, especially excess dip traction ahead of the nucleation front,
+> not with the already-fixed seed discretization issue.**
+
+---
+
+## 14. Current Best Next Step
+
+The previous proposal to use `--traction-stress-only` as a likely fix was too strong.
+That run has now been checked directly and it blows up very quickly.
+
+Observed behavior from the user's full run with `--traction-stress-only`:
+
+- earthquake begins effectively at `t=0`
+- `V_max` grows rapidly instead of decaying
+- the run becomes strongly unstable
+
+Correct interpretation:
+
+> **The penalty correction cannot simply be removed.**
+>
+> It is providing essential stabilization, even though the full traction still
+> appears too contaminated to match Tandem.
+
+So the right next step is not "stress-only as the solution." It is:
+
+- **measure the stress part and correction part separately at the BP5 stations**
+
+### 14.1 New Diagnostic Implemented
+
+A new station-level traction decomposition diagnostic has been implemented:
+
+- `ElasticityDomainOperator::ComputeTractionComponents(...)`
+  now returns:
+  - total traction
+  - stress contribution
+  - correction contribution
+- `BP5BenchmarkOutput` / `ParallelBP5BenchmarkOutput`
+  can now write separate station files for this decomposition
+- BP5 driver flag:
+  - `--diag-station-traction-decomp`
+
+This writes files of the form:
+
+- `<prefix>_tracdec_<station>.txt`
+
+with columns:
+
+- `time(s)`
+- `tau_stress_strike(MPa)`
+- `tau_stress_dip(MPa)`
+- `tau_corr_strike(MPa)`
+- `tau_corr_dip(MPa)`
+- `tau_total_strike(MPa)`
+- `tau_total_dip(MPa)`
+
+The decomposition is evaluated only on actual BP5 output writes, so it does not
+change the solve path.
+
+### 14.2 Updated Best Isolation Run
+
+- rerun the same `p=1`, near-fault 1000 m case with:
+  - `--diag-station-traction-decomp`
+
+Reason:
+
+- it preserves the actual stable run
+- it exposes whether the remaining mismatch at `strk-16dp+10` comes mainly from:
+  - the stress part,
+  - the correction part,
+  - or their balance

@@ -24,17 +24,22 @@
 #include <sstream>
 #include <iomanip>
 #include <limits>
+#include <utility>
 
 namespace mfem
 {
 namespace seas
 {
 
-/// @brief 2D nearest-DOF probe matching for BP5 fault stations.
+/// @brief 2D fault-station matching/interpolation for BP5 output.
 ///
-/// Unlike ProbeInterpolator (1D depth interpolation), this uses
-/// simple nearest-neighbor matching in 2D (x2, x3) space.
-/// No interpolation needed for DG nodes.
+/// The legacy path snaps each station to the nearest fault DOF. That is
+/// exact only when the requested station coincides with a fault node.
+/// Tandem instead locates the containing fault face and evaluates the
+/// finite-element field at the requested point. This class now does the
+/// same when the gathered fault data preserves per-face ordering
+/// (`nbf_per_face >= 3` and contiguous face blocks). If exact face
+/// interpolation cannot be constructed, it falls back to nearest-DOF.
 class Probe2DInterpolator
 {
 public:
@@ -46,20 +51,29 @@ public:
    /// @param fault_x3 Depth coordinates of fault DOFs [num_dofs]
    /// @param stations List of probe stations with (name, x2, x3)
    Probe2DInterpolator(const Vector &fault_x2, const Vector &fault_x3,
-                        const std::vector<Station> &stations)
+                       const std::vector<Station> &stations,
+                       int nbf_per_face = 1,
+                       int face_basis_type = BasisType::GaussLobatto)
       : num_stations_(static_cast<int>(stations.size())),
-        num_dofs_(fault_x2.Size())
+        num_dofs_(fault_x2.Size()),
+        nbf_per_face_(nbf_per_face),
+        face_basis_type_(face_basis_type)
    {
       MFEM_VERIFY(fault_x2.Size() == fault_x3.Size(),
                   "Coordinate arrays must have the same size");
 
       nearest_dof_.resize(num_stations_);
       match_distance_.resize(num_stations_);
+      exact_match_.resize(num_stations_, false);
+      face_start_.resize(num_stations_, -1);
+      exact_weights_.resize(num_stations_);
 
       for (int s = 0; s < num_stations_; s++)
       {
          FindNearest(fault_x2, fault_x3,
                      stations[s].x2, stations[s].x3, s);
+         TryBuildExactMatch(fault_x2, fault_x3,
+                            stations[s].x2, stations[s].x3, s);
       }
    }
 
@@ -78,11 +92,71 @@ public:
    /// Number of stations.
    int NumStations() const { return num_stations_; }
 
+   /// Whether the station uses exact face-local interpolation.
+   bool HasExactMatch(int station_idx) const
+   {
+      return exact_match_[station_idx];
+   }
+
+   /// Evaluate a scalar field [num_dofs] at the given station.
+   real_t EvaluateScalar(const Vector &field, int station_idx) const
+   {
+      MFEM_ASSERT(field.Size() == num_dofs_,
+                  "EvaluateScalar size mismatch: got " << field.Size()
+                  << ", expected " << num_dofs_);
+
+      if (exact_match_[station_idx])
+      {
+         const int start = face_start_[station_idx];
+         const Vector &w = exact_weights_[station_idx];
+         real_t value = 0.0;
+         for (int k = 0; k < w.Size(); k++)
+         {
+            value += w(k) * field(start + k);
+         }
+         return value;
+      }
+
+      const int dof = nearest_dof_[station_idx];
+      return (dof >= 0) ? field(dof) : 0.0;
+   }
+
+   /// Evaluate one component of an interleaved field [ncomp*num_dofs].
+   real_t EvaluateInterleaved(const Vector &field, int station_idx,
+                              int comp, int ncomp = 2) const
+   {
+      MFEM_ASSERT(field.Size() == ncomp * num_dofs_,
+                  "EvaluateInterleaved size mismatch: got " << field.Size()
+                  << ", expected " << ncomp * num_dofs_);
+      MFEM_ASSERT(comp >= 0 && comp < ncomp,
+                  "Component index out of range");
+
+      if (exact_match_[station_idx])
+      {
+         const int start = face_start_[station_idx];
+         const Vector &w = exact_weights_[station_idx];
+         real_t value = 0.0;
+         for (int k = 0; k < w.Size(); k++)
+         {
+            value += w(k) * field(ncomp * (start + k) + comp);
+         }
+         return value;
+      }
+
+      const int dof = nearest_dof_[station_idx];
+      return (dof >= 0) ? field(ncomp * dof + comp) : 0.0;
+   }
+
 private:
    int num_stations_;
    int num_dofs_;
+   int nbf_per_face_;
+   int face_basis_type_;
    std::vector<int> nearest_dof_;
    std::vector<real_t> match_distance_;
+   std::vector<bool> exact_match_;
+   std::vector<int> face_start_;
+   std::vector<Vector> exact_weights_;
 
    void FindNearest(const Vector &x2, const Vector &x3,
                     real_t target_x2, real_t target_x3, int s)
@@ -111,6 +185,80 @@ private:
 
       nearest_dof_[s] = best;
       match_distance_[s] = best_dist;
+   }
+
+   static int OrderFromNbf(int nbf)
+   {
+      if (nbf == 1) { return 0; }
+
+      const real_t disc = std::sqrt(1.0 + 8.0 * nbf);
+      const int p = static_cast<int>(std::llround((disc - 3.0) / 2.0));
+      return ((p + 1) * (p + 2) / 2 == nbf) ? p : -1;
+   }
+
+   static bool ComputeReferenceIP(real_t x0, real_t z0,
+                                  real_t x1, real_t z1,
+                                  real_t x2, real_t z2,
+                                  real_t xp, real_t zp,
+                                  IntegrationPoint &ip)
+   {
+      const real_t ax = x1 - x0;
+      const real_t az = z1 - z0;
+      const real_t bx = x2 - x0;
+      const real_t bz = z2 - z0;
+      const real_t px = xp - x0;
+      const real_t pz = zp - z0;
+      const real_t det = ax * bz - az * bx;
+      if (std::abs(det) < 1e-14) { return false; }
+
+      const real_t r = (px * bz - pz * bx) / det;
+      const real_t s = (ax * pz - az * px) / det;
+      const real_t l0 = 1.0 - r - s;
+      const real_t l1 = r;
+      const real_t l2 = s;
+      const real_t tol = 1e-10;
+      if (l0 < -tol || l1 < -tol || l2 < -tol) { return false; }
+
+      ip.x = r;
+      ip.y = s;
+      ip.weight = 0.0;
+      return true;
+   }
+
+   void TryBuildExactMatch(const Vector &x2, const Vector &x3,
+                           real_t target_x2, real_t target_x3, int s)
+   {
+      if (nbf_per_face_ < 3 || num_dofs_ % nbf_per_face_ != 0)
+      {
+         return;
+      }
+
+      const int order = OrderFromNbf(nbf_per_face_);
+      if (order < 1) { return; }
+
+      H1_TriangleElement face_fe(order, face_basis_type_);
+      Vector shape(nbf_per_face_);
+      const int num_faces = num_dofs_ / nbf_per_face_;
+
+      for (int f = 0; f < num_faces; f++)
+      {
+         const int start = f * nbf_per_face_;
+         IntegrationPoint ip;
+         if (!ComputeReferenceIP(x2(start + 0), x3(start + 0),
+                                 x2(start + 1), x3(start + 1),
+                                 x2(start + 2), x3(start + 2),
+                                 target_x2, target_x3, ip))
+         {
+            continue;
+         }
+
+         face_fe.CalcShape(ip, shape);
+         exact_match_[s] = true;
+         face_start_[s] = start;
+         exact_weights_[s] = shape;
+         match_distance_[s] = 0.0;
+         return;
+      }
    }
 };
 
@@ -142,10 +290,13 @@ public:
    BP5BenchmarkOutput(const std::string &prefix,
                       const BP5Params &params,
                       const std::vector<Station> &stations,
-                      const Vector &fault_x2, const Vector &fault_x3)
+                      const Vector &fault_x2, const Vector &fault_x3,
+                      int nbf_per_face = 1,
+                      int face_basis_type = BasisType::GaussLobatto)
       : prefix_(prefix),
         stations_(stations),
-        interpolator_(fault_x2, fault_x3, stations),
+        interpolator_(fault_x2, fault_x3, stations,
+                      nbf_per_face, face_basis_type),
         last_write_time_(-1e30)
    {
       // Store per-DOF tau_pre components for WriteFromGlobalData
@@ -186,6 +337,41 @@ public:
    {
       tau_pre_dip_ = tau_pre_dip;
       tau_pre_strike_ = tau_pre_strike;
+   }
+
+   /// Enable writing separate station files for traction decomposition.
+   ///
+   /// Files are written as:
+   ///   <prefix>_tracdec_<station>.txt
+   /// with columns:
+   ///   t, tau_stress_strike, tau_stress_dip, tau_corr_strike,
+   ///   tau_corr_dip, tau_total_strike, tau_total_dip
+   void EnableTractionDecompositionOutput()
+   {
+      if (!decomp_probes_.empty()) { return; }
+
+      std::vector<std::string> columns = {
+         "time(s)",
+         "tau_stress_strike(MPa)", "tau_stress_dip(MPa)",
+         "tau_corr_strike(MPa)", "tau_corr_dip(MPa)",
+         "tau_total_strike(MPa)", "tau_total_dip(MPa)"
+      };
+
+      for (size_t i = 0; i < stations_.size(); i++)
+      {
+         real_t x2_km = stations_[i].x2 / 1000.0;
+         real_t x3_km = stations_[i].x3 / 1000.0;
+
+         std::ostringstream desc;
+         desc << "BP5 traction decomposition at " << stations_[i].name
+              << " (x2=" << x2_km << "km, x3=" << x3_km << "km)";
+
+         std::string filename =
+            prefix_ + "_tracdec_" + stations_[i].name + ".txt";
+         auto probe = std::make_unique<ProbeOutput>(
+            filename, columns, desc.str());
+         decomp_probes_.push_back(std::move(probe));
+      }
    }
 
    /// @brief Write output if adaptive schedule requires it.
@@ -245,24 +431,30 @@ public:
       for (int s = 0; s < interpolator_.NumStations(); s++)
       {
          int dof = interpolator_.GetNearestDOF(s);
-         if (dof < 0) { continue; }
+         if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
 
          // Negate slip for SCEC output: internal convention uses negative
          // for right-lateral, SCEC expects positive.
-         real_t slip_dip    = -global_slip_dip(dof);
-         real_t slip_strike = -global_slip_strike(dof);
+         real_t slip_dip =
+            -interpolator_.EvaluateScalar(global_slip_dip, s);
+         real_t slip_strike =
+            -interpolator_.EvaluateScalar(global_slip_strike, s);
 
-         real_t V_dip    = std::abs(global_V_dip(dof));
-         real_t V_strike = std::abs(global_V_strike(dof));
+         real_t V_dip =
+            std::abs(interpolator_.EvaluateScalar(global_V_dip, s));
+         real_t V_strike =
+            std::abs(interpolator_.EvaluateScalar(global_V_strike, s));
 
          // Negate for SCEC output: internal convention uses negative
          // for right-lateral, SCEC expects positive.
-         real_t tau_dip    = -(tau_pre_dip_(dof) +
-                               global_trac_dip(dof)) / 1e6;
-         real_t tau_strike = -(tau_pre_strike_(dof) +
-                               global_trac_strike(dof)) / 1e6;
+         real_t tau_dip =
+            -(interpolator_.EvaluateScalar(tau_pre_dip_, s) +
+              interpolator_.EvaluateScalar(global_trac_dip, s)) / 1e6;
+         real_t tau_strike =
+            -(interpolator_.EvaluateScalar(tau_pre_strike_, s) +
+              interpolator_.EvaluateScalar(global_trac_strike, s)) / 1e6;
 
-         real_t th = global_theta(dof);
+         real_t th = interpolator_.EvaluateScalar(global_theta, s);
 
          // Output: strike first, dip second (SCEC convention)
          std::vector<real_t> row = {
@@ -281,16 +473,55 @@ public:
       last_write_time_ = time;
    }
 
+   /// Write station-level traction decomposition from globally gathered data.
+   void WriteTractionDecompositionFromGlobalData(
+      real_t time,
+      const Vector &global_trac_stress_dip,
+      const Vector &global_trac_stress_strike,
+      const Vector &global_trac_corr_dip,
+      const Vector &global_trac_corr_strike)
+   {
+      if (decomp_probes_.empty()) { return; }
+
+      for (int s = 0; s < interpolator_.NumStations(); s++)
+      {
+         int dof = interpolator_.GetNearestDOF(s);
+         if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
+
+         real_t tau_stress_dip =
+            -interpolator_.EvaluateScalar(global_trac_stress_dip, s) / 1e6;
+         real_t tau_stress_strike =
+            -interpolator_.EvaluateScalar(global_trac_stress_strike, s) / 1e6;
+         real_t tau_corr_dip =
+            -interpolator_.EvaluateScalar(global_trac_corr_dip, s) / 1e6;
+         real_t tau_corr_strike =
+            -interpolator_.EvaluateScalar(global_trac_corr_strike, s) / 1e6;
+
+         std::vector<real_t> row = {
+            time,
+            tau_stress_strike,
+            tau_stress_dip,
+            tau_corr_strike,
+            tau_corr_dip,
+            tau_stress_strike + tau_corr_strike,
+            tau_stress_dip + tau_corr_dip
+         };
+         decomp_probes_[s]->WriteStep(row);
+      }
+   }
+
    /// Flush all output files.
    void Flush()
    {
       for (auto &p : probes_) { p->Flush(); }
+      for (auto &p : decomp_probes_) { p->Flush(); }
    }
 
    /// Close all output files.
    void Close()
    {
       for (auto &p : probes_) { p->Close(); }
+      for (auto &p : decomp_probes_) { p->Close(); }
    }
 
    /// Number of probes.
@@ -336,6 +567,7 @@ private:
    std::vector<Station> stations_;
    Probe2DInterpolator interpolator_;
    std::vector<std::unique_ptr<ProbeOutput>> probes_;
+   std::vector<std::unique_ptr<ProbeOutput>> decomp_probes_;
    real_t last_write_time_;
 
    // Pre-stress components for WriteFromGlobalData path
@@ -353,26 +585,32 @@ private:
       for (int s = 0; s < interpolator_.NumStations(); s++)
       {
          int dof = interpolator_.GetNearestDOF(s);
-         if (dof < 0) { continue; }
+         if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
 
          // Internal: index 0 = dip, index 1 = strike
          // Negate slip for SCEC output: internal convention uses negative
          // for right-lateral, SCEC expects positive.
-         real_t slip_dip    = -slip(2 * dof + 0);
-         real_t slip_strike = -slip(2 * dof + 1);
+         real_t slip_dip =
+            -interpolator_.EvaluateInterleaved(slip, s, 0);
+         real_t slip_strike =
+            -interpolator_.EvaluateInterleaved(slip, s, 1);
 
-         real_t V_dip    = std::abs(slip_rate(2 * dof + 0));
-         real_t V_strike = std::abs(slip_rate(2 * dof + 1));
+         real_t V_dip =
+            std::abs(interpolator_.EvaluateInterleaved(slip_rate, s, 0));
+         real_t V_strike =
+            std::abs(interpolator_.EvaluateInterleaved(slip_rate, s, 1));
 
          // Total shear stress = tau_pre + elastic_traction
          // Negate for SCEC output: internal convention uses negative
          // for right-lateral, SCEC expects positive.
-         real_t tau_dip = -(tau_pre(2 * dof + 0) +
-                            traction(2 * dof + 0)) / 1e6;
-         real_t tau_strike = -(tau_pre(2 * dof + 1) +
-                               traction(2 * dof + 1)) / 1e6;
+         real_t tau_dip =
+            -(interpolator_.EvaluateInterleaved(tau_pre, s, 0) +
+              interpolator_.EvaluateInterleaved(traction, s, 0)) / 1e6;
+         real_t tau_strike =
+            -(interpolator_.EvaluateInterleaved(tau_pre, s, 1) +
+              interpolator_.EvaluateInterleaved(traction, s, 1)) / 1e6;
 
-         real_t th = theta(dof);
+         real_t th = interpolator_.EvaluateScalar(theta, s);
 
          // Output: strike first, dip second (SCEC convention)
          std::vector<real_t> row = {

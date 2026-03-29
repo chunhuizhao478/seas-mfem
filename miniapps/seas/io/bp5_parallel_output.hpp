@@ -50,6 +50,8 @@ public:
    /// @param global_x3 Globally gathered depth coords (root only)
    /// @param global_tau_pre_dip Globally gathered tau_pre dip component (root)
    /// @param global_tau_pre_strike Globally gathered tau_pre strike component (root)
+   /// @param nbf_per_face Number of fault DOFs per face in gathered ordering
+   /// @param face_basis_type BasisType used for fault face nodes
    ParallelBP5BenchmarkOutput(
       const std::string &prefix,
       const BP5Params &params,
@@ -59,7 +61,9 @@ public:
       const Vector &global_x2,
       const Vector &global_x3,
       const Vector &global_tau_pre_dip,
-      const Vector &global_tau_pre_strike)
+      const Vector &global_tau_pre_strike,
+      int nbf_per_face = 1,
+      int face_basis_type = BasisType::GaussLobatto)
       : fault_geom_(fault_geom),
         mpi_ctx_(mpi_ctx),
         last_write_time_(-1e30)
@@ -67,8 +71,17 @@ public:
       if (mpi_ctx_.IsRoot())
       {
          bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
-            prefix, params, stations, global_x2, global_x3);
+            prefix, params, stations, global_x2, global_x3,
+            nbf_per_face, face_basis_type);
          bench_out_->SetTauPre(global_tau_pre_dip, global_tau_pre_strike);
+      }
+   }
+
+   void EnableTractionDecompositionOutput()
+   {
+      if (mpi_ctx_.IsRoot() && bench_out_)
+      {
+         bench_out_->EnableTractionDecompositionOutput();
       }
    }
 
@@ -144,6 +157,49 @@ public:
 
       last_write_time_ = time;
       return true;
+   }
+
+   /// Write station-level traction decomposition at the current time.
+   ///
+   /// Inputs are local interleaved traction components [2*N_local]:
+   ///   traction_stress = physical stress contribution
+   ///   traction_correction = correction contribution added to the stress part
+   void WriteTractionDecomposition(real_t time,
+                                   const Vector &traction_stress,
+                                   const Vector &traction_correction)
+   {
+      if (!bench_out_ && !mpi_ctx_.IsRoot())
+      {
+         // Non-root still participates in gather below.
+      }
+
+      const int N = fault_geom_.NumLocalFaultDOFs();
+      MFEM_ASSERT(traction_stress.Size() == 2 * N,
+                  "traction_stress size mismatch");
+      MFEM_ASSERT(traction_correction.Size() == 2 * N,
+                  "traction_correction size mismatch");
+
+      Vector local_stress_dip(N), local_stress_strike(N);
+      Vector local_corr_dip(N), local_corr_strike(N);
+      for (int i = 0; i < N; i++)
+      {
+         local_stress_dip(i) = traction_stress(2 * i + 0);
+         local_stress_strike(i) = traction_stress(2 * i + 1);
+         local_corr_dip(i) = traction_correction(2 * i + 0);
+         local_corr_strike(i) = traction_correction(2 * i + 1);
+      }
+
+      Vector g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike;
+      fault_geom_.GatherToRoot(local_stress_dip, g_stress_dip);
+      fault_geom_.GatherToRoot(local_stress_strike, g_stress_strike);
+      fault_geom_.GatherToRoot(local_corr_dip, g_corr_dip);
+      fault_geom_.GatherToRoot(local_corr_strike, g_corr_strike);
+
+      if (mpi_ctx_.IsRoot() && bench_out_)
+      {
+         bench_out_->WriteTractionDecompositionFromGlobalData(
+            time, g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike);
+      }
    }
 
    /// @brief Force a write at the current state (always flushes).
