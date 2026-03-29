@@ -10,8 +10,8 @@
 
 # BP5 v55 baseline LONG run: pre-D5 code to t>200s
 #
-# Strategy: checkout baseline commit into a temp dir, copy only the
-# miniapps/seas source files, and build against the existing MFEM library.
+# Strategy: checkout baseline seas files, build, run, then restore.
+# The MFEM library itself doesn't change between commits.
 
 export LC_ALL=C
 export LANG=C
@@ -23,33 +23,28 @@ module list
 
 export LD_LIBRARY_PATH=${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH}
 
-SEAS_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem/miniapps/seas
 REPO_DIR=/scratch2/10024/zhaochun/seas-project/seas-mfem
+SEAS_DIR=$REPO_DIR/miniapps/seas
 BASELINE_COMMIT=d27c9cf
-BUILD_DIR=/tmp/seas_baseline_$$
+CURRENT_BRANCH=$(cd $REPO_DIR && git rev-parse HEAD)
 
-# Extract only miniapps/seas source from the baseline commit
-mkdir -p "$BUILD_DIR"
-cd "$REPO_DIR"
-git archive "$BASELINE_COMMIT" -- miniapps/seas | tar -x -C "$BUILD_DIR"
+cd $SEAS_DIR
 
-cd "$BUILD_DIR/miniapps/seas"
+# Save current seas files
+git stash push -m "baseline-long-run" -- .
 
-# Symlink to the existing MFEM library (two levels up from miniapps/seas)
-ln -sf "$REPO_DIR/libmfem.a" ../../libmfem.a
-ln -sf "$REPO_DIR/config" ../../config
-ln -sf "$REPO_DIR/fem" ../../fem
-ln -sf "$REPO_DIR/general" ../../general
-ln -sf "$REPO_DIR/linalg" ../../linalg
-ln -sf "$REPO_DIR/mesh" ../../mesh
+# Checkout baseline seas files only
+cd $REPO_DIR
+git checkout $BASELINE_COMMIT -- miniapps/seas/
 
-# Build
-make seas_bp5_full || { echo "BUILD FAILED"; exit 1; }
+cd $SEAS_DIR
+make clean-build
+make seas_bp5_full || { echo "BUILD FAILED"; cd $REPO_DIR; git checkout $CURRENT_BRANCH -- miniapps/seas/; git stash pop; exit 1; }
 
 mkdir -p bp5/results_v55_baseline_long
 
 ibrun ./seas_bp5_full \
-      --mesh "$SEAS_DIR/bp5/mesh/reference/bp5_tandem.msh" \
+      --mesh bp5/mesh/reference/bp5_tandem.msh \
       --mesh-scale 1000 \
       --order 1 \
       --dg-method IP \
@@ -57,14 +52,13 @@ ibrun ./seas_bp5_full \
       --blr-tol 1e-12 \
       --check-residual \
       --tfinal 5.68e10 \
-      --ref-dir "$SEAS_DIR/bp5/benchmark_data" \
+      --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v55_baseline_long \
       --output-prefix bp5_v55_base_long \
       --checkpoint-interval 1000 \
       --write-every-step
 
-# Copy results back to main tree for easy access
-cp -r bp5/results_v55_baseline_long "$SEAS_DIR/bp5/" 2>/dev/null || true
-
-# Cleanup
-rm -rf "$BUILD_DIR"
+# Restore current code
+cd $REPO_DIR
+git checkout $CURRENT_BRANCH -- miniapps/seas/
+git stash pop 2>/dev/null || true
