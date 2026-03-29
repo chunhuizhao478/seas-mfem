@@ -55,7 +55,7 @@ mkdir -p bp5/results_v52_rhs_z
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem.msh \
       --mesh-scale 1000 \
-      --order 2 \
+      --order 1 \
       --dg-method IP \
       --solver mumps-blr \
       --blr-tol 1e-12 \
