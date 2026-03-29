@@ -312,6 +312,95 @@ public:
       }
    }
 
+   /// Assemble the Dirichlet BC RHS for a single boundary face.
+   ///
+   /// Mirrors Tandem's rhs_boundary (Elasticity.cpp:644-695):
+   ///   b[k,p] += c1 * tractionTest(0, f_q) * w + c2 * φ[k] * f_lifted_q[p] * w
+   /// with c1 = epsilon (full, not halved) and c2 = penalty (single element).
+   ///
+   /// This is the SAME formula as AssembleSlipFaceRHS but with:
+   ///   - Full epsilon (not halved) for the symmetry term
+   ///   - Single-element penalty (not averaged)
+   ///   - Only element 1 contribution (boundary has no element 2)
+   ///
+   /// @param fe1 Finite element on the boundary
+   /// @param Trans Face transformation (Elem2No < 0 for true boundary)
+   /// @param u_D_3d Prescribed Dirichlet displacement at quad points [dim*nq]
+   /// @param elvec Output RHS for element 1 [ndof1*dim]
+   void AssembleBoundaryFaceRHS(const FiniteElement &fe1,
+                                 FaceElementTransformations &Trans,
+                                 const Vector &u_D_3d,
+                                 Vector &elvec) const
+   {
+      const int ndof1 = fe1.GetDof();
+      elvec.SetSize(ndof1 * dim_); elvec = 0.0;
+
+      const int order = 2 * fe1.GetOrder() + 1;
+      const IntegrationRule &ir = IntRules.Get(Trans.GetGeometryType(), order);
+      int nq = ir.GetNPoints();
+
+      Vector shape1(ndof1);
+      DenseMatrix dshape1_ref(ndof1, dim_), dshape1_adj(ndof1, dim_);
+      DenseMatrix adjJ(dim_);
+      Vector nor(dim_);
+
+      for (int q = 0; q < nq; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Trans.SetAllIntPoints(&ip);
+         const IntegrationPoint &eip1 = Trans.GetElement1IntPoint();
+
+         fe1.CalcShape(eip1, shape1);
+         fe1.CalcDShape(eip1, dshape1_ref);
+         CalcAdjugate(Trans.Elem1->Jacobian(), adjJ);
+         Mult(dshape1_ref, adjJ, dshape1_adj);
+
+         CalcOrtho(Trans.Jacobian(), nor);
+         real_t nl_q = nor.Norml2();
+         real_t w_q = ip.weight;
+
+         real_t detJ1 = Trans.Elem1->Weight();
+         real_t lam1 = lambda_.Eval(*Trans.Elem1, eip1);
+         real_t mu1 = mu_.Eval(*Trans.Elem1, eip1);
+
+         // Boundary penalty: single element (Tandem: penalty_[fctNo] = p(0))
+         real_t penalty = ComputePenalty(fe1, fe1, detJ1, detJ1,
+                                          lam1, mu1, nl_q, false);
+
+         // Prescribed Dirichlet value at this quad point
+         real_t f_q[3];
+         for (int c = 0; c < dim_; c++)
+            f_q[c] = u_D_3d(c * nq + q);
+
+         real_t f_dot_n = 0.0;
+         for (int d = 0; d < dim_; d++) { f_dot_n += f_q[d] * nor(d); }
+
+         // Tandem: c1 = epsilon (FULL, not halved for boundary)
+         real_t c1 = epsilon_;
+
+         for (int k = 0; k < ndof1; k++)
+         {
+            real_t grad_dot_n = 0.0;
+            real_t grad_dot_f = 0.0;
+            for (int d = 0; d < dim_; d++)
+            {
+               grad_dot_n += dshape1_adj(k, d) * nor(d);
+               grad_dot_f += dshape1_adj(k, d) * f_q[d];
+            }
+
+            for (int p = 0; p < dim_; p++)
+            {
+               real_t trac_test = lam1 * dshape1_adj(k, p) * f_dot_n
+                  + mu1 * (grad_dot_n * f_q[p] + grad_dot_f * nor(p));
+
+               int idx = p * ndof1 + k;
+               elvec(idx) += c1 * trac_test * w_q / detJ1;
+               elvec(idx) += penalty * w_q * nl_q * shape1(k) * f_q[p];
+            }
+         }
+      }
+   }
+
    /// Compute DG traction at quad points for a skeleton fault face.
    ///
    /// Mirrors Tandem's compute_traction kernel (elasticity.py:242-244):

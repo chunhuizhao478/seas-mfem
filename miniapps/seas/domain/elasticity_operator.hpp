@@ -2074,62 +2074,27 @@ private:
 
          if (method_ == DGMethod::IP)
          {
-            real_t kappa = (order_ + 1) * (order_ + 1);
-            for (int p = 0; p < ir.GetNPoints(); p++)
-            {
-               const IntegrationPoint &ip = ir.IntPoint(p);
-               FTr->SetAllIntPoints(&ip);
-               const IntegrationPoint &eip = FTr->GetElement1IntPoint();
+            // v55: Use combined integrator's AssembleBoundaryFaceRHS
+            // (same formula as K's boundary face, Tandem's rhs_boundary)
+            DGElasticityIPCombinedIntegrator dir_integ(
+               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
-               Vector nor(dim);
-               CalcOrtho(FTr->Jacobian(), nor);
+            int quad_order_dir = 2 * fe->GetOrder() + 1;
+            const IntegrationRule &ir_dir = IntRules.Get(
+               FTr->FaceGeom, quad_order_dir);
+            int nq_dir = ir_dir.GetNPoints();
 
-               Vector shape(ndof);
-               fe->CalcShape(eip, shape);
+            // Build u_D at quad points (constant per face for BP5)
+            Vector u_D_3d(dim * nq_dir);
+            for (int q = 0; q < nq_dir; q++)
+               for (int c = 0; c < dim; c++)
+                  u_D_3d(c * nq_dir + q) = u_D[c];
 
-               DenseMatrix dshape_ref(ndof, dim);
-               fe->CalcDShape(eip, dshape_ref);
-               DenseMatrix adjJ(dim);
-               CalcAdjugate(FTr->Elem1->Jacobian(), adjJ);
-               DenseMatrix dshape_adj(ndof, dim);
-               Mult(dshape_ref, adjJ, dshape_adj);
+            Vector elvec_dir;
+            dir_integ.AssembleBoundaryFaceRHS(*fe, *FTr, u_D_3d, elvec_dir);
 
-               real_t detJ = FTr->Elem1->Weight();
-               real_t w = ip.weight / detJ;
-
-               // Penalty: v47 fix — dim * nl_q / detJ = physical A/V
-               real_t nl_q = nor.Norml2();
-               real_t c0_mat = 2.0 * mu_val_;
-               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
-               real_t wq_penalty = p0 * ip.weight * nl_q;
-
-               for (int k = 0; k < ndof; k++)
-               {
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape_adj(k, d) * nor(d);
-                  }
-
-                  for (int i = 0; i < dim; i++)
-                  {
-                     real_t sym_val = 0.0;
-                     for (int u = 0; u < dim; u++)
-                     {
-                        real_t trac = lambda_val_ * dshape_adj(k, i) * nor(u)
-                           + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                        + dshape_adj(k, u) * nor(i));
-                        sym_val += trac * u_D[u];
-                     }
-
-                     int idx = i * ndof + k;
-                     elvec(idx) += epsilon_ * sym_val * w;
-                     elvec(idx) += wq_penalty * u_D[i] * shape(k);
-                  }
-               }
-            }
+            for (int j = 0; j < elvec_dir.Size(); j++)
+               elvec(j) += elvec_dir(j);
          }
          else  // BR2
          {
@@ -2339,101 +2304,27 @@ private:
 
          if (method_ == DGMethod::IP)
          {
-            for (int p = 0; p < ir.GetNPoints(); p++)
-            {
-               const IntegrationPoint &ip = ir.IntPoint(p);
-               FTr->SetAllIntPoints(&ip);
-               const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-               const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
+            // v55: Use combined integrator's AssembleSlipFaceRHS for
+            // Dirichlet interior faces (skeleton pattern, same as fault slip)
+            DGElasticityIPCombinedIntegrator dir_integ(
+               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
-               Vector nor(dim);
-               CalcOrtho(FTr->Jacobian(), nor);
+            int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+            const IntegrationRule &ir_dir = IntRules.Get(
+               FTr->FaceGeom, quad_order_dir);
+            int nq_dir = ir_dir.GetNPoints();
 
-               Vector shape1(ndof1), shape2(ndof2);
-               fe1->CalcShape(eip1, shape1);
-               fe2->CalcShape(eip2, shape2);
+            // u_D_int is constant per face → fill all quad points
+            Vector u_D_3d(dim * nq_dir);
+            for (int q = 0; q < nq_dir; q++)
+               for (int c = 0; c < dim; c++)
+                  u_D_3d(c * nq_dir + q) = u_D_int[c];
 
-               DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
-               fe1->CalcDShape(eip1, dshape1_ref);
-               fe2->CalcDShape(eip2, dshape2_ref);
+            Vector ev1, ev2;
+            dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
 
-               DenseMatrix adjJ1(dim), adjJ2(dim);
-               CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
-               CalcAdjugate(FTr->Elem2->Jacobian(), adjJ2);
-
-               DenseMatrix dshape1_adj(ndof1, dim), dshape2_adj(ndof2, dim);
-               Mult(dshape1_ref, adjJ1, dshape1_adj);
-               Mult(dshape2_ref, adjJ2, dshape2_adj);
-
-               real_t detJ1 = FTr->Elem1->Weight();
-               real_t detJ2 = FTr->Elem2->Weight();
-               real_t w1 = ip.weight / (2.0 * detJ1);
-               real_t w2 = ip.weight / (2.0 * detJ2);
-
-               // Skeleton penalty: v47 fix — dim * nl_q / detJ = physical A/V
-               real_t nl_q = nor.Norml2();
-               real_t c0_mat = 2.0 * mu_val_;
-               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-               real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
-                           * (c1_mat * c1_mat / c0_mat);
-               real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
-                           * (c1_mat * c1_mat / c0_mat);
-               real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
-               real_t wq_penalty = penalty_ip * ip.weight * nl_q;
-
-               // Elem1 contribution
-               for (int k = 0; k < ndof1; k++)
-               {
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape1_adj(k, d) * nor(d);
-                  }
-
-                  for (int i = 0; i < dim; i++)
-                  {
-                     real_t sym_val = 0.0;
-                     for (int u = 0; u < dim; u++)
-                     {
-                        real_t trac = lambda_val_ * dshape1_adj(k, i) * nor(u)
-                           + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                        + dshape1_adj(k, u) * nor(i));
-                        sym_val += trac * u_D_int[u];
-                     }
-
-                     int idx = i * ndof1 + k;
-                     elvec1(idx) += epsilon_ * sym_val * w1;
-                     elvec1(idx) += wq_penalty * u_D_int[i] * shape1(k);
-                  }
-               }
-
-               // Elem2 contribution (opposite penalty sign)
-               for (int k = 0; k < ndof2; k++)
-               {
-                  real_t grad_dot_n = 0.0;
-                  for (int d = 0; d < dim; d++)
-                  {
-                     grad_dot_n += dshape2_adj(k, d) * nor(d);
-                  }
-
-                  for (int i = 0; i < dim; i++)
-                  {
-                     real_t sym_val = 0.0;
-                     for (int u = 0; u < dim; u++)
-                     {
-                        real_t trac = lambda_val_ * dshape2_adj(k, i) * nor(u)
-                           + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                        + dshape2_adj(k, u) * nor(i));
-                        sym_val += trac * u_D_int[u];
-                     }
-
-                     int idx = i * ndof2 + k;
-                     elvec2(idx) += epsilon_ * sym_val * w2;
-                     elvec2(idx) -= wq_penalty * u_D_int[i] * shape2(k);
-                  }
-               }
-            }
+            for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
+            for (int j = 0; j < ev2.Size(); j++) { elvec2(j) += ev2(j); }
          }
          else  // BR2
          {
@@ -2725,69 +2616,24 @@ private:
 
             if (method_ == DGMethod::IP)
             {
-               for (int p = 0; p < ir.GetNPoints(); p++)
-               {
-                  const IntegrationPoint &ip = ir.IntPoint(p);
-                  FTr->SetAllIntPoints(&ip);
-                  const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
+               // v55: Use combined integrator (skeleton pattern, only elem1)
+               DGElasticityIPCombinedIntegrator dir_integ(
+                  lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
-                  Vector nor(dim);
-                  CalcOrtho(FTr->Jacobian(), nor);
+               int quad_order_dir = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+               const IntegrationRule &ir_dir = IntRules.Get(
+                  FTr->FaceGeom, quad_order_dir);
+               int nq_dir = ir_dir.GetNPoints();
 
-                  Vector shape1(ndof1);
-                  fe1->CalcShape(eip1, shape1);
+               Vector u_D_3d(dim * nq_dir);
+               for (int q = 0; q < nq_dir; q++)
+                  for (int c = 0; c < dim; c++)
+                     u_D_3d(c * nq_dir + q) = u_D_int[c];
 
-                  DenseMatrix dshape1_ref(ndof1, dim);
-                  fe1->CalcDShape(eip1, dshape1_ref);
-
-                  DenseMatrix adjJ1(dim);
-                  CalcAdjugate(FTr->Elem1->Jacobian(), adjJ1);
-
-                  DenseMatrix dshape1_adj(ndof1, dim);
-                  Mult(dshape1_ref, adjJ1, dshape1_adj);
-
-                  real_t detJ1 = FTr->Elem1->Weight();
-                  real_t detJ2 = FTr->Elem2->Weight();
-                  real_t w1 = ip.weight / (2.0 * detJ1);
-
-                  // Skeleton penalty: v47 fix — dim * nl_q / detJ = physical A/V
-                  real_t nl_q = nor.Norml2();
-                  real_t c0_mat = 2.0 * mu_val_;
-                  real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
-                  real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-                  real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ1)
-                              * (c1_mat * c1_mat / c0_mat);
-                  real_t p1 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ2)
-                              * (c1_mat * c1_mat / c0_mat);
-                  real_t penalty_ip = penalty_factor_ * (p0 + p1) / 4.0;
-                  real_t wq_penalty = penalty_ip * ip.weight * nl_q;
-
-                  // Elem1 contribution only (elem2 handled by neighbor rank)
-                  for (int k = 0; k < ndof1; k++)
-                  {
-                     real_t grad_dot_n = 0.0;
-                     for (int d = 0; d < dim; d++)
-                     {
-                        grad_dot_n += dshape1_adj(k, d) * nor(d);
-                     }
-
-                     for (int i = 0; i < dim; i++)
-                     {
-                        real_t sym_val = 0.0;
-                        for (int u = 0; u < dim; u++)
-                        {
-                           real_t trac = lambda_val_ * dshape1_adj(k, i) * nor(u)
-                              + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
-                                           + dshape1_adj(k, u) * nor(i));
-                           sym_val += trac * u_D_int[u];
-                        }
-
-                        int idx = i * ndof1 + k;
-                        elvec1(idx) += epsilon_ * sym_val * w1;
-                        elvec1(idx) += wq_penalty * u_D_int[i] * shape1(k);
-                     }
-                  }
-               }
+               Vector ev1, ev2;
+               dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+               for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
+               // ev2 goes to neighbor rank, not used here
             }
             else  // BR2
             {
