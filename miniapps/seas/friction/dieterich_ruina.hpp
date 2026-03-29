@@ -311,22 +311,28 @@ public:
    /// Solves: tau = sigma_n * f(V, psi) + eta * V
    /// where f(V, psi) = a * asinh[(V / 2V0) * exp(psi / a)]
    ///
-   /// Uses Brent's method (matching Tandem) with bracket [0, tau/eta].
-   /// - At V=0: R(0) = tau > 0
-   /// - At V=tau/eta: R = -sigma_n*f < 0
+   /// v55: Uses Brent's method in **log10(V) space**, matching Tandem's
+   /// DieterichRuinaBase::slip_rate (lines 90-132).
    ///
-   /// When psi is very negative (collapsed state variable during RK45
-   /// intermediate stages), f → 0 and R(V_hi) ≈ 0 may become slightly
-   /// positive due to floating-point error. In this degenerate case,
-   /// friction is negligible and V ≈ tau/eta is returned. This allows
-   /// the adaptive time stepper to compute an error estimate and reject
-   /// the step rather than aborting.
+   /// Bracket: Ve ∈ [-32, log10(tau/eta)] where Ve = log10(V).
+   /// The log10 space provides uniform relative precision across 36
+   /// orders of magnitude, critical for interseismic slip rates
+   /// (V ~ 10^{-12}) where a linear bracket would have ~0% resolution.
+   ///
+   /// Fallback: if the primary bracket fails (e.g., bracket too narrow),
+   /// retry with Va_min = log10(nextafter(0,1)) ≈ -324.
+   ///
+   /// Edge cases:
+   /// - sigma_n <= 0: fault in tension, V = tau/eta
+   /// - tau <= 0: no driving stress, V = 0
+   /// - eta == 0: direct inversion (no radiation damping)
    real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
                            real_t eta, real_t a,
                            int *iterations = nullptr) const
    {
       if (sigma_n <= 0.0)
       {
+         // Fault in tension (Tandem: DieterichRuinaBase.h:98-102)
          if (iterations) { *iterations = 0; }
          if (eta > 0.0) { return tau / eta; }
          else { return 0.0; }
@@ -338,41 +344,82 @@ public:
          return 0.0;
       }
 
-      // Brent's method with bracket [0, tau/eta]
-      real_t V_lo = 0.0;
-      real_t V_hi = tau / eta;
-
-      auto residual = [&](real_t V) -> real_t
+      if (eta == 0.0)
       {
+         // No radiation damping: direct inversion (Tandem: Finv path)
+         // tau = sigma_n * a * asinh(V/(2V0) * exp(psi/a))
+         // V = 2*V0 * sinh(tau/(sigma_n*a)) * exp(-psi/a)
+         real_t r = tau / (sigma_n * a);
+         real_t V = 2.0 * cp_.V0 * std::sinh(r) * std::exp(-psi / a);
+         if (iterations) { *iterations = 0; }
+         return V;
+      }
+
+      // Brent's method in log10(V) space (Tandem convention)
+      // Residual: R(Ve) = tau - sigma_n * f(10^Ve, psi) - eta * 10^Ve
+      auto residual_log = [&](real_t Ve) -> real_t
+      {
+         real_t V = std::pow(10.0, Ve);
          return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
       };
 
-      // Check bracket validity before calling zeroIn.
-      // R(V_lo) = tau > 0 (guaranteed since tau > 0 checked above).
-      // R(V_hi) should be -sigma_n*f(V_hi, psi) < 0, but when psi << 0,
-      // exp(psi/a) underflows → f → 0 → R(V_hi) ≈ 0 and may be slightly
-      // positive due to floating-point roundoff in tau - eta*(tau/eta).
-      real_t Fb = residual(V_hi);
-      if (Fb >= 0.0)
+      real_t Va = -32.0;                                         // Tandem default
+      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));      // fallback ≈ -324
+      real_t Vb = std::log10(tau / eta);
+
+      // Ensure a <= b for zeroIn
+      real_t lo = std::min(Va, Vb);
+      real_t hi = std::max(Va, Vb);
+
+      // Check bracket validity
+      real_t Fhi = residual_log(hi);
+      real_t Flo = residual_log(lo);
+      if (Fhi >= 0.0 && Flo >= 0.0)
       {
-         // Friction is negligible (collapsed state variable, psi << 0).
-         // Return V = tau/eta. This is physically correct when friction
-         // vanishes, but may indicate numerical issues if it occurs during
-         // interseismic (psi should be ~0.8, not deeply negative).
-         static int degen_count = 0;
-         if (++degen_count <= 5)
-         {
-            std::cerr << "[WARNING] SolveSlipRatePsi degenerate case #"
-                      << degen_count << ": psi=" << psi
-                      << " a=" << a << " tau=" << tau
-                      << " V=tau/eta=" << V_hi << "\n";
-         }
+         // Both endpoints positive — friction negligible (psi << 0).
+         // Return V = tau/eta (same as Tandem's sigma_n=0 path).
          if (iterations) { *iterations = 0; }
-         return V_hi;
+         return tau / eta;
       }
 
-      real_t V = zeroIn(V_lo, V_hi, residual);
+      real_t Ve;
+      bool solved = false;
 
+      // Primary bracket: [-32, log10(tau/eta)]
+      if (std::copysign(Flo, Fhi) != Flo || Flo == 0.0)
+      {
+         // Signs differ (or lo is zero) — valid bracket
+         Ve = zeroIn(lo, hi, residual_log);
+         solved = true;
+      }
+
+      // Fallback bracket: [log10(nextafter(0,1)), log10(tau/eta)]
+      // (Tandem: lines 121-129)
+      if (!solved)
+      {
+         lo = std::min(Va_min, Vb);
+         hi = std::max(Va_min, Vb);
+         Flo = residual_log(lo);
+         Fhi = residual_log(hi);
+         if (std::copysign(Flo, Fhi) != Flo || Flo == 0.0)
+         {
+            Ve = zeroIn(lo, hi, residual_log);
+            solved = true;
+         }
+      }
+
+      if (!solved)
+      {
+         // Both brackets failed — return tau/eta as fallback
+         MFEM_WARNING("SolveSlipRatePsi: bracket failure, psi=" << psi
+                      << " a=" << a << " tau=" << tau
+                      << " R(Va)=" << residual_log(Va)
+                      << " R(Vb)=" << residual_log(Vb));
+         if (iterations) { *iterations = 0; }
+         return tau / eta;
+      }
+
+      real_t V = std::pow(10.0, Ve);
       if (iterations) { *iterations = 0; }
       return V;
    }
