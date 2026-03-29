@@ -163,6 +163,20 @@ public:
             penalty,             // c2 (same side)
             elmat);
       }
+
+      // Symmetrize: for SIPG (epsilon=-1), the face matrix is symmetric.
+      // Explicit symmetrization ensures A(i,j) == A(j,i) exactly,
+      // which is required for CG solver. Matches MFEM's built-in
+      // DGElasticityIntegrator which does elmat := -C + alpha*C^T.
+      for (int i = 0; i < nvdofs; i++)
+      {
+         for (int j = 0; j < i; j++)
+         {
+            real_t avg = 0.5 * (elmat(i,j) + elmat(j,i));
+            elmat(i,j) = avg;
+            elmat(j,i) = avg;
+         }
+      }
    }
 
    /// Assemble the slip RHS contribution for a single fault face.
@@ -294,6 +308,235 @@ public:
                elvec2(idx) += c1 * trac_test * w_q / detJ2;
                elvec2(idx) -= penalty * w_q * nl_q * shape2(k) * f_q[p];
             }
+         }
+      }
+   }
+
+   /// Compute DG traction at quad points for a skeleton fault face.
+   ///
+   /// Mirrors Tandem's compute_traction kernel (elasticity.py:242-244):
+   ///   T_q = 0.5*(σ_0·n̂ + σ_1·n̂) - penalty*(u_jump - f_q)
+   ///
+   /// All geometry (Jinv, normal, penalty) computed per quad point.
+   /// General for any polynomial order and element geometry.
+   ///
+   /// @param fe1, fe2 Elements sharing the face
+   /// @param Trans Face transformation
+   /// @param u1_dofs, u2_dofs Element displacement DOFs [ndof*dim, byNODES]
+   /// @param slip_3d Prescribed 3D slip at quad points [dim*nq]
+   /// @param traction_q Output: 3D traction at quad points [dim*nq]
+   /// @param nor_q Output (optional): unnormalized normal at quad points [dim*nq]
+   /// @param nl_q_out Output (optional): normal lengths at quad points [nq]
+   void ComputeTractionAtQuadPoints(
+      const FiniteElement &fe1, const FiniteElement &fe2,
+      FaceElementTransformations &Trans,
+      const Vector &u1_dofs, const Vector &u2_dofs,
+      const Vector &slip_3d,
+      Vector &traction_q,
+      Vector *nor_q_out = nullptr,
+      Vector *nl_q_out = nullptr) const
+   {
+      const int ndof1 = fe1.GetDof();
+      const int ndof2 = fe2.GetDof();
+
+      const int order = 2 * std::max(fe1.GetOrder(), fe2.GetOrder()) + 1;
+      const IntegrationRule &ir = IntRules.Get(Trans.GetGeometryType(), order);
+      const int nq = ir.GetNPoints();
+
+      traction_q.SetSize(dim_ * nq);
+      traction_q = 0.0;
+      if (nor_q_out) { nor_q_out->SetSize(dim_ * nq); }
+      if (nl_q_out) { nl_q_out->SetSize(nq); }
+
+      Vector shape1(ndof1), shape2(ndof2);
+      DenseMatrix dshape1_ref(ndof1, dim_), dshape2_ref(ndof2, dim_);
+      DenseMatrix dshape1_phys(ndof1, dim_), dshape2_phys(ndof2, dim_);
+      DenseMatrix Jinv(dim_);
+      Vector nor(dim_);
+
+      for (int q = 0; q < nq; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Trans.SetAllIntPoints(&ip);
+         const IntegrationPoint &eip1 = Trans.GetElement1IntPoint();
+         const IntegrationPoint &eip2 = Trans.GetElement2IntPoint();
+
+         // Per-quad-point geometry
+         CalcOrtho(Trans.Jacobian(), nor);
+         real_t nl = nor.Norml2();
+         Vector n_hat(dim_);
+         for (int d = 0; d < dim_; d++) { n_hat(d) = nor(d) / nl; }
+
+         if (nor_q_out)
+         {
+            for (int d = 0; d < dim_; d++)
+            {
+               (*nor_q_out)(d * nq + q) = nor(d);
+            }
+         }
+         if (nl_q_out) { (*nl_q_out)(q) = nl; }
+
+         // Physical gradients (per quad point, not centroid)
+         CalcInverse(Trans.Elem1->Jacobian(), Jinv);
+         fe1.CalcDShape(eip1, dshape1_ref);
+         Mult(dshape1_ref, Jinv, dshape1_phys);
+
+         CalcInverse(Trans.Elem2->Jacobian(), Jinv);
+         fe2.CalcDShape(eip2, dshape2_ref);
+         Mult(dshape2_ref, Jinv, dshape2_phys);
+
+         // Material (constant for BP5, but general for future)
+         real_t lam = lambda_.Eval(*Trans.Elem1, eip1);
+         real_t mu_val = mu_.Eval(*Trans.Elem1, eip1);
+
+         // Compute ∇u on each side
+         // grad[c,d] = Σ_k dshape_phys[k,d] * u_dofs[c*ndof+k]
+         DenseMatrix grad1(dim_, dim_), grad2(dim_, dim_);
+         grad1 = 0.0; grad2 = 0.0;
+         for (int c = 0; c < dim_; c++)
+         {
+            for (int d = 0; d < dim_; d++)
+            {
+               for (int k = 0; k < ndof1; k++)
+                  grad1(c, d) += dshape1_phys(k, d) * u1_dofs(c * ndof1 + k);
+               for (int k = 0; k < ndof2; k++)
+                  grad2(c, d) += dshape2_phys(k, d) * u2_dofs(c * ndof2 + k);
+            }
+         }
+
+         // Stress average: {σ} = 0.5*(σ_0 + σ_1), then T = {σ}·n̂
+         // σ_ij = λ*tr(ε)*δ_ij + 2μ*ε_ij
+         real_t tr1 = grad1(0,0) + grad1(1,1) + grad1(2,2);
+         real_t tr2 = grad2(0,0) + grad2(1,1) + grad2(2,2);
+         for (int p = 0; p < dim_; p++)
+         {
+            real_t T_p = 0.0;
+            for (int j = 0; j < dim_; j++)
+            {
+               real_t eps1 = 0.5*(grad1(p,j) + grad1(j,p));
+               real_t eps2 = 0.5*(grad2(p,j) + grad2(j,p));
+               real_t sig1 = (p==j ? lam*tr1 : 0.0) + 2.0*mu_val*eps1;
+               real_t sig2 = (p==j ? lam*tr2 : 0.0) + 2.0*mu_val*eps2;
+               T_p += 0.5 * (sig1 + sig2) * n_hat(j);
+            }
+            traction_q(p * nq + q) = T_p;
+         }
+
+         // Penalty correction: -penalty * (u_jump - f_q)
+         // Matches Tandem: c00 = -penalty, T += c00*(u0-u1-f_q)
+         real_t detJ1 = Trans.Elem1->Weight();
+         real_t detJ2 = Trans.Elem2->Weight();
+         real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
+                                          lam, mu_val, nl, true);
+
+         fe1.CalcShape(eip1, shape1);
+         fe2.CalcShape(eip2, shape2);
+
+         for (int c = 0; c < dim_; c++)
+         {
+            real_t u1q = 0.0, u2q = 0.0;
+            for (int k = 0; k < ndof1; k++)
+               u1q += shape1(k) * u1_dofs(c * ndof1 + k);
+            for (int k = 0; k < ndof2; k++)
+               u2q += shape2(k) * u2_dofs(c * ndof2 + k);
+
+            real_t f_q = slip_3d(c * nq + q);
+            // Tandem: T += (-penalty) * (u0 - u1 - f_q)
+            traction_q(c * nq + q) += (-penalty) * (u1q - u2q - f_q);
+         }
+      }
+   }
+
+   /// Project 3D quad-point traction to fault-local DOFs with nl_q weighting.
+   ///
+   /// Mirrors Tandem's evaluate_traction kernel (elasticity_adapter.py:26-27):
+   ///   traction[k,p] = Minv[l,k] * Σ_q φ[l,q] * w[q] * nl[q]
+   ///                   * T_q[o,q] * fault_basis[o,p,q]
+   ///
+   /// The fault basis transform is applied INSIDE the L2 integral,
+   /// not after. This is the correct order for curved faces / higher p.
+   ///
+   /// When sign_flipped=true (mesh normal opposes ref_normal), the tangent
+   /// vectors are negated in the projection to match Tandem's AdapterBase
+   /// convention (lines 77-84 of AdapterBase.cpp). The compute_traction
+   /// kernel uses the mesh normal, so traction_q has the opposite sign.
+   /// Negating the tangents produces the double negation → correct result.
+   ///
+   /// @param dim Spatial dimension
+   /// @param ncomp_local Number of local components (2 for 3D fault)
+   /// @param traction_q 3D traction at quad points [dim*nq]
+   /// @param nl_q Normal lengths at quad points [nq]
+   /// @param ir Integration rule
+   /// @param nbf Number of fault basis functions per face
+   /// @param e_q Fault basis functions at quad points [nbf × nq]
+   /// @param fault_tangents Tangent vectors [ncomp_local][dim] (constant per face)
+   /// @param sign_flipped Whether mesh normal was flipped to align with ref_normal
+   /// @param traction_local Output: fault-local traction [ncomp_local * nbf]
+   static void ProjectTractionToFaultDOFs(
+      int dim, int ncomp_local,
+      const Vector &traction_q, const Vector &nl_q,
+      const IntegrationRule &ir, int nbf,
+      const DenseMatrix &e_q,
+      const real_t tangents[][3],
+      bool sign_flipped,
+      Vector &traction_local)
+   {
+      int nq = ir.GetNPoints();
+      traction_local.SetSize(ncomp_local * nbf);
+      traction_local = 0.0;
+
+      // Build nl_q-weighted mass matrix: M[i,j] = Σ_q w*nl*φ_i*φ_j
+      DenseMatrix M(nbf);
+      M = 0.0;
+      for (int q = 0; q < nq; q++)
+      {
+         real_t wn = ir.IntPoint(q).weight * nl_q(q);
+         for (int i = 0; i < nbf; i++)
+            for (int j = 0; j < nbf; j++)
+               M(i, j) += wn * e_q(i, q) * e_q(j, q);
+      }
+
+      // Invert mass matrix
+      DenseMatrix Minv(nbf);
+      DenseMatrixInverse M_inv_solver(M);
+      M_inv_solver.GetInverseMatrix(Minv);
+
+      // RHS: Σ_q w*nl*φ_l*(T_3D · tangent_t)
+      // When sign_flipped: negate tangents (Tandem double-negation convention)
+      real_t sign_factor = sign_flipped ? -1.0 : 1.0;
+
+      DenseMatrix rhs(nbf, ncomp_local);
+      rhs = 0.0;
+      for (int q = 0; q < nq; q++)
+      {
+         real_t wn = ir.IntPoint(q).weight * nl_q(q);
+         for (int t = 0; t < ncomp_local; t++)
+         {
+            // Project T_q onto tangent direction t at this quad point
+            // sign_factor handles the double negation for flipped faces
+            real_t T_local = 0.0;
+            for (int p = 0; p < dim; p++)
+            {
+               T_local += traction_q(p * nq + q) * tangents[t][p] * sign_factor;
+            }
+            for (int l = 0; l < nbf; l++)
+            {
+               rhs(l, t) += wn * e_q(l, q) * T_local;
+            }
+         }
+      }
+
+      // Solve: traction_local[k,t] = Σ_l Minv[k,l] * rhs[l,t]
+      for (int t = 0; t < ncomp_local; t++)
+      {
+         for (int k = 0; k < nbf; k++)
+         {
+            real_t val = 0.0;
+            for (int l = 0; l < nbf; l++)
+            {
+               val += Minv(k, l) * rhs(l, t);
+            }
+            traction_local(t * nbf + k) = val;
          }
       }
    }
