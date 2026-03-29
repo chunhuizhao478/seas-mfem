@@ -54,29 +54,6 @@ enum class BCMode
    AllDirichlet
 };
 
-/// BP5 plate-rate Dirichlet BC: u_D = (sgn(Y) * Vp * t / 2, 0, 0)
-/// Used with MFEM's DGElasticityDirichletLFIntegrator for boundary faces.
-class PlateRateCoefficient : public VectorCoefficient
-{
-public:
-   PlateRateCoefficient(real_t Vp) : VectorCoefficient(3), Vp_(Vp) {}
-
-   void Eval(Vector &V, ElementTransformation &T,
-             const IntegrationPoint &ip) override
-   {
-      Vector x(3);
-      T.Transform(ip, x);
-      real_t sign = (x(1) > 0.0) ? 1.0 : -1.0;
-      V.SetSize(3);
-      V(0) = sign * Vp_ * GetTime() / 2.0;
-      V(1) = 0.0;
-      V(2) = 0.0;
-   }
-
-private:
-   real_t Vp_;
-};
-
 /// @brief DG Elasticity domain operator for 3D vector elasticity (BP5)
 ///
 /// Solves the 3D linear elasticity problem:
@@ -311,7 +288,6 @@ private:
    Array<int> dirichlet_shared_faces_;
 
    real_t epsilon_;  // SIPG sign = -1
-   mutable real_t kappa_ip_ = 0.0;  // IP penalty parameter for MFEM's DGElasticityIntegrator
 
    // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
    mutable ConstantCoefficient lambda_coeff_, mu_coeff_;
@@ -895,41 +871,32 @@ private:
       }
       else  // IP
       {
-         // Use MFEM's built-in DGElasticityIntegrator with kappa for all three
-         // terms (consistency + symmetry + penalty) in a single integrator.
+         // Split IP into two integrators:
+         // 1. Consistency + symmetry (MFEM's DGElasticityIntegrator with kappa=0)
+         // 2. Penalty (custom integrator matching Uphoff et al. 2023 formula)
          //
-         // Kappa mapping from our custom penalty formula (Uphoff et al. 2023):
-         //   p(K) = (D+1)*c_N_1*(D*|n|/W)*(c1²/c0)
+         // The penalty uses: η_F * ∫_F |nor| * [[u]]·[[v]] ds
+         // where η_F = (p0+p1)/4 with p = (D+1)*c_N_1*(A/V)*(c1²/c0)
          //
-         // Interior: custom penalty = pf*(p0+p1)/4, coeff = penalty*w*|n|
-         //   MFEM: jmatcoef = kappa*|n|²*(lam+2mu)*(1/W1+1/W2)*w
-         //   => kappa = pf*(D+1)*c_N_1*D*c1² / (4*c0*(lam+2mu))
-         //
-         // Boundary: custom penalty = pf*p0, coeff = penalty*w*|n|
-         //   MFEM: jmatcoef = kappa_bdr*|n|²*(lam+2mu)/W*w
-         //   => kappa_bdr = pf*(D+1)*c_N_1*D*c1² / (c0*(lam+2mu)) = 4*kappa
-         //
-         // The 4x factor arises because interior averages (p0+p1)/4 while
-         // boundary uses the full p0. MFEM's wLM sums both elements for
-         // interior (2x) but has only one element for boundary (1x),
-         // giving a net 4x ratio.
-         int dim = 3;
-         real_t c0 = 2.0 * mu_val_;
-         real_t c1 = dim * lambda_val_ + 2.0 * mu_val_;
-         real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
-         kappa_ip_ = penalty_factor_ * (dim + 1) * c_N_1 * dim * c1 * c1
-                     / (4.0 * c0 * (lambda_val_ + 2.0 * mu_val_));
-         real_t kappa_bdr = 4.0 * kappa_ip_;
+         // This differs from MFEM's built-in DGElasticityIntegrator which uses
+         // κ * |nor|² * {{(λ+2μ)/detJ}} * [[u]]·[[v]].
 
+         // Consistency + symmetry only (kappa=0 → no penalty in this integrator)
          cached_a_->AddInteriorFaceIntegrator(
-            new DGElasticityIntegrator(lambda_coeff_, mu_coeff_,
-                                       epsilon_, kappa_ip_));
+            new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0));
+         // Penalty (material-dependent, |nor| scaling)
+         cached_a_->AddInteriorFaceIntegrator(
+            new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
+                                                 penalty_factor_));
 
          if (dirichlet_bdr_marker_.Size() > 0)
          {
             cached_a_->AddBdrFaceIntegrator(
-               new DGElasticityIntegrator(lambda_coeff_, mu_coeff_,
-                                          epsilon_, kappa_bdr),
+               new DGElasticityIntegrator(lambda_coeff_, mu_coeff_, epsilon_, 0.0),
+               dirichlet_bdr_marker_);
+            cached_a_->AddBdrFaceIntegrator(
+               new DGElasticityIPPenaltyIntegrator(lambda_coeff_, mu_coeff_, 3,
+                                                    penalty_factor_),
                dirichlet_bdr_marker_);
          }
       }
@@ -2009,76 +1976,129 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // BP5 Dirichlet loading: u_D = (sgn(Y)·Vp·t/2, 0, 0)
-      // Applied on Dirichlet-marked boundaries and interior Dirichlet faces.
+      // BP5 Dirichlet loading: u = (0, sgn(x)·Vp·t/2, 0)
+      // Applied on Dirichlet-marked boundaries only (controlled by BCMode).
+      // sgn(x) determined from face centroid x-coordinate.
+      //
+      // DG Dirichlet BC contribution:
+      //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
+      //           + penalty * φ_k * u_D_i
 
       if (std::abs(time * Vp_) < 1e-30) { return; }
 
-      // Boundary faces: use MFEM's DGElasticityDirichletLFIntegrator.
-      // This computes:
-      //   alpha * <u_D, sigma(v)·n> + kappa * <h^{-1}(lam+2mu) u_D, v>
-      // matching the bilinear form from DGElasticityIntegrator.
-      if (method_ == DGMethod::IP)
-      {
-         PlateRateCoefficient uD_coeff(Vp_);
-         uD_coeff.SetTime(time);
-         real_t kappa_bdr = 4.0 * kappa_ip_;  // boundary uses full penalty
-         LinFormType b_diri(fes_.get());
-         b_diri.AddBdrFaceIntegrator(
-            new DGElasticityDirichletLFIntegrator(
-               uD_coeff, lambda_coeff_, mu_coeff_, epsilon_, kappa_bdr),
-            dirichlet_bdr_marker_);
-         b_diri.Assemble();
-         rhs += b_diri;
-      }
-      else  // BR2: keep custom boundary loading (no MFEM built-in for BR2 RHS)
-      {
-         int dim = 3;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            int attr = mesh_.GetBdrAttribute(be);
-            if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+      int dim = 3;
 
-            Vector centroid(3);
-            centroid = 0.0;
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         int attr = mesh_.GetBdrAttribute(be);
+         if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+
+         // Compute face centroid x-coordinate to determine sign
+         Vector centroid(3);
+         centroid = 0.0;
+         {
+            ElementTransformation *eltransf = mesh_.GetBdrElementTransformation(be);
+            const IntegrationRule &ir_c = IntRules.Get(eltransf->GetGeometryType(), 1);
+            for (int p = 0; p < ir_c.GetNPoints(); p++)
             {
-               ElementTransformation *eltransf = mesh_.GetBdrElementTransformation(be);
-               const IntegrationRule &ir_c = IntRules.Get(eltransf->GetGeometryType(), 1);
-               for (int p = 0; p < ir_c.GetNPoints(); p++)
+               eltransf->SetIntPoint(&ir_c.IntPoint(p));
+               Vector phys(3);
+               eltransf->Transform(ir_c.IntPoint(p), phys);
+               centroid.Add(1.0 / ir_c.GetNPoints(), phys);
+            }
+         }
+         // Tandem: sign from Y (centroid(1)), loading in X (component 0)
+         //   u_D = (sgn(Y)*Vp*t/2, 0, 0)
+         real_t u_D[3] = {0.0, 0.0, 0.0};
+         {
+            real_t sign = (centroid(1) > 0.0) ? 1.0 : -1.0;
+            u_D[0] = sign * Vp_ * time / 2.0;
+         }
+
+         // Get face transformation
+         int face_idx, face_info;
+         mesh_.GetBdrElementFace(be, &face_idx, &face_info);
+         FaceElementTransformations *FTr =
+            mesh_.GetFaceElementTransformations(face_idx);
+         if (FTr == nullptr) { continue; }
+
+         Array<int> vdofs;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs);
+         const FiniteElement *fe = scalar_fes_->GetFE(FTr->Elem1No);
+         int ndof = fe->GetDof();
+
+         int face_order = fe->GetOrder();
+         int quad_order_bdr = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_bdr);
+
+         Vector elvec(vdofs.Size());
+         elvec = 0.0;
+
+         if (method_ == DGMethod::IP)
+         {
+            real_t kappa = (order_ + 1) * (order_ + 1);
+            for (int p = 0; p < ir.GetNPoints(); p++)
+            {
+               const IntegrationPoint &ip = ir.IntPoint(p);
+               FTr->SetAllIntPoints(&ip);
+               const IntegrationPoint &eip = FTr->GetElement1IntPoint();
+
+               Vector nor(dim);
+               CalcOrtho(FTr->Jacobian(), nor);
+
+               Vector shape(ndof);
+               fe->CalcShape(eip, shape);
+
+               DenseMatrix dshape_ref(ndof, dim);
+               fe->CalcDShape(eip, dshape_ref);
+               DenseMatrix adjJ(dim);
+               CalcAdjugate(FTr->Elem1->Jacobian(), adjJ);
+               DenseMatrix dshape_adj(ndof, dim);
+               Mult(dshape_ref, adjJ, dshape_adj);
+
+               real_t detJ = FTr->Elem1->Weight();
+               real_t w = ip.weight / detJ;
+
+               // Penalty: v47 fix — dim * nl_q / detJ = physical A/V
+               real_t nl_q = nor.Norml2();
+               real_t c0_mat = 2.0 * mu_val_;
+               real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
+               real_t c_N_1 = order_ * (order_ + dim - 1.0) / dim;
+               real_t p0 = (dim + 1) * c_N_1 * (real_t(dim) * nl_q / detJ) * (c1_mat * c1_mat / c0_mat);
+               real_t wq_penalty = p0 * ip.weight * nl_q;
+
+               for (int k = 0; k < ndof; k++)
                {
-                  eltransf->SetIntPoint(&ir_c.IntPoint(p));
-                  Vector phys(3);
-                  eltransf->Transform(ir_c.IntPoint(p), phys);
-                  centroid.Add(1.0 / ir_c.GetNPoints(), phys);
+                  real_t grad_dot_n = 0.0;
+                  for (int d = 0; d < dim; d++)
+                  {
+                     grad_dot_n += dshape_adj(k, d) * nor(d);
+                  }
+
+                  for (int i = 0; i < dim; i++)
+                  {
+                     real_t sym_val = 0.0;
+                     for (int u = 0; u < dim; u++)
+                     {
+                        real_t trac = lambda_val_ * dshape_adj(k, i) * nor(u)
+                           + mu_val_ * ((i == u ? 1.0 : 0.0) * grad_dot_n
+                                        + dshape_adj(k, u) * nor(i));
+                        sym_val += trac * u_D[u];
+                     }
+
+                     int idx = i * ndof + k;
+                     elvec(idx) += epsilon_ * sym_val * w;
+                     elvec(idx) += wq_penalty * u_D[i] * shape(k);
+                  }
                }
             }
-            real_t u_D[3] = {0.0, 0.0, 0.0};
-            {
-               real_t sign = (centroid(1) > 0.0) ? 1.0 : -1.0;
-               u_D[0] = sign * Vp_ * time / 2.0;
-            }
-
-            int face_idx, face_info;
-            mesh_.GetBdrElementFace(be, &face_idx, &face_info);
-            FaceElementTransformations *FTr =
-               mesh_.GetFaceElementTransformations(face_idx);
-            if (FTr == nullptr) { continue; }
-
-            Array<int> vdofs;
-            fes_->GetElementVDofs(FTr->Elem1No, vdofs);
-            const FiniteElement *fe = scalar_fes_->GetFE(FTr->Elem1No);
-            int ndof = fe->GetDof();
-
-            int face_order = fe->GetOrder();
-            int quad_order_bdr = match_quad_order_ ? (2 * face_order) : (2 * face_order + 1);
-            const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, quad_order_bdr);
-
-            Vector elvec(vdofs.Size());
-            elvec = 0.0;
-
+         }
+         else  // BR2
+         {
             const DenseMatrix &Minv = elem_mass_inv_[FTr->Elem1No];
             int nqp = ir.GetNPoints();
 
+            // Precompute shapes and normals
             DenseMatrix shapes(ndof, nqp);
             Vector nor_arr(dim * nqp), w_arr(nqp);
 
@@ -2096,6 +2116,7 @@ private:
                w_arr[q] = ip.weight;
             }
 
+            // Compute lifted Dirichlet: similar to slip but for boundary
             DenseMatrix face_int(dim * dim, ndof);
             face_int = 0.0;
             for (int q = 0; q < nqp; q++)
@@ -2117,7 +2138,9 @@ private:
 
             DenseMatrix f_lifted(dim * dim, ndof);
             MultABt(face_int, Minv, f_lifted);
+            // No 0.5 for boundary (full factor)
 
+            // f_lifted_q[i,q]
             DenseMatrix fl_q(dim, nqp);
             fl_q = 0.0;
             for (int q = 0; q < nqp; q++)
@@ -2147,6 +2170,7 @@ private:
                }
             }
 
+            // BR2 penalty: num faces per element (geometry-dependent)
             Geometry::Type br2_geom = mesh_.GetElementGeometry(FTr->Elem1No);
             real_t br2_pen = (br2_geom == Geometry::TETRAHEDRON)
                                  ? real_t(dim + 1) : real_t(2 * dim);
@@ -2194,13 +2218,13 @@ private:
                   }
                }
             }
+         }
 
-            for (int j = 0; j < vdofs.Size(); j++)
-            {
-               int gj = vdofs[j];
-               if (gj >= 0) { rhs(gj) += elvec(j); }
-               else { rhs(-1 - gj) -= elvec(j); }
-            }
+         for (int j = 0; j < vdofs.Size(); j++)
+         {
+            int gj = vdofs[j];
+            if (gj >= 0) { rhs(gj) += elvec(j); }
+            else { rhs(-1 - gj) -= elvec(j); }
          }
       }
 
@@ -2213,7 +2237,6 @@ private:
       // triggers, so u_D = (Vp*t, 0, 0) — the full plate velocity.
       // This represents a locked fault (no relative slip).
       // ---------------------------------------------------------------
-      int dim = 3;
       for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
       {
          int f = dirichlet_interior_faces_[fi];
