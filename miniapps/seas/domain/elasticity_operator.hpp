@@ -283,6 +283,8 @@ private:
    mutable bool diag_normals_done_ = false;
    mutable bool diag_first_traction_done_ = false;
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
+   mutable bool used_coord_fallback_ = false;  // Set when coordinate-based fault detection is used
+   bool has_fault_attr_ = false;         // True when the mesh globally contains fault attr 3
    bool diag_dip_traction_ = false;     // v51: dump per-component traction (global xyz)
    mutable bool diag_dip_traction_done_ = false;
    bool diag_uz_fault_ = false;         // v51: dump u_z at fault faces after solve
@@ -416,18 +418,34 @@ private:
    /// as fault faces.
    void BuildFaultTaggedFaces()
    {
+      fault_tagged_faces_.SetSize(0);
+      fault_face_keys_.clear();
+      fault_shared_tagged_.clear();
+
       // Only support Tandem fault attr 3
       int fault_attr = 3;
-      bool has_fault_attr = false;
+      bool has_fault_attr_local = false;
       for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
       {
          if (mesh_.bdr_attributes[i] == fault_attr)
          {
-            has_fault_attr = true;
+            has_fault_attr_local = true;
             break;
          }
       }
-      if (!has_fault_attr) { return; }
+
+      has_fault_attr_ = has_fault_attr_local;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int local = has_fault_attr_local ? 1 : 0;
+         int global = 0;
+         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, mesh_.GetComm());
+         has_fault_attr_ = (global != 0);
+#endif
+      }
+      if (!has_fault_attr_) { return; }
+      if (!has_fault_attr_local) { return; }
 
       // Collect vertex sets of all boundary elements with fault attribute.
       // Each boundary element (triangle in 3D) defines a face by its vertices.
@@ -627,6 +645,43 @@ private:
 
       num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
+      if (has_fault_attr_)
+      {
+         int local_fault_faces = num_fault_faces_;
+         int global_fault_faces = local_fault_faces;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(&local_fault_faces, &global_fault_faces, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+#endif
+         }
+         MFEM_VERIFY(global_fault_faces > 0,
+                     "Mesh has fault attr 3 but no fault faces were recovered. "
+                     "This does not match Tandem's tag-based classification.");
+      }
+
+      // Emit coordinate-fallback warning once, on root only
+      if (used_coord_fallback_ && !has_fault_attr_)
+      {
+         bool is_root = true;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            int rank;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            is_root = (rank == 0);
+#endif
+         }
+         if (is_root)
+         {
+            mfem::out << "  WARNING: Using coordinate-based fault detection "
+                      << "(mesh has no fault attr 3). This does not follow "
+                      << "Tandem's tag-based classification and can hide mesh "
+                      << "tagging errors.\n";
+         }
+      }
+
       // Multi-DOF fault quadrature
       // IP: use the same nodal triangle order as the volume space, matching
       // Tandem's fault discretization even at p=1.
@@ -714,9 +769,9 @@ private:
 
    bool IsFaultFace3D(FaceElementTransformations *FTr) const
    {
-      // Tag-based detection: check if the face corresponds to a boundary
-      // element with the fault attribute (3 for Tandem mesh, 100 for MFEM mesh).
-      if (fault_tagged_faces_.Size() > 0)
+      // Follow Tandem: if the mesh carries the fault tag, trust tag-based
+      // classification and do not silently fall back to coordinates.
+      if (has_fault_attr_)
       {
          int e1 = FTr->Elem1No;
          int e2 = FTr->Elem2No;
@@ -726,14 +781,7 @@ private:
 
       // Fallback: coordinate-based detection (Tandem convention only).
       // This can hide bad mesh tagging — prefer tag-based detection.
-      static bool coord_fallback_warned = false;
-      if (!coord_fallback_warned)
-      {
-         mfem::out << "  WARNING: Using coordinate-based fault detection "
-                   << "(no fault tags found). This can hide mesh tagging "
-                   << "errors. Use a tagged mesh for production runs.\n";
-         coord_fallback_warned = true;
-      }
+      used_coord_fallback_ = true;
 
       // Fault at Y=0, X in [-lf/2, lf/2], Z in [-Wf, 0]
       const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
@@ -754,8 +802,9 @@ private:
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         // Tag-based: check if this shared face was tagged
-         if (!fault_shared_tagged_.empty())
+         // Follow Tandem: if the mesh carries the fault tag, trust tag-based
+         // classification and do not silently fall back to coordinates.
+         if (has_fault_attr_)
          {
             return fault_shared_tagged_.count(shared_face) > 0;
          }
