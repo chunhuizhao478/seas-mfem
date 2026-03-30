@@ -29,6 +29,8 @@ module load parmetis
 module load petsc/3.15
 module list
 
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${LD_LIBRARY_PATH}"
+
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 
 export JOBS=8
