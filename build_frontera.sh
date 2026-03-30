@@ -14,6 +14,12 @@ set -euo pipefail
 PETSC_MODULE="${PETSC_MODULE:-petsc/3.23}"
 JOBS="${JOBS:-8}"
 
+# Intel classic compiler wrappers on Frontera can abort during config probes when
+# the login shell carries an empty or invalid locale. Match the working batch
+# scripts in this repo and force the portable C locale for the build.
+export LC_ALL=C
+export LANG=C
+
 if ! type module >/dev/null 2>&1; then
     echo "ERROR: environment modules are not available in this shell."
     exit 1
