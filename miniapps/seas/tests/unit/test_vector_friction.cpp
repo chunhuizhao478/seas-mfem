@@ -40,53 +40,55 @@ void TestDirection()
    real_t a = 0.004;  // VW zone
    real_t psi = fc.f0 + fc.b * std::log(fc.V0 / 1e-9);
 
-   // Test 1: Pure x-direction stress
+   // v55 D8: V_vec is anti-parallel to tau (Tandem convention).
+   // V_vec = -(V_abs / tau_abs) * tau_vec
+
+   // Test 1: Pure x-direction stress → V points in -x
    {
       real_t tau_vec[2] = {20.0e6, 0.0};
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      TEST_ASSERT(V_vec[0] > 0.0, "Pure x-stress: V[0] > 0 (parallel)");
+      TEST_ASSERT(V_vec[0] < 0.0, "Pure x-stress: V[0] < 0 (anti-parallel)");
       TEST_NEAR(V_vec[1], 0.0, 1e-30, "Pure x-stress: V[1] = 0");
    }
 
-   // Test 2: Pure y-direction stress
+   // Test 2: Pure y-direction stress → V points in -y
    {
       real_t tau_vec[2] = {0.0, 20.0e6};
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
       TEST_NEAR(V_vec[0], 0.0, 1e-30, "Pure y-stress: V[0] = 0");
-      TEST_ASSERT(V_vec[1] > 0.0, "Pure y-stress: V[1] > 0 (parallel)");
+      TEST_ASSERT(V_vec[1] < 0.0, "Pure y-stress: V[1] < 0 (anti-parallel)");
    }
 
-   // Test 3: 45-degree stress
+   // Test 3: 45-degree stress → V anti-parallel, both components negative
    {
       real_t tau_val = 20.0e6;
       real_t tau_vec[2] = {tau_val, tau_val};
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      // Both components should be positive (parallel to positive tau)
-      TEST_ASSERT(V_vec[0] > 0.0, "45-deg: V[0] > 0");
-      TEST_ASSERT(V_vec[1] > 0.0, "45-deg: V[1] > 0");
+      TEST_ASSERT(V_vec[0] < 0.0, "45-deg: V[0] < 0 (anti-parallel)");
+      TEST_ASSERT(V_vec[1] < 0.0, "45-deg: V[1] < 0 (anti-parallel)");
 
       // Components should be equal (same magnitude in both directions)
       TEST_REL_NEAR(V_vec[0], V_vec[1], 1e-12,
                      "45-deg: V[0] = V[1] (symmetric)");
    }
 
-   // Test 4: Negative stress direction
+   // Test 4: Mixed-sign stress direction → V anti-parallel
    {
       real_t tau_vec[2] = {-15.0e6, 10.0e6};
       real_t V_vec[2];
       friction.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
 
-      // V should be parallel to tau: V[0] < 0, V[1] > 0
-      TEST_ASSERT(V_vec[0] < 0.0,
-                  "(-,+) stress: V[0] < 0 (parallel)");
-      TEST_ASSERT(V_vec[1] > 0.0,
-                  "(-,+) stress: V[1] > 0 (parallel)");
+      // V anti-parallel to tau(-,+) → V is (+,-)
+      TEST_ASSERT(V_vec[0] > 0.0,
+                  "(-,+) stress: V[0] > 0 (anti-parallel)");
+      TEST_ASSERT(V_vec[1] < 0.0,
+                  "(-,+) stress: V[1] < 0 (anti-parallel)");
    }
 }
 

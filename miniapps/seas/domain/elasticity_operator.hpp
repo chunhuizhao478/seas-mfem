@@ -676,6 +676,44 @@ private:
                                            ref_normal, up);
 #endif
          }
+
+         // Per-quad-point basis (matching Tandem AdapterBase::prepare).
+         // Uses the same 2p+1 face quadrature order as the combined integrator.
+         // Detect face geometry from the first available fault face (interior
+         // or shared), so ranks with only shared faces get the right rule.
+         const int face_quad_order = 2 * order_ + 1;
+         Geometry::Type face_geom = Geometry::TRIANGLE;  // default for tets
+         if (fault_interior_faces_.Size() > 0)
+         {
+            auto *ftr0 = mesh_.GetInteriorFaceTransformations(
+               fault_interior_faces_[0]);
+            if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+         }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            if (fault_shared_faces_.Size() > 0)
+            {
+               auto *ftr0 = mesh_.GetSharedFaceTransformations(
+                  fault_shared_faces_[0]);
+               if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+            }
+#endif
+         }
+         const IntegrationRule &face_ir =
+            IntRules.Get(face_geom, face_quad_order);
+
+         fault_basis_.ComputeQPBasis(mesh_, fault_interior_faces_,
+                                      ref_normal, up, face_ir);
+
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            fault_basis_.ComputeQPBasisShared(mesh_, fault_shared_faces_,
+                                               ref_normal, up, face_ir,
+                                               fault_interior_faces_.Size());
+#endif
+         }
       }
    }
 
@@ -1083,33 +1121,61 @@ private:
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         // Build per-DOF nodal slip and interpolate to quad points
-         Vector delta_u_nodal(dim * nbf);
+         const auto &basis_slip = fault_basis_.GetBasis(fi);
+         real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+
+         // Check if any slip is non-zero
          bool all_zero = true;
-         for (int kk = 0; kk < nbf; kk++)
+         for (int kk = 0; kk < nbf && all_zero; kk++)
          {
             int dof_idx = fi * nbf + kk;
-            real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                    slip_bc(2 * dof_idx + 1)};
-            real_t du[3];
-            fault_basis_.EmbedSlip(fi, slip_local, du);
-            for (int c = 0; c < dim; c++)
-            {
-               delta_u_nodal(c * nbf + kk) = du[c];
-               if (std::abs(du[c]) >= 1e-15) { all_zero = false; }
-            }
+            if (std::abs(slip_bc(2 * dof_idx)) >= 1e-15 ||
+                std::abs(slip_bc(2 * dof_idx + 1)) >= 1e-15)
+            { all_zero = false; }
          }
          if (all_zero) { continue; }
 
-         // Interpolate to quad points
+         // Build slip at quad points (Tandem evaluate_slip)
          Vector delta_u_quad;
-         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-
-         // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
-         // sign_flipped=true when mesh normal opposes ref_normal
+         if (!basis_slip.qp_data.empty())
          {
-            const auto &basis_slip = fault_basis_.GetBasis(fi);
-            real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+            // Per-QP tangent embedding: interpolate tangential components,
+            // then embed using per-QP tangent frame
+            Vector slip_tang(2 * nbf);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf + kk;
+               slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);      // dip
+               slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);  // strike
+            }
+            Vector slip_tang_q;
+            face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+            int nqp = slip_tang_q.Size() / 2;
+            delta_u_quad.SetSize(dim * nqp);
+            for (int q = 0; q < nqp; q++)
+            {
+               real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
+               real_t du[3];
+               fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
+               for (int c = 0; c < dim; c++)
+                  delta_u_quad(c * nqp + q) = sign * du[c];
+            }
+         }
+         else
+         {
+            // Fallback: centroid tangents (BR2 path)
+            Vector delta_u_nodal(dim * nbf);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf + kk;
+               real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                       slip_bc(2 * dof_idx + 1)};
+               real_t du[3];
+               fault_basis_.EmbedSlip(fi, slip_local, du);
+               for (int c = 0; c < dim; c++)
+                  delta_u_nodal(c * nbf + kk) = du[c];
+            }
+            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
             for (int i = 0; i < delta_u_quad.Size(); i++)
                delta_u_quad(i) *= sign;
          }
@@ -1439,30 +1505,56 @@ private:
             if (FTr == nullptr) { continue; }
 
             int slip_idx = interior_face_count + i;
-            Vector delta_u_nodal(dim * nbf);
+            const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
+            real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+
             bool all_zero = true;
-            for (int kk = 0; kk < nbf; kk++)
+            for (int kk = 0; kk < nbf && all_zero; kk++)
             {
                int dof_idx = slip_idx * nbf + kk;
-               real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                       slip_bc(2 * dof_idx + 1)};
-               real_t du[3];
-               fault_basis_.EmbedSlip(slip_idx, slip_local, du);
-               for (int c = 0; c < dim; c++)
-               {
-                  delta_u_nodal(c * nbf + kk) = du[c];
-                  if (std::abs(du[c]) >= 1e-15) { all_zero = false; }
-               }
+               if (std::abs(slip_bc(2 * dof_idx)) >= 1e-15 ||
+                   std::abs(slip_bc(2 * dof_idx + 1)) >= 1e-15)
+               { all_zero = false; }
             }
             if (all_zero) { continue; }
 
             Vector delta_u_quad;
-            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-
-            // v55: Sign from FaultBasis sign_flipped (general)
+            if (!basis_slip.qp_data.empty())
             {
-               const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
-               real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+               Vector slip_tang(2 * nbf);
+               for (int kk = 0; kk < nbf; kk++)
+               {
+                  int dof_idx = slip_idx * nbf + kk;
+                  slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
+                  slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
+               }
+               Vector slip_tang_q;
+               face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+               int nqp = slip_tang_q.Size() / 2;
+               delta_u_quad.SetSize(dim * nqp);
+               for (int q = 0; q < nqp; q++)
+               {
+                  real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
+                  real_t du[3];
+                  fault_basis_.EmbedSlipQP(slip_idx, q, sl_q, du);
+                  for (int c = 0; c < dim; c++)
+                     delta_u_quad(c * nqp + q) = sign * du[c];
+               }
+            }
+            else
+            {
+               Vector delta_u_nodal(dim * nbf);
+               for (int kk = 0; kk < nbf; kk++)
+               {
+                  int dof_idx = slip_idx * nbf + kk;
+                  real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                          slip_bc(2 * dof_idx + 1)};
+                  real_t du[3];
+                  fault_basis_.EmbedSlip(slip_idx, slip_local, du);
+                  for (int c = 0; c < dim; c++)
+                     delta_u_nodal(c * nbf + kk) = du[c];
+               }
+               face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
                for (int j = 0; j < delta_u_quad.Size(); j++)
                   delta_u_quad(j) *= sign;
             }
@@ -3289,7 +3381,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
       real_t sign = basis.sign_flipped ? 1.0 : -1.0;
 
-      // Element Jacobian inverses (constant for linear tets)
+      // Element Jacobian inverses (constant for linear tets/hexes)
+      // Must set an integration point first so Jacobian() is valid.
+      FTr->SetAllIntPoints(&ip);
       DenseMatrix Jinv1(dim), Jinv2(dim);
       CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
       CalcInverse(FTr->Elem2->Jacobian(), Jinv2);
@@ -3316,21 +3410,60 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // + ProjectTractionToFaultDOFs (nl_q-weighted, sign_flipped)
          int nbf = nbf_per_face_;
 
-         // Build sign-corrected slip at quad points
-         Vector delta_u_nodal_t(dim * nbf);
-         for (int kk = 0; kk < nbf; kk++)
-         {
-            int dof_idx = fi * nbf + kk;
-            real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
-            real_t du[3];
-            fault_basis_.EmbedSlip(fi, sl, du);
-            for (int c = 0; c < dim; c++)
-               delta_u_nodal_t(c * nbf + kk) = du[c];
-         }
+         // Build sign-corrected slip at quad points (Tandem evaluate_slip).
+         // 1. Collect tangential slip components (dip, strike) per DOF
+         // 2. Interpolate to quad points using face basis functions e_q
+         // 3. Embed at each QP using per-QP tangent frame
+         // This matches Tandem's tensor contraction:
+         //   slip_q[p,q] = e_q[l,q] * fault_basis_q[p,o,q] * slip[l,n] * copy_slip[n,o]
+         int qo_slip = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+         const IntegrationRule &ir_slip = IntRules.Get(
+            FTr->GetGeometryType(), qo_slip);
+         int nqp_slip = ir_slip.GetNPoints();
          Vector delta_u_quad_t;
-         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_t, delta_u_quad_t);
-         for (int j = 0; j < delta_u_quad_t.Size(); j++)
-            delta_u_quad_t(j) *= sign;
+
+         if (!basis.qp_data.empty())
+         {
+            // Per-QP tangent embedding (matches Tandem for any nbf)
+            // Step 1: tangential slip components per DOF
+            Vector slip_tang(2 * nbf);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf + kk;
+               slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);      // dip
+               slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);  // strike
+            }
+            // Step 2: interpolate tangential components to QPs
+            Vector slip_tang_q;
+            face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+            // Step 3: embed at each QP using per-QP tangent frame
+            delta_u_quad_t.SetSize(dim * nqp_slip);
+            for (int q = 0; q < nqp_slip; q++)
+            {
+               real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp_slip + q)};
+               real_t du[3];
+               fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
+               for (int c = 0; c < dim; c++)
+                  delta_u_quad_t(c * nqp_slip + q) = sign * du[c];
+            }
+         }
+         else
+         {
+            // Fallback: centroid tangents (exact for flat faces, used by BR2)
+            Vector delta_u_nodal_t(dim * nbf);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf + kk;
+               real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
+               real_t du[3];
+               fault_basis_.EmbedSlip(fi, sl, du);
+               for (int c = 0; c < dim; c++)
+                  delta_u_nodal_t(c * nbf + kk) = du[c];
+            }
+            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_t, delta_u_quad_t);
+            for (int j = 0; j < delta_u_quad_t.Size(); j++)
+               delta_u_quad_t(j) *= sign;
+         }
 
          // Step 1: Traction at quad points (Tandem compute_traction)
          DGElasticityIPCombinedIntegrator trac_integ(
@@ -3353,9 +3486,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          };
 
          Vector trac_local_new;
+         const auto *qpd = basis.qp_data.empty() ? nullptr : &basis.qp_data;
          DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
             dim, 2, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
-            tangents_arr, basis.sign_flipped, trac_local_new);
+            tangents_arr, basis.sign_flipped, trac_local_new, qpd);
 
          // Store per-DOF traction
          for (int kk = 0; kk < nbf; kk++)
@@ -3368,6 +3502,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             {
                // Normal stress: project T onto normal direction
                // Use nl_q-weighted average of T·n_hat at this DOF
+               // Per-quad-point normal when available (Tandem convention)
+               const bool have_qp = !basis.qp_data.empty();
                real_t T_n = 0.0;
                real_t wn_sum = 0.0;
                for (int q = 0; q < nqp_new; q++)
@@ -3375,12 +3511,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t nl = nl_q_vec(q);
                   real_t wn = ir_new.IntPoint(q).weight * nl * e_q(kk, q);
 
-                  // T · n_hat (unit normal = basis.normal, always oriented)
-                  // For sign_flipped: mesh T is with -n_hat, negate the dot product
+                  const real_t *n_hat = have_qp ? basis.qp_data[q].normal : basis.normal;
+                  bool sf = have_qp ? basis.qp_data[q].sign_flipped : basis.sign_flipped;
+
                   real_t T_dot_n = 0.0;
                   for (int c = 0; c < dim; c++)
-                     T_dot_n += T_quad_new(c * nqp_new + q) * basis.normal[c];
-                  if (basis.sign_flipped) { T_dot_n = -T_dot_n; }
+                     T_dot_n += T_quad_new(c * nqp_new + q) * n_hat[c];
+                  if (sf) { T_dot_n = -T_dot_n; }
 
                   T_n += wn * T_dot_n;
                   wn_sum += wn;
@@ -3400,6 +3537,14 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // (traction_stress_out, traction_correction_out, jump_residual_out)
          // are requested. The new Tandem-style pipeline above handles the
          // main traction computation; this fallback provides the decomposition.
+
+         // Compute face normal at centroid (was previously in outer scope)
+         const IntegrationPoint &ip_ctr =
+            Geometries.GetCenter(FTr->GetGeometryType());
+         FTr->Face->SetIntPoint(&ip_ctr);
+         Vector nor(dim);
+         CalcOrtho(FTr->Face->Jacobian(), nor);
+
          // IP penalty parameters (constant per face)
          real_t c0_mat = 2.0 * mu_val_;
          real_t c1_mat = dim * lambda_val_ + 2.0 * mu_val_;
@@ -3828,7 +3973,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          real_t delta_u[3];
          fault_basis_.EmbedSlip(fi, slip_local_br2, delta_u);
 
-         if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+         if (!mass_inv_computed_) {
+            PrecomputeMassInverse();
+            // Re-fetch FTr: PrecomputeMassInverse calls GetElementTransformation
+            // for every element, which may invalidate MFEM's cached face transforms.
+            FTr = mesh_.GetInteriorFaceTransformations(face);
+         }
 
          Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
          real_t br2_penalty = (geom == Geometry::TETRAHEDRON)
@@ -4149,20 +4299,54 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int nbf_sh = nbf_per_face_;
             const auto &basis_sh = fault_basis_.GetBasis(trac_idx);
 
-            Vector delta_u_nodal_sh(dim * nbf_sh);
-            for (int kk = 0; kk < nbf_sh; kk++)
-            {
-               int dof_idx = trac_idx * nbf_sh + kk;
-               real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
-               real_t du[3];
-               fault_basis_.EmbedSlip(trac_idx, sl, du);
-               for (int c = 0; c < dim; c++)
-                  delta_u_nodal_sh(c * nbf_sh + kk) = du[c];
-            }
+            // Build sign-corrected slip at quad points (shared faces).
+            // Same Tandem-style per-QP tangent embedding as interior faces.
+            int quad_order_sh_slip = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+            const IntegrationRule &ir_sh_slip = IntRules.Get(
+               FTr->GetGeometryType(), quad_order_sh_slip);
+            int nqp_sh_slip = ir_sh_slip.GetNPoints();
             Vector delta_u_quad_sh;
-            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_sh, delta_u_quad_sh);
-            for (int j = 0; j < delta_u_quad_sh.Size(); j++)
-               delta_u_quad_sh(j) *= sign;
+
+            if (!basis_sh.qp_data.empty())
+            {
+               // Per-QP tangent embedding (Tandem evaluate_slip)
+               Vector slip_tang_sh(2 * nbf_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_sh + kk;
+                  slip_tang_sh(0 * nbf_sh + kk) = slip_bc(2 * dof_idx);      // dip
+                  slip_tang_sh(1 * nbf_sh + kk) = slip_bc(2 * dof_idx + 1);  // strike
+               }
+               Vector slip_tang_q_sh;
+               face_quad_->InterpolateToQuadPoints(2, slip_tang_sh, slip_tang_q_sh);
+               delta_u_quad_sh.SetSize(dim * nqp_sh_slip);
+               for (int q = 0; q < nqp_sh_slip; q++)
+               {
+                  real_t sl_q[2] = {slip_tang_q_sh(q),
+                                    slip_tang_q_sh(nqp_sh_slip + q)};
+                  real_t du[3];
+                  fault_basis_.EmbedSlipQP(trac_idx, q, sl_q, du);
+                  for (int c = 0; c < dim; c++)
+                     delta_u_quad_sh(c * nqp_sh_slip + q) = sign * du[c];
+               }
+            }
+            else
+            {
+               // Fallback: centroid tangents (BR2 path)
+               Vector delta_u_nodal_sh(dim * nbf_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_sh + kk;
+                  real_t sl[2] = {slip_bc(2 * dof_idx), slip_bc(2 * dof_idx + 1)};
+                  real_t du[3];
+                  fault_basis_.EmbedSlip(trac_idx, sl, du);
+                  for (int c = 0; c < dim; c++)
+                     delta_u_nodal_sh(c * nbf_sh + kk) = du[c];
+               }
+               face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_sh, delta_u_quad_sh);
+               for (int j = 0; j < delta_u_quad_sh.Size(); j++)
+                  delta_u_quad_sh(j) *= sign;
+            }
 
             DGElasticityIPCombinedIntegrator trac_integ_sh(
                lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
@@ -4183,9 +4367,10 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             };
 
             Vector trac_local_sh;
+            const auto *qpd_sh = basis_sh.qp_data.empty() ? nullptr : &basis_sh.qp_data;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-               tangents_sh, basis_sh.sign_flipped, trac_local_sh);
+               tangents_sh, basis_sh.sign_flipped, trac_local_sh, qpd_sh);
 
             for (int kk = 0; kk < nbf_sh; kk++)
             {
@@ -4194,14 +4379,17 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                traction(2 * dof_idx + 1) = trac_local_sh(1 * nbf_sh + kk);
                if (normal_traction)
                {
+                  const bool have_qp_sh = !basis_sh.qp_data.empty();
                   real_t T_n = 0.0, wn_sum = 0.0;
                   for (int q = 0; q < nqp_sh; q++)
                   {
                      real_t wn = ir_sh2.IntPoint(q).weight * nl_q_sh(q) * e_q_sh(kk, q);
+                     const real_t *n_hat_sh = have_qp_sh ? basis_sh.qp_data[q].normal : basis_sh.normal;
+                     bool sf_sh = have_qp_sh ? basis_sh.qp_data[q].sign_flipped : basis_sh.sign_flipped;
                      real_t T_dot_n = 0.0;
                      for (int c = 0; c < dim; c++)
-                        T_dot_n += T_quad_sh(c * nqp_sh + q) * basis_sh.normal[c];
-                     if (basis_sh.sign_flipped) { T_dot_n = -T_dot_n; }
+                        T_dot_n += T_quad_sh(c * nqp_sh + q) * n_hat_sh[c];
+                     if (sf_sh) { T_dot_n = -T_dot_n; }
                      T_n += wn * T_dot_n;
                      wn_sum += wn;
                   }
@@ -4477,7 +4665,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             real_t delta_u[3];
             fault_basis_.EmbedSlip(trac_idx, slip_local_br2, delta_u);
 
-            if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+            if (!mass_inv_computed_) {
+               PrecomputeMassInverse();
+               // Re-fetch FTr: PrecomputeMassInverse invalidates cached transforms.
+               FTr = mesh_.GetSharedFaceTransformations(sf);
+            }
 
             Geometry::Type geom = mesh_.GetElementGeometry(FTr->Elem1No);
             real_t br2_penalty = (geom == Geometry::TETRAHEDRON)

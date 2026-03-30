@@ -21,17 +21,24 @@ namespace mfem
 namespace seas
 {
 
-/// Per-face orthonormal basis data on fault surface.
+/// Per-quad-point data on a fault face (matching Tandem AdapterBase).
+struct FaultBasisQPData
+{
+   real_t normal[3];       ///< Unit normal (oriented to ref_normal)
+   real_t tangent1[3];     ///< First tangent (dip) at this quad point
+   real_t tangent2[3];     ///< Second tangent (strike) at this quad point
+   real_t nl;              ///< Normal length |n_raw| at this quad point
+   bool sign_flipped;      ///< True if mesh normal was flipped at this quad point
+};
+
+/// Per-face summary (for backward compatibility and fast access).
 struct FaultBasisData
 {
-   real_t normal[3];    ///< Unit outward normal (oriented to ref_normal)
-   real_t tangent1[3];  ///< First tangent (dip direction for vertical fault)
-   real_t tangent2[3];  ///< Second tangent (strike direction for vertical fault)
-   bool sign_flipped;   ///< True if mesh normal was flipped to align with ref_normal
-                        ///< (Tandem AdapterBase convention). When true, the DG
-                        ///< compute_traction uses the OPPOSITE normal, so the
-                        ///< traction projection must negate the fault basis to
-                        ///< compensate (double negation → correct result).
+   real_t normal[3];    ///< Unit outward normal (oriented to ref_normal, at centroid)
+   real_t tangent1[3];  ///< First tangent (dip, at centroid)
+   real_t tangent2[3];  ///< Second tangent (strike, at centroid)
+   bool sign_flipped;   ///< True if mesh normal was flipped at centroid
+   std::vector<FaultBasisQPData> qp_data;  ///< Per-quad-point data (Tandem convention)
 };
 
 /// Computes and stores per-face local coordinate frames on a fault surface.
@@ -73,91 +80,91 @@ public:
       {
          int face_idx = fault_faces[i];
 
-         // Get face element transformations
          auto *ftr = mesh.GetInteriorFaceTransformations(face_idx);
          MFEM_VERIFY(ftr != nullptr,
                      "Face " << face_idx << " is not an interior face");
 
-         // Compute normal at face centroid
          const IntegrationPoint &ip =
             Geometries.GetCenter(ftr->GetGeometryType());
          ftr->Face->SetIntPoint(&ip);
 
-         // Get face Jacobian and compute (unnormalized) normal
-         const DenseMatrix &J = ftr->Face->Jacobian();
          Vector n_raw(dim_);
-         CalcOrtho(J, n_raw);
+         CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
-         // Orient with reference normal (matching Tandem AdapterBase::prepare)
-         real_t dot = 0.0;
-         for (int d = 0; d < dim_; d++) { dot += n_raw(d) * ref_normal(d); }
-         basis_[i].sign_flipped = (dot < 0.0);
-         if (basis_[i].sign_flipped) { n_raw.Neg(); }
+         real_t nl;
+         ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+                              basis_[i].normal, basis_[i].tangent1,
+                              basis_[i].tangent2, basis_[i].sign_flipped, nl);
+         MFEM_VERIFY(nl > 0.0, "Zero-length face normal");
+      }
+   }
 
-         // Normalize
-         real_t n_len = n_raw.Norml2();
-         MFEM_VERIFY(n_len > 0.0, "Zero-length face normal");
-         n_raw /= n_len;
+   /// Populate per-quad-point basis data for all faces (Tandem AdapterBase style).
+   ///
+   /// Must be called AFTER Compute(). Evaluates normal, tangent1, tangent2,
+   /// nl, sign_flipped at each quad point on each face.
+   ///
+   /// @param mesh The mesh
+   /// @param fault_faces Interior face indices
+   /// @param ref_normal Reference normal
+   /// @param up Up vector
+   /// @param ir Quadrature rule for face integration
+   void ComputeQPBasis(Mesh &mesh,
+                        const Array<int> &fault_faces,
+                        const Vector &ref_normal,
+                        const Vector &up,
+                        const IntegrationRule &ir)
+   {
+      int nq = ir.GetNPoints();
+      for (int i = 0; i < fault_faces.Size(); i++)
+      {
+         int face_idx = fault_faces[i];
+         auto *ftr = mesh.GetInteriorFaceTransformations(face_idx);
+         if (!ftr) { continue; }
 
-         // Zero-initialize all components
-         for (int d = 0; d < 3; d++)
+         basis_[i].qp_data.resize(nq);
+         for (int q = 0; q < nq; q++)
          {
-            basis_[i].normal[d] = 0.0;
-            basis_[i].tangent1[d] = 0.0;
-            basis_[i].tangent2[d] = 0.0;
+            ftr->Face->SetIntPoint(&ir.IntPoint(q));
+            Vector n_raw(dim_);
+            CalcOrtho(ftr->Face->Jacobian(), n_raw);
+
+            auto &qpd = basis_[i].qp_data[q];
+            ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+                                 qpd.normal, qpd.tangent1, qpd.tangent2,
+                                 qpd.sign_flipped, qpd.nl);
          }
+      }
+   }
 
-         // Store normal
-         for (int d = 0; d < dim_; d++)
+   /// Same as ComputeQPBasis but for shared faces (parallel).
+   template <typename PMeshType>
+   void ComputeQPBasisShared(PMeshType &mesh,
+                              const Array<int> &shared_faces,
+                              const Vector &ref_normal,
+                              const Vector &up,
+                              const IntegrationRule &ir,
+                              int interior_face_count)
+   {
+      int nq = ir.GetNPoints();
+      for (int i = 0; i < shared_faces.Size(); i++)
+      {
+         int sf = shared_faces[i];
+         auto *ftr = mesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+
+         int bi = interior_face_count + i;
+         basis_[bi].qp_data.resize(nq);
+         for (int q = 0; q < nq; q++)
          {
-            basis_[i].normal[d] = n_raw(d);
-         }
+            ftr->Face->SetIntPoint(&ir.IntPoint(q));
+            Vector n_raw(dim_);
+            CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
-         if (dim_ == 3)
-         {
-            // Following Tandem: strike = normalize(up x n), dip = strike x n
-            real_t s[3];
-            s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
-            s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
-            s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
-
-            real_t s_len = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
-            MFEM_VERIFY(s_len > 1e-12,
-                        "Up vector and normal are nearly collinear");
-            s[0] /= s_len;
-            s[1] /= s_len;
-            s[2] /= s_len;
-
-            // dip = strike x n (no negation)
-            // Matches Tandem's Curvilinear.cpp:facetBasis().
-            // With ref_normal=(0,-1,0), up=(0,0,1):
-            //   n=(0,-1,0), strike=(1,0,0), dip=(0,0,-1) = downward.
-            real_t d_vec[3];
-            d_vec[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
-            d_vec[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
-            d_vec[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
-
-            // tangent1 = dip, tangent2 = strike (Tandem convention)
-            for (int d = 0; d < 3; d++)
-            {
-               basis_[i].tangent1[d] = d_vec[d];
-               basis_[i].tangent2[d] = s[d];
-            }
-         }
-         else // dim_ == 2
-         {
-            // Tandem 2D convention: tangent perpendicular to normal.
-            // The sign is chosen from the cross product of "up" with n so
-            // that the tangent points in the "depth" direction when "up"
-            // points upward in the mesh (e.g., up=(0,-1) with depth
-            // positive downward gives tangent=(0,1), matching the existing
-            // antiplane convention).
-            real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
-            MFEM_VERIFY(std::abs(cross) > 1e-12,
-                        "2D: Up vector and normal are nearly collinear");
-            real_t sign_val = (cross >= 0.0) ? 1.0 : -1.0;
-            basis_[i].tangent1[0] = -sign_val * n_raw(1);
-            basis_[i].tangent1[1] =  sign_val * n_raw(0);
+            auto &qpd = basis_[bi].qp_data[q];
+            ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+                                 qpd.normal, qpd.tangent1, qpd.tangent2,
+                                 qpd.sign_flipped, qpd.nl);
          }
       }
    }
@@ -191,67 +198,15 @@ public:
             Geometries.GetCenter(ftr->GetGeometryType());
          ftr->Face->SetIntPoint(&ip);
 
-         const DenseMatrix &J = ftr->Face->Jacobian();
          Vector n_raw(dim_);
-         CalcOrtho(J, n_raw);
+         CalcOrtho(ftr->Face->Jacobian(), n_raw);
 
-         real_t dot = 0.0;
-         for (int d = 0; d < dim_; d++) { dot += n_raw(d) * ref_normal(d); }
          int bi = old_count + i;
-         basis_[bi].sign_flipped = (dot < 0.0);
-         if (basis_[bi].sign_flipped) { n_raw.Neg(); }
-
-         real_t n_len = n_raw.Norml2();
-         MFEM_VERIFY(n_len > 0.0, "Zero-length shared face normal");
-         n_raw /= n_len;
-
-         for (int d = 0; d < 3; d++)
-         {
-            basis_[bi].normal[d] = 0.0;
-            basis_[bi].tangent1[d] = 0.0;
-            basis_[bi].tangent2[d] = 0.0;
-         }
-
-         for (int d = 0; d < dim_; d++)
-         {
-            basis_[bi].normal[d] = n_raw(d);
-         }
-
-         if (dim_ == 3)
-         {
-            real_t s[3];
-            s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
-            s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
-            s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
-
-            real_t s_len = std::sqrt(s[0] * s[0] + s[1] * s[1] + s[2] * s[2]);
-            MFEM_VERIFY(s_len > 1e-12,
-                        "Up vector and normal are nearly collinear (shared)");
-            s[0] /= s_len;
-            s[1] /= s_len;
-            s[2] /= s_len;
-
-            // dip = strike x n (no negation, matches Tandem)
-            real_t d_vec[3];
-            d_vec[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
-            d_vec[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
-            d_vec[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
-
-            for (int d = 0; d < 3; d++)
-            {
-               basis_[bi].tangent1[d] = d_vec[d];
-               basis_[bi].tangent2[d] = s[d];
-            }
-         }
-         else // dim_ == 2
-         {
-            real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
-            MFEM_VERIFY(std::abs(cross) > 1e-12,
-                        "2D: Up and normal nearly collinear (shared)");
-            real_t sign_val = (cross >= 0.0) ? 1.0 : -1.0;
-            basis_[bi].tangent1[0] = -sign_val * n_raw(1);
-            basis_[bi].tangent1[1] =  sign_val * n_raw(0);
-         }
+         real_t nl;
+         ComputeOrientedFrame(n_raw, dim_, ref_normal, up,
+                              basis_[bi].normal, basis_[bi].tangent1,
+                              basis_[bi].tangent2, basis_[bi].sign_flipped, nl);
+         MFEM_VERIFY(nl > 0.0, "Zero-length shared face normal");
       }
 #endif
    }
@@ -325,6 +280,37 @@ public:
       }
    }
 
+   /// Per-quad-point embed: uses qp_data tangent vectors instead of centroid.
+   ///
+   /// For 3D: delta_u = slip[0]*tangent1(q) + slip[1]*tangent2(q)
+   void EmbedSlipQP(int fi, int q, const real_t *slip_local,
+                    real_t *delta_u_global) const
+   {
+      MFEM_ASSERT(fi >= 0 && fi < num_faces_,
+                  "FaultBasis::EmbedSlipQP: face index out of range");
+      const auto &b = basis_[fi];
+      if (q >= 0 && q < static_cast<int>(b.qp_data.size()))
+      {
+         const auto &qd = b.qp_data[q];
+         for (int d = 0; d < dim_; d++)
+         {
+            delta_u_global[d] = slip_local[0] * qd.tangent1[d];
+         }
+         if (dim_ == 3)
+         {
+            for (int d = 0; d < dim_; d++)
+            {
+               delta_u_global[d] += slip_local[1] * qd.tangent2[d];
+            }
+         }
+      }
+      else
+      {
+         // Fallback to centroid basis if qp_data not populated
+         EmbedSlip(fi, slip_local, delta_u_global);
+      }
+   }
+
    /// Get the normal stress component: sigma_n = -traction . normal.
    /// Positive in compression.
    real_t NormalStress(int fi, const real_t *traction_global) const
@@ -345,6 +331,80 @@ private:
    int dim_ = 0;
    int num_faces_ = 0;
    std::vector<FaultBasisData> basis_;
+
+   /// Core orientation and tangent-frame computation shared by all paths.
+   ///
+   /// Given a raw (unnormalized) face normal, orients it with ref_normal,
+   /// normalizes it, and computes strike/dip tangent vectors.
+   ///
+   /// @param n_raw       Raw face normal (modified in-place: oriented + normalized)
+   /// @param dim         Spatial dimension (2 or 3)
+   /// @param ref_normal  Reference normal for orientation
+   /// @param up          Reference up vector
+   /// @param[out] normal      Unit normal (3 components, zero-padded)
+   /// @param[out] tangent1    Dip tangent (3 components)
+   /// @param[out] tangent2    Strike tangent (3 components)
+   /// @param[out] sign_flipped  True if raw normal was flipped
+   /// @param[out] nl          Raw normal length (before normalization)
+   static void ComputeOrientedFrame(Vector &n_raw, int dim,
+                                     const Vector &ref_normal,
+                                     const Vector &up,
+                                     real_t normal[3],
+                                     real_t tangent1[3],
+                                     real_t tangent2[3],
+                                     bool &sign_flipped,
+                                     real_t &nl)
+   {
+      nl = n_raw.Norml2();
+
+      // Orient with reference normal
+      real_t dot = 0.0;
+      for (int d = 0; d < dim; d++) { dot += n_raw(d) * ref_normal(d); }
+      sign_flipped = (dot < 0.0);
+      if (sign_flipped) { n_raw.Neg(); }
+
+      // Normalize
+      if (nl > 0.0) { n_raw /= nl; }
+
+      // Zero-initialize output
+      for (int d = 0; d < 3; d++)
+      {
+         normal[d] = 0.0;
+         tangent1[d] = 0.0;
+         tangent2[d] = 0.0;
+      }
+      for (int d = 0; d < dim; d++) { normal[d] = n_raw(d); }
+
+      if (dim == 3)
+      {
+         // strike = normalize(up x n)
+         real_t s[3];
+         s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
+         s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
+         s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
+         real_t s_len = std::sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
+         MFEM_VERIFY(s_len > 1e-12,
+                     "ComputeOrientedFrame: up vector is nearly collinear with "
+                     "face normal (|up x n| = " << s_len << "). Cannot form "
+                     "strike/dip tangent frame.");
+         s[0] /= s_len; s[1] /= s_len; s[2] /= s_len;
+
+         // dip = strike x n
+         real_t dv[3];
+         dv[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
+         dv[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+         dv[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
+
+         for (int d = 0; d < 3; d++) { tangent1[d] = dv[d]; tangent2[d] = s[d]; }
+      }
+      else // dim == 2
+      {
+         real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
+         real_t sv = (cross >= 0.0) ? 1.0 : -1.0;
+         tangent1[0] = -sv * n_raw(1);
+         tangent1[1] =  sv * n_raw(0);
+      }
+   }
 };
 
 } // namespace seas

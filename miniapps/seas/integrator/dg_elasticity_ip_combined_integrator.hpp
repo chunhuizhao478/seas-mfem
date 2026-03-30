@@ -15,7 +15,9 @@
 #define MFEM_SEAS_DG_ELASTICITY_IP_COMBINED_INTEGRATOR_HPP
 
 #include "mfem.hpp"
+#include "../fault/fault_basis.hpp"
 #include <cmath>
+#include <vector>
 
 namespace mfem
 {
@@ -560,9 +562,12 @@ public:
    /// @param ir Integration rule
    /// @param nbf Number of fault basis functions per face
    /// @param e_q Fault basis functions at quad points [nbf × nq]
-   /// @param fault_tangents Tangent vectors [ncomp_local][dim] (constant per face)
-   /// @param sign_flipped Whether mesh normal was flipped to align with ref_normal
+   /// @param fault_tangents Tangent vectors [ncomp_local][dim] (constant per face,
+   ///        used when qp_data is null)
+   /// @param sign_flipped Whether mesh normal was flipped (constant, used when qp_data is null)
    /// @param traction_local Output: fault-local traction [ncomp_local * nbf]
+   /// @param qp_data Optional per-quad-point basis data (Tandem convention).
+   ///        When provided, tangent vectors and sign_flipped are taken per quad point.
    static void ProjectTractionToFaultDOFs(
       int dim, int ncomp_local,
       const Vector &traction_q, const Vector &nl_q,
@@ -570,7 +575,8 @@ public:
       const DenseMatrix &e_q,
       const real_t tangents[][3],
       bool sign_flipped,
-      Vector &traction_local)
+      Vector &traction_local,
+      const std::vector<FaultBasisQPData> *qp_data = nullptr)
    {
       int nq = ir.GetNPoints();
       traction_local.SetSize(ncomp_local * nbf);
@@ -592,23 +598,38 @@ public:
       DenseMatrixInverse M_inv_solver(M);
       M_inv_solver.GetInverseMatrix(Minv);
 
-      // RHS: Σ_q w*nl*φ_l*(T_3D · tangent_t)
+      // RHS: Σ_q w*nl*φ_l*(T_3D · tangent_t(q))
       // When sign_flipped: negate tangents (Tandem double-negation convention)
-      real_t sign_factor = sign_flipped ? -1.0 : 1.0;
+      // Use per-quad-point tangents if qp_data is provided (Tandem convention).
 
       DenseMatrix rhs(nbf, ncomp_local);
       rhs = 0.0;
       for (int q = 0; q < nq; q++)
       {
          real_t wn = ir.IntPoint(q).weight * nl_q(q);
+
+         // Get tangent and sign for this quad point
+         real_t t1[3], t2[3];
+         real_t sf;
+         if (qp_data && q < static_cast<int>(qp_data->size()))
+         {
+            const auto &qd = (*qp_data)[q];
+            for (int d = 0; d < 3; d++) { t1[d] = qd.tangent1[d]; t2[d] = qd.tangent2[d]; }
+            sf = qd.sign_flipped ? -1.0 : 1.0;
+         }
+         else
+         {
+            for (int d = 0; d < 3; d++) { t1[d] = tangents[0][d]; t2[d] = tangents[1][d]; }
+            sf = sign_flipped ? -1.0 : 1.0;
+         }
+         const real_t *tang[2] = {t1, t2};
+
          for (int t = 0; t < ncomp_local; t++)
          {
-            // Project T_q onto tangent direction t at this quad point
-            // sign_factor handles the double negation for flipped faces
             real_t T_local = 0.0;
             for (int p = 0; p < dim; p++)
             {
-               T_local += traction_q(p * nq + q) * tangents[t][p] * sign_factor;
+               T_local += traction_q(p * nq + q) * tang[t][p] * sf;
             }
             for (int l = 0; l < nbf; l++)
             {

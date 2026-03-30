@@ -346,12 +346,17 @@ bool test_parallel_traction_bounded(MPIContext &ctx)
    Vector traction;
    op.ComputeTraction(u, slip, traction);
 
+   // Physically meaningful bound: for unit slip on a coarse mesh with
+   // BP5 material (mu ~ 32 GPa), traction should be O(mu).  Allow 10x
+   // headroom for DG penalty on the coarse 2x1x1 test mesh.
+   const real_t traction_bound = 10.0 * mu;
+
    bool local_ok = true;
    real_t local_max = 0.0;
    for (int i = 0; i < traction.Size(); i++)
    {
       real_t val = traction(i);
-      if (std::isnan(val) || std::isinf(val) || std::abs(val) > 1e15)
+      if (std::isnan(val) || std::isinf(val) || std::abs(val) > traction_bound)
       {
          local_ok = false;
       }
