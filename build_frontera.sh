@@ -7,11 +7,13 @@
 #
 # Optional environment overrides:
 #   PETSC_MODULE=petsc/3.23   # Frontera PETSc module to load
+#   USE_MUMPS=0               # Disable MFEM's direct MUMPS integration
 #   JOBS=8                    # Parallel build jobs
 
 set -euo pipefail
 
 PETSC_MODULE="${PETSC_MODULE:-petsc/3.23}"
+USE_MUMPS="${USE_MUMPS:-auto}"
 JOBS="${JOBS:-8}"
 
 # Intel classic compiler wrappers on Frontera can abort during config probes when
@@ -73,6 +75,7 @@ resolve_petsc_dir() {
 }
 
 PETSC_DIR_RESOLVED="$(resolve_petsc_dir || true)"
+USE_MUMPS_RESOLVED="YES"
 MUMPS_OPT_RESOLVED="-I${TACC_MUMPS_INC:-}"
 
 # Verify modules
@@ -105,12 +108,28 @@ if [ -n "${TACC_PETSC_INC:-}" ]; then
     echo "  TACC_PETSC_INC = ${TACC_PETSC_INC}"
 fi
 
+# Frontera's mumps/5.3 module is installed under a PETSc 3.15 tree. That is
+# incompatible with PETSc 3.23 headers/libraries used for MFEM's PETSc build.
+# Auto-disable MFEM_USE_MUMPS in that mixed-tree case unless the user forces it.
+if [ "${USE_MUMPS}" = "0" ] || [ "${USE_MUMPS}" = "NO" ] || [ "${USE_MUMPS}" = "no" ]; then
+    USE_MUMPS_RESOLVED="NO"
+elif [ "${USE_MUMPS}" = "1" ] || [ "${USE_MUMPS}" = "YES" ] || [ "${USE_MUMPS}" = "yes" ]; then
+    USE_MUMPS_RESOLVED="YES"
+elif [ -n "${TACC_MUMPS_LIB:-}" ] && [ -n "${PETSC_DIR_RESOLVED}" ] &&
+     [ "${TACC_MUMPS_LIB#${PETSC_DIR_RESOLVED}}" = "${TACC_MUMPS_LIB}" ] &&
+     [ "${TACC_MUMPS_LIB#*petsc/}" != "${TACC_MUMPS_LIB}" ]; then
+    USE_MUMPS_RESOLVED="NO"
+    echo "  NOTE: TACC_MUMPS_LIB lives under a different PETSc tree than PETSC_DIR."
+    echo "        Disabling MFEM_USE_MUMPS to avoid PETSc 3.15/3.23 ABI conflicts."
+fi
+
 # On Frontera, the MUMPS module can point at a PETSc 3.15 include tree that
 # also contains petscconf.h and related headers. MFEM places MUMPS include
 # flags before PETSc include flags, so a plain -I here contaminates PETSc 3.23
 # builds with older PETSc headers. Demote the MUMPS include path so PETSc's
 # own include directories win while dmumps_c.h remains discoverable.
-if [ -n "${TACC_MUMPS_INC:-}" ] && [ -f "${TACC_MUMPS_INC}/petscconf.h" ]; then
+if [ "${USE_MUMPS_RESOLVED}" = "YES" ] &&
+   [ -n "${TACC_MUMPS_INC:-}" ] && [ -f "${TACC_MUMPS_INC}/petscconf.h" ]; then
     MUMPS_OPT_RESOLVED="-isystem ${TACC_MUMPS_INC}"
     echo "  NOTE: TACC_MUMPS_INC contains PETSc headers; using '-isystem' to avoid PETSc header conflicts."
 fi
@@ -120,22 +139,30 @@ cd "$SCRIPT_DIR"
 
 echo ""
 echo "=== Configuring MFEM ==="
-make config \
-  MFEM_USE_MPI=YES \
-  MFEM_USE_METIS=YES \
-  MFEM_USE_METIS_5=YES \
-  MFEM_USE_LAPACK=YES \
-  MFEM_USE_MUMPS=YES \
-  MFEM_USE_PETSC=YES \
-  PETSC_DIR="${PETSC_DIR_RESOLVED}" \
-  HYPRE_OPT="-I${TACC_HYPRE_INC}" \
-  HYPRE_LIB="-L${TACC_HYPRE_LIB} -Wl,-rpath,${TACC_HYPRE_LIB} -lHYPRE" \
-  METIS_OPT="-I${TACC_PARMETIS_INC} -DMETIS_EXPORT=" \
-  METIS_LIB="-L${TACC_PARMETIS_LIB} -lparmetis -lmetis" \
-  MUMPS_OPT="${MUMPS_OPT_RESOLVED}" \
-  MUMPS_LIB="-L${TACC_MUMPS_LIB} -ldmumps -lmumps_common -lpord -lesmumps -lptscotch -lscotch -lptscotcherr -lscotcherr -L${TACC_MKL_LIB} -lmkl_scalapack_lp64 -lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lmpifort -lifcore" \
-  LAPACK_OPT="-I${MKLROOT}/include" \
+CONFIG_ARGS=(
+  MFEM_USE_MPI=YES
+  MFEM_USE_METIS=YES
+  MFEM_USE_METIS_5=YES
+  MFEM_USE_LAPACK=YES
+  MFEM_USE_MUMPS="${USE_MUMPS_RESOLVED}"
+  MFEM_USE_PETSC=YES
+  PETSC_DIR="${PETSC_DIR_RESOLVED}"
+  HYPRE_OPT="-I${TACC_HYPRE_INC}"
+  HYPRE_LIB="-L${TACC_HYPRE_LIB} -Wl,-rpath,${TACC_HYPRE_LIB} -lHYPRE"
+  METIS_OPT="-I${TACC_PARMETIS_INC} -DMETIS_EXPORT="
+  METIS_LIB="-L${TACC_PARMETIS_LIB} -lparmetis -lmetis"
+  LAPACK_OPT="-I${MKLROOT}/include"
   LAPACK_LIB="-L${TACC_MKL_LIB} -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread"
+)
+
+if [ "${USE_MUMPS_RESOLVED}" = "YES" ]; then
+    CONFIG_ARGS+=(
+      MUMPS_OPT="${MUMPS_OPT_RESOLVED}"
+      MUMPS_LIB="-L${TACC_MUMPS_LIB} -ldmumps -lmumps_common -lpord -lesmumps -lptscotch -lscotch -lptscotcherr -lscotcherr -L${TACC_MKL_LIB} -lmkl_scalapack_lp64 -lmkl_blacs_intelmpi_lp64 -lmkl_intel_lp64 -lmkl_sequential -lmkl_core -lpthread -lmpifort -lifcore"
+    )
+fi
+
+make config "${CONFIG_ARGS[@]}"
 
 echo ""
 echo "=== Building MFEM library ==="
