@@ -1430,13 +1430,32 @@ int main(int argc, char *argv[])
    std::unique_ptr<PetscParVector> petsc_state;
    if (use_petsc_ts)
    {
-      petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "bp5ts_");
+      // No prefix: options file uses unprefixed names (-ts_type, etc.)
+      // so the solver must also be unprefixed.
+      petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "");
       petsc_ode->SetAbsTol(1e-7);
       petsc_ode->SetRelTol(1e-50);
       petsc_ode->SetMaxIter(max_steps);
       petsc_ode->Init(seas_op, PetscODESolver::ODE_SOLVER_GENERAL);
       petsc::TS ts = *petsc_ode;
-      PetscErrorCode ierr = TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP);
+
+      // MFEM's PetscODESolver constructor disables TS adaptivity
+      // (TSAdaptSetType(TSADAPTNONE) in petsc.cpp:4194). Re-enable
+      // adaptive stepping so PETSc's RK45 error control works.
+      // TSSetFromOptions below will pick up -ts_adapt_* from the cfg.
+      {
+         TSAdapt tsad;
+         PetscErrorCode ierr2 = TSGetAdapt(ts, &tsad);
+         MFEM_VERIFY(ierr2 == PETSC_SUCCESS, "TSGetAdapt failed");
+         ierr2 = TSAdaptSetType(tsad, TSADAPTBASIC);
+         MFEM_VERIFY(ierr2 == PETSC_SUCCESS, "TSAdaptSetType(BASIC) failed");
+      }
+
+      // Apply all PETSc options from the cfg file (-ts_type, -ts_rk_type, etc.)
+      PetscErrorCode ierr = TSSetFromOptions(ts);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetFromOptions failed");
+
+      ierr = TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetExactFinalTime(MATCHSTEP) failed");
       ierr = TSSetMaxTime(ts, t_final);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetMaxTime() failed");
@@ -1778,7 +1797,7 @@ int main(int argc, char *argv[])
                    << std::setw(16) << std::scientific << std::setprecision(6)
                    << t / BP5Params::seconds_per_year
                    << std::setw(14) << std::scientific << std::setprecision(3)
-                   << current_dt
+                   << dt
                    << std::setw(16) << std::scientific << std::setprecision(3)
                    << V_max
                    << std::setw(8) << num_seismic_events
