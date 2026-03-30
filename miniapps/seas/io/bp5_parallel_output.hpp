@@ -14,6 +14,7 @@
 
 #include "mfem.hpp"
 #include "bp5_benchmark_output.hpp"
+#include "probe_output.hpp"
 #include "../fault/fault_geometry.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/mpi_context.hpp"
@@ -21,232 +22,271 @@
 #include <memory>
 #include <string>
 #include <vector>
+#include <cmath>
+#include <limits>
 
 namespace mfem
 {
 namespace seas
 {
 
-/// @brief Parallel wrapper for BP5BenchmarkOutput.
+/// @brief Distributed parallel BP5 benchmark output (Tandem-style).
 ///
-/// Gathers local fault data to root rank via FaultGeometry::GatherToRoot,
-/// splits vector fields into per-component scalars, then root writes output
-/// using the serial BP5BenchmarkOutput class. Only root rank opens files.
+/// Each rank locates probe stations on its local fault DOFs and faces.
+/// Ownership is assigned via MPI_Allreduce: the rank with minimum geometric
+/// distance owns each station (ties broken by lower rank number). Each rank
+/// writes only its owned stations from local data — no global gather needed
+/// during time stepping.
 ///
-/// Follows ParallelBenchmarkOutput pattern exactly.
+/// This matches Tandem's BoundaryProbeWriter architecture:
+///   - BoundaryPointLocator assigns each probe to a rank
+///   - clean_duplicate_probes() uses MPI_Allreduce(MIN) for ownership
+///   - Each rank writes its probes independently
 class ParallelBP5BenchmarkOutput
 {
    static constexpr real_t kOutputTimeTolerance = 0.99;
 
+   using Station = Probe2DInterpolator::Station;
+
 public:
-   /// @brief Construct parallel BP5 benchmark output.
-   ///
-   /// @param prefix Output file prefix
-   /// @param params BP5 benchmark parameters
-   /// @param stations Probe station list
-   /// @param fault_geom Fault geometry with parallel gather support
-   /// @param mpi_ctx MPI context
-   /// @param global_x2 Globally gathered along-strike coords (root only)
-   /// @param global_x3 Globally gathered depth coords (root only)
-   /// @param global_tau_pre_dip Globally gathered tau_pre dip component (root)
-   /// @param global_tau_pre_strike Globally gathered tau_pre strike component (root)
-   /// @param nbf_per_face Number of fault DOFs per face in gathered ordering
-   /// @param face_basis_type BasisType used for fault face nodes
    ParallelBP5BenchmarkOutput(
       const std::string &prefix,
       const BP5Params &params,
-      const std::vector<Probe2DInterpolator::Station> &stations,
+      const std::vector<Station> &stations,
       FaultGeometry<ParMesh> &fault_geom,
       MPIContext &mpi_ctx,
-      const Vector &global_x2,
-      const Vector &global_x3,
-      const Vector &global_tau_pre_dip,
-      const Vector &global_tau_pre_strike,
+      const Vector &local_x2,
+      const Vector &local_x3,
+      const Vector &local_tau_pre_dip,
+      const Vector &local_tau_pre_strike,
       int nbf_per_face = 1,
       int face_basis_type = BasisType::GaussLobatto)
       : fault_geom_(fault_geom),
         mpi_ctx_(mpi_ctx),
-        nbf_per_face_(nbf_per_face),
+        prefix_(prefix),
+        stations_(stations),
+        eta_(params.eta()),
         last_write_time_(-1e30)
    {
-      if (mpi_ctx_.IsRoot())
+      int num_stations = static_cast<int>(stations.size());
+
+      // Step 1: Each rank creates a local interpolator using LOCAL coords.
+      // This finds the nearest DOF and (if nbf >= 3) tries exact face match.
+      Probe2DInterpolator local_interp(
+         local_x2, local_x3, stations, nbf_per_face, face_basis_type);
+
+      // Step 2: Tandem-style distributed ownership via MPI_Allreduce.
+      // Each rank reports its distance to each station; the global minimum
+      // determines ownership. Ties broken by lower rank number.
+      owned_stations_.clear();
+      std::vector<real_t> local_dist(num_stations);
+      for (int s = 0; s < num_stations; s++)
       {
-         // Build face deduplication mapping to handle shared-face duplicates
-         // at partition boundaries. Without this, the contiguous-per-face
-         // assumption in TryBuildExactMatch would break.
-         if (nbf_per_face > 1)
+         local_dist[s] = local_interp.GetMatchDistance(s);
+         // Ranks without any fault DOFs get infinite distance
+         if (local_interp.GetNearestDOF(s) < 0 &&
+             !local_interp.HasExactMatch(s))
          {
-            FaultGeometry<ParMesh>::BuildFaceDedupMap(
-               global_x2, global_x3, nbf_per_face,
-               dedup_face_indices_);
-
-            int num_raw = global_x2.Size();
-            int num_dedup = static_cast<int>(dedup_face_indices_.size())
-                            * nbf_per_face;
-            if (num_dedup < num_raw)
-            {
-               std::cout << "  Face dedup: " << num_raw / nbf_per_face
-                         << " raw faces → "
-                         << dedup_face_indices_.size()
-                         << " unique faces ("
-                         << (num_raw - num_dedup) / nbf_per_face
-                         << " duplicates removed)\n";
-            }
-
-            // Deduplicate coordinates and tau_pre
-            Vector dedup_x2, dedup_x3, dedup_tau_dip, dedup_tau_strike;
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_x2, dedup_face_indices_, nbf_per_face, dedup_x2);
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_x3, dedup_face_indices_, nbf_per_face, dedup_x3);
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_tau_pre_dip, dedup_face_indices_, nbf_per_face,
-               dedup_tau_dip);
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_tau_pre_strike, dedup_face_indices_, nbf_per_face,
-               dedup_tau_strike);
-
-            bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
-               prefix, params, stations, dedup_x2, dedup_x3,
-               nbf_per_face, face_basis_type);
-            bench_out_->SetTauPre(dedup_tau_dip, dedup_tau_strike);
+            local_dist[s] = std::numeric_limits<real_t>::max();
          }
-         else
+      }
+
+      std::vector<real_t> global_min_dist(num_stations);
+#ifdef SEAS_USE_MPI
+      MPI_Allreduce(local_dist.data(), global_min_dist.data(),
+                    num_stations, MPI_DOUBLE, MPI_MIN, mpi_ctx.GetComm());
+#else
+      global_min_dist = local_dist;
+#endif
+
+      // Tie-break by rank number (matching Tandem's clean_duplicate_probes)
+      int rank = 0;
+#ifdef SEAS_USE_MPI
+      MPI_Comm_rank(mpi_ctx.GetComm(), &rank);
+#endif
+      std::vector<int> local_owner_rank(num_stations);
+      for (int s = 0; s < num_stations; s++)
+      {
+         local_owner_rank[s] =
+            (local_dist[s] == global_min_dist[s])
+               ? rank : std::numeric_limits<int>::max();
+      }
+      std::vector<int> global_owner_rank(num_stations);
+#ifdef SEAS_USE_MPI
+      MPI_Allreduce(local_owner_rank.data(), global_owner_rank.data(),
+                    num_stations, MPI_INT, MPI_MIN, mpi_ctx.GetComm());
+#else
+      global_owner_rank = local_owner_rank;
+#endif
+
+      // Step 3: Store ownership and create probe files for owned stations.
+      local_tau_pre_dip_ = local_tau_pre_dip;
+      local_tau_pre_strike_ = local_tau_pre_strike;
+      local_interp_ = std::make_unique<Probe2DInterpolator>(
+         local_x2, local_x3, stations, nbf_per_face, face_basis_type);
+
+      std::vector<std::string> columns = {
+         "time(s)", "slip_strike(m)", "slip_dip(m)",
+         "log10(V_strike)(m/s)", "log10(V_dip)(m/s)",
+         "tau_strike(MPa)", "tau_dip(MPa)", "log10(state)(s)"
+      };
+
+      for (int s = 0; s < num_stations; s++)
+      {
+         if (global_owner_rank[s] == rank)
          {
-            // nbf=1: no face structure to deduplicate, use raw data directly
-            bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
-               prefix, params, stations, global_x2, global_x3,
-               nbf_per_face, face_basis_type);
-            bench_out_->SetTauPre(global_tau_pre_dip, global_tau_pre_strike);
+            owned_stations_.push_back(s);
+
+            real_t x2_km = stations[s].x2 / 1000.0;
+            real_t x3_km = stations[s].x3 / 1000.0;
+            std::ostringstream desc;
+            desc << "BP5-QD time series at " << stations[s].name
+                 << " (x2=" << x2_km << "km, x3=" << x3_km << "km)";
+            std::string filename = prefix + "_" + stations[s].name + ".txt";
+            auto probe = std::make_unique<ProbeOutput>(
+               filename, columns, desc.str());
+            probes_.push_back(std::move(probe));
+         }
+      }
+
+      // Print ownership summary on root
+      if (mpi_ctx.IsRoot())
+      {
+         std::cout << "  Distributed probe ownership:\n";
+         for (int s = 0; s < num_stations; s++)
+         {
+            std::cout << "    " << stations[s].name
+                      << " → rank " << global_owner_rank[s]
+                      << " (dist=" << global_min_dist[s] << " m";
+            if (global_owner_rank[s] == rank &&
+                local_interp.HasExactMatch(s))
+            {
+               std::cout << ", exact";
+            }
+            std::cout << ")\n";
          }
       }
    }
 
    void EnableTractionDecompositionOutput()
    {
-      if (mpi_ctx_.IsRoot() && bench_out_)
+      if (owned_stations_.empty()) { return; }
+      if (!decomp_probes_.empty()) { return; }
+
+      std::vector<std::string> columns = {
+         "time(s)",
+         "tau_stress_strike(MPa)", "tau_stress_dip(MPa)",
+         "tau_corr_strike(MPa)", "tau_corr_dip(MPa)",
+         "tau_total_strike(MPa)", "tau_total_dip(MPa)"
+      };
+
+      for (int idx = 0; idx < static_cast<int>(owned_stations_.size()); idx++)
       {
-         bench_out_->EnableTractionDecompositionOutput();
+         int s = owned_stations_[idx];
+         std::string filename =
+            prefix_ + "_tracdec_" + stations_[s].name + ".txt";
+         std::ostringstream desc;
+         desc << "BP5 traction decomposition at " << stations_[s].name;
+         decomp_probes_.push_back(
+            std::make_unique<ProbeOutput>(filename, columns, desc.str()));
       }
    }
 
    void EnableJumpResidualOutput()
    {
-      if (mpi_ctx_.IsRoot() && bench_out_)
+      if (owned_stations_.empty()) { return; }
+      if (!jump_res_probes_.empty()) { return; }
+
+      std::vector<std::string> columns = {
+         "time(s)", "jump_res_strike", "jump_res_dip", "jump_res_mag"
+      };
+
+      for (int idx = 0; idx < static_cast<int>(owned_stations_.size()); idx++)
       {
-         bench_out_->EnableJumpResidualOutput();
+         int s = owned_stations_[idx];
+         std::string filename =
+            prefix_ + "_jumpres_" + stations_[s].name + ".txt";
+         std::ostringstream desc;
+         desc << "BP5 jump residual at " << stations_[s].name;
+         jump_res_probes_.push_back(
+            std::make_unique<ProbeOutput>(filename, columns, desc.str()));
       }
    }
 
-   /// Print station mapping diagnostics on root.
-   void PrintDiagnostics(const Vector &global_x2, const Vector &global_x3,
+   void PrintDiagnostics(const Vector &local_x2, const Vector &local_x3,
                          std::ostream &os = std::cout) const
    {
-      if (mpi_ctx_.IsRoot() && bench_out_)
+      if (!owned_stations_.empty() && local_interp_)
       {
-         if (!dedup_face_indices_.empty())
-         {
-            Vector d_x2, d_x3;
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_x2, dedup_face_indices_, nbf_per_face_, d_x2);
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               global_x3, dedup_face_indices_, nbf_per_face_, d_x3);
-            bench_out_->PrintDiagnostics(d_x2, d_x3, os);
-         }
-         else
-         {
-            bench_out_->PrintDiagnostics(global_x2, global_x3, os);
-         }
+         local_interp_->PrintDiagnostics(stations_, local_x2, local_x3, os);
       }
    }
 
    /// @brief Write output if adaptive schedule requires it.
    ///
-   /// Gathers local fault data to root, then root writes.
-   /// All ranks must call this collectively.
-   ///
-   /// @param time Current simulation time [s]
-   /// @param state Full state vector (local)
-   /// @param fault Fault operator (BP5, SlipComponents=2)
-   /// @param traction Local traction vector [2*N_local interleaved]
-   /// @param global_V_max Global maximum slip rate (already reduced)
-   /// @return true if data was written
+   /// Each rank evaluates owned stations from local data — no gather.
+   /// All ranks must call collectively for the write-decision sync.
    bool Write(real_t time, const Vector &state,
               const RateStateFaultOperator<ParMesh, 2> &fault,
               const Vector &traction, real_t global_V_max)
    {
-      // Synchronize write decision across all ranks
       real_t dt_out = BP5BenchmarkOutput<Mesh>::OutputInterval(global_V_max);
       int should_write =
          (time - last_write_time_ >= dt_out * kOutputTimeTolerance) ? 1 : 0;
-
 #ifdef SEAS_USE_MPI
       MPI_Allreduce(MPI_IN_PLACE, &should_write, 1, MPI_INT, MPI_MAX,
                     mpi_ctx_.GetComm());
 #endif
       if (!should_write) { return false; }
 
-      // Extract local fault quantities
-      Vector local_slip, local_theta;
-      fault.GetSlip(state, local_slip);       // [2*N_local interleaved]
-      fault.GetTheta(state, local_theta);     // [N_local]
-      const Vector &local_V = fault.GetSlipRate(); // [2*N_local interleaved]
-
-      int N = fault.NumNodes();
-
-      // Split interleaved vectors into per-component scalars
-      Vector local_slip_dip(N), local_slip_strike(N);
-      Vector local_V_dip(N), local_V_strike(N);
-      Vector local_trac_dip(N), local_trac_strike(N);
-
-      for (int i = 0; i < N; i++)
+      if (!owned_stations_.empty())
       {
-         local_slip_dip(i)    = local_slip(2 * i + 0);
-         local_slip_strike(i) = local_slip(2 * i + 1);
-         local_V_dip(i)       = local_V(2 * i + 0);
-         local_V_strike(i)    = local_V(2 * i + 1);
-         local_trac_dip(i)    = traction(2 * i + 0);
-         local_trac_strike(i) = traction(2 * i + 1);
-      }
+         // Extract local data
+         Vector local_slip, local_theta;
+         fault.GetSlip(state, local_slip);
+         fault.GetTheta(state, local_theta);
+         const Vector &local_V = fault.GetSlipRate();
+         int N = fault.NumNodes();
 
-      // Gather 7 scalar fields to root
-      Vector g_slip_dip, g_slip_strike, g_theta;
-      Vector g_V_dip, g_V_strike;
-      Vector g_trac_dip, g_trac_strike;
-
-      fault_geom_.GatherToRoot(local_slip_dip, g_slip_dip);
-      fault_geom_.GatherToRoot(local_slip_strike, g_slip_strike);
-      fault_geom_.GatherToRoot(local_theta, g_theta);
-      fault_geom_.GatherToRoot(local_V_dip, g_V_dip);
-      fault_geom_.GatherToRoot(local_V_strike, g_V_strike);
-      fault_geom_.GatherToRoot(local_trac_dip, g_trac_dip);
-      fault_geom_.GatherToRoot(local_trac_strike, g_trac_strike);
-
-      // Root writes using globally gathered data (deduplicated if needed)
-      if (mpi_ctx_.IsRoot() && bench_out_)
-      {
-         if (!dedup_face_indices_.empty())
+         Vector slip_dip(N), slip_strike(N), V_dip(N), V_strike(N);
+         Vector trac_dip(N), trac_strike(N);
+         for (int i = 0; i < N; i++)
          {
-            Vector d_sd, d_ss, d_th, d_vd, d_vs, d_td, d_ts;
-            auto dedup = [&](const Vector &raw, Vector &out) {
-               FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-                  raw, dedup_face_indices_, nbf_per_face_, out);
-            };
-            dedup(g_slip_dip, d_sd);
-            dedup(g_slip_strike, d_ss);
-            dedup(g_theta, d_th);
-            dedup(g_V_dip, d_vd);
-            dedup(g_V_strike, d_vs);
-            dedup(g_trac_dip, d_td);
-            dedup(g_trac_strike, d_ts);
-            bench_out_->WriteFromGlobalData(
-               time, d_sd, d_ss, d_th, d_vd, d_vs, d_td, d_ts);
+            slip_dip(i)    = local_slip(2*i);
+            slip_strike(i) = local_slip(2*i+1);
+            V_dip(i)       = local_V(2*i);
+            V_strike(i)    = local_V(2*i+1);
+            trac_dip(i)    = traction(2*i);
+            trac_strike(i) = traction(2*i+1);
          }
-         else
+
+         // Write owned stations from local data
+         for (int idx = 0; idx < static_cast<int>(owned_stations_.size()); idx++)
          {
-            bench_out_->WriteFromGlobalData(
-               time, g_slip_dip, g_slip_strike, g_theta,
-               g_V_dip, g_V_strike, g_trac_dip, g_trac_strike);
+            int s = owned_stations_[idx];
+
+            real_t sd = -local_interp_->EvaluateScalar(slip_dip, s);
+            real_t ss = -local_interp_->EvaluateScalar(slip_strike, s);
+            real_t vd = std::abs(local_interp_->EvaluateScalar(V_dip, s));
+            real_t vs = std::abs(local_interp_->EvaluateScalar(V_strike, s));
+
+            real_t tau_d = -(local_interp_->EvaluateScalar(local_tau_pre_dip_, s)
+                           + local_interp_->EvaluateScalar(trac_dip, s)
+                           + eta_ * local_interp_->EvaluateScalar(V_dip, s)) / 1e6;
+            real_t tau_s = -(local_interp_->EvaluateScalar(local_tau_pre_strike_, s)
+                           + local_interp_->EvaluateScalar(trac_strike, s)
+                           + eta_ * local_interp_->EvaluateScalar(V_strike, s)) / 1e6;
+
+            real_t th = local_interp_->EvaluateScalar(local_theta, s);
+
+            std::vector<real_t> row = {
+               time, ss, sd,
+               vs > 0.0 ? std::log10(vs) : -300.0,
+               vd > 0.0 ? std::log10(vd) : -300.0,
+               tau_s, tau_d,
+               th > 0.0 ? std::log10(th) : -300.0
+            };
+            probes_[idx]->WriteStep(row);
          }
       }
 
@@ -254,113 +294,61 @@ public:
       return true;
    }
 
-   /// Write station-level traction decomposition at the current time.
-   ///
-   /// Inputs are local interleaved traction components [2*N_local]:
-   ///   traction_stress = physical stress contribution
-   ///   traction_correction = correction contribution added to the stress part
    void WriteTractionDecomposition(real_t time,
                                    const Vector &traction_stress,
                                    const Vector &traction_correction)
    {
-      if (!bench_out_ && !mpi_ctx_.IsRoot())
-      {
-         // Non-root still participates in gather below.
-      }
+      if (decomp_probes_.empty() || owned_stations_.empty()) { return; }
 
       const int N = fault_geom_.NumLocalFaultDOFs();
-      MFEM_ASSERT(traction_stress.Size() == 2 * N,
-                  "traction_stress size mismatch");
-      MFEM_ASSERT(traction_correction.Size() == 2 * N,
-                  "traction_correction size mismatch");
-
-      Vector local_stress_dip(N), local_stress_strike(N);
-      Vector local_corr_dip(N), local_corr_strike(N);
+      Vector sd(N), ss(N), cd(N), cs(N);
       for (int i = 0; i < N; i++)
       {
-         local_stress_dip(i) = traction_stress(2 * i + 0);
-         local_stress_strike(i) = traction_stress(2 * i + 1);
-         local_corr_dip(i) = traction_correction(2 * i + 0);
-         local_corr_strike(i) = traction_correction(2 * i + 1);
+         sd(i) = traction_stress(2*i);
+         ss(i) = traction_stress(2*i+1);
+         cd(i) = traction_correction(2*i);
+         cs(i) = traction_correction(2*i+1);
       }
 
-      Vector g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike;
-      fault_geom_.GatherToRoot(local_stress_dip, g_stress_dip);
-      fault_geom_.GatherToRoot(local_stress_strike, g_stress_strike);
-      fault_geom_.GatherToRoot(local_corr_dip, g_corr_dip);
-      fault_geom_.GatherToRoot(local_corr_strike, g_corr_strike);
-
-      if (mpi_ctx_.IsRoot() && bench_out_)
+      for (int idx = 0; idx < static_cast<int>(owned_stations_.size()); idx++)
       {
-         if (!dedup_face_indices_.empty())
-         {
-            Vector d_sd, d_ss, d_cd, d_cs;
-            auto dedup = [&](const Vector &raw, Vector &out) {
-               FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-                  raw, dedup_face_indices_, nbf_per_face_, out);
-            };
-            dedup(g_stress_dip, d_sd);
-            dedup(g_stress_strike, d_ss);
-            dedup(g_corr_dip, d_cd);
-            dedup(g_corr_strike, d_cs);
-            bench_out_->WriteTractionDecompositionFromGlobalData(
-               time, d_sd, d_ss, d_cd, d_cs);
-         }
-         else
-         {
-            bench_out_->WriteTractionDecompositionFromGlobalData(
-               time, g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike);
-         }
+         int s = owned_stations_[idx];
+         real_t tsd = -local_interp_->EvaluateScalar(sd, s) / 1e6;
+         real_t tss = -local_interp_->EvaluateScalar(ss, s) / 1e6;
+         real_t tcd = -local_interp_->EvaluateScalar(cd, s) / 1e6;
+         real_t tcs = -local_interp_->EvaluateScalar(cs, s) / 1e6;
+
+         std::vector<real_t> row = {
+            time, tss, tsd, tcs, tcd, tss + tcs, tsd + tcd
+         };
+         decomp_probes_[idx]->WriteStep(row);
       }
    }
 
-   /// Write station-level jump residual at the current time.
-   ///
-   /// Input is a local interleaved residual field [2*N_local]:
-   ///   jump_residual = [[u]] - delta projected into local [dip, strike]
    void WriteJumpResidual(real_t time, const Vector &jump_residual)
    {
-      if (!bench_out_ && !mpi_ctx_.IsRoot())
-      {
-         // Non-root still participates in gather below.
-      }
+      if (jump_res_probes_.empty() || owned_stations_.empty()) { return; }
 
       const int N = fault_geom_.NumLocalFaultDOFs();
-      MFEM_ASSERT(jump_residual.Size() == 2 * N,
-                  "jump_residual size mismatch");
-
-      Vector local_res_dip(N), local_res_strike(N);
+      Vector rd(N), rs(N);
       for (int i = 0; i < N; i++)
       {
-         local_res_dip(i) = jump_residual(2 * i + 0);
-         local_res_strike(i) = jump_residual(2 * i + 1);
+         rd(i) = jump_residual(2*i);
+         rs(i) = jump_residual(2*i+1);
       }
 
-      Vector g_res_dip, g_res_strike;
-      fault_geom_.GatherToRoot(local_res_dip, g_res_dip);
-      fault_geom_.GatherToRoot(local_res_strike, g_res_strike);
-
-      if (mpi_ctx_.IsRoot() && bench_out_)
+      for (int idx = 0; idx < static_cast<int>(owned_stations_.size()); idx++)
       {
-         if (!dedup_face_indices_.empty())
-         {
-            Vector d_rd, d_rs;
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               g_res_dip, dedup_face_indices_, nbf_per_face_, d_rd);
-            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
-               g_res_strike, dedup_face_indices_, nbf_per_face_, d_rs);
-            bench_out_->WriteJumpResidualFromGlobalData(
-               time, d_rd, d_rs);
-         }
-         else
-         {
-            bench_out_->WriteJumpResidualFromGlobalData(
-               time, g_res_dip, g_res_strike);
-         }
+         int s = owned_stations_[idx];
+         real_t res_d = local_interp_->EvaluateScalar(rd, s);
+         real_t res_s = local_interp_->EvaluateScalar(rs, s);
+         real_t res_mag = std::sqrt(res_d*res_d + res_s*res_s);
+
+         std::vector<real_t> row = { time, res_s, res_d, res_mag };
+         jump_res_probes_[idx]->WriteStep(row);
       }
    }
 
-   /// @brief Force a write at the current state (always flushes).
    void ForceWrite(real_t time, const Vector &state,
                    const RateStateFaultOperator<ParMesh, 2> &fault,
                    const Vector &traction, real_t global_V_max)
@@ -370,24 +358,40 @@ public:
       Flush();
    }
 
-   /// Flush all output files.
    void Flush()
    {
-      if (mpi_ctx_.IsRoot() && bench_out_) { bench_out_->Flush(); }
+      for (auto &p : probes_) { p->Flush(); }
+      for (auto &p : decomp_probes_) { p->Flush(); }
+      for (auto &p : jump_res_probes_) { p->Flush(); }
    }
 
-   /// Close all output files.
    void Close()
    {
-      if (mpi_ctx_.IsRoot() && bench_out_) { bench_out_->Close(); }
+      for (auto &p : probes_) { p->Close(); }
+      for (auto &p : decomp_probes_) { p->Close(); }
+      for (auto &p : jump_res_probes_) { p->Close(); }
    }
 
 private:
    FaultGeometry<ParMesh> &fault_geom_;
    MPIContext &mpi_ctx_;
-   int nbf_per_face_ = 1;
-   std::vector<int> dedup_face_indices_;  // Face dedup mapping (root only)
-   std::unique_ptr<BP5BenchmarkOutput<Mesh>> bench_out_;
+   std::string prefix_;
+   std::vector<Station> stations_;
+   real_t eta_ = 0.0;
+
+   // Distributed ownership: indices into stations_ that this rank owns
+   std::vector<int> owned_stations_;
+
+   // Local interpolator and tau_pre (used only for owned stations)
+   std::unique_ptr<Probe2DInterpolator> local_interp_;
+   Vector local_tau_pre_dip_;
+   Vector local_tau_pre_strike_;
+
+   // Per-owned-station output files
+   std::vector<std::unique_ptr<ProbeOutput>> probes_;
+   std::vector<std::unique_ptr<ProbeOutput>> decomp_probes_;
+   std::vector<std::unique_ptr<ProbeOutput>> jump_res_probes_;
+
    real_t last_write_time_;
 };
 

@@ -956,17 +956,13 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // I/O: gather global fault coords and tau_pre for parallel output
+   // I/O: distributed probe output (Tandem-style)
    // =========================================================================
+   // Each rank uses LOCAL fault coords for probe location.
+   // No global gather needed — ownership resolved via MPI_Allreduce.
    Vector local_x2, local_x3;
    domain.GetFaultCoords2D(local_x2, local_x3);
 
-   // Gather coordinates and tau_pre to root
-   Vector global_x2, global_x3;
-   fault_geom.GatherToRoot(local_x2, global_x2);
-   fault_geom.GatherToRoot(local_x3, global_x3);
-
-   // Split and gather tau_pre components
    int N_local = fault_geom.NumLocalFaultDOFs();
    Vector local_tp_dip(N_local), local_tp_strike(N_local);
    const Vector &local_tau_pre = fault_geom.GetTauPre();
@@ -974,16 +970,6 @@ int main(int argc, char *argv[])
    {
       local_tp_dip(i) = local_tau_pre(2 * i);
       local_tp_strike(i) = local_tau_pre(2 * i + 1);
-   }
-
-   Vector global_tp_dip, global_tp_strike;
-   fault_geom.GatherToRoot(local_tp_dip, global_tp_dip);
-   fault_geom.GatherToRoot(local_tp_strike, global_tp_strike);
-
-   if (mpi.IsRoot())
-   {
-      std::cout << "  Global fault coords gathered: "
-                << global_x2.Size() << " DOFs\n";
    }
 
    // Clean up old output files
@@ -1000,11 +986,10 @@ int main(int argc, char *argv[])
 
    ParallelBP5BenchmarkOutput bench_out(
       full_prefix, params, stations, fault_geom, mpi,
-      global_x2, global_x3, global_tp_dip, global_tp_strike,
+      local_x2, local_x3, local_tp_dip, local_tp_strike,
       domain.GetNbfPerFace(), face_basis_type);
 
-   // v56: Print station mapping diagnostics on root
-   bench_out.PrintDiagnostics(global_x2, global_x3);
+   bench_out.PrintDiagnostics(local_x2, local_x3);
 
    if (diag_station_traction_decomp)
    {
@@ -1085,6 +1070,11 @@ int main(int argc, char *argv[])
          fault_geom.GatherToRoot(local_trac_dip, global_trac_dip);
          fault_geom.GatherToRoot(local_trac_strike, global_trac_strike);
 
+         // Gather coords for this diagnostic only
+         Vector diag_gx2, diag_gx3;
+         fault_geom.GatherToRoot(local_x2, diag_gx2);
+         fault_geom.GatherToRoot(local_x3, diag_gx3);
+
          if (mpi.IsRoot())
          {
             // Analytical estimate: tau = mu*Vp*1yr/(2*Lx)
@@ -1104,8 +1094,8 @@ int main(int argc, char *argv[])
                real_t best_dist = 1e30;
                for (int j = 0; j < M; j++)
                {
-                  real_t d = std::abs(global_x2(j)) +
-                             std::abs(global_x3(j) - target_z);
+                  real_t d = std::abs(diag_gx2(j)) +
+                             std::abs(diag_gx3(j) - target_z);
                   if (d < best_dist) { best_dist = d; best = j; }
                }
                if (best >= 0)
