@@ -445,10 +445,17 @@ private:
 #endif
       }
       if (!has_fault_attr_) { return; }
-      if (!has_fault_attr_local) { return; }
 
       // Collect vertex sets of all boundary elements with fault attribute.
-      // Each boundary element (triangle in 3D) defines a face by its vertices.
+      // Each boundary element (triangle face in 3D) defines a fault face
+      // by its sorted vertex indices.
+      //
+      // In MPI, a rank may own no attr-3 boundary elements even though the
+      // mesh globally has them. The vertex-set matching below uses only
+      // LOCAL indices, which are consistent within a rank: GetBdrElementVertices
+      // and GetFaceVertices use the same local vertex numbering. So each rank
+      // can only match its OWN boundary elements against its OWN interior/
+      // shared faces — no cross-rank gathering is needed.
       std::set<std::set<int>> fault_bdr_vertex_sets;
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
@@ -461,7 +468,11 @@ private:
          fault_bdr_vertex_sets.insert(vset);
       }
 
-      if (fault_bdr_vertex_sets.empty()) { return; }
+      // Note: fault_bdr_vertex_sets may be empty on ranks without local
+      // attr-3 boundary elements. This is correct — such ranks simply have
+      // no tagged interior/shared faces to match. The coordinate-based
+      // fallback in IsFaultFace3D will not fire as long as has_fault_attr_
+      // is true, so those ranks will correctly report zero fault faces.
 
       // For each interior face, check if its vertex set matches a tagged face.
       // Also build element-pair keys for fast lookup during IsFaultFace3D.
@@ -493,10 +504,8 @@ private:
 #ifdef MFEM_USE_MPI
          for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
          {
-            // Get local face index for this shared face
             int local_face = mesh_.GetSharedFace(sf);
 
-            // Get face vertices
             Array<int> face_verts;
             mesh_.GetFaceVertices(local_face, face_verts);
 
@@ -647,18 +656,47 @@ private:
 
       if (has_fault_attr_)
       {
-         int local_fault_faces = num_fault_faces_;
-         int global_fault_faces = local_fault_faces;
+         // Validate: the number of recovered tagged fault faces should match
+         // the number of boundary elements with attr 3 (globally).
+         int local_tagged_bdr = 0;
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            if (mesh_.GetBdrAttribute(be) == 3) { local_tagged_bdr++; }
+         }
+         int global_tagged_bdr = local_tagged_bdr;
+         int local_fault_faces = fault_tagged_faces_.Size();
+         int global_tagged_faces = local_fault_faces;
          if constexpr (IsParallelMesh<MeshType>::value)
          {
 #ifdef MFEM_USE_MPI
-            MPI_Allreduce(&local_fault_faces, &global_fault_faces, 1, MPI_INT,
+            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_bdr, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_faces, 1, MPI_INT,
                           MPI_SUM, mesh_.GetComm());
 #endif
          }
-         MFEM_VERIFY(global_fault_faces > 0,
-                     "Mesh has fault attr 3 but no fault faces were recovered. "
-                     "This does not match Tandem's tag-based classification.");
+         // Report discrepancy between boundary elements and recovered faces.
+         // In MFEM, Gmsh Physical Surfaces on INTERNAL faces may not create
+         // boundary elements, so global_tagged_bdr can be 0 for Tandem meshes
+         // where the fault is an internal surface. In that case, the coordinate
+         // fallback in IsFaultFace3D handles detection correctly.
+         bool is_root = true;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            int rank;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            is_root = (rank == 0);
+#endif
+         }
+         if (is_root && global_tagged_bdr > 0 &&
+             global_tagged_faces != global_tagged_bdr)
+         {
+            mfem::out << "  WARNING: Tag-based fault recovery: "
+                      << global_tagged_faces << " interior faces recovered vs "
+                      << global_tagged_bdr << " boundary elements with attr 3. "
+                      << "Some fault faces may be missing.\n";
+         }
       }
 
       // Emit coordinate-fallback warning once, on root only

@@ -55,8 +55,7 @@ ibrun ./seas_bp5_full \
       --order 1 \
       --dg-method IP \
       --tandem-time-stepping \
-      --solver mumps-blr \
-      --blr-tol 1e-12 \
+      --solver mumps \
       --check-residual \
       --tfinal 5.68e10 \
       --ref-dir bp5/benchmark_data \

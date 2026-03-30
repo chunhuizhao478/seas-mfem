@@ -447,9 +447,9 @@ public:
             real_t sigma_n_eff = sigma_n_bp5_;
             if (normal_traction)
             {
+               // Tandem DieterichRuinaBase.h:87: snAbs = -sn + SnPre
+               // No floor — match Tandem exactly.
                sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
-               // Safety: ensure sigma_n stays positive (physical requirement)
-               sigma_n_eff = std::max(sigma_n_eff, 0.1 * sigma_n_bp5_);
             }
 
             real_t V_vec[2];
