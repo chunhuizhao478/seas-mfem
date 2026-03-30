@@ -50,6 +50,9 @@
 //   --petsc-ts-options FILE    PETSc options file (default: built-in Tandem rk45)
 
 #include "mfem.hpp"
+#ifdef MFEM_USE_PETSC
+#include "petsc.h"
+#endif
 #include "../../solver/seas_operator.hpp"
 #include "../../solver/time_stepper.hpp"
 #include "../../domain/elasticity_operator.hpp"
