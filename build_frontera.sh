@@ -77,6 +77,7 @@ resolve_petsc_dir() {
 PETSC_DIR_RESOLVED="$(resolve_petsc_dir || true)"
 USE_MUMPS_RESOLVED="YES"
 MUMPS_OPT_RESOLVED="-I${TACC_MUMPS_INC:-}"
+PETSC_OPT_RESOLVED=""
 
 # Verify modules
 echo "=== Checking environment ==="
@@ -106,6 +107,19 @@ if [ -n "${TACC_PETSC_LIB:-}" ]; then
 fi
 if [ -n "${TACC_PETSC_INC:-}" ]; then
     echo "  TACC_PETSC_INC = ${TACC_PETSC_INC}"
+fi
+
+# Frontera's PETSc modules do not always expose include flags in the exact form
+# MFEM's make-based PETSc autodetection expects, especially for older PETSc
+# trees such as 3.15. Provide the PETSc include flags explicitly so headers like
+# petscversion.h and petscconf.h are always found during MFEM compilation.
+if [ -n "${TACC_PETSC_INC:-}" ] && [ -f "${TACC_PETSC_INC}/petscversion.h" ]; then
+    PETSC_OPT_RESOLVED="-I${TACC_PETSC_INC}"
+elif [ -f "${PETSC_DIR_RESOLVED}/include/petscversion.h" ]; then
+    PETSC_OPT_RESOLVED="-I${PETSC_DIR_RESOLVED}/include"
+else
+    echo "ERROR: could not locate petscversion.h under TACC_PETSC_INC or PETSC_DIR."
+    exit 1
 fi
 
 # Frontera's mumps/5.3 module is installed under a PETSc 3.15 tree. That is
@@ -147,6 +161,7 @@ CONFIG_ARGS=(
   MFEM_USE_MUMPS="${USE_MUMPS_RESOLVED}"
   MFEM_USE_PETSC=YES
   PETSC_DIR="${PETSC_DIR_RESOLVED}"
+  PETSC_OPT="${PETSC_OPT_RESOLVED}"
   HYPRE_OPT="-I${TACC_HYPRE_INC}"
   HYPRE_LIB="-L${TACC_HYPRE_LIB} -Wl,-rpath,${TACC_HYPRE_LIB} -lHYPRE"
   METIS_OPT="-I${TACC_PARMETIS_INC} -DMETIS_EXPORT="
