@@ -414,15 +414,16 @@ private:
 
    /// Build tag-based fault face lookup from mesh boundary element attributes.
    ///
-   /// Tandem mesh: tag 3 = Fault. Only faces with this tag are treated
-   /// as fault faces.
+   /// Uses MFEM's direct GetBdrElementFaceIndex(be) to map each attr-3
+   /// boundary element to its face index in O(1), avoiding fragile vertex-set
+   /// matching. This is the closest MFEM equivalent to Tandem's direct
+   /// facet-tag import (GlobalSimplexMeshBuilder.cpp:72).
    void BuildFaultTaggedFaces()
    {
       fault_tagged_faces_.SetSize(0);
       fault_face_keys_.clear();
       fault_shared_tagged_.clear();
 
-      // Only support Tandem fault attr 3
       int fault_attr = 3;
       bool has_fault_attr_local = false;
       for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
@@ -446,87 +447,62 @@ private:
       }
       if (!has_fault_attr_) { return; }
 
-      // Collect vertex sets of all boundary elements with fault attribute.
-      // Each boundary element (triangle face in 3D) defines a fault face
-      // by its sorted vertex indices.
-      //
-      // In MPI, a rank may own no attr-3 boundary elements even though the
-      // mesh globally has them. The vertex-set matching below uses only
-      // LOCAL indices, which are consistent within a rank: GetBdrElementVertices
-      // and GetFaceVertices use the same local vertex numbering. So each rank
-      // can only match its OWN boundary elements against its OWN interior/
-      // shared faces — no cross-rank gathering is needed.
-      std::set<std::set<int>> fault_bdr_vertex_sets;
-      for (int be = 0; be < mesh_.GetNBE(); be++)
-      {
-         if (mesh_.GetBdrAttribute(be) != fault_attr) { continue; }
-
-         Array<int> verts;
-         mesh_.GetBdrElementVertices(be, verts);
-
-         std::set<int> vset(verts.begin(), verts.end());
-         fault_bdr_vertex_sets.insert(vset);
-      }
-
-      // Note: fault_bdr_vertex_sets may be empty on ranks without local
-      // attr-3 boundary elements. This is correct — such ranks simply have
-      // no tagged interior/shared faces to match. The coordinate-based
-      // fallback in IsFaultFace3D will not fire as long as has_fault_attr_
-      // is true, so those ranks will correctly report zero fault faces.
-
-      // For each interior face, check if its vertex set matches a tagged face.
-      // Also build element-pair keys for fast lookup during IsFaultFace3D.
-      int num_faces = mesh_.GetNumFaces();
-      for (int f = 0; f < num_faces; f++)
-      {
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(f);
-         if (FTr == nullptr) { continue; }
-
-         Array<int> face_verts;
-         mesh_.GetFaceVertices(f, face_verts);
-
-         std::set<int> vset(face_verts.begin(), face_verts.end());
-         if (fault_bdr_vertex_sets.count(vset) > 0)
-         {
-            fault_tagged_faces_.Append(f);
-
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
-            fault_face_keys_.insert(key);
-         }
-      }
-
-      // Also tag shared faces in parallel using vertex matching
+      // Build reverse map: local face index → shared face index.
+      // Needed to tag shared faces directly from boundary elements.
+      std::unordered_map<int, int> lface_to_sface;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
          for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
          {
-            int local_face = mesh_.GetSharedFace(sf);
-
-            Array<int> face_verts;
-            mesh_.GetFaceVertices(local_face, face_verts);
-
-            std::set<int> vset(face_verts.begin(), face_verts.end());
-            if (fault_bdr_vertex_sets.count(vset) > 0)
-            {
-               fault_shared_tagged_.insert(sf);
-            }
+            lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
          }
 #endif
+      }
+
+      // Collect fault face indices directly from boundary elements using
+      // GetBdrElementFaceIndex — O(1) per boundary element, no vertex
+      // matching. Each attr-3 boundary element maps to exactly one face.
+      std::set<int> fault_face_set;
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         if (mesh_.GetBdrAttribute(be) != fault_attr) { continue; }
+         int face_idx = mesh_.GetBdrElementFaceIndex(be);
+         fault_face_set.insert(face_idx);
+      }
+
+      // Classify each tagged face as interior or shared
+      for (int face_idx : fault_face_set)
+      {
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(face_idx);
+         if (FTr != nullptr)
+         {
+            // Interior face: both adjacent elements are local
+            fault_tagged_faces_.Append(face_idx);
+            int e1 = FTr->Elem1No;
+            int e2 = FTr->Elem2No;
+            long key = (long)std::min(e1, e2) * mesh_.GetNE()
+                       + std::max(e1, e2);
+            fault_face_keys_.insert(key);
+         }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            // Check if this face is a shared face at a partition boundary
+            auto it = lface_to_sface.find(face_idx);
+            if (it != lface_to_sface.end())
+            {
+               fault_shared_tagged_.insert(it->second);
+            }
+         }
       }
    }
 
    /// Build Dirichlet interior face list from mesh boundary element attributes.
    ///
-   /// In Tandem's BP5 mesh, Physical Surface(5) includes ALL far-field faces,
-   /// including Y=0 faces outside the fault region. These are interior faces
-   /// in MFEM (shared by two volume elements) and are missed by the standard
-   /// boundary element loop in AssembleDirichletLoading(). This method
-   /// identifies them using the same vertex-matching approach as
-   /// BuildFaultTaggedFaces(), but for attr 5, excluding fault faces.
+   /// Uses the same direct GetBdrElementFaceIndex approach as
+   /// BuildFaultTaggedFaces. For attr 5 (far-field Dirichlet), excluding
+   /// faces already tagged as fault.
    void BuildDirichletInteriorFaces()
    {
       dirichlet_interior_faces_.SetSize(0);
@@ -544,66 +520,46 @@ private:
       }
       if (!has_dirichlet_attr) { return; }
 
-      // Collect vertex sets of all boundary elements with Dirichlet attribute.
-      std::set<std::set<int>> diri_bdr_vertex_sets;
-      for (int be = 0; be < mesh_.GetNBE(); be++)
-      {
-         if (mesh_.GetBdrAttribute(be) != dirichlet_attr) { continue; }
-
-         Array<int> verts;
-         mesh_.GetBdrElementVertices(be, verts);
-
-         std::set<int> vset(verts.begin(), verts.end());
-         diri_bdr_vertex_sets.insert(vset);
-      }
-
-      if (diri_bdr_vertex_sets.empty()) { return; }
-
-      // For each interior face, check if its vertex set matches a Dirichlet
-      // boundary element AND is NOT a fault face.
-      int num_faces = mesh_.GetNumFaces();
-      for (int f = 0; f < num_faces; f++)
-      {
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(f);
-         if (FTr == nullptr) { continue; }
-
-         Array<int> face_verts;
-         mesh_.GetFaceVertices(f, face_verts);
-
-         std::set<int> vset(face_verts.begin(), face_verts.end());
-         if (diri_bdr_vertex_sets.count(vset) > 0)
-         {
-            // Exclude faces that are already tagged as fault faces
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
-            if (fault_face_keys_.count(key) > 0) { continue; }
-
-            dirichlet_interior_faces_.Append(f);
-         }
-      }
-
-      // Also tag shared faces in parallel
+      // Build reverse map: local face → shared face index
+      std::unordered_map<int, int> lface_to_sface;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
          for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
          {
-            int local_face = mesh_.GetSharedFace(sf);
-
-            Array<int> face_verts;
-            mesh_.GetFaceVertices(local_face, face_verts);
-
-            std::set<int> vset(face_verts.begin(), face_verts.end());
-            if (diri_bdr_vertex_sets.count(vset) > 0)
-            {
-               // Exclude fault shared faces
-               if (fault_shared_tagged_.count(sf) > 0) { continue; }
-               dirichlet_shared_faces_.Append(sf);
-            }
+            lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
          }
 #endif
+      }
+
+      // Direct face lookup from boundary elements
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         if (mesh_.GetBdrAttribute(be) != dirichlet_attr) { continue; }
+         int face_idx = mesh_.GetBdrElementFaceIndex(be);
+
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(face_idx);
+         if (FTr != nullptr)
+         {
+            // Exclude fault faces by element-pair key
+            int e1 = FTr->Elem1No;
+            int e2 = FTr->Elem2No;
+            long key = (long)std::min(e1, e2) * mesh_.GetNE()
+                       + std::max(e1, e2);
+            if (fault_face_keys_.count(key) > 0) { continue; }
+
+            dirichlet_interior_faces_.Append(face_idx);
+         }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            auto it = lface_to_sface.find(face_idx);
+            if (it != lface_to_sface.end())
+            {
+               if (fault_shared_tagged_.count(it->second) > 0) { continue; }
+               dirichlet_shared_faces_.Append(it->second);
+            }
+         }
       }
    }
 
