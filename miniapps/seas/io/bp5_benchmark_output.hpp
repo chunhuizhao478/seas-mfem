@@ -297,7 +297,8 @@ public:
         stations_(stations),
         interpolator_(fault_x2, fault_x3, stations,
                       nbf_per_face, face_basis_type),
-        last_write_time_(-1e30)
+        last_write_time_(-1e30),
+        eta_(params.eta())
    {
       // Store per-DOF tau_pre components for WriteFromGlobalData
       int n = fault_x2.Size();
@@ -478,14 +479,16 @@ public:
          real_t V_strike =
             std::abs(interpolator_.EvaluateScalar(global_V_strike, s));
 
-         // Negate for SCEC output: internal convention uses negative
-         // for right-lateral, SCEC expects positive.
+         // v55: tau_hat = tau_pre + elastic_traction + eta*V (Tandem convention)
+         // V is signed from GetSlipRate; eta*V uses the raw signed values.
          real_t tau_dip =
             -(interpolator_.EvaluateScalar(tau_pre_dip_, s) +
-              interpolator_.EvaluateScalar(global_trac_dip, s)) / 1e6;
+              interpolator_.EvaluateScalar(global_trac_dip, s) +
+              eta_ * interpolator_.EvaluateScalar(global_V_dip, s)) / 1e6;
          real_t tau_strike =
             -(interpolator_.EvaluateScalar(tau_pre_strike_, s) +
-              interpolator_.EvaluateScalar(global_trac_strike, s)) / 1e6;
+              interpolator_.EvaluateScalar(global_trac_strike, s) +
+              eta_ * interpolator_.EvaluateScalar(global_V_strike, s)) / 1e6;
 
          real_t th = interpolator_.EvaluateScalar(global_theta, s);
 
@@ -640,6 +643,9 @@ private:
    Vector tau_pre_dip_;
    Vector tau_pre_strike_;
 
+   // v55: Radiation damping coefficient for tau_hat output (matching Tandem)
+   real_t eta_ = 0.0;
+
    /// Write one row per station from interleaved data (serial path).
    void WriteRow(real_t time,
                  const Vector &slip,       // [2*N interleaved]
@@ -666,15 +672,20 @@ private:
          real_t V_strike =
             std::abs(interpolator_.EvaluateInterleaved(slip_rate, s, 1));
 
-         // Total shear stress = tau_pre + elastic_traction
+         // v55: Total shear stress = tau_hat = tau_pre + elastic_traction + eta*V
+         // Matches Tandem's DieterichRuinaBase::tau_hat (line 76):
+         //   tau_hat = tau + TauPre + eta * V
          // Negate for SCEC output: internal convention uses negative
          // for right-lateral, SCEC expects positive.
+         // V is signed (from GetSlipRate), eta*V uses absolute values.
          real_t tau_dip =
             -(interpolator_.EvaluateInterleaved(tau_pre, s, 0) +
-              interpolator_.EvaluateInterleaved(traction, s, 0)) / 1e6;
+              interpolator_.EvaluateInterleaved(traction, s, 0) +
+              eta_ * interpolator_.EvaluateInterleaved(slip_rate, s, 0)) / 1e6;
          real_t tau_strike =
             -(interpolator_.EvaluateInterleaved(tau_pre, s, 1) +
-              interpolator_.EvaluateInterleaved(traction, s, 1)) / 1e6;
+              interpolator_.EvaluateInterleaved(traction, s, 1) +
+              eta_ * interpolator_.EvaluateInterleaved(slip_rate, s, 1)) / 1e6;
 
          real_t th = interpolator_.EvaluateScalar(theta, s);
 
