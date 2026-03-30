@@ -2181,6 +2181,7 @@ void ComputeExplicitIPFaceTractionNodal(
    const int ndof1 = fe1.GetDof();
    const int ndof2 = fe2.GetDof();
    const int nbf = slip_face.Size() / 2;
+   const auto &basis = fault_basis.GetBasis(fault_face_idx);
    const int face_order = std::max(fe1.GetOrder(), fe2.GetOrder());
    const IntegrationRule &ir = IntRules.Get(FTr.FaceGeom, 2 * face_order + 1);
    const int nqp = ir.GetNPoints();
@@ -2189,27 +2190,55 @@ void ComputeExplicitIPFaceTractionNodal(
    MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
    MFEM_ASSERT(fq.NumQuadPoints() == nqp, "Quadrature point mismatch");
 
-   Vector delta_u_nodal(dim * nbf);
-   for (int kk = 0; kk < nbf; kk++)
+   const real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+   Vector delta_u_quad;
+   if (!basis.qp_data.empty())
    {
-      real_t slip_local[2] = {slip_face(2 * kk), slip_face(2 * kk + 1)};
-      real_t du[3];
-      fault_basis.EmbedSlip(fault_face_idx, slip_local, du);
-      for (int c = 0; c < dim; c++)
+      Vector slip_tang(2 * nbf);
+      for (int kk = 0; kk < nbf; kk++)
       {
-         delta_u_nodal(c * nbf + kk) = du[c];
+         slip_tang(0 * nbf + kk) = slip_face(2 * kk);
+         slip_tang(1 * nbf + kk) = slip_face(2 * kk + 1);
+      }
+
+      Vector slip_tang_q;
+      fq.InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+      delta_u_quad.SetSize(dim * nqp);
+      for (int q = 0; q < nqp; q++)
+      {
+         real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
+         real_t du[3];
+         fault_basis.EmbedSlipQP(fault_face_idx, q, sl_q, du);
+         for (int c = 0; c < dim; c++)
+         {
+            delta_u_quad(c * nqp + q) = sign * du[c];
+         }
       }
    }
-
-   Vector delta_u_quad;
-   fq.InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+   else
+   {
+      Vector delta_u_nodal(dim * nbf);
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         real_t slip_local[2] = {slip_face(2 * kk), slip_face(2 * kk + 1)};
+         real_t du[3];
+         fault_basis.EmbedSlip(fault_face_idx, slip_local, du);
+         for (int c = 0; c < dim; c++)
+         {
+            delta_u_nodal(c * nbf + kk) = du[c];
+         }
+      }
+      fq.InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+      for (int j = 0; j < delta_u_quad.Size(); j++)
+      {
+         delta_u_quad(j) *= sign;
+      }
+   }
 
    const IntegrationPoint &ip_center = Geometries.GetCenter(FTr.GetGeometryType());
    FTr.SetAllIntPoints(&ip_center);
    Vector nor(dim);
    CalcOrtho(FTr.Jacobian(), nor);
-   const real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
-
    const real_t face_area = nor.Norml2();
    const real_t vol1 = FTr.Elem1->Weight();
    const real_t vol2 = FTr.Elem2->Weight();
@@ -2232,6 +2261,8 @@ void ComputeExplicitIPFaceTractionNodal(
    T_stress_quad = 0.0;
    Vector T_corr_quad(dim * nqp);
    T_corr_quad = 0.0;
+   Vector nl_q(nqp);
+   nl_q = 0.0;
 
    for (int q = 0; q < nqp; q++)
    {
@@ -2239,6 +2270,12 @@ void ComputeExplicitIPFaceTractionNodal(
       FTr.SetAllIntPoints(&fip);
       const IntegrationPoint &eip1 = FTr.GetElement1IntPoint();
       const IntegrationPoint &eip2 = FTr.GetElement2IntPoint();
+      Vector nor_q(dim);
+      CalcOrtho(FTr.Jacobian(), nor_q);
+      const real_t nl = nor_q.Norml2();
+      nl_q(q) = nl;
+      Vector n_hat(dim);
+      for (int d = 0; d < dim; d++) { n_hat(d) = nor_q(d) / nl; }
 
       DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
       fe1.CalcDShape(eip1, dshape1_ref);
@@ -2279,7 +2316,7 @@ void ComputeExplicitIPFaceTractionNodal(
                     + (grad1(2, 2) + grad2(2, 2)));
             const real_t tr_contrib = (ci == cj) ? lambda * tr_avg : 0.0;
             const real_t stress_ij = tr_contrib + 2.0 * mu * eps_ij;
-            T_stress_q[ci] += stress_ij * fault_basis.GetBasis(fault_face_idx).normal[cj];
+            T_stress_q[ci] += stress_ij * n_hat(cj);
          }
       }
 
@@ -2294,7 +2331,7 @@ void ComputeExplicitIPFaceTractionNodal(
          for (int k = 0; k < ndof1; k++) { u1q += s1q(k) * u1_all(c * ndof1 + k); }
          for (int k = 0; k < ndof2; k++) { u2q += s2q(k) * u2_all(c * ndof2 + k); }
 
-         const real_t jump_c = (u1q - u2q) - sign * delta_u_quad(c * nqp + q);
+         const real_t jump_c = (u1q - u2q) - delta_u_quad(c * nqp + q);
          const real_t correction_q = -penalty_ip * sign * jump_c;
          corr_neg_q[c] = -correction_q;
          T_quad(c * nqp + q) = T_stress_q[c] - correction_q;
@@ -2303,53 +2340,45 @@ void ComputeExplicitIPFaceTractionNodal(
       }
    }
 
-   Vector T_nodal, T_stress_nodal, T_corr_nodal;
-   fq.GalerkinProject(dim, T_quad, T_nodal);
-   fq.GalerkinProject(dim, T_stress_quad, T_stress_nodal);
-   fq.GalerkinProject(dim, T_corr_quad, T_corr_nodal);
-
-   traction_local.SetSize(2 * nbf);
-   traction_local = 0.0;
+   real_t tangents[2][3] = {{basis.tangent1[0], basis.tangent1[1], basis.tangent1[2]},
+                            {basis.tangent2[0], basis.tangent2[1], basis.tangent2[2]}};
+   const auto *qp_data = basis.qp_data.empty() ? nullptr : &basis.qp_data;
+   Vector traction_local_blocked;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 2, T_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
+      basis.sign_flipped, traction_local_blocked, qp_data);
    if (traction_stress_local)
    {
+      Vector traction_stress_blocked;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, 2, T_stress_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
+         basis.sign_flipped, traction_stress_blocked, qp_data);
       traction_stress_local->SetSize(2 * nbf);
-      *traction_stress_local = 0.0;
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         (*traction_stress_local)(2 * kk) = traction_stress_blocked(0 * nbf + kk);
+         (*traction_stress_local)(2 * kk + 1) = traction_stress_blocked(1 * nbf + kk);
+      }
    }
    if (traction_corr_local)
    {
+      Vector traction_corr_blocked;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, 2, T_corr_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
+         basis.sign_flipped, traction_corr_blocked, qp_data);
       traction_corr_local->SetSize(2 * nbf);
-      *traction_corr_local = 0.0;
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         (*traction_corr_local)(2 * kk) = traction_corr_blocked(0 * nbf + kk);
+         (*traction_corr_local)(2 * kk + 1) = traction_corr_blocked(1 * nbf + kk);
+      }
    }
 
+   traction_local.SetSize(2 * nbf);
    for (int kk = 0; kk < nbf; kk++)
    {
-      real_t T_k[3] = {T_nodal(0 * nbf + kk),
-                       T_nodal(1 * nbf + kk),
-                       T_nodal(2 * nbf + kk)};
-      real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
-                         T_stress_nodal(1 * nbf + kk),
-                         T_stress_nodal(2 * nbf + kk)};
-      real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
-                         T_corr_nodal(1 * nbf + kk),
-                         T_corr_nodal(2 * nbf + kk)};
-
-      real_t tau_local[2], tau_stress[2], tau_corr[2];
-      fault_basis.ProjectTraction(fault_face_idx, T_k, tau_local);
-      fault_basis.ProjectTraction(fault_face_idx, T_s_k, tau_stress);
-      fault_basis.ProjectTraction(fault_face_idx, T_c_k, tau_corr);
-
-      traction_local(2 * kk) = tau_local[0];
-      traction_local(2 * kk + 1) = tau_local[1];
-      if (traction_stress_local)
-      {
-         (*traction_stress_local)(2 * kk) = tau_stress[0];
-         (*traction_stress_local)(2 * kk + 1) = tau_stress[1];
-      }
-      if (traction_corr_local)
-      {
-         (*traction_corr_local)(2 * kk) = tau_corr[0];
-         (*traction_corr_local)(2 * kk + 1) = tau_corr[1];
-      }
+      traction_local(2 * kk) = traction_local_blocked(0 * nbf + kk);
+      traction_local(2 * kk + 1) = traction_local_blocked(1 * nbf + kk);
    }
 }
 
@@ -2624,11 +2653,13 @@ void TestIPTractionMatchesExplicitTandemFormP1()
       return;
    }
 
+   const int fi = 0;
    TEST_ASSERT(nbf == 3, "p=1 IP tet uses 3 fault DOFs");
+   TEST_ASSERT(!op.GetFaultBasis()->GetBasis(fi).qp_data.empty(),
+               "p=1 IP tet traction test uses per-QP fault basis data");
 
    Vector slip_bc(2 * ndofs);
    slip_bc = 0.0;
-   const int fi = 0;
    for (int kk = 0; kk < nbf; kk++)
    {
       const int dof_idx = fi * nbf + kk;

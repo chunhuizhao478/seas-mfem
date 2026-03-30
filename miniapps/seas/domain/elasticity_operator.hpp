@@ -3623,6 +3623,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          T_quad = 0.0;
          Vector T_stress_quad, T_corr_quad;
          Vector R_quad;
+         Vector nl_q_proj;
+         if (!basis.qp_data.empty())
+         {
+            nl_q_proj.SetSize(nqp);
+            nl_q_proj = 0.0;
+         }
          if (traction_stress_out || traction_correction_out)
          {
             T_stress_quad.SetSize(dim * nqp);
@@ -3643,6 +3649,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
             const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
             real_t wq = fip.weight;
+            if (!basis.qp_data.empty()) { nl_q_proj(q) = basis.qp_data[q].nl; }
+            Vector nor_q(dim), n_hat_q(dim);
+            CalcOrtho(FTr->Jacobian(), nor_q);
+            real_t nl_q_face = nor_q.Norml2();
+            for (int d = 0; d < dim; d++) { n_hat_q(d) = nor_q(d) / nl_q_face; }
 
             // {sigma . n_hat} at quadrature point q
             DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
@@ -3678,7 +3689,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                         + (grad1(1,1)+grad2(1,1))
                         + (grad1(2,2)+grad2(2,2)))) : 0.0;
                   real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
-                  T_stress_q[ci] += stress_ij * basis.normal[cj];
+                  T_stress_q[ci] += stress_ij * n_hat_q(cj);
                }
             }
 
@@ -3771,69 +3782,145 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             sum_wq += wq;
          }
 
-         // L2 project quad-point traction to per-DOF nodal values
-         // At nbf=1 (p=1): GalerkinProject = face average -> identical to old code
-         Vector T_nodal;
-         face_quad_->GalerkinProject(dim, T_quad, T_nodal);
-         Vector T_stress_nodal, T_corr_nodal;
-         Vector R_nodal;
-         if (traction_stress_out || traction_correction_out)
+         if (!basis.qp_data.empty())
          {
-            face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
-            face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
-         }
-         if (jump_residual_out)
-         {
-            face_quad_->GalerkinProject(dim, R_quad, R_nodal);
-         }
-
-         // Store per-DOF traction in local frame
-         for (int kk = 0; kk < nbf; kk++)
-         {
-            real_t T_k[3] = {T_nodal(0 * nbf + kk),
-                             T_nodal(1 * nbf + kk),
-                             T_nodal(2 * nbf + kk)};
-            real_t tau_local[2];
-            fault_basis_.ProjectTraction(fi, T_k, tau_local);
-            int dof_idx = fi * nbf_per_face_ + kk;
-            traction(2 * dof_idx)     = tau_local[0];
-            traction(2 * dof_idx + 1) = tau_local[1];
-            if (traction_stress_out || traction_correction_out)
+            real_t tangents[2][3] = {
+               {basis.tangent1[0], basis.tangent1[1], basis.tangent1[2]},
+               {basis.tangent2[0], basis.tangent2[1], basis.tangent2[2]}
+            };
+            Vector T_local_blocked, T_stress_blocked, T_corr_blocked, R_local_blocked;
+            DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+               dim, 2, T_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+               tangents, basis.sign_flipped, T_local_blocked, &basis.qp_data);
+            if (traction_stress_out)
             {
-               real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
-                                  T_stress_nodal(1 * nbf + kk),
-                                  T_stress_nodal(2 * nbf + kk)};
-               real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
-                                  T_corr_nodal(1 * nbf + kk),
-                                  T_corr_nodal(2 * nbf + kk)};
-               real_t tau_stress_local[2], tau_corr_local[2];
-               fault_basis_.ProjectTraction(fi, T_s_k, tau_stress_local);
-               fault_basis_.ProjectTraction(fi, T_c_k, tau_corr_local);
-               if (traction_stress_out)
-               {
-                  (*traction_stress_out)(2 * dof_idx) = tau_stress_local[0];
-                  (*traction_stress_out)(2 * dof_idx + 1) = tau_stress_local[1];
-               }
-               if (traction_correction_out)
-               {
-                  (*traction_correction_out)(2 * dof_idx) = tau_corr_local[0];
-                  (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
-               }
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 2, T_stress_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                  tangents, basis.sign_flipped, T_stress_blocked, &basis.qp_data);
+            }
+            if (traction_correction_out)
+            {
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 2, T_corr_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                  tangents, basis.sign_flipped, T_corr_blocked, &basis.qp_data);
             }
             if (jump_residual_out)
             {
-               real_t R_k[3] = {R_nodal(0 * nbf + kk),
-                                R_nodal(1 * nbf + kk),
-                                R_nodal(2 * nbf + kk)};
-               real_t res_local[2];
-               fault_basis_.ProjectTraction(fi, R_k, res_local);
-               (*jump_residual_out)(2 * dof_idx) = res_local[0];
-               (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 2, R_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                  tangents, basis.sign_flipped, R_local_blocked, &basis.qp_data);
             }
-            // v51: elastic normal traction for sigma_n feedback
-            if (normal_traction)
+
+            for (int kk = 0; kk < nbf; kk++)
             {
-               (*normal_traction)(dof_idx) = fault_basis_.NormalStress(fi, T_k);
+               int dof_idx = fi * nbf_per_face_ + kk;
+               traction(2 * dof_idx)     = T_local_blocked(0 * nbf + kk);
+               traction(2 * dof_idx + 1) = T_local_blocked(1 * nbf + kk);
+               if (traction_stress_out)
+               {
+                  (*traction_stress_out)(2 * dof_idx) = T_stress_blocked(0 * nbf + kk);
+                  (*traction_stress_out)(2 * dof_idx + 1) = T_stress_blocked(1 * nbf + kk);
+               }
+               if (traction_correction_out)
+               {
+                  (*traction_correction_out)(2 * dof_idx) = T_corr_blocked(0 * nbf + kk);
+                  (*traction_correction_out)(2 * dof_idx + 1) = T_corr_blocked(1 * nbf + kk);
+               }
+               if (jump_residual_out)
+               {
+                  (*jump_residual_out)(2 * dof_idx) = R_local_blocked(0 * nbf + kk);
+                  (*jump_residual_out)(2 * dof_idx + 1) = R_local_blocked(1 * nbf + kk);
+               }
+               if (normal_traction)
+               {
+                  real_t T_n = 0.0;
+                  real_t wn_sum = 0.0;
+                  const DenseMatrix &e_q = face_quad_->BasisAtQuadPoints();
+                  for (int q = 0; q < nqp; q++)
+                  {
+                     real_t nl = nl_q_proj(q);
+                     real_t wn = ir_trac.IntPoint(q).weight * nl * e_q(kk, q);
+                     const real_t *n_hat = basis.qp_data[q].normal;
+                     bool sf = basis.qp_data[q].sign_flipped;
+
+                     real_t T_dot_n = 0.0;
+                     for (int c = 0; c < dim; c++)
+                     {
+                        T_dot_n += T_quad(c * nqp + q) * n_hat[c];
+                     }
+                     if (sf) { T_dot_n = -T_dot_n; }
+
+                     T_n += wn * T_dot_n;
+                     wn_sum += wn;
+                  }
+                  if (std::abs(wn_sum) > 1e-30) { T_n /= wn_sum; }
+                  (*normal_traction)(dof_idx) = -T_n;
+               }
+            }
+         }
+         else
+         {
+            // L2 project quad-point traction to per-DOF nodal values
+            Vector T_nodal;
+            face_quad_->GalerkinProject(dim, T_quad, T_nodal);
+            Vector T_stress_nodal, T_corr_nodal;
+            Vector R_nodal;
+            if (traction_stress_out || traction_correction_out)
+            {
+               face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
+               face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
+            }
+            if (jump_residual_out)
+            {
+               face_quad_->GalerkinProject(dim, R_quad, R_nodal);
+            }
+
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               real_t T_k[3] = {T_nodal(0 * nbf + kk),
+                                T_nodal(1 * nbf + kk),
+                                T_nodal(2 * nbf + kk)};
+               real_t tau_local[2];
+               fault_basis_.ProjectTraction(fi, T_k, tau_local);
+               int dof_idx = fi * nbf_per_face_ + kk;
+               traction(2 * dof_idx)     = tau_local[0];
+               traction(2 * dof_idx + 1) = tau_local[1];
+               if (traction_stress_out || traction_correction_out)
+               {
+                  real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
+                                     T_stress_nodal(1 * nbf + kk),
+                                     T_stress_nodal(2 * nbf + kk)};
+                  real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
+                                     T_corr_nodal(1 * nbf + kk),
+                                     T_corr_nodal(2 * nbf + kk)};
+                  real_t tau_stress_local[2], tau_corr_local[2];
+                  fault_basis_.ProjectTraction(fi, T_s_k, tau_stress_local);
+                  fault_basis_.ProjectTraction(fi, T_c_k, tau_corr_local);
+                  if (traction_stress_out)
+                  {
+                     (*traction_stress_out)(2 * dof_idx) = tau_stress_local[0];
+                     (*traction_stress_out)(2 * dof_idx + 1) = tau_stress_local[1];
+                  }
+                  if (traction_correction_out)
+                  {
+                     (*traction_correction_out)(2 * dof_idx) = tau_corr_local[0];
+                     (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
+                  }
+               }
+               if (jump_residual_out)
+               {
+                  real_t R_k[3] = {R_nodal(0 * nbf + kk),
+                                   R_nodal(1 * nbf + kk),
+                                   R_nodal(2 * nbf + kk)};
+                  real_t res_local[2];
+                  fault_basis_.ProjectTraction(fi, R_k, res_local);
+                  (*jump_residual_out)(2 * dof_idx) = res_local[0];
+                  (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
+               }
+               if (normal_traction)
+               {
+                  (*normal_traction)(dof_idx) = fault_basis_.NormalStress(fi, T_k);
+               }
             }
          }
 
@@ -4440,6 +4527,12 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             T_quad = 0.0;
             Vector T_stress_quad, T_corr_quad;
             Vector R_quad;
+            Vector nl_q_proj;
+            if (!basis.qp_data.empty())
+            {
+               nl_q_proj.SetSize(nqp);
+               nl_q_proj = 0.0;
+            }
             if (traction_stress_out || traction_correction_out)
             {
                T_stress_quad.SetSize(dim * nqp);
@@ -4460,6 +4553,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                const IntegrationPoint &eip1_q = FTr->GetElement1IntPoint();
                const IntegrationPoint &eip2_q = FTr->GetElement2IntPoint();
                real_t wq = fip.weight;
+               if (!basis.qp_data.empty()) { nl_q_proj(q) = basis.qp_data[q].nl; }
+               Vector nor_q(dim), n_hat_q(dim);
+               CalcOrtho(FTr->Jacobian(), nor_q);
+               real_t nl_q_face = nor_q.Norml2();
+               for (int d = 0; d < dim; d++) { n_hat_q(d) = nor_q(d) / nl_q_face; }
 
                DenseMatrix dshape1_ref(ndof1, dim), dshape2_ref(ndof2, dim);
                fe1->CalcDShape(eip1_q, dshape1_ref);
@@ -4493,7 +4591,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                            + (grad1(1,1)+grad2(1,1))
                            + (grad1(2,2)+grad2(2,2)))) : 0.0;
                      real_t stress_ij = tr_contrib + 2.0 * mu_val_ * eps_ij;
-                     T_stress_q[ci] += stress_ij * basis.normal[cj];
+                     T_stress_q[ci] += stress_ij * n_hat_q(cj);
                   }
 
                Vector s1q(ndof1), s2q(ndof2);
@@ -4557,70 +4655,146 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                sum_wq += wq;
             }
 
-            // L2 project quad-point traction to per-DOF nodal values
-            Vector T_nodal;
-            face_quad_->GalerkinProject(dim, T_quad, T_nodal);
-            Vector T_stress_nodal, T_corr_nodal;
-            Vector R_nodal;
-            if (traction_stress_out || traction_correction_out)
-            {
-               face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
-               face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
-            }
-            if (jump_residual_out)
-            {
-               face_quad_->GalerkinProject(dim, R_quad, R_nodal);
-            }
-
-            // Store per-DOF traction in local frame
             int base_dof = trac_idx * nbf_per_face_;
-            for (int kk = 0; kk < nbf; kk++)
+            if (!basis.qp_data.empty())
             {
-               real_t T_k[3] = {T_nodal(0 * nbf + kk),
-                                T_nodal(1 * nbf + kk),
-                                T_nodal(2 * nbf + kk)};
-               real_t tau_local[2];
-               fault_basis_.ProjectTraction(trac_idx, T_k, tau_local);
-               int dof_idx = base_dof + kk;
-               traction(2 * dof_idx)     = tau_local[0];
-               traction(2 * dof_idx + 1) = tau_local[1];
-               if (traction_stress_out || traction_correction_out)
+               real_t tangents[2][3] = {
+                  {basis.tangent1[0], basis.tangent1[1], basis.tangent1[2]},
+                  {basis.tangent2[0], basis.tangent2[1], basis.tangent2[2]}
+               };
+               Vector T_local_blocked, T_stress_blocked, T_corr_blocked, R_local_blocked;
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 2, T_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                  tangents, basis.sign_flipped, T_local_blocked, &basis.qp_data);
+               if (traction_stress_out)
                {
-                  real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
-                                     T_stress_nodal(1 * nbf + kk),
-                                     T_stress_nodal(2 * nbf + kk)};
-                  real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
-                                     T_corr_nodal(1 * nbf + kk),
-                                     T_corr_nodal(2 * nbf + kk)};
-                  real_t tau_stress_local[2], tau_corr_local[2];
-                  fault_basis_.ProjectTraction(trac_idx, T_s_k, tau_stress_local);
-                  fault_basis_.ProjectTraction(trac_idx, T_c_k, tau_corr_local);
-                  if (traction_stress_out)
-                  {
-                     (*traction_stress_out)(2 * dof_idx) = tau_stress_local[0];
-                     (*traction_stress_out)(2 * dof_idx + 1) = tau_stress_local[1];
-                  }
-                  if (traction_correction_out)
-                  {
-                     (*traction_correction_out)(2 * dof_idx) = tau_corr_local[0];
-                     (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
-                  }
+                  DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                     dim, 2, T_stress_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                     tangents, basis.sign_flipped, T_stress_blocked, &basis.qp_data);
+               }
+               if (traction_correction_out)
+               {
+                  DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                     dim, 2, T_corr_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                     tangents, basis.sign_flipped, T_corr_blocked, &basis.qp_data);
                }
                if (jump_residual_out)
                {
-                  real_t R_k[3] = {R_nodal(0 * nbf + kk),
-                                   R_nodal(1 * nbf + kk),
-                                   R_nodal(2 * nbf + kk)};
-                  real_t res_local[2];
-                  fault_basis_.ProjectTraction(trac_idx, R_k, res_local);
-                  (*jump_residual_out)(2 * dof_idx) = res_local[0];
-                  (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
+                  DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                     dim, 2, R_quad, nl_q_proj, ir_trac, nbf, face_quad_->BasisAtQuadPoints(),
+                     tangents, basis.sign_flipped, R_local_blocked, &basis.qp_data);
                }
-               // v51: elastic normal traction for sigma_n feedback
-               if (normal_traction)
+
+               for (int kk = 0; kk < nbf; kk++)
                {
-                  (*normal_traction)(dof_idx) =
-                     fault_basis_.NormalStress(trac_idx, T_k);
+                  int dof_idx = base_dof + kk;
+                  traction(2 * dof_idx)     = T_local_blocked(0 * nbf + kk);
+                  traction(2 * dof_idx + 1) = T_local_blocked(1 * nbf + kk);
+                  if (traction_stress_out)
+                  {
+                     (*traction_stress_out)(2 * dof_idx) = T_stress_blocked(0 * nbf + kk);
+                     (*traction_stress_out)(2 * dof_idx + 1) = T_stress_blocked(1 * nbf + kk);
+                  }
+                  if (traction_correction_out)
+                  {
+                     (*traction_correction_out)(2 * dof_idx) = T_corr_blocked(0 * nbf + kk);
+                     (*traction_correction_out)(2 * dof_idx + 1) = T_corr_blocked(1 * nbf + kk);
+                  }
+                  if (jump_residual_out)
+                  {
+                     (*jump_residual_out)(2 * dof_idx) = R_local_blocked(0 * nbf + kk);
+                     (*jump_residual_out)(2 * dof_idx + 1) = R_local_blocked(1 * nbf + kk);
+                  }
+                  if (normal_traction)
+                  {
+                     real_t T_n = 0.0;
+                     real_t wn_sum = 0.0;
+                     const DenseMatrix &e_q = face_quad_->BasisAtQuadPoints();
+                     for (int q = 0; q < nqp; q++)
+                     {
+                        real_t nl = nl_q_proj(q);
+                        real_t wn = ir_trac.IntPoint(q).weight * nl * e_q(kk, q);
+                        const real_t *n_hat = basis.qp_data[q].normal;
+                        bool sf = basis.qp_data[q].sign_flipped;
+
+                        real_t T_dot_n = 0.0;
+                        for (int c = 0; c < dim; c++)
+                        {
+                           T_dot_n += T_quad(c * nqp + q) * n_hat[c];
+                        }
+                        if (sf) { T_dot_n = -T_dot_n; }
+
+                        T_n += wn * T_dot_n;
+                        wn_sum += wn;
+                     }
+                     if (std::abs(wn_sum) > 1e-30) { T_n /= wn_sum; }
+                     (*normal_traction)(dof_idx) = -T_n;
+                  }
+               }
+            }
+            else
+            {
+               Vector T_nodal;
+               face_quad_->GalerkinProject(dim, T_quad, T_nodal);
+               Vector T_stress_nodal, T_corr_nodal;
+               Vector R_nodal;
+               if (traction_stress_out || traction_correction_out)
+               {
+                  face_quad_->GalerkinProject(dim, T_stress_quad, T_stress_nodal);
+                  face_quad_->GalerkinProject(dim, T_corr_quad, T_corr_nodal);
+               }
+               if (jump_residual_out)
+               {
+                  face_quad_->GalerkinProject(dim, R_quad, R_nodal);
+               }
+
+               for (int kk = 0; kk < nbf; kk++)
+               {
+                  real_t T_k[3] = {T_nodal(0 * nbf + kk),
+                                   T_nodal(1 * nbf + kk),
+                                   T_nodal(2 * nbf + kk)};
+                  real_t tau_local[2];
+                  fault_basis_.ProjectTraction(trac_idx, T_k, tau_local);
+                  int dof_idx = base_dof + kk;
+                  traction(2 * dof_idx)     = tau_local[0];
+                  traction(2 * dof_idx + 1) = tau_local[1];
+                  if (traction_stress_out || traction_correction_out)
+                  {
+                     real_t T_s_k[3] = {T_stress_nodal(0 * nbf + kk),
+                                        T_stress_nodal(1 * nbf + kk),
+                                        T_stress_nodal(2 * nbf + kk)};
+                     real_t T_c_k[3] = {T_corr_nodal(0 * nbf + kk),
+                                        T_corr_nodal(1 * nbf + kk),
+                                        T_corr_nodal(2 * nbf + kk)};
+                     real_t tau_stress_local[2], tau_corr_local[2];
+                     fault_basis_.ProjectTraction(trac_idx, T_s_k, tau_stress_local);
+                     fault_basis_.ProjectTraction(trac_idx, T_c_k, tau_corr_local);
+                     if (traction_stress_out)
+                     {
+                        (*traction_stress_out)(2 * dof_idx) = tau_stress_local[0];
+                        (*traction_stress_out)(2 * dof_idx + 1) = tau_stress_local[1];
+                     }
+                     if (traction_correction_out)
+                     {
+                        (*traction_correction_out)(2 * dof_idx) = tau_corr_local[0];
+                        (*traction_correction_out)(2 * dof_idx + 1) = tau_corr_local[1];
+                     }
+                  }
+                  if (jump_residual_out)
+                  {
+                     real_t R_k[3] = {R_nodal(0 * nbf + kk),
+                                      R_nodal(1 * nbf + kk),
+                                      R_nodal(2 * nbf + kk)};
+                     real_t res_local[2];
+                     fault_basis_.ProjectTraction(trac_idx, R_k, res_local);
+                     (*jump_residual_out)(2 * dof_idx) = res_local[0];
+                     (*jump_residual_out)(2 * dof_idx + 1) = res_local[1];
+                  }
+                  if (normal_traction)
+                  {
+                     (*normal_traction)(dof_idx) =
+                        fault_basis_.NormalStress(trac_idx, T_k);
+                  }
                }
             }
 

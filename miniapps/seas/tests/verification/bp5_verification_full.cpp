@@ -44,6 +44,8 @@
 //                              correction vs jump) for each fault DOF
 //   --psi-clamp                Enable legacy post-step psi clamping (diagnostic)
 //   --diag-psi-clamp           Print/summary diagnostics for psi clamp activity
+//   --tandem-time-stepping     Use Tandem-style startup/acceptance defaults
+//   --tandem-dt-init DT        Initial dt [s] for Tandem-style startup
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -335,6 +337,8 @@ int main(int argc, char *argv[])
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
    bool no_v_guard = false;         // v50: disable V guard (for testing only)
+   bool tandem_time_stepping = false; // Use Tandem-style startup/acceptance policy
+   real_t tandem_dt_init = 0.01;      // Default Tandem-style startup dt [s]
    // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
    real_t penalty_factor = 1.0;
    // v50f: traction recovery strategies
@@ -344,6 +348,9 @@ int main(int argc, char *argv[])
    bool diag_station_jump_residual = false;   // Write station-level [[u]]-delta residual
    bool no_psi_clamp = true;           // Default OFF: match Tandem (no post-step psi clamp)
    bool diag_psi_clamp = false;        // Report psi clamp activation statistics
+   bool dt_init_explicit = false;
+   bool v_guard_explicit = false;
+   bool psi_clamp_explicit = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -436,9 +443,26 @@ int main(int argc, char *argv[])
       if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       // v49 Phase 2: CFL fix and V guard
-      if (arg == "--dt-init" && i + 1 < argc) { dt_init_override = std::atof(argv[++i]); }
-      if (arg == "--v-guard" && i + 1 < argc) { v_guard_factor = std::atof(argv[++i]); }
-      if (arg == "--no-v-guard") { no_v_guard = true; }
+      if (arg == "--dt-init" && i + 1 < argc)
+      {
+         dt_init_override = std::atof(argv[++i]);
+         dt_init_explicit = true;
+      }
+      if (arg == "--v-guard" && i + 1 < argc)
+      {
+         v_guard_factor = std::atof(argv[++i]);
+         v_guard_explicit = true;
+      }
+      if (arg == "--no-v-guard")
+      {
+         no_v_guard = true;
+         v_guard_explicit = true;
+      }
+      if (arg == "--tandem-time-stepping") { tandem_time_stepping = true; }
+      if (arg == "--tandem-dt-init" && i + 1 < argc)
+      {
+         tandem_dt_init = std::atof(argv[++i]);
+      }
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
       if (arg == "--traction-stress-only") { traction_stress_only = true; }
       if (arg == "--diag-station-traction-decomp")
@@ -449,8 +473,16 @@ int main(int argc, char *argv[])
       {
          diag_station_jump_residual = true;
       }
-      if (arg == "--psi-clamp") { no_psi_clamp = false; }
-      if (arg == "--no-psi-clamp") { no_psi_clamp = true; }
+      if (arg == "--psi-clamp")
+      {
+         no_psi_clamp = false;
+         psi_clamp_explicit = true;
+      }
+      if (arg == "--no-psi-clamp")
+      {
+         no_psi_clamp = true;
+         psi_clamp_explicit = true;
+      }
       if (arg == "--diag-psi-clamp") { diag_psi_clamp = true; }
       if (arg == "--traction-weak-form") { traction_weak_form = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
@@ -465,6 +497,13 @@ int main(int argc, char *argv[])
          else
          { MFEM_ABORT("Unknown face-basis-type: " << face_basis_str); }
       }
+   }
+
+   if (tandem_time_stepping)
+   {
+      if (!dt_init_explicit) { dt_init_override = tandem_dt_init; }
+      if (!v_guard_explicit) { no_v_guard = true; }
+      if (!psi_clamp_explicit) { no_psi_clamp = true; }
    }
 
    // Parse DG method
@@ -633,6 +672,13 @@ int main(int argc, char *argv[])
                 << (no_psi_clamp ? "OFF (default, Tandem-style)"
                                  : "ON [-5, 3] (--psi-clamp)")
                 << (diag_psi_clamp ? " [diagnostic]" : "") << "\n";
+      if (tandem_time_stepping)
+      {
+         real_t ts_dt = (dt_init_override > 0.0) ? dt_init_override : tandem_dt_init;
+         std::cout << "  Time stepping policy: Tandem-style"
+                   << " (dt_init=" << ts_dt
+                   << " s, no V-guard, no psi clamp)\n";
+      }
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
