@@ -474,9 +474,11 @@ public:
          fe2.CalcDShape(eip2, dshape2_ref);
          Mult(dshape2_ref, Jinv, dshape2_phys);
 
-         // Material (constant for BP5, but general for future)
-         real_t lam = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu_val = mu_.Eval(*Trans.Elem1, eip1);
+         // Per-side material (matching Tandem's lam_q[0/1], mu_q[0/1])
+         real_t lam1t = lambda_.Eval(*Trans.Elem1, eip1);
+         real_t mu1t = mu_.Eval(*Trans.Elem1, eip1);
+         real_t lam2t = lambda_.Eval(*Trans.Elem2, eip2);
+         real_t mu2t = mu_.Eval(*Trans.Elem2, eip2);
 
          // Compute ∇u on each side
          // grad[c,d] = Σ_k dshape_phys[k,d] * u_dofs[c*ndof+k]
@@ -494,7 +496,7 @@ public:
          }
 
          // Stress average: {σ} = 0.5*(σ_0 + σ_1), then T = {σ}·n̂
-         // σ_ij = λ*tr(ε)*δ_ij + 2μ*ε_ij
+         // Per-side material: σ_x uses lam_x, mu_x (Tandem convention)
          real_t tr1 = grad1(0,0) + grad1(1,1) + grad1(2,2);
          real_t tr2 = grad2(0,0) + grad2(1,1) + grad2(2,2);
          for (int p = 0; p < dim_; p++)
@@ -504,8 +506,8 @@ public:
             {
                real_t eps1 = 0.5*(grad1(p,j) + grad1(j,p));
                real_t eps2 = 0.5*(grad2(p,j) + grad2(j,p));
-               real_t sig1 = (p==j ? lam*tr1 : 0.0) + 2.0*mu_val*eps1;
-               real_t sig2 = (p==j ? lam*tr2 : 0.0) + 2.0*mu_val*eps2;
+               real_t sig1 = (p==j ? lam1t*tr1 : 0.0) + 2.0*mu1t*eps1;
+               real_t sig2 = (p==j ? lam2t*tr2 : 0.0) + 2.0*mu2t*eps2;
                T_p += 0.5 * (sig1 + sig2) * n_hat(j);
             }
             traction_q(p * nq + q) = T_p;
@@ -516,7 +518,7 @@ public:
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
-                                          lam, mu_val, nl, true);
+                                          lam1t, mu1t, nl, true);
 
          fe1.CalcShape(eip1, shape1);
          fe2.CalcShape(eip2, shape2);

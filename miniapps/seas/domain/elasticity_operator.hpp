@@ -1105,14 +1105,11 @@ private:
          Vector delta_u_quad;
          face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
 
-         // Apply sign correction
+         // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
+         // sign_flipped=true when mesh normal opposes ref_normal
          {
-            const IntegrationPoint &ip0 = IntRules.Get(
-               FTr->FaceGeom, 1).IntPoint(0);
-            FTr->SetAllIntPoints(&ip0);
-            Vector nor0(dim);
-            CalcOrtho(FTr->Jacobian(), nor0);
-            real_t sign = (nor0(1) > 0) ? 1.0 : -1.0;
+            const auto &basis_slip = fault_basis_.GetBasis(fi);
+            real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
             for (int i = 0; i < delta_u_quad.Size(); i++)
                delta_u_quad(i) *= sign;
          }
@@ -1462,14 +1459,10 @@ private:
             Vector delta_u_quad;
             face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
 
-            // Sign correction
+            // v55: Sign from FaultBasis sign_flipped (general)
             {
-               const IntegrationPoint &ip0 = IntRules.Get(
-                  FTr->FaceGeom, 1).IntPoint(0);
-               FTr->SetAllIntPoints(&ip0);
-               Vector nor0(dim);
-               CalcOrtho(FTr->Jacobian(), nor0);
-               real_t sign = (nor0(1) > 0) ? 1.0 : -1.0;
+               const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
+               real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
                for (int j = 0; j < delta_u_quad.Size(); j++)
                   delta_u_quad(j) *= sign;
             }
@@ -3293,12 +3286,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       // Fault basis
       const auto &basis = fault_basis_.GetBasis(fi);
 
-      // Sign correction (same convention as slip assembly)
-      // Use centroid to get face normal for sign determination
-      FTr->SetAllIntPoints(&ip);
-      Vector nor(dim);
-      CalcOrtho(FTr->Jacobian(), nor);
-      real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
+      // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
+      real_t sign = basis.sign_flipped ? 1.0 : -1.0;
 
       // Element Jacobian inverses (constant for linear tets)
       DenseMatrix Jinv1(dim), Jinv2(dim);
@@ -4110,13 +4099,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // Fault basis
          const auto &basis = fault_basis_.GetBasis(trac_idx);
 
-         // Sign correction
+         // v55: Sign from FaultBasis sign_flipped (general)
+         real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+
+         // Shared face sign diagnostic (v48 verification)
          FTr->SetAllIntPoints(&ip);
          Vector nor(dim);
          CalcOrtho(FTr->Jacobian(), nor);
-         real_t sign = (nor(1) > 0) ? 1.0 : -1.0;
-
-         // Shared face sign diagnostic (v48 verification)
          if (i < 3 && diag_face_call_ <= 2)
          {
             Vector fc(dim);

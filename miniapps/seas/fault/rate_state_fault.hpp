@@ -439,14 +439,15 @@ public:
             real_t eta = eta_values(i);
             real_t Dc = Dc_values_(i);
 
-            // v54 fix: elastic sigma_n feedback matching Tandem DieterichRuinaBase.h:87
-            //   Tandem: snAbs = -sn + SnPre  (sn = T . n_hat, n_hat = fault normal)
-            //   For compression: sn < 0, so snAbs = SnPre + |sn| > SnPre (correct)
-            // v51 had WRONG SIGN: sigma_n_eff = SnPre + sn (compression decreased sigma_n)
+            // v55 fix: elastic sigma_n feedback matching Tandem DieterichRuinaBase.h:87
+            //   Tandem: snAbs = -sn + SnPre  (sn = T·n, negative in compression)
+            //   MFEM:   normal_traction = -T·n (positive in compression, from NormalStress)
+            //   Match:  sigma_n_eff = SnPre + normal_traction
+            //           compression → normal_traction > 0 → sigma_n_eff > SnPre ✓
             real_t sigma_n_eff = sigma_n_bp5_;
             if (normal_traction)
             {
-               sigma_n_eff = sigma_n_bp5_ - (*normal_traction)(i);
+               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
                // Safety: ensure sigma_n stays positive (physical requirement)
                sigma_n_eff = std::max(sigma_n_eff, 0.1 * sigma_n_bp5_);
             }
