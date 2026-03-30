@@ -664,22 +664,19 @@ private:
             if (mesh_.GetBdrAttribute(be) == 3) { local_tagged_bdr++; }
          }
          int global_tagged_bdr = local_tagged_bdr;
-         int local_fault_faces = fault_tagged_faces_.Size();
-         int global_tagged_faces = local_fault_faces;
+         // Count BOTH interior and shared tagged faces
+         int local_tagged_total = fault_tagged_faces_.Size()
+            + static_cast<int>(fault_shared_tagged_.size());
+         int global_tagged_total = local_tagged_total;
          if constexpr (IsParallelMesh<MeshType>::value)
          {
 #ifdef MFEM_USE_MPI
             MPI_Allreduce(MPI_IN_PLACE, &global_tagged_bdr, 1, MPI_INT,
                           MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_faces, 1, MPI_INT,
+            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_total, 1, MPI_INT,
                           MPI_SUM, mesh_.GetComm());
 #endif
          }
-         // Report discrepancy between boundary elements and recovered faces.
-         // In MFEM, Gmsh Physical Surfaces on INTERNAL faces may not create
-         // boundary elements, so global_tagged_bdr can be 0 for Tandem meshes
-         // where the fault is an internal surface. In that case, the coordinate
-         // fallback in IsFaultFace3D handles detection correctly.
          bool is_root = true;
          if constexpr (IsParallelMesh<MeshType>::value)
          {
@@ -689,13 +686,24 @@ private:
             is_root = (rank == 0);
 #endif
          }
+         // In MPI, shared faces are counted on both ranks, so
+         // global_tagged_total may exceed global_tagged_bdr.
+         // A genuine problem is when tagged_total < tagged_bdr.
          if (is_root && global_tagged_bdr > 0 &&
-             global_tagged_faces != global_tagged_bdr)
+             global_tagged_total < global_tagged_bdr)
          {
             mfem::out << "  WARNING: Tag-based fault recovery: "
-                      << global_tagged_faces << " interior faces recovered vs "
+                      << global_tagged_total
+                      << " tagged faces (interior+shared) vs "
                       << global_tagged_bdr << " boundary elements with attr 3. "
                       << "Some fault faces may be missing.\n";
+         }
+         if (is_root && global_tagged_bdr > 0)
+         {
+            mfem::out << "  Tag-based fault faces: "
+                      << fault_tagged_faces_.Size() << " interior + "
+                      << fault_shared_tagged_.size() << " shared (this rank), "
+                      << global_tagged_bdr << " boundary elements globally\n";
          }
       }
 
