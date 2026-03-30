@@ -2088,6 +2088,16 @@ private:
          }
          else  // BR2
          {
+            // BR2: compute u_D from face centroid (legacy)
+            const IntegrationPoint &ip_c = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_c);
+            Vector fc_br2(dim);
+            FTr->Face->Transform(ip_c, fc_br2);
+            real_t Vh_br2 = Vp_ * time;
+            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+            real_t u_D[3] = {Vh_br2, 0.0, 0.0};
+
             const DenseMatrix &Minv = elem_mass_inv_[FTr->Elem1No];
             int nqp = ir.GetNPoints();
 
@@ -2304,6 +2314,16 @@ private:
          }
          else  // BR2
          {
+            // BR2 path: compute u_D_int from face centroid (legacy)
+            const IntegrationPoint &ip_c = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_c);
+            Vector fc_br2(dim);
+            FTr->Face->Transform(ip_c, fc_br2);
+            real_t Vh_br2 = Vp_ * time;
+            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+            real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
+
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
             int nqp = ir.GetNPoints();
@@ -2602,6 +2622,16 @@ private:
             else  // BR2
             {
                if (!mass_inv_computed_) { PrecomputeMassInverse(); }
+
+               // BR2: compute u_D_int from face centroid (legacy)
+               const IntegrationPoint &ip_c = Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip_c);
+               Vector fc_br2(dim);
+               FTr->Face->Transform(ip_c, fc_br2);
+               real_t Vh_br2 = Vp_ * time;
+               if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
+               else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+               real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
                const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
