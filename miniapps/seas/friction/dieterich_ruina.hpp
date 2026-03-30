@@ -336,35 +336,61 @@ public:
          return 0.0;
       }
 
-      // Brent's method with bracket [0, tau/eta]
-      real_t V_lo = 0.0;
-      real_t V_hi = tau / eta;
-
-      auto residual = [&](real_t V) -> real_t
+      if (eta == 0.0)
       {
+         // No radiation damping: direct inversion (Tandem: Finv path)
+         real_t r = tau / sigma_n;
+         real_t V = cp_.V0 * (std::exp((r - psi) / a)
+                              - std::exp(-(r + psi) / a));
+         if (iterations) { *iterations = 0; }
+         return std::max(V, 0.0);
+      }
+
+      // v55 D4: Brent's method in log10(V) space matching Tandem
+      // (DieterichRuinaBase.h:90-132)
+      auto fF = [&](real_t Ve) -> real_t
+      {
+         real_t V = std::pow(10.0, Ve);
          return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
       };
 
-      real_t Fb = residual(V_hi);
-      if (Fb >= 0.0)
+      real_t Va = -32.0;
+      real_t Vb = std::log10(tau / eta);
+      real_t lo = std::min(Va, Vb);
+      real_t hi = std::max(Va, Vb);
+      real_t Flo = fF(lo);
+      real_t Fhi = fF(hi);
+
+      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
+      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
+
+      if (std::copysign(Flo, Fhi) != Flo)
       {
-         // Friction is negligible (collapsed state variable, psi << 0).
-         static int degen_count = 0;
-         if (++degen_count <= 5)
-         {
-            std::cerr << "[WARNING] SolveSlipRatePsi degenerate case #"
-                      << degen_count << ": psi=" << psi
-                      << " a=" << a << " tau=" << tau
-                      << " V=tau/eta=" << V_hi << "\n";
-         }
+         real_t Ve = zeroIn(lo, hi, fF);
          if (iterations) { *iterations = 0; }
-         return V_hi;
+         return std::pow(10.0, Ve);
       }
 
-      real_t V = zeroIn(V_lo, V_hi, residual);
+      // Fallback bracket (Tandem: lines 121-129)
+      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));
+      lo = std::min(Va_min, Vb);
+      hi = std::max(Va_min, Vb);
+      Flo = fF(lo);
+      Fhi = fF(hi);
 
+      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
+      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
+
+      if (std::copysign(Flo, Fhi) != Flo)
+      {
+         real_t Ve = zeroIn(lo, hi, fF);
+         if (iterations) { *iterations = 0; }
+         return std::pow(10.0, Ve);
+      }
+
+      // Both brackets failed
       if (iterations) { *iterations = 0; }
-      return V;
+      return tau / eta;
    }
 
    /// Solve for 2-component slip rate given 2-component traction and scalar psi.
