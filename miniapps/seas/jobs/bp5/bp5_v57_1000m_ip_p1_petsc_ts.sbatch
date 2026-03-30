@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v57_pts_p1_mumps
 #SBATCH -o bp5_v57_pts_p1_mumps_%j.out
 #SBATCH -e bp5_v57_pts_p1_mumps_%j.err
-#SBATCH -p normal
+#SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 48:00:00
+#SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
 # BP5 v57: 1000 m, IP, p=1, PETSc TS with MUMPS BLR
