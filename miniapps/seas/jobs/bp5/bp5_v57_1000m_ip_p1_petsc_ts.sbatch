@@ -11,28 +11,20 @@
 # BP5 v57: 1000 m, IP, p=1, PETSc TS with MUMPS BLR
 #
 # Purpose:
-# - build MFEM/SEAS with PETSc and MFEM_USE_MUMPS enabled
 # - use PETSc TS for time stepping
 # - keep the BP5 elasticity solve on MUMPS BLR
 #
-# IMPORTANT:
-# - on Frontera, the MUMPS module is coupled to PETSc 3.15
-# - this job therefore builds against petsc/3.15 intentionally
+# Assumption:
+# - MFEM was already built before job submission with MFEM_USE_PETSC=YES and
+#   MFEM_USE_MUMPS=YES on the intended Frontera stack
+# - only the `seas_bp5_full` miniapp may need an incremental rebuild
 
 export LC_ALL=C
 export LANG=C
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 
-export PETSC_MODULE=petsc/3.15
-export USE_MUMPS=1
 export JOBS=8
-
-# Reconfigure from a clean tree so we do not mix stale PETSc 3.23 objects
-# with the PETSc 3.15 + MUMPS build requested by this job.
-make distclean || true
-
-bash build_frontera.sh || { echo "BUILD FAILED"; exit 1; }
 
 grep -q '^MFEM_USE_PETSC *= YES' config/config.mk || {
     echo "ERROR: MFEM was not built with PETSc enabled"
@@ -44,6 +36,7 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || {
 }
 
 cd miniapps/seas
+make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 mkdir -p bp5/results_v57_1000m_ip_p1_petsc_ts_mumps
 
 ibrun ./seas_bp5_full \
