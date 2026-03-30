@@ -2031,28 +2031,6 @@ private:
          int attr = mesh_.GetBdrAttribute(be);
          if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
 
-         // Compute face centroid x-coordinate to determine sign
-         Vector centroid(3);
-         centroid = 0.0;
-         {
-            ElementTransformation *eltransf = mesh_.GetBdrElementTransformation(be);
-            const IntegrationRule &ir_c = IntRules.Get(eltransf->GetGeometryType(), 1);
-            for (int p = 0; p < ir_c.GetNPoints(); p++)
-            {
-               eltransf->SetIntPoint(&ir_c.IntPoint(p));
-               Vector phys(3);
-               eltransf->Transform(ir_c.IntPoint(p), phys);
-               centroid.Add(1.0 / ir_c.GetNPoints(), phys);
-            }
-         }
-         // Tandem: sign from Y (centroid(1)), loading in X (component 0)
-         //   u_D = (sgn(Y)*Vp*t/2, 0, 0)
-         real_t u_D[3] = {0.0, 0.0, 0.0};
-         {
-            real_t sign = (centroid(1) > 0.0) ? 1.0 : -1.0;
-            u_D[0] = sign * Vp_ * time / 2.0;
-         }
-
          // Get face transformation
          int face_idx, face_info;
          mesh_.GetBdrElementFace(be, &face_idx, &face_info);
@@ -2084,11 +2062,23 @@ private:
                FTr->FaceGeom, quad_order_dir);
             int nq_dir = ir_dir.GetNPoints();
 
-            // Build u_D at quad points (constant per face for BP5)
+            // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
             Vector u_D_3d(dim * nq_dir);
+            u_D_3d = 0.0;
             for (int q = 0; q < nq_dir; q++)
-               for (int c = 0; c < dim; c++)
-                  u_D_3d(c * nq_dir + q) = u_D[c];
+            {
+               const IntegrationPoint &ipq = ir_dir.IntPoint(q);
+               FTr->SetAllIntPoints(&ipq);
+               Vector phys(dim);
+               FTr->Face->SetIntPoint(&ipq);
+               FTr->Face->Transform(ipq, phys);
+               real_t y = phys(1);
+               // Tandem bp5.lua boundary(x,y,z,t):
+               real_t Vh = Vp_ * time;
+               if (y > 1.0) { Vh *= 0.5; }
+               else if (y < -1.0) { Vh *= -0.5; }
+               u_D_3d(0 * nq_dir + q) = Vh;
+            }
 
             Vector elvec_dir;
             dir_integ.AssembleBoundaryFaceRHS(*fe, *FTr, u_D_3d, elvec_dir);
@@ -2247,43 +2237,15 @@ private:
             mesh_.GetInteriorFaceTransformations(f);
          if (FTr == nullptr) { continue; }
 
-         // Prescribed JUMP u_D = u1 - u2 at non-fault Y=0 interior faces.
+         // v55: Evaluate Tandem's boundary function at each quad point,
+         // matching bp5.lua boundary(x,y,z,t) exactly:
+         //   y > 1:  u_D = (Vp*t/2, 0, 0)
+         //   y < -1: u_D = (-Vp*t/2, 0, 0)
+         //   else:   u_D = (Vp*t, 0, 0)
          //
-         // Tandem's bp5.lua boundary() returns absolute displacement:
-         //   Y > 0: +Vp*t/2,  Y < 0: -Vp*t/2
-         // The jump across Y=0 is ±Vp*t depending on element ordering.
-         //
-         // Each element's centroid Y-coordinate determines its side:
-         //   sign1 = sgn(elem1_centroid_Y), sign2 = sgn(elem2_centroid_Y)
-         //   u_D = (sign1 - sign2) * Vp*t/2
-         //
-         // This matches Tandem: each DG element "knows" which side of Y=0
-         // it is on, and the prescribed jump follows from the difference
-         // of the two sides' far-field displacements.
-
-         auto get_elem_y_sign = [&](int elem_no) -> real_t
-         {
-            ElementTransformation *eltrans =
-               mesh_.GetElementTransformation(elem_no);
-            const IntegrationRule &ir_c = IntRules.Get(
-               eltrans->GetGeometryType(), 1);
-            real_t y_avg = 0.0;
-            for (int p = 0; p < ir_c.GetNPoints(); p++)
-            {
-               eltrans->SetIntPoint(&ir_c.IntPoint(p));
-               Vector phys(3);
-               eltrans->Transform(ir_c.IntPoint(p), phys);
-               y_avg += phys(1);
-            }
-            y_avg /= ir_c.GetNPoints();
-            return (y_avg > 0.0) ? 1.0 : -1.0;
-         };
-
-         real_t sign1 = get_elem_y_sign(FTr->Elem1No);
-         real_t sign2 = get_elem_y_sign(FTr->Elem2No);
-
-         real_t u_D_int[3] = {0.0, 0.0, 0.0};
-         u_D_int[0] = (sign1 - sign2) * 0.5 * Vp_ * time;
+         // The DG skeleton RHS uses this as f_q (prescribed data at the face).
+         // Previously we computed u_D from element centroid Y-signs, which is
+         // mathematically equivalent but evaluates at different points.
 
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
@@ -2314,11 +2276,25 @@ private:
                FTr->FaceGeom, quad_order_dir);
             int nq_dir = ir_dir.GetNPoints();
 
-            // u_D_int is constant per face → fill all quad points
+            // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
             Vector u_D_3d(dim * nq_dir);
+            u_D_3d = 0.0;
             for (int q = 0; q < nq_dir; q++)
-               for (int c = 0; c < dim; c++)
-                  u_D_3d(c * nq_dir + q) = u_D_int[c];
+            {
+               const IntegrationPoint &ipq = ir_dir.IntPoint(q);
+               FTr->SetAllIntPoints(&ipq);
+               Vector phys(dim);
+               FTr->Face->SetIntPoint(&ipq);
+               FTr->Face->Transform(ipq, phys);
+               real_t y = phys(1);
+               // Tandem bp5.lua boundary(x,y,z,t):
+               real_t Vh = Vp_ * time;
+               if (y > 1.0) { Vh *= 0.5; }
+               else if (y < -1.0) { Vh *= -0.5; }
+               // else: Vh = Vp*t (full rate for |y| <= 1)
+               u_D_3d(0 * nq_dir + q) = Vh;  // X component
+               // Y and Z components = 0
+            }
 
             Vector ev1, ev2;
             dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
@@ -2569,31 +2545,7 @@ private:
                mesh_.GetSharedFaceTransformations(sf);
             if (FTr == nullptr) { continue; }
 
-            // Compute Y-sign for elem1 (local) from its centroid
-            auto get_elem_y_sign_local = [&](int elem_no) -> real_t
-            {
-               ElementTransformation *eltrans =
-                  mesh_.GetElementTransformation(elem_no);
-               const IntegrationRule &ir_c = IntRules.Get(
-                  eltrans->GetGeometryType(), 1);
-               real_t y_avg = 0.0;
-               for (int p = 0; p < ir_c.GetNPoints(); p++)
-               {
-                  eltrans->SetIntPoint(&ir_c.IntPoint(p));
-                  Vector phys(3);
-                  eltrans->Transform(ir_c.IntPoint(p), phys);
-                  y_avg += phys(1);
-               }
-               y_avg /= ir_c.GetNPoints();
-               return (y_avg > 0.0) ? 1.0 : -1.0;
-            };
-
-            real_t sign1 = get_elem_y_sign_local(FTr->Elem1No);
-            // Elem2 is across Y=0 from elem1, so sign2 = -sign1
-            real_t sign2 = -sign1;
-
-            real_t u_D_int[3] = {0.0, 0.0, 0.0};
-            u_D_int[0] = (sign1 - sign2) * 0.5 * Vp_ * time;
+            // v55: Per-quad-point boundary evaluation (done below in IP block)
 
             // Only elem1 is local
             Array<int> vdofs1;
@@ -2625,10 +2577,22 @@ private:
                   FTr->FaceGeom, quad_order_dir);
                int nq_dir = ir_dir.GetNPoints();
 
+               // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
                Vector u_D_3d(dim * nq_dir);
+               u_D_3d = 0.0;
                for (int q = 0; q < nq_dir; q++)
-                  for (int c = 0; c < dim; c++)
-                     u_D_3d(c * nq_dir + q) = u_D_int[c];
+               {
+                  const IntegrationPoint &ipq = ir_dir.IntPoint(q);
+                  FTr->SetAllIntPoints(&ipq);
+                  Vector phys(dim);
+                  FTr->Face->SetIntPoint(&ipq);
+                  FTr->Face->Transform(ipq, phys);
+                  real_t y = phys(1);
+                  real_t Vh = Vp_ * time;
+                  if (y > 1.0) { Vh *= 0.5; }
+                  else if (y < -1.0) { Vh *= -0.5; }
+                  u_D_3d(0 * nq_dir + q) = Vh;
+               }
 
                Vector ev1, ev2;
                dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
