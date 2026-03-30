@@ -1425,6 +1425,9 @@ int main(int argc, char *argv[])
    }
 #ifdef MFEM_USE_PETSC
    std::unique_ptr<PetscODESolver> petsc_ode;
+   // Persistent PETSc vector for state — avoids MFEM's PlaceMemory/
+   // ResetMemory cycle which can crash with certain PETSc versions.
+   std::unique_ptr<PetscParVector> petsc_state;
    if (use_petsc_ts)
    {
       petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "bp5ts_");
@@ -1437,6 +1440,16 @@ int main(int argc, char *argv[])
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetExactFinalTime(MATCHSTEP) failed");
       ierr = TSSetMaxTime(ts, t_final);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetMaxTime() failed");
+
+      // Create a persistent PETSc-managed copy of the state vector.
+      // PetscODESolver::Step uses PlaceMemory/ResetMemory which fails
+      // with PETSc 3.15. Instead, we copy state ↔ petsc_state at each
+      // step and call TSStep directly.
+      petsc_state = std::make_unique<PetscParVector>(
+         mpi.GetComm(), state, true);
+      ierr = TSSetSolution(ts, *petsc_state);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetSolution() failed");
+
       current_dt = dt_init;
       if (mpi.IsRoot())
       {
@@ -1538,12 +1551,49 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_PETSC
       else
       {
-         MFEM_VERIFY(petsc_ode, "PETSc TS solver was not initialized");
-         dt = current_dt;
-         petsc_ode->Step(state, t, dt);
+         MFEM_VERIFY(petsc_ode && petsc_state,
+                     "PETSc TS solver was not initialized");
          petsc::TS ts = *petsc_ode;
+         PetscErrorCode ierr;
+
+         // Copy state → PETSc Vec (bypass MFEM PlaceMemory)
+         {
+            PetscScalar *arr;
+            ierr = VecGetArray(*petsc_state, &arr);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArray failed");
+            for (int i = 0; i < state.Size(); i++) { arr[i] = state(i); }
+            ierr = VecRestoreArray(*petsc_state, &arr);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArray failed");
+         }
+
+         // Take one PETSc TS step directly
+         dt = current_dt;
+         ierr = TSSetTime(ts, t);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTime failed");
+         ierr = TSSetTimeStep(ts, dt);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTimeStep failed");
+         ierr = TSStep(ts);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSStep failed");
+
+         // Read back updated time and state
+         PetscReal pt;
+         ierr = TSGetTime(ts, &pt);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTime failed");
+         dt = pt - t;
+         t = pt;
+
+         // Copy PETSc Vec → state
+         {
+            const PetscScalar *arr;
+            ierr = VecGetArrayRead(*petsc_state, &arr);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead failed");
+            for (int i = 0; i < state.Size(); i++) { state(i) = arr[i]; }
+            ierr = VecRestoreArrayRead(*petsc_state, &arr);
+            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead failed");
+         }
+
          PetscReal next_dt = 0.0;
-         PetscErrorCode ierr = TSGetTimeStep(ts, &next_dt);
+         ierr = TSGetTimeStep(ts, &next_dt);
          MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTimeStep() failed");
          current_dt = next_dt;
          PetscInt rejects = 0;
