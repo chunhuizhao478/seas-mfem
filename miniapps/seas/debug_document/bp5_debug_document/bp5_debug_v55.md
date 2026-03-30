@@ -1103,3 +1103,53 @@ All 587 tests pass across 5 test suites:
 | friction | 32 | ✅ 0 failures |
 | state_evolution | 23 | ✅ 0 failures |
 | **Total** | **587** | **✅ All pass** |
+
+### 20.15 Code Review Fix: All IP Paths Now Use Combined Integrator
+
+A code review identified 5 issues where the live operator did not match the
+documented Tandem-matched structure. All were fixed:
+
+**Issue 1 (P1): K stiffness used old split integrators**
+- Before: `DGElasticityIntegrator` + `DGElasticityIPPenaltyIntegrator` (two passes)
+- After: Single `DGElasticityIPCombinedIntegrator` for both interior and boundary K
+- File: `elasticity_operator.hpp` AssembleStiffness()
+
+**Issue 2 (P1): K-b mismatch for Dirichlet loading**
+- Resolved by Issue 1: K and Dirichlet b now both use the combined integrator
+
+**Issue 3 (P1): Fault slip RHS used old manual loop**
+- Before: `AssembleSlipContributionIP` had 268-line manual loop
+- After: Uses `AssembleSlipFaceRHS` from combined integrator
+- Same fix applied to `AssembleSlipContributionIPShared`
+
+**Issue 4 (P1): Shared-face traction used old path**
+- Before: Old stress/correction/projection code for shared fault faces
+- After: `ComputeTractionAtQuadPoints` + `ProjectTractionToFaultDOFs` with
+  `sign_flipped`, matching interior face path exactly
+
+**Issue 5 (P2): D4 log10 Brent solver was not applied**
+- Before: Linear bracket `[0, tau/eta]`
+- After: Log10 bracket `[-32, log10(tau/eta)]` with fallback, matching
+  Tandem's DieterichRuinaBase.h:90-132. Includes eta=0 direct inversion.
+
+**Issue 6 (P2, latent): Heterogeneous material handling**
+- MFEM evaluates λ,μ from element 1 only in traction helpers
+- Tandem carries per-side `lam_q[x]`, `mu_q[x]`
+- Not a problem for BP5 (uniform material), noted for future
+
+**After fix: every IP code path uses the combined integrator:**
+
+| Path | Method | Matches Tandem |
+|------|--------|----------------|
+| K interior faces | `DGElasticityIPCombinedIntegrator::AssembleFaceMatrix` | `assembleSurface` ✅ |
+| K boundary faces | Same | `assemble_boundary` ✅ |
+| Fault slip RHS (interior) | `AssembleSlipFaceRHS` | `rhsFacet` (skeleton) ✅ |
+| Fault slip RHS (shared) | Same | Same ✅ |
+| Dirichlet RHS (boundary) | `AssembleBoundaryFaceRHS` | `rhsFacet` (boundary) ✅ |
+| Dirichlet RHS (interior) | `AssembleSlipFaceRHS` | `rhsFacet` (skeleton) ✅ |
+| Dirichlet RHS (shared) | Same | Same ✅ |
+| Traction (interior) | `ComputeTractionAtQuadPoints` + `ProjectTractionToFaultDOFs` | `compute_traction` + `evaluate_traction` ✅ |
+| Traction (shared) | Same | Same ✅ |
+| Friction solver | Log10 Brent, anti-parallel V | `DieterichRuinaBase::slip_rate` ✅ |
+
+All 587 tests pass after fixes.
