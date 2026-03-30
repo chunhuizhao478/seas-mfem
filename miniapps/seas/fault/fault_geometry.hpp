@@ -579,6 +579,102 @@ private:
       }
    }
 
+public:
+   /// @brief Build face deduplication mapping from gathered 2D coordinates.
+   ///
+   /// In parallel DG, shared fault faces at partition boundaries produce
+   /// duplicate face blocks in the gathered DOF array. This method identifies
+   /// duplicate faces by comparing face centroids (average of DOF coordinates)
+   /// within a tolerance, and returns the list of unique face start indices.
+   ///
+   /// Usage:
+   ///   1. Call once with gathered x2, x3 coordinates to get the mapping
+   ///   2. Use ApplyFaceDedupMap() to deduplicate any gathered field
+   ///
+   /// @param raw_x2 Gathered along-strike coordinates [M]
+   /// @param raw_x3 Gathered depth coordinates [M]
+   /// @param nbf_per_face Number of DOFs per face (must divide M evenly)
+   /// @param[out] unique_face_indices Index of first DOF for each unique face
+   /// @param tol Coordinate tolerance for centroid matching [m]
+   static void BuildFaceDedupMap(
+      const Vector &raw_x2, const Vector &raw_x3,
+      int nbf_per_face,
+      std::vector<int> &unique_face_indices,
+      real_t tol = 1.0)
+   {
+      int M = raw_x2.Size();
+      unique_face_indices.clear();
+      if (M == 0 || nbf_per_face < 1) { return; }
+      if (M % nbf_per_face != 0)
+      {
+         // Cannot form complete faces; return all DOFs as individual "faces"
+         for (int i = 0; i < M; i++) { unique_face_indices.push_back(i); }
+         return;
+      }
+
+      int num_faces = M / nbf_per_face;
+
+      // Compute face centroids
+      std::vector<real_t> cx2(num_faces), cx3(num_faces);
+      for (int f = 0; f < num_faces; f++)
+      {
+         real_t s2 = 0.0, s3 = 0.0;
+         for (int k = 0; k < nbf_per_face; k++)
+         {
+            s2 += raw_x2(f * nbf_per_face + k);
+            s3 += raw_x3(f * nbf_per_face + k);
+         }
+         cx2[f] = s2 / nbf_per_face;
+         cx3[f] = s3 / nbf_per_face;
+      }
+
+      // Mark unique faces: a face is duplicate if its centroid matches
+      // a previously seen face within tolerance.
+      std::vector<bool> is_dup(num_faces, false);
+      for (int f = 0; f < num_faces; f++)
+      {
+         if (is_dup[f]) { continue; }
+         unique_face_indices.push_back(f * nbf_per_face);
+         // Mark later faces with matching centroid as duplicates
+         for (int g = f + 1; g < num_faces; g++)
+         {
+            if (is_dup[g]) { continue; }
+            if (std::abs(cx2[f] - cx2[g]) < tol &&
+                std::abs(cx3[f] - cx3[g]) < tol)
+            {
+               is_dup[g] = true;
+            }
+         }
+      }
+   }
+
+   /// @brief Apply a face dedup mapping to a gathered scalar field.
+   ///
+   /// Extracts the unique face DOF blocks from a raw gathered vector.
+   ///
+   /// @param raw Raw gathered field [M]
+   /// @param unique_face_indices From BuildFaceDedupMap (first DOF of each unique face)
+   /// @param nbf_per_face DOFs per face
+   /// @param[out] dedup Deduplicated field [num_unique * nbf_per_face]
+   static void ApplyFaceDedupMap(
+      const Vector &raw,
+      const std::vector<int> &unique_face_indices,
+      int nbf_per_face,
+      Vector &dedup)
+   {
+      int num_unique = static_cast<int>(unique_face_indices.size());
+      dedup.SetSize(num_unique * nbf_per_face);
+      for (int u = 0; u < num_unique; u++)
+      {
+         int start = unique_face_indices[u];
+         for (int k = 0; k < nbf_per_face; k++)
+         {
+            dedup(u * nbf_per_face + k) = raw(start + k);
+         }
+      }
+   }
+
+private:
    /// @brief Compute 2D spatially varying parameters for BP5.
    ///
    /// Following Tandem's approach: ALL parameters are evaluated at each

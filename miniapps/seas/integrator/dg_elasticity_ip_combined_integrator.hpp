@@ -540,6 +540,136 @@ public:
       }
    }
 
+   /// Compute traction at quad points with optional stress/correction decomposition.
+   ///
+   /// Same as ComputeTractionAtQuadPoints, but additionally outputs the stress
+   /// and penalty-correction components separately:
+   ///   traction_q = stress_q + correction_q
+   ///
+   /// @param stress_q_out If non-null, receives the stress-average part [dim*nq]
+   /// @param correction_q_out If non-null, receives the penalty part [dim*nq]
+   /// @param jump_residual_q_out If non-null, receives (u_jump - slip) [dim*nq]
+   void ComputeTractionAtQuadPointsDecomposed(
+      const FiniteElement &fe1, const FiniteElement &fe2,
+      FaceElementTransformations &Trans,
+      const Vector &u1_dofs, const Vector &u2_dofs,
+      const Vector &slip_3d,
+      Vector &traction_q,
+      Vector *stress_q_out,
+      Vector *correction_q_out,
+      Vector *jump_residual_q_out = nullptr,
+      Vector *nor_q_out = nullptr,
+      Vector *nl_q_out = nullptr) const
+   {
+      const int ndof1 = fe1.GetDof();
+      const int ndof2 = fe2.GetDof();
+
+      const int order = 2 * std::max(fe1.GetOrder(), fe2.GetOrder()) + 1;
+      const IntegrationRule &ir = IntRules.Get(Trans.GetGeometryType(), order);
+      const int nq = ir.GetNPoints();
+
+      traction_q.SetSize(dim_ * nq);
+      traction_q = 0.0;
+      if (stress_q_out) { stress_q_out->SetSize(dim_ * nq); *stress_q_out = 0.0; }
+      if (correction_q_out) { correction_q_out->SetSize(dim_ * nq); *correction_q_out = 0.0; }
+      if (jump_residual_q_out) { jump_residual_q_out->SetSize(dim_ * nq); *jump_residual_q_out = 0.0; }
+      if (nor_q_out) { nor_q_out->SetSize(dim_ * nq); }
+      if (nl_q_out) { nl_q_out->SetSize(nq); }
+
+      Vector shape1(ndof1), shape2(ndof2);
+      DenseMatrix dshape1_ref(ndof1, dim_), dshape2_ref(ndof2, dim_);
+      DenseMatrix dshape1_phys(ndof1, dim_), dshape2_phys(ndof2, dim_);
+      DenseMatrix Jinv(dim_);
+      Vector nor(dim_);
+
+      for (int q = 0; q < nq; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Trans.SetAllIntPoints(&ip);
+         const IntegrationPoint &eip1 = Trans.GetElement1IntPoint();
+         const IntegrationPoint &eip2 = Trans.GetElement2IntPoint();
+
+         CalcOrtho(Trans.Jacobian(), nor);
+         real_t nl = nor.Norml2();
+         Vector n_hat(dim_);
+         for (int d = 0; d < dim_; d++) { n_hat(d) = nor(d) / nl; }
+
+         if (nor_q_out)
+         {
+            for (int d = 0; d < dim_; d++)
+               (*nor_q_out)(d * nq + q) = nor(d);
+         }
+         if (nl_q_out) { (*nl_q_out)(q) = nl; }
+
+         CalcInverse(Trans.Elem1->Jacobian(), Jinv);
+         fe1.CalcDShape(eip1, dshape1_ref);
+         Mult(dshape1_ref, Jinv, dshape1_phys);
+
+         CalcInverse(Trans.Elem2->Jacobian(), Jinv);
+         fe2.CalcDShape(eip2, dshape2_ref);
+         Mult(dshape2_ref, Jinv, dshape2_phys);
+
+         real_t lam1t = lambda_.Eval(*Trans.Elem1, eip1);
+         real_t mu1t = mu_.Eval(*Trans.Elem1, eip1);
+         real_t lam2t = lambda_.Eval(*Trans.Elem2, eip2);
+         real_t mu2t = mu_.Eval(*Trans.Elem2, eip2);
+
+         DenseMatrix grad1(dim_, dim_), grad2(dim_, dim_);
+         grad1 = 0.0; grad2 = 0.0;
+         for (int c = 0; c < dim_; c++)
+            for (int d = 0; d < dim_; d++)
+            {
+               for (int k = 0; k < ndof1; k++)
+                  grad1(c, d) += dshape1_phys(k, d) * u1_dofs(c * ndof1 + k);
+               for (int k = 0; k < ndof2; k++)
+                  grad2(c, d) += dshape2_phys(k, d) * u2_dofs(c * ndof2 + k);
+            }
+
+         real_t tr1 = grad1(0,0) + grad1(1,1) + grad1(2,2);
+         real_t tr2 = grad2(0,0) + grad2(1,1) + grad2(2,2);
+         for (int p = 0; p < dim_; p++)
+         {
+            real_t T_p = 0.0;
+            for (int j = 0; j < dim_; j++)
+            {
+               real_t eps1 = 0.5*(grad1(p,j) + grad1(j,p));
+               real_t eps2 = 0.5*(grad2(p,j) + grad2(j,p));
+               real_t sig1 = (p==j ? lam1t*tr1 : 0.0) + 2.0*mu1t*eps1;
+               real_t sig2 = (p==j ? lam2t*tr2 : 0.0) + 2.0*mu2t*eps2;
+               T_p += 0.5 * (sig1 + sig2) * n_hat(j);
+            }
+            traction_q(p * nq + q) = T_p;
+            if (stress_q_out) { (*stress_q_out)(p * nq + q) = T_p; }
+         }
+
+         real_t detJ1 = Trans.Elem1->Weight();
+         real_t detJ2 = Trans.Elem2->Weight();
+         real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
+                                          lam1t, mu1t, nl, true);
+
+         fe1.CalcShape(eip1, shape1);
+         fe2.CalcShape(eip2, shape2);
+
+         for (int c = 0; c < dim_; c++)
+         {
+            real_t u1q = 0.0, u2q = 0.0;
+            for (int k = 0; k < ndof1; k++)
+               u1q += shape1(k) * u1_dofs(c * ndof1 + k);
+            for (int k = 0; k < ndof2; k++)
+               u2q += shape2(k) * u2_dofs(c * ndof2 + k);
+
+            real_t f_q = slip_3d(c * nq + q);
+            real_t corr = (-penalty) * (u1q - u2q - f_q);
+            traction_q(c * nq + q) += corr;
+            if (correction_q_out) { (*correction_q_out)(c * nq + q) = corr; }
+            if (jump_residual_q_out)
+            {
+               (*jump_residual_q_out)(c * nq + q) = u1q - u2q - f_q;
+            }
+         }
+      }
+   }
+
    /// Project 3D quad-point traction to fault-local DOFs with nl_q weighting.
    ///
    /// Mirrors Tandem's evaluate_traction kernel (elasticity_adapter.py:26-27):

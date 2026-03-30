@@ -687,6 +687,221 @@ void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
 }
 
 // ============================================================================
+// Test: PrintDiagnostics produces valid output
+// ============================================================================
+
+void TestProbe2DInterpolator_PrintDiagnostics()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_PrintDiagnostics ===\n";
+
+   // Single p=1 triangle
+   Vector x2(3), x3(3);
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"inside", 250.0, 250.0},
+      {"outside", 2e3, 2e3},
+   };
+
+   Probe2DInterpolator interp(x2, x3, stations, 3);
+
+   // Station inside should have exact match
+   TEST_ASSERT(interp.HasExactMatch(0),
+               "Station inside triangle has exact match");
+   TEST_ASSERT(!interp.HasExactMatch(1),
+               "Station outside triangle falls back to nearest-DOF");
+
+   // PrintDiagnostics should not crash
+   std::ostringstream oss;
+   interp.PrintDiagnostics(stations, x2, x3, oss);
+   std::string diag = oss.str();
+   TEST_ASSERT(diag.find("exact_match = true") != std::string::npos,
+               "Diagnostics show exact match for inside station");
+   TEST_ASSERT(diag.find("exact_match = false") != std::string::npos,
+               "Diagnostics show no exact match for outside station");
+   TEST_ASSERT(diag.find("DEGENERATE") == std::string::npos,
+               "No degenerate triangle detected");
+
+   std::cout << diag;
+}
+
+// ============================================================================
+// Test: CountDuplicateFaces detects shared-face duplication
+// ============================================================================
+
+void TestProbe2DInterpolator_CountDuplicateFaces()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_CountDuplicateFaces ===\n";
+
+   // Simulate 3 faces gathered from 2 ranks:
+   //   Rank 0: face A (unique) + face B (shared)
+   //   Rank 1: face B (shared, same coords) + face C (unique)
+   // After gather: [faceA, faceB_rank0, faceB_rank1, faceC] = 4 face blocks
+   // But faceB appears twice.
+
+   const int nbf = 3;
+   const int nfaces = 4;
+   Vector x2(nfaces * nbf), x3(nfaces * nbf);
+
+   // Face A: (0, 0), (1000, 0), (0, 1000) — unique
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   // Face B (rank 0 copy): (2000, 0), (3000, 0), (2000, 1000)
+   x2(3) = 2e3;    x3(3) = 0.0;
+   x2(4) = 3e3;    x3(4) = 0.0;
+   x2(5) = 2e3;    x3(5) = 1e3;
+
+   // Face B (rank 1 copy): same coordinates
+   x2(6) = 2e3;    x3(6) = 0.0;
+   x2(7) = 3e3;    x3(7) = 0.0;
+   x2(8) = 2e3;    x3(8) = 1e3;
+
+   // Face C: (4000, 0), (5000, 0), (4000, 1000) — unique
+   x2(9)  = 4e3;   x3(9)  = 0.0;
+   x2(10) = 5e3;   x3(10) = 0.0;
+   x2(11) = 4e3;   x3(11) = 1e3;
+
+   std::ostringstream oss;
+   int dups = Probe2DInterpolator::CountDuplicateFaces(x2, x3, nbf, 1.0, &oss);
+   TEST_ASSERT(dups == 1,
+               "Detected exactly 1 duplicate face pair");
+
+   std::cout << oss.str();
+
+   // No duplicates when all faces are unique
+   x2(6) = 6e3;  // Move rank 1's "face B" to a different location
+   int dups2 = Probe2DInterpolator::CountDuplicateFaces(x2, x3, nbf, 1.0);
+   TEST_ASSERT(dups2 == 0,
+               "No duplicates when all faces are unique");
+}
+
+// ============================================================================
+// Test: Exact interpolation with duplicated shared faces
+// ============================================================================
+
+void TestProbe2DInterpolator_ExactWithDuplicates()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_ExactWithDuplicates ===\n";
+
+   // Simulate what happens when a shared face is duplicated in the global
+   // array. Station is inside the duplicated face. Both copies should
+   // produce the same interpolated value if field data is consistent.
+
+   const int nbf = 3;
+   // 3 faces: faceA, faceB_rank0, faceB_rank1 (duplicate)
+   Vector x2(9), x3(9);
+
+   // Face A
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   // Face B (rank 0)
+   x2(3) = 2e3;    x3(3) = 0.0;
+   x2(4) = 3e3;    x3(4) = 0.0;
+   x2(5) = 2e3;    x3(5) = 1e3;
+
+   // Face B (rank 1) — same coords
+   x2(6) = 2e3;    x3(6) = 0.0;
+   x2(7) = 3e3;    x3(7) = 0.0;
+   x2(8) = 2e3;    x3(8) = 1e3;
+
+   // Station inside face B
+   std::vector<Probe2DInterpolator::Station> stations = {
+      {"in_faceB", 2500.0, 250.0},
+   };
+
+   Probe2DInterpolator interp(x2, x3, stations, nbf);
+
+   TEST_ASSERT(interp.HasExactMatch(0),
+               "Station inside duplicated face has exact match");
+
+   // The interpolator should match the FIRST occurrence (rank 0's copy)
+   TEST_ASSERT(interp.GetFaceStart(0) == 3,
+               "Matched face_start is rank 0's copy (index 3)");
+
+   // Evaluate with consistent field data across both copies
+   Vector field(9);
+   field(0) = 100.0;  field(1) = 200.0;  field(2) = 300.0;  // face A
+   field(3) = 10.0;   field(4) = 20.0;   field(5) = 40.0;   // face B rank 0
+   field(6) = 10.0;   field(7) = 20.0;   field(8) = 40.0;   // face B rank 1 (same)
+
+   real_t val = interp.EvaluateScalar(field, 0);
+
+   // Barycentric at (2500, 250) in triangle (2000,0)-(3000,0)-(2000,1000):
+   // r = (500*1000 - 250*0) / (1000*1000 - 0*0) = 0.5
+   // s = (0*250 - (-1000)*500) / (1000*1000) = ... let me compute properly
+   // Using ComputeReferenceIP logic:
+   // ax = 3000-2000 = 1000, az = 0-0 = 0
+   // bx = 2000-2000 = 0, bz = 1000-0 = 1000
+   // px = 2500-2000 = 500, pz = 250-0 = 250
+   // det = 1000*1000 - 0*0 = 1e6
+   // r = (500*1000 - 250*0) / 1e6 = 0.5
+   // s = (1000*250 - 0*500) / 1e6 = 0.25
+   // l0 = 1 - 0.5 - 0.25 = 0.25, l1 = 0.5, l2 = 0.25
+   // For p=1 H1_TriangleElement with GaussLobatto: shape = [l0, l1, l2]
+   // val = 0.25*10 + 0.5*20 + 0.25*40 = 2.5 + 10 + 10 = 22.5
+   TEST_NEAR(val, 22.5, 1e-12,
+             "Exact interpolation correct with duplicated face (consistent data)");
+
+   // Now test with INCONSISTENT field data across copies (the dangerous case)
+   field(6) = 15.0;   field(7) = 25.0;   field(8) = 45.0;  // rank 1 differs
+
+   real_t val_consistent = interp.EvaluateScalar(field, 0);
+   // Should still use rank 0's copy (face_start = 3)
+   TEST_NEAR(val_consistent, 22.5, 1e-12,
+             "Uses rank 0's copy even when rank 1 differs (first-match wins)");
+}
+
+// ============================================================================
+// Test: Exact interpolation at face boundary and vertex
+// ============================================================================
+
+void TestProbe2DInterpolator_ExactBoundaryAndVertex()
+{
+   std::cout << "\n=== Test: Probe2DInterpolator_ExactBoundaryAndVertex ===\n";
+
+   Vector x2(3), x3(3);
+   x2(0) = 0.0;    x3(0) = 0.0;
+   x2(1) = 1e3;    x3(1) = 0.0;
+   x2(2) = 0.0;    x3(2) = 1e3;
+
+   Vector field(3);
+   field(0) = 10.0;  field(1) = 20.0;  field(2) = 30.0;
+
+   // Station exactly at vertex 0
+   {
+      std::vector<Probe2DInterpolator::Station> stations = {
+         {"at_v0", 0.0, 0.0},
+      };
+      Probe2DInterpolator interp(x2, x3, stations, 3);
+      TEST_ASSERT(interp.HasExactMatch(0),
+                  "Station at vertex has exact match");
+      real_t val = interp.EvaluateScalar(field, 0);
+      TEST_NEAR(val, 10.0, 1e-12,
+                "Exact interpolation at vertex 0 gives vertex value");
+   }
+
+   // Station at midpoint of edge (v0-v1)
+   {
+      std::vector<Probe2DInterpolator::Station> stations = {
+         {"mid_edge", 500.0, 0.0},
+      };
+      Probe2DInterpolator interp(x2, x3, stations, 3);
+      TEST_ASSERT(interp.HasExactMatch(0),
+                  "Station at edge midpoint has exact match");
+      real_t val = interp.EvaluateScalar(field, 0);
+      // At (500, 0): r=0.5, s=0, l0=0.5, l1=0.5, l2=0
+      TEST_NEAR(val, 15.0, 1e-12,
+                "Exact interpolation at edge midpoint correct");
+   }
+}
+
+// ============================================================================
 // Main
 // ============================================================================
 
@@ -708,6 +923,12 @@ int main()
    TestProbe2DInterpolator_MultiDOFCloserMatch();
    TestBP5BenchmarkOutput_MultiDOFWrite();
    TestBP5BenchmarkOutput_ExactFaceInterpolationP1();
+
+   // v56: Diagnostics and duplicate detection tests
+   TestProbe2DInterpolator_PrintDiagnostics();
+   TestProbe2DInterpolator_CountDuplicateFaces();
+   TestProbe2DInterpolator_ExactWithDuplicates();
+   TestProbe2DInterpolator_ExactBoundaryAndVertex();
 
    TEST_PRINT_RESULTS();
    return num_failed;

@@ -75,6 +75,20 @@ public:
          TryBuildExactMatch(fault_x2, fault_x3,
                             stations[s].x2, stations[s].x3, s);
       }
+
+      // Warn about stations using nearest-DOF snap instead of exact
+      // face interpolation — the output method is different.
+      for (int s = 0; s < num_stations_; s++)
+      {
+         if (!exact_match_[s] && nbf_per_face_ >= 3)
+         {
+            std::cout << "  WARNING: Station " << stations[s].name
+                      << " at (" << stations[s].x2 << ", "
+                      << stations[s].x3 << ") using nearest-DOF snap "
+                      << "(dist=" << match_distance_[s]
+                      << " m) instead of exact face interpolation.\n";
+         }
+      }
    }
 
    /// Get the DOF index closest to the given station.
@@ -96,6 +110,148 @@ public:
    bool HasExactMatch(int station_idx) const
    {
       return exact_match_[station_idx];
+   }
+
+   /// Get the face start index for a station (valid only if HasExactMatch).
+   int GetFaceStart(int station_idx) const { return face_start_[station_idx]; }
+
+   /// Get the exact interpolation weights for a station.
+   const Vector &GetExactWeights(int station_idx) const
+   {
+      return exact_weights_[station_idx];
+   }
+
+   /// Get nbf_per_face used by this interpolator.
+   int GetNbfPerFace() const { return nbf_per_face_; }
+
+   /// Print diagnostic information for all stations.
+   ///
+   /// For each station, prints whether exact interpolation is active,
+   /// the face_start index, weights, nearest DOF, match distance,
+   /// and the coordinates of the contributing DOFs.
+   void PrintDiagnostics(const std::vector<Station> &stations,
+                         const Vector &x2, const Vector &x3,
+                         std::ostream &os = std::cout) const
+   {
+      os << "\n=== Probe2DInterpolator Diagnostics ===\n";
+      os << "  num_dofs = " << num_dofs_
+         << ", nbf_per_face = " << nbf_per_face_
+         << ", num_faces = "
+         << (nbf_per_face_ > 0 ? num_dofs_ / nbf_per_face_ : 0)
+         << "\n";
+      if (nbf_per_face_ >= 3 && num_dofs_ % nbf_per_face_ != 0)
+      {
+         os << "  WARNING: num_dofs % nbf_per_face != 0 ("
+            << num_dofs_ << " % " << nbf_per_face_
+            << " = " << (num_dofs_ % nbf_per_face_)
+            << ") — exact interpolation disabled\n";
+      }
+
+      for (int s = 0; s < num_stations_; s++)
+      {
+         os << "\n  Station " << s;
+         if (s < static_cast<int>(stations.size()))
+         {
+            os << " [" << stations[s].name
+               << "] target=(" << stations[s].x2
+               << ", " << stations[s].x3 << ")";
+         }
+         os << "\n";
+
+         os << "    nearest_dof = " << nearest_dof_[s]
+            << ", match_distance = " << match_distance_[s] << " m\n";
+
+         if (nearest_dof_[s] >= 0 && nearest_dof_[s] < num_dofs_)
+         {
+            os << "    nearest coords = ("
+               << x2(nearest_dof_[s]) << ", "
+               << x3(nearest_dof_[s]) << ")\n";
+         }
+
+         os << "    exact_match = "
+            << (exact_match_[s] ? "true" : "false") << "\n";
+
+         if (exact_match_[s])
+         {
+            int start = face_start_[s];
+            os << "    face_start = " << start << "\n";
+            os << "    weights = [";
+            for (int k = 0; k < exact_weights_[s].Size(); k++)
+            {
+               if (k > 0) { os << ", "; }
+               os << exact_weights_[s](k);
+            }
+            os << "]\n";
+            os << "    face DOF coords:\n";
+            int nbf = std::min(nbf_per_face_, num_dofs_ - start);
+            for (int k = 0; k < nbf; k++)
+            {
+               os << "      DOF " << (start + k) << ": ("
+                  << x2(start + k) << ", " << x3(start + k) << ")\n";
+            }
+
+            // Validate: check triangle non-degeneracy
+            if (nbf >= 3)
+            {
+               real_t ax = x2(start + 1) - x2(start);
+               real_t az = x3(start + 1) - x3(start);
+               real_t bx = x2(start + 2) - x2(start);
+               real_t bz = x3(start + 2) - x3(start);
+               real_t det = ax * bz - az * bx;
+               os << "    triangle det = " << det;
+               if (std::abs(det) < 1e-14)
+               {
+                  os << " *** DEGENERATE ***";
+               }
+               os << "\n";
+            }
+         }
+      }
+      os << "=== End Diagnostics ===\n\n";
+   }
+
+   /// Detect duplicate faces in the global coordinate array.
+   ///
+   /// Returns the number of face pairs that share the same vertex
+   /// coordinates (within tolerance). This indicates shared-face
+   /// duplication from the parallel gather.
+   static int CountDuplicateFaces(const Vector &x2, const Vector &x3,
+                                  int nbf_per_face, real_t tol = 1.0,
+                                  std::ostream *os = nullptr)
+   {
+      if (nbf_per_face < 3) { return 0; }
+      int ndofs = x2.Size();
+      if (ndofs % nbf_per_face != 0) { return 0; }
+      int nfaces = ndofs / nbf_per_face;
+      int duplicates = 0;
+
+      for (int i = 0; i < nfaces; i++)
+      {
+         int si = i * nbf_per_face;
+         for (int j = i + 1; j < nfaces; j++)
+         {
+            int sj = j * nbf_per_face;
+            // Compare first vertex (sufficient for face identification)
+            real_t dx = x2(si) - x2(sj);
+            real_t dz = x3(si) - x3(sj);
+            if (std::sqrt(dx * dx + dz * dz) < tol)
+            {
+               // Confirm with second vertex
+               real_t dx1 = x2(si + 1) - x2(sj + 1);
+               real_t dz1 = x3(si + 1) - x3(sj + 1);
+               if (std::sqrt(dx1 * dx1 + dz1 * dz1) < tol)
+               {
+                  duplicates++;
+                  if (os)
+                  {
+                     *os << "  Duplicate faces: " << i << " and " << j
+                         << " at (" << x2(si) << ", " << x3(si) << ")\n";
+                  }
+               }
+            }
+         }
+      }
+      return duplicates;
    }
 
    /// Evaluate a scalar field [num_dofs] at the given station.
@@ -594,6 +750,35 @@ public:
 
    /// Number of probes.
    int NumProbes() const { return static_cast<int>(probes_.size()); }
+
+   /// Access the interpolator (for diagnostics).
+   const Probe2DInterpolator &GetInterpolator() const { return interpolator_; }
+
+   /// Print station mapping diagnostics (delegates to interpolator).
+   ///
+   /// @param fault_x2 The same x2 coordinate vector used to construct the output
+   /// @param fault_x3 The same x3 coordinate vector used to construct the output
+   void PrintDiagnostics(const Vector &fault_x2, const Vector &fault_x3,
+                         std::ostream &os = std::cout) const
+   {
+      interpolator_.PrintDiagnostics(stations_, fault_x2, fault_x3, os);
+
+      // Check for duplicate faces
+      int nbf = interpolator_.GetNbfPerFace();
+      if (nbf >= 3)
+      {
+         os << "Checking for duplicate faces in gathered coordinates...\n";
+         int dups = Probe2DInterpolator::CountDuplicateFaces(
+            fault_x2, fault_x3, nbf, 1.0, &os);
+         os << "  Total duplicate face pairs: " << dups << "\n";
+         if (dups > 0)
+         {
+            os << "  WARNING: " << dups << " shared faces are duplicated "
+               << "in the global gather. Exact interpolation may use stale "
+               << "data from the wrong rank's copy.\n";
+         }
+      }
+   }
 
    /// @brief Compute adaptive output interval based on slip rate.
    /// Same thresholds as BenchmarkOutput.

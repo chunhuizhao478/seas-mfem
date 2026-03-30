@@ -66,14 +66,59 @@ public:
       int face_basis_type = BasisType::GaussLobatto)
       : fault_geom_(fault_geom),
         mpi_ctx_(mpi_ctx),
+        nbf_per_face_(nbf_per_face),
         last_write_time_(-1e30)
    {
       if (mpi_ctx_.IsRoot())
       {
-         bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
-            prefix, params, stations, global_x2, global_x3,
-            nbf_per_face, face_basis_type);
-         bench_out_->SetTauPre(global_tau_pre_dip, global_tau_pre_strike);
+         // Build face deduplication mapping to handle shared-face duplicates
+         // at partition boundaries. Without this, the contiguous-per-face
+         // assumption in TryBuildExactMatch would break.
+         if (nbf_per_face > 1)
+         {
+            FaultGeometry<ParMesh>::BuildFaceDedupMap(
+               global_x2, global_x3, nbf_per_face,
+               dedup_face_indices_);
+
+            int num_raw = global_x2.Size();
+            int num_dedup = static_cast<int>(dedup_face_indices_.size())
+                            * nbf_per_face;
+            if (num_dedup < num_raw)
+            {
+               std::cout << "  Face dedup: " << num_raw / nbf_per_face
+                         << " raw faces → "
+                         << dedup_face_indices_.size()
+                         << " unique faces ("
+                         << (num_raw - num_dedup) / nbf_per_face
+                         << " duplicates removed)\n";
+            }
+
+            // Deduplicate coordinates and tau_pre
+            Vector dedup_x2, dedup_x3, dedup_tau_dip, dedup_tau_strike;
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_x2, dedup_face_indices_, nbf_per_face, dedup_x2);
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_x3, dedup_face_indices_, nbf_per_face, dedup_x3);
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_tau_pre_dip, dedup_face_indices_, nbf_per_face,
+               dedup_tau_dip);
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_tau_pre_strike, dedup_face_indices_, nbf_per_face,
+               dedup_tau_strike);
+
+            bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
+               prefix, params, stations, dedup_x2, dedup_x3,
+               nbf_per_face, face_basis_type);
+            bench_out_->SetTauPre(dedup_tau_dip, dedup_tau_strike);
+         }
+         else
+         {
+            // nbf=1: no face structure to deduplicate, use raw data directly
+            bench_out_ = std::make_unique<BP5BenchmarkOutput<Mesh>>(
+               prefix, params, stations, global_x2, global_x3,
+               nbf_per_face, face_basis_type);
+            bench_out_->SetTauPre(global_tau_pre_dip, global_tau_pre_strike);
+         }
       }
    }
 
@@ -90,6 +135,28 @@ public:
       if (mpi_ctx_.IsRoot() && bench_out_)
       {
          bench_out_->EnableJumpResidualOutput();
+      }
+   }
+
+   /// Print station mapping diagnostics on root.
+   void PrintDiagnostics(const Vector &global_x2, const Vector &global_x3,
+                         std::ostream &os = std::cout) const
+   {
+      if (mpi_ctx_.IsRoot() && bench_out_)
+      {
+         if (!dedup_face_indices_.empty())
+         {
+            Vector d_x2, d_x3;
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_x2, dedup_face_indices_, nbf_per_face_, d_x2);
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               global_x3, dedup_face_indices_, nbf_per_face_, d_x3);
+            bench_out_->PrintDiagnostics(d_x2, d_x3, os);
+         }
+         else
+         {
+            bench_out_->PrintDiagnostics(global_x2, global_x3, os);
+         }
       }
    }
 
@@ -155,12 +222,32 @@ public:
       fault_geom_.GatherToRoot(local_trac_dip, g_trac_dip);
       fault_geom_.GatherToRoot(local_trac_strike, g_trac_strike);
 
-      // Root writes using globally gathered data
+      // Root writes using globally gathered data (deduplicated if needed)
       if (mpi_ctx_.IsRoot() && bench_out_)
       {
-         bench_out_->WriteFromGlobalData(
-            time, g_slip_dip, g_slip_strike, g_theta,
-            g_V_dip, g_V_strike, g_trac_dip, g_trac_strike);
+         if (!dedup_face_indices_.empty())
+         {
+            Vector d_sd, d_ss, d_th, d_vd, d_vs, d_td, d_ts;
+            auto dedup = [&](const Vector &raw, Vector &out) {
+               FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+                  raw, dedup_face_indices_, nbf_per_face_, out);
+            };
+            dedup(g_slip_dip, d_sd);
+            dedup(g_slip_strike, d_ss);
+            dedup(g_theta, d_th);
+            dedup(g_V_dip, d_vd);
+            dedup(g_V_strike, d_vs);
+            dedup(g_trac_dip, d_td);
+            dedup(g_trac_strike, d_ts);
+            bench_out_->WriteFromGlobalData(
+               time, d_sd, d_ss, d_th, d_vd, d_vs, d_td, d_ts);
+         }
+         else
+         {
+            bench_out_->WriteFromGlobalData(
+               time, g_slip_dip, g_slip_strike, g_theta,
+               g_V_dip, g_V_strike, g_trac_dip, g_trac_strike);
+         }
       }
 
       last_write_time_ = time;
@@ -205,8 +292,25 @@ public:
 
       if (mpi_ctx_.IsRoot() && bench_out_)
       {
-         bench_out_->WriteTractionDecompositionFromGlobalData(
-            time, g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike);
+         if (!dedup_face_indices_.empty())
+         {
+            Vector d_sd, d_ss, d_cd, d_cs;
+            auto dedup = [&](const Vector &raw, Vector &out) {
+               FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+                  raw, dedup_face_indices_, nbf_per_face_, out);
+            };
+            dedup(g_stress_dip, d_sd);
+            dedup(g_stress_strike, d_ss);
+            dedup(g_corr_dip, d_cd);
+            dedup(g_corr_strike, d_cs);
+            bench_out_->WriteTractionDecompositionFromGlobalData(
+               time, d_sd, d_ss, d_cd, d_cs);
+         }
+         else
+         {
+            bench_out_->WriteTractionDecompositionFromGlobalData(
+               time, g_stress_dip, g_stress_strike, g_corr_dip, g_corr_strike);
+         }
       }
    }
 
@@ -238,8 +342,21 @@ public:
 
       if (mpi_ctx_.IsRoot() && bench_out_)
       {
-         bench_out_->WriteJumpResidualFromGlobalData(
-            time, g_res_dip, g_res_strike);
+         if (!dedup_face_indices_.empty())
+         {
+            Vector d_rd, d_rs;
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               g_res_dip, dedup_face_indices_, nbf_per_face_, d_rd);
+            FaultGeometry<ParMesh>::ApplyFaceDedupMap(
+               g_res_strike, dedup_face_indices_, nbf_per_face_, d_rs);
+            bench_out_->WriteJumpResidualFromGlobalData(
+               time, d_rd, d_rs);
+         }
+         else
+         {
+            bench_out_->WriteJumpResidualFromGlobalData(
+               time, g_res_dip, g_res_strike);
+         }
       }
    }
 
@@ -268,6 +385,8 @@ public:
 private:
    FaultGeometry<ParMesh> &fault_geom_;
    MPIContext &mpi_ctx_;
+   int nbf_per_face_ = 1;
+   std::vector<int> dedup_face_indices_;  // Face dedup mapping (root only)
    std::unique_ptr<BP5BenchmarkOutput<Mesh>> bench_out_;
    real_t last_write_time_;
 };

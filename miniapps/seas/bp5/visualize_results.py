@@ -313,47 +313,77 @@ def main():
     )
     # Primary datasets
     parser.add_argument(
-        "mfem_prefix_positional", nargs="?", default=None,
-        help="(Legacy) MFEM output prefix (e.g., results_1000m/bp5_full)"
+        "mfem_prefix_positional",
+        nargs="?",
+        default=None,
+        help="(Legacy) MFEM output prefix (e.g., results_1000m/bp5_full)",
     )
     parser.add_argument(
-        "--mfem", action="append", metavar="[LABEL:]PREFIX",
-        help="MFEM output prefix. Use 'label:prefix' for custom label. Repeatable."
+        "--mfem",
+        action="append",
+        metavar="[LABEL:]PREFIX",
+        help="MFEM output prefix. Use 'label:prefix' for custom label. Repeatable.",
     )
     parser.add_argument(
-        "--tandem-results", action="append", metavar="[LABEL:]PREFIX",
+        "--tandem-results",
+        action="append",
+        metavar="[LABEL:]PREFIX",
         help="Tandem results prefix (e.g., 'p1 1000m:/path/to/bp5qd_tandem_p1'). "
-             "Files: {prefix}_x2_{x2}_x3_{x3}.txt. Repeatable."
+        "Files: {prefix}_x2_{x2}_x3_{x3}.txt. Repeatable.",
     )
 
     # Benchmark references
-    parser.add_argument("--tandem-p4", action="store_true",
-                        help="Include Tandem p4 benchmark data")
-    parser.add_argument("--tandem-p6", action="store_true",
-                        help="Include Tandem p6 benchmark data")
-    parser.add_argument("--tandem", action="store_true",
-                        help="Include both Tandem p4 and p6 benchmark data")
-    parser.add_argument("--eqsim", action="store_true",
-                        help="Include EQSim benchmark data")
-    parser.add_argument("--tribie", action="store_true",
-                        help="Include TriBIE benchmark data")
-    parser.add_argument("--benchmark-dir", default="benchmark_data",
-                        help="Directory containing benchmark files")
-    parser.add_argument("--no-benchmark", action="store_true",
-                        help="Skip all benchmark references")
+    parser.add_argument(
+        "--tandem-p4", action="store_true", help="Include Tandem p4 benchmark data"
+    )
+    parser.add_argument(
+        "--tandem-p6", action="store_true", help="Include Tandem p6 benchmark data"
+    )
+    parser.add_argument(
+        "--tandem",
+        action="store_true",
+        help="Include both Tandem p4 and p6 benchmark data",
+    )
+    parser.add_argument(
+        "--eqsim", action="store_true", help="Include EQSim benchmark data"
+    )
+    parser.add_argument(
+        "--tribie", action="store_true", help="Include TriBIE benchmark data"
+    )
+    parser.add_argument(
+        "--benchmark-dir",
+        default="benchmark_data",
+        help="Directory containing benchmark files",
+    )
+    parser.add_argument(
+        "--no-benchmark", action="store_true", help="Skip all benchmark references"
+    )
 
     # Output options
-    parser.add_argument("--stations", nargs="+", type=int, default=None,
-                        help="Specific station indices (1-10). Default: all")
-    parser.add_argument("--save", action="store_true",
-                        help="Save plots as PNG (default: display)")
+    parser.add_argument(
+        "--stations",
+        nargs="+",
+        type=int,
+        default=None,
+        help="Specific station indices (1-10). Default: all",
+    )
+    parser.add_argument(
+        "--save", action="store_true", help="Save plots as PNG (default: display)"
+    )
     parser.add_argument("--output-dir", default=".", help="Directory for output plots")
-    parser.add_argument("--flip-dip", action="store_true",
-                        help="Flip sign of slip_dip and tau_dip for MFEM datasets")
+    parser.add_argument(
+        "--flip-dip",
+        action="store_true",
+        help="Flip sign of slip_dip and tau_dip for MFEM datasets",
+    )
 
     # Legacy compat
-    parser.add_argument("--compare", action="append", metavar="LABEL:PREFIX",
-                        help="(Legacy) Additional MFEM dataset to overlay")
+    parser.add_argument(
+        "--compare",
+        action="append",
+        metavar="LABEL:PREFIX",
+        help="(Legacy) Additional MFEM dataset to overlay",
+    )
 
     args = parser.parse_args()
 
@@ -363,8 +393,13 @@ def main():
         args.tandem_p6 = True
 
     # Default: Tandem p4 if no benchmark flags and not --no-benchmark
-    if (not args.no_benchmark and not args.tandem_p4 and not args.tandem_p6
-            and not args.eqsim and not args.tribie):
+    if (
+        not args.no_benchmark
+        and not args.tandem_p4
+        and not args.tandem_p6
+        and not args.eqsim
+        and not args.tribie
+    ):
         args.tandem_p4 = True
 
     # Build ordered source list following command-line order.
@@ -398,11 +433,14 @@ def main():
 
     # Check we have at least one data source
     if not ordered_sources:
-        parser.error("No data sources specified. Use --mfem, --tandem-results, "
-                     "or benchmark flags (--tandem, --eqsim, etc.)")
+        parser.error(
+            "No data sources specified. Use --mfem, --tandem-results, "
+            "or benchmark flags (--tandem, --eqsim, etc.)"
+        )
 
     try:
         import matplotlib
+
         if args.save:
             matplotlib.use("Agg")
     except ImportError:
@@ -410,15 +448,17 @@ def main():
         return 1
 
     # Resolve benchmark directory
-    data_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                            args.benchmark_dir)
+    data_dir = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), args.benchmark_dir
+    )
     if not os.path.isabs(args.benchmark_dir) and not os.path.isdir(data_dir):
         data_dir = args.benchmark_dir
 
     # Select stations
     if args.stations:
-        stations = [SCEC_STATIONS[i - 1] for i in args.stations
-                     if 1 <= i <= len(SCEC_STATIONS)]
+        stations = [
+            SCEC_STATIONS[i - 1] for i in args.stations if 1 <= i <= len(SCEC_STATIONS)
+        ]
     else:
         stations = SCEC_STATIONS
 
@@ -541,8 +581,12 @@ def main():
                 args.output_dir, f"bp5_{station_name}_closeup.png"
             )
             plot_closeup(
-                datasets, station_name, x2_km, x3_km,
-                t_max_yr=1.0, save_path=fname_close,
+                datasets,
+                station_name,
+                x2_km,
+                x3_km,
+                t_max_yr=10.0,
+                save_path=fname_close,
             )
         else:
             plot_closeup(datasets, station_name, x2_km, x3_km, t_max_yr=1.0)

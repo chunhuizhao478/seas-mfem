@@ -1153,3 +1153,77 @@ documented Tandem-matched structure. All were fixed:
 | Friction solver | Log10 Brent, anti-parallel V | `DieterichRuinaBase::slip_rate` ✅ |
 
 All 587 tests pass after fixes.
+
+---
+
+## v55 Code Review Fixes + Interseismic Dip Deviation Analysis (2026-03-30)
+
+### Code Review Fixes Applied
+
+**P1-1: Per-QP slip embedding path unreachable for p=1 IP (CRITICAL)**
+- The `nbf == 1` gate at the per-QP embedding path was unreachable for p=1 IP
+  where `nbf_per_face_ = 3`. Fixed in 4 locations:
+  - `ComputeTractionImpl` interior faces: embed tangential components to QPs first,
+    then use per-QP tangent frame (matches Tandem `evaluate_slip`)
+  - `ComputeTractionImpl` shared faces: same fix
+  - `AssembleSlipContributionIP` interior: same per-QP path
+  - `AssembleSlipContributionIPShared`: same per-QP path
+- The correct Tandem flow: interpolate 2 tangential components (dip, strike) to
+  QPs via `e_q`, then embed at each QP using per-QP tangent frame
+
+**P1-2: Per-QP basis setup for shared-face-only ranks**
+- `face_geom` was only detected from the first interior fault face. If a rank has
+  no interior faces (only shared), it defaulted to TRIANGLE without verification.
+  Fixed to also check shared faces.
+
+**P2-3: Restored degeneracy check in ComputeOrientedFrame**
+- `MFEM_VERIFY(s_len > 1e-12, ...)` — prevents silent zero tangent vectors when
+  up-vector is collinear with face normal.
+
+**P2-5: Physically meaningful traction bound in parallel test**
+- Changed from 1e15 to `10 * mu` (~3.2e11 Pa). The old threshold passed while
+  reporting 3.19e10 as "TRACTION BLOWUP".
+
+**Normal stress L2 projection (NEW)**
+- The normal stress per DOF used a lumped-mass weighted average instead of the
+  consistent mass `M^{-1} * B^T * W * (T·n̂)` approach used for shear traction.
+  Fixed for both interior and shared face paths to use proper L2 projection
+  matching `ProjectTractionToFaultDOFs`.
+
+### Interseismic Dip Deviation Analysis
+
+**Observation**: Dip component shows growing deviation over earthquake cycles while
+strike tracks Tandem well at center stations. Off-center stations (strk±16, ±36)
+show larger deviation in BOTH strike and dip.
+
+**Data comparison (strk+00dp+00, first earthquake cycle)**:
+- Pre-eq peak: tau_dip ≈ -2.1 MPa (both MFEM and Tandem — physical, from 3D geometry)
+- Post-eq: tau_dip ≈ 0.1 MPa (both codes)
+- First cycle matches well (< 5% difference)
+
+**Off-center stations (strk+16dp+00)**:
+- Post-eq slip_dip: MFEM=-0.175 vs Tandem=-0.182 (4%)
+- Post-eq tau_strk: MFEM=14.10 vs Tandem=14.71 (4%)
+- **Post-eq state: MFEM log10(θ)=4.26 vs Tandem=3.30 (10× difference in θ!)**
+- Late-earthquake slip rate: MFEM V≈2e-6 vs Tandem V≈2e-5 (10× slower)
+
+**Rupture timing**:
+- MFEM earthquake at t≈183s, Tandem at t≈103s (80s offset)
+- Both show ~5s propagation delay to strk±16
+- Neither reaches V>0.1 at strk±36 in first earthquake
+
+**Root cause assessment**:
+1. The 80s timing offset (MFEM nucleates later) causes different stress paths
+2. Off-center stations are more sensitive because rupture dynamics differ:
+   the station's position relative to the rupture front matters
+3. The state variable (θ) divergence at off-center stations compounds over cycles
+4. The L2 normal stress fix should improve consistency but is unlikely to resolve
+   the timing offset
+
+**Remaining investigation needed**:
+- The 80s nucleation timing offset suggests the MFEM loading rate or initial
+  stress state differs slightly from Tandem. This could be due to:
+  - Different mesh topology (different tet connectivity → different stress concentration)
+  - Different DG penalty parameter formula or value
+  - Different quadrature accuracy in the initial stress computation
+- A mesh convergence study (500m vs 1000m) would help isolate discretization effects

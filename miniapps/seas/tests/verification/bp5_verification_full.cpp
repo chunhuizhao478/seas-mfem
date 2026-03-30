@@ -46,6 +46,8 @@
 //   --diag-psi-clamp           Print/summary diagnostics for psi clamp activity
 //   --tandem-time-stepping     Use Tandem-style startup/acceptance defaults
 //   --tandem-dt-init DT        Initial dt [s] for Tandem-style startup
+//   --petsc-ts                 Use PETSc TS RK45 path (exact Tandem framework)
+//   --petsc-ts-options FILE    PETSc options file (default: built-in Tandem rk45)
 
 #include "mfem.hpp"
 #include "../../solver/seas_operator.hpp"
@@ -341,9 +343,6 @@ int main(int argc, char *argv[])
    real_t tandem_dt_init = 0.01;      // Default Tandem-style startup dt [s]
    // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
    real_t penalty_factor = 1.0;
-   // v50f: traction recovery strategies
-   bool traction_stress_only = false;  // Skip penalty correction in traction
-   bool traction_weak_form = false;    // Weak-form traction (not yet implemented)
    bool diag_station_traction_decomp = false; // Write station-level stress/correction traction
    bool diag_station_jump_residual = false;   // Write station-level [[u]]-delta residual
    bool no_psi_clamp = true;           // Default OFF: match Tandem (no post-step psi clamp)
@@ -351,6 +350,9 @@ int main(int argc, char *argv[])
    bool dt_init_explicit = false;
    bool v_guard_explicit = false;
    bool psi_clamp_explicit = false;
+   bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
+   std::string petsc_ts_options_file;  // Optional PETSc options file
+   bool petsc_initialized = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -463,8 +465,12 @@ int main(int argc, char *argv[])
       {
          tandem_dt_init = std::atof(argv[++i]);
       }
+      if (arg == "--petsc-ts") { use_petsc_ts = true; }
+      if (arg == "--petsc-ts-options" && i + 1 < argc)
+      {
+         petsc_ts_options_file = argv[++i];
+      }
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
-      if (arg == "--traction-stress-only") { traction_stress_only = true; }
       if (arg == "--diag-station-traction-decomp")
       {
          diag_station_traction_decomp = true;
@@ -484,7 +490,6 @@ int main(int argc, char *argv[])
          psi_clamp_explicit = true;
       }
       if (arg == "--diag-psi-clamp") { diag_psi_clamp = true; }
-      if (arg == "--traction-weak-form") { traction_weak_form = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
       {
          face_basis_str = argv[++i];
@@ -504,6 +509,48 @@ int main(int argc, char *argv[])
       if (!dt_init_explicit) { dt_init_override = tandem_dt_init; }
       if (!v_guard_explicit) { no_v_guard = true; }
       if (!psi_clamp_explicit) { no_psi_clamp = true; }
+   }
+
+   if (use_petsc_ts)
+   {
+      no_v_guard = true;
+      no_psi_clamp = true;
+   }
+
+#ifndef MFEM_USE_PETSC
+   if (use_petsc_ts)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --petsc-ts requires MFEM built with PETSc "
+                   << "(current config has MFEM_USE_PETSC=NO).\n";
+      }
+      return 2;
+   }
+#else
+   if (use_petsc_ts)
+   {
+      if (petsc_ts_options_file.empty())
+      {
+         petsc_ts_options_file = "tests/verification/petsc_ts_rk45_tandem.cfg";
+      }
+      MFEMInitializePetsc(&argc, &argv,
+                          petsc_ts_options_file.c_str(), NULL);
+      petsc_initialized = true;
+   }
+#endif
+
+   // PETSc TS does not yet serialize its internal state, so
+   // checkpoint/restart is not supported. Reject the combination
+   // early so users don't discover it mid-run.
+   if (use_petsc_ts && !restart_prefix.empty())
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --restart is not supported with --petsc-ts "
+                   << "(PETSc TS state is not serialized in checkpoints).\n";
+      }
+      return 2;
    }
 
    // Parse DG method
@@ -547,6 +594,51 @@ int main(int argc, char *argv[])
    {
       solver_type = SolverType::CG_AMG;
    }
+
+   // Verify requested solver is actually available at compile time.
+   // Without this check, MUMPS/SuperLU/STRUMPACK requests silently
+   // fall through to CG+AMG, which may converge differently.
+#ifndef MFEM_USE_MUMPS
+   if (solver_type == SolverType::MUMPS || solver_type == SolverType::MUMPS_BLR)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --solver " << solver_str
+                   << " requires MFEM built with MFEM_USE_MUMPS=YES.\n"
+                   << "  Available solvers: cg, gmres, gmres-amg";
+#ifdef MFEM_USE_SUPERLU
+         std::cerr << ", superlu";
+#endif
+#ifdef MFEM_USE_STRUMPACK
+         std::cerr << ", strumpack";
+#endif
+         std::cerr << "\n";
+      }
+      return 2;
+   }
+#endif
+#ifndef MFEM_USE_SUPERLU
+   if (solver_type == SolverType::SUPERLU)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --solver superlu requires MFEM built with "
+                   << "MFEM_USE_SUPERLU=YES.\n";
+      }
+      return 2;
+   }
+#endif
+#ifndef MFEM_USE_STRUMPACK
+   if (solver_type == SolverType::STRUMPACK)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "ERROR: --solver strumpack requires MFEM built with "
+                   << "MFEM_USE_STRUMPACK=YES.\n";
+      }
+      return 2;
+   }
+#endif
 
    // Process --bc-mode flag
    BCMode bc_mode = BCMode::FarField;
@@ -598,6 +690,9 @@ int main(int argc, char *argv[])
          RunComparison(output_dir, output_prefix, ref_dir,
                        stations, t_final);
       }
+#ifdef MFEM_USE_PETSC
+      if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
       return 0;
    }
 
@@ -649,6 +744,9 @@ int main(int argc, char *argv[])
       {
          std::cerr << "ERROR: --mesh <file.msh> or --inline-mesh required.\n";
       }
+#ifdef MFEM_USE_PETSC
+      if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
       return 1;
    }
 
@@ -678,6 +776,16 @@ int main(int argc, char *argv[])
          std::cout << "  Time stepping policy: Tandem-style"
                    << " (dt_init=" << ts_dt
                    << " s, no V-guard, no psi clamp)\n";
+      }
+      if (use_petsc_ts)
+      {
+         std::cout << "  Time stepping policy: PETSc TS RK45"
+                   << " (exact Tandem framework";
+         if (!petsc_ts_options_file.empty())
+         {
+            std::cout << ", options=" << petsc_ts_options_file;
+         }
+         std::cout << ")\n";
       }
       std::cout << "  t_final: " << t_final / BP5Params::seconds_per_year
                 << " years\n";
@@ -750,22 +858,6 @@ int main(int argc, char *argv[])
    {
       std::cout << "  [v50g] face-basis-type: " << face_basis_str << "\n";
    }
-   if (traction_stress_only)
-   {
-      domain.SetTractionStressOnly(true);
-      if (mpi.IsRoot())
-      {
-         std::cout << "  [v50f] traction-stress-only: ON\n";
-      }
-   }
-   if (traction_weak_form)
-   {
-      if (mpi.IsRoot())
-      {
-         std::cout << "  [v50f] traction-weak-form: NOT YET IMPLEMENTED\n";
-      }
-   }
-
    if (mpi.IsRoot())
    {
       std::cout << "  Local fault DOFs: " << domain.GetNumFaultDOFs()
@@ -904,6 +996,10 @@ int main(int argc, char *argv[])
       full_prefix, params, stations, fault_geom, mpi,
       global_x2, global_x3, global_tp_dip, global_tp_strike,
       domain.GetNbfPerFace(), face_basis_type);
+
+   // v56: Print station mapping diagnostics on root
+   bench_out.PrintDiagnostics(global_x2, global_x3);
+
    if (diag_station_traction_decomp)
    {
       bench_out.EnableTractionDecompositionOutput();
@@ -1284,39 +1380,74 @@ int main(int argc, char *argv[])
          std::cout << "  [override] dt_init = " << dt_init << " s\n";
       }
    }
-   ode_solver.SetDt(dt_init);
-   if (mpi.IsRoot())
-   {
-      std::cout << "  CFL: c_N_1=" << c_N_1 << " beta=" << beta
-                << " (order=" << order << ")\n";
-      std::cout << "  dt_V = " << dt_V << " s, dt_CFL = " << dt_CFL << " s\n";
-      std::cout << "  Initial dt: " << dt_init << " s"
-                << (dt_init <= dt_CFL ? " (CFL-limited)" : " (V-limited)")
-                << "\n";
-   }
-   ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
-   if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
+   real_t current_dt = dt_init;
+   int step_rejections = 0;
+   int max_steps = 10000000;
+   Vector empty_k0;
 
-   // v50: V-guard ON by default (factor=100). Prevents RK cascade overflow.
-   // Use --v-guard <factor> to change threshold, --no-v-guard to disable.
-   if (!no_v_guard)
+   if (!use_petsc_ts)
    {
-      real_t factor = (v_guard_factor > 0) ? v_guard_factor : 100.0;
-      ode_solver.SetVGuard(factor);
+      ode_solver.SetDt(dt_init);
       if (mpi.IsRoot())
       {
-         std::cout << "  V-guard: ON (factor=" << factor << ")\n";
+         std::cout << "  CFL: c_N_1=" << c_N_1 << " beta=" << beta
+                   << " (order=" << order << ")\n";
+         std::cout << "  dt_V = " << dt_V << " s, dt_CFL = " << dt_CFL << " s\n";
+         std::cout << "  Initial dt: " << dt_init << " s"
+                   << (dt_init <= dt_CFL ? " (CFL-limited)" : " (V-limited)")
+                   << "\n";
+      }
+      ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
+      if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
+
+      // v50: V-guard ON by default (factor=100). Prevents RK cascade overflow.
+      // Use --v-guard <factor> to change threshold, --no-v-guard to disable.
+      if (!no_v_guard)
+      {
+         real_t factor = (v_guard_factor > 0) ? v_guard_factor : 100.0;
+         ode_solver.SetVGuard(factor);
+         if (mpi.IsRoot())
+         {
+            std::cout << "  V-guard: ON (factor=" << factor << ")\n";
+         }
+      }
+      else if (mpi.IsRoot())
+      {
+         std::cout << "  V-guard: OFF (--no-v-guard)\n";
+      }
+      ode_solver.Init(seas_op);
+   }
+#ifdef MFEM_USE_PETSC
+   std::unique_ptr<PetscODESolver> petsc_ode;
+   if (use_petsc_ts)
+   {
+      petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "bp5ts_");
+      petsc_ode->SetAbsTol(1e-7);
+      petsc_ode->SetRelTol(1e-50);
+      petsc_ode->SetMaxIter(max_steps);
+      petsc_ode->Init(seas_op, PetscODESolver::ODE_SOLVER_GENERAL);
+      petsc::TS ts = *petsc_ode;
+      PetscErrorCode ierr = TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetExactFinalTime(MATCHSTEP) failed");
+      ierr = TSSetMaxTime(ts, t_final);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetMaxTime() failed");
+      current_dt = dt_init;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  PETSc TS initial dt: "
+                   << ((dt_init_override > 0.0) ? dt_init : 0.1)
+                   << " s";
+         if (dt_init_override <= 0.0)
+         {
+            std::cout << " (PETSc default if not overridden)";
+         }
+         std::cout << "\n";
       }
    }
-   else if (mpi.IsRoot())
-   {
-      std::cout << "  V-guard: OFF (--no-v-guard)\n";
-   }
-   ode_solver.Init(seas_op);
+#endif
 
    real_t t = 0.0;
    int step = 0;
-   int max_steps = 10000000;
 
    // Earthquake detection
    bool in_seismic_event = false;
@@ -1346,12 +1477,16 @@ int main(int argc, char *argv[])
                                &mpi);
       MFEM_VERIFY(ok, "Failed to load checkpoint: " << restart_prefix);
 
-      ode_solver.SetDt(restart_dt);
+      current_dt = restart_dt;
       seas_op.SetDisplacement(restart_disp);
       fault_op.SetSlipRate(restart_slip_rate);
-      if (restart_fsal && restart_k0.Size() > 0)
+      if (!use_petsc_ts)
       {
-         ode_solver.RestoreFSAL(restart_k0);
+         ode_solver.SetDt(restart_dt);
+         if (restart_fsal && restart_k0.Size() > 0)
+         {
+            ode_solver.RestoreFSAL(restart_k0);
+         }
       }
 
       if (mpi.IsRoot())
@@ -1381,14 +1516,36 @@ int main(int argc, char *argv[])
    // =========================================================================
    while (t < t_final && step < max_steps)
    {
-      if (t + ode_solver.GetDt() > t_final)
+      if (!use_petsc_ts && t + ode_solver.GetDt() > t_final)
       {
          ode_solver.SetDt(t_final - t);
       }
 
       real_t dt;
-      bool accepted = ode_solver.Step(seas_op, state, t, dt);
-      if (!accepted) { continue; }
+      bool accepted = true;
+      if (!use_petsc_ts)
+      {
+         accepted = ode_solver.Step(seas_op, state, t, dt);
+         if (!accepted) { continue; }
+         current_dt = ode_solver.GetDt();
+      }
+#ifdef MFEM_USE_PETSC
+      else
+      {
+         MFEM_VERIFY(petsc_ode, "PETSc TS solver was not initialized");
+         dt = current_dt;
+         petsc_ode->Step(state, t, dt);
+         petsc::TS ts = *petsc_ode;
+         PetscReal next_dt = 0.0;
+         PetscErrorCode ierr = TSGetTimeStep(ts, &next_dt);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTimeStep() failed");
+         current_dt = next_dt;
+         PetscInt rejects = 0;
+         ierr = TSGetStepRejections(ts, &rejects);
+         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetStepRejections() failed");
+         step_rejections = static_cast<int>(rejects);
+      }
+#endif
       step++;
 
       // Post-step psi clamping is MFEM-specific. Tandem does not do this, so
@@ -1548,11 +1705,12 @@ int main(int argc, char *argv[])
       {
          Vector u_vec;
          u_vec = seas_op.GetDisplacement();
-         WriteCheckpoint(full_prefix, t, ode_solver.GetDt(),
+         WriteCheckpoint(full_prefix, t, current_dt,
                          step, num_seismic_events, in_seismic_event,
                          state, u_vec,
                          seas_op.GetTraction(), fault_op.GetSlipRate(),
-                         ode_solver.IsInitialized(), ode_solver.GetK0(),
+                         use_petsc_ts ? false : ode_solver.IsInitialized(),
+                         use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
                          &mpi);
       }
 
@@ -1564,7 +1722,7 @@ int main(int argc, char *argv[])
                    << std::setw(16) << std::scientific << std::setprecision(6)
                    << t / BP5Params::seconds_per_year
                    << std::setw(14) << std::scientific << std::setprecision(3)
-                   << ode_solver.GetDt()
+                   << current_dt
                    << std::setw(16) << std::scientific << std::setprecision(3)
                    << V_max
                    << std::setw(8) << num_seismic_events
@@ -1580,11 +1738,12 @@ int main(int argc, char *argv[])
    {
       Vector u_vec;
       u_vec = seas_op.GetDisplacement();
-      WriteCheckpoint(full_prefix, t, ode_solver.GetDt(),
+      WriteCheckpoint(full_prefix, t, current_dt,
                       step, num_seismic_events, in_seismic_event,
                       state, u_vec,
                       seas_op.GetTraction(), fault_op.GetSlipRate(),
-                      ode_solver.IsInitialized(), ode_solver.GetK0(),
+                      use_petsc_ts ? false : ode_solver.IsInitialized(),
+                      use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
                       &mpi);
    }
 
@@ -1604,6 +1763,9 @@ int main(int argc, char *argv[])
       std::cout << "  Final time: " << t / BP5Params::seconds_per_year
                 << " years\n";
       std::cout << "  Total steps: " << step << "\n";
+      std::cout << "  Step rejections: "
+                << (use_petsc_ts ? step_rejections
+                                 : ode_solver.GetTotalRejections()) << "\n";
       std::cout << "  Seismic events: " << num_seismic_events << "\n\n";
       if (!no_psi_clamp)
       {
@@ -1638,6 +1800,13 @@ int main(int argc, char *argv[])
       RunComparison(output_dir, output_prefix, ref_dir,
                     stations, t_final);
    }
+
+#ifdef MFEM_USE_PETSC
+   if (petsc_initialized)
+   {
+      MFEMFinalizePetsc();
+   }
+#endif
 
    return 0;
 }
