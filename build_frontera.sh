@@ -13,7 +13,7 @@
 set -euo pipefail
 
 PETSC_MODULE="${PETSC_MODULE:-petsc/3.23}"
-USE_MUMPS="${USE_MUMPS:-auto}"
+USE_MUMPS="${USE_MUMPS:-YES}"
 JOBS="${JOBS:-8}"
 
 # Intel classic compiler wrappers on Frontera can abort during config probes when
