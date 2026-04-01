@@ -50,7 +50,7 @@ make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 mkdir -p bp5/results_v57_1000m_ip_p1_petsc_ts_mumps
 
 ibrun ./seas_bp5_full \
-      --mesh bp5/mesh/reference/bp5_tandem.msh \
+      --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
       --order 1 \
       --dg-method IP \
