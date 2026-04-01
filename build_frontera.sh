@@ -122,30 +122,20 @@ else
     exit 1
 fi
 
-# Frontera's mumps/5.3 module is installed under a PETSc 3.15 tree. That is
-# incompatible with PETSc 3.23 headers/libraries used for MFEM's PETSc build.
-# Auto-disable MFEM_USE_MUMPS in that mixed-tree case unless the user forces it.
+# MUMPS is always enabled. Both the petsc and mumps/5.3 modules on Frontera
+# are under the same PETSc 3.15 tree, so there is no ABI conflict.
+# If MUMPS includes contain PETSc headers (petscconf.h), use -isystem to
+# deprioritize them so the PETSc module's own headers win.
 if [ "${USE_MUMPS}" = "0" ] || [ "${USE_MUMPS}" = "NO" ] || [ "${USE_MUMPS}" = "no" ]; then
     USE_MUMPS_RESOLVED="NO"
-elif [ "${USE_MUMPS}" = "1" ] || [ "${USE_MUMPS}" = "YES" ] || [ "${USE_MUMPS}" = "yes" ]; then
+else
     USE_MUMPS_RESOLVED="YES"
-elif [ -n "${TACC_MUMPS_LIB:-}" ] && [ -n "${PETSC_DIR_RESOLVED}" ] &&
-     [ "${TACC_MUMPS_LIB#${PETSC_DIR_RESOLVED}}" = "${TACC_MUMPS_LIB}" ] &&
-     [ "${TACC_MUMPS_LIB#*petsc/}" != "${TACC_MUMPS_LIB}" ]; then
-    USE_MUMPS_RESOLVED="NO"
-    echo "  NOTE: TACC_MUMPS_LIB lives under a different PETSc tree than PETSC_DIR."
-    echo "        Disabling MFEM_USE_MUMPS to avoid PETSc 3.15/3.23 ABI conflicts."
 fi
 
-# On Frontera, the MUMPS module can point at a PETSc 3.15 include tree that
-# also contains petscconf.h and related headers. MFEM places MUMPS include
-# flags before PETSc include flags, so a plain -I here contaminates PETSc 3.23
-# builds with older PETSc headers. Demote the MUMPS include path so PETSc's
-# own include directories win while dmumps_c.h remains discoverable.
 if [ "${USE_MUMPS_RESOLVED}" = "YES" ] &&
    [ -n "${TACC_MUMPS_INC:-}" ] && [ -f "${TACC_MUMPS_INC}/petscconf.h" ]; then
     MUMPS_OPT_RESOLVED="-isystem ${TACC_MUMPS_INC}"
-    echo "  NOTE: TACC_MUMPS_INC contains PETSc headers; using '-isystem' to avoid PETSc header conflicts."
+    echo "  NOTE: TACC_MUMPS_INC contains PETSc headers; using '-isystem' to avoid header conflicts."
 fi
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
