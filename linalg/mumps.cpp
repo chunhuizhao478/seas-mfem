@@ -251,7 +251,7 @@ void MUMPSSolver::SetOperator(const Operator &op)
    // MUMPS factorization
    id->job = 2;
    {
-      const int mem_relax_lim = 200;
+      const int mem_relax_lim = 500;
       while (true)
       {
 #ifdef MFEM_USE_SINGLE
@@ -261,7 +261,8 @@ void MUMPSSolver::SetOperator(const Operator &op)
 #endif
          if (id->MUMPS_INFOG(1) < 0)
          {
-            if (id->MUMPS_INFOG(1) == -8 || id->MUMPS_INFOG(1) == -9)
+            if (id->MUMPS_INFOG(1) == -8 || id->MUMPS_INFOG(1) == -9 ||
+                id->MUMPS_INFOG(1) == -1)
             {
                id->MUMPS_ICNTL(14) += 20;
                MFEM_VERIFY(id->MUMPS_ICNTL(14) <= mem_relax_lim,
