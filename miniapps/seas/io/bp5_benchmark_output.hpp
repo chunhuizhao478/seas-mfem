@@ -53,7 +53,8 @@ public:
    Probe2DInterpolator(const Vector &fault_x2, const Vector &fault_x3,
                        const std::vector<Station> &stations,
                        int nbf_per_face = 1,
-                       int face_basis_type = BasisType::GaussLobatto)
+                       int face_basis_type = BasisType::GaussLobatto,
+                       bool emit_warnings = true)
       : num_stations_(static_cast<int>(stations.size())),
         num_dofs_(fault_x2.Size()),
         nbf_per_face_(nbf_per_face),
@@ -78,15 +79,18 @@ public:
 
       // Warn about stations using nearest-DOF snap instead of exact
       // face interpolation — the output method is different.
-      for (int s = 0; s < num_stations_; s++)
+      if (emit_warnings)
       {
-         if (!exact_match_[s] && nbf_per_face_ >= 3)
+         for (int s = 0; s < num_stations_; s++)
          {
-            std::cout << "  WARNING: Station " << stations[s].name
-                      << " at (" << stations[s].x2 << ", "
-                      << stations[s].x3 << ") using nearest-DOF snap "
-                      << "(dist=" << match_distance_[s]
-                      << " m) instead of exact face interpolation.\n";
+            if (!exact_match_[s] && nbf_per_face_ >= 3)
+            {
+               std::cout << "  WARNING: Station " << stations[s].name
+                         << " at (" << stations[s].x2 << ", "
+                         << stations[s].x3 << ") using nearest-DOF snap "
+                         << "(dist=" << match_distance_[s]
+                         << " m) instead of exact face interpolation.\n";
+            }
          }
       }
    }

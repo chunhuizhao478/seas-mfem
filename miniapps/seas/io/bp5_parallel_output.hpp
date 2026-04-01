@@ -73,7 +73,7 @@ public:
       // Step 1: Each rank creates a local interpolator using LOCAL coords.
       // This finds the nearest DOF and (if nbf >= 3) tries exact face match.
       Probe2DInterpolator local_interp(
-         local_x2, local_x3, stations, nbf_per_face, face_basis_type);
+         local_x2, local_x3, stations, nbf_per_face, face_basis_type, false);
 
       // Step 2: Tandem-style distributed ownership via MPI_Allreduce.
       // Each rank reports its distance to each station; the global minimum
@@ -123,7 +123,7 @@ public:
       local_tau_pre_dip_ = local_tau_pre_dip;
       local_tau_pre_strike_ = local_tau_pre_strike;
       local_interp_ = std::make_unique<Probe2DInterpolator>(
-         local_x2, local_x3, stations, nbf_per_face, face_basis_type);
+         local_x2, local_x3, stations, nbf_per_face, face_basis_type, false);
 
       std::vector<std::string> columns = {
          "time(s)", "slip_strike(m)", "slip_dip(m)",
