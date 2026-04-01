@@ -12,7 +12,7 @@
 
 set -euo pipefail
 
-PETSC_MODULE="${PETSC_MODULE:-petsc/3.23}"
+PETSC_MODULE="${PETSC_MODULE:-petsc}"
 USE_MUMPS="${USE_MUMPS:-YES}"
 JOBS="${JOBS:-8}"
 
