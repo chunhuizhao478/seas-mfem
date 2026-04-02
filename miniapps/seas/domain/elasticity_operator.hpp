@@ -2130,7 +2130,14 @@ private:
                else { rhs(-1 - gj) -= elvec1(j); }
             }
          }
-         if (!diag_slip_embed_done_) { diag_slip_embed_done_ = true; }
+         // Only mark done if we actually printed (had non-zero slip)
+         {
+            real_t slip_max_local = slip_bc.Normlinf();
+            if (!diag_slip_embed_done_ && slip_max_local > 1e-20)
+            {
+               diag_slip_embed_done_ = true;
+            }
+         }
 #endif
       }
    }
