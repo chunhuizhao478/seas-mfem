@@ -1294,6 +1294,17 @@ private:
 
       cached_a_ = std::make_unique<BilinFormType>(fes_.get());
 
+      // v57: Enable full neighbor-block assembly for DG shared faces.
+      // With keep_nbr_block=false (MFEM default), shared face contributions
+      // only assemble Elem1 rows into a rectangular local matrix. This causes
+      // the global HypreParMatrix to have partition-dependent NNZ and slight
+      // numerical differences in the stiffness matrix, producing ~6%
+      // displacement errors across different MPI rank counts.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         cached_a_->KeepNbrBlock(true);
+      }
+
       // Volume term: ∫_Ω σ(u):ε(v) dV
       cached_a_->AddDomainIntegrator(
          new ElasticityIntegrator(lambda_coeff_, mu_coeff_));
