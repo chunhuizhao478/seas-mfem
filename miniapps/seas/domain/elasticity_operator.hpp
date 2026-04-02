@@ -189,10 +189,19 @@ public:
    real_t GetShearModulus() const override { return mu_val_; }
 
    int GetNumFaultDOFs() const override { return num_fault_dofs_; }
+   int GetNumOwnedFaultDOFs() const override { return num_owned_fault_dofs_; }
 
    void GetFaultDepths(Vector &depths) const override;
 
    void GetFaultCoords2D(Vector &coords_x2, Vector &coords_x3) const override;
+
+   void RestrictToOwnedFault(const Vector &local_data,
+                             Vector &owned_data,
+                             int comps_per_dof = 1) const override;
+
+   void ExpandOwnedToLocalFault(const Vector &owned_data,
+                                Vector &local_data,
+                                int comps_per_dof = 1) const override;
 
    const Array<int> &GetFaultDOFs() const override { return fault_dofs_; }
 
@@ -351,12 +360,33 @@ private:
    Array<int> fault_shared_faces_;
    Array<int> fault_dofs_;
    int num_fault_dofs_ = 0;
+   int num_owned_fault_dofs_ = 0;
    FaultBasis fault_basis_;
 
    // Multi-DOF fault discretization (v45, Phase 2)
    std::unique_ptr<FaceQuadrature> face_quad_;
    int nbf_per_face_ = 1;   // BR2: 1, IP: (p+1)(p+2)/2 on triangle faces
    int num_fault_faces_ = 0; // number of fault faces (interior + shared)
+   int num_owned_fault_faces_ = 0;
+
+   Array<int> owned_fault_face_to_local_face_;
+   Array<int> full_fault_face_to_owned_face_;
+   Array<int> owned_fault_dof_to_local_dof_;
+
+   struct SharedFaultFaceBlock
+   {
+      HYPRE_BigInt gid = -1;
+      int face_idx = -1;
+   };
+
+   struct SharedFaultCommBlock
+   {
+      int neighbor_rank = -1;
+      std::vector<int> send_owned_faces;
+      std::vector<int> recv_local_faces;
+   };
+
+   std::vector<SharedFaultCommBlock> shared_fault_comm_blocks_;
 
    mutable Vector fault_depths_;
    mutable bool fault_depths_computed_;
@@ -695,6 +725,7 @@ private:
                                                      face_basis_type_);
       nbf_per_face_ = face_quad_->NumBasisFunctions();
       num_fault_dofs_ = num_fault_faces_ * nbf_per_face_;
+      BuildOwnedFaultLayout();
 
       fault_dofs_.SetSize(num_fault_dofs_);
       for (int i = 0; i < num_fault_dofs_; i++)
@@ -765,6 +796,162 @@ private:
                                                ref_normal, up, face_ir,
                                                fault_interior_faces_.Size());
 #endif
+         }
+      }
+   }
+
+   void BuildOwnedFaultLayout()
+   {
+      owned_fault_face_to_local_face_.SetSize(0);
+      full_fault_face_to_owned_face_.SetSize(num_fault_faces_);
+      full_fault_face_to_owned_face_ = -1;
+      owned_fault_dof_to_local_dof_.SetSize(0);
+      shared_fault_comm_blocks_.clear();
+
+      const int num_interior = fault_interior_faces_.Size();
+
+      for (int face_idx = 0; face_idx < num_interior; face_idx++)
+      {
+         full_fault_face_to_owned_face_[face_idx] =
+            owned_fault_face_to_local_face_.Size();
+         owned_fault_face_to_local_face_.Append(face_idx);
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         Array<HYPRE_BigInt> global_face_ids;
+         mesh_.GetGlobalFaceIndices(global_face_ids);
+
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+
+         std::vector<HYPRE_BigInt> local_shared_gids(fault_shared_faces_.Size());
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int sf = fault_shared_faces_[i];
+            const int local_face = mesh_.GetSharedFace(sf);
+            local_shared_gids[i] = global_face_ids[local_face];
+         }
+
+         int comm_size = 1;
+         MPI_Comm_size(mesh_.GetComm(), &comm_size);
+         std::vector<int> recv_counts(comm_size, 0), recv_displs(comm_size, 0);
+         const int local_shared_count = fault_shared_faces_.Size();
+         MPI_Allgather(&local_shared_count, 1, MPI_INT,
+                       recv_counts.data(), 1, MPI_INT, mesh_.GetComm());
+
+         int total_shared = 0;
+         for (int r = 0; r < comm_size; r++)
+         {
+            recv_displs[r] = total_shared;
+            total_shared += recv_counts[r];
+         }
+
+         std::vector<HYPRE_BigInt> all_shared_gids(total_shared);
+         MPI_Allgatherv(local_shared_gids.data(), local_shared_count,
+                        HYPRE_MPI_BIG_INT,
+                        all_shared_gids.data(), recv_counts.data(),
+                        recv_displs.data(), HYPRE_MPI_BIG_INT, mesh_.GetComm());
+
+         std::unordered_map<HYPRE_BigInt, std::vector<int>> gid_ranks;
+         for (int r = 0; r < comm_size; r++)
+         {
+            for (int j = 0; j < recv_counts[r]; j++)
+            {
+               gid_ranks[all_shared_gids[recv_displs[r] + j]].push_back(r);
+            }
+         }
+         for (auto &kv : gid_ranks)
+         {
+            auto &ranks = kv.second;
+            std::sort(ranks.begin(), ranks.end());
+            ranks.erase(std::unique(ranks.begin(), ranks.end()), ranks.end());
+         }
+
+         std::unordered_map<int, std::vector<SharedFaultFaceBlock>> send_by_rank;
+         std::unordered_map<int, std::vector<SharedFaultFaceBlock>> recv_by_rank;
+
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int sf = fault_shared_faces_[i];
+            const int local_face = mesh_.GetSharedFace(sf);
+            const int face_idx = num_interior + i;
+            const HYPRE_BigInt gid = global_face_ids[local_face];
+            auto gid_it = gid_ranks.find(gid);
+            MFEM_VERIFY(gid_it != gid_ranks.end() && !gid_it->second.empty(),
+                        "Missing shared fault ownership info for gid " << gid);
+            const auto &sharing_ranks = gid_it->second;
+            const int owner_rank = sharing_ranks.front();
+
+            if (rank == owner_rank)
+            {
+               const int owned_face =
+                  owned_fault_face_to_local_face_.Size();
+               full_fault_face_to_owned_face_[face_idx] = owned_face;
+               owned_fault_face_to_local_face_.Append(face_idx);
+               for (int other_rank : sharing_ranks)
+               {
+                  if (other_rank == rank) { continue; }
+                  send_by_rank[other_rank].push_back({gid, owned_face});
+               }
+            }
+            else
+            {
+               recv_by_rank[owner_rank].push_back({gid, face_idx});
+            }
+         }
+
+         std::set<int> neighbors;
+         for (const auto &kv : send_by_rank) { neighbors.insert(kv.first); }
+         for (const auto &kv : recv_by_rank) { neighbors.insert(kv.first); }
+
+         for (int neighbor : neighbors)
+         {
+            auto &send_faces = send_by_rank[neighbor];
+            auto &recv_faces = recv_by_rank[neighbor];
+
+            std::sort(send_faces.begin(), send_faces.end(),
+                      [](const SharedFaultFaceBlock &a,
+                         const SharedFaultFaceBlock &b)
+                      {
+                         return a.gid < b.gid;
+                      });
+            std::sort(recv_faces.begin(), recv_faces.end(),
+                      [](const SharedFaultFaceBlock &a,
+                         const SharedFaultFaceBlock &b)
+                      {
+                         return a.gid < b.gid;
+                      });
+
+            SharedFaultCommBlock block;
+            block.neighbor_rank = neighbor;
+            block.send_owned_faces.reserve(send_faces.size());
+            block.recv_local_faces.reserve(recv_faces.size());
+            for (const auto &entry : send_faces)
+            {
+               block.send_owned_faces.push_back(entry.face_idx);
+            }
+            for (const auto &entry : recv_faces)
+            {
+               block.recv_local_faces.push_back(entry.face_idx);
+            }
+            shared_fault_comm_blocks_.push_back(std::move(block));
+         }
+#endif
+      }
+
+      num_owned_fault_faces_ = owned_fault_face_to_local_face_.Size();
+      num_owned_fault_dofs_ = num_owned_fault_faces_ * nbf_per_face_;
+
+      owned_fault_dof_to_local_dof_.SetSize(num_owned_fault_dofs_);
+      for (int owned_face = 0; owned_face < num_owned_fault_faces_; owned_face++)
+      {
+         const int local_face = owned_fault_face_to_local_face_[owned_face];
+         for (int kk = 0; kk < nbf_per_face_; kk++)
+         {
+            owned_fault_dof_to_local_dof_[owned_face * nbf_per_face_ + kk] =
+               local_face * nbf_per_face_ + kk;
          }
       }
    }
@@ -2766,6 +2953,129 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
 
    coords_x2 = fault_x2_;
    coords_x3 = fault_x3_;
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::RestrictToOwnedFault(
+   const Vector &local_data, Vector &owned_data, int comps_per_dof) const
+{
+   MFEM_VERIFY(comps_per_dof > 0, "comps_per_dof must be positive");
+   MFEM_VERIFY(local_data.Size() == comps_per_dof * num_fault_dofs_,
+               "Local fault vector size mismatch: got " << local_data.Size()
+               << ", expected " << comps_per_dof * num_fault_dofs_);
+
+   owned_data.SetSize(comps_per_dof * num_owned_fault_dofs_);
+   for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
+   {
+      const int local_dof = owned_fault_dof_to_local_dof_[owned_dof];
+      for (int c = 0; c < comps_per_dof; c++)
+      {
+         owned_data(comps_per_dof * owned_dof + c) =
+            local_data(comps_per_dof * local_dof + c);
+      }
+   }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
+   const Vector &owned_data, Vector &local_data, int comps_per_dof) const
+{
+   MFEM_VERIFY(comps_per_dof > 0, "comps_per_dof must be positive");
+   MFEM_VERIFY(owned_data.Size() == comps_per_dof * num_owned_fault_dofs_,
+               "Owned fault vector size mismatch: got " << owned_data.Size()
+               << ", expected " << comps_per_dof * num_owned_fault_dofs_);
+
+   local_data.SetSize(comps_per_dof * num_fault_dofs_);
+   local_data = 0.0;
+
+   for (int owned_dof = 0; owned_dof < num_owned_fault_dofs_; owned_dof++)
+   {
+      const int local_dof = owned_fault_dof_to_local_dof_[owned_dof];
+      for (int c = 0; c < comps_per_dof; c++)
+      {
+         local_data(comps_per_dof * local_dof + c) =
+            owned_data(comps_per_dof * owned_dof + c);
+      }
+   }
+
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      if (shared_fault_comm_blocks_.empty()) { return; }
+
+      const int block_size = comps_per_dof * nbf_per_face_;
+      std::vector<Vector> send_buffers(shared_fault_comm_blocks_.size());
+      std::vector<Vector> recv_buffers(shared_fault_comm_blocks_.size());
+      std::vector<MPI_Request> requests;
+      requests.reserve(2 * shared_fault_comm_blocks_.size());
+
+      for (int bi = 0; bi < static_cast<int>(shared_fault_comm_blocks_.size()); bi++)
+      {
+         const auto &block = shared_fault_comm_blocks_[bi];
+
+         if (!block.recv_local_faces.empty())
+         {
+            recv_buffers[bi].SetSize(block_size * block.recv_local_faces.size());
+            MPI_Request req;
+            MPI_Irecv(recv_buffers[bi].GetData(), recv_buffers[bi].Size(),
+                      MPI_DOUBLE, block.neighbor_rank, 27183,
+                      mesh_.GetComm(), &req);
+            requests.push_back(req);
+         }
+
+         if (!block.send_owned_faces.empty())
+         {
+            send_buffers[bi].SetSize(block_size * block.send_owned_faces.size());
+            for (int j = 0; j < static_cast<int>(block.send_owned_faces.size()); j++)
+            {
+               const int owned_face = block.send_owned_faces[j];
+               for (int kk = 0; kk < nbf_per_face_; kk++)
+               {
+                  const int owned_dof = owned_face * nbf_per_face_ + kk;
+                  for (int c = 0; c < comps_per_dof; c++)
+                  {
+                     send_buffers[bi](j * block_size + kk * comps_per_dof + c) =
+                        owned_data(comps_per_dof * owned_dof + c);
+                  }
+               }
+            }
+
+            MPI_Request req;
+            MPI_Isend(send_buffers[bi].GetData(), send_buffers[bi].Size(),
+                      MPI_DOUBLE, block.neighbor_rank, 27183,
+                      mesh_.GetComm(), &req);
+            requests.push_back(req);
+         }
+      }
+
+      if (!requests.empty())
+      {
+         MPI_Waitall(static_cast<int>(requests.size()), requests.data(),
+                     MPI_STATUSES_IGNORE);
+      }
+
+      for (int bi = 0; bi < static_cast<int>(shared_fault_comm_blocks_.size()); bi++)
+      {
+         const auto &block = shared_fault_comm_blocks_[bi];
+         const Vector &recv = recv_buffers[bi];
+         if (recv.Size() == 0) { continue; }
+
+         for (int j = 0; j < static_cast<int>(block.recv_local_faces.size()); j++)
+         {
+            const int local_face = block.recv_local_faces[j];
+            for (int kk = 0; kk < nbf_per_face_; kk++)
+            {
+               const int local_dof = local_face * nbf_per_face_ + kk;
+               for (int c = 0; c < comps_per_dof; c++)
+               {
+                  local_data(comps_per_dof * local_dof + c) =
+                     recv(j * block_size + kk * comps_per_dof + c);
+               }
+            }
+         }
+      }
+#endif
+   }
 }
 
 template <typename MeshType>

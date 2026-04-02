@@ -958,10 +958,10 @@ int main(int argc, char *argv[])
    // =========================================================================
    // I/O: distributed probe output (Tandem-style)
    // =========================================================================
-   // Each rank uses LOCAL fault coords for probe location.
-   // No global gather needed — ownership resolved via MPI_Allreduce.
-   Vector local_x2, local_x3;
-   domain.GetFaultCoords2D(local_x2, local_x3);
+   // Each rank uses the owned local fault coords for probe location.
+   // This follows Tandem's owned-state + ghost-read layout.
+   Vector local_x2 = fault_geom.GetCoordsX2();
+   Vector local_x3 = fault_geom.GetCoordsX3();
 
    int N_local = fault_geom.NumLocalFaultDOFs();
    Vector local_tp_dip(N_local), local_tp_strike(N_local);
@@ -989,7 +989,10 @@ int main(int argc, char *argv[])
       local_x2, local_x3, local_tp_dip, local_tp_strike,
       domain.GetNbfPerFace(), face_basis_type);
 
-   bench_out.PrintDiagnostics(local_x2, local_x3);
+   if (mpi.IsRoot())
+   {
+      bench_out.PrintDiagnostics(local_x2, local_x3);
+   }
 
    if (diag_station_traction_decomp)
    {

@@ -144,8 +144,11 @@ private:
 
    /// Work vectors (mutable for use in const Mult)
    mutable Vector slip_;
+   mutable Vector local_slip_;
    mutable Vector traction_;
+   mutable Vector local_traction_;
    mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
+   mutable Vector local_normal_traction_;
 
    // v51 flags
    bool zero_dip_traction_ = false;
@@ -178,7 +181,10 @@ SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SEASQuasiDynamicO
 
    // Allocate work vectors (sized for slip/traction components)
    slip_.SetSize(fault_->SlipSize());
+   local_slip_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
    traction_.SetSize(fault_->TractionSize());
+   local_traction_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
+   local_normal_traction_.SetSize(domain_->GetNumFaultDOFs());
 }
 
 template <typename MeshType, typename DomainOpType, typename FaultOpType>
@@ -193,8 +199,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
 
    // Phase 2: Solve domain with zero slip to get initial traction
    fault_->GetSlip(state, slip_);
-   domain_->Solve(0.0, slip_, *u_gf_);
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(0.0, local_slip_, *u_gf_);
+   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_);
+   domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                 domain_->NumSlipComponents());
 
    // Phase 3: Initialize theta from stress equilibrium
    //   tau0 + traction = sigma_n * f(V_init, theta) + eta * V_init
@@ -204,8 +213,11 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
    // Phase 4: Verify initial slip rate
    // Re-solve domain and recompute traction with updated state
    fault_->GetSlip(state, slip_);
-   domain_->Solve(0.0, slip_, *u_gf_);
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(0.0, local_slip_, *u_gf_);
+   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_);
+   domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                 domain_->NumSlipComponents());
 
    // Compute RHS to populate slip rates
    Vector rate_temp(fault_->StateSize());
@@ -257,12 +269,19 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 #endif
 
    // 2. Solve domain problem with slip BC
-   domain_->Solve(t, slip_, *u_gf_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(t, local_slip_, *u_gf_);
 
    // 3. Compute traction at fault from displacement
    // v51: optionally compute elastic normal traction for sigma_n feedback
-   domain_->ComputeTraction(*u_gf_, slip_, traction_,
-                             elastic_sigma_n_ ? &normal_traction_ : nullptr);
+   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
+                            elastic_sigma_n_ ? &local_normal_traction_ : nullptr);
+   domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                 domain_->NumSlipComponents());
+   if (elastic_sigma_n_)
+   {
+      domain_->RestrictToOwnedFault(local_normal_traction_, normal_traction_);
+   }
 
    // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
    if (zero_dip_traction_)

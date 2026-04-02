@@ -585,7 +585,7 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=5e-5,
+                t_max_yr=1e-5,
                 save_path=fname_close,
             )
         else:

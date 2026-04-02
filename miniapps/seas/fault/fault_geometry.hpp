@@ -50,8 +50,8 @@ public:
                   MPIContext *mpi_ctx = nullptr)
       : params_(params), mpi_ctx_(mpi_ctx)
    {
-      // Get fault DOF count and depths from domain operator
-      num_fault_dofs_ = domain_op.GetNumFaultDOFs();
+      // Use the owned fault view for the friction/state ODE.
+      num_fault_dofs_ = domain_op.GetNumOwnedFaultDOFs();
 
       if constexpr (IsParallelMesh<MeshType>::value)
       {
@@ -85,8 +85,10 @@ public:
          return;
       }
 
-      // Get depths from domain operator
-      domain_op.GetFaultDepths(depths_);
+      // Get depths from domain operator and restrict to the owned view.
+      Vector local_depths;
+      domain_op.GetFaultDepths(local_depths);
+      domain_op.RestrictToOwnedFault(local_depths, depths_);
 
       // Compute depth-dependent parameters
       ComputeDepthDependentParams();
@@ -100,9 +102,9 @@ public:
                   MPIContext *mpi_ctx = nullptr)
       : bp5_params_(params), mpi_ctx_(mpi_ctx), is_bp5_(true)
    {
-      num_fault_dofs_ = domain_op.GetNumFaultDOFs();
+      num_fault_dofs_ = domain_op.GetNumOwnedFaultDOFs();
       nbf_per_face_ = domain_op.GetNbfPerFace();
-      num_fault_faces_ = domain_op.GetNumFaultFaces();
+      num_fault_faces_ = (nbf_per_face_ > 0) ? num_fault_dofs_ / nbf_per_face_ : 0;
       num_local_fault_dofs_ = num_fault_dofs_;
       num_global_fault_dofs_ = num_fault_dofs_;
 
@@ -117,8 +119,11 @@ public:
 
       if (num_fault_dofs_ == 0) { return; }
 
-      // Get 2D fault coordinates
-      domain_op.GetFaultCoords2D(coords_x2_, coords_x3_);
+      // Get 2D fault coordinates on the owned fault view.
+      Vector local_x2, local_x3;
+      domain_op.GetFaultCoords2D(local_x2, local_x3);
+      domain_op.RestrictToOwnedFault(local_x2, coords_x2_);
+      domain_op.RestrictToOwnedFault(local_x3, coords_x3_);
 
       // Also store depths for compatibility
       depths_.SetSize(num_fault_dofs_);

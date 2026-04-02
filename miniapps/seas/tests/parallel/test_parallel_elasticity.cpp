@@ -20,6 +20,8 @@
 
 #include <iostream>
 #include <cmath>
+#include <map>
+#include <vector>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -170,7 +172,144 @@ bool test_serial_parallel_fault_dof_count(MPIContext &ctx)
    return ok;
 }
 
-/// Test 3: Zero slip → zero traction in parallel
+/// Test 3: Owned fault DOFs match serial unique count and shared ghosts sync
+bool test_owned_fault_layout(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_owned_fault_layout... " << std::flush;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = Lz;
+   real_t lf = 2.0 * Ly;
+
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   const int nf_serial = serial_op.GetNumFaultDOFs();
+
+   ParMesh pmesh(ctx.GetComm(), serial_mesh);
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu, Vp, Wf, lf);
+
+   const int local_owned = par_op.GetNumOwnedFaultDOFs();
+   const int global_owned = ctx.GlobalSumInt(local_owned);
+
+   Vector owned_slip(2 * local_owned);
+   for (int i = 0; i < local_owned; i++)
+   {
+      owned_slip(2 * i) = -1000.0 - 10.0 * ctx.Rank() - i;
+      owned_slip(2 * i + 1) = 1000.0 + 10.0 * ctx.Rank() + i;
+   }
+
+   Vector local_slip;
+   par_op.ExpandOwnedToLocalFault(owned_slip, local_slip, 2);
+
+   Array<HYPRE_BigInt> global_face_ids;
+   pmesh.GetGlobalFaceIndices(global_face_ids);
+
+   std::vector<HYPRE_BigInt> local_gids;
+   std::vector<real_t> local_vals;
+   for (int i = 0; i < par_op.GetFaultSharedFaces().Size(); i++)
+   {
+      const int sf = par_op.GetFaultSharedFaces()[i];
+      const int lf_idx = pmesh.GetSharedFace(sf);
+      const int dof = par_op.GetFaultInteriorFaces().Size() + i;
+      local_gids.push_back(global_face_ids[lf_idx]);
+      local_vals.push_back(local_slip(2 * dof));
+      local_vals.push_back(local_slip(2 * dof + 1));
+   }
+
+   int local_shared = static_cast<int>(local_gids.size());
+   std::vector<int> recv_counts(ctx.Size(), 0);
+#ifdef SEAS_USE_MPI
+   MPI_Gather(&local_shared, 1, MPI_INT,
+              ctx.IsRoot() ? recv_counts.data() : nullptr,
+              1, MPI_INT, 0, ctx.GetComm());
+#endif
+
+   bool shared_ok = true;
+   int total_shared = 0;
+   std::vector<int> displs(ctx.Size(), 0);
+   if (ctx.IsRoot())
+   {
+      for (int r = 0; r < ctx.Size(); r++)
+      {
+         displs[r] = total_shared;
+         total_shared += recv_counts[r];
+      }
+   }
+
+   std::vector<HYPRE_BigInt> global_gids(total_shared);
+   std::vector<real_t> global_vals(2 * total_shared);
+#ifdef SEAS_USE_MPI
+   MPI_Gatherv(local_gids.data(), local_shared, HYPRE_MPI_BIG_INT,
+               ctx.IsRoot() ? global_gids.data() : nullptr,
+               ctx.IsRoot() ? recv_counts.data() : nullptr,
+               ctx.IsRoot() ? displs.data() : nullptr,
+               HYPRE_MPI_BIG_INT, 0, ctx.GetComm());
+
+   std::vector<int> recv_counts_vals(ctx.Size(), 0), displs_vals(ctx.Size(), 0);
+   if (ctx.IsRoot())
+   {
+      for (int r = 0; r < ctx.Size(); r++)
+      {
+         recv_counts_vals[r] = 2 * recv_counts[r];
+         displs_vals[r] = 2 * displs[r];
+      }
+   }
+   MPI_Gatherv(local_vals.data(), 2 * local_shared, MPI_DOUBLE,
+               ctx.IsRoot() ? global_vals.data() : nullptr,
+               ctx.IsRoot() ? recv_counts_vals.data() : nullptr,
+               ctx.IsRoot() ? displs_vals.data() : nullptr,
+               MPI_DOUBLE, 0, ctx.GetComm());
+#endif
+
+   if (ctx.IsRoot())
+   {
+      std::map<HYPRE_BigInt, std::pair<real_t, real_t>> first_seen;
+      for (int i = 0; i < total_shared; i++)
+      {
+         const auto gid = global_gids[i];
+         const std::pair<real_t, real_t> val =
+            {global_vals[2 * i], global_vals[2 * i + 1]};
+         auto it = first_seen.find(gid);
+         if (it == first_seen.end())
+         {
+            first_seen.emplace(gid, val);
+         }
+         else if (std::abs(it->second.first - val.first) > 1e-12 ||
+                  std::abs(it->second.second - val.second) > 1e-12)
+         {
+            shared_ok = false;
+            break;
+         }
+      }
+   }
+
+   int shared_ok_int = shared_ok ? 1 : 0;
+   shared_ok_int = ctx.GlobalMinInt(shared_ok_int);
+
+   const bool ok = (global_owned == nf_serial) && (shared_ok_int == 1);
+
+   TEST_CHECK(ctx, "owned BP5 fault layout follows serial unique faces", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (global_owned=" << global_owned
+                << ", serial=" << nf_serial << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Test 4: Zero slip → zero traction in parallel
 bool test_parallel_zero_slip_traction(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -221,7 +360,7 @@ bool test_parallel_zero_slip_traction(MPIContext &ctx)
    return ok;
 }
 
-/// Test 4: Serial-parallel traction consistency for uniform slip
+/// Test 5: Serial-parallel traction consistency for uniform slip
 bool test_serial_parallel_traction_consistency(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -311,7 +450,7 @@ bool test_serial_parallel_traction_consistency(MPIContext &ctx)
    return ok;
 }
 
-/// Test 5: All parallel traction values are bounded (no blowup)
+/// Test 6: All parallel traction values are bounded (no blowup)
 bool test_parallel_traction_bounded(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -380,7 +519,7 @@ bool test_parallel_traction_bounded(MPIContext &ctx)
    return ok;
 }
 
-/// Test 6: Parallel solve with non-zero slip produces non-zero displacement
+/// Test 7: Parallel solve with non-zero slip produces non-zero displacement
 bool test_parallel_solve_with_slip(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -442,6 +581,7 @@ int main(int argc, char *argv[])
 
    test_shared_fault_detection(ctx);
    test_serial_parallel_fault_dof_count(ctx);
+   test_owned_fault_layout(ctx);
    test_parallel_zero_slip_traction(ctx);
    test_serial_parallel_traction_consistency(ctx);
    test_parallel_traction_bounded(ctx);

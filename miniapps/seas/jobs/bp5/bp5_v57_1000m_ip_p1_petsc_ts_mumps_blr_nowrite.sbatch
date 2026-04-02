@@ -13,6 +13,7 @@
 # Purpose:
 # - use PETSc TS for time stepping
 # - use MUMPS-BLR instead of exact MUMPS
+# - set BLR tolerance explicitly to 1e-12
 # - avoid per-step forced output to reduce I/O overhead
 #
 # Assumption:
@@ -57,6 +58,7 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps-blr \
+      --blr-tol 1e-12 \
       --check-residual \
       --tfinal 5.68e10 \
       --ref-dir bp5/benchmark_data \

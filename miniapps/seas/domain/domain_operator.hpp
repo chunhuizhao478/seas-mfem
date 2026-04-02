@@ -107,6 +107,14 @@ public:
    /// Default: 1 (backward compatible with antiplane and p=1 cases).
    virtual int GetNbfPerFace() const { return 1; }
 
+   /// @brief Get number of owned fault DOFs used by the fault ODE state.
+   ///
+   /// In serial this is identical to GetNumFaultDOFs(). In parallel DG
+   /// elasticity, shared partition-boundary faces may appear in the local
+   /// fault view on both ranks, but only the owned subset should contribute
+   /// independent friction/state unknowns.
+   virtual int GetNumOwnedFaultDOFs() const { return GetNumFaultDOFs(); }
+
    /// @brief Get number of fault faces.
    ///
    /// Default: same as GetNumFaultDOFs() (assumes 1 DOF per face).
@@ -143,6 +151,33 @@ public:
       coords_x2.SetSize(depths.Size());
       coords_x2 = 0.0;
       coords_x3 = depths;
+   }
+
+   /// @brief Restrict a full local fault vector to the owned fault DOFs.
+   ///
+   /// @param[in] local_data Full local fault data
+   /// @param[out] owned_data Owned-only fault data
+   /// @param[in] comps_per_dof Number of stored components per fault DOF
+   virtual void RestrictToOwnedFault(const Vector &local_data,
+                                     Vector &owned_data,
+                                     int comps_per_dof = 1) const
+   {
+      owned_data = local_data;
+   }
+
+   /// @brief Expand owned fault data to the full local fault view.
+   ///
+   /// Parallel implementations can use this to ghost shared partition
+   /// boundary fault values before domain solves / traction evaluations.
+   ///
+   /// @param[in] owned_data Owned-only fault data
+   /// @param[out] local_data Full local fault data including shared ghosts
+   /// @param[in] comps_per_dof Number of stored components per fault DOF
+   virtual void ExpandOwnedToLocalFault(const Vector &owned_data,
+                                        Vector &local_data,
+                                        int comps_per_dof = 1) const
+   {
+      local_data = owned_data;
    }
 
    /// @brief Get the per-face fault basis. Returns nullptr by default.
