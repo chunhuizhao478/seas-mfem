@@ -124,29 +124,31 @@ State vector (owned DOFs only)
     └─ ComputeRHS(traction, state) → rate (owned DOFs)
 ```
 
-## 4. Known Limitation: Missing DOF Permutation
+## 4. DOF Permutation Fix (v57b)
 
-### 4.1 MFEM Shared Face Orientation
+### 4.1 Problem: First fix attempt had no effect
 
-MFEM's `GetSharedFaceTransformations` returns face transformations where the face vertex ordering depends on the local element (elem1). The same reference integration point can map to **different physical coordinates** on the two ranks sharing a face.
+The initial owned-fault fix (Section 3) produced byte-for-byte identical results to the pre-fix runs because the communicated DOF values landed at wrong physical locations on the receiving rank. MFEM's shared face vertex ordering is element-dependent (`faces[FaceNo]->GetVertices()` differs between ranks), so DOF 0 on the owner maps to a different physical vertex than DOF 0 on the ghost.
 
-Evidence from MFEM source (`mesh/pmesh.cpp`):
-- `shared_trias[sf].v` stores canonical (global-vertex-ID-sorted) ordering
-- `faces[FaceNo]->GetVertices()` uses local element-dependent ordering
-- Orientation info is tracked in `Elem1Inf`/`Elem2Inf` via `GetTriOrientation()`
+### 4.2 Solution: Canonical DOF permutation (Tandem sorted-simplex)
 
-### 4.2 Impact on the Fix
+Following Tandem's `Simplex.h` convention, we sort face vertices by ascending global vertex ID to produce a canonical ordering. A per-face permutation maps between MFEM's local DOF order and canonical order.
 
-The `ExpandOwnedToLocalFault` communication copies DOF values directly by index (`kk=0,1,2`) without applying orientation-based permutation. If the face vertex ordering differs between owner and ghost, DOF values are placed at wrong physical locations on the ghost rank.
+**Implementation in `BuildOwnedFaultLayout()`:**
+1. Get global vertex IDs via `mesh_.GetGlobalVertexIndices()`
+2. For each fault face, get face vertices via `mesh_.GetFaceVertices()`
+3. Sort (global_vertex_id, mfem_local_index) pairs by global ID
+4. Store `canonical_to_local_perm_[face][k]` = MFEM local DOF for canonical DOF k
+5. For p=1: DOF k = vertex k, so vertex permutation = DOF permutation
 
-**Expected impact:** For flat faces with parameters that are nearly constant within a face, the error is negligible. For faces crossing parameter transition zones (VW/VS boundary, nucleation zone edge), the error could be significant but smaller than the original duplicate-evolution bug.
+**Applied at three points:**
+- `owned_fault_dof_to_local_dof_` includes the permutation (used by `RestrictToOwnedFault` and owned-face expansion)
+- `ExpandOwnedToLocalFault` ghost recv applies receiver's `canonical_to_local_perm_`
+- `ExpandOwnedToLocalFault` ghost send packs data in canonical order (from owned state which is canonical)
 
 ### 4.3 Validation Plan
 
-Run the same BP5 v57 configuration at three rank counts (100, 200, 400) with the fix applied:
-
-- If V_max agrees to ~1e-10 → permutation issue is negligible
-- If ~0.1-1% difference persists → need to add `GetTriOrientation`-based DOF permutation
+Re-run the 100/200/400-rank jobs. V_max trajectories should now agree.
 
 ## 5. Verification Jobs
 

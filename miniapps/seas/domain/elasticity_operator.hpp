@@ -26,6 +26,7 @@
 #include <cmath>
 #include <limits>
 #include <set>
+#include <cstdint>
 
 namespace mfem
 {
@@ -387,6 +388,12 @@ private:
    };
 
    std::vector<SharedFaultCommBlock> shared_fault_comm_blocks_;
+
+   /// Per-face canonical DOF permutation (Tandem sorted-simplex convention).
+   /// canonical_to_local_perm_[face_idx][canonical_k] = mfem_local_k
+   /// where canonical order = sorted by ascending global vertex ID.
+   /// For p=1 triangles: DOF k = vertex k, so vertex perm = DOF perm.
+   Array<Array<int>> canonical_to_local_perm_;
 
    mutable Vector fault_depths_;
    mutable bool fault_depths_computed_;
@@ -944,14 +951,91 @@ private:
       num_owned_fault_faces_ = owned_fault_face_to_local_face_.Size();
       num_owned_fault_dofs_ = num_owned_fault_faces_ * nbf_per_face_;
 
+      // ------------------------------------------------------------------
+      // Build per-face canonical DOF permutation (Tandem sorted-simplex).
+      // For each fault face, sort the face vertices by global vertex ID.
+      // canonical_to_local_perm_[face][k] = MFEM local DOF index for
+      // the k-th vertex in sorted-global-ID order.
+      // For p=1 triangles: DOF k = vertex k, so vertex perm = DOF perm.
+      // ------------------------------------------------------------------
+      canonical_to_local_perm_.SetSize(num_fault_faces_);
+
+      // Get global vertex IDs (parallel) or use local indices (serial).
+      // Use int64_t for sorting to avoid HYPRE dependency in serial builds.
+      std::vector<int64_t> global_vert_ids;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         Array<HYPRE_BigInt> gvi;
+         mesh_.GetGlobalVertexIndices(gvi);
+         global_vert_ids.resize(gvi.Size());
+         for (int i = 0; i < gvi.Size(); i++)
+         {
+            global_vert_ids[i] = static_cast<int64_t>(gvi[i]);
+         }
+#endif
+      }
+      else
+      {
+         global_vert_ids.resize(mesh_.GetNV());
+         for (int i = 0; i < mesh_.GetNV(); i++)
+         {
+            global_vert_ids[i] = static_cast<int64_t>(i);
+         }
+      }
+
+      for (int fi = 0; fi < num_fault_faces_; fi++)
+      {
+         // Get local face index in the mesh
+         int local_face_idx;
+         if (fi < num_interior)
+         {
+            local_face_idx = fault_interior_faces_[fi];
+         }
+         else
+         {
+            const int si = fi - num_interior;
+            local_face_idx = mesh_.GetSharedFace(fault_shared_faces_[si]);
+         }
+
+         // Get face vertices (local indices)
+         Array<int> vert;
+         mesh_.GetFaceVertices(local_face_idx, vert);
+         const int nv = vert.Size();
+
+         // Build (global_id, mfem_local_index) pairs and sort by global ID
+         // (Tandem sorted-simplex convention)
+         std::vector<std::pair<int64_t, int>> gid_idx(nv);
+         for (int k = 0; k < nv; k++)
+         {
+            gid_idx[k] = {global_vert_ids[vert[k]], k};
+         }
+         std::sort(gid_idx.begin(), gid_idx.end());
+
+         // canonical_to_local_perm_[fi][canonical_k] = mfem_local_k
+         canonical_to_local_perm_[fi].SetSize(nbf_per_face_);
+         // For p=1: nbf_per_face_ == nv (3 vertices = 3 DOFs)
+         for (int k = 0; k < nv && k < nbf_per_face_; k++)
+         {
+            canonical_to_local_perm_[fi][k] = gid_idx[k].second;
+         }
+         // For higher-order DOFs beyond vertices (p>=2): identity for now
+         for (int k = nv; k < nbf_per_face_; k++)
+         {
+            canonical_to_local_perm_[fi][k] = k;
+         }
+      }
+
+      // Build owned DOF → local DOF map (with permutation applied)
       owned_fault_dof_to_local_dof_.SetSize(num_owned_fault_dofs_);
       for (int owned_face = 0; owned_face < num_owned_fault_faces_; owned_face++)
       {
          const int local_face = owned_fault_face_to_local_face_[owned_face];
          for (int kk = 0; kk < nbf_per_face_; kk++)
          {
+            const int mfem_kk = canonical_to_local_perm_[local_face][kk];
             owned_fault_dof_to_local_dof_[owned_face * nbf_per_face_ + kk] =
-               local_face * nbf_per_face_ + kk;
+               local_face * nbf_per_face_ + mfem_kk;
          }
       }
    }
@@ -3063,13 +3147,18 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
          for (int j = 0; j < static_cast<int>(block.recv_local_faces.size()); j++)
          {
             const int local_face = block.recv_local_faces[j];
-            for (int kk = 0; kk < nbf_per_face_; kk++)
+            // Received data is in canonical order (sorted by global vertex ID).
+            // Apply this rank's canonical→local permutation so the values
+            // land at the correct MFEM-local DOF positions.
+            for (int canonical_kk = 0; canonical_kk < nbf_per_face_; canonical_kk++)
             {
-               const int local_dof = local_face * nbf_per_face_ + kk;
+               const int mfem_kk =
+                  canonical_to_local_perm_[local_face][canonical_kk];
+               const int local_dof = local_face * nbf_per_face_ + mfem_kk;
                for (int c = 0; c < comps_per_dof; c++)
                {
                   local_data(comps_per_dof * local_dof + c) =
-                     recv(j * block_size + kk * comps_per_dof + c);
+                     recv(j * block_size + canonical_kk * comps_per_dof + c);
                }
             }
          }
