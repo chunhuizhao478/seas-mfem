@@ -18,6 +18,7 @@
 #include "../domain/elasticity_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
+#include <iomanip>
 #include "../common/mpi_context.hpp"
 
 #include <memory>
@@ -150,6 +151,9 @@ private:
    mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
    mutable Vector local_normal_traction_;
 
+   // v57 MPI diagnostic: fire once on first non-zero slip
+   mutable bool mpi_diag_done_ = false;
+
    // v51 flags
    bool zero_dip_traction_ = false;
    // v54: default ON to match Tandem's DieterichRuinaBase.h:87
@@ -281,6 +285,32 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    if (elastic_sigma_n_)
    {
       domain_->RestrictToOwnedFault(local_normal_traction_, normal_traction_);
+   }
+
+   // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
+   if (!mpi_diag_done_)
+   {
+      real_t slip_norm = local_slip_.Normlinf();
+      if (mpi_ctx_) { slip_norm = mpi_ctx_->GlobalMax(slip_norm); }
+      if (slip_norm > 1e-30)
+      {
+         mpi_diag_done_ = true;
+         real_t u_norm = u_gf_->Normlinf();
+         real_t trac_norm = local_traction_.Normlinf();
+         if (mpi_ctx_)
+         {
+            u_norm = mpi_ctx_->GlobalMax(u_norm);
+            trac_norm = mpi_ctx_->GlobalMax(trac_norm);
+         }
+         if (mpi_ctx_ == nullptr || mpi_ctx_->IsRoot())
+         {
+            mfem::out << "[MPI-DIAG] First non-zero-slip Mult:\n"
+                      << "  ||slip||_inf=" << std::scientific << std::setprecision(15)
+                      << slip_norm << "\n"
+                      << "  ||u||_inf=" << u_norm << "\n"
+                      << "  ||traction||_inf=" << trac_norm << "\n";
+         }
+      }
    }
 
    // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
