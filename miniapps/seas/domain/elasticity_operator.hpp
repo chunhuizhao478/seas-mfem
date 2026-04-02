@@ -1349,7 +1349,12 @@ private:
          }
       }
 
-      cached_a_->Assemble();
+      // v57: Assemble with skip_zeros=0 to ensure partition-independent NNZ.
+      // With skip_zeros=1 (default), shared vs interior faces produce
+      // slightly different face matrices (due to elem1/elem2 swap changing
+      // floating-point order), causing O(ε) entries to be zero-skipped
+      // on one partition but not another → different K matrix.
+      cached_a_->Assemble(0);
       cached_a_->Finalize();
 
       // Set up solver operator
