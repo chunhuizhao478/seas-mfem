@@ -39,6 +39,7 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || {
 }
 
 cd miniapps/seas
+make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 mkdir -p bp5/results_v58_mpi_test_400ranks
 
