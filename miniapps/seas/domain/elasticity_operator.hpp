@@ -1356,6 +1356,52 @@ private:
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
+         // v57 face-count diagnostic: how many faces does each assembly path see?
+         {
+            int local_interior = mesh_.GetNumFaces();
+            int interior_with_nbr = 0;
+            for (int f = 0; f < local_interior; f++)
+            {
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (FTr) { interior_with_nbr++; }
+            }
+            int local_shared = mesh_.GetNSharedFaces();
+            int local_bdr = mesh_.GetNBE();
+            int total_local_faces = mesh_.GetNumFaces();
+
+            int global_interior = 0, global_shared = 0;
+            int global_bdr = 0, global_total = 0;
+            MPI_Reduce(&interior_with_nbr, &global_interior, 1, MPI_INT,
+                       MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_shared, &global_shared, 1, MPI_INT,
+                       MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_bdr, &global_bdr, 1, MPI_INT,
+                       MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&total_local_faces, &global_total, 1, MPI_INT,
+                       MPI_SUM, 0, mesh_.GetComm());
+
+            // Local sparse matrix NNZ (before ParallelAssemble)
+            int local_mat_nnz = cached_a_->SpMat().NumNonZeroElems();
+            long long global_mat_nnz = 0;
+            long long ll_nnz = local_mat_nnz;
+            MPI_Reduce(&ll_nnz, &global_mat_nnz, 1, MPI_LONG_LONG,
+                       MPI_SUM, 0, mesh_.GetComm());
+
+            int rank = 0;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            if (rank == 0)
+            {
+               mfem::out << "[MPI-DIAG] Face assembly counts:\n"
+                         << "  global_interior_faces(BilinForm)="
+                         << global_interior << "\n"
+                         << "  global_shared_faces(ParBilinForm)="
+                         << global_shared << "\n"
+                         << "  global_boundary_elems=" << global_bdr << "\n"
+                         << "  global_total_local_faces=" << global_total << "\n"
+                         << "  local_sparse_NNZ(sum)=" << global_mat_nnz << "\n";
+            }
+         }
+
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
          cached_a_->ParallelAssemble(cached_Ah_);
 
