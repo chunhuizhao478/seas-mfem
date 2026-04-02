@@ -1410,6 +1410,31 @@ private:
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
          cached_a_->ParallelAssemble(cached_Ah_);
 
+         // v57 diagnostic: P matrix and HypreParMatrix global dimensions
+         {
+            auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+            auto *Kh = cached_Ah_.As<HypreParMatrix>();
+            HYPRE_BigInt glob_rows = Kh->GetGlobalNumRows();
+            HYPRE_BigInt glob_cols = Kh->GetGlobalNumCols();
+            HYPRE_BigInt glob_nnz = Kh->NNZ();
+
+            // Check P matrix: for DG, should be identity
+            int local_dofs = pfes->GetVSize();
+            int true_dofs = pfes->GetTrueVSize();
+
+            int rank = 0;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            if (rank == 0)
+            {
+               mfem::out << "[MPI-DIAG] HypreParMatrix global dims:\n"
+                         << "  rows=" << glob_rows << " cols=" << glob_cols
+                         << " nnz=" << glob_nnz << "\n"
+                         << "  rank0: local_dofs=" << local_dofs
+                         << " true_dofs=" << true_dofs
+                         << " (should be equal for DG)\n";
+            }
+         }
+
 #ifdef MFEM_USE_MUMPS
          if (solver_type_ == SolverType::MUMPS)
          {
