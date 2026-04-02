@@ -18,6 +18,7 @@
 #include "../domain/domain_operator.hpp"
 #include "../common/seas_types.hpp"
 #include "../common/mpi_context.hpp"
+#include <iomanip>
 
 #include <algorithm>
 #include <cmath>
@@ -727,6 +728,31 @@ private:
          bp5_params_.V_init_vec(x2, x3, Vi);
          V_init_vec_(2 * i)     = Vi[0];
          V_init_vec_(2 * i + 1) = Vi[1];
+
+         // v58 diagnostic: dump full state for DOFs near fault tip
+         // Target: x2 < -45000 (near lf/2=50km edge) AND x3 < 3000 (shallow)
+         if (std::abs(x2) > 45000.0 && x3 < 3000.0)
+         {
+            int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+            real_t psi_ss = bp5_params_.f0
+                          + bp5_params_.b * std::log(bp5_params_.V0 / bp5_params_.Vp);
+            mfem::out << std::scientific << std::setprecision(10)
+                      << "[TIP-INIT] rank=" << rank
+                      << " dof=" << i
+                      << " x2=" << x2
+                      << " x3=" << x3
+                      << " a=" << a_values_(i)
+                      << " b=" << bp5_params_.b
+                      << " Dc=" << dc_values_(i)
+                      << " f0=" << bp5_params_.f0
+                      << " sigma_n=" << bp5_params_.sigma_n
+                      << " eta=" << eta
+                      << " V_init=(" << Vi[0] << "," << Vi[1] << ")"
+                      << " tau_pre=(" << tau[0] << "," << tau[1] << ")"
+                      << " psi_ss=" << psi_ss
+                      << " psi_ss/a=" << psi_ss / a_values_(i)
+                      << "\n";
+         }
       }
    }
 

@@ -239,6 +239,42 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
    MFEM_VERIFY(eq_error < 1e-6,
                "Initial stress equilibrium error too large: " << eq_error);
 
+   // v58 diagnostic: dump post-init state at fault-tip DOFs
+   // Must run AFTER ComputeRHS populates slip rates and AFTER traction is computed
+   {
+      const auto *geom = fault_->GetGeometry();
+      if (geom)
+      {
+         const Vector &x2 = geom->GetCoordsX2();
+         const Vector &x3 = geom->GetCoordsX3();
+         const Vector &a_val = geom->GetAValues();
+         const Vector &slip_rate = fault_->GetSlipRate();
+         int num_nodes = fault_->NumNodes();
+
+         for (int i = 0; i < num_nodes; i++)
+         {
+            if (std::abs(x2(i)) > 45000.0 && x3(i) < 3000.0)
+            {
+               int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+               // State: [slip_dip, slip_strike, psi] per node for BP5
+               real_t psi0 = state(i * 3 + 2);  // BP5: 3 state per node
+               mfem::out << std::scientific << std::setprecision(10)
+                         << "[TIP-POST] rank=" << rank
+                         << " dof=" << i
+                         << " x2=" << x2(i)
+                         << " x3=" << x3(i)
+                         << " a=" << a_val(i)
+                         << " psi0=" << psi0
+                         << " V=(" << slip_rate(2*i) << ","
+                         << slip_rate(2*i+1) << ")"
+                         << " traction=(" << traction_(2*i) << ","
+                         << traction_(2*i+1) << ")"
+                         << "\n";
+            }
+         }
+      }
+   }
+
    // Log initial slip rate comparison (use global V_ref in parallel).
    // For BP5-QD, the nucleation zone has δτ overstress so V_max > V_nuc
    // is expected and correct — do not assert.
