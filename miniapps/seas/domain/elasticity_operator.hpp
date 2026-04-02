@@ -1043,7 +1043,15 @@ private:
          else
          {
             const int si = fi - num_interior;
-            local_face_idx = mesh_.GetSharedFace(fault_shared_faces_[si]);
+            if constexpr (IsParallelMesh<MeshType>::value)
+            {
+               local_face_idx = mesh_.GetSharedFace(fault_shared_faces_[si]);
+            }
+            else
+            {
+               MFEM_ABORT("Shared fault face in serial mesh");
+               local_face_idx = -1;
+            }
          }
 
          // Get face vertices (local indices)
