@@ -390,10 +390,11 @@ private:
    std::vector<SharedFaultCommBlock> shared_fault_comm_blocks_;
 
    /// Per-face canonical DOF permutation (Tandem sorted-simplex convention).
-   /// canonical_to_local_perm_[face_idx][canonical_k] = mfem_local_k
+   /// Flat array: canonical_to_local_perm_[face_idx * nbf_per_face_ + canonical_k]
+   ///           = mfem_local_k
    /// where canonical order = sorted by ascending global vertex ID.
    /// For p=1 triangles: DOF k = vertex k, so vertex perm = DOF perm.
-   Array<Array<int>> canonical_to_local_perm_;
+   Array<int> canonical_to_local_perm_;
 
    mutable Vector fault_depths_;
    mutable bool fault_depths_computed_;
@@ -958,7 +959,7 @@ private:
       // the k-th vertex in sorted-global-ID order.
       // For p=1 triangles: DOF k = vertex k, so vertex perm = DOF perm.
       // ------------------------------------------------------------------
-      canonical_to_local_perm_.SetSize(num_fault_faces_);
+      canonical_to_local_perm_.SetSize(num_fault_faces_ * nbf_per_face_);
 
       // Get global vertex IDs (parallel) or use local indices (serial).
       // Use int64_t for sorting to avoid HYPRE dependency in serial builds.
@@ -1012,17 +1013,16 @@ private:
          }
          std::sort(gid_idx.begin(), gid_idx.end());
 
-         // canonical_to_local_perm_[fi][canonical_k] = mfem_local_k
-         canonical_to_local_perm_[fi].SetSize(nbf_per_face_);
+         // canonical_to_local_perm_[fi * nbf + canonical_k] = mfem_local_k
          // For p=1: nbf_per_face_ == nv (3 vertices = 3 DOFs)
          for (int k = 0; k < nv && k < nbf_per_face_; k++)
          {
-            canonical_to_local_perm_[fi][k] = gid_idx[k].second;
+            canonical_to_local_perm_[fi * nbf_per_face_ + k] = gid_idx[k].second;
          }
          // For higher-order DOFs beyond vertices (p>=2): identity for now
          for (int k = nv; k < nbf_per_face_; k++)
          {
-            canonical_to_local_perm_[fi][k] = k;
+            canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
          }
       }
 
@@ -1033,7 +1033,8 @@ private:
          const int local_face = owned_fault_face_to_local_face_[owned_face];
          for (int kk = 0; kk < nbf_per_face_; kk++)
          {
-            const int mfem_kk = canonical_to_local_perm_[local_face][kk];
+            const int mfem_kk =
+               canonical_to_local_perm_[local_face * nbf_per_face_ + kk];
             owned_fault_dof_to_local_dof_[owned_face * nbf_per_face_ + kk] =
                local_face * nbf_per_face_ + mfem_kk;
          }
@@ -3153,7 +3154,7 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
             for (int canonical_kk = 0; canonical_kk < nbf_per_face_; canonical_kk++)
             {
                const int mfem_kk =
-                  canonical_to_local_perm_[local_face][canonical_kk];
+                  canonical_to_local_perm_[local_face * nbf_per_face_ + canonical_kk];
                const int local_dof = local_face * nbf_per_face_ + mfem_kk;
                for (int c = 0; c < comps_per_dof; c++)
                {
