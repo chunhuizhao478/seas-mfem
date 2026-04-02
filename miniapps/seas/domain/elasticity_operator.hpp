@@ -537,6 +537,71 @@ private:
             }
          }
       }
+
+      // v58 fix: Exchange shared fault face tags between neighboring ranks.
+      //
+      // Internal boundary elements (attr=3) only exist on ONE rank per
+      // shared face.  The rank without the boundary element never detects
+      // the face as a fault face, causing its elem2 RHS contribution to
+      // be silently dropped in AssembleSlipContributionIPShared.
+      //
+      // Fix: each rank broadcasts its shared fault face indices (by
+      // shared-face index) to the neighbor that shares those faces.
+      // After this exchange, both ranks have the face in
+      // fault_shared_tagged_.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Build global-face-ID set of locally-detected shared fault faces
+         Array<HYPRE_BigInt> global_face_ids_arr;
+         mesh_.GetGlobalFaceIndices(global_face_ids_arr);
+
+         std::set<HYPRE_BigInt> local_shared_fault_gids;
+         for (int sf : fault_shared_tagged_)
+         {
+            int lf = mesh_.GetSharedFace(sf);
+            local_shared_fault_gids.insert(global_face_ids_arr[lf]);
+         }
+
+         // Allgather: collect ALL shared fault face GIDs from all ranks
+         int local_count = static_cast<int>(local_shared_fault_gids.size());
+         std::vector<HYPRE_BigInt> local_gids(local_shared_fault_gids.begin(),
+                                               local_shared_fault_gids.end());
+         int nranks = 1;
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+         std::vector<int> recv_counts(nranks), displs(nranks);
+         MPI_Allgather(&local_count, 1, MPI_INT,
+                       recv_counts.data(), 1, MPI_INT, mesh_.GetComm());
+         int total = 0;
+         for (int r = 0; r < nranks; r++)
+         {
+            displs[r] = total;
+            total += recv_counts[r];
+         }
+         std::vector<HYPRE_BigInt> all_gids(total);
+         MPI_Allgatherv(local_gids.data(), local_count, HYPRE_MPI_BIG_INT,
+                        all_gids.data(), recv_counts.data(), displs.data(),
+                        HYPRE_MPI_BIG_INT, mesh_.GetComm());
+
+         // Build global set of all shared fault face GIDs
+         std::set<HYPRE_BigInt> global_fault_gids(all_gids.begin(),
+                                                    all_gids.end());
+
+         // Check each of MY shared faces against the global set.
+         // If my neighbor detected a shared face as fault but I didn't,
+         // add it to my fault_shared_tagged_.
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            if (fault_shared_tagged_.count(sf) > 0) { continue; }
+            int lf = mesh_.GetSharedFace(sf);
+            HYPRE_BigInt gid = global_face_ids_arr[lf];
+            if (global_fault_gids.count(gid) > 0)
+            {
+               fault_shared_tagged_.insert(sf);
+            }
+         }
+#endif
+      }
    }
 
    /// Build Dirichlet interior face list from mesh boundary element attributes.
