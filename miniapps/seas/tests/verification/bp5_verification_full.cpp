@@ -1695,6 +1695,60 @@ int main(int argc, char *argv[])
 
       real_t V_max = seas_op.GetMaxSlipRate();
 
+      // v58 tip DOF monitor: sparse-to-dense schedule
+      // Early: powers of 2; mid-run: every 1000; dense near failure: every 10
+      {
+         real_t t_yr = t / BP5Params::seconds_per_year;
+         bool should_log = false;
+         if (step <= 64 && (step & (step - 1)) == 0) { should_log = true; }  // powers of 2
+         else if (step % 1000 == 0) { should_log = true; }                    // every 1000
+         else if (t_yr > 0.45 && step % 10 == 0) { should_log = true; }      // dense near failure
+
+         if (should_log)
+         {
+            const auto *geom = fault_op.GetGeometry();
+            if (geom)
+            {
+               const Vector &x2 = geom->GetCoordsX2();
+               const Vector &x3 = geom->GetCoordsX3();
+               const Vector &slip_rate = fault_op.GetSlipRate();
+               const Vector &traction = seas_op.GetTraction();
+               int nn = fault_op.NumNodes();
+               int spn = 3;  // BP5: slip_dip, slip_strike, psi
+
+               for (int i = 0; i < nn; i++)
+               {
+                  // Monitor exact crash DOFs: |x2| > 48km AND x3 < 2.5km
+                  if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
+                  {
+                     real_t psi = state(i * spn + 2);
+                     real_t slip_d = state(i * spn + 0);
+                     real_t slip_s = state(i * spn + 1);
+                     real_t V_d = slip_rate(2*i);
+                     real_t V_s = slip_rate(2*i+1);
+                     real_t V_abs = std::sqrt(V_d*V_d + V_s*V_s);
+                     real_t tau_d = traction(2*i);
+                     real_t tau_s = traction(2*i+1);
+                     real_t tau_abs = std::sqrt(tau_d*tau_d + tau_s*tau_s);
+                     mfem::out << "[TIP-MON] step=" << step
+                               << " t_yr=" << std::scientific << std::setprecision(6)
+                               << t_yr
+                               << " dt=" << dt
+                               << " rank=" << mpi.Rank()
+                               << " dof=" << i
+                               << " x2=" << x2(i)
+                               << " x3=" << x3(i)
+                               << " psi=" << psi
+                               << " |V|=" << V_abs
+                               << " |tau|=" << tau_abs
+                               << " slip=(" << slip_d << "," << slip_s << ")"
+                               << "\n";
+                  }
+               }
+            }
+         }
+      }
+
       // NaN/Inf check
       bool has_nan = !std::isfinite(V_max);
       if (!has_nan)
