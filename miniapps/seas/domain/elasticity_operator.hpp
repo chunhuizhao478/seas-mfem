@@ -305,6 +305,7 @@ private:
    bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
    mutable bool diag_rhs_z_done_ = false;
    mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
+   mutable bool diag_slip_embed_done_ = false;   // v58 FaultBasis diagnostic
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -1668,6 +1669,38 @@ private:
                delta_u_quad(i) *= sign;
          }
 
+         // v58 diagnostic: print FaultBasis + delta_u_quad for first 3 interior faces
+         if (!diag_slip_embed_done_ && fi < 3)
+         {
+            const IntegrationPoint &ip_c =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_c);
+            Vector fc(3);
+            FTr->Face->Transform(ip_c, fc);
+            int rank = 0;
+            if constexpr (IsParallelMesh<MeshType>::value)
+            {
+#ifdef MFEM_USE_MPI
+               MPI_Comm_rank(mesh_.GetComm(), &rank);
+#endif
+            }
+            int nqp_diag = delta_u_quad.Size() / dim;
+            mfem::out << "[SLIP-EMBED] INTERIOR fi=" << fi
+                      << " rank=" << rank
+                      << " centroid=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
+                      << " sign_flipped=" << basis_slip.sign_flipped
+                      << " n=(" << basis_slip.normal[0] << ","
+                      << basis_slip.normal[1] << "," << basis_slip.normal[2] << ")"
+                      << " t1=(" << basis_slip.tangent1[0] << ","
+                      << basis_slip.tangent1[1] << "," << basis_slip.tangent1[2] << ")"
+                      << " t2=(" << basis_slip.tangent2[0] << ","
+                      << basis_slip.tangent2[1] << "," << basis_slip.tangent2[2] << ")"
+                      << " du_q0=(" << delta_u_quad(0) << ","
+                      << delta_u_quad(nqp_diag) << ","
+                      << delta_u_quad(2*nqp_diag) << ")"
+                      << "\n";
+         }
+
          const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
          const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
 
@@ -2047,6 +2080,37 @@ private:
                   delta_u_quad(j) *= sign;
             }
 
+            // v58 diagnostic: print FaultBasis + delta_u_quad for ALL shared fault faces
+            if (!diag_slip_embed_done_)
+            {
+               const IntegrationPoint &ip_c =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip_c);
+               Vector fc(3);
+               FTr->Face->Transform(ip_c, fc);
+               int rank = 0;
+               MPI_Comm_rank(mesh_.GetComm(), &rank);
+               int nqp_diag = delta_u_quad.Size() / dim;
+               mfem::out << "[SLIP-EMBED] SHARED i=" << i
+                         << " rank=" << rank
+                         << " centroid=(" << fc(0) << "," << fc(1)
+                         << "," << fc(2) << ")"
+                         << " sign_flipped=" << basis_slip.sign_flipped
+                         << " n=(" << basis_slip.normal[0] << ","
+                         << basis_slip.normal[1] << ","
+                         << basis_slip.normal[2] << ")"
+                         << " t1=(" << basis_slip.tangent1[0] << ","
+                         << basis_slip.tangent1[1] << ","
+                         << basis_slip.tangent1[2] << ")"
+                         << " t2=(" << basis_slip.tangent2[0] << ","
+                         << basis_slip.tangent2[1] << ","
+                         << basis_slip.tangent2[2] << ")"
+                         << " du_q0=(" << delta_u_quad(0) << ","
+                         << delta_u_quad(nqp_diag) << ","
+                         << delta_u_quad(2*nqp_diag) << ")"
+                         << "\n";
+            }
+
             const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
             auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
             int nbr_idx = FTr->Elem2No - mesh_.GetNE();
@@ -2066,6 +2130,7 @@ private:
                else { rhs(-1 - gj) -= elvec1(j); }
             }
          }
+         if (!diag_slip_embed_done_) { diag_slip_embed_done_ = true; }
 #endif
       }
    }
