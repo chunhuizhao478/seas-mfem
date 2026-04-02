@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J bp5_v57_pts_p1_mx
-#SBATCH -o bp5_v57_pts_p1_mx_%j.out
-#SBATCH -e bp5_v57_pts_p1_mx_%j.err
+#SBATCH -J bp5_v57_pts_p1_mumps_nowrite
+#SBATCH -o bp5_v57_pts_p1_mumps_nowrite_%j.out
+#SBATCH -e bp5_v57_pts_p1_mumps_nowrite_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
@@ -13,7 +13,7 @@
 # Purpose:
 # - use PETSc TS for time stepping
 # - keep the BP5 elasticity solve on exact MUMPS
-# - avoid per-step forced output to reduce I/O overhead
+# - match the baseline PETSc TS MUMPS run except omit --write-every-step
 #
 # Assumption:
 # - MFEM was already built before job submission with MFEM_USE_PETSC=YES and
@@ -62,6 +62,6 @@ ibrun ./seas_bp5_full \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v57_1000m_ip_p1_petsc_ts_mumps_nowrite \
       --output-prefix bp5_v57_petsc_ts_p1_mumps_nowrite \
-      --checkpoint-interval 1000 \
+      --checkpoint-interval 0 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg
