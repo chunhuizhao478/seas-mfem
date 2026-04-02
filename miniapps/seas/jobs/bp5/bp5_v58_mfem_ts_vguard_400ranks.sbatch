@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v58_mfem_vg
 #SBATCH -o bp5_v58_mfem_vg_%j.out
 #SBATCH -e bp5_v58_mfem_vg_%j.err
-#SBATCH -p development
+#SBATCH -p normal
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 02:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # BP5 v58: 1000 m, IP, p=1, MFEM time stepper with V-guard, MUMPS

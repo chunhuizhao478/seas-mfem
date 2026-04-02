@@ -2,10 +2,10 @@
 #SBATCH -J bp5_v58_mpi400
 #SBATCH -o bp5_v58_mpi400_%j.out
 #SBATCH -e bp5_v58_mpi400_%j.err
-#SBATCH -p development
+#SBATCH -p normal
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 02:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # BP5 v58 MPI-independence test: 400 ranks
