@@ -790,6 +790,16 @@ private:
    real_t epsilon_;
    real_t penalty_factor_;
 
+public:
+   /// Public accessor for diagnostic use.
+   real_t GetPenalty(const FiniteElement &fe1, const FiniteElement &fe2,
+                     real_t detJ1, real_t detJ2,
+                     real_t lam, real_t mu_val, real_t nl_q) const
+   {
+      return ComputePenalty(fe1, fe2, detJ1, detJ2, lam, mu_val, nl_q, true);
+   }
+
+private:
    /// Compute IP penalty matching Tandem's formula.
    /// penalty = (p0+p1)/4 for interior, p0 for boundary.
    /// p_i = (D+1) * c_N_1 * (D*nl_q/detJ_i) * (c1^2/c0)

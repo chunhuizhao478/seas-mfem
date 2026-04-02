@@ -4353,7 +4353,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          int nbf = nbf_per_face_;
          bool need_decomp = traction_stress_out || traction_correction_out ||
                             jump_residual_out || coherence_active ||
-                            diag_traction_decomp_;
+                            diag_traction_decomp_ ||
+                            !diag_first_traction_done_;  // force decomp for tip diagnostic
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
@@ -4458,6 +4459,106 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int dof_idx = fi * nbf_per_face_ + kk;
             traction(2 * dof_idx)     = trac_local_new(0 * nbf + kk);
             traction(2 * dof_idx + 1) = trac_local_new(1 * nbf + kk);
+         }
+
+         // v58 face-level tip diagnostic: compare mirror left/right tip faces
+         if (!diag_first_traction_done_)
+         {
+            // Compute face centroid
+            const IntegrationPoint &ip_diag =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_diag);
+            Vector fc_diag(3);
+            FTr->Face->Transform(ip_diag, fc_diag);
+            real_t cx = fc_diag(0), cz = -fc_diag(2);
+
+            // Only dump for tip faces: |x| > 49km AND depth < 2.5km
+            if (std::abs(cx) > 49000.0 && cz < 2500.0)
+            {
+               // Element volumes
+               real_t detJ1_diag = FTr->Elem1->Weight();
+               real_t detJ2_diag = FTr->Elem2->Weight();
+
+               // Face area (sum of nl_q * w_q)
+               real_t face_area = 0.0;
+               for (int q = 0; q < nqp_new; q++)
+                  face_area += ir_new.IntPoint(q).weight * nl_q_vec(q);
+
+               // DG penalty (same formula as K assembly)
+               real_t nl0 = nl_q_vec(0);
+               real_t pen = trac_integ.GetPenalty(
+                  *fe1, *fe2, detJ1_diag, detJ2_diag,
+                  lambda_val_, mu_val_, nl0);
+
+               // Traction decomposition at quad point 0
+               real_t T_stress_q0[3] = {0,0,0}, T_corr_q0[3] = {0,0,0};
+               if (T_stress_quad_dec.Size() > 0)
+               {
+                  for (int c = 0; c < dim; c++)
+                  {
+                     T_stress_q0[c] = T_stress_quad_dec(c * nqp_new);
+                     T_corr_q0[c] = T_corr_quad_dec(c * nqp_new);
+                  }
+               }
+
+               // Jump at quad point 0: u1-u2-slip
+               DenseMatrix shape1_d(fe1->GetDof()), shape2_d(fe2->GetDof());
+               {
+                  const IntegrationPoint &ip0 = ir_new.IntPoint(0);
+                  FTr->SetAllIntPoints(&ip0);
+                  Vector s1(fe1->GetDof()), s2(fe2->GetDof());
+                  fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
+                  fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
+                  real_t jump_q0[3] = {0,0,0};
+                  for (int c = 0; c < dim; c++)
+                  {
+                     real_t u1q = 0, u2q = 0;
+                     for (int k = 0; k < fe1->GetDof(); k++)
+                        u1q += s1(k) * u1_all(c * fe1->GetDof() + k);
+                     for (int k = 0; k < fe2->GetDof(); k++)
+                        u2q += s2(k) * u2_all(c * fe2->GetDof() + k);
+                     real_t fq = delta_u_quad_t(c * nqp_new);
+                     jump_q0[c] = u1q - u2q - fq;
+                  }
+
+                  int rank = 0;
+                  if constexpr (IsParallelMesh<MeshType>::value)
+                  {
+#ifdef MFEM_USE_MPI
+                     MPI_Comm_rank(mesh_.GetComm(), &rank);
+#endif
+                  }
+                  mfem::out << std::scientific << std::setprecision(6)
+                     << "[TIP-FACE] rank=" << rank
+                     << " fi=" << fi << " interior"
+                     << " centroid=(" << cx << "," << fc_diag(1)
+                     << "," << fc_diag(2) << ")"
+                     << " sign_flipped=" << basis.sign_flipped
+                     << " detJ1=" << detJ1_diag
+                     << " detJ2=" << detJ2_diag
+                     << " face_area=" << face_area
+                     << " penalty=" << pen
+                     << " nl_q0=" << nl0
+                     << "\n    T_stress_q0=(" << T_stress_q0[0]
+                     << "," << T_stress_q0[1] << "," << T_stress_q0[2] << ")"
+                     << " T_corr_q0=(" << T_corr_q0[0]
+                     << "," << T_corr_q0[1] << "," << T_corr_q0[2] << ")"
+                     << "\n    jump_q0=(" << jump_q0[0]
+                     << "," << jump_q0[1] << "," << jump_q0[2] << ")"
+                     << " slip_q0=(" << delta_u_quad_t(0)
+                     << "," << delta_u_quad_t(nqp_new)
+                     << "," << delta_u_quad_t(2*nqp_new) << ")"
+                     << "\n    trac_local=(";
+                  for (int kk = 0; kk < nbf; kk++)
+                  {
+                     int di = fi * nbf_per_face_ + kk;
+                     mfem::out << "(" << traction(2*di) << ","
+                               << traction(2*di+1) << ")";
+                     if (kk < nbf-1) mfem::out << " ";
+                  }
+                  mfem::out << ")\n";
+               }
+            }
          }
 
          // Normal stress: L2 projection using M^{-1} * B^T * W * (T·n̂),
