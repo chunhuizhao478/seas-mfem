@@ -3397,8 +3397,20 @@ void ElasticityDomainOperator<MeshType>::Solve(
    B_ = rhs;
 
    // v57 MPI diagnostic: print ||K|| and ||b|| once on first non-trivial solve
-   if (!diag_matrix_norm_done_ && rhs.Normlinf() > 1e-30)
+   // Use global trigger to avoid MPI deadlock (ranks without fault DOFs
+   // may have zero local RHS).
    {
+      bool local_trigger = !diag_matrix_norm_done_ && rhs.Normlinf() > 1e-30;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int lt = local_trigger ? 1 : 0, gt = 0;
+         MPI_Allreduce(&lt, &gt, 1, MPI_INT, MPI_MAX, mesh_.GetComm());
+         local_trigger = (gt > 0);
+#endif
+      }
+      if (local_trigger && !diag_matrix_norm_done_)
+      {
       diag_matrix_norm_done_ = true;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
@@ -3443,7 +3455,8 @@ void ElasticityDomainOperator<MeshType>::Solve(
          }
 #endif
       }
-   }
+      }  // if (local_trigger)
+   }  // scope for MPI diagnostic
 
    solver_->Mult(B_, X_);
 
