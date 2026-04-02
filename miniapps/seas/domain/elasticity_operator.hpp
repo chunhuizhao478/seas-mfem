@@ -1424,11 +1424,28 @@ private:
 
             int rank = 0;
             MPI_Comm_rank(mesh_.GetComm(), &rank);
+            // Compute sum(|K_ij|) (L1 norm of all entries) — partition-independent test
+            hypre_ParCSRMatrix *hA = (hypre_ParCSRMatrix*)(*Kh);
+            hypre_CSRMatrix *d = hypre_ParCSRMatrixDiag(hA);
+            hypre_CSRMatrix *o = hypre_ParCSRMatrixOffd(hA);
+            double *dd = hypre_CSRMatrixData(d);
+            double *od = hypre_CSRMatrixData(o);
+            int dnnz = hypre_CSRMatrixNumNonzeros(d);
+            int onnz = hypre_CSRMatrixNumNonzeros(o);
+            real_t local_abs_sum = 0.0;
+            for (int ii = 0; ii < dnnz; ii++) local_abs_sum += std::abs(dd[ii]);
+            for (int ii = 0; ii < onnz; ii++) local_abs_sum += std::abs(od[ii]);
+            real_t global_abs_sum = 0.0;
+            MPI_Reduce(&local_abs_sum, &global_abs_sum, 1, MPI_DOUBLE,
+                       MPI_SUM, 0, mesh_.GetComm());
+
             if (rank == 0)
             {
                mfem::out << "[MPI-DIAG] HypreParMatrix global dims:\n"
                          << "  rows=" << glob_rows << " cols=" << glob_cols
                          << " nnz=" << glob_nnz << "\n"
+                         << "  sum|K_ij|=" << std::scientific
+                         << std::setprecision(15) << global_abs_sum << "\n"
                          << "  rank0: local_dofs=" << local_dofs
                          << " true_dofs=" << true_dofs
                          << " (should be equal for DG)\n";
