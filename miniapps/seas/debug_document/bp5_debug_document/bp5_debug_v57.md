@@ -146,11 +146,78 @@ Following Tandem's `Simplex.h` convention, we sort face vertices by ascending gl
 - `ExpandOwnedToLocalFault` ghost recv applies receiver's `canonical_to_local_perm_`
 - `ExpandOwnedToLocalFault` ghost send packs data in canonical order (from owned state which is canonical)
 
-### 4.3 Validation Plan
+### 4.3 Result: No effect
 
-Re-run the 100/200/400-rank jobs. V_max trajectories should now agree.
+Both the owned-fault fix and the canonical DOF permutation produced byte-for-byte
+identical results to the pre-fix runs. The root cause is NOT shared fault faces
+(only 4 instances across 100 ranks — negligible).
 
-## 5. Verification Jobs
+## 5. True Root Cause: Shared-Face Parameterization in DG Assembly
+
+### 5.1 Diagnostic Data (Frontera 100 vs 400 ranks)
+
+| Quantity | 100 ranks | 400 ranks | Interpretation |
+|----------|-----------|-----------|----------------|
+| `||slip||_inf` | 2.00e-05 | 2.00e-05 | identical input |
+| `sum|K_ij|` | 8.1196e+21 | 8.1196e+21 | K values same (5e-15 rel) |
+| `K_nnz` | 43,434,416 | 43,443,554 | structural zeros differ by 9,138 |
+| `||b||_2` | 2.3240e+11 | 2.3232e+11 | **RHS differs 0.037%** |
+| `||u||_inf` | 6.85e-05 | 6.41e-05 | **displacement differs 6.4%** |
+
+### 5.2 Mechanism
+
+MFEM's DG assembly splits face processing:
+- `BilinearForm::Assemble()` → interior faces (both elements local)
+- `ParBilinearForm::AssembleSharedFaces()` → shared faces (elem1 local, elem2 remote)
+
+For the SAME physical face, the face transformation differs because:
+1. The face vertex ordering in `faces[FaceNo]->GetVertices()` is element-dependent
+2. `CalcOrtho(Trans.Jacobian(), nor)` gives different normals
+3. `Trans.GetElement1IntPoint()` / `GetElement2IntPoint()` map face reference
+   points to different physical locations via Loc1/Loc2
+
+For polynomial integrands on planar faces with exact quadrature, the integral
+is parameterization-independent. But:
+- The **slip RHS** interpolates fault DOF values that can have sub-element
+  discontinuities (nucleation zone boundary with `nucleation_eps=0.001m << h=1000m`).
+  Different quadrature point locations sample this discontinuity differently.
+- The **K matrix** has 9,138 structural zeros that differ (entries exactly zero for
+  one parameterization but O(ε) for another), explaining NNZ mismatch but not values.
+
+The 0.037% RHS error is consistent with ~4 shared fault faces out of 9,312 total
+(0.04%). Amplified by condition number κ ≈ 160 → 6.4% displacement error.
+
+### 5.3 Key MFEM Code Paths
+
+- Face transformation: `mesh.cpp:540-561` — PointMat columns from `faces[FaceNo]->GetVertices()`
+- Face-to-element mapping: `eltrans.cpp:606` — eip1/eip2 through Loc1/Loc2
+- Interior face assembly: `bilinearform.cpp:672-696` — GetInteriorFaceTransformations
+- Shared face assembly: `pbilinearform.cpp:229-272` — GetSharedFaceTransformations
+- Slip RHS: `elasticity_operator.hpp:AssembleSlipContributionIPShared`
+
+### 5.4 Attempted Fixes (No Effect)
+
+| Fix | Commit | Effect |
+|-----|--------|--------|
+| Owned-fault DOF layout | f94d000 | None — only 4 shared fault faces |
+| Canonical DOF permutation | 978155d | None — permutation doesn't change face parameterization |
+| `KeepNbrBlock(true)` | 6cf06f8 | None — doesn't change HypreParMatrix after RAP |
+| `Assemble(skip_zeros=0)` | cad9a31 | None — no exact zeros in face matrix |
+
+### 5.5 Required Fix: Full Shared-Face Reparameterization
+
+Following Tandem's sorted-simplex approach, canonicalize the FULL face reference
+mapping for shared faces before any face integrator call:
+
+1. **Face transformation** — permute PointMat columns to canonical vertex order
+2. **Loc1** — compose reference-face permutation into face→elem1 mapping
+3. **Loc2** — compose reference-face permutation into face→elem2 mapping
+
+This must be a general wrapper applied in `ParBilinearForm::AssembleSharedFaces()`
+and in all custom shared-face code (slip RHS, traction recovery). NOT a PointMat-only
+patch — Loc1/Loc2 control the element integration point mapping and must be consistent.
+
+## 6. Verification Jobs
 
 Three SBATCH scripts created for Frontera validation:
 
