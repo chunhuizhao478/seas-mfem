@@ -19,6 +19,7 @@
 #include "../../config/bp5_params.hpp"
 
 #include <iostream>
+#include <iomanip>
 #include <cmath>
 #include <map>
 #include <vector>
@@ -446,7 +447,97 @@ bool test_canonical_dof_coords_match_serial(MPIContext &ctx)
    return ok;
 }
 
-/// Test 5: Zero slip → zero traction in parallel
+/// Test 5: Serial-parallel displacement match for non-uniform slip
+///
+/// Core proof-of-bug for shared-face parameterization: assemble K and b
+/// in serial and parallel with the SAME non-uniform slip (step function
+/// at the fault midpoint, mimicking nucleation boundary). Compare the
+/// global ||u||_inf.  Any difference > O(ε) proves that shared face
+/// parameterization corrupts the RHS.
+bool test_serial_parallel_displacement_match(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_serial_parallel_displacement_match... " << std::flush;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = Lz;
+   real_t lf = 2.0 * Ly;
+
+   // --- Serial: solve with non-uniform strike slip ---
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   int nf_serial = serial_op.GetNumFaultDOFs();
+   Vector serial_x2, serial_x3;
+   serial_op.GetFaultCoords2D(serial_x2, serial_x3);
+
+   // Non-uniform slip: step function at x2=0 (mimics nucleation boundary)
+   Vector slip_serial(2 * nf_serial);
+   slip_serial = 0.0;
+   for (int i = 0; i < nf_serial; i++)
+   {
+      real_t x2 = serial_x2(i);
+      slip_serial(2 * i + 1) = (x2 > 0.0) ? 1.0 : 0.01;  // strike slip
+   }
+
+   GridFunction u_serial(&serial_op.GetFESpace());
+   serial_op.Solve(0.0, slip_serial, u_serial);
+   real_t serial_u_inf = u_serial.Normlinf();
+
+   // --- Parallel: solve with same non-uniform slip ---
+   ParMesh pmesh(ctx.GetComm(), serial_mesh);
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu, Vp, Wf, lf);
+
+   int nf_par = par_op.GetNumFaultDOFs();
+   Vector par_x2, par_x3;
+   par_op.GetFaultCoords2D(par_x2, par_x3);
+
+   Vector slip_par(2 * nf_par);
+   slip_par = 0.0;
+   for (int i = 0; i < nf_par; i++)
+   {
+      real_t x2 = par_x2(i);
+      slip_par(2 * i + 1) = (x2 > 0.0) ? 1.0 : 0.01;  // same step function
+   }
+
+   ParGridFunction u_par(&par_op.GetFESpace());
+   par_op.Solve(0.0, slip_par, u_par);
+   real_t local_u_inf = u_par.Normlinf();
+   real_t parallel_u_inf = ctx.GlobalMax(local_u_inf);
+
+   // Broadcast serial result
+   ctx.Bcast(serial_u_inf);
+
+   real_t rel_err = (serial_u_inf > 0.0)
+      ? std::abs(parallel_u_inf - serial_u_inf) / serial_u_inf : 0.0;
+
+   // Tight tolerance: should be < 1e-10 for partition-independent assembly.
+   // If > 1e-6, shared face parameterization is corrupting the solve.
+   bool ok = (rel_err < 1e-10);
+
+   TEST_CHECK(ctx, "serial-parallel displacement match (non-uniform slip)", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (serial_u=" << std::scientific << std::setprecision(12)
+                << serial_u_inf
+                << ", parallel_u=" << parallel_u_inf
+                << ", rel_err=" << rel_err << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Test 6: Zero slip → zero traction in parallel
+/// (unchanged from before)
 bool test_parallel_zero_slip_traction(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -720,6 +811,7 @@ int main(int argc, char *argv[])
    test_serial_parallel_fault_dof_count(ctx);
    test_owned_fault_layout(ctx);
    test_canonical_dof_coords_match_serial(ctx);
+   test_serial_parallel_displacement_match(ctx);
    test_parallel_zero_slip_traction(ctx);
    test_serial_parallel_traction_consistency(ctx);
    test_parallel_traction_bounded(ctx);
