@@ -735,6 +735,51 @@ private:
       num_fault_dofs_ = num_fault_faces_ * nbf_per_face_;
       BuildOwnedFaultLayout();
 
+      // Diagnostic: report owned vs local fault DOFs across all ranks
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank = 0, nranks = 1;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+         int local_shared = fault_shared_faces_.Size();
+         int global_shared = 0;
+         MPI_Reduce(&local_shared, &global_shared, 1, MPI_INT, MPI_SUM, 0,
+                    mesh_.GetComm());
+         int global_owned = 0;
+         MPI_Reduce(&num_owned_fault_dofs_, &global_owned, 1, MPI_INT, MPI_SUM,
+                    0, mesh_.GetComm());
+         int global_local = 0;
+         MPI_Reduce(&num_fault_dofs_, &global_local, 1, MPI_INT, MPI_SUM,
+                    0, mesh_.GetComm());
+         // Check how many faces have non-identity permutation
+         int local_permuted = 0;
+         for (int fi = 0; fi < num_fault_faces_; fi++)
+         {
+            for (int k = 0; k < nbf_per_face_; k++)
+            {
+               if (canonical_to_local_perm_[fi * nbf_per_face_ + k] != k)
+               {
+                  local_permuted++;
+                  break;
+               }
+            }
+         }
+         int global_permuted = 0;
+         MPI_Reduce(&local_permuted, &global_permuted, 1, MPI_INT, MPI_SUM, 0,
+                    mesh_.GetComm());
+         if (rank == 0)
+         {
+            mfem::out << "  Owned fault layout: "
+                      << "global_shared_faces=" << global_shared
+                      << ", global_owned_dofs=" << global_owned
+                      << ", global_local_dofs=" << global_local
+                      << ", faces_with_nontrivial_perm=" << global_permuted
+                      << "\n";
+         }
+#endif
+      }
+
       fault_dofs_.SetSize(num_fault_dofs_);
       for (int i = 0; i < num_fault_dofs_; i++)
       {
