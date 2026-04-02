@@ -3343,19 +3343,43 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    // Add slip contributions (interior + shared faces)
    real_t rhs_before_slip = rhs.Normlinf();
+
+   // v57 RHS decomposition diagnostic: capture interior-only and shared-only norms
+   Vector rhs_after_interior;
    if (method_ == DGMethod::IP)
    {
       AssembleSlipContributionIP(rhs, slip_bc);
+
+      // Snapshot after interior-only (before shared)
+      if (!diag_matrix_norm_done_)
+      {
+         rhs_after_interior.SetSize(rhs.Size());
+         rhs_after_interior = rhs;
+      }
+
       AssembleSlipContributionIPShared(rhs, slip_bc,
                                        fault_interior_faces_.Size());
    }
    else
    {
       AssembleSlipContributionBR2(rhs, slip_bc);
+      if (!diag_matrix_norm_done_)
+      {
+         rhs_after_interior.SetSize(rhs.Size());
+         rhs_after_interior = rhs;
+      }
       AssembleSlipContributionBR2Shared(rhs, slip_bc,
                                         fault_interior_faces_.Size());
    }
    real_t rhs_after_slip = rhs.Normlinf();
+
+   // Snapshot total slip RHS (interior + shared, before Dirichlet)
+   Vector rhs_total_slip;
+   if (!diag_matrix_norm_done_ && rhs_after_slip > 1e-30)
+   {
+      rhs_total_slip.SetSize(rhs.Size());
+      rhs_total_slip = rhs;
+   }
 
    // v52: RHS z-component diagnostic — capture f_z after slip, before Dirichlet
    // byNODES ordering: rhs[0..N-1]=x, rhs[N..2N-1]=y, rhs[2N..3N-1]=z
@@ -3557,13 +3581,39 @@ void ElasticityDomainOperator<MeshType>::Solve(
                        mesh_.GetComm());
          int rank = 0;
          MPI_Comm_rank(mesh_.GetComm(), &rank);
+         // RHS decomposition: interior-only vs shared vs total (slip only, no Dirichlet)
+         real_t local_b_int2 = 0.0, local_b_shared2 = 0.0;
+         if (rhs_after_interior.Size() > 0 && rhs_total_slip.Size() > 0)
+         {
+            local_b_int2 = rhs_after_interior * rhs_after_interior;
+            // shared contribution = total_slip - interior
+            Vector rhs_shared(rhs_total_slip.Size());
+            subtract(rhs_total_slip, rhs_after_interior, rhs_shared);
+            local_b_shared2 = rhs_shared * rhs_shared;
+         }
+         real_t global_b_int2 = 0.0, global_b_shared2 = 0.0;
+         MPI_Allreduce(&local_b_int2, &global_b_int2, 1, MPI_DOUBLE,
+                       MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(&local_b_shared2, &global_b_shared2, 1, MPI_DOUBLE,
+                       MPI_SUM, mesh_.GetComm());
+
+         // Local sparse NNZ (before ParallelAssemble)
+         int local_sparse_nnz = cached_a_->SpMat().NumNonZeroElems();
+         long long global_sparse_nnz = 0;
+         long long ll_sparse = local_sparse_nnz;
+         MPI_Allreduce(&ll_sparse, &global_sparse_nnz, 1, MPI_LONG_LONG,
+                       MPI_SUM, mesh_.GetComm());
+
          if (rank == 0)
          {
             mfem::out << "[MPI-DIAG] Stiffness matrix and RHS:\n"
                       << "  ||K||_F=" << std::scientific << std::setprecision(15)
                       << std::sqrt(global_K2) << "\n"
                       << "  ||b||_2=" << std::sqrt(global_b2) << "\n"
-                      << "  K_nnz=" << global_nnz << "\n";
+                      << "  ||b_interior||_2=" << std::sqrt(global_b_int2) << "\n"
+                      << "  ||b_shared||_2=" << std::sqrt(global_b_shared2) << "\n"
+                      << "  K_nnz(HypreParMatrix)=" << global_nnz << "\n"
+                      << "  K_nnz(local_sparse_sum)=" << global_sparse_nnz << "\n";
          }
 #endif
       }
