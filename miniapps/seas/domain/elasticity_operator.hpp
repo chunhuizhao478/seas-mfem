@@ -377,9 +377,45 @@ private:
    Array<int> full_fault_face_to_owned_face_;
    Array<int> owned_fault_dof_to_local_dof_;
 
+   /// Canonical face key: sorted global vertex IDs for triangular faces.
+   /// BP5/tet-specific (3 vertices per face). Would need extension for
+   /// quad faces (hex meshes) if used in that context.
+   struct FaceVertexKey
+   {
+      HYPRE_BigInt v[3] = {-1, -1, -1};
+      bool operator<(const FaceVertexKey &o) const
+      {
+         if (v[0] != o.v[0]) return v[0] < o.v[0];
+         if (v[1] != o.v[1]) return v[1] < o.v[1];
+         return v[2] < o.v[2];
+      }
+      bool operator==(const FaceVertexKey &o) const
+      {
+         return v[0] == o.v[0] && v[1] == o.v[1] && v[2] == o.v[2];
+      }
+   };
+
+   /// Build a canonical face key from a local face index (sorted global vertex IDs).
+   FaceVertexKey MakeFaceKey(int local_face,
+                              const Array<HYPRE_BigInt> &gvert) const
+   {
+      Array<int> verts;
+      mesh_.GetFaceVertices(local_face, verts);
+      FaceVertexKey key;
+      for (int j = 0; j < 3 && j < verts.Size(); j++)
+      {
+         key.v[j] = gvert[verts[j]];
+      }
+      // Sort to canonical order
+      if (key.v[0] > key.v[1]) { std::swap(key.v[0], key.v[1]); }
+      if (key.v[1] > key.v[2]) { std::swap(key.v[1], key.v[2]); }
+      if (key.v[0] > key.v[1]) { std::swap(key.v[0], key.v[1]); }
+      return key;
+   }
+
    struct SharedFaultFaceBlock
    {
-      HYPRE_BigInt gid = -1;
+      FaceVertexKey key;
       int face_idx = -1;
    };
 
@@ -545,28 +581,26 @@ private:
       // the face as a fault face, causing its elem2 RHS contribution to
       // be silently dropped in AssembleSlipContributionIPShared.
       //
-      // Fix: each rank broadcasts its shared fault face indices (by
-      // shared-face index) to the neighbor that shares those faces.
-      // After this exchange, both ranks have the face in
-      // fault_shared_tagged_.
+      // Fix: identify each face by its sorted global vertex IDs (canonical
+      // triplet).  Each rank broadcasts the vertex signatures of its
+      // detected shared fault faces.  Other ranks match their shared faces
+      // against this global set.
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         // Build global-face-ID set of locally-detected shared fault faces
-         Array<HYPRE_BigInt> global_face_ids_arr;
-         mesh_.GetGlobalFaceIndices(global_face_ids_arr);
+         Array<HYPRE_BigInt> gvert_tag;
+         mesh_.GetGlobalVertexIndices(gvert_tag);
 
-         std::set<HYPRE_BigInt> local_shared_fault_gids;
+         // Build canonical vertex keys for locally-detected shared fault faces
+         std::vector<FaceVertexKey> local_fault_keys;
          for (int sf : fault_shared_tagged_)
          {
             int lf = mesh_.GetSharedFace(sf);
-            local_shared_fault_gids.insert(global_face_ids_arr[lf]);
+            local_fault_keys.push_back(MakeFaceKey(lf, gvert_tag));
          }
 
-         // Allgather: collect ALL shared fault face GIDs from all ranks
-         int local_count = static_cast<int>(local_shared_fault_gids.size());
-         std::vector<HYPRE_BigInt> local_gids(local_shared_fault_gids.begin(),
-                                               local_shared_fault_gids.end());
+         // Allgather: collect all fault face keys from all ranks
+         int local_count = static_cast<int>(local_fault_keys.size());
          int nranks = 1;
          MPI_Comm_size(mesh_.GetComm(), &nranks);
          std::vector<int> recv_counts(nranks), displs(nranks);
@@ -578,24 +612,44 @@ private:
             displs[r] = total;
             total += recv_counts[r];
          }
-         std::vector<HYPRE_BigInt> all_gids(total);
-         MPI_Allgatherv(local_gids.data(), local_count, HYPRE_MPI_BIG_INT,
-                        all_gids.data(), recv_counts.data(), displs.data(),
+
+         // Pack as flat array (3 HYPRE_BigInt per face)
+         std::vector<HYPRE_BigInt> local_flat(3 * local_count);
+         for (int i = 0; i < local_count; i++)
+         {
+            local_flat[3*i]   = local_fault_keys[i].v[0];
+            local_flat[3*i+1] = local_fault_keys[i].v[1];
+            local_flat[3*i+2] = local_fault_keys[i].v[2];
+         }
+         std::vector<int> recv3(nranks), disp3(nranks);
+         for (int r = 0; r < nranks; r++)
+         {
+            recv3[r] = 3 * recv_counts[r];
+            disp3[r] = 3 * displs[r];
+         }
+         std::vector<HYPRE_BigInt> all_flat(3 * total);
+         MPI_Allgatherv(local_flat.data(), 3 * local_count, HYPRE_MPI_BIG_INT,
+                        all_flat.data(), recv3.data(), disp3.data(),
                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         // Build global set of all shared fault face GIDs
-         std::set<HYPRE_BigInt> global_fault_gids(all_gids.begin(),
-                                                    all_gids.end());
+         // Build set of all known fault face keys
+         std::set<FaceVertexKey> global_fault_keys;
+         for (int i = 0; i < total; i++)
+         {
+            FaceVertexKey k;
+            k.v[0] = all_flat[3*i];
+            k.v[1] = all_flat[3*i+1];
+            k.v[2] = all_flat[3*i+2];
+            global_fault_keys.insert(k);
+         }
 
-         // Check each of MY shared faces against the global set.
-         // If my neighbor detected a shared face as fault but I didn't,
-         // add it to my fault_shared_tagged_.
+         // Check each of MY shared faces against the global set
          for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
          {
             if (fault_shared_tagged_.count(sf) > 0) { continue; }
             int lf = mesh_.GetSharedFace(sf);
-            HYPRE_BigInt gid = global_face_ids_arr[lf];
-            if (global_fault_gids.count(gid) > 0)
+            FaceVertexKey key = MakeFaceKey(lf, gvert_tag);
+            if (global_fault_keys.count(key) > 0)
             {
                fault_shared_tagged_.insert(sf);
             }
@@ -941,24 +995,26 @@ private:
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         Array<HYPRE_BigInt> global_face_ids;
-         mesh_.GetGlobalFaceIndices(global_face_ids);
+         Array<HYPRE_BigInt> gvert;
+         mesh_.GetGlobalVertexIndices(gvert);
 
          int rank = 0;
          MPI_Comm_rank(mesh_.GetComm(), &rank);
 
-         std::vector<HYPRE_BigInt> local_shared_gids(fault_shared_faces_.Size());
+         // Build canonical vertex-key for each local shared fault face
+         std::vector<FaceVertexKey> local_shared_keys(fault_shared_faces_.Size());
          for (int i = 0; i < fault_shared_faces_.Size(); i++)
          {
             const int sf = fault_shared_faces_[i];
             const int local_face = mesh_.GetSharedFace(sf);
-            local_shared_gids[i] = global_face_ids[local_face];
+            local_shared_keys[i] = MakeFaceKey(local_face, gvert);
          }
 
+         // Allgather: collect all shared fault face keys + originating rank
          int comm_size = 1;
          MPI_Comm_size(mesh_.GetComm(), &comm_size);
-         std::vector<int> recv_counts(comm_size, 0), recv_displs(comm_size, 0);
          const int local_shared_count = fault_shared_faces_.Size();
+         std::vector<int> recv_counts(comm_size, 0), recv_displs(comm_size, 0);
          MPI_Allgather(&local_shared_count, 1, MPI_INT,
                        recv_counts.data(), 1, MPI_INT, mesh_.GetComm());
 
@@ -969,21 +1025,41 @@ private:
             total_shared += recv_counts[r];
          }
 
-         std::vector<HYPRE_BigInt> all_shared_gids(total_shared);
-         MPI_Allgatherv(local_shared_gids.data(), local_shared_count,
+         // Pack as flat array: 3 HYPRE_BigInt per face (sorted vertex IDs)
+         std::vector<HYPRE_BigInt> local_flat(3 * local_shared_count);
+         for (int i = 0; i < local_shared_count; i++)
+         {
+            local_flat[3*i]   = local_shared_keys[i].v[0];
+            local_flat[3*i+1] = local_shared_keys[i].v[1];
+            local_flat[3*i+2] = local_shared_keys[i].v[2];
+         }
+         std::vector<int> recv3(comm_size), disp3(comm_size);
+         for (int r = 0; r < comm_size; r++)
+         {
+            recv3[r] = 3 * recv_counts[r];
+            disp3[r] = 3 * recv_displs[r];
+         }
+         std::vector<HYPRE_BigInt> all_flat(3 * total_shared);
+         MPI_Allgatherv(local_flat.data(), 3 * local_shared_count,
                         HYPRE_MPI_BIG_INT,
-                        all_shared_gids.data(), recv_counts.data(),
-                        recv_displs.data(), HYPRE_MPI_BIG_INT, mesh_.GetComm());
+                        all_flat.data(), recv3.data(), disp3.data(),
+                        HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         std::unordered_map<HYPRE_BigInt, std::vector<int>> gid_ranks;
+         // Build map: face key → list of ranks that have it
+         std::map<FaceVertexKey, std::vector<int>> key_ranks;
          for (int r = 0; r < comm_size; r++)
          {
             for (int j = 0; j < recv_counts[r]; j++)
             {
-               gid_ranks[all_shared_gids[recv_displs[r] + j]].push_back(r);
+               int idx = recv_displs[r] + j;
+               FaceVertexKey k;
+               k.v[0] = all_flat[3*idx];
+               k.v[1] = all_flat[3*idx+1];
+               k.v[2] = all_flat[3*idx+2];
+               key_ranks[k].push_back(r);
             }
          }
-         for (auto &kv : gid_ranks)
+         for (auto &kv : key_ranks)
          {
             auto &ranks = kv.second;
             std::sort(ranks.begin(), ranks.end());
@@ -998,11 +1074,11 @@ private:
             const int sf = fault_shared_faces_[i];
             const int local_face = mesh_.GetSharedFace(sf);
             const int face_idx = num_interior + i;
-            const HYPRE_BigInt gid = global_face_ids[local_face];
-            auto gid_it = gid_ranks.find(gid);
-            MFEM_VERIFY(gid_it != gid_ranks.end() && !gid_it->second.empty(),
-                        "Missing shared fault ownership info for gid " << gid);
-            const auto &sharing_ranks = gid_it->second;
+            const FaceVertexKey key = local_shared_keys[i];
+            auto key_it = key_ranks.find(key);
+            MFEM_VERIFY(key_it != key_ranks.end() && !key_it->second.empty(),
+                        "Missing shared fault ownership info for face key");
+            const auto &sharing_ranks = key_it->second;
             const int owner_rank = sharing_ranks.front();
 
             if (rank == owner_rank)
@@ -1014,12 +1090,12 @@ private:
                for (int other_rank : sharing_ranks)
                {
                   if (other_rank == rank) { continue; }
-                  send_by_rank[other_rank].push_back({gid, owned_face});
+                  send_by_rank[other_rank].push_back({key, owned_face});
                }
             }
             else
             {
-               recv_by_rank[owner_rank].push_back({gid, face_idx});
+               recv_by_rank[owner_rank].push_back({key, face_idx});
             }
          }
 
@@ -1036,13 +1112,13 @@ private:
                       [](const SharedFaultFaceBlock &a,
                          const SharedFaultFaceBlock &b)
                       {
-                         return a.gid < b.gid;
+                         return a.key < b.key;
                       });
             std::sort(recv_faces.begin(), recv_faces.end(),
                       [](const SharedFaultFaceBlock &a,
                          const SharedFaultFaceBlock &b)
                       {
-                         return a.gid < b.gid;
+                         return a.key < b.key;
                       });
 
             SharedFaultCommBlock block;
@@ -5343,18 +5419,21 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    {
       int rank;
       MPI_Comm_rank(mesh_.GetComm(), &rank);
+      const int num_interior_faces = fault_interior_faces_.Size();
       for (int i = 0; i < num_fault_dofs_; i++)
       {
          real_t tau_mag = std::sqrt(traction(2*i)*traction(2*i) +
                                     traction(2*i+1)*traction(2*i+1));
          if (tau_mag > 1e9 || std::isnan(tau_mag))
          {
+            // Convert DOF index to face index (nbf_per_face_ DOFs per face)
+            int face_i = i / nbf_per_face_;
             // Get face coordinates for diagnostics
             Vector face_center(3);
             face_center = 0.0;
-            if (i < fault_interior_faces_.Size())
+            if (face_i < num_interior_faces)
             {
-               int face_idx = fault_interior_faces_[i];
+               int face_idx = fault_interior_faces_[face_i];
                FaceElementTransformations *FTr =
                   mesh_.GetInteriorFaceTransformations(face_idx);
                if (FTr)
@@ -5367,7 +5446,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
             else
             {
-               int shared_idx = i - fault_interior_faces_.Size();
+               int shared_idx = face_i - num_interior_faces;
                int sf = fault_shared_faces_[shared_idx];
                FaceElementTransformations *FTr =
                   mesh_.GetSharedFaceTransformations(sf);
@@ -5380,8 +5459,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                }
             }
             mfem::out << "[Rank " << rank << "] TRACTION BLOWUP: DOF " << i
-                      << (i < fault_interior_faces_.Size() ?
-                          " (interior)" : " (shared)")
+                      << " (face " << face_i << "/"
+                      << (face_i < num_interior_faces ? "interior" : "shared")
+                      << ")"
                       << " tau_mag=" << tau_mag
                       << " tau=(" << traction(2*i) << ","
                       << traction(2*i+1) << ")"
