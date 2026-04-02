@@ -487,7 +487,278 @@ Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
    return mesh;
 }
 
-/// Test 5: Serial-parallel displacement match for non-uniform slip (TET mesh)
+/// Test 5: Micro-test — same triangular face as serial interior vs parallel shared.
+///
+/// Decisive A/B proof for the shared-face parameterization hypothesis:
+/// 1. Create a tet mesh, find a fault face at y=0
+/// 2. SERIAL: assemble face matrix K and slip RHS b for that face
+/// 3. PARALLEL: custom-partition so the same face is shared between 2 ranks
+/// 4. Assemble face matrix K' and slip RHS b' on the rank that has elem1
+/// 5. Compare K vs K' and b vs b'
+///
+/// If K matches but b (with non-uniform slip) doesn't, the parameterization
+/// hypothesis is confirmed: polynomial integrands are invariant, but
+/// non-polynomial integrands (nucleation slip) sample differently.
+bool test_shared_face_micro(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_shared_face_micro... " << std::flush;
+   }
+
+   // Only meaningful with exactly 2 ranks
+   if (ctx.Size() != 2 && ctx.Size() != 4)
+   {
+      if (ctx.IsRoot())
+      {
+         std::cout << "SKIPPED (need 2 or 4 ranks, got " << ctx.Size() << ")\n";
+      }
+      return true;
+   }
+
+   // 1. Create a small tet mesh centered at origin
+   Mesh serial_mesh = Mesh::MakeCartesian3D(
+      2, 2, 1, Element::TETRAHEDRON, 2.0, 2.0, 1.0);
+   for (int i = 0; i < serial_mesh.GetNV(); i++)
+   {
+      real_t *v = serial_mesh.GetVertex(i);
+      v[0] -= 1.0; v[1] -= 1.0; v[2] -= 1.0;
+   }
+
+   // 2. Find a fault face at y=0 in serial
+   int serial_face = -1;
+   for (int f = 0; f < serial_mesh.GetNumFaces(); f++)
+   {
+      auto *FTr = serial_mesh.GetInteriorFaceTransformations(f);
+      if (!FTr) { continue; }
+      Array<int> verts;
+      serial_mesh.GetFaceVertices(f, verts);
+      bool on_fault = true;
+      for (int j = 0; j < verts.Size(); j++)
+      {
+         if (std::abs(serial_mesh.GetVertex(verts[j])[1]) > 1e-10)
+         { on_fault = false; break; }
+      }
+      if (on_fault) { serial_face = f; break; }
+   }
+
+   bool have_face = (serial_face >= 0);
+   if (ctx.IsRoot() && !have_face)
+   {
+      std::cout << "SKIPPED (no interior fault face at y=0)\n";
+      return true;
+   }
+
+   // 3. SERIAL: assemble face matrix and slip RHS
+   DG_FECollection fec(1, 3, BasisType::GaussLobatto);
+   FiniteElementSpace fes(&serial_mesh, &fec, 3, Ordering::byNODES);
+
+   auto *FTr_s = serial_mesh.GetInteriorFaceTransformations(serial_face);
+   const FiniteElement *fe1_s = fes.GetFE(FTr_s->Elem1No);
+   const FiniteElement *fe2_s = fes.GetFE(FTr_s->Elem2No);
+
+   // Record serial elem1/elem2 vertex centroid y-coords for later matching
+   real_t serial_e1_cy = 0, serial_e2_cy = 0;
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(FTr_s->Elem1No, ev);
+      for (int j = 0; j < ev.Size(); j++)
+         serial_e1_cy += serial_mesh.GetVertex(ev[j])[1];
+      serial_e1_cy /= ev.Size();
+      serial_mesh.GetElementVertices(FTr_s->Elem2No, ev);
+      for (int j = 0; j < ev.Size(); j++)
+         serial_e2_cy += serial_mesh.GetVertex(ev[j])[1];
+      serial_e2_cy /= ev.Size();
+   }
+
+   BP5Params params;
+   ConstantCoefficient lam_coef(params.lambda());
+   ConstantCoefficient mu_coef(params.mu());
+   DGElasticityIPCombinedIntegrator integ(lam_coef, mu_coef, 3, -1.0);
+
+   DenseMatrix K_serial;
+   integ.AssembleFaceMatrix(*fe1_s, *fe2_s, *FTr_s, K_serial);
+
+   // Non-uniform slip at quad points (step function: x>0 → 1, x<0 → 0.01)
+   int order_q = 2 * 1 + 1;
+   const IntegrationRule &ir = IntRules.Get(FTr_s->GetGeometryType(), order_q);
+   int nq = ir.GetNPoints();
+   Vector slip_serial(3 * nq);
+   slip_serial = 0.0;
+   for (int q = 0; q < nq; q++)
+   {
+      FTr_s->Face->SetIntPoint(&ir.IntPoint(q));
+      Vector phys(3);
+      FTr_s->Face->Transform(ir.IntPoint(q), phys);
+      real_t strike_slip = (phys(0) > 0.0) ? 1.0 : 0.01;
+      slip_serial(0 * nq + q) = strike_slip;  // x-component
+   }
+
+   Vector b1_serial, b2_serial;
+   integ.AssembleSlipFaceRHS(*fe1_s, *fe2_s, *FTr_s, slip_serial, b1_serial, b2_serial);
+
+   real_t K_serial_fnorm = K_serial.FNorm();
+   real_t b1_serial_norm = b1_serial.Norml2();
+   real_t b2_serial_norm = b2_serial.Norml2();
+
+   // Broadcast serial results to all ranks
+   ctx.Bcast(K_serial_fnorm);
+   ctx.Bcast(b1_serial_norm);
+   ctx.Bcast(b2_serial_norm);
+   ctx.Bcast(serial_e1_cy);
+   ctx.Bcast(serial_e2_cy);
+
+   // 4. PARALLEL: custom partition to force the fault face to be shared
+   // Put elements with centroid y<0 on rank 0, y>0 on rank 1
+   Array<int> partitioning(serial_mesh.GetNE());
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      partitioning[e] = (cy < 0.0) ? 0 : (ctx.Size() > 2 ? (e % ctx.Size()) : 1);
+   }
+
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, partitioning.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   DG_FECollection pfec(1, 3, BasisType::GaussLobatto);
+   ParFiniteElementSpace pfes(&pmesh, &pfec, 3, Ordering::byNODES);
+   pfes.ExchangeFaceNbrData();
+
+   // 5. Find the same physical face as a shared face on this rank
+   real_t K_par_fnorm = -1.0, b1_par_norm = -1.0;
+   bool found_shared = false;
+
+   int n_shared = pmesh.GetNSharedFaces();
+   if (ctx.IsRoot())
+   {
+      std::cout << "\n    [micro] rank0: NSharedFaces=" << n_shared
+                << " NE=" << pmesh.GetNE() << "\n";
+      for (int sf = 0; sf < n_shared; sf++)
+      {
+         int lf = pmesh.GetSharedFace(sf);
+         Array<int> verts;
+         pmesh.GetFaceVertices(lf, verts);
+         std::cout << "      sf=" << sf << " verts: ";
+         for (int j = 0; j < verts.Size(); j++)
+         {
+            real_t *v = pmesh.GetVertex(verts[j]);
+            std::cout << "(" << v[0] << "," << v[1] << "," << v[2] << ") ";
+         }
+         std::cout << "\n";
+      }
+      std::cout << std::flush;
+   }
+
+   for (int sf = 0; sf < n_shared; sf++)
+   {
+      auto *FTr_p = pmesh.GetSharedFaceTransformations(sf);
+      if (!FTr_p) { continue; }
+
+      // Check if this face is at y=0
+      Array<int> verts;
+      int local_face = pmesh.GetSharedFace(sf);
+      pmesh.GetFaceVertices(local_face, verts);
+      bool on_fault = true;
+      for (int j = 0; j < verts.Size(); j++)
+      {
+         if (std::abs(pmesh.GetVertex(verts[j])[1]) > 1e-10)
+         { on_fault = false; break; }
+      }
+      if (!on_fault) { continue; }
+
+      // Found a shared fault face — assemble
+      found_shared = true;
+
+      const FiniteElement *fe1_p = pfes.GetFE(FTr_p->Elem1No);
+      int nbr_idx = FTr_p->Elem2No - pmesh.GetNE();
+      const FiniteElement *fe2_p = pfes.GetFaceNbrFE(nbr_idx);
+
+      DenseMatrix K_par;
+      integ.AssembleFaceMatrix(*fe1_p, *fe2_p, *FTr_p, K_par);
+      K_par_fnorm = K_par.FNorm();
+
+      // Same non-uniform slip at quad points
+      const IntegrationRule &ir_p = IntRules.Get(FTr_p->GetGeometryType(), order_q);
+      int nq_p = ir_p.GetNPoints();
+      Vector slip_par(3 * nq_p);
+      slip_par = 0.0;
+      for (int q = 0; q < nq_p; q++)
+      {
+         FTr_p->Face->SetIntPoint(&ir_p.IntPoint(q));
+         Vector phys(3);
+         FTr_p->Face->Transform(ir_p.IntPoint(q), phys);
+         real_t strike_slip = (phys(0) > 0.0) ? 1.0 : 0.01;
+         slip_par(0 * nq_p + q) = strike_slip;
+      }
+
+      Vector b1_par, b2_par;
+      integ.AssembleSlipFaceRHS(*fe1_p, *fe2_p, *FTr_p, slip_par, b1_par, b2_par);
+
+      // Determine if parallel elem1 matches serial elem1 or serial elem2
+      // by checking elem1 centroid y
+      Array<int> ev;
+      pmesh.GetElementVertices(FTr_p->Elem1No, ev);
+      real_t par_e1_cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         par_e1_cy += pmesh.GetVertex(ev[j])[1];
+      par_e1_cy /= ev.Size();
+
+      bool elem1_matches = (std::abs(par_e1_cy - serial_e1_cy) < 0.1);
+      b1_par_norm = elem1_matches ? b1_par.Norml2() : b2_par.Norml2();
+
+      break;  // Only need one face
+   }
+
+   // 6. Gather results
+   real_t global_K_par = ctx.GlobalMax(K_par_fnorm);
+   real_t global_b1_par = ctx.GlobalMax(b1_par_norm);
+   int any_found = found_shared ? 1 : 0;
+   any_found = ctx.GlobalMaxInt(any_found);
+
+   if (any_found == 0)
+   {
+      if (ctx.IsRoot())
+      {
+         std::cout << "SKIPPED (no shared fault face created)\n";
+      }
+      return true;
+   }
+
+   real_t K_rel_err = std::abs(global_K_par - K_serial_fnorm) /
+                      std::max(K_serial_fnorm, 1e-30);
+   real_t b_rel_err = std::abs(global_b1_par - b1_serial_norm) /
+                      std::max(b1_serial_norm, 1e-30);
+
+   // K should match (polynomial integrand, exact quadrature).
+   // b may or may not match depending on parameterization.
+   bool K_ok = (K_rel_err < 1e-10);
+   bool b_ok = (b_rel_err < 1e-10);
+   bool ok = K_ok && b_ok;
+
+   TEST_CHECK(ctx, "shared-face matrix/RHS matches serial", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED") << "\n"
+                << "    K: serial_fnorm=" << std::scientific << std::setprecision(12)
+                << K_serial_fnorm
+                << " parallel_fnorm=" << global_K_par
+                << " rel_err=" << K_rel_err
+                << (K_ok ? " OK" : " MISMATCH") << "\n"
+                << "    b: serial_norm=" << b1_serial_norm
+                << " parallel_norm=" << global_b1_par
+                << " rel_err=" << b_rel_err
+                << (b_ok ? " OK" : " MISMATCH") << "\n";
+   }
+   return ok;
+}
+
+/// Test 6: Serial-parallel displacement match for non-uniform slip (TET mesh)
 ///
 /// Core proof-of-bug for shared-face parameterization: assemble K and b
 /// in serial and parallel with the SAME non-uniform slip (step function
@@ -853,6 +1124,7 @@ int main(int argc, char *argv[])
    test_serial_parallel_fault_dof_count(ctx);
    // test_owned_fault_layout(ctx);        // temporarily disabled (known issue)
    // test_canonical_dof_coords_match_serial(ctx);  // temporarily disabled
+   test_shared_face_micro(ctx);
    test_serial_parallel_displacement_match(ctx);
    test_parallel_zero_slip_traction(ctx);
    test_serial_parallel_traction_consistency(ctx);
