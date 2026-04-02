@@ -27,6 +27,7 @@
 #include <limits>
 #include <set>
 #include <cstdint>
+#include <iomanip>
 
 namespace mfem
 {
@@ -303,6 +304,7 @@ private:
    mutable bool diag_traction_coherence_done_ = false;
    bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
    mutable bool diag_rhs_z_done_ = false;
+   mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -3393,6 +3395,55 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    X_ = 0.0;
    B_ = rhs;
+
+   // v57 MPI diagnostic: print ||K|| and ||b|| once on first non-trivial solve
+   if (!diag_matrix_norm_done_ && rhs.Normlinf() > 1e-30)
+   {
+      diag_matrix_norm_done_ = true;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *Kh = cached_Ah_.As<HypreParMatrix>();
+         // Global ||b||
+         real_t local_b2 = B_ * B_;
+         real_t global_b2 = 0.0;
+         MPI_Allreduce(&local_b2, &global_b2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         // Global NNZ and Frobenius norm via hypre
+         hypre_ParCSRMatrix *hA = (hypre_ParCSRMatrix*)(*Kh);
+         // Diagonal block
+         hypre_CSRMatrix *diag = hypre_ParCSRMatrixDiag(hA);
+         hypre_CSRMatrix *offd = hypre_ParCSRMatrixOffd(hA);
+         real_t local_K2 = 0.0;
+         int diag_nnz = hypre_CSRMatrixNumNonzeros(diag);
+         int offd_nnz = hypre_CSRMatrixNumNonzeros(offd);
+         double *diag_data = hypre_CSRMatrixData(diag);
+         double *offd_data = hypre_CSRMatrixData(offd);
+         for (int i = 0; i < diag_nnz; i++)
+            local_K2 += diag_data[i] * diag_data[i];
+         for (int i = 0; i < offd_nnz; i++)
+            local_K2 += offd_data[i] * offd_data[i];
+         real_t global_K2 = 0.0;
+         MPI_Allreduce(&local_K2, &global_K2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         int local_nnz = diag_nnz + offd_nnz;
+         long long global_nnz = 0;
+         long long ll_nnz = local_nnz;
+         MPI_Allreduce(&ll_nnz, &global_nnz, 1, MPI_LONG_LONG, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "[MPI-DIAG] Stiffness matrix and RHS:\n"
+                      << "  ||K||_F=" << std::scientific << std::setprecision(15)
+                      << std::sqrt(global_K2) << "\n"
+                      << "  ||b||_2=" << std::sqrt(global_b2) << "\n"
+                      << "  K_nnz=" << global_nnz << "\n";
+         }
+#endif
+      }
+   }
 
    solver_->Mult(B_, X_);
 
