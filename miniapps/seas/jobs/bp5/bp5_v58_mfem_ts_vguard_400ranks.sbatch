@@ -56,4 +56,4 @@ ibrun ./seas_bp5_full \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v58_mfem_ts_vguard_400ranks \
       --output-prefix bp5_v58_mfem_vg \
-      --checkpoint-interval 0
+      --checkpoint-interval 1000

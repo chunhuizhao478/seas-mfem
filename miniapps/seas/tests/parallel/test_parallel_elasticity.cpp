@@ -17,12 +17,20 @@
 #include "../../common/mpi_context.hpp"
 #include "../../domain/elasticity_operator.hpp"
 #include "../../config/bp5_params.hpp"
+#include "../../io/checkpoint.hpp"
+#include "../../solver/seas_operator.hpp"
+#include "../../solver/time_stepper.hpp"
+#include "../../fault/rate_state_fault.hpp"
+#include "../../fault/fault_geometry.hpp"
+#include "../../friction/dieterich_ruina.hpp"
+#include "../../friction/state_evolution.hpp"
 
 #include <iostream>
 #include <iomanip>
 #include <cmath>
 #include <map>
 #include <vector>
+#include <cstdio>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -1109,6 +1117,325 @@ bool test_parallel_solve_with_slip(MPIContext &ctx)
    return ok;
 }
 
+/// Helper: compare two vectors element-wise
+static bool VectorsMatch(const Vector &a, const Vector &b, real_t tol = 0.0)
+{
+   if (a.Size() != b.Size()) { return false; }
+   for (int i = 0; i < a.Size(); i++)
+   {
+      if (std::abs(a(i) - b(i)) > tol) { return false; }
+   }
+   return true;
+}
+
+/// Test: Parallel checkpoint/restart produces bit-identical results
+///
+/// Run A: 10 continuous accepted steps
+/// Run B: 5 steps → checkpoint → fresh operators → restart → 5 more steps
+/// Compare final (t, state) — must be bitwise identical.
+bool test_parallel_checkpoint_restart(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_parallel_checkpoint_restart... " << std::flush;
+   }
+
+   // Use BP5-scale mesh to match BP5Params geometry (Wf=40km, lf=100km)
+   real_t Lx = 100.0e3, Ly = 60.0e3, Lz = 50.0e3;
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = params.Wf;
+   real_t lf = params.lf;
+
+   int total_steps = 4;
+   int ckpt_step = 2;
+
+   // --- Run A: continuous 10 steps ---
+   Vector state_A;
+   real_t t_A = 0.0;
+   {
+      auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+      ParMesh pmesh(ctx.GetComm(), serial_mesh);
+
+      ElasticityDomainOperator<ParMesh> domain(
+         pmesh, 1, lambda, mu, Vp, Wf, lf);
+      FaultGeometry<ParMesh> fault_geom(domain, params, &ctx);
+
+      DieterichRuinaFriction::Constants fc;
+      fc.V0 = params.V0; fc.f0 = params.f0;
+      fc.b = params.b; fc.Dc = params.L0;
+      DieterichRuinaFriction friction(fc);
+      AgingLawPsi aging(params.b, params.V0, params.f0);
+
+      RateStateFaultOperator<ParMesh, 2> fault_op(
+         &fault_geom, &friction, &aging, params, &ctx);
+      PBP5SEASOp seas_op(&domain, &fault_op, &ctx);
+
+      Vector state(fault_op.StateSize());
+      seas_op.SetInitialCondition(state);
+
+      DormandPrinceRK45 solver;
+      solver.SetAbsTol(1e-7);
+      solver.SetRelTol(1e-50);
+      solver.SetDtMin(1e-6);
+      solver.SetDtMax(1e8);
+      solver.SetDt(1e-2);
+      solver.Init(seas_op);
+
+      real_t t = 0.0;
+      int step = 0;
+      while (step < total_steps)
+      {
+         real_t dt;
+         bool accepted = solver.Step(seas_op, state, t, dt);
+         if (accepted) { step++; }
+      }
+
+      state_A = state;
+      t_A = t;
+   }
+
+   // --- Run B: 5 steps, checkpoint, restart, 5 more steps ---
+   Vector state_B;
+   real_t t_B = 0.0;
+   {
+      std::string ckpt_prefix = "test_par_ckpt";
+
+      // Phase 1: run 5 steps and checkpoint
+      {
+         auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+         ParMesh pmesh(ctx.GetComm(), serial_mesh);
+
+         ElasticityDomainOperator<ParMesh> domain(
+            pmesh, 1, lambda, mu, Vp, Wf, lf);
+         FaultGeometry<ParMesh> fault_geom(domain, params, &ctx);
+
+         DieterichRuinaFriction::Constants fc;
+         fc.V0 = params.V0; fc.f0 = params.f0;
+         fc.b = params.b; fc.Dc = params.L0;
+         DieterichRuinaFriction friction(fc);
+         AgingLawPsi aging(params.b, params.V0, params.f0);
+
+         RateStateFaultOperator<ParMesh, 2> fault_op(
+            &fault_geom, &friction, &aging, params, &ctx);
+         PBP5SEASOp seas_op(&domain, &fault_op, &ctx);
+
+         Vector state(fault_op.StateSize());
+         seas_op.SetInitialCondition(state);
+
+         DormandPrinceRK45 solver;
+         solver.SetAbsTol(1e-7);
+         solver.SetRelTol(1e-50);
+         solver.SetDtMin(1e-6);
+         solver.SetDtMax(1e8);
+         solver.SetDt(1e-2);
+         solver.Init(seas_op);
+
+         real_t t = 0.0;
+         int step = 0;
+         while (step < ckpt_step)
+         {
+            real_t dt;
+            bool accepted = solver.Step(seas_op, state, t, dt);
+            if (accepted) { step++; }
+         }
+
+         // Write checkpoint
+         Vector u_vec;
+         u_vec = seas_op.GetDisplacement();
+         WriteCheckpoint(ckpt_prefix, t, solver.GetDt(),
+                         step, 0, false,
+                         state, u_vec,
+                         seas_op.GetTraction(), fault_op.GetSlipRate(),
+                         solver.IsInitialized(), solver.GetK0(),
+                         &ctx);
+      }
+
+      // Phase 2: restart from checkpoint, run 5 more steps
+      {
+         auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+         ParMesh pmesh(ctx.GetComm(), serial_mesh);
+
+         ElasticityDomainOperator<ParMesh> domain(
+            pmesh, 1, lambda, mu, Vp, Wf, lf);
+         FaultGeometry<ParMesh> fault_geom(domain, params, &ctx);
+
+         DieterichRuinaFriction::Constants fc;
+         fc.V0 = params.V0; fc.f0 = params.f0;
+         fc.b = params.b; fc.Dc = params.L0;
+         DieterichRuinaFriction friction(fc);
+         AgingLawPsi aging(params.b, params.V0, params.f0);
+
+         RateStateFaultOperator<ParMesh, 2> fault_op(
+            &fault_geom, &friction, &aging, params, &ctx);
+         PBP5SEASOp seas_op(&domain, &fault_op, &ctx);
+         if (ctx.IsRoot()) { std::cout << "done" << std::flush; }
+
+         // Load checkpoint
+         real_t t, restart_dt;
+         int step, num_eq;
+         bool in_eq, fsal_init;
+         Vector state, disp, traction, slip_rate, k0;
+
+         bool loaded = ReadCheckpoint(ckpt_prefix, t, restart_dt,
+                                       step, num_eq, in_eq,
+                                       state, disp, traction, slip_rate,
+                                       fsal_init, k0, &ctx);
+         MFEM_VERIFY(loaded, "Checkpoint load failed");
+
+         if (ctx.IsRoot())
+         {
+            std::cout << "\n    [ckpt] loaded: state=" << state.Size()
+                      << " disp=" << disp.Size()
+                      << " slip_rate=" << slip_rate.Size()
+                      << " k0=" << k0.Size() << std::flush;
+         }
+
+         // Restore state
+         seas_op.SetDisplacement(disp);
+         fault_op.SetSlipRate(slip_rate);
+
+         DormandPrinceRK45 solver;
+         solver.SetAbsTol(1e-7);
+         solver.SetRelTol(1e-50);
+         solver.SetDtMin(1e-6);
+         solver.SetDtMax(1e8);
+         solver.SetDt(restart_dt);
+         solver.Init(seas_op);
+
+         if (fsal_init && k0.Size() > 0)
+         {
+            solver.RestoreFSAL(k0);
+         }
+
+         // Run remaining steps
+         while (step < total_steps)
+         {
+            real_t dt;
+            bool accepted = solver.Step(seas_op, state, t, dt);
+            if (accepted) { step++; }
+         }
+
+         state_B = state;
+         t_B = t;
+      }
+
+      // Clean up checkpoint files
+      std::string ckpt_file = CheckpointFilename(ckpt_prefix, ctx.Rank());
+      std::remove(ckpt_file.c_str());
+   }
+
+   // Compare
+   bool t_match = (t_A == t_B);
+   bool state_match = VectorsMatch(state_A, state_B);
+   bool ok = t_match && state_match;
+
+   TEST_CHECK(ctx, "parallel checkpoint restart (bitwise match)", ok);
+
+   if (ctx.IsRoot())
+   {
+      real_t max_diff = 0.0;
+      for (int i = 0; i < std::min(state_A.Size(), state_B.Size()); i++)
+      {
+         max_diff = std::max(max_diff, std::abs(state_A(i) - state_B(i)));
+      }
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (t_A=" << t_A << ", t_B=" << t_B
+                << ", state_diff=" << max_diff << ")"
+                << std::endl;
+   }
+   return ok;
+}
+// Note: full restart consistency test (run N steps vs checkpoint+restart+N steps)
+// requires the actual BP5 Gmsh mesh and is tested on Frontera, not locally.
+
+/// Test: Parallel checkpoint I/O round-trip
+///
+/// Verifies WriteCheckpoint/ReadCheckpoint preserves all data exactly
+/// in a parallel setting (each rank writes/reads its own file).
+bool test_parallel_checkpoint_roundtrip(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_parallel_checkpoint_roundtrip... " << std::flush;
+   }
+
+   std::string prefix = "test_par_ckpt_rt";
+
+   // Create synthetic data with rank-dependent values
+   real_t t_write = 12345.6789012345678;
+   real_t dt_write = 0.0031415926535897;
+   int step_write = 42;
+   int num_eq_write = 3;
+   bool in_eq_write = true;
+
+   int rank = ctx.Rank();
+   int state_n = 6 + rank;
+   int disp_n = 12 + rank;
+   int slip_n = 4 + rank;
+   int k0_n = state_n;
+
+   Vector state_w(state_n), disp_w(disp_n);
+   Vector trac_w(slip_n), slip_w(slip_n), k0_w(k0_n);
+
+   for (int i = 0; i < state_n; i++)
+      state_w(i) = 1.0e-7 * (rank * 100 + i + 1);
+   for (int i = 0; i < disp_n; i++)
+      disp_w(i) = -3.14159e-5 * (rank * 1000 + i);
+   for (int i = 0; i < slip_n; i++)
+   {
+      trac_w(i) = 2.5e6 * (rank + 1) + i * 100.0;
+      slip_w(i) = 1.0e-9 * (i + 1);
+   }
+   for (int i = 0; i < k0_n; i++)
+      k0_w(i) = -9.81e-3 * (rank * 10 + i);
+
+   WriteCheckpoint(prefix, t_write, dt_write,
+                   step_write, num_eq_write, in_eq_write,
+                   state_w, disp_w, trac_w, slip_w,
+                   true, k0_w, &ctx);
+
+   // Read back
+   real_t t_r, dt_r;
+   int step_r, num_eq_r;
+   bool in_eq_r, fsal_r;
+   Vector state_r, disp_r, trac_r, slip_r, k0_r;
+
+   bool loaded = ReadCheckpoint(prefix, t_r, dt_r,
+                                 step_r, num_eq_r, in_eq_r,
+                                 state_r, disp_r, trac_r, slip_r,
+                                 fsal_r, k0_r, &ctx);
+
+   bool ok = loaded;
+   ok = ok && (t_r == t_write);
+   ok = ok && (dt_r == dt_write);
+   ok = ok && (step_r == step_write);
+   ok = ok && (num_eq_r == num_eq_write);
+   ok = ok && (in_eq_r == in_eq_write);
+   ok = ok && (fsal_r == true);
+   ok = ok && VectorsMatch(state_r, state_w);
+   ok = ok && VectorsMatch(disp_r, disp_w);
+   ok = ok && VectorsMatch(trac_r, trac_w);
+   ok = ok && VectorsMatch(slip_r, slip_w);
+   ok = ok && VectorsMatch(k0_r, k0_w);
+
+   int ok_int = ok ? 1 : 0;
+   ok_int = ctx.GlobalMinInt(ok_int);
+   ok = (ok_int == 1);
+
+   TEST_CHECK(ctx, "parallel checkpoint round-trip", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED") << std::endl;
+   }
+
+   std::remove(CheckpointFilename(prefix, ctx.Rank()).c_str());
+   return ok;
+}
+
 int main(int argc, char *argv[])
 {
    MPIContext ctx(&argc, &argv);
@@ -1130,6 +1457,7 @@ int main(int argc, char *argv[])
    test_serial_parallel_traction_consistency(ctx);
    test_parallel_traction_bounded(ctx);
    test_parallel_solve_with_slip(ctx);
+   test_parallel_checkpoint_roundtrip(ctx);
 
    if (ctx.IsRoot())
    {

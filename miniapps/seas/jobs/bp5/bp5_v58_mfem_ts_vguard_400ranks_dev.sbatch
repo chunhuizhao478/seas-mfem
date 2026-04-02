@@ -49,4 +49,4 @@ ibrun ./seas_bp5_full \
       --ref-dir bp5/benchmark_data \
       --output-dir bp5/results_v58_mfem_vg_dev \
       --output-prefix bp5_v58_mfem_vgd \
-      --checkpoint-interval 0
+      --checkpoint-interval 1000
