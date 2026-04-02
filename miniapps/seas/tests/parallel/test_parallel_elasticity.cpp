@@ -309,7 +309,144 @@ bool test_owned_fault_layout(MPIContext &ctx)
    return ok;
 }
 
-/// Test 4: Zero slip → zero traction in parallel
+/// Test 4: Canonical DOF permutation — parallel owned coords match serial
+///
+/// The strongest invariant: serial fault DOF coordinates must exactly match
+/// the parallel owned coordinates (which pass through the canonical
+/// permutation in RestrictToOwnedFault).  Gather all owned (x2, x3) pairs
+/// to root, sort both sets lexicographically, and compare.
+bool test_canonical_dof_coords_match_serial(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_canonical_dof_coords_match_serial... " << std::flush;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = Lz;
+   real_t lf = 2.0 * Ly;
+
+   // --- Serial reference coordinates ---
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   Vector serial_x2, serial_x3;
+   serial_op.GetFaultCoords2D(serial_x2, serial_x3);
+   const int nf_serial = serial_op.GetNumFaultDOFs();
+
+   // --- Parallel owned coordinates (through canonical permutation) ---
+   ParMesh pmesh(ctx.GetComm(), serial_mesh);
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu, Vp, Wf, lf);
+
+   Vector local_x2_full, local_x3_full;
+   par_op.GetFaultCoords2D(local_x2_full, local_x3_full);
+
+   // RestrictToOwnedFault applies the canonical permutation
+   Vector owned_x2, owned_x3;
+   par_op.RestrictToOwnedFault(local_x2_full, owned_x2);
+   par_op.RestrictToOwnedFault(local_x3_full, owned_x3);
+   const int local_owned = par_op.GetNumOwnedFaultDOFs();
+
+   // --- Gather owned coordinates to root ---
+   std::vector<int> recv_counts(ctx.Size(), 0);
+   std::vector<int> displs(ctx.Size(), 0);
+#ifdef SEAS_USE_MPI
+   MPI_Gather(&local_owned, 1, MPI_INT,
+              ctx.IsRoot() ? recv_counts.data() : nullptr,
+              1, MPI_INT, 0, ctx.GetComm());
+#endif
+
+   int total_owned = 0;
+   if (ctx.IsRoot())
+   {
+      for (int r = 0; r < ctx.Size(); r++)
+      {
+         displs[r] = total_owned;
+         total_owned += recv_counts[r];
+      }
+   }
+
+   std::vector<real_t> all_x2(total_owned), all_x3(total_owned);
+#ifdef SEAS_USE_MPI
+   MPI_Gatherv(owned_x2.GetData(), local_owned, MPI_DOUBLE,
+               ctx.IsRoot() ? all_x2.data() : nullptr,
+               ctx.IsRoot() ? recv_counts.data() : nullptr,
+               ctx.IsRoot() ? displs.data() : nullptr,
+               MPI_DOUBLE, 0, ctx.GetComm());
+   MPI_Gatherv(owned_x3.GetData(), local_owned, MPI_DOUBLE,
+               ctx.IsRoot() ? all_x3.data() : nullptr,
+               ctx.IsRoot() ? recv_counts.data() : nullptr,
+               ctx.IsRoot() ? displs.data() : nullptr,
+               MPI_DOUBLE, 0, ctx.GetComm());
+#endif
+
+   // --- Compare on root: sort both sets by (x2, x3) and check ---
+   bool coords_ok = true;
+   if (ctx.IsRoot())
+   {
+      // Build and sort serial coordinate pairs
+      std::vector<std::pair<real_t, real_t>> serial_pairs(nf_serial);
+      for (int i = 0; i < nf_serial; i++)
+      {
+         serial_pairs[i] = {serial_x2(i), serial_x3(i)};
+      }
+      std::sort(serial_pairs.begin(), serial_pairs.end());
+
+      // Build and sort parallel coordinate pairs
+      std::vector<std::pair<real_t, real_t>> par_pairs(total_owned);
+      for (int i = 0; i < total_owned; i++)
+      {
+         par_pairs[i] = {all_x2[i], all_x3[i]};
+      }
+      std::sort(par_pairs.begin(), par_pairs.end());
+
+      if (nf_serial != total_owned)
+      {
+         coords_ok = false;
+      }
+      else
+      {
+         for (int i = 0; i < nf_serial; i++)
+         {
+            if (std::abs(serial_pairs[i].first - par_pairs[i].first) > 1e-10 ||
+                std::abs(serial_pairs[i].second - par_pairs[i].second) > 1e-10)
+            {
+               coords_ok = false;
+               if (i < 5) // print first few mismatches
+               {
+                  std::cerr << "  mismatch DOF " << i
+                            << ": serial=(" << serial_pairs[i].first
+                            << "," << serial_pairs[i].second
+                            << ") par=(" << par_pairs[i].first
+                            << "," << par_pairs[i].second << ")\n";
+               }
+            }
+         }
+      }
+   }
+
+   int ok_int = coords_ok ? 1 : 0;
+   ok_int = ctx.GlobalMinInt(ok_int);
+   const bool ok = (ok_int == 1);
+
+   TEST_CHECK(ctx, "canonical DOF coords match serial", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (serial=" << nf_serial
+                << ", par_owned=" << total_owned << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Test 5: Zero slip → zero traction in parallel
 bool test_parallel_zero_slip_traction(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -360,7 +497,7 @@ bool test_parallel_zero_slip_traction(MPIContext &ctx)
    return ok;
 }
 
-/// Test 5: Serial-parallel traction consistency for uniform slip
+/// Test 6: Serial-parallel traction consistency for uniform slip
 bool test_serial_parallel_traction_consistency(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -450,7 +587,7 @@ bool test_serial_parallel_traction_consistency(MPIContext &ctx)
    return ok;
 }
 
-/// Test 6: All parallel traction values are bounded (no blowup)
+/// Test 7: All parallel traction values are bounded (no blowup)
 bool test_parallel_traction_bounded(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -519,7 +656,7 @@ bool test_parallel_traction_bounded(MPIContext &ctx)
    return ok;
 }
 
-/// Test 7: Parallel solve with non-zero slip produces non-zero displacement
+/// Test 8: Parallel solve with non-zero slip produces non-zero displacement
 bool test_parallel_solve_with_slip(MPIContext &ctx)
 {
    if (ctx.IsRoot())
@@ -582,6 +719,7 @@ int main(int argc, char *argv[])
    test_shared_fault_detection(ctx);
    test_serial_parallel_fault_dof_count(ctx);
    test_owned_fault_layout(ctx);
+   test_canonical_dof_coords_match_serial(ctx);
    test_parallel_zero_slip_traction(ctx);
    test_serial_parallel_traction_consistency(ctx);
    test_parallel_traction_bounded(ctx);
