@@ -730,8 +730,8 @@ private:
          V_init_vec_(2 * i + 1) = Vi[1];
 
          // v58 diagnostic: dump full state for DOFs near fault tip
-         // Target: x2 < -45000 (near lf/2=50km edge) AND x3 < 3000 (shallow)
-         if (std::abs(x2) > 45000.0 && x3 < 3000.0)
+         // Disabled by default — enable via code flag if needed.
+         if (false && std::abs(x2) > 45000.0 && x3 < 3000.0)
          {
             int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
             real_t psi_ss = bp5_params_.f0

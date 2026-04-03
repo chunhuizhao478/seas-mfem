@@ -1790,8 +1790,8 @@ int main(int argc, char *argv[])
 
       real_t V_max = seas_op.GetMaxSlipRate();
 
-      // v58 tip DOF monitor: sparse-to-dense schedule
-      // Early: powers of 2; mid-run: every 1000; dense near failure: every 10
+      // v58 tip DOF monitor (only with --diag-tip-step1, disabled for production)
+      if (diag_tip_step1)
       {
          real_t t_yr = t / BP5Params::seconds_per_year;
          bool should_log = false;

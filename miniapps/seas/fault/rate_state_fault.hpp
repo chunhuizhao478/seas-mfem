@@ -466,6 +466,35 @@ public:
             slip_rate_(2*i) = V_vec[0];
             slip_rate_(2*i+1) = V_vec[1];
             V_max_ = std::max(V_max_, V_abs);
+
+            // v58: exact friction I/O at tip DOFs
+            if (geom_ && !diag_tip_friction_done_)
+            {
+               real_t x2 = geom_->GetCoordsX2()(i);
+               real_t x3 = geom_->GetCoordsX3()(i);
+               if (std::abs(x2) > 49000.0 && x3 < 2500.0)
+               {
+                  real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
+                                             tau_vec[1]*tau_vec[1]);
+                  real_t dpsi_dt = evolution_->Rate(V_abs, psi, Dc);
+                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  mfem::out << std::scientific << std::setprecision(8)
+                     << "[FRIC] r=" << rank << " d=" << i
+                     << " x=" << x2 << " z=" << x3
+                     << " a=" << a << " sn=" << sigma_n_eff
+                     << " eta=" << eta << " Dc=" << Dc
+                     << " psi=" << psi
+                     << " |tau_total|=" << tau_abs
+                     << " tau_pre=(" << tau_pre_(2*i) << ","
+                     << tau_pre_(2*i+1) << ")"
+                     << " trac=(" << traction(2*i) << ","
+                     << traction(2*i+1) << ")"
+                     << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
+                     << " |V|=" << V_abs
+                     << " dpsi=" << dpsi_dt
+                     << "\n";
+               }
+            }
          }
       }
 
@@ -508,6 +537,8 @@ public:
             }
          }
       }
+
+      if (!diag_tip_friction_done_) { diag_tip_friction_done_ = true; }
 
       return V_max_;
    }
@@ -891,6 +922,7 @@ private:
    int num_nodes_;      ///< Number of fault DOFs
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
+   mutable bool diag_tip_friction_done_ = false;  ///< v58 tip friction diagnostic
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
    bool scec_psi_init_ = false;  ///< If false (default), Tandem InitialStatePsi; if true, SCEC fixed psi

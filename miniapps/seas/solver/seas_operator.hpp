@@ -239,8 +239,8 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCo
    MFEM_VERIFY(eq_error < 1e-6,
                "Initial stress equilibrium error too large: " << eq_error);
 
-   // v58 diagnostic: dump post-init state at fault-tip DOFs
-   // Must run AFTER ComputeRHS populates slip rates and AFTER traction is computed
+   // v58 diagnostic: dump post-init state at fault-tip DOFs (disabled for production)
+   if (false)
    {
       const auto *geom = fault_->GetGeometry();
       if (geom)
