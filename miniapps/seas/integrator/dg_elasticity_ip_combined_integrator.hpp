@@ -738,28 +738,44 @@ public:
       {
          real_t wn = ir.IntPoint(q).weight * nl_q(q);
 
-         // Get tangent and sign for this quad point
-         real_t t1[3], t2[3];
+         // Get local basis vectors and sign for this quad point.
+         // When ncomp_local=3: basis_vec[0]=normal, [1]=tangent1, [2]=tangent2
+         // When ncomp_local=2: basis_vec[0]=tangent1, [1]=tangent2
+         real_t n0[3], t1[3], t2[3];
          real_t sf;
          if (qp_data && q < static_cast<int>(qp_data->size()))
          {
             const auto &qd = (*qp_data)[q];
-            for (int d = 0; d < 3; d++) { t1[d] = qd.tangent1[d]; t2[d] = qd.tangent2[d]; }
+            for (int d = 0; d < 3; d++)
+            {
+               n0[d] = qd.normal[d];
+               t1[d] = qd.tangent1[d];
+               t2[d] = qd.tangent2[d];
+            }
             sf = qd.sign_flipped ? -1.0 : 1.0;
          }
          else
          {
-            for (int d = 0; d < 3; d++) { t1[d] = tangents[0][d]; t2[d] = tangents[1][d]; }
+            for (int d = 0; d < 3; d++)
+            {
+               n0[d] = (ncomp_local >= 3) ? tangents[0][d] : 0.0;
+               t1[d] = tangents[ncomp_local >= 3 ? 1 : 0][d];
+               t2[d] = tangents[ncomp_local >= 3 ? 2 : 1][d];
+            }
             sf = sign_flipped ? -1.0 : 1.0;
          }
-         const real_t *tang[2] = {t1, t2};
+         const real_t *basis_vec[3] = {
+            (ncomp_local >= 3) ? n0 : t1,
+            (ncomp_local >= 3) ? t1 : t2,
+            t2
+         };
 
          for (int t = 0; t < ncomp_local; t++)
          {
             real_t T_local = 0.0;
             for (int p = 0; p < dim; p++)
             {
-               T_local += traction_q(p * nq + q) * tang[t][p] * sf;
+               T_local += traction_q(p * nq + q) * basis_vec[t][p] * sf;
             }
             for (int l = 0; l < nbf; l++)
             {

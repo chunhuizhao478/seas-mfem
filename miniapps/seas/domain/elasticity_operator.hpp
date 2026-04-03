@@ -4418,23 +4418,45 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             FTr->GetGeometryType(), quad_order_new);
          const DenseMatrix &e_q = face_quad_->BasisAtQuadPoints();
 
-         real_t tangents_arr[2][3] = {
-            {basis.tangent1[0], basis.tangent1[1], basis.tangent1[2]},
-            {basis.tangent2[0], basis.tangent2[1], basis.tangent2[2]}
-         };
+         const auto *qpd = basis.qp_data.empty() ? nullptr : &basis.qp_data;
+
+         // Unified projection: project all local components through one
+         // L2 solve (matching Tandem's single-kernel approach).
+         // When normal_traction is requested, project 3 components
+         // (normal, dip, strike); otherwise project 2 (dip, strike).
+         int ncomp_proj = normal_traction ? 3 : 2;
+         real_t basis_vecs[3][3];
+         if (normal_traction)
+         {
+            for (int d = 0; d < 3; d++)
+            {
+               basis_vecs[0][d] = basis.normal[d];
+               basis_vecs[1][d] = basis.tangent1[d];
+               basis_vecs[2][d] = basis.tangent2[d];
+            }
+         }
+         else
+         {
+            for (int d = 0; d < 3; d++)
+            {
+               basis_vecs[0][d] = basis.tangent1[d];
+               basis_vecs[1][d] = basis.tangent2[d];
+               basis_vecs[2][d] = 0.0;
+            }
+         }
 
          Vector trac_local_new;
-         const auto *qpd = basis.qp_data.empty() ? nullptr : &basis.qp_data;
          DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
-            dim, 2, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
-            tangents_arr, basis.sign_flipped, trac_local_new, qpd);
+            dim, ncomp_proj, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
+            basis_vecs, basis.sign_flipped, trac_local_new, qpd);
 
          // Store per-DOF shear traction
+         int tang_offset = normal_traction ? 1 : 0;
          for (int kk = 0; kk < nbf; kk++)
          {
             int dof_idx = fi * nbf_per_face_ + kk;
-            traction(2 * dof_idx)     = trac_local_new(0 * nbf + kk);
-            traction(2 * dof_idx + 1) = trac_local_new(1 * nbf + kk);
+            traction(2 * dof_idx)     = trac_local_new((tang_offset + 0) * nbf + kk);
+            traction(2 * dof_idx + 1) = trac_local_new((tang_offset + 1) * nbf + kk);
          }
 
          // v58 face-level tip diagnostic: compare mirror left/right tip faces
@@ -4537,58 +4559,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
          }
 
-         // Normal stress: L2 projection using M^{-1} * B^T * W * (T·n̂),
-         // consistent with the shear traction projection (Tandem convention).
-         // Previously used a per-DOF weighted average (lumped mass), which
-         // gives O(h) error vs the consistent mass approach for p≥1.
+         // Normal stress: extracted from the unified 3-component projection
+         // above (Tandem-style: normal + dip + strike through one L2 solve).
+         // Sign convention: positive in compression = -(T · n̂).
          if (normal_traction)
          {
-            const bool have_qp = !basis.qp_data.empty();
-
-            // Build nl_q-weighted mass matrix: M[i,j] = Σ_q w*nl*φ_i*φ_j
-            DenseMatrix M_n(nbf);
-            M_n = 0.0;
-            for (int q = 0; q < nqp_new; q++)
-            {
-               real_t wn = ir_new.IntPoint(q).weight * nl_q_vec(q);
-               for (int i = 0; i < nbf; i++)
-                  for (int j = 0; j < nbf; j++)
-                     M_n(i, j) += wn * e_q(i, q) * e_q(j, q);
-            }
-            DenseMatrix Minv_n(nbf);
-            DenseMatrixInverse M_n_solver(M_n);
-            M_n_solver.GetInverseMatrix(Minv_n);
-
-            // RHS: rhs[l] = Σ_q w*nl*φ_l*(T·n̂)
-            Vector rhs_n(nbf);
-            rhs_n = 0.0;
-            for (int q = 0; q < nqp_new; q++)
-            {
-               real_t wn = ir_new.IntPoint(q).weight * nl_q_vec(q);
-
-               const real_t *n_hat = have_qp ?
-                  basis.qp_data[q].normal : basis.normal;
-               bool sf = have_qp ?
-                  basis.qp_data[q].sign_flipped : basis.sign_flipped;
-
-               real_t T_dot_n = 0.0;
-               for (int c = 0; c < dim; c++)
-                  T_dot_n += T_quad_new(c * nqp_new + q) * n_hat[c];
-               if (sf) { T_dot_n = -T_dot_n; }
-
-               for (int l = 0; l < nbf; l++)
-                  rhs_n(l) += wn * e_q(l, q) * T_dot_n;
-            }
-
-            // Solve: sigma_n[k] = Σ_l Minv[k,l] * rhs[l]
             for (int kk = 0; kk < nbf; kk++)
             {
-               real_t val = 0.0;
-               for (int l = 0; l < nbf; l++)
-                  val += Minv_n(kk, l) * rhs_n(l);
-
                int dof_idx = fi * nbf_per_face_ + kk;
-               (*normal_traction)(dof_idx) = -val;  // positive in compression
+               (*normal_traction)(dof_idx) = -trac_local_new(0 * nbf + kk);
             }
          }
 
@@ -4598,7 +4577,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector stress_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               tangents_arr, basis.sign_flipped, stress_local, qpd);
+               basis_vecs + tang_offset, basis.sign_flipped, stress_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4611,7 +4590,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector corr_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               tangents_arr, basis.sign_flipped, corr_local, qpd);
+               basis_vecs + tang_offset, basis.sign_flipped, corr_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4624,7 +4603,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector res_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, R_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               tangents_arr, basis.sign_flipped, res_local, qpd);
+               basis_vecs + tang_offset, basis.sign_flipped, res_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -5126,62 +5105,48 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                FTr->GetGeometryType(), quad_order_sh2);
             const DenseMatrix &e_q_sh = face_quad_->BasisAtQuadPoints();
 
-            real_t tangents_sh[2][3] = {
-               {basis_sh.tangent1[0], basis_sh.tangent1[1], basis_sh.tangent1[2]},
-               {basis_sh.tangent2[0], basis_sh.tangent2[1], basis_sh.tangent2[2]}
-            };
+            const auto *qpd_sh = basis_sh.qp_data.empty() ? nullptr : &basis_sh.qp_data;
+
+            // Unified projection for shared faces (same as interior)
+            int ncomp_sh = normal_traction ? 3 : 2;
+            real_t basis_vecs_sh[3][3];
+            if (normal_traction)
+            {
+               for (int d = 0; d < 3; d++)
+               {
+                  basis_vecs_sh[0][d] = basis_sh.normal[d];
+                  basis_vecs_sh[1][d] = basis_sh.tangent1[d];
+                  basis_vecs_sh[2][d] = basis_sh.tangent2[d];
+               }
+            }
+            else
+            {
+               for (int d = 0; d < 3; d++)
+               {
+                  basis_vecs_sh[0][d] = basis_sh.tangent1[d];
+                  basis_vecs_sh[1][d] = basis_sh.tangent2[d];
+                  basis_vecs_sh[2][d] = 0.0;
+               }
+            }
 
             Vector trac_local_sh;
-            const auto *qpd_sh = basis_sh.qp_data.empty() ? nullptr : &basis_sh.qp_data;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
-               dim, 2, T_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-               tangents_sh, basis_sh.sign_flipped, trac_local_sh, qpd_sh);
+               dim, ncomp_sh, T_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
+               basis_vecs_sh, basis_sh.sign_flipped, trac_local_sh, qpd_sh);
 
+            int tang_off_sh = normal_traction ? 1 : 0;
             for (int kk = 0; kk < nbf_sh; kk++)
             {
                int dof_idx = trac_idx * nbf_per_face_ + kk;
-               traction(2 * dof_idx)     = trac_local_sh(0 * nbf_sh + kk);
-               traction(2 * dof_idx + 1) = trac_local_sh(1 * nbf_sh + kk);
+               traction(2 * dof_idx)     = trac_local_sh((tang_off_sh + 0) * nbf_sh + kk);
+               traction(2 * dof_idx + 1) = trac_local_sh((tang_off_sh + 1) * nbf_sh + kk);
             }
-            // Normal stress: L2 projection (consistent mass, same as shear)
             if (normal_traction)
             {
-               const bool have_qp_sh = !basis_sh.qp_data.empty();
-               DenseMatrix M_ns(nbf_sh);
-               M_ns = 0.0;
-               for (int q = 0; q < nqp_sh; q++)
-               {
-                  real_t wn = ir_sh2.IntPoint(q).weight * nl_q_sh(q);
-                  for (int ii = 0; ii < nbf_sh; ii++)
-                     for (int jj = 0; jj < nbf_sh; jj++)
-                        M_ns(ii, jj) += wn * e_q_sh(ii, q) * e_q_sh(jj, q);
-               }
-               DenseMatrix Minv_ns(nbf_sh);
-               DenseMatrixInverse M_ns_solver(M_ns);
-               M_ns_solver.GetInverseMatrix(Minv_ns);
-               Vector rhs_ns(nbf_sh);
-               rhs_ns = 0.0;
-               for (int q = 0; q < nqp_sh; q++)
-               {
-                  real_t wn = ir_sh2.IntPoint(q).weight * nl_q_sh(q);
-                  const real_t *n_hat_sh = have_qp_sh ?
-                     basis_sh.qp_data[q].normal : basis_sh.normal;
-                  bool sf_sh = have_qp_sh ?
-                     basis_sh.qp_data[q].sign_flipped : basis_sh.sign_flipped;
-                  real_t T_dot_n = 0.0;
-                  for (int c = 0; c < dim; c++)
-                     T_dot_n += T_quad_sh(c * nqp_sh + q) * n_hat_sh[c];
-                  if (sf_sh) { T_dot_n = -T_dot_n; }
-                  for (int l = 0; l < nbf_sh; l++)
-                     rhs_ns(l) += wn * e_q_sh(l, q) * T_dot_n;
-               }
                for (int kk = 0; kk < nbf_sh; kk++)
                {
-                  real_t val = 0.0;
-                  for (int l = 0; l < nbf_sh; l++)
-                     val += Minv_ns(kk, l) * rhs_ns(l);
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
-                  (*normal_traction)(dof_idx) = -val;
+                  (*normal_traction)(dof_idx) = -trac_local_sh(0 * nbf_sh + kk);
                }
             }
 
@@ -5191,7 +5156,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector stress_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  tangents_sh, basis_sh.sign_flipped, stress_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, stress_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5204,7 +5169,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector corr_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  tangents_sh, basis_sh.sign_flipped, corr_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, corr_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5217,7 +5182,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector res_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, R_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  tangents_sh, basis_sh.sign_flipped, res_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, res_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;

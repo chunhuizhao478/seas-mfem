@@ -15,6 +15,7 @@
 
 #include "test_macros.hpp"
 #include "../../fault/fault_basis.hpp"
+#include "../../integrator/dg_elasticity_ip_combined_integrator.hpp"
 
 #include <cstdlib>
 
@@ -832,6 +833,232 @@ void TestNearCollinearUpNormal()
 }
 
 // =============================================================================
+// Test unified 3-component projection (normal + dip + strike)
+// Verifies that ProjectTractionToFaultDOFs with ncomp=3 gives the same
+// tangential result as ncomp=2, and that the normal component satisfies
+// T_n = T . n_hat (with sign_flipped handled correctly).
+// =============================================================================
+static void TestUnifiedNormalProjection()
+{
+   std::cout << "  TestUnifiedNormalProjection...\n";
+
+   // Construct a known orthonormal basis on a planar fault at y=0
+   // normal = (0, -1, 0), tangent1(dip) = (0, 0, 1), tangent2(strike) = (-1, 0, 0)
+   real_t normal[3]   = {0.0, -1.0, 0.0};
+   real_t tangent1[3] = {0.0,  0.0, 1.0};
+   real_t tangent2[3] = {-1.0, 0.0, 0.0};
+
+   // Quadrature: 1 point (centroid) on a reference triangle
+   IntegrationRule ir(1);
+   ir.IntPoint(0).x = 1.0/3.0;
+   ir.IntPoint(0).y = 1.0/3.0;
+   ir.IntPoint(0).weight = 0.5;  // reference triangle area
+
+   int nbf = 1;  // 1 basis function (p=0, constant)
+   int dim = 3;
+   int nq = 1;
+
+   // Basis function = 1 at the single quad point
+   DenseMatrix e_q(nbf, nq);
+   e_q(0, 0) = 1.0;
+
+   // Normal length (face Jacobian determinant)
+   Vector nl_q(nq);
+   nl_q(0) = 1.0;
+
+   // Known 3D traction at the quad point:
+   // T = (T_x, T_y, T_z) = (3.0, -5.0, 7.0)
+   // Expected projections:
+   //   T . normal   = (3)(0) + (-5)(-1) + (7)(0)  = 5.0
+   //   T . tangent1 = (3)(0) + (-5)(0)  + (7)(1)  = 7.0
+   //   T . tangent2 = (3)(-1)+ (-5)(0)  + (7)(0)  = -3.0
+   Vector traction_q(dim * nq);
+   traction_q(0) = 3.0;   // T_x
+   traction_q(1) = -5.0;  // T_y
+   traction_q(2) = 7.0;   // T_z
+
+   // --- Test 1: 2-component projection (tangential only, sign_flipped=false) ---
+   real_t tang_vecs[2][3] = {
+      {tangent1[0], tangent1[1], tangent1[2]},
+      {tangent2[0], tangent2[1], tangent2[2]}
+   };
+   Vector trac_2comp;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 2, traction_q, nl_q, ir, nbf, e_q,
+      tang_vecs, false, trac_2comp);
+
+   TEST_NEAR(trac_2comp(0), 7.0, 1e-12, "2-comp dip (sf=false)");
+   TEST_NEAR(trac_2comp(1), -3.0, 1e-12, "2-comp strike (sf=false)");
+
+   // --- Test 2: 3-component projection (normal + dip + strike, sf=false) ---
+   real_t full_basis[3][3] = {
+      {normal[0],   normal[1],   normal[2]},
+      {tangent1[0], tangent1[1], tangent1[2]},
+      {tangent2[0], tangent2[1], tangent2[2]}
+   };
+   Vector trac_3comp;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 3, traction_q, nl_q, ir, nbf, e_q,
+      full_basis, false, trac_3comp);
+
+   TEST_NEAR(trac_3comp(0), 5.0, 1e-12, "3-comp normal (sf=false)");
+   TEST_NEAR(trac_3comp(1), 7.0, 1e-12, "3-comp dip (sf=false)");
+   TEST_NEAR(trac_3comp(2), -3.0, 1e-12, "3-comp strike (sf=false)");
+
+   // Tangential components must match between 2-comp and 3-comp
+   TEST_NEAR(trac_3comp(1), trac_2comp(0), 1e-14, "dip: 3-comp == 2-comp");
+   TEST_NEAR(trac_3comp(2), trac_2comp(1), 1e-14, "strike: 3-comp == 2-comp");
+
+   // --- Test 3: sign_flipped = true ---
+   // With sf=true, all components get negated (Tandem convention:
+   // the entire local basis flips when the raw normal opposes ref_normal).
+   Vector trac_3comp_sf;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 3, traction_q, nl_q, ir, nbf, e_q,
+      full_basis, true, trac_3comp_sf);
+
+   TEST_NEAR(trac_3comp_sf(0), -5.0, 1e-12, "3-comp normal (sf=true)");
+   TEST_NEAR(trac_3comp_sf(1), -7.0, 1e-12, "3-comp dip (sf=true)");
+   TEST_NEAR(trac_3comp_sf(2), 3.0, 1e-12, "3-comp strike (sf=true)");
+
+   // Sign-flipped should negate all components uniformly
+   TEST_NEAR(trac_3comp_sf(0), -trac_3comp(0), 1e-14, "sf negates normal");
+   TEST_NEAR(trac_3comp_sf(1), -trac_3comp(1), 1e-14, "sf negates dip");
+   TEST_NEAR(trac_3comp_sf(2), -trac_3comp(2), 1e-14, "sf negates strike");
+
+   // --- Test 4: Verify normal_traction sign convention ---
+   // In the elasticity operator: normal_traction = -projected_normal
+   // (positive in compression). With sf=false:
+   //   projected_normal = T . n = 5.0
+   //   normal_traction = -5.0 (tensile, since T_y = -5 pushes inward on y=-1 face)
+   // This matches: sigma_n_eff = sn0 + normal_traction = 25 + (-5) = 20 MPa
+   real_t normal_traction_val = -trac_3comp(0);  // same as elasticity_operator line 4466
+   TEST_NEAR(normal_traction_val, -5.0, 1e-12,
+             "normal_traction = -T.n (positive in compression)");
+
+   // --- Test 5: per-QP data path (sign_flipped=true) ---
+   // This exercises the qp_data branch in ProjectTractionToFaultDOFs,
+   // which is the actual BP5 DG code path.
+   {
+      FaultBasisQPData qpd;
+      for (int d = 0; d < 3; d++)
+      {
+         qpd.normal[d]   = normal[d];
+         qpd.tangent1[d] = tangent1[d];
+         qpd.tangent2[d] = tangent2[d];
+      }
+      qpd.nl = 1.0;
+      qpd.sign_flipped = true;
+      std::vector<FaultBasisQPData> qp_vec = {qpd};
+
+      // 3-comp with qp_data, sign_flipped=true in the per-QP struct
+      // The centroid sign_flipped arg is ignored when qp_data is provided.
+      Vector trac_3comp_qp;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, 3, traction_q, nl_q, ir, nbf, e_q,
+         full_basis, /*centroid sf=*/false, trac_3comp_qp, &qp_vec);
+
+      // Per-QP sign_flipped=true should negate all components
+      TEST_NEAR(trac_3comp_qp(0), -5.0, 1e-12, "qp_data 3-comp normal (sf=true)");
+      TEST_NEAR(trac_3comp_qp(1), -7.0, 1e-12, "qp_data 3-comp dip (sf=true)");
+      TEST_NEAR(trac_3comp_qp(2),  3.0, 1e-12, "qp_data 3-comp strike (sf=true)");
+
+      // Must match the centroid sf=true result exactly
+      TEST_NEAR(trac_3comp_qp(0), trac_3comp_sf(0), 1e-14, "qp vs centroid: normal");
+      TEST_NEAR(trac_3comp_qp(1), trac_3comp_sf(1), 1e-14, "qp vs centroid: dip");
+      TEST_NEAR(trac_3comp_qp(2), trac_3comp_sf(2), 1e-14, "qp vs centroid: strike");
+
+      // 2-comp with qp_data for backward compat
+      Vector trac_2comp_qp;
+      FaultBasisQPData qpd_nosf = qpd;
+      qpd_nosf.sign_flipped = false;
+      std::vector<FaultBasisQPData> qp_vec_nosf = {qpd_nosf};
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, 2, traction_q, nl_q, ir, nbf, e_q,
+         tang_vecs, false, trac_2comp_qp, &qp_vec_nosf);
+
+      TEST_NEAR(trac_2comp_qp(0), 7.0, 1e-12, "qp_data 2-comp dip (sf=false)");
+      TEST_NEAR(trac_2comp_qp(1), -3.0, 1e-12, "qp_data 2-comp strike (sf=false)");
+   }
+
+   std::cout << "  TestUnifiedNormalProjection... DONE\n";
+}
+
+// =============================================================================
+// Test qp_data branch of unified 3-component projection
+// Verifies that per-quad-point basis data overrides the centroid basis arrays,
+// and that sign_flipped from qp_data negates all projected components uniformly.
+// =============================================================================
+static void TestUnifiedNormalProjectionQPData()
+{
+   std::cout << "  TestUnifiedNormalProjectionQPData...\n";
+
+   IntegrationRule ir(1);
+   ir.IntPoint(0).x = 1.0/3.0;
+   ir.IntPoint(0).y = 1.0/3.0;
+   ir.IntPoint(0).weight = 0.5;
+
+   const int nbf = 1;
+   const int dim = 3;
+   const int nq = 1;
+
+   DenseMatrix e_q(nbf, nq);
+   e_q(0, 0) = 1.0;
+
+   Vector nl_q(nq);
+   nl_q(0) = 1.0;
+
+   // Known 3D traction at the single quad point.
+   Vector traction_q(dim * nq);
+   traction_q(0) = 3.0;   // T_x
+   traction_q(1) = -5.0;  // T_y
+   traction_q(2) = 7.0;   // T_z
+
+   // Deliberately wrong centroid basis. If qp_data is used correctly,
+   // these values should be ignored.
+   real_t wrong_basis[3][3] = {
+      {1.0, 0.0, 0.0},
+      {0.0, 1.0, 0.0},
+      {0.0, 0.0, 1.0}
+   };
+
+   std::vector<FaultBasisQPData> qp_data(1);
+   auto &qd = qp_data[0];
+   qd.normal[0] = 0.0;  qd.normal[1] = -1.0; qd.normal[2] = 0.0;
+   qd.tangent1[0] = 0.0; qd.tangent1[1] = 0.0; qd.tangent1[2] = 1.0;
+   qd.tangent2[0] = -1.0; qd.tangent2[1] = 0.0; qd.tangent2[2] = 0.0;
+   qd.nl = 1.0;
+
+   // sf=false: should use qp_data basis, not wrong_basis.
+   qd.sign_flipped = false;
+   Vector trac_qpd;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 3, traction_q, nl_q, ir, nbf, e_q,
+      wrong_basis, false, trac_qpd, &qp_data);
+
+   TEST_NEAR(trac_qpd(0), 5.0, 1e-12, "qp_data normal (sf=false)");
+   TEST_NEAR(trac_qpd(1), 7.0, 1e-12, "qp_data dip (sf=false)");
+   TEST_NEAR(trac_qpd(2), -3.0, 1e-12, "qp_data strike (sf=false)");
+
+   // sf=true in qp_data: should negate all local components uniformly.
+   qd.sign_flipped = true;
+   Vector trac_qpd_sf;
+   DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+      dim, 3, traction_q, nl_q, ir, nbf, e_q,
+      wrong_basis, false, trac_qpd_sf, &qp_data);
+
+   TEST_NEAR(trac_qpd_sf(0), -5.0, 1e-12, "qp_data normal (sf=true)");
+   TEST_NEAR(trac_qpd_sf(1), -7.0, 1e-12, "qp_data dip (sf=true)");
+   TEST_NEAR(trac_qpd_sf(2), 3.0, 1e-12, "qp_data strike (sf=true)");
+
+   TEST_NEAR(trac_qpd_sf(0), -trac_qpd(0), 1e-14, "qp_data sf negates normal");
+   TEST_NEAR(trac_qpd_sf(1), -trac_qpd(1), 1e-14, "qp_data sf negates dip");
+   TEST_NEAR(trac_qpd_sf(2), -trac_qpd(2), 1e-14, "qp_data sf negates strike");
+
+   std::cout << "  TestUnifiedNormalProjectionQPData... DONE\n";
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 int main()
@@ -853,6 +1080,8 @@ int main()
    TestOrientationFlip2D();
    TestNonUnitInputVectors();
    TestNearCollinearUpNormal();
+   TestUnifiedNormalProjection();
+   TestUnifiedNormalProjectionQPData();
 
    TEST_PRINT_RESULTS();
    return (num_failed > 0) ? 1 : 0;
