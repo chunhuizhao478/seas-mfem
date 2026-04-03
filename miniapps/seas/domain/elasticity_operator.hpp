@@ -232,6 +232,9 @@ public:
    /// for each fault DOF (helps identify stress vs penalty instability sources).
    void SetDiagTractionDecomp(bool enable) { diag_traction_decomp_ = enable; }
 
+   /// Enable one-shot [TIP-UY] dump at first tip face with non-zero slip.
+   void SetDiagTipUy(bool enable) { diag_tip_uy_ = enable; diag_tip_uy_done_ = !enable; }
+
    /// Set MUMPS-BLR tolerance (default 1e-10). Lower = more accurate, more memory.
    /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
@@ -286,6 +289,8 @@ private:
    bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
    mutable int diag_face_call_ = 0;  // Face consistency diagnostic: trigger on call #2 (non-zero slip)
+   bool diag_tip_uy_ = false;              // v58: enable [TIP-UY] dump (opt-in)
+   mutable bool diag_tip_uy_done_ = true;  // v58: inert until SetDiagTipUy(true)
 
    // v49 Phase 1 diagnostic flags
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
@@ -4330,7 +4335,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          bool need_decomp = traction_stress_out || traction_correction_out ||
                             jump_residual_out || coherence_active ||
                             diag_traction_decomp_ ||
-                            !diag_first_traction_done_;  // force decomp for tip diagnostic
+                            !diag_first_traction_done_ ||
+                            (diag_tip_uy_ && !diag_tip_uy_done_);  // force decomp for [TIP-UY]
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
@@ -4397,9 +4403,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             trac_integ.ComputeTractionAtQuadPointsDecomposed(
                *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
                T_quad_new,
-               (traction_stress_out || coherence_active || diag_traction_decomp_)
+               (traction_stress_out || coherence_active || diag_traction_decomp_ ||
+                (diag_tip_uy_ && !diag_tip_uy_done_))
                   ? &T_stress_quad_dec : nullptr,
-               (traction_correction_out || coherence_active || diag_traction_decomp_)
+               (traction_correction_out || coherence_active || diag_traction_decomp_ ||
+                (diag_tip_uy_ && !diag_tip_uy_done_))
                   ? &T_corr_quad_dec : nullptr,
                jump_residual_out ? &R_quad_dec : nullptr,
                nullptr, &nl_q_vec);
@@ -4568,6 +4576,73 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             {
                int dof_idx = fi * nbf_per_face_ + kk;
                (*normal_traction)(dof_idx) = -trac_local_new(0 * nbf + kk);
+            }
+         }
+
+         // v58: One-shot quad-point dump at tip face for K+b comparison.
+         // Fires once: first tip face with non-zero slip, then done.
+         if (diag_tip_uy_ && !diag_tip_uy_done_ && slip_bc.Normlinf() > 1e-20)
+         {
+            const IntegrationPoint &ip_ct =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_ct);
+            Vector fc_ct(3);
+            FTr->Face->Transform(ip_ct, fc_ct);
+            real_t cx = fc_ct(0), cz = -fc_ct(2);
+
+            if (std::abs(cx) > 49000.0 && cz < 2500.0)
+            {
+               diag_tip_uy_done_ = true;  // done after first matching face
+
+               int rank = 0;
+               if constexpr (IsParallelMesh<MeshType>::value)
+               {
+#ifdef MFEM_USE_MPI
+                  MPI_Comm_rank(mesh_.GetComm(), &rank);
+#endif
+               }
+               int nq_d = T_quad_new.Size() / dim;
+               for (int q = 0; q < nq_d; q++)
+               {
+                  FTr->SetAllIntPoints(&ir_new.IntPoint(q));
+                  const IntegrationPoint &eip1d = FTr->GetElement1IntPoint();
+                  const IntegrationPoint &eip2d = FTr->GetElement2IntPoint();
+                  Vector s1d(fe1->GetDof()), s2d(fe2->GetDof());
+                  fe1->CalcShape(eip1d, s1d);
+                  fe2->CalcShape(eip2d, s2d);
+
+                  real_t u1_y = 0, u2_y = 0, slip_y = 0;
+                  for (int k = 0; k < fe1->GetDof(); k++)
+                     u1_y += s1d(k) * u1_all(1 * fe1->GetDof() + k);
+                  for (int k = 0; k < fe2->GetDof(); k++)
+                     u2_y += s2d(k) * u2_all(1 * fe2->GetDof() + k);
+                  slip_y = delta_u_quad_t(1 * nq_d + q);
+
+                  real_t detJ1d = FTr->Elem1->Weight();
+                  real_t detJ2d = FTr->Elem2->Weight();
+                  real_t pen_d = trac_integ.GetPenalty(
+                     *fe1, *fe2, detJ1d, detJ2d,
+                     lambda_val_, mu_val_, nl_q_vec(q));
+                  real_t T_sy = T_stress_quad_dec(1 * nq_d + q);
+                  real_t T_cy = T_corr_quad_dec(1 * nq_d + q);
+
+                  mfem::out << std::scientific << std::setprecision(10)
+                     << "[TIP-UY] r=" << rank
+                     << " fi=" << fi << " q=" << q
+                     << " cx=" << cx << " cz=" << cz
+                     << " u1_y=" << u1_y
+                     << " u2_y=" << u2_y
+                     << " slip_y=" << slip_y
+                     << " jump_y=" << (u1_y - u2_y - slip_y)
+                     << " pen=" << pen_d
+                     << " T_stress_y=" << T_sy
+                     << " T_corr_y=" << T_cy
+                     << " T_total_y=" << T_quad_new(1 * nq_d + q)
+                     << " sf=" << basis.sign_flipped
+                     << " detJ1=" << detJ1d
+                     << " detJ2=" << detJ2d
+                     << "\n";
+               }
             }
          }
 
