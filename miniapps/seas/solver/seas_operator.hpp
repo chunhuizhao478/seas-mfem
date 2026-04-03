@@ -104,6 +104,13 @@ public:
    /// @brief Get traction at fault from last evaluation.
    const Vector &GetTraction() const { return traction_; }
 
+   /// @brief Get elastic normal traction from last evaluation (owned DOFs).
+   /// Only valid when elastic_sigma_n_ is true; empty otherwise.
+   const Vector &GetNormalTraction() const { return normal_traction_; }
+
+   /// @brief Whether elastic sigma_n feedback is active.
+   bool ElasticSigmaNEnabled() const { return elastic_sigma_n_; }
+
    /// @brief Get maximum slip rate from last evaluation (global in parallel).
    real_t GetMaxSlipRate() const
    {

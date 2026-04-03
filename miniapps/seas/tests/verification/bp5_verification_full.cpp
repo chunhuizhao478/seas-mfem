@@ -358,6 +358,7 @@ int main(int argc, char *argv[])
    bool psi_clamp_explicit = false;
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
    bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
+   bool diag_tip_monitor = false;      // v58: per-step tip DOF monitor (production-safe)
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
@@ -452,6 +453,7 @@ int main(int argc, char *argv[])
       if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       if (arg == "--diag-tip-step1") { diag_tip_step1 = true; }
+      if (arg == "--diag-tip-monitor") { diag_tip_monitor = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc)
       {
@@ -1800,14 +1802,15 @@ int main(int argc, char *argv[])
 
       real_t V_max = seas_op.GetMaxSlipRate();
 
-      // v58 tip DOF monitor (only with --diag-tip-step1, disabled for production)
-      if (diag_tip_step1)
+      // v58 tip DOF monitor — production-safe, tracks feedback loop at tip
+      if (diag_tip_monitor)
       {
          real_t t_yr = t / BP5Params::seconds_per_year;
          bool should_log = false;
-         if (step <= 64 && (step & (step - 1)) == 0) { should_log = true; }  // powers of 2
-         else if (step % 1000 == 0) { should_log = true; }                    // every 1000
-         else if (t_yr > 0.45 && step % 10 == 0) { should_log = true; }      // dense near failure
+         if (step <= 64 && (step & (step - 1)) == 0) { should_log = true; }
+         else if (step % 500 == 0) { should_log = true; }
+         else if (t_yr > 0.40 && step % 50 == 0) { should_log = true; }
+         else if (t_yr > 0.50 && step % 5 == 0) { should_log = true; }
 
          if (should_log)
          {
@@ -1818,36 +1821,45 @@ int main(int argc, char *argv[])
                const Vector &x3 = geom->GetCoordsX3();
                const Vector &slip_rate = fault_op.GetSlipRate();
                const Vector &traction = seas_op.GetTraction();
+               const bool have_sn = seas_op.ElasticSigmaNEnabled();
+               const Vector &ntrac = seas_op.GetNormalTraction();
+               real_t sn0 = fault_op.GetSigmaN();
                int nn = fault_op.NumNodes();
                int spn = 3;  // BP5: slip_dip, slip_strike, psi
 
                for (int i = 0; i < nn; i++)
                {
-                  // Monitor exact crash DOFs: |x2| > 48km AND x3 < 2.5km
                   if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
                   {
                      real_t psi = state(i * spn + 2);
                      real_t slip_d = state(i * spn + 0);
                      real_t slip_s = state(i * spn + 1);
-                     real_t V_d = slip_rate(2*i);
-                     real_t V_s = slip_rate(2*i+1);
-                     real_t V_abs = std::sqrt(V_d*V_d + V_s*V_s);
+                     real_t V_abs = std::sqrt(
+                        slip_rate(2*i)*slip_rate(2*i) +
+                        slip_rate(2*i+1)*slip_rate(2*i+1));
                      real_t tau_d = traction(2*i);
                      real_t tau_s = traction(2*i+1);
-                     real_t tau_abs = std::sqrt(tau_d*tau_d + tau_s*tau_s);
-                     mfem::out << "[TIP-MON] step=" << step
-                               << " t_yr=" << std::scientific << std::setprecision(6)
-                               << t_yr
-                               << " dt=" << dt
-                               << " rank=" << mpi.Rank()
-                               << " dof=" << i
-                               << " x2=" << x2(i)
-                               << " x3=" << x3(i)
-                               << " psi=" << psi
-                               << " |V|=" << V_abs
-                               << " |tau|=" << tau_abs
-                               << " slip=(" << slip_d << "," << slip_s << ")"
-                               << "\n";
+                     // normal_traction: positive in compression (= -T·n̂)
+                     // sigma_n_eff = sigma_n_bp5 + normal_traction
+                     // (matches ComputeRHS line 452 in rate_state_fault.hpp)
+                     real_t sn_el = (have_sn && ntrac.Size() > i) ? ntrac(i) : 0.0;
+                     real_t sn_eff = sn0 + sn_el;
+                     mfem::out << std::scientific << std::setprecision(8)
+                        << "[TIP-MON] s=" << step
+                        << " t=" << t_yr
+                        << " dt=" << dt
+                        << " r=" << mpi.Rank()
+                        << " d=" << i
+                        << " x=" << x2(i)
+                        << " z=" << x3(i)
+                        << " psi=" << psi
+                        << " |V|=" << V_abs
+                        << " td=" << tau_d
+                        << " ts=" << tau_s
+                        << " sn_el=" << sn_el
+                        << " sn_eff=" << sn_eff
+                        << " sl=(" << slip_d << "," << slip_s << ")"
+                        << "\n";
                   }
                }
             }
