@@ -32,6 +32,7 @@ export JOBS=8
 cd miniapps/seas
 make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
+mkdir -p bp5/results_v58_tip_step1
 
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
