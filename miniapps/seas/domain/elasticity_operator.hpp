@@ -292,7 +292,7 @@ private:
    bool diag_normals_ = false;           // Compare CalcOrtho vs FaultBasis normals
    bool diag_first_traction_ = false;    // Dump traction at first zero-slip evaluation
    mutable bool diag_normals_done_ = false;
-   mutable bool diag_first_traction_done_ = false;
+   mutable bool diag_first_traction_done_ = true;  // v58: disabled by default, was flooding output
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    mutable bool used_coord_fallback_ = false;  // Set when coordinate-based fault detection is used
    bool has_fault_attr_ = false;         // True when the mesh globally contains fault attr 3
@@ -1544,17 +1544,9 @@ private:
 
             int rank = 0;
             MPI_Comm_rank(mesh_.GetComm(), &rank);
-            if (rank == 0)
-            {
-               mfem::out << "[MPI-DIAG] Face assembly counts:\n"
-                         << "  global_interior_faces(BilinForm)="
-                         << global_interior << "\n"
-                         << "  global_shared_faces(ParBilinForm)="
-                         << global_shared << "\n"
-                         << "  global_boundary_elems=" << global_bdr << "\n"
-                         << "  global_total_local_faces=" << global_total << "\n"
-                         << "  local_sparse_NNZ(sum)=" << global_mat_nnz << "\n";
-            }
+            // [MPI-DIAG] face assembly counts — disabled by default (v58)
+            (void)global_interior; (void)global_shared;
+            (void)global_bdr; (void)global_total; (void)global_mat_nnz;
          }
 
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
@@ -1589,17 +1581,9 @@ private:
             MPI_Reduce(&local_abs_sum, &global_abs_sum, 1, MPI_DOUBLE,
                        MPI_SUM, 0, mesh_.GetComm());
 
-            if (rank == 0)
-            {
-               mfem::out << "[MPI-DIAG] HypreParMatrix global dims:\n"
-                         << "  rows=" << glob_rows << " cols=" << glob_cols
-                         << " nnz=" << glob_nnz << "\n"
-                         << "  sum|K_ij|=" << std::scientific
-                         << std::setprecision(15) << global_abs_sum << "\n"
-                         << "  rank0: local_dofs=" << local_dofs
-                         << " true_dofs=" << true_dofs
-                         << " (should be equal for DG)\n";
-            }
+            // [MPI-DIAG] HypreParMatrix dims — disabled by default (v58)
+            (void)glob_rows; (void)glob_cols; (void)glob_nnz;
+            (void)global_abs_sum; (void)local_dofs; (void)true_dofs;
          }
 
 #ifdef MFEM_USE_MUMPS
@@ -3817,17 +3801,9 @@ void ElasticityDomainOperator<MeshType>::Solve(
          MPI_Allreduce(&ll_sparse, &global_sparse_nnz, 1, MPI_LONG_LONG,
                        MPI_SUM, mesh_.GetComm());
 
-         if (rank == 0)
-         {
-            mfem::out << "[MPI-DIAG] Stiffness matrix and RHS:\n"
-                      << "  ||K||_F=" << std::scientific << std::setprecision(15)
-                      << std::sqrt(global_K2) << "\n"
-                      << "  ||b||_2=" << std::sqrt(global_b2) << "\n"
-                      << "  ||b_interior||_2=" << std::sqrt(global_b_int2) << "\n"
-                      << "  ||b_shared||_2=" << std::sqrt(global_b_shared2) << "\n"
-                      << "  K_nnz(HypreParMatrix)=" << global_nnz << "\n"
-                      << "  K_nnz(local_sparse_sum)=" << global_sparse_nnz << "\n";
-         }
+         // [MPI-DIAG] Stiffness matrix/RHS norms — disabled by default (v58)
+         (void)global_K2; (void)global_b2; (void)global_b_int2;
+         (void)global_b_shared2; (void)global_nnz; (void)global_sparse_nnz;
 #endif
       }
       }  // if (local_trigger)

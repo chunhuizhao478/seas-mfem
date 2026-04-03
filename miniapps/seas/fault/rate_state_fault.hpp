@@ -922,7 +922,7 @@ private:
    int num_nodes_;      ///< Number of fault DOFs
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
-   mutable bool diag_tip_friction_done_ = false;  ///< v58 tip friction diagnostic
+   mutable bool diag_tip_friction_done_ = true;  ///< v58 tip friction diagnostic (disabled by default)
 public:
    void ResetTipFrictionDiag() { diag_tip_friction_done_ = false; }
 private:

@@ -159,7 +159,7 @@ private:
    mutable Vector local_normal_traction_;
 
    // v57 MPI diagnostic: fire once on first non-zero slip
-   mutable bool mpi_diag_done_ = false;
+   mutable bool mpi_diag_done_ = true;  // v58: disabled by default
 
    // v51 flags
    bool zero_dip_traction_ = false;
