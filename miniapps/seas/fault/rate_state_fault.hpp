@@ -923,6 +923,9 @@ private:
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
    mutable bool diag_tip_friction_done_ = false;  ///< v58 tip friction diagnostic
+public:
+   void ResetTipFrictionDiag() { diag_tip_friction_done_ = false; }
+private:
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
    bool scec_psi_init_ = false;  ///< If false (default), Tandem InitialStatePsi; if true, SCEC fixed psi

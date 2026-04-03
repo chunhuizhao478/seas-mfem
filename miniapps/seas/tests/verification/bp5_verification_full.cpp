@@ -1592,6 +1592,16 @@ int main(int argc, char *argv[])
                                         trac_stress_step1,
                                         trac_corr_step1);
 
+      // === Evaluate friction with the step1 traction ===
+      // Restrict local traction to owned DOFs, then run ComputeRHS
+      Vector trac_owned_step1;
+      domain.RestrictToOwnedFault(trac_step1, trac_owned_step1,
+                                   domain.NumSlipComponents());
+      // Reset the friction diagnostic flag so it fires on THIS call
+      fault_op.ResetTipFrictionDiag();
+      Vector rate_step1(fault_op.StateSize());
+      fault_op.ComputeRHS(trac_owned_step1, state_step1, rate_step1);
+
       // === Dump mirror tip faces ===
       const auto *geom = fault_op.GetGeometry();
       const Vector &x2 = geom->GetCoordsX2();
