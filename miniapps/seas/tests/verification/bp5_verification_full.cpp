@@ -357,6 +357,7 @@ int main(int argc, char *argv[])
    bool v_guard_explicit = false;
    bool psi_clamp_explicit = false;
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
+   bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
@@ -450,6 +451,7 @@ int main(int argc, char *argv[])
       if (arg == "--no-elastic-sigma-n") { elastic_sigma_n = false; }
       if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
+      if (arg == "--diag-tip-step1") { diag_tip_step1 = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc)
       {
@@ -1541,6 +1543,98 @@ int main(int argc, char *argv[])
    }
 
    int print_step_interval = 10;
+
+   // =========================================================================
+   // v58: One-step tip reproducer — isolate first-solve asymmetry
+   // =========================================================================
+   if (diag_tip_step1)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "\n[TIP-STEP1] One-step reproducer: applying first nonzero slip...\n";
+      }
+
+      // Apply first nonzero slip: V_init * dt with dt=0.01s (Tandem default)
+      // This mimics what the first RK stage does.
+      real_t dt_step1 = 0.01;
+      int num_nodes = fault_op.NumNodes();
+      const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+
+      // Create a state with first-step slip increment
+      Vector state_step1 = state;  // copy initial state
+      for (int i = 0; i < num_nodes; i++)
+      {
+         // dslip/dt = V_init, so slip += V_init * dt * RK_coeff
+         // For RK45 stage 2: coeff = a21 = 1/5
+         real_t coeff = 0.2;
+         const Vector &V = fault_op.GetSlipRate();
+         state_step1(i * spn + 0) += V(2*i)   * dt_step1 * coeff;
+         state_step1(i * spn + 1) += V(2*i+1) * dt_step1 * coeff;
+      }
+
+      // Extract slip from state
+      Vector slip_step1(fault_op.SlipSize());
+      fault_op.GetSlip(state_step1, slip_step1);
+
+      // Expand to local and solve
+      Vector local_slip_step1;
+      domain.ExpandOwnedToLocalFault(slip_step1, local_slip_step1,
+                                      domain.NumSlipComponents());
+
+      // === Solve K*u = b(slip) ===
+      ParGridFunction u_step1(&domain.GetFESpace());
+      domain.Solve(0.0, local_slip_step1, u_step1);
+
+      // === Compute traction with decomposition ===
+      Vector trac_step1, trac_stress_step1, trac_corr_step1;
+      domain.ComputeTractionComponents(u_step1, local_slip_step1,
+                                        trac_step1, nullptr,
+                                        &trac_stress_step1,
+                                        &trac_corr_step1, nullptr);
+
+      // === Dump mirror tip faces ===
+      const auto *geom = fault_op.GetGeometry();
+      const Vector &x2 = geom->GetCoordsX2();
+      const Vector &x3 = geom->GetCoordsX3();
+
+      for (int i = 0; i < num_nodes; i++)
+      {
+         // Mirror tip DOFs: |x2| > 49km AND depth < 2.5km
+         if (std::abs(x2(i)) > 49000.0 && x3(i) < 2500.0)
+         {
+            real_t tau_stress_d = trac_stress_step1(2*i);
+            real_t tau_stress_s = trac_stress_step1(2*i+1);
+            real_t tau_corr_d = trac_corr_step1(2*i);
+            real_t tau_corr_s = trac_corr_step1(2*i+1);
+            real_t tau_d = trac_step1(2*i);
+            real_t tau_s = trac_step1(2*i+1);
+            real_t slip_d = slip_step1(2*i);
+            real_t slip_s = slip_step1(2*i+1);
+
+            mfem::out << std::scientific << std::setprecision(8)
+               << "[TIP-STEP1] rank=" << mpi.Rank()
+               << " dof=" << i
+               << " x2=" << x2(i) << " x3=" << x3(i)
+               << "\n  slip=(" << slip_d << "," << slip_s << ")"
+               << "\n  tau_total=(" << tau_d << "," << tau_s << ")"
+               << "  |tau|=" << std::sqrt(tau_d*tau_d + tau_s*tau_s)
+               << "\n  tau_stress=(" << tau_stress_d << "," << tau_stress_s << ")"
+               << "  |stress|=" << std::sqrt(tau_stress_d*tau_stress_d +
+                                              tau_stress_s*tau_stress_s)
+               << "\n  tau_corr=(" << tau_corr_d << "," << tau_corr_s << ")"
+               << "  |corr|=" << std::sqrt(tau_corr_d*tau_corr_d +
+                                            tau_corr_s*tau_corr_s)
+               << "\n";
+         }
+      }
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "[TIP-STEP1] Done. Exiting.\n";
+      }
+      MPI_Finalize();
+      return 0;
+   }
 
    // =========================================================================
    // Main time-stepping loop
