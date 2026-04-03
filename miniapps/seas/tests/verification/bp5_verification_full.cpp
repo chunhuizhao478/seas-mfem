@@ -1588,9 +1588,9 @@ int main(int argc, char *argv[])
       // === Compute traction with decomposition ===
       Vector trac_step1, trac_stress_step1, trac_corr_step1;
       domain.ComputeTractionComponents(u_step1, local_slip_step1,
-                                        trac_step1, nullptr,
-                                        &trac_stress_step1,
-                                        &trac_corr_step1, nullptr);
+                                        trac_step1,
+                                        trac_stress_step1,
+                                        trac_corr_step1);
 
       // === Dump mirror tip faces ===
       const auto *geom = fault_op.GetGeometry();
