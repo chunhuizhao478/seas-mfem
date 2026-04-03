@@ -426,8 +426,11 @@ public:
       }
       real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
       // v55 D8: anti-parallel to tau, matching Tandem DieterichRuinaBase.h:174.
-      V_vec[0] = -(V_abs / tau_abs) * tau_vec[0];
-      V_vec[1] = -(V_abs / tau_abs) * tau_vec[1];
+      // Reorder to avoid underflow: (tau_vec/tau_abs) is O(1), multiply by V_abs last.
+      // Original V_abs/tau_abs can underflow when V_abs < ~1e-310.
+      real_t inv_tau = 1.0 / tau_abs;
+      V_vec[0] = -(tau_vec[0] * inv_tau) * V_abs;
+      V_vec[1] = -(tau_vec[1] * inv_tau) * V_abs;
    }
 
    /// Compute initial psi from stress equilibrium.

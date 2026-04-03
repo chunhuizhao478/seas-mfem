@@ -279,12 +279,17 @@ public:
 
             real_t th = local_interp_->EvaluateScalar(local_theta, s);
 
+            // Distinguish non-finite (NaN, inf) from genuine V=0.
+            // Without this, both map to -300 via the "v > 0.0" check.
+            auto safe_log10 = [](real_t v) -> real_t {
+               if (!std::isfinite(v)) { return -999.0; }
+               return v > 0.0 ? std::log10(v) : -300.0;
+            };
             std::vector<real_t> row = {
                time, ss, sd,
-               vs > 0.0 ? std::log10(vs) : -300.0,
-               vd > 0.0 ? std::log10(vd) : -300.0,
+               safe_log10(vs), safe_log10(vd),
                tau_s, tau_d,
-               th > 0.0 ? std::log10(th) : -300.0
+               safe_log10(th)
             };
             probes_[idx]->WriteStep(row);
          }
