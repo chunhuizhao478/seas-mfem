@@ -321,7 +321,9 @@ public:
    /// friction is negligible and V ≈ tau/eta is returned.
    real_t SolveSlipRatePsi(real_t tau, real_t psi, real_t sigma_n,
                            real_t eta, real_t a,
-                           int *iterations = nullptr) const
+                           int *iterations = nullptr,
+                           int dbg_rank = -1, int dbg_dof = -1,
+                           real_t dbg_x = 0, real_t dbg_z = 0) const
    {
       if (sigma_n <= 0.0)
       {
@@ -351,7 +353,20 @@ public:
       auto fF = [&](real_t Ve) -> real_t
       {
          real_t V = std::pow(10.0, Ve);
-         return tau - sigma_n * FrictionCoefficientPsi(V, psi, a) - eta * V;
+         real_t f_val = FrictionCoefficientPsi(V, psi, a);
+         real_t result = tau - sigma_n * f_val - eta * V;
+         // v58: catch the first NaN in residual evaluation
+         if (!std::isfinite(result))
+         {
+            std::cerr << std::scientific << std::setprecision(15)
+               << "[FRIC-RESID] NaN/Inf in fF: r=" << dbg_rank
+               << " d=" << dbg_dof << " x=" << dbg_x << " z=" << dbg_z
+               << " Ve=" << Ve << " V=" << V
+               << " tau=" << tau << " sigma_n=" << sigma_n
+               << " psi=" << psi << " a=" << a << " eta=" << eta
+               << " f=" << f_val << " result=" << result << std::endl;
+         }
+         return result;
       };
 
       real_t Va = -32.0;
@@ -388,7 +403,14 @@ public:
          return std::pow(10.0, Ve);
       }
 
-      // Both brackets failed
+      // Both brackets failed — print diagnostic
+      std::cerr << std::scientific << std::setprecision(15)
+         << "[FRIC-BRACKET] Both brackets failed: r=" << dbg_rank
+         << " d=" << dbg_dof << " x=" << dbg_x << " z=" << dbg_z
+         << " tau=" << tau << " sigma_n=" << sigma_n << " psi=" << psi
+         << " a=" << a << " eta=" << eta
+         << " Flo=" << Flo << " Fhi=" << Fhi
+         << " lo=" << lo << " hi=" << hi << std::endl;
       if (iterations) { *iterations = 0; }
       return tau / eta;
    }
@@ -413,7 +435,9 @@ public:
    void SolveSlipRateVectorPsi(const real_t tau_vec[2], real_t psi,
                                 real_t sigma_n, real_t eta, real_t a,
                                 real_t V_vec[2],
-                                int *iterations = nullptr) const
+                                int *iterations = nullptr,
+                                int dbg_rank = -1, int dbg_dof = -1,
+                                real_t dbg_x = 0, real_t dbg_z = 0) const
    {
       real_t tau_abs = std::sqrt(tau_vec[0] * tau_vec[0] +
                                  tau_vec[1] * tau_vec[1]);
@@ -424,7 +448,9 @@ public:
          if (iterations) { *iterations = 0; }
          return;
       }
-      real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a, iterations);
+      real_t V_abs = SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a,
+                                       iterations, dbg_rank, dbg_dof,
+                                       dbg_x, dbg_z);
       // v55 D8: anti-parallel to tau, matching Tandem DieterichRuinaBase.h:174.
       // Reorder to avoid underflow: (tau_vec/tau_abs) is O(1), multiply by V_abs last.
       // Original V_abs/tau_abs can underflow when V_abs < ~1e-310.

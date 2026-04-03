@@ -452,11 +452,80 @@ public:
                sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
             }
 
+            // v58: catch first non-finite friction input or sigma_n_eff <= 0
+            {
+               bool bad_input = !std::isfinite(psi) ||
+                                !std::isfinite(tau_vec[0]) ||
+                                !std::isfinite(tau_vec[1]) ||
+                                !std::isfinite(sigma_n_eff) ||
+                                !std::isfinite(a) ||
+                                !std::isfinite(eta) ||
+                                !std::isfinite(Dc);
+               if (bad_input)
+               {
+                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+                  std::cerr << std::scientific << std::setprecision(15)
+                     << "[FRIC-GUARD] NON-FINITE INPUT r=" << rank
+                     << " d=" << i << " x=" << x2 << " z=" << x3
+                     << " psi=" << psi
+                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
+                     << " sn_eff=" << sigma_n_eff
+                     << " a=" << a << " eta=" << eta << " Dc=" << Dc
+                     << " trac=(" << traction(2*i) << "," << traction(2*i+1) << ")"
+                     << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
+                     << " slip=(" << state(i*StatePerNode) << ","
+                     << state(i*StatePerNode+1) << ")"
+                     << std::endl;
+                  MFEM_ABORT("Non-finite friction input at DOF " << i);
+               }
+               if (sigma_n_eff <= 0.0 && !diag_sn_neg_done_)
+               {
+                  diag_sn_neg_done_ = true;
+                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+                  real_t sn_el = normal_traction ? (*normal_traction)(i) : 0.0;
+                  std::cerr << std::scientific << std::setprecision(15)
+                     << "[FRIC-GUARD] SIGMA_N_EFF<=0 r=" << rank
+                     << " d=" << i << " x=" << x2 << " z=" << x3
+                     << " sn_eff=" << sigma_n_eff
+                     << " sn0=" << sigma_n_bp5_
+                     << " sn_el=" << sn_el
+                     << " psi=" << psi
+                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
+                     << " slip=(" << state(i*StatePerNode) << ","
+                     << state(i*StatePerNode+1) << ")"
+                     << std::endl;
+               }
+            }
+
+            int dbg_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+            real_t dbg_x = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+            real_t dbg_z = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi, sigma_n_eff, eta, a, V_vec);
+               tau_vec, psi, sigma_n_eff, eta, a, V_vec,
+               nullptr, dbg_rank, i, dbg_x, dbg_z);
 
             real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+
+            if (!std::isfinite(V_vec[0]) || !std::isfinite(V_vec[1]) ||
+                !std::isfinite(V_abs))
+            {
+               std::cerr << std::scientific << std::setprecision(15)
+                  << "[FRIC-GUARD] NON-FINITE V r=" << dbg_rank
+                  << " d=" << i << " x=" << dbg_x << " z=" << dbg_z
+                  << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
+                  << " |V|=" << V_abs
+                  << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
+                  << " psi=" << psi << " sn_eff=" << sigma_n_eff
+                  << " a=" << a << " eta=" << eta
+                  << std::endl;
+               MFEM_ABORT("Non-finite V from friction solver at DOF " << i);
+            }
 
             rate(i * StatePerNode + 0) = V_vec[0];
             rate(i * StatePerNode + 1) = V_vec[1];
@@ -923,6 +992,7 @@ private:
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
    mutable bool diag_tip_friction_done_ = true;  ///< v58 tip friction diagnostic (disabled by default)
+   mutable bool diag_sn_neg_done_ = false;       ///< v58: print once when sigma_n_eff <= 0
 public:
    void ResetTipFrictionDiag() { diag_tip_friction_done_ = false; }
 private:

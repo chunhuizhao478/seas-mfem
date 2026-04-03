@@ -359,6 +359,7 @@ int main(int argc, char *argv[])
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
    bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
    bool diag_tip_monitor = false;      // v58: per-step tip DOF monitor (production-safe)
+   bool diag_tip_face_dumped = false;  // v58: one-shot face dump when threshold crossed
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
@@ -1861,6 +1862,88 @@ int main(int argc, char *argv[])
                         << " sl=(" << slip_d << "," << slip_s << ")"
                         << "\n";
                   }
+               }
+            }
+         }
+      }
+
+      // v58: one-shot face-level dump when any tip DOF crosses onset threshold
+      if (diag_tip_monitor && !diag_tip_face_dumped)
+      {
+         const auto *geom = fault_op.GetGeometry();
+         const bool have_sn = seas_op.ElasticSigmaNEnabled();
+         const Vector &ntrac = seas_op.GetNormalTraction();
+         if (geom)
+         {
+            const Vector &x2 = geom->GetCoordsX2();
+            const Vector &x3 = geom->GetCoordsX3();
+            const Vector &slip_rate = fault_op.GetSlipRate();
+            const Vector &traction = seas_op.GetTraction();
+            int nn = fault_op.NumNodes();
+            bool triggered = false;
+            for (int i = 0; i < nn && !triggered; i++)
+            {
+               if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
+               {
+                  real_t V_abs = std::sqrt(
+                     slip_rate(2*i)*slip_rate(2*i) +
+                     slip_rate(2*i+1)*slip_rate(2*i+1));
+                  real_t tau_abs = std::sqrt(
+                     traction(2*i)*traction(2*i) +
+                     traction(2*i+1)*traction(2*i+1));
+                  real_t sn_el_abs = (have_sn && ntrac.Size() > i) ?
+                     std::abs(ntrac(i)) : 0.0;
+                  if (V_abs > 1e-7 || tau_abs > 1e8 || sn_el_abs > 1e7)
+                  {
+                     triggered = true;
+                  }
+               }
+            }
+            // Global trigger so all ranks participate
+            int local_trig = triggered ? 1 : 0;
+            int global_trig = mpi.GlobalSumInt(local_trig);
+            if (global_trig > 0)
+            {
+               diag_tip_face_dumped = true;
+               // Compute traction decomposition (stress vs penalty)
+               Vector slip_diag;
+               fault_op.GetSlip(state, slip_diag);
+               Vector local_slip_diag;
+               domain.ExpandOwnedToLocalFault(slip_diag, local_slip_diag,
+                                               domain.NumSlipComponents());
+               Vector trac_decomp, trac_stress, trac_corr;
+               domain.ComputeTractionComponents(
+                  seas_op.GetDisplacement(), local_slip_diag,
+                  trac_decomp, trac_stress, trac_corr);
+               Vector trac_stress_own, trac_corr_own;
+               domain.RestrictToOwnedFault(trac_stress, trac_stress_own,
+                                            domain.NumSlipComponents());
+               domain.RestrictToOwnedFault(trac_corr, trac_corr_own,
+                                            domain.NumSlipComponents());
+
+               for (int i = 0; i < nn; i++)
+               {
+                  if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
+                  {
+                     mfem::out << std::scientific << std::setprecision(10)
+                        << "[TIP-FACE-DUMP] s=" << step
+                        << " t=" << t / BP5Params::seconds_per_year
+                        << " r=" << mpi.Rank()
+                        << " d=" << i
+                        << " x=" << x2(i)
+                        << " z=" << x3(i)
+                        << " str_d=" << trac_stress_own(2*i)
+                        << " str_s=" << trac_stress_own(2*i+1)
+                        << " cor_d=" << trac_corr_own(2*i)
+                        << " cor_s=" << trac_corr_own(2*i+1)
+                        << " sn_el=" << ((have_sn && ntrac.Size() > i) ? ntrac(i) : 0.0)
+                        << "\n";
+                  }
+               }
+               if (mpi.IsRoot())
+               {
+                  std::cout << "[TIP-FACE-DUMP] triggered at step=" << step
+                     << " t=" << t / BP5Params::seconds_per_year << " yr\n";
                }
             }
          }
