@@ -1611,19 +1611,20 @@ int main(int argc, char *argv[])
             real_t slip_d = slip_step1(2*i);
             real_t slip_s = slip_step1(2*i+1);
 
-            mfem::out << std::scientific << std::setprecision(8)
-               << "[TIP-STEP1] rank=" << mpi.Rank()
-               << " dof=" << i
-               << " x2=" << x2(i) << " x3=" << x3(i)
-               << "\n  slip=(" << slip_d << "," << slip_s << ")"
-               << "\n  tau_total=(" << tau_d << "," << tau_s << ")"
-               << "  |tau|=" << std::sqrt(tau_d*tau_d + tau_s*tau_s)
-               << "\n  tau_stress=(" << tau_stress_d << "," << tau_stress_s << ")"
-               << "  |stress|=" << std::sqrt(tau_stress_d*tau_stress_d +
-                                              tau_stress_s*tau_stress_s)
-               << "\n  tau_corr=(" << tau_corr_d << "," << tau_corr_s << ")"
-               << "  |corr|=" << std::sqrt(tau_corr_d*tau_corr_d +
-                                            tau_corr_s*tau_corr_s)
+            real_t tau_abs = std::sqrt(tau_d*tau_d + tau_s*tau_s);
+            real_t stress_abs = std::sqrt(tau_stress_d*tau_stress_d +
+                                          tau_stress_s*tau_stress_s);
+            real_t corr_abs = std::sqrt(tau_corr_d*tau_corr_d +
+                                         tau_corr_s*tau_corr_s);
+            // Single-line format to survive MPI interleaving
+            mfem::out << std::scientific << std::setprecision(6)
+               << "[TS1] r=" << mpi.Rank()
+               << " d=" << i
+               << " x=" << x2(i) << " z=" << x3(i)
+               << " |tau|=" << tau_abs
+               << " |str|=" << stress_abs
+               << " |cor|=" << corr_abs
+               << " sl=(" << slip_d << "," << slip_s << ")"
                << "\n";
          }
       }
