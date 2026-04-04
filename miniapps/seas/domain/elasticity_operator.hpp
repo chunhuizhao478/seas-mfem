@@ -4459,10 +4459,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             const IntegrationRule &ir_tq = IntRules.Get(
                FTr->GetGeometryType(), qo_tq);
             FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
+            // Exact matched MFEM face for the left shallow tip.
+            // Tandem and MFEM do not share global vertex numbering, so this
+            // must use the MFEM-observed key, not the Tandem key.
             FaceVertexKey target_key;
-            target_key.v[0] = 63;
-            target_key.v[1] = 3300;
-            target_key.v[2] = 3910;
+            target_key.v[0] = 551;
+            target_key.v[1] = 555;
+            target_key.v[2] = 613;
 
             if (fkey == target_key)
             {
