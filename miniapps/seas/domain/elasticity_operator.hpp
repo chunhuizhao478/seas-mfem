@@ -5128,7 +5128,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int nbf_sh = nbf_per_face_;
             bool need_decomp_sh = traction_stress_out ||
                                   traction_correction_out || jump_residual_out ||
-                                  coherence_active || diag_traction_decomp_;
+                                  coherence_active || diag_traction_decomp_ ||
+                                  (diag_tip_uy_ && !diag_tip_uy_done_);
             const auto &basis_sh = fault_basis_.GetBasis(trac_idx);
 
             // Build sign-corrected slip at quad points (shared faces).
@@ -5189,9 +5190,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                trac_integ_sh.ComputeTractionAtQuadPointsDecomposed(
                   *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_sh,
                   T_quad_sh,
-                  (traction_stress_out || coherence_active || diag_traction_decomp_)
+                  (traction_stress_out || coherence_active || diag_traction_decomp_ ||
+                   (diag_tip_uy_ && !diag_tip_uy_done_))
                      ? &T_stress_quad_sh : nullptr,
-                  (traction_correction_out || coherence_active || diag_traction_decomp_)
+                  (traction_correction_out || coherence_active || diag_traction_decomp_ ||
+                   (diag_tip_uy_ && !diag_tip_uy_done_))
                      ? &T_corr_quad_sh : nullptr,
                   jump_residual_out ? &R_quad_sh : nullptr,
                   nullptr, &nl_q_sh);
@@ -5251,6 +5254,64 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
                   (*normal_traction)(dof_idx) = -trac_local_sh(0 * nbf_sh + kk);
+               }
+            }
+
+            // v58: [TIP-UY] for shared faces (tip faces are often shared)
+            if (diag_tip_uy_ && !diag_tip_uy_done_ && slip_bc.Normlinf() > 1e-20)
+            {
+               const IntegrationPoint &ip_ct_sh =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip_ct_sh);
+               Vector fc_ct_sh(3);
+               FTr->Face->Transform(ip_ct_sh, fc_ct_sh);
+               real_t cx_sh = fc_ct_sh(0), cz_sh = -fc_ct_sh(2);
+
+               if (std::abs(cx_sh) > 49000.0 && cz_sh < 2500.0)
+               {
+                  diag_tip_uy_done_ = true;
+                  int nqp_d = T_quad_sh.Size() / dim;
+                  for (int q = 0; q < nqp_d; q++)
+                  {
+                     FTr->SetAllIntPoints(&ir_sh2.IntPoint(q));
+                     const IntegrationPoint &eip1d = FTr->GetElement1IntPoint();
+                     const IntegrationPoint &eip2d = FTr->GetElement2IntPoint();
+                     Vector s1d(fe1->GetDof()), s2d(fe2->GetDof());
+                     fe1->CalcShape(eip1d, s1d);
+                     fe2->CalcShape(eip2d, s2d);
+
+                     real_t u1_y = 0, u2_y = 0, slip_y_q = 0;
+                     for (int k = 0; k < fe1->GetDof(); k++)
+                        u1_y += s1d(k) * u1_all(1 * fe1->GetDof() + k);
+                     for (int k = 0; k < fe2->GetDof(); k++)
+                        u2_y += s2d(k) * u2_all(1 * fe2->GetDof() + k);
+                     slip_y_q = delta_u_quad_sh(1 * nqp_d + q);
+
+                     real_t detJ1d = FTr->Elem1->Weight();
+                     real_t detJ2d = FTr->Elem2->Weight();
+                     real_t pen_d = trac_integ_sh.GetPenalty(
+                        *fe1, *fe2, detJ1d, detJ2d,
+                        lambda_val_, mu_val_, nl_q_sh(q));
+                     real_t T_sy = T_stress_quad_sh(1 * nqp_d + q);
+                     real_t T_cy = T_corr_quad_sh(1 * nqp_d + q);
+
+                     mfem::out << std::scientific << std::setprecision(10)
+                        << "[TIP-UY] r=" << rank
+                        << " fi=sh" << i << " q=" << q
+                        << " cx=" << cx_sh << " cz=" << cz_sh
+                        << " u1_y=" << u1_y
+                        << " u2_y=" << u2_y
+                        << " slip_y=" << slip_y_q
+                        << " jump_y=" << (u1_y - u2_y - slip_y_q)
+                        << " pen=" << pen_d
+                        << " T_stress_y=" << T_sy
+                        << " T_corr_y=" << T_cy
+                        << " T_total_y=" << T_quad_sh(1 * nqp_d + q)
+                        << " sf=" << basis_sh.sign_flipped
+                        << " detJ1=" << detJ1d
+                        << " detJ2=" << detJ2d
+                        << "\n";
+                  }
                }
             }
 
