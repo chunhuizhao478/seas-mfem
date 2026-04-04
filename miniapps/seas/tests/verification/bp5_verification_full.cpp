@@ -858,7 +858,11 @@ int main(int argc, char *argv[])
    if (diag_uz_fault) { domain.SetDiagUzFault(true); }
    if (diag_traction_coherence) { domain.SetDiagTractionCoherence(true); }
    if (diag_rhs_z) { domain.SetDiagRhsZ(true); }
-   if (diag_tnd_tq) { domain.SetDiagTndTQ(true); }
+   // PETSc TS evaluates RHS at intermediate RK stages before the step is
+   // accepted. For the exact-face MFEM/Tandem comparison we want one dump at
+   // the accepted step state/time, so only arm the in-operator dump here for
+   // non-PETSc steppers. The PETSc path rearms and recomputes once post-step.
+   if (diag_tnd_tq && !use_petsc_ts) { domain.SetDiagTndTQ(true); }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);
@@ -1732,7 +1736,32 @@ int main(int argc, char *argv[])
          step_rejections = static_cast<int>(rejects);
       }
 #endif
+      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq && (step == 0);
       step++;
+
+      // PETSc TS RHS evaluations occur at internal RK stage times, so the
+      // usual in-operator diagnostic can capture a stage state instead of the
+      // accepted step. Recompute once at the accepted post-step state/time.
+      if (do_poststep_tnd_tq)
+      {
+         domain.SetDiagSolveMetadata(step, dt);
+         domain.SetDiagTndTQ(true);
+
+         Vector slip_owned_dbg(fault_op.SlipSize());
+         fault_op.GetSlip(state, slip_owned_dbg);
+
+         Vector slip_local_dbg(domain.NumSlipComponents() * domain.GetNumFaultDOFs());
+         domain.ExpandOwnedToLocalFault(slip_owned_dbg, slip_local_dbg,
+                                        domain.NumSlipComponents());
+
+         ParGridFunction u_dbg(&domain.GetFESpace());
+         u_dbg = 0.0;
+         Vector traction_dbg(domain.NumSlipComponents() * domain.GetNumFaultDOFs());
+         traction_dbg = 0.0;
+
+         domain.Solve(t, slip_local_dbg, u_dbg);
+         domain.ComputeTraction(u_dbg, slip_local_dbg, traction_dbg);
+      }
 
       // Post-step psi clamping is MFEM-specific. Tandem does not do this, so
       // keep it switchable and instrumented while debugging dynamic mismatch.
