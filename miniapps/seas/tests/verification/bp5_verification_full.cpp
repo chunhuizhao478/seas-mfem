@@ -360,7 +360,6 @@ int main(int argc, char *argv[])
    bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
    bool diag_tip_monitor = false;      // v58: per-step tip DOF monitor (production-safe)
    bool diag_tip_face_dumped = false;  // v58: one-shot face dump when threshold crossed
-   bool diag_tip_uy = false;           // v58: one-shot [[u_y]] dump at tip face
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
@@ -456,7 +455,6 @@ int main(int argc, char *argv[])
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       if (arg == "--diag-tip-step1") { diag_tip_step1 = true; }
       if (arg == "--diag-tip-monitor") { diag_tip_monitor = true; }
-      if (arg == "--diag-tip-uy") { diag_tip_uy = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc)
       {
@@ -849,7 +847,6 @@ int main(int argc, char *argv[])
 
    if (check_residual) { domain.SetCheckResidual(true); }
    if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
-   if (diag_tip_uy) { domain.SetDiagTipUy(true); }
    if (blr_tol != 1e-10) { domain.SetBLRTol(blr_tol); }
    // v49 Phase 1 flags
    if (match_quad_order) { domain.SetMatchQuadOrder(true); }
