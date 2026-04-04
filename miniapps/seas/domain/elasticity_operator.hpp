@@ -272,14 +272,6 @@ public:
    /// v52: Enable RHS z-component diagnostic (fires once after first non-trivial slip)
    void SetDiagRhsZ(bool v) { diag_rhs_z_ = v; }
 
-   /// v58: Enable one-shot slip-embedding startup diagnostic.
-   /// Disabled by default because the shared-face dump is extremely large in parallel.
-   void SetDiagSlipEmbed(bool v)
-   {
-      diag_slip_embed_ = v;
-      diag_slip_embed_done_ = !v;
-   }
-
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -318,8 +310,7 @@ private:
    bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
    mutable bool diag_rhs_z_done_ = false;
    mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
-   bool diag_slip_embed_ = false;          // v58 FaultBasis diagnostic (opt-in)
-   mutable bool diag_slip_embed_done_ = true;
+   mutable bool diag_slip_embed_done_ = false;   // v58 FaultBasis diagnostic
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -1809,7 +1800,7 @@ private:
          }
 
          // v58 diagnostic: print FaultBasis + delta_u_quad for first 3 interior faces
-         if (diag_slip_embed_ && !diag_slip_embed_done_ && fi < 3)
+         if (!diag_slip_embed_done_ && fi < 3)
          {
             const IntegrationPoint &ip_c =
                Geometries.GetCenter(FTr->GetGeometryType());
@@ -2220,7 +2211,7 @@ private:
             }
 
             // v58 diagnostic: print FaultBasis + delta_u_quad for ALL shared fault faces
-            if (diag_slip_embed_ && !diag_slip_embed_done_)
+            if (!diag_slip_embed_done_)
             {
                const IntegrationPoint &ip_c =
                   Geometries.GetCenter(FTr->GetGeometryType());
@@ -2272,7 +2263,7 @@ private:
          // Only mark done if we actually printed (had non-zero slip)
          {
             real_t slip_max_local = slip_bc.Normlinf();
-            if (diag_slip_embed_ && !diag_slip_embed_done_ && slip_max_local > 1e-20)
+            if (!diag_slip_embed_done_ && slip_max_local > 1e-20)
             {
                diag_slip_embed_done_ = true;
             }
