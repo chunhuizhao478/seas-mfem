@@ -309,7 +309,7 @@ private:
    bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
    mutable bool diag_rhs_z_done_ = false;
    mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
-   mutable bool diag_slip_embed_done_ = false;   // v58 FaultBasis diagnostic
+   mutable bool diag_slip_embed_done_ = true;    // v58 FaultBasis diagnostic (disabled by default)
    bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
    mutable bool diag_tnd_tq_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
