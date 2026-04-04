@@ -4203,6 +4203,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    };
    std::vector<CohFaceData> coh_face_data;
 
+   // [MFEM-TQ] Pre-compute global vertex indices once (may be collective)
+   Array<HYPRE_BigInt> gvert_tq_;
+   if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+   {
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         mesh_.GetGlobalVertexIndices(gvert_tq_);
+      }
+   }
+
    for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
    {
       int face = fault_interior_faces_[fi];
@@ -4439,13 +4449,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 #endif
                }
 
-               // Face vertex key
-               Array<HYPRE_BigInt> gvert_tq;
-               if constexpr (IsParallelMesh<MeshType>::value)
-               {
-                  mesh_.GetGlobalVertexIndices(gvert_tq);
-               }
-               FaceVertexKey fkey = MakeFaceKey(face, gvert_tq);
+               FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
 
                // Quad rule (same as used for traction)
                int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
@@ -5219,11 +5223,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 
                if (std::abs(cx_m) > 49000.0)
                {
-                  // Face vertex key for shared face
                   int lf_sh = mesh_.GetSharedFace(sf);
-                  Array<HYPRE_BigInt> gvert_sh;
-                  mesh_.GetGlobalVertexIndices(gvert_sh);
-                  FaceVertexKey fkey = MakeFaceKey(lf_sh, gvert_sh);
+                  FaceVertexKey fkey = MakeFaceKey(lf_sh, gvert_tq_);
 
                   int qo_sh = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
                   const IntegrationRule &ir_tq_sh = IntRules.Get(
