@@ -1663,6 +1663,13 @@ int main(int argc, char *argv[])
          ode_solver.SetDt(t_final - t);
       }
 
+      // Carry the next accepted-step metadata into the elasticity operator's
+      // face diagnostics before any stage solve happens inside the time step.
+      {
+         real_t step_dt_hint = use_petsc_ts ? current_dt : ode_solver.GetDt();
+         domain.SetDiagSolveMetadata(step + 1, step_dt_hint);
+      }
+
       real_t dt;
       bool accepted = true;
       if (!use_petsc_ts)

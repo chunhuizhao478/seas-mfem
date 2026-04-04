@@ -270,9 +270,21 @@ public:
    /// v52: Enable RHS z-component diagnostic (fires once after first non-trivial slip)
    void SetDiagRhsZ(bool v) { diag_rhs_z_ = v; }
 
-   /// Diagnostic: output per-QP traction data at tip faces, matching Tandem [TND-TQ] format.
-   /// Fires once at first ComputeTraction call. Each rank prints its own tip faces.
-   void SetDiagTndTQ(bool v) { diag_tnd_tq_ = v; }
+   /// Diagnostic: output per-QP traction data at the exact matched face,
+   /// matching Tandem [TND-TQ] structure but with MFEM units/metadata.
+   void SetDiagTndTQ(bool v)
+   {
+      diag_tnd_tq_ = v;
+      diag_tnd_tq_done_ = !v;
+   }
+
+   /// Carry accepted-step metadata from the BP5 driver into the next solve/traction call.
+   /// This avoids inferring step context from PETSc internals inside the operator.
+   void SetDiagSolveMetadata(int step, real_t dt) const
+   {
+      last_solve_step_ = step;
+      last_solve_dt_ = dt;
+   }
 
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
@@ -313,6 +325,8 @@ private:
    mutable bool diag_slip_embed_done_ = true;    // v58 FaultBasis diagnostic (disabled by default)
    bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
    mutable bool diag_tnd_tq_done_ = false;
+   mutable int last_solve_step_ = -1;             // Accepted step hint from BP5 driver
+   mutable real_t last_solve_dt_ = 0.0;           // Accepted dt hint from BP5 driver [s]
    mutable real_t last_solve_t_ = 0.0;            // Simulation time from last Solve() call
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
@@ -4438,33 +4452,19 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          int nqp_new = T_quad_new.Size() / dim;
 
          // [MFEM-TQ] structured face-pipeline comparison (Tandem [TND-TQ]).
-         // Target face: cx≈-49440 m, cz≈2012 m.
-         // Trigger: t > 0.015 s AND |Ty(q=0)| > 1e-30 (same instant as Tandem).
-         if (tnd_tq_active && last_solve_t_ > 0.015)
+         // Trigger once on the exact matched face after the first non-zero slip.
+         if (tnd_tq_active && slip_bc.Normlinf() > 1e-20)
          {
             int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_tq = IntRules.Get(
                FTr->GetGeometryType(), qo_tq);
-            real_t cx_avg = 0.0, cz_avg = 0.0;
-            for (int q = 0; q < nqp_new; q++)
-            {
-               const IntegrationPoint &fip = ir_tq.IntPoint(q);
-               FTr->Face->SetIntPoint(&fip);
-               Vector cq_tmp(3);
-               FTr->Face->Transform(fip, cq_tmp);
-               cx_avg += cq_tmp(0);
-               cz_avg += -cq_tmp(2);
-            }
-            cx_avg /= nqp_new;
-            cz_avg /= nqp_new;
+            FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
+            FaceVertexKey target_key;
+            target_key.v[0] = 63;
+            target_key.v[1] = 3300;
+            target_key.v[2] = 3910;
 
-            bool target_match =
-               (std::abs(cx_avg + 49440.0) < 300.0 &&
-                std::abs(cz_avg - 2012.0) < 300.0);
-
-            real_t Ty0 = T_quad_new(1 * nqp_new + 0);
-
-            if (target_match && std::abs(Ty0) > 1e-30)
+            if (fkey == target_key)
             {
                int rank_tq = 0;
                if constexpr (IsParallelMesh<MeshType>::value)
@@ -4474,19 +4474,33 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 #endif
                }
 
-               FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
                real_t vol0_tq = FTr->Elem1->Weight();
                real_t vol1_tq = FTr->Elem2->Weight();
                real_t area_tq = 0.0;
+               real_t cx_avg = 0.0, cz_avg = 0.0;
                for (int q = 0; q < nqp_new; q++)
+               {
                   area_tq += ir_tq.IntPoint(q).weight * nl_q_vec(q);
+                  const IntegrationPoint &fip = ir_tq.IntPoint(q);
+                  FTr->Face->SetIntPoint(&fip);
+                  Vector cq_tmp(3);
+                  FTr->Face->Transform(fip, cq_tmp);
+                  cx_avg += cq_tmp(0);
+                  cz_avg += -cq_tmp(2);
+               }
+               cx_avg /= nqp_new;
+               cz_avg /= nqp_new;
 
                tnd_tq_buf_ << std::scientific << std::setprecision(10)
-                  << "[MFEM-TQ] t=" << last_solve_t_
+                  << "[MFEM-TQ] step=" << last_solve_step_
+                  << " t=" << last_solve_t_
+                  << " dt=" << last_solve_dt_
                   << " r=" << rank_tq
                   << " fct=" << face
                   << " key=(" << fkey.v[0] << "," << fkey.v[1]
                   << "," << fkey.v[2] << ")"
+                  << " cx=" << cx_avg
+                  << " cz=" << cz_avg
                   << " pen=" << trac_integ.GetPenalty(
                         *fe1, *fe2, vol0_tq, vol1_tq,
                         lambda_val_, mu_val_, nl_q_vec(0))
@@ -4523,6 +4537,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t Ty_stress = T_stress_quad_dec(1 * nqp_new + q);
                   real_t Ty_penalty = T_corr_quad_dec(1 * nqp_new + q);
                   real_t Ty = T_quad_new(1 * nqp_new + q);
+                  real_t pen_q = trac_integ.GetPenalty(
+                     *fe1, *fe2, FTr->Elem1->Weight(), FTr->Elem2->Weight(),
+                     lambda_val_, mu_val_, nl_q_vec(q));
 
                   tnd_tq_buf_ << std::scientific << std::setprecision(10)
                      << "[MFEM-TQ] q=" << q
@@ -4531,6 +4548,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      << " u0_y=" << u0y << " u1_y=" << u1y
                      << " slip_y=" << slip_y
                      << " jump_y=" << jump_y
+                     << " pen=" << pen_q
                      << " Ty_stress=" << Ty_stress
                      << " Ty_penalty=" << Ty_penalty
                      << " Ty=" << Ty
