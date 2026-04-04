@@ -4473,94 +4473,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 
             if (fkey == target_key)
             {
-               int rank_tq = 0;
-               if constexpr (IsParallelMesh<MeshType>::value)
-               {
-#ifdef MFEM_USE_MPI
-                  MPI_Comm_rank(mesh_.GetComm(), &rank_tq);
-#endif
-               }
-
-               real_t vol0_tq = FTr->Elem1->Weight();
-               real_t vol1_tq = FTr->Elem2->Weight();
-               real_t area_tq = 0.0;
-               real_t cx_avg = 0.0, cz_avg = 0.0;
-               for (int q = 0; q < nqp_new; q++)
-               {
-                  area_tq += ir_tq.IntPoint(q).weight * nl_q_vec(q);
-                  const IntegrationPoint &fip = ir_tq.IntPoint(q);
-                  FTr->Face->SetIntPoint(&fip);
-                  Vector cq_tmp(3);
-                  FTr->Face->Transform(fip, cq_tmp);
-                  cx_avg += cq_tmp(0);
-                  cz_avg += -cq_tmp(2);
-               }
-               cx_avg /= nqp_new;
-               cz_avg /= nqp_new;
-
-               tnd_tq_buf_ << std::scientific << std::setprecision(10)
-                  << "[MFEM-TQ] step=" << last_solve_step_
-                  << " t=" << last_solve_t_
-                  << " dt=" << last_solve_dt_
-                  << " r=" << rank_tq
-                  << " fct=" << face
-                  << " key=(" << fkey.v[0] << "," << fkey.v[1]
-                  << "," << fkey.v[2] << ")"
-                  << " cx=" << cx_avg
-                  << " cz=" << cz_avg
-                  << " pen=" << trac_integ.GetPenalty(
-                        *fe1, *fe2, vol0_tq, vol1_tq,
-                        lambda_val_, mu_val_, nl_q_vec(0))
-                  << " area=" << area_tq
-                  << " vol0=" << vol0_tq << " vol1=" << vol1_tq
-                  << "\n";
-
-               Vector sh1_tq(ndof1), sh2_tq(ndof2);
-               for (int q = 0; q < nqp_new; q++)
-               {
-                  const IntegrationPoint &fip = ir_tq.IntPoint(q);
-                  FTr->SetAllIntPoints(&fip);
-                  fe1->CalcShape(FTr->GetElement1IntPoint(), sh1_tq);
-                  fe2->CalcShape(FTr->GetElement2IntPoint(), sh2_tq);
-
-                  Vector cq(3);
-                  FTr->Face->SetIntPoint(&fip);
-                  FTr->Face->Transform(fip, cq);
-
-                  Vector nor_tq(dim);
-                  CalcOrtho(FTr->Jacobian(), nor_tq);
-                  real_t nl_tq = nor_tq.Norml2();
-                  real_t ny_tq = nor_tq(1) / nl_tq;
-
-                  real_t u0y = 0.0, u1y = 0.0;
-                  for (int k = 0; k < ndof1; k++)
-                     u0y += sh1_tq(k) * u1_all(1 * ndof1 + k);
-                  for (int k = 0; k < ndof2; k++)
-                     u1y += sh2_tq(k) * u2_all(1 * ndof2 + k);
-
-                  real_t slip_y = delta_u_quad_t(1 * nqp_new + q);
-                  real_t jump_y = u0y - u1y - slip_y;
-
-                  real_t Ty_stress = T_stress_quad_dec(1 * nqp_new + q);
-                  real_t Ty_penalty = T_corr_quad_dec(1 * nqp_new + q);
-                  real_t Ty = T_quad_new(1 * nqp_new + q);
-                  real_t pen_q = trac_integ.GetPenalty(
-                     *fe1, *fe2, FTr->Elem1->Weight(), FTr->Elem2->Weight(),
-                     lambda_val_, mu_val_, nl_q_vec(q));
-
-                  tnd_tq_buf_ << std::scientific << std::setprecision(10)
-                     << "[MFEM-TQ] q=" << q
-                     << " xyz=(" << cq(0) << "," << cq(1) << "," << cq(2) << ")"
-                     << " ny=" << ny_tq
-                     << " u0_y=" << u0y << " u1_y=" << u1y
-                     << " slip_y=" << slip_y
-                     << " jump_y=" << jump_y
-                     << " pen=" << pen_q
-                     << " Ty_stress=" << Ty_stress
-                     << " Ty_penalty=" << Ty_penalty
-                     << " Ty=" << Ty
-                     << "\n";
-               }
+               // v58 isolation: disable the diagnostic block body to test
+               // whether the stall is caused by this block (FTr mutation,
+               // printing) vs the decomposed-path-with-diag mode itself.
+               // If the run no longer stalls with this stub, the block body
+               // is the culprit.
                diag_tnd_tq_done_ = true;
             }
          }
