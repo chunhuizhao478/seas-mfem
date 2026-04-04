@@ -312,6 +312,7 @@ private:
    mutable bool diag_slip_embed_done_ = true;    // v58 FaultBasis diagnostic (disabled by default)
    bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
    mutable bool diag_tnd_tq_done_ = false;
+   mutable int diag_tnd_tq_call_ = 0;             // Skip init calls (0,1), fire on call 2
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -4203,9 +4204,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    };
    std::vector<CohFaceData> coh_face_data;
 
-   // [MFEM-TQ] Pre-compute global vertex indices once (may be collective)
+   // [MFEM-TQ] Pre-compute global vertex indices once (may be collective).
+   // Skip first 2 calls (SetInitialCondition: zero displacement) — fire on call 2
+   // (first RK stage of step 1, where loading produces non-zero displacement).
    Array<HYPRE_BigInt> gvert_tq_;
-   if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+   bool tnd_tq_active = diag_tnd_tq_ && !diag_tnd_tq_done_ && diag_tnd_tq_call_ >= 2;
+   if (diag_tnd_tq_ && !diag_tnd_tq_done_) { diag_tnd_tq_call_++; }
+   if (tnd_tq_active)
    {
       if constexpr (IsParallelMesh<MeshType>::value)
       {
@@ -4429,7 +4434,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          int nqp_new = T_quad_new.Size() / dim;
 
          // [MFEM-TQ] per-QP diagnostic at tip faces (interior), matching Tandem [TND-TQ]
-         if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+         if (tnd_tq_active)
          {
             // Compute face centroid to check if this is a tip face
             const IntegrationPoint &ip_tq =
@@ -5212,7 +5217,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int nqp_sh = T_quad_sh.Size() / dim;
 
             // [MFEM-TQ] per-QP diagnostic at tip faces (shared)
-            if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+            if (tnd_tq_active)
             {
                const IntegrationPoint &ip_tq =
                   Geometries.GetCenter(FTr->GetGeometryType());
@@ -5646,7 +5651,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    }
 
    // Mark [MFEM-TQ] diagnostic as done after processing all faces
-   if (diag_tnd_tq_ && !diag_tnd_tq_done_) { diag_tnd_tq_done_ = true; }
+   if (tnd_tq_active) { diag_tnd_tq_done_ = true; }
 
    // Diagnostic: check for traction blowup
 #ifdef MFEM_USE_MPI
