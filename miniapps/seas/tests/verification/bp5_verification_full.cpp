@@ -860,7 +860,7 @@ int main(int argc, char *argv[])
    if (diag_rhs_z) { domain.SetDiagRhsZ(true); }
    // PETSc TS evaluates RHS at intermediate RK stages before the step is
    // accepted. For the exact-face MFEM/Tandem comparison we want one dump at
-   // the accepted step state/time, so only arm the in-operator dump here for
+   // an accepted step state/time, so only arm the in-operator dump here for
    // non-PETSc steppers. The PETSc path rearms and recomputes once post-step.
    if (diag_tnd_tq && !use_petsc_ts) { domain.SetDiagTndTQ(true); }
    if (penalty_factor != 1.0)
@@ -1736,12 +1736,16 @@ int main(int argc, char *argv[])
          step_rejections = static_cast<int>(rejects);
       }
 #endif
-      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq && (step == 0);
+      // For PETSc TS, replay the exact-face diagnostic after the SECOND
+      // accepted step so the dump lands at t≈2e-2 s (matching the current
+      // Tandem exact-face dump), not at the first accepted step t≈1e-2 s.
+      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq && (step == 1);
       step++;
 
       // PETSc TS RHS evaluations occur at internal RK stage times, so the
       // usual in-operator diagnostic can capture a stage state instead of the
-      // accepted step. Recompute once at the accepted post-step state/time.
+      // accepted step. Recompute once at the targeted accepted post-step
+      // state/time.
       if (do_poststep_tnd_tq)
       {
          domain.SetDiagSolveMetadata(step, dt);
