@@ -4593,6 +4593,19 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             if (std::abs(cx) > 49000.0 && cz < 2500.0)
             {
                diag_tip_uy_done_ = true;  // done after first matching face
+               Array<HYPRE_BigInt> gvert_tag;
+               if constexpr (IsParallelMesh<MeshType>::value)
+               {
+                  mesh_.GetGlobalVertexIndices(gvert_tag);
+               }
+               else
+               {
+                  gvert_tag.SetSize(mesh_.GetNV());
+                  for (int vi = 0; vi < mesh_.GetNV(); ++vi)
+                  {
+                     gvert_tag[vi] = vi;
+                  }
+               }
                FaceVertexKey tip_key = MakeFaceKey(fault_interior_faces_[fi], gvert_tag);
 
                int rank = 0;
