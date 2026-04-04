@@ -269,6 +269,10 @@ public:
    /// v52: Enable RHS z-component diagnostic (fires once after first non-trivial slip)
    void SetDiagRhsZ(bool v) { diag_rhs_z_ = v; }
 
+   /// Diagnostic: output per-QP traction data at tip faces, matching Tandem [TND-TQ] format.
+   /// Fires once at first ComputeTraction call. Each rank prints its own tip faces.
+   void SetDiagTndTQ(bool v) { diag_tnd_tq_ = v; }
+
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
@@ -306,6 +310,8 @@ private:
    mutable bool diag_rhs_z_done_ = false;
    mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
    mutable bool diag_slip_embed_done_ = false;   // v58 FaultBasis diagnostic
+   bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
+   mutable bool diag_tnd_tq_done_ = false;
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -4412,6 +4418,107 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          }
          int nqp_new = T_quad_new.Size() / dim;
 
+         // [MFEM-TQ] per-QP diagnostic at tip faces (interior), matching Tandem [TND-TQ]
+         if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+         {
+            // Compute face centroid to check if this is a tip face
+            const IntegrationPoint &ip_tq =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_tq);
+            Vector fc_tq(3);
+            FTr->Face->Transform(ip_tq, fc_tq);
+            real_t cx_m = fc_tq(0);  // meters
+
+            if (std::abs(cx_m) > 49000.0)  // tip: |x| > 49 km
+            {
+               int rank_tq = 0;
+               if constexpr (IsParallelMesh<MeshType>::value)
+               {
+#ifdef MFEM_USE_MPI
+                  MPI_Comm_rank(mesh_.GetComm(), &rank_tq);
+#endif
+               }
+
+               // Face vertex key
+               Array<HYPRE_BigInt> gvert_tq;
+               if constexpr (IsParallelMesh<MeshType>::value)
+               {
+                  mesh_.GetGlobalVertexIndices(gvert_tq);
+               }
+               FaceVertexKey fkey = MakeFaceKey(face, gvert_tq);
+
+               // Quad rule (same as used for traction)
+               int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+               const IntegrationRule &ir_tq = IntRules.Get(
+                  FTr->GetGeometryType(), qo_tq);
+
+               // Element volumes
+               real_t vol0_tq = FTr->Elem1->Weight();
+               real_t vol1_tq = FTr->Elem2->Weight();
+
+               // Face area
+               real_t area_tq = 0.0;
+               for (int q = 0; q < nqp_new; q++)
+                  area_tq += ir_tq.IntPoint(q).weight * nl_q_vec(q);
+
+               // Per-QP output
+               Vector sh1_tq(ndof1), sh2_tq(ndof2);
+               for (int q = 0; q < nqp_new; q++)
+               {
+                  const IntegrationPoint &fip = ir_tq.IntPoint(q);
+                  FTr->SetAllIntPoints(&fip);
+                  fe1->CalcShape(FTr->GetElement1IntPoint(), sh1_tq);
+                  fe2->CalcShape(FTr->GetElement2IntPoint(), sh2_tq);
+
+                  // QP physical coordinates
+                  Vector cq(3);
+                  FTr->Face->SetIntPoint(&fip);
+                  FTr->Face->Transform(fip, cq);
+
+                  // Normal at this QP
+                  Vector nor_tq(dim);
+                  CalcOrtho(FTr->Jacobian(), nor_tq);
+                  real_t nl_tq = nor_tq.Norml2();
+                  real_t ny_tq = nor_tq(1) / nl_tq;
+
+                  // Penalty at this QP
+                  real_t detJ1_tq = FTr->Elem1->Weight();
+                  real_t detJ2_tq = FTr->Elem2->Weight();
+                  real_t pen_tq = trac_integ.GetPenalty(
+                     *fe1, *fe2, detJ1_tq, detJ2_tq,
+                     lambda_val_, mu_val_, nl_tq);
+
+                  // u0_y, u1_y (y = component 1)
+                  real_t u0y = 0.0, u1y = 0.0;
+                  for (int k = 0; k < ndof1; k++)
+                     u0y += sh1_tq(k) * u1_all(1 * ndof1 + k);
+                  for (int k = 0; k < ndof2; k++)
+                     u1y += sh2_tq(k) * u2_all(1 * ndof2 + k);
+
+                  real_t slip_y = delta_u_quad_t(1 * nqp_new + q);
+                  real_t jump_y = u0y - u1y;
+                  real_t Ty = T_quad_new(1 * nqp_new + q);
+
+                  mfem::out << std::scientific << std::setprecision(10)
+                     << "[MFEM-TQ] r=" << rank_tq
+                     << " fct=" << face << " q=" << q
+                     << " key=(" << fkey.v[0] << "," << fkey.v[1]
+                     << "," << fkey.v[2] << ")"
+                     << " cx=" << cq(0) << " cz=" << -cq(2)
+                     << " u0_y=" << u0y << " u1_y=" << u1y
+                     << " slip_y=" << slip_y
+                     << " jump_y=" << jump_y
+                     << " Ty=" << Ty
+                     << " pen=" << pen_tq
+                     << " ny=" << ny_tq
+                     << " area=" << area_tq
+                     << " vol0=" << vol0_tq << " vol1=" << vol1_tq
+                     << " interior"
+                     << "\n";
+               }
+            }
+         }
+
          // Step 2: Project to fault DOFs (Tandem evaluate_traction)
          int quad_order_new = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
          const IntegrationRule &ir_new = IntRules.Get(
@@ -5100,6 +5207,88 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
             int nqp_sh = T_quad_sh.Size() / dim;
 
+            // [MFEM-TQ] per-QP diagnostic at tip faces (shared)
+            if (diag_tnd_tq_ && !diag_tnd_tq_done_)
+            {
+               const IntegrationPoint &ip_tq =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip_tq);
+               Vector fc_tq(3);
+               FTr->Face->Transform(ip_tq, fc_tq);
+               real_t cx_m = fc_tq(0);
+
+               if (std::abs(cx_m) > 49000.0)
+               {
+                  // Face vertex key for shared face
+                  int lf_sh = mesh_.GetSharedFace(sf);
+                  Array<HYPRE_BigInt> gvert_sh;
+                  mesh_.GetGlobalVertexIndices(gvert_sh);
+                  FaceVertexKey fkey = MakeFaceKey(lf_sh, gvert_sh);
+
+                  int qo_sh = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+                  const IntegrationRule &ir_tq_sh = IntRules.Get(
+                     FTr->GetGeometryType(), qo_sh);
+
+                  real_t vol0_sh = FTr->Elem1->Weight();
+                  real_t vol1_sh = FTr->Elem2->Weight();
+
+                  real_t area_sh = 0.0;
+                  for (int q = 0; q < nqp_sh; q++)
+                     area_sh += ir_tq_sh.IntPoint(q).weight * nl_q_sh(q);
+
+                  Vector sh1_tq(ndof1), sh2_tq(ndof2);
+                  for (int q = 0; q < nqp_sh; q++)
+                  {
+                     const IntegrationPoint &fip = ir_tq_sh.IntPoint(q);
+                     FTr->SetAllIntPoints(&fip);
+                     fe1->CalcShape(FTr->GetElement1IntPoint(), sh1_tq);
+                     fe2->CalcShape(FTr->GetElement2IntPoint(), sh2_tq);
+
+                     Vector cq(3);
+                     FTr->Face->SetIntPoint(&fip);
+                     FTr->Face->Transform(fip, cq);
+
+                     Vector nor_tq(dim);
+                     CalcOrtho(FTr->Jacobian(), nor_tq);
+                     real_t nl_tq = nor_tq.Norml2();
+                     real_t ny_tq = nor_tq(1) / nl_tq;
+
+                     real_t detJ1_sh = FTr->Elem1->Weight();
+                     real_t detJ2_sh = FTr->Elem2->Weight();
+                     real_t pen_tq = trac_integ_sh.GetPenalty(
+                        *fe1, *fe2, detJ1_sh, detJ2_sh,
+                        lambda_val_, mu_val_, nl_tq);
+
+                     real_t u0y = 0.0, u1y = 0.0;
+                     for (int k = 0; k < ndof1; k++)
+                        u0y += sh1_tq(k) * u1_all(1 * ndof1 + k);
+                     for (int k = 0; k < ndof2; k++)
+                        u1y += sh2_tq(k) * u2_all(1 * ndof2 + k);
+
+                     real_t slip_y = delta_u_quad_sh(1 * nqp_sh + q);
+                     real_t jump_y = u0y - u1y;
+                     real_t Ty = T_quad_sh(1 * nqp_sh + q);
+
+                     mfem::out << std::scientific << std::setprecision(10)
+                        << "[MFEM-TQ] r=" << rank
+                        << " fct=" << sf << " q=" << q
+                        << " key=(" << fkey.v[0] << "," << fkey.v[1]
+                        << "," << fkey.v[2] << ")"
+                        << " cx=" << cq(0) << " cz=" << -cq(2)
+                        << " u0_y=" << u0y << " u1_y=" << u1y
+                        << " slip_y=" << slip_y
+                        << " jump_y=" << jump_y
+                        << " Ty=" << Ty
+                        << " pen=" << pen_tq
+                        << " ny=" << ny_tq
+                        << " area=" << area_sh
+                        << " vol0=" << vol0_sh << " vol1=" << vol1_sh
+                        << " shared"
+                        << "\n";
+                  }
+               }
+            }
+
             int quad_order_sh2 = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_sh2 = IntRules.Get(
                FTr->GetGeometryType(), quad_order_sh2);
@@ -5454,6 +5643,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       }
 #endif
    }
+
+   // Mark [MFEM-TQ] diagnostic as done after processing all faces
+   if (diag_tnd_tq_ && !diag_tnd_tq_done_) { diag_tnd_tq_done_ = true; }
 
    // Diagnostic: check for traction blowup
 #ifdef MFEM_USE_MPI

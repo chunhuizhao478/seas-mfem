@@ -359,6 +359,7 @@ int main(int argc, char *argv[])
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
    bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
    bool diag_tip_monitor = false;      // v58: per-step tip DOF monitor (production-safe)
+   bool diag_tnd_tq = false;            // Per-QP tip traction (Tandem [TND-TQ] comparison)
    bool diag_tip_face_dumped = false;  // v58: one-shot face dump when threshold crossed
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
@@ -455,6 +456,7 @@ int main(int argc, char *argv[])
       if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
       if (arg == "--diag-tip-step1") { diag_tip_step1 = true; }
       if (arg == "--diag-tip-monitor") { diag_tip_monitor = true; }
+      if (arg == "--diag-tnd-tq") { diag_tnd_tq = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc)
       {
@@ -856,6 +858,7 @@ int main(int argc, char *argv[])
    if (diag_uz_fault) { domain.SetDiagUzFault(true); }
    if (diag_traction_coherence) { domain.SetDiagTractionCoherence(true); }
    if (diag_rhs_z) { domain.SetDiagRhsZ(true); }
+   if (diag_tnd_tq) { domain.SetDiagTndTQ(true); }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);
