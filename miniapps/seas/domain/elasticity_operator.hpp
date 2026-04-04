@@ -313,7 +313,7 @@ private:
    mutable bool diag_slip_embed_done_ = true;    // v58 FaultBasis diagnostic (disabled by default)
    bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
    mutable bool diag_tnd_tq_done_ = false;
-   mutable int diag_tnd_tq_call_ = 0;             // Skip init calls (0,1), fire on call 2
+   mutable real_t last_solve_t_ = 0.0;            // Simulation time from last Solve() call
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -3536,6 +3536,7 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
+   last_solve_t_ = time;
    if (!stiffness_assembled_)
    {
       AssembleStiffness();
@@ -4351,7 +4352,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          bool need_decomp = traction_stress_out || traction_correction_out ||
                             jump_residual_out || coherence_active ||
                             diag_traction_decomp_ ||
-                            !diag_first_traction_done_;  // force decomp for tip diagnostic
+                            !diag_first_traction_done_ ||
+                            (diag_tnd_tq_ && !diag_tnd_tq_done_);
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
@@ -4418,9 +4420,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             trac_integ.ComputeTractionAtQuadPointsDecomposed(
                *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
                T_quad_new,
-               (traction_stress_out || coherence_active || diag_traction_decomp_)
+               (traction_stress_out || coherence_active || diag_traction_decomp_ ||
+                (diag_tnd_tq_ && !diag_tnd_tq_done_))
                   ? &T_stress_quad_dec : nullptr,
-               (traction_correction_out || coherence_active || diag_traction_decomp_)
+               (traction_correction_out || coherence_active || diag_traction_decomp_ ||
+                (diag_tnd_tq_ && !diag_tnd_tq_done_))
                   ? &T_corr_quad_dec : nullptr,
                jump_residual_out ? &R_quad_dec : nullptr,
                nullptr, &nl_q_vec);
@@ -4433,13 +4437,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          }
          int nqp_new = T_quad_new.Size() / dim;
 
-         // [MFEM-TQ] per-QP diagnostic matching Tandem [TND-TQ].
-         // Target face: cx≈-49440 m, cz≈2012 m (Tandem target: cx=-49.44, cz=2.01).
-         // Trigger: |Ty(q=0)| > 1e-30 (same as Tandem).
-         // jump_y = u0_y - u1_y - slip_y (Tandem convention).
+         // [MFEM-TQ] structured face-pipeline comparison (Tandem [TND-TQ]).
+         // Target face: cx≈-49440 m, cz≈2012 m. Trigger: |Ty(q=0)| > 1e-30.
+         // Prints t, QP xyz, full pipeline: u→slip→jump→penalty→stress→total.
          if (tnd_tq_active)
          {
-            // Compute face centroid (average of QP coords, matching Tandem)
             int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_tq = IntRules.Get(
                FTr->GetGeometryType(), qo_tq);
@@ -4456,13 +4458,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             cx_avg /= nqp_new;
             cz_avg /= nqp_new;
 
-            // Match target face: |cx + 49440| < 300 m AND |cz - 2012| < 300 m
             bool target_match =
                (std::abs(cx_avg + 49440.0) < 300.0 &&
                 std::abs(cz_avg - 2012.0) < 300.0);
 
-            // Trigger: |Ty(q=0)| > 1e-30
-            real_t Ty0 = T_quad_new(1 * nqp_new + 0);  // y-component at q=0
+            real_t Ty0 = T_quad_new(1 * nqp_new + 0);
 
             if (target_match && std::abs(Ty0) > 1e-30)
             {
@@ -4475,13 +4475,24 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                }
 
                FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
-
                real_t vol0_tq = FTr->Elem1->Weight();
                real_t vol1_tq = FTr->Elem2->Weight();
-
                real_t area_tq = 0.0;
                for (int q = 0; q < nqp_new; q++)
                   area_tq += ir_tq.IntPoint(q).weight * nl_q_vec(q);
+
+               tnd_tq_buf_ << std::scientific << std::setprecision(10)
+                  << "[MFEM-TQ] t=" << last_solve_t_
+                  << " r=" << rank_tq
+                  << " fct=" << face
+                  << " key=(" << fkey.v[0] << "," << fkey.v[1]
+                  << "," << fkey.v[2] << ")"
+                  << " pen=" << trac_integ.GetPenalty(
+                        *fe1, *fe2, vol0_tq, vol1_tq,
+                        lambda_val_, mu_val_, nl_q_vec(0))
+                  << " area=" << area_tq
+                  << " vol0=" << vol0_tq << " vol1=" << vol1_tq
+                  << "\n";
 
                Vector sh1_tq(ndof1), sh2_tq(ndof2);
                for (int q = 0; q < nqp_new; q++)
@@ -4500,12 +4511,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t nl_tq = nor_tq.Norml2();
                   real_t ny_tq = nor_tq(1) / nl_tq;
 
-                  real_t detJ1_tq = FTr->Elem1->Weight();
-                  real_t detJ2_tq = FTr->Elem2->Weight();
-                  real_t pen_tq = trac_integ.GetPenalty(
-                     *fe1, *fe2, detJ1_tq, detJ2_tq,
-                     lambda_val_, mu_val_, nl_tq);
-
                   real_t u0y = 0.0, u1y = 0.0;
                   for (int k = 0; k < ndof1; k++)
                      u0y += sh1_tq(k) * u1_all(1 * ndof1 + k);
@@ -4513,24 +4518,22 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      u1y += sh2_tq(k) * u2_all(1 * ndof2 + k);
 
                   real_t slip_y = delta_u_quad_t(1 * nqp_new + q);
-                  real_t jump_y = u0y - u1y - slip_y;  // Tandem convention
+                  real_t jump_y = u0y - u1y - slip_y;
+
+                  real_t Ty_stress = T_stress_quad_dec(1 * nqp_new + q);
+                  real_t Ty_penalty = T_corr_quad_dec(1 * nqp_new + q);
                   real_t Ty = T_quad_new(1 * nqp_new + q);
 
                   tnd_tq_buf_ << std::scientific << std::setprecision(10)
-                     << "[MFEM-TQ] r=" << rank_tq
-                     << " fct=" << face << " q=" << q
-                     << " key=(" << fkey.v[0] << "," << fkey.v[1]
-                     << "," << fkey.v[2] << ")"
-                     << " cx=" << cq(0) << " cz=" << -cq(2)
+                     << "[MFEM-TQ] q=" << q
+                     << " xyz=(" << cq(0) << "," << cq(1) << "," << cq(2) << ")"
+                     << " ny=" << ny_tq
                      << " u0_y=" << u0y << " u1_y=" << u1y
                      << " slip_y=" << slip_y
                      << " jump_y=" << jump_y
+                     << " Ty_stress=" << Ty_stress
+                     << " Ty_penalty=" << Ty_penalty
                      << " Ty=" << Ty
-                     << " pen=" << pen_tq
-                     << " ny=" << ny_tq
-                     << " area=" << area_tq
-                     << " vol0=" << vol0_tq << " vol1=" << vol1_tq
-                     << " interior"
                      << "\n";
                }
                diag_tnd_tq_done_ = true;
