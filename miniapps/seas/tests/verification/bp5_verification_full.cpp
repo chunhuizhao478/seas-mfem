@@ -1660,8 +1660,11 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Main time-stepping loop
    // =========================================================================
+   constexpr real_t target_tnd_tq_time = 2.0e-2;
+   bool poststep_tnd_tq_done = false;
    while (t < t_final && step < max_steps)
    {
+      real_t t_before_step = t;
       if (!use_petsc_ts && t + ode_solver.GetDt() > t_final)
       {
          ode_solver.SetDt(t_final - t);
@@ -1736,10 +1739,14 @@ int main(int argc, char *argv[])
          step_rejections = static_cast<int>(rejects);
       }
 #endif
-      // For PETSc TS, replay the exact-face diagnostic after the SECOND
-      // accepted step so the dump lands at t≈2e-2 s (matching the current
-      // Tandem exact-face dump), not at the first accepted step t≈1e-2 s.
-      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq && (step == 1);
+      // For PETSc TS, replay the exact-face diagnostic on the first accepted
+      // step whose accepted time reaches the Tandem target time (currently
+      // t=2.0e-2 s). Adaptive RK45 does not preserve a fixed accepted-step
+      // count, so triggering by step index is not robust.
+      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq &&
+         !poststep_tnd_tq_done &&
+         (t_before_step < target_tnd_tq_time) &&
+         (t >= target_tnd_tq_time);
       step++;
 
       // PETSc TS RHS evaluations occur at internal RK stage times, so the
@@ -1748,6 +1755,7 @@ int main(int argc, char *argv[])
       // state/time.
       if (do_poststep_tnd_tq)
       {
+         poststep_tnd_tq_done = true;
          domain.SetDiagSolveMetadata(step, dt);
          domain.SetDiagTndTQ(true);
 
