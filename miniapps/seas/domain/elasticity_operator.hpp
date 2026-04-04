@@ -4439,8 +4439,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 
          // [MFEM-TQ] structured face-pipeline comparison (Tandem [TND-TQ]).
          // Target face: cx≈-49440 m, cz≈2012 m.
-         // Trigger: t > 0.01 s AND |Ty(q=0)| > 1e-30 (same instant as Tandem).
-         if (tnd_tq_active && last_solve_t_ > 0.01)
+         // Trigger: t > 0.015 s AND |Ty(q=0)| > 1e-30 (same instant as Tandem).
+         if (tnd_tq_active && last_solve_t_ > 0.015)
          {
             int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
             const IntegrationRule &ir_tq = IntRules.Get(
