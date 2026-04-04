@@ -4206,10 +4206,11 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    std::vector<CohFaceData> coh_face_data;
 
    // [MFEM-TQ] Pre-compute global vertex indices once (may be collective).
-   // Fire when displacement becomes non-trivial (skip zero-displacement init calls).
+   // Skip first 2 calls (SetInitialCondition), fire on call 2 (first RK stage).
    Array<HYPRE_BigInt> gvert_tq_;
    std::ostringstream tnd_tq_buf_;  // buffer output to avoid MPI interleaving
-   bool tnd_tq_active = diag_tnd_tq_ && !diag_tnd_tq_done_;
+   bool tnd_tq_active = diag_tnd_tq_ && !diag_tnd_tq_done_ && diag_tnd_tq_call_ >= 2;
+   if (diag_tnd_tq_ && !diag_tnd_tq_done_) { diag_tnd_tq_call_++; }
    if (tnd_tq_active)
    {
       if constexpr (IsParallelMesh<MeshType>::value)
@@ -4436,14 +4437,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // [MFEM-TQ] per-QP diagnostic at tip faces (interior), matching Tandem [TND-TQ]
          if (tnd_tq_active)
          {
-            // Check if displacement is non-trivial (skip zero-displacement init calls)
-            real_t u_max_check = 0.0;
-            for (int j = 0; j < u1_all.Size(); j++)
-               u_max_check = std::max(u_max_check, std::abs(u1_all(j)));
-            if (u_max_check < 1e-30) { goto tnd_tq_interior_skip; }
-
             {
-               // Compute face centroid to check if this is a tip face
                const IntegrationPoint &ip_tq =
                   Geometries.GetCenter(FTr->GetGeometryType());
                FTr->Face->SetIntPoint(&ip_tq);
@@ -4526,7 +4520,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   }
                }
             }
-            tnd_tq_interior_skip:;
          }
 
          // Step 2: Project to fault DOFs (Tandem evaluate_traction)
@@ -5220,10 +5213,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             // [MFEM-TQ] per-QP diagnostic at tip faces (shared)
             if (tnd_tq_active)
             {
-               real_t u_max_sh = 0.0;
-               for (int j = 0; j < u1_all.Size(); j++)
-                  u_max_sh = std::max(u_max_sh, std::abs(u1_all(j)));
-               if (u_max_sh >= 1e-30)
                {
                   const IntegrationPoint &ip_tq =
                      Geometries.GetCenter(FTr->GetGeometryType());
@@ -5657,7 +5646,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 #endif
    }
 
-   // Flush [MFEM-TQ] buffer and mark done (only if we actually printed)
+   // Flush [MFEM-TQ] buffer and mark done
    if (tnd_tq_active)
    {
       std::string tnd_out = tnd_tq_buf_.str();
@@ -5665,8 +5654,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       {
          mfem::out << tnd_out;
          mfem::out.flush();
-         diag_tnd_tq_done_ = true;
       }
+      diag_tnd_tq_done_ = true;
    }
 
    // Diagnostic: check for traction blowup
