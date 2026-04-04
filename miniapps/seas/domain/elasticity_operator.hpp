@@ -28,7 +28,6 @@
 #include <set>
 #include <cstdint>
 #include <iomanip>
-#include <sstream>
 
 namespace mfem
 {
@@ -4593,31 +4592,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // Fires once: first tip face with non-zero slip, then done.
          if (diag_tip_uy_ && !diag_tip_uy_done_ && slip_bc.Normlinf() > 1e-20)
          {
-            Array<HYPRE_BigInt> gvert_tag;
-            if constexpr (IsParallelMesh<MeshType>::value)
-            {
-               mesh_.GetGlobalVertexIndices(gvert_tag);
-            }
-            else
-            {
-               gvert_tag.SetSize(mesh_.GetNV());
-               for (int vi = 0; vi < mesh_.GetNV(); ++vi)
-               {
-                  gvert_tag[vi] = vi;
-               }
-            }
-            FaceVertexKey tip_key = MakeFaceKey(fault_interior_faces_[fi], gvert_tag);
-            const FaceVertexKey target_key{{63, 3300, 3910}};
+            const IntegrationPoint &ip_ct =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip_ct);
+            Vector fc_ct(3);
+            FTr->Face->Transform(ip_ct, fc_ct);
+            real_t cx = fc_ct(0), cz = -fc_ct(2);
 
-            if (tip_key == target_key)
+            if (std::abs(cx) > 49000.0 && cz < 2500.0)
             {
-               diag_tip_uy_done_ = true;  // exact-face match only
-               const IntegrationPoint &ip_ct =
-                  Geometries.GetCenter(FTr->GetGeometryType());
-               FTr->Face->SetIntPoint(&ip_ct);
-               Vector fc_ct(3);
-               FTr->Face->Transform(ip_ct, fc_ct);
-               real_t cx = fc_ct(0), cz = -fc_ct(2);
+               diag_tip_uy_done_ = true;  // done after first matching face
+               Array<HYPRE_BigInt> gvert_tag;
+               if constexpr (IsParallelMesh<MeshType>::value)
+               {
+                  mesh_.GetGlobalVertexIndices(gvert_tag);
+               }
+               else
+               {
+                  gvert_tag.SetSize(mesh_.GetNV());
+                  for (int vi = 0; vi < mesh_.GetNV(); ++vi)
+                  {
+                     gvert_tag[vi] = vi;
+                  }
+               }
+               FaceVertexKey tip_key = MakeFaceKey(fault_interior_faces_[fi], gvert_tag);
+
                int rank = 0;
                if constexpr (IsParallelMesh<MeshType>::value)
                {
@@ -4626,7 +4625,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 #endif
                }
                int nq_d = T_quad_new.Size() / dim;
-               std::ostringstream oss;
                for (int q = 0; q < nq_d; q++)
                {
                   FTr->SetAllIntPoints(&ir_new.IntPoint(q));
@@ -4651,27 +4649,26 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t T_sy = T_stress_quad_dec(1 * nq_d + q);
                   real_t T_cy = T_corr_quad_dec(1 * nq_d + q);
 
-                  oss << std::scientific << std::setprecision(10)
-                      << "[TIP-UY] r=" << rank
-                      << " fi=" << fi << " q=" << q
-                      << " key=(" << tip_key.v[0]
-                      << "," << tip_key.v[1]
-                      << "," << tip_key.v[2] << ")"
-                      << " cx=" << cx << " cz=" << cz
-                      << " u1_y=" << u1_y
-                      << " u2_y=" << u2_y
-                      << " slip_y=" << slip_y
-                      << " jump_y=" << (u1_y - u2_y - slip_y)
-                      << " pen=" << pen_d
-                      << " T_stress_y=" << T_sy
-                      << " T_corr_y=" << T_cy
-                      << " T_total_y=" << T_quad_new(1 * nq_d + q)
-                      << " sf=" << basis.sign_flipped
-                      << " detJ1=" << detJ1d
-                      << " detJ2=" << detJ2d
-                      << "\n";
+                  mfem::out << std::scientific << std::setprecision(10)
+                     << "[TIP-UY] r=" << rank
+                     << " fi=" << fi << " q=" << q
+                     << " key=(" << tip_key.v[0]
+                     << "," << tip_key.v[1]
+                     << "," << tip_key.v[2] << ")"
+                     << " cx=" << cx << " cz=" << cz
+                     << " u1_y=" << u1_y
+                     << " u2_y=" << u2_y
+                     << " slip_y=" << slip_y
+                     << " jump_y=" << (u1_y - u2_y - slip_y)
+                     << " pen=" << pen_d
+                     << " T_stress_y=" << T_sy
+                     << " T_corr_y=" << T_cy
+                     << " T_total_y=" << T_quad_new(1 * nq_d + q)
+                     << " sf=" << basis.sign_flipped
+                     << " detJ1=" << detJ1d
+                     << " detJ2=" << detJ2d
+                     << "\n";
                }
-               mfem::out << oss.str();
             }
          }
 
