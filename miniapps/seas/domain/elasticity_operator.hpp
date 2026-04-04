@@ -4363,11 +4363,15 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // When decomposition diagnostics are requested, uses the decomposed
          // variant to also output stress, correction, and jump residual.
          int nbf = nbf_per_face_;
+         // v58 isolating experiment: keep decomposed path active for the
+         // entire run when diag_tnd_tq_ is enabled, instead of dropping to
+         // the fast path after the one-time log fires.  This tests whether
+         // the stall is caused by the decomposed→non-decomposed transition.
          bool need_decomp = traction_stress_out || traction_correction_out ||
                             jump_residual_out || coherence_active ||
                             diag_traction_decomp_ ||
                             !diag_first_traction_done_ ||
-                            (diag_tnd_tq_ && !diag_tnd_tq_done_);
+                            diag_tnd_tq_;
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
