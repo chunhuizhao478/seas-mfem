@@ -8,9 +8,8 @@
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# BP5 v58: PETSc TS with [MFEM-TQ] diagnostic at tip faces.
-# Outputs per-QP traction data matching Tandem [TND-TQ] format
-# for side-by-side comparison at fault tip faces (|x| > 49 km).
+# BP5 v58: PETSc TS sign-only test.
+# Sign chain aligned with Tandem, all diagnostics removed.
 
 export LC_ALL=C
 export LANG=C
@@ -54,7 +53,5 @@ ibrun ./seas_bp5_full \
       --output-dir bp5/results_v58_tndtq \
       --output-prefix bp5_v58_tndtq \
       --checkpoint-interval 0 \
-      --diag-tip-monitor \
-      --diag-tnd-tq \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg
