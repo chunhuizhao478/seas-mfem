@@ -480,24 +480,10 @@ public:
                      << std::endl;
                   MFEM_ABORT("Non-finite friction input at DOF " << i);
                }
-               if (sigma_n_eff <= 0.0 && !diag_sn_neg_done_)
+               if (sigma_n_eff <= 0.0)
                {
-                  diag_sn_neg_done_ = true;
-                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-                  real_t sn_el = normal_traction ? (*normal_traction)(i) : 0.0;
-                  std::cerr << std::scientific << std::setprecision(15)
-                     << "[FRIC-GUARD] SIGMA_N_EFF<=0 r=" << rank
-                     << " d=" << i << " x=" << x2 << " z=" << x3
-                     << " sn_eff=" << sigma_n_eff
-                     << " sn0=" << sigma_n_bp5_
-                     << " sn_el=" << sn_el
-                     << " psi=" << psi
-                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
-                     << " slip=(" << state(i*StatePerNode) << ","
-                     << state(i*StatePerNode+1) << ")"
-                     << std::endl;
+                  std::cerr << "[FRIC-GUARD] sigma_n_eff <= 0 at DOF "
+                            << i << std::endl;
                }
             }
 
@@ -536,34 +522,6 @@ public:
             slip_rate_(2*i+1) = V_vec[1];
             V_max_ = std::max(V_max_, V_abs);
 
-            // v58: exact friction I/O at tip DOFs
-            if (geom_ && !diag_tip_friction_done_)
-            {
-               real_t x2 = geom_->GetCoordsX2()(i);
-               real_t x3 = geom_->GetCoordsX3()(i);
-               if (std::abs(x2) > 49000.0 && x3 < 2500.0)
-               {
-                  real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
-                                             tau_vec[1]*tau_vec[1]);
-                  real_t dpsi_dt = evolution_->Rate(V_abs, psi, Dc);
-                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  mfem::out << std::scientific << std::setprecision(8)
-                     << "[FRIC] r=" << rank << " d=" << i
-                     << " x=" << x2 << " z=" << x3
-                     << " a=" << a << " sn=" << sigma_n_eff
-                     << " eta=" << eta << " Dc=" << Dc
-                     << " psi=" << psi
-                     << " |tau_total|=" << tau_abs
-                     << " tau_pre=(" << tau_pre_(2*i) << ","
-                     << tau_pre_(2*i+1) << ")"
-                     << " trac=(" << traction(2*i) << ","
-                     << traction(2*i+1) << ")"
-                     << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
-                     << " |V|=" << V_abs
-                     << " dpsi=" << dpsi_dt
-                     << "\n";
-               }
-            }
          }
       }
 
@@ -607,8 +565,6 @@ public:
          }
       }
 
-      if (!diag_tip_friction_done_) { diag_tip_friction_done_ = true; }
-
       return V_max_;
    }
 
@@ -616,7 +572,15 @@ public:
    // State access methods
    // =========================================================================
 
-   /// @brief Extract slip from state vector.
+   /// @brief Extract slip from state vector (Tandem-internal convention).
+   ///
+   /// Returns the raw state slip components without sign conversion.
+   /// For BP5 (SlipComponents==2): slip is anti-parallel to τ, matching
+   /// Tandem's internal convention (DieterichRuinaBase.h:174).
+   /// For BP2 (SlipComponents==1): slip is a positive scalar (parallel to τ).
+   ///
+   /// Output code must negate BP5 slip for SCEC-compatible files:
+   ///   δ_SCEC = -GetSlip()  (physical slip = u⁺ − u⁻, parallel to τ)
    ///
    /// @param[in] state Full state vector [StateSize()]
    /// @param[out] slip Slip at each node [SlipSize()]
@@ -628,16 +592,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate to convert from Tandem internal convention
-               // (S anti-parallel to tau) to physical slip for the domain solver.
-               slip(i * SlipComponents + c) = -state(i * StatePerNode + c);
-            }
-            else
-            {
-               slip(i * SlipComponents + c) = state(i * StatePerNode + c);
-            }
+            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
          }
       }
    }
@@ -679,7 +634,10 @@ public:
       }
    }
 
-   /// @brief Set slip in state vector.
+   /// @brief Set slip in state vector (Tandem-internal convention).
+   ///
+   /// Expects slip in the same convention as GetSlip() returns.
+   /// For BP5: anti-parallel to τ. For BP2: positive scalar.
    ///
    /// @param[in] slip Slip values to set [SlipSize()]
    /// @param[out] state State vector to modify [StateSize()]
@@ -691,15 +649,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate physical slip to internal Tandem convention
-               state(i * StatePerNode + c) = -slip(i * SlipComponents + c);
-            }
-            else
-            {
-               state(i * StatePerNode + c) = slip(i * SlipComponents + c);
-            }
+            state(i * StatePerNode + c) = slip(i * SlipComponents + c);
          }
       }
    }
@@ -991,11 +941,6 @@ private:
    int num_nodes_;      ///< Number of fault DOFs
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
-   mutable bool diag_tip_friction_done_ = true;  ///< v58 tip friction diagnostic (disabled by default)
-   mutable bool diag_sn_neg_done_ = false;       ///< v58: print once when sigma_n_eff <= 0
-public:
-   void ResetTipFrictionDiag() { diag_tip_friction_done_ = false; }
-private:
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
    bool scec_psi_init_ = false;  ///< If false (default), Tandem InitialStatePsi; if true, SCEC fixed psi
