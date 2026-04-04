@@ -4593,7 +4593,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             if (std::abs(cx) > 49000.0 && cz < 2500.0)
             {
                diag_tip_uy_done_ = true;  // done after first matching face
-               FaceVertexKey tip_key = MakeFaceKey(fault_interior_faces_[fi], gvert_tag);
 
                int rank = 0;
                if constexpr (IsParallelMesh<MeshType>::value)
@@ -4630,9 +4629,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   mfem::out << std::scientific << std::setprecision(10)
                      << "[TIP-UY] r=" << rank
                      << " fi=" << fi << " q=" << q
-                     << " key=(" << tip_key.v[0]
-                     << "," << tip_key.v[1]
-                     << "," << tip_key.v[2] << ")"
                      << " cx=" << cx << " cz=" << cz
                      << " u1_y=" << u1_y
                      << " u2_y=" << u2_y
