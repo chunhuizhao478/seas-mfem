@@ -1726,10 +1726,10 @@ void TestSlipRateSignConvention()
       real_t S_internal[2] = {V_vec[0] * dt, V_vec[1] * dt};
       TEST_ASSERT(S_internal[1] < 0.0, "Internal S_strike < 0 (Tandem convention)");
 
-      // GetSlip negates for domain solver
-      real_t slip_for_domain[2] = {-S_internal[0], -S_internal[1]};
-      TEST_ASSERT(slip_for_domain[1] > 0.0,
-         "GetSlip output positive (physical slip direction for domain)");
+      // GetSlip now preserves Tandem's internal convention.
+      real_t slip_for_domain[2] = {S_internal[0], S_internal[1]};
+      TEST_ASSERT(slip_for_domain[1] < 0.0,
+         "GetSlip preserves Tandem internal sign for domain");
    }
 
    // Zero traction
@@ -1744,7 +1744,7 @@ void TestSlipRateSignConvention()
 }
 
 // ============================================================================
-// Test 19: v55 D8 — Full chain: V(neg) → S(neg) → GetSlip(pos) → same g^F
+// Test 19: v55 D8 — Full chain: V(neg) → S(neg) → GetSlip(neg) → same g^F
 // ============================================================================
 void TestSignChainDisplacementJump()
 {
@@ -1765,14 +1765,15 @@ void TestSignChainDisplacementJump()
    // Internal state: S = V_vec * dt (negative, Tandem convention)
    real_t S[2] = {V_vec[0] * dt, V_vec[1] * dt};
 
-   // GetSlip negation: domain sees positive slip
-   real_t slip_domain[2] = {-S[0], -S[1]};
-   TEST_ASSERT(slip_domain[1] > 0.0, "Domain slip positive (physical direction)");
+   // GetSlip preserves Tandem internal convention.
+   real_t slip_domain[2] = {S[0], S[1]};
+   TEST_ASSERT(slip_domain[1] < 0.0, "Domain slip preserves Tandem internal sign");
 
-   // EmbedSlip with positive slip → positive delta_u (same as baseline)
+   // EmbedSlip with preserved internal slip sign gives a negative raw delta_u;
+   // the face sign then produces the same prescribed jump seen by Tandem.
    real_t t2[3] = {1,0,0};
    real_t du_x = slip_domain[1] * t2[0];
-   TEST_ASSERT(du_x > 0.0, "delta_u_x positive (same as pre-D8 baseline)");
+   TEST_ASSERT(du_x < 0.0, "raw delta_u_x follows Tandem internal sign");
 
    // Prescribed jump g^F = sign * delta_u is unchanged from baseline
    // → domain solve produces same displacement field
@@ -1782,8 +1783,36 @@ void TestSignChainDisplacementJump()
              << " S_internal=" << S[1]
              << " slip_domain=" << slip_domain[1]
              << " du_x=" << du_x << "\n";
-   TEST_REL_NEAR(du_x, V_abs * dt, 1e-12,
+   TEST_REL_NEAR(std::abs(du_x), V_abs * dt, 1e-12,
       "|delta_u| = |V|*dt (physics unchanged)");
+
+   // Explicitly verify the DG prescribed-jump sign seen by the domain solve.
+   // Tandem path:
+   //   internal state S (negative) -> AdapterBasis (basis flipped iff sign_flipped)
+   // MFEM path:
+   //   GetSlip(state) = S (same Tandem internal convention) -> EmbedSlip ->
+   //   sign*delta_u, with sign = (sign_flipped ? -1 : +1)
+   //
+   // These must match for both sign_flipped branches; otherwise jump_y and the
+   // penalty traction will diverge even if the friction law and traction kernel
+   // are individually correct.
+   for (int sf_case = 0; sf_case < 2; sf_case++)
+   {
+      const bool sign_flipped = (sf_case == 1);
+      const char* msg = sign_flipped
+         ? "MFEM prescribed jump matches Tandem when sign_flipped=true"
+         : "MFEM prescribed jump matches Tandem when sign_flipped=false";
+
+      // Tandem: basis is additionally negated when sign_flipped=true.
+      real_t basis_factor_tandem = sign_flipped ? -1.0 : 1.0;
+      real_t g_tandem_x = basis_factor_tandem * S[1] * t2[0];
+
+      // MFEM: GetSlip preserves S, then the DG path applies face sign.
+      real_t sign_mfem = sign_flipped ? -1.0 : 1.0;
+      real_t g_mfem_x = sign_mfem * slip_domain[1] * t2[0];
+
+      TEST_NEAR(g_mfem_x, g_tandem_x, 1e-15, msg);
+   }
 }
 
 // ============================================================================

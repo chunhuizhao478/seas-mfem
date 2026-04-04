@@ -627,8 +627,8 @@ public:
          int dof = interpolator_.GetNearestDOF(s);
          if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
 
-         // Negate slip for SCEC output: internal convention uses negative
-         // for right-lateral, SCEC expects positive.
+         // SCEC output: negate Tandem-internal slip (anti-parallel to τ)
+         // to physical slip δ = u⁺ − u⁻ (parallel to τ).
          real_t slip_dip =
             -interpolator_.EvaluateScalar(global_slip_dip, s);
          real_t slip_strike =
@@ -639,8 +639,8 @@ public:
          real_t V_strike =
             std::abs(interpolator_.EvaluateScalar(global_V_strike, s));
 
-         // v55: tau_hat = tau_pre + elastic_traction + eta*V (Tandem convention)
-         // V is signed from GetSlipRate; eta*V uses the raw signed values.
+         // SCEC output: negate traction (same convention boundary as slip above).
+         // V is signed from GetSlipRate (anti-parallel to τ); eta*V reduces |τ|.
          real_t tau_dip =
             -(interpolator_.EvaluateScalar(tau_pre_dip_, s) +
               interpolator_.EvaluateScalar(global_trac_dip, s) +
@@ -848,9 +848,9 @@ private:
          int dof = interpolator_.GetNearestDOF(s);
          if (dof < 0 && !interpolator_.HasExactMatch(s)) { continue; }
 
-         // Internal: index 0 = dip, index 1 = strike
-         // Negate slip for SCEC output: internal convention uses negative
-         // for right-lateral, SCEC expects positive.
+         // SCEC output: negate Tandem-internal slip (anti-parallel to τ)
+         // to physical slip δ = u⁺ − u⁻ (parallel to τ).
+         // Internal: index 0 = dip, index 1 = strike.
          real_t slip_dip =
             -interpolator_.EvaluateInterleaved(slip, s, 0);
          real_t slip_strike =
@@ -861,12 +861,11 @@ private:
          real_t V_strike =
             std::abs(interpolator_.EvaluateInterleaved(slip_rate, s, 1));
 
-         // v55: Total shear stress = tau_hat = tau_pre + elastic_traction + eta*V
-         // Matches Tandem's DieterichRuinaBase::tau_hat (line 76):
-         //   tau_hat = tau + TauPre + eta * V
-         // Negate for SCEC output: internal convention uses negative
-         // for right-lateral, SCEC expects positive.
-         // V is signed (from GetSlipRate), eta*V uses absolute values.
+         // SCEC output: negate traction (same convention boundary as slip above).
+         // Total shear stress = tau_hat = tau_pre + elastic_traction + eta*V
+         // Matches Tandem's DieterichRuinaBase::tau_hat (line 76).
+         // V is signed (from GetSlipRate, anti-parallel to τ), so eta*V
+         // reduces the magnitude, and the outer negation converts to SCEC sign.
          real_t tau_dip =
             -(interpolator_.EvaluateInterleaved(tau_pre, s, 0) +
               interpolator_.EvaluateInterleaved(traction, s, 0) +

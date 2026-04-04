@@ -1758,7 +1758,7 @@ private:
          if (FTr == nullptr) { continue; }
 
          const auto &basis_slip = fault_basis_.GetBasis(fi);
-         real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+         real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
 
          // Check if any slip is non-zero
          bool all_zero = true;
@@ -2174,7 +2174,7 @@ private:
 
             int slip_idx = interior_face_count + i;
             const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
-            real_t sign = basis_slip.sign_flipped ? 1.0 : -1.0;
+            real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
 
             bool all_zero = true;
             for (int kk = 0; kk < nbf && all_zero; kk++)
@@ -4332,7 +4332,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       const auto &basis = fault_basis_.GetBasis(fi);
 
       // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
-      real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+      real_t sign = basis.sign_flipped ? -1.0 : 1.0;
 
       // Element Jacobian inverses (constant for linear tets/hexes)
       // Must set an integration point first so Jacobian() is valid.
@@ -5144,7 +5144,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          const auto &basis = fault_basis_.GetBasis(trac_idx);
 
          // v55: Sign from FaultBasis sign_flipped (general)
-         real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+         real_t sign = basis.sign_flipped ? -1.0 : 1.0;
 
          // Element Jacobian inverses (constant for linear tets)
          DenseMatrix Jinv1(dim), Jinv2(dim);

@@ -265,6 +265,8 @@ public:
          {
             int s = owned_stations_[idx];
 
+            // SCEC output: negate Tandem-internal slip (anti-parallel to τ)
+            // to physical slip δ = u⁺ − u⁻ (parallel to τ).
             real_t sd = -local_interp_->EvaluateScalar(slip_dip, s);
             real_t ss = -local_interp_->EvaluateScalar(slip_strike, s);
             real_t vd = std::abs(local_interp_->EvaluateScalar(V_dip, s));

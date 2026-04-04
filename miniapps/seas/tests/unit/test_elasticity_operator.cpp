@@ -1800,7 +1800,9 @@ Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
 
       Vector nor(dim);
       CalcOrtho(FTr.Jacobian(), nor);
-      real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+      // sign_flipped = mesh normal opposes ref_normal (0,-1,0), i.e. nor(1) > 0.
+      // Convention: sign = sign_flipped ? -1 : +1 (matches production code).
+      real_t sign = (nor(1) > 0.0) ? -1.0 : 1.0;
 
       Vector shape1(ndof1), shape2(ndof2);
       fe1.CalcShape(eip1, shape1);
@@ -2190,7 +2192,7 @@ void ComputeExplicitIPFaceTractionNodal(
    MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
    MFEM_ASSERT(fq.NumQuadPoints() == nqp, "Quadrature point mismatch");
 
-   const real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+   const real_t sign = basis.sign_flipped ? -1.0 : 1.0;
    Vector delta_u_quad;
    if (!basis.qp_data.empty())
    {
@@ -2439,7 +2441,9 @@ void TestIPFaceMatrixSlipRHSConsistencyP1()
    FTr->SetAllIntPoints(&ip_center);
    Vector nor(3);
    CalcOrtho(FTr->Jacobian(), nor);
-   const real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+   // sign_flipped = mesh normal opposes ref_normal (0,-1,0), i.e. nor(1) > 0.
+   // Convention: sign = sign_flipped ? -1 : +1 (matches production code).
+   const real_t sign = (nor(1) > 0.0) ? -1.0 : 1.0;
 
    Vector local_x(3 * (fe1->GetDof() + fe2->GetDof()));
    local_x = 0.0;

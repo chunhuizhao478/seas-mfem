@@ -616,7 +616,15 @@ public:
    // State access methods
    // =========================================================================
 
-   /// @brief Extract slip from state vector.
+   /// @brief Extract slip from state vector (Tandem-internal convention).
+   ///
+   /// Returns the raw state slip components without sign conversion.
+   /// For BP5 (SlipComponents==2): slip is anti-parallel to τ, matching
+   /// Tandem's internal convention (DieterichRuinaBase.h:174).
+   /// For BP2 (SlipComponents==1): slip is a positive scalar (parallel to τ).
+   ///
+   /// Output code must negate BP5 slip for SCEC-compatible files:
+   ///   δ_SCEC = -GetSlip()  (physical slip = u⁺ − u⁻, parallel to τ)
    ///
    /// @param[in] state Full state vector [StateSize()]
    /// @param[out] slip Slip at each node [SlipSize()]
@@ -628,16 +636,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate to convert from Tandem internal convention
-               // (S anti-parallel to tau) to physical slip for the domain solver.
-               slip(i * SlipComponents + c) = -state(i * StatePerNode + c);
-            }
-            else
-            {
-               slip(i * SlipComponents + c) = state(i * StatePerNode + c);
-            }
+            slip(i * SlipComponents + c) = state(i * StatePerNode + c);
          }
       }
    }
@@ -679,7 +678,10 @@ public:
       }
    }
 
-   /// @brief Set slip in state vector.
+   /// @brief Set slip in state vector (Tandem-internal convention).
+   ///
+   /// Expects slip in the same convention as GetSlip() returns.
+   /// For BP5: anti-parallel to τ. For BP2: positive scalar.
    ///
    /// @param[in] slip Slip values to set [SlipSize()]
    /// @param[out] state State vector to modify [StateSize()]
@@ -691,15 +693,7 @@ public:
       {
          for (int c = 0; c < SlipComponents; c++)
          {
-            if constexpr (SlipComponents == 2)
-            {
-               // v55 D8: negate physical slip to internal Tandem convention
-               state(i * StatePerNode + c) = -slip(i * SlipComponents + c);
-            }
-            else
-            {
-               state(i * StatePerNode + c) = slip(i * SlipComponents + c);
-            }
+            state(i * StatePerNode + c) = slip(i * SlipComponents + c);
          }
       }
    }
