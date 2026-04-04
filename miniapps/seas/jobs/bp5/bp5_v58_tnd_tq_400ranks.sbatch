@@ -39,7 +39,6 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || {
 }
 
 cd miniapps/seas
-make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 mkdir -p bp5/results_v58_tndtq
 
@@ -55,6 +54,7 @@ ibrun ./seas_bp5_full \
       --output-dir bp5/results_v58_tndtq \
       --output-prefix bp5_v58_tndtq \
       --checkpoint-interval 0 \
+      --diag-tip-monitor \
       --diag-tnd-tq \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg
