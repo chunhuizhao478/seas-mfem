@@ -924,6 +924,77 @@ private:
          }
       }
 
+      // Gap diagnostic: check for y=0 shared faces that are NEITHER fault
+      // NOR Dirichlet. Such faces would be treated as regular interior faces
+      // (enforcing continuity but no prescribed displacement/friction),
+      // creating a "locked" gap that can cause stress concentration at the
+      // fault tip.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+
+         // Build set of shared faces already classified
+         std::set<int> classified_shared;
+         for (int sf : fault_shared_tagged_)
+         {
+            classified_shared.insert(sf);
+         }
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            classified_shared.insert(dirichlet_shared_faces_[fi]);
+         }
+
+         // Check all shared faces for unclassified y=0 faces
+         int local_gap = 0;
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            if (classified_shared.count(sf) > 0) { continue; }
+            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!FTr) { continue; }
+            const IntegrationPoint &ip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip);
+            Vector center(3);
+            FTr->Face->Transform(ip, center);
+            if (std::abs(center(1)) < 1.0)  // y ≈ 0
+            {
+               local_gap++;
+               mfem::out << "  [GAP] rank=" << rank
+                         << " shared face " << sf
+                         << " at (" << center(0) << ", "
+                         << center(1) << ", " << center(2) << ")"
+                         << " is on y=0 but NOT classified as fault or Dirichlet\n";
+            }
+         }
+         int global_gap = local_gap;
+         MPI_Allreduce(MPI_IN_PLACE, &global_gap, 1, MPI_INT,
+                        MPI_SUM, mesh_.GetComm());
+         if (rank == 0)
+         {
+            mfem::out << "  Y=0 shared face gap check: "
+                      << global_gap << " unclassified y=0 shared faces"
+                      << (global_gap > 0 ? " *** POTENTIAL BUG ***" : " (OK)")
+                      << "\n";
+         }
+
+         // Per-rank face summary for debugging partition issues
+         int local_fi = fault_interior_faces_.Size();
+         int local_fs = static_cast<int>(fault_shared_tagged_.size());
+         int local_di = dirichlet_interior_faces_.Size();
+         int local_ds = dirichlet_shared_faces_.Size();
+         mfem::out << "  [PARTITION] rank=" << rank
+                   << " fault_int=" << local_fi
+                   << " fault_sh=" << local_fs
+                   << " dir_int=" << local_di
+                   << " dir_sh=" << local_ds
+                   << " total_shared=" << mesh_.GetNSharedFaces()
+                   << "\n";
+         mfem::out.flush();
+#endif
+      }
+
       // Multi-DOF fault quadrature
       // IP: use the same nodal triangle order as the volume space, matching
       // Tandem's fault discretization even at p=1.
