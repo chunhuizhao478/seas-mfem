@@ -946,7 +946,58 @@ private:
             classified_shared.insert(dirichlet_shared_faces_[fi]);
          }
 
-         // Check all shared faces for unclassified y=0 faces
+         // Also scan interior faces for unclassified y=0 gaps.
+         {
+            std::set<int> classified_interior;
+            for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+            {
+               classified_interior.insert(fault_interior_faces_[fi]);
+            }
+            for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+            {
+               classified_interior.insert(dirichlet_interior_faces_[fi]);
+            }
+            int local_int_gap = 0;
+            int num_faces = mesh_.GetNumFaces();
+            for (int f = 0; f < num_faces; f++)
+            {
+               if (classified_interior.count(f) > 0) { continue; }
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip_c =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip_c);
+               Vector ctr(3);
+               FTr->Face->Transform(ip_c, ctr);
+               if (std::abs(ctr(1)) < 1.0)
+               {
+                  local_int_gap++;
+                  dirichlet_interior_faces_.Append(f);
+                  mfem::out << "  [GAP-FIX] rank=" << rank
+                            << " interior face " << f
+                            << " at (" << ctr(0) << ", "
+                            << ctr(1) << ", " << ctr(2) << ")"
+                            << " added to Dirichlet interior faces\n";
+               }
+            }
+            int global_int_gap = local_int_gap;
+            MPI_Allreduce(MPI_IN_PLACE, &global_int_gap, 1, MPI_INT,
+                           MPI_SUM, mesh_.GetComm());
+            if (rank == 0)
+            {
+               mfem::out << "  Y=0 interior face gap fix: "
+                         << global_int_gap << " untagged y=0 interior faces"
+                         << " added to Dirichlet set"
+                         << (global_int_gap > 0 ? " (FIXED)" : " (none needed)")
+                         << "\n";
+            }
+         }
+
+         // Check all shared faces for unclassified y=0 faces.
+         // FIX: classify any such faces as Dirichlet shared faces so they
+         // receive the proper skeleton loading (same as attr-5 faces).
+         // This handles faces on the y=0 plane that were not tagged in any
+         // Physical Surface in the Gmsh mesh but sit at MPI boundaries.
          int local_gap = 0;
          for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
          {
@@ -961,11 +1012,12 @@ private:
             if (std::abs(center(1)) < 1.0)  // y ≈ 0
             {
                local_gap++;
-               mfem::out << "  [GAP] rank=" << rank
+               dirichlet_shared_faces_.Append(sf);
+               mfem::out << "  [GAP-FIX] rank=" << rank
                          << " shared face " << sf
                          << " at (" << center(0) << ", "
                          << center(1) << ", " << center(2) << ")"
-                         << " is on y=0 but NOT classified as fault or Dirichlet\n";
+                         << " added to Dirichlet shared faces\n";
             }
          }
          int global_gap = local_gap;
@@ -973,9 +1025,10 @@ private:
                         MPI_SUM, mesh_.GetComm());
          if (rank == 0)
          {
-            mfem::out << "  Y=0 shared face gap check: "
-                      << global_gap << " unclassified y=0 shared faces"
-                      << (global_gap > 0 ? " *** POTENTIAL BUG ***" : " (OK)")
+            mfem::out << "  Y=0 shared face gap fix: "
+                      << global_gap << " untagged y=0 shared faces"
+                      << " added to Dirichlet set"
+                      << (global_gap > 0 ? " (FIXED)" : " (none needed)")
                       << "\n";
          }
 
