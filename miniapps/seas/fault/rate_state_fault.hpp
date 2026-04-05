@@ -482,8 +482,15 @@ public:
                }
                if (sigma_n_eff <= 0.0)
                {
+                  int sn_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t sn_x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t sn_x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
                   std::cerr << "[FRIC-GUARD] sigma_n_eff <= 0 at DOF "
-                            << i << std::endl;
+                            << i << " r=" << sn_rank
+                            << " x2=" << sn_x2 << " x3=" << sn_x3
+                            << " sn_eff=" << sigma_n_eff
+                            << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
+                            << std::endl;
                }
             }
 

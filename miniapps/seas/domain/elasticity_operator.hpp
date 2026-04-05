@@ -798,6 +798,89 @@ private:
          }
       }
 
+      // Dirichlet face diagnostic summary
+      {
+         int local_dir_int = dirichlet_interior_faces_.Size();
+         int local_dir_sh = dirichlet_shared_faces_.Size();
+         int global_dir_int = local_dir_int;
+         int global_dir_sh = local_dir_sh;
+
+         // Count boundary elements by attribute
+         int local_bdr5 = 0, local_bdr1 = 0, local_bdr3 = 0;
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            int a = mesh_.GetBdrAttribute(be);
+            if (a == 5) { local_bdr5++; }
+            if (a == 1) { local_bdr1++; }
+            if (a == 3) { local_bdr3++; }
+         }
+         int global_bdr5 = local_bdr5;
+         int global_bdr1 = local_bdr1;
+         int global_bdr3 = local_bdr3;
+
+         // Count exterior Dirichlet faces (attr 5, boundary face with no elem2)
+         int local_dir_ext = 0;
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            if (mesh_.GetBdrAttribute(be) != 5) { continue; }
+            int face_idx = mesh_.GetBdrElementFaceIndex(be);
+            FaceElementTransformations *FTr =
+               mesh_.GetInteriorFaceTransformations(face_idx);
+            if (FTr == nullptr)
+            {
+               // Not interior → true boundary face
+               local_dir_ext++;
+            }
+         }
+         int global_dir_ext = local_dir_ext;
+
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(MPI_IN_PLACE, &global_dir_int, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_dir_sh, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_dir_ext, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_bdr5, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_bdr1, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_bdr3, 1, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+#endif
+         }
+         bool is_root = true;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            int rank;
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+            is_root = (rank == 0);
+#endif
+         }
+         if (is_root)
+         {
+            mfem::out << "  Boundary elements: attr1=" << global_bdr1
+                      << " attr3=" << global_bdr3
+                      << " attr5=" << global_bdr5 << "\n";
+            mfem::out << "  Dirichlet faces (attr 5): "
+                      << global_dir_ext << " exterior + "
+                      << global_dir_int << " interior + "
+                      << global_dir_sh << " shared"
+                      << " (total recovered: "
+                      << (global_dir_ext + global_dir_int + global_dir_sh)
+                      << ", expected: " << global_bdr5 << ")\n";
+            if (global_dir_ext + global_dir_int + global_dir_sh < global_bdr5)
+            {
+               mfem::out << "  WARNING: "
+                         << (global_bdr5 - global_dir_ext - global_dir_int - global_dir_sh)
+                         << " attr-5 faces unaccounted for!\n";
+            }
+         }
+      }
+
       // Multi-DOF fault quadrature
       // IP: use the same nodal triangle order as the volume space, matching
       // Tandem's fault discretization even at p=1.
