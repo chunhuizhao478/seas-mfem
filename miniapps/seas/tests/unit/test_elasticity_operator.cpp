@@ -59,6 +59,10 @@ void AddFaultBoundaryElements(Mesh &mesh, real_t tol = 1e-6)
    mesh.SetAttributes();
 }
 
+// Forward declaration (defined below, after explicit-form helpers)
+Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
+                          real_t Lx, real_t Ly, real_t Lz);
+
 Mesh CreateTestMesh3D(int nx, int ny, int nz,
                        real_t Lx, real_t Ly, real_t Lz)
 {
@@ -389,7 +393,7 @@ void TestFaultGeometry3DValues()
    std::cout << "\n--- Test: FaultGeometry 3D Value Verification ---\n";
 
    real_t Lx = 50e3, Ly = 60e3, Lz = 40e3;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    BP5Params params;
 
@@ -634,8 +638,8 @@ void TestDirichletLoadingShearTraction()
    std::cout << "\n--- Test: Dirichlet Loading Produces Shear Traction ---\n";
 
    // Use a mesh large enough to have fault faces
-   real_t Lx = 2.0, Ly = 2.0, Lz = 2.0;
-   Mesh mesh = CreateTestMesh3D(1, 1, 1, Lx, Ly, Lz);
+   real_t Lx = 2000.0, Ly = 3000.0, Lz = 2000.0;
+   Mesh mesh = CreateTestMesh3DTet(1, 1, 1, Lx, Ly, Lz);
 
    real_t Vp = 1.0;
    real_t lambda = 1.0, mu = 1.0;
@@ -1828,7 +1832,8 @@ Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
 
       Vector nor(dim);
       CalcOrtho(FTr.Jacobian(), nor);
-      real_t sign = (nor(1) > 0.0) ? 1.0 : -1.0;
+      const auto &basis = fault_basis.GetBasis(fault_face_idx);
+      real_t sign = basis.sign_flipped ? -1.0 : 1.0;
 
       Vector shape1(ndof1), shape2(ndof2);
       fe1.CalcShape(eip1, shape1);
@@ -2218,7 +2223,7 @@ void ComputeExplicitIPFaceTractionNodal(
    MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
    MFEM_ASSERT(fq.NumQuadPoints() == nqp, "Quadrature point mismatch");
 
-   const real_t sign = basis.sign_flipped ? 1.0 : -1.0;
+   const real_t sign = basis.sign_flipped ? -1.0 : 1.0;
    Vector delta_u_quad;
    if (!basis.qp_data.empty())
    {

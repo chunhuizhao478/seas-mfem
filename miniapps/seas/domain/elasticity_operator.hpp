@@ -213,6 +213,9 @@ public:
 
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+   const Array<int> &GetOwnedFaultFaceMap() const
+   { return owned_fault_face_to_local_face_; }
+   int GetNumOwnedFaultFaces() const { return num_owned_fault_faces_; }
 
    DGMethod GetMethod() const { return method_; }
    int GetOrder() const { return order_; }

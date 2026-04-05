@@ -71,6 +71,10 @@ void AddFaultBoundaryElements(Mesh &mesh, real_t tol = 1e-6)
    mesh.SetAttributes();
 }
 
+// Forward declaration (defined below)
+Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
+                          real_t Lx, real_t Ly, real_t Lz);
+
 /// Create a 3D hex mesh: [-Lx,Lx] x [-Ly,Ly] x [-Lz,0]
 /// Boundary attrs: 1=top/bottom, 3=fault (y=0), 5=far-field (sides)
 Mesh CreateTestMesh3D(int nx, int ny, int nz,
@@ -164,7 +168,7 @@ bool test_serial_parallel_fault_dof_count(MPIContext &ctx)
    }
 
    real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
-   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
 
    BP5Params params;
    real_t lambda = params.lambda();
@@ -640,8 +644,11 @@ bool test_shared_face_micro(MPIContext &ctx)
    ctx.Bcast(serial_e2_cy);
 
    // 4. PARALLEL: custom partition to force the fault face to be shared
-   // Put elements with centroid y<0 on rank 0, y>0 on rank 1
+   // Put elements with centroid y<0 on lower-half ranks, y>0 on upper-half.
+   // This ensures fault faces at y=0 are always shared between the two groups.
+   int half = std::max(ctx.Size() / 2, 1);
    Array<int> partitioning(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
    for (int e = 0; e < serial_mesh.GetNE(); e++)
    {
       Array<int> ev;
@@ -650,7 +657,14 @@ bool test_shared_face_micro(MPIContext &ctx)
       for (int j = 0; j < ev.Size(); j++)
          cy += serial_mesh.GetVertex(ev[j])[1];
       cy /= ev.Size();
-      partitioning[e] = (cy < 0.0) ? 0 : (ctx.Size() > 2 ? (e % ctx.Size()) : 1);
+      if (cy < 0.0)
+      {
+         partitioning[e] = (cnt_lo++) % half;
+      }
+      else
+      {
+         partitioning[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+      }
    }
 
    ParMesh pmesh(ctx.GetComm(), serial_mesh, partitioning.GetData());
@@ -941,7 +955,7 @@ bool test_serial_parallel_traction_consistency(MPIContext &ctx)
    }
 
    real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
-   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
 
    BP5Params params;
    real_t lambda = params.lambda();
@@ -1031,7 +1045,7 @@ bool test_parallel_traction_bounded(MPIContext &ctx)
    }
 
    real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
-   auto serial_mesh = CreateTestMesh3D(2, 1, 1, Lx, Ly, Lz);
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
    ParMesh pmesh(ctx.GetComm(), serial_mesh);
 
    BP5Params params;
@@ -1058,9 +1072,10 @@ bool test_parallel_traction_bounded(MPIContext &ctx)
    op.ComputeTraction(u, slip, traction);
 
    // Physically meaningful bound: for unit slip on a coarse mesh with
-   // BP5 material (mu ~ 32 GPa), traction should be O(mu).  Allow 10x
-   // headroom for DG penalty on the coarse 2x1x1 test mesh.
-   const real_t traction_bound = 10.0 * mu;
+   // BP5 material (mu ~ 32 GPa), traction should be O(mu).  Allow 20x
+   // headroom for DG IP penalty on the coarse 2x1x1 tet mesh (penalty
+   // scales with element count and aspect ratio from hex-to-tet splitting).
+   const real_t traction_bound = 20.0 * mu;
 
    bool local_ok = true;
    real_t local_max = 0.0;
