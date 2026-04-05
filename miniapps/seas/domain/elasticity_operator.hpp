@@ -256,6 +256,12 @@ private:
    bool check_residual_;  // Post-solve residual check
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
 
+   // Reference normal for skeleton Dirichlet orientation sign.
+   // Matches Tandem's ref_normal from bp5.toml (default (0,-1,0) for BP5).
+   // Used by ComputeSkeletonDirichletSign() to determine f_q sign on
+   // interior/shared Dirichlet faces, same role as DGCurvilinearCommon.h:97.
+   Vector ref_normal_;
+
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    mutable bool used_coord_fallback_ = false;  // Set when coordinate-based fault detection is used
@@ -396,6 +402,32 @@ private:
 
    // Boundary markers
    mutable Array<int> dirichlet_bdr_marker_;
+
+   // ========================================================================
+   // Helpers
+   // ========================================================================
+
+   /// Compute the skeleton Dirichlet orientation sign at the current face integration point.
+   ///
+   /// Matches Tandem DGCurvilinearCommon.h:95-99: on skeleton (interior)
+   /// faces, negate f_q when the face normal opposes ref_normal_.
+   /// This is the same role as sign_flipped for fault slip, generalized
+   /// to use the full dot product with the stored ref_normal_ vector.
+   ///
+   /// @param FTr Face transformation (SetAllIntPoints must have been called)
+   /// @return +1.0 if face normal aligns with ref_normal_, -1.0 otherwise
+   real_t ComputeSkeletonDirichletSign(
+      FaceElementTransformations *FTr) const
+   {
+      Vector nor(3);
+      CalcOrtho(FTr->Jacobian(), nor);
+      real_t dot_ref = 0.0;
+      for (int d = 0; d < ref_normal_.Size(); d++)
+      {
+         dot_ref += nor(d) * ref_normal_(d);
+      }
+      return (dot_ref < 0.0) ? -1.0 : 1.0;
+   }
 
    // ========================================================================
    // Setup methods
@@ -967,6 +999,9 @@ private:
          Vector ref_normal(3);
          ref_normal = 0.0;
          ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
+
+         // Store for skeleton Dirichlet sign computation
+         ref_normal_ = ref_normal;
 
          Vector up(3);
          up = 0.0;
@@ -2396,9 +2431,9 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // BP5 Dirichlet loading: u = (0, sgn(x)·Vp·t/2, 0)
-      // Applied on Dirichlet-marked boundaries only (controlled by BCMode).
-      // sgn(x) determined from face centroid x-coordinate.
+      // BP5 Dirichlet loading: u_D = (sgn(y)*Vp*t/2, 0, 0) on far-field,
+      //                        u_D = (Vp*t, 0, 0) on y=0 skeleton faces.
+      // Applied on attr-5 faces only (controlled by BCMode).
       //
       // DG Dirichlet BC contribution:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
@@ -2654,15 +2689,13 @@ private:
             mesh_.GetInteriorFaceTransformations(f);
          if (FTr == nullptr) { continue; }
 
-         // v55: Evaluate Tandem's boundary function at each quad point,
-         // matching bp5.lua boundary(x,y,z,t) exactly:
-         //   y > 1:  u_D = (Vp*t/2, 0, 0)
-         //   y < -1: u_D = (-Vp*t/2, 0, 0)
-         //   else:   u_D = (Vp*t, 0, 0)
+         // Evaluate bp5.lua boundary(x,y,z,t) at each quad point:
+         //   y > 1000 m (1 km):  u_D = (Vp*t/2, 0, 0)
+         //   y < -1000 m:        u_D = (-Vp*t/2, 0, 0)
+         //   |y| <= 1000 m:      u_D = (Vp*t, 0, 0)
          //
-         // The DG skeleton RHS uses this as f_q (prescribed data at the face).
-         // Previously we computed u_D from element centroid Y-signs, which is
-         // mathematically equivalent but evaluates at different points.
+         // Orientation sign applied per QP via ComputeSkeletonDirichletSign,
+         // matching Tandem DGCurvilinearCommon.h:92-99.
 
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
@@ -2681,26 +2714,8 @@ private:
          elvec1 = 0.0;
          elvec2 = 0.0;
 
-         // Tandem orientation sign for skeleton Dirichlet faces
-         // (DGCurvilinearCommon.h:95-99): negate f_q when face normal
-         // is opposite to ref_normal = (0,-1,0).
-         // This is the same mechanism as sign_flipped for fault slip.
-         real_t dir_sign = 1.0;
-         {
-            const IntegrationPoint &ip0 = IntRules.Get(
-               FTr->FaceGeom, 0).IntPoint(0);
-            FTr->SetAllIntPoints(&ip0);
-            Vector nor0(dim);
-            CalcOrtho(FTr->Jacobian(), nor0);
-            // ref_normal = (0, -1, 0)
-            real_t dot_ref = nor0(1) * (-1.0);  // dot(nor, ref_normal)
-            dir_sign = (dot_ref < 0.0) ? -1.0 : 1.0;
-         }
-
          if (method_ == DGMethod::IP)
          {
-            // v55: Use combined integrator's AssembleSlipFaceRHS for
-            // Dirichlet interior faces (skeleton pattern, same as fault slip)
             DGElasticityIPCombinedIntegrator dir_integ(
                lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
@@ -2709,7 +2724,8 @@ private:
                FTr->FaceGeom, quad_order_dir);
             int nq_dir = ir_dir.GetNPoints();
 
-            // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
+            // Evaluate boundary(x,y,z,t) at each QP with per-QP orientation
+            // sign, matching Tandem DGCurvilinearCommon.h:92-99.
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
             for (int q = 0; q < nq_dir; q++)
@@ -2720,14 +2736,12 @@ private:
                FTr->Face->SetIntPoint(&ipq);
                FTr->Face->Transform(ipq, phys);
                real_t y = phys(1);
-               // Tandem bp5.lua boundary(x,y,z,t):
                real_t Vh = Vp_ * time;
                if (y > 1000.0) { Vh *= 0.5; }
                else if (y < -1000.0) { Vh *= -0.5; }
-               // else: Vh = Vp*t (full rate for |y| <= 1)
-               // Apply orientation sign (Tandem DGCurvilinearCommon.h:97-98)
-               u_D_3d(0 * nq_dir + q) = dir_sign * Vh;  // X component
-               // Y and Z components = 0
+               // Per-QP orientation sign (Tandem DGCurvilinearCommon.h:97-98)
+               real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+               u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
             }
 
             Vector ev1, ev2;
@@ -2746,8 +2760,11 @@ private:
             real_t Vh_br2 = Vp_ * time;
             if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
             else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
-            // Apply orientation sign (same as IP path above)
-            real_t u_D_int[3] = {dir_sign * Vh_br2, 0.0, 0.0};
+            // Orientation sign for BR2 (face-constant, affine faces)
+            const IntegrationPoint &ip_s = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ip_s);
+            real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
+            real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
@@ -3011,21 +3028,8 @@ private:
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
 
-            // Tandem orientation sign for shared skeleton Dirichlet faces
-            real_t dir_sign_sh = 1.0;
-            {
-               const IntegrationPoint &ip0 = IntRules.Get(
-                  FTr->FaceGeom, 0).IntPoint(0);
-               FTr->SetAllIntPoints(&ip0);
-               Vector nor0(dim);
-               CalcOrtho(FTr->Jacobian(), nor0);
-               real_t dot_ref = nor0(1) * (-1.0);
-               dir_sign_sh = (dot_ref < 0.0) ? -1.0 : 1.0;
-            }
-
             if (method_ == DGMethod::IP)
             {
-               // v55: Use combined integrator (skeleton pattern, only elem1)
                DGElasticityIPCombinedIntegrator dir_integ(
                   lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
@@ -3034,7 +3038,7 @@ private:
                   FTr->FaceGeom, quad_order_dir);
                int nq_dir = ir_dir.GetNPoints();
 
-               // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
+               // Per-QP boundary evaluation with orientation sign
                Vector u_D_3d(dim * nq_dir);
                u_D_3d = 0.0;
                for (int q = 0; q < nq_dir; q++)
@@ -3048,8 +3052,8 @@ private:
                   real_t Vh = Vp_ * time;
                   if (y > 1000.0) { Vh *= 0.5; }
                   else if (y < -1000.0) { Vh *= -0.5; }
-                  // Apply orientation sign (Tandem DGCurvilinearCommon.h:97-98)
-                  u_D_3d(0 * nq_dir + q) = dir_sign_sh * Vh;
+                  real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+                  u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
                }
 
                Vector ev1, ev2;
@@ -3069,8 +3073,10 @@ private:
                real_t Vh_br2 = Vp_ * time;
                if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
                else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
-               // Apply orientation sign (same as IP path above)
-               real_t u_D_int[3] = {dir_sign_sh * Vh_br2, 0.0, 0.0};
+               // Orientation sign for BR2 (face-constant, affine faces)
+               FTr->SetAllIntPoints(&ip_c);
+               real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
+               real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
                const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
