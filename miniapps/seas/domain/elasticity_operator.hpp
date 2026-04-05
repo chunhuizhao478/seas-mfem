@@ -2363,8 +2363,8 @@ private:
                real_t y = phys(1);
                // Tandem bp5.lua boundary(x,y,z,t):
                real_t Vh = Vp_ * time;
-               if (y > 1.0) { Vh *= 0.5; }
-               else if (y < -1.0) { Vh *= -0.5; }
+               if (y > 1000.0) { Vh *= 0.5; }
+               else if (y < -1000.0) { Vh *= -0.5; }
                u_D_3d(0 * nq_dir + q) = Vh;
             }
 
@@ -2382,8 +2382,8 @@ private:
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
             real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
             real_t u_D[3] = {Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv = elem_mass_inv_[FTr->Elem1No];
@@ -2587,8 +2587,8 @@ private:
                real_t y = phys(1);
                // Tandem bp5.lua boundary(x,y,z,t):
                real_t Vh = Vp_ * time;
-               if (y > 1.0) { Vh *= 0.5; }
-               else if (y < -1.0) { Vh *= -0.5; }
+               if (y > 1000.0) { Vh *= 0.5; }
+               else if (y < -1000.0) { Vh *= -0.5; }
                // else: Vh = Vp*t (full rate for |y| <= 1)
                u_D_3d(0 * nq_dir + q) = Vh;  // X component
                // Y and Z components = 0
@@ -2608,8 +2608,8 @@ private:
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
             real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
             real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
@@ -2897,8 +2897,8 @@ private:
                   FTr->Face->Transform(ipq, phys);
                   real_t y = phys(1);
                   real_t Vh = Vp_ * time;
-                  if (y > 1.0) { Vh *= 0.5; }
-                  else if (y < -1.0) { Vh *= -0.5; }
+                  if (y > 1000.0) { Vh *= 0.5; }
+                  else if (y < -1000.0) { Vh *= -0.5; }
                   u_D_3d(0 * nq_dir + q) = Vh;
                }
 
@@ -2917,8 +2917,8 @@ private:
                Vector fc_br2(dim);
                FTr->Face->Transform(ip_c, fc_br2);
                real_t Vh_br2 = Vp_ * time;
-               if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-               else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+               if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+               else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
                real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
