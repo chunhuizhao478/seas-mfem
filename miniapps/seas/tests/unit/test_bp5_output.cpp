@@ -231,8 +231,7 @@ void TestBP5BenchmarkOutput_ComponentSwap()
       Vector V_dip(1), V_strike(1);
       Vector trac_dip(1), trac_strike(1);
 
-      // Internal convention: negative = right-lateral motion.
-      // WriteFromGlobalData negates for SCEC output (positive = right-lateral).
+      // Output now preserves the stored slip sign directly.
       slip_dip(0) = -1.0;
       slip_strike(0) = -2.0;
       theta(0) = 100.0;      // 100 seconds
@@ -264,9 +263,9 @@ void TestBP5BenchmarkOutput_ComponentSwap()
       double t, col2, col3;
       iss >> t >> col2 >> col3;
 
-      // col2 = slip_strike = 2.0, col3 = slip_dip = 1.0 (SWAPPED)
-      TEST_NEAR(col2, 2.0, 1e-6, "Column 2 = slip_strike = 2.0 (swapped)");
-      TEST_NEAR(col3, 1.0, 1e-6, "Column 3 = slip_dip = 1.0 (swapped)");
+      // col2 = slip_strike = -2.0, col3 = slip_dip = -1.0 (SWAPPED)
+      TEST_NEAR(col2, -2.0, 1e-6, "Column 2 = slip_strike = -2.0 (swapped)");
+      TEST_NEAR(col3, -1.0, 1e-6, "Column 3 = slip_dip = -1.0 (swapped)");
       file.close();
    }
 
@@ -577,11 +576,11 @@ void TestBP5BenchmarkOutput_MultiDOFWrite()
       iss >> t >> s_strike >> s_dip >> v_strike >> v_dip
           >> tau_s >> tau_d >> state_val;
 
-      // DOF 3 (i=3): slip_strike negated = 0.02*4 = 0.08
-      TEST_NEAR(s_strike, 0.02 * 4, 1e-6,
+      // DOF 3 (i=3): slip_strike preserved = -0.02*4 = -0.08
+      TEST_NEAR(s_strike, -0.02 * 4, 1e-6,
                 "Multi-DOF: slip_strike from DOF 3");
-      // DOF 3 (i=3): slip_dip negated = 0.01*4 = 0.04
-      TEST_NEAR(s_dip, 0.01 * 4, 1e-6,
+      // DOF 3 (i=3): slip_dip preserved = -0.01*4 = -0.04
+      TEST_NEAR(s_dip, -0.01 * 4, 1e-6,
                 "Multi-DOF: slip_dip from DOF 3");
       // DOF 3: V_strike = abs(2e-9*4) = 8e-9, output = log10(8e-9) ≈ -8.097
       TEST_NEAR(v_strike, std::log10(2e-9 * 4), 0.01,
@@ -632,7 +631,7 @@ void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
       Vector V_dip(3), V_strike(3);
       Vector trac_dip(3), trac_strike(3);
 
-      // Internal values are negated before SCEC output.
+      // Output now preserves the stored slip sign directly.
       slip_dip(0) = -1.0;   slip_strike(0) = -10.0;
       slip_dip(1) = -2.0;   slip_strike(1) = -20.0;
       slip_dip(2) = -4.0;   slip_strike(2) = -40.0;
@@ -669,9 +668,9 @@ void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
       iss >> t >> slip_s >> slip_d >> logV_s >> logV_d >> tau_s >> tau_d >> log_theta;
 
       // Barycentric weights = [0.5, 0.25, 0.25] at (250,250).
-      TEST_NEAR(slip_s, 20.0, 1e-12,
+      TEST_NEAR(slip_s, -20.0, 1e-12,
                 "strike slip interpolated exactly on p=1 face");
-      TEST_NEAR(slip_d, 2.0, 1e-12,
+      TEST_NEAR(slip_d, -2.0, 1e-12,
                 "dip slip interpolated exactly on p=1 face");
       TEST_NEAR(logV_s, std::log10(2e-5), 1e-12,
                 "strike slip-rate interpolated exactly on p=1 face");
