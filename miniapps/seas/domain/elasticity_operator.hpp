@@ -818,19 +818,30 @@ private:
          int global_bdr1 = local_bdr1;
          int global_bdr3 = local_bdr3;
 
-         // Count exterior Dirichlet faces (attr 5, boundary face with no elem2)
+         // Count exterior Dirichlet faces: attr 5 faces NOT in interior or shared lists
+         std::set<int> diag_dir_int_set;
+         for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+         {
+            diag_dir_int_set.insert(dirichlet_interior_faces_[fi]);
+         }
+         std::set<int> diag_dir_sh_set;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+            {
+               diag_dir_sh_set.insert(mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
+            }
+#endif
+         }
          int local_dir_ext = 0;
          for (int be = 0; be < mesh_.GetNBE(); be++)
          {
             if (mesh_.GetBdrAttribute(be) != 5) { continue; }
             int face_idx = mesh_.GetBdrElementFaceIndex(be);
-            FaceElementTransformations *FTr =
-               mesh_.GetInteriorFaceTransformations(face_idx);
-            if (FTr == nullptr)
-            {
-               // Not interior → true boundary face
-               local_dir_ext++;
-            }
+            if (diag_dir_int_set.count(face_idx) > 0) { continue; }
+            if (diag_dir_sh_set.count(face_idx) > 0) { continue; }
+            local_dir_ext++;
          }
          int global_dir_ext = local_dir_ext;
 
@@ -2397,6 +2408,26 @@ private:
 
       int dim = 3;
 
+      // Build set of face indices already handled as interior/shared Dirichlet.
+      // These must NOT also be processed as boundary faces (would double-load
+      // with incompatible DG formulas: boundary uses c1=epsilon, skeleton uses
+      // c1=0.5*epsilon).
+      std::set<int> dir_interior_set;
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+      {
+         dir_interior_set.insert(dirichlet_interior_faces_[fi]);
+      }
+      std::set<int> dir_shared_set;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            dir_shared_set.insert(mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
+         }
+#endif
+      }
+
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
@@ -2405,6 +2436,11 @@ private:
          // Get face transformation
          int face_idx, face_info;
          mesh_.GetBdrElementFace(be, &face_idx, &face_info);
+
+         // Skip faces already handled as interior or shared Dirichlet
+         if (dir_interior_set.count(face_idx) > 0) { continue; }
+         if (dir_shared_set.count(face_idx) > 0) { continue; }
+
          FaceElementTransformations *FTr =
             mesh_.GetFaceElementTransformations(face_idx);
          if (FTr == nullptr) { continue; }
