@@ -64,6 +64,7 @@
 #include "../../io/probe_output.hpp"
 #include "../../io/checkpoint.hpp"
 #include "../../common/mpi_context.hpp"
+#include "../../trace/face_trace_logger.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -883,6 +884,19 @@ int main(int argc, char *argv[])
                 << "\n";
    }
 
+   // Face tracer for per-face diagnostics (rank-local, no MPI)
+   seas::TraceConfig trace_cfg;
+   trace_cfg.explicit_rank = 96;
+   trace_cfg.explicit_fi = {21, 28, 29, 31, 33, 37};
+   trace_cfg.use_coord_window = true;
+   trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
+   trace_cfg.x3_min = -40e3; trace_cfg.x3_max = -35e3;
+   trace_cfg.num_control_faces = 2;
+   trace_cfg.output_dir = output_dir;
+   seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
+   face_tracer.SelectFaces(domain, fault_geom);
+   seas_op.SetFaceTracer(&face_tracer);
+
    Vector state(fault_op.StateSize());
    seas_op.SetInitialCondition(state);
 
@@ -1294,6 +1308,14 @@ int main(int argc, char *argv[])
          }
       }
 
+      // Face tracer: commit after psi clamp so psi reflects the carried state.
+      // Note: traction/rate/correction were staged in Mult() before clamping,
+      // so rows are only fully self-consistent when psi clamp is off (default).
+      if (face_tracer.IsActive())
+      {
+         face_tracer.CommitStep(step, t, state, false);
+      }
+
       real_t V_max = seas_op.GetMaxSlipRate();
 
       // NaN/Inf check
@@ -1415,6 +1437,13 @@ int main(int argc, char *argv[])
                       use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
                       &mpi);
    }
+
+   // Face tracer: finalize (commit final step + write summary)
+   if (face_tracer.IsActive())
+   {
+      face_tracer.CommitStep(step, t, state, true);
+   }
+   face_tracer.Finalize();
 
    bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
                         seas_op.GetMaxSlipRate());

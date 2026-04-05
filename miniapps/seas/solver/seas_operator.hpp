@@ -18,6 +18,7 @@
 #include "../domain/elasticity_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
+#include "../trace/face_trace_logger.hpp"
 #include <iomanip>
 #include "../common/mpi_context.hpp"
 
@@ -142,6 +143,12 @@ public:
    /// instead of constant sigma_n. Matches Tandem's DieterichRuinaAgeing.
    void SetElasticSigmaN(bool v) { elastic_sigma_n_ = v; }
 
+   /// Set face tracer (non-owning pointer, caller manages lifetime).
+   void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
+   {
+      face_tracer_ = tracer;
+   }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -157,6 +164,12 @@ private:
    mutable Vector local_traction_;
    mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
    mutable Vector local_normal_traction_;
+
+   // Face tracer decomposition vectors (allocated only when tracer is active)
+   FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
+   mutable Vector local_traction_stress_, local_traction_correction_;
+   mutable Vector local_jump_residual_;
+   mutable Vector traction_stress_, traction_correction_, jump_residual_;
 
    // v57 MPI diagnostic: fire once on first non-zero slip
    mutable bool mpi_diag_done_ = true;  // v58: disabled by default
@@ -321,13 +334,41 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 3. Compute traction at fault from displacement
    // v51: optionally compute elastic normal traction for sigma_n feedback
-   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
-                            elastic_sigma_n_ ? &local_normal_traction_ : nullptr);
-   domain_->RestrictToOwnedFault(local_traction_, traction_,
-                                 domain_->NumSlipComponents());
-   if (elastic_sigma_n_)
+   if (face_tracer_ && face_tracer_->IsActive())
    {
-      domain_->RestrictToOwnedFault(local_normal_traction_, normal_traction_);
+      // Decomposed traction for face tracer
+      domain_->ComputeTractionDiagnostics(
+         *u_gf_, local_slip_, local_traction_,
+         local_traction_stress_, local_traction_correction_,
+         local_jump_residual_,
+         elastic_sigma_n_ ? &local_normal_traction_ : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_correction_,
+                                    traction_correction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_jump_residual_, jump_residual_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+      }
+   }
+   else
+   {
+      domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
+                               elastic_sigma_n_ ? &local_normal_traction_
+                                                : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+      }
    }
 
    // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
@@ -422,6 +463,15 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    fault_->ComputeRHS(traction_, state, rate,
                        elastic_sigma_n_ ? &normal_traction_ : nullptr);
+
+   // Face tracer: stage decomposition data for committed step
+   if (face_tracer_ && face_tracer_->IsActive())
+   {
+      face_tracer_->RecordMult(
+         traction_, traction_stress_, traction_correction_,
+         jump_residual_, normal_traction_,
+         fault_->GetSlipRate(), fault_->GetSigmaN());
+   }
 }
 
 // BP2 type alias (uses default template arguments)
