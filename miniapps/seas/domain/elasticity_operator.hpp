@@ -2681,6 +2681,22 @@ private:
          elvec1 = 0.0;
          elvec2 = 0.0;
 
+         // Tandem orientation sign for skeleton Dirichlet faces
+         // (DGCurvilinearCommon.h:95-99): negate f_q when face normal
+         // is opposite to ref_normal = (0,-1,0).
+         // This is the same mechanism as sign_flipped for fault slip.
+         real_t dir_sign = 1.0;
+         {
+            const IntegrationPoint &ip0 = IntRules.Get(
+               FTr->FaceGeom, 0).IntPoint(0);
+            FTr->SetAllIntPoints(&ip0);
+            Vector nor0(dim);
+            CalcOrtho(FTr->Jacobian(), nor0);
+            // ref_normal = (0, -1, 0)
+            real_t dot_ref = nor0(1) * (-1.0);  // dot(nor, ref_normal)
+            dir_sign = (dot_ref < 0.0) ? -1.0 : 1.0;
+         }
+
          if (method_ == DGMethod::IP)
          {
             // v55: Use combined integrator's AssembleSlipFaceRHS for
@@ -2709,7 +2725,8 @@ private:
                if (y > 1000.0) { Vh *= 0.5; }
                else if (y < -1000.0) { Vh *= -0.5; }
                // else: Vh = Vp*t (full rate for |y| <= 1)
-               u_D_3d(0 * nq_dir + q) = Vh;  // X component
+               // Apply orientation sign (Tandem DGCurvilinearCommon.h:97-98)
+               u_D_3d(0 * nq_dir + q) = dir_sign * Vh;  // X component
                // Y and Z components = 0
             }
 
@@ -2729,7 +2746,8 @@ private:
             real_t Vh_br2 = Vp_ * time;
             if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
             else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
-            real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
+            // Apply orientation sign (same as IP path above)
+            real_t u_D_int[3] = {dir_sign * Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
@@ -2993,6 +3011,18 @@ private:
             Vector elvec1(vdofs1.Size());
             elvec1 = 0.0;
 
+            // Tandem orientation sign for shared skeleton Dirichlet faces
+            real_t dir_sign_sh = 1.0;
+            {
+               const IntegrationPoint &ip0 = IntRules.Get(
+                  FTr->FaceGeom, 0).IntPoint(0);
+               FTr->SetAllIntPoints(&ip0);
+               Vector nor0(dim);
+               CalcOrtho(FTr->Jacobian(), nor0);
+               real_t dot_ref = nor0(1) * (-1.0);
+               dir_sign_sh = (dot_ref < 0.0) ? -1.0 : 1.0;
+            }
+
             if (method_ == DGMethod::IP)
             {
                // v55: Use combined integrator (skeleton pattern, only elem1)
@@ -3018,7 +3048,8 @@ private:
                   real_t Vh = Vp_ * time;
                   if (y > 1000.0) { Vh *= 0.5; }
                   else if (y < -1000.0) { Vh *= -0.5; }
-                  u_D_3d(0 * nq_dir + q) = Vh;
+                  // Apply orientation sign (Tandem DGCurvilinearCommon.h:97-98)
+                  u_D_3d(0 * nq_dir + q) = dir_sign_sh * Vh;
                }
 
                Vector ev1, ev2;
@@ -3038,7 +3069,8 @@ private:
                real_t Vh_br2 = Vp_ * time;
                if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
                else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
-               real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
+               // Apply orientation sign (same as IP path above)
+               real_t u_D_int[3] = {dir_sign_sh * Vh_br2, 0.0, 0.0};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
                const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
