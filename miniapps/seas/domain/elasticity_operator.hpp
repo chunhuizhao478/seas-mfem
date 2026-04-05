@@ -265,8 +265,6 @@ private:
 
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
-   mutable bool used_coord_fallback_ = false;  // Set when coordinate-based fault detection is used
-   bool has_fault_attr_ = false;         // True when the mesh globally contains fault attr 3
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
    void ComputeTractionImpl(const GridFuncType &displacement,
@@ -277,17 +275,22 @@ private:
                             Vector *traction_correction_out,
                             Vector *jump_residual_out);
 
-   // Tag-based fault face detection (matches Tandem's Physical Surface approach)
-   Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
-   std::set<long> fault_face_keys_;     // Element-pair keys for fast lookup
-   std::set<int> fault_shared_tagged_;  // Shared face indices from mesh tags
+   // ---- Facet BC classification (single source of truth) ----
+   // Mirrors Tandem's per-facet BC enum (DGOperatorTopo FacetInfo.bc).
+   // Built once at startup from mesh tags, propagated exactly via MPI.
+   enum class FacetBC : int8_t { None = 0, Fault = 1, Dirichlet = 2 };
 
-   // Dirichlet interior faces: interior faces with attr 5 that are NOT fault faces.
-   // In Tandem's BP5 mesh, Physical Surface(5) tags all far-field boundaries including
-   // Y=0 faces outside the fault region. These are interior faces in MFEM and need
-   // Dirichlet RHS contributions via the skeleton (two-element) pattern.
+   std::vector<FacetBC> face_bc_;         // [mesh_.GetNumFaces()] interior faces
+   std::vector<FacetBC> shared_face_bc_;  // [mesh_.GetNSharedFaces()] shared faces
+
+   // Legacy face arrays derived from the BC tables (kept for assembly loops)
+   Array<int> fault_interior_faces_;
+   Array<int> fault_shared_faces_;
    Array<int> dirichlet_interior_faces_;
    Array<int> dirichlet_shared_faces_;
+
+   // Element-pair keys for fault faces (populated during BC table build)
+   std::set<long> fault_face_keys_;
 
    real_t epsilon_;  // SIPG sign = -1
 
@@ -321,8 +324,6 @@ private:
 #endif
 
    // Fault data
-   Array<int> fault_interior_faces_;
-   Array<int> fault_shared_faces_;
    Array<int> fault_dofs_;
    int num_fault_dofs_ = 0;
    int num_owned_fault_dofs_ = 0;
@@ -476,572 +477,466 @@ private:
       }
    }
 
-   /// Build tag-based fault face lookup from mesh boundary element attributes.
+   /// Build the facet BC tables from mesh tags. Single source of truth.
    ///
-   /// Uses MFEM's direct GetBdrElementFaceIndex(be) to map each attr-3
-   /// boundary element to its face index in O(1), avoiding fragile vertex-set
-   /// matching. This is the closest MFEM equivalent to Tandem's direct
-   /// facet-tag import (GlobalSimplexMeshBuilder.cpp:72).
-   void BuildFaultTaggedFaces()
+   /// Mirrors Tandem's facet-BC model: import tags → propagate exactly →
+   /// store per-facet class → consume per-facet class.
+   ///
+   /// 1. Scan boundary elements with attr 3 (fault) and attr 5 (Dirichlet)
+   /// 2. Mark interior faces directly in face_bc_
+   /// 3. Collect shared-face canonical vertex keys, Allgatherv across ranks
+   /// 4. Mark shared faces in shared_face_bc_
+   /// 5. Validate: attr 3 and attr 5 must exist; fault ∩ Dirichlet = ∅
+   /// 6. Derive legacy face arrays for downstream assembly
+   void BuildFacetBCTables()
    {
-      fault_tagged_faces_.SetSize(0);
-      fault_face_keys_.clear();
-      fault_shared_tagged_.clear();
+      const int num_faces = mesh_.GetNumFaces();
+      face_bc_.assign(num_faces, FacetBC::None);
 
-      int fault_attr = 3;
-      bool has_fault_attr_local = false;
-      for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
-      {
-         if (mesh_.bdr_attributes[i] == fault_attr)
-         {
-            has_fault_attr_local = true;
-            break;
-         }
-      }
-
-      has_fault_attr_ = has_fault_attr_local;
+      int num_shared = 0;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         int local = has_fault_attr_local ? 1 : 0;
-         int global = 0;
-         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, mesh_.GetComm());
-         has_fault_attr_ = (global != 0);
+         num_shared = mesh_.GetNSharedFaces();
 #endif
       }
-      if (!has_fault_attr_) { return; }
+      shared_face_bc_.assign(num_shared, FacetBC::None);
 
-      // Build reverse map: local face index → shared face index.
-      // Needed to tag shared faces directly from boundary elements.
+      // ---- Check global attr existence ----
+      int local_has3 = 0, local_has5 = 0;
+      // Scan actual boundary elements instead of mesh_.bdr_attributes. In
+      // ParMesh, internal tagged faces can appear in GetNBE() even when the
+      // summary attribute list does not include their tag.
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr == 3) { local_has3 = 1; }
+         if (attr == 5) { local_has5 = 1; }
+      }
+      int global_has3 = local_has3, global_has5 = local_has5;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(MPI_IN_PLACE, &global_has3, 1, MPI_INT,
+                       MPI_MAX, mesh_.GetComm());
+         MPI_Allreduce(MPI_IN_PLACE, &global_has5, 1, MPI_INT,
+                       MPI_MAX, mesh_.GetComm());
+#endif
+      }
+      // If the mesh has no fault tags (attr 3), this is a non-BP5 problem
+      // (unit test, pure elasticity, etc.). Skip fault classification but
+      // still build Dirichlet faces if attr 5 is present.
+      // If the mesh HAS fault tags, enforce BP5 requirement: attr 5 must
+      // also be present.
+      bool has_fault = (global_has3 > 0);
+      bool has_dirichlet = (global_has5 > 0);
+      if (has_fault)
+      {
+         MFEM_VERIFY(has_dirichlet,
+            "ERROR: Mesh has fault faces (attr 3) but no Dirichlet faces "
+            "(attr 5). BP5 requires both Physical Surface tags.");
+      }
+      if (!has_fault && !has_dirichlet) { return; }
+
+      // ---- Build reverse map: local face → shared face index ----
       std::unordered_map<int, int> lface_to_sface;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         for (int sf = 0; sf < num_shared; sf++)
          {
             lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
          }
 #endif
       }
 
-      // Collect fault face indices directly from boundary elements using
-      // GetBdrElementFaceIndex — O(1) per boundary element, no vertex
-      // matching. Each attr-3 boundary element maps to exactly one face.
-      std::set<int> fault_face_set;
+      // ---- Phase 1: Scan boundary elements, mark local faces ----
+      // Collect shared-face tags locally (only 1 rank has the bdr element)
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
-         if (mesh_.GetBdrAttribute(be) != fault_attr) { continue; }
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr != 3 && attr != 5) { continue; }
+         FacetBC bc = (attr == 3) ? FacetBC::Fault : FacetBC::Dirichlet;
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
-         fault_face_set.insert(face_idx);
-      }
 
-      // Classify each tagged face as interior or shared
-      for (int face_idx : fault_face_set)
-      {
          FaceElementTransformations *FTr =
             mesh_.GetInteriorFaceTransformations(face_idx);
          if (FTr != nullptr)
          {
-            // Interior face: both adjacent elements are local
-            fault_tagged_faces_.Append(face_idx);
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE()
-                       + std::max(e1, e2);
-            fault_face_keys_.insert(key);
+            // Interior face: mark in face_bc_ table
+            MFEM_VERIFY(face_bc_[face_idx] == FacetBC::None ||
+                        face_bc_[face_idx] == bc,
+               "ERROR: Interior face " << face_idx << " tagged as both "
+               "attr 3 and attr 5.");
+            face_bc_[face_idx] = bc;
+
+            if (bc == FacetBC::Fault)
+            {
+               int e1 = FTr->Elem1No;
+               int e2 = FTr->Elem2No;
+               long key = (long)std::min(e1, e2) * mesh_.GetNE()
+                          + std::max(e1, e2);
+               fault_face_keys_.insert(key);
+            }
          }
          else if constexpr (IsParallelMesh<MeshType>::value)
          {
-            // Check if this face is a shared face at a partition boundary
             auto it = lface_to_sface.find(face_idx);
             if (it != lface_to_sface.end())
             {
-               fault_shared_tagged_.insert(it->second);
+               int sf = it->second;
+               MFEM_VERIFY(shared_face_bc_[sf] == FacetBC::None ||
+                           shared_face_bc_[sf] == bc,
+                  "ERROR: Shared face " << sf << " tagged as both "
+                  "attr 3 and attr 5.");
+               shared_face_bc_[sf] = bc;
             }
          }
       }
 
-      // v58 fix: Exchange shared fault face tags between neighboring ranks.
-      //
-      // Internal boundary elements (attr=3) only exist on ONE rank per
-      // shared face.  The rank without the boundary element never detects
-      // the face as a fault face, causing its elem2 RHS contribution to
-      // be silently dropped in AssembleSlipContributionIPShared.
-      //
-      // Fix: identify each face by its sorted global vertex IDs (canonical
-      // triplet).  Each rank broadcasts the vertex signatures of its
-      // detected shared fault faces.  Other ranks match their shared faces
-      // against this global set.
+      // ---- Phase 2: Propagate shared-face tags across MPI ranks ----
+      // A shared face's boundary element exists on only ONE rank. The
+      // other rank must discover it via canonical vertex key exchange.
+      // We propagate fault and Dirichlet tags in a single Allgatherv,
+      // packing (key, bc_class) per face.
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         Array<HYPRE_BigInt> gvert_tag;
-         mesh_.GetGlobalVertexIndices(gvert_tag);
+         Array<HYPRE_BigInt> gvert;
+         mesh_.GetGlobalVertexIndices(gvert);
 
-         // Build canonical vertex keys for locally-detected shared fault faces
-         std::vector<FaceVertexKey> local_fault_keys;
-         for (int sf : fault_shared_tagged_)
+         // Pack: 4 values per locally-tagged shared face (3 key + bc_class)
+         std::vector<HYPRE_BigInt> local_flat;
+         for (int sf = 0; sf < num_shared; sf++)
          {
+            if (shared_face_bc_[sf] == FacetBC::None) { continue; }
             int lf = mesh_.GetSharedFace(sf);
-            local_fault_keys.push_back(MakeFaceKey(lf, gvert_tag));
+            FaceVertexKey fk = MakeFaceKey(lf, gvert);
+            local_flat.push_back(fk.v[0]);
+            local_flat.push_back(fk.v[1]);
+            local_flat.push_back(fk.v[2]);
+            local_flat.push_back(static_cast<HYPRE_BigInt>(shared_face_bc_[sf]));
          }
 
-         // Allgather: collect all fault face keys from all ranks
-         int local_count = static_cast<int>(local_fault_keys.size());
+         int lc = static_cast<int>(local_flat.size());
          int nranks = 1;
          MPI_Comm_size(mesh_.GetComm(), &nranks);
-         std::vector<int> recv_counts(nranks), displs(nranks);
-         MPI_Allgather(&local_count, 1, MPI_INT,
-                       recv_counts.data(), 1, MPI_INT, mesh_.GetComm());
-         int total = 0;
-         for (int r = 0; r < nranks; r++)
-         {
-            displs[r] = total;
-            total += recv_counts[r];
-         }
-
-         // Pack as flat array (3 HYPRE_BigInt per face)
-         std::vector<HYPRE_BigInt> local_flat(3 * local_count);
-         for (int i = 0; i < local_count; i++)
-         {
-            local_flat[3*i]   = local_fault_keys[i].v[0];
-            local_flat[3*i+1] = local_fault_keys[i].v[1];
-            local_flat[3*i+2] = local_fault_keys[i].v[2];
-         }
-         std::vector<int> recv3(nranks), disp3(nranks);
-         for (int r = 0; r < nranks; r++)
-         {
-            recv3[r] = 3 * recv_counts[r];
-            disp3[r] = 3 * displs[r];
-         }
-         std::vector<HYPRE_BigInt> all_flat(3 * total);
-         MPI_Allgatherv(local_flat.data(), 3 * local_count, HYPRE_MPI_BIG_INT,
-                        all_flat.data(), recv3.data(), disp3.data(),
+         std::vector<int> rc(nranks), dp(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                       mesh_.GetComm());
+         int tot = 0;
+         for (int r = 0; r < nranks; r++) { dp[r] = tot; tot += rc[r]; }
+         std::vector<HYPRE_BigInt> all(tot);
+         MPI_Allgatherv(local_flat.data(), lc, HYPRE_MPI_BIG_INT,
+                        all.data(), rc.data(), dp.data(),
                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         // Build set of all known fault face keys
-         std::set<FaceVertexKey> global_fault_keys;
-         for (int i = 0; i < total; i++)
+         // Build global key → bc map
+         std::map<FaceVertexKey, FacetBC> global_shared_bc;
+         for (int i = 0; i < tot; i += 4)
          {
             FaceVertexKey k;
-            k.v[0] = all_flat[3*i];
-            k.v[1] = all_flat[3*i+1];
-            k.v[2] = all_flat[3*i+2];
-            global_fault_keys.insert(k);
+            k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
+            FacetBC bc = static_cast<FacetBC>(all[i+3]);
+            auto [it, inserted] = global_shared_bc.emplace(k, bc);
+            MFEM_VERIFY(inserted || it->second == bc,
+               "ERROR: Shared face key (" << k.v[0] << "," << k.v[1]
+               << "," << k.v[2] << ") has conflicting tags from "
+               "different ranks.");
          }
 
-         // Check each of MY shared faces against the global set
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         // Fill untagged local shared faces from the global map
+         for (int sf = 0; sf < num_shared; sf++)
          {
-            if (fault_shared_tagged_.count(sf) > 0) { continue; }
+            if (shared_face_bc_[sf] != FacetBC::None) { continue; }
             int lf = mesh_.GetSharedFace(sf);
-            FaceVertexKey key = MakeFaceKey(lf, gvert_tag);
-            if (global_fault_keys.count(key) > 0)
+            FaceVertexKey key = MakeFaceKey(lf, gvert);
+            auto it = global_shared_bc.find(key);
+            if (it != global_shared_bc.end())
             {
-               fault_shared_tagged_.insert(sf);
+               shared_face_bc_[sf] = it->second;
             }
          }
 #endif
       }
-   }
 
-   /// Build Dirichlet interior face list from mesh boundary element attributes.
-   ///
-   /// Uses the same direct GetBdrElementFaceIndex approach as
-   /// BuildFaultTaggedFaces. For attr 5 (far-field Dirichlet), excluding
-   /// faces already tagged as fault.
-   void BuildDirichletInteriorFaces()
-   {
+      // ---- Phase 3: Derive legacy face arrays from BC tables ----
+      fault_interior_faces_.SetSize(0);
+      fault_shared_faces_.SetSize(0);
       dirichlet_interior_faces_.SetSize(0);
       dirichlet_shared_faces_.SetSize(0);
 
-      int dirichlet_attr = 5;
-      bool has_dirichlet_attr = false;
-      for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
+      for (int f = 0; f < num_faces; f++)
       {
-         if (mesh_.bdr_attributes[i] == dirichlet_attr)
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (!FTr) { continue; }
+         if (face_bc_[f] == FacetBC::Fault)
          {
-            has_dirichlet_attr = true;
-            break;
+            fault_interior_faces_.Append(f);
+         }
+         else if (face_bc_[f] == FacetBC::Dirichlet)
+         {
+            dirichlet_interior_faces_.Append(f);
          }
       }
-      if (!has_dirichlet_attr) { return; }
+      for (int sf = 0; sf < num_shared; sf++)
+      {
+         if (shared_face_bc_[sf] == FacetBC::Fault)
+         {
+            fault_shared_faces_.Append(sf);
+         }
+         else if (shared_face_bc_[sf] == FacetBC::Dirichlet)
+         {
+            dirichlet_shared_faces_.Append(sf);
+         }
+      }
 
-      // Build reverse map: local face → shared face index
-      std::unordered_map<int, int> lface_to_sface;
+      // ---- Phase 4: Assert no None-classified face in any assembly array ----
+      for (int i = 0; i < fault_interior_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(face_bc_[fault_interior_faces_[i]] == FacetBC::Fault,
+            "ERROR: fault_interior_faces_[" << i << "] = "
+            << fault_interior_faces_[i] << " has BC="
+            << static_cast<int>(face_bc_[fault_interior_faces_[i]])
+            << ", expected Fault.");
+      }
+      for (int i = 0; i < dirichlet_interior_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(face_bc_[dirichlet_interior_faces_[i]] == FacetBC::Dirichlet,
+            "ERROR: dirichlet_interior_faces_[" << i << "] = "
+            << dirichlet_interior_faces_[i] << " has BC="
+            << static_cast<int>(face_bc_[dirichlet_interior_faces_[i]])
+            << ", expected Dirichlet.");
+      }
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(shared_face_bc_[fault_shared_faces_[i]] == FacetBC::Fault,
+            "ERROR: fault_shared_faces_[" << i << "] = "
+            << fault_shared_faces_[i] << " has BC="
+            << static_cast<int>(shared_face_bc_[fault_shared_faces_[i]])
+            << ", expected Fault.");
+      }
+      for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(shared_face_bc_[dirichlet_shared_faces_[i]] == FacetBC::Dirichlet,
+            "ERROR: dirichlet_shared_faces_[" << i << "] = "
+            << dirichlet_shared_faces_[i] << " has BC="
+            << static_cast<int>(shared_face_bc_[dirichlet_shared_faces_[i]])
+            << ", expected Dirichlet.");
+      }
+
+      // ---- Phase 5: Exact canonical-key validation ----
+      ValidateFacetBCTables();
+   }
+
+   /// Allgather a local set of FaceVertexKeys and return the global union.
+   std::set<FaceVertexKey> AllgatherKeys(
+      const std::set<FaceVertexKey> &local_keys) const
+   {
+      std::set<FaceVertexKey> global_keys = local_keys;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         int lc = static_cast<int>(local_keys.size());
+         int nranks = 1;
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+         std::vector<int> rc(nranks), dp(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                       mesh_.GetComm());
+         int tot = 0;
+         for (int r = 0; r < nranks; r++) { dp[r] = tot; tot += rc[r]; }
+         std::vector<HYPRE_BigInt> lf(3 * lc);
+         int idx = 0;
+         for (auto &k : local_keys)
          {
-            lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
+            lf[3*idx] = k.v[0]; lf[3*idx+1] = k.v[1]; lf[3*idx+2] = k.v[2];
+            idx++;
+         }
+         std::vector<int> rc3(nranks), dp3(nranks);
+         for (int r = 0; r < nranks; r++)
+         { rc3[r] = 3*rc[r]; dp3[r] = 3*dp[r]; }
+         std::vector<HYPRE_BigInt> af(3 * tot);
+         MPI_Allgatherv(lf.data(), 3*lc, HYPRE_MPI_BIG_INT,
+                        af.data(), rc3.data(), dp3.data(),
+                        HYPRE_MPI_BIG_INT, mesh_.GetComm());
+         for (int i = 0; i < tot; i++)
+         {
+            FaceVertexKey k;
+            k.v[0] = af[3*i]; k.v[1] = af[3*i+1]; k.v[2] = af[3*i+2];
+            global_keys.insert(k);
          }
 #endif
       }
+      return global_keys;
+   }
 
-      // Direct face lookup from boundary elements
+   /// Exact canonical-key validation of recovered face sets.
+   void ValidateFacetBCTables() const
+   {
+      Array<HYPRE_BigInt> gvert;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         mesh_.GetGlobalVertexIndices(gvert);
+#endif
+      }
+      else
+      {
+         gvert.SetSize(mesh_.GetNV());
+         for (int i = 0; i < mesh_.GetNV(); i++) { gvert[i] = i; }
+      }
+
+      // Build tagged key sets from boundary elements (ground truth).
+      // Separate tagged attr-5 faces into recoverable (interior/shared)
+      // and exterior (handled by AddBdrFaceIntegrator, not recovered here).
+      std::set<FaceVertexKey> local_tagged_fault;
+      std::set<FaceVertexKey> local_tagged_dir_recoverable;  // interior/shared only
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
-         if (mesh_.GetBdrAttribute(be) != dirichlet_attr) { continue; }
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr != 3 && attr != 5) { continue; }
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
-
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(face_idx);
-         if (FTr != nullptr)
+         FaceVertexKey key = MakeFaceKey(face_idx, gvert);
+         if (attr == 3)
          {
-            // Exclude fault faces by element-pair key
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE()
-                       + std::max(e1, e2);
-            if (fault_face_keys_.count(key) > 0) { continue; }
-
-            dirichlet_interior_faces_.Append(face_idx);
+            local_tagged_fault.insert(key);
          }
-         else if constexpr (IsParallelMesh<MeshType>::value)
+         else
          {
-            auto it = lface_to_sface.find(face_idx);
-            if (it != lface_to_sface.end())
+            // Is this face interior or shared? If so, it's recoverable.
+            bool is_interior = (mesh_.GetInteriorFaceTransformations(face_idx)
+                                != nullptr);
+            bool is_shared = false;
+            if constexpr (IsParallelMesh<MeshType>::value)
             {
-               if (fault_shared_tagged_.count(it->second) > 0) { continue; }
-               dirichlet_shared_faces_.Append(it->second);
+#ifdef MFEM_USE_MPI
+               if (!is_interior)
+               {
+                  // Check if face_idx corresponds to a shared face
+                  for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+                  {
+                     if (mesh_.GetSharedFace(sf) == face_idx)
+                     {
+                        is_shared = true;
+                        break;
+                     }
+                  }
+               }
+#endif
+            }
+            if (is_interior || is_shared)
+            {
+               local_tagged_dir_recoverable.insert(key);
             }
          }
+      }
+      std::set<FaceVertexKey> global_tagged_fault =
+         AllgatherKeys(local_tagged_fault);
+      std::set<FaceVertexKey> global_tagged_dir_recoverable =
+         AllgatherKeys(local_tagged_dir_recoverable);
+
+      // Build recovered key sets from the derived face arrays
+      std::set<FaceVertexKey> local_recovered_fault, local_recovered_dir;
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+         local_recovered_fault.insert(MakeFaceKey(fault_interior_faces_[fi], gvert));
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+         local_recovered_dir.insert(MakeFaceKey(dirichlet_interior_faces_[fi], gvert));
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            local_recovered_fault.insert(
+               MakeFaceKey(mesh_.GetSharedFace(fault_shared_faces_[i]), gvert));
+         for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+            local_recovered_dir.insert(
+               MakeFaceKey(mesh_.GetSharedFace(dirichlet_shared_faces_[i]), gvert));
+#endif
+      }
+      std::set<FaceVertexKey> global_recovered_fault =
+         AllgatherKeys(local_recovered_fault);
+      std::set<FaceVertexKey> global_recovered_dir =
+         AllgatherKeys(local_recovered_dir);
+
+      // Exact fault key equality: tagged == recovered (bidirectional)
+      for (auto &k : global_tagged_fault)
+      {
+         MFEM_VERIFY(global_recovered_fault.count(k) > 0,
+            "ERROR: Tagged attr-3 face key (" << k.v[0] << "," << k.v[1]
+            << "," << k.v[2] << ") was not recovered as a fault face.");
+      }
+      for (auto &k : global_recovered_fault)
+      {
+         MFEM_VERIFY(global_tagged_fault.count(k) > 0,
+            "ERROR: Recovered fault face key (" << k.v[0] << "," << k.v[1]
+            << "," << k.v[2] << ") has no matching attr-3 boundary element.");
+      }
+
+      // Exact Dirichlet key equality for recoverable faces (bidirectional)
+      for (auto &k : global_tagged_dir_recoverable)
+      {
+         MFEM_VERIFY(global_recovered_dir.count(k) > 0,
+            "ERROR: Tagged attr-5 interior/shared face key (" << k.v[0]
+            << "," << k.v[1] << "," << k.v[2]
+            << ") was not recovered as a Dirichlet face.");
+      }
+      for (auto &k : global_recovered_dir)
+      {
+         MFEM_VERIFY(global_tagged_dir_recoverable.count(k) > 0,
+            "ERROR: Recovered Dirichlet face key (" << k.v[0] << ","
+            << k.v[1] << "," << k.v[2]
+            << ") has no matching recoverable attr-5 boundary element.");
+      }
+
+      // Fault ∩ Dirichlet = ∅
+      for (auto &k : global_recovered_fault)
+      {
+         MFEM_VERIFY(!global_recovered_dir.count(k),
+            "ERROR: Face key (" << k.v[0] << "," << k.v[1] << ","
+            << k.v[2] << ") classified as both fault AND Dirichlet.");
+      }
+
+      // Summary
+      bool is_root = true;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank; MPI_Comm_rank(mesh_.GetComm(), &rank);
+         is_root = (rank == 0);
+#endif
+      }
+      if (is_root)
+      {
+         mfem::out << "  Tag validation: "
+                   << global_tagged_fault.size() << " fault keys (exact), "
+                   << global_recovered_dir.size() << " Dirichlet keys (exact, "
+                   << global_tagged_dir_recoverable.size() << " recoverable)"
+                   << " (OK)\n";
+         mfem::out << "  Fault faces: "
+                   << fault_interior_faces_.Size() << " interior + "
+                   << fault_shared_faces_.Size() << " shared (this rank)\n";
+         mfem::out << "  Dirichlet faces: "
+                   << dirichlet_interior_faces_.Size() << " interior + "
+                   << dirichlet_shared_faces_.Size() << " shared (this rank)\n";
       }
    }
 
    void SetupFaultInfo()
    {
-      fault_interior_faces_.SetSize(0);
+      // Build facet BC tables (single source of truth) and derive
+      // legacy face arrays. Includes exact canonical-key validation.
+      BuildFacetBCTables();
 
-      // Build tag-based fault face lookup from mesh Physical Surface attributes.
-      // This matches Tandem's BC-based face classification.
-      BuildFaultTaggedFaces();
+      num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
-      // Build Dirichlet interior face list (must come after BuildFaultTaggedFaces
-      // since it uses fault_face_keys_ to exclude fault faces)
-      BuildDirichletInteriorFaces();
-
-      // Detect fault faces using tags (or coordinate fallback)
-      int num_faces = mesh_.GetNumFaces();
-      for (int f = 0; f < num_faces; f++)
-      {
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(f);
-         if (FTr == nullptr) { continue; }
-
-         if (IsFaultFace3D(FTr))
-         {
-            fault_interior_faces_.Append(f);
-         }
-      }
-
-      // Shared faces (parallel): coordinate-based detection.
-      fault_shared_faces_.SetSize(0);
+      // Exchange face-neighbor data for shared face assembly
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
          mesh_.ExchangeFaceNbrData();
          auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
          if (pfes) { pfes->ExchangeFaceNbrData(); }
-
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
-         {
-            if (IsFaultFace3DShared(sf))
-            {
-               fault_shared_faces_.Append(sf);
-            }
-         }
 #endif
-      }
-
-      num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
-
-      if (has_fault_attr_)
-      {
-         // Validate: the number of recovered tagged fault faces should match
-         // the number of boundary elements with attr 3 (globally).
-         int local_tagged_bdr = 0;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            if (mesh_.GetBdrAttribute(be) == 3) { local_tagged_bdr++; }
-         }
-         int global_tagged_bdr = local_tagged_bdr;
-         // Count BOTH interior and shared tagged faces
-         int local_tagged_total = fault_tagged_faces_.Size()
-            + static_cast<int>(fault_shared_tagged_.size());
-         int global_tagged_total = local_tagged_total;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_bdr, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_total, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-#endif
-         }
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-#endif
-         }
-         // In MPI, shared faces are counted on both ranks, so
-         // global_tagged_total may exceed global_tagged_bdr.
-         // A genuine problem is when tagged_total < tagged_bdr.
-         if (is_root && global_tagged_bdr > 0 &&
-             global_tagged_total < global_tagged_bdr)
-         {
-            mfem::out << "  WARNING: Tag-based fault recovery: "
-                      << global_tagged_total
-                      << " tagged faces (interior+shared) vs "
-                      << global_tagged_bdr << " boundary elements with attr 3. "
-                      << "Some fault faces may be missing.\n";
-         }
-         if (is_root && global_tagged_bdr > 0)
-         {
-            mfem::out << "  Tag-based fault faces: "
-                      << fault_tagged_faces_.Size() << " interior + "
-                      << fault_shared_tagged_.size() << " shared (this rank), "
-                      << global_tagged_bdr << " boundary elements globally\n";
-         }
-      }
-
-      // Emit coordinate-fallback warning once, on root only
-      if (used_coord_fallback_ && !has_fault_attr_)
-      {
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-#endif
-         }
-         if (is_root)
-         {
-            mfem::out << "  WARNING: Using coordinate-based fault detection "
-                      << "(mesh has no fault attr 3). This does not follow "
-                      << "Tandem's tag-based classification and can hide mesh "
-                      << "tagging errors.\n";
-         }
-      }
-
-      // BP5-specific y=0 gap recovery: classify untagged y=0 interior faces
-      // as Dirichlet. These are faces on the y=0 continuation plane that were
-      // not included in any Physical Surface in the Gmsh mesh. Without
-      // Dirichlet loading they act as locked gaps, causing stress concentration.
-      // This scan works in both serial and parallel builds.
-      {
-         std::set<int> classified_interior;
-         for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
-         {
-            classified_interior.insert(fault_interior_faces_[fi]);
-         }
-         for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
-         {
-            classified_interior.insert(dirichlet_interior_faces_[fi]);
-         }
-         int local_int_gap = 0;
-         int num_faces = mesh_.GetNumFaces();
-         for (int f = 0; f < num_faces; f++)
-         {
-            if (classified_interior.count(f) > 0) { continue; }
-            auto *FTr = mesh_.GetInteriorFaceTransformations(f);
-            if (!FTr) { continue; }
-            const IntegrationPoint &ip_c =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip_c);
-            Vector ctr(3);
-            FTr->Face->Transform(ip_c, ctr);
-            if (std::abs(ctr(1)) < 1.0)  // y ≈ 0 (BP5 fault plane)
-            {
-               local_int_gap++;
-               dirichlet_interior_faces_.Append(f);
-            }
-         }
-         int global_int_gap = local_int_gap;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(MPI_IN_PLACE, &global_int_gap, 1, MPI_INT,
-                           MPI_SUM, mesh_.GetComm());
-#endif
-         }
-         bool is_root_ig = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int r; MPI_Comm_rank(mesh_.GetComm(), &r); is_root_ig = (r == 0);
-#endif
-         }
-         if (is_root_ig)
-         {
-            mfem::out << "  Y=0 interior face gap fix: "
-                      << global_int_gap << " untagged y=0 interior faces"
-                      << " added to Dirichlet set"
-                      << (global_int_gap > 0 ? " (FIXED)" : " (none needed)")
-                      << "\n";
-         }
-      }
-
-      // BP5-specific y=0 gap recovery for shared faces (parallel only).
-      // Same heuristic as above but for faces at MPI partition boundaries.
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         int rank;
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-
-         std::set<int> classified_shared;
-         for (int sf : fault_shared_tagged_)
-         {
-            classified_shared.insert(sf);
-         }
-         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
-         {
-            classified_shared.insert(dirichlet_shared_faces_[fi]);
-         }
-
-         int local_gap = 0;
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
-         {
-            if (classified_shared.count(sf) > 0) { continue; }
-            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
-            if (!FTr) { continue; }
-            const IntegrationPoint &ip =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip);
-            Vector center(3);
-            FTr->Face->Transform(ip, center);
-            if (std::abs(center(1)) < 1.0)  // y ≈ 0 (BP5 fault plane)
-            {
-               local_gap++;
-               dirichlet_shared_faces_.Append(sf);
-               mfem::out << "  [GAP-FIX] rank=" << rank
-                         << " shared face " << sf
-                         << " at (" << center(0) << ", "
-                         << center(1) << ", " << center(2) << ")"
-                         << " added to Dirichlet shared faces\n";
-            }
-         }
-         int global_gap = local_gap;
-         MPI_Allreduce(MPI_IN_PLACE, &global_gap, 1, MPI_INT,
-                        MPI_SUM, mesh_.GetComm());
-         if (rank == 0)
-         {
-            mfem::out << "  Y=0 shared face gap fix: "
-                      << global_gap << " untagged y=0 shared faces"
-                      << " added to Dirichlet set"
-                      << (global_gap > 0 ? " (FIXED)" : " (none needed)")
-                      << "\n";
-         }
-
-         // Per-rank face summary (post-fix state)
-         int local_fi = fault_interior_faces_.Size();
-         int local_fs = static_cast<int>(fault_shared_tagged_.size());
-         int local_di = dirichlet_interior_faces_.Size();
-         int local_ds = dirichlet_shared_faces_.Size();
-         mfem::out << "  [PARTITION] rank=" << rank
-                   << " fault_int=" << local_fi
-                   << " fault_sh=" << local_fs
-                   << " dir_int=" << local_di
-                   << " dir_sh=" << local_ds
-                   << " total_shared=" << mesh_.GetNSharedFaces()
-                   << "\n";
-         mfem::out.flush();
-#endif
-      }
-
-      // Dirichlet face summary (printed AFTER gap fix so totals reflect
-      // the final post-fix classification state).
-      {
-         int local_dir_int = dirichlet_interior_faces_.Size();
-         int local_dir_sh = dirichlet_shared_faces_.Size();
-         int global_dir_int = local_dir_int;
-         int global_dir_sh = local_dir_sh;
-
-         int local_bdr5 = 0, local_bdr1 = 0, local_bdr3 = 0;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            int a = mesh_.GetBdrAttribute(be);
-            if (a == 5) { local_bdr5++; }
-            if (a == 1) { local_bdr1++; }
-            if (a == 3) { local_bdr3++; }
-         }
-         int global_bdr5 = local_bdr5;
-         int global_bdr1 = local_bdr1;
-         int global_bdr3 = local_bdr3;
-
-         std::set<int> diag_dir_int_set;
-         for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
-         {
-            diag_dir_int_set.insert(dirichlet_interior_faces_[fi]);
-         }
-         std::set<int> diag_dir_sh_set;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
-            {
-               diag_dir_sh_set.insert(mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
-            }
-#endif
-         }
-         int local_dir_ext = 0;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            if (mesh_.GetBdrAttribute(be) != 5) { continue; }
-            int face_idx = mesh_.GetBdrElementFaceIndex(be);
-            if (diag_dir_int_set.count(face_idx) > 0) { continue; }
-            if (diag_dir_sh_set.count(face_idx) > 0) { continue; }
-            local_dir_ext++;
-         }
-         int global_dir_ext = local_dir_ext;
-
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(MPI_IN_PLACE, &global_dir_int, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_dir_sh, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_dir_ext, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_bdr5, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_bdr1, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_bdr3, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-#endif
-         }
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-#endif
-         }
-         if (is_root)
-         {
-            mfem::out << "  Boundary elements: attr1=" << global_bdr1
-                      << " attr3=" << global_bdr3
-                      << " attr5=" << global_bdr5 << "\n";
-            mfem::out << "  Dirichlet faces (post-fix): "
-                      << global_dir_ext << " exterior + "
-                      << global_dir_int << " interior + "
-                      << global_dir_sh << " shared"
-                      << " (total: "
-                      << (global_dir_ext + global_dir_int + global_dir_sh)
-                      << ", tagged attr5: " << global_bdr5 << ")\n";
-         }
       }
 
       // Multi-DOF fault quadrature
@@ -1178,293 +1073,39 @@ private:
       }
    }
 
-   /// Startup face audit. Verifies every y=0 face is uniquely classified,
-   /// checks fault∩dirichlet=∅, exchanges shared-face metadata to detect
-   /// neighbor disagreements, and dumps a per-rank CSV for the fault-tip
-   /// region. Called once from the constructor after SetupFaultInfo().
+   /// Startup face audit (validation-only). Verifies shared-face classification
+   /// agreement between neighboring MPI ranks. No coordinate-based logic —
+   /// only validates that the tag-recovered sets are self-consistent.
    void RunStartupFaceAudit()
    {
-      int rank = 0, nranks = 1;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
+         int rank = 0, nranks = 1;
          MPI_Comm_rank(mesh_.GetComm(), &rank);
          MPI_Comm_size(mesh_.GetComm(), &nranks);
-#endif
-      }
 
-      // ---- Lookup sets ----
-      std::set<int> fault_int_set, dir_int_set;
-      for (int i = 0; i < fault_interior_faces_.Size(); i++)
-         fault_int_set.insert(fault_interior_faces_[i]);
-      for (int i = 0; i < dirichlet_interior_faces_.Size(); i++)
-         dir_int_set.insert(dirichlet_interior_faces_[i]);
+         // Build classification lookup for shared faces:
+         // 0=unclassified, 1=fault, 2=dirichlet
+         std::map<int, int> shared_cls;
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            shared_cls[fault_shared_faces_[i]] = 1;
+         for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+            shared_cls[dirichlet_shared_faces_[i]] = 2;
 
-      std::set<int> fault_sh_set, dir_sh_set;
-      for (int i = 0; i < fault_shared_faces_.Size(); i++)
-         fault_sh_set.insert(fault_shared_faces_[i]);
-      for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
-         dir_sh_set.insert(dirichlet_shared_faces_[i]);
-
-      // ---- Assert fault ∩ dirichlet = ∅ ----
-      for (int f : fault_int_set)
-         MFEM_VERIFY(!dir_int_set.count(f),
-            "AUDIT: interior face " << f << " is both fault and Dirichlet");
-      for (int sf : fault_sh_set)
-         MFEM_VERIFY(!dir_sh_set.count(sf),
-            "AUDIT: shared face " << sf << " is both fault and Dirichlet");
-
-      // ---- Collect all y=0 faces with classification ----
-      struct FR { int id; real_t cx,cz; int e1,e2; int cls; bool shared; };
-      // cls: 0=unclassified, 1=fault_int, 2=dir_int, 3=fault_sh, 4=dir_sh
-      std::vector<FR> y0;
-
-      for (int f = 0; f < mesh_.GetNumFaces(); f++)
-      {
-         auto *FTr = mesh_.GetInteriorFaceTransformations(f);
-         if (!FTr) continue;
-         const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
-         FTr->Face->SetIntPoint(&ip);
-         Vector c(3); FTr->Face->Transform(ip, c);
-         if (std::abs(c(1)) >= 1.0) continue;
-         int cls = 0;
-         if (fault_int_set.count(f))    cls = 1;
-         else if (dir_int_set.count(f)) cls = 2;
-         y0.push_back({f, c(0), c(2), FTr->Elem1No, FTr->Elem2No, cls, false});
-      }
-
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
-         {
-            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
-            if (!FTr) continue;
-            const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip);
-            Vector c(3); FTr->Face->Transform(ip, c);
-            if (std::abs(c(1)) >= 1.0) continue;
-            int cls = 0;
-            if (fault_sh_set.count(sf))    cls = 3;
-            else if (dir_sh_set.count(sf)) cls = 4;
-            y0.push_back({sf, c(0), c(2), FTr->Elem1No, FTr->Elem2No, cls, true});
-         }
-#endif
-      }
-
-      // ---- Count unclassified ----
-      // Interior counts are exact (one rank per face). Shared counts assume
-      // multiplicity 2 (each shared face on exactly 2 ranks). If the
-      // agreement check below finds topology anomalies, these shared counts
-      // are approximate — the agreement check gives authoritative results.
-      int local_unc_int = 0;
-      for (auto &f : y0) if (f.cls == 0 && !f.shared) local_unc_int++;
-      int global_unc_int = local_unc_int;
-      int local_unc_sh = 0;
-      for (auto &f : y0) if (f.cls == 0 && f.shared) local_unc_sh++;
-      int global_unc_sh = local_unc_sh;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         MPI_Allreduce(MPI_IN_PLACE, &global_unc_int, 1, MPI_INT,
-                        MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(MPI_IN_PLACE, &global_unc_sh, 1, MPI_INT,
-                        MPI_SUM, mesh_.GetComm());
-         global_unc_sh /= 2;
-#endif
-      }
-      if (rank == 0)
-      {
-         int total_unc = global_unc_int + global_unc_sh;
-         mfem::out << "  AUDIT: " << total_unc
-                   << " unclassified y=0 faces (" << global_unc_int
-                   << " interior + ~" << global_unc_sh << " shared)"
-                   << (total_unc > 0 ? " *** CHECK ***" : " (OK)") << "\n";
-      }
-
-      // ---- Dump per-rank CSV: full y=0 inventory + tip region detail ----
-      {
-         const char *cls_name[] = {"UNCLASSIFIED","fault_int","dir_int",
-                                    "fault_sh","dir_sh"};
-         std::ostringstream fn;
-         fn << "face_audit_r" << rank << ".csv";
-         std::ofstream out(fn.str());
-         out << "region,type,id,cx,cz,e1,e2,cls\n";
-         int tip_int = 0, tip_sh = 0;
-         for (auto &f : y0)
-         {
-            bool in_tip = (f.cx >= -45000 && f.cx <= -25000
-                        && f.cz >= -40000 && f.cz <= -35000);
-            const char *region = in_tip ? "TIP" : "ALL";
-            if (in_tip) { if (f.shared) tip_sh++; else tip_int++; }
-            out << region << ","
-                << (f.shared ? "shared" : "interior") << ","
-                << f.id << "," << f.cx << "," << f.cz << ","
-                << f.e1 << "," << f.e2 << ","
-                << cls_name[f.cls] << "\n";
-         }
-         out.close();
-
-         int global_tip_int = tip_int, global_tip_sh = tip_sh;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(MPI_IN_PLACE, &global_tip_int, 1, MPI_INT,
-                           MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_tip_sh, 1, MPI_INT,
-                           MPI_SUM, mesh_.GetComm());
-            global_tip_sh /= 2;
-#endif
-         }
-         if (rank == 0)
-         {
-            mfem::out << "  AUDIT: " << (global_tip_int + global_tip_sh)
-                      << " y=0 faces in tip region "
-                      << "x∈[-45,-25]km z∈[-40,-35]km ("
-                      << global_tip_int << " int + ~"
-                      << global_tip_sh << " sh)\n";
-         }
-      }
-
-      // ---- Fault-face metadata dump for blowup region ----
-      // For each fault face near the corner (x∈[-45,-25]km, z∈[-40,-35]km),
-      // dump sign_flipped, canonical_to_local_perm, face key, and element IDs
-      // to a separate CSV for debugging permutation/orientation issues.
-      {
-         Array<HYPRE_BigInt> gvert_fault;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            mesh_.GetGlobalVertexIndices(gvert_fault);
-#endif
-         }
-
-         std::ostringstream csv_buf;
-         int tip_fault = 0;
-         for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
-         {
-            int f = fault_interior_faces_[fi];
-            auto *FTr = mesh_.GetInteriorFaceTransformations(f);
-            if (!FTr) continue;
-            const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip);
-            Vector c(3); FTr->Face->Transform(ip, c);
-
-            bool in_tip = (c(0) >= -45000 && c(0) <= -25000
-                        && c(2) >= -40000 && c(2) <= -35000);
-            if (!in_tip) continue;
-            tip_fault++;
-
-            const auto &basis = fault_basis_.GetBasis(fi);
-
-            // Permutation string
-            std::string perm_str;
-            for (int k = 0; k < nbf_per_face_; k++)
-            {
-               if (k > 0) perm_str += " ";
-               perm_str += std::to_string(
-                  canonical_to_local_perm_[fi * nbf_per_face_ + k]);
-            }
-
-            // Face key (needs global vertices)
-            std::string key_str = "-";
-            if (gvert_fault.Size() > 0)
-            {
-               FaceVertexKey fk = MakeFaceKey(f, gvert_fault);
-               key_str = std::to_string(fk.v[0]) + " "
-                       + std::to_string(fk.v[1]) + " "
-                       + std::to_string(fk.v[2]);
-            }
-
-            csv_buf << "fault_int," << fi << ","
-                 << c(0) << "," << c(2) << ","
-                 << FTr->Elem1No << "," << FTr->Elem2No << ","
-                 << basis.sign_flipped << ","
-                 << perm_str << ","
-                 << key_str << "\n";
-         }
-
-         // Shared fault faces in the region
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int total_int = fault_interior_faces_.Size();
-            for (int i = 0; i < fault_shared_faces_.Size(); i++)
-            {
-               int sf = fault_shared_faces_[i];
-               auto *FTr = mesh_.GetSharedFaceTransformations(sf);
-               if (!FTr) continue;
-               const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
-               FTr->Face->SetIntPoint(&ip);
-               Vector c(3); FTr->Face->Transform(ip, c);
-
-               bool in_tip = (c(0) >= -45000 && c(0) <= -25000
-                           && c(2) >= -40000 && c(2) <= -35000);
-               if (!in_tip) continue;
-               tip_fault++;
-
-               int bi = total_int + i;
-               bool sf_flag = false;
-               if (bi < fault_basis_.NumFaces())
-                  sf_flag = fault_basis_.GetBasis(bi).sign_flipped;
-
-               std::string perm_str;
-               for (int k = 0; k < nbf_per_face_; k++)
-               {
-                  if (k > 0) perm_str += " ";
-                  perm_str += std::to_string(
-                     canonical_to_local_perm_[bi * nbf_per_face_ + k]);
-               }
-
-               int lf = mesh_.GetSharedFace(sf);
-               FaceVertexKey fk = MakeFaceKey(lf, gvert_fault);
-               std::string key_str = std::to_string(fk.v[0]) + " "
-                                   + std::to_string(fk.v[1]) + " "
-                                   + std::to_string(fk.v[2]);
-
-               csv_buf << "fault_sh," << bi << ","
-                    << c(0) << "," << c(2) << ","
-                    << FTr->Elem1No << "," << FTr->Elem2No << ","
-                    << sf_flag << ","
-                    << perm_str << ","
-                    << key_str << "\n";
-            }
-#endif
-         }
-         if (tip_fault > 0)
-         {
-            std::ostringstream fn;
-            fn << "fault_audit_r" << rank << ".csv";
-            std::ofstream fout(fn.str());
-            fout << "type,fi,cx,cz,e1,e2,sign_flipped,perm,face_key\n";
-            fout << csv_buf.str();
-            fout.close();
-            mfem::out << "  [PARTITION] rank=" << rank
-                      << " has " << tip_fault
-                      << " fault faces in blowup region"
-                      << " (file: fault_audit_r" << rank << ".csv)\n";
-         }
-      }
-
-      // ---- Shared-face neighbor agreement ----
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
+         // Pack: 4 values per classified shared face (3 key + cls)
          Array<HYPRE_BigInt> gvert;
          mesh_.GetGlobalVertexIndices(gvert);
 
-         // Pack: 5 values per shared y=0 face (3 key + cls + rank)
          std::vector<HYPRE_BigInt> local_flat;
-         for (auto &f : y0)
+         for (auto &[sf, cls] : shared_cls)
          {
-            if (!f.shared) continue;
-            int lf = mesh_.GetSharedFace(f.id);
+            int lf = mesh_.GetSharedFace(sf);
             FaceVertexKey fk = MakeFaceKey(lf, gvert);
             local_flat.push_back(fk.v[0]);
             local_flat.push_back(fk.v[1]);
             local_flat.push_back(fk.v[2]);
-            local_flat.push_back(f.cls);
-            local_flat.push_back(rank);
+            local_flat.push_back(cls);
          }
 
          int lc = static_cast<int>(local_flat.size());
@@ -1482,57 +1123,55 @@ private:
                          all.data(), counts.data(), displs.data(),
                          HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         // Check: matching keys must have same cls
-         std::map<FaceVertexKey, std::vector<std::pair<int,int>>> kmap;
-         for (int i = 0; i < total; i += 5)
+         // Check: each key must appear exactly twice (once per rank sharing
+         // the face), and both ranks must agree on the classification.
+         std::map<FaceVertexKey, std::vector<int>> kmap;
+         for (int i = 0; i < total; i += 4)
          {
             FaceVertexKey k;
             k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
-            kmap[k].push_back({(int)all[i+3], (int)all[i+4]});
+            kmap[k].push_back(static_cast<int>(all[i+3]));
          }
-         int mismatch = 0, bad_mult = 0;
+         int mismatch = 0, single_rank = 0;
          for (auto &[k, entries] : kmap)
          {
-            if (entries.size() != 2)
+            if (entries.size() < 2)
             {
-               bad_mult++;
-               if (rank == 0 && bad_mult <= 10)
-               {
-                  mfem::out << "  AUDIT TOPOLOGY: key=("
-                            << k.v[0] << "," << k.v[1] << "," << k.v[2]
-                            << ") has " << entries.size() << " entries (expected 2):";
-                  for (auto &[c, r] : entries)
-                     mfem::out << " r" << r << "=cls" << c;
-                  mfem::out << "\n";
-               }
+               // Face seen from only one rank — valid in some MFEM
+               // partitioning layouts where only the owning rank
+               // contributes the shared face to the allgather.
+               single_rank++;
                continue;
             }
-            if (entries[0].first != entries[1].first)
+            // Check that all ranks contributing this face agree
+            for (size_t e = 1; e < entries.size(); e++)
             {
-               mismatch++;
-               if (rank == 0 && mismatch <= 20)
+               if (entries[e] != entries[0])
                {
-                  mfem::out << "  AUDIT MISMATCH: key=("
-                            << k.v[0] << "," << k.v[1] << "," << k.v[2]
-                            << ") r" << entries[0].second << "=cls"
-                            << entries[0].first << " vs r"
-                            << entries[1].second << "=cls"
-                            << entries[1].first << "\n";
+                  mismatch++;
+                  if (rank == 0 && mismatch <= 10)
+                  {
+                     mfem::out << "  AUDIT MISMATCH: key=("
+                               << k.v[0] << "," << k.v[1] << "," << k.v[2]
+                               << ") cls=" << entries[0] << " vs cls="
+                               << entries[e] << "\n";
+                  }
+                  break;
                }
             }
          }
+         MFEM_VERIFY(mismatch == 0,
+            "ERROR: " << mismatch << " shared faces have classification "
+            "mismatch between neighboring ranks.");
          if (rank == 0)
          {
-            mfem::out << "  AUDIT shared-face agreement: "
-                      << mismatch << " cls mismatches, "
-                      << bad_mult << " topology anomalies"
-                      << ((mismatch + bad_mult) > 0 ? " *** BUG ***" : " (OK)")
-                      << "\n";
+            int paired = static_cast<int>(kmap.size()) - single_rank;
+            mfem::out << "  AUDIT: shared-face agreement OK ("
+                      << paired << " paired, "
+                      << single_rank << " single-rank)\n";
          }
 #endif
       }
-
-      if (rank == 0) { mfem::out << "  AUDIT complete.\n"; }
    }
 
    void BuildOwnedFaultLayout()
@@ -1798,69 +1437,19 @@ private:
       }
    }
 
-   bool IsFaultFace3D(FaceElementTransformations *FTr) const
+   /// Facet BC table lookup for interior faces.
+   FacetBC GetFaceBC(int face_idx) const
    {
-      // Follow Tandem: if the mesh carries the fault tag, trust tag-based
-      // classification and do not silently fall back to coordinates.
-      if (has_fault_attr_)
-      {
-         int e1 = FTr->Elem1No;
-         int e2 = FTr->Elem2No;
-         long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
-         return fault_face_keys_.count(key) > 0;
-      }
-
-      // Fallback: coordinate-based detection (Tandem convention only).
-      // This can hide bad mesh tagging — prefer tag-based detection.
-      used_coord_fallback_ = true;
-
-      // Fault at Y=0, X in [-lf/2, lf/2], Z in [-Wf, 0]
-      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
-      FTr->Face->SetIntPoint(&ip);
-      Vector center(3);
-      FTr->Face->Transform(ip, center);
-
-      const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-
-      return std::abs(center(1)) < tol
-          && std::abs(center(0)) <= lf_ / 2.0 + tol
-          && center(2) >= -Wf_ - tol
-          && center(2) <= tol;
+      return (face_idx >= 0 && face_idx < static_cast<int>(face_bc_.size()))
+             ? face_bc_[face_idx] : FacetBC::None;
    }
 
-   bool IsFaultFace3DShared(int shared_face) const
+   /// Facet BC table lookup for shared faces.
+   FacetBC GetSharedFaceBC(int shared_face) const
    {
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         // Follow Tandem: if the mesh carries the fault tag, trust tag-based
-         // classification and do not silently fall back to coordinates.
-         if (has_fault_attr_)
-         {
-            return fault_shared_tagged_.count(shared_face) > 0;
-         }
-
-         // Fallback: coordinate-based (Tandem convention only)
-         // This can hide bad mesh tagging — see warning in IsFaultFace3D.
-         // Fault at Y=0, X in [-lf/2,lf/2], Z in [-Wf,0]
-         FaceElementTransformations *FTr =
-            mesh_.GetSharedFaceTransformations(shared_face);
-         if (FTr == nullptr) { return false; }
-
-         const IntegrationPoint &ip =
-            Geometries.GetCenter(FTr->GetGeometryType());
-         FTr->Face->SetIntPoint(&ip);
-         Vector center(3);
-         FTr->Face->Transform(ip, center);
-
-         const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-
-         return std::abs(center(1)) < tol
-             && std::abs(center(0)) <= lf_ / 2.0 + tol
-             && center(2) >= -Wf_ - tol && center(2) <= tol;
-#endif
-      }
-      return false;
+      return (shared_face >= 0 &&
+              shared_face < static_cast<int>(shared_face_bc_.size()))
+             ? shared_face_bc_[shared_face] : FacetBC::None;
    }
 
    void SetupSolver()

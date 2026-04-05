@@ -29,6 +29,36 @@ using namespace mfem::seas;
 // Boundary attributes (Tandem tags):
 //   1 = Natural (z=0 top, z=-Lz bottom)
 //   5 = Dirichlet (x=±Lx, y=±Ly far-field)
+/// Add attr-3 internal boundary elements at y=0 interior faces.
+/// Mirrors Tandem's Physical Surface(3) fault tags on the y=0 split plane.
+void AddFaultBoundaryElements(Mesh &mesh, real_t tol = 1e-6)
+{
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      auto *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (!FTr) { continue; }
+      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
+      FTr->Face->SetIntPoint(&ip);
+      Vector center(3);
+      FTr->Face->Transform(ip, center);
+      if (std::abs(center(1)) > tol) { continue; }
+
+      Array<int> verts;
+      mesh.GetFaceVertices(f, verts);
+      if (verts.Size() == 4)
+      {
+         mesh.AddBdrQuad(verts[0], verts[1], verts[2], verts[3], 3);
+      }
+      else if (verts.Size() == 3)
+      {
+         mesh.AddBdrTriangle(verts[0], verts[1], verts[2], 3);
+      }
+   }
+   mesh.FinalizeTopology();
+   mesh.Finalize();
+   mesh.SetAttributes();
+}
+
 Mesh CreateTestMesh3D(int nx, int ny, int nz,
                        real_t Lx, real_t Ly, real_t Lz)
 {
@@ -65,8 +95,8 @@ Mesh CreateTestMesh3D(int nx, int ny, int nz,
       }
    }
 
-   // Update boundary attribute list
-   mesh.SetAttributes();
+   // Add attr-3 internal boundary elements at y=0 (fault plane)
+   AddFaultBoundaryElements(mesh);
 
    return mesh;
 }
@@ -1152,8 +1182,9 @@ void TestTagBasedFaultDetection()
 {
    std::cout << "\n--- Test: Tag-Based Fault Detection ---\n";
 
-   // Load the actual BP5 mesh which has Physical Surface 100 (fault)
-   const std::string mesh_file = "bp5/mesh/bp5_1000m.msh";
+   // Load the Tandem-aligned BP5 mesh that uses attr 3 (fault) and attr 5
+   // (Dirichlet), matching the production startup contract.
+   const std::string mesh_file = "bp5/mesh/reference/bp5_tandem_exact.msh";
    std::ifstream f(mesh_file);
    if (!f.good())
    {
@@ -1174,29 +1205,23 @@ void TestTagBasedFaultDetection()
    }
    mesh.SetAttributes();
 
-   // This mesh uses old MFEM convention (attr 100 for fault).
-   // The code now only supports Tandem convention (attr 3).
-   // Verify that attr 100 is NOT detected as fault.
-   bool has_100 = false;
+   bool has_3 = false, has_5 = false;
    for (int i = 0; i < mesh.bdr_attributes.Size(); i++)
    {
-      if (mesh.bdr_attributes[i] == 100) { has_100 = true; break; }
+      if (mesh.bdr_attributes[i] == 3) { has_3 = true; }
+      if (mesh.bdr_attributes[i] == 5) { has_5 = true; }
    }
-   TEST_ASSERT(has_100, "Gmsh mesh has boundary attribute 100 (old MFEM convention)");
+   TEST_ASSERT(has_3, "Gmsh mesh has boundary attribute 3 (fault)");
+   TEST_ASSERT(has_5, "Gmsh mesh has boundary attribute 5 (Dirichlet)");
 
-   // Build the operator — should NOT find tag-based fault faces (attr 100 not supported)
-   // But coordinate-based fallback may still find faces at x=0 (old convention).
    real_t lambda = 32.04e9, mu = 32.04e9;
    real_t Vp = 1e-9, Wf = 40e3, lf = 100e3;
    ElasticityDomainOperator<Mesh> op(mesh, 1, lambda, mu, Vp, Wf, lf,
                                        DGMethod::IP);
 
    int nf = op.GetNumFaultDOFs();
-   std::cout << "  Fault DOFs (with deprecated attr 100 mesh): " << nf << "\n";
-   // Old MFEM mesh (attr 100) is deprecated. Tag detection returns 0.
-   // Coordinate-based fallback uses Tandem convention (Y=0), which won't
-   // match this mesh's fault at x=0.
-   TEST_ASSERT(true, "Old MFEM mesh attr 100 handled gracefully");
+   std::cout << "  Fault DOFs (with attr-3 mesh): " << nf << "\n";
+   TEST_ASSERT(nf > 0, "Tag-based detection finds fault DOFs on attr-3 mesh");
 }
 
 // =============================================================================
@@ -1206,7 +1231,7 @@ void TestTagExcludesBoundaryFaces()
 {
    std::cout << "\n--- Test: Tag Detection Excludes Boundary Faces ---\n";
 
-   const std::string mesh_file = "bp5/mesh/bp5_1000m.msh";
+   const std::string mesh_file = "bp5/mesh/reference/bp5_tandem_exact.msh";
    std::ifstream f(mesh_file);
    if (!f.good())
    {
@@ -1241,7 +1266,10 @@ void TestTagExcludesBoundaryFaces()
       return;
    }
 
-   // Check that no fault face is at the boundary edges
+   // Check that the recovered fault faces stay within the tagged BP5 fault
+   // plane bounds. The Tandem exact mesh legitimately includes faces that
+   // touch the geometric tips/edges, so strict exclusion of edge-adjacent
+   // faces is no longer a valid expectation here.
    real_t y_min = coords_x2.Min();
    real_t y_max = coords_x2.Max();
    real_t z_min = coords_x3.Min();
@@ -1250,16 +1278,14 @@ void TestTagExcludesBoundaryFaces()
    std::cout << "  y range: [" << y_min << ", " << y_max << "] m\n";
    std::cout << "  z range: [" << z_min << ", " << z_max << "] m\n";
 
-   // The fault extends y in [-50km, +50km] and z in [0, 40km]
-   // Tagged faces should NOT be at the exact boundary
-   TEST_ASSERT(y_min > -lf/2.0 + 100.0,
-               "No fault faces at y=-lf/2 edge");
-   TEST_ASSERT(y_max < lf/2.0 - 100.0,
-               "No fault faces at y=+lf/2 edge");
-   TEST_ASSERT(z_min > 100.0,
-               "No fault faces at z=0 edge");
-   TEST_ASSERT(z_max < Wf - 100.0,
-               "No fault faces at z=Wf edge");
+   TEST_ASSERT(y_min >= -lf/2.0 - 100.0,
+               "Fault faces stay within y=-lf/2 bound");
+   TEST_ASSERT(y_max <= lf/2.0 + 100.0,
+               "Fault faces stay within y=+lf/2 bound");
+   TEST_ASSERT(z_min >= -100.0,
+               "Fault faces stay within z=0 bound");
+   TEST_ASSERT(z_max <= Wf + 100.0,
+               "Fault faces stay within z=Wf bound");
 }
 
 // =============================================================================
@@ -1663,7 +1689,9 @@ Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
       }
    }
 
-   mesh.SetAttributes();
+   // Add attr-3 internal boundary elements at y=0 (fault plane)
+   AddFaultBoundaryElements(mesh);
+
    return mesh;
 }
 

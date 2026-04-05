@@ -48,6 +48,34 @@ using namespace mfem::seas;
 namespace
 {
 
+void AddFaultBoundaryElements(Mesh &mesh, real_t tol = 1e-6)
+{
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      auto *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (!FTr) { continue; }
+      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
+      FTr->Face->SetIntPoint(&ip);
+      Vector center(3);
+      FTr->Face->Transform(ip, center);
+      if (std::abs(center(1)) > tol) { continue; }
+
+      Array<int> verts;
+      mesh.GetFaceVertices(f, verts);
+      if (verts.Size() == 4)
+      {
+         mesh.AddBdrQuad(verts[0], verts[1], verts[2], verts[3], 3);
+      }
+      else if (verts.Size() == 3)
+      {
+         mesh.AddBdrTriangle(verts[0], verts[1], verts[2], 3);
+      }
+   }
+   mesh.FinalizeTopology();
+   mesh.Finalize();
+   mesh.SetAttributes();
+}
+
 std::unique_ptr<Mesh> LoadScaledBP5Mesh(const std::string &mesh_file,
                                         real_t mesh_scale)
 {
@@ -335,6 +363,16 @@ ReferenceIPComparisonResult TestReferenceMeshIPSerialParallel(MPIContext &mpi)
    }
 
    const std::string mesh_file = "bp5/mesh/reference/bp5_tandem_coarse.msh";
+   std::ifstream mesh_in(mesh_file);
+   if (!mesh_in.good())
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Skipping reference BP5 check: missing mesh file "
+                   << mesh_file << "\n";
+      }
+      return result;
+   }
    const real_t mesh_scale = 1000.0;
    const int order = 1;
    const DGMethod dg_method = DGMethod::IP;
@@ -583,7 +621,7 @@ std::unique_ptr<Mesh> CreateBP5InlineMesh(
       mesh->SetBdrAttribute(i, attr);
    }
 
-   mesh->SetAttributes();
+   AddFaultBoundaryElements(*mesh, tol);
    return mesh;
 }
 
