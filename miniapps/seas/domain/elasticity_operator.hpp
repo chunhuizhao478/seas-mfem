@@ -129,6 +129,7 @@ public:
       SetupFESpace();
       SetupBoundaryMarkers();
       SetupFaultInfo();
+      RunStartupFaceAudit();
       SetupSolver();
 
       // Precompute fault depths/coordinates eagerly
@@ -1175,6 +1176,243 @@ private:
 #endif
          }
       }
+   }
+
+   /// Startup face audit. Verifies every y=0 face is uniquely classified,
+   /// checks fault∩dirichlet=∅, exchanges shared-face metadata to detect
+   /// neighbor disagreements, and dumps a per-rank CSV for the fault-tip
+   /// region. Called once from the constructor after SetupFaultInfo().
+   void RunStartupFaceAudit()
+   {
+      int rank = 0, nranks = 1;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+#endif
+      }
+
+      // ---- Lookup sets ----
+      std::set<int> fault_int_set, dir_int_set;
+      for (int i = 0; i < fault_interior_faces_.Size(); i++)
+         fault_int_set.insert(fault_interior_faces_[i]);
+      for (int i = 0; i < dirichlet_interior_faces_.Size(); i++)
+         dir_int_set.insert(dirichlet_interior_faces_[i]);
+
+      std::set<int> fault_sh_set, dir_sh_set;
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         fault_sh_set.insert(fault_shared_faces_[i]);
+      for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+         dir_sh_set.insert(dirichlet_shared_faces_[i]);
+
+      // ---- Assert fault ∩ dirichlet = ∅ ----
+      for (int f : fault_int_set)
+         MFEM_VERIFY(!dir_int_set.count(f),
+            "AUDIT: interior face " << f << " is both fault and Dirichlet");
+      for (int sf : fault_sh_set)
+         MFEM_VERIFY(!dir_sh_set.count(sf),
+            "AUDIT: shared face " << sf << " is both fault and Dirichlet");
+
+      // ---- Collect all y=0 faces with classification ----
+      struct FR { int id; real_t cx,cz; int e1,e2; int cls; bool shared; };
+      // cls: 0=unclassified, 1=fault_int, 2=dir_int, 3=fault_sh, 4=dir_sh
+      std::vector<FR> y0;
+
+      for (int f = 0; f < mesh_.GetNumFaces(); f++)
+      {
+         auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+         if (!FTr) continue;
+         const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
+         FTr->Face->SetIntPoint(&ip);
+         Vector c(3); FTr->Face->Transform(ip, c);
+         if (std::abs(c(1)) >= 1.0) continue;
+         int cls = 0;
+         if (fault_int_set.count(f))    cls = 1;
+         else if (dir_int_set.count(f)) cls = 2;
+         y0.push_back({f, c(0), c(2), FTr->Elem1No, FTr->Elem2No, cls, false});
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!FTr) continue;
+            const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip);
+            Vector c(3); FTr->Face->Transform(ip, c);
+            if (std::abs(c(1)) >= 1.0) continue;
+            int cls = 0;
+            if (fault_sh_set.count(sf))    cls = 3;
+            else if (dir_sh_set.count(sf)) cls = 4;
+            y0.push_back({sf, c(0), c(2), FTr->Elem1No, FTr->Elem2No, cls, true});
+         }
+#endif
+      }
+
+      // ---- Count unclassified ----
+      // Interior counts are exact (one rank per face). Shared counts assume
+      // multiplicity 2 (each shared face on exactly 2 ranks). If the
+      // agreement check below finds topology anomalies, these shared counts
+      // are approximate — the agreement check gives authoritative results.
+      int local_unc_int = 0;
+      for (auto &f : y0) if (f.cls == 0 && !f.shared) local_unc_int++;
+      int global_unc_int = local_unc_int;
+      int local_unc_sh = 0;
+      for (auto &f : y0) if (f.cls == 0 && f.shared) local_unc_sh++;
+      int global_unc_sh = local_unc_sh;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(MPI_IN_PLACE, &global_unc_int, 1, MPI_INT,
+                        MPI_SUM, mesh_.GetComm());
+         MPI_Allreduce(MPI_IN_PLACE, &global_unc_sh, 1, MPI_INT,
+                        MPI_SUM, mesh_.GetComm());
+         global_unc_sh /= 2;
+#endif
+      }
+      if (rank == 0)
+      {
+         int total_unc = global_unc_int + global_unc_sh;
+         mfem::out << "  AUDIT: " << total_unc
+                   << " unclassified y=0 faces (" << global_unc_int
+                   << " interior + ~" << global_unc_sh << " shared)"
+                   << (total_unc > 0 ? " *** CHECK ***" : " (OK)") << "\n";
+      }
+
+      // ---- Dump per-rank CSV: full y=0 inventory + tip region detail ----
+      {
+         const char *cls_name[] = {"UNCLASSIFIED","fault_int","dir_int",
+                                    "fault_sh","dir_sh"};
+         std::ostringstream fn;
+         fn << "face_audit_r" << rank << ".csv";
+         std::ofstream out(fn.str());
+         out << "region,type,id,cx,cz,e1,e2,cls\n";
+         int tip_int = 0, tip_sh = 0;
+         for (auto &f : y0)
+         {
+            bool in_tip = (f.cx >= -45000 && f.cx <= -25000
+                        && f.cz >= -40000 && f.cz <= -35000);
+            const char *region = in_tip ? "TIP" : "ALL";
+            if (in_tip) { if (f.shared) tip_sh++; else tip_int++; }
+            out << region << ","
+                << (f.shared ? "shared" : "interior") << ","
+                << f.id << "," << f.cx << "," << f.cz << ","
+                << f.e1 << "," << f.e2 << ","
+                << cls_name[f.cls] << "\n";
+         }
+         out.close();
+
+         int global_tip_int = tip_int, global_tip_sh = tip_sh;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(MPI_IN_PLACE, &global_tip_int, 1, MPI_INT,
+                           MPI_SUM, mesh_.GetComm());
+            MPI_Allreduce(MPI_IN_PLACE, &global_tip_sh, 1, MPI_INT,
+                           MPI_SUM, mesh_.GetComm());
+            global_tip_sh /= 2;
+#endif
+         }
+         if (rank == 0)
+         {
+            mfem::out << "  AUDIT: " << (global_tip_int + global_tip_sh)
+                      << " y=0 faces in tip region "
+                      << "x∈[-45,-25]km z∈[-40,-35]km ("
+                      << global_tip_int << " int + ~"
+                      << global_tip_sh << " sh)\n";
+         }
+      }
+
+      // ---- Shared-face neighbor agreement ----
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         Array<HYPRE_BigInt> gvert;
+         mesh_.GetGlobalVertexIndices(gvert);
+
+         // Pack: 5 values per shared y=0 face (3 key + cls + rank)
+         std::vector<HYPRE_BigInt> local_flat;
+         for (auto &f : y0)
+         {
+            if (!f.shared) continue;
+            int lf = mesh_.GetSharedFace(f.id);
+            FaceVertexKey fk = MakeFaceKey(lf, gvert);
+            local_flat.push_back(fk.v[0]);
+            local_flat.push_back(fk.v[1]);
+            local_flat.push_back(fk.v[2]);
+            local_flat.push_back(f.cls);
+            local_flat.push_back(rank);
+         }
+
+         int lc = static_cast<int>(local_flat.size());
+         std::vector<int> counts(nranks), displs(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, counts.data(), 1, MPI_INT,
+                        mesh_.GetComm());
+         int total = 0;
+         for (int r = 0; r < nranks; r++)
+         {
+            displs[r] = total;
+            total += counts[r];
+         }
+         std::vector<HYPRE_BigInt> all(total);
+         MPI_Allgatherv(local_flat.data(), lc, HYPRE_MPI_BIG_INT,
+                         all.data(), counts.data(), displs.data(),
+                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
+
+         // Check: matching keys must have same cls
+         std::map<FaceVertexKey, std::vector<std::pair<int,int>>> kmap;
+         for (int i = 0; i < total; i += 5)
+         {
+            FaceVertexKey k;
+            k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
+            kmap[k].push_back({(int)all[i+3], (int)all[i+4]});
+         }
+         int mismatch = 0, bad_mult = 0;
+         for (auto &[k, entries] : kmap)
+         {
+            if (entries.size() != 2)
+            {
+               bad_mult++;
+               if (rank == 0 && bad_mult <= 10)
+               {
+                  mfem::out << "  AUDIT TOPOLOGY: key=("
+                            << k.v[0] << "," << k.v[1] << "," << k.v[2]
+                            << ") has " << entries.size() << " entries (expected 2):";
+                  for (auto &[c, r] : entries)
+                     mfem::out << " r" << r << "=cls" << c;
+                  mfem::out << "\n";
+               }
+               continue;
+            }
+            if (entries[0].first != entries[1].first)
+            {
+               mismatch++;
+               if (rank == 0 && mismatch <= 20)
+               {
+                  mfem::out << "  AUDIT MISMATCH: key=("
+                            << k.v[0] << "," << k.v[1] << "," << k.v[2]
+                            << ") r" << entries[0].second << "=cls"
+                            << entries[0].first << " vs r"
+                            << entries[1].second << "=cls"
+                            << entries[1].first << "\n";
+               }
+            }
+         }
+         if (rank == 0)
+         {
+            mfem::out << "  AUDIT shared-face agreement: "
+                      << mismatch << " cls mismatches, "
+                      << bad_mult << " topology anomalies"
+                      << ((mismatch + bad_mult) > 0 ? " *** BUG ***" : " (OK)")
+                      << "\n";
+         }
+#endif
+      }
+
+      if (rank == 0) { mfem::out << "  AUDIT complete.\n"; }
    }
 
    void BuildOwnedFaultLayout()
