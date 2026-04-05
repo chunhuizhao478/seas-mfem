@@ -1326,6 +1326,126 @@ private:
          }
       }
 
+      // ---- Fault-face metadata dump for blowup region ----
+      // For each fault face near the corner (x∈[-45,-25]km, z∈[-40,-35]km),
+      // dump sign_flipped, canonical_to_local_perm, face key, and element IDs
+      // to a separate CSV for debugging permutation/orientation issues.
+      {
+         Array<HYPRE_BigInt> gvert_fault;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            mesh_.GetGlobalVertexIndices(gvert_fault);
+#endif
+         }
+
+         std::ostringstream csv_buf;
+         int tip_fault = 0;
+         for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+         {
+            int f = fault_interior_faces_[fi];
+            auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+            if (!FTr) continue;
+            const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->Face->SetIntPoint(&ip);
+            Vector c(3); FTr->Face->Transform(ip, c);
+
+            bool in_tip = (c(0) >= -45000 && c(0) <= -25000
+                        && c(2) >= -40000 && c(2) <= -35000);
+            if (!in_tip) continue;
+            tip_fault++;
+
+            const auto &basis = fault_basis_.GetBasis(fi);
+
+            // Permutation string
+            std::string perm_str;
+            for (int k = 0; k < nbf_per_face_; k++)
+            {
+               if (k > 0) perm_str += " ";
+               perm_str += std::to_string(
+                  canonical_to_local_perm_[fi * nbf_per_face_ + k]);
+            }
+
+            // Face key (needs global vertices)
+            std::string key_str = "-";
+            if (gvert_fault.Size() > 0)
+            {
+               FaceVertexKey fk = MakeFaceKey(f, gvert_fault);
+               key_str = std::to_string(fk.v[0]) + " "
+                       + std::to_string(fk.v[1]) + " "
+                       + std::to_string(fk.v[2]);
+            }
+
+            csv_buf << "fault_int," << fi << ","
+                 << c(0) << "," << c(2) << ","
+                 << FTr->Elem1No << "," << FTr->Elem2No << ","
+                 << basis.sign_flipped << ","
+                 << perm_str << ","
+                 << key_str << "\n";
+         }
+
+         // Shared fault faces in the region
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            int total_int = fault_interior_faces_.Size();
+            for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            {
+               int sf = fault_shared_faces_[i];
+               auto *FTr = mesh_.GetSharedFaceTransformations(sf);
+               if (!FTr) continue;
+               const auto &ip = Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->Face->SetIntPoint(&ip);
+               Vector c(3); FTr->Face->Transform(ip, c);
+
+               bool in_tip = (c(0) >= -45000 && c(0) <= -25000
+                           && c(2) >= -40000 && c(2) <= -35000);
+               if (!in_tip) continue;
+               tip_fault++;
+
+               int bi = total_int + i;
+               bool sf_flag = false;
+               if (bi < fault_basis_.NumFaces())
+                  sf_flag = fault_basis_.GetBasis(bi).sign_flipped;
+
+               std::string perm_str;
+               for (int k = 0; k < nbf_per_face_; k++)
+               {
+                  if (k > 0) perm_str += " ";
+                  perm_str += std::to_string(
+                     canonical_to_local_perm_[bi * nbf_per_face_ + k]);
+               }
+
+               int lf = mesh_.GetSharedFace(sf);
+               FaceVertexKey fk = MakeFaceKey(lf, gvert_fault);
+               std::string key_str = std::to_string(fk.v[0]) + " "
+                                   + std::to_string(fk.v[1]) + " "
+                                   + std::to_string(fk.v[2]);
+
+               csv_buf << "fault_sh," << bi << ","
+                    << c(0) << "," << c(2) << ","
+                    << FTr->Elem1No << "," << FTr->Elem2No << ","
+                    << sf_flag << ","
+                    << perm_str << ","
+                    << key_str << "\n";
+            }
+#endif
+         }
+         if (tip_fault > 0)
+         {
+            std::ostringstream fn;
+            fn << "fault_audit_r" << rank << ".csv";
+            std::ofstream fout(fn.str());
+            fout << "type,fi,cx,cz,e1,e2,sign_flipped,perm,face_key\n";
+            fout << csv_buf.str();
+            fout.close();
+            mfem::out << "  [PARTITION] rank=" << rank
+                      << " has " << tip_fault
+                      << " fault faces in blowup region"
+                      << " (file: fault_audit_r" << rank << ".csv)\n";
+         }
+      }
+
       // ---- Shared-face neighbor agreement ----
       if constexpr (IsParallelMesh<MeshType>::value)
       {
