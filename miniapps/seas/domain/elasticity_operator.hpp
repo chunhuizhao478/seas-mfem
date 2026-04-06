@@ -507,6 +507,191 @@ private:
       }
    }
 
+   /// Local-only variant: dumps interior fault faces only (no MPI exchange).
+   /// Safe to call on a single rank without deadlocking.
+   void DebugDumpFaultJumpsLocal(const GridFuncType &displacement,
+                                 const Vector &slip_bc) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_face_jump"),
+                        debug_jump_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_jump_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,q,component,value\n";
+         debug_jump_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int q, int c, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << "," << logical_fault_idx << ","
+             << mesh_face_idx << "," << elem1 << "," << elem2 << ","
+             << record << "," << q << "," << c << "," << value << "\n";
+      };
+
+      const int dim = 3;
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+         const int ndof1 = fe1->GetDof();
+         const int ndof2 = fe2->GetDof();
+         const int nq = face_quad_->NumQuadPoints();
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
+
+         const IntegrationRule &ir = face_quad_->GetQuadRule();
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &fip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+
+            Vector s1(ndof1), s2(ndof2);
+            fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
+            fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++) { u1q += s1(k) * u1_all(c * ndof1 + k); }
+               for (int k = 0; k < ndof2; k++) { u2q += s2(k) * u2_all(c * ndof2 + k); }
+               const real_t slipq = delta_u_quad(c * nq + q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "u1_q", q, c, u1q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "u2_q", q, c, u2q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "slip_q", q, c, slipq);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "jump_minus_slip", q, c,
+                         (u1q - u2q) - slipq);
+            }
+         }
+      }
+   }
+
+   /// Local-only variant: dumps interior fault face traction (no MPI exchange).
+   void DebugDumpFaultTractionLocal(const GridFuncType &displacement,
+                                     const Vector &slip_bc)
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      // Compute full traction (uses the production path, MPI-safe on all ranks)
+      Vector traction, normal_traction;
+      ComputeTraction(displacement, slip_bc, traction, &normal_traction);
+
+      std::ofstream out(DebugFilePath("first_step_face_trac"),
+                        debug_trac_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_trac_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_trac_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << "," << logical_fault_idx << ","
+             << mesh_face_idx << "," << elem1 << "," << elem2 << ","
+             << record << "," << i0 << "," << i1 << "," << value << "\n";
+      };
+
+      const int dim = 3;
+      const int nbf = nbf_per_face_;
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
+
+         DGElasticityIPCombinedIntegrator trac_integ(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         Vector T_quad, nl_q;
+         trac_integ.ComputeTractionAtQuadPoints(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);
+
+         const int nq = T_quad.Size() / dim;
+         const IntegrationRule &ir = IntRules.Get(
+            FTr->GetGeometryType(), 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1);
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir.IntPoint(q));
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "nl_q", q, -1, nl_q(q));
+            for (int c = 0; c < dim; c++)
+            {
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "traction_q", q, c,
+                         T_quad(c * nq + q));
+            }
+         }
+
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            const int dof_idx = fi * nbf + kk;
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "traction_dip", kk, -1,
+                      traction(2 * dof_idx));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "traction_strike", kk, -1,
+                      traction(2 * dof_idx + 1));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "normal_traction", kk, -1,
+                      normal_traction(dof_idx));
+         }
+      }
+   }
+
    void DebugDumpFaultJumps(const GridFuncType &displacement,
                             const Vector &slip_bc) const
    {
@@ -4111,24 +4296,10 @@ void ElasticityDomainOperator<MeshType>::Solve(
                                  DebugEnabledForTime(time);
    debug_time_ = time;
 
-   // Add slip contributions (interior + shared faces)
-   if (debug_first_step)
-   {
-      Vector rhs_slip, rhs_dir;
-      debug_phase_ = DebugAssemblePhase::Slip;
-      AssembleSlipOnlyRHS(rhs_slip, slip_bc);
-      debug_phase_ = DebugAssemblePhase::Dirichlet;
-      AssembleDirichletOnlyRHS(rhs_dir, time);
-      debug_phase_ = DebugAssemblePhase::None;
-
-      rhs = rhs_slip;
-      rhs += rhs_dir;
-
-      DebugDumpElementVector("rhs_slip", rhs_slip);
-      DebugDumpElementVector("rhs_dirichlet", rhs_dir);
-      DebugDumpElementVector("rhs_total", rhs);
-   }
-   else if (method_ == DGMethod::IP)
+   // Production assembly path: same on ALL ranks (MPI-safe).
+   // Debug dumps happen AFTER the solve, gated by rank — no separate
+   // assembly path that could cause MPI divergence.
+   if (method_ == DGMethod::IP)
    {
       AssembleSlipContributionIP(rhs, slip_bc);
       AssembleSlipContributionIPShared(rhs, slip_bc,
@@ -4141,6 +4312,13 @@ void ElasticityDomainOperator<MeshType>::Solve(
                                         fault_interior_faces_.Size());
    }
 
+   // Snapshot slip-only RHS before adding Dirichlet (rank-local, no MPI)
+   Vector rhs_slip_snapshot;
+   if (debug_first_step)
+   {
+      rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
+   }
+
    // Add Dirichlet loading
    AssembleDirichletLoading(rhs, time);
 
@@ -4148,47 +4326,6 @@ void ElasticityDomainOperator<MeshType>::Solve(
    B_ = rhs;
 
    solver_->Mult(B_, X_);
-
-   if (debug_first_step)
-   {
-      DebugDumpElementVector("u", X_);
-
-      // K spot-check: apply K to unit vectors at target element DOFs.
-      // Dumps K*e_hat for direct column-of-K comparison with Tandem.
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         auto *Kh = cached_Ah_.As<HypreParMatrix>();
-         if (Kh)
-         {
-            const auto &target_elems = DebugTargetLocalElements();
-            Vector e_hat(fes_->GetVSize());
-            Vector Ke(fes_->GetVSize());
-            // Pick first DOF of each target element's x-component
-            for (int elem : target_elems)
-            {
-               Array<int> vdofs;
-               fes_->GetElementVDofs(elem, vdofs);
-               if (vdofs.Size() == 0) { continue; }
-               int probe_vdof = vdofs[0];  // first DOF, x-component
-               if (probe_vdof < 0) { probe_vdof = -1 - probe_vdof; }
-               e_hat = 0.0;
-               e_hat(probe_vdof) = 1.0;
-               Kh->Mult(e_hat, Ke);
-               std::ostringstream label;
-               label << "K_e" << elem << "_d" << probe_vdof;
-               DebugDumpElementVector(label.str().c_str(), Ke);
-            }
-         }
-#endif
-      }
-
-      GridFuncType debug_u(fes_.get());
-      debug_u = X_;
-      DebugDumpFaultJumps(debug_u, slip_bc);
-      DebugDumpFaultTraction(debug_u, slip_bc);
-      first_step_debug_done_ = true;
-   }
 
    // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
    if (check_residual_)
@@ -4255,6 +4392,26 @@ void ElasticityDomainOperator<MeshType>::Solve(
    }
 
    displacement = X_;
+
+   // Debug dumps: rank-local file I/O only, no MPI collectives.
+   // Placed AFTER displacement = X_ so the GridFunction has the current solution.
+   if (debug_first_step)
+   {
+      // Compute Dirichlet-only RHS by subtraction (no extra assembly)
+      Vector rhs_dir(rhs.Size());
+      subtract(rhs, rhs_slip_snapshot, rhs_dir);
+
+      DebugDumpElementVector("rhs_slip", rhs_slip_snapshot);
+      DebugDumpElementVector("rhs_dirichlet", rhs_dir);
+      DebugDumpElementVector("rhs_total", rhs);
+      DebugDumpElementVector("u", X_);
+
+      // Dump fault jumps and traction using the solved displacement.
+      // Interior faces only — no ExchangeFaceNbrData (MPI-safe).
+      DebugDumpFaultJumpsLocal(displacement, slip_bc);
+      DebugDumpFaultTractionLocal(displacement, slip_bc);
+      first_step_debug_done_ = true;
+   }
 }
 
 template <typename MeshType>
