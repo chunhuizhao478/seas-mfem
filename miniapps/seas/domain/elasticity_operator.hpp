@@ -2540,6 +2540,76 @@ private:
       cached_a_->Assemble(0);
       cached_a_->Finalize();
 
+      // K assembly diagnostics: count faces/elements processed.
+      // All ranks participate in MPI_Allreduce — MPI-safe.
+      {
+         long long local_volume = mesh_.GetNE();
+
+         long long local_interior_face = 0;
+         for (int f = 0; f < mesh_.GetNumFaces(); f++)
+         {
+            if (mesh_.GetInteriorFaceTransformations(f)) { local_interior_face++; }
+         }
+
+         // Count boundary faces processed by the Dirichlet face integrator
+         long long local_bdr_face = 0;
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            int attr = mesh_.GetBdrAttribute(be);
+            if (dirichlet_bdr_marker_.Size() > 0 &&
+                dirichlet_bdr_marker_[attr - 1] == 1)
+            {
+               auto *FTr = mesh_.GetBdrFaceTransformations(be);
+               if (FTr) { local_bdr_face++; }
+            }
+         }
+
+         // Count ALL boundary elements (any attr) to see total boundary faces
+         long long local_bdr_all = 0;
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            auto *FTr = mesh_.GetBdrFaceTransformations(be);
+            if (FTr) { local_bdr_all++; }
+         }
+
+         long long local_shared = 0;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            local_shared = mesh_.GetNSharedFaces();
+#endif
+         }
+
+         long long counts[5] = {local_volume, local_interior_face, local_shared,
+                                local_bdr_face, local_bdr_all};
+         long long global[5] = {0};
+
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(counts, global, 5, MPI_LONG_LONG, MPI_SUM,
+                          mesh_.GetComm());
+#endif
+         }
+         else
+         {
+            for (int i = 0; i < 5; i++) { global[i] = counts[i]; }
+         }
+
+         if (DebugRank() == 0)
+         {
+            mfem::out << "  [K-DIAG] Volume elements:        " << global[0] << "\n";
+            mfem::out << "  [K-DIAG] Interior faces (K):     " << global[1] << "\n";
+            mfem::out << "  [K-DIAG] Shared faces (K):       " << global[2]
+                      << " (each counted by owning rank)\n";
+            mfem::out << "  [K-DIAG] Bdr faces (Dirichlet):  " << global[3] << "\n";
+            mfem::out << "  [K-DIAG] Bdr faces (all attrs):  " << global[4] << "\n";
+            mfem::out << "  [K-DIAG] Total K contributions:  "
+                      << global[0] + global[1] + global[2] + global[3]
+                      << " (vol + interior + shared + bdr_dir)\n";
+         }
+      }
+
       // Set up solver operator
       if constexpr (IsParallelMesh<MeshType>::value)
       {
