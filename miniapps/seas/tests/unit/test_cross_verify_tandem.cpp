@@ -2093,6 +2093,131 @@ void TestSignFlippedTractionProjection()
 }
 
 // ============================================================================
+// Test 21b: sign_flipped normal traction projection in 3-component path
+//
+// Production BP5 normal traction uses the unified 3-component projection:
+//   [normal, dip, strike] = ProjectTractionToFaultDOFs(..., ncomp_local=3)
+// followed by:
+//   normal_traction = -projected_normal
+//
+// This test verifies that the extracted normal traction is invariant under
+// sign_flipped when the 3D traction input is negated consistently with the
+// flipped mesh normal.
+// ============================================================================
+void TestSignFlippedNormalTractionProjection()
+{
+   std::cout << "\n[Test 21b] sign_flipped normal traction in 3-component projection\n";
+
+   int dim = 3, nbf = 1, ncomp = 3;
+
+   const IntegrationRule &ir = IntRules.Get(Geometry::TRIANGLE, 1);
+   int nq = ir.GetNPoints();
+
+   DenseMatrix e_q(nbf, nq);
+   for (int q = 0; q < nq; q++) { e_q(0, q) = 1.0; }
+
+   Vector nl_q(nq);
+   for (int q = 0; q < nq; q++) { nl_q(q) = 1.0; }
+
+   // BP5 basis:
+   //   normal  = (0,-1,0)
+   //   tangent1 = dip    = (0,0,-1)
+   //   tangent2 = strike = (1,0,0)
+   real_t basis_vecs[3][3] = {
+      {0, -1, 0},
+      {0,  0, -1},
+      {1,  0,  0}
+   };
+
+   // Reference 3D traction:
+   //   T = (5, 3, -2) MPa
+   // Then:
+   //   T·n      = (5,3,-2)·(0,-1,0) = -3 MPa
+   //   normal_traction = -(T·n) = +3 MPa  (compression)
+   //   tau_dip    = T·t1 = +2 MPa
+   //   tau_strike = T·t2 = +5 MPa
+
+   // Case 1: non-flipped face
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = 5e6;
+         T_q(1 * nq + q) = 3e6;
+         T_q(2 * nq + q) = -2e6;
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, basis_vecs,
+         false, trac_local);
+
+      real_t normal_traction = -trac_local(0);
+      real_t tau_dip = trac_local(1);
+      real_t tau_strike = trac_local(2);
+
+      TEST_NEAR(normal_traction, 3e6, 1e-6,
+                "Non-flipped: normal traction = +3 MPa compression");
+      TEST_NEAR(tau_dip, 2e6, 1e-6, "Non-flipped: tau_dip = 2 MPa");
+      TEST_NEAR(tau_strike, 5e6, 1e-6, "Non-flipped: tau_strike = 5 MPa");
+   }
+
+   // Case 2: flipped face with consistently negated traction input
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = -5e6;
+         T_q(1 * nq + q) = -3e6;
+         T_q(2 * nq + q) = 2e6;
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, basis_vecs,
+         true, trac_local);
+
+      real_t normal_traction = -trac_local(0);
+      real_t tau_dip = trac_local(1);
+      real_t tau_strike = trac_local(2);
+
+      TEST_NEAR(normal_traction, 3e6, 1e-6,
+                "Flipped: normal traction = +3 MPa compression");
+      TEST_NEAR(tau_dip, 2e6, 1e-6,
+                "Flipped: tau_dip invariant under double negation");
+      TEST_NEAR(tau_strike, 5e6, 1e-6,
+                "Flipped: tau_strike invariant under double negation");
+   }
+
+   // Case 3: flipped traction WITHOUT sign_flipped should invert all components
+   {
+      Vector T_q(dim * nq);
+      for (int q = 0; q < nq; q++)
+      {
+         T_q(0 * nq + q) = -5e6;
+         T_q(1 * nq + q) = -3e6;
+         T_q(2 * nq + q) = 2e6;
+      }
+
+      Vector trac_local;
+      DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+         dim, ncomp, T_q, nl_q, ir, nbf, e_q, basis_vecs,
+         false, trac_local);
+
+      real_t normal_traction = -trac_local(0);
+      real_t tau_dip = trac_local(1);
+      real_t tau_strike = trac_local(2);
+
+      TEST_NEAR(normal_traction, -3e6, 1e-6,
+                "Missing flip flag: normal traction sign is wrong");
+      TEST_NEAR(tau_dip, -2e6, 1e-6,
+                "Missing flip flag: tau_dip sign is wrong");
+      TEST_NEAR(tau_strike, -5e6, 1e-6,
+                "Missing flip flag: tau_strike sign is wrong");
+   }
+}
+
+// ============================================================================
 // Test 22: v55 — FaultBasis sign_flipped flag is set correctly
 // ============================================================================
 void TestFaultBasisSignFlipped()
@@ -2188,6 +2313,7 @@ int main()
    TestSignChainDisplacementJump();
    TestKbConsistency();
    TestSignFlippedTractionProjection();
+   TestSignFlippedNormalTractionProjection();
    TestFaultBasisSignFlipped();
 
    TEST_PRINT_RESULTS();

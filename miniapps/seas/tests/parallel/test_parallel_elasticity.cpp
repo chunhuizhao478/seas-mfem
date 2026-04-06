@@ -482,6 +482,128 @@ bool test_canonical_dof_coords_match_serial(MPIContext &ctx)
    return ok;
 }
 
+/// Test: BP5 FaultGeometry uses the same owned DOF ordering as the solver path.
+///
+/// This directly checks the consistency risk:
+///   domain local fault getters -> RestrictToOwnedFault -> FaultGeometry<ParMesh>
+/// for all geometry-driven BP5 quantities used by friction/state evolution.
+bool test_bp5_fault_geometry_owned_order(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_bp5_fault_geometry_owned_order... " << std::flush;
+   }
+
+   real_t Lx = 100.0e3, Ly = 60.0e3, Lz = 50.0e3;
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+   ParMesh pmesh(ctx.GetComm(), serial_mesh);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = params.Wf;
+   real_t lf = params.lf;
+
+   ElasticityDomainOperator<ParMesh> domain(pmesh, 1, lambda, mu, Vp, Wf, lf);
+
+   FaultGeometry<ParMesh> geom(domain, params, &ctx);
+
+   Vector local_x2, local_x3, local_depths;
+   domain.GetFaultCoords2D(local_x2, local_x3);
+   domain.GetFaultDepths(local_depths);
+
+   Vector owned_x2, owned_x3, owned_depths;
+   domain.RestrictToOwnedFault(local_x2, owned_x2);
+   domain.RestrictToOwnedFault(local_x3, owned_x3);
+   domain.RestrictToOwnedFault(local_depths, owned_depths);
+
+   const Vector &geom_x2 = geom.GetCoordsX2();
+   const Vector &geom_x3 = geom.GetCoordsX3();
+   const Vector &geom_depths = geom.GetDepths();
+   const Vector &geom_a = geom.GetAValues();
+   const Vector &geom_eta = geom.GetEtaValues();
+   const Vector &geom_dc = geom.GetDcValues();
+   const Vector &geom_tau_pre = geom.GetTauPre();
+   const Vector &geom_v_init = geom.GetVInit();
+
+   bool ok = true;
+   const int n = geom.NumFaultDOFs();
+
+   ok = ok && (owned_x2.Size() == n);
+   ok = ok && (owned_x3.Size() == n);
+   ok = ok && (owned_depths.Size() == n);
+   ok = ok && (geom_tau_pre.Size() == 2 * n);
+   ok = ok && (geom_v_init.Size() == 2 * n);
+
+   for (int i = 0; ok && i < n; i++)
+   {
+      if (std::abs(owned_x2(i) - geom_x2(i)) > 1e-12 ||
+          std::abs(owned_x3(i) - geom_x3(i)) > 1e-12 ||
+          std::abs(owned_depths(i) - geom_depths(i)) > 1e-12 ||
+          std::abs(geom_depths(i) - geom_x3(i)) > 1e-12)
+      {
+         ok = false;
+         if (ctx.IsRoot())
+         {
+            std::cerr << "  geometry/order mismatch at owned DOF " << i
+                      << ": owned=(" << owned_x2(i) << "," << owned_x3(i)
+                      << "," << owned_depths(i) << ")"
+                      << " geom=(" << geom_x2(i) << "," << geom_x3(i)
+                      << "," << geom_depths(i) << ")\n";
+         }
+         break;
+      }
+
+      const real_t expect_a = params.a_of_x2_x3(geom_x2(i), geom_x3(i));
+      const real_t expect_dc = params.Dc_of_x2_x3(geom_x2(i), geom_x3(i));
+      real_t expect_tau[2];
+      params.tau0_vec(geom_x2(i), geom_x3(i), expect_tau);
+      real_t expect_v[2];
+      params.V_init_vec(geom_x2(i), geom_x3(i), expect_v);
+
+      if (std::abs(geom_a(i) - expect_a) > 1e-12 ||
+          std::abs(geom_eta(i) - params.eta()) > 1e-12 ||
+          std::abs(geom_dc(i) - expect_dc) > 1e-12 ||
+          std::abs(geom_tau_pre(2 * i) - expect_tau[0]) > 1e-12 ||
+          std::abs(geom_tau_pre(2 * i + 1) - expect_tau[1]) > 1e-12 ||
+          std::abs(geom_v_init(2 * i) - expect_v[0]) > 1e-12 ||
+          std::abs(geom_v_init(2 * i + 1) - expect_v[1]) > 1e-12)
+      {
+         ok = false;
+         if (ctx.IsRoot())
+         {
+            std::cerr << "  BP5 parameter/order mismatch at owned DOF " << i
+                      << ": x=(" << geom_x2(i) << "," << geom_x3(i) << ")"
+                      << " a=" << geom_a(i) << " expect_a=" << expect_a
+                      << " Dc=" << geom_dc(i) << " expect_Dc=" << expect_dc
+                      << " tau=(" << geom_tau_pre(2 * i) << ","
+                      << geom_tau_pre(2 * i + 1) << ")"
+                      << " expect_tau=(" << expect_tau[0] << ","
+                      << expect_tau[1] << ")"
+                      << " V_init=(" << geom_v_init(2 * i) << ","
+                      << geom_v_init(2 * i + 1) << ")"
+                      << " expect_V_init=(" << expect_v[0] << ","
+                      << expect_v[1] << ")\n";
+         }
+         break;
+      }
+   }
+
+   int ok_int = ok ? 1 : 0;
+   ok_int = ctx.GlobalMinInt(ok_int);
+   ok = (ok_int == 1);
+
+   TEST_CHECK(ctx, "BP5 FaultGeometry uses owned fault ordering", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (owned_dofs=" << n << ")" << std::endl;
+   }
+   return ok;
+}
+
 /// Create a 3D TET mesh: [-Lx,Lx] x [-Ly,Ly] x [-Lz,0]
 /// Same domain/BCs as hex version but with tetrahedral elements.
 Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
@@ -1489,6 +1611,7 @@ int main(int argc, char *argv[])
    test_serial_parallel_fault_dof_count(ctx);
    // test_owned_fault_layout(ctx);        // temporarily disabled (known issue)
    // test_canonical_dof_coords_match_serial(ctx);  // temporarily disabled
+   test_bp5_fault_geometry_owned_order(ctx);
    test_shared_face_micro(ctx);
    test_serial_parallel_displacement_match(ctx);
    test_parallel_zero_slip_traction(ctx);
