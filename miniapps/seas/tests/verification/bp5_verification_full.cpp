@@ -726,7 +726,7 @@ int main(int argc, char *argv[])
       else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
       std::cout << "  Solver: " << solver_desc << "\n";
-      std::string bc_desc = "FarField (attrs 1-4 Dirichlet, 5-6 Natural)";
+      std::string bc_desc = "FarField";
       if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
       else if (bc_mode == BCMode::AllDirichlet) bc_desc = "AllDirichlet (all attrs Dirichlet, legacy)";
       std::cout << "  BC mode: " << bc_desc << "\n";
@@ -890,7 +890,7 @@ int main(int argc, char *argv[])
    seas::TraceConfig trace_cfg;
    trace_cfg.use_coord_window = true;
    trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
-   trace_cfg.x3_min = -40e3; trace_cfg.x3_max = -35e3;
+   trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
    trace_cfg.num_control_faces = 2;
    trace_cfg.max_traced_faces = 50;
    trace_cfg.output_dir = output_dir;
