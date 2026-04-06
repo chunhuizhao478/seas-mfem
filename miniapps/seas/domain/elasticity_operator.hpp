@@ -519,13 +519,9 @@ private:
       const auto &target_elems = DebugTargetLocalElements();
       if (target_elems.empty()) { return; }
 
-      std::ofstream out(DebugFilePath("first_step_K_contributions"),
-                        std::ios::trunc);
-      if (!out) { return; }
-      out << "source,elem_or_face,elem1,elem2,block,row,col,value\n";
-
-      auto write_mat = [&](const char *source, int id, int e1, int e2,
-                           const char *block, const DenseMatrix &M)
+      auto write_mat = [](std::ofstream &os, const char *source, int id,
+                          int e1, int e2, const char *block,
+                          const DenseMatrix &M)
       {
          for (int i = 0; i < M.Height(); i++)
          {
@@ -534,83 +530,99 @@ private:
                real_t v = M(i, j);
                if (std::abs(v) > 1e-30)
                {
-                  out << source << "," << id << "," << e1 << "," << e2
-                      << "," << block << "," << i << "," << j << ","
-                      << std::setprecision(17) << v << "\n";
+                  os << source << "," << id << "," << e1 << "," << e2
+                     << "," << block << "," << i << "," << j << ","
+                     << std::setprecision(17) << v << "\n";
                }
             }
          }
       };
 
       // 1. Volume contributions: ElasticityIntegrator on target elements
-      ElasticityIntegrator vol_integ(lambda_coeff_, mu_coeff_);
-      for (int elem : target_elems)
       {
-         const FiniteElement *fe = scalar_fes_->GetFE(elem);
-         ElementTransformation *eltrans = mesh_.GetElementTransformation(elem);
-         DenseMatrix K_vol;
-         vol_integ.AssembleElementMatrix(*fe, *eltrans, K_vol);
-         write_mat("volume", elem, elem, -1, "A00", K_vol);
+         std::ofstream out(DebugFilePath("first_step_K_volume"), std::ios::trunc);
+         if (out)
+         {
+            out << "source,elem,elem1,elem2,block,row,col,value\n";
+            ElasticityIntegrator vol_integ(lambda_coeff_, mu_coeff_);
+            for (int elem : target_elems)
+            {
+               const FiniteElement *fe = scalar_fes_->GetFE(elem);
+               ElementTransformation *eltrans =
+                  mesh_.GetElementTransformation(elem);
+               DenseMatrix K_vol;
+               vol_integ.AssembleElementMatrix(*fe, *eltrans, K_vol);
+               write_mat(out, "volume", elem, elem, -1, "A00", K_vol);
+            }
+         }
       }
 
       // 2. Interior face contributions: DGElasticityIPCombinedIntegrator
-      DGElasticityIPCombinedIntegrator face_integ(
-         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
-
-      int nfaces = mesh_.GetNumFaces();
-      for (int f = 0; f < nfaces; f++)
       {
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(f);
-         if (!FTr) { continue; }
+         std::ofstream out(DebugFilePath("first_step_K_skeleton"),
+                           std::ios::trunc);
+         if (out)
+         {
+            out << "source,face,elem1,elem2,block,row,col,value\n";
+            DGElasticityIPCombinedIntegrator face_integ(
+               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
-         // Only dump if at least one element is a target
-         bool e1_target = target_elems.count(FTr->Elem1No) > 0;
-         bool e2_target = (FTr->Elem2No >= 0 &&
-                           target_elems.count(FTr->Elem2No) > 0);
-         if (!e1_target && !e2_target) { continue; }
+            int nfaces = mesh_.GetNumFaces();
+            for (int f = 0; f < nfaces; f++)
+            {
+               FaceElementTransformations *FTr =
+                  mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
 
-         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
-         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
-         DenseMatrix K_face;
-         face_integ.AssembleFaceMatrix(*fe1, *fe2, *FTr, K_face);
+               bool e1_target = target_elems.count(FTr->Elem1No) > 0;
+               bool e2_target = (FTr->Elem2No >= 0 &&
+                                 target_elems.count(FTr->Elem2No) > 0);
+               if (!e1_target && !e2_target) { continue; }
 
-         // Split into 4 blocks: A00, A01, A10, A11
-         int n1 = fe1->GetDof() * dim;
-         int n2 = fe2->GetDof() * dim;
-         DenseMatrix A00(n1, n1), A01(n1, n2), A10(n2, n1), A11(n2, n2);
-         K_face.GetSubMatrix(0, n1, 0, n1, A00);
-         K_face.GetSubMatrix(0, n1, n1, n1 + n2, A01);
-         K_face.GetSubMatrix(n1, n1 + n2, 0, n1, A10);
-         K_face.GetSubMatrix(n1, n1 + n2, n1, n1 + n2, A11);
+               const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+               const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+               DenseMatrix K_face;
+               face_integ.AssembleFaceMatrix(*fe1, *fe2, *FTr, K_face);
 
-         write_mat("interior_face", f, FTr->Elem1No, FTr->Elem2No,
-                   "A00", A00);
-         write_mat("interior_face", f, FTr->Elem1No, FTr->Elem2No,
-                   "A01", A01);
-         write_mat("interior_face", f, FTr->Elem1No, FTr->Elem2No,
-                   "A10", A10);
-         write_mat("interior_face", f, FTr->Elem1No, FTr->Elem2No,
-                   "A11", A11);
-      }
+               int n1 = fe1->GetDof() * dim;
+               int n2 = fe2->GetDof() * dim;
+               DenseMatrix A00(n1, n1), A01(n1, n2), A10(n2, n1), A11(n2, n2);
+               K_face.GetSubMatrix(0, n1, 0, n1, A00);
+               K_face.GetSubMatrix(0, n1, n1, n1 + n2, A01);
+               K_face.GetSubMatrix(n1, n1 + n2, 0, n1, A10);
+               K_face.GetSubMatrix(n1, n1 + n2, n1, n1 + n2, A11);
 
-      // 3. Boundary face contributions (if any target element touches a boundary)
-      for (int be = 0; be < mesh_.GetNBE(); be++)
-      {
-         int attr = mesh_.GetBdrAttribute(be);
-         if (dirichlet_bdr_marker_.Size() > 0 &&
-             dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A00", A00);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A01", A01);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A10", A10);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A11", A11);
+            }
 
-         int face_idx, face_info;
-         mesh_.GetBdrElementFace(be, &face_idx, &face_info);
-         FaceElementTransformations *FTr =
-            mesh_.GetFaceElementTransformations(face_idx);
-         if (!FTr || target_elems.count(FTr->Elem1No) == 0) { continue; }
+            // Boundary face contributions (if any target element touches one)
+            for (int be = 0; be < mesh_.GetNBE(); be++)
+            {
+               int attr = mesh_.GetBdrAttribute(be);
+               if (dirichlet_bdr_marker_.Size() > 0 &&
+                   dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
 
-         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
-         DenseMatrix K_bdr;
-         face_integ.AssembleFaceMatrix(*fe1, *fe1, *FTr, K_bdr);
-         write_mat("boundary_face", face_idx, FTr->Elem1No, -1, "A00", K_bdr);
+               int face_idx, face_info_val;
+               mesh_.GetBdrElementFace(be, &face_idx, &face_info_val);
+               FaceElementTransformations *FTr =
+                  mesh_.GetFaceElementTransformations(face_idx);
+               if (!FTr || target_elems.count(FTr->Elem1No) == 0)
+               { continue; }
+
+               const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+               DenseMatrix K_bdr;
+               face_integ.AssembleFaceMatrix(*fe1, *fe1, *FTr, K_bdr);
+               write_mat(out, "boundary_face", face_idx, FTr->Elem1No, -1,
+                         "A00", K_bdr);
+            }
+         }
       }
    }
 
