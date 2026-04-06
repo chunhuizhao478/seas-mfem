@@ -739,8 +739,11 @@ public:
          real_t wn = ir.IntPoint(q).weight * nl_q(q);
 
          // Get local basis vectors and sign for this quad point.
-         // When ncomp_local=3: basis_vec[0]=normal, [1]=tangent1, [2]=tangent2
-         // When ncomp_local=2: basis_vec[0]=tangent1, [1]=tangent2
+         // Layout depends on ncomp_local:
+         //   ncomp_local=3: basis_vec = [normal, tangent1, tangent2]
+         //   ncomp_local=2: basis_vec = [tangent1, tangent2]
+         //   ncomp_local=1: basis_vec = [tangents[0]] (caller decides:
+         //                  normal for normal decomposition, tangent1 otherwise)
          real_t n0[3], t1[3], t2[3];
          real_t sf;
          if (qp_data && q < static_cast<int>(qp_data->size()))
@@ -758,14 +761,18 @@ public:
          {
             for (int d = 0; d < 3; d++)
             {
-               n0[d] = (ncomp_local >= 3) ? tangents[0][d] : 0.0;
-               t1[d] = tangents[ncomp_local >= 3 ? 1 : 0][d];
-               t2[d] = tangents[ncomp_local >= 3 ? 2 : 1][d];
+               n0[d] = tangents[0][d];
+               t1[d] = (ncomp_local >= 2) ? tangents[ncomp_local >= 3 ? 1 : 0][d] : 0.0;
+               t2[d] = (ncomp_local >= 2) ? tangents[ncomp_local >= 3 ? 2 : 1][d] : 0.0;
             }
             sf = sign_flipped ? -1.0 : 1.0;
          }
+         // Map ncomp_local to the correct basis vectors:
+         //   ncomp=3: [normal, tangent1, tangent2]
+         //   ncomp=2: [tangent1, tangent2]  (n0=tangents[0]=tangent1 in this case)
+         //   ncomp=1: [tangents[0]]         (n0=tangents[0], whatever the caller passed)
          const real_t *basis_vec[3] = {
-            (ncomp_local >= 3) ? n0 : t1,
+            (ncomp_local >= 3) ? n0 : (ncomp_local == 1) ? n0 : t1,
             (ncomp_local >= 3) ? t1 : t2,
             t2
          };

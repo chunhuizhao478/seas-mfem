@@ -540,8 +540,8 @@ def main():
                         # current MFEM output files carry reversed slip sign
                         # relative to Tandem for both strike and dip. Revert
                         # this in the plot loader for comparison runs.
-                        data["slip_strike"] = -data["slip_strike"]
-                        data["slip_dip"] = -data["slip_dip"]
+                        data["slip_strike"] = data["slip_strike"]
+                        data["slip_dip"] = data["slip_dip"]
             datasets.append((label, data, color, ls))
 
         # Skip if no data at this station
@@ -583,7 +583,7 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=1,
+                t_max_yr=0.01,
                 save_path=fname_close,
             )
         else:

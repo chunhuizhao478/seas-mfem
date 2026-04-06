@@ -4346,6 +4346,172 @@ void TestPerQPFaultBasisCurved()
              << (found_diff ? "yes" : "no") << "\n";
 }
 
+/// Test: Spurious normal traction from purely tangential slip (IP method).
+///
+/// On a planar fault (y=0) with tet elements, purely tangential (dip) slip
+/// should produce zero normal traction by symmetry. In practice, the DG
+/// discretization produces a small spurious T_n from:
+///   (a) mesh asymmetry across the fault (tet faces are not symmetric)
+///   (b) the penalty term acting on the normal component of [[u]]
+///
+/// This test measures:
+///   1. The spurious T_n magnitude relative to sigma_n_base (25 MPa)
+///   2. The decomposition: how much comes from stress vs correction
+///   3. Scaling: whether T_n grows linearly or superlinearly with slip
+///
+/// If the spurious T_n is a significant fraction of sigma_n_base, it could
+/// explain the 25-year blowup through sigma_n_eff erosion.
+void TestNormalTractionLeakageIP()
+{
+   std::cout << "\n--- TestNormalTractionLeakageIP ---\n";
+
+   real_t Lx = 100.0e3, Ly = 60.0e3, Lz = 50.0e3;
+   Mesh mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+
+   BP5Params params;
+   ElasticityDomainOperator<Mesh> op(mesh, 1, params.lambda(), params.mu(),
+                                     0.0, Lz, 2.0 * Ly, DGMethod::IP);
+
+   const int ndofs = op.GetNumFaultDOFs();
+   const int nbf = op.GetNbfPerFace();
+   if (ndofs == 0)
+   {
+      std::cout << "  (Skipped: no fault faces found)\n";
+      return;
+   }
+
+   real_t sigma_n_base = params.sigma_n;  // 25 MPa
+
+   // Sweep over increasing slip magnitudes
+   real_t slip_mags[] = {0.001, 0.01, 0.1, 1.0, 10.0};
+   int n_mags = 5;
+
+   std::cout << std::scientific << std::setprecision(4);
+   std::cout << "  sigma_n_base = " << sigma_n_base << " Pa\n";
+   std::cout << "  ndofs=" << ndofs << " nbf=" << nbf << "\n";
+   std::cout << "  slip_m    |Tn_max|     |Tn_stress|  |Tn_corr|    "
+             << "|Tn_jr|      Tn/sigma_n  corr/stress\n";
+
+   real_t prev_Tn_max = 0;
+   real_t prev_slip = 0;
+   bool linear_scaling = true;
+   real_t max_Tn_ratio = 0;  // max |Tn| / sigma_n_base
+
+   for (int si = 0; si < n_mags; si++)
+   {
+      real_t slip_mag = slip_mags[si];
+
+      // Pure dip slip, uniform across all DOFs
+      Vector slip(2 * ndofs);
+      slip = 0.0;
+      for (int i = 0; i < ndofs; i++)
+      {
+         slip(2 * i) = slip_mag;  // dip only, no strike
+      }
+
+      GridFunction u(&op.GetFESpace());
+      u = 0.0;
+      op.Solve(0.0, slip, u);
+
+      Vector traction, stress, corr, jump_res;
+      Vector normal_trac, normal_stress, normal_corr;
+      op.ComputeTractionDiagnostics(u, slip, traction, stress, corr, jump_res,
+                                    &normal_trac, &normal_stress, &normal_corr);
+
+      // Find max |T_n|, |T_n_stress|, |T_n_corr| across all DOFs
+      real_t Tn_max = 0, Tn_stress_max = 0, Tn_corr_max = 0;
+      for (int i = 0; i < ndofs; i++)
+      {
+         Tn_max = std::max(Tn_max, std::abs(normal_trac(i)));
+         Tn_stress_max = std::max(Tn_stress_max, std::abs(normal_stress(i)));
+         Tn_corr_max = std::max(Tn_corr_max, std::abs(normal_corr(i)));
+      }
+
+      // Also compute jump residual normal component
+      // normal_trac = normal_stress + normal_corr + normal_jump_res
+      // → normal_jump_res = normal_trac - normal_stress - normal_corr
+      real_t Tn_jumpres_max = 0;
+      for (int i = 0; i < ndofs; i++)
+      {
+         real_t jr_n = normal_trac(i) - normal_stress(i) - normal_corr(i);
+         Tn_jumpres_max = std::max(Tn_jumpres_max, std::abs(jr_n));
+      }
+
+      real_t Tn_ratio = Tn_max / sigma_n_base;
+      real_t corr_over_stress = Tn_corr_max / std::max(Tn_stress_max, 1e-30);
+      max_Tn_ratio = std::max(max_Tn_ratio, Tn_ratio);
+
+      std::cout << "  " << slip_mag
+                << "   " << Tn_max
+                << "   " << Tn_stress_max
+                << "   " << Tn_corr_max
+                << "   " << Tn_jumpres_max
+                << "   " << Tn_ratio
+                << "   " << corr_over_stress << "\n";
+
+      // Per-DOF dump at slip=1m to see cancellation pattern
+      if (std::abs(slip_mag - 1.0) < 0.01)
+      {
+         // Get fault coordinates for location context
+         Vector local_x2, local_x3;
+         op.GetFaultCoords2D(local_x2, local_x3);
+
+         std::cout << "  --- Per-DOF at slip=1m (face,dof  x2  x3  "
+                   << "Tn_total  Tn_stress  Tn_corr  Tn_jumpres) ---\n";
+         for (int f = 0; f < ndofs / nbf; f++)
+         {
+            for (int k = 0; k < nbf; k++)
+            {
+               int d = f * nbf + k;
+               real_t jr_n = normal_trac(d) - normal_stress(d) - normal_corr(d);
+               std::cout << "  f" << f << "d" << k
+                         << "  x2=" << local_x2(d)
+                         << "  x3=" << local_x3(d)
+                         << "  total=" << normal_trac(d)
+                         << "  stress=" << normal_stress(d)
+                         << "  corr=" << normal_corr(d)
+                         << "  jumpres=" << jr_n << "\n";
+            }
+         }
+      }
+
+      // Check superlinear growth: if slip doubles, T_n should roughly double
+      // (linear). If T_n grows much faster, there's a stability concern.
+      if (si > 0 && prev_Tn_max > 1e-20)
+      {
+         real_t slip_ratio = slip_mag / prev_slip;
+         real_t Tn_growth = Tn_max / prev_Tn_max;
+         // Superlinear: growth ratio >> slip ratio (allow 50% tolerance)
+         if (Tn_growth > slip_ratio * 1.5)
+         {
+            linear_scaling = false;
+            std::cout << "  WARNING: superlinear growth at slip=" << slip_mag
+                      << " (Tn grew " << Tn_growth << "x for " << slip_ratio
+                      << "x slip)\n";
+         }
+      }
+      prev_Tn_max = Tn_max;
+      prev_slip = slip_mag;
+   }
+
+   // Check 1: spurious T_n should be small relative to sigma_n_base
+   // At slip=1m (typical interseismic), T_n/sigma_n < 10%
+   bool ratio_ok = (max_Tn_ratio < 0.5);  // generous: <50% of sigma_n
+
+   // Check 2: T_n should scale linearly with slip (no runaway)
+   bool scaling_ok = linear_scaling;
+
+   std::cout << "  max |Tn|/sigma_n = " << max_Tn_ratio
+             << (ratio_ok ? " OK" : " HIGH") << "\n";
+   std::cout << "  scaling: " << (scaling_ok ? "linear" : "SUPERLINEAR") << "\n";
+
+   // This test is diagnostic — it quantifies the leakage.
+   // A hard failure means the leakage is so large it would quickly erode
+   // sigma_n_eff, confirming the blowup mechanism.
+   TEST_ASSERT(ratio_ok && scaling_ok,
+              "Spurious normal traction from tangential slip is bounded");
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -4418,6 +4584,9 @@ int main()
    // Note: TestPerQPFaultBasisCurved() deferred — linear tet faces are
    // always flat, so per-QP and centroid normals are identical by construction.
    // Need higher-order geometry (SetCurvature ≥ 2 with curved faces) to test.
+
+   // v59: Normal traction leakage from tangential slip (blowup diagnosis)
+   TestNormalTractionLeakageIP();
 
    TEST_PRINT_RESULTS();
 

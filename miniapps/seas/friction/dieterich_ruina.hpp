@@ -371,39 +371,68 @@ public:
 
       real_t Va = -32.0;
       real_t Vb = std::log10(tau / eta);
-      real_t lo = std::min(Va, Vb);
-      real_t hi = std::max(Va, Vb);
-      real_t Flo = fF(lo);
-      real_t Fhi = fF(hi);
+      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));
+      real_t Flo = std::numeric_limits<real_t>::quiet_NaN();
+      real_t Fhi = std::numeric_limits<real_t>::quiet_NaN();
+      real_t lo = std::numeric_limits<real_t>::quiet_NaN();
+      real_t hi = std::numeric_limits<real_t>::quiet_NaN();
 
-      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
-      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
-
-      if (std::copysign(Flo, Fhi) != Flo)
+      auto try_bracket = [&](real_t a_try, real_t b_try, real_t &V_try) -> bool
       {
-         real_t Ve = zeroIn(lo, hi, fF);
+         lo = std::min(a_try, b_try);
+         hi = std::max(a_try, b_try);
+         Flo = fF(lo);
+         Fhi = fF(hi);
+
+         if (!std::isfinite(Flo) || !std::isfinite(Fhi))
+         {
+            return false;
+         }
+
+         if (Flo == 0.0)
+         {
+            V_try = std::pow(10.0, lo);
+            return true;
+         }
+         if (Fhi == 0.0)
+         {
+            V_try = std::pow(10.0, hi);
+            return true;
+         }
+
+         if (std::copysign(Flo, Fhi) == Flo)
+         {
+            return false;
+         }
+
+         try
+         {
+            real_t Ve = zeroIn(lo, hi, fF);
+            V_try = std::pow(10.0, Ve);
+            return std::isfinite(V_try);
+         }
+         catch (const std::exception &)
+         {
+            return false;
+         }
+      };
+
+      real_t V_try = std::numeric_limits<real_t>::quiet_NaN();
+      if (try_bracket(Va, Vb, V_try))
+      {
          if (iterations) { *iterations = 0; }
-         return std::pow(10.0, Ve);
+         return V_try;
       }
 
       // Fallback bracket (Tandem: lines 121-129)
-      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));
-      lo = std::min(Va_min, Vb);
-      hi = std::max(Va_min, Vb);
-      Flo = fF(lo);
-      Fhi = fF(hi);
-
-      if (Flo == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, lo); }
-      if (Fhi == 0.0) { if (iterations) { *iterations = 0; } return std::pow(10.0, hi); }
-
-      if (std::copysign(Flo, Fhi) != Flo)
+      if (try_bracket(Va_min, Vb, V_try))
       {
-         real_t Ve = zeroIn(lo, hi, fF);
          if (iterations) { *iterations = 0; }
-         return std::pow(10.0, Ve);
+         return V_try;
       }
 
-      // Both brackets failed — print diagnostic
+      // Both brackets failed. Match Tandem and surface the failure to the
+      // time-stepper instead of silently regularizing to tau/eta.
       std::cerr << std::scientific << std::setprecision(15)
          << "[FRIC-BRACKET] Both brackets failed: r=" << dbg_rank
          << " d=" << dbg_dof << " x=" << dbg_x << " z=" << dbg_z
@@ -412,7 +441,7 @@ public:
          << " Flo=" << Flo << " Fhi=" << Fhi
          << " lo=" << lo << " hi=" << hi << std::endl;
       if (iterations) { *iterations = 0; }
-      return tau / eta;
+      return std::numeric_limits<real_t>::quiet_NaN();
    }
 
    /// Solve for 2-component slip rate given 2-component traction and scalar psi.
