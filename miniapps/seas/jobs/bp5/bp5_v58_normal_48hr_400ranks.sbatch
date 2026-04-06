@@ -41,7 +41,15 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || {
 cd miniapps/seas
 make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
-mkdir -p bp5/results_v58
+
+RESULT_DIR="bp5/results_v58_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX="bp5_v58_job${SLURM_JOB_ID}"
+
+mkdir -p "${RESULT_DIR}"
+
+echo "Git commit: $(git rev-parse HEAD)"
+echo "Output dir: ${RESULT_DIR}"
+echo "Output prefix: ${OUTPUT_PREFIX}"
 
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
@@ -52,8 +60,8 @@ ibrun ./seas_bp5_full \
       --solver mumps \
       --tfinal 5.68e10 \
       --ref-dir bp5/benchmark_data \
-      --output-dir bp5/results_v58 \
-      --output-prefix bp5_v58 \
+      --output-dir "${RESULT_DIR}" \
+      --output-prefix "${OUTPUT_PREFIX}" \
       --checkpoint-interval 0 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg
