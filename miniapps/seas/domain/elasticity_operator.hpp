@@ -3269,11 +3269,7 @@ private:
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
-               // TODO(v59): Evaluate whether Elem1->Transform is more
-               // correct here (see first-step comparison). For now keep
-               // the original Face->Transform to avoid production changes.
-               FTr->Face->SetIntPoint(&ipq);
-               FTr->Face->Transform(ipq, phys);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                real_t y = phys(1);
                phys_y_qp(q) = y;
                // Tandem bp5.lua boundary(x,y,z,t):
@@ -3497,8 +3493,7 @@ private:
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
-               FTr->Face->SetIntPoint(&ipq);
-               FTr->Face->Transform(ipq, phys);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                real_t y = phys(1);
                phys_y_qp(q) = y;
                real_t Vh = Vp_ * time;
@@ -3814,8 +3809,7 @@ private:
                   const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                   FTr->SetAllIntPoints(&ipq);
                   Vector phys(dim);
-                  FTr->Face->SetIntPoint(&ipq);
-                  FTr->Face->Transform(ipq, phys);
+                  FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                   real_t y = phys(1);
                   phys_y_qp(q) = y;
                   real_t Vh = Vp_ * time;
