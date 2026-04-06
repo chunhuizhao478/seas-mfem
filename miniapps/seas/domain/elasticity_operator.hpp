@@ -596,14 +596,12 @@ private:
    }
 
    /// Local-only variant: dumps interior fault face traction (no MPI exchange).
+   /// Local-only variant: computes traction per-face inline for interior
+   /// faces only. No ComputeTraction call (which uses MPI for shared faces).
    void DebugDumpFaultTractionLocal(const GridFuncType &displacement,
                                      const Vector &slip_bc)
    {
       if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
-
-      // Compute full traction (uses the production path, MPI-safe on all ranks)
-      Vector traction, normal_traction;
-      ComputeTraction(displacement, slip_bc, traction, &normal_traction);
 
       std::ofstream out(DebugFilePath("first_step_face_trac"),
                         debug_trac_header_written_ ? std::ios::app : std::ios::trunc);
@@ -676,19 +674,10 @@ private:
             }
          }
 
-         for (int kk = 0; kk < nbf; kk++)
-         {
-            const int dof_idx = fi * nbf + kk;
-            write_row("fault_interior", fi, face,
-                      FTr->Elem1No, FTr->Elem2No, "traction_dip", kk, -1,
-                      traction(2 * dof_idx));
-            write_row("fault_interior", fi, face,
-                      FTr->Elem1No, FTr->Elem2No, "traction_strike", kk, -1,
-                      traction(2 * dof_idx + 1));
-            write_row("fault_interior", fi, face,
-                      FTr->Elem1No, FTr->Elem2No, "normal_traction", kk, -1,
-                      normal_traction(dof_idx));
-         }
+         // Note: projected DOF-level traction (traction_dip/strike/normal)
+         // is omitted here because it requires ComputeTraction which uses MPI.
+         // The per-QP traction_q values above are sufficient for cross-code
+         // comparison — project offline if needed.
       }
    }
 
