@@ -885,13 +885,14 @@ int main(int argc, char *argv[])
    }
 
    // Face tracer for per-face diagnostics (rank-local, no MPI)
+   // Coordinate window selects faces in the region where prior blowups occurred.
+   // All ranks participate; max_traced_faces limits output per rank.
    seas::TraceConfig trace_cfg;
-   trace_cfg.explicit_rank = 96;
-   trace_cfg.explicit_fi = {21, 28, 29, 31, 33, 37};
    trace_cfg.use_coord_window = true;
    trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
    trace_cfg.x3_min = -40e3; trace_cfg.x3_max = -35e3;
    trace_cfg.num_control_faces = 2;
+   trace_cfg.max_traced_faces = 50;
    trace_cfg.output_dir = output_dir;
    seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
    face_tracer.SelectFaces(domain, fault_geom);

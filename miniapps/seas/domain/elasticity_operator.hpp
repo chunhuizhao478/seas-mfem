@@ -177,7 +177,9 @@ public:
                                    Vector &traction_stress,
                                    Vector &traction_correction,
                                    Vector &jump_residual,
-                                   Vector *normal_traction = nullptr);
+                                   Vector *normal_traction = nullptr,
+                                   Vector *normal_stress = nullptr,
+                                   Vector *normal_correction = nullptr);
 
    /// Assemble only the fault-slip RHS contribution into the DG displacement
    /// space. This is a test/debug utility for checking K*u against b(slip)
@@ -276,7 +278,9 @@ private:
                             Vector *normal_traction,
                             Vector *traction_stress_out,
                             Vector *traction_correction_out,
-                            Vector *jump_residual_out);
+                            Vector *jump_residual_out,
+                            Vector *normal_stress_out = nullptr,
+                            Vector *normal_correction_out = nullptr);
 
    // ---- Facet BC classification (single source of truth) ----
    // Mirrors Tandem's per-facet BC enum (DGOperatorTopo FacetInfo.bc).
@@ -1413,15 +1417,24 @@ private:
          std::sort(gid_idx.begin(), gid_idx.end());
 
          // canonical_to_local_perm_[fi * nbf + canonical_k] = mfem_local_k
-         // For p=1: nbf_per_face_ == nv (3 vertices = 3 DOFs)
-         for (int k = 0; k < nv && k < nbf_per_face_; k++)
+         if (nbf_per_face_ == 1)
          {
-            canonical_to_local_perm_[fi * nbf_per_face_ + k] = gid_idx[k].second;
+            // BR2: single centroid DOF per face, no vertex permutation
+            canonical_to_local_perm_[fi] = 0;
          }
-         // For higher-order DOFs beyond vertices (p>=2): identity for now
-         for (int k = nv; k < nbf_per_face_; k++)
+         else
          {
-            canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
+            // IP (nbf == nv for p=1): reorder by sorted global vertex IDs
+            for (int k = 0; k < nv && k < nbf_per_face_; k++)
+            {
+               canonical_to_local_perm_[fi * nbf_per_face_ + k] =
+                  gid_idx[k].second;
+            }
+            // For higher-order DOFs beyond vertices (p>=2): identity
+            for (int k = nv; k < nbf_per_face_; k++)
+            {
+               canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
+            }
          }
       }
 
@@ -3309,6 +3322,7 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
    if (!fault_depths_computed_)
    {
       fault_depths_.SetSize(num_fault_dofs_);
+      fault_depths_ = 0.0;
 
       // Nodal rule for per-DOF coordinate evaluation.
       // At nbf=1 (BR2 / order-0 face space): single centroid point.
@@ -3326,9 +3340,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->Face->SetIntPoint(&nip);
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Depth: -Z (Z is negative downward in Tandem, depth is positive)
             fault_depths_(i * nbf + kk) = -coords(2);
@@ -3350,9 +3364,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_depths_(face_idx * nbf + kk) = -coords(2);
             }
@@ -3374,6 +3388,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
    {
       fault_x2_.SetSize(num_fault_dofs_);
       fault_x3_.SetSize(num_fault_dofs_);
+      fault_x2_ = 0.0;
+      fault_x3_ = 0.0;
 
       // Nodal rule for per-DOF coordinate evaluation
       const IntegrationRule &nir = face_quad_->GetNodalRule();
@@ -3389,9 +3405,11 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->Face->SetIntPoint(&nip);
+
+            // Map face integration point to physical coordinates via Elem1
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
             fault_x2_(i * nbf + kk) = coords(0);
@@ -3414,9 +3432,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_x2_(face_idx * nbf + kk) = coords(0);
                fault_x3_(face_idx * nbf + kk) = -coords(2);
@@ -3716,10 +3734,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionDiagnostics(
    Vector &traction_stress,
    Vector &traction_correction,
    Vector &jump_residual,
-   Vector *normal_traction)
+   Vector *normal_traction,
+   Vector *normal_stress,
+   Vector *normal_correction)
 {
    ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
-                       &traction_stress, &traction_correction, &jump_residual);
+                       &traction_stress, &traction_correction, &jump_residual,
+                       normal_stress, normal_correction);
 }
 
 template <typename MeshType>
@@ -3730,7 +3751,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector *normal_traction,
    Vector *traction_stress_out,
    Vector *traction_correction_out,
-   Vector *jump_residual_out)
+   Vector *jump_residual_out,
+   Vector *normal_stress_out,
+   Vector *normal_correction_out)
 {
    int dim = 3;
    traction.SetSize(2 * num_fault_dofs_);
@@ -3751,6 +3774,16 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
        jump_residual_out->SetSize(2 * num_fault_dofs_);
        *jump_residual_out = 0.0;
     }
+   if (normal_stress_out)
+   {
+      normal_stress_out->SetSize(num_fault_dofs_);
+      *normal_stress_out = 0.0;
+   }
+   if (normal_correction_out)
+   {
+      normal_correction_out->SetSize(num_fault_dofs_);
+      *normal_correction_out = 0.0;
+   }
 
    // v51: Elastic normal traction for sigma_n feedback
    if (normal_traction)
@@ -3831,7 +3864,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // variant to also output stress, correction, and jump residual.
          int nbf = nbf_per_face_;
          bool need_decomp = traction_stress_out || traction_correction_out ||
-                            jump_residual_out;
+                            jump_residual_out ||
+                            normal_stress_out || normal_correction_out;
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
@@ -4008,6 +4042,33 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                int dof_idx = fi * nbf_per_face_ + kk;
                (*jump_residual_out)(2 * dof_idx)     = res_local(0 * nbf + kk);
                (*jump_residual_out)(2 * dof_idx + 1) = res_local(1 * nbf + kk);
+            }
+         }
+
+         // Normal decomposition: project stress and correction onto normal
+         // Same sign convention as total normal traction: -(T · n̂)
+         if (normal_stress_out && normal_traction)
+         {
+            Vector ns_local;
+            DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+               dim, 1, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
+               basis_vecs, basis.sign_flipped, ns_local, qpd);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf_per_face_ + kk;
+               (*normal_stress_out)(dof_idx) = -ns_local(kk);
+            }
+         }
+         if (normal_correction_out && normal_traction)
+         {
+            Vector nc_local;
+            DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+               dim, 1, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
+               basis_vecs, basis.sign_flipped, nc_local, qpd);
+            for (int kk = 0; kk < nbf; kk++)
+            {
+               int dof_idx = fi * nbf_per_face_ + kk;
+               (*normal_correction_out)(dof_idx) = -nc_local(kk);
             }
          }
 
@@ -4302,7 +4363,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             // When decomposition is requested, uses decomposed variant.
             int nbf_sh = nbf_per_face_;
             bool need_decomp_sh = traction_stress_out ||
-                                  traction_correction_out || jump_residual_out;
+                                  traction_correction_out || jump_residual_out ||
+                                  normal_stress_out || normal_correction_out;
             const auto &basis_sh = fault_basis_.GetBasis(trac_idx);
 
             // Build sign-corrected slip at quad points (shared faces).
@@ -4464,6 +4526,32 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
                   (*jump_residual_out)(2 * dof_idx)     = res_local_sh(0 * nbf_sh + kk);
                   (*jump_residual_out)(2 * dof_idx + 1) = res_local_sh(1 * nbf_sh + kk);
+               }
+            }
+
+            // Normal decomposition for shared faces
+            if (normal_stress_out && normal_traction)
+            {
+               Vector ns_local_sh;
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 1, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
+                  basis_vecs_sh, basis_sh.sign_flipped, ns_local_sh, qpd_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_per_face_ + kk;
+                  (*normal_stress_out)(dof_idx) = -ns_local_sh(kk);
+               }
+            }
+            if (normal_correction_out && normal_traction)
+            {
+               Vector nc_local_sh;
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 1, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
+                  basis_vecs_sh, basis_sh.sign_flipped, nc_local_sh, qpd_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_per_face_ + kk;
+                  (*normal_correction_out)(dof_idx) = -nc_local_sh(kk);
                }
             }
 

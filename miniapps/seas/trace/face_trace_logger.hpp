@@ -35,12 +35,21 @@ namespace mfem
 namespace seas
 {
 
+/// Per-DOF metadata for a traced fault face DOF.
 struct TraceFaceSpec
 {
    int fi;              // owned fault face index
+   int dof;             // DOF index within face (0..nbf-1)
+   int owned_dof_idx;   // global owned DOF index (fi * nbf + dof)
    std::string role;    // "target" or "control"
-   real_t cx, cz;       // along-strike (x2), depth (x3) centroid
+   real_t cx, cz;       // along-strike (x2), depth (x3) of this DOF
    std::string face_type;   // "interior" or "shared"
+
+   // BP5 metadata (written once at startup)
+   real_t depth;
+   real_t a, Dc;
+   real_t tau_pre_dip, tau_pre_strike;
+   real_t V_init_dip, V_init_strike;
 };
 
 struct TraceConfig
@@ -55,6 +64,9 @@ struct TraceConfig
 
    // Control faces
    int num_control_faces = 2;
+
+   // Max traced faces per rank (guard against huge CSV files)
+   int max_traced_faces = 50;
 
    // Sampling
    int warmup_steps = 32;
@@ -95,7 +107,7 @@ public:
       int num_owned_dofs = x2.Size();
       int num_owned_faces = num_owned_dofs / nbf_per_face_;
 
-      // Compute per-face centroids
+      // Compute per-face centroids for selection
       std::vector<real_t> face_cx(num_owned_faces, 0.0);
       std::vector<real_t> face_cz(num_owned_faces, 0.0);
       for (int f = 0; f < num_owned_faces; f++)
@@ -137,42 +149,88 @@ public:
          }
       }
 
+      // Enforce max_traced_faces limit on targets
+      if (static_cast<int>(selected.size()) > cfg_.max_traced_faces)
+      {
+         std::set<int> trimmed;
+         int count = 0;
+         for (int fi : selected)
+         {
+            if (count >= cfg_.max_traced_faces) { break; }
+            trimmed.insert(fi);
+            count++;
+         }
+         selected = std::move(trimmed);
+      }
+
       // Gather face metadata from domain operator
       const int num_interior = domain_op.GetFaultInteriorFaces().Size();
       const auto &owned_map = domain_op.GetOwnedFaultFaceMap();
 
-      auto fill_meta = [&](TraceFaceSpec &spec)
+      auto get_face_type = [&](int fi) -> std::string
       {
-         if (spec.fi < static_cast<int>(owned_map.Size()))
+         if (fi < static_cast<int>(owned_map.Size()))
          {
-            int local_fi = owned_map[spec.fi];
-            spec.face_type = (local_fi < num_interior) ? "interior" : "shared";
+            int local_fi = owned_map[fi];
+            return (local_fi < num_interior) ? "interior" : "shared";
          }
+         return "unknown";
       };
 
-      // Build traced face specs from selected set
+      // Get BP5 per-DOF parameters from geometry
+      const Vector &geom_a = geom.GetAValues();
+      const Vector &geom_dc = geom.GetDcValues();
+      const Vector &geom_depths = geom.GetDepths();
+      const Vector &geom_tau_pre = geom.GetTauPre();
+      const Vector &geom_v_init = geom.GetVInit();
+
+      // Build traced DOF specs from selected faces
       for (int fi : selected)
       {
-         TraceFaceSpec spec;
-         spec.fi = fi;
-         spec.role = "target";
-         spec.cx = face_cx[fi];
-         spec.cz = face_cz[fi];
-         fill_meta(spec);
-         traced_faces_.push_back(spec);
+         std::string ft = get_face_type(fi);
+         for (int kk = 0; kk < nbf_per_face_; kk++)
+         {
+            int owned_dof = fi * nbf_per_face_ + kk;
+            TraceFaceSpec spec;
+            spec.fi = fi;
+            spec.dof = kk;
+            spec.owned_dof_idx = owned_dof;
+            spec.role = "target";
+            spec.cx = x2(owned_dof);
+            spec.cz = x3(owned_dof);
+            spec.face_type = ft;
+
+            // BP5 metadata
+            spec.depth = (owned_dof < geom_depths.Size())
+                         ? geom_depths(owned_dof) : 0.0;
+            spec.a = (owned_dof < geom_a.Size())
+                      ? geom_a(owned_dof) : 0.0;
+            spec.Dc = (owned_dof < geom_dc.Size())
+                       ? geom_dc(owned_dof) : 0.0;
+            spec.tau_pre_dip = (2 * owned_dof < geom_tau_pre.Size())
+                               ? geom_tau_pre(2 * owned_dof) : 0.0;
+            spec.tau_pre_strike = (2 * owned_dof + 1 < geom_tau_pre.Size())
+                                  ? geom_tau_pre(2 * owned_dof + 1) : 0.0;
+            spec.V_init_dip = (2 * owned_dof < geom_v_init.Size())
+                              ? geom_v_init(2 * owned_dof) : 0.0;
+            spec.V_init_strike = (2 * owned_dof + 1 < geom_v_init.Size())
+                                 ? geom_v_init(2 * owned_dof + 1) : 0.0;
+
+            traced_dofs_.push_back(spec);
+         }
       }
 
       // Mode 3: control faces (nearest to cluster centroid, outside selection)
-      if (cfg_.num_control_faces > 0 && !traced_faces_.empty())
+      if (cfg_.num_control_faces > 0 && !traced_dofs_.empty())
       {
          real_t cluster_cx = 0, cluster_cz = 0;
-         for (auto &s : traced_faces_)
+         for (auto &s : traced_dofs_)
          {
             cluster_cx += s.cx;
             cluster_cz += s.cz;
          }
-         cluster_cx /= traced_faces_.size();
-         cluster_cz /= traced_faces_.size();
+         cluster_cx /= traced_dofs_.size();
+         cluster_cz /= traced_dofs_.size();
 
          std::vector<std::pair<real_t, int>> dist_fi;
          for (int f = 0; f < num_owned_faces; f++)
@@ -189,22 +247,48 @@ public:
          for (int i = 0; i < n_ctrl; i++)
          {
             int fi = dist_fi[i].second;
-            TraceFaceSpec spec;
-            spec.fi = fi;
-            spec.role = "control";
-            spec.cx = face_cx[fi];
-            spec.cz = face_cz[fi];
-            fill_meta(spec);
-            traced_faces_.push_back(spec);
+            std::string ft = get_face_type(fi);
+            for (int kk = 0; kk < nbf_per_face_; kk++)
+            {
+               int owned_dof = fi * nbf_per_face_ + kk;
+               TraceFaceSpec spec;
+               spec.fi = fi;
+               spec.dof = kk;
+               spec.owned_dof_idx = owned_dof;
+               spec.role = "control";
+               spec.cx = x2(owned_dof);
+               spec.cz = x3(owned_dof);
+               spec.face_type = ft;
+               spec.depth = (owned_dof < geom_depths.Size())
+                            ? geom_depths(owned_dof) : 0.0;
+               spec.a = (owned_dof < geom_a.Size())
+                         ? geom_a(owned_dof) : 0.0;
+               spec.Dc = (owned_dof < geom_dc.Size())
+                          ? geom_dc(owned_dof) : 0.0;
+               spec.tau_pre_dip = (2 * owned_dof < geom_tau_pre.Size())
+                                  ? geom_tau_pre(2 * owned_dof) : 0.0;
+               spec.tau_pre_strike = (2 * owned_dof + 1 < geom_tau_pre.Size())
+                                     ? geom_tau_pre(2 * owned_dof + 1) : 0.0;
+               spec.V_init_dip = (2 * owned_dof < geom_v_init.Size())
+                                 ? geom_v_init(2 * owned_dof) : 0.0;
+               spec.V_init_strike = (2 * owned_dof + 1 < geom_v_init.Size())
+                                    ? geom_v_init(2 * owned_dof + 1) : 0.0;
+               traced_dofs_.push_back(spec);
+            }
          }
       }
 
-      active_ = !traced_faces_.empty();
+      active_ = !traced_dofs_.empty();
       if (!active_) { return; }
 
-      // Initialize per-face summaries and previous values
-      summaries_.resize(traced_faces_.size());
-      prev_V_mag_.resize(traced_faces_.size() * nbf_per_face_, -1.0);
+      // Build face-level index for summaries (unique fi values)
+      std::set<int> unique_faces;
+      for (auto &s : traced_dofs_) { unique_faces.insert(s.fi); }
+      num_traced_faces_ = static_cast<int>(unique_faces.size());
+
+      // Initialize per-DOF summaries and previous values
+      summaries_.resize(traced_dofs_.size());
+      prev_V_mag_.resize(traced_dofs_.size(), -1.0);
 
       // Open output files (fail-soft)
       std::string suffix = "r" + std::to_string(rank_);
@@ -213,6 +297,7 @@ public:
       f_meta_.open(dir + "/trace_faces_" + suffix + ".csv");
       f_ts_.open(dir + "/trace_timeseries_" + suffix + ".csv");
       f_events_.open(dir + "/trace_events_" + suffix + ".csv");
+      summary_path_ = dir + "/trace_summary_" + suffix + ".csv";
 
       if (!f_meta_.is_open() || !f_ts_.is_open() || !f_events_.is_open())
       {
@@ -220,45 +305,56 @@ public:
          return;
       }
 
-      // Write metadata
-      f_meta_ << "rank,fi,role,cx,cz,nbf,face_type\n";
-      for (auto &s : traced_faces_)
+      // Write per-DOF metadata CSV
+      f_meta_ << "rank,fi,dof,owned_dof_idx,role,cx,cz,nbf,face_type,"
+              << "depth,a,Dc,tau_pre_dip,tau_pre_strike,"
+              << "V_init_dip,V_init_strike\n";
+      for (auto &s : traced_dofs_)
       {
-         f_meta_ << rank_ << "," << s.fi << "," << s.role << ","
+         f_meta_ << rank_ << "," << s.fi << "," << s.dof << ","
+                 << s.owned_dof_idx << "," << s.role << ","
                  << std::scientific << std::setprecision(6)
                  << s.cx << "," << s.cz << "," << nbf_per_face_ << ","
-                 << s.face_type << "\n";
+                 << s.face_type << ","
+                 << s.depth << "," << s.a << "," << s.Dc << ","
+                 << s.tau_pre_dip << "," << s.tau_pre_strike << ","
+                 << s.V_init_dip << "," << s.V_init_strike << "\n";
       }
       f_meta_.flush();
 
       // Write CSV headers
-      f_ts_ << "step,time_s,time_yr,rank,fi,dof,role,cx,cz,"
-             << "tau_dip,tau_strike,"
-             << "tau_stress_dip,tau_stress_strike,"
-             << "tau_corr_dip,tau_corr_strike,"
-             << "jump_res_dip,jump_res_strike,"
-             << "normal_traction,sigma_n_eff,"
-             << "V_dip,V_strike,V_mag,psi\n";
+      f_ts_ << "step,time_s,time_yr,rank,fi,dof,owned_dof_idx,role,cx,cz,"
+            << "tau_dip,tau_strike,"
+            << "tau_stress_dip,tau_stress_strike,"
+            << "tau_corr_dip,tau_corr_strike,"
+            << "jump_res_dip,jump_res_strike,"
+            << "normal_traction,normal_stress,normal_corr,sigma_n_eff,"
+            << "V_dip,V_strike,V_mag,psi\n";
       f_ts_.flush();
 
-      f_events_ << "step,time_s,time_yr,rank,fi,dof,event,value,threshold\n";
+      f_events_ << "step,time_s,time_yr,rank,fi,dof,owned_dof_idx,"
+                << "event,value,threshold,"
+                << "sigma_n_eff,normal_traction,normal_stress,normal_corr,"
+                << "V_mag\n";
       f_events_.flush();
    }
 
    bool IsActive() const { return active_ && !disabled_; }
 
+   /// Stage decomposition data from Mult() (overwritten by rejected ODE stages).
    void RecordMult(
       const Vector &traction,
       const Vector &traction_stress,
       const Vector &traction_correction,
       const Vector &jump_residual,
       const Vector &normal_traction,
+      const Vector &normal_stress,
+      const Vector &normal_correction,
       const Vector &slip_rate,
       real_t sigma_n_base)
    {
       if (!IsActive()) { return; }
 
-      // Copy into staging area (these get overwritten by rejected ODE stages)
       staged_traction_ = traction;
       staged_stress_ = traction_stress;
       staged_corr_ = traction_correction;
@@ -266,6 +362,14 @@ public:
       if (normal_traction.Size() > 0)
       {
          staged_normal_trac_ = normal_traction;
+      }
+      if (normal_stress.Size() > 0)
+      {
+         staged_normal_stress_ = normal_stress;
+      }
+      if (normal_correction.Size() > 0)
+      {
+         staged_normal_corr_ = normal_correction;
       }
       staged_slip_rate_ = slip_rate;
       staged_sigma_n_base_ = sigma_n_base;
@@ -294,120 +398,139 @@ public:
       constexpr int spn = 3;
       constexpr int psi_idx = 2;
 
-      for (size_t ti = 0; ti < traced_faces_.size(); ti++)
+      for (size_t ti = 0; ti < traced_dofs_.size(); ti++)
       {
-         auto &spec = traced_faces_[ti];
+         auto &spec = traced_dofs_[ti];
          auto &summary = summaries_[ti];
          summary.last_time_s = time_s;
 
-         for (int kk = 0; kk < nbf_per_face_; kk++)
+         int dof = spec.owned_dof_idx;
+
+         real_t tau_d = staged_traction_(2 * dof);
+         real_t tau_s = staged_traction_(2 * dof + 1);
+         real_t ts_d = staged_stress_(2 * dof);
+         real_t ts_s = staged_stress_(2 * dof + 1);
+         real_t tc_d = staged_corr_(2 * dof);
+         real_t tc_s = staged_corr_(2 * dof + 1);
+         real_t jr_d = staged_jump_res_(2 * dof);
+         real_t jr_s = staged_jump_res_(2 * dof + 1);
+         real_t nt = (staged_normal_trac_.Size() > dof)
+                     ? staged_normal_trac_(dof) : 0.0;
+         real_t ns = (staged_normal_stress_.Size() > dof)
+                     ? staged_normal_stress_(dof) : 0.0;
+         real_t nc = (staged_normal_corr_.Size() > dof)
+                     ? staged_normal_corr_(dof) : 0.0;
+         real_t sigma_n_eff = staged_sigma_n_base_ + nt;
+         real_t V_d = staged_slip_rate_(2 * dof);
+         real_t V_s = staged_slip_rate_(2 * dof + 1);
+         real_t V_mag = std::sqrt(V_d * V_d + V_s * V_s);
+         real_t psi = (dof < state.Size() / spn)
+                      ? state(dof * spn + psi_idx) : 0.0;
+
+         // Update summary
+         real_t tau_mag = std::sqrt(tau_d * tau_d + tau_s * tau_s);
+         summary.tau_max = std::max(summary.tau_max, tau_mag);
+         summary.V_max = std::max(summary.V_max, V_mag);
+         summary.psi_min = std::min(summary.psi_min, psi);
+         summary.sigma_n_eff_min = std::min(summary.sigma_n_eff_min,
+                                            sigma_n_eff);
+         summary.max_normal_corr = std::max(summary.max_normal_corr,
+                                            std::abs(nc));
+
+         // Event detection
+         bool force_row = false;
+
+         auto emit_event = [&](const char *name, real_t val, real_t thresh)
          {
-            int dof = spec.fi * nbf_per_face_ + kk;
-            int pv_idx = static_cast<int>(ti) * nbf_per_face_ + kk;
-
-            real_t tau_d = staged_traction_(2 * dof);
-            real_t tau_s = staged_traction_(2 * dof + 1);
-            real_t ts_d = staged_stress_(2 * dof);
-            real_t ts_s = staged_stress_(2 * dof + 1);
-            real_t tc_d = staged_corr_(2 * dof);
-            real_t tc_s = staged_corr_(2 * dof + 1);
-            real_t jr_d = staged_jump_res_(2 * dof);
-            real_t jr_s = staged_jump_res_(2 * dof + 1);
-            real_t nt = (staged_normal_trac_.Size() > dof)
-                        ? staged_normal_trac_(dof) : 0.0;
-            real_t sigma_n_eff = staged_sigma_n_base_ + nt;
-            real_t V_d = staged_slip_rate_(2 * dof);
-            real_t V_s = staged_slip_rate_(2 * dof + 1);
-            real_t V_mag = std::sqrt(V_d * V_d + V_s * V_s);
-            real_t psi = (dof < state.Size() / spn)
-                         ? state(dof * spn + psi_idx) : 0.0;
-
-            // Update summary
-            real_t tau_mag = std::sqrt(tau_d * tau_d + tau_s * tau_s);
-            summary.tau_max = std::max(summary.tau_max, tau_mag);
-            summary.V_max = std::max(summary.V_max, V_mag);
-            summary.psi_min = std::min(summary.psi_min, psi);
-            summary.sigma_n_eff_min = std::min(summary.sigma_n_eff_min,
-                                               sigma_n_eff);
-
-            // Event detection
-            bool force_row = false;
-
-            auto emit_event = [&](const char *name, real_t val, real_t thresh)
+            std::ostringstream oss;
+            oss << std::scientific << std::setprecision(8);
+            oss << step << "," << time_s << "," << time_yr << ","
+                << rank_ << "," << spec.fi << "," << spec.dof << ","
+                << spec.owned_dof_idx << ","
+                << name << "," << val << "," << thresh << ","
+                << sigma_n_eff << "," << nt << "," << ns << "," << nc << ","
+                << V_mag << "\n";
+            event_buffer_.push_back(oss.str());
+            force_row = true;
+            any_event = true;
+            if (summary.first_event.empty())
             {
-               std::ostringstream oss;
-               oss << std::scientific << std::setprecision(8);
-               oss << step << "," << time_s << "," << time_yr << ","
-                   << rank_ << "," << spec.fi << "," << kk << ","
-                   << name << "," << val << "," << thresh << "\n";
-               event_buffer_.push_back(oss.str());
-               force_row = true;
-               any_event = true;
-               if (summary.first_event.empty())
-               {
-                  summary.first_event = name;
-               }
-            };
-
-            // Non-finite check
-            if (!std::isfinite(tau_d) || !std::isfinite(tau_s) ||
-                !std::isfinite(V_mag) || !std::isfinite(psi) ||
-                !std::isfinite(sigma_n_eff))
-            {
-               emit_event("non_finite", 0.0, 0.0);
+               summary.first_event = name;
             }
+         };
 
-            // sigma_n_eff low
-            if (sigma_n_eff < cfg_.sigma_n_eff_warn)
-            {
-               emit_event("sigma_n_eff_low", sigma_n_eff,
-                          cfg_.sigma_n_eff_warn);
-            }
+         // Non-finite check
+         if (!std::isfinite(tau_d) || !std::isfinite(tau_s) ||
+             !std::isfinite(V_mag) || !std::isfinite(psi) ||
+             !std::isfinite(sigma_n_eff))
+         {
+            emit_event("non_finite", 0.0, 0.0);
+         }
 
-            // V_mag high
-            if (V_mag > cfg_.V_mag_warn)
-            {
-               emit_event("V_mag_high", V_mag, cfg_.V_mag_warn);
-            }
+         // Normal-collapse graduated thresholds
+         if (sigma_n_eff <= 0.0)
+         {
+            emit_event("sigma_n_eff_nonpos", sigma_n_eff, 0.0);
+         }
+         else if (sigma_n_eff < 1e6)
+         {
+            emit_event("sigma_n_eff_lt_1mpa", sigma_n_eff, 1e6);
+         }
+         else if (sigma_n_eff < 5e6)
+         {
+            emit_event("sigma_n_eff_lt_5mpa", sigma_n_eff, 5e6);
+         }
 
-            // Correction ratio
-            real_t tc_mag = std::sqrt(tc_d * tc_d + tc_s * tc_s);
-            real_t corr_ratio = tc_mag / std::max(tau_mag, 1e-30);
-            if (corr_ratio > cfg_.corr_ratio_warn)
-            {
-               emit_event("corr_ratio_high", corr_ratio,
-                          cfg_.corr_ratio_warn);
-            }
+         // Normal correction dominates: |normal_corr| > |normal_stress|
+         if (std::abs(ns) > 1e-30 && std::abs(nc) > std::abs(ns))
+         {
+            emit_event("normal_corr_dominates", std::abs(nc) / std::abs(ns),
+                       1.0);
+         }
 
-            // Sudden jump in V_mag
-            if (prev_V_mag_[pv_idx] > 0.0 && V_mag > 0.0)
-            {
-               real_t ratio = V_mag / prev_V_mag_[pv_idx];
-               if (ratio > cfg_.jump_factor_warn)
-               {
-                  emit_event("V_jump", ratio, cfg_.jump_factor_warn);
-               }
-            }
-            prev_V_mag_[pv_idx] = V_mag;
+         // V_mag high
+         if (V_mag > cfg_.V_mag_warn)
+         {
+            emit_event("V_mag_high", V_mag, cfg_.V_mag_warn);
+         }
 
-            // Write timeseries row if sampled or forced by event
-            if (sample || force_row)
+         // Correction ratio (tangential)
+         real_t tc_mag = std::sqrt(tc_d * tc_d + tc_s * tc_s);
+         real_t corr_ratio = tc_mag / std::max(tau_mag, 1e-30);
+         if (corr_ratio > cfg_.corr_ratio_warn)
+         {
+            emit_event("corr_ratio_high", corr_ratio,
+                       cfg_.corr_ratio_warn);
+         }
+
+         // Sudden jump in V_mag
+         if (prev_V_mag_[ti] > 0.0 && V_mag > 0.0)
+         {
+            real_t ratio = V_mag / prev_V_mag_[ti];
+            if (ratio > cfg_.jump_factor_warn)
             {
-               std::ostringstream oss;
-               oss << std::scientific << std::setprecision(8);
-               oss << step << "," << time_s << "," << time_yr << ","
-                   << rank_ << "," << spec.fi << "," << kk << ","
-                   << spec.role << ","
-                   << spec.cx << "," << spec.cz << ","
-                   << tau_d << "," << tau_s << ","
-                   << ts_d << "," << ts_s << ","
-                   << tc_d << "," << tc_s << ","
-                   << jr_d << "," << jr_s << ","
-                   << nt << "," << sigma_n_eff << ","
-                   << V_d << "," << V_s << "," << V_mag << ","
-                   << psi << "\n";
-               ts_buffer_.push_back(oss.str());
+               emit_event("V_jump", ratio, cfg_.jump_factor_warn);
             }
+         }
+         prev_V_mag_[ti] = V_mag;
+
+         // Write timeseries row if sampled or forced by event
+         if (sample || force_row)
+         {
+            std::ostringstream oss;
+            oss << std::scientific << std::setprecision(8);
+            oss << step << "," << time_s << "," << time_yr << ","
+                << rank_ << "," << spec.fi << "," << spec.dof << ","
+                << spec.owned_dof_idx << "," << spec.role << ","
+                << spec.cx << "," << spec.cz << ","
+                << tau_d << "," << tau_s << ","
+                << ts_d << "," << ts_s << ","
+                << tc_d << "," << tc_s << ","
+                << jr_d << "," << jr_s << ","
+                << nt << "," << ns << "," << nc << "," << sigma_n_eff << ","
+                << V_d << "," << V_s << "," << V_mag << ","
+                << psi << "\n";
+            ts_buffer_.push_back(oss.str());
          }
       }
 
@@ -424,7 +547,7 @@ public:
       finalized_ = true;
 
       FlushBuffers();
-      WriteSummary();
+      WriteSummary();  // final definitive write
 
       if (f_meta_.is_open()) { f_meta_.close(); }
       if (f_ts_.is_open()) { f_ts_.close(); }
@@ -464,31 +587,38 @@ private:
       event_buffer_.clear();
 
       rows_since_flush_ = 0;
+
+      // Incremental summary: rewrite on every flush so the file is
+      // always up-to-date even if the run aborts.
+      WriteSummary();
    }
 
    void WriteSummary()
    {
-      std::string suffix = "r" + std::to_string(rank_);
-      std::string path = cfg_.output_dir + "/trace_summary_" + suffix + ".csv";
-      f_summary_.open(path);
-      if (!f_summary_.is_open()) { return; }
+      if (summary_path_.empty()) { return; }
 
-      f_summary_ << "rank,fi,role,tau_max,V_max,psi_min,"
-                  << "sigma_n_eff_min,first_event,last_time_s\n";
+      std::ofstream f(summary_path_);
+      if (!f.is_open()) { return; }
 
-      for (size_t ti = 0; ti < traced_faces_.size(); ti++)
+      f << "rank,fi,dof,owned_dof_idx,role,"
+        << "tau_max,V_max,psi_min,sigma_n_eff_min,max_normal_corr,"
+        << "first_event,last_time_s\n";
+
+      for (size_t ti = 0; ti < traced_dofs_.size(); ti++)
       {
-         auto &spec = traced_faces_[ti];
+         auto &spec = traced_dofs_[ti];
          auto &s = summaries_[ti];
-         f_summary_ << std::scientific << std::setprecision(8);
-         f_summary_ << rank_ << "," << spec.fi << "," << spec.role << ","
-                     << s.tau_max << "," << s.V_max << ","
-                     << s.psi_min << "," << s.sigma_n_eff_min << ","
-                     << (s.first_event.empty() ? "none" : s.first_event) << ","
-                     << s.last_time_s << "\n";
+         f << std::scientific << std::setprecision(8);
+         f << rank_ << "," << spec.fi << "," << spec.dof << ","
+           << spec.owned_dof_idx << "," << spec.role << ","
+           << s.tau_max << "," << s.V_max << ","
+           << s.psi_min << "," << s.sigma_n_eff_min << ","
+           << s.max_normal_corr << ","
+           << (s.first_event.empty() ? "none" : s.first_event) << ","
+           << s.last_time_s << "\n";
       }
-      f_summary_.flush();
-      f_summary_.close();
+      f.flush();
+      f.close();
    }
 
    TraceConfig cfg_;
@@ -501,33 +631,37 @@ private:
    int last_committed_step_ = -1;
    real_t last_committed_time_ = -1.0;
 
-   std::vector<TraceFaceSpec> traced_faces_;
+   std::vector<TraceFaceSpec> traced_dofs_;
    int nbf_per_face_ = 1;
+   int num_traced_faces_ = 0;
 
    // Staging area (overwritten each Mult, committed on accepted step)
    Vector staged_traction_, staged_stress_, staged_corr_;
    Vector staged_jump_res_, staged_normal_trac_;
+   Vector staged_normal_stress_, staged_normal_corr_;
    Vector staged_slip_rate_;
    real_t staged_sigma_n_base_ = 0.0;
 
    // Buffered CSV rows
    std::vector<std::string> ts_buffer_, event_buffer_;
 
-   // Per-face summary accumulators
-   struct FaceSummary
+   // Per-DOF summary accumulators
+   struct DofSummary
    {
       real_t tau_max = 0, V_max = 0, psi_min = 1e30;
       real_t sigma_n_eff_min = 1e30;
+      real_t max_normal_corr = 0;
       std::string first_event;
       real_t last_time_s = 0;
    };
-   std::vector<FaceSummary> summaries_;
+   std::vector<DofSummary> summaries_;
 
    // Previous V_mag per traced DOF for jump detection
    std::vector<real_t> prev_V_mag_;
 
    // File handles
-   std::ofstream f_meta_, f_ts_, f_events_, f_summary_;
+   std::ofstream f_meta_, f_ts_, f_events_;
+   std::string summary_path_;
 };
 
 } // namespace seas

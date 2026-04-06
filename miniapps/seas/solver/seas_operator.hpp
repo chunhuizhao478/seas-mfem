@@ -169,7 +169,9 @@ private:
    FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
    mutable Vector local_traction_stress_, local_traction_correction_;
    mutable Vector local_jump_residual_;
+   mutable Vector local_normal_stress_, local_normal_corr_;
    mutable Vector traction_stress_, traction_correction_, jump_residual_;
+   mutable Vector normal_stress_, normal_corr_;
 
    // v57 MPI diagnostic: fire once on first non-zero slip
    mutable bool mpi_diag_done_ = true;  // v58: disabled by default
@@ -336,12 +338,14 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: optionally compute elastic normal traction for sigma_n feedback
    if (face_tracer_ && face_tracer_->IsActive())
    {
-      // Decomposed traction for face tracer
+      // Decomposed traction for face tracer (including normal decomposition)
       domain_->ComputeTractionDiagnostics(
          *u_gf_, local_slip_, local_traction_,
          local_traction_stress_, local_traction_correction_,
          local_jump_residual_,
-         elastic_sigma_n_ ? &local_normal_traction_ : nullptr);
+         elastic_sigma_n_ ? &local_normal_traction_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_stress_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_corr_ : nullptr);
       domain_->RestrictToOwnedFault(local_traction_, traction_,
                                     domain_->NumSlipComponents());
       domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
@@ -355,6 +359,10 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       {
          domain_->RestrictToOwnedFault(local_normal_traction_,
                                        normal_traction_);
+         domain_->RestrictToOwnedFault(local_normal_stress_,
+                                       normal_stress_);
+         domain_->RestrictToOwnedFault(local_normal_corr_,
+                                       normal_corr_);
       }
    }
    else
@@ -470,6 +478,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
       face_tracer_->RecordMult(
          traction_, traction_stress_, traction_correction_,
          jump_residual_, normal_traction_,
+         normal_stress_, normal_corr_,
          fault_->GetSlipRate(), fault_->GetSigmaN());
    }
 }
