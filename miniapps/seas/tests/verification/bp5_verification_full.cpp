@@ -71,6 +71,7 @@
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cctype>
 #include <memory>
 #include <vector>
 #include <string>
@@ -887,6 +888,25 @@ int main(int argc, char *argv[])
    // Face tracer for per-face diagnostics (rank-local, no MPI)
    // Coordinate window selects faces in the region where prior blowups occurred.
    // All ranks participate; max_traced_faces limits output per rank.
+   auto env_truthy = [](const char *name) -> bool
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return false; }
+      std::string s(v);
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return !(s == "0" || s == "false" || s == "off" || s == "no");
+   };
+   auto env_int = [](const char *name, int default_value) -> int
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return default_value; }
+      return std::atoi(v);
+   };
+   const bool debug_first_step_dump = env_truthy("SEAS_DEBUG_FIRST_STEP_DUMP");
+   const int debug_first_step_rank =
+      env_int("SEAS_DEBUG_FIRST_STEP_TARGET_RANK", 96);
+
    seas::TraceConfig trace_cfg;
    trace_cfg.use_coord_window = true;
    trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
@@ -897,6 +917,27 @@ int main(int argc, char *argv[])
    seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
    face_tracer.SelectFaces(domain, fault_geom);
    seas_op.SetFaceTracer(&face_tracer);
+
+   if (debug_first_step_dump)
+   {
+      ElasticityDomainOperator<ParMesh>::FirstStepDebugConfig dbg_cfg;
+      dbg_cfg.enabled = true;
+      dbg_cfg.target_rank = debug_first_step_rank;
+      dbg_cfg.output_dir = output_dir;
+      // Fault-tip faces on rank 96 (1000m mesh, 400 ranks):
+      //   fi=4:  near x2=-37 km, depth~39 km (interior, just above tip)
+      //   fi=28: x2=-37 km, depth=40 km (tip corner, v59 blowup DOF)
+      //   fi=29: x2=-36 km, depth=40 km (adjacent tip)
+      //   fi=33: x2=-37 km, depth~39 km (interior control)
+      dbg_cfg.target_fault_faces = {4, 28, 29, 33};
+      domain.SetFirstStepDebugConfig(dbg_cfg);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [debug] first-step IP dump: ON"
+                   << " (target rank " << debug_first_step_rank
+                   << ", fault faces 4/28/29/33)\n";
+      }
+   }
 
    Vector state(fault_op.StateSize());
    seas_op.SetInitialCondition(state);
@@ -1420,6 +1461,17 @@ int main(int argc, char *argv[])
                    << std::setw(8) << num_seismic_events
                    << "\n";
          std::cout.flush();
+      }
+
+      // Intentional early exit: dump only the first accepted step for
+      // cross-verification with Tandem (v59 diagnostic).
+      if (debug_first_step_dump)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cout << "  [debug] stopping after first accepted step dump\n";
+         }
+         break;
       }
    }
 

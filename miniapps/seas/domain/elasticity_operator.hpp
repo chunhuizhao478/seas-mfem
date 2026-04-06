@@ -27,6 +27,7 @@
 #include <limits>
 #include <set>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
@@ -186,6 +187,10 @@ public:
    /// without Dirichlet loading.
    void AssembleSlipOnlyRHS(Vector &rhs, const Vector &slip_bc) const;
 
+   /// Assemble only the Dirichlet loading RHS contribution into the DG
+   /// displacement space. Debug utility for first-step RHS comparison.
+   void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
+
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
 
@@ -251,6 +256,20 @@ public:
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
    void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
 
+   struct FirstStepDebugConfig
+   {
+      bool enabled = false;
+      int target_rank = -1;
+      std::string output_dir = ".";
+      std::set<int> target_fault_faces;
+   };
+
+   void SetFirstStepDebugConfig(const FirstStepDebugConfig &cfg)
+   {
+      first_step_debug_ = cfg;
+      debug_target_elems_cached_ = false;
+   }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -272,6 +291,18 @@ private:
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
 
+   enum class DebugAssemblePhase { None, Slip, Dirichlet };
+   mutable FirstStepDebugConfig first_step_debug_;
+   mutable bool first_step_debug_done_ = false;
+   mutable DebugAssemblePhase debug_phase_ = DebugAssemblePhase::None;
+   mutable real_t debug_time_ = 0.0;
+   mutable bool debug_face_header_written_ = false;
+   mutable bool debug_elem_header_written_ = false;
+   mutable bool debug_jump_header_written_ = false;
+   mutable bool debug_trac_header_written_ = false;
+   mutable bool debug_target_elems_cached_ = false;
+   mutable std::set<int> debug_target_elems_;
+
    void ComputeTractionImpl(const GridFuncType &displacement,
                             const Vector &slip_bc,
                             Vector &traction,
@@ -281,6 +312,550 @@ private:
                             Vector *jump_residual_out,
                             Vector *normal_stress_out = nullptr,
                             Vector *normal_correction_out = nullptr);
+
+   int DebugRank() const
+   {
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         return rank;
+#endif
+      }
+      return 0;
+   }
+
+   bool DebugEnabledForTime(real_t time) const
+   {
+      if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
+      if (time <= 0.0) { return false; }
+      return (first_step_debug_.target_rank < 0 ||
+              DebugRank() == first_step_debug_.target_rank);
+   }
+
+   const char *DebugPhaseName() const
+   {
+      switch (debug_phase_)
+      {
+         case DebugAssemblePhase::Slip: return "slip";
+         case DebugAssemblePhase::Dirichlet: return "dirichlet";
+         default: return "none";
+      }
+   }
+
+   std::string DebugFilePath(const std::string &stem) const
+   {
+      std::ostringstream oss;
+      oss << first_step_debug_.output_dir;
+      if (!first_step_debug_.output_dir.empty() &&
+          first_step_debug_.output_dir.back() != '/')
+      {
+         oss << "/";
+      }
+      oss << stem << "_r" << DebugRank() << ".csv";
+      return oss.str();
+   }
+
+   const std::set<int> &DebugTargetLocalElements() const
+   {
+      if (debug_target_elems_cached_) { return debug_target_elems_; }
+      debug_target_elems_.clear();
+      const int num_local = mesh_.GetNE();
+      const int interior_count = fault_interior_faces_.Size();
+      for (int fault_idx : first_step_debug_.target_fault_faces)
+      {
+         if (fault_idx < 0) { continue; }
+         FaceElementTransformations *FTr = nullptr;
+         if (fault_idx < interior_count)
+         {
+            int face = fault_interior_faces_[fault_idx];
+            FTr = mesh_.GetInteriorFaceTransformations(face);
+         }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            int sh_idx = fault_idx - interior_count;
+            if (sh_idx >= 0 && sh_idx < fault_shared_faces_.Size())
+            {
+               FTr = mesh_.GetSharedFaceTransformations(fault_shared_faces_[sh_idx]);
+            }
+         }
+         if (!FTr) { continue; }
+         if (FTr->Elem1No >= 0 && FTr->Elem1No < num_local) { debug_target_elems_.insert(FTr->Elem1No); }
+         if (FTr->Elem2No >= 0 && FTr->Elem2No < num_local) { debug_target_elems_.insert(FTr->Elem2No); }
+      }
+      debug_target_elems_cached_ = true;
+      return debug_target_elems_;
+   }
+
+   bool DebugShouldDumpFace(int logical_fault_idx,
+                            FaceElementTransformations *FTr) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || FTr == nullptr) { return false; }
+      if (logical_fault_idx >= 0 &&
+          first_step_debug_.target_fault_faces.count(logical_fault_idx) > 0)
+      {
+         return true;
+      }
+
+      const auto &target_elems = DebugTargetLocalElements();
+      return target_elems.count(FTr->Elem1No) > 0 ||
+             target_elems.count(FTr->Elem2No) > 0;
+   }
+
+   void DebugDumpFaceData(int logical_fault_idx,
+                          int mesh_face_idx,
+                          const char *face_kind,
+                          FaceElementTransformations *FTr,
+                          const Vector *phys_y_qp,
+                          const Vector *input_qp,
+                          const Vector &elvec1,
+                          const Vector *elvec2) const
+   {
+      if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+      // Truncate on first write to discard stale data from previous runs
+      std::ofstream out(DebugFilePath("first_step_face_rhs"),
+                        debug_face_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_face_header_written_)
+      {
+         out << "time,phase,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_face_header_written_ = true;
+      }
+
+      const int elem1 = FTr ? FTr->Elem1No : -1;
+      const int elem2 = FTr ? FTr->Elem2No : -1;
+      auto write_row = [&](const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << DebugPhaseName() << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << i0 << ","
+             << i1 << ","
+             << value << "\n";
+      };
+
+      if (phys_y_qp)
+      {
+         for (int q = 0; q < phys_y_qp->Size(); q++)
+         {
+            write_row("phys_y", q, -1, (*phys_y_qp)(q));
+         }
+      }
+      if (input_qp)
+      {
+         const int nq = input_qp->Size() / 3;
+         for (int q = 0; q < nq; q++)
+         {
+            for (int c = 0; c < 3; c++)
+            {
+               write_row("input_qp", q, c, (*input_qp)(c * nq + q));
+            }
+         }
+      }
+      for (int j = 0; j < elvec1.Size(); j++)
+      {
+         write_row("elvec1", j, -1, elvec1(j));
+      }
+      if (elvec2)
+      {
+         for (int j = 0; j < elvec2->Size(); j++)
+         {
+            write_row("elvec2", j, -1, (*elvec2)(j));
+         }
+      }
+   }
+
+   void DebugDumpElementVector(const char *quantity, const Vector &vec) const
+   {
+      if (!DebugEnabledForTime(debug_time_)) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_elem_data"),
+                        debug_elem_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_elem_header_written_)
+      {
+         out << "time,quantity,elem,component,local_dof,vdof,value\n";
+         debug_elem_header_written_ = true;
+      }
+
+      const auto &target_elems = DebugTargetLocalElements();
+      for (int elem : target_elems)
+      {
+         Array<int> vdofs;
+         fes_->GetElementVDofs(elem, vdofs);
+         const int ndof = scalar_fes_->GetFE(elem)->GetDof();
+         for (int j = 0; j < vdofs.Size(); j++)
+         {
+            const int vdof = vdofs[j];
+            const int lid = (vdof >= 0) ? vdof : (-1 - vdof);
+            const real_t value = (vdof >= 0) ? vec(lid) : -vec(lid);
+            out << std::setprecision(17) << debug_time_ << ","
+                << quantity << ","
+                << elem << ","
+                << (j / ndof) << ","
+                << (j % ndof) << ","
+                << vdof << ","
+                << value << "\n";
+         }
+      }
+   }
+
+   void DebugDumpFaultJumps(const GridFuncType &displacement,
+                            const Vector &slip_bc) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_face_jump"),
+                        debug_jump_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_jump_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,q,component,value\n";
+         debug_jump_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int q, int c, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << q << ","
+             << c << ","
+             << value << "\n";
+      };
+
+      auto dump_face = [&](int logical_fault_idx, int mesh_face_idx,
+                           const char *face_kind, FaceElementTransformations *FTr,
+                           const FiniteElement *fe1, const Vector &u1_all,
+                           const FiniteElement *fe2, const Vector &u2_all)
+      {
+         if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+         const int dim = 3;
+         const int ndof1 = fe1->GetDof();
+         const int ndof2 = fe2->GetDof();
+         const int nq = face_quad_->NumQuadPoints();
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(logical_fault_idx, slip_bc, delta_u_quad);
+
+         const IntegrationRule &ir = face_quad_->GetQuadRule();
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &fip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+
+            // Physical coordinates at this QP (for cross-code matching)
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+
+            Vector s1(ndof1), s2(ndof2);
+            fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
+            fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++) { u1q += s1(k) * u1_all(c * ndof1 + k); }
+               for (int k = 0; k < ndof2; k++) { u2q += s2(k) * u2_all(c * ndof2 + k); }
+               const real_t slipq = delta_u_quad(c * nq + q);
+               const real_t jump_minus_slip = (u1q - u2q) - slipq;
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "u1_q", q, c, u1q);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "u2_q", q, c, u2q);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "slip_q", q, c, slipq);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No,
+                         "jump_minus_slip", q, c, jump_minus_slip);
+            }
+         }
+      };
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+         dump_face(fi, face, "fault_interior", FTr,
+                   scalar_fes_->GetFE(FTr->Elem1No), u1_all,
+                   scalar_fes_->GetFE(FTr->Elem2No), u2_all);
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         if (!pfes) { return; }
+
+         ParGridFunction par_u(pfes);
+         par_u = displacement;
+         pfes->ExchangeFaceNbrData();
+         par_u.ExchangeFaceNbrData();
+
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int logical_fault_idx = fault_interior_faces_.Size() + i;
+            int sf = fault_shared_faces_[i];
+            FaceElementTransformations *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { continue; }
+
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+            Vector u1_all(vdofs1.Size());
+            par_u.GetSubVector(vdofs1, u1_all);
+
+            const int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            Array<int> vdofs2;
+            pfes->GetFaceNbrElementVDofs(nbr_idx, vdofs2);
+            const Vector &nbr_data = par_u.FaceNbrData();
+            Vector u2_all(vdofs2.Size());
+            for (int j = 0; j < vdofs2.Size(); j++)
+            {
+               u2_all(j) = nbr_data(vdofs2[j]);
+            }
+
+            dump_face(logical_fault_idx, mesh_.GetSharedFace(sf), "fault_shared", FTr,
+                      scalar_fes_->GetFE(FTr->Elem1No), u1_all, fe2, u2_all);
+         }
+#endif
+      }
+   }
+
+   void DebugDumpFaultTraction(const GridFuncType &displacement,
+                               const Vector &slip_bc)
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      Vector traction, normal_traction;
+      ComputeTraction(displacement, slip_bc, traction, &normal_traction);
+
+      std::ofstream out(DebugFilePath("first_step_face_trac"),
+                        debug_trac_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_trac_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_trac_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << i0 << ","
+             << i1 << ","
+             << value << "\n";
+      };
+
+      auto dump_face = [&](int logical_fault_idx, int mesh_face_idx,
+                           const char *face_kind, FaceElementTransformations *FTr,
+                           const FiniteElement *fe1, const Vector &u1_all,
+                           const FiniteElement *fe2, const Vector &u2_all)
+      {
+         if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+         const int dim = 3;
+         const int nbf = nbf_per_face_;
+         const int nq = face_quad_->NumQuadPoints();
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(logical_fault_idx, slip_bc, delta_u_quad);
+
+         DGElasticityIPCombinedIntegrator trac_integ(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         Vector T_quad, nl_q;
+         trac_integ.ComputeTractionAtQuadPoints(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);
+
+         // Compute physical coordinates at each QP for cross-code matching
+         const IntegrationRule &ir_trac = IntRules.Get(
+            FTr->GetGeometryType(), 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1);
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir_trac.IntPoint(q));
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "nl_q", q, -1, nl_q(q));
+            for (int c = 0; c < dim; c++)
+            {
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "traction_q", q, c,
+                         T_quad(c * nq + q));
+            }
+         }
+
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            const int dof_idx = logical_fault_idx * nbf + kk;
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "traction_dip", kk, -1,
+                      traction(2 * dof_idx));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "traction_strike", kk, -1,
+                      traction(2 * dof_idx + 1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "normal_traction", kk, -1,
+                      normal_traction(dof_idx));
+         }
+      };
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+         dump_face(fi, face, "fault_interior", FTr,
+                   scalar_fes_->GetFE(FTr->Elem1No), u1_all,
+                   scalar_fes_->GetFE(FTr->Elem2No), u2_all);
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         if (!pfes) { return; }
+
+         ParGridFunction par_u(pfes);
+         par_u = displacement;
+         pfes->ExchangeFaceNbrData();
+         par_u.ExchangeFaceNbrData();
+
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int logical_fault_idx = fault_interior_faces_.Size() + i;
+            int sf = fault_shared_faces_[i];
+            FaceElementTransformations *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { continue; }
+
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+            Vector u1_all(vdofs1.Size());
+            par_u.GetSubVector(vdofs1, u1_all);
+
+            const int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            Array<int> vdofs2;
+            pfes->GetFaceNbrElementVDofs(nbr_idx, vdofs2);
+            const Vector &nbr_data = par_u.FaceNbrData();
+            Vector u2_all(vdofs2.Size());
+            for (int j = 0; j < vdofs2.Size(); j++)
+            {
+               u2_all(j) = nbr_data(vdofs2[j]);
+            }
+
+            dump_face(logical_fault_idx, mesh_.GetSharedFace(sf), "fault_shared", FTr,
+                      scalar_fes_->GetFE(FTr->Elem1No), u1_all, fe2, u2_all);
+         }
+#endif
+      }
+   }
+
+   /// Build 3D slip at quadrature points for a single fault face.
+   ///
+   /// Shared by production assembly (AssembleSlipContributionIP) and debug
+   /// diagnostics (DebugDumpFaultJumps, DebugDumpFaultTraction).  Single
+   /// source of truth for the interpolation + embedding + sign chain.
+   ///
+   /// @param logical_fault_idx  Face index in the combined interior+shared list
+   /// @param slip_bc            Full local slip vector [2 * num_fault_dofs]
+   /// @param[out] delta_u_quad  3D slip at QPs [dim * nq], sign-corrected
+   void BuildSlipAtQuadPoints(int logical_fault_idx, const Vector &slip_bc,
+                              Vector &delta_u_quad) const
+   {
+      const int dim = 3;
+      const int nbf = nbf_per_face_;
+      const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
+      const real_t sign = basis.sign_flipped ? -1.0 : 1.0;
+
+      if (!basis.qp_data.empty())
+      {
+         Vector slip_tang(2 * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = logical_fault_idx * nbf + kk;
+            slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
+            slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
+         }
+         Vector slip_tang_q;
+         face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+         int nqp = slip_tang_q.Size() / 2;
+         delta_u_quad.SetSize(dim * nqp);
+         for (int q = 0; q < nqp; q++)
+         {
+            real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
+            real_t du[3];
+            fault_basis_.EmbedSlipQP(logical_fault_idx, q, sl_q, du);
+            for (int c = 0; c < dim; c++)
+               delta_u_quad(c * nqp + q) = sign * du[c];
+         }
+      }
+      else
+      {
+         Vector delta_u_nodal(dim * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = logical_fault_idx * nbf + kk;
+            real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                    slip_bc(2 * dof_idx + 1)};
+            real_t du[3];
+            fault_basis_.EmbedSlip(logical_fault_idx, slip_local, du);
+            for (int c = 0; c < dim; c++)
+               delta_u_nodal(c * nbf + kk) = du[c];
+         }
+         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+         for (int i = 0; i < delta_u_quad.Size(); i++)
+            delta_u_quad(i) *= sign;
+      }
+   }
 
    // ---- Facet BC classification (single source of truth) ----
    // Mirrors Tandem's per-facet BC enum (DGOperatorTopo FacetInfo.bc).
@@ -1843,48 +2418,7 @@ private:
 
          // Build slip at quad points (Tandem evaluate_slip)
          Vector delta_u_quad;
-         if (!basis_slip.qp_data.empty())
-         {
-            // Per-QP tangent embedding: interpolate tangential components,
-            // then embed using per-QP tangent frame
-            Vector slip_tang(2 * nbf);
-            for (int kk = 0; kk < nbf; kk++)
-            {
-               int dof_idx = fi * nbf + kk;
-               slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);      // dip
-               slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);  // strike
-            }
-            Vector slip_tang_q;
-            face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
-            int nqp = slip_tang_q.Size() / 2;
-            delta_u_quad.SetSize(dim * nqp);
-            for (int q = 0; q < nqp; q++)
-            {
-               real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
-               real_t du[3];
-               fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
-               for (int c = 0; c < dim; c++)
-                  delta_u_quad(c * nqp + q) = sign * du[c];
-            }
-         }
-         else
-         {
-            // Fallback: centroid tangents (BR2 path)
-            Vector delta_u_nodal(dim * nbf);
-            for (int kk = 0; kk < nbf; kk++)
-            {
-               int dof_idx = fi * nbf + kk;
-               real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                       slip_bc(2 * dof_idx + 1)};
-               real_t du[3];
-               fault_basis_.EmbedSlip(fi, slip_local, du);
-               for (int c = 0; c < dim; c++)
-                  delta_u_nodal(c * nbf + kk) = du[c];
-            }
-            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-            for (int i = 0; i < delta_u_quad.Size(); i++)
-               delta_u_quad(i) *= sign;
-         }
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
 
          const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
          const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
@@ -1893,6 +2427,8 @@ private:
          Vector elvec1, elvec2;
          slip_integrator.AssembleSlipFaceRHS(
             *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
+         DebugDumpFaceData(fi, face, "fault_interior", FTr, nullptr,
+                           &delta_u_quad, elvec1, &elvec2);
 
          // Scatter into global RHS
          Array<int> vdofs1, vdofs2;
@@ -2225,45 +2761,7 @@ private:
             if (all_zero) { continue; }
 
             Vector delta_u_quad;
-            if (!basis_slip.qp_data.empty())
-            {
-               Vector slip_tang(2 * nbf);
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int dof_idx = slip_idx * nbf + kk;
-                  slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
-                  slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
-               }
-               Vector slip_tang_q;
-               face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
-               int nqp = slip_tang_q.Size() / 2;
-               delta_u_quad.SetSize(dim * nqp);
-               for (int q = 0; q < nqp; q++)
-               {
-                  real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
-                  real_t du[3];
-                  fault_basis_.EmbedSlipQP(slip_idx, q, sl_q, du);
-                  for (int c = 0; c < dim; c++)
-                     delta_u_quad(c * nqp + q) = sign * du[c];
-               }
-            }
-            else
-            {
-               Vector delta_u_nodal(dim * nbf);
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int dof_idx = slip_idx * nbf + kk;
-                  real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                          slip_bc(2 * dof_idx + 1)};
-                  real_t du[3];
-                  fault_basis_.EmbedSlip(slip_idx, slip_local, du);
-                  for (int c = 0; c < dim; c++)
-                     delta_u_nodal(c * nbf + kk) = du[c];
-               }
-               face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-               for (int j = 0; j < delta_u_quad.Size(); j++)
-                  delta_u_quad(j) *= sign;
-            }
+            BuildSlipAtQuadPoints(slip_idx, slip_bc, delta_u_quad);
 
             const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
             auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
@@ -2274,6 +2772,8 @@ private:
             Vector elvec1, elvec2;
             slip_integrator.AssembleSlipFaceRHS(
                *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
+            DebugDumpFaceData(slip_idx, mesh_.GetSharedFace(sf), "fault_shared",
+                              FTr, nullptr, &delta_u_quad, elvec1, &elvec2);
 
             Array<int> vdofs1;
             fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
@@ -2589,14 +3089,19 @@ private:
             // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
+            Vector phys_y_qp(nq_dir);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
+               // TODO(v59): Evaluate whether Elem1->Transform is more
+               // correct here (see first-step comparison). For now keep
+               // the original Face->Transform to avoid production changes.
                FTr->Face->SetIntPoint(&ipq);
                FTr->Face->Transform(ipq, phys);
                real_t y = phys(1);
+               phys_y_qp(q) = y;
                // Tandem bp5.lua boundary(x,y,z,t):
                real_t Vh = Vp_ * time;
                if (y > 1000.0) { Vh *= 0.5; }
@@ -2606,6 +3111,8 @@ private:
 
             Vector elvec_dir;
             dir_integ.AssembleBoundaryFaceRHS(*fe, *FTr, u_D_3d, elvec_dir);
+            DebugDumpFaceData(-1, face_idx, "dirichlet_boundary", FTr,
+                              &phys_y_qp, &u_D_3d, elvec_dir, nullptr);
 
             for (int j = 0; j < elvec_dir.Size(); j++)
                elvec(j) += elvec_dir(j);
@@ -2810,6 +3317,7 @@ private:
             // sign, matching Tandem DGCurvilinearCommon.h:92-99.
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
+            Vector phys_y_qp(nq_dir);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
@@ -2818,6 +3326,7 @@ private:
                FTr->Face->SetIntPoint(&ipq);
                FTr->Face->Transform(ipq, phys);
                real_t y = phys(1);
+               phys_y_qp(q) = y;
                real_t Vh = Vp_ * time;
                if (y > 1000.0) { Vh *= 0.5; }
                else if (y < -1000.0) { Vh *= -0.5; }
@@ -2828,6 +3337,8 @@ private:
 
             Vector ev1, ev2;
             dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+            DebugDumpFaceData(-1, f, "dirichlet_interior", FTr,
+                              &phys_y_qp, &u_D_3d, ev1, &ev2);
 
             for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
             for (int j = 0; j < ev2.Size(); j++) { elvec2(j) += ev2(j); }
@@ -3123,6 +3634,7 @@ private:
                // Per-QP boundary evaluation with orientation sign
                Vector u_D_3d(dim * nq_dir);
                u_D_3d = 0.0;
+               Vector phys_y_qp(nq_dir);
                for (int q = 0; q < nq_dir; q++)
                {
                   const IntegrationPoint &ipq = ir_dir.IntPoint(q);
@@ -3131,6 +3643,7 @@ private:
                   FTr->Face->SetIntPoint(&ipq);
                   FTr->Face->Transform(ipq, phys);
                   real_t y = phys(1);
+                  phys_y_qp(q) = y;
                   real_t Vh = Vp_ * time;
                   if (y > 1000.0) { Vh *= 0.5; }
                   else if (y < -1000.0) { Vh *= -0.5; }
@@ -3140,6 +3653,8 @@ private:
 
                Vector ev1, ev2;
                dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+               DebugDumpFaceData(-1, mesh_.GetSharedFace(sf), "dirichlet_shared",
+                                 FTr, &phys_y_qp, &u_D_3d, ev1, &ev2);
                for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
                // ev2 goes to neighbor rank, not used here
             }
@@ -3592,8 +4107,28 @@ void ElasticityDomainOperator<MeshType>::Solve(
    b.Assemble();
    Vector &rhs = b;
 
+   const bool debug_first_step = (method_ == DGMethod::IP) &&
+                                 DebugEnabledForTime(time);
+   debug_time_ = time;
+
    // Add slip contributions (interior + shared faces)
-   if (method_ == DGMethod::IP)
+   if (debug_first_step)
+   {
+      Vector rhs_slip, rhs_dir;
+      debug_phase_ = DebugAssemblePhase::Slip;
+      AssembleSlipOnlyRHS(rhs_slip, slip_bc);
+      debug_phase_ = DebugAssemblePhase::Dirichlet;
+      AssembleDirichletOnlyRHS(rhs_dir, time);
+      debug_phase_ = DebugAssemblePhase::None;
+
+      rhs = rhs_slip;
+      rhs += rhs_dir;
+
+      DebugDumpElementVector("rhs_slip", rhs_slip);
+      DebugDumpElementVector("rhs_dirichlet", rhs_dir);
+      DebugDumpElementVector("rhs_total", rhs);
+   }
+   else if (method_ == DGMethod::IP)
    {
       AssembleSlipContributionIP(rhs, slip_bc);
       AssembleSlipContributionIPShared(rhs, slip_bc,
@@ -3613,6 +4148,47 @@ void ElasticityDomainOperator<MeshType>::Solve(
    B_ = rhs;
 
    solver_->Mult(B_, X_);
+
+   if (debug_first_step)
+   {
+      DebugDumpElementVector("u", X_);
+
+      // K spot-check: apply K to unit vectors at target element DOFs.
+      // Dumps K*e_hat for direct column-of-K comparison with Tandem.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *Kh = cached_Ah_.As<HypreParMatrix>();
+         if (Kh)
+         {
+            const auto &target_elems = DebugTargetLocalElements();
+            Vector e_hat(fes_->GetVSize());
+            Vector Ke(fes_->GetVSize());
+            // Pick first DOF of each target element's x-component
+            for (int elem : target_elems)
+            {
+               Array<int> vdofs;
+               fes_->GetElementVDofs(elem, vdofs);
+               if (vdofs.Size() == 0) { continue; }
+               int probe_vdof = vdofs[0];  // first DOF, x-component
+               if (probe_vdof < 0) { probe_vdof = -1 - probe_vdof; }
+               e_hat = 0.0;
+               e_hat(probe_vdof) = 1.0;
+               Kh->Mult(e_hat, Ke);
+               std::ostringstream label;
+               label << "K_e" << elem << "_d" << probe_vdof;
+               DebugDumpElementVector(label.str().c_str(), Ke);
+            }
+         }
+#endif
+      }
+
+      GridFuncType debug_u(fes_.get());
+      debug_u = X_;
+      DebugDumpFaultJumps(debug_u, slip_bc);
+      DebugDumpFaultTraction(debug_u, slip_bc);
+      first_step_debug_done_ = true;
+   }
 
    // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
    if (check_residual_)
@@ -3711,6 +4287,15 @@ void ElasticityDomainOperator<MeshType>::AssembleSlipOnlyRHS(
       AssembleSlipContributionBR2Shared(rhs, slip_bc,
                                         fault_interior_faces_.Size());
    }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::AssembleDirichletOnlyRHS(
+   Vector &rhs, real_t time) const
+{
+   rhs.SetSize(fes_->GetVSize());
+   rhs = 0.0;
+   AssembleDirichletLoading(rhs, time);
 }
 
 template <typename MeshType>
