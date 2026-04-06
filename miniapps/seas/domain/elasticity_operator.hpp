@@ -2596,6 +2596,31 @@ private:
             for (int i = 0; i < 5; i++) { global[i] = counts[i]; }
          }
 
+         // Count boundary faces per attribute
+         int max_attr = mesh_.GetNBE() > 0 ? mesh_.bdr_attributes.Max() : 0;
+         std::vector<long long> local_bdr_by_attr(max_attr + 1, 0);
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            auto *FTr = mesh_.GetBdrFaceTransformations(be);
+            if (FTr)
+            {
+               int attr = mesh_.GetBdrAttribute(be);
+               if (attr <= max_attr) { local_bdr_by_attr[attr]++; }
+            }
+         }
+         std::vector<long long> global_bdr_by_attr(max_attr + 1, 0);
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(local_bdr_by_attr.data(), global_bdr_by_attr.data(),
+                          max_attr + 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+#endif
+         }
+         else
+         {
+            global_bdr_by_attr = local_bdr_by_attr;
+         }
+
          if (DebugRank() == 0)
          {
             mfem::out << "  [K-DIAG] Volume elements:        " << global[0] << "\n";
@@ -2604,6 +2629,18 @@ private:
                       << " (each counted by owning rank)\n";
             mfem::out << "  [K-DIAG] Bdr faces (Dirichlet):  " << global[3] << "\n";
             mfem::out << "  [K-DIAG] Bdr faces (all attrs):  " << global[4] << "\n";
+            for (int a = 1; a <= max_attr; a++)
+            {
+               if (global_bdr_by_attr[a] > 0)
+               {
+                  mfem::out << "  [K-DIAG]   attr " << a << ": "
+                            << global_bdr_by_attr[a] << " bdr faces"
+                            << (dirichlet_bdr_marker_.Size() >= a &&
+                                dirichlet_bdr_marker_[a-1] == 1
+                                ? " (Dirichlet K)" : " (NO K integrator)")
+                            << "\n";
+               }
+            }
             mfem::out << "  [K-DIAG] Total K contributions:  "
                       << global[0] + global[1] + global[2] + global[3]
                       << " (vol + interior + shared + bdr_dir)\n";
