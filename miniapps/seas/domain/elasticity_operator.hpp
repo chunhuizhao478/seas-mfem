@@ -4029,9 +4029,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->SetAllIntPoints(&nip);
+            FTr->Face->SetIntPoint(&nip);
             Vector coords(3);
-            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
+            FTr->Face->Transform(nip, coords);
 
             // Depth: -Z (Z is negative downward in Tandem, depth is positive)
             fault_depths_(i * nbf + kk) = -coords(2);
@@ -4053,9 +4053,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->SetAllIntPoints(&nip);
+               FTr->Face->SetIntPoint(&nip);
                Vector coords(3);
-               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
+               FTr->Face->Transform(nip, coords);
 
                fault_depths_(face_idx * nbf + kk) = -coords(2);
             }
@@ -4095,10 +4095,10 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
 
-            // Map face integration point to physical coordinates via Elem1
-            FTr->SetAllIntPoints(&nip);
+            // Map face integration point to physical coordinates via Face
+            FTr->Face->SetIntPoint(&nip);
             Vector coords(3);
-            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
+            FTr->Face->Transform(nip, coords);
 
             // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
             fault_x2_(i * nbf + kk) = coords(0);
@@ -4121,9 +4121,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->SetAllIntPoints(&nip);
+               FTr->Face->SetIntPoint(&nip);
                Vector coords(3);
-               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
+               FTr->Face->Transform(nip, coords);
 
                fault_x2_(face_idx * nbf + kk) = coords(0);
                fault_x3_(face_idx * nbf + kk) = -coords(2);
