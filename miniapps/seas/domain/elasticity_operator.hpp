@@ -2552,24 +2552,18 @@ private:
          }
 
          // Count boundary faces processed by the Dirichlet face integrator
+         // Count boundary elements by Dirichlet marker (no GetBdrFaceTransformations
+         // — that call can cause MPI deadlock on ParMesh).
          long long local_bdr_face = 0;
+         long long local_bdr_all = mesh_.GetNBE();
          for (int be = 0; be < mesh_.GetNBE(); be++)
          {
             int attr = mesh_.GetBdrAttribute(be);
             if (dirichlet_bdr_marker_.Size() > 0 &&
                 dirichlet_bdr_marker_[attr - 1] == 1)
             {
-               auto *FTr = mesh_.GetBdrFaceTransformations(be);
-               if (FTr) { local_bdr_face++; }
+               local_bdr_face++;
             }
-         }
-
-         // Count ALL boundary elements (any attr) to see total boundary faces
-         long long local_bdr_all = 0;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            auto *FTr = mesh_.GetBdrFaceTransformations(be);
-            if (FTr) { local_bdr_all++; }
          }
 
          long long local_shared = 0;
@@ -2596,17 +2590,23 @@ private:
             for (int i = 0; i < 5; i++) { global[i] = counts[i]; }
          }
 
-         // Count boundary faces per attribute
-         int max_attr = mesh_.GetNBE() > 0 ? mesh_.bdr_attributes.Max() : 0;
+         // Count ALL boundary elements per attribute (no GetBdrFaceTransformations
+         // — that can cause MPI issues). This counts boundary ELEMENTS, not
+         // faces that pass the interior-check.
+         int local_max_attr = mesh_.GetNBE() > 0 ? mesh_.bdr_attributes.Max() : 0;
+         int max_attr = local_max_attr;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(&local_max_attr, &max_attr, 1, MPI_INT, MPI_MAX,
+                          mesh_.GetComm());
+#endif
+         }
          std::vector<long long> local_bdr_by_attr(max_attr + 1, 0);
          for (int be = 0; be < mesh_.GetNBE(); be++)
          {
-            auto *FTr = mesh_.GetBdrFaceTransformations(be);
-            if (FTr)
-            {
-               int attr = mesh_.GetBdrAttribute(be);
-               if (attr <= max_attr) { local_bdr_by_attr[attr]++; }
-            }
+            int attr = mesh_.GetBdrAttribute(be);
+            if (attr >= 1 && attr <= max_attr) { local_bdr_by_attr[attr]++; }
          }
          std::vector<long long> global_bdr_by_attr(max_attr + 1, 0);
          if constexpr (IsParallelMesh<MeshType>::value)
