@@ -329,10 +329,9 @@ private:
    bool DebugEnabledForTime(real_t time) const
    {
       if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
-      // Target: dump at the first Mult() call with t >= 0.01 (first accepted
-      // step for dt_init=0.01). This avoids sub-stage dumps and matches the
-      // time window where Tandem's first_step_dump_active fires.
-      if (time < 0.005) { return false; }
+      // Target: dump at the first Mult() call with t >= 0.019.
+      // Tandem dumps at t=0.02 (k2 of second step). Match that.
+      if (time < 0.019) { return false; }
       return (first_step_debug_.target_rank < 0 ||
               DebugRank() == first_step_debug_.target_rank);
    }
