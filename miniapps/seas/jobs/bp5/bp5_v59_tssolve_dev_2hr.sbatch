@@ -60,7 +60,8 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps \
-      --tfinal 3.15576e7 \
+      --tfinal 1.0 \
+      --max-steps 1 \
       --ref-dir bp5/benchmark_data \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
