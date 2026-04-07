@@ -1110,7 +1110,8 @@ private:
       const int dim = 3;
       const int nbf = nbf_per_face_;
       const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
-      const real_t sign = basis.sign_flipped ? -1.0 : 1.0;
+      // Tandem convention: sign is baked into the basis vectors.
+      // No separate sign factor needed.
 
       if (!basis.qp_data.empty())
       {
@@ -1131,7 +1132,7 @@ private:
             real_t du[3];
             fault_basis_.EmbedSlipQP(logical_fault_idx, q, sl_q, du);
             for (int c = 0; c < dim; c++)
-               delta_u_quad(c * nqp + q) = sign * du[c];
+               delta_u_quad(c * nqp + q) = du[c];
          }
       }
       else
@@ -1148,8 +1149,6 @@ private:
                delta_u_nodal(c * nbf + kk) = du[c];
          }
          face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-         for (int i = 0; i < delta_u_quad.Size(); i++)
-            delta_u_quad(i) *= sign;
       }
    }
 
@@ -2821,9 +2820,6 @@ private:
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
 
-         const auto &basis_slip = fault_basis_.GetBasis(fi);
-         real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
-
          // Check if any slip is non-zero
          bool all_zero = true;
          for (int kk = 0; kk < nbf && all_zero; kk++)
@@ -3166,9 +3162,6 @@ private:
             if (FTr == nullptr) { continue; }
 
             int slip_idx = interior_face_count + i;
-            const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
-            real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
-
             bool all_zero = true;
             for (int kk = 0; kk < nbf && all_zero; kk++)
             {
@@ -4802,9 +4795,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       // Fault basis
       const auto &basis = fault_basis_.GetBasis(fi);
 
-      // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
-      real_t sign = basis.sign_flipped ? -1.0 : 1.0;
-
       // Element Jacobian inverses (constant for linear tets/hexes)
       // Must set an integration point first so Jacobian() is valid.
       FTr->SetAllIntPoints(&ip);
@@ -4830,7 +4820,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       {
          // Tandem-style traction recovery using combined integrator.
          // ComputeTractionAtQuadPoints (per-qp geometry, same penalty as K)
-         // + ProjectTractionToFaultDOFs (nl_q-weighted, sign_flipped)
+         // + ProjectTractionToFaultDOFs (nl_q-weighted L2 projection)
          // When decomposition diagnostics are requested, uses the decomposed
          // variant to also output stress, correction, and jump residual.
          int nbf = nbf_per_face_;
@@ -4872,7 +4862,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                real_t du[3];
                fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
                for (int c = 0; c < dim; c++)
-                  delta_u_quad_t(c * nqp_slip + q) = sign * du[c];
+                  delta_u_quad_t(c * nqp_slip + q) = du[c];
             }
          }
          else
@@ -4889,8 +4879,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   delta_u_nodal_t(c * nbf + kk) = du[c];
             }
             face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_t, delta_u_quad_t);
-            for (int j = 0; j < delta_u_quad_t.Size(); j++)
-               delta_u_quad_t(j) *= sign;
          }
 
          // Step 1: Traction at quad points (Tandem compute_traction)
@@ -4952,7 +4940,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          Vector trac_local_new;
          DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
             dim, ncomp_proj, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
-            basis_vecs, basis.sign_flipped, trac_local_new, qpd);
+            basis_vecs, trac_local_new, qpd);
 
          // Store per-DOF shear traction
          int tang_offset = normal_traction ? 1 : 0;
@@ -4981,7 +4969,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector stress_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, stress_local, qpd);
+               basis_vecs + tang_offset, stress_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4994,7 +4982,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector corr_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, corr_local, qpd);
+               basis_vecs + tang_offset, corr_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -5007,7 +4995,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector res_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, R_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, res_local, qpd);
+               basis_vecs + tang_offset, res_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -5023,7 +5011,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector ns_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 1, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs, basis.sign_flipped, ns_local, qpd);
+               basis_vecs, ns_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -5035,7 +5023,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector nc_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 1, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs, basis.sign_flipped, nc_local, qpd);
+               basis_vecs, nc_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -5098,7 +5086,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
-               jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+               jump_q[c] = (u1q - u2q) - delta_u[c];
             }
 
             for (int u = 0; u < dim; u++)
@@ -5305,9 +5293,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // Fault basis
          const auto &basis = fault_basis_.GetBasis(trac_idx);
 
-         // v55: Sign from FaultBasis sign_flipped (general)
-         real_t sign = basis.sign_flipped ? -1.0 : 1.0;
-
          // Element Jacobian inverses (constant for linear tets)
          DenseMatrix Jinv1(dim), Jinv2(dim);
          CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
@@ -5366,7 +5351,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t du[3];
                   fault_basis_.EmbedSlipQP(trac_idx, q, sl_q, du);
                   for (int c = 0; c < dim; c++)
-                     delta_u_quad_sh(c * nqp_sh_slip + q) = sign * du[c];
+                     delta_u_quad_sh(c * nqp_sh_slip + q) = du[c];
                }
             }
             else
@@ -5383,8 +5368,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      delta_u_nodal_sh(c * nbf_sh + kk) = du[c];
                }
                face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_sh, delta_u_quad_sh);
-               for (int j = 0; j < delta_u_quad_sh.Size(); j++)
-                  delta_u_quad_sh(j) *= sign;
             }
 
             DGElasticityIPCombinedIntegrator trac_integ_sh(
@@ -5441,7 +5424,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector trac_local_sh;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, ncomp_sh, T_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-               basis_vecs_sh, basis_sh.sign_flipped, trac_local_sh, qpd_sh);
+               basis_vecs_sh, trac_local_sh, qpd_sh);
 
             int tang_off_sh = normal_traction ? 1 : 0;
             for (int kk = 0; kk < nbf_sh; kk++)
@@ -5465,7 +5448,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector stress_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, stress_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, stress_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5478,7 +5461,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector corr_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, corr_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, corr_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5491,7 +5474,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector res_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, R_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, res_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, res_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5506,7 +5489,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector ns_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 1, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh, basis_sh.sign_flipped, ns_local_sh, qpd_sh);
+                  basis_vecs_sh, ns_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5518,7 +5501,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector nc_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 1, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh, basis_sh.sign_flipped, nc_local_sh, qpd_sh);
+                  basis_vecs_sh, nc_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5579,7 +5562,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
-                  jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+                  jump_q[c] = (u1q - u2q) - delta_u[c];
                }
 
                for (int u = 0; u < dim; u++)

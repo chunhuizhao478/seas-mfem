@@ -697,14 +697,13 @@ public:
    /// @param sign_flipped Whether mesh normal was flipped (constant, used when qp_data is null)
    /// @param traction_local Output: fault-local traction [ncomp_local * nbf]
    /// @param qp_data Optional per-quad-point basis data (Tandem convention).
-   ///        When provided, tangent vectors and sign_flipped are taken per quad point.
+   ///        When provided, tangent vectors are taken per quad point.
    static void ProjectTractionToFaultDOFs(
       int dim, int ncomp_local,
       const Vector &traction_q, const Vector &nl_q,
       const IntegrationRule &ir, int nbf,
       const DenseMatrix &e_q,
       const real_t tangents[][3],
-      bool sign_flipped,
       Vector &traction_local,
       const std::vector<FaultBasisQPData> *qp_data = nullptr)
    {
@@ -744,8 +743,9 @@ public:
          //   ncomp_local=2: basis_vec = [tangent1, tangent2]
          //   ncomp_local=1: basis_vec = [tangents[0]] (caller decides:
          //                  normal for normal decomposition, tangent1 otherwise)
+         // Tandem convention: sign is baked into the basis vectors.
+         // No separate sf factor needed (sign_flipped param is unused).
          real_t n0[3], t1[3], t2[3];
-         real_t sf;
          if (qp_data && q < static_cast<int>(qp_data->size()))
          {
             const auto &qd = (*qp_data)[q];
@@ -755,7 +755,6 @@ public:
                t1[d] = qd.tangent1[d];
                t2[d] = qd.tangent2[d];
             }
-            sf = qd.sign_flipped ? -1.0 : 1.0;
          }
          else
          {
@@ -765,7 +764,6 @@ public:
                t1[d] = (ncomp_local >= 2) ? tangents[ncomp_local >= 3 ? 1 : 0][d] : 0.0;
                t2[d] = (ncomp_local >= 2) ? tangents[ncomp_local >= 3 ? 2 : 1][d] : 0.0;
             }
-            sf = sign_flipped ? -1.0 : 1.0;
          }
          // Map ncomp_local to the correct basis vectors:
          //   ncomp=3: [normal, tangent1, tangent2]
@@ -782,7 +780,7 @@ public:
             real_t T_local = 0.0;
             for (int p = 0; p < dim; p++)
             {
-               T_local += traction_q(p * nq + q) * basis_vec[t][p] * sf;
+               T_local += traction_q(p * nq + q) * basis_vec[t][p];
             }
             for (int l = 0; l < nbf; l++)
             {

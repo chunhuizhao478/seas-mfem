@@ -22,22 +22,26 @@ namespace seas
 {
 
 /// Per-quad-point data on a fault face (matching Tandem AdapterBase).
+/// Sign convention: all vectors already include the sign_flipped negation
+/// (Tandem convention).  Callers use them directly, no sign factor needed.
 struct FaultBasisQPData
 {
-   real_t normal[3];       ///< Unit normal (oriented to ref_normal)
-   real_t tangent1[3];     ///< First tangent (dip) at this quad point
-   real_t tangent2[3];     ///< Second tangent (strike) at this quad point
+   real_t normal[3];       ///< Unit normal (with sign baked in)
+   real_t tangent1[3];     ///< First tangent / dip (with sign baked in)
+   real_t tangent2[3];     ///< Second tangent / strike (with sign baked in)
    real_t nl;              ///< Normal length |n_raw| at this quad point
-   bool sign_flipped;      ///< True if mesh normal was flipped at this quad point
+   bool sign_flipped;      ///< Diagnostic only; sign already baked into basis vectors
 };
 
 /// Per-face summary (for backward compatibility and fast access).
+/// Sign convention: all vectors already include the sign_flipped negation
+/// (Tandem convention).  Callers use them directly, no sign factor needed.
 struct FaultBasisData
 {
-   real_t normal[3];    ///< Unit outward normal (oriented to ref_normal, at centroid)
-   real_t tangent1[3];  ///< First tangent (dip, at centroid)
-   real_t tangent2[3];  ///< Second tangent (strike, at centroid)
-   bool sign_flipped;   ///< True if mesh normal was flipped at centroid
+   real_t normal[3];    ///< Unit normal at centroid (with sign baked in)
+   real_t tangent1[3];  ///< First tangent / dip at centroid (with sign baked in)
+   real_t tangent2[3];  ///< Second tangent / strike at centroid (with sign baked in)
+   bool sign_flipped;   ///< Diagnostic only; sign already baked into basis vectors
    std::vector<FaultBasisQPData> qp_data;  ///< Per-quad-point data (Tandem convention)
 };
 
@@ -235,12 +239,8 @@ public:
    ///         tau_local[1] = traction . tangent2 (strike)
    /// For 2D: tau_local[0] = traction . tangent1
    ///
-   /// NOTE: tangent vectors are from the ORIGINAL (un-flipped) normal.
-   /// This function does NOT apply sign_flipped correction. For the IP
-   /// path, ProjectTractionToFaultDOFs (which applies sf) is used instead.
-   /// If this function is used on sign_flipped faces (BR2 path), callers
-   /// must apply sign = sign_flipped ? -1 : 1 to get orientation-
-   /// independent traction.
+   /// NOTE: tangent vectors already contain the sign_flipped negation
+   /// (Tandem convention).  No additional sign correction is needed.
    void ProjectTraction(int fi, const real_t *traction_global,
                         real_t *tau_local) const
    {
@@ -339,53 +339,30 @@ private:
    int num_faces_ = 0;
    std::vector<FaultBasisData> basis_;
 
-   /// Core orientation and tangent-frame computation shared by all paths.
+   /// Compute oriented fault frame (normal, dip, strike) from a raw face
+   /// normal, replicating Tandem's AdapterBase::prepare() convention exactly.
    ///
-   /// Given a raw (unnormalized) face normal, orients it with ref_normal,
-   /// normalizes it, and computes strike/dip tangent vectors.
+   /// Tandem's algorithm (AdapterBase.cpp:62-84, Curvilinear.cpp:260-293):
+   ///   1. Record nl = |n_raw|
+   ///   2. sign_flipped = dot(n_raw, ref_normal) < 0
+   ///   3. If sign_flipped: flip n_raw to ref-aligned  (line 72-73)
+   ///   4. Compute tangent frame from ref-aligned normal:
+   ///        strike = normalize(up × n_ref)   (facetBasis:287)
+   ///        dip    = normalize(strike × n_ref) (facetBasis:291)
+   ///   5. If sign_flipped: negate ALL stored vectors  (lines 78-84)
    ///
-   /// @param n_raw       Raw face normal (modified in-place: oriented + normalized)
+   /// The stored basis already contains the sign.  Callers use it directly
+   /// — NO separate sign factor is needed.
+   ///
+   /// @param n_raw       Raw face normal (modified in-place)
    /// @param dim         Spatial dimension (2 or 3)
    /// @param ref_normal  Reference normal for orientation
    /// @param up          Reference up vector
-   /// @param[out] normal      Unit normal (3 components, zero-padded)
-   /// @param[out] tangent1    Dip tangent (3 components)
-   /// @param[out] tangent2    Strike tangent (3 components)
-   /// @param[out] sign_flipped  True if raw normal was flipped
+   /// @param[out] normal      Unit normal with sign (3 components)
+   /// @param[out] tangent1    Dip tangent with sign (3 components)
+   /// @param[out] tangent2    Strike tangent with sign (3 components)
+   /// @param[out] sign_flipped  True if raw normal was anti-aligned with ref
    /// @param[out] nl          Raw normal length (before normalization)
-   /// Compute oriented fault frame from a raw face normal.
-   ///
-   /// Tandem convention: compute tangent frame from the CANONICAL normal
-   /// (aligned with ref_normal), then record sign_flipped so callers can
-   /// negate the entire embedded result uniformly.  This ensures all three
-   /// basis vectors (normal, tangent1, tangent2) are computed from the same
-   /// canonical normal direction.  The caller (BuildSlipAtQuadPoints)
-   /// multiplies the full 3D embedded slip by sign = sign_flipped ? -1 : +1.
-   ///
-   /// Previous bug: the normal was negated BEFORE computing the tangent
-   /// frame.  Because strike = up × n, negating n reverses strike but
-   /// leaves dip = strike × n unchanged.  The subsequent sign multiplication
-   /// then triple-negated strike (reversed tangent × sign = original) but
-   /// correctly double-negated dip.  This gave the strike-slip component
-   /// the wrong sign on every sign_flipped face.
-   /// Compute an oriented fault frame (normal, dip, strike) from the raw
-   /// face normal, matching Tandem's AdapterBase::prepare() convention.
-   ///
-   /// Tandem's algorithm (AdapterBase.cpp lines 62-84):
-   ///   1. Compute tangent frame from the ORIGINAL (unflipped) normal
-   ///   2. If sign_flipped: negate ALL basis vectors uniformly
-   ///
-   /// MFEM's approach is algebraically equivalent but uses a scalar sign
-   /// factor instead of mutating the stored basis:
-   ///   1. Compute tangent frame from the ORIGINAL normal (not flipped)
-   ///   2. Store the unflipped frame
-   ///   3. Callers apply sign = sign_flipped ? -1 : +1 to the full result
-   ///
-   /// The key invariant: the tangent vectors (strike, dip) must be computed
-   /// from the ORIGINAL normal direction, not from the ref-aligned normal.
-   /// This ensures that when sign_flipped=true and the caller negates the
-   /// entire embedding, the result matches Tandem's uniform negation of
-   /// all fault_basis_q vectors.
    static void ComputeOrientedFrame(Vector &n_raw, int dim,
                                      const Vector &ref_normal,
                                      const Vector &up,
@@ -397,21 +374,16 @@ private:
    {
       nl = n_raw.Norml2();
 
-      // Determine orientation relative to reference normal
+      // Step 1-2: Determine orientation relative to reference normal
       real_t dot = 0.0;
       for (int d = 0; d < dim; d++) { dot += n_raw(d) * ref_normal(d); }
       sign_flipped = (dot < 0.0);
 
-      // Normalize the raw normal WITHOUT flipping.
-      // Tandem computes the tangent frame from the original normal direction,
-      // then negates all basis vectors if sign_flipped. We do the same:
-      // compute tangents from the original normal, store them unflipped,
-      // and let callers apply the sign factor.
-      Vector n_unit(dim);
-      for (int d = 0; d < dim; d++)
-      {
-         n_unit(d) = (nl > 0.0) ? n_raw(d) / nl : 0.0;
-      }
+      // Step 3: Flip to ref-aligned (Tandem AdapterBase.cpp:72-73)
+      if (sign_flipped) { n_raw.Neg(); }
+
+      // Normalize
+      if (nl > 0.0) { n_raw /= nl; }
 
       // Zero-initialize output
       for (int d = 0; d < 3; d++)
@@ -420,22 +392,16 @@ private:
          tangent1[d] = 0.0;
          tangent2[d] = 0.0;
       }
-      // Store the ref-aligned normal for diagnostic/projection use.
-      // (Sign-flipped callers negate via the scalar sign factor.)
-      for (int d = 0; d < dim; d++)
-      {
-         normal[d] = sign_flipped ? -n_unit(d) : n_unit(d);
-      }
+      for (int d = 0; d < dim; d++) { normal[d] = n_raw(d); }
 
+      // Step 4: Compute tangent frame from ref-aligned normal
       if (dim == 3)
       {
-         // Compute tangent frame from the ORIGINAL normal direction.
-         // This matches Tandem's facetBasis(up, normal_original).
-         // strike = normalize(up x n_original)
+         // strike = normalize(up × n_ref) (Tandem facetBasis:287)
          real_t s[3];
-         s[0] = up(1) * n_unit(2) - up(2) * n_unit(1);
-         s[1] = up(2) * n_unit(0) - up(0) * n_unit(2);
-         s[2] = up(0) * n_unit(1) - up(1) * n_unit(0);
+         s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
+         s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
+         s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
          real_t s_len = std::sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
          MFEM_VERIFY(s_len > 1e-12,
                      "ComputeOrientedFrame: up vector is nearly collinear with "
@@ -443,20 +409,32 @@ private:
                      "strike/dip tangent frame.");
          s[0] /= s_len; s[1] /= s_len; s[2] /= s_len;
 
-         // dip = strike x n_original
+         // dip = strike × n_ref (Tandem facetBasis:291)
          real_t dv[3];
-         dv[0] = s[1] * n_unit(2) - s[2] * n_unit(1);
-         dv[1] = s[2] * n_unit(0) - s[0] * n_unit(2);
-         dv[2] = s[0] * n_unit(1) - s[1] * n_unit(0);
+         dv[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
+         dv[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
+         dv[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
 
          for (int d = 0; d < 3; d++) { tangent1[d] = dv[d]; tangent2[d] = s[d]; }
       }
       else // dim == 2
       {
-         real_t cross = up(0) * n_unit(1) - up(1) * n_unit(0);
+         real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
          real_t sv = (cross >= 0.0) ? 1.0 : -1.0;
-         tangent1[0] = -sv * n_unit(1);
-         tangent1[1] =  sv * n_unit(0);
+         tangent1[0] = -sv * n_raw(1);
+         tangent1[1] =  sv * n_raw(0);
+      }
+
+      // Step 5: Negate ALL if sign_flipped (Tandem AdapterBase.cpp:78-84)
+      // The stored basis now contains the sign — callers use it directly.
+      if (sign_flipped)
+      {
+         for (int d = 0; d < 3; d++)
+         {
+            normal[d] = -normal[d];
+            tangent1[d] = -tangent1[d];
+            tangent2[d] = -tangent2[d];
+         }
       }
    }
 };
