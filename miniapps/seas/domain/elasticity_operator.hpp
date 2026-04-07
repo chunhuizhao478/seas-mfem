@@ -4604,9 +4604,11 @@ void ElasticityDomainOperator<MeshType>::Solve(
                                         fault_interior_faces_.Size());
    }
 
-   // Snapshot slip-only RHS before adding Dirichlet (rank-local, no MPI)
+   // Snapshot slip-only RHS before adding Dirichlet.
+   // Taken on ALL ranks when debug is enabled (needed for MPI-collective norms).
    Vector rhs_slip_snapshot;
-   if (debug_first_step)
+   const bool debug_norm = first_step_debug_.enabled && (time >= 0.019);
+   if (debug_first_step || debug_norm)
    {
       rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
    }
@@ -4745,6 +4747,11 @@ void ElasticityDomainOperator<MeshType>::Solve(
             }
          };
 
+         print_global_norm("b_slip", rhs_slip_snapshot);
+         // b_dirichlet = b_total - b_slip
+         Vector rhs_dir_norm(rhs.Size());
+         subtract(rhs, rhs_slip_snapshot, rhs_dir_norm);
+         print_global_norm("b_dirichlet", rhs_dir_norm);
          print_global_norm("b_total", rhs);
          print_global_norm("u", X_);
       }
