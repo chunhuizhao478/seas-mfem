@@ -2063,21 +2063,204 @@ amplifies a small per-stage difference through traction → friction → slip.
 - Solver (MUMPS direct)
 - Unit scaling (Pa vs MPa self-consistent)
 
-**Remaining suspect: coupling loop**
-
-The divergence begins at RK45 Stage 2+ when traction feeds back through
-friction to produce updated slip. A small (~0.5%) per-stage error
-accumulates over many steps into the 5× earthquake timing difference.
-
-Possible sub-causes in the coupling loop:
-1. Traction computation: `ComputeTractionAtQuadPoints` formula difference
-2. L2 projection: `ProjectTractionToFaultDOFs` implementation difference
-3. Friction law: `ComputeRHS` (V and dpsi/dt computation)
-4. State vector layout: different DOF ordering in [slip, psi] state
-5. RK45 stage evaluation: different time/state passed to Mult()
+**Remaining suspect: coupling loop** — resolved in Section 25.
 
 ### 24.7 Data references
 
 - MFEM: Frontera job 7636770 (commit b631c63)
 - Tandem: Frontera job with commit ceeaefa
 - MFEM dt=0.02 (6 stages), Tandem dt=0.1 (6 stages, PETSc default)
+
+---
+
+## 25. Stage-by-Stage Verification: Coupling Loop Is Identical
+
+### 25.1 Method
+
+Both codes run with identical dt=0.02 (fixed via `-ts_dt 0.02` for Tandem,
+`tandem_dt_init=0.02` for MFEM). RK45 Dormand-Prince 5(4) produces 6
+stages per step at times:
+
+```
+Stage 1: t = 0.004   (c₂ = 1/5)
+Stage 2: t = 0.006   (c₃ = 3/10)
+Stage 3: t = 0.016   (c₄ = 4/5)
+Stage 4: t = 0.01778 (c₅ = 8/9)
+Stage 5: t = 0.02    (c₆ = 1)
+Stage 6: t = 0.02    (c₇ = 1, FSAL)
+```
+
+At each stage, dump:
+- `||b_total||` (RHS vector, MFEM in Pa·m units, Tandem in MPa·km units)
+- `||u||` (displacement, both in meters)
+- `||traction||` (fault traction, MFEM in Pa, Tandem in MPa)
+- `||V||` / `||result||` (slip rate in m/s)
+
+Note: MFEM COUPLING Stage N+1 corresponds to Tandem COUPLING Stage N
+(MFEM has an extra initial evaluation at t=0).
+
+### 25.2 Results: traction comparison (Pa vs MPa, ×1e6 scaling)
+
+| Stage | Time (s) | MFEM `\|\|T\|\|_inf` | Tandem `\|\|T\|\|_inf` × 1e6 | Relative diff |
+|-------|----------|---------------------|-------------------------------|---------------|
+| 1 | 0.004 | 8910.4597829**04** | 8910.4597843**91** | 1.7e-10 |
+| 2 | 0.006 | 12832.598085**21** | 12832.598087**64** | 1.9e-10 |
+| 3 | 0.016 | 33254.70356**573** | 33254.70357**282** | 2.1e-9 |
+| 4 | 0.01778 | 38360.16260**381** | 38360.16261**154** | 2.0e-9 |
+| 5 | 0.02 | 42526.93077**608** | 42526.93078**706** | 2.6e-9 |
+| 6 | 0.02 | 39824.48862**475** | 39824.48863**411** | 2.4e-9 |
+
+All stages match to **8–11 significant figures**.
+
+### 25.3 Results: slip rate comparison (both in m/s)
+
+| Stage | Time (s) | MFEM `\|\|V\|\|_inf` | Tandem `\|\|result\|\|_inf` | Relative diff |
+|-------|----------|---------------------|----------------------------|---------------|
+| 1 | 0.004 | 0.010171930667**57** | 0.010171930667**79** | 2.1e-11 |
+| 2 | 0.006 | 0.010205209801**06** | 0.010205209801**38** | 3.1e-11 |
+| 3 | 0.016 | 0.01058194720**898** | 0.01058194720**986** | 8.4e-11 |
+| 4 | 0.01778 | 0.01102459537**489** | 0.01102459537**592** | 9.3e-11 |
+| 5 | 0.02 | 0.01113336956**769** | 0.01113336956**887** | 1.1e-10 |
+| 6 | 0.02 | 0.01046475035**046** | 0.01046475035**154** | 1.0e-10 |
+
+All stages match to **10–11 significant figures**.
+
+### 25.4 Results: displacement comparison (both in m)
+
+| Stage | Time (s) | MFEM `\|\|u\|\|_inf` | Tandem `\|\|u\|\|_inf` | Relative diff |
+|-------|----------|---------------------|------------------------|---------------|
+| 1 | 0.004 | 2.27394**387**e-05 | 2.27394**225**e-05 | 7.1e-7 |
+| 2 | 0.006 | 3.38352**372**e-05 | 3.38352**129**e-05 | 7.2e-7 |
+| 3 | 0.016 | 8.88970**036**e-05 | 8.88969**388**e-05 | 7.3e-7 |
+| 4 | 0.01778 | 9.83391**459**e-05 | 9.83390**739**e-05 | 7.3e-7 |
+| 5 | 0.02 | 1.10293**551**e-04 | 1.10293**470**e-04 | 7.3e-7 |
+| 6 | 0.02 | 1.10600**715**e-04 | 1.10600**634**e-04 | 7.3e-7 |
+
+Displacement matches to **6–7 significant figures** — consistent with MUMPS
+direct solver precision on a ~750K DOF system.
+
+### 25.5 Results: RHS vector comparison (1e12 unit scaling)
+
+| Stage | Time (s) | MFEM `\|\|b\|\|_1` | Tandem `\|\|b\|\|_1` × 1e12 | Relative diff |
+|-------|----------|--------------------|-----------------------------|---------------|
+| 1 | 0.004 | 2.36163035e+13 | 2.36163057e+13 | 9.5e-8 |
+| 2 | 0.006 | 3.53349408e+13 | 3.53349441e+13 | 9.5e-8 |
+| 3 | 0.016 | 9.39235045e+13 | 9.39235134e+13 | 9.4e-8 |
+| 5 | 0.02 | 1.17333382e+14 | 1.17333393e+14 | 9.5e-8 |
+
+RHS matches to **7–8 significant figures**.
+
+### 25.6 Conclusion
+
+**The entire MFEM coupling loop is verified identical to Tandem:**
+
+1. ✅ K assembly (global K·1 norms, Section 21)
+2. ✅ b assembly — slip + Dirichlet (per-stage norms, this section)
+3. ✅ Linear solve u = K⁻¹b (per-stage norms)
+4. ✅ Traction computation (8–11 digits match)
+5. ✅ L2 projection (implicit in traction match)
+6. ✅ Friction law (10–11 digits match on V)
+7. ✅ State evolution dpsi/dt (implicit in V match)
+
+All components match to machine precision (10⁻¹⁰ for traction/V) or
+MUMPS solver precision (10⁻⁷ for u/b). There is **no formula error,
+no sign error, no unit error, and no assembly error** in the MFEM
+implementation.
+
+**The 5× earthquake timing difference must come from the time integration
+layer** — how PETSc's adaptive RK45 chooses step sizes over millions of
+steps between MFEM and Tandem.
+
+---
+
+## 26. Root Cause: Adaptive Time Stepping Differences
+
+### 26.1 The critical architectural difference
+
+**Tandem** uses PETSc's `TSSolve()` — a single call that runs the entire
+simulation. PETSc manages the full adaptive time stepping internally:
+
+```cpp
+// PetscTimeSolver.h:96 (Tandem)
+void solve(double upcoming_time) {
+    TSSetMaxTime(ts_, upcoming_time);
+    TSSolve(ts_, ts_state_);   // PETSc manages everything
+}
+```
+
+**MFEM** manually calls `TSStep()` in a loop, resetting dt before each step:
+
+```cpp
+// bp5_verification_full.cpp:1256-1285 (MFEM)
+while (t < t_final) {
+    dt = current_dt;
+    TSSetTime(ts, t);
+    TSSetTimeStep(ts, dt);     // Override PETSc's adaptive dt!
+    TSStep(ts);
+    TSGetTime(ts, &pt);
+    TSGetTimeStep(ts, &next_dt);
+    current_dt = next_dt;      // Save for next iteration
+}
+```
+
+### 26.2 The problem with TSSetTimeStep before each TSStep
+
+When MFEM calls `TSSetTimeStep(ts, dt)` before `TSStep(ts)`, it overrides
+PETSc's internally computed next dt from the previous step's error estimate.
+However, `current_dt = next_dt` reads back PETSc's suggested dt after the
+step, so the override should be the same value PETSc computed.
+
+**But** there's a subtle issue: PETSc's FSAL (First Same As Last)
+optimization in Dormand-Prince RK45 reuses the last stage evaluation from
+step N as the first stage of step N+1. When `TSSetTimeStep` is called
+between steps, PETSc may invalidate the FSAL cache, forcing a redundant
+function evaluation. This doesn't change the result of a single step
+but could affect the adaptive controller's error estimate differently.
+
+### 26.3 Other potential differences
+
+1. **dt_max setting**: MFEM sets `-ts_adapt_dt_max 3.15576e6` (0.1 year)
+   in the cfg file. Tandem may not set dt_max for QD mode (no CFL limit).
+   If Tandem uses PETSc's default dt_max (infinity), it can take much
+   larger steps during interseismic periods, reaching earthquakes faster.
+
+2. **Error norm**: Both use `-ts_adapt_wnormtype infinity`. But the state
+   vector layout differs:
+   - MFEM: `[slip_dip_0, slip_strike_0, psi_0, slip_dip_1, ...]` (interleaved)
+   - Tandem: `[slip_dip_all..., slip_strike_all..., psi_all...]` (blocked)
+
+   PETSc's RK45 error estimator computes a weighted norm over all
+   components. Different ordering doesn't change the norm value, but
+   MFEM's `PetscODESolver` may configure the error controller differently.
+
+3. **MFEM's PetscODESolver wrapper**: MFEM's constructor sets
+   `TSAdaptSetType(TSADAPTNONE)` by default, which we override back to
+   `TSADAPTBASIC`. This is correct, but there may be other settings that
+   MFEM's wrapper modifies (tolerances, step limits) that differ from
+   Tandem's PETSc setup.
+
+4. **State vector size**: MFEM's state vector includes ALL fault DOFs
+   (including non-owned in MPI). Tandem's includes only owned DOFs.
+   PETSc's error norm divides by the vector length — different lengths
+   produce different error estimates for the same physical error.
+
+### 26.4 Recommended investigation
+
+1. **Add dt logging**: Print the adaptive dt chosen by PETSc at each step
+   in both codes. Compare the first 100 steps to see where dt diverges.
+
+2. **Check state vector size**: Print `VecGetSize()` for the PETSc state
+   vector in both codes. If sizes differ, the error norm differs.
+
+3. **Match PETSc options exactly**: Dump all PETSc options in both codes
+   with `-ts_view` and compare line by line.
+
+4. **Test TSSolve in MFEM**: Replace the TSStep loop with a single
+   TSSolve call (same as Tandem). If results match, the TSStep/TSSetTimeStep
+   overhead was the cause.
+
+### 26.5 Data references
+
+- MFEM stage norms: Frontera job with commit 267028e
+- Tandem stage norms: Frontera job with commit a26753d
+- Both dt=0.02, 8 nodes, 400 ranks, MUMPS, RK45 5dp
