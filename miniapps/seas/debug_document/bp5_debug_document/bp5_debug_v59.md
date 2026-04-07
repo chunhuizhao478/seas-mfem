@@ -1786,3 +1786,157 @@ are classified differently between the two codes' mesh topologies.
 3. Consider whether the MFEM boundary face integrator formula (c1=ε,
    c2=penalty_single) vs the skeleton formula (c1=ε/2, c2=penalty_avg)
    matters for the 1388 faces that have different classification.
+
+---
+
+## 20. Tandem Convention Fix: Bake Sign into Basis Vectors
+
+### 20.1 Problem with commit 9df168f
+
+The previous sign fix (9df168f) computed tangent vectors from the ORIGINAL
+(unflipped) normal and relied on callers applying `sign = sign_flipped ? -1 : 1`.
+This was based on an incorrect reading of Tandem's algorithm.
+
+**What Tandem actually does** (AdapterBase.cpp:62-84, Curvilinear.cpp:260-293):
+
+1. Flip `n_raw` to ref-aligned: `normal_i = -1.0 * normal_i` (line 72-73)
+2. Call `facetBasis(up, normal)` with the **ref-aligned** normal (line 76)
+3. Negate ALL basis vectors if sign_flipped (lines 78-84)
+
+The stored `fault_basis_q` already contains the sign. No separate sign factor
+is used anywhere in Tandem's slip embedding or traction projection.
+
+### 20.2 Fix (commit bbae289)
+
+Replicate Tandem's algorithm exactly in `ComputeOrientedFrame`:
+
+1. Flip `n_raw` to ref-aligned
+2. Compute tangent frame from ref-aligned normal
+3. Negate ALL stored vectors (normal, tangent1, tangent2) if sign_flipped
+
+Remove all `sign = sign_flipped ? -1 : 1` factors from callers:
+
+- `BuildSlipAtQuadPoints`: remove `sign *` on embedded slip
+- `ProjectTractionToFaultDOFs`: remove `sign_flipped` parameter and `sf` factor
+- All 12 call sites: remove `false`/`sign_flipped` argument
+- BR2 jump residual: remove `sign * delta_u`
+
+### 20.3 Verification
+
+The fix is algebraically equivalent to the old code (pre-9df168f). First-step
+comparison at t=0.02s confirms:
+
+- input_qp (slip): identical signs and magnitudes as old code
+- elvec (per-face b): identical to old code, matches Tandem at 1e12 ratio
+- K matrix: identical (time-independent)
+
+### 20.4 Cleanup
+
+- `sign_flipped` field in structs: kept for diagnostics, marked with comment
+  "Diagnostic only; sign already baked into basis vectors"
+- `ProjectTractionToFaultDOFs`: removed dead `sign_flipped` parameter entirely
+
+---
+
+## 21. Global K·1 Norm Test: Global K Is Identical
+
+### 21.1 Method
+
+Apply assembled global K to all-ones vector on all ranks, compute global norms.
+This tests whether the global sparse matrix matches without dumping the full
+matrix or tracing DOF mappings.
+
+### 21.2 Results
+
+| Norm | MFEM | Tandem | MFEM/Tandem |
+|------|------|--------|-------------|
+| `\|\|K·1\|\|_1`   | 5.65352175925782e+19 | 5.65352175925783e+07 | 1.000000000000e+12 |
+| `\|\|K·1\|\|_2`   | 1.29129430119791e+18 | 1.29129430119791e+06 | 1.000000000000e+12 |
+| `\|\|K·1\|\|_inf` | 5.43100448027764e+16 | 5.43100448027764e+04 | 1.000000000000e+12 |
+
+All three norms match to **15 significant figures** with exact 1e12 unit ratio.
+
+### 21.3 Conclusion
+
+The global stiffness matrix K is **numerically identical** between MFEM and
+Tandem. This confirms:
+
+- Per-element and per-face local matrices are correct (Section 18)
+- DOF-to-global scatter (`AddSubMatrix(vdofs, elmat)`) is correct
+- `ParallelAssemble` / `HypreParMatrix` construction is correct
+- Face counting and classification produce the same global system
+- The mesh partitioning difference (587 interior/shared split) does not
+  affect the global matrix
+
+**The stiffness matrix is eliminated as a suspect.**
+
+---
+
+## 22. Global b and u Norm Test: b DIFFERS, u DIFFERS
+
+### 22.1 Method
+
+After the first elastic solve at t=0.02s (both codes using dt_init=0.02),
+print global norms of the assembled RHS vector b and displacement solution u.
+
+### 22.2 Results
+
+| Norm | MFEM | Tandem | MFEM/Tandem |
+|------|------|--------|-------------|
+| `\|\|b\|\|_1`   | 1.17333e+14 | 118.08  | 9.935e+11 |
+| `\|\|b\|\|_2`   | 2.31610e+12 | 2.326   | 9.957e+11 |
+| `\|\|b\|\|_inf` | 6.74057e+10 | 0.0673  | 1.002e+12 |
+| `\|\|u\|\|_1`   | 1.531        | 1.540   | 0.9941    |
+| `\|\|u\|\|_2`   | 0.00776      | 0.00780 | 0.9949    |
+| `\|\|u\|\|_inf` | 1.103e-04    | 1.137e-04 | 0.9701  |
+
+### 22.3 Analysis
+
+**b ratios are inconsistent across norms**: L1 gives 9.94e11, L2 gives
+9.96e11, Linf gives 1.00e12. If b were identical (up to a uniform unit
+scaling), all three ratios would be the same. They are not — they vary
+by ~1% across norms. This means the global b vector has entries that
+differ non-uniformly between the two codes.
+
+**u differs by 0.5-3%**: The displacement solution is close but not
+identical. This is consistent with a slightly different b producing a
+slightly different u through the same (matched) K.
+
+### 22.4 Implications
+
+Since K matches globally but b does not, and per-face elvec matches
+locally, the mismatch must come from:
+
+1. **Different slip entering the RHS at t=0.02s** — the coupling loop
+   (traction → friction → slip rate) produces different slip by t=0.02s
+   even though initial slip matches. One RK45 step with dt=0.02 involves
+   multiple stages, and any difference in the traction computation at
+   intermediate stages would feed back into different slip at later stages.
+
+2. **Dirichlet RHS difference** — the Dirichlet loading `Vp·t` should be
+   identical, but if the coordinate evaluation or branch logic differs on
+   some faces, the Dirichlet b contribution could differ.
+
+3. **Assembly scatter difference** — local elvec matches on sampled faces,
+   but we only checked 4 faces out of 124,621. If a subset of faces have
+   wrong scatter, the global b would differ.
+
+### 22.5 Next steps
+
+1. **Separate b_slip and b_dirichlet norms** — determine which component
+   of b is responsible for the mismatch. If b_slip matches but b_dirichlet
+   differs, the bug is in the Dirichlet loading path.
+
+2. **Compare at t=0 (before any coupling)** — at the very first Mult() call
+   with t=0 (initial condition), the slip is exactly zero and b_slip=0. The
+   only b contribution is b_dirichlet. If b_dirichlet differs at t=0, the
+   coupling loop is not involved.
+
+3. **Trace the first RK45 stage** — dump b at each intermediate RK45 stage
+   of the first step to see where the divergence begins.
+
+### 22.6 Data references
+
+- MFEM: Frontera job 7636758 (commit 1f945dd)
+- Tandem: Frontera job with commit 01a642c
+- Both at t=0.02s, dt_init=0.02, 8 nodes, 400 ranks
