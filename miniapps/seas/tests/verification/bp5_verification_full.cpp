@@ -1295,7 +1295,7 @@ int main(int argc, char *argv[])
       const Vector &dc_vals = fault_geom.GetDcValues();
 
       std::string vtp_file = output_dir + "/fault_dof_coords_r"
-                           + std::to_string(mpi.GetRank()) + ".csv";
+                           + std::to_string(mpi.Rank()) + ".csv";
       std::ofstream vtp(vtp_file);
       vtp << "owned_dof,x2,x3,param_a,param_Dc,psi_init\n";
       vtp << std::setprecision(10);
