@@ -295,12 +295,16 @@ public:
    ///               BEFORE calling so all ranks see the same value).
    bool Save(int cycle, real_t time, real_t V_max)
    {
-      // Step-based override
-      if (output_every_n_steps > 0 && cycle % output_every_n_steps == 0)
+      if (output_every_n_steps > 0)
       {
-         return ForceSaveImpl(cycle, time);
+         // Step-based: write only at multiples of the interval
+         if (cycle % output_every_n_steps == 0)
+         {
+            return ForceSaveImpl(cycle, time);
+         }
+         return false;
       }
-      // Adaptive schedule
+      // Adaptive schedule (only when step-based interval is not set)
       real_t dt_out = OutputInterval(V_max);
       if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
       {
