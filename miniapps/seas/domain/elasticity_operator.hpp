@@ -2672,6 +2672,50 @@ private:
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
          cached_a_->ParallelAssemble(cached_Ah_);
 
+         // K·v diagnostic: apply global K to all-ones vector,
+         // dump result at target elements for cross-code comparison.
+         if (first_step_debug_.enabled)
+         {
+            auto *K = cached_Ah_.As<HypreParMatrix>();
+            int local_size = K->Height();
+            HypreParVector ones(K->GetComm(), K->GetGlobalNumRows(),
+                                K->GetRowStarts());
+            ones = 1.0;
+            HypreParVector Kv(K->GetComm(), K->GetGlobalNumRows(),
+                              K->GetRowStarts());
+            K->Mult(ones, Kv);
+
+            // Dump K·1 for target elements
+            if (DebugRank() == first_step_debug_.target_rank ||
+                first_step_debug_.target_rank < 0)
+            {
+               std::string kv_path = DebugFilePath("first_step_Kv");
+               std::ofstream out(kv_path, std::ios::trunc);
+               out << "elem,component,local_dof,vdof,Kv_value\n";
+               out << std::setprecision(17);
+
+               const auto &target_elems = DebugTargetLocalElements();
+               for (int e : target_elems)
+               {
+                  Array<int> vdofs;
+                  fes_->GetElementVDofs(e, vdofs);
+                  for (int j = 0; j < vdofs.Size(); j++)
+                  {
+                     int gj = vdofs[j];
+                     int sign = 1;
+                     if (gj < 0) { gj = -1 - gj; sign = -1; }
+                     int comp = j / (vdofs.Size() / 3);
+                     int ldof = j % (vdofs.Size() / 3);
+                     double val = (gj < local_size) ? Kv(gj) * sign : 0.0;
+                     out << e << "," << comp << "," << ldof << ","
+                         << vdofs[j] << "," << val << "\n";
+                  }
+               }
+               mfem::out << "  [K-DIAG] K·1 dumped to " << kv_path
+                         << " (" << target_elems.size() << " elements)\n";
+            }
+         }
+
 #ifdef MFEM_USE_MUMPS
          if (solver_type_ == SolverType::MUMPS)
          {
