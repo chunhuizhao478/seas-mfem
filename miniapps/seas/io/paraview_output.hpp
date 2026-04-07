@@ -163,6 +163,12 @@ public:
 #endif
       }
 
+      // Friction parameter / coordinate fields (static)
+      fault_param_a_   = make_gf();
+      fault_param_Dc_  = make_gf();
+      fault_coord_x2_  = make_gf();
+      fault_coord_x3_  = make_gf();
+
       // Register fields
       pv_.RegisterField("slip_dip",         fault_slip_dip_.get());
       pv_.RegisterField("slip_strike",      fault_slip_strike_.get());
@@ -172,8 +178,76 @@ public:
       pv_.RegisterField("traction_strike",  fault_trac_strike_.get());
       pv_.RegisterField("state_variable",   fault_state_.get());
       pv_.RegisterField("normal_stress",    fault_normal_stress_.get());
+      pv_.RegisterField("param_a",          fault_param_a_.get());
+      pv_.RegisterField("param_Dc",         fault_param_Dc_.get());
+      pv_.RegisterField("fault_x2",         fault_coord_x2_.get());
+      pv_.RegisterField("fault_x3",         fault_coord_x3_.get());
 
       has_fault_output_ = true;
+   }
+
+   /// @brief Set static friction parameters and coordinates on fault elements.
+   ///
+   /// Call once after InitFaultOutputBP5. Vectors are in local (all faces)
+   /// layout with 1 component per DOF.
+   void SetFaultParamsBP5(const Vector &local_a,
+                          const Vector &local_Dc,
+                          const Vector &local_x2,
+                          const Vector &local_x3)
+   {
+      if (!has_fault_output_) { return; }
+
+      *fault_param_a_  = 0.0;
+      *fault_param_Dc_ = 0.0;
+      *fault_coord_x2_ = 0.0;
+      *fault_coord_x3_ = 0.0;
+
+      const int nbf = nbf_per_face_;
+      const int n_int = n_interior_fault_faces_;
+
+      for (int fi = 0; fi < n_int; fi++)
+      {
+         int base = fi * nbf;
+         real_t avg_a = 0, avg_Dc = 0, avg_x2 = 0, avg_x3 = 0;
+         for (int k = 0; k < nbf; k++)
+         {
+            avg_a  += local_a(base + k);
+            avg_Dc += local_Dc(base + k);
+            avg_x2 += local_x2(base + k);
+            avg_x3 += local_x3(base + k);
+         }
+         real_t inv = 1.0 / nbf;
+         avg_a *= inv; avg_Dc *= inv; avg_x2 *= inv; avg_x3 *= inv;
+
+         int e1 = fault_face_elem1_[fi];
+         int e2 = fault_face_elem2_[fi];
+         (*fault_param_a_)(e1)  = avg_a;  (*fault_param_a_)(e2)  = avg_a;
+         (*fault_param_Dc_)(e1) = avg_Dc; (*fault_param_Dc_)(e2) = avg_Dc;
+         (*fault_coord_x2_)(e1) = avg_x2; (*fault_coord_x2_)(e2) = avg_x2;
+         (*fault_coord_x3_)(e1) = avg_x3; (*fault_coord_x3_)(e2) = avg_x3;
+      }
+
+      for (int si = 0; si < n_shared_fault_faces_; si++)
+      {
+         int fi = n_int + si;
+         int base = fi * nbf;
+         real_t avg_a = 0, avg_Dc = 0, avg_x2 = 0, avg_x3 = 0;
+         for (int k = 0; k < nbf; k++)
+         {
+            avg_a  += local_a(base + k);
+            avg_Dc += local_Dc(base + k);
+            avg_x2 += local_x2(base + k);
+            avg_x3 += local_x3(base + k);
+         }
+         real_t inv = 1.0 / nbf;
+         avg_a *= inv; avg_Dc *= inv; avg_x2 *= inv; avg_x3 *= inv;
+
+         int e1 = fault_shared_elem1_[si];
+         (*fault_param_a_)(e1)  = avg_a;
+         (*fault_param_Dc_)(e1) = avg_Dc;
+         (*fault_coord_x2_)(e1) = avg_x2;
+         (*fault_coord_x3_)(e1) = avg_x3;
+      }
    }
 
    /// @brief Update all fault L2-p0 fields from owned-DOF vectors.
@@ -368,6 +442,12 @@ private:
    std::unique_ptr<GF> fault_trac_strike_;
    std::unique_ptr<GF> fault_state_;
    std::unique_ptr<GF> fault_normal_stress_;
+
+   // Friction parameter and coordinate fields (static, written once)
+   std::unique_ptr<GF> fault_param_a_;
+   std::unique_ptr<GF> fault_param_Dc_;
+   std::unique_ptr<GF> fault_coord_x2_;
+   std::unique_ptr<GF> fault_coord_x3_;
 
    // Interior fault face → element mapping
    std::vector<int> fault_face_elem1_;

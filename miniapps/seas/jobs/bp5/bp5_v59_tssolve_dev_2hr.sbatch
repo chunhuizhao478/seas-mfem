@@ -60,10 +60,11 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps \
-      --tfinal 5.68e10 \
+      --tfinal 3.15576e7 \
       --ref-dir bp5/benchmark_data \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --checkpoint-interval 0 \
       --petsc-ts \
-      --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg
+      --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
+      --paraview-every 1

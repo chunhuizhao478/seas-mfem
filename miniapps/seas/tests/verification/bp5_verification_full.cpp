@@ -1237,6 +1237,18 @@ int main(int argc, char *argv[])
       pv_local_state.SetSize(n_local_dofs);
       pv_local_normal_stress.SetSize(n_local_dofs);
 
+      // Set static friction parameters and fault coordinates for visualization.
+      // Expand owned → local so they map to the same faces as the dynamic fields.
+      {
+         const auto &geom = *fault_geom;
+         Vector local_a, local_Dc, local_x2, local_x3;
+         domain.ExpandOwnedToLocalFault(geom.GetAValues(), local_a, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetDcValues(), local_Dc, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetCoordsX2(), local_x2, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetCoordsX3(), local_x3, 1);
+         pv_out->SetFaultParamsBP5(local_a, local_Dc, local_x2, local_x3);
+      }
+
       if (paraview_step_interval > 0)
       {
          pv_out->output_every_n_steps = paraview_step_interval;
