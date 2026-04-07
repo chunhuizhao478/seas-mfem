@@ -1278,6 +1278,42 @@ int main(int argc, char *argv[])
       }
    }
 
+   // =========================================================================
+   // Fault DOF point cloud (VTP) — diagnostic for coordinate validation
+   // =========================================================================
+   // Writes one VTP file per rank with the EXACT owned-DOF coordinates used
+   // by the friction parameter computation. If the points form a clean fault
+   // rectangle, the coordinates are correct and any ParaView scatter is a
+   // projection artifact. If points are scattered here too, the coordinates
+   // are wrong and that's the root cause.
+   if (use_paraview)
+   {
+      const int n_owned = fault_geom.NumFaultDOFs();  // owned count
+      const Vector &x2 = fault_geom.GetCoordsX2();
+      const Vector &x3 = fault_geom.GetCoordsX3();
+      const Vector &a_vals = fault_geom.GetAValues();
+      const Vector &dc_vals = fault_geom.GetDcValues();
+
+      std::string vtp_file = output_dir + "/fault_dof_coords_r"
+                           + std::to_string(mpi.GetRank()) + ".csv";
+      std::ofstream vtp(vtp_file);
+      vtp << "owned_dof,x2,x3,param_a,param_Dc,psi_init\n";
+      vtp << std::setprecision(10);
+      for (int i = 0; i < n_owned; i++)
+      {
+         real_t psi_i = state(i * 3 + 2);  // BP5: [slip_dip, slip_strike, psi]
+         vtp << i << "," << x2(i) << "," << x3(i)
+             << "," << a_vals(i) << "," << dc_vals(i)
+             << "," << psi_i << "\n";
+      }
+      vtp.close();
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Fault DOF point cloud: " << vtp_file
+                   << " (" << n_owned << " owned DOFs)\n";
+      }
+   }
+
    // Helper lambda: update + save ParaView output at a given time step.
    // All ranks must call collectively (ParaViewDataCollection::Save is
    // MPI-collective).  V_max must already be globally reduced.
