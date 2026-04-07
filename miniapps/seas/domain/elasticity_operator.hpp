@@ -4702,6 +4702,11 @@ void ElasticityDomainOperator<MeshType>::Solve(
       {
          int myrank;
          MPI_Comm_rank(mesh_.GetComm(), &myrank);
+         if (myrank == 0)
+         {
+            mfem::out << "  [NORM] Dump at time = "
+                      << std::setprecision(17) << debug_time_ << "\n";
+         }
 
          auto print_global_norm = [&](const char *label, const Vector &v) {
             double local_n1 = 0.0, local_n2sq = 0.0, local_ninf = 0.0;
