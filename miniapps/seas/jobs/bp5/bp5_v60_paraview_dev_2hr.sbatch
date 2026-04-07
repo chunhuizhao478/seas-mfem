@@ -1,15 +1,17 @@
 #!/bin/bash
-#SBATCH -J bp5_pvd
-#SBATCH -o bp5_v60_pvdev_%j.out
-#SBATCH -e bp5_v60_pvdev_%j.err
+#SBATCH -J bp5_v60pv
+#SBATCH -o bp5_v60_paraview_%j.out
+#SBATCH -e bp5_v60_paraview_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60 ParaView dev: 2hr development run with fault surface VTU
-# output every 0.05 yr. Quick turnaround for checking field evolution.
+# BP5 v60: Full run with ParaView output every ~3.5 yr.
+# Fix: removed hardcoded below-fault branch (depth > Wf+1) that bypassed
+# friction solver with wrong-sign rate. All DOFs now go through friction
+# solver naturally, matching Tandem's approach.
 
 export LC_ALL=C
 export LANG=C
@@ -34,8 +36,8 @@ cd miniapps/seas
 make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
-RESULT_DIR="bp5/results_v60_pvdev_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX="bp5_v60_pvdev_job${SLURM_JOB_ID}"
+RESULT_DIR="bp5/results_v60_paraview_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX="bp5_v60_pv_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR}"
 
@@ -43,9 +45,8 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Dev 2hr run, fault surface VTU every 0.05 yr"
+echo "Fix: removed below-fault hardcoded branch, friction solver handles all DOFs"
 
-# 0.05 yr = 1577880 s
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
@@ -53,11 +54,10 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps \
-      --tfinal 5.68e10 \
       --ref-dir bp5/benchmark_data \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --checkpoint-interval 0 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-dt 1577880
+      --paraview-dt 1.1e8
