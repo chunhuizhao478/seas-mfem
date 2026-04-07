@@ -270,6 +270,8 @@ public:
       debug_target_elems_cached_ = false;
    }
 
+   bool IsFirstStepDebugEnabled() const { return first_step_debug_.enabled; }
+
 private:
    MeshType &mesh_;
    int order_;

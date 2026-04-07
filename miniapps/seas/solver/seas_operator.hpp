@@ -472,6 +472,59 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    fault_->ComputeRHS(traction_, state, rate,
                        elastic_sigma_n_ ? &normal_traction_ : nullptr);
 
+   // Per-stage coupling loop norms (first 10 evaluations)
+   {
+      static int stage_count = 0;
+      if (stage_count < 10 && domain_->IsFirstStepDebugEnabled())
+      {
+         stage_count++;
+         real_t trac_l1 = 0.0, trac_linf = 0.0;
+         for (int i = 0; i < traction_.Size(); i++)
+         {
+            real_t a = std::abs(traction_(i));
+            trac_l1 += a;
+            if (a > trac_linf) trac_linf = a;
+         }
+         real_t V_l1 = 0.0, V_linf = 0.0;
+         const Vector &V = fault_->GetSlipRate();
+         for (int i = 0; i < V.Size(); i++)
+         {
+            real_t a = std::abs(V(i));
+            V_l1 += a;
+            if (a > V_linf) V_linf = a;
+         }
+         // MPI reduce (traction_ and V are owned-restricted, one value per owned DOF)
+         real_t g_trac_l1, g_trac_linf, g_V_l1, g_V_linf;
+         if (mpi_ctx_)
+         {
+            MPI_Reduce(&trac_l1, &g_trac_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&trac_linf, &g_trac_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_l1, &g_V_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_linf, &g_V_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+         }
+         else
+         {
+            g_trac_l1 = trac_l1; g_trac_linf = trac_linf;
+            g_V_l1 = V_l1; g_V_linf = V_linf;
+         }
+         bool is_root = !mpi_ctx_ || mpi_ctx_->IsRoot();
+         if (is_root)
+         {
+            mfem::out << std::setprecision(15);
+            mfem::out << "  [COUPLING] Stage " << stage_count
+                      << " t=" << t << "\n";
+            mfem::out << "  [COUPLING] ||traction||_1   = " << g_trac_l1 << "\n";
+            mfem::out << "  [COUPLING] ||traction||_inf = " << g_trac_linf << "\n";
+            mfem::out << "  [COUPLING] ||V||_1   = " << g_V_l1 << "\n";
+            mfem::out << "  [COUPLING] ||V||_inf = " << g_V_linf << "\n";
+         }
+      }
+   }
+
    // Face tracer: stage decomposition data for committed step
    if (face_tracer_ && face_tracer_->IsActive())
    {
