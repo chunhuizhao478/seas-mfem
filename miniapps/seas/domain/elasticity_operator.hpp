@@ -2714,6 +2714,33 @@ private:
                mfem::out << "  [K-DIAG] K·1 dumped to " << kv_path
                          << " (" << target_elems.size() << " elements)\n";
             }
+
+            // Print global norms (collective, rank 0 prints)
+            double local_norm1 = 0.0, local_norm2sq = 0.0, local_norminf = 0.0;
+            for (int i = 0; i < local_size; i++)
+            {
+               double v = std::abs(Kv(i));
+               local_norm1 += v;
+               local_norm2sq += v * v;
+               if (v > local_norminf) { local_norminf = v; }
+            }
+            double global_norm1, global_norm2sq, global_norminf;
+            MPI_Reduce(&local_norm1, &global_norm1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mesh_.GetComm());
+            MPI_Reduce(&local_norm2sq, &global_norm2sq, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mesh_.GetComm());
+            MPI_Reduce(&local_norminf, &global_norminf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mesh_.GetComm());
+            int myrank;
+            MPI_Comm_rank(mesh_.GetComm(), &myrank);
+            if (myrank == 0)
+            {
+               mfem::out << std::setprecision(15);
+               mfem::out << "  [K-DIAG] ||K·1||_1   = " << global_norm1 << "\n";
+               mfem::out << "  [K-DIAG] ||K·1||_2   = "
+                         << std::sqrt(global_norm2sq) << "\n";
+               mfem::out << "  [K-DIAG] ||K·1||_inf = " << global_norminf << "\n";
+            }
          }
 
 #ifdef MFEM_USE_MUMPS
