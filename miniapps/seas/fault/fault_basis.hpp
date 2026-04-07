@@ -234,6 +234,13 @@ public:
    /// For 3D: tau_local[0] = traction . tangent1 (dip)
    ///         tau_local[1] = traction . tangent2 (strike)
    /// For 2D: tau_local[0] = traction . tangent1
+   ///
+   /// NOTE: tangent vectors are from the ORIGINAL (un-flipped) normal.
+   /// This function does NOT apply sign_flipped correction. For the IP
+   /// path, ProjectTractionToFaultDOFs (which applies sf) is used instead.
+   /// If this function is used on sign_flipped faces (BR2 path), callers
+   /// must apply sign = sign_flipped ? -1 : 1 to get orientation-
+   /// independent traction.
    void ProjectTraction(int fi, const real_t *traction_global,
                         real_t *tau_local) const
    {
@@ -346,6 +353,39 @@ private:
    /// @param[out] tangent2    Strike tangent (3 components)
    /// @param[out] sign_flipped  True if raw normal was flipped
    /// @param[out] nl          Raw normal length (before normalization)
+   /// Compute oriented fault frame from a raw face normal.
+   ///
+   /// Tandem convention: compute tangent frame from the CANONICAL normal
+   /// (aligned with ref_normal), then record sign_flipped so callers can
+   /// negate the entire embedded result uniformly.  This ensures all three
+   /// basis vectors (normal, tangent1, tangent2) are computed from the same
+   /// canonical normal direction.  The caller (BuildSlipAtQuadPoints)
+   /// multiplies the full 3D embedded slip by sign = sign_flipped ? -1 : +1.
+   ///
+   /// Previous bug: the normal was negated BEFORE computing the tangent
+   /// frame.  Because strike = up × n, negating n reverses strike but
+   /// leaves dip = strike × n unchanged.  The subsequent sign multiplication
+   /// then triple-negated strike (reversed tangent × sign = original) but
+   /// correctly double-negated dip.  This gave the strike-slip component
+   /// the wrong sign on every sign_flipped face.
+   /// Compute an oriented fault frame (normal, dip, strike) from the raw
+   /// face normal, matching Tandem's AdapterBase::prepare() convention.
+   ///
+   /// Tandem's algorithm (AdapterBase.cpp lines 62-84):
+   ///   1. Compute tangent frame from the ORIGINAL (unflipped) normal
+   ///   2. If sign_flipped: negate ALL basis vectors uniformly
+   ///
+   /// MFEM's approach is algebraically equivalent but uses a scalar sign
+   /// factor instead of mutating the stored basis:
+   ///   1. Compute tangent frame from the ORIGINAL normal (not flipped)
+   ///   2. Store the unflipped frame
+   ///   3. Callers apply sign = sign_flipped ? -1 : +1 to the full result
+   ///
+   /// The key invariant: the tangent vectors (strike, dip) must be computed
+   /// from the ORIGINAL normal direction, not from the ref-aligned normal.
+   /// This ensures that when sign_flipped=true and the caller negates the
+   /// entire embedding, the result matches Tandem's uniform negation of
+   /// all fault_basis_q vectors.
    static void ComputeOrientedFrame(Vector &n_raw, int dim,
                                      const Vector &ref_normal,
                                      const Vector &up,
@@ -357,14 +397,21 @@ private:
    {
       nl = n_raw.Norml2();
 
-      // Orient with reference normal
+      // Determine orientation relative to reference normal
       real_t dot = 0.0;
       for (int d = 0; d < dim; d++) { dot += n_raw(d) * ref_normal(d); }
       sign_flipped = (dot < 0.0);
-      if (sign_flipped) { n_raw.Neg(); }
 
-      // Normalize
-      if (nl > 0.0) { n_raw /= nl; }
+      // Normalize the raw normal WITHOUT flipping.
+      // Tandem computes the tangent frame from the original normal direction,
+      // then negates all basis vectors if sign_flipped. We do the same:
+      // compute tangents from the original normal, store them unflipped,
+      // and let callers apply the sign factor.
+      Vector n_unit(dim);
+      for (int d = 0; d < dim; d++)
+      {
+         n_unit(d) = (nl > 0.0) ? n_raw(d) / nl : 0.0;
+      }
 
       // Zero-initialize output
       for (int d = 0; d < 3; d++)
@@ -373,15 +420,22 @@ private:
          tangent1[d] = 0.0;
          tangent2[d] = 0.0;
       }
-      for (int d = 0; d < dim; d++) { normal[d] = n_raw(d); }
+      // Store the ref-aligned normal for diagnostic/projection use.
+      // (Sign-flipped callers negate via the scalar sign factor.)
+      for (int d = 0; d < dim; d++)
+      {
+         normal[d] = sign_flipped ? -n_unit(d) : n_unit(d);
+      }
 
       if (dim == 3)
       {
-         // strike = normalize(up x n)
+         // Compute tangent frame from the ORIGINAL normal direction.
+         // This matches Tandem's facetBasis(up, normal_original).
+         // strike = normalize(up x n_original)
          real_t s[3];
-         s[0] = up(1) * n_raw(2) - up(2) * n_raw(1);
-         s[1] = up(2) * n_raw(0) - up(0) * n_raw(2);
-         s[2] = up(0) * n_raw(1) - up(1) * n_raw(0);
+         s[0] = up(1) * n_unit(2) - up(2) * n_unit(1);
+         s[1] = up(2) * n_unit(0) - up(0) * n_unit(2);
+         s[2] = up(0) * n_unit(1) - up(1) * n_unit(0);
          real_t s_len = std::sqrt(s[0]*s[0] + s[1]*s[1] + s[2]*s[2]);
          MFEM_VERIFY(s_len > 1e-12,
                      "ComputeOrientedFrame: up vector is nearly collinear with "
@@ -389,20 +443,20 @@ private:
                      "strike/dip tangent frame.");
          s[0] /= s_len; s[1] /= s_len; s[2] /= s_len;
 
-         // dip = strike x n
+         // dip = strike x n_original
          real_t dv[3];
-         dv[0] = s[1] * n_raw(2) - s[2] * n_raw(1);
-         dv[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
-         dv[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
+         dv[0] = s[1] * n_unit(2) - s[2] * n_unit(1);
+         dv[1] = s[2] * n_unit(0) - s[0] * n_unit(2);
+         dv[2] = s[0] * n_unit(1) - s[1] * n_unit(0);
 
          for (int d = 0; d < 3; d++) { tangent1[d] = dv[d]; tangent2[d] = s[d]; }
       }
       else // dim == 2
       {
-         real_t cross = up(0) * n_raw(1) - up(1) * n_raw(0);
+         real_t cross = up(0) * n_unit(1) - up(1) * n_unit(0);
          real_t sv = (cross >= 0.0) ? 1.0 : -1.0;
-         tangent1[0] = -sv * n_raw(1);
-         tangent1[1] =  sv * n_raw(0);
+         tangent1[0] = -sv * n_unit(1);
+         tangent1[1] =  sv * n_unit(0);
       }
    }
 };

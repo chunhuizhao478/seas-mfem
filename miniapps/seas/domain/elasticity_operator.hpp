@@ -2568,7 +2568,7 @@ private:
             mesh_.GetBdrElementFace(be, &face_idx, &face_info_val);
             // Skip if the underlying face is interior (two local parents)
             // or shared (FaceIsTrueInterior includes shared faces)
-            if (mesh_.FaceIsTrueInterior(face_idx)) { continue; }
+            if (mesh_.FaceIsInterior(face_idx)) { continue; }
             local_bdr_all_true++;
             int attr = mesh_.GetBdrAttribute(be);
             if (dirichlet_bdr_marker_.Size() > 0 &&
@@ -2619,7 +2619,7 @@ private:
          {
             int face_idx2, face_info_val2;
             mesh_.GetBdrElementFace(be, &face_idx2, &face_info_val2);
-            if (mesh_.FaceIsTrueInterior(face_idx2)) { continue; }
+            if (mesh_.FaceIsInterior(face_idx2)) { continue; }
             int attr = mesh_.GetBdrAttribute(be);
             if (attr >= 1 && attr <= max_attr) { local_bdr_by_attr[attr]++; }
          }
