@@ -4698,6 +4698,39 @@ void ElasticityDomainOperator<MeshType>::Solve(
       DebugDumpElementVector("rhs_total", rhs);
       DebugDumpElementVector("u", X_);
 
+      // Global norm comparison (collective across all ranks)
+      {
+         int myrank;
+         MPI_Comm_rank(mesh_.GetComm(), &myrank);
+
+         auto print_global_norm = [&](const char *label, const Vector &v) {
+            double local_n1 = 0.0, local_n2sq = 0.0, local_ninf = 0.0;
+            for (int i = 0; i < v.Size(); i++)
+            {
+               double a = std::abs(v(i));
+               local_n1 += a;
+               local_n2sq += a * a;
+               if (a > local_ninf) { local_ninf = a; }
+            }
+            double g1, g2sq, ginf;
+            MPI_Reduce(&local_n1, &g1, 1, MPI_DOUBLE, MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_n2sq, &g2sq, 1, MPI_DOUBLE, MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_ninf, &ginf, 1, MPI_DOUBLE, MPI_MAX, 0, mesh_.GetComm());
+            if (myrank == 0)
+            {
+               mfem::out << std::setprecision(15);
+               mfem::out << "  [NORM] ||" << label << "||_1   = " << g1 << "\n";
+               mfem::out << "  [NORM] ||" << label << "||_2   = " << std::sqrt(g2sq) << "\n";
+               mfem::out << "  [NORM] ||" << label << "||_inf = " << ginf << "\n";
+            }
+         };
+
+         print_global_norm("b_slip", rhs_slip_snapshot);
+         print_global_norm("b_dirichlet", rhs_dir);
+         print_global_norm("b_total", rhs);
+         print_global_norm("u", X_);
+      }
+
       // Dump fault jumps and traction using the solved displacement.
       // Interior faces only — no ExchangeFaceNbrData (MPI-safe).
       DebugDumpFaultJumpsLocal(displacement, slip_bc);
