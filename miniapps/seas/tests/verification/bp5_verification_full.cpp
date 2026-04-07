@@ -1354,6 +1354,20 @@ int main(int argc, char *argv[])
                                    pv_local_traction, pv_local_state,
                                    pv_local_normal_stress);
       pv_out->Save(step_num, time, V_max);
+
+      // Fault surface VTU (proper triangle geometry, no L2-p0 artifacts)
+      {
+         Vector local_a, local_Dc, local_x2, local_x3;
+         domain.ExpandOwnedToLocalFault(fault_geom.GetAValues(), local_a, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetDcValues(), local_Dc, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX2(), local_x2, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX3(), local_x3, 1);
+         pv_out->WriteFaultSurfaceVTU(
+            output_dir, step_num, time, mpi.Rank(), mpi.Size(),
+            pv_local_slip, pv_local_slip_rate, pv_local_traction,
+            pv_local_state, pv_local_normal_stress,
+            local_a, local_Dc, local_x2, local_x3);
+      }
    };
 
    // Write initial state

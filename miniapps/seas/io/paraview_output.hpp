@@ -183,6 +183,9 @@ public:
       pv_.RegisterField("fault_x2",         fault_coord_x2_.get());
       pv_.RegisterField("fault_x3",         fault_coord_x3_.get());
 
+      fault_interior_faces_ = fault_interior_faces;
+      fault_shared_faces_ = fault_shared_faces;
+
       has_fault_output_ = true;
    }
 
@@ -363,6 +366,241 @@ public:
          if (has_normal) { (*fault_normal_stress_)(e1) = sn; }
       }
    }
+
+   // ---------------------------------------------------------------
+   //  Fault surface VTU output (proper 2D face geometry)
+   // ---------------------------------------------------------------
+
+   /// @brief Write fault surface as a triangle VTU with per-cell field data.
+   ///
+   /// Each rank writes fault_surface_r{rank}_c{cycle}.vtu containing the
+   /// actual fault face triangles and per-face averaged field values.
+   /// Rank 0 also writes a .pvtu index.  This replaces the L2-p0 volume
+   /// projection which creates scattered-dot artifacts in ParaView.
+   ///
+   /// @param prefix   Output directory path
+   /// @param cycle    Time step number
+   /// @param time     Simulation time
+   /// @param rank     MPI rank
+   /// @param nranks   Total number of MPI ranks
+   void WriteFaultSurfaceVTU(
+      const std::string &prefix,
+      int cycle, real_t time, int rank, int nranks,
+      const Vector &local_slip,
+      const Vector &local_slip_rate,
+      const Vector &local_traction,
+      const Vector &local_state,
+      const Vector &local_normal_stress,
+      const Vector &local_a,
+      const Vector &local_Dc,
+      const Vector &local_x2,
+      const Vector &local_x3)
+   {
+      if (!has_fault_output_) { return; }
+      const int nbf = nbf_per_face_;
+      const int n_int = n_interior_fault_faces_;
+      const int n_shared = n_shared_fault_faces_;
+      const int n_faces = n_int + n_shared;
+      const bool has_normal = (local_normal_stress.Size() > 0);
+
+      // Collect face vertices and per-face averaged fields
+      std::vector<std::array<double,3>> vertices;
+      std::vector<std::array<int,3>> triangles;
+      // Per-face field values
+      std::vector<double> f_sd, f_ss, f_srd, f_srs, f_td, f_ts, f_psi, f_sn;
+      std::vector<double> f_a, f_Dc, f_x2, f_x3;
+
+      auto process_face = [&](int fi, int face_mesh_idx, bool is_shared)
+      {
+         // Get face vertex coordinates
+         FaceElementTransformations *FTr = nullptr;
+         if (!is_shared)
+         {
+            int face = fault_interior_faces_[fi];
+            FTr = mesh_.GetInteriorFaceTransformations(face);
+         }
+         else
+         {
+            if constexpr (std::is_same_v<MeshType, ParMesh>)
+            {
+#ifdef MFEM_USE_MPI
+               int sf = fi;  // shared face index
+               FTr = mesh_.GetSharedFaceTransformations(sf);
+#endif
+            }
+         }
+         if (!FTr) { return; }
+
+         // Get face vertex positions (3 vertices for a triangle)
+         int base_vert = static_cast<int>(vertices.size());
+         const IntegrationRule &nir =
+            IntRules.Get(FTr->FaceGeom, 1);  // linear nodes
+         for (int v = 0; v < nbf; v++)
+         {
+            const IntegrationPoint &ip = nir.IntPoint(v);
+            FTr->Face->SetIntPoint(&ip);
+            Vector coords(3);
+            FTr->Face->Transform(ip, coords);
+            vertices.push_back({coords(0), coords(1), coords(2)});
+         }
+         // Triangle connectivity
+         if (nbf == 3)
+         {
+            triangles.push_back({base_vert, base_vert+1, base_vert+2});
+         }
+         else
+         {
+            // Fallback for non-triangle faces (shouldn't happen for tet mesh)
+            for (int v = 1; v < nbf - 1; v++)
+            {
+               triangles.push_back({base_vert, base_vert+v, base_vert+v+1});
+            }
+         }
+
+         // Average DOF values for this face
+         int base = face_mesh_idx * nbf;
+         double sd=0,ss=0,srd=0,srs=0,td=0,ts=0,psi=0,sn=0;
+         double a=0,Dc=0,x2=0,x3=0;
+         for (int k = 0; k < nbf; k++)
+         {
+            int d = base + k;
+            sd  += local_slip(2*d);
+            ss  += local_slip(2*d+1);
+            srd += local_slip_rate(2*d);
+            srs += local_slip_rate(2*d+1);
+            td  += local_traction(2*d);
+            ts  += local_traction(2*d+1);
+            psi += local_state(d);
+            if (has_normal) { sn += local_normal_stress(d); }
+            if (local_a.Size() > 0) { a += local_a(d); }
+            if (local_Dc.Size() > 0) { Dc += local_Dc(d); }
+            if (local_x2.Size() > 0) { x2 += local_x2(d); }
+            if (local_x3.Size() > 0) { x3 += local_x3(d); }
+         }
+         double inv = 1.0 / nbf;
+         f_sd.push_back(sd*inv);   f_ss.push_back(ss*inv);
+         f_srd.push_back(srd*inv); f_srs.push_back(srs*inv);
+         f_td.push_back(td*inv);   f_ts.push_back(ts*inv);
+         f_psi.push_back(psi*inv); f_sn.push_back(sn*inv);
+         f_a.push_back(a*inv);     f_Dc.push_back(Dc*inv);
+         f_x2.push_back(x2*inv);   f_x3.push_back(x3*inv);
+      };
+
+      // Interior faces
+      for (int i = 0; i < n_int; i++)
+      {
+         process_face(i, i, false);
+      }
+      // Shared faces
+      if constexpr (std::is_same_v<MeshType, ParMesh>)
+      {
+#ifdef MFEM_USE_MPI
+         for (int i = 0; i < n_shared; i++)
+         {
+            int sf_idx = fault_shared_faces_[i];
+            process_face(sf_idx, n_int + i, true);
+         }
+#endif
+      }
+
+      // Write VTU
+      std::string vtu_name = prefix + "/fault_surface_r"
+                           + std::to_string(rank)
+                           + "_c" + std::to_string(cycle) + ".vtu";
+      std::ofstream vtu(vtu_name);
+      vtu << std::setprecision(10);
+      int npts = static_cast<int>(vertices.size());
+      int ncells = static_cast<int>(triangles.size());
+
+      vtu << "<?xml version=\"1.0\"?>\n";
+      vtu << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\">\n";
+      vtu << "<UnstructuredGrid>\n";
+      vtu << "<Piece NumberOfPoints=\"" << npts
+          << "\" NumberOfCells=\"" << ncells << "\">\n";
+
+      // Points
+      vtu << "<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\" "
+             "format=\"ascii\">\n";
+      for (auto &v : vertices)
+      {
+         vtu << v[0] << " " << v[1] << " " << v[2] << "\n";
+      }
+      vtu << "</DataArray></Points>\n";
+
+      // Cells
+      vtu << "<Cells>\n";
+      vtu << "<DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n";
+      for (auto &t : triangles)
+      {
+         vtu << t[0] << " " << t[1] << " " << t[2] << "\n";
+      }
+      vtu << "</DataArray>\n";
+      vtu << "<DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n";
+      for (int i = 0; i < ncells; i++) { vtu << (i+1)*3 << "\n"; }
+      vtu << "</DataArray>\n";
+      vtu << "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
+      for (int i = 0; i < ncells; i++) { vtu << 5 << "\n"; } // VTK_TRIANGLE
+      vtu << "</DataArray>\n";
+      vtu << "</Cells>\n";
+
+      // Cell data
+      vtu << "<CellData>\n";
+      auto write_field = [&](const char* name, const std::vector<double>& vals) {
+         vtu << "<DataArray type=\"Float64\" Name=\"" << name
+             << "\" format=\"ascii\">\n";
+         for (double v : vals) { vtu << v << "\n"; }
+         vtu << "</DataArray>\n";
+      };
+      write_field("slip_dip", f_sd);
+      write_field("slip_strike", f_ss);
+      write_field("slip_rate_dip", f_srd);
+      write_field("slip_rate_strike", f_srs);
+      write_field("traction_dip", f_td);
+      write_field("traction_strike", f_ts);
+      write_field("state_variable", f_psi);
+      write_field("normal_stress", f_sn);
+      write_field("param_a", f_a);
+      write_field("param_Dc", f_Dc);
+      write_field("fault_x2", f_x2);
+      write_field("fault_x3", f_x3);
+      vtu << "</CellData>\n";
+
+      vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
+      vtu.close();
+
+      // Rank 0 writes PVTU index
+      if (rank == 0)
+      {
+         std::string pvtu_name = prefix + "/fault_surface_c"
+                               + std::to_string(cycle) + ".pvtu";
+         std::ofstream pvtu(pvtu_name);
+         pvtu << "<?xml version=\"1.0\"?>\n";
+         pvtu << "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\">\n";
+         pvtu << "<PUnstructuredGrid GhostLevel=\"0\">\n";
+         pvtu << "<PPoints><PDataArray type=\"Float64\" "
+                 "NumberOfComponents=\"3\"/></PPoints>\n";
+         pvtu << "<PCellData>\n";
+         const char* fields[] = {
+            "slip_dip","slip_strike","slip_rate_dip","slip_rate_strike",
+            "traction_dip","traction_strike","state_variable","normal_stress",
+            "param_a","param_Dc","fault_x2","fault_x3"
+         };
+         for (auto f : fields) {
+            pvtu << "<PDataArray type=\"Float64\" Name=\"" << f << "\"/>\n";
+         }
+         pvtu << "</PCellData>\n";
+         for (int r = 0; r < nranks; r++) {
+            pvtu << "<Piece Source=\"fault_surface_r" << r
+                 << "_c" << cycle << ".vtu\"/>\n";
+         }
+         pvtu << "</PUnstructuredGrid>\n</VTKFile>\n";
+         pvtu.close();
+      }
+   }
+
+   // Stored shared face indices for surface VTU output
+   Array<int> fault_shared_faces_;
+   Array<int> fault_interior_faces_;
 
    // ---------------------------------------------------------------
    //  Save methods
