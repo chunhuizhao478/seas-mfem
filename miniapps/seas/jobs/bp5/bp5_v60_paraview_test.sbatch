@@ -8,7 +8,8 @@
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60 ParaView: Full simulation with ParaView output every 500 steps.
+# BP5 v60 ParaView: Full simulation with ParaView output every 0.1 yr.
+# ~250 snapshots over 25 yr to capture the normal stress erosion.
 # Produces VTU files for displacement, fault slip, slip rate, traction,
 # state variable, and normal stress visualization.
 
@@ -44,7 +45,7 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Full run with ParaView every 500 steps"
+echo "Full run with ParaView every 0.1 yr"
 
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
@@ -60,4 +61,4 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-every 500
+      --paraview-dt 3155760

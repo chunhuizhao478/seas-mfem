@@ -533,7 +533,8 @@ int main(int argc, char *argv[])
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
    bool use_paraview = false;          // Enable ParaView PVD/VTU output
-   int  paraview_step_interval = 0;   // 0 = adaptive schedule, >0 = every N steps
+   int  paraview_step_interval = 0;   // 0 = adaptive/time schedule, >0 = every N steps
+   real_t paraview_dt = 0.0;          // >0 = fixed time interval (seconds) between writes
    int  max_steps = 10000000;         // Maximum number of time steps
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
@@ -641,6 +642,11 @@ int main(int argc, char *argv[])
       {
          use_paraview = true;
          paraview_step_interval = std::atoi(argv[++i]);
+      }
+      if (arg == "--paraview-dt" && i + 1 < argc)
+      {
+         use_paraview = true;
+         paraview_dt = std::atof(argv[++i]);
       }
       if (arg == "--petsc-ts-options" && i + 1 < argc)
       {
@@ -1235,6 +1241,10 @@ int main(int argc, char *argv[])
       {
          pv_out->output_every_n_steps = paraview_step_interval;
       }
+      if (paraview_dt > 0.0)
+      {
+         pv_out->fixed_dt = paraview_dt;
+      }
 
       if (mpi.IsRoot())
       {
@@ -1242,6 +1252,12 @@ int main(int argc, char *argv[])
          {
             std::cout << "  ParaView output: ON (every "
                       << paraview_step_interval << " steps)\n";
+         }
+         else if (paraview_dt > 0.0)
+         {
+            std::cout << "  ParaView output: ON (every "
+                      << paraview_dt / BP5Params::seconds_per_year
+                      << " yr)\n";
          }
          else
          {

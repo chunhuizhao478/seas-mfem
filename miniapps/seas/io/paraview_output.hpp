@@ -58,8 +58,13 @@ class ParaViewOutput
 
 public:
    /// Step-based output interval (write every N steps).  Set to 0 to
-   /// use the adaptive V_max schedule exclusively.
+   /// use the adaptive V_max or fixed-dt schedule.
    int output_every_n_steps = 0;
+
+   /// Fixed time interval between writes (seconds).  Set to 0 to use
+   /// the adaptive V_max schedule.  Takes precedence over V_max schedule
+   /// but not over step-based interval.
+   real_t fixed_dt = 0.0;
 
    /// @brief Construct the ParaView output manager.
    ParaViewOutput(const std::string &prefix,
@@ -304,8 +309,8 @@ public:
          }
          return false;
       }
-      // Adaptive schedule (only when step-based interval is not set)
-      real_t dt_out = OutputInterval(V_max);
+      // Time-based: fixed dt or adaptive V_max schedule
+      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
       if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
       {
          return false;
