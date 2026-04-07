@@ -1353,9 +1353,11 @@ int main(int argc, char *argv[])
       pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                    pv_local_traction, pv_local_state,
                                    pv_local_normal_stress);
-      pv_out->Save(step_num, time, V_max);
+      bool wrote = pv_out->Save(step_num, time, V_max);
 
       // Fault surface VTU (proper triangle geometry, no L2-p0 artifacts)
+      // Only write when Save() schedule triggers (same gating).
+      if (wrote)
       {
          Vector local_a, local_Dc, local_x2, local_x3;
          domain.ExpandOwnedToLocalFault(fault_geom.GetAValues(), local_a, 1);

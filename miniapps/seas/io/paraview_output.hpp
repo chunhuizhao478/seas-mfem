@@ -503,8 +503,18 @@ public:
 #endif
       }
 
-      // Write VTU
-      std::string vtu_name = prefix + "/fault_surface_r"
+      // Write VTU (create directory if needed)
+      std::string fault_dir = prefix + "/FaultSurface";
+      if (rank == 0)
+      {
+         // Simple mkdir -p equivalent (safe to call redundantly)
+         std::string cmd = "mkdir -p " + fault_dir;
+         (void)system(cmd.c_str());
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Barrier(mesh_.GetComm());
+#endif
+      std::string vtu_name = fault_dir + "/fault_surface_r"
                            + std::to_string(rank)
                            + "_c" + std::to_string(cycle) + ".vtu";
       std::ofstream vtu(vtu_name);
@@ -568,11 +578,12 @@ public:
       vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
       vtu.close();
 
-      // Rank 0 writes PVTU index
+      // Rank 0 writes PVTU index + appends to PVD time series
       if (rank == 0)
       {
-         std::string pvtu_name = prefix + "/fault_surface_c"
-                               + std::to_string(cycle) + ".pvtu";
+         std::string pvtu_rel = "fault_surface_c"
+                              + std::to_string(cycle) + ".pvtu";
+         std::string pvtu_name = fault_dir + "/" + pvtu_rel;
          std::ofstream pvtu(pvtu_name);
          pvtu << "<?xml version=\"1.0\"?>\n";
          pvtu << "<VTKFile type=\"PUnstructuredGrid\" version=\"0.1\">\n";
@@ -595,6 +606,10 @@ public:
          }
          pvtu << "</PUnstructuredGrid>\n</VTKFile>\n";
          pvtu.close();
+
+         // Append to PVD time-series file
+         fault_pvd_entries_.push_back({time, pvtu_rel});
+         WriteFaultPVD(fault_dir);
       }
    }
 
@@ -693,6 +708,10 @@ private:
    // Shared fault face → local element mapping (Elem1 only)
    std::vector<int> fault_shared_elem1_;
 
+   // Fault surface PVD time-series entries (rank 0 only)
+   struct PVDEntry { real_t time; std::string pvtu_file; };
+   std::vector<PVDEntry> fault_pvd_entries_;
+
    bool ForceSaveImpl(int cycle, real_t time)
    {
       pv_.SetCycle(cycle);
@@ -700,6 +719,24 @@ private:
       pv_.Save();
       last_write_time_ = time;
       return true;
+   }
+
+   /// Write (or overwrite) the fault surface PVD file with all entries so far.
+   void WriteFaultPVD(const std::string &fault_dir)
+   {
+      std::string pvd_name = fault_dir + "/fault_surface.pvd";
+      std::ofstream pvd(pvd_name, std::ios::trunc);
+      pvd << std::setprecision(17);
+      pvd << "<?xml version=\"1.0\"?>\n";
+      pvd << "<VTKFile type=\"Collection\" version=\"0.1\">\n";
+      pvd << "<Collection>\n";
+      for (const auto &e : fault_pvd_entries_)
+      {
+         pvd << "<DataSet timestep=\"" << e.time
+             << "\" file=\"" << e.pvtu_file << "\"/>\n";
+      }
+      pvd << "</Collection>\n</VTKFile>\n";
+      pvd.close();
    }
 
    // Factory for FES: serial vs parallel
