@@ -4698,14 +4698,28 @@ void ElasticityDomainOperator<MeshType>::Solve(
       DebugDumpElementVector("rhs_total", rhs);
       DebugDumpElementVector("u", X_);
 
-      // Global norm comparison (collective across all ranks)
+      // Dump fault jumps and traction using the solved displacement.
+      // Interior faces only — no ExchangeFaceNbrData (MPI-safe).
+      DebugDumpFaultJumpsLocal(displacement, slip_bc);
+      DebugDumpFaultTractionLocal(displacement, slip_bc);
+      DebugDumpKContributions();
+      first_step_debug_done_ = true;
+   }
+
+   // Global norm comparison — OUTSIDE rank-gated block.
+   // All ranks must participate in MPI_Reduce (no deadlock).
+   // Condition uses only rank-independent flags (enabled + time).
+   {
+      static bool norm_printed = false;
+      if (!norm_printed && first_step_debug_.enabled && time >= 0.019)
       {
+         norm_printed = true;
          int myrank;
          MPI_Comm_rank(mesh_.GetComm(), &myrank);
          if (myrank == 0)
          {
             mfem::out << "  [NORM] Dump at time = "
-                      << std::setprecision(17) << debug_time_ << "\n";
+                      << std::setprecision(17) << time << "\n";
          }
 
          auto print_global_norm = [&](const char *label, const Vector &v) {
@@ -4725,23 +4739,15 @@ void ElasticityDomainOperator<MeshType>::Solve(
             {
                mfem::out << std::setprecision(15);
                mfem::out << "  [NORM] ||" << label << "||_1   = " << g1 << "\n";
-               mfem::out << "  [NORM] ||" << label << "||_2   = " << std::sqrt(g2sq) << "\n";
+               mfem::out << "  [NORM] ||" << label << "||_2   = "
+                         << std::sqrt(g2sq) << "\n";
                mfem::out << "  [NORM] ||" << label << "||_inf = " << ginf << "\n";
             }
          };
 
-         print_global_norm("b_slip", rhs_slip_snapshot);
-         print_global_norm("b_dirichlet", rhs_dir);
          print_global_norm("b_total", rhs);
          print_global_norm("u", X_);
       }
-
-      // Dump fault jumps and traction using the solved displacement.
-      // Interior faces only — no ExchangeFaceNbrData (MPI-safe).
-      DebugDumpFaultJumpsLocal(displacement, slip_bc);
-      DebugDumpFaultTractionLocal(displacement, slip_bc);
-      DebugDumpKContributions();
-      first_step_debug_done_ = true;
    }
 }
 
