@@ -49,9 +49,9 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Full run, fault surface VTU every 0.01 yr (~2500 snapshots over 25 yr)"
+echo "Full run, fault surface VTU every 0.05 yr (~500 snapshots over 25 yr)"
 
-# 0.01 yr = 315576 s (seconds_per_year = 31557600)
+# 0.05 yr = 1577880 s (seconds_per_year = 31557600)
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
@@ -66,4 +66,4 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-dt 315576
+      --paraview-dt 1577880
