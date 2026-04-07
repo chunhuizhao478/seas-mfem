@@ -1644,28 +1644,31 @@ private:
             else if (face_bc_[f] == FacetBC::Dirichlet) { local_y0_dir++; }
          }
 
-         // Shared faces
+         // Shared faces — count by classification only (avoid
+         // GetSharedFaceTransformations which can fail for boundary faces).
+         // Use GetSharedFace to get the local face index, then compute
+         // centroid via the local face geometry.
          if constexpr (IsParallelMesh<MeshType>::value)
          {
 #ifdef MFEM_USE_MPI
             for (int sf = 0; sf < num_shared; sf++)
             {
-               auto *FTr = mesh_.GetSharedFaceTransformations(sf);
-               if (!FTr) { continue; }
+               if (shared_face_bc_[sf] != FacetBC::None) { continue; }
+
+               // Get centroid of shared face via local face index
+               int lf = mesh_.GetSharedFace(sf);
+               auto *face_tr = mesh_.GetFaceTransformation(lf);
+               if (!face_tr) { local_y0_none_shared++; continue; }
                const IntegrationPoint &ip =
-                  Geometries.GetCenter(FTr->GetGeometryType());
-               FTr->SetAllIntPoints(&ip);
+                  Geometries.GetCenter(face_tr->GetGeometryType());
+               face_tr->SetIntPoint(&ip);
                Vector fc(3);
-               FTr->Face->Transform(ip, fc);
+               face_tr->Transform(ip, fc);
                if (std::abs(fc(1)) > 1.0) { continue; }
 
-               if (shared_face_bc_[sf] == FacetBC::None)
-               {
-                  local_y0_none_shared++;
-                  int lf = mesh_.GetSharedFace(sf);
-                  none_faces.push_back({fc(0), fc(1), fc(2),
-                                        static_cast<double>(lf)});
-               }
+               local_y0_none_shared++;
+               none_faces.push_back({fc(0), fc(1), fc(2),
+                                     static_cast<double>(lf)});
             }
 #endif
          }
