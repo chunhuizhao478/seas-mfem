@@ -431,14 +431,16 @@ public:
          }
          if (!FTr) { return; }
 
-         // Get face vertex positions (3 vertices for a triangle)
+         // Get face vertex positions using reference triangle vertices.
+         // IntRules.Get(TRIANGLE, 1) gives only 1 quadrature point (centroid),
+         // NOT the 3 vertices.  Use the reference simplex nodes directly:
+         //   vertex 0 = (0, 0),  vertex 1 = (1, 0),  vertex 2 = (0, 1)
          int base_vert = static_cast<int>(vertices.size());
-         const IntegrationRule &nir =
-            IntRules.Get(FTr->FaceGeom, 1);  // linear nodes
-         for (int v = 0; v < nbf; v++)
+         const double ref_tri[3][2] = {{0,0}, {1,0}, {0,1}};
+         for (int v = 0; v < 3; v++)
          {
-            const IntegrationPoint &ip = nir.IntPoint(v);
-            FTr->Face->SetIntPoint(&ip);
+            IntegrationPoint ip;
+            ip.Set2(ref_tri[v][0], ref_tri[v][1]);
             Vector coords(3);
             FTr->Face->Transform(ip, coords);
             vertices.push_back({coords(0), coords(1), coords(2)});
