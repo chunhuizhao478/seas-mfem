@@ -8,10 +8,14 @@
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60 ParaView: Full simulation with ParaView output every 0.1 yr.
-# ~250 snapshots over 25 yr to capture the normal stress erosion.
-# Produces VTU files for displacement, fault slip, slip rate, traction,
-# state variable, and normal stress visualization.
+# BP5 v60 ParaView: Full simulation to capture the ~25 yr blowup.
+# Fault surface VTU output every 0.01 yr (~3.65 days) = ~2500 snapshots.
+# Dense enough to see the normal stress erosion develop frame by frame
+# near the failure point at ~25.27 yr.
+#
+# Fields: displacement (3D), slip, slip_rate, traction, state_variable,
+#         normal_stress, param_a, param_Dc, fault_x2, fault_x3.
+# Open FaultSurface/fault_surface.pvd in ParaView.
 
 export LC_ALL=C
 export LANG=C
@@ -45,8 +49,9 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Full run with ParaView every 0.1 yr"
+echo "Full run, fault surface VTU every 0.01 yr (~2500 snapshots over 25 yr)"
 
+# 0.01 yr = 315576 s (seconds_per_year = 31557600)
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
@@ -61,4 +66,4 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-dt 3155760
+      --paraview-dt 315576
