@@ -63,6 +63,7 @@
 #include "../../io/bp5_parallel_output.hpp"
 #include "../../io/probe_output.hpp"
 #include "../../io/checkpoint.hpp"
+#include "../../io/paraview_output.hpp"
 #include "../../common/mpi_context.hpp"
 #include "../../trace/face_trace_logger.hpp"
 
@@ -319,6 +320,9 @@ struct BP5MonitorCtx
    // Current dt (read from TS after each step)
    real_t current_dt;
 
+   // ParaView output (may be nullptr if --paraview not set)
+   std::function<void(int, real_t, real_t)> paraview_write_fn;
+
 };
 
 /// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
@@ -408,6 +412,12 @@ static PetscErrorCode bp5_ts_monitor_callback(
                                   mon->seas_op->GetTraction(), V_max))
    {
       mon->bench_out->Flush();
+   }
+
+   // ParaView output (adaptive schedule, MPI-collective)
+   if (mon->paraview_write_fn)
+   {
+      mon->paraview_write_fn(static_cast<int>(step), time, V_max);
    }
 
    // Global output
@@ -522,6 +532,9 @@ int main(int argc, char *argv[])
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
+   bool use_paraview = false;          // Enable ParaView PVD/VTU output
+   int  paraview_step_interval = 0;   // 0 = adaptive schedule, >0 = every N steps
+   int  max_steps = 10000000;         // Maximum number of time steps
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
@@ -558,6 +571,10 @@ int main(int argc, char *argv[])
       if (arg == "--checkpoint-interval" && i + 1 < argc)
       {
          checkpoint_interval = std::atoi(argv[++i]);
+      }
+      if (arg == "--max-steps" && i + 1 < argc)
+      {
+         max_steps = std::atoi(argv[++i]);
       }
       if (arg == "--restart" && i + 1 < argc)
       {
@@ -619,6 +636,12 @@ int main(int argc, char *argv[])
          tandem_dt_init = std::atof(argv[++i]);
       }
       if (arg == "--petsc-ts") { use_petsc_ts = true; }
+      if (arg == "--paraview") { use_paraview = true; }
+      if (arg == "--paraview-every" && i + 1 < argc)
+      {
+         use_paraview = true;
+         paraview_step_interval = std::atoi(argv[++i]);
+      }
       if (arg == "--petsc-ts-options" && i + 1 < argc)
       {
          petsc_ts_options_file = argv[++i];
@@ -1179,9 +1202,100 @@ int main(int argc, char *argv[])
          "BP5-QD global output");
    }
 
+   // =========================================================================
+   // ParaView output (displacement + fault fields)
+   // =========================================================================
+   std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_out;
+   // Fault field scratch vectors (local = all faces on this rank)
+   Vector pv_local_slip, pv_local_slip_rate, pv_local_traction, pv_local_state;
+   Vector pv_local_normal_stress;
+   if (use_paraview)
+   {
+      pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
+         output_dir + "/ParaView", pmesh, order);
+      // Displacement: non-owning pointer to the live ParGridFunction in seas_op
+      pv_out->RegisterDomainField("displacement",
+         const_cast<ParGridFunction*>(
+            &seas_op.GetDisplacement()));
+      // Fault fields: L2-p0 projection onto volume elements
+      pv_out->InitFaultOutputBP5(
+         domain.GetFaultInteriorFaces(),
+         domain.GetFaultSharedFaces(),
+         domain.GetNbfPerFace());
+
+      // Pre-allocate local fault vectors
+      const int n_local_dofs = domain.GetNumFaultDOFs();
+      pv_local_slip.SetSize(2 * n_local_dofs);
+      pv_local_slip_rate.SetSize(2 * n_local_dofs);
+      pv_local_traction.SetSize(2 * n_local_dofs);
+      pv_local_state.SetSize(n_local_dofs);
+      pv_local_normal_stress.SetSize(n_local_dofs);
+
+      if (paraview_step_interval > 0)
+      {
+         pv_out->output_every_n_steps = paraview_step_interval;
+      }
+
+      if (mpi.IsRoot())
+      {
+         if (paraview_step_interval > 0)
+         {
+            std::cout << "  ParaView output: ON (every "
+                      << paraview_step_interval << " steps)\n";
+         }
+         else
+         {
+            std::cout << "  ParaView output: ON (adaptive schedule)\n";
+         }
+      }
+   }
+
+   // Helper lambda: update + save ParaView output at a given time step.
+   // All ranks must call collectively (ParaViewDataCollection::Save is
+   // MPI-collective).  V_max must already be globally reduced.
+   auto paraview_write = [&](int step_num, real_t time, real_t V_max)
+   {
+      if (!pv_out) { return; }
+      // Expand owned fault vectors to local (all faces) for visualization
+      Vector owned_slip;
+      fault_op.GetSlip(state, owned_slip);
+      domain.ExpandOwnedToLocalFault(owned_slip, pv_local_slip, 2);
+      domain.ExpandOwnedToLocalFault(fault_op.GetSlipRate(),
+                                     pv_local_slip_rate, 2);
+      domain.ExpandOwnedToLocalFault(seas_op.GetTraction(),
+                                     pv_local_traction, 2);
+      // State (psi): extract from ODE state vector, 1 comp per DOF
+      {
+         const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+         const int n_owned = fault_op.NumNodes();
+         Vector owned_psi(n_owned);
+         for (int i = 0; i < n_owned; i++)
+         {
+            owned_psi(i) = state(i * spn + 2);
+         }
+         domain.ExpandOwnedToLocalFault(owned_psi, pv_local_state, 1);
+      }
+      // Normal stress (1 comp per DOF, may be empty if disabled)
+      if (seas_op.ElasticSigmaNEnabled() &&
+          seas_op.GetNormalTraction().Size() > 0)
+      {
+         domain.ExpandOwnedToLocalFault(seas_op.GetNormalTraction(),
+                                        pv_local_normal_stress, 1);
+      }
+      else
+      {
+         pv_local_normal_stress = 0.0;
+      }
+      pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
+                                   pv_local_traction, pv_local_state,
+                                   pv_local_normal_stress);
+      pv_out->Save(step_num, time, V_max);
+   };
+
    // Write initial state
    bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
    bench_out.Flush();
+   paraview_write(0, 0.0, V_init);
    if (mpi.IsRoot() && global_out)
    {
       global_out->WriteStep({0.0, V_init > 0.0 ? std::log10(V_init) : -300.0});
@@ -1236,7 +1350,6 @@ int main(int argc, char *argv[])
    }
    real_t current_dt = dt_init;
    int step_rejections = 0;
-   int max_steps = 10000000;
    int print_step_interval = 10;
    Vector empty_k0;
 
@@ -1325,6 +1438,7 @@ int main(int argc, char *argv[])
       petsc_mon_ctx.in_seismic_event = false;
       petsc_mon_ctx.V_threshold_seismic = 1e-3;
       petsc_mon_ctx.V_threshold_interseismic = 1e-6;
+      petsc_mon_ctx.paraview_write_fn = paraview_write;
       petsc_mon_ctx.current_dt = dt_init;
 
       ierr = TSMonitorSet(ts, bp5_ts_monitor_callback, &petsc_mon_ctx,
@@ -1587,6 +1701,9 @@ int main(int argc, char *argv[])
          {
             bench_out.Flush();
          }
+
+         // ParaView output (adaptive schedule, MPI-collective)
+         paraview_write(step, t, V_max);
 
          // Global output
          if (mpi.IsRoot() && global_out)
