@@ -489,14 +489,7 @@ void TestBP5ComputeRHSMatchesTandemSourceAllNodes()
       real_t V_expected[2];
       real_t dpsi_expected = 0.0;
 
-      if (depths(i) > fix.params.Wf + 1.0)
-      {
-         // v55 D8: below-fault rate is -Vp (Tandem convention)
-         V_expected[0] = 0.0;
-         V_expected[1] = -fix.params.Vp;
-         dpsi_expected = 0.0;
-      }
-      else
+      // All DOFs (including below-Wf) handled by friction solver naturally.
       {
          const real_t psi = state(i * 3 + 2);
          const real_t tau_vec[2] = {
@@ -897,11 +890,14 @@ void TestBP5ParamsAccessor()
 }
 
 // =============================================================================
-// Test 11: BP5 Below-Fault Handling — DOFs below Wf get (0, Vp, 0) rate
+// Test 11: BP5 Below-Fault Handling — friction solver handles all DOFs
+// naturally (no hardcoded below-Wf branch), matching Tandem's approach.
+// Below-fault DOFs are velocity-strengthening and should converge to
+// steady-state plate rate via the friction solver.
 // =============================================================================
 void TestBP5BelowFault()
 {
-   std::cout << "\n--- Test: BP5 Below-Fault Handling ---\n";
+   std::cout << "\n--- Test: BP5 Below-Fault Handling (natural, no hardcoded branch) ---\n";
 
    BP5Params params;
 
@@ -956,7 +952,11 @@ void TestBP5BelowFault()
    Vector rate(fault_op.StateSize());
    fault_op.ComputeRHS(traction, state, rate);
 
-   // Check that at least one DOF is below Wf_small
+   // All DOFs (including below-Wf) are handled by the friction solver.
+   // At initial equilibrium with zero elastic traction, all DOFs should
+   // have V ≈ V_init. For below-fault DOFs: V_init = (0, Vp).
+   // The friction solver: V_vec = -(tau_vec/|tau|)*V_abs
+   //   tau_pre = (0, -tau0_scalar) → V_vec = (0, +Vp)
    const Vector &depths = fault_geom.GetDepths();
    real_t Wf_small = params_small_wf.Wf;
    int below_count = 0;
@@ -966,13 +966,19 @@ void TestBP5BelowFault()
       if (depths(i) > Wf_small + 1.0)
       {
          below_count++;
-         // v55 D8: Below-fault DOFs have rate = (0, -Vp, 0) (negated, Tandem convention)
-         TEST_NEAR(rate(i * 3 + 0), 0.0, 1e-15,
-                   "Below-fault: dip rate = 0");
-         TEST_NEAR(rate(i * 3 + 1), -params_small_wf.Vp, 1e-20,
-                   "Below-fault: strike rate = -Vp (Tandem)");
-         TEST_NEAR(rate(i * 3 + 2), 0.0, 1e-15,
-                   "Below-fault: dpsi/dt = 0");
+         // Friction solver should give V ≈ (0, +Vp) at steady state
+         real_t V_dip = rate(i * 3 + 0);
+         real_t V_strike = rate(i * 3 + 1);
+         real_t V_abs = std::sqrt(V_dip*V_dip + V_strike*V_strike);
+         // V_abs should be close to Vp (within friction solver tolerance)
+         TEST_NEAR(V_abs, params_small_wf.Vp, params_small_wf.Vp * 1e-6,
+                   "Below-fault: |V| ≈ Vp (friction solver)");
+         // Strike component should be positive (right-lateral)
+         TEST_ASSERT(V_strike > 0.0,
+                     "Below-fault: strike rate > 0 (right-lateral)");
+         // Dip component should be near zero
+         TEST_NEAR(V_dip, 0.0, params_small_wf.Vp * 1e-6,
+                   "Below-fault: dip rate ≈ 0");
       }
       else
       {

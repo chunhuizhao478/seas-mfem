@@ -128,8 +128,7 @@ public:
         dr_friction_(friction),
         bp5_params_(params),
         sigma_n_bp5_(params.sigma_n),
-        Vp_bp5_(params.Vp),
-        Wf_bp5_(params.Wf)
+        Vp_bp5_(params.Vp)  // kept for potential diagnostics
    {
       static_assert(SlipComponents == 2,
                     "BP5Params constructor requires SlipComponents=2");
@@ -300,14 +299,6 @@ public:
          // ---- BP5 vector path ----
          for (int i = 0; i < num_nodes_; i++)
          {
-            // Below fault zone check (shouldn't happen with proper fault detection)
-            if (depths(i) > Wf_bp5_ + 1.0)
-            {
-               slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               continue;
-            }
-
             // Vector stress: tau_pre + elastic traction
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
                                  tau_pre_(2*i+1) + traction(2*i+1)};
@@ -421,16 +412,8 @@ public:
          else
          {
             // ---- BP5 vector path ----
-            if (depths(i) > Wf_bp5_ + 1.0)
-            {
-               // Below fault zone: prescribed plate rate.
-               rate(i * StatePerNode + 0) = 0.0;
-               rate(i * StatePerNode + 1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               rate(i * StatePerNode + PsiIndex) = 0.0;
-               slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               continue;
-            }
+            // No below-fault hardcoded branch: let friction solver handle
+            // all DOFs naturally, matching Tandem's approach.
 
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
@@ -816,8 +799,6 @@ public:
          }
          else
          {
-            if (depths(i) > Wf_bp5_ + 1.0) { continue; }
-
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
                                  tau_pre_(2*i+1) + traction(2*i+1)};
