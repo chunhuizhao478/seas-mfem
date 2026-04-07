@@ -403,16 +403,17 @@ public:
       const int n_faces = n_int + n_shared;
       const bool has_normal = (local_normal_stress.Size() > 0);
 
-      // Collect face vertices and per-face averaged fields
+      // Collect face vertices and per-VERTEX (per-DOF) field values.
+      // Each triangle has 3 vertices with independent DOF values,
+      // giving smooth interpolation within each face in ParaView.
       std::vector<std::array<double,3>> vertices;
       std::vector<std::array<int,3>> triangles;
-      // Per-face field values
+      // Per-vertex field values (one entry per vertex = per DOF)
       std::vector<double> f_sd, f_ss, f_srd, f_srs, f_td, f_ts, f_psi, f_sn;
       std::vector<double> f_a, f_Dc, f_x2, f_x3;
 
       auto process_face = [&](int fi, int face_mesh_idx, bool is_shared)
       {
-         // Get face vertex coordinates
          FaceElementTransformations *FTr = nullptr;
          if (!is_shared)
          {
@@ -424,17 +425,14 @@ public:
             if constexpr (std::is_same_v<MeshType, ParMesh>)
             {
 #ifdef MFEM_USE_MPI
-               int sf = fi;  // shared face index
+               int sf = fi;
                FTr = mesh_.GetSharedFaceTransformations(sf);
 #endif
             }
          }
          if (!FTr) { return; }
 
-         // Get face vertex positions using reference triangle vertices.
-         // IntRules.Get(TRIANGLE, 1) gives only 1 quadrature point (centroid),
-         // NOT the 3 vertices.  Use the reference simplex nodes directly:
-         //   vertex 0 = (0, 0),  vertex 1 = (1, 0),  vertex 2 = (0, 1)
+         // Reference triangle vertices: (0,0), (1,0), (0,1)
          int base_vert = static_cast<int>(vertices.size());
          const double ref_tri[3][2] = {{0,0}, {1,0}, {0,1}};
          for (int v = 0; v < 3; v++)
@@ -445,47 +443,26 @@ public:
             FTr->Face->Transform(ip, coords);
             vertices.push_back({coords(0), coords(1), coords(2)});
          }
-         // Triangle connectivity
-         if (nbf == 3)
-         {
-            triangles.push_back({base_vert, base_vert+1, base_vert+2});
-         }
-         else
-         {
-            // Fallback for non-triangle faces (shouldn't happen for tet mesh)
-            for (int v = 1; v < nbf - 1; v++)
-            {
-               triangles.push_back({base_vert, base_vert+v, base_vert+v+1});
-            }
-         }
+         triangles.push_back({base_vert, base_vert+1, base_vert+2});
 
-         // Average DOF values for this face
+         // Store per-vertex (per-DOF) values — no averaging
          int base = face_mesh_idx * nbf;
-         double sd=0,ss=0,srd=0,srs=0,td=0,ts=0,psi=0,sn=0;
-         double a=0,Dc=0,x2=0,x3=0;
-         for (int k = 0; k < nbf; k++)
+         for (int k = 0; k < 3; k++)
          {
             int d = base + k;
-            sd  += local_slip(2*d);
-            ss  += local_slip(2*d+1);
-            srd += local_slip_rate(2*d);
-            srs += local_slip_rate(2*d+1);
-            td  += local_traction(2*d);
-            ts  += local_traction(2*d+1);
-            psi += local_state(d);
-            if (has_normal) { sn += local_normal_stress(d); }
-            if (local_a.Size() > 0) { a += local_a(d); }
-            if (local_Dc.Size() > 0) { Dc += local_Dc(d); }
-            if (local_x2.Size() > 0) { x2 += local_x2(d); }
-            if (local_x3.Size() > 0) { x3 += local_x3(d); }
+            f_sd.push_back(local_slip(2*d));
+            f_ss.push_back(local_slip(2*d+1));
+            f_srd.push_back(local_slip_rate(2*d));
+            f_srs.push_back(local_slip_rate(2*d+1));
+            f_td.push_back(local_traction(2*d));
+            f_ts.push_back(local_traction(2*d+1));
+            f_psi.push_back(local_state(d));
+            f_sn.push_back(has_normal ? local_normal_stress(d) : 0.0);
+            f_a.push_back(local_a.Size() > 0 ? local_a(d) : 0.0);
+            f_Dc.push_back(local_Dc.Size() > 0 ? local_Dc(d) : 0.0);
+            f_x2.push_back(local_x2.Size() > 0 ? local_x2(d) : 0.0);
+            f_x3.push_back(local_x3.Size() > 0 ? local_x3(d) : 0.0);
          }
-         double inv = 1.0 / nbf;
-         f_sd.push_back(sd*inv);   f_ss.push_back(ss*inv);
-         f_srd.push_back(srd*inv); f_srs.push_back(srs*inv);
-         f_td.push_back(td*inv);   f_ts.push_back(ts*inv);
-         f_psi.push_back(psi*inv); f_sn.push_back(sn*inv);
-         f_a.push_back(a*inv);     f_Dc.push_back(Dc*inv);
-         f_x2.push_back(x2*inv);   f_x3.push_back(x3*inv);
       };
 
       // Interior faces
@@ -555,8 +532,8 @@ public:
       vtu << "</DataArray>\n";
       vtu << "</Cells>\n";
 
-      // Cell data
-      vtu << "<CellData>\n";
+      // Point data (per-vertex values, interpolated across triangles)
+      vtu << "<PointData>\n";
       auto write_field = [&](const char* name, const std::vector<double>& vals) {
          vtu << "<DataArray type=\"Float64\" Name=\"" << name
              << "\" format=\"ascii\">\n";
@@ -575,7 +552,7 @@ public:
       write_field("param_Dc", f_Dc);
       write_field("fault_x2", f_x2);
       write_field("fault_x3", f_x3);
-      vtu << "</CellData>\n";
+      vtu << "</PointData>\n";
 
       vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
       vtu.close();
@@ -592,7 +569,7 @@ public:
          pvtu << "<PUnstructuredGrid GhostLevel=\"0\">\n";
          pvtu << "<PPoints><PDataArray type=\"Float64\" "
                  "NumberOfComponents=\"3\"/></PPoints>\n";
-         pvtu << "<PCellData>\n";
+         pvtu << "<PPointData>\n";
          const char* fields[] = {
             "slip_dip","slip_strike","slip_rate_dip","slip_rate_strike",
             "traction_dip","traction_strike","state_variable","normal_stress",
@@ -601,7 +578,7 @@ public:
          for (auto f : fields) {
             pvtu << "<PDataArray type=\"Float64\" Name=\"" << f << "\"/>\n";
          }
-         pvtu << "</PCellData>\n";
+         pvtu << "</PPointData>\n";
          for (int r = 0; r < nranks; r++) {
             pvtu << "<Piece Source=\"fault_surface_r" << r
                  << "_c" << cycle << ".vtu\"/>\n";
