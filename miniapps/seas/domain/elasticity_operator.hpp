@@ -329,7 +329,10 @@ private:
    bool DebugEnabledForTime(real_t time) const
    {
       if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
-      if (time <= 0.0) { return false; }
+      // Target: dump at the first Mult() call with t >= 0.01 (first accepted
+      // step for dt_init=0.01). This avoids sub-stage dumps and matches the
+      // time window where Tandem's first_step_dump_active fires.
+      if (time < 0.005) { return false; }
       return (first_step_debug_.target_rank < 0 ||
               DebugRank() == first_step_debug_.target_rank);
    }
@@ -2599,9 +2602,9 @@ private:
             for (int i = 0; i < 5; i++) { global[i] = counts[i]; }
          }
 
-         // Count ALL boundary elements per attribute (no GetBdrFaceTransformations
-         // — that can cause MPI issues). This counts boundary ELEMENTS, not
-         // faces that pass the interior-check.
+         // Count true one-sided boundary faces per attribute.
+         // Uses FaceIsTrueInterior to skip interior and shared faces
+         // (same filter as the main boundary count above).
          int local_max_attr = mesh_.GetNBE() > 0 ? mesh_.bdr_attributes.Max() : 0;
          int max_attr = local_max_attr;
          if constexpr (IsParallelMesh<MeshType>::value)
