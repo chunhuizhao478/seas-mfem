@@ -2551,18 +2551,27 @@ private:
             if (mesh_.GetInteriorFaceTransformations(f)) { local_interior_face++; }
          }
 
-         // Count boundary faces processed by the Dirichlet face integrator
-         // Count boundary elements by Dirichlet marker (no GetBdrFaceTransformations
-         // — that call can cause MPI deadlock on ParMesh).
-         long long local_bdr_face = 0;
-         long long local_bdr_all = mesh_.GetNBE();
+         // Count TRUE one-sided boundary faces (not interior) that K processes.
+         // A boundary element is a true boundary face only if its underlying
+         // mesh face does NOT have two local parent elements.
+         // Use FaceIsInterior (checks Elem2No >= 0) instead of
+         // GetBdrFaceTransformations (which can deadlock on ParMesh).
+         long long local_bdr_face_true = 0;   // attr-5 true boundary faces
+         long long local_bdr_all_true = 0;    // all-attr true boundary faces
+         long long local_bdr_elem_total = mesh_.GetNBE();  // all boundary elements
          for (int be = 0; be < mesh_.GetNBE(); be++)
          {
+            int face_idx, face_info_val;
+            mesh_.GetBdrElementFace(be, &face_idx, &face_info_val);
+            // Skip if the underlying face is interior (two local parents)
+            // or shared (FaceIsTrueInterior includes shared faces)
+            if (mesh_.FaceIsTrueInterior(face_idx)) { continue; }
+            local_bdr_all_true++;
             int attr = mesh_.GetBdrAttribute(be);
             if (dirichlet_bdr_marker_.Size() > 0 &&
                 dirichlet_bdr_marker_[attr - 1] == 1)
             {
-               local_bdr_face++;
+               local_bdr_face_true++;
             }
          }
 
@@ -2575,7 +2584,7 @@ private:
          }
 
          long long counts[5] = {local_volume, local_interior_face, local_shared,
-                                local_bdr_face, local_bdr_all};
+                                local_bdr_face_true, local_bdr_all_true};
          long long global[5] = {0};
 
          if constexpr (IsParallelMesh<MeshType>::value)
@@ -2605,6 +2614,9 @@ private:
          std::vector<long long> local_bdr_by_attr(max_attr + 1, 0);
          for (int be = 0; be < mesh_.GetNBE(); be++)
          {
+            int face_idx2, face_info_val2;
+            mesh_.GetBdrElementFace(be, &face_idx2, &face_info_val2);
+            if (mesh_.FaceIsTrueInterior(face_idx2)) { continue; }
             int attr = mesh_.GetBdrAttribute(be);
             if (attr >= 1 && attr <= max_attr) { local_bdr_by_attr[attr]++; }
          }
@@ -2623,12 +2635,16 @@ private:
 
          if (DebugRank() == 0)
          {
-            mfem::out << "  [K-DIAG] Volume elements:        " << global[0] << "\n";
-            mfem::out << "  [K-DIAG] Interior faces (K):     " << global[1] << "\n";
-            mfem::out << "  [K-DIAG] Shared faces (K):       " << global[2]
-                      << " (each counted by owning rank)\n";
-            mfem::out << "  [K-DIAG] Bdr faces (Dirichlet):  " << global[3] << "\n";
-            mfem::out << "  [K-DIAG] Bdr faces (all attrs):  " << global[4] << "\n";
+            mfem::out << "  [K-DIAG] Volume elements:            " << global[0] << "\n";
+            mfem::out << "  [K-DIAG] Interior faces (K):         " << global[1] << "\n";
+            mfem::out << "  [K-DIAG] Shared faces (K):           " << global[2]
+                      << " (each face counted by both ranks)\n";
+            mfem::out << "  [K-DIAG] Bdr faces w/ K (Dirichlet): " << global[3]
+                      << " (true one-sided, attr 5)\n";
+            mfem::out << "  [K-DIAG] Bdr faces (all attrs):      " << global[4]
+                      << " (true one-sided, any attr)\n";
+            mfem::out << "  [K-DIAG] Bdr elements total:         " << local_bdr_elem_total
+                      << " (local rank, includes interior)\n";
             for (int a = 1; a <= max_attr; a++)
             {
                if (global_bdr_by_attr[a] > 0)
