@@ -329,8 +329,9 @@ private:
    bool DebugEnabledForTime(real_t time) const
    {
       if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
-      // Target: dump at t >= 0.019s to match Tandem's first accepted step
-      // (dt_init=0.01 → first RK45 eval at t≈0.02s).
+      // Target: dump at first accepted step (last RK45 stage).
+      // With dt_init=0.02, the last stage is at t=0.02.
+      // Threshold skips intermediate RK45 stages (t < 0.019).
       if (time < 0.019) { return false; }
       return (first_step_debug_.target_rank < 0 ||
               DebugRank() == first_step_debug_.target_rank);

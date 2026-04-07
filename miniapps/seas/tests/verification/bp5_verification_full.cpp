@@ -333,7 +333,7 @@ int main(int argc, char *argv[])
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
    bool no_v_guard = false;         // v50: disable V guard (for testing only)
    bool tandem_time_stepping = false; // Use Tandem-style startup/acceptance policy
-   real_t tandem_dt_init = 0.01;      // Default Tandem-style startup dt [s]
+   real_t tandem_dt_init = 0.02;      // Default Tandem-style startup dt [s]
    // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
    real_t penalty_factor = 1.0;
    bool no_psi_clamp = true;           // Default OFF: match Tandem (no post-step psi clamp)
