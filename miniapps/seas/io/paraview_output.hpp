@@ -18,6 +18,7 @@
 #include <string>
 #include <cmath>
 #include <memory>
+#include <sys/stat.h>
 #include <vector>
 #include <type_traits>
 
@@ -486,9 +487,7 @@ public:
       std::string fault_dir = prefix + "/FaultSurface";
       if (rank == 0)
       {
-         // Simple mkdir -p equivalent (safe to call redundantly)
-         std::string cmd = "mkdir -p " + fault_dir;
-         (void)system(cmd.c_str());
+         ::mkdir(fault_dir.c_str(), 0755);  // ignore error if exists
       }
 #ifdef MFEM_USE_MPI
       MPI_Barrier(mesh_.GetComm());
