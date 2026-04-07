@@ -329,9 +329,10 @@ private:
    bool DebugEnabledForTime(real_t time) const
    {
       if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
-      // Target: dump at the first Mult() call with t >= 0.019.
-      // Tandem dumps at t=0.02 (k2 of second step). Match that.
-      if (time < 0.019) { return false; }
+      // Target: dump at the first Mult() call with t > 0.
+      // The driver stops after the first accepted step, so this will
+      // fire at the first RK45 stage of the first step.
+      if (time <= 0.0) { return false; }
       return (first_step_debug_.target_rank < 0 ||
               DebugRank() == first_step_debug_.target_rank);
    }
