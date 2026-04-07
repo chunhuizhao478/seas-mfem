@@ -1240,7 +1240,7 @@ int main(int argc, char *argv[])
       // Set static friction parameters and fault coordinates for visualization.
       // Expand owned → local so they map to the same faces as the dynamic fields.
       {
-         const auto &geom = *fault_geom;
+         const auto &geom = fault_geom;
          Vector local_a, local_Dc, local_x2, local_x3;
          domain.ExpandOwnedToLocalFault(geom.GetAValues(), local_a, 1);
          domain.ExpandOwnedToLocalFault(geom.GetDcValues(), local_Dc, 1);
