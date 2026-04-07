@@ -1940,3 +1940,144 @@ locally, the mismatch must come from:
 - MFEM: Frontera job 7636758 (commit 1f945dd)
 - Tandem: Frontera job with commit 01a642c
 - Both at t=0.02s, dt_init=0.02, 8 nodes, 400 ranks
+
+---
+
+## 23. Per-Stage RK45 Norms: First Stage Matches Exactly
+
+### 23.1 Method
+
+Print `||b_total||`, `||u||`, `||traction||`, `||V||` at every RK45 stage
+of the first step in both codes. MFEM uses dt=0.02 (6 stages), Tandem used
+dt=0.1 (6 stages — PETSc default overrode `-ts_init_dt 0.02`).
+
+### 23.2 First-stage comparison (pure initial conditions)
+
+At the first RK45 evaluation with t > 0, the slip is purely `V_init × c₂ × dt`
+(no traction feedback yet). Both codes produce identical results up to the
+time/unit scaling factor.
+
+MFEM Stage 1 at t=0.004 vs Tandem Stage 1 at t=0.02 (time ratio = 0.2):
+
+| Norm | MFEM | Tandem | MFEM/Tandem | Expected |
+|------|------|--------|-------------|----------|
+| b_total L1 | 2.3616e+13 | 118.08 | 2.000e+11 | 1e12 × 0.2 ✓ |
+| b_total L2 | 4.6519e+11 | 2.326 | 2.000e+11 | 1e12 × 0.2 ✓ |
+| b_total Linf | 1.3456e+10 | 0.06728 | 2.000e+11 | 1e12 × 0.2 ✓ |
+| u L1 | 0.3080 | 1.540 | 0.2000 | 0.2 ✓ |
+| u L2 | 0.001560 | 0.007800 | 0.2000 | 0.2 ✓ |
+| u Linf | 2.274e-05 | 1.137e-04 | 0.2000 | 0.2 ✓ |
+
+All six ratios match the expected time/unit scaling to 4+ significant figures.
+
+### 23.3 Conclusion: linear algebra is identical
+
+At the first stage (before any coupling feedback), the global b, the global
+u = K⁻¹b, and all their norms match exactly. This proves:
+
+- K assembly is correct (already shown in Section 21)
+- b assembly (slip + Dirichlet) is correct
+- DOF scatter is correct
+- Solver produces the correct solution
+- The entire linear algebra pipeline matches Tandem
+
+**The bug is NOT in K, b, the solver, or any assembly path.**
+
+---
+
+## 24. Unit System Comparison: Tandem Uses km/Mg/MPa, Not m/kg/Pa
+
+### 24.1 Discovery
+
+The per-stage traction norms differ by ~1e6 between MFEM and Tandem:
+
+MFEM COUPLING Stage 2 (t=0.004): `||traction||_inf = 8910`
+Tandem COUPLING Stage 1 (t=0.02): `||traction||_inf = 0.04455`
+
+Time-normalized ratio: (8910/0.004) / (0.04455/0.02) = ~1,000,000
+
+### 24.2 Root cause: consistent unit system in Tandem
+
+**Tandem** (`bp5.lua`) uses km/Mg/s units:
+
+```lua
+BP5.rho0 = 2.670       -- Mg/m³ (not kg/m³)
+BP5.cs = 3.464         -- km/s (not m/s)
+BP5.mu = cs² × rho     -- = 32.04 MPa (not Pa)
+BP5.sn_pre = 25.0      -- MPa (not Pa)
+BP5.eta = cs × rho / 2 -- = 4.624 MPa·s/m (not Pa·s/m)
+```
+
+**MFEM** (`bp5_params.hpp`) uses m/kg/s (SI):
+
+```cpp
+rho = 2670.0;           // kg/m³
+cs = 3464.0;            // m/s
+mu() = rho × cs² = 3.204e10;  // Pa
+sigma_n = 25.0e6;       // Pa
+eta() = mu / (2cs) = 4.624e6; // Pa·s/m
+```
+
+The 1e6 ratio is **Pa / MPa** — a legitimate unit convention difference.
+
+### 24.3 Why this is NOT a bug
+
+Both codes are internally self-consistent:
+
+- In Tandem: τ in MPa, σ_n in MPa → τ/σ_n is dimensionless ✓
+- In MFEM: τ in Pa, σ_n in Pa → τ/σ_n is dimensionless ✓
+- Friction: f = f₀ + a·ln(V/V₀) + b·ψ is dimensionless in both ✓
+- V = τ / (f·σ_n + η·V) gives same V in m/s in both codes ✓
+
+The 1e6 traction difference does NOT cause the coupling loop divergence.
+It is a natural consequence of Tandem's km-based coordinate system producing
+stress in MPa, while MFEM's meter-based system produces stress in Pa.
+
+### 24.4 Full unit scaling table
+
+| Quantity | MFEM unit | Tandem unit | Ratio MFEM/Tandem |
+|----------|-----------|-------------|-------------------|
+| Coordinates | m | km | 1e3 |
+| Displacement | m | m | 1 |
+| Stress (μ) | Pa | MPa | 1e6 |
+| Traction | Pa | MPa | 1e6 |
+| σ_n | Pa (25e6) | MPa (25) | 1e6 |
+| η | Pa·s/m (4.624e6) | MPa·s/m (4.624) | 1e6 |
+| Velocity V | m/s | m/s | 1 |
+| K matrix entry | Pa·m | MPa·km | 1e12 (= 1e6 × 1e3 × 1e3) |
+| b vector entry | Pa·m² | MPa·km² | varies with mesh dim |
+
+### 24.5 Revised interpretation of b norm mismatch
+
+The 0.5% difference in b norms at t=0.02 (Section 22.2) comes from
+accumulated coupling loop feedback over 4 RK45 stages, NOT from a unit
+error. At Stage 1 (no feedback), b matches exactly. The feedback
+amplifies a small per-stage difference through traction → friction → slip.
+
+### 24.6 Updated status
+
+**Verified identical:**
+- K matrix (global K·1 norms, per-element matrices)
+- b vector at Stage 1 (pure initial conditions)
+- u at Stage 1
+- Solver (MUMPS direct)
+- Unit scaling (Pa vs MPa self-consistent)
+
+**Remaining suspect: coupling loop**
+
+The divergence begins at RK45 Stage 2+ when traction feeds back through
+friction to produce updated slip. A small (~0.5%) per-stage error
+accumulates over many steps into the 5× earthquake timing difference.
+
+Possible sub-causes in the coupling loop:
+1. Traction computation: `ComputeTractionAtQuadPoints` formula difference
+2. L2 projection: `ProjectTractionToFaultDOFs` implementation difference
+3. Friction law: `ComputeRHS` (V and dpsi/dt computation)
+4. State vector layout: different DOF ordering in [slip, psi] state
+5. RK45 stage evaluation: different time/state passed to Mult()
+
+### 24.7 Data references
+
+- MFEM: Frontera job 7636770 (commit b631c63)
+- Tandem: Frontera job with commit ceeaefa
+- MFEM dt=0.02 (6 stages), Tandem dt=0.1 (6 stages, PETSc default)
