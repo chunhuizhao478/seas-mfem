@@ -1605,6 +1605,144 @@ private:
             << ", expected Dirichlet.");
       }
 
+      // ---- Phase 4b: Audit y=0 face classification ----
+      // Detect interior faces on y=0 that are FacetBC::None (unclassified).
+      // These faces get DG penalty enforcing zero jump, conflicting with
+      // adjacent fault slip or Dirichlet displacement.
+      {
+         int rank = 0;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+#endif
+         }
+
+         int local_y0_none = 0, local_y0_fault = 0, local_y0_dir = 0;
+         int local_y0_none_shared = 0;
+         std::vector<std::array<double, 4>> none_faces;  // x, y, z, face_idx
+
+         // Interior faces
+         for (int f = 0; f < num_faces; f++)
+         {
+            auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+            if (!FTr) { continue; }
+            const IntegrationPoint &ip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ip);
+            Vector fc(3);
+            FTr->Face->Transform(ip, fc);
+            if (std::abs(fc(1)) > 1.0) { continue; }  // not on y=0
+
+            if (face_bc_[f] == FacetBC::None)
+            {
+               local_y0_none++;
+               none_faces.push_back({fc(0), fc(1), fc(2),
+                                     static_cast<double>(f)});
+            }
+            else if (face_bc_[f] == FacetBC::Fault) { local_y0_fault++; }
+            else if (face_bc_[f] == FacetBC::Dirichlet) { local_y0_dir++; }
+         }
+
+         // Shared faces
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int sf = 0; sf < num_shared; sf++)
+            {
+               auto *FTr = mesh_.GetSharedFaceTransformations(sf);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->Transform(ip, fc);
+               if (std::abs(fc(1)) > 1.0) { continue; }
+
+               if (shared_face_bc_[sf] == FacetBC::None)
+               {
+                  local_y0_none_shared++;
+                  int lf = mesh_.GetSharedFace(sf);
+                  none_faces.push_back({fc(0), fc(1), fc(2),
+                                        static_cast<double>(lf)});
+               }
+            }
+#endif
+         }
+
+         // Reduce counts
+         int global_counts[4] = {local_y0_fault, local_y0_dir,
+                                  local_y0_none, local_y0_none_shared};
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(MPI_IN_PLACE, global_counts, 4, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+#endif
+         }
+
+         if (rank == 0)
+         {
+            std::cout << "\n=== Y=0 Face Classification Audit ===\n"
+                      << "  Fault (attr=3):      " << global_counts[0] << "\n"
+                      << "  Dirichlet (attr=5):  " << global_counts[1] << "\n"
+                      << "  NONE (interior):     " << global_counts[2] << "\n"
+                      << "  NONE (shared):       " << global_counts[3] << "\n";
+            if (global_counts[2] + global_counts[3] > 0)
+            {
+               std::cout << "  *** WARNING: " << global_counts[2] + global_counts[3]
+                         << " y=0 faces have NO BC! These enforce zero jump "
+                         << "via DG penalty, conflicting with fault slip.\n";
+            }
+            else
+            {
+               std::cout << "  OK: all y=0 interior faces classified.\n";
+            }
+            std::cout << "=====================================\n\n";
+         }
+
+         // Dump unclassified face locations to CSV
+         if (!none_faces.empty())
+         {
+            std::string fname = "face_audit_r" + std::to_string(rank) + ".csv";
+            std::ofstream ofs(fname);
+            ofs << "x,y,z,face_idx,bc\n";
+            for (auto &nf : none_faces)
+            {
+               ofs << nf[0] << "," << nf[1] << ","
+                   << nf[2] << "," << static_cast<int>(nf[3])
+                   << ",None\n";
+            }
+            // Also dump fault faces near the boundary for context
+            for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+            {
+               int f = fault_interior_faces_[fi];
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->Transform(ip, fc);
+               ofs << fc(0) << "," << fc(1) << ","
+                   << fc(2) << "," << f << ",Fault\n";
+            }
+            for (int di = 0; di < dirichlet_interior_faces_.Size(); di++)
+            {
+               int f = dirichlet_interior_faces_[di];
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->Transform(ip, fc);
+               ofs << fc(0) << "," << fc(1) << ","
+                   << fc(2) << "," << f << ",Dirichlet\n";
+            }
+         }
+      }
+
       // ---- Phase 5: Exact canonical-key validation ----
       ValidateFacetBCTables();
    }
