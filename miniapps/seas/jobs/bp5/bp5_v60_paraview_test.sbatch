@@ -2,15 +2,15 @@
 #SBATCH -J bp5_pv
 #SBATCH -o bp5_v60_paraview_%j.out
 #SBATCH -e bp5_v60_paraview_%j.err
-#SBATCH -p development
+#SBATCH -p normal
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 00:30:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60 ParaView test: Run first 100 steps with ParaView output every
-# 10 steps.  Produces VTU files for displacement, fault slip, slip rate,
-# traction, state variable, and normal stress visualization.
+# BP5 v60 ParaView: Full simulation with ParaView output every 500 steps.
+# Produces VTU files for displacement, fault slip, slip rate, traction,
+# state variable, and normal stress visualization.
 
 export LC_ALL=C
 export LANG=C
@@ -44,7 +44,7 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Test: first 100 steps, ParaView every 10 steps"
+echo "Full run with ParaView every 500 steps"
 
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
@@ -54,11 +54,10 @@ ibrun ./seas_bp5_full \
       --tandem-time-stepping \
       --solver mumps \
       --tfinal 5.68e10 \
-      --max-steps 100 \
       --ref-dir bp5/benchmark_data \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
-      --checkpoint-interval 0 \
+      --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-every 10
+      --paraview-every 500
