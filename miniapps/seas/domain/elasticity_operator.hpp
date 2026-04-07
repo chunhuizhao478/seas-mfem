@@ -4607,7 +4607,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
    // Snapshot slip-only RHS before adding Dirichlet.
    // Taken on ALL ranks when debug is enabled (needed for MPI-collective norms).
    Vector rhs_slip_snapshot;
-   const bool debug_norm = first_step_debug_.enabled && (time >= 0.019);
+   const bool debug_norm = first_step_debug_.enabled && (time > 0.0);
    if (debug_first_step || debug_norm)
    {
       rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
@@ -4711,17 +4711,18 @@ void ElasticityDomainOperator<MeshType>::Solve(
    // Global norm comparison — OUTSIDE rank-gated block.
    // All ranks must participate in MPI_Reduce (no deadlock).
    // Condition uses only rank-independent flags (enabled + time).
+   // Prints at EVERY Mult() call during first step to trace RK45 stages.
    {
-      static bool norm_printed = false;
-      if (!norm_printed && first_step_debug_.enabled && time >= 0.019)
+      static int norm_count = 0;
+      if (norm_count < 10 && first_step_debug_.enabled && time > 0.0)
       {
-         norm_printed = true;
+         norm_count++;
          int myrank;
          MPI_Comm_rank(mesh_.GetComm(), &myrank);
          if (myrank == 0)
          {
-            mfem::out << "  [NORM] Dump at time = "
-                      << std::setprecision(17) << time << "\n";
+            mfem::out << "  [NORM] Stage " << norm_count
+                      << " at time = " << std::setprecision(17) << time << "\n";
          }
 
          auto print_global_norm = [&](const char *label, const Vector &v) {
@@ -4748,10 +4749,6 @@ void ElasticityDomainOperator<MeshType>::Solve(
          };
 
          print_global_norm("b_slip", rhs_slip_snapshot);
-         // b_dirichlet = b_total - b_slip
-         Vector rhs_dir_norm(rhs.Size());
-         subtract(rhs, rhs_slip_snapshot, rhs_dir_norm);
-         print_global_norm("b_dirichlet", rhs_dir_norm);
          print_global_norm("b_total", rhs);
          print_global_norm("u", X_);
       }
