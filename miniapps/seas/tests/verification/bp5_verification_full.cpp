@@ -1194,12 +1194,15 @@ int main(int argc, char *argv[])
       // Test 4: RHS norms at t=1yr (Dirichlet active)
       domain.VerifyRHSNorms(3.15576e7, zero_slip);
 
+      // Test 5: Per-face shared Dirichlet diagnostic
+      domain.VerifySharedDirichletPerFace(3.15576e7);
+
       if (mpi.IsRoot())
       {
          std::cout << "=== Verification Complete ===\n\n"
                    << "Compare ||b_dir|| and ||b_total|| between 1-rank and\n"
                    << "N-rank runs. Mismatch -> shared-face assembly bug.\n"
-                   << "If shared_skip != dirichlet_shared list -> skip-set bug.\n\n";
+                   << "If SIGN_SAME on any face -> dir_sign does not flip.\n\n";
       }
    }
 

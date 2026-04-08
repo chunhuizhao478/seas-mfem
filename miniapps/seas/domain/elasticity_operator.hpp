@@ -457,6 +457,194 @@ public:
       }
    }
 
+   /// Per-face diagnostic for shared Dirichlet faces.
+   /// For each shared Dirichlet face, dumps face normal, dir_sign, and
+   /// ev1/ev2 norms from both ranks. Gathers via Allgather and compares
+   /// rank A's ||ev2|| against rank B's ||ev1|| for the same physical face.
+   void VerifySharedDirichletPerFace(real_t time) const
+   {
+      if constexpr (!IsParallelMesh<MeshType>::value) { return; }
+#ifdef MFEM_USE_MPI
+      if (dirichlet_shared_faces_.Size() == 0 &&
+          mesh_.GetNRanks() > 1)
+      {
+         // Some ranks may have 0 shared Dirichlet faces — still participate
+      }
+
+      int dim = 3;
+      int n_sh = dirichlet_shared_faces_.Size();
+
+      // Get global vertex IDs for face keying
+      Array<HYPRE_BigInt> gvert;
+      mesh_.GetGlobalVertexIndices(gvert);
+
+      // Pack: [gv0, gv1, gv2, nor0, nor1, nor2, dir_sign,
+      //        ev1_norm, ev2_norm, rank] = 10 doubles per face
+      const int ENTRY = 10;
+      std::vector<double> local_pack(ENTRY * n_sh, 0.0);
+
+      DGElasticityIPCombinedIntegrator dir_integ(
+         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+      auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+
+      for (int fi = 0; fi < n_sh; fi++)
+      {
+         int sf = dirichlet_shared_faces_[fi];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+         if (!FTr) { continue; }
+
+         // Face vertex key
+         int lf = mesh_.GetSharedFace(sf);
+         Array<int> verts;
+         mesh_.GetFaceVertices(lf, verts);
+         HYPRE_BigInt gv[3] = {0, 0, 0};
+         for (int j = 0; j < 3 && j < verts.Size(); j++)
+            gv[j] = gvert[verts[j]];
+         if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+         if (gv[1] > gv[2]) { std::swap(gv[1], gv[2]); }
+         if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+
+         // Normal and dir_sign at face centroid
+         const IntegrationPoint &ip0 =
+            Geometries.GetCenter(FTr->GetGeometryType());
+         FTr->SetAllIntPoints(&ip0);
+         Vector nor(3);
+         CalcOrtho(FTr->Jacobian(), nor);
+         real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+
+         // Compute ev1, ev2 with the same formula as the assembly
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+         const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+
+         int qo = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, qo);
+         int nq = ir.GetNPoints();
+
+         real_t Vh = Vp_ * time;
+         // y=0 faces: no scaling (|y| < 1000)
+         Vector u_D_3d(dim * nq);
+         u_D_3d = 0.0;
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir.IntPoint(q));
+            real_t ds = ComputeSkeletonDirichletSign(FTr);
+            u_D_3d(0 * nq + q) = ds * Vh;
+         }
+
+         Vector ev1, ev2;
+         dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+
+         int b = ENTRY * fi;
+         local_pack[b + 0] = static_cast<double>(gv[0]);
+         local_pack[b + 1] = static_cast<double>(gv[1]);
+         local_pack[b + 2] = static_cast<double>(gv[2]);
+         local_pack[b + 3] = nor(0);
+         local_pack[b + 4] = nor(1);
+         local_pack[b + 5] = nor(2);
+         local_pack[b + 6] = dir_sign;
+         local_pack[b + 7] = ev1.Norml2();
+         local_pack[b + 8] = ev2.Norml2();
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         local_pack[b + 9] = static_cast<double>(rank);
+      }
+
+      // Allgather
+      int lc = ENTRY * n_sh;
+      int nranks = mesh_.GetNRanks();
+      std::vector<int> rc(nranks), rd(nranks);
+      MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                    mesh_.GetComm());
+      int total = 0;
+      for (int r = 0; r < nranks; r++)
+      {
+         rd[r] = total;
+         total += rc[r];
+      }
+      std::vector<double> all(total);
+      MPI_Allgatherv(local_pack.data(), lc, MPI_DOUBLE,
+                     all.data(), rc.data(), rd.data(),
+                     MPI_DOUBLE, mesh_.GetComm());
+
+      // Group by face key, compare pairs
+      struct VKey3 {
+         int64_t v[3];
+         bool operator<(const VKey3 &o) const {
+            if (v[0]!=o.v[0]) return v[0]<o.v[0];
+            if (v[1]!=o.v[1]) return v[1]<o.v[1];
+            return v[2]<o.v[2];
+         }
+      };
+      std::map<VKey3, std::vector<int>> key_entries;
+      int n_entries = total / ENTRY;
+      for (int e = 0; e < n_entries; e++)
+      {
+         VKey3 key;
+         key.v[0] = static_cast<int64_t>(all[ENTRY*e + 0]);
+         key.v[1] = static_cast<int64_t>(all[ENTRY*e + 1]);
+         key.v[2] = static_cast<int64_t>(all[ENTRY*e + 2]);
+         key_entries[key].push_back(e);
+      }
+
+      int rank = 0;
+      MPI_Comm_rank(mesh_.GetComm(), &rank);
+      if (rank == 0)
+      {
+         mfem::out << "  [VERIFY] Shared Dirichlet per-face diagnostic"
+                   << " (t=" << time << "):\n";
+         int n_pairs = 0, n_sign_same = 0, n_ev_mismatch = 0;
+         for (auto &kv : key_entries)
+         {
+            auto &entries = kv.second;
+            if (entries.size() != 2) { continue; }
+            n_pairs++;
+            int b0 = ENTRY * entries[0], b1 = ENTRY * entries[1];
+
+            real_t ds0 = all[b0+6], ds1 = all[b1+6];
+            real_t ev1_0 = all[b0+7], ev2_0 = all[b0+8];
+            real_t ev1_1 = all[b1+7], ev2_1 = all[b1+8];
+            int r0 = static_cast<int>(all[b0+9]);
+            int r1 = static_cast<int>(all[b1+9]);
+
+            bool sign_same = (ds0 * ds1 > 0);
+            if (sign_same) { n_sign_same++; }
+
+            // rank A's ev2 should match rank B's ev1
+            real_t ev_scale = std::max({ev1_0, ev2_0, ev1_1, ev2_1, 1e-30});
+            real_t cross_err = std::max(
+               std::abs(ev2_0 - ev1_1) / ev_scale,
+               std::abs(ev1_0 - ev2_1) / ev_scale);
+            if (cross_err > 0.01) { n_ev_mismatch++; }
+
+            auto &k = kv.first;
+            mfem::out << "    face(" << k.v[0] << "," << k.v[1] << ","
+                      << k.v[2] << "):"
+                      << " r" << r0 << " ds=" << std::setw(2) << ds0
+                      << " nor_y=" << std::setprecision(4) << all[b0+4]
+                      << " |ev1|=" << std::setprecision(6) << ev1_0
+                      << " |ev2|=" << ev2_0
+                      << "  |  r" << r1 << " ds=" << std::setw(2) << ds1
+                      << " nor_y=" << std::setprecision(4) << all[b1+4]
+                      << " |ev1|=" << std::setprecision(6) << ev1_1
+                      << " |ev2|=" << ev2_1
+                      << (sign_same ? " SIGN_SAME!" : "")
+                      << (cross_err > 0.01 ? " EV_MISMATCH!" : "")
+                      << "\n";
+         }
+         mfem::out << "    summary: " << n_pairs << " pairs, "
+                   << n_sign_same << " with SAME dir_sign, "
+                   << n_ev_mismatch << " with ev cross-mismatch\n";
+         if (n_sign_same > 0)
+         {
+            mfem::out << "    -> dir_sign does NOT flip on " << n_sign_same
+                      << " faces! This is the bug.\n";
+         }
+      }
+#endif
+   }
+
    /// Verify serial-parallel Dirichlet loading consistency.
    /// At the given time, assembles the full RHS (slip + Dirichlet) and
    /// reports the global RHS norm. When run at 1 rank vs N ranks, the
