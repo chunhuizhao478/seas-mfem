@@ -2,10 +2,10 @@
 #SBATCH -J bp5_s1
 #SBATCH -o bp5_v60_serial_%j.out
 #SBATCH -e bp5_v60_serial_%j.err
-#SBATCH -p development
+#SBATCH -p normal
 #SBATCH -N 1
 #SBATCH -n 1
-#SBATCH -t 02:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # BP5 v60: Serial (1 rank) full production run.
