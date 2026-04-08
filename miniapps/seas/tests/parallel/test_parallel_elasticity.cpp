@@ -644,6 +644,87 @@ Mesh CreateTestMesh3DTet(int nx, int ny, int nz,
    return mesh;
 }
 
+/// Create a 3D TET mesh with BOTH fault (attr=3) and Dirichlet (attr=5)
+/// boundary elements on y=0.
+///   Fault (attr=3): y=0 faces with centroid |x|<lf/2 AND depth<Wf
+///   Dirichlet (attr=5): remaining y=0 interior faces
+///   Far-field (attr=5): side boundary faces
+///   Natural (attr=1): top/bottom
+///
+/// Use nz>=2 so the mesh has faces at different depths, guaranteeing
+/// both fault and Dirichlet faces exist on y=0 when Wf < Lz.
+Mesh CreateTestMesh3DTetWithDirichlet(int nx, int ny, int nz,
+                                       real_t Lx, real_t Ly, real_t Lz,
+                                       real_t Wf, real_t lf)
+{
+   Mesh mesh = Mesh::MakeCartesian3D(2 * nx, 2 * ny, nz,
+                                      Element::TETRAHEDRON,
+                                      2.0 * Lx, 2.0 * Ly, Lz);
+
+   for (int i = 0; i < mesh.GetNV(); i++)
+   {
+      real_t *v = mesh.GetVertex(i);
+      v[0] -= Lx;
+      v[1] -= Ly;
+      v[2] -= Lz;
+   }
+
+   // Boundary faces: natural (top/bottom) or far-field (sides)
+   for (int be = 0; be < mesh.GetNBE(); be++)
+   {
+      ElementTransformation *T = mesh.GetBdrElementTransformation(be);
+      const IntegrationPoint &ip = Geometries.GetCenter(T->GetGeometryType());
+      T->SetIntPoint(&ip);
+      Vector center(3);
+      T->Transform(ip, center);
+
+      real_t tol = 1e-6;
+      if (std::abs(center(2)) < tol || std::abs(center(2) + Lz) < tol)
+      {
+         mesh.SetBdrAttribute(be, 1);
+      }
+      else
+      {
+         mesh.SetBdrAttribute(be, 5);
+      }
+   }
+
+   // Add y=0 interior faces as boundary elements.
+   // Classify: fault (attr=3) if within fault rectangle, Dirichlet (attr=5)
+   // otherwise. Depth = -z (z is negative downward).
+   real_t tol = 1e-6;
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      auto *FTr = mesh.GetInteriorFaceTransformations(f);
+      if (!FTr) { continue; }
+      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
+      FTr->Face->SetIntPoint(&ip);
+      Vector center(3);
+      FTr->Face->Transform(ip, center);
+      if (std::abs(center(1)) > tol) { continue; }
+
+      real_t depth = -center(2);
+      bool in_fault = (std::abs(center(0)) < lf / 2.0 + tol) &&
+                      (depth < Wf + tol);
+      int attr = in_fault ? 3 : 5;
+
+      Array<int> verts;
+      mesh.GetFaceVertices(f, verts);
+      if (verts.Size() == 3)
+      {
+         mesh.AddBdrTriangle(verts[0], verts[1], verts[2], attr);
+      }
+      else if (verts.Size() == 4)
+      {
+         mesh.AddBdrQuad(verts[0], verts[1], verts[2], verts[3], attr);
+      }
+   }
+   mesh.FinalizeTopology();
+   mesh.Finalize();
+   mesh.SetAttributes();
+   return mesh;
+}
+
 /// Test 5: Micro-test — same triangular face as serial interior vs parallel shared.
 ///
 /// Decisive A/B proof for the shared-face parameterization hypothesis:
@@ -1797,6 +1878,1195 @@ bool test_ip_dof_permutation_consistency(MPIContext &ctx)
    return ok;
 }
 
+// ==========================================================================
+// Diagnostic tests for shared-face bug hunting (v61 suspects)
+// ==========================================================================
+
+/// Diagnostic Test A: Face->Transform vs Elem1->Transform at shared fault DOFs
+///
+/// At each DOF point on every shared fault face, compare physical coordinates
+/// from Face->Transform(ip) vs Elem1->Transform(GetElement1IntPoint()).
+/// If these disagree, code using Face->Jacobian (CalcOrtho in FaultBasis,
+/// quadrature-point slip evaluation) computes wrong geometry.
+///
+/// Rules out suspects #3 (wrong coordinate transform) and #5 (Dirichlet
+/// loading mis-coords at shared faces).
+bool test_diag_shared_face_coords(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_shared_face_coords... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+
+   // Force y-partitioning: y<0 -> ranks [0,half), y>0 -> ranks [half,nranks)
+   // Guarantees ALL y=0 faces become shared.
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   BP5Params params;
+   ElasticityDomainOperator<ParMesh> op(pmesh, 1,
+      params.lambda(), params.mu(), params.Vp, Lz, 2.0 * Ly);
+
+   const Array<int> &shared_faces = op.GetFaultSharedFaces();
+   int n_shared = shared_faces.Size();
+
+   // Use face quadrature nodal rule (same points as DOF coordinate evaluation)
+   const FaceQuadrature *fq = op.GetFaceQuadrature();
+   const IntegrationRule &nir = fq->GetNodalRule();
+   int nbf = op.GetNbfPerFace();
+
+   real_t max_diff = 0.0;
+   int qp_disagree = 0;
+
+   for (int i = 0; i < n_shared; i++)
+   {
+      int sf = shared_faces[i];
+      FaceElementTransformations *FTr =
+         pmesh.GetSharedFaceTransformations(sf);
+      if (!FTr) { continue; }
+
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         const IntegrationPoint &nip = nir.IntPoint(kk);
+         FTr->SetAllIntPoints(&nip);
+
+         Vector cf(3), ce(3);
+         FTr->Face->Transform(nip, cf);
+         FTr->Elem1->Transform(FTr->GetElement1IntPoint(), ce);
+
+         real_t diff = 0.0;
+         for (int d = 0; d < 3; d++)
+         {
+            diff = std::max(diff, std::abs(cf(d) - ce(d)));
+         }
+         max_diff = std::max(max_diff, diff);
+         if (diff > 1e-10)
+         {
+            qp_disagree++;
+            if (qp_disagree <= 3)
+            {
+               std::cerr << "  [rank " << ctx.Rank()
+                         << "] shared fault " << i << " dof " << kk
+                         << ": Face=(" << cf(0) << "," << cf(1)
+                         << "," << cf(2) << ")"
+                         << "  Elem1=(" << ce(0) << "," << ce(1)
+                         << "," << ce(2) << ")"
+                         << "  diff=" << diff << "\n";
+            }
+         }
+      }
+   }
+
+   // Also check at higher-order quadrature points (used by CalcOrtho path)
+   for (int i = 0; i < n_shared; i++)
+   {
+      int sf = shared_faces[i];
+      FaceElementTransformations *FTr =
+         pmesh.GetSharedFaceTransformations(sf);
+      if (!FTr) { continue; }
+
+      int order_q = 3;
+      const IntegrationRule &ir =
+         IntRules.Get(FTr->GetGeometryType(), order_q);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         FTr->SetAllIntPoints(&ip);
+
+         Vector cf(3), ce(3);
+         FTr->Face->Transform(ip, cf);
+         FTr->Elem1->Transform(FTr->GetElement1IntPoint(), ce);
+
+         real_t diff = 0.0;
+         for (int d = 0; d < 3; d++)
+         {
+            diff = std::max(diff, std::abs(cf(d) - ce(d)));
+         }
+         max_diff = std::max(max_diff, diff);
+         if (diff > 1e-10) { qp_disagree++; }
+      }
+   }
+
+   real_t global_max = ctx.GlobalMax(max_diff);
+   int global_shared = ctx.GlobalSumInt(n_shared);
+   int global_disagree = ctx.GlobalSumInt(qp_disagree);
+
+   if (global_shared == 0)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (no shared fault faces)\n";
+      return true;
+   }
+
+   bool ok = (global_max < 1e-10);
+   TEST_CHECK(ctx, "shared face coords: Face vs Elem1", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (max_diff=" << std::scientific << std::setprecision(6)
+                << global_max
+                << ", shared_fault=" << global_shared
+                << ", qp_disagree=" << global_disagree << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test B: Fault basis sign-baking consistency at shared faces
+///
+/// Both ranks sharing a fault face compute CalcOrtho independently via
+/// AppendSharedFaces(). The Tandem convention bakes the sign into basis
+/// vectors, so one rank has basis_A and the other has basis_B = -basis_A
+/// (a global sign flip). This test verifies the sign-baking is correct:
+///   - Both ranks' basis vectors differ by EXACTLY a global sign (±1)
+///   - The normal/tangent1/tangent2 all flip together (same sign factor)
+///   - No partial flip (e.g., normal flips but tangent1 doesn't)
+///
+/// The sign-baking is compensated by the DG normal flip (nor_B = -nor_A),
+/// making the assembly correct (elvec1_B = elvec2_A, proven by
+/// test_serial_parallel_displacement_match to rel_err < 1e-12).
+///
+/// Rules out suspect #1 (inconsistent sign-baking at shared faces).
+bool test_diag_shared_fault_basis(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_shared_fault_basis... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+
+   // Force y-partitioning
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   BP5Params params;
+   ElasticityDomainOperator<ParMesh> op(pmesh, 1,
+      params.lambda(), params.mu(), params.Vp, Lz, 2.0 * Ly);
+
+   const FaultBasis *fb = op.GetFaultBasis();
+   int n_interior = op.GetFaultInteriorFaces().Size();
+   const Array<int> &shared = op.GetFaultSharedFaces();
+   int n_shared = shared.Size();
+
+   // Get global vertex IDs for canonical face keying
+   Array<HYPRE_BigInt> gvert;
+   pmesh.GetGlobalVertexIndices(gvert);
+
+   // Pack shared face basis: [key(3), normal(3), t1(3), t2(3), rank(1)] = 13
+   const int ENTRY = 13;
+   std::vector<double> local_pack(ENTRY * n_shared);
+   for (int i = 0; i < n_shared; i++)
+   {
+      int sf = shared[i];
+      int lf = pmesh.GetSharedFace(sf);
+
+      // Build sorted global vertex key
+      Array<int> verts;
+      pmesh.GetFaceVertices(lf, verts);
+      HYPRE_BigInt gv[3] = {-1, -1, -1};
+      for (int j = 0; j < 3 && j < verts.Size(); j++)
+      {
+         gv[j] = gvert[verts[j]];
+      }
+      if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+      if (gv[1] > gv[2]) { std::swap(gv[1], gv[2]); }
+      if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+
+      const FaultBasisData &bd = fb->GetBasis(n_interior + i);
+      int b = ENTRY * i;
+      local_pack[b + 0]  = static_cast<double>(gv[0]);
+      local_pack[b + 1]  = static_cast<double>(gv[1]);
+      local_pack[b + 2]  = static_cast<double>(gv[2]);
+      local_pack[b + 3]  = bd.normal[0];
+      local_pack[b + 4]  = bd.normal[1];
+      local_pack[b + 5]  = bd.normal[2];
+      local_pack[b + 6]  = bd.tangent1[0];
+      local_pack[b + 7]  = bd.tangent1[1];
+      local_pack[b + 8]  = bd.tangent1[2];
+      local_pack[b + 9]  = bd.tangent2[0];
+      local_pack[b + 10] = bd.tangent2[1];
+      local_pack[b + 11] = bd.tangent2[2];
+      local_pack[b + 12] = static_cast<double>(ctx.Rank());
+   }
+
+   // Allgather across all ranks
+   int lc = ENTRY * n_shared;
+   int nranks = ctx.Size();
+   std::vector<int> recv_c(nranks), recv_d(nranks);
+   MPI_Allgather(&lc, 1, MPI_INT, recv_c.data(), 1, MPI_INT,
+                 pmesh.GetComm());
+   int total = 0;
+   for (int r = 0; r < nranks; r++)
+   {
+      recv_d[r] = total;
+      total += recv_c[r];
+   }
+   std::vector<double> all(total);
+   MPI_Allgatherv(local_pack.data(), lc, MPI_DOUBLE,
+                  all.data(), recv_c.data(), recv_d.data(),
+                  MPI_DOUBLE, pmesh.GetComm());
+
+   // Group entries by face key using sorted vertex IDs
+   struct VKey3
+   {
+      int64_t v[3];
+      bool operator<(const VKey3 &o) const
+      {
+         if (v[0] != o.v[0]) { return v[0] < o.v[0]; }
+         if (v[1] != o.v[1]) { return v[1] < o.v[1]; }
+         return v[2] < o.v[2];
+      }
+   };
+   std::map<VKey3, std::vector<int>> key_entries;
+   int n_entries = total / ENTRY;
+   for (int e = 0; e < n_entries; e++)
+   {
+      int b = ENTRY * e;
+      VKey3 key;
+      key.v[0] = static_cast<int64_t>(all[b + 0]);
+      key.v[1] = static_cast<int64_t>(all[b + 1]);
+      key.v[2] = static_cast<int64_t>(all[b + 2]);
+      key_entries[key].push_back(e);
+   }
+
+   // Compare pairs: verify consistent global sign flip.
+   // With Tandem sign-baking, one rank has sign_flipped=true and the other
+   // false, so basis_A = -basis_B (all 3 vectors negated together).
+   // We check: either basis_A == basis_B (same sign_flipped), or
+   //           basis_A == -basis_B (opposite sign_flipped).
+   // A partial flip (e.g., normal flips but tangent doesn't) is a bug.
+   real_t max_sign_err = 0.0;
+   int pairs_checked = 0, pairs_inconsistent = 0;
+   int pairs_same_sign = 0, pairs_flipped = 0;
+
+   for (auto &kv : key_entries)
+   {
+      auto &entries = kv.second;
+      if (entries.size() != 2) { continue; }
+
+      int b0 = ENTRY * entries[0];
+      int b1 = ENTRY * entries[1];
+
+      // Determine sign: check if normal_A ≈ +normal_B or -normal_B
+      real_t dot_n = 0.0;
+      for (int d = 0; d < 3; d++)
+      {
+         dot_n += all[b0 + 3 + d] * all[b1 + 3 + d];
+      }
+      real_t sign = (dot_n >= 0.0) ? 1.0 : -1.0;
+      if (sign > 0.0) { pairs_same_sign++; } else { pairs_flipped++; }
+
+      // Check that ALL vectors obey the same sign relationship
+      real_t pair_err = 0.0;
+      for (int d = 0; d < 3; d++)
+      {
+         pair_err = std::max(pair_err,
+            std::abs(all[b0 + 3 + d] - sign * all[b1 + 3 + d]));  // normal
+         pair_err = std::max(pair_err,
+            std::abs(all[b0 + 6 + d] - sign * all[b1 + 6 + d]));  // tangent1
+         pair_err = std::max(pair_err,
+            std::abs(all[b0 + 9 + d] - sign * all[b1 + 9 + d]));  // tangent2
+      }
+      max_sign_err = std::max(max_sign_err, pair_err);
+      pairs_checked++;
+
+      if (pair_err > 1e-12)
+      {
+         pairs_inconsistent++;
+         if (pairs_inconsistent <= 3 && ctx.IsRoot())
+         {
+            auto &k = kv.first;
+            std::cerr << "  [sign inconsistency] key=(" << k.v[0] << ","
+                      << k.v[1] << "," << k.v[2] << ")"
+                      << " sign=" << sign
+                      << " rank_A=" << static_cast<int>(all[b0 + 12])
+                      << " rank_B=" << static_cast<int>(all[b1 + 12])
+                      << " err=" << pair_err << "\n";
+         }
+      }
+   }
+
+   bool ok = (max_sign_err < 1e-12);
+
+   TEST_CHECK(ctx, "shared fault basis sign-baking consistency", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (max_sign_err=" << std::scientific << std::setprecision(6)
+                << max_sign_err
+                << ", pairs=" << pairs_checked
+                << " [same_sign=" << pairs_same_sign
+                << " flipped=" << pairs_flipped << "]"
+                << ", inconsistent=" << pairs_inconsistent << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test C: Ghost DOF expand/restrict verification
+///
+/// Set owned fault DOFs to a known function of their physical coordinates.
+/// ExpandOwnedToLocalFault distributes data (including ghost DOFs via MPI).
+/// Verify ALL local DOFs (including received ghosts) match expected values
+/// based on independently-computed local coordinates.
+///
+/// Simultaneously tests:
+///   - Ghost MPI communication (suspect #6)
+///   - Canonical-to-local permutation on receive (suspect #6)
+///   - Face matching in shared_fault_comm_blocks_ (suspect #6b)
+///   - Coordinate consistency at ghost DOFs
+bool test_diag_ghost_dof_roundtrip(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_ghost_dof_roundtrip... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   auto serial_mesh = CreateTestMesh3DTet(2, 1, 1, Lx, Ly, Lz);
+
+   // Force y-partitioning
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   BP5Params params;
+   ElasticityDomainOperator<ParMesh> op(pmesh, 1,
+      params.lambda(), params.mu(), params.Vp, Lz, 2.0 * Ly);
+
+   int n_local = op.GetNumFaultDOFs();
+   int n_owned = op.GetNumOwnedFaultDOFs();
+   int nbf = op.GetNbfPerFace();
+   int n_interior = op.GetFaultInteriorFaces().Size();
+   int n_shared = op.GetFaultSharedFaces().Size();
+
+   // Step 1: Get local coordinates (each rank computes independently
+   //         using Elem1->Transform for its own interior+shared faces)
+   Vector local_x2, local_x3;
+   op.GetFaultCoords2D(local_x2, local_x3);
+
+   // Step 2: Restrict to owned (canonical order)
+   Vector owned_x2, owned_x3;
+   op.RestrictToOwnedFault(local_x2, owned_x2);
+   op.RestrictToOwnedFault(local_x3, owned_x3);
+
+   // Step 3: Set owned data = f(owned_coords), using 2 components
+   // A smooth function that varies uniquely with coordinates so any
+   // permutation error produces a detectable mismatch.
+   Vector owned_data(2 * n_owned);
+   for (int i = 0; i < n_owned; i++)
+   {
+      owned_data(2 * i)     = 7.0 * std::sin(owned_x2(i))
+                             + 3.0 * std::cos(owned_x3(i));
+      owned_data(2 * i + 1) = 2.0 * owned_x2(i) - 5.0 * owned_x3(i);
+   }
+
+   // Step 4: Expand to all local DOFs (including ghost via MPI)
+   Vector local_data;
+   op.ExpandOwnedToLocalFault(owned_data, local_data, 2);
+
+   // Step 5: Compute expected values from local coordinates
+   Vector expected(2 * n_local);
+   for (int i = 0; i < n_local; i++)
+   {
+      expected(2 * i)     = 7.0 * std::sin(local_x2(i))
+                           + 3.0 * std::cos(local_x3(i));
+      expected(2 * i + 1) = 2.0 * local_x2(i) - 5.0 * local_x3(i);
+   }
+
+   // Step 6: Compare all DOFs (owned + ghost)
+   real_t max_err = 0.0;
+   int n_mismatch = 0;
+   int ghost_mismatch = 0;
+   int owned_mismatch = 0;
+
+   for (int i = 0; i < n_local; i++)
+   {
+      real_t err0 = std::abs(local_data(2 * i)     - expected(2 * i));
+      real_t err1 = std::abs(local_data(2 * i + 1) - expected(2 * i + 1));
+      real_t err = std::max(err0, err1);
+      max_err = std::max(max_err, err);
+
+      if (err > 1e-10)
+      {
+         n_mismatch++;
+         int face_idx = i / nbf;
+         bool is_shared = (face_idx >= n_interior);
+
+         if (is_shared) { ghost_mismatch++; }
+         else           { owned_mismatch++; }
+
+         if (n_mismatch <= 5)
+         {
+            std::cerr << "  [rank " << ctx.Rank() << "] DOF " << i
+                      << " (face " << face_idx
+                      << (is_shared ? " SHARED" : " interior") << ")"
+                      << " err=" << err
+                      << "\n    got=(" << local_data(2 * i) << ","
+                      << local_data(2 * i + 1) << ")"
+                      << "\n    expect=(" << expected(2 * i) << ","
+                      << expected(2 * i + 1) << ")"
+                      << "\n    coords=(" << local_x2(i) << ","
+                      << local_x3(i) << ")\n";
+         }
+      }
+   }
+
+   // Also verify owned-only roundtrip: expand then restrict
+   Vector owned_rt;
+   op.RestrictToOwnedFault(local_data, owned_rt, 2);
+   real_t rt_err = 0.0;
+   for (int i = 0; i < n_owned; i++)
+   {
+      rt_err = std::max(rt_err,
+         std::max(std::abs(owned_rt(2 * i)     - owned_data(2 * i)),
+                  std::abs(owned_rt(2 * i + 1) - owned_data(2 * i + 1))));
+   }
+
+   real_t global_max_err = ctx.GlobalMax(max_err);
+   real_t global_rt_err  = ctx.GlobalMax(rt_err);
+   int global_mismatch   = ctx.GlobalSumInt(n_mismatch);
+   int global_ghost_mm   = ctx.GlobalSumInt(ghost_mismatch);
+   int global_owned_mm   = ctx.GlobalSumInt(owned_mismatch);
+   int global_owned      = ctx.GlobalSumInt(n_owned);
+   int global_local      = ctx.GlobalSumInt(n_local);
+
+   bool ok_all = (global_max_err < 1e-10);
+   bool ok_rt  = (global_rt_err < 1e-14);
+   bool ok = ok_all && ok_rt;
+
+   TEST_CHECK(ctx, "ghost DOF roundtrip (expand + verify coords)", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (max_err=" << std::scientific << std::setprecision(6)
+                << global_max_err
+                << ", rt_err=" << global_rt_err
+                << ", mismatch=" << global_mismatch
+                << " [ghost=" << global_ghost_mm
+                << " owned=" << global_owned_mm << "]"
+                << ", total_owned=" << global_owned
+                << ", total_local=" << global_local << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test D: Serial-parallel displacement match with NONZERO time
+///
+/// Critical gap filler: all previous displacement tests use time=0.0,
+/// which makes Dirichlet loading zero (Vp*t = 0). This test uses time=1.0
+/// and forced y-partitioning so that shared Dirichlet faces (attr=5 on y=0)
+/// exist and receive nonzero loading.
+///
+/// Uses CreateTestMesh3DTetWithDirichlet to create a mesh with both
+/// fault (attr=3) and Dirichlet (attr=5) boundary elements on y=0.
+///
+/// Two sub-tests:
+///   D1: slip=0, time=1.0 — PURE Dirichlet isolation (no fault slip at all)
+///   D2: non-uniform slip, time=1.0 — combined fault+Dirichlet
+///
+/// Directly tests suspect #3 (shared Dirichlet loading assembly).
+bool test_diag_displacement_with_dirichlet(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_displacement_with_dirichlet... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   // Mesh: nz=2 so faces exist at two depth layers.
+   // Wf = Lz/2 = 1.0 → shallow layer is fault, deep layer is Dirichlet.
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   real_t Wf = 1.0;
+   real_t lf = 2.0 * Lx;  // wider than mesh → all x positions in fault
+
+   auto serial_mesh = CreateTestMesh3DTetWithDirichlet(
+      2, 1, 2, Lx, Ly, Lz, Wf, lf);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+
+   // --- Serial operator ---
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   int nf_serial = serial_op.GetNumFaultDOFs();
+   Vector serial_x2, serial_x3;
+   serial_op.GetFaultCoords2D(serial_x2, serial_x3);
+
+   // --- Parallel: forced y-partitioning ---
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+
+   int local_n_fault_int = par_op.GetFaultInteriorFaces().Size();
+   int local_n_fault_sh = par_op.GetFaultSharedFaces().Size();
+   int global_fault_int = ctx.GlobalSumInt(local_n_fault_int);
+   int global_fault_sh = ctx.GlobalSumInt(local_n_fault_sh);
+
+   int nf_par = par_op.GetNumFaultDOFs();
+   Vector par_x2, par_x3;
+   par_op.GetFaultCoords2D(par_x2, par_x3);
+
+   // ============================================================
+   // D1: PURE DIRICHLET ISOLATION — slip = 0, time = 1.0
+   // Only AssembleDirichletLoading contributes to the RHS.
+   // ============================================================
+   Vector slip_zero_serial(2 * nf_serial);
+   slip_zero_serial = 0.0;
+
+   GridFunction u_serial_d1(&serial_op.GetFESpace());
+   serial_op.Solve(1.0, slip_zero_serial, u_serial_d1);
+   real_t serial_u_d1 = u_serial_d1.Normlinf();
+
+   Vector slip_zero_par(2 * nf_par);
+   slip_zero_par = 0.0;
+
+   ParGridFunction u_par_d1(&par_op.GetFESpace());
+   par_op.Solve(1.0, slip_zero_par, u_par_d1);
+   real_t parallel_u_d1 = ctx.GlobalMax(u_par_d1.Normlinf());
+
+   ctx.Bcast(serial_u_d1);
+
+   real_t rel_err_d1 = (serial_u_d1 > 0.0)
+      ? std::abs(parallel_u_d1 - serial_u_d1) / serial_u_d1 : 0.0;
+   bool ok_d1 = (rel_err_d1 < 1e-10);
+
+   // ============================================================
+   // D1b: slip + time=0 on this mesh — confirm fault slip alone is OK
+   // ============================================================
+   Vector slip_serial_d1b(2 * nf_serial);
+   slip_serial_d1b = 0.0;
+   for (int i = 0; i < nf_serial; i++)
+   {
+      slip_serial_d1b(2 * i + 1) = (serial_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+   GridFunction u_serial_d1b(&serial_op.GetFESpace());
+   serial_op.Solve(0.0, slip_serial_d1b, u_serial_d1b);
+   real_t serial_u_d1b = u_serial_d1b.Normlinf();
+
+   Vector slip_par_d1b(2 * nf_par);
+   slip_par_d1b = 0.0;
+   for (int i = 0; i < nf_par; i++)
+   {
+      slip_par_d1b(2 * i + 1) = (par_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+   ParGridFunction u_par_d1b(&par_op.GetFESpace());
+   par_op.Solve(0.0, slip_par_d1b, u_par_d1b);
+   real_t parallel_u_d1b = ctx.GlobalMax(u_par_d1b.Normlinf());
+   ctx.Bcast(serial_u_d1b);
+   real_t rel_err_d1b = (serial_u_d1b > 0.0)
+      ? std::abs(parallel_u_d1b - serial_u_d1b) / serial_u_d1b : 0.0;
+   bool ok_d1b = (rel_err_d1b < 1e-10);
+
+   // ============================================================
+   // D2: COMBINED — non-uniform slip + time = 1.0
+   // Both fault slip and Dirichlet loading contribute.
+   // ============================================================
+   Vector slip_serial(2 * nf_serial);
+   slip_serial = 0.0;
+   for (int i = 0; i < nf_serial; i++)
+   {
+      slip_serial(2 * i + 1) = (serial_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   GridFunction u_serial_d2(&serial_op.GetFESpace());
+   serial_op.Solve(1.0, slip_serial, u_serial_d2);
+   real_t serial_u_d2 = u_serial_d2.Normlinf();
+
+   Vector slip_par(2 * nf_par);
+   slip_par = 0.0;
+   for (int i = 0; i < nf_par; i++)
+   {
+      slip_par(2 * i + 1) = (par_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   ParGridFunction u_par_d2(&par_op.GetFESpace());
+   par_op.Solve(1.0, slip_par, u_par_d2);
+   real_t parallel_u_d2 = ctx.GlobalMax(u_par_d2.Normlinf());
+
+   ctx.Bcast(serial_u_d2);
+
+   real_t rel_err_d2 = (serial_u_d2 > 0.0)
+      ? std::abs(parallel_u_d2 - serial_u_d2) / serial_u_d2 : 0.0;
+   bool ok_d2 = (rel_err_d2 < 1e-10);
+
+   bool ok = ok_d1 && ok_d1b && ok_d2;
+
+   TEST_CHECK(ctx, "serial-parallel displacement match (t=1.0, Dirichlet active)", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED") << "\n"
+                << "    D1  (slip=0, Dirichlet only): "
+                << (ok_d1 ? "PASS" : "FAIL")
+                << " serial_u=" << std::scientific << std::setprecision(12)
+                << serial_u_d1
+                << " parallel_u=" << parallel_u_d1
+                << " rel_err=" << rel_err_d1 << "\n"
+                << "    D1b (slip, t=0, no Dirichlet): "
+                << (ok_d1b ? "PASS" : "FAIL")
+                << " serial_u=" << serial_u_d1b
+                << " parallel_u=" << parallel_u_d1b
+                << " rel_err=" << rel_err_d1b << "\n"
+                << "    D2  (slip+Dirichlet, t=1.0): "
+                << (ok_d2 ? "PASS" : "FAIL")
+                << " serial_u=" << serial_u_d2
+                << " parallel_u=" << parallel_u_d2
+                << " rel_err=" << rel_err_d2
+                << "\n    fault=" << global_fault_int << "i+"
+                << global_fault_sh << "sh"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test E: Serial-parallel per-DOF traction match with Dirichlet
+///
+/// Same mesh/time as Test D. Compares per-owned-DOF traction values
+/// between serial and parallel by matching DOFs via their physical
+/// coordinates. Uses tight per-DOF tolerance.
+///
+/// Covers suspect #4 (shared face traction) with Dirichlet loading active.
+bool test_diag_traction_with_dirichlet(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_traction_with_dirichlet... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   real_t Wf = 1.0;
+   real_t lf = 2.0 * Lx;
+
+   auto serial_mesh = CreateTestMesh3DTetWithDirichlet(
+      2, 1, 2, Lx, Ly, Lz, Wf, lf);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+
+   // --- Serial solve + traction ---
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   int nf_serial = serial_op.GetNumFaultDOFs();
+   Vector serial_x2, serial_x3;
+   serial_op.GetFaultCoords2D(serial_x2, serial_x3);
+
+   Vector slip_serial(2 * nf_serial);
+   slip_serial = 0.0;
+   for (int i = 0; i < nf_serial; i++)
+   {
+      slip_serial(2 * i + 1) = (serial_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   GridFunction u_serial(&serial_op.GetFESpace());
+   serial_op.Solve(1.0, slip_serial, u_serial);
+
+   Vector trac_serial;
+   serial_op.ComputeTraction(u_serial, slip_serial, trac_serial);
+
+   // Build serial lookup: for each DOF, store (x2, x3) → (tau_dip, tau_strike)
+   // Serial has all DOFs as "owned" (no ghost concept).
+   struct TractionEntry { real_t x2, x3, tau0, tau1; };
+   std::vector<TractionEntry> serial_entries(nf_serial);
+   for (int i = 0; i < nf_serial; i++)
+   {
+      serial_entries[i] = {serial_x2(i), serial_x3(i),
+                           trac_serial(2 * i), trac_serial(2 * i + 1)};
+   }
+
+   // Broadcast serial entries to all ranks
+   int ns = nf_serial;
+   MPI_Bcast(&ns, 1, MPI_INT, 0, ctx.GetComm());
+   if (!ctx.IsRoot())
+   {
+      serial_entries.resize(ns);
+   }
+   MPI_Bcast(serial_entries.data(),
+             static_cast<int>(ns * sizeof(TractionEntry)),
+             MPI_BYTE, 0, ctx.GetComm());
+
+   // --- Parallel solve + traction ---
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+
+   int nf_par = par_op.GetNumFaultDOFs();
+   Vector par_x2, par_x3;
+   par_op.GetFaultCoords2D(par_x2, par_x3);
+
+   Vector slip_par(2 * nf_par);
+   slip_par = 0.0;
+   for (int i = 0; i < nf_par; i++)
+   {
+      slip_par(2 * i + 1) = (par_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   ParGridFunction u_par(&par_op.GetFESpace());
+   par_op.Solve(1.0, slip_par, u_par);
+
+   Vector trac_par;
+   par_op.ComputeTraction(u_par, slip_par, trac_par);
+
+   // Restrict to owned DOFs
+   Vector owned_trac, owned_x2, owned_x3;
+   par_op.RestrictToOwnedFault(trac_par, owned_trac, 2);
+   par_op.RestrictToOwnedFault(par_x2, owned_x2);
+   par_op.RestrictToOwnedFault(par_x3, owned_x3);
+   int n_owned = par_op.GetNumOwnedFaultDOFs();
+
+   // Match each owned DOF to a serial DOF by coordinates
+   real_t max_trac_err = 0.0;
+   int dofs_matched = 0;
+   int dofs_unmatched = 0;
+
+   for (int i = 0; i < n_owned; i++)
+   {
+      real_t px2 = owned_x2(i), px3 = owned_x3(i);
+
+      // Find closest serial DOF
+      int best_j = -1;
+      real_t best_dist = 1e30;
+      for (int j = 0; j < ns; j++)
+      {
+         real_t d = std::max(std::abs(serial_entries[j].x2 - px2),
+                             std::abs(serial_entries[j].x3 - px3));
+         if (d < best_dist)
+         {
+            best_dist = d;
+            best_j = j;
+         }
+      }
+
+      if (best_dist > 1e-6)
+      {
+         dofs_unmatched++;
+         continue;
+      }
+
+      dofs_matched++;
+      real_t err0 = std::abs(owned_trac(2 * i) - serial_entries[best_j].tau0);
+      real_t err1 = std::abs(owned_trac(2 * i + 1) - serial_entries[best_j].tau1);
+      real_t scale = std::max(
+         {std::abs(serial_entries[best_j].tau0),
+          std::abs(serial_entries[best_j].tau1), 1e-20});
+      real_t rel = std::max(err0, err1) / scale;
+      max_trac_err = std::max(max_trac_err, rel);
+
+      if (rel > 1e-8 && dofs_unmatched + dofs_matched <= 5)
+      {
+         std::cerr << "  [rank " << ctx.Rank() << "] DOF " << i
+                   << " coords=(" << px2 << "," << px3 << ")"
+                   << " par_tau=(" << owned_trac(2*i) << ","
+                   << owned_trac(2*i+1) << ")"
+                   << " ser_tau=(" << serial_entries[best_j].tau0 << ","
+                   << serial_entries[best_j].tau1 << ")"
+                   << " rel_err=" << rel << "\n";
+      }
+   }
+
+   real_t global_max_err = ctx.GlobalMax(max_trac_err);
+   int global_matched = ctx.GlobalSumInt(dofs_matched);
+   int global_unmatched = ctx.GlobalSumInt(dofs_unmatched);
+
+   bool ok = (global_max_err < 1e-8) && (global_unmatched == 0) &&
+             (global_matched > 0);
+
+   TEST_CHECK(ctx, "serial-parallel per-DOF traction match (t=1.0)", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (max_rel_err=" << std::scientific << std::setprecision(6)
+                << global_max_err
+                << ", matched=" << global_matched
+                << ", unmatched=" << global_unmatched
+                << ", serial_nf=" << ns << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test F: Attr=3-only on mixed-geometry mesh
+///
+/// Takes the SAME mesh geometry as CreateTestMesh3DTetWithDirichlet (nz=2,
+/// two depth layers) but sets ALL y=0 boundary elements to attr=3 (fault).
+/// No attr=5 faces on y=0 at all.
+///
+/// If D1b FAILS on mixed attrs but THIS test PASSES on the same geometry
+/// with uniform attr=3, the bug is definitively in how BuildFacetBCTables
+/// handles the coexistence of attr=3 and attr=5 on y=0.
+bool test_diag_attr3_only_mixed_geometry(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_attr3_only_mixed_geometry... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   // SAME geometry as D1b: CreateTestMesh3DTetWithDirichlet(2,1,2,...) uses
+   // MakeCartesian3D(4, 2, 2, ...). Here we use the SAME mesh but all
+   // y=0 faces get attr=3 (no attr=5). This isolates attrs from geometry.
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+
+   Mesh serial_mesh = Mesh::MakeCartesian3D(
+      4, 2, 2, Element::TETRAHEDRON, 2.0 * Lx, 2.0 * Ly, Lz);
+   for (int i = 0; i < serial_mesh.GetNV(); i++)
+   {
+      real_t *v = serial_mesh.GetVertex(i);
+      v[0] -= Lx; v[1] -= Ly; v[2] -= Lz;
+   }
+   for (int be = 0; be < serial_mesh.GetNBE(); be++)
+   {
+      ElementTransformation *T = serial_mesh.GetBdrElementTransformation(be);
+      const IntegrationPoint &ip = Geometries.GetCenter(T->GetGeometryType());
+      T->SetIntPoint(&ip);
+      Vector center(3);
+      T->Transform(ip, center);
+      real_t tol = 1e-6;
+      if (std::abs(center(2)) < tol || std::abs(center(2) + Lz) < tol)
+         serial_mesh.SetBdrAttribute(be, 1);
+      else
+         serial_mesh.SetBdrAttribute(be, 5);
+   }
+   // ALL y=0 interior faces → attr=3 (fault), no attr=5
+   AddFaultBoundaryElements(serial_mesh);
+
+   BP5Params params;
+   real_t lambda = params.lambda();
+   real_t mu = params.mu();
+   real_t Vp = params.Vp;
+   real_t Wf = Lz;
+   real_t lf = 2.0 * Ly;
+
+   // Serial solve
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+   int nf_serial = serial_op.GetNumFaultDOFs();
+   Vector serial_x2, serial_x3;
+   serial_op.GetFaultCoords2D(serial_x2, serial_x3);
+
+   Vector slip_serial(2 * nf_serial);
+   slip_serial = 0.0;
+   for (int i = 0; i < nf_serial; i++)
+   {
+      slip_serial(2 * i + 1) = (serial_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   GridFunction u_serial(&serial_op.GetFESpace());
+   serial_op.Solve(0.0, slip_serial, u_serial);
+   real_t serial_u_inf = u_serial.Normlinf();
+
+   // Parallel: forced y-partitioning
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1, lambda, mu,
+                                             Vp, Wf, lf);
+
+   int nf_par = par_op.GetNumFaultDOFs();
+   Vector par_x2, par_x3;
+   par_op.GetFaultCoords2D(par_x2, par_x3);
+
+   Vector slip_par(2 * nf_par);
+   slip_par = 0.0;
+   for (int i = 0; i < nf_par; i++)
+   {
+      slip_par(2 * i + 1) = (par_x2(i) > 0.0) ? 1.0 : 0.01;
+   }
+
+   ParGridFunction u_par(&par_op.GetFESpace());
+   par_op.Solve(0.0, slip_par, u_par);
+   real_t parallel_u_inf = ctx.GlobalMax(u_par.Normlinf());
+
+   ctx.Bcast(serial_u_inf);
+
+   real_t rel_err = (serial_u_inf > 0.0)
+      ? std::abs(parallel_u_inf - serial_u_inf) / serial_u_inf : 0.0;
+
+   int global_fault_sh = ctx.GlobalSumInt(par_op.GetFaultSharedFaces().Size());
+   int global_nf = ctx.GlobalSumInt(nf_par);
+
+   bool ok = (rel_err < 1e-10);
+
+   TEST_CHECK(ctx, "attr=3-only on mixed geometry (slip, t=0)", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << " (serial_u=" << std::scientific << std::setprecision(12)
+                << serial_u_inf
+                << ", parallel_u=" << parallel_u_inf
+                << ", rel_err=" << rel_err
+                << ", fault_shared=" << global_fault_sh
+                << ", global_nf=" << global_nf << ")"
+                << std::endl;
+   }
+   return ok;
+}
+
+/// Diagnostic Test G: Face classification audit on mixed mesh
+///
+/// Dumps fault/Dirichlet face counts on both serial and parallel mixed meshes.
+/// Verifies that:
+///   1. Serial fault + Dirichlet face count matches mesh attr counts
+///   2. Parallel global fault faces == serial fault faces
+///   3. Parallel global Dirichlet faces == serial Dirichlet faces
+///   4. No face is double-counted or missing
+///
+/// If counts disagree, BuildFacetBCTables is misclassifying faces.
+bool test_diag_mixed_mesh_face_classification(MPIContext &ctx)
+{
+   if (ctx.IsRoot())
+   {
+      std::cout << "  test_diag_mixed_mesh_face_classification... " << std::flush;
+   }
+
+   if (ctx.Size() < 2)
+   {
+      if (ctx.IsRoot())
+         std::cout << "SKIPPED (need >=2 ranks)\n";
+      return true;
+   }
+
+   real_t Lx = 4.0, Ly = 2.0, Lz = 2.0;
+   real_t Wf = 1.0;
+   real_t lf = 2.0 * Lx;
+
+   auto serial_mesh = CreateTestMesh3DTetWithDirichlet(
+      2, 1, 2, Lx, Ly, Lz, Wf, lf);
+
+   BP5Params params;
+
+   // --- Serial face counts ---
+   ElasticityDomainOperator<Mesh> serial_op(serial_mesh, 1,
+      params.lambda(), params.mu(), params.Vp, Wf, lf);
+   int serial_fault = serial_op.GetFaultInteriorFaces().Size();
+   int serial_nf = serial_op.GetNumFaultDOFs();
+
+   // --- Parallel (forced y-partition) ---
+   int half = std::max(ctx.Size() / 2, 1);
+   Array<int> part(serial_mesh.GetNE());
+   int cnt_lo = 0, cnt_hi = 0;
+   for (int e = 0; e < serial_mesh.GetNE(); e++)
+   {
+      Array<int> ev;
+      serial_mesh.GetElementVertices(e, ev);
+      real_t cy = 0;
+      for (int j = 0; j < ev.Size(); j++)
+         cy += serial_mesh.GetVertex(ev[j])[1];
+      cy /= ev.Size();
+      if (cy < 0.0)
+         part[e] = (cnt_lo++) % half;
+      else
+         part[e] = half + ((cnt_hi++) % (ctx.Size() - half));
+   }
+   ParMesh pmesh(ctx.GetComm(), serial_mesh, part.GetData());
+   pmesh.ExchangeFaceNbrData();
+
+   ElasticityDomainOperator<ParMesh> par_op(pmesh, 1,
+      params.lambda(), params.mu(), params.Vp, Wf, lf);
+
+   int par_fault_int = par_op.GetFaultInteriorFaces().Size();
+   int par_fault_sh  = par_op.GetFaultSharedFaces().Size();
+   int par_nf        = par_op.GetNumFaultDOFs();
+   int par_nbf       = par_op.GetNbfPerFace();
+   int par_owned_nf  = par_op.GetNumOwnedFaultDOFs();
+
+   // Global sums
+   int g_fault_int = ctx.GlobalSumInt(par_fault_int);
+   int g_fault_sh  = ctx.GlobalSumInt(par_fault_sh);
+   int g_nf        = ctx.GlobalSumInt(par_nf);
+   int g_owned_nf  = ctx.GlobalSumInt(par_owned_nf);
+
+   MPI_Bcast(&serial_fault, 1, MPI_INT, 0, ctx.GetComm());
+   MPI_Bcast(&serial_nf, 1, MPI_INT, 0, ctx.GetComm());
+
+   // Check 1: global owned DOFs == serial DOFs
+   bool ok_dof = (g_owned_nf == serial_nf);
+
+   // Check 2: global interior + shared/2 == serial (each shared face
+   // counted by both ranks)
+   bool ok_face = (g_fault_int + g_fault_sh / 2 == serial_fault);
+
+   // Check 3: local_nf == (fault_int + fault_sh) * nbf
+   int par_nf_expect = (par_fault_int + par_fault_sh) * par_nbf;
+   int local_nf_ok = (par_nf == par_nf_expect) ? 1 : 0;
+   int global_nf_ok = ctx.GlobalMinInt(local_nf_ok);
+   bool ok_local = (global_nf_ok == 1);
+
+   bool ok = ok_dof && ok_face && ok_local;
+
+   TEST_CHECK(ctx, "mixed mesh face classification counts", ok);
+
+   if (ctx.IsRoot())
+   {
+      std::cout << (ok ? "PASSED" : "FAILED")
+                << "\n    serial: fault_faces=" << serial_fault
+                << " nf=" << serial_nf
+                << "\n    parallel: fault_int=" << g_fault_int
+                << " fault_sh=" << g_fault_sh
+                << " owned_nf=" << g_owned_nf
+                << " total_nf=" << g_nf
+                << "\n    dof_match=" << (ok_dof ? "OK" : "FAIL")
+                << " face_match=" << (ok_face ? "OK" : "FAIL")
+                << " local_nf=" << (ok_local ? "OK" : "FAIL")
+                << std::endl;
+   }
+   return ok;
+}
+
 int main(int argc, char *argv[])
 {
    MPIContext ctx(&argc, &argv);
@@ -1821,6 +3091,15 @@ int main(int argc, char *argv[])
    test_parallel_solve_with_slip(ctx);
    test_parallel_checkpoint_roundtrip(ctx);
    test_ip_dof_permutation_consistency(ctx);
+
+   // v61 diagnostic tests: rule out shared-face suspects
+   test_diag_shared_face_coords(ctx);
+   test_diag_shared_fault_basis(ctx);
+   test_diag_ghost_dof_roundtrip(ctx);
+   test_diag_displacement_with_dirichlet(ctx);
+   test_diag_traction_with_dirichlet(ctx);
+   test_diag_attr3_only_mixed_geometry(ctx);
+   test_diag_mixed_mesh_face_classification(ctx);
 
    if (ctx.IsRoot())
    {

@@ -539,6 +539,7 @@ int main(int argc, char *argv[])
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
+   bool verify_parallel = false;  // Run production-mesh verification diagnostics
 
    for (int i = 1; i < argc; i++)
    {
@@ -603,6 +604,7 @@ int main(int argc, char *argv[])
          nucleation_eps_override = std::atof(argv[++i]);
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
+      if (arg == "--verify") { verify_parallel = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
       if (arg == "--psi-init-mode" && i + 1 < argc)
       {
@@ -1147,6 +1149,20 @@ int main(int argc, char *argv[])
       }
    }
 
+   // =========================================================================
+   // Production-mesh verification: Phase 1 (before K assembly)
+   // =========================================================================
+   if (verify_parallel)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "\n=== Production-Mesh Verification ===\n";
+      }
+      // Test 1: Ghost DOF communication (no K needed)
+      real_t ghost_err = domain.VerifyGhostDOFCommunication();
+      (void)ghost_err;
+   }
+
    Vector state(fault_op.StateSize());
    seas_op.SetInitialCondition(state);
 
@@ -1157,6 +1173,29 @@ int main(int argc, char *argv[])
       std::cout << "  V_max = " << V_init << " m/s\n";
       std::cout << "  StateSize = " << fault_op.StateSize() << "\n";
       std::cout << "  SlipSize = " << fault_op.SlipSize() << "\n";
+   }
+
+   // =========================================================================
+   // Production-mesh verification: Phase 2 (after K assembly)
+   // =========================================================================
+   if (verify_parallel)
+   {
+      // K is now assembled (triggered by SetInitialCondition → Solve)
+      Vector zero_slip(2 * domain.GetNumFaultDOFs());
+      zero_slip = 0.0;
+
+      // Test 2: RHS norms at t=0 (slip only, Dirichlet=0)
+      domain.VerifyRHSNorms(0.0, zero_slip);
+
+      // Test 3: RHS norms at t=1yr (Dirichlet active)
+      domain.VerifyRHSNorms(3.15576e7, zero_slip);
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "=== Verification Complete ===\n\n"
+                   << "Compare ||b_dir|| and ||b_total|| between 1-rank and\n"
+                   << "N-rank runs. Mismatch → shared-face assembly bug.\n\n";
+      }
    }
 
    // =========================================================================

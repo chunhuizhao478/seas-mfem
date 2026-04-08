@@ -427,6 +427,18 @@ private:
 
       // Step 5: Negate ALL if sign_flipped (Tandem AdapterBase.cpp:78-84)
       // The stored basis now contains the sign — callers use it directly.
+      //
+      // NOTE (v61 analysis): For shared faces in parallel, both ranks
+      // compute basis independently. CalcOrtho gives opposite normals on
+      // each rank → one rank has sign_flipped=true, the other false →
+      // basis vectors differ by a global sign: tangent_A = -tangent_B.
+      //
+      // This is CORRECT because the DG face normal also flips between
+      // ranks (nor_B = -nor_A, proven by K matching to 15 digits).
+      // The embedded displacement jump flips accordingly (f_q_B = -f_q_A),
+      // and the assembly produces elvec1_B = elvec2_A (verified by
+      // test_serial_parallel_displacement_match to rel_err < 1e-12).
+      // See debug document v61 Section 8.9 for the full proof.
       if (sign_flipped)
       {
          for (int d = 0; d < 3; d++)

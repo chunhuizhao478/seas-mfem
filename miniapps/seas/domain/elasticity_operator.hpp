@@ -272,6 +272,163 @@ public:
 
    bool IsFirstStepDebugEnabled() const { return first_step_debug_.enabled; }
 
+   // ========================================================================
+   // Production-mesh verification diagnostics (triggered by --verify)
+   // ========================================================================
+
+   /// Verify ghost DOF communication on the production mesh.
+   /// Sets owned DOFs to f(x2,x3) = 7*sin(x2) + 3*cos(x3), expands to
+   /// ghost DOFs via MPI, and verifies all local DOFs match expected values
+   /// computed from independently-evaluated local coordinates.
+   /// Returns global max error across all ranks.
+   real_t VerifyGhostDOFCommunication() const
+   {
+      if (num_fault_dofs_ == 0) { return 0.0; }
+
+      // Get local coordinates (each rank evaluates independently)
+      Vector local_x2, local_x3;
+      GetFaultCoords2D(local_x2, local_x3);
+
+      // Restrict to owned (canonical order)
+      Vector owned_x2, owned_x3;
+      RestrictToOwnedFault(local_x2, owned_x2);
+      RestrictToOwnedFault(local_x3, owned_x3);
+
+      // Set owned data = f(coords) with 2 components
+      Vector owned_data(2 * num_owned_fault_dofs_);
+      for (int i = 0; i < num_owned_fault_dofs_; i++)
+      {
+         owned_data(2 * i)     = 7.0 * std::sin(owned_x2(i))
+                                + 3.0 * std::cos(owned_x3(i));
+         owned_data(2 * i + 1) = 2.0 * owned_x2(i) - 5.0 * owned_x3(i);
+      }
+
+      // Expand to all local DOFs (including ghost via MPI)
+      Vector local_data;
+      ExpandOwnedToLocalFault(owned_data, local_data, 2);
+
+      // Compute expected from local coordinates
+      Vector expected(2 * num_fault_dofs_);
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         expected(2 * i)     = 7.0 * std::sin(local_x2(i))
+                              + 3.0 * std::cos(local_x3(i));
+         expected(2 * i + 1) = 2.0 * local_x2(i) - 5.0 * local_x3(i);
+      }
+
+      // Compare
+      real_t max_err = 0.0;
+      int n_mismatch = 0;
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         real_t err = std::max(
+            std::abs(local_data(2 * i)     - expected(2 * i)),
+            std::abs(local_data(2 * i + 1) - expected(2 * i + 1)));
+         max_err = std::max(max_err, err);
+         if (err > 1e-10) { n_mismatch++; }
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         real_t global_max = 0.0;
+         MPI_Allreduce(&max_err, &global_max, 1, MPI_DOUBLE, MPI_MAX,
+                       mesh_.GetComm());
+         int global_mismatch = 0;
+         MPI_Allreduce(&n_mismatch, &global_mismatch, 1, MPI_INT, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] Ghost DOF communication: max_err="
+                      << std::scientific << std::setprecision(6) << global_max
+                      << ", mismatches=" << global_mismatch
+                      << " → " << (global_max < 1e-10 ? "PASS" : "FAIL")
+                      << "\n";
+         }
+         return global_max;
+#endif
+      }
+      return max_err;
+   }
+
+   /// Verify serial-parallel Dirichlet loading consistency.
+   /// At the given time, assembles the full RHS (slip + Dirichlet) and
+   /// reports the global RHS norm. When run at 1 rank vs N ranks, the
+   /// norms should match. Logs b_slip and b_dirichlet norms separately.
+   void VerifyRHSNorms(real_t time, const Vector &slip_bc) const
+   {
+      if (!stiffness_assembled_) { return; }
+
+      // Assemble slip RHS
+      Vector rhs_slip(fes_->GetTrueVSize());
+      rhs_slip = 0.0;
+      if (method_ == DGMethod::IP)
+      {
+         AssembleSlipContributionIP(rhs_slip, slip_bc);
+         AssembleSlipContributionIPShared(rhs_slip, slip_bc,
+                                          fault_interior_faces_.Size());
+      }
+      else
+      {
+         AssembleSlipContributionBR2(rhs_slip, slip_bc);
+         AssembleSlipContributionBR2Shared(rhs_slip, slip_bc,
+                                           fault_interior_faces_.Size());
+      }
+      real_t slip_norm = rhs_slip.Norml2();
+
+      // Assemble Dirichlet RHS
+      Vector rhs_dir(fes_->GetTrueVSize());
+      rhs_dir = 0.0;
+      // Copy the slip RHS to get the total, then subtract to isolate Dirichlet
+      Vector rhs_total = rhs_slip;
+      AssembleDirichletLoading(rhs_total, time);
+      for (int i = 0; i < rhs_dir.Size(); i++)
+      {
+         rhs_dir(i) = rhs_total(i) - rhs_slip(i);
+      }
+      real_t dir_norm = rhs_dir.Norml2();
+      real_t total_norm = rhs_total.Norml2();
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Use global L2 norms
+         real_t local_s2 = slip_norm * slip_norm;
+         real_t local_d2 = dir_norm * dir_norm;
+         real_t local_t2 = total_norm * total_norm;
+         real_t global_s2 = 0, global_d2 = 0, global_t2 = 0;
+         MPI_Allreduce(&local_s2, &global_s2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         MPI_Allreduce(&local_d2, &global_d2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         MPI_Allreduce(&local_t2, &global_t2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] RHS norms at t=" << time << "s:"
+                      << " ||b_slip||=" << std::scientific << std::setprecision(12)
+                      << std::sqrt(global_s2)
+                      << " ||b_dir||=" << std::sqrt(global_d2)
+                      << " ||b_total||=" << std::sqrt(global_t2)
+                      << "\n";
+         }
+#endif
+      }
+      else
+      {
+         mfem::out << "  [VERIFY] RHS norms at t=" << time << "s:"
+                   << " ||b_slip||=" << std::scientific << std::setprecision(12)
+                   << slip_norm
+                   << " ||b_dir||=" << dir_norm
+                   << " ||b_total||=" << total_norm
+                   << "\n";
+      }
+   }
+
 private:
    MeshType &mesh_;
    int order_;
@@ -4475,9 +4632,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->Face->SetIntPoint(&nip);
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Depth: -Z (Z is negative downward in Tandem, depth is positive)
             fault_depths_(i * nbf + kk) = -coords(2);
@@ -4499,9 +4656,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_depths_(face_idx * nbf + kk) = -coords(2);
             }
@@ -4541,10 +4698,11 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
 
-            // Map face integration point to physical coordinates via Face
-            FTr->Face->SetIntPoint(&nip);
+            // Use Elem1->Transform for robust coordinate evaluation
+            // (Face->Transform can disagree on BP5/tet path — v59 Section 6)
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
             fault_x2_(i * nbf + kk) = coords(0);
@@ -4567,9 +4725,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_x2_(face_idx * nbf + kk) = coords(0);
                fault_x3_(face_idx * nbf + kk) = -coords(2);
@@ -4855,7 +5013,9 @@ void ElasticityDomainOperator<MeshType>::Solve(
    // All ranks must participate in MPI_Reduce (no deadlock).
    // Condition uses only rank-independent flags (enabled + time).
    // Prints at EVERY Mult() call during first step to trace RK45 stages.
+   if constexpr (IsParallelMesh<MeshType>::value)
    {
+#ifdef MFEM_USE_MPI
       static int norm_count = 0;
       if (norm_count < 10 && first_step_debug_.enabled && time > 0.0)
       {
@@ -4895,6 +5055,7 @@ void ElasticityDomainOperator<MeshType>::Solve(
          print_global_norm("b_total", rhs);
          print_global_norm("u", X_);
       }
+#endif
    }
 }
 
