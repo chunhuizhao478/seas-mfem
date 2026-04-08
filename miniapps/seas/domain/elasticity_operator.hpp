@@ -283,51 +283,50 @@ public:
    /// Returns global max error across all ranks.
    real_t VerifyGhostDOFCommunication() const
    {
-      if (num_fault_dofs_ == 0) { return 0.0; }
-
-      // Get local coordinates (each rank evaluates independently)
-      Vector local_x2, local_x3;
-      GetFaultCoords2D(local_x2, local_x3);
-
-      // Restrict to owned (canonical order)
-      Vector owned_x2, owned_x3;
-      RestrictToOwnedFault(local_x2, owned_x2);
-      RestrictToOwnedFault(local_x3, owned_x3);
-
-      // Set owned data = f(coords) with 2 components
-      Vector owned_data(2 * num_owned_fault_dofs_);
-      for (int i = 0; i < num_owned_fault_dofs_; i++)
-      {
-         owned_data(2 * i)     = 7.0 * std::sin(owned_x2(i))
-                                + 3.0 * std::cos(owned_x3(i));
-         owned_data(2 * i + 1) = 2.0 * owned_x2(i) - 5.0 * owned_x3(i);
-      }
-
-      // Expand to all local DOFs (including ghost via MPI)
-      Vector local_data;
-      ExpandOwnedToLocalFault(owned_data, local_data, 2);
-
-      // Compute expected from local coordinates
-      Vector expected(2 * num_fault_dofs_);
-      for (int i = 0; i < num_fault_dofs_; i++)
-      {
-         expected(2 * i)     = 7.0 * std::sin(local_x2(i))
-                              + 3.0 * std::cos(local_x3(i));
-         expected(2 * i + 1) = 2.0 * local_x2(i) - 5.0 * local_x3(i);
-      }
-
-      // Compare
       real_t max_err = 0.0;
       int n_mismatch = 0;
-      for (int i = 0; i < num_fault_dofs_; i++)
+
+      // Ranks with fault DOFs run the full test; ranks without
+      // participate in the collective MPI_Allreduce with zero values.
+      if (num_fault_dofs_ > 0)
       {
-         real_t err = std::max(
-            std::abs(local_data(2 * i)     - expected(2 * i)),
-            std::abs(local_data(2 * i + 1) - expected(2 * i + 1)));
-         max_err = std::max(max_err, err);
-         if (err > 1e-10) { n_mismatch++; }
+         Vector local_x2, local_x3;
+         GetFaultCoords2D(local_x2, local_x3);
+
+         Vector owned_x2, owned_x3;
+         RestrictToOwnedFault(local_x2, owned_x2);
+         RestrictToOwnedFault(local_x3, owned_x3);
+
+         Vector owned_data(2 * num_owned_fault_dofs_);
+         for (int i = 0; i < num_owned_fault_dofs_; i++)
+         {
+            owned_data(2 * i)     = 7.0 * std::sin(owned_x2(i))
+                                   + 3.0 * std::cos(owned_x3(i));
+            owned_data(2 * i + 1) = 2.0 * owned_x2(i) - 5.0 * owned_x3(i);
+         }
+
+         Vector local_data;
+         ExpandOwnedToLocalFault(owned_data, local_data, 2);
+
+         Vector expected(2 * num_fault_dofs_);
+         for (int i = 0; i < num_fault_dofs_; i++)
+         {
+            expected(2 * i)     = 7.0 * std::sin(local_x2(i))
+                                 + 3.0 * std::cos(local_x3(i));
+            expected(2 * i + 1) = 2.0 * local_x2(i) - 5.0 * local_x3(i);
+         }
+
+         for (int i = 0; i < num_fault_dofs_; i++)
+         {
+            real_t err = std::max(
+               std::abs(local_data(2 * i)     - expected(2 * i)),
+               std::abs(local_data(2 * i + 1) - expected(2 * i + 1)));
+            max_err = std::max(max_err, err);
+            if (err > 1e-10) { n_mismatch++; }
+         }
       }
 
+      // All ranks participate in the collective reduction
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
@@ -344,7 +343,7 @@ public:
             mfem::out << "  [VERIFY] Ghost DOF communication: max_err="
                       << std::scientific << std::setprecision(6) << global_max
                       << ", mismatches=" << global_mismatch
-                      << " → " << (global_max < 1e-10 ? "PASS" : "FAIL")
+                      << " -> " << (global_max < 1e-10 ? "PASS" : "FAIL")
                       << "\n";
          }
          return global_max;
