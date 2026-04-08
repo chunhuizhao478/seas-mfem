@@ -1,7 +1,7 @@
 # BP5 Debug v62: Shared-Face Bug — Comprehensive Suspect List & Test Plan
 
 **Date:** 2026-04-07
-**Status:** IP method all shared-face tests PASS (17/18). BR2 shared path has a confirmed bug (not production-relevant). BP5 production blowup root cause still unknown — not in shared-face slip assembly (IP), Dirichlet loading, ghost comm, basis, or coords.
+**Status:** ROOT CAUSE FOUND AND FIXED — `ref_normal_` uninitialized on no-fault ranks. Fix: commit `27a548b`. Local displacement test PASS. Awaiting Frontera verification.
 **Scope:** BP5, bp5_tandem_exact.msh, IP, p=1, mesh-scale=1000, parallel
 
 ---
@@ -868,18 +868,118 @@ Combined with the local Phase 3 findings:
 - Production P2 (Dirichlet only, zero slip): FAIL (3.87%) — Dirichlet shared formula wrong
 - Production P6: skip-set accounting correct — bug is NOT in face counting
 
-#### Root cause hypothesis (narrowed)
+#### P7: Per-face shared Dirichlet diagnostic — ROOT CAUSE FOUND
 
-The shared Dirichlet skeleton path (lines 4217–4445) calls
-`AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2)` and uses
-only `ev1`. For correctness, rank A's `ev1` + rank B's `ev1` must equal
-the interior path's `ev1 + ev2`.
+`VerifySharedDirichletPerFace(t=1yr)` on Frontera job 7639340 (400 ranks):
 
-The v61 analysis proved this holds when `nor_B = -nor_A` and
-`dir_sign_B = -dir_sign_A`. But the 50% per-face error on the production
-mesh suggests the cancellation does NOT hold for some faces.
+```
+11 pairs, 8 with SAME dir_sign, 0 with ev cross-mismatch
+-> dir_sign does NOT flip on 8 faces! This is the bug.
+```
 
-**Next diagnostic:** For each of the 11 shared Dirichlet faces, dump
-`{face_key, nor(0:2), dir_sign, ||ev1||, ||ev2||}` from BOTH ranks.
-Compare rank A's `||ev2||` against rank B's `||ev1||`. If they differ,
-the normal flip or dir_sign computation is inconsistent on that face.
+8 of 11 shared Dirichlet face pairs show `SIGN_SAME!`: `dir_sign = +1`
+on BOTH ranks despite the face normals being opposite (`nor_y` has
+opposite sign). The 3 correct faces have `dir_sign` that properly flips.
+
+Example (face 1637,1640,1644):
+```
+r51: ds=+1, nor_y=-7.66e8   (dot = +7.66e8 > 0 → ds=+1 correct)
+r55: ds=+1, nor_y=+7.66e8   (dot = -7.66e8 < 0 → ds SHOULD be -1, but is +1!)
+```
+
+The 8 broken faces all have ONE rank that has Dirichlet shared faces but
+**zero fault DOFs**. The 3 correct faces have BOTH ranks with fault DOFs.
+
+---
+
+## 8. ROOT CAUSE: `ref_normal_` Uninitialized on No-Fault Ranks
+
+### 8.1 The bug
+
+`ref_normal_` is set at line 2488 inside `if (num_fault_dofs_ > 0)`:
+
+```cpp
+if (num_fault_dofs_ > 0)        // ← guard
+{
+    Vector ref_normal(3);
+    ref_normal(1) = -1.0;
+    ref_normal_ = ref_normal;   // ← line 2488: only set when fault DOFs > 0
+    ...
+}
+```
+
+On ranks with zero fault DOFs but shared Dirichlet faces, `ref_normal_`
+is a default `Vector` (size 0). Then `ComputeSkeletonDirichletSign`:
+
+```cpp
+real_t dot_ref = 0.0;
+for (int d = 0; d < ref_normal_.Size(); d++)   // Size()=0 → loop skipped
+{
+    dot_ref += nor(d) * ref_normal_(d);
+}
+return (dot_ref < 0.0) ? -1.0 : 1.0;   // dot_ref=0 → always returns +1
+```
+
+`dir_sign = +1` on ALL faces regardless of normal direction. The
+Dirichlet value `u_D = dir_sign * Vh` doesn't flip to compensate the
+flipped face normal, breaking the skeleton formula:
+
+- **Correct:** `u_D_A = +Vh`, `u_D_B = -Vh` → penalty terms cancel
+- **Buggy:**   `u_D_A = +Vh`, `u_D_B = +Vh` → penalty term has wrong sign
+
+This produces a ~50% per-face error on the 8 affected faces, totaling
+the 3.87% global `||b_dir||` mismatch.
+
+### 8.2 Why it only manifests on the production mesh
+
+On the local test mesh with forced y-partitioning, every rank that has
+shared y=0 faces also has fault DOFs (because the mesh is small and the
+fault covers the full y=0 plane). So `ref_normal_` is always set.
+
+On the production mesh with METIS partitioning, some ranks in the
+far-field get a few shared Dirichlet faces on y=0 but NO fault faces.
+These ranks have `num_fault_dofs_ = 0` and `ref_normal_.Size() = 0`.
+
+### 8.3 The fix
+
+Move `ref_normal_` initialization BEFORE the `if (num_fault_dofs_ > 0)`
+guard so ALL ranks have it set:
+
+```cpp
+// Set unconditionally — needed by ComputeSkeletonDirichletSign even
+// on ranks with zero fault DOFs
+{
+    Vector ref_normal(3);
+    ref_normal = 0.0;
+    ref_normal(1) = -1.0;
+    ref_normal_ = ref_normal;
+}
+
+if (num_fault_dofs_ > 0)
+{
+    const Vector &ref_normal = ref_normal_;  // reuse
+    ...
+}
+```
+
+**Commit:** `27a548b` on `test/revert-transform`.
+
+### 8.4 Local test result after fix
+
+```
+Before fix: test_diag_displacement_with_dirichlet FAIL (rel_err=8.17)
+After fix:  test_diag_displacement_with_dirichlet PASS
+```
+
+17 of 18 local tests pass. The remaining failure is
+`test_diag_traction_with_dirichlet` (`max_rel_err=1.95`), which is a
+separate issue in the traction projection path — not related to the
+Dirichlet loading bug.
+
+### 8.5 Production-mesh verification (pending)
+
+Submitted serial + parallel verification jobs with the fix on Frontera.
+Expected result:
+- P2 `||b_dir||` at t=1yr should match between serial and parallel
+- P7 per-face diagnostic should show `0 with SAME dir_sign`
+- The ~25 yr displacement blowup should be resolved (extended run needed)
