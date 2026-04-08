@@ -352,6 +352,111 @@ public:
       return max_err;
    }
 
+   /// Diagnose the Dirichlet skip-set mechanism in AssembleDirichletLoading.
+   /// Counts how many attr=5 boundary elements are: processed by boundary
+   /// loop, skipped by dir_interior_set, skipped by dir_shared_set, or
+   /// skipped because FTr==null. Mismatches between serial and parallel
+   /// indicate the skip set misses some shared Dirichlet faces.
+   void VerifyDirichletSkipSets() const
+   {
+      int n_attr5 = 0, n_skip_interior = 0, n_skip_shared = 0;
+      int n_skip_null = 0, n_processed = 0;
+
+      // Rebuild the same skip sets as AssembleDirichletLoading
+      std::set<int> dir_interior_set;
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+      {
+         dir_interior_set.insert(dirichlet_interior_faces_[fi]);
+      }
+      std::set<int> dir_shared_set;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            dir_shared_set.insert(
+               mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
+         }
+#endif
+      }
+
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         int attr = mesh_.GetBdrAttribute(be);
+         if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+         n_attr5++;
+
+         int face_idx, face_info;
+         mesh_.GetBdrElementFace(be, &face_idx, &face_info);
+
+         if (dir_interior_set.count(face_idx) > 0)
+         {
+            n_skip_interior++;
+            continue;
+         }
+         if (dir_shared_set.count(face_idx) > 0)
+         {
+            n_skip_shared++;
+            continue;
+         }
+
+         FaceElementTransformations *FTr =
+            mesh_.GetFaceElementTransformations(face_idx);
+         if (FTr == nullptr) { n_skip_null++; continue; }
+
+         n_processed++;
+      }
+
+      int n_dir_interior = dirichlet_interior_faces_.Size();
+      int n_dir_shared = dirichlet_shared_faces_.Size();
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Global sums
+         int locals[6] = {n_attr5, n_skip_interior, n_skip_shared,
+                          n_skip_null, n_processed, n_dir_shared};
+         int globals[6] = {0};
+         MPI_Allreduce(locals, globals, 6, MPI_INT, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] Dirichlet skip-set audit:\n"
+                      << "    attr=5 bdr elems:      " << globals[0] << "\n"
+                      << "    skipped (interior):    " << globals[1] << "\n"
+                      << "    skipped (shared set):  " << globals[2] << "\n"
+                      << "    skipped (FTr null):    " << globals[3] << "\n"
+                      << "    processed (boundary):  " << globals[4] << "\n"
+                      << "    dirichlet_shared list: " << globals[5] << "\n"
+                      << "    expected: processed + interior_skip + shared_skip"
+                      << " + null_skip = attr5\n"
+                      << "    actual:   " << globals[4] << " + " << globals[1]
+                      << " + " << globals[2] << " + " << globals[3]
+                      << " = " << (globals[4]+globals[1]+globals[2]+globals[3])
+                      << (globals[4]+globals[1]+globals[2]+globals[3] == globals[0]
+                          ? " -> OK" : " -> MISMATCH") << "\n";
+            // Check if shared set size matches skip count
+            if (globals[2] != globals[5])
+            {
+               mfem::out << "    WARNING: shared_skip ("
+                         << globals[2] << ") != dirichlet_shared list ("
+                         << globals[5] << ") -> some shared faces NOT skipped"
+                         << " from boundary loop!\n";
+            }
+         }
+#endif
+      }
+      else
+      {
+         mfem::out << "  [VERIFY] Dirichlet skip-set audit (serial):\n"
+                   << "    attr=5 bdr elems: " << n_attr5
+                   << ", skip_interior: " << n_skip_interior
+                   << ", processed: " << n_processed << "\n";
+      }
+   }
+
    /// Verify serial-parallel Dirichlet loading consistency.
    /// At the given time, assembles the full RHS (slip + Dirichlet) and
    /// reports the global RHS norm. When run at 1 rank vs N ranks, the

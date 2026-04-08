@@ -1181,20 +1181,25 @@ int main(int argc, char *argv[])
    if (verify_parallel)
    {
       // K is now assembled (triggered by SetInitialCondition → Solve)
+
+      // Test 2: Dirichlet skip-set audit (root cause diagnostic)
+      domain.VerifyDirichletSkipSets();
+
       Vector zero_slip(2 * domain.GetNumFaultDOFs());
       zero_slip = 0.0;
 
-      // Test 2: RHS norms at t=0 (slip only, Dirichlet=0)
+      // Test 3: RHS norms at t=0 (slip only, Dirichlet=0)
       domain.VerifyRHSNorms(0.0, zero_slip);
 
-      // Test 3: RHS norms at t=1yr (Dirichlet active)
+      // Test 4: RHS norms at t=1yr (Dirichlet active)
       domain.VerifyRHSNorms(3.15576e7, zero_slip);
 
       if (mpi.IsRoot())
       {
          std::cout << "=== Verification Complete ===\n\n"
                    << "Compare ||b_dir|| and ||b_total|| between 1-rank and\n"
-                   << "N-rank runs. Mismatch → shared-face assembly bug.\n\n";
+                   << "N-rank runs. Mismatch -> shared-face assembly bug.\n"
+                   << "If shared_skip != dirichlet_shared list -> skip-set bug.\n\n";
       }
    }
 
