@@ -1,16 +1,15 @@
 #!/bin/bash
-#SBATCH -J bp5_600r
-#SBATCH -o bp5_v60_600ranks_%j.out
-#SBATCH -e bp5_v60_600ranks_%j.err
-#SBATCH -p development
-#SBATCH -N 12
-#SBATCH -n 600
-#SBATCH -t 02:00:00
+#SBATCH -J bp5_800r
+#SBATCH -o bp5_v60_800ranks_%j.out
+#SBATCH -e bp5_v60_800ranks_%j.err
+#SBATCH -p normal
+#SBATCH -N 15
+#SBATCH -n 800
+#SBATCH -t 06:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60: 600-rank run to test whether displacement hot spots
-# shift with a different MPI partition. If they do, the bug is
-# MPI-partition-specific (shared-face path).
+# BP5 v60: 800-rank partition test.
+# Compare hot spot locations against 100/200/400/600-rank runs.
 
 export LC_ALL=C
 export LANG=C
@@ -35,8 +34,8 @@ cd miniapps/seas
 make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
-RESULT_DIR="bp5/results_v60_600ranks_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX="bp5_v60_600r_job${SLURM_JOB_ID}"
+RESULT_DIR="bp5/results_v60_800ranks_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX="bp5_v60_800r_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR}"
 
@@ -44,7 +43,7 @@ echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Output prefix: ${OUTPUT_PREFIX}"
-echo "Test: 600 ranks to check if hot spots shift with different partition"
+echo "Test: 800 ranks — partition sensitivity test"
 
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
