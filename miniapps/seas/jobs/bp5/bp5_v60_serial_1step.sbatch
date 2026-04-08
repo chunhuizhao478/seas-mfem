@@ -8,7 +8,7 @@
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# BP5 v60: Serial (1 core) 1-step run.
+# BP5 v60: Serial (1 rank) full production run.
 # Eliminates MPI partitioning as a variable — if the displacement
 # anomaly disappears, the bug is in shared-face K assembly.
 
@@ -52,12 +52,10 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps \
-      --tfinal 1.0 \
-      --max-steps 1 \
       --ref-dir bp5/benchmark_data \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --checkpoint-interval 0 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
-      --paraview-every 1
+      --paraview-dt 1.1e8
