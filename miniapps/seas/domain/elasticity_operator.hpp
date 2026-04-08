@@ -2472,6 +2472,16 @@ private:
          fault_dofs_[i] = i;
       }
 
+      // ref_normal_ is needed by ComputeSkeletonDirichletSign for ALL
+      // ranks that have shared Dirichlet faces, even ranks with zero fault
+      // DOFs. Set it unconditionally BEFORE the fault DOF guard.
+      {
+         Vector ref_normal(3);
+         ref_normal = 0.0;
+         ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
+         ref_normal_ = ref_normal;
+      }
+
       // Compute FaultBasis for coordinate transforms
       if (num_fault_dofs_ > 0)
       {
@@ -2480,12 +2490,7 @@ private:
          //   Fault at Y = 0
          //   ref_normal = (0, -1, 0) matches Tandem's convention
          //   Up = (0, 0, 1)
-         Vector ref_normal(3);
-         ref_normal = 0.0;
-         ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
-
-         // Store for skeleton Dirichlet sign computation
-         ref_normal_ = ref_normal;
+         const Vector &ref_normal = ref_normal_;
 
          Vector up(3);
          up = 0.0;
