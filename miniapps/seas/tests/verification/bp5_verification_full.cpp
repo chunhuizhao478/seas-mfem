@@ -1223,6 +1223,17 @@ int main(int argc, char *argv[])
       pv_out->RegisterDomainField("displacement",
          const_cast<ParGridFunction*>(
             &seas_op.GetDisplacement()));
+
+      // MPI rank field: L2 order-0 (constant per element) for partition visualization
+      {
+         auto *l2_fec = new L2_FECollection(0, 3);
+         auto *l2_fes = new ParFiniteElementSpace(&pmesh, l2_fec);
+         auto *rank_gf = new ParGridFunction(l2_fes);
+         *rank_gf = static_cast<real_t>(mpi.Rank());
+         rank_gf->MakeOwner(l2_fec);  // GF owns FEC+FES, freed on destruction
+         pv_out->RegisterDomainField("mpi_rank", rank_gf);
+      }
+
       // Fault fields: L2-p0 projection onto volume elements
       pv_out->InitFaultOutputBP5(
          domain.GetFaultInteriorFaces(),
