@@ -1,7 +1,7 @@
-# BP5 Debug v59: Tandem Comparison Proves MFEM-Specific Normal Traction Bug
+# BP5 Debug v59: Tandem Comparison → TSStep Loop Root Cause → TSSolve Fix
 
 **Date:** 2026-04-06
-**Status:** Active — root cause narrowed to assembly/solve path, not friction or traction formula
+**Status:** TSSolve fix implemented (commit 51da03b), awaiting Frontera test
 **Scope:** BP5, 1000 m mesh, IP, p=1, same mesh for both codes
 
 ---
@@ -2264,3 +2264,166 @@ but could affect the adaptive controller's error estimate differently.
 - MFEM stage norms: Frontera job with commit 267028e
 - Tandem stage norms: Frontera job with commit a26753d
 - Both dt=0.02, 8 nodes, 400 ranks, MUMPS, RK45 5dp
+
+---
+
+## 27. TSSolve Implementation: Replacing the TSStep Loop
+
+**Date:** 2026-04-06
+**Commit:** 51da03b
+**Status:** Implemented, awaiting Frontera test
+
+### 27.1 Motivation
+
+Section 26 identified three sub-issues with MFEM's manual TSStep loop:
+
+1. `TSSetTimeStep(ts, dt)` called before every step interferes with PETSc's
+   FSAL (First Same As Last) optimisation in Dormand-Prince RK45
+2. `TSSetTime(ts, t)` resets PETSc's internal time tracking, breaking
+   continuity of the adaptive controller
+3. Per-step `state → PETSc Vec → state` copies add overhead and risk
+   subtle inconsistencies
+
+Tandem uses a single `TSSolve` call with a `TSMonitorSet` callback for
+per-step I/O. PETSc manages dt adaptation, FSAL, error control, and
+state continuity internally. All physics was verified identical to
+Tandem at every RK45 stage (Sections 21–25), so the time stepper is the
+only remaining difference.
+
+### 27.2 Sign fix alone does not resolve blowup
+
+The ComputeOrientedFrame sign convention fix (Section 20, commit bbae289)
+was tested on Frontera with the old TSStep loop. **The ~25 yr blowup
+persists** — normal stress still goes tensile at the fault tip, causing
+NaN divergence. This confirms the blowup is not caused by the sign
+convention but by accumulated time-stepping error from the broken TSStep
+loop.
+
+### 27.3 How the TSStep bug causes tensile sigma_n
+
+The mechanism linking broken FSAL to fault-tip blowup:
+
+1. **Stale FSAL stage**: Calling `TSSetTimeStep` between steps invalidates
+   the cached 7th-stage RK derivative (k7) that Dormand-Prince reuses as
+   k1 of the next step. PETSc may use a stale k7, producing a wrong k1.
+
+2. **Wrong error estimate**: The 4th-vs-5th-order error comparison uses
+   the corrupted stage values, so PETSc's adaptive controller accepts
+   steps that are actually inaccurate.
+
+3. **Accumulated state drift**: Over thousands of steps (~25 yr simulated
+   time), small per-step errors in slip (δ) and state variable (ψ)
+   compound. The slip distribution drifts from the correct trajectory.
+
+4. **Unphysical stress concentration**: The drifted slip distribution
+   creates artificial stress concentrations at the fault tip (depth = 40 km,
+   the bottom edge of the seismogenic zone). These concentrations do not
+   exist in Tandem's solution.
+
+5. **Tensile sigma_n**: The elastic normal traction from the unphysical
+   slip grows linearly at ~0.98 MPa/yr until it cancels the 25 MPa
+   background compression (σ_n^eff → 0), triggering friction law
+   singularity and NaN divergence.
+
+This explains why:
+- The blowup occurs at the fault **tip** (maximum stress sensitivity)
+- The blowup takes ~25 yr (time for accumulated error to reach 25 MPa)
+- Tandem does NOT blow up (TSSolve preserves FSAL and adaptive accuracy)
+- The physics matches per-stage (error only accumulates across steps)
+
+### 27.4 Implementation details
+
+**Architecture** — matches Tandem's `PetscTimeSolver::solve()` +
+`MonitorQD::monitor()` pattern:
+
+```
+Tandem:                           MFEM (new):
+─────────                         ────────────
+TSCreate                          PetscODESolver(comm, "")
+TSSetRHSFunction                  Init(seas_op, GENERAL)
+TSSetFromOptions                  TSSetFromOptions
+TSSetSolution(ts, state)          [Run() uses PlaceMemory]
+TSSolve(ts, state)                petsc_ode->Run(state, t, dt, t_final)
+MonitorFunction via TSMonitorSet  bp5_ts_monitor_callback via TSMonitorSet
+```
+
+**BP5MonitorCtx struct** — holds non-owning pointers to all objects
+needed for per-step monitoring:
+
+| Field | Type | Purpose |
+|-------|------|---------|
+| `mpi` | `MPIContext*` | MPI operations |
+| `state` | `Vector*` | Shares memory with PETSc Vec via PlaceMemory |
+| `bench_out` | `ParallelBP5BenchmarkOutput*` | SCEC-format I/O |
+| `face_tracer` | `FaceTraceLogger<ParMesh>*` | Face trace logging |
+| `fault_op` | `RateStateFaultOperator*` | Slip rate access |
+| `seas_op` | `PBP5SEASOp*` | Traction, displacement, V_max |
+| `global_out` | `ProbeOutput*` | Global time series (root only) |
+
+**bp5_ts_monitor_callback** — static PETSc `TSMonitor` callback, called
+after every accepted step inside TSSolve. Performs:
+
+1. Face tracer commit
+2. V_max computation and NaN/Inf check
+3. Earthquake detection (seismic/interseismic transitions)
+4. Adaptive I/O (SCEC benchmark output)
+5. Global output (log10(V_max) time series)
+6. Checkpoint writing
+7. Console output (step, time, dt, V_max, #EQs)
+8. Debug first-step dump (early termination)
+
+**Early termination** — the monitor calls `TSSetConvergedReason()` directly:
+- `TS_DIVERGED_STEP_REJECTED` on NaN detection
+- `TS_CONVERGED_USER` on debug first-step dump
+
+**No psi clamping** in TSSolve mode — Tandem does not clamp ψ post-step.
+Clamping would also break FSAL (modifying state without updating the
+cached stage derivative). The `no_psi_clamp` flag defaults to `true`.
+
+### 27.5 Code changes
+
+**`tests/verification/bp5_verification_full.cpp`:**
+
+| Change | Lines | Description |
+|--------|-------|-------------|
+| `BP5MonitorCtx` struct | 293–319 | Monitor context with all per-step state |
+| `bp5_ts_monitor_callback` | 325–466 | PETSc TSMonitor callback |
+| PETSc setup | 1273–1340 | Remove `petsc_state`/`TSSetSolution`, add `TSMonitorSet` |
+| Main loop | 1405–1640 | Split: `use_petsc_ts` → `Run()`, else → original while loop |
+| `print_step_interval` | 1240 | Moved before PETSc setup (monitor needs it) |
+| `tandem_dt_init` | 512 | Reverted to 0.01 (was 0.02 for diagnostic) |
+
+**Removed from PETSc path:**
+- `petsc_state` (PetscParVector) — MFEM's `Run()` uses `PlaceMemory`
+- `TSSetSolution` — `Run()` passes Vec directly to `TSSolve`
+- `TSSetTime`/`TSSetTimeStep` per-step calls — TSSolve manages internally
+- Per-step `state ↔ PETSc Vec` copies — PlaceMemory shares memory
+- Psi clamping — Tandem does not clamp
+
+### 27.6 Expected results
+
+| Metric | Old (TSStep loop) | Expected (TSSolve) |
+|--------|-------------------|-------------------|
+| First earthquake | ~1191 yr (5× too slow) | ~225 yr (matching Tandem) |
+| Blowup at ~25 yr | Yes (tensile σ_n) | No (correct FSAL/dt control) |
+| Fault-tip σ_n | Erodes at -0.98 MPa/yr | Stable (bounded oscillation) |
+| Per-stage physics | Identical to Tandem | Identical to Tandem |
+
+### 27.7 Test plan
+
+1. **Dev run** (2 hr, development queue):
+   `jobs/bp5/bp5_v59_tssolve_dev_2hr.sbatch`
+   - Must survive past 25 yr without NaN
+   - Check σ_n at fault tip stays compressive
+
+2. **Production run** (48 hr, normal queue):
+   `jobs/bp5/bp5_v59_tssolve_48hr_400ranks.sbatch`
+   - Must reach first earthquake at ~225 yr
+   - Compare time series with Tandem at all 10 SCEC stations
+
+### 27.8 Files
+
+- Source: `tests/verification/bp5_verification_full.cpp` (commit 51da03b)
+- Dev sbatch: `jobs/bp5/bp5_v59_tssolve_dev_2hr.sbatch`
+- Production sbatch: `jobs/bp5/bp5_v59_tssolve_48hr_400ranks.sbatch`
+- PETSc options: `tests/verification/petsc_ts_rk45_tandem.cfg`

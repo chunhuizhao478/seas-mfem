@@ -483,7 +483,7 @@ def main():
             label, prefix = parse_labeled_arg(spec)
             if label is None:
                 label = os.path.basename(prefix)
-            sources.append((f"Tandem {label}", "tandem_results", prefix, color, "-"))
+            sources.append((f"Tandem {label}", "tandem_results", prefix, color, "--"))
         elif stype == "mfem":
             label, prefix = parse_labeled_arg(spec)
             if label is None:
@@ -583,7 +583,7 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=30,
+                t_max_yr=4e-5,
                 save_path=fname_close,
             )
         else:
