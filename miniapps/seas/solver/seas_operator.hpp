@@ -18,6 +18,7 @@
 #include "../domain/elasticity_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
+#include "../trace/face_trace_logger.hpp"
 #include <iomanip>
 #include "../common/mpi_context.hpp"
 
@@ -142,6 +143,12 @@ public:
    /// instead of constant sigma_n. Matches Tandem's DieterichRuinaAgeing.
    void SetElasticSigmaN(bool v) { elastic_sigma_n_ = v; }
 
+   /// Set face tracer (non-owning pointer, caller manages lifetime).
+   void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
+   {
+      face_tracer_ = tracer;
+   }
+
 private:
    DomainOpType *domain_;
    FaultOpType *fault_;
@@ -157,6 +164,14 @@ private:
    mutable Vector local_traction_;
    mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
    mutable Vector local_normal_traction_;
+
+   // Face tracer decomposition vectors (allocated only when tracer is active)
+   FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
+   mutable Vector local_traction_stress_, local_traction_correction_;
+   mutable Vector local_jump_residual_;
+   mutable Vector local_normal_stress_, local_normal_corr_;
+   mutable Vector traction_stress_, traction_correction_, jump_residual_;
+   mutable Vector normal_stress_, normal_corr_;
 
    // v57 MPI diagnostic: fire once on first non-zero slip
    mutable bool mpi_diag_done_ = true;  // v58: disabled by default
@@ -321,13 +336,47 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
 
    // 3. Compute traction at fault from displacement
    // v51: optionally compute elastic normal traction for sigma_n feedback
-   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
-                            elastic_sigma_n_ ? &local_normal_traction_ : nullptr);
-   domain_->RestrictToOwnedFault(local_traction_, traction_,
-                                 domain_->NumSlipComponents());
-   if (elastic_sigma_n_)
+   if (face_tracer_ && face_tracer_->IsActive())
    {
-      domain_->RestrictToOwnedFault(local_normal_traction_, normal_traction_);
+      // Decomposed traction for face tracer (including normal decomposition)
+      domain_->ComputeTractionDiagnostics(
+         *u_gf_, local_slip_, local_traction_,
+         local_traction_stress_, local_traction_correction_,
+         local_jump_residual_,
+         elastic_sigma_n_ ? &local_normal_traction_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_stress_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_corr_ : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_correction_,
+                                    traction_correction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_jump_residual_, jump_residual_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+         domain_->RestrictToOwnedFault(local_normal_stress_,
+                                       normal_stress_);
+         domain_->RestrictToOwnedFault(local_normal_corr_,
+                                       normal_corr_);
+      }
+   }
+   else
+   {
+      domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
+                               elastic_sigma_n_ ? &local_normal_traction_
+                                                : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+      }
    }
 
    // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
@@ -422,6 +471,69 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
    fault_->ComputeRHS(traction_, state, rate,
                        elastic_sigma_n_ ? &normal_traction_ : nullptr);
+
+   // Per-stage coupling loop norms (first 10 evaluations)
+   {
+      static int stage_count = 0;
+      if (stage_count < 10 && domain_->IsFirstStepDebugEnabled())
+      {
+         stage_count++;
+         real_t trac_l1 = 0.0, trac_linf = 0.0;
+         for (int i = 0; i < traction_.Size(); i++)
+         {
+            real_t a = std::abs(traction_(i));
+            trac_l1 += a;
+            if (a > trac_linf) trac_linf = a;
+         }
+         real_t V_l1 = 0.0, V_linf = 0.0;
+         const Vector &V = fault_->GetSlipRate();
+         for (int i = 0; i < V.Size(); i++)
+         {
+            real_t a = std::abs(V(i));
+            V_l1 += a;
+            if (a > V_linf) V_linf = a;
+         }
+         // MPI reduce (traction_ and V are owned-restricted, one value per owned DOF)
+         real_t g_trac_l1, g_trac_linf, g_V_l1, g_V_linf;
+         if (mpi_ctx_)
+         {
+            MPI_Reduce(&trac_l1, &g_trac_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&trac_linf, &g_trac_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_l1, &g_V_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_linf, &g_V_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+         }
+         else
+         {
+            g_trac_l1 = trac_l1; g_trac_linf = trac_linf;
+            g_V_l1 = V_l1; g_V_linf = V_linf;
+         }
+         bool is_root = !mpi_ctx_ || mpi_ctx_->IsRoot();
+         if (is_root)
+         {
+            mfem::out << std::setprecision(15);
+            mfem::out << "  [COUPLING] Stage " << stage_count
+                      << " t=" << t << "\n";
+            mfem::out << "  [COUPLING] ||traction||_1   = " << g_trac_l1 << "\n";
+            mfem::out << "  [COUPLING] ||traction||_inf = " << g_trac_linf << "\n";
+            mfem::out << "  [COUPLING] ||V||_1   = " << g_V_l1 << "\n";
+            mfem::out << "  [COUPLING] ||V||_inf = " << g_V_linf << "\n";
+         }
+      }
+   }
+
+   // Face tracer: stage decomposition data for committed step
+   if (face_tracer_ && face_tracer_->IsActive())
+   {
+      face_tracer_->RecordMult(
+         traction_, traction_stress_, traction_correction_,
+         jump_residual_, normal_traction_,
+         normal_stress_, normal_corr_,
+         fault_->GetSlipRate(), fault_->GetSigmaN());
+   }
 }
 
 // BP2 type alias (uses default template arguments)

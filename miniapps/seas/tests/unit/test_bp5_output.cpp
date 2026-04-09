@@ -231,7 +231,7 @@ void TestBP5BenchmarkOutput_ComponentSwap()
       Vector V_dip(1), V_strike(1);
       Vector trac_dip(1), trac_strike(1);
 
-      // Tandem-internal slip (anti-parallel to τ). Output negates for SCEC.
+      // Output now preserves the stored slip sign directly.
       slip_dip(0) = -1.0;
       slip_strike(0) = -2.0;
       theta(0) = 100.0;      // 100 seconds
@@ -263,9 +263,9 @@ void TestBP5BenchmarkOutput_ComponentSwap()
       double t, col2, col3;
       iss >> t >> col2 >> col3;
 
-      // SCEC output negates internal slip: col2 = -(-2.0) = 2.0, col3 = -(-1.0) = 1.0
-      TEST_NEAR(col2, 2.0, 1e-6, "Column 2 = slip_strike SCEC = 2.0");
-      TEST_NEAR(col3, 1.0, 1e-6, "Column 3 = slip_dip SCEC = 1.0");
+      // col2 = slip_strike = -2.0, col3 = slip_dip = -1.0 (SWAPPED)
+      TEST_NEAR(col2, -2.0, 1e-6, "Column 2 = slip_strike = -2.0 (swapped)");
+      TEST_NEAR(col3, -1.0, 1e-6, "Column 3 = slip_dip = -1.0 (swapped)");
       file.close();
    }
 
@@ -291,7 +291,8 @@ void TestBP5BenchmarkOutput_StressComputation()
    std::string prefix = "test_bp5stress";
 
    // Set known tau_pre: dip=-5e6 Pa, strike=-10e6 Pa
-   // Internal convention is written directly by WriteFromGlobalData.
+   // Internal convention: negative = right-lateral shear.
+   // WriteFromGlobalData negates for SCEC output (positive = right-lateral).
    Vector tau_pre_dip(1), tau_pre_strike(1);
    tau_pre_dip(0) = -5e6;
    tau_pre_strike(0) = -10e6;
@@ -308,7 +309,7 @@ void TestBP5BenchmarkOutput_StressComputation()
       theta(0) = 100.0;
       V_dip(0) = 1e-9; V_strike(0) = 1e-9;
       // Elastic traction: dip=-1e6, strike=-2e6
-      // Internal convention is written directly by WriteFromGlobalData.
+      // Internal convention: negative = right-lateral shear.
       trac_dip(0) = -1e6;
       trac_strike(0) = -2e6;
 
@@ -575,12 +576,12 @@ void TestBP5BenchmarkOutput_MultiDOFWrite()
       iss >> t >> s_strike >> s_dip >> v_strike >> v_dip
           >> tau_s >> tau_d >> state_val;
 
-      // DOF 3 (i=3): internal slip_strike = -0.02*4 = -0.08, SCEC = 0.08
-      TEST_NEAR(s_strike, 0.02 * 4, 1e-6,
-                "Multi-DOF: slip_strike SCEC from DOF 3");
-      // DOF 3 (i=3): internal slip_dip = -0.01*4 = -0.04, SCEC = 0.04
-      TEST_NEAR(s_dip, 0.01 * 4, 1e-6,
-                "Multi-DOF: slip_dip SCEC from DOF 3");
+      // DOF 3 (i=3): slip_strike preserved = -0.02*4 = -0.08
+      TEST_NEAR(s_strike, -0.02 * 4, 1e-6,
+                "Multi-DOF: slip_strike from DOF 3");
+      // DOF 3 (i=3): slip_dip preserved = -0.01*4 = -0.04
+      TEST_NEAR(s_dip, -0.01 * 4, 1e-6,
+                "Multi-DOF: slip_dip from DOF 3");
       // DOF 3: V_strike = abs(2e-9*4) = 8e-9, output = log10(8e-9) ≈ -8.097
       TEST_NEAR(v_strike, std::log10(2e-9 * 4), 0.01,
                 "Multi-DOF: log10(V_strike) from DOF 3");
@@ -630,7 +631,7 @@ void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
       Vector V_dip(3), V_strike(3);
       Vector trac_dip(3), trac_strike(3);
 
-      // Tandem-internal slip (anti-parallel to τ). Output negates for SCEC.
+      // Output now preserves the stored slip sign directly.
       slip_dip(0) = -1.0;   slip_strike(0) = -10.0;
       slip_dip(1) = -2.0;   slip_strike(1) = -20.0;
       slip_dip(2) = -4.0;   slip_strike(2) = -40.0;
@@ -667,11 +668,10 @@ void TestBP5BenchmarkOutput_ExactFaceInterpolationP1()
       iss >> t >> slip_s >> slip_d >> logV_s >> logV_d >> tau_s >> tau_d >> log_theta;
 
       // Barycentric weights = [0.5, 0.25, 0.25] at (250,250).
-      // Internal: -20.0 (strike), -2.0 (dip); SCEC output negates: 20.0, 2.0.
-      TEST_NEAR(slip_s, 20.0, 1e-12,
-                "strike slip SCEC on p=1 face");
-      TEST_NEAR(slip_d, 2.0, 1e-12,
-                "dip slip SCEC on p=1 face");
+      TEST_NEAR(slip_s, -20.0, 1e-12,
+                "strike slip interpolated exactly on p=1 face");
+      TEST_NEAR(slip_d, -2.0, 1e-12,
+                "dip slip interpolated exactly on p=1 face");
       TEST_NEAR(logV_s, std::log10(2e-5), 1e-12,
                 "strike slip-rate interpolated exactly on p=1 face");
       TEST_NEAR(logV_d, std::log10(2e-6), 1e-12,

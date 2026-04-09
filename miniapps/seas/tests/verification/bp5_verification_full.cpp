@@ -38,10 +38,6 @@
 //   --check-residual           Warn if post-solve ||K*x-b||/||b|| > 1e-8
 //   --monitor-traction N       Log tau_pre/traction/total every N RHS evals
 //   --dump-bdr-vtk             Output boundary attributes to VTK
-//   --diag-vtk                 Output diagnostic VTK: displacement, fault a,
-//                              tau_pre, V_init, and boundary attributes
-//   --diag-traction-decomp     Print traction decomposition (stress vs penalty
-//                              correction vs jump) for each fault DOF
 //   --psi-clamp                Enable legacy post-step psi clamping (diagnostic)
 //   --diag-psi-clamp           Print/summary diagnostics for psi clamp activity
 //   --tandem-time-stepping     Use Tandem-style startup/acceptance defaults
@@ -67,13 +63,16 @@
 #include "../../io/bp5_parallel_output.hpp"
 #include "../../io/probe_output.hpp"
 #include "../../io/checkpoint.hpp"
+#include "../../io/paraview_output.hpp"
 #include "../../common/mpi_context.hpp"
+#include "../../trace/face_trace_logger.hpp"
 
 #include <iostream>
 #include <iomanip>
 #include <fstream>
 #include <sstream>
 #include <cmath>
+#include <cctype>
 #include <memory>
 #include <vector>
 #include <string>
@@ -287,6 +286,194 @@ bool RunComparison(const std::string &output_dir,
 }
 
 // ============================================================================
+// TSSolve monitor context and callback (Tandem-style time stepping)
+// ============================================================================
+#ifdef MFEM_USE_PETSC
+
+/// Context passed to PETSc TSMonitor callback.  Holds references to all
+/// objects needed for per-step monitoring (I/O, earthquake detection,
+/// console output, checkpoint, face tracer).
+struct BP5MonitorCtx
+{
+   // Core objects (non-owning)
+   MPIContext *mpi;
+   Vector *state;                                       // shares memory with PETSc Vec
+   ParallelBP5BenchmarkOutput *bench_out;
+   seas::FaceTraceLogger<ParMesh> *face_tracer;
+   RateStateFaultOperator<ParMesh, 2> *fault_op;
+   PBP5SEASOp *seas_op;
+   ProbeOutput *global_out;                              // may be nullptr (non-root)
+
+   // Settings
+   bool write_every_step;
+   int  print_step_interval;
+   int  checkpoint_interval;
+   std::string full_prefix;
+   bool debug_first_step_dump;
+
+   // Mutable per-step state
+   int  num_seismic_events;
+   bool in_seismic_event;
+   real_t V_threshold_seismic;
+   real_t V_threshold_interseismic;
+
+   // Current dt (read from TS after each step)
+   real_t current_dt;
+
+   // ParaView output (may be nullptr if --paraview not set)
+   std::function<void(int, real_t, real_t)> paraview_write_fn;
+
+};
+
+/// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
+/// Matches Tandem's MonitorQD::monitor pattern: read state, do I/O.
+static PetscErrorCode bp5_ts_monitor_callback(
+   TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
+{
+   PetscFunctionBeginUser;
+   auto *mon = static_cast<BP5MonitorCtx*>(ctx);
+
+   // state already reflects the accepted step (PlaceMemory shares memory).
+   Vector &state  = *mon->state;
+   auto   &mpi    = *mon->mpi;
+
+   // Get dt for console output
+   PetscReal dt;
+   TSGetTimeStep(ts, &dt);
+   mon->current_dt = dt;
+
+   // Face tracer
+   if (mon->face_tracer->IsActive())
+   {
+      mon->face_tracer->CommitStep(static_cast<int>(step), time, state, false);
+   }
+
+   // V_max & NaN check
+   real_t V_max = mon->seas_op->GetMaxSlipRate();
+   {
+      bool has_nan = !std::isfinite(V_max);
+      if (!has_nan)
+      {
+         for (int i = 0; i < std::min(state.Size(), 100); i++)
+         {
+            if (!std::isfinite(state(i))) { has_nan = true; break; }
+         }
+      }
+      int local_nan = has_nan ? 1 : 0;
+      int global_nan = mpi.GlobalSumInt(local_nan);
+      has_nan = (global_nan > 0);
+      if (has_nan)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr << "NaN/Inf detected at step " << step
+                      << ", t = " << time / BP5Params::seconds_per_year
+                      << " yr, V_max = " << V_max << "\n";
+         }
+         TSSetConvergedReason(ts, TS_DIVERGED_STEP_REJECTED);
+         PetscFunctionReturn(PETSC_SUCCESS);
+      }
+   }
+
+   // Earthquake detection
+   if (!mon->in_seismic_event && V_max > mon->V_threshold_seismic)
+   {
+      mon->in_seismic_event = true;
+      mon->num_seismic_events++;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  *** EARTHQUAKE #" << mon->num_seismic_events
+                   << " at t = " << std::fixed << std::setprecision(1)
+                   << time / BP5Params::seconds_per_year << " yr"
+                   << ", V_max = " << std::scientific
+                   << std::setprecision(2) << V_max << " m/s ***\n";
+      }
+   }
+   else if (mon->in_seismic_event && V_max < mon->V_threshold_interseismic)
+   {
+      mon->in_seismic_event = false;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Earthquake #" << mon->num_seismic_events
+                   << " resolved at t = "
+                   << std::fixed << std::setprecision(1)
+                   << time / BP5Params::seconds_per_year << " yr\n";
+      }
+   }
+
+   // I/O: adaptive schedule or every step
+   if (mon->write_every_step)
+   {
+      mon->bench_out->ForceWrite(time, state, *mon->fault_op,
+                                 mon->seas_op->GetTraction(), V_max);
+      mon->bench_out->Flush();
+   }
+   else if (mon->bench_out->Write(time, state, *mon->fault_op,
+                                  mon->seas_op->GetTraction(), V_max))
+   {
+      mon->bench_out->Flush();
+   }
+
+   // ParaView output (adaptive schedule, MPI-collective)
+   if (mon->paraview_write_fn)
+   {
+      mon->paraview_write_fn(static_cast<int>(step), time, V_max);
+   }
+
+   // Global output
+   if (mpi.IsRoot() && mon->global_out)
+   {
+      mon->global_out->WriteStep(
+         {time, V_max > 0.0 ? std::log10(V_max) : -300.0});
+   }
+
+   // Checkpoint
+   int istep = static_cast<int>(step);
+   if (mon->checkpoint_interval > 0 && istep % mon->checkpoint_interval == 0)
+   {
+      Vector u_vec;
+      u_vec = mon->seas_op->GetDisplacement();
+      Vector empty_k0;
+      WriteCheckpoint(mon->full_prefix, time, mon->current_dt,
+                      istep, mon->num_seismic_events, mon->in_seismic_event,
+                      state, u_vec,
+                      mon->seas_op->GetTraction(), mon->fault_op->GetSlipRate(),
+                      false, empty_k0, mon->mpi);
+   }
+
+   // Console output
+   if (mpi.IsRoot() &&
+       (istep % mon->print_step_interval == 0 ||
+        V_max > mon->V_threshold_seismic))
+   {
+      std::cout << std::setw(10) << istep
+                << std::setw(16) << std::scientific << std::setprecision(6)
+                << time / BP5Params::seconds_per_year
+                << std::setw(14) << std::scientific << std::setprecision(3)
+                << static_cast<double>(dt)
+                << std::setw(16) << std::scientific << std::setprecision(3)
+                << V_max
+                << std::setw(8) << mon->num_seismic_events
+                << "\n";
+      std::cout.flush();
+   }
+
+   // Debug: stop after first accepted step
+   if (mon->debug_first_step_dump)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [debug] stopping after first accepted step dump\n";
+      }
+      TSSetConvergedReason(ts, TS_CONVERGED_USER);
+   }
+
+   PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+#endif // MFEM_USE_PETSC
+
+// ============================================================================
 // Main driver
 // ============================================================================
 
@@ -319,28 +506,17 @@ int main(int argc, char *argv[])
    double delta_tau_factor_override = -1.0;
    double nucleation_eps_override = -1.0;
    bool dump_bdr_vtk = false;
-   bool diag_vtk = false;
-   bool diag_traction_decomp = false;
    std::string bc_mode_str = "far-field";
    std::string psi_init_mode_str = "tandem";  // "tandem" (default) or "scec"
    int order = 1;
    double blr_tol = 1e-10;  // MUMPS-BLR tolerance (default 1e-10)
 
-   // v49 Phase 1 diagnostic flags
+   // v49 Phase 1 flags
    bool smooth_nucleation = false;
    bool match_quad_order = false;
-   bool diag_normals = false;
-   bool diag_first_traction = false;
-   bool diag_rk_stages = false;
-   bool diag_dip_traction = false;   // v51: per-component traction diagnostic
    bool zero_dip_traction = false;   // v51: zero tau_dip after ComputeTraction
-   bool diag_coseismic_dip = false;  // v51: dump dip/strike ratio during coseismic
-   real_t coseismic_dip_threshold = 0.1;  // v51: V_max threshold for coseismic dump
-   bool diag_uz_fault = false;       // v51: dump u_z at fault faces after solve
    // v54: elastic sigma_n ON by default (matches Tandem DieterichRuinaBase.h:87)
    bool elastic_sigma_n = true;
-   bool diag_traction_coherence = false; // v52: solve vs traction coherence test
-   bool diag_rhs_z = false;              // v52: dump f_z components of RHS
    // v49 Phase 2: CFL-aware dt and V guard
    real_t dt_init_override = -1.0;  // Manual dt_init override (negative = auto)
    real_t v_guard_factor = -1.0;    // V guard threshold factor (negative = use default 100)
@@ -349,23 +525,21 @@ int main(int argc, char *argv[])
    real_t tandem_dt_init = 0.01;      // Default Tandem-style startup dt [s]
    // v50a: penalty scaling factor (1.0 = default, <1.0 = reduced penalty)
    real_t penalty_factor = 1.0;
-   bool diag_station_traction_decomp = false; // Write station-level stress/correction traction
-   bool diag_station_jump_residual = false;   // Write station-level [[u]]-delta residual
    bool no_psi_clamp = true;           // Default OFF: match Tandem (no post-step psi clamp)
-   bool diag_psi_clamp = false;        // Report psi clamp activation statistics
    bool dt_init_explicit = false;
    bool v_guard_explicit = false;
    bool psi_clamp_explicit = false;
    bool use_petsc_ts = false;          // Exact Tandem framework: PETSc TS
-   bool diag_tip_step1 = false;        // v58: one-step tip reproducer then exit
-   bool diag_tip_monitor = false;      // v58: per-step tip DOF monitor (production-safe)
-   bool diag_tnd_tq = false;            // Per-QP tip traction (Tandem [TND-TQ] comparison)
-   bool diag_tip_face_dumped = false;  // v58: one-shot face dump when threshold crossed
    std::string petsc_ts_options_file;  // Optional PETSc options file
    bool petsc_initialized = false;
+   bool use_paraview = false;          // Enable ParaView PVD/VTU output
+   int  paraview_step_interval = 0;   // 0 = adaptive/time schedule, >0 = every N steps
+   real_t paraview_dt = 0.0;          // >0 = fixed time interval (seconds) between writes
+   int  max_steps = 10000000;         // Maximum number of time steps
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
+   bool verify_parallel = false;  // Run production-mesh verification diagnostics
 
    for (int i = 1; i < argc; i++)
    {
@@ -400,6 +574,10 @@ int main(int argc, char *argv[])
       {
          checkpoint_interval = std::atoi(argv[++i]);
       }
+      if (arg == "--max-steps" && i + 1 < argc)
+      {
+         max_steps = std::atoi(argv[++i]);
+      }
       if (arg == "--restart" && i + 1 < argc)
       {
          restart_prefix = argv[++i];
@@ -408,7 +586,6 @@ int main(int argc, char *argv[])
       if (arg == "--mumps") { solver_str = "mumps"; }
       if (arg == "--solver" && i + 1 < argc) { solver_str = argv[++i]; }
       if (arg == "--check-residual") { check_residual = true; }
-      if (arg == "--diag-traction-decomp") { diag_traction_decomp = true; }
       if (arg == "--monitor-traction" && i + 1 < argc)
       {
          monitor_traction = std::atoi(argv[++i]);
@@ -427,7 +604,7 @@ int main(int argc, char *argv[])
          nucleation_eps_override = std::atof(argv[++i]);
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
-      if (arg == "--diag-vtk") { diag_vtk = true; }
+      if (arg == "--verify") { verify_parallel = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
       if (arg == "--psi-init-mode" && i + 1 < argc)
       {
@@ -435,28 +612,11 @@ int main(int argc, char *argv[])
       }
       if (arg == "--order" && i + 1 < argc) { order = std::atoi(argv[++i]); }
       if (arg == "--blr-tol" && i + 1 < argc) { blr_tol = std::atof(argv[++i]); }
-      // v49 Phase 1 diagnostic flags
       if (arg == "--smooth-nucleation") { smooth_nucleation = true; }
       if (arg == "--match-quad-order") { match_quad_order = true; }
-      if (arg == "--diag-normals") { diag_normals = true; }
-      if (arg == "--diag-first-traction") { diag_first_traction = true; }
-      if (arg == "--diag-rk-stages") { diag_rk_stages = true; }
-      if (arg == "--diag-dip-traction") { diag_dip_traction = true; }
       if (arg == "--zero-dip-traction") { zero_dip_traction = true; }
-      if (arg == "--diag-coseismic-dip") { diag_coseismic_dip = true; }
-      if (arg == "--diag-coseismic-dip-threshold" && i + 1 < argc)
-      {
-         diag_coseismic_dip = true;
-         coseismic_dip_threshold = std::atof(argv[++i]);
-      }
-      if (arg == "--diag-uz-fault") { diag_uz_fault = true; }
       if (arg == "--elastic-sigma-n") { elastic_sigma_n = true; }
       if (arg == "--no-elastic-sigma-n") { elastic_sigma_n = false; }
-      if (arg == "--diag-traction-coherence") { diag_traction_coherence = true; }
-      if (arg == "--diag-rhs-z") { diag_rhs_z = true; }
-      if (arg == "--diag-tip-step1") { diag_tip_step1 = true; }
-      if (arg == "--diag-tip-monitor") { diag_tip_monitor = true; }
-      if (arg == "--diag-tnd-tq") { diag_tnd_tq = true; }
       // v49 Phase 2: CFL fix and V guard
       if (arg == "--dt-init" && i + 1 < argc)
       {
@@ -479,19 +639,22 @@ int main(int argc, char *argv[])
          tandem_dt_init = std::atof(argv[++i]);
       }
       if (arg == "--petsc-ts") { use_petsc_ts = true; }
+      if (arg == "--paraview") { use_paraview = true; }
+      if (arg == "--paraview-every" && i + 1 < argc)
+      {
+         use_paraview = true;
+         paraview_step_interval = std::atoi(argv[++i]);
+      }
+      if (arg == "--paraview-dt" && i + 1 < argc)
+      {
+         use_paraview = true;
+         paraview_dt = std::atof(argv[++i]);
+      }
       if (arg == "--petsc-ts-options" && i + 1 < argc)
       {
          petsc_ts_options_file = argv[++i];
       }
       if (arg == "--penalty-factor" && i + 1 < argc) { penalty_factor = std::atof(argv[++i]); }
-      if (arg == "--diag-station-traction-decomp")
-      {
-         diag_station_traction_decomp = true;
-      }
-      if (arg == "--diag-station-jump-residual")
-      {
-         diag_station_jump_residual = true;
-      }
       if (arg == "--psi-clamp")
       {
          no_psi_clamp = false;
@@ -502,7 +665,6 @@ int main(int argc, char *argv[])
          no_psi_clamp = true;
          psi_clamp_explicit = true;
       }
-      if (arg == "--diag-psi-clamp") { diag_psi_clamp = true; }
       if (arg == "--face-basis-type" && i + 1 < argc)
       {
          face_basis_str = argv[++i];
@@ -775,14 +937,14 @@ int main(int argc, char *argv[])
       else if (solver_type == SolverType::STRUMPACK) solver_desc = "STRUMPACK BLR (approximate direct)";
       else if (solver_type == SolverType::GMRES_BlockILU) solver_desc = "GMRES+BlockILU (iterative)";
       std::cout << "  Solver: " << solver_desc << "\n";
-      std::string bc_desc = "FarField (attrs 1-4 Dirichlet, 5-6 Natural)";
+      std::string bc_desc = "FarField";
       if (bc_mode == BCMode::XOnly) bc_desc = "XOnly (attrs 1-2 Dirichlet, 3-6 Natural)";
       else if (bc_mode == BCMode::AllDirichlet) bc_desc = "AllDirichlet (all attrs Dirichlet, legacy)";
       std::cout << "  BC mode: " << bc_desc << "\n";
       std::cout << "  Psi clamp: "
                 << (no_psi_clamp ? "OFF (default, Tandem-style)"
                                  : "ON [-5, 3] (--psi-clamp)")
-                << (diag_psi_clamp ? " [diagnostic]" : "") << "\n";
+                << "\n";
       if (tandem_time_stepping)
       {
          real_t ts_dt = (dt_init_override > 0.0) ? dt_init_override : tandem_dt_init;
@@ -804,12 +966,8 @@ int main(int argc, char *argv[])
                 << " years\n";
       std::cout << "  Output prefix: " << full_prefix << "\n";
       params.Print();
-      // v49 Phase 1 diagnostic flags
-      if (smooth_nucleation) { std::cout << "  [v49] Smooth nucleation: ON\n"; }
-      if (match_quad_order) { std::cout << "  [v49] Match quad order (2p): ON\n"; }
-      if (diag_normals) { std::cout << "  [v49] Diag normals: ON\n"; }
-      if (diag_first_traction) { std::cout << "  [v49] Diag first traction: ON\n"; }
-      if (diag_rk_stages) { std::cout << "  [v49] Diag RK stages: ON\n"; }
+      if (smooth_nucleation) { std::cout << "  Smooth nucleation: ON\n"; }
+      if (match_quad_order) { std::cout << "  Match quad order (2p): ON\n"; }
       std::cout << "\n";
    }
 
@@ -848,21 +1006,8 @@ int main(int argc, char *argv[])
       face_basis_type);
 
    if (check_residual) { domain.SetCheckResidual(true); }
-   if (diag_traction_decomp) { domain.SetDiagTractionDecomp(true); }
    if (blr_tol != 1e-10) { domain.SetBLRTol(blr_tol); }
-   // v49 Phase 1 flags
    if (match_quad_order) { domain.SetMatchQuadOrder(true); }
-   if (diag_normals) { domain.SetDiagNormals(true); }
-   if (diag_first_traction) { domain.SetDiagFirstTraction(true); }
-   if (diag_dip_traction) { domain.SetDiagDipTraction(true); }
-   if (diag_uz_fault) { domain.SetDiagUzFault(true); }
-   if (diag_traction_coherence) { domain.SetDiagTractionCoherence(true); }
-   if (diag_rhs_z) { domain.SetDiagRhsZ(true); }
-   // PETSc TS evaluates RHS at intermediate RK stages before the step is
-   // accepted. For the exact-face MFEM/Tandem comparison we want one dump at
-   // an accepted step state/time, so only arm the in-operator dump here for
-   // non-PETSc steppers. The PETSc path rearms and recomputes once post-step.
-   if (diag_tnd_tq && !use_petsc_ts) { domain.SetDiagTndTQ(true); }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);
@@ -941,11 +1086,6 @@ int main(int argc, char *argv[])
       seas_op.SetZeroDipTraction(true);
       if (mpi.IsRoot()) { std::cout << "  [v51] zero-dip-traction: ON\n"; }
    }
-   if (diag_coseismic_dip)
-   {
-      seas_op.SetDiagCoseismicDip(true, coseismic_dip_threshold);
-      if (mpi.IsRoot()) { std::cout << "  [v51] diag-coseismic-dip: ON (threshold=" << coseismic_dip_threshold << " m/s)\n"; }
-   }
    // v54: elastic sigma_n ON by default (Tandem DieterichRuinaBase.h:87)
    seas_op.SetElasticSigmaN(elastic_sigma_n);
    if (mpi.IsRoot())
@@ -953,6 +1093,74 @@ int main(int argc, char *argv[])
       std::cout << "  [v54] elastic-sigma-n: "
                 << (elastic_sigma_n ? "ON (default, Tandem)" : "OFF (--no-elastic-sigma-n)")
                 << "\n";
+   }
+
+   // Face tracer for per-face diagnostics (rank-local, no MPI)
+   // Coordinate window selects faces in the region where prior blowups occurred.
+   // All ranks participate; max_traced_faces limits output per rank.
+   auto env_truthy = [](const char *name) -> bool
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return false; }
+      std::string s(v);
+      std::transform(s.begin(), s.end(), s.begin(),
+                     [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+      return !(s == "0" || s == "false" || s == "off" || s == "no");
+   };
+   auto env_int = [](const char *name, int default_value) -> int
+   {
+      const char *v = std::getenv(name);
+      if (!v || !*v) { return default_value; }
+      return std::atoi(v);
+   };
+   const bool debug_first_step_dump = env_truthy("SEAS_DEBUG_FIRST_STEP_DUMP");
+   const int debug_first_step_rank =
+      env_int("SEAS_DEBUG_FIRST_STEP_TARGET_RANK", 96);
+
+   seas::TraceConfig trace_cfg;
+   trace_cfg.use_coord_window = true;
+   trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
+   trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
+   trace_cfg.num_control_faces = 2;
+   trace_cfg.max_traced_faces = 50;
+   trace_cfg.output_dir = output_dir;
+   seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
+   face_tracer.SelectFaces(domain, fault_geom);
+   seas_op.SetFaceTracer(&face_tracer);
+
+   if (debug_first_step_dump)
+   {
+      ElasticityDomainOperator<ParMesh>::FirstStepDebugConfig dbg_cfg;
+      dbg_cfg.enabled = true;
+      dbg_cfg.target_rank = debug_first_step_rank;
+      dbg_cfg.output_dir = output_dir;
+      // Fault-tip faces on rank 96 (1000m mesh, 400 ranks):
+      //   fi=4:  near x2=-37 km, depth~39 km (interior, just above tip)
+      //   fi=28: x2=-37 km, depth=40 km (tip corner, v59 blowup DOF)
+      //   fi=29: x2=-36 km, depth=40 km (adjacent tip)
+      //   fi=33: x2=-37 km, depth~39 km (interior control)
+      dbg_cfg.target_fault_faces = {4, 28, 29, 33};
+      domain.SetFirstStepDebugConfig(dbg_cfg);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [debug] first-step IP dump: ON"
+                   << " (target rank " << debug_first_step_rank
+                   << ", fault faces 4/28/29/33)\n";
+      }
+   }
+
+   // =========================================================================
+   // Production-mesh verification: Phase 1 (before K assembly)
+   // =========================================================================
+   if (verify_parallel)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "\n=== Production-Mesh Verification ===\n";
+      }
+      // Test 1: Ghost DOF communication (no K needed)
+      real_t ghost_err = domain.VerifyGhostDOFCommunication();
+      (void)ghost_err;
    }
 
    Vector state(fault_op.StateSize());
@@ -965,6 +1173,37 @@ int main(int argc, char *argv[])
       std::cout << "  V_max = " << V_init << " m/s\n";
       std::cout << "  StateSize = " << fault_op.StateSize() << "\n";
       std::cout << "  SlipSize = " << fault_op.SlipSize() << "\n";
+   }
+
+   // =========================================================================
+   // Production-mesh verification: Phase 2 (after K assembly)
+   // =========================================================================
+   if (verify_parallel)
+   {
+      // K is now assembled (triggered by SetInitialCondition → Solve)
+
+      // Test 2: Dirichlet skip-set audit (root cause diagnostic)
+      domain.VerifyDirichletSkipSets();
+
+      Vector zero_slip(2 * domain.GetNumFaultDOFs());
+      zero_slip = 0.0;
+
+      // Test 3: RHS norms at t=0 (slip only, Dirichlet=0)
+      domain.VerifyRHSNorms(0.0, zero_slip);
+
+      // Test 4: RHS norms at t=1yr (Dirichlet active)
+      domain.VerifyRHSNorms(3.15576e7, zero_slip);
+
+      // Test 5: Per-face shared Dirichlet diagnostic
+      domain.VerifySharedDirichletPerFace(3.15576e7);
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "=== Verification Complete ===\n\n"
+                   << "Compare ||b_dir|| and ||b_total|| between 1-rank and\n"
+                   << "N-rank runs. Mismatch -> shared-face assembly bug.\n"
+                   << "If SIGN_SAME on any face -> dir_sign does not flip.\n\n";
+      }
    }
 
    // =========================================================================
@@ -1006,23 +1245,6 @@ int main(int argc, char *argv[])
       bench_out.PrintDiagnostics(local_x2, local_x3);
    }
 
-   if (diag_station_traction_decomp)
-   {
-      bench_out.EnableTractionDecompositionOutput();
-      if (mpi.IsRoot())
-      {
-         std::cout << "  Diagnostic station traction decomposition: ON\n";
-      }
-   }
-   if (diag_station_jump_residual)
-   {
-      bench_out.EnableJumpResidualOutput();
-      if (mpi.IsRoot())
-      {
-         std::cout << "  Diagnostic station jump residual: ON\n";
-      }
-   }
-
    // Global output (root only)
    std::unique_ptr<ProbeOutput> global_out;
    if (mpi.IsRoot())
@@ -1033,316 +1255,189 @@ int main(int argc, char *argv[])
          "BP5-QD global output");
    }
 
+   // =========================================================================
+   // ParaView output (displacement + fault fields)
+   // =========================================================================
+   std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_out;
+   // Fault field scratch vectors (local = all faces on this rank)
+   Vector pv_local_slip, pv_local_slip_rate, pv_local_traction, pv_local_state;
+   Vector pv_local_normal_stress;
+   if (use_paraview)
+   {
+      pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
+         output_dir + "/ParaView", pmesh, order);
+      // Displacement: non-owning pointer to the live ParGridFunction in seas_op
+      pv_out->RegisterDomainField("displacement",
+         const_cast<ParGridFunction*>(
+            &seas_op.GetDisplacement()));
+
+      // MPI rank field: L2 order-0 (constant per element) for partition visualization
+      {
+         auto *l2_fec = new L2_FECollection(0, 3);
+         auto *l2_fes = new ParFiniteElementSpace(&pmesh, l2_fec);
+         auto *rank_gf = new ParGridFunction(l2_fes);
+         *rank_gf = static_cast<real_t>(mpi.Rank());
+         rank_gf->MakeOwner(l2_fec);  // GF owns FEC+FES, freed on destruction
+         pv_out->RegisterDomainField("mpi_rank", rank_gf);
+      }
+
+      // Fault fields: L2-p0 projection onto volume elements
+      pv_out->InitFaultOutputBP5(
+         domain.GetFaultInteriorFaces(),
+         domain.GetFaultSharedFaces(),
+         domain.GetNbfPerFace());
+
+      // Pre-allocate local fault vectors
+      const int n_local_dofs = domain.GetNumFaultDOFs();
+      pv_local_slip.SetSize(2 * n_local_dofs);
+      pv_local_slip_rate.SetSize(2 * n_local_dofs);
+      pv_local_traction.SetSize(2 * n_local_dofs);
+      pv_local_state.SetSize(n_local_dofs);
+      pv_local_normal_stress.SetSize(n_local_dofs);
+
+      // Set static friction parameters and fault coordinates for visualization.
+      // Expand owned → local so they map to the same faces as the dynamic fields.
+      {
+         const auto &geom = fault_geom;
+         Vector local_a, local_Dc, local_x2, local_x3;
+         domain.ExpandOwnedToLocalFault(geom.GetAValues(), local_a, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetDcValues(), local_Dc, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetCoordsX2(), local_x2, 1);
+         domain.ExpandOwnedToLocalFault(geom.GetCoordsX3(), local_x3, 1);
+         pv_out->SetFaultParamsBP5(local_a, local_Dc, local_x2, local_x3);
+      }
+
+      if (paraview_step_interval > 0)
+      {
+         pv_out->output_every_n_steps = paraview_step_interval;
+      }
+      if (paraview_dt > 0.0)
+      {
+         pv_out->fixed_dt = paraview_dt;
+      }
+
+      if (mpi.IsRoot())
+      {
+         if (paraview_step_interval > 0)
+         {
+            std::cout << "  ParaView output: ON (every "
+                      << paraview_step_interval << " steps)\n";
+         }
+         else if (paraview_dt > 0.0)
+         {
+            std::cout << "  ParaView output: ON (every "
+                      << paraview_dt / BP5Params::seconds_per_year
+                      << " yr)\n";
+         }
+         else
+         {
+            std::cout << "  ParaView output: ON (adaptive schedule)\n";
+         }
+      }
+   }
+
+   // =========================================================================
+   // Fault DOF point cloud (VTP) — diagnostic for coordinate validation
+   // =========================================================================
+   // Writes one VTP file per rank with the EXACT owned-DOF coordinates used
+   // by the friction parameter computation. If the points form a clean fault
+   // rectangle, the coordinates are correct and any ParaView scatter is a
+   // projection artifact. If points are scattered here too, the coordinates
+   // are wrong and that's the root cause.
+   if (use_paraview)
+   {
+      const int n_owned = fault_geom.NumFaultDOFs();  // owned count
+      const Vector &x2 = fault_geom.GetCoordsX2();
+      const Vector &x3 = fault_geom.GetCoordsX3();
+      const Vector &a_vals = fault_geom.GetAValues();
+      const Vector &dc_vals = fault_geom.GetDcValues();
+
+      std::string vtp_file = output_dir + "/fault_dof_coords_r"
+                           + std::to_string(mpi.Rank()) + ".csv";
+      std::ofstream vtp(vtp_file);
+      vtp << "owned_dof,x2,x3,param_a,param_Dc,psi_init\n";
+      vtp << std::setprecision(10);
+      for (int i = 0; i < n_owned; i++)
+      {
+         real_t psi_i = state(i * 3 + 2);  // BP5: [slip_dip, slip_strike, psi]
+         vtp << i << "," << x2(i) << "," << x3(i)
+             << "," << a_vals(i) << "," << dc_vals(i)
+             << "," << psi_i << "\n";
+      }
+      vtp.close();
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Fault DOF point cloud: " << vtp_file
+                   << " (" << n_owned << " owned DOFs)\n";
+      }
+   }
+
+   // Helper lambda: update + save ParaView output at a given time step.
+   // All ranks must call collectively (ParaViewDataCollection::Save is
+   // MPI-collective).  V_max must already be globally reduced.
+   auto paraview_write = [&](int step_num, real_t time, real_t V_max)
+   {
+      if (!pv_out) { return; }
+      // Expand owned fault vectors to local (all faces) for visualization
+      Vector owned_slip;
+      fault_op.GetSlip(state, owned_slip);
+      domain.ExpandOwnedToLocalFault(owned_slip, pv_local_slip, 2);
+      domain.ExpandOwnedToLocalFault(fault_op.GetSlipRate(),
+                                     pv_local_slip_rate, 2);
+      domain.ExpandOwnedToLocalFault(seas_op.GetTraction(),
+                                     pv_local_traction, 2);
+      // State (psi): extract from ODE state vector, 1 comp per DOF
+      {
+         const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+         const int n_owned = fault_op.NumNodes();
+         Vector owned_psi(n_owned);
+         for (int i = 0; i < n_owned; i++)
+         {
+            owned_psi(i) = state(i * spn + 2);
+         }
+         domain.ExpandOwnedToLocalFault(owned_psi, pv_local_state, 1);
+      }
+      // Normal stress (1 comp per DOF, may be empty if disabled)
+      if (seas_op.ElasticSigmaNEnabled() &&
+          seas_op.GetNormalTraction().Size() > 0)
+      {
+         domain.ExpandOwnedToLocalFault(seas_op.GetNormalTraction(),
+                                        pv_local_normal_stress, 1);
+      }
+      else
+      {
+         pv_local_normal_stress = 0.0;
+      }
+      pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
+                                   pv_local_traction, pv_local_state,
+                                   pv_local_normal_stress);
+      bool wrote = pv_out->Save(step_num, time, V_max);
+
+      // Fault surface VTU (proper triangle geometry, no L2-p0 artifacts)
+      // Only write when Save() schedule triggers (same gating).
+      if (wrote)
+      {
+         Vector local_a, local_Dc, local_x2, local_x3;
+         domain.ExpandOwnedToLocalFault(fault_geom.GetAValues(), local_a, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetDcValues(), local_Dc, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX2(), local_x2, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX3(), local_x3, 1);
+         pv_out->WriteFaultSurfaceVTU(
+            output_dir, step_num, time, mpi.Rank(), mpi.Size(),
+            pv_local_slip, pv_local_slip_rate, pv_local_traction,
+            pv_local_state, pv_local_normal_stress,
+            local_a, local_Dc, local_x2, local_x3);
+      }
+   };
+
    // Write initial state
    bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
    bench_out.Flush();
+   paraview_write(0, 0.0, V_init);
    if (mpi.IsRoot() && global_out)
    {
       global_out->WriteStep({0.0, V_init > 0.0 ? std::log10(V_init) : -300.0});
    }
-
-   // =========================================================================
-   // Diagnostic VTK output
-   // =========================================================================
-   if (diag_vtk)
-   {
-      if (mpi.IsRoot())
-      {
-         std::cout << "\n=== Diagnostic VTK Output ===\n";
-      }
-
-      // Solve domain at t=1yr with zero slip to show Dirichlet BC pattern
-      real_t diag_t = BP5Params::seconds_per_year;
-      int N_loc = fault_geom.NumLocalFaultDOFs();
-      Vector zero_slip(2 * N_loc);
-      zero_slip = 0.0;
-
-      ParGridFunction u_diag(&domain.GetFESpace());
-      u_diag = 0.0;
-      domain.Solve(diag_t, zero_slip, u_diag);
-
-      if (mpi.IsRoot())
-      {
-         std::cout << "  Dirichlet BC solve at t=1yr: |u| = "
-                   << u_diag.Norml2() << "\n";
-      }
-
-      // === Test 2 diagnostic: boundary loading traction verification ===
-      // Compute traction at fault from boundary-only solve (zero slip)
-      {
-         Vector diag_traction(2 * N_loc);
-         domain.ComputeTraction(u_diag, zero_slip, diag_traction);
-
-         // Gather to root for analysis
-         Vector local_trac_dip(N_loc), local_trac_strike(N_loc);
-         for (int i = 0; i < N_loc; i++)
-         {
-            local_trac_dip(i) = diag_traction(2 * i);
-            local_trac_strike(i) = diag_traction(2 * i + 1);
-         }
-
-         Vector global_trac_dip, global_trac_strike;
-         fault_geom.GatherToRoot(local_trac_dip, global_trac_dip);
-         fault_geom.GatherToRoot(local_trac_strike, global_trac_strike);
-
-         // Gather coords for this diagnostic only
-         Vector diag_gx2, diag_gx3;
-         fault_geom.GatherToRoot(local_x2, diag_gx2);
-         fault_geom.GatherToRoot(local_x3, diag_gx3);
-
-         if (mpi.IsRoot())
-         {
-            // Analytical estimate: tau = mu*Vp*1yr/(2*Lx)
-            real_t mu = params.mu();
-            real_t tau_analytical = mu * params.Vp * BP5Params::seconds_per_year
-                                    / (2.0 * 100e3);
-            std::cout << "\n  === Boundary Loading Traction Verification ===\n";
-            std::cout << "  Analytical estimate (2D antiplane): "
-                      << tau_analytical << " Pa = "
-                      << tau_analytical / 1e6 << " MPa\n";
-
-            int M = global_trac_strike.Size();
-            // Find station nearest to (x2=0, x3=10km) and (x2=0, x3=22km)
-            for (int target_z : {0, 10000, 22000})
-            {
-               int best = -1;
-               real_t best_dist = 1e30;
-               for (int j = 0; j < M; j++)
-               {
-                  real_t d = std::abs(diag_gx2(j)) +
-                             std::abs(diag_gx3(j) - target_z);
-                  if (d < best_dist) { best_dist = d; best = j; }
-               }
-               if (best >= 0)
-               {
-                  real_t ts = global_trac_strike(best);
-                  real_t td = global_trac_dip(best);
-                  std::cout << "  z=" << target_z/1000 << "km: trac_strike="
-                            << ts << " Pa (" << ts/1e6 << " MPa)"
-                            << "  trac_dip=" << td << " Pa (" << td/1e6 << " MPa)"
-                            << "  ratio_to_analytical=" << ts/tau_analytical
-                            << "\n";
-               }
-            }
-            std::cout << "\n";
-         }
-      }
-
-      // Create L2 p=0 fields for fault parameter visualization
-      L2_FECollection l2_fec(0, 3);
-      ParFiniteElementSpace l2_fes(&pmesh, &l2_fec);
-
-      // --- Centroid-based analytic fields (kept from original) ---
-      ParGridFunction a_field(&l2_fes);
-      a_field = 0.0;
-      ParGridFunction tau_pre_mag(&l2_fes);
-      tau_pre_mag = 0.0;
-      ParGridFunction V_init_field(&l2_fes);
-      V_init_field = 0.0;
-
-      // Map fault parameters to elements adjacent to fault plane (x=0)
-      int n_fault_elem = 0;
-      for (int i = 0; i < pmesh.GetNE(); i++)
-      {
-         Array<int> verts;
-         pmesh.GetElementVertices(i, verts);
-         real_t min_x = 1e30, max_x = -1e30;
-         Vector center(3);
-         center = 0.0;
-         for (int v = 0; v < verts.Size(); v++)
-         {
-            const real_t *coords = pmesh.GetVertex(verts[v]);
-            min_x = std::min(min_x, coords[0]);
-            max_x = std::max(max_x, coords[0]);
-            for (int d = 0; d < 3; d++) { center(d) += coords[d]; }
-         }
-         center /= verts.Size();
-
-         if (min_x > 0.0 || max_x < 0.0) { continue; }
-
-         real_t y = center(1);
-         real_t z = center(2);
-
-         if (std::abs(y) > params.lf / 2.0 || z > params.Wf) { continue; }
-
-         a_field(i) = params.a_of_x2_x3(y, z);
-
-         real_t tau[2];
-         params.tau0_vec(y, z, tau);
-         tau_pre_mag(i) = std::sqrt(tau[0] * tau[0] + tau[1] * tau[1]);
-
-         real_t V[2];
-         params.V_init_vec(y, z, V);
-         V_init_field(i) = std::sqrt(V[0] * V[0] + V[1] * V[1]);
-
-         n_fault_elem++;
-      }
-
-      if (mpi.IsRoot())
-      {
-         std::cout << "  Fault-adjacent elements (centroid, rank 0): "
-                   << n_fault_elem << "\n";
-      }
-
-      // --- State-based fields via fault face → element mapping ---
-      const Array<int> &fault_int_faces = domain.GetFaultInteriorFaces();
-      int nf_int = fault_int_faces.Size();
-
-      std::vector<int> face_elem1(nf_int), face_elem2(nf_int);
-      for (int i = 0; i < nf_int; i++)
-      {
-         FaceElementTransformations *FTr =
-            pmesh.GetInteriorFaceTransformations(fault_int_faces[i]);
-         face_elem1[i] = FTr->Elem1No;
-         face_elem2[i] = FTr->Elem2No;
-      }
-
-      // Extract fault quantities from state
-      Vector slip, theta;
-      fault_op.GetSlip(state, slip);
-      fault_op.GetTheta(state, theta);
-      const Vector &V_rate = fault_op.GetSlipRate();
-      const Vector &traction = seas_op.GetTraction();
-      const Vector &tau_pre = fault_geom.GetTauPre();
-      const Vector &a_vals = fault_geom.GetAValues();
-      const Vector &dc_vals = fault_geom.GetDcValues();
-
-      // Create L2 p=0 fields for state-based quantities
-      ParGridFunction slip_dip_f(&l2_fes);    slip_dip_f = 0.0;
-      ParGridFunction slip_strike_f(&l2_fes); slip_strike_f = 0.0;
-      ParGridFunction V_dip_f(&l2_fes);       V_dip_f = 0.0;
-      ParGridFunction V_strike_f(&l2_fes);    V_strike_f = 0.0;
-      ParGridFunction V_mag_f(&l2_fes);       V_mag_f = 0.0;
-      ParGridFunction tau_dip_f(&l2_fes);     tau_dip_f = 0.0;
-      ParGridFunction tau_strike_f(&l2_fes);  tau_strike_f = 0.0;
-      ParGridFunction tau_mag_f(&l2_fes);     tau_mag_f = 0.0;
-      ParGridFunction psi_f(&l2_fes);         psi_f = 0.0;
-      ParGridFunction a_state_f(&l2_fes);     a_state_f = 0.0;
-      ParGridFunction dc_f(&l2_fes);          dc_f = 0.0;
-
-      // Map fault DOFs to adjacent elements
-      // DOF ordering: interior faces first (0..nf_int-1), then shared faces
-      for (int i = 0; i < nf_int; i++)
-      {
-         int e1 = face_elem1[i];
-         int e2 = face_elem2[i];
-
-         real_t sd = slip(2 * i);
-         real_t ss = slip(2 * i + 1);
-         slip_dip_f(e1) = sd;    slip_dip_f(e2) = sd;
-         slip_strike_f(e1) = ss; slip_strike_f(e2) = ss;
-
-         real_t vd = V_rate(2 * i);
-         real_t vs = V_rate(2 * i + 1);
-         real_t vm = std::sqrt(vd * vd + vs * vs);
-         V_dip_f(e1) = vd;    V_dip_f(e2) = vd;
-         V_strike_f(e1) = vs; V_strike_f(e2) = vs;
-         V_mag_f(e1) = vm;    V_mag_f(e2) = vm;
-
-         // Total stress = pre-stress + elastic traction
-         real_t td = tau_pre(2 * i) + traction(2 * i);
-         real_t ts = tau_pre(2 * i + 1) + traction(2 * i + 1);
-         real_t tm = std::sqrt(td * td + ts * ts);
-         tau_dip_f(e1) = td;    tau_dip_f(e2) = td;
-         tau_strike_f(e1) = ts; tau_strike_f(e2) = ts;
-         tau_mag_f(e1) = tm;    tau_mag_f(e2) = tm;
-
-         psi_f(e1) = theta(i); psi_f(e2) = theta(i);
-         a_state_f(e1) = a_vals(i); a_state_f(e2) = a_vals(i);
-         dc_f(e1) = dc_vals(i); dc_f(e2) = dc_vals(i);
-      }
-
-      if (mpi.IsRoot())
-      {
-         std::cout << "  Fault interior faces mapped: " << nf_int << "\n";
-      }
-
-      // Save via ParaViewDataCollection
-      ParaViewDataCollection pv("bp5_diag", &pmesh);
-      pv.SetPrefixPath(output_dir);
-      pv.SetDataFormat(VTKFormat::ASCII);
-      // Volume displacement
-      pv.RegisterField("displacement", &u_diag);
-      // Centroid-based analytic fields
-      pv.RegisterField("fault_a", &a_field);
-      pv.RegisterField("tau_pre_magnitude", &tau_pre_mag);
-      pv.RegisterField("V_init_magnitude", &V_init_field);
-      // State-based fields
-      pv.RegisterField("slip_dip", &slip_dip_f);
-      pv.RegisterField("slip_strike", &slip_strike_f);
-      pv.RegisterField("V_dip", &V_dip_f);
-      pv.RegisterField("V_strike", &V_strike_f);
-      pv.RegisterField("V_magnitude", &V_mag_f);
-      pv.RegisterField("tau_dip", &tau_dip_f);
-      pv.RegisterField("tau_strike", &tau_strike_f);
-      pv.RegisterField("tau_magnitude", &tau_mag_f);
-      pv.RegisterField("state_psi", &psi_f);
-      pv.RegisterField("fault_a_state", &a_state_f);
-      pv.RegisterField("fault_dc", &dc_f);
-      pv.SetCycle(0);
-      pv.SetTime(0.0);
-      pv.Save();
-
-      // Also output boundary attributes
-      pmesh.PrintBdrVTU(output_dir + "/boundary_attributes");
-
-      if (mpi.IsRoot())
-      {
-         std::cout << "  ParaView output: " << output_dir << "/bp5_diag/\n";
-         std::cout << "  Fields: displacement, fault_a, tau_pre_magnitude, "
-                   << "V_init_magnitude\n";
-         std::cout << "  State fields: slip_dip/strike, V_dip/strike/magnitude, "
-                   << "tau_dip/strike/magnitude, state_psi, fault_a_state, "
-                   << "fault_dc\n";
-         std::cout << "  Boundary VTK: " << output_dir
-                   << "/boundary_attributes\n";
-         std::cout << "  Open in ParaView: File > Open > bp5_diag.pvd\n";
-         std::cout << "  To see fault 'a': Threshold filter on fault_a > 0\n";
-         std::cout << "=== Diagnostic VTK Complete ===\n\n";
-      }
-   }
-
-   auto write_station_fault_diagnostics = [&](real_t time_now)
-   {
-      if (!diag_station_traction_decomp && !diag_station_jump_residual)
-      {
-         return;
-      }
-
-      Vector slip_diag;
-      fault_op.GetSlip(state, slip_diag);
-
-      Vector traction_diag, traction_stress_diag, traction_corr_diag;
-      Vector jump_residual_diag;
-      if (diag_station_jump_residual)
-      {
-         domain.ComputeTractionDiagnostics(seas_op.GetDisplacement(),
-                                           slip_diag,
-                                           traction_diag,
-                                           traction_stress_diag,
-                                           traction_corr_diag,
-                                           jump_residual_diag);
-      }
-      else
-      {
-         domain.ComputeTractionComponents(seas_op.GetDisplacement(),
-                                          slip_diag,
-                                          traction_diag,
-                                          traction_stress_diag,
-                                          traction_corr_diag);
-      }
-
-      if (diag_station_traction_decomp)
-      {
-         bench_out.WriteTractionDecomposition(time_now,
-                                              traction_stress_diag,
-                                              traction_corr_diag);
-      }
-      if (diag_station_jump_residual)
-      {
-         bench_out.WriteJumpResidual(time_now, jump_residual_diag);
-      }
-   };
 
    // =========================================================================
    // Time integration (Dormand-Prince RK45)
@@ -1393,7 +1488,7 @@ int main(int argc, char *argv[])
    }
    real_t current_dt = dt_init;
    int step_rejections = 0;
-   int max_steps = 10000000;
+   int print_step_interval = 10;
    Vector empty_k0;
 
    if (!use_petsc_ts)
@@ -1409,7 +1504,6 @@ int main(int argc, char *argv[])
                    << "\n";
       }
       ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
-      if (diag_rk_stages) { ode_solver.SetDiagRKStages(true); }
 
       // v50: V-guard ON by default (factor=100). Prevents RK cascade overflow.
       // Use --v-guard <factor> to change threshold, --no-v-guard to disable.
@@ -1430,9 +1524,7 @@ int main(int argc, char *argv[])
    }
 #ifdef MFEM_USE_PETSC
    std::unique_ptr<PetscODESolver> petsc_ode;
-   // Persistent PETSc vector for state — avoids MFEM's PlaceMemory/
-   // ResetMemory cycle which can crash with certain PETSc versions.
-   std::unique_ptr<PetscParVector> petsc_state;
+   BP5MonitorCtx petsc_mon_ctx{};  // zero-initialized
    if (use_petsc_ts)
    {
       // No prefix: options file uses unprefixed names (-ts_type, etc.)
@@ -1460,31 +1552,42 @@ int main(int argc, char *argv[])
       PetscErrorCode ierr = TSSetFromOptions(ts);
       MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetFromOptions failed");
 
-      ierr = TSSetExactFinalTime(ts, TS_EXACTFINALTIME_MATCHSTEP);
-      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetExactFinalTime(MATCHSTEP) failed");
-      ierr = TSSetMaxTime(ts, t_final);
-      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetMaxTime() failed");
+      // Set initial dt once — MFEM's Run() will pass this to TSSolve.
+      // Matches Tandem: set dt once, then TSSolve handles everything.
+      ierr = TSSetTimeStep(ts, dt_init);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTimeStep(dt_init) failed");
 
-      // Create a persistent PETSc-managed copy of the state vector.
-      // PetscODESolver::Step uses PlaceMemory/ResetMemory which fails
-      // with PETSc 3.15. Instead, we copy state ↔ petsc_state at each
-      // step and call TSStep directly.
-      petsc_state = std::make_unique<PetscParVector>(
-         mpi.GetComm(), state, true);
-      ierr = TSSetSolution(ts, *petsc_state);
-      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetSolution() failed");
+      // Register monitor callback for per-step I/O, earthquake detection,
+      // console output, checkpointing — exactly Tandem's TSMonitorSet pattern.
+      // MFEM's Run() calls TSSolve; the monitor fires after each accepted step.
+      petsc_mon_ctx.mpi = &mpi;
+      petsc_mon_ctx.state = &state;
+      petsc_mon_ctx.bench_out = &bench_out;
+      petsc_mon_ctx.face_tracer = &face_tracer;
+      petsc_mon_ctx.fault_op = &fault_op;
+      petsc_mon_ctx.seas_op = &seas_op;
+      petsc_mon_ctx.global_out = global_out.get();
+      petsc_mon_ctx.write_every_step = write_every_step;
+      petsc_mon_ctx.print_step_interval = print_step_interval;
+      petsc_mon_ctx.checkpoint_interval = checkpoint_interval;
+      petsc_mon_ctx.full_prefix = full_prefix;
+      petsc_mon_ctx.debug_first_step_dump = debug_first_step_dump;
+      petsc_mon_ctx.num_seismic_events = 0;
+      petsc_mon_ctx.in_seismic_event = false;
+      petsc_mon_ctx.V_threshold_seismic = 1e-3;
+      petsc_mon_ctx.V_threshold_interseismic = 1e-6;
+      petsc_mon_ctx.paraview_write_fn = paraview_write;
+      petsc_mon_ctx.current_dt = dt_init;
+
+      ierr = TSMonitorSet(ts, bp5_ts_monitor_callback, &petsc_mon_ctx,
+                          nullptr);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSMonitorSet failed");
 
       current_dt = dt_init;
       if (mpi.IsRoot())
       {
-         std::cout << "  PETSc TS initial dt: "
-                   << ((dt_init_override > 0.0) ? dt_init : 0.1)
-                   << " s";
-         if (dt_init_override <= 0.0)
-         {
-            std::cout << " (PETSc default if not overridden)";
-         }
-         std::cout << "\n";
+         std::cout << "  PETSc TS initial dt: " << dt_init << " s\n";
+         std::cout << "  Time stepping: TSSolve (Tandem-style, no manual TSStep loop)\n";
       }
    }
 #endif
@@ -1552,555 +1655,240 @@ int main(int argc, char *argv[])
       std::cout << std::string(64, '-') << "\n";
    }
 
-   int print_step_interval = 10;
-
-   // =========================================================================
-   // v58: One-step tip reproducer — isolate first-solve asymmetry
-   // =========================================================================
-   if (diag_tip_step1)
-   {
-      if (mpi.IsRoot())
-      {
-         std::cout << "\n[TIP-STEP1] One-step reproducer: applying first nonzero slip...\n";
-      }
-
-      // Apply first nonzero slip: V_init * dt with dt=0.01s (Tandem default)
-      // This mimics what the first RK stage does.
-      real_t dt_step1 = 0.01;
-      int num_nodes = fault_op.NumNodes();
-      const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
-
-      // Create a state with first-step slip increment
-      Vector state_step1 = state;  // copy initial state
-      for (int i = 0; i < num_nodes; i++)
-      {
-         // dslip/dt = V_init, so slip += V_init * dt * RK_coeff
-         // For RK45 stage 2: coeff = a21 = 1/5
-         real_t coeff = 0.2;
-         const Vector &V = fault_op.GetSlipRate();
-         state_step1(i * spn + 0) += V(2*i)   * dt_step1 * coeff;
-         state_step1(i * spn + 1) += V(2*i+1) * dt_step1 * coeff;
-      }
-
-      // Extract slip from state
-      Vector slip_step1(fault_op.SlipSize());
-      fault_op.GetSlip(state_step1, slip_step1);
-
-      // Expand to local and solve
-      Vector local_slip_step1;
-      domain.ExpandOwnedToLocalFault(slip_step1, local_slip_step1,
-                                      domain.NumSlipComponents());
-
-      // === Solve K*u = b(slip) ===
-      ParGridFunction u_step1(&domain.GetFESpace());
-      domain.Solve(0.0, local_slip_step1, u_step1);
-
-      // === Compute traction with decomposition ===
-      Vector trac_step1, trac_stress_step1, trac_corr_step1;
-      domain.ComputeTractionComponents(u_step1, local_slip_step1,
-                                        trac_step1,
-                                        trac_stress_step1,
-                                        trac_corr_step1);
-
-      // === Evaluate friction with the step1 traction ===
-      // Restrict local traction to owned DOFs, then run ComputeRHS
-      Vector trac_owned_step1;
-      domain.RestrictToOwnedFault(trac_step1, trac_owned_step1,
-                                   domain.NumSlipComponents());
-      // Reset the friction diagnostic flag so it fires on THIS call
-      fault_op.ResetTipFrictionDiag();
-      Vector rate_step1(fault_op.StateSize());
-      fault_op.ComputeRHS(trac_owned_step1, state_step1, rate_step1);
-
-      // === Dump mirror tip faces ===
-      const auto *geom = fault_op.GetGeometry();
-      const Vector &x2 = geom->GetCoordsX2();
-      const Vector &x3 = geom->GetCoordsX3();
-
-      for (int i = 0; i < num_nodes; i++)
-      {
-         // Mirror tip DOFs: |x2| > 49km AND depth < 2.5km
-         if (std::abs(x2(i)) > 49000.0 && x3(i) < 2500.0)
-         {
-            real_t tau_stress_d = trac_stress_step1(2*i);
-            real_t tau_stress_s = trac_stress_step1(2*i+1);
-            real_t tau_corr_d = trac_corr_step1(2*i);
-            real_t tau_corr_s = trac_corr_step1(2*i+1);
-            real_t tau_d = trac_step1(2*i);
-            real_t tau_s = trac_step1(2*i+1);
-            real_t slip_d = slip_step1(2*i);
-            real_t slip_s = slip_step1(2*i+1);
-
-            real_t tau_abs = std::sqrt(tau_d*tau_d + tau_s*tau_s);
-            real_t stress_abs = std::sqrt(tau_stress_d*tau_stress_d +
-                                          tau_stress_s*tau_stress_s);
-            real_t corr_abs = std::sqrt(tau_corr_d*tau_corr_d +
-                                         tau_corr_s*tau_corr_s);
-            // Single-line format to survive MPI interleaving
-            mfem::out << std::scientific << std::setprecision(6)
-               << "[TS1] r=" << mpi.Rank()
-               << " d=" << i
-               << " x=" << x2(i) << " z=" << x3(i)
-               << " |tau|=" << tau_abs
-               << " |str|=" << stress_abs
-               << " |cor|=" << corr_abs
-               << " sl=(" << slip_d << "," << slip_s << ")"
-               << "\n";
-         }
-      }
-
-      if (mpi.IsRoot())
-      {
-         std::cout << "[TIP-STEP1] Done. Exiting.\n";
-      }
-      MPI_Finalize();
-      return 0;
-   }
-
    // =========================================================================
    // Main time-stepping loop
    // =========================================================================
-   constexpr real_t target_tnd_tq_time = 2.0e-2;
-   bool poststep_tnd_tq_done = false;
-   while (t < t_final && step < max_steps)
-   {
-      real_t t_before_step = t;
-      if (!use_petsc_ts && t + ode_solver.GetDt() > t_final)
-      {
-         ode_solver.SetDt(t_final - t);
-      }
-
-      // Carry the next accepted-step metadata into the elasticity operator's
-      // face diagnostics before any stage solve happens inside the time step.
-      {
-         real_t step_dt_hint = use_petsc_ts ? current_dt : ode_solver.GetDt();
-         domain.SetDiagSolveMetadata(step + 1, step_dt_hint);
-      }
-
-      real_t dt;
-      bool accepted = true;
-      if (!use_petsc_ts)
-      {
-         accepted = ode_solver.Step(seas_op, state, t, dt);
-         if (!accepted) { continue; }
-         current_dt = ode_solver.GetDt();
-      }
 #ifdef MFEM_USE_PETSC
-      else
+   if (use_petsc_ts)
+   {
+      // ---- Tandem-style TSSolve: single call, PETSc manages everything ----
+      // MFEM's Run() maps state memory into PETSc Vec via PlaceMemory,
+      // calls TSSolve, then copies back final time and dt.
+      // Per-step monitoring (I/O, earthquake detection, console output)
+      // is handled by the bp5_ts_monitor_callback registered above.
+      MFEM_VERIFY(petsc_ode, "PETSc TS solver was not initialized");
+
+      if (mpi.IsRoot())
       {
-         MFEM_VERIFY(petsc_ode && petsc_state,
-                     "PETSc TS solver was not initialized");
+         std::cout << "  Entering TSSolve (t=" << t << " → " << t_final
+                   << " s) ...\n";
+         std::cout.flush();
+      }
+
+      petsc_ode->Run(state, t, current_dt, t_final);
+
+      // Retrieve final step count and rejection count from PETSc
+      {
          petsc::TS ts = *petsc_ode;
-         PetscErrorCode ierr;
-
-         // Copy state → PETSc Vec (bypass MFEM PlaceMemory)
-         {
-            PetscScalar *arr;
-            ierr = VecGetArray(*petsc_state, &arr);
-            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArray failed");
-            for (int i = 0; i < state.Size(); i++) { arr[i] = state(i); }
-            ierr = VecRestoreArray(*petsc_state, &arr);
-            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArray failed");
-         }
-
-         // Take one PETSc TS step directly
-         dt = current_dt;
-         ierr = TSSetTime(ts, t);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTime failed");
-         ierr = TSSetTimeStep(ts, dt);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTimeStep failed");
-         ierr = TSStep(ts);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSStep failed");
-
-         // Read back updated time and state
-         PetscReal pt;
-         ierr = TSGetTime(ts, &pt);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTime failed");
-         dt = pt - t;
-         t = pt;
-
-         // Copy PETSc Vec → state
-         {
-            const PetscScalar *arr;
-            ierr = VecGetArrayRead(*petsc_state, &arr);
-            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecGetArrayRead failed");
-            for (int i = 0; i < state.Size(); i++) { state(i) = arr[i]; }
-            ierr = VecRestoreArrayRead(*petsc_state, &arr);
-            MFEM_VERIFY(ierr == PETSC_SUCCESS, "VecRestoreArrayRead failed");
-         }
-
-         PetscReal next_dt = 0.0;
-         ierr = TSGetTimeStep(ts, &next_dt);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetTimeStep() failed");
-         current_dt = next_dt;
+         PetscInt ts_steps = 0;
+         TSGetStepNumber(ts, &ts_steps);
+         step = static_cast<int>(ts_steps);
          PetscInt rejects = 0;
-         ierr = TSGetStepRejections(ts, &rejects);
-         MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSGetStepRejections() failed");
+         TSGetStepRejections(ts, &rejects);
          step_rejections = static_cast<int>(rejects);
       }
+
+      // Copy monitor state back for summary
+      num_seismic_events = petsc_mon_ctx.num_seismic_events;
+      in_seismic_event = petsc_mon_ctx.in_seismic_event;
+   }
+   else
 #endif
-      // For PETSc TS, replay the exact-face diagnostic on the first accepted
-      // step whose accepted time reaches the Tandem target time (currently
-      // t=2.0e-2 s). Adaptive RK45 does not preserve a fixed accepted-step
-      // count, so triggering by step index is not robust.
-      bool do_poststep_tnd_tq = use_petsc_ts && diag_tnd_tq &&
-         !poststep_tnd_tq_done &&
-         (t_before_step < target_tnd_tq_time) &&
-         (t >= target_tnd_tq_time);
-      step++;
-
-      // PETSc TS RHS evaluations occur at internal RK stage times, so the
-      // usual in-operator diagnostic can capture a stage state instead of the
-      // accepted step. Recompute once at the targeted accepted post-step
-      // state/time.
-      if (do_poststep_tnd_tq)
+   {
+      // ---- Original MFEM Dormand-Prince loop (non-PETSc path) ----
+      while (t < t_final && step < max_steps)
       {
-         poststep_tnd_tq_done = true;
-         domain.SetDiagSolveMetadata(step, dt);
-         domain.SetDiagTndTQ(true);
-
-         Vector slip_owned_dbg(fault_op.SlipSize());
-         fault_op.GetSlip(state, slip_owned_dbg);
-
-         Vector slip_local_dbg(domain.NumSlipComponents() * domain.GetNumFaultDOFs());
-         domain.ExpandOwnedToLocalFault(slip_owned_dbg, slip_local_dbg,
-                                        domain.NumSlipComponents());
-
-         ParGridFunction u_dbg(&domain.GetFESpace());
-         u_dbg = 0.0;
-         Vector traction_dbg(domain.NumSlipComponents() * domain.GetNumFaultDOFs());
-         traction_dbg = 0.0;
-
-         domain.Solve(t, slip_local_dbg, u_dbg);
-         domain.ComputeTraction(u_dbg, slip_local_dbg, traction_dbg);
-      }
-
-      // Post-step psi clamping is MFEM-specific. Tandem does not do this, so
-      // keep it switchable and instrumented while debugging dynamic mismatch.
-      if (!no_psi_clamp)
-      {
-         const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
-         const int psi_idx = 2;
-         const real_t psi_max = 3.0;
-         const real_t psi_min = -5.0;
-         int local_hi = 0;
-         int local_lo = 0;
-         real_t local_max_hi = -std::numeric_limits<real_t>::infinity();
-         real_t local_min_lo = std::numeric_limits<real_t>::infinity();
-         int n_nodes = state.Size() / spn;
-         for (int i = 0; i < n_nodes; i++)
+         if (t + ode_solver.GetDt() > t_final)
          {
-            real_t &psi = state(i * spn + psi_idx);
-            if (psi > psi_max)
-            {
-               local_hi++;
-               local_max_hi = std::max(local_max_hi, psi);
-               psi = psi_max;
-            }
-            else if (psi < psi_min)
-            {
-               local_lo++;
-               local_min_lo = std::min(local_min_lo, psi);
-               psi = psi_min;
-            }
+            ode_solver.SetDt(t_final - t);
          }
 
-         int global_hi = mpi.GlobalSumInt(local_hi);
-         int global_lo = mpi.GlobalSumInt(local_lo);
-         real_t global_max_hi = (global_hi > 0)
-                                  ? mpi.GlobalMax(local_max_hi)
-                                  : -std::numeric_limits<real_t>::infinity();
-         real_t global_min_lo = (global_lo > 0)
-                                  ? mpi.GlobalMin(local_min_lo)
-                                  : std::numeric_limits<real_t>::infinity();
+         real_t dt;
+         bool accepted = ode_solver.Step(seas_op, state, t, dt);
+         if (!accepted) { continue; }
+         current_dt = ode_solver.GetDt();
+         step++;
 
-         if (global_hi > 0 || global_lo > 0)
+         // Post-step psi clamping is MFEM-specific. Tandem does not do this,
+         // so keep it switchable and instrumented while debugging.
+         if (!no_psi_clamp)
          {
-            psi_clamp_hits_hi += global_hi;
-            psi_clamp_hits_lo += global_lo;
-            if (global_hi > 0)
+            const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+            const int psi_idx = 2;
+            const real_t psi_max = 3.0;
+            const real_t psi_min = -5.0;
+            int local_hi = 0;
+            int local_lo = 0;
+            real_t local_max_hi = -std::numeric_limits<real_t>::infinity();
+            real_t local_min_lo = std::numeric_limits<real_t>::infinity();
+            int n_nodes = state.Size() / spn;
+            for (int i = 0; i < n_nodes; i++)
             {
-               psi_clamp_max_hi = std::max(psi_clamp_max_hi, global_max_hi);
-            }
-            if (global_lo > 0)
-            {
-               psi_clamp_min_lo = std::min(psi_clamp_min_lo, global_min_lo);
-            }
-            if (psi_clamp_first_step < 0)
-            {
-               psi_clamp_first_step = step + 1;
-               psi_clamp_first_time = t;
-               if (diag_psi_clamp && mpi.IsRoot())
+               real_t &psi = state(i * spn + psi_idx);
+               if (psi > psi_max)
                {
-                  std::cout << "  [psi-clamp] first activation at accepted step "
-                            << psi_clamp_first_step
-                            << ", t=" << std::scientific
-                            << std::setprecision(6) << psi_clamp_first_time
-                            << " s, hi_hits=" << global_hi
-                            << ", lo_hits=" << global_lo;
-                  if (global_hi > 0)
-                  {
-                     std::cout << ", max_hi=" << global_max_hi;
-                  }
-                  if (global_lo > 0)
-                  {
-                     std::cout << ", min_lo=" << global_min_lo;
-                  }
-                  std::cout << "\n";
+                  local_hi++;
+                  local_max_hi = std::max(local_max_hi, psi);
+                  psi = psi_max;
+               }
+               else if (psi < psi_min)
+               {
+                  local_lo++;
+                  local_min_lo = std::min(local_min_lo, psi);
+                  psi = psi_min;
+               }
+            }
+
+            int global_hi = mpi.GlobalSumInt(local_hi);
+            int global_lo = mpi.GlobalSumInt(local_lo);
+            real_t global_max_hi = (global_hi > 0)
+                                     ? mpi.GlobalMax(local_max_hi)
+                                     : -std::numeric_limits<real_t>::infinity();
+            real_t global_min_lo = (global_lo > 0)
+                                     ? mpi.GlobalMin(local_min_lo)
+                                     : std::numeric_limits<real_t>::infinity();
+
+            if (global_hi > 0 || global_lo > 0)
+            {
+               psi_clamp_hits_hi += global_hi;
+               psi_clamp_hits_lo += global_lo;
+               if (global_hi > 0)
+               {
+                  psi_clamp_max_hi = std::max(psi_clamp_max_hi, global_max_hi);
+               }
+               if (global_lo > 0)
+               {
+                  psi_clamp_min_lo = std::min(psi_clamp_min_lo, global_min_lo);
+               }
+               if (psi_clamp_first_step < 0)
+               {
+                  psi_clamp_first_step = step + 1;
+                  psi_clamp_first_time = t;
                }
             }
          }
-      }
 
-      real_t V_max = seas_op.GetMaxSlipRate();
-
-      // v58 tip DOF monitor — production-safe, tracks feedback loop at tip
-      if (diag_tip_monitor)
-      {
-         real_t t_yr = t / BP5Params::seconds_per_year;
-         bool should_log = false;
-         if (step <= 64 && (step & (step - 1)) == 0) { should_log = true; }
-         else if (step % 500 == 0) { should_log = true; }
-         else if (t_yr > 0.40 && step % 50 == 0) { should_log = true; }
-         else if (t_yr > 0.50 && step % 5 == 0) { should_log = true; }
-
-         if (should_log)
+         // Face tracer: commit after psi clamp so psi reflects the carried state.
+         if (face_tracer.IsActive())
          {
-            const auto *geom = fault_op.GetGeometry();
-            if (geom)
-            {
-               const Vector &x2 = geom->GetCoordsX2();
-               const Vector &x3 = geom->GetCoordsX3();
-               const Vector &slip_rate = fault_op.GetSlipRate();
-               const Vector &traction = seas_op.GetTraction();
-               const bool have_sn = seas_op.ElasticSigmaNEnabled();
-               const Vector &ntrac = seas_op.GetNormalTraction();
-               real_t sn0 = fault_op.GetSigmaN();
-               int nn = fault_op.NumNodes();
-               int spn = 3;  // BP5: slip_dip, slip_strike, psi
+            face_tracer.CommitStep(step, t, state, false);
+         }
 
-               for (int i = 0; i < nn; i++)
-               {
-                  if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
-                  {
-                     real_t psi = state(i * spn + 2);
-                     real_t slip_d = state(i * spn + 0);
-                     real_t slip_s = state(i * spn + 1);
-                     real_t V_abs = std::sqrt(
-                        slip_rate(2*i)*slip_rate(2*i) +
-                        slip_rate(2*i+1)*slip_rate(2*i+1));
-                     real_t tau_d = traction(2*i);
-                     real_t tau_s = traction(2*i+1);
-                     // normal_traction: positive in compression (= -T·n̂)
-                     // sigma_n_eff = sigma_n_bp5 + normal_traction
-                     // (matches ComputeRHS line 452 in rate_state_fault.hpp)
-                     real_t sn_el = (have_sn && ntrac.Size() > i) ? ntrac(i) : 0.0;
-                     real_t sn_eff = sn0 + sn_el;
-                     mfem::out << std::scientific << std::setprecision(8)
-                        << "[TIP-MON] s=" << step
-                        << " t=" << t_yr
-                        << " dt=" << dt
-                        << " r=" << mpi.Rank()
-                        << " d=" << i
-                        << " x=" << x2(i)
-                        << " z=" << x3(i)
-                        << " psi=" << psi
-                        << " |V|=" << V_abs
-                        << " td=" << tau_d
-                        << " ts=" << tau_s
-                        << " sn_el=" << sn_el
-                        << " sn_eff=" << sn_eff
-                        << " sl=(" << slip_d << "," << slip_s << ")"
-                        << "\n";
-                  }
-               }
+         real_t V_max = seas_op.GetMaxSlipRate();
+
+         // NaN/Inf check
+         bool has_nan = !std::isfinite(V_max);
+         if (!has_nan)
+         {
+            for (int i = 0; i < std::min(state.Size(), 100); i++)
+            {
+               if (!std::isfinite(state(i))) { has_nan = true; break; }
             }
          }
-      }
-
-      // v58: one-shot face-level dump when any tip DOF crosses onset threshold
-      if (diag_tip_monitor && !diag_tip_face_dumped)
-      {
-         const auto *geom = fault_op.GetGeometry();
-         const bool have_sn = seas_op.ElasticSigmaNEnabled();
-         const Vector &ntrac = seas_op.GetNormalTraction();
-         if (geom)
          {
-            const Vector &x2 = geom->GetCoordsX2();
-            const Vector &x3 = geom->GetCoordsX3();
-            const Vector &slip_rate = fault_op.GetSlipRate();
-            const Vector &traction = seas_op.GetTraction();
-            int nn = fault_op.NumNodes();
-            bool triggered = false;
-            for (int i = 0; i < nn && !triggered; i++)
+            int local_nan = has_nan ? 1 : 0;
+            int global_nan = mpi.GlobalSumInt(local_nan);
+            has_nan = (global_nan > 0);
+         }
+         if (has_nan)
+         {
+            if (mpi.IsRoot())
             {
-               if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
-               {
-                  real_t V_abs = std::sqrt(
-                     slip_rate(2*i)*slip_rate(2*i) +
-                     slip_rate(2*i+1)*slip_rate(2*i+1));
-                  real_t tau_abs = std::sqrt(
-                     traction(2*i)*traction(2*i) +
-                     traction(2*i+1)*traction(2*i+1));
-                  real_t sn_el_abs = (have_sn && ntrac.Size() > i) ?
-                     std::abs(ntrac(i)) : 0.0;
-                  if (V_abs > 1e-7 || tau_abs > 1e8 || sn_el_abs > 1e7)
-                  {
-                     triggered = true;
-                  }
-               }
+               std::cerr << "NaN/Inf detected at step " << step
+                         << ", t = " << t / BP5Params::seconds_per_year
+                         << " yr, V_max = " << V_max << "\n";
             }
-            // Global trigger so all ranks participate
-            int local_trig = triggered ? 1 : 0;
-            int global_trig = mpi.GlobalSumInt(local_trig);
-            if (global_trig > 0)
-            {
-               diag_tip_face_dumped = true;
-               // Compute traction decomposition (stress vs penalty)
-               Vector slip_diag;
-               fault_op.GetSlip(state, slip_diag);
-               Vector local_slip_diag;
-               domain.ExpandOwnedToLocalFault(slip_diag, local_slip_diag,
-                                               domain.NumSlipComponents());
-               Vector trac_decomp, trac_stress, trac_corr;
-               domain.ComputeTractionComponents(
-                  seas_op.GetDisplacement(), local_slip_diag,
-                  trac_decomp, trac_stress, trac_corr);
-               Vector trac_stress_own, trac_corr_own;
-               domain.RestrictToOwnedFault(trac_stress, trac_stress_own,
-                                            domain.NumSlipComponents());
-               domain.RestrictToOwnedFault(trac_corr, trac_corr_own,
-                                            domain.NumSlipComponents());
+            break;
+         }
 
-               for (int i = 0; i < nn; i++)
-               {
-                  if (std::abs(x2(i)) > 48000.0 && x3(i) < 2500.0)
-                  {
-                     mfem::out << std::scientific << std::setprecision(10)
-                        << "[TIP-FACE-DUMP] s=" << step
-                        << " t=" << t / BP5Params::seconds_per_year
-                        << " r=" << mpi.Rank()
-                        << " d=" << i
-                        << " x=" << x2(i)
-                        << " z=" << x3(i)
-                        << " str_d=" << trac_stress_own(2*i)
-                        << " str_s=" << trac_stress_own(2*i+1)
-                        << " cor_d=" << trac_corr_own(2*i)
-                        << " cor_s=" << trac_corr_own(2*i+1)
-                        << " sn_el=" << ((have_sn && ntrac.Size() > i) ? ntrac(i) : 0.0)
-                        << "\n";
-                  }
-               }
-               if (mpi.IsRoot())
-               {
-                  std::cout << "[TIP-FACE-DUMP] triggered at step=" << step
-                     << " t=" << t / BP5Params::seconds_per_year << " yr\n";
-               }
+         // Earthquake detection
+         if (!in_seismic_event && V_max > V_threshold_seismic)
+         {
+            in_seismic_event = true;
+            num_seismic_events++;
+            if (mpi.IsRoot())
+            {
+               std::cout << "  *** EARTHQUAKE #" << num_seismic_events
+                         << " at t = " << std::fixed << std::setprecision(1)
+                         << t / BP5Params::seconds_per_year << " yr"
+                         << ", V_max = " << std::scientific
+                         << std::setprecision(2) << V_max << " m/s ***\n";
             }
          }
-      }
-
-      // NaN/Inf check
-      bool has_nan = !std::isfinite(V_max);
-      if (!has_nan)
-      {
-         for (int i = 0; i < std::min(state.Size(), 100); i++)
+         else if (in_seismic_event && V_max < V_threshold_interseismic)
          {
-            if (!std::isfinite(state(i))) { has_nan = true; break; }
+            in_seismic_event = false;
+            if (mpi.IsRoot())
+            {
+               std::cout << "  Earthquake #" << num_seismic_events
+                         << " resolved at t = "
+                         << std::fixed << std::setprecision(1)
+                         << t / BP5Params::seconds_per_year << " yr\n";
+            }
          }
-      }
-      {
-         int local_nan = has_nan ? 1 : 0;
-         int global_nan = mpi.GlobalSumInt(local_nan);
-         has_nan = (global_nan > 0);
-      }
-      if (has_nan)
-      {
-         if (mpi.IsRoot())
+
+         // I/O: adaptive schedule or every step
+         if (write_every_step)
          {
-            std::cerr << "NaN/Inf detected at step " << step
-                      << ", t = " << t / BP5Params::seconds_per_year
-                      << " yr, V_max = " << V_max << "\n";
+            bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
+                                 V_max);
+            bench_out.Flush();
          }
-         break;
-      }
-
-      // Earthquake detection
-      if (!in_seismic_event && V_max > V_threshold_seismic)
-      {
-         in_seismic_event = true;
-         num_seismic_events++;
-         if (mpi.IsRoot())
+         else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
+                                  V_max))
          {
-            std::cout << "  *** EARTHQUAKE #" << num_seismic_events
-                      << " at t = " << std::fixed << std::setprecision(1)
-                      << t / BP5Params::seconds_per_year << " yr"
-                      << ", V_max = " << std::scientific
-                      << std::setprecision(2) << V_max << " m/s ***\n";
+            bench_out.Flush();
          }
-      }
-      else if (in_seismic_event && V_max < V_threshold_interseismic)
-      {
-         in_seismic_event = false;
-         if (mpi.IsRoot())
+
+         // ParaView output (adaptive schedule, MPI-collective)
+         paraview_write(step, t, V_max);
+
+         // Global output
+         if (mpi.IsRoot() && global_out)
          {
-            std::cout << "  Earthquake #" << num_seismic_events
-                      << " resolved at t = "
-                      << std::fixed << std::setprecision(1)
-                      << t / BP5Params::seconds_per_year << " yr\n";
+            global_out->WriteStep(
+               {t, V_max > 0.0 ? std::log10(V_max) : -300.0});
          }
-      }
 
-      // I/O: adaptive schedule or every step
-      if (write_every_step)
-      {
-         bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
-                              V_max);
-         write_station_fault_diagnostics(t);
-         bench_out.Flush();
-      }
-      else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(),
-                               V_max))
-      {
-         write_station_fault_diagnostics(t);
-         bench_out.Flush();
-      }
+         // Checkpoint
+         if (checkpoint_interval > 0 && step % checkpoint_interval == 0)
+         {
+            Vector u_vec;
+            u_vec = seas_op.GetDisplacement();
+            WriteCheckpoint(full_prefix, t, current_dt,
+                            step, num_seismic_events, in_seismic_event,
+                            state, u_vec,
+                            seas_op.GetTraction(), fault_op.GetSlipRate(),
+                            ode_solver.IsInitialized(), ode_solver.GetK0(),
+                            &mpi);
+         }
 
-      // Global output
-      if (mpi.IsRoot() && global_out)
-      {
-         global_out->WriteStep(
-            {t, V_max > 0.0 ? std::log10(V_max) : -300.0});
-      }
+         // Console output
+         if (mpi.IsRoot() &&
+             (step % print_step_interval == 0 || V_max > V_threshold_seismic))
+         {
+            std::cout << std::setw(10) << step
+                      << std::setw(16) << std::scientific << std::setprecision(6)
+                      << t / BP5Params::seconds_per_year
+                      << std::setw(14) << std::scientific << std::setprecision(3)
+                      << dt
+                      << std::setw(16) << std::scientific << std::setprecision(3)
+                      << V_max
+                      << std::setw(8) << num_seismic_events
+                      << "\n";
+            std::cout.flush();
+         }
 
-      // Checkpoint
-      if (checkpoint_interval > 0 && step % checkpoint_interval == 0)
-      {
-         Vector u_vec;
-         u_vec = seas_op.GetDisplacement();
-         WriteCheckpoint(full_prefix, t, current_dt,
-                         step, num_seismic_events, in_seismic_event,
-                         state, u_vec,
-                         seas_op.GetTraction(), fault_op.GetSlipRate(),
-                         use_petsc_ts ? false : ode_solver.IsInitialized(),
-                         use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
-                         &mpi);
-      }
-
-      // Console output
-      if (mpi.IsRoot() &&
-          (step % print_step_interval == 0 || V_max > V_threshold_seismic))
-      {
-         std::cout << std::setw(10) << step
-                   << std::setw(16) << std::scientific << std::setprecision(6)
-                   << t / BP5Params::seconds_per_year
-                   << std::setw(14) << std::scientific << std::setprecision(3)
-                   << dt
-                   << std::setw(16) << std::scientific << std::setprecision(3)
-                   << V_max
-                   << std::setw(8) << num_seismic_events
-                   << "\n";
-         std::cout.flush();
+         // Intentional early exit: dump only the first accepted step for
+         // cross-verification with Tandem (v59 diagnostic).
+         if (debug_first_step_dump)
+         {
+            if (mpi.IsRoot())
+            {
+               std::cout << "  [debug] stopping after first accepted step dump\n";
+            }
+            break;
+         }
       }
    }
 
@@ -2119,6 +1907,13 @@ int main(int argc, char *argv[])
                       use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
                       &mpi);
    }
+
+   // Face tracer: finalize (commit final step + write summary)
+   if (face_tracer.IsActive())
+   {
+      face_tracer.CommitStep(step, t, state, true);
+   }
+   face_tracer.Finalize();
 
    bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(),
                         seas_op.GetMaxSlipRate());

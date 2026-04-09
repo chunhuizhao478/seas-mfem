@@ -27,6 +27,7 @@
 #include <limits>
 #include <set>
 #include <cstdint>
+#include <fstream>
 #include <iomanip>
 #include <sstream>
 
@@ -129,6 +130,7 @@ public:
       SetupFESpace();
       SetupBoundaryMarkers();
       SetupFaultInfo();
+      RunStartupFaceAudit();
       SetupSolver();
 
       // Precompute fault depths/coordinates eagerly
@@ -176,12 +178,18 @@ public:
                                    Vector &traction_stress,
                                    Vector &traction_correction,
                                    Vector &jump_residual,
-                                   Vector *normal_traction = nullptr);
+                                   Vector *normal_traction = nullptr,
+                                   Vector *normal_stress = nullptr,
+                                   Vector *normal_correction = nullptr);
 
    /// Assemble only the fault-slip RHS contribution into the DG displacement
    /// space. This is a test/debug utility for checking K*u against b(slip)
    /// without Dirichlet loading.
    void AssembleSlipOnlyRHS(Vector &rhs, const Vector &slip_bc) const;
+
+   /// Assemble only the Dirichlet loading RHS contribution into the DG
+   /// displacement space. Debug utility for first-step RHS comparison.
+   void AssembleDirichletOnlyRHS(Vector &rhs, real_t time) const;
 
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
@@ -212,6 +220,9 @@ public:
 
    const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
    const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+   const Array<int> &GetOwnedFaultFaceMap() const
+   { return owned_fault_face_to_local_face_; }
+   int GetNumOwnedFaultFaces() const { return num_owned_fault_faces_; }
 
    DGMethod GetMethod() const { return method_; }
    int GetOrder() const { return order_; }
@@ -228,11 +239,6 @@ public:
    /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
    void SetCheckResidual(bool check) { check_residual_ = check; }
 
-   /// Enable/disable traction decomposition diagnostic.
-   /// When enabled, ComputeTraction prints T_stress, T_penalty, jump, and penalty
-   /// for each fault DOF (helps identify stress vs penalty instability sources).
-   void SetDiagTractionDecomp(bool enable) { diag_traction_decomp_ = enable; }
-
    /// Set MUMPS-BLR tolerance (default 1e-10). Lower = more accurate, more memory.
    /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
@@ -241,55 +247,479 @@ public:
    /// Tests whether the extra quad point causes instability at p>=2.
    void SetMatchQuadOrder(bool v) { match_quad_order_ = v; }
 
-   /// v49: Diagnostic - compare CalcOrtho normals with FaultBasis normals.
-   void SetDiagNormals(bool v) { diag_normals_ = v; }
-
-   /// v49: Diagnostic - dump traction values at first evaluation (zero slip).
-   void SetDiagFirstTraction(bool v) { diag_first_traction_ = v; }
-
    /// v50a: Scale IP penalty by this factor (1.0 = default, <1.0 = reduced).
    /// Used to diagnose whether over-stiff penalty causes nucleation failure at high p.
    void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
-
-   /// v51: Dump per-component traction (global x,y,z + local dip,strike) at first
-   /// non-zero-slip ComputeTraction call. Isolates cross-component coupling source.
-   void SetDiagDipTraction(bool v) { diag_dip_traction_ = v; }
-
-   /// v51: Dump z-component of displacement at fault face quad points after solve.
-   /// Tests K-f consistency: for pure strike-slip, u_z should be exactly 0.
-   void SetDiagUzFault(bool v) { diag_uz_fault_ = v; }
-
-   /// v52: Traction coherence diagnostic.
-   /// Tests whether ComputeTraction is consistent with the solve by measuring:
-   ///   1. Penalty correction magnitude (η*[[u]]-slip) — should be ~0 if solve is exact
-   ///   2. Dip contamination from stress vs penalty separately
-   ///   3. Solver fault residual |[[u]] - slip| per quad point
-   /// Triggers once when slip is non-trivial, prints summary, then done.
-   void SetDiagTractionCoherence(bool v) { diag_traction_coherence_ = v; }
-
-   /// v52: Enable RHS z-component diagnostic (fires once after first non-trivial slip)
-   void SetDiagRhsZ(bool v) { diag_rhs_z_ = v; }
-
-   /// Diagnostic: output per-QP traction data at the exact matched face,
-   /// matching Tandem [TND-TQ] structure but with MFEM units/metadata.
-   void SetDiagTndTQ(bool v)
-   {
-      diag_tnd_tq_ = v;
-      diag_tnd_tq_done_ = !v;
-   }
-
-   /// Carry accepted-step metadata from the BP5 driver into the next solve/traction call.
-   /// This avoids inferring step context from PETSc internals inside the operator.
-   void SetDiagSolveMetadata(int step, real_t dt) const
-   {
-      last_solve_step_ = step;
-      last_solve_dt_ = dt;
-   }
 
    /// v50g: Set face DOF node type for FaceQuadrature.
    /// Must be called BEFORE Init() (which creates FaceQuadrature).
    /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
    void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
+
+   struct FirstStepDebugConfig
+   {
+      bool enabled = false;
+      int target_rank = -1;
+      std::string output_dir = ".";
+      std::set<int> target_fault_faces;
+   };
+
+   void SetFirstStepDebugConfig(const FirstStepDebugConfig &cfg)
+   {
+      first_step_debug_ = cfg;
+      debug_target_elems_cached_ = false;
+   }
+
+   bool IsFirstStepDebugEnabled() const { return first_step_debug_.enabled; }
+
+   // ========================================================================
+   // Production-mesh verification diagnostics (triggered by --verify)
+   // ========================================================================
+
+   /// Verify ghost DOF communication on the production mesh.
+   /// Sets owned DOFs to f(x2,x3) = 7*sin(x2) + 3*cos(x3), expands to
+   /// ghost DOFs via MPI, and verifies all local DOFs match expected values
+   /// computed from independently-evaluated local coordinates.
+   /// Returns global max error across all ranks.
+   real_t VerifyGhostDOFCommunication() const
+   {
+      real_t max_err = 0.0;
+      int n_mismatch = 0;
+
+      // Ranks with fault DOFs run the full test; ranks without
+      // participate in the collective MPI_Allreduce with zero values.
+      if (num_fault_dofs_ > 0)
+      {
+         Vector local_x2, local_x3;
+         GetFaultCoords2D(local_x2, local_x3);
+
+         Vector owned_x2, owned_x3;
+         RestrictToOwnedFault(local_x2, owned_x2);
+         RestrictToOwnedFault(local_x3, owned_x3);
+
+         Vector owned_data(2 * num_owned_fault_dofs_);
+         for (int i = 0; i < num_owned_fault_dofs_; i++)
+         {
+            owned_data(2 * i)     = 7.0 * std::sin(owned_x2(i))
+                                   + 3.0 * std::cos(owned_x3(i));
+            owned_data(2 * i + 1) = 2.0 * owned_x2(i) - 5.0 * owned_x3(i);
+         }
+
+         Vector local_data;
+         ExpandOwnedToLocalFault(owned_data, local_data, 2);
+
+         Vector expected(2 * num_fault_dofs_);
+         for (int i = 0; i < num_fault_dofs_; i++)
+         {
+            expected(2 * i)     = 7.0 * std::sin(local_x2(i))
+                                 + 3.0 * std::cos(local_x3(i));
+            expected(2 * i + 1) = 2.0 * local_x2(i) - 5.0 * local_x3(i);
+         }
+
+         for (int i = 0; i < num_fault_dofs_; i++)
+         {
+            real_t err = std::max(
+               std::abs(local_data(2 * i)     - expected(2 * i)),
+               std::abs(local_data(2 * i + 1) - expected(2 * i + 1)));
+            max_err = std::max(max_err, err);
+            if (err > 1e-10) { n_mismatch++; }
+         }
+      }
+
+      // All ranks participate in the collective reduction
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         real_t global_max = 0.0;
+         MPI_Allreduce(&max_err, &global_max, 1, MPI_DOUBLE, MPI_MAX,
+                       mesh_.GetComm());
+         int global_mismatch = 0;
+         MPI_Allreduce(&n_mismatch, &global_mismatch, 1, MPI_INT, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] Ghost DOF communication: max_err="
+                      << std::scientific << std::setprecision(6) << global_max
+                      << ", mismatches=" << global_mismatch
+                      << " -> " << (global_max < 1e-10 ? "PASS" : "FAIL")
+                      << "\n";
+         }
+         return global_max;
+#endif
+      }
+      return max_err;
+   }
+
+   /// Diagnose the Dirichlet skip-set mechanism in AssembleDirichletLoading.
+   /// Counts how many attr=5 boundary elements are: processed by boundary
+   /// loop, skipped by dir_interior_set, skipped by dir_shared_set, or
+   /// skipped because FTr==null. Mismatches between serial and parallel
+   /// indicate the skip set misses some shared Dirichlet faces.
+   void VerifyDirichletSkipSets() const
+   {
+      int n_attr5 = 0, n_skip_interior = 0, n_skip_shared = 0;
+      int n_skip_null = 0, n_processed = 0;
+
+      // Rebuild the same skip sets as AssembleDirichletLoading
+      std::set<int> dir_interior_set;
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+      {
+         dir_interior_set.insert(dirichlet_interior_faces_[fi]);
+      }
+      std::set<int> dir_shared_set;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            dir_shared_set.insert(
+               mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
+         }
+#endif
+      }
+
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         int attr = mesh_.GetBdrAttribute(be);
+         if (dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+         n_attr5++;
+
+         int face_idx, face_info;
+         mesh_.GetBdrElementFace(be, &face_idx, &face_info);
+
+         if (dir_interior_set.count(face_idx) > 0)
+         {
+            n_skip_interior++;
+            continue;
+         }
+         if (dir_shared_set.count(face_idx) > 0)
+         {
+            n_skip_shared++;
+            continue;
+         }
+
+         FaceElementTransformations *FTr =
+            mesh_.GetFaceElementTransformations(face_idx);
+         if (FTr == nullptr) { n_skip_null++; continue; }
+
+         n_processed++;
+      }
+
+      int n_dir_interior = dirichlet_interior_faces_.Size();
+      int n_dir_shared = dirichlet_shared_faces_.Size();
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Global sums
+         int locals[6] = {n_attr5, n_skip_interior, n_skip_shared,
+                          n_skip_null, n_processed, n_dir_shared};
+         int globals[6] = {0};
+         MPI_Allreduce(locals, globals, 6, MPI_INT, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] Dirichlet skip-set audit:\n"
+                      << "    attr=5 bdr elems:      " << globals[0] << "\n"
+                      << "    skipped (interior):    " << globals[1] << "\n"
+                      << "    skipped (shared set):  " << globals[2] << "\n"
+                      << "    skipped (FTr null):    " << globals[3] << "\n"
+                      << "    processed (boundary):  " << globals[4] << "\n"
+                      << "    dirichlet_shared list: " << globals[5] << "\n"
+                      << "    expected: processed + interior_skip + shared_skip"
+                      << " + null_skip = attr5\n"
+                      << "    actual:   " << globals[4] << " + " << globals[1]
+                      << " + " << globals[2] << " + " << globals[3]
+                      << " = " << (globals[4]+globals[1]+globals[2]+globals[3])
+                      << (globals[4]+globals[1]+globals[2]+globals[3] == globals[0]
+                          ? " -> OK" : " -> MISMATCH") << "\n";
+            // Check if shared set size matches skip count
+            if (globals[2] != globals[5])
+            {
+               mfem::out << "    WARNING: shared_skip ("
+                         << globals[2] << ") != dirichlet_shared list ("
+                         << globals[5] << ") -> some shared faces NOT skipped"
+                         << " from boundary loop!\n";
+            }
+         }
+#endif
+      }
+      else
+      {
+         mfem::out << "  [VERIFY] Dirichlet skip-set audit (serial):\n"
+                   << "    attr=5 bdr elems: " << n_attr5
+                   << ", skip_interior: " << n_skip_interior
+                   << ", processed: " << n_processed << "\n";
+      }
+   }
+
+   /// Per-face diagnostic for shared Dirichlet faces.
+   /// For each shared Dirichlet face, dumps face normal, dir_sign, and
+   /// ev1/ev2 norms from both ranks. Gathers via Allgather and compares
+   /// rank A's ||ev2|| against rank B's ||ev1|| for the same physical face.
+   void VerifySharedDirichletPerFace(real_t time) const
+   {
+      if constexpr (!IsParallelMesh<MeshType>::value) { return; }
+#ifdef MFEM_USE_MPI
+      if (dirichlet_shared_faces_.Size() == 0 &&
+          mesh_.GetNRanks() > 1)
+      {
+         // Some ranks may have 0 shared Dirichlet faces — still participate
+      }
+
+      int dim = 3;
+      int n_sh = dirichlet_shared_faces_.Size();
+
+      // Get global vertex IDs for face keying
+      Array<HYPRE_BigInt> gvert;
+      mesh_.GetGlobalVertexIndices(gvert);
+
+      // Pack: [gv0, gv1, gv2, nor0, nor1, nor2, dir_sign,
+      //        ev1_norm, ev2_norm, rank] = 10 doubles per face
+      const int ENTRY = 10;
+      std::vector<double> local_pack(ENTRY * n_sh, 0.0);
+
+      DGElasticityIPCombinedIntegrator dir_integ(
+         lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+      auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+
+      for (int fi = 0; fi < n_sh; fi++)
+      {
+         int sf = dirichlet_shared_faces_[fi];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+         if (!FTr) { continue; }
+
+         // Face vertex key
+         int lf = mesh_.GetSharedFace(sf);
+         Array<int> verts;
+         mesh_.GetFaceVertices(lf, verts);
+         HYPRE_BigInt gv[3] = {0, 0, 0};
+         for (int j = 0; j < 3 && j < verts.Size(); j++)
+            gv[j] = gvert[verts[j]];
+         if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+         if (gv[1] > gv[2]) { std::swap(gv[1], gv[2]); }
+         if (gv[0] > gv[1]) { std::swap(gv[0], gv[1]); }
+
+         // Normal and dir_sign at face centroid
+         const IntegrationPoint &ip0 =
+            Geometries.GetCenter(FTr->GetGeometryType());
+         FTr->SetAllIntPoints(&ip0);
+         Vector nor(3);
+         CalcOrtho(FTr->Jacobian(), nor);
+         real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+
+         // Compute ev1, ev2 with the same formula as the assembly
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+         const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+
+         int qo = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
+         const IntegrationRule &ir = IntRules.Get(FTr->FaceGeom, qo);
+         int nq = ir.GetNPoints();
+
+         real_t Vh = Vp_ * time;
+         // y=0 faces: no scaling (|y| < 1000)
+         Vector u_D_3d(dim * nq);
+         u_D_3d = 0.0;
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir.IntPoint(q));
+            real_t ds = ComputeSkeletonDirichletSign(FTr);
+            u_D_3d(0 * nq + q) = ds * Vh;
+         }
+
+         Vector ev1, ev2;
+         dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+
+         int b = ENTRY * fi;
+         local_pack[b + 0] = static_cast<double>(gv[0]);
+         local_pack[b + 1] = static_cast<double>(gv[1]);
+         local_pack[b + 2] = static_cast<double>(gv[2]);
+         local_pack[b + 3] = nor(0);
+         local_pack[b + 4] = nor(1);
+         local_pack[b + 5] = nor(2);
+         local_pack[b + 6] = dir_sign;
+         local_pack[b + 7] = ev1.Norml2();
+         local_pack[b + 8] = ev2.Norml2();
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         local_pack[b + 9] = static_cast<double>(rank);
+      }
+
+      // Allgather
+      int lc = ENTRY * n_sh;
+      int nranks = mesh_.GetNRanks();
+      std::vector<int> rc(nranks), rd(nranks);
+      MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                    mesh_.GetComm());
+      int total = 0;
+      for (int r = 0; r < nranks; r++)
+      {
+         rd[r] = total;
+         total += rc[r];
+      }
+      std::vector<double> all(total);
+      MPI_Allgatherv(local_pack.data(), lc, MPI_DOUBLE,
+                     all.data(), rc.data(), rd.data(),
+                     MPI_DOUBLE, mesh_.GetComm());
+
+      // Group by face key, compare pairs
+      struct VKey3 {
+         int64_t v[3];
+         bool operator<(const VKey3 &o) const {
+            if (v[0]!=o.v[0]) return v[0]<o.v[0];
+            if (v[1]!=o.v[1]) return v[1]<o.v[1];
+            return v[2]<o.v[2];
+         }
+      };
+      std::map<VKey3, std::vector<int>> key_entries;
+      int n_entries = total / ENTRY;
+      for (int e = 0; e < n_entries; e++)
+      {
+         VKey3 key;
+         key.v[0] = static_cast<int64_t>(all[ENTRY*e + 0]);
+         key.v[1] = static_cast<int64_t>(all[ENTRY*e + 1]);
+         key.v[2] = static_cast<int64_t>(all[ENTRY*e + 2]);
+         key_entries[key].push_back(e);
+      }
+
+      int rank = 0;
+      MPI_Comm_rank(mesh_.GetComm(), &rank);
+      if (rank == 0)
+      {
+         mfem::out << "  [VERIFY] Shared Dirichlet per-face diagnostic"
+                   << " (t=" << time << "):\n";
+         int n_pairs = 0, n_sign_same = 0, n_ev_mismatch = 0;
+         for (auto &kv : key_entries)
+         {
+            auto &entries = kv.second;
+            if (entries.size() != 2) { continue; }
+            n_pairs++;
+            int b0 = ENTRY * entries[0], b1 = ENTRY * entries[1];
+
+            real_t ds0 = all[b0+6], ds1 = all[b1+6];
+            real_t ev1_0 = all[b0+7], ev2_0 = all[b0+8];
+            real_t ev1_1 = all[b1+7], ev2_1 = all[b1+8];
+            int r0 = static_cast<int>(all[b0+9]);
+            int r1 = static_cast<int>(all[b1+9]);
+
+            bool sign_same = (ds0 * ds1 > 0);
+            if (sign_same) { n_sign_same++; }
+
+            // rank A's ev2 should match rank B's ev1
+            real_t ev_scale = std::max({ev1_0, ev2_0, ev1_1, ev2_1, 1e-30});
+            real_t cross_err = std::max(
+               std::abs(ev2_0 - ev1_1) / ev_scale,
+               std::abs(ev1_0 - ev2_1) / ev_scale);
+            if (cross_err > 0.01) { n_ev_mismatch++; }
+
+            auto &k = kv.first;
+            mfem::out << "    face(" << k.v[0] << "," << k.v[1] << ","
+                      << k.v[2] << "):"
+                      << " r" << r0 << " ds=" << std::setw(2) << ds0
+                      << " nor_y=" << std::setprecision(4) << all[b0+4]
+                      << " |ev1|=" << std::setprecision(6) << ev1_0
+                      << " |ev2|=" << ev2_0
+                      << "  |  r" << r1 << " ds=" << std::setw(2) << ds1
+                      << " nor_y=" << std::setprecision(4) << all[b1+4]
+                      << " |ev1|=" << std::setprecision(6) << ev1_1
+                      << " |ev2|=" << ev2_1
+                      << (sign_same ? " SIGN_SAME!" : "")
+                      << (cross_err > 0.01 ? " EV_MISMATCH!" : "")
+                      << "\n";
+         }
+         mfem::out << "    summary: " << n_pairs << " pairs, "
+                   << n_sign_same << " with SAME dir_sign, "
+                   << n_ev_mismatch << " with ev cross-mismatch\n";
+         if (n_sign_same > 0)
+         {
+            mfem::out << "    -> dir_sign does NOT flip on " << n_sign_same
+                      << " faces! This is the bug.\n";
+         }
+      }
+#endif
+   }
+
+   /// Verify serial-parallel Dirichlet loading consistency.
+   /// At the given time, assembles the full RHS (slip + Dirichlet) and
+   /// reports the global RHS norm. When run at 1 rank vs N ranks, the
+   /// norms should match. Logs b_slip and b_dirichlet norms separately.
+   void VerifyRHSNorms(real_t time, const Vector &slip_bc) const
+   {
+      if (!stiffness_assembled_) { return; }
+
+      // Assemble slip RHS
+      Vector rhs_slip(fes_->GetTrueVSize());
+      rhs_slip = 0.0;
+      if (method_ == DGMethod::IP)
+      {
+         AssembleSlipContributionIP(rhs_slip, slip_bc);
+         AssembleSlipContributionIPShared(rhs_slip, slip_bc,
+                                          fault_interior_faces_.Size());
+      }
+      else
+      {
+         AssembleSlipContributionBR2(rhs_slip, slip_bc);
+         AssembleSlipContributionBR2Shared(rhs_slip, slip_bc,
+                                           fault_interior_faces_.Size());
+      }
+      real_t slip_norm = rhs_slip.Norml2();
+
+      // Assemble Dirichlet RHS
+      Vector rhs_dir(fes_->GetTrueVSize());
+      rhs_dir = 0.0;
+      // Copy the slip RHS to get the total, then subtract to isolate Dirichlet
+      Vector rhs_total = rhs_slip;
+      AssembleDirichletLoading(rhs_total, time);
+      for (int i = 0; i < rhs_dir.Size(); i++)
+      {
+         rhs_dir(i) = rhs_total(i) - rhs_slip(i);
+      }
+      real_t dir_norm = rhs_dir.Norml2();
+      real_t total_norm = rhs_total.Norml2();
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         // Use global L2 norms
+         real_t local_s2 = slip_norm * slip_norm;
+         real_t local_d2 = dir_norm * dir_norm;
+         real_t local_t2 = total_norm * total_norm;
+         real_t global_s2 = 0, global_d2 = 0, global_t2 = 0;
+         MPI_Allreduce(&local_s2, &global_s2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         MPI_Allreduce(&local_d2, &global_d2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         MPI_Allreduce(&local_t2, &global_t2, 1, MPI_DOUBLE, MPI_SUM,
+                       mesh_.GetComm());
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "  [VERIFY] RHS norms at t=" << time << "s:"
+                      << " ||b_slip||=" << std::scientific << std::setprecision(12)
+                      << std::sqrt(global_s2)
+                      << " ||b_dir||=" << std::sqrt(global_d2)
+                      << " ||b_total||=" << std::sqrt(global_t2)
+                      << "\n";
+         }
+#endif
+      }
+      else
+      {
+         mfem::out << "  [VERIFY] RHS norms at t=" << time << "s:"
+                   << " ||b_slip||=" << std::scientific << std::setprecision(12)
+                   << slip_norm
+                   << " ||b_dir||=" << dir_norm
+                   << " ||b_total||=" << total_norm
+                   << "\n";
+      }
+   }
 
 private:
    MeshType &mesh_;
@@ -300,35 +730,29 @@ private:
    SolverType solver_type_;
    BCMode bc_mode_;
    bool check_residual_;  // Post-solve residual check
-   bool diag_traction_decomp_ = false;  // Print traction decomposition (stress vs penalty)
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
-   mutable int diag_face_call_ = 0;  // Face consistency diagnostic: trigger on call #2 (non-zero slip)
 
-   // v49 Phase 1 diagnostic flags
+   // Reference normal for skeleton Dirichlet orientation sign.
+   // Matches Tandem's ref_normal from bp5.toml (default (0,-1,0) for BP5).
+   // Used by ComputeSkeletonDirichletSign() to determine f_q sign on
+   // interior/shared Dirichlet faces, same role as DGCurvilinearCommon.h:97.
+   Vector ref_normal_;
+
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
-   bool diag_normals_ = false;           // Compare CalcOrtho vs FaultBasis normals
-   bool diag_first_traction_ = false;    // Dump traction at first zero-slip evaluation
-   mutable bool diag_normals_done_ = false;
-   mutable bool diag_first_traction_done_ = true;  // v58: disabled by default, was flooding output
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
-   mutable bool used_coord_fallback_ = false;  // Set when coordinate-based fault detection is used
-   bool has_fault_attr_ = false;         // True when the mesh globally contains fault attr 3
-   bool diag_dip_traction_ = false;     // v51: dump per-component traction (global xyz)
-   mutable bool diag_dip_traction_done_ = false;
-   bool diag_uz_fault_ = false;         // v51: dump u_z at fault faces after solve
-   mutable bool diag_uz_fault_done_ = false;
-   bool diag_traction_coherence_ = false;  // v52: traction coherence diagnostic
-   mutable bool diag_traction_coherence_done_ = false;
-   bool diag_rhs_z_ = false;               // v52: dump f_z components of RHS
-   mutable bool diag_rhs_z_done_ = false;
-   mutable bool diag_matrix_norm_done_ = false;  // v57 MPI diagnostic
-   mutable bool diag_slip_embed_done_ = true;    // v58 FaultBasis diagnostic (disabled by default)
-   bool diag_tnd_tq_ = false;                     // Per-QP tip traction (Tandem [TND-TQ] comparison)
-   mutable bool diag_tnd_tq_done_ = false;
-   mutable int last_solve_step_ = -1;             // Accepted step hint from BP5 driver
-   mutable real_t last_solve_dt_ = 0.0;           // Accepted dt hint from BP5 driver [s]
-   mutable real_t last_solve_t_ = 0.0;            // Simulation time from last Solve() call
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
+
+   enum class DebugAssemblePhase { None, Slip, Dirichlet };
+   mutable FirstStepDebugConfig first_step_debug_;
+   mutable bool first_step_debug_done_ = false;
+   mutable DebugAssemblePhase debug_phase_ = DebugAssemblePhase::None;
+   mutable real_t debug_time_ = 0.0;
+   mutable bool debug_face_header_written_ = false;
+   mutable bool debug_elem_header_written_ = false;
+   mutable bool debug_jump_header_written_ = false;
+   mutable bool debug_trac_header_written_ = false;
+   mutable bool debug_target_elems_cached_ = false;
+   mutable std::set<int> debug_target_elems_;
 
    void ComputeTractionImpl(const GridFuncType &displacement,
                             const Vector &slip_bc,
@@ -336,19 +760,865 @@ private:
                             Vector *normal_traction,
                             Vector *traction_stress_out,
                             Vector *traction_correction_out,
-                            Vector *jump_residual_out);
+                            Vector *jump_residual_out,
+                            Vector *normal_stress_out = nullptr,
+                            Vector *normal_correction_out = nullptr);
 
-   // Tag-based fault face detection (matches Tandem's Physical Surface approach)
-   Array<int> fault_tagged_faces_;      // Interior face indices from mesh tags
-   std::set<long> fault_face_keys_;     // Element-pair keys for fast lookup
-   std::set<int> fault_shared_tagged_;  // Shared face indices from mesh tags
+   int DebugRank() const
+   {
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank = 0;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         return rank;
+#endif
+      }
+      return 0;
+   }
 
-   // Dirichlet interior faces: interior faces with attr 5 that are NOT fault faces.
-   // In Tandem's BP5 mesh, Physical Surface(5) tags all far-field boundaries including
-   // Y=0 faces outside the fault region. These are interior faces in MFEM and need
-   // Dirichlet RHS contributions via the skeleton (two-element) pattern.
+   bool DebugEnabledForTime(real_t time) const
+   {
+      if (!first_step_debug_.enabled || first_step_debug_done_) { return false; }
+      // Target: dump at first accepted step (last RK45 stage).
+      // With dt_init=0.02, the last stage is at t=0.02.
+      // Threshold skips intermediate RK45 stages (t < 0.019).
+      if (time < 0.019) { return false; }
+      return (first_step_debug_.target_rank < 0 ||
+              DebugRank() == first_step_debug_.target_rank);
+   }
+
+   const char *DebugPhaseName() const
+   {
+      switch (debug_phase_)
+      {
+         case DebugAssemblePhase::Slip: return "slip";
+         case DebugAssemblePhase::Dirichlet: return "dirichlet";
+         default: return "none";
+      }
+   }
+
+   std::string DebugFilePath(const std::string &stem) const
+   {
+      std::ostringstream oss;
+      oss << first_step_debug_.output_dir;
+      if (!first_step_debug_.output_dir.empty() &&
+          first_step_debug_.output_dir.back() != '/')
+      {
+         oss << "/";
+      }
+      oss << stem << "_r" << DebugRank() << ".csv";
+      return oss.str();
+   }
+
+   const std::set<int> &DebugTargetLocalElements() const
+   {
+      if (debug_target_elems_cached_) { return debug_target_elems_; }
+      debug_target_elems_.clear();
+      const int num_local = mesh_.GetNE();
+      const int interior_count = fault_interior_faces_.Size();
+      for (int fault_idx : first_step_debug_.target_fault_faces)
+      {
+         if (fault_idx < 0) { continue; }
+         FaceElementTransformations *FTr = nullptr;
+         if (fault_idx < interior_count)
+         {
+            int face = fault_interior_faces_[fault_idx];
+            FTr = mesh_.GetInteriorFaceTransformations(face);
+         }
+         else if constexpr (IsParallelMesh<MeshType>::value)
+         {
+            int sh_idx = fault_idx - interior_count;
+            if (sh_idx >= 0 && sh_idx < fault_shared_faces_.Size())
+            {
+               FTr = mesh_.GetSharedFaceTransformations(fault_shared_faces_[sh_idx]);
+            }
+         }
+         if (!FTr) { continue; }
+         if (FTr->Elem1No >= 0 && FTr->Elem1No < num_local) { debug_target_elems_.insert(FTr->Elem1No); }
+         if (FTr->Elem2No >= 0 && FTr->Elem2No < num_local) { debug_target_elems_.insert(FTr->Elem2No); }
+      }
+      debug_target_elems_cached_ = true;
+      return debug_target_elems_;
+   }
+
+   bool DebugShouldDumpFace(int logical_fault_idx,
+                            FaceElementTransformations *FTr) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || FTr == nullptr) { return false; }
+      if (logical_fault_idx >= 0 &&
+          first_step_debug_.target_fault_faces.count(logical_fault_idx) > 0)
+      {
+         return true;
+      }
+
+      const auto &target_elems = DebugTargetLocalElements();
+      return target_elems.count(FTr->Elem1No) > 0 ||
+             target_elems.count(FTr->Elem2No) > 0;
+   }
+
+   void DebugDumpFaceData(int logical_fault_idx,
+                          int mesh_face_idx,
+                          const char *face_kind,
+                          FaceElementTransformations *FTr,
+                          const Vector *phys_y_qp,
+                          const Vector *input_qp,
+                          const Vector &elvec1,
+                          const Vector *elvec2) const
+   {
+      if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+      // Truncate on first write to discard stale data from previous runs
+      std::ofstream out(DebugFilePath("first_step_face_rhs"),
+                        debug_face_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_face_header_written_)
+      {
+         out << "time,phase,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_face_header_written_ = true;
+      }
+
+      const int elem1 = FTr ? FTr->Elem1No : -1;
+      const int elem2 = FTr ? FTr->Elem2No : -1;
+      auto write_row = [&](const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << DebugPhaseName() << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << i0 << ","
+             << i1 << ","
+             << value << "\n";
+      };
+
+      if (phys_y_qp)
+      {
+         for (int q = 0; q < phys_y_qp->Size(); q++)
+         {
+            write_row("phys_y", q, -1, (*phys_y_qp)(q));
+         }
+      }
+      if (input_qp)
+      {
+         const int nq = input_qp->Size() / 3;
+         for (int q = 0; q < nq; q++)
+         {
+            for (int c = 0; c < 3; c++)
+            {
+               write_row("input_qp", q, c, (*input_qp)(c * nq + q));
+            }
+         }
+      }
+      for (int j = 0; j < elvec1.Size(); j++)
+      {
+         write_row("elvec1", j, -1, elvec1(j));
+      }
+      if (elvec2)
+      {
+         for (int j = 0; j < elvec2->Size(); j++)
+         {
+            write_row("elvec2", j, -1, (*elvec2)(j));
+         }
+      }
+   }
+
+   void DebugDumpElementVector(const char *quantity, const Vector &vec) const
+   {
+      if (!DebugEnabledForTime(debug_time_)) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_elem_data"),
+                        debug_elem_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_elem_header_written_)
+      {
+         out << "time,quantity,elem,component,local_dof,vdof,value\n";
+         debug_elem_header_written_ = true;
+      }
+
+      const auto &target_elems = DebugTargetLocalElements();
+      for (int elem : target_elems)
+      {
+         Array<int> vdofs;
+         fes_->GetElementVDofs(elem, vdofs);
+         const int ndof = scalar_fes_->GetFE(elem)->GetDof();
+         for (int j = 0; j < vdofs.Size(); j++)
+         {
+            const int vdof = vdofs[j];
+            const int lid = (vdof >= 0) ? vdof : (-1 - vdof);
+            const real_t value = (vdof >= 0) ? vec(lid) : -vec(lid);
+            out << std::setprecision(17) << debug_time_ << ","
+                << quantity << ","
+                << elem << ","
+                << (j / ndof) << ","
+                << (j % ndof) << ","
+                << vdof << ","
+                << value << "\n";
+         }
+      }
+   }
+
+   /// Dump per-element and per-face K matrix contributions for target elements.
+   /// Each contribution is dumped separately so we can compare against Tandem's
+   /// assemble_volume / assemble_skeleton / assemble_boundary piece by piece.
+   /// MPI-safe: only local elements and local interior faces.
+   void DebugDumpKContributions() const
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      const int dim = 3;
+      const auto &target_elems = DebugTargetLocalElements();
+      if (target_elems.empty()) { return; }
+
+      auto write_mat = [](std::ofstream &os, const char *source, int id,
+                          int e1, int e2, const char *block,
+                          const DenseMatrix &M)
+      {
+         for (int i = 0; i < M.Height(); i++)
+         {
+            for (int j = 0; j < M.Width(); j++)
+            {
+               real_t v = M(i, j);
+               if (std::abs(v) > 1e-30)
+               {
+                  os << source << "," << id << "," << e1 << "," << e2
+                     << "," << block << "," << i << "," << j << ","
+                     << std::setprecision(17) << v << "\n";
+               }
+            }
+         }
+      };
+
+      // 1. Volume contributions: ElasticityIntegrator on target elements
+      {
+         std::ofstream out(DebugFilePath("first_step_K_volume"), std::ios::trunc);
+         if (out)
+         {
+            out << "source,elem,elem1,elem2,block,row,col,value\n";
+            ElasticityIntegrator vol_integ(lambda_coeff_, mu_coeff_);
+            for (int elem : target_elems)
+            {
+               const FiniteElement *fe = scalar_fes_->GetFE(elem);
+               ElementTransformation *eltrans =
+                  mesh_.GetElementTransformation(elem);
+               DenseMatrix K_vol;
+               vol_integ.AssembleElementMatrix(*fe, *eltrans, K_vol);
+               write_mat(out, "volume", elem, elem, -1, "A00", K_vol);
+            }
+         }
+      }
+
+      // 2. Interior face contributions: DGElasticityIPCombinedIntegrator
+      {
+         std::ofstream out(DebugFilePath("first_step_K_skeleton"),
+                           std::ios::trunc);
+         if (out)
+         {
+            out << "source,face,elem1,elem2,block,row,col,value\n";
+            DGElasticityIPCombinedIntegrator face_integ(
+               lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+
+            int nfaces = mesh_.GetNumFaces();
+            for (int f = 0; f < nfaces; f++)
+            {
+               FaceElementTransformations *FTr =
+                  mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+
+               bool e1_target = target_elems.count(FTr->Elem1No) > 0;
+               bool e2_target = (FTr->Elem2No >= 0 &&
+                                 target_elems.count(FTr->Elem2No) > 0);
+               if (!e1_target && !e2_target) { continue; }
+
+               const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+               const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+               DenseMatrix K_face;
+               face_integ.AssembleFaceMatrix(*fe1, *fe2, *FTr, K_face);
+
+               int n1 = fe1->GetDof() * dim;
+               int n2 = fe2->GetDof() * dim;
+               DenseMatrix A00(n1, n1), A01(n1, n2), A10(n2, n1), A11(n2, n2);
+               K_face.GetSubMatrix(0, n1, 0, n1, A00);
+               K_face.GetSubMatrix(0, n1, n1, n1 + n2, A01);
+               K_face.GetSubMatrix(n1, n1 + n2, 0, n1, A10);
+               K_face.GetSubMatrix(n1, n1 + n2, n1, n1 + n2, A11);
+
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A00", A00);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A01", A01);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A10", A10);
+               write_mat(out, "interior_face", f, FTr->Elem1No, FTr->Elem2No,
+                         "A11", A11);
+            }
+
+            // Boundary face contributions (if any target element touches one)
+            for (int be = 0; be < mesh_.GetNBE(); be++)
+            {
+               int attr = mesh_.GetBdrAttribute(be);
+               if (dirichlet_bdr_marker_.Size() > 0 &&
+                   dirichlet_bdr_marker_[attr - 1] != 1) { continue; }
+
+               int face_idx, face_info_val;
+               mesh_.GetBdrElementFace(be, &face_idx, &face_info_val);
+               FaceElementTransformations *FTr =
+                  mesh_.GetFaceElementTransformations(face_idx);
+               if (!FTr || target_elems.count(FTr->Elem1No) == 0)
+               { continue; }
+
+               const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+               DenseMatrix K_bdr;
+               face_integ.AssembleFaceMatrix(*fe1, *fe1, *FTr, K_bdr);
+               write_mat(out, "boundary_face", face_idx, FTr->Elem1No, -1,
+                         "A00", K_bdr);
+            }
+         }
+      }
+   }
+
+   /// Local-only variant: dumps interior fault faces only (no MPI exchange).
+   /// Safe to call on a single rank without deadlocking.
+   void DebugDumpFaultJumpsLocal(const GridFuncType &displacement,
+                                 const Vector &slip_bc) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_face_jump"),
+                        debug_jump_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_jump_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,q,component,value\n";
+         debug_jump_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int q, int c, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << "," << logical_fault_idx << ","
+             << mesh_face_idx << "," << elem1 << "," << elem2 << ","
+             << record << "," << q << "," << c << "," << value << "\n";
+      };
+
+      const int dim = 3;
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+         const int ndof1 = fe1->GetDof();
+         const int ndof2 = fe2->GetDof();
+         const int nq = face_quad_->NumQuadPoints();
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
+
+         const IntegrationRule &ir = face_quad_->GetQuadRule();
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &fip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+
+            Vector s1(ndof1), s2(ndof2);
+            fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
+            fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++) { u1q += s1(k) * u1_all(c * ndof1 + k); }
+               for (int k = 0; k < ndof2; k++) { u2q += s2(k) * u2_all(c * ndof2 + k); }
+               const real_t slipq = delta_u_quad(c * nq + q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "u1_q", q, c, u1q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "u2_q", q, c, u2q);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "slip_q", q, c, slipq);
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "jump_minus_slip", q, c,
+                         (u1q - u2q) - slipq);
+            }
+         }
+      }
+   }
+
+   /// Local-only variant: dumps interior fault face traction (no MPI exchange).
+   /// Local-only variant: computes traction per-face inline for interior
+   /// faces only. No ComputeTraction call (which uses MPI for shared faces).
+   void DebugDumpFaultTractionLocal(const GridFuncType &displacement,
+                                     const Vector &slip_bc)
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_face_trac"),
+                        debug_trac_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_trac_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_trac_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << "," << logical_fault_idx << ","
+             << mesh_face_idx << "," << elem1 << "," << elem2 << ","
+             << record << "," << i0 << "," << i1 << "," << value << "\n";
+      };
+
+      const int dim = 3;
+      const int nbf = nbf_per_face_;
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
+         const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
+
+         DGElasticityIPCombinedIntegrator trac_integ(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         Vector T_quad, nl_q;
+         trac_integ.ComputeTractionAtQuadPoints(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);
+
+         const int nq = T_quad.Size() / dim;
+         const IntegrationRule &ir = IntRules.Get(
+            FTr->GetGeometryType(), 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1);
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir.IntPoint(q));
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+            write_row("fault_interior", fi, face,
+                      FTr->Elem1No, FTr->Elem2No, "nl_q", q, -1, nl_q(q));
+            for (int c = 0; c < dim; c++)
+            {
+               write_row("fault_interior", fi, face,
+                         FTr->Elem1No, FTr->Elem2No, "traction_q", q, c,
+                         T_quad(c * nq + q));
+            }
+         }
+
+         // Note: projected DOF-level traction (traction_dip/strike/normal)
+         // is omitted here because it requires ComputeTraction which uses MPI.
+         // The per-QP traction_q values above are sufficient for cross-code
+         // comparison — project offline if needed.
+      }
+   }
+
+   void DebugDumpFaultJumps(const GridFuncType &displacement,
+                            const Vector &slip_bc) const
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      std::ofstream out(DebugFilePath("first_step_face_jump"),
+                        debug_jump_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_jump_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,q,component,value\n";
+         debug_jump_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int q, int c, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << q << ","
+             << c << ","
+             << value << "\n";
+      };
+
+      auto dump_face = [&](int logical_fault_idx, int mesh_face_idx,
+                           const char *face_kind, FaceElementTransformations *FTr,
+                           const FiniteElement *fe1, const Vector &u1_all,
+                           const FiniteElement *fe2, const Vector &u2_all)
+      {
+         if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+         const int dim = 3;
+         const int ndof1 = fe1->GetDof();
+         const int ndof2 = fe2->GetDof();
+         const int nq = face_quad_->NumQuadPoints();
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(logical_fault_idx, slip_bc, delta_u_quad);
+
+         const IntegrationRule &ir = face_quad_->GetQuadRule();
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &fip = ir.IntPoint(q);
+            FTr->SetAllIntPoints(&fip);
+
+            // Physical coordinates at this QP (for cross-code matching)
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+
+            Vector s1(ndof1), s2(ndof2);
+            fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
+            fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
+            for (int c = 0; c < dim; c++)
+            {
+               real_t u1q = 0.0, u2q = 0.0;
+               for (int k = 0; k < ndof1; k++) { u1q += s1(k) * u1_all(c * ndof1 + k); }
+               for (int k = 0; k < ndof2; k++) { u2q += s2(k) * u2_all(c * ndof2 + k); }
+               const real_t slipq = delta_u_quad(c * nq + q);
+               const real_t jump_minus_slip = (u1q - u2q) - slipq;
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "u1_q", q, c, u1q);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "u2_q", q, c, u2q);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "slip_q", q, c, slipq);
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No,
+                         "jump_minus_slip", q, c, jump_minus_slip);
+            }
+         }
+      };
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+         dump_face(fi, face, "fault_interior", FTr,
+                   scalar_fes_->GetFE(FTr->Elem1No), u1_all,
+                   scalar_fes_->GetFE(FTr->Elem2No), u2_all);
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         if (!pfes) { return; }
+
+         ParGridFunction par_u(pfes);
+         par_u = displacement;
+         pfes->ExchangeFaceNbrData();
+         par_u.ExchangeFaceNbrData();
+
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int logical_fault_idx = fault_interior_faces_.Size() + i;
+            int sf = fault_shared_faces_[i];
+            FaceElementTransformations *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { continue; }
+
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+            Vector u1_all(vdofs1.Size());
+            par_u.GetSubVector(vdofs1, u1_all);
+
+            const int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            Array<int> vdofs2;
+            pfes->GetFaceNbrElementVDofs(nbr_idx, vdofs2);
+            const Vector &nbr_data = par_u.FaceNbrData();
+            Vector u2_all(vdofs2.Size());
+            for (int j = 0; j < vdofs2.Size(); j++)
+            {
+               u2_all(j) = nbr_data(vdofs2[j]);
+            }
+
+            dump_face(logical_fault_idx, mesh_.GetSharedFace(sf), "fault_shared", FTr,
+                      scalar_fes_->GetFE(FTr->Elem1No), u1_all, fe2, u2_all);
+         }
+#endif
+      }
+   }
+
+   void DebugDumpFaultTraction(const GridFuncType &displacement,
+                               const Vector &slip_bc)
+   {
+      if (!DebugEnabledForTime(debug_time_) || method_ != DGMethod::IP) { return; }
+
+      Vector traction, normal_traction;
+      ComputeTraction(displacement, slip_bc, traction, &normal_traction);
+
+      std::ofstream out(DebugFilePath("first_step_face_trac"),
+                        debug_trac_header_written_ ? std::ios::app : std::ios::trunc);
+      if (!out) { return; }
+      if (!debug_trac_header_written_)
+      {
+         out << "time,face_kind,fault_idx,mesh_face,elem1,elem2,record,index0,index1,value\n";
+         debug_trac_header_written_ = true;
+      }
+
+      auto write_row = [&](const char *face_kind, int logical_fault_idx,
+                           int mesh_face_idx, int elem1, int elem2,
+                           const char *record, int i0, int i1, real_t value)
+      {
+         out << std::setprecision(17) << debug_time_ << ","
+             << face_kind << ","
+             << logical_fault_idx << ","
+             << mesh_face_idx << ","
+             << elem1 << ","
+             << elem2 << ","
+             << record << ","
+             << i0 << ","
+             << i1 << ","
+             << value << "\n";
+      };
+
+      auto dump_face = [&](int logical_fault_idx, int mesh_face_idx,
+                           const char *face_kind, FaceElementTransformations *FTr,
+                           const FiniteElement *fe1, const Vector &u1_all,
+                           const FiniteElement *fe2, const Vector &u2_all)
+      {
+         if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { return; }
+
+         const int dim = 3;
+         const int nbf = nbf_per_face_;
+         const int nq = face_quad_->NumQuadPoints();
+
+         Vector delta_u_quad;
+         BuildSlipAtQuadPoints(logical_fault_idx, slip_bc, delta_u_quad);
+
+         DGElasticityIPCombinedIntegrator trac_integ(
+            lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
+         Vector T_quad, nl_q;
+         trac_integ.ComputeTractionAtQuadPoints(
+            *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad, T_quad, nullptr, &nl_q);
+
+         // Compute physical coordinates at each QP for cross-code matching
+         const IntegrationRule &ir_trac = IntRules.Get(
+            FTr->GetGeometryType(), 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1);
+         for (int q = 0; q < nq; q++)
+         {
+            FTr->SetAllIntPoints(&ir_trac.IntPoint(q));
+            Vector phys(dim);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_x", q, -1, phys(0));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_y", q, -1, phys(1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "phys_z", q, -1, phys(2));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "nl_q", q, -1, nl_q(q));
+            for (int c = 0; c < dim; c++)
+            {
+               write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                         FTr->Elem1No, FTr->Elem2No, "traction_q", q, c,
+                         T_quad(c * nq + q));
+            }
+         }
+
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            const int dof_idx = logical_fault_idx * nbf + kk;
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "traction_dip", kk, -1,
+                      traction(2 * dof_idx));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "traction_strike", kk, -1,
+                      traction(2 * dof_idx + 1));
+            write_row(face_kind, logical_fault_idx, mesh_face_idx,
+                      FTr->Elem1No, FTr->Elem2No, "normal_traction", kk, -1,
+                      normal_traction(dof_idx));
+         }
+      };
+
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+      {
+         int face = fault_interior_faces_[fi];
+         FaceElementTransformations *FTr = mesh_.GetInteriorFaceTransformations(face);
+         if (!DebugShouldDumpFace(fi, FTr)) { continue; }
+
+         Array<int> vdofs1, vdofs2;
+         fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+         fes_->GetElementVDofs(FTr->Elem2No, vdofs2);
+         Vector u1_all(vdofs1.Size()), u2_all(vdofs2.Size());
+         displacement.GetSubVector(vdofs1, u1_all);
+         displacement.GetSubVector(vdofs2, u2_all);
+         dump_face(fi, face, "fault_interior", FTr,
+                   scalar_fes_->GetFE(FTr->Elem1No), u1_all,
+                   scalar_fes_->GetFE(FTr->Elem2No), u2_all);
+      }
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         if (!pfes) { return; }
+
+         ParGridFunction par_u(pfes);
+         par_u = displacement;
+         pfes->ExchangeFaceNbrData();
+         par_u.ExchangeFaceNbrData();
+
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            const int logical_fault_idx = fault_interior_faces_.Size() + i;
+            int sf = fault_shared_faces_[i];
+            FaceElementTransformations *FTr = mesh_.GetSharedFaceTransformations(sf);
+            if (!DebugShouldDumpFace(logical_fault_idx, FTr)) { continue; }
+
+            Array<int> vdofs1;
+            fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
+            Vector u1_all(vdofs1.Size());
+            par_u.GetSubVector(vdofs1, u1_all);
+
+            const int nbr_idx = FTr->Elem2No - mesh_.GetNE();
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            Array<int> vdofs2;
+            pfes->GetFaceNbrElementVDofs(nbr_idx, vdofs2);
+            const Vector &nbr_data = par_u.FaceNbrData();
+            Vector u2_all(vdofs2.Size());
+            for (int j = 0; j < vdofs2.Size(); j++)
+            {
+               u2_all(j) = nbr_data(vdofs2[j]);
+            }
+
+            dump_face(logical_fault_idx, mesh_.GetSharedFace(sf), "fault_shared", FTr,
+                      scalar_fes_->GetFE(FTr->Elem1No), u1_all, fe2, u2_all);
+         }
+#endif
+      }
+   }
+
+   /// Build 3D slip at quadrature points for a single fault face.
+   ///
+   /// Shared by production assembly (AssembleSlipContributionIP) and debug
+   /// diagnostics (DebugDumpFaultJumps, DebugDumpFaultTraction).  Single
+   /// source of truth for the interpolation + embedding + sign chain.
+   ///
+   /// @param logical_fault_idx  Face index in the combined interior+shared list
+   /// @param slip_bc            Full local slip vector [2 * num_fault_dofs]
+   /// @param[out] delta_u_quad  3D slip at QPs [dim * nq], sign-corrected
+   void BuildSlipAtQuadPoints(int logical_fault_idx, const Vector &slip_bc,
+                              Vector &delta_u_quad) const
+   {
+      const int dim = 3;
+      const int nbf = nbf_per_face_;
+      const auto &basis = fault_basis_.GetBasis(logical_fault_idx);
+      // Tandem convention: sign is baked into the basis vectors.
+      // No separate sign factor needed.
+
+      if (!basis.qp_data.empty())
+      {
+         Vector slip_tang(2 * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = logical_fault_idx * nbf + kk;
+            slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
+            slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
+         }
+         Vector slip_tang_q;
+         face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
+         int nqp = slip_tang_q.Size() / 2;
+         delta_u_quad.SetSize(dim * nqp);
+         for (int q = 0; q < nqp; q++)
+         {
+            real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
+            real_t du[3];
+            fault_basis_.EmbedSlipQP(logical_fault_idx, q, sl_q, du);
+            for (int c = 0; c < dim; c++)
+               delta_u_quad(c * nqp + q) = du[c];
+         }
+      }
+      else
+      {
+         Vector delta_u_nodal(dim * nbf);
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            int dof_idx = logical_fault_idx * nbf + kk;
+            real_t slip_local[2] = {slip_bc(2 * dof_idx),
+                                    slip_bc(2 * dof_idx + 1)};
+            real_t du[3];
+            fault_basis_.EmbedSlip(logical_fault_idx, slip_local, du);
+            for (int c = 0; c < dim; c++)
+               delta_u_nodal(c * nbf + kk) = du[c];
+         }
+         face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
+      }
+   }
+
+   // ---- Facet BC classification (single source of truth) ----
+   // Mirrors Tandem's per-facet BC enum (DGOperatorTopo FacetInfo.bc).
+   // Built once at startup from mesh tags, propagated exactly via MPI.
+   enum class FacetBC : int8_t { None = 0, Fault = 1, Dirichlet = 2 };
+
+   std::vector<FacetBC> face_bc_;         // [mesh_.GetNumFaces()] interior faces
+   std::vector<FacetBC> shared_face_bc_;  // [mesh_.GetNSharedFaces()] shared faces
+
+   // Legacy face arrays derived from the BC tables (kept for assembly loops)
+   Array<int> fault_interior_faces_;
+   Array<int> fault_shared_faces_;
    Array<int> dirichlet_interior_faces_;
    Array<int> dirichlet_shared_faces_;
+
+   // Element-pair keys for fault faces (populated during BC table build)
+   std::set<long> fault_face_keys_;
 
    real_t epsilon_;  // SIPG sign = -1
 
@@ -382,8 +1652,6 @@ private:
 #endif
 
    // Fault data
-   Array<int> fault_interior_faces_;
-   Array<int> fault_shared_faces_;
    Array<int> fault_dofs_;
    int num_fault_dofs_ = 0;
    int num_owned_fault_dofs_ = 0;
@@ -466,6 +1734,32 @@ private:
    mutable Array<int> dirichlet_bdr_marker_;
 
    // ========================================================================
+   // Helpers
+   // ========================================================================
+
+   /// Compute the skeleton Dirichlet orientation sign at the current face integration point.
+   ///
+   /// Matches Tandem DGCurvilinearCommon.h:95-99: on skeleton (interior)
+   /// faces, negate f_q when the face normal opposes ref_normal_.
+   /// This is the same role as sign_flipped for fault slip, generalized
+   /// to use the full dot product with the stored ref_normal_ vector.
+   ///
+   /// @param FTr Face transformation (SetAllIntPoints must have been called)
+   /// @return +1.0 if face normal aligns with ref_normal_, -1.0 otherwise
+   real_t ComputeSkeletonDirichletSign(
+      FaceElementTransformations *FTr) const
+   {
+      Vector nor(3);
+      CalcOrtho(FTr->Jacobian(), nor);
+      real_t dot_ref = 0.0;
+      for (int d = 0; d < ref_normal_.Size(); d++)
+      {
+         dot_ref += nor(d) * ref_normal_(d);
+      }
+      return (dot_ref < 0.0) ? -1.0 : 1.0;
+   }
+
+   // ========================================================================
    // Setup methods
    // ========================================================================
 
@@ -511,359 +1805,607 @@ private:
       }
    }
 
-   /// Build tag-based fault face lookup from mesh boundary element attributes.
+   /// Build the facet BC tables from mesh tags. Single source of truth.
    ///
-   /// Uses MFEM's direct GetBdrElementFaceIndex(be) to map each attr-3
-   /// boundary element to its face index in O(1), avoiding fragile vertex-set
-   /// matching. This is the closest MFEM equivalent to Tandem's direct
-   /// facet-tag import (GlobalSimplexMeshBuilder.cpp:72).
-   void BuildFaultTaggedFaces()
+   /// Mirrors Tandem's facet-BC model: import tags → propagate exactly →
+   /// store per-facet class → consume per-facet class.
+   ///
+   /// 1. Scan boundary elements with attr 3 (fault) and attr 5 (Dirichlet)
+   /// 2. Mark interior faces directly in face_bc_
+   /// 3. Collect shared-face canonical vertex keys, Allgatherv across ranks
+   /// 4. Mark shared faces in shared_face_bc_
+   /// 5. Validate: attr 3 and attr 5 must exist; fault ∩ Dirichlet = ∅
+   /// 6. Derive legacy face arrays for downstream assembly
+   void BuildFacetBCTables()
    {
-      fault_tagged_faces_.SetSize(0);
-      fault_face_keys_.clear();
-      fault_shared_tagged_.clear();
+      const int num_faces = mesh_.GetNumFaces();
+      face_bc_.assign(num_faces, FacetBC::None);
 
-      int fault_attr = 3;
-      bool has_fault_attr_local = false;
-      for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
-      {
-         if (mesh_.bdr_attributes[i] == fault_attr)
-         {
-            has_fault_attr_local = true;
-            break;
-         }
-      }
-
-      has_fault_attr_ = has_fault_attr_local;
+      int num_shared = 0;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         int local = has_fault_attr_local ? 1 : 0;
-         int global = 0;
-         MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_MAX, mesh_.GetComm());
-         has_fault_attr_ = (global != 0);
+         num_shared = mesh_.GetNSharedFaces();
 #endif
       }
-      if (!has_fault_attr_) { return; }
+      shared_face_bc_.assign(num_shared, FacetBC::None);
 
-      // Build reverse map: local face index → shared face index.
-      // Needed to tag shared faces directly from boundary elements.
+      // ---- Check global attr existence ----
+      int local_has3 = 0, local_has5 = 0;
+      // Scan actual boundary elements instead of mesh_.bdr_attributes. In
+      // ParMesh, internal tagged faces can appear in GetNBE() even when the
+      // summary attribute list does not include their tag.
+      for (int be = 0; be < mesh_.GetNBE(); be++)
+      {
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr == 3) { local_has3 = 1; }
+         if (attr == 5) { local_has5 = 1; }
+      }
+      int global_has3 = local_has3, global_has5 = local_has5;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(MPI_IN_PLACE, &global_has3, 1, MPI_INT,
+                       MPI_MAX, mesh_.GetComm());
+         MPI_Allreduce(MPI_IN_PLACE, &global_has5, 1, MPI_INT,
+                       MPI_MAX, mesh_.GetComm());
+#endif
+      }
+      // If the mesh has no fault tags (attr 3), this is a non-BP5 problem
+      // (unit test, pure elasticity, etc.). Skip fault classification but
+      // still build Dirichlet faces if attr 5 is present.
+      // If the mesh HAS fault tags, enforce BP5 requirement: attr 5 must
+      // also be present.
+      bool has_fault = (global_has3 > 0);
+      bool has_dirichlet = (global_has5 > 0);
+      if (has_fault)
+      {
+         MFEM_VERIFY(has_dirichlet,
+            "ERROR: Mesh has fault faces (attr 3) but no Dirichlet faces "
+            "(attr 5). BP5 requires both Physical Surface tags.");
+      }
+      if (!has_fault && !has_dirichlet) { return; }
+
+      // ---- Build reverse map: local face → shared face index ----
       std::unordered_map<int, int> lface_to_sface;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         for (int sf = 0; sf < num_shared; sf++)
          {
             lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
          }
 #endif
       }
 
-      // Collect fault face indices directly from boundary elements using
-      // GetBdrElementFaceIndex — O(1) per boundary element, no vertex
-      // matching. Each attr-3 boundary element maps to exactly one face.
-      std::set<int> fault_face_set;
+      // ---- Phase 1: Scan boundary elements, mark local faces ----
+      // Collect shared-face tags locally (only 1 rank has the bdr element)
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
-         if (mesh_.GetBdrAttribute(be) != fault_attr) { continue; }
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr != 3 && attr != 5) { continue; }
+         FacetBC bc = (attr == 3) ? FacetBC::Fault : FacetBC::Dirichlet;
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
-         fault_face_set.insert(face_idx);
-      }
 
-      // Classify each tagged face as interior or shared
-      for (int face_idx : fault_face_set)
-      {
          FaceElementTransformations *FTr =
             mesh_.GetInteriorFaceTransformations(face_idx);
          if (FTr != nullptr)
          {
-            // Interior face: both adjacent elements are local
-            fault_tagged_faces_.Append(face_idx);
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE()
-                       + std::max(e1, e2);
-            fault_face_keys_.insert(key);
+            // Interior face: mark in face_bc_ table
+            MFEM_VERIFY(face_bc_[face_idx] == FacetBC::None ||
+                        face_bc_[face_idx] == bc,
+               "ERROR: Interior face " << face_idx << " tagged as both "
+               "attr 3 and attr 5.");
+            face_bc_[face_idx] = bc;
+
+            if (bc == FacetBC::Fault)
+            {
+               int e1 = FTr->Elem1No;
+               int e2 = FTr->Elem2No;
+               long key = (long)std::min(e1, e2) * mesh_.GetNE()
+                          + std::max(e1, e2);
+               fault_face_keys_.insert(key);
+            }
          }
          else if constexpr (IsParallelMesh<MeshType>::value)
          {
-            // Check if this face is a shared face at a partition boundary
             auto it = lface_to_sface.find(face_idx);
             if (it != lface_to_sface.end())
             {
-               fault_shared_tagged_.insert(it->second);
+               int sf = it->second;
+               MFEM_VERIFY(shared_face_bc_[sf] == FacetBC::None ||
+                           shared_face_bc_[sf] == bc,
+                  "ERROR: Shared face " << sf << " tagged as both "
+                  "attr 3 and attr 5.");
+               shared_face_bc_[sf] = bc;
             }
          }
       }
 
-      // v58 fix: Exchange shared fault face tags between neighboring ranks.
-      //
-      // Internal boundary elements (attr=3) only exist on ONE rank per
-      // shared face.  The rank without the boundary element never detects
-      // the face as a fault face, causing its elem2 RHS contribution to
-      // be silently dropped in AssembleSlipContributionIPShared.
-      //
-      // Fix: identify each face by its sorted global vertex IDs (canonical
-      // triplet).  Each rank broadcasts the vertex signatures of its
-      // detected shared fault faces.  Other ranks match their shared faces
-      // against this global set.
+      // ---- Phase 2: Propagate shared-face tags across MPI ranks ----
+      // A shared face's boundary element exists on only ONE rank. The
+      // other rank must discover it via canonical vertex key exchange.
+      // We propagate fault and Dirichlet tags in a single Allgatherv,
+      // packing (key, bc_class) per face.
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         Array<HYPRE_BigInt> gvert_tag;
-         mesh_.GetGlobalVertexIndices(gvert_tag);
+         Array<HYPRE_BigInt> gvert;
+         mesh_.GetGlobalVertexIndices(gvert);
 
-         // Build canonical vertex keys for locally-detected shared fault faces
-         std::vector<FaceVertexKey> local_fault_keys;
-         for (int sf : fault_shared_tagged_)
+         // Pack: 4 values per locally-tagged shared face (3 key + bc_class)
+         std::vector<HYPRE_BigInt> local_flat;
+         for (int sf = 0; sf < num_shared; sf++)
          {
+            if (shared_face_bc_[sf] == FacetBC::None) { continue; }
             int lf = mesh_.GetSharedFace(sf);
-            local_fault_keys.push_back(MakeFaceKey(lf, gvert_tag));
+            FaceVertexKey fk = MakeFaceKey(lf, gvert);
+            local_flat.push_back(fk.v[0]);
+            local_flat.push_back(fk.v[1]);
+            local_flat.push_back(fk.v[2]);
+            local_flat.push_back(static_cast<HYPRE_BigInt>(shared_face_bc_[sf]));
          }
 
-         // Allgather: collect all fault face keys from all ranks
-         int local_count = static_cast<int>(local_fault_keys.size());
+         int lc = static_cast<int>(local_flat.size());
          int nranks = 1;
          MPI_Comm_size(mesh_.GetComm(), &nranks);
-         std::vector<int> recv_counts(nranks), displs(nranks);
-         MPI_Allgather(&local_count, 1, MPI_INT,
-                       recv_counts.data(), 1, MPI_INT, mesh_.GetComm());
-         int total = 0;
-         for (int r = 0; r < nranks; r++)
-         {
-            displs[r] = total;
-            total += recv_counts[r];
-         }
-
-         // Pack as flat array (3 HYPRE_BigInt per face)
-         std::vector<HYPRE_BigInt> local_flat(3 * local_count);
-         for (int i = 0; i < local_count; i++)
-         {
-            local_flat[3*i]   = local_fault_keys[i].v[0];
-            local_flat[3*i+1] = local_fault_keys[i].v[1];
-            local_flat[3*i+2] = local_fault_keys[i].v[2];
-         }
-         std::vector<int> recv3(nranks), disp3(nranks);
-         for (int r = 0; r < nranks; r++)
-         {
-            recv3[r] = 3 * recv_counts[r];
-            disp3[r] = 3 * displs[r];
-         }
-         std::vector<HYPRE_BigInt> all_flat(3 * total);
-         MPI_Allgatherv(local_flat.data(), 3 * local_count, HYPRE_MPI_BIG_INT,
-                        all_flat.data(), recv3.data(), disp3.data(),
+         std::vector<int> rc(nranks), dp(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                       mesh_.GetComm());
+         int tot = 0;
+         for (int r = 0; r < nranks; r++) { dp[r] = tot; tot += rc[r]; }
+         std::vector<HYPRE_BigInt> all(tot);
+         MPI_Allgatherv(local_flat.data(), lc, HYPRE_MPI_BIG_INT,
+                        all.data(), rc.data(), dp.data(),
                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         // Build set of all known fault face keys
-         std::set<FaceVertexKey> global_fault_keys;
-         for (int i = 0; i < total; i++)
+         // Build global key → bc map
+         std::map<FaceVertexKey, FacetBC> global_shared_bc;
+         for (int i = 0; i < tot; i += 4)
          {
             FaceVertexKey k;
-            k.v[0] = all_flat[3*i];
-            k.v[1] = all_flat[3*i+1];
-            k.v[2] = all_flat[3*i+2];
-            global_fault_keys.insert(k);
+            k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
+            FacetBC bc = static_cast<FacetBC>(all[i+3]);
+            auto [it, inserted] = global_shared_bc.emplace(k, bc);
+            MFEM_VERIFY(inserted || it->second == bc,
+               "ERROR: Shared face key (" << k.v[0] << "," << k.v[1]
+               << "," << k.v[2] << ") has conflicting tags from "
+               "different ranks.");
          }
 
-         // Check each of MY shared faces against the global set
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         // Fill untagged local shared faces from the global map
+         for (int sf = 0; sf < num_shared; sf++)
          {
-            if (fault_shared_tagged_.count(sf) > 0) { continue; }
+            if (shared_face_bc_[sf] != FacetBC::None) { continue; }
             int lf = mesh_.GetSharedFace(sf);
-            FaceVertexKey key = MakeFaceKey(lf, gvert_tag);
-            if (global_fault_keys.count(key) > 0)
+            FaceVertexKey key = MakeFaceKey(lf, gvert);
+            auto it = global_shared_bc.find(key);
+            if (it != global_shared_bc.end())
             {
-               fault_shared_tagged_.insert(sf);
+               shared_face_bc_[sf] = it->second;
             }
          }
 #endif
       }
-   }
 
-   /// Build Dirichlet interior face list from mesh boundary element attributes.
-   ///
-   /// Uses the same direct GetBdrElementFaceIndex approach as
-   /// BuildFaultTaggedFaces. For attr 5 (far-field Dirichlet), excluding
-   /// faces already tagged as fault.
-   void BuildDirichletInteriorFaces()
-   {
+      // ---- Phase 3: Derive legacy face arrays from BC tables ----
+      fault_interior_faces_.SetSize(0);
+      fault_shared_faces_.SetSize(0);
       dirichlet_interior_faces_.SetSize(0);
       dirichlet_shared_faces_.SetSize(0);
 
-      int dirichlet_attr = 5;
-      bool has_dirichlet_attr = false;
-      for (int i = 0; i < mesh_.bdr_attributes.Size(); i++)
+      for (int f = 0; f < num_faces; f++)
       {
-         if (mesh_.bdr_attributes[i] == dirichlet_attr)
+         FaceElementTransformations *FTr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (!FTr) { continue; }
+         if (face_bc_[f] == FacetBC::Fault)
          {
-            has_dirichlet_attr = true;
-            break;
+            fault_interior_faces_.Append(f);
+         }
+         else if (face_bc_[f] == FacetBC::Dirichlet)
+         {
+            dirichlet_interior_faces_.Append(f);
          }
       }
-      if (!has_dirichlet_attr) { return; }
+      for (int sf = 0; sf < num_shared; sf++)
+      {
+         if (shared_face_bc_[sf] == FacetBC::Fault)
+         {
+            fault_shared_faces_.Append(sf);
+         }
+         else if (shared_face_bc_[sf] == FacetBC::Dirichlet)
+         {
+            dirichlet_shared_faces_.Append(sf);
+         }
+      }
 
-      // Build reverse map: local face → shared face index
-      std::unordered_map<int, int> lface_to_sface;
+      // ---- Phase 4: Assert no None-classified face in any assembly array ----
+      for (int i = 0; i < fault_interior_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(face_bc_[fault_interior_faces_[i]] == FacetBC::Fault,
+            "ERROR: fault_interior_faces_[" << i << "] = "
+            << fault_interior_faces_[i] << " has BC="
+            << static_cast<int>(face_bc_[fault_interior_faces_[i]])
+            << ", expected Fault.");
+      }
+      for (int i = 0; i < dirichlet_interior_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(face_bc_[dirichlet_interior_faces_[i]] == FacetBC::Dirichlet,
+            "ERROR: dirichlet_interior_faces_[" << i << "] = "
+            << dirichlet_interior_faces_[i] << " has BC="
+            << static_cast<int>(face_bc_[dirichlet_interior_faces_[i]])
+            << ", expected Dirichlet.");
+      }
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(shared_face_bc_[fault_shared_faces_[i]] == FacetBC::Fault,
+            "ERROR: fault_shared_faces_[" << i << "] = "
+            << fault_shared_faces_[i] << " has BC="
+            << static_cast<int>(shared_face_bc_[fault_shared_faces_[i]])
+            << ", expected Fault.");
+      }
+      for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+      {
+         MFEM_VERIFY(shared_face_bc_[dirichlet_shared_faces_[i]] == FacetBC::Dirichlet,
+            "ERROR: dirichlet_shared_faces_[" << i << "] = "
+            << dirichlet_shared_faces_[i] << " has BC="
+            << static_cast<int>(shared_face_bc_[dirichlet_shared_faces_[i]])
+            << ", expected Dirichlet.");
+      }
+
+      // ---- Phase 4b: Audit y=0 face classification ----
+      // Detect interior faces on y=0 that are FacetBC::None (unclassified).
+      // These faces get DG penalty enforcing zero jump, conflicting with
+      // adjacent fault slip or Dirichlet displacement.
+      {
+         int rank = 0;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Comm_rank(mesh_.GetComm(), &rank);
+#endif
+         }
+
+         int local_y0_none = 0, local_y0_fault = 0, local_y0_dir = 0;
+         int local_y0_none_shared = 0;
+         std::vector<std::array<double, 4>> none_faces;  // x, y, z, face_idx
+
+         // Interior faces
+         for (int f = 0; f < num_faces; f++)
+         {
+            auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+            if (!FTr) { continue; }
+            const IntegrationPoint &ip =
+               Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ip);
+            Vector fc(3);
+            FTr->Face->Transform(ip, fc);
+            if (std::abs(fc(1)) > 1.0) { continue; }  // not on y=0
+
+            if (face_bc_[f] == FacetBC::None)
+            {
+               local_y0_none++;
+               none_faces.push_back({fc(0), fc(1), fc(2),
+                                     static_cast<double>(f)});
+            }
+            else if (face_bc_[f] == FacetBC::Fault) { local_y0_fault++; }
+            else if (face_bc_[f] == FacetBC::Dirichlet) { local_y0_dir++; }
+         }
+
+         // Shared faces — count by classification only (avoid
+         // GetSharedFaceTransformations which can fail for boundary faces).
+         // Use GetSharedFace to get the local face index, then compute
+         // centroid via the local face geometry.
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            for (int sf = 0; sf < num_shared; sf++)
+            {
+               if (shared_face_bc_[sf] != FacetBC::None) { continue; }
+
+               // Get centroid of shared face via local face index
+               int lf = mesh_.GetSharedFace(sf);
+               auto *face_tr = mesh_.GetFaceTransformation(lf);
+               if (!face_tr) { local_y0_none_shared++; continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(face_tr->GetGeometryType());
+               face_tr->SetIntPoint(&ip);
+               Vector fc(3);
+               face_tr->Transform(ip, fc);
+               if (std::abs(fc(1)) > 1.0) { continue; }
+
+               local_y0_none_shared++;
+               none_faces.push_back({fc(0), fc(1), fc(2),
+                                     static_cast<double>(lf)});
+            }
+#endif
+         }
+
+         // Reduce counts
+         int global_counts[4] = {local_y0_fault, local_y0_dir,
+                                  local_y0_none, local_y0_none_shared};
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(MPI_IN_PLACE, global_counts, 4, MPI_INT,
+                          MPI_SUM, mesh_.GetComm());
+#endif
+         }
+
+         if (rank == 0)
+         {
+            std::cout << "\n=== Y=0 Face Classification Audit ===\n"
+                      << "  Fault (attr=3):      " << global_counts[0] << "\n"
+                      << "  Dirichlet (attr=5):  " << global_counts[1] << "\n"
+                      << "  NONE (interior):     " << global_counts[2] << "\n"
+                      << "  NONE (shared):       " << global_counts[3] << "\n";
+            if (global_counts[2] + global_counts[3] > 0)
+            {
+               std::cout << "  *** WARNING: " << global_counts[2] + global_counts[3]
+                         << " y=0 faces have NO BC! These enforce zero jump "
+                         << "via DG penalty, conflicting with fault slip.\n";
+            }
+            else
+            {
+               std::cout << "  OK: all y=0 interior faces classified.\n";
+            }
+            std::cout << "=====================================\n\n";
+         }
+
+         // Dump unclassified face locations to CSV
+         if (!none_faces.empty())
+         {
+            std::string fname = "face_audit_r" + std::to_string(rank) + ".csv";
+            std::ofstream ofs(fname);
+            ofs << "x,y,z,face_idx,bc\n";
+            for (auto &nf : none_faces)
+            {
+               ofs << nf[0] << "," << nf[1] << ","
+                   << nf[2] << "," << static_cast<int>(nf[3])
+                   << ",None\n";
+            }
+            // Also dump fault faces near the boundary for context
+            for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+            {
+               int f = fault_interior_faces_[fi];
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->Transform(ip, fc);
+               ofs << fc(0) << "," << fc(1) << ","
+                   << fc(2) << "," << f << ",Fault\n";
+            }
+            for (int di = 0; di < dirichlet_interior_faces_.Size(); di++)
+            {
+               int f = dirichlet_interior_faces_[di];
+               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
+               if (!FTr) { continue; }
+               const IntegrationPoint &ip =
+                  Geometries.GetCenter(FTr->GetGeometryType());
+               FTr->SetAllIntPoints(&ip);
+               Vector fc(3);
+               FTr->Face->Transform(ip, fc);
+               ofs << fc(0) << "," << fc(1) << ","
+                   << fc(2) << "," << f << ",Dirichlet\n";
+            }
+         }
+      }
+
+      // ---- Phase 5: Exact canonical-key validation ----
+      ValidateFacetBCTables();
+   }
+
+   /// Allgather a local set of FaceVertexKeys and return the global union.
+   std::set<FaceVertexKey> AllgatherKeys(
+      const std::set<FaceVertexKey> &local_keys) const
+   {
+      std::set<FaceVertexKey> global_keys = local_keys;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         int lc = static_cast<int>(local_keys.size());
+         int nranks = 1;
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+         std::vector<int> rc(nranks), dp(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, rc.data(), 1, MPI_INT,
+                       mesh_.GetComm());
+         int tot = 0;
+         for (int r = 0; r < nranks; r++) { dp[r] = tot; tot += rc[r]; }
+         std::vector<HYPRE_BigInt> lf(3 * lc);
+         int idx = 0;
+         for (auto &k : local_keys)
          {
-            lface_to_sface[mesh_.GetSharedFace(sf)] = sf;
+            lf[3*idx] = k.v[0]; lf[3*idx+1] = k.v[1]; lf[3*idx+2] = k.v[2];
+            idx++;
+         }
+         std::vector<int> rc3(nranks), dp3(nranks);
+         for (int r = 0; r < nranks; r++)
+         { rc3[r] = 3*rc[r]; dp3[r] = 3*dp[r]; }
+         std::vector<HYPRE_BigInt> af(3 * tot);
+         MPI_Allgatherv(lf.data(), 3*lc, HYPRE_MPI_BIG_INT,
+                        af.data(), rc3.data(), dp3.data(),
+                        HYPRE_MPI_BIG_INT, mesh_.GetComm());
+         for (int i = 0; i < tot; i++)
+         {
+            FaceVertexKey k;
+            k.v[0] = af[3*i]; k.v[1] = af[3*i+1]; k.v[2] = af[3*i+2];
+            global_keys.insert(k);
          }
 #endif
       }
+      return global_keys;
+   }
 
-      // Direct face lookup from boundary elements
+   /// Exact canonical-key validation of recovered face sets.
+   void ValidateFacetBCTables() const
+   {
+      Array<HYPRE_BigInt> gvert;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         mesh_.GetGlobalVertexIndices(gvert);
+#endif
+      }
+      else
+      {
+         gvert.SetSize(mesh_.GetNV());
+         for (int i = 0; i < mesh_.GetNV(); i++) { gvert[i] = i; }
+      }
+
+      // Build tagged key sets from boundary elements (ground truth).
+      // Separate tagged attr-5 faces into recoverable (interior/shared)
+      // and exterior (handled by AddBdrFaceIntegrator, not recovered here).
+      std::set<FaceVertexKey> local_tagged_fault;
+      std::set<FaceVertexKey> local_tagged_dir_recoverable;  // interior/shared only
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
-         if (mesh_.GetBdrAttribute(be) != dirichlet_attr) { continue; }
+         int attr = mesh_.GetBdrAttribute(be);
+         if (attr != 3 && attr != 5) { continue; }
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
-
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(face_idx);
-         if (FTr != nullptr)
+         FaceVertexKey key = MakeFaceKey(face_idx, gvert);
+         if (attr == 3)
          {
-            // Exclude fault faces by element-pair key
-            int e1 = FTr->Elem1No;
-            int e2 = FTr->Elem2No;
-            long key = (long)std::min(e1, e2) * mesh_.GetNE()
-                       + std::max(e1, e2);
-            if (fault_face_keys_.count(key) > 0) { continue; }
-
-            dirichlet_interior_faces_.Append(face_idx);
+            local_tagged_fault.insert(key);
          }
-         else if constexpr (IsParallelMesh<MeshType>::value)
+         else
          {
-            auto it = lface_to_sface.find(face_idx);
-            if (it != lface_to_sface.end())
+            // Is this face interior or shared? If so, it's recoverable.
+            bool is_interior = (mesh_.GetInteriorFaceTransformations(face_idx)
+                                != nullptr);
+            bool is_shared = false;
+            if constexpr (IsParallelMesh<MeshType>::value)
             {
-               if (fault_shared_tagged_.count(it->second) > 0) { continue; }
-               dirichlet_shared_faces_.Append(it->second);
+#ifdef MFEM_USE_MPI
+               if (!is_interior)
+               {
+                  // Check if face_idx corresponds to a shared face
+                  for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+                  {
+                     if (mesh_.GetSharedFace(sf) == face_idx)
+                     {
+                        is_shared = true;
+                        break;
+                     }
+                  }
+               }
+#endif
+            }
+            if (is_interior || is_shared)
+            {
+               local_tagged_dir_recoverable.insert(key);
             }
          }
+      }
+      std::set<FaceVertexKey> global_tagged_fault =
+         AllgatherKeys(local_tagged_fault);
+      std::set<FaceVertexKey> global_tagged_dir_recoverable =
+         AllgatherKeys(local_tagged_dir_recoverable);
+
+      // Build recovered key sets from the derived face arrays
+      std::set<FaceVertexKey> local_recovered_fault, local_recovered_dir;
+      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+         local_recovered_fault.insert(MakeFaceKey(fault_interior_faces_[fi], gvert));
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+         local_recovered_dir.insert(MakeFaceKey(dirichlet_interior_faces_[fi], gvert));
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            local_recovered_fault.insert(
+               MakeFaceKey(mesh_.GetSharedFace(fault_shared_faces_[i]), gvert));
+         for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+            local_recovered_dir.insert(
+               MakeFaceKey(mesh_.GetSharedFace(dirichlet_shared_faces_[i]), gvert));
+#endif
+      }
+      std::set<FaceVertexKey> global_recovered_fault =
+         AllgatherKeys(local_recovered_fault);
+      std::set<FaceVertexKey> global_recovered_dir =
+         AllgatherKeys(local_recovered_dir);
+
+      // Exact fault key equality: tagged == recovered (bidirectional)
+      for (auto &k : global_tagged_fault)
+      {
+         MFEM_VERIFY(global_recovered_fault.count(k) > 0,
+            "ERROR: Tagged attr-3 face key (" << k.v[0] << "," << k.v[1]
+            << "," << k.v[2] << ") was not recovered as a fault face.");
+      }
+      for (auto &k : global_recovered_fault)
+      {
+         MFEM_VERIFY(global_tagged_fault.count(k) > 0,
+            "ERROR: Recovered fault face key (" << k.v[0] << "," << k.v[1]
+            << "," << k.v[2] << ") has no matching attr-3 boundary element.");
+      }
+
+      // Exact Dirichlet key equality for recoverable faces (bidirectional)
+      for (auto &k : global_tagged_dir_recoverable)
+      {
+         MFEM_VERIFY(global_recovered_dir.count(k) > 0,
+            "ERROR: Tagged attr-5 interior/shared face key (" << k.v[0]
+            << "," << k.v[1] << "," << k.v[2]
+            << ") was not recovered as a Dirichlet face.");
+      }
+      for (auto &k : global_recovered_dir)
+      {
+         MFEM_VERIFY(global_tagged_dir_recoverable.count(k) > 0,
+            "ERROR: Recovered Dirichlet face key (" << k.v[0] << ","
+            << k.v[1] << "," << k.v[2]
+            << ") has no matching recoverable attr-5 boundary element.");
+      }
+
+      // Fault ∩ Dirichlet = ∅
+      for (auto &k : global_recovered_fault)
+      {
+         MFEM_VERIFY(!global_recovered_dir.count(k),
+            "ERROR: Face key (" << k.v[0] << "," << k.v[1] << ","
+            << k.v[2] << ") classified as both fault AND Dirichlet.");
+      }
+
+      // Summary
+      bool is_root = true;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank; MPI_Comm_rank(mesh_.GetComm(), &rank);
+         is_root = (rank == 0);
+#endif
+      }
+      if (is_root)
+      {
+         mfem::out << "  Tag validation: "
+                   << global_tagged_fault.size() << " fault keys (exact), "
+                   << global_recovered_dir.size() << " Dirichlet keys (exact, "
+                   << global_tagged_dir_recoverable.size() << " recoverable)"
+                   << " (OK)\n";
+         mfem::out << "  Fault faces: "
+                   << fault_interior_faces_.Size() << " interior + "
+                   << fault_shared_faces_.Size() << " shared (this rank)\n";
+         mfem::out << "  Dirichlet faces: "
+                   << dirichlet_interior_faces_.Size() << " interior + "
+                   << dirichlet_shared_faces_.Size() << " shared (this rank)\n";
       }
    }
 
    void SetupFaultInfo()
    {
-      fault_interior_faces_.SetSize(0);
+      // Build facet BC tables (single source of truth) and derive
+      // legacy face arrays. Includes exact canonical-key validation.
+      BuildFacetBCTables();
 
-      // Build tag-based fault face lookup from mesh Physical Surface attributes.
-      // This matches Tandem's BC-based face classification.
-      BuildFaultTaggedFaces();
+      num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
 
-      // Build Dirichlet interior face list (must come after BuildFaultTaggedFaces
-      // since it uses fault_face_keys_ to exclude fault faces)
-      BuildDirichletInteriorFaces();
-
-      // Detect fault faces using tags (or coordinate fallback)
-      int num_faces = mesh_.GetNumFaces();
-      for (int f = 0; f < num_faces; f++)
-      {
-         FaceElementTransformations *FTr =
-            mesh_.GetInteriorFaceTransformations(f);
-         if (FTr == nullptr) { continue; }
-
-         if (IsFaultFace3D(FTr))
-         {
-            fault_interior_faces_.Append(f);
-         }
-      }
-
-      // Shared faces (parallel): coordinate-based detection.
-      fault_shared_faces_.SetSize(0);
+      // Exchange face-neighbor data for shared face assembly
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
          mesh_.ExchangeFaceNbrData();
          auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
          if (pfes) { pfes->ExchangeFaceNbrData(); }
-
-         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
-         {
-            if (IsFaultFace3DShared(sf))
-            {
-               fault_shared_faces_.Append(sf);
-            }
-         }
 #endif
-      }
-
-      num_fault_faces_ = fault_interior_faces_.Size() + fault_shared_faces_.Size();
-
-      if (has_fault_attr_)
-      {
-         // Validate: the number of recovered tagged fault faces should match
-         // the number of boundary elements with attr 3 (globally).
-         int local_tagged_bdr = 0;
-         for (int be = 0; be < mesh_.GetNBE(); be++)
-         {
-            if (mesh_.GetBdrAttribute(be) == 3) { local_tagged_bdr++; }
-         }
-         int global_tagged_bdr = local_tagged_bdr;
-         // Count BOTH interior and shared tagged faces
-         int local_tagged_total = fault_tagged_faces_.Size()
-            + static_cast<int>(fault_shared_tagged_.size());
-         int global_tagged_total = local_tagged_total;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_bdr, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-            MPI_Allreduce(MPI_IN_PLACE, &global_tagged_total, 1, MPI_INT,
-                          MPI_SUM, mesh_.GetComm());
-#endif
-         }
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-#endif
-         }
-         // In MPI, shared faces are counted on both ranks, so
-         // global_tagged_total may exceed global_tagged_bdr.
-         // A genuine problem is when tagged_total < tagged_bdr.
-         if (is_root && global_tagged_bdr > 0 &&
-             global_tagged_total < global_tagged_bdr)
-         {
-            mfem::out << "  WARNING: Tag-based fault recovery: "
-                      << global_tagged_total
-                      << " tagged faces (interior+shared) vs "
-                      << global_tagged_bdr << " boundary elements with attr 3. "
-                      << "Some fault faces may be missing.\n";
-         }
-         if (is_root && global_tagged_bdr > 0)
-         {
-            mfem::out << "  Tag-based fault faces: "
-                      << fault_tagged_faces_.Size() << " interior + "
-                      << fault_shared_tagged_.size() << " shared (this rank), "
-                      << global_tagged_bdr << " boundary elements globally\n";
-         }
-      }
-
-      // Emit coordinate-fallback warning once, on root only
-      if (used_coord_fallback_ && !has_fault_attr_)
-      {
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-#endif
-         }
-         if (is_root)
-         {
-            mfem::out << "  WARNING: Using coordinate-based fault detection "
-                      << "(mesh has no fault attr 3). This does not follow "
-                      << "Tandem's tag-based classification and can hide mesh "
-                      << "tagging errors.\n";
-         }
       }
 
       // Multi-DOF fault quadrature
@@ -930,6 +2472,16 @@ private:
          fault_dofs_[i] = i;
       }
 
+      // ref_normal_ is needed by ComputeSkeletonDirichletSign for ALL
+      // ranks that have shared Dirichlet faces, even ranks with zero fault
+      // DOFs. Set it unconditionally BEFORE the fault DOF guard.
+      {
+         Vector ref_normal(3);
+         ref_normal = 0.0;
+         ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
+         ref_normal_ = ref_normal;
+      }
+
       // Compute FaultBasis for coordinate transforms
       if (num_fault_dofs_ > 0)
       {
@@ -938,9 +2490,7 @@ private:
          //   Fault at Y = 0
          //   ref_normal = (0, -1, 0) matches Tandem's convention
          //   Up = (0, 0, 1)
-         Vector ref_normal(3);
-         ref_normal = 0.0;
-         ref_normal(1) = -1.0;  // Y = fault-normal, pointing -Y
+         const Vector &ref_normal = ref_normal_;
 
          Vector up(3);
          up = 0.0;
@@ -994,6 +2544,107 @@ private:
                                                fault_interior_faces_.Size());
 #endif
          }
+      }
+   }
+
+   /// Startup face audit (validation-only). Verifies shared-face classification
+   /// agreement between neighboring MPI ranks. No coordinate-based logic —
+   /// only validates that the tag-recovered sets are self-consistent.
+   void RunStartupFaceAudit()
+   {
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         int rank = 0, nranks = 1;
+         MPI_Comm_rank(mesh_.GetComm(), &rank);
+         MPI_Comm_size(mesh_.GetComm(), &nranks);
+
+         // Build classification lookup for shared faces:
+         // 0=unclassified, 1=fault, 2=dirichlet
+         std::map<int, int> shared_cls;
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+            shared_cls[fault_shared_faces_[i]] = 1;
+         for (int i = 0; i < dirichlet_shared_faces_.Size(); i++)
+            shared_cls[dirichlet_shared_faces_[i]] = 2;
+
+         // Pack: 4 values per classified shared face (3 key + cls)
+         Array<HYPRE_BigInt> gvert;
+         mesh_.GetGlobalVertexIndices(gvert);
+
+         std::vector<HYPRE_BigInt> local_flat;
+         for (auto &[sf, cls] : shared_cls)
+         {
+            int lf = mesh_.GetSharedFace(sf);
+            FaceVertexKey fk = MakeFaceKey(lf, gvert);
+            local_flat.push_back(fk.v[0]);
+            local_flat.push_back(fk.v[1]);
+            local_flat.push_back(fk.v[2]);
+            local_flat.push_back(cls);
+         }
+
+         int lc = static_cast<int>(local_flat.size());
+         std::vector<int> counts(nranks), displs(nranks);
+         MPI_Allgather(&lc, 1, MPI_INT, counts.data(), 1, MPI_INT,
+                        mesh_.GetComm());
+         int total = 0;
+         for (int r = 0; r < nranks; r++)
+         {
+            displs[r] = total;
+            total += counts[r];
+         }
+         std::vector<HYPRE_BigInt> all(total);
+         MPI_Allgatherv(local_flat.data(), lc, HYPRE_MPI_BIG_INT,
+                         all.data(), counts.data(), displs.data(),
+                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
+
+         // Check: each key must appear exactly twice (once per rank sharing
+         // the face), and both ranks must agree on the classification.
+         std::map<FaceVertexKey, std::vector<int>> kmap;
+         for (int i = 0; i < total; i += 4)
+         {
+            FaceVertexKey k;
+            k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
+            kmap[k].push_back(static_cast<int>(all[i+3]));
+         }
+         int mismatch = 0, single_rank = 0;
+         for (auto &[k, entries] : kmap)
+         {
+            if (entries.size() < 2)
+            {
+               // Face seen from only one rank — valid in some MFEM
+               // partitioning layouts where only the owning rank
+               // contributes the shared face to the allgather.
+               single_rank++;
+               continue;
+            }
+            // Check that all ranks contributing this face agree
+            for (size_t e = 1; e < entries.size(); e++)
+            {
+               if (entries[e] != entries[0])
+               {
+                  mismatch++;
+                  if (rank == 0 && mismatch <= 10)
+                  {
+                     mfem::out << "  AUDIT MISMATCH: key=("
+                               << k.v[0] << "," << k.v[1] << "," << k.v[2]
+                               << ") cls=" << entries[0] << " vs cls="
+                               << entries[e] << "\n";
+                  }
+                  break;
+               }
+            }
+         }
+         MFEM_VERIFY(mismatch == 0,
+            "ERROR: " << mismatch << " shared faces have classification "
+            "mismatch between neighboring ranks.");
+         if (rank == 0)
+         {
+            int paired = static_cast<int>(kmap.size()) - single_rank;
+            mfem::out << "  AUDIT: shared-face agreement OK ("
+                      << paired << " paired, "
+                      << single_rank << " single-rank)\n";
+         }
+#endif
       }
    }
 
@@ -1233,15 +2884,24 @@ private:
          std::sort(gid_idx.begin(), gid_idx.end());
 
          // canonical_to_local_perm_[fi * nbf + canonical_k] = mfem_local_k
-         // For p=1: nbf_per_face_ == nv (3 vertices = 3 DOFs)
-         for (int k = 0; k < nv && k < nbf_per_face_; k++)
+         if (nbf_per_face_ == 1)
          {
-            canonical_to_local_perm_[fi * nbf_per_face_ + k] = gid_idx[k].second;
+            // BR2: single centroid DOF per face, no vertex permutation
+            canonical_to_local_perm_[fi] = 0;
          }
-         // For higher-order DOFs beyond vertices (p>=2): identity for now
-         for (int k = nv; k < nbf_per_face_; k++)
+         else
          {
-            canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
+            // IP (nbf == nv for p=1): reorder by sorted global vertex IDs
+            for (int k = 0; k < nv && k < nbf_per_face_; k++)
+            {
+               canonical_to_local_perm_[fi * nbf_per_face_ + k] =
+                  gid_idx[k].second;
+            }
+            // For higher-order DOFs beyond vertices (p>=2): identity
+            for (int k = nv; k < nbf_per_face_; k++)
+            {
+               canonical_to_local_perm_[fi * nbf_per_face_ + k] = k;
+            }
          }
       }
 
@@ -1260,69 +2920,19 @@ private:
       }
    }
 
-   bool IsFaultFace3D(FaceElementTransformations *FTr) const
+   /// Facet BC table lookup for interior faces.
+   FacetBC GetFaceBC(int face_idx) const
    {
-      // Follow Tandem: if the mesh carries the fault tag, trust tag-based
-      // classification and do not silently fall back to coordinates.
-      if (has_fault_attr_)
-      {
-         int e1 = FTr->Elem1No;
-         int e2 = FTr->Elem2No;
-         long key = (long)std::min(e1, e2) * mesh_.GetNE() + std::max(e1, e2);
-         return fault_face_keys_.count(key) > 0;
-      }
-
-      // Fallback: coordinate-based detection (Tandem convention only).
-      // This can hide bad mesh tagging — prefer tag-based detection.
-      used_coord_fallback_ = true;
-
-      // Fault at Y=0, X in [-lf/2, lf/2], Z in [-Wf, 0]
-      const IntegrationPoint &ip = Geometries.GetCenter(FTr->GetGeometryType());
-      FTr->Face->SetIntPoint(&ip);
-      Vector center(3);
-      FTr->Face->Transform(ip, center);
-
-      const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-
-      return std::abs(center(1)) < tol
-          && std::abs(center(0)) <= lf_ / 2.0 + tol
-          && center(2) >= -Wf_ - tol
-          && center(2) <= tol;
+      return (face_idx >= 0 && face_idx < static_cast<int>(face_bc_.size()))
+             ? face_bc_[face_idx] : FacetBC::None;
    }
 
-   bool IsFaultFace3DShared(int shared_face) const
+   /// Facet BC table lookup for shared faces.
+   FacetBC GetSharedFaceBC(int shared_face) const
    {
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         // Follow Tandem: if the mesh carries the fault tag, trust tag-based
-         // classification and do not silently fall back to coordinates.
-         if (has_fault_attr_)
-         {
-            return fault_shared_tagged_.count(shared_face) > 0;
-         }
-
-         // Fallback: coordinate-based (Tandem convention only)
-         // This can hide bad mesh tagging — see warning in IsFaultFace3D.
-         // Fault at Y=0, X in [-lf/2,lf/2], Z in [-Wf,0]
-         FaceElementTransformations *FTr =
-            mesh_.GetSharedFaceTransformations(shared_face);
-         if (FTr == nullptr) { return false; }
-
-         const IntegrationPoint &ip =
-            Geometries.GetCenter(FTr->GetGeometryType());
-         FTr->Face->SetIntPoint(&ip);
-         Vector center(3);
-         FTr->Face->Transform(ip, center);
-
-         const real_t tol = 1e-10 * std::max(Wf_, 1.0);
-
-         return std::abs(center(1)) < tol
-             && std::abs(center(0)) <= lf_ / 2.0 + tol
-             && center(2) >= -Wf_ - tol && center(2) <= tol;
-#endif
-      }
-      return false;
+      return (shared_face >= 0 &&
+              shared_face < static_cast<int>(shared_face_bc_.size()))
+             ? shared_face_bc_[shared_face] : FacetBC::None;
    }
 
    void SetupSolver()
@@ -1529,83 +3139,205 @@ private:
       cached_a_->Assemble(0);
       cached_a_->Finalize();
 
+      // K assembly diagnostics: count faces/elements processed.
+      // All ranks participate in MPI_Allreduce — MPI-safe.
+      {
+         long long local_volume = mesh_.GetNE();
+
+         long long local_interior_face = 0;
+         for (int f = 0; f < mesh_.GetNumFaces(); f++)
+         {
+            if (mesh_.GetInteriorFaceTransformations(f)) { local_interior_face++; }
+         }
+
+         // Count TRUE one-sided boundary faces (not interior) that K processes.
+         // A boundary element is a true boundary face only if its underlying
+         // mesh face does NOT have two local parent elements.
+         // Use FaceIsInterior (checks Elem2No >= 0) instead of
+         // GetBdrFaceTransformations (which can deadlock on ParMesh).
+         long long local_bdr_face_true = 0;   // attr-5 true boundary faces
+         long long local_bdr_all_true = 0;    // all-attr true boundary faces
+         long long local_bdr_elem_total = mesh_.GetNBE();  // all boundary elements
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            int face_idx, face_info_val;
+            mesh_.GetBdrElementFace(be, &face_idx, &face_info_val);
+            // Skip if the underlying face is interior (two local parents)
+            // or shared (FaceIsTrueInterior includes shared faces)
+            if (mesh_.FaceIsInterior(face_idx)) { continue; }
+            local_bdr_all_true++;
+            int attr = mesh_.GetBdrAttribute(be);
+            if (dirichlet_bdr_marker_.Size() > 0 &&
+                dirichlet_bdr_marker_[attr - 1] == 1)
+            {
+               local_bdr_face_true++;
+            }
+         }
+
+         long long local_shared = 0;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            local_shared = mesh_.GetNSharedFaces();
+#endif
+         }
+
+         long long counts[5] = {local_volume, local_interior_face, local_shared,
+                                local_bdr_face_true, local_bdr_all_true};
+         long long global[5] = {0};
+
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(counts, global, 5, MPI_LONG_LONG, MPI_SUM,
+                          mesh_.GetComm());
+#endif
+         }
+         else
+         {
+            for (int i = 0; i < 5; i++) { global[i] = counts[i]; }
+         }
+
+         // Count true one-sided boundary faces per attribute.
+         // Uses FaceIsTrueInterior to skip interior and shared faces
+         // (same filter as the main boundary count above).
+         int local_max_attr = mesh_.GetNBE() > 0 ? mesh_.bdr_attributes.Max() : 0;
+         int max_attr = local_max_attr;
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(&local_max_attr, &max_attr, 1, MPI_INT, MPI_MAX,
+                          mesh_.GetComm());
+#endif
+         }
+         std::vector<long long> local_bdr_by_attr(max_attr + 1, 0);
+         for (int be = 0; be < mesh_.GetNBE(); be++)
+         {
+            int face_idx2, face_info_val2;
+            mesh_.GetBdrElementFace(be, &face_idx2, &face_info_val2);
+            if (mesh_.FaceIsInterior(face_idx2)) { continue; }
+            int attr = mesh_.GetBdrAttribute(be);
+            if (attr >= 1 && attr <= max_attr) { local_bdr_by_attr[attr]++; }
+         }
+         std::vector<long long> global_bdr_by_attr(max_attr + 1, 0);
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(local_bdr_by_attr.data(), global_bdr_by_attr.data(),
+                          max_attr + 1, MPI_LONG_LONG, MPI_SUM, mesh_.GetComm());
+#endif
+         }
+         else
+         {
+            global_bdr_by_attr = local_bdr_by_attr;
+         }
+
+         if (DebugRank() == 0)
+         {
+            mfem::out << "  [K-DIAG] Volume elements:            " << global[0] << "\n";
+            mfem::out << "  [K-DIAG] Interior faces (K):         " << global[1] << "\n";
+            mfem::out << "  [K-DIAG] Shared faces (K):           " << global[2]
+                      << " (each face counted by both ranks)\n";
+            mfem::out << "  [K-DIAG] Bdr faces w/ K (Dirichlet): " << global[3]
+                      << " (true one-sided, attr 5)\n";
+            mfem::out << "  [K-DIAG] Bdr faces (all attrs):      " << global[4]
+                      << " (true one-sided, any attr)\n";
+            mfem::out << "  [K-DIAG] Bdr elements total:         " << local_bdr_elem_total
+                      << " (local rank, includes interior)\n";
+            for (int a = 1; a <= max_attr; a++)
+            {
+               if (global_bdr_by_attr[a] > 0)
+               {
+                  mfem::out << "  [K-DIAG]   attr " << a << ": "
+                            << global_bdr_by_attr[a] << " bdr faces"
+                            << (dirichlet_bdr_marker_.Size() >= a &&
+                                dirichlet_bdr_marker_[a-1] == 1
+                                ? " (Dirichlet K)" : " (NO K integrator)")
+                            << "\n";
+               }
+            }
+            mfem::out << "  [K-DIAG] Total K contributions:  "
+                      << global[0] + global[1] + global[2] + global[3]
+                      << " (vol + interior + shared + bdr_dir)\n";
+         }
+      }
+
       // Set up solver operator
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         // v57 face-count diagnostic: how many faces does each assembly path see?
-         {
-            int local_interior = mesh_.GetNumFaces();
-            int interior_with_nbr = 0;
-            for (int f = 0; f < local_interior; f++)
-            {
-               auto *FTr = mesh_.GetInteriorFaceTransformations(f);
-               if (FTr) { interior_with_nbr++; }
-            }
-            int local_shared = mesh_.GetNSharedFaces();
-            int local_bdr = mesh_.GetNBE();
-            int total_local_faces = mesh_.GetNumFaces();
-
-            int global_interior = 0, global_shared = 0;
-            int global_bdr = 0, global_total = 0;
-            MPI_Reduce(&interior_with_nbr, &global_interior, 1, MPI_INT,
-                       MPI_SUM, 0, mesh_.GetComm());
-            MPI_Reduce(&local_shared, &global_shared, 1, MPI_INT,
-                       MPI_SUM, 0, mesh_.GetComm());
-            MPI_Reduce(&local_bdr, &global_bdr, 1, MPI_INT,
-                       MPI_SUM, 0, mesh_.GetComm());
-            MPI_Reduce(&total_local_faces, &global_total, 1, MPI_INT,
-                       MPI_SUM, 0, mesh_.GetComm());
-
-            // Local sparse matrix NNZ (before ParallelAssemble)
-            int local_mat_nnz = cached_a_->SpMat().NumNonZeroElems();
-            long long global_mat_nnz = 0;
-            long long ll_nnz = local_mat_nnz;
-            MPI_Reduce(&ll_nnz, &global_mat_nnz, 1, MPI_LONG_LONG,
-                       MPI_SUM, 0, mesh_.GetComm());
-
-            int rank = 0;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            // [MPI-DIAG] face assembly counts — disabled by default (v58)
-            (void)global_interior; (void)global_shared;
-            (void)global_bdr; (void)global_total; (void)global_mat_nnz;
-         }
-
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
          cached_a_->ParallelAssemble(cached_Ah_);
 
-         // v57 diagnostic: P matrix and HypreParMatrix global dimensions
+         // K·v diagnostic: apply global K to all-ones vector,
+         // dump result at target elements for cross-code comparison.
+         if (first_step_debug_.enabled)
          {
-            auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
-            auto *Kh = cached_Ah_.As<HypreParMatrix>();
-            HYPRE_BigInt glob_rows = Kh->GetGlobalNumRows();
-            HYPRE_BigInt glob_cols = Kh->GetGlobalNumCols();
-            HYPRE_BigInt glob_nnz = Kh->NNZ();
+            auto *K = cached_Ah_.As<HypreParMatrix>();
+            int local_size = K->Height();
+            HypreParVector ones(K->GetComm(), K->GetGlobalNumRows(),
+                                K->GetRowStarts());
+            ones = 1.0;
+            HypreParVector Kv(K->GetComm(), K->GetGlobalNumRows(),
+                              K->GetRowStarts());
+            K->Mult(ones, Kv);
 
-            // Check P matrix: for DG, should be identity
-            int local_dofs = pfes->GetVSize();
-            int true_dofs = pfes->GetTrueVSize();
+            // Dump K·1 for target elements
+            if (DebugRank() == first_step_debug_.target_rank ||
+                first_step_debug_.target_rank < 0)
+            {
+               std::string kv_path = DebugFilePath("first_step_Kv");
+               std::ofstream out(kv_path, std::ios::trunc);
+               out << "elem,component,local_dof,vdof,Kv_value\n";
+               out << std::setprecision(17);
 
-            int rank = 0;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            // Compute sum(|K_ij|) (L1 norm of all entries) — partition-independent test
-            hypre_ParCSRMatrix *hA = (hypre_ParCSRMatrix*)(*Kh);
-            hypre_CSRMatrix *d = hypre_ParCSRMatrixDiag(hA);
-            hypre_CSRMatrix *o = hypre_ParCSRMatrixOffd(hA);
-            double *dd = hypre_CSRMatrixData(d);
-            double *od = hypre_CSRMatrixData(o);
-            int dnnz = hypre_CSRMatrixNumNonzeros(d);
-            int onnz = hypre_CSRMatrixNumNonzeros(o);
-            real_t local_abs_sum = 0.0;
-            for (int ii = 0; ii < dnnz; ii++) local_abs_sum += std::abs(dd[ii]);
-            for (int ii = 0; ii < onnz; ii++) local_abs_sum += std::abs(od[ii]);
-            real_t global_abs_sum = 0.0;
-            MPI_Reduce(&local_abs_sum, &global_abs_sum, 1, MPI_DOUBLE,
-                       MPI_SUM, 0, mesh_.GetComm());
+               const auto &target_elems = DebugTargetLocalElements();
+               for (int e : target_elems)
+               {
+                  Array<int> vdofs;
+                  fes_->GetElementVDofs(e, vdofs);
+                  for (int j = 0; j < vdofs.Size(); j++)
+                  {
+                     int gj = vdofs[j];
+                     int sign = 1;
+                     if (gj < 0) { gj = -1 - gj; sign = -1; }
+                     int comp = j / (vdofs.Size() / 3);
+                     int ldof = j % (vdofs.Size() / 3);
+                     double val = (gj < local_size) ? Kv(gj) * sign : 0.0;
+                     out << e << "," << comp << "," << ldof << ","
+                         << vdofs[j] << "," << val << "\n";
+                  }
+               }
+               mfem::out << "  [K-DIAG] K·1 dumped to " << kv_path
+                         << " (" << target_elems.size() << " elements)\n";
+            }
 
-            // [MPI-DIAG] HypreParMatrix dims — disabled by default (v58)
-            (void)glob_rows; (void)glob_cols; (void)glob_nnz;
-            (void)global_abs_sum; (void)local_dofs; (void)true_dofs;
+            // Print global norms (collective, rank 0 prints)
+            double local_norm1 = 0.0, local_norm2sq = 0.0, local_norminf = 0.0;
+            for (int i = 0; i < local_size; i++)
+            {
+               double v = std::abs(Kv(i));
+               local_norm1 += v;
+               local_norm2sq += v * v;
+               if (v > local_norminf) { local_norminf = v; }
+            }
+            double global_norm1, global_norm2sq, global_norminf;
+            MPI_Reduce(&local_norm1, &global_norm1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mesh_.GetComm());
+            MPI_Reduce(&local_norm2sq, &global_norm2sq, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mesh_.GetComm());
+            MPI_Reduce(&local_norminf, &global_norminf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mesh_.GetComm());
+            int myrank;
+            MPI_Comm_rank(mesh_.GetComm(), &myrank);
+            if (myrank == 0)
+            {
+               mfem::out << std::setprecision(15);
+               mfem::out << "  [K-DIAG] ||K·1||_1   = " << global_norm1 << "\n";
+               mfem::out << "  [K-DIAG] ||K·1||_2   = "
+                         << std::sqrt(global_norm2sq) << "\n";
+               mfem::out << "  [K-DIAG] ||K·1||_inf = " << global_norminf << "\n";
+            }
          }
 
 #ifdef MFEM_USE_MUMPS
@@ -1743,7 +3475,6 @@ private:
    {
       int dim = 3;
       int nbf = nbf_per_face_;
-      diag_face_call_++;
 
       // v55: Use the combined integrator's AssembleSlipFaceRHS to guarantee
       // K-b consistency. Same traction operator, quadrature, and penalty as K.
@@ -1756,9 +3487,6 @@ private:
          FaceElementTransformations *FTr =
             mesh_.GetInteriorFaceTransformations(face);
          if (FTr == nullptr) { continue; }
-
-         const auto &basis_slip = fault_basis_.GetBasis(fi);
-         real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
 
          // Check if any slip is non-zero
          bool all_zero = true;
@@ -1773,80 +3501,7 @@ private:
 
          // Build slip at quad points (Tandem evaluate_slip)
          Vector delta_u_quad;
-         if (!basis_slip.qp_data.empty())
-         {
-            // Per-QP tangent embedding: interpolate tangential components,
-            // then embed using per-QP tangent frame
-            Vector slip_tang(2 * nbf);
-            for (int kk = 0; kk < nbf; kk++)
-            {
-               int dof_idx = fi * nbf + kk;
-               slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);      // dip
-               slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);  // strike
-            }
-            Vector slip_tang_q;
-            face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
-            int nqp = slip_tang_q.Size() / 2;
-            delta_u_quad.SetSize(dim * nqp);
-            for (int q = 0; q < nqp; q++)
-            {
-               real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
-               real_t du[3];
-               fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
-               for (int c = 0; c < dim; c++)
-                  delta_u_quad(c * nqp + q) = sign * du[c];
-            }
-         }
-         else
-         {
-            // Fallback: centroid tangents (BR2 path)
-            Vector delta_u_nodal(dim * nbf);
-            for (int kk = 0; kk < nbf; kk++)
-            {
-               int dof_idx = fi * nbf + kk;
-               real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                       slip_bc(2 * dof_idx + 1)};
-               real_t du[3];
-               fault_basis_.EmbedSlip(fi, slip_local, du);
-               for (int c = 0; c < dim; c++)
-                  delta_u_nodal(c * nbf + kk) = du[c];
-            }
-            face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-            for (int i = 0; i < delta_u_quad.Size(); i++)
-               delta_u_quad(i) *= sign;
-         }
-
-         // v58 diagnostic: print FaultBasis + delta_u_quad for first 3 interior faces
-         if (!diag_slip_embed_done_ && fi < 3)
-         {
-            const IntegrationPoint &ip_c =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip_c);
-            Vector fc(3);
-            FTr->Face->Transform(ip_c, fc);
-            int rank = 0;
-            if constexpr (IsParallelMesh<MeshType>::value)
-            {
-#ifdef MFEM_USE_MPI
-               MPI_Comm_rank(mesh_.GetComm(), &rank);
-#endif
-            }
-            int nqp_diag = delta_u_quad.Size() / dim;
-            mfem::out << "[SLIP-EMBED] INTERIOR fi=" << fi
-                      << " rank=" << rank
-                      << " centroid=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                      << " sign_flipped=" << basis_slip.sign_flipped
-                      << " n=(" << basis_slip.normal[0] << ","
-                      << basis_slip.normal[1] << "," << basis_slip.normal[2] << ")"
-                      << " t1=(" << basis_slip.tangent1[0] << ","
-                      << basis_slip.tangent1[1] << "," << basis_slip.tangent1[2] << ")"
-                      << " t2=(" << basis_slip.tangent2[0] << ","
-                      << basis_slip.tangent2[1] << "," << basis_slip.tangent2[2] << ")"
-                      << " du_q0=(" << delta_u_quad(0) << ","
-                      << delta_u_quad(nqp_diag) << ","
-                      << delta_u_quad(2*nqp_diag) << ")"
-                      << "\n";
-         }
+         BuildSlipAtQuadPoints(fi, slip_bc, delta_u_quad);
 
          const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
          const FiniteElement *fe2 = scalar_fes_->GetFE(FTr->Elem2No);
@@ -1855,6 +3510,8 @@ private:
          Vector elvec1, elvec2;
          slip_integrator.AssembleSlipFaceRHS(
             *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
+         DebugDumpFaceData(fi, face, "fault_interior", FTr, nullptr,
+                           &delta_u_quad, elvec1, &elvec2);
 
          // Scatter into global RHS
          Array<int> vdofs1, vdofs2;
@@ -2173,9 +3830,6 @@ private:
             if (FTr == nullptr) { continue; }
 
             int slip_idx = interior_face_count + i;
-            const auto &basis_slip = fault_basis_.GetBasis(slip_idx);
-            real_t sign = basis_slip.sign_flipped ? -1.0 : 1.0;
-
             bool all_zero = true;
             for (int kk = 0; kk < nbf && all_zero; kk++)
             {
@@ -2187,76 +3841,7 @@ private:
             if (all_zero) { continue; }
 
             Vector delta_u_quad;
-            if (!basis_slip.qp_data.empty())
-            {
-               Vector slip_tang(2 * nbf);
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int dof_idx = slip_idx * nbf + kk;
-                  slip_tang(0 * nbf + kk) = slip_bc(2 * dof_idx);
-                  slip_tang(1 * nbf + kk) = slip_bc(2 * dof_idx + 1);
-               }
-               Vector slip_tang_q;
-               face_quad_->InterpolateToQuadPoints(2, slip_tang, slip_tang_q);
-               int nqp = slip_tang_q.Size() / 2;
-               delta_u_quad.SetSize(dim * nqp);
-               for (int q = 0; q < nqp; q++)
-               {
-                  real_t sl_q[2] = {slip_tang_q(q), slip_tang_q(nqp + q)};
-                  real_t du[3];
-                  fault_basis_.EmbedSlipQP(slip_idx, q, sl_q, du);
-                  for (int c = 0; c < dim; c++)
-                     delta_u_quad(c * nqp + q) = sign * du[c];
-               }
-            }
-            else
-            {
-               Vector delta_u_nodal(dim * nbf);
-               for (int kk = 0; kk < nbf; kk++)
-               {
-                  int dof_idx = slip_idx * nbf + kk;
-                  real_t slip_local[2] = {slip_bc(2 * dof_idx),
-                                          slip_bc(2 * dof_idx + 1)};
-                  real_t du[3];
-                  fault_basis_.EmbedSlip(slip_idx, slip_local, du);
-                  for (int c = 0; c < dim; c++)
-                     delta_u_nodal(c * nbf + kk) = du[c];
-               }
-               face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-               for (int j = 0; j < delta_u_quad.Size(); j++)
-                  delta_u_quad(j) *= sign;
-            }
-
-            // v58 diagnostic: print FaultBasis + delta_u_quad for ALL shared fault faces
-            if (!diag_slip_embed_done_)
-            {
-               const IntegrationPoint &ip_c =
-                  Geometries.GetCenter(FTr->GetGeometryType());
-               FTr->Face->SetIntPoint(&ip_c);
-               Vector fc(3);
-               FTr->Face->Transform(ip_c, fc);
-               int rank = 0;
-               MPI_Comm_rank(mesh_.GetComm(), &rank);
-               int nqp_diag = delta_u_quad.Size() / dim;
-               mfem::out << "[SLIP-EMBED] SHARED i=" << i
-                         << " rank=" << rank
-                         << " centroid=(" << fc(0) << "," << fc(1)
-                         << "," << fc(2) << ")"
-                         << " sign_flipped=" << basis_slip.sign_flipped
-                         << " n=(" << basis_slip.normal[0] << ","
-                         << basis_slip.normal[1] << ","
-                         << basis_slip.normal[2] << ")"
-                         << " t1=(" << basis_slip.tangent1[0] << ","
-                         << basis_slip.tangent1[1] << ","
-                         << basis_slip.tangent1[2] << ")"
-                         << " t2=(" << basis_slip.tangent2[0] << ","
-                         << basis_slip.tangent2[1] << ","
-                         << basis_slip.tangent2[2] << ")"
-                         << " du_q0=(" << delta_u_quad(0) << ","
-                         << delta_u_quad(nqp_diag) << ","
-                         << delta_u_quad(2*nqp_diag) << ")"
-                         << "\n";
-            }
+            BuildSlipAtQuadPoints(slip_idx, slip_bc, delta_u_quad);
 
             const FiniteElement *fe1 = scalar_fes_->GetFE(FTr->Elem1No);
             auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
@@ -2267,6 +3852,8 @@ private:
             Vector elvec1, elvec2;
             slip_integrator.AssembleSlipFaceRHS(
                *fe1, *fe2, *FTr, delta_u_quad, elvec1, elvec2);
+            DebugDumpFaceData(slip_idx, mesh_.GetSharedFace(sf), "fault_shared",
+                              FTr, nullptr, &delta_u_quad, elvec1, &elvec2);
 
             Array<int> vdofs1;
             fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
@@ -2275,14 +3862,6 @@ private:
                int gj = vdofs1[j];
                if (gj >= 0) { rhs(gj) += elvec1(j); }
                else { rhs(-1 - gj) -= elvec1(j); }
-            }
-         }
-         // Only mark done if we actually printed (had non-zero slip)
-         {
-            real_t slip_max_local = slip_bc.Normlinf();
-            if (!diag_slip_embed_done_ && slip_max_local > 1e-20)
-            {
-               diag_slip_embed_done_ = true;
             }
          }
 #endif
@@ -2514,9 +4093,9 @@ private:
 
    void AssembleDirichletLoading(Vector &rhs, real_t time) const
    {
-      // BP5 Dirichlet loading: u = (0, sgn(x)·Vp·t/2, 0)
-      // Applied on Dirichlet-marked boundaries only (controlled by BCMode).
-      // sgn(x) determined from face centroid x-coordinate.
+      // BP5 Dirichlet loading: u_D = (sgn(y)*Vp*t/2, 0, 0) on far-field,
+      //                        u_D = (Vp*t, 0, 0) on y=0 skeleton faces.
+      // Applied on attr-5 faces only (controlled by BCMode).
       //
       // DG Dirichlet BC contribution:
       //   b[k,i] += c0 * [σ(φ_k e_i)·n]_u * u_D_u * (1/detJ)
@@ -2526,6 +4105,26 @@ private:
 
       int dim = 3;
 
+      // Build set of face indices already handled as interior/shared Dirichlet.
+      // These must NOT also be processed as boundary faces (would double-load
+      // with incompatible DG formulas: boundary uses c1=epsilon, skeleton uses
+      // c1=0.5*epsilon).
+      std::set<int> dir_interior_set;
+      for (int fi = 0; fi < dirichlet_interior_faces_.Size(); fi++)
+      {
+         dir_interior_set.insert(dirichlet_interior_faces_[fi]);
+      }
+      std::set<int> dir_shared_set;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int fi = 0; fi < dirichlet_shared_faces_.Size(); fi++)
+         {
+            dir_shared_set.insert(mesh_.GetSharedFace(dirichlet_shared_faces_[fi]));
+         }
+#endif
+      }
+
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
@@ -2534,6 +4133,11 @@ private:
          // Get face transformation
          int face_idx, face_info;
          mesh_.GetBdrElementFace(be, &face_idx, &face_info);
+
+         // Skip faces already handled as interior or shared Dirichlet
+         if (dir_interior_set.count(face_idx) > 0) { continue; }
+         if (dir_shared_set.count(face_idx) > 0) { continue; }
+
          FaceElementTransformations *FTr =
             mesh_.GetFaceElementTransformations(face_idx);
          if (FTr == nullptr) { continue; }
@@ -2565,23 +4169,26 @@ private:
             // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
+            Vector phys_y_qp(nq_dir);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
-               FTr->Face->SetIntPoint(&ipq);
-               FTr->Face->Transform(ipq, phys);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                real_t y = phys(1);
+               phys_y_qp(q) = y;
                // Tandem bp5.lua boundary(x,y,z,t):
                real_t Vh = Vp_ * time;
-               if (y > 1.0) { Vh *= 0.5; }
-               else if (y < -1.0) { Vh *= -0.5; }
+               if (y > 1000.0) { Vh *= 0.5; }
+               else if (y < -1000.0) { Vh *= -0.5; }
                u_D_3d(0 * nq_dir + q) = Vh;
             }
 
             Vector elvec_dir;
             dir_integ.AssembleBoundaryFaceRHS(*fe, *FTr, u_D_3d, elvec_dir);
+            DebugDumpFaceData(-1, face_idx, "dirichlet_boundary", FTr,
+                              &phys_y_qp, &u_D_3d, elvec_dir, nullptr);
 
             for (int j = 0; j < elvec_dir.Size(); j++)
                elvec(j) += elvec_dir(j);
@@ -2594,8 +4201,8 @@ private:
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
             real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
+            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
             real_t u_D[3] = {Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv = elem_mass_inv_[FTr->Elem1No];
@@ -2747,15 +4354,13 @@ private:
             mesh_.GetInteriorFaceTransformations(f);
          if (FTr == nullptr) { continue; }
 
-         // v55: Evaluate Tandem's boundary function at each quad point,
-         // matching bp5.lua boundary(x,y,z,t) exactly:
-         //   y > 1:  u_D = (Vp*t/2, 0, 0)
-         //   y < -1: u_D = (-Vp*t/2, 0, 0)
-         //   else:   u_D = (Vp*t, 0, 0)
+         // Evaluate bp5.lua boundary(x,y,z,t) at each quad point:
+         //   y > 1000 m (1 km):  u_D = (Vp*t/2, 0, 0)
+         //   y < -1000 m:        u_D = (-Vp*t/2, 0, 0)
+         //   |y| <= 1000 m:      u_D = (Vp*t, 0, 0)
          //
-         // The DG skeleton RHS uses this as f_q (prescribed data at the face).
-         // Previously we computed u_D from element centroid Y-signs, which is
-         // mathematically equivalent but evaluates at different points.
+         // Orientation sign applied per QP via ComputeSkeletonDirichletSign,
+         // matching Tandem DGCurvilinearCommon.h:92-99.
 
          Array<int> vdofs1, vdofs2;
          fes_->GetElementVDofs(FTr->Elem1No, vdofs1);
@@ -2776,8 +4381,6 @@ private:
 
          if (method_ == DGMethod::IP)
          {
-            // v55: Use combined integrator's AssembleSlipFaceRHS for
-            // Dirichlet interior faces (skeleton pattern, same as fault slip)
             DGElasticityIPCombinedIntegrator dir_integ(
                lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
@@ -2786,28 +4389,31 @@ private:
                FTr->FaceGeom, quad_order_dir);
             int nq_dir = ir_dir.GetNPoints();
 
-            // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
+            // Evaluate boundary(x,y,z,t) at each QP with per-QP orientation
+            // sign, matching Tandem DGCurvilinearCommon.h:92-99.
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
+            Vector phys_y_qp(nq_dir);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
-               FTr->Face->SetIntPoint(&ipq);
-               FTr->Face->Transform(ipq, phys);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                real_t y = phys(1);
-               // Tandem bp5.lua boundary(x,y,z,t):
+               phys_y_qp(q) = y;
                real_t Vh = Vp_ * time;
-               if (y > 1.0) { Vh *= 0.5; }
-               else if (y < -1.0) { Vh *= -0.5; }
-               // else: Vh = Vp*t (full rate for |y| <= 1)
-               u_D_3d(0 * nq_dir + q) = Vh;  // X component
-               // Y and Z components = 0
+               if (y > 1000.0) { Vh *= 0.5; }
+               else if (y < -1000.0) { Vh *= -0.5; }
+               // Per-QP orientation sign (Tandem DGCurvilinearCommon.h:97-98)
+               real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+               u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
             }
 
             Vector ev1, ev2;
             dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+            DebugDumpFaceData(-1, f, "dirichlet_interior", FTr,
+                              &phys_y_qp, &u_D_3d, ev1, &ev2);
 
             for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
             for (int j = 0; j < ev2.Size(); j++) { elvec2(j) += ev2(j); }
@@ -2820,9 +4426,13 @@ private:
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
             real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
-            real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
+            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
+            // Orientation sign for BR2 (face-constant, affine faces)
+            const IntegrationPoint &ip_s = Geometries.GetCenter(FTr->GetGeometryType());
+            FTr->SetAllIntPoints(&ip_s);
+            real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
+            real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
 
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
@@ -3088,7 +4698,6 @@ private:
 
             if (method_ == DGMethod::IP)
             {
-               // v55: Use combined integrator (skeleton pattern, only elem1)
                DGElasticityIPCombinedIntegrator dir_integ(
                   lambda_coeff_, mu_coeff_, dim, epsilon_, penalty_factor_);
 
@@ -3097,25 +4706,29 @@ private:
                   FTr->FaceGeom, quad_order_dir);
                int nq_dir = ir_dir.GetNPoints();
 
-               // v55: Evaluate Tandem's boundary(x,y,z,t) at each quad point
+               // Per-QP boundary evaluation with orientation sign
                Vector u_D_3d(dim * nq_dir);
                u_D_3d = 0.0;
+               Vector phys_y_qp(nq_dir);
                for (int q = 0; q < nq_dir; q++)
                {
                   const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                   FTr->SetAllIntPoints(&ipq);
                   Vector phys(dim);
-                  FTr->Face->SetIntPoint(&ipq);
-                  FTr->Face->Transform(ipq, phys);
+                  FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
                   real_t y = phys(1);
+                  phys_y_qp(q) = y;
                   real_t Vh = Vp_ * time;
-                  if (y > 1.0) { Vh *= 0.5; }
-                  else if (y < -1.0) { Vh *= -0.5; }
-                  u_D_3d(0 * nq_dir + q) = Vh;
+                  if (y > 1000.0) { Vh *= 0.5; }
+                  else if (y < -1000.0) { Vh *= -0.5; }
+                  real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
+                  u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
                }
 
                Vector ev1, ev2;
                dir_integ.AssembleSlipFaceRHS(*fe1, *fe2, *FTr, u_D_3d, ev1, ev2);
+               DebugDumpFaceData(-1, mesh_.GetSharedFace(sf), "dirichlet_shared",
+                                 FTr, &phys_y_qp, &u_D_3d, ev1, &ev2);
                for (int j = 0; j < ev1.Size(); j++) { elvec1(j) += ev1(j); }
                // ev2 goes to neighbor rank, not used here
             }
@@ -3129,9 +4742,12 @@ private:
                Vector fc_br2(dim);
                FTr->Face->Transform(ip_c, fc_br2);
                real_t Vh_br2 = Vp_ * time;
-               if (fc_br2(1) > 1.0) { Vh_br2 *= 0.5; }
-               else if (fc_br2(1) < -1.0) { Vh_br2 *= -0.5; }
-               real_t u_D_int[3] = {Vh_br2, 0.0, 0.0};
+               if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
+               else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
+               // Orientation sign for BR2 (face-constant, affine faces)
+               FTr->SetAllIntPoints(&ip_c);
+               real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
+               real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
                const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
@@ -3295,6 +4911,7 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
    if (!fault_depths_computed_)
    {
       fault_depths_.SetSize(num_fault_dofs_);
+      fault_depths_ = 0.0;
 
       // Nodal rule for per-DOF coordinate evaluation.
       // At nbf=1 (BR2 / order-0 face space): single centroid point.
@@ -3312,9 +4929,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->Face->SetIntPoint(&nip);
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Depth: -Z (Z is negative downward in Tandem, depth is positive)
             fault_depths_(i * nbf + kk) = -coords(2);
@@ -3336,9 +4953,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultDepths(Vector &depths) const
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_depths_(face_idx * nbf + kk) = -coords(2);
             }
@@ -3360,6 +4977,8 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
    {
       fault_x2_.SetSize(num_fault_dofs_);
       fault_x3_.SetSize(num_fault_dofs_);
+      fault_x2_ = 0.0;
+      fault_x3_ = 0.0;
 
       // Nodal rule for per-DOF coordinate evaluation
       const IntegrationRule &nir = face_quad_->GetNodalRule();
@@ -3375,9 +4994,12 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
          for (int kk = 0; kk < nbf; kk++)
          {
             const IntegrationPoint &nip = nir.IntPoint(kk);
-            FTr->Face->SetIntPoint(&nip);
+
+            // Use Elem1->Transform for robust coordinate evaluation
+            // (Face->Transform can disagree on BP5/tet path — v59 Section 6)
+            FTr->SetAllIntPoints(&nip);
             Vector coords(3);
-            FTr->Face->Transform(nip, coords);
+            FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
             // Tandem: X=along-strike=coords(0), depth=-Z=-coords(2)
             fault_x2_(i * nbf + kk) = coords(0);
@@ -3400,9 +5022,9 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
             for (int kk = 0; kk < nbf; kk++)
             {
                const IntegrationPoint &nip = nir.IntPoint(kk);
-               FTr->Face->SetIntPoint(&nip);
+               FTr->SetAllIntPoints(&nip);
                Vector coords(3);
-               FTr->Face->Transform(nip, coords);
+               FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
 
                fault_x2_(face_idx * nbf + kk) = coords(0);
                fault_x3_(face_idx * nbf + kk) = -coords(2);
@@ -3550,7 +5172,6 @@ template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
-   last_solve_t_ = time;
    if (!stiffness_assembled_)
    {
       AssembleStiffness();
@@ -3561,276 +5182,40 @@ void ElasticityDomainOperator<MeshType>::Solve(
    b.Assemble();
    Vector &rhs = b;
 
-   // Add slip contributions (interior + shared faces)
-   real_t rhs_before_slip = rhs.Normlinf();
+   const bool debug_first_step = (method_ == DGMethod::IP) &&
+                                 DebugEnabledForTime(time);
+   debug_time_ = time;
 
-   // v57 RHS decomposition diagnostic: capture interior-only and shared-only norms
-   Vector rhs_after_interior;
+   // Production assembly path: same on ALL ranks (MPI-safe).
+   // Debug dumps happen AFTER the solve, gated by rank — no separate
+   // assembly path that could cause MPI divergence.
    if (method_ == DGMethod::IP)
    {
       AssembleSlipContributionIP(rhs, slip_bc);
-
-      // Snapshot after interior-only (before shared)
-      if (!diag_matrix_norm_done_)
-      {
-         rhs_after_interior.SetSize(rhs.Size());
-         rhs_after_interior = rhs;
-      }
-
       AssembleSlipContributionIPShared(rhs, slip_bc,
                                        fault_interior_faces_.Size());
    }
    else
    {
       AssembleSlipContributionBR2(rhs, slip_bc);
-      if (!diag_matrix_norm_done_)
-      {
-         rhs_after_interior.SetSize(rhs.Size());
-         rhs_after_interior = rhs;
-      }
       AssembleSlipContributionBR2Shared(rhs, slip_bc,
                                         fault_interior_faces_.Size());
    }
-   real_t rhs_after_slip = rhs.Normlinf();
 
-   // Snapshot total slip RHS (interior + shared, before Dirichlet)
-   Vector rhs_total_slip;
-   if (!diag_matrix_norm_done_ && rhs_after_slip > 1e-30)
-   {
-      rhs_total_slip.SetSize(rhs.Size());
-      rhs_total_slip = rhs;
-   }
-
-   // v52: RHS z-component diagnostic — capture f_z after slip, before Dirichlet
-   // byNODES ordering: rhs[0..N-1]=x, rhs[N..2N-1]=y, rhs[2N..3N-1]=z
-   int N_scalar = fes_->GetNDofs();
+   // Snapshot slip-only RHS before adding Dirichlet.
+   // Taken on ALL ranks when debug is enabled (needed for MPI-collective norms).
    Vector rhs_slip_snapshot;
-
-   // Synchronize trigger across all ranks to avoid MPI deadlock
-   // (ranks without fault DOFs may have rhs_after_slip == 0)
-   bool diag_rhs_z_trigger = (diag_rhs_z_ && !diag_rhs_z_done_ && rhs_after_slip > 0.0);
-   if constexpr (IsParallelMesh<MeshType>::value)
+   const bool debug_norm = first_step_debug_.enabled && (time > 0.0);
+   if (debug_first_step || debug_norm)
    {
-#ifdef MFEM_USE_MPI
-      int local_trigger = diag_rhs_z_trigger ? 1 : 0;
-      int global_trigger = 0;
-      MPI_Allreduce(&local_trigger, &global_trigger, 1, MPI_INT, MPI_MAX,
-                    mesh_.GetComm());
-      diag_rhs_z_trigger = (global_trigger > 0);
-#endif
-   }
-
-   if (diag_rhs_z_trigger)
-   {
-      rhs_slip_snapshot.SetSize(rhs.Size());
-      rhs_slip_snapshot = rhs;
+      rhs_slip_snapshot = rhs;  // copy before Dirichlet is added
    }
 
    // Add Dirichlet loading
    AssembleDirichletLoading(rhs, time);
 
-   // v52: RHS z-component diagnostic — fire once after first non-trivial RHS
-   if (diag_rhs_z_trigger)
-   {
-      diag_rhs_z_done_ = true;
-
-      // Helper: compute per-component L2 norms (local)
-      auto component_norms = [&](const Vector &v, real_t &nx, real_t &ny, real_t &nz)
-      {
-         nx = ny = nz = 0.0;
-         for (int i = 0; i < N_scalar; i++)
-         {
-            nx += v(i) * v(i);
-            ny += v(N_scalar + i) * v(N_scalar + i);
-            nz += v(2 * N_scalar + i) * v(2 * N_scalar + i);
-         }
-      };
-
-      // Slip-only contribution
-      real_t slip_nx, slip_ny, slip_nz;
-      component_norms(rhs_slip_snapshot, slip_nx, slip_ny, slip_nz);
-
-      // Dirichlet-only contribution (total minus slip)
-      Vector rhs_diri(rhs.Size());
-      subtract(rhs, rhs_slip_snapshot, rhs_diri);
-      real_t diri_nx, diri_ny, diri_nz;
-      component_norms(rhs_diri, diri_nx, diri_ny, diri_nz);
-
-      // Total RHS
-      real_t tot_nx, tot_ny, tot_nz;
-      component_norms(rhs, tot_nx, tot_ny, tot_nz);
-
-      // Also compute max absolute z-values
-      real_t slip_zmax = 0.0, diri_zmax = 0.0, tot_zmax = 0.0;
-      for (int i = 0; i < N_scalar; i++)
-      {
-         slip_zmax = std::max(slip_zmax, std::abs(rhs_slip_snapshot(2 * N_scalar + i)));
-         diri_zmax = std::max(diri_zmax, std::abs(rhs_diri(2 * N_scalar + i)));
-         tot_zmax  = std::max(tot_zmax,  std::abs(rhs(2 * N_scalar + i)));
-      }
-
-      // MPI reduce for global norms
-      bool is_root = true;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         int rank;
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-         is_root = (rank == 0);
-         // Sum of squares for L2 norms
-         real_t local_vals[9] = {slip_nx, slip_ny, slip_nz,
-                                  diri_nx, diri_ny, diri_nz,
-                                  tot_nx,  tot_ny,  tot_nz};
-         real_t global_vals[9];
-         MPI_Allreduce(local_vals, global_vals, 9, MPI_DOUBLE, MPI_SUM,
-                       mesh_.GetComm());
-         slip_nx = global_vals[0]; slip_ny = global_vals[1]; slip_nz = global_vals[2];
-         diri_nx = global_vals[3]; diri_ny = global_vals[4]; diri_nz = global_vals[5];
-         tot_nx  = global_vals[6]; tot_ny  = global_vals[7]; tot_nz  = global_vals[8];
-         // Max for max-abs
-         real_t local_max[3] = {slip_zmax, diri_zmax, tot_zmax};
-         real_t global_max[3];
-         MPI_Allreduce(local_max, global_max, 3, MPI_DOUBLE, MPI_MAX,
-                       mesh_.GetComm());
-         slip_zmax = global_max[0]; diri_zmax = global_max[1]; tot_zmax = global_max[2];
-#endif
-      }
-
-      // Take sqrt for L2 norms
-      slip_nx = std::sqrt(slip_nx); slip_ny = std::sqrt(slip_ny); slip_nz = std::sqrt(slip_nz);
-      diri_nx = std::sqrt(diri_nx); diri_ny = std::sqrt(diri_ny); diri_nz = std::sqrt(diri_nz);
-      tot_nx  = std::sqrt(tot_nx);  tot_ny  = std::sqrt(tot_ny);  tot_nz  = std::sqrt(tot_nz);
-
-      if (is_root)
-      {
-         mfem::out << "\n[DIAG-RHS-Z] RHS z-component diagnostic (t=" << time << " s)\n"
-            << "  DOF ordering: byNODES, N_scalar=" << N_scalar << "\n"
-            << "  Slip contribution (f_slip):\n"
-            << "    ||f_x|| = " << slip_nx << "\n"
-            << "    ||f_y|| = " << slip_ny << "\n"
-            << "    ||f_z|| = " << slip_nz << "\n"
-            << "    ||f_z||/||f_x|| = " << (slip_nx > 0 ? slip_nz / slip_nx : 0.0) << "\n"
-            << "    max|f_z| = " << slip_zmax << "\n"
-            << "  Dirichlet contribution (f_diri):\n"
-            << "    ||f_x|| = " << diri_nx << "\n"
-            << "    ||f_y|| = " << diri_ny << "\n"
-            << "    ||f_z|| = " << diri_nz << "\n"
-            << "    ||f_z||/||f_x|| = " << (diri_nx > 0 ? diri_nz / diri_nx : 0.0) << "\n"
-            << "    max|f_z| = " << diri_zmax << "\n"
-            << "  Total RHS (f_slip + f_diri):\n"
-            << "    ||f_x|| = " << tot_nx << "\n"
-            << "    ||f_y|| = " << tot_ny << "\n"
-            << "    ||f_z|| = " << tot_nz << "\n"
-            << "    ||f_z||/||f_x|| = " << (tot_nx > 0 ? tot_nz / tot_nx : 0.0) << "\n"
-            << "    max|f_z| = " << tot_zmax << "\n"
-            << "  Interpretation:\n"
-            << "    If ||f_z||/||f_x|| >> 0: RHS has z-forcing (assembly bug, Hypothesis A)\n"
-            << "    If ||f_z||/||f_x|| ~ 0: f_z=0, dip comes from solver (Hypothesis B)\n"
-            << std::endl;
-      }
-   }
-
-   // Diagnostic: check for RHS blowup
-   real_t rhs_final = rhs.Normlinf();
-   real_t slip_max = slip_bc.Normlinf();
-   if (std::isnan(rhs_final))
-   {
-      int rank = 0;
-#ifdef MFEM_USE_MPI
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-      }
-#endif
-      mfem::out << "[Rank " << rank << "] RHS NaN DETECTED: before_slip="
-                << rhs_before_slip << " after_slip=" << rhs_after_slip
-                << " final=" << rhs_final
-                << " slip_max=" << slip_max
-                << " time=" << time << "\n";
-   }
-
    X_ = 0.0;
    B_ = rhs;
-
-   // v57 MPI diagnostic: print ||K|| and ||b|| once on first non-trivial solve
-   // Use global trigger to avoid MPI deadlock (ranks without fault DOFs
-   // may have zero local RHS).
-   {
-      bool local_trigger = !diag_matrix_norm_done_ && rhs.Normlinf() > 1e-30;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         int lt = local_trigger ? 1 : 0, gt = 0;
-         MPI_Allreduce(&lt, &gt, 1, MPI_INT, MPI_MAX, mesh_.GetComm());
-         local_trigger = (gt > 0);
-#endif
-      }
-      if (local_trigger && !diag_matrix_norm_done_)
-      {
-      diag_matrix_norm_done_ = true;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         auto *Kh = cached_Ah_.As<HypreParMatrix>();
-         // Global ||b||
-         real_t local_b2 = B_ * B_;
-         real_t global_b2 = 0.0;
-         MPI_Allreduce(&local_b2, &global_b2, 1, MPI_DOUBLE, MPI_SUM,
-                       mesh_.GetComm());
-         // Global NNZ and Frobenius norm via hypre
-         hypre_ParCSRMatrix *hA = (hypre_ParCSRMatrix*)(*Kh);
-         // Diagonal block
-         hypre_CSRMatrix *diag = hypre_ParCSRMatrixDiag(hA);
-         hypre_CSRMatrix *offd = hypre_ParCSRMatrixOffd(hA);
-         real_t local_K2 = 0.0;
-         int diag_nnz = hypre_CSRMatrixNumNonzeros(diag);
-         int offd_nnz = hypre_CSRMatrixNumNonzeros(offd);
-         double *diag_data = hypre_CSRMatrixData(diag);
-         double *offd_data = hypre_CSRMatrixData(offd);
-         for (int i = 0; i < diag_nnz; i++)
-            local_K2 += diag_data[i] * diag_data[i];
-         for (int i = 0; i < offd_nnz; i++)
-            local_K2 += offd_data[i] * offd_data[i];
-         real_t global_K2 = 0.0;
-         MPI_Allreduce(&local_K2, &global_K2, 1, MPI_DOUBLE, MPI_SUM,
-                       mesh_.GetComm());
-         int local_nnz = diag_nnz + offd_nnz;
-         long long global_nnz = 0;
-         long long ll_nnz = local_nnz;
-         MPI_Allreduce(&ll_nnz, &global_nnz, 1, MPI_LONG_LONG, MPI_SUM,
-                       mesh_.GetComm());
-         int rank = 0;
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-         // RHS decomposition: interior-only vs shared vs total (slip only, no Dirichlet)
-         real_t local_b_int2 = 0.0, local_b_shared2 = 0.0;
-         if (rhs_after_interior.Size() > 0 && rhs_total_slip.Size() > 0)
-         {
-            local_b_int2 = rhs_after_interior * rhs_after_interior;
-            // shared contribution = total_slip - interior
-            Vector rhs_shared(rhs_total_slip.Size());
-            subtract(rhs_total_slip, rhs_after_interior, rhs_shared);
-            local_b_shared2 = rhs_shared * rhs_shared;
-         }
-         real_t global_b_int2 = 0.0, global_b_shared2 = 0.0;
-         MPI_Allreduce(&local_b_int2, &global_b_int2, 1, MPI_DOUBLE,
-                       MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&local_b_shared2, &global_b_shared2, 1, MPI_DOUBLE,
-                       MPI_SUM, mesh_.GetComm());
-
-         // Local sparse NNZ (before ParallelAssemble)
-         int local_sparse_nnz = cached_a_->SpMat().NumNonZeroElems();
-         long long global_sparse_nnz = 0;
-         long long ll_sparse = local_sparse_nnz;
-         MPI_Allreduce(&ll_sparse, &global_sparse_nnz, 1, MPI_LONG_LONG,
-                       MPI_SUM, mesh_.GetComm());
-
-         // [MPI-DIAG] Stiffness matrix/RHS norms — disabled by default (v58)
-         (void)global_K2; (void)global_b2; (void)global_b_int2;
-         (void)global_b_shared2; (void)global_nnz; (void)global_sparse_nnz;
-#endif
-      }
-      }  // if (local_trigger)
-   }  // scope for MPI diagnostic
 
    solver_->Mult(B_, X_);
 
@@ -3884,67 +5269,6 @@ void ElasticityDomainOperator<MeshType>::Solve(
          << u_max << ")");
    }
 
-   // v52: Solution u_z diagnostic — companion to RHS diagnostic
-   if (diag_rhs_z_ && diag_rhs_z_done_)
-   {
-      // Only fire once: reset the flag to prevent repeat (done_ was set above)
-      // Use a static to fire exactly once
-      static bool u_z_diag_fired = false;
-      if (!u_z_diag_fired)
-      {
-         u_z_diag_fired = true;
-         real_t ux2 = 0.0, uy2 = 0.0, uz2 = 0.0;
-         real_t ux_max = 0.0, uz_max = 0.0;
-         for (int i = 0; i < N_scalar; i++)
-         {
-            ux2 += X_(i) * X_(i);
-            uy2 += X_(N_scalar + i) * X_(N_scalar + i);
-            uz2 += X_(2 * N_scalar + i) * X_(2 * N_scalar + i);
-            ux_max = std::max(ux_max, std::abs(X_(i)));
-            uz_max = std::max(uz_max, std::abs(X_(2 * N_scalar + i)));
-         }
-
-         bool is_root = true;
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-#ifdef MFEM_USE_MPI
-            int rank;
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-            is_root = (rank == 0);
-            real_t local_sum[3] = {ux2, uy2, uz2};
-            real_t global_sum[3];
-            MPI_Allreduce(local_sum, global_sum, 3, MPI_DOUBLE, MPI_SUM,
-                          mesh_.GetComm());
-            ux2 = global_sum[0]; uy2 = global_sum[1]; uz2 = global_sum[2];
-            real_t local_mx[2] = {ux_max, uz_max};
-            real_t global_mx[2];
-            MPI_Allreduce(local_mx, global_mx, 2, MPI_DOUBLE, MPI_MAX,
-                          mesh_.GetComm());
-            ux_max = global_mx[0]; uz_max = global_mx[1];
-#endif
-         }
-
-         real_t ux_norm = std::sqrt(ux2);
-         real_t uy_norm = std::sqrt(uy2);
-         real_t uz_norm = std::sqrt(uz2);
-
-         if (is_root)
-         {
-            mfem::out << "[DIAG-RHS-Z] Solution u decomposition (same time step):\n"
-               << "  ||u_x|| = " << ux_norm << "  (along-strike)\n"
-               << "  ||u_y|| = " << uy_norm << "  (fault-normal)\n"
-               << "  ||u_z|| = " << uz_norm << "  (dip/vertical)\n"
-               << "  ||u_z||/||u_x|| = " << (ux_norm > 0 ? uz_norm / ux_norm : 0.0) << "\n"
-               << "  max|u_x| = " << ux_max << "  max|u_z| = " << uz_max << "\n"
-               << "  max|u_z|/max|u_x| = " << (ux_max > 0 ? uz_max / ux_max : 0.0) << "\n"
-               << "  Interpretation:\n"
-               << "    If f_z=0 but u_z>>0: solver introduces dip (Hypothesis B)\n"
-               << "    If f_z>>0 and u_z>>0: assembly bug forces dip (Hypothesis A)\n"
-               << std::endl;
-         }
-      }
-   }
-
    // Check convergence and log solver info when RHS is large
    {
       auto *iter_solver = dynamic_cast<IterativeSolver*>(solver_.get());
@@ -3956,44 +5280,80 @@ void ElasticityDomainOperator<MeshType>::Solve(
                       << iter_solver->GetNumIterations() << " iterations, final norm = "
                       << iter_solver->GetFinalNorm() << "\n";
          }
-         if (rhs_final > 1e15)
-         {
-            int rank = 0;
-#ifdef MFEM_USE_MPI
-            if constexpr (IsParallelMesh<MeshType>::value)
-            {
-               MPI_Comm_rank(mesh_.GetComm(), &rank);
-            }
-#endif
-            mfem::out << "[Rank " << rank << "] SOLVER: iters="
-                      << iter_solver->GetNumIterations()
-                      << " converged=" << iter_solver->GetConverged()
-                      << " final_norm=" << iter_solver->GetFinalNorm()
-                      << " ||u||_inf=" << X_.Normlinf() << "\n";
-         }
-      }
-   }
-
-   // Diagnostic: check for displacement blowup
-   {
-      real_t u_max = X_.Normlinf();
-      if (u_max > 1e6 || std::isnan(u_max))
-      {
-         int rank = 0;
-#ifdef MFEM_USE_MPI
-         if constexpr (IsParallelMesh<MeshType>::value)
-         {
-            MPI_Comm_rank(mesh_.GetComm(), &rank);
-         }
-#endif
-         mfem::out << "[Rank " << rank << "] DISPLACEMENT BLOWUP: ||u||_inf="
-                   << u_max << "\n";
-         mfem::out << "[Rank " << rank << "] ||RHS||_inf=" << B_.Normlinf()
-                   << "\n";
       }
    }
 
    displacement = X_;
+
+   // Debug dumps: rank-local file I/O only, no MPI collectives.
+   // Placed AFTER displacement = X_ so the GridFunction has the current solution.
+   if (debug_first_step)
+   {
+      // Compute Dirichlet-only RHS by subtraction (no extra assembly)
+      Vector rhs_dir(rhs.Size());
+      subtract(rhs, rhs_slip_snapshot, rhs_dir);
+
+      DebugDumpElementVector("rhs_slip", rhs_slip_snapshot);
+      DebugDumpElementVector("rhs_dirichlet", rhs_dir);
+      DebugDumpElementVector("rhs_total", rhs);
+      DebugDumpElementVector("u", X_);
+
+      // Dump fault jumps and traction using the solved displacement.
+      // Interior faces only — no ExchangeFaceNbrData (MPI-safe).
+      DebugDumpFaultJumpsLocal(displacement, slip_bc);
+      DebugDumpFaultTractionLocal(displacement, slip_bc);
+      DebugDumpKContributions();
+      first_step_debug_done_ = true;
+   }
+
+   // Global norm comparison — OUTSIDE rank-gated block.
+   // All ranks must participate in MPI_Reduce (no deadlock).
+   // Condition uses only rank-independent flags (enabled + time).
+   // Prints at EVERY Mult() call during first step to trace RK45 stages.
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      static int norm_count = 0;
+      if (norm_count < 10 && first_step_debug_.enabled && time > 0.0)
+      {
+         norm_count++;
+         int myrank;
+         MPI_Comm_rank(mesh_.GetComm(), &myrank);
+         if (myrank == 0)
+         {
+            mfem::out << "  [NORM] Stage " << norm_count
+                      << " at time = " << std::setprecision(17) << time << "\n";
+         }
+
+         auto print_global_norm = [&](const char *label, const Vector &v) {
+            double local_n1 = 0.0, local_n2sq = 0.0, local_ninf = 0.0;
+            for (int i = 0; i < v.Size(); i++)
+            {
+               double a = std::abs(v(i));
+               local_n1 += a;
+               local_n2sq += a * a;
+               if (a > local_ninf) { local_ninf = a; }
+            }
+            double g1, g2sq, ginf;
+            MPI_Reduce(&local_n1, &g1, 1, MPI_DOUBLE, MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_n2sq, &g2sq, 1, MPI_DOUBLE, MPI_SUM, 0, mesh_.GetComm());
+            MPI_Reduce(&local_ninf, &ginf, 1, MPI_DOUBLE, MPI_MAX, 0, mesh_.GetComm());
+            if (myrank == 0)
+            {
+               mfem::out << std::setprecision(15);
+               mfem::out << "  [NORM] ||" << label << "||_1   = " << g1 << "\n";
+               mfem::out << "  [NORM] ||" << label << "||_2   = "
+                         << std::sqrt(g2sq) << "\n";
+               mfem::out << "  [NORM] ||" << label << "||_inf = " << ginf << "\n";
+            }
+         };
+
+         print_global_norm("b_slip", rhs_slip_snapshot);
+         print_global_norm("b_total", rhs);
+         print_global_norm("u", X_);
+      }
+#endif
+   }
 }
 
 template <typename MeshType>
@@ -4029,6 +5389,15 @@ void ElasticityDomainOperator<MeshType>::AssembleSlipOnlyRHS(
 }
 
 template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::AssembleDirichletOnlyRHS(
+   Vector &rhs, real_t time) const
+{
+   rhs.SetSize(fes_->GetVSize());
+   rhs = 0.0;
+   AssembleDirichletLoading(rhs, time);
+}
+
+template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::ComputeTractionComponents(
    const GridFuncType &displacement,
    const Vector &slip_bc,
@@ -4049,10 +5418,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionDiagnostics(
    Vector &traction_stress,
    Vector &traction_correction,
    Vector &jump_residual,
-   Vector *normal_traction)
+   Vector *normal_traction,
+   Vector *normal_stress,
+   Vector *normal_correction)
 {
    ComputeTractionImpl(displacement, slip_bc, traction, normal_traction,
-                       &traction_stress, &traction_correction, &jump_residual);
+                       &traction_stress, &traction_correction, &jump_residual,
+                       normal_stress, normal_correction);
 }
 
 template <typename MeshType>
@@ -4063,7 +5435,9 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    Vector *normal_traction,
    Vector *traction_stress_out,
    Vector *traction_correction_out,
-   Vector *jump_residual_out)
+   Vector *jump_residual_out,
+   Vector *normal_stress_out,
+   Vector *normal_correction_out)
 {
    int dim = 3;
    traction.SetSize(2 * num_fault_dofs_);
@@ -4084,153 +5458,22 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
        jump_residual_out->SetSize(2 * num_fault_dofs_);
        *jump_residual_out = 0.0;
     }
+   if (normal_stress_out)
+   {
+      normal_stress_out->SetSize(num_fault_dofs_);
+      *normal_stress_out = 0.0;
+   }
+   if (normal_correction_out)
+   {
+      normal_correction_out->SetSize(num_fault_dofs_);
+      *normal_correction_out = 0.0;
+   }
 
    // v51: Elastic normal traction for sigma_n feedback
    if (normal_traction)
    {
       normal_traction->SetSize(num_fault_dofs_);
       *normal_traction = 0.0;
-   }
-
-   // v49: Diagnostic - compare CalcOrtho normals with FaultBasis normals
-   if (diag_normals_ && !diag_normals_done_)
-   {
-      int rank = 0;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-      }
-
-      for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
-      {
-         int face = fault_interior_faces_[fi];
-         auto *FTr = mesh_.GetInteriorFaceTransformations(face);
-         if (!FTr) { continue; }
-
-         const IntegrationPoint &ip_diag =
-            Geometries.GetCenter(FTr->GetGeometryType());
-         FTr->SetAllIntPoints(&ip_diag);
-         Vector nor(3);
-         CalcOrtho(FTr->Jacobian(), nor);
-         real_t nl = nor.Norml2();
-
-         const auto &basis = fault_basis_.GetBasis(fi);
-         real_t dot = 0;
-         for (int d = 0; d < 3; d++)
-         {
-            dot += (nor(d) / nl) * basis.normal[d];
-         }
-
-         // Print if normals are not aligned (|dot| != 1) or for first few faces
-         if (std::abs(std::abs(dot) - 1.0) > 1e-10 || fi < 5)
-         {
-            mfem::out << "[NOR-DIAG] rank=" << rank << " fi=" << fi
-               << " CalcOrtho=(" << nor(0)/nl << "," << nor(1)/nl
-               << "," << nor(2)/nl << ")"
-               << " basis.n=(" << basis.normal[0] << ","
-               << basis.normal[1] << "," << basis.normal[2] << ")"
-               << " dot=" << dot
-               << (std::abs(std::abs(dot) - 1.0) > 1e-10
-                   ? " *** MISMATCH ***" : "")
-               << "\n";
-         }
-      }
-      // Also check shared faces if parallel
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-         int base_idx = fault_interior_faces_.Size();
-         for (int si = 0; si < fault_shared_faces_.Size(); si++)
-         {
-            int sf = fault_shared_faces_[si];
-            auto *FTr = mesh_.GetSharedFaceTransformations(sf);
-            if (!FTr) { continue; }
-
-            const IntegrationPoint &ip_diag =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->SetAllIntPoints(&ip_diag);
-            Vector nor(3);
-            CalcOrtho(FTr->Jacobian(), nor);
-            real_t nl = nor.Norml2();
-
-            int trac_idx = base_idx + si;
-            const auto &basis = fault_basis_.GetBasis(trac_idx);
-            real_t dot = 0;
-            for (int d = 0; d < 3; d++)
-            {
-               dot += (nor(d) / nl) * basis.normal[d];
-            }
-
-            if (std::abs(std::abs(dot) - 1.0) > 1e-10 || si < 5)
-            {
-               mfem::out << "[NOR-DIAG] rank=" << rank
-                  << " shared si=" << si
-                  << " CalcOrtho=(" << nor(0)/nl << "," << nor(1)/nl
-                  << "," << nor(2)/nl << ")"
-                  << " basis.n=(" << basis.normal[0] << ","
-                  << basis.normal[1] << "," << basis.normal[2] << ")"
-                  << " dot=" << dot
-                  << (std::abs(std::abs(dot) - 1.0) > 1e-10
-                      ? " *** MISMATCH ***" : "")
-                  << "\n";
-            }
-         }
-      }
-      diag_normals_done_ = true;
-   }
-
-   // v52: Traction coherence diagnostic accumulators
-   bool coherence_active = diag_traction_coherence_ &&
-                            !diag_traction_coherence_done_;
-   // Check if slip is non-trivial (skip zero-slip evaluations).
-   // IMPORTANT: must be globally consistent (all ranks agree) because the
-   // summary section uses MPI collectives. Ranks without fault DOFs have
-   // empty slip_bc, so local-only check would deadlock.
-   if (coherence_active)
-   {
-      int local_has_slip = 0;
-      for (int i = 0; i < slip_bc.Size(); i++)
-      {
-         if (std::abs(slip_bc(i)) > 1e-20) { local_has_slip = 1; break; }
-      }
-      int global_has_slip = local_has_slip;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         MPI_Allreduce(&local_has_slip, &global_has_slip, 1,
-                        MPI_INT, MPI_MAX, mesh_.GetComm());
-#endif
-      }
-      if (!global_has_slip) { coherence_active = false; }
-   }
-   // Accumulate across all fault faces (interior + shared)
-   real_t coh_sum_stress_dip2 = 0.0, coh_sum_stress_strike2 = 0.0;
-   real_t coh_sum_corr_dip2 = 0.0, coh_sum_corr_strike2 = 0.0;
-   real_t coh_sum_res2 = 0.0;  // ||[[u]] - slip||^2 at quad points
-   real_t coh_max_res = 0.0;   // max |[[u]] - slip| component
-   real_t coh_max_corr_dip = 0.0;
-   real_t coh_max_stress_dip = 0.0;
-   int coh_n_qp = 0;
-
-   // Per-face centroid data for station-level reporting
-   struct CohFaceData {
-      real_t x2, x3;               // face centroid in fault coords
-      real_t stress_dip, stress_strike;  // face-averaged stress-only
-      real_t corr_dip, corr_strike;      // face-averaged penalty correction
-      real_t max_res;              // max |[[u]]-slip| on this face
-   };
-   std::vector<CohFaceData> coh_face_data;
-
-   // [MFEM-TQ] Pre-compute global vertex indices once (may be collective).
-   // Fire when target face has |Ty(q=0)| > 1e-30 (matches Tandem trigger).
-   Array<HYPRE_BigInt> gvert_tq_;
-   std::ostringstream tnd_tq_buf_;  // buffer output to avoid MPI interleaving
-   bool tnd_tq_active = diag_tnd_tq_ && !diag_tnd_tq_done_;
-   if (tnd_tq_active)
-   {
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-         mesh_.GetGlobalVertexIndices(gvert_tq_);
-      }
    }
 
    for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
@@ -4269,70 +5512,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       displacement.GetSubVector(vdofs1, u1_all);
       displacement.GetSubVector(vdofs2, u2_all);
 
-      // v51: Dump u_z at fault face centroid (one-time diagnostic)
-      if (diag_uz_fault_ && !diag_uz_fault_done_)
-      {
-         // Check if any slip is non-zero
-         bool has_slip = false;
-         int nbf_check = nbf_per_face_;
-         for (int kk = 0; kk < nbf_check; kk++)
-         {
-            int di = fi * nbf_check + kk;
-            if (di * 2 + 1 < slip_bc.Size() &&
-                (std::abs(slip_bc(2*di)) > 1e-20 ||
-                 std::abs(slip_bc(2*di+1)) > 1e-20))
-            { has_slip = true; break; }
-         }
-         if (has_slip || fi == 0)
-         {
-            // Evaluate u at face centroid
-            FTr->SetAllIntPoints(&ip);
-            const IntegrationPoint &eip1 = FTr->GetElement1IntPoint();
-            const IntegrationPoint &eip2 = FTr->GetElement2IntPoint();
-
-            Vector shape1(ndof1), shape2(ndof2);
-            fe1->CalcShape(eip1, shape1);
-            fe2->CalcShape(eip2, shape2);
-
-            real_t u1[3] = {0,0,0}, u2[3] = {0,0,0};
-            for (int c = 0; c < dim; c++)
-               for (int k = 0; k < ndof1; k++)
-                  u1[c] += shape1(k) * u1_all(c * ndof1 + k);
-            for (int c = 0; c < dim; c++)
-               for (int k = 0; k < ndof2; k++)
-                  u2[c] += shape2(k) * u2_all(c * ndof2 + k);
-
-            Vector fc(3);
-            FTr->Face->SetIntPoint(&ip);
-            FTr->Face->Transform(ip, fc);
-
-            // u_z is component 2 (dip direction for BP5)
-            // For pure strike-slip, u_z should be exactly 0
-            real_t uz_avg = 0.5 * (u1[2] + u2[2]);
-            real_t uz_jump = u1[2] - u2[2];
-            real_t ux_avg = 0.5 * (u1[0] + u2[0]);
-
-            if (std::abs(uz_avg) > 1e-20 || fi < 5)
-            {
-               mfem::out << "[UZ-FAULT] fi=" << fi
-                  << " loc=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                  << " u1=(" << u1[0] << "," << u1[1] << "," << u1[2] << ")"
-                  << " u2=(" << u2[0] << "," << u2[1] << "," << u2[2] << ")"
-                  << " uz_avg=" << uz_avg
-                  << " uz_jump=" << uz_jump
-                  << " ux_avg=" << ux_avg
-                  << " |uz/ux|=" << (std::abs(ux_avg) > 1e-30 ?
-                     std::abs(uz_avg/ux_avg) : 0.0)
-                  << std::endl;
-            }
-         }
-      }
-
       // Fault basis
       const auto &basis = fault_basis_.GetBasis(fi);
-
-      // v55: Sign from FaultBasis sign_flipped (general, not BP5-specific)
-      real_t sign = basis.sign_flipped ? -1.0 : 1.0;
 
       // Element Jacobian inverses (constant for linear tets/hexes)
       // Must set an integration point first so Jacobian() is valid.
@@ -4359,19 +5540,13 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
       {
          // Tandem-style traction recovery using combined integrator.
          // ComputeTractionAtQuadPoints (per-qp geometry, same penalty as K)
-         // + ProjectTractionToFaultDOFs (nl_q-weighted, sign_flipped)
+         // + ProjectTractionToFaultDOFs (nl_q-weighted L2 projection)
          // When decomposition diagnostics are requested, uses the decomposed
          // variant to also output stress, correction, and jump residual.
          int nbf = nbf_per_face_;
-         // v58 isolating experiment: keep decomposed path active for the
-         // entire run when diag_tnd_tq_ is enabled, instead of dropping to
-         // the fast path after the one-time log fires.  This tests whether
-         // the stall is caused by the decomposed→non-decomposed transition.
          bool need_decomp = traction_stress_out || traction_correction_out ||
-                            jump_residual_out || coherence_active ||
-                            diag_traction_decomp_ ||
-                            !diag_first_traction_done_ ||
-                            diag_tnd_tq_;
+                            jump_residual_out ||
+                            normal_stress_out || normal_correction_out;
 
          // Build sign-corrected slip at quad points (Tandem evaluate_slip).
          // 1. Collect tangential slip components (dip, strike) per DOF
@@ -4407,7 +5582,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                real_t du[3];
                fault_basis_.EmbedSlipQP(fi, q, sl_q, du);
                for (int c = 0; c < dim; c++)
-                  delta_u_quad_t(c * nqp_slip + q) = sign * du[c];
+                  delta_u_quad_t(c * nqp_slip + q) = du[c];
             }
          }
          else
@@ -4424,8 +5599,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   delta_u_nodal_t(c * nbf + kk) = du[c];
             }
             face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_t, delta_u_quad_t);
-            for (int j = 0; j < delta_u_quad_t.Size(); j++)
-               delta_u_quad_t(j) *= sign;
          }
 
          // Step 1: Traction at quad points (Tandem compute_traction)
@@ -4438,12 +5611,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             trac_integ.ComputeTractionAtQuadPointsDecomposed(
                *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_t,
                T_quad_new,
-               (traction_stress_out || coherence_active || diag_traction_decomp_ ||
-                (diag_tnd_tq_ && !diag_tnd_tq_done_))
-                  ? &T_stress_quad_dec : nullptr,
-               (traction_correction_out || coherence_active || diag_traction_decomp_ ||
-                (diag_tnd_tq_ && !diag_tnd_tq_done_))
-                  ? &T_corr_quad_dec : nullptr,
+               traction_stress_out ? &T_stress_quad_dec : nullptr,
+               traction_correction_out ? &T_corr_quad_dec : nullptr,
                jump_residual_out ? &R_quad_dec : nullptr,
                nullptr, &nl_q_vec);
          }
@@ -4454,33 +5623,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                T_quad_new, nullptr, &nl_q_vec);
          }
          int nqp_new = T_quad_new.Size() / dim;
-
-         // [MFEM-TQ] structured face-pipeline comparison (Tandem [TND-TQ]).
-         // Trigger once on the exact matched face after the first non-zero slip.
-         if (tnd_tq_active && slip_bc.Normlinf() > 1e-20)
-         {
-            int qo_tq = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
-            const IntegrationRule &ir_tq = IntRules.Get(
-               FTr->GetGeometryType(), qo_tq);
-            FaceVertexKey fkey = MakeFaceKey(face, gvert_tq_);
-            // Exact matched MFEM face for the left shallow tip.
-            // Tandem and MFEM do not share global vertex numbering, so this
-            // must use the MFEM-observed key, not the Tandem key.
-            FaceVertexKey target_key;
-            target_key.v[0] = 551;
-            target_key.v[1] = 555;
-            target_key.v[2] = 613;
-
-            if (fkey == target_key)
-            {
-               // v58 isolation: disable the diagnostic block body to test
-               // whether the stall is caused by this block (FTr mutation,
-               // printing) vs the decomposed-path-with-diag mode itself.
-               // If the run no longer stalls with this stub, the block body
-               // is the culprit.
-               diag_tnd_tq_done_ = true;
-            }
-         }
 
          // Step 2: Project to fault DOFs (Tandem evaluate_traction)
          int quad_order_new = 2 * std::max(fe1->GetOrder(), fe2->GetOrder()) + 1;
@@ -4518,7 +5660,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          Vector trac_local_new;
          DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
             dim, ncomp_proj, T_quad_new, nl_q_vec, ir_new, nbf, e_q,
-            basis_vecs, basis.sign_flipped, trac_local_new, qpd);
+            basis_vecs, trac_local_new, qpd);
 
          // Store per-DOF shear traction
          int tang_offset = normal_traction ? 1 : 0;
@@ -4527,106 +5669,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int dof_idx = fi * nbf_per_face_ + kk;
             traction(2 * dof_idx)     = trac_local_new((tang_offset + 0) * nbf + kk);
             traction(2 * dof_idx + 1) = trac_local_new((tang_offset + 1) * nbf + kk);
-         }
-
-         // v58 face-level tip diagnostic: compare mirror left/right tip faces
-         if (!diag_first_traction_done_)
-         {
-            // Compute face centroid
-            const IntegrationPoint &ip_diag =
-               Geometries.GetCenter(FTr->GetGeometryType());
-            FTr->Face->SetIntPoint(&ip_diag);
-            Vector fc_diag(3);
-            FTr->Face->Transform(ip_diag, fc_diag);
-            real_t cx = fc_diag(0), cz = -fc_diag(2);
-
-            // Only dump for tip faces: |x| > 49km AND depth < 2.5km
-            if (std::abs(cx) > 49000.0 && cz < 2500.0)
-            {
-               // Element volumes
-               real_t detJ1_diag = FTr->Elem1->Weight();
-               real_t detJ2_diag = FTr->Elem2->Weight();
-
-               // Face area (sum of nl_q * w_q)
-               real_t face_area = 0.0;
-               for (int q = 0; q < nqp_new; q++)
-                  face_area += ir_new.IntPoint(q).weight * nl_q_vec(q);
-
-               // DG penalty (same formula as K assembly)
-               real_t nl0 = nl_q_vec(0);
-               real_t pen = trac_integ.GetPenalty(
-                  *fe1, *fe2, detJ1_diag, detJ2_diag,
-                  lambda_val_, mu_val_, nl0);
-
-               // Traction decomposition at quad point 0
-               real_t T_stress_q0[3] = {0,0,0}, T_corr_q0[3] = {0,0,0};
-               if (T_stress_quad_dec.Size() > 0)
-               {
-                  for (int c = 0; c < dim; c++)
-                  {
-                     T_stress_q0[c] = T_stress_quad_dec(c * nqp_new);
-                     T_corr_q0[c] = T_corr_quad_dec(c * nqp_new);
-                  }
-               }
-
-               // Jump at quad point 0: u1-u2-slip
-               DenseMatrix shape1_d(fe1->GetDof()), shape2_d(fe2->GetDof());
-               {
-                  const IntegrationPoint &ip0 = ir_new.IntPoint(0);
-                  FTr->SetAllIntPoints(&ip0);
-                  Vector s1(fe1->GetDof()), s2(fe2->GetDof());
-                  fe1->CalcShape(FTr->GetElement1IntPoint(), s1);
-                  fe2->CalcShape(FTr->GetElement2IntPoint(), s2);
-                  real_t jump_q0[3] = {0,0,0};
-                  for (int c = 0; c < dim; c++)
-                  {
-                     real_t u1q = 0, u2q = 0;
-                     for (int k = 0; k < fe1->GetDof(); k++)
-                        u1q += s1(k) * u1_all(c * fe1->GetDof() + k);
-                     for (int k = 0; k < fe2->GetDof(); k++)
-                        u2q += s2(k) * u2_all(c * fe2->GetDof() + k);
-                     real_t fq = delta_u_quad_t(c * nqp_new);
-                     jump_q0[c] = u1q - u2q - fq;
-                  }
-
-                  int rank = 0;
-                  if constexpr (IsParallelMesh<MeshType>::value)
-                  {
-#ifdef MFEM_USE_MPI
-                     MPI_Comm_rank(mesh_.GetComm(), &rank);
-#endif
-                  }
-                  mfem::out << std::scientific << std::setprecision(6)
-                     << "[TIP-FACE] rank=" << rank
-                     << " fi=" << fi << " interior"
-                     << " centroid=(" << cx << "," << fc_diag(1)
-                     << "," << fc_diag(2) << ")"
-                     << " sign_flipped=" << basis.sign_flipped
-                     << " detJ1=" << detJ1_diag
-                     << " detJ2=" << detJ2_diag
-                     << " face_area=" << face_area
-                     << " penalty=" << pen
-                     << " nl_q0=" << nl0
-                     << "\n    T_stress_q0=(" << T_stress_q0[0]
-                     << "," << T_stress_q0[1] << "," << T_stress_q0[2] << ")"
-                     << " T_corr_q0=(" << T_corr_q0[0]
-                     << "," << T_corr_q0[1] << "," << T_corr_q0[2] << ")"
-                     << "\n    jump_q0=(" << jump_q0[0]
-                     << "," << jump_q0[1] << "," << jump_q0[2] << ")"
-                     << " slip_q0=(" << delta_u_quad_t(0)
-                     << "," << delta_u_quad_t(nqp_new)
-                     << "," << delta_u_quad_t(2*nqp_new) << ")"
-                     << "\n    trac_local=(";
-                  for (int kk = 0; kk < nbf; kk++)
-                  {
-                     int di = fi * nbf_per_face_ + kk;
-                     mfem::out << "(" << traction(2*di) << ","
-                               << traction(2*di+1) << ")";
-                     if (kk < nbf-1) mfem::out << " ";
-                  }
-                  mfem::out << ")\n";
-               }
-            }
          }
 
          // Normal stress: extracted from the unified 3-component projection
@@ -4647,7 +5689,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector stress_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, stress_local, qpd);
+               basis_vecs + tang_offset, stress_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4660,7 +5702,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector corr_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, corr_local, qpd);
+               basis_vecs + tang_offset, corr_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4673,7 +5715,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector res_local;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, 2, R_quad_dec, nl_q_vec, ir_new, nbf, e_q,
-               basis_vecs + tang_offset, basis.sign_flipped, res_local, qpd);
+               basis_vecs + tang_offset, res_local, qpd);
             for (int kk = 0; kk < nbf; kk++)
             {
                int dof_idx = fi * nbf_per_face_ + kk;
@@ -4682,104 +5724,33 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
          }
 
-         // v52: Coherence diagnostic from decomposed quad-point data
-         if (coherence_active && T_stress_quad_dec.Size() > 0)
+         // Normal decomposition: project stress and correction onto normal
+         // Same sign convention as total normal traction: -(T · n̂)
+         if (normal_stress_out && normal_traction)
          {
-            for (int q = 0; q < nqp_new; q++)
+            Vector ns_local;
+            DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+               dim, 1, T_stress_quad_dec, nl_q_vec, ir_new, nbf, e_q,
+               basis_vecs, ns_local, qpd);
+            for (int kk = 0; kk < nbf; kk++)
             {
-               real_t T_s_q[3], T_c_q[3];
-               for (int c = 0; c < dim; c++)
-               {
-                  T_s_q[c] = T_stress_quad_dec(c * nqp_new + q);
-                  T_c_q[c] = T_corr_quad_dec(c * nqp_new + q);
-               }
-               real_t tau_s[2], tau_c[2];
-               fault_basis_.ProjectTraction(fi, T_s_q, tau_s);
-               fault_basis_.ProjectTraction(fi, T_c_q, tau_c);
-
-               coh_sum_stress_dip2 += tau_s[0] * tau_s[0];
-               coh_sum_stress_strike2 += tau_s[1] * tau_s[1];
-               coh_sum_corr_dip2 += tau_c[0] * tau_c[0];
-               coh_sum_corr_strike2 += tau_c[1] * tau_c[1];
-               coh_max_stress_dip = std::max(coh_max_stress_dip,
-                                              std::abs(tau_s[0]));
-               coh_max_corr_dip = std::max(coh_max_corr_dip,
-                                            std::abs(tau_c[0]));
-               coh_n_qp++;
+               int dof_idx = fi * nbf_per_face_ + kk;
+               (*normal_stress_out)(dof_idx) = -ns_local(kk);
             }
-
-            FTr->SetAllIntPoints(&ip);
-            Vector fc(3);
-            FTr->Face->SetIntPoint(&ip);
-            FTr->Face->Transform(ip, fc);
-
-            // Face-averaged stress/correction for per-face recording
-            real_t T_s_avg[3] = {0,0,0}, T_c_avg[3] = {0,0,0};
-            real_t sw = 0.0;
-            for (int q = 0; q < nqp_new; q++)
+         }
+         if (normal_correction_out && normal_traction)
+         {
+            Vector nc_local;
+            DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+               dim, 1, T_corr_quad_dec, nl_q_vec, ir_new, nbf, e_q,
+               basis_vecs, nc_local, qpd);
+            for (int kk = 0; kk < nbf; kk++)
             {
-               real_t wq = ir_new.IntPoint(q).weight;
-               for (int c = 0; c < dim; c++)
-               {
-                  T_s_avg[c] += wq * T_stress_quad_dec(c * nqp_new + q);
-                  T_c_avg[c] += wq * T_corr_quad_dec(c * nqp_new + q);
-               }
-               sw += wq;
+               int dof_idx = fi * nbf_per_face_ + kk;
+               (*normal_correction_out)(dof_idx) = -nc_local(kk);
             }
-            if (sw > 0.0)
-            {
-               for (int c = 0; c < dim; c++)
-               {
-                  T_s_avg[c] /= sw;
-                  T_c_avg[c] /= sw;
-               }
-            }
-            real_t tau_s_face[2], tau_c_face[2];
-            fault_basis_.ProjectTraction(fi, T_s_avg, tau_s_face);
-            fault_basis_.ProjectTraction(fi, T_c_avg, tau_c_face);
-
-            coh_face_data.push_back({fc(0), std::abs(fc(2)),
-                                      tau_s_face[0], tau_s_face[1],
-                                      tau_c_face[0], tau_c_face[1],
-                                      0.0});
          }
 
-         // Traction decomposition diagnostic (face-averaged)
-         if (diag_traction_decomp_ && T_stress_quad_dec.Size() > 0)
-         {
-            real_t T_s_avg[3] = {0,0,0}, T_c_avg[3] = {0,0,0};
-            real_t sw = 0.0;
-            for (int q = 0; q < nqp_new; q++)
-            {
-               real_t wq = ir_new.IntPoint(q).weight;
-               for (int c = 0; c < dim; c++)
-               {
-                  T_s_avg[c] += wq * T_stress_quad_dec(c * nqp_new + q);
-                  T_c_avg[c] += wq * T_corr_quad_dec(c * nqp_new + q);
-               }
-               sw += wq;
-            }
-            if (sw > 0.0)
-            {
-               for (int c = 0; c < dim; c++) { T_s_avg[c] /= sw; T_c_avg[c] /= sw; }
-            }
-            real_t tau_stress_local[2], tau_corr_local[2];
-            fault_basis_.ProjectTraction(fi, T_s_avg, tau_stress_local);
-            fault_basis_.ProjectTraction(fi, T_c_avg, tau_corr_local);
-
-            FTr->SetAllIntPoints(&ip);
-            Vector fc(3);
-            FTr->Face->SetIntPoint(&ip);
-            FTr->Face->Transform(ip, fc);
-
-            mfem::out << "  TRAC_DECOMP interior DOF=" << fi
-                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                      << " stress_dip=" << tau_stress_local[0]
-                      << " stress_strike=" << tau_stress_local[1]
-                      << " corr_dip=" << tau_corr_local[0]
-                      << " corr_strike=" << tau_corr_local[1]
-                      << "\n";
-         }
       }
       else  // BR2
       {
@@ -4835,7 +5806,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   u1q += s1q(k) * u1_all(c * ndof1 + k);
                for (int k = 0; k < ndof2; k++)
                   u2q += s2q(k) * u2_all(c * ndof2 + k);
-               jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+               jump_q[c] = (u1q - u2q) - delta_u[c];
             }
 
             for (int u = 0; u < dim; u++)
@@ -4953,28 +5924,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             }
          }
 
-         // Traction decomposition diagnostic
-         if (diag_traction_decomp_)
-         {
-            real_t tau_stress_local[2], tau_corr_local[2];
-            fault_basis_.ProjectTraction(fi, T_stress, tau_stress_local);
-            real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
-            fault_basis_.ProjectTraction(fi, corr_neg, tau_corr_local);
-
-            FTr->SetAllIntPoints(&ip);
-            Vector fc(3);
-            FTr->Face->SetIntPoint(&ip);
-            FTr->Face->Transform(ip, fc);
-
-            mfem::out << "  TRAC_DECOMP interior DOF=" << fi
-                      << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                      << " stress_dip=" << tau_stress_local[0]
-                      << " stress_strike=" << tau_stress_local[1]
-                      << " corr_dip=" << tau_corr_local[0]
-                      << " corr_strike=" << tau_corr_local[1];
-            mfem::out << "\n";
-         }
-
          // Project to local frame: (tau_dip, tau_strike)
          // BR2 always has nbf_per_face_=1, so dof_idx = fi
          real_t tau_local[2];
@@ -5064,9 +6013,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          // Fault basis
          const auto &basis = fault_basis_.GetBasis(trac_idx);
 
-         // v55: Sign from FaultBasis sign_flipped (general)
-         real_t sign = basis.sign_flipped ? -1.0 : 1.0;
-
          // Element Jacobian inverses (constant for linear tets)
          DenseMatrix Jinv1(dim), Jinv2(dim);
          CalcInverse(FTr->Elem1->Jacobian(), Jinv1);
@@ -5094,7 +6040,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             int nbf_sh = nbf_per_face_;
             bool need_decomp_sh = traction_stress_out ||
                                   traction_correction_out || jump_residual_out ||
-                                  coherence_active || diag_traction_decomp_;
+                                  normal_stress_out || normal_correction_out;
             const auto &basis_sh = fault_basis_.GetBasis(trac_idx);
 
             // Build sign-corrected slip at quad points (shared faces).
@@ -5125,7 +6071,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                   real_t du[3];
                   fault_basis_.EmbedSlipQP(trac_idx, q, sl_q, du);
                   for (int c = 0; c < dim; c++)
-                     delta_u_quad_sh(c * nqp_sh_slip + q) = sign * du[c];
+                     delta_u_quad_sh(c * nqp_sh_slip + q) = du[c];
                }
             }
             else
@@ -5142,8 +6088,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      delta_u_nodal_sh(c * nbf_sh + kk) = du[c];
                }
                face_quad_->InterpolateToQuadPoints(dim, delta_u_nodal_sh, delta_u_quad_sh);
-               for (int j = 0; j < delta_u_quad_sh.Size(); j++)
-                  delta_u_quad_sh(j) *= sign;
             }
 
             DGElasticityIPCombinedIntegrator trac_integ_sh(
@@ -5155,10 +6099,8 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                trac_integ_sh.ComputeTractionAtQuadPointsDecomposed(
                   *fe1, *fe2, *FTr, u1_all, u2_all, delta_u_quad_sh,
                   T_quad_sh,
-                  (traction_stress_out || coherence_active || diag_traction_decomp_)
-                     ? &T_stress_quad_sh : nullptr,
-                  (traction_correction_out || coherence_active || diag_traction_decomp_)
-                     ? &T_corr_quad_sh : nullptr,
+                  traction_stress_out ? &T_stress_quad_sh : nullptr,
+                  traction_correction_out ? &T_corr_quad_sh : nullptr,
                   jump_residual_out ? &R_quad_sh : nullptr,
                   nullptr, &nl_q_sh);
             }
@@ -5202,7 +6144,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
             Vector trac_local_sh;
             DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                dim, ncomp_sh, T_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-               basis_vecs_sh, basis_sh.sign_flipped, trac_local_sh, qpd_sh);
+               basis_vecs_sh, trac_local_sh, qpd_sh);
 
             int tang_off_sh = normal_traction ? 1 : 0;
             for (int kk = 0; kk < nbf_sh; kk++)
@@ -5226,7 +6168,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector stress_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, stress_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, stress_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5239,7 +6181,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector corr_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, corr_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, corr_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5252,7 +6194,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                Vector res_local_sh;
                DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
                   dim, 2, R_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
-                  basis_vecs_sh + tang_off_sh, basis_sh.sign_flipped, res_local_sh, qpd_sh);
+                  basis_vecs_sh + tang_off_sh, res_local_sh, qpd_sh);
                for (int kk = 0; kk < nbf_sh; kk++)
                {
                   int dof_idx = trac_idx * nbf_per_face_ + kk;
@@ -5261,43 +6203,32 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                }
             }
 
-            // Traction decomposition diagnostic (shared faces)
-            if (diag_traction_decomp_ && T_stress_quad_sh.Size() > 0)
+            // Normal decomposition for shared faces
+            if (normal_stress_out && normal_traction)
             {
-               real_t T_s_avg[3] = {0,0,0}, T_c_avg[3] = {0,0,0};
-               real_t sw = 0.0;
-               for (int q = 0; q < nqp_sh; q++)
+               Vector ns_local_sh;
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 1, T_stress_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
+                  basis_vecs_sh, ns_local_sh, qpd_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
                {
-                  real_t wq = ir_sh2.IntPoint(q).weight;
-                  for (int c = 0; c < dim; c++)
-                  {
-                     T_s_avg[c] += wq * T_stress_quad_sh(c * nqp_sh + q);
-                     T_c_avg[c] += wq * T_corr_quad_sh(c * nqp_sh + q);
-                  }
-                  sw += wq;
+                  int dof_idx = trac_idx * nbf_per_face_ + kk;
+                  (*normal_stress_out)(dof_idx) = -ns_local_sh(kk);
                }
-               if (sw > 0.0)
-               {
-                  for (int c = 0; c < dim; c++) { T_s_avg[c] /= sw; T_c_avg[c] /= sw; }
-               }
-               real_t tau_stress_local[2], tau_corr_local[2];
-               fault_basis_.ProjectTraction(trac_idx, T_s_avg, tau_stress_local);
-               fault_basis_.ProjectTraction(trac_idx, T_c_avg, tau_corr_local);
-
-               FTr->SetAllIntPoints(&ip);
-               Vector fc(3);
-               FTr->Face->SetIntPoint(&ip);
-               FTr->Face->Transform(ip, fc);
-
-               mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
-                         << " rank=" << rank
-                         << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                         << " stress_dip=" << tau_stress_local[0]
-                         << " stress_strike=" << tau_stress_local[1]
-                         << " corr_dip=" << tau_corr_local[0]
-                         << " corr_strike=" << tau_corr_local[1]
-                         << "\n";
             }
+            if (normal_correction_out && normal_traction)
+            {
+               Vector nc_local_sh;
+               DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
+                  dim, 1, T_corr_quad_sh, nl_q_sh, ir_sh2, nbf_sh, e_q_sh,
+                  basis_vecs_sh, nc_local_sh, qpd_sh);
+               for (int kk = 0; kk < nbf_sh; kk++)
+               {
+                  int dof_idx = trac_idx * nbf_per_face_ + kk;
+                  (*normal_correction_out)(dof_idx) = -nc_local_sh(kk);
+               }
+            }
+
          }
          else  // BR2
          {
@@ -5351,7 +6282,7 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                      u1q += s1q(k) * u1_all(c * ndof1 + k);
                   for (int k = 0; k < ndof2; k++)
                      u2q += s2q(k) * u2_all(c * ndof2 + k);
-                  jump_q[c] = (u1q - u2q) - sign * delta_u[c];
+                  jump_q[c] = (u1q - u2q) - delta_u[c];
                }
 
                for (int u = 0; u < dim; u++)
@@ -5462,29 +6393,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                }
             }
 
-            // Traction decomposition diagnostic (shared faces)
-            if (diag_traction_decomp_)
-            {
-               real_t tau_stress_local[2], tau_corr_local[2];
-               fault_basis_.ProjectTraction(trac_idx, T_stress, tau_stress_local);
-               real_t corr_neg[3] = {-correction[0], -correction[1], -correction[2]};
-               fault_basis_.ProjectTraction(trac_idx, corr_neg, tau_corr_local);
-
-               FTr->SetAllIntPoints(&ip);
-               Vector fc(3);
-               FTr->Face->SetIntPoint(&ip);
-               FTr->Face->Transform(ip, fc);
-
-               mfem::out << "  TRAC_DECOMP shared DOF=" << trac_idx
-                         << " rank=" << rank
-                         << " x=(" << fc(0) << "," << fc(1) << "," << fc(2) << ")"
-                         << " stress_dip=" << tau_stress_local[0]
-                         << " stress_strike=" << tau_stress_local[1]
-                         << " corr_dip=" << tau_corr_local[0]
-                         << " corr_strike=" << tau_corr_local[1];
-               mfem::out << "\n";
-            }
-
             // BR2 always has nbf_per_face_=1, so dof_idx = trac_idx
             real_t tau_local[2];
             fault_basis_.ProjectTraction(trac_idx, T_global, tau_local);
@@ -5523,13 +6431,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
          }
       }
 #endif
-   }
-
-   // Flush [MFEM-TQ] buffer (done flag is set inside face loop when target found)
-   if (diag_tnd_tq_ && !tnd_tq_buf_.str().empty())
-   {
-      mfem::out << tnd_tq_buf_.str();
-      mfem::out.flush();
    }
 
    // Diagnostic: check for traction blowup
@@ -5593,295 +6494,6 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
    }
 #endif
 
-   // v49: Diagnostic - dump traction at first evaluation with zero slip
-   if (diag_first_traction_ && !diag_first_traction_done_)
-   {
-      int rank = 0;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-      }
-
-      // Check if this is first stage (all slip ~ 0)
-      real_t max_slip = 0;
-      for (int i = 0; i < slip_bc.Size(); i++)
-      {
-         max_slip = std::max(max_slip, std::abs(slip_bc(i)));
-      }
-
-      if (max_slip < 1e-20)
-      {
-         // First evaluation with zero slip - dump traction
-         int count = 0;
-         for (int i = 0; i < num_fault_dofs_; i++)
-         {
-            real_t tau_dip = traction(2*i);
-            real_t tau_strike = traction(2*i+1);
-            real_t tau_mag = std::sqrt(tau_dip*tau_dip + tau_strike*tau_strike);
-
-            // Print DOFs with non-negligible traction (> 1 Pa)
-            // or first few DOFs for reference
-            if (tau_mag > 1.0 || i < 3)
-            {
-               mfem::out << "[SEED-TRAC] rank=" << rank << " DOF=" << i
-                  << " tau=(" << tau_dip << "," << tau_strike << ")"
-                  << " mag=" << tau_mag << "\n";
-               count++;
-            }
-         }
-         mfem::out << "[SEED-TRAC] rank=" << rank
-            << " total_DOFs_with_tau>1Pa: " << count
-            << " / " << num_fault_dofs_ << "\n";
-         diag_first_traction_done_ = true;
-      }
-
-      // v51: Mark u_z diagnostic as done
-      if (diag_uz_fault_ && !diag_uz_fault_done_)
-      {
-         bool any_slip = false;
-         for (int i = 0; i < slip_bc.Size(); i++)
-         {
-            if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
-         }
-         if (any_slip) { diag_uz_fault_done_ = true; }
-      }
-
-      // v51: Mark dip traction diagnostic as done after first complete pass
-      if (diag_dip_traction_ && !diag_dip_traction_done_)
-      {
-         // Check if any face had non-zero slip
-         bool any_slip = false;
-         for (int i = 0; i < slip_bc.Size(); i++)
-         {
-            if (std::abs(slip_bc(i)) > 1e-20) { any_slip = true; break; }
-         }
-         if (any_slip)
-         {
-            diag_dip_traction_done_ = true;
-            if constexpr (IsParallelMesh<MeshType>::value)
-            {
-#ifdef MFEM_USE_MPI
-               int rank;
-               MPI_Comm_rank(mesh_.GetComm(), &rank);
-               mfem::out << "[DIP-TRAC] rank=" << rank << " diagnostic complete\n";
-#endif
-            }
-         }
-      }
-   }
-
-   // v52: Print traction coherence summary (MPI-reduced)
-   // NOTE: ALL ranks must enter this block when coherence_active is true
-   // (coherence_active is globally consistent via MPI_Allreduce above).
-   // Do NOT gate on local coh_n_qp — ranks without fault faces have 0
-   // quad points but must still participate in MPI collectives.
-   if (coherence_active)
-   {
-      real_t g_stress_dip2 = coh_sum_stress_dip2;
-      real_t g_stress_strike2 = coh_sum_stress_strike2;
-      real_t g_corr_dip2 = coh_sum_corr_dip2;
-      real_t g_corr_strike2 = coh_sum_corr_strike2;
-      real_t g_res2 = coh_sum_res2;
-      real_t g_max_res = coh_max_res;
-      real_t g_max_corr_dip = coh_max_corr_dip;
-      real_t g_max_stress_dip = coh_max_stress_dip;
-      int g_n_qp = coh_n_qp;
-      bool is_root = true;
-
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         MPI_Allreduce(&coh_sum_stress_dip2, &g_stress_dip2, 1,
-                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&coh_sum_stress_strike2, &g_stress_strike2, 1,
-                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&coh_sum_corr_dip2, &g_corr_dip2, 1,
-                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&coh_sum_corr_strike2, &g_corr_strike2, 1,
-                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&coh_sum_res2, &g_res2, 1,
-                        MPI_DOUBLE, MPI_SUM, mesh_.GetComm());
-         MPI_Allreduce(&coh_max_res, &g_max_res, 1,
-                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
-         MPI_Allreduce(&coh_max_corr_dip, &g_max_corr_dip, 1,
-                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
-         MPI_Allreduce(&coh_max_stress_dip, &g_max_stress_dip, 1,
-                        MPI_DOUBLE, MPI_MAX, mesh_.GetComm());
-         int local_nqp = coh_n_qp;
-         MPI_Allreduce(&local_nqp, &g_n_qp, 1,
-                        MPI_INT, MPI_SUM, mesh_.GetComm());
-         int rank;
-         MPI_Comm_rank(mesh_.GetComm(), &rank);
-         is_root = (rank == 0);
-#endif
-      }
-
-      if (is_root && g_n_qp > 0)
-      {
-         real_t rms_stress_dip = std::sqrt(g_stress_dip2 / g_n_qp);
-         real_t rms_stress_strike = std::sqrt(g_stress_strike2 / g_n_qp);
-         real_t rms_corr_dip = std::sqrt(g_corr_dip2 / g_n_qp);
-         real_t rms_corr_strike = std::sqrt(g_corr_strike2 / g_n_qp);
-         real_t rms_res = std::sqrt(g_res2 / g_n_qp);
-
-         mfem::out << "\n[TRACTION-COHERENCE] Solve vs Traction Extraction "
-                   << "Diagnostic (v52)\n";
-         mfem::out << "  Quad points sampled: " << g_n_qp << "\n";
-         mfem::out << "\n  Stress-only traction {sigma.n} (should carry "
-                   << "physical signal):\n";
-         mfem::out << "    RMS tau_strike(stress) = "
-                   << rms_stress_strike << " Pa\n";
-         mfem::out << "    RMS tau_dip(stress)    = "
-                   << rms_stress_dip << " Pa\n";
-         mfem::out << "    max |tau_dip(stress)|  = "
-                   << g_max_stress_dip << " Pa\n";
-         mfem::out << "    dip/strike ratio (RMS) = "
-                   << (rms_stress_strike > 1e-30 ?
-                       rms_stress_dip / rms_stress_strike * 100.0 : 0.0)
-                   << " %\n";
-         mfem::out << "\n  Penalty correction eta*(jump-slip) (should be "
-                   << "~0 if solve is exact):\n";
-         mfem::out << "    RMS tau_strike(corr)   = "
-                   << rms_corr_strike << " Pa\n";
-         mfem::out << "    RMS tau_dip(corr)      = "
-                   << rms_corr_dip << " Pa\n";
-         mfem::out << "    max |tau_dip(corr)|    = "
-                   << g_max_corr_dip << " Pa\n";
-         mfem::out << "    corr/stress ratio (strike) = "
-                   << (rms_stress_strike > 1e-30 ?
-                       rms_corr_strike / rms_stress_strike * 100.0 : 0.0)
-                   << " %\n";
-         mfem::out << "    corr/stress ratio (dip)    = "
-                   << (rms_stress_dip > 1e-30 ?
-                       rms_corr_dip / rms_stress_dip * 100.0 : 0.0)
-                   << " %\n";
-         mfem::out << "\n  Solver fault residual |[[u]] - slip|:\n";
-         mfem::out << "    RMS residual = " << rms_res << " m\n";
-         mfem::out << "    max residual = " << g_max_res << " m\n";
-         mfem::out << "\n  Interpretation:\n";
-         mfem::out << "    If dip/strike(stress) >> 0: DG solution "
-                   << "itself has cross-component coupling\n";
-         mfem::out << "    If corr/stress >> 0: penalty amplifies "
-                   << "solver residual into spurious traction\n";
-         mfem::out << "    If both are small but total dip is large: "
-                   << "coherence problem in stress evaluation\n";
-      }
-
-      // Per-station nearest-face report
-      // BP5 benchmark stations: (x2 [m], x3 [m])
-      struct StationDef { const char *name; real_t x2; real_t x3; };
-      StationDef stations[] = {
-         {"strk-36dp+00", -36e3,  0.0},
-         {"strk-16dp+00", -16e3,  0.0},
-         {"strk+00dp+00",   0.0,  0.0},
-         {"strk+16dp+00",  16e3,  0.0},
-         {"strk+36dp+00",  36e3,  0.0},
-         {"strk-24dp+10", -24e3, 10e3},
-         {"strk-16dp+10", -16e3, 10e3},
-         {"strk+00dp+10",   0.0, 10e3},
-         {"strk+16dp+10",  16e3, 10e3},
-         {"strk+00dp+22",   0.0, 22e3},
-      };
-      int n_stations = 10;
-
-      // Each rank finds its nearest face to each station
-      // Pack: [dist, stress_dip, stress_strike, corr_dip, corr_strike, max_res]
-      const int n_fields = 6;
-      std::vector<double> local_best(n_stations * n_fields, 1e30);
-      for (int s = 0; s < n_stations; s++)
-      {
-         local_best[s * n_fields + 0] = 1e30;  // distance (sentinel)
-      }
-
-      for (size_t f = 0; f < coh_face_data.size(); f++)
-      {
-         const auto &fd = coh_face_data[f];
-         for (int s = 0; s < n_stations; s++)
-         {
-            real_t dx = fd.x2 - stations[s].x2;
-            real_t dz = fd.x3 - stations[s].x3;
-            real_t dist = std::sqrt(dx*dx + dz*dz);
-            if (dist < local_best[s * n_fields + 0])
-            {
-               local_best[s * n_fields + 0] = dist;
-               local_best[s * n_fields + 1] = fd.stress_dip;
-               local_best[s * n_fields + 2] = fd.stress_strike;
-               local_best[s * n_fields + 3] = fd.corr_dip;
-               local_best[s * n_fields + 4] = fd.corr_strike;
-               local_best[s * n_fields + 5] = fd.max_res;
-            }
-         }
-      }
-
-      // MPI reduce: pick the rank with smallest distance for each station
-      std::vector<double> global_best = local_best;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         // Use MPI_MINLOC to find rank with smallest distance per station
-         // Pack distance + rank into MPI_DOUBLE_INT struct
-         struct { double val; int rank; } local_dr[10], global_dr[10];
-         int my_rank;
-         MPI_Comm_rank(mesh_.GetComm(), &my_rank);
-         for (int s = 0; s < n_stations; s++)
-         {
-            local_dr[s].val = local_best[s * n_fields + 0];
-            local_dr[s].rank = my_rank;
-         }
-         MPI_Allreduce(local_dr, global_dr, n_stations,
-                        MPI_DOUBLE_INT, MPI_MINLOC, mesh_.GetComm());
-
-         // Broadcast each winning rank's data
-         for (int s = 0; s < n_stations; s++)
-         {
-            MPI_Bcast(&local_best[s * n_fields], n_fields,
-                       MPI_DOUBLE, global_dr[s].rank, mesh_.GetComm());
-         }
-         global_best = local_best;
-#endif
-      }
-
-      if (is_root)
-      {
-         mfem::out << "\n  Per-station decomposition (nearest fault face):\n";
-         mfem::out << "  " << std::setw(16) << "Station"
-                   << std::setw(10) << "dist(m)"
-                   << std::setw(14) << "stress_dip"
-                   << std::setw(14) << "stress_strk"
-                   << std::setw(12) << "dip/strk%"
-                   << std::setw(14) << "corr_dip"
-                   << std::setw(14) << "corr_strk"
-                   << std::setw(12) << "max_res"
-                   << "\n";
-         for (int s = 0; s < n_stations; s++)
-         {
-            double dist = global_best[s * n_fields + 0];
-            double sd   = global_best[s * n_fields + 1];
-            double ss   = global_best[s * n_fields + 2];
-            double cd   = global_best[s * n_fields + 3];
-            double cs   = global_best[s * n_fields + 4];
-            double mr   = global_best[s * n_fields + 5];
-            double ratio = (std::abs(ss) > 1e-30)
-                           ? std::abs(sd) / std::abs(ss) * 100.0 : 0.0;
-            mfem::out << "  " << std::setw(16) << stations[s].name
-                      << std::setw(10) << std::fixed << std::setprecision(0)
-                      << dist
-                      << std::setw(14) << std::scientific << std::setprecision(3)
-                      << sd
-                      << std::setw(14) << ss
-                      << std::setw(12) << std::fixed << std::setprecision(1)
-                      << ratio
-                      << std::setw(14) << std::scientific << std::setprecision(3)
-                      << cd
-                      << std::setw(14) << cs
-                      << std::setw(12) << mr
-                      << "\n";
-         }
-         mfem::out << std::defaultfloat;
-         mfem::out << "\n[TRACTION-COHERENCE] Done.\n\n";
-      }
-      diag_traction_coherence_done_ = true;
-   }
 }
 
 // Convenience type alias

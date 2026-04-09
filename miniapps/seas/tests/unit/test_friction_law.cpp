@@ -559,6 +559,25 @@ void TestRobustness()
       TEST_ASSERT(std::isfinite(theta0), "Tiny 'a' InitialState: theta is finite");
       TEST_ASSERT(theta0 > 0.0, "Tiny 'a' InitialState: theta is positive");
    }
+
+   // Test 6: When both Brent brackets fail, match Tandem and return NaN.
+   // A non-finite psi makes the residual non-finite at both bracket endpoints.
+   {
+      real_t tau = 1.0e6;
+      real_t psi = std::numeric_limits<real_t>::quiet_NaN();
+      real_t sigma_n = 50.0e6;
+      real_t eta = 4.63e6;
+      real_t a = 0.015;
+
+      int iterations = -1;
+      real_t V_solved =
+         law.SolveSlipRatePsi(tau, psi, sigma_n, eta, a, &iterations);
+
+      TEST_ASSERT(std::isnan(V_solved),
+                  "Bracket failure: SolveSlipRatePsi returns NaN like Tandem");
+      TEST_ASSERT(iterations == 0,
+                  "Bracket failure: No iterations reported");
+   }
 }
 
 // =============================================================================

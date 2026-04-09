@@ -128,8 +128,7 @@ public:
         dr_friction_(friction),
         bp5_params_(params),
         sigma_n_bp5_(params.sigma_n),
-        Vp_bp5_(params.Vp),
-        Wf_bp5_(params.Wf)
+        Vp_bp5_(params.Vp)  // kept for potential diagnostics
    {
       static_assert(SlipComponents == 2,
                     "BP5Params constructor requires SlipComponents=2");
@@ -300,14 +299,6 @@ public:
          // ---- BP5 vector path ----
          for (int i = 0; i < num_nodes_; i++)
          {
-            // Below fault zone check (shouldn't happen with proper fault detection)
-            if (depths(i) > Wf_bp5_ + 1.0)
-            {
-               slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               continue;
-            }
-
             // Vector stress: tau_pre + elastic traction
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
                                  tau_pre_(2*i+1) + traction(2*i+1)};
@@ -421,16 +412,8 @@ public:
          else
          {
             // ---- BP5 vector path ----
-            if (depths(i) > Wf_bp5_ + 1.0)
-            {
-               // Below fault zone: prescribed plate rate.
-               rate(i * StatePerNode + 0) = 0.0;
-               rate(i * StatePerNode + 1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               rate(i * StatePerNode + PsiIndex) = 0.0;
-               slip_rate_(2*i) = 0.0;
-               slip_rate_(2*i+1) = -Vp_bp5_;  // v55 D8: Tandem convention
-               continue;
-            }
+            // No below-fault hardcoded branch: let friction solver handle
+            // all DOFs naturally, matching Tandem's approach.
 
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
@@ -480,24 +463,17 @@ public:
                      << std::endl;
                   MFEM_ABORT("Non-finite friction input at DOF " << i);
                }
-               if (sigma_n_eff <= 0.0 && !diag_sn_neg_done_)
+               if (sigma_n_eff <= 0.0)
                {
-                  diag_sn_neg_done_ = true;
-                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  real_t x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-                  real_t x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-                  real_t sn_el = normal_traction ? (*normal_traction)(i) : 0.0;
-                  std::cerr << std::scientific << std::setprecision(15)
-                     << "[FRIC-GUARD] SIGMA_N_EFF<=0 r=" << rank
-                     << " d=" << i << " x=" << x2 << " z=" << x3
-                     << " sn_eff=" << sigma_n_eff
-                     << " sn0=" << sigma_n_bp5_
-                     << " sn_el=" << sn_el
-                     << " psi=" << psi
-                     << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
-                     << " slip=(" << state(i*StatePerNode) << ","
-                     << state(i*StatePerNode+1) << ")"
-                     << std::endl;
+                  int sn_rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+                  real_t sn_x2 = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
+                  real_t sn_x3 = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
+                  std::cerr << "[FRIC-GUARD] sigma_n_eff <= 0 at DOF "
+                            << i << " r=" << sn_rank
+                            << " x2=" << sn_x2 << " x3=" << sn_x3
+                            << " sn_eff=" << sigma_n_eff
+                            << " sn_el=" << (normal_traction ? (*normal_traction)(i) : 0.0)
+                            << std::endl;
                }
             }
 
@@ -536,34 +512,6 @@ public:
             slip_rate_(2*i+1) = V_vec[1];
             V_max_ = std::max(V_max_, V_abs);
 
-            // v58: exact friction I/O at tip DOFs
-            if (geom_ && !diag_tip_friction_done_)
-            {
-               real_t x2 = geom_->GetCoordsX2()(i);
-               real_t x3 = geom_->GetCoordsX3()(i);
-               if (std::abs(x2) > 49000.0 && x3 < 2500.0)
-               {
-                  real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
-                                             tau_vec[1]*tau_vec[1]);
-                  real_t dpsi_dt = evolution_->Rate(V_abs, psi, Dc);
-                  int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-                  mfem::out << std::scientific << std::setprecision(8)
-                     << "[FRIC] r=" << rank << " d=" << i
-                     << " x=" << x2 << " z=" << x3
-                     << " a=" << a << " sn=" << sigma_n_eff
-                     << " eta=" << eta << " Dc=" << Dc
-                     << " psi=" << psi
-                     << " |tau_total|=" << tau_abs
-                     << " tau_pre=(" << tau_pre_(2*i) << ","
-                     << tau_pre_(2*i+1) << ")"
-                     << " trac=(" << traction(2*i) << ","
-                     << traction(2*i+1) << ")"
-                     << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
-                     << " |V|=" << V_abs
-                     << " dpsi=" << dpsi_dt
-                     << "\n";
-               }
-            }
          }
       }
 
@@ -606,8 +554,6 @@ public:
             }
          }
       }
-
-      if (!diag_tip_friction_done_) { diag_tip_friction_done_ = true; }
 
       return V_max_;
    }
@@ -853,8 +799,6 @@ public:
          }
          else
          {
-            if (depths(i) > Wf_bp5_ + 1.0) { continue; }
-
             real_t psi = state(i * StatePerNode + PsiIndex);
             real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
                                  tau_pre_(2*i+1) + traction(2*i+1)};
@@ -985,11 +929,6 @@ private:
    int num_nodes_;      ///< Number of fault DOFs
    real_t tau0_;        ///< Pre-stress [Pa] (BP2 scalar)
    real_t V_max_;       ///< Maximum slip rate from last evaluation
-   mutable bool diag_tip_friction_done_ = true;  ///< v58 tip friction diagnostic (disabled by default)
-   mutable bool diag_sn_neg_done_ = false;       ///< v58: print once when sigma_n_eff <= 0
-public:
-   void ResetTipFrictionDiag() { diag_tip_friction_done_ = false; }
-private:
 
    bool use_psi_ = false;  ///< If true, state variable is psi instead of theta
    bool scec_psi_init_ = false;  ///< If false (default), Tandem InitialStatePsi; if true, SCEC fixed psi

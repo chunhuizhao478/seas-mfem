@@ -371,12 +371,6 @@ def main():
         "--save", action="store_true", help="Save plots as PNG (default: display)"
     )
     parser.add_argument("--output-dir", default=".", help="Directory for output plots")
-    parser.add_argument(
-        "--flip-dip",
-        action="store_true",
-        help="Flip sign of slip_dip and tau_dip for MFEM datasets",
-    )
-
     # Legacy compat
     parser.add_argument(
         "--compare",
@@ -489,7 +483,7 @@ def main():
             label, prefix = parse_labeled_arg(spec)
             if label is None:
                 label = os.path.basename(prefix)
-            sources.append((f"Tandem {label}", "tandem_results", prefix, color, "-"))
+            sources.append((f"Tandem {label}", "tandem_results", prefix, color, "--"))
         elif stype == "mfem":
             label, prefix = parse_labeled_arg(spec)
             if label is None:
@@ -541,9 +535,13 @@ def main():
                 path = mfem_filename(info, station_name)
                 if os.path.exists(path):
                     data = load_bp5_file(path)
-                    if data is not None and args.flip_dip:
-                        data["slip_dip"] = -data["slip_dip"]
-                        data["tau_dip"] = -data["tau_dip"]
+                    if data is not None:
+                        # Temporary BP5 v58 plotting workaround:
+                        # current MFEM output files carry reversed slip sign
+                        # relative to Tandem for both strike and dip. Revert
+                        # this in the plot loader for comparison runs.
+                        data["slip_strike"] = data["slip_strike"]
+                        data["slip_dip"] = data["slip_dip"]
             datasets.append((label, data, color, ls))
 
         # Skip if no data at this station
@@ -585,7 +583,7 @@ def main():
                 station_name,
                 x2_km,
                 x3_km,
-                t_max_yr=1e-5,
+                t_max_yr=4e-5,
                 save_path=fname_close,
             )
         else:
