@@ -589,7 +589,13 @@ public:
       Vector slip, theta;
       fault.GetSlip(state, slip);       // [2*N interleaved: dip, strike]
       fault.GetTheta(state, theta);     // [N]
-      const Vector &slip_rate = fault.GetSlipRate(); // [2*N interleaved]
+      // Re-solve friction from current state (not cached from RK stage).
+      // Matches Tandem's RateAndState::state() — see bp5_parallel_output.hpp.
+      // NOTE: traction is still cached from the last RK stage, not the
+      // accepted state.  Traction staleness is negligible compared to the
+      // psi sensitivity that this fix addresses.
+      Vector slip_rate;
+      fault.RecomputeSlipRate(traction, state, slip_rate);
 
       const Vector &tau_pre = fault.GetGeometry()->GetTauPre(); // [2*N]
 

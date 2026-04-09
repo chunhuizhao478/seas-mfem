@@ -749,6 +749,101 @@ public:
    }
 
    // =========================================================================
+   // Output-time recomputation (matches Tandem RateAndState::state())
+   // =========================================================================
+
+   /// @brief Recompute slip rate from current state and traction.
+   ///
+   /// Unlike GetSlipRate() which returns the cached value from the last
+   /// ComputeRHS() call (which may be from an intermediate RK stage),
+   /// this method re-solves the friction equation for the given state
+   /// and traction.  This matches Tandem's RateAndState::state() which
+   /// calls law_.slip_rate() fresh at every output time.
+   ///
+   /// At locked fault DOFs where a is small (e.g. a=0.004 in BP5 VW
+   /// core), the slip rate is exponentially sensitive to psi via
+   /// V ~ exp(-psi/a).  Even tiny psi mismatches between the cached
+   /// intermediate-stage state and the accepted state produce orders-
+   /// of-magnitude errors in V.
+   ///
+   /// @param[in] traction Traction from domain solve [TractionSize()]
+   /// @param[in] state Current state vector [StateSize()]
+   /// @param[out] V_out Recomputed slip rate [SlipComponents * NumNodes()]
+   /// @param[in] normal_traction Optional elastic normal traction [NumNodes()]
+   ///            (BP5 only, for --elastic-sigma-n).  When provided,
+   ///            sigma_n_eff = sigma_n_bp5_ + normal_traction(i), matching
+   ///            ComputeRHS().  When nullptr, uses constant sigma_n.
+   void RecomputeSlipRate(const Vector &traction, const Vector &state,
+                          Vector &V_out,
+                          const Vector *normal_traction = nullptr) const
+   {
+      MFEM_ASSERT(traction.Size() == TractionSize(),
+                  "Traction vector has wrong size");
+      MFEM_ASSERT(state.Size() == StateSize(),
+                  "State vector has wrong size");
+      if (normal_traction)
+      {
+         MFEM_ASSERT(normal_traction->Size() == num_nodes_,
+                     "Normal traction vector has wrong size: "
+                     << normal_traction->Size() << " vs " << num_nodes_);
+      }
+
+      V_out.SetSize(SlipComponents * num_nodes_);
+      const Vector &a_values = geom_->GetAValues();
+      const Vector &eta_values = geom_->GetEtaValues();
+
+      for (int i = 0; i < num_nodes_; i++)
+      {
+         if constexpr (SlipComponents == 1)
+         {
+            const Vector &depths = geom_->GetDepths();
+            if (depths(i) < -params_.Wf)
+            {
+               V_out(i) = params_.Vp;
+               continue;
+            }
+            real_t state_var = state(i * StatePerNode + ThetaIndex);
+            real_t tau = tau0_ + traction(i);
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+            real_t V;
+            if (use_psi_)
+            {
+               V = dr_friction_->SolveSlipRatePsi(tau, state_var,
+                                                   params_.sigma_n, eta, a);
+            }
+            else
+            {
+               V = friction_->SolveSlipRate(tau, state_var,
+                                             params_.sigma_n, eta, a);
+            }
+            V_out(i) = V;
+         }
+         else
+         {
+            real_t psi = state(i * StatePerNode + PsiIndex);
+            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
+                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t a = a_values(i);
+            real_t eta = eta_values(i);
+
+            // Match ComputeRHS() sigma_n_eff logic for elastic normal stress
+            real_t sigma_n_eff = sigma_n_bp5_;
+            if (normal_traction)
+            {
+               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
+            }
+
+            real_t V_vec[2];
+            dr_friction_->SolveSlipRateVectorPsi(
+               tau_vec, psi, sigma_n_eff, eta, a, V_vec);
+            V_out(2*i) = V_vec[0];
+            V_out(2*i+1) = V_vec[1];
+         }
+      }
+   }
+
+   // =========================================================================
    // Verification and output
    // =========================================================================
 

@@ -241,11 +241,27 @@ public:
 
       if (!owned_stations_.empty())
       {
-         // Extract local data
+         // Extract local data.
+         // Re-solve the friction equation from the current state and traction
+         // rather than using the cached GetSlipRate().  This matches Tandem's
+         // RateAndState::state() which calls law_.slip_rate() at every output.
+         //
+         // The cached slip rate can be from an intermediate RK stage whose
+         // psi differs from the accepted state's psi.  At locked fault DOFs
+         // (a=0.004 in BP5 VW core), V ~ exp(-psi/a) is exponentially
+         // sensitive — even tiny psi mismatches produce orders-of-magnitude
+         // errors in the cached V.
+         //
+         // NOTE: traction is from the last RK stage (cached in seas_op), not
+         // recomputed from the accepted state.  The dominant error was psi
+         // staleness (exp(-psi/a) sensitivity); traction staleness is orders
+         // of magnitude smaller.  A full fix would require re-solving the
+         // domain at output time.
          Vector local_slip, local_theta;
          fault.GetSlip(state, local_slip);
          fault.GetTheta(state, local_theta);
-         const Vector &local_V = fault.GetSlipRate();
+         Vector local_V;
+         fault.RecomputeSlipRate(traction, state, local_V);
          int N = fault.NumNodes();
 
          Vector slip_dip(N), slip_strike(N), V_dip(N), V_strike(N);
