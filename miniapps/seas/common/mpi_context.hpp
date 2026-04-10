@@ -171,6 +171,17 @@ public:
    ///
    /// In serial mode, this is a no-op.
    /// In parallel mode, performs MPI_Bcast from rank 0.
+   void Bcast(int &value) const
+   {
+#ifdef SEAS_USE_MPI
+      MPI_Bcast(&value, 1, MPI_INT, 0, MPI_COMM_WORLD);
+#endif
+   }
+
+   /// @brief Broadcast a value from root to all processes
+   ///
+   /// In serial mode, this is a no-op.
+   /// In parallel mode, performs MPI_Bcast from rank 0.
    void Bcast(real_t &value) const
    {
 #ifdef SEAS_USE_MPI

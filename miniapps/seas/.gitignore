@@ -34,3 +34,7 @@ test_pv_*/
 
 # Archive
 archive/
+
+# Diagnostic artifacts
+face_audit_r*.csv
+bp5_quick_check/

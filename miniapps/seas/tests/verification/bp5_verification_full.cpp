@@ -44,6 +44,9 @@
 //   --tandem-dt-init DT        Initial dt [s] for Tandem-style startup
 //   --petsc-ts                 Use PETSc TS RK45 path (exact Tandem framework)
 //   --petsc-ts-options FILE    PETSc options file (default: built-in Tandem rk45)
+//   --regression-tolerance TOL Regression test: fail if any per-field relative
+//                              L2 error exceeds TOL (negative = skip check)
+//   --ref-prefix PFX           Reference file prefix (auto-detected if omitted)
 
 #include "mfem.hpp"
 #ifdef MFEM_USE_PETSC
@@ -66,6 +69,7 @@
 #include "../../io/paraview_output.hpp"
 #include "../../common/mpi_context.hpp"
 #include "../../trace/face_trace_logger.hpp"
+#include "../../config/bp5_mesh_utils.hpp"
 
 #include <iostream>
 #include <iomanip>
@@ -80,69 +84,12 @@
 #include <algorithm>
 #include <set>
 #include <map>
+#include <dirent.h>
 
 using namespace mfem;
 using namespace mfem::seas;
 
-// ============================================================================
-// Inline mesh creation for smoke tests
-// ============================================================================
-
-/// Create a 3D hex mesh for BP5 with Tandem boundary attributes.
-/// Domain: [-Lx,Lx] x [-Ly,Ly] x [-Lz,0]
-/// Boundary attributes (Tandem tags):
-///   1 = Natural (z=0 top, z=-Lz bottom)
-///   5 = Dirichlet (x=±Lx, y=±Ly far-field)
-std::unique_ptr<Mesh> CreateBP5InlineMesh(
-   int nx, int ny, int nz,
-   real_t Lx, real_t Ly, real_t Lz)
-{
-   auto mesh = std::make_unique<Mesh>(
-      Mesh::MakeCartesian3D(2 * nx, 2 * ny, nz,
-                            Element::HEXAHEDRON,
-                            2.0 * Lx, 2.0 * Ly, Lz));
-
-   for (int i = 0; i < mesh->GetNV(); i++)
-   {
-      real_t *v = mesh->GetVertex(i);
-      v[0] -= Lx;
-      v[1] -= Ly;
-      v[2] -= Lz;  // Z ranges [-Lz, 0]
-   }
-
-   const real_t tol = 1e-6 * std::max({Lx, Ly, Lz});
-
-   for (int i = 0; i < mesh->GetNBE(); i++)
-   {
-      Array<int> vertices;
-      mesh->GetBdrElementVertices(i, vertices);
-
-      real_t cx = 0.0, cy = 0.0, cz = 0.0;
-      for (int j = 0; j < vertices.Size(); j++)
-      {
-         const real_t *v = mesh->GetVertex(vertices[j]);
-         cx += v[0]; cy += v[1]; cz += v[2];
-      }
-      cx /= vertices.Size();
-      cy /= vertices.Size();
-      cz /= vertices.Size();
-
-      int attr;
-      if (std::abs(cz) < tol || std::abs(cz + Lz) < tol)
-      {
-         attr = 1;  // Natural (top z=0, bottom z=-Lz)
-      }
-      else
-      {
-         attr = 5;  // Dirichlet (far-field x=±Lx, y=±Ly)
-      }
-
-      mesh->SetBdrAttribute(i, attr);
-   }
-
-   mesh->SetAttributes();
-   return mesh;
-}
+// CreateBP5InlineMesh() moved to config/bp5_mesh_utils.hpp
 
 // ============================================================================
 // Reference data loading and comparison (adapted for 8-column BP5 format)
@@ -194,11 +141,13 @@ bool LoadBP5TimeSeriesFile(const std::string &filename,
 }
 
 /// Linear interpolation of y_ref at x_ref onto x_target grid.
+/// Precondition: x_ref and x_target must be sorted in ascending order.
 std::vector<double> InterpolateOnto(const std::vector<double> &x_ref,
                                      const std::vector<double> &y_ref,
                                      const std::vector<double> &x_target)
 {
-   std::vector<double> y_interp(x_target.size());
+   std::vector<double> y_interp(x_target.size(), 0.0);
+   if (x_ref.empty() || y_ref.empty()) { return y_interp; }
    int n_ref = static_cast<int>(x_ref.size());
    int j = 0;
 
@@ -228,61 +177,299 @@ double RelativeL2Error(const std::vector<double> &sim,
       num += diff * diff;
       den += ref[i] * ref[i];
    }
-   if (den < 1e-30) { return (num < 1e-30) ? 0.0 : 1e30; }
-   return std::sqrt(num / den);
+   double norm_num = std::sqrt(num);
+   double norm_den = std::sqrt(den);
+   if (norm_den < 1e-30) { return (norm_num < 1e-30) ? 0.0 : 1e30; }
+   return norm_num / norm_den;
 }
 
-/// Run comparison for all stations (placeholder — needs reference data).
-bool RunComparison(const std::string &output_dir,
-                   const std::string &output_prefix,
-                   const std::string &ref_dir,
-                   const std::vector<Probe2DInterpolator::Station> &stations,
-                   double t_final_s)
+/// Check if string `s` ends with `suffix`.
+static bool EndsWith(const std::string &s, const std::string &suffix)
+{
+   return s.size() >= suffix.size() &&
+          s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
+/// Auto-detect reference file prefix by scanning ref_dir for *_global.txt
+/// or *_fltst_strk+00dp+00.txt. Returns empty string if no match found.
+/// Deterministic: sorts matches alphabetically, warns on ambiguity.
+std::string DetectRefPrefix(const std::string &ref_dir)
+{
+   const std::string suffixes[] = {
+      "_global.txt",
+      "_fltst_strk+00dp+00.txt"
+   };
+
+   DIR *dir = opendir(ref_dir.c_str());
+   if (!dir) { return ""; }
+
+   // Collect all matching prefixes per suffix
+   for (const auto &suffix : suffixes)
+   {
+      std::vector<std::string> prefixes;
+      rewinddir(dir);
+      struct dirent *entry;
+      while ((entry = readdir(dir)) != nullptr)
+      {
+         std::string fname(entry->d_name);
+         if (EndsWith(fname, suffix))
+         {
+            prefixes.push_back(fname.substr(0, fname.size() - suffix.size()));
+         }
+      }
+      if (!prefixes.empty())
+      {
+         std::sort(prefixes.begin(), prefixes.end());
+         if (prefixes.size() > 1)
+         {
+            std::cout << "WARNING: Multiple prefixes in " << ref_dir
+                      << ", using '" << prefixes[0] << "'\n";
+         }
+         closedir(dir);
+         return prefixes[0];
+      }
+   }
+   closedir(dir);
+   return "";
+}
+
+/// Extract a single field from BP5TimeSeriesData by column index (0-6).
+/// Order: slip_strike, slip_dip, log10_V_strike, log10_V_dip,
+///        tau_strike, tau_dip, log10_state
+static const char *BP5FieldNames[7] = {
+   "slip_strike", "slip_dip", "log10_V_strike", "log10_V_dip",
+   "tau_strike", "tau_dip", "log10_state"
+};
+
+const std::vector<double> &GetBP5Field(const BP5TimeSeriesData &d, int idx)
+{
+   switch (idx)
+   {
+      case 0: return d.slip_strike;
+      case 1: return d.slip_dip;
+      case 2: return d.log10_V_strike;
+      case 3: return d.log10_V_dip;
+      case 4: return d.tau_strike;
+      case 5: return d.tau_dip;
+      case 6: return d.log10_state;
+      default: MFEM_ABORT("Invalid BP5 field index"); return d.slip_strike;
+   }
+}
+
+/// Load BP5 global output file (2 columns: time, log10(Vmax)).
+bool LoadBP5GlobalFile(const std::string &filename,
+                       std::vector<double> &time,
+                       std::vector<double> &log10_vmax,
+                       double t_max = 1e30)
+{
+   std::ifstream file(filename);
+   if (!file.is_open()) { return false; }
+
+   std::string line;
+   while (std::getline(file, line))
+   {
+      if (line.empty() || line[0] == '#') { continue; }
+      std::istringstream iss(line);
+      double t, v;
+      if (!(iss >> t >> v)) { continue; }
+      if (t > t_max) { break; }
+      time.push_back(t);
+      log10_vmax.push_back(v);
+   }
+   return !time.empty();
+}
+
+/// Count seismic events: upward crossings of threshold in log10(Vmax).
+int CountEvents(const std::vector<double> &log10_vmax,
+                double threshold_log10 = -3.0)
+{
+   int count = 0;
+   bool above = false;
+   for (double v : log10_vmax)
+   {
+      if (v > threshold_log10 && !above)
+      {
+         count++;
+         above = true;
+      }
+      else if (v <= threshold_log10)
+      {
+         above = false;
+      }
+   }
+   return count;
+}
+
+/// Run comparison for all stations + global output.
+/// Returns 0 on pass (all errors within tolerance), nonzero on fail.
+/// If regression_tol < 0, comparison is informational only (always returns 0).
+int RunComparison(const std::string &output_dir,
+                  const std::string &output_prefix,
+                  const std::string &ref_dir,
+                  const std::string &ref_prefix,
+                  const std::vector<Probe2DInterpolator::Station> &stations,
+                  double t_final_s,
+                  double regression_tol)
 {
    std::cout << "\n" << std::string(80, '=') << "\n";
-   std::cout << "BP5 Full Simulation Verification: Comparison Summary\n";
-   std::cout << std::string(80, '=') << "\n\n";
+   std::cout << "BP5 Verification: Regression Comparison\n";
+   std::cout << std::string(80, '=') << "\n";
+   if (regression_tol >= 0.0)
+   {
+      std::cout << "  Regression tolerance: " << std::scientific
+                << std::setprecision(2) << regression_tol << "\n";
+   }
+   else
+   {
+      std::cout << "  Mode: informational (no tolerance check)\n";
+   }
+   std::cout << "\n";
 
-   int num_loaded = 0;
+   bool any_fail = false;
+   double max_error = 0.0;
+   std::string worst_station, worst_field;
+   int stations_compared = 0;
+
+   // --- Station comparison (7 SCEC columns) ---
    for (const auto &st : stations)
    {
       std::string sim_file = output_dir + "/" + output_prefix + "_"
                              + st.name + ".txt";
-      BP5TimeSeriesData sim_data;
-      bool loaded = LoadBP5TimeSeriesFile(sim_file, sim_data, t_final_s);
+      std::string ref_file = ref_dir + "/" + ref_prefix + "_"
+                             + st.name + ".txt";
 
-      std::cout << "  Station " << std::setw(24) << st.name << ": ";
-      if (loaded)
+      BP5TimeSeriesData sim_data, ref_data;
+      bool sim_ok = LoadBP5TimeSeriesFile(sim_file, sim_data, t_final_s);
+      bool ref_ok = LoadBP5TimeSeriesFile(ref_file, ref_data, t_final_s);
+
+      if (!sim_ok)
       {
-         std::cout << sim_data.Size() << " data points";
-         num_loaded++;
+         std::cout << "  Station " << std::setw(24) << st.name
+                   << ": sim MISSING\n";
+         if (regression_tol >= 0.0) { any_fail = true; }
+         continue;
+      }
+      if (!ref_ok)
+      {
+         std::cout << "  Station " << std::setw(24) << st.name
+                   << ": ref MISSING (" << ref_file << ")\n";
+         continue;  // Missing ref is not a failure — may be informational
+      }
+
+      stations_compared++;
+      std::cout << "  Station " << std::setw(24) << st.name
+                << " (" << sim_data.Size() << " vs " << ref_data.Size()
+                << " pts):\n";
+
+      for (int f = 0; f < 7; f++)
+      {
+         // Interpolate reference onto simulation time grid
+         const auto &ref_field = GetBP5Field(ref_data, f);
+         auto ref_interp = InterpolateOnto(ref_data.time, ref_field,
+                                           sim_data.time);
+         const auto &sim_field = GetBP5Field(sim_data, f);
+         double err = RelativeL2Error(sim_field, ref_interp);
+
+         bool field_fail = (regression_tol >= 0.0 && err > regression_tol);
+         const char *status = field_fail ? "FAIL" : "ok";
+
+         std::cout << "    " << std::setw(16) << BP5FieldNames[f]
+                   << ": L2_rel = " << std::scientific << std::setprecision(6)
+                   << err << "  [" << status << "]\n";
+
+         if (field_fail) { any_fail = true; }
+         if (err > max_error)
+         {
+            max_error = err;
+            worst_station = st.name;
+            worst_field = BP5FieldNames[f];
+         }
+      }
+   }
+
+   // --- Global output comparison (log10(Vmax)) ---
+   std::string sim_global = output_dir + "/" + output_prefix + "_global.txt";
+   std::string ref_global = ref_dir + "/" + ref_prefix + "_global.txt";
+   std::vector<double> sim_gt, sim_gv, ref_gt, ref_gv;
+   bool sim_g_ok = LoadBP5GlobalFile(sim_global, sim_gt, sim_gv, t_final_s);
+   bool ref_g_ok = LoadBP5GlobalFile(ref_global, ref_gt, ref_gv, t_final_s);
+
+   if (sim_g_ok && ref_g_ok)
+   {
+      auto ref_gv_interp = InterpolateOnto(ref_gt, ref_gv, sim_gt);
+      double err = RelativeL2Error(sim_gv, ref_gv_interp);
+      bool g_fail = (regression_tol >= 0.0 && err > regression_tol);
+      const char *status = g_fail ? "FAIL" : "ok";
+
+      std::cout << "  Global log10(Vmax): L2_rel = " << std::scientific
+                << std::setprecision(6) << err << "  [" << status << "]\n";
+      if (g_fail) { any_fail = true; }
+      if (err > max_error)
+      {
+         max_error = err;
+         worst_station = "global";
+         worst_field = "log10_Vmax";
+      }
+
+      // Event count comparison
+      int sim_events = CountEvents(sim_gv);
+      int ref_events = CountEvents(ref_gv);
+      if (sim_events != ref_events)
+      {
+         std::cout << "  Event count: " << sim_events << " vs "
+                   << ref_events << " [MISMATCH]\n";
+         if (regression_tol >= 0.0) { any_fail = true; }
       }
       else
       {
-         std::cout << "MISSING";
+         std::cout << "  Event count: " << sim_events << " [ok]\n";
       }
-      std::cout << "\n";
    }
-
-   // Check for reference data
-   for (const auto &st : stations)
+   else
    {
-      std::string ref_file = ref_dir + "/bp5-qd-" + st.name + ".txt";
-      BP5TimeSeriesData ref_data;
-      bool ref_loaded = LoadBP5TimeSeriesFile(ref_file, ref_data, t_final_s);
-      if (ref_loaded)
+      if (!sim_g_ok)
       {
-         std::cout << "  Reference data found for " << st.name
-                   << ": " << ref_data.Size() << " points\n";
+         std::cout << "  Global: sim file missing (" << sim_global << ")\n";
+      }
+      if (!ref_g_ok)
+      {
+         std::cout << "  Global: ref file missing (" << ref_global << ")\n";
       }
    }
 
-   std::cout << "\n=== Verification Summary ===\n";
-   std::cout << "  Stations with output: " << num_loaded << " / "
+   // --- Summary ---
+   std::cout << "\n" << std::string(80, '-') << "\n";
+   std::cout << "  Stations compared: " << stations_compared << " / "
              << stations.size() << "\n";
+   std::cout << "  Max relative L2 error: " << std::scientific
+             << std::setprecision(6) << max_error;
+   if (!worst_station.empty())
+   {
+      std::cout << " (" << worst_station << " / " << worst_field << ")";
+   }
+   std::cout << "\n";
+
+   if (regression_tol >= 0.0)
+   {
+      if (stations_compared == 0)
+      {
+         std::cout << "  REGRESSION CHECK: FAIL (no stations compared — "
+                      "check --ref-dir and --ref-prefix)\n";
+         any_fail = true;
+      }
+      else if (any_fail)
+      {
+         std::cout << "  REGRESSION CHECK: FAIL (tolerance "
+                   << regression_tol << " exceeded)\n";
+      }
+      else
+      {
+         std::cout << "  REGRESSION CHECK: PASS\n";
+      }
+   }
    std::cout << std::string(80, '=') << "\n";
 
-   return num_loaded > 0;
+   return any_fail ? 1 : 0;
 }
 
 // ============================================================================
@@ -540,6 +727,8 @@ int main(int argc, char *argv[])
    int face_basis_type = BasisType::GaussLobatto;
    std::string face_basis_str = "GaussLobatto";
    bool verify_parallel = false;  // Run production-mesh verification diagnostics
+   double regression_tolerance = -1.0;  // Negative = no regression check
+   std::string ref_prefix;               // Reference file prefix (auto-detect if empty)
 
    for (int i = 1; i < argc; i++)
    {
@@ -664,6 +853,14 @@ int main(int argc, char *argv[])
       {
          no_psi_clamp = true;
          psi_clamp_explicit = true;
+      }
+      if (arg == "--regression-tolerance" && i + 1 < argc)
+      {
+         regression_tolerance = std::atof(argv[++i]);
+      }
+      if (arg == "--ref-prefix" && i + 1 < argc)
+      {
+         ref_prefix = argv[++i];
       }
       if (arg == "--face-basis-type" && i + 1 < argc)
       {
@@ -860,15 +1057,20 @@ int main(int argc, char *argv[])
    // =========================================================================
    if (comparison_only)
    {
+      int rc = 0;
       if (mpi.IsRoot())
       {
-         RunComparison(output_dir, output_prefix, ref_dir,
-                       stations, t_final);
+         std::string rp = ref_prefix;
+         if (rp.empty()) { rp = DetectRefPrefix(ref_dir); }
+         if (rp.empty()) { rp = output_prefix; }
+         rc = RunComparison(output_dir, output_prefix, ref_dir, rp,
+                            stations, t_final, regression_tolerance);
       }
+      mpi.Bcast(rc);
 #ifdef MFEM_USE_PETSC
       if (petsc_initialized) { MFEMFinalizePetsc(); }
 #endif
-      return 0;
+      return rc;
    }
 
    // =========================================================================
@@ -1963,11 +2165,16 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Post-simulation comparison
    // =========================================================================
+   int regression_rc = 0;
    if (mpi.IsRoot())
    {
-      RunComparison(output_dir, output_prefix, ref_dir,
-                    stations, t_final);
+      std::string rp = ref_prefix;
+      if (rp.empty()) { rp = DetectRefPrefix(ref_dir); }
+      if (rp.empty()) { rp = output_prefix; }
+      regression_rc = RunComparison(output_dir, output_prefix, ref_dir, rp,
+                                    stations, t_final, regression_tolerance);
    }
+   mpi.Bcast(regression_rc);
 
 #ifdef MFEM_USE_PETSC
    if (petsc_initialized)
@@ -1976,5 +2183,5 @@ int main(int argc, char *argv[])
    }
 #endif
 
-   return 0;
+   return regression_rc;
 }

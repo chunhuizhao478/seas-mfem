@@ -99,7 +99,8 @@ FRICTION_HEADERS = friction/friction_law.hpp \
                    friction/dieterich_ruina.hpp \
                    config/bp2_params.hpp \
                    config/bp1_params.hpp \
-                   config/bp5_params.hpp
+                   config/bp5_params.hpp \
+                   config/bp5_mesh_utils.hpp
 
 # Phase 2: Domain operator
 DOMAIN_HEADERS = common/seas_types.hpp \
@@ -263,7 +264,8 @@ MFEM_TESTS = MINIAPPS
         test-bp5-integration \
         test-bp5-output test-bp5-mesh \
         test-diag-vtk test-mesh-regions \
-        test-bp5-smoke
+        test-bp5-smoke \
+        regression-check quick-check
 
 all: $(MINIAPPS)
 
@@ -703,6 +705,39 @@ $(TEST_BP5_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MF
 test-bp5-smoke: seas_test_bp5_parallel_smoke
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_bp5_parallel_smoke
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_bp5_parallel_smoke
+
+# Regression check: compare simulation output against golden reference.
+# Usage: make regression-check SIM_DIR=. SIM_PREFIX=bp5_full REF_DIR=bp5/benchmark_data/golden_serial_1r_50step [TOL=0]
+REG_TOL ?=
+SIM_DIR ?= .
+SIM_PREFIX ?= bp5_full
+REF_DIR ?= bp5/benchmark_data/golden_serial_1r_50step
+regression-check:
+	python3 scripts/regression_check.py \
+		--sim-dir $(SIM_DIR) --sim-prefix $(SIM_PREFIX) \
+		--ref-dir $(REF_DIR) \
+		$(if $(REG_TOL),--tolerance $(REG_TOL),)
+
+# Quick-check: 8-rank/20-step inline-mesh run + regression against golden.
+# Produces output in bp5_quick_check/, then compares against golden_inline_8r_20step/.
+QUICK_CHECK_NP ?= 8
+QUICK_CHECK_STEPS ?= 20
+QUICK_CHECK_DIR ?= bp5_quick_check
+QUICK_CHECK_GOLDEN ?= bp5/benchmark_data/golden_inline_8r_20step
+QUICK_CHECK_TOL ?= 0
+quick-check: seas_bp5_full
+	@if [ ! -d $(QUICK_CHECK_GOLDEN) ]; then \
+		echo "SKIP quick-check: golden dir $(QUICK_CHECK_GOLDEN) not found"; \
+		exit 0; \
+	fi
+	@mkdir -p $(QUICK_CHECK_DIR)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(QUICK_CHECK_NP) ./seas_bp5_full \
+		--inline-mesh --max-steps $(QUICK_CHECK_STEPS) \
+		--output-dir $(QUICK_CHECK_DIR) --output-prefix bp5_quick \
+		--tandem-time-stepping \
+		--regression-tolerance $(QUICK_CHECK_TOL) \
+		--ref-dir $(QUICK_CHECK_GOLDEN)
+	@echo "Quick-check complete. Output in $(QUICK_CHECK_DIR)/"
 
 # Phase 10: BP2 first-cycle verification
 seas_bp2_verify: $(BP2_VERIFY_OBJ)
