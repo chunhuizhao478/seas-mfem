@@ -36,7 +36,7 @@ struct DomainConfig
 {
    int face_basis_type = BasisType::GaussLobatto;
    real_t penalty_factor = 1.0;
-   real_t blr_tol = 1e-10;
+   real_t blr_tol = 1e-12;
    bool check_residual = false;
    bool match_quad_order = false;
 };

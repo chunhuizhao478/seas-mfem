@@ -66,6 +66,7 @@ TEST_FACE_QUADRATURE_SRC = tests/unit/test_face_quadrature.cpp
 TEST_CROSS_VERIFY_SRC = tests/unit/test_cross_verify_tandem.cpp
 # Phase 3: Constitutive model tests
 TEST_LINEAR_ELASTIC_SRC = tests/unit/test_linear_elastic.cpp
+TEST_CONSTITUTIVE_INTEG_SRC = tests/unit/test_constitutive_integrator.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -94,6 +95,7 @@ TEST_MESH_REGIONS_OBJ = $(TEST_MESH_REGIONS_SRC:.cpp=.o)
 TEST_FACE_QUADRATURE_OBJ = $(TEST_FACE_QUADRATURE_SRC:.cpp=.o)
 TEST_CROSS_VERIFY_OBJ = $(TEST_CROSS_VERIFY_SRC:.cpp=.o)
 TEST_LINEAR_ELASTIC_OBJ = $(TEST_LINEAR_ELASTIC_SRC:.cpp=.o)
+TEST_CONSTITUTIVE_INTEG_OBJ = $(TEST_CONSTITUTIVE_INTEG_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -168,7 +170,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_bp5_output seas_test_bp5_mesh \
                seas_test_diag_vtk seas_test_mesh_regions \
                seas_test_face_quadrature \
-               seas_test_linear_elastic
+               seas_test_linear_elastic \
+               seas_test_constitutive_integrator
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -285,7 +288,7 @@ MFEM_TESTS = MINIAPPS
         test-bp5-integration \
         test-bp5-output test-bp5-mesh \
         test-diag-vtk test-mesh-regions \
-        test-bp5-smoke test-linear-elastic \
+        test-bp5-smoke test-linear-elastic test-constitutive-integrator \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -602,6 +605,16 @@ $(TEST_LINEAR_ELASTIC_OBJ): %.o: $(SRC)%.cpp $(CONSTITUTIVE_HEADERS) $(MFEM_LIB_
 
 test-linear-elastic: seas_test_linear_elastic
 	./seas_test_linear_elastic
+
+seas_test_constitutive_integrator: $(TEST_CONSTITUTIVE_INTEG_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CONSTITUTIVE_INTEG_OBJ) $(MFEM_LIBS)
+
+$(TEST_CONSTITUTIVE_INTEG_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-constitutive-integrator: seas_test_constitutive_integrator
+	./seas_test_constitutive_integrator
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)

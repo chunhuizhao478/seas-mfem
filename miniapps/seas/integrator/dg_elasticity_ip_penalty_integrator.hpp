@@ -233,8 +233,8 @@ public:
    }
 
 private:
-   Coefficient *lambda_ptr_;
-   Coefficient *mu_ptr_;
+   Coefficient *lambda_ptr_ = nullptr;
+   Coefficient *mu_ptr_ = nullptr;
    int dim_;
    real_t penalty_factor_;
 };
