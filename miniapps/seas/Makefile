@@ -159,13 +159,18 @@ SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
 TEST_MPI_CONTEXT_SRC = tests/parallel/test_mpi_context.cpp
 TEST_PARALLEL_UTILS_SRC = tests/parallel/test_parallel_utils.cpp
+TEST_FAULT_SCATTER_SRC = tests/parallel/test_fault_scatter.cpp
 TEST_MPI_CONTEXT_OBJ = $(TEST_MPI_CONTEXT_SRC:.cpp=.o)
 TEST_PARALLEL_UTILS_OBJ = $(TEST_PARALLEL_UTILS_SRC:.cpp=.o)
+TEST_FAULT_SCATTER_OBJ = $(TEST_FAULT_SCATTER_SRC:.cpp=.o)
 
 # Phase 6: Parallel headers
 PARALLEL_HEADERS = common/mpi_context.hpp \
                    common/parallel_utils.hpp \
-                   common/seas_types.hpp
+                   common/seas_types.hpp \
+                   common/fault_scatter.hpp \
+                   common/mpi_check.hpp \
+                   common/mpi_tags.hpp
 
 # Phase 7: Parallel domain test sources
 TEST_PARALLEL_DOMAIN_SRC = tests/parallel/test_parallel_domain.cpp
@@ -225,6 +230,7 @@ BP5_FULL_SRC = tests/verification/bp5_verification_full.cpp
 BP5_FULL_OBJ = $(BP5_FULL_SRC:.cpp=.o)
 
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
+               seas_test_fault_scatter \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
                seas_test_parallel_fault \
                seas_test_serial_parallel_consistency \
@@ -253,7 +259,7 @@ MFEM_TESTS = MINIAPPS
         test-friction test-state-evolution test-antiplane \
         test-fault-operator test-quasi-dynamic test-bp2-short \
         test-io test-bp2-serial-smoke test-checkpoint \
-        test-mpi-context test-parallel-utils test-parallel \
+        test-mpi-context test-parallel-utils test-fault-scatter test-parallel \
         test-parallel-domain test-mms-parallel test-parallel-fault \
         test-serial-parallel test-bp2-parallel test-scaling \
         test-bp2-verify test-psi-state test-br2-consistency \
@@ -585,6 +591,17 @@ $(TEST_MPI_CONTEXT_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $
 $(TEST_PARALLEL_UTILS_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_test_fault_scatter: $(TEST_FAULT_SCATTER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SCATTER_OBJ) $(MFEM_LIBS)
+
+$(TEST_FAULT_SCATTER_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-fault-scatter: seas_test_fault_scatter
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_fault_scatter
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_scatter
 
 test-mpi-context: seas_test_mpi_context
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mpi_context

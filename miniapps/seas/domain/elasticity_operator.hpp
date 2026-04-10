@@ -16,6 +16,7 @@
 #include "domain_operator.hpp"
 #include "antiplane_operator.hpp"  // For DGMethod enum
 #include "../common/seas_types.hpp"
+#include "../common/fault_scatter.hpp"
 #include "../fault/fault_basis.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
@@ -1709,13 +1710,7 @@ private:
       int face_idx = -1;
    };
 
-   struct SharedFaultCommBlock
-   {
-      int neighbor_rank = -1;
-      std::vector<int> send_owned_faces;
-      std::vector<int> recv_local_faces;
-   };
-
+   // SharedFaultCommBlock defined in common/fault_scatter.hpp
    std::vector<SharedFaultCommBlock> shared_fault_comm_blocks_;
 
    /// Per-face canonical DOF permutation (Tandem sorted-simplex convention).
@@ -5088,61 +5083,17 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
 #ifdef MFEM_USE_MPI
       if (shared_fault_comm_blocks_.empty()) { return; }
 
+      // Use FaultScatter to handle all point-to-point communication.
+      FaultScatter scatter(shared_fault_comm_blocks_, mesh_.GetComm());
+      scatter.BeginScatter(owned_data, comps_per_dof, nbf_per_face_);
+      scatter.WaitScatter();
+
+      // Unpack received data with canonical→local DOF permutation.
       const int block_size = comps_per_dof * nbf_per_face_;
-      std::vector<Vector> send_buffers(shared_fault_comm_blocks_.size());
-      std::vector<Vector> recv_buffers(shared_fault_comm_blocks_.size());
-      std::vector<MPI_Request> requests;
-      requests.reserve(2 * shared_fault_comm_blocks_.size());
-
-      for (int bi = 0; bi < static_cast<int>(shared_fault_comm_blocks_.size()); bi++)
+      for (int bi = 0; bi < scatter.NumBlocks(); bi++)
       {
-         const auto &block = shared_fault_comm_blocks_[bi];
-
-         if (!block.recv_local_faces.empty())
-         {
-            recv_buffers[bi].SetSize(block_size * block.recv_local_faces.size());
-            MPI_Request req;
-            MPI_Irecv(recv_buffers[bi].GetData(), recv_buffers[bi].Size(),
-                      MPI_DOUBLE, block.neighbor_rank, 27183,
-                      mesh_.GetComm(), &req);
-            requests.push_back(req);
-         }
-
-         if (!block.send_owned_faces.empty())
-         {
-            send_buffers[bi].SetSize(block_size * block.send_owned_faces.size());
-            for (int j = 0; j < static_cast<int>(block.send_owned_faces.size()); j++)
-            {
-               const int owned_face = block.send_owned_faces[j];
-               for (int kk = 0; kk < nbf_per_face_; kk++)
-               {
-                  const int owned_dof = owned_face * nbf_per_face_ + kk;
-                  for (int c = 0; c < comps_per_dof; c++)
-                  {
-                     send_buffers[bi](j * block_size + kk * comps_per_dof + c) =
-                        owned_data(comps_per_dof * owned_dof + c);
-                  }
-               }
-            }
-
-            MPI_Request req;
-            MPI_Isend(send_buffers[bi].GetData(), send_buffers[bi].Size(),
-                      MPI_DOUBLE, block.neighbor_rank, 27183,
-                      mesh_.GetComm(), &req);
-            requests.push_back(req);
-         }
-      }
-
-      if (!requests.empty())
-      {
-         MPI_Waitall(static_cast<int>(requests.size()), requests.data(),
-                     MPI_STATUSES_IGNORE);
-      }
-
-      for (int bi = 0; bi < static_cast<int>(shared_fault_comm_blocks_.size()); bi++)
-      {
-         const auto &block = shared_fault_comm_blocks_[bi];
-         const Vector &recv = recv_buffers[bi];
+         const auto &block = scatter.GetBlock(bi);
+         const Vector &recv = scatter.GetRecvBuffer(bi);
          if (recv.Size() == 0) { continue; }
 
          for (int j = 0; j < static_cast<int>(block.recv_local_faces.size()); j++)
