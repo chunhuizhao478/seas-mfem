@@ -109,6 +109,11 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/antiplane_operator.hpp \
                  domain/antiplane_bdrload_operator.hpp \
                  domain/elasticity_operator.hpp \
+                 domain/elasticity_operator_verify.inl \
+                 domain/elasticity_operator_debug.inl \
+                 domain/elasticity_operator_setup.inl \
+                 domain/elasticity_operator_assembly.inl \
+                 domain/elasticity_operator_traction.inl \
                  domain/seas_boundary_tags.hpp \
                  domain/bp2_mesh.hpp \
                  integrator/dg_br2_integrator.hpp \
