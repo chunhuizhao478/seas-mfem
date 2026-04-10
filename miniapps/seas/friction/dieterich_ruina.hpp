@@ -424,10 +424,33 @@ public:
          return V_try;
       }
 
+      // Primary bracket failed — log inputs for VW-core DOFs
+      real_t psi_over_a_dbg = psi / a;
+      if (psi_over_a_dbg > 100.0 && a < 0.01)
+      {
+         std::cerr << std::scientific << std::setprecision(15)
+            << "[FRIC-FALLBACK] Primary failed, trying fallback: r="
+            << dbg_rank << " d=" << dbg_dof
+            << " x=" << dbg_x << " z=" << dbg_z
+            << " tau=" << tau << " psi=" << psi << " psi/a=" << psi_over_a_dbg
+            << " a=" << a << " sigma_n=" << sigma_n << " eta=" << eta
+            << " Flo=" << Flo << " Fhi=" << Fhi
+            << " Va=" << Va << " Vb=" << Vb
+            << " Va_min=" << Va_min << std::endl;
+      }
+
       // Fallback bracket (Tandem: lines 121-129)
       if (try_bracket(Va_min, Vb, V_try))
       {
          if (iterations) { *iterations = 0; }
+         // Log successful fallback for VW-core DOFs
+         if (psi_over_a_dbg > 100.0 && a < 0.01)
+         {
+            std::cerr << std::scientific << std::setprecision(15)
+               << "[FRIC-FALLBACK] Fallback SUCCEEDED: V=" << V_try
+               << " log10(V)=" << (V_try > 0 ? std::log10(V_try) : -999.0)
+               << std::endl;
+         }
          return V_try;
       }
 
