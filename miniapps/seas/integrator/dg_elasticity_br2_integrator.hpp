@@ -13,7 +13,10 @@
 #define MFEM_SEAS_DG_ELASTICITY_BR2_INTEGRATOR_HPP
 
 #include "mfem.hpp"
+#include "../constitutive/constitutive_model.hpp"
+#include "../constitutive/linear_elastic.hpp"
 #include <vector>
+#include <memory>
 
 namespace mfem
 {
@@ -44,20 +47,32 @@ namespace seas
 class DGElasticityBR2Integrator : public BilinearFormIntegrator
 {
 public:
-   /// @brief Construct BR2 interior face integrator for elasticity
-   ///
-   /// @param lambda First Lame parameter coefficient
-   /// @param mu Shear modulus coefficient
-   /// @param epsilon SIPG sign (-1 for symmetric)
-   /// @param elem_mass_inv Precomputed scalar element mass matrix inverses
-   /// @param dim Spatial dimension (3 for 3D elasticity)
+   /// @brief Construct from Coefficient references (legacy path).
    DGElasticityBR2Integrator(Coefficient &lambda, Coefficient &mu,
                               real_t epsilon,
                               const std::vector<DenseMatrix> &elem_mass_inv,
                               int dim = 3)
-      : lambda_(lambda), mu_(mu), epsilon_(epsilon),
+      : lambda_ptr_(&lambda), mu_ptr_(&mu), epsilon_(epsilon),
         elem_mass_inv_(elem_mass_inv), dim_(dim)
    {}
+
+   /// @brief Construct from ConstitutiveModel (Phase 3+ path).
+   ///
+   /// Extracts lambda/mu from the model for coefficient evaluation.
+   /// The model must outlive this integrator.
+   DGElasticityBR2Integrator(const ConstitutiveModel &model,
+                              real_t epsilon,
+                              const std::vector<DenseMatrix> &elem_mass_inv,
+                              int dim = 3)
+      : epsilon_(epsilon), elem_mass_inv_(elem_mass_inv), dim_(dim)
+   {
+      const auto *le = dynamic_cast<const LinearElastic *>(&model);
+      MFEM_VERIFY(le, "BR2 integrator currently requires LinearElastic model");
+      owned_lambda_ = std::make_unique<ConstantCoefficient>(le->GetLambda());
+      owned_mu_ = std::make_unique<ConstantCoefficient>(le->GetMu());
+      lambda_ptr_ = owned_lambda_.get();
+      mu_ptr_ = owned_mu_.get();
+   }
 
    void AssembleFaceMatrix(const FiniteElement &el1,
                            const FiniteElement &el2,
@@ -65,7 +80,9 @@ public:
                            DenseMatrix &elmat) override;
 
 protected:
-   Coefficient &lambda_, &mu_;
+   Coefficient *lambda_ptr_ = nullptr;
+   Coefficient *mu_ptr_ = nullptr;
+   std::unique_ptr<ConstantCoefficient> owned_lambda_, owned_mu_;
    real_t epsilon_;
    const std::vector<DenseMatrix> &elem_mass_inv_;
    int dim_;
@@ -97,6 +114,13 @@ public:
                                       const std::vector<DenseMatrix> &elem_mass_inv,
                                       int dim = 3)
       : DGElasticityBR2Integrator(lambda, mu, epsilon, elem_mass_inv, dim)
+   {}
+
+   DGElasticityBR2BoundaryIntegrator(const ConstitutiveModel &model,
+                                      real_t epsilon,
+                                      const std::vector<DenseMatrix> &elem_mass_inv,
+                                      int dim = 3)
+      : DGElasticityBR2Integrator(model, epsilon, elem_mass_inv, dim)
    {}
 
    void AssembleFaceMatrix(const FiniteElement &el1,
@@ -194,8 +218,8 @@ inline void DGElasticityBR2Integrator::AssembleFaceMatrix(
       w_all[q] = ip.weight;
 
       // Material coefficients
-      lam_all[q] = lambda_.Eval(*Trans.Face, ip);
-      mu_all[q] = mu_.Eval(*Trans.Face, ip);
+      lam_all[q] = lambda_ptr_->Eval(*Trans.Face, ip);
+      mu_all[q] = mu_ptr_->Eval(*Trans.Face, ip);
 
       // 1/detJ for each element
       invdetJ1_all[q] = 1.0 / Trans.Elem1->Weight();
@@ -697,8 +721,8 @@ inline void DGElasticityBR2BoundaryIntegrator::AssembleFaceMatrix(
       CalcOrtho(Trans.Jacobian(), nor_q);
 
       w_all[q] = ip.weight;
-      lam_all[q] = lambda_.Eval(*Trans.Face, ip);
-      mu_all[q] = mu_.Eval(*Trans.Face, ip);
+      lam_all[q] = lambda_ptr_->Eval(*Trans.Face, ip);
+      mu_all[q] = mu_ptr_->Eval(*Trans.Face, ip);
       invdetJ_all[q] = 1.0 / Trans.Elem1->Weight();
    }
 

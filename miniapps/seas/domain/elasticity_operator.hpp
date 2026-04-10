@@ -17,6 +17,10 @@
 #include "antiplane_operator.hpp"  // For DGMethod enum
 #include "../common/seas_types.hpp"
 #include "../common/fault_scatter.hpp"
+#include "../constitutive/constitutive_model.hpp"
+#include "../constitutive/linear_elastic.hpp"
+#include "boundary_config.hpp"
+#include "domain_config.hpp"
 #include "../fault/fault_basis.hpp"
 #include "../integrator/dg_elasticity_br2_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
@@ -93,18 +97,46 @@ public:
    using BilinFormType = typename Base::BilinFormType;
    using LinFormType = typename Base::LinFormType;
 
-   /// @brief Construct the 3D DG elasticity operator
+   /// @brief Construct with explicit ConstitutiveModel (Phase 3+ path).
    ///
-   /// @param mesh The 3D mesh (hex or tet)
-   /// @param order Polynomial order for DG
-   /// @param lambda First Lame parameter [Pa]
-   /// @param mu Shear modulus [Pa]
-   /// @param Vp Plate rate [m/s]
-   /// @param Wf Fault depth [m] (rate-state zone)
-   /// @param lf Fault length [m] (along-strike extent)
-   /// @param method DG method (BR2 default, IP alternative)
-   /// @param solver_type Linear solver: CG_AMG, MUMPS, or GMRES_BlockILU
-   /// @param bc_mode Boundary condition mode (FarField default)
+   /// The model must outlive this operator (non-owning reference stored as pointer).
+   /// Use DomainConfig to set discretization/solver parameters.
+   ElasticityDomainOperator(MeshType &mesh, int order,
+                             const ConstitutiveModel &model,
+                             real_t Vp, real_t Wf, real_t lf,
+                             DGMethod method = DGMethod::BR2,
+                             SolverType solver_type = SolverType::MUMPS_BLR,
+                             BCMode bc_mode = BCMode::FarField,
+                             const DomainConfig &config = {})
+      : mesh_(mesh), order_(order),
+        model_(&model),
+        Vp_(Vp), Wf_(Wf), lf_(lf),
+        method_(method), solver_type_(solver_type),
+        bc_mode_(bc_mode),
+        check_residual_(config.check_residual),
+        mass_inv_computed_(false),
+        fault_depths_computed_(false),
+        fault_coords_computed_(false),
+        face_basis_type_(config.face_basis_type),
+        penalty_factor_(config.penalty_factor),
+        blr_tol_(config.blr_tol),
+        match_quad_order_(config.match_quad_order)
+   {
+      // Extract lambda/mu for legacy code paths that need scalar values
+      const auto *le = dynamic_cast<const LinearElastic *>(model_);
+      MFEM_VERIFY(le, "ElasticityDomainOperator currently requires LinearElastic");
+      lambda_val_ = le->GetLambda();
+      mu_val_ = le->GetMu();
+      lambda_coeff_.constant = lambda_val_;
+      mu_coeff_.constant = mu_val_;
+
+      InitOperator();
+   }
+
+   /// @brief Legacy constructor: scalar lambda/mu (deprecated, delegates).
+   ///
+   /// Creates an internal LinearElastic model and delegates to the new path.
+   /// Existing tests and drivers continue to work unchanged.
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
                              real_t Vp, real_t Wf, real_t lf,
@@ -124,26 +156,10 @@ public:
         fault_coords_computed_(false),
         face_basis_type_(face_basis_type)
    {
-      MFEM_VERIFY(mesh_.Dimension() == 3, "ElasticityDomainOperator requires 3D mesh");
+      owned_model_ = std::make_unique<LinearElastic>(lambda, mu);
+      model_ = owned_model_.get();
 
-      epsilon_ = -1.0;  // SIPG
-
-      SetupFESpace();
-      SetupBoundaryMarkers();
-      SetupFaultInfo();
-      RunStartupFaceAudit();
-      SetupSolver();
-
-      // Precompute fault depths/coordinates eagerly
-      {
-         Vector tmp;
-         GetFaultDepths(tmp);
-      }
-
-      if (method_ == DGMethod::BR2)
-      {
-         PrecomputeMassInverse();
-      }
+      InitOperator();
    }
 
    ~ElasticityDomainOperator() override = default;
@@ -237,24 +253,15 @@ public:
    int GetNbfPerFace() const override { return nbf_per_face_; }
    const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
 
-   /// Enable/disable post-solve residual check (||K*x - b|| / ||b||)
+   /// Access the constitutive model.
+   const ConstitutiveModel &GetModel() const { return *model_; }
+
+   // Legacy setters (deprecated — use DomainConfig in the new constructor).
+   // Kept for backward compatibility with existing drivers/tests.
    void SetCheckResidual(bool check) { check_residual_ = check; }
-
-   /// Set MUMPS-BLR tolerance (default 1e-10). Lower = more accurate, more memory.
-   /// Only affects MUMPS_BLR solver type. Must be called BEFORE first Solve().
    void SetBLRTol(real_t tol) { blr_tol_ = tol; }
-
-   /// v49: Use 2p quadrature instead of 2p+1 for fault face integration.
-   /// Tests whether the extra quad point causes instability at p>=2.
    void SetMatchQuadOrder(bool v) { match_quad_order_ = v; }
-
-   /// v50a: Scale IP penalty by this factor (1.0 = default, <1.0 = reduced).
-   /// Used to diagnose whether over-stiff penalty causes nucleation failure at high p.
    void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
-
-   /// v50g: Set face DOF node type for FaceQuadrature.
-   /// Must be called BEFORE Init() (which creates FaceQuadrature).
-   /// BasisType::GaussLobatto (default), BasisType::ClosedUniform, etc.
    void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
 
    struct FirstStepDebugConfig
@@ -278,9 +285,42 @@ public:
 
 
 private:
+   /// Common initialization shared by both constructors.
+   void InitOperator()
+   {
+      MFEM_VERIFY(mesh_.Dimension() == 3, "ElasticityDomainOperator requires 3D mesh");
+
+      epsilon_ = -1.0;  // SIPG
+
+      SetupFESpace();
+      SetupBoundaryMarkers();
+      SetupFaultInfo();
+      RunStartupFaceAudit();
+      SetupSolver();
+
+      // Precompute fault depths/coordinates eagerly
+      {
+         Vector tmp;
+         GetFaultDepths(tmp);
+      }
+
+      if (method_ == DGMethod::BR2)
+      {
+         PrecomputeMassInverse();
+      }
+   }
+
    MeshType &mesh_;
    int order_;
-   real_t lambda_val_, mu_val_;
+
+   // Constitutive model: model_ is always valid (non-owning pointer).
+   // owned_model_ is set only when the legacy constructor creates it.
+   const ConstitutiveModel *model_ = nullptr;
+   std::unique_ptr<LinearElastic> owned_model_;
+
+   // Cached scalar values from the model (for legacy code paths)
+   real_t lambda_val_ = 0.0, mu_val_ = 0.0;
+
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
    SolverType solver_type_;

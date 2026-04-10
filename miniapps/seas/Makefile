@@ -64,6 +64,8 @@ TEST_MESH_REGIONS_SRC = tests/unit/test_bp5_mesh_regions.cpp
 TEST_FACE_QUADRATURE_SRC = tests/unit/test_face_quadrature.cpp
 # v54: Cross-verification against Tandem
 TEST_CROSS_VERIFY_SRC = tests/unit/test_cross_verify_tandem.cpp
+# Phase 3: Constitutive model tests
+TEST_LINEAR_ELASTIC_SRC = tests/unit/test_linear_elastic.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -91,6 +93,11 @@ TEST_DIAG_VTK_OBJ = $(TEST_DIAG_VTK_SRC:.cpp=.o)
 TEST_MESH_REGIONS_OBJ = $(TEST_MESH_REGIONS_SRC:.cpp=.o)
 TEST_FACE_QUADRATURE_OBJ = $(TEST_FACE_QUADRATURE_SRC:.cpp=.o)
 TEST_CROSS_VERIFY_OBJ = $(TEST_CROSS_VERIFY_SRC:.cpp=.o)
+TEST_LINEAR_ELASTIC_OBJ = $(TEST_LINEAR_ELASTIC_SRC:.cpp=.o)
+
+# Constitutive model headers
+CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
+                       constitutive/linear_elastic.hpp
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -114,6 +121,8 @@ DOMAIN_HEADERS = common/seas_types.hpp \
                  domain/elasticity_operator_setup.inl \
                  domain/elasticity_operator_assembly.inl \
                  domain/elasticity_operator_traction.inl \
+                 domain/boundary_config.hpp \
+                 domain/domain_config.hpp \
                  domain/seas_boundary_tags.hpp \
                  domain/bp2_mesh.hpp \
                  integrator/dg_br2_integrator.hpp \
@@ -139,7 +148,7 @@ IO_HEADERS = io/probe_output.hpp \
 CHECKPOINT_HEADERS = io/checkpoint.hpp
 
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -158,7 +167,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_bp5_integration \
                seas_test_bp5_output seas_test_bp5_mesh \
                seas_test_diag_vtk seas_test_mesh_regions \
-               seas_test_face_quadrature
+               seas_test_face_quadrature \
+               seas_test_linear_elastic
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -275,7 +285,7 @@ MFEM_TESTS = MINIAPPS
         test-bp5-integration \
         test-bp5-output test-bp5-mesh \
         test-diag-vtk test-mesh-regions \
-        test-bp5-smoke \
+        test-bp5-smoke test-linear-elastic \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -581,6 +591,17 @@ test-face-quadrature: seas_test_face_quadrature
 
 test-cross-verify: seas_test_cross_verify
 	./seas_test_cross_verify
+
+# Phase 3: Constitutive model tests
+seas_test_linear_elastic: $(TEST_LINEAR_ELASTIC_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LINEAR_ELASTIC_OBJ) $(MFEM_LIBS)
+
+$(TEST_LINEAR_ELASTIC_OBJ): %.o: $(SRC)%.cpp $(CONSTITUTIVE_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-linear-elastic: seas_test_linear_elastic
+	./seas_test_linear_elastic
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)
