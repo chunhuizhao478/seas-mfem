@@ -12,16 +12,16 @@
 # Runs on refactor/phase3-constitutive branch.
 # Compares against Phase 0 full production golden (golden_tandem_p1_1000m).
 #
+# Before submitting, on the login node:
+#   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+#   git fetch origin && git checkout refactor/phase3-constitutive && git pull
+#   cd miniapps/seas && sbatch jobs/bp5/bp5_phase3_full_production.sbatch
+#
 # What to check:
 #   1. Recurrence interval ~240 yr (same as v62/Phase 0 golden)
 #   2. Coseismic slip ~3-5 m per event
 #   3. Station time series match golden within recompilation noise
 #   4. No blowup, no dt→0, no bracket failures
-#
-# IMPORTANT: Pull the branch on the LOGIN NODE before submitting:
-#   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
-#   git fetch origin && git checkout refactor/phase3-constitutive && git pull
-#   cd miniapps/seas && sbatch jobs/bp5/bp5_phase3_full_production.sbatch
 #
 # Post-run comparison:
 #   python3 scripts/regression_check.py \
@@ -32,7 +32,6 @@
 export LC_ALL=C
 export LANG=C
 
-module purge
 module load intel/19.1.1
 module load impi/19.0.9
 module load hypre/2.31.0
@@ -46,9 +45,6 @@ cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 
 JOBS=8
 
-echo "Git commit: $(git rev-parse HEAD)"
-echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
-
 grep -q '^MFEM_USE_PETSC *= YES' config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
 grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
 
@@ -61,6 +57,8 @@ OUTPUT_PREFIX="bp5_phase3_full_production_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR}"
 
+echo "Git commit: $(git rev-parse HEAD)"
+echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
 echo "Phase 3 full production: 400 ranks, 48hr, ~1800 yr earthquake cycles"
 
