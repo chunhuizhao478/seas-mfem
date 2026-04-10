@@ -18,6 +18,11 @@
 #   3. Station time series match golden within recompilation noise
 #   4. No blowup, no dt→0, no bracket failures
 #
+# IMPORTANT: Pull the branch on the LOGIN NODE before submitting:
+#   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+#   git fetch origin && git checkout refactor/phase3-constitutive && git pull
+#   cd miniapps/seas && sbatch jobs/bp5/bp5_phase3_full_production.sbatch
+#
 # Post-run comparison:
 #   python3 scripts/regression_check.py \
 #       --sim-dir RESULT_DIR --sim-prefix OUTPUT_PREFIX \
@@ -27,6 +32,7 @@
 export LC_ALL=C
 export LANG=C
 
+module purge
 module load intel/19.1.1
 module load impi/19.0.9
 module load hypre/2.31.0
@@ -39,10 +45,6 @@ export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 
 JOBS=8
-
-git fetch origin
-git checkout refactor/phase3-constitutive
-git pull origin refactor/phase3-constitutive
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
