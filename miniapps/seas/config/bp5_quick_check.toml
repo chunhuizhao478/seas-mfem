@@ -1,0 +1,25 @@
+# Quick-check: inline mesh, 20 steps, local verification
+benchmark = "bp5"
+
+[mesh]
+file = "__inline__"     # Sentinel: driver uses CreateBP5InlineMesh()
+scale = 1.0             # Inline mesh is already in meters
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "mumps"
+blr_tol = 1e-12
+
+[time]
+max_steps = 20
+tandem_time_stepping = true
+
+[output]
+output_dir = "bp5_driver_quick_check"
+output_prefix = "bp5_driver_quick"

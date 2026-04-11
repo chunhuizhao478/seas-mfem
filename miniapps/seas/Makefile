@@ -78,6 +78,7 @@ TEST_CONSTITUTIVE_INTEG_SRC = tests/unit/test_constitutive_integrator.cpp
 TEST_BOUNDARY_CONFIG_SRC = tests/unit/test_boundary_config.cpp
 TEST_BOUNDARY_CONFIG_OP_SRC = tests/unit/test_boundary_config_operator.cpp
 TEST_LOGGING_SRC = tests/unit/test_logging.cpp
+TEST_CONFIG_BRIDGE_SRC = tests/unit/test_seas_config_bridge.cpp
 # Phase 5: TOML config
 TEST_CONFIG_PARSER_SRC = tests/unit/test_seas_config_parser.cpp
 SEAS_DRIVER_SRC = drivers/seas_driver.cpp
@@ -113,6 +114,7 @@ TEST_CONSTITUTIVE_INTEG_OBJ = $(TEST_CONSTITUTIVE_INTEG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OBJ = $(TEST_BOUNDARY_CONFIG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OP_OBJ = $(TEST_BOUNDARY_CONFIG_OP_SRC:.cpp=.o)
 TEST_LOGGING_OBJ = $(TEST_LOGGING_SRC:.cpp=.o)
+TEST_CONFIG_BRIDGE_OBJ = $(TEST_CONFIG_BRIDGE_SRC:.cpp=.o)
 TEST_CONFIG_PARSER_OBJ = $(TEST_CONFIG_PARSER_SRC:.cpp=.o)
 SEAS_DRIVER_OBJ = $(SEAS_DRIVER_SRC:.cpp=.o)
 
@@ -122,7 +124,8 @@ CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
 
 # Phase 5: Config headers
 CONFIG_HEADERS = config/seas_config.hpp \
-                 config/seas_config_parser.hpp
+                 config/seas_config_parser.hpp \
+                 config/seas_config_bridge.hpp
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -197,7 +200,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_constitutive_integrator \
                seas_test_boundary_config \
                seas_test_boundary_config_operator \
-               seas_test_logging
+               seas_test_logging \
+               seas_test_config_bridge
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -318,6 +322,7 @@ MFEM_TESTS = MINIAPPS
         test-diag-vtk test-mesh-regions \
         test-bp5-smoke test-linear-elastic test-constitutive-integrator \
         test-boundary-config test-boundary-config-operator test-logging \
+        test-config-bridge \
         test-config-parser \
         regression-check quick-check
 
@@ -551,7 +556,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-face-quadrature \
       test-linear-elastic test-constitutive-integrator \
       test-boundary-config test-boundary-config-operator \
-      test-logging
+      test-logging test-config-bridge
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -680,6 +685,17 @@ $(TEST_LOGGING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_
 
 test-logging: seas_test_logging
 	./seas_test_logging
+
+# Phase 7a: Config bridge tests
+seas_test_config_bridge: $(TEST_CONFIG_BRIDGE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CONFIG_BRIDGE_OBJ) $(MFEM_LIBS)
+
+$(TEST_CONFIG_BRIDGE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-config-bridge: seas_test_config_bridge
+	./seas_test_config_bridge
 
 # Phase 5: TOML config tests and driver
 seas_test_config_parser: $(TEST_CONFIG_PARSER_OBJ)
