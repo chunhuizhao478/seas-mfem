@@ -22,6 +22,14 @@ CONFIG_MK = $(or $(wildcard $(MFEM_BUILD_DIR)/config/config.mk),\
 MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
 
+# Optional TOML support (requires extern/toml11)
+SEAS_USE_TOML ?= $(if $(wildcard extern/toml11/include/toml.hpp),YES,)
+ifeq ($(SEAS_USE_TOML),YES)
+   TOML_FLAGS = -DSEAS_USE_TOML -Iextern/toml11/include
+else
+   TOML_FLAGS =
+endif
+
 # Source files
 # Phase 1
 TEST_FRICTION_SRC = tests/unit/test_friction_law.cpp
@@ -69,6 +77,9 @@ TEST_LINEAR_ELASTIC_SRC = tests/unit/test_linear_elastic.cpp
 TEST_CONSTITUTIVE_INTEG_SRC = tests/unit/test_constitutive_integrator.cpp
 TEST_BOUNDARY_CONFIG_SRC = tests/unit/test_boundary_config.cpp
 TEST_BOUNDARY_CONFIG_OP_SRC = tests/unit/test_boundary_config_operator.cpp
+# Phase 5: TOML config
+TEST_CONFIG_PARSER_SRC = tests/unit/test_seas_config_parser.cpp
+SEAS_DRIVER_SRC = drivers/seas_driver.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -100,10 +111,16 @@ TEST_LINEAR_ELASTIC_OBJ = $(TEST_LINEAR_ELASTIC_SRC:.cpp=.o)
 TEST_CONSTITUTIVE_INTEG_OBJ = $(TEST_CONSTITUTIVE_INTEG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OBJ = $(TEST_BOUNDARY_CONFIG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OP_OBJ = $(TEST_BOUNDARY_CONFIG_OP_SRC:.cpp=.o)
+TEST_CONFIG_PARSER_OBJ = $(TEST_CONFIG_PARSER_SRC:.cpp=.o)
+SEAS_DRIVER_OBJ = $(SEAS_DRIVER_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
                        constitutive/linear_elastic.hpp
+
+# Phase 5: Config headers
+CONFIG_HEADERS = config/seas_config.hpp \
+                 config/seas_config_parser.hpp
 
 # Header dependencies
 # Phase 1: Friction and state evolution
@@ -154,7 +171,7 @@ IO_HEADERS = io/probe_output.hpp \
 CHECKPOINT_HEADERS = io/checkpoint.hpp
 
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -255,6 +272,7 @@ BP5_FULL_OBJ = $(BP5_FULL_SRC:.cpp=.o)
 
 PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_fault_scatter \
+               seas_test_config_parser \
                seas_test_parallel_domain seas_mms_antiplane_parallel \
                seas_test_parallel_fault \
                seas_test_serial_parallel_consistency \
@@ -296,6 +314,7 @@ MFEM_TESTS = MINIAPPS
         test-diag-vtk test-mesh-regions \
         test-bp5-smoke test-linear-elastic test-constitutive-integrator \
         test-boundary-config test-boundary-config-operator \
+        test-config-parser \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -643,6 +662,24 @@ $(TEST_BOUNDARY_CONFIG_OP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE
 
 test-boundary-config-operator: seas_test_boundary_config_operator
 	./seas_test_boundary_config_operator
+
+# Phase 5: TOML config tests and driver
+seas_test_config_parser: $(TEST_CONFIG_PARSER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CONFIG_PARSER_OBJ) $(MFEM_LIBS)
+
+$(TEST_CONFIG_PARSER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-config-parser: seas_test_config_parser
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_config_parser
+
+seas_driver: $(SEAS_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(SEAS_DRIVER_OBJ) $(MFEM_LIBS)
+
+$(SEAS_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
 
 # Phase 6: Parallel test targets
 seas_test_mpi_context: $(TEST_MPI_CONTEXT_OBJ)

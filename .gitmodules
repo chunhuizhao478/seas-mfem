@@ -1,0 +1,3 @@
+[submodule "miniapps/seas/extern/toml11"]
+	path = miniapps/seas/extern/toml11
+	url = https://github.com/ToruNiina/toml11.git
