@@ -23,8 +23,13 @@ namespace seas
 {
 
 /// Dirichlet boundary function: (x, time) → displacement vector.
+///
+/// DirichletFunc captures parameters BY VALUE at construction.
+/// Changing Vp later requires creating a new lambda.
+///
 /// The function receives the spatial coordinate and current time,
 /// and writes the prescribed displacement into the output vector.
+/// The output vector is pre-sized to dim (3 for 3D).
 using DirichletFunc = std::function<void(const Vector &x, real_t t, Vector &u)>;
 
 /// @brief Boundary configuration for the elasticity domain operator.
@@ -48,6 +53,28 @@ struct BoundaryConfig
    /// not listed in dirichlet_funcs.
    DirichletFunc default_dirichlet_func;
 };
+
+/// Create the standard BP5 Dirichlet loading function.
+///
+/// Tandem bp5.lua boundary(x,y,z,t):
+///   y > 1000 m:   u_D = ( Vp*t/2, 0, 0)
+///   y < -1000 m:  u_D = (-Vp*t/2, 0, 0)
+///   |y| <= 1000:  u_D = ( Vp*t,   0, 0)
+///
+/// Vp is captured by value.
+inline DirichletFunc MakeBP5DirichletFunc(real_t Vp)
+{
+   return [Vp](const Vector &x, real_t t, Vector &u)
+   {
+      u.SetSize(3);
+      u = 0.0;
+      real_t y = x(1);
+      real_t Vh = Vp * t;
+      if (y > 1000.0)       { Vh *= 0.5; }
+      else if (y < -1000.0) { Vh *= -0.5; }
+      u(0) = Vh;
+   };
+}
 
 } // namespace seas
 } // namespace mfem

@@ -97,22 +97,25 @@ public:
    using BilinFormType = typename Base::BilinFormType;
    using LinFormType = typename Base::LinFormType;
 
-   /// @brief Construct with explicit ConstitutiveModel (Phase 3+ path).
+   /// @brief Construct with explicit ConstitutiveModel + BoundaryConfig (Phase 4+ path).
    ///
-   /// The model must outlive this operator (non-owning reference stored as pointer).
-   /// Use DomainConfig to set discretization/solver parameters.
+   /// The model must outlive this operator (non-owning pointer stored).
+   /// BoundaryConfig is required — no default. User specifies boundary
+   /// attributes explicitly from their mesh file.
    ElasticityDomainOperator(MeshType &mesh, int order,
                              const ConstitutiveModel &model,
                              real_t Vp, real_t Wf, real_t lf,
+                             const BoundaryConfig &bdr_config,
                              DGMethod method = DGMethod::BR2,
                              SolverType solver_type = SolverType::MUMPS_BLR,
-                             BCMode bc_mode = BCMode::FarField,
                              const DomainConfig &config = {})
       : mesh_(mesh), order_(order),
         model_(&model),
+        bdr_config_(bdr_config),
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), solver_type_(solver_type),
-        bc_mode_(bc_mode),
+        bc_mode_(BCMode::FarField),
+        use_bdr_config_(true),
         check_residual_(config.check_residual),
         mass_inv_computed_(false),
         fault_depths_computed_(false),
@@ -122,7 +125,6 @@ public:
         blr_tol_(config.blr_tol),
         match_quad_order_(config.match_quad_order)
    {
-      // Extract lambda/mu for legacy code paths that need scalar values
       const auto *le = dynamic_cast<const LinearElastic *>(model_);
       MFEM_VERIFY(le, "ElasticityDomainOperator currently requires LinearElastic");
       lambda_val_ = le->GetLambda();
@@ -135,7 +137,8 @@ public:
 
    /// @brief Legacy constructor: scalar lambda/mu (deprecated, delegates).
    ///
-   /// Creates an internal LinearElastic model and delegates to the new path.
+   /// Creates an internal LinearElastic model and builds BoundaryConfig
+   /// internally from BCMode with legacy BP5 attribute numbers.
    /// Existing tests and drivers continue to work unchanged.
    ElasticityDomainOperator(MeshType &mesh, int order,
                              real_t lambda, real_t mu,
@@ -149,6 +152,7 @@ public:
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), solver_type_(solver_type),
         bc_mode_(bc_mode),
+        use_bdr_config_(false),
         check_residual_(false),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
@@ -158,6 +162,13 @@ public:
    {
       owned_model_ = std::make_unique<LinearElastic>(lambda, mu);
       model_ = owned_model_.get();
+
+      // Build BoundaryConfig from legacy BCMode numbers.
+      // These numbers match existing BP5 test meshes ONLY.
+      bdr_config_.fault_attr = 3;
+      bdr_config_.dirichlet_attrs = {5};
+      bdr_config_.natural_attrs = {1};
+      bdr_config_.default_dirichlet_func = MakeBP5DirichletFunc(Vp);
 
       InitOperator();
    }
@@ -286,6 +297,29 @@ public:
 
 private:
    /// Common initialization shared by both constructors.
+   /// Evaluate the Dirichlet function for a given boundary attribute.
+   /// Uses per-attr function if available, otherwise default.
+   /// Aborts if no function is set (no silent fallback).
+   void EvalDirichletFunc(int attr, const Vector &x, real_t t,
+                          Vector &u_D) const
+   {
+      auto it = bdr_config_.dirichlet_funcs.find(attr);
+      if (it != bdr_config_.dirichlet_funcs.end())
+      {
+         it->second(x, t, u_D);
+         return;
+      }
+      if (bdr_config_.default_dirichlet_func)
+      {
+         bdr_config_.default_dirichlet_func(x, t, u_D);
+         return;
+      }
+      MFEM_ABORT("No DirichletFunc set for boundary attr " << attr
+                 << ". Set default_dirichlet_func or per-attr func "
+                    "in BoundaryConfig.");
+   }
+
+   /// Common initialization shared by both constructors.
    void InitOperator()
    {
       MFEM_VERIFY(mesh_.Dimension() == 3, "ElasticityDomainOperator requires 3D mesh");
@@ -321,10 +355,14 @@ private:
    // Cached scalar values from the model (for legacy code paths)
    real_t lambda_val_ = 0.0, mu_val_ = 0.0;
 
+   // Boundary configuration (Phase 4+)
+   BoundaryConfig bdr_config_;
+   bool use_bdr_config_ = false;  // true = Phase 4+ path, false = legacy BCMode path
+
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
    SolverType solver_type_;
-   BCMode bc_mode_;
+   BCMode bc_mode_;  // Legacy — kept for backward compatibility
    bool check_residual_;  // Post-solve residual check
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
 
@@ -360,13 +398,18 @@ private:
    enum class FacetBC : int8_t { None = 0, Fault = 1, Dirichlet = 2 };
 
    std::vector<FacetBC> face_bc_;         // [mesh_.GetNumFaces()] interior faces
+   std::vector<int> face_bc_attr_;       // [mesh_.GetNumFaces()] boundary attr per face
    std::vector<FacetBC> shared_face_bc_;  // [mesh_.GetNSharedFaces()] shared faces
+   std::vector<int> shared_face_bc_attr_; // [mesh_.GetNSharedFaces()] boundary attr
 
    // Legacy face arrays derived from the BC tables (kept for assembly loops)
    Array<int> fault_interior_faces_;
    Array<int> fault_shared_faces_;
    Array<int> dirichlet_interior_faces_;
    Array<int> dirichlet_shared_faces_;
+   // Per-face boundary attr (parallel to dirichlet_interior/shared_faces_)
+   Array<int> dirichlet_interior_attrs_;
+   Array<int> dirichlet_shared_attrs_;
 
    // Element-pair keys for fault faces (populated during BC table build)
    std::set<long> fault_face_keys_;

@@ -1116,19 +1116,19 @@
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
             Vector phys_y_qp(nq_dir);
+            Vector u_D_val(dim);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
                FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
-               real_t y = phys(1);
-               phys_y_qp(q) = y;
-               // Tandem bp5.lua boundary(x,y,z,t):
-               real_t Vh = Vp_ * time;
-               if (y > 1000.0) { Vh *= 0.5; }
-               else if (y < -1000.0) { Vh *= -0.5; }
-               u_D_3d(0 * nq_dir + q) = Vh;
+               phys_y_qp(q) = phys(1);
+               EvalDirichletFunc(attr, phys, time, u_D_val);
+               for (int c = 0; c < dim; c++)
+               {
+                  u_D_3d(c * nq_dir + q) = u_D_val(c);
+               }
             }
 
             Vector elvec_dir;
@@ -1141,15 +1141,14 @@
          }
          else  // BR2
          {
-            // BR2: compute u_D from face centroid (legacy)
+            // BR2: compute u_D from face centroid
             const IntegrationPoint &ip_c = Geometries.GetCenter(FTr->GetGeometryType());
             FTr->Face->SetIntPoint(&ip_c);
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
-            real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
-            real_t u_D[3] = {Vh_br2, 0.0, 0.0};
+            Vector u_D_br2;
+            EvalDirichletFunc(attr, fc_br2, time, u_D_br2);
+            real_t u_D[3] = {u_D_br2(0), u_D_br2(1), u_D_br2(2)};
 
             const DenseMatrix &Minv = elem_mass_inv_[FTr->Elem1No];
             int nqp = ir.GetNPoints();
@@ -1340,20 +1339,21 @@
             Vector u_D_3d(dim * nq_dir);
             u_D_3d = 0.0;
             Vector phys_y_qp(nq_dir);
+            Vector u_D_val(dim);
             for (int q = 0; q < nq_dir; q++)
             {
                const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                FTr->SetAllIntPoints(&ipq);
                Vector phys(dim);
                FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
-               real_t y = phys(1);
-               phys_y_qp(q) = y;
-               real_t Vh = Vp_ * time;
-               if (y > 1000.0) { Vh *= 0.5; }
-               else if (y < -1000.0) { Vh *= -0.5; }
+               phys_y_qp(q) = phys(1);
+               EvalDirichletFunc(dirichlet_interior_attrs_[fi], phys, time, u_D_val);
                // Per-QP orientation sign (Tandem DGCurvilinearCommon.h:97-98)
                real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
-               u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
+               for (int c = 0; c < dim; c++)
+               {
+                  u_D_3d(c * nq_dir + q) = dir_sign * u_D_val(c);
+               }
             }
 
             Vector ev1, ev2;
@@ -1371,14 +1371,15 @@
             FTr->Face->SetIntPoint(&ip_c);
             Vector fc_br2(dim);
             FTr->Face->Transform(ip_c, fc_br2);
-            real_t Vh_br2 = Vp_ * time;
-            if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
-            else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
+            Vector u_D_br2;
+            EvalDirichletFunc(dirichlet_interior_attrs_[fi], fc_br2, time, u_D_br2);
             // Orientation sign for BR2 (face-constant, affine faces)
             const IntegrationPoint &ip_s = Geometries.GetCenter(FTr->GetGeometryType());
             FTr->SetAllIntPoints(&ip_s);
             real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
-            real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
+            real_t u_D_int[3] = {dir_sign_br2 * u_D_br2(0),
+                                 dir_sign_br2 * u_D_br2(1),
+                                 dir_sign_br2 * u_D_br2(2)};
 
             const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
             const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];
@@ -1656,19 +1657,20 @@
                Vector u_D_3d(dim * nq_dir);
                u_D_3d = 0.0;
                Vector phys_y_qp(nq_dir);
+               Vector u_D_val(dim);
                for (int q = 0; q < nq_dir; q++)
                {
                   const IntegrationPoint &ipq = ir_dir.IntPoint(q);
                   FTr->SetAllIntPoints(&ipq);
                   Vector phys(dim);
                   FTr->Elem1->Transform(FTr->GetElement1IntPoint(), phys);
-                  real_t y = phys(1);
-                  phys_y_qp(q) = y;
-                  real_t Vh = Vp_ * time;
-                  if (y > 1000.0) { Vh *= 0.5; }
-                  else if (y < -1000.0) { Vh *= -0.5; }
+                  phys_y_qp(q) = phys(1);
+                  EvalDirichletFunc(dirichlet_shared_attrs_[fi], phys, time, u_D_val);
                   real_t dir_sign = ComputeSkeletonDirichletSign(FTr);
-                  u_D_3d(0 * nq_dir + q) = dir_sign * Vh;
+                  for (int c = 0; c < dim; c++)
+                  {
+                     u_D_3d(c * nq_dir + q) = dir_sign * u_D_val(c);
+                  }
                }
 
                Vector ev1, ev2;
@@ -1687,13 +1689,14 @@
                FTr->Face->SetIntPoint(&ip_c);
                Vector fc_br2(dim);
                FTr->Face->Transform(ip_c, fc_br2);
-               real_t Vh_br2 = Vp_ * time;
-               if (fc_br2(1) > 1000.0) { Vh_br2 *= 0.5; }
-               else if (fc_br2(1) < -1000.0) { Vh_br2 *= -0.5; }
+               Vector u_D_br2;
+               EvalDirichletFunc(dirichlet_shared_attrs_[fi], fc_br2, time, u_D_br2);
                // Orientation sign for BR2 (face-constant, affine faces)
                FTr->SetAllIntPoints(&ip_c);
                real_t dir_sign_br2 = ComputeSkeletonDirichletSign(FTr);
-               real_t u_D_int[3] = {dir_sign_br2 * Vh_br2, 0.0, 0.0};
+               real_t u_D_int[3] = {dir_sign_br2 * u_D_br2(0),
+                                    dir_sign_br2 * u_D_br2(1),
+                                    dir_sign_br2 * u_D_br2(2)};
 
                const DenseMatrix &Minv1 = elem_mass_inv_[FTr->Elem1No];
                const DenseMatrix &Minv2 = elem_mass_inv_[FTr->Elem2No];

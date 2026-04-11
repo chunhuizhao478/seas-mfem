@@ -17,33 +17,42 @@
 
    void SetupBoundaryMarkers()
    {
-      // Tandem Physical Surface tags:
-      //   Tag 1 = Natural (top Z=0 + bottom Z=Z0) → zero traction
-      //   Tag 3 = Fault (Y=0 interior) → handled separately
-      //   Tag 5 = Dirichlet (far-field: Y=±Y1, X=±X1) → plate loading
-
       int num_bdr = mesh_.bdr_attributes.Size() > 0 ? mesh_.bdr_attributes.Max() : 0;
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
 
-      if (bc_mode_ == BCMode::AllDirichlet)
+      if (use_bdr_config_)
       {
-         mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "
-                   << "to be incorrect for BP5. ***\n"
-                   << "  *** Use BCMode::FarField (default) for production runs. "
-                   << "***\n\n";
-         for (int i = 0; i < num_bdr; i++)
+         // Phase 4+ path: use BoundaryConfig attrs directly
+         for (int attr : bdr_config_.dirichlet_attrs)
          {
-            dirichlet_bdr_marker_[i] = 1;
+            MFEM_VERIFY(attr >= 1 && attr <= num_bdr,
+                        "BoundaryConfig: Dirichlet attr " << attr
+                        << " not in mesh (max attr = " << num_bdr << ")");
+            dirichlet_bdr_marker_[attr - 1] = 1;
          }
       }
-      else if (bc_mode_ == BCMode::FarField || bc_mode_ == BCMode::XOnly)
+      else
       {
-         // Mark only attr 5 as Dirichlet (Tandem tag for far-field faces)
-         for (int i = 0; i < num_bdr; i++)
+         // Legacy BCMode path (deprecated)
+         if (bc_mode_ == BCMode::AllDirichlet)
          {
-            int attr = i + 1;
-            if (attr == 5) { dirichlet_bdr_marker_[i] = 1; }
+            mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "
+                      << "to be incorrect for BP5. ***\n"
+                      << "  *** Use BCMode::FarField (default) for production runs. "
+                      << "***\n\n";
+            for (int i = 0; i < num_bdr; i++)
+            {
+               dirichlet_bdr_marker_[i] = 1;
+            }
+         }
+         else if (bc_mode_ == BCMode::FarField || bc_mode_ == BCMode::XOnly)
+         {
+            for (int i = 0; i < num_bdr; i++)
+            {
+               int attr = i + 1;
+               if (attr == 5) { dirichlet_bdr_marker_[i] = 1; }
+            }
          }
       }
    }
@@ -63,6 +72,7 @@
    {
       const int num_faces = mesh_.GetNumFaces();
       face_bc_.assign(num_faces, FacetBC::None);
+      face_bc_attr_.assign(num_faces, 0);
 
       int num_shared = 0;
       if constexpr (IsParallelMesh<MeshType>::value)
@@ -72,40 +82,38 @@
 #endif
       }
       shared_face_bc_.assign(num_shared, FacetBC::None);
+      shared_face_bc_attr_.assign(num_shared, 0);
+
+      // ---- Resolve BC attr numbers ----
+      const int fault_attr = bdr_config_.fault_attr;
+      const auto &dir_attrs = bdr_config_.dirichlet_attrs;
 
       // ---- Check global attr existence ----
-      int local_has3 = 0, local_has5 = 0;
-      // Scan actual boundary elements instead of mesh_.bdr_attributes. In
-      // ParMesh, internal tagged faces can appear in GetNBE() even when the
-      // summary attribute list does not include their tag.
+      int local_has_fault = 0, local_has_dir = 0;
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr == 3) { local_has3 = 1; }
-         if (attr == 5) { local_has5 = 1; }
+         if (attr == fault_attr) { local_has_fault = 1; }
+         if (dir_attrs.count(attr)) { local_has_dir = 1; }
       }
-      int global_has3 = local_has3, global_has5 = local_has5;
+      int global_has_fault = local_has_fault;
+      int global_has_dir = local_has_dir;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
-         MPI_Allreduce(MPI_IN_PLACE, &global_has3, 1, MPI_INT,
+         MPI_Allreduce(MPI_IN_PLACE, &global_has_fault, 1, MPI_INT,
                        MPI_MAX, mesh_.GetComm());
-         MPI_Allreduce(MPI_IN_PLACE, &global_has5, 1, MPI_INT,
+         MPI_Allreduce(MPI_IN_PLACE, &global_has_dir, 1, MPI_INT,
                        MPI_MAX, mesh_.GetComm());
 #endif
       }
-      // If the mesh has no fault tags (attr 3), this is a non-BP5 problem
-      // (unit test, pure elasticity, etc.). Skip fault classification but
-      // still build Dirichlet faces if attr 5 is present.
-      // If the mesh HAS fault tags, enforce BP5 requirement: attr 5 must
-      // also be present.
-      bool has_fault = (global_has3 > 0);
-      bool has_dirichlet = (global_has5 > 0);
+      bool has_fault = (global_has_fault > 0);
+      bool has_dirichlet = (global_has_dir > 0);
       if (has_fault)
       {
          MFEM_VERIFY(has_dirichlet,
-            "ERROR: Mesh has fault faces (attr 3) but no Dirichlet faces "
-            "(attr 5). BP5 requires both Physical Surface tags.");
+            "ERROR: Mesh has fault faces (attr " << fault_attr
+            << ") but no Dirichlet faces. Requires both.");
       }
       if (!has_fault && !has_dirichlet) { return; }
 
@@ -126,8 +134,10 @@
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr != 3 && attr != 5) { continue; }
-         FacetBC bc = (attr == 3) ? FacetBC::Fault : FacetBC::Dirichlet;
+         bool is_fault = (attr == fault_attr);
+         bool is_dir = dir_attrs.count(attr) > 0;
+         if (!is_fault && !is_dir) { continue; }
+         FacetBC bc = is_fault ? FacetBC::Fault : FacetBC::Dirichlet;
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
 
          FaceElementTransformations *FTr =
@@ -138,8 +148,9 @@
             MFEM_VERIFY(face_bc_[face_idx] == FacetBC::None ||
                         face_bc_[face_idx] == bc,
                "ERROR: Interior face " << face_idx << " tagged as both "
-               "attr 3 and attr 5.");
+               "fault (attr " << fault_attr << ") and Dirichlet.");
             face_bc_[face_idx] = bc;
+            face_bc_attr_[face_idx] = attr;
 
             if (bc == FacetBC::Fault)
             {
@@ -161,6 +172,7 @@
                   "ERROR: Shared face " << sf << " tagged as both "
                   "attr 3 and attr 5.");
                shared_face_bc_[sf] = bc;
+               shared_face_bc_attr_[sf] = attr;
             }
          }
       }
@@ -176,7 +188,7 @@
          Array<HYPRE_BigInt> gvert;
          mesh_.GetGlobalVertexIndices(gvert);
 
-         // Pack: 4 values per locally-tagged shared face (3 key + bc_class)
+         // Pack: 5 values per locally-tagged shared face (3 key + bc_class + attr)
          std::vector<HYPRE_BigInt> local_flat;
          for (int sf = 0; sf < num_shared; sf++)
          {
@@ -187,6 +199,7 @@
             local_flat.push_back(fk.v[1]);
             local_flat.push_back(fk.v[2]);
             local_flat.push_back(static_cast<HYPRE_BigInt>(shared_face_bc_[sf]));
+            local_flat.push_back(static_cast<HYPRE_BigInt>(shared_face_bc_attr_[sf]));
          }
 
          int lc = static_cast<int>(local_flat.size());
@@ -202,18 +215,22 @@
                         all.data(), rc.data(), dp.data(),
                         HYPRE_MPI_BIG_INT, mesh_.GetComm());
 
-         // Build global key → bc map
-         std::map<FaceVertexKey, FacetBC> global_shared_bc;
-         for (int i = 0; i < tot; i += 4)
+         // Build global key → (bc, attr) map
+         std::map<FaceVertexKey, std::pair<FacetBC, int>> global_shared_bc;
+         for (int i = 0; i < tot; i += 5)
          {
             FaceVertexKey k;
             k.v[0] = all[i]; k.v[1] = all[i+1]; k.v[2] = all[i+2];
             FacetBC bc = static_cast<FacetBC>(all[i+3]);
-            auto [it, inserted] = global_shared_bc.emplace(k, bc);
-            MFEM_VERIFY(inserted || it->second == bc,
+            int bc_attr = static_cast<int>(all[i+4]);
+            auto [it, inserted] = global_shared_bc.emplace(
+               k, std::make_pair(bc, bc_attr));
+            MFEM_VERIFY(inserted || (it->second.first == bc &&
+                                     it->second.second == bc_attr),
                "ERROR: Shared face key (" << k.v[0] << "," << k.v[1]
                << "," << k.v[2] << ") has conflicting tags from "
-               "different ranks.");
+               "different ranks (bc=" << static_cast<int>(bc)
+               << " attr=" << bc_attr << ").");
          }
 
          // Fill untagged local shared faces from the global map
@@ -225,7 +242,8 @@
             auto it = global_shared_bc.find(key);
             if (it != global_shared_bc.end())
             {
-               shared_face_bc_[sf] = it->second;
+               shared_face_bc_[sf] = it->second.first;
+               shared_face_bc_attr_[sf] = it->second.second;
             }
          }
 #endif
@@ -236,6 +254,8 @@
       fault_shared_faces_.SetSize(0);
       dirichlet_interior_faces_.SetSize(0);
       dirichlet_shared_faces_.SetSize(0);
+      dirichlet_interior_attrs_.SetSize(0);
+      dirichlet_shared_attrs_.SetSize(0);
 
       for (int f = 0; f < num_faces; f++)
       {
@@ -249,6 +269,7 @@
          else if (face_bc_[f] == FacetBC::Dirichlet)
          {
             dirichlet_interior_faces_.Append(f);
+            dirichlet_interior_attrs_.Append(face_bc_attr_[f]);
          }
       }
       for (int sf = 0; sf < num_shared; sf++)
@@ -260,6 +281,7 @@
          else if (shared_face_bc_[sf] == FacetBC::Dirichlet)
          {
             dirichlet_shared_faces_.Append(sf);
+            dirichlet_shared_attrs_.Append(shared_face_bc_attr_[sf]);
          }
       }
 
@@ -500,17 +522,18 @@
       }
 
       // Build tagged key sets from boundary elements (ground truth).
-      // Separate tagged attr-5 faces into recoverable (interior/shared)
-      // and exterior (handled by AddBdrFaceIntegrator, not recovered here).
+      const int fault_attr = bdr_config_.fault_attr;
+      const auto &dir_attrs = bdr_config_.dirichlet_attrs;
+
       std::set<FaceVertexKey> local_tagged_fault;
       std::set<FaceVertexKey> local_tagged_dir_recoverable;  // interior/shared only
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
-         if (attr != 3 && attr != 5) { continue; }
+         if (attr != fault_attr && !dir_attrs.count(attr)) { continue; }
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
          FaceVertexKey key = MakeFaceKey(face_idx, gvert);
-         if (attr == 3)
+         if (attr == fault_attr)
          {
             local_tagged_fault.insert(key);
          }
