@@ -20,11 +20,20 @@ namespace mfem
 namespace seas
 {
 
+// Forward declaration — only a pointer is returned, no include needed.
+class FaultBasis;
+
 /// @brief Abstract base class for domain operators
 ///
 /// This class defines the interface for solving the domain PDE
 /// (e.g., Laplace equation for antiplane shear) with fault slip
 /// boundary conditions, and computing traction on the fault.
+///
+/// Future extension: dynamic rupture and QD-FD hybrid simulations will
+/// add a DynamicDomainOperator subclass that includes inertia terms
+/// (mass matrix), explicit time integration, and PML absorbing boundaries.
+/// The interface will gain: AssembleMass(), ComputeAcceleration(),
+/// GetCFL(). See refactoring plan v4, Section 12 for architecture.
 ///
 /// The template parameter MeshType allows the same interface to
 /// work with both serial (Mesh) and parallel (ParMesh) execution.
@@ -77,7 +86,8 @@ public:
    /// @param[out] traction Computed traction at fault DOFs
    virtual void ComputeTraction(const GridFuncType &displacement,
                                 const Vector &slip_bc,
-                                Vector &traction) = 0;
+                                Vector &traction,
+                                Vector *normal_traction = nullptr) = 0;
 
    /// @brief Get reference to finite element space
    virtual FESpaceType &GetFESpace() = 0;
@@ -96,6 +106,25 @@ public:
 
    /// @brief Get the number of DOFs on the fault boundary
    virtual int GetNumFaultDOFs() const = 0;
+
+   /// @brief Get number of basis functions per fault face.
+   ///
+   /// At p=1: 1 (constant per face). At p>=2: (p+1)(p+2)/2 (multi-DOF).
+   /// Default: 1 (backward compatible with antiplane and p=1 cases).
+   virtual int GetNbfPerFace() const { return 1; }
+
+   /// @brief Get number of owned fault DOFs used by the fault ODE state.
+   ///
+   /// In serial this is identical to GetNumFaultDOFs(). In parallel DG
+   /// elasticity, shared partition-boundary faces may appear in the local
+   /// fault view on both ranks, but only the owned subset should contribute
+   /// independent friction/state unknowns.
+   virtual int GetNumOwnedFaultDOFs() const { return GetNumFaultDOFs(); }
+
+   /// @brief Get number of fault faces.
+   ///
+   /// Default: same as GetNumFaultDOFs() (assumes 1 DOF per face).
+   virtual int GetNumFaultFaces() const { return GetNumFaultDOFs(); }
 
    /// @brief Get the depth (z-coordinate) at each fault DOF
    ///
@@ -129,6 +158,39 @@ public:
       coords_x2 = 0.0;
       coords_x3 = depths;
    }
+
+   /// @brief Restrict a full local fault vector to the owned fault DOFs.
+   ///
+   /// @param[in] local_data Full local fault data
+   /// @param[out] owned_data Owned-only fault data
+   /// @param[in] comps_per_dof Number of stored components per fault DOF
+   virtual void RestrictToOwnedFault(const Vector &local_data,
+                                     Vector &owned_data,
+                                     int comps_per_dof = 1) const
+   {
+      owned_data = local_data;
+   }
+
+   /// @brief Expand owned fault data to the full local fault view.
+   ///
+   /// Parallel implementations can use this to ghost shared partition
+   /// boundary fault values before domain solves / traction evaluations.
+   ///
+   /// @param[in] owned_data Owned-only fault data
+   /// @param[out] local_data Full local fault data including shared ghosts
+   /// @param[in] comps_per_dof Number of stored components per fault DOF
+   virtual void ExpandOwnedToLocalFault(const Vector &owned_data,
+                                        Vector &local_data,
+                                        int comps_per_dof = 1) const
+   {
+      local_data = owned_data;
+   }
+
+   /// @brief Get the per-face fault basis. Returns nullptr by default.
+   ///
+   /// Override in 3D elasticity operators to provide the global-to-local
+   /// coordinate transformation on the fault surface.
+   virtual const FaultBasis *GetFaultBasis() const { return nullptr; }
 
    /// @brief Get off-fault displacement at specified spatial points
    ///

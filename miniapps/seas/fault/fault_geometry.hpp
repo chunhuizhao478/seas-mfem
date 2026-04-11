@@ -14,9 +14,11 @@
 
 #include "mfem.hpp"
 #include "../config/bp2_params.hpp"
+#include "../config/bp5_params.hpp"
 #include "../domain/domain_operator.hpp"
 #include "../common/seas_types.hpp"
 #include "../common/mpi_context.hpp"
+#include <iomanip>
 
 #include <algorithm>
 #include <cmath>
@@ -49,8 +51,8 @@ public:
                   MPIContext *mpi_ctx = nullptr)
       : params_(params), mpi_ctx_(mpi_ctx)
    {
-      // Get fault DOF count and depths from domain operator
-      num_fault_dofs_ = domain_op.GetNumFaultDOFs();
+      // Use the owned fault view for the friction/state ODE.
+      num_fault_dofs_ = domain_op.GetNumOwnedFaultDOFs();
 
       if constexpr (IsParallelMesh<MeshType>::value)
       {
@@ -84,11 +86,55 @@ public:
          return;
       }
 
-      // Get depths from domain operator
-      domain_op.GetFaultDepths(depths_);
+      // Get depths from domain operator and restrict to the owned view.
+      Vector local_depths;
+      domain_op.GetFaultDepths(local_depths);
+      domain_op.RestrictToOwnedFault(local_depths, depths_);
 
       // Compute depth-dependent parameters
       ComputeDepthDependentParams();
+   }
+
+   /// @brief Construct fault geometry for 3D (BP5) with spatially varying params.
+   ///
+   /// @param domain_op Domain operator providing 2D fault coordinates
+   /// @param params BP5 benchmark parameters (2D spatially varying a, L, etc.)
+   FaultGeometry(DomainOperator<MeshType> &domain_op, const BP5Params &params,
+                  MPIContext *mpi_ctx = nullptr)
+      : bp5_params_(params), mpi_ctx_(mpi_ctx), is_bp5_(true)
+   {
+      num_fault_dofs_ = domain_op.GetNumOwnedFaultDOFs();
+      nbf_per_face_ = domain_op.GetNbfPerFace();
+      num_fault_faces_ = (nbf_per_face_ > 0) ? num_fault_dofs_ / nbf_per_face_ : 0;
+      num_local_fault_dofs_ = num_fault_dofs_;
+      num_global_fault_dofs_ = num_fault_dofs_;
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         if (mpi_ctx_)
+         {
+            num_global_fault_dofs_ = mpi_ctx_->GlobalSumInt(num_local_fault_dofs_);
+            ComputeGatherInfo();
+         }
+      }
+
+      if (num_fault_dofs_ == 0) { return; }
+
+      // Get 2D fault coordinates on the owned fault view.
+      Vector local_x2, local_x3;
+      domain_op.GetFaultCoords2D(local_x2, local_x3);
+      domain_op.RestrictToOwnedFault(local_x2, coords_x2_);
+      domain_op.RestrictToOwnedFault(local_x3, coords_x3_);
+
+      // Also store depths for compatibility
+      depths_.SetSize(num_fault_dofs_);
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         depths_(i) = coords_x3_(i);
+      }
+
+      // Precompute per-DOF parameters using BP5 2D functions
+      ComputeBP5Params();
    }
 
    /// @brief Number of fault DOFs (local in parallel, total in serial).
@@ -221,6 +267,27 @@ public:
    /// @brief Get the BP2 parameters.
    const BP2Params &GetParams() const { return params_; }
 
+   /// @brief Get the BP5 parameters (only valid if constructed with BP5Params).
+   const BP5Params &GetBP5Params() const { return bp5_params_; }
+
+   /// @brief Whether this was constructed for BP5 (3D, spatially varying).
+   bool IsBP5() const { return is_bp5_; }
+
+   /// @brief Get critical slip distance (Dc/L) at each fault DOF.
+   const Vector &GetDcValues() const { return dc_values_; }
+
+   /// @brief Get pre-stress vector at fault DOFs [2*NumFaultDOFs].
+   /// Layout: [tau_dip_0, tau_strike_0, tau_dip_1, tau_strike_1, ...]
+   const Vector &GetTauPre() const { return tau_pre_; }
+
+   /// @brief Get initial velocity at fault DOFs [2*NumFaultDOFs].
+   /// Layout: [V_dip_0, V_strike_0, V_dip_1, V_strike_1, ...]
+   const Vector &GetVInit() const { return V_init_vec_; }
+
+   /// @brief Get 2D fault coordinates.
+   const Vector &GetCoordsX2() const { return coords_x2_; }
+   const Vector &GetCoordsX3() const { return coords_x3_; }
+
    /// @brief Find the DOF index closest to a target depth.
    ///
    /// @param target_depth Target depth (z coordinate, negative for below surface)
@@ -248,24 +315,39 @@ public:
       return closest_idx;
    }
 
-   /// @brief Check if a depth is in the velocity-weakening zone.
+   /// @brief Check if a DOF is in the velocity-weakening zone.
    ///
-   /// @param z Depth coordinate (negative below surface)
-   /// @return True if a(z) < b (velocity-weakening)
-   bool IsVelocityWeakening(real_t z) const
+   /// Uses precomputed a_values_ which are correct for both BP2 and BP5.
+   ///
+   /// @param dof_idx DOF index
+   /// @return True if a(dof_idx) < b (velocity-weakening)
+   bool IsVelocityWeakening(int dof_idx) const
    {
-      return params_.a_of_z(z) < params_.b;
+      real_t b_val = is_bp5_ ? bp5_params_.b : params_.b;
+      return a_values_(dof_idx) < b_val;
    }
 
    /// @brief Get the VW/VS transition depth (top of transition zone).
    ///
    /// Returns the depth H where the transition from VW to VS begins.
-   real_t GetVWDepth() const { return -params_.H; }
+   /// Only valid for BP2 (1D depth profile). For BP5, the VW zone is 2D.
+   real_t GetVWDepth() const
+   {
+      MFEM_VERIFY(!is_bp5_,
+                   "GetVWDepth() not applicable for BP5 (2D VW zone)");
+      return -params_.H;
+   }
 
    /// @brief Get the full VS depth (bottom of transition zone).
    ///
    /// Returns the depth H+h where fully VS behavior begins.
-   real_t GetVSDepth() const { return -(params_.H + params_.h); }
+   /// Only valid for BP2 (1D depth profile). For BP5, the VS zone is 2D.
+   real_t GetVSDepth() const
+   {
+      MFEM_VERIFY(!is_bp5_,
+                   "GetVSDepth() not applicable for BP5 (2D VW zone)");
+      return -(params_.H + params_.h);
+   }
 
    /// @brief Get indices of DOFs in the velocity-weakening zone.
    void GetVWDOFs(Array<int> &vw_dofs) const
@@ -273,7 +355,7 @@ public:
       vw_dofs.SetSize(0);
       for (int i = 0; i < num_fault_dofs_; i++)
       {
-         if (IsVelocityWeakening(depths_(i)))
+         if (IsVelocityWeakening(i))
          {
             vw_dofs.Append(i);
          }
@@ -286,7 +368,7 @@ public:
       vs_dofs.SetSize(0);
       for (int i = 0; i < num_fault_dofs_; i++)
       {
-         if (!IsVelocityWeakening(depths_(i)))
+         if (!IsVelocityWeakening(i))
          {
             vs_dofs.Append(i);
          }
@@ -309,40 +391,48 @@ public:
 
       if (num_fault_dofs_ > 0)
       {
-         // Find depth range
+         // Local statistics (rank 0 only — global reduction would deadlock
+         // since Print() is called only on root)
          real_t z_min = depths_.Min();
          real_t z_max = depths_.Max();
-         os << "  Depth range: [" << z_max / 1000.0 << ", "
-            << z_min / 1000.0 << "] km\n";
 
-         // Count VW and VS DOFs
+         real_t b_val = is_bp5_ ? bp5_params_.b : params_.b;
          int vw_count = 0;
          for (int i = 0; i < num_fault_dofs_; i++)
          {
-            if (a_values_(i) < params_.b) { vw_count++; }
+            if (a_values_(i) < b_val) { vw_count++; }
          }
-         os << "  VW DOFs: " << vw_count << "\n";
-         os << "  VS DOFs: " << num_fault_dofs_ - vw_count << "\n";
 
-         // Show a(z) range
          real_t a_min = a_values_.Min();
          real_t a_max = a_values_.Max();
-         os << "  a range: [" << a_min << ", " << a_max << "]\n";
 
-         // Show eta (should be constant for BP2)
+         os << "  Depth range: [" << z_max / 1000.0 << ", "
+            << z_min / 1000.0 << "] km (local rank)\n";
+         os << "  VW DOFs: " << vw_count << " (local rank)\n";
+         os << "  VS DOFs: " << num_fault_dofs_ - vw_count << " (local rank)\n";
+         os << "  a range: [" << a_min << ", " << a_max << "] (local rank)\n";
          os << "  eta: " << eta_values_(0) / 1e6 << " MPa·s/m\n";
       }
    }
 
 private:
    BP2Params params_;
+   BP5Params bp5_params_;
    MPIContext *mpi_ctx_ = nullptr;
+   bool is_bp5_ = false;
    int num_fault_dofs_;
+   int nbf_per_face_ = 1;         // basis functions per face
+   int num_fault_faces_ = 0;      // number of fault faces
    int num_local_fault_dofs_ = 0;
    int num_global_fault_dofs_ = 0;
    Vector depths_;      // z-coordinates of fault DOFs
-   Vector a_values_;    // a(z) for each DOF
+   Vector a_values_;    // a for each DOF (from depth in BP2, from (x2,x3) in BP5)
    Vector eta_values_;  // η for each DOF
+   Vector dc_values_;   // Dc/L for each DOF (BP5: spatially varying)
+   Vector tau_pre_;     // Pre-stress [2*N for BP5, N for BP2]
+   Vector V_init_vec_;  // Initial velocity [2*N for BP5]
+   Vector coords_x2_;   // Along-strike coordinate
+   Vector coords_x3_;   // Depth coordinate
 
    // MPI gather info (parallel only)
    std::vector<int> recv_counts_;
@@ -492,6 +582,177 @@ private:
       {
          dedup_fields[f].SetSize(m);
          for (int k = 0; k < m; k++) { dedup_fields[f](k) = d_fields[f][k]; }
+      }
+   }
+
+public:
+   /// @brief Build face deduplication mapping from gathered 2D coordinates.
+   ///
+   /// In parallel DG, shared fault faces at partition boundaries produce
+   /// duplicate face blocks in the gathered DOF array. This method identifies
+   /// duplicate faces by comparing face centroids (average of DOF coordinates)
+   /// within a tolerance, and returns the list of unique face start indices.
+   ///
+   /// Usage:
+   ///   1. Call once with gathered x2, x3 coordinates to get the mapping
+   ///   2. Use ApplyFaceDedupMap() to deduplicate any gathered field
+   ///
+   /// @param raw_x2 Gathered along-strike coordinates [M]
+   /// @param raw_x3 Gathered depth coordinates [M]
+   /// @param nbf_per_face Number of DOFs per face (must divide M evenly)
+   /// @param[out] unique_face_indices Index of first DOF for each unique face
+   /// @param tol Coordinate tolerance for centroid matching [m]
+   static void BuildFaceDedupMap(
+      const Vector &raw_x2, const Vector &raw_x3,
+      int nbf_per_face,
+      std::vector<int> &unique_face_indices,
+      real_t tol = 1.0)
+   {
+      int M = raw_x2.Size();
+      unique_face_indices.clear();
+      if (M == 0 || nbf_per_face < 1) { return; }
+      if (M % nbf_per_face != 0)
+      {
+         // Cannot form complete faces; return all DOFs as individual "faces"
+         for (int i = 0; i < M; i++) { unique_face_indices.push_back(i); }
+         return;
+      }
+
+      int num_faces = M / nbf_per_face;
+
+      // Compute face centroids
+      std::vector<real_t> cx2(num_faces), cx3(num_faces);
+      for (int f = 0; f < num_faces; f++)
+      {
+         real_t s2 = 0.0, s3 = 0.0;
+         for (int k = 0; k < nbf_per_face; k++)
+         {
+            s2 += raw_x2(f * nbf_per_face + k);
+            s3 += raw_x3(f * nbf_per_face + k);
+         }
+         cx2[f] = s2 / nbf_per_face;
+         cx3[f] = s3 / nbf_per_face;
+      }
+
+      // Mark unique faces: a face is duplicate if its centroid matches
+      // a previously seen face within tolerance.
+      std::vector<bool> is_dup(num_faces, false);
+      for (int f = 0; f < num_faces; f++)
+      {
+         if (is_dup[f]) { continue; }
+         unique_face_indices.push_back(f * nbf_per_face);
+         // Mark later faces with matching centroid as duplicates
+         for (int g = f + 1; g < num_faces; g++)
+         {
+            if (is_dup[g]) { continue; }
+            if (std::abs(cx2[f] - cx2[g]) < tol &&
+                std::abs(cx3[f] - cx3[g]) < tol)
+            {
+               is_dup[g] = true;
+            }
+         }
+      }
+   }
+
+   /// @brief Apply a face dedup mapping to a gathered scalar field.
+   ///
+   /// Extracts the unique face DOF blocks from a raw gathered vector.
+   ///
+   /// @param raw Raw gathered field [M]
+   /// @param unique_face_indices From BuildFaceDedupMap (first DOF of each unique face)
+   /// @param nbf_per_face DOFs per face
+   /// @param[out] dedup Deduplicated field [num_unique * nbf_per_face]
+   static void ApplyFaceDedupMap(
+      const Vector &raw,
+      const std::vector<int> &unique_face_indices,
+      int nbf_per_face,
+      Vector &dedup)
+   {
+      int num_unique = static_cast<int>(unique_face_indices.size());
+      dedup.SetSize(num_unique * nbf_per_face);
+      for (int u = 0; u < num_unique; u++)
+      {
+         int start = unique_face_indices[u];
+         for (int k = 0; k < nbf_per_face; k++)
+         {
+            dedup(u * nbf_per_face + k) = raw(start + k);
+         }
+      }
+   }
+
+private:
+   /// @brief Compute 2D spatially varying parameters for BP5.
+   ///
+   /// Following Tandem's approach: ALL parameters are evaluated at each
+   /// individual DOF's physical coordinates (per-DOF evaluation).
+   ///
+   /// Tandem reference: RateAndState.h:36-43 — set_params() iterates over
+   /// all DOFs (numFaultFaces * nbf) and calls the Lua parameter function
+   /// with each DOF's physical (x,y,z) coordinates.
+   ///
+   /// At p>=2 (multi-DOF), DOFs on the same face straddling the nucleation
+   /// zone boundary will get different Dc, V_init, tau_pre values. This
+   /// within-face discontinuity is handled correctly when combined with
+   /// Tandem-style equilibrium initialization (--psi-init tandem), which
+   /// absorbs all stress into psi so no overstress exists.
+   ///
+   /// Note: With SCEC initialization (delta_tau overstress), this per-DOF
+   /// discontinuity combined with IP penalty can trigger instability at p>=2.
+   /// The proper fix is to use --psi-init tandem, not to smooth the
+   /// parameters (see bp5_debug_v46.md for analysis).
+   void ComputeBP5Params()
+   {
+      a_values_.SetSize(num_fault_dofs_);
+      eta_values_.SetSize(num_fault_dofs_);
+      dc_values_.SetSize(num_fault_dofs_);
+      tau_pre_.SetSize(2 * num_fault_dofs_);
+      V_init_vec_.SetSize(2 * num_fault_dofs_);
+
+      real_t eta = bp5_params_.eta();
+
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         real_t x2 = coords_x2_(i);
+         real_t x3 = coords_x3_(i);
+
+         a_values_(i) = bp5_params_.a_of_x2_x3(x2, x3);
+         eta_values_(i) = eta;
+         dc_values_(i) = bp5_params_.Dc_of_x2_x3(x2, x3);
+
+         real_t tau[2];
+         bp5_params_.tau0_vec(x2, x3, tau);
+         tau_pre_(2 * i)     = tau[0];
+         tau_pre_(2 * i + 1) = tau[1];
+
+         real_t Vi[2];
+         bp5_params_.V_init_vec(x2, x3, Vi);
+         V_init_vec_(2 * i)     = Vi[0];
+         V_init_vec_(2 * i + 1) = Vi[1];
+
+         // v58 diagnostic: dump full state for DOFs near fault tip
+         // Disabled by default — enable via code flag if needed.
+         if (false && std::abs(x2) > 45000.0 && x3 < 3000.0)
+         {
+            int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+            real_t psi_ss = bp5_params_.f0
+                          + bp5_params_.b * std::log(bp5_params_.V0 / bp5_params_.Vp);
+            mfem::out << std::scientific << std::setprecision(10)
+                      << "[TIP-INIT] rank=" << rank
+                      << " dof=" << i
+                      << " x2=" << x2
+                      << " x3=" << x3
+                      << " a=" << a_values_(i)
+                      << " b=" << bp5_params_.b
+                      << " Dc=" << dc_values_(i)
+                      << " f0=" << bp5_params_.f0
+                      << " sigma_n=" << bp5_params_.sigma_n
+                      << " eta=" << eta
+                      << " V_init=(" << Vi[0] << "," << Vi[1] << ")"
+                      << " tau_pre=(" << tau[0] << "," << tau[1] << ")"
+                      << " psi_ss=" << psi_ss
+                      << " psi_ss/a=" << psi_ss / a_values_(i)
+                      << "\n";
+         }
       }
    }
 

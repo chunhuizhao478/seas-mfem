@@ -1,0 +1,52 @@
+#!/bin/bash
+#SBATCH -J bp5_v58_mfem_vgd
+#SBATCH -o bp5_v58_mfem_vgd_%j.out
+#SBATCH -e bp5_v58_mfem_vgd_%j.err
+#SBATCH -p development
+#SBATCH -N 8
+#SBATCH -n 400
+#SBATCH -t 02:00:00
+#SBATCH -A EAR20006
+
+# BP5 v58 DEV test: MFEM time stepper + V-guard, 400 ranks
+# Short development run to verify fix before normal-queue production
+
+export LC_ALL=C
+export LANG=C
+
+module load intel/19.1.1
+module load impi/19.0.9
+module load hypre/2.31.0
+module load mumps/5.3
+module load parmetis
+module load petsc/3.15
+module list
+
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${LD_LIBRARY_PATH}"
+
+cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+
+export JOBS=8
+
+grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || {
+    echo "ERROR: MFEM was not built with MUMPS enabled"
+    exit 1
+}
+
+cd miniapps/seas
+make clean
+make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
+mkdir -p bp5/results_v58_mfem_vg_dev
+
+ibrun ./seas_bp5_full \
+      --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
+      --mesh-scale 1000 \
+      --order 1 \
+      --dg-method IP \
+      --solver mumps \
+      --check-residual \
+      --tfinal 5.68e10 \
+      --ref-dir bp5/benchmark_data \
+      --output-dir bp5/results_v58_mfem_vg_dev \
+      --output-prefix bp5_v58_mfem_vgd \
+      --checkpoint-interval 1000

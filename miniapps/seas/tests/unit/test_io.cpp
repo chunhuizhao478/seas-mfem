@@ -369,13 +369,14 @@ void TestParaViewCombinedOutput()
 
    const Array<int> &fault_faces = domain.GetFaultInteriorFaces();
    int num_fault_dofs = domain.GetNumFaultDOFs();
-   // Per-face DOFs: for order 1, each face has 2 independent DOFs (not shared).
-   // Total DOFs = 2 * num_faces.
-   int dofs_per_face = 2;  // Per-face DOFs
+   // Antiplane operator uses 1 DOF per fault face (centroid evaluation).
+   // In serial: num_fault_dofs = fault_interior_faces.Size()
+   // (fault_shared_faces is empty).
+   int dofs_per_face = 1;
 
    TEST_ASSERT(fault_faces.Size() > 0, "Fault interior faces found");
-   TEST_ASSERT(num_fault_dofs == 2 * fault_faces.Size(),
-               "Fault DOFs = 2 * num_faces (per-face DOFs)");
+   TEST_ASSERT(num_fault_dofs == fault_faces.Size(),
+               "Fault DOFs = num_faces (1 DOF per face)");
 
    // Create displacement GridFunction
    DG_FECollection fec(order, 2, BasisType::GaussLobatto);

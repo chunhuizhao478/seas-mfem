@@ -21,6 +21,16 @@ Before implementing any feature, check:
 - **Building MFEM/SEAS code (mpicxx, MPI):** `conda activate mfem-dev`
 - **Gmsh mesh generation:** `conda activate pythonenv`
 
+## Proposing Fixes
+
+Before proposing any fix:
+- **Always read the debug documents** in `miniapps/seas/debug_document/bp5_debug_document/` to understand the full history of what has been tried, what worked, and what failed
+- **Never revert a previous fix without careful justification.** Each fix in the debug history was made for a specific reason. If you believe a prior fix should be reverted, you must:
+  1. Cite the specific debug document and fix you want to revert
+  2. Explain why the original reasoning was wrong
+  3. Show evidence (data, math, or code analysis) that reverting improves correctness
+  4. Get explicit approval before reverting
+
 ## Debugging Behavior
 
 When encountering errors or issues:

@@ -48,6 +48,7 @@ int main(int argc, char *argv[])
    int nz_override = 0;
    double tfinal_override = 0.0;
    std::string prefix_override;
+   int order = 1;
    for (int i = 1; i < argc; i++)
    {
       std::string arg(argv[i]);
@@ -55,6 +56,7 @@ int main(int argc, char *argv[])
       if (arg == "--nz" && i + 1 < argc) { nz_override = std::atoi(argv[++i]); }
       if (arg == "--prefix" && i + 1 < argc) { prefix_override = argv[++i]; }
       if (arg == "--tfinal" && i + 1 < argc) { tfinal_override = std::atof(argv[++i]); }
+      if (arg == "--order" && i + 1 < argc) { order = std::atoi(argv[++i]); }
    }
 
    // Simulation parameters
@@ -115,9 +117,8 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Domain operator: DG order 1
+   // Domain operator: DG
    // =========================================================================
-   int order = 1;
    AntiplaneDomainOperator<ParMesh> domain(
       pmesh, order, params.mu(), params.Vp, params.Wf, DGMethod::BR2);
 

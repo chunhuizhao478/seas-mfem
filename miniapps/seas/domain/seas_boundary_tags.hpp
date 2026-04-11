@@ -19,21 +19,17 @@ namespace mfem
 namespace seas
 {
 
-/// @brief Standard boundary attribute tags for SEAS meshes.
+/// @brief Standard boundary attribute tags for SEAS meshes (Tandem convention).
 ///
-/// These tags correspond to Gmsh Physical Curve (2D) or Physical Surface (3D)
-/// IDs used in .geo files. They follow Tandem's convention:
-///   - Tags 1-4: outer boundaries
-///   - Tag 5: fault interior interface
-///
-/// Existing BP2BoundaryAttributes (tags 1-4) remains for backward compatibility.
+/// These tags match Tandem's Gmsh Physical Surface IDs:
+///   - Tag 1 = Natural (top Z=0 + bottom Z=Z0), zero traction
+///   - Tag 3 = Fault (Y=0 interior interface)
+///   - Tag 5 = Dirichlet (far-field vertical faces), plate loading
 struct SEASBoundaryTags
 {
-   static constexpr int FARFIELD_LEFT  = 1;  ///< x = -Lx boundary
-   static constexpr int FARFIELD_RIGHT = 2;  ///< x = +Lx boundary
-   static constexpr int FREE_SURFACE   = 3;  ///< z = 0 (top) boundary
-   static constexpr int BOTTOM         = 4;  ///< z = -Lz (bottom) boundary
-   static constexpr int FAULT          = 5;  ///< Fault interior interface
+   static constexpr int NATURAL   = 1;  ///< Top (Z=0) + bottom (Z=Z0), zero traction
+   static constexpr int FAULT     = 3;  ///< Fault interior (Y=0)
+   static constexpr int DIRICHLET = 5;  ///< Far-field vertical faces, plate loading
 };
 
 /// @brief Utility for finding fault faces from Gmsh Physical Group tags.
@@ -99,12 +95,7 @@ public:
    /// faces" rather than interior faces. MFEM does not directly expose
    /// boundary attributes on shared faces, so this method uses a
    /// coordinate-based fallback: a shared face is on the fault if its
-   /// centroid has |x| < coord_tol.
-   ///
-   /// This is acceptable for axis-aligned faults (BP1/BP2/BP5 at x=0).
-   /// For non-axis-aligned faults, a more general approach (e.g.,
-   /// communicating boundary element tags across partitions) would be
-   /// needed.
+   /// centroid has |Y| < coord_tol (Tandem convention: fault at Y=0).
    ///
    /// @param pmesh The parallel mesh
    /// @param fault_tag The fault tag (unused for shared faces, reserved
@@ -133,8 +124,8 @@ public:
          Vector coords(pmesh.Dimension());
          FTr->Face->Transform(ip, coords);
 
-         // Fault is at x = 0 (first coordinate)
-         if (std::abs(coords(0)) < coord_tol)
+         // Fault is at Y = 0 (second coordinate, Tandem convention)
+         if (std::abs(coords(1)) < coord_tol)
          {
             fault_shared_faces.Append(sf);
          }

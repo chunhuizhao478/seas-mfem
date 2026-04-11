@@ -251,7 +251,7 @@ void MUMPSSolver::SetOperator(const Operator &op)
    // MUMPS factorization
    id->job = 2;
    {
-      const int mem_relax_lim = 200;
+      const int mem_relax_lim = 500;
       while (true)
       {
 #ifdef MFEM_USE_SINGLE
@@ -261,7 +261,8 @@ void MUMPSSolver::SetOperator(const Operator &op)
 #endif
          if (id->MUMPS_INFOG(1) < 0)
          {
-            if (id->MUMPS_INFOG(1) == -8 || id->MUMPS_INFOG(1) == -9)
+            if (id->MUMPS_INFOG(1) == -8 || id->MUMPS_INFOG(1) == -9 ||
+                id->MUMPS_INFOG(1) == -1)
             {
                id->MUMPS_ICNTL(14) += 20;
                MFEM_VERIFY(id->MUMPS_ICNTL(14) <= mem_relax_lim,
@@ -489,8 +490,10 @@ void MUMPSSolver::SetParameters()
    id->MUMPS_ICNTL(11) = 0;
    // Use of ScaLAPACK (Parallel factorization on root)
    id->MUMPS_ICNTL(13) = 0;
-   // Percentage increase of estimated workspace (default = 20%)
-   id->MUMPS_ICNTL(14) = 20;
+   // Percentage increase of estimated workspace.
+   // Increased to 200% for large 3D DG systems where MUMPS memory
+   // estimation underpredicts fill-in. PETSc uses a similar default.
+   id->MUMPS_ICNTL(14) = 200;
    // Number of OpenMP threads (default)
    id->MUMPS_ICNTL(16) = 0;
    // Matrix input format (distributed)

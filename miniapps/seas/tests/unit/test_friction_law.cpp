@@ -559,6 +559,25 @@ void TestRobustness()
       TEST_ASSERT(std::isfinite(theta0), "Tiny 'a' InitialState: theta is finite");
       TEST_ASSERT(theta0 > 0.0, "Tiny 'a' InitialState: theta is positive");
    }
+
+   // Test 6: When both Brent brackets fail, match Tandem and return NaN.
+   // A non-finite psi makes the residual non-finite at both bracket endpoints.
+   {
+      real_t tau = 1.0e6;
+      real_t psi = std::numeric_limits<real_t>::quiet_NaN();
+      real_t sigma_n = 50.0e6;
+      real_t eta = 4.63e6;
+      real_t a = 0.015;
+
+      int iterations = -1;
+      real_t V_solved =
+         law.SolveSlipRatePsi(tau, psi, sigma_n, eta, a, &iterations);
+
+      TEST_ASSERT(std::isnan(V_solved),
+                  "Bracket failure: SolveSlipRatePsi returns NaN like Tandem");
+      TEST_ASSERT(iterations == 0,
+                  "Bracket failure: No iterations reported");
+   }
 }
 
 // =============================================================================
@@ -604,6 +623,130 @@ void TestDerivatives()
 }
 
 // =============================================================================
+// RecomputeSlipRate consistency test
+// =============================================================================
+//
+// Verifies that re-solving the friction equation from the current state
+// produces the expected slip rate.  This is the core mechanism behind the
+// RecomputeSlipRate fix for the stale-cache output bug at locked fault DOFs.
+//
+// At a = 0.004 (BP5 VW core), V ~ exp(-psi/a) is exponentially sensitive
+// to psi.  This test confirms that the friction solver resolves V correctly
+// even at extreme parameters, and that small psi perturbations cause bounded
+// V changes (i.e., the solver doesn't suddenly return V=0).
+
+void TestRecomputeSlipRateConsistency()
+{
+   std::cout << "\n=== Testing RecomputeSlipRate Consistency ===\n";
+
+   DieterichRuinaFriction::Constants c;
+   c.f0 = 0.6;
+   c.V0 = 1.0e-6;
+   c.b = 0.03;
+   c.Dc = 0.14;
+   DieterichRuinaFriction law(c);
+
+   real_t sigma_n = 25.0e6;   // BP5 normal stress
+   real_t eta = 32.04e9 / (2.0 * 3464.0);  // radiation damping
+
+   // --- Test 1: VW core (a=0.004), interseismic locked fault ---
+   // At depth 10km, psi grows as theta accumulates.
+   // After ~2 days, theta ~ 3e5 s, psi ~ 0.62.
+   // V should be extremely small but non-zero.
+   {
+      real_t a = 0.004;  // BP5 VW core
+      real_t psi = 0.62;
+      real_t tau = 8.74e6;  // Typical interseismic traction at dp+10
+
+      real_t V = law.SolveSlipRatePsi(tau, psi, sigma_n, eta, a);
+      TEST_ASSERT(std::isfinite(V), "VW locked: V is finite");
+      TEST_ASSERT(V > 0.0, "VW locked: V > 0 (not clamped to zero)");
+      // V should be extremely small (order 10^(-30) to 10^(-40))
+      TEST_ASSERT(V < 1e-10, "VW locked: V < 1e-10 (fault is locked)");
+      TEST_ASSERT(V > 1e-300, "VW locked: V > 1e-300 (not underflow)");
+
+      std::cout << "    V(a=0.004, psi=0.62) = " << V
+                << " (log10 = " << std::log10(V) << ")\n";
+   }
+
+   // --- Test 2: Small psi perturbation produces bounded V change ---
+   // Verifies that V changes smoothly with psi (no sudden jump to zero).
+   {
+      real_t a = 0.004;
+      real_t psi0 = 0.62;
+      real_t tau = 8.74e6;
+      real_t delta_psi = 1e-4;  // One RK stage's worth of psi change
+
+      real_t V0 = law.SolveSlipRatePsi(tau, psi0, sigma_n, eta, a);
+      real_t V1 = law.SolveSlipRatePsi(tau, psi0 + delta_psi, sigma_n, eta, a);
+
+      TEST_ASSERT(std::isfinite(V0) && V0 > 0,
+                  "Psi perturbation: V0 valid");
+      TEST_ASSERT(std::isfinite(V1) && V1 > 0,
+                  "Psi perturbation: V1 valid");
+
+      // V change should be bounded: |log10(V1/V0)| < delta_psi / (a * ln10) + margin
+      real_t expected_log_change = delta_psi / (a * std::log(10.0));
+      real_t actual_log_change = std::abs(std::log10(V1) - std::log10(V0));
+
+      TEST_ASSERT(actual_log_change < expected_log_change * 2.0,
+                  "Psi perturbation: V change bounded");
+
+      std::cout << "    delta_psi=" << delta_psi
+                << " expected_dlog10V=" << expected_log_change
+                << " actual=" << actual_log_change << "\n";
+   }
+
+   // --- Test 3: Vector solve consistency ---
+   // Verifies that the 2-component solver decomposes V correctly
+   // at extreme parameters.
+   {
+      real_t a = 0.004;
+      real_t psi = 0.62;
+      real_t tau_vec[2] = {-0.016e6, 8.74e6};  // Mostly strike
+      real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] + tau_vec[1]*tau_vec[1]);
+
+      real_t V_scalar = law.SolveSlipRatePsi(tau_abs, psi, sigma_n, eta, a);
+
+      real_t V_vec[2];
+      law.SolveSlipRateVectorPsi(tau_vec, psi, sigma_n, eta, a, V_vec);
+      real_t V_vec_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
+
+      TEST_ASSERT(std::isfinite(V_vec[0]) && std::isfinite(V_vec[1]),
+                  "Vector solve: components finite");
+      TEST_ASSERT(V_vec_abs > 0.0,
+                  "Vector solve: |V| > 0");
+
+      // |V_vec| should equal the scalar V
+      if (V_scalar > 0 && V_vec_abs > 0)
+      {
+         real_t rel_diff = std::abs(V_vec_abs - V_scalar) /
+                           std::max(V_scalar, V_vec_abs);
+         TEST_ASSERT(rel_diff < 1e-10,
+                     "Vector solve: |V_vec| == V_scalar");
+      }
+
+      std::cout << "    V_scalar=" << V_scalar << " V_vec_abs=" << V_vec_abs
+                << " V_vec=(" << V_vec[0] << ", " << V_vec[1] << ")\n";
+   }
+
+   // --- Test 4: VS region (a=0.04, larger than b) ---
+   // At the surface, V should be close to Vp during interseismic.
+   {
+      real_t a = 0.04;  // VS region
+      real_t psi = 0.62;
+      real_t tau = 13.3e6;  // Surface traction
+
+      real_t V = law.SolveSlipRatePsi(tau, psi, sigma_n, eta, a);
+      TEST_ASSERT(std::isfinite(V) && V > 0,
+                  "VS surface: V valid");
+      // VS region: V should be relatively large (much > VW core)
+      TEST_ASSERT(V > 1e-20,
+                  "VS surface: V > 1e-20 (not locked)");
+   }
+}
+
+// =============================================================================
 // Main
 // =============================================================================
 
@@ -622,6 +765,7 @@ int main(int argc, char *argv[])
    TestInitialState();
    TestDerivatives();
    TestRobustness();
+   TestRecomputeSlipRateConsistency();
 
    std::cout << "\n========================================\n";
    std::cout << "Test Summary\n";

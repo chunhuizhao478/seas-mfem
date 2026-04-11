@@ -359,6 +359,15 @@ public:
    /// @brief Compute d(state)/dt = RHS(t, state).
    void Mult(const Vector &state, Vector &rate) const override;
 
+   /// @brief PETSc TS explicit RHS callback.
+   ///
+   /// This operator is explicit and already defines its RHS in Mult(), so
+   /// forward PETSc's ExplicitMult() call to the same implementation.
+   void ExplicitMult(const Vector &state, Vector &rate) const override
+   {
+      Mult(state, rate);
+   }
+
    const GridFuncType &GetDisplacement() const { return *u_gf_; }
    void SetDisplacement(const Vector &u) { *u_gf_ = u; }
    const Vector &GetTraction() const { return traction_; }

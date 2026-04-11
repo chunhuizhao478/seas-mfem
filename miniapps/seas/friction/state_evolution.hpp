@@ -181,9 +181,16 @@ public:
       : b_(b), V0_(V0), f0_(f0) {}
 
    /// Compute dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0].
+   ///
+   /// No cap on the exp argument — matches Tandem and SCEC benchmark exactly.
+   /// The adaptive RK45 time stepper handles the stiffness during post-earthquake
+   /// healing by reducing dt. Previous versions capped at exp(20), which limited
+   /// the healing rate and deviated from the benchmark formulation.
+   /// See bp5_debug_v51.md Section 23.
    real_t Rate(real_t V, real_t psi, real_t Dc) const override
    {
-      return (b_ * V0_ / Dc) * (std::exp((f0_ - psi) / b_) - V / V0_);
+      real_t exp_arg = (f0_ - psi) / b_;
+      return (b_ * V0_ / Dc) * (std::exp(exp_arg) - V / V0_);
    }
 
    /// Steady-state psi: psi_ss = f0 + b*ln(V0/V).
@@ -202,7 +209,8 @@ public:
    /// dG/dpsi = -(V0/Dc) * exp((f0-psi)/b).
    real_t RateDerivativeTheta(real_t V, real_t psi, real_t Dc) const override
    {
-      return -(V0_ / Dc) * std::exp((f0_ - psi) / b_);
+      real_t exp_arg = (f0_ - psi) / b_;
+      return -(V0_ / Dc) * std::exp(exp_arg);
    }
 
    const char *GetName() const override { return "AgingLawPsi"; }

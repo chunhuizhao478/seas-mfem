@@ -10,6 +10,7 @@ bp1/plots/
 bp1/plots_*/
 bp2_verification_plots/
 bp2/benchmark_data_200m/benchmark_comparison_plots/
+bp5/plots_*/
 
 # Mesh output
 *.vtk
@@ -21,6 +22,7 @@ seas_mms_antiplane_parallel
 seas_pseas
 seas_bp2_full
 seas_bp1_full
+seas_bp5_full
 seas_test_*
 
 # Checkpoint files
@@ -32,3 +34,7 @@ test_pv_*/
 
 # Archive
 archive/
+
+# Diagnostic artifacts
+face_audit_r*.csv
+bp5_quick_check/

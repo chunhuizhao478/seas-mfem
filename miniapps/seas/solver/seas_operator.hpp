@@ -15,8 +15,11 @@
 #include "mfem.hpp"
 #include "../domain/domain_operator.hpp"
 #include "../domain/antiplane_operator.hpp"
+#include "../domain/elasticity_operator.hpp"
 #include "../fault/rate_state_fault.hpp"
 #include "../common/seas_types.hpp"
+#include "../trace/face_trace_logger.hpp"
+#include <iomanip>
 #include "../common/mpi_context.hpp"
 
 #include <memory>
@@ -35,9 +38,6 @@ namespace seas
 /// Inherits from TimeDependentOperator for use with MFEM ODE solvers
 /// (RK4Solver, etc.).
 ///
-/// State vector layout: [slip_0, theta_0, slip_1, theta_1, ..., slip_{n-1}, theta_{n-1}]
-/// Rate vector layout:  [V_0, dtheta_0/dt, V_1, dtheta_1/dt, ..., V_{n-1}, dtheta_{n-1}/dt]
-///
 /// The coupling flow in each Mult() call:
 /// 1. Extract slip from state vector
 /// 2. Solve domain problem with slip BC -> displacement u
@@ -46,8 +46,10 @@ namespace seas
 ///
 /// @tparam MeshType Either Mesh for serial or ParMesh for parallel
 /// @tparam DomainOpType Domain operator type (default: AntiplaneDomainOperator)
+/// @tparam FaultOpType Fault operator type (default: RateStateFaultOperator<MeshType>)
 template <typename MeshType = Mesh,
-          typename DomainOpType = AntiplaneDomainOperator<MeshType>>
+          typename DomainOpType = AntiplaneDomainOperator<MeshType>,
+          typename FaultOpType = RateStateFaultOperator<MeshType>>
 class SEASQuasiDynamicOperator : public TimeDependentOperator
 {
 public:
@@ -59,7 +61,7 @@ public:
    /// @param fault Fault operator (Phase 3) - owned externally
    /// @param mpi_ctx MPI context for parallel reductions (optional)
    SEASQuasiDynamicOperator(DomainOpType *domain,
-                             RateStateFaultOperator<MeshType> *fault,
+                             FaultOpType *fault,
                              MPIContext *mpi_ctx = nullptr);
 
    /// Destructor
@@ -73,16 +75,26 @@ public:
    /// 3. Init: Compute theta from stress equilibrium
    /// 4. Verify initial slip rate matches V_init
    ///
-   /// @param[out] state State vector to initialize [2 * num_fault_dofs]
+   /// @param[out] state State vector to initialize [fault->StateSize()]
    void SetInitialCondition(Vector &state);
 
    /// @brief Compute d(state)/dt = RHS(t, state).
    ///
    /// This is the main ODE function called by MFEM ODE solvers (e.g., RK4Solver).
    ///
-   /// @param[in] state Current state [slip_0, theta_0, slip_1, theta_1, ...]
-   /// @param[out] rate Time derivatives [V_0, dtheta_0/dt, V_1, dtheta_1/dt, ...]
+   /// @param[in] state Current state [StateSize()]
+   /// @param[out] rate Time derivatives [StateSize()]
    void Mult(const Vector &state, Vector &rate) const override;
+
+   /// @brief PETSc TS explicit RHS callback.
+   ///
+   /// PetscODESolver routes explicit RHS evaluations through ExplicitMult().
+   /// This operator is explicit and already defines its RHS in Mult(), so
+   /// forward both code paths to the same implementation.
+   void ExplicitMult(const Vector &state, Vector &rate) const override
+   {
+      Mult(state, rate);
+   }
 
    /// @brief Get current displacement solution.
    const GridFuncType &GetDisplacement() const { return *u_gf_; }
@@ -92,6 +104,13 @@ public:
 
    /// @brief Get traction at fault from last evaluation.
    const Vector &GetTraction() const { return traction_; }
+
+   /// @brief Get elastic normal traction from last evaluation (owned DOFs).
+   /// Only valid when elastic_sigma_n_ is true; empty otherwise.
+   const Vector &GetNormalTraction() const { return normal_traction_; }
+
+   /// @brief Whether elastic sigma_n feedback is active.
+   bool ElasticSigmaNEnabled() const { return elastic_sigma_n_; }
 
    /// @brief Get maximum slip rate from last evaluation (global in parallel).
    real_t GetMaxSlipRate() const
@@ -107,11 +126,32 @@ public:
    const DomainOpType *GetDomain() const { return domain_; }
 
    /// @brief Get the fault operator.
-   const RateStateFaultOperator<MeshType> *GetFault() const { return fault_; }
+   const FaultOpType *GetFault() const { return fault_; }
+
+   /// v51: Zero dip traction component after ComputeTraction, before friction law.
+   /// Tests whether the 21% cross-component contamination in {σ·n} causes the dip offset.
+   void SetZeroDipTraction(bool v) { zero_dip_traction_ = v; }
+
+   /// v51: Dump dip/strike traction ratio during coseismic (V_max > threshold).
+   void SetDiagCoseismicDip(bool v, real_t v_threshold = 0.1)
+   {
+      diag_coseismic_dip_ = v;
+      coseismic_v_threshold_ = v_threshold;
+   }
+
+   /// v51: Use elastic normal stress (sigma_n from displacement field)
+   /// instead of constant sigma_n. Matches Tandem's DieterichRuinaAgeing.
+   void SetElasticSigmaN(bool v) { elastic_sigma_n_ = v; }
+
+   /// Set face tracer (non-owning pointer, caller manages lifetime).
+   void SetFaceTracer(FaceTraceLogger<MeshType> *tracer)
+   {
+      face_tracer_ = tracer;
+   }
 
 private:
    DomainOpType *domain_;
-   RateStateFaultOperator<MeshType> *fault_;
+   FaultOpType *fault_;
    MPIContext *mpi_ctx_ = nullptr;
 
    /// Displacement grid function (solution of domain problem)
@@ -119,17 +159,41 @@ private:
 
    /// Work vectors (mutable for use in const Mult)
    mutable Vector slip_;
+   mutable Vector local_slip_;
    mutable Vector traction_;
+   mutable Vector local_traction_;
+   mutable Vector normal_traction_;  // v51: elastic T_n for sigma_n feedback
+   mutable Vector local_normal_traction_;
+
+   // Face tracer decomposition vectors (allocated only when tracer is active)
+   FaceTraceLogger<MeshType> *face_tracer_ = nullptr;
+   mutable Vector local_traction_stress_, local_traction_correction_;
+   mutable Vector local_jump_residual_;
+   mutable Vector local_normal_stress_, local_normal_corr_;
+   mutable Vector traction_stress_, traction_correction_, jump_residual_;
+   mutable Vector normal_stress_, normal_corr_;
+
+   // v57 MPI diagnostic: fire once on first non-zero slip
+   mutable bool mpi_diag_done_ = true;  // v58: disabled by default
+
+   // v51 flags
+   bool zero_dip_traction_ = false;
+   // v54: default ON to match Tandem's DieterichRuinaBase.h:87
+   // (sigma_n = -sn_elastic + SnPre). Previously off by default (v51).
+   bool elastic_sigma_n_ = true;
+   bool diag_coseismic_dip_ = false;
+   mutable bool diag_coseismic_dip_done_ = false;
+   real_t coseismic_v_threshold_ = 0.1;
 };
 
 // ============================================================================
 // Implementation
 // ============================================================================
 
-template <typename MeshType, typename DomainOpType>
-SEASQuasiDynamicOperator<MeshType, DomainOpType>::SEASQuasiDynamicOperator(
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SEASQuasiDynamicOperator(
    DomainOpType *domain,
-   RateStateFaultOperator<MeshType> *fault,
+   FaultOpType *fault,
    MPIContext *mpi_ctx)
    : TimeDependentOperator(fault->StateSize()),
      domain_(domain), fault_(fault), mpi_ctx_(mpi_ctx)
@@ -141,13 +205,16 @@ SEASQuasiDynamicOperator<MeshType, DomainOpType>::SEASQuasiDynamicOperator(
    u_gf_ = std::make_unique<GridFuncType>(&domain_->GetFESpace());
    *u_gf_ = 0.0;
 
-   // Allocate work vectors
-   slip_.SetSize(fault_->NumNodes());
-   traction_.SetSize(fault_->NumNodes());
+   // Allocate work vectors (sized for slip/traction components)
+   slip_.SetSize(fault_->SlipSize());
+   local_slip_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
+   traction_.SetSize(fault_->TractionSize());
+   local_traction_.SetSize(domain_->NumSlipComponents() * domain_->GetNumFaultDOFs());
+   local_normal_traction_.SetSize(domain_->GetNumFaultDOFs());
 }
 
-template <typename MeshType, typename DomainOpType>
-void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vector &state)
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::SetInitialCondition(Vector &state)
 {
    MFEM_VERIFY(state.Size() == fault_->StateSize(),
                "State vector size mismatch: got " << state.Size()
@@ -158,18 +225,25 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
 
    // Phase 2: Solve domain with zero slip to get initial traction
    fault_->GetSlip(state, slip_);
-   domain_->Solve(0.0, slip_, *u_gf_);
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(0.0, local_slip_, *u_gf_);
+   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_);
+   domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                 domain_->NumSlipComponents());
 
    // Phase 3: Initialize theta from stress equilibrium
    //   tau0 + traction = sigma_n * f(V_init, theta) + eta * V_init
+   // V_max is recomputed below after the verification re-solve
    real_t V_max = fault_->Init(traction_, state);
 
    // Phase 4: Verify initial slip rate
    // Re-solve domain and recompute traction with updated state
    fault_->GetSlip(state, slip_);
-   domain_->Solve(0.0, slip_, *u_gf_);
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(0.0, local_slip_, *u_gf_);
+   domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_);
+   domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                 domain_->NumSlipComponents());
 
    // Compute RHS to populate slip rates
    Vector rate_temp(fault_->StateSize());
@@ -177,8 +251,6 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
 
    // Use global V_max in parallel, local in serial
    V_max = GetMaxSlipRate();
-
-   const BP2Params &params = fault_->GetParams();
 
    // Verify stress equilibrium (local check, each rank verifies its own DOFs)
    real_t eq_error = fault_->VerifyStressEquilibrium(traction_, state);
@@ -189,19 +261,61 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::SetInitialCondition(Vecto
    MFEM_VERIFY(eq_error < 1e-6,
                "Initial stress equilibrium error too large: " << eq_error);
 
-   // Verify initial slip rate is close to V_init
-   // Allow generous tolerance since the domain solve with zero slip
-   // gives near-zero traction, so V should be close to V_init
-   real_t V_rel_err = std::abs(V_max - params.V_init) /
-                      std::max(params.V_init, 1e-30);
-   MFEM_VERIFY(V_rel_err < 0.1,
-               "Initial V_max = " << V_max
-               << " differs from V_init = " << params.V_init
-               << " by " << V_rel_err * 100 << "%");
+   // v58 diagnostic: dump post-init state at fault-tip DOFs (disabled for production)
+   if (false)
+   {
+      const auto *geom = fault_->GetGeometry();
+      if (geom)
+      {
+         const Vector &x2 = geom->GetCoordsX2();
+         const Vector &x3 = geom->GetCoordsX3();
+         const Vector &a_val = geom->GetAValues();
+         const Vector &slip_rate = fault_->GetSlipRate();
+         int num_nodes = fault_->NumNodes();
+
+         for (int i = 0; i < num_nodes; i++)
+         {
+            if (std::abs(x2(i)) > 45000.0 && x3(i) < 3000.0)
+            {
+               int rank = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
+               // State: [slip_dip, slip_strike, psi] per node for BP5
+               real_t psi0 = state(i * 3 + 2);  // BP5: 3 state per node
+               mfem::out << std::scientific << std::setprecision(10)
+                         << "[TIP-POST] rank=" << rank
+                         << " dof=" << i
+                         << " x2=" << x2(i)
+                         << " x3=" << x3(i)
+                         << " a=" << a_val(i)
+                         << " psi0=" << psi0
+                         << " V=(" << slip_rate(2*i) << ","
+                         << slip_rate(2*i+1) << ")"
+                         << " traction=(" << traction_(2*i) << ","
+                         << traction_(2*i+1) << ")"
+                         << "\n";
+            }
+         }
+      }
+   }
+
+   // Log initial slip rate comparison (use global V_ref in parallel).
+   // For BP5-QD, the nucleation zone has δτ overstress so V_max > V_nuc
+   // is expected and correct — do not assert.
+   {
+      real_t V_ref = fault_->GetReferenceVInit();
+      if (mpi_ctx_)
+      {
+         V_ref = mpi_ctx_->GlobalMax(V_ref);
+      }
+      if (mpi_ctx_ == nullptr || mpi_ctx_->IsRoot())
+      {
+         mfem::out << "  Initial V_max = " << V_max
+                   << ", V_ref (max V_init) = " << V_ref << "\n";
+      }
+   }
 }
 
-template <typename MeshType, typename DomainOpType>
-void SEASQuasiDynamicOperator<MeshType, DomainOpType>::Mult(
+template <typename MeshType, typename DomainOpType, typename FaultOpType>
+void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
    const Vector &state, Vector &rate) const
 {
    // 1. Extract slip from state vector
@@ -217,18 +331,224 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType>::Mult(
 #endif
 
    // 2. Solve domain problem with slip BC
-   //    ∇²u = 0 with [[u]] = slip on fault (all x=0 faces)
-   domain_->Solve(t, slip_, *u_gf_);
+   domain_->ExpandOwnedToLocalFault(slip_, local_slip_, domain_->NumSlipComponents());
+   domain_->Solve(t, local_slip_, *u_gf_);
 
    // 3. Compute traction at fault from displacement
-   //    τ_qs = μ * {{∂u/∂x}} + μ * κ * h⁻¹ * ([[u]] - δ)
-   domain_->ComputeTraction(*u_gf_, slip_, traction_);
+   // v51: optionally compute elastic normal traction for sigma_n feedback
+   if (face_tracer_ && face_tracer_->IsActive())
+   {
+      // Decomposed traction for face tracer (including normal decomposition)
+      domain_->ComputeTractionDiagnostics(
+         *u_gf_, local_slip_, local_traction_,
+         local_traction_stress_, local_traction_correction_,
+         local_jump_residual_,
+         elastic_sigma_n_ ? &local_normal_traction_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_stress_ : nullptr,
+         elastic_sigma_n_ ? &local_normal_corr_ : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_stress_, traction_stress_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_traction_correction_,
+                                    traction_correction_,
+                                    domain_->NumSlipComponents());
+      domain_->RestrictToOwnedFault(local_jump_residual_, jump_residual_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+         domain_->RestrictToOwnedFault(local_normal_stress_,
+                                       normal_stress_);
+         domain_->RestrictToOwnedFault(local_normal_corr_,
+                                       normal_corr_);
+      }
+   }
+   else
+   {
+      domain_->ComputeTraction(*u_gf_, local_slip_, local_traction_,
+                               elastic_sigma_n_ ? &local_normal_traction_
+                                                : nullptr);
+      domain_->RestrictToOwnedFault(local_traction_, traction_,
+                                    domain_->NumSlipComponents());
+      if (elastic_sigma_n_)
+      {
+         domain_->RestrictToOwnedFault(local_normal_traction_,
+                                       normal_traction_);
+      }
+   }
+
+   // v57 MPI diagnostic: print norms on first non-zero-slip evaluation
+   if (!mpi_diag_done_)
+   {
+      real_t slip_norm = local_slip_.Normlinf();
+      if (mpi_ctx_) { slip_norm = mpi_ctx_->GlobalMax(slip_norm); }
+      if (slip_norm > 1e-30)
+      {
+         mpi_diag_done_ = true;
+         real_t u_norm = u_gf_->Normlinf();
+         real_t trac_norm = local_traction_.Normlinf();
+         if (mpi_ctx_)
+         {
+            u_norm = mpi_ctx_->GlobalMax(u_norm);
+            trac_norm = mpi_ctx_->GlobalMax(trac_norm);
+         }
+         if (mpi_ctx_ == nullptr || mpi_ctx_->IsRoot())
+         {
+            mfem::out << "[MPI-DIAG] First non-zero-slip Mult:\n"
+                      << "  ||slip||_inf=" << std::scientific << std::setprecision(15)
+                      << slip_norm << "\n"
+                      << "  ||u||_inf=" << u_norm << "\n"
+                      << "  ||traction||_inf=" << trac_norm << "\n";
+         }
+      }
+   }
+
+   // v51: Zero dip traction component (index 0 of each DOF's [dip, strike] pair)
+   if (zero_dip_traction_)
+   {
+      for (int i = 0; i < traction_.Size() / 2; i++)
+      {
+         traction_(2 * i) = 0.0;  // tau_dip = 0
+      }
+   }
+
+   // v51: Dump dip/strike traction ratio during coseismic phase
+   if (diag_coseismic_dip_ && !diag_coseismic_dip_done_)
+   {
+      // Check if V_max exceeds coseismic threshold
+      real_t v_max = fault_->GetMaxSlipRate();
+      if (mpi_ctx_) { v_max = fault_->GetGlobalMaxSlipRate(); }
+      if (v_max > coseismic_v_threshold_)
+      {
+         int n_dofs = traction_.Size() / 2;
+         real_t sum_ratio = 0.0;
+         real_t max_ratio = 0.0;
+         int count = 0;
+         real_t max_tau_dip = 0.0, max_tau_strike = 0.0;
+         int max_ratio_dof = -1;
+
+         for (int i = 0; i < n_dofs; i++)
+         {
+            real_t td = std::abs(traction_(2*i));      // |tau_dip|
+            real_t ts = std::abs(traction_(2*i + 1));   // |tau_strike|
+            if (ts > 1e3)  // only count DOFs with significant strike traction (> 1 kPa)
+            {
+               real_t ratio = td / ts;
+               sum_ratio += ratio;
+               count++;
+               if (ratio > max_ratio)
+               {
+                  max_ratio = ratio;
+                  max_ratio_dof = i;
+                  max_tau_dip = traction_(2*i);
+                  max_tau_strike = traction_(2*i + 1);
+               }
+            }
+         }
+
+         if (count > 0)
+         {
+            bool is_root = !mpi_ctx_ || mpi_ctx_->IsRoot();
+            if (is_root)
+            {
+               mfem::out << "[COSEISMIC-DIP] V_max=" << v_max
+                  << " n_active=" << count
+                  << " mean_|td/ts|=" << sum_ratio / count
+                  << " max_|td/ts|=" << max_ratio
+                  << " @DOF=" << max_ratio_dof
+                  << " tau_dip=" << max_tau_dip
+                  << " tau_strike=" << max_tau_strike
+                  << std::endl;
+            }
+            diag_coseismic_dip_done_ = true;
+         }
+      }
+   }
 
    // 4. Compute fault RHS (slip rate and state rate)
-   //    Stress balance: τ₀ + τ_qs = σ_n * f(V, θ) + η * V
-   //    State evolution: dθ/dt = G(V, θ)
-   fault_->ComputeRHS(traction_, state, rate);
+   // v51: pass elastic normal traction for sigma_n feedback (nullptr = use constant)
+   fault_->ComputeRHS(traction_, state, rate,
+                       elastic_sigma_n_ ? &normal_traction_ : nullptr);
+
+   // Per-stage coupling loop norms (first 10 evaluations)
+   {
+      static int stage_count = 0;
+      if (stage_count < 10 && domain_->IsFirstStepDebugEnabled())
+      {
+         stage_count++;
+         real_t trac_l1 = 0.0, trac_linf = 0.0;
+         for (int i = 0; i < traction_.Size(); i++)
+         {
+            real_t a = std::abs(traction_(i));
+            trac_l1 += a;
+            if (a > trac_linf) trac_linf = a;
+         }
+         real_t V_l1 = 0.0, V_linf = 0.0;
+         const Vector &V = fault_->GetSlipRate();
+         for (int i = 0; i < V.Size(); i++)
+         {
+            real_t a = std::abs(V(i));
+            V_l1 += a;
+            if (a > V_linf) V_linf = a;
+         }
+         // MPI reduce (traction_ and V are owned-restricted, one value per owned DOF)
+         real_t g_trac_l1, g_trac_linf, g_V_l1, g_V_linf;
+         if (mpi_ctx_)
+         {
+            MPI_Reduce(&trac_l1, &g_trac_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&trac_linf, &g_trac_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_l1, &g_V_l1, 1, MPI_DOUBLE, MPI_SUM,
+                        0, mpi_ctx_->GetComm());
+            MPI_Reduce(&V_linf, &g_V_linf, 1, MPI_DOUBLE, MPI_MAX,
+                        0, mpi_ctx_->GetComm());
+         }
+         else
+         {
+            g_trac_l1 = trac_l1; g_trac_linf = trac_linf;
+            g_V_l1 = V_l1; g_V_linf = V_linf;
+         }
+         bool is_root = !mpi_ctx_ || mpi_ctx_->IsRoot();
+         if (is_root)
+         {
+            mfem::out << std::setprecision(15);
+            mfem::out << "  [COUPLING] Stage " << stage_count
+                      << " t=" << t << "\n";
+            mfem::out << "  [COUPLING] ||traction||_1   = " << g_trac_l1 << "\n";
+            mfem::out << "  [COUPLING] ||traction||_inf = " << g_trac_linf << "\n";
+            mfem::out << "  [COUPLING] ||V||_1   = " << g_V_l1 << "\n";
+            mfem::out << "  [COUPLING] ||V||_inf = " << g_V_linf << "\n";
+         }
+      }
+   }
+
+   // Face tracer: stage decomposition data for committed step
+   if (face_tracer_ && face_tracer_->IsActive())
+   {
+      face_tracer_->RecordMult(
+         traction_, traction_stress_, traction_correction_,
+         jump_residual_, normal_traction_,
+         normal_stress_, normal_corr_,
+         fault_->GetSlipRate(), fault_->GetSigmaN());
+   }
 }
+
+// BP2 type alias (uses default template arguments)
+using BP2SEASOp = SEASQuasiDynamicOperator<Mesh>;
+
+// BP5 type aliases
+using BP5DomainOp = ElasticityDomainOperator<Mesh>;
+using BP5SEASOp   = SEASQuasiDynamicOperator<Mesh, BP5DomainOp, BP5FaultOp>;
+
+#ifdef MFEM_USE_MPI
+// Parallel BP5 type alias
+using PBP5SEASOp = SEASQuasiDynamicOperator<ParMesh,
+                      ElasticityDomainOperator<ParMesh>,
+                      RateStateFaultOperator<ParMesh, 2>>;
+#endif
 
 } // namespace seas
 } // namespace mfem

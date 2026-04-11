@@ -1,0 +1,60 @@
+# SEAS-MFEM BP5 Configuration File
+#
+# This is the standard SCEC BP5-QD benchmark configuration.
+# All values match BP5Params defaults. Override individual fields
+# as needed — the benchmark preset fills everything else.
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+scale = 1000       # km → m
+order = 1
+
+# Material, friction, loading, fault geometry:
+# All filled by benchmark = "bp5". Override selectively:
+#
+# [material]
+# density = 2670.0
+# cs = 3464.0
+# nu = 0.25
+#
+# [friction]
+# V0 = 1e-6
+# f0 = 0.6
+# b = 0.03
+# L0 = 0.14
+# L_nuc = 0.13
+# a0 = 0.004
+# amax = 0.04
+# sigma_n = 25e6
+#
+# [loading]
+# Vp = 1e-9
+# V_init = 1e-9
+# V_nuc = 0.01
+# delta_tau_factor = 0.0
+# nucleation_eps = 1e-3
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "mumps"
+blr_tol = 1e-12
+
+[time]
+t_final = 56844000000  # ~1800 yr
+tandem_time_stepping = true
+checkpoint_interval = 5000
+max_steps = 10000000
+
+[output]
+output_dir = "."
+output_prefix = "bp5"
+
+[simulation]
+mode = "qd"

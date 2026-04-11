@@ -111,7 +111,8 @@ public:
 
    void ComputeTraction(const GridFuncType &displacement,
                         const Vector &slip_bc,
-                        Vector &traction) override;
+                        Vector &traction,
+                        Vector *normal_traction = nullptr) override;
 
    FESpaceType &GetFESpace() override { return *fes_; }
    const FESpaceType &GetFESpace() const override { return *fes_; }
@@ -900,8 +901,10 @@ real_t AntiplaneDomainOperator<MeshType>::InterpolateSlipBC(
 template <typename MeshType>
 void AntiplaneDomainOperator<MeshType>::ComputeTraction(
    const GridFuncType &displacement, const Vector &slip_bc,
-   Vector &traction)
+   Vector &traction, Vector *normal_traction)
 {
+   // Antiplane has no normal traction component; ignore the parameter.
+   (void)normal_traction;
    // Traction on fault faces from average gradient: τ = μ * {{∂u/∂x}}.
 
    traction.SetSize(num_fault_dofs_);
