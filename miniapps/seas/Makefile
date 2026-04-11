@@ -548,7 +548,10 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-bp5-integration \
       test-bp5-output test-bp5-mesh \
       test-diag-vtk test-mesh-regions \
-      test-face-quadrature
+      test-face-quadrature \
+      test-linear-elastic test-constitutive-integrator \
+      test-boundary-config test-boundary-config-operator \
+      test-logging
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law

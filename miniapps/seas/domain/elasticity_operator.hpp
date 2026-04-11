@@ -168,8 +168,10 @@ public:
       {
          mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "
                    << "to be incorrect for BP5. Use BCMode::FarField. ***\n\n";
-         int max_attr = mesh_.bdr_attributes.Size() > 0
-                        ? mesh_.bdr_attributes.Max() : 6;
+         MFEM_VERIFY(mesh_.bdr_attributes.Size() > 0,
+                     "BCMode::AllDirichlet requires boundary elements, "
+                     "but mesh has none");
+         int max_attr = mesh_.bdr_attributes.Max();
          for (int a = 1; a <= max_attr; a++)
          {
             bdr_config_.dirichlet_attrs.insert(a);
