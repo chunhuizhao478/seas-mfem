@@ -77,6 +77,7 @@ TEST_LINEAR_ELASTIC_SRC = tests/unit/test_linear_elastic.cpp
 TEST_CONSTITUTIVE_INTEG_SRC = tests/unit/test_constitutive_integrator.cpp
 TEST_BOUNDARY_CONFIG_SRC = tests/unit/test_boundary_config.cpp
 TEST_BOUNDARY_CONFIG_OP_SRC = tests/unit/test_boundary_config_operator.cpp
+TEST_LOGGING_SRC = tests/unit/test_logging.cpp
 # Phase 5: TOML config
 TEST_CONFIG_PARSER_SRC = tests/unit/test_seas_config_parser.cpp
 SEAS_DRIVER_SRC = drivers/seas_driver.cpp
@@ -111,6 +112,7 @@ TEST_LINEAR_ELASTIC_OBJ = $(TEST_LINEAR_ELASTIC_SRC:.cpp=.o)
 TEST_CONSTITUTIVE_INTEG_OBJ = $(TEST_CONSTITUTIVE_INTEG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OBJ = $(TEST_BOUNDARY_CONFIG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OP_OBJ = $(TEST_BOUNDARY_CONFIG_OP_SRC:.cpp=.o)
+TEST_LOGGING_OBJ = $(TEST_LOGGING_SRC:.cpp=.o)
 TEST_CONFIG_PARSER_OBJ = $(TEST_CONFIG_PARSER_SRC:.cpp=.o)
 SEAS_DRIVER_OBJ = $(SEAS_DRIVER_SRC:.cpp=.o)
 
@@ -194,7 +196,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_linear_elastic \
                seas_test_constitutive_integrator \
                seas_test_boundary_config \
-               seas_test_boundary_config_operator
+               seas_test_boundary_config_operator \
+               seas_test_logging
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -209,6 +212,7 @@ TEST_FAULT_SCATTER_OBJ = $(TEST_FAULT_SCATTER_SRC:.cpp=.o)
 PARALLEL_HEADERS = common/mpi_context.hpp \
                    common/parallel_utils.hpp \
                    common/seas_types.hpp \
+                   common/logging.hpp \
                    common/fault_scatter.hpp \
                    common/mpi_check.hpp \
                    common/mpi_tags.hpp
@@ -313,7 +317,7 @@ MFEM_TESTS = MINIAPPS
         test-bp5-output test-bp5-mesh \
         test-diag-vtk test-mesh-regions \
         test-bp5-smoke test-linear-elastic test-constitutive-integrator \
-        test-boundary-config test-boundary-config-operator \
+        test-boundary-config test-boundary-config-operator test-logging \
         test-config-parser \
         regression-check quick-check
 
@@ -662,6 +666,17 @@ $(TEST_BOUNDARY_CONFIG_OP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE
 
 test-boundary-config-operator: seas_test_boundary_config_operator
 	./seas_test_boundary_config_operator
+
+# Phase 6: Logging tests
+seas_test_logging: $(TEST_LOGGING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_LOGGING_OBJ) $(MFEM_LIBS)
+
+$(TEST_LOGGING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-logging: seas_test_logging
+	./seas_test_logging
 
 # Phase 5: TOML config tests and driver
 seas_test_config_parser: $(TEST_CONFIG_PARSER_OBJ)

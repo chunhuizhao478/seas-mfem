@@ -115,7 +115,6 @@ public:
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), solver_type_(solver_type),
         bc_mode_(BCMode::FarField),
-        use_bdr_config_(true),
         check_residual_(config.check_residual),
         mass_inv_computed_(false),
         fault_depths_computed_(false),
@@ -152,7 +151,6 @@ public:
         Vp_(Vp), Wf_(Wf), lf_(lf),
         method_(method), solver_type_(solver_type),
         bc_mode_(bc_mode),
-        use_bdr_config_(false),
         check_residual_(false),
         lambda_coeff_(lambda), mu_coeff_(mu),
         mass_inv_computed_(false),
@@ -164,11 +162,29 @@ public:
       model_ = owned_model_.get();
 
       // Build BoundaryConfig from legacy BCMode numbers.
-      // These numbers match existing BP5 test meshes ONLY.
       bdr_config_.fault_attr = 3;
-      bdr_config_.dirichlet_attrs = {5};
-      bdr_config_.natural_attrs = {1};
       bdr_config_.default_dirichlet_func = MakeBP5DirichletFunc(Vp);
+      if (bc_mode == BCMode::AllDirichlet)
+      {
+         mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "
+                   << "to be incorrect for BP5. Use BCMode::FarField. ***\n\n";
+         int max_attr = mesh_.bdr_attributes.Size() > 0
+                        ? mesh_.bdr_attributes.Max() : 6;
+         for (int a = 1; a <= max_attr; a++)
+         {
+            bdr_config_.dirichlet_attrs.insert(a);
+         }
+      }
+      else if (bc_mode == BCMode::XOnly)
+      {
+         bdr_config_.dirichlet_attrs = {1, 2};
+         bdr_config_.natural_attrs = {3, 4, 5, 6};
+      }
+      else // FarField (default, correct for BP5)
+      {
+         bdr_config_.dirichlet_attrs = {5};
+         bdr_config_.natural_attrs = {1};
+      }
 
       InitOperator();
    }
@@ -357,8 +373,6 @@ private:
 
    // Boundary configuration (Phase 4+)
    BoundaryConfig bdr_config_;
-   bool use_bdr_config_ = false;  // true = Phase 4+ path, false = legacy BCMode path
-
    real_t Vp_, Wf_, lf_;
    DGMethod method_;
    SolverType solver_type_;

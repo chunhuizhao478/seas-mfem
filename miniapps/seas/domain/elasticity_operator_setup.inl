@@ -21,39 +21,13 @@
       dirichlet_bdr_marker_.SetSize(num_bdr);
       dirichlet_bdr_marker_ = 0;
 
-      if (use_bdr_config_)
+      // Always use BoundaryConfig (populated by both constructors)
+      for (int attr : bdr_config_.dirichlet_attrs)
       {
-         // Phase 4+ path: use BoundaryConfig attrs directly
-         for (int attr : bdr_config_.dirichlet_attrs)
-         {
-            MFEM_VERIFY(attr >= 1 && attr <= num_bdr,
-                        "BoundaryConfig: Dirichlet attr " << attr
-                        << " not in mesh (max attr = " << num_bdr << ")");
-            dirichlet_bdr_marker_[attr - 1] = 1;
-         }
-      }
-      else
-      {
-         // Legacy BCMode path (deprecated)
-         if (bc_mode_ == BCMode::AllDirichlet)
-         {
-            mfem::out << "\n  *** WARNING: AllDirichlet BC mode is legacy and known "
-                      << "to be incorrect for BP5. ***\n"
-                      << "  *** Use BCMode::FarField (default) for production runs. "
-                      << "***\n\n";
-            for (int i = 0; i < num_bdr; i++)
-            {
-               dirichlet_bdr_marker_[i] = 1;
-            }
-         }
-         else if (bc_mode_ == BCMode::FarField || bc_mode_ == BCMode::XOnly)
-         {
-            for (int i = 0; i < num_bdr; i++)
-            {
-               int attr = i + 1;
-               if (attr == 5) { dirichlet_bdr_marker_[i] = 1; }
-            }
-         }
+         MFEM_VERIFY(attr >= 1 && attr <= num_bdr,
+                     "BoundaryConfig: Dirichlet attr " << attr
+                     << " not in mesh (max attr = " << num_bdr << ")");
+         dirichlet_bdr_marker_[attr - 1] = 1;
       }
    }
 
