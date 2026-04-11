@@ -839,30 +839,6 @@ public:
                tau_vec, psi, sigma_n_eff, eta, a, V_vec);
             V_out(2*i) = V_vec[0];
             V_out(2*i+1) = V_vec[1];
-
-            // Diagnostic: catch cases where solver returns V=0
-            // despite non-zero traction (the stale-output bug symptom)
-            real_t tau_abs_dbg = std::sqrt(tau_vec[0]*tau_vec[0] +
-                                           tau_vec[1]*tau_vec[1]);
-            real_t V_abs_dbg = std::sqrt(V_vec[0]*V_vec[0] +
-                                          V_vec[1]*V_vec[1]);
-            if (tau_abs_dbg > 1e3 && V_abs_dbg == 0.0 && a < 0.01)
-            {
-               real_t x2_dbg = geom_ ? geom_->GetCoordsX2()(i) : 0.0;
-               real_t x3_dbg = geom_ ? geom_->GetCoordsX3()(i) : 0.0;
-               int rank_dbg = mpi_ctx_ ? mpi_ctx_->Rank() : 0;
-               std::cerr << std::scientific << std::setprecision(15)
-                  << "[RECOMPUTE-V0] r=" << rank_dbg
-                  << " d=" << i
-                  << " x2=" << x2_dbg << " x3=" << x3_dbg
-                  << " tau=(" << tau_vec[0] << "," << tau_vec[1] << ")"
-                  << " |tau|=" << tau_abs_dbg
-                  << " psi=" << psi << " psi/a=" << psi/a
-                  << " sn=" << sigma_n_eff
-                  << " a=" << a << " eta=" << eta
-                  << " V=(" << V_vec[0] << "," << V_vec[1] << ")"
-                  << std::endl;
-            }
          }
       }
    }

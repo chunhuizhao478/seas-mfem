@@ -371,7 +371,13 @@ public:
 
       real_t Va = -32.0;
       real_t Vb = std::log10(tau / eta);
-      real_t Va_min = std::log10(std::nextafter(0.0, 1.0));
+      // Tandem uses log10(nextafter(0,1)) ≈ -323.3, but Intel's FTZ mode
+      // flushes the subnormal nextafter(0,1) to 0, producing Va_min = -inf.
+      // With -inf as the bracket bound, zeroIn converges to V=0 instead of
+      // the true root.  Use a hard-coded finite bound: -300 gives
+      // V_min = 1e-300 which is well within normal double range and far
+      // below any physical slip rate.
+      real_t Va_min = -300.0;
       real_t Flo = std::numeric_limits<real_t>::quiet_NaN();
       real_t Fhi = std::numeric_limits<real_t>::quiet_NaN();
       real_t lo = std::numeric_limits<real_t>::quiet_NaN();
@@ -424,33 +430,10 @@ public:
          return V_try;
       }
 
-      // Primary bracket failed — log inputs for VW-core DOFs
-      real_t psi_over_a_dbg = psi / a;
-      if (psi_over_a_dbg > 100.0 && a < 0.01)
-      {
-         std::cerr << std::scientific << std::setprecision(15)
-            << "[FRIC-FALLBACK] Primary failed, trying fallback: r="
-            << dbg_rank << " d=" << dbg_dof
-            << " x=" << dbg_x << " z=" << dbg_z
-            << " tau=" << tau << " psi=" << psi << " psi/a=" << psi_over_a_dbg
-            << " a=" << a << " sigma_n=" << sigma_n << " eta=" << eta
-            << " Flo=" << Flo << " Fhi=" << Fhi
-            << " Va=" << Va << " Vb=" << Vb
-            << " Va_min=" << Va_min << std::endl;
-      }
-
       // Fallback bracket (Tandem: lines 121-129)
       if (try_bracket(Va_min, Vb, V_try))
       {
          if (iterations) { *iterations = 0; }
-         // Log successful fallback for VW-core DOFs
-         if (psi_over_a_dbg > 100.0 && a < 0.01)
-         {
-            std::cerr << std::scientific << std::setprecision(15)
-               << "[FRIC-FALLBACK] Fallback SUCCEEDED: V=" << V_try
-               << " log10(V)=" << (V_try > 0 ? std::log10(V_try) : -999.0)
-               << std::endl;
-         }
          return V_try;
       }
 
