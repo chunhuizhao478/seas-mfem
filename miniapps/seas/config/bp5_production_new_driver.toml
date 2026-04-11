@@ -1,0 +1,28 @@
+# Full production run using new TOML driver
+# 400 ranks, ~1800 yr earthquake cycles
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+scale = 1000
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "mumps"
+blr_tol = 1e-12
+
+[time]
+t_final = 56844000000
+tandem_time_stepping = true
+checkpoint_interval = 5000
+
+[output]
+output_dir = "."
+output_prefix = "bp5_newdriver_prod"

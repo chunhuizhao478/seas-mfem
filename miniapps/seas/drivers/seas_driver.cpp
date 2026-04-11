@@ -273,6 +273,13 @@ int main(int argc, char *argv[])
    if (config.time.tandem_time_stepping)
    {
       dt_init = 0.01;
+      // Tandem-style: no V-guard rejection (matches old driver line 882)
+   }
+   else
+   {
+      // Default: V-guard ON (factor=100) — reject RK stages where V > 100*V_stage0
+      // Matches old driver (bp5_verification_full.cpp:1712-1715)
+      ode_solver.SetVGuard(100.0);
    }
 
    ode_solver.SetDt(dt_init);
@@ -283,6 +290,15 @@ int main(int argc, char *argv[])
       std::cout << "  dt_init = " << dt_init << " s"
                 << (config.time.tandem_time_stepping ? " (Tandem-style)" : " (CFL)")
                 << "\n\n";
+   }
+
+   // Write initial state (t=0)
+   bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
+   bench_out.Flush();
+   if (global_out)
+   {
+      real_t log10_V = (V_init > 0) ? std::log10(V_init) : -300.0;
+      global_out->WriteStep({0.0, log10_V});
    }
 
    // =========================================================================
@@ -345,22 +361,15 @@ int main(int argc, char *argv[])
          in_event = false;
       }
 
-      // I/O
-      bool do_write = write_every_step;
-      if (!do_write)
+      // I/O: adaptive schedule (SaveScheduler) or every step
+      if (write_every_step)
       {
-         // Adaptive I/O: write at seismic transitions and periodically
-         static int last_io_step = 0;
-         if (step - last_io_step >= 10 || (in_event && step - last_io_step >= 1))
-         {
-            do_write = true;
-            last_io_step = step;
-         }
+         bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+         bench_out.Flush();
       }
-
-      if (do_write)
+      else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max))
       {
-         bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max);
+         bench_out.Flush();
       }
 
       // Global output (every accepted step)

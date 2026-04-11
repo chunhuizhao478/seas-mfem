@@ -77,6 +77,7 @@ TEST_LINEAR_ELASTIC_SRC = tests/unit/test_linear_elastic.cpp
 TEST_CONSTITUTIVE_INTEG_SRC = tests/unit/test_constitutive_integrator.cpp
 TEST_BOUNDARY_CONFIG_SRC = tests/unit/test_boundary_config.cpp
 TEST_BOUNDARY_CONFIG_OP_SRC = tests/unit/test_boundary_config_operator.cpp
+TEST_BOUNDARY_CLASSIF_SRC = tests/unit/test_boundary_classification.cpp
 TEST_LOGGING_SRC = tests/unit/test_logging.cpp
 TEST_CONFIG_BRIDGE_SRC = tests/unit/test_seas_config_bridge.cpp
 # Phase 5: TOML config
@@ -113,6 +114,7 @@ TEST_LINEAR_ELASTIC_OBJ = $(TEST_LINEAR_ELASTIC_SRC:.cpp=.o)
 TEST_CONSTITUTIVE_INTEG_OBJ = $(TEST_CONSTITUTIVE_INTEG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OBJ = $(TEST_BOUNDARY_CONFIG_SRC:.cpp=.o)
 TEST_BOUNDARY_CONFIG_OP_OBJ = $(TEST_BOUNDARY_CONFIG_OP_SRC:.cpp=.o)
+TEST_BOUNDARY_CLASSIF_OBJ = $(TEST_BOUNDARY_CLASSIF_SRC:.cpp=.o)
 TEST_LOGGING_OBJ = $(TEST_LOGGING_SRC:.cpp=.o)
 TEST_CONFIG_BRIDGE_OBJ = $(TEST_CONFIG_BRIDGE_SRC:.cpp=.o)
 TEST_CONFIG_PARSER_OBJ = $(TEST_CONFIG_PARSER_SRC:.cpp=.o)
@@ -556,7 +558,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-face-quadrature \
       test-linear-elastic test-constitutive-integrator \
       test-boundary-config test-boundary-config-operator \
-      test-logging test-config-bridge
+      test-boundary-classification \
+      test-logging test-config-bridge test-config-parser
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -674,6 +677,17 @@ $(TEST_BOUNDARY_CONFIG_OP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE
 
 test-boundary-config-operator: seas_test_boundary_config_operator
 	./seas_test_boundary_config_operator
+
+# Phase 4h-iii: Boundary classification (BuildFacetBCTables) face-by-face tests
+seas_test_boundary_classification: $(TEST_BOUNDARY_CLASSIF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BOUNDARY_CLASSIF_OBJ) $(MFEM_LIBS)
+
+$(TEST_BOUNDARY_CLASSIF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-boundary-classification: seas_test_boundary_classification
+	./seas_test_boundary_classification
 
 # Phase 6: Logging tests
 seas_test_logging: $(TEST_LOGGING_OBJ)
@@ -893,6 +907,59 @@ quick-check: seas_bp5_full
 		--regression-tolerance $(QUICK_CHECK_TOL) \
 		--ref-dir $(QUICK_CHECK_GOLDEN)
 	@echo "Quick-check complete. Output in $(QUICK_CHECK_DIR)/"
+
+# Phase 7c-iii: New driver (seas_driver) quick-check, equivalence, and regression targets
+DRIVER_QC_NP ?= 8
+DRIVER_QC_DIR ?= bp5_driver_quick_check
+driver-quick-check: seas_driver
+	@mkdir -p $(DRIVER_QC_DIR)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(DRIVER_QC_NP) ./seas_driver \
+		config/bp5_quick_check.toml --write-every-step
+	@echo "Driver quick-check complete. Output in $(DRIVER_QC_DIR)/"
+
+DRIVER_EQUIV_NP ?= 8
+DRIVER_EQUIV_STEPS ?= 20
+DRIVER_EQUIV_NEW_DIR ?= bp5_driver_equiv_new
+DRIVER_EQUIV_OLD_DIR ?= bp5_driver_equiv_old
+driver-equivalence: seas_driver seas_bp5_full
+	@mkdir -p $(DRIVER_EQUIV_NEW_DIR) $(DRIVER_EQUIV_OLD_DIR)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(DRIVER_EQUIV_NP) ./seas_driver \
+		config/bp5_quick_check.toml \
+		--override output.output_dir=$(DRIVER_EQUIV_NEW_DIR) \
+		--override output.output_prefix=bp5_equiv \
+		--write-every-step
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(DRIVER_EQUIV_NP) ./seas_bp5_full \
+		--inline-mesh --max-steps $(DRIVER_EQUIV_STEPS) \
+		--output-dir $(DRIVER_EQUIV_OLD_DIR) --output-prefix bp5_equiv \
+		--tandem-time-stepping --solver mumps \
+		--write-every-step
+	@echo "Equivalence test: comparing new vs old driver output..."
+	python3 scripts/regression_check.py \
+		--sim-dir $(DRIVER_EQUIV_NEW_DIR) --sim-prefix bp5_equiv \
+		--ref-dir $(DRIVER_EQUIV_OLD_DIR) \
+		--tolerance 1e-12
+	@echo "Driver equivalence PASSED."
+
+DRIVER_REG_NP ?= 8
+DRIVER_REG_DIR ?= bp5_driver_regression
+DRIVER_REG_GOLDEN ?= bp5/benchmark_data/golden_inline_8r_20step
+DRIVER_REG_TOL ?= 0
+driver-regression-local: seas_driver
+	@if [ ! -d $(DRIVER_REG_GOLDEN) ]; then \
+		echo "SKIP driver-regression-local: golden dir $(DRIVER_REG_GOLDEN) not found"; \
+		exit 0; \
+	fi
+	@mkdir -p $(DRIVER_REG_DIR)
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) $(DRIVER_REG_NP) ./seas_driver \
+		config/bp5_quick_check.toml \
+		--override output.output_dir=$(DRIVER_REG_DIR) \
+		--override output.output_prefix=bp5_quick \
+		--write-every-step
+	python3 scripts/regression_check.py \
+		--sim-dir $(DRIVER_REG_DIR) --sim-prefix bp5_quick \
+		--ref-dir $(DRIVER_REG_GOLDEN) \
+		--tolerance $(DRIVER_REG_TOL)
+	@echo "Driver regression PASSED (tol=$(DRIVER_REG_TOL))."
 
 # Phase 10: BP2 first-cycle verification
 seas_bp2_verify: $(BP2_VERIFY_OBJ)
