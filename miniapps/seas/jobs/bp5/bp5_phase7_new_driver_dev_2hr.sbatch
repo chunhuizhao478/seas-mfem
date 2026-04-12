@@ -1,28 +1,22 @@
 #!/bin/bash
-#SBATCH -J bp5_nd
-#SBATCH -o jobs/bp5/bp5_new_driver_production_%j.out
-#SBATCH -e jobs/bp5/bp5_new_driver_production_%j.err
-#SBATCH -p normal
+#SBATCH -J bp5_nd2
+#SBATCH -o jobs/bp5/bp5_new_driver_dev_2hr_%j.out
+#SBATCH -e jobs/bp5/bp5_new_driver_dev_2hr_%j.err
+#SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 48:00:00
+#SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# Phase 7: Full production run using NEW TOML-based driver.
-# Uses all new code paths: ConstitutiveModel, BoundaryConfig, DomainConfig.
-# Compares against Phase 0 golden (golden_tandem_p1_1000m).
+# Phase 7: Dev 2hr test run using NEW TOML-based driver.
+# Tests that the driver builds and runs on Frontera with toml11 v3.
 #
-# Before submitting, on the login node:
+# Before submitting:
 #   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 #   git fetch origin && git checkout refactor/phase7-driver-verification && git pull
 #   git submodule update --init miniapps/seas/extern/toml11
-#   cd miniapps/seas && sbatch jobs/bp5/bp5_phase7_new_driver_production.sbatch
-#
-# Post-run comparison:
-#   python3 scripts/regression_check.py \
-#       --sim-dir $RESULT_DIR --sim-prefix $OUTPUT_PREFIX \
-#       --ref-dir bp5/benchmark_data/golden_tandem_p1_1000m \
-#       --tolerance 1e-2
+#   cd miniapps/seas/extern/toml11 && git checkout v3.8.1 && cd ../..
+#   sbatch jobs/bp5/bp5_phase7_new_driver_dev_2hr.sbatch
 
 export LC_ALL=C
 export LANG=C
@@ -45,23 +39,23 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; e
 
 cd miniapps/seas
 
-# Verify toml11 submodule is present
-test -f extern/toml11/include/toml.hpp || { echo "ERROR: toml11 not initialized. Run: git submodule update --init miniapps/seas/extern/toml11"; exit 1; }
+# Verify toml11 v3 submodule
+test -f extern/toml11/toml.hpp || { echo "ERROR: toml11 not initialized or wrong version. Need v3.8.1"; exit 1; }
 
 make clean
 make seas_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
-RESULT_DIR="bp5/results_new_driver_production_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX="bp5_newdriver_prod_job${SLURM_JOB_ID}"
+RESULT_DIR="bp5/results_new_driver_dev_2hr_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX="bp5_newdriver_dev_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR}"
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
-echo "Phase 7: New TOML driver full production run (400 ranks, 48hr)"
+echo "Phase 7 dev test: 400 ranks, 2hr, 50 steps"
 
-ibrun ./seas_driver config/bp5_production_new_driver.toml \
+ibrun ./seas_driver config/bp5_verification_50step.toml \
       --override output.output_dir="${RESULT_DIR}" \
       --override output.output_prefix="${OUTPUT_PREFIX}" \
       --write-every-step
