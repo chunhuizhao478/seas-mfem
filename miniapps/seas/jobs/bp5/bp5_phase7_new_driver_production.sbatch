@@ -34,8 +34,9 @@ module load hypre/2.31.0
 module load mumps/5.3
 module load parmetis
 module load petsc/3.15
+module load fftw3/3.3.8
 
-export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${LD_LIBRARY_PATH}"
 
 cd /scratch2/10024/zhaochun/seas-project/seas-mfem
 
