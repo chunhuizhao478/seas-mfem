@@ -23,9 +23,10 @@ MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
 
 # Optional TOML support (requires extern/toml11)
-SEAS_USE_TOML ?= $(if $(wildcard extern/toml11/include/toml.hpp),YES,)
+# v3: toml.hpp at root; v4: toml.hpp in include/
+SEAS_USE_TOML ?= $(if $(wildcard extern/toml11/toml.hpp),YES,$(if $(wildcard extern/toml11/include/toml.hpp),YES,))
 ifeq ($(SEAS_USE_TOML),YES)
-   TOML_FLAGS = -DSEAS_USE_TOML -Iextern/toml11/include
+   TOML_FLAGS = -DSEAS_USE_TOML -Iextern/toml11 -Iextern/toml11/include
 else
    TOML_FLAGS =
 endif

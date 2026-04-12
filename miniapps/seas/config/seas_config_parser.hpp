@@ -191,7 +191,7 @@ private:
          const auto &m = data.at("mesh");
          config.mesh.file = toml::find_or<std::string>(m, "file", config.mesh.file);
          config.mesh.scale = toml::find_or<double>(m, "scale", config.mesh.scale);
-         config.mesh.order = toml::find_or<int>(m, "order", config.mesh.order);
+         config.mesh.order = static_cast<int>(toml::find_or<toml::integer>(m, "order", config.mesh.order));
       }
 
       if (data.contains("material"))
@@ -244,7 +244,7 @@ private:
          if (bd.contains("dirichlet"))
          {
             config.boundary.dirichlet_attrs.clear();
-            for (const auto &v : toml::find<std::vector<int>>(bd, "dirichlet"))
+            for (const auto &v : toml::find<std::vector<toml::integer>>(bd, "dirichlet"))
             {
                config.boundary.dirichlet_attrs.insert(v);
             }
@@ -252,12 +252,12 @@ private:
          if (bd.contains("natural"))
          {
             config.boundary.natural_attrs.clear();
-            for (const auto &v : toml::find<std::vector<int>>(bd, "natural"))
+            for (const auto &v : toml::find<std::vector<toml::integer>>(bd, "natural"))
             {
                config.boundary.natural_attrs.insert(v);
             }
          }
-         config.boundary.fault_attr = toml::find_or<int>(bd, "fault", config.boundary.fault_attr);
+         config.boundary.fault_attr = static_cast<int>(toml::find_or<toml::integer>(bd, "fault", config.boundary.fault_attr));
       }
 
       if (data.contains("solver"))
@@ -268,7 +268,7 @@ private:
          config.solver.penalty_factor = toml::find_or<double>(s, "penalty_factor", config.solver.penalty_factor);
          config.solver.blr_tol = toml::find_or<double>(s, "blr_tol", config.solver.blr_tol);
          config.solver.check_residual = toml::find_or<bool>(s, "check_residual", config.solver.check_residual);
-         config.solver.face_basis_type = toml::find_or<int>(s, "face_basis_type", config.solver.face_basis_type);
+         config.solver.face_basis_type = static_cast<int>(toml::find_or<toml::integer>(s, "face_basis_type", config.solver.face_basis_type));
       }
 
       if (data.contains("time"))
@@ -277,8 +277,8 @@ private:
          config.time.t_final = toml::find_or<double>(t, "t_final", config.time.t_final);
          config.time.atol = toml::find_or<double>(t, "atol", config.time.atol);
          config.time.rtol = toml::find_or<double>(t, "rtol", config.time.rtol);
-         config.time.max_steps = toml::find_or<int>(t, "max_steps", config.time.max_steps);
-         config.time.checkpoint_interval = toml::find_or<int>(t, "checkpoint_interval", config.time.checkpoint_interval);
+         config.time.max_steps = static_cast<int>(toml::find_or<toml::integer>(t, "max_steps", config.time.max_steps));
+         config.time.checkpoint_interval = static_cast<int>(toml::find_or<toml::integer>(t, "checkpoint_interval", config.time.checkpoint_interval));
          config.time.tandem_time_stepping = toml::find_or<bool>(t, "tandem_time_stepping", config.time.tandem_time_stepping);
       }
 
