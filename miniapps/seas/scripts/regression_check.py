@@ -253,12 +253,24 @@ def main():
             f"({sim_data.shape[0]} vs {ref_data.shape[0]} pts):"
         )
 
+        # Interpolate the denser dataset onto the sparser time grid.
+        # When point counts differ significantly, interpolating a sparse
+        # dataset onto a dense grid creates large artifacts in regions
+        # with nonlinear behavior (e.g., log10_V_dip initial transient).
+        sim_is_denser = sim_data.shape[0] >= ref_data.shape[0]
+
         for f_idx, f_name in enumerate(STATION_FIELDS):
             col = f_idx + 1  # skip time column
-            ref_interp = interpolate_onto(
-                ref_data[:, 0], ref_data[:, col], sim_data[:, 0]
-            )
-            err = relative_l2_error(sim_data[:, col], ref_interp)
+            if sim_is_denser:
+                sim_interp = interpolate_onto(
+                    sim_data[:, 0], sim_data[:, col], ref_data[:, 0]
+                )
+                err = relative_l2_error(sim_interp, ref_data[:, col])
+            else:
+                ref_interp = interpolate_onto(
+                    ref_data[:, 0], ref_data[:, col], sim_data[:, 0]
+                )
+                err = relative_l2_error(sim_data[:, col], ref_interp)
 
             field_fail = args.tolerance is not None and err > args.tolerance
             status = "FAIL" if field_fail else "ok"
@@ -280,8 +292,12 @@ def main():
     ref_g = load_global_file(ref_global, args.tfinal)
 
     if sim_g is not None and ref_g is not None:
-        ref_gv_interp = interpolate_onto(ref_g[:, 0], ref_g[:, 1], sim_g[:, 0])
-        err = relative_l2_error(sim_g[:, 1], ref_gv_interp)
+        if sim_g.shape[0] >= ref_g.shape[0]:
+            sim_gv_interp = interpolate_onto(sim_g[:, 0], sim_g[:, 1], ref_g[:, 0])
+            err = relative_l2_error(sim_gv_interp, ref_g[:, 1])
+        else:
+            ref_gv_interp = interpolate_onto(ref_g[:, 0], ref_g[:, 1], sim_g[:, 0])
+            err = relative_l2_error(sim_g[:, 1], ref_gv_interp)
         g_fail = args.tolerance is not None and err > args.tolerance
         status = "FAIL" if g_fail else "ok"
         print(f"  Global log10(Vmax): L2_rel = {err:.6e}  [{status}]")
