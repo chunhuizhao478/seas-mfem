@@ -1,22 +1,22 @@
 #!/bin/bash
-#SBATCH -J bp5_nd2
-#SBATCH -o bp5_new_driver_dev_2hr_%j.out
-#SBATCH -e bp5_new_driver_dev_2hr_%j.err
+#SBATCH -J bp5_p7v
+#SBATCH -o bp5_phase7_verify_%j.out
+#SBATCH -e bp5_phase7_verify_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# Phase 7: Dev 2hr test run using NEW TOML-based driver.
-# Tests that the driver builds and runs on Frontera with toml11 v3.
+# Phase 7: Verification run using NEW TOML-based driver with PETSc TS.
+# Tests all refactored code paths: ConstitutiveModel, BoundaryConfig,
+# DomainConfig, SEASConfigParser, and PETSc TS time integration.
 #
 # Before submitting:
 #   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
-#   git fetch origin && git checkout refactor/phase7-driver-verification && git pull
+#   git fetch origin && git pull
 #   git submodule update --init miniapps/seas/extern/toml11
-#   cd miniapps/seas/extern/toml11 && git checkout v3.8.1 && cd ../..
-#   sbatch jobs/bp5/bp5_phase7_new_driver_dev_2hr.sbatch
+#   sbatch miniapps/seas/jobs/bp5/bp5_phase7_new_driver_dev_2hr.sbatch
 
 export LC_ALL=C
 export LANG=C
@@ -39,21 +39,22 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; e
 
 cd miniapps/seas
 
-# Verify toml11 v3 submodule
-test -f extern/toml11/toml.hpp || { echo "ERROR: toml11 not initialized or wrong version. Need v3.8.1"; exit 1; }
+# Verify toml11 submodule
+test -f extern/toml11/include/toml.hpp || test -f extern/toml11/toml.hpp || \
+   { echo "ERROR: toml11 not initialized. Run: git submodule update --init miniapps/seas/extern/toml11"; exit 1; }
 
 make clean
 make seas_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
-RESULT_DIR="bp5/results_new_driver_dev_2hr_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX="bp5_newdriver_dev_job${SLURM_JOB_ID}"
+RESULT_DIR="bp5/results_phase7_verify_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX="bp5_phase7_verify_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR}"
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
-echo "Phase 7 dev test: 400 ranks, 2hr, 50 steps"
+echo "Phase 7 verification: 400 ranks, 2hr, 50 steps, PETSc TS RK45"
 
 ibrun ./seas_driver config/bp5_verification_50step.toml \
       --override output.output_dir="${RESULT_DIR}" \

@@ -13,6 +13,12 @@
 // For BP5: use config/bp5_example.toml as a starting point.
 
 #include "mfem.hpp"
+#ifdef MFEM_USE_PETSC
+#include "petsc.h"
+#if PETSC_VERSION_LT(3,19,0)
+#define PETSC_SUCCESS 0
+#endif
+#endif
 #include "../solver/seas_operator.hpp"
 #include "../solver/time_stepper.hpp"
 #include "../domain/elasticity_operator.hpp"
@@ -42,6 +48,142 @@
 
 using namespace mfem;
 using namespace mfem::seas;
+
+// ============================================================================
+// PETSc TS monitor context and callback
+// ============================================================================
+#ifdef MFEM_USE_PETSC
+
+/// Context passed to PETSc TSMonitor callback.
+struct DriverMonitorCtx
+{
+   MPIContext *mpi;
+   Vector *state;
+   ParallelBP5BenchmarkOutput *bench_out;
+   RateStateFaultOperator<ParMesh, 2> *fault_op;
+   PBP5SEASOp *seas_op;
+   ProbeOutput *global_out;  // may be nullptr (non-root)
+
+   bool write_every_step;
+   int  print_step_interval;
+   int  checkpoint_interval;
+   std::string full_prefix;
+
+   int  num_seismic_events;
+   bool in_seismic_event;
+   real_t V_threshold_seismic;
+   real_t V_threshold_interseismic;
+   real_t current_dt;
+};
+
+/// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
+static PetscErrorCode driver_ts_monitor_callback(
+   TS ts, PetscInt step, PetscReal time, Vec u, void *ctx)
+{
+   PetscFunctionBeginUser;
+   auto *mon = static_cast<DriverMonitorCtx*>(ctx);
+
+   Vector &state  = *mon->state;
+   auto   &mpi    = *mon->mpi;
+
+   PetscReal dt;
+   TSGetTimeStep(ts, &dt);
+   mon->current_dt = dt;
+
+   real_t V_max = mon->seas_op->GetMaxSlipRate();
+   {
+      bool has_nan = !std::isfinite(V_max);
+      if (!has_nan)
+      {
+         for (int i = 0; i < std::min(state.Size(), 100); i++)
+         {
+            if (!std::isfinite(state(i))) { has_nan = true; break; }
+         }
+      }
+      int local_nan = has_nan ? 1 : 0;
+      int global_nan = mpi.GlobalSumInt(local_nan);
+      has_nan = (global_nan > 0);
+      if (has_nan)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr << "NaN/Inf detected at step " << step
+                      << ", t = " << time / BP5Params::seconds_per_year
+                      << " yr, V_max = " << V_max << "\n";
+         }
+         TSSetConvergedReason(ts, TS_DIVERGED_STEP_REJECTED);
+         PetscFunctionReturn(PETSC_SUCCESS);
+      }
+   }
+
+   // Earthquake detection
+   if (!mon->in_seismic_event && V_max > mon->V_threshold_seismic)
+   {
+      mon->in_seismic_event = true;
+      mon->num_seismic_events++;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  *** EARTHQUAKE #" << mon->num_seismic_events
+                   << " at t = " << std::fixed << std::setprecision(1)
+                   << time / BP5Params::seconds_per_year << " yr"
+                   << ", V_max = " << std::scientific
+                   << std::setprecision(2) << V_max << " m/s ***\n";
+      }
+   }
+   else if (mon->in_seismic_event && V_max < mon->V_threshold_interseismic)
+   {
+      mon->in_seismic_event = false;
+      if (mpi.IsRoot())
+      {
+         std::cout << "  Earthquake #" << mon->num_seismic_events
+                   << " resolved at t = "
+                   << std::fixed << std::setprecision(1)
+                   << time / BP5Params::seconds_per_year << " yr\n";
+      }
+   }
+
+   // I/O: adaptive schedule or every step
+   if (mon->write_every_step)
+   {
+      mon->bench_out->ForceWrite(time, state, *mon->fault_op,
+                                 mon->seas_op->GetTraction(), V_max);
+      mon->bench_out->Flush();
+   }
+   else if (mon->bench_out->Write(time, state, *mon->fault_op,
+                                  mon->seas_op->GetTraction(), V_max))
+   {
+      mon->bench_out->Flush();
+   }
+
+   // Global output
+   if (mpi.IsRoot() && mon->global_out)
+   {
+      mon->global_out->WriteStep(
+         {time, V_max > 0.0 ? std::log10(V_max) : -300.0});
+   }
+
+   // Console output
+   int istep = static_cast<int>(step);
+   if (mpi.IsRoot() &&
+       (istep % mon->print_step_interval == 0 ||
+        V_max > mon->V_threshold_seismic))
+   {
+      std::cout << std::setw(10) << istep
+                << std::setw(16) << std::scientific << std::setprecision(6)
+                << time / BP5Params::seconds_per_year
+                << std::setw(14) << std::scientific << std::setprecision(3)
+                << static_cast<double>(dt)
+                << std::setw(16) << std::scientific << std::setprecision(3)
+                << V_max
+                << std::setw(8) << mon->num_seismic_events
+                << "\n";
+      std::cout.flush();
+   }
+
+   PetscFunctionReturn(PETSC_SUCCESS);
+}
+
+#endif // MFEM_USE_PETSC
 
 int main(int argc, char *argv[])
 {
@@ -86,6 +228,28 @@ int main(int argc, char *argv[])
    SEASConfigParser::ApplyCLIOverrides(config, overrides);
    SEASConfigParser::Validate(config);
 
+   // PETSc initialization (must happen before any PETSc calls)
+   bool petsc_initialized = false;
+   bool use_petsc_ts = config.time.use_petsc_ts;
+#ifndef MFEM_USE_PETSC
+   if (use_petsc_ts)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cerr << "WARNING: use_petsc_ts=true but MFEM built without PETSc. "
+                   << "Falling back to DormandPrince RK45.\n";
+      }
+      use_petsc_ts = false;
+   }
+#else
+   if (use_petsc_ts)
+   {
+      MFEMInitializePetsc(&argc, &argv,
+                          config.time.petsc_ts_options.c_str(), NULL);
+      petsc_initialized = true;
+   }
+#endif
+
    // Build bridge objects
    BP5Params params = BuildBP5Params(config);
    params.Validate();
@@ -103,6 +267,7 @@ int main(int argc, char *argv[])
                 << (config.benchmark.empty() ? "(none)" : config.benchmark) << "\n"
                 << "  DG method: " << config.solver.dg_method << "\n"
                 << "  Solver:    " << config.solver.solver_type << "\n"
+                << "  Stepper:   " << (use_petsc_ts ? "PETSc TS RK45" : "DormandPrince RK45") << "\n"
                 << "  Ranks:     " << mpi.Size() << "\n\n";
    }
 
@@ -255,14 +420,8 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Stage 7: Time stepper setup
    // =========================================================================
-   DormandPrinceRK45 ode_solver;
-   ode_solver.SetAbsTol(config.time.atol);
-   ode_solver.SetRelTol(config.time.rtol);
-   ode_solver.SetDtMin(1e-6);
-   ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
-   ode_solver.SetMPIContext(&mpi);
 
-   // CFL-aware initial dt
+   // CFL-aware initial dt (used by both PETSc and native paths)
    int dim = 3;
    real_t c_N_1 = config.mesh.order * (config.mesh.order + dim - 1.0) / dim;
    real_t c_N_1_ref = 2.0 * (2.0 + dim - 1.0) / dim;
@@ -272,21 +431,79 @@ int main(int argc, char *argv[])
    real_t dt_CFL = (h_min > 0) ? 2.0 * params.eta() * h_min / (beta * params.mu()) : dt_V;
    real_t dt_init = std::min(dt_V, dt_CFL);
 
-   // Tandem-style time stepping overrides
    if (config.time.tandem_time_stepping)
    {
       dt_init = 0.01;
-      // Tandem-style: no V-guard rejection (matches old driver line 882)
-   }
-   else
-   {
-      // Default: V-guard ON (factor=100) — reject RK stages where V > 100*V_stage0
-      // Matches old driver (bp5_verification_full.cpp:1712-1715)
-      ode_solver.SetVGuard(100.0);
    }
 
-   ode_solver.SetDt(dt_init);
-   ode_solver.Init(seas_op);
+   // Native DormandPrince solver (used when PETSc-TS is not active)
+   DormandPrinceRK45 ode_solver;
+   if (!use_petsc_ts)
+   {
+      ode_solver.SetAbsTol(config.time.atol);
+      ode_solver.SetRelTol(config.time.rtol);
+      ode_solver.SetDtMin(1e-6);
+      ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
+      ode_solver.SetMPIContext(&mpi);
+
+      if (!config.time.tandem_time_stepping)
+      {
+         ode_solver.SetVGuard(100.0);
+      }
+
+      ode_solver.SetDt(dt_init);
+      ode_solver.Init(seas_op);
+   }
+
+#ifdef MFEM_USE_PETSC
+   std::unique_ptr<PetscODESolver> petsc_ode;
+   DriverMonitorCtx petsc_mon_ctx{};
+   if (use_petsc_ts)
+   {
+      petsc_ode = std::make_unique<PetscODESolver>(mpi.GetComm(), "");
+      petsc_ode->SetAbsTol(config.time.atol);
+      petsc_ode->SetRelTol(config.time.rtol);
+      petsc_ode->SetMaxIter(config.time.max_steps);
+      petsc_ode->Init(seas_op, PetscODESolver::ODE_SOLVER_GENERAL);
+      petsc::TS ts = *petsc_ode;
+
+      // Re-enable adaptive stepping (MFEM disables it by default)
+      {
+         TSAdapt tsad;
+         PetscErrorCode ierr2 = TSGetAdapt(ts, &tsad);
+         MFEM_VERIFY(ierr2 == PETSC_SUCCESS, "TSGetAdapt failed");
+         ierr2 = TSAdaptSetType(tsad, TSADAPTBASIC);
+         MFEM_VERIFY(ierr2 == PETSC_SUCCESS, "TSAdaptSetType(BASIC) failed");
+      }
+
+      PetscErrorCode ierr = TSSetFromOptions(ts);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetFromOptions failed");
+
+      ierr = TSSetTimeStep(ts, dt_init);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSSetTimeStep(dt_init) failed");
+
+      // Register monitor callback
+      petsc_mon_ctx.mpi = &mpi;
+      petsc_mon_ctx.state = &state;
+      petsc_mon_ctx.bench_out = &bench_out;
+      petsc_mon_ctx.fault_op = &fault_op;
+      petsc_mon_ctx.seas_op = &seas_op;
+      petsc_mon_ctx.global_out = global_out.get();
+      petsc_mon_ctx.write_every_step = write_every_step;
+      petsc_mon_ctx.print_step_interval = 10;
+      petsc_mon_ctx.checkpoint_interval = config.time.checkpoint_interval;
+      petsc_mon_ctx.full_prefix = full_prefix;
+      petsc_mon_ctx.num_seismic_events = 0;
+      petsc_mon_ctx.in_seismic_event = false;
+      petsc_mon_ctx.V_threshold_seismic = 1e-3;
+      petsc_mon_ctx.V_threshold_interseismic = 1e-6;
+      petsc_mon_ctx.current_dt = dt_init;
+
+      ierr = TSMonitorSet(ts, driver_ts_monitor_callback, &petsc_mon_ctx,
+                          nullptr);
+      MFEM_VERIFY(ierr == PETSC_SUCCESS, "TSMonitorSet failed");
+   }
+#endif
 
    if (mpi.IsRoot())
    {
@@ -314,9 +531,8 @@ int main(int argc, char *argv[])
    int eq_count = 0;
    bool in_event = false;
    real_t V_max = V_init;
-
-   const real_t V_seismic = 1e-3;
-   const real_t V_interseismic = 1e-6;
+   int step_rejections = 0;
+   real_t current_dt = dt_init;
 
    if (mpi.IsRoot())
    {
@@ -328,79 +544,115 @@ int main(int argc, char *argv[])
                 << std::string(64, '-') << "\n";
    }
 
-   while (t < t_final && step < max_steps)
+#ifdef MFEM_USE_PETSC
+   if (use_petsc_ts)
    {
-      if (t + ode_solver.GetDt() > t_final)
+      // ---- PETSc TSSolve: single call, PETSc manages everything ----
+      MFEM_VERIFY(petsc_ode, "PETSc TS solver was not initialized");
+
+      if (mpi.IsRoot())
       {
-         ode_solver.SetDt(t_final - t);
+         std::cout << "  Entering TSSolve (t=" << t << " → " << t_final
+                   << " s) ...\n";
+         std::cout.flush();
       }
 
-      real_t dt;
-      bool accepted = ode_solver.Step(seas_op, state, t, dt);
-      if (!accepted) { continue; }
-      step++;
+      petsc_ode->Run(state, t, current_dt, t_final);
 
+      // Retrieve final step count and rejection count from PETSc
+      {
+         petsc::TS ts = *petsc_ode;
+         PetscInt ts_steps = 0;
+         TSGetStepNumber(ts, &ts_steps);
+         step = static_cast<int>(ts_steps);
+         PetscInt rejects = 0;
+         TSGetStepRejections(ts, &rejects);
+         step_rejections = static_cast<int>(rejects);
+      }
+
+      eq_count = petsc_mon_ctx.num_seismic_events;
+      in_event = petsc_mon_ctx.in_seismic_event;
       V_max = seas_op.GetMaxSlipRate();
-
-      // NaN/Inf check
-      if (std::isnan(V_max) || std::isinf(V_max))
+   }
+   else
+#endif
+   {
+      // ---- Native DormandPrince RK45 loop ----
+      while (t < t_final && step < max_steps)
       {
-         if (mpi.IsRoot())
+         if (t + ode_solver.GetDt() > t_final)
          {
-            std::cerr << "\n[FATAL] NaN/Inf detected at step " << step
-                      << ", t = " << t << " s. Aborting.\n";
+            ode_solver.SetDt(t_final - t);
          }
-         return 2;
-      }
 
-      // Earthquake detection
-      if (!in_event && V_max > V_seismic)
-      {
-         eq_count++;
-         in_event = true;
-      }
-      else if (in_event && V_max < V_interseismic)
-      {
-         in_event = false;
-      }
+         real_t dt;
+         bool accepted = ode_solver.Step(seas_op, state, t, dt);
+         if (!accepted) { continue; }
+         step++;
 
-      // I/O: adaptive schedule (SaveScheduler) or every step
-      if (write_every_step)
-      {
-         bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
-         bench_out.Flush();
-      }
-      else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max))
-      {
-         bench_out.Flush();
-      }
+         V_max = seas_op.GetMaxSlipRate();
 
-      // Global output (every accepted step)
-      if (global_out)
-      {
-         real_t log10_V = (V_max > 0) ? std::log10(V_max) : -300.0;
-         global_out->WriteStep({t, log10_V});
-      }
+         // NaN/Inf check
+         if (std::isnan(V_max) || std::isinf(V_max))
+         {
+            if (mpi.IsRoot())
+            {
+               std::cerr << "\n[FATAL] NaN/Inf detected at step " << step
+                         << ", t = " << t << " s. Aborting.\n";
+            }
+            return 2;
+         }
 
-      // Console output
-      if (step % 10 == 0 && mpi.IsRoot())
-      {
-         real_t t_yr = t / BP5Params::seconds_per_year;
-         std::cout << std::setw(10) << step
-                   << std::scientific << std::setprecision(6)
-                   << std::setw(16) << t_yr
-                   << std::setw(14) << dt
-                   << std::setw(16) << V_max
-                   << std::setw(8) << eq_count
-                   << "\n" << std::flush;
-      }
+         // Earthquake detection
+         if (!in_event && V_max > 1e-3)
+         {
+            eq_count++;
+            in_event = true;
+         }
+         else if (in_event && V_max < 1e-6)
+         {
+            in_event = false;
+         }
 
-      // Checkpoint (periodic log only — full checkpoint requires displacement/traction)
-      if (config.time.checkpoint_interval > 0 &&
-          step % config.time.checkpoint_interval == 0 && mpi.IsRoot())
-      {
-         std::cout << "Checkpoint at step " << step << ", t=" << t << " s\n";
+         // I/O: adaptive schedule or every step
+         if (write_every_step)
+         {
+            bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+            bench_out.Flush();
+         }
+         else if (bench_out.Write(t, state, fault_op, seas_op.GetTraction(), V_max))
+         {
+            bench_out.Flush();
+         }
+
+         // Global output (every accepted step)
+         if (global_out)
+         {
+            real_t log10_V = (V_max > 0) ? std::log10(V_max) : -300.0;
+            global_out->WriteStep({t, log10_V});
+         }
+
+         // Console output
+         if (step % 10 == 0 && mpi.IsRoot())
+         {
+            real_t t_yr = t / BP5Params::seconds_per_year;
+            std::cout << std::setw(10) << step
+                      << std::scientific << std::setprecision(6)
+                      << std::setw(16) << t_yr
+                      << std::setw(14) << dt
+                      << std::setw(16) << V_max
+                      << std::setw(8) << eq_count
+                      << "\n" << std::flush;
+         }
+
+         // Checkpoint
+         if (config.time.checkpoint_interval > 0 &&
+             step % config.time.checkpoint_interval == 0 && mpi.IsRoot())
+         {
+            std::cout << "Checkpoint at step " << step << ", t=" << t << " s\n";
+         }
       }
+      step_rejections = ode_solver.GetTotalRejections();
    }
 
    // =========================================================================
@@ -414,10 +666,15 @@ int main(int argc, char *argv[])
       std::cout << "\n=== SEAS Simulation Complete ===\n"
                 << "  Final time: " << t / BP5Params::seconds_per_year << " years\n"
                 << "  Steps:      " << step << "\n"
-                << "  Rejections: " << ode_solver.GetTotalRejections() << "\n"
+                << "  Rejections: " << step_rejections << "\n"
                 << "  Events:     " << eq_count << "\n"
+                << "  Stepper:    " << (use_petsc_ts ? "PETSc TS" : "DormandPrince RK45") << "\n"
                 << "================================\n";
    }
+
+#ifdef MFEM_USE_PETSC
+   if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
 
    return 0;
 }

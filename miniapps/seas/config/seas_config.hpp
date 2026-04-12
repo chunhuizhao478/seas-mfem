@@ -106,6 +106,8 @@ struct TimeConfig
    int max_steps = 10000000;
    int checkpoint_interval = 5000;
    bool tandem_time_stepping = true;
+   bool use_petsc_ts = true;        ///< Use PETSc TS RK45 (default, matches Tandem)
+   std::string petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg";
 };
 
 /// Output configuration

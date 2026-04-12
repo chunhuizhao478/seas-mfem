@@ -21,6 +21,8 @@ blr_tol = 1e-12
 [time]
 t_final = 56844000000
 tandem_time_stepping = true
+use_petsc_ts = true
+petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
 max_steps = 50
 
 [output]
