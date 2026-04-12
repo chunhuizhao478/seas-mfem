@@ -144,12 +144,15 @@ int main(int argc, char *argv[])
    ParMesh pmesh(mpi.GetComm(), *serial_mesh);
    serial_mesh.reset();
 
+   // GetGlobalNE() does MPI_Allreduce — must be called by ALL ranks.
+   long long global_ne = pmesh.GetGlobalNE();
+
    real_t h_min, h_max, kappa_min, kappa_max;
    pmesh.GetCharacteristics(h_min, h_max, kappa_min, kappa_max);
 
    if (mpi.IsRoot())
    {
-      std::cout << "  Global elements: " << pmesh.GetGlobalNE() << "\n"
+      std::cout << "  Global elements: " << global_ne << "\n"
                 << "  h_min = " << h_min << " m, h_max = " << h_max << " m\n\n";
    }
 
