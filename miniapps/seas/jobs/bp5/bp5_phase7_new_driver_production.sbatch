@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH -J bp5_nd
-#SBATCH -o jobs/bp5/bp5_new_driver_production_%j.out
-#SBATCH -e jobs/bp5/bp5_new_driver_production_%j.err
+#SBATCH -o bp5_new_driver_production_%j.out
+#SBATCH -e bp5_new_driver_production_%j.err
 #SBATCH -p normal
 #SBATCH -N 8
 #SBATCH -n 400

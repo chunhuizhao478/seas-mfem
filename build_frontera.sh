@@ -141,6 +141,21 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Initialize toml11 submodule (header-only, v3.8.1 for GCC 8.3 compat)
+echo ""
+echo "=== Initializing toml11 submodule ==="
+git submodule update --init miniapps/seas/extern/toml11 2>/dev/null || true
+if [ -d miniapps/seas/extern/toml11 ]; then
+    (cd miniapps/seas/extern/toml11 && git checkout v3.8.1 2>/dev/null || true)
+    if [ -f miniapps/seas/extern/toml11/toml.hpp ]; then
+        echo "  toml11 v3.8.1 ready (header-only, no build needed)"
+    else
+        echo "  WARNING: toml11 header not found. TOML driver will not build."
+    fi
+else
+    echo "  WARNING: toml11 submodule not available. TOML driver will not build."
+fi
+
 echo ""
 echo "=== Configuring MFEM ==="
 CONFIG_ARGS=(
@@ -178,6 +193,16 @@ echo "=== Building SEAS miniapps ==="
 cd miniapps/seas
 make seas_bp1_full seas_bp5_full seas_test_parallel_elasticity seas_test_bp5_parallel_smoke -j"${JOBS}"
 
+# Build TOML driver if toml11 is available
+if [ -f extern/toml11/toml.hpp ] || [ -f extern/toml11/include/toml.hpp ]; then
+    echo ""
+    echo "=== Building TOML driver ==="
+    make seas_driver -j"${JOBS}"
+    DRIVER_BUILT=1
+else
+    DRIVER_BUILT=0
+fi
+
 echo ""
 echo "=== Build complete ==="
 echo "Binaries:"
@@ -185,6 +210,12 @@ echo "  $(pwd)/seas_bp1_full"
 echo "  $(pwd)/seas_bp5_full"
 echo "  $(pwd)/seas_test_parallel_elasticity"
 echo "  $(pwd)/seas_test_bp5_parallel_smoke"
+if [ "${DRIVER_BUILT}" = "1" ]; then
+    echo "  $(pwd)/seas_driver          (TOML-based, new code paths)"
+fi
 echo ""
-echo "PETSc-enabled run example:"
+echo "Run examples:"
 echo "  ibrun ./seas_bp5_full --petsc-ts"
+if [ "${DRIVER_BUILT}" = "1" ]; then
+    echo "  ibrun ./seas_driver config/bp5_example.toml"
+fi
