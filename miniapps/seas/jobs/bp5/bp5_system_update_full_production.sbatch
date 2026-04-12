@@ -10,7 +10,7 @@
 
 # system_update branch: full production run (400 ranks, ~1800 yr).
 # Final verification after all 7 refactoring phases (0-6).
-# Compares against Phase 0 full production golden (golden_tandem_p1_1000m).
+# Compares against seas-mfem parallel golden (golden_parallel_400r_p1_1000m).
 #
 # Before submitting, on the login node:
 #   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
@@ -26,7 +26,7 @@
 # Post-run comparison:
 #   python3 scripts/regression_check.py \
 #       --sim-dir $RESULT_DIR --sim-prefix $OUTPUT_PREFIX \
-#       --ref-dir bp5/benchmark_data/golden_tandem_p1_1000m \
+#       --ref-dir bp5/benchmark_data/golden_parallel_400r_p1_1000m \
 #       --tolerance 1e-2
 
 export LC_ALL=C
@@ -70,7 +70,7 @@ ibrun ./seas_bp5_full \
       --dg-method IP \
       --tandem-time-stepping \
       --solver mumps \
-      --ref-dir bp5/benchmark_data/golden_tandem_p1_1000m \
+      --ref-dir bp5/benchmark_data/golden_parallel_400r_p1_1000m \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --checkpoint-interval 5000 \

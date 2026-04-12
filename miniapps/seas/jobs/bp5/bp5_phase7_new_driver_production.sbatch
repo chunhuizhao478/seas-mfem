@@ -11,7 +11,7 @@
 # Phase 7: Full production run using NEW TOML-based driver with PETSc TS.
 # Tests all refactored code paths: ConstitutiveModel, BoundaryConfig,
 # DomainConfig, SEASConfigParser, and PETSc TS time integration.
-# Compares against Phase 0 golden (golden_tandem_p1_1000m).
+# Compares against seas-mfem parallel golden (golden_parallel_400r_p1_1000m).
 #
 # Before submitting, on the login node:
 #   cd /scratch2/10024/zhaochun/seas-project/seas-mfem
@@ -22,7 +22,7 @@
 # Post-run comparison:
 #   python3 scripts/regression_check.py \
 #       --sim-dir $RESULT_DIR --sim-prefix $OUTPUT_PREFIX \
-#       --ref-dir bp5/benchmark_data/golden_tandem_p1_1000m \
+#       --ref-dir bp5/benchmark_data/golden_parallel_400r_p1_1000m \
 #       --tolerance 1e-2
 
 export LC_ALL=C
