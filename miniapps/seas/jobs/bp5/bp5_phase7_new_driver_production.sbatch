@@ -66,5 +66,4 @@ echo "Phase 7: New TOML driver + PETSc TS, full production (400 ranks, 48hr)"
 
 ibrun ./seas_driver config/bp5_production_new_driver.toml \
       --override output.output_dir="${RESULT_DIR}" \
-      --override output.output_prefix="${OUTPUT_PREFIX}" \
-      --write-every-step
+      --override output.output_prefix="${OUTPUT_PREFIX}"
