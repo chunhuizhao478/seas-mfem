@@ -48,6 +48,22 @@ void TestJacobianSymmetryABC()
 
    // A[VY][SXY] = -1/rho
    TEST_NEAR(Ax(VY, SXY), -1.0/rho, 1e-20, "A[VY][SXY] = -1/rho");
+
+   // B (y-direction): B[SYY][VY] = -(lambda+2*mu), B[VY][SYY] = -1/rho
+   DenseMatrix By(NUM_STATE, NUM_STATE);
+   flux.BuildJacobian(1, By);
+   TEST_NEAR(By(SYY, VY), -(lambda + 2.0*mu), 1e-6, "B[SYY][VY] = -(lambda+2mu)");
+   TEST_NEAR(By(VY, SYY), -1.0/rho, 1e-20,          "B[VY][SYY] = -1/rho");
+   TEST_NEAR(By(SXY, VX), -mu, 1e-6,                 "B[SXY][VX] = -mu");
+   TEST_NEAR(By(VX, SXY), -1.0/rho, 1e-20,           "B[VX][SXY] = -1/rho");
+
+   // C (z-direction): C[SZZ][VZ] = -(lambda+2*mu), C[VZ][SZZ] = -1/rho
+   DenseMatrix Cz(NUM_STATE, NUM_STATE);
+   flux.BuildJacobian(2, Cz);
+   TEST_NEAR(Cz(SZZ, VZ), -(lambda + 2.0*mu), 1e-6, "C[SZZ][VZ] = -(lambda+2mu)");
+   TEST_NEAR(Cz(VZ, SZZ), -1.0/rho, 1e-20,          "C[VZ][SZZ] = -1/rho");
+   TEST_NEAR(Cz(SXZ, VX), -mu, 1e-6,                 "C[SXZ][VX] = -mu");
+   TEST_NEAR(Cz(VX, SXZ), -1.0/rho, 1e-20,           "C[VX][SXZ] = -1/rho");
 }
 
 // ===== Test 2: Eigenvalues via split flux =====
@@ -88,6 +104,33 @@ void TestEigenvalues()
 
    TEST_ASSERT(eigval_err < 1e-6,
                "P-wave eigenvalue cp verified (error " + std::to_string(eigval_err) + ")");
+
+   // S-wave eigenvector for +cs (y-polarized): [0,0,0,-mu,0,0,0,cs,0]
+   // Values are O(mu*cs) ≈ 1e14, so use relative tolerance.
+   real_t e_s[NUM_STATE] = {0, 0, 0, -mu, 0, 0, 0, cs, 0};
+   real_t Ae_s[NUM_STATE];
+   Ax.Mult(e_s, Ae_s);
+   real_t s_err = 0.0, s_scale = 0.0;
+   for (int i = 0; i < NUM_STATE; i++)
+   {
+      s_err = std::max(s_err, std::abs(Ae_s[i] - cs * e_s[i]));
+      s_scale = std::max(s_scale, std::abs(cs * e_s[i]));
+   }
+   TEST_ASSERT(s_err / s_scale < 1e-10,
+               "S-wave eigenvalue cs verified (rel error " + std::to_string(s_err/s_scale) + ")");
+
+   // Leftgoing P-wave eigenvector for -cp: [+lp, +lambda, +lambda, 0,0,0, cp, 0, 0]
+   real_t e_left[NUM_STATE] = {lp, lambda, lambda, 0, 0, 0, cp, 0, 0};
+   real_t Ae_left[NUM_STATE];
+   Ax.Mult(e_left, Ae_left);
+   real_t left_err = 0.0, left_scale = 0.0;
+   for (int i = 0; i < NUM_STATE; i++)
+   {
+      left_err = std::max(left_err, std::abs(Ae_left[i] - (-cp) * e_left[i]));
+      left_scale = std::max(left_scale, std::abs(cp * e_left[i]));
+   }
+   TEST_ASSERT(left_err / left_scale < 1e-10,
+               "Leftgoing P-wave eigenvalue -cp verified (rel error " + std::to_string(left_err/left_scale) + ")");
 }
 
 // ===== Test 3: Rotation T * T^{-1} = Identity =====
@@ -225,6 +268,40 @@ void TestAbsorbingOutgoingPWave()
                "Absorbing: outgoing P-wave flux = AQ (error " + std::to_string(max_err) + ")");
 }
 
+// ===== Test 6b: Absorbing BC: incoming P-wave produces zero flux =====
+void TestAbsorbingIncomingPWave()
+{
+   std::cout << "Test 6b: TestAbsorbingIncomingPWave\n";
+   real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   GodunovFlux flux(lambda, mu, rho);
+
+   real_t cp = flux.GetCp();
+   real_t lp = lambda + 2.0*mu;
+
+   // Leftgoing P-wave eigenvector (eigenvalue -cp of A_x):
+   // [+lp, +lambda, +lambda, 0, 0, 0, cp, 0, 0]
+   // At x=+Lx boundary (normal = +x), this is an INCOMING wave.
+   real_t e_left[NUM_STATE] = {lp, lambda, lambda, 0, 0, 0, cp, 0, 0};
+
+   real_t nor[3] = {1.0, 0.0, 0.0};
+   real_t F_abs[NUM_STATE];
+   flux.Absorbing(nor, e_left, F_abs);
+
+   // A^+ applied to the -cp eigenvector should give zero
+   // (the entire wave is in the negative eigenspace of A_x).
+   // Values are O(lp*cp) ≈ 1e14, so use relative tolerance.
+   real_t F_norm = 0.0;
+   for (int c = 0; c < NUM_STATE; c++)
+      F_norm += F_abs[c] * F_abs[c];
+   real_t Q_norm = 0.0;
+   for (int c = 0; c < NUM_STATE; c++)
+      Q_norm += e_left[c] * e_left[c];
+
+   TEST_ASSERT(std::sqrt(F_norm) / std::sqrt(Q_norm) < 1e-10,
+               "Absorbing: incoming P-wave gives zero flux (rel " +
+               std::to_string(std::sqrt(F_norm) / std::sqrt(Q_norm)) + ")");
+}
+
 // ===== Test 7: Free surface: Godunov state has sigma . n = 0 =====
 void TestFreeSurfaceZeroTraction()
 {
@@ -322,6 +399,7 @@ int main()
    TestInteriorFluxConstantQ();
    TestInteriorFluxConservation();
    TestAbsorbingOutgoingPWave();
+   TestAbsorbingIncomingPWave();
    TestFreeSurfaceZeroTraction();
    TestSplitFluxReconstructsA();
 

@@ -85,6 +85,9 @@ public:
 
    /// Get number of fault DOFs per component.
    int GetNumFaultDOFs() const { return num_fault_dofs_; }
+
+   /// Get per-element inverse mass matrix (for testing).
+   const DenseMatrix &GetElementMassInverse(int e) const { return elem_mass_inv_[e]; }
    ///@}
 
 private:
