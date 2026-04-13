@@ -93,6 +93,12 @@ void WaveOperator::Mult(const Vector &Q, Vector &dQdt) const
    // Accumulate face flux (negative contribution, sign handled inside)
    ComputeFaceFluxRHS(Q, dQdt);
 
+   // Apply PML damping if enabled: rhs -= d(x) * D * Q (Eq. 16)
+   if (pml_layer_)
+   {
+      ApplyPMLDamping(Q, dQdt);
+   }
+
    // Apply per-element inverse mass matrix
    ApplyMassInverse(dQdt);
 }
@@ -402,6 +408,71 @@ real_t WaveOperator::ComputeMaxDt(real_t cfl) const
 {
    // dt <= cfl * h_min / c_p, where cfl ~ 1/(2N+1) for DG of order N
    return cfl * h_min_ / flux_.GetCp();
+}
+
+// ---------------------------------------------------------------------------
+// PML damping: rhs -= d(x) * D * Q  (Eq. 16)
+// ---------------------------------------------------------------------------
+void WaveOperator::ApplyPMLDamping(const Vector &Q, Vector &rhs) const
+{
+   const real_t *Q_data = Q.GetData();
+
+   for (int e = 0; e < ne_; e++)
+   {
+      const FiniteElement *fe = fes_->GetFE(e);
+      ElementTransformation *Tr = fes_->GetElementTransformation(e);
+      int ndof = fe->GetDof();
+      int dof_offset = e * ndof_per_el_;
+
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(), 2*order_);
+
+      Vector shape(ndof);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         real_t w = ip.weight * Tr->Weight();
+
+         fe->CalcShape(ip, shape);
+
+         // Get physical coordinates of quadrature point
+         Vector phys(3);
+         Tr->Transform(ip, phys);
+
+         // Compute directional damping (R-004 fix: 3 separate values)
+         real_t dx, dy, dz;
+         pml_layer_->ComputeDamping(phys(0), phys(1), phys(2), dx, dy, dz);
+
+         // Skip if no damping at this point
+         if (dx <= 0.0 && dy <= 0.0 && dz <= 0.0) { continue; }
+
+         // Interpolate Q at quadrature point
+         real_t Q_qp[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            Q_qp[c] = 0.0;
+            for (int i = 0; i < ndof; i++)
+            {
+               Q_qp[c] += shape(i) * Q_data[c * ndof_total_ + dof_offset + i];
+            }
+         }
+
+         // Per-component damping: d_c = dx*Dx[c] + dy*Dy[c] + dz*Dz[c]
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t d_c = dx * PMLLayer::Dx[c]
+                       + dy * PMLLayer::Dy[c]
+                       + dz * PMLLayer::Dz[c];
+            if (d_c > 0.0)
+            {
+               for (int i = 0; i < ndof; i++)
+               {
+                  rhs[c * ndof_total_ + dof_offset + i] -= w * d_c * shape(i) * Q_qp[c];
+               }
+            }
+         }
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------

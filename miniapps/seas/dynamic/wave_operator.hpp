@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 #include "wave_state.hpp"
 #include "godunov_flux.hpp"
+#include "pml_layer.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../fault/fault_basis.hpp"
 
@@ -88,6 +89,10 @@ public:
 
    /// Get per-element inverse mass matrix (for testing).
    const DenseMatrix &GetElementMassInverse(int e) const { return elem_mass_inv_[e]; }
+
+   /// Set PML layer (non-owning). Pass nullptr to disable.
+   void SetPML(PMLLayer *pml) { pml_layer_ = pml; }
+   const PMLLayer *GetPML() const { return pml_layer_; }
    ///@}
 
 private:
@@ -119,6 +124,9 @@ private:
    /// Per-face boundary attribute (0 = interior/shared face).
    std::vector<int> face_bdr_attr_;
 
+   /// Optional PML layer (non-owning, nullptr if disabled).
+   PMLLayer *pml_layer_ = nullptr;
+
    /// @brief Compute volume integral contribution to RHS.
    /// Implements Eq. (2c): for each element, accumulate
    ///   rhs[c*ndof+i] += w * dshape(i,j) * F[j][c]
@@ -135,6 +143,10 @@ private:
 
    /// @brief Assemble and store per-element inverse mass matrices.
    void AssembleElementMassInverse();
+
+   /// @brief Apply PML damping: rhs -= d(x) * D * Q (Eq. 16).
+   /// Per-component damping with directional splitting (R-004 fix).
+   void ApplyPMLDamping(const Vector &Q, Vector &rhs) const;
 
    /// Classify a boundary face: returns "absorbing", "free", or "interior".
    enum class FaceBC { Interior, Absorbing, FreeSurface, Fault };
