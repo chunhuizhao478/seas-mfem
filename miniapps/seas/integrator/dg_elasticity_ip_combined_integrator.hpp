@@ -15,8 +15,11 @@
 #define MFEM_SEAS_DG_ELASTICITY_IP_COMBINED_INTEGRATOR_HPP
 
 #include "mfem.hpp"
+#include "../constitutive/constitutive_model.hpp"
+#include "../constitutive/linear_elastic.hpp"
 #include "../fault/fault_basis.hpp"
 #include <cmath>
+#include <memory>
 #include <vector>
 
 namespace mfem
@@ -27,16 +30,26 @@ namespace seas
 class DGElasticityIPCombinedIntegrator : public BilinearFormIntegrator
 {
 public:
-   /// @param lambda First Lame parameter
-   /// @param mu Shear modulus
-   /// @param dim Spatial dimension (3 for BP5)
-   /// @param epsilon SIPG sign (-1 for SIPG)
-   /// @param penalty_factor Multiplier on penalty (default 1.0)
+   /// @brief Construct from Coefficient references (legacy path).
    DGElasticityIPCombinedIntegrator(Coefficient &lambda, Coefficient &mu,
                                      int dim, real_t epsilon,
                                      real_t penalty_factor = 1.0)
-      : lambda_(lambda), mu_(mu), dim_(dim),
+      : lambda_ptr_(&lambda), mu_ptr_(&mu), dim_(dim),
         epsilon_(epsilon), penalty_factor_(penalty_factor) {}
+
+   /// @brief Construct from ConstitutiveModel (Phase 3+ path).
+   DGElasticityIPCombinedIntegrator(const ConstitutiveModel &model,
+                                     int dim, real_t epsilon,
+                                     real_t penalty_factor = 1.0)
+      : dim_(dim), epsilon_(epsilon), penalty_factor_(penalty_factor)
+   {
+      const auto *le = dynamic_cast<const LinearElastic *>(&model);
+      MFEM_VERIFY(le, "IP combined integrator currently requires LinearElastic");
+      owned_lambda_ = std::make_unique<ConstantCoefficient>(le->GetLambda());
+      owned_mu_ = std::make_unique<ConstantCoefficient>(le->GetMu());
+      lambda_ptr_ = owned_lambda_.get();
+      mu_ptr_ = owned_mu_.get();
+   }
 
    using BilinearFormIntegrator::AssembleFaceMatrix;
 
@@ -82,8 +95,8 @@ public:
          real_t nl_q = nor.Norml2();
 
          real_t detJ1 = Trans.Elem1->Weight();
-         real_t lam1 = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu1 = mu_.Eval(*Trans.Elem1, eip1);
+         real_t lam1 = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu1 = mu_ptr_->Eval(*Trans.Elem1, eip1);
 
          real_t detJ2 = detJ1;
          real_t lam2 = lam1, mu2 = mu1;
@@ -97,8 +110,8 @@ public:
             Mult(dshape2_ref, adjJ, dshape2_adj);
 
             detJ2 = Trans.Elem2->Weight();
-            lam2 = lambda_.Eval(*Trans.Elem2, eip2);
-            mu2 = mu_.Eval(*Trans.Elem2, eip2);
+            lam2 = lambda_ptr_->Eval(*Trans.Elem2, eip2);
+            mu2 = mu_ptr_->Eval(*Trans.Elem2, eip2);
          }
 
          // Penalty (Tandem formula)
@@ -239,10 +252,10 @@ public:
 
          real_t detJ1 = Trans.Elem1->Weight();
          real_t detJ2 = Trans.Elem2->Weight();
-         real_t lam1 = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu1 = mu_.Eval(*Trans.Elem1, eip1);
-         real_t lam2 = lambda_.Eval(*Trans.Elem2, eip2);
-         real_t mu2 = mu_.Eval(*Trans.Elem2, eip2);
+         real_t lam1 = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu1 = mu_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t lam2 = lambda_ptr_->Eval(*Trans.Elem2, eip2);
+         real_t mu2 = mu_ptr_->Eval(*Trans.Elem2, eip2);
 
          real_t penalty = ComputePenalty(fe1, fe2, detJ1, detJ2,
                                           lam1, mu1, nl_q, true);
@@ -362,8 +375,8 @@ public:
          real_t w_q = ip.weight;
 
          real_t detJ1 = Trans.Elem1->Weight();
-         real_t lam1 = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu1 = mu_.Eval(*Trans.Elem1, eip1);
+         real_t lam1 = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu1 = mu_ptr_->Eval(*Trans.Elem1, eip1);
 
          // Boundary penalty: single element (Tandem: penalty_[fctNo] = p(0))
          real_t penalty = ComputePenalty(fe1, fe1, detJ1, detJ1,
@@ -477,10 +490,10 @@ public:
          Mult(dshape2_ref, Jinv, dshape2_phys);
 
          // Per-side material (matching Tandem's lam_q[0/1], mu_q[0/1])
-         real_t lam1t = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu1t = mu_.Eval(*Trans.Elem1, eip1);
-         real_t lam2t = lambda_.Eval(*Trans.Elem2, eip2);
-         real_t mu2t = mu_.Eval(*Trans.Elem2, eip2);
+         real_t lam1t = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu1t = mu_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t lam2t = lambda_ptr_->Eval(*Trans.Elem2, eip2);
+         real_t mu2t = mu_ptr_->Eval(*Trans.Elem2, eip2);
 
          // Compute ∇u on each side
          // grad[c,d] = Σ_k dshape_phys[k,d] * u_dofs[c*ndof+k]
@@ -609,10 +622,10 @@ public:
          fe2.CalcDShape(eip2, dshape2_ref);
          Mult(dshape2_ref, Jinv, dshape2_phys);
 
-         real_t lam1t = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu1t = mu_.Eval(*Trans.Elem1, eip1);
-         real_t lam2t = lambda_.Eval(*Trans.Elem2, eip2);
-         real_t mu2t = mu_.Eval(*Trans.Elem2, eip2);
+         real_t lam1t = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu1t = mu_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t lam2t = lambda_ptr_->Eval(*Trans.Elem2, eip2);
+         real_t mu2t = mu_ptr_->Eval(*Trans.Elem2, eip2);
 
          DenseMatrix grad1(dim_, dim_), grad2(dim_, dim_);
          grad1 = 0.0; grad2 = 0.0;
@@ -805,8 +818,9 @@ public:
    }
 
 private:
-   Coefficient &lambda_;
-   Coefficient &mu_;
+   Coefficient *lambda_ptr_ = nullptr;
+   Coefficient *mu_ptr_ = nullptr;
+   std::unique_ptr<ConstantCoefficient> owned_lambda_, owned_mu_;
    int dim_;
    real_t epsilon_;
    real_t penalty_factor_;

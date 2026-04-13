@@ -488,3 +488,12 @@ TAGS
 *seas_bp2*
 *debug_ip*
 *bp2-qd*
+
+# SEAS miniapp binaries
+miniapps/seas/seas_driver
+miniapps/seas/seas_pseas
+miniapps/seas/seas_bp1_bdrload
+miniapps/seas/seas_bp1_full
+miniapps/seas/seas_bp5_full
+miniapps/seas/seas_generate_mesh
+miniapps/seas/seas_mms_antiplane_parallel

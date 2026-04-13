@@ -1,0 +1,41 @@
+# BP5-QD parametric study: 2x domain size, 1000m near-fault resolution
+# Domain doubled in each dimension: 800 x 400 x 200 km
+# Fault geometry unchanged (100 x 40 km)
+#
+# Generate mesh first:
+#   conda activate pythonenv
+#   cd miniapps/seas
+#   gmsh -3 bp5/parametric_study/case_2x_domain/bp5_2x_1000m.geo \
+#        -o bp5/parametric_study/case_2x_domain/bp5_2x_1000m.msh
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/parametric_study/case_2x_domain/bp5_2x_1000m.msh"
+scale = 1000
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "mumps"
+blr_tol = 1e-12
+
+[time]
+t_final = 56844000000
+tandem_time_stepping = true
+use_petsc_ts = true
+petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+checkpoint_interval = 5000
+
+[output]
+output_dir = "."
+output_prefix = "bp5_parametric_2x_domain"
+# Post-hoc comparison (not used by seas_driver at runtime):
+#   python3 scripts/regression_check.py \
+#       --ref-dir bp5/benchmark_data/golden_parallel_400r_p1_1000m \
+#       --tolerance 0.05

@@ -57,7 +57,7 @@ public:
    /// @param dim Spatial dimension (default 3)
    DGElasticityIPPenaltyIntegrator(Coefficient &lambda, Coefficient &mu,
                                     int dim = 3, real_t penalty_factor = 1.0)
-      : lambda_(lambda), mu_(mu), dim_(dim), penalty_factor_(penalty_factor) {}
+      : lambda_ptr_(&lambda), mu_ptr_(&mu), dim_(dim), penalty_factor_(penalty_factor) {}
 
    using BilinearFormIntegrator::AssembleFaceMatrix;
    void AssembleFaceMatrix(const FiniteElement &el1,
@@ -103,8 +103,8 @@ public:
          real_t nl_q = nor.Norml2();  // |nor| = NormalLength
 
          // Material properties (evaluate at face quadrature point)
-         real_t lam_val = lambda_.Eval(*Trans.Elem1, eip1);
-         real_t mu_val = mu_.Eval(*Trans.Elem1, eip1);
+         real_t lam_val = lambda_ptr_->Eval(*Trans.Elem1, eip1);
+         real_t mu_val = mu_ptr_->Eval(*Trans.Elem1, eip1);
 
          // Stiffness tensor bounds (isotropic)
          real_t c0 = 2.0 * mu_val;
@@ -233,8 +233,8 @@ public:
    }
 
 private:
-   Coefficient &lambda_;
-   Coefficient &mu_;
+   Coefficient *lambda_ptr_ = nullptr;
+   Coefficient *mu_ptr_ = nullptr;
    int dim_;
    real_t penalty_factor_;
 };

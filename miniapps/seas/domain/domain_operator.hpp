@@ -29,6 +29,12 @@ class FaultBasis;
 /// (e.g., Laplace equation for antiplane shear) with fault slip
 /// boundary conditions, and computing traction on the fault.
 ///
+/// Future extension: dynamic rupture and QD-FD hybrid simulations will
+/// add a DynamicDomainOperator subclass that includes inertia terms
+/// (mass matrix), explicit time integration, and PML absorbing boundaries.
+/// The interface will gain: AssembleMass(), ComputeAcceleration(),
+/// GetCFL(). See refactoring plan v4, Section 12 for architecture.
+///
 /// The template parameter MeshType allows the same interface to
 /// work with both serial (Mesh) and parallel (ParMesh) execution.
 ///

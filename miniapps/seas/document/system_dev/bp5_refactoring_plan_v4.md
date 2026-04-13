@@ -44,6 +44,7 @@
 10. [Dependency & Coupling Analysis](#10-dependency--coupling-analysis)
 11. [Resolved Questions](#11-resolved-questions)
 12. [Future Architecture: Dynamic Rupture, Friction, Multi-Physics](#12-future-architecture)
+13. [Phase 7: New Driver Full Simulation & Verification](#13-phase-7-new-driver-full-simulation--verification)
 
 ---
 
@@ -1063,6 +1064,790 @@ Phase 3 establishes the `ConstitutiveModel` interface with three tiers (algebrai
 | Don't store `Vp_` as authoritative Dirichlet source | Phase 4's DirichletFunc callback replaces it |
 | Keep `FaultBasis`, `FaultGeometry` solver-independent | Both QD and FD use same transforms |
 | Don't free stiffness matrix during FD | Reassembly cost >> memory cost |
+
+---
+
+## 13. Phase 7: New Driver Full Simulation & Verification
+
+**Date Added:** 2026-04-10
+**Goal:** Wire `seas_driver.cpp` to run a complete BP5 simulation using all new code paths (ConstitutiveModel, BoundaryConfig, DomainConfig, TOML config) and verify the new setup produces results identical to the existing verification driver (`bp5_verification_full.cpp`).
+**Branch:** `refactor/phase7-driver-verification`
+**Regression:** L2 < 1e-12 against existing golden data; target byte-for-byte against old driver at identical parameters.
+
+### 13.0 Overview
+
+After 7 phases of refactoring, the new infrastructure is in place but untested end-to-end:
+- **Phase 3** added `ConstitutiveModel` + `LinearElastic` + new operator constructor
+- **Phase 4** added `BoundaryConfig` with parameterized boundary attrs and `DirichletFunc`
+- **Phase 5** added TOML parsing, `SEASConfig`, and `seas_driver.cpp`
+- **Phase 6** added unified BoundaryConfig path, logging cleanup
+
+But `seas_driver.cpp` currently only **parses config and prints it** (line 122: `"Full simulation pipeline will be wired in Phase 6."`). It does NOT construct operators, run time integration, or produce output. This phase completes the driver and proves the new code paths are correct.
+
+### 13.1 Gap Analysis
+
+| Component | Old Path (`bp5_verification_full.cpp`) | New Path (`seas_driver.cpp`) | Gap |
+|-----------|---------------------------------------|------------------------------|-----|
+| **Config source** | CLI flags + hardcoded `BP5Params` | TOML file → `SEASConfig` | Need `SEASConfig → BP5Params` bridge |
+| **Material** | Scalar `lambda, mu` from `BP5Params` | `LinearElastic(lambda, mu)` from `MaterialConfig` | Need construction from config |
+| **Boundary** | `BCMode::FarField` enum → legacy internal build | `BoundaryConfig{dirichlet_attrs, natural_attrs, fault_attr, DirichletFunc}` from TOML | Need construction from config |
+| **Domain operator** | Legacy constructor (11 params) | New constructor (ConstitutiveModel + BoundaryConfig + DomainConfig) | Need to wire new constructor |
+| **DG method** | `DGMethod` enum from CLI `--solver` | String `"IP"` / `"BR2"` from TOML | Need string→enum conversion |
+| **Solver type** | `SolverType` enum from CLI `--solver` | String `"mumps"` / `"cg"` from TOML | Need string→enum conversion |
+| **Fault geometry** | `FaultGeometry(domain, BP5Params, mpi)` | Same, but params from `SEASConfig` | Need `SEASConfig → BP5Params` bridge |
+| **Fault operator** | `RateStateFaultOperator<ParMesh, 2>` with `BP5Params` | Same | Same bridge needed |
+| **I/O** | `ParallelBP5BenchmarkOutput` | Same | Need station list + fault coords setup |
+| **Time integration** | `DormandPrinceRK45` with CFL-aware dt | Same | Need dt init from config |
+| **Checkpoint** | `ReadCheckpoint` / `WriteCheckpoint` | Same | Need restart CLI flag |
+
+**Core blocker:** `FaultGeometry`, `RateStateFaultOperator`, and `ParallelBP5BenchmarkOutput` all accept `BP5Params` as constructor arguments. Rather than refactoring those constructors (high-risk, many callers), we create a `SEASConfig → BP5Params` bridge function.
+
+### 13.2 Constraints
+
+- **Interface constraints:** `FaultGeometry`, `RateStateFaultOperator`, `ParallelBP5BenchmarkOutput`, `DormandPrinceRK45` constructors are untouched.
+- **Dependency constraints:** Must use existing `BP5Params` struct for components that require it. No parallel refactoring of fault/IO code.
+- **Convention constraints:** Follow existing BP5 verification driver patterns for I/O, earthquake detection, console output.
+- **Numerical constraints:** Output must match old driver at identical parameters. L2 < 1e-12 against golden data. Target byte-for-byte.
+
+### 13.3 Phase 7a: SEASConfig → BP5Params Bridge & Enum Mapping
+
+#### Goal
+Provide utility functions that convert between `SEASConfig` fields and the types expected by existing components, without modifying those components.
+
+#### Files to Create
+- `config/seas_config_bridge.hpp` — utility functions for SEASConfig → BP5Params conversion and string→enum mapping
+
+#### Detailed Requirements
+
+1. **`BP5Params BuildBP5Params(const SEASConfig &config)`**
+
+   Maps SEASConfig fields to BP5Params fields. Field mapping:
+
+   ```cpp
+   BP5Params BuildBP5Params(const SEASConfig &config)
+   {
+      BP5Params p;
+      p.rho = config.material.density;
+      p.cs = config.material.cs;
+      p.nu = config.material.nu;
+      p.V0 = config.friction.V0;
+      p.f0 = config.friction.f0;
+      p.b = config.friction.b;
+      p.L0 = config.friction.L0;
+      p.L_nuc = config.friction.L_nuc;
+      p.a0 = config.friction.a0;
+      p.amax = config.friction.amax;
+      p.sigma_n = config.friction.sigma_n;
+      p.Vp = config.loading.Vp;
+      p.V_init = config.loading.V_init;
+      p.V_nuc = config.loading.V_nuc;
+      p.delta_tau_factor = config.loading.delta_tau_factor;
+      p.nucleation_eps = config.loading.nucleation_eps;
+      p.smooth_nucleation = config.loading.smooth_nucleation;
+      p.Wf = config.fault_geom.Wf;
+      p.lf = config.fault_geom.lf;
+      p.hs = config.fault_geom.hs;
+      p.ht = config.fault_geom.ht;
+      p.H = config.fault_geom.H;
+      p.l_vw = config.fault_geom.l_vw;
+      p.w_nuc = config.fault_geom.w_nuc;
+      p.t_final = config.time.t_final;
+      return p;
+   }
+   ```
+
+   Every field in `BP5Params` that has a corresponding `SEASConfig` field must be mapped. Fields not in `SEASConfig` (e.g., `V_zero = 1e-20`, `seconds_per_year`) keep their `BP5Params` defaults.
+
+2. **`DGMethod ParseDGMethod(const std::string &s)`**
+
+   Only accept the same strings that `SEASConfigParser::Validate()` accepts (`"IP"`, `"BR2"`), plus lowercase variants. Do NOT add aliases like `"SIPG"` that Validate() rejects — they would be dead code since Validate() runs upstream and aborts on unrecognized values.
+
+   ```cpp
+   DGMethod ParseDGMethod(const std::string &s)
+   {
+      if (s == "IP" || s == "ip") return DGMethod::IP;
+      if (s == "BR2" || s == "br2") return DGMethod::BR2;
+      MFEM_ABORT("Unknown DG method: " << s);
+      return DGMethod::BR2;
+   }
+   ```
+
+3. **`SolverType ParseSolverType(const std::string &s)`**
+
+   ```cpp
+   SolverType ParseSolverType(const std::string &s)
+   {
+      if (s == "cg" || s == "CG") return SolverType::CG_AMG;
+      if (s == "mumps" || s == "MUMPS") return SolverType::MUMPS;
+      if (s == "mumps-blr" || s == "MUMPS-BLR") return SolverType::MUMPS_BLR;
+      if (s == "superlu") return SolverType::SUPERLU;
+      if (s == "strumpack") return SolverType::STRUMPACK;
+      if (s == "gmres") return SolverType::GMRES_AMG;
+      MFEM_ABORT("Unknown solver type: " << s);
+      return SolverType::CG_AMG;
+   }
+   ```
+
+4. **`BoundaryConfig BuildBoundaryConfig(const BoundaryTomlConfig &bdr, real_t Vp)`**
+
+   ```cpp
+   BoundaryConfig BuildBoundaryConfig(const BoundaryTomlConfig &bdr, real_t Vp)
+   {
+      BoundaryConfig bc;
+      bc.dirichlet_attrs = bdr.dirichlet_attrs;
+      bc.natural_attrs = bdr.natural_attrs;
+      bc.fault_attr = bdr.fault_attr;
+      bc.default_dirichlet_func = MakeBP5DirichletFunc(Vp);
+      return bc;
+   }
+   ```
+
+5. **`DomainConfig BuildDomainConfig(const SolverConfig &solver)`**
+
+   ```cpp
+   DomainConfig BuildDomainConfig(const SolverConfig &solver)
+   {
+      DomainConfig dc;
+      dc.face_basis_type = solver.face_basis_type;
+      dc.penalty_factor = solver.penalty_factor;
+      dc.blr_tol = solver.blr_tol;
+      dc.check_residual = solver.check_residual;
+      return dc;
+   }
+   ```
+
+#### Interfaces
+- All functions are `inline` in the header, no .cpp file needed
+- Include `seas_config.hpp`, `bp5_params.hpp`, `boundary_config.hpp`, `domain_config.hpp`, `elasticity_operator.hpp` (for DGMethod, SolverType)
+
+#### Edge Cases
+- `SEASConfig` with `benchmark=""` (no preset): all fields must be explicitly set — `BuildBP5Params` still works (copies whatever values are in SEASConfig)
+- `SEASConfig` with non-BP5 benchmark: `BuildBP5Params` still works but caller should validate the result makes physical sense
+- Empty `dirichlet_attrs` or `fault_attr==0`: caught by `SEASConfigParser::Validate()` upstream, but `BuildBoundaryConfig` does not re-validate
+
+#### Unit Test: `tests/unit/test_seas_config_bridge.cpp` (~200 LOC)
+
+Every previous phase created explicit test files for new code (Phase 1: `test_fault_scatter.cpp`, Phase 3: `test_linear_elastic.cpp`, Phase 4: `test_boundary_config.cpp`, Phase 5: `test_seas_config_parser.cpp`). Phase 7a follows the same pattern.
+
+Test cases:
+
+1. **`BuildBP5Params` round-trip:** Construct `SEASConfig`, call `ApplyBP5Defaults`, then `BuildBP5Params` → every field matches `BP5Params()` default constructor. Compare all 25+ fields individually (not just a few spot-checks).
+
+2. **`BuildBP5Params` with non-preset values:** Construct `SEASConfig` with `material.density=3000`, `friction.b=0.05`, etc. → verify those specific fields in the returned `BP5Params`, and verify unmapped fields (e.g., `V_zero`, `seconds_per_year`) retain their `BP5Params` defaults.
+
+3. **`ParseDGMethod`:** `"IP"` → `DGMethod::IP`, `"ip"` → `DGMethod::IP`, `"BR2"` → `DGMethod::BR2`, `"br2"` → `DGMethod::BR2`. (No "SIPG" — not a valid Validate() input.)
+
+4. **`ParseSolverType`:** All 6 valid strings → correct enum value: `"cg"`, `"mumps"`, `"mumps-blr"`, `"superlu"`, `"strumpack"`, `"gmres"`.
+
+5. **`BuildBoundaryConfig`:** Verify `dirichlet_attrs`, `natural_attrs`, `fault_attr` copied from `BoundaryTomlConfig`. Verify `default_dirichlet_func` is non-null and produces correct displacement at a test point (e.g., `y=2000, t=1e9` → `u(0) = Vp*t/2`).
+
+6. **`BuildDomainConfig`:** Verify all `SolverConfig` fields map to corresponding `DomainConfig` fields: `face_basis_type`, `penalty_factor`, `blr_tol`, `check_residual`.
+
+Add to `Makefile`: `test-config-bridge` target, included in `make test`.
+
+#### Acceptance Criteria
+- [ ] `BuildBP5Params(config)` round-trips: `ApplyBP5Defaults` → `BuildBP5Params` → every field matches `BP5Params()` default
+- [ ] `ParseDGMethod("IP") == DGMethod::IP`, `ParseDGMethod("BR2") == DGMethod::BR2`
+- [ ] `ParseSolverType("mumps") == SolverType::MUMPS`, all 6 solver types covered
+- [ ] `BuildBoundaryConfig` produces a `BoundaryConfig` with correct attrs and non-null `default_dirichlet_func`
+- [ ] `test_seas_config_bridge` compiles and all tests pass under `make test`
+
+#### Dependencies
+- Depends on: Phase 5 (SEASConfig, BoundaryTomlConfig exist), Phase 4 (BoundaryConfig, MakeBP5DirichletFunc exist)
+- Required by: Phase 7b
+
+---
+
+### 13.4 Phase 7b: Wire Full Simulation Pipeline in `seas_driver.cpp`
+
+#### Goal
+Transform `seas_driver.cpp` from a config-printer into a fully functional BP5 simulation driver using all new code paths.
+
+#### Files to Modify
+- `drivers/seas_driver.cpp` — replace the config-print stub with the full simulation pipeline
+
+#### Detailed Requirements
+
+The driver must replicate the exact simulation flow of `bp5_verification_full.cpp` but using the new constructor paths. The pipeline stages are:
+
+**Stage 1: Config & Mesh (lines 35-66 of current driver, extend)**
+
+```cpp
+// Parse TOML config (already implemented)
+SEASConfig config = SEASConfigParser::ParseFile(config_file);
+SEASConfigParser::ApplyCLIOverrides(config, overrides);
+SEASConfigParser::Validate(config);
+
+// Build bridge objects
+BP5Params params = BuildBP5Params(config);
+DGMethod dg_method = ParseDGMethod(config.solver.dg_method);
+SolverType solver_type = ParseSolverType(config.solver.solver_type);
+BoundaryConfig bdr_config = BuildBoundaryConfig(config.boundary, config.loading.Vp);
+DomainConfig domain_config = BuildDomainConfig(config.solver);
+```
+
+**Stage 2: Mesh loading + mesh characteristics**
+
+```cpp
+// Load mesh from file specified in TOML
+auto serial_mesh = std::make_unique<Mesh>(config.mesh.file.c_str(), 1, 1);
+if (config.mesh.scale != 1.0)
+{
+   serial_mesh->Transform([scale=config.mesh.scale](const Vector &x, Vector &p)
+   {
+      p.SetSize(x.Size());
+      for (int i = 0; i < x.Size(); i++) { p(i) = x(i) * scale; }
+   });
+}
+ParMesh pmesh(mpi.GetComm(), *serial_mesh);
+serial_mesh.reset();
+
+// Compute mesh characteristics (h_min needed for CFL-aware dt in Stage 7)
+real_t h_min, h_max, kappa_min, kappa_max;
+pmesh.GetCharacteristics(h_min, h_max, kappa_min, kappa_max);
+MFEM_VERIFY(h_min > 0, "Degenerate mesh: h_min = " << h_min);
+```
+
+**Stage 3: Domain operator (NEW constructor path)**
+
+```cpp
+LinearElastic material(config.material.lambda(), config.material.mu());
+
+ElasticityDomainOperator<ParMesh> domain(
+   pmesh, config.mesh.order,
+   material,                    // ConstitutiveModel& (Phase 3)
+   config.loading.Vp,
+   config.fault_geom.Wf, config.fault_geom.lf,
+   bdr_config,                  // BoundaryConfig (Phase 4)
+   dg_method, solver_type,
+   domain_config);              // DomainConfig (Phase 3)
+```
+
+This is the **critical line** — it exercises the new constructor that was never called by a real simulation driver before.
+
+**Stage 4: Fault components**
+
+```cpp
+FaultGeometry<ParMesh> fault_geom(domain, params, &mpi);
+
+DieterichRuinaFriction::Constants fc;
+fc.V0 = params.V0; fc.f0 = params.f0;
+fc.b = params.b; fc.Dc = params.L0;
+DieterichRuinaFriction friction(fc);
+AgingLawPsi aging(params.b, params.V0, params.f0);
+
+RateStateFaultOperator<ParMesh, 2> fault_op(
+   &fault_geom, &friction, &aging, params, &mpi);
+```
+
+**Stage 5: SEAS operator + initial condition**
+
+```cpp
+PBP5SEASOp seas_op(&domain, &fault_op, &mpi);
+seas_op.SetElasticSigmaN(true);  // Default ON per Tandem convention
+
+Vector state(fault_op.StateSize());
+seas_op.SetInitialCondition(state);
+real_t V_init = seas_op.GetMaxSlipRate();
+```
+
+**Stage 6: I/O setup**
+
+Use `BP5BenchmarkOutput<MeshType>::DefaultStations()` — do NOT hardcode a station list. The 10 SCEC BP5 on-fault stations (Section 4.1 of spec) are defined in `io/bp5_benchmark_output.hpp:811-824`:
+
+```cpp
+// Correct: use the canonical station list from the output class
+auto stations = BP5BenchmarkOutput<ParMesh>::DefaultStations();
+```
+
+These are (for reference, from `DefaultStations()`):
+```
+fltst_strk-36dp+00  (-36 km,  0 km)
+fltst_strk-16dp+00  (-16 km,  0 km)
+fltst_strk+00dp+00  (  0 km,  0 km)
+fltst_strk+16dp+00  ( 16 km,  0 km)
+fltst_strk+36dp+00  ( 36 km,  0 km)
+fltst_strk-24dp+10  (-24 km, 10 km)
+fltst_strk-16dp+10  (-16 km, 10 km)
+fltst_strk+00dp+10  (  0 km, 10 km)
+fltst_strk+16dp+10  ( 16 km, 10 km)
+fltst_strk+00dp+22  (  0 km, 22 km)
+```
+
+This is exactly what `bp5_verification_full.cpp` uses (line 1034: `auto stations = BP5BenchmarkOutput<Mesh>::DefaultStations()`). The station names must match exactly for golden data comparison — the comparison script matches files by station name suffix.
+
+I/O objects:
+```cpp
+ParallelBP5BenchmarkOutput bench_out(
+   full_prefix, params, stations, fault_geom, mpi,
+   local_x2, local_x3, local_tp_dip, local_tp_strike,
+   domain.GetNbfPerFace(), face_basis_type);
+
+// Global output
+std::unique_ptr<ProbeOutput> global_out;
+if (mpi.IsRoot()) {
+   global_out = std::make_unique<ProbeOutput>(
+      full_prefix + "_global.txt",
+      std::vector<std::string>{"time(s)", "log10(Vmax)(m/s)"},
+      "BP5-QD global output");
+}
+```
+
+**Stage 7: Time integration**
+
+**CRITICAL: `tandem_time_stepping` policy.** When `config.time.tandem_time_stepping == true` (the TOML default, `seas_config.hpp:108`), the old driver (`bp5_verification_full.cpp` lines 879-884) overrides three settings:
+- `dt_init = 0.01` (fixed, ignoring CFL formula)
+- V-guard = OFF
+- psi-clamp = OFF (not applicable here — psi-clamp is a fault operator setting)
+
+The new driver must mirror this exactly, otherwise the 7d equivalence test will fail due to different initial conditions.
+
+```cpp
+DormandPrinceRK45 ode_solver;
+ode_solver.SetMPIContext(&mpi);
+ode_solver.SetAbsTol(config.time.atol);
+ode_solver.SetRelTol(config.time.rtol);
+ode_solver.SetDtMin(1e-6);
+ode_solver.SetDtMax(0.1 * BP5Params::seconds_per_year);
+
+// CFL-aware initial dt computation (always computed for logging)
+int dim = 3;
+real_t c_N_1 = config.mesh.order * (config.mesh.order + dim - 1.0) / dim;
+real_t c_N_1_ref = 2.0 * (2.0 + dim - 1.0) / dim;
+real_t beta = 4.0 * c_N_1 / c_N_1_ref;
+real_t V_max_init = std::max(V_init, params.V_nuc);
+real_t dt_V = std::min(1e3, 0.01 * params.L_nuc / std::max(V_max_init, 1e-20));
+real_t dt_CFL = 2.0 * params.eta() * h_min / (beta * params.mu());
+real_t dt_init = std::min(dt_V, dt_CFL);
+
+// Tandem-style time stepping overrides (mirrors bp5_verification_full.cpp:879-884)
+bool use_v_guard = true;   // default: V-guard ON
+if (config.time.tandem_time_stepping)
+{
+   dt_init = 0.01;         // Tandem's fixed startup dt (tandem_dt_init)
+   use_v_guard = false;     // Tandem doesn't use V-guard
+}
+
+ode_solver.SetDt(dt_init);
+ode_solver.SetStatePerNode(3);  // BP5: [slip_dip, slip_strike, psi]
+if (use_v_guard)
+{
+   ode_solver.SetVGuard(100.0);
+}
+ode_solver.Init(seas_op);
+```
+
+**Why this matters for equivalence:** The CFL-based dt at p=1/1000m is typically ~O(1) seconds, while Tandem's dt=0.01 is much smaller. V-guard rejects steps where V grows too fast — with it OFF, the RK45 error control alone governs acceptance. Both differences compound from step 1, making outputs diverge immediately if not matched.
+
+**Stage 8: Time loop**
+
+Standard time loop with:
+- Step rejection handling
+- Earthquake detection (V_threshold_seismic = 1e-3, V_threshold_interseismic = 1e-6)
+- bench_out.Write() + bench_out.Flush() per accepted step
+- global_out per step (root only)
+- Periodic console output
+- Checkpoint writing at configurable intervals
+- NaN/Inf detection with early termination
+
+Match the exact logic from `bp5_verification_full.cpp` lines 1849-2100 (the main time loop).
+
+**Stage 9: Final output**
+
+```cpp
+bench_out.ForceWrite(t, state, fault_op, seas_op.GetTraction(), V_max);
+bench_out.Close();
+// Summary statistics
+```
+
+#### Additional CLI Overrides for the New Driver
+
+Add support for common CLI flags that `bp5_verification_full.cpp` supports, passed after the TOML file:
+
+```
+--override time.t_final=1e8     # TOML field override (already supported)
+--max-steps N                   # Shorthand for time.max_steps
+--tandem-time-stepping          # Enable Tandem-style dt defaults
+--restart PREFIX                # Restart from checkpoint
+--write-every-step              # Write I/O at every accepted step
+```
+
+These are convenience aliases that translate to `SEASConfig` field modifications before the simulation starts.
+
+#### Interfaces
+- `seas_driver.cpp` includes: `seas_config_bridge.hpp`, `elasticity_operator.hpp`, `fault_geometry.hpp`, `rate_state_fault.hpp`, `dieterich_ruina.hpp`, `state_evolution.hpp`, `seas_operator.hpp`, `time_stepper.hpp`, `bp5_parallel_output.hpp`, `probe_output.hpp`, `checkpoint.hpp`
+- No new classes; the driver is a `main()` function using existing components via the new constructor paths
+
+#### Edge Cases
+- Mesh file not found → MFEM's Mesh constructor throws, caught by driver
+- Mesh scale = 1.0 (already in meters) → skip Transform
+- `h_min = 0` from degenerate mesh �� MFEM_VERIFY guard on dt_CFL computation
+- Zero fault DOFs on a rank → `FaultGeometry` handles this (existing code)
+- Restart with different rank count than checkpoint → `ReadCheckpoint` handles or fails cleanly
+
+#### Acceptance Criteria
+- [ ] `seas_driver.cpp` compiles with `make seas_driver`
+- [ ] `mpirun -np 1 ./seas_driver bp5_example.toml --override time.t_final=100` runs and produces station output files
+- [ ] `mpirun -np 8 ./seas_driver bp5_example.toml --override time.max_steps=20` produces output
+- [ ] Station file format matches SCEC 8-column spec (time, slip_strike, slip_dip, log10_V_strike, log10_V_dip, tau_strike, tau_dip, log10_state)
+- [ ] Global output file produced with time + log10(Vmax)
+- [ ] Console output includes step, time, dt, V_max, earthquake count
+- [ ] Driver exits cleanly on NaN/Inf with nonzero exit code
+
+#### Dependencies
+- Depends on: Phase 7a (bridge functions)
+- Required by: Phase 7c, 7d
+
+---
+
+### 13.5 Phase 7c: Verification TOML Config & Build Targets
+
+#### Goal
+Create TOML configs and Makefile targets that enable testing the new driver against golden data.
+
+#### Files to Create
+- `config/bp5_verification_50step.toml` — matches bp5_verification_full.cpp's 50-step Frontera configuration exactly
+- `config/bp5_quick_check.toml` — matches the inline-mesh 8-rank/20-step quick-check configuration
+
+#### Files to Modify
+- `Makefile` — add targets for new driver tests
+
+#### Detailed Requirements
+
+1. **`config/bp5_verification_50step.toml`**
+
+   ```toml
+   # Matches bp5_verification_full.cpp default configuration
+   # for golden data comparison (50 accepted steps, Frontera mesh)
+
+   benchmark = "bp5"
+
+   [mesh]
+   file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+   scale = 1000
+   order = 1
+
+   [boundary]
+   dirichlet = [5]
+   natural = [1]
+   fault = 3
+
+   [solver]
+   dg_method = "IP"
+   solver_type = "mumps"
+   blr_tol = 1e-12
+
+   [time]
+   t_final = 56844000000    # ~1800 yr (will override for 50-step test)
+   tandem_time_stepping = true
+   max_steps = 50
+
+   [output]
+   output_dir = "."
+   output_prefix = "bp5_driver_verify"
+   ```
+
+2. **`config/bp5_quick_check.toml`**
+
+   ```toml
+   # Quick-check: inline mesh, 20 steps, local verification
+   benchmark = "bp5"
+
+   [mesh]
+   file = "__inline__"     # Sentinel: driver uses CreateBP5InlineMesh()
+   scale = 1.0             # Inline mesh is already in meters
+   order = 1
+
+   [boundary]
+   dirichlet = [5]
+   natural = [1]
+   fault = 3
+
+   [solver]
+   dg_method = "IP"
+   solver_type = "mumps"
+   blr_tol = 1e-12
+
+   [time]
+   max_steps = 20
+   tandem_time_stepping = true
+
+   [output]
+   output_dir = "bp5_driver_quick_check"
+   output_prefix = "bp5_driver_quick"
+   ```
+
+   **Note:** The `file = "__inline__"` sentinel tells the driver to call `CreateBP5InlineMesh()` instead of loading from file. This requires adding inline-mesh support to the driver (Phase 7b should handle this with an `if (config.mesh.file == "__inline__")` check).
+
+3. **Makefile targets**
+
+   ```makefile
+   # New driver quick-check (exercises new constructor path)
+   driver-quick-check: seas_driver
+       @mkdir -p bp5_driver_quick_check
+       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_driver \
+           config/bp5_quick_check.toml
+       @echo "driver-quick-check: PASS (no crash)"
+
+   # New driver vs old driver equivalence test
+   # IMPORTANT: Both drivers must use the same solver type.
+   # New driver: TOML default is solver_type = "mumps" (→ SolverType::MUMPS).
+   # Old driver: default is SolverType::MUMPS_BLR. Must pass --solver mumps explicitly.
+   driver-equivalence: seas_driver seas_bp5_full
+       @mkdir -p bp5_driver_equiv_new bp5_driver_equiv_old
+       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_driver \
+           config/bp5_quick_check.toml \
+           --override output.output_dir=bp5_driver_equiv_new \
+           --override output.output_prefix=bp5_equiv_new
+       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_bp5_full \
+           --inline-mesh --max-steps 20 --tandem-time-stepping \
+           --solver mumps \
+           --output-dir bp5_driver_equiv_old --output-prefix bp5_equiv_old
+       python3 scripts/compare_station_files.py \
+           bp5_driver_equiv_new bp5_driver_equiv_old --tolerance 1e-12
+   ```
+
+#### Acceptance Criteria
+- [ ] `make seas_driver` builds successfully
+- [ ] `make driver-quick-check` runs without crash, produces station files
+- [ ] TOML configs parse without error (validated by `SEASConfigParser::Validate`)
+
+#### Dependencies
+- Depends on: Phase 7b (driver runs)
+- Required by: Phase 7d
+
+---
+
+### 13.6 Phase 7d: Equivalence Testing — Old Path vs New Path
+
+#### Goal
+Prove that the new constructor path (ConstitutiveModel + BoundaryConfig + DomainConfig) produces bit-identical or near-identical results to the legacy constructor path (scalar lambda/mu + BCMode) when given the same parameters.
+
+#### Files to Create
+- `scripts/compare_station_files.py` — compares two sets of station output files field-by-field
+- `tests/verification/bp5_driver_equivalence.cpp` — C++ test that constructs both paths side-by-side and compares
+
+#### Detailed Requirements
+
+1. **`scripts/compare_station_files.py`**
+
+   ```
+   Usage: compare_station_files.py DIR_A DIR_B [--tolerance TOL] [--prefix-a PA] [--prefix-b PB]
+
+   For each station file found in DIR_A:
+     1. Find matching station in DIR_B (by station name suffix)
+     2. Load both as 8-column SCEC format
+     3. Interpolate to common time points
+     4. Compute per-field relative L2 error for all 7 non-time columns
+     5. Report per-station, per-field errors
+     6. Exit nonzero if any field exceeds tolerance
+   ```
+
+   This is a lightweight version of the Phase 0 `regression_check.py` focused on comparing two simulation outputs rather than against golden data. Key difference: it auto-detects file prefixes by scanning directory contents, handles different time grids via interpolation, and accepts different file naming prefixes.
+
+   Required columns: `slip_strike, slip_dip, log10_V_strike, log10_V_dip, tau_strike, tau_dip, log10_state`
+
+   Output format:
+   ```
+   Station: fltst_strk+00dp+00
+     slip_strike:    L2 = 1.23e-15  PASS
+     slip_dip:       L2 = 4.56e-16  PASS
+     ...
+   Overall: PASS (max L2 = 1.23e-15 < tolerance 1e-12)
+   ```
+
+2. **`tests/verification/bp5_driver_equivalence.cpp`**
+
+   A C++ program that constructs BOTH operator paths and compares outputs directly in memory (no file I/O needed for the comparison). This is the strongest equivalence test:
+
+   **IMPORTANT:** Both paths must use the same solver type for a valid comparison. The TOML default is `"mumps"` → `SolverType::MUMPS`. The legacy path's default is `SolverType::MUMPS_BLR`. Explicitly set both to `SolverType::MUMPS` to avoid false differences from solver numerics.
+
+   ```cpp
+   // Both paths use MUMPS (not MUMPS_BLR) — matches TOML default
+   const SolverType solver = SolverType::MUMPS;
+   const DGMethod method = DGMethod::IP;
+
+   // OLD path: legacy constructor
+   ElasticityDomainOperator<ParMesh> domain_old(
+      pmesh, order, params.lambda(), params.mu(),
+      params.Vp, params.Wf, params.lf,
+      method, solver, BCMode::FarField);
+
+   // NEW path: ConstitutiveModel + BoundaryConfig
+   LinearElastic material(params.lambda(), params.mu());
+   BoundaryConfig bdr_config;
+   bdr_config.dirichlet_attrs = {5};
+   bdr_config.natural_attrs = {1};
+   bdr_config.fault_attr = 3;
+   bdr_config.default_dirichlet_func = MakeBP5DirichletFunc(params.Vp);
+   DomainConfig domain_config;
+   domain_config.blr_tol = 1e-12;
+
+   ElasticityDomainOperator<ParMesh> domain_new(
+      pmesh, order, material, params.Vp, params.Wf, params.lf,
+      bdr_config, method, solver, domain_config);
+
+   // Compare: stiffness matrix, RHS at t=0, solution at t=0
+   // Then run N steps with both, compare displacement and traction
+   ```
+
+   Steps to compare:
+   - After construction: `domain_old.GetStiffnessMatrix()` vs `domain_new.GetStiffnessMatrix()` → must be identical (same assembly code path)
+   - At t=0 with zero slip: solve both → compare displacement vectors → max |diff| < 1e-15
+   - At t=1yr with zero slip: solve both → compare displacement and traction → max |diff| < 1e-15
+   - After 5 full SEAS steps (domain + fault + SEAS operator): compare state vector → max |diff| < 1e-14
+
+   If the stiffness matrices and displacement at t=0 are bit-identical, the paths are numerically equivalent. Any difference in later steps would come from FP accumulation in the time stepper, which should be bounded by 1e-14.
+
+#### Acceptance Criteria
+- [ ] `compare_station_files.py` correctly detects matching station files across two directories
+- [ ] `compare_station_files.py` exits 0 when comparing a directory against itself
+- [ ] `compare_station_files.py` exits nonzero when comparing against perturbed data (slip * 1.001)
+- [ ] `bp5_driver_equivalence` passes at 1/4/8 ranks: max displacement diff < 1e-15 at t=0
+- [ ] `bp5_driver_equivalence` passes at 8 ranks: max state vector diff < 1e-14 after 5 steps
+
+#### Dependencies
+- Depends on: Phase 7b (driver exists), Phase 7c (TOML configs exist)
+- Required by: Phase 7e
+
+---
+
+### 13.7 Phase 7e: Golden Data Regression Test
+
+#### Goal
+Run the new driver against golden reference data to confirm it produces correct BP5 results.
+
+#### Files to Modify
+- `Makefile` — add regression test target
+
+#### Detailed Requirements
+
+1. **Local regression test (8 ranks, 20 steps, inline mesh)**
+
+   ```makefile
+   driver-regression-local: seas_driver
+       @mkdir -p bp5_driver_regression
+       $(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 8 ./seas_driver \
+           config/bp5_quick_check.toml \
+           --override output.output_dir=bp5_driver_regression \
+           --override output.output_prefix=bp5_driver_regress
+       python3 scripts/compare_station_files.py \
+           bp5_driver_regression \
+           bp5/benchmark_data/golden_inline_8r_20step \
+           --tolerance 0
+   ```
+
+   This compares new-driver output against the Phase 0 local golden. Tolerance 0 = byte-for-byte.
+
+2. **Frontera regression test (1 rank, 50 steps, reference mesh)**
+
+   ```bash
+   mpirun -np 1 ./seas_driver config/bp5_verification_50step.toml \
+       --override output.output_dir=bp5_driver_frontera_1r \
+       --override output.output_prefix=bp5_driver_serial
+
+   python3 scripts/compare_station_files.py \
+       bp5_driver_frontera_1r \
+       bp5/benchmark_data/golden_serial_1r_50step \
+       --tolerance 1e-12
+   ```
+
+3. **Frontera regression test (400 ranks, 50 steps, reference mesh)**
+
+   Same as above with `np 400` and comparing against `golden_parallel_400r_50step`.
+
+4. **End-to-end sbatch script for Frontera**
+
+   Create `scripts/sbatch_driver_regression.sh` that:
+   - Runs new driver at 1 rank + 400 ranks
+   - Runs old driver at 1 rank + 400 ranks (as control)
+   - Compares all 4 outputs: new-serial vs golden-serial, new-parallel vs golden-parallel, new-serial vs old-serial, new-parallel vs old-parallel
+   - Reports all L2 errors in a single summary
+
+#### Acceptance Criteria
+- [ ] Local 8-rank/20-step: L2 = 0 (byte-for-byte) against golden
+- [ ] If local golden doesn't exist yet: generate it first with old driver, then compare
+- [ ] Frontera 1-rank/50-step: L2 < 1e-12 against golden_serial_1r_50step
+- [ ] Frontera 400-rank/50-step: L2 < 1e-12 against golden_parallel_400r_50step
+- [ ] New driver vs old driver (same rank count): L2 < 1e-15 (near byte-for-byte)
+
+#### Dependencies
+- Depends on: Phase 7d (comparison tooling), Phase 0 golden data
+- Required by: nothing (final verification)
+
+---
+
+### 13.8 Phase 7 Checklist (All Sub-phases Combined)
+
+**Phase 7a: Bridge & Enum Mapping**
+- [ ] 7a-i. Create `config/seas_config_bridge.hpp` with `BuildBP5Params`, `ParseDGMethod`, `ParseSolverType`, `BuildBoundaryConfig`, `BuildDomainConfig`
+- [ ] 7a-ii. Write `tests/unit/test_seas_config_bridge.cpp` (~200 LOC): round-trip, non-preset values, all enum variants, BoundaryConfig attrs + DirichletFunc verification, DomainConfig field mapping (see Phase 7a unit test spec for full list)
+- [ ] 7a-iii. Add `test-config-bridge` target to Makefile, include in `make test`
+- [ ] 7a-iv. `test_seas_config_bridge` compiles and all tests pass
+
+**Phase 7b: Wire Simulation Pipeline**
+- [ ] 7b-i. Add includes for all simulation components to `seas_driver.cpp`
+- [ ] 7b-ii. Implement Stage 2: mesh loading from TOML file path with scale transform
+- [ ] 7b-iii. Implement Stage 3: construct `LinearElastic` + `ElasticityDomainOperator` via NEW constructor
+- [ ] 7b-iv. Implement Stage 4: construct `FaultGeometry`, `DieterichRuinaFriction`, `AgingLawPsi`, `RateStateFaultOperator`
+- [ ] 7b-v. Implement Stage 5: construct `PBP5SEASOp`, set initial condition
+- [ ] 7b-vi. Implement Stage 6: station list, `ParallelBP5BenchmarkOutput`, `ProbeOutput`
+- [ ] 7b-vii. Implement Stage 7: `DormandPrinceRK45` with CFL-aware initial dt
+- [ ] 7b-viii. Implement Stage 8: time loop with earthquake detection, bench_out.Write, checkpoint
+- [ ] 7b-ix. Implement Stage 9: final output, summary statistics
+- [ ] 7b-x. Add `__inline__` mesh sentinel support (calls `CreateBP5InlineMesh()`)
+- [ ] 7b-xi. Compile test: `make seas_driver` succeeds with zero warnings
+- [ ] 7b-xii. Smoke test: `mpirun -np 1 ./seas_driver config/bp5_example.toml --override time.max_steps=2` produces output
+
+**Phase 7c: Verification Configs & Build Targets**
+- [ ] 7c-i. Create `config/bp5_verification_50step.toml`
+- [ ] 7c-ii. Create `config/bp5_quick_check.toml`
+- [ ] 7c-iii. Add Makefile targets: `driver-quick-check`, `driver-equivalence`, `driver-regression-local`
+- [ ] 7c-iv. `make driver-quick-check` runs without crash (8 ranks, 20 steps, inline mesh)
+
+**Phase 7d: Equivalence Testing**
+- [ ] 7d-i. Write `scripts/compare_station_files.py` with auto-prefix detection, per-field L2, tolerance gating
+- [ ] 7d-ii. Self-test: `compare_station_files.py DIR DIR --tolerance 0` → exit 0 (self-comparison)
+- [ ] 7d-iii. Self-test: perturbed comparison → exit nonzero
+- [ ] 7d-iv. Write `tests/verification/bp5_driver_equivalence.cpp`: side-by-side old-path vs new-path
+- [ ] 7d-v. `bp5_driver_equivalence` at 4 ranks: displacement diff < 1e-15 at t=0
+- [ ] 7d-vi. `bp5_driver_equivalence` at 8 ranks: state vector diff < 1e-14 after 5 steps
+- [ ] 7d-vii. Run `make driver-equivalence`: station-file comparison passes at tolerance 1e-12
+
+**Phase 7e: Golden Data Regression**
+- [ ] 7e-i. Generate local 8-rank/20-step golden with OLD driver (if not already done from Phase 0)
+- [ ] 7e-ii. `make driver-regression-local`: new driver output matches golden at tolerance 0
+- [ ] 7e-iii. Create `scripts/sbatch_driver_regression.sh` for Frontera
+- [ ] 7e-iv. Frontera serial (1 rank, 50 steps): L2 < 1e-12 vs golden_serial_1r_50step
+- [ ] 7e-v. Frontera parallel (400 ranks, 50 steps): L2 < 1e-12 vs golden_parallel_400r_50step
+- [ ] 7e-vi. Record actual L2 in this document
+- [ ] 7e-vii. Run full `make test` suite — all existing tests still pass
+- [ ] 7e-viii. Merge to `system_update`
+
+### 13.9 Summary Table Update
+
+| Phase | Branch | Risk | Regression | Key Deliverable | New Tests |
+|-------|--------|------|-----------|-----------------|-----------|
+| 7a | `phase7-driver-verification` | Low | N/A (utility only) | `seas_config_bridge.hpp` | `test_seas_config_bridge.cpp` (~200 LOC) |
+| 7b | same | **High** | First run | Full simulation in `seas_driver.cpp` | Smoke test |
+| 7c | same | Low | N/A | TOML configs, Makefile targets | Quick-check target |
+| 7d | same | Medium | L2 < 1e-12 | Equivalence proof: old == new | `bp5_driver_equivalence.cpp`, `compare_station_files.py` |
+| 7e | same | Low | L2 < 1e-12 | Golden regression confirmed | Frontera sbatch |
+
+### 13.10 Rollback Cost
+
+If Phase 7 fails: delete `seas_config_bridge.hpp`, revert `seas_driver.cpp` to the config-printer, remove TOML configs and new Makefile targets. Old driver and all existing tests are untouched. **Rollback: 5 minutes with git.**
+
+### 13.11 Risk Assessment
+
+| Risk | Likelihood | Impact | Mitigation |
+|------|-----------|--------|------------|
+| New constructor produces different results than old | Low (same assembly code) | High | Phase 7d equivalence test catches it immediately |
+| `BoundaryConfig` path classifies faces differently than `BCMode::FarField` | Medium | High | Phase 7d side-by-side test at t=0 catches it before time integration |
+| `DomainConfig` defaults differ from post-construction setter values | Medium | Medium | Phase 7a bridge sets `blr_tol` explicitly; Phase 7d catches any drift |
+| `BP5Params` bridge misses a field | Low | High | Round-trip unit test in 7a-ii catches it |
+| Station file format mismatch | Low | Low | `compare_station_files.py` reports specific column/row differences |
+| Inline mesh (from `CreateBP5InlineMesh()`) doesn't have the same boundary attributes as the Gmsh mesh | Medium | High | Verify `__inline__` mesh boundary attributes in Phase 7b before constructing BoundaryConfig |
 
 ---
 
