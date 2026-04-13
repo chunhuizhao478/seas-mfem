@@ -1,87 +1,365 @@
 # SEAS Miniapp Architecture
 
+> Post-refactor (7 phases). Last updated: 2026-04-11.
+>
+> For detailed physics derivations and weak-form equations, see `CODEBASE_GUIDE.md`.
+> For critical numerical constraints and debug history, see `CLAUDE.md`.
+
 MFEM-based Discontinuous Galerkin code for SCEC SEAS (Sequences of Earthquakes and Aseismic Slip) benchmark problems. Couples a DG elasticity domain solver with rate-and-state friction on an embedded fault interface via a quasi-dynamic approximation. Supports 2D antiplane (BP1/BP2) and 3D full elasticity (BP5).
+
+**Code size:** ~60K LOC C++ (excluding extern/toml11).
+
+---
 
 ## Module Inventory
 
-| Module | Directory | Purpose |
-|--------|-----------|---------|
-| **Config** | `config/` | Benchmark parameters: `bp1_params.hpp`, `bp2_params.hpp`, `bp5_params.hpp` |
-| **Domain** | `domain/` | DG elasticity solvers: antiplane (scalar Laplace) and 3D vector elasticity |
-| **Fault** | `fault/` | Fault geometry, basis transforms, rate-and-state operator, face quadrature |
-| **Friction** | `friction/` | Friction laws (Dieterich-Ruina), state evolution (aging, slip, psi-space) |
-| **Integrator** | `integrator/` | DG bilinear form integrators: BR2 and IP penalty for scalar and 3D elasticity |
-| **Solver** | `solver/` | SEAS quasi-dynamic ODE operator, Dormand-Prince RK45 time stepper |
-| **I/O** | `io/` | Benchmark output (SCEC format), ParaView VTK, checkpoint, probe sampling |
-| **Common** | `common/` | MPI context, parallel utilities, type definitions |
-| **Trace** | `trace/` | Face-level traction diagnostics (stress/correction decomposition) |
-| **Driver** | `pseas.cpp` | Main parallel BP2 driver |
-| **Tests** | `tests/` | Unit (24), verification (7), parallel (9) test programs |
+| Module | Directory | Key Files | Purpose |
+|--------|-----------|-----------|---------|
+| **Config** | `config/` | `seas_config.hpp`, `seas_config_parser.hpp`, `seas_config_bridge.hpp`, `bp{1,2,5}_params.hpp` | TOML config parsing, benchmark parameters, spatial functions a(x), Dc(x) |
+| **Constitutive** | `constitutive/` | `constitutive_model.hpp`, `linear_elastic.hpp` | Material model interface + isotropic linear elastic |
+| **Domain** | `domain/` | `domain_operator.hpp`, `elasticity_operator.hpp`, `antiplane_operator.hpp`, `boundary_config.hpp` | DG elasticity solvers (3D and antiplane), boundary conditions |
+| **Fault** | `fault/` | `rate_state_fault.hpp`, `fault_geometry.hpp`, `fault_basis.hpp`, `face_quadrature.hpp` | Fault ODE operator, DOF management, coordinate transforms |
+| **Friction** | `friction/` | `dieterich_ruina.hpp`, `friction_law.hpp`, `state_evolution.hpp` | Rate-and-state friction (Brent solver), aging/slip laws |
+| **Integrator** | `integrator/` | `dg_elasticity_br2_integrator.hpp`, `dg_elasticity_ip_combined_integrator.hpp` | DG bilinear form integrators: BR2 and IP methods |
+| **Solver** | `solver/` | `seas_operator.hpp`, `time_stepper.hpp`, `seas_bdrload_operator.hpp` | SEAS ODE coupling operator, Dormand-Prince RK45 |
+| **I/O** | `io/` | `bp5_parallel_output.hpp`, `probe_output.hpp`, `checkpoint.hpp`, `paraview_output.hpp` | SCEC benchmark output, checkpointing, VTK visualization |
+| **Common** | `common/` | `mpi_context.hpp`, `parallel_utils.hpp`, `fault_scatter.hpp`, `logging.hpp` | MPI wrappers, parallel utilities, logging |
+| **Trace** | `trace/` | `face_trace_logger.hpp` | Face-level traction diagnostics |
+| **Driver** | `drivers/` | `seas_driver.cpp` | Primary BP5 parallel driver (TOML-configured) |
+| **Legacy** | root | `pseas.cpp` | Old BP2 driver (kept for reference) |
+| **Tests** | `tests/` | `unit/` (38), `parallel/` (11), `verification/` (7) | Unit, MPI parallel, and full benchmark tests |
+
+---
+
+## Directory Layout
+
+```
+miniapps/seas/
+├── drivers/
+│   └── seas_driver.cpp             ← PRIMARY ENTRY POINT (TOML-based BP5 driver)
+│
+├── config/                         ← Configuration layer
+│   ├── seas_config.hpp                 SEASConfig: top-level config aggregate
+│   ├── seas_config_parser.hpp          TOML file parser
+│   ├── seas_config_bridge.hpp          Config → domain/solver object bridge
+│   ├── bp5_params.hpp                  BP5 parameters + spatial functions a(x2,x3), Dc(x2,x3)
+│   ├── bp5_mesh_utils.hpp              BP5 mesh loading utilities
+│   ├── bp2_params.hpp                  BP2 parameters + a(z)
+│   └── bp1_params.hpp                  BP1 parameters
+│
+├── constitutive/                   ← Material models
+│   ├── constitutive_model.hpp          Abstract: ComputeStress(), ComputeTangent()
+│   └── linear_elastic.hpp              σ = λ tr(ε)I + 2με
+│
+├── domain/                         ← Domain PDE solvers
+│   ├── domain_operator.hpp             Abstract base: Solve(), ComputeTraction()
+│   ├── elasticity_operator.hpp         3D DG elasticity (BR2/IP), stiffness assembly, traction
+│   ├── antiplane_operator.hpp          2D scalar DG (BP1/BP2)
+│   ├── antiplane_bdrload_operator.hpp  Boundary-load variant (BP1)
+│   ├── boundary_config.hpp             BC specification (Dirichlet/Natural/Fault attrs)
+│   ├── domain_config.hpp               Solver tuning (penalty, BLR tol, face basis)
+│   ├── bp2_mesh.hpp                    BP2 graded mesh generator
+│   └── seas_boundary_tags.hpp          Gmsh physical surface tag definitions
+│
+├── integrator/                     ← DG bilinear form integrators
+│   ├── dg_elasticity_br2_integrator.hpp        BR2 interior + boundary (3D vector)
+│   ├── dg_elasticity_ip_combined_integrator.hpp IP interior + boundary + traction
+│   ├── dg_elasticity_ip_penalty_integrator.hpp  IP penalty with full elasticity tensor
+│   └── dg_br2_integrator.hpp                    BR2 scalar (antiplane)
+│
+├── friction/                       ← Friction laws
+│   ├── friction_law.hpp                Abstract: FrictionCoefficient(), SolveSlipRate()
+│   ├── dieterich_ruina.hpp             Regularized DR, Brent solver, psi-space
+│   └── state_evolution.hpp             AgingLaw, SlipLaw, AgingLawPsi, SlipLawPsi
+│
+├── fault/                          ← Fault interface coupling
+│   ├── fault_geometry.hpp              Fault DOF management, spatial params a(x), η, τ_pre
+│   ├── rate_state_fault.hpp            Fault ODE operator: traction → (V, dψ/dt)
+│   ├── fault_basis.hpp                 Per-face coordinate frames (normal, dip, strike)
+│   ├── face_quadrature.hpp             Multi-DOF face basis for fault discretization
+│   └── fault_nodes.hpp                 Fault node extraction and DOF mapping
+│
+├── solver/                         ← Top-level coupling & time integration
+│   ├── seas_operator.hpp               SEAS quasi-dynamic ODE operator (domain + fault)
+│   ├── time_stepper.hpp                Dormand-Prince RK45 + AdaptiveTimeStepper
+│   └── seas_bdrload_operator.hpp       Boundary-load coupling (BP1)
+│
+├── io/                             ← Output & checkpointing
+│   ├── bp5_parallel_output.hpp         Distributed SCEC fltst probe output
+│   ├── bp5_benchmark_output.hpp        BP5-specific SCEC format
+│   ├── benchmark_output.hpp            Serial benchmark output
+│   ├── parallel_benchmark_output.hpp   Parallel output with gather + dedup
+│   ├── probe_output.hpp                Single-station file writer
+│   ├── paraview_output.hpp             VTK/ParaView diagnostic output
+│   └── checkpoint.hpp                  Binary checkpoint/restart
+│
+├── common/                         ← Shared utilities
+│   ├── mpi_context.hpp                 MPI RAII wrapper (GlobalMax, GlobalSum, etc.)
+│   ├── parallel_utils.hpp              MPI scatter/gather helpers
+│   ├── fault_scatter.hpp               Distributed fault data communication
+│   ├── logging.hpp                     Rank-aware logging (SEAS_LOG)
+│   ├── mpi_check.hpp                   MPI error checking macros
+│   ├── mpi_tags.hpp                    MPI message tag definitions
+│   └── seas_types.hpp                  Enums, typedefs (BCMode, ProblemType, etc.)
+│
+├── trace/
+│   └── face_trace_logger.hpp           Per-face traction diagnostics
+│
+├── tests/
+│   ├── unit/           (~38 tests)     Fast unit tests (`make test`, ~2 min)
+│   ├── parallel/       (~11 tests)     MPI parallel tests
+│   └── verification/   (7 tests)       BP1/BP2/BP5 full benchmark simulations
+│
+├── extern/toml11/                      TOML config parsing (header-only)
+├── pseas.cpp                           Legacy BP2 driver
+├── Makefile                            Primary build system
+├── CMakeLists.txt                      CMake alternative
+├── ARCHITECTURE.md                     This file
+├── CLAUDE.md                           Critical numerical constraints
+└── CODEBASE_GUIDE.md                   Physics-to-numerics walkthrough
+```
+
+---
 
 ## Class Hierarchy
 
+### Domain Layer
+
+```
+ConstitutiveModel                           [constitutive/constitutive_model.hpp]
+│  Abstract: ComputeStress(), ComputeTangent(), GetMaxWaveSpeed()
+└── LinearElastic                           [constitutive/linear_elastic.hpp]
+      σ = λ tr(ε)I + 2με
+
+DomainOperator<MeshType>                    [domain/domain_operator.hpp]
+│  Abstract: Solve(), ComputeTraction(), GetFaultDOFs()
+│  MeshType = Mesh (serial) | ParMesh (parallel)
+├── ElasticityDomainOperator<MeshType>      [domain/elasticity_operator.hpp]
+│     3D vector elasticity, DG BR2 or IP, ConstitutiveModel-based
+└── AntiplaneDomainOperator<MeshType>       [domain/antiplane_operator.hpp]
+      2D scalar Laplace, DG IP or BR2
+```
+
+### Friction Layer
+
+```
+FrictionLaw                                 [friction/friction_law.hpp]
+│  Abstract: FrictionCoefficient(), SolveSlipRate()
+└── DieterichRuinaFriction                  [friction/dieterich_ruina.hpp]
+      Regularized DR with Brent solver
+      Psi-space: SolveSlipRatePsi(), SolveSlipRateVectorPsi()
+
+StateEvolution                              [friction/state_evolution.hpp]
+│  Abstract: Rate(), SteadyState()
+├── AgingLaw         dθ/dt = 1 - Vθ/Dc
+├── SlipLaw          dθ/dt = -Vθ/Dc · ln(Vθ/Dc)
+├── AgingLawPsi      dψ/dt = (bV₀/Dc)[exp((f₀-ψ)/b) - V/V₀]
+└── SlipLawPsi       dψ/dt = -(V/Dc)(ψ - ψ_ss)
+```
+
+### Fault Layer
+
+```
+FaultGeometry<MeshType>                     [fault/fault_geometry.hpp]
+  Precomputes: depths, a(x), Dc(x), τ_pre(x), η, V_init(x)
+
+RateStateFaultOperator<MeshType, SlipComp>  [fault/rate_state_fault.hpp]
+  SlipComp = 1 (BP2 scalar) | 2 (BP5 vector)
+  ComputeRHS(): traction → slip rate + state evolution
+
+FaultBasis                                  [fault/fault_basis.hpp]
+  Per-face: (normal, tangent_dip, tangent_strike)
+  Embedding: (dip,strike) → (X,Y,Z)   Projection: (X,Y,Z) → (dip,strike,σ_n)
+
+FaceQuadrature                              [fault/face_quadrature.hpp]
+  Multi-DOF face basis functions for fault discretization
+```
+
+### Solver Layer
+
 ```
 TimeDependentOperator (MFEM)
-  +-- SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>
-        |-- domain_: DomainOperator<MeshType>*
-        |     +-- AntiplaneDomainOperator<MeshType>     (BP1/BP2: scalar)
-        |     +-- ElasticityDomainOperator<MeshType>     (BP5: 3D vector)
-        |-- fault_:  RateStateFaultOperator<MeshType, SlipComponents>*
-        |     |-- geom_:      FaultGeometry<MeshType>
-        |     |-- friction_:  FrictionLaw*
-        |     |     +-- DieterichRuinaFriction
-        |     |-- evolution_: StateEvolution*
-        |     |     +-- AgingLaw / SlipLaw / AgingLawPsi
-        |-- mpi_ctx_: MPIContext*
-        +-- face_tracer_: FaceTraceLogger* (optional diagnostics)
+└── SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>
+      │                                     [solver/seas_operator.hpp]
+      │  Mult(): domain solve + traction + friction → ODE RHS
+      │  SetInitialCondition(): 4-phase init
+      │
+      ├── domain_: DomainOpType*            (non-owning)
+      ├── fault_:  FaultOpType*             (non-owning)
+      ├── mpi_ctx_: MPIContext*
+      ├── u_gf_:    GridFunction            (displacement solution)
+      ├── slip_, traction_, local_slip_, local_traction_
+      └── elastic_sigma_n_: bool            (normal stress feedback, default ON)
 
-DormandPrinceRK45 (custom adaptive RK45 time integrator)
-  |-- mpi_ctx_: MPIContext* (parallel error reduction)
-
-FaultBasis (fault coordinate transforms: global <-> dip/strike/normal)
-FaceQuadrature (high-order fault DOF locations on faces)
+DormandPrinceRK45                           [solver/time_stepper.hpp]
+  7-stage embedded RK pair (5th/4th order), FSAL
+  PI controller for dt adaptation
+  V-guard: reject stages with V > 100·V_stage0
+  MPI: parallel error reduction via GlobalMax
 ```
 
-## Execution Flow: One Time Step
+### Type Aliases (Template Instantiations)
+
+```cpp
+// Parallel BP5 — primary production path
+using PBP5SEASOp = SEASQuasiDynamicOperator<
+    ParMesh,
+    ElasticityDomainOperator<ParMesh>,
+    RateStateFaultOperator<ParMesh, 2>>;
+
+// Serial BP2
+using SBP2SEASOp = SEASQuasiDynamicOperator<
+    Mesh,
+    AntiplaneDomainOperator<Mesh>,
+    RateStateFaultOperator<Mesh, 1>>;
+```
+
+---
+
+## Configuration System
+
+Parameters flow: **TOML file → CLI overrides → SEASConfig → bridge → domain/solver objects**
 
 ```
-DormandPrinceRK45::Step(seas_op, state, t, dt)
-  |
-  |-- For each RK stage k (7 stages, Dormand-Prince FSAL):
-  |     |
-  |     seas_op.Mult(state_k, rate_k)
-  |       |
-  |       |-- 1. fault_->GetSlip(state, slip_)
-  |       |       Extract slip components from interleaved state vector
-  |       |
-  |       |-- 2. domain_->ExpandOwnedToLocalFault(slip_, local_slip_)
-  |       |       MPI: broadcast owned DOFs to ghost DOFs on neighbor ranks
-  |       |
-  |       |-- 3. domain_->Solve(t, local_slip_, displacement_)
-  |       |       Assemble RHS: slip contribution + Dirichlet loading
-  |       |       Reuse stiffness matrix (assembled once)
-  |       |       Solve K*u = b via MUMPS/CG+AMG/etc.
-  |       |
-  |       |-- 4. domain_->ComputeTraction(displacement_, local_slip_, local_traction_)
-  |       |       Loop over fault interior + shared faces
-  |       |       DG flux: tau = mu*{{grad(u).n}} - penalty*(jump(u) - slip)
-  |       |       BP5: transform to fault-local (dip, strike, normal)
-  |       |
-  |       |-- 5. domain_->RestrictToOwnedFault(local_traction_, traction_)
-  |       |       Select owned subset from full local traction
-  |       |
-  |       +-- 6. fault_->ComputeRHS(traction_, state, rate)
-  |               For each owned fault DOF:
-  |                 tau_total = tau0 + traction
-  |                 V = friction_->SolveSlipRate(tau_total, psi, sigma_n, eta, a)
-  |                 dpsi/dt = evolution_->Rate(V, psi, Dc)
-  |               MPI_Allreduce(V_max, MPI_MAX) for global max
-  |
-  |-- Compute error estimate from embedded 4th-order solution
-  |-- MPI_Allreduce(err_norm, MPI_MAX) for consistent accept/reject
-  |-- Accept: advance t, state = y_next, k[0] = k[6] (FSAL)
-  +-- Reject: shrink dt, retry
+SEASConfig                                  [config/seas_config.hpp]
+├── MeshConfig          file, scale (1000.0), order (1)
+├── MaterialConfig      rho (2670), cs (3464), nu (0.25) → mu(), lambda()
+├── FrictionConfig      V0, f0, b, L0, L_nuc, a0, amax, sigma_n
+├── LoadingConfig       Vp, V_init, V_nuc, delta_tau_factor, smooth_nucleation
+├── FaultGeomConfig     Wf, lf, hs, ht, H, l_vw, w_nuc
+├── BoundaryTomlConfig  dirichlet_attrs, natural_attrs, fault_attr
+├── SolverConfig        dg_method (IP/BR2), solver_type, penalty_factor, blr_tol
+├── TimeConfig          t_final, atol (1e-7), rtol (1e-50), max_steps, tandem_time_stepping
+├── OutputConfig        output_dir, prefix, write_every_step, ref_dir
+└── SimulationConfig    mode (qd / dynamic / hybrid)
 ```
+
+Parsed by `seas_config_parser.hpp`, bridged to runtime objects by `seas_config_bridge.hpp`.
+
+CLI overrides: `--mesh`, `--order`, `--V-nuc`, `--delta-tau-factor`, `--tandem-time-stepping`, etc.
+
+---
+
+## Execution Flow: Full Simulation (seas_driver.cpp)
+
+```
+┌────────────────────────────────────────────────────────────────────┐
+│ Stage 1: CONFIGURATION                              (lines 50-96) │
+│   Parse TOML + CLI → SEASConfig → BP5Params, BoundaryConfig, etc. │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 2: MESH                                      (lines 109-154)│
+│   Load Gmsh file → Mesh → ParMesh (MPI partition)                 │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 3: DOMAIN OPERATOR                           (lines 156-172)│
+│   LinearElastic(λ,μ) → ElasticityDomainOperator(mesh, BCs, DG)   │
+│   Assembles stiffness K once (cached, reused all steps)           │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 4: FAULT COMPONENTS                          (lines 174-188)│
+│   FaultGeometry + DieterichRuinaFriction + AgingLawPsi            │
+│   → RateStateFaultOperator<ParMesh, 2>                            │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 5: SEAS OPERATOR + INIT                      (lines 190-204)│
+│   PBP5SEASOp(domain, fault) + elastic σ_n feedback                │
+│   4-phase init: PreInit → Solve → Init(equilibrium) → Verify     │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 6: I/O SETUP                                 (lines 206-241)│
+│   ParallelBP5BenchmarkOutput (distributed probe ownership)        │
+│   ProbeOutput (global V_max log, root rank only)                  │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 7: TIME STEPPER                              (lines 252-302)│
+│   DormandPrinceRK45: atol=1e-7, rtol=1e-50                       │
+│   dt_init = min(0.01·L_nuc/V_nuc, CFL), V-guard=100              │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 8: TIME LOOP                                 (lines 304-401)│
+│   while (t < t_final && step < max_steps):                        │
+│     ode_solver.Step(seas_op, state, t, dt)                        │
+│     earthquake detection: V_max > 1e-3 m/s enter, < 1e-6 exit    │
+│     adaptive output scheduling                                     │
+├────────────────────────────────────────────────────────────────────┤
+│ Stage 9: FINAL OUTPUT                              (lines 403-420)│
+│   Force write, summary: steps, rejections, earthquake count       │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Execution Flow: One ODE RHS Evaluation (Mult)
+
+Called 7 times per RK45 step. This is the core physics cycle:
+
+```
+DormandPrinceRK45::Step(seas_op, state, t, dt)    [time_stepper.hpp]
+  │
+  │  For each of 7 RK stages:
+  │
+  └── seas_op.Mult(state, rate)                    [seas_operator.hpp]
+        │
+        ├── 1. fault_->GetSlip(state, slip_)
+        │       Extract slip from interleaved state vector
+        │
+        ├── 2. domain_->ExpandOwnedToLocalFault(slip_, local_slip_)
+        │       MPI: broadcast owned DOFs → ghost DOFs
+        │
+        ├── 3. domain_->Solve(t, local_slip_, u_gf_)
+        │       Assemble RHS: b = b_slip + b_dirichlet
+        │       Reuse cached stiffness K
+        │       Solve K*u = b via MUMPS/CG+AMG
+        │
+        ├── 4. domain_->ComputeTraction(u_gf_, local_slip_, local_traction_)
+        │       DG flux: τ = {{σ(u)·n}} - penalty·([[u]] - slip)
+        │       Project (X,Y,Z) → (dip, strike, σ_n)
+        │
+        ├── 5. domain_->RestrictToOwnedFault(local_traction_, traction_)
+        │       Select owned subset from full local traction
+        │
+        └── 6. fault_->ComputeRHS(traction_, state, rate)
+                For each owned fault DOF:
+                  τ_total = τ_pre + traction
+                  V = SolveSlipRateVectorPsi(τ, ψ, σ_n, η, a)  [Brent]
+                  dψ/dt = aging_law(|V|, ψ, Dc)
+```
+
+### Data Flow Diagram
+
+```
+  state = [slip_dip, slip_strike, ψ] × N_fault
+    │
+    ▼
+┌──────────────────┐
+│ 1. GetSlip()     │  Extract slip from interleaved state vector
+└────────┬─────────┘
+         │ slip (fault-local: dip, strike)
+         ▼
+┌──────────────────┐
+│ 2. EmbedSlipQP() │  Transform (dip,strike) → (X,Y,Z) via FaultBasis
+└────────┬─────────┘
+         │ slip (global 3D)
+         ▼
+┌──────────────────────────────────────────┐
+│ 3. ElasticityDomainOperator::Solve()     │
+│    K u = b_slip + b_dirichlet            │
+│    (K cached, only RHS reassembled)      │
+└────────┬─────────────────────────────────┘
+         │ u (displacement field)
+         ▼
+┌──────────────────────────────────────────┐
+│ 4. ComputeTraction()                     │
+│    τ = {{σ(u)·n}} - penalty·([[u]]-slip) │
+│    Project (X,Y,Z) → (dip, strike, σ_n) │
+└────────┬─────────────────────────────────┘
+         │ traction (fault-local)
+         ▼
+┌──────────────────────────────────────────┐
+│ 5. ComputeRHS()                          │
+│    τ_total = τ_pre + traction            │
+│    V = Brent solve: τ = σ_n·f(V,ψ)+η·V  │
+│    dψ/dt = aging_law(|V|, ψ, Dc)        │
+└────────┬─────────────────────────────────┘
+         ▼
+  rate = [V_dip, V_strike, dψ/dt] × N_fault
+```
+
+---
 
 ## Data Ownership
 
@@ -111,6 +389,8 @@ state = [slip_dip_0, slip_strike_0, psi_0, slip_dip_1, slip_strike_1, psi_1, ...
 ```
 
 Traction follows the same interleaving but without the state variable component.
+
+---
 
 ## DG Formulation
 
@@ -156,6 +436,8 @@ tau = {{sigma(u)}} . n - penalty * ([[u]] - delta)
 
 This DG-corrected traction feeds into the friction solver as the elastic loading.
 
+---
+
 ## Friction Coupling
 
 ### Regularized Dieterich-Ruina Law
@@ -186,6 +468,8 @@ Aging law (psi-space): `dpsi/dt = (b*V0/Dc) * [exp((f0-psi)/b) - V/V0]`
 
 Steady state: `psi_ss = f0 + b * ln(V0/V)` when `dpsi/dt = 0`.
 
+---
+
 ## Time Integration
 
 Dormand-Prince RK45 (7-stage, 5th-order, FSAL) with adaptive step control:
@@ -193,11 +477,14 @@ Dormand-Prince RK45 (7-stage, 5th-order, FSAL) with adaptive step control:
 - Error norm: `max_i |err_i / (atol + rtol * |y_i|)|` (L-infinity, default)
 - PI controller: `dt_new = safety * dt * err_norm^(-1/5)`
 - Parallel: `MPI_Allreduce(err_norm, MPI_MAX)` ensures consistent accept/reject
-- Settings: `atol = 1e-7`, `rtol = 1e-50` (pure absolute), `dt_min = 1e-6 s`, `dt_max = 0.5 yr`
+- V-guard: reject RK stages where `V_max > 100 * V_stage0` (prevents runaway amplification)
+- Settings: `atol = 1e-7`, `rtol = 1e-50` (pure absolute), `dt_min = 1e-6 s`, `dt_max = 0.1 yr`
+
+---
 
 ## Boundary Conditions (BP5)
 
-Controlled by `BCMode` enum:
+Controlled by `BoundaryConfig` (configured via TOML or `BCMode` enum):
 
 | Mode | Dirichlet Faces | Natural Faces | Usage |
 |------|----------------|---------------|-------|
@@ -209,24 +496,33 @@ Dirichlet loading: `u_X = sgn(Y) * Vp * t / 2` (along-strike plate motion).
 
 Tandem mesh tag convention: Physical Surface 1 = Natural (top/bottom), 3 = Fault, 5 = Dirichlet (far-field).
 
+---
+
 ## MPI Communication Pattern
 
-1. **ExpandOwnedToLocalFault**: Before domain solve, broadcast owned slip to ghost DOFs on neighbor ranks (all-to-all scatter at partition boundaries)
-2. **Domain Solve**: Each rank solves local portion; MFEM parallel solvers handle internal communication
-3. **ComputeTraction**: Each rank computes traction at its local fault faces (interior + shared)
-4. **RestrictToOwnedFault**: Select owned DOF subset from full local traction
-5. **ComputeRHS**: Each rank computes friction/state evolution for owned DOFs only
-6. **GetMaxSlipRate**: `MPI_Allreduce(MPI_MAX)` for global V_max
-7. **RK45 error norm**: `MPI_Allreduce(MPI_MAX)` for consistent accept/reject
-8. **Output gather**: `MPI_Gatherv` to root + deduplication at partition boundaries
+Most computation is rank-local. MPI happens at these points:
+
+| When | Operation | Pattern |
+|------|-----------|---------|
+| Per RK stage | `ExpandOwnedToLocalFault()` | Scatter: owned slip → ghost DOFs |
+| Per RK stage | `domain_->Solve()` | MUMPS distributed solve (internal MFEM/Hypre) |
+| Per RK stage | `fault_->ComputeRHS()` | Purely local (no MPI) |
+| Per RK step | Error norm reduction | `MPI_Allreduce(MAX)` — consistent accept/reject |
+| Per RK step | Max slip rate | `MPI_Allreduce(MAX)` — earthquake detection, dt control |
+| At I/O setup | Probe station ownership | `MPI_Allreduce(MIN)` on distances (computed once) |
+| At output | Station writes | Each rank writes only its owned stations |
+
+**Critical:** The error norm `MPI_Allreduce(MAX)` prevents rank divergence; without it, ranks disagree on accept/reject and deadlock.
+
+---
 
 ## Coordinate System (BP5)
 
 ```
 SCEC Convention:        Tandem/MFEM Mesh:
-  x1 = fault-normal  ->  Y (fault at Y=0)
-  x2 = along-strike  ->  X
-  x3 = depth (+down)  ->  -Z (Z=0 surface, Z<0 depth)
+  x1 = fault-normal  →  Y (fault at Y=0)
+  x2 = along-strike  →  X
+  x3 = depth (+down)  →  -Z (Z=0 surface, Z<0 depth)
 ```
 
 Fault-local frame (FaultBasis):
@@ -234,12 +530,16 @@ Fault-local frame (FaultBasis):
 - `tangent2` = strike direction = (1, 0, 0) (along-strike, dominant slip)
 - `normal` = (0, 1, 0) or (0, -1, 0) depending on face orientation
 
+---
+
 ## Initialization Sequence (4-Phase)
 
 1. **PreInit**: slip=0, psi = f0 + b*ln(V0/V_init) (steady-state placeholder)
 2. **First domain solve**: K*u=b with zero slip, compute initial elastic traction
 3. **Init**: Compute psi(0) from stress equilibrium: `tau0 + tau_elastic = sigma_n * f(V_init, psi) + eta * V_init`
 4. **Verification re-solve**: Re-solve domain, re-compute traction, verify equilibrium error < 1e-6
+
+---
 
 ## BP5 Spatial Parameters
 
@@ -255,88 +555,48 @@ VW core: `hs+ht <= depth <= hs+ht+H` AND `|x2| <= l_vw/2` (depth 4-16 km, +/-30 
 
 Nucleation zone: left edge of VW, `-l_vw/2 <= x2 <= -l_vw/2 + w_nuc`, same depth range.
 
-## File Map
+---
 
+## Key Physics Equations Summary
+
+| Equation | Formula | Code Location |
+|----------|---------|---------------|
+| Momentum balance | ∇·σ(u) = 0 | `elasticity_operator.hpp` Solve() |
+| Constitutive law | σ = λ tr(ε)I + 2με | `linear_elastic.hpp` ComputeStress() |
+| Fault stress balance | τ = σ_n·f(V,ψ) + η·V | `dieterich_ruina.hpp` SolveSlipRatePsi() |
+| Friction coefficient | f = a·asinh[(V/2V₀)·exp(ψ/a)] | `dieterich_ruina.hpp` FrictionCoefficientPsi() |
+| Aging law (ψ-space) | dψ/dt = (bV₀/Dc)[exp((f₀-ψ)/b) - V/V₀] | `state_evolution.hpp` AgingLawPsi::Rate() |
+| Radiation damping | η = μ/(2c_s) | `fault_geometry.hpp` constructor |
+| DG traction | τ = {{σ·n}} - penalty·([[u]] - slip) | `elasticity_operator.hpp` ComputeTraction() |
+
+---
+
+## Building and Testing
+
+```bash
+conda activate mfem-dev              # Build environment
+
+# Build
+make all                              # Everything
+make seas_driver                      # Primary BP5 driver
+
+# Unit tests (fast, ~2 min)
+make test
+
+# Parallel tests
+mpirun -np 4 seas_test_bp5_parallel_smoke
+mpirun -np 8 seas_test_parallel_elasticity
+
+# Full verification (long-running)
+mpirun -np 8 seas_bp5_full --config bp5/config/bp5_1000m.toml
 ```
-miniapps/seas/
-  pseas.cpp                              Main parallel BP2 driver
-  Makefile                               Build: make all / make test
-  CMakeLists.txt                         CMake alternative
-  ARCHITECTURE.md                        This file
-  CLAUDE.md                              AI assistant instructions
-  CODEBASE_GUIDE.md                      Physics-to-numerics walkthrough
 
-  config/
-    bp1_params.hpp                       BP1 benchmark parameters
-    bp2_params.hpp                       BP2 benchmark parameters + mesh generator
-    bp5_params.hpp                       BP5 parameters, spatial functions a(x2,x3), Dc(x2,x3)
-
-  domain/
-    domain_operator.hpp                  Abstract domain solver interface
-    antiplane_operator.hpp               2D scalar DG (BP1/BP2), BR2 + IP
-    antiplane_bdrload_operator.hpp       Variant with boundary-only loading
-    elasticity_operator.hpp              3D vector DG elasticity (BP5), BR2 + IP
-    bp2_mesh.hpp                         BP2 graded mesh generator (BP2MeshGenerator)
-    seas_boundary_tags.hpp               Gmsh physical surface tag definitions
-
-  fault/
-    fault_geometry.hpp                   Fault DOF management, depth-dependent parameters
-    fault_basis.hpp                      FaultBasis: global <-> (dip, strike, normal) transforms
-    fault_nodes.hpp                      Fault node identification
-    rate_state_fault.hpp                 RateStateFaultOperator: slip rate + state evolution
-    face_quadrature.hpp                  FaceQuadrature: high-order DOF locations on faces
-
-  friction/
-    friction_law.hpp                     Abstract friction law interface
-    dieterich_ruina.hpp                  Regularized Dieterich-Ruina, Brent solver, psi-space
-    state_evolution.hpp                  AgingLaw, SlipLaw, AgingLawPsi
-
-  integrator/
-    dg_br2_integrator.hpp               Scalar BR2 DG integrator (BP1/BP2)
-    dg_elasticity_br2_integrator.hpp     3D elasticity BR2 integrator (BP5)
-    dg_elasticity_ip_penalty_integrator.hpp      IP penalty with full elasticity tensor
-    dg_elasticity_ip_combined_integrator.hpp      Combined IP integrator
-
-  solver/
-    seas_operator.hpp                    SEASQuasiDynamicOperator: couples domain + fault
-    seas_bdrload_operator.hpp            Variant with boundary-load driving
-    time_stepper.hpp                     DormandPrinceRK45: adaptive RK45, parallel error
-
-  io/
-    benchmark_output.hpp                 SCEC format serial output
-    parallel_benchmark_output.hpp        Parallel output with gather + dedup
-    bp5_benchmark_output.hpp             BP5-specific SCEC output
-    bp5_parallel_output.hpp              BP5 parallel output
-    paraview_output.hpp                  ParaView VTK export
-    probe_output.hpp                     Point probe sampling
-    checkpoint.hpp                       Checkpoint/restart
-
-  common/
-    seas_types.hpp                       Enums, typedefs
-    mpi_context.hpp                      MPIContext: Allreduce, Gatherv wrappers
-    parallel_utils.hpp                   Parallel utility functions
-
-  trace/
-    face_trace_logger.hpp                Per-face traction decomposition diagnostics
-
-  tests/
-    unit/                                24 unit tests (friction, DG, fault, I/O, etc.)
-    verification/                         7 verification tests (BP1/BP2/BP5 full runs)
-    parallel/                             9 parallel tests (consistency, MPI, scaling)
-
-  bp1/mesh/                              BP1 Gmsh geometries and meshes
-  bp2/mesh/                              BP2 Gmsh geometries and meshes
-  bp5/mesh/                              BP5 Gmsh geometries and meshes (250m-4000m)
-  bp5/frontera/                          Frontera HPC SLURM scripts
-  jobs/bp5/                              130+ SLURM job scripts (various configs)
-
-  debug_document/bp5_debug_document/     Debug history: v1-v62 (critical domain knowledge)
-```
+---
 
 ## Known Limitations
 
 1. **Matrix assembly**: Stiffness matrix assembled and stored (not matrix-free). Memory-bound for large meshes at high polynomial order.
 2. **Direct solver default**: MUMPS (or MUMPS_BLR) for BP5. Iterative solvers (CG+AMG) available but less robust for DG.
 3. **Single fault plane**: Code assumes one planar fault at Y=0. Multi-fault or non-planar faults not supported.
-4. **Quasi-dynamic only**: No fully dynamic wave propagation. Radiation damping (eta*V) approximates dynamic effects.
+4. **Quasi-dynamic only**: No fully dynamic wave propagation. Radiation damping (eta*V) approximates dynamic effects. (Note: `feature/elasticity-inertia` branch in progress.)
 5. **DG noise on unstructured meshes**: BR2 traction can show O(h) noise at sharp element-size transitions. Smooth mesh grading recommended.

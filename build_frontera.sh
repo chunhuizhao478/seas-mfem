@@ -34,6 +34,7 @@ module load hypre/2.31.0 2>/dev/null || true
 module load mumps/5.3 2>/dev/null || true
 module load parmetis 2>/dev/null || true
 module load "${PETSC_MODULE}" 2>/dev/null || true
+module load fftw3/3.3.8 2>/dev/null || true   # PETSc links against libfftw3_mpi
 
 resolve_petsc_dir() {
     local candidates=(
@@ -85,6 +86,7 @@ for var in \
     TACC_HYPRE_INC TACC_HYPRE_LIB \
     TACC_MUMPS_INC TACC_MUMPS_LIB \
     TACC_PARMETIS_INC TACC_PARMETIS_LIB \
+    TACC_FFTW3_LIB \
     MKLROOT TACC_MKL_LIB; do
     val="$(eval echo \$$var)"
     if [ -z "${val}" ]; then
