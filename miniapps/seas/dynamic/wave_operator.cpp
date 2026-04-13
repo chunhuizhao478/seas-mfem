@@ -52,29 +52,12 @@ WaveOperator::WaveOperator(Mesh &mesh, int order,
    // Assemble per-element inverse mass matrices
    AssembleElementMassInverse();
 
-   // Compute minimum inscribed element diameter for CFL (R-005 fix).
-   // h_inscribed = dim * Volume / max_face_area.
+   // Compute minimum characteristic element size for CFL.
+   // h = V^{1/dim} is the correct CFL length for both hex and tet elements.
    h_min_ = std::numeric_limits<real_t>::max();
    for (int e = 0; e < ne_; e++)
    {
-      real_t vol = mesh_.GetElementVolume(e);
-      real_t max_face_area = 0.0;
-      Array<int> faces, ori;
-      mesh_.GetElementFaces(e, faces, ori);
-      for (int i = 0; i < faces.Size(); i++)
-      {
-         ElementTransformation *ftr = mesh_.GetFaceTransformation(faces[i]);
-         const IntegrationRule &ir = IntRules.Get(ftr->GetGeometryType(), 2);
-         real_t fa = 0.0;
-         for (int q = 0; q < ir.GetNPoints(); q++)
-         {
-            const IntegrationPoint &ip = ir.IntPoint(q);
-            ftr->SetIntPoint(&ip);
-            fa += ip.weight * ftr->Weight();
-         }
-         max_face_area = std::max(max_face_area, fa);
-      }
-      real_t h = 3.0 * vol / max_face_area;  // dim=3
+      real_t h = std::pow(mesh_.GetElementVolume(e), 1.0 / mesh_.Dimension());
       h_min_ = std::min(h_min_, h);
    }
 

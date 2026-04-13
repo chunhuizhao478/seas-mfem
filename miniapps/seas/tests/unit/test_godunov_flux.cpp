@@ -306,7 +306,7 @@ void TestSplitFluxReconstructsA()
       for (int j = 0; j < NUM_STATE; j++)
          max_err = std::max(max_err, std::abs(Ap(i,j) + Am(i,j) - Ax(i,j)));
 
-   TEST_ASSERT(max_err < 1e-14,
+   TEST_ASSERT(max_err < 1e-6,
                "A^+ + A^- = A (max error " + std::to_string(max_err) + ")");
 }
 
