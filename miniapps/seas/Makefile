@@ -296,7 +296,8 @@ PAR_LONG = seas_pseas \
            seas_bp2_benchmark_parallel \
            seas_bp2_verify seas_bp2_full seas_bp1_full \
            seas_bp1_bdrload \
-           seas_bp5_full
+           seas_bp5_full \
+           seas_driver
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS) $(SEQ_LONG)
@@ -1022,8 +1023,8 @@ $(MFEM_LIB_FILE):
 clean: clean-build clean-exec
 
 clean-build:
-	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS)
-	rm -f tests/unit/*.o tests/verification/*.o tests/parallel/*.o
+	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS) $(PAR_LONG)
+	rm -f drivers/*.o tests/unit/*.o tests/verification/*.o tests/parallel/*.o
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:

@@ -110,6 +110,8 @@ public:
          else if (key == "loading.V_nuc") { config.loading.V_nuc = ParseDouble(key, val); }
          else if (key == "time.t_final") { config.time.t_final = ParseDouble(key, val); }
          else if (key == "time.max_steps") { config.time.max_steps = ParseInt(key, val); }
+         else if (key == "time.use_petsc_ts") { config.time.use_petsc_ts = (val == "true" || val == "1"); }
+         else if (key == "time.petsc_ts_options") { config.time.petsc_ts_options = val; }
          else if (key == "mesh.file") { config.mesh.file = val; }
          else if (key == "mesh.scale") { config.mesh.scale = ParseDouble(key, val); }
          else if (key == "mesh.order") { config.mesh.order = ParseInt(key, val); }
@@ -280,6 +282,8 @@ private:
          config.time.max_steps = static_cast<int>(toml::find_or<toml::integer>(t, "max_steps", config.time.max_steps));
          config.time.checkpoint_interval = static_cast<int>(toml::find_or<toml::integer>(t, "checkpoint_interval", config.time.checkpoint_interval));
          config.time.tandem_time_stepping = toml::find_or<bool>(t, "tandem_time_stepping", config.time.tandem_time_stepping);
+         config.time.use_petsc_ts = toml::find_or<bool>(t, "use_petsc_ts", config.time.use_petsc_ts);
+         config.time.petsc_ts_options = toml::find_or<std::string>(t, "petsc_ts_options", config.time.petsc_ts_options);
       }
 
       if (data.contains("output"))
