@@ -39,6 +39,7 @@ struct DomainConfig
    real_t blr_tol = 1e-12;
    bool check_residual = false;
    bool match_quad_order = false;
+   real_t cfl_factor = 0.5;  ///< CFL stability factor for explicit time stepping
 };
 
 } // namespace seas

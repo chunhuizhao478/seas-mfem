@@ -84,6 +84,13 @@ TEST_CONFIG_BRIDGE_SRC = tests/unit/test_seas_config_bridge.cpp
 # Phase 5: TOML config
 TEST_CONFIG_PARSER_SRC = tests/unit/test_seas_config_parser.cpp
 SEAS_DRIVER_SRC = drivers/seas_driver.cpp
+# Dynamic rupture Phase 1: Wave operator and Godunov flux
+GODUNOV_FLUX_SRC = dynamic/godunov_flux.cpp
+WAVE_OPERATOR_SRC = dynamic/wave_operator.cpp
+GODUNOV_FLUX_OBJ = $(GODUNOV_FLUX_SRC:.cpp=.o)
+WAVE_OPERATOR_OBJ = $(WAVE_OPERATOR_SRC:.cpp=.o)
+TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
+TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -120,6 +127,8 @@ TEST_LOGGING_OBJ = $(TEST_LOGGING_SRC:.cpp=.o)
 TEST_CONFIG_BRIDGE_OBJ = $(TEST_CONFIG_BRIDGE_SRC:.cpp=.o)
 TEST_CONFIG_PARSER_OBJ = $(TEST_CONFIG_PARSER_SRC:.cpp=.o)
 SEAS_DRIVER_OBJ = $(SEAS_DRIVER_SRC:.cpp=.o)
+TEST_GODUNOV_FLUX_OBJ = $(TEST_GODUNOV_FLUX_SRC:.cpp=.o)
+TEST_WAVE_OPERATOR_OBJ = $(TEST_WAVE_OPERATOR_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -178,8 +187,14 @@ IO_HEADERS = io/probe_output.hpp \
 # Checkpoint I/O
 CHECKPOINT_HEADERS = io/checkpoint.hpp
 
+# Dynamic rupture headers (Phase 1)
+DYNAMIC_HEADERS = dynamic/wave_state.hpp \
+                  dynamic/godunov_flux.hpp \
+                  dynamic/wave_operator.hpp \
+                  dynamic/seas_dynamic_operator.hpp
+
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -204,7 +219,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_boundary_config \
                seas_test_boundary_config_operator \
                seas_test_logging \
-               seas_test_config_bridge
+               seas_test_config_bridge \
+               seas_test_godunov_flux \
+               seas_test_wave_operator
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -438,6 +455,14 @@ seas_test_face_quadrature: $(TEST_FACE_QUADRATURE_OBJ)
 seas_test_cross_verify: $(TEST_CROSS_VERIFY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CROSS_VERIFY_OBJ) $(MFEM_LIBS)
 
+# Dynamic rupture Phase 1: Godunov flux tests
+seas_test_godunov_flux: $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# Dynamic rupture Phase 1: Wave operator tests
+seas_test_wave_operator: $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
@@ -543,6 +568,22 @@ $(TEST_CROSS_VERIFY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(GODUNOV_FLUX_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_GODUNOV_FLUX_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -561,7 +602,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-linear-elastic test-constitutive-integrator \
       test-boundary-config test-boundary-config-operator \
       test-boundary-classification \
-      test-logging test-config-bridge test-config-parser
+      test-logging test-config-bridge test-config-parser \
+      test-godunov-flux test-wave-operator
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -723,6 +765,12 @@ $(TEST_CONFIG_PARSER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(C
 
 test-config-parser: seas_test_config_parser
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_config_parser
+
+test-godunov-flux: seas_test_godunov_flux
+	./seas_test_godunov_flux
+
+test-wave-operator: seas_test_wave_operator
+	./seas_test_wave_operator
 
 seas_driver: $(SEAS_DRIVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(SEAS_DRIVER_OBJ) $(MFEM_LIBS)

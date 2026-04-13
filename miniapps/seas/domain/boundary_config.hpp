@@ -43,6 +43,7 @@ struct BoundaryConfig
 {
    std::set<int> dirichlet_attrs;  ///< Boundary attrs with Dirichlet BC
    std::set<int> natural_attrs;    ///< Boundary attrs with Natural (zero-traction) BC
+   std::set<int> absorbing_attrs;  ///< Boundary attrs with first-order absorbing BC
    int fault_attr = 3;             ///< Boundary attr for fault faces
 
    /// Per-attribute Dirichlet functions. Key = attr number.
