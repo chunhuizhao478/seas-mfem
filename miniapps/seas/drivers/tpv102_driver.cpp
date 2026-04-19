@@ -434,8 +434,9 @@ int main(int argc, char *argv[])
 
    if (rank == 0)
    {
-      std::cout << "Q = 0 (perturbation). Background: tau = "
-                << TPV102Params::tau_ini / 1e6 << " MPa, sigma_n = "
+      std::cout << "Q = 0 (perturbation). Background: tau_strike = "
+                << TPV102Params::tau_ini / 1e6
+                << " MPa (BP5 convention: stored in tau2_0), sigma_n = "
                 << TPV102Params::sigma_n / 1e6 << " MPa\n\n";
    }
 
@@ -470,9 +471,12 @@ int main(int argc, char *argv[])
    //   - Fault friction parameter fields: param_a, param_Dc, fault_x2, fault_x3
    //   - Fault-surface VTU/PVD (proper triangle geometry, per-DOF field values)
    //
-   // Component-to-name mapping (BP5 convention: comp 0 = dip, comp 1 = strike):
-   //   TPV102 V1/slip1/tau1_corr (along-strike, mode-II) -> strike channel
-   //   TPV102 V2/slip2/tau2_corr (along-dip,   mode-III) -> dip   channel
+   // Component-to-name mapping (BP5 convention, enforced project-wide by
+   // R-801 Option A: comp 0 = dip = tangent1, comp 1 = strike = tangent2):
+   //   DOFData.V1/slip1/tau1_corr (dip,    mode-III in TPV102) -> dip channel
+   //   DOFData.V2/slip2/tau2_corr (strike, mode-II  in TPV102) -> strike channel
+   // TPV102 is pure strike-slip so the dip channel stays near zero and the
+   // interesting rupture physics lives in the strike channel.
    // -----------------------------------------------------------------------
    using PvFES = typename seas::GFType<MeshT>::FESType;
    using PvGF  = typename seas::GFType<MeshT>::type;
@@ -627,17 +631,25 @@ int main(int argc, char *argv[])
                      3 * ndof_total * sizeof(real_t));
       }
 
-      // Pack fault fields from DOFData (V1/slip1 = strike = comp 1,
-      // V2/slip2 = dip = comp 0, matching BP5 naming).
+      // Pack fault fields from DOFData.  R-801 Option A: DOFData.V1/slip1/
+      // tau1_corr are the DIP-aligned components and DOFData.V2/slip2/
+      // tau2_corr are the STRIKE-aligned components, project-wide (BP5
+      // convention).  BP5's ParaView writer takes comp 0 = dip, comp 1 =
+      // strike, so this map is now the identity — no swap needed.
+      //
+      // Pre-R-801 this code swapped components because the SOURCE convention
+      // was (t1 = strike, t2 = dip) on interior fault QPs via
+      // GodunovFlux::BuildFrame.  Under Option A the source is BP5-canonical
+      // everywhere, so the swap is removed (it would now double-invert).
       for (int i = 0; i < num_fault_total; i++)
       {
          const DOFData &d = dof_data[i];
-         pv_local_slip(2*i + 0)      = d.slip2;
-         pv_local_slip(2*i + 1)      = d.slip1;
-         pv_local_slip_rate(2*i + 0) = d.V2;
-         pv_local_slip_rate(2*i + 1) = d.V1;
-         pv_local_traction(2*i + 0)  = d.tau2_corr;
-         pv_local_traction(2*i + 1)  = d.tau1_corr;
+         pv_local_slip(2*i + 0)      = d.slip1;       // dip
+         pv_local_slip(2*i + 1)      = d.slip2;       // strike
+         pv_local_slip_rate(2*i + 0) = d.V1;          // dip rate
+         pv_local_slip_rate(2*i + 1) = d.V2;          // strike rate
+         pv_local_traction(2*i + 0)  = d.tau1_corr;   // dip traction
+         pv_local_traction(2*i + 1)  = d.tau2_corr;   // strike traction
          pv_local_state(i)           = d.psi;
          pv_local_normal_stress(i)   = d.sigma_n_corr;
       }

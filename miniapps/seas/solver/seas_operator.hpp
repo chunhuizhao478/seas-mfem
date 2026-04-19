@@ -493,8 +493,14 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
             V_l1 += a;
             if (a > V_linf) V_linf = a;
          }
-         // MPI reduce (traction_ and V are owned-restricted, one value per owned DOF)
+         // MPI reduce (traction_ and V are owned-restricted, one value per owned DOF).
+         // Serial-build compile fragility fix: MPIContext::GetComm is only
+         // defined under `#ifdef SEAS_USE_MPI` (common/mpi_context.hpp:34-66),
+         // so the MPI branch must be guarded at the same granularity to
+         // keep seas_operator.hpp serial-compilable by unit tests that
+         // include it transitively.
          real_t g_trac_l1, g_trac_linf, g_V_l1, g_V_linf;
+#ifdef SEAS_USE_MPI
          if (mpi_ctx_)
          {
             MPI_Reduce(&trac_l1, &g_trac_l1, 1, MPI_DOUBLE, MPI_SUM,
@@ -507,6 +513,7 @@ void SEASQuasiDynamicOperator<MeshType, DomainOpType, FaultOpType>::Mult(
                         0, mpi_ctx_->GetComm());
          }
          else
+#endif
          {
             g_trac_l1 = trac_l1; g_trac_linf = trac_linf;
             g_V_l1 = V_l1; g_V_linf = V_linf;

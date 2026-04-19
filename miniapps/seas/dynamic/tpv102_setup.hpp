@@ -57,15 +57,25 @@ inline void InitializeFaultDOFs(std::vector<DOFData> &dof_data, int ndof,
       d.eta_p    = TPV102Params::Zp / 2.0;
       d.eta_s    = TPV102Params::eta_s;
 
-      // Background stress (uniform, in fault-local frame).
-      // NOTE: tau1_0 and tau2_0 are specified in the fault-local coordinate frame.
-      // For TPV102's vertical planar fault at Y=0, BuildFrame aligns t1 with the
-      // x-axis (along-strike), so tau1_0 = tau_ini is the along-strike pre-stress.
-      // For non-planar faults, these would need to be rotated from global coordinates
-      // at each QP using the face normal and BuildFrame tangent vectors.
+      // Background stress (uniform, in the BP5 canonical fault-local frame).
+      // Under R-801 Option A the whole TPV102 pipeline uses BP5's
+      // FaultBasis convention — tangent1 = dip, tangent2 = strike
+      // (Tandem convention, see fault/fault_basis.hpp:54-56).  For TPV102's
+      // vertical planar fault at y=0 with ref_normal=(0,-1,0) and up=(0,0,1):
+      //   can_t1 = dip    = (0, 0, -1)   (-z = down into earth)
+      //   can_t2 = strike = (+1, 0, 0)   (+x = along strike)
+      // TPV102 is pure strike-slip, so the along-strike pre-stress and
+      // initial slip rate live in COMPONENT 2 (tangent2), not component 1.
+      // Pre-R-801, this file wrote strike into component 1 under the
+      // GodunovFlux::BuildFrame convention (t1=x=strike); that made the
+      // interior-fault path self-consistent but collided with the shared-
+      // fault path (which always used BP5's canonical frame via R-701),
+      // producing mixed semantics for DOFData.V1/V2/tau1_corr/tau2_corr
+      // across QPs on the same fault.  Option A puts every QP on BP5's
+      // convention, restoring a single source of truth.
       d.sigma_n0 = TPV102Params::sigma_n;
-      d.tau1_0   = TPV102Params::tau_ini;
-      d.tau2_0   = 0.0;
+      d.tau1_0   = 0.0;                      // no dip pre-stress
+      d.tau2_0   = TPV102Params::tau_ini;    // along-strike pre-stress
 
       // Fault coordinates: x = along-strike, z = depth
       real_t along_strike = fault_coords[i](0);
@@ -78,16 +88,18 @@ inline void InitializeFaultDOFs(std::vector<DOFData> &dof_data, int ndof,
       // Initial state from equilibrium
       d.psi = ComputeInitialPsi(d.a);
 
-      // Initially locked
+      // Initially locked — TPV102 initial slip rate is purely along-strike
+      // (mode II).  Under BP5 convention strike lives in component 2.
       d.slip_rate = TPV102Params::V_ini;
-      d.V1 = TPV102Params::V_ini;  // pure mode-II initial slip
-      d.V2 = 0.0;
+      d.V1 = 0.0;                            // no dip slip rate
+      d.V2 = TPV102Params::V_ini;            // along-strike initial slip rate
       d.slip1 = 0.0;
       d.slip2 = 0.0;
 
-      // Initial corrected traction = background (no perturbation)
-      d.tau1_corr = TPV102Params::tau_ini;
-      d.tau2_corr = 0.0;
+      // Initial corrected traction = background (no perturbation).  Same
+      // component assignment as the pre-stress: strike in component 2.
+      d.tau1_corr = 0.0;
+      d.tau2_corr = TPV102Params::tau_ini;
       d.sigma_n_corr = TPV102Params::sigma_n;
    }
 }
@@ -110,8 +122,11 @@ inline void InitializeState(Vector &Q, int ndof_total)
 
 /// @brief Apply nucleation perturbation to fault DOF shear stress.
 ///
-/// Adds delta_tau(x, z, t) to the background shear stress tau1_0 for each DOF.
-/// This modifies the pre-stress term that enters the trial traction computation.
+/// Adds delta_tau(x, z, t) to the background along-strike shear pre-stress
+/// for each DOF.  Under R-801 Option A the BP5 canonical frame is in force
+/// everywhere, so the along-strike pre-stress lives in `tau2_0` (tangent2 =
+/// strike), NOT `tau1_0` (tangent1 = dip).  This modifies the pre-stress
+/// term that enters the trial traction computation.
 ///
 /// @param[in,out] dof_data  Fault DOF data array.
 /// @param[in] ndof  Number of fault DOFs.
@@ -127,7 +142,8 @@ inline void ApplyNucleation(std::vector<DOFData> &dof_data, int ndof,
       real_t down_dip = std::abs(fault_coords[i](2));
 
       real_t dtau = NucleationPerturbation(along_strike, down_dip, t);
-      dof_data[i].tau1_0 = TPV102Params::tau_ini + dtau;
+      // BP5 convention (tangent2 = strike): along-strike pre-stress = tau2_0.
+      dof_data[i].tau2_0 = TPV102Params::tau_ini + dtau;
    }
 }
 
@@ -328,6 +344,8 @@ private:
                    << " (along_strike=" << stations_[s].along_strike
                    << ", down_dip=" << stations_[s].down_dip << ")\n";
          files_[s] << "# Columns: time slip1 slip2 V1 V2 tau1 tau2 sigma_n log10_theta\n";
+         files_[s] << "# BP5 convention: 1 = dip (tangent1), 2 = strike (tangent2). TPV102 is pure strike-slip so V1/slip1/tau1 ~ 0 "
+                      "and the interesting physics is in column 2.\n";
       }
    }
 

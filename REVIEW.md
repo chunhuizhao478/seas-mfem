@@ -1,479 +1,371 @@
-# Code Review: 2026-04-19 — v4 fresh review of TPV102 v3-fixes
+# Code Review: 2026-04-19 v5 — Frontera 4-rank R-101 abort diagnosis
 
-This is a from-scratch adversarial review of the code after `tpv102_debug_v3_fix.md`
-was applied. Each of the three passes was re-executed on the changed files; findings
-below are not a re-verification of prior checklist items.
+This review was triggered by the dispositive failure of the v4 4-rank
+sanity run on Frontera (job 7664983).  The run aborted during step 0
+of the first RK4 time step with `MFEM abort: R-101 shared-fault DOFData
+consistency FAILED` — the exact guard R-305/R-101 was installed to raise.
 
-## Review Scope
-- Plans / fix history consulted:
-  - `miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v1.md`
-  - `tpv102_debug_v1_check.md` / `tpv102_debug_v1_fix.md`
-  - `tpv102_debug_v2_check.md` / `tpv102_debug_v2_fix.md`
-  - `tpv102_debug_v3_check.md` / `tpv102_debug_v3_fix.md`
-- Files re-reviewed:
-  - `miniapps/seas/drivers/tpv102_driver.cpp`
-  - `miniapps/seas/dynamic/wave_operator.hpp`
-  - `miniapps/seas/dynamic/wave_operator.inl`
-  - `miniapps/seas/dynamic/tpv102_setup.hpp`
-  - `miniapps/seas/io/paraview_output.hpp`
-  - `miniapps/seas/tests/parallel/test_r101_shared_fault.cpp`
-  - `miniapps/seas/jobs/tpv102/tpv102_200m_p1_1.5s_50rank_dev.sbatch`
-  - `miniapps/seas/jobs/tpv102/tpv102_200m_p1_1.5s_400rank_dev.sbatch`
-- Domain context:
-  - `miniapps/seas/CLAUDE.md` (repo invariants, DG+fault physics rules)
-  - MFEM `communication.hpp` (`MPITypeMap` specializations)
-  - MFEM `pmesh.hpp` (shared-face / face-nbr / global-vertex APIs)
-- Build + runtime verification:
-  - `make seas_tpv102_driver` — **OK** on local macOS / conda mfem-dev
-  - `mpirun -np 2 ./seas_test_r101_shared_fault` — **8/8 PASS**
-    (R-101a / R-101b SKIP on TPV102 coarse mesh as disclosed; R-302a
-    inline 2-tet test passes with `max_diff=0`, `3 pairs matched`)
-  - `mpirun -np 4 ./seas_tpv102_driver --mesh tpv102_1000m.msh --tfinal 0.1 --debug-qnorm`
-    — runs cleanly, no aborts, qnorm grows on all 4 ranks.
+Full analysis is in:
+`miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v5_check.md`
+
+This file summarises the findings for the /code-fix agent.
+
+## Verdict on the Frontera Abort
+
+**Real bug, not a false positive.**  The R-001 (+,-) canonicalisation
+design from v3 cannot produce identical `Evaluate` inputs on two ranks
+that share a fault face, because MFEM's `GetSharedFaceTransformations`
+returns opposite face normals on the two ranks (documented invariant in
+`mfem/mesh/pmesh.hpp:592-597`), and `BuildFrame(nor)` therefore
+produces different fault-local frames.  The (+,-) swap corrects the
+labeling but not the rotation-matrix mismatch.  The abort correctly
+reports real DOFData drift.
 
 ## Findings
 
-### [R-401] [MODERATE] `dynamic/tpv102_setup.hpp:246-247` — TPV102StationWriter::Open (MPI variant) uses `MPI_DOUBLE` on a `std::vector<real_t>` buffer; silent memory corruption on `MFEM_USE_SINGLE` builds
+### [R-501] [CRITICAL] `dynamic/wave_operator.inl:ComputeSharedFaceFluxRHS` — R-001 swap alone cannot produce identical Evaluate inputs on two ranks sharing a fault face
 
-**Category:** BUG (same root cause as R-303, missed in v3 fix scope)
-
-**Description:**
-R-303 fixed four `MPI_DOUBLE`-on-`real_t` sites: three in `tpv102_driver.cpp` and
-one in `wave_operator.inl` (ctor h_min_). But `tpv102_setup.hpp` — which is
-`#include`'d by `tpv102_driver.cpp` and compiled into `seas_tpv102_driver` —
-still contains the same bug class on the station-ownership reduction:
-
-```cpp
-// dynamic/tpv102_setup.hpp, lines 230-247
-std::vector<real_t> local_dist(nstations, std::numeric_limits<real_t>::max());
-for (int s = 0; s < nstations; s++) { ... local_dist[s] = std::sqrt(...); }
-std::vector<real_t> global_min_dist(nstations);
-MPI_Allreduce(local_dist.data(), global_min_dist.data(), nstations,
-              MPI_DOUBLE, MPI_MIN, comm);   // ← real_t buffer, MPI_DOUBLE
-```
-
-Both `local_dist` and `global_min_dist` are `std::vector<real_t>`. On a
-`MFEM_USE_SINGLE` build (`real_t = float`, stride = 4 bytes), MPI_Allreduce
-reads/writes 8 bytes per slot from/to a 4-byte-stride buffer. Result on single-
-precision builds: garbage station-ownership distances → wrong ownership
-tiebreaker → either duplicated or missing station files. On double-precision
-builds (Frontera default, as far as the v3 fix doc implies) this is latent.
-
-**Trigger:**
-Any `MFEM_USE_SINGLE=YES` build that exercises TPV102. Does not block the
-double-precision Frontera run but is a latent crash/corruption on the
-supported single-precision config.
-
-**Actual behavior:**
-Works by coincidence on double builds (sizeof(real_t) == sizeof(double)).
-Corrupts `global_min_dist[]` on single builds.
-
-**Expected behavior:**
-Use `MPITypeMap<real_t>::mpi_type`, matching the R-303 fix pattern already
-applied in `tpv102_driver.cpp` and `wave_operator.inl`.
-
-**Suggested fix:**
-```diff
- // dynamic/tpv102_setup.hpp
--      // Global min distance across all ranks
--      std::vector<real_t> global_min_dist(nstations);
--      MPI_Allreduce(local_dist.data(), global_min_dist.data(), nstations,
--                    MPI_DOUBLE, MPI_MIN, comm);
-+      // Global min distance across all ranks (R-401: match real_t type
-+      // at compile time — same MPITypeMap pattern as R-303 fix).
-+      std::vector<real_t> global_min_dist(nstations);
-+      MPI_Allreduce(local_dist.data(), global_min_dist.data(), nstations,
-+                    MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
-```
-
-**Test case:**
-```python
-@pytest.mark.skipif(not has_mfem_single_precision(),
-                    reason="only applicable to MFEM_USE_SINGLE builds")
-def test_R401_station_writer_single_precision():
-    """
-    On MFEM_USE_SINGLE build, TPV102StationWriter::Open must not
-    produce corrupted station distances.  Precondition: real_t = float.
-    Check no duplicated-station-file opens and all 9 stations get exactly
-    one writer across the communicator.
-    """
-    run_tpv102_driver(nranks=4, build="single")
-    station_writers = count_station_writers_across_ranks()
-    # Exactly one rank opens each station file
-    assert all(v == 1 for v in station_writers.values()), \
-        f"duplicate/missing station owners under MFEM_USE_SINGLE: {station_writers}"
-```
-
----
-
-### [R-402] [MODERATE] `jobs/tpv102/tpv102_200m_p1_1.5s_{50,400}rank_dev.sbatch` — RESULT.txt regex false-positive marks alive-but-small ranks as FAIL; dispositive run's PASS/FAIL verdict can invert
-
-**Category:** BUG (post-run verifier logic)
+**Category:** BUG (fundamental — incomplete R-001 design)
 
 **Description:**
-Both dev-queue sbatch scripts added in the R-306 fix use the same regex to
-classify the final `[qnorm:watch]` line:
+On shared face A↔B, MFEM gives `nor_A = -nor_B` (Elem1's outward normal
+convention; pmesh.hpp:592-597).  `BuildFrame` then produces different
+`(nor, t1, t2)` frames → different `Tinv` → `Tinv_A·Q ≠ Tinv_B·Q` for
+any Q ≠ 0.  The R-001 swap of `(Q_plus_local, Q_minus_local)` on the
+non-owner corrects the +/- labeling but cannot correct the frame
+mismatch.  Result: `Evaluate(Q_plus_local, Q_minus_local, ...)` is
+called with **different numerical inputs on the two ranks**, producing
+different outputs and drifting DOFData.
 
-```bash
-elif echo "${FINAL_WATCH}" | grep -qE "r[0-9]+=0(\b|[^.0-9])|r[0-9]+=1e-3[0-9]+"; then
-   echo "FAIL: final [qnorm:watch] shows dead ranks..."
-```
-
-The first alternation `r[0-9]+=0(\b|[^.0-9])` is *not* a "dead rank" detector.
-It matches any rank whose printed qnorm value starts with the digit `0`, followed
-by anything non-digit-non-dot **or** a word boundary. In particular:
-
-- `r10=0.0001` — rank 10 with ||Q||_∞ = 1e-4. MATCHES (`r10=0` + `\b` at the
-  `0`→`.` transition since `0` is a word-char and `.` is not).
-- `r10=0`    — true dead rank. MATCHES (correct behaviour).
-- `r10=5e-21` — tiny but nonzero, doesn't start with `0`. Does **not** match.
-- `r10=0.5`  — rank 10 with ||Q||_∞ = 0.5. MATCHES (false positive).
-
-C++ `operator<<(ostream, double)` with default precision renders values in the
-range `[1e-4, 1e6]` in *fixed* notation (e.g., `0.5`, `0.0001`), not in
-scientific. In a working TPV102 run at tfinal=1.5 s, off-axis or edge ranks
-can legitimately have ||Q||_∞ on the order of 0.1–1 depending on stress/velocity
-scaling and output precision. Those ranks then trip the regex and the script
-writes `FAIL: ...shows dead ranks...` even though the run was successful.
-
-This is the verifier for the **dispositive 400-rank run**. A false FAIL means:
-(a) node-hours are burned without a trustworthy verdict, (b) a follow-up human
-eyeballs the log anyway, which was the problem R-306 was supposed to eliminate.
+The 4-rank Frontera log reports `tau1_corr` differs by 1.93e-7 Pa at
+step 0.  At Q=0 (stage 1) both ranks compute identically; the drift
+comes from stages 2-4 which drive Evaluate with Q_tmp ≠ 0.  Drift will
+grow with simulation progress as V_abs ramps from 1e-12 to O(1 m/s),
+producing O(MPa)-scale divergence by late-in-run.
 
 **Trigger:**
-Any successful run whose final per-rank qnorm prints in fixed notation and
-contains the leading digit `0`. Very likely to occur for edge ranks whose
-wave perturbation is sub-unit but nonzero.
+Any TPV102 run whose METIS partitioning places ≥ 1 fault face on a
+partition seam (observed on 4-rank 1000 m mesh, expected on all
+higher-rank-count production configs).
 
 **Actual behavior:**
-`r10=0.0001` → matches → FAIL written to `RESULT.txt`.
-`r10=1e-21`  → no match → PASS written to `RESULT.txt` (correct).
+Owner and non-owner call `Evaluate` with `Tinv_A·Q_self_A` vs
+`Tinv_B·Q_self_B` as the first arg (values agree, transforms differ).
+Swapping the arguments on non-owner does not fix this — what the swap
+achieves is relabeling `(plus, minus)` within the Evaluate formula,
+but the formula's velocity-jump term `(VY^- - VY^+)` is not symmetric
+under the combined `(swap, Tinv_A → Tinv_B)` operation because
+`Tinv_B = diag(-1,-1,+1) · Tinv_A` on the tangent components.
 
 **Expected behavior:**
-The detector should recognize either (i) an exact literal zero (`=0` followed
-by end-of-token), or (ii) a value in scientific notation with exponent ≤ -20
-(the "essentially zero" floor). It must not match valid small fixed-notation
-values.
+DOFData on both ranks of a shared fault face must be bit-identical
+(or within true round-off) after every Evaluate.  Equivalently: each
+shared fault QP has exactly one authoritative post-Evaluate state,
+and both ranks' copies of that state agree.
 
-**Suggested fix:**
-Bound the detector to literal `=0` only at a token boundary (space or EOL),
-and keep the existing scientific `1e-3XX` pattern:
+**Suggested fix — owner-broadcasts, batched per Mult:**
 
-```diff
--elif echo "${FINAL_WATCH}" | grep -qE "r[0-9]+=0(\b|[^.0-9])|r[0-9]+=1e-3[0-9]+"; then
-+# R-402 fix: `r[0-9]+=0(\b|[^.0-9])` also matches valid small values like
-+# `rN=0.0001`.  Restrict the "exact zero" case to `=0` followed by whitespace
-+# or EOL, and keep the denormal-exponent case as-is.
-+elif echo "${FINAL_WATCH}" | grep -qE "r[0-9]+=0([[:space:]]|$)|r[0-9]+=1e-3[0-9]+"; then
-    echo "FAIL: final [qnorm:watch] shows dead ranks (rupture may not have crossed seam):" > "${RESULT_FILE}"
-```
+Structure the fix in three phases inside `ComputeSharedFaceFluxRHS`:
 
-Belt-and-suspenders: also promote the driver to print qnorm with `%.3e`
-formatting so the regex operates on a stable format instead of `operator<<`'s
-value-dependent switching between fixed and scientific:
+1. **Owner Evaluate + pack phase (first loop over shared fault faces):**
+   - For each shared fault QP the owner (lower rank ID) rotates its
+     local Q into its frame, calls `Evaluate`, and rotates the resulting
+     `Q_imp_plus, Q_imp_minus` back to the **global frame** (using T).
+   - Owner packs per-QP into a flat send buffer: `fdata` (8 mutable
+     scalars: V1_local, V2_local, tau1_corr_local, tau2_corr_local,
+     sigma_n_corr, slip_rate, slip1, slip2, psi — per v4 R-301 field
+     list) PLUS the full global-frame `Q_imp_plus_g, Q_imp_minus_g`
+     (18 doubles per QP).  Record count = 8 + 18 = 26 doubles/QP.
+   - Non-owner does not call Evaluate yet; leaves slot for received
+     data.
 
-```diff
- // drivers/tpv102_driver.cpp, inside the [qnorm:watch] block
-+std::cout << std::scientific << std::setprecision(3);
- for (int r : watch_unique)
- {
-    std::cout << " r" << r << "=" << qn_all[r];
- }
- std::cout << " (hypo_rank=" << hypo_rank << ")\n";
-+std::cout.unsetf(std::ios::scientific);    // restore default
-```
+2. **MPI point-to-point exchange (single collective per peer):**
+   - Per peer rank, issue `MPI_Sendrecv` exchanging the per-peer
+     buffers.  Owner sends, non-owner receives (inverse on the peer).
+     Total traffic ~ 26 * n_shared_fault_qps_per_peer doubles.
 
-**Test case:**
-```bash
-# jobs/tpv102/test_result_regex.sh
-set -eu
+3. **Accumulate flux phase (second loop):**
+   - Both ranks now have authoritative `fdata`, `Q_imp_plus_g,
+     Q_imp_minus_g` for every shared fault QP they own.
+   - For each QP, compute `F_h = flux_.Interior(nor_local,
+     Q_imp_plus_g, Q_imp_minus_g, F_h_out)` using the LOCAL `nor`.
+   - **Sign correction:** non-owner's local `nor` is opposite owner's
+     canonical normal.  Since `flux_.Interior`'s convention integrates
+     `A_n^+ Q^+ + A_n^- Q^-` and both ranks end up with Q_imp buffers
+     rotated via owner's T (global frame), the flux direction encoded
+     in `Q_imp_plus_g / Q_imp_minus_g` matches owner's nor.  Non-owner
+     must negate `F_h` before accumulating into its rhs to account for
+     its Elem1 being on the `−canonical_nor` side.
 
-# Positive cases: must match (FAIL)
-for line in \
-   "[qnorm:watch] r10=0 r11=1e5 (hypo_rank=10)"        \
-   "[qnorm:watch] r10=1e-35 r11=1e5 (hypo_rank=10)"    \
-   "[qnorm:watch] r10=1e-300 r11=1e5 (hypo_rank=10)"   \
-; do
-   echo "$line" | grep -qE "r[0-9]+=0([[:space:]]|$)|r[0-9]+=1e-3[0-9]+" \
-      || { echo "REGRESS: should have matched: $line"; exit 1; }
-done
-
-# Negative cases: must NOT match (alive ranks)
-for line in \
-   "[qnorm:watch] r10=0.0001 r11=1e5 (hypo_rank=10)"   \
-   "[qnorm:watch] r10=0.5 r11=1e5 (hypo_rank=10)"      \
-   "[qnorm:watch] r10=5e-21 r11=1e5 (hypo_rank=10)"    \
-   "[qnorm:watch] r10=1e6 r11=1e5 (hypo_rank=10)"      \
-; do
-   echo "$line" | grep -qE "r[0-9]+=0([[:space:]]|$)|r[0-9]+=1e-3[0-9]+" \
-      && { echo "REGRESS: should NOT have matched: $line"; exit 1; }
-   :
-done
-
-echo "R-402: RESULT.txt regex behaves correctly"
-```
-
----
-
-### [R-403] [MODERATE] `jobs/tpv102/tpv102_200m_p1_1.5s_{50,400}rank_dev.sbatch` — post-run `JOB_LOG` path is relative to a CWD the script itself changes; RESULT.txt silently records FAIL on any submission from outside `miniapps/seas/`
-
-**Category:** BUG (CI/robustness)
-
-**Description:**
-Both scripts have the pattern (identical in 50-rank and 400-rank):
-
-```bash
-cd /scratch2/10024/zhaochun/seas-project/seas-mfem       # line ~53
-# ...
-cd miniapps/seas                                           # line ~60
-make seas_tpv102_driver ...                                # line ~61
-# ...
-ibrun ./seas_tpv102_driver ...                             # line ~74
-# ...
-JOB_LOG="tpv102_200m_50r_${SLURM_JOB_ID}.out"              # relative name
-FINAL_WATCH=$(grep "\[qnorm:watch\]" "${JOB_LOG}" | tail -1)
-```
-
-Slurm writes `#SBATCH -o tpv102_200m_50r_%j.out` relative to the directory in
-which `sbatch` was invoked (the submit CWD). The script then does
-`cd ... && cd miniapps/seas`, so by the time the `grep "${JOB_LOG}"` runs, the
-current working directory is `/scratch2/.../seas-mfem/miniapps/seas/`, which is
-not the submit dir unless the user happened to invoke `sbatch` from exactly
-`miniapps/seas/`. In every other submission workflow (e.g., submitting from
-repo root, a login-node jump-host, or the `jobs/tpv102/` directory itself), the
-`grep` returns "file not found" (exit 2), `FINAL_WATCH` ends up empty, and the
-script then falls into the `elif [ -z "${FINAL_WATCH}" ]` branch and writes
-`FAIL: no [qnorm:watch] line in job output — driver never produced diagnostic`
-— even when the driver produced dozens of `[qnorm:watch]` lines successfully.
-
-**Trigger:**
-`sbatch jobs/tpv102/tpv102_200m_p1_1.5s_400rank_dev.sbatch` from the repo root,
-which matches the recommendation in the sbatch comments of rec #4 in the v3
-check document:
-> 4. `tpv102_200m_p1_1.5s_400rank_dev.sbatch` (~1.5 hr within dev-queue).
-> **THE dispositive test.**
-
-A user submitting from `/scratch2/10024/zhaochun/seas-project/seas-mfem/`
-(the natural root to stand in for a repo root workflow) will see **every**
-post-run RESULT.txt report FAIL regardless of physics outcome. R-306 fix's
-stated goal ("PASS/FAIL machine-checkable verdict") becomes a no-op.
-
-**Actual behavior:**
-`grep "[qnorm:watch]" "tpv102_200m_400r_v2_${ID}.out" | tail -1` with CWD =
-`miniapps/seas/` and log file at `/scratch2/.../seas-mfem/tpv102_200m_400r_v2_${ID}.out`
-fails to find the file. FINAL_WATCH empty → FAIL verdict.
-
-**Expected behavior:**
-`JOB_LOG` must be an absolute path (or at minimum a path that resolves
-independently of the script's own CWD changes).
-
-**Suggested fix:**
-Capture the submit CWD before any `cd`, and anchor the log path there:
+Minimal code shape (pseudo — real implementation must batch and use
+`MPI_Sendrecv` rather than the per-face call shown):
 
 ```diff
- export LC_ALL=C
- export LANG=C
-
-+# R-403 fix: pin SLURM_SUBMIT_DIR before we `cd` anywhere so the post-run
-+# RESULT.txt check can locate the SBATCH -o file (Slurm writes it relative
-+# to the submit dir, but the script changes CWD before grepping).
-+SBATCH_LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
+ // Inside ComputeSharedFaceFluxRHS, within the `if (is_fault && ...)` block:
+-MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
+-            shared_face_peer_[sf].resolved, "...");
+-const int peer_rank = shared_face_peer_[sf].peer_rank;
+-MFEM_VERIFY(peer_rank != my_rank_, "...");
+-const bool owner = (my_rank_ < peer_rank);
+-if (owner)
+-{
+-   fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
+-                         Q_imp_plus, Q_imp_minus);
+-}
+-else
+-{
+-   fault_flux_->Evaluate(fdata, Q_minus_local, Q_plus_local,
+-                         Q_imp_minus, Q_imp_plus);
+-}
++MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
++            shared_face_peer_[sf].resolved, "...");
++const int peer_rank = shared_face_peer_[sf].peer_rank;
++MFEM_VERIFY(peer_rank != my_rank_, "...");
++const bool owner = (my_rank_ < peer_rank);
++real_t Q_imp_plus_g[NUM_STATE] = {0}, Q_imp_minus_g[NUM_STATE] = {0};
++if (owner)
++{
++   // Owner computes authoritative state; rotates Q_imp back to GLOBAL
++   // frame so non-owner can use it verbatim.
++   fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
++                         Q_imp_plus, Q_imp_minus);
++   for (int c = 0; c < NUM_STATE; c++)
++   {
++      for (int k = 0; k < NUM_STATE; k++)
++      {
++         Q_imp_plus_g[c]  += T(c, k) * Q_imp_plus[k];
++         Q_imp_minus_g[c] += T(c, k) * Q_imp_minus[k];
++      }
++   }
++}
++// Owner packs (fdata + Q_imp_plus_g + Q_imp_minus_g) into a batched
++// send buffer keyed by peer_rank.  After the sf loop, one
++// MPI_Sendrecv per peer exchanges all QPs at once.  Non-owner
++// unpacks received data into fdata, Q_imp_plus_g, Q_imp_minus_g.
++//
++// (Implementation detail: add a new helper method
++//  `ExchangeSharedFaultState(peer_packs, ...)` that batches the
++//  per-face packs and runs the MPI collective; call it once between
++//  the two sf loops.)
 +
- module load intel/19.1.1
- # ...
-
- cd /scratch2/10024/zhaochun/seas-project/seas-mfem
- # ...
- cd miniapps/seas
- # ...
- ibrun ./seas_tpv102_driver ...
- # ...
- RESULT_FILE="${RESULT_DIR}/RESULT.txt"
--JOB_LOG="tpv102_200m_400r_v2_${SLURM_JOB_ID}.out"
-+JOB_LOG="${SBATCH_LOG_DIR}/tpv102_200m_400r_v2_${SLURM_JOB_ID}.out"
-+if [ ! -f "${JOB_LOG}" ]; then
-+   echo "FAIL: post-run check cannot locate job log (looked at '${JOB_LOG}'). "\
-+        "Hint: SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-<unset>}'." > "${RESULT_FILE}"
-+   cat "${RESULT_FILE}"
-+   exit 0
-+fi
- FINAL_WATCH=$(grep "\[qnorm:watch\]" "${JOB_LOG}" | tail -1)
++// Accumulate phase (second loop or inline after exchange):
++flux_.Interior(nor, Q_imp_plus_g, Q_imp_minus_g, F_h);
++if (!owner)
++{
++   // Non-owner's Elem1 is on the opposite side of canonical nor.
++   // Flux computed with canonical (owner's) nor is inbound to its
++   // Elem1, not outbound; negate for the "rhs[Elem1] -= F_h" convention.
++   for (int c = 0; c < NUM_STATE; c++) { F_h[c] = -F_h[c]; }
++}
 ```
 
-Apply the identical change in the 50-rank variant.
+Because the MPI exchange is "between stages 1 and stage-N of the sf
+loop", the simplest correct structure is:
 
-**Test case:** N/A (script-level change). Manually verifiable by
-`sbatch --hold` from the repo root, waiting for output file, then sourcing
-the RESULT-writing block and asserting `grep FAIL "${RESULT_FILE}"` is empty
-when the log contains a valid `[qnorm:watch]` line.
+```
+// Pass 1: build owner/non-owner work-lists.  Owners pack per-peer send
+// buffers (fdata + Q_imp_plus_g + Q_imp_minus_g).  Non-owners record
+// their expected slot indices.
+//
+// Batched MPI: per peer, one MPI_Sendrecv (or Send/Recv pair).
+//
+// Pass 2: for each sf (owner and non-owner both), compute F_h in
+// local frame using GLOBAL Q_imp buffers (authoritative after
+// exchange), apply non-owner sign flip, accumulate into rhs.
+```
+
+**Test case:**
+```cpp
+// tests/parallel/test_r101_shared_fault.cpp — add R-501 regression test:
+// Uses the same 2-tet inline mesh as R-302a but drives Mult on a
+// NON-ZERO initial Q to surface the frame mismatch.  Current code
+// aborts; fixed code completes with max_diff < scale × 1e-12.
+TEST_R501_DOFData_identical_after_multistage_nonzero_Q:
+   Vector Q(wave.Height());
+   for (int i = 0; i < Q.Size(); i++) { Q(i) = 1e-3 * std::sin(i); }
+   for (int rk = 0; rk < 4; rk++) { wave.Mult(Q, k); Q.Add(0.25, k); }
+   wave.VerifySharedFaultDOFDataConsistency(1e-10);
+   TEST_ASSERT("R-501: DOFData identical after 4 stages on nonzero Q",
+               "reached (no abort)");
+```
 
 ---
 
-### [R-404] [LOW] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — centroid exact-equality pair matching silently skips the only-one-rank-hit-the-QP case on some topologies (corollary to R-305)
+### [R-502] [MODERATE] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — absolute tol = 1e-10 is unreasonable for fields spanning 10^-20 … 10^+8
 
-**Category:** POSSIBLE EDGE_CASE
+**Category:** QUALITY (diagnostic tuning — blocks validating the R-501 fix)
 
 **Description:**
-R-305 (v3) promoted `n_unpaired > 0` to a hard abort. Good. But the centroid
-pairing logic has one remaining soft edge: the `same_centroid` lambda uses
-exact double equality on all 3 coordinates after `ftr->Face->Transform(ip, phys)`.
-The v3 fix doc asserts (correctly) that both ranks compute the centroid from
-the same MFEM face transformation at the same reference IP → bit-identical.
+Field magnitudes: sigma_n_corr ≈ 1.2e+08 Pa, tau1_corr ≈ 7.5e+07 Pa,
+V1 ≈ 1e-12 → 1 m/s, psi ≈ 0.5, slip ≈ 0 → 1 m.  A single absolute tol
+of 1e-10 for all fields demands sub-ULP agreement on large-magnitude
+stresses.  Even a perfectly correct R-501 fix with mild compiler
+reassociation between ranks would trip this.
 
-However, this bit-identity depends on an undocumented invariant: that MFEM's
-`FaceElementTransformations::Face` returned by `GetSharedFaceTransformations`
-on rank A and rank B, when driven with the same ip, produces bit-identical
-`phys` vectors. If (a) the two ranks' face-nbr ghost vertex data differs in
-any floating-point round-off on the face's geometric basis (it shouldn't;
-Mesh::face_nbr_vertices is exchanged verbatim); or (b) an optimization pass in
-the compiler reassociates float ops differently at the two call sites; then
-two "same" QPs appear with different centroids and get classified as
-**unpaired** on both sides, tripping R-305's abort on a false positive.
+**Trigger:**
+Any field with magnitude > 1e-10 whose inter-rank evaluation differs
+by a few ULPs.
 
-The current v3 test (R-302a inline) happens to have `max_diff=0` and
-`3 pairs matched, 0 unpaired`, which argues the invariant holds on the local
-mpich build. It is not an invariant MFEM documents, though.
+**Actual behavior:** absolute tol.
 
-**Suggested fix:** make `same_centroid` tolerant at the sub-ULP level only
-(not the coordinate-scale tolerance that caused R-304). `1 ULP * |value|` is a
-safe floor and preserves transitivity:
+**Expected behavior:** scale-relative tol
+(e.g., `max(1e-10, |field_max| × 1e-12)`).
 
+**Suggested fix:**
+```diff
+ int fail_local = (max_diff > tol || n_unpaired > 0) ? 1 : 0;
++// R-502: scale-relative tol — absolute tol is unreasonable for fields
++// with magnitudes up to ~1e8 Pa.  Compute the scale from the maximum
++// absolute field value in the paired data.
++double max_abs_field = 0.0;
++for (int ii = 0; ii < n_entries; ii++)
++{
++   for (int kk = FIELD_BASE; kk < REC; kk++)
++   {
++      max_abs_field = std::max(max_abs_field, std::abs(all_data[ii*REC + kk]));
++   }
++}
++const double effective_tol = std::max(tol, max_abs_field * tol * 1e2);
++fail_local = (max_diff > effective_tol || n_unpaired > 0) ? 1 : 0;
+```
+
+(`tol * 1e2` keeps the tol interpretable: if the caller passes `1e-10`
+they get `1e-8` relative on the largest field, which is what's needed
+for Pa-scale stresses.)
+
+**Test case:**
+```cpp
+TEST_R502_scale_relative_tol:
+   // Inject a 1e-6 drift on tau1_corr ≈ 1e8 Pa → rel drift 1e-14,
+   // should PASS.  Pre-fix: FAIL (abs 1e-6 > abs 1e-10).
+```
+
+---
+
+### [R-503] [MODERATE] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — R-404 regression: `same_centroid` uses `scale × DBL_EPSILON` which collapses to ~1e-28 at near-zero coordinates (fault plane y = 9.7e-13)
+
+**Category:** BUG (introduced by R-404 in v4)
+
+**Description:**
+R-404 added a sub-ULP tolerance `scale × DBL_EPSILON`.  For the fault
+plane coordinate y = 9.7e-13, `scale = 9.7e-13` and `tol_k = 2.15e-28`,
+far below any realistic inter-rank round-off floor.  The Frontera
+abort shows the pairing worked (both ranks produced bit-identical y
+values by pure luck of deterministic `Transform`), but any future
+topology change or MFEM refactor could introduce sub-ULP drift in y
+and produce a spurious R-305 unpaired abort.
+
+**Trigger:**
+Shared fault QPs with a near-zero coordinate component combined with
+non-bit-identical inter-rank round-off in that coordinate.
+
+**Actual behavior:** coordinate equality is asserted to sub-sub-ULP
+precision near zero → fragile.
+
+**Expected behavior:** hybrid tolerance with an absolute floor matched
+to the physical mesh scale.
+
+**Suggested fix:**
 ```diff
  auto same_centroid = [&](int a, int b)
  {
-+   // Sub-ULP safety: `ftr->Face->Transform(ip, phys)` should produce bit-
-+   // identical output on both ranks (MFEM exchanges face_nbr_vertices
-+   // verbatim; same reference IP ⇒ same affine combination), but that is
-+   // not a documented MFEM contract.  Allow <=1 ULP per coordinate against
-+   // the coordinate's own magnitude so a future compiler-reassociation
-+   // round-off doesn't flip matched pairs into R-305 aborts.
     for (int k = 0; k < 3; k++)
     {
--      if (all_data[a*REC + k] != all_data[b*REC + k]) { return false; }
-+      double va = all_data[a*REC + k], vb = all_data[b*REC + k];
-+      double scale = std::max(std::abs(va), std::abs(vb));
-+      double ulp   = scale * std::numeric_limits<double>::epsilon();
-+      if (std::abs(va - vb) > ulp) { return false; }
+       double va = all_data[a*REC + k], vb = all_data[b*REC + k];
+       double scale = std::max(std::abs(va), std::abs(vb));
+-      double ulp = scale * std::numeric_limits<double>::epsilon();
+-      if (std::abs(va - vb) > ulp) { return false; }
++      // R-503: hybrid scale-relative + absolute-floor tolerance.
++      // Fault-plane coordinates can be O(1e-13) after MFEM's affine
++      // face transform, where a pure scale-ULP tolerance collapses to
++      // ~1e-28 and is tighter than any realistic noise.  Floor at
++      // 1e-9 m (~1e-6 of the smallest plausible mesh element) scaled
++      // by epsilon so two ranks' centroid coordinates compare equal
++      // across near-zero axes.
++      const double abs_floor = 1e-9;
++      double tol_k = std::max(scale, abs_floor)
++                     * std::numeric_limits<double>::epsilon();
++      if (std::abs(va - vb) > tol_k) { return false; }
     }
     return true;
  };
 ```
 
-Transitivity is preserved because the threshold is bounded by the *larger*
-magnitude (not an absolute floor). This is a belt-and-suspenders change; the
-current exact compare is defensible too.
-
 **Test case:**
-```python
-def test_R404_same_centroid_ULP_safe():
-    """1 ULP perturbation in one coord of one side must still match."""
-    a = [1.0, 0.0, 0.0, 5.0]   # centroid + one field
-    b = [np.nextafter(1.0, 2.0), 0.0, 0.0, 5.0]
-    assert same_centroid(a, b) == True
+```cpp
+TEST_R503_same_centroid_nearzero_coordinate:
+   double a[3] = {1.0, 9.7e-13, 2.0};
+   double b[3] = {1.0, 9.7e-13 + 1e-15, 2.0};
+   assert(same_centroid(a, b) == true);   // pre-fix: false, post-fix: true
 ```
 
 ---
 
-### [R-405] [LOW] `dynamic/wave_operator.inl:ComputeSharedFaceFluxRHS` — MFEM_VERIFY for nbr_data deep-copy (R-302 Part B) fires per-Mult call per component, adding O(NUM_STATE × Mult) release-build overhead for no useful protection
+### [R-504] [LOW] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — abort message blames R-001 specifically; post-R-501 wording will be misleading
 
-**Category:** QUALITY
+**Category:** QUALITY (doc)
 
 **Description:**
-```cpp
-// wave_operator.inl:700-726
-for (int c = 0; c < NUM_STATE; c++)
-{
-   for (int i = 0; i < ndof_total_; i++) { q_gf[i] = Q_data[...]; }
-   q_gf.ExchangeFaceNbrData();
-   const Vector &src = q_gf.FaceNbrData();
-   nbr_data[c].SetSize(src.Size());
-   std::memcpy(nbr_data[c].GetData(), src.GetData(), src.Size() * sizeof(real_t));
-   MFEM_VERIFY(nbr_data[c].GetData() != q_gf.FaceNbrData().GetData(), ...);
-}
-```
+The abort text `"R-001's (+,-) canonicalisation is not sufficient ..."`
+is correct today but will be misleading after R-501 is applied.  Any
+future drift is no longer "R-001 insufficient" — it's a new bug (MPI
+exchange miss, missing field, or rotation mismatch).
 
-R-302 Part B promoted this guard from `MFEM_ASSERT` to `MFEM_VERIFY` so the
-invariant is enforced in Release. Intent understood — the comment calls the
-deep-copy "load-bearing". But the assertion compares two pointers that are
-architecturally guaranteed to differ immediately after `SetSize(n)` (which
-allocates new storage via `Vector::SetSize`) followed by `std::memcpy`. The
-check cannot fail *unless* a future refactor replaces `SetSize + memcpy` with
-a shallow `operator=` — exactly the H2 scenario. In other words: it protects
-against a refactor, not against a runtime condition the current code can
-reach.
-
-The check is cheap (two pointer reads + one compare) but runs
-`NUM_STATE × n_Mult × n_time_steps` times on every ParMesh run of the driver;
-~9 × 4 × 5250 = ~190k branches on the dispositive 400-rank job. Negligible
-compute. QUALITY only — flagging it so the next reader understands the check's
-intent is regression-catch, not runtime-safety.
-
-**Suggested fix:** keep `MFEM_VERIFY` for the first iteration, downgrade
-subsequent iterations to `MFEM_ASSERT` (debug-only):
-
+**Suggested fix:**
 ```diff
-+// R-302B reduced: one-time deep-copy invariant check on the first component;
-+// subsequent components use the same allocator pathway so a single check
-+// suffices at release.
- for (int c = 0; c < NUM_STATE; c++)
- {
-    ...
-    nbr_data[c].SetSize(src.Size());
-    std::memcpy(nbr_data[c].GetData(), src.GetData(), src.Size() * sizeof(real_t));
--   MFEM_VERIFY(nbr_data[c].GetData() != q_gf.FaceNbrData().GetData(),
--               "nbr_data[" << c << "] aliases q_gf.FaceNbrData() — H2 ...");
-+   if (c == 0)
-+   {
-+      MFEM_VERIFY(nbr_data[c].GetData() != q_gf.FaceNbrData().GetData(),
-+                  "nbr_data[0] aliases q_gf.FaceNbrData() — H2 regression.  "
-+                  "SetSize/memcpy path must be preserved in release.");
-+   }
- }
+-MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
+-           "Field '" << field_name << "' at centroid ("
+-           << cx << ", " << cy << ", " << cz
+-           << ") differs by " << max_diff
+-           << " across the two ranks sharing the face (tol="
+-           << tol << ").  R-001's (+,-) canonicalisation is not "
+-           "sufficient under the current MFEM face-normal "
+-           "convention; the fix must be extended (e.g. by having "
+-           "the owner rank broadcast its DOFData to the non-owner "
+-           "after Evaluate).");
++MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
++           "Field '" << field_name << "' at centroid ("
++           << cx << ", " << cy << ", " << cz
++           << ") differs by " << max_diff
++           << " across the two ranks sharing the face (tol="
++           << tol << ").  The two ranks' DOFData diverged — check "
++           "that R-501 owner-broadcast covers every mutable field "
++           "written by FaultFaceFlux::Evaluate and the driver's RK4 "
++           "averaging step.");
 ```
-
-**Test case:** N/A (quality refactor; coverage already via
-`seas_test_parallel_wave_operator`).
 
 ---
 
 ## Summary
-- Critical issues: **0**
-- Moderate issues: **3**   (R-401 MPI datatype in station writer;
-                            R-402 RESULT.txt regex false positive;
-                            R-403 JOB_LOG path is CWD-dependent)
-- Low issues: **2**        (R-404 sub-ULP same_centroid; R-405 hot-loop verify)
-- Plan compliance: **FULL** — every R-301…R-309 item from
-  `tpv102_debug_v3_check.md` is correctly and testably addressed, and the new
-  `TestR302_InlineTwoTetSharedFault` exercises the shared-fault path end-to-end
-  with `max_diff=0`.
-- **Verdict: PASS WITH FIXES** — no finding in this review blocks the Frontera
-  dispositive run from executing; the simulation code itself is sound and the
-  R-005 / R-001 / R-101 fixes are in force. The two MODERATE sbatch issues are
-  in the **post-run verifier** (RESULT.txt logic), not in the physics — but
-  they will cause the dispositive run to be flagged FAIL even if it succeeds,
-  which reintroduces exactly the "exit 0 ⇒ success" blind spot R-306 was
-  supposed to close.
-  Recommended action before burning 400-rank node-hours: apply R-402 + R-403
-  fixes to both sbatch scripts so the post-run PASS/FAIL verdict is
-  trustworthy. R-401 is advisory (only affects MFEM_USE_SINGLE builds, which
-  the Frontera run does not use).
+- Critical issues: **1** (R-501 — R-001 design fundamentally incomplete)
+- Moderate issues: **2** (R-502 abs tol scale; R-503 R-404 near-zero coord regression)
+- Low issues: **1** (R-504 post-fix message wording)
+- Plan compliance: N/A (post-deployment bug).
+- **Verdict: FAIL — R-501 must be fixed before any further Frontera run.**
+  The v4 code correctly catches the bug via the R-101 verifier; the
+  underlying R-001 fix is not algorithmically sufficient for MFEM's
+  shared-face normal convention.
+
+## Do-Not-Do Guardrails
+- Do NOT revert R-005 (deep copy), R-002 (`global_fault_keys` Allgatherv),
+  R-101 (verifier), or R-305 (unpair abort).  These are all correct.
+- Do NOT merely loosen the tol to hide the abort — R-502 is a legitimate
+  scale-relative tol improvement, but R-501 is the actual physics bug.
+  Loosening tol alone would make the simulation continue with silently
+  drifting DOFData (= the v1 rupture-stops-at-seam symptom with more
+  steps before it manifests).
+- Do NOT repeatedly rewrite the R-001 swap logic to try to find a
+  local-only algebraic fix.  The symmetry is fundamentally broken by
+  MFEM's Elem1-outward-normal convention; no amount of sign-flipping
+  inside a single rank's Evaluate call can fix it without knowing
+  what the peer rank computed.
 
 ## Unreviewed Areas
-- **Frontera module-load environment** — the sbatch scripts load
-  `intel/19.1.1 impi/19.0.9 hypre/2.31.0 mumps/5.3 parmetis petsc/3.15
-  fftw3/3.3.8`. This review does not re-verify the environment against a
-  recent working Frontera build; if a module was retired or renamed between
-  v2 and v3, the build step (`make seas_tpv102_driver`) fails before the
-  driver ever runs. Mitigation: dry-run the module loads on a Frontera login
-  node before submitting dev-queue jobs.
-- **METIS partitioning of the 200 m mesh onto 400 ranks** — whether the 400-
-  rank partition produces a fault-face-owning rank whose neighbors see bulk-
-  wave energy arriving within ~0.5 s depends on METIS's placement, which is
-  undocumented. This review assumes it behaves as the 4-rank smoke test
-  observed.
-- **`MFEM_USE_SINGLE` build** — build was not attempted in single precision;
-  R-401 is inferred from code shape, not observed.
-- **R-101 runtime diagnostic on a mesh with non-duplicated-vertex fault** —
-  R-302a inline test (2 tets) passes. No larger non-duplicated-vertex mesh
-  exists in the repo, so the diagnostic's behaviour under realistic QP counts
-  (e.g., 10^4 shared fault QPs) is unexercised.
+- R-501 fix performance at 400 ranks (per-Mult MPI traffic for shared
+  fault QPs).  Expected negligible (~kB/Mult) but must benchmark.
+- Whether `ftr->Face->Jacobian()` is bit-identical on both ranks
+  (modulo sign).  Documented invariant but not directly tested.
+- Whether the 2x2 tangent-plane rotation alternative to R-501 (keep
+  Q_imp in fault-local, rotate the 2-vector tangent fields per rank)
+  is tractable.  The global-frame Q_imp approach in the suggested fix
+  avoids the 2x2 entirely and is simpler.

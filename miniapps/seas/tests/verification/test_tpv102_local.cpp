@@ -303,10 +303,12 @@ void TestL1_Nucleation()
    InitializeFaultDOFs(dof_data, ndof, coords);
    ApplyNucleation(dof_data, ndof, coords, 0.5);
 
-   TEST_ASSERT(dof_data[0].tau1_0 > TPV102Params::tau_ini + 1e6,
+   // R-801 Option A: under BP5 convention strike lives in tau2_0, so
+   // nucleation bumps tau2_0, not tau1_0.
+   TEST_ASSERT(dof_data[0].tau2_0 > TPV102Params::tau_ini + 1e6,
                "Nucleation: dtau > 1 MPa at hypocenter at t=0.5 s ("
-               + std::to_string((dof_data[0].tau1_0 - TPV102Params::tau_ini)/1e6) + " MPa)");
-   TEST_NEAR(dof_data[1].tau1_0, TPV102Params::tau_ini, 1e3,
+               + std::to_string((dof_data[0].tau2_0 - TPV102Params::tau_ini)/1e6) + " MPa)");
+   TEST_NEAR(dof_data[1].tau2_0, TPV102Params::tau_ini, 1e3,
              "Nucleation: dtau = 0 outside nucleation zone");
 
    delete mesh;

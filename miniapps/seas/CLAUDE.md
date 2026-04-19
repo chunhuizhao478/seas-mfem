@@ -31,6 +31,16 @@ These lessons were learned through extensive debugging (v1-v62). Violating any o
 - **DG face sign**: `sign = (nor(0) > 0) ? -1.0 : 1.0` applied consistently to slip embedding and traction extraction.
 - **Normal stress**: sigma_n > 0 = compression (geology convention).
 - **Depth coordinate**: Z=0 at surface, Z<0 is depth. `Wf` is positive, fault extends from z=0 to z=-Wf.
+- **Fault-local tangent frame (BP5 / TPV102, project-wide)**: Uses the
+  `FaultBasis` (Tandem) convention — `tangent1 = dip, tangent2 = strike`.
+  For TPV102's vertical y=0 fault with `ref_normal=(0,-1,0)` and `up=(0,0,1)`:
+  `can_t1 = (0, 0, -1)` (down-dip), `can_t2 = (+1, 0, 0)` (along strike).
+  Therefore in `DOFData`: `V1/slip1/tau1_0/tau1_corr` are the **dip** components
+  and `V2/slip2/tau2_0/tau2_corr` are the **strike** components.  TPV102 is
+  pure strike-slip, so `tau2_0 = tau_ini`, `V2 = V_ini`, and `tau1_0 = 0`,
+  `V1 = 0` (debug v7.0.0 R-801).  Pre-R-801 the interior-fault branch used
+  `GodunovFlux::BuildFrame` (t1=strike) while the shared-fault branch used
+  BP5 (t1=dip); the two have been unified on the BP5 convention.
 
 ### Friction Solver
 

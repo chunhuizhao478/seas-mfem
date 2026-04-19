@@ -400,19 +400,26 @@ void TestOrientationFlip()
    const FaultBasisData &bp = fb_pos.GetBasis(0);
    const FaultBasisData &bn = fb_neg.GetBasis(0);
 
-   // Normals should point in opposite directions
-   TEST_NEAR(bp.normal[0], -bn.normal[0], 1e-12,
-             "Flipped normals are opposite in x");
-   TEST_NEAR(bp.normal[1], -bn.normal[1], 1e-12,
-             "Flipped normals are opposite in y");
-   TEST_NEAR(bp.normal[2], -bn.normal[2], 1e-12,
-             "Flipped normals are opposite in z");
+   // Under Tandem's "sign baked in" convention (fault_basis.hpp:442-450),
+   // Step-5 negation cancels Step-3 flip, so the STORED basis equals the
+   // raw `CalcOrtho` direction regardless of `ref_normal`'s sign.  The
+   // observable effect of flipping ref_normal is ONLY in `sign_flipped`
+   // (diagnostic) — the stored basis vectors themselves are invariant.
+   TEST_NEAR(bp.normal[0], bn.normal[0], 1e-12,
+             "Basis invariant under ref_normal sign: normal[0]");
+   TEST_NEAR(bp.normal[1], bn.normal[1], 1e-12,
+             "Basis invariant under ref_normal sign: normal[1]");
+   TEST_NEAR(bp.normal[2], bn.normal[2], 1e-12,
+             "Basis invariant under ref_normal sign: normal[2]");
+   TEST_NEAR(bp.tangent1[0], bn.tangent1[0], 1e-12,
+             "Basis invariant: tangent1[0]");
+   TEST_NEAR(bp.tangent2[0], bn.tangent2[0], 1e-12,
+             "Basis invariant: tangent2[0]");
 
-   // Both should be properly oriented with their ref_normal
-   TEST_ASSERT(bp.normal[0] > 0.0,
-               "Positive ref → positive normal");
-   TEST_ASSERT(bn.normal[0] < 0.0,
-               "Negative ref → negative normal");
+   // sign_flipped is the observable of ref_normal sign change: exactly
+   // one of the two FaultBasis objects has sign_flipped set.
+   TEST_ASSERT(bp.sign_flipped != bn.sign_flipped,
+               "sign_flipped toggles when ref_normal sign flips");
 
    // Both should have unit normals
    real_t len_pos = Norm3(bp.normal, 3);
@@ -638,15 +645,20 @@ void TestOrientationFlip2D()
    const FaultBasisData &bp = fb_pos.GetBasis(0);
    const FaultBasisData &bn = fb_neg.GetBasis(0);
 
-   // Normals should point in opposite directions
-   TEST_NEAR(bp.normal[0], -bn.normal[0], 1e-12,
-             "2D flipped normals are opposite in x");
-   TEST_NEAR(bp.normal[1], -bn.normal[1], 1e-12,
-             "2D flipped normals are opposite in y");
+   // Under Tandem's "sign baked in" convention, Step-5 negation cancels
+   // Step-3 flip, so the stored basis equals the raw CalcOrtho direction
+   // regardless of ref_normal's sign.  Only `sign_flipped` observes the
+   // ref_normal sign toggle.
+   TEST_NEAR(bp.normal[0], bn.normal[0], 1e-12,
+             "2D basis invariant under ref_normal sign: normal[0]");
+   TEST_NEAR(bp.normal[1], bn.normal[1], 1e-12,
+             "2D basis invariant under ref_normal sign: normal[1]");
+   TEST_NEAR(bp.tangent1[0], bn.tangent1[0], 1e-12,
+             "2D basis invariant: tangent1[0]");
 
-   // Both should be properly oriented
-   TEST_ASSERT(bp.normal[0] > 0.0, "2D positive ref -> positive normal");
-   TEST_ASSERT(bn.normal[0] < 0.0, "2D negative ref -> negative normal");
+   // sign_flipped toggles between the two ref_normal signs.
+   TEST_ASSERT(bp.sign_flipped != bn.sign_flipped,
+               "2D sign_flipped toggles when ref_normal sign flips");
 
    // Both should have unit normals
    real_t len_pos = Norm3(bp.normal, 2);
@@ -885,7 +897,7 @@ static void TestUnifiedNormalProjection()
    Vector trac_2comp;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 2, traction_q, nl_q, ir, nbf, e_q,
-      tang_vecs, false, trac_2comp);
+      tang_vecs, trac_2comp);
 
    TEST_NEAR(trac_2comp(0), 7.0, 1e-12, "2-comp dip (sf=false)");
    TEST_NEAR(trac_2comp(1), -3.0, 1e-12, "2-comp strike (sf=false)");
@@ -899,7 +911,7 @@ static void TestUnifiedNormalProjection()
    Vector trac_3comp;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 3, traction_q, nl_q, ir, nbf, e_q,
-      full_basis, false, trac_3comp);
+      full_basis, trac_3comp);
 
    TEST_NEAR(trac_3comp(0), 5.0, 1e-12, "3-comp normal (sf=false)");
    TEST_NEAR(trac_3comp(1), 7.0, 1e-12, "3-comp dip (sf=false)");
@@ -910,12 +922,20 @@ static void TestUnifiedNormalProjection()
    TEST_NEAR(trac_3comp(2), trac_2comp(1), 1e-14, "strike: 3-comp == 2-comp");
 
    // --- Test 3: sign_flipped = true ---
-   // With sf=true, all components get negated (Tandem convention:
-   // the entire local basis flips when the raw normal opposes ref_normal).
+   // Tandem convention: sign is baked INTO the basis vectors by the caller.
+   // To simulate sf=true, pass a pre-negated basis.  The current
+   // ProjectTractionToFaultDOFs API has no standalone sign_flipped flag;
+   // the only sign-flip channel is via qp_data[q].sign_flipped (tested in
+   // Test 5 and TestUnifiedNormalProjectionQPData below).
+   real_t full_basis_sf[3][3] = {
+      {-normal[0],   -normal[1],   -normal[2]},
+      {-tangent1[0], -tangent1[1], -tangent1[2]},
+      {-tangent2[0], -tangent2[1], -tangent2[2]}
+   };
    Vector trac_3comp_sf;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 3, traction_q, nl_q, ir, nbf, e_q,
-      full_basis, true, trac_3comp_sf);
+      full_basis_sf, trac_3comp_sf);
 
    TEST_NEAR(trac_3comp_sf(0), -5.0, 1e-12, "3-comp normal (sf=true)");
    TEST_NEAR(trac_3comp_sf(1), -7.0, 1e-12, "3-comp dip (sf=true)");
@@ -936,27 +956,33 @@ static void TestUnifiedNormalProjection()
    TEST_NEAR(normal_traction_val, -5.0, 1e-12,
              "normal_traction = -T.n (positive in compression)");
 
-   // --- Test 5: per-QP data path (sign_flipped=true) ---
+   // --- Test 5: per-QP data path (sign baked in, sign_flipped=true) ---
    // This exercises the qp_data branch in ProjectTractionToFaultDOFs,
-   // which is the actual BP5 DG code path.
+   // which is the actual BP5 DG code path.  Per Tandem convention, the
+   // caller bakes the sign into the basis vectors — `sign_flipped` in
+   // `FaultBasisQPData` is a diagnostic field only.  So to test the
+   // "sf=true negates output" semantic we negate the basis vectors
+   // explicitly here (which is exactly what `FaultBasis::Compute`
+   // does at line 442-450 of fault/fault_basis.hpp when the raw
+   // normal opposes ref_normal).
    {
       FaultBasisQPData qpd;
       for (int d = 0; d < 3; d++)
       {
-         qpd.normal[d]   = normal[d];
-         qpd.tangent1[d] = tangent1[d];
-         qpd.tangent2[d] = tangent2[d];
+         qpd.normal[d]   = -normal[d];
+         qpd.tangent1[d] = -tangent1[d];
+         qpd.tangent2[d] = -tangent2[d];
       }
       qpd.nl = 1.0;
       qpd.sign_flipped = true;
       std::vector<FaultBasisQPData> qp_vec = {qpd};
 
-      // 3-comp with qp_data, sign_flipped=true in the per-QP struct
-      // The centroid sign_flipped arg is ignored when qp_data is provided.
+      // 3-comp with qp_data, sign_flipped=true in the per-QP struct.
+      // qp_data takes precedence over the centroid `tangents` array.
       Vector trac_3comp_qp;
       DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
          dim, 3, traction_q, nl_q, ir, nbf, e_q,
-         full_basis, /*centroid sf=*/false, trac_3comp_qp, &qp_vec);
+         full_basis, trac_3comp_qp, &qp_vec);
 
       // Per-QP sign_flipped=true should negate all components
       TEST_NEAR(trac_3comp_qp(0), -5.0, 1e-12, "qp_data 3-comp normal (sf=true)");
@@ -968,14 +994,24 @@ static void TestUnifiedNormalProjection()
       TEST_NEAR(trac_3comp_qp(1), trac_3comp_sf(1), 1e-14, "qp vs centroid: dip");
       TEST_NEAR(trac_3comp_qp(2), trac_3comp_sf(2), 1e-14, "qp vs centroid: strike");
 
-      // 2-comp with qp_data for backward compat
+      // 2-comp with qp_data for backward compat (sign_flipped=false case).
+      // Rebuild qpd_nosf with the ORIGINAL (non-negated) basis vectors —
+      // the `qpd` in this scope is negated (Test 5's sf=true setup), so
+      // copying from it would bake in the flip here too.
       Vector trac_2comp_qp;
-      FaultBasisQPData qpd_nosf = qpd;
+      FaultBasisQPData qpd_nosf;
+      for (int d = 0; d < 3; d++)
+      {
+         qpd_nosf.normal[d]   = normal[d];
+         qpd_nosf.tangent1[d] = tangent1[d];
+         qpd_nosf.tangent2[d] = tangent2[d];
+      }
+      qpd_nosf.nl = 1.0;
       qpd_nosf.sign_flipped = false;
       std::vector<FaultBasisQPData> qp_vec_nosf = {qpd_nosf};
       DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
          dim, 2, traction_q, nl_q, ir, nbf, e_q,
-         tang_vecs, false, trac_2comp_qp, &qp_vec_nosf);
+         tang_vecs, trac_2comp_qp, &qp_vec_nosf);
 
       TEST_NEAR(trac_2comp_qp(0), 7.0, 1e-12, "qp_data 2-comp dip (sf=false)");
       TEST_NEAR(trac_2comp_qp(1), -3.0, 1e-12, "qp_data 2-comp strike (sf=false)");
@@ -1034,18 +1070,25 @@ static void TestUnifiedNormalProjectionQPData()
    Vector trac_qpd;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 3, traction_q, nl_q, ir, nbf, e_q,
-      wrong_basis, false, trac_qpd, &qp_data);
+      wrong_basis, trac_qpd, &qp_data);
 
    TEST_NEAR(trac_qpd(0), 5.0, 1e-12, "qp_data normal (sf=false)");
    TEST_NEAR(trac_qpd(1), 7.0, 1e-12, "qp_data dip (sf=false)");
    TEST_NEAR(trac_qpd(2), -3.0, 1e-12, "qp_data strike (sf=false)");
 
-   // sf=true in qp_data: should negate all local components uniformly.
+   // sf=true in qp_data: per Tandem convention, the caller bakes the sign
+   // into the basis vectors; qp_data[q].sign_flipped is diagnostic only.
+   // Simulate sf=true by negating qp_data's basis vectors directly.
    qd.sign_flipped = true;
+   for (int d = 0; d < 3; d++) {
+      qd.normal[d]   = -qd.normal[d];
+      qd.tangent1[d] = -qd.tangent1[d];
+      qd.tangent2[d] = -qd.tangent2[d];
+   }
    Vector trac_qpd_sf;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 3, traction_q, nl_q, ir, nbf, e_q,
-      wrong_basis, false, trac_qpd_sf, &qp_data);
+      wrong_basis, trac_qpd_sf, &qp_data);
 
    TEST_NEAR(trac_qpd_sf(0), -5.0, 1e-12, "qp_data normal (sf=true)");
    TEST_NEAR(trac_qpd_sf(1), -7.0, 1e-12, "qp_data dip (sf=true)");

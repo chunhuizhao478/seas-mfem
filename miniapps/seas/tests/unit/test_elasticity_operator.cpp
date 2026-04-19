@@ -1832,8 +1832,10 @@ Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
 
       Vector nor(dim);
       CalcOrtho(FTr.Jacobian(), nor);
-      const auto &basis = fault_basis.GetBasis(fault_face_idx);
-      real_t sign = basis.sign_flipped ? -1.0 : 1.0;
+      // Tandem "sign baked in" convention: no explicit sign factor — the
+      // EmbedSlip call above already produced sign-corrected `delta_u_q`.
+      // Applying `sign * delta_u_q` here would double-flip when
+      // `basis.sign_flipped == true`.
 
       Vector shape1(ndof1), shape2(ndof2);
       fe1.CalcShape(eip1, shape1);
@@ -1890,11 +1892,11 @@ Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
                   lambda * dshape1_adj(k, i) * nor(u)
                   + mu * ((i == u ? 1.0 : 0.0) * grad_dot_n
                           + dshape1_adj(k, u) * nor(i));
-               sym_val += trac * sign * delta_u_q[u];
+               sym_val += trac * delta_u_q[u];
             }
             const int idx = i * ndof1 + k;
             elvec1(idx) += -1.0 * sym_val * w1;
-            elvec1(idx) += wq_penalty * sign * delta_u_q[i] * shape1(k);
+            elvec1(idx) += wq_penalty * delta_u_q[i] * shape1(k);
          }
       }
 
@@ -1915,11 +1917,11 @@ Vector AssembleCustomIPSlipFaceRHS(const FiniteElement &fe1,
                   lambda * dshape2_adj(k, i) * nor(u)
                   + mu * ((i == u ? 1.0 : 0.0) * grad_dot_n
                           + dshape2_adj(k, u) * nor(i));
-               sym_val += trac * sign * delta_u_q[u];
+               sym_val += trac * delta_u_q[u];
             }
             const int idx = i * ndof2 + k;
             elvec2(idx) += -1.0 * sym_val * w2;
-            elvec2(idx) -= wq_penalty * sign * delta_u_q[i] * shape2(k);
+            elvec2(idx) -= wq_penalty * delta_u_q[i] * shape2(k);
          }
       }
    }
@@ -2223,7 +2225,12 @@ void ComputeExplicitIPFaceTractionNodal(
    MFEM_ASSERT(fq.NumBasisFunctions() == nbf, "FaceQuadrature nbf mismatch");
    MFEM_ASSERT(fq.NumQuadPoints() == nqp, "Quadrature point mismatch");
 
-   const real_t sign = basis.sign_flipped ? -1.0 : 1.0;
+   // Tandem "sign baked in" convention: FaultBasis::EmbedSlip[QP] returns
+   // slip × (signed tangent); no separate `sign * du` multiplication is
+   // needed (that would double-apply the sign flip when sign_flipped=true).
+   // Mirrors production BP5 code in `BuildSlipAtQuadPoints`
+   // (elasticity_operator_debug.inl:812 — "Tandem convention: sign is
+   //  baked into the basis vectors.  No separate sign factor needed.").
    Vector delta_u_quad;
    if (!basis.qp_data.empty())
    {
@@ -2244,7 +2251,7 @@ void ComputeExplicitIPFaceTractionNodal(
          fault_basis.EmbedSlipQP(fault_face_idx, q, sl_q, du);
          for (int c = 0; c < dim; c++)
          {
-            delta_u_quad(c * nqp + q) = sign * du[c];
+            delta_u_quad(c * nqp + q) = du[c];
          }
       }
    }
@@ -2262,10 +2269,6 @@ void ComputeExplicitIPFaceTractionNodal(
          }
       }
       fq.InterpolateToQuadPoints(dim, delta_u_nodal, delta_u_quad);
-      for (int j = 0; j < delta_u_quad.Size(); j++)
-      {
-         delta_u_quad(j) *= sign;
-      }
    }
 
    const IntegrationPoint &ip_center = Geometries.GetCenter(FTr.GetGeometryType());
@@ -2379,13 +2382,13 @@ void ComputeExplicitIPFaceTractionNodal(
    Vector traction_local_blocked;
    DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
       dim, 2, T_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
-      basis.sign_flipped, traction_local_blocked, qp_data);
+      traction_local_blocked, qp_data);
    if (traction_stress_local)
    {
       Vector traction_stress_blocked;
       DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
          dim, 2, T_stress_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
-         basis.sign_flipped, traction_stress_blocked, qp_data);
+         traction_stress_blocked, qp_data);
       traction_stress_local->SetSize(2 * nbf);
       for (int kk = 0; kk < nbf; kk++)
       {
@@ -2398,7 +2401,7 @@ void ComputeExplicitIPFaceTractionNodal(
       Vector traction_corr_blocked;
       DGElasticityIPCombinedIntegrator::ProjectTractionToFaultDOFs(
          dim, 2, T_corr_quad, nl_q, ir, nbf, fq.BasisAtQuadPoints(), tangents,
-         basis.sign_flipped, traction_corr_blocked, qp_data);
+         traction_corr_blocked, qp_data);
       traction_corr_local->SetSize(2 * nbf);
       for (int kk = 0; kk < nbf; kk++)
       {

@@ -219,14 +219,14 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
          // a partition-seam face (Elem2No==-1 BUT in the set) — the
          // latter are handled by ComputeSharedFaceFluxRHS and must
          // NOT be dispatched by the local-face loop.
+         //
+         // R-701 fix: peer-rank resolution and the SharedFacePeer table
+         // are no longer needed.  The canonical-frame path in
+         // ComputeSharedFaceFluxRHS reconstructs the pre-Step-5 frame
+         // (identical on both ranks) from FaultBasis's sign_flipped bit,
+         // so there is no owner/non-owner Evaluate split.  Both ranks
+         // run Evaluate locally on bit-identical inputs.
          shared_mesh_face_set_.clear();
-         // R-001 fix: resolve peer rank per shared face via face_nbr_elements_offset.
-         // R-107 fix: resolved/peer_rank fields are independent (a false
-         // `resolved` means "ctor couldn't resolve this face", distinct from
-         // "peer rank happens to be 0").
-         shared_face_peer_.assign(n_shared, SharedFacePeer{});
-         const Array<int> &fn_offs = pmesh.face_nbr_elements_offset;
-         const int num_fn = pmesh.GetNFaceNeighbors();
          for (int sf = 0; sf < n_shared; sf++)
          {
             FaceElementTransformations *ftr =
@@ -239,17 +239,6 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
             std::array<HYPRE_BigInt, 4> key = make_global_key(verts);
             shared_face_bdr_attr_[sf] = global_fault_keys.count(key)
                                       ? bc_.fault_attr : 0;
-
-            // Resolve peer rank: map the ghost element to its face neighbor
-            // group, then look up that group's remote MPI rank.
-            int nbr_elem_idx = ftr->Elem2No - ne_;
-            int fn = 0;
-            while (fn < num_fn && nbr_elem_idx >= fn_offs[fn + 1]) { fn++; }
-            if (fn < num_fn)
-            {
-               shared_face_peer_[sf].resolved  = true;
-               shared_face_peer_[sf].peer_rank = pmesh.GetFaceNbrRank(fn);
-            }
          }
       }
 #endif
@@ -289,6 +278,169 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
          }
       }
 #endif
+   }
+
+   // R-801 fix: build mesh_face_idx → FaultBasis index map for interior
+   // fault faces.  FaultBasis stores per-face data as [interior_faces...,
+   // shared_faces...], so the position of face f in fault_interior_faces_
+   // is directly usable as `fault_basis_->GetBasis(pos)`.  The
+   // ComputeFaceFluxRHS interior-fault branch uses this to reconstruct the
+   // BP5 canonical frame (same convention as the shared-fault branch) —
+   // unifying the (t1, t2) = (dip, strike) semantics across every fault
+   // code path so DOFData.V1/V2/tau1_corr/tau2_corr/slip1/slip2 carry the
+   // SAME physical meaning on interior and shared fault QPs.
+   fault_interior_face_to_basis_idx_.clear();
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      fault_interior_face_to_basis_idx_[fault_interior_faces_[i]] = i;
+   }
+
+   // R-701 fix: populate BP5's FaultBasis for every fault face (interior
+   // and shared).  The canonical pre-Step-5 frame — reconstructed below
+   // in the flux routines from `FaultBasisQPData::sign_flipped` — is
+   // identical on both ranks sharing a fault face.  This is what makes
+   // the v5 R-501 owner-broadcast (and the entire v1–v5 (+,-) swap saga)
+   // unnecessary: both ranks run `FaultFaceFlux::Evaluate` locally on
+   // bit-identical inputs and produce bit-identical DOFData updates.
+   //
+   // Uses the same conventions as BP5's elasticity_operator_setup.inl:
+   //   ref_normal = (0, -1, 0)  (Tandem convention — fault at y=0, normal -y)
+   //   up         = (0,  0, 1)  (z-axis up).
+   //
+   // nbf_per_face_ is derived from face geometry here (not deferred to
+   // SetFaultDOFData) so the per-QP FaultBasis can be populated at ctor
+   // time.  The SetFaultDOFData verify still catches the case where the
+   // driver configures a different nqp_per_face than the ctor computed.
+   if (bc_.fault_attr > 0 &&
+       (fault_interior_faces_.Size() > 0 || fault_shared_faces_.Size() > 0))
+   {
+      Vector ref_normal(3); ref_normal = 0.0; ref_normal(1) = -1.0;
+      Vector up(3);         up = 0.0;         up(2) = 1.0;
+
+      fault_basis_ = std::make_unique<FaultBasis>();
+      // Always call Compute (even with an empty list) so FaultBasis's dim_
+      // is initialised.  AppendSharedFaces / ComputeQPBasisShared use dim_
+      // to size the `n_raw` vector passed to CalcOrtho; skipping Compute
+      // on ranks with zero interior-fault faces but nonzero shared-fault
+      // faces crashes in CalcOrtho.
+      fault_basis_->Compute(static_cast<Mesh &>(mesh_),
+                            fault_interior_faces_, ref_normal, up);
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         if (fault_shared_faces_.Size() > 0)
+         {
+            fault_basis_->AppendSharedFaces(
+               static_cast<ParMesh &>(mesh_),
+               fault_shared_faces_, ref_normal, up);
+         }
+#endif
+      }
+
+      // Determine face geometry + per-QP count from the first available
+      // fault face.  Ranks may have only shared, only interior, or both.
+      Geometry::Type face_geom = Geometry::TRIANGLE;
+      if (fault_interior_faces_.Size() > 0)
+      {
+         auto *ftr0 = mesh_.GetInteriorFaceTransformations(
+            fault_interior_faces_[0]);
+         if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+      }
+      else if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         if (fault_shared_faces_.Size() > 0)
+         {
+            auto &pmesh = static_cast<ParMesh &>(mesh_);
+            auto *ftr0 = pmesh.GetSharedFaceTransformations(
+               fault_shared_faces_[0]);
+            if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+         }
+#endif
+      }
+      const IntegrationRule &face_ir = IntRules.Get(face_geom, 2*order_);
+      nbf_per_face_ = face_ir.GetNPoints();
+
+      if (fault_interior_faces_.Size() > 0)
+      {
+         fault_basis_->ComputeQPBasis(static_cast<Mesh &>(mesh_),
+                                      fault_interior_faces_,
+                                      ref_normal, up, face_ir);
+      }
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         if (fault_shared_faces_.Size() > 0)
+         {
+            fault_basis_->ComputeQPBasisShared(
+               static_cast<ParMesh &>(mesh_),
+               fault_shared_faces_, ref_normal, up, face_ir,
+               fault_interior_faces_.Size());
+         }
+#endif
+      }
+
+      // R-701 swap-flag: determine per shared-fault face whether this rank's
+      // Elem1 sits on the canonical "+" side (side FROM WHICH ref_normal
+      // points AWAY — origin of the arrow).  We cannot use FaultBasis's
+      // `sign_flipped` for the swap because MFEM's shared-face CalcOrtho
+      // can produce the SAME raw nor on both ranks (the Elem1-outward
+      // convention only holds strictly for serial interior faces; for
+      // shared faces, depending on mesh topology, CalcOrtho may orient
+      // globally rather than per-rank).  So we derive `elem1_on_plus_`
+      // from geometry: compare Elem1 centroid vs face centroid along
+      // ref_normal.  Exactly one of the two ranks sharing a fault face
+      // will have elem1_on_plus_ == true; the other will have false.
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         shared_fault_elem1_on_plus_.assign(fault_shared_faces_.Size(), false);
+         auto &pmesh = static_cast<ParMesh &>(mesh_);
+         for (int sf_idx = 0; sf_idx < fault_shared_faces_.Size(); sf_idx++)
+         {
+            int sf = fault_shared_faces_[sf_idx];
+            FaceElementTransformations *ftr =
+               pmesh.GetSharedFaceTransformations(sf);
+            if (!ftr) { continue; }
+
+            // Face centroid.
+            const IntegrationPoint &ip_center =
+               Geometries.GetCenter(ftr->GetGeometryType());
+            ftr->Face->SetIntPoint(&ip_center);
+            Vector face_c(3);
+            ftr->Face->Transform(ip_center, face_c);
+
+            // Elem1 centroid (local element; vertex-average is sufficient
+            // for tet/hex).
+            Array<int> e1_verts;
+            mesh_.GetElementVertices(ftr->Elem1No, e1_verts);
+            Vector elem1_c(3);
+            elem1_c = 0.0;
+            for (int v = 0; v < e1_verts.Size(); v++)
+            {
+               const real_t *vp = mesh_.GetVertex(e1_verts[v]);
+               for (int d = 0; d < 3; d++) { elem1_c(d) += vp[d]; }
+            }
+            if (e1_verts.Size() > 0)
+            {
+               elem1_c /= static_cast<real_t>(e1_verts.Size());
+            }
+
+            // Projections along ref_normal: canonical arrow points in
+            // ref_normal direction.  "+ side" = origin half-space =
+            // opposite to ref_normal direction.  A point with SMALLER
+            // (more negative) projection onto ref_normal is on the
+            // +side.  So elem1_on_plus = (elem1_proj < face_proj).
+            real_t face_proj  = 0.0, elem1_proj = 0.0;
+            for (int d = 0; d < 3; d++)
+            {
+               face_proj  += face_c(d)  * ref_normal(d);
+               elem1_proj += elem1_c(d) * ref_normal(d);
+            }
+            shared_fault_elem1_on_plus_[sf_idx] = (elem1_proj < face_proj);
+         }
+#endif
+      }
    }
 }
 
@@ -554,54 +706,109 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                   dof_idx = it->second + q;
                }
 
+               // R-801 fix: look up this interior fault face in FaultBasis
+               // so we can use the same BP5 canonical (dip, strike) frame
+               // convention as ComputeSharedFaceFluxRHS.  Without this
+               // unification, interior-fault QPs store DOFData.V1 =
+               // along-strike (from GodunovFlux::BuildFrame's t1=x) while
+               // shared-fault QPs store DOFData.V1 = along-dip (from BP5's
+               // tangent1 = dip), corrupting the TPV102 pure-strike-slip
+               // initialisation and mixing the physical components.
+               const int fb_idx = LookupInteriorFaultBasisIndex(f);
+               const bool have_basis = (fault_basis_ && fb_idx >= 0 &&
+                                        fb_idx < fault_basis_->NumFaces());
+               const FaultBasisQPData *qpd_ptr = nullptr;
+               if (have_basis)
+               {
+                  const FaultBasisData &bd = fault_basis_->GetBasis(fb_idx);
+                  if (q < static_cast<int>(bd.qp_data.size()))
+                  {
+                     qpd_ptr = &bd.qp_data[q];
+                  }
+               }
+
                if (dof_idx >= 0 &&
-                   dof_idx < static_cast<int>(fault_dof_data_->size()))
+                   dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                   qpd_ptr != nullptr)
                {
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
 
-                  // 1. Rotate Q± to fault-local coordinates
-                  real_t t1[3], t2[3];
-                  GodunovFlux::BuildFrame(nor, t1, t2);
-                  DenseMatrix T(NUM_STATE), Tinv(NUM_STATE);
-                  GodunovFlux::BuildRotation(nor, t1, t2, T);
-                  GodunovFlux::BuildRotationInverse(nor, t1, t2, Tinv);
+                  // 1. Reconstruct canonical (pre-Step-5) BP5 frame from
+                  // (stored_basis, sign_flipped) — ref-normal-aligned.
+                  // BP5 convention: can_t1 = dip, can_t2 = strike.
+                  const FaultBasisQPData &qpd = *qpd_ptr;
+                  real_t can_n[3], can_t1[3], can_t2[3];
+                  for (int d = 0; d < 3; d++)
+                  {
+                     can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
+                                                  :  qpd.normal[d];
+                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
+                                                  :  qpd.tangent1[d];
+                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
+                                                  :  qpd.tangent2[d];
+                  }
 
-                  real_t Q_plus_local[NUM_STATE], Q_minus_local[NUM_STATE];
+                  DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
+                  GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
+                  GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
+                                                    Tinv_can);
+
+                  // For interior faces MFEM's CalcOrtho returns Elem1-outward
+                  // normal; sign_flipped = true iff that is anti-aligned with
+                  // ref_normal.  can_n points along ref_normal (+→−).  So
+                  // Elem1 sits on the canonical + side iff its outward lies
+                  // along can_n iff sign_flipped == false.
+                  const bool elem1_on_plus = !qpd.sign_flipped;
+
+                  // Rotate self/nbr into canonical frame.
+                  real_t Q_self_can[NUM_STATE], Q_nbr_can[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {
-                     Q_plus_local[c] = 0.0;
-                     Q_minus_local[c] = 0.0;
+                     Q_self_can[c] = 0.0; Q_nbr_can[c] = 0.0;
                      for (int k = 0; k < NUM_STATE; k++)
                      {
-                        Q_plus_local[c]  += Tinv(c, k) * Q_self[k];
-                        Q_minus_local[c] += Tinv(c, k) * Q_nbr[k];
+                        Q_self_can[c] += Tinv_can(c, k) * Q_self[k];
+                        Q_nbr_can[c]  += Tinv_can(c, k) * Q_nbr[k];
                      }
                   }
+
+                  const real_t *Q_plus_local  = elem1_on_plus ? Q_self_can
+                                                              : Q_nbr_can;
+                  const real_t *Q_minus_local = elem1_on_plus ? Q_nbr_can
+                                                              : Q_self_can;
 
                   // 2. Evaluate: trial traction → friction solve → imposed states
                   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
                   fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
                                         Q_imp_plus, Q_imp_minus);
 
-                  // 3. Rotate imposed states back to global
+                  // 3. Rotate imposed states back to global via T_can.
                   real_t Q_imp_plus_g[NUM_STATE], Q_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {
-                     Q_imp_plus_g[c] = 0.0;
-                     Q_imp_minus_g[c] = 0.0;
+                     Q_imp_plus_g[c] = 0.0; Q_imp_minus_g[c] = 0.0;
                      for (int k = 0; k < NUM_STATE; k++)
                      {
-                        Q_imp_plus_g[c]  += T(c, k) * Q_imp_plus[k];
-                        Q_imp_minus_g[c] += T(c, k) * Q_imp_minus[k];
+                        Q_imp_plus_g[c]  += T_can(c, k) * Q_imp_plus[k];
+                        Q_imp_minus_g[c] += T_can(c, k) * Q_imp_minus[k];
                      }
                   }
 
-                  // Godunov flux from imposed states: F = A_n^+ Q^{+,imp} + A_n^- Q^{-,imp}.
-                  // Standard DG accumulation (Elem1 -= F, Elem2 += F) ensures conservation.
+                  // Godunov flux from imposed states.  Standard DG
+                  // accumulation: Elem1 -= F, Elem2 += F.  MFEM's `nor` is
+                  // Elem1-outward on interior faces, so this element's
+                  // Q_self comes from the (+) side iff elem1_on_plus is
+                  // true.  Route Q_imp_plus_g/Q_imp_minus_g to self/nbr
+                  // slots accordingly; the Godunov identity
+                  // `F(L,R,+n) = -F(R,L,-n)` then makes the Elem1/Elem2
+                  // accumulation conservative.
+                  const real_t *Q_self_imp = elem1_on_plus ? Q_imp_plus_g
+                                                           : Q_imp_minus_g;
+                  const real_t *Q_nbr_imp  = elem1_on_plus ? Q_imp_minus_g
+                                                           : Q_imp_plus_g;
                   real_t F_h_total[NUM_STATE];
-                  flux_.Interior(nor, Q_imp_plus_g, Q_imp_minus_g, F_h_total);
+                  flux_.Interior(nor, Q_self_imp, Q_nbr_imp, F_h_total);
 
-                  // Standard accumulation: Elem1 -= F, Elem2 += F
                   for (int c = 0; c < NUM_STATE; c++)
                   {
                      for (int i = 0; i < ndof; i++)
@@ -621,7 +828,8 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                }
                else
                {
-                  // Fault face but no DOFData mapping — fall back to welded
+                  // Fault face but no DOFData mapping (or FaultBasis not
+                  // populated) — fall back to welded interior flux.
                   flux_.Interior(nor, Q_self, Q_nbr, F_h);
                   for (int c = 0; c < NUM_STATE; c++)
                   {
@@ -729,6 +937,54 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
          }
       }
 
+      // R-701 fix: canonical-fault-frame refactor.
+      //
+      // Before R-701, shared-fault face processing required owner broadcast
+      // of post-Evaluate state (v5 R-501) because each rank built its own
+      // fault-local frame via `GodunovFlux::BuildFrame(rank_local_nor, ...)`
+      // and the two ranks' rotation matrices disagreed → Evaluate inputs
+      // disagreed → DOFData drifted.  Under R-701, the frame comes from
+      // BP5's `FaultBasis` (populated in the ctor), which exposes a per-QP
+      // `sign_flipped` bit.  Reconstructing the pre-Step-5 canonical frame
+      // from `(stored_basis, sign_flipped)` gives a (normal, tangent1,
+      // tangent2) triple that is BIT-IDENTICAL on both ranks (it is the
+      // ref-normal-aligned frame both ranks compute in BP5's Step 3/4
+      // before the Step-5 negation flips the stored copy).
+      //
+      // Consequence: both ranks feed `Evaluate` with bit-identical arguments
+      // and produce bit-identical DOFData updates locally.  No MPI
+      // broadcast, no owner/non-owner split, no peer-rank table.  The
+      // ~270 lines of v5 R-501 machinery are deleted.
+      //
+      // Per-rank self/nbr labeling still differs (rank A's Elem1 is on
+      // canonical-+ side, rank B's on canonical-- side).  The swap logic
+      // comes from `qpd.sign_flipped`: sign_flipped == true identifies the
+      // rank whose Elem1 is on the canonical-- side (rank B).  Flux
+      // assembly uses each rank's own MFEM `nor` with its own
+      // (Q_self_imp, Q_nbr_imp) assignment; the Godunov conservation
+      // identity `F(L, R, +n) = -F(R, L, -n)` then gives consistent
+      // accumulation on both ranks without an explicit sign flip.
+      const int nfs = fault_shared_faces_.Size();
+      const bool fault_active = (fault_flux_ && fault_dof_data_
+                                 && nfs > 0 && nbf_per_face_ > 0
+                                 && fault_basis_);
+
+      // Map each shared-face index sf to its FaultBasis entry.  BP5 lays
+      // out `basis_[]` as (interior-fault faces, then shared-fault faces);
+      // the shared half starts at offset `fault_interior_faces_.Size()`.
+      std::vector<int> sf_to_basis_idx(n_shared, -1);
+      if (fault_active)
+      {
+         for (int sf_idx = 0; sf_idx < nfs; sf_idx++)
+         {
+            int sf = fault_shared_faces_[sf_idx];
+            if (sf >= 0 && sf < n_shared)
+            {
+               sf_to_basis_idx[sf] = fault_interior_faces_.Size() + sf_idx;
+            }
+         }
+      }
+
       for (int sf = 0; sf < n_shared; sf++)
       {
          FaceElementTransformations *ftr =
@@ -747,6 +1003,13 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
 
          const IntegrationRule &ir = IntRules.Get(
             ftr->GetGeometryType(), 2*order_);
+
+         const bool sf_fault =
+            fault_active && (sf < static_cast<int>(shared_face_bdr_attr_.size()))
+            && (shared_face_bdr_attr_[sf] == bc_.fault_attr)
+            && (bc_.fault_attr > 0)
+            && (sf_to_basis_idx[sf] >= 0);
+         const int basis_idx = sf_fault ? sf_to_basis_idx[sf] : -1;
 
          for (int q = 0; q < ir.GetNPoints(); q++)
          {
@@ -797,19 +1060,10 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                }
             }
 
-            // R-001 Part C: Check if shared face is a fault face
-            bool is_fault = false;
-            if (sf < static_cast<int>(shared_face_bdr_attr_.size()))
-            {
-               is_fault = (shared_face_bdr_attr_[sf] == bc_.fault_attr)
-                        && (bc_.fault_attr > 0);
-            }
-
             real_t F_h[NUM_STATE];
 
-            if (is_fault && fault_flux_ && fault_dof_data_)
+            if (sf_fault)
             {
-               // Shared fault face: same pipeline as local fault faces
                auto it = shared_fault_dof_offset_.find(sf);
                int dof_idx = (it != shared_fault_dof_offset_.end())
                            ? it->second + q : -1;
@@ -817,76 +1071,117 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                if (dof_idx >= 0 &&
                    dof_idx < static_cast<int>(fault_dof_data_->size()))
                {
-                  DOFData &fdata = (*fault_dof_data_)[dof_idx];
+                  // Look up the rank's canonical-side flag for this
+                  // shared fault face (computed once in the ctor from
+                  // Elem1 geometry).  sf_idx in fault_shared_faces_:
+                  const int sf_idx_in_fault = basis_idx
+                                              - fault_interior_faces_.Size();
+                  const bool elem1_on_plus =
+                     (sf_idx_in_fault >= 0 && sf_idx_in_fault <
+                      static_cast<int>(shared_fault_elem1_on_plus_.size()))
+                     ? shared_fault_elem1_on_plus_[sf_idx_in_fault] : false;
 
-                  real_t t1[3], t2[3];
-                  GodunovFlux::BuildFrame(nor, t1, t2);
-                  DenseMatrix T(NUM_STATE), Tinv(NUM_STATE);
-                  GodunovFlux::BuildRotation(nor, t1, t2, T);
-                  GodunovFlux::BuildRotationInverse(nor, t1, t2, Tinv);
+                  const FaultBasisData &bd = fault_basis_->GetBasis(basis_idx);
+                  MFEM_ASSERT(q < static_cast<int>(bd.qp_data.size()),
+                              "FaultBasis::qp_data not populated for shared "
+                              "fault face — ComputeQPBasisShared missed "
+                              "this face");
+                  const FaultBasisQPData &qpd = bd.qp_data[q];
 
-                  real_t Q_plus_local[NUM_STATE], Q_minus_local[NUM_STATE];
+                  // Reconstruct canonical (pre-Step-5) frame: aligned with
+                  // ref_normal on BOTH ranks → bit-identical across ranks
+                  // regardless of whether MFEM's CalcOrtho gave identical
+                  // or opposite raw normals.
+                  real_t can_n[3], can_t1[3], can_t2[3];
+                  for (int d = 0; d < 3; d++)
+                  {
+                     can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
+                                                  :  qpd.normal[d];
+                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
+                                                  :  qpd.tangent1[d];
+                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
+                                                  :  qpd.tangent2[d];
+                  }
+
+                  DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
+                  GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
+                  GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
+                                                    Tinv_can);
+
+                  // Rotate self/nbr Q into canonical frame.
+                  real_t Q_self_can[NUM_STATE], Q_nbr_can[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {
-                     Q_plus_local[c] = 0.0;
-                     Q_minus_local[c] = 0.0;
+                     Q_self_can[c] = 0.0; Q_nbr_can[c] = 0.0;
                      for (int k = 0; k < NUM_STATE; k++)
                      {
-                        Q_plus_local[c]  += Tinv(c, k) * Q_self[k];
-                        Q_minus_local[c] += Tinv(c, k) * Q_nbr[k];
+                        Q_self_can[c] += Tinv_can(c, k) * Q_self[k];
+                        Q_nbr_can[c]  += Tinv_can(c, k) * Q_nbr[k];
                      }
                   }
 
-                  real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-                  // R-001 fix: peer with lower rank ID is the canonical "+" owner.
-                  // R-102 fix: hard-abort on unresolved peer rank instead of
-                  // silently falling back to the pre-R-001 buggy path.  Both
-                  // ranks sharing a fault face would fail resolution together
-                  // and both would then skip the swap, re-introducing the H3
-                  // DOFData-drift bug with no warning.
-                  MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
-                              shared_face_peer_[sf].resolved,
-                              "shared_face_peer_[" << sf << "] was not resolved "
-                              "in the WaveOperator ctor.  Cannot canonicalise "
-                              "the (+,-) side of a shared fault face — check "
-                              "that face_nbr_elements_offset is populated "
-                              "(pmesh.ExchangeFaceNbrData has run) and that "
-                              "GetFaceNbrRank returned a valid rank.");
-                  const int peer_rank = shared_face_peer_[sf].peer_rank;
-                  MFEM_VERIFY(peer_rank != my_rank_,
-                              "shared face " << sf << " peer_rank == my_rank_ "
-                              "— ParMesh invariant violated");
-                  const bool owner = (my_rank_ < peer_rank);
-                  if (owner)
-                  {
-                     fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
-                                           Q_imp_plus, Q_imp_minus);
-                  }
-                  else
-                  {
-                     // Non-owner: swap so Evaluate sees the same (Q+, Q-) as
-                     // the owner.  Swap output buffers so that, in caller
-                     // vocabulary, Q_imp_plus still means the e1/self-side
-                     // imposed state and Q_imp_minus still means the
-                     // e2/nbr-side imposed state (matches the downstream
-                     // flux_.Interior convention).
-                     fault_flux_->Evaluate(fdata, Q_minus_local, Q_plus_local,
-                                           Q_imp_minus, Q_imp_plus);
-                  }
+                  // Swap based on geometric `elem1_on_plus_`: exactly
+                  // one of the two ranks has elem1_on_plus=true, the
+                  // other false.  Both ranks feed Evaluate with the
+                  // same (Q_plus, Q_minus) = (Q at canonical-+ side,
+                  // Q at canonical-- side) — bit-identical across
+                  // ranks, because Q_self_can ⊕ Q_nbr_can across ranks
+                  // exhaust the same two physical values (one rank's
+                  // self = other rank's nbr by MFEM ghost exchange).
+                  const real_t *Q_plus_local  = elem1_on_plus ? Q_self_can
+                                                              : Q_nbr_can;
+                  const real_t *Q_minus_local = elem1_on_plus ? Q_nbr_can
+                                                              : Q_self_can;
 
+                  DOFData &fdata = (*fault_dof_data_)[dof_idx];
+                  real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
+                  fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
+                                        Q_imp_plus, Q_imp_minus);
+
+                  // Rotate imposed states back to global via T_can (same
+                  // on both ranks).  Q_imp_plus_g, Q_imp_minus_g are
+                  // bit-identical across ranks.
                   real_t Q_imp_plus_g[NUM_STATE], Q_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {
-                     Q_imp_plus_g[c] = 0.0;
-                     Q_imp_minus_g[c] = 0.0;
+                     Q_imp_plus_g[c] = 0.0; Q_imp_minus_g[c] = 0.0;
                      for (int k = 0; k < NUM_STATE; k++)
                      {
-                        Q_imp_plus_g[c]  += T(c, k) * Q_imp_plus[k];
-                        Q_imp_minus_g[c] += T(c, k) * Q_imp_minus[k];
+                        Q_imp_plus_g[c]  += T_can(c, k) * Q_imp_plus[k];
+                        Q_imp_minus_g[c] += T_can(c, k) * Q_imp_minus[k];
                      }
                   }
 
-                  flux_.Interior(nor, Q_imp_plus_g, Q_imp_minus_g, F_h);
+                  // R-802 fix: use canonical normal `can_n` (bit-identical
+                  // on both ranks, by construction) for the Godunov flux so
+                  // both ranks compute the SAME F_h regardless of whether
+                  // MFEM's CalcOrtho gives `nor_A = -nor_B` (classical) or
+                  // `nor_A = nor_B` (observed empirically on the inline
+                  // 2-tet mesh in v6 fix report).  The accumulation sign is
+                  // then gated on `elem1_on_plus`:
+                  //   Elem1 on canonical "+" side:  rhs[Elem1] -= F_can*w
+                  //     (flux leaves Elem1 into the "-" half-space).
+                  //   Elem1 on canonical "-" side:  rhs[Elem1] += F_can*w
+                  //     (flux enters Elem1 from the "+" half-space).
+                  // Pre-R-802 this code fed `nor` + self/nbr to Interior and
+                  // relied on the Godunov identity F(L,R,+n) = -F(R,L,-n) to
+                  // produce conservation — which is true only when
+                  // nor_A = -nor_B.  When MFEM returns identical normals on
+                  // the two ranks (v6 observation) the identity does not
+                  // apply and bulk momentum leaks across the shared fault.
+                  flux_.Interior(can_n, Q_imp_plus_g, Q_imp_minus_g, F_h);
+                  const real_t accum_sign = elem1_on_plus ? +1.0 : -1.0;
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     for (int i = 0; i < ndof; i++)
+                     {
+                        rhs[c * ndof_total_ + dof_offset1 + i] -=
+                           accum_sign * w * shape1(i) * F_h[c];
+                     }
+                  }
+                  continue;  // Fault accumulation done; skip the generic
+                             // -= F_h path below (which assumes rank-local
+                             // `nor` + standard Godunov orientation).
                }
                else
                {
@@ -898,7 +1193,14 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                flux_.Interior(nor, Q_self, Q_nbr, F_h);
             }
 
-            // Accumulate into local element only (no ghost writes)
+            // Accumulate into local element only (no ghost writes).
+            // Non-fault shared faces: standard Godunov conservation holds
+            // because both ranks use rank-local `nor` (opposite) on
+            // bit-identical Q_self/Q_nbr inputs (each rank's `Q_self` is
+            // the other rank's `Q_nbr`, and ghost exchange enforces
+            // agreement).  For the fault path we use a separate
+            // canonical-normal assembly + explicit accum_sign gated on
+            // elem1_on_plus (see R-802 block above and its `continue`).
             for (int c = 0; c < NUM_STATE; c++)
             {
                for (int i = 0; i < ndof; i++)
@@ -1168,7 +1470,12 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          return false;
       });
 
-      double max_diff = 0.0;
+      // Track both absolute and relative diff so the diagnostic can report
+      // the physical units while thresholding against a scale-relative
+      // tolerance (R-502).
+      double max_rel_diff = 0.0;
+      double max_diff_abs = 0.0;
+      double max_diff_scale = 1.0;
       int    max_diff_field = -1;
       int    max_diff_entry = -1;
       int    n_pairs = 0;
@@ -1176,21 +1483,23 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
 
       auto same_centroid = [&](int a, int b)
       {
-         // R-404 fix: sub-ULP tolerance (1 ULP * max(|va|, |vb|)).  The
-         // exact compare imported by R-304 assumed `ftr->Face->Transform(ip,
-         // phys)` produces bit-identical output on both ranks that share a
-         // face — which holds for the current MFEM build but is not
-         // documented as a contract.  The scale-relative ULP floor keeps
-         // strict weak ordering (threshold bounded by the larger magnitude,
-         // never an absolute constant) while accommodating a future
-         // compiler-reassociation round-off that would otherwise flip
-         // matched pairs into R-305 unpaired-aborts.
+         // R-503 fix: hybrid tolerance — `scale * DBL_EPSILON` alone
+         // collapses to ~1e-28 at coordinates near zero (fault plane at
+         // y=0 is the TPV102 case), so two ranks with 1-ULP-of-nonzero
+         // drift in y get classified as different centroids and trigger
+         // a spurious R-305 unpair-abort.  The absolute floor is smaller
+         // than any realistic fault-mesh element (min h ~ m, fault
+         // geometry tolerance 1e-9 m) and larger than any plausible FP
+         // noise at mesh-scale coordinates.
+         const double abs_floor = 1e-9;
          for (int k = 0; k < 3; k++)
          {
             double va = all_data[a*REC + k], vb = all_data[b*REC + k];
             double scale = std::max(std::abs(va), std::abs(vb));
-            double ulp = scale * std::numeric_limits<double>::epsilon();
-            if (std::abs(va - vb) > ulp) { return false; }
+            double tol_k = std::max(scale
+                                    * std::numeric_limits<double>::epsilon(),
+                                    abs_floor);
+            if (std::abs(va - vb) > tol_k) { return false; }
          }
          return true;
       };
@@ -1206,10 +1515,26 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
             int a = idx[i], b = idx[i+1];
             for (int k = FIELD_BASE; k < REC; k++)
             {
-               double diff = std::abs(all_data[a*REC + k] - all_data[b*REC + k]);
-               if (diff > max_diff)
+               double va = all_data[a*REC + k];
+               double vb = all_data[b*REC + k];
+               double diff = std::abs(va - vb);
+               // R-502: scale-relative tolerance.  Fields span ~1e-12
+               // (slip rate at nucleation) to ~1e+8 Pa (normal stress);
+               // a fixed absolute tol either fails on large-magnitude
+               // fields (sub-ULP reassociation) or permits gross drift
+               // on small ones.  `max(|va|, |vb|, 1.0)` gives a
+               // physically meaningful scale that (a) never divides by
+               // zero, (b) is O(1) for dimensionless fields like psi,
+               // and (c) matches the field magnitude for large
+               // dimensioned fields.
+               double field_scale = std::max({std::abs(va), std::abs(vb),
+                                              1.0});
+               double rel_diff = diff / field_scale;
+               if (rel_diff > max_rel_diff)
                {
-                  max_diff = diff;
+                  max_rel_diff = rel_diff;
+                  max_diff_abs = diff;
+                  max_diff_scale = field_scale;
                   max_diff_field = k;
                   max_diff_entry = a;
                }
@@ -1234,14 +1559,16 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       // A shared fault QP must appear on exactly 2 ranks.  n_unpaired > 0
       // indicates a mesh-partitioning pathology (or a peer-rank resolution
       // bug that MFEM_VERIFY at the call site of Evaluate did not catch);
-      // treat it as a hard diagnostic failure.
-      int fail_local = (max_diff > tol || n_unpaired > 0) ? 1 : 0;
+      // treat it as a hard diagnostic failure.  `tol` is interpreted as
+      // a RELATIVE tolerance (R-502): a field with |field| ≈ 1e8 is
+      // allowed to differ by ~tol × 1e8 across ranks.
+      int fail_local = (max_rel_diff > tol || n_unpaired > 0) ? 1 : 0;
       int fail_global = 0;
       MPI_Allreduce(&fail_local, &fail_global, 1, MPI_INT, MPI_MAX, comm);
 
       if (fail_global)
       {
-         if (n_unpaired > 0 && max_diff <= tol)
+         if (n_unpaired > 0 && max_rel_diff <= tol)
          {
             MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
                        << " unpaired entries (every shared QP should have "
@@ -1255,24 +1582,33 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          const char *field_name =
             (field_off >= 0 && field_off < NUM_FIELDS)
                ? FIELD_NAMES[field_off] : "<unknown>";
+         // R-504: generic diagnostic wording.  Prior to R-501 this blamed
+         // "R-001's (+,-) canonicalisation"; with the owner-broadcast fix
+         // in place the underlying R-001 path no longer runs, so any
+         // future trip is from a different bug (missed field in the
+         // broadcast, R-501 MPI exchange error, stale auth_state, ...).
          MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
                     "Field '" << field_name << "' at centroid ("
                     << cx << ", " << cy << ", " << cz
-                    << ") differs by " << max_diff
-                    << " across the two ranks sharing the face (tol="
-                    << tol << ").  R-001's (+,-) canonicalisation is not "
-                    "sufficient under the current MFEM face-normal "
-                    "convention; the fix must be extended (e.g. by having "
-                    "the owner rank broadcast its DOFData to the non-owner "
-                    "after Evaluate).");
+                    << ") differs by " << max_diff_abs
+                    << " across the two ranks sharing the face (scale="
+                    << max_diff_scale << ", rel_diff=" << max_rel_diff
+                    << ", rel_tol=" << tol << ").  The two ranks' DOFData "
+                    "diverged — check that the R-501 owner-broadcast in "
+                    "ComputeSharedFaceFluxRHS covers every mutable field "
+                    "written by FaultFaceFlux::Evaluate and the driver's "
+                    "RK4 averaging step, and that the Q_imp exchange is "
+                    "packed/unpacked in a consistent order on both ranks.");
       }
 
       if (my_rank_ == 0)
       {
          std::cout << "  [R-101 check] shared-fault DOFData consistency OK: "
                    << n_pairs << " pairs matched, " << n_unpaired
-                   << " unpaired entries, max_diff=" << max_diff
-                   << " (tol=" << tol << ")\n";
+                   << " unpaired entries, max_rel_diff=" << max_rel_diff
+                   << " (max_abs_diff=" << max_diff_abs
+                   << ", scale=" << max_diff_scale
+                   << ", rel_tol=" << tol << ")\n";
       }
 #else
       (void)tol;

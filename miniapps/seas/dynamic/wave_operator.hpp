@@ -112,6 +112,19 @@ public:
    { return GetNumLocalFaultQPs() + GetNumSharedFaultQPs(); }
    ///@}
 
+   /// R-801 fix: look up the FaultBasis index for an interior fault face by
+   /// its mesh face index.  Returns -1 if the face is not an interior fault
+   /// face (i.e., not in fault_interior_faces_).
+   ///
+   /// FaultBasis stores basis data for [interior fault faces, then shared
+   /// fault faces]; interior faces occupy positions [0, nfi), so the
+   /// returned index is directly usable as `fault_basis_->GetBasis(idx)`.
+   int LookupInteriorFaultBasisIndex(int mesh_face_idx) const
+   {
+      auto it = fault_interior_face_to_basis_idx_.find(mesh_face_idx);
+      return (it == fault_interior_face_to_basis_idx_.end()) ? -1 : it->second;
+   }
+
    /// Set fault DOF data and build face→DOFData index mapping.
    ///
    /// Uses the wave operator's owned fault-face lists.  The data array's
@@ -153,21 +166,28 @@ public:
    /// @brief R-101 fix: verify shared-fault DOFData consistency across ranks.
    ///
    /// For every shared fault QP, both ranks that own it carry an independent
-   /// DOFData entry.  R-001's (+,-) canonicalisation is supposed to keep
-   /// those two entries bit-identical, but the claim rests on an MFEM
-   /// invariant (identical face normals on both ranks) that the v1 fix
-   /// report flagged as unverified.  This method gathers all shared-fault
-   /// DOFData across ranks, matches pairs by face centroid, and asserts
-   /// bit-equality (within `tol`).  On mismatch, it calls `MFEM_ABORT`.
+   /// DOFData entry.  Under R-701's canonical-fault-frame path (both ranks
+   /// run Evaluate in the same pre-sign-flip frame derived from
+   /// `FaultBasis`'s `sign_flipped` bit), the two entries are bit-identical
+   /// by construction.  This method gathers all shared-fault DOFData across
+   /// ranks, matches pairs by face centroid, and asserts bit-equality
+   /// (within the relative `tol`).  On mismatch, it calls `MFEM_ABORT`.
    ///
-   /// Intended usage: call once from the driver after the first RK4 step.
+   /// Intended usage: call once from the driver after the first RK4 step
+   /// as regression insurance.  Under R-701 a mismatch indicates a new bug
+   /// in the canonical-frame reconstruction, the sign_flipped swap, or the
+   /// driver's RK4 averaging — it is NO LONGER the v1–v5 symptom.
    /// Cost is O(n_shared_fault_global) communication + memory, one-shot.
    ///
    /// No-op on serial builds.
    ///
-   /// @param[in] tol  Absolute tolerance for per-field equality; default
-   ///                 1e-10 matches the double-precision noise floor of
-   ///                 one Evaluate call.
+   /// @param[in] tol  RELATIVE tolerance for per-field equality (R-502):
+   ///                 `|a - b| / max(|a|, |b|, 1.0) > tol` triggers abort.
+   ///                 Default 1e-10 tolerates the double-precision noise
+   ///                 floor on Pa-scale fields (~1e+8 × ULP ≈ 2e-8).
+   ///                 Under R-701's canonical frame this is expected to
+   ///                 report `max_rel_diff=0` always; it remains as
+   ///                 regression insurance.
    void VerifySharedFaultDOFDataConsistency(real_t tol = 1e-10) const;
    ///@}
 
@@ -200,29 +220,35 @@ private:
    std::map<int, int> shared_fault_dof_offset_;  ///< shared_face_index → DOFData start index
    std::vector<int> shared_face_bdr_attr_;  ///< shared face boundary attr (0 = regular interior)
    std::set<int> shared_mesh_face_set_;  ///< mesh face indices that are shared (ParMesh only)
-   /// Per-shared-face peer-rank record.
-   ///
-   /// R-001 fix: the rank with the lower ID is the canonical "+" owner of a
-   /// shared fault face, so both ranks feed the same `(Q+, Q-)` into
-   /// `Evaluate` and update `DOFData` identically.
-   ///
-   /// R-107 fix: split `resolved` from `peer_rank` so a ctor failure
-   /// (GetSharedFaceTransformations returned null, or `fn` lookup couldn't
-   /// find the face neighbor) is distinguishable from a successful lookup
-   /// at rank 0.  `ComputeSharedFaceFluxRHS` (R-102) aborts if a shared
-   /// fault face has `resolved == false`.
-   struct SharedFacePeer
-   {
-      bool resolved = false;
-      int  peer_rank = -1;
-   };
-   std::vector<SharedFacePeer> shared_face_peer_;
+   // R-705 fix: SharedFacePeer struct and shared_face_peer_ member removed.
+   // Under R-701 the canonical fault frame (reconstructed from FaultBasis)
+   // plus a geometry-based `elem1_on_plus_side` swap flag make Evaluate
+   // inputs bit-identical on both ranks without any owner/non-owner MPI
+   // exchange.  No peer-rank resolution needed.
+   /// For each shared-fault face (indexed by position in fault_shared_faces_),
+   /// true iff this rank's local Elem1 sits on the canonical "+" side of
+   /// the fault (opposite to where ref_normal points).  The flag is derived
+   /// purely from local geometry (element centroid vs face centroid vs
+   /// ref_normal), so it is robust to whatever CalcOrtho orientation
+   /// convention MFEM uses for shared faces.  Populated in the ctor.
+   std::vector<bool> shared_fault_elem1_on_plus_;
 
    // Canonical fault-face geometry lists (built in constructor).
    // See GetFaultInteriorFaces / GetFaultSharedFaces for layout contract.
    Array<int> fault_interior_faces_;     ///< mesh face indices, 2-sided & non-shared
    Array<int> fault_shared_faces_;       ///< shared-face indices (sf), ParMesh only
    int nbf_per_face_ = 0;                ///< QPs per fault face (set by SetFaultDOFData)
+
+   /// R-801 fix: mesh face index → position in fault_interior_faces_ (=
+   /// FaultBasis interior basis index).  Built in the ctor; lets
+   /// ComputeFaceFluxRHS reconstruct the BP5 canonical frame for each
+   /// interior fault QP (same frame convention as the shared-fault path),
+   /// so DOFData.V1/V2/tau1_corr/tau2_corr/slip1/slip2 carry the SAME
+   /// physical meaning (component 1 = dip, component 2 = strike) on
+   /// every fault QP — interior or shared.  Previously the interior
+   /// branch used `GodunovFlux::BuildFrame` (t1 = strike, t2 = up),
+   /// creating a convention split between interior and shared fault QPs.
+   std::map<int, int> fault_interior_face_to_basis_idx_;
 
    /// Persistent ghost exchange state (R-001/R-003 fix).
    bool ghost_initialized_ = false;
