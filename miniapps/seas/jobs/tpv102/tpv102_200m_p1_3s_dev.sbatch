@@ -20,17 +20,27 @@
 #   embedded fault at Y=0 (attr 3).
 #
 # Run parameters:
-#   tfinal = 3.0 s
-#   dt     = 5 ms  →  600 explicit-RK4 steps
-#            With p=1 on h=200 m tets (cp ≈ 5800 m/s) this is inside the
-#            RK4 stability region.  The driver still prints the usual
-#            CFL comparison line in the log; safely ignore the
-#            "dt_override > dt_cfl" advisory — dt_cfl is reported at
-#            cfl_factor=0.5 and the explicit RK4 envelope is larger.
+#   tfinal = 3.0 s (see WALL-TIME NOTE below — dev queue 2 hr will
+#                    not complete the full run; use normal queue
+#                    48 hr for production).
+#   dt     = auto (CFL-limited) via the driver's ComputeMaxDt using
+#            cfl_factor=0.5.  For h=200 m, p=1, cp ≈ 5800 m/s on tets
+#            this is ~0.285 ms.  Do NOT override with a larger dt:
+#            explicit RK4 for our Godunov-flux DG has a linear stability
+#            envelope of only ~2× the CFL-1 limit on hyperbolic systems,
+#            i.e. dt ≲ 0.6 ms; anything larger (e.g. the 5 ms value
+#            that looked reasonable for implicit PyLith integrators)
+#            causes the wave field to amplify ~10×/step once dynamics
+#            engage — blow-up was observed at step ~30 in job 7664250.
 #   ParaView fault-surface PVD every 0.1 s; volume PVD suppressed.
 #   Station output every 0.1 s at the SCEC probe points.
 #
-# Parallel setup: 8 nodes × 50 ranks = 400 ranks.  Dev queue, 2 hr.
+# WALL-TIME NOTE: ~10 500 steps × ~1 s/step on 400 ranks ≈ 3 hr.  The
+# 2 hr dev queue will produce results up to ~t ≈ 2 s.  For the full
+# 3 s run, change `-p development` → `-p normal` and `-t 02:00:00` →
+# `-t 12:00:00` (normal queue max is 48 hr).
+#
+# Parallel setup: 8 nodes × 50 ranks = 400 ranks.
 #
 # Before submitting:
 #   1. Build driver on Frontera:
@@ -75,16 +85,16 @@ mkdir -p "${RESULT_DIR}"
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
-echo "tfinal=3.0 s, dt=5 ms, order=1 (matches PyLith Tet4 200m)"
-echo "Output every 0.1 s, fault-surface PVD only"
+echo "tfinal=3.0 s, dt=auto (CFL-limited at cfl_factor=0.5)"
+echo "order=1 (matches PyLith Tet4 200m), output every 0.1 s, fault-surface PVD only"
 
 ibrun ./seas_tpv102_driver \
       --mesh tpv102/mesh/tpv102_200m.msh \
       --mesh-scale 1 \
       --order 1 \
       --bc-mode absorbing \
+      --cfl 0.5 \
       --tfinal 3.0 \
-      --dt 0.005 \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --output-dt 0.1 \
