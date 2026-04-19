@@ -48,6 +48,7 @@ tpv102/mesh/tpv102_200m_2_surfaces.vtu
 tpv102/mesh/tpv102_200m_2_volume.vtu
 tpv102/mesh/tpv102_200m_3.geo
 tpv102/run_200m_dt5ms_3step/
+tpv102/run_200m_p1_dt5ms_3step/
 
 # Generated TPV102 meshes (too large for GitHub, rebuild from .geo with gmsh)
 tpv102/mesh/tpv102_200m.msh
