@@ -47,6 +47,9 @@ static Mesh Create3DMesh(int nx, int ny, int nz,
       v[1] -= Ly;
    }
 
+   // Assign boundary attributes, AVOIDING attr=3 which is reserved for
+   // the fault plane in BP5 convention. The Cartesian mesh has no fault
+   // faces (Y=0 is interior), so attr=3 must not appear on any boundary.
    for (int be = 0; be < mesh.GetNBE(); be++)
    {
       ElementTransformation *T = mesh.GetBdrElementTransformation(be);
@@ -58,10 +61,10 @@ static Mesh Create3DMesh(int nx, int ny, int nz,
       real_t tol = 1e-6;
       if (std::abs(center(0) - (-Lx)) < tol)      { mesh.SetBdrAttribute(be, 1); }
       else if (std::abs(center(0) - Lx) < tol)     { mesh.SetBdrAttribute(be, 2); }
-      else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 3); }
-      else if (std::abs(center(1) - (-Ly)) < tol)  { mesh.SetBdrAttribute(be, 4); }
-      else if (std::abs(center(2) - 0.0) < tol)    { mesh.SetBdrAttribute(be, 5); }
-      else if (std::abs(center(2) - Lz) < tol)     { mesh.SetBdrAttribute(be, 6); }
+      else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 4); }
+      else if (std::abs(center(1) - (-Ly)) < tol)  { mesh.SetBdrAttribute(be, 5); }
+      else if (std::abs(center(2) - 0.0) < tol)    { mesh.SetBdrAttribute(be, 6); }
+      else if (std::abs(center(2) - Lz) < tol)     { mesh.SetBdrAttribute(be, 7); }
    }
 
    mesh.SetAttributes();
@@ -85,13 +88,13 @@ void TestBoundaryAttributes()
       attr_count[mesh.GetBdrAttribute(i)]++;
    }
 
-   // Should have all 6 boundary attributes
+   // Should have all 6 boundary attributes (attr=3 reserved for fault, not used)
    TEST_ASSERT(attr_count.count(1) > 0, "Boundary attr 1 (x=-Lx) exists");
    TEST_ASSERT(attr_count.count(2) > 0, "Boundary attr 2 (x=+Lx) exists");
-   TEST_ASSERT(attr_count.count(3) > 0, "Boundary attr 3 (y=+Ly) exists");
-   TEST_ASSERT(attr_count.count(4) > 0, "Boundary attr 4 (y=-Ly) exists");
-   TEST_ASSERT(attr_count.count(5) > 0, "Boundary attr 5 (z=0) exists");
-   TEST_ASSERT(attr_count.count(6) > 0, "Boundary attr 6 (z=Lz) exists");
+   TEST_ASSERT(attr_count.count(4) > 0, "Boundary attr 4 (y=+Ly) exists");
+   TEST_ASSERT(attr_count.count(5) > 0, "Boundary attr 5 (y=-Ly) exists");
+   TEST_ASSERT(attr_count.count(6) > 0, "Boundary attr 6 (z=0) exists");
+   TEST_ASSERT(attr_count.count(7) > 0, "Boundary attr 7 (z=Lz) exists");
 
    int total = 0;
    for (auto &p : attr_count)

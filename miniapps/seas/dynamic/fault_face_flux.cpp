@@ -148,6 +148,11 @@ void FaultFaceFlux::Evaluate(DOFData &data,
 
    // Update fault state
    data.slip_rate = V_abs;
+   data.V1 = V1;
+   data.V2 = V2;
+   data.tau1_corr = data.tau1_0 + tau1_corr;  // total corrected traction
+   data.tau2_corr = data.tau2_0 + tau2_corr;
+   data.sigma_n_corr = data.sigma_n0 + sigma_n_corr;
 }
 
 } // namespace seas

@@ -497,3 +497,7 @@ miniapps/seas/seas_bp1_full
 miniapps/seas/seas_bp5_full
 miniapps/seas/seas_generate_mesh
 miniapps/seas/seas_mms_antiplane_parallel
+
+# Local skill/tooling directory (not part of the MFEM tree)
+/claude-skills/
+/.claude/

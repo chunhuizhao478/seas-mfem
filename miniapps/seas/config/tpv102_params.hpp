@@ -44,9 +44,9 @@ struct TPV102Params
    static constexpr real_t Ls = 15e3;           ///< Along-strike VW half-width [m]
    static constexpr real_t ws = 3e3;            ///< Along-strike transition width [m]
 
-   // Fault geometry
-   static constexpr real_t fault_length = 30e3; ///< Along-strike [m]
-   static constexpr real_t fault_depth = 15e3;  ///< Down-dip [m]
+   // Fault geometry (VW zone + 3 km transition on each side)
+   static constexpr real_t fault_length = 36e3; ///< Along-strike [m] (VW 30 + 3 km each side)
+   static constexpr real_t fault_depth = 18e3;  ///< Down-dip [m] (VW 15 + 3 km at bottom)
 
    // Loading and initial conditions
    static constexpr real_t sigma_n = 120e6;     ///< Normal stress [Pa] (compression)
@@ -61,30 +61,34 @@ struct TPV102Params
    static constexpr real_t nuc_T = 1.0;               ///< Nucleation rise time [s]
 
    // Domain
-   static constexpr real_t domain_half = 30e3;  ///< Domain half-size [m] (each direction)
+   static constexpr real_t domain_half = 60e3;  ///< Domain half-size [m] (each direction)
 
    // Simulation
    static constexpr real_t t_final = 12.0;      ///< Final time [s]
 };
 
-/// Boxcar function B(x, W, w): smooth transition from 1 to 0.
-/// B = 1 for |x| < W - w, smooth for W-w < |x| < W+w, 0 for |x| > W+w.
+/// SCEC Boxcar function B(x, W, w) — Eq. (5) of SCEC TPV101/102 spec.
+/// B = 1 for |x| <= W, tanh transition for W < |x| < W+w, 0 for |x| >= W+w.
+/// Uses C-infinity tanh taper (required for SCEC cross-code comparison).
 inline real_t Boxcar(real_t x, real_t W, real_t w_trans)
 {
    real_t ax = std::abs(x);
-   if (ax <= W - w_trans) { return 1.0; }
+   if (ax <= W) { return 1.0; }
    if (ax >= W + w_trans) { return 0.0; }
-   // Smooth transition: cosine taper
-   real_t s = (ax - (W - w_trans)) / (2.0 * w_trans);
-   return 0.5 * (1.0 + std::cos(M_PI * s));
+   // SCEC Eq. (5): tanh transition
+   return 0.5 * (1.0 + std::tanh(w_trans / (ax - W - w_trans)
+                                + w_trans / (ax - W)));
 }
 
 /// Compute direct effect parameter a at position (along_strike, down_dip).
-/// VW in the central region, VS outside, smooth transition.
+/// SCEC Eq. (4): delta_a = delta_a0 * [1 - B(x; W, w) * B(y - y0; W/2, w)]
+/// VW covers the entire fault extent, transition starts OUTSIDE the fault.
 inline real_t ComputeA(real_t along_strike, real_t down_dip)
 {
    real_t B_strike = Boxcar(along_strike, TPV102Params::Ls, TPV102Params::ws);
-   real_t B_dip = Boxcar(down_dip, TPV102Params::W, TPV102Params::w);
+   // Dip: centered at hypocenter depth y0=7.5km, half-width W/2=7.5km
+   real_t B_dip = Boxcar(down_dip - TPV102Params::hypo_down_dip,
+                         TPV102Params::W / 2.0, TPV102Params::w);
    real_t B = B_strike * B_dip;
    return TPV102Params::a_vs + (TPV102Params::a_vw - TPV102Params::a_vs) * B;
 }

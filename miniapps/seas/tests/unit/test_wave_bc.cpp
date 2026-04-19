@@ -28,7 +28,7 @@ static int num_tests = 0, num_passed = 0, num_failed = 0;
 } while(0)
 
 /// Helper: RK4 step
-static void RK4Step(const WaveOperator &wave, Vector &Q, real_t dt)
+static void RK4Step(const WaveOperator<> &wave, Vector &Q, real_t dt)
 {
    int size = Q.Size();
    Vector k1(size), k2(size), k3(size), k4(size), Q_tmp(size);
@@ -41,7 +41,7 @@ static void RK4Step(const WaveOperator &wave, Vector &Q, real_t dt)
 }
 
 /// Helper: compute total energy
-static real_t ComputeEnergy(const WaveOperator &wave, const Vector &Q,
+static real_t ComputeEnergy(const WaveOperator<> &wave, const Vector &Q,
                             real_t lambda, real_t mu, real_t rho)
 {
    int ndof_total = wave.GetScalarNDof();

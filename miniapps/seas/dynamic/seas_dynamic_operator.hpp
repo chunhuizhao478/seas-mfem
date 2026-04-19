@@ -25,61 +25,44 @@ class FaultFaceFlux;
 
 /// @brief Coupling operator for dynamic rupture simulations.
 ///
-/// Wraps WaveOperator* + FaultFaceFlux* (analogous to SEASQuasiDynamicOperator
-/// which wraps DomainOperator* + RateStateFault*). Provides the coupled
+/// Wraps WaveOperator<MeshType>* + FaultFaceFlux*. Provides the coupled
 /// Mult() that the time integrator calls.
 ///
-/// Architecture (R-001 fix): Composition, not inheritance. WaveOperator does
-/// not inherit from DomainOperator. SEASDynamicOperator holds non-owning
-/// pointers to both WaveOperator and FaultFaceFlux.
-///
-/// For hybrid QD+dynamic (Phase 5), SEASHybridOperator switches between
-/// SEASQuasiDynamicOperator* and SEASDynamicOperator* — trivial pointer swap.
+/// Templated on MeshType to match WaveOperator<MeshType>.
+template <typename MeshType = Mesh>
 class SEASDynamicOperator : public TimeDependentOperator
 {
 public:
-   /// @brief Construct from a WaveOperator and optional FaultFaceFlux.
-   ///
-   /// @param[in] wave  Non-owning pointer to the wave operator.
-   /// @param[in] fault  Non-owning pointer to the fault flux (nullptr if no fault).
-   SEASDynamicOperator(WaveOperator *wave, FaultFaceFlux *fault = nullptr)
+   SEASDynamicOperator(WaveOperator<MeshType> *wave,
+                       FaultFaceFlux *fault = nullptr)
       : TimeDependentOperator(wave ? wave->Height() : 0),
         wave_(wave), fault_(fault)
    {
       MFEM_VERIFY(wave, "WaveOperator must not be null");
    }
 
-   /// @brief Compute dQ/dt by delegating to the wave operator.
-   ///
-   /// If a FaultFaceFlux is set, the wave operator's face flux loop
-   /// dispatches fault faces to it (Phase 3). For now (Phase 1),
-   /// this simply calls wave_->Mult().
    void Mult(const Vector &Q, Vector &dQdt) const override
    {
       wave_->Mult(Q, dQdt);
    }
 
-   /// Set the time for the operator and its sub-components.
    void SetTime(const real_t t_) override
    {
       TimeDependentOperator::SetTime(t_);
       wave_->SetTime(t_);
    }
 
-   /// Access the wave operator.
-   WaveOperator *GetWaveOperator() { return wave_; }
-   const WaveOperator *GetWaveOperator() const { return wave_; }
+   WaveOperator<MeshType> *GetWaveOperator() { return wave_; }
+   const WaveOperator<MeshType> *GetWaveOperator() const { return wave_; }
 
-   /// Access the fault flux (may be null in Phase 1).
    FaultFaceFlux *GetFaultFlux() { return fault_; }
    const FaultFaceFlux *GetFaultFlux() const { return fault_; }
 
-   /// Set/replace the fault flux (for Phase 3 integration).
    void SetFaultFlux(FaultFaceFlux *fault) { fault_ = fault; }
 
 private:
-   WaveOperator *wave_;       ///< Non-owning
-   FaultFaceFlux *fault_;     ///< Non-owning (null until Phase 3)
+   WaveOperator<MeshType> *wave_;
+   FaultFaceFlux *fault_;
 };
 
 } // namespace seas

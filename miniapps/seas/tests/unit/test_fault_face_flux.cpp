@@ -270,29 +270,54 @@ void TestStateVariableUpdate()
 {
    std::cout << "Test 29: TestStateVariableUpdate\n";
 
+   // Test the θ-space analytic update via ψ→θ→update→ψ.
+   // SCEC Eq. (2): dθ/dt = 1 - Vθ/L, analytic for constant V:
+   //   θ(t+dt) = θ * exp(-V*dt/L) + (L/V) * (1 - exp(-V*dt/L))
+   real_t f0 = 0.6, b = 0.012, V0 = 1e-6;
    real_t psi0 = 0.5, V = 1e-3, Dc = 0.02, dt = 1e-3;
 
-   // Exact: psi(t+dt) = psi0 * exp(-V*dt/Dc) + (Dc/V)(1 - exp(-V*dt/Dc))
-   real_t x = V * dt / Dc;  // = 0.05
-   real_t psi_exact = psi0 * std::exp(-x) + (Dc / V) * (1.0 - std::exp(-x));
-   real_t psi_computed = UpdateStateAnalytic(psi0, V, Dc, dt);
+   // Manually compute: ψ→θ, update θ, θ→ψ
+   real_t theta0 = (Dc / V0) * std::exp((psi0 - f0) / b);
+   real_t x = V * dt / Dc;
+   real_t theta_new = theta0 * std::exp(-x) + (Dc / V) * (1.0 - std::exp(-x));
+   real_t psi_exact = f0 + b * std::log(V0 * theta_new / Dc);
+
+   real_t psi_computed = UpdateStateAnalytic(psi0, V, Dc, dt, f0, b, V0);
 
    TEST_NEAR(psi_computed, psi_exact, 1e-12,
-             "State update matches exact (diff " +
+             "State update matches exact θ-space (diff " +
              std::to_string(std::abs(psi_computed - psi_exact)) + ")");
 
    // Check stability for 1000 steps with constant V
    real_t psi = psi0;
    for (int i = 0; i < 1000; i++)
    {
-      psi = UpdateStateAnalytic(psi, V, Dc, dt);
+      psi = UpdateStateAnalytic(psi, V, Dc, dt, f0, b, V0);
    }
-   // Should converge to steady state: psi_ss = Dc/V * ln(2*V0/V) = Dc/V * ln(2e-3)
-   // For V=1e-3, V0=1e-6: Dc/V = 20, ln(2*V0/V) = ln(2e-3) ≈ -6.21
-   // psi_ss ≈ 20 * (-6.21) = ... Actually psi_ss = ln(V0/V) + ln(2) * ...
-   // Just check it's finite and positive
-   TEST_ASSERT(std::isfinite(psi) && psi > 0,
-               "State variable finite after 1000 steps (psi = " + std::to_string(psi) + ")");
+   // Should converge to steady state: ψ_ss = f0 + b*ln(V0/V)
+   // For V=1e-3: ψ_ss = 0.6 + 0.012 * ln(1e-6/1e-3) = 0.6 + 0.012*(-6.908) = 0.517
+   real_t psi_ss = f0 + b * std::log(V0 / V);
+   // After 1000 steps (1s at V=1e-3), ψ should approach steady state.
+   // θ_ss = Dc/V = 20, but θ_0 ≈ 6.1e-5 for ψ=0.5. The relaxation
+   // time is ~Dc/V = 20s, so after 1s we're ~5% of the way. Check direction.
+   TEST_ASSERT(std::isfinite(psi) && psi > psi0 && psi < psi_ss + 0.1,
+               "State variable evolving toward steady state (psi = " + std::to_string(psi) +
+               ", psi_ss = " + std::to_string(psi_ss) + ")");
+
+
+   // Critical test: locked fault (V ≈ 0) — the catastrophic case.
+   // For V_ini = 1e-12, θ ≈ 1.6e9 s, dt = 1 s:
+   // θ grows by ~1 → negligible change → ψ barely changes.
+   // OLD BUG: ψ grew by dt=1 → ψ=1.736 → friction=1.6 → nucleation impossible.
+   real_t psi_locked = 0.736;  // typical TPV102 initial ψ
+   real_t V_locked = 1e-12;    // V_ini
+   real_t dt_locked = 1.0;     // 1 second
+   real_t psi_after = UpdateStateAnalytic(psi_locked, V_locked, Dc, dt_locked, f0, b, V0);
+   real_t dpsi = std::abs(psi_after - psi_locked);
+   TEST_ASSERT(dpsi < 1e-6,
+               "Locked fault: psi barely changes after 1s (dpsi = " +
+               std::to_string(dpsi) + ", was " + std::to_string(psi_locked) +
+               ", now " + std::to_string(psi_after) + ")");
 }
 
 // ===== Test 30: Energy balance (domain energy + fault work = 0) =====

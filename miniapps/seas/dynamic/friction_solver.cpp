@@ -65,28 +65,13 @@ real_t FrictionSolver::Solve(real_t tau, real_t psi, real_t sigma_n,
 }
 
 // ---------------------------------------------------------------------------
-// Brent's method: robust, guaranteed convergence
-// Bracket: [0, tau/eta]
+// Brent's method: delegates to proven QD solver (log10-V space, Tandem-verified)
 // ---------------------------------------------------------------------------
 real_t FrictionSolver::SolveBrent(real_t tau, real_t psi, real_t sigma_n,
                                   real_t eta, real_t a) const
 {
    if (tau <= 0.0) { return 0.0; }
-   if (eta <= 0.0) { return 0.0; }
-
-   real_t V_lo = 0.0;
-   real_t V_hi = tau / eta;
-
-   // Check degenerate bracket: if g(V_hi) <= 0, the entire traction
-   // is consumed by friction even at maximum slip rate. Return V_hi.
-   real_t g_hi = Residual(V_hi, tau, psi, sigma_n, eta, a);
-   if (g_hi <= 0.0) { return V_hi; }
-
-   auto F = [&](real_t V) -> real_t {
-      return Residual(V, tau, psi, sigma_n, eta, a);
-   };
-
-   return ZeroIn(V_lo, V_hi, F);
+   return qd_friction_.SolveSlipRatePsi(tau, psi, sigma_n, eta, a);
 }
 
 // ---------------------------------------------------------------------------
@@ -142,83 +127,8 @@ real_t FrictionSolver::SolveHybrid(real_t tau, real_t psi, real_t sigma_n,
    return SolveBrent(tau, psi, sigma_n, eta, a);
 }
 
-// ---------------------------------------------------------------------------
-// Brent's method root finder (Forsythe/Malcolm/Moler ZEROIN)
-// ---------------------------------------------------------------------------
-real_t FrictionSolver::ZeroIn(real_t a, real_t b,
-                              const std::function<real_t(real_t)> &F,
-                              real_t tol)
-{
-   real_t fa = F(a);
-   real_t fb = F(b);
-
-   real_t c = a, fc = fa;
-   real_t d = b - a, e = d;
-
-   for (int iter = 0; iter < 100; iter++)
-   {
-      if ((fb > 0.0 && fc > 0.0) || (fb < 0.0 && fc < 0.0))
-      {
-         c = a; fc = fa;
-         d = b - a; e = d;
-      }
-
-      if (std::abs(fc) < std::abs(fb))
-      {
-         a = b; b = c; c = a;
-         fa = fb; fb = fc; fc = fa;
-      }
-
-      real_t tol1 = 2.0 * std::numeric_limits<real_t>::epsilon() * std::abs(b) + 0.5 * tol;
-      real_t m = 0.5 * (c - b);
-
-      if (std::abs(m) <= tol1 || fb == 0.0) { return b; }
-
-      if (std::abs(e) >= tol1 && std::abs(fa) > std::abs(fb))
-      {
-         // Inverse quadratic interpolation or secant
-         real_t s = fb / fa;
-         real_t p, q;
-         if (a == c)
-         {
-            p = 2.0 * m * s;
-            q = 1.0 - s;
-         }
-         else
-         {
-            q = fa / fc;
-            real_t r = fb / fc;
-            p = s * (2.0 * m * q * (q - r) - (b - a) * (r - 1.0));
-            q = (q - 1.0) * (r - 1.0) * (s - 1.0);
-         }
-
-         if (p > 0.0) { q = -q; } else { p = -p; }
-
-         if (2.0 * p < std::min(3.0 * m * q - std::abs(tol1 * q), std::abs(e * q)))
-         {
-            e = d;
-            d = p / q;
-         }
-         else
-         {
-            d = m; e = m;
-         }
-      }
-      else
-      {
-         d = m; e = m;
-      }
-
-      a = b; fa = fb;
-
-      if (std::abs(d) > tol1) { b += d; }
-      else { b += (m > 0 ? tol1 : -tol1); }
-
-      fb = F(b);
-   }
-
-   return b;
-}
+// ZeroIn removed — Brent now delegates to DieterichRuinaFriction::SolveSlipRatePsi
+// which uses the proven QD log10-V Brent solver (Tandem-verified).
 
 } // namespace seas
 } // namespace mfem

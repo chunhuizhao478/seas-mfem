@@ -16,11 +16,15 @@
 #include "wave_state.hpp"
 #include "godunov_flux.hpp"
 #include "pml_layer.hpp"
+#include "fault_face_flux.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../fault/fault_basis.hpp"
+#include "../common/seas_types.hpp"
 
 #include <memory>
 #include <vector>
+#include <map>
+#include <set>
 
 namespace mfem
 {
@@ -33,37 +37,28 @@ namespace seas
 /// Godunov upwind flux. Inherits only TimeDependentOperator (R-001 fix),
 /// NOT DomainOperator.
 ///
-/// Owns its own mesh, L2 FE space, per-element inverse mass matrix,
-/// and Godunov flux. Shared fault-coupling code (FaultBasis) is accessed
-/// via composition.
+/// Templated on MeshType (Mesh or ParMesh) for serial/parallel support.
+/// Uses FESpaceForMesh trait for automatic FE space type resolution.
 ///
 /// The state vector Q has 9 components per DOF:
 ///   [sigma_xx, sigma_yy, sigma_zz, sigma_xy, sigma_yz, sigma_xz, v_x, v_y, v_z]
 /// stored as Q[c * ndof_total + local_dof] (component-major).
 ///
 /// Reference: Dumbser & Kaser (2006), de la Puente et al. (2009).
+template <typename MeshType = Mesh>
 class WaveOperator : public TimeDependentOperator
 {
+   using FESpaceType = FESpaceForMesh<MeshType>;
+
 public:
    /// @brief Construct a WaveOperator on the given mesh.
-   ///
-   /// @param[in] mesh  Mesh (serial or parallel). WaveOperator does NOT own this.
-   /// @param[in] order  Polynomial order for L2 DG space.
-   /// @param[in] lambda  First Lame parameter [Pa].
-   /// @param[in] mu  Shear modulus [Pa].
-   /// @param[in] rho  Density [kg/m^3].
-   /// @param[in] bc  Boundary configuration (which attrs are absorbing/free/etc).
-   WaveOperator(Mesh &mesh, int order,
+   WaveOperator(MeshType &mesh, int order,
                 real_t lambda, real_t mu, real_t rho,
                 const BoundaryConfig &bc);
 
-   /// Destructor.
    ~WaveOperator() override;
 
    /// @brief Compute dQ/dt = (M^{-1}) * (-Face + Vol).
-   ///
-   /// Implements Eq. (3) from the plan: the full semi-discrete ODE RHS.
-   /// This is the main entry point called by the time integrator.
    void Mult(const Vector &Q, Vector &dQdt) const override;
 
    /// @name Accessors
@@ -73,85 +68,145 @@ public:
    int NumElements() const { return ne_; }
 
    const GodunovFlux &GetFlux() const { return flux_; }
-   const FiniteElementSpace &GetFESpace() const { return *fes_; }
+   const FESpaceType &GetFESpace() const { return *fes_; }
 
-   /// Number of DOFs per scalar component (total across all elements).
    int GetScalarNDof() const { return ndof_total_; }
-
-   /// Compute CFL-limited time step: dt = cfl * h_min / c_p.
    real_t ComputeMaxDt(real_t cfl) const;
 
-   /// Get the FaultBasis (may be null if no fault faces found).
    const FaultBasis *GetFaultBasis() const { return fault_basis_.get(); }
-
-   /// Get number of fault DOFs per component.
    int GetNumFaultDOFs() const { return num_fault_dofs_; }
 
-   /// Get per-element inverse mass matrix (for testing).
    const DenseMatrix &GetElementMassInverse(int e) const { return elem_mass_inv_[e]; }
 
-   /// Set PML layer (non-owning). Pass nullptr to disable.
    void SetPML(PMLLayer *pml) { pml_layer_ = pml; }
    const PMLLayer *GetPML() const { return pml_layer_; }
+
+   /// Set/get FaultFaceFlux for fault face dispatch (R-002 fix).
+   void SetFaultFlux(FaultFaceFlux *ff) { fault_flux_ = ff; }
+   FaultFaceFlux *GetFaultFlux() { return fault_flux_; }
+
+   /// Get shared face boundary attributes (for driver's shared fault DOFData collection).
+   const std::vector<int> &GetSharedFaceBdrAttr() const { return shared_face_bdr_attr_; }
+
+   /// @name Fault-face geometry (single source of truth, matches BP5 pattern)
+   ///
+   /// The wave operator owns the canonical list of fault faces.  Both the
+   /// physics (flux dispatch, state evolution) and downstream consumers
+   /// (driver-level fault_coords / DOFData initialization, ParaView output)
+   /// read these getters.  Building the list twice with different filters
+   /// is what produced the v1 visualization/coord-mismatch bug — do not
+   /// reconstruct in callers.
+   ///
+   /// Layout: local fault DOFs occupy indices [0, nbf_per_face_ *
+   /// fault_interior_faces_.Size()) followed by shared-fault DOFs in
+   /// [nbf_per_face_ * fault_interior_faces_.Size(), ...).
+   ///@{
+   const Array<int> &GetFaultInteriorFaces() const { return fault_interior_faces_; }
+   const Array<int> &GetFaultSharedFaces() const { return fault_shared_faces_; }
+   int GetNbfPerFace() const { return nbf_per_face_; }
+   int GetNumLocalFaultQPs() const
+   { return fault_interior_faces_.Size() * nbf_per_face_; }
+   int GetNumSharedFaultQPs() const
+   { return fault_shared_faces_.Size() * nbf_per_face_; }
+   int GetNumTotalFaultQPs() const
+   { return GetNumLocalFaultQPs() + GetNumSharedFaultQPs(); }
+   ///@}
+
+   /// Set fault DOF data and build face→DOFData index mapping.
+   ///
+   /// Uses the wave operator's owned fault-face lists.  The data array's
+   /// layout must match: local-interior QPs first (in fault_interior_faces_
+   /// order), then shared-fault QPs (in fault_shared_faces_ order).
+   ///
+   /// @param[in] data           Pointer to DOFData array sized to
+   ///                           GetNumTotalFaultQPs().
+   /// @param[in] nqp_per_face   Number of QPs per fault face.
+   void SetFaultDOFData(std::vector<DOFData> *data, int nqp_per_face = 0)
+   {
+      fault_dof_data_ = data;
+      fault_face_dof_offset_.clear();
+      shared_fault_dof_offset_.clear();
+      if (!data || nqp_per_face <= 0) { return; }
+
+      MFEM_VERIFY(nqp_per_face == nbf_per_face_ || nbf_per_face_ == 0,
+                  "nqp_per_face inconsistent with fault-face list setup");
+      nbf_per_face_ = nqp_per_face;
+
+      // Local interior fault faces: index i → offset i*nqp_per_face
+      for (int i = 0; i < fault_interior_faces_.Size(); i++)
+      {
+         fault_face_dof_offset_[fault_interior_faces_[i]] = i * nqp_per_face;
+      }
+
+      // Shared fault faces: placed after all local-interior QPs
+      const int shared_base = fault_interior_faces_.Size() * nqp_per_face;
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         shared_fault_dof_offset_[fault_shared_faces_[i]] =
+            shared_base + i * nqp_per_face;
+      }
+   }
+
+   MeshType &GetMesh() { return mesh_; }
+   const MeshType &GetMesh() const { return mesh_; }
    ///@}
 
 private:
-   Mesh &mesh_;
+   MeshType &mesh_;
    int order_;
-   int ndof_per_el_;  ///< DOFs per element per component
-   int ne_;           ///< Number of elements
-   int ndof_total_;   ///< Total DOFs per component = ne_ * ndof_per_el_
+   int ndof_per_el_;
+   int ne_;
+   int ndof_total_;
 
    std::unique_ptr<L2_FECollection> fec_;
-   std::unique_ptr<FiniteElementSpace> fes_;
+   std::unique_ptr<FESpaceType> fes_;
 
    GodunovFlux flux_;
    BoundaryConfig bc_;
 
-   /// Precomputed Jacobian matrices for x, y, z directions (constant for homogeneous).
    DenseMatrix Ax_, Ay_, Az_;
-
-   /// Per-element inverse mass matrix (dense ndof x ndof).
    std::vector<DenseMatrix> elem_mass_inv_;
 
-   /// Fault basis (constructed if mesh has fault faces).
    std::unique_ptr<FaultBasis> fault_basis_;
    int num_fault_dofs_ = 0;
 
-   /// Minimum inscribed element diameter (for CFL).
    real_t h_min_;
-
-   /// Per-face boundary attribute (0 = interior/shared face).
    std::vector<int> face_bdr_attr_;
 
-   /// Optional PML layer (non-owning, nullptr if disabled).
    PMLLayer *pml_layer_ = nullptr;
+   FaultFaceFlux *fault_flux_ = nullptr;
+   std::vector<DOFData> *fault_dof_data_ = nullptr;
+   std::map<int, int> fault_face_dof_offset_;  ///< face_index → DOFData start index
+   std::map<int, int> shared_fault_dof_offset_;  ///< shared_face_index → DOFData start index
+   std::vector<int> shared_face_bdr_attr_;  ///< shared face boundary attr (0 = regular interior)
+   std::set<int> shared_mesh_face_set_;  ///< mesh face indices that are shared (ParMesh only)
 
-   /// @brief Compute volume integral contribution to RHS.
-   /// Implements Eq. (2c): for each element, accumulate
-   ///   rhs[c*ndof+i] += w * dshape(i,j) * F[j][c]
+   // Canonical fault-face geometry lists (built in constructor).
+   // See GetFaultInteriorFaces / GetFaultSharedFaces for layout contract.
+   Array<int> fault_interior_faces_;     ///< mesh face indices, 2-sided & non-shared
+   Array<int> fault_shared_faces_;       ///< shared-face indices (sf), ParMesh only
+   int nbf_per_face_ = 0;                ///< QPs per fault face (set by SetFaultDOFData)
+
+   /// Persistent ghost exchange state (R-001/R-003 fix).
+   bool ghost_initialized_ = false;
+#ifdef MFEM_USE_MPI
+   /// Reusable ParGridFunction for ghost exchange (mutable: used in const Mult).
+   mutable std::unique_ptr<ParGridFunction> ghost_gf_;
+#endif
+
    void ComputeVolumeRHS(const Vector &Q, Vector &rhs) const;
-
-   /// @brief Compute face flux contribution to RHS.
-   /// Implements Eq. (2d): for each face, compute Godunov flux and
-   /// subtract from both elements' RHS.
    void ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) const;
-
-   /// @brief Apply per-element inverse mass matrix to the RHS.
-   /// dQdt[c*ndof+i] = sum_j M_inv[i][j] * rhs[c*ndof+j], per element.
+   void ComputeSharedFaceFluxRHS(const Vector &Q, Vector &rhs) const;
    void ApplyMassInverse(Vector &dQdt) const;
-
-   /// @brief Assemble and store per-element inverse mass matrices.
    void AssembleElementMassInverse();
-
-   /// @brief Apply PML damping: rhs -= d(x) * D * Q (Eq. 16).
-   /// Per-component damping with directional splitting (R-004 fix).
    void ApplyPMLDamping(const Vector &Q, Vector &rhs) const;
 
-   /// Classify a boundary face: returns "absorbing", "free", or "interior".
    enum class FaceBC { Interior, Absorbing, FreeSurface, Fault };
    FaceBC ClassifyBoundaryFace(int bdr_attr) const;
 };
+
+// Implementation in wave_operator.inl
+#include "wave_operator.inl"
 
 } // namespace seas
 } // namespace mfem

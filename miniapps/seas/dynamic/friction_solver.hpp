@@ -13,6 +13,8 @@
 #define MFEM_SEAS_FRICTION_SOLVER_HPP
 
 #include "mfem.hpp"
+#include "../friction/dieterich_ruina.hpp"
+#include "../friction/state_evolution.hpp"
 #include <cmath>
 #include <functional>
 
@@ -27,6 +29,10 @@ namespace seas
 ///   Θ = |σ_n| * f(V̂, ψ) + η_s * V̂
 /// where f(V, ψ) = a * asinh[(V / 2V₀) * exp(ψ/a)] is the regularized
 /// rate-and-state friction coefficient.
+///
+/// Brent solve delegates to the proven QD DieterichRuinaFriction solver
+/// (log10-V space, verified against Tandem across 62 debug iterations).
+/// NR and Hybrid solvers are new (for GPU performance).
 ///
 /// Reference: Uphoff (2020) Eq. 4.57, SeisSol SlowVelocityWeakeningLaw.h.
 class FrictionSolver
@@ -74,33 +80,15 @@ public:
                                     real_t sigma_n, real_t eta, real_t a);
 
 private:
-   /// Brent's method root finder. Finds root of F in [a, b].
-   /// Requires F(a) * F(b) < 0. Returns root.
-   static real_t ZeroIn(real_t a, real_t b,
-                        const std::function<real_t(real_t)> &F,
-                        real_t tol = 0.0);
+   /// QD friction solver (Tandem-verified log10-V Brent).
+   /// Only V0 is used by SolveSlipRatePsi (a is passed as argument).
+   /// Other constants (f0, b, Dc) are unused by the Brent solve.
+   DieterichRuinaFriction qd_friction_{
+      DieterichRuinaFriction::Constants{V0, 0.6, 0.012, 0.02}};
 };
 
-/// Aging law state variable update (plan Eq. 13).
-/// Uses expm1() for numerical stability when V*dt/L is small.
-///
-/// ψ(t+Δt) = ψ(t) * exp(-V*Δt/L) + (L/V) * (1 - exp(-V*Δt/L))
-///
-/// @param[in] psi_old  Current state variable.
-/// @param[in] V  Slip rate [m/s].
-/// @param[in] Dc  Critical slip distance [m].
-/// @param[in] dt  Time step [s].
-/// @return Updated state variable.
-inline real_t UpdateStateAnalytic(real_t psi_old, real_t V, real_t Dc, real_t dt)
-{
-   // For V→0: aging law dψ/dt = 1 - Vψ/L → dψ/dt ≈ 1, so ψ(t+dt) = ψ + dt.
-   real_t x = V * dt / Dc;
-   if (x < 1e-15) { return psi_old + dt; }
-   real_t exp_neg_x = std::exp(-x);
-   // Use expm1 for stability: 1 - exp(-x) = -expm1(-x)
-   real_t one_minus_exp = -std::expm1(-x);
-   return psi_old * exp_neg_x + (Dc / V) * one_minus_exp;
-}
+// UpdateStateAnalytic now lives in friction/state_evolution.hpp (R-005 fix).
+// It's available here via the #include "../friction/state_evolution.hpp" above.
 
 } // namespace seas
 } // namespace mfem

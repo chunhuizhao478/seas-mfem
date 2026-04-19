@@ -132,7 +132,11 @@ public:
       fault_state_           = make_gf();
       fault_normal_stress_   = make_gf();
 
-      // Build fault face → (elem1, elem2) mapping for interior faces
+      // Build fault face → (elem1, elem2) mapping for interior faces.
+      // The driver list may include orphan / shared-as-bdr faces (kept to
+      // preserve fi*nbf index alignment with fault_coords); for those the
+      // interior-transformation lookup returns nullptr and we record -1 so
+      // Set/UpdateFaultFieldsBP5 can skip the L2-p0 scatter.
       int n_int = fault_interior_faces.Size();
       fault_face_elem1_.resize(n_int);
       fault_face_elem2_.resize(n_int);
@@ -141,8 +145,16 @@ public:
          int face = fault_interior_faces[i];
          FaceElementTransformations *FTr =
             mesh_.GetInteriorFaceTransformations(face);
-         fault_face_elem1_[i] = FTr->Elem1No;
-         fault_face_elem2_[i] = FTr->Elem2No;
+         if (FTr)
+         {
+            fault_face_elem1_[i] = FTr->Elem1No;
+            fault_face_elem2_[i] = FTr->Elem2No;
+         }
+         else
+         {
+            fault_face_elem1_[i] = -1;
+            fault_face_elem2_[i] = -1;
+         }
       }
       n_interior_fault_faces_ = n_int;
 
@@ -225,10 +237,19 @@ public:
 
          int e1 = fault_face_elem1_[fi];
          int e2 = fault_face_elem2_[fi];
-         (*fault_param_a_)(e1)  = avg_a;  (*fault_param_a_)(e2)  = avg_a;
-         (*fault_param_Dc_)(e1) = avg_Dc; (*fault_param_Dc_)(e2) = avg_Dc;
-         (*fault_coord_x2_)(e1) = avg_x2; (*fault_coord_x2_)(e2) = avg_x2;
-         (*fault_coord_x3_)(e1) = avg_x3; (*fault_coord_x3_)(e2) = avg_x3;
+         // Skip orphan / shared-as-bdr entries kept only for index alignment.
+         if (e1 < 0) { continue; }
+         (*fault_param_a_)(e1)  = avg_a;
+         (*fault_param_Dc_)(e1) = avg_Dc;
+         (*fault_coord_x2_)(e1) = avg_x2;
+         (*fault_coord_x3_)(e1) = avg_x3;
+         if (e2 >= 0)
+         {
+            (*fault_param_a_)(e2)  = avg_a;
+            (*fault_param_Dc_)(e2) = avg_Dc;
+            (*fault_coord_x2_)(e2) = avg_x2;
+            (*fault_coord_x3_)(e2) = avg_x3;
+         }
       }
 
       for (int si = 0; si < n_shared_fault_faces_; si++)
@@ -311,24 +332,26 @@ public:
 
          int e1 = fault_face_elem1_[fi];
          int e2 = fault_face_elem2_[fi];
+         // Skip orphan / shared-as-bdr entries kept only for index alignment.
+         if (e1 < 0) { continue; }
          (*fault_slip_dip_)(e1)         = s_d;
-         (*fault_slip_dip_)(e2)         = s_d;
          (*fault_slip_strike_)(e1)      = s_s;
-         (*fault_slip_strike_)(e2)      = s_s;
          (*fault_slip_rate_dip_)(e1)    = sr_d;
-         (*fault_slip_rate_dip_)(e2)    = sr_d;
          (*fault_slip_rate_strike_)(e1) = sr_s;
-         (*fault_slip_rate_strike_)(e2) = sr_s;
          (*fault_trac_dip_)(e1)         = tr_d;
-         (*fault_trac_dip_)(e2)         = tr_d;
          (*fault_trac_strike_)(e1)      = tr_s;
-         (*fault_trac_strike_)(e2)      = tr_s;
          (*fault_state_)(e1)            = psi;
-         (*fault_state_)(e2)            = psi;
-         if (has_normal)
+         if (has_normal) { (*fault_normal_stress_)(e1) = sn; }
+         if (e2 >= 0)
          {
-            (*fault_normal_stress_)(e1) = sn;
-            (*fault_normal_stress_)(e2) = sn;
+            (*fault_slip_dip_)(e2)         = s_d;
+            (*fault_slip_strike_)(e2)      = s_s;
+            (*fault_slip_rate_dip_)(e2)    = sr_d;
+            (*fault_slip_rate_strike_)(e2) = sr_s;
+            (*fault_trac_dip_)(e2)         = tr_d;
+            (*fault_trac_strike_)(e2)      = tr_s;
+            (*fault_state_)(e2)            = psi;
+            if (has_normal) { (*fault_normal_stress_)(e2) = sn; }
          }
       }
 
@@ -623,6 +646,31 @@ public:
       return ForceSaveImpl(cycle, time);
    }
 
+   /// Schedule check without writing the volume PVD.  Returns true on the
+   /// cycles/times when Save() would write, and advances last_write_time_
+   /// so subsequent scheduling stays consistent.  Use this when only the
+   /// fault-surface VTU is wanted and the volume mesh+fields are suppressed
+   /// to save disk space.
+   bool ShouldWrite(int cycle, real_t time, real_t V_max)
+   {
+      if (output_every_n_steps > 0)
+      {
+         if (cycle % output_every_n_steps == 0)
+         {
+            last_write_time_ = time;
+            return true;
+         }
+         return false;
+      }
+      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
+      if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
+      {
+         return false;
+      }
+      last_write_time_ = time;
+      return true;
+   }
+
    /// Force a save at the current state.
    void ForceSave(int cycle, real_t time)
    {
@@ -648,6 +696,7 @@ public:
 
    void SetDataFormat(VTKFormat fmt) { pv_.SetDataFormat(fmt); }
    void SetHighOrderOutput(bool enable) { pv_.SetHighOrderOutput(enable); }
+   void SetLevelsOfDetail(int lod) { pv_.SetLevelsOfDetail(lod); }
    bool HasFaultOutput() const { return has_fault_output_; }
 
 private:

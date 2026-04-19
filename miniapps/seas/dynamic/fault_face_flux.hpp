@@ -33,7 +33,12 @@ struct DOFData
    real_t Dc = 0.14;                      ///< Critical slip distance [m]
    real_t psi = 0;                        ///< State variable (logarithmic)
    real_t slip_rate = 0;                  ///< Current slip rate |V| [m/s]
+   real_t V1 = 0, V2 = 0;               ///< Slip rate components [m/s] (from Eq. 9)
    real_t slip1 = 0, slip2 = 0;          ///< Accumulated slip components
+
+   // Corrected traction from Riemann solver (populated by FaultFaceFlux::Evaluate)
+   real_t tau1_corr = 0, tau2_corr = 0;  ///< Corrected tangential traction [Pa]
+   real_t sigma_n_corr = 0;              ///< Corrected normal traction [Pa]
 };
 
 /// @brief Fault-face Riemann solver for dynamic rupture.

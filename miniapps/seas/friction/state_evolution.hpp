@@ -273,6 +273,56 @@ private:
    real_t f0_;
 };
 
+/// Analytic one-step update for aging law (exact for constant V during dt).
+/// Used by explicit time steppers (RK4) in dynamic rupture.
+///
+/// SCEC Eq. (2): dθ/dt = 1 − Vθ/L, where θ is the state variable in seconds.
+/// Analytic solution for constant V:
+///   θ(t+Δt) = θ(t) · exp(−VΔt/L) + (L/V) · (1 − exp(−VΔt/L))
+///
+/// The update is applied in θ-space (where the ODE is linear), then converted
+/// back to ψ-space: ψ = f₀ + b·ln(V₀θ/Dc).
+///
+/// The ψ-space ODE dψ/dt = (bV₀/Dc)[exp((f₀−ψ)/b) − V/V₀] is NONLINEAR
+/// and does NOT have the form dψ/dt = 1 − Vψ/L. Applying the linear θ formula
+/// to ψ directly is wrong (catastrophic for locked faults where V ≈ 0).
+///
+/// @param[in] psi_old  Current ψ = f₀ + b·ln(V₀θ/Dc).
+/// @param[in] V  Slip rate [m/s].
+/// @param[in] Dc  Critical slip distance [m] (= L in SCEC spec).
+/// @param[in] dt  Time step [s].
+/// @param[in] f0  Reference friction coefficient.
+/// @param[in] b  State evolution parameter.
+/// @param[in] V0  Reference slip rate [m/s].
+/// @return Updated ψ.
+inline real_t UpdateStateAnalytic(real_t psi_old, real_t V, real_t Dc, real_t dt,
+                                  real_t f0 = 0.6, real_t b = 0.012,
+                                  real_t V0 = 1e-6)
+{
+   // Convert ψ → θ: θ = (Dc/V0) * exp((ψ - f0) / b)
+   real_t theta = (Dc / V0) * std::exp((psi_old - f0) / b);
+
+   // Apply SCEC Eq. (2) analytic solution in θ-space
+   real_t x = V * dt / Dc;
+   real_t theta_new;
+   if (x < 1e-15)
+   {
+      // V→0: dθ/dt ≈ 1, so θ_new = θ + dt
+      theta_new = theta + dt;
+   }
+   else
+   {
+      real_t exp_neg_x = std::exp(-x);
+      real_t one_minus_exp = -std::expm1(-x);
+      theta_new = theta * exp_neg_x + (Dc / V) * one_minus_exp;
+   }
+
+   // Convert θ → ψ: ψ = f0 + b * ln(V0 * θ / Dc)
+   // Guard: θ must be positive
+   if (theta_new <= 0.0) { theta_new = 1e-300; }
+   return f0 + b * std::log(V0 * theta_new / Dc);
+}
+
 } // namespace seas
 } // namespace mfem
 

@@ -102,6 +102,8 @@ TEST_PML_SRC = tests/unit/test_pml.cpp
 TEST_FAULT_FACE_FLUX_SRC = tests/unit/test_fault_face_flux.cpp
 TEST_FRICTION_SOLVER_SRC = tests/unit/test_friction_solver.cpp
 TEST_TPV102_SETUP_SRC = tests/unit/test_tpv102_setup.cpp
+TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
+TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -145,6 +147,8 @@ TEST_PML_OBJ = $(TEST_PML_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_OBJ = $(TEST_FAULT_FACE_FLUX_SRC:.cpp=.o)
 TEST_FRICTION_SOLVER_OBJ = $(TEST_FRICTION_SOLVER_SRC:.cpp=.o)
 TEST_TPV102_SETUP_OBJ = $(TEST_TPV102_SETUP_SRC:.cpp=.o)
+TPV102_DRIVER_OBJ = $(TPV102_DRIVER_SRC:.cpp=.o)
+TEST_TPV102_LOCAL_OBJ = $(TEST_TPV102_LOCAL_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -207,10 +211,12 @@ CHECKPOINT_HEADERS = io/checkpoint.hpp
 DYNAMIC_HEADERS = dynamic/wave_state.hpp \
                   dynamic/godunov_flux.hpp \
                   dynamic/wave_operator.hpp \
+                  dynamic/wave_operator.inl \
                   dynamic/pml_layer.hpp \
                   dynamic/friction_solver.hpp \
                   dynamic/fault_face_flux.hpp \
-                  dynamic/seas_dynamic_operator.hpp
+                  dynamic/seas_dynamic_operator.hpp \
+                  dynamic/tpv102_setup.hpp
 
 # All headers
 SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS)
@@ -245,7 +251,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_pml \
                seas_test_fault_face_flux \
                seas_test_friction_solver \
-               seas_test_tpv102_setup
+               seas_test_tpv102_setup \
+               seas_test_tpv102_local
 # Long-running simulations and tools (built by `make all`, not run by `make test`)
 SEQ_LONG = seas_bp2_serial_smoke seas_generate_mesh
 # Phase 6: Parallel test sources
@@ -298,6 +305,10 @@ TEST_BR2_CONSISTENCY_OBJ = $(TEST_BR2_CONSISTENCY_SRC:.cpp=.o)
 TEST_PARALLEL_ELAST_SRC = tests/parallel/test_parallel_elasticity.cpp
 TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 
+# Parallel wave operator tests (dynamic rupture)
+TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
+TEST_PARALLEL_WAVE_OBJ = $(TEST_PARALLEL_WAVE_SRC:.cpp=.o)
+
 # BP5 parallel smoke test
 TEST_BP5_SMOKE_SRC = tests/parallel/test_bp5_parallel_smoke.cpp
 TEST_BP5_SMOKE_OBJ = $(TEST_BP5_SMOKE_SRC:.cpp=.o)
@@ -331,7 +342,8 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_scaling \
                seas_test_br2_consistency \
                seas_test_parallel_elasticity \
-               seas_test_bp5_parallel_smoke
+               seas_test_bp5_parallel_smoke \
+               seas_test_parallel_wave_operator
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
 PAR_LONG = seas_pseas \
            seas_bp2_benchmark_parallel \
@@ -369,6 +381,8 @@ MFEM_TESTS = MINIAPPS
         test-boundary-config test-boundary-config-operator test-logging \
         test-config-bridge \
         test-config-parser \
+        test-tpv102-setup test-tpv102-local \
+        test-parallel-wave-operator \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -484,16 +498,16 @@ seas_test_godunov_flux: $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 1: Wave operator tests
-seas_test_wave_operator: $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
+seas_test_wave_operator: $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OPERATOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 2a: BC tests
-seas_test_wave_bc: $(TEST_WAVE_BC_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_BC_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
+seas_test_wave_bc: $(TEST_WAVE_BC_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_BC_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 2b: PML tests
-seas_test_pml: $(TEST_PML_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
+seas_test_pml: $(TEST_PML_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PML_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 3: Fault face flux tests
 seas_test_fault_face_flux: $(TEST_FAULT_FACE_FLUX_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
@@ -506,6 +520,14 @@ seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
 # Phase 4a: TPV102 setup tests
 seas_test_tpv102_setup: $(TEST_TPV102_SETUP_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_SETUP_OBJ) $(MFEM_LIBS)
+
+# Phase 4a: TPV102 driver
+seas_tpv102_driver: $(TPV102_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TPV102_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Phase 4a: TPV102 local integration tests
+seas_test_tpv102_local: $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Mesh generation tool (serial)
 seas_generate_mesh: $(GENERATE_MESH_OBJ)
@@ -660,6 +682,14 @@ $(TEST_TPV102_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TPV102_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_TPV102_LOCAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(GENERATE_MESH_OBJ): %.o: $(SRC)%.cpp $(DOMAIN_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -682,7 +712,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-godunov-flux test-wave-operator \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
-      test-tpv102-setup
+      test-tpv102-setup test-tpv102-local
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -866,6 +896,9 @@ test-friction-solver: seas_test_friction_solver
 test-tpv102-setup: seas_test_tpv102_setup
 	./seas_test_tpv102_setup
 
+test-tpv102-local: seas_test_tpv102_local
+	./seas_test_tpv102_local
+
 seas_driver: $(SEAS_DRIVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(SEAS_DRIVER_OBJ) $(MFEM_LIBS)
 
@@ -1006,6 +1039,17 @@ $(TEST_PARALLEL_ELAST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 test-parallel-elasticity: seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
+
+# Parallel wave operator tests (dynamic rupture)
+seas_test_parallel_wave_operator: $(TEST_PARALLEL_WAVE_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_WAVE_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+$(TEST_PARALLEL_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-parallel-wave-operator: seas_test_parallel_wave_operator
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_wave_operator
 
 # BP5 parallel smoke test
 seas_test_bp5_parallel_smoke: $(TEST_BP5_SMOKE_OBJ)
