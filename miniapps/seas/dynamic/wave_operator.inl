@@ -1,8 +1,13 @@
 // Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC.
 // WaveOperator template implementation (included from wave_operator.hpp).
 
+#include <algorithm>
 #include <cmath>
+#include <cstring>
+#include <iostream>
 #include <limits>
+#include <numeric>
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Construction
@@ -95,7 +100,8 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
    {
 #ifdef MFEM_USE_MPI
       real_t global_h_min;
-      MPI_Allreduce(&h_min_, &global_h_min, 1, MPI_DOUBLE, MPI_MIN,
+      MPI_Allreduce(&h_min_, &global_h_min, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MIN,
                     mesh_.GetComm());
       h_min_ = global_h_min;
 #endif
@@ -124,6 +130,9 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
          pfes->ExchangeFaceNbrData();
          ghost_gf_ = std::make_unique<ParGridFunction>(pfes);
          ghost_initialized_ = true;
+         // R-109 fix: cache MPI rank once here so
+         // ComputeSharedFaceFluxRHS doesn't re-query it on every RK4 stage.
+         my_rank_ = pmesh.GetMyRank();
 
          // R-001 fix: Identify shared faces that are fault faces.
          // A shared face is a fault face if it corresponds to a boundary
@@ -132,26 +141,77 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
          int n_shared = pmesh.GetNSharedFaces();
          shared_face_bdr_attr_.assign(n_shared, 0);
 
-         // Build a set of local fault face vertex keys
-         std::set<std::array<int, 4>> local_fault_keys;
+         // Global vertex IDs are the only stable key across ranks: local
+         // vertex numbering is rank-private, so a shared face's local
+         // verts on rank 0 and rank 1 are different integers.  MFEM's
+         // GetGlobalVertexIndices assigns a consistent global ID per vertex.
+         Array<HYPRE_BigInt> gvi;
+         pmesh.GetGlobalVertexIndices(gvi);
+
+         auto make_global_key = [&](const Array<int> &verts)
+         {
+            std::array<HYPRE_BigInt, 4> key = {0, 0, 0, 0};
+            for (int v = 0; v < std::min(verts.Size(), 4); v++)
+            {
+               key[v] = gvi[verts[v]];
+            }
+            std::sort(key.begin(), key.begin() + verts.Size());
+            return key;
+         };
+
+         // Build a set of local fault face *global* vertex keys.  When
+         // the serial mesh tagged an interior face as a fault boundary
+         // element (the TPV102 pattern via BooleanFragments, or the 2-tet
+         // inline test), ParMesh partitioning keeps that BE on only ONE
+         // of the two ranks that share the face.  So the key set must be
+         // merged across ranks, otherwise the non-BE-owner rank would
+         // silently misclassify its shared fault face as non-fault and
+         // VerifySharedFaultDOFDataConsistency would see an unpaired
+         // DOFData record (the R-305 abort condition).
+         std::set<std::array<HYPRE_BigInt, 4>> global_fault_keys;
          for (int b = 0; b < mesh_.GetNBE(); b++)
          {
             if (mesh_.GetBdrAttribute(b) != bc_.fault_attr) { continue; }
             Array<int> verts;
             mesh_.GetBdrElementVertices(b, verts);
-            std::array<int, 4> key = {0, 0, 0, 0};
-            for (int v = 0; v < std::min(verts.Size(), 4); v++)
-            {
-               key[v] = verts[v];
-            }
-            std::sort(key.begin(), key.begin() + verts.Size());
-            local_fault_keys.insert(key);
+            global_fault_keys.insert(make_global_key(verts));
          }
 
-         // R-002 fix: Detect shared fault faces using LOCAL vertex-key
-         // matching only (no MPI_Allreduce — n_shared differs per rank).
-         // Both ranks sharing a fault face independently detect it via
-         // their respective boundary elements.
+         // MPI Allgatherv of local fault keys so every rank sees the
+         // union — cheap (O(N_fault) per rank, no per-RK4-stage cost).
+         {
+            std::vector<HYPRE_BigInt> local_flat;
+            local_flat.reserve(global_fault_keys.size() * 4);
+            for (const auto &k : global_fault_keys)
+            {
+               for (int i = 0; i < 4; i++) { local_flat.push_back(k[i]); }
+            }
+            const int my_size = static_cast<int>(local_flat.size());
+            int nprocs_ctor = 0;
+            MPI_Comm_size(pmesh.GetComm(), &nprocs_ctor);
+            std::vector<int> sizes(nprocs_ctor), displs(nprocs_ctor);
+            MPI_Allgather(&my_size, 1, MPI_INT, sizes.data(), 1, MPI_INT,
+                          pmesh.GetComm());
+            int total = 0;
+            for (int r = 0; r < nprocs_ctor; r++)
+            { displs[r] = total; total += sizes[r]; }
+            std::vector<HYPRE_BigInt> all_flat(total);
+            MPI_Allgatherv(local_flat.data(), my_size,
+                           MPITypeMap<HYPRE_BigInt>::mpi_type,
+                           all_flat.data(), sizes.data(), displs.data(),
+                           MPITypeMap<HYPRE_BigInt>::mpi_type,
+                           pmesh.GetComm());
+            for (int i = 0; i < total; i += 4)
+            {
+               std::array<HYPRE_BigInt, 4> key = {
+                  all_flat[i], all_flat[i+1], all_flat[i+2], all_flat[i+3]
+               };
+               global_fault_keys.insert(key);
+            }
+         }
+
+         // R-002 fix: Detect shared fault faces by matching each shared
+         // face's global vertex key against the MPI-merged fault key set.
          //
          // We also record every shared face's mesh-face index in
          // shared_mesh_face_set_ so ComputeFaceFluxRHS can tell a real
@@ -160,6 +220,13 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
          // latter are handled by ComputeSharedFaceFluxRHS and must
          // NOT be dispatched by the local-face loop.
          shared_mesh_face_set_.clear();
+         // R-001 fix: resolve peer rank per shared face via face_nbr_elements_offset.
+         // R-107 fix: resolved/peer_rank fields are independent (a false
+         // `resolved` means "ctor couldn't resolve this face", distinct from
+         // "peer rank happens to be 0").
+         shared_face_peer_.assign(n_shared, SharedFacePeer{});
+         const Array<int> &fn_offs = pmesh.face_nbr_elements_offset;
+         const int num_fn = pmesh.GetNFaceNeighbors();
          for (int sf = 0; sf < n_shared; sf++)
          {
             FaceElementTransformations *ftr =
@@ -169,14 +236,20 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
             shared_mesh_face_set_.insert(face_idx);
             Array<int> verts;
             mesh_.GetFaceVertices(face_idx, verts);
-            std::array<int, 4> key = {0, 0, 0, 0};
-            for (int v = 0; v < std::min(verts.Size(), 4); v++)
-            {
-               key[v] = verts[v];
-            }
-            std::sort(key.begin(), key.begin() + verts.Size());
-            shared_face_bdr_attr_[sf] = local_fault_keys.count(key)
+            std::array<HYPRE_BigInt, 4> key = make_global_key(verts);
+            shared_face_bdr_attr_[sf] = global_fault_keys.count(key)
                                       ? bc_.fault_attr : 0;
+
+            // Resolve peer rank: map the ghost element to its face neighbor
+            // group, then look up that group's remote MPI rank.
+            int nbr_elem_idx = ftr->Elem2No - ne_;
+            int fn = 0;
+            while (fn < num_fn && nbr_elem_idx >= fn_offs[fn + 1]) { fn++; }
+            if (fn < num_fn)
+            {
+               shared_face_peer_[sf].resolved  = true;
+               shared_face_peer_[sf].peer_rank = pmesh.GetFaceNbrRank(fn);
+            }
          }
       }
 #endif
@@ -604,6 +677,18 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
       int n_shared = pmesh.GetNSharedFaces();
       if (n_shared == 0) { return; }
 
+      // R-001 fix: canonicalize (+,-) side at shared fault faces.  Both ranks
+      // share the same physical QP but each stores an independent DOFData
+      // entry.  Without the swap, Evaluate is called with opposite (+,-)
+      // arguments on the two ranks — the velocity-jump term in Eq. 7b flips
+      // sign while the stress term does not, so tau1_trial (and every
+      // downstream quantity) diverges and the two DOFData entries drift
+      // apart step by step.  The lower rank ID is the canonical "+" owner;
+      // the peer swaps (Q_plus, Q_minus) and the Q_imp output buffers so
+      // both ranks drive Evaluate with identical inputs and end up with
+      // bit-identical DOFData updates.
+      // R-109 fix: MPI rank is cached in the ctor to avoid per-call queries.
+
       // Exchange ghost Q data: one component at a time via persistent
       // ParGridFunction (R-003 fix: initialized once in constructor).
       const real_t *Q_data = Q.GetData();
@@ -619,7 +704,29 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
             q_gf[i] = Q_data[c * ndof_total_ + i];
          }
          q_gf.ExchangeFaceNbrData();
-         nbr_data[c] = q_gf.FaceNbrData();
+         // R-005 fix: force own-storage deep copy. Vector::operator= can take
+         // a shallow branch; without this the per-component ghost data may
+         // all alias q_gf.FaceNbrData(), which is overwritten by the NEXT
+         // ExchangeFaceNbrData call — every nbr_data[c] would then end up
+         // pointing at the last component's ghost buffer (silent aliasing).
+         const Vector &src = q_gf.FaceNbrData();
+         nbr_data[c].SetSize(src.Size());
+         std::memcpy(nbr_data[c].GetData(), src.GetData(),
+                     src.Size() * sizeof(real_t));
+         // R-302 Part B (refined by R-405): MFEM_VERIFY in Release to catch
+         // a future refactor that replaces SetSize+memcpy with a shallow
+         // `operator=` (the H2 regression).  Every component uses the same
+         // allocator pathway, so a single check on the first iteration
+         // gives the same protection without per-Mult-per-component branch
+         // overhead in the hot loop.
+         if (c == 0)
+         {
+            MFEM_VERIFY(nbr_data[c].GetData() != q_gf.FaceNbrData().GetData(),
+                        "nbr_data[0] aliases q_gf.FaceNbrData() — H2 "
+                        "regression.  The deep-copy invariant is load-"
+                        "bearing for cross-rank bulk wave propagation and "
+                        "must hold in Release.");
+         }
       }
 
       for (int sf = 0; sf < n_shared; sf++)
@@ -731,8 +838,41 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   }
 
                   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-                  fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
-                                        Q_imp_plus, Q_imp_minus);
+                  // R-001 fix: peer with lower rank ID is the canonical "+" owner.
+                  // R-102 fix: hard-abort on unresolved peer rank instead of
+                  // silently falling back to the pre-R-001 buggy path.  Both
+                  // ranks sharing a fault face would fail resolution together
+                  // and both would then skip the swap, re-introducing the H3
+                  // DOFData-drift bug with no warning.
+                  MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
+                              shared_face_peer_[sf].resolved,
+                              "shared_face_peer_[" << sf << "] was not resolved "
+                              "in the WaveOperator ctor.  Cannot canonicalise "
+                              "the (+,-) side of a shared fault face — check "
+                              "that face_nbr_elements_offset is populated "
+                              "(pmesh.ExchangeFaceNbrData has run) and that "
+                              "GetFaceNbrRank returned a valid rank.");
+                  const int peer_rank = shared_face_peer_[sf].peer_rank;
+                  MFEM_VERIFY(peer_rank != my_rank_,
+                              "shared face " << sf << " peer_rank == my_rank_ "
+                              "— ParMesh invariant violated");
+                  const bool owner = (my_rank_ < peer_rank);
+                  if (owner)
+                  {
+                     fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
+                                           Q_imp_plus, Q_imp_minus);
+                  }
+                  else
+                  {
+                     // Non-owner: swap so Evaluate sees the same (Q+, Q-) as
+                     // the owner.  Swap output buffers so that, in caller
+                     // vocabulary, Q_imp_plus still means the e1/self-side
+                     // imposed state and Q_imp_minus still means the
+                     // e2/nbr-side imposed state (matches the downstream
+                     // flux_.Interior convention).
+                     fault_flux_->Evaluate(fdata, Q_minus_local, Q_plus_local,
+                                           Q_imp_minus, Q_imp_plus);
+                  }
 
                   real_t Q_imp_plus_g[NUM_STATE], Q_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -906,6 +1046,237 @@ void WaveOperator<MeshType>::ApplyPMLDamping(const Vector &Q, Vector &rhs) const
             }
          }
       }
+   }
+}
+
+// ---------------------------------------------------------------------------
+// R-101 fix: verify shared-fault DOFData consistency across ranks.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
+   real_t tol) const
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return;  // Serial: nothing to compare.
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = const_cast<ParMesh &>(static_cast<const ParMesh &>(mesh_));
+      MPI_Comm comm = pmesh.GetComm();
+      int nprocs;
+      MPI_Comm_size(comm, &nprocs);
+
+      // Short-circuit globally only: every rank must still participate in
+      // the MPI_Allgather below even if it has nothing to contribute, or
+      // ranks with shared fault faces would deadlock waiting on ranks
+      // without any.
+      int any_shared_local = (fault_dof_data_ &&
+                              fault_shared_faces_.Size() > 0) ? 1 : 0;
+      int any_shared_global = 0;
+      MPI_Allreduce(&any_shared_local, &any_shared_global, 1, MPI_INT,
+                    MPI_MAX, comm);
+      if (!any_shared_global) { return; }
+
+      // Pack per-QP records: centroid + every DOFData field that
+      // FaultFaceFlux::Evaluate or the driver-side RK4-averaging step
+      // writes.  One record = 3 centroid coords + 8 mutable fields = 11
+      // doubles.  Each rank contributes one record per shared fault QP
+      // it owns; the same physical QP appears on both ranks that share
+      // the fault face.  Any field whose values disagree between the
+      // two owners is flagged as an R-101 consistency failure.
+      constexpr int REC = 11;
+      constexpr int FIELD_BASE = 3;
+      constexpr int NUM_FIELDS = 8;
+      static const char *FIELD_NAMES[NUM_FIELDS] = {
+         "tau1_corr", "tau2_corr", "sigma_n_corr",
+         "V1", "V2", "psi", "slip1", "slip2"
+      };
+      std::vector<double> local_data;
+
+      for (int sf_idx = 0; sf_idx < fault_shared_faces_.Size(); sf_idx++)
+      {
+         int sf = fault_shared_faces_[sf_idx];
+         FaceElementTransformations *ftr = pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+
+         auto it = shared_fault_dof_offset_.find(sf);
+         if (it == shared_fault_dof_offset_.end()) { continue; }
+         int dof_base = it->second;
+
+         const IntegrationRule &ir =
+            IntRules.Get(ftr->GetGeometryType(), 2*order_);
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            ftr->SetAllIntPoints(&ip);
+            Vector phys(3);
+            ftr->Face->Transform(ip, phys);
+
+            int idx = dof_base + q;
+            if (idx < 0 ||
+                idx >= static_cast<int>(fault_dof_data_->size())) { continue; }
+            const DOFData &d = (*fault_dof_data_)[idx];
+
+            local_data.push_back(phys(0));
+            local_data.push_back(phys(1));
+            local_data.push_back(phys(2));
+            local_data.push_back(d.tau1_corr);
+            local_data.push_back(d.tau2_corr);
+            local_data.push_back(d.sigma_n_corr);
+            local_data.push_back(d.V1);
+            local_data.push_back(d.V2);
+            local_data.push_back(d.psi);
+            local_data.push_back(d.slip1);
+            local_data.push_back(d.slip2);
+         }
+      }
+
+      // Allgatherv.  Use int sizes/displacements; total record count
+      // fits easily for a TPV102-scale (< 1e5 shared fault QPs globally).
+      int my_size = static_cast<int>(local_data.size());
+      std::vector<int> sizes(nprocs), displs(nprocs);
+      MPI_Allgather(&my_size, 1, MPI_INT, sizes.data(), 1, MPI_INT, comm);
+      int total = 0;
+      for (int r = 0; r < nprocs; r++) { displs[r] = total; total += sizes[r]; }
+      std::vector<double> all_data(total);
+      MPI_Allgatherv(local_data.data(), my_size, MPI_DOUBLE,
+                     all_data.data(), sizes.data(), displs.data(),
+                     MPI_DOUBLE, comm);
+
+      int n_entries = total / REC;
+      if (n_entries == 0) { return; }
+
+      // Sort entries lexicographically by exact (cx, cy, cz).  Both ranks
+      // that own a shared fault QP compute the centroid by evaluating the
+      // same MFEM Face transformation at the same reference IntegrationPoint,
+      // so matching pairs agree bit-for-bit.  Using exact equality (a) avoids
+      // the strict-weak-ordering UB of any tolerance-based comparator, and
+      // (b) exposes topological mismatches (QPs owned by only one rank) as
+      // unpaired entries instead of silently fusing them into 3-element
+      // "groups" via transitive tolerance.
+      std::vector<int> idx(n_entries);
+      std::iota(idx.begin(), idx.end(), 0);
+      std::sort(idx.begin(), idx.end(), [&](int a, int b)
+      {
+         for (int k = 0; k < 3; k++)
+         {
+            double va = all_data[a*REC + k], vb = all_data[b*REC + k];
+            if (va != vb) { return va < vb; }
+         }
+         return false;
+      });
+
+      double max_diff = 0.0;
+      int    max_diff_field = -1;
+      int    max_diff_entry = -1;
+      int    n_pairs = 0;
+      int    n_unpaired = 0;
+
+      auto same_centroid = [&](int a, int b)
+      {
+         // R-404 fix: sub-ULP tolerance (1 ULP * max(|va|, |vb|)).  The
+         // exact compare imported by R-304 assumed `ftr->Face->Transform(ip,
+         // phys)` produces bit-identical output on both ranks that share a
+         // face — which holds for the current MFEM build but is not
+         // documented as a contract.  The scale-relative ULP floor keeps
+         // strict weak ordering (threshold bounded by the larger magnitude,
+         // never an absolute constant) while accommodating a future
+         // compiler-reassociation round-off that would otherwise flip
+         // matched pairs into R-305 unpaired-aborts.
+         for (int k = 0; k < 3; k++)
+         {
+            double va = all_data[a*REC + k], vb = all_data[b*REC + k];
+            double scale = std::max(std::abs(va), std::abs(vb));
+            double ulp = scale * std::numeric_limits<double>::epsilon();
+            if (std::abs(va - vb) > ulp) { return false; }
+         }
+         return true;
+      };
+
+      int i = 0;
+      while (i < n_entries)
+      {
+         int j = i + 1;
+         while (j < n_entries && same_centroid(idx[i], idx[j])) { j++; }
+         int group_size = j - i;
+         if (group_size == 2)
+         {
+            int a = idx[i], b = idx[i+1];
+            for (int k = FIELD_BASE; k < REC; k++)
+            {
+               double diff = std::abs(all_data[a*REC + k] - all_data[b*REC + k]);
+               if (diff > max_diff)
+               {
+                  max_diff = diff;
+                  max_diff_field = k;
+                  max_diff_entry = a;
+               }
+            }
+            n_pairs++;
+         }
+         else if (group_size != 1)
+         {
+            // A shared face is owned by exactly 2 ranks; anything else means
+            // the centroid-match collapsed unrelated faces, which would
+            // already be a logic error in this diagnostic.
+            n_unpaired += group_size;
+         }
+         else
+         {
+            n_unpaired++;
+         }
+         i = j;
+      }
+
+      // Only rank 0 prints a summary; all ranks cooperate on the abort.
+      // A shared fault QP must appear on exactly 2 ranks.  n_unpaired > 0
+      // indicates a mesh-partitioning pathology (or a peer-rank resolution
+      // bug that MFEM_VERIFY at the call site of Evaluate did not catch);
+      // treat it as a hard diagnostic failure.
+      int fail_local = (max_diff > tol || n_unpaired > 0) ? 1 : 0;
+      int fail_global = 0;
+      MPI_Allreduce(&fail_local, &fail_global, 1, MPI_INT, MPI_MAX, comm);
+
+      if (fail_global)
+      {
+         if (n_unpaired > 0 && max_diff <= tol)
+         {
+            MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
+                       << " unpaired entries (every shared QP should have "
+                       "exactly 2 ranks).  Likely mesh-partitioning "
+                       "pathology or peer-rank resolution failure.");
+         }
+         double cx = all_data[max_diff_entry*REC + 0];
+         double cy = all_data[max_diff_entry*REC + 1];
+         double cz = all_data[max_diff_entry*REC + 2];
+         const int field_off = max_diff_field - FIELD_BASE;
+         const char *field_name =
+            (field_off >= 0 && field_off < NUM_FIELDS)
+               ? FIELD_NAMES[field_off] : "<unknown>";
+         MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
+                    "Field '" << field_name << "' at centroid ("
+                    << cx << ", " << cy << ", " << cz
+                    << ") differs by " << max_diff
+                    << " across the two ranks sharing the face (tol="
+                    << tol << ").  R-001's (+,-) canonicalisation is not "
+                    "sufficient under the current MFEM face-normal "
+                    "convention; the fix must be extended (e.g. by having "
+                    "the owner rank broadcast its DOFData to the non-owner "
+                    "after Evaluate).");
+      }
+
+      if (my_rank_ == 0)
+      {
+         std::cout << "  [R-101 check] shared-fault DOFData consistency OK: "
+                   << n_pairs << " pairs matched, " << n_unpaired
+                   << " unpaired entries, max_diff=" << max_diff
+                   << " (tol=" << tol << ")\n";
+      }
+#else
+      (void)tol;
+#endif
    }
 }
 

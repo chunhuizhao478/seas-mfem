@@ -24,12 +24,16 @@
 #include "../io/paraview_output.hpp"
 
 #include <algorithm>
+#include <cstddef>
 #include <cstring>
 #include <iostream>
 #include <fstream>
+#include <iomanip>
+#include <limits>
 #include <memory>
 #include <string>
 #include <cmath>
+#include <vector>
 #include <sys/stat.h>
 
 #ifdef MFEM_USE_MPI
@@ -101,9 +105,17 @@ int main(int argc, char *argv[])
    // --no-domain-pv          : suppress volume-mesh PVD (ParaView/Cycle*/*.vtu);
    //                           fault-surface PVD + VTUs are still written on the
    //                           same schedule.  Saves tremendous disk on large runs.
+   // --debug-qnorm           : print per-rank ||Q||_inf at every station output
+   //                           cycle.  Diagnostic for tpv102_debug_v1.md H1 —
+   //                           checks whether bulk wave energy crosses rank
+   //                           partition seams.  Rank 0 prints:
+   //                             global {min, max, mean} of ||Q||_inf across ranks
+   //                             per-rank ||Q||_inf for a small sampled set
+   //                           Cost: one MPI_Gather per output cycle, negligible.
    bool use_paraview = false;
    bool pv_low_order = false;
    bool pv_no_domain = false;
+   bool debug_qnorm  = false;
    int  paraview_step_interval = 0;
    real_t paraview_dt_flag = 0.0;
    for (int i = 1; i < argc; i++)
@@ -112,6 +124,7 @@ int main(int argc, char *argv[])
       if (a == "--paraview") { use_paraview = true; }
       else if (a == "--pv-low-order") { pv_low_order = true; }
       else if (a == "--no-domain-pv") { pv_no_domain = true; }
+      else if (a == "--debug-qnorm") { debug_qnorm = true; }
       else if (a == "--paraview-every" && i + 1 < argc)
       {
          use_paraview = true;
@@ -383,6 +396,36 @@ int main(int argc, char *argv[])
    wave.SetFaultFlux(&fault_flux);
    wave.SetFaultDOFData(&dof_data, nqp_per_face);
 
+   // R-002 fix: resolve the rank that owns the hypocenter QP (closest local
+   // fault QP to (hypo_along_strike, -hypo_down_dip) in x/z).  Used only by
+   // --debug-qnorm to print a per-rank ||Q||_inf watch list.
+   //
+   // R-105 fix: use a named struct with static_asserts so the MPI_DOUBLE_INT
+   // layout assumption fails loudly at compile time if it is ever broken
+   // (e.g. by a compiler with unusual padding of {double, int}).
+   int hypo_rank = 0;
+   {
+      real_t local_min_dist2 = std::numeric_limits<real_t>::max();
+      for (int i = 0; i < num_fault_total; i++)
+      {
+         real_t dx = fault_coords[i](0) - TPV102Params::hypo_along_strike;
+         real_t dz = std::abs(fault_coords[i](2)) - TPV102Params::hypo_down_dip;
+         real_t d2 = dx*dx + dz*dz;
+         if (d2 < local_min_dist2) { local_min_dist2 = d2; }
+      }
+#ifdef MFEM_USE_MPI
+      struct MinDist { double d; int r; };
+      static_assert(offsetof(MinDist, d) == 0,
+                    "MinDist.d must be at offset 0 for MPI_DOUBLE_INT");
+      static_assert(offsetof(MinDist, r) == sizeof(double),
+                    "MinDist.r must follow d with no padding for MPI_DOUBLE_INT");
+      MinDist in{static_cast<double>(local_min_dist2), rank};
+      MinDist out{};
+      MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+      hypo_rank = out.r;
+#endif
+   }
+
    // -----------------------------------------------------------------------
    // 6. Initialize state Q = 0 (perturbation field)
    // -----------------------------------------------------------------------
@@ -537,6 +580,11 @@ int main(int argc, char *argv[])
          {
             std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
          }
+         if (debug_qnorm)
+         {
+            std::cout << "  Diagnostic: --debug-qnorm ON "
+                         "(per-rank ||Q||_inf each output cycle)\n";
+         }
          if (paraview_step_interval > 0)
          {
             std::cout << "  Interval: every " << paraview_step_interval
@@ -562,14 +610,15 @@ int main(int argc, char *argv[])
    {
       if (!pv_out) { return; }
 
-      // When volume PVD is suppressed, we still need to decide whether
-      // this cycle is a scheduled frame (for fault-surface VTUs).
-      bool wrote = false;
-      if (pv_no_domain)
-      {
-         wrote = pv_out->ShouldWrite(step_num, time, V_max);
-      }
-      else
+      // R-007 / R-104 fix: single-shot schedule gate.  PeekShouldWrite is a
+      // const read that does not advance last_write_time_.  The schedule is
+      // committed below (ForceSave advances it for the !pv_no_domain path;
+      // CommitSchedule advances it explicitly for the pv_no_domain path),
+      // so the gate and the advance can never disagree on V_max or the
+      // current last_write_time_.
+      if (!pv_out->PeekShouldWrite(step_num, time, V_max)) { return; }
+
+      if (!pv_no_domain)
       {
          // Copy Q's velocity block (VX..VZ, length 3*ndof_total) into vel_gf.
          // byNODES ordering of the vector FES matches Q's component-major layout.
@@ -593,24 +642,26 @@ int main(int argc, char *argv[])
          pv_local_normal_stress(i)   = d.sigma_n_corr;
       }
 
-      if (!pv_no_domain)
+      if (pv_no_domain)
+      {
+         // Fault-surface PVD only; advance the schedule ourselves.
+         pv_out->CommitSchedule(time);
+      }
+      else
       {
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                       pv_local_traction, pv_local_state,
                                       pv_local_normal_stress);
-         wrote = pv_out->Save(step_num, time, V_max);
+         pv_out->ForceSave(step_num, time);  // advances last_write_time_ internally
       }
 
-      // Fault-surface VTU (proper triangle geometry, no L2-p0 scatter).
-      // Same scheduling as the main PVD save.
-      if (wrote)
-      {
-         pv_out->WriteFaultSurfaceVTU(
-            output_dir, step_num, time, rank, nprocs,
-            pv_local_slip, pv_local_slip_rate, pv_local_traction,
-            pv_local_state, pv_local_normal_stress,
-            pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3);
-      }
+      // Fault-surface VTU (proper triangle geometry, no L2-p0 scatter) —
+      // reached iff PeekShouldWrite returned true above.
+      pv_out->WriteFaultSurfaceVTU(
+         output_dir, step_num, time, rank, nprocs,
+         pv_local_slip, pv_local_slip_rate, pv_local_traction,
+         pv_local_state, pv_local_normal_stress,
+         pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3);
    };
 
    // Initial snapshot at t=0 (V_max = V_ini since the fault is quasi-static).
@@ -751,11 +802,23 @@ int main(int argc, char *argv[])
       }
 #ifdef MFEM_USE_MPI
       real_t V_max_step;
-      MPI_Allreduce(&V_max_local, &V_max_step, 1, MPI_DOUBLE, MPI_MAX, comm);
+      MPI_Allreduce(&V_max_local, &V_max_step, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #else
       real_t V_max_step = V_max_local;
 #endif
       V_max_global = std::max(V_max_global, V_max_step);
+
+      // R-101 fix: after the first RK4 step, verify that shared-fault
+      // DOFData entries agree bit-identically across the two ranks that
+      // own each shared fault QP.  The (+,-) canonicalisation in R-001
+      // depends on an MFEM invariant (identical face normals on both
+      // ranks) that was previously unverified; this call makes the
+      // invariant failure mode loud and fatal instead of silent drift.
+      if (step == 0)
+      {
+         wave.VerifySharedFaultDOFDataConsistency();
+      }
 
       // Output
       if (step % output_interval == 0 || step == nsteps - 1)
@@ -769,6 +832,86 @@ int main(int argc, char *argv[])
                       << ", t = " << t << " s"
                       << ", V_max = " << V_max_step << " m/s\n";
          }
+
+         // --debug-qnorm diagnostic (tpv102_debug_v1 H1): print per-rank
+         // ||Q||_inf.  If all ranks other than the hypocenter's stay at 0,
+         // bulk wave energy is not crossing partition seams.
+         if (debug_qnorm)
+         {
+            real_t qn_local = Q.Normlinf();
+#ifdef MFEM_USE_MPI
+            // Gather all ranks' norms onto rank 0 for a compact summary.
+            // R-303 fix: MPI datatype must match real_t at compile time.
+            // Hardcoding MPI_DOUBLE silently corrupts qn_all on
+            // MFEM_USE_SINGLE builds (where real_t = float = 4 bytes).
+            std::vector<real_t> qn_all;
+            if (rank == 0) { qn_all.resize(nprocs); }
+            MPI_Gather(&qn_local, 1, MPITypeMap<real_t>::mpi_type,
+                       rank == 0 ? qn_all.data() : nullptr, 1,
+                       MPITypeMap<real_t>::mpi_type,
+                       0, comm);
+            if (rank == 0)
+            {
+               real_t qmin = qn_all[0], qmax = qn_all[0], qsum = 0.0;
+               int nzero = 0;
+               for (int r = 0; r < nprocs; r++)
+               {
+                  qmin = std::min(qmin, qn_all[r]);
+                  qmax = std::max(qmax, qn_all[r]);
+                  qsum += qn_all[r];
+                  if (qn_all[r] == 0.0) { nzero++; }
+               }
+               std::cout << "  [qnorm] min=" << qmin
+                         << " max=" << qmax
+                         << " mean=" << (qsum / nprocs)
+                         << " #ranks_with_||Q||=0: " << nzero
+                         << "/" << nprocs << "\n";
+               // R-002 / R-106 fix: per-rank breakout for H1 diagnosis.
+               // Always show bilateral neighbours of the hypocenter rank
+               // plus rank 0 and nprocs-1; this survives the edge case
+               // where hypo_rank is at an endpoint of the rank range
+               // (previously collapsed the watch list to a single entry).
+               std::vector<int> watch = { hypo_rank };
+               for (int off : {1, 4})
+               {
+                  if (hypo_rank + off <  nprocs) { watch.push_back(hypo_rank + off); }
+                  if (hypo_rank - off >= 0)      { watch.push_back(hypo_rank - off); }
+               }
+               watch.push_back(nprocs - 1);
+               watch.push_back(0);
+               // De-dup while preserving order (small N so linear is fine).
+               std::vector<int> watch_unique;
+               for (int r : watch)
+               {
+                  bool dup = false;
+                  for (int u : watch_unique) { if (u == r) { dup = true; break; } }
+                  if (!dup) { watch_unique.push_back(r); }
+               }
+               // R-402 fix: format qnorm in scientific notation so the
+               // post-run RESULT.txt regex operates on a stable format.
+               // Default operator<< switches between fixed and scientific
+               // by value magnitude, so a legitimate small ||Q||_inf like
+               // 0.0001 would otherwise print as "0.0001" and trip the
+               // dead-rank detector.
+               std::ios::fmtflags prev_flags = std::cout.flags();
+               std::streamsize    prev_prec  = std::cout.precision();
+               std::cout << std::scientific << std::setprecision(3);
+               std::cout << "  [qnorm:watch]";
+               for (int r : watch_unique)
+               {
+                  std::cout << " r" << r << "=" << qn_all[r];
+               }
+               std::cout << " (hypo_rank=" << hypo_rank << ")\n";
+               std::cout.flags(prev_flags);
+               std::cout.precision(prev_prec);
+            }
+#else
+            if (rank == 0)
+            {
+               std::cout << "  [qnorm] ||Q||_inf = " << qn_local << "\n";
+            }
+#endif
+         }
       }
 
       // ParaView: MPI-collective; must be called every step (even if the
@@ -780,7 +923,8 @@ int main(int argc, char *argv[])
       real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
       real_t global_nan = local_nan;
 #ifdef MFEM_USE_MPI
-      MPI_Allreduce(&local_nan, &global_nan, 1, MPI_DOUBLE, MPI_MAX, comm);
+      MPI_Allreduce(&local_nan, &global_nan, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #endif
       if (global_nan > 0.0)
       {

@@ -149,6 +149,26 @@ public:
 
    MeshType &GetMesh() { return mesh_; }
    const MeshType &GetMesh() const { return mesh_; }
+
+   /// @brief R-101 fix: verify shared-fault DOFData consistency across ranks.
+   ///
+   /// For every shared fault QP, both ranks that own it carry an independent
+   /// DOFData entry.  R-001's (+,-) canonicalisation is supposed to keep
+   /// those two entries bit-identical, but the claim rests on an MFEM
+   /// invariant (identical face normals on both ranks) that the v1 fix
+   /// report flagged as unverified.  This method gathers all shared-fault
+   /// DOFData across ranks, matches pairs by face centroid, and asserts
+   /// bit-equality (within `tol`).  On mismatch, it calls `MFEM_ABORT`.
+   ///
+   /// Intended usage: call once from the driver after the first RK4 step.
+   /// Cost is O(n_shared_fault_global) communication + memory, one-shot.
+   ///
+   /// No-op on serial builds.
+   ///
+   /// @param[in] tol  Absolute tolerance for per-field equality; default
+   ///                 1e-10 matches the double-precision noise floor of
+   ///                 one Evaluate call.
+   void VerifySharedFaultDOFDataConsistency(real_t tol = 1e-10) const;
    ///@}
 
 private:
@@ -180,6 +200,23 @@ private:
    std::map<int, int> shared_fault_dof_offset_;  ///< shared_face_index → DOFData start index
    std::vector<int> shared_face_bdr_attr_;  ///< shared face boundary attr (0 = regular interior)
    std::set<int> shared_mesh_face_set_;  ///< mesh face indices that are shared (ParMesh only)
+   /// Per-shared-face peer-rank record.
+   ///
+   /// R-001 fix: the rank with the lower ID is the canonical "+" owner of a
+   /// shared fault face, so both ranks feed the same `(Q+, Q-)` into
+   /// `Evaluate` and update `DOFData` identically.
+   ///
+   /// R-107 fix: split `resolved` from `peer_rank` so a ctor failure
+   /// (GetSharedFaceTransformations returned null, or `fn` lookup couldn't
+   /// find the face neighbor) is distinguishable from a successful lookup
+   /// at rank 0.  `ComputeSharedFaceFluxRHS` (R-102) aborts if a shared
+   /// fault face has `resolved == false`.
+   struct SharedFacePeer
+   {
+      bool resolved = false;
+      int  peer_rank = -1;
+   };
+   std::vector<SharedFacePeer> shared_face_peer_;
 
    // Canonical fault-face geometry lists (built in constructor).
    // See GetFaultInteriorFaces / GetFaultSharedFaces for layout contract.
@@ -189,6 +226,10 @@ private:
 
    /// Persistent ghost exchange state (R-001/R-003 fix).
    bool ghost_initialized_ = false;
+   /// Cached MPI rank (R-109 fix; 0 on serial builds).  Used by R-001's
+   /// shared-fault (+,-) canonicalisation inside ComputeSharedFaceFluxRHS;
+   /// caching avoids re-querying pmesh.GetMyRank() on every RK4 stage.
+   int my_rank_ = 0;
 #ifdef MFEM_USE_MPI
    /// Reusable ParGridFunction for ghost exchange (mutable: used in const Mult).
    mutable std::unique_ptr<ParGridFunction> ghost_gf_;

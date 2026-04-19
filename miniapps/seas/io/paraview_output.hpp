@@ -671,6 +671,33 @@ public:
       return true;
    }
 
+   /// Read-only schedule check: returns true iff Save() (or ShouldWrite())
+   /// would write at (cycle, time, V_max), without mutating last_write_time_.
+   /// Use this to gate expensive per-step packing work: Commit the schedule
+   /// advance with CommitSchedule once the writes are done — this replaces
+   /// the earlier "Peek then also call Save/ShouldWrite" pattern that
+   /// evaluated the gate twice with (in principle) inconsistent inputs.
+   bool PeekShouldWrite(int cycle, real_t time, real_t V_max) const
+   {
+      if (output_every_n_steps > 0)
+      {
+         return (cycle % output_every_n_steps == 0);
+      }
+      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
+      return (time - last_write_time_ >= dt_out * kOutputTimeTolerance);
+   }
+
+   /// Advance `last_write_time_` to `time` (R-104/R-108 fix, simplified by
+   /// R-308).  Call after `PeekShouldWrite` has already confirmed the cycle
+   /// is scheduled AND the per-cycle writes (Save, WriteFaultSurfaceVTU,
+   /// ...) have been committed.  Keeps the schedule gate as a const read
+   /// (Peek) and the mutation as a distinct write (Commit), so the two
+   /// calls cannot disagree on `last_write_time_`.  The cycle and V_max
+   /// arguments of PeekShouldWrite are *gate* inputs — they decide whether
+   /// this cycle writes — and are deliberately not plumbed through Commit,
+   /// since Commit's only effect is to advance the time watermark.
+   void CommitSchedule(real_t time) { last_write_time_ = time; }
+
    /// Force a save at the current state.
    void ForceSave(int cycle, real_t time)
    {

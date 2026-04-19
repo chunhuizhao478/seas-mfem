@@ -53,3 +53,4 @@ tpv102/run_200m_p1_dt5ms_3step/
 # Generated TPV102 meshes (too large for GitHub, rebuild from .geo with gmsh)
 tpv102/mesh/tpv102_200m.msh
 tpv102/mesh/tpv102_100m.msh
+tpv102/mesh/tpv102_1000m.msh

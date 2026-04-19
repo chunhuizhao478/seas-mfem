@@ -104,6 +104,7 @@ TEST_FRICTION_SOLVER_SRC = tests/unit/test_friction_solver.cpp
 TEST_TPV102_SETUP_SRC = tests/unit/test_tpv102_setup.cpp
 TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
 TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
+TEST_R101_SHARED_FAULT_SRC = tests/parallel/test_r101_shared_fault.cpp
 
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
@@ -149,6 +150,7 @@ TEST_FRICTION_SOLVER_OBJ = $(TEST_FRICTION_SOLVER_SRC:.cpp=.o)
 TEST_TPV102_SETUP_OBJ = $(TEST_TPV102_SETUP_SRC:.cpp=.o)
 TPV102_DRIVER_OBJ = $(TPV102_DRIVER_SRC:.cpp=.o)
 TEST_TPV102_LOCAL_OBJ = $(TEST_TPV102_LOCAL_SRC:.cpp=.o)
+TEST_R101_SHARED_FAULT_OBJ = $(TEST_R101_SHARED_FAULT_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -1050,6 +1052,17 @@ $(TEST_PARALLEL_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) 
 
 test-parallel-wave-operator: seas_test_parallel_wave_operator
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_wave_operator
+
+# R-101 shared-fault DOFData consistency test (2-rank MPI regression)
+seas_test_r101_shared_fault: $(TEST_R101_SHARED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R101_SHARED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+$(TEST_R101_SHARED_FAULT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-r101-shared-fault: seas_test_r101_shared_fault
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_r101_shared_fault
 
 # BP5 parallel smoke test
 seas_test_bp5_parallel_smoke: $(TEST_BP5_SMOKE_OBJ)

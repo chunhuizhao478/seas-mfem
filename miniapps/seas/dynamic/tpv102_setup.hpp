@@ -241,10 +241,13 @@ public:
          }
       }
 
-      // Global min distance across all ranks
+      // Global min distance across all ranks.  R-401 fix: match real_t at
+      // compile time via MPITypeMap (same pattern used at all R-303 sites).
+      // Hardcoded MPI_DOUBLE silently corrupts local_dist/global_min_dist
+      // on MFEM_USE_SINGLE builds (real_t = float, stride 4 bytes).
       std::vector<real_t> global_min_dist(nstations);
       MPI_Allreduce(local_dist.data(), global_min_dist.data(), nstations,
-                    MPI_DOUBLE, MPI_MIN, comm);
+                    MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
 
       // R-005 fix: Tiebreaker — among equidistant ranks, lowest rank ID wins.
       // Prevents multiple ranks writing the same station file.
@@ -293,6 +296,10 @@ public:
                    << d.tau2_corr << " "
                    << d.sigma_n_corr << " "
                    << log10_theta << "\n";
+         // Flush on every write: output_interval makes this ~30/rank/hour,
+         // and a Slurm SIGKILL at the wall-time limit otherwise discards
+         // all buffered probe data (v1 debug: all .dat files ended up 0 B).
+         files_[s].flush();
       }
    }
 
@@ -436,6 +443,9 @@ public:
 
          files_[s] << std::scientific << std::setprecision(10)
                    << t << " " << vx << " " << vy << " " << vz << "\n";
+         // F1 parity: flush every write so a Slurm SIGKILL at the wall
+         // limit does not discard buffered probe data.
+         files_[s].flush();
       }
    }
 
