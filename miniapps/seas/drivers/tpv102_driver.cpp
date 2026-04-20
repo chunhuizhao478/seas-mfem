@@ -80,6 +80,41 @@ int main(int argc, char *argv[])
    int rank = 0, nprocs = 1;
 #endif
 
+   // R-501 + R-606: diagnostic-flag startup banner.  Print on stderr AND
+   // write to build_info.txt (rank 0 only).  Every Phase 2+ diagnostic
+   // analysis must verify the banner shows the expected flag state
+   // before interpreting DIAG output: MFEM's config.mk can silently drop
+   // -D flags passed via CXXFLAGS+=..., and Frontera stderr may be
+   // interleaved across ranks.  The file is rank-0-only and deterministic.
+   if (rank == 0)
+   {
+#ifdef SEAS_DIAG_FAULT_FLUX
+      const char *diag_fault_flux = "SEAS_DIAG_FAULT_FLUX = ON";
+#else
+      const char *diag_fault_flux = "SEAS_DIAG_FAULT_FLUX = OFF";
+#endif
+#ifdef SEAS_DIAG_GHOST_EXCHANGE
+      const char *diag_ghost = "SEAS_DIAG_GHOST_EXCHANGE = ON";
+#else
+      const char *diag_ghost = "SEAS_DIAG_GHOST_EXCHANGE = OFF";
+#endif
+      std::fprintf(stderr, "[BUILD] %s\n", diag_fault_flux);
+      std::fprintf(stderr, "[BUILD] %s\n", diag_ghost);
+
+      std::ofstream binfo("build_info.txt");
+      if (binfo.is_open())
+      {
+         binfo << "[BUILD] " << diag_fault_flux << "\n";
+         binfo << "[BUILD] " << diag_ghost << "\n";
+         binfo.close();
+      }
+      else
+      {
+         std::fprintf(stderr, "[WARNING] could not open build_info.txt for "
+                              "banner (Phase 2 should fall back to stderr)\n");
+      }
+   }
+
    // -----------------------------------------------------------------------
    // Parse command-line arguments
    // -----------------------------------------------------------------------

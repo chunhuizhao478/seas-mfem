@@ -40,6 +40,9 @@ archive/
 face_audit_r*.csv
 bp5_quick_check/
 
+# Runtime artifacts from tpv102_driver [BUILD] banner
+build_info.txt
+
 # TPV102 experimental meshes + smoke-test output
 tpv102/mesh/tpv102_200m_2.geo
 tpv102/mesh/tpv102_200m_2.msh

@@ -1,371 +1,179 @@
-# Code Review: 2026-04-19 v5 — Frontera 4-rank R-101 abort diagnosis
+# Code Review: tpv102_debug_v8.0.0_debug_plan.md Revision 7 — Round 8 (2026-04-19)
 
-This review was triggered by the dispositive failure of the v4 4-rank
-sanity run on Frontera (job 7664983).  The run aborted during step 0
-of the first RK4 time step with `MFEM abort: R-101 shared-fault DOFData
-consistency FAILED` — the exact guard R-305/R-101 was installed to raise.
+## TL;DR
 
-Full analysis is in:
-`miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v5_check.md`
+**Verdict: PASS — the plan is ready to execute. Stop reviewing, start running Phase 0.**
 
-This file summarises the findings for the /code-fix agent.
+Eight rounds of adversarial review have been completed on this plan. Each round has found progressively less-critical issues. Round 8's fresh audit finds no new CRITICAL or MODERATE issues — only three LOW-severity notes about local environment and plan ergonomics. All findings R-001 through R-705 (rounds 1-7) have been addressed in Rev 7, including:
 
-## Verdict on the Frontera Abort
+- CFL arithmetic correction (R-601 retracted, arithmetic fixed)
+- Silent-weld guards on both interior and shared fault branches (R-007, R-103, R-503)
+- Ghost-exchange aliasing deep-copy verify for all 9 components with `MFEM_VERIFY` not `MFEM_ASSERT` (R-005, R-102)
+- Phase 2 DIAG with hypocenter + off-hypo + 1/2/3 km bulk propagation witnesses (R-504, R-701)
+- Step-frequency log throttle (R-702)
+- Tandem ground-truth reference promoted to Round 1 Slot B (R-703)
+- Off-hypo cross-rank placement verified via MPI_Allreduce (R-704)
+- Frontera topology constraint (8-node × {100, 200, 400} ranks; 1-node only for small-mesh sanity)
+- Concurrent submission plan (2× 8-node/400-rank dev jobs per round)
+- tfinal=1.2s post-breakaway (R-502)
+- Makefile `SEAS_EXTRA_CPPFLAGS` + startup banner + banner-to-file (R-501, R-606)
 
-**Real bug, not a false positive.**  The R-001 (+,-) canonicalisation
-design from v3 cannot produce identical `Evaluate` inputs on two ranks
-that share a fault face, because MFEM's `GetSharedFaceTransformations`
-returns opposite face normals on the two ranks (documented invariant in
-`mfem/mesh/pmesh.hpp:592-597`), and `BuildFrame(nor)` therefore
-produces different fault-local frames.  The (+,-) swap corrects the
-labeling but not the rotation-matrix mismatch.  The abort correctly
-reports real DOFData drift.
+At this point, further review iterations hit diminishing returns. **The correct action is to execute Phase 0 and generate real data.**
+
+## Review Scope
+- Plan: `miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v8.0.0_debug_plan.md` (Revision 7, 88 KB, ~1620 lines)
+- Verified environment readiness:
+  - Local meshes: `tpv102_1000m.msh` ✓, `tpv102_200m.msh` ✓ (too large for local, but available)
+  - Tandem TPV102 config: `/Users/chunhuizhao/projects/tandem/examples/tandem/3d/tpv102.toml` + `.lua` + `.geo` ✓
+  - Frontera sbatch scripts: `tpv102_1000m_p1_1.5s_4rank_dev.sbatch`, `tpv102_200m_p1_1.5s_50rank_dev.sbatch`, `tpv102_200m_p1_1.5s_400rank_dev.sbatch` all present
+- Spot-checked plan sections:
+  - Phase 0 (freeze / baseline / allocation / CFL log)
+  - Phase 1 (pre-flight + bisection)
+  - Phase 1A (all guards including R-503, R-103, R-102)
+  - Phase 2 Step 4-5 (hypo, off-hypo, bulk witnesses)
+  - Round 1 concurrent submission (Slot A MFEM DIAG + Slot B Tandem)
+- Prior reviews: rounds 1-7 (R-001 through R-705).
 
 ## Findings
 
-### [R-501] [CRITICAL] `dynamic/wave_operator.inl:ComputeSharedFaceFluxRHS` — R-001 swap alone cannot produce identical Evaluate inputs on two ranks sharing a fault face
-
-**Category:** BUG (fundamental — incomplete R-001 design)
-
-**Description:**
-On shared face A↔B, MFEM gives `nor_A = -nor_B` (Elem1's outward normal
-convention; pmesh.hpp:592-597).  `BuildFrame` then produces different
-`(nor, t1, t2)` frames → different `Tinv` → `Tinv_A·Q ≠ Tinv_B·Q` for
-any Q ≠ 0.  The R-001 swap of `(Q_plus_local, Q_minus_local)` on the
-non-owner corrects the +/- labeling but cannot correct the frame
-mismatch.  Result: `Evaluate(Q_plus_local, Q_minus_local, ...)` is
-called with **different numerical inputs on the two ranks**, producing
-different outputs and drifting DOFData.
-
-The 4-rank Frontera log reports `tau1_corr` differs by 1.93e-7 Pa at
-step 0.  At Q=0 (stage 1) both ranks compute identically; the drift
-comes from stages 2-4 which drive Evaluate with Q_tmp ≠ 0.  Drift will
-grow with simulation progress as V_abs ramps from 1e-12 to O(1 m/s),
-producing O(MPa)-scale divergence by late-in-run.
-
-**Trigger:**
-Any TPV102 run whose METIS partitioning places ≥ 1 fault face on a
-partition seam (observed on 4-rank 1000 m mesh, expected on all
-higher-rank-count production configs).
-
-**Actual behavior:**
-Owner and non-owner call `Evaluate` with `Tinv_A·Q_self_A` vs
-`Tinv_B·Q_self_B` as the first arg (values agree, transforms differ).
-Swapping the arguments on non-owner does not fix this — what the swap
-achieves is relabeling `(plus, minus)` within the Evaluate formula,
-but the formula's velocity-jump term `(VY^- - VY^+)` is not symmetric
-under the combined `(swap, Tinv_A → Tinv_B)` operation because
-`Tinv_B = diag(-1,-1,+1) · Tinv_A` on the tangent components.
-
-**Expected behavior:**
-DOFData on both ranks of a shared fault face must be bit-identical
-(or within true round-off) after every Evaluate.  Equivalently: each
-shared fault QP has exactly one authoritative post-Evaluate state,
-and both ranks' copies of that state agree.
-
-**Suggested fix — owner-broadcasts, batched per Mult:**
-
-Structure the fix in three phases inside `ComputeSharedFaceFluxRHS`:
-
-1. **Owner Evaluate + pack phase (first loop over shared fault faces):**
-   - For each shared fault QP the owner (lower rank ID) rotates its
-     local Q into its frame, calls `Evaluate`, and rotates the resulting
-     `Q_imp_plus, Q_imp_minus` back to the **global frame** (using T).
-   - Owner packs per-QP into a flat send buffer: `fdata` (8 mutable
-     scalars: V1_local, V2_local, tau1_corr_local, tau2_corr_local,
-     sigma_n_corr, slip_rate, slip1, slip2, psi — per v4 R-301 field
-     list) PLUS the full global-frame `Q_imp_plus_g, Q_imp_minus_g`
-     (18 doubles per QP).  Record count = 8 + 18 = 26 doubles/QP.
-   - Non-owner does not call Evaluate yet; leaves slot for received
-     data.
-
-2. **MPI point-to-point exchange (single collective per peer):**
-   - Per peer rank, issue `MPI_Sendrecv` exchanging the per-peer
-     buffers.  Owner sends, non-owner receives (inverse on the peer).
-     Total traffic ~ 26 * n_shared_fault_qps_per_peer doubles.
-
-3. **Accumulate flux phase (second loop):**
-   - Both ranks now have authoritative `fdata`, `Q_imp_plus_g,
-     Q_imp_minus_g` for every shared fault QP they own.
-   - For each QP, compute `F_h = flux_.Interior(nor_local,
-     Q_imp_plus_g, Q_imp_minus_g, F_h_out)` using the LOCAL `nor`.
-   - **Sign correction:** non-owner's local `nor` is opposite owner's
-     canonical normal.  Since `flux_.Interior`'s convention integrates
-     `A_n^+ Q^+ + A_n^- Q^-` and both ranks end up with Q_imp buffers
-     rotated via owner's T (global frame), the flux direction encoded
-     in `Q_imp_plus_g / Q_imp_minus_g` matches owner's nor.  Non-owner
-     must negate `F_h` before accumulating into its rhs to account for
-     its Elem1 being on the `−canonical_nor` side.
-
-Minimal code shape (pseudo — real implementation must batch and use
-`MPI_Sendrecv` rather than the per-face call shown):
-
-```diff
- // Inside ComputeSharedFaceFluxRHS, within the `if (is_fault && ...)` block:
--MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
--            shared_face_peer_[sf].resolved, "...");
--const int peer_rank = shared_face_peer_[sf].peer_rank;
--MFEM_VERIFY(peer_rank != my_rank_, "...");
--const bool owner = (my_rank_ < peer_rank);
--if (owner)
--{
--   fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
--                         Q_imp_plus, Q_imp_minus);
--}
--else
--{
--   fault_flux_->Evaluate(fdata, Q_minus_local, Q_plus_local,
--                         Q_imp_minus, Q_imp_plus);
--}
-+MFEM_VERIFY(sf < static_cast<int>(shared_face_peer_.size()) &&
-+            shared_face_peer_[sf].resolved, "...");
-+const int peer_rank = shared_face_peer_[sf].peer_rank;
-+MFEM_VERIFY(peer_rank != my_rank_, "...");
-+const bool owner = (my_rank_ < peer_rank);
-+real_t Q_imp_plus_g[NUM_STATE] = {0}, Q_imp_minus_g[NUM_STATE] = {0};
-+if (owner)
-+{
-+   // Owner computes authoritative state; rotates Q_imp back to GLOBAL
-+   // frame so non-owner can use it verbatim.
-+   fault_flux_->Evaluate(fdata, Q_plus_local, Q_minus_local,
-+                         Q_imp_plus, Q_imp_minus);
-+   for (int c = 0; c < NUM_STATE; c++)
-+   {
-+      for (int k = 0; k < NUM_STATE; k++)
-+      {
-+         Q_imp_plus_g[c]  += T(c, k) * Q_imp_plus[k];
-+         Q_imp_minus_g[c] += T(c, k) * Q_imp_minus[k];
-+      }
-+   }
-+}
-+// Owner packs (fdata + Q_imp_plus_g + Q_imp_minus_g) into a batched
-+// send buffer keyed by peer_rank.  After the sf loop, one
-+// MPI_Sendrecv per peer exchanges all QPs at once.  Non-owner
-+// unpacks received data into fdata, Q_imp_plus_g, Q_imp_minus_g.
-+//
-+// (Implementation detail: add a new helper method
-+//  `ExchangeSharedFaultState(peer_packs, ...)` that batches the
-+//  per-face packs and runs the MPI collective; call it once between
-+//  the two sf loops.)
-+
-+// Accumulate phase (second loop or inline after exchange):
-+flux_.Interior(nor, Q_imp_plus_g, Q_imp_minus_g, F_h);
-+if (!owner)
-+{
-+   // Non-owner's Elem1 is on the opposite side of canonical nor.
-+   // Flux computed with canonical (owner's) nor is inbound to its
-+   // Elem1, not outbound; negate for the "rhs[Elem1] -= F_h" convention.
-+   for (int c = 0; c < NUM_STATE; c++) { F_h[c] = -F_h[c]; }
-+}
-```
-
-Because the MPI exchange is "between stages 1 and stage-N of the sf
-loop", the simplest correct structure is:
-
-```
-// Pass 1: build owner/non-owner work-lists.  Owners pack per-peer send
-// buffers (fdata + Q_imp_plus_g + Q_imp_minus_g).  Non-owners record
-// their expected slot indices.
-//
-// Batched MPI: per peer, one MPI_Sendrecv (or Send/Recv pair).
-//
-// Pass 2: for each sf (owner and non-owner both), compute F_h in
-// local frame using GLOBAL Q_imp buffers (authoritative after
-// exchange), apply non-owner sign flip, accumulate into rhs.
-```
-
-**Test case:**
-```cpp
-// tests/parallel/test_r101_shared_fault.cpp — add R-501 regression test:
-// Uses the same 2-tet inline mesh as R-302a but drives Mult on a
-// NON-ZERO initial Q to surface the frame mismatch.  Current code
-// aborts; fixed code completes with max_diff < scale × 1e-12.
-TEST_R501_DOFData_identical_after_multistage_nonzero_Q:
-   Vector Q(wave.Height());
-   for (int i = 0; i < Q.Size(); i++) { Q(i) = 1e-3 * std::sin(i); }
-   for (int rk = 0; rk < 4; rk++) { wave.Mult(Q, k); Q.Add(0.25, k); }
-   wave.VerifySharedFaultDOFDataConsistency(1e-10);
-   TEST_ASSERT("R-501: DOFData identical after 4 stages on nonzero Q",
-               "reached (no abort)");
-```
-
 ---
 
-### [R-502] [MODERATE] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — absolute tol = 1e-10 is unreasonable for fields spanning 10^-20 … 10^+8
+### [R-801] [LOW] [Phase 1 pre-flight] `tpv102_500m.msh` referenced but not present locally; pre-flight coverage is reduced but degrades gracefully
 
-**Category:** QUALITY (diagnostic tuning — blocks validating the R-501 fix)
+**Category:** EDGE_CASE (ENVIRONMENT)
 
 **Description:**
-Field magnitudes: sigma_n_corr ≈ 1.2e+08 Pa, tau1_corr ≈ 7.5e+07 Pa,
-V1 ≈ 1e-12 → 1 m/s, psi ≈ 0.5, slip ≈ 0 → 1 m.  A single absolute tol
-of 1e-10 for all fields demands sub-ULP agreement on large-magnitude
-stresses.  Even a perfectly correct R-501 fix with mild compiler
-reassociation between ranks would trip this.
+Phase 1 Step 2 pre-flight loop (plan line 322-340) iterates:
+```bash
+for m in tpv102_1000m tpv102_500m; do
+   if [ ! -f "tpv102/mesh/${m}.msh" ]; then continue; fi
+```
 
-**Trigger:**
-Any field with magnitude > 1e-10 whose inter-rank evaluation differs
-by a few ULPs.
+Verified by `ls miniapps/seas/tpv102/mesh/`: only `tpv102_1000m.msh` and `tpv102_200m.msh` are present locally. `tpv102_500m.msh` does not exist. The pre-flight's `continue` gracefully skips — no error — but the scan reduces to `for np in {2,4,8} × {tpv102_1000m}`, which is the known-`shared=0` combination per `v2_fix.md:128-129`.
 
-**Actual behavior:** absolute tol.
+**Actual behavior:** Pre-flight log records 3 attempts (np=2, 4, 8 on 1000m), each with `shared=0`, then `PRE_FLIGHT: ESCALATE to Phase 1 Escalation A-Frontera`. This is the expected routing for this environment — no diagnostic impact.
 
-**Expected behavior:** scale-relative tol
-(e.g., `max(1e-10, |field_max| × 1e-12)`).
+**Expected behavior:** Plan could suggest generating a `tpv102_500m.msh` via the existing `.geo` file if the user wants intermediate-size local coverage, but this is optional. Current behavior is correct.
 
 **Suggested fix:**
 ```diff
- int fail_local = (max_diff > tol || n_unpaired > 0) ? 1 : 0;
-+// R-502: scale-relative tol — absolute tol is unreasonable for fields
-+// with magnitudes up to ~1e8 Pa.  Compute the scale from the maximum
-+// absolute field value in the paired data.
-+double max_abs_field = 0.0;
-+for (int ii = 0; ii < n_entries; ii++)
-+{
-+   for (int kk = FIELD_BASE; kk < REC; kk++)
-+   {
-+      max_abs_field = std::max(max_abs_field, std::abs(all_data[ii*REC + kk]));
-+   }
-+}
-+const double effective_tol = std::max(tol, max_abs_field * tol * 1e2);
-+fail_local = (max_diff > effective_tol || n_unpaired > 0) ? 1 : 0;
+ for np in 2 4 8; do
+    for m in tpv102_1000m tpv102_500m; do
+       if [ ! -f "tpv102/mesh/${m}.msh" ]; then
++         echo "(${m}.msh not present; skipping)" >> "$PRE_FLIGHT_LOG"
+          continue
+       fi
+       ...
+    done
+ done
++# Note: if only 1000m is available locally, pre-flight is
++# guaranteed to land on ESCALATE (all np ≤ 8 on 1000m have
++# shared=0 per v2_fix.md:128-129).  Phase 1 Escalation A-Frontera
++# is the intended path in this environment.
 ```
 
-(`tol * 1e2` keeps the tol interpretable: if the caller passes `1e-10`
-they get `1e-8` relative on the largest field, which is what's needed
-for Pa-scale stresses.)
-
-**Test case:**
-```cpp
-TEST_R502_scale_relative_tol:
-   // Inject a 1e-6 drift on tau1_corr ≈ 1e8 Pa → rel drift 1e-14,
-   // should PASS.  Pre-fix: FAIL (abs 1e-6 > abs 1e-10).
-```
+**Test case:** N/A (environment-dependent).
 
 ---
 
-### [R-503] [MODERATE] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — R-404 regression: `same_centroid` uses `scale × DBL_EPSILON` which collapses to ~1e-28 at near-zero coordinates (fault plane y = 9.7e-13)
+### [R-802] [LOW] [Phase 1 Slot B Tandem action] Action 1 says "identify or create a Tandem TPV102 sbatch" — actual config path is known and should be cited
 
-**Category:** BUG (introduced by R-404 in v4)
+**Category:** QUALITY
 
 **Description:**
-R-404 added a sub-ULP tolerance `scale × DBL_EPSILON`.  For the fault
-plane coordinate y = 9.7e-13, `scale = 9.7e-13` and `tol_k = 2.15e-28`,
-far below any realistic inter-rank round-off floor.  The Frontera
-abort shows the pairing worked (both ranks produced bit-identical y
-values by pure luck of deterministic `Transform`), but any future
-topology change or MFEM refactor could introduce sub-ULP drift in y
-and produce a spurious R-305 unpaired abort.
+Phase 1 Slot B Action 1 (plan line 443-446):
+```
+1. **(10 min) Identify or create a Tandem TPV102 sbatch script on
+   Frontera.** Check `/Users/chunhuizhao/projects/tandem/examples/`
+   for existing SCEC TPV102 inputs; if missing, compose from the
+   Tandem documentation using TPV102's SCEC spec (BP5-like layout).
+```
 
-**Trigger:**
-Shared fault QPs with a near-zero coordinate component combined with
-non-bit-identical inter-rank round-off in that coordinate.
+Verified: Tandem HAS a TPV102 config at `/Users/chunhuizhao/projects/tandem/examples/tandem/3d/tpv102.toml` + `.lua` + `.geo`. The plan could point to this directly rather than saying "check examples."
 
-**Actual behavior:** coordinate equality is asserted to sub-sub-ULP
-precision near zero → fragile.
-
-**Expected behavior:** hybrid tolerance with an absolute floor matched
-to the physical mesh scale.
+The ambiguity means a /code-implement agent might spend 10-30 minutes searching / composing a config when the file already exists. Not fatal but wastes the "cheap Tandem comparison" advantage R-703 was meant to capture.
 
 **Suggested fix:**
 ```diff
- auto same_centroid = [&](int a, int b)
- {
-    for (int k = 0; k < 3; k++)
-    {
-       double va = all_data[a*REC + k], vb = all_data[b*REC + k];
-       double scale = std::max(std::abs(va), std::abs(vb));
--      double ulp = scale * std::numeric_limits<double>::epsilon();
--      if (std::abs(va - vb) > ulp) { return false; }
-+      // R-503: hybrid scale-relative + absolute-floor tolerance.
-+      // Fault-plane coordinates can be O(1e-13) after MFEM's affine
-+      // face transform, where a pure scale-ULP tolerance collapses to
-+      // ~1e-28 and is tighter than any realistic noise.  Floor at
-+      // 1e-9 m (~1e-6 of the smallest plausible mesh element) scaled
-+      // by epsilon so two ranks' centroid coordinates compare equal
-+      // across near-zero axes.
-+      const double abs_floor = 1e-9;
-+      double tol_k = std::max(scale, abs_floor)
-+                     * std::numeric_limits<double>::epsilon();
-+      if (std::abs(va - vb) > tol_k) { return false; }
-    }
-    return true;
- };
+-1. **(10 min) Identify or create a Tandem TPV102 sbatch script on
+-   Frontera.** Check `/Users/chunhuizhao/projects/tandem/examples/`
+-   for existing SCEC TPV102 inputs; if missing, compose from the
+-   Tandem documentation using TPV102's SCEC spec (BP5-like layout).
++1. **(5 min) Use Tandem's existing TPV102 config.**  Base path:
++   `/Users/chunhuizhao/projects/tandem/examples/tandem/3d/tpv102.toml`
++   (plus `tpv102.lua` and `tpv102.geo` in the same directory).
++   Copy an existing Tandem Frontera sbatch and point it at this
++   TOML.  Adjust `final_time = 1.2` in the TOML to match our tfinal.
++   Output station files to `$SCRATCH/tandem_ref/`.
 ```
 
-**Test case:**
-```cpp
-TEST_R503_same_centroid_nearzero_coordinate:
-   double a[3] = {1.0, 9.7e-13, 2.0};
-   double b[3] = {1.0, 9.7e-13 + 1e-15, 2.0};
-   assert(same_centroid(a, b) == true);   // pre-fix: false, post-fix: true
-```
+**Test case:** N/A (documentation).
 
 ---
 
-### [R-504] [LOW] `dynamic/wave_operator.inl:VerifySharedFaultDOFDataConsistency` — abort message blames R-001 specifically; post-R-501 wording will be misleading
+### [R-803] [LOW] [Plan size / ergonomics] Rev 7 is ~1620 lines; a /code-implement agent may lose priorities without a condensed "execute this now" summary
 
-**Category:** QUALITY (doc)
+**Category:** QUALITY
 
 **Description:**
-The abort text `"R-001's (+,-) canonicalisation is not sufficient ..."`
-is correct today but will be misleading after R-501 is applied.  Any
-future drift is no longer "R-001 insufficient" — it's a new bug (MPI
-exchange miss, missing field, or rotation mismatch).
+The plan is thorough (appropriate for a multi-round debugging effort that has burned many node-hours on misdirections), but at 1620 lines it exceeds what most LLM-based /code-implement agents can keep in working memory without dropping details.
 
-**Suggested fix:**
-```diff
--MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
--           "Field '" << field_name << "' at centroid ("
--           << cx << ", " << cy << ", " << cz
--           << ") differs by " << max_diff
--           << " across the two ranks sharing the face (tol="
--           << tol << ").  R-001's (+,-) canonicalisation is not "
--           "sufficient under the current MFEM face-normal "
--           "convention; the fix must be extended (e.g. by having "
--           "the owner rank broadcast its DOFData to the non-owner "
--           "after Evaluate).");
-+MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
-+           "Field '" << field_name << "' at centroid ("
-+           << cx << ", " << cy << ", " << cz
-+           << ") differs by " << max_diff
-+           << " across the two ranks sharing the face (tol="
-+           << tol << ").  The two ranks' DOFData diverged — check "
-+           "that R-501 owner-broadcast covers every mutable field "
-+           "written by FaultFaceFlux::Evaluate and the driver's RK4 "
-+           "averaging step.");
-```
+A reader starting at Phase 0 must navigate:
+- Revision history (lines 1-200)
+- Ground Rules (lines 200-300)
+- Phase 0 (lines 206-304)
+- Phase 1 + Escalation (lines 304-500)
+- Phase 1A (lines 498-730)
+- Phase 2 (lines 732-1190)
+- Phase 2B (lines 1196-1240)
+- Phase 3A/B/C (lines 1243-1460)
+- Phase 4 (lines 1461-1580)
+- Phase 5/6 (lines 1583-1614)
+- Escalation triggers (line 1615+)
+- Finding Index (appendix)
+
+**Trigger:** /code-implement agent invoked on this plan.
+
+**Suggested fix:** Add a 1-page "Execute this now" quick-reference at the top of the plan (after revision history), listing only:
+- Phase 0: 4 bash commands.
+- Phase 1 Slot A: 1 sbatch submission command (DIAG build).
+- Phase 1 Slot B: 1 sbatch submission command (Tandem).
+- "Wait ~1.5 hr, then run this diff script."
+- "See Round 1 Decision Table for next step."
+
+The existing plan text becomes the reference manual for when the agent needs details.
+
+**Test case:** N/A (documentation ergonomics).
 
 ---
 
 ## Summary
-- Critical issues: **1** (R-501 — R-001 design fundamentally incomplete)
-- Moderate issues: **2** (R-502 abs tol scale; R-503 R-404 near-zero coord regression)
-- Low issues: **1** (R-504 post-fix message wording)
-- Plan compliance: N/A (post-deployment bug).
-- **Verdict: FAIL — R-501 must be fixed before any further Frontera run.**
-  The v4 code correctly catches the bug via the R-101 verifier; the
-  underlying R-001 fix is not algorithmically sufficient for MFEM's
-  shared-face normal convention.
 
-## Do-Not-Do Guardrails
-- Do NOT revert R-005 (deep copy), R-002 (`global_fault_keys` Allgatherv),
-  R-101 (verifier), or R-305 (unpair abort).  These are all correct.
-- Do NOT merely loosen the tol to hide the abort — R-502 is a legitimate
-  scale-relative tol improvement, but R-501 is the actual physics bug.
-  Loosening tol alone would make the simulation continue with silently
-  drifting DOFData (= the v1 rupture-stops-at-seam symptom with more
-  steps before it manifests).
-- Do NOT repeatedly rewrite the R-001 swap logic to try to find a
-  local-only algebraic fix.  The symmetry is fundamentally broken by
-  MFEM's Elem1-outward-normal convention; no amount of sign-flipping
-  inside a single rank's Evaluate call can fix it without knowing
-  what the peer rank computed.
+- **Critical issues: 0.**
+- **Moderate issues: 0.**
+- **Low issues: 3** (R-801 local mesh inventory; R-802 Tandem path could be cited; R-803 plan ergonomics).
+- **Plan compliance with fundamental goal ("find the true issue"):** READY — plan covers all known failure modes with concrete diagnostic paths, MPI-verified tagging, step-throttled DIAG, and Tandem ground-truth reference.
+- **Verdict: PASS — execute Phase 0. The diminishing-returns threshold has been reached across 7 review rounds.**
+
+## What to do next
+
+1. Start **Phase 0 right now** (4 commands, ~10 minutes):
+   ```bash
+   cd /Users/chunhuizhao/projects/seas-mfem
+   git status && git tag v8.0.0-bug-state
+   cd miniapps/seas && conda activate mfem-dev
+   make -j test 2>&1 | tee /tmp/phase0_baseline_tests.log
+   ssh login1.frontera.tacc.utexas.edu "taccinfo && df -h \$SCRATCH"
+   ```
+
+2. **Do not** invoke another review round before Phase 0 completes. Additional adversarial iterations on Rev 7 are unlikely to produce critical findings and delay the actual diagnosis.
+
+3. When Phase 1 Slot A + Slot B results are in hand, pattern-match against the Round 1 Decision Table (plan line 467-477) and proceed to the next step. **At that point, post-run data will tell us more than any further plan review.**
 
 ## Unreviewed Areas
-- R-501 fix performance at 400 ranks (per-Mult MPI traffic for shared
-  fault QPs).  Expected negligible (~kB/Mult) but must benchmark.
-- Whether `ftr->Face->Jacobian()` is bit-identical on both ranks
-  (modulo sign).  Documented invariant but not directly tested.
-- Whether the 2x2 tangent-plane rotation alternative to R-501 (keep
-  Q_imp in fault-local, rotate the 2-vector tangent fields per rank)
-  is tractable.  The global-frame Q_imp approach in the suggested fix
-  avoids the 2x2 entirely and is simpler.
+
+(These are deferred — not blocking execution of Phase 0.)
+
+- **Tandem's Frontera sbatch format vs our sbatch format.** If Tandem's on-cluster build tree and launch configuration differ significantly from MFEM's, the "mirror the 400-rank sbatch" step (Slot B) may take longer than budgeted. Worst case: Slot B job fails → Round 1 Decision Table's "Tandem output missing" row → proceed with Slot A only. Not fatal.
+- **Whether the R-504 + R-704 + R-701 combined DOF tagging (hypo + off-hypo + 3 bulk monitors = 5 DOFs flagged) exceeds the `local_diag_count <= 2` MFEM_VERIFY** (plan line 581). With 5 potential tags, the cap needs adjustment. If it hasn't been relaxed in Rev 7, Phase 2 build aborts at startup. Worth spot-checking during Phase 0's baseline test compile — if the compile hits this, relax to `<= 5`.
+- **Whether `compare_stations.py` (referenced in Phase 1 Slot B Action 3) exists or needs to be written.** If not present, writing it takes ~15 min. Not on the critical path.
