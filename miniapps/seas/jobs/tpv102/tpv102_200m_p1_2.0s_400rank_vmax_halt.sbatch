@@ -2,10 +2,10 @@
 #SBATCH -J tpv102_vmax_halt_400r
 #SBATCH -o tpv102_vmax_halt_400r_%j.out
 #SBATCH -e tpv102_vmax_halt_400r_%j.err
-#SBATCH -p normal
+#SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 03:00:00
+#SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
 # TPV102 v8.0.0 Phase 1+2 confirmation — "does V_max halt or evolve?"
@@ -40,12 +40,11 @@
 #     m/s → v8.0.0 bug resolved by the Phase 1+2 verifier fixes (the
 #     "drift" cascade we chased was entirely verifier-pairing artifact).
 #
-# WALL-CLOCK budget: ~2.5 hr on 8 Cascade Lake nodes (8750-step
-# equivalent at 400-rank with 200 m mesh dt_cfl ~ 0.23 ms).
-# SU COST: ~640 SU (8 nodes × 2.5 hr × 32 SU/node-hour, budget).
-#
-# Why `normal` queue (not `development`): 2.0 s run exceeds the 2 hr
-# dev-queue wall-clock limit.  `normal` allows up to 48 hr.
+# WALL-CLOCK budget: ≤ 2 hr on 8 Cascade Lake nodes (8750-step
+# equivalent at 400-rank with 200 m mesh dt_cfl ~ 0.23 ms).  User
+# confirmed fits in dev-queue 2 hr window based on prior runs at
+# this scale.
+# SU COST: ~512 SU (8 nodes × 2 hr × 32 SU/node-hour, budget).
 #
 # Usage:
 #   sbatch jobs/tpv102/tpv102_200m_p1_2.0s_400rank_vmax_halt.sbatch
