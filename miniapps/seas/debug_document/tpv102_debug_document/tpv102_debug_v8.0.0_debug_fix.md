@@ -781,24 +781,166 @@ produces the full R-101 diagnostic (face_key + centroid + field name +
 drift magnitude + rank pair).  Phase 2 of v8.0.0 (diagnose & fix the
 psi drift) can proceed entirely against this local reproducer.
 
-**Phase 1 Phase Log (current):**
+### Step 1.12 — Phase 2 diagnosis: "psi drift" was a verifier artifact, not a real bug
+
+**Instrumentation:** Added `SEAS_DIAG_FAULT_FLUX` block to
+`ComputeSharedFaceFluxRHS` (wave_operator.inl) that prints Evaluate
+inputs (Q_plus, Q_minus hashes, psi, slip_rate, V1/V2, tau/sigma
+corrections) and outputs per RK4 stage, filtered to a target
+centroid.
+
+**Ran np=14 reproducer with DIAG enabled.** Data from rank 5 and
+rank 6 (the two ranks sharing the failing fault face at
+`centroid=(-1.67317e+04, ~0, -1.58660e+04)`):
+
+| Stage | psi (both ranks) | V_abs (both ranks) | h_plus / h_minus | Agreement |
+|-------|------------------|---------------------|-------------------|-----------|
+|  k1   | 8.221292303436545e-1 | 9.9999999999729e-13 | identical   | bit-exact |
+|  k2   | 8.221292303436544e-1 | 9.9999999999731e-13 | identical   | bit-exact |
+|  k3   | 8.221292303436544e-1 | 9.9999999999731e-13 | identical   | bit-exact |
+|  k4   | 8.221292303436541e-1 | 9.9999999999731e-13 | identical   | bit-exact |
+
+**Finding:** at the physically-same QP on both ranks, the
+fault-state fields (psi, V_abs, V1, V2, tau_corr, sigma_n_corr) are
+**bit-identical** across all 4 RK4 stages.  No drift exists.
+
+Yet the R-101 verifier was aborting with `psi differs by 2.19e-2`.
+The centroid reported by the verifier matched our DIAG target.  So
+where did 2.19e-2 come from?
+
+**Root cause (the actual one):** MFEM's shared-face orientation
+differs between the two ranks.  DIAG showed:
+
+- Rank 5: `sf=1624 q=2 cz=-15866.037060 sign_flipped=1`
+- Rank 6: `sf=1262 q=0 cz=-15866.037078 sign_flipped=0`
+
+These are the **same physical QP**, but each rank indexes it with a
+different local `qp_idx` (rank 5 calls it q=2, rank 6 calls it q=0).
+The Step 1.10 pairing algorithm was matching by `(face_key, qp_idx)`
+— which for this face pairs rank 5's q=0 with rank 6's q=0, a
+DIFFERENT physical point ~face_size/3 away.  Comparing psi at two
+different physical points gave the 2.19e-2 "drift" — purely the
+spatial gradient of psi across the face, not any inter-rank
+inconsistency.
+
+**Phase 2 fix (minimal, same file):**
+`VerifySharedFaultDOFDataConsistency` now sorts by `(face_key
+primary, physical centroid secondary)` and groups entries that
+match on BOTH face_key (integer exact) AND centroid within 1e-6 m
+tolerance.  Within a face, QPs are separated by ~face_size/3
+(hundreds of meters on the production mesh), so the 1e-6 m floor
+safely distinguishes different physical QPs on the same face while
+matching the ~1 ULP FP drift between ranks' views of the same QP.
+
+The qp_idx field stays in the record (diagnostic) but no longer
+participates in grouping.  Face key remains integer-exact.
+
+**Local verification after the Phase 2 fix:**
+
+```
+mpirun -np 2 ./seas_test_r101_shared_fault       → 18/18 PASS
+mpirun -np 2 ./seas_test_parallel_wave_operator  →  5/5 PASS
+```
+
+Production-configuration runs:
+
+| np | mesh    | result |
+|----|---------|--------|
+| 14 | 1000m   | R-101 OK: 27 pairs, 0 unpaired, max_rel_diff=1.11e-16 (1 ULP) |
+| 30 | 1000m   | R-101 OK: 21 pairs, 0 unpaired, max_rel_diff=4.44e-16 (4 ULP) |
+| 50 | 1000m   | R-101 OK: 27 pairs, 0 unpaired, max_rel_diff=1.11e-16 (1 ULP) |
+
+All three report **bit-exact** DOFData consistency across ranks at
+step 0.  The DIAG instrumentation was removed after confirming the
+root cause — it remains accessible via `SEAS_DIAG_FAULT_FLUX` build
+flag for future debugging.
+
+**Propagation sanity check (np=14 / 1000m / tfinal=0.05 s, 35
+steps):**
+
+```
+Step  0/35, V_max = 1.00000e-12 m/s, qnorm r0=0        (distant rank quiet)
+Step 24/35, V_max = 1.00007e-12 m/s, qnorm r0=1.2e-27  (wave reached r0)
+Step 34/35, V_max = 1.00248e-12 m/s, qnorm r0=7.6e-27  (wave still growing)
+R-101 verifier at step 0: OK (unchanged)
+```
+
+V_max increases monotonically.  All 14 ranks have nonzero ||Q||
+by step 12.  No "pinned V_max, silent stations" signature at
+tfinal=0.05 s.  Breakaway (V_max > 0.1 m/s) is expected at t ≈ 1 s;
+this short local run is below breakaway by design.
+
+### Step 1.13 — Phase 1+2 complete; proposing Frontera production confirmation
+
+The original v8.0.0 signature from Frontera job 7665297 (400-rank,
+tfinal=1.5 s) was "V_max pinned at 7.699 m/s at hypocenter, off-hypo
+stations at V_ini=1e-12, bulk max‖Q‖_∞ ≈ 1.66e-8".  Our theory of the
+failure cascade was:
+
+1. R-101 shared-fault DOFData drift → (hypothesized, NOW DISPROVEN).
+2. Drift causes asymmetric fault flux across partition seams.
+3. Seam asymmetry blocks wave propagation to off-hypo stations.
+
+Phase 1+2 locally disprove step (1): DOFData is bit-exact across
+ranks at fault QPs, including through the full RK4 step.  The
+original R-101 aborts at np=50 / 200m / Frontera were
+verifier-pairing artifacts (centroid tolerance + qp_idx misalignment
+under MFEM face orientation flip), NOT real field drift.
+
+**Remaining unknowns that only Frontera can confirm:**
+
+- Does the 200m production mesh at 50/100/400 ranks pair cleanly
+  with the Phase 2 verifier?  (Local 1000m mesh says yes; 200m has
+  different METIS partition topology.)
+- Does V_max reach breakaway at tfinal ≈ 1 s as expected by TPV102
+  physics, or does the original "pinned V_max" signature persist?
+  If it persists, the cause is **not** inter-rank fault-state drift
+  (ruled out) and we move to Phase 3 (bulk wave propagation / ghost
+  Q exchange / CFL / nucleation physics).
+
+**Proposed Frontera jobs (USER APPROVAL REQUIRED per
+`feedback_frontera_approval.md`):**
+
+1. `jobs/tpv102/tpv102_200m_p1_0.01s_50rank_init.sbatch` — init-only
+   sanity at the original failing configuration.  ~5 min dev-queue,
+   ~0.1 SU.  Primary check: R-101 passes (Phase 1+2 fix holds on the
+   200m mesh + Frontera Intel-MPI topology).
+
+2. `jobs/tpv102/tpv102_200m_p1_1.2s_100rank_bisect.sbatch` — bisection
+   tier 2 at 100 ranks, full tfinal=1.2s.  ~1.2 hr dev-queue, ~100 SU.
+   Confirms Phase 2 fix holds past step 0, tests breakaway.
+
+3. `jobs/tpv102/tpv102_200m_p1_1.2s_400rank_bisect.sbatch` — bisection
+   tier 3 at 400 ranks, full tfinal=1.2s.  ~1.5 hr dev-queue, ~400 SU.
+   This is the job 7665297 dispositive reproducer — if V_max pinning
+   still happens, we know the bug is scale-dependent and NOT in R-101
+   pairing.  If it resolves, the v8.0.0 bug was entirely the verifier
+   artifact cascade we fixed in Phase 1+2.
+
+Total budget: ~500 SU.  No autonomous submission — awaiting explicit
+user approval.
+
+**Phase 1+2 Phase Log (final):**
 ```
 [x] Phase 1A Action 0 (Makefile + banner) applied + verified
 [x] Partition pre-flight (local) complete
-[x] Frontera sbatches built (4 files) — sbatch banner check bug
-    identified and fixed in all 4
-[x] Job 1 submitted (50-rank init) — aborted on R-101 verifier
-[x] R-101 verifier diagnostic enhanced (rank tag + per-entry report)
-[x] Job 1 re-run #1 (7666151) — fprintf+fflush needed for detail print
-[x] Job 1 re-run #2 (7666171) — rank-0 detail captured
-[x] Tolerance fix applied (abs_floor 1e-9→1e-6) — did NOT resolve
-[x] Self-check diagnostic added, Job 1 re-run #3 (7666233)
-[x] **Root cause:** centroid-tolerance pairing is structurally wrong
-    for MFEM shared-face geometry; BP5 proves integer-key pairing works
-[x] **Fix:** `shared_fault_key.hpp` + integer-exact verifier rewrite,
-    no BP5 modification
-[x] Local verification (R-101 tests + np=50 tpv102_driver) PASS on
-    pairing.  Field check now exposes real psi drift (Step 1.11)
-[ ] Phase 2: diagnose psi drift between rank pairs (new task #59)
-[ ] Frontera re-run (deferred — local reproducer adequate for Phase 2)
+[x] Frontera sbatches built (4 files)
+[x] Job 1 submitted (50-rank init) — R-101 "2 unpaired" signature
+[x] Steps 1.4-1.9: iterative diagnosis of R-101 centroid pairing
+[x] Step 1.10: BP5-pattern integer face_key pairing via
+    `shared_fault_key.hpp` (no BP5 modification)
+[x] Step 1.11: discovered apparent "psi drift" after pairing fixed
+[x] Step 1.12: DIAG-instrumented np=14 reproducer; confirmed
+    DOFData is bit-exact across ranks.  The "drift" was a second
+    verifier bug: pairing by qp_idx mismatches under MFEM face
+    orientation flip.  Added centroid tiebreaker within face group.
+[x] Local verification: R-101 PASS at np=2/14/30/50.  DIAG confirms
+    bit-exact fault-state consistency through all 4 RK4 stages.
+[x] Propagation sanity (np=14 / 0.05 s): waves reach all ranks,
+    V_max growing, no pinning signature.
+[ ] Frontera confirmation (3 jobs, ~500 SU) — AWAITING USER APPROVAL
+[ ] If all 3 PASS: v8.0.0 closed; mark signature resolved by Phase 1+2
+[ ] If Frontera 400r still shows V_max pinning: open Phase 3 (bulk
+    propagation / ghost Q exchange), with confirmed rule-out that
+    fault-state drift is not the cause.
 ```

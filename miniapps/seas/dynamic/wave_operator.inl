@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
+#include <cstdio>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -1487,9 +1489,29 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       int n_entries = total / REC;
       if (n_entries == 0) { return; }
 
-      // Sort lexicographically by (key[0], key[1], key[2], qp_idx) as
-      // integers (cast from the double encoding).  Integer comparison is
-      // bit-exact — no tolerance, no sort-ordering pathology.
+      // Pairing strategy (v8.0.0 Phase 2 refinement, np=14 DIAG result):
+      //
+      // Primary key: face vertex triple (integer, exact) — groups the 6
+      //   entries for one shared fault face (3 QPs × 2 owning ranks) into
+      //   one contiguous block.  No tolerance, no FP pathology.
+      //
+      // Secondary key within a face group: physical centroid (with ~1e-6 m
+      //   tolerance) — this is necessary because MFEM's shared-face
+      //   orientation can flip between the two ranks owning the face
+      //   (observed in DIAG output: rank 5 had `sign_flipped=1`, rank 6
+      //   `sign_flipped=0`).  When that happens, rank A's qp_idx=k and
+      //   rank B's qp_idx=k are at DIFFERENT physical points on the face,
+      //   and pairing by qp_idx alone compares mismatched physical QPs
+      //   (whose psi/V differ by the spatial-gradient over face_size/3 —
+      //   the spurious "2.19e-2 psi drift" of Step 1.11).
+      //
+      // Within a face, the 3 QPs are spatially well-separated (~ face_size /
+      //   3 ≈ 300 m on the 1000 m mesh), while the two ranks' views of the
+      //   SAME physical QP agree to ~1 ULP (1e-12 at magnitude 1e4).  A
+      //   1e-6 m tolerance on the centroid secondary key therefore
+      //   unambiguously identifies same-physical-QP pairs without risk of
+      //   false grouping.  qp_idx is ignored for pairing but kept in the
+      //   record + diagnostic output so orientation-flip cases are visible.
       auto key_component = [&](int entry, int k) -> HYPRE_BigInt
       {
          return static_cast<HYPRE_BigInt>(all_data[entry*REC + k]);
@@ -1499,10 +1521,18 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       std::iota(idx.begin(), idx.end(), 0);
       std::sort(idx.begin(), idx.end(), [&](int a, int b)
       {
-         for (int k = 0; k < NUM_KEY_COMPONENTS + 1; k++)   // key[3] + qp_idx
+         // Primary: face_key (3 int64 components, exact).
+         for (int k = 0; k < NUM_KEY_COMPONENTS; k++)
          {
             HYPRE_BigInt va = key_component(a, k);
             HYPRE_BigInt vb = key_component(b, k);
+            if (va != vb) { return va < vb; }
+         }
+         // Secondary: physical centroid lex (tie-breaker within a face).
+         for (int k = 0; k < 3; k++)
+         {
+            double va = all_data[a*REC + CENTROID_OFFSET + k];
+            double vb = all_data[b*REC + CENTROID_OFFSET + k];
             if (va != vb) { return va < vb; }
          }
          return false;
@@ -1510,9 +1540,22 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
 
       auto same_face_qp = [&](int a, int b)
       {
-         for (int k = 0; k < NUM_KEY_COMPONENTS + 1; k++)
+         // Must share face (exact integer match)...
+         for (int k = 0; k < NUM_KEY_COMPONENTS; k++)
          {
             if (key_component(a, k) != key_component(b, k)) { return false; }
+         }
+         // ...AND have centroids agreeing to 1e-6 m (safe within-face tol).
+         constexpr double centroid_abs_floor = 1e-6;
+         for (int k = 0; k < 3; k++)
+         {
+            double va = all_data[a*REC + CENTROID_OFFSET + k];
+            double vb = all_data[b*REC + CENTROID_OFFSET + k];
+            double scale = std::max(std::abs(va), std::abs(vb));
+            double tol_k = std::max(scale
+                                    * std::numeric_limits<double>::epsilon(),
+                                    centroid_abs_floor);
+            if (std::abs(va - vb) > tol_k) { return false; }
          }
          return true;
       };
