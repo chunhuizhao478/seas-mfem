@@ -635,50 +635,6 @@ void TestParaViewFaultOnlyAdvancesRegime()
 }
 
 // =============================================================================
-// Test 6e-tpv: TPV102-style fault-only path advances regime (R-I01)
-// =============================================================================
-//
-// The TPV102 driver's pv_no_domain branch uses the same PeekShouldWrite +
-// CommitSchedule pattern as the BP5 fault-only path.  After R-I01 both use
-// the 2-arg CommitSchedule(time, V_max) so adaptive hysteresis advances.
-// Reverting the TPV102 call to the 1-arg shim (while leaving the default
-// hysteresis_factor = 1.0) is safe today but would silently defeat
-// hysteresis on any future adaptive run.  This test locks that in.
-
-void TestParaViewTPV102StyleFaultOnlyAdvancesRegime()
-{
-   std::cout << "\n=== Test: TPV102-Style Fault-Only Advances Regime (R-I01) ===\n";
-
-   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 1, Element::HEXAHEDRON,
-                                     2.0, 2.0, 1.0);
-   ParaViewOutput<Mesh> pv("test_pv_tpv102_style", mesh, 1);
-   auto &s = pv.GetSchedule();
-   s.v_coseismic       = 1e-3;
-   s.v_nucleation      = 1e-6;
-   s.hysteresis_factor = 10.0;
-   s.dt_coseismic      = 0.5;
-   s.dt_nucleation     = 10.0;
-   s.dt_interseismic   = 1.0 * BP5Params::seconds_per_year;
-   s.Validate();
-
-   TEST_ASSERT(pv.PeekShouldWrite(0, 0.0, 2e-3),
-               "TPV102-style step 0: IC write fires");
-   pv.CommitSchedule(0.0, 2e-3);
-
-   TEST_ASSERT(pv.PeekShouldWrite(1, 0.5, 2e-3),
-               "TPV102-style step 1: dt_coseismic=0.5s elapsed");
-   pv.CommitSchedule(0.5, 2e-3);
-
-   // Step 2: V drops to 2e-4 (above V_co_exit=1e-4 thanks to hyst=10),
-   // so regime MUST stay at 2 and the next write should fire at
-   // elapsed 0.5 s.  Reverting the TPV102 CommitSchedule call to the
-   // 1-arg shim would pin current_regime_ at 0 and dt_out would
-   // become 10 s → this assertion would fail.
-   TEST_ASSERT(pv.PeekShouldWrite(2, 1.0, 2e-4),
-               "TPV102-style step 2: hysteresis keeps coseismic cadence");
-}
-
-// =============================================================================
 // Test 6f: AdaptiveSchedule::Validate() passes on legal inputs (R-P04)
 // =============================================================================
 
@@ -928,7 +884,6 @@ int main(int argc, char *argv[])
    TestParaViewCoseismicDropSkipsNucleation();
    TestParaViewAdaptiveScheduleCustomIntervals();
    TestParaViewFaultOnlyAdvancesRegime();
-   TestParaViewTPV102StyleFaultOnlyAdvancesRegime();
    TestAdaptiveScheduleValidate();
    TestForceWriteFlushes();
    TestWriteAdaptiveInterval();

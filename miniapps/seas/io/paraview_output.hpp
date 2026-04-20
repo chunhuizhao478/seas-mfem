@@ -828,14 +828,14 @@ public:
       last_v_max_      = V_max;
    }
 
-   /// Back-compat single-arg shim preserved for legacy call sites that
-   /// call Save/ShouldWrite just before it (so `last_v_max_` is current),
-   /// or that use the default `hysteresis_factor = 1.0` where the regime
-   /// is a stateless function of V.  Delegates to the two-arg form using
-   /// the last V_max recorded by Save/ShouldWrite.  Callers that want
-   /// hysteresis to advance through a PeekShouldWrite-gated path MUST
-   /// call the two-arg overload instead (TPV102 and the BP5 fault-only
-   /// driver path both do).
+   /// Back-compat single-arg shim preserved for existing call sites
+   /// (TPV102 driver and legacy BP5 paths).  Delegates to the two-arg
+   /// form using the last V_max recorded by Save/ShouldWrite; this is
+   /// correct for callers that either (a) use the default
+   /// hysteresis_factor = 1.0 (regime is stateless in V), or (b) call
+   /// Save/ShouldWrite just before this.  Callers that want hysteresis
+   /// to advance through a PeekShouldWrite-gated path MUST call the
+   /// two-arg overload instead.
    void CommitSchedule(real_t time) { CommitSchedule(time, last_v_max_); }
 
    /// Force a save at the current state.
