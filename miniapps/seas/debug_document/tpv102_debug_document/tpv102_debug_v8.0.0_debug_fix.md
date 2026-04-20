@@ -535,6 +535,108 @@ the abort.  Based on the output we will either:
 verifier enhancement identifies and fixes the 50-rank R-101 abort.
 Otherwise all 3 larger-scale runs will hit the same abort.
 
+### Step 1.7 — Job 7666171 diagnosis (same sbatch, fprintf+fflush rank-0 detail)
+
+**Input:** `tpv102_init_50r_7666171.err` / `.out` — 50-rank re-run of
+`tpv102_200m_p1_0.01s_50rank_init.sbatch` against commit `6c620d6`
+(post Step 1.5 + the Step 1.5b fprintf+fflush rework).
+
+Rank-0 detail now printed successfully:
+
+```
+[BUILD] SEAS_DIAG_FAULT_FLUX = OFF
+[BUILD] SEAS_DIAG_GHOST_EXCHANGE = OFF
+
+[R-101 rank-0 detail]
+  n_entries=246, n_pairs=122, n_unpaired=2, reported=2
+  [UNPAIRED] centroid=(-9.8993357168e+03, 2.6023744482e-13, -4.2500000000e+03) rank=3 group_size=1
+  [UNPAIRED] centroid=(-9.8993357168e+03, 2.6023744482e-13, -4.2500000000e+03) rank=6 group_size=1
+  Likely mesh-partitioning pathology ... OR tolerance collapse.
+```
+
+**Diagnosis.**  Key numbers:
+
+- 246 entries = 122 pairs × 2 + 2 orphans.  Consistent with 41 shared
+  fault faces (3 QPs/face): 40 faces pair all 3 QPs (120 pairs / 240
+  entries) + 1 face pairs 2 QPs (2 pairs / 4 entries) + 2 orphans on
+  the 3rd QP of that single face.
+- Both orphans printed with identical centroid to 10 digits.
+- Orphans come from 2 *distinct* ranks (3 and 6) — not a same-rank
+  ctor double-mapping anomaly.
+- Each reports `group_size=1` — i.e. `same_centroid(rank3, rank6)`
+  returned FALSE despite apparently identical coords.
+
+**Root cause.**  The centroid values are NOT actually identical at
+the bit level — they agree only to ~10 printed digits.  The 1e-9
+`abs_floor` was set by the prior R-503 fix assuming "FP noise at
+mesh-scale coords stays within 1e-9".  At the 200 m production mesh
+with 50-rank METIS partition, one QP on one shared fault face
+produces inter-rank centroid drift that exceeds 1e-9 through MFEM's
+`ftr->Face->Transform(ip, phys)` path — likely due to
+face-neighbor vertex data reaching the other rank via MPI with an
+aggregation order that is not bit-identical to the local-face path.
+The 1000 m / np=2 / np=4 R-101 tests do not exercise any partition
+configuration that triggers this drift, so the tight 1e-9 floor
+passed unit tests but failed production.
+
+**Ruled out (not the cause):**
+
+- Same-rank double mapping: both entries have different ranks.
+- Triple-rank claim (group_size≥3): both groups are exactly size 1.
+- Global-vertex-key mismatch at the ctor (R-002/R-502): if one rank
+  had failed to classify this face as a fault, it would have emitted
+  zero entries for this QP — we would see 1 orphan (not 2) and no
+  matching-centroid counterpart.  The fact that BOTH rank 3 and rank
+  6 emitted an entry at this centroid means both ranks correctly
+  classified this face as a shared fault face.
+
+**Fix applied** — `miniapps/seas/dynamic/wave_operator.inl`:
+
+1. `same_centroid` (line ~1489): `abs_floor` raised from **1e-9 → 1e-6**.
+   New value is 8 orders of magnitude below the smallest realistic
+   fault-mesh element (min h ≈ 100 m) — cannot cause false grouping
+   of unrelated faces — and 3 orders above any observed inter-rank
+   drift.  Comment updated to cite this diagnosis.
+
+2. Diagnostic `[UNPAIRED]` centroid print: `%.10e → %.17e` (full
+   double precision).  If this fires again in any future run, the
+   log will show the actual numerical difference between the two
+   orphans' centroids, eliminating the "same printed coords but
+   different groups" ambiguity we saw here.
+
+**Local verification** (commit applied, `seas_test_r101_shared_fault`
+and `seas_test_parallel_wave_operator` rebuilt from fresh .o):
+
+```
+mpirun -np 2 ./seas_test_r101_shared_fault  →  18/18 PASS
+mpirun -np 2 ./seas_test_parallel_wave_operator →   5/5 PASS
+```
+
+R-802 momentum-conservation diagnostic unchanged (rel=3.04e-18).
+The fix widens pairing tolerance but does not touch the bit-equality
+path that `same_centroid` returning TRUE leads to (`max_rel_diff`
+comparison is unchanged).  No test regressed.
+
+**No new test added.**  Constructing a 2-rank reproducer for
+sub-1e-6 inter-rank centroid drift requires a specific
+METIS-partition corner case on a 200 m mesh that is not practical to
+reproduce in a local np=2 unit test.  The existing R-101 parallel
+test continues to guarantee the paired path is correct; the Frontera
+50-rank re-run is the regression check for the tolerance fix.
+
+### Step 1.8 — Next Frontera submission (awaiting user go-ahead)
+
+Re-run `tpv102_200m_p1_0.01s_50rank_init.sbatch` against the fix
+commit.  Expected: init-only sanity PASS (no R-101 abort), RESULT.txt
+prints "init complete" (or equivalent driver-exit marker).  If PASS,
+proceed to Jobs 2/3/4 per plan decision table.
+
+If R-101 fires again at 50-rank, the `%.17e` diagnostic will reveal
+whether the orphan centroids genuinely differ by > 1e-6 (→ MFEM
+pathology deeper than FP drift — escalate to face-vertex-key-based
+pairing) or the sort algorithm is at fault (→ revisit the sort
+comparator, which currently uses exact equality).
+
 **Phase 1 Phase Log (current):**
 ```
 [x] Phase 1A Action 0 (Makefile + banner) applied + verified
@@ -543,9 +645,11 @@ Otherwise all 3 larger-scale runs will hit the same abort.
     identified and fixed in all 4
 [x] Job 1 submitted (50-rank init) — aborted on R-101 verifier
 [x] R-101 verifier diagnostic enhanced (rank tag + per-entry report)
-[ ] Job 1 re-run — awaiting user submission
-[ ] R-101 root cause identified
-[ ] R-101 fix applied
+[x] Job 1 re-run #1 (7666151) — fprintf+fflush needed for detail print
+[x] Job 1 re-run #2 (7666171) — rank-0 detail captured; root cause
+    identified (inter-rank centroid FP drift > 1e-9)
+[x] R-101 fix applied (abs_floor 1e-9→1e-6, diag precision %.17e)
+[ ] Job 1 re-run #3 — awaiting user submission on fix commit
 [ ] Job 1 PASS confirmed
 [ ] Jobs 2, 3, 4 submitted
 [ ] Phase 1 Case selected

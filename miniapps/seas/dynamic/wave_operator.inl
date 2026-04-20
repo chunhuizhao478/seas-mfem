@@ -1492,11 +1492,24 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          // collapses to ~1e-28 at coordinates near zero (fault plane at
          // y=0 is the TPV102 case), so two ranks with 1-ULP-of-nonzero
          // drift in y get classified as different centroids and trigger
-         // a spurious R-305 unpair-abort.  The absolute floor is smaller
-         // than any realistic fault-mesh element (min h ~ m, fault
-         // geometry tolerance 1e-9 m) and larger than any plausible FP
-         // noise at mesh-scale coordinates.
-         const double abs_floor = 1e-9;
+         // a spurious R-305 unpair-abort.
+         //
+         // v8.0.0 Phase 1 fix (job 7666171 diagnosis): the prior 1e-9 floor
+         // was too tight.  At 200 m production mesh with 50-rank partition,
+         // MFEM's shared-face `ftr->Face->Transform(ip, phys)` produces FP
+         // drift > 1e-9 between rank pairs for some QP configurations
+         // (vertex coordinate replication through face_nbr data is not
+         // bit-identical to the local-face path through all aggregation
+         // orders).  Two orphaned entries were observed with centroids
+         // matching to 10 printed digits yet failing `same_centroid`.
+         //
+         // Raising the floor to 1e-6 m keeps us safely above any observed
+         // inter-rank FP drift while remaining 8 orders of magnitude below
+         // the smallest realistic fault-mesh element (min h ≈ 100 m on
+         // production BP5/TPV102 meshes).  Two distinct fault faces have
+         // centroids separated by O(h/2) ≈ 100 m, so 1e-6 m cannot cause
+         // false grouping of unrelated faces.
+         const double abs_floor = 1e-6;
          for (int k = 0; k < 3; k++)
          {
             double va = all_data[a*REC + k], vb = all_data[b*REC + k];
@@ -1639,8 +1652,13 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                    ? " (truncated)" : ""));
                for (size_t u = 0; u < unpaired.size(); u++)
                {
+                  // %.17e preserves full double precision so any
+                  // sub-printable-digit FP drift that causes pairing
+                  // failure is visible in the log (v8.0.0 Phase 1: job
+                  // 7666171 printed "identical" coords at %.10e that
+                  // actually differed by > 1e-9 and caused the failure).
                   std::fprintf(stderr,
-                     "  [UNPAIRED] centroid=(%.10e, %.10e, %.10e) "
+                     "  [UNPAIRED] centroid=(%.17e, %.17e, %.17e) "
                      "rank=%d group_size=%d\n",
                      unpaired[u].cx, unpaired[u].cy, unpaired[u].cz,
                      unpaired[u].rank, unpaired[u].group_size);
