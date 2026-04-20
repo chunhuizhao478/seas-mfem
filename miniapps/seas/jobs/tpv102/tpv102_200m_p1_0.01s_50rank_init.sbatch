@@ -51,9 +51,12 @@ grep -q '^MFEM_USE_PETSC *= YES' config/config.mk || { echo "ERROR: no PETSc"; e
 grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
 
 cd miniapps/seas
-# Ensure a clean rebuild so the new [BUILD] banner compiles in even if
-# .o files were built before the banner patch.
-rm -f drivers/tpv102_driver.o dynamic/wave_operator.o dynamic/fault_face_flux.o
+# Force a full rebuild of the driver + every dynamic/ .o file so the
+# current git state's source (user pulls before submit) unconditionally
+# compiles in.  The 3-file rm list used previously missed godunov_flux,
+# pml_layer, friction_solver and would silently produce a stale binary
+# when those files changed.  rm'ing the executable also forces relink.
+rm -f seas_tpv102_driver drivers/tpv102_driver.o dynamic/*.o
 make seas_tpv102_driver -j"${JOBS}" SEAS_EXTRA_CPPFLAGS="" \
    || { echo "BUILD FAILED"; exit 1; }
 

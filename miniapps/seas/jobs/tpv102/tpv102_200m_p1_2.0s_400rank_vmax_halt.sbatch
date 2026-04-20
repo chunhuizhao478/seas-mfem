@@ -72,7 +72,9 @@ grep -q '^MFEM_USE_PETSC *= YES' config/config.mk || { echo "ERROR: no PETSc"; e
 grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
 
 cd miniapps/seas
-rm -f drivers/tpv102_driver.o dynamic/wave_operator.o dynamic/fault_face_flux.o
+# Force full rebuild: rm executable + ALL dynamic/ .o files so any
+# source change (user pulls before submit) unconditionally picks up.
+rm -f seas_tpv102_driver drivers/tpv102_driver.o dynamic/*.o
 make seas_tpv102_driver -j"${JOBS}" SEAS_EXTRA_CPPFLAGS="" \
    || { echo "BUILD FAILED"; exit 1; }
 
