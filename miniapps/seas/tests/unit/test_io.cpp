@@ -29,6 +29,7 @@
 #include "../../friction/dieterich_ruina.hpp"
 #include "../../friction/state_evolution.hpp"
 #include "../../config/bp2_params.hpp"
+#include "../../config/bp5_params.hpp"
 #include "../../domain/bp2_mesh.hpp"
 
 #include <iostream>
@@ -464,8 +465,11 @@ void TestParaViewOutputInterval()
 {
    std::cout << "\n=== Test: ParaView Adaptive Output Interval ===\n";
 
+   // R-P05: reference BP5Params (not BP2Params) — both are numerically
+   // identical today, but the code under test (paraview_output.hpp)
+   // uses BP5Params::seconds_per_year, so the test should too.
    TEST_NEAR(ParaViewOutput<Mesh>::OutputInterval(1e-10),
-             1.0 * BP2Params::seconds_per_year, 1.0,
+             1.0 * BP5Params::seconds_per_year, 1.0,
              "PV interseismic interval ~ 1 yr");
    TEST_NEAR(ParaViewOutput<Mesh>::OutputInterval(1e-4),
              1.0, 1e-10,
@@ -473,6 +477,226 @@ void TestParaViewOutputInterval()
    TEST_NEAR(ParaViewOutput<Mesh>::OutputInterval(1e-2),
              0.01, 1e-10,
              "PV coseismic interval = 0.01 s");
+}
+
+// =============================================================================
+// Test 6a: Adaptive schedule hysteresis state machine
+// =============================================================================
+
+void TestParaViewAdaptiveScheduleHysteresis()
+{
+   std::cout << "\n=== Test: AdaptiveSchedule Hysteresis ===\n";
+
+   using Schedule = ParaViewOutput<Mesh>::AdaptiveSchedule;
+   Schedule s;
+   s.v_coseismic     = 1e-3;
+   s.v_nucleation    = 1e-6;
+   s.hysteresis_factor = 10.0;
+   s.Validate();
+   int r = 0;
+
+   r = s.NextRegime(2e-3, r);
+   TEST_ASSERT(r == 2, "Hysteresis: enter coseismic at V=2e-3");
+   r = s.NextRegime(2e-4, r);
+   TEST_ASSERT(r == 2, "Hysteresis: stay coseismic at V=2e-4 > V_co_exit=1e-4");
+   r = s.NextRegime(5e-5, r);
+   TEST_ASSERT(r == 1, "Hysteresis: drop to nucleation at V=5e-5 < V_co_exit");
+   r = s.NextRegime(1.1e-6, r);
+   TEST_ASSERT(r == 1, "Hysteresis: stay nucleation at V=1.1e-6 > V_nu_exit=1e-7");
+   r = s.NextRegime(5e-8, r);
+   TEST_ASSERT(r == 0, "Hysteresis: drop to interseismic at V=5e-8 < V_nu_exit");
+}
+
+// =============================================================================
+// Test 6b: Legacy boundary preserved at exact-threshold V (R-P08)
+// =============================================================================
+
+void TestParaViewLegacyBoundaryPreserved()
+{
+   std::cout << "\n=== Test: ParaView Legacy Boundary Preserved ===\n";
+
+   // Legacy helper used strict V_max > 1e-3 / > 1e-6.  The new state
+   // machine must match this at the exact threshold values.  Flipping
+   // > to >= in NextRegime entry branches would fail this test.
+   TEST_NEAR(ParaViewOutput<Mesh>::OutputInterval(1e-3),
+             1.0, 1e-15,
+             "V=1e-3 (exact threshold): nucleation, not coseismic");
+   TEST_NEAR(ParaViewOutput<Mesh>::OutputInterval(1e-6),
+             1.0 * BP5Params::seconds_per_year, 1.0,
+             "V=1e-6 (exact threshold): interseismic, not nucleation");
+}
+
+// =============================================================================
+// Test 6c: Coseismic→drop bypasses the nucleation window (R-P03)
+// =============================================================================
+
+void TestParaViewCoseismicDropSkipsNucleation()
+{
+   std::cout << "\n=== Test: Coseismic-drop Skips Nucleation ===\n";
+
+   using Schedule = ParaViewOutput<Mesh>::AdaptiveSchedule;
+   Schedule s;
+   s.v_coseismic = 1e-3;
+   s.v_nucleation = 1e-6;
+   s.hysteresis_factor = 10.0;
+   // Derived thresholds: V_co_exit=1e-4, V_nu_enter=1e-6, V_nu_exit=1e-7.
+   int r = 2;                                    // start in coseismic
+   r = s.NextRegime(2e-4, r);
+   TEST_ASSERT(r == 2, "Coseismic drop: stay at V=2e-4 > V_co_exit=1e-4");
+   r = s.NextRegime(5e-7, r);
+   TEST_ASSERT(r == 0,
+               "Coseismic drop: V=5e-7 < V_nu_enter=1e-6 -> regime 0 "
+               "(intentional skip of nucleation window)");
+
+   // Starting fresh in regime 2 with V landing inside [V_nu_exit, V_nu_enter]
+   // = [1e-7, 1e-6] — the "intentionally skipped" window — must drop
+   // straight to regime 0, NOT to regime 1 (R-P03 design choice).
+   r = 2;
+   r = s.NextRegime(5e-7, r);
+   TEST_ASSERT(r == 0, "Coseismic drop: intentional skip — regime 0 (not 1)");
+}
+
+// =============================================================================
+// Test 6d: Custom-interval schedule
+// =============================================================================
+
+void TestParaViewAdaptiveScheduleCustomIntervals()
+{
+   std::cout << "\n=== Test: AdaptiveSchedule Custom Intervals ===\n";
+
+   // Tiny inline mesh — does NOT use the BP5 1000m mesh.
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 1, Element::HEXAHEDRON,
+                                     2.0, 2.0, 1.0);
+   ParaViewOutput<Mesh> pv("test_pv_custom_intervals", mesh, 1);
+
+   auto &s = pv.GetSchedule();
+   s.dt_interseismic = 60.0;
+   s.dt_coseismic    = 0.1;
+   s.Validate();
+
+   // Step 0: last_write_time_ starts at -1e30 → fires.
+   TEST_ASSERT(pv.Save(0, 0.0, 1e-10),
+               "CustomIntervals: Save(0, 0.0) fires (IC write)");
+   // Step 1: 30 s elapsed, dt_interseismic=60 → does NOT fire.
+   TEST_ASSERT(!pv.Save(1, 30.0, 1e-10),
+               "CustomIntervals: 30s < 60s interseismic interval → skip");
+   // Step 2: 120 s elapsed → fires.
+   TEST_ASSERT(pv.Save(2, 120.0, 1e-10),
+               "CustomIntervals: 120s >= 60s → fire");
+   // Step 3: coseismic spike, 0.05 s elapsed < 0.1 s → skip.
+   TEST_ASSERT(!pv.Save(3, 120.05, 2e-3),
+               "CustomIntervals: 0.05s < 0.1s coseismic → skip");
+   // Step 4: 0.15 s elapsed >= 0.1 s → fire.
+   TEST_ASSERT(pv.Save(4, 120.15, 2e-3),
+               "CustomIntervals: 0.15s >= 0.1s coseismic → fire");
+}
+
+// =============================================================================
+// Test 6e: Fault-only CommitSchedule(time, V_max) advances regime (R-P07)
+// =============================================================================
+
+void TestParaViewFaultOnlyAdvancesRegime()
+{
+   std::cout << "\n=== Test: Fault-only Mode Advances Regime (R-P07) ===\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 1, Element::HEXAHEDRON,
+                                     2.0, 2.0, 1.0);
+   ParaViewOutput<Mesh> pv("test_pv_fault_only_regime", mesh, 1);
+   auto &s = pv.GetSchedule();
+   s.v_coseismic       = 1e-3;
+   s.v_nucleation      = 1e-6;
+   s.hysteresis_factor = 10.0;
+   s.dt_coseismic      = 0.5;
+   s.dt_nucleation     = 10.0;
+   s.dt_interseismic   = 1.0 * BP5Params::seconds_per_year;
+   s.Validate();
+
+   // V trajectory {2e-3, 2e-3, 2e-4}: with hyst=10 ⇒ V_co_exit=1e-4.
+   // Step 2's V=2e-4 > V_co_exit, so regime MUST stay at 2 (coseismic),
+   // keeping the cadence at dt_coseismic=0.5s.  Without the two-arg
+   // CommitSchedule, current_regime_ is pinned at 0 and step 2 would
+   // silently see dt_out=dt_nucleation=10s, causing the final assertion
+   // below to fail.
+
+   // Step 0: last_write_time_ starts at -1e30 so any non-zero dt fires.
+   TEST_ASSERT(pv.PeekShouldWrite(0, 0.0, 2e-3),
+               "FaultOnly step 0: PeekShouldWrite fires for IC");
+   pv.CommitSchedule(0.0, 2e-3);
+
+   // Step 1: 0.5 s elapsed >= dt_coseismic=0.5 s → fire.
+   TEST_ASSERT(pv.PeekShouldWrite(1, 0.5, 2e-3),
+               "FaultOnly step 1: dt_coseismic=0.5s elapsed");
+   pv.CommitSchedule(0.5, 2e-3);
+
+   // Step 2: V drops to 2e-4, but hysteresis keeps regime 2.  elapsed
+   // 0.5 s from last_write_time_=0.5 to time=1.0 → should fire.
+   TEST_ASSERT(pv.PeekShouldWrite(2, 1.0, 2e-4),
+               "FaultOnly step 2: hysteresis keeps coseismic cadence (R-P07)");
+}
+
+// =============================================================================
+// Test 6e-tpv: TPV102-style fault-only path advances regime (R-I01)
+// =============================================================================
+//
+// The TPV102 driver's pv_no_domain branch uses the same PeekShouldWrite +
+// CommitSchedule pattern as the BP5 fault-only path.  After R-I01 both use
+// the 2-arg CommitSchedule(time, V_max) so adaptive hysteresis advances.
+// Reverting the TPV102 call to the 1-arg shim (while leaving the default
+// hysteresis_factor = 1.0) is safe today but would silently defeat
+// hysteresis on any future adaptive run.  This test locks that in.
+
+void TestParaViewTPV102StyleFaultOnlyAdvancesRegime()
+{
+   std::cout << "\n=== Test: TPV102-Style Fault-Only Advances Regime (R-I01) ===\n";
+
+   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 1, Element::HEXAHEDRON,
+                                     2.0, 2.0, 1.0);
+   ParaViewOutput<Mesh> pv("test_pv_tpv102_style", mesh, 1);
+   auto &s = pv.GetSchedule();
+   s.v_coseismic       = 1e-3;
+   s.v_nucleation      = 1e-6;
+   s.hysteresis_factor = 10.0;
+   s.dt_coseismic      = 0.5;
+   s.dt_nucleation     = 10.0;
+   s.dt_interseismic   = 1.0 * BP5Params::seconds_per_year;
+   s.Validate();
+
+   TEST_ASSERT(pv.PeekShouldWrite(0, 0.0, 2e-3),
+               "TPV102-style step 0: IC write fires");
+   pv.CommitSchedule(0.0, 2e-3);
+
+   TEST_ASSERT(pv.PeekShouldWrite(1, 0.5, 2e-3),
+               "TPV102-style step 1: dt_coseismic=0.5s elapsed");
+   pv.CommitSchedule(0.5, 2e-3);
+
+   // Step 2: V drops to 2e-4 (above V_co_exit=1e-4 thanks to hyst=10),
+   // so regime MUST stay at 2 and the next write should fire at
+   // elapsed 0.5 s.  Reverting the TPV102 CommitSchedule call to the
+   // 1-arg shim would pin current_regime_ at 0 and dt_out would
+   // become 10 s → this assertion would fail.
+   TEST_ASSERT(pv.PeekShouldWrite(2, 1.0, 2e-4),
+               "TPV102-style step 2: hysteresis keeps coseismic cadence");
+}
+
+// =============================================================================
+// Test 6f: AdaptiveSchedule::Validate() passes on legal inputs (R-P04)
+// =============================================================================
+
+void TestAdaptiveScheduleValidate()
+{
+   std::cout << "\n=== Test: AdaptiveSchedule Validate() ===\n";
+
+   using Schedule = ParaViewOutput<Mesh>::AdaptiveSchedule;
+   Schedule s;                         // all defaults — must pass.
+   s.Validate();
+   // Realistic production overrides — must also pass.
+   s.hysteresis_factor = 10.0;
+   s.dt_coseismic      = 0.5;
+   s.dt_nucleation     = 10.0;
+   s.dt_interseismic   = 5.0 * BP5Params::seconds_per_year;
+   s.Validate();
+   // If we reach here without abort, the schedule accepts valid inputs.
+   TEST_ASSERT(true, "Validate() passes on legal default + override inputs");
 }
 
 // =============================================================================
@@ -699,6 +923,13 @@ int main(int argc, char *argv[])
    TestParaViewOutput();
    TestParaViewCombinedOutput();
    TestParaViewOutputInterval();
+   TestParaViewAdaptiveScheduleHysteresis();
+   TestParaViewLegacyBoundaryPreserved();
+   TestParaViewCoseismicDropSkipsNucleation();
+   TestParaViewAdaptiveScheduleCustomIntervals();
+   TestParaViewFaultOnlyAdvancesRegime();
+   TestParaViewTPV102StyleFaultOnlyAdvancesRegime();
+   TestAdaptiveScheduleValidate();
    TestForceWriteFlushes();
    TestWriteAdaptiveInterval();
    TestProbeOutputFlush();

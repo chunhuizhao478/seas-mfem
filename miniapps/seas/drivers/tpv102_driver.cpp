@@ -692,7 +692,11 @@ int main(int argc, char *argv[])
       if (pv_no_domain)
       {
          // Fault-surface PVD only; advance the schedule ourselves.
-         pv_out->CommitSchedule(time);
+         // Two-arg overload advances last_write_time_, current_regime_,
+         // and last_v_max_ atomically, so adaptive hysteresis stays
+         // correct if ever enabled on this path.  Matches the BP5
+         // fault-only pattern at bp5_verification_full.cpp.
+         pv_out->CommitSchedule(time, V_max);
       }
       else
       {

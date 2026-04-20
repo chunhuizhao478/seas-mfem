@@ -63,6 +63,14 @@ echo "Output dir: ${RESULT_DIR}"
 echo "system_update full production: 400 ranks, 48hr, ~1800 yr earthquake cycles"
 echo "Phases 0-6 complete. Final verification run."
 
+# Adaptive fault-surface ParaView PVD output (fault-only: no volume PVD).
+# Rationale for the values below on a 1800-yr / ~8-event / ~100-s-rupture run:
+#   dt_inter = 5 yr   -> ~360 interseismic frames (was 1800 at 1 yr).
+#   dt_nu    = 10 s   -> ~100s of frames over each event's nucleation phase.
+#   dt_co    = 0.5 s  -> ~200 frames per ~100-s rupture (was ~10000 at 0.01 s).
+#   hyst     = 10     -> enter at 1e-3 / 1e-6, exit at 1e-4 / 1e-7 (no chatter).
+# Expected disk footprint: ~3000 fault-surface frames x ~400 ranks x ~12 fields
+# ~= a few GB total, vs. hundreds of GB if volume PVD were enabled.
 ibrun ./seas_bp5_full \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
@@ -77,4 +85,13 @@ ibrun ./seas_bp5_full \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
       --regression-tolerance 1e-2 \
-      --verify
+      --verify \
+      --paraview \
+      --paraview-fault-only \
+      --paraview-adaptive \
+      --paraview-v-co        1e-3 \
+      --paraview-v-nu        1e-6 \
+      --paraview-hyst        10.0 \
+      --paraview-dt-co       0.5 \
+      --paraview-dt-nu       10.0 \
+      --paraview-dt-inter-yr 5.0

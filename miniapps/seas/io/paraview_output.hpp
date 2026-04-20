@@ -43,10 +43,13 @@ template <> struct GFType<ParMesh>
 /// GridFunctions on the domain mesh.  Fault values are mapped from owned
 /// fault DOF vectors to the two volume elements adjacent to each fault face.
 ///
-/// Output frequency is adaptive, keyed to V_max (slip rate):
+/// Output frequency is adaptive, keyed to V_max (slip rate).  Defaults:
 ///   - coseismic  (V > 1e-3 m/s)  : every 0.01 s
 ///   - nucleation (V > 1e-6)       : every 1.0 s
 ///   - interseismic                : every 1 year
+/// Thresholds and intervals are runtime-configurable via GetSchedule()
+/// (see AdaptiveSchedule).  A hysteresis_factor > 1 suppresses regime
+/// chattering near the thresholds.
 ///
 /// @tparam MeshType  Mesh (serial) or ParMesh (parallel)
 template <typename MeshType = Mesh>
@@ -66,6 +69,110 @@ public:
    /// the adaptive V_max schedule.  Takes precedence over V_max schedule
    /// but not over step-based interval.
    real_t fixed_dt = 0.0;
+
+   /// Runtime-configurable adaptive-schedule parameters.  Defaults match
+   /// the legacy hardcoded OutputInterval thresholds/intervals and have
+   /// hysteresis_factor = 1.0 (no hysteresis), so existing callers see
+   /// bit-identical behavior.
+   ///
+   /// Regime indices: 0 = interseismic, 1 = nucleation, 2 = coseismic.
+   struct AdaptiveSchedule
+   {
+      // V thresholds (m/s).  Coseismic enter when V exceeds v_coseismic;
+      // nucleation enter when V exceeds v_nucleation.
+      real_t v_coseismic       = 1e-3;
+      real_t v_nucleation      = 1e-6;
+      // Hysteresis factor (>= 1).  Leaving a regime requires V to drop
+      // below (threshold / hysteresis_factor).  1.0 disables hysteresis.
+      real_t hysteresis_factor = 1.0;
+      // Output intervals (seconds) used in each regime.
+      real_t dt_coseismic      = 0.01;
+      real_t dt_nucleation     = 1.0;
+      real_t dt_interseismic   = 1.0 * BP5Params::seconds_per_year;
+
+      /// Return the output interval (seconds) for a given regime.
+      /// V is accepted for signature symmetry with NextRegime but is
+      /// unused — the cadence is stable within a regime.
+      real_t Interval(real_t /*V*/, int regime) const
+      {
+         switch (regime)
+         {
+            case 2:  return dt_coseismic;
+            case 1:  return dt_nucleation;
+            default: return dt_interseismic;
+         }
+      }
+
+      /// State machine mapping (V, prev_regime) -> new regime.
+      ///
+      /// Entry comparisons are STRICT > (not >=) to preserve byte
+      /// compatibility with the legacy OutputInterval which used
+      /// V_max > 1e-3 / V_max > 1e-6.  Exit comparisons are strict <,
+      /// so an exact-threshold V stays in its current regime.
+      ///
+      /// Non-finite V (NaN/Inf) is treated as coseismic, so we keep
+      /// dense output during a blowup.
+      int NextRegime(real_t V, int prev) const
+      {
+         const real_t V_co_enter = v_coseismic;
+         const real_t V_co_exit  = v_coseismic  / hysteresis_factor;
+         const real_t V_nu_enter = v_nucleation;
+         const real_t V_nu_exit  = v_nucleation / hysteresis_factor;
+
+         if (!std::isfinite(V)) { return 2; }
+
+         switch (prev)
+         {
+            case 0: // interseismic
+               if (V > V_co_enter) { return 2; }
+               if (V > V_nu_enter) { return 1; }
+               return 0;
+            case 1: // nucleation
+               if (V > V_co_enter) { return 2; }
+               if (V < V_nu_exit)  { return 0; }
+               return 1;
+            case 2: // coseismic
+               if (V < V_co_exit)
+               {
+                  // Drop-past-threshold semantics (intentional):
+                  // the target uses the STRICT ENTRY threshold, so a V
+                  // landing in [V_nu_exit, V_nu_enter] goes straight to
+                  // regime 0 (interseismic) — we do NOT transfer any
+                  // accumulated nucleation-hysteresis credit from the
+                  // outbound path.  Rationale: after a completed
+                  // rupture, V is usually already deep in interseismic
+                  // territory; returning to nucleation only when V is
+                  // unambiguously above the entry threshold avoids
+                  // over-sampling post-rupture ring-down.
+                  if (V > V_nu_enter) { return 1; }
+                  return 0;
+               }
+               return 2;
+            default: return 0;
+         }
+      }
+
+      /// One-shot invariant check.  Call once after applying any CLI
+      /// overrides (NOT inside NextRegime / Interval — those are
+      /// hot-path).  Aborts with a readable message on bad inputs.
+      void Validate() const
+      {
+         MFEM_VERIFY(hysteresis_factor >= 1.0,
+                     "AdaptiveSchedule: hysteresis_factor must be >= 1.0, got "
+                     << hysteresis_factor);
+         MFEM_VERIFY(v_coseismic > v_nucleation && v_nucleation > 0.0,
+                     "AdaptiveSchedule: require v_coseismic (" << v_coseismic
+                     << ") > v_nucleation (" << v_nucleation << ") > 0");
+         MFEM_VERIFY(dt_coseismic > 0.0 && dt_nucleation > 0.0 &&
+                     dt_interseismic > 0.0,
+                     "AdaptiveSchedule: all dt_* must be positive");
+      }
+   };
+
+   /// Mutable accessor so drivers can override thresholds/intervals at
+   /// configuration time.  Call Validate() after tweaking.
+   AdaptiveSchedule &GetSchedule() { return adaptive_; }
+   const AdaptiveSchedule &GetSchedule() const { return adaptive_; }
 
    /// @brief Construct the ParaView output manager.
    ParaViewOutput(const std::string &prefix,
@@ -633,24 +740,30 @@ public:
          // Step-based: write only at multiples of the interval
          if (cycle % output_every_n_steps == 0)
          {
+            last_v_max_ = V_max;
             return ForceSaveImpl(cycle, time);
          }
          return false;
       }
-      // Time-based: fixed dt or adaptive V_max schedule
-      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
+      // Time-based: fixed dt or adaptive V_max schedule (with hysteresis).
+      const int new_regime = adaptive_.NextRegime(V_max, current_regime_);
+      real_t dt_out = (fixed_dt > 0.0)
+                      ? fixed_dt
+                      : adaptive_.Interval(V_max, new_regime);
       if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
       {
          return false;
       }
+      current_regime_ = new_regime;
+      last_v_max_     = V_max;
       return ForceSaveImpl(cycle, time);
    }
 
    /// Schedule check without writing the volume PVD.  Returns true on the
    /// cycles/times when Save() would write, and advances last_write_time_
-   /// so subsequent scheduling stays consistent.  Use this when only the
-   /// fault-surface VTU is wanted and the volume mesh+fields are suppressed
-   /// to save disk space.
+   /// (and current_regime_, last_v_max_) so subsequent scheduling stays
+   /// consistent.  Use this when only the fault-surface VTU is wanted and
+   /// the volume mesh+fields are suppressed to save disk space.
    bool ShouldWrite(int cycle, real_t time, real_t V_max)
    {
       if (output_every_n_steps > 0)
@@ -658,45 +771,72 @@ public:
          if (cycle % output_every_n_steps == 0)
          {
             last_write_time_ = time;
+            last_v_max_      = V_max;
             return true;
          }
          return false;
       }
-      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
+      const int new_regime = adaptive_.NextRegime(V_max, current_regime_);
+      real_t dt_out = (fixed_dt > 0.0)
+                      ? fixed_dt
+                      : adaptive_.Interval(V_max, new_regime);
       if (time - last_write_time_ < dt_out * kOutputTimeTolerance)
       {
          return false;
       }
+      current_regime_  = new_regime;
       last_write_time_ = time;
+      last_v_max_      = V_max;
       return true;
    }
 
    /// Read-only schedule check: returns true iff Save() (or ShouldWrite())
-   /// would write at (cycle, time, V_max), without mutating last_write_time_.
-   /// Use this to gate expensive per-step packing work: Commit the schedule
-   /// advance with CommitSchedule once the writes are done — this replaces
-   /// the earlier "Peek then also call Save/ShouldWrite" pattern that
-   /// evaluated the gate twice with (in principle) inconsistent inputs.
+   /// would write at (cycle, time, V_max), without mutating last_write_time_,
+   /// current_regime_, or last_v_max_.  Use this to gate expensive per-step
+   /// packing work: then call the two-arg CommitSchedule(time, V_max) to
+   /// advance state after the writes are committed.  The single-arg shim
+   /// CommitSchedule(time) uses the last V_max recorded by Save/ShouldWrite
+   /// (NOT by Peek — Peek is strictly read-only) and is correct for any
+   /// call site that uses the default hysteresis_factor = 1.0 (where the
+   /// regime is a stateless function of V).  Fault-only callers that set
+   /// hysteresis_factor > 1 MUST use the two-arg CommitSchedule.
    bool PeekShouldWrite(int cycle, real_t time, real_t V_max) const
    {
       if (output_every_n_steps > 0)
       {
          return (cycle % output_every_n_steps == 0);
       }
-      real_t dt_out = (fixed_dt > 0.0) ? fixed_dt : OutputInterval(V_max);
+      // Compute the prospective regime locally WITHOUT mutating state.
+      const int prospective_regime = adaptive_.NextRegime(V_max, current_regime_);
+      real_t dt_out = (fixed_dt > 0.0)
+                      ? fixed_dt
+                      : adaptive_.Interval(V_max, prospective_regime);
       return (time - last_write_time_ >= dt_out * kOutputTimeTolerance);
    }
 
-   /// Advance `last_write_time_` to `time` (R-104/R-108 fix, simplified by
-   /// R-308).  Call after `PeekShouldWrite` has already confirmed the cycle
-   /// is scheduled AND the per-cycle writes (Save, WriteFaultSurfaceVTU,
-   /// ...) have been committed.  Keeps the schedule gate as a const read
-   /// (Peek) and the mutation as a distinct write (Commit), so the two
-   /// calls cannot disagree on `last_write_time_`.  The cycle and V_max
-   /// arguments of PeekShouldWrite are *gate* inputs — they decide whether
-   /// this cycle writes — and are deliberately not plumbed through Commit,
-   /// since Commit's only effect is to advance the time watermark.
-   void CommitSchedule(real_t time) { last_write_time_ = time; }
+   /// Advance `last_write_time_` AND `current_regime_` AND `last_v_max_`
+   /// in one atomic step after PeekShouldWrite has confirmed a write.
+   /// Use this two-arg form from callers that skip Save (e.g. the
+   /// fault-only path that only writes the fault-surface VTU) so the
+   /// regime state machine keeps advancing — otherwise
+   /// `current_regime_` would be pinned at 0 and hysteresis would
+   /// silently no-op.
+   void CommitSchedule(real_t time, real_t V_max)
+   {
+      current_regime_  = adaptive_.NextRegime(V_max, current_regime_);
+      last_write_time_ = time;
+      last_v_max_      = V_max;
+   }
+
+   /// Back-compat single-arg shim preserved for legacy call sites that
+   /// call Save/ShouldWrite just before it (so `last_v_max_` is current),
+   /// or that use the default `hysteresis_factor = 1.0` where the regime
+   /// is a stateless function of V.  Delegates to the two-arg form using
+   /// the last V_max recorded by Save/ShouldWrite.  Callers that want
+   /// hysteresis to advance through a PeekShouldWrite-gated path MUST
+   /// call the two-arg overload instead (TPV102 and the BP5 fault-only
+   /// driver path both do).
+   void CommitSchedule(real_t time) { CommitSchedule(time, last_v_max_); }
 
    /// Force a save at the current state.
    void ForceSave(int cycle, real_t time)
@@ -704,21 +844,14 @@ public:
       ForceSaveImpl(cycle, time);
    }
 
-   /// Adaptive output interval based on maximum slip rate.
+   /// Adaptive output interval based on maximum slip rate (legacy API,
+   /// still used by test_io.cpp and any caller that wants the default
+   /// thresholds/intervals without constructing a ParaViewOutput).  For
+   /// runtime-configurable thresholds, mutate GetSchedule() instead.
    static real_t OutputInterval(real_t V_max)
    {
-      if (V_max > 1e-3)
-      {
-         return 0.01;  // Coseismic: every 0.01 s
-      }
-      else if (V_max > 1e-6)
-      {
-         return 1.0;   // Nucleation: every 1.0 s
-      }
-      else
-      {
-         return 1.0 * BP5Params::seconds_per_year;  // Interseismic: every 1 year
-      }
+      AdaptiveSchedule s;  // defaults = legacy behavior
+      return s.Interval(V_max, s.NextRegime(V_max, 0));
    }
 
    void SetDataFormat(VTKFormat fmt) { pv_.SetDataFormat(fmt); }
@@ -731,6 +864,14 @@ private:
    int order_;
    real_t last_write_time_;
    ParaViewDataCollection pv_;
+
+   // Adaptive-schedule state.  adaptive_ holds the tunable thresholds
+   // and intervals (GetSchedule() exposes it for CLI overrides);
+   // current_regime_ threads hysteresis across writes; last_v_max_
+   // backs the single-arg CommitSchedule(time) shim.
+   AdaptiveSchedule adaptive_;
+   int    current_regime_ = 0;   // 0=interseismic, 1=nucleation, 2=coseismic
+   real_t last_v_max_     = 0.0;
 
    // Fault L2-p0 output
    bool has_fault_output_ = false;

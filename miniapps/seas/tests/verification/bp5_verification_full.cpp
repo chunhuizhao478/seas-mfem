@@ -722,6 +722,14 @@ int main(int argc, char *argv[])
    bool use_paraview = false;          // Enable ParaView PVD/VTU output
    int  paraview_step_interval = 0;   // 0 = adaptive/time schedule, >0 = every N steps
    real_t paraview_dt = 0.0;          // >0 = fixed time interval (seconds) between writes
+   // Adaptive-schedule CLI overrides (negative = inherit schedule default).
+   real_t pv_dt_co    = -1.0;         // coseismic interval override (s)
+   real_t pv_dt_nu    = -1.0;         // nucleation interval override (s)
+   real_t pv_dt_inter = -1.0;         // interseismic interval override (s)
+   real_t pv_v_co     = -1.0;         // coseismic V threshold override (m/s)
+   real_t pv_v_nu     = -1.0;         // nucleation V threshold override (m/s)
+   real_t pv_hyst     = -1.0;         // hysteresis factor override (must be >= 1)
+   bool   pv_fault_only = false;      // if true, skip volume PVD Save()
    int  max_steps = 10000000;         // Maximum number of time steps
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
@@ -838,6 +846,42 @@ int main(int argc, char *argv[])
       {
          use_paraview = true;
          paraview_dt = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-adaptive") { use_paraview = true; }
+      if (arg == "--paraview-dt-co" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_dt_co = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-dt-nu" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_dt_nu = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-dt-inter-yr" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_dt_inter = std::atof(argv[++i]) * BP5Params::seconds_per_year;
+      }
+      if (arg == "--paraview-v-co" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_v_co = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-v-nu" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_v_nu = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-hyst" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_hyst = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-fault-only")
+      {
+         use_paraview = true;
+         pv_fault_only = true;
       }
       if (arg == "--petsc-ts-options" && i + 1 < argc)
       {
@@ -1518,6 +1562,21 @@ int main(int argc, char *argv[])
          pv_out->fixed_dt = paraview_dt;
       }
 
+      // Apply CLI overrides to the adaptive schedule (inside the use_paraview
+      // guard — pv_out is nullptr otherwise).  Validate() runs once at
+      // configuration time; a bad user input aborts BEFORE the first
+      // time step instead of inside the hot-path NextRegime.
+      {
+         auto &sched = pv_out->GetSchedule();
+         if (pv_dt_co    > 0) { sched.dt_coseismic      = pv_dt_co; }
+         if (pv_dt_nu    > 0) { sched.dt_nucleation     = pv_dt_nu; }
+         if (pv_dt_inter > 0) { sched.dt_interseismic   = pv_dt_inter; }
+         if (pv_v_co     > 0) { sched.v_coseismic       = pv_v_co; }
+         if (pv_v_nu     > 0) { sched.v_nucleation      = pv_v_nu; }
+         if (pv_hyst     > 0) { sched.hysteresis_factor = pv_hyst; }
+         sched.Validate();
+      }
+
       if (mpi.IsRoot())
       {
          if (paraview_step_interval > 0)
@@ -1533,7 +1592,18 @@ int main(int argc, char *argv[])
          }
          else
          {
-            std::cout << "  ParaView output: ON (adaptive schedule)\n";
+            const auto &s = pv_out->GetSchedule();
+            std::cout << "  ParaView output: ON (adaptive schedule"
+                      << (pv_fault_only ? ", fault-only" : "")
+                      << ")\n"
+                      << "    V_co=" << s.v_coseismic
+                      << "  V_nu=" << s.v_nucleation
+                      << "  hyst=" << s.hysteresis_factor
+                      << "  dt_co=" << s.dt_coseismic << "s"
+                      << "  dt_nu=" << s.dt_nucleation << "s"
+                      << "  dt_inter="
+                      << s.dt_interseismic / BP5Params::seconds_per_year
+                      << "yr\n";
          }
       }
    }
@@ -1580,6 +1650,68 @@ int main(int argc, char *argv[])
    auto paraview_write = [&](int step_num, real_t time, real_t V_max)
    {
       if (!pv_out) { return; }
+
+      // -------- Fault-only path (skips volume PVD) --------
+      // Gated by PeekShouldWrite (const), populates local vectors, commits
+      // the schedule (two-arg: advances last_write_time_ AND current_regime_
+      // in lockstep so hysteresis keeps working), then writes the fault
+      // surface VTU.  We skip pv_out->UpdateFaultFieldsBP5 (volume-PVD
+      // GridFunction update) and pv_out->Save (volume PVD write) — neither
+      // is needed when the volume mesh is not being output.
+      if (pv_fault_only)
+      {
+         if (!pv_out->PeekShouldWrite(step_num, time, V_max)) { return; }
+
+         // Populate pv_local_* for WriteFaultSurfaceVTU.  Same five
+         // expansions as the volume path below, MINUS UpdateFaultFieldsBP5.
+         Vector owned_slip;
+         fault_op.GetSlip(state, owned_slip);
+         domain.ExpandOwnedToLocalFault(owned_slip, pv_local_slip, 2);
+         domain.ExpandOwnedToLocalFault(fault_op.GetSlipRate(),
+                                        pv_local_slip_rate, 2);
+         domain.ExpandOwnedToLocalFault(seas_op.GetTraction(),
+                                        pv_local_traction, 2);
+         {
+            const int spn = 3;  // BP5: [slip_dip, slip_strike, psi]
+            const int n_owned = fault_op.NumNodes();
+            Vector owned_psi(n_owned);
+            for (int i = 0; i < n_owned; i++)
+            {
+               owned_psi(i) = state(i * spn + 2);
+            }
+            domain.ExpandOwnedToLocalFault(owned_psi, pv_local_state, 1);
+         }
+         if (seas_op.ElasticSigmaNEnabled() &&
+             seas_op.GetNormalTraction().Size() > 0)
+         {
+            domain.ExpandOwnedToLocalFault(seas_op.GetNormalTraction(),
+                                           pv_local_normal_stress, 1);
+         }
+         else
+         {
+            pv_local_normal_stress = 0.0;
+         }
+
+         // Advance BOTH last_write_time_ AND current_regime_ in lockstep.
+         // This is the two-arg overload — the one-arg shim would leave
+         // current_regime_ pinned at 0, silently defeating Phase 3 hysteresis.
+         pv_out->CommitSchedule(time, V_max);
+
+         Vector local_a, local_Dc, local_x2, local_x3;
+         domain.ExpandOwnedToLocalFault(fault_geom.GetAValues(),  local_a,  1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetDcValues(), local_Dc, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX2(), local_x2, 1);
+         domain.ExpandOwnedToLocalFault(fault_geom.GetCoordsX3(), local_x3, 1);
+
+         pv_out->WriteFaultSurfaceVTU(
+            output_dir, step_num, time, mpi.Rank(), mpi.Size(),
+            pv_local_slip, pv_local_slip_rate, pv_local_traction,
+            pv_local_state, pv_local_normal_stress,
+            local_a, local_Dc, local_x2, local_x3);
+         return;
+      }
+
+      // -------- Volume-PVD path (default) --------
       // Expand owned fault vectors to local (all faces) for visualization
       Vector owned_slip;
       fault_op.GetSlip(state, owned_slip);
@@ -1635,6 +1767,7 @@ int main(int argc, char *argv[])
    // Write initial state
    bench_out.ForceWrite(0.0, state, fault_op, seas_op.GetTraction(), V_init);
    bench_out.Flush();
+   // t=0 IC write: always triggers because last_write_time_ starts at -1e30.
    paraview_write(0, 0.0, V_init);
    if (mpi.IsRoot() && global_out)
    {
