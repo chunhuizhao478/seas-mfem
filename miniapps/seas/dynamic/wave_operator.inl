@@ -1712,6 +1712,107 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                   "ctor did not add this face-key to fault_shared_faces_ — "
                   "check global_fault_keys allgather) OR ctor "
                   "dof-offset double mapping.\n\n");
+
+               // v8.0.0 Phase 2 follow-up diagnostic: when entries remain
+               // unpaired under the Phase 2 (face_key, centroid) predicate,
+               // dump ALL entries that share a face_key with any orphan.
+               // This reveals the full 6-entry picture for the affected
+               // face so we can see which QP pairs succeeded and why the
+               // orphaned pair fell through.  Also prints
+               // `same_face_qp(orphan_i, orphan_j)` for every orphan
+               // pairing to distinguish (a) predicate returning FALSE
+               // unexpectedly from (b) algorithm grouping them apart
+               // despite predicate TRUE (e.g., intruder entry breaks
+               // adjacency).
+               std::fprintf(stderr,
+                  "  [R-101 face-context dump for unpaired entries]\n");
+               std::set<std::array<HYPRE_BigInt,3>> unpaired_keys;
+               for (size_t u = 0; u < unpaired.size(); u++)
+               {
+                  unpaired_keys.insert({unpaired[u].key[0],
+                                        unpaired[u].key[1],
+                                        unpaired[u].key[2]});
+               }
+               for (const auto &k : unpaired_keys)
+               {
+                  std::fprintf(stderr,
+                     "    face_key=(%lld, %lld, %lld) all entries in sort "
+                     "order:\n",
+                     static_cast<long long>(k[0]),
+                     static_cast<long long>(k[1]),
+                     static_cast<long long>(k[2]));
+                  for (int p = 0; p < n_entries; p++)
+                  {
+                     int e = idx[p];
+                     HYPRE_BigInt k0 = key_component(e, 0);
+                     HYPRE_BigInt k1 = key_component(e, 1);
+                     HYPRE_BigInt k2 = key_component(e, 2);
+                     if (k0 != k[0] || k1 != k[1] || k2 != k[2]) { continue; }
+                     int er = static_cast<int>(all_data[e*REC + RANK_OFFSET]);
+                     int qidx = static_cast<int>(
+                        key_component(e, QP_IDX_OFFSET));
+                     std::fprintf(stderr,
+                        "      sort_pos=%d qp_idx=%d rank=%d "
+                        "centroid=(%.17e, %.17e, %.17e)\n",
+                        p, qidx, er,
+                        all_data[e*REC + CENTROID_OFFSET + 0],
+                        all_data[e*REC + CENTROID_OFFSET + 1],
+                        all_data[e*REC + CENTROID_OFFSET + 2]);
+                  }
+               }
+               // Direct same_face_qp() check between every orphan pair that
+               // shares a face_key — this pinpoints whether the predicate
+               // is the cause or the sort/group order is.
+               if (unpaired.size() >= 2)
+               {
+                  std::fprintf(stderr,
+                     "  [R-101 same_face_qp self-check between orphans]\n");
+                  for (size_t u = 0; u < unpaired.size(); u++)
+                  {
+                     for (size_t v = u + 1; v < unpaired.size(); v++)
+                     {
+                        if (unpaired[u].key[0] != unpaired[v].key[0] ||
+                            unpaired[u].key[1] != unpaired[v].key[1] ||
+                            unpaired[u].key[2] != unpaired[v].key[2])
+                        { continue; }
+                        // Find the data indices by linear search.
+                        int idx_u = -1, idx_v = -1;
+                        for (int e = 0; e < n_entries; e++)
+                        {
+                           int er = static_cast<int>(
+                              all_data[e*REC + RANK_OFFSET]);
+                           if (idx_u < 0 && er == unpaired[u].rank &&
+                               all_data[e*REC + CENTROID_OFFSET + 0] ==
+                                  unpaired[u].cx)
+                           { idx_u = e; }
+                           if (idx_v < 0 && er == unpaired[v].rank &&
+                               all_data[e*REC + CENTROID_OFFSET + 0] ==
+                                  unpaired[v].cx)
+                           { idx_v = e; }
+                        }
+                        if (idx_u < 0 || idx_v < 0)
+                        {
+                           std::fprintf(stderr,
+                              "    could not re-locate orphan pair u=%zu "
+                              "v=%zu\n", u, v);
+                           continue;
+                        }
+                        bool sc = same_face_qp(idx_u, idx_v);
+                        double dx = std::abs(all_data[idx_u*REC+CENTROID_OFFSET+0]
+                                            - all_data[idx_v*REC+CENTROID_OFFSET+0]);
+                        double dy = std::abs(all_data[idx_u*REC+CENTROID_OFFSET+1]
+                                            - all_data[idx_v*REC+CENTROID_OFFSET+1]);
+                        double dz = std::abs(all_data[idx_u*REC+CENTROID_OFFSET+2]
+                                            - all_data[idx_v*REC+CENTROID_OFFSET+2]);
+                        std::fprintf(stderr,
+                           "    same_face_qp(orphan u=%zu rank=%d, "
+                           "v=%zu rank=%d) = %s "
+                           "(dx=%.3e dy=%.3e dz=%.3e)\n",
+                           u, unpaired[u].rank, v, unpaired[v].rank,
+                           sc ? "TRUE" : "FALSE", dx, dy, dz);
+                     }
+                  }
+               }
                std::fflush(stderr);
             }
             MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
