@@ -1599,31 +1599,98 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          unpaired.push_back(u);
       };
 
+      // v8.0.0 Phase 3 (job 7666323 diagnosis): the sequential-adjacency
+      // grouping loop is fragile to sort-order accidents.  On the 50-rank
+      // 200 m topology, one shared fault face has two vertices V0 and V1
+      // with bit-identical x — this makes rank 6's q=1 (at P1) and q=2
+      // (at P0) compute to bit-identical cx while rank 3's q=0 (also at
+      // P0) has a 1-ULP smaller cx.  The sort then places rank 3's P0
+      // entry ALONE (smaller cx) and the three rank-6 entries + rank-3's
+      // P1 together at the larger cx.  `same_face_qp` between two
+      // physical-P0 entries is TRUE, but they are non-adjacent, so the
+      // sequential grouping loop misses the pair.
+      //
+      // Fix: within a face group, do all-pairs nearest-neighbor matching
+      // by centroid (O(n²) per face, n=6 typical, cheap).  Robust to any
+      // sort artifact, including orientation-flip + shared-vertex-x
+      // combined edge cases.  `same_face_qp` tolerance check becomes a
+      // PAIR TOLERANCE (must hold for a claimed pair), not a GROUP
+      // predicate.
+      auto centroid_max_dist = [&](int a, int b) -> double
+      {
+         double dx = std::abs(all_data[a*REC + CENTROID_OFFSET + 0]
+                            - all_data[b*REC + CENTROID_OFFSET + 0]);
+         double dy = std::abs(all_data[a*REC + CENTROID_OFFSET + 1]
+                            - all_data[b*REC + CENTROID_OFFSET + 1]);
+         double dz = std::abs(all_data[a*REC + CENTROID_OFFSET + 2]
+                            - all_data[b*REC + CENTROID_OFFSET + 2]);
+         return std::max({dx, dy, dz});
+      };
+
+      auto same_face_key = [&](int a, int b)
+      {
+         for (int k = 0; k < NUM_KEY_COMPONENTS; k++)
+         {
+            if (key_component(a, k) != key_component(b, k)) { return false; }
+         }
+         return true;
+      };
+
+      constexpr double PAIR_TOL_M = 1e-6;
+
       int i = 0;
       while (i < n_entries)
       {
+         // Find end of face-key group (contiguous after the face_key
+         // primary sort).
          int j = i + 1;
-         while (j < n_entries && same_face_qp(idx[i], idx[j])) { j++; }
-         int group_size = j - i;
-         if (group_size == 2)
+         while (j < n_entries && same_face_key(idx[i], idx[j])) { j++; }
+         int n_in_group = j - i;
+
+         // All-pairs nearest-neighbor matching within this face group.
+         // Repeatedly pick the closest unmatched pair whose ranks differ
+         // and whose centroid separation is below PAIR_TOL_M; pair them,
+         // compare fields, mark matched.  Stop when no more valid pairs.
+         std::vector<bool> matched(n_in_group, false);
+         while (true)
          {
-            int a = idx[i], b = idx[i+1];
-            int rank_a = static_cast<int>(all_data[a*REC + RANK_OFFSET]);
-            int rank_b = static_cast<int>(all_data[b*REC + RANK_OFFSET]);
-            if (rank_a == rank_b)
+            double best_d = std::numeric_limits<double>::max();
+            int best_a = -1, best_b = -1;
+            for (int a = 0; a < n_in_group; a++)
             {
-               // Both records from the same rank for the same (face, qp).
-               // Indicates a ctor double-mapping bug (same dof_offset
-               // assigned twice) — not a normal pairing failure.
-               push_unpaired(a, 2);
-               n_unpaired += 2;
-               i = j;
-               continue;
+               if (matched[a]) { continue; }
+               int ea = idx[i + a];
+               int rank_a = static_cast<int>(all_data[ea*REC + RANK_OFFSET]);
+               for (int b = a + 1; b < n_in_group; b++)
+               {
+                  if (matched[b]) { continue; }
+                  int eb = idx[i + b];
+                  int rank_b = static_cast<int>(
+                     all_data[eb*REC + RANK_OFFSET]);
+                  if (rank_a == rank_b)
+                  {
+                     // Same-rank entries are not a valid cross-rank pair.
+                     continue;
+                  }
+                  double d = centroid_max_dist(ea, eb);
+                  if (d < best_d)
+                  {
+                     best_d = d;
+                     best_a = a;
+                     best_b = b;
+                  }
+               }
             }
+            if (best_a < 0 || best_d > PAIR_TOL_M) { break; }
+
+            matched[best_a] = true;
+            matched[best_b] = true;
+            int ea = idx[i + best_a];
+            int eb = idx[i + best_b];
             for (int k = FIELD_BASE; k < FIELD_BASE + NUM_FIELDS; k++)
             {
-               double va = all_data[a*REC + k];
-               double vb = all_data[b*REC + k];
+               double va = all_data[ea*REC + k];
+               double vb = all_data[eb*REC + k];
                double diff = std::abs(va - vb);
                double field_scale = std::max({std::abs(va), std::abs(vb),
                                               1.0});
@@ -1634,24 +1701,23 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                   max_diff_abs = diff;
                   max_diff_scale = field_scale;
                   max_diff_field = k;
-                  max_diff_entry = a;
+                  max_diff_entry = ea;
                }
             }
             n_pairs++;
          }
-         else
+
+         // Unmatched entries in this face group are singletons.  Genuine
+         // classification asymmetry (one rank doesn't classify this face
+         // as fault) or same-rank double emission (ctor dof_offset bug)
+         // are both reported here.
+         for (int a = 0; a < n_in_group; a++)
          {
-            // group_size == 1: one rank classified this face as fault but
-            // the other did not (or emitted for a different qp_idx —
-            // extremely unlikely since IntRules is deterministic).
-            // group_size >= 3: impossible for a shared face (at most 2
-            // elements, hence at most 2 ranks).  If seen, flags a
-            // fault-classification / allgather anomaly.
-            for (int m = i; m < j; m++)
+            if (!matched[a])
             {
-               push_unpaired(idx[m], group_size);
+               push_unpaired(idx[i + a], 1);
+               n_unpaired++;
             }
-            n_unpaired += group_size;
          }
          i = j;
       }
