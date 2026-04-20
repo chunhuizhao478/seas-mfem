@@ -10,7 +10,9 @@
 // CONTRIBUTING.md for details.
 
 #include "fault_face_flux.hpp"
+#include "seas_diag_rank.hpp"
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 
 namespace mfem
@@ -70,6 +72,31 @@ void FaultFaceFlux::Evaluate(DOFData &data,
                              real_t *Q_imp_plus, real_t *Q_imp_minus,
                              FrictionSolver::Method method) const
 {
+   // v9.0.0 Pelties-9 per-side flux (see
+   // debug_document/tpv102_debug_document/tpv102_debug_v9.0.0_seissol_flux_comparison.md
+   // §10.1 and §18 R-F08).  The call site in wave_operator.inl applies a
+   // SINGLE GodunovFlux instance to both sides of the fault, which is
+   // correct only when A_plus == A_minus (homogeneous material).  Guard
+   // against silent use on a bimaterial face.
+   // R-008: allow ~1-ULP drift — reject only when the two sides are
+   // observably different materials, not when they're the same material
+   // reached via two different expression chains (e.g. a future driver
+   // computing Zp_plus, Zp_minus from separate rho*cp expressions).
+   auto homog_ok = [](real_t a, real_t b)
+   {
+      return std::abs(a - b) <=
+             1e-12 * std::max(std::abs(a), std::abs(b));
+   };
+   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
+               homog_ok(data.Zs_plus, data.Zs_minus),
+               "Bimaterial fault face detected (Zp_plus=" << data.Zp_plus
+               << " Zp_minus=" << data.Zp_minus
+               << " Zs_plus=" << data.Zs_plus
+               << " Zs_minus=" << data.Zs_minus
+               << ").  v9.0.0 Pelties-9 per-side flux assumes "
+               "homogeneous material.  Extend GodunovFlux to per-side A "
+               "before running this configuration.");
+
    // Step 1: Trial traction (Eq. 7)
    real_t sigma_n_trial, tau1_trial, tau2_trial;
    ComputeTrialTraction(data, Q_plus, Q_minus,
@@ -79,6 +106,24 @@ void FaultFaceFlux::Evaluate(DOFData &data,
    real_t sigma_n_total = data.sigma_n0 + sigma_n_trial;
    real_t tau1_total = data.tau1_0 + tau1_trial;
    real_t tau2_total = data.tau2_0 + tau2_trial;
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // C-1 EVAL: v9.0.0 §0.5 checkpoint — printf only, no MPI.  Prints only
+   // on DOFs the driver flagged as diagnostic (typically the hypocenter QP).
+   if (data.diag_print)
+   {
+      std::fprintf(stderr,
+         "[C-1 EVAL] rank=%d  tau1_trial=%+.3e Pa  tau2_trial=%+.3e Pa  "
+         "|Q_plus[VY]|=%.3e  |Q_plus[SXY]|=%.3e  |Q_plus[VZ]|=%.3e  "
+         "|Q_plus[SXZ]|=%.3e  psi=%.3e\n",
+         g_seas_my_rank,
+         tau1_trial, tau2_trial,
+         std::abs(Q_plus[VY]),  std::abs(Q_plus[SXY]),
+         std::abs(Q_plus[VZ]),  std::abs(Q_plus[SXZ]),
+         data.psi);
+   }
+#endif
+
 
    // Traction magnitude Θ = sqrt(tau1_total² + tau2_total²)
    real_t Theta = std::sqrt(tau1_total * tau1_total + tau2_total * tau2_total);

@@ -11,6 +11,7 @@ bp1/plots_*/
 bp2_verification_plots/
 bp2/benchmark_data_200m/benchmark_comparison_plots/
 bp5/plots_*/
+tpv102/plots_*/
 
 # Mesh output
 *.vtk

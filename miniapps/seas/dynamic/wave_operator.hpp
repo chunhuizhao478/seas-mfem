@@ -21,6 +21,7 @@
 #include "../domain/boundary_config.hpp"
 #include "../fault/fault_basis.hpp"
 #include "../common/seas_types.hpp"
+#include "seas_diag_rank.hpp"
 
 #include <memory>
 #include <vector>

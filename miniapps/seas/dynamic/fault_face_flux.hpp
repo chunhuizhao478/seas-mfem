@@ -39,6 +39,15 @@ struct DOFData
    // Corrected traction from Riemann solver (populated by FaultFaceFlux::Evaluate)
    real_t tau1_corr = 0, tau2_corr = 0;  ///< Corrected tangential traction [Pa]
    real_t sigma_n_corr = 0;              ///< Corrected normal traction [Pa]
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // v9.0.0 §0.5 DIAG gate for the C-1 / C-2 / C-3 bisection checkpoints.
+   // Set true on exactly one hypocenter DOF (and optionally one off-hypo
+   // witness) by the driver at init; all other DOFs keep diag_print=false
+   // and the fprintf blocks are skipped.  Entire field is compiled out in
+   // production builds so struct layout matches pre-change byte-for-byte.
+   bool diag_print = false;
+#endif
 };
 
 /// @brief Fault-face Riemann solver for dynamic rupture.

@@ -1,5 +1,9 @@
 // Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC.
 // WaveOperator template implementation (included from wave_operator.hpp).
+// NOTE: seas_diag_rank.hpp must be included at file scope — include it from
+// wave_operator.hpp before the `namespace mfem::seas` block opens, NOT here
+// (wave_operator.hpp #includes this .inl from inside `namespace mfem::seas`,
+// so any `#include` here would be nested).
 
 #include <algorithm>
 #include <cmath>
@@ -555,6 +559,25 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
 {
    const real_t *Q_data = Q.GetData();
 
+   // R-204: hoist the R-002 fault-bookkeeping guard out of the per-QP
+   // loop.  If bc_.fault_attr > 0 the mesh has a fault, and the
+   // interior-face loop below can dispatch to the fault branch at any
+   // face whose bdr_attr matches — in that case fault_flux_ and
+   // fault_dof_data_ MUST be wired.  One check per Mult call replaces
+   // billions of per-QP checks with identical semantics.
+   if (bc_.fault_attr > 0)
+   {
+      MFEM_VERIFY(fault_flux_ && fault_dof_data_,
+                  "WaveOperator::ComputeFaceFluxRHS: bc_.fault_attr="
+                  << bc_.fault_attr
+                  << " > 0 (fault configured) but fault_flux_="
+                  << (void*)fault_flux_
+                  << ", fault_dof_data_=" << (void*)fault_dof_data_
+                  << "; ctor did not populate fault bookkeeping.  "
+                  "v9.0.0 Pelties-9 per-side flux requires both; "
+                  "welded-flux fallback is no longer physical.");
+   }
+
    for (int f = 0; f < mesh_.GetNumFaces(); f++)
    {
       FaceElementTransformations *ftr = mesh_.GetFaceElementTransformations(f);
@@ -696,8 +719,18 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
             // FaultFaceFlux dispatch.
             bool is_fault = (bdr_attr == bc_.fault_attr) && (bc_.fault_attr > 0);
 
-            if (is_fault && fault_flux_ && fault_dof_data_)
+            if (is_fault)
             {
+               // R-204: hoisted check at the top of ComputeFaceFluxRHS
+               // already verified fault_flux_ && fault_dof_data_ when
+               // bc_.fault_attr > 0.  Keep a debug-only assertion here
+               // as a tripwire for a future refactor that bypasses the
+               // hoisted check.
+               MFEM_ASSERT(fault_flux_ && fault_dof_data_,
+                           "R-204: bookkeeping hoisted check should have "
+                           "fired at the top of ComputeFaceFluxRHS.  If "
+                           "execution reaches here with null fault_flux_, "
+                           "the hoisted guard was removed or bypassed.");
                // Fault face: dispatch to FaultFaceFlux with tracked DOFData.
 
                // R-001 fix: Look up the tracked DOFData for this face QP.
@@ -796,53 +829,129 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                      }
                   }
 
-                  // Godunov flux from imposed states.  Standard DG
-                  // accumulation: Elem1 -= F, Elem2 += F.  MFEM's `nor` is
-                  // Elem1-outward on interior faces, so this element's
-                  // Q_self comes from the (+) side iff elem1_on_plus is
-                  // true.  Route Q_imp_plus_g/Q_imp_minus_g to self/nbr
-                  // slots accordingly; the Godunov identity
-                  // `F(L,R,+n) = -F(R,L,-n)` then makes the Elem1/Elem2
-                  // accumulation conservative.
-                  const real_t *Q_self_imp = elem1_on_plus ? Q_imp_plus_g
-                                                           : Q_imp_minus_g;
-                  const real_t *Q_nbr_imp  = elem1_on_plus ? Q_imp_minus_g
-                                                           : Q_imp_plus_g;
-                  real_t F_h_total[NUM_STATE];
-                  flux_.Interior(nor, Q_self_imp, Q_nbr_imp, F_h_total);
+                  // v9.0.0 Pelties-9 per-side flux (plan §14.2).  Each
+                  // side's bulk rhs gets its OWN imposed-state flux
+                  // `A_{can_n} . Q_imp_side` in the global frame,
+                  // realised via the identity
+                  //   flux_.Interior(n, Q, Q) = T . (A_x^+ + A_x^-) . T^{-1} . Q
+                  //                           = T . A_x . T^{-1} . Q
+                  //                           = A_n . Q
+                  // Using `can_n` (canonical, rank-invariant) rather
+                  // than MFEM's local `nor` removes the L/R routing
+                  // step and matches the shared-fault convention.
+                  real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
+                  flux_.Interior(can_n, Q_imp_plus_g,  Q_imp_plus_g,
+                                 F_h_plus);
+                  flux_.Interior(can_n, Q_imp_minus_g, Q_imp_minus_g,
+                                 F_h_minus);
 
-                  for (int c = 0; c < NUM_STATE; c++)
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-2 FLUX: print Elem1's own-side flux in the GLOBAL
+                  // frame (the flux the DG rhs update actually sees for
+                  // this element).
+                  const real_t *F_h_elem1 = elem1_on_plus ? F_h_plus
+                                                          : F_h_minus;
+                  if (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print)
                   {
-                     for (int i = 0; i < ndof; i++)
+                     real_t F_v_mag = std::sqrt(
+                        F_h_elem1[VX]*F_h_elem1[VX]
+                      + F_h_elem1[VY]*F_h_elem1[VY]
+                      + F_h_elem1[VZ]*F_h_elem1[VZ]);
+                     real_t F_s_max = 0.0;
+                     for (int c = 0; c < 6; c++)
                      {
-                        rhs[c * ndof_total_ + dof_offset1 + i] -=
-                           w * shape1(i) * F_h_total[c];
+                        F_s_max = std::max(F_s_max, std::abs(F_h_elem1[c]));
+                     }
+                     std::fprintf(stderr,
+                        "[C-2 FLUX] rank=%d  dof=%d  side=%c  "
+                        "|F_v|=%.3e m2/s2  max|F_stress|=%.3e Pa*m/s  "
+                        "F_h[VX]=%+.3e  F_h[SXY]=%+.3e  F_h[VY]=%+.3e  "
+                        "F_h[SXZ]=%+.3e\n",
+                        g_seas_my_rank, dof_idx,
+                        elem1_on_plus ? '+' : '-',
+                        F_v_mag, F_s_max,
+                        F_h_elem1[VX], F_h_elem1[SXY],
+                        F_h_elem1[VY], F_h_elem1[SXZ]);
+                  }
+#endif
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-3 RHS: bracket the Elem1 accumulation to measure
+                  // the delta injected into rhs[VX, elem1, dof0].
+                  const bool _c3_diag =
+                     (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print);
+                  const int  _c3_probe =
+                     VX * ndof_total_ + dof_offset1 + 0;
+                  const real_t _c3_pre = _c3_diag ? rhs[_c3_probe] : 0.0;
+#endif
+                  // Per-side DG assembly.  Each element's rhs gets its
+                  // own side's flux, signed by its outward normal
+                  // relative to can_n:
+                  //   plus-side  elem (outward = +can_n): rhs -= w*shape*F_h_plus
+                  //   minus-side elem (outward = -can_n): rhs += w*shape*F_h_minus
+                  if (elem1_on_plus)
+                  {
+                     for (int c = 0; c < NUM_STATE; c++)
+                     {
+                        for (int i = 0; i < ndof; i++)
+                        {
+                           rhs[c * ndof_total_ + dof_offset1 + i] -=
+                              w * shape1(i) * F_h_plus[c];
+                           rhs[c * ndof_total_ + dof_offset2 + i] +=
+                              w * shape2(i) * F_h_minus[c];
+                        }
                      }
                   }
-                  for (int c = 0; c < NUM_STATE; c++)
+                  else
                   {
-                     for (int i = 0; i < ndof; i++)
+                     for (int c = 0; c < NUM_STATE; c++)
                      {
-                        rhs[c * ndof_total_ + dof_offset2 + i] +=
-                           w * shape2(i) * F_h_total[c];
+                        for (int i = 0; i < ndof; i++)
+                        {
+                           rhs[c * ndof_total_ + dof_offset1 + i] +=
+                              w * shape1(i) * F_h_minus[c];
+                           rhs[c * ndof_total_ + dof_offset2 + i] -=
+                              w * shape2(i) * F_h_plus[c];
+                        }
                      }
                   }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  if (_c3_diag)
+                  {
+                     const real_t _c3_post = rhs[_c3_probe];
+                     std::fprintf(stderr,
+                        "[C-3 RHS]  rank=%d  dof=%d  side=%c  "
+                        "rhs[VX,elem1,dof0] pre=%+.3e post=%+.3e  "
+                        "delta=%+.3e  w=%.3e  shape1(0)=%.3e  "
+                        "F_h_elem1[VX]=%+.3e\n",
+                        g_seas_my_rank, dof_idx,
+                        elem1_on_plus ? '+' : '-',
+                        _c3_pre, _c3_post, _c3_post - _c3_pre, w,
+                        shape1(0), F_h_elem1[VX]);
+                  }
+#endif
                }
                else
                {
-                  // Fault face but no DOFData mapping (or FaultBasis not
-                  // populated) — fall back to welded interior flux.
-                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
-                  for (int c = 0; c < NUM_STATE; c++)
-                  {
-                     for (int i = 0; i < ndof; i++)
-                     {
-                        rhs[c * ndof_total_ + dof_offset1 + i] -=
-                           w * shape1(i) * F_h[c];
-                        rhs[c * ndof_total_ + dof_offset2 + i] +=
-                           w * shape2(i) * F_h[c];
-                     }
-                  }
+                  // v9.0.0 Pelties-9 (plan §14.2 + R-F02): a fault face
+                  // without a valid DOFData / FaultBasis mapping is a
+                  // ctor-population bug.  The previous welded-flux
+                  // fallback silently bypassed Pelties-9 eq. (9) and
+                  // under-radiated the affected QP.  Force the bug to
+                  // surface instead of masking it.
+                  MFEM_ABORT("interior fault face f=" << f
+                             << " has no FaultBasis/DOFData mapping"
+                             << " (fb_idx=" << fb_idx
+                             << ", dof_idx=" << dof_idx
+                             << ", have_basis=" << have_basis << "). "
+                             << "v9.0.0 Pelties-9 per-side flux requires"
+                             << " a valid mapping; welded-flux fallback"
+                             << " is no longer physical.");
                }
             }
             else
@@ -886,6 +995,26 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
       int n_shared = pmesh.GetNSharedFaces();
       if (n_shared == 0) { return; }
+
+      // R-204 (symmetric with ComputeFaceFluxRHS): hoist the fault
+      // bookkeeping guard out of the per-face / per-QP loops.  If the
+      // mesh has a fault (bc_.fault_attr > 0) then fault_flux_ and
+      // fault_dof_data_ MUST be wired — the per-QP `fault_active`
+      // short-circuit at line ~1063 would otherwise silently skip the
+      // fault path on this rank, under-radiating the same way the
+      // pre-R-002 welded-flux fallback did.
+      if (bc_.fault_attr > 0)
+      {
+         MFEM_VERIFY(fault_flux_ && fault_dof_data_,
+                     "WaveOperator::ComputeSharedFaceFluxRHS: "
+                     "bc_.fault_attr=" << bc_.fault_attr
+                     << " > 0 (fault configured) but fault_flux_="
+                     << (void*)fault_flux_
+                     << ", fault_dof_data_=" << (void*)fault_dof_data_
+                     << "; ctor did not populate fault bookkeeping.  "
+                     "v9.0.0 Pelties-9 per-side flux requires both on "
+                     "every rank that owns a shared fault face.");
+      }
 
       // R-001 fix: canonicalize (+,-) side at shared fault faces.  Both ranks
       // share the same physical QP but each stores an independent DOFData
@@ -1078,16 +1207,41 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   // Elem1 geometry).  sf_idx in fault_shared_faces_:
                   const int sf_idx_in_fault = basis_idx
                                               - fault_interior_faces_.Size();
+                  // R-003: post-v9.0.0 per-side flux, the failure modes for
+                  // a wrong `elem1_on_plus` are NOT symmetric (the pre-fix
+                  // welded flux partially masked them via cancellation).
+                  // A silent fallback to `false` would simultaneously
+                  // mis-select Q_imp_± and flip assemble_sign.  Fail loud.
+                  MFEM_VERIFY(sf_idx_in_fault >= 0 &&
+                              sf_idx_in_fault <
+                              static_cast<int>(shared_fault_elem1_on_plus_.size()),
+                              "shared_fault_elem1_on_plus_ missing entry for "
+                              "sf_idx_in_fault=" << sf_idx_in_fault
+                              << " (array size="
+                              << shared_fault_elem1_on_plus_.size()
+                              << "; fault_shared_faces_ size="
+                              << fault_shared_faces_.Size() << "); "
+                              "ctor did not populate. v9.0.0 Pelties-9 "
+                              "per-side flux cannot default-route silently.");
                   const bool elem1_on_plus =
-                     (sf_idx_in_fault >= 0 && sf_idx_in_fault <
-                      static_cast<int>(shared_fault_elem1_on_plus_.size()))
-                     ? shared_fault_elem1_on_plus_[sf_idx_in_fault] : false;
+                     shared_fault_elem1_on_plus_[sf_idx_in_fault];
 
                   const FaultBasisData &bd = fault_basis_->GetBasis(basis_idx);
-                  MFEM_ASSERT(q < static_cast<int>(bd.qp_data.size()),
+                  // R-202: use MFEM_VERIFY (not MFEM_ASSERT).  MFEM_ASSERT
+                  // is a no-op in release builds; the next line would then
+                  // read bd.qp_data[q] out-of-bounds — undefined behaviour.
+                  // qpd.normal/tangent1/tangent2 are load-bearing for the
+                  // per-side flux and cross-rank consistency, so garbage
+                  // here silently corrupts the result on one rank.
+                  MFEM_VERIFY(q < static_cast<int>(bd.qp_data.size()),
                               "FaultBasis::qp_data not populated for shared "
                               "fault face — ComputeQPBasisShared missed "
-                              "this face");
+                              "this face (basis_idx=" << basis_idx
+                              << ", q=" << q
+                              << ", qp_data.size()=" << bd.qp_data.size()
+                              << ").  v9.0.0 Pelties-9 per-side flux reads "
+                              "qpd.normal/tangent1/tangent2 from this entry; "
+                              "a wrong can_n corrupts the flux.");
                   const FaultBasisQPData &qpd = bd.qp_data[q];
 
                   // Reconstruct canonical (pre-Step-5) frame: aligned with
@@ -1159,26 +1313,29 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   // both ranks compute the SAME F_h regardless of whether
                   // MFEM's CalcOrtho gives `nor_A = -nor_B` (classical) or
                   // `nor_A = nor_B` (observed empirically on the inline
-                  // 2-tet mesh in v6 fix report).  The accumulation sign is
-                  // then gated on `elem1_on_plus`:
-                  //   Elem1 on canonical "+" side:  rhs[Elem1] -= F_can*w
-                  //     (flux leaves Elem1 into the "-" half-space).
-                  //   Elem1 on canonical "-" side:  rhs[Elem1] += F_can*w
-                  //     (flux enters Elem1 from the "+" half-space).
-                  // Pre-R-802 this code fed `nor` + self/nbr to Interior and
-                  // relied on the Godunov identity F(L,R,+n) = -F(R,L,-n) to
-                  // produce conservation — which is true only when
-                  // nor_A = -nor_B.  When MFEM returns identical normals on
-                  // the two ranks (v6 observation) the identity does not
-                  // apply and bulk momentum leaks across the shared fault.
-                  flux_.Interior(can_n, Q_imp_plus_g, Q_imp_minus_g, F_h);
-                  const real_t accum_sign = elem1_on_plus ? +1.0 : -1.0;
+                  // v9.0.0 Pelties-9 per-side flux (plan §14.3).  This
+                  // rank owns Elem1 only; it assembles that side's own
+                  // `A_{can_n} . Q_imp_side` contribution.  The paired
+                  // rank (with elem1_on_plus flipped) assembles the
+                  // opposite-side contribution separately with the
+                  // opposite sign.
+                  //
+                  // Sign convention:
+                  //   plus-side  elem1 (outward = +can_n) :  rhs -= w*shape*F
+                  //   minus-side elem1 (outward = -can_n) :  rhs += w*shape*F
+                  real_t F_h_side[NUM_STATE];
+                  const real_t *Q_imp_side = elem1_on_plus
+                                             ? Q_imp_plus_g
+                                             : Q_imp_minus_g;
+                  flux_.Interior(can_n, Q_imp_side, Q_imp_side, F_h_side);
+
+                  const real_t assemble_sign = elem1_on_plus ? -1.0 : +1.0;
                   for (int c = 0; c < NUM_STATE; c++)
                   {
                      for (int i = 0; i < ndof; i++)
                      {
-                        rhs[c * ndof_total_ + dof_offset1 + i] -=
-                           accum_sign * w * shape1(i) * F_h[c];
+                        rhs[c * ndof_total_ + dof_offset1 + i] +=
+                           assemble_sign * w * shape1(i) * F_h_side[c];
                      }
                   }
                   continue;  // Fault accumulation done; skip the generic
@@ -1187,11 +1344,21 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                }
                else
                {
-                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
+                  // v9.0.0 Pelties-9 (plan §14.3 + R-F02): see §14.2's
+                  // matching interior-fault fallback for rationale.
+                  // Welded-flux fallback at a SHARED fault face is
+                  // equally unacceptable post-fix; hard-abort.
+                  MFEM_ABORT("shared fault face sf=" << sf
+                             << " has no DOFData mapping (dof_idx="
+                             << dof_idx << "). v9.0.0 Pelties-9 per-side"
+                             << " flux requires a valid mapping;"
+                             << " welded-flux fallback is no longer"
+                             << " physical.");
                }
             }
             else
             {
+               // Non-fault shared face: standard welded Godunov flux.
                flux_.Interior(nor, Q_self, Q_nbr, F_h);
             }
 

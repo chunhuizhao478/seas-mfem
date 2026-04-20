@@ -22,6 +22,7 @@
 #include "../config/tpv102_params.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../io/paraview_output.hpp"
+#include "../dynamic/seas_diag_rank.hpp"
 
 #include <algorithm>
 #include <cstddef>
@@ -42,6 +43,14 @@
 
 using namespace mfem;
 using namespace mfem::seas;
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+// v9.0.0 §0.5.2 preamble: definition of the global rank cache declared in
+// dynamic/seas_diag_rank.hpp.  Written once at MPI init inside main();
+// read-only thereafter.  Defined here (driver TU) so it has exactly one
+// definition across the whole link.
+namespace mfem { namespace seas { int g_seas_my_rank = 0; } }  // NOLINT
+#endif
 
 static std::string GetStringArg(int argc, char *argv[], const char *flag,
                                 const std::string &default_val)
@@ -67,7 +76,6 @@ static int GetIntArg(int argc, char *argv[], const char *flag, int default_val)
    if (val.empty()) { return default_val; }
    return std::stoi(val);
 }
-
 int main(int argc, char *argv[])
 {
 #ifdef MFEM_USE_MPI
@@ -78,6 +86,11 @@ int main(int argc, char *argv[])
    MPI_Comm_size(comm, &nprocs);
 #else
    int rank = 0, nprocs = 1;
+#endif
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // v9.0.0 §0.5.2: seed the global rank cache used by C-1/C-2/C-3 DIAG.
+   mfem::seas::g_seas_my_rank = rank;
 #endif
 
    // R-501 + R-606: diagnostic-flag startup banner.  Print on stderr AND
@@ -439,6 +452,7 @@ int main(int argc, char *argv[])
    // layout assumption fails loudly at compile time if it is ever broken
    // (e.g. by a compiler with unusual padding of {double, int}).
    int hypo_rank = 0;
+   int hypo_dof_local = -1;  // local DOF index of the closest hypo QP, or -1
    {
       real_t local_min_dist2 = std::numeric_limits<real_t>::max();
       for (int i = 0; i < num_fault_total; i++)
@@ -446,7 +460,11 @@ int main(int argc, char *argv[])
          real_t dx = fault_coords[i](0) - TPV102Params::hypo_along_strike;
          real_t dz = std::abs(fault_coords[i](2)) - TPV102Params::hypo_down_dip;
          real_t d2 = dx*dx + dz*dz;
-         if (d2 < local_min_dist2) { local_min_dist2 = d2; }
+         if (d2 < local_min_dist2)
+         {
+            local_min_dist2 = d2;
+            hypo_dof_local = i;
+         }
       }
 #ifdef MFEM_USE_MPI
       struct MinDist { double d; int r; };
@@ -460,6 +478,21 @@ int main(int argc, char *argv[])
       hypo_rank = out.r;
 #endif
    }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // v9.0.0 §0.5: tag the hypocenter DOF on the owning rank so the C-1/C-2/
+   // C-3 printf blocks emit a single line per RK4 Mult instead of flooding
+   // stderr from every fault QP.  Only the rank that won the MINLOC above
+   // sets diag_print=true; at most one DOF is flagged globally.
+   if (rank == hypo_rank && hypo_dof_local >= 0 && num_fault_total > 0)
+   {
+      dof_data[hypo_dof_local].diag_print = true;
+      const Vector &hpos = fault_coords[hypo_dof_local];
+      std::fprintf(stderr,
+         "[diag] rank %d tagging hypo DOF %d at (%.1f, %.1f, %.1f)\n",
+         rank, hypo_dof_local, hpos(0), hpos(1), hpos(2));
+   }
+#endif
 
    // -----------------------------------------------------------------------
    // 6. Initialize state Q = 0 (perturbation field)
@@ -855,6 +888,53 @@ int main(int argc, char *argv[])
       real_t V_max_step = V_max_local;
 #endif
       V_max_global = std::max(V_max_global, V_max_step);
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+      {
+         // C-4 BULK: v9.0.0 §0.5 checkpoint — global max|Q[VX]|, max|Q[SXY]|
+         // post-RK4 update.  Deadlock-safe by construction:
+         //   * `c4_fire` depends only on (step, t) — both lockstep-identical
+         //     across ranks — so every rank evaluates the same boolean.
+         //   * MPI_Allreduce is called UNCONDITIONALLY on every rank
+         //     whenever c4_fire is true; no rank-local gate on the
+         //     collective.
+         //   * Only the final fprintf is guarded by `rank == 0`, AFTER the
+         //     collectives complete.
+         // Throttle: every 100 steps routinely + every 10 steps inside the
+         // 1.0 s <= t < 1.4 s breakaway window.  step=0 fires unconditionally
+         // so the 2-rank deadlock unit-test sees at least one C-4 line.
+         const bool c4_fire = (step % 100 == 0) ||
+                              (step % 10 == 0 && t >= 1.0 && t < 1.4);
+         if (c4_fire)
+         {
+            real_t q_vx_local  = 0.0;
+            real_t q_sxy_local = 0.0;
+            for (int i = 0; i < ndof_total; i++)
+            {
+               q_vx_local  = std::max(q_vx_local,
+                                      std::abs(Q[VX  * ndof_total + i]));
+               q_sxy_local = std::max(q_sxy_local,
+                                      std::abs(Q[SXY * ndof_total + i]));
+            }
+            real_t q_vx_global  = q_vx_local;
+            real_t q_sxy_global = q_sxy_local;
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(&q_vx_local,  &q_vx_global,  1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+            MPI_Allreduce(&q_sxy_local, &q_sxy_global, 1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+            if (rank == 0)
+            {
+               std::fprintf(stderr,
+                  "[C-4 BULK] step=%d  t=%.4f  V_max=%.3e  "
+                  "max|Q[VX]|=%.3e m/s  max|Q[SXY]|=%.3e Pa\n",
+                  step, t, V_max_step, q_vx_global, q_sxy_global);
+            }
+         }
+      }
+#endif
+
 
       // R-101 fix: after the first RK4 step, verify that shared-fault
       // DOFData entries agree bit-identically across the two ranks that

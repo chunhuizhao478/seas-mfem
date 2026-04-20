@@ -105,6 +105,15 @@ TEST_TPV102_SETUP_SRC = tests/unit/test_tpv102_setup.cpp
 TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
 TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
 TEST_R101_SHARED_FAULT_SRC = tests/parallel/test_r101_shared_fault.cpp
+# TPV102 v9.0.0 Phase 1 unit tests (§3.1, §3.1b, §3.1c, §3.1d)
+TEST_FAULT_FACE_FLUX_FRAME_SRC = tests/unit/test_fault_face_flux_frame.cpp
+TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_SRC = tests/unit/test_fault_face_flux_frame_and_flux.cpp
+TEST_GODUNOV_IDENTITY_SRC = tests/unit/test_godunov_identity_normal_reversal.cpp
+TEST_FAULT_FLUX_BRANCH_EQUIV_SRC = tests/unit/test_fault_flux_interior_vs_shared_branch_equivalence.cpp
+# v9.0.0 Pelties-9 fix: new unit tests (§3.1e, §3.1f)
+TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC = tests/unit/test_godunov_interior_equal_sides_identity.cpp
+TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC = tests/unit/test_fault_face_flux_per_side_assembly.cpp
+TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC  = tests/unit/test_fault_face_flux_bimaterial_guard.cpp
 
 # R-501: `make ... CXXFLAGS+=-D<FLAG>` may not reach the compile step
 # because MFEM's config.mk explicitly sets MFEM_CPPFLAGS/MFEM_CXXFLAGS.
@@ -158,6 +167,13 @@ TEST_TPV102_SETUP_OBJ = $(TEST_TPV102_SETUP_SRC:.cpp=.o)
 TPV102_DRIVER_OBJ = $(TPV102_DRIVER_SRC:.cpp=.o)
 TEST_TPV102_LOCAL_OBJ = $(TEST_TPV102_LOCAL_SRC:.cpp=.o)
 TEST_R101_SHARED_FAULT_OBJ = $(TEST_R101_SHARED_FAULT_SRC:.cpp=.o)
+TEST_FAULT_FACE_FLUX_FRAME_OBJ = $(TEST_FAULT_FACE_FLUX_FRAME_SRC:.cpp=.o)
+TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_OBJ = $(TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_SRC:.cpp=.o)
+TEST_GODUNOV_IDENTITY_OBJ = $(TEST_GODUNOV_IDENTITY_SRC:.cpp=.o)
+TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ = $(TEST_FAULT_FLUX_BRANCH_EQUIV_SRC:.cpp=.o)
+TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ = $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC:.cpp=.o)
+TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ = $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC:.cpp=.o)
+TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ  = $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -522,6 +538,33 @@ seas_test_pml: $(TEST_PML_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LA
 seas_test_fault_face_flux: $(TEST_FAULT_FACE_FLUX_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 
+# TPV102 v9.0.0 Phase 1 unit tests (§3.1, §3.1b, §3.1c, §3.1d)
+seas_test_fault_face_flux_frame: $(TEST_FAULT_FACE_FLUX_FRAME_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_FRAME_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+seas_test_fault_face_flux_frame_and_flux: $(TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+seas_test_godunov_identity_normal_reversal: $(TEST_GODUNOV_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+seas_test_fault_flux_interior_vs_shared_branch_equivalence: $(TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.0.0 Pelties-9 fix: §3.1e primitive identity test
+seas_test_godunov_interior_equal_sides_identity: $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.0.0 Pelties-9 fix: §3.1f per-side assembly test
+seas_test_fault_face_flux_per_side_assembly: $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# REVIEW R-007 (v9.0.0): bimaterial-guard regression test for
+# FaultFaceFlux::Evaluate.  Death test — the child aborts inside
+# MFEM_VERIFY; the shell target below interprets non-zero exit as PASS.
+seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
 # Dynamic rupture Phase 3: Friction solver tests
 seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
@@ -683,6 +726,35 @@ $(TEST_FAULT_FACE_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_FAULT_FACE_FLUX_FRAME_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_FACE_FLUX_FRAME_AND_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_GODUNOV_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.0.0 Pelties-9 fix: new unit tests (§3.1e, §3.1f)
+$(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_FRICTION_SOLVER_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -721,7 +793,14 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-godunov-flux test-wave-operator \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
-      test-tpv102-setup test-tpv102-local
+      test-tpv102-setup test-tpv102-local \
+      test-fault-face-flux-frame \
+      test-fault-face-flux-frame-and-flux \
+      test-godunov-identity-normal-reversal \
+      test-fault-flux-interior-vs-shared-branch-equivalence \
+      test-godunov-interior-equal-sides-identity \
+      test-fault-face-flux-per-side-assembly \
+      test-fault-face-flux-bimaterial-guard
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -898,6 +977,36 @@ test-pml: seas_test_pml
 
 test-fault-face-flux: seas_test_fault_face_flux
 	./seas_test_fault_face_flux
+
+test-fault-face-flux-frame: seas_test_fault_face_flux_frame
+	./seas_test_fault_face_flux_frame
+
+test-fault-face-flux-frame-and-flux: seas_test_fault_face_flux_frame_and_flux
+	./seas_test_fault_face_flux_frame_and_flux
+
+test-godunov-identity-normal-reversal: seas_test_godunov_identity_normal_reversal
+	./seas_test_godunov_identity_normal_reversal
+
+test-fault-flux-interior-vs-shared-branch-equivalence: seas_test_fault_flux_interior_vs_shared_branch_equivalence
+	./seas_test_fault_flux_interior_vs_shared_branch_equivalence
+
+# v9.0.0 Pelties-9 fix: §3.1e / §3.1f phonies
+test-godunov-interior-equal-sides-identity: seas_test_godunov_interior_equal_sides_identity
+	./seas_test_godunov_interior_equal_sides_identity
+
+test-fault-face-flux-per-side-assembly: seas_test_fault_face_flux_per_side_assembly
+	./seas_test_fault_face_flux_per_side_assembly
+
+# Death test (REVIEW R-007): child aborts inside MFEM_VERIFY; treat
+# non-zero exit as PASS.  If the child returns 0, the guard is gone.
+test-fault-face-flux-bimaterial-guard: seas_test_fault_face_flux_bimaterial_guard
+	@./seas_test_fault_face_flux_bimaterial_guard 2>/dev/null; rc=$$?; \
+	    if [ $$rc -ne 0 ]; then \
+	        echo "PASS: bimaterial guard aborted as expected (rc=$$rc)"; \
+	    else \
+	        echo "FAIL: Evaluate returned without aborting on bimaterial DOFData"; \
+	        exit 1; \
+	    fi
 
 test-friction-solver: seas_test_friction_solver
 	./seas_test_friction_solver

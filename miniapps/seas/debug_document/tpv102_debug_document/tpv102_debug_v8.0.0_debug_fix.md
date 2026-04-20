@@ -944,3 +944,104 @@ user approval.
     propagation / ghost Q exchange), with confirmed rule-out that
     fault-state drift is not the cause.
 ```
+
+### Step 1.14 — Phase 3 sort-adjacency fix; 50-rank Frontera CONFIRMED
+
+After the 200m / 50-rank Frontera run aborted a **second** time (job
+7666323, post-Phase-2 code) with the same `face_key=(26547, 26548,
+26549)` signature, the face-context dump diagnostic (commit
+`cbe8e3d`) resolved the mechanism:
+
+```
+sort_pos=48 qp_idx=0 rank=3 centroid=(-9.8993357e+03, 2.602e-13, -4.250e+03)
+sort_pos=49 qp_idx=1 rank=6 centroid=(-9.8993357e+03, 2.541e-13, -4.150e+03)
+sort_pos=50 qp_idx=1 rank=3 centroid=(-9.8993357e+03, 2.541e-13, -4.150e+03)
+sort_pos=51 qp_idx=2 rank=6 centroid=(-9.8993357e+03, 2.602e-13, -4.250e+03)
+sort_pos=52 qp_idx=0 rank=6 centroid=(-9.8127332e+03, 2.572e-13, -4.200e+03)
+sort_pos=53 qp_idx=2 rank=3 centroid=(-9.8127332e+03, 2.572e-13, -4.200e+03)
+```
+
+**Root cause (Phase 3):** the face in question has vertices V0, V1
+with bit-identical x-coordinates.  Consequently rank 6's q=1 and q=2
+QPs compute **bit-identical** cx while rank 3's q=0 has a 1-ULP
+smaller cx.  The stable sort (by face_key, then cx, then cy, then cz)
+places the two **physical-P0** orphans **non-adjacent**: pos 48 and
+pos 51 are separated by the physical-P1 entries at pos 49, 50.  The
+Phase 2 sequential-adjacency grouping loop only compares `idx[i]`
+with `idx[i+1]`, so pos 48 becomes a singleton despite
+`same_face_qp(48, 51) = TRUE`.
+
+**Fix (commit `0aa7d77`):** replace the sequential-adjacency
+grouping with O(n²) all-pairs nearest-neighbor matching within each
+face-key group.  Repeatedly pick the closest unmatched pair (must
+be different ranks, distance ≤ `PAIR_TOL_M = 1e-6`) and pair them,
+until no candidates remain.  Remaining entries are unpaired (true
+topology errors, not sort-order artifacts).
+
+**Frontera 50-rank confirmation (job 7666340, 2026-04-19):**
+
+```
+Git commit: 0aa7d7780618f033fb5192d143b2b55b010722bc
+Ranks: 50   Mesh: tpv102_200m.msh   Tfinal: 0.01 s
+Elements: 2,464,689   Fault QPs (global): 113,835
+
+[R-101 check] shared-fault DOFData consistency OK:
+  123 pairs matched, 0 unpaired entries,
+  max_rel_diff = 3.33067e-16 (1 ULP)
+
+Step  0/36, V_max = 1e-12 m/s
+  [qnorm] mean=2.13e-24, 17/50 ranks silent
+  [qnorm:watch] r0=3.43e-24 r1=3.02e-24 r4=2.66e-24 r49=0
+
+Step 35/36, V_max = 1e-12 m/s
+  [qnorm] mean=6.24e-22, 0/50 ranks silent
+  [qnorm:watch] r0=8.90e-22 r1=9.82e-22 r4=8.78e-22 r49=3.71e-104
+
+PASS: init sanity complete
+```
+
+This is **dispositive** for the R-101 pairing chain at 50 ranks on
+the 200m mesh:
+- Same METIS partition topology, same Intel-MPI build that aborted
+  twice before (jobs 7666171 Pre-Phase 1, 7666323 Phase 2).
+- 123 pairs × 2 ranks = 246 entries, 0 unpaired (previous runs were
+  122 pairs + 2 unpaired = 246 entries).
+- max_rel_diff = 3.33e-16 confirms the Phase 1 bit-exact DOFData is
+  still bit-exact through the new pairing; Phase 3 did not alter
+  numerics, only correctness of the verifier's match step.
+- Wave-cone reached r49 (the farthest rank from the hypocenter) by
+  step 35 — no pinning, no silent ranks.
+
+**What 1.14 settles:**
+- R-101 pairing is now robust to (i) sign-flipped faces (Phase 2
+  centroid tiebreaker) **and** (ii) faces with coincident vertex
+  coordinates under the sort key (Phase 3 all-pairs matching).
+- The chain Phase 1+2+3 (BP5 face-key + centroid + all-pairs) works
+  at np=2, np=14, np=30, np=50 locally, and at np=50 on Frontera's
+  200m mesh.  400-rank Frontera was already clean under Phase 2.
+
+**What 1.14 does NOT yet settle:**
+- Does V_max break away past ~1e-12 and drive rupture to off-hypo
+  stations?  The 0.01s init run only exercises the first 36 steps,
+  which is far below the nucleation-to-breakaway horizon (~1 s).
+  The 400-rank `tpv102_200m_p1_2.0s_400rank_vmax_halt.sbatch` was
+  submitted against commit `0aa7d77` by the user in a prior session;
+  its result (V_max halting vs evolving) is the remaining piece.
+
+**Updated Phase Log:**
+```
+[x] Step 1.10: BP5-pattern integer face_key (Phase 1)
+[x] Step 1.12: centroid tiebreaker within face-key group (Phase 2)
+[x] Step 1.13: local verification np=2/14/30/50 at 1000m
+[x] Step 1.14: all-pairs matching within face-key group (Phase 3)
+[x] Step 1.14: Frontera 50r/200m init sanity — R-101 OK,
+    123 pairs, 0 unpaired, max_rel_diff=1 ULP
+[ ] Frontera 400r/200m/tfinal=2.0s V_max halt test — IN FLIGHT or
+    pending user-reported result
+[ ] If V_max ≥ 0.1 m/s through breakaway and ≥6/9 stations slip:
+    v8.0.0 closed; Phase 1+2+3 is sufficient.
+[ ] If V_max halts at 1e-12 and no stations slip: open Phase 3B
+    (bulk propagation / ghost Q exchange / CFL / nucleation),
+    with verifier-pairing fully ruled out as the cause.
+```
+```

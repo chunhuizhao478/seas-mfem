@@ -81,6 +81,14 @@ public:
    /// Get A_x^- split flux matrix (for testing).
    const DenseMatrix &GetAxMinus() const { return Ax_minus_; }
    /// Build the 9x9 Jacobian matrix for direction dir (0=x, 1=y, 2=z).
+   ///
+   /// NOTE: this method must remain public.
+   /// tests/unit/test_godunov_interior_equal_sides_identity.cpp
+   /// (see plan §15.4 T-E in tpv102_debug_v9.0.0_seissol_flux_comparison.md)
+   /// reconstructs A externally to verify the identity
+   ///    flux_.Interior(n, Q, Q) == T . A_x . T^{-1} . Q
+   /// which underpins the Pelties 2012 eq. (9) per-side fix at
+   /// wave_operator.inl:811-887 and :1232-1244.
    void BuildJacobian(int dir, DenseMatrix &A) const;
 
    /// Compute the 9x9 rotation matrix T^{-1} (global -> face-local).
