@@ -1381,24 +1381,48 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                     MPI_MAX, comm);
       if (!any_shared_global) { return; }
 
-      // Pack per-QP records: centroid + every DOFData field that
-      // FaultFaceFlux::Evaluate or the driver-side RK4-averaging step
-      // writes.  One record = 3 centroid coords + 8 mutable fields +
-      // 1 emitting-rank tag = 12 doubles.  Each rank contributes one
-      // record per shared fault QP it owns; the same physical QP appears
-      // on both ranks that share the fault face.  Any field whose values
-      // disagree between the two owners is flagged as an R-101
-      // consistency failure.  The emitting-rank tag is used in the
-      // diagnostic print for unpaired entries so we can identify which
-      // rank contributed a singleton.
-      constexpr int REC = 12;
-      constexpr int FIELD_BASE = 3;
+      // Pack per-QP records with BP5-style face-vertex-key for cross-rank
+      // matching.  One record (16 doubles):
+      //
+      //   [0..2]  face_key (sorted triple of HYPRE_BigInt global vertex IDs)
+      //           encoded as double — bit-exact for |v| < 2^53 (holds for any
+      //           realistic mesh; TPV102-200m has ~500K vertices).
+      //   [3]     qp_idx within the face (0, 1, or 2 for triangles at order=1).
+      //   [4..6]  centroid cx, cy, cz — diagnostic only, not used for pairing.
+      //   [7..14] 8 mutable DOFData fields that
+      //           FaultFaceFlux::Evaluate / the RK4 averaging step writes.
+      //   [15]    emitting rank.
+      //
+      // v8.0.0 Phase 1 / job 7666233 root cause: the previous centroid-based
+      // pairing (sort by (cx,cy,cz) with a tolerance) is sensitive to
+      // sub-ULP FP drift between the two ranks' `ftr->Face->Transform` paths
+      // for the same shared face, as MFEM's shared-face code does not
+      // guarantee bit-identical physical coordinates across ranks for every
+      // QP.  Replacing the key with the sorted global-vertex-ID triple
+      // (the same approach BP5's `ElasticityOperator` uses at scale —
+      // `MakeFaceKey` in `domain/elasticity_operator.hpp`, mirrored locally
+      // in `dynamic/shared_fault_key.hpp`) makes pairing integer-exact and
+      // immune to FP drift.  The (key, qp_idx) composite key pairs the same
+      // physical QP on both ranks deterministically: IntRules is deterministic
+      // given the same geometry type, so rank A's qp_idx=k and rank B's
+      // qp_idx=k are the same reference point on the same canonical face.
+      constexpr int REC = 16;
+      constexpr int KEY_OFFSET = 0;
+      constexpr int NUM_KEY_COMPONENTS = 3;
+      constexpr int QP_IDX_OFFSET = 3;
+      constexpr int CENTROID_OFFSET = 4;
+      constexpr int FIELD_BASE = 7;
       constexpr int NUM_FIELDS = 8;
-      constexpr int RANK_OFFSET = 11;   // FIELD_BASE + NUM_FIELDS
+      constexpr int RANK_OFFSET = 15;
       static const char *FIELD_NAMES[NUM_FIELDS] = {
          "tau1_corr", "tau2_corr", "sigma_n_corr",
          "V1", "V2", "psi", "slip1", "slip2"
       };
+
+      // Need the global vertex index table to build face keys.
+      Array<HYPRE_BigInt> gvi;
+      pmesh.GetGlobalVertexIndices(gvi);
+
       std::vector<double> local_data;
 
       for (int sf_idx = 0; sf_idx < fault_shared_faces_.Size(); sf_idx++)
@@ -1411,6 +1435,10 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          if (it == shared_fault_dof_offset_.end()) { continue; }
          int dof_base = it->second;
 
+         int local_face = pmesh.GetSharedFace(sf);
+         dynamic::FaceVertexKey key =
+            dynamic::MakeFaceKey(local_face, gvi, pmesh);
+
          const IntegrationRule &ir =
             IntRules.Get(ftr->GetGeometryType(), 2*order_);
          for (int q = 0; q < ir.GetNPoints(); q++)
@@ -1420,11 +1448,15 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
             Vector phys(3);
             ftr->Face->Transform(ip, phys);
 
-            int idx = dof_base + q;
-            if (idx < 0 ||
-                idx >= static_cast<int>(fault_dof_data_->size())) { continue; }
-            const DOFData &d = (*fault_dof_data_)[idx];
+            int didx = dof_base + q;
+            if (didx < 0 ||
+                didx >= static_cast<int>(fault_dof_data_->size())) { continue; }
+            const DOFData &d = (*fault_dof_data_)[didx];
 
+            local_data.push_back(static_cast<double>(key.v[0]));
+            local_data.push_back(static_cast<double>(key.v[1]));
+            local_data.push_back(static_cast<double>(key.v[2]));
+            local_data.push_back(static_cast<double>(q));
             local_data.push_back(phys(0));
             local_data.push_back(phys(1));
             local_data.push_back(phys(2));
@@ -1455,29 +1487,36 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       int n_entries = total / REC;
       if (n_entries == 0) { return; }
 
-      // Sort entries lexicographically by exact (cx, cy, cz).  Both ranks
-      // that own a shared fault QP compute the centroid by evaluating the
-      // same MFEM Face transformation at the same reference IntegrationPoint,
-      // so matching pairs agree bit-for-bit.  Using exact equality (a) avoids
-      // the strict-weak-ordering UB of any tolerance-based comparator, and
-      // (b) exposes topological mismatches (QPs owned by only one rank) as
-      // unpaired entries instead of silently fusing them into 3-element
-      // "groups" via transitive tolerance.
+      // Sort lexicographically by (key[0], key[1], key[2], qp_idx) as
+      // integers (cast from the double encoding).  Integer comparison is
+      // bit-exact — no tolerance, no sort-ordering pathology.
+      auto key_component = [&](int entry, int k) -> HYPRE_BigInt
+      {
+         return static_cast<HYPRE_BigInt>(all_data[entry*REC + k]);
+      };
+
       std::vector<int> idx(n_entries);
       std::iota(idx.begin(), idx.end(), 0);
       std::sort(idx.begin(), idx.end(), [&](int a, int b)
       {
-         for (int k = 0; k < 3; k++)
+         for (int k = 0; k < NUM_KEY_COMPONENTS + 1; k++)   // key[3] + qp_idx
          {
-            double va = all_data[a*REC + k], vb = all_data[b*REC + k];
+            HYPRE_BigInt va = key_component(a, k);
+            HYPRE_BigInt vb = key_component(b, k);
             if (va != vb) { return va < vb; }
          }
          return false;
       });
 
-      // Track both absolute and relative diff so the diagnostic can report
-      // the physical units while thresholding against a scale-relative
-      // tolerance (R-502).
+      auto same_face_qp = [&](int a, int b)
+      {
+         for (int k = 0; k < NUM_KEY_COMPONENTS + 1; k++)
+         {
+            if (key_component(a, k) != key_component(b, k)) { return false; }
+         }
+         return true;
+      };
+
       double max_rel_diff = 0.0;
       double max_diff_abs = 0.0;
       double max_diff_scale = 1.0;
@@ -1486,82 +1525,55 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       int    n_pairs = 0;
       int    n_unpaired = 0;
 
-      auto same_centroid = [&](int a, int b)
-      {
-         // R-503 fix: hybrid tolerance — `scale * DBL_EPSILON` alone
-         // collapses to ~1e-28 at coordinates near zero (fault plane at
-         // y=0 is the TPV102 case), so two ranks with 1-ULP-of-nonzero
-         // drift in y get classified as different centroids and trigger
-         // a spurious R-305 unpair-abort.
-         //
-         // v8.0.0 Phase 1 fix (job 7666171 diagnosis): the prior 1e-9 floor
-         // was too tight.  At 200 m production mesh with 50-rank partition,
-         // MFEM's shared-face `ftr->Face->Transform(ip, phys)` produces FP
-         // drift > 1e-9 between rank pairs for some QP configurations
-         // (vertex coordinate replication through face_nbr data is not
-         // bit-identical to the local-face path through all aggregation
-         // orders).  Two orphaned entries were observed with centroids
-         // matching to 10 printed digits yet failing `same_centroid`.
-         //
-         // Raising the floor to 1e-6 m keeps us safely above any observed
-         // inter-rank FP drift while remaining 8 orders of magnitude below
-         // the smallest realistic fault-mesh element (min h ≈ 100 m on
-         // production BP5/TPV102 meshes).  Two distinct fault faces have
-         // centroids separated by O(h/2) ≈ 100 m, so 1e-6 m cannot cause
-         // false grouping of unrelated faces.
-         const double abs_floor = 1e-6;
-         for (int k = 0; k < 3; k++)
-         {
-            double va = all_data[a*REC + k], vb = all_data[b*REC + k];
-            double scale = std::max(std::abs(va), std::abs(vb));
-            double tol_k = std::max(scale
-                                    * std::numeric_limits<double>::epsilon(),
-                                    abs_floor);
-            if (std::abs(va - vb) > tol_k) { return false; }
-         }
-         return true;
-      };
-
-      // R-101 diagnostic enhancement (v8.0.0 Phase 1): collect unpaired
-      // entries' centroid + emitting rank so the abort message identifies
-      // WHICH QPs are orphaned.  Needed to distinguish (a) a rank
-      // asymmetrically classifying one face as fault (both-side symmetric
-      // orphan → 2 singletons of DIFFERENT centroids) from (b) a
-      // transitive centroid collision (3-way group collapsing to one).
-      // Capped at 32 entries so the diagnostic stays bounded.
+      // Unpaired entries still reported so a genuine classification
+      // pathology (one rank doesn't see this face as fault; global-key
+      // mismatch) stays visible in the abort trace.  With integer-exact
+      // pairing, tolerance-induced false singletons can no longer happen.
       struct UnpairedEntry
       {
-         double cx, cy, cz;
-         int    rank;
-         int    group_size;
+         HYPRE_BigInt key[3];
+         int          qp_idx;
+         double       cx, cy, cz;
+         int          rank;
+         int          group_size;
       };
       std::vector<UnpairedEntry> unpaired;
       constexpr int MAX_UNPAIRED_REPORT = 32;
+
+      auto push_unpaired = [&](int e, int group_size)
+      {
+         if (static_cast<int>(unpaired.size()) >= MAX_UNPAIRED_REPORT) { return; }
+         UnpairedEntry u;
+         u.key[0] = key_component(e, 0);
+         u.key[1] = key_component(e, 1);
+         u.key[2] = key_component(e, 2);
+         u.qp_idx = static_cast<int>(key_component(e, QP_IDX_OFFSET));
+         u.cx = all_data[e*REC + CENTROID_OFFSET + 0];
+         u.cy = all_data[e*REC + CENTROID_OFFSET + 1];
+         u.cz = all_data[e*REC + CENTROID_OFFSET + 2];
+         u.rank = static_cast<int>(all_data[e*REC + RANK_OFFSET]);
+         u.group_size = group_size;
+         unpaired.push_back(u);
+      };
 
       int i = 0;
       while (i < n_entries)
       {
          int j = i + 1;
-         while (j < n_entries && same_centroid(idx[i], idx[j])) { j++; }
+         while (j < n_entries && same_face_qp(idx[i], idx[j])) { j++; }
          int group_size = j - i;
          if (group_size == 2)
          {
             int a = idx[i], b = idx[i+1];
-            // Guard: both entries of a valid pair must come from DIFFERENT
-            // ranks (same rank emitting twice for the same centroid is a
-            // ctor bug — dof_offset double-mapping or similar).
             int rank_a = static_cast<int>(all_data[a*REC + RANK_OFFSET]);
             int rank_b = static_cast<int>(all_data[b*REC + RANK_OFFSET]);
             if (rank_a == rank_b)
             {
-               if (static_cast<int>(unpaired.size()) < MAX_UNPAIRED_REPORT)
-               {
-                  UnpairedEntry e = {all_data[a*REC+0], all_data[a*REC+1],
-                                     all_data[a*REC+2], rank_a,
-                                     /*group_size=*/2};
-                  unpaired.push_back(e);
-               }
-               n_unpaired += 2;  // both counted as anomalous
+               // Both records from the same rank for the same (face, qp).
+               // Indicates a ctor double-mapping bug (same dof_offset
+               // assigned twice) — not a normal pairing failure.
+               push_unpaired(a, 2);
+               n_unpaired += 2;
                i = j;
                continue;
             }
@@ -1570,15 +1582,6 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                double va = all_data[a*REC + k];
                double vb = all_data[b*REC + k];
                double diff = std::abs(va - vb);
-               // R-502: scale-relative tolerance.  Fields span ~1e-12
-               // (slip rate at nucleation) to ~1e+8 Pa (normal stress);
-               // a fixed absolute tol either fails on large-magnitude
-               // fields (sub-ULP reassociation) or permits gross drift
-               // on small ones.  `max(|va|, |vb|, 1.0)` gives a
-               // physically meaningful scale that (a) never divides by
-               // zero, (b) is O(1) for dimensionless fields like psi,
-               // and (c) matches the field magnitude for large
-               // dimensioned fields.
                double field_scale = std::max({std::abs(va), std::abs(vb),
                                               1.0});
                double rel_diff = diff / field_scale;
@@ -1595,23 +1598,15 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          }
          else
          {
-            // group_size == 1 (singleton — only one rank claimed this QP),
-            // or group_size >= 3 (centroid-match over-aggregated due to
-            // transitive tolerance — less likely at the 1e-9 floor, but
-            // still reported so the two failure modes are distinguishable
-            // in the log).
+            // group_size == 1: one rank classified this face as fault but
+            // the other did not (or emitted for a different qp_idx —
+            // extremely unlikely since IntRules is deterministic).
+            // group_size >= 3: impossible for a shared face (at most 2
+            // elements, hence at most 2 ranks).  If seen, flags a
+            // fault-classification / allgather anomaly.
             for (int m = i; m < j; m++)
             {
-               int e = idx[m];
-               if (static_cast<int>(unpaired.size()) < MAX_UNPAIRED_REPORT)
-               {
-                  UnpairedEntry u = {
-                     all_data[e*REC+0], all_data[e*REC+1], all_data[e*REC+2],
-                     static_cast<int>(all_data[e*REC + RANK_OFFSET]),
-                     group_size
-                  };
-                  unpaired.push_back(u);
-               }
+               push_unpaired(idx[m], group_size);
             }
             n_unpaired += group_size;
          }
@@ -1652,110 +1647,28 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                    ? " (truncated)" : ""));
                for (size_t u = 0; u < unpaired.size(); u++)
                {
-                  // %.17e preserves full double precision so any
-                  // sub-printable-digit FP drift that causes pairing
-                  // failure is visible in the log (v8.0.0 Phase 1: job
-                  // 7666171 printed "identical" coords at %.10e that
-                  // actually differed by > 1e-9 and caused the failure).
+                  // Print the face-vertex-key (integer, bit-exact across
+                  // ranks) + qp_idx + physical centroid (diagnostic only).
+                  // With integer-exact pairing, a group_size != 2 means
+                  // either (a) only one rank classified this face as fault
+                  // (classification asymmetry — likely a global-fault-key
+                  // allgather bug) or (b) the same rank emitted twice for
+                  // the same (face, qp) (dof-offset double mapping).
                   std::fprintf(stderr,
-                     "  [UNPAIRED] centroid=(%.17e, %.17e, %.17e) "
-                     "rank=%d group_size=%d\n",
+                     "  [UNPAIRED] face_key=(%lld, %lld, %lld) qp_idx=%d "
+                     "centroid=(%.17e, %.17e, %.17e) rank=%d group_size=%d\n",
+                     static_cast<long long>(unpaired[u].key[0]),
+                     static_cast<long long>(unpaired[u].key[1]),
+                     static_cast<long long>(unpaired[u].key[2]),
+                     unpaired[u].qp_idx,
                      unpaired[u].cx, unpaired[u].cy, unpaired[u].cz,
                      unpaired[u].rank, unpaired[u].group_size);
                }
                std::fprintf(stderr,
-                  "  Likely mesh-partitioning pathology (one rank "
-                  "classifies a shared face as fault, peer does not; "
-                  "global-vertex-key mismatch) OR tolerance collapse.\n\n");
-               // v8.0.0 Phase 1 self-check (job 7666233 followup): the
-               // abs_floor=1e-6 fix should have paired two entries whose
-               // centroids agree to ~1 ULP.  If they still orphan, this
-               // block distinguishes (a) same_centroid-logic failure vs
-               // (b) sort-ordering pathology (a third entry sorts between
-               // them and is NOT same_centroid with the first).
-               if (unpaired.size() == 2)
-               {
-                  int idx_a = -1, idx_b = -1;
-                  for (int e = 0; e < n_entries; e++)
-                  {
-                     int er = static_cast<int>(all_data[e*REC + RANK_OFFSET]);
-                     double ex = all_data[e*REC + 0];
-                     double ey = all_data[e*REC + 1];
-                     double ez = all_data[e*REC + 2];
-                     if (idx_a < 0 &&
-                         ex == unpaired[0].cx && ey == unpaired[0].cy &&
-                         ez == unpaired[0].cz && er == unpaired[0].rank)
-                     { idx_a = e; }
-                     if (idx_b < 0 &&
-                         ex == unpaired[1].cx && ey == unpaired[1].cy &&
-                         ez == unpaired[1].cz && er == unpaired[1].rank)
-                     { idx_b = e; }
-                  }
-                  if (idx_a >= 0 && idx_b >= 0)
-                  {
-                     bool sc = same_centroid(idx_a, idx_b);
-                     double dx = std::abs(all_data[idx_a*REC+0]
-                                        - all_data[idx_b*REC+0]);
-                     double dy = std::abs(all_data[idx_a*REC+1]
-                                        - all_data[idx_b*REC+1]);
-                     double dz = std::abs(all_data[idx_a*REC+2]
-                                        - all_data[idx_b*REC+2]);
-                     std::fprintf(stderr,
-                        "  [self-check] same_centroid(orphan_0, orphan_1) "
-                        "= %s\n"
-                        "  [self-check]   dx=%.3e, dy=%.3e, dz=%.3e; "
-                        "abs_floor=1.0e-6\n",
-                        sc ? "TRUE" : "FALSE", dx, dy, dz);
-
-                     int pos_a = -1, pos_b = -1;
-                     for (int p = 0; p < n_entries; p++)
-                     {
-                        if (idx[p] == idx_a) { pos_a = p; }
-                        if (idx[p] == idx_b) { pos_b = p; }
-                     }
-                     std::fprintf(stderr,
-                        "  [self-check]   sort positions: orphan_0 at %d, "
-                        "orphan_1 at %d (distance %d)\n",
-                        pos_a, pos_b, std::abs(pos_a - pos_b));
-
-                     // If non-adjacent, dump every entry between them so
-                     // we can see what the "intruder" record(s) look like.
-                     // Cap the window at 16 to keep the log bounded.
-                     if (pos_a >= 0 && pos_b >= 0 &&
-                         std::abs(pos_a - pos_b) != 1)
-                     {
-                        int lo = std::min(pos_a, pos_b);
-                        int hi = std::max(pos_a, pos_b);
-                        int span = hi - lo + 1;
-                        int cap = std::min(span, 16);
-                        for (int p = lo; p < lo + cap; p++)
-                        {
-                           int e = idx[p];
-                           int er = static_cast<int>(
-                              all_data[e*REC + RANK_OFFSET]);
-                           std::fprintf(stderr,
-                              "  [self-check]   pos=%d: "
-                              "cx=%.17e cy=%.17e cz=%.17e rank=%d\n",
-                              p,
-                              all_data[e*REC+0],
-                              all_data[e*REC+1],
-                              all_data[e*REC+2], er);
-                        }
-                        if (span > cap)
-                        {
-                           std::fprintf(stderr,
-                              "  [self-check]   ... (%d entries truncated)\n",
-                              span - cap);
-                        }
-                     }
-                  }
-                  else
-                  {
-                     std::fprintf(stderr,
-                        "  [self-check] unable to re-locate orphan data "
-                        "indices (idx_a=%d, idx_b=%d)\n", idx_a, idx_b);
-                  }
-               }
+                  "  Likely fault-classification asymmetry (one rank's "
+                  "ctor did not add this face-key to fault_shared_faces_ — "
+                  "check global_fault_keys allgather) OR ctor "
+                  "dof-offset double mapping.\n\n");
                std::fflush(stderr);
             }
             MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
@@ -1763,9 +1676,9 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                        "exactly 2 ranks).  See rank-0 [R-101 rank-0 detail] "
                        "lines above this abort trace.");
          }
-         double cx = all_data[max_diff_entry*REC + 0];
-         double cy = all_data[max_diff_entry*REC + 1];
-         double cz = all_data[max_diff_entry*REC + 2];
+         double cx = all_data[max_diff_entry*REC + CENTROID_OFFSET + 0];
+         double cy = all_data[max_diff_entry*REC + CENTROID_OFFSET + 1];
+         double cz = all_data[max_diff_entry*REC + CENTROID_OFFSET + 2];
          const int field_off = max_diff_field - FIELD_BASE;
          const char *field_name =
             (field_off >= 0 && field_off < NUM_FIELDS)

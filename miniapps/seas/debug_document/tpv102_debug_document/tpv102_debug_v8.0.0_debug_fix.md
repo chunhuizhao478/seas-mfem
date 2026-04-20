@@ -688,13 +688,98 @@ and prints:
 → 18/18 PASS.  Self-check is inert when `unpaired.size() != 2`
 and diagnostic-only when triggered.
 
-### Step 1.10 — Next Frontera submission (awaiting user go-ahead)
+### Step 1.10 — BP5-aligned integer-key pairing (root-cause fix)
 
-Pull commit (with self-check), re-run
-`tpv102_200m_p1_0.01s_50rank_init.sbatch`.  The new `[self-check]`
-lines will appear immediately after the `[UNPAIRED]` list if the
-abort fires.  Paste them back and we can cross-reference against
-the table above to choose the correct fix direction.
+**Comparison with BP5 (user directive):** Why does BP5 not see the same
+failure?  BP5's `ElasticityOperator` (`domain/elasticity_operator_setup.inl:917-994`)
+pairs shared fault faces across ranks via an integer triple of sorted
+global vertex IDs (`MakeFaceKey` → `key_ranks` map).  TPV102's R-101
+verifier was instead pairing by physical centroid with a FP tolerance.
+The centroid approach is the source of every pathology we chased
+through Steps 1.4-1.9: sub-ULP MFEM drift, ordering intruders,
+tolerance tuning.  The integer-key approach is bit-exact and immune.
+
+**Fix applied** (user directive: "reuse BP5 pattern, do not touch BP5
+source, write a new file with same logic"):
+
+1. NEW file `miniapps/seas/dynamic/shared_fault_key.hpp` — duplicates
+   BP5's `ElasticityOperator::FaceVertexKey` / `MakeFaceKey` as a
+   free-standing struct + inline function, bit-identical logic.  Header
+   comment documents the unification plan: later BP5 will include this
+   header and drop the nested copies, collapsing the duplication.
+
+2. Rewrote `VerifySharedFaultDOFDataConsistency` in
+   `dynamic/wave_operator.inl`:
+
+   - Record now 16 doubles: `[key(3 int64 as double), qp_idx, centroid(3),
+     fields(8), rank]`.
+   - Sort + group by `(face_key, qp_idx)` as integers — exact, no
+     tolerance.  `same_face_qp` replaces `same_centroid`.
+   - Self-check block and abs_floor infrastructure removed; they
+     existed only to work around the centroid-based pairing, which is
+     gone.
+   - Diagnostic `[UNPAIRED]` now prints face_key + qp_idx + centroid
+     so any remaining orphan is traceable to a specific mesh face.
+
+3. Zero modification of BP5 source (`domain/*`, `fault/*`, `solver/*`
+   unchanged).
+
+**Local verification:**
+
+```
+mpirun -np 2 ./seas_test_r101_shared_fault       → 18/18 PASS
+mpirun -np 2 ./seas_test_parallel_wave_operator  →  5/5 PASS
+```
+
+The 1000m np=2 test continues to cover the paired path.  To exercise
+the failure configuration that no unit test covers (50-rank production
+topology), we ran `seas_tpv102_driver` locally:
+
+```
+mpirun --oversubscribe -np 50 ./seas_tpv102_driver \
+  --mesh tpv102/mesh/tpv102_1000m.msh --mesh-scale 1 --order 1 \
+  --bc-mode absorbing --cfl 0.5 --tfinal 0.0005 \
+  --output-dir /tmp/tpv102_test --no-domain-pv
+```
+
+Result: **pairing succeeds** (no "unpaired entries" abort).  The
+verifier now completes the pairing phase and enters the field-comparison
+phase — the scenario that previously could not be reached.
+
+### Step 1.11 — NEW finding exposed: real psi drift between rank pairs
+
+Once pairing works, the verifier reports a **genuine** inter-rank field
+inconsistency:
+
+```
+MFEM abort: R-101 shared-fault DOFData consistency FAILED.
+  Field 'psi' at centroid (-1.5272e+04, 9.8e-13, -1.6038e+04)
+  differs by 4.277e-3 across the two ranks sharing the face
+  (scale=1.0, rel_diff=4.277e-3, rel_tol=1e-10).
+```
+
+Reproduces at np=14 (psi drift 2.19e-2), np=30 (3.12e-2), np=50
+(4.28e-3) on the 1000m mesh — different faces/magnitudes, but always
+the same class of defect: `psi` on the **same** shared fault QP differs
+between its two rank owners after a single RK4 step.
+
+This is NOT a new bug our fix introduced.  It is the pre-existing
+v8.0.0 defect that the broken pairing was masking — the centroid
+matcher failed with "unpaired entries" BEFORE the field-comparison
+loop could run.  With integer-exact pairing, we now see the real
+divergence.
+
+The abort's own hint is on point: "check that the R-501 owner-broadcast
+in ComputeSharedFaceFluxRHS covers every mutable field written by
+FaultFaceFlux::Evaluate and the driver's RK4 averaging step".  psi
+(state variable) is likely not being propagated from the owner rank
+to the non-owner after the RK4 stage that updates it.
+
+**Local reproducer established — no Frontera needed for Phase 2:**
+The 1000m / np=14 case aborts in under 30 seconds on a laptop and
+produces the full R-101 diagnostic (face_key + centroid + field name +
+drift magnitude + rank pair).  Phase 2 of v8.0.0 (diagnose & fix the
+psi drift) can proceed entirely against this local reproducer.
 
 **Phase 1 Phase Log (current):**
 ```
@@ -705,18 +790,15 @@ the table above to choose the correct fix direction.
 [x] Job 1 submitted (50-rank init) — aborted on R-101 verifier
 [x] R-101 verifier diagnostic enhanced (rank tag + per-entry report)
 [x] Job 1 re-run #1 (7666151) — fprintf+fflush needed for detail print
-[x] Job 1 re-run #2 (7666171) — rank-0 detail captured; initial
-    diagnosis (FP drift > 1e-9)
-[x] Tolerance fix applied (abs_floor 1e-9→1e-6, diag precision %.17e)
-[x] Job 1 re-run #3 (7666233) — tolerance fix did NOT resolve abort;
-    measured drift = 1 ULP = 1.82e-12, well below 1e-6 floor.  The
-    grouping logic itself (not tolerance) is the issue.
-[x] Self-check diagnostic added (direct same_centroid + sort position
-    + intruder enumeration)
-[ ] Job 1 re-run #4 — awaiting user submission on self-check commit
-[ ] R-101 root cause definitively identified
-[ ] R-101 fix applied (pending diagnostic outcome)
-[ ] Job 1 PASS confirmed
-[ ] Jobs 2, 3, 4 submitted
-[ ] Phase 1 Case selected
+[x] Job 1 re-run #2 (7666171) — rank-0 detail captured
+[x] Tolerance fix applied (abs_floor 1e-9→1e-6) — did NOT resolve
+[x] Self-check diagnostic added, Job 1 re-run #3 (7666233)
+[x] **Root cause:** centroid-tolerance pairing is structurally wrong
+    for MFEM shared-face geometry; BP5 proves integer-key pairing works
+[x] **Fix:** `shared_fault_key.hpp` + integer-exact verifier rewrite,
+    no BP5 modification
+[x] Local verification (R-101 tests + np=50 tpv102_driver) PASS on
+    pairing.  Field check now exposes real psi drift (Step 1.11)
+[ ] Phase 2: diagnose psi drift between rank pairs (new task #59)
+[ ] Frontera re-run (deferred — local reproducer adequate for Phase 2)
 ```

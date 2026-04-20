@@ -17,6 +17,7 @@
 #include "godunov_flux.hpp"
 #include "pml_layer.hpp"
 #include "fault_face_flux.hpp"
+#include "shared_fault_key.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../fault/fault_basis.hpp"
 #include "../common/seas_types.hpp"
