@@ -1620,44 +1620,41 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       {
          if (n_unpaired > 0 && max_rel_diff <= tol)
          {
-            // Build a compact singleton/anomaly report on rank 0 so the
-            // abort message identifies WHICH QPs are orphaned (coords +
-            // emitting rank + group_size).  Other ranks emit a short
-            // MFEM_ABORT to keep MPI cooperative shutdown; the detail
-            // only prints once.
-            std::ostringstream detail;
-            detail << "R-101 shared-fault DOFData: " << n_unpaired
-                   << " unpaired entries out of " << n_entries
-                   << " total records (";
-            detail << n_pairs << " paired, "
-                   << static_cast<int>(unpaired.size())
-                   << " reported below";
-            if (static_cast<int>(unpaired.size()) >= MAX_UNPAIRED_REPORT)
-            {
-               detail << "; truncated to first " << MAX_UNPAIRED_REPORT;
-            }
-            detail << ").  Every shared QP should have exactly 2 ranks "
-                   << "owning it.\n";
-            for (size_t u = 0; u < unpaired.size(); u++)
-            {
-               detail << "  [UNPAIRED] centroid=(" << unpaired[u].cx
-                      << ", " << unpaired[u].cy << ", " << unpaired[u].cz
-                      << ") rank=" << unpaired[u].rank
-                      << " group_size=" << unpaired[u].group_size << "\n";
-            }
-            detail << "Likely mesh-partitioning pathology (one rank "
-                   << "classifies a shared face as fault, peer does not; "
-                   << "global-vertex-key mismatch) OR tolerance collapse.";
+            // Rank 0 prints the detailed unpaired-entry report directly
+            // to stderr with an explicit flush BEFORE calling MFEM_ABORT.
+            // MFEM_ABORT → MPI_Abort can swallow long cerr-buffered
+            // messages under SLURM/ibrun (job 7666151 saw only the
+            // short non-rank-0 messages); fprintf+fflush is the
+            // low-level escape hatch.  Every rank then calls a short
+            // MFEM_ABORT for cooperative shutdown.
             if (my_rank_ == 0)
             {
-               MFEM_ABORT(detail.str());
+               std::fprintf(stderr,
+                  "\n[R-101 rank-0 detail]\n"
+                  "  n_entries=%d, n_pairs=%d, n_unpaired=%d, "
+                  "reported=%d%s\n",
+                  n_entries, n_pairs, n_unpaired,
+                  static_cast<int>(unpaired.size()),
+                  (static_cast<int>(unpaired.size()) >= MAX_UNPAIRED_REPORT
+                   ? " (truncated)" : ""));
+               for (size_t u = 0; u < unpaired.size(); u++)
+               {
+                  std::fprintf(stderr,
+                     "  [UNPAIRED] centroid=(%.10e, %.10e, %.10e) "
+                     "rank=%d group_size=%d\n",
+                     unpaired[u].cx, unpaired[u].cy, unpaired[u].cz,
+                     unpaired[u].rank, unpaired[u].group_size);
+               }
+               std::fprintf(stderr,
+                  "  Likely mesh-partitioning pathology (one rank "
+                  "classifies a shared face as fault, peer does not; "
+                  "global-vertex-key mismatch) OR tolerance collapse.\n\n");
+               std::fflush(stderr);
             }
-            else
-            {
-               MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
-                          << " unpaired entries (every shared QP should have "
-                          "exactly 2 ranks).  See rank-0 detail.");
-            }
+            MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
+                       << " unpaired entries (every shared QP should have "
+                       "exactly 2 ranks).  See rank-0 [R-101 rank-0 detail] "
+                       "lines above this abort trace.");
          }
          double cx = all_data[max_diff_entry*REC + 0];
          double cy = all_data[max_diff_entry*REC + 1];
