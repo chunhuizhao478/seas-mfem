@@ -624,18 +624,77 @@ reproduce in a local np=2 unit test.  The existing R-101 parallel
 test continues to guarantee the paired path is correct; the Frontera
 50-rank re-run is the regression check for the tolerance fix.
 
-### Step 1.8 — Next Frontera submission (awaiting user go-ahead)
+### Step 1.8 — Job 7666233: tolerance fix did NOT resolve the abort
 
-Re-run `tpv102_200m_p1_0.01s_50rank_init.sbatch` against the fix
-commit.  Expected: init-only sanity PASS (no R-101 abort), RESULT.txt
-prints "init complete" (or equivalent driver-exit marker).  If PASS,
-proceed to Jobs 2/3/4 per plan decision table.
+**Result.**  Re-run against commit `9cfd296` (abs_floor=1e-6 +
+%.17e diagnostic).  Same count: `n_entries=246, n_pairs=122,
+n_unpaired=2`.  The %.17e diagnostic now reveals the actual orphan
+coordinates:
 
-If R-101 fires again at 50-rank, the `%.17e` diagnostic will reveal
-whether the orphan centroids genuinely differ by > 1e-6 (→ MFEM
-pathology deeper than FP drift — escalate to face-vertex-key-based
-pairing) or the sort algorithm is at fault (→ revisit the sort
-comparator, which currently uses exact equality).
+```
+[UNPAIRED] centroid=(-9.89933571681227295e+03, 2.60237444819293559e-13, -4.25000000000785622e+03) rank=3 group_size=1
+[UNPAIRED] centroid=(-9.89933571681227113e+03, 2.60237444819293559e-13, -4.25000000000785622e+03) rank=6 group_size=1
+```
+
+Drift in x: `|(-9899.33571681227295) - (-9899.33571681227113)| =
+1.82e-12`.  At magnitude 9899, that's **exactly 1 ULP** of
+double precision.  y and z agree to bit-identical 17-digit
+precision (drift == 0).  With `abs_floor=1e-6`, `same_centroid(A,B)`
+**must** return TRUE (1.82e-12 ≪ 1e-6).
+
+So our diagnosis from Step 1.7 (FP drift > 1e-9 breaks the
+tolerance) is **incomplete**.  Something else is causing the two
+entries to be assigned to separate groups of size 1 each.  Possibilities:
+
+- (A) same_centroid returns FALSE despite coords well within tol —
+  compilation / tolerance-evaluation subtlety we haven't
+  understood.
+- (B) another entry sorts lex-between A and B and has
+  same_centroid(A, intruder) == FALSE — a sort-ordering pathology
+  (unlikely given cx values are 1 ULP apart, leaving no strict-
+  between double).
+- (C) the grouping loop itself has a bug — e.g., the post-group
+  `i = j` accidentally skips one of the pair.
+
+None of these can be distinguished from the current log.
+
+### Step 1.9 — Diagnostic self-check added (for job 1 re-run #4)
+
+**Rationale.**  Submitting another Frontera run on a guess would
+waste SUs.  Added a `[self-check]` block to the R-101 verifier
+that runs exactly once (rank 0 only) when `unpaired.size() == 2`
+and prints:
+
+- `same_centroid(orphan_0, orphan_1) = TRUE|FALSE` — directly
+  answers whether the tolerance check passes between the two
+  orphans.
+- `dx / dy / dz` — per-coordinate drift between them.
+- `sort positions: orphan_0 at P0, orphan_1 at P1 (distance D)`
+  — reveals whether they were adjacent in the sort order.
+- If `D != 1`, enumerate up to 16 entries between them with
+  full-precision coords + rank — shows the "intruder" records that
+  broke the grouping.
+
+**Outcome table** (what to conclude after job 1 re-run #4):
+
+| `same_centroid` | `distance` | Diagnosis | Fix direction |
+|-----------------|------------|-----------|---------------|
+| FALSE | 1 | tol not applied (impossible given source?) | recheck build, `abs_floor` value at runtime |
+| TRUE  | 1 | algorithm bug in grouping loop | audit `i = j` / `group_size==2` branch |
+| TRUE  | >1 | sort non-determinism or NaN-like coord | audit sort lambda, check coord values |
+| FALSE | >1 | intruder entry has |coord diff| > 1e-6 | intruder coords will show why; may need vertex-key pairing |
+
+**Local verification:** `mpirun -np 2 ./seas_test_r101_shared_fault`
+→ 18/18 PASS.  Self-check is inert when `unpaired.size() != 2`
+and diagnostic-only when triggered.
+
+### Step 1.10 — Next Frontera submission (awaiting user go-ahead)
+
+Pull commit (with self-check), re-run
+`tpv102_200m_p1_0.01s_50rank_init.sbatch`.  The new `[self-check]`
+lines will appear immediately after the `[UNPAIRED]` list if the
+abort fires.  Paste them back and we can cross-reference against
+the table above to choose the correct fix direction.
 
 **Phase 1 Phase Log (current):**
 ```
@@ -646,10 +705,17 @@ comparator, which currently uses exact equality).
 [x] Job 1 submitted (50-rank init) — aborted on R-101 verifier
 [x] R-101 verifier diagnostic enhanced (rank tag + per-entry report)
 [x] Job 1 re-run #1 (7666151) — fprintf+fflush needed for detail print
-[x] Job 1 re-run #2 (7666171) — rank-0 detail captured; root cause
-    identified (inter-rank centroid FP drift > 1e-9)
-[x] R-101 fix applied (abs_floor 1e-9→1e-6, diag precision %.17e)
-[ ] Job 1 re-run #3 — awaiting user submission on fix commit
+[x] Job 1 re-run #2 (7666171) — rank-0 detail captured; initial
+    diagnosis (FP drift > 1e-9)
+[x] Tolerance fix applied (abs_floor 1e-9→1e-6, diag precision %.17e)
+[x] Job 1 re-run #3 (7666233) — tolerance fix did NOT resolve abort;
+    measured drift = 1 ULP = 1.82e-12, well below 1e-6 floor.  The
+    grouping logic itself (not tolerance) is the issue.
+[x] Self-check diagnostic added (direct same_centroid + sort position
+    + intruder enumeration)
+[ ] Job 1 re-run #4 — awaiting user submission on self-check commit
+[ ] R-101 root cause definitively identified
+[ ] R-101 fix applied (pending diagnostic outcome)
 [ ] Job 1 PASS confirmed
 [ ] Jobs 2, 3, 4 submitted
 [ ] Phase 1 Case selected

@@ -1667,6 +1667,95 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
                   "  Likely mesh-partitioning pathology (one rank "
                   "classifies a shared face as fault, peer does not; "
                   "global-vertex-key mismatch) OR tolerance collapse.\n\n");
+               // v8.0.0 Phase 1 self-check (job 7666233 followup): the
+               // abs_floor=1e-6 fix should have paired two entries whose
+               // centroids agree to ~1 ULP.  If they still orphan, this
+               // block distinguishes (a) same_centroid-logic failure vs
+               // (b) sort-ordering pathology (a third entry sorts between
+               // them and is NOT same_centroid with the first).
+               if (unpaired.size() == 2)
+               {
+                  int idx_a = -1, idx_b = -1;
+                  for (int e = 0; e < n_entries; e++)
+                  {
+                     int er = static_cast<int>(all_data[e*REC + RANK_OFFSET]);
+                     double ex = all_data[e*REC + 0];
+                     double ey = all_data[e*REC + 1];
+                     double ez = all_data[e*REC + 2];
+                     if (idx_a < 0 &&
+                         ex == unpaired[0].cx && ey == unpaired[0].cy &&
+                         ez == unpaired[0].cz && er == unpaired[0].rank)
+                     { idx_a = e; }
+                     if (idx_b < 0 &&
+                         ex == unpaired[1].cx && ey == unpaired[1].cy &&
+                         ez == unpaired[1].cz && er == unpaired[1].rank)
+                     { idx_b = e; }
+                  }
+                  if (idx_a >= 0 && idx_b >= 0)
+                  {
+                     bool sc = same_centroid(idx_a, idx_b);
+                     double dx = std::abs(all_data[idx_a*REC+0]
+                                        - all_data[idx_b*REC+0]);
+                     double dy = std::abs(all_data[idx_a*REC+1]
+                                        - all_data[idx_b*REC+1]);
+                     double dz = std::abs(all_data[idx_a*REC+2]
+                                        - all_data[idx_b*REC+2]);
+                     std::fprintf(stderr,
+                        "  [self-check] same_centroid(orphan_0, orphan_1) "
+                        "= %s\n"
+                        "  [self-check]   dx=%.3e, dy=%.3e, dz=%.3e; "
+                        "abs_floor=1.0e-6\n",
+                        sc ? "TRUE" : "FALSE", dx, dy, dz);
+
+                     int pos_a = -1, pos_b = -1;
+                     for (int p = 0; p < n_entries; p++)
+                     {
+                        if (idx[p] == idx_a) { pos_a = p; }
+                        if (idx[p] == idx_b) { pos_b = p; }
+                     }
+                     std::fprintf(stderr,
+                        "  [self-check]   sort positions: orphan_0 at %d, "
+                        "orphan_1 at %d (distance %d)\n",
+                        pos_a, pos_b, std::abs(pos_a - pos_b));
+
+                     // If non-adjacent, dump every entry between them so
+                     // we can see what the "intruder" record(s) look like.
+                     // Cap the window at 16 to keep the log bounded.
+                     if (pos_a >= 0 && pos_b >= 0 &&
+                         std::abs(pos_a - pos_b) != 1)
+                     {
+                        int lo = std::min(pos_a, pos_b);
+                        int hi = std::max(pos_a, pos_b);
+                        int span = hi - lo + 1;
+                        int cap = std::min(span, 16);
+                        for (int p = lo; p < lo + cap; p++)
+                        {
+                           int e = idx[p];
+                           int er = static_cast<int>(
+                              all_data[e*REC + RANK_OFFSET]);
+                           std::fprintf(stderr,
+                              "  [self-check]   pos=%d: "
+                              "cx=%.17e cy=%.17e cz=%.17e rank=%d\n",
+                              p,
+                              all_data[e*REC+0],
+                              all_data[e*REC+1],
+                              all_data[e*REC+2], er);
+                        }
+                        if (span > cap)
+                        {
+                           std::fprintf(stderr,
+                              "  [self-check]   ... (%d entries truncated)\n",
+                              span - cap);
+                        }
+                     }
+                  }
+                  else
+                  {
+                     std::fprintf(stderr,
+                        "  [self-check] unable to re-locate orphan data "
+                        "indices (idx_a=%d, idx_b=%d)\n", idx_a, idx_b);
+                  }
+               }
                std::fflush(stderr);
             }
             MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
