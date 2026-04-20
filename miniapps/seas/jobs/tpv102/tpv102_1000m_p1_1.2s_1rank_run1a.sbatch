@@ -97,8 +97,18 @@ ibrun ./seas_tpv102_driver \
 # `flt_n9_7.5.dat`, `flt_n12_3.dat`, `flt_n12_12.dat`.
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
 JOB_LOG="${SBATCH_LOG_DIR}/tpv102_run1a_1r_${SLURM_JOB_ID}.out"
+JOB_ERR="${SBATCH_LOG_DIR}/tpv102_run1a_1r_${SLURM_JOB_ID}.err"
 if [ ! -f "${JOB_LOG}" ]; then
    echo "FAIL: post-run check cannot locate job log (looked at '${JOB_LOG}'). Hint: SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-<unset>}'." > "${RESULT_FILE}"
+   cat "${RESULT_FILE}"
+   exit 0
+fi
+
+# Early bailout for MFEM_ABORT (writes to stderr → .err).
+if grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData" "${JOB_ERR}" 2>/dev/null; then
+   ABORT_LINE=$(grep -E "MFEM abort|MFEM_ABORT|R-101 shared-fault DOFData" "${JOB_ERR}" | head -1)
+   echo "FAIL: MFEM abort during Run 1a" > "${RESULT_FILE}"
+   echo "      ${ABORT_LINE}" >> "${RESULT_FILE}"
    cat "${RESULT_FILE}"
    exit 0
 fi
@@ -126,7 +136,8 @@ for sta in flt_0_3 flt_0_7.5 flt_0_12 flt_9_7.5 flt_12_3 flt_12_12 \
    fi
 done
 
-if grep -q "MFEM abort\|MFEM_ABORT" "${JOB_LOG}"; then
+if grep -q "MFEM abort\|MFEM_ABORT" "${JOB_ERR}" 2>/dev/null \
+   || grep -q "MFEM abort\|MFEM_ABORT" "${JOB_LOG}"; then
    echo "FAIL: MFEM abort during Run 1a" > "${RESULT_FILE}"
 else
    echo "Run 1a propagation score: ${SLIP_COUNT} / 9 stations slipped" > "${RESULT_FILE}"

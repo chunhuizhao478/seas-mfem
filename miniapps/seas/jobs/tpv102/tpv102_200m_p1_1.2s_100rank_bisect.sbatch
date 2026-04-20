@@ -97,8 +97,18 @@ ibrun ./seas_tpv102_driver \
 # Phase 1 success criterion [R-506]: station propagation score.
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
 JOB_LOG="${SBATCH_LOG_DIR}/tpv102_bisect_100r_${SLURM_JOB_ID}.out"
+JOB_ERR="${SBATCH_LOG_DIR}/tpv102_bisect_100r_${SLURM_JOB_ID}.err"
 if [ ! -f "${JOB_LOG}" ]; then
    echo "FAIL: post-run check cannot locate job log (looked at '${JOB_LOG}'). Hint: SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-<unset>}'." > "${RESULT_FILE}"
+   cat "${RESULT_FILE}"
+   exit 0
+fi
+
+# Early bailout for MFEM_ABORT (writes to stderr → .err).
+if grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData" "${JOB_ERR}" 2>/dev/null; then
+   ABORT_LINE=$(grep -E "MFEM abort|MFEM_ABORT|R-101 shared-fault DOFData" "${JOB_ERR}" | head -1)
+   echo "FAIL: MFEM abort during Run 1b (Tier 2)" > "${RESULT_FILE}"
+   echo "      ${ABORT_LINE}" >> "${RESULT_FILE}"
    cat "${RESULT_FILE}"
    exit 0
 fi
@@ -126,9 +136,11 @@ done
 # Qnorm cross-rank tail watch.
 FINAL_WATCH=$(grep "\[qnorm:watch\]" "${JOB_LOG}" | tail -1)
 
-if grep -q "R-101 shared-fault DOFData consistency FAILED\|R-101 shared-fault DOFData: .* unpaired entries" "${JOB_LOG}"; then
+if grep -q "R-101 shared-fault DOFData consistency FAILED\|R-101 shared-fault DOFData: .* unpaired entries" "${JOB_ERR}" 2>/dev/null \
+   || grep -q "R-101 shared-fault DOFData consistency FAILED\|R-101 shared-fault DOFData: .* unpaired entries" "${JOB_LOG}"; then
    echo "FAIL: R-101 shared-fault consistency diagnostic tripped" > "${RESULT_FILE}"
-elif grep -q "MFEM abort\|MFEM_ABORT" "${JOB_LOG}"; then
+elif grep -q "MFEM abort\|MFEM_ABORT" "${JOB_ERR}" 2>/dev/null \
+   || grep -q "MFEM abort\|MFEM_ABORT" "${JOB_LOG}"; then
    echo "FAIL: MFEM abort during Run 1b (Tier 2)" > "${RESULT_FILE}"
 else
    echo "Run 1b Tier 2 propagation score: ${SLIP_COUNT} / 9 stations slipped" > "${RESULT_FILE}"

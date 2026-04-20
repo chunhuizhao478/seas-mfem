@@ -424,4 +424,129 @@ autonomously.
 3. On completion, collect the 4 `RESULT.txt` files + their
    station data directories for scoring.
 
-*(Phase 1 decision-rule fall-through pending submission.)*
+### Step 1.4 — First Frontera run: 50-rank init (job 7666117, 2026-04-19)
+
+**Submitted by user.**  Results:
+
+**Finding 1 — R-101 verifier aborts at init with 2 unpaired entries.**
+
+`tpv102_init_50r_7666117.err` excerpt:
+```
+[BUILD] SEAS_DIAG_FAULT_FLUX = OFF
+[BUILD] SEAS_DIAG_GHOST_EXCHANGE = OFF
+
+MFEM abort: R-101 shared-fault DOFData: 2 unpaired entries (every shared
+QP should have exactly 2 ranks).  Likely mesh-partitioning pathology or
+peer-rank resolution failure.
+ ... in file: drivers/../dynamic/wave_operator.inl:1576
+(aborted on all 50 ranks)
+```
+
+`tpv102_init_50r_7666117.out` excerpt:
+```
+Mesh: 2464689 elements total, 50 ranks
+Fault QPs (global): 113835 (local: 5136, shared: 3)
+TACC:  MPI job exited with code: 1
+```
+
+**Analysis:**
+- Build and banner are clean — `[BUILD]` banner prints both flags OFF as
+  requested.  Flag plumbing confirmed end-to-end on Frontera.
+- The abort is a **real bug in the R-101 verifier or the shared-fault
+  bookkeeping at 50-rank topology**.  The plan's recorded baseline
+  ("405 pairs, 135 shared fault faces, max_rel_diff=6.66e-16") was at
+  400-rank; at 50-rank the partition cuts produce 2 QPs that appear
+  on only one rank.
+- Local np=2 R-101 test still passes (18/18); local np=8 on 200m mesh
+  also reported `72 pairs matched, max_rel_diff=4.44e-16` with no
+  unpaired.  The bug is **specific to intermediate rank counts** where
+  METIS produces a partition topology that the current bookkeeping
+  fails to symmetrize.
+- `fault_shared_faces_` selection in the ctor (`wave_operator.inl:267-281`)
+  relies on `shared_face_bdr_attr_[sf] == fault_attr`, which is
+  populated via global-vertex-key match against the Allgatherv-merged
+  `global_fault_keys` set (`wave_operator.inl:137-242`).  For both
+  ranks of a shared face to classify identically, the same 4 sorted
+  global vertex IDs must yield the same key.  If 2 unpaired entries
+  persist, either (a) one rank's `gvi[]` for a face's vertices differs
+  from the other's, or (b) the key itself is under-specified for
+  certain face geometries.
+
+**Finding 2 — sbatch banner check bug (now fixed).**
+
+The `RESULT.txt` check in `tpv102_200m_p1_0.01s_50rank_init.sbatch`
+greppedthe `.out` file, but the `[BUILD]` banner writes to stderr
+(→ `.err` via `#SBATCH -e`).  Fixed post-facto in all 4 sbatches
+(commit follows): the check now reads `build_info.txt` (preferred
+per plan R-606) with `.err` fallback.
+
+### Step 1.5 — R-101 verifier diagnostic enhancement
+
+**Rationale:** the current abort message prints only the count
+(`2 unpaired entries`) — not which physical QPs or which ranks
+own them.  Without that info we cannot distinguish the failure
+modes (asymmetric classification vs centroid-tolerance collapse vs
+triple-match due to partition corner vertex).
+
+**Implemented** in `miniapps/seas/dynamic/wave_operator.inl`:
+
+- Extended the per-QP record from 11 to 12 doubles by appending
+  the emitting rank ID as a tag.  `REC`, `RANK_OFFSET` constants
+  updated.
+- Rewrote the centroid-group loop to collect up to 32 unpaired
+  entries (centroid + rank + group_size).
+- Added a guard for `rank_a == rank_b` paired entries — same-rank
+  pairing is an anomalous condition indicating a ctor
+  double-mapping rather than a real MPI pair; flagged as anomaly
+  and reported.
+- Rewrote the abort message on rank 0 to enumerate the unpaired
+  entries (coordinates + rank + group_size), capped at 32 entries.
+  Other ranks emit a short "see rank-0 detail" abort.
+- Added `#include <sstream>` to `wave_operator.hpp`.
+- R-101 parallel tests (np=2): 18/18 PASS after the
+  enhancement — no behavior change on the paired path.
+
+Next Frontera run will produce:
+```
+[UNPAIRED] centroid=(x1, y1, z1) rank=A group_size=1
+[UNPAIRED] centroid=(x2, y2, z2) rank=B group_size=1
+```
+From those 2 coordinates we can determine (a) whether the 2
+unpaired QPs are on the same fault face (→ centroid-tolerance
+issue), or (b) on different faces each missed on one side
+(→ global-key mismatch).
+
+### Step 1.6 — Next Frontera submission (awaiting user go-ahead)
+
+The same `tpv102_200m_p1_0.01s_50rank_init.sbatch` (50-rank,
+tfinal=0.01 s, dev queue, ~5 min, ~0.1 SU) re-run against the
+enhanced R-101 verifier will identify the exact 2 QPs causing
+the abort.  Based on the output we will either:
+
+(A) Fix `make_global_key` to disambiguate triangle vs quad faces
+    that share the same 3 vertices (e.g., include `verts.Size()`
+    in the key);
+(B) Loosen the centroid-match tolerance if the 2 entries turn out
+    to be sub-1e-9 coordinate-drift partners;
+(C) Inspect MFEM's `GetGlobalVertexIndices` behavior at the
+    specific vertex IDs.
+
+**Decision:** do NOT submit Jobs 2/3/4 until Job 1 re-run with the
+verifier enhancement identifies and fixes the 50-rank R-101 abort.
+Otherwise all 3 larger-scale runs will hit the same abort.
+
+**Phase 1 Phase Log (current):**
+```
+[x] Phase 1A Action 0 (Makefile + banner) applied + verified
+[x] Partition pre-flight (local) complete
+[x] Frontera sbatches built (4 files) — sbatch banner check bug
+    identified and fixed in all 4
+[x] Job 1 submitted (50-rank init) — aborted on R-101 verifier
+[x] R-101 verifier diagnostic enhanced (rank tag + per-entry report)
+[ ] Job 1 re-run — awaiting user submission
+[ ] R-101 root cause identified
+[ ] R-101 fix applied
+[ ] Job 1 PASS confirmed
+[ ] Jobs 2, 3, 4 submitted
+[ ] Phase 1 Case selected
+```

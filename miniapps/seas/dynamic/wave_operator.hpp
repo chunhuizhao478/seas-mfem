@@ -25,6 +25,7 @@
 #include <vector>
 #include <map>
 #include <set>
+#include <sstream>
 
 namespace mfem
 {

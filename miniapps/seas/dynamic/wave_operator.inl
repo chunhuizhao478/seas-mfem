@@ -1383,14 +1383,18 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
 
       // Pack per-QP records: centroid + every DOFData field that
       // FaultFaceFlux::Evaluate or the driver-side RK4-averaging step
-      // writes.  One record = 3 centroid coords + 8 mutable fields = 11
-      // doubles.  Each rank contributes one record per shared fault QP
-      // it owns; the same physical QP appears on both ranks that share
-      // the fault face.  Any field whose values disagree between the
-      // two owners is flagged as an R-101 consistency failure.
-      constexpr int REC = 11;
+      // writes.  One record = 3 centroid coords + 8 mutable fields +
+      // 1 emitting-rank tag = 12 doubles.  Each rank contributes one
+      // record per shared fault QP it owns; the same physical QP appears
+      // on both ranks that share the fault face.  Any field whose values
+      // disagree between the two owners is flagged as an R-101
+      // consistency failure.  The emitting-rank tag is used in the
+      // diagnostic print for unpaired entries so we can identify which
+      // rank contributed a singleton.
+      constexpr int REC = 12;
       constexpr int FIELD_BASE = 3;
       constexpr int NUM_FIELDS = 8;
+      constexpr int RANK_OFFSET = 11;   // FIELD_BASE + NUM_FIELDS
       static const char *FIELD_NAMES[NUM_FIELDS] = {
          "tau1_corr", "tau2_corr", "sigma_n_corr",
          "V1", "V2", "psi", "slip1", "slip2"
@@ -1432,6 +1436,7 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
             local_data.push_back(d.psi);
             local_data.push_back(d.slip1);
             local_data.push_back(d.slip2);
+            local_data.push_back(static_cast<double>(my_rank_));
          }
       }
 
@@ -1504,6 +1509,22 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          return true;
       };
 
+      // R-101 diagnostic enhancement (v8.0.0 Phase 1): collect unpaired
+      // entries' centroid + emitting rank so the abort message identifies
+      // WHICH QPs are orphaned.  Needed to distinguish (a) a rank
+      // asymmetrically classifying one face as fault (both-side symmetric
+      // orphan → 2 singletons of DIFFERENT centroids) from (b) a
+      // transitive centroid collision (3-way group collapsing to one).
+      // Capped at 32 entries so the diagnostic stays bounded.
+      struct UnpairedEntry
+      {
+         double cx, cy, cz;
+         int    rank;
+         int    group_size;
+      };
+      std::vector<UnpairedEntry> unpaired;
+      constexpr int MAX_UNPAIRED_REPORT = 32;
+
       int i = 0;
       while (i < n_entries)
       {
@@ -1513,7 +1534,25 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          if (group_size == 2)
          {
             int a = idx[i], b = idx[i+1];
-            for (int k = FIELD_BASE; k < REC; k++)
+            // Guard: both entries of a valid pair must come from DIFFERENT
+            // ranks (same rank emitting twice for the same centroid is a
+            // ctor bug — dof_offset double-mapping or similar).
+            int rank_a = static_cast<int>(all_data[a*REC + RANK_OFFSET]);
+            int rank_b = static_cast<int>(all_data[b*REC + RANK_OFFSET]);
+            if (rank_a == rank_b)
+            {
+               if (static_cast<int>(unpaired.size()) < MAX_UNPAIRED_REPORT)
+               {
+                  UnpairedEntry e = {all_data[a*REC+0], all_data[a*REC+1],
+                                     all_data[a*REC+2], rank_a,
+                                     /*group_size=*/2};
+                  unpaired.push_back(e);
+               }
+               n_unpaired += 2;  // both counted as anomalous
+               i = j;
+               continue;
+            }
+            for (int k = FIELD_BASE; k < FIELD_BASE + NUM_FIELDS; k++)
             {
                double va = all_data[a*REC + k];
                double vb = all_data[b*REC + k];
@@ -1541,16 +1580,27 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
             }
             n_pairs++;
          }
-         else if (group_size != 1)
-         {
-            // A shared face is owned by exactly 2 ranks; anything else means
-            // the centroid-match collapsed unrelated faces, which would
-            // already be a logic error in this diagnostic.
-            n_unpaired += group_size;
-         }
          else
          {
-            n_unpaired++;
+            // group_size == 1 (singleton — only one rank claimed this QP),
+            // or group_size >= 3 (centroid-match over-aggregated due to
+            // transitive tolerance — less likely at the 1e-9 floor, but
+            // still reported so the two failure modes are distinguishable
+            // in the log).
+            for (int m = i; m < j; m++)
+            {
+               int e = idx[m];
+               if (static_cast<int>(unpaired.size()) < MAX_UNPAIRED_REPORT)
+               {
+                  UnpairedEntry u = {
+                     all_data[e*REC+0], all_data[e*REC+1], all_data[e*REC+2],
+                     static_cast<int>(all_data[e*REC + RANK_OFFSET]),
+                     group_size
+                  };
+                  unpaired.push_back(u);
+               }
+            }
+            n_unpaired += group_size;
          }
          i = j;
       }
@@ -1570,10 +1620,44 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       {
          if (n_unpaired > 0 && max_rel_diff <= tol)
          {
-            MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
-                       << " unpaired entries (every shared QP should have "
-                       "exactly 2 ranks).  Likely mesh-partitioning "
-                       "pathology or peer-rank resolution failure.");
+            // Build a compact singleton/anomaly report on rank 0 so the
+            // abort message identifies WHICH QPs are orphaned (coords +
+            // emitting rank + group_size).  Other ranks emit a short
+            // MFEM_ABORT to keep MPI cooperative shutdown; the detail
+            // only prints once.
+            std::ostringstream detail;
+            detail << "R-101 shared-fault DOFData: " << n_unpaired
+                   << " unpaired entries out of " << n_entries
+                   << " total records (";
+            detail << n_pairs << " paired, "
+                   << static_cast<int>(unpaired.size())
+                   << " reported below";
+            if (static_cast<int>(unpaired.size()) >= MAX_UNPAIRED_REPORT)
+            {
+               detail << "; truncated to first " << MAX_UNPAIRED_REPORT;
+            }
+            detail << ").  Every shared QP should have exactly 2 ranks "
+                   << "owning it.\n";
+            for (size_t u = 0; u < unpaired.size(); u++)
+            {
+               detail << "  [UNPAIRED] centroid=(" << unpaired[u].cx
+                      << ", " << unpaired[u].cy << ", " << unpaired[u].cz
+                      << ") rank=" << unpaired[u].rank
+                      << " group_size=" << unpaired[u].group_size << "\n";
+            }
+            detail << "Likely mesh-partitioning pathology (one rank "
+                   << "classifies a shared face as fault, peer does not; "
+                   << "global-vertex-key mismatch) OR tolerance collapse.";
+            if (my_rank_ == 0)
+            {
+               MFEM_ABORT(detail.str());
+            }
+            else
+            {
+               MFEM_ABORT("R-101 shared-fault DOFData: " << n_unpaired
+                          << " unpaired entries (every shared QP should have "
+                          "exactly 2 ranks).  See rank-0 detail.");
+            }
          }
          double cx = all_data[max_diff_entry*REC + 0];
          double cy = all_data[max_diff_entry*REC + 1];

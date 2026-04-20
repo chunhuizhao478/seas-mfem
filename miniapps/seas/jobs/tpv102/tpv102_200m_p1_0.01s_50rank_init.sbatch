@@ -93,11 +93,33 @@ if [ ! -f "${JOB_LOG}" ]; then
    exit 0
 fi
 
-BUILD_LINE=$(grep "\[BUILD\]" "${JOB_LOG}" | head -1)
-R101_LINE=$(grep -E "\[R-101 check\]|pairs matched" "${JOB_LOG}" | head -1)
+# R-501 / R-606: banner lives in build_info.txt (rank-0 file, CWD of
+# driver execution) and also on stderr (.err file).  SLURM's -o / -e
+# split means the banner is NOT in .out.  Prefer build_info.txt
+# (deterministic, rank-0-only); fall back to .err.
+BUILD_INFO_FILE="build_info.txt"
+JOB_ERR="${SBATCH_LOG_DIR}/tpv102_init_50r_${SLURM_JOB_ID}.err"
+if [ -f "${BUILD_INFO_FILE}" ]; then
+   BUILD_LINE=$(grep "\[BUILD\]" "${BUILD_INFO_FILE}" | head -1)
+elif [ -f "${JOB_ERR}" ]; then
+   BUILD_LINE=$(grep "\[BUILD\]" "${JOB_ERR}" | head -1)
+else
+   BUILD_LINE=""
+fi
+# R-101 diagnostic and MFEM_ABORT lines go to stderr.
+R101_LINE=""
+if [ -f "${JOB_ERR}" ]; then
+   R101_LINE=$(grep -E "\[R-101 check\]|pairs matched" "${JOB_ERR}" | head -1)
+fi
+if [ -z "${R101_LINE}" ]; then
+   R101_LINE=$(grep -E "\[R-101 check\]|pairs matched" "${JOB_LOG}" | head -1)
+fi
 
-if grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData consistency FAILED" "${JOB_LOG}"; then
+if grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData" "${JOB_ERR}" 2>/dev/null \
+   || grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData" "${JOB_LOG}"; then
+   ABORT_LINE=$(grep -E "MFEM abort|MFEM_ABORT|R-101 shared-fault DOFData" "${JOB_ERR}" "${JOB_LOG}" 2>/dev/null | head -1)
    echo "FAIL: MFEM abort during init" > "${RESULT_FILE}"
+   echo "      ${ABORT_LINE}" >> "${RESULT_FILE}"
 elif [ -z "${BUILD_LINE}" ]; then
    echo "FAIL: no [BUILD] banner — R-501 banner patch did not compile in" > "${RESULT_FILE}"
 elif [ -z "${R101_LINE}" ]; then
