@@ -502,12 +502,18 @@ public:
    //  Fault surface VTU output (proper 2D face geometry)
    // ---------------------------------------------------------------
 
-   /// @brief Write fault surface as a triangle VTU with per-cell field data.
+   /// @brief Write fault surface as a triangle VTU, one averaged value per cell.
    ///
    /// Each rank writes fault_surface_r{rank}_c{cycle}.vtu containing the
-   /// actual fault face triangles and per-face averaged field values.
-   /// Rank 0 also writes a .pvtu index.  This replaces the L2-p0 volume
-   /// projection which creates scattered-dot artifacts in ParaView.
+   /// fault-face triangles and one CellData value per triangle.  Each cell
+   /// value is the arithmetic mean of the DG field evaluated at the face's
+   /// `nbf_per_face_` quadrature/nodal points.  Averaging (rather than
+   /// per-vertex interpolation from QP-at-vertex coordinates) avoids the
+   /// R-001 / H-V91-A4 speckle artefact that arose when QP values were
+   /// written to reference-triangle vertex positions directly (plan
+   /// v9.1.0 §2.3).  It also side-steps the BR2 latent bug R-005 where
+   /// the old hardcoded `k<3` loop crossed face boundaries for `nbf=1`.
+   /// Rank 0 also writes a .pvtu index.
    ///
    /// @param prefix   Output directory path
    /// @param cycle    Time step number
@@ -534,14 +540,29 @@ public:
       const int n_faces = n_int + n_shared;
       const bool has_normal = (local_normal_stress.Size() > 0);
 
-      // Collect face vertices and per-VERTEX (per-DOF) field values.
-      // Each triangle has 3 vertices with independent DOF values,
-      // giving smooth interpolation within each face in ParaView.
+      // R-007 (v9.1.0 rev 3): hard-fail on nbf<=0 in both Debug and Release.
+      // The per-face average below divides by nbf; nbf=0 would produce
+      // inv_nbf = 1/0 = +Inf and 0*Inf = NaN in every CellData entry.
+      // InitFaultOutputBP5 assigns nbf_per_face_ = caller-supplied value
+      // with no sanity check, so guard here at the call boundary.
+      MFEM_VERIFY(nbf > 0,
+                  "WriteFaultSurfaceVTU: nbf_per_face_ must be > 0, got "
+                  << nbf);
+
+      // Collect face vertices (geometry only) and per-CELL (one entry per
+      // output triangle) averaged field values.  Pre-v9.1.0 this emitted
+      // per-VERTEX values drawn from per-QP DOFs at reference-triangle
+      // corner positions, which is incorrect when the QPs live at interior
+      // barycentric points (TPV102 wave operator, order=1 triangle rule =
+      // `(1/6,1/6), (2/3,1/6), (1/6,2/3)`) — see plan v9.1.0 §2.3 R-001
+      // / H-V91-A4.  The per-cell average is exact for any barycentric
+      // quadrature of degree ≤ linear and side-steps the BR2 latent R-005
+      // cross-face read (the loop bound is now `k<nbf`, not hardcoded 3).
       std::vector<std::array<double,3>> vertices;
       std::vector<std::array<int,3>> triangles;
-      // Per-vertex field values (one entry per vertex = per DOF)
-      std::vector<double> f_sd, f_ss, f_srd, f_srs, f_td, f_ts, f_psi, f_sn;
-      std::vector<double> f_a, f_Dc, f_x2, f_x3;
+      // Per-cell field values (one entry per output triangle)
+      std::vector<double> c_sd, c_ss, c_srd, c_srs, c_td, c_ts, c_psi, c_sn;
+      std::vector<double> c_a, c_Dc, c_x2, c_x3;
 
       auto process_face = [&](int fi, int face_mesh_idx, bool is_shared)
       {
@@ -563,7 +584,9 @@ public:
          }
          if (!FTr) { return; }
 
-         // Reference triangle vertices: (0,0), (1,0), (0,1)
+         // Reference triangle vertices: (0,0), (1,0), (0,1).  Kept for
+         // geometry; the per-cell data array below holds the single
+         // averaged value for this triangle.
          int base_vert = static_cast<int>(vertices.size());
          const double ref_tri[3][2] = {{0,0}, {1,0}, {0,1}};
          for (int v = 0; v < 3; v++)
@@ -576,24 +599,46 @@ public:
          }
          triangles.push_back({base_vert, base_vert+1, base_vert+2});
 
-         // Store per-vertex (per-DOF) values — no averaging
-         int base = face_mesh_idx * nbf;
-         for (int k = 0; k < 3; k++)
+         // Face-averaged cell-data values (over this face's nbf DOFs).
+         // Loop bound `k<nbf` handles every DG method:
+         //   BR2 (nbf=1): single centroid value, no mixing (R-005 fix).
+         //   IP  (nbf=3): mean of three vertex values.
+         //   TPV102 wave operator (nbf=3): mean of three interior QPs.
+         //   Higher order (nbf=6, ...): mean of all DOFs (R-002 fix).
+         // (nbf>0 enforced at function entry via MFEM_VERIFY — R-007.)
+         const int base = face_mesh_idx * nbf;
+         double a_sd = 0.0, a_ss = 0.0, a_srd = 0.0, a_srs = 0.0;
+         double a_td = 0.0, a_ts = 0.0, a_psi = 0.0, a_sn = 0.0;
+         double a_a  = 0.0, a_Dc = 0.0, a_x2  = 0.0, a_x3 = 0.0;
+         for (int k = 0; k < nbf; k++)
          {
-            int d = base + k;
-            f_sd.push_back(local_slip(2*d));
-            f_ss.push_back(local_slip(2*d+1));
-            f_srd.push_back(local_slip_rate(2*d));
-            f_srs.push_back(local_slip_rate(2*d+1));
-            f_td.push_back(local_traction(2*d));
-            f_ts.push_back(local_traction(2*d+1));
-            f_psi.push_back(local_state(d));
-            f_sn.push_back(has_normal ? local_normal_stress(d) : 0.0);
-            f_a.push_back(local_a.Size() > 0 ? local_a(d) : 0.0);
-            f_Dc.push_back(local_Dc.Size() > 0 ? local_Dc(d) : 0.0);
-            f_x2.push_back(local_x2.Size() > 0 ? local_x2(d) : 0.0);
-            f_x3.push_back(local_x3.Size() > 0 ? local_x3(d) : 0.0);
+            const int d = base + k;
+            a_sd  += local_slip(2*d);
+            a_ss  += local_slip(2*d+1);
+            a_srd += local_slip_rate(2*d);
+            a_srs += local_slip_rate(2*d+1);
+            a_td  += local_traction(2*d);
+            a_ts  += local_traction(2*d+1);
+            a_psi += local_state(d);
+            a_sn  += has_normal ? local_normal_stress(d) : 0.0;
+            a_a   += local_a.Size()  > 0 ? local_a(d)  : 0.0;
+            a_Dc  += local_Dc.Size() > 0 ? local_Dc(d) : 0.0;
+            a_x2  += local_x2.Size() > 0 ? local_x2(d) : 0.0;
+            a_x3  += local_x3.Size() > 0 ? local_x3(d) : 0.0;
          }
+         const double inv_nbf = 1.0 / static_cast<double>(nbf);
+         c_sd.push_back(a_sd  * inv_nbf);
+         c_ss.push_back(a_ss  * inv_nbf);
+         c_srd.push_back(a_srd * inv_nbf);
+         c_srs.push_back(a_srs * inv_nbf);
+         c_td.push_back(a_td  * inv_nbf);
+         c_ts.push_back(a_ts  * inv_nbf);
+         c_psi.push_back(a_psi * inv_nbf);
+         c_sn.push_back(a_sn  * inv_nbf);
+         c_a.push_back(a_a   * inv_nbf);
+         c_Dc.push_back(a_Dc  * inv_nbf);
+         c_x2.push_back(a_x2  * inv_nbf);
+         c_x3.push_back(a_x3  * inv_nbf);
       };
 
       // Interior faces
@@ -620,7 +665,10 @@ public:
          ::mkdir(fault_dir.c_str(), 0755);  // ignore error if exists
       }
 #ifdef MFEM_USE_MPI
-      MPI_Barrier(mesh_.GetComm());
+      if constexpr (std::is_same_v<MeshType, ParMesh>)
+      {
+         MPI_Barrier(mesh_.GetComm());
+      }
 #endif
       std::string vtu_name = fault_dir + "/fault_surface_r"
                            + std::to_string(rank)
@@ -661,27 +709,29 @@ public:
       vtu << "</DataArray>\n";
       vtu << "</Cells>\n";
 
-      // Point data (per-vertex values, interpolated across triangles)
-      vtu << "<PointData>\n";
+      // Cell data — one value per output triangle (speckle-free per
+      // R-001 / v9.1.0 §2.3 at the cost of sub-triangle shading, which
+      // the DG face-local basis doesn't carry anyway).
+      vtu << "<CellData>\n";
       auto write_field = [&](const char* name, const std::vector<double>& vals) {
          vtu << "<DataArray type=\"Float64\" Name=\"" << name
              << "\" format=\"ascii\">\n";
          for (double v : vals) { vtu << v << "\n"; }
          vtu << "</DataArray>\n";
       };
-      write_field("slip_dip", f_sd);
-      write_field("slip_strike", f_ss);
-      write_field("slip_rate_dip", f_srd);
-      write_field("slip_rate_strike", f_srs);
-      write_field("traction_dip", f_td);
-      write_field("traction_strike", f_ts);
-      write_field("state_variable", f_psi);
-      write_field("normal_stress", f_sn);
-      write_field("param_a", f_a);
-      write_field("param_Dc", f_Dc);
-      write_field("fault_x2", f_x2);
-      write_field("fault_x3", f_x3);
-      vtu << "</PointData>\n";
+      write_field("slip_dip",         c_sd);
+      write_field("slip_strike",      c_ss);
+      write_field("slip_rate_dip",    c_srd);
+      write_field("slip_rate_strike", c_srs);
+      write_field("traction_dip",     c_td);
+      write_field("traction_strike",  c_ts);
+      write_field("state_variable",   c_psi);
+      write_field("normal_stress",    c_sn);
+      write_field("param_a",          c_a);
+      write_field("param_Dc",         c_Dc);
+      write_field("fault_x2",         c_x2);
+      write_field("fault_x3",         c_x3);
+      vtu << "</CellData>\n";
 
       vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
       vtu.close();
@@ -698,7 +748,7 @@ public:
          pvtu << "<PUnstructuredGrid GhostLevel=\"0\">\n";
          pvtu << "<PPoints><PDataArray type=\"Float64\" "
                  "NumberOfComponents=\"3\"/></PPoints>\n";
-         pvtu << "<PPointData>\n";
+         pvtu << "<PCellData>\n";
          const char* fields[] = {
             "slip_dip","slip_strike","slip_rate_dip","slip_rate_strike",
             "traction_dip","traction_strike","state_variable","normal_stress",
@@ -707,7 +757,7 @@ public:
          for (auto f : fields) {
             pvtu << "<PDataArray type=\"Float64\" Name=\"" << f << "\"/>\n";
          }
-         pvtu << "</PPointData>\n";
+         pvtu << "</PCellData>\n";
          for (int r = 0; r < nranks; r++) {
             pvtu << "<Piece Source=\"fault_surface_r" << r
                  << "_c" << cycle << ".vtu\"/>\n";

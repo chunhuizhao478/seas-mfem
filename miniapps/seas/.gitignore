@@ -33,6 +33,7 @@ bp1_full_checkpoint_*.txt
 
 # Test output
 test_pv_*/
+test_r001_*/
 
 # Archive
 archive/

@@ -114,6 +114,9 @@ TEST_FAULT_FLUX_BRANCH_EQUIV_SRC = tests/unit/test_fault_flux_interior_vs_shared
 TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC = tests/unit/test_godunov_interior_equal_sides_identity.cpp
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC = tests/unit/test_fault_face_flux_per_side_assembly.cpp
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC  = tests/unit/test_fault_face_flux_bimaterial_guard.cpp
+# v9.1.0 Pelties-9 follow-through: post-R-001 VTU continuity + post-R-003 basis symmetry
+TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC      = tests/unit/test_fault_surface_vtu_continuity.cpp
+TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_strike_symmetry.cpp
 
 # R-501: `make ... CXXFLAGS+=-D<FLAG>` may not reach the compile step
 # because MFEM's config.mk explicitly sets MFEM_CPPFLAGS/MFEM_CXXFLAGS.
@@ -174,6 +177,9 @@ TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ = $(TEST_FAULT_FLUX_BRANCH_EQUIV_SRC:.cpp=.o)
 TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ = $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ = $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ  = $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC:.cpp=.o)
+# v9.1.0 Pelties-9 follow-through
+TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ      = $(TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC:.cpp=.o)
+TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -565,6 +571,14 @@ seas_test_fault_face_flux_per_side_assembly: $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASS
 seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 
+# v9.1.0 plan §4.1 — fault-surface VTU CellData contract (post-R-001)
+seas_test_fault_surface_vtu_continuity: $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ) $(MFEM_LIBS)
+
+# v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
+seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ) $(MFEM_LIBS)
+
 # Dynamic rupture Phase 3: Friction solver tests
 seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
@@ -752,6 +766,15 @@ $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) 
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.1.0 plan §4.1 / §4.2 — Pelties-9 follow-through tests
+$(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -996,6 +1019,13 @@ test-godunov-interior-equal-sides-identity: seas_test_godunov_interior_equal_sid
 
 test-fault-face-flux-per-side-assembly: seas_test_fault_face_flux_per_side_assembly
 	./seas_test_fault_face_flux_per_side_assembly
+
+# v9.1.0 plan §4.1 / §4.2 — Pelties-9 follow-through
+test-fault-surface-vtu-continuity: seas_test_fault_surface_vtu_continuity
+	./seas_test_fault_surface_vtu_continuity
+
+test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
+	./seas_test_fault_basis_dip_strike_symmetry
 
 # Death test (REVIEW R-007): child aborts inside MFEM_VERIFY; treat
 # non-zero exit as PASS.  If the child returns 0, the guard is gone.

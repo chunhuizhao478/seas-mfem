@@ -339,8 +339,15 @@ private:
    int num_faces_ = 0;
    std::vector<FaultBasisData> basis_;
 
+public:
    /// Compute oriented fault frame (normal, dip, strike) from a raw face
    /// normal, replicating Tandem's AdapterBase::prepare() convention exactly.
+   ///
+   /// Exposed as public (v9.1.0) so `test_fault_basis_dip_strike_symmetry.cpp`
+   /// can exercise the R-003 orthonormality contract on 1000 perturbed-
+   /// normal samples without constructing a mesh per sample.  The method is
+   /// pure (static, no class-state dependency); public promotion has no
+   /// semantic consequence.
    ///
    /// Tandem's algorithm (AdapterBase.cpp:62-84, Curvilinear.cpp:260-293):
    ///   1. Record nl = |n_raw|
@@ -415,6 +422,20 @@ private:
          dv[1] = s[2] * n_raw(0) - s[0] * n_raw(2);
          dv[2] = s[0] * n_raw(1) - s[1] * n_raw(0);
 
+         // R-003 (v9.1.0, plan §3.4 H-V91-B1): normalize dip explicitly.
+         // |strike|=1 and strike⟂n guarantee |dip|=1 in exact arithmetic,
+         // but FP rounding in the strike normalize above leaks into this
+         // cross product so |dip| drifts ~5 ULP from 1.  Downstream
+         // BuildRotation / BuildRotationInverse and the per-side flux
+         // consumers assume orthonormality; defensive normalize.
+         const real_t d_len = std::sqrt(dv[0]*dv[0] + dv[1]*dv[1]
+                                        + dv[2]*dv[2]);
+         MFEM_VERIFY(d_len > 1e-12,
+                     "ComputeOrientedFrame: degenerate dip vector |dv|="
+                     << d_len << ".  strike/ref_normal nearly parallel?");
+         const real_t d_inv = 1.0 / d_len;
+         dv[0] *= d_inv; dv[1] *= d_inv; dv[2] *= d_inv;
+
          for (int d = 0; d < 3; d++) { tangent1[d] = dv[d]; tangent2[d] = s[d]; }
       }
       else // dim == 2
@@ -449,6 +470,14 @@ private:
          }
       }
    }
+
+private:
+   // R-008 (v9.1.0 rev 3): explicit closing `private:` section.  The
+   // v9.1.0 R-003 patch opened a mid-class `public:` block above the
+   // static `ComputeOrientedFrame` (so the test can call it directly).
+   // Without this trailing section, any member added after the method
+   // would silently inherit `public:` visibility.  Intentionally empty;
+   // add future private members here.
 };
 
 } // namespace seas
