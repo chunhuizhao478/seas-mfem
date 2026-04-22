@@ -72,6 +72,17 @@ void FaultFaceFlux::Evaluate(DOFData &data,
                              real_t *Q_imp_plus, real_t *Q_imp_minus,
                              FrictionSolver::Method method) const
 {
+   // v9.2.0 F01+F02 invariant (REVIEW R-V92-H07): the driver's coupled
+   // RK4 on (Q, psi) in `drivers/tpv102_driver.cpp` reads `data.psi` at
+   // entry to this call as the stage-local psi and relies on it being
+   // UNCHANGED on return.  A future refactor that adds a psi write here
+   // would silently invalidate the RK4 stage arithmetic (the driver
+   // would double-integrate psi).  Keep this guard whenever psi is not
+   // a formal input to the Riemann solver.
+#ifndef NDEBUG
+   const real_t psi_at_entry = data.psi;
+#endif
+
    // v9.0.0 Pelties-9 per-side flux (see
    // debug_document/tpv102_debug_document/tpv102_debug_v9.0.0_seissol_flux_comparison.md
    // §10.1 and §18 R-F08).  The call site in wave_operator.inl applies a
@@ -198,6 +209,18 @@ void FaultFaceFlux::Evaluate(DOFData &data,
    data.tau1_corr = data.tau1_0 + tau1_corr;  // total corrected traction
    data.tau2_corr = data.tau2_0 + tau2_corr;
    data.sigma_n_corr = data.sigma_n0 + sigma_n_corr;
+
+#ifndef NDEBUG
+   // R-V92-H07: psi must be pristine for the driver's coupled RK4 to be
+   // correct.  Bit-exact equality is the right check — no arithmetic on
+   // psi has happened between entry and exit.
+   MFEM_ASSERT(data.psi == psi_at_entry,
+               "FaultFaceFlux::Evaluate mutated data.psi "
+               "(before = " << psi_at_entry << ", after = " << data.psi
+               << ").  The driver's coupled-RK4-on-psi integrator assumes "
+               "this function is psi-pure.  See plan Step 5 + REVIEW "
+               "R-V92-H07.");
+#endif
 }
 
 } // namespace seas

@@ -520,6 +520,24 @@ public:
    /// @param time     Simulation time
    /// @param rank     MPI rank
    /// @param nranks   Total number of MPI ranks
+   /// @param local_slip_rate_k4  (optional, R-V92-E02 diagnostic) stage-4
+   ///                            DOFData.V1/V2 snapshot, 2*num_fault_total.
+   ///                            If `Size()==0` the `*_k4` fields are skipped.
+   /// @param local_traction_k4   (optional, R-V92-E02 diagnostic) stage-4
+   ///                            DOFData.tau1_corr/tau2_corr snapshot.
+   /// @param local_normal_stress_k4  (optional, R-V92-E02 diagnostic) stage-4
+   ///                                DOFData.sigma_n_corr snapshot.
+   ///
+   /// When the three `_k4` vectors are supplied (all non-empty), five
+   /// extra CellData fields are emitted alongside the averaged ones:
+   ///   slip_rate_dip_k4, slip_rate_strike_k4,
+   ///   traction_dip_k4, traction_strike_k4,
+   ///   normal_stress_k4.
+   /// ParaView can then compute `sigma_n_k4 - normal_stress` to quantify
+   /// the RK4-averaging discrepancy; a non-zero per-face delta confirms
+   /// that the end-of-pipeline DOFData the station writer reports is a
+   /// stage-averaged value distinct from the stage-4 friction-solve
+   /// result (R-V92-E02 / plan §19 H-V92-K discriminator).
    void WriteFaultSurfaceVTU(
       const std::string &prefix,
       int cycle, real_t time, int rank, int nranks,
@@ -531,7 +549,10 @@ public:
       const Vector &local_a,
       const Vector &local_Dc,
       const Vector &local_x2,
-      const Vector &local_x3)
+      const Vector &local_x3,
+      const Vector &local_slip_rate_k4 = Vector(),
+      const Vector &local_traction_k4 = Vector(),
+      const Vector &local_normal_stress_k4 = Vector())
    {
       if (!has_fault_output_) { return; }
       const int nbf = nbf_per_face_;
@@ -563,6 +584,15 @@ public:
       // Per-cell field values (one entry per output triangle)
       std::vector<double> c_sd, c_ss, c_srd, c_srs, c_td, c_ts, c_psi, c_sn;
       std::vector<double> c_a, c_Dc, c_x2, c_x3;
+
+      // R-V92-E02 diagnostic: stage-4 (non-averaged) DOFData snapshot.
+      // Populated only if all three `_k4` vectors are non-empty.  Used by
+      // ParaView to compute `<field>_k4 - <field>` and quantify the
+      // RK4-averaging discrepancy in a single VTU.
+      const bool has_k4 = (local_slip_rate_k4.Size() > 0
+                           && local_traction_k4.Size() > 0
+                           && local_normal_stress_k4.Size() > 0);
+      std::vector<double> c_srd_k4, c_srs_k4, c_td_k4, c_ts_k4, c_sn_k4;
 
       auto process_face = [&](int fi, int face_mesh_idx, bool is_shared)
       {
@@ -610,6 +640,8 @@ public:
          double a_sd = 0.0, a_ss = 0.0, a_srd = 0.0, a_srs = 0.0;
          double a_td = 0.0, a_ts = 0.0, a_psi = 0.0, a_sn = 0.0;
          double a_a  = 0.0, a_Dc = 0.0, a_x2  = 0.0, a_x3 = 0.0;
+         double a_srd_k4 = 0.0, a_srs_k4 = 0.0;
+         double a_td_k4  = 0.0, a_ts_k4  = 0.0, a_sn_k4 = 0.0;
          for (int k = 0; k < nbf; k++)
          {
             const int d = base + k;
@@ -625,6 +657,14 @@ public:
             a_Dc  += local_Dc.Size() > 0 ? local_Dc(d) : 0.0;
             a_x2  += local_x2.Size() > 0 ? local_x2(d) : 0.0;
             a_x3  += local_x3.Size() > 0 ? local_x3(d) : 0.0;
+            if (has_k4)
+            {
+               a_srd_k4 += local_slip_rate_k4(2*d);
+               a_srs_k4 += local_slip_rate_k4(2*d+1);
+               a_td_k4  += local_traction_k4(2*d);
+               a_ts_k4  += local_traction_k4(2*d+1);
+               a_sn_k4  += local_normal_stress_k4(d);
+            }
          }
          const double inv_nbf = 1.0 / static_cast<double>(nbf);
          c_sd.push_back(a_sd  * inv_nbf);
@@ -639,6 +679,14 @@ public:
          c_Dc.push_back(a_Dc  * inv_nbf);
          c_x2.push_back(a_x2  * inv_nbf);
          c_x3.push_back(a_x3  * inv_nbf);
+         if (has_k4)
+         {
+            c_srd_k4.push_back(a_srd_k4 * inv_nbf);
+            c_srs_k4.push_back(a_srs_k4 * inv_nbf);
+            c_td_k4.push_back (a_td_k4  * inv_nbf);
+            c_ts_k4.push_back (a_ts_k4  * inv_nbf);
+            c_sn_k4.push_back (a_sn_k4  * inv_nbf);
+         }
       };
 
       // Interior faces
@@ -731,6 +779,17 @@ public:
       write_field("param_Dc",         c_Dc);
       write_field("fault_x2",         c_x2);
       write_field("fault_x3",         c_x3);
+      if (has_k4)
+      {
+         // R-V92-E02 diagnostic: stage-4 (pre-RK4-averaging) values.
+         // ParaView Calculator "normal_stress_k4 - normal_stress" gives
+         // the per-face RK4-averaging residual.
+         write_field("slip_rate_dip_k4",    c_srd_k4);
+         write_field("slip_rate_strike_k4", c_srs_k4);
+         write_field("traction_dip_k4",     c_td_k4);
+         write_field("traction_strike_k4",  c_ts_k4);
+         write_field("normal_stress_k4",    c_sn_k4);
+      }
       vtu << "</CellData>\n";
 
       vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
@@ -756,6 +815,18 @@ public:
          };
          for (auto f : fields) {
             pvtu << "<PDataArray type=\"Float64\" Name=\"" << f << "\"/>\n";
+         }
+         if (has_k4)
+         {
+            const char* fields_k4[] = {
+               "slip_rate_dip_k4","slip_rate_strike_k4",
+               "traction_dip_k4","traction_strike_k4",
+               "normal_stress_k4"
+            };
+            for (auto f : fields_k4) {
+               pvtu << "<PDataArray type=\"Float64\" Name=\"" << f
+                    << "\"/>\n";
+            }
          }
          pvtu << "</PCellData>\n";
          for (int r = 0; r < nranks; r++) {

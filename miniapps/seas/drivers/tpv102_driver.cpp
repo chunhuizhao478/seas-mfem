@@ -558,6 +558,11 @@ int main(int argc, char *argv[])
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
    Vector pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3;
+   // R-V92-E02 diagnostic: stage-4 (pre-RK4-averaging) DOFData snapshot.
+   // Populated from the stage-4 kN buffers and shipped to the fault-surface
+   // VTU alongside the averaged fields.  Plan §19 uses the VTU delta
+   // `normal_stress_k4 - normal_stress` to discriminate H-V92-K from H-V92-G.
+   Vector pv_local_slip_rate_k4, pv_local_traction_k4, pv_local_normal_stress_k4;
 
    // output_interval = step-count matching --output-dt, reused by station
    // writers, console logging, and (as a default) ParaView output.
@@ -611,6 +616,11 @@ int main(int argc, char *argv[])
       pv_local_traction.SetSize(2 * num_fault_total);
       pv_local_state.SetSize(num_fault_total);
       pv_local_normal_stress.SetSize(num_fault_total);
+
+      // R-V92-E02 stage-4 buffers (same shape as the averaged ones).
+      pv_local_slip_rate_k4.SetSize(2 * num_fault_total);
+      pv_local_traction_k4.SetSize(2 * num_fault_total);
+      pv_local_normal_stress_k4.SetSize(num_fault_total);
 
       // Static friction parameters / fault coordinates (one entry per QP).
       // x2 = along-strike, x3 = z (depth, negative below free surface) to
@@ -721,6 +731,22 @@ int main(int argc, char *argv[])
          pv_local_state(i)           = d.psi;
          pv_local_normal_stress(i)   = d.sigma_n_corr;
       }
+      // R-V92-E02 + R-V92-I01 fix: pv_local_*_k4 must carry the stage-4
+      // DOFData snapshot captured by the main RK4 loop (line ~919) BEFORE
+      // the averaging block overwrites DOFData.  The gate `step_num == 0`
+      // restricts the "default = averaged" initialisation to the t=0
+      // snapshot only — there is no stage-4 at t=0, so `<field>_k4 -
+      // <field> == 0` by construction there, which is correct.  On every
+      // subsequent paraview_write call the main-loop write is preserved
+      // and the RK4-averaging residual is visible as the delta.  Without
+      // this gate the lambda stomped the main-loop write at every output
+      // step and the entire R-V92-E02 discriminator was dead.
+      if (step_num == 0 && pv_local_normal_stress_k4.Size() == num_fault_total)
+      {
+         pv_local_slip_rate_k4 = pv_local_slip_rate;
+         pv_local_traction_k4  = pv_local_traction;
+         pv_local_normal_stress_k4 = pv_local_normal_stress;
+      }
 
       if (pv_no_domain)
       {
@@ -736,12 +762,18 @@ int main(int argc, char *argv[])
       }
 
       // Fault-surface VTU (proper triangle geometry, no L2-p0 scatter) —
-      // reached iff PeekShouldWrite returned true above.
+      // reached iff PeekShouldWrite returned true above.  R-V92-E02:
+      // pass stage-4 buffers so the writer emits `<field>_k4` CellData
+      // alongside the averaged `<field>` CellData.  ParaView Calculator
+      // "normal_stress_k4 - normal_stress" then quantifies the RK4-
+      // averaging residual per triangle.
       pv_out->WriteFaultSurfaceVTU(
          output_dir, step_num, time, rank, nprocs,
          pv_local_slip, pv_local_slip_rate, pv_local_traction,
          pv_local_state, pv_local_normal_stress,
-         pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3);
+         pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3,
+         pv_local_slip_rate_k4, pv_local_traction_k4,
+         pv_local_normal_stress_k4);
    };
 
    // Initial snapshot at t=0 (V_max = V_ini since the fault is quasi-static).
@@ -771,6 +803,31 @@ int main(int argc, char *argv[])
    std::vector<real_t> t2c_k3(num_fault_total), t2c_k4(num_fault_total);
    std::vector<real_t> snc_k1(num_fault_total), snc_k2(num_fault_total);
    std::vector<real_t> snc_k3(num_fault_total), snc_k4(num_fault_total);
+   // v9.2.0 plan Step 5 F01+F02 fix: per-stage dpsi/dt buffers so psi
+   // integrates inside the RK4 state (classical coupled RK4 on (Q, psi))
+   // instead of the pre-fix operator-split pattern (stage-wise analytic
+   // updates of psi using single-stage V).  The old pattern was O(dt^2)
+   // in the (Q, psi) coupling; coupled RK4 is O(dt^4) to match the Q
+   // integration order.
+   //
+   // Stability note (REVIEW R-V92-H06): UpdateStateAnalytic was
+   // unconditionally stable in the constant-V limit via the closed-
+   // form theta transform.  Explicit RK4 on dpsi/dt = (b V0 / Dc) *
+   // (exp((f0-psi)/b) - V/V0) is only conditionally stable:
+   //   local timescale ~ Dc / (b V0 exp((f0-psi)/b))
+   //   stability requires dt << that timescale.
+   // TPV102 during an event: psi ∈ [0.40, 0.85]; with b=0.012, V0=1e-6,
+   // Dc=0.14 the timescale floor is ~0.6 s, and CFL dt ~ 2 ms gives
+   // dt/tau ~ 3e-3 — safely stable.  Future SEAS cycle simulations
+   // that drive psi below ~0.35 could enter an unstable regime; the
+   // psi-floor warning printf below fires if psi drops unexpectedly
+   // low.  Revisit if broadening past TPV102.
+   std::vector<real_t> psi_k1(num_fault_total), psi_k2(num_fault_total);
+   std::vector<real_t> psi_k3(num_fault_total), psi_k4(num_fault_total);
+   AgingLawPsi aging_law(TPV102Params::b, TPV102Params::V0, TPV102Params::f0);
+   // One-shot stability-envelope tripwire: fires at most once across
+   // the whole run if any psi drops below 0.3.  Rank 0 only.
+   bool psi_stability_warned = false;
 
    if (rank == 0) { std::cout << "Starting time stepping...\n"; }
 
@@ -795,12 +852,13 @@ int main(int argc, char *argv[])
          sr_k1[i] = dof_data[i].slip_rate;
          t1c_k1[i] = dof_data[i].tau1_corr; t2c_k1[i] = dof_data[i].tau2_corr;
          snc_k1[i] = dof_data[i].sigma_n_corr;
-         // Advance psi to t + dt/2 for stage 2
-         dof_data[i].psi = UpdateStateAnalytic(psi_n[i], sr_k1[i], dof_data[i].Dc,
-            dt_step / 2.0, TPV102Params::f0, TPV102Params::b, TPV102Params::V0);
+         // F01+F02: psi_k1 = dpsi/dt | (V = sr_k1, psi = psi_n, Dc).
+         // Advance psi to stage 2 input: psi_n + (dt/2) * psi_k1.
+         psi_k1[i] = aging_law.Rate(sr_k1[i], psi_n[i], dof_data[i].Dc);
+         dof_data[i].psi = psi_n[i] + 0.5 * dt_step * psi_k1[i];
       }
 
-      // RK4 stage 2: at time t + dt/2, psi advanced by dt/2 using k1 rate
+      // RK4 stage 2: at time t + dt/2, psi = psi_n + (dt/2) * psi_k1
       if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t + dt_step / 2.0); }
       add(Q, dt_step / 2.0, k1, Q_tmp);
       wave.Mult(Q_tmp, k2);
@@ -810,12 +868,14 @@ int main(int argc, char *argv[])
          sr_k2[i] = dof_data[i].slip_rate;
          t1c_k2[i] = dof_data[i].tau1_corr; t2c_k2[i] = dof_data[i].tau2_corr;
          snc_k2[i] = dof_data[i].sigma_n_corr;
-         // Re-advance psi from psi_n using k2 rate for dt/2
-         dof_data[i].psi = UpdateStateAnalytic(psi_n[i], sr_k2[i], dof_data[i].Dc,
-            dt_step / 2.0, TPV102Params::f0, TPV102Params::b, TPV102Params::V0);
+         // F01+F02: psi_k2 = dpsi/dt at stage-2 state (V = sr_k2, psi = psi_n + dt/2 * psi_k1
+         // which is the current dof_data[i].psi set at end of stage 1).
+         // Advance psi to stage 3 input: psi_n + (dt/2) * psi_k2.
+         psi_k2[i] = aging_law.Rate(sr_k2[i], dof_data[i].psi, dof_data[i].Dc);
+         dof_data[i].psi = psi_n[i] + 0.5 * dt_step * psi_k2[i];
       }
 
-      // RK4 stage 3: at time t + dt/2, psi advanced by dt/2 using k2 rate
+      // RK4 stage 3: at time t + dt/2, psi = psi_n + (dt/2) * psi_k2
       add(Q, dt_step / 2.0, k2, Q_tmp);
       wave.Mult(Q_tmp, k3);
       for (int i = 0; i < num_fault_total; i++)
@@ -824,12 +884,13 @@ int main(int argc, char *argv[])
          sr_k3[i] = dof_data[i].slip_rate;
          t1c_k3[i] = dof_data[i].tau1_corr; t2c_k3[i] = dof_data[i].tau2_corr;
          snc_k3[i] = dof_data[i].sigma_n_corr;
-         // Advance psi from psi_n using k3 rate for full dt
-         dof_data[i].psi = UpdateStateAnalytic(psi_n[i], sr_k3[i], dof_data[i].Dc,
-            dt_step, TPV102Params::f0, TPV102Params::b, TPV102Params::V0);
+         // F01+F02: psi_k3 = dpsi/dt at stage-3 state (V = sr_k3, psi = psi_n + dt/2 * psi_k2).
+         // Advance psi to stage 4 input: psi_n + dt * psi_k3.
+         psi_k3[i] = aging_law.Rate(sr_k3[i], dof_data[i].psi, dof_data[i].Dc);
+         dof_data[i].psi = psi_n[i] + dt_step * psi_k3[i];
       }
 
-      // RK4 stage 4: at time t + dt, psi advanced by dt using k3 rate
+      // RK4 stage 4: at time t + dt, psi = psi_n + dt * psi_k3
       if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t + dt_step); }
       add(Q, dt_step, k3, Q_tmp);
       wave.Mult(Q_tmp, k4);
@@ -839,6 +900,9 @@ int main(int argc, char *argv[])
          sr_k4[i] = dof_data[i].slip_rate;
          t1c_k4[i] = dof_data[i].tau1_corr; t2c_k4[i] = dof_data[i].tau2_corr;
          snc_k4[i] = dof_data[i].sigma_n_corr;
+         // F01+F02: psi_k4 = dpsi/dt at stage-4 state (V = sr_k4, psi = psi_n + dt * psi_k3).
+         // No further advance; the final RK4 combination lives in the post-stage block.
+         psi_k4[i] = aging_law.Rate(sr_k4[i], dof_data[i].psi, dof_data[i].Dc);
       }
 
       // Update Q with RK4 weights
@@ -849,28 +913,100 @@ int main(int argc, char *argv[])
 
       t += dt_step;
 
-      // State update using RK4-weighted average slip rate.
-      // NOTE: This gives O(dt^2) coupling accuracy for the wave+friction system.
-      // The analytic update with averaged V loses RK4's higher-order corrections.
-      // For CFL-limited dt ~ 0.02 ms on 100m meshes, cumulative psi error over
-      // 12 s is ~ (dt)^2 * nsteps ~ 3e-4, negligible vs spatial O(h) error.
-      // Full O(dt^4) coupling requires integrating psi inside the RK4 state vector.
+      // R-V92-E02 (plan §19): capture stage-4 DOFData snapshot BEFORE the
+      // RK4-averaging block below overwrites DOFData.V1/V2/tau*_corr/
+      // sigma_n_corr with the averaged values.  paraview_write packs these
+      // into `<field>_k4` CellData alongside the averaged `<field>` CellData
+      // so the RK4-averaging residual `<field>_k4 - <field>` is directly
+      // inspectable in ParaView — it is the H-V92-K vs H-V92-G discriminator.
+      if (use_paraview && pv_local_normal_stress_k4.Size() == num_fault_total)
+      {
+         for (int i = 0; i < num_fault_total; i++)
+         {
+            pv_local_slip_rate_k4(2*i + 0)   = V1_k4[i];
+            pv_local_slip_rate_k4(2*i + 1)   = V2_k4[i];
+            pv_local_traction_k4(2*i + 0)    = t1c_k4[i];
+            pv_local_traction_k4(2*i + 1)    = t2c_k4[i];
+            pv_local_normal_stress_k4(i)     = snc_k4[i];
+         }
+      }
+
+      // v9.2.0 Step 5 F01+F02: classical coupled RK4 on (Q, psi).
+      // psi_k1..psi_k4 are dpsi/dt samples at the four RK4 stage states
+      // (V, psi) — V from the just-finished Mult, psi from the stage input
+      // set at the end of the previous stage block.  The combination below
+      // is the O(dt^4) Butcher-tableau weighted sum, replacing the pre-fix
+      // O(dt^2) operator-split pattern (analytic update with averaged V).
+      // All other fields (V/slip/tau/sigma_n) retain their RK4-weighted
+      // averages from the stage buffers — slip IS the RK4 integral of V
+      // when V_avg uses (1+2+2+1)/6 weights (since dslip/dt = V), so
+      // `slip += V_avg * dt` below is the same thing.
       for (int i = 0; i < num_fault_total; i++)
       {
-         real_t sr_avg = (sr_k1[i] + 2.0*sr_k2[i] + 2.0*sr_k3[i] + sr_k4[i]) / 6.0;
-         dof_data[i].psi = UpdateStateAnalytic(psi_n[i], sr_avg, dof_data[i].Dc,
-            dt_step, TPV102Params::f0, TPV102Params::b, TPV102Params::V0);
-         dof_data[i].V1 = (V1_k1[i] + 2*V1_k2[i] + 2*V1_k3[i] + V1_k4[i]) / 6.0;
-         dof_data[i].V2 = (V2_k1[i] + 2*V2_k2[i] + 2*V2_k3[i] + V2_k4[i]) / 6.0;
-         // R-005: Recompute slip_rate from averaged V components for output consistency
-         dof_data[i].slip_rate = std::sqrt(dof_data[i].V1 * dof_data[i].V1
-                                         + dof_data[i].V2 * dof_data[i].V2);
-         dof_data[i].slip1 += dof_data[i].V1 * dt_step;
-         dof_data[i].slip2 += dof_data[i].V2 * dt_step;
-         // R-001 fix: RK4-weighted corrected tractions for consistent station output
-         dof_data[i].tau1_corr = (t1c_k1[i] + 2*t1c_k2[i] + 2*t1c_k3[i] + t1c_k4[i]) / 6.0;
-         dof_data[i].tau2_corr = (t2c_k1[i] + 2*t2c_k2[i] + 2*t2c_k3[i] + t2c_k4[i]) / 6.0;
-         dof_data[i].sigma_n_corr = (snc_k1[i] + 2*snc_k2[i] + 2*snc_k3[i] + snc_k4[i]) / 6.0;
+         dof_data[i].psi = psi_n[i] + dt_step / 6.0 *
+                           (psi_k1[i] + 2.0*psi_k2[i] + 2.0*psi_k3[i] + psi_k4[i]);
+         // R-V92-H06 stability tripwire: explicit RK4 on aging law is
+         // conditionally stable; safe margin fails around psi < 0.3.
+         // Warn once on rank 0 to surface if a new scenario enters the
+         // unstable regime without changing the integrator.
+         if (!psi_stability_warned && rank == 0 && dof_data[i].psi < 0.3)
+         {
+            std::fprintf(stderr,
+               "[WARNING] psi dropped to %.3f at fault QP %d (t=%.3f s). "
+               "Explicit RK4 aging-law stability margin shrinks rapidly "
+               "below psi=0.35 (see driver comment near aging_law ctor). "
+               "If this run is a cycle simulation, switch to an implicit "
+               "psi solver.\n",
+               dof_data[i].psi, i, t);
+            psi_stability_warned = true;
+         }
+         // R-V92-K01 (round-9): slip IS the RK4 integral of V when
+         // V_avg uses the Butcher (1,2,2,1)/6 weights (since dslip/dt
+         // = V), so `slip += V_avg * dt` below is the exact O(dt^4)
+         // integral.  This is the ONLY place the Simpson-mean V_avg is
+         // USED as a value in its own right — for the slip integral.
+         const real_t V1_avg = (V1_k1[i] + 2*V1_k2[i] + 2*V1_k3[i] + V1_k4[i]) / 6.0;
+         const real_t V2_avg = (V2_k1[i] + 2*V2_k2[i] + 2*V2_k3[i] + V2_k4[i]) / 6.0;
+         dof_data[i].slip1 += V1_avg * dt_step;
+         dof_data[i].slip2 += V2_avg * dt_step;
+      }
+
+      // ---------------------------------------------------------------
+      // R-V92-K01 (round-9 REVIEW fix): endpoint re-evaluation of fault
+      // observables at Q(t+dt).
+      //
+      // Prior behaviour: dof_data.{V1, V2, slip_rate, tau1_corr, tau2_corr,
+      // sigma_n_corr} were overwritten with the RK4-Butcher-weighted
+      // Simpson mean of stage-i snapshots, i.e. the TIME-AVERAGED values
+      // over [t_n, t_n+dt] which approximate midpoint (t_n + dt/2).
+      //
+      // Problem: the station writer labels the sample time as t = t_{n+1}
+      // (post-increment above), but the values correspond to t_n + dt/2 —
+      // a half-step phase lag.  Semantically wrong for instantaneous
+      // observables regardless of magnitude.
+      //
+      // Fix: invoke wave.Mult(Q, k_unused) one more time on the ENDPOINT
+      // state Q(t_{n+1}).  This triggers FaultFaceFlux::Evaluate on the
+      // endpoint Q, which overwrites dof_data.{tau1_corr, tau2_corr,
+      // sigma_n_corr, V1, V2, slip_rate} with values self-consistent
+      // with the Q used for output.  The slip accumulators already hold
+      // the correct Simpson-integral of V (above) — do NOT re-accumulate.
+      //
+      // Cost: one extra Mult per step.  Not wrapped under `if output step`
+      // because every subsequent RK4 step's stage-1 would do the same
+      // Mult anyway; this just shifts that first Mult from "stage 1 of
+      // step n+1" to "endpoint re-eval of step n", reusing the result.
+      // To avoid the overhead we could cache k_endpoint and reuse it as
+      // stage-1 k1 of the next step (FSAL-style), but that complicates
+      // nucleation timing — deferred.
+      // ---------------------------------------------------------------
+      {
+         Vector k_endpoint(Q.Size());
+         if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t); }
+         wave.Mult(Q, k_endpoint);
+         // dof_data[i].{tau1_corr, tau2_corr, sigma_n_corr, V1, V2,
+         //              slip_rate} are now the endpoint-at-t values
+         // produced by the stage Evaluate on Q(t+dt).
       }
 
       // R-006: Track peak V_max across all RK4 stages, not just the average

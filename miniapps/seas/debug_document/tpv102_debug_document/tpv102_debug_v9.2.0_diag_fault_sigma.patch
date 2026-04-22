@@ -1,0 +1,184 @@
+TPV102 v9.2.0 plan §5.1 — SEAS_DIAG_FAULT_SIGMA C0 diagnostic patch
+====================================================================
+
+This is a STANDALONE DIFF.  It is NOT YET APPLIED.  Per plan §5.1 and
+the TODO checklist head of tpv102_debug_v9.2.0_debug_plan.md, user
+approval is required before the debugger applies this patch.
+
+Purpose (§5.1 rank-1 diagnostic)
+--------------------------------
+Adds ONLY printfs + MPI_Allreduce.  No functional code changes.
+Measures `max|Q_self[SYY]|`, `max|Q_self[VY]|`, `max|Q_self[SYZ]|`,
+`max|Q_self[VZ]|` on ALL fault QPs, reduced across ranks, printed to
+stderr once per RK4 step.
+
+Why this matters for R-V92 diagnosis
+------------------------------------
+The observed σ_n drift is 50 MPa.  The diagnostic discriminates
+between:
+
+- bulk mode-II σ_yy amplification (H-V92-G): max|Q_self[SYY]| on
+  fault QPs tracks the drift magnitude.
+- RK4 stage-averaging bug in station output (H-V92-K): bulk stays
+  clean (~0 MPa), station sigma_n_corr still drifts.
+
+Apply with:
+    cd /Users/chunhuizhao/projects/seas-mfem
+    patch -p0 < miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v9.2.0_diag_fault_sigma.patch
+
+Revert with:
+    patch -R -p0 < miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v9.2.0_diag_fault_sigma.patch
+
+Build with the flag enabled:
+    cd miniapps/seas
+    make seas_tpv102_driver SEAS_EXTRA_CPPFLAGS="-DSEAS_DIAG_FAULT_SIGMA"
+
+Expected stderr output shape (one line per RK4 Mult call):
+    [FAULT-DIAG-SYY] t=0.000 max|SYY|=0.000e+00 max|VY|=0.000e+00 max|SYZ|=0.000e+00 max|VZ|=0.000e+00
+    ...
+    [FAULT-DIAG-SYY] t=3.500 max|SYY|=4.123e+07 max|VY|=2.345e-02 ...
+
+Verification
+------------
+After applying, `make test` on the local laptop should STILL pass
+(the patch is compile-only-additive; runtime behavior depends on
+SEAS_DIAG_FAULT_SIGMA flag which is off by default in `make test`).
+
+--- miniapps/seas/dynamic/wave_operator.inl.orig
++++ miniapps/seas/dynamic/wave_operator.inl
+@@ -455,12 +455,30 @@
+ // Mult: dQ/dt = M^{-1} * (-Face + Vol)   [Eq. (3)]
+ // ---------------------------------------------------------------------------
+ template <typename MeshType>
+ void WaveOperator<MeshType>::Mult(const Vector &Q, Vector &dQdt) const
+ {
+    MFEM_VERIFY(Q.Size() == height,
+                "Q size mismatch: " << Q.Size() << " vs " << height);
+
+    dQdt.SetSize(height);
+    dQdt = 0.0;
+
++#ifdef SEAS_DIAG_FAULT_SIGMA
++   // v9.2.0 §5.1 diagnostic accumulators (reset per Mult call).
++   // Populated inside ComputeFaceFluxRHS / ComputeSharedFaceFluxRHS
++   // via the thread-local pointer diag_syy_ptr_ below.  `mutable`
++   // members because Mult is a `const` method; these are diagnostic-
++   // only state.  No effect on dQdt.
++   diag_max_syy_ = 0.0;
++   diag_max_vy_  = 0.0;
++   diag_max_syz_ = 0.0;
++   diag_max_vz_  = 0.0;
++#endif
++
+    ComputeVolumeRHS(Q, dQdt);
+    ComputeFaceFluxRHS(Q, dQdt);
+
+    // Shared face flux for parallel (R-002 fix)
+    if constexpr (IsParallelMesh<MeshType>::value)
+    {
+       ComputeSharedFaceFluxRHS(Q, dQdt);
+    }
+
+    if (pml_layer_)
+    {
+       ApplyPMLDamping(Q, dQdt);
+    }
+
+    ApplyMassInverse(dQdt);
++
++#ifdef SEAS_DIAG_FAULT_SIGMA
++   // MPI-reduce over ranks and print.
++   real_t sums[4] = { diag_max_syy_, diag_max_vy_, diag_max_syz_, diag_max_vz_ };
++   real_t globals[4] = {0,0,0,0};
++   if constexpr (IsParallelMesh<MeshType>::value)
++   {
++#ifdef MFEM_USE_MPI
++      MPI_Allreduce(sums, globals, 4, MPITypeMap<real_t>::mpi_type, MPI_MAX,
++                    static_cast<const ParMesh &>(mesh_).GetComm());
++#else
++      for (int i = 0; i < 4; i++) globals[i] = sums[i];
++#endif
++   } else {
++      for (int i = 0; i < 4; i++) globals[i] = sums[i];
++   }
++   int rank_pr = 0;
++#ifdef MFEM_USE_MPI
++   if constexpr (IsParallelMesh<MeshType>::value)
++   { rank_pr = static_cast<const ParMesh &>(mesh_).GetMyRank(); }
++#endif
++   if (rank_pr == 0)
++   {
++      std::fprintf(stderr,
++         "[FAULT-DIAG-SYY] max|SYY|=%.6e max|VY|=%.6e max|SYZ|=%.6e max|VZ|=%.6e\n",
++         globals[0], globals[1], globals[2], globals[3]);
++   }
++#endif
+ }
+
+@@ -632,12 +650,21 @@
+          real_t Q_self[NUM_STATE];
+          for (int c = 0; c < NUM_STATE; c++)
+          {
+             Q_self[c] = 0.0;
+             for (int i = 0; i < ndof; i++)
+             {
+                Q_self[c] += shape1(i) * Q_data[c * ndof_total_ + dof_offset1 + i];
+             }
+          }
+
++#ifdef SEAS_DIAG_FAULT_SIGMA
++         // v9.2.0 §5.1: track Q_self on interior fault QPs only.  We are
++         // still inside the per-QP loop; is_fault is computed below but we
++         // gate the accumulation on face_bdr_attr_ == bc_.fault_attr.
++         if (face_bdr_attr_[f] == bc_.fault_attr && bc_.fault_attr > 0) {
++            diag_max_syy_ = std::max(diag_max_syy_, std::abs(Q_self[SYY]));
++            diag_max_vy_  = std::max(diag_max_vy_,  std::abs(Q_self[VY]));
++            diag_max_syz_ = std::max(diag_max_syz_, std::abs(Q_self[SYZ]));
++            diag_max_vz_  = std::max(diag_max_vz_,  std::abs(Q_self[VZ]));
++         }
++#endif
++
+          real_t F_h[NUM_STATE];
+@@ -1164,12 +1192,21 @@
+             real_t Q_self[NUM_STATE];
+             for (int c = 0; c < NUM_STATE; c++)
+             {
+                Q_self[c] = 0.0;
+                for (int i = 0; i < ndof; i++)
+                {
+                   Q_self[c] += shape1(i) * Q_data[c * ndof_total_ + dof_offset1 + i];
+                }
+             }
+
++#ifdef SEAS_DIAG_FAULT_SIGMA
++            // v9.2.0 §5.1: track Q_self on shared fault QPs.
++            if (bdr_attr == bc_.fault_attr && bc_.fault_attr > 0) {
++               diag_max_syy_ = std::max(diag_max_syy_, std::abs(Q_self[SYY]));
++               diag_max_vy_  = std::max(diag_max_vy_,  std::abs(Q_self[VY]));
++               diag_max_syz_ = std::max(diag_max_syz_, std::abs(Q_self[SYZ]));
++               diag_max_vz_  = std::max(diag_max_vz_,  std::abs(Q_self[VZ]));
++            }
++#endif
++
+             // R-501: use actual quadrature weight w_q here
+
+
+--- miniapps/seas/dynamic/wave_operator.hpp.orig
++++ miniapps/seas/dynamic/wave_operator.hpp
+@@ -210,6 +210,18 @@
+    std::unique_ptr<FaultBasis> fault_basis_;
+
++#ifdef SEAS_DIAG_FAULT_SIGMA
++   // v9.2.0 §5.1 diagnostic accumulators.  `mutable` because Mult() is
++   // const and updates these per-call.  Zeroed at the start of every
++   // Mult.  NOT state of the PDE — diagnostic only.  Gated entirely by
++   // the compile-time flag; zero overhead when the flag is undefined.
++   mutable real_t diag_max_syy_ = 0.0;
++   mutable real_t diag_max_vy_  = 0.0;
++   mutable real_t diag_max_syz_ = 0.0;
++   mutable real_t diag_max_vz_  = 0.0;
++#endif
++
+    // R-701: SharedFacePeer table no longer needed (see ctor comment
+    // around line 178).  Both ranks sharing a fault face run
+    // FaultFaceFlux::Evaluate locally on bit-identical inputs.

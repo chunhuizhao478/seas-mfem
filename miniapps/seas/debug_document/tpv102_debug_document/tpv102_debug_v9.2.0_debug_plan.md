@@ -18,6 +18,24 @@ Primary R-V92 mechanism: **not identified**.
   the 45 MPa Poisson bound**, verdict **MONOTONIC-GROWTH**.  R-V92-E01
   "rupture-extent misread" REFUTED.  H-V92-G stays viable; Step 3
   (§5.1 bulk SYY probe) still needed to localize the amplifier.
+- Step 5 **DONE** — coupled RK4 on (Q, psi) applied to
+  `drivers/tpv102_driver.cpp`; psi now RK4-integrated inside the
+  stage loop via `AgingLawPsi::Rate`; all 4 regression gates
+  (§4.9/§4.10/§4.11/§4.12) + Step 6 PASS.  Post-fix Frontera
+  verification pending.  Local changes STILL UNCOMMITTED per
+  R-V92-H03 Option B hold.
+- Step 5b **PASS 100/100** (rev-3h+, 2026-04-21) — local 4-km
+  shared-fault stress-test of F01+F02 over 100 RK4 steps at 4
+  ranks.  Terminal envelope: `max|σ_n-σ_n0| = 2.487·10⁵ Pa` (0.2×
+  1 MPa bound), `max slip_rate = 1.37·10⁻¹² m/s` (effectively
+  V_ini), `max|psi-psi_0| = 1.1·10⁻¹⁴` (FP noise), zero NaNs.
+  σ_n deviation grew linearly (2.5·10⁴ → 2.5·10⁵ Pa over 1 ms),
+  consistent with elastic-wave transit of the seeded antisymmetric
+  σ_xy(y) profile rather than any amplification pathology.
+  **Decision (Step 5b table):** commit + push F01+F02 with high
+  confidence; the coupled-RK4 arithmetic is multi-step stable on
+  shared-fault QPs.  Closes R-V92-H01 (driver RK4 block was
+  untested in multi-step form).
 - Step 6 **PASS 6/6** — interior-fault path reproduces Pelties eq.
   (7a/7b/7c) on a 2-tet fixture to O(10⁻⁸) relative error.  H-V92-U
   ELIMINATED on this fixture; bimaterial / corner / multi-face
@@ -93,6 +111,22 @@ ahead to Step 8/9); **Next if not closed** = which step to proceed to.
      Bimaterial / corner / multi-face extensions still open → continue.
 
 5. **Fix F01 + F02 RK4 operator-splitting — FREE, local, ~2 h.**
+   **[DONE — rev-3h+, 2026-04-21]**
+
+   **Scope clarification (REVIEW R-V92-H02):** the plan's original
+   F01 bullet reads "move DOFData (V1/V2/tau/sigma/psi/slip) INTO
+   the RK4 state vector," implying all 8 fields.  The applied fix
+   deliberately narrows that to **psi only**, because:
+   - `V1/V2/tau*_corr/sigma_n_corr` are algebraic functionals of
+     (Q, psi) at each RK4 stage, not ODE states.  "Moving them
+     into Q" has no well-defined meaning — they are not
+     integrated, they are evaluated.
+   - `slip1/slip2` satisfy `dslip/dt = V`; the existing code
+     updates them via `slip += V_avg · dt` with RK4-weighted
+     `V_avg`, which IS the RK4 integral of V.  Already O(dt⁴).
+   - Only `psi` had a genuine splitting defect (stage-wise
+     analytic update with constant V); fixing that is the full
+     F01+F02 correction.
    - **Condition:** Step 1 outcome was `~16×` (F01+F02 needed) or
      `~8×` (F02 alone) drop in `slip_dip`; OR Step 1 was non-decisive
      but user wants to try F01+F02 as a precautionary fix (lower cost
@@ -103,6 +137,132 @@ ahead to Step 8/9); **Next if not closed** = which step to proceed to.
    - Move DOFData (V1/V2/tau/sigma/psi/slip) INTO the RK4 state vector.
    - Independent of all above; does NOT require ADER port.
    - **Next if not closed:** Step 6 / Step 7 on a different mechanism.
+
+   **Implementation (applied to `drivers/tpv102_driver.cpp` only; no
+   library-side edits).**  Scope reduces from the plan's literal
+   "move all DOFData into Q" to a single functional change: replace
+   the operator-split analytic psi updates between RK4 stages with
+   a classical coupled RK4 on (Q, psi).  Rationale:
+   - `V1/V2/tau*_corr/sigma_n_corr` are algebraic functionals of
+     (Q, psi) at each stage, not ODE states; the existing code
+     already RK4-averages their stage outputs into DOFData for
+     station output, which is the natural and correct behaviour.
+   - `slip1/slip2`: `slip_new = slip_old + V_avg * dt` with
+     `V_avg = (V_k1 + 2V_k2 + 2V_k3 + V_k4)/6` IS the RK4
+     integral of `dslip/dt = V`, so already O(dt⁴).  Nothing
+     to move.
+   - `psi` was the only genuinely split state: stages 1–3 wrote
+     `dof_data.psi = UpdateStateAnalytic(psi_n, sr_k_i, ..., dt_sub)`
+     (exact for CONSTANT V over dt_sub, not for the varying-V
+     intrinsic to RK4), and the final block re-evaluated
+     `UpdateStateAnalytic(psi_n, sr_avg, dt_step)` — together
+     O(dt²) coupling.  The fix records `psi_k_i = aging_law.Rate(
+     sr_k_i, psi_stage, Dc)` at each stage using the stage-local
+     (V, psi), and closes with
+     `psi(t+dt) = psi_n + dt/6 · (psi_k1 + 2psi_k2 + 2psi_k3 + psi_k4)` —
+     classical RK4 on psi, O(dt⁴) coupled with Q.
+   - `AgingLawPsi(b, V0, f0)` from `friction/state_evolution.hpp`
+     supplies `Rate()`; instance is created once outside the RK4
+     loop.
+
+   **Verification (local, 2026-04-21):**
+   - `seas_tpv102_driver` rebuilt clean (no compile warnings in
+     the diff region).
+   - `seas_test_interior_fault_flux_path` (Step 6) PASS 6/6 — the
+     test drives `wave.Mult` directly so it does not exercise the
+     driver's RK4 loop; retained here as a regression gate for
+     unrelated dynamic-path edits.
+   - `seas_test_no_penalty_dynamic_rupture` (§4.9) PASS 4/4.
+   - `seas_test_rk4_conservation` (§4.11) PASS 2/2.
+   - `seas_test_volume_jacobian_single_channel` (§4.10) PASS 2/2.
+   - `seas_test_absorbing_bc_energy_decay` (§4.12) PASS 1/1.
+   - Per `feedback_no_local_reproducer.md`: did NOT run the
+     production driver locally.  Post-fix dt-scaling and σ_n /
+     slip_dip magnitudes must be verified on Frontera via Step 8
+     (or a dedicated post-F01+F02 rerun — sbatch NOT yet written;
+     waiting for user direction).
+
+   **Submission guidance (REVIEW R-V92-H03 — Option B HOLD).**
+   F01+F02 is applied LOCALLY ONLY.  The change is NOT committed
+   or pushed until Step 1 PRE-fix dt-halving runs complete,
+   because the existing `dt_half` / `dt_quarter` sbatches rebuild
+   from branch HEAD — pushing F01+F02 first would make those runs
+   exercise the POST-fix driver and conflate the round-5 R-V92-G01
+   dt-scaling classifier with the F01+F02 effect.  Sequence:
+   1. User submits `dt_half` + `dt_quarter` (PRE-fix HEAD).
+   2. Wait for `RESULT.txt` from both.
+   3. If Step 1 closes R-V92 (≈16× or ≈8× slip_dip reduction):
+      F01+F02 was the needed fix and the PRE-fix run classifies
+      the truncation order cleanly; commit F01+F02 then launch
+      Step 8 confirmation.
+   4. If Step 1 does NOT close: commit F01+F02, then submit
+      `tpv102_200m_p1_4.0s_400r_v92_f01f02_dev.sbatch` (post-fix
+      dev run at `cfl=0.5 / tfinal=4 s`) — expected to reveal
+      whether F01+F02 alone materially reduces the anomaly.  If
+      not, continue to Step 3 §5.1 bulk SYY probe.
+   The v91 job 7668434 data (slip_dip peak 1.83 m, σ_n peak 218 MPa)
+   remains the pre-fix reference throughout.  Step 8 confirmation
+   criteria (|σ_n−120 MPa| ≤ 1 MPa AND |slip_dip| ≤ 10⁻³ m at every
+   station, tfinal=12 s / 200 m / 400 ranks) unchanged.
+
+   **Step 5b (DONE, rev-3h+, 2026-04-21): local stress-test of
+   F01+F02 on a 4-km shared-fault fixture (R-V92-I02, bug-fix-
+   oriented).  PASS 100/100.**  Motivation: before any Frontera submission, run
+   the full driver RK4-on-(Q, psi) arithmetic for ~100 steps on the
+   existing 4-km inline tet fixture (same one used by §4.7
+   `test_shared_fault_dof_data_consistency`) and assert the DOFData
+   fields stay in a physically-bounded envelope.  The §4.7 test
+   runs 1 RK4 step and closes H-V92-P at init level; the new test
+   extends to a multi-step run that exercises the coupled-RK4
+   arithmetic across MPI partition seams — exactly the code path
+   F01+F02 touches.
+   - **New file:** `tests/parallel/test_rk4_f01f02_shared_fault_stability.cpp`
+   - **Fixture:** 4-km cartesian tet box (identical to §4.7 Phase D);
+     4 MPI ranks; fault attr=3 at y=0; TPV102 material parameters;
+     `InitializeFaultDOFs` for TPV102 background stress.
+   - **Drive:** extract the full RK4-on-(Q, psi) from the driver
+     into a `DriverRK4OnePost()` helper inside the test TU (local
+     copy, does NOT edit the driver); call it 100 times at dt =
+     0.5 · dt_cfl; re-apply `ApplyNucleation` at stage-matched
+     times.
+   - **Assertions at every 10 steps:** `|σ_n_corr − σ_n0| < 1 MPa`
+     AND `slip_rate < 1 m/s` AND `|psi − psi_initial| < 0.1` AND
+     no NaN — all enforced pairwise across ranks (same gather
+     pattern as §4.7 Phase D).
+   - **Runtime:** ~5 s on 4 ranks; well under the laptop's
+     14-core oversubscription limit.
+   - **Actual result (2026-04-21):** PASS 100/100.  Envelope at
+     step 100: `max|σ_n-σ_n0|` = 2.487·10⁵ Pa (≪ 1 MPa bound);
+     `max slip_rate` = 1.371·10⁻¹² m/s (≈ V_ini); `max|psi-psi_0|`
+     = 1.1·10⁻¹⁴ (FP noise); NaN count = 0.  σ_n deviation grows
+     linearly (2.5·10⁴ → 2.5·10⁵ Pa) over 1 ms, consistent with
+     elastic-wave transit of the seeded tanh σ_xy(y) profile
+     across shared fault faces — no amplification pathology in
+     the coupled RK4 arithmetic.
+   - **Decision (REVIEW R-V92-H03 sequencing):**
+     - If all 100 steps PASS: F01+F02 arithmetic is multi-step-
+       stable on shared-fault QPs.  Commit + push F01+F02 with
+       high confidence.  The dt-half/dt-quarter Step 1 runs then
+       measure dt scaling on the POST-fix driver (i.e. "does the
+       post-fix driver still show dt-dependence?" — a clean
+       residual probe).  This MUDDLES the pre-fix Step 1
+       interpretation somewhat — discuss with user before pushing;
+       the cost of a second pre-fix Step 1 run is high if user
+       wants the literal R-V92-G01 experiment.
+     - If the test FAILS before step 50: F01+F02 contains a bug
+       not caught by `test_rk4_psi_integration` (the constant-V
+       convergence probe) or the existing Pelties gates.  DO NOT
+       push; bisect the failing stage locally until the regression
+       is understood, then patch.
+     - If the test DRIFTS slowly past step 50: F01+F02 is a
+       partial fix or has a minor integration leak.  Still
+       commit + push (the fix is not regressive in the
+       short-horizon sense), but submit the f01f02_dev sbatch
+       after Step 1 to quantify the residual on production mesh.
+   - **Interplay with R-V92-H03 (Option B hold):** the stress
+     test is not a Frontera run, so it does not compete with the
+     "hold F01+F02 before Step 1 submission" rule.  It simply
+     raises confidence in the local fix before it propagates.
 
 6. **Add `[FAULT-INIT-V1]` printf at end of RK4 stage 1 — FREE, 1-line.**
    - **Condition:** after Steps 1–5 did not close, OR anytime as a

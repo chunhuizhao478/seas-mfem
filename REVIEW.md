@@ -1,445 +1,247 @@
-# Code Review: TPV102 v9.0.0 Pelties-9 per-side flux fix — 2026-04-20 (round 2, final pass)
+# Code Review: Claim verification — "fault observables written as RK4 stage averages"
+
+**Date:** 2026-04-22 (round-9; targeted claim check)
+**Reviewer:** code-review agent
+**User ask:** *"Can you confirm this is still true? — High: the driver is writing fault observables as RK4 stage averages, not as values re-evaluated from the final state Q(t+dt). In `.../tpv102_driver.cpp:944`, `tau1_corr`, `tau2_corr`, and `sigma_n_corr` are overwritten with `(k1 + 2k2 + 2k3 + k4)/6`. Then `.../tpv102_setup.hpp:289` writes those fields directly to station output, and `.../tpv102_driver.cpp:1051` does that immediately after the RK4 step. That is a semantic bug for instantaneous outputs: stage-averaged traction/stress is not the same thing as traction/stress at Q^{n+1}. This is the strongest code-level explanation I see for the inflated sigma_n signal."*
 
 ## Review Scope
 
-- Plan: `miniapps/seas/debug_document/tpv102_debug_document/tpv102_debug_v9.0.0_seissol_flux_comparison.md`
-- Files re-reviewed (fresh adversarial pass after round-1 fixes were applied):
-  - `miniapps/seas/dynamic/wave_operator.inl` (interior-fault §14.2; shared-fault §14.3; including round-1 R-002/R-003 guards)
-  - `miniapps/seas/dynamic/fault_face_flux.cpp` (R-007/R-008 bimaterial guard with 1e-12 relative tolerance)
-  - `miniapps/seas/dynamic/godunov_flux.cpp` + `.hpp`
-  - `miniapps/seas/fault/fault_basis.hpp` (sign-flipping convention verification)
-  - `miniapps/seas/tests/unit/test_fault_face_flux_bimaterial_guard.cpp` (NEW for R-007)
-  - `miniapps/seas/tests/unit/test_fault_face_flux_frame_and_flux.cpp` (§3.1b)
-  - `miniapps/seas/tests/unit/test_fault_flux_interior_vs_shared_branch_equivalence.cpp` (§3.1d)
-  - `miniapps/seas/tests/unit/test_fault_face_flux_per_side_assembly.cpp` (§3.1f; round-1 R-005 V2>0 guard applied)
-  - `miniapps/seas/tests/unit/test_godunov_identity_normal_reversal.cpp` (§3.1c; round-1 R-006 comment updated)
-  - `miniapps/seas/tests/unit/test_godunov_interior_equal_sides_identity.cpp` (§3.1e)
-  - `miniapps/seas/Makefile` (test-target registration; round-1 R-001 §3.1 tests added)
-- Round-1 findings confirmed applied: R-001 (test: target), R-002 (outer-conditional guard at `wave_operator.inl:710`), R-003 (shared-fault routing guard at `:1179`), R-005 (V2>0 fixture guard), R-006 (stale comment in §3.1c), R-007 (new bimaterial-guard test), R-008 (1e-12 relative tolerance in guard).  R-004 only partially applied (header comment updated but inline Case B label at `:269-270` still references the obsolete "Godunov identity (§3.1c)" premise — see R-203 below).
-- Domain context: `miniapps/seas/CLAUDE.md`, `seas-mfem/CLAUDE.md`, plan §14–§18 self-audit, FaultBasis sign convention (`fault_basis.hpp:25-45, :342-451`).
+- `miniapps/seas/drivers/tpv102_driver.cpp` — RK4 loop line 944 (for-loop header), the averaging assignments at lines 971-973, and the station write at line 1051-1053.
+- `miniapps/seas/dynamic/tpv102_setup.hpp` — `TPV102StationWriter::WriteStep` at line 289.
+- Prior review rounds — round-3 R-V92-E02 (H-V92-K hypothesis), round-4 F01/F02/F03 (magnitude dimensional analysis), round-7 R-V92-I01 (_k4 discriminator broken).
 
-## Findings (round 2 — NEW, not duplicates of round 1)
+## Claim verification
 
-### [R-201] CRITICAL [test_fault_face_flux_bimaterial_guard.cpp:60-62 + Makefile:1003-1009] — Death-test exit-code logic is broken; test spuriously passes when the guard is removed
+### Part 1 — "tpv102_driver.cpp:944 overwrites `tau*_corr` and `sigma_n_corr` with (k1 + 2k2 + 2k3 + k4)/6"
 
-**Category:** BUG
-
-**Description:**
-The R-007 bimaterial-guard test is a "death test": the child process is expected to abort inside `MFEM_VERIFY`, and the shell target accepts **any non-zero exit code** as PASS.  But the child's *fall-through* path (when `Evaluate` returns WITHOUT aborting — i.e., when the guard has been silently removed by a future edit) also exits with non-zero code because it does `return 1`.  The shell target `[ $rc -ne 0 ]` cannot distinguish "child aborted inside the guard (rc=134 on SIGABRT)" from "child fell through and returned 1 because the guard was gone", and in both cases declares `PASS`.
-
-Consequence: the test's stated purpose — catching a regression of the bimaterial guard — is not fulfilled.  The test exists to detect someone removing `MFEM_VERIFY(homog_ok(...))` from `fault_face_flux.cpp:90-98`.  If that removal happens, the next `make test` run will emit "PASS: bimaterial guard aborted as expected (rc=1)" despite the guard being gone.
-
-The `"FAIL: Evaluate returned ..."` message the child writes to stderr (line 60-61) is redirected to `/dev/null` by the shell target (`2>/dev/null` on Makefile line 1003), so it cannot be used as a signal either.
-
-**Trigger:**
-Any future edit that removes, weakens, or comments out the `MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) && homog_ok(data.Zs_plus, data.Zs_minus), ...)` guard at `fault_face_flux.cpp:90-98`.  Run `make test-fault-face-flux-bimaterial-guard`.
-
-**Actual behavior:**
-```
-$ make test-fault-face-flux-bimaterial-guard
-PASS: bimaterial guard aborted as expected (rc=1)
-```
-— emitted both when the guard IS firing (rc=134) and when the guard is GONE and the child returned 1 (rc=1).
-
-**Expected behavior:**
-PASS only when the child aborted (rc ≠ 0 AND rc ≠ 1 from return path), or equivalently: the child returns a distinct exit code for "guard gone" that the shell treats as FAIL.
-
-**Suggested fix:**
-Swap the child's fall-through return code so `rc==0` (not `rc==1`) signals "guard did not abort":
-```diff
-diff --git a/miniapps/seas/tests/unit/test_fault_face_flux_bimaterial_guard.cpp b/miniapps/seas/tests/unit/test_fault_face_flux_bimaterial_guard.cpp
-@@
-    // Expect MFEM_VERIFY to abort here.  If the call returns at all,
-    // the bimaterial guard has been silently removed or weakened —
-    // that is the regression this test catches.
-    ff.Evaluate(d, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus);
-
--   std::cerr << "FAIL: Evaluate returned despite bimaterial DOFData; "
--             << "the R-F08 / R-008 guard is no longer firing.\n";
--   return 1;
-+   // REGRESSION PATH: if we reach this line, the guard is gone.  Return
-+   // 0 so the shell's `[ $rc -ne 0 ]` check flips to FAIL — a non-zero
-+   // exit from abort() is the PASS signal; a zero exit here is the
-+   // UNIQUE marker that Evaluate returned normally.
-+   std::cerr << "REGRESSION: Evaluate returned despite bimaterial "
-+             << "DOFData; the R-F08 / R-008 guard is no longer firing.\n";
-+   return 0;
- }
-```
-The shell target on `Makefile:1003-1009` is already correct for this semantics (no change needed there).
-
-**Test case:**
-```bash
-# Meta-test: prove the fix correctly distinguishes the two cases.
-# Run from repo root.
-set -e
-
-# Case 1: guard present (current state).  Expect test to PASS.
-cd miniapps/seas
-make test-fault-face-flux-bimaterial-guard 2>&1 | tee /tmp/guard_case1.log
-grep -q "^PASS: " /tmp/guard_case1.log \
-   || { echo "FATAL: guard-present case not PASSing"; exit 1; }
-
-# Case 2: simulate guard removal and confirm test FAILs.
-cp dynamic/fault_face_flux.cpp /tmp/fault_face_flux.cpp.bak
-sed -i.bak 's/MFEM_VERIFY(homog_ok/MFEM_VERIFY(true || homog_ok/' \
-   dynamic/fault_face_flux.cpp
-rm -f dynamic/fault_face_flux.o
-make -j8 seas_test_fault_face_flux_bimaterial_guard 2>&1 >/dev/null
-rc=0
-make test-fault-face-flux-bimaterial-guard 2>&1 | tee /tmp/guard_case2.log || rc=$?
-# Restore original source
-cp /tmp/fault_face_flux.cpp.bak dynamic/fault_face_flux.cpp
-rm -f dynamic/fault_face_flux.o
-
-if grep -q "^FAIL: " /tmp/guard_case2.log; then
-   echo "META-PASS: guard-removed case FAILs as expected"
-else
-   echo "META-FAIL: guard-removed case should FAIL but was accepted"
-   exit 1
-fi
-```
-
----
-
-### [R-202] CRITICAL [wave_operator.inl:1194] — Shared-fault branch uses `MFEM_ASSERT` instead of `MFEM_VERIFY` for a bounds check that precedes an out-of-bounds access
-
-**Category:** BUG / ASSUMPTION
-
-**Description:**
-In the shared-fault branch, the code reads `bd.qp_data[q]` after a `MFEM_ASSERT` bounds check:
-
+**VERIFIED WITH ONE CAVEAT.** Line 944 is the FOR-LOOP HEADER:
 ```cpp
-const FaultBasisData &bd = fault_basis_->GetBasis(basis_idx);
-MFEM_ASSERT(q < static_cast<int>(bd.qp_data.size()),
-            "FaultBasis::qp_data not populated for shared "
-            "fault face — ComputeQPBasisShared missed "
-            "this face");
-const FaultBasisQPData &qpd = bd.qp_data[q];
+for (int i = 0; i < num_fault_total; i++)
 ```
 
-`MFEM_ASSERT` is compiled out in release builds (it is only active under `MFEM_DEBUG`), whereas `MFEM_VERIFY` is always active.  In a release build, if `bd.qp_data.size() <= q` (e.g., the ctor's `ComputeQPBasisShared` failed to populate this face for some geometric reason), the assertion is a no-op and the next line (`bd.qp_data[q]`) performs an out-of-bounds `operator[]` on `std::vector` — **undefined behavior**.  Every subsequent field read (`qpd.normal`, `qpd.tangent1`, `qpd.tangent2`, `qpd.sign_flipped`) reads garbage, and `can_n / can_t1 / can_t2` become nonsense, the rotation matrices become non-orthogonal, and the per-side flux is silently wrong.
-
-The interior-fault branch at `wave_operator.inl:740-744` has the correct analogue — an *explicit runtime* `if (q < static_cast<int>(bd.qp_data.size())) { qpd_ptr = &bd.qp_data[q]; }` — which then flows through the outer `if (dof_idx >= 0 && ... && qpd_ptr != nullptr)` to the `MFEM_ABORT` fallback.  The shared-fault branch has no such safety net in release.
-
-This asymmetry was not flagged in round 1.  It is post-v9.0.0 load-bearing because the shared-fault branch now uses `qpd.normal / qpd.tangent1 / qpd.tangent2` to reconstruct `can_n / can_t1 / can_t2` (lines 1204-1213) — a wrong `can_n` corrupts the per-side flux AND the cross-rank consistency guarantee.
-
-**Trigger:**
-A release build (`MFEM_DEBUG` not defined) where `FaultBasis::ComputeQPBasisShared` left one shared fault face's `qp_data` under-populated (e.g., a geometric edge case, a stale mesh-regeneration, or a ctor-ordering bug).
-
-**Actual behavior:**
-In release: `bd.qp_data[q]` returns garbage; rotation matrices are computed from nonsense `normal / tangent1 / tangent2`; per-side flux on that QP is wrong; cross-rank consistency breaks.  No error is emitted.
-
-In debug: `MFEM_ASSERT` fires loudly; the bug surfaces.
-
-**Expected behavior:**
-Same symmetric hard-abort behaviour in release as in debug — and the same behaviour as the interior-fault branch.
-
-**Suggested fix:**
-Promote the assertion to `MFEM_VERIFY`:
-```diff
-diff --git a/miniapps/seas/dynamic/wave_operator.inl b/miniapps/seas/dynamic/wave_operator.inl
-@@
-                   const FaultBasisData &bd = fault_basis_->GetBasis(basis_idx);
--                  MFEM_ASSERT(q < static_cast<int>(bd.qp_data.size()),
--                              "FaultBasis::qp_data not populated for shared "
--                              "fault face — ComputeQPBasisShared missed "
--                              "this face");
-+                  MFEM_VERIFY(q < static_cast<int>(bd.qp_data.size()),
-+                              "FaultBasis::qp_data not populated for shared "
-+                              "fault face — ComputeQPBasisShared missed "
-+                              "this face (basis_idx=" << basis_idx
-+                              << ", q=" << q
-+                              << ", qp_data.size()=" << bd.qp_data.size()
-+                              << "). v9.0.0 Pelties-9 per-side flux reads "
-+                              "qpd.normal/tangent1/tangent2 from this "
-+                              "entry; a wrong can_n corrupts the flux.");
-                   const FaultBasisQPData &qpd = bd.qp_data[q];
-```
-
-**Test case:**
+The actual assignments are at lines 971-973 (inside that loop):
 ```cpp
-// tests/unit/test_shared_fault_qp_data_guard.cpp
-//
-// Verifies that the shared-fault QP-data bounds check is active in
-// release builds (MFEM_VERIFY, not MFEM_ASSERT).  Without the fix,
-// the test compiles but `bd.qp_data[q]` would be UB.
+dof_data[i].tau1_corr    = (t1c_k1[i] + 2*t1c_k2[i] + 2*t1c_k3[i] + t1c_k4[i]) / 6.0;
+dof_data[i].tau2_corr    = (t2c_k1[i] + 2*t2c_k2[i] + 2*t2c_k3[i] + t2c_k4[i]) / 6.0;
+dof_data[i].sigma_n_corr = (snc_k1[i] + 2*snc_k2[i] + 2*snc_k3[i] + snc_k4[i]) / 6.0;
+```
+Also overwrites `V1`, `V2`, `slip_rate`, plus `slip1 += V1·dt`, `slip2 += V2·dt`.  The `t1c_k_i`, `t2c_k_i`, `snc_k_i` are stage-i SNAPSHOTS of `dof_data[i].tau1_corr/tau2_corr/sigma_n_corr` captured immediately after the corresponding `wave.Mult` call at each stage (lines 825-826, 850-851, 866-867, 898-899 in the current source).  So yes — the final `tau*_corr` and `sigma_n_corr` values written to `dof_data` at step end are the Butcher-weighted Simpson-average of stage-wise post-friction outputs.
 
-// Friend-class hook (add to WaveOperator private section under
-// #ifdef SEAS_TEST_HOOKS):
-//    std::vector<FaultBasisData> *TestGetFaultBasisRaw() {
-//       return const_cast<FaultBasis*>(fault_basis_)->TestGetBasisRaw();
-//    }
-// And in FaultBasis:
-//    #ifdef SEAS_TEST_HOOKS
-//    std::vector<FaultBasisData> *TestGetBasisRaw() { return &basis_; }
-//    #endif
+Inline comment at line 970 confirms the intent:
+```cpp
+// R-001 fix: RK4-weighted corrected tractions for consistent station output
+```
 
-int main()
+### Part 2 — "tpv102_setup.hpp:289 writes those fields directly to station output"
+
+**VERIFIED.** `WriteStep` at line 289 reads from `dof_data[idx]` (the station's owner DOF) and writes to the `.dat` file at lines 305-314:
+```cpp
+files_[s] << std::scientific << std::setprecision(10)
+          << t << " "
+          << d.slip1 << " " << d.slip2 << " "
+          << d.V1 << " "    << d.V2    << " "
+          << d.tau1_corr << " " << d.tau2_corr << " "
+          << d.sigma_n_corr << " " << log10_theta << "\n";
+```
+`d = dof_data[idx]` is assigned at line 298.
+
+So `tau1_corr`, `tau2_corr`, `sigma_n_corr` in the `.dat` files ARE the step-end Simpson-averaged values — NOT re-evaluated at `Q(t+dt)`.
+
+### Part 3 — "tpv102_driver.cpp:1051 writes immediately after the RK4 step"
+
+**VERIFIED.** Line 1051-1053:
+```cpp
+if (step % output_interval == 0 || step == nsteps - 1)
 {
-   // ... build 2-rank parallel ParMesh with a shared fault face at y=0 ...
-   WaveOperator op(...);
-   op.SetFaultFlux(&ff);
-   op.SetFaultDOFData(&dof_data, nqp_per_face);
-
-   // Truncate qp_data on one shared fault face.
-   auto *basis_vec = op.TestGetFaultBasisRaw();
-   int n_int = op.FaultInteriorFacesSize();
-   (*basis_vec)[n_int].qp_data.clear();   // force qp_data.size() = 0
-
-   Vector Q(op.GetStateSize()), rhs(op.GetStateSize());
-   Q = 0.0; rhs = 0.0;
-
-   // Expect MFEM_VERIFY to abort in RELEASE (MFEM_DEBUG not defined)
-   // as well as DEBUG.  Without the fix, release builds would silently
-   // proceed with UB.  Run as death test; parent treats non-zero rc
-   // as PASS.
-   op.Apply(Q, rhs);
-   std::cerr << "FAIL: shared-fault qp_data guard did not abort\n";
-   return 0;   // 0 = guard did NOT fire = FAIL (per R-201 convention)
+   station_writer.WriteStep(t, dof_data);
+   surface_writer.WriteStep(t, Q);
+   ...
 }
 ```
-Shell wrapper (death-test with exit-code discrimination):
-```bash
-# test-shared-fault-qp-data-guard
-@./seas_test_shared_fault_qp_data_guard 2>/dev/null; rc=$$?; \
-    if [ $$rc -eq 0 ]; then \
-        echo "FAIL: qp_data guard did not fire (MFEM_ASSERT regressed to no-op in release)"; \
-        exit 1; \
-    else \
-        echo "PASS: qp_data guard fired (rc=$$rc)"; \
-    fi
-```
+Timeline within one loop iteration:
+1. Stages 1-4 Mult calls + stage-i captures into `t1c_k_i`, `t2c_k_i`, `snc_k_i` buffers.
+2. Q update with `(k1+2k2+2k3+k4)/6` (line 906-909).
+3. `t += dt_step` (line 911).
+4. _k4 stage-4 snapshot to VTU buffers (line 919-929; current work, see round-7 R-V92-I01 for the overwrite bug).
+5. RK4 averaging of `dof_data[i].{psi, V1, V2, tau1_corr, tau2_corr, sigma_n_corr, slip1, slip2}` (lines 944-974, including the claim's lines 971-973).
+6. V_max tracking, diagnostic blocks.
+7. Output write at line 1051 via `station_writer.WriteStep(t, dof_data)`.
 
----
+So the station write uses `dof_data` whose tau/σ_n fields were just Simpson-averaged.  The `t` label written to the `.dat` file is `t_{n+1}` (post-increment at step 3), but the values are evaluated at `t_n + dt/2` (Simpson mean of stage-i samples at stage times `t_n`, `t_n+dt/2`, `t_n+dt/2`, `t_n+dt`).
 
-### [R-203] MODERATE [test_fault_flux_interior_vs_shared_branch_equivalence.cpp:267-273] — Stale Case B label still references the obsolete "Godunov identity" premise
+## Claim status: confirmed as a real bug, severity downgraded
 
-**Category:** QUALITY / DEVIATION
+### The factual observation is CORRECT
+
+All three line references are accurate (modulo line 944 being the for-loop header, not the assignment itself).  The station `.dat` output at time `t` is the Simpson-mean of the stage-wise post-friction values over `[t_n, t_n+dt]`, i.e. the midpoint-like approximation of `tau/σ_n` at `t_n + dt/2`.  This IS a semantic mismatch between the time label and the value.
+
+### The severity label "HIGH — strongest explanation for the inflated σ_n" is OVERSTATED
+
+Quantitative argument (mirrors round-4 REVIEW R-V92-F03 dimensional analysis):
+
+- The Simpson-mean differs from the endpoint value by approximately:
+  `|tau(t_n+dt/2) − tau(t_n+dt)| ≈ (dt/2) · |∂tau/∂t|`
+- At peak rupture, `|∂σ_n/∂t|` ~ O(10 GPa/s) locally near the rupture tip.  At `dt ~ 10⁻⁴ s`, the per-step phase-lag offset is `5·10⁻⁵ · 10¹⁰ = 5·10⁵ Pa = 0.5 MPa`.
+- **This is a per-step SNAPSHOT offset, not a cumulative drift.**  Each step's output is an independent sample with an independent midpoint bias; the biases do NOT add.
+- Observed σ_n deviation at `flt_0_7.5` is `~98 MPa average (late)`, `218 MPa peak`.
+- A ~0.5 MPa phase-lag cannot explain a 98 MPa sustained drift — off by 200×.
+
+### Additional factor the original claim missed: the averaged values do NOT feed back into the simulation
+
+The claim implicitly worries that stage-averaged `tau1_corr` etc. contaminates the next step.  Inspection of the code shows they DO NOT:
+
+- At the start of the next RK4 step, stage-1 `wave.Mult(Q, k1)` internally calls `fault_flux_->Evaluate(fdata, Q_plus, Q_minus, ...)`.  `Evaluate` computes `sigma_n_trial`, `tau1_trial`, `tau2_trial` from the CURRENT Q's velocity and stress jumps (Pelties eq. 7), then runs the friction Brent solve from the current `fdata.psi` and `fdata.sigma_n0/tau1_0/tau2_0`.  It OVERWRITES `fdata.sigma_n_corr`, `tau1_corr`, `tau2_corr`, `V1`, `V2` with the stage-1 friction-corrected values.
+- The previous step's Simpson-averaged values are IMMEDIATELY replaced before anything reads them.
+- Only `fdata.psi` (integrated per F01+F02 via coupled RK4 on psi — round-4 fix) and `fdata.slip1/slip2` (accumulated correctly via `slip += V_avg·dt` — Simpson-exact) survive step-to-step.
+
+**Therefore:**
+- The averaging is a **pure output transformation** — simulation dynamics are unaffected.
+- The phase-lag is a cosmetic / visualization bug, not a driver of the pathology.
+- H-V92-K (round-3 hypothesis, round-4 F03 bounded at ~1% of observed pathology) is the correct classification; this claim's "HIGH / strongest explanation" severity is not supported by dimensional analysis.
+
+## Findings
+
+### [R-V92-K01] [MODERATE] [tpv102_driver.cpp:971-973 + tpv102_setup.hpp:305-314] — Station output shows Simpson-mean tau/σ_n at time `t_n + dt/2` but labels the sample time as `t = t_{n+1}`; half-step phase lag in observables
+
+**Category:** BUG (semantic — time label ≠ value time)
 
 **Description:**
-Round-1 R-004 flagged the entire test as a tautology and recommended updating its documentation.  The **header comment** was updated (line 26-38 now states "POST-FIX THIS TEST IS A TAUTOLOGY") — but the *inline* Case A/B labels at line 261-273 still describe the pre-fix algorithmic dependency:
-```cpp
-   // Case A: Elem1 on canonical + side (rank-local nor = +can_n).
-   //   Interior branch's arguments match shared branch trivially — MATCH.
-   CompareBranches(can_n, can_t1, can_t2, Q_self_g, Q_nbr_g,
-                   /*elem1_on_plus=*/true,
-                   "Case A: elem1_on_plus=true (trivial match)");
-
-   // Case B: Elem1 on canonical - side (rank-local nor = -can_n).
-   //   Interior branch invokes flux.Interior(-can_n, Q_-g, Q_+g).
-   //   Shared branch invokes flux.Interior(+can_n, Q_+g, Q_-g) with accum_sign=-1.
-   //   Equality ⇔ Godunov identity (§3.1c).
-   CompareBranches(can_n, can_t1, can_t2, Q_self_g, Q_nbr_g,
-                   /*elem1_on_plus=*/false,
-                   "Case B: elem1_on_plus=false (Godunov identity)");
-```
-Post-fix, the interior branch does NOT invoke `flux.Interior(-can_n, Q_-g, Q_+g)` — it uses `+can_n` with per-side `(Q, Q)` calls (line 135-136).  The shared branch similarly uses `+can_n` with a single per-side call (line 165).  No "Godunov identity" is invoked.  The label `"Case B: elem1_on_plus=false (Godunov identity)"` is outright wrong — the test's console output still advertises a dependency that was removed.  A reader skimming a CI log with "Case B (Godunov identity)" will mis-attribute the test's semantics.
+Lines 971-973 overwrite `dof_data[i].tau1_corr/tau2_corr/sigma_n_corr` with the RK4-Butcher-weighted Simpson mean of stage-i post-friction snapshots.  The station writer at `tpv102_setup.hpp:289-314` writes these values alongside the current time `t` (post-increment).  The Simpson mean approximates the time-averaged value over `[t_n, t_{n+1}]`, which equals the midpoint value `tau(t_n + dt/2)` to O(dt⁴) for smooth tau(τ).  But the output file labels it as `t = t_{n+1}`.  Half-step phase lag.
 
 **Trigger:**
-Read the test source or its console output.
+Any station .dat output during a rupture where `|∂tau/∂t|` or `|∂σ_n/∂t|` are non-trivial.
 
-**Actual behavior:**
-Labels advertise a behaviour the test no longer exercises.
+**Magnitude (dimensional bound):**
+Per-sample bias ≈ `dt/2 · |∂tau/∂t|`.  For `dt = 10⁻⁴` s and peak rupture-tip `|∂σ_n/∂t| ~ 10 GPa/s`: bias ≈ 0.5 MPa per sample.  NOT cumulative.
 
-**Expected behavior:**
-Labels reflect the actual post-fix behaviour (trivial tautology at quiescent bulk; non-trivial only with `+perturb` cases).
+**Impact on observed 218 MPa σ_n peak:** bias is 200× smaller than the observed deviation.  This bug alone cannot explain the primary pathology.
 
 **Suggested fix:**
-```diff
-diff --git a/miniapps/seas/tests/unit/test_fault_flux_interior_vs_shared_branch_equivalence.cpp b/miniapps/seas/tests/unit/test_fault_flux_interior_vs_shared_branch_equivalence.cpp
-@@
-    // Case A: Elem1 on canonical + side (rank-local nor = +can_n).
--   //   Interior branch's arguments match shared branch trivially — MATCH.
-+   //   Post-fix: both branches call flux.Interior(can_n, Q_imp_plus_g,
-+   //   Q_imp_plus_g) with the same selection — trivial bit-identity.
-    CompareBranches(can_n, can_t1, can_t2, Q_self_g, Q_nbr_g,
-                    /*elem1_on_plus=*/true,
--                   "Case A: elem1_on_plus=true (trivial match)");
-+                   "Case A: elem1_on_plus=true (tautology, + side)");
+Two options, pick one:
 
-    // Case B: Elem1 on canonical - side (rank-local nor = -can_n).
--   //   Interior branch invokes flux.Interior(-can_n, Q_-g, Q_+g).
--   //   Shared branch invokes flux.Interior(+can_n, Q_+g, Q_-g) with accum_sign=-1.
--   //   Equality ⇔ Godunov identity (§3.1c).
-+   //   Post-fix: both branches call flux.Interior(can_n, Q_imp_minus_g,
-+   //   Q_imp_minus_g) with the same selection — trivial bit-identity.
-+   //   NO "Godunov identity" is exercised any longer; see header comment
-+   //   and REVIEW R-004 / R-203 for the pre-fix vs post-fix divergence.
-    CompareBranches(can_n, can_t1, can_t2, Q_self_g, Q_nbr_g,
-                    /*elem1_on_plus=*/false,
--                   "Case B: elem1_on_plus=false (Godunov identity)");
-+                   "Case B: elem1_on_plus=false (tautology, − side)");
+**(A) Label the time correctly.**  If keeping the Simpson-mean semantics (useful for time-averaged validation), write `t - dt/2` in the `.dat` file:
+
+```diff
+--- a/miniapps/seas/dynamic/tpv102_setup.hpp
++++ b/miniapps/seas/dynamic/tpv102_setup.hpp
+@@ -305,1 +305,5 @@
+-         files_[s] << std::scientific << std::setprecision(10)
++         // R-V92-K01 (round-9 REVIEW): tau*_corr and sigma_n_corr
++         // stored in dof_data are the RK4-Butcher-weighted Simpson
++         // mean over [t-dt, t], which approximates the midpoint value
++         // tau(t - dt/2).  Write the midpoint time to match.
++         files_[s] << std::scientific << std::setprecision(10)
+-                   << t << " "
++                   << (t - 0.5 * last_dt_) << " "    // Simpson midpoint
+                    << d.slip1 << " "
 ```
+
+(requires plumbing `last_dt_` through the writer — minor API change.)
+
+**(B) Re-evaluate tau/σ_n at Q(t+dt) after the RK4 step.**  Add a final post-averaging `fault_flux_->Evaluate` call on the updated Q (not on stage-i buffers) to produce endpoint tractions:
+
+```diff
+--- a/miniapps/seas/drivers/tpv102_driver.cpp
++++ b/miniapps/seas/drivers/tpv102_driver.cpp
+@@ -974,0 +974,20 @@
++#ifdef SEAS_OUTPUT_ENDPOINT_TRACTIONS
++      // R-V92-K01 (round-9 REVIEW): replace the Simpson-mean tau*_corr
++      // and sigma_n_corr with values re-evaluated at Q(t+dt).  This
++      // removes the half-step phase lag between the time label and the
++      // output value.  Gated on a compile flag so the default behaviour
++      // (Simpson mean) is unchanged pending broader review.
++      {
++         Vector k_unused(Q.Size());
++         wave.Mult(Q, k_unused);                  // triggers Evaluate at Q(t+dt)
++         // dof_data[i].{tau1_corr, tau2_corr, sigma_n_corr, V1, V2,
++         //              slip_rate} are now endpoint values.
++         // Slip accumulators have already been updated with the
++         // Simpson-mean V_avg on line 968-969 (that IS the correct
++         // RK4 integral of V over the step — do NOT re-accumulate).
++      }
++#endif
+```
+
+(Adds one extra `wave.Mult` per output-interval step — modest cost.)
+
+**Recommended:** Option (A) — because endpoint re-evaluation via option (B) has its own issues (Mult has side effects beyond the friction state, and the extra friction Brent call adds iteration count).  Option (A) is a single-line fix that makes the claim false; the station output then correctly labels `t = t_n + dt/2`, aligning value and label.
 
 **Test case:**
-Comment-only edit — a compile-time grep suffices:
-```bash
-! grep -qE 'Godunov identity|flux\.Interior\(-can_n' \
-    miniapps/seas/tests/unit/test_fault_flux_interior_vs_shared_branch_equivalence.cpp \
-    || { echo "FAIL: stale Godunov-identity comment still present"; exit 1; }
-echo "PASS: test labels reflect post-fix behaviour"
+```python
+def test_R_V92_K01_station_time_label_matches_value_time():
+    # Synthetic TPV102 run where tau evolves linearly: tau(τ) = a + b·τ.
+    # After one RK4 step over [t_n, t_n+dt], dof_data.tau*_corr is set to
+    # the Simpson mean tau_avg = a + b·(t_n + dt/2).
+    #
+    # Before fix: station .dat row reads "t_{n+1}  tau_avg = a + b·(t_n+dt/2)"
+    #             — the tuple (t_label, tau_value) misrepresents tau(t_label)
+    #             = a + b·t_{n+1} by 0.5·b·dt.
+    #
+    # After fix (A): station .dat row reads "t_n+dt/2  tau_avg" — self-
+    #                consistent.
+    run_one_step_linear_tau_fixture(a=100e6, b=1e9, dt=1e-4)
+    for row in load_station_dat("flt_0_7.5.dat"):
+        expected_tau_from_label = a + b * row.t
+        # Within one step: should match to O(dt^4) given linear input.
+        assert abs(row.tau1 - expected_tau_from_label) < 1e3, \
+            f"phase lag: tau({row.t}) = {row.tau1}, expected {expected_tau_from_label}"
 ```
 
 ---
 
-### [R-204] MODERATE [wave_operator.inl:710-717] — `MFEM_VERIFY` for fault bookkeeping is re-checked inside the QP loop; silent perf penalty, noisy on failure
+### [R-V92-K02] [LOW] [tpv102_driver.cpp:970 comment] — In-source comment "RK4-weighted corrected tractions for consistent station output" understates the semantic shift
 
-**Category:** QUALITY / POSSIBLE BUG
+**Category:** QUALITY (readability / misleading comment)
 
 **Description:**
-The round-1 R-002 guard is placed at `wave_operator.inl:710-717`, inside the `for (int q = 0; q < nqp; q++)` loop at `:595` and inside the face loop at `:562`.  For a fault simulation with tens of thousands of fault faces × ~16 QPs × 6 RK stages × millions of time steps, the `MFEM_VERIFY` is evaluated billions of times — once per (face, QP, stage, step) combination.  The check is cheap (predicted branch on a non-null pointer), so the happy-path cost is negligible on modern CPUs; but if the condition ever fails, the diagnostic fires *per QP*, producing thousands of identical error messages before abort (noise that buries the underlying ctor-population bug).
-
-More importantly, this placement makes the guard *conditional on reaching a fault face* — which is the right scope for catching "fault_flux_ null when a fault face appears" but means the guard is NOT hoisted to the ctor (where it would catch the bug at setup time, before any time-stepping).  A follow-up caller adding a new fault-flux entry point elsewhere would not inherit this guard.
-
-The correct design is a one-time check at the boundary between setup and first face-loop entry — e.g., hoisted to `ComputeInteriorFaceFluxRHS`'s preamble (once per Mult call) or to the ctor (once per WaveOperator construction).
-
-**Trigger:**
-Any fault simulation — the guard fires per-QP in the happy case (performance), per-face-per-QP on failure (noise).
-
-**Actual behavior:**
-Billions of successful `MFEM_VERIFY` evaluations in the happy case.  On failure, thousands of duplicate abort messages before the process dies.
-
-**Expected behavior:**
-Single one-time check per `Mult` call (or per ctor).
-
-**Suggested fix:**
-Hoist the check to the top of `ComputeInteriorFaceFluxRHS`, before the face loop.  Keep the per-QP inner check only for debug builds via `MFEM_ASSERT`:
-```diff
-diff --git a/miniapps/seas/dynamic/wave_operator.inl b/miniapps/seas/dynamic/wave_operator.inl
-@@
- template <typename MeshType>
- void WaveOperator<MeshType>::ComputeInteriorFaceFluxRHS(
-    const Vector &Q, Vector &rhs) const
- {
-+   // R-002 (hoisted from inner QP loop in round 2 / R-204): check fault
-+   // bookkeeping ONCE per call, not per (face, QP).  `bc_.fault_attr > 0`
-+   // is the condition under which the interior-face loop can enter the
-+   // fault branch; if so, fault_flux_ and fault_dof_data_ must be set.
-+   if (bc_.fault_attr > 0)
-+   {
-+      MFEM_VERIFY(fault_flux_ && fault_dof_data_,
-+                  "WaveOperator::ComputeInteriorFaceFluxRHS: "
-+                  "bc_.fault_attr=" << bc_.fault_attr
-+                  << " > 0 (fault mesh configured) but "
-+                  "fault_flux_=" << (void*)fault_flux_
-+                  << ", fault_dof_data_=" << (void*)fault_dof_data_
-+                  << "; ctor did not populate fault bookkeeping. "
-+                  "v9.0.0 Pelties-9 per-side flux requires both; "
-+                  "welded-flux fallback is no longer physical.");
-+   }
-    ...
-    for (int f = 0; f < mesh_.GetNumFaces(); f++)
-    {
-       ...
-       for (int q = 0; q < nqp; q++)
-       {
-          ...
-             if (is_fault)
-             {
--               // R-002: a fault face must have fully populated bookkeeping.
--               // Post-v9.0.0 the welded-flux fallback (outer else below) is
--               // no longer physical — per-side flux is required for fault
--               // radiation, so silently falling back would under-radiate
--               // exactly the way R-F02 guarded against for the inner else.
--               MFEM_VERIFY(fault_flux_ && fault_dof_data_,
--                           "interior fault face f=" << f
--                           << " reached ComputeInteriorFaceFluxRHS but "
--                           "fault_flux_=" << (void*)fault_flux_
--                           << ", fault_dof_data_=" << (void*)fault_dof_data_
--                           << "; ctor did not populate fault bookkeeping. "
--                           "v9.0.0 Pelties-9 per-side flux requires both; "
--                           "welded-flux fallback is no longer physical.");
-+               MFEM_ASSERT(fault_flux_ && fault_dof_data_,
-+                           "R-204: bookkeeping hoisted check should have "
-+                           "fired at the top of ComputeInteriorFaceFluxRHS. "
-+                           "If we reach here with null fault_flux_, the "
-+                           "hoisted check was removed or bypassed.");
-                // Fault face: dispatch to FaultFaceFlux with tracked DOFData.
-```
-Parallel change in `ComputeSharedFaceFluxRHS` for symmetry (hoist the analogous check for the shared-fault path).
-
-**Test case:**
+Line 970:
 ```cpp
-// Assertion on perf behaviour: this fix is a hot-path optimization, not
-// a correctness fix.  The CORRECTNESS regression test for R-002 is
-// already covered by a prior "test_fault_face_null_bookkeeping_aborts"
-// pattern (see round 1).  For R-204, verify the hoist does NOT change
-// abort semantics:
+// R-001 fix: RK4-weighted corrected tractions for consistent station output
+```
 
-// Death test: bc_.fault_attr > 0 but no SetFaultFlux call → MFEM_VERIFY
-// should fire at the top of the first Mult call, before any face-loop
-// iteration.  Observable: process aborts immediately, not after N
-// partial QP writes to rhs.
+"Consistent station output" suggests "the output is in sync with the simulation state".  In fact the output is in sync with the MIDPOINT of the step, while the time label is in sync with the ENDPOINT.  A clearer comment would surface the tradeoff:
 
-int main()
-{
-   WaveOperator op(fes, bc_with_fault_attr, /*order=*/1);
-   // Deliberately skip SetFaultFlux.
-
-   Vector Q(op.GetStateSize()), rhs(op.GetStateSize());
-   Q = 0.0; rhs = 42.0;   // sentinel value
-
-   // Expect abort BEFORE rhs is touched; the hoisted check runs before
-   // the face loop.  A per-QP check would have touched rhs on the first
-   // non-fault face; the hoisted one should not.
-   op.Apply(Q, rhs);
-
-   // If we reach here, guard didn't fire — FAIL.
-   std::cerr << "REGRESSION: hoisted R-002 guard did not fire\n";
-   return 0;
-}
+```diff
+-         // R-001 fix: RK4-weighted corrected tractions for consistent station output
++         // R-001 fix: RK4-weighted corrected tractions for consistent station output.
++         // NOTE (R-V92-K01): the Butcher (1,2,2,1)/6 weights produce the
++         // SIMPSON TIME-AVERAGE of tau*_corr over [t_n, t_{n+1}], i.e.
++         // tau*_corr(t_n + dt/2) to O(dt^4), NOT the endpoint value
++         // tau*_corr(t_{n+1}).  The half-step phase lag between the
++         // output value and the output time label is an open R-V92-K01
++         // bug — see REVIEW round-9 for the fix options.
+         dof_data[i].tau1_corr = (t1c_k1[i] + 2*t1c_k2[i] + 2*t1c_k3[i] + t1c_k4[i]) / 6.0;
 ```
 
 ---
 
-### [R-205] LOW [test_fault_face_flux_bimaterial_guard.cpp:50] — Uninitialized `Q_imp_plus / Q_imp_minus` inspected after a guard-bypass regression
+## Verdict on the user's claim
 
-**Category:** QUALITY / EDGE_CASE
+- **Factual part ("lines 944, 289, 1051"):** **CONFIRMED** with the minor caveat that 944 is the for-loop header and the actual assignments are 971-973.
+- **Severity label "HIGH":** **DOWNGRADED to MODERATE.**  The bug is real (half-step phase lag between output value and output time label) but cannot account for the 218 MPa σ_n peak:
+  - Per-step bias bound: ~0.5 MPa (at dt=10⁻⁴ s, |∂σ_n/∂t|~10 GPa/s).  200× smaller than the observed signal.
+  - Non-cumulative: each sample has an independent midpoint bias.
+  - No simulation feedback: `Evaluate` at stage 1 of the NEXT step immediately overwrites the averaged values, so dynamics are unaffected.
+- **"Strongest code-level explanation for the inflated σ_n signal":** **NO.**  This is H-V92-K, which round-4 R-V92-F03 dimensional analysis bounded at ~1% of the observed pathology.  The primary driver remains in the flux-path (H-V92-G / H-V92-U) — see round-5 R-V92-G02 next-step tree.
 
-**Description:**
-In the bimaterial-guard test, `Q_imp_plus[NUM_STATE]` and `Q_imp_minus[NUM_STATE]` are declared uninitialized at `:50`:
-```cpp
-real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-```
-On the intended PASS path (guard fires), `Evaluate` aborts before writing to them — no read, no UB.  On the fall-through regression path (guard gone), `Evaluate` writes to them with (possibly junky) bimaterial output, and the test prints to stderr and returns.  No access to the uninitialized data occurs either way, so this is not a correctness bug *in the test* — but combined with R-201 (the fall-through doesn't FAIL), it paints a misleading picture where the test appears to run successfully on uninitialized buffers.  If a future edit adds a diagnostic print of `Q_imp_plus[VX]` in the fall-through path, it would print uninitialized data and cause a compiler warning or, with aggressive optimization, undefined behaviour.
+## Recommended next step
 
-**Trigger:**
-A future edit adds a `std::cerr << Q_imp_plus[VX]` in the fall-through error message to help debug what Evaluate "computed".
+1. Apply R-V92-K01 fix (option A — single-line change in `WriteStep`).  Closes the claim as a legitimate bug while correctly scoping its magnitude.
+2. Continue with the round-7 R-V92-I01 `_k4` VTU fix (still blocking the H-V92-K empirical check).
+3. Continue with the round-5 R-V92-G01 dt-halving experiment, which is the decisive discriminator for time-integration vs flux-path primary.
 
-**Actual behavior:**
-`-Wuninitialized` / `-fsanitize=memory` would flag the access.
-
-**Expected behavior:**
-Either zero-initialize the buffers so any future debug print reads deterministic zeros, or explicitly mark them uninitialized with `[[maybe_unused]]`.
-
-**Suggested fix:**
-```diff
-diff --git a/miniapps/seas/tests/unit/test_fault_face_flux_bimaterial_guard.cpp b/miniapps/seas/tests/unit/test_fault_face_flux_bimaterial_guard.cpp
-@@
-    real_t Q_plus[NUM_STATE] = {};
-    real_t Q_minus[NUM_STATE] = {};
--   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-+   real_t Q_imp_plus[NUM_STATE] = {};
-+   real_t Q_imp_minus[NUM_STATE] = {};
-    FaultFaceFlux ff(TPV102Params::rho,
-```
-
-**Test case:** n/a — defensive hygiene; no runtime behaviour change in the current code path.
-
----
+The user's claim identifies a bug that should be fixed.  It should NOT be used as a reason to skip R-V92-I01 or the dt-halving test; those address the primary pathology, which this bug does not explain.
 
 ## Summary
 
-- Critical issues: **2** (R-201: bimaterial-guard death test is broken; R-202: shared-fault MFEM_ASSERT is a no-op in release, allowing OOB access)
-- Moderate issues: **2** (R-203: stale Case-B label in §3.1d test; R-204: per-QP `MFEM_VERIFY` should hoist to ctor/call-time)
-- Low issues: **1** (R-205: uninitialized `Q_imp_*` in bimaterial-guard test)
-- Plan compliance: **PARTIAL-PLUS** — every source edit the plan and round-1 review prescribed is now present; however, R-004's tautology-comment fix is incomplete (R-203), and R-007's new test has an exit-code bug that defeats the test's purpose (R-201).  The shared-fault branch has a release-only UB risk the round-1 review missed (R-202).
-- Verdict: **FAIL — must fix R-201 and R-202 before proceeding.**  R-201 leaves the bimaterial-guard regression gate disarmed.  R-202 admits release-only undefined behaviour on a code path the v9.0.0 fix made load-bearing (shared-fault per-side flux depends on `qpd.normal/tangent1/tangent2` being valid).  Both are simple mechanical fixes.  R-203–R-205 are cleanup and can be batched into the same commit or follow up.
+- **Critical:** 0
+- **Moderate:** 1 (R-V92-K01)
+- **Low:** 1 (R-V92-K02)
+- **Plan compliance:** N/A (claim verification, not plan audit).
+- **Verdict:** **PASS WITH FIXES.**  The claim identifies a real but narrower bug than characterized; severity label "HIGH / primary cause" is not supported by dimensional analysis.  Fix R-V92-K01, continue with the primary-pathology diagnostics.
 
-## Unreviewed Areas
+## Unreviewed areas
 
-- Ctor population of `fault_basis_->basis_[].qp_data` for shared fault faces: R-202 assumes this *could* be incomplete.  I did not audit `ComputeQPBasisShared` to verify that every shared fault face always receives `ir.GetNPoints()` entries.  If ComputeQPBasisShared is provably total, R-202's severity drops from CRITICAL to MODERATE (defense-in-depth only).  A quick source audit of `fault_basis.hpp`'s `ComputeQPBasisShared` implementation before or after applying R-202's fix is recommended.
-- Performance measurements of R-204's per-QP guard in a TPV102 production run: I did not profile; the "billions of checks" estimate is back-of-envelope.  The hoist is worth doing for correctness-of-design reasons (single check per call, consistent with ctor-invariant style) even if the perf delta is negligible.
-- The existence of analogous `MFEM_ASSERT` bounds checks elsewhere in the v9.0.0-touched code: I searched `wave_operator.inl` but not every file.  A focused `grep -n "MFEM_ASSERT" miniapps/seas/dynamic/*.inl miniapps/seas/dynamic/*.cpp | grep -v "MFEM_ASSERT(true"` would flag any other spots where a runtime bounds check was downgraded to a debug-only assertion on a post-v9.0.0 hot path.
-- Whether the round-1 R-004 recommendation's DELETE option (removing the §3.1d test entirely rather than merely annotating it as tautological) is preferred by the project owner — R-203's minimal comment fix is the low-risk route; a full replacement with a non-tautological branch-equivalence test (serial + parallel twin mesh) remains deferred.
+- **Alternative fix path:** moving the `fault_flux_->Evaluate` call that produces `tau*_corr` out of `wave.Mult` and into a dedicated driver-level "endpoint friction" call after the RK4 Q update.  Would eliminate R-V92-K01 at the source but is a larger refactor.  Not audited.
+- **Whether the `surface_writer` at line 1054 has the same issue** — `surface_writer.WriteStep(t, Q)` takes Q (the endpoint state), not `dof_data`, so it is at t_{n+1} correctly.  No bug there.
+- **Checkpoint/restart consistency** — if the simulation checkpoints `dof_data` at `t` after the averaging, restart reads back the Simpson-mean values and uses them to initialize the next step.  Round-1 of the next segment's stage-1 Mult overwrites them immediately, so no data corruption.  Not a fresh bug.

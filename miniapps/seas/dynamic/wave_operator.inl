@@ -444,6 +444,30 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                elem1_proj += elem1_c(d) * ref_normal(d);
             }
             shared_fault_elem1_on_plus_[sf_idx] = (elem1_proj < face_proj);
+
+#ifdef SEAS_DIAG_CENTROID_MARGIN
+            // v9.2.0 §17 (rev-3d, post-REVIEW R-V92-C04): dump the
+            // per-face FP margin of the `elem1_on_plus` comparison so
+            // we can quantify the production-mesh FP-fragility risk
+            // without running any time stepping.  Margin = |elem1_proj
+            // − face_proj|; a small margin means the sign of the
+            // comparison is fragile (centroid close to the fault plane
+            // in the ref_normal direction).  On the 4-km Cartesian
+            // fixture every margin is O(10³ m); on Gmsh-duplicated
+            // production meshes near x = 0 the margin can be O(ε_FP).
+            const real_t margin = std::abs(elem1_proj - face_proj);
+            std::fprintf(stderr,
+               "[CENTROID-MARGIN] sf_idx=%d elem1_proj=%.17e face_proj=%.17e "
+               "margin=%.6e elem1_on_plus=%d face_c=(%.3e,%.3e,%.3e)\n",
+               sf_idx, static_cast<double>(elem1_proj),
+               static_cast<double>(face_proj),
+               static_cast<double>(margin),
+               shared_fault_elem1_on_plus_[sf_idx] ? 1 : 0,
+               static_cast<double>(face_c(0)),
+               static_cast<double>(face_c(1)),
+               static_cast<double>(face_c(2)));
+            std::fflush(stderr);
+#endif
          }
 #endif
       }

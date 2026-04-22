@@ -128,6 +128,10 @@ TEST_PER_QP_VS_CENTROID_BASIS_SRC          = tests/unit/test_per_qp_vs_centroid_
 TEST_NO_PENALTY_DR_SRC                     = tests/unit/test_no_penalty_dynamic_rupture.cpp
 # v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
 TEST_INTERIOR_FAULT_FLUX_PATH_SRC          = tests/unit/test_interior_fault_flux_path.cpp
+# v9.2.0 round-9 REVIEW R-V92-K01 — driver post-RK4 contract regression guard
+TEST_RK4_ENDPOINT_REEVAL_SRC               = tests/unit/test_rk4_endpoint_reeval.cpp
+# v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
+TEST_RK4_PSI_INTEGRATION_SRC               = tests/unit/test_rk4_psi_integration.cpp
 # v9.2.0 plan §4.10-§4.12 (rev-3g) — H-V92-G candidate probes (b)(c)(d)(e)
 TEST_VOLUME_JAC_SINGLE_CH_SRC              = tests/unit/test_volume_jacobian_single_channel.cpp
 TEST_RK4_CONSERVATION_SRC                  = tests/unit/test_rk4_conservation.cpp
@@ -136,6 +140,8 @@ TEST_ABSORBING_BC_DECAY_SRC                = tests/unit/test_absorbing_bc_energy
 TEST_SHARED_FAULT_ROLE_CONSIST_SRC         = tests/parallel/test_shared_fault_role_consistency.cpp
 # v9.2.0 plan §4.7 (rev-3c) — shared-fault DOFData runtime consistency
 TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC      = tests/parallel/test_shared_fault_dof_data_consistency.cpp
+# v9.2.0 plan Step 5b (R-V92-I02) — 100-step F01+F02 stability probe
+TEST_RK4_F01F02_STABILITY_SRC              = tests/parallel/test_rk4_f01f02_shared_fault_stability.cpp
 # v9.2.0 plan §17 (rev-3d, post-REVIEW R-V92-C04) — centroid-margin ctor-only probe
 TEST_CENTROID_MARGIN_CTOR_SRC              = tests/parallel/test_centroid_margin_ctor_only.cpp
 
@@ -211,10 +217,13 @@ TEST_PER_QP_VS_CENTROID_BASIS_OBJ          = $(TEST_PER_QP_VS_CENTROID_BASIS_SRC
 TEST_SHARED_FAULT_ROLE_CONSIST_OBJ         = $(TEST_SHARED_FAULT_ROLE_CONSIST_SRC:.cpp=.o)
 TEST_NO_PENALTY_DR_OBJ                     = $(TEST_NO_PENALTY_DR_SRC:.cpp=.o)
 TEST_INTERIOR_FAULT_FLUX_PATH_OBJ          = $(TEST_INTERIOR_FAULT_FLUX_PATH_SRC:.cpp=.o)
+TEST_RK4_PSI_INTEGRATION_OBJ               = $(TEST_RK4_PSI_INTEGRATION_SRC:.cpp=.o)
+TEST_RK4_ENDPOINT_REEVAL_OBJ               = $(TEST_RK4_ENDPOINT_REEVAL_SRC:.cpp=.o)
 TEST_VOLUME_JAC_SINGLE_CH_OBJ              = $(TEST_VOLUME_JAC_SINGLE_CH_SRC:.cpp=.o)
 TEST_RK4_CONSERVATION_OBJ                  = $(TEST_RK4_CONSERVATION_SRC:.cpp=.o)
 TEST_ABSORBING_BC_DECAY_OBJ                = $(TEST_ABSORBING_BC_DECAY_SRC:.cpp=.o)
 TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ      = $(TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC:.cpp=.o)
+TEST_RK4_F01F02_STABILITY_OBJ              = $(TEST_RK4_F01F02_STABILITY_SRC:.cpp=.o)
 TEST_CENTROID_MARGIN_CTOR_OBJ              = $(TEST_CENTROID_MARGIN_CTOR_SRC:.cpp=.o)
 
 # Constitutive model headers
@@ -648,6 +657,14 @@ seas_test_no_penalty_dynamic_rupture: $(TEST_NO_PENALTY_DR_OBJ) $(WAVE_OPERATOR_
 seas_test_interior_fault_flux_path: $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
+# v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
+seas_test_rk4_psi_integration: $(TEST_RK4_PSI_INTEGRATION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RK4_PSI_INTEGRATION_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 round-9 REVIEW R-V92-K01 — driver post-RK4 contract regression guard
+seas_test_rk4_endpoint_reeval: $(TEST_RK4_ENDPOINT_REEVAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RK4_ENDPOINT_REEVAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
 # v9.2.0 plan §4.10 (rev-3g) — single-channel Jacobian probe (d+e)
 seas_test_volume_jacobian_single_channel: $(TEST_VOLUME_JAC_SINGLE_CH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VOLUME_JAC_SINGLE_CH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
@@ -667,6 +684,10 @@ seas_test_shared_fault_role_consistency: $(TEST_SHARED_FAULT_ROLE_CONSIST_OBJ) $
 # v9.2.0 plan §4.7 (rev-3c) — shared-fault DOFData runtime consistency
 seas_test_shared_fault_dof_data_consistency: $(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan Step 5b (R-V92-I02) — 100-step F01+F02 stability probe
+seas_test_rk4_f01f02_shared_fault_stability: $(TEST_RK4_F01F02_STABILITY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RK4_F01F02_STABILITY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # v9.2.0 plan §17 (rev-3d) — centroid-margin ctor-only probe
 seas_test_centroid_margin_ctor_only: $(TEST_CENTROID_MARGIN_CTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -905,6 +926,14 @@ $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LI
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
+$(TEST_RK4_PSI_INTEGRATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_RK4_ENDPOINT_REEVAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
 $(TEST_VOLUME_JAC_SINGLE_CH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -918,6 +947,10 @@ $(TEST_ABSORBING_BC_DECAY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
 $(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_RK4_F01F02_STABILITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
@@ -1204,6 +1237,18 @@ test-no-penalty-dynamic-rupture: seas_test_no_penalty_dynamic_rupture
 # v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
 test-interior-fault-flux-path: seas_test_interior_fault_flux_path
 	./seas_test_interior_fault_flux_path
+
+# v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
+test-rk4-psi-integration: seas_test_rk4_psi_integration
+	./seas_test_rk4_psi_integration
+
+# v9.2.0 round-9 REVIEW R-V92-K01 — driver post-RK4 contract regression guard
+test-rk4-endpoint-reeval: seas_test_rk4_endpoint_reeval
+	./seas_test_rk4_endpoint_reeval
+
+# v9.2.0 plan Step 5b (R-V92-I02) — 100-step F01+F02 stability probe (4 ranks)
+test-rk4-f01f02-stability: seas_test_rk4_f01f02_shared_fault_stability
+	mpirun -np 4 ./seas_test_rk4_f01f02_shared_fault_stability
 
 # v9.2.0 plan §4.10 (rev-3g) — single-channel Jacobian probe (d+e)
 test-volume-jacobian-single-channel: seas_test_volume_jacobian_single_channel
