@@ -117,6 +117,31 @@ GodunovFlux::GodunovFlux(real_t lambda, real_t mu, real_t rho)
    Mult(Lambda_minus, Rinv_mat, temp);
    // Ax_minus_ = R * temp
    mfem::Mult(R, temp, Ax_minus_);
+
+   // ADER I-05 Phase 2: precompute the physical-frame material Jacobians
+   // used by the CK recursion.  Because `ApplySpatialDerivative` returns
+   // PHYSICAL-frame derivatives (via `CalcPhysDShape`, which absorbs the
+   // reference→physical J^{-T} transform), the CK recursion `L(Q) =
+   // -Σ_d A_d ∂_d Q` can use `BuildJacobian(d, ·)` directly as `A_d`
+   // without an additional reference-frame transform.  For the
+   // homogeneous isotropic material TPV102 uses, the result is the same
+   // 9x9 matrix on every element — cache it once.
+   // See GetReferenceStarMatrix's doc-comment for the "star" naming.
+   for (int d = 0; d < 3; d++)
+   {
+      ref_star_[d].SetSize(NUM_STATE, NUM_STATE);
+      BuildJacobian(d, ref_star_[d]);
+   }
+}
+
+// ---------------------------------------------------------------------------
+// ADER I-05 Phase 2: accessor for cached reference star matrices.
+// ---------------------------------------------------------------------------
+const DenseMatrix &GodunovFlux::GetReferenceStarMatrix(int dir) const
+{
+   MFEM_VERIFY(dir >= 0 && dir < 3,
+               "GetReferenceStarMatrix: dir must be in {0,1,2}, got " << dir);
+   return ref_star_[dir];
 }
 
 // ---------------------------------------------------------------------------
@@ -361,6 +386,163 @@ void GodunovFlux::Absorbing(const real_t *nor, const real_t *Q_self,
 }
 
 // ---------------------------------------------------------------------------
+// AbsorbingTotal (I-06 migration): background-aware absorbing BC.
+// ---------------------------------------------------------------------------
+// Addresses REVIEW.md R-I06-001.  Under the Phase 4 total-stress migration,
+// bulk Q carries the pre-stress tensor at every DOF, including DOFs
+// adjacent to absorbing (lateral, bottom, far-Y) boundary faces.  The
+// original Absorbing flux uses Q_ghost = 0, so at equilibrium (uniform
+// Q = Q_pre with no waves) the flux reduces to A^+ Q_pre -- NOT equal
+// to the interior identity A Q_pre, so a constant-in-time source of
+// outgoing waves radiates the pre-stress at every absorbing face.
+//
+// AbsorbingTotal uses Q_ghost = Q_bg (the supplied background).  When
+// Q_self = Q_bg, Interior(Q_bg, Q_bg) = A Q_bg, which gives the same
+// value at every face of a closed element and sums to zero after the
+// standard surface-integral -- equilibrium is preserved.  Perturbations
+// Q_self - Q_bg are upwind-damped by A^-, so the BC still absorbs
+// outgoing waves relative to the background.
+// ---------------------------------------------------------------------------
+void GodunovFlux::AbsorbingTotal(const real_t *nor, const real_t *Q_self,
+                                 const real_t *Q_bg, real_t *F_h) const
+{
+   Interior(nor, Q_self, Q_bg, F_h);
+}
+
+// ---------------------------------------------------------------------------
+// FreeSurfaceTotal (I-06 R-I06-005): background-aware gamma-mirror free
+// surface.  Enforces (sigma - sigma_bg).n = 0, i.e. ZERO FLUCTUATION
+// traction, rather than sigma.n = 0.  On a uniform Q = Q_bg field the
+// flux reduces to the interior identity F = A Q_bg and equilibrium is
+// preserved — no spurious radiation from tilted free-surface faces with
+// non-zero pre-stress traction.
+//
+// Construction: Q_pert = Q_self - Q_bg carries the fluctuation; apply
+// the fluctuation-path gamma-mirror to Q_pert alone to get the ghost
+// fluctuation; reconstruct Q_ghost = Q_bg + gamma*Q_pert.  Then the
+// standard Godunov flux F = A^+ Q_self + A^- Q_ghost.
+//
+// Equivalence with FreeSurface on a flat horizontal free surface
+// (TPV102's z=0): sigma_bg.n = 0 there, so Q_bg traction rotated to
+// face-local has zero sigma_nn / sigma_nt1 / sigma_nt2; the
+// gamma-mirror of Q_pert is also the gamma-mirror of Q_self; the two
+// fluxes agree.  This matches the "fix inert for TPV102 production"
+// property the reviewer noted.
+// ---------------------------------------------------------------------------
+void GodunovFlux::FreeSurfaceTotal(const real_t *nor, const real_t *Q_self,
+                                   const real_t *Q_bg, real_t *F_h) const
+{
+   // 1. Build orthonormal frame.
+   real_t t1[3], t2[3];
+   BuildFrame(nor, t1, t2);
+
+   // 2. Build rotation matrices.
+   DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+   DenseMatrix T(NUM_STATE, NUM_STATE);
+   BuildRotationInverse(nor, t1, t2, Tinv);
+   BuildRotation(nor, t1, t2, T);
+
+   // 3. Rotate Q_self and Q_bg only (R-003: Q_pert_rot = Q_self_rot -
+   //    Q_bg_rot algebraically, by linearity of Tinv; saves one 9x9
+   //    mat-vec vs rotating a separately-formed Q_pert).
+   real_t Q_self_rot[NUM_STATE];
+   real_t Q_bg_rot  [NUM_STATE];
+   Tinv.Mult(Q_self, Q_self_rot);
+   Tinv.Mult(Q_bg,   Q_bg_rot);
+   real_t Q_pert_rot[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_pert_rot[c] = Q_self_rot[c] - Q_bg_rot[c];
+   }
+
+   // 4. Gamma-mirror of the fluctuation.  In rotated frame:
+   //      SXX (sigma_nn)  → flip (odd-normal-index)
+   //      SYY (sigma_t1t1) → keep
+   //      SZZ (sigma_t2t2) → keep
+   //      SXY (sigma_nt1) → flip
+   //      SYZ (sigma_t1t2) → keep
+   //      SXZ (sigma_nt2) → flip
+   //      VX, VY, VZ       → keep
+   static const real_t gamma[NUM_STATE] = {-1, 1, 1, -1, 1, -1, 1, 1, 1};
+
+   // 5. Ghost = Q_bg + gamma * Q_pert in rotated frame.
+   real_t Q_ghost_rot[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_ghost_rot[c] = Q_bg_rot[c] + gamma[c] * Q_pert_rot[c];
+   }
+
+   // 6. Apply split flux in rotated frame.
+   real_t F_rot[NUM_STATE];
+   ApplySplitFlux(Q_self_rot, Q_ghost_rot, F_rot);
+
+   // 7. Rotate back to global frame.
+   T.Mult(F_rot, F_h);
+}
+
+// ---------------------------------------------------------------------------
+// FreeSurfaceGodunovTotal (I-06 R-I06-005): background-aware Godunov-
+// projection free surface.  Same idea as FreeSurfaceTotal but uses the
+// characteristic projection on the fluctuation Q_pert.
+// ---------------------------------------------------------------------------
+void GodunovFlux::FreeSurfaceGodunovTotal(const real_t *nor,
+                                          const real_t *Q_self,
+                                          const real_t *Q_bg,
+                                          real_t *F_h) const
+{
+   // 1. Build frame.
+   real_t t1[3], t2[3];
+   BuildFrame(nor, t1, t2);
+
+   // 2. Rotation matrices.
+   DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+   DenseMatrix T(NUM_STATE, NUM_STATE);
+   BuildRotationInverse(nor, t1, t2, Tinv);
+   BuildRotation(nor, t1, t2, T);
+
+   // 3. Rotate Q_self and Q_bg into face-local frame; compute
+   //    fluctuation Q_pert_rot.
+   real_t Q_self_rot[NUM_STATE];
+   real_t Q_bg_rot  [NUM_STATE];
+   Tinv.Mult(Q_self, Q_self_rot);
+   Tinv.Mult(Q_bg,   Q_bg_rot);
+   real_t Q_pert_rot[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_pert_rot[c] = Q_self_rot[c] - Q_bg_rot[c];
+   }
+
+   // 4. Godunov projection on the fluctuation: sigma_pert.n = 0 at the
+   //    surface, velocity perturbed by Z^{-1} . sigma_pert.  MFEM sign
+   //    convention (see FreeSurfaceGodunov): velocity increment has
+   //    MINUS sign.
+   const real_t invZp = 1.0 / Zp_;
+   const real_t invZs = 1.0 / Zs_;
+   real_t Q_god_pert_rot[NUM_STATE];
+   std::memcpy(Q_god_pert_rot, Q_pert_rot, NUM_STATE * sizeof(real_t));
+   Q_god_pert_rot[SXX] = 0.0;
+   Q_god_pert_rot[SXY] = 0.0;
+   Q_god_pert_rot[SXZ] = 0.0;
+   Q_god_pert_rot[VX]  = Q_pert_rot[VX] - invZp * Q_pert_rot[SXX];
+   Q_god_pert_rot[VY]  = Q_pert_rot[VY] - invZs * Q_pert_rot[SXY];
+   Q_god_pert_rot[VZ]  = Q_pert_rot[VZ] - invZs * Q_pert_rot[SXZ];
+
+   // 5. Ghost = Q_bg + Q_god_pert in rotated frame.
+   real_t Q_god_rot[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_god_rot[c] = Q_bg_rot[c] + Q_god_pert_rot[c];
+   }
+
+   // 6. Apply split flux.
+   real_t F_rot[NUM_STATE];
+   ApplySplitFlux(Q_self_rot, Q_god_rot, F_rot);
+
+   // 7. Rotate back.
+   T.Mult(F_rot, F_h);
+}
+
+// ---------------------------------------------------------------------------
 // Free-surface BC flux (Eq. 6)
 // ---------------------------------------------------------------------------
 void GodunovFlux::FreeSurface(const real_t *nor, const real_t *Q_self,
@@ -404,6 +586,90 @@ void GodunovFlux::FreeSurface(const real_t *nor, const real_t *Q_self,
    ApplySplitFlux(Q_rot, Q_ghost_rot, F_rot);
 
    // 6. Rotate back to global frame
+   T.Mult(F_rot, F_h);
+}
+
+// ---------------------------------------------------------------------------
+// Free-surface BC flux via Godunov characteristic projection (I-04).
+// ---------------------------------------------------------------------------
+// PURPOSE (addresses REVIEW.md R-I04-004): this variant exists for
+// SeisSol API parity and as the integration point for the v9.3.1 ADER
+// free-surface path.  It is NOT a corner-pump remedy — both this path
+// and `FreeSurface` call the same `BuildFrame`, so any Gram-Schmidt
+// sensitivity at near-axis-aligned normals affects them identically.
+//
+// EQUIVALENCE WITH gamma-MIRROR: algebraically exact at any tilt on a
+// flat facet.  Let delta := Q_ghost_gamma - Q_god in the rotated frame.
+// Then delta lies entirely in span{R(:,0..5)} (right-going + zero modes),
+// so A_x^- * delta = 0 and the two flux expressions are bit-equal modulo
+// FP noise from the rotate -> ApplySplitFlux -> rotate-back chain.
+//
+// The compliance projector S = -R_{21} R_{11}^{-1} in the rotated frame is
+// diagonal for isotropic elasticity.  SIGN NOTE (deviation from v9.3.0 plan
+// pseudocode): the plan Phase 1 section writes S = diag(-1/Zp, -1/Zs, -1/Zs)
+// and "Q_god[vel] = Q_self[vel] + (1/Zp) * Q_self[sigma_nn]" (plus sign).
+// That pseudocode assumes SeisSol's eigenvector sign convention where the
+// +cp mode has +lp at SXX.  MFEM's R (see godunov_flux.cpp ctor: R(SXX,0) =
+// -lp) uses the OPPOSITE sign, so the derived compliance block is
+//      S_MFEM = +diag(1/Zp, 1/Zs, 1/Zs)
+// and the velocity update is
+//      Q_god[vel] = Q_self[vel] + S_MFEM * (0 - Q_self[trac])
+//                 = Q_self[vel] - S_MFEM * Q_self[trac]        (MINUS sign)
+//
+// Both sign conventions give the SAME physical Godunov state — what
+// matters is that the implementation's S sign matches its R sign.  The
+// minus form below is what passes the equivalence-with-gamma-mirror test
+// on a flat free surface (proof: the Riemann interface state
+// Q_L + P^-(Q_R - Q_L) with Q_R = gamma*Q_L has Q_god[VX] = Q_L[VX] -
+// (1/Zp) * Q_L[SXX] under MFEM's eigenvector scaling).
+//
+// Rotated-frame components (x = normal, y = t1, z = t2):
+//    Q_god[SXX] = 0            (sigma_nn)
+//    Q_god[SXY] = 0            (sigma_nt1)
+//    Q_god[SXZ] = 0            (sigma_nt2)
+//    Q_god[VX]  = Q_self[VX] - (1/Zp) * Q_self[SXX]
+//    Q_god[VY]  = Q_self[VY] - (1/Zs) * Q_self[SXY]
+//    Q_god[VZ]  = Q_self[VZ] - (1/Zs) * Q_self[SXZ]
+// Passive modes (SYY, SZZ, SYZ) pass through unchanged: they are zero-
+// mode eigenvectors of A_x and do not contribute to A^-.
+//
+// R-004: inlined invZp/invZs; no cached compliance-block member.
+// ---------------------------------------------------------------------------
+void GodunovFlux::FreeSurfaceGodunov(const real_t *nor, const real_t *Q_self,
+                                     real_t *F_h) const
+{
+   // 1. Build orthonormal frame (matches Interior / FreeSurface).
+   real_t t1[3], t2[3];
+   BuildFrame(nor, t1, t2);
+
+   // 2. Build rotation matrices.
+   DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+   DenseMatrix T(NUM_STATE, NUM_STATE);
+   BuildRotationInverse(nor, t1, t2, Tinv);
+   BuildRotation(nor, t1, t2, T);
+
+   // 3. Rotate Q_self into face-local frame.
+   real_t Q_rot[NUM_STATE];
+   Tinv.Mult(Q_self, Q_rot);
+
+   // 4. Godunov projection in MFEM's R convention (see SIGN NOTE above).
+   const real_t invZp = 1.0 / Zp_;
+   const real_t invZs = 1.0 / Zs_;
+
+   real_t Q_god_rot[NUM_STATE];
+   std::memcpy(Q_god_rot, Q_rot, NUM_STATE * sizeof(real_t));
+   Q_god_rot[SXX] = 0.0;                       // sigma_nn  = 0
+   Q_god_rot[SXY] = 0.0;                       // sigma_nt1 = 0
+   Q_god_rot[SXZ] = 0.0;                       // sigma_nt2 = 0
+   Q_god_rot[VX]  = Q_rot[VX] - invZp * Q_rot[SXX];
+   Q_god_rot[VY]  = Q_rot[VY] - invZs * Q_rot[SXY];
+   Q_god_rot[VZ]  = Q_rot[VZ] - invZs * Q_rot[SXZ];
+
+   // 5. Apply split flux in rotated frame with the Godunov-projected ghost.
+   real_t F_rot[NUM_STATE];
+   ApplySplitFlux(Q_rot, Q_god_rot, F_rot);
+
+   // 6. Rotate back to global frame.
    T.Mult(F_rot, F_h);
 }
 

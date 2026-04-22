@@ -101,6 +101,14 @@
 #include "../../dynamic/godunov_flux.hpp"
 #include "../../dynamic/fault_face_flux.hpp"
 #include "../../dynamic/tpv102_setup.hpp"
+// v9.3.0 Phase 4 (I-06 migration): this test originally used the
+// fluctuation-Q path (Q = 0, DOFData carrying pre-stress).  Under the
+// v9.3.0 migration, the TPV102 fault dispatch calls EvaluateTotal on
+// total-stress Q with DOFData pre-stress zeroed.  The Pelties eq. (7)
+// predictions are identical in magnitude under either representation;
+// only the bulk-Q / DOFData partition changes.  tpv102_setup_total.hpp
+// supplies InitializeStateTotal and ZeroDOFDataPreStressTotal.
+#include "../../dynamic/tpv102_setup_total.hpp"
 #include "../../config/tpv102_params.hpp"
 #include "../../domain/boundary_config.hpp"
 
@@ -255,11 +263,24 @@ static void SetAntiSymQComponent(const Mesh &mesh, Vector &Q, int comp,
 // Re-initialise DOFData so the friction solver starts from equilibrium.
 // Needed between test cases because `wave.Mult` advances psi via the
 // friction solver and we want each T_i to start from clean state.
+// Under the v9.3.0 Phase 4 total-stress migration, also zero the DOFData
+// pre-stress fields (sigma_n0, tau1_0, tau2_0) because the bulk Q now
+// carries those values — EvaluateTotal would double-count otherwise.
 static void ResetDOFData(std::vector<DOFData> &dof_data,
                           const std::vector<Vector> &fault_coords)
 {
-   InitializeFaultDOFs(dof_data, static_cast<int>(dof_data.size()),
-                       fault_coords);
+   const int ndof = static_cast<int>(dof_data.size());
+   InitializeFaultDOFs(dof_data, ndof, fault_coords);
+   ZeroDOFDataPreStressTotal(dof_data, ndof);
+}
+
+// Initialize bulk Q for the total-stress migration.  Replaces `Q = 0.0`
+// from the pre-migration fluctuation convention.  Callers that want to
+// add a velocity-jump perturbation do so ON TOP of this initial state.
+static void InitTotalStateQ(Vector &Q, int ndof_total)
+{
+   InitializeStateTotal(Q, ndof_total,
+                        TPV102Params::sigma_n, TPV102Params::tau_ini);
 }
 
 int main()
@@ -298,6 +319,17 @@ int main()
    const int nfault = SetupFault(wave, mesh, order, dof_data, ff, fault_coords);
    std::cout << "  Fault QPs  : " << nfault << "\n";
 
+   // Post-R-001: the RK4 fault dispatch now selects EvaluateTotal vs
+   // Evaluate via has_bulk_bg_.  This test drives a total-Q bulk state
+   // (InitTotalStateQ + ZeroDOFDataPreStressTotal), so wire the
+   // background so the dispatch keeps calling EvaluateTotal.  Without
+   // this, the test would fall through to Evaluate and produce
+   // fluctuation-path outputs on total-Q inputs.
+   real_t bulk_bg[NUM_STATE] = {0};
+   bulk_bg[SYY] =  TPV102Params::sigma_n;
+   bulk_bg[SXY] = -TPV102Params::tau_ini;
+   wave.SetAbsorbingBackground(bulk_bg);
+
    if (nfault == 0)
    {
       std::cout << "ERROR: no fault QPs found — fault bdr not detected by "
@@ -326,7 +358,7 @@ int main()
    std::cout << "\n-- T0: Q = 0 at bulk; fault at initial equilibrium --\n";
    {
       ResetDOFData(dof_data, fault_coords);
-      Vector Q(size); Q = 0.0;
+      Vector Q(size); InitTotalStateQ(Q, ndof_total);
       Vector k(size);
       wave.Mult(Q, k);
 
@@ -356,7 +388,7 @@ int main()
    std::cout << "\n-- T1: Pelties 7a  (v_y jump → normal-stress trial) --\n";
    {
       ResetDOFData(dof_data, fault_coords);
-      Vector Q(size); Q = 0.0;
+      Vector Q(size); InitTotalStateQ(Q, ndof_total);
       // + side (y>0, tet 1) gets +V_test; − side (y<0, tet 0) gets -V_test.
       SetAntiSymQComponent(mesh, Q, VY, ndof_total, ndof_per_elem,
                            +V_test, -V_test);
@@ -398,7 +430,7 @@ int main()
    std::cout << "\n-- T2: Pelties 7c  (v_x jump → strike-traction trial) --\n";
    {
       ResetDOFData(dof_data, fault_coords);
-      Vector Q(size); Q = 0.0;
+      Vector Q(size); InitTotalStateQ(Q, ndof_total);
       SetAntiSymQComponent(mesh, Q, VX, ndof_total, ndof_per_elem,
                            +V_test, -V_test);
       Vector k(size);
@@ -436,7 +468,7 @@ int main()
    std::cout << "\n-- T3: Pelties 7b  (v_z jump → dip-traction trial) --\n";
    {
       ResetDOFData(dof_data, fault_coords);
-      Vector Q(size); Q = 0.0;
+      Vector Q(size); InitTotalStateQ(Q, ndof_total);
       SetAntiSymQComponent(mesh, Q, VZ, ndof_total, ndof_per_elem,
                            +V_test, -V_test);
       Vector k(size);

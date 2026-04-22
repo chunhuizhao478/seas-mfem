@@ -133,6 +133,7 @@ int main()
                            TPV102Params::lambda,
                            TPV102Params::mu,
                            TPV102Params::rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    const auto &fes_const = wave.GetFESpace();
    auto &fes = const_cast<FiniteElementSpace &>(fes_const);

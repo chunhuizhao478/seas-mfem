@@ -1,4 +1,4 @@
-# TPV102 Debug v9.3.0 — SeisSol-parity patch set: free-surface Godunov projection, total-stress mode, and ADER integration point
+# TPV102 Debug v9.3.0 — SeisSol-parity patch set: free-surface Godunov projection, total-stress migration, and ADER integration point
 
 > **Author:** planning agent, 2026-04-21.
 > **Predecessors:**
@@ -20,10 +20,10 @@
 >   implementation is `tpv102_ader_time_integration_plan.md`.  This plan
 >   documents where ADER wiring plugs into v9.3.0's total-stress mode
 >   (I-06) — the two landings must be coordinated.
-> - **I-06 (this plan):** State representation — add a total-stress
->   mode as an alternative to the current fluctuation representation.
->   Opt-in via `--state-representation={fluctuation|total}`.  Default
->   keeps fluctuation.
+> - **I-06 (this plan):** State representation — migrate TPV102 from
+>   fluctuation-Q to total-stress Q.  After Phase 4, total stress is
+>   the only supported TPV102 representation; there is no user-facing
+>   `--state-representation` fallback to fluctuation mode.
 >
 > Each of I-04, I-06 lands independently of the other and independently
 > of ADER.  I-05 requires I-06 as a prerequisite (SeisSol's ADER uses
@@ -41,32 +41,37 @@
 
 ## Overview
 
-Three additive patches land in v9.3.0.  Each is opt-in via a CLI flag
-so RK4 + fluctuation-Q + γ-mirror remains the byte-identical default;
-users switch on the SeisSol-parity modes only when exercising the
-H-V92 candidate probes.  After v9.3.0 + the ADER plan land, the full
-combination `--time-integrator=ader --state-representation=total
+Three patches land in v9.3.0.  I-04 remains opt-in via
+`--free-surface-bc={gamma|godunov}` so the old γ-mirror path stays
+available for controlled A/B checks.  I-06 is not opt-in: it replaces
+TPV102's fluctuation-Q path with total-stress Q.  After v9.3.0 + the
+ADER plan land, the combination `--time-integrator=ader
 --free-surface-bc=godunov` gives a TPV102 execution path that matches
-SeisSol's at the equation-block level.
+SeisSol's at the equation-block level, with total stress as the only
+supported TPV102 state representation.
 
 ## Constraints
 
 ### Interface constraints (frozen)
-- **`WaveOperator::Mult(Q, dQdt)`** signature — unchanged.  Behavior
-  branches internally on the state-representation flag, not the
-  signature.
+- **`WaveOperator::Mult(Q, dQdt)`** signature — unchanged.  No
+  user-facing state-representation branch is added; TPV102 simply uses
+  total-stress Q after Phase 4.
 - **`FaultFaceFlux::Evaluate(data, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus, method)`** —
   unchanged.  A second entry point `EvaluateTotal` (Phase 3) is added
-  alongside; the old path is untouched.
+  alongside; TPV102 dispatch uses `EvaluateTotal` exclusively from
+  Phase 4 onward.  The old path may remain only as a migration
+  reference in unit tests until follow-up cleanup.
 - **`DOFData` struct layout** — append-only.  New fields
   (`Q_total_init_*`) at end of struct; `alignof(DOFData)` must not change.
-- **CLI defaults** — `seas_tpv102_driver` with no new flags produces
-  byte-identical output to rev 3 (`5609d4c`).
-- **BP5 drivers** — untouched.  State-representation flag is TPV102-only.
+- **CLI defaults** — `seas_tpv102_driver` has no
+  `--state-representation` flag in the final v9.3.0 design.  TPV102
+  runs total-stress by default/only; free-surface BC still defaults to
+  γ-mirror unless `--free-surface-bc=godunov` is requested.
+- **BP5 drivers** — untouched.  The total-stress migration is TPV102-only.
 - **Plan v9.2.0 §19 `_k4` VTU diagnostic** — still populated under all
-  v9.3.0 modes.  Under ADER the `_k4 − avg` delta is zero by
-  construction (from the ADER plan §7).  Under v9.3.0's opt-in modes
-  without ADER the delta is still informative.
+  v9.3.0 TPV102 runs.  Under ADER the `_k4 − avg` delta is zero by
+  construction (from the ADER plan §7).  Under RK4 + total the delta
+  is still informative.
 
 ### Dependency constraints
 - No new external libraries.  Eigen headers already ship with SeisSol;
@@ -75,10 +80,9 @@ SeisSol's at the equation-block level.
 - No change to MFEM core.
 
 ### Convention constraints
-- Enum naming: `enum class StateRepresentation { Fluctuation, Total };`
-  in `dynamic/seas_dynamic_operator.hpp` (existing namespace).
-- CLI flag pattern: `--state-representation {fluctuation|total}`,
-  `--free-surface-bc {gamma|godunov}`.  Both lowercase, hyphenated.
+- CLI flag pattern: `--free-surface-bc {gamma|godunov}`.  Lowercase,
+  hyphenated.  There is no `--state-representation` runtime flag in the
+  final v9.3.0 design.
 - All new unit tests follow the `tests/unit/test_*` TEST_ASSERT /
   TEST_NEAR pattern.
 
@@ -86,14 +90,18 @@ SeisSol's at the equation-block level.
 - **I-04:** on an axis-aligned free surface, γ-mirror and
   Godunov-projection must agree to 10 ULP per component per face.
   This is the equivalence-at-flat-surface regression gate.
-- **I-06:** on a locked-fault fixture (V=0), switching from fluctuation
-  to total produces:
-  - Identical `data.V1, data.V2, data.slip_rate` (all 0).
-  - Identical `data.sigma_n_corr, tau1_corr, tau2_corr` (pre-stress).
-  - Bulk Q differs by the constant pre-stress field: in fluctuation
-    mode `Q[SXX] = 0` at every fault QP; in total mode
-    `Q[SXX]_local = σ_nn_pre`.  Verified in Phase 5 tests.
-- **Conservation:** both Godunov-projection and total-stress modes
+- **I-06:** on a locked-fault fixture (V=0), the migrated TPV102
+  total-stress path must produce:
+  - `data.V1, data.V2, data.slip_rate` all 0.
+  - `data.sigma_n_corr, tau1_corr, tau2_corr` equal to the physical
+    pre-stress.
+  - Bulk Q carrying the constant pre-stress field in global
+    coordinates (`Q[SYY] = +sigma_n0`, `Q[SXY] = -tau_ini` for TPV102).
+  - A dedicated migration test may compare this path against the frozen
+    fluctuation formulation on a small fixture, but fluctuation mode is
+    not user-exposed after v9.3.0.
+- **Conservation:** both Godunov-projection and the migrated
+  total-stress path
   must preserve discrete mass conservation
   (`∫_V Q_new = ∫_V Q − Δt ∫_∂V F_h · n`) to machine precision on a
   periodic domain.
@@ -346,8 +354,9 @@ if (rank == 0) {
 ### Goal
 After this phase, a new `FaultFaceFlux::EvaluateTotal` method exists
 that implements Pelties eq. 7–12 on **total-stress inputs**, not
-fluctuations.  `Evaluate` (fluctuation path) is untouched.  Unit-tested
-for equivalence with `Evaluate` on a well-posed fixture.
+fluctuations.  `Evaluate` may remain temporarily for migration checks,
+but TPV102 no longer dispatches to it after Phase 4.  Unit-tested for
+equivalence with `Evaluate` on a well-posed fixture.
 
 ### Files to Modify
 - `dynamic/fault_face_flux.hpp` — add `EvaluateTotal` declaration.  Add
@@ -508,6 +517,9 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
     tolerance ~1e-8).
   - Same for `data.{sigma_n_corr, tau_i_corr}` — both paths store
     TOTAL, so they must match to solver tolerance.
+- [ ] The test above is documented as a migration-reference gate only;
+  it does not imply that fluctuation mode remains a supported TPV102
+  runtime option after Phase 4.
 
 ### Dependencies
 - Depends on: nothing.
@@ -515,23 +527,22 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
 
 ---
 
-## Phase 4: `StateRepresentation` enum + initialization (I-06 part B)
+## Phase 4: Total-stress initialization + TPV102 dispatch migration (I-06 part B)
 
 ### Goal
-After this phase, a CLI flag `--state-representation={fluctuation|total}`
-is parsed; default `fluctuation` reproduces byte-identical rev-3 output.
-The total mode initializes Q by ADDING the pre-stress state into Q at
-every DOF (not just fault DOFs — the bulk also carries total stress
-under this mode).
+After this phase, TPV102 initializes Q in total stress unconditionally.
+There is no `--state-representation` CLI, and TPV102 fault dispatch
+uses `EvaluateTotal` exclusively.  The bulk state carries the
+pre-stress field at every DOF (not just fault DOFs).
 
 ### Files to Modify
-- `dynamic/seas_dynamic_operator.hpp` — add `enum class StateRepresentation`.
-- `dynamic/wave_operator.hpp` — add `state_rep_` member + setter.
-- `dynamic/wave_operator.inl::Mult` — branch at the fault-face flux
-  dispatch to call `EvaluateTotal` instead of `Evaluate` under total
-  mode.
-- `drivers/tpv102_driver.cpp` — parse CLI flag; add total-mode
-  initializer; branch the `InitializeState(Q)` call.
+- `dynamic/wave_operator.inl::Mult` — replace the TPV102 fault-face
+  dispatch so it calls `EvaluateTotal`.
+- `dynamic/wave_operator.inl::ComputeSharedFaceFluxRHS` — same
+  replacement for shared fault faces.
+- `drivers/tpv102_driver.cpp` — initialize TPV102 in total stress
+  unconditionally and remove any design mention of a dual
+  fluctuation/total runtime mode.
 
 ### Files to Create
 - `dynamic/tpv102_setup_total.hpp` — companion to `tpv102_setup.hpp`
@@ -548,25 +559,14 @@ under this mode).
 
 ### Detailed Requirements
 
-**1. `enum class StateRepresentation { Fluctuation = 0, Total = 1 };`**
-in `dynamic/seas_dynamic_operator.hpp`.
-
-**2. `WaveOperator::SetStateRepresentation(StateRepresentation r)`**
-setter + member.
-
-**3. `Mult` branch.** At the fault-face `if (is_fault)` block:
+**1. `Mult` replacement.** At the fault-face `if (is_fault)` block:
 ```cpp
-if (state_rep_ == StateRepresentation::Total) {
-   fault_flux_->EvaluateTotal(fdata, Q_plus_can, Q_minus_can,
-                               Q_imp_plus_can, Q_imp_minus_can, method);
-} else {
-   fault_flux_->Evaluate(fdata, Q_plus_can, Q_minus_can,
-                          Q_imp_plus_can, Q_imp_minus_can, method);
-}
+fault_flux_->EvaluateTotal(fdata, Q_plus_can, Q_minus_can,
+                           Q_imp_plus_can, Q_imp_minus_can, method);
 ```
-Same dispatch in `ComputeSharedFaceFluxRHS`.
+Same replacement in `ComputeSharedFaceFluxRHS`.
 
-**4. `InitializeStateTotal`:**
+**2. `InitializeStateTotal`:**
 ```cpp
 inline void InitializeStateTotal(Vector &Q, int ndof_total,
                                  real_t sigma_n0, real_t tau_ini)
@@ -590,35 +590,25 @@ inline void InitializeStateTotal(Vector &Q, int ndof_total,
 }
 ```
 
-**5. Driver plumbing.**
+**3. Driver plumbing.**
 ```cpp
-std::string state_rep_str = GetStringArg(argc, argv,
-                                         "--state-representation", "fluctuation");
-StateRepresentation state_rep = (state_rep_str == "total")
-                                  ? StateRepresentation::Total
-                                  : StateRepresentation::Fluctuation;
-wave.SetStateRepresentation(state_rep);
-
 Vector Q;
-if (state_rep == StateRepresentation::Total) {
-   InitializeStateTotal(Q, ndof_total,
-                         TPV102Params::sigma_n, TPV102Params::tau_ini);
-   // Pre-stress is already baked into Q — zero the DOFData pre-stress
-   // fields to avoid double-counting.
-   for (int i = 0; i < num_fault_total; i++) {
-      dof_data[i].sigma_n0 = 0.0;
-      dof_data[i].tau1_0   = 0.0;
-      dof_data[i].tau2_0   = 0.0;
-   }
-} else {
-   InitializeState(Q, ndof_total);  // Q = 0, fluctuation mode
+InitializeStateTotal(Q, ndof_total,
+                     TPV102Params::sigma_n, TPV102Params::tau_ini);
+// Pre-stress is already baked into Q — zero the DOFData pre-stress
+// fields to avoid double-counting in EvaluateTotal.
+for (int i = 0; i < num_fault_total; i++) {
+   dof_data[i].sigma_n0 = 0.0;
+   dof_data[i].tau1_0   = 0.0;
+   dof_data[i].tau2_0   = 0.0;
 }
 ```
 
-**6. Nucleation compatibility.**  `ApplyNucleation` writes to
-`dof_data[i].tau2_0`.  Under total mode we zeroed `tau2_0`.  Solution:
-under total mode, nucleation must write to the BULK Q at the fault QP,
-not to the DOFData pre-stress field.  Add an `ApplyNucleationTotal`
+**4. Nucleation compatibility.**  `ApplyNucleation` writes to
+`dof_data[i].tau2_0`.  After the migration, `tau2_0` is zeroed and
+must remain bookkeeping-only.  Nucleation therefore has to write to the
+BULK Q at the fault QP, not to the DOFData pre-stress field.  Add an
+`ApplyNucleationTotal`
 variant:
 ```cpp
 inline void ApplyNucleationTotal(Vector &Q, ...,
@@ -628,25 +618,22 @@ inline void ApplyNucleationTotal(Vector &Q, ...,
    // Option A: per-fault-QP sigma_xy injection (identifies which
    //           global Q DOF corresponds to which fault QP via a
    //           fault_qp_to_global_dof_ map built once in the driver).
-   // Option B (simpler for Phase 4): defer — total-mode + nucleation
-   //           is a Phase 5 add-on.  For Phase 4, require
-   //           `--no-nucleation` under `--state-representation=total`
-   //           (verified at startup).
+   // Phase 4 may land before the full nucleation-to-Q injection from
+   // Phase 5.  In that case, the Phase 4-only tests use a locked-fault
+   // fixture with nucleation amplitude set to zero inside the harness.
 }
 ```
-For Phase 4, take Option B: REJECT total mode if nucleation is active.
-Phase 5 adds the proper nucleation-to-Q injection.
+Phase 5 adds the proper nucleation-to-Q injection for the production
+TPV102 path.
 
 ### Acceptance Criteria
-- [ ] `--state-representation=fluctuation` (default) ⇒ byte-identical
-  to rev 3.
-- [ ] `--state-representation=total --no-nucleation` runs to
-  completion on a 1-element fixture with V_ini = 0 ⇒ station σ_n
-  stays at 120 MPa to 1 Pa over 100 RK4 steps.
-- [ ] Attempting `--state-representation=total` WITHOUT
-  `--no-nucleation` (i.e., with default nucleation ON) aborts at
-  startup with a clear error message: "total-state mode does not yet
-  support nucleation; use --no-nucleation or --state-representation=fluctuation".
+- [ ] There is no `--state-representation` parser in the final TPV102
+  driver path.
+- [ ] A 1-element locked-fault fixture with nucleation suppressed in
+  the test harness runs to completion over 100 RK4 steps and station
+  σ_n stays at 120 MPa to 1 Pa.
+- [ ] Both interior and shared TPV102 fault paths call `EvaluateTotal`
+  and no TPV102 dispatch path calls `Evaluate`.
 - [ ] Existing v9.1.0 / v9.2.0 regression tests all pass.
 
 ### Dependencies
@@ -655,17 +642,17 @@ Phase 5 adds the proper nucleation-to-Q injection.
 
 ---
 
-## Phase 5: Total-mode nucleation via bulk-Q injection (I-06 part C)
+## Phase 5: Nucleation via bulk-Q injection (I-06 part C)
 
 ### Goal
-After this phase, `--state-representation=total` works WITH nucleation —
-the perturbation is injected into the bulk Q at the fault QPs instead
-of into `DOFData.tau2_0`.  No startup abort is needed.
+After this phase, the migrated total-stress TPV102 path works with the
+real nucleation patch.  The perturbation is injected into the bulk Q at
+the fault QPs instead of into `DOFData.tau2_0`.
 
 ### Files to Modify
 - `dynamic/tpv102_setup_total.hpp` — add `ApplyNucleationTotal`.
 - `drivers/tpv102_driver.cpp` — call `ApplyNucleationTotal` instead of
-  `ApplyNucleation` under total mode at each RK4 stage.
+  `ApplyNucleation` in the TPV102 driver at each RK4 stage.
 
 ### Detailed Requirements
 
@@ -712,12 +699,12 @@ RK4 stage using MFEM's `LinearForm` integration.  More expensive but
 avoids QP-vs-node alignment concerns.
 
 ### Acceptance Criteria
-- [ ] `--state-representation=total` with nucleation ON runs to
-  completion on TPV102 1000 m fixture, 2 s wall-time.
-- [ ] Station σ_n at hypocenter matches fluctuation-mode's σ_n within
-  solver tolerance (1 kPa) over t ∈ [0, 2 s].
-- [ ] Slip_strike at hypocenter matches fluctuation-mode to within 1 mm
-  over t ∈ [0, 2 s].
+- [ ] The default TPV102 run (no state-representation flag) with
+  nucleation ON runs to completion on the 1000 m fixture, 2 s wall-time.
+- [ ] Station σ_n at hypocenter matches a frozen fluctuation-reference
+  migration baseline within solver tolerance (1 kPa) over t ∈ [0, 2 s].
+- [ ] Slip_strike at hypocenter matches the same migration baseline to
+  within 1 mm over t ∈ [0, 2 s].
 - [ ] No regression in the v9.2.0 `_k4` VTU diagnostic.
 
 ### Dependencies
@@ -726,35 +713,40 @@ avoids QP-vs-node alignment concerns.
 
 ---
 
-## Phase 6: Equivalence + coverage tests (I-06 validation)
+## Phase 6: Migration + coverage tests (I-06 validation)
 
 ### Goal
-After this phase, a regression matrix covers {fluctuation, total} ×
-{γ, godunov} on a 1-element TPV102 fixture for 100 RK4 steps, with
-all 4 combinations producing station-level output identical to
-fluctuation + γ within tolerance bounds.
+After this phase, a regression matrix covers `{gamma, godunov}` on a
+1-element TPV102 fixture for 100 RK4 steps, and a dedicated migration
+test checks the new total-stress path against a frozen fluctuation
+reference on a small fixture.  Fluctuation remains a reference only,
+not a supported TPV102 runtime mode.
 
 ### Files to Create
 - `tests/unit/test_tpv102_total_fluctuation_equivalence.cpp` — 1-element
   TPV102 rig, V_ini initial condition, 100 RK4 steps at dt=1e-4,
-  assertion: station σ_n, slip_strike, slip_rate_strike agree across
-  {fluctuation, total} to 1 Pa / 1 nm / 1 nm/s respectively.
+  assertion: station σ_n, slip_strike, slip_rate_strike from the new
+  total-stress path agree with a frozen fluctuation-reference fixture
+  to 1 Pa / 1 nm / 1 nm/s respectively.
 - `tests/unit/test_tpv102_free_surface_bc_variants.cpp` — run the same
   rig with γ vs godunov free surface, assert agreement to 10 ULP on a
   flat surface and ≤ 10 Pa on the corner fixture (tolerant of the
   actual corner-pumping divergence we HOPE to see eliminated).
 
 ### Detailed Requirements
-All 4 cells of the 2×2 matrix `{gamma, godunov} × {fluctuation, total}`
-run to completion on the minimum fixture.  Output comparison performed
-in-test via direct DOFData inspection plus, if paraview is enabled,
-a file-level diff of the VTU.
+Both cells of the 1×2 matrix `{gamma, godunov}` run to completion on
+the minimum fixture.  Output comparison is performed in-test via direct
+DOFData inspection plus, if paraview is enabled, a file-level diff of
+the VTU.  The migration regression against the fluctuation reference is
+kept separate so runtime support is not confused with validation.
 
 ### Acceptance Criteria
-- [ ] All 4 cells produce run-complete TPV102 rigs; no NaN / abort / CFL overrun.
-- [ ] The 2×2 grid of (σ_n at hypocenter at t=1 s) values agrees
-  within 1 Pa across all 4 cells.
-- [ ] The 2×2 grid of (slip_strike at t=1 s) agrees within 1 nm.
+- [ ] Both `{gamma, godunov}` cells produce run-complete TPV102 rigs;
+  no NaN / abort / CFL overrun.
+- [ ] The 1×2 grid of (σ_n at hypocenter at t=1 s) values agrees within
+  1 Pa across `{gamma, godunov}` on the flat-surface fixture.
+- [ ] The total-vs-frozen-fluctuation migration regression agrees to
+  1 Pa in σ_n and 1 nm in slip_strike at t=1 s.
 
 ### Dependencies
 - Depends on: Phases 1, 4, 5.
@@ -767,51 +759,29 @@ a file-level diff of the VTU.
 ### Goal
 After this phase, the ADER plan's `--time-integrator=ader` flag (from
 `tpv102_ader_time_integration_plan.md` Phase 7) combines cleanly with
-v9.3.0's `--state-representation=total` flag.  The combined mode
+the total-stress-only TPV102 path from I-06.  The combined mode
 reproduces SeisSol's outer-loop behaviour.
 
 ### Files to Modify
-- `drivers/tpv102_driver.cpp` — add a pre-flight compatibility check:
-  ```
-  if (time_integrator == "ader" &&
-      state_rep      == StateRepresentation::Fluctuation) {
-      fprintf(stderr, "Warning: ADER + fluctuation mode is supported "
-                     "but incurs an extra pre-stress subtraction in "
-                     "the CK recursion.  SeisSol-parity mode requires "
-                     "--state-representation=total.\n");
-  }
-  ```
 - `tpv102_ader_time_integration_plan.md` — add a cross-reference note
-  to v9.3.0 Phase 4 as the recommended state mode for ADER.  Do NOT
+  to v9.3.0 Phase 4 as the required state mode for ADER in TPV102.  Do NOT
   duplicate Phase 4 content.
 
 ### Files to Create
-- `tests/unit/test_ader_plus_total_vs_rk4_plus_fluctuation.cpp` — a
-  1-element TPV102 rig, run both combinations for 10 time steps,
+- `tests/unit/test_ader_total_vs_rk4_total.cpp` — a 1-element TPV102
+  rig, run both combinations for 10 time steps,
   assert station output matches to O(dt) (ADER-O(2) is 2nd-order;
   RK4 is 4th-order; difference scales as dt² at the leading order
   given identical physics).
 
 ### Detailed Requirements
 
-**1. Compatibility matrix:**
+**1. Compatibility statement.**
 
-|  | `--state=fluc` | `--state=total` |
-|---|---|---|
-| `--ti=rk4`   | ✅ default            | ✅ v9.3.0 Phase 4 path |
-| `--ti=ader`  | ✅ with warning       | ✅ **SeisSol-parity**  |
-
-Under ADER + total, the `ComputeADERTimeIntegrated` predictor from
+Under ADER, the `ComputeADERTimeIntegrated` predictor from
 ADER Phase 3 operates on total-stress Q directly — no modification
 needed to the CK recursion because it only uses spatial derivatives of
 Q and the constant material Jacobians $A_{d}$.
-
-Under ADER + fluctuation, the CK recursion still works but produces
-slightly different numerical behaviour because the bulk Q's temporal
-derivatives do not carry the pre-stress contribution.  For TPV102
-with uniform pre-stress, the predictors are identical in exact
-arithmetic; in FP there is no measurable difference.  A warning is
-sufficient.
 
 **2. Station-output alignment.**  Under ADER, the step-end DOFData is
 the one-shot friction-solve result at $t_{n+1}$ (ADER plan §7).  Under
@@ -820,9 +790,9 @@ the step.  Under ADER + total, DOFData is the exact end-of-step
 quantity at $t_{n+1}$ — this is the expected SeisSol-parity output.
 
 ### Acceptance Criteria
-- [ ] `--time-integrator=ader --state-representation=total` runs on
-  the TPV102 1000 m fixture for 2 s wall-time, 1 rank.
-- [ ] Station σ_n at hypocenter matches the fluctuation+RK4 baseline
+- [ ] `--time-integrator=ader` runs on the TPV102 1000 m fixture for
+  2 s wall-time, 1 rank, using the total-stress TPV102 path.
+- [ ] Station σ_n at hypocenter matches the RK4+total baseline
   to within 100 Pa (0.1 ‰ of σ_n0) for t ∈ [0, 2 s].
 - [ ] The `_k4` VTU diagnostic (from plan v9.2.0 §19) shows
   `max |normal_stress_k4 − normal_stress|` ≤ 1 Pa — confirming that
@@ -849,12 +819,13 @@ test-v93-regression: seas_test_free_surface_godunov \
                      seas_test_fault_face_flux_total_vs_fluctuation \
                      seas_test_tpv102_total_fluctuation_equivalence \
                      seas_test_tpv102_free_surface_bc_variants \
-                     seas_test_ader_plus_total_vs_rk4_plus_fluctuation
+                     seas_test_ader_total_vs_rk4_total
 ```
 
 ### Reference comparison (manual, post-landing)
-After Phase 7, a local 2 s / 1 rank run with all SeisSol-parity modes
-enabled should produce station output whose σ_n stays within ±1 MPa of
+After Phase 7, a local 2 s / 1 rank run with the total-stress TPV102
+path and all SeisSol-parity options enabled should produce station
+output whose σ_n stays within ±1 MPa of
 pre-stress at `flt_0_7.5` and whose slip_dip stays ≤ 0.001 m.  If it
 does, the three divergences I-04/05/06 are sufficient to reproduce
 SeisSol behaviour and the remaining v9.2 symptoms (if any) fall into
@@ -863,12 +834,11 @@ I-07 (shared-fault MPI) or a residual mesh/nucleation concern.
 ## Risk Assessment
 
 ### High risk
-- **Phase 4 nucleation-off gate.**  Disabling nucleation produces a
-  locked fault — a test that looks like it passes because nothing is
-  happening, not because the code is correct.  Mitigation: Phase 4
-  acceptance includes a "pulse test" where a small initial velocity
-  perturbation is injected manually and the decay rate compared to a
-  known analytical Green's function.
+- **Phase 4 locked-fault harness.**  Using a locked fixture before the
+  full nucleation-to-Q injection lands can look deceptively healthy.
+  Mitigation: Phase 4 acceptance includes a pulse test where a small
+  initial velocity perturbation is injected manually and the decay rate
+  compared to a known analytical Green's function.
 
 - **Phase 5 nucleation-to-Q injection on non-nodal bases.**  If the DG
   basis is modal / non-interpolatory, the single-DOF injection is
@@ -902,7 +872,7 @@ I-07 (shared-fault MPI) or a residual mesh/nucleation concern.
 | 1 Godunov FS BC      |  80 |  30 | 1 day   |
 | 2 BC dispatch flag   |  40 |  60 | 0.5 day |
 | 3 EvaluateTotal      |  80 |  20 | 1 day   |
-| 4 State-rep enum+init| 140 |  90 | 1.5 day |
+| 4 Total-Q init+dispatch| 120 |  80 | 1.25 day |
 | 5 Nucleation→bulk Q  | 100 |  50 | 1 day   |
 | 6 Equivalence tests  | 250 |  30 | 1 day   |
 | 7 ADER wiring        |  60 |  40 | 0.5 day |
@@ -922,8 +892,8 @@ I-07 (shared-fault MPI) or a residual mesh/nucleation concern.
 - **`EvaluateADERTotal`.**  Properly a follow-up addition to the ADER
   plan Phase 5, not v9.3.0.  v9.3.0 Phase 7 uses an explicit rescale
   workaround.
-- **BP5 total-stress mode.**  BP5 does not benefit (quasi-dynamic SIPG
-  does not have a fluctuation/total split in the same sense).
+- **BP5 total-stress migration.**  BP5 does not benefit (quasi-dynamic
+  SIPG does not have a fluctuation/total split in the same sense).
 
 ## Quick-reference for implementation agent
 
@@ -931,7 +901,8 @@ I-07 (shared-fault MPI) or a residual mesh/nucleation concern.
   `fault_face_flux.cpp` are on it; any edit requires the full v9.2.0
   `test-v92-regression-gates` suite to stay green AFTER each phase.
 - Do not revert any v9.0.0 / v9.1.0 / v9.2.0 fix.  The Godunov-projection
-  and total-stress paths are ADDITIONS, not replacements.
+  path is additive; the TPV102 total-stress path REPLACES the
+  fluctuation-Q TPV102 runtime path.
 - Phase ordering is: Phase 1 → Phase 2 → Phase 3 → Phase 4 → Phase 5 → Phase 6 → Phase 7.
   Phases 1, 2, 3 can land in parallel if desired (disjoint files);
   Phases 4–7 must be sequential.

@@ -223,5 +223,242 @@ void FaultFaceFlux::Evaluate(DOFData &data,
 #endif
 }
 
+// ---------------------------------------------------------------------------
+// Total-stress pipeline: Evaluate operating on Q that already carries the
+// pre-stress tensor in every bulk DOF (v9.3.0 Phase 3, I-06 part A).
+//
+// Differences from Evaluate:
+//   - Inputs Q_plus / Q_minus are TOTAL (pre-stress + fluctuation).
+//     ComputeTrialTraction on TOTAL Q therefore produces a TOTAL trial
+//     traction directly — no additional +sigma_n0/+tau_i_0 shift needed.
+//   - DOFData.sigma_n0 / tau1_0 / tau2_0 are assumed ZEROED by the driver
+//     under the Phase 4 migration so pre-stress is not double-counted.
+//   - DOFData.sigma_n_corr / tau1_corr / tau2_corr are stored as TOTAL
+//     directly (no sigma_n0 add).  This matches SeisSol's
+//     RateAndState.h:222-240 convention.
+//
+// The imposed-state construction (Step 4) is byte-identical to the
+// fluctuation path: the differences (sigma_n_corr - Q_{plus,minus}[SXX])
+// are invariant under a constant pre-stress shift of both sides.
+//
+// R-003 guards: #ifndef NDEBUG psi-invariance entry/exit MFEM_ASSERT +
+// SEAS_DIAG_FAULT_FLUX diag print block after ComputeTrialTraction.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateTotal(DOFData &data,
+                                  const real_t *Q_plus, const real_t *Q_minus,
+                                  real_t *Q_imp_plus, real_t *Q_imp_minus,
+                                  FrictionSolver::Method method) const
+{
+#ifndef NDEBUG
+   // R-003 (review-incorporation plan): the driver's coupled-RK4-on-psi
+   // integrator requires this function to be psi-pure.  Enforce the same
+   // bit-exact guard as in Evaluate.
+   const real_t psi_at_entry = data.psi;
+
+   // R-I06-007 (review-round-2): EvaluateTotal's correctness contract is
+   // that bulk Q carries the pre-stress, so DOFData's pre-stress fields
+   // MUST be zero — the fluctuation-mode seeding done by
+   // InitializeFaultDOFs must be followed by ZeroDOFDataPreStressTotal
+   // before any EvaluateTotal call.  A future refactor that removes the
+   // zeroing (or a "unification" that folds pre-stress back into
+   // ComputeTrialTraction) would silently double-count the pre-stress
+   // in the trial traction.  Assert the contract at runtime.
+   MFEM_ASSERT(data.sigma_n0 == 0.0 &&
+               data.tau1_0   == 0.0 &&
+               data.tau2_0   == 0.0,
+               "EvaluateTotal contract violated: DOFData pre-stress "
+               "fields must be zero (sigma_n0=" << data.sigma_n0 <<
+               ", tau1_0=" << data.tau1_0 <<
+               ", tau2_0=" << data.tau2_0 <<
+               ").  Total-stress drivers must call "
+               "ZeroDOFDataPreStressTotal after InitializeFaultDOFs.");
+#endif
+
+   // Homogeneous check — identical to Evaluate.  v9.0.0 Pelties-9 per-side
+   // flux assumes A_plus == A_minus on a fault face.
+   auto homog_ok = [](real_t a, real_t b)
+   {
+      return std::abs(a - b) <=
+             1e-12 * std::max(std::abs(a), std::abs(b));
+   };
+   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
+               homog_ok(data.Zs_plus, data.Zs_minus),
+               "Bimaterial fault face detected (Zp_plus=" << data.Zp_plus
+               << " Zp_minus=" << data.Zp_minus
+               << " Zs_plus=" << data.Zs_plus
+               << " Zs_minus=" << data.Zs_minus
+               << ").  EvaluateTotal assumes homogeneous material.  "
+               "Extend GodunovFlux / FaultFaceFlux to per-side A before "
+               "running this configuration.");
+
+   // Step 1: Trial traction IS the total traction (Pelties eq. 7 on
+   //         total states — not on fluctuations + pre-stress).
+   //         SeisSol matches: RateAndState.h:222-240.
+   real_t sigma_n_trial, tau1_trial, tau2_trial;
+   ComputeTrialTraction(data, Q_plus, Q_minus,
+                        sigma_n_trial, tau1_trial, tau2_trial);
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // R-003: mirror Evaluate's C-1 checkpoint for total mode.  Same
+   // diag_print gate, same fprintf semantics (no MPI).  Prints only
+   // on DOFs the driver flagged as diagnostic.
+   if (data.diag_print)
+   {
+      std::fprintf(stderr,
+         "[C-1 EVAL-TOTAL] rank=%d  tau1_trial=%+.3e Pa  "
+         "tau2_trial=%+.3e Pa  psi=%.3e\n",
+         g_seas_my_rank, tau1_trial, tau2_trial, data.psi);
+   }
+#endif
+
+   // Step 2: Solve friction equation for |V| using total Theta.
+   //         No `tau_i_0 + tau_i*` reconstruction needed.
+   const real_t Theta = std::sqrt(tau1_trial * tau1_trial
+                                 + tau2_trial * tau2_trial);
+   real_t V_abs = 0.0;
+   if (Theta > 0.0)
+   {
+      V_abs = solver_.Solve(Theta, data.psi, std::abs(sigma_n_trial),
+                            data.eta_s, data.a, method);
+   }
+
+   // Step 3: Slip-rate decomposition (identical formula; input is total).
+   real_t V1 = 0.0, V2 = 0.0;
+   real_t tau1_corr = tau1_trial, tau2_corr = tau2_trial;
+   if (Theta > 0.0 && V_abs > 0.0)
+   {
+      real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
+      real_t f_V = data.a * std::asinh(V_abs * C);
+      real_t strength = std::abs(sigma_n_trial) * f_V;
+      V1 = V_abs * tau1_trial / (strength + data.eta_s * V_abs);
+      V2 = V_abs * tau2_trial / (strength + data.eta_s * V_abs);
+      tau1_corr = tau1_trial - data.eta_s * V1;
+      tau2_corr = tau2_trial - data.eta_s * V2;
+   }
+
+   // Step 4: Imposed states in TOTAL.  The subtraction pattern matches
+   //         the fluctuation path verbatim — differences
+   //         (sigma_n_corr - Q_{plus,minus}[SXX]) are invariant under a
+   //         constant pre-stress shift applied identically to both sides.
+   const real_t sigma_n_corr = sigma_n_trial;
+   std::memcpy(Q_imp_minus, Q_minus, NUM_STATE * sizeof(real_t));
+   std::memcpy(Q_imp_plus,  Q_plus,  NUM_STATE * sizeof(real_t));
+
+   const real_t invZp_m = 1.0 / data.Zp_minus;
+   const real_t invZs_m = 1.0 / data.Zs_minus;
+   const real_t invZp_p = 1.0 / data.Zp_plus;
+   const real_t invZs_p = 1.0 / data.Zs_plus;
+
+   Q_imp_minus[VX] = Q_minus[VX] - invZp_m * (sigma_n_corr - Q_minus[SXX]);
+   Q_imp_minus[VY] = Q_minus[VY] - invZs_m * (tau1_corr    - Q_minus[SXY]);
+   Q_imp_minus[VZ] = Q_minus[VZ] - invZs_m * (tau2_corr    - Q_minus[SXZ]);
+   Q_imp_plus[VX]  = Q_plus[VX]  + invZp_p * (sigma_n_corr - Q_plus[SXX]);
+   Q_imp_plus[VY]  = Q_plus[VY]  + invZs_p * (tau1_corr    - Q_plus[SXY]);
+   Q_imp_plus[VZ]  = Q_plus[VZ]  + invZs_p * (tau2_corr    - Q_plus[SXZ]);
+
+   Q_imp_minus[SXX] = sigma_n_corr;  Q_imp_plus[SXX] = sigma_n_corr;
+   Q_imp_minus[SXY] = tau1_corr;     Q_imp_plus[SXY] = tau1_corr;
+   Q_imp_minus[SXZ] = tau2_corr;     Q_imp_plus[SXZ] = tau2_corr;
+
+   // Step 5: Update DOFData — store TOTAL directly (no sigma_n0 add).
+   //         The fluctuation path stores `data.sigma_n_corr = data.sigma_n0
+   //         + sigma_n_corr`; here sigma_n_corr is already TOTAL.
+   data.slip_rate    = V_abs;
+   data.V1           = V1;
+   data.V2           = V2;
+   data.tau1_corr    = tau1_corr;
+   data.tau2_corr    = tau2_corr;
+   data.sigma_n_corr = sigma_n_corr;
+
+#ifndef NDEBUG
+   MFEM_ASSERT(data.psi == psi_at_entry,
+               "FaultFaceFlux::EvaluateTotal mutated data.psi "
+               "(before = " << psi_at_entry << ", after = " << data.psi
+               << ").  R-V92-H07: the driver's coupled-RK4-on-psi "
+               "integrator assumes this function is psi-pure.");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// ADER I-05 Phase 5: time-integrated Riemann solve (fluctuation variant).
+// ---------------------------------------------------------------------------
+// I± = ∫_0^{dt} Q±(τ) dτ  ⇒  Q̄± = I±/dt.  Call the standard Evaluate on
+// the time-averaged state (which now represents the mean Q over [t_n,
+// t_n+dt]); the friction solver returns tractions / slip-rate that are
+// themselves time-averaged in the same sense.  Finally rescale the
+// imposed Q-states back to time-integrated form: I_imp± = dt · Q_imp±.
+//
+// Proof of O(dt²) consistency with a midpoint-RK4 call: let
+// Q(τ) = Q_m + O(dt),  Q_m = Q(t_n + dt/2).  Then Q̄ = Q_m + O(dt²) by
+// Simpson's rule on smooth Q, so feeding Q̄ into the nonlinear friction
+// equation gives the same root as feeding Q_m up to O(dt²) (Brent's
+// root of a Lipschitz-smooth residual commutes with O(dt²) input
+// perturbations).  Imposed states scale linearly in the inputs modulo
+// the friction-law nonlinearity, again O(dt²).  Plan §Phase 5 §4.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateADER(DOFData &data,
+                                 const real_t *I_plus, const real_t *I_minus,
+                                 real_t dt,
+                                 real_t *I_imp_plus, real_t *I_imp_minus,
+                                 FrictionSolver::Method method) const
+{
+   MFEM_VERIFY(dt > 0.0,
+               "FaultFaceFlux::EvaluateADER: dt must be > 0, got " << dt);
+
+   real_t Q_avg_plus[NUM_STATE], Q_avg_minus[NUM_STATE];
+   const real_t inv_dt = 1.0 / dt;
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_avg_plus[c]  = I_plus[c]  * inv_dt;
+      Q_avg_minus[c] = I_minus[c] * inv_dt;
+   }
+
+   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
+   Evaluate(data, Q_avg_plus, Q_avg_minus, Q_imp_plus, Q_imp_minus, method);
+
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      I_imp_plus[c]  = Q_imp_plus[c]  * dt;
+      I_imp_minus[c] = Q_imp_minus[c] * dt;
+   }
+}
+
+// ---------------------------------------------------------------------------
+// ADER I-05 Phase 5 + v9.3.0 §Phase 7: time-integrated Riemann solve
+// (total-stress variant).  Same 1/dt ↔ dt scaling wrapping pattern as
+// EvaluateADER, but dispatches to EvaluateTotal so TPV102's post-I-06
+// total-Q path has a direct ADER entry point without the workaround the
+// v9.3.0 plan describes.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateADERTotal(DOFData &data,
+                                      const real_t *I_plus_tot,
+                                      const real_t *I_minus_tot,
+                                      real_t dt,
+                                      real_t *I_imp_plus_tot,
+                                      real_t *I_imp_minus_tot,
+                                      FrictionSolver::Method method) const
+{
+   MFEM_VERIFY(dt > 0.0,
+               "FaultFaceFlux::EvaluateADERTotal: dt must be > 0, got " << dt);
+
+   real_t Q_avg_plus[NUM_STATE], Q_avg_minus[NUM_STATE];
+   const real_t inv_dt = 1.0 / dt;
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      Q_avg_plus[c]  = I_plus_tot[c]  * inv_dt;
+      Q_avg_minus[c] = I_minus_tot[c] * inv_dt;
+   }
+
+   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
+   EvaluateTotal(data, Q_avg_plus, Q_avg_minus, Q_imp_plus, Q_imp_minus,
+                 method);
+
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      I_imp_plus_tot[c]  = Q_imp_plus[c]  * dt;
+      I_imp_minus_tot[c] = Q_imp_minus[c] * dt;
+   }
+}
+
 } // namespace seas
 } // namespace mfem

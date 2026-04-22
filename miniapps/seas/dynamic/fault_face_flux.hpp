@@ -109,6 +109,87 @@ public:
                  real_t *Q_imp_plus, real_t *Q_imp_minus,
                  FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
 
+   /// Total-stress variant of Evaluate (I-06 Phase 3).  Expects Q_plus,
+   /// Q_minus to carry TOTAL stresses (pre-stress + fluctuation); outputs
+   /// Q_imp_± also carry TOTAL stresses.  On a symmetric-pre-stress fault
+   /// with homogeneous material, mathematically equivalent to
+   /// Evaluate(data, Q_fluc_±, ...) + pre-stress shift (plan §3).
+   ///
+   /// DOFData.sigma_n_corr, tau1_corr, tau2_corr are stored as TOTAL.
+   /// Under the v9.3.0 migration, DOFData.sigma_n0, tau1_0, tau2_0 are
+   /// ZEROED by the driver (Phase 4) so that EvaluateTotal does not
+   /// double-count pre-stress through ComputeTrialTraction on TOTAL Q.
+   ///
+   /// R-003 guards preserved: psi-invariance is asserted at entry/exit
+   /// (the driver's coupled RK4-on-psi integrator relies on psi-purity),
+   /// and the SEAS_DIAG_FAULT_FLUX diagnostic print block mirrors the
+   /// fluctuation path so C-1 / C-2 / C-3 bisection still functions.
+   ///
+   /// @param[in,out] data  Per-DOF state.  sigma_n_corr, tau1_corr,
+   ///                      tau2_corr stored as TOTAL values.
+   /// @param[in]  Q_plus  Total-stress state on + side (fault-local).
+   /// @param[in]  Q_minus Total-stress state on - side (fault-local).
+   /// @param[out] Q_imp_plus  Total-stress imposed state on + side.
+   /// @param[out] Q_imp_minus Total-stress imposed state on - side.
+   /// @param[in]  method Friction solver choice.
+   void EvaluateTotal(DOFData &data,
+                      const real_t *Q_plus, const real_t *Q_minus,
+                      real_t *Q_imp_plus, real_t *Q_imp_minus,
+                      FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
+   /// ADER Phase 5: time-integrated friction solve (fluctuation-Q variant).
+   ///
+   /// Inputs I± = ∫_0^{dt} Q±(τ) dτ in fault-local coordinates.  Converts
+   /// to time-averaged Q̄± = I±/dt, calls `Evaluate` once on the averaged
+   /// state (the ADER one-shot replacement for the 4 per-stage RK4 calls),
+   /// and rescales the imposed outputs back to time-integrated form:
+   ///   I_imp± = dt · Q_imp±.
+   ///
+   /// After the call, `data.{slip_rate,V1,V2,tau1_corr,tau2_corr,sigma_n_corr}`
+   /// carry the TIME-AVERAGED values over [t_n, t_n+dt], as specified by
+   /// plan §Phase 5 §4.  `data.psi` is NOT updated — the caller must call
+   /// `UpdateStateAnalytic` with the returned time-averaged slip rate.
+   ///
+   /// In the dt→0 limit, `EvaluateADER(data, I±, dt)` ≈
+   /// `Evaluate(data, Q±(t_n + dt/2), dt) · dt` to O(dt²)
+   /// (averaging-then-solving vs solving-at-midpoint for the nonlinear
+   /// friction law).
+   ///
+   /// @param[in,out] data  Per-DOF state.  Slip-rate & traction fields
+   ///                      updated to time-averaged values.
+   /// @param[in]  I_plus   Time-integrated + side state (9 components,
+   ///                      fault-local).
+   /// @param[in]  I_minus  Time-integrated − side state.
+   /// @param[in]  dt       Time step.  Must be > 0.
+   /// @param[out] I_imp_plus   Time-integrated imposed + state.
+   /// @param[out] I_imp_minus  Time-integrated imposed − state.
+   /// @param[in]  method   Friction solver choice.
+   void EvaluateADER(DOFData &data,
+                     const real_t *I_plus, const real_t *I_minus,
+                     real_t dt,
+                     real_t *I_imp_plus, real_t *I_imp_minus,
+                     FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
+   /// ADER Phase 5 + v9.3.0 §Phase 7 follow-up: time-integrated friction
+   /// solve with TOTAL-stress inputs.  Mirrors `EvaluateADER` but wraps
+   /// `EvaluateTotal` internally so the ADER corrector can drive the
+   /// post-I-06 TPV102 dispatch path without the explicit 1/dt-then-dt
+   /// workaround mentioned in the v9.3.0 plan.
+   ///
+   /// @param[in,out] data  Per-DOF state; slip/traction fields updated
+   ///                      to time-averaged TOTAL values.
+   /// @param[in]  I_plus_tot  Total-stress time-integrated + state.
+   /// @param[in]  I_minus_tot Total-stress time-integrated − state.
+   /// @param[in]  dt          Time step (> 0).
+   /// @param[out] I_imp_plus_tot   Total-stress imposed + state.
+   /// @param[out] I_imp_minus_tot  Total-stress imposed − state.
+   /// @param[in]  method      Friction solver choice.
+   void EvaluateADERTotal(DOFData &data,
+                          const real_t *I_plus_tot, const real_t *I_minus_tot,
+                          real_t dt,
+                          real_t *I_imp_plus_tot, real_t *I_imp_minus_tot,
+                          FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
    /// Access the friction solver.
    const FrictionSolver &GetSolver() const { return solver_; }
 

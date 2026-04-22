@@ -65,6 +65,7 @@ void TestMassMatrixInverse()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    // The mass matrix inverse is tested implicitly: if it's wrong,
    // the wave speeds will be incorrect. Here we verify construction
@@ -133,6 +134,7 @@ void TestPlaneWavePSpeed()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = NUM_STATE * ndof_total;
@@ -203,6 +205,7 @@ void TestPlaneWaveSSpeed()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = NUM_STATE * ndof_total;
@@ -272,6 +275,7 @@ void TestConvergenceOrder()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int size = wave.Height();
    srand(42);
@@ -321,6 +325,7 @@ void TestEnergyConservation()
    BoundaryConfig bc = MakeFreeSurfaceBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -446,6 +451,7 @@ void TestQuiescentState()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int size = wave.Height();
    Vector Q(size), dQdt(size);
@@ -471,6 +477,7 @@ void TestSEASDynamicOperator()
    BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
    SEASDynamicOperator seas_op(&wave);
 
    // Verify sizes match

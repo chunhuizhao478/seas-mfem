@@ -2,13 +2,30 @@
 
 ---
 
-## PRIORITY NOW (rev-3h+, 2026-04-21)
+## PRIORITY NOW (rev-3i, 2026-04-22)
 
 ### Plan is NOT closed.
 
 Observed:  **σ_n peak 218 MPa (~100× SCEC spec), slip_dip 1.83 m (~1 830× SCEC spec)**.
 
 Primary R-V92 mechanism: **not identified**.
+
+**rev-3i update (2026-04-22):** Frontera jobs 7670526 (dt/2),
+7670527 (dt/4), and 7671002 (F01+F02 postfix at nominal dt) all
+produce **visually indistinguishable** station plots — same peak
+V_strike, same σ_n drift (120 → 102–123 MPa depending on
+station), same spurious V_dip / slip_dip / τ_dip signatures.
+Decisive conclusions:
+1. **H-V92-K (time-integrator / RK4 truncation) CLOSED** —
+   dt-invariance rules it out (§21.2).
+2. **F01+F02 is correct but NOT sufficient to close R-V92** —
+   postfix plots match PRE-fix plots exactly (§21.3).
+3. **H-V92-U (interior-fault path, non-2-tet code paths) is now
+   the sole RANK-1 candidate**; H-V92-W promoted to RANK-2.
+4. **Next decisive experiment: §5.1 `SEAS_DIAG_FAULT_SIGMA`
+   Frontera probe (~200 SU)** — §20.3 Step 3.
+
+See §21 for the full write-up and hypothesis-rank update.
 
 ### Progress snapshot (rev-3h+, 2026-04-21)
 
@@ -4117,3 +4134,151 @@ but not identified the primary R-V92 mechanism; the dt-halving
 test (~20 SU) is the single decisive experiment that breaks the
 repeating "small-scale PASS → defer" loop and must be run before
 any further code change or expensive Frontera diagnostic.
+
+---
+
+## §21. Frontera dt-halving + postfix results (rev-3i, 2026-04-22)
+
+Three Frontera runs completed on the 200 m / p=1 / 400-rank
+fixture at `tfinal = 12.0 s`.  All three share the same SCEC
+station set and plotting harness as job-7668434 (v91 baseline).
+
+| # | Job | Label | dt | Source |
+|---|---|---|---|---|
+| 1 | 7670526 | `dt_half` | `0.5 · dt_cfl_v91` | PRE-fix HEAD (per §5 R-V92-H03 Option B) |
+| 2 | 7670527 | `dt_quarter` | `0.25 · dt_cfl_v91` | PRE-fix HEAD |
+| 3 | 7671002 | `postfix` | nominal `dt_cfl_v91` | POST-F01+F02 driver (Step 5 fix applied) |
+
+Plot artifacts under
+`miniapps/seas/tpv102/plots_results_200m_p1_12.0s_400r_v92_{dt_half,dt_quarter,postfix}_job{…}/`.
+
+### §21.1 Observations across all 9 SCEC stations
+
+For each station, V_strike / slip_strike / tau_strike / V_dip /
+slip_dip / tau_dip / σ_n / log10(state) panels were compared panel-
+by-panel across the three runs.  The following pathology
+signatures persist in every run and are **visually
+indistinguishable** between runs 1, 2, 3:
+
+- **flt_0_3** (on-fault, z = −3 km): V_strike double-peak at ~3.5 s
+  (3.3 m/s) and ~5.1 s (2.0 m/s); spurious V_dip ±0.010 m/s during
+  rupture; slip_dip monotonically drifting to −0.035 m by t = 9 s;
+  τ_dip reaches −1.25 MPa; σ_n drift 120 → 123 MPa.
+- **flt_0_7.5** (on-fault, z = −7.5 km): V_strike peak 4.2 m/s at
+  ~2 s and secondary 3–4 m/s at 6–7 s; slip_dip reaches −0.20 m;
+  **σ_n drops to 102–105 MPa (-15 to -18 MPa from the 120 MPa
+  spec)**; τ_dip reaches −3.0 MPa.
+- **flt_0_12** (on-fault, z = −12 km, below seismogenic zone):
+  sharp V_strike spike ~8 m/s at ~6.5 s; same pathology profile as
+  flt_0_7.5 but compressed in time.
+- **flt_9_7.5, flt_n9_7.5** (off-fault, along-strike ±9 km, z =
+  −7.5 km): V_strike ~7 m/s peak at ~6.8 s; identical spurious
+  V_dip / σ_n / τ_dip signatures in the three runs.
+- **flt_12_3** (off-fault, along-strike 12 km, z = −3 km): slip_dip
+  drift to **−0.10 to −0.13 m**; τ_dip peaks −6 MPa; σ_n transient
+  spike to ~122 MPa.
+- **flt_12_12, flt_n12_12** (off-fault, along-strike ±12 km, z =
+  −12 km): slip_dip +0.025–0.030 m; V_dip spurious pulse +0.15 m/s
+  at rupture-front arrival (~6.5 s); σ_n transient ~122 MPa.
+- **flt_n12_3** (off-fault, along-strike −12 km, z = −3 km): mirror
+  of flt_12_3; same signature magnitudes.
+
+The overview V_strike plot (all 9 stations overlaid on one axis)
+is bit-visually identical across runs 1–3: same peak magnitudes,
+same peak arrival times, same rupture-front propagation order.
+
+### §21.2 dt-scaling verdict — "≈ unchanged" branch
+
+Per §20.3 Step 1 classification tree:
+
+| Scaling outcome | Classification | Action |
+|---|---|---|
+| slip_dip drops ~16× at dt/2 | RK4 truncation | F01+F02 → skip to Step 8 |
+| slip_dip drops ~8× at dt/2  | psi splitting (F02) | integrate psi inside RK4 |
+| **≈ unchanged** | **NOT time integration** | **go to Step 2/3** |
+| larger / NaN | CFL violation | reduce CFL + audit `flux.Interior` |
+
+**Observed:** slip_dip peak magnitudes at the critical stations
+(flt_0_7.5: −0.20 m; flt_12_3: −0.12 m; flt_0_3: −0.035 m) are
+identical to PRE-fix v91 baseline (job-7668434) at all three dt
+values to plotting resolution.  No detectable reduction at dt/2
+or dt/4.  **Verdict: ≈ unchanged → NOT time-integration.**
+
+### §21.3 F01+F02 postfix verdict — necessary-but-not-sufficient
+
+Run 3 (postfix, job-7671002) exercises the F01+F02 coupled-RK4
+-on-(Q, psi) driver.  Its plots are indistinguishable from runs 1–2
+(PRE-fix HEAD).  Therefore the F01+F02 fix, while correct as
+architectural hygiene (Step 5b PASS 100/100 on the 4-km fixture),
+**does not close R-V92** on the production fault.  The
+operator-splitting defect on ψ was not the amplifier.
+
+### §21.4 Hypothesis-rank table update (supersedes §20.1)
+
+| ID | Prev | New | Basis |
+|---|---|---|---|
+| H-V92-K (time-integrator) | OPEN | **CLOSED** | §21.2 dt-invariance across dt, dt/2, dt/4 |
+| H-V92-T (RK4 truncation) | CLOSED NON-PRIMARY | CLOSED (reinforced) | §21.2 empirically confirms round-4 F03 |
+| RK4-psi splitting (F02) | suspected amplifier | NOT amplifier | §21.3 postfix identical to PRE-fix |
+| F01+F02 as fix | pending Frontera confirm | **applied, NOT sufficient** | §21.3 |
+| **H-V92-U (interior-fault)** | OPEN — RANK-1 | **OPEN — RANK-1 (reinforced)** | Elimination of H-V92-K makes it the sole surviving spatial-path amplifier among non-init candidates |
+| H-V92-V (abs-BC per-channel phase) | OPEN | OPEN | no new evidence |
+| H-V92-W (init pre-stress) | OPEN — RANK-3 | OPEN — RANK-2 | promoted: §21 eliminates one above-ranked competitor |
+| H-V92-G (bulk amplifier) | INCONSISTENT | INCONSISTENT | §21 does not discriminate; §5.1 SYY probe still decisive |
+| H-V92-Q (friction solver) | OPEN (unlikely) | OPEN (unlikely) | no new evidence |
+
+### §21.5 Updated next-step tree (supersedes §20.3 Step 1)
+
+Step 1 is now **DONE** with verdict "≈ unchanged → NOT time
+integration".  The surviving path is:
+
+1. ~~dt-halving~~ — **DONE (§21.2).  Verdict: not time-integration.**
+2. ~~re-analyse §18 outliers~~ — **DONE: MONOTONIC-GROWTH.**
+3. **§5.1 `SEAS_DIAG_FAULT_SIGMA` bulk probe (Frontera, ~200 SU)** —
+   now the highest-priority remaining diagnostic.  Discriminates
+   bulk pump (H-V92-G) from post-friction drift (now reducible to
+   H-V92-U or H-V92-V since H-V92-K closed).
+4. ~~interior-fault 2-tet unit test~~ — **DONE: PASS 6/6 on 2-tet.**
+   Bimaterial / corner / multi-face extensions remain viable.
+5. ~~F01+F02~~ — **DONE + empirically shown non-sufficient (§21.3).**
+   Commit anyway as architectural hygiene.
+6. **`[FAULT-INIT-V1]` printf (FREE)** — now higher-ROI than before
+   because H-V92-W is promoted to RANK-2.  Trivially cheap.
+7. **Interior-fault unit-test extensions** — add bimaterial / corner
+   / multi-face variants to `test_interior_fault_flux_path.cpp` to
+   actually exercise H-V92-U on code paths not yet covered.
+8. Apply C2 patch; Step 8 confirmation; fix/check docs.
+
+### §21.6 Commit + push decision for F01+F02
+
+Per §5 R-V92-H03 Option B hold, F01+F02 was held locally pending
+PRE-fix dt-halving completion.  Runs 1–2 are the PRE-fix
+dt-halving data.  Run 3 is the POST-fix confirmation at nominal
+dt.  All three complete with matching plots.  **Option B hold is
+now satisfied.**  Recommendation: commit + push F01+F02 as
+architectural hygiene, with the explicit commit-message note that
+§21 shows the fix alone does not close R-V92 and the primary
+amplifier search must continue on the non-time-integration branch.
+
+### §21.7 Budget status
+
+| Step | Planned SU | Actual SU | Cumulative |
+|---|---:|---:|---:|
+| 1 dt_half | ~10 | job-7670526 | — |
+| 1 dt_quarter | ~10 | job-7670527 | — |
+| 1-post F01+F02 confirm | — | job-7671002 (~400 SU, 12 s run) | — |
+| 3 §5.1 SYY probe | 200 | pending | — |
+| 6 confirmation run | 400 | pending | — |
+
+(Exact SU draw per job not yet recorded — add when Frontera usage
+log is pulled.)
+
+### §21.8 One-sentence summary
+
+The Frontera dt-halving + dt-quartering + F01+F02-postfix trio
+shows **zero change** in the R-V92 pathology across all three
+runs, decisively closing H-V92-K (time-integrator) and
+F01+F02-as-primary-fix, promoting H-V92-U (interior-fault path,
+non-2-tet code paths) to sole RANK-1, and redirecting the next
+decisive experiment to the §5.1 `SEAS_DIAG_FAULT_SIGMA` bulk
+probe.

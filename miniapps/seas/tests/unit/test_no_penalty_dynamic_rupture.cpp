@@ -153,6 +153,7 @@ int main()
                            TPV102Params::lambda,
                            TPV102Params::mu,
                            TPV102Params::rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    const int size = wave.Height();
    const auto &fes = wave.GetFESpace();

@@ -95,6 +95,7 @@ void TestAbsorbingNormalIncidence()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -166,6 +167,7 @@ void TestAbsorbingObliqueIncidence()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -248,6 +250,7 @@ void TestFreeSurfacePReflection()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -323,6 +326,7 @@ void TestFreeSurfaceZeroTraction()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -403,6 +407,7 @@ void TestFreeSurfaceEnergyConservation()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();
@@ -470,6 +475,7 @@ void TestMixedBCCorner()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int size = wave.Height();
    real_t cp = std::sqrt((lambda + 2.0*mu) / rho);
@@ -521,6 +527,7 @@ void TestAbsorbingEnergyDecay()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    int ndof_total = wave.GetScalarNDof();
    int size = wave.Height();

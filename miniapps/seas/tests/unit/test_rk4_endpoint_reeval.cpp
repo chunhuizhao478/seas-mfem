@@ -72,6 +72,7 @@
 #include "../../dynamic/wave_operator.hpp"
 #include "../../dynamic/fault_face_flux.hpp"
 #include "../../dynamic/tpv102_setup.hpp"
+#include "../../dynamic/tpv102_setup_total.hpp"
 #include "../../config/tpv102_params.hpp"
 #include "../../domain/boundary_config.hpp"
 #include "../../friction/state_evolution.hpp"
@@ -212,7 +213,16 @@ static int SetupFault(WaveOperator<Mesh> &wave, Mesh &mesh, int order,
       }
    }
 
-   if (nfault > 0) { InitializeFaultDOFs(dof_data, nfault, fault_coords); }
+   if (nfault > 0)
+   {
+      InitializeFaultDOFs(dof_data, nfault, fault_coords);
+      // Round-6 R-002: total-Q only.  Zero the DOFData pre-stress
+      // fields so EvaluateTotal does not double-count (the test runs
+      // with a zero bulk-Q background — no baseline pre-stress — so
+      // the fault flux computes trial tractions from the Q
+      // perturbation alone).
+      ZeroDOFDataPreStressTotal(dof_data, nfault);
+   }
    wave.SetFaultFlux(&ff);
    wave.SetFaultDOFData(&dof_data, nqp_per_face);
    return nfault;
@@ -365,6 +375,12 @@ int main()
 
    WaveOperator<Mesh> wave(mesh, order, TPV102Params::lambda,
                            TPV102Params::mu, TPV102Params::rho, bc);
+   // Round-6 R-002: total-Q only.  Supply Q_bg = 0 as the background —
+   // the test doesn't bake pre-stress into Q, it uses cross-fault SXY
+   // perturbations as the only stress content, so the zero-background
+   // total-Q dispatch is numerically identical to the old
+   // fluctuation-path baseline for the endpoint-reeval assertions.
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
    std::vector<DOFData> dof_data;
    std::vector<Vector>  fault_coords;
    FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp,
@@ -385,6 +401,7 @@ int main()
       std::cout << "\n[T1] tau/σ_n/V = ENDPOINT Evaluate(Q(t+dt)) "
                    "(NOT Simpson mean)\n";
       InitializeFaultDOFs(dof_data, n, fault_coords);
+      ZeroDOFDataPreStressTotal(dof_data, n);
 
       // Cross-fault SXY jump of magnitude 10 MPa — large enough that
       // stage-1 (unperturbed) and stages 2-4 (after k1 perturbs Q)
@@ -501,6 +518,7 @@ int main()
    {
       std::cout << "\n[T2] slip_{1,2} = slip_n + V_avg · dt (Simpson integral)\n";
       InitializeFaultDOFs(dof_data, n, fault_coords);
+      ZeroDOFDataPreStressTotal(dof_data, n);
       wave.SetFaultDOFData(&dof_data,
                            (int)(n / wave.GetFaultInteriorFaces().Size()));
       Vector Q(wave.Height()); Q = 0.0;
@@ -544,6 +562,7 @@ int main()
       std::cout << "\n[T3] psi = psi_n + dt/6 · (psi_k1 + 2·psi_k2 + "
                    "2·psi_k3 + psi_k4)\n";
       InitializeFaultDOFs(dof_data, n, fault_coords);
+      ZeroDOFDataPreStressTotal(dof_data, n);
       wave.SetFaultDOFData(&dof_data,
                            (int)(n / wave.GetFaultInteriorFaces().Size()));
       Vector Q(wave.Height()); Q = 0.0;

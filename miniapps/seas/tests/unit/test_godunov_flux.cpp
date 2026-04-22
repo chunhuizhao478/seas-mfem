@@ -387,6 +387,33 @@ void TestSplitFluxReconstructsA()
                "A^+ + A^- = A (max error " + std::to_string(max_err) + ")");
 }
 
+// ADER I-05 Phase 2: GetReferenceStarMatrix(dir) must equal BuildJacobian(dir).
+void TestReferenceStarMatricesMatchJacobians()
+{
+   std::cout << "Test 9: TestReferenceStarMatricesMatchJacobians\n";
+   real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   GodunovFlux flux(lambda, mu, rho);
+
+   for (int d = 0; d < 3; d++)
+   {
+      DenseMatrix A_ref(NUM_STATE, NUM_STATE);
+      flux.BuildJacobian(d, A_ref);
+      const DenseMatrix &A_star = flux.GetReferenceStarMatrix(d);
+      real_t max_err = 0.0;
+      for (int i = 0; i < NUM_STATE; i++)
+      {
+         for (int j = 0; j < NUM_STATE; j++)
+         {
+            max_err = std::max(max_err, std::abs(A_ref(i,j) - A_star(i,j)));
+         }
+      }
+      TEST_ASSERT(max_err == 0.0,
+                  "GetReferenceStarMatrix(" + std::to_string(d) +
+                  ") == BuildJacobian(" + std::to_string(d) + ") (max error "
+                  + std::to_string(max_err) + ")");
+   }
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -402,6 +429,7 @@ int main()
    TestAbsorbingIncomingPWave();
    TestFreeSurfaceZeroTraction();
    TestSplitFluxReconstructsA();
+   TestReferenceStarMatricesMatchJacobians();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";

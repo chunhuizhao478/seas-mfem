@@ -19,6 +19,7 @@
 #include "../dynamic/pml_layer.hpp"
 #include "../dynamic/seas_dynamic_operator.hpp"
 #include "../dynamic/tpv102_setup.hpp"
+#include "../dynamic/tpv102_setup_total.hpp"
 #include "../config/tpv102_params.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../io/paraview_output.hpp"
@@ -134,7 +135,14 @@ int main(int argc, char *argv[])
    std::string mesh_file = GetStringArg(argc, argv, "--mesh",
                                         "tpv102/mesh/tpv102_coarse.msh");
    real_t mesh_scale = GetRealArg(argc, argv, "--mesh-scale", 1.0);
-   int order = GetIntArg(argc, argv, "--order", 2);
+   // Round-7 R-001: default DG polynomial order is p=1 so the default
+   // `--ader-order=2` satisfies the ADER plan's `O >= p + 1`
+   // consistent-order rule (plan §Numerical constraints).  Higher p
+   // requires a matching bump in --ader-order; at --ader-order >= 3 the
+   // nucleation time-integration is only 2nd-order-accurate under the
+   // current mid-step scheme, so land the deferred plan Phase 7 §4
+   // higher-order nucleation before flipping this back to p=2.
+   int order = GetIntArg(argc, argv, "--order", 1);
    std::string bc_mode = GetStringArg(argc, argv, "--bc-mode", "absorbing");
    real_t tfinal = GetRealArg(argc, argv, "--tfinal", TPV102Params::t_final);
    std::string output_dir = GetStringArg(argc, argv, "--output-dir", "tpv102/results");
@@ -143,6 +151,43 @@ int main(int argc, char *argv[])
    int bc_free = GetIntArg(argc, argv, "--bc-free", 1);
    int bc_fault = GetIntArg(argc, argv, "--bc-fault", 3);
    int bc_absorb = GetIntArg(argc, argv, "--bc-absorb", 5);
+
+   // ADER I-05 Phase 7 (round-6: purpose change #1): time integrator
+   // selection.  ADER is now the default; RK4 is kept only as an
+   // alternative for byte-compat regression runs.
+   // --time-integrator {ader|rk4}  : default ader.
+   // --ader-order N                : ADER order in {2, 3, 4}, default 2.
+   //                                 Ignored when --time-integrator=rk4.
+   std::string time_integrator =
+      GetStringArg(argc, argv, "--time-integrator", "ader");
+   int ader_order = GetIntArg(argc, argv, "--ader-order", 2);
+   // Normalise + validate.
+   for (auto &ch : time_integrator) { ch = std::tolower(ch); }
+   // R-005 (round-6): `use_ader` must be MUTABLE so the unknown-flag
+   // fallback branch below can re-sync it with the post-fallback value
+   // of `time_integrator` — otherwise a typo like `--time-integrator=ader3`
+   // would warn "falling back to 'ader'" yet silently take the RK4
+   // branch.
+   bool use_ader = (time_integrator == "ader");
+   if (!use_ader && time_integrator != "rk4")
+   {
+      if (rank == 0)
+      {
+         std::cerr << "[WARNING] --time-integrator '" << time_integrator
+                   << "' unrecognised — falling back to 'ader'.\n";
+      }
+      time_integrator = "ader";
+      use_ader = true;
+   }
+   if (use_ader && (ader_order < 2 || ader_order > 4))
+   {
+      if (rank == 0)
+      {
+         std::cerr << "[WARNING] --ader-order " << ader_order
+                   << " out of {2,3,4} — clamping to 2.\n";
+      }
+      ader_order = 2;
+   }
 
    // ParaView output controls (mirrors BP5 --paraview* flags).
    // --paraview              : enable PVD/VTU output, interval matches --output-dt
@@ -451,11 +496,45 @@ int main(int argc, char *argv[])
    if (num_fault_total > 0)
    {
       InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
+      // Round-6 purpose change #2 (total-Q only): zero the DOFData
+      // pre-stress fields so the wave operator's EvaluateTotal /
+      // EvaluateADERTotal dispatch does not double-count pre-stress
+      // (pre-stress lives in bulk Q via InitializeStateTotal below).
+      ZeroDOFDataPreStressTotal(dof_data, num_fault_total);
    }
 
    FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp, TPV102Params::cs);
    wave.SetFaultFlux(&fault_flux);
    wave.SetFaultDOFData(&dof_data, nqp_per_face);
+
+   // Round-6 purpose change #2: supply the bulk background state for the
+   // total-Q-aware BC variants (AbsorbingTotal / FreeSurface*Total / PML
+   // damping toward Q_bg).  Q_bg mirrors the TPV102 pre-stress tensor
+   // in global coordinates (same rotation as InitializeStateTotal).
+   {
+      real_t Q_bg[NUM_STATE] = {0};
+      Q_bg[SYY] =  TPV102Params::sigma_n;
+      Q_bg[SXY] = -TPV102Params::tau_ini;
+      wave.SetAbsorbingBackground(Q_bg);
+   }
+
+   // Round-6 purpose change #2: nucleation injection under total-Q
+   // writes delta-dtau into bulk Q[SXY] at each fault QP's nearest-
+   // nodal DOF via ApplyNucleationTotal.  Build the fault-QP-to-nodal
+   // map once (read-only during the time loop) and allocate the
+   // running nucleation state tracker.  The map uses the wave
+   // operator's canonical fault-face lists (interior + shared).
+   FaultQPNodalMap fault_qp_map;
+   FaultQPNucleationState nuc_state;
+   if (num_fault_total > 0)
+   {
+      BuildFaultQPNodalMap(fault_qp_map, pmesh,
+                           const_cast<FESpaceForMesh<MeshT> &>(wave.GetFESpace()),
+                           wave.GetFaultInteriorFaces(),
+                           wave.GetFaultSharedFaces(),
+                           order, nqp_per_face);
+      nuc_state.Reset(num_fault_total);
+   }
 
    // R-002 fix: resolve the rank that owns the hypocenter QP (closest local
    // fault QP to (hypo_along_strike, -hypo_down_dip) in x/z).  Used only by
@@ -508,16 +587,36 @@ int main(int argc, char *argv[])
 #endif
 
    // -----------------------------------------------------------------------
-   // 6. Initialize state Q = 0 (perturbation field)
+   // 6. Initialize state Q = TPV102 pre-stress tensor at every DOF
+   //    (Round-6 purpose change #2: total-Q only — bulk Q carries the
+   //    pre-stress, nucleation writes deltas into Q[SXY] at fault QPs,
+   //    the fault face flux dispatches `EvaluateTotal` / `EvaluateADERTotal`).
    // -----------------------------------------------------------------------
    Vector Q;
-   InitializeState(Q, ndof_total);
+   InitializeStateTotal(Q, ndof_total,
+                        TPV102Params::sigma_n, TPV102Params::tau_ini);
+
+   // Round-6 purpose change #2: total-Q is the only supported driver
+   // mode.  Fail loud if SetAbsorbingBackground was never called — the
+   // wave operator's non-fault BC branches + fault dispatch fall
+   // through to fluctuation semantics in that case and would silently
+   // radiate the pre-stress / disable the fault.  This is the
+   // driver-level hardening analogue of R-004's wave-operator-level
+   // MFEM_VERIFY proposal: keeping the wave-operator else branches
+   // alive (they support BP5 + the non-TPV102 unit tests) while
+   // making sure the TPV102 driver cannot accidentally dispatch
+   // through them.
+   MFEM_VERIFY(wave.GetAbsorbingBackground() != nullptr,
+               "tpv102_driver: total-Q migration requires "
+               "wave.SetAbsorbingBackground() to have been called "
+               "before any Mult / AdvanceADER; none detected.");
 
    if (rank == 0)
    {
-      std::cout << "Q = 0 (perturbation). Background: tau_strike = "
+      std::cout << "State representation: total-Q (pre-stress baked into Q)\n"
+                << "Background: tau_strike = "
                 << TPV102Params::tau_ini / 1e6
-                << " MPa (BP5 convention: stored in tau2_0), sigma_n = "
+                << " MPa, sigma_n = "
                 << TPV102Params::sigma_n / 1e6 << " MPa\n\n";
    }
 
@@ -946,12 +1045,199 @@ int main(int argc, char *argv[])
    // the whole run if any psi drops below 0.3.  Rank 0 only.
    bool psi_stability_warned = false;
 
-   if (rank == 0) { std::cout << "Starting time stepping...\n"; }
+   if (rank == 0)
+   {
+      std::cout << "Starting time stepping...\n";
+      if (use_ader)
+      {
+         std::cout << "Time integrator: ADER-O(" << ader_order
+                   << ")  (default)\n";
+      }
+      else
+      {
+         std::cout << "Time integrator: RK4  (alternative; default is ADER)\n";
+      }
+   }
+
+   // Round-6 R-004: hoist the ADER step buffer out of the loop and use
+   // Vector::Swap for an O(1) exchange each step (vs the previous
+   // Q = Q_new deep copy).  Allocation is one-shot; the Swap-based
+   // exchange also makes Q and Q_new refer to the same pair of
+   // buffers throughout the run.
+   Vector Q_new(Q.Size());
 
    for (int step = 0; step < nsteps; step++)
    {
       real_t dt_step = std::min(dt, tfinal - t);
       if (dt_step <= 0.0) { break; }
+
+      // ================================================================
+      // ADER I-05 Phase 7: ADER time-stepping branch.  RK4 path below is
+      // unchanged (this branch is invoked only when --time-integrator=ader).
+      // ================================================================
+      if (use_ader)
+      {
+         // Save psi at step start for the sub-step psi update.
+         for (int i = 0; i < num_fault_total; i++)
+         {
+            psi_n[i] = dof_data[i].psi;
+         }
+
+         // Nucleation at the stage midpoint for 2nd-order accuracy.
+         // Higher-order nucleation time-integration is deferred (plan
+         // Phase 7 §4 "Nucleation timing for higher order").
+         // Round-6 purpose change #2: inject into bulk Q[SXY] via
+         // ApplyNucleationTotal.  `update_state = true` (default) because
+         // this is the single nucleation call of the step; the running
+         // dtau_applied tracker advances to the mid-step value.
+         if (num_fault_total > 0)
+         {
+            ApplyNucleationTotal(Q, fault_qp_map, nuc_state,
+                                 fault_coords,
+                                 wave.GetNDof(), ndof_total,
+                                 TPV102Params::tau_ini,
+                                 t + dt_step / 2.0);
+         }
+
+         // One-shot ADER predictor-corrector.  AdvanceADER fills the
+         // DOFData {V1, V2, slip_rate, tau*_corr, sigma_n_corr} with
+         // the friction-solve output on Q̄ = I/dt (= time-averaged bulk
+         // Q over [t, t+dt]).  NOTE: this is NOT exactly the time-
+         // average of the friction-solve trajectory — the solve is
+         // nonlinear — but it matches the one-shot equivalent to
+         // O(dt²) per plan §Phase 5 §4 (R-007).
+         // Q_new is hoisted above the step loop (round-6 R-004).  Q.Swap
+         // exchanges the Vector backing buffers in O(1); no deep copy.
+         wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+         Q.Swap(Q_new);
+
+         t += dt_step;
+
+         // Forward-Euler psi update using the time-averaged slip rate.
+         // 1st-order in dt but matches the plan's pseudocode
+         // (`UpdateStateAnalytic`-style closed-form from
+         // psi_n and V_avg); the bulk scheme's 2nd-order accuracy is
+         // preserved because psi is a scalar state that contributes only
+         // to friction via a Lipschitz-smooth law.  Slip accumulation
+         // uses the same time-averaged V directly.
+         for (int i = 0; i < num_fault_total; i++)
+         {
+            const real_t dpsi = aging_law.Rate(dof_data[i].slip_rate,
+                                               psi_n[i],
+                                               dof_data[i].Dc);
+            dof_data[i].psi = psi_n[i] + dt_step * dpsi;
+
+            dof_data[i].slip1 += dof_data[i].V1 * dt_step;
+            dof_data[i].slip2 += dof_data[i].V2 * dt_step;
+
+            // psi stability tripwire (mirrors RK4 path).
+            if (!psi_stability_warned && rank == 0 && dof_data[i].psi < 0.3)
+            {
+               std::fprintf(stderr,
+                  "[WARNING] psi dropped to %.3f at fault QP %d (t=%.3f s). "
+                  "ADER path uses forward-Euler psi update; switch to an "
+                  "implicit psi solver if the stability margin shrinks.\n",
+                  dof_data[i].psi, i, t);
+               psi_stability_warned = true;
+            }
+         }
+
+         // Under ADER, the DOFData values after AdvanceADER ARE the
+         // one-shot endpoint state — there is no "stage-4" snapshot to
+         // distinguish from an RK4-weighted average.  Populate the _k4
+         // fields with the same values so `<field>_k4 − <field>` = 0 in
+         // the VTU (plan Phase 7 §3: "documents that ADER eliminates
+         // H-V92-K by formulation").
+         if (use_paraview && pv_local_normal_stress_k4.Size() == num_fault_total)
+         {
+            for (int i = 0; i < num_fault_total; i++)
+            {
+               pv_local_slip_rate_k4(2*i + 0) = dof_data[i].V1;
+               pv_local_slip_rate_k4(2*i + 1) = dof_data[i].V2;
+               pv_local_traction_k4(2*i + 0)  = dof_data[i].tau1_corr;
+               pv_local_traction_k4(2*i + 1)  = dof_data[i].tau2_corr;
+               pv_local_normal_stress_k4(i)   = dof_data[i].sigma_n_corr;
+            }
+         }
+
+         // V_max tracking — under ADER we only have the time-averaged
+         // slip rate per step, so track its peak (vs the per-stage max
+         // the RK4 path tracks).  This is a weaker tripwire under ADER
+         // but still surfaces unbounded growth.
+         real_t V_max_local = 0.0;
+         for (int i = 0; i < num_fault_total; i++)
+         {
+            V_max_local = std::max(V_max_local, dof_data[i].slip_rate);
+         }
+#ifdef MFEM_USE_MPI
+         real_t V_max_step;
+         MPI_Allreduce(&V_max_local, &V_max_step, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#else
+         real_t V_max_step = V_max_local;
+#endif
+         V_max_global = std::max(V_max_global, V_max_step);
+
+         // Output (mirrors the RK4 loop's station/surface write cadence).
+         if (step % output_interval == 0 || step == nsteps - 1)
+         {
+            station_writer.WriteStep(t, dof_data);
+            surface_writer.WriteStep(t, Q);
+            if (rank == 0)
+            {
+               std::cout << "Step " << step << "/" << nsteps
+                         << ", t = " << t << " s"
+                         << ", V_max = " << V_max_step << " m/s\n";
+            }
+         }
+
+         // R-004 (round-5): step-0 shared-fault DOFData consistency check
+         // must also run under ADER so an MPI cross-rank regression
+         // doesn't go silent.  Mirrors the RK4 path's call below.
+         if (step == 0)
+         {
+            wave.VerifySharedFaultDOFDataConsistency();
+         }
+
+         // R-002 (round-5): ParaView output cadence must match the RK4
+         // path — paraview_write is MPI-collective, so every rank must
+         // call it every step.  The pv_local_*_k4 buffers were populated
+         // above (so `<field>_k4 - <field>` = 0 under ADER by
+         // construction, per plan Phase 7 §5).
+         paraview_write(step + 1, t, V_max_step);
+
+         // R-003 (round-5): NaN tripwire — AdvanceADER can produce NaN
+         // under CFL-violating dt or a divergent friction solve; mirror
+         // the RK4 path's detection and loud exit so a bad run is
+         // caught immediately rather than propagated.
+         {
+            real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
+            real_t global_nan = local_nan;
+#ifdef MFEM_USE_MPI
+            MPI_Allreduce(&local_nan, &global_nan, 1,
+                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+            if (global_nan > 0.0)
+            {
+               std::cerr << "ERROR: NaN detected at step " << step
+                         << ", t = " << t << " s (rank " << rank
+                         << ", ADER path)\n";
+#ifdef MFEM_USE_MPI
+               MPI_Finalize();
+#endif
+               return 1;
+            }
+         }
+
+         // All per-step epilogue actions handled in the ADER branch.
+         // Skip the RK4 bookkeeping below and go back to the top of
+         // the step loop.
+         continue;
+      }
+
+      // ================================================================
+      // RK4 path (unchanged from the default TPV102 driver).
+      // ================================================================
 
       // Save psi at step start for sub-stage restoration.
       for (int i = 0; i < num_fault_total; i++)
@@ -961,7 +1247,15 @@ int main(int argc, char *argv[])
 
       // RK4 stage 1: at time t, psi = psi_n
       // R-003 fix: nucleation evaluated at stage time
-      if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t); }
+      // Round-6 purpose change #2: inject delta-dtau into bulk Q[SXY]
+      // at the fault QP nodal DOFs.  update_state=true (default) advances
+      // the running dtau_applied tracker incrementally across stages.
+      if (num_fault_total > 0)
+      {
+         ApplyNucleationTotal(Q, fault_qp_map, nuc_state, fault_coords,
+                              wave.GetNDof(), ndof_total,
+                              TPV102Params::tau_ini, t);
+      }
       wave.Mult(Q, k1);
       for (int i = 0; i < num_fault_total; i++)
       {
@@ -976,7 +1270,13 @@ int main(int argc, char *argv[])
       }
 
       // RK4 stage 2: at time t + dt/2, psi = psi_n + (dt/2) * psi_k1
-      if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t + dt_step / 2.0); }
+      if (num_fault_total > 0)
+      {
+         ApplyNucleationTotal(Q, fault_qp_map, nuc_state, fault_coords,
+                              wave.GetNDof(), ndof_total,
+                              TPV102Params::tau_ini,
+                              t + dt_step / 2.0);
+      }
       add(Q, dt_step / 2.0, k1, Q_tmp);
       wave.Mult(Q_tmp, k2);
       for (int i = 0; i < num_fault_total; i++)
@@ -1008,7 +1308,13 @@ int main(int argc, char *argv[])
       }
 
       // RK4 stage 4: at time t + dt, psi = psi_n + dt * psi_k3
-      if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t + dt_step); }
+      if (num_fault_total > 0)
+      {
+         ApplyNucleationTotal(Q, fault_qp_map, nuc_state, fault_coords,
+                              wave.GetNDof(), ndof_total,
+                              TPV102Params::tau_ini,
+                              t + dt_step);
+      }
       add(Q, dt_step, k3, Q_tmp);
       wave.Mult(Q_tmp, k4);
       for (int i = 0; i < num_fault_total; i++)
@@ -1119,7 +1425,17 @@ int main(int argc, char *argv[])
       // ---------------------------------------------------------------
       {
          Vector k_endpoint(Q.Size());
-         if (num_fault_total > 0) { ApplyNucleation(dof_data, num_fault_total, fault_coords, t); }
+         // Under total-Q this call is a no-op (state.dtau_applied was
+         // advanced to dtau(t_end) by stage-4 above; delta = 0) but we
+         // keep it for symmetry with the stage-1..4 pattern and to
+         // guarantee Q carries the correct endpoint nucleation even if
+         // an upstream code path skipped the stage-4 call.
+         if (num_fault_total > 0)
+         {
+            ApplyNucleationTotal(Q, fault_qp_map, nuc_state, fault_coords,
+                                 wave.GetNDof(), ndof_total,
+                                 TPV102Params::tau_ini, t);
+         }
          wave.Mult(Q, k_endpoint);
          // dof_data[i].{tau1_corr, tau2_corr, sigma_n_corr, V1, V2,
          //              slip_rate} are now the endpoint-at-t values

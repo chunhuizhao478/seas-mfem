@@ -130,6 +130,24 @@ TEST_PER_QP_VS_CENTROID_BASIS_SRC          = tests/unit/test_per_qp_vs_centroid_
 TEST_NO_PENALTY_DR_SRC                     = tests/unit/test_no_penalty_dynamic_rupture.cpp
 # v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
 TEST_INTERIOR_FAULT_FLUX_PATH_SRC          = tests/unit/test_interior_fault_flux_path.cpp
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T1 — asymmetric Q probe
+TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_SRC     = tests/unit/test_interior_fault_flux_path_asymmetric.cpp
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T3 — rupture-regime amplitude probe
+TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_SRC  = tests/unit/test_interior_fault_flux_path_rupture_regime.cpp
+# Pepper-bug plan 2026-04-22 Phase 5 P5-N — bulk RK4 noise stability
+TEST_BULK_RK4_NOISE_STAB_SRC               = tests/unit/test_bulk_rk4_noise_stability.cpp
+# Pepper-bug plan 2026-04-22 Test 5 — shared-fault Pelties-7 analytic (np=4)
+TEST_SHARED_FAULT_FLUX_PATH_ANA_SRC        = tests/parallel/test_shared_fault_flux_path_analytic.cpp
+# Pepper-bug plan 2026-04-22 Phase 5 P5-PW — bulk plane-wave recovery
+TEST_BULK_PLANE_WAVE_SRC                   = tests/unit/test_bulk_plane_wave_recovery.cpp
+# Pepper-bug plan 2026-04-22 Phase 1 — live interior-vs-shared cross-check
+TEST_INTERIOR_VS_SHARED_LIVE_SRC           = tests/unit/test_interior_vs_shared_branch_live.cpp
+# Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
+TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC          = tests/unit/test_sign_flipped_elem1_on_plus_truth_table.cpp
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T1 — MakeFaceKey uniqueness (np=2)
+TEST_MAKE_FACE_KEY_UNIQ_SRC                = tests/parallel/test_make_face_key_uniqueness.cpp
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T2 — DOF-offset invariants
+TEST_FAULT_DOF_OFFSET_SRC                  = tests/unit/test_fault_dof_offset_invariants.cpp
 # v9.2.0 round-9 REVIEW R-V92-K01 — driver post-RK4 contract regression guard
 TEST_RK4_ENDPOINT_REEVAL_SRC               = tests/unit/test_rk4_endpoint_reeval.cpp
 # v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
@@ -146,6 +164,48 @@ TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC      = tests/parallel/test_shared_fault_do
 TEST_RK4_F01F02_STABILITY_SRC              = tests/parallel/test_rk4_f01f02_shared_fault_stability.cpp
 # v9.2.0 plan §17 (rev-3d, post-REVIEW R-V92-C04) — centroid-margin ctor-only probe
 TEST_CENTROID_MARGIN_CTOR_SRC              = tests/parallel/test_centroid_margin_ctor_only.cpp
+# v9.3.0 plan Phase 1 (I-04): FreeSurfaceGodunov vs FreeSurface equivalence
+TEST_FREE_SURFACE_GODUNOV_SRC              = tests/unit/test_free_surface_godunov.cpp
+# v9.3.0 plan Phase 2 (I-04 wiring, R-005): --free-surface-bc parsing
+TEST_R005_FS_BC_FLAG_PARSE_SRC             = tests/unit/test_R005_free_surface_bc_flag_parse.cpp
+# v9.3.0 plan Phase 2 AC-3 (I-04 driver integration gate): locked-fault
+# 10-RK4 max|Q[SYY]| <= 1 μPa under both gamma and godunov BC modes
+TEST_FREE_SURFACE_GODUNOV_DRIVER_SRC       = tests/unit/test_free_surface_godunov_driver.cpp
+# v9.3.0 plan Phase 3 (I-06 part A): EvaluateTotal vs Evaluate equivalence
+TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_SRC     = tests/unit/test_fault_face_flux_total_vs_fluctuation.cpp
+# v9.3.0 R-003 (review-incorporation plan): EvaluateTotal psi-invariance
+TEST_R003_EVALUATETOTAL_PSI_SRC            = tests/unit/test_R003_evaluatetotal_psi_invariant.cpp
+# v9.3.0 Phase 4 (I-06 part B): R-001 InitializeStateTotal sign regression
+TEST_R001_INITSTATE_TOTAL_SIGN_SRC         = tests/unit/test_R001_initstate_total_sign.cpp
+# v9.3.0 Phase 4 AC (I-06 part B): locked-fault 100 RK4 sigma_n stability
+TEST_TPV102_TOTAL_LOCKED_FAULT_SRC         = tests/unit/test_tpv102_total_locked_fault.cpp
+# v9.3.0 Phase 5 (I-06 part C): R-002 nucleation sign regression
+TEST_R002_NUCLEATION_SIGN_SRC              = tests/unit/test_R002_nucleation_sign_match.cpp
+# v9.3.0 Phase 5 (I-06 part C): R-009 nucleation both-sides regression
+TEST_R009_NUCLEATION_BOTH_SIDES_SRC        = tests/unit/test_R009_nucleation_total_both_sides.cpp
+# v9.3.0 R-I06-001 / R-I06-006 (review-round-2): total-Q absorbing BC
+# preserves pre-stress equilibrium (AbsorbingTotal regression gate)
+TEST_TPV102_TOTAL_ABSORBING_SRC            = tests/unit/test_tpv102_total_absorbing_equilibrium.cpp
+# v9.3.0 R-I06-003 / R-I06-004 (review-round-2): shape-max amplitude
+# scaling + add-delta preserves wave perturbations
+TEST_R_I06_003_NUC_SHAPE_SCALING_SRC       = tests/unit/test_R_I06_003_nucleation_shape_scaling.cpp
+# v9.3.0 R-I06-round3 R-006: direct unit tests for FreeSurfaceTotal /
+# FreeSurfaceGodunovTotal (Q_bg=0 equivalence + tilted-normal equilibrium)
+TEST_FREE_SURFACE_TOTAL_DIRECT_SRC         = tests/unit/test_free_surface_total_direct.cpp
+# ADER I-05 Phase 1: polynomial-exactness test for ApplySpatialDerivative
+TEST_WAVE_OP_SPATIAL_DERIV_SRC             = tests/unit/test_wave_operator_spatial_derivative.cpp
+# ADER I-05 Phase 3: CK predictor plane-wave convergence
+TEST_ADER_CK_PREDICTOR_SRC                 = tests/unit/test_ader_ck_predictor.cpp
+# ADER I-05 Phase 5: EvaluateADER / EvaluateADERTotal equivalence
+TEST_ADER_FAULT_FLUX_EQUIV_SRC             = tests/unit/test_fault_face_flux_ader_equivalence.cpp
+# ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
+TEST_ADER_LINEAR_WAVE_EQUIV_SRC            = tests/unit/test_ader_linear_wave_equivalence.cpp
+# ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
+TEST_ADER_TPV102_SMOKE_SRC                 = tests/unit/test_ader_tpv102_smoke.cpp
+# Round-6 R-001 regression: driver defaults to ADER (purpose change #1)
+TEST_R001_DRIVER_DEFAULT_ADER_SRC          = tests/unit/test_R001_driver_defaults_to_ader.cpp
+# Round-6 R-002 regression: driver init uses total-Q
+TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_total_q.cpp
 
 # R-501: `make ... CXXFLAGS+=-D<FLAG>` may not reach the compile step
 # because MFEM's config.mk explicitly sets MFEM_CPPFLAGS/MFEM_CXXFLAGS.
@@ -221,6 +281,15 @@ TEST_PER_QP_VS_CENTROID_BASIS_OBJ          = $(TEST_PER_QP_VS_CENTROID_BASIS_SRC
 TEST_SHARED_FAULT_ROLE_CONSIST_OBJ         = $(TEST_SHARED_FAULT_ROLE_CONSIST_SRC:.cpp=.o)
 TEST_NO_PENALTY_DR_OBJ                     = $(TEST_NO_PENALTY_DR_SRC:.cpp=.o)
 TEST_INTERIOR_FAULT_FLUX_PATH_OBJ          = $(TEST_INTERIOR_FAULT_FLUX_PATH_SRC:.cpp=.o)
+TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_OBJ     = $(TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_SRC:.cpp=.o)
+TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_OBJ  = $(TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_SRC:.cpp=.o)
+TEST_BULK_RK4_NOISE_STAB_OBJ               = $(TEST_BULK_RK4_NOISE_STAB_SRC:.cpp=.o)
+TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ        = $(TEST_SHARED_FAULT_FLUX_PATH_ANA_SRC:.cpp=.o)
+TEST_BULK_PLANE_WAVE_OBJ                   = $(TEST_BULK_PLANE_WAVE_SRC:.cpp=.o)
+TEST_INTERIOR_VS_SHARED_LIVE_OBJ           = $(TEST_INTERIOR_VS_SHARED_LIVE_SRC:.cpp=.o)
+TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ          = $(TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC:.cpp=.o)
+TEST_MAKE_FACE_KEY_UNIQ_OBJ                = $(TEST_MAKE_FACE_KEY_UNIQ_SRC:.cpp=.o)
+TEST_FAULT_DOF_OFFSET_OBJ                  = $(TEST_FAULT_DOF_OFFSET_SRC:.cpp=.o)
 TEST_RK4_PSI_INTEGRATION_OBJ               = $(TEST_RK4_PSI_INTEGRATION_SRC:.cpp=.o)
 TEST_RK4_ENDPOINT_REEVAL_OBJ               = $(TEST_RK4_ENDPOINT_REEVAL_SRC:.cpp=.o)
 TEST_VOLUME_JAC_SINGLE_CH_OBJ              = $(TEST_VOLUME_JAC_SINGLE_CH_SRC:.cpp=.o)
@@ -229,6 +298,26 @@ TEST_ABSORBING_BC_DECAY_OBJ                = $(TEST_ABSORBING_BC_DECAY_SRC:.cpp=
 TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ      = $(TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC:.cpp=.o)
 TEST_RK4_F01F02_STABILITY_OBJ              = $(TEST_RK4_F01F02_STABILITY_SRC:.cpp=.o)
 TEST_CENTROID_MARGIN_CTOR_OBJ              = $(TEST_CENTROID_MARGIN_CTOR_SRC:.cpp=.o)
+# v9.3.0 Phase 1 / Phase 2 (I-04)
+TEST_FREE_SURFACE_GODUNOV_OBJ              = $(TEST_FREE_SURFACE_GODUNOV_SRC:.cpp=.o)
+TEST_R005_FS_BC_FLAG_PARSE_OBJ             = $(TEST_R005_FS_BC_FLAG_PARSE_SRC:.cpp=.o)
+TEST_FREE_SURFACE_GODUNOV_DRIVER_OBJ       = $(TEST_FREE_SURFACE_GODUNOV_DRIVER_SRC:.cpp=.o)
+TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_OBJ     = $(TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_SRC:.cpp=.o)
+TEST_R003_EVALUATETOTAL_PSI_OBJ            = $(TEST_R003_EVALUATETOTAL_PSI_SRC:.cpp=.o)
+TEST_R001_INITSTATE_TOTAL_SIGN_OBJ         = $(TEST_R001_INITSTATE_TOTAL_SIGN_SRC:.cpp=.o)
+TEST_TPV102_TOTAL_LOCKED_FAULT_OBJ         = $(TEST_TPV102_TOTAL_LOCKED_FAULT_SRC:.cpp=.o)
+TEST_R002_NUCLEATION_SIGN_OBJ              = $(TEST_R002_NUCLEATION_SIGN_SRC:.cpp=.o)
+TEST_R009_NUCLEATION_BOTH_SIDES_OBJ        = $(TEST_R009_NUCLEATION_BOTH_SIDES_SRC:.cpp=.o)
+TEST_TPV102_TOTAL_ABSORBING_OBJ            = $(TEST_TPV102_TOTAL_ABSORBING_SRC:.cpp=.o)
+TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ       = $(TEST_R_I06_003_NUC_SHAPE_SCALING_SRC:.cpp=.o)
+TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ         = $(TEST_FREE_SURFACE_TOTAL_DIRECT_SRC:.cpp=.o)
+TEST_WAVE_OP_SPATIAL_DERIV_OBJ             = $(TEST_WAVE_OP_SPATIAL_DERIV_SRC:.cpp=.o)
+TEST_ADER_CK_PREDICTOR_OBJ                 = $(TEST_ADER_CK_PREDICTOR_SRC:.cpp=.o)
+TEST_ADER_FAULT_FLUX_EQUIV_OBJ             = $(TEST_ADER_FAULT_FLUX_EQUIV_SRC:.cpp=.o)
+TEST_ADER_LINEAR_WAVE_EQUIV_OBJ            = $(TEST_ADER_LINEAR_WAVE_EQUIV_SRC:.cpp=.o)
+TEST_ADER_TPV102_SMOKE_OBJ                 = $(TEST_ADER_TPV102_SMOKE_SRC:.cpp=.o)
+TEST_R001_DRIVER_DEFAULT_ADER_OBJ          = $(TEST_R001_DRIVER_DEFAULT_ADER_SRC:.cpp=.o)
+TEST_R002_DRIVER_INIT_TOTAL_Q_OBJ          = $(TEST_R002_DRIVER_INIT_TOTAL_Q_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -665,6 +754,44 @@ seas_test_no_penalty_dynamic_rupture: $(TEST_NO_PENALTY_DR_OBJ) $(WAVE_OPERATOR_
 seas_test_interior_fault_flux_path: $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T1 — asymmetric Q probe
+seas_test_interior_fault_flux_path_asymmetric: $(TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T3 — rupture-regime amplitude probe
+seas_test_interior_fault_flux_path_rupture_regime: $(TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 5 P5-N — bulk RK4 noise stability
+seas_test_bulk_rk4_noise_stability: $(TEST_BULK_RK4_NOISE_STAB_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BULK_RK4_NOISE_STAB_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Test 5 — shared-fault Pelties-7 analytic (np=4)
+seas_test_shared_fault_flux_path_analytic: $(TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 5 P5-PW — bulk plane-wave recovery
+seas_test_bulk_plane_wave_recovery: $(TEST_BULK_PLANE_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BULK_PLANE_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 1 — live interior-vs-shared cross-check
+# NB: built with -DSEAS_TEST_INTERNAL so the test can access WaveOperator
+# internal bookkeeping (getters gated by that macro in wave_operator.hpp).
+seas_test_interior_vs_shared_branch_live: $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
+seas_test_sign_flipped_elem1_on_plus_truth_table: $(TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T1 — MakeFaceKey uniqueness (np=2)
+seas_test_make_face_key_uniqueness: $(TEST_MAKE_FACE_KEY_UNIQ_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MAKE_FACE_KEY_UNIQ_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T2 — DOF-offset invariants
+seas_test_fault_dof_offset_invariants: $(TEST_FAULT_DOF_OFFSET_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_DOF_OFFSET_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
 # v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
 seas_test_rk4_psi_integration: $(TEST_RK4_PSI_INTEGRATION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RK4_PSI_INTEGRATION_OBJ) $(MFEM_LIBS)
@@ -700,6 +827,82 @@ seas_test_rk4_f01f02_shared_fault_stability: $(TEST_RK4_F01F02_STABILITY_OBJ) $(
 # v9.2.0 plan §17 (rev-3d) — centroid-margin ctor-only probe
 seas_test_centroid_margin_ctor_only: $(TEST_CENTROID_MARGIN_CTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CENTROID_MARGIN_CTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 plan Phase 1 (I-04): FreeSurfaceGodunov vs FreeSurface equivalence
+seas_test_free_surface_godunov: $(TEST_FREE_SURFACE_GODUNOV_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FREE_SURFACE_GODUNOV_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 plan Phase 2 (I-04 wiring, R-005): --free-surface-bc CLI parsing
+seas_test_R005_free_surface_bc_flag_parse: $(TEST_R005_FS_BC_FLAG_PARSE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R005_FS_BC_FLAG_PARSE_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 plan Phase 2 AC-3 (I-04 driver integration gate)
+seas_test_free_surface_godunov_driver: $(TEST_FREE_SURFACE_GODUNOV_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FREE_SURFACE_GODUNOV_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 plan Phase 3 (I-06 part A): EvaluateTotal vs Evaluate equivalence
+seas_test_fault_face_flux_total_vs_fluctuation: $(TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 R-003 (review-incorporation plan): EvaluateTotal psi-invariance
+seas_test_R003_evaluatetotal_psi_invariant: $(TEST_R003_EVALUATETOTAL_PSI_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R003_EVALUATETOTAL_PSI_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 Phase 4 (I-06 part B): R-001 InitializeStateTotal sign regression
+seas_test_R001_initstate_total_sign: $(TEST_R001_INITSTATE_TOTAL_SIGN_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R001_INITSTATE_TOTAL_SIGN_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 Phase 4 AC (I-06 part B): locked-fault 100 RK4 sigma_n stability
+seas_test_tpv102_total_locked_fault: $(TEST_TPV102_TOTAL_LOCKED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_TOTAL_LOCKED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 Phase 5 (I-06 part C): R-002 nucleation sign regression
+seas_test_R002_nucleation_sign_match: $(TEST_R002_NUCLEATION_SIGN_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R002_NUCLEATION_SIGN_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 Phase 5 (I-06 part C): R-009 nucleation both-sides regression
+seas_test_R009_nucleation_total_both_sides: $(TEST_R009_NUCLEATION_BOTH_SIDES_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R009_NUCLEATION_BOTH_SIDES_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 R-I06-001 / R-I06-006: total-Q absorbing BC equilibrium gate
+seas_test_tpv102_total_absorbing_equilibrium: $(TEST_TPV102_TOTAL_ABSORBING_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_TOTAL_ABSORBING_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 R-I06-003 / R-I06-004: shape-max amplitude scaling + add-delta
+seas_test_R_I06_003_nucleation_shape_scaling: $(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ) $(MFEM_LIBS)
+
+# v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal / FreeSurfaceGodunovTotal
+seas_test_free_surface_total_direct: $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# ADER I-05 Phase 1: polynomial-exactness test for ApplySpatialDerivative
+seas_test_wave_operator_spatial_derivative: $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER I-05 Phase 3: CK predictor plane-wave convergence test
+seas_test_ader_ck_predictor: $(TEST_ADER_CK_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_CK_PREDICTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER I-05 Phase 5: EvaluateADER / EvaluateADERTotal equivalence tests
+seas_test_fault_face_flux_ader_equivalence: $(TEST_ADER_FAULT_FLUX_EQUIV_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_FAULT_FLUX_EQUIV_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
+seas_test_ader_linear_wave_equivalence: $(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
+seas_test_ader_tpv102_smoke: $(TEST_ADER_TPV102_SMOKE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_TPV102_SMOKE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# Round-6 R-001 regression: driver defaults to ADER
+seas_test_R001_driver_defaults_to_ader: $(TEST_R001_DRIVER_DEFAULT_ADER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R001_DRIVER_DEFAULT_ADER_OBJ) $(MFEM_LIBS)
+
+# Round-6 R-002 regression: driver init uses total-Q
+seas_test_R002_driver_init_total_q: $(TEST_R002_DRIVER_INIT_TOTAL_Q_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R002_DRIVER_INIT_TOTAL_Q_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 3: Friction solver tests
 seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -939,6 +1142,42 @@ $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LI
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
+$(TEST_INTERIOR_FAULT_FLUX_PATH_ASYM_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_INTERIOR_FAULT_FLUX_PATH_RUPTURE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_BULK_RK4_NOISE_STAB_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_BULK_PLANE_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_INTERIOR_VS_SHARED_LIVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -c $< -o $@
+
+$(TEST_MAKE_FACE_KEY_UNIQ_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_FAULT_DOF_OFFSET_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -c $< -o $@
+
 $(TEST_RK4_PSI_INTEGRATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -970,6 +1209,101 @@ $(TEST_RK4_F01F02_STABILITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HE
 $(TEST_CENTROID_MARGIN_CTOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+# v9.3.0 plan Phase 1 (I-04): FreeSurfaceGodunov vs FreeSurface equivalence
+$(TEST_FREE_SURFACE_GODUNOV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 plan Phase 2 (I-04 wiring, R-005): --free-surface-bc CLI parsing
+$(TEST_R005_FS_BC_FLAG_PARSE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 plan Phase 2 AC-3 (I-04 driver integration gate)
+$(TEST_FREE_SURFACE_GODUNOV_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 plan Phase 3 (I-06 part A): EvaluateTotal vs Evaluate equivalence
+$(TEST_FAULT_FACE_FLUX_TOTAL_VS_FLUC_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 R-003 (review-incorporation plan): EvaluateTotal psi-invariance
+$(TEST_R003_EVALUATETOTAL_PSI_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 Phase 4 (I-06 part B): R-001 InitializeStateTotal sign regression
+$(TEST_R001_INITSTATE_TOTAL_SIGN_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 Phase 4 AC (I-06 part B): locked-fault 100 RK4 sigma_n stability
+$(TEST_TPV102_TOTAL_LOCKED_FAULT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 Phase 5 (I-06 part C): R-002 nucleation sign regression
+$(TEST_R002_NUCLEATION_SIGN_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 Phase 5 (I-06 part C): R-009 nucleation both-sides regression
+$(TEST_R009_NUCLEATION_BOTH_SIDES_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 R-I06-001 / R-I06-006: total-Q absorbing BC equilibrium gate
+$(TEST_TPV102_TOTAL_ABSORBING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 R-I06-003 / R-I06-004: shape-max amplitude scaling + add-delta
+$(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal variants
+$(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER I-05 Phase 1: ApplySpatialDerivative polynomial-exactness test
+$(TEST_WAVE_OP_SPATIAL_DERIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER I-05 Phase 3: CK predictor plane-wave convergence
+$(TEST_ADER_CK_PREDICTOR_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER I-05 Phase 5: EvaluateADER / EvaluateADERTotal equivalence
+$(TEST_ADER_FAULT_FLUX_EQUIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
+$(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
+$(TEST_ADER_TPV102_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Round-6 R-001 regression: driver default is ADER
+$(TEST_R001_DRIVER_DEFAULT_ADER_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Round-6 R-002 regression: driver init uses total-Q
+$(TEST_R002_DRIVER_INIT_TOTAL_Q_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_FRICTION_SOLVER_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -1016,7 +1350,26 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-fault-flux-interior-vs-shared-branch-equivalence \
       test-godunov-interior-equal-sides-identity \
       test-fault-face-flux-per-side-assembly \
-      test-fault-face-flux-bimaterial-guard
+      test-fault-face-flux-bimaterial-guard \
+      test-free-surface-godunov \
+      test-R005-free-surface-bc-flag-parse \
+      test-free-surface-godunov-driver \
+      test-fault-face-flux-total-vs-fluctuation \
+      test-R003-evaluatetotal-psi-invariant \
+      test-R001-initstate-total-sign \
+      test-tpv102-total-locked-fault \
+      test-R002-nucleation-sign-match \
+      test-R009-nucleation-total-both-sides \
+      test-tpv102-total-absorbing-equilibrium \
+      test-R-I06-003-nucleation-shape-scaling \
+      test-free-surface-total-direct \
+      test-wave-operator-spatial-derivative \
+      test-ader-ck-predictor \
+      test-fault-face-flux-ader-equivalence \
+      test-ader-linear-wave-equivalence \
+      test-ader-tpv102-smoke \
+      test-R001-driver-defaults-to-ader \
+      test-R002-driver-init-total-q
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -1255,6 +1608,59 @@ test-no-penalty-dynamic-rupture: seas_test_no_penalty_dynamic_rupture
 test-interior-fault-flux-path: seas_test_interior_fault_flux_path
 	./seas_test_interior_fault_flux_path
 
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T1 — asymmetric Q probe
+test-interior-fault-flux-path-asymmetric: seas_test_interior_fault_flux_path_asymmetric
+	./seas_test_interior_fault_flux_path_asymmetric
+
+# Pepper-bug plan 2026-04-22 Phase 3 P3-T3 — rupture-regime amplitude probe
+test-interior-fault-flux-path-rupture-regime: seas_test_interior_fault_flux_path_rupture_regime
+	./seas_test_interior_fault_flux_path_rupture_regime
+
+# Pepper-bug plan 2026-04-22 Phase 5 P5-N — bulk RK4 noise stability
+test-bulk-rk4-noise-stability: seas_test_bulk_rk4_noise_stability
+	./seas_test_bulk_rk4_noise_stability
+
+# Pepper-bug plan 2026-04-22 Test 5 — shared-fault Pelties-7 analytic (np=4)
+test-shared-fault-flux-path-analytic: seas_test_shared_fault_flux_path_analytic
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_shared_fault_flux_path_analytic
+
+# Pepper-bug plan 2026-04-22 Phase 5 P5-PW — bulk plane-wave recovery
+test-bulk-plane-wave-recovery: seas_test_bulk_plane_wave_recovery
+	./seas_test_bulk_plane_wave_recovery
+
+# Pepper-bug plan 2026-04-22 Phase 1 — live interior-vs-shared cross-check
+test-interior-vs-shared-branch-live: seas_test_interior_vs_shared_branch_live
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_interior_vs_shared_branch_live
+
+# Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
+test-sign-flipped-elem1-on-plus-truth-table: seas_test_sign_flipped_elem1_on_plus_truth_table
+	./seas_test_sign_flipped_elem1_on_plus_truth_table
+
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T1 — MakeFaceKey uniqueness (np=4)
+# NB: requires np=4 to reliably cut the 4-km fault fixture across ranks
+# (np=2 often puts the whole fault inside one rank, yielding exit 77).
+test-make-face-key-uniqueness: seas_test_make_face_key_uniqueness
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_make_face_key_uniqueness
+
+# Pepper-bug plan 2026-04-22 Phase 4 P4-T2 — DOF-offset invariants
+test-fault-dof-offset-invariants: seas_test_fault_dof_offset_invariants
+	./seas_test_fault_dof_offset_invariants
+
+# Pepper-bug plan 2026-04-22 Phase 6 — aggregator: run all pepper-bug tests
+test-tpv102-pepper: \
+	test-interior-fault-flux-path-asymmetric \
+	test-interior-fault-flux-path-rupture-regime \
+	test-bulk-rk4-noise-stability \
+	test-bulk-plane-wave-recovery \
+	test-sign-flipped-elem1-on-plus-truth-table \
+	test-fault-dof-offset-invariants \
+	test-make-face-key-uniqueness \
+	test-interior-vs-shared-branch-live \
+	test-shared-fault-flux-path-analytic
+	@echo "=========================================="
+	@echo "  TPV102 pepper-bug test suite: COMPLETE"
+	@echo "=========================================="
+
 # v9.2.0 plan Step 5 (R-V92-H01) — coupled RK4-on-psi convergence probe
 test-rk4-psi-integration: seas_test_rk4_psi_integration
 	./seas_test_rk4_psi_integration
@@ -1285,6 +1691,113 @@ test-shared-fault-role-consistency: seas_test_shared_fault_role_consistency
 # v9.2.0 plan §4.7 (rev-3c) — DOFData runtime consistency via RK4 on fixture
 test-shared-fault-dof-data-consistency: seas_test_shared_fault_dof_data_consistency
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_shared_fault_dof_data_consistency
+
+# v9.3.0 plan Phase 1 (I-04): FreeSurfaceGodunov vs FreeSurface equivalence
+test-free-surface-godunov: seas_test_free_surface_godunov
+	./seas_test_free_surface_godunov
+
+# v9.3.0 plan Phase 2 (I-04 wiring, R-005): --free-surface-bc CLI parsing
+test-R005-free-surface-bc-flag-parse: seas_test_R005_free_surface_bc_flag_parse
+	./seas_test_R005_free_surface_bc_flag_parse
+
+# v9.3.0 plan Phase 2 AC-3 (I-04 driver integration gate)
+test-free-surface-godunov-driver: seas_test_free_surface_godunov_driver
+	./seas_test_free_surface_godunov_driver
+
+# v9.3.0 plan Phase 3 (I-06 part A): EvaluateTotal vs Evaluate equivalence
+test-fault-face-flux-total-vs-fluctuation: seas_test_fault_face_flux_total_vs_fluctuation
+	./seas_test_fault_face_flux_total_vs_fluctuation
+
+# v9.3.0 R-003: EvaluateTotal psi-invariance
+test-R003-evaluatetotal-psi-invariant: seas_test_R003_evaluatetotal_psi_invariant
+	./seas_test_R003_evaluatetotal_psi_invariant
+
+# v9.3.0 Phase 4 (I-06): R-001 InitializeStateTotal sign regression
+test-R001-initstate-total-sign: seas_test_R001_initstate_total_sign
+	./seas_test_R001_initstate_total_sign
+
+# v9.3.0 Phase 4 AC (I-06): locked-fault 100 RK4 sigma_n stability
+test-tpv102-total-locked-fault: seas_test_tpv102_total_locked_fault
+	./seas_test_tpv102_total_locked_fault
+
+# v9.3.0 Phase 5 (I-06): R-002 nucleation sign regression
+test-R002-nucleation-sign-match: seas_test_R002_nucleation_sign_match
+	./seas_test_R002_nucleation_sign_match
+
+# v9.3.0 Phase 5 (I-06): R-009 nucleation both-sides regression
+test-R009-nucleation-total-both-sides: seas_test_R009_nucleation_total_both_sides
+	./seas_test_R009_nucleation_total_both_sides
+
+# v9.3.0 R-I06-001 / R-I06-006: total-Q absorbing BC equilibrium gate
+test-tpv102-total-absorbing-equilibrium: seas_test_tpv102_total_absorbing_equilibrium
+	./seas_test_tpv102_total_absorbing_equilibrium
+
+# v9.3.0 R-I06-003 / R-I06-004: shape-max amplitude scaling + add-delta
+test-R-I06-003-nucleation-shape-scaling: seas_test_R_I06_003_nucleation_shape_scaling
+	./seas_test_R_I06_003_nucleation_shape_scaling
+
+# v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal variants
+test-free-surface-total-direct: seas_test_free_surface_total_direct
+	./seas_test_free_surface_total_direct
+
+# ADER I-05 Phase 1: ApplySpatialDerivative polynomial-exactness test
+test-wave-operator-spatial-derivative: seas_test_wave_operator_spatial_derivative
+	./seas_test_wave_operator_spatial_derivative
+
+# ADER I-05 Phase 3: CK predictor plane-wave convergence
+test-ader-ck-predictor: seas_test_ader_ck_predictor
+	./seas_test_ader_ck_predictor
+
+# ADER I-05 Phase 5: EvaluateADER / EvaluateADERTotal equivalence
+test-fault-face-flux-ader-equivalence: seas_test_fault_face_flux_ader_equivalence
+	./seas_test_fault_face_flux_ader_equivalence
+
+# ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
+test-ader-linear-wave-equivalence: seas_test_ader_linear_wave_equivalence
+	./seas_test_ader_linear_wave_equivalence
+
+# ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
+test-ader-tpv102-smoke: seas_test_ader_tpv102_smoke
+	./seas_test_ader_tpv102_smoke
+
+# Round-6 R-001 regression: driver defaults to ADER
+test-R001-driver-defaults-to-ader: seas_test_R001_driver_defaults_to_ader
+	./seas_test_R001_driver_defaults_to_ader
+
+# Round-6 R-002 regression: driver init uses total-Q
+test-R002-driver-init-total-q: seas_test_R002_driver_init_total_q
+	./seas_test_R002_driver_init_total_q
+
+# ADER I-05 Phase 8 aggregate: all five ADER tests in order.
+test-ader: test-wave-operator-spatial-derivative \
+           test-ader-ck-predictor \
+           test-fault-face-flux-ader-equivalence \
+           test-ader-linear-wave-equivalence \
+           test-ader-tpv102-smoke
+
+# v9.3.0 plan Testing Strategy aggregate
+#   I-04: Phase 1 flux kernel + Phase 2 CLI + Phase 2 AC-3 driver gate
+#   I-06: Phase 3 EvaluateTotal + R-003 psi guard + Phase 4 R-001 +
+#         Phase 4 AC locked-fault + Phase 5 R-002 + R-009
+test-v93-regression: test-free-surface-godunov \
+                     test-R005-free-surface-bc-flag-parse \
+                     test-free-surface-godunov-driver \
+                     test-fault-face-flux-total-vs-fluctuation \
+                     test-R003-evaluatetotal-psi-invariant \
+                     test-R001-initstate-total-sign \
+                     test-tpv102-total-locked-fault \
+                     test-R002-nucleation-sign-match \
+                     test-R009-nucleation-total-both-sides \
+                     test-tpv102-total-absorbing-equilibrium \
+                     test-R-I06-003-nucleation-shape-scaling \
+                     test-free-surface-total-direct \
+                     test-wave-operator-spatial-derivative \
+                     test-ader-ck-predictor \
+                     test-fault-face-flux-ader-equivalence \
+                     test-ader-linear-wave-equivalence \
+                     test-ader-tpv102-smoke \
+                     test-R001-driver-defaults-to-ader \
+                     test-R002-driver-init-total-q
 
 # Aggregate target: all v9.2.0 §4 regression gates (rev-3..rev-3g)
 # §4.9 runs FIRST per user directive: it verifies the Pelties 2012 benchmark

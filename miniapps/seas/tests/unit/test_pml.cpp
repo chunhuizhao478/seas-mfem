@@ -85,6 +85,7 @@ void TestPMLNormalReflection()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    // Set up PML: thickness = 0.2, on x-boundaries only
    Vector xmin(3), xmax(3);
@@ -174,6 +175,7 @@ void TestPMLObliqueReflection()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    Vector xmin(3), xmax(3);
    xmin = 0.0; xmax(0) = 1.0; xmax(1) = 1.0; xmax(2) = 0.125;
@@ -252,6 +254,7 @@ void TestPMLEnergyDecay()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    Vector xmin(3), xmax(3);
    xmin = 0.0; xmax(0) = 1.0; xmax(1) = 0.125; xmax(2) = 0.125;
@@ -321,6 +324,7 @@ void TestPMLCorner()
    bc.fault_attr = 0;
 
    WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
 
    // PML on ALL faces, 0.25 thickness → overlaps at all 8 corners
    Vector xmin(3), xmax(3);
