@@ -117,6 +117,27 @@ TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC  = tests/unit/test_fault_face_flux_bim
 # v9.1.0 Pelties-9 follow-through: post-R-001 VTU continuity + post-R-003 basis symmetry
 TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC      = tests/unit/test_fault_surface_vtu_continuity.cpp
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_strike_symmetry.cpp
+# v9.2.0 §19 R-V92-E02 stage-4 VTU diagnostic
+TEST_FAULT_SURFACE_VTU_K4_SRC              = tests/unit/test_fault_surface_vtu_k4.cpp
+# v9.2.0 plan §4.1-§4.4 regression gates
+TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
+TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
+TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC     = tests/unit/test_fault_basis_qp_orthonormality.cpp
+TEST_PER_QP_VS_CENTROID_BASIS_SRC          = tests/unit/test_per_qp_vs_centroid_basis_planar_1el.cpp
+# v9.2.0 plan §4.9 (rev-3f) — No-penalty regression gate (Pelties 2012 §3.1)
+TEST_NO_PENALTY_DR_SRC                     = tests/unit/test_no_penalty_dynamic_rupture.cpp
+# v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
+TEST_INTERIOR_FAULT_FLUX_PATH_SRC          = tests/unit/test_interior_fault_flux_path.cpp
+# v9.2.0 plan §4.10-§4.12 (rev-3g) — H-V92-G candidate probes (b)(c)(d)(e)
+TEST_VOLUME_JAC_SINGLE_CH_SRC              = tests/unit/test_volume_jacobian_single_channel.cpp
+TEST_RK4_CONSERVATION_SRC                  = tests/unit/test_rk4_conservation.cpp
+TEST_ABSORBING_BC_DECAY_SRC                = tests/unit/test_absorbing_bc_energy_decay.cpp
+# v9.2.0 plan §4.6 (rev-3b) — shared-fault role consistency across MPI
+TEST_SHARED_FAULT_ROLE_CONSIST_SRC         = tests/parallel/test_shared_fault_role_consistency.cpp
+# v9.2.0 plan §4.7 (rev-3c) — shared-fault DOFData runtime consistency
+TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC      = tests/parallel/test_shared_fault_dof_data_consistency.cpp
+# v9.2.0 plan §17 (rev-3d, post-REVIEW R-V92-C04) — centroid-margin ctor-only probe
+TEST_CENTROID_MARGIN_CTOR_SRC              = tests/parallel/test_centroid_margin_ctor_only.cpp
 
 # R-501: `make ... CXXFLAGS+=-D<FLAG>` may not reach the compile step
 # because MFEM's config.mk explicitly sets MFEM_CPPFLAGS/MFEM_CXXFLAGS.
@@ -180,6 +201,21 @@ TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ  = $(TEST_FAULT_FACE_FLUX_BIMATERIAL_G
 # v9.1.0 Pelties-9 follow-through
 TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ      = $(TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC:.cpp=.o)
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC:.cpp=.o)
+# v9.2.0 §19 R-V92-E02
+TEST_FAULT_SURFACE_VTU_K4_OBJ              = $(TEST_FAULT_SURFACE_VTU_K4_SRC:.cpp=.o)
+# v9.2.0 plan §4.1-§4.4 regression gates
+TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
+TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
+TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ     = $(TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC:.cpp=.o)
+TEST_PER_QP_VS_CENTROID_BASIS_OBJ          = $(TEST_PER_QP_VS_CENTROID_BASIS_SRC:.cpp=.o)
+TEST_SHARED_FAULT_ROLE_CONSIST_OBJ         = $(TEST_SHARED_FAULT_ROLE_CONSIST_SRC:.cpp=.o)
+TEST_NO_PENALTY_DR_OBJ                     = $(TEST_NO_PENALTY_DR_SRC:.cpp=.o)
+TEST_INTERIOR_FAULT_FLUX_PATH_OBJ          = $(TEST_INTERIOR_FAULT_FLUX_PATH_SRC:.cpp=.o)
+TEST_VOLUME_JAC_SINGLE_CH_OBJ              = $(TEST_VOLUME_JAC_SINGLE_CH_SRC:.cpp=.o)
+TEST_RK4_CONSERVATION_OBJ                  = $(TEST_RK4_CONSERVATION_SRC:.cpp=.o)
+TEST_ABSORBING_BC_DECAY_OBJ                = $(TEST_ABSORBING_BC_DECAY_SRC:.cpp=.o)
+TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ      = $(TEST_SHARED_FAULT_DOFDATA_CONSIST_SRC:.cpp=.o)
+TEST_CENTROID_MARGIN_CTOR_OBJ              = $(TEST_CENTROID_MARGIN_CTOR_SRC:.cpp=.o)
 
 # Constitutive model headers
 CONSTITUTIVE_HEADERS = constitutive/constitutive_model.hpp \
@@ -414,6 +450,11 @@ MFEM_TESTS = MINIAPPS
         test-config-parser \
         test-tpv102-setup test-tpv102-local \
         test-parallel-wave-operator \
+        test-godunov-rotation-identity \
+        test-canonical-rotation-pure-strikeslip \
+        test-fault-basis-qp-orthonormality \
+        test-per-qp-vs-centroid-basis-planar-1el \
+        test-v92-regression-gates \
         regression-check quick-check
 
 all: $(MINIAPPS)
@@ -575,9 +616,61 @@ seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GU
 seas_test_fault_surface_vtu_continuity: $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ) $(MFEM_LIBS)
 
+# v9.2.0 plan §19 — R-V92-E02 stage-4 VTU diagnostic
+seas_test_fault_surface_vtu_k4: $(TEST_FAULT_SURFACE_VTU_K4_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_K4_OBJ) $(MFEM_LIBS)
+
 # v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
 seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.1 — Godunov rotation identity T·Tinv = I
+seas_test_godunov_rotation_identity: $(TEST_GODUNOV_ROTATION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_ROTATION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.2 — canonical rotation pure strike-slip Tinv probe
+seas_test_canonical_rotation_pure_strikeslip: $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.3 — per-QP fault basis orthonormality
+seas_test_fault_basis_qp_orthonormality: $(TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.4 — per-QP vs centroid basis on planar 1-tet fixture
+seas_test_per_qp_vs_centroid_basis_planar_1el: $(TEST_PER_QP_VS_CENTROID_BASIS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PER_QP_VS_CENTROID_BASIS_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.9 (rev-3f) — No-penalty regression gate (Pelties 2012 §3.1)
+seas_test_no_penalty_dynamic_rupture: $(TEST_NO_PENALTY_DR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_NO_PENALTY_DR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
+seas_test_interior_fault_flux_path: $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.10 (rev-3g) — single-channel Jacobian probe (d+e)
+seas_test_volume_jacobian_single_channel: $(TEST_VOLUME_JAC_SINGLE_CH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VOLUME_JAC_SINGLE_CH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.11 (rev-3g) — RK4 conservation probe (b)
+seas_test_rk4_conservation: $(TEST_RK4_CONSERVATION_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RK4_CONSERVATION_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.12 (rev-3g) — absorbing-BC energy decay probe (c)
+seas_test_absorbing_bc_energy_decay: $(TEST_ABSORBING_BC_DECAY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ABSORBING_BC_DECAY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.6 (rev-3b) — shared-fault role consistency across MPI
+seas_test_shared_fault_role_consistency: $(TEST_SHARED_FAULT_ROLE_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SHARED_FAULT_ROLE_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §4.7 (rev-3c) — shared-fault DOFData runtime consistency
+seas_test_shared_fault_dof_data_consistency: $(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# v9.2.0 plan §17 (rev-3d) — centroid-margin ctor-only probe
+seas_test_centroid_margin_ctor_only: $(TEST_CENTROID_MARGIN_CTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CENTROID_MARGIN_CTOR_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # Dynamic rupture Phase 3: Friction solver tests
 seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -774,9 +867,63 @@ $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFE
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# v9.2.0 plan §19 R-V92-E02 stage-4 VTU diagnostic
+$(TEST_FAULT_SURFACE_VTU_K4_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# v9.2.0 plan §4.1-§4.4 regression gates
+$(TEST_GODUNOV_ROTATION_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PER_QP_VS_CENTROID_BASIS_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_SHARED_FAULT_ROLE_CONSIST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_NO_PENALTY_DR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_INTERIOR_FAULT_FLUX_PATH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_VOLUME_JAC_SINGLE_CH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_RK4_CONSERVATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_ABSORBING_BC_DECAY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_SHARED_FAULT_DOFDATA_CONSIST_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_CENTROID_MARGIN_CTOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
 $(TEST_FRICTION_SOLVER_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -1024,8 +1171,73 @@ test-fault-face-flux-per-side-assembly: seas_test_fault_face_flux_per_side_assem
 test-fault-surface-vtu-continuity: seas_test_fault_surface_vtu_continuity
 	./seas_test_fault_surface_vtu_continuity
 
+# v9.2.0 plan §19 — R-V92-E02 stage-4 VTU diagnostic
+test-fault-surface-vtu-k4: seas_test_fault_surface_vtu_k4
+	./seas_test_fault_surface_vtu_k4
+
 test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
 	./seas_test_fault_basis_dip_strike_symmetry
+
+# v9.2.0 plan §4.1-§4.4 regression gates
+test-godunov-rotation-identity: seas_test_godunov_rotation_identity
+	./seas_test_godunov_rotation_identity
+
+test-canonical-rotation-pure-strikeslip: seas_test_canonical_rotation_pure_strikeslip
+	./seas_test_canonical_rotation_pure_strikeslip
+
+test-fault-basis-qp-orthonormality: seas_test_fault_basis_qp_orthonormality
+	./seas_test_fault_basis_qp_orthonormality
+
+test-per-qp-vs-centroid-basis-planar-1el: seas_test_per_qp_vs_centroid_basis_planar_1el
+	./seas_test_per_qp_vs_centroid_basis_planar_1el
+
+# v9.2.0 plan §4.6 (rev-3b) — shared-fault role consistency
+# Uses 4 ranks on a 4 km inline fixture.  2 ranks is insufficient
+# because ParMETIS rarely cuts through the fault in a 2-way
+# partition of this compact fixture, causing the test to skip with
+# exit-77 ("no shared fault faces").  4 ranks reliably yields
+# several cross-rank shared fault faces — the test input.
+# v9.2.0 plan §4.9 (rev-3f) — No-penalty regression gate (Pelties 2012 §3.1)
+test-no-penalty-dynamic-rupture: seas_test_no_penalty_dynamic_rupture
+	./seas_test_no_penalty_dynamic_rupture
+
+# v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
+test-interior-fault-flux-path: seas_test_interior_fault_flux_path
+	./seas_test_interior_fault_flux_path
+
+# v9.2.0 plan §4.10 (rev-3g) — single-channel Jacobian probe (d+e)
+test-volume-jacobian-single-channel: seas_test_volume_jacobian_single_channel
+	./seas_test_volume_jacobian_single_channel
+
+# v9.2.0 plan §4.11 (rev-3g) — RK4 conservation probe (b)
+test-rk4-conservation: seas_test_rk4_conservation
+	./seas_test_rk4_conservation
+
+# v9.2.0 plan §4.12 (rev-3g) — absorbing-BC energy decay probe (c)
+test-absorbing-bc-energy-decay: seas_test_absorbing_bc_energy_decay
+	./seas_test_absorbing_bc_energy_decay
+
+test-shared-fault-role-consistency: seas_test_shared_fault_role_consistency
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_shared_fault_role_consistency
+
+# v9.2.0 plan §4.7 (rev-3c) — DOFData runtime consistency via RK4 on fixture
+test-shared-fault-dof-data-consistency: seas_test_shared_fault_dof_data_consistency
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_shared_fault_dof_data_consistency
+
+# Aggregate target: all v9.2.0 §4 regression gates (rev-3..rev-3g)
+# §4.9 runs FIRST per user directive: it verifies the Pelties 2012 benchmark
+# contract that the dynamic-rupture scheme uses pure Godunov fluxes with no
+# IP/BR2/penalty term.  §4.10-§4.12 probe H-V92-G candidates (b)(c)(d)(e).
+test-v92-regression-gates: test-no-penalty-dynamic-rupture \
+                          test-godunov-rotation-identity \
+                          test-canonical-rotation-pure-strikeslip \
+                          test-fault-basis-qp-orthonormality \
+                          test-per-qp-vs-centroid-basis-planar-1el \
+                          test-shared-fault-role-consistency \
+                          test-shared-fault-dof-data-consistency \
+                          test-volume-jacobian-single-channel \
+                          test-rk4-conservation \
+                          test-absorbing-bc-energy-decay
 
 # Death test (REVIEW R-007): child aborts inside MFEM_VERIFY; treat
 # non-zero exit as PASS.  If the child returns 0, the guard is gone.
