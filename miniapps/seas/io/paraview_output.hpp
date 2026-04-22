@@ -21,6 +21,7 @@
 #include <sys/stat.h>
 #include <vector>
 #include <type_traits>
+#include <set>
 
 namespace mfem
 {
@@ -198,6 +199,35 @@ public:
    {
       pv_.RegisterField(name, gf);
    }
+
+   // ---------------------------------------------------------------
+   //  Fault-surface VTU field filter
+   // ---------------------------------------------------------------
+
+   /// @brief Restrict which CellData fields WriteFaultSurfaceVTU emits.
+   ///
+   /// Default (empty set) emits ALL 12 standard fields plus the 5 `_k4`
+   /// fields when stage-4 buffers are supplied, matching pre-feature
+   /// behaviour.  When `fields` is non-empty, WriteFaultSurfaceVTU
+   /// emits only the CellData arrays whose names appear in `fields`
+   /// (comparison is case-sensitive, exact match).  Unknown names in
+   /// `fields` are silently ignored — the resulting VTU simply has no
+   /// such field.  Points / Cells / connectivity are always written.
+   ///
+   /// Use cases:
+   ///  - Large-scale BP5 runs where only `slip_rate_strike` is needed
+   ///    for visualisation ⇒ ~12× per-file size reduction vs the full
+   ///    12-field default, without breaking backward compatibility.
+   ///  - Debugging workflows where a single field is inspected.
+   ///
+   /// The filter does NOT affect `UpdateFaultFieldsBP5` (volume-PVD
+   /// L2-p0 fields) — those remain fully populated.
+   void SetFaultVTUFields(const std::set<std::string> &fields)
+   { fault_vtu_fields_ = fields; }
+
+   /// @brief Current filter set; empty ⇒ all fields.
+   const std::set<std::string> &GetFaultVTUFields() const
+   { return fault_vtu_fields_; }
 
    // ---------------------------------------------------------------
    //  BP5 fault field output (2-component tangential + 1 state)
@@ -760,8 +790,16 @@ public:
       // Cell data — one value per output triangle (speckle-free per
       // R-001 / v9.1.0 §2.3 at the cost of sub-triangle shading, which
       // the DG face-local basis doesn't carry anyway).
+      // Field filter: empty fault_vtu_fields_ ⇒ emit all fields (default);
+      // non-empty ⇒ emit only the listed fields.  See SetFaultVTUFields.
+      const bool filter_active = !fault_vtu_fields_.empty();
+      auto want_field = [&](const char* name) -> bool {
+         if (!filter_active) { return true; }
+         return fault_vtu_fields_.count(std::string(name)) > 0;
+      };
       vtu << "<CellData>\n";
       auto write_field = [&](const char* name, const std::vector<double>& vals) {
+         if (!want_field(name)) { return; }
          vtu << "<DataArray type=\"Float64\" Name=\"" << name
              << "\" format=\"ascii\">\n";
          for (double v : vals) { vtu << v << "\n"; }
@@ -814,6 +852,7 @@ public:
             "param_a","param_Dc","fault_x2","fault_x3"
          };
          for (auto f : fields) {
+            if (!want_field(f)) { continue; }
             pvtu << "<PDataArray type=\"Float64\" Name=\"" << f << "\"/>\n";
          }
          if (has_k4)
@@ -824,6 +863,7 @@ public:
                "normal_stress_k4"
             };
             for (auto f : fields_k4) {
+               if (!want_field(f)) { continue; }
                pvtu << "<PDataArray type=\"Float64\" Name=\"" << f
                     << "\"/>\n";
             }
@@ -999,6 +1039,11 @@ private:
    int  nbf_per_face_ = 1;
    int  n_interior_fault_faces_ = 0;
    int  n_shared_fault_faces_ = 0;
+
+   // Fault-surface VTU field filter.  Empty ⇒ emit all fields
+   // (backward-compatible default).  Non-empty ⇒ emit only the
+   // named CellData arrays.  See SetFaultVTUFields.
+   std::set<std::string> fault_vtu_fields_;
 
    std::unique_ptr<FiniteElementCollection> fault_fec_;
    std::unique_ptr<FES> fault_fes_;

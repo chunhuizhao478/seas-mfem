@@ -119,6 +119,8 @@ TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC      = tests/unit/test_fault_surface_vtu_c
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_strike_symmetry.cpp
 # v9.2.0 §19 R-V92-E02 stage-4 VTU diagnostic
 TEST_FAULT_SURFACE_VTU_K4_SRC              = tests/unit/test_fault_surface_vtu_k4.cpp
+# --paraview-fields / SetFaultVTUFields filter
+TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC    = tests/unit/test_fault_surface_vtu_field_filter.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
@@ -209,6 +211,8 @@ TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ      = $(TEST_FAULT_SURFACE_VTU_CONTINUITY
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC:.cpp=.o)
 # v9.2.0 §19 R-V92-E02
 TEST_FAULT_SURFACE_VTU_K4_OBJ              = $(TEST_FAULT_SURFACE_VTU_K4_SRC:.cpp=.o)
+# --paraview-fields field filter
+TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ    = $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
@@ -629,6 +633,10 @@ seas_test_fault_surface_vtu_continuity: $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ)
 seas_test_fault_surface_vtu_k4: $(TEST_FAULT_SURFACE_VTU_K4_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_K4_OBJ) $(MFEM_LIBS)
 
+# --paraview-fields / SetFaultVTUFields field filter
+seas_test_fault_surface_vtu_field_filter: $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ) $(MFEM_LIBS)
+
 # v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
 seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ) $(MFEM_LIBS)
@@ -890,6 +898,11 @@ $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFE
 
 # v9.2.0 plan §19 R-V92-E02 stage-4 VTU diagnostic
 $(TEST_FAULT_SURFACE_VTU_K4_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# --paraview-fields / SetFaultVTUFields field filter
+$(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -1207,6 +1220,10 @@ test-fault-surface-vtu-continuity: seas_test_fault_surface_vtu_continuity
 # v9.2.0 plan §19 — R-V92-E02 stage-4 VTU diagnostic
 test-fault-surface-vtu-k4: seas_test_fault_surface_vtu_k4
 	./seas_test_fault_surface_vtu_k4
+
+# --paraview-fields / SetFaultVTUFields field filter
+test-fault-surface-vtu-field-filter: seas_test_fault_surface_vtu_field_filter
+	./seas_test_fault_surface_vtu_field_filter
 
 test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
 	./seas_test_fault_basis_dip_strike_symmetry

@@ -730,6 +730,11 @@ int main(int argc, char *argv[])
    real_t pv_v_nu     = -1.0;         // nucleation V threshold override (m/s)
    real_t pv_hyst     = -1.0;         // hysteresis factor override (must be >= 1)
    bool   pv_fault_only = false;      // if true, skip volume PVD Save()
+   // Fault-surface VTU field filter.  Empty ⇒ emit all 12 standard
+   // fields + the 5 _k4 fields when stage-4 buffers are present
+   // (backward-compatible default).  Non-empty ⇒ only the named
+   // CellData arrays are emitted.  Parsed from --paraview-fields.
+   std::set<std::string> pv_fault_fields;
    int  max_steps = 10000000;         // Maximum number of time steps
    // v50g: face DOF node type (GaussLobatto has cond(M)=2901 at p=4, ClosedUniform=58)
    int face_basis_type = BasisType::GaussLobatto;
@@ -882,6 +887,32 @@ int main(int argc, char *argv[])
       {
          use_paraview = true;
          pv_fault_only = true;
+      }
+      if (arg == "--paraview-fields" && i + 1 < argc)
+      {
+         // Comma-separated list of CellData field names to emit.
+         // Empty list (not providing the flag) ⇒ emit all fields.
+         // Example: --paraview-fields slip_rate_strike,normal_stress
+         // Silent handling of unknown names; they simply do not
+         // appear in the VTU.
+         use_paraview = true;
+         std::string list = argv[++i];
+         std::string token;
+         size_t pos = 0;
+         while (pos <= list.size()) {
+            size_t comma = list.find(',', pos);
+            size_t end   = (comma == std::string::npos) ? list.size() : comma;
+            token = list.substr(pos, end - pos);
+            // strip leading/trailing whitespace
+            size_t a = token.find_first_not_of(" \t");
+            size_t b = token.find_last_not_of(" \t");
+            if (a != std::string::npos && b != std::string::npos)
+            {
+               pv_fault_fields.insert(token.substr(a, b - a + 1));
+            }
+            if (comma == std::string::npos) { break; }
+            pos = comma + 1;
+         }
       }
       if (arg == "--petsc-ts-options" && i + 1 < argc)
       {
@@ -1532,6 +1563,23 @@ int main(int argc, char *argv[])
          domain.GetFaultInteriorFaces(),
          domain.GetFaultSharedFaces(),
          domain.GetNbfPerFace());
+
+      // Apply optional CellData field filter from --paraview-fields.
+      // Empty set ⇒ emit all fields (default).  See ParaViewOutput::
+      // SetFaultVTUFields.
+      if (!pv_fault_fields.empty())
+      {
+         pv_out->SetFaultVTUFields(pv_fault_fields);
+         if (mpi.IsRoot())
+         {
+            std::cout << "  Fault-VTU field filter (--paraview-fields):";
+            for (const auto &f : pv_fault_fields)
+            {
+               std::cout << " " << f;
+            }
+            std::cout << "\n";
+         }
+      }
 
       // Pre-allocate local fault vectors
       const int n_local_dofs = domain.GetNumFaultDOFs();
