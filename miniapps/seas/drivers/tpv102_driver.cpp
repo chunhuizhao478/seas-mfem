@@ -166,6 +166,14 @@ int main(int argc, char *argv[])
    bool debug_qnorm  = false;
    int  paraview_step_interval = 0;
    real_t paraview_dt_flag = 0.0;
+   // Bulk (volume) ParaView cadence.  <= 0 disables the bulk collection
+   // entirely (default).  Positive values enable a SECOND ParaView
+   // collection written at the specified seconds interval (to
+   // `ParaView_bulk/`), carrying velocity, sigma_yy, sigma_xy, sigma_xz,
+   // mpi_rank.  Independent of --paraview-dt / --paraview-every (those
+   // set the fault-surface schedule), and independent of --no-domain-pv
+   // (which suppresses only the fault-schedule domain save on pv_out).
+   real_t paraview_bulk_dt = 0.0;
    for (int i = 1; i < argc; i++)
    {
       std::string a = argv[i];
@@ -182,6 +190,11 @@ int main(int argc, char *argv[])
       {
          use_paraview = true;
          paraview_dt_flag = std::atof(argv[++i]);
+      }
+      else if (a == "--paraview-bulk-dt" && i + 1 < argc)
+      {
+         use_paraview = true;
+         paraview_bulk_dt = std::atof(argv[++i]);
       }
    }
 
@@ -554,6 +567,19 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
+   // Second ParaView collection for coarse bulk output at --paraview-bulk-dt.
+   // Populated when paraview_bulk_dt > 0, independent of --no-domain-pv:
+   // the bulk collection writes to `ParaView_bulk/` (separate directory),
+   // so it does not conflict with --no-domain-pv which only suppresses the
+   // fault-schedule pv_out volume save.  Carries velocity (shared GF with
+   // pv_out — allocated regardless of pv_no_domain), three stress
+   // components (sigma_yy, sigma_xy, sigma_xz — the ones most informative
+   // for fault loading / mode-II radiation), and mpi_rank.
+   std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
+   std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
+   std::unique_ptr<PvFES> pv_bulk_sigma_fes;
+   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+
    // Scratch vectors passed to UpdateFaultFieldsBP5 / WriteFaultSurfaceVTU.
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
@@ -684,6 +710,54 @@ int main(int argc, char *argv[])
                       << " s)\n";
          }
       }
+
+      // Optional bulk collection: velocity + sigma_yy + sigma_xy +
+      // sigma_xz + mpi_rank written at a separate --paraview-bulk-dt
+      // cadence to `ParaView_bulk/`.  Independent of --no-domain-pv —
+      // that flag suppresses pv_out's fault-schedule volume save,
+      // while this collection writes its own PVD/VTU series.
+      if (paraview_bulk_dt > 0.0)
+      {
+         pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
+            output_dir + "/ParaView_bulk", pmesh, order);
+         if (pv_low_order)
+         {
+            pv_bulk_out->SetHighOrderOutput(false);
+            pv_bulk_out->SetLevelsOfDetail(1);
+         }
+
+         // Reuse velocity + mpi_rank GFs from pv_out — they are copied
+         // into pv_vel_gf / pv_rank_gf at every paraview_write call.
+         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
+         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
+
+         // Scalar L2 order-`order` FESpace for the three stress
+         // components extracted from Q's stress block.
+         pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
+            order, 3, BasisType::GaussLobatto);
+         pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
+                                                     pv_bulk_sigma_fec.get());
+         pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_sxy_gf = 0.0;
+         *pv_bulk_sxz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+
+         pv_bulk_out->fixed_dt = paraview_bulk_dt;
+
+         if (rank == 0)
+         {
+            std::cout << "  Bulk collection: ON (prefix="
+                      << output_dir << "/ParaView_bulk, every "
+                      << paraview_bulk_dt
+                      << " s; fields: velocity, sigma_yy, sigma_xy, "
+                      << "sigma_xz, mpi_rank)\n";
+         }
+      }
    }
 
    // paraview_write: MPI-collective snapshot writer.  V_max must already be
@@ -698,16 +772,59 @@ int main(int argc, char *argv[])
       // CommitSchedule advances it explicitly for the pv_no_domain path),
       // so the gate and the advance can never disagree on V_max or the
       // current last_write_time_.
-      if (!pv_out->PeekShouldWrite(step_num, time, V_max)) { return; }
+      //
+      // The bulk collection has its OWN schedule (via
+      // `pv_bulk_out->fixed_dt = paraview_bulk_dt`), so we check it
+      // independently.  If neither collection wants to fire this step,
+      // early-return.  Otherwise fall through, pack the fields needed by
+      // whichever collection IS firing, and dispatch both.
+      const bool fault_wants =
+         pv_out->PeekShouldWrite(step_num, time, V_max);
+      const bool bulk_wants = pv_bulk_out &&
+         pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
+      if (!fault_wants && !bulk_wants) { return; }
 
-      if (!pv_no_domain)
+      if (!pv_no_domain || bulk_wants)
       {
          // Copy Q's velocity block (VX..VZ, length 3*ndof_total) into vel_gf.
          // byNODES ordering of the vector FES matches Q's component-major layout.
+         // Needed by either the fault-schedule domain save (pv_out with
+         // --no-domain-pv OFF) or the bulk schedule (pv_bulk_out).
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
                      3 * ndof_total * sizeof(real_t));
       }
+
+      // Pack bulk stress-component GFs from Q's SYY / SXY / SXZ blocks.
+      // byNODES ordering of the scalar FES matches Q's component-major
+      // layout for each of SYY/SXY/SXZ, so one memcpy per component
+      // populates the corresponding GF.
+      if (bulk_wants)
+      {
+         std::memcpy(pv_bulk_syy_gf->GetData(),
+                     Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxy_gf->GetData(),
+                     Q.GetData() + SXY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxz_gf->GetData(),
+                     Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+      }
+
+      // Bulk collection save — advances its own schedule (independent of
+      // pv_out's schedule).  Uses the velocity GF packed above plus the
+      // three sigma GFs packed above (and the mpi_rank GF which is
+      // populated once at setup).  No fault-DOFData packing is needed.
+      if (bulk_wants)
+      {
+         pv_bulk_out->ForceSave(step_num, time);
+      }
+
+      // Everything below is fault-schedule-only (fault DOFData packing,
+      // fault-surface domain save, fault-surface VTU).  If the fault
+      // schedule did not fire this step, nothing else to do.
+      if (!fault_wants) { return; }
 
       // Pack fault fields from DOFData.  R-801 Option A: DOFData.V1/slip1/
       // tau1_corr are the DIP-aligned components and DOFData.V2/slip2/

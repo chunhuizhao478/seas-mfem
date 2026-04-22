@@ -161,7 +161,19 @@ ibrun ./seas_tpv102_driver \
       --paraview \
       --paraview-dt 0.1 \
       --no-domain-pv \
+      --paraview-bulk-dt 1.0 \
       --debug-qnorm
+
+# Bulk-output budget (added 2026-04-20):
+#   --paraview-bulk-dt 1.0  → 12 bulk frames at 0,1,...,12 s (tfinal=12).
+#   Each frame emits 1 PVTU + 400 per-rank VTUs under
+#   "${RESULT_DIR}/ParaView_bulk/", each carrying velocity (3-comp),
+#   sigma_yy, sigma_xy, sigma_xz (scalar), and mpi_rank.  Expected inode
+#   count: ~12 * (1 + 400) + 1 PVD ≈ 4.8k.  Per-VTU size is dominated
+#   by the order-p domain mesh (not the fault surface), so expect
+#   ~100-500 MB total bulk data for the 200 m / P1 / 12 s run.
+#   Fault-surface PVD/VTU (at --paraview-dt 0.1) is unaffected — it
+#   writes to "${RESULT_DIR}/ParaView_fault*/" via WriteFaultSurfaceVTU.
 
 # -------------------------------------------------------------------------
 # Post-run classification.  Apply the §20.5 closure gate, then the tiered
