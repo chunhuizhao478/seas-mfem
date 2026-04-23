@@ -201,7 +201,7 @@ int SetupFault(WaveOperator<MeshT> &wave, MeshT &mesh, int order,
       // Persistent nucleation uniform across every fault QP.
       for (int i = 0; i < n_fault; i++)
       {
-         dof_data[i].tau2_nuc = TPV102Params::nuc_dtau;
+         dof_data[i].tau2_nuc = 0.0;  // HARDCODED for diagnostic
 #ifdef SEAS_DIAG_FAULT_FLUX
          dof_data[i].diag_print = true;
 #endif
@@ -505,26 +505,78 @@ int main(int argc, char *argv[])
                    << "nucleation, expect rhs == 0\n";
          for (int i = 0; i < n_fault_local; i++)
          { dof_data[i].tau2_nuc = 0.0; }
+
+         const char *kCompName[NUM_STATE] = {
+            "SXX","SYY","SZZ","SXY","SYZ","SXZ","VX","VY","VZ"
+         };
+         auto dump_rhs = [&](const char *label, const Vector &k) {
+            real_t max_k = 0;
+            real_t max_per_c[NUM_STATE] = {0};
+            int max_c = -1, max_dof = -1;
+            for (int i = 0; i < k.Size(); i++)
+            {
+               const int c = i / ndof_total;
+               const real_t a = std::abs(k(i));
+               max_per_c[c] = std::max(max_per_c[c], a);
+               if (a > max_k) { max_k = a; max_c = c; max_dof = i % ndof_total; }
+            }
+            std::cout << "    " << label
+                      << "  max |rhs| = " << std::scientific
+                      << std::setprecision(3) << max_k
+                      << " at " << kCompName[max_c] << "[" << max_dof << "]\n      per-c: ";
+            for (int c = 0; c < NUM_STATE; c++)
+            { std::cout << kCompName[c] << "=" << max_per_c[c] << " "; }
+            std::cout << "\n";
+         };
+
          Vector k(size);
          wave.Mult(Q, k);
-         real_t max_k = 0;
-         int max_c = -1, max_dof = -1;
-         for (int i = 0; i < k.Size(); i++)
+         dump_rhs("[BASELINE TPV102 BCs (natural+fault)]", k);
+
+         // VARIANT 1: NO prestress in Q (Q = 0).  If rhs IS zero here,
+         // the bug is specifically about how prestress couples through.
          {
-            if (std::abs(k(i)) > max_k)
-            {
-               max_k = std::abs(k(i));
-               max_c = i / ndof_total;
-               max_dof = i % ndof_total;
-            }
+            Vector Q0(size); Q0 = 0.0;
+            real_t bg_zero[NUM_STATE] = {0};
+            wave.SetAbsorbingBackground(bg_zero);
+            Vector k0(size);
+            wave.Mult(Q0, k0);
+            dump_rhs("[Q == 0, Q_bg == 0]                   ", k0);
+            // Restore the bulk_bg.
+            wave.SetAbsorbingBackground(bulk_bg);
          }
-         std::cout << "    max |rhs| = " << std::scientific
-                   << std::setprecision(6) << max_k
-                   << "  at component " << max_c
-                   << " dof " << max_dof << "\n";
-         // Restore tau2_nuc.
-         for (int i = 0; i < n_fault_local; i++)
-         { dof_data[i].tau2_nuc = TPV102Params::nuc_dtau; }
+
+         // VARIANT 2: Q_bg has SYY only (drop SXY).  If rhs IS zero
+         // here but NOT in baseline, SXY in Q_bg is the trigger.
+         {
+            real_t bg_syy_only[NUM_STATE] = {0};
+            bg_syy_only[SYY] = TPV102Params::sigma_n;
+            wave.SetAbsorbingBackground(bg_syy_only);
+            Vector Q_syy(size); Q_syy = 0.0;
+            for (int i = 0; i < ndof_total; i++)
+            { Q_syy[SYY * ndof_total + i] = TPV102Params::sigma_n; }
+            Vector k2(size);
+            wave.Mult(Q_syy, k2);
+            dump_rhs("[Q,Q_bg = SYY=sigma_n only]            ", k2);
+            wave.SetAbsorbingBackground(bulk_bg);
+         }
+
+         // VARIANT 3: Q_bg has SXY only (drop SYY).  Reverse of V2.
+         {
+            real_t bg_sxy_only[NUM_STATE] = {0};
+            bg_sxy_only[SXY] = -TPV102Params::tau_ini;
+            wave.SetAbsorbingBackground(bg_sxy_only);
+            Vector Q_sxy(size); Q_sxy = 0.0;
+            for (int i = 0; i < ndof_total; i++)
+            { Q_sxy[SXY * ndof_total + i] = -TPV102Params::tau_ini; }
+            Vector k3(size);
+            wave.Mult(Q_sxy, k3);
+            dump_rhs("[Q,Q_bg = SXY=-tau only]               ", k3);
+            wave.SetAbsorbingBackground(bulk_bg);
+         }
+
+         // INTENTIONALLY do NOT restore tau2_nuc — leave at 0 so the
+         // step-by-step loop tests pepper WITHOUT rupture drive.
       }
 
       real_t worst_slip_spread = 0.0, worst_tau1_spread = 0.0;

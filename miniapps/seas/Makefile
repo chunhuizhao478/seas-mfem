@@ -147,6 +147,7 @@ TEST_RUPTURE_MULTISTEP_SRC                 = tests/unit/test_rupture_multistep_s
 # Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY test (8-fault-triangle fixture)
 TEST_ADJACENT_TRI_UNIFORMITY_SRC           = tests/unit/test_adjacent_triangle_fault_uniformity.cpp
 TEST_GODUNOV_ROUNDTRIP_SRC                 = tests/unit/test_godunov_rotation_roundtrip.cpp
+TEST_FRICTION_EQUIL_SRC                    = tests/unit/test_friction_solver_equilibrium.cpp
 # Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
 TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC          = tests/unit/test_sign_flipped_elem1_on_plus_truth_table.cpp
 # Pepper-bug plan 2026-04-22 Phase 4 P4-T1 — MakeFaceKey uniqueness (np=2)
@@ -302,6 +303,7 @@ TEST_INTERIOR_VS_SHARED_LIVE_OBJ           = $(TEST_INTERIOR_VS_SHARED_LIVE_SRC:
 TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.o)
 TEST_ADJACENT_TRI_UNIFORMITY_OBJ           = $(TEST_ADJACENT_TRI_UNIFORMITY_SRC:.cpp=.o)
 TEST_GODUNOV_ROUNDTRIP_OBJ                 = $(TEST_GODUNOV_ROUNDTRIP_SRC:.cpp=.o)
+TEST_FRICTION_EQUIL_OBJ                    = $(TEST_FRICTION_EQUIL_SRC:.cpp=.o)
 TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ          = $(TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC:.cpp=.o)
 TEST_MAKE_FACE_KEY_UNIQ_OBJ                = $(TEST_MAKE_FACE_KEY_UNIQ_SRC:.cpp=.o)
 TEST_FAULT_DOF_OFFSET_OBJ                  = $(TEST_FAULT_DOF_OFFSET_SRC:.cpp=.o)
@@ -804,6 +806,9 @@ seas_test_adjacent_triangle_fault_uniformity: $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ
 seas_test_godunov_rotation_roundtrip: $(TEST_GODUNOV_ROUNDTRIP_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_ROUNDTRIP_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 
+seas_test_friction_solver_equilibrium: $(TEST_FRICTION_EQUIL_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRICTION_EQUIL_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
 seas_test_interior_vs_shared_branch_live: $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
@@ -1214,6 +1219,10 @@ $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
 $(TEST_GODUNOV_ROUNDTRIP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_FRICTION_EQUIL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 

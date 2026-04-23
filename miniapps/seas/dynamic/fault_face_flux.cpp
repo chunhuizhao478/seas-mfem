@@ -325,8 +325,10 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
    {
       std::fprintf(stderr,
          "[C-1 EVAL-TOTAL] rank=%d  tau1_fric=%+.3e Pa  "
-         "tau2_fric=%+.3e Pa  psi=%.3e  (tau2_nuc=%+.3e)\n",
-         g_seas_my_rank, tau1_fric, tau2_fric, data.psi, data.tau2_nuc);
+         "tau2_fric=%+.3e Pa  sigma_n_fric=%+.3e Pa  psi=%.3e  "
+         "a=%.3e  eta_s=%.3e  (tau2_nuc=%+.3e, sigma_n_nuc=%+.3e)\n",
+         g_seas_my_rank, tau1_fric, tau2_fric, sigma_n_fric, data.psi,
+         data.a, data.eta_s, data.tau2_nuc, data.sigma_n_nuc);
    }
 #endif
 
