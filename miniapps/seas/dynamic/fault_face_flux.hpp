@@ -152,6 +152,49 @@ public:
                       real_t *Q_imp_plus, real_t *Q_imp_minus,
                       FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
 
+   /// FACE-AVERAGED friction-solve variant (option 1 of the
+   /// 2026-04-22 pepper investigation).
+   ///
+   /// Pepper-bug diagnosis: per-QP friction outputs differ slightly
+   /// across QPs of a single fault triangle due to per-DOF DG
+   /// non-uniformity in bulk Q after one stage's flux deposition.
+   /// Under strong rupture drive (V_abs O(0.1) m/s), the per-QP
+   /// variations compound step-over-step to produce visible per-tet
+   /// pepper.  See debug_document/tpv102_debug_document/
+   /// tpv102_debug_2026-04-22 documents.
+   ///
+   /// This variant takes face-averaged trial inputs (the AVERAGE
+   /// across QPs of one fault triangle) and writes face-uniform
+   /// outputs back to every per-QP DOFData entry of that face.
+   /// The friction solver runs ONCE PER FACE.  The wave operator
+   /// then deposits the same Q_imp at every QP via shape1·F_h.
+   /// All per-QP F_h values are identical → no per-QP variation in
+   /// rhs deposition → no compounding pepper.
+   ///
+   /// Mirrors SeisSol's approach in spirit (per-face DR processing
+   /// in BaseFrictionLaw::evaluate) while being a minimal patch on
+   /// MFEM's per-QP wave operator dispatch.
+   ///
+   /// @param[in,out] dof_data        Per-QP DOFData array for ONE
+   ///                                fault face.  All entries are
+   ///                                updated to the face-averaged
+   ///                                friction output (uniform per
+   ///                                face).
+   /// @param[in]  nqp_per_face       Number of QPs on this face
+   ///                                (== dof_data.size()).
+   /// @param[in]  Q_plus_avg         Face-averaged total-Q on +side
+   ///                                (fault-local frame, 9 components).
+   /// @param[in]  Q_minus_avg        Face-averaged total-Q on -side.
+   /// @param[out] Q_imp_plus         Face-uniform imposed +state,
+   ///                                same value used for every QP.
+   /// @param[out] Q_imp_minus        Face-uniform imposed -state.
+   /// @param[in]  method             Friction solver method.
+   void EvaluateTotalFaceAveraged(
+      DOFData *dof_data, int nqp_per_face,
+      const real_t *Q_plus_avg, const real_t *Q_minus_avg,
+      real_t *Q_imp_plus, real_t *Q_imp_minus,
+      FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
    /// ADER Phase 5: time-integrated friction solve (fluctuation-Q variant).
    ///
    /// Inputs I± = ∫_0^{dt} Q±(τ) dτ in fault-local coordinates.  Converts

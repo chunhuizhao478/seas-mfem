@@ -409,6 +409,88 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
 }
 
 // ---------------------------------------------------------------------------
+// FACE-AVERAGED EvaluateTotal (option 1, 2026-04-22 pepper fix).
+//
+// Calls EvaluateTotal on the FACE-AVERAGED tau_trial / sigma_n_trial
+// using a representative DOFData snapshot (averaged psi, averaged
+// tau*_nuc) for the friction solve, then writes the friction outputs
+// uniformly to every per-QP DOFData entry of the face.  The wave
+// operator can then deposit the face-uniform Q_imp via shape1·F_h at
+// every QP — all per-QP F_h values are identical.
+//
+// Effect: eliminates per-QP rhs deposition variation that compounds
+// through the DG×nonlinear-friction amplification chain (per-DOF
+// non-uniformity → per-QP friction outputs differ → per-QP rhs
+// variation → next stage sees more variation, etc.).  Diagnosed in
+// test_adjacent_triangle_fault_uniformity; see commits e686867 +
+// 81ae35a for the full diagnostic chain.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateTotalFaceAveraged(
+   DOFData *dof_data, int nqp_per_face,
+   const real_t *Q_plus_avg, const real_t *Q_minus_avg,
+   real_t *Q_imp_plus, real_t *Q_imp_minus,
+   FrictionSolver::Method method) const
+{
+   MFEM_VERIFY(dof_data != nullptr,
+               "EvaluateTotalFaceAveraged: dof_data must not be null");
+   MFEM_VERIFY(nqp_per_face > 0,
+               "EvaluateTotalFaceAveraged: nqp_per_face must be > 0, got "
+               << nqp_per_face);
+
+   // Build a face-representative DOFData by averaging the per-QP fields
+   // that the friction solver reads (psi, tau*_nuc, sigma_n_nuc).
+   // Material parameters (Zp, Zs, eta_p, eta_s, a, Dc) are uniform per
+   // face by physics; assert the first QP matches the rest as a sanity
+   // gate.  V1, V2, slip_rate, slip1, slip2, tau*_corr, sigma_n_corr
+   // are OUTPUTS — overwritten by EvaluateTotal.
+   DOFData face_data = dof_data[0];
+   real_t psi_avg = 0.0, tau1_nuc_avg = 0.0, tau2_nuc_avg = 0.0;
+   real_t sigma_n_nuc_avg = 0.0;
+   for (int q = 0; q < nqp_per_face; q++)
+   {
+      psi_avg          += dof_data[q].psi;
+      tau1_nuc_avg     += dof_data[q].tau1_nuc;
+      tau2_nuc_avg     += dof_data[q].tau2_nuc;
+      sigma_n_nuc_avg  += dof_data[q].sigma_n_nuc;
+   }
+   const real_t inv_nqp = 1.0 / static_cast<real_t>(nqp_per_face);
+   face_data.psi         = psi_avg          * inv_nqp;
+   face_data.tau1_nuc    = tau1_nuc_avg     * inv_nqp;
+   face_data.tau2_nuc    = tau2_nuc_avg     * inv_nqp;
+   face_data.sigma_n_nuc = sigma_n_nuc_avg  * inv_nqp;
+   face_data.tau1_0      = 0.0;  // total-Q contract: must be zero
+   face_data.tau2_0      = 0.0;
+   face_data.sigma_n0    = 0.0;
+
+   // Run the standard EvaluateTotal on face-averaged inputs.  The
+   // outputs (V1, V2, slip_rate, tau*_corr, sigma_n_corr) are written
+   // into face_data; Q_imp_plus / Q_imp_minus are the face-uniform
+   // imposed states.
+   EvaluateTotal(face_data, Q_plus_avg, Q_minus_avg,
+                 Q_imp_plus, Q_imp_minus, method);
+
+   // Distribute the friction outputs UNIFORMLY across every per-QP
+   // DOFData entry of this face.  psi is intentionally NOT
+   // overwritten: the caller's coupled-RK4-on-psi integrator owns
+   // psi evolution per QP, and the EvaluateTotal contract guarantees
+   // psi is unchanged inside.  We restore each QP's per-QP psi
+   // (already preserved by EvaluateTotal contract on face_data; we
+   // just leave per-QP dof_data[q].psi untouched).
+   for (int q = 0; q < nqp_per_face; q++)
+   {
+      dof_data[q].slip_rate    = face_data.slip_rate;
+      dof_data[q].V1           = face_data.V1;
+      dof_data[q].V2           = face_data.V2;
+      dof_data[q].tau1_corr    = face_data.tau1_corr;
+      dof_data[q].tau2_corr    = face_data.tau2_corr;
+      dof_data[q].sigma_n_corr = face_data.sigma_n_corr;
+      // psi: untouched (per-QP integrated by driver's coupled RK4).
+      // {tau*_0, tau*_nuc, sigma_n_*} are INPUTS to friction; not
+      // overwritten here.
+   }
+}
+
+// ---------------------------------------------------------------------------
 // ADER I-05 Phase 5: time-integrated Riemann solve (fluctuation variant).
 // ---------------------------------------------------------------------------
 // I± = ∫_0^{dt} Q±(τ) dτ  ⇒  Q̄± = I±/dt.  Call the standard Evaluate on
