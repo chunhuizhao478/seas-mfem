@@ -196,6 +196,9 @@ int SetupFault(WaveOperator<MeshT> &wave, MeshT &mesh, int order,
       for (int i = 0; i < n_fault; i++)
       {
          dof_data[i].tau2_nuc = TPV102Params::nuc_dtau;
+#ifdef SEAS_DIAG_FAULT_FLUX
+         dof_data[i].diag_print = true;
+#endif
       }
    }
    wave.SetFaultFlux(&ff);
@@ -494,6 +497,64 @@ int main(int argc, char *argv[])
                       << "\n";
          }
       };
+
+      // Dump Q at EVERY DOF of every fault-adjacent tet.  If bulk Q
+      // within a single tet becomes non-uniform, we've localized the
+      // per-DOF asymmetry.  Also dump Q[SXY] and Q[SXZ] (which map to
+      // dip/strike in global Cartesian — fault-local rotation aside,
+      // non-uniformity in either = per-DOF flux deposition asymmetry).
+      const auto &fes = wave.GetFESpace();
+      auto dump_bulk_at_fault_tets = [&](int step) {
+         std::cout << "\n  BULK Q at fault-adjacent tets at step "
+                   << step << ":\n";
+         // Track tets that touch the fault plane (y=L/2).
+         std::vector<int> fault_tets;
+         const Array<int> &int_faces = wave.GetFaultInteriorFaces();
+         for (int i = 0; i < int_faces.Size(); i++)
+         {
+            auto *ftr = serial_mesh.GetInteriorFaceTransformations(
+               int_faces[i]);
+            fault_tets.push_back(ftr->Elem1No);
+            fault_tets.push_back(ftr->Elem2No);
+         }
+         std::sort(fault_tets.begin(), fault_tets.end());
+         fault_tets.erase(std::unique(fault_tets.begin(),
+                                       fault_tets.end()),
+                          fault_tets.end());
+         for (int e : fault_tets)
+         {
+            Array<int> edofs; fes.GetElementDofs(e, edofs);
+            // Compute centroid.
+            Array<int> ev; serial_mesh.GetElementVertices(e, ev);
+            real_t cx = 0, cy = 0, cz = 0;
+            for (int v = 0; v < ev.Size(); v++)
+            {
+               cx += serial_mesh.GetVertex(ev[v])[0];
+               cy += serial_mesh.GetVertex(ev[v])[1];
+               cz += serial_mesh.GetVertex(ev[v])[2];
+            }
+            cx /= ev.Size(); cy /= ev.Size(); cz /= ev.Size();
+            std::cout << "    tet=" << std::setw(3) << e
+                      << "  cy=" << std::fixed << std::setprecision(1)
+                      << cy << "  SXY=[";
+            for (int k = 0; k < edofs.Size(); k++)
+            {
+               std::cout << std::scientific << std::setprecision(4)
+                         << std::showpos
+                         << Q(SXY * ndof_total + edofs[k])
+                         << (k < edofs.Size() - 1 ? "," : "");
+            }
+            std::cout << "]\n             SXZ=[";
+            for (int k = 0; k < edofs.Size(); k++)
+            {
+               std::cout << std::scientific << std::setprecision(4)
+                         << std::showpos
+                         << Q(SXZ * ndof_total + edofs[k])
+                         << (k < edofs.Size() - 1 ? "," : "");
+            }
+            std::cout << std::noshowpos << "]\n";
+         }
+      };
       for (int step = 0; step < kNSteps; step++)
       {
          wave.AdvanceADER(Q, kDt, /*ader_order=*/2, Q_new);
@@ -524,7 +585,11 @@ int main(int argc, char *argv[])
                    << s.max_tau2 << "]  spread = " << tau2_spread
                    << "  |  tau1_corr [" << s.min_tau1 << " ... "
                    << s.max_tau1 << "]\n";
-         if (step == 5 || step == 19) { dump_per_qp(step); }
+         if (step == 0 || step == 1 || step == 2 || step == 5 || step == 19)
+         {
+            dump_per_qp(step);
+            dump_bulk_at_fault_tets(step);
+         }
       }
       std::cout << "\n  worst spreads over " << kNSteps << " steps:\n"
                 << "    slip_rate : " << std::scientific
