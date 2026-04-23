@@ -1,15 +1,15 @@
 #!/bin/bash
-#SBATCH -J tpv102_persist_nuc_400r
-#SBATCH -o tpv102_persist_nuc_400r_%j.out
-#SBATCH -e tpv102_persist_nuc_400r_%j.err
+#SBATCH -J tpv102_persist_nuc_12s_400r
+#SBATCH -o tpv102_persist_nuc_12s_400r_%j.out
+#SBATCH -e tpv102_persist_nuc_12s_400r_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# TPV102 nucleation persistent-prestress channel fix — re-run of the
-# 400-rank V_max halt test under the 2026-04-22 fix.
+# TPV102 nucleation persistent-prestress channel fix — full 12 s
+# 400-rank confirmation run under the 2026-04-22 fix.
 #
 # What changed since
 # `tpv102_200m_p1_2.0s_400rank_ader_total_vmax_halt.sbatch`:
@@ -36,14 +36,25 @@
 #     (under the broken add-delta path it saw ~kPa, hence V_max
 #     stalled at 2e-7 m/s in the prior 400-rank run).
 #   - Breakaway around t ~ 0.5-1 s, V_max into the 1-10 m/s range.
-#   - At least 6 / 9 SCEC fault stations should record nontrivial
-#     slip rate by t = 2.0 s.
+#   - Rupture propagates across the VW patch over the full 12 s;
+#     by t = 12 s all 9 SCEC fault stations should record slip.
+#   - Bulk ParaView output every 1.0 s for post-run wavefield QA
+#     (13 frames at t=0,1,...,12 s; follows the pattern in
+#     tpv102_200m_p1_12.0s_400r_v92_postfix.sbatch).
 #
-# WALL-CLOCK budget: ≤ 2 hr on 8 Cascade Lake dev-queue nodes.
-# SU COST: ~512 SU (8 nodes × 2 hr × 32 SU/node-hour).
+# WALL-CLOCK budget: 2 hr cap on 8 Cascade Lake development-queue
+# nodes.  The 12 s tfinal at 200 m / P1 / cfl=0.5 extrapolates to
+# ~4 hr on the RK4 + fluctuation-Q v91 baseline and ~4.5 hr on the
+# v92 postfix (normal queue).  The 2 hr dev cap WILL TRIGGER a
+# SIGKILL mid-run — the station .dat files flush every write so
+# partial (t < 12 s) output is recoverable, and the bulk ParaView
+# frames written before the cap are still usable for early
+# wavefield QA.  Re-submit to normal queue if a full 12 s run is
+# needed.
+# SU COST: ~512 SU (2 hr × 8 nodes × 32 SU/node-hour).
 #
 # Usage:
-#   sbatch jobs/tpv102/tpv102_200m_p1_2.0s_400rank_persistent_nuc_fix.sbatch
+#   sbatch jobs/tpv102/tpv102_200m_p1_12.0s_400rank_persistent_nuc_fix.sbatch
 
 export LC_ALL=C
 export LANG=C
@@ -82,7 +93,7 @@ make seas_test_persistent_nuc_prestress_channel -j"${JOBS}" \
 ./seas_test_persistent_nuc_prestress_channel \
    || { echo "FIX UNIT TEST FAILED"; exit 1; }
 
-RESULT_DIR="tpv102/results_persist_nuc_400r_job${SLURM_JOB_ID}"
+RESULT_DIR="tpv102/results_persist_nuc_12s_400r_job${SLURM_JOB_ID}"
 OUTPUT_PREFIX="tpv102"
 
 mkdir -p "${RESULT_DIR}"
@@ -90,10 +101,11 @@ mkdir -p "${RESULT_DIR}"
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${RESULT_DIR}"
-echo "TPV102 persistent-prestress fix: 400 ranks / 8 nodes, tfinal=2.0 s"
+echo "TPV102 persistent-prestress fix: 400 ranks / 8 nodes, tfinal=12.0 s"
 
 # CLI mirrors the working ADER+total-Q halt sbatch — only the source
-# changed, not the runtime configuration.
+# changed, not the runtime configuration.  Bulk ParaView at 1.0 s
+# matches the v92 12 s postfix sbatch for wavefield QA.
 ibrun ./seas_tpv102_driver \
       --mesh tpv102/mesh/tpv102_200m.msh \
       --mesh-scale 1 \
@@ -102,20 +114,30 @@ ibrun ./seas_tpv102_driver \
       --ader-order 2 \
       --bc-mode absorbing \
       --cfl 0.5 \
-      --tfinal 2.0 \
+      --tfinal 12.0 \
       --output-dir "${RESULT_DIR}" \
       --output-prefix "${OUTPUT_PREFIX}" \
       --output-dt 0.1 \
       --paraview \
       --paraview-dt 0.1 \
       --no-domain-pv \
+      --paraview-bulk-dt 1.0 \
       --debug-qnorm
+
+# Bulk-output budget:
+#   --paraview-bulk-dt 1.0  → 13 bulk frames at 0,1,...,12 s.  Each
+#   frame emits 1 PVTU + 400 per-rank VTUs under
+#   "${RESULT_DIR}/ParaView_bulk/" carrying velocity (3-comp),
+#   sigma_yy, sigma_xy, sigma_xz, mpi_rank.  Expected inode count
+#   ~13*(1+400) ≈ 5.2k.  Per-VTU size dominated by the 200 m domain
+#   mesh (not fault surface); expect ~100-500 MB total bulk data.
+#   Fault-surface PVD/VTU (at --paraview-dt 0.1) unchanged.
 
 # Post-run classification: same shape as the prior halt sbatch so the
 # RESULT.txt format stays comparable.
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
-JOB_LOG="${SBATCH_LOG_DIR}/tpv102_persist_nuc_400r_${SLURM_JOB_ID}.out"
-JOB_ERR="${SBATCH_LOG_DIR}/tpv102_persist_nuc_400r_${SLURM_JOB_ID}.err"
+JOB_LOG="${SBATCH_LOG_DIR}/tpv102_persist_nuc_12s_400r_${SLURM_JOB_ID}.out"
+JOB_ERR="${SBATCH_LOG_DIR}/tpv102_persist_nuc_12s_400r_${SLURM_JOB_ID}.err"
 if [ ! -f "${JOB_LOG}" ]; then
    echo "FAIL: post-run check cannot locate job log (looked at '${JOB_LOG}'). Hint: SLURM_SUBMIT_DIR='${SLURM_SUBMIT_DIR:-<unset>}'." > "${RESULT_FILE}"
    cat "${RESULT_FILE}"
@@ -172,7 +194,7 @@ V_MAX_PEAK=$(grep "V_max" "${JOB_LOG}" \
              | sort -g | tail -1)
 FINAL_WATCH=$(grep "\[qnorm:watch\]" "${JOB_LOG}" | tail -1)
 
-echo "TPV102 persistent-prestress fix (400-rank / tfinal=2.0 s)" > "${RESULT_FILE}"
+echo "TPV102 persistent-prestress fix (400-rank / tfinal=12.0 s)" > "${RESULT_FILE}"
 echo "  Banners:" >> "${RESULT_FILE}"
 echo "    ${TOTAL_Q_LINE}" >> "${RESULT_FILE}"
 echo "    ${ADER_LINE}" >> "${RESULT_FILE}"
