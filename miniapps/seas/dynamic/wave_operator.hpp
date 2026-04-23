@@ -103,6 +103,20 @@ public:
    void SetFreeSurfaceBCMode(FreeSurfaceBCMode m) { free_surface_bc_mode_ = m; }
    FreeSurfaceBCMode GetFreeSurfaceBCMode() const { return free_surface_bc_mode_; }
 
+   /// Face-averaged friction-solve mode (option 1 of the 2026-04-22
+   /// pepper fix).  Default false (per-QP friction, byte-identical to
+   /// pre-fix behaviour).  When true, fault-face dispatch uses a
+   /// face-level pre-pass to compute Q_self_avg / Q_nbr_avg across
+   /// the face's QPs, calls FaultFaceFlux::EvaluateTotalFaceAveraged
+   /// once per face, and uses face-uniform Q_imp values to compute
+   /// F_h identical at every QP.  Eliminates per-QP rhs deposition
+   /// variation that compounds through the DG×nonlinear-friction
+   /// amplification chain (the per-tet pepper observed in production).
+   void SetFaceAveragedFrictionMode(bool on)
+   { face_averaged_friction_mode_ = on; }
+   bool GetFaceAveragedFrictionMode() const
+   { return face_averaged_friction_mode_; }
+
    /// I-06 migration: supply a bulk background state used by all total-Q
    /// BC variants (R-I06-001 absorbing, R-I06-005 free-surface, R-I06-007
    /// PML).  When set:
@@ -382,6 +396,7 @@ private:
    /// I-04: free-surface BC flux dispatch mode.  Defaults to Gamma so
    /// setup-free drivers keep pre-v9.3.0 output.
    FreeSurfaceBCMode free_surface_bc_mode_ = FreeSurfaceBCMode::Gamma;
+   bool face_averaged_friction_mode_ = false;
 
    /// I-06: bulk background state for total-Q BC dispatch
    /// (R-I06-001 absorbing / R-I06-005 free-surface / R-I06-007 PML).
