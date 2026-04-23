@@ -193,8 +193,11 @@ int main()
    std::cout << "\n-- Cross-frame F_h consistency: flux_.Interior with both --\n";
 
    // We need a GodunovFlux instance.  TPV102 material.
+   // CTOR signature: GodunovFlux(real_t lambda, real_t mu, real_t rho)
    const real_t rho = 2670.0, cp = 6000.0, cs = 3464.0;
-   GodunovFlux flux(rho, cp, cs);
+   const real_t mu = rho * cs * cs;
+   const real_t lambda = rho * cp * cp - 2.0 * mu;
+   GodunovFlux flux(lambda, mu, rho);
 
    real_t F_h_A[NUM_STATE], F_h_B[NUM_STATE];
    // Frame A is implicit in flux.Interior(can_n, Q, Q, F_h) — Interior calls
@@ -240,6 +243,119 @@ int main()
       TEST_LE(v, 1.0e-12,
               std::string("F_h[") + StateName(c) + "] == 0 for Q_bg input");
    }
+
+   // -----------------------------------------------------------------
+   // CRITICAL TEST: Does the spectral decomposition recover A_x?
+   // I.e., does A_x_plus + A_x_minus == A_x_full (BuildJacobian)?
+   //
+   // The flux.Interior pipeline assumes:
+   //   F_rot = ApplySplitFlux(Q_self, Q_nbr) computes
+   //           Ax_plus_ * Q_self + Ax_minus_ * Q_nbr.
+   //   When Q_self == Q_nbr, this = (Ax_plus_ + Ax_minus_) * Q.
+   //   For physical correctness, this MUST equal Ax_full * Q.
+   //
+   // If the F_h[VX] discrepancy above is due to Ax_plus_ + Ax_minus_ !=
+   // Ax_full, this test will reveal it.
+   // -----------------------------------------------------------------
+   std::cout << "\n-- Ax decomposition consistency test --\n";
+   const DenseMatrix &Ax_full = flux.GetReferenceStarMatrix(0);
+   // Apply Ax_full to the LOCAL Q in BuildFrame frame.
+   // Step 1: rotate Q_bg into BuildFrame-local.
+   DenseMatrix Tinv_bf(NUM_STATE), T_bf(NUM_STATE);
+   GodunovFlux::BuildRotationInverse(can_n, bf_t1, bf_t2, Tinv_bf);
+   GodunovFlux::BuildRotation       (can_n, bf_t1, bf_t2, T_bf);
+   Vector Q_g_vec(const_cast<real_t*>(Q_bg), NUM_STATE);
+   Vector Q_local_bf(NUM_STATE);
+   Tinv_bf.Mult(Q_g_vec, Q_local_bf);
+   // Step 2: Apply Ax_full directly.
+   Vector F_local_full(NUM_STATE);
+   Ax_full.Mult(Q_local_bf, F_local_full);
+   // Step 3: Rotate back to global.
+   Vector F_global_full(NUM_STATE);
+   T_bf.Mult(F_local_full, F_global_full);
+
+   std::cout << "  Ax_full (BuildJacobian) gives:\n";
+   real_t F_full_arr[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++) { F_full_arr[c] = F_global_full(c); }
+   PrintQ("F_h via Ax_full", F_full_arr);
+   std::cout << "  flux.Interior (Ax_plus + Ax_minus) gives:\n";
+   PrintQ("F_h via Interior", F_h_A);
+
+   // Intermediate diagnostic: print F_local before rotating back, to
+   // localize whether Ax_full is wrong OR T is wrong.
+   real_t F_loc_arr[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++) { F_loc_arr[c] = F_local_full(c); }
+   std::cout << "  F_local (Ax_full * Q_local, Frame B):\n";
+   PrintQ("F_local", F_loc_arr);
+
+   // Hand-expected per elastodynamics:
+   //   For dir=0 (local x), V=0, Q_local = (SXX=σ_n, SXY=+τ, ...):
+   //     F_local[VX] = -SXX/ρ = -σ_n/ρ
+   //     F_local[VY] = -SXY/ρ = -τ/ρ
+   //     all others = 0.
+   const real_t F_loc_VX_expect = -1.20e8 / rho;
+   const real_t F_loc_VY_expect = -7.50e7 / rho;
+   std::cout << "  expected F_local[VX] = " << std::scientific
+             << std::setprecision(6) << F_loc_VX_expect
+             << "  actual = " << F_loc_arr[VX] << "\n";
+   std::cout << "  expected F_local[VY] = " << F_loc_VY_expect
+             << "  actual = " << F_loc_arr[VY] << "\n";
+   TEST_LE(std::abs(F_loc_arr[VX] - F_loc_VX_expect) /
+           std::abs(F_loc_VX_expect), 1.0e-12,
+           "Ax_full * Q_local: F_local[VX] = -SXX/ρ");
+   TEST_LE(std::abs(F_loc_arr[VY] - F_loc_VY_expect) /
+           std::abs(F_loc_VY_expect), 1.0e-12,
+           "Ax_full * Q_local: F_local[VY] = -SXY/ρ");
+
+   // Direct dump of Ax_full entries (with full precision):
+   std::cout << std::scientific << std::setprecision(15);
+   std::cout << "  Ax_full row VX (the -1/rho row, expected entry at SXX): \n";
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      if (std::abs(Ax_full(VX, c)) > 1e-30)
+      {
+         std::cout << "    Ax_full(VX, " << StateName(c) << ") = "
+                   << Ax_full(VX, c) << "\n";
+      }
+   }
+   std::cout << "  Ax_full row VY (the -1/rho row, expected entry at SXY): \n";
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      if (std::abs(Ax_full(VY, c)) > 1e-30)
+      {
+         std::cout << "    Ax_full(VY, " << StateName(c) << ") = "
+                   << Ax_full(VY, c) << "\n";
+      }
+   }
+   std::cout << "  Q_local SXX = " << Q_local_bf(SXX)
+             << "  SXY = " << Q_local_bf(SXY) << "\n";
+   std::cout << "  Expected: 1/rho = " << (1.0/rho) << "\n";
+   std::cout << std::setprecision(6);
+
+   // Now print key entries of T to see if T(VX, VY) = -1 as I expect.
+   std::cout << "  T_bf velocity block (should be Q^T of "
+             << "[n; t1; t2]):\n";
+   for (int gi = 0; gi < 3; gi++)
+   {
+      std::cout << "    T(V_global[" << gi << "], V_local[*]) = (";
+      for (int lj = 0; lj < 3; lj++)
+      {
+         std::cout << T_bf(VX + gi, VX + lj) << (lj < 2 ? ", " : ")");
+      }
+      std::cout << "\n";
+   }
+
+   real_t max_diff = 0;
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      max_diff = std::max(max_diff, std::abs(F_full_arr[c] - F_h_A[c]));
+   }
+   std::cout << "  max |F_h_full - F_h_Interior| = " << std::scientific
+             << std::setprecision(6) << max_diff << "\n";
+   TEST_LE(max_diff / std::max(std::abs(F_full_arr[VX]), 1.0),
+           1.0e-10,
+           "Ax_plus + Ax_minus == Ax_full (spectral decomposition is "
+           "correct decomposition of A_x)");
 
    std::cout << "\n========================================\n"
              << "  Results: " << num_passed << " passed, "

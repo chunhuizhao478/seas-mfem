@@ -83,10 +83,14 @@ static int num_tests = 0, num_passed = 0, num_failed = 0;
 
 namespace {
 
-constexpr real_t kL = 1000.0;       // 1 km cube; dt safe for p=1 ADER-2
+constexpr real_t kL = 1000.0;       // 1 km cube; dt safe for p=1 ADER
 constexpr real_t kDt = 5.0e-5;
 constexpr int    kNSteps = 20;
 constexpr int    kOrder = 1;
+// ADER order: 1 = no predictor (forward Euler-like), 2 = Cauchy-Kovalevskaya
+// 1st-order time predictor.  Production tpv102_200m_p1_*.sbatch uses 2.
+// Override at runtime: env var SEAS_TEST_ADER_ORDER (default 2).
+int kAderOrder = 2;
 
 // 2x2x2 Cartesian hex, then convert to tets.  MFEM's MakeCartesian3D
 // splits each hex into 6 tets.  Fault plane y = L/2 cuts 2x2 = 4 hexes,
@@ -279,6 +283,17 @@ int main(int argc, char *argv[])
 #endif
    const bool is_parallel = (nprocs > 1);
 
+   if (const char *env = std::getenv("SEAS_TEST_ADER_ORDER"))
+   {
+      kAderOrder = std::atoi(env);
+      if (kAderOrder < 1 || kAderOrder > 4) { kAderOrder = 2; }
+   }
+   if (rank == 0)
+   {
+      std::cout << "  ADER order = " << kAderOrder
+                << " (override via env SEAS_TEST_ADER_ORDER)\n";
+   }
+
    if (rank == 0)
    {
       std::cout << "\n=== TPV102 pepper-bug: ADJACENT-TRIANGLE "
@@ -354,7 +369,7 @@ int main(int argc, char *argv[])
       int    worst_step = -1;
       for (int step = 0; step < kNSteps; step++)
       {
-         wave.AdvanceADER(Q, kDt, /*ader_order=*/2, Q_new);
+         wave.AdvanceADER(Q, kDt, /*ader_order=*/kAderOrder, Q_new);
          Q.Swap(Q_new);
          UniformityStats s = CollectStats(dof_data);
          GlobalReduce(s, MPI_COMM_WORLD);
@@ -480,6 +495,38 @@ int main(int argc, char *argv[])
       InitializeStateTotal(Q, ndof_total, TPV102Params::sigma_n,
                            TPV102Params::tau_ini);
 
+      // CONSERVATION TEST: for uniform Q == Q_bg, no nucleation, the
+      // wave operator MUST give rhs == 0 at every DOF (divergence
+      // theorem: face flux contributions cancel around any closed
+      // element).  Anything > FP roundoff means the volume + face
+      // assembly does NOT preserve uniform Q -- direct pepper source.
+      {
+         std::cout << "\n  CONSERVATION TEST: uniform Q == Q_bg, no "
+                   << "nucleation, expect rhs == 0\n";
+         for (int i = 0; i < n_fault_local; i++)
+         { dof_data[i].tau2_nuc = 0.0; }
+         Vector k(size);
+         wave.Mult(Q, k);
+         real_t max_k = 0;
+         int max_c = -1, max_dof = -1;
+         for (int i = 0; i < k.Size(); i++)
+         {
+            if (std::abs(k(i)) > max_k)
+            {
+               max_k = std::abs(k(i));
+               max_c = i / ndof_total;
+               max_dof = i % ndof_total;
+            }
+         }
+         std::cout << "    max |rhs| = " << std::scientific
+                   << std::setprecision(6) << max_k
+                   << "  at component " << max_c
+                   << " dof " << max_dof << "\n";
+         // Restore tau2_nuc.
+         for (int i = 0; i < n_fault_local; i++)
+         { dof_data[i].tau2_nuc = TPV102Params::nuc_dtau; }
+      }
+
       real_t worst_slip_spread = 0.0, worst_tau1_spread = 0.0;
       real_t worst_tau2_spread = 0.0, worst_sn_spread = 0.0;
       int    worst_step = -1;
@@ -559,7 +606,7 @@ int main(int argc, char *argv[])
       };
       for (int step = 0; step < kNSteps; step++)
       {
-         wave.AdvanceADER(Q, kDt, /*ader_order=*/2, Q_new);
+         wave.AdvanceADER(Q, kDt, /*ader_order=*/kAderOrder, Q_new);
          Q.Swap(Q_new);
          UniformityStats s = CollectStats(dof_data);
          const real_t slip_mid = 0.5 * (s.max_slip + s.min_slip);
