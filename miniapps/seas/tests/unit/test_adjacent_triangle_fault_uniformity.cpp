@@ -65,6 +65,8 @@
 using namespace mfem;
 using namespace mfem::seas;
 
+namespace mfem { namespace seas { int g_seas_my_rank = 0; } }  // NOLINT
+
 static int num_tests = 0, num_passed = 0, num_failed = 0;
 
 #define TEST_LE(v, tol, msg) do { \
