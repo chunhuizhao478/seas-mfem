@@ -142,6 +142,10 @@ TEST_SHARED_FAULT_FLUX_PATH_ANA_SRC        = tests/parallel/test_shared_fault_fl
 TEST_BULK_PLANE_WAVE_SRC                   = tests/unit/test_bulk_plane_wave_recovery.cpp
 # Pepper-bug plan 2026-04-22 Phase 1 — live interior-vs-shared cross-check
 TEST_INTERIOR_VS_SHARED_LIVE_SRC           = tests/unit/test_interior_vs_shared_branch_live.cpp
+# Pepper-bug: MULTI-STEP rupture-regime serial-vs-parallel cross-check
+TEST_RUPTURE_MULTISTEP_SRC                 = tests/unit/test_rupture_multistep_serial_vs_parallel.cpp
+# Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY test (8-fault-triangle fixture)
+TEST_ADJACENT_TRI_UNIFORMITY_SRC           = tests/unit/test_adjacent_triangle_fault_uniformity.cpp
 # Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
 TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC          = tests/unit/test_sign_flipped_elem1_on_plus_truth_table.cpp
 # Pepper-bug plan 2026-04-22 Phase 4 P4-T1 — MakeFaceKey uniqueness (np=2)
@@ -203,6 +207,10 @@ TEST_ADER_CK_PREDICTOR_SRC                 = tests/unit/test_ader_ck_predictor.c
 TEST_ADER_FAULT_FLUX_EQUIV_SRC             = tests/unit/test_fault_face_flux_ader_equivalence.cpp
 # ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
 TEST_ADER_LINEAR_WAVE_EQUIV_SRC            = tests/unit/test_ader_linear_wave_equivalence.cpp
+# ADER fault-path live check: AdvanceADER(dt) / dt -> wave.Mult on a faulted TPV102 fixture
+TEST_ADER_FAULT_COUPLING_DT_LIMIT_SRC      = tests/unit/test_ader_fault_coupling_dt_limit.cpp
+# ADER live interior-vs-shared branch cross-check on the same physical face (np=2)
+TEST_ADER_INTERIOR_VS_SHARED_LIVE_SRC      = tests/unit/test_ader_interior_vs_shared_branch_live.cpp
 # ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
 TEST_ADER_TPV102_SMOKE_SRC                 = tests/unit/test_ader_tpv102_smoke.cpp
 # Round-6 R-001 regression: driver defaults to ADER (purpose change #1)
@@ -290,6 +298,8 @@ TEST_BULK_RK4_NOISE_STAB_OBJ               = $(TEST_BULK_RK4_NOISE_STAB_SRC:.cpp
 TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ        = $(TEST_SHARED_FAULT_FLUX_PATH_ANA_SRC:.cpp=.o)
 TEST_BULK_PLANE_WAVE_OBJ                   = $(TEST_BULK_PLANE_WAVE_SRC:.cpp=.o)
 TEST_INTERIOR_VS_SHARED_LIVE_OBJ           = $(TEST_INTERIOR_VS_SHARED_LIVE_SRC:.cpp=.o)
+TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.o)
+TEST_ADJACENT_TRI_UNIFORMITY_OBJ           = $(TEST_ADJACENT_TRI_UNIFORMITY_SRC:.cpp=.o)
 TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ          = $(TEST_SIGN_FLIPPED_TRUTH_TABLE_SRC:.cpp=.o)
 TEST_MAKE_FACE_KEY_UNIQ_OBJ                = $(TEST_MAKE_FACE_KEY_UNIQ_SRC:.cpp=.o)
 TEST_FAULT_DOF_OFFSET_OBJ                  = $(TEST_FAULT_DOF_OFFSET_SRC:.cpp=.o)
@@ -319,6 +329,8 @@ TEST_WAVE_OP_SPATIAL_DERIV_OBJ             = $(TEST_WAVE_OP_SPATIAL_DERIV_SRC:.c
 TEST_ADER_CK_PREDICTOR_OBJ                 = $(TEST_ADER_CK_PREDICTOR_SRC:.cpp=.o)
 TEST_ADER_FAULT_FLUX_EQUIV_OBJ             = $(TEST_ADER_FAULT_FLUX_EQUIV_SRC:.cpp=.o)
 TEST_ADER_LINEAR_WAVE_EQUIV_OBJ            = $(TEST_ADER_LINEAR_WAVE_EQUIV_SRC:.cpp=.o)
+TEST_ADER_FAULT_COUPLING_DT_LIMIT_OBJ      = $(TEST_ADER_FAULT_COUPLING_DT_LIMIT_SRC:.cpp=.o)
+TEST_ADER_INTERIOR_VS_SHARED_LIVE_OBJ      = $(TEST_ADER_INTERIOR_VS_SHARED_LIVE_SRC:.cpp=.o)
 TEST_ADER_TPV102_SMOKE_OBJ                 = $(TEST_ADER_TPV102_SMOKE_SRC:.cpp=.o)
 TEST_R001_DRIVER_DEFAULT_ADER_OBJ          = $(TEST_R001_DRIVER_DEFAULT_ADER_SRC:.cpp=.o)
 TEST_R002_DRIVER_INIT_TOTAL_Q_OBJ          = $(TEST_R002_DRIVER_INIT_TOTAL_Q_SRC:.cpp=.o)
@@ -781,6 +793,12 @@ seas_test_bulk_plane_wave_recovery: $(TEST_BULK_PLANE_WAVE_OBJ) $(WAVE_OPERATOR_
 # Pepper-bug plan 2026-04-22 Phase 1 — live interior-vs-shared cross-check
 # NB: built with -DSEAS_TEST_INTERNAL so the test can access WaveOperator
 # internal bookkeeping (getters gated by that macro in wave_operator.hpp).
+seas_test_rupture_multistep_serial_vs_parallel: $(TEST_RUPTURE_MULTISTEP_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_MULTISTEP_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+seas_test_adjacent_triangle_fault_uniformity: $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
 seas_test_interior_vs_shared_branch_live: $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
@@ -899,6 +917,14 @@ seas_test_fault_face_flux_ader_equivalence: $(TEST_ADER_FAULT_FLUX_EQUIV_OBJ) $(
 # ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
 seas_test_ader_linear_wave_equivalence: $(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER fault-path live consistency: (Q_new - Q)/dt -> wave.Mult(Q) on a faulted fixture
+seas_test_ader_fault_coupling_dt_limit: $(TEST_ADER_FAULT_COUPLING_DT_LIMIT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_FAULT_COUPLING_DT_LIMIT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# ADER live interior-vs-shared branch cross-check (np=2)
+seas_test_ader_interior_vs_shared_branch_live: $(TEST_ADER_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ADER_INTERIOR_VS_SHARED_LIVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 # ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
 seas_test_ader_tpv102_smoke: $(TEST_ADER_TPV102_SMOKE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -1174,6 +1200,14 @@ $(TEST_INTERIOR_VS_SHARED_LIVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -DSEAS_USE_MPI -c $< -o $@
 
+$(TEST_RUPTURE_MULTISTEP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_ADJACENT_TRI_UNIFORMITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_SIGN_FLIPPED_TRUTH_TABLE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -c $< -o $@
@@ -1300,6 +1334,16 @@ $(TEST_ADER_FAULT_FLUX_EQUIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LI
 
 # ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
 $(TEST_ADER_LINEAR_WAVE_EQUIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER fault-path live consistency on a faulted TPV102 fixture
+$(TEST_ADER_FAULT_COUPLING_DT_LIMIT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER live interior-vs-shared branch cross-check
+$(TEST_ADER_INTERIOR_VS_SHARED_LIVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -1646,6 +1690,17 @@ test-bulk-plane-wave-recovery: seas_test_bulk_plane_wave_recovery
 test-interior-vs-shared-branch-live: seas_test_interior_vs_shared_branch_live
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_interior_vs_shared_branch_live
 
+# Pepper-bug: MULTI-STEP rupture-regime serial-vs-parallel cross-check
+test-rupture-multistep-serial-vs-parallel: seas_test_rupture_multistep_serial_vs_parallel
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_multistep_serial_vs_parallel
+
+# Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY (serial + np=4 variants)
+test-adjacent-triangle-fault-uniformity-serial: seas_test_adjacent_triangle_fault_uniformity
+	./seas_test_adjacent_triangle_fault_uniformity
+
+test-adjacent-triangle-fault-uniformity-parallel: seas_test_adjacent_triangle_fault_uniformity
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_adjacent_triangle_fault_uniformity
+
 # Pepper-bug plan 2026-04-22 Phase 2 — sign_flipped / elem1_on_plus truth table
 test-sign-flipped-elem1-on-plus-truth-table: seas_test_sign_flipped_elem1_on_plus_truth_table
 	./seas_test_sign_flipped_elem1_on_plus_truth_table
@@ -1773,6 +1828,14 @@ test-fault-face-flux-ader-equivalence: seas_test_fault_face_flux_ader_equivalenc
 # ADER I-05 Phase 6: AdvanceADER vs RK4 on a linear wave
 test-ader-linear-wave-equivalence: seas_test_ader_linear_wave_equivalence
 	./seas_test_ader_linear_wave_equivalence
+
+# ADER fault-path live consistency: (Q_new - Q)/dt -> wave.Mult(Q)
+test-ader-fault-coupling-dt-limit: seas_test_ader_fault_coupling_dt_limit
+	./seas_test_ader_fault_coupling_dt_limit
+
+# ADER live interior-vs-shared branch cross-check
+test-ader-interior-vs-shared-branch-live: seas_test_ader_interior_vs_shared_branch_live
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_ader_interior_vs_shared_branch_live
 
 # ADER I-05 Phase 8: TPV102 AdvanceADER smoke test
 test-ader-tpv102-smoke: seas_test_ader_tpv102_smoke
