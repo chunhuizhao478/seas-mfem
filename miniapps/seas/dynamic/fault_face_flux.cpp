@@ -291,55 +291,79 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
                "Extend GodunovFlux / FaultFaceFlux to per-side A before "
                "running this configuration.");
 
-   // Step 1: Trial traction IS the total traction (Pelties eq. 7 on
-   //         total states — not on fluctuations + pre-stress).
-   //         SeisSol matches: RateAndState.h:222-240.
+   // Step 1: Trial traction from bulk Q.  Under total-Q, bulk Q
+   //         carries the static background prestress, so this trial is
+   //         "background + wave" — but does NOT yet include the
+   //         persistent nucleation channel.
    real_t sigma_n_trial, tau1_trial, tau2_trial;
    ComputeTrialTraction(data, Q_plus, Q_minus,
                         sigma_n_trial, tau1_trial, tau2_trial);
 
+   // Step 1b: friction inputs = trial + persistent-nucleation channel.
+   // Mirrors SeisSol's RateAndState.h:222-240 pattern, where
+   // `totalTraction* = initialStressInFaultCS* + faultStresses.traction*`
+   // is a temporary used ONLY for the friction solve and the
+   // slip-rate divisor — never fed back into `tractionResults`
+   // (which is the analog of our `tau*_corr` consumed by the Riemann
+   // imposed state below).  Mutating `tau*_trial` here would leak
+   // `tau*_nuc` into the Riemann velocity-jump
+   // `(2/Zs)·(tau_corr - Q_bulk[SXY])`, producing a ~24× spurious
+   // shear pulse into bulk Q every step at full nucleation
+   // (tau2_nuc=25 MPa, V_abs≈0.22 m/s, Zs≈9.25 MPa·s/m).  Keep the
+   // two scales separate.
+   const real_t sigma_n_fric = sigma_n_trial + data.sigma_n_nuc;
+   const real_t tau1_fric    = tau1_trial    + data.tau1_nuc;
+   const real_t tau2_fric    = tau2_trial    + data.tau2_nuc;
+
 #ifdef SEAS_DIAG_FAULT_FLUX
    // R-003: mirror Evaluate's C-1 checkpoint for total mode.  Same
    // diag_print gate, same fprintf semantics (no MPI).  Prints only
-   // on DOFs the driver flagged as diagnostic.
+   // on DOFs the driver flagged as diagnostic.  Print the friction-
+   // input total (what the solver actually sees); a separate trial
+   // value can be reconstructed as tau*_fric - data.tau*_nuc if needed.
    if (data.diag_print)
    {
       std::fprintf(stderr,
-         "[C-1 EVAL-TOTAL] rank=%d  tau1_trial=%+.3e Pa  "
-         "tau2_trial=%+.3e Pa  psi=%.3e\n",
-         g_seas_my_rank, tau1_trial, tau2_trial, data.psi);
+         "[C-1 EVAL-TOTAL] rank=%d  tau1_fric=%+.3e Pa  "
+         "tau2_fric=%+.3e Pa  psi=%.3e  (tau2_nuc=%+.3e)\n",
+         g_seas_my_rank, tau1_fric, tau2_fric, data.psi, data.tau2_nuc);
    }
 #endif
 
-   // Step 2: Solve friction equation for |V| using total Theta.
-   //         No `tau_i_0 + tau_i*` reconstruction needed.
-   const real_t Theta = std::sqrt(tau1_trial * tau1_trial
-                                 + tau2_trial * tau2_trial);
+   // Step 2: Solve friction equation for |V| on the FRICTION-INPUT
+   //         total (trial + nuc).  Theta is the magnitude of the
+   //         total tangential traction the friction law must balance.
+   const real_t Theta = std::sqrt(tau1_fric * tau1_fric
+                                + tau2_fric * tau2_fric);
    real_t V_abs = 0.0;
    if (Theta > 0.0)
    {
-      V_abs = solver_.Solve(Theta, data.psi, std::abs(sigma_n_trial),
+      V_abs = solver_.Solve(Theta, data.psi, std::abs(sigma_n_fric),
                             data.eta_s, data.a, method);
    }
 
-   // Step 3: Slip-rate decomposition (identical formula; input is total).
+   // Step 3: Slip-rate decomposition uses the TOTAL traction in the
+   //         numerator (SeisSol numerator is `totalTraction*`).
+   //         Riemann-side corrected traction tau*_corr stays on the
+   //         TRIAL scale (no nuc).
    real_t V1 = 0.0, V2 = 0.0;
    real_t tau1_corr = tau1_trial, tau2_corr = tau2_trial;
    if (Theta > 0.0 && V_abs > 0.0)
    {
       real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
       real_t f_V = data.a * std::asinh(V_abs * C);
-      real_t strength = std::abs(sigma_n_trial) * f_V;
-      V1 = V_abs * tau1_trial / (strength + data.eta_s * V_abs);
-      V2 = V_abs * tau2_trial / (strength + data.eta_s * V_abs);
+      real_t strength = std::abs(sigma_n_fric) * f_V;
+      V1 = V_abs * tau1_fric / (strength + data.eta_s * V_abs);
+      V2 = V_abs * tau2_fric / (strength + data.eta_s * V_abs);
       tau1_corr = tau1_trial - data.eta_s * V1;
       tau2_corr = tau2_trial - data.eta_s * V2;
    }
 
-   // Step 4: Imposed states in TOTAL.  The subtraction pattern matches
-   //         the fluctuation path verbatim — differences
-   //         (sigma_n_corr - Q_{plus,minus}[SXX]) are invariant under a
-   //         constant pre-stress shift applied identically to both sides.
+   // Step 4: Imposed states.  `*_corr` here is TRIAL-scale (matches
+   //         SeisSol `tractionResults.traction*`), so the Riemann
+   //         velocity jump `(2/Zs)·(tau_corr - Q_bulk[SXY])` carries
+   //         only the friction reaction `eta_s·V` — the persistent
+   //         nucleation channel does NOT radiate through bulk Q.
    const real_t sigma_n_corr = sigma_n_trial;
    std::memcpy(Q_imp_minus, Q_minus, NUM_STATE * sizeof(real_t));
    std::memcpy(Q_imp_plus,  Q_plus,  NUM_STATE * sizeof(real_t));
@@ -360,15 +384,18 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
    Q_imp_minus[SXY] = tau1_corr;     Q_imp_plus[SXY] = tau1_corr;
    Q_imp_minus[SXZ] = tau2_corr;     Q_imp_plus[SXZ] = tau2_corr;
 
-   // Step 5: Update DOFData — store TOTAL directly (no sigma_n0 add).
-   //         The fluctuation path stores `data.sigma_n_corr = data.sigma_n0
-   //         + sigma_n_corr`; here sigma_n_corr is already TOTAL.
+   // Step 5: Update DOFData — store TOTAL (trial + nuc) for station
+   //         output and post-step diagnostics.  Mirrors the
+   //         fluctuation-path `data.tau*_corr = data.tau*_0 + tau*_corr`
+   //         pattern: post-call DOFData carries the full physical
+   //         traction the fault is bearing, while the Riemann path
+   //         above operated on the trial scale.
    data.slip_rate    = V_abs;
    data.V1           = V1;
    data.V2           = V2;
-   data.tau1_corr    = tau1_corr;
-   data.tau2_corr    = tau2_corr;
-   data.sigma_n_corr = sigma_n_corr;
+   data.tau1_corr    = tau1_corr   + data.tau1_nuc;
+   data.tau2_corr    = tau2_corr   + data.tau2_nuc;
+   data.sigma_n_corr = sigma_n_corr + data.sigma_n_nuc;
 
 #ifndef NDEBUG
    MFEM_ASSERT(data.psi == psi_at_entry,

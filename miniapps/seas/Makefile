@@ -189,6 +189,9 @@ TEST_TPV102_TOTAL_ABSORBING_SRC            = tests/unit/test_tpv102_total_absorb
 # v9.3.0 R-I06-003 / R-I06-004 (review-round-2): shape-max amplitude
 # scaling + add-delta preserves wave perturbations
 TEST_R_I06_003_NUC_SHAPE_SCALING_SRC       = tests/unit/test_R_I06_003_nucleation_shape_scaling.cpp
+# 2026-04-22 nucleation persistent-prestress channel fix regression
+# (replaces the bulk-Q add-delta path that diluted nuc by 1e4-1e5x)
+TEST_PERSISTENT_NUC_PRESTRESS_SRC          = tests/unit/test_persistent_nuc_prestress_channel.cpp
 # v9.3.0 R-I06-round3 R-006: direct unit tests for FreeSurfaceTotal /
 # FreeSurfaceGodunovTotal (Q_bg=0 equivalence + tilted-normal equilibrium)
 TEST_FREE_SURFACE_TOTAL_DIRECT_SRC         = tests/unit/test_free_surface_total_direct.cpp
@@ -310,6 +313,7 @@ TEST_R002_NUCLEATION_SIGN_OBJ              = $(TEST_R002_NUCLEATION_SIGN_SRC:.cp
 TEST_R009_NUCLEATION_BOTH_SIDES_OBJ        = $(TEST_R009_NUCLEATION_BOTH_SIDES_SRC:.cpp=.o)
 TEST_TPV102_TOTAL_ABSORBING_OBJ            = $(TEST_TPV102_TOTAL_ABSORBING_SRC:.cpp=.o)
 TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ       = $(TEST_R_I06_003_NUC_SHAPE_SCALING_SRC:.cpp=.o)
+TEST_PERSISTENT_NUC_PRESTRESS_OBJ          = $(TEST_PERSISTENT_NUC_PRESTRESS_SRC:.cpp=.o)
 TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ         = $(TEST_FREE_SURFACE_TOTAL_DIRECT_SRC:.cpp=.o)
 TEST_WAVE_OP_SPATIAL_DERIV_OBJ             = $(TEST_WAVE_OP_SPATIAL_DERIV_SRC:.cpp=.o)
 TEST_ADER_CK_PREDICTOR_OBJ                 = $(TEST_ADER_CK_PREDICTOR_SRC:.cpp=.o)
@@ -872,6 +876,10 @@ seas_test_tpv102_total_absorbing_equilibrium: $(TEST_TPV102_TOTAL_ABSORBING_OBJ)
 seas_test_R_I06_003_nucleation_shape_scaling: $(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ) $(MFEM_LIBS)
 
+# 2026-04-22 persistent-prestress channel: links FaultFaceFlux + FrictionSolver
+seas_test_persistent_nuc_prestress_channel: $(TEST_PERSISTENT_NUC_PRESTRESS_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PERSISTENT_NUC_PRESTRESS_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
 # v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal / FreeSurfaceGodunovTotal
 seas_test_free_surface_total_direct: $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
@@ -1265,6 +1273,11 @@ $(TEST_R_I06_003_NUC_SHAPE_SCALING_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(M
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# 2026-04-22 nucleation persistent-prestress channel fix regression
+$(TEST_PERSISTENT_NUC_PRESTRESS_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 # v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal variants
 $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -1362,6 +1375,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-R009-nucleation-total-both-sides \
       test-tpv102-total-absorbing-equilibrium \
       test-R-I06-003-nucleation-shape-scaling \
+      test-persistent-nuc-prestress-channel \
       test-free-surface-total-direct \
       test-wave-operator-spatial-derivative \
       test-ader-ck-predictor \
@@ -1736,6 +1750,10 @@ test-tpv102-total-absorbing-equilibrium: seas_test_tpv102_total_absorbing_equili
 test-R-I06-003-nucleation-shape-scaling: seas_test_R_I06_003_nucleation_shape_scaling
 	./seas_test_R_I06_003_nucleation_shape_scaling
 
+# 2026-04-22 nucleation persistent-prestress channel fix regression
+test-persistent-nuc-prestress-channel: seas_test_persistent_nuc_prestress_channel
+	./seas_test_persistent_nuc_prestress_channel
+
 # v9.3.0 R-I06-round3 R-006: direct tests for FreeSurfaceTotal variants
 test-free-surface-total-direct: seas_test_free_surface_total_direct
 	./seas_test_free_surface_total_direct
@@ -1790,6 +1808,7 @@ test-v93-regression: test-free-surface-godunov \
                      test-R009-nucleation-total-both-sides \
                      test-tpv102-total-absorbing-equilibrium \
                      test-R-I06-003-nucleation-shape-scaling \
+                     test-persistent-nuc-prestress-channel \
                      test-free-surface-total-direct \
                      test-wave-operator-spatial-derivative \
                      test-ader-ck-predictor \

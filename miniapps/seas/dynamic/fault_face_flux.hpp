@@ -29,6 +29,21 @@ struct DOFData
    real_t eta_p = 0, eta_s = 0;          ///< Harmonic mean impedances
    real_t sigma_n0 = 0;                  ///< Background normal stress (>0 compression)
    real_t tau1_0 = 0, tau2_0 = 0;        ///< Background shear pre-stress
+   /// Nucleation prestress (TPV102 total-Q persistent-driver channel).
+   /// Read by FaultFaceFlux::EvaluateTotal each call and added to the
+   /// trial traction so the persistent driver is re-imposed at every
+   /// friction solve (SeisSol initialStressInFaultCS analog).  Distinct
+   /// from {sigma_n0, tau1_0, tau2_0}: those carry STATIC background
+   /// prestress and are zeroed under the total-Q dispatch contract
+   /// (background prestress lives in bulk Q for total-Q).  tau*_nuc
+   /// carries the time-varying nucleation perturbation that must NOT
+   /// be poked into bulk Q (the wave operator radiates point sources
+   /// away in O(h/cp), so a nucleation amplitude written to bulk Q
+   /// dilutes ~10^4-10^5x before the friction solver sees it).
+   /// For TPV102 only tau2_nuc is written (pure strike-slip);
+   /// sigma_n_nuc and tau1_nuc are kept zero by default.
+   real_t sigma_n_nuc = 0;               ///< Nucleation normal-stress driver
+   real_t tau1_nuc = 0, tau2_nuc = 0;    ///< Nucleation shear-traction driver
    real_t a = 0.004;                      ///< Direct effect parameter
    real_t Dc = 0.14;                      ///< Critical slip distance [m]
    real_t psi = 0;                        ///< State variable (logarithmic)

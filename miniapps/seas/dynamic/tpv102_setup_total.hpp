@@ -118,9 +118,18 @@ inline void ZeroDOFDataPreStressTotal(std::vector<DOFData> &dof_data, int ndof)
 
    for (int i = 0; i < ndof; i++)
    {
-      dof_data[i].sigma_n0 = 0.0;
-      dof_data[i].tau1_0   = 0.0;
-      dof_data[i].tau2_0   = 0.0;
+      dof_data[i].sigma_n0   = 0.0;
+      dof_data[i].tau1_0     = 0.0;
+      dof_data[i].tau2_0     = 0.0;
+      // Persistent-prestress channel: under total-Q the nucleation
+      // amplitude lives in tau*_nuc and is overwritten per step by
+      // ApplyNucleationTotalPrestress.  Reset here so a re-init that
+      // calls InitializeFaultDOFs + ZeroDOFDataPreStressTotal in
+      // sequence (e.g. checkpoint restart, test fixture rebuild) does
+      // NOT carry stale nucleation state from a prior run.
+      dof_data[i].sigma_n_nuc = 0.0;
+      dof_data[i].tau1_nuc    = 0.0;
+      dof_data[i].tau2_nuc    = 0.0;
    }
 }
 
@@ -704,6 +713,68 @@ inline void ApplyNucleationTotal(Vector &Q,
          Q[SXY * ndof_total + off] += -delta / shape_max;
          if (update_state) { state.dtau_applied_minus[i] = dtau_new; }
       }
+   }
+}
+
+/// @brief Persistent-prestress nucleation channel for TPV102 total-Q
+///        (replacement for `ApplyNucleationTotal` in the production driver).
+///
+/// Mirrors the working fluctuation-Q `ApplyNucleation` at
+/// `tpv102_setup.hpp:135-148` — OVERWRITES the per-DOF nucleation prestress
+/// each call.  `FaultFaceFlux::EvaluateTotal` reads `data.tau2_nuc` and
+/// adds it to the trial traction, so the requested `dtau` is re-imposed
+/// at every Riemann solve and never gets diluted by wave radiation.
+///
+/// Why this replaces the bulk-Q `ApplyNucleationTotal`:
+///   The bulk-Q version pokes a single nodal DOF in `Q[SXY]` with
+///   `-delta/shape_max`.  The wave operator at `wave_operator.inl:905-913`
+///   reads Q via `Q_self[c] = sum_i shape1(i) * Q[..., dof_i]`, treating
+///   the poke as a point source.  For a 3D DG wave system that point
+///   source radiates outward in `O(h/cp) ≈ 3×10⁻⁵ s` on a 200 m mesh —
+///   far shorter than the 1 s nucleation ramp.  The shape-weighted QP
+///   amplitude effective in `ComputeTrialTraction` ends up ~10⁴-10⁵×
+///   below the requested `nuc_dtau = 25 MPa` (back-of-envelope: ramp
+///   rate × residence time = 25 MPa/s × 30 µs ≈ 750 Pa).  See
+///   `debug_document/tpv102_debug_document/tpv102_nucleation_code_review_2026-04-22.md`
+///   and the companion fix doc `tpv102_nucleation_code_fix_2026-04-22.md`.
+///
+/// The persistent-prestress channel sidesteps the wave-radiation problem
+/// entirely: nucleation does not enter bulk Q at all.  At every
+/// EvaluateTotal call the friction solver sees
+///     tau2_total_trial = tau2_trial(Q) + data.tau2_nuc
+/// where `tau2_nuc` is overwritten per call from this function.  Bulk Q
+/// at the fault DOFs evolves naturally under the slip-driven Riemann
+/// imposed-state coupling.
+///
+/// BP5 convention (tangent2 = strike): TPV102's along-strike pre-stress
+/// lives in component 2.  This function therefore writes to `tau2_nuc`,
+/// leaving `tau1_nuc` and `sigma_n_nuc` at their default 0.
+///
+/// @param[in,out] dof_data      Fault DOFData (`tau2_nuc` is the only
+///                              field mutated).  Sized to one entry per
+///                              fault QP (matches `InitializeFaultDOFs`).
+/// @param[in]     fault_coords  Per-QP physical (x, y, z); `x` =
+///                              along-strike, `|z|` = down-dip.
+/// @param[in]     t             Simulation time [s].  The per-QP
+///                              nucleation amplitude is
+///                              `NucleationPerturbation(x, |z|, t)`.
+inline void ApplyNucleationTotalPrestress(std::vector<DOFData> &dof_data,
+                                          const std::vector<Vector> &fault_coords,
+                                          real_t t)
+{
+   const int n = static_cast<int>(dof_data.size());
+   MFEM_VERIFY(static_cast<int>(fault_coords.size()) >= n,
+               "ApplyNucleationTotalPrestress: fault_coords size "
+               << fault_coords.size() << " < dof_data size " << n);
+   for (int i = 0; i < n; i++)
+   {
+      const real_t along_strike = fault_coords[i](0);
+      const real_t down_dip     = std::abs(fault_coords[i](2));
+      const real_t dtau         = NucleationPerturbation(along_strike,
+                                                          down_dip, t);
+      dof_data[i].tau2_nuc = dtau;
+      // tau1_nuc / sigma_n_nuc intentionally left at their default 0
+      // (TPV102 is pure strike-slip, no normal-stress nucleation).
    }
 }
 
