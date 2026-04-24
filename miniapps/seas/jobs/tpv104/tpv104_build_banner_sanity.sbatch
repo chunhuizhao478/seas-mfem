@@ -72,7 +72,9 @@ echo "[banner + dry-run check]"
 echo "========================================"
 
 # Run with --verify-dispatch so the tri-consistency lines print too.
-./seas_tpv104_driver --dry-run --verify-dispatch 2>&1 | tee tpv104_banner_output.txt
+# Must go through ibrun — Frontera IMPI fails PMPI_Init without the
+# SLURM OFI launcher context, even for a 1-rank dry-run.
+ibrun -n 1 ./seas_tpv104_driver --dry-run --verify-dispatch 2>&1 | tee tpv104_banner_output.txt
 
 # Success criteria (machine-checkable, R7-001-honest + R8-004 per-rank):
 #   - banner contains "Friction solver: Brent (hard-coded via EvaluateADERTotal"
