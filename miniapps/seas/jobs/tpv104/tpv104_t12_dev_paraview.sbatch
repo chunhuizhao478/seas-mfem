@@ -120,49 +120,117 @@ ibrun ./seas_tpv104_driver \
       --paraview-bulk-dt 0.5
 
 # Post-run check: dev-queue run is intentionally killed before tfinal,
-# so the production sbatch's "≥ 50 rows / 9 fault stations" gate does
-# not apply.  Instead verify:
-#   (a) at least one fault station has ≥ 5 rows (early rupture visible),
-#   (b) no NaN/Inf in any station file,
-#   (c) ParaView/ directory exists and contains at least 5 fault-surface
-#       VTU frames (covers the t < 0.5 s nucleation interval at min).
+# so the production sbatch's "≥50 rows / 9 fault stations" gate does
+# not apply.  Quick-check decision pattern mirrors
+# jobs/tpv102/tpv102_200m_p1_2.0s_400rank_vmax_halt.sbatch:
+#   (a) MFEM abort short-circuit (FAIL fast on solver/R-101 trip),
+#   (b) per-station slip-progression score (how many of the 9 fault
+#       stations have non-trivial strike-slip rate, the TPV104 mode-II
+#       diagnostic),
+#   (c) V_max timeline (first / peak / final lines from the job log) —
+#       confirms nucleation drove V_max above V_ini=1e-16 and rupture
+#       propagated rather than pinning,
+#   (d) ParaView frame count + station NaN-free check.
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
+JOB_LOG="${SBATCH_LOG_DIR}/tpv104_t12_dev_${SLURM_JOB_ID}.out"
+JOB_ERR="${SBATCH_LOG_DIR}/tpv104_t12_dev_${SLURM_JOB_ID}.err"
 
+# (a) MFEM abort short-circuit.
+if [ -f "${JOB_ERR}" ] && grep -q "MFEM abort\|MFEM_ABORT\|R-101 shared-fault DOFData" "${JOB_ERR}"; then
+   ABORT_LINE=$(grep -E "MFEM abort|MFEM_ABORT|R-101 shared-fault DOFData" "${JOB_ERR}" | head -1)
+   echo "FAIL: MFEM abort during dev-queue run" > "${RESULT_FILE}"
+   echo "      ${ABORT_LINE}" >> "${RESULT_FILE}"
+   cat "${RESULT_FILE}"
+   exit 0
+fi
+
+# (b) Per-station slip-progression score.  TPV104 station column layout
+# (per TPV104StationWriter, plan §4.4):
+#   col 1 = t       col 2 = h-slip      col 3 = h-slip-rate (strike rate)
+#   col 4 = h-stress col 5 = v-slip      col 6 = v-slip-rate (dip rate)
+#   col 7 = v-stress col 8 = n-stress    col 9 = psi
+# TPV104 is pure strike-slip → score on col 3 (h-rate).  A station has
+# "slipped" if any row has |h-rate|^2 > 1e-12 → |h-rate| > ~1e-6 m/s.
+SLIP_COUNT=0
+SLIPPED_STATIONS=""
+SILENT_STATIONS=""
+for sta in tpv104_station_x2_0_x3_3 tpv104_station_x2_0_x3_7.5 tpv104_station_x2_0_x3_12 \
+           tpv104_station_x2_9_x3_7.5 tpv104_station_x2_12_x3_3 tpv104_station_x2_12_x3_12 \
+           tpv104_station_x2_-9_x3_7.5 tpv104_station_x2_-12_x3_3 tpv104_station_x2_-12_x3_12; do
+   STA_FILE="${RESULT_DIR}/${sta}.dat"
+   if [ ! -f "${STA_FILE}" ]; then
+      SILENT_STATIONS="${SILENT_STATIONS} ${sta}(missing)"
+      continue
+   fi
+   # Maximum |h-rate| across all rows (col 3).  Returns 0 if no data.
+   V_PEAK=$(awk '!/^#/ && NF>=3 { v=$3; if (v<0) v=-v; if (v>m) m=v } END { print (m=="" ? "0" : m) }' "${STA_FILE}")
+   if awk "BEGIN {exit !( ($V_PEAK)*($V_PEAK) > 1e-12 )}"; then
+      SLIP_COUNT=$((SLIP_COUNT + 1))
+      SLIPPED_STATIONS="${SLIPPED_STATIONS} ${sta}"
+   else
+      SILENT_STATIONS="${SILENT_STATIONS} ${sta}"
+   fi
+done
+
+# (c) V_max timeline from job log.
+V_MAX_INIT=""
+V_MAX_PEAK=""
+V_MAX_FINAL=""
+if [ -f "${JOB_LOG}" ]; then
+   V_MAX_INIT=$(grep "V_max" "${JOB_LOG}" | head -1)
+   V_MAX_FINAL=$(grep "V_max" "${JOB_LOG}" | tail -1)
+   V_MAX_PEAK=$(grep "V_max" "${JOB_LOG}" \
+                | awk '{for(i=1;i<=NF;i++) if ($i ~ /^[0-9.e+-]+$/) v=$i; print v}' \
+                | sort -g | tail -1)
+fi
+LAST_STEP=$([ -f "${JOB_LOG}" ] && grep "^Step " "${JOB_LOG}" | tail -1 || echo "")
+
+# (d) Frame counts + NaN sweep.
 STATIONS_TOTAL=0
-STATIONS_WITH_DATA=0
 STATIONS_NANFREE=0
 for f in "${RESULT_DIR}"/tpv104_station_x2_*.dat; do
    STATIONS_TOTAL=$((STATIONS_TOTAL + 1))
-   ROWS=$(awk '!/^#/' "${f}" | wc -l)
-   if [ "${ROWS}" -ge 5 ]; then
-      STATIONS_WITH_DATA=$((STATIONS_WITH_DATA + 1))
-   fi
    if ! grep -qiE "nan|inf" "${f}"; then
       STATIONS_NANFREE=$((STATIONS_NANFREE + 1))
    fi
 done
-
-PV_DIR="${RESULT_DIR}/ParaView"
-PV_FRAMES=$(find "${PV_DIR}" -name "Cycle*.vtu" 2>/dev/null | wc -l || echo 0)
-PV_BULK_DIR="${RESULT_DIR}/ParaView_bulk"
-PV_BULK_FRAMES=$(find "${PV_BULK_DIR}" -name "Cycle*.vtu" 2>/dev/null | wc -l || echo 0)
+PV_FRAMES=$(find "${RESULT_DIR}/ParaView" -name "Cycle*.vtu" 2>/dev/null | wc -l || echo 0)
+PV_BULK_FRAMES=$(find "${RESULT_DIR}/ParaView_bulk" -name "Cycle*.vtu" 2>/dev/null | wc -l || echo 0)
 FAULT_VTU=$(find "${RESULT_DIR}" -name "tpv104_fault_t*.vtu" 2>/dev/null | wc -l || echo 0)
 
 {
    echo "TPV104 t=12.0 s DEV-QUEUE partial run (intentionally killed at 2h)"
-   echo "fault stations total       : ${STATIONS_TOTAL}"
-   echo "fault stations with ≥5 rows: ${STATIONS_WITH_DATA}"
-   echo "fault stations NaN/Inf-free: ${STATIONS_NANFREE}"
-   echo "ParaView/ volume frames    : ${PV_FRAMES}"
-   echo "ParaView_bulk/ frames      : ${PV_BULK_FRAMES}"
-   echo "fault-surface VTU frames   : ${FAULT_VTU}"
-   if [ "${STATIONS_TOTAL}" -eq 9 ] \
-      && [ "${STATIONS_WITH_DATA}" -ge 1 ] \
-      && [ "${STATIONS_NANFREE}" -eq 9 ] \
-      && [ "${FAULT_VTU}" -ge 5 ]; then
-      echo "STATUS: PASS (partial output as expected for dev-queue cap)"
+   echo "  Slip score : ${SLIP_COUNT} / 9 fault stations have |h-rate| > 1e-6 m/s"
+   echo "  Slipped    :${SLIPPED_STATIONS}"
+   echo "  Silent     :${SILENT_STATIONS}"
+   echo "  fault stations total       : ${STATIONS_TOTAL}"
+   echo "  fault stations NaN/Inf-free: ${STATIONS_NANFREE}"
+   echo "  ParaView/ volume frames    : ${PV_FRAMES}"
+   echo "  ParaView_bulk/ frames      : ${PV_BULK_FRAMES}"
+   echo "  fault-surface VTU frames   : ${FAULT_VTU}"
+   [ -n "${LAST_STEP}"    ] && echo "  Last step line : ${LAST_STEP}"
+   [ -n "${V_MAX_INIT}"   ] && echo "  First V_max line: ${V_MAX_INIT}"
+   [ -n "${V_MAX_PEAK}"   ] && echo "  Peak  V_max value: ${V_MAX_PEAK}"
+   [ -n "${V_MAX_FINAL}"  ] && echo "  Final V_max line: ${V_MAX_FINAL}"
+   # Decision:
+   #   - 0/9 slipped AND V_max stays at V_ini=1e-16: ADER one-shot did
+   #     NOT propagate rupture — escalate (probably nucleation off, or
+   #     wave operator silent on shared faces, or P2_D wired wrong).
+   #   - >=6/9 slipped AND V_max peak > 0.1 m/s: rupture broke through
+   #     hypocenter, propagated past partition seams — proceed to the
+   #     5-h normal-queue run.
+   #   - Intermediate: partial — investigate per-station before the 5h.
+   if [ "${STATIONS_TOTAL}" -ne 9 ] || [ "${STATIONS_NANFREE}" -ne 9 ] \
+      || [ "${FAULT_VTU}" -lt 5 ]; then
+      echo "STATUS: FAIL — output incomplete or NaN/Inf in stations"
+   elif [ "${SLIP_COUNT}" -eq 0 ]; then
+      echo "STATUS: FAIL — 0/9 slipped; rupture did not break through hypocenter"
+      echo "  Decision: do NOT submit the 5-h normal-queue run; diagnose first"
+   elif [ "${SLIP_COUNT}" -ge 6 ]; then
+      echo "STATUS: PASS — ${SLIP_COUNT}/9 slipped; rupture propagated past seams"
+      echo "  Decision: cleared to submit jobs/tpv104/tpv104_t3_mesh_coupled.sbatch"
    else
-      echo "STATUS: FAIL"
+      echo "STATUS: PARTIAL — ${SLIP_COUNT}/9 slipped; investigate before 5-h run"
    fi
 } > "${RESULT_FILE}"
 cat "${RESULT_FILE}"
