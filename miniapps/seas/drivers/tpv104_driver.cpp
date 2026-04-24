@@ -36,6 +36,7 @@
 #include "../domain/boundary_config.hpp"
 #include "../friction/slip_law_srw_psi.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
+#include "../io/paraview_output.hpp"
 
 #include <algorithm>
 #include <cmath>
@@ -300,6 +301,29 @@ int main(int argc, char *argv[])
    bool debug_qnorm      = HasFlag(argc, argv, "--debug-qnorm");
    bool dry_run          = HasFlag(argc, argv, "--dry-run");
    bool verify_dispatch  = HasFlag(argc, argv, "--verify-dispatch");
+
+   // ParaView output controls — mirror tpv102_driver.cpp + BP5 conventions:
+   //   --paraview              : enable PVD/VTU output, interval matches --output-dt
+   //   --paraview-every N      : write every N steps
+   //   --paraview-dt X         : write every X seconds (overrides step interval)
+   //   --paraview-bulk-dt X    : enable a SECOND collection in ParaView_bulk/
+   //                             with velocity + sigma_yy/sigma_xy/sigma_xz at
+   //                             coarser cadence (typical: 0.05 s)
+   //   --pv-low-order          : linear tets only (~40x smaller volume output)
+   //   --no-domain-pv          : suppress fault-schedule volume save (fault-
+   //                             surface PVD/VTU still written; bulk collection
+   //                             unaffected)
+   bool use_paraview = HasFlag(argc, argv, "--paraview");
+   bool pv_low_order = HasFlag(argc, argv, "--pv-low-order");
+   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv");
+   int  paraview_step_interval = GetIntArg(argc, argv, "--paraview-every", 0);
+   real_t paraview_dt_flag     = GetRealArg(argc, argv, "--paraview-dt", 0.0);
+   real_t paraview_bulk_dt     = GetRealArg(argc, argv, "--paraview-bulk-dt", 0.0);
+   if (paraview_step_interval > 0 || paraview_dt_flag > 0.0
+       || paraview_bulk_dt > 0.0)
+   {
+      use_paraview = true;
+   }
    // `--dry-run` is a shortcut for "no mesh, no time-stepping,
    // just print banner + verify wiring compiles/runs".  Used by
    // test_tpv104_smoke.cpp and the banner-check sbatch on Frontera.
@@ -671,6 +695,264 @@ int main(int argc, char *argv[])
                        pmesh, fes);
    surface_writer.WriteStep(0.0, Q);
 
+   // -----------------------------------------------------------------------
+   // 7b. ParaView output (mirrors tpv102_driver.cpp / BP5 seas::ParaViewOutput
+   //     pattern).  Two collections:
+   //       - pv_out (output_dir/ParaView): velocity + mpi_rank volume +
+   //         fault-surface PVD/VTU (slip, slip_rate, traction dip+strike,
+   //         psi, sigma_n, plus static a, Dc, x2, x3) at the fault schedule.
+   //       - pv_bulk_out (output_dir/ParaView_bulk): velocity + sigma_yy +
+   //         sigma_xy + sigma_xz + mpi_rank at --paraview-bulk-dt cadence.
+   //
+   // R-801 / BP5 component convention enforced project-wide: comp 0 = dip,
+   // comp 1 = strike.  TPV104 is pure strike-slip so the strike channel
+   // carries the rupture; dip stays near zero.
+   //
+   // Under R7-001 option (b) ADER one-shot, there is no "stage-4" snapshot
+   // distinct from the time-averaged DOFData — write the same values into
+   // both the averaged and the _k4 buffers so the ParaView Calculator
+   // delta `<field>_k4 - <field>` reads zero everywhere (consistent with
+   // what tpv102_driver.cpp does on the ADER path).
+   // -----------------------------------------------------------------------
+   using PvFES = typename seas::GFType<MeshT>::FESType;
+   using PvGF  = typename seas::GFType<MeshT>::type;
+
+   std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_out;
+   std::unique_ptr<L2_FECollection> pv_vel_fec, pv_rank_fec;
+   std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
+   std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
+
+   std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
+   std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
+   std::unique_ptr<PvFES> pv_bulk_sigma_fes;
+   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+
+   Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
+   Vector pv_local_state, pv_local_normal_stress;
+   Vector pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3;
+   Vector pv_local_slip_rate_k4, pv_local_traction_k4, pv_local_normal_stress_k4;
+
+   if (use_paraview)
+   {
+      if (rank == 0) { mkdir((output_dir + "/ParaView").c_str(), 0755); }
+#ifdef MFEM_USE_MPI
+      MPI_Barrier(comm);
+#endif
+      pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
+         output_dir + "/ParaView", pmesh, order);
+
+      if (pv_low_order)
+      {
+         pv_out->SetHighOrderOutput(false);
+         pv_out->SetLevelsOfDetail(1);
+      }
+
+      // Velocity: 3-component vector L2, byNODES so memcpy from Q's
+      // [VX..VZ] block is a single contiguous copy.
+      pv_vel_fec = std::make_unique<L2_FECollection>(order, 3, BasisType::GaussLobatto);
+      pv_vel_fes = std::make_unique<PvFES>(&pmesh, pv_vel_fec.get(),
+                                           3, Ordering::byNODES);
+      pv_vel_gf  = std::make_unique<PvGF>(pv_vel_fes.get());
+      *pv_vel_gf = 0.0;
+      pv_out->RegisterDomainField("velocity", pv_vel_gf.get());
+
+      // MPI rank: L2 p=0 (one value per element).
+      pv_rank_fec = std::make_unique<L2_FECollection>(0, 3);
+      pv_rank_fes = std::make_unique<PvFES>(&pmesh, pv_rank_fec.get());
+      pv_rank_gf  = std::make_unique<PvGF>(pv_rank_fes.get());
+      *pv_rank_gf = static_cast<real_t>(rank);
+      pv_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
+
+      // Fault L2-p0 fields keyed off the wave operator's canonical face
+      // lists (interior + shared) so ParaView indexing matches DOFData.
+      pv_out->InitFaultOutputBP5(fault_int_faces, fault_shr_faces,
+                                 nqp_per_face);
+
+      pv_local_slip.SetSize(2 * num_fault_total);
+      pv_local_slip_rate.SetSize(2 * num_fault_total);
+      pv_local_traction.SetSize(2 * num_fault_total);
+      pv_local_state.SetSize(num_fault_total);
+      pv_local_normal_stress.SetSize(num_fault_total);
+      pv_local_slip_rate_k4.SetSize(2 * num_fault_total);
+      pv_local_traction_k4.SetSize(2 * num_fault_total);
+      pv_local_normal_stress_k4.SetSize(num_fault_total);
+
+      pv_local_a.SetSize(num_fault_total);
+      pv_local_Dc.SetSize(num_fault_total);
+      pv_local_x2.SetSize(num_fault_total);
+      pv_local_x3.SetSize(num_fault_total);
+      for (int i = 0; i < num_fault_total; i++)
+      {
+         pv_local_a(i)  = dof_data[i].a;
+         pv_local_Dc(i) = dof_data[i].Dc;
+         pv_local_x2(i) = fault_coords[i](0);
+         pv_local_x3(i) = fault_coords[i](2);
+      }
+      pv_out->SetFaultParamsBP5(pv_local_a, pv_local_Dc,
+                                pv_local_x2, pv_local_x3);
+
+      // Schedule (CLI > step-interval > output_dt step interval):
+      const int output_interval_for_pv =
+         std::max(1, static_cast<int>(output_dt / dt));
+      if (paraview_step_interval > 0)
+      {
+         pv_out->output_every_n_steps = paraview_step_interval;
+      }
+      else if (paraview_dt_flag > 0.0)
+      {
+         pv_out->fixed_dt = paraview_dt_flag;
+      }
+      else
+      {
+         pv_out->output_every_n_steps = output_interval_for_pv;
+      }
+
+      if (rank == 0)
+      {
+         std::cout << "ParaView output: ON (prefix="
+                   << output_dir << "/ParaView)\n";
+         if (pv_no_domain)
+         {
+            std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
+         }
+         if (paraview_step_interval > 0)
+         {
+            std::cout << "  Interval: every " << paraview_step_interval
+                      << " steps (--paraview-every)\n";
+         }
+         else if (paraview_dt_flag > 0.0)
+         {
+            std::cout << "  Interval: every " << paraview_dt_flag
+                      << " s (--paraview-dt)\n";
+         }
+         else
+         {
+            std::cout << "  Interval: every " << output_interval_for_pv
+                      << " steps (matches --output-dt=" << output_dt
+                      << " s)\n";
+         }
+      }
+
+      if (paraview_bulk_dt > 0.0)
+      {
+         pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
+            output_dir + "/ParaView_bulk", pmesh, order);
+         if (pv_low_order)
+         {
+            pv_bulk_out->SetHighOrderOutput(false);
+            pv_bulk_out->SetLevelsOfDetail(1);
+         }
+         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
+         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
+
+         pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
+            order, 3, BasisType::GaussLobatto);
+         pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
+                                                     pv_bulk_sigma_fec.get());
+         pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_sxy_gf = 0.0;
+         *pv_bulk_sxz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+
+         pv_bulk_out->fixed_dt = paraview_bulk_dt;
+
+         if (rank == 0)
+         {
+            std::cout << "  Bulk collection: ON (prefix="
+                      << output_dir << "/ParaView_bulk, every "
+                      << paraview_bulk_dt
+                      << " s; fields: velocity, sigma_yy, sigma_xy, "
+                      << "sigma_xz, mpi_rank)\n";
+         }
+      }
+   }
+
+   // paraview_write: MPI-collective snapshot writer.  V_max must already be
+   // globally reduced; step_num/time identify the frame.
+   auto paraview_write = [&](int step_num, real_t time, real_t V_max)
+   {
+      if (!pv_out) { return; }
+
+      const bool fault_wants =
+         pv_out->PeekShouldWrite(step_num, time, V_max);
+      const bool bulk_wants = pv_bulk_out &&
+         pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
+      if (!fault_wants && !bulk_wants) { return; }
+
+      if (!pv_no_domain || bulk_wants)
+      {
+         std::memcpy(pv_vel_gf->GetData(),
+                     Q.GetData() + VX * ndof_total,
+                     3 * ndof_total * sizeof(real_t));
+      }
+
+      if (bulk_wants)
+      {
+         std::memcpy(pv_bulk_syy_gf->GetData(),
+                     Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxy_gf->GetData(),
+                     Q.GetData() + SXY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxz_gf->GetData(),
+                     Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         pv_bulk_out->ForceSave(step_num, time);
+      }
+
+      if (!fault_wants) { return; }
+
+      for (int i = 0; i < num_fault_total; i++)
+      {
+         const DOFData &d = dof_data[i];
+         pv_local_slip(2*i + 0)      = d.slip1;       // dip
+         pv_local_slip(2*i + 1)      = d.slip2;       // strike
+         pv_local_slip_rate(2*i + 0) = d.V1;
+         pv_local_slip_rate(2*i + 1) = d.V2;
+         pv_local_traction(2*i + 0)  = d.tau1_corr;
+         pv_local_traction(2*i + 1)  = d.tau2_corr;
+         pv_local_state(i)           = d.psi;
+         pv_local_normal_stress(i)   = d.sigma_n_corr;
+
+         // ADER one-shot: no stage-4 distinct from averaged DOFData (R7-001
+         // option b).  Mirror tpv102 ADER path: write the same values into
+         // _k4 buffers so the VTU delta reads exactly zero.
+         pv_local_slip_rate_k4(2*i + 0) = d.V1;
+         pv_local_slip_rate_k4(2*i + 1) = d.V2;
+         pv_local_traction_k4(2*i + 0)  = d.tau1_corr;
+         pv_local_traction_k4(2*i + 1)  = d.tau2_corr;
+         pv_local_normal_stress_k4(i)   = d.sigma_n_corr;
+      }
+
+      if (pv_no_domain)
+      {
+         pv_out->CommitSchedule(time);
+      }
+      else
+      {
+         pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
+                                      pv_local_traction, pv_local_state,
+                                      pv_local_normal_stress);
+         pv_out->ForceSave(step_num, time);
+      }
+
+      pv_out->WriteFaultSurfaceVTU(
+         output_dir, step_num, time, rank, nprocs,
+         pv_local_slip, pv_local_slip_rate, pv_local_traction,
+         pv_local_state, pv_local_normal_stress,
+         pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3,
+         pv_local_slip_rate_k4, pv_local_traction_k4,
+         pv_local_normal_stress_k4);
+   };
+
+   // Initial snapshot at t=0 (V_max = V_ini since fault is quasi-static).
+   paraview_write(0, 0.0, TPV104Params::V_ini);
+
    // If tfinal == 0: init-only run, stations at t=0 already written.
    // Skip the time loop and go straight to summary.  This is the
    // Phase-2 P2_D gate — the init sbatch verifies ψ_ini at every
@@ -797,6 +1079,11 @@ int main(int argc, char *argv[])
                       << ", V_max = " << V_max_step << " m/s\n";
          }
       }
+
+      // ParaView snapshot — has its own internal schedule (matches
+      // --paraview-dt / --paraview-every / output_dt), so we always
+      // call and let pv_out / pv_bulk_out's PeekShouldWrite gate the I/O.
+      paraview_write(step + 1, t, V_max_step);
 
       if (step == 0)
       {
