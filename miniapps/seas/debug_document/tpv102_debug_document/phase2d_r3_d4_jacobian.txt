@@ -1,0 +1,8 @@
+=== D4 fixture Jacobian sign audit ===
+  total elements    : 48
+  positive det(J)   : 24   (12 lower, 12 upper)
+  negative det(J)   : 24   (12 lower, 12 upper)
+  zero det(J)       : 0
+
+  D4 fixture orientation uniform: FAIL   (mixed-sign Jacobians break y-mirror symmetry of
+    ∫ shape_i ∂Q/∂x dV even on slot-equivariant meshes)

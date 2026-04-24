@@ -1,0 +1,67 @@
+
+========================================
+  Round-9 Step 1: FREEZE-C + dt-refinement
+  Fixture: kuhn
+========================================
+
+=== BASELINE (dt=5e-5, 20 steps)  (dt=5e-05, n_steps=20, freeze_psi=no) ===
+  [fixture=kuhn] (default)
+  worst spreads over 20 steps:
+    slip_rate    : 4.557465e-05
+    tau1_corr    : 2.236162e+00
+    tau2_corr    : 1.734665e+02
+    sigma_n_corr : 2.458748e+02
+
+=== FREEZE-C (dt=5e-5, 20 steps, ψ held after step 1)  (dt=5.000000e-05, n_steps=20, freeze_psi=yes) ===
+  [fixture=kuhn] (default)
+  worst spreads over 20 steps:
+    slip_rate    : 4.557465e-05
+    tau1_corr    : 2.236162e+00
+    tau2_corr    : 1.734665e+02
+    sigma_n_corr : 2.458748e+02
+
+=== DT/2 baseline (dt=2.5e-5, 40 steps)  (dt=2.500000e-05, n_steps=40, freeze_psi=no) ===
+  [fixture=kuhn] (default)
+  worst spreads over 40 steps:
+    slip_rate    : 4.911320e-05
+    tau1_corr    : 2.609875e+00
+    tau2_corr    : 1.867556e+02
+    sigma_n_corr : 2.653548e+02
+
+=== DT/4 baseline (dt=1.25e-5, 80 steps)  (dt=1.250000e-05, n_steps=80, freeze_psi=no) ===
+  [fixture=kuhn] (default)
+  worst spreads over 80 steps:
+    slip_rate    : 5.091788e-05
+    tau1_corr    : 2.810030e+00
+    tau2_corr    : 1.935263e+02
+    sigma_n_corr : 2.753057e+02
+
+========================================
+  VERDICT TABLE
+========================================
+                 | slip_rate  | tau1_corr  | tau2_corr  | sigma_n_corr
+  ---------------|------------|------------|------------|--------------
+  BASELINE       | 4.557465e-05 | 2.236162e+00 | 1.734665e+02 | 2.458748e+02
+  FREEZE-C       | 4.557465e-05 | 2.236162e+00 | 1.734665e+02 | 2.458748e+02
+  DT/2 baseline  | 4.911320e-05 | 2.609875e+00 | 1.867556e+02 | 2.653548e+02
+  DT/4 baseline  | 5.091788e-05 | 2.810030e+00 | 1.935263e+02 | 2.753057e+02
+
+=== Key ratios (tau1_corr, relative to baseline) ===
+  FREEZE-C / baseline = 1.0000
+  DT/2     / baseline = 1.1671
+  DT/4     / baseline = 1.2566
+
+=== dt-scaling fit (tau1_corr vs dt) ===
+  tau1_corr ∝ dt^-0.165 (fit from baseline / dt/4 ratio)
+  p > 0.5  → pepper vanishes as dt → 0 (sub-resolved physics)
+  p ≈ 0    → dt-insensitive (code bug)
+
+=== Verdict per R-005 matrix ===
+  FREEZE-C closes pepper? NO
+  dt refinement scales pepper? NO (dt-insensitive)
+
+  → Branch: ψ NOT amplifier AND dt-insensitive.
+    CODE BUG outside friction solver and outside ψ.
+    Requires FREEZE-A / FREEZE-B to disambiguate,
+    which need user authorization for flux-layer
+    code changes (§C R-006).

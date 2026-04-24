@@ -38,7 +38,23 @@ namespace seas
 class FrictionSolver
 {
 public:
-   enum class Method { Brent, NewtonRaphson, HybridNRBisection };
+   /// Friction-solver dispatch.  `Brent` / `NewtonRaphson` /
+   /// `HybridNRBisection` use the MFEM-native μ from
+   /// `friction/dieterich_ruina.hpp::FrictionCoefficientPsi` and are
+   /// shared with BP5/TPV102.  `NewtonRaphsonStable` is the TPV104-
+   /// canonical Newton (Plan §4.10 Step 5): it uses
+   /// `friction/friction_coeff_stable.hpp::FrictionCoefficientStable`
+   /// (byte-matched to the reference FVW runtime's `rs::arsinhexp`)
+   /// and dispatches via `dynamic/tpv104_friction_solver.hpp::
+   /// SolveSlipRateNewtonStable`.  `Method::NewtonRaphson` stays
+   /// intact so BP5/TPV102 callers see the legacy path unchanged.
+   enum class Method
+   {
+      Brent,                 ///< MFEM μ + log10-V Brent (Tandem-verified)
+      NewtonRaphson,         ///< MFEM μ + Newton (legacy)
+      NewtonRaphsonStable,   ///< stable-asinh μ + Newton (TPV104 canonical)
+      HybridNRBisection      ///< MFEM μ + NR-with-bisection-fallback
+   };
 
    /// Reference slip rate V₀ [m/s].
    static constexpr real_t V0 = 1e-6;
@@ -68,6 +84,14 @@ public:
    /// Hybrid NR+Bisection: try NR for 5 iterations, fall back to bisection.
    real_t SolveHybrid(real_t tau, real_t psi, real_t sigma_n,
                       real_t eta, real_t a) const;
+
+   /// Stable-asinh Newton (stable μ + `SolveSlipRateNewtonStable`).
+   /// TPV104 canonical per Plan §4.10 Step 5 and the R5-003 fix plan.
+   /// Warm-starts from Brent so that the V_prev requirement of
+   /// `SolveSlipRateNewtonStable` is satisfied without extending
+   /// `FrictionSolver::Solve`'s signature (preserves the legacy API).
+   real_t SolveNRStable(real_t tau, real_t psi, real_t sigma_n,
+                        real_t eta, real_t a) const;
 
    /// Evaluate the residual g(V) = |σ_n| * f(V, ψ) + η * V - Θ.
    /// (R-002 fix) g(0) = -Θ < 0, g(Θ/η) > 0 for valid bracket.

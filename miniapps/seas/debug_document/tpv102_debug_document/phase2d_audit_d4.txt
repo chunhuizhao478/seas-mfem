@@ -1,0 +1,206 @@
+
+=== TPV102 adjacent-triangle first-step audit ===
+  mesh dims: 2 x 2 x 2 hexes (override with SEAS_TEST_FAULT_NX/NY/NZ, even integers)
+  [SEAS_TEST_FIXTURE=d4] using BuildD4Mesh(true).
+  fault QPs: 24
+
+-- Gate 1: step-0 fault-local uniformity --
+  PASSED: fault slip_rate uniform across all QPs at step 0  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault tau1_corr uniform across all QPs at step 0  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault tau2_corr uniform across all QPs at step 0  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault sigma_n_corr uniform across all QPs at step 0  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: Q_imp_plus_local uniform across all fault QPs  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: Q_imp_minus_local uniform across all fault QPs  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: F_h_plus uniform across all fault QPs  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: F_h_minus uniform across all fault QPs  (got 0.000000e+00, tol 1.000000e-10)
+
+-- Gate 2: fault-face lift symmetry on adjacent bulk tets --
+  PASSED: pre-Minv rhs SXY cell means uniform on lower-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: pre-Minv rhs SXY cell means uniform on upper-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: pre-Minv rhs SXZ cell means uniform on lower-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: pre-Minv rhs SXZ cell means uniform on upper-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  FAILED [1980]: post-Minv SXY cell means uniform on lower-side fault-adjacent tets  (got 1.119241e+03, expected <= 1.000000e-10)
+  FAILED [1981]: post-Minv SXY cell means uniform on upper-side fault-adjacent tets  (got 1.119241e+03, expected <= 1.000000e-10)
+  PASSED: post-Minv SXZ cell means uniform on lower-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: post-Minv SXZ cell means uniform on upper-side fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+
+-- Gate 3: manual fault-only increment equals production first ADER step --
+  PASSED: manual fault-face-only first-step increment matches production AdvanceADER(Q=0)  (got 0.000000e+00, tol 1.000000e-11)
+
+-- Gate 4: second-step bulk signature audit --
+  FAILED [2064]: second-step I_plus_local traces uniform across all fault QPs  (got 8.660000e-04, expected <= 1.000000e-10)
+  FAILED [2065]: second-step I_minus_local traces uniform across all fault QPs  (got 8.660000e-04, expected <= 1.000000e-10)
+  PASSED: second-step Q_imp_plus_local uniform across all fault QPs  (got 2.696510e-16, tol 1.000000e-10)
+  PASSED: second-step Q_imp_minus_local uniform across all fault QPs  (got 2.696510e-16, tol 1.000000e-10)
+  PASSED: second-step F_h_plus uniform across all fault QPs  (got 1.009929e-19, tol 1.000000e-10)
+  PASSED: second-step F_h_minus uniform across all fault QPs  (got 1.009929e-19, tol 1.000000e-10)
+  PASSED: fault slip_rate still uniform after the second ADER step  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault tau1_corr still uniform after the second ADER step  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault tau2_corr still uniform after the second ADER step  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: fault sigma_n_corr still uniform after the second ADER step  (got 0.000000e+00, tol 1.000000e-10)
+  FAILED [2143]: step-0 lower-side sorted SXY signatures match across all fault-adjacent tets  (got 2.000000e+00, expected <= 1.000000e-10)
+  FAILED [2144]: step-0 upper-side sorted SXY signatures match across all fault-adjacent tets  (got 2.000000e+00, expected <= 1.000000e-10)
+  PASSED: step-0 lower-side sorted SXZ signatures match across all fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: step-0 upper-side sorted SXZ signatures match across all fault-adjacent tets  (got 0.000000e+00, tol 1.000000e-10)
+  FAILED [2147]: second-step fault-face-only lower-side sorted SXY signatures match  (got 2.000000e+00, expected <= 1.000000e-10)
+  FAILED [2148]: second-step fault-face-only upper-side sorted SXY signatures match  (got 2.000000e+00, expected <= 1.000000e-10)
+  PASSED: second-step fault-face-only lower-side sorted SXZ signatures match  (got 0.000000e+00, tol 1.000000e-10)
+  PASSED: second-step fault-face-only upper-side sorted SXZ signatures match  (got 0.000000e+00, tol 1.000000e-10)
+  FAILED [2151]: second-step volume-only lower-side sorted SXY signatures match  (got 2.306670e-03, expected <= 1.000000e-10)
+  FAILED [2152]: second-step volume-only upper-side sorted SXY signatures match  (got 2.306670e-03, expected <= 1.000000e-10)
+  FAILED [2153]: second-step volume-only lower-side sorted SXZ signatures match  (got 2.306670e-03, expected <= 1.000000e-10)
+  FAILED [2154]: second-step volume-only upper-side sorted SXZ signatures match  (got 2.306670e-03, expected <= 1.000000e-10)
+  FAILED [2155]: second-step boundary-face lower-side sorted SXY signatures match  (got 1.000000e+00, expected <= 1.000000e-10)
+  FAILED [2156]: second-step boundary-face upper-side sorted SXY signatures match  (got 1.000000e+00, expected <= 1.000000e-10)
+  FAILED [2157]: second-step boundary-face lower-side sorted SXZ signatures match  (got 1.000000e+00, expected <= 1.000000e-10)
+  FAILED [2158]: second-step boundary-face upper-side sorted SXZ signatures match  (got 1.000000e+00, expected <= 1.000000e-10)
+  FAILED [2159]: second-step interior-nonfault lower-side sorted SXY signatures match  (got 1.881082e+00, expected <= 1.000000e-10)
+  FAILED [2160]: second-step interior-nonfault upper-side sorted SXY signatures match  (got 1.935661e+00, expected <= 1.000000e-10)
+  FAILED [2161]: second-step interior-nonfault lower-side sorted SXZ signatures match  (got 1.741427e+00, expected <= 1.000000e-10)
+  FAILED [2162]: second-step interior-nonfault upper-side sorted SXZ signatures match  (got 4.996851e-01, expected <= 1.000000e-10)
+  FAILED [2163]: second-step manual nonfault-face lower-side sorted SXY signatures match  (got 1.389225e+00, expected <= 1.000000e-10)
+  FAILED [2164]: second-step manual nonfault-face upper-side sorted SXY signatures match  (got 7.441168e-01, expected <= 1.000000e-10)
+  FAILED [2165]: second-step manual nonfault-face lower-side sorted SXZ signatures match  (got 1.000990e+00, expected <= 1.000000e-10)
+  FAILED [2166]: second-step manual nonfault-face upper-side sorted SXZ signatures match  (got 1.000990e+00, expected <= 1.000000e-10)
+  FAILED [2167]: second-step nonfault residual lower-side sorted SXY signatures match  (got 1.389225e+00, expected <= 1.000000e-10)
+  FAILED [2168]: second-step nonfault residual upper-side sorted SXY signatures match  (got 7.441168e-01, expected <= 1.000000e-10)
+  FAILED [2169]: second-step nonfault residual lower-side sorted SXZ signatures match  (got 1.000990e+00, expected <= 1.000000e-10)
+  FAILED [2170]: second-step nonfault residual upper-side sorted SXZ signatures match  (got 1.000990e+00, expected <= 1.000000e-10)
+  PASSED: manual nonfault-face assembly matches nonfault residual exactly  (got 5.275780e-13, tol 1.000000e-11)
+  FAILED [2172]: step-1 lower-side sorted SXY signatures match across all fault-adjacent tets  (got 1.999018e+00, expected <= 1.000000e-10)
+  FAILED [2173]: step-1 upper-side sorted SXY signatures match across all fault-adjacent tets  (got 1.999480e+00, expected <= 1.000000e-10)
+  FAILED [2174]: step-1 lower-side sorted SXZ signatures match across all fault-adjacent tets  (got 1.000720e+00, expected <= 1.000000e-10)
+  FAILED [2175]: step-1 upper-side sorted SXZ signatures match across all fault-adjacent tets  (got 1.000432e+00, expected <= 1.000000e-10)
+
+-- Gate 5: per-face orbit drift in interior non-fault branch --
+  5a raw Interior(nor,L,R): max orbit F_h drift = 2.000e+00 on SXX
+      orbits in iface raw probe: 32  (total samples: 192)
+        orbit x=0;y=166667;z=166667;nx=10000;ny=0;nz=0  size=6  worst F_h drift=2.000e+00 on SXX
+        orbit x=0;y=166667;z=333333;nx=10000;ny=0;nz=0  size=6  worst F_h drift=2.000e+00 on SXX
+        orbit x=166667;y=166667;z=0;nx=0;ny=0;nz=10000  size=6  worst F_h drift=2.000e+00 on SXZ
+        orbit x=166667;y=166667;z=166667;nx=0;ny=7071;nz=7071  size=6  worst F_h drift=1.876e+00 on SXY
+  5b symmetrized 0.5*(Interior(n,L,R)+Interior(-n,R,L)): max orbit F_h drift = 4.263e-14 on SXX
+  5c canonical-normal Interior(nor_can,L,R): max orbit F_h drift = 2.000e+00 on SXY
+      orbits in iface can probe: 32  (total samples: 192)
+        orbit x=0;y=166667;z=166667;nx=10000;ny=0;nz=0  size=6  worst F_h drift=2.000e+00 on SXY
+        orbit x=0;y=166667;z=333333;nx=10000;ny=0;nz=0  size=6  worst F_h drift=2.000e+00 on SXY
+        orbit x=166667;y=166667;z=0;nx=0;ny=0;nz=10000  size=6  worst F_h drift=1.874e+00 on SXZ
+        orbit x=166667;y=166667;z=166667;nx=0;ny=7071;nz=7071  size=6  worst F_h drift=1.876e+00 on SXY
+  FAILED [2211]: Gate 5a: per-face F_h orbit-uniform on interior non-fault (raw Interior)  (got 2.000000e+00, expected <= 1.000000e-10)
+  PASSED: Gate 5b: per-face F_h orbit-uniform when Interior symmetrized in (nor,L<->R)  (got 4.263256e-14, tol 1.000000e-10)
+  FAILED [2215]: Gate 5c: per-face F_h orbit-uniform when normal is canonicalized outward  (got 2.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 6: per-face orbit drift in boundary branch --
+  6a Gamma baseline FreeSurfaceTotal: max orbit F_h drift = 2.000e+00 on SXZ
+      orbits in bface gamma probe: 12  (total samples: 144)
+        orbit x=166667;y=166667;z=500000;nx=0;ny=0;nz=10000  size=12  worst F_h drift=2.000e+00 on SXZ
+        orbit x=333333;y=166667;z=500000;nx=0;ny=0;nz=10000  size=12  worst F_h drift=2.000e+00 on SXZ
+        orbit x=500000;y=166667;z=166667;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXX
+        orbit x=500000;y=166667;z=333333;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXX
+  6b Godunov variant FreeSurfaceGodunovTotal: max orbit F_h drift = 2.000e+00 on SXZ
+      orbits in bface godunov probe: 12  (total samples: 144)
+        orbit x=166667;y=166667;z=500000;nx=0;ny=0;nz=10000  size=12  worst F_h drift=2.000e+00 on SXZ
+        orbit x=333333;y=166667;z=500000;nx=0;ny=0;nz=10000  size=12  worst F_h drift=2.000e+00 on SXZ
+        orbit x=500000;y=166667;z=166667;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXX
+        orbit x=500000;y=166667;z=333333;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXX
+  6c Gamma symmetrized 0.5*(Gamma(n)+Gamma(-n)): max orbit F_h drift = 2.000e+00 on SXY
+      orbits in bface gsym probe: 12  (total samples: 144)
+        orbit x=500000;y=166667;z=166667;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXY
+        orbit x=500000;y=166667;z=333333;nx=10000;ny=0;nz=0  size=12  worst F_h drift=2.000e+00 on SXY
+  FAILED [2252]: Gate 6a: per-face F_h orbit-uniform on boundary (Gamma baseline)  (got 2.000000e+00, expected <= 1.000000e-10)
+  FAILED [2254]: Gate 6b: per-face F_h orbit-uniform on boundary (Godunov variant)  (got 2.000000e+00, expected <= 1.000000e-10)
+  FAILED [2256]: Gate 6c: per-face F_h orbit-uniform when boundary flux sign-symmetrized  (got 2.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 7: element-level lifted orbit drift after branch fixes --
+    [raw                ]  iface SXY lower=1.881e+00  iface SXZ lower=1.741e+00  bface SXY lower=1.000e+00  bface SXZ lower=1.000e+00
+    [iface symmetrized  ]  iface SXY lower=3.115e-16  iface SXZ lower=0.000e+00  bface SXY lower=1.000e+00  bface SXZ lower=1.000e+00
+    [bface symmetrized  ]  iface SXY lower=1.881e+00  iface SXZ lower=1.741e+00  bface SXY lower=1.000e+00  bface SXZ lower=3.545e-20
+    [both symmetrized   ]  iface SXY lower=3.115e-16  iface SXZ lower=0.000e+00  bface SXY lower=1.000e+00  bface SXZ lower=3.545e-20
+  totals:  raw=1.936e+00  iface_sym=1.000e+00  bface_sym=1.936e+00  both_sym=1.000e+00
+  PASSED: Gate 7 raw baseline reproduces the failure (sanity)  (got 1.935661e+00, tol 1.000000e+01)
+  FAILED [2321]: Gate 7a: interior-only symmetrization zeroes the lifted drift  (got 1.000000e+00, expected <= 1.000000e-10)
+  FAILED [2322]: Gate 7b: boundary-only symmetrization zeroes the lifted drift  (got 1.935661e+00, expected <= 1.000000e-10)
+  FAILED [2323]: Gate 7c: both symmetrizations together zero the lifted drift  (got 1.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 8: within-outer-side boundary F_h orbit breakdown --
+    boundary-face side count:  x=0=24  x=L=24  y=0=24  y=L=24  z=0=24  z=L=24
+    per-side worst F_h orbit drift (within side):
+      x=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=0.00e+00  SXZ=7.70e-34  VX=1.39e-21  VY=7.89e-22  VZ=1.12e-41
+      x=L:  SXX=0.00e+00  SYY=0.00e+00  SZZ=0.00e+00  SXY=0.00e+00  SYZ=0.00e+00  SXZ=0.00e+00  VX=0.00e+00  VY=0.00e+00  VZ=0.00e+00
+      y=0:  SXX=0.00e+00  SYY=0.00e+00  SZZ=0.00e+00  SXY=0.00e+00  SYZ=0.00e+00  SXZ=0.00e+00  VX=0.00e+00  VY=0.00e+00  VZ=0.00e+00
+      y=L:  SXX=0.00e+00  SYY=0.00e+00  SZZ=0.00e+00  SXY=0.00e+00  SYZ=0.00e+00  SXZ=0.00e+00  VX=0.00e+00  VY=0.00e+00  VZ=0.00e+00
+      z=0:  SXX=3.85e-34  SYY=3.85e-34  SZZ=1.16e-33  SXY=0.00e+00  SYZ=0.00e+00  SXZ=2.00e+00  VX=1.12e-22  VY=7.25e-41  VZ=4.12e-41
+      z=L:  SXX=0.00e+00  SYY=0.00e+00  SZZ=0.00e+00  SXY=0.00e+00  SYZ=0.00e+00  SXZ=0.00e+00  VX=0.00e+00  VY=0.00e+00  VZ=0.00e+00
+  FAILED [2479]: Gate 8: within-side F_h orbits uniform on each outer-cube side  (got 2.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 9: Gamma vs Godunov lifted bface drift comparison --
+    Gamma + both sym   : bface SXY lower=1.000e+00  bface SXY upper=1.000e+00  bface SXZ lower=3.545e-20  bface SXZ upper=3.545e-20
+    Godunov raw        : bface SXY lower=1.000e+00  bface SXY upper=1.000e+00  bface SXZ lower=1.000e+00  bface SXZ upper=1.000e+00
+    Godunov + both sym : bface SXY lower=1.000e+00  bface SXY upper=1.000e+00  bface SXZ lower=3.545e-20  bface SXZ upper=3.545e-20
+  FAILED [2533]: Gate 9: Godunov BC mode + both symmetrizations zero the bface drift  (got 1.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 10: zero-input boundary sanity --
+    with I=0: interior rhs max=0.000e+00  boundary rhs max=0.000e+00
+  PASSED: Gate 10a: zero input gives zero interior non-fault contribution  (got 0.000000e+00, tol 1.000000e-20)
+  PASSED: Gate 10b: zero input gives zero boundary contribution  (got 0.000000e+00, tol 1.000000e-20)
+
+-- Gate 11: constant-input boundary D4 covariance probe --
+    Gamma   per-side relative F_h drift on constant I:
+      x=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=0.00e+00  SXZ=2.00e+00  VX=1.02e-06  VY=4.68e-14  VZ=4.34e-14
+      x=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=0.00e+00  SXZ=2.00e+00  VX=1.02e-06  VY=4.68e-14  VZ=4.34e-14
+      y=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=2.00e+00  SXZ=0.00e+00  VX=2.94e-07  VY=1.99e-13  VZ=1.12e-13
+      y=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=2.00e+00  SXZ=0.00e+00  VX=2.94e-07  VY=1.99e-13  VZ=1.12e-13
+      z=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=0.00e+00  SYZ=2.00e+00  SXZ=2.00e+00  VX=2.94e-07  VY=1.12e-13  VZ=4.12e-13
+      z=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=0.00e+00  SYZ=2.00e+00  SXZ=2.00e+00  VX=2.94e-07  VY=1.12e-13  VZ=4.12e-13
+    Godunov per-side relative F_h drift on constant I:
+      x=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=0.00e+00  SXZ=2.00e+00  VX=3.28e-06  VY=1.40e-06  VZ=1.71e-06
+      x=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=0.00e+00  SXZ=2.00e+00  VX=3.28e-06  VY=1.40e-06  VZ=1.71e-06
+      y=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=2.00e+00  SXZ=0.00e+00  VX=1.61e-06  VY=3.11e-06  VZ=1.57e-07
+      y=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=2.00e+00  SYZ=2.00e+00  SXZ=0.00e+00  VX=1.61e-06  VY=3.11e-06  VZ=1.57e-07
+      z=0:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=0.00e+00  SYZ=2.00e+00  SXZ=2.00e+00  VX=1.71e-06  VY=1.57e-07  VZ=8.57e-07
+      z=L:  SXX=2.00e+00  SYY=2.00e+00  SZZ=2.00e+00  SXY=0.00e+00  SYZ=2.00e+00  SXZ=2.00e+00  VX=1.71e-06  VY=1.57e-07  VZ=8.57e-07
+  FAILED [2647]: Gate 11a: constant-I F_h within-side orbit uniform under Gamma BC  (got 2.000000e+00, expected <= 1.000000e-13)
+  FAILED [2649]: Gate 11b: constant-I F_h within-side orbit uniform under Godunov BC  (got 2.000000e+00, expected <= 1.000000e-13)
+
+-- Gate 12: boundary-face normal orientation audit --
+    boundary-face inward-normal count: 24 of 48 total
+      side x=0: 4 inward-pointing normals
+      side x=L: 4 inward-pointing normals
+      side y=0: 4 inward-pointing normals
+      side y=L: 4 inward-pointing normals
+      side z=0: 4 inward-pointing normals
+      side z=L: 4 inward-pointing normals
+  FAILED [2729]: Gate 12: every boundary-face nor from CalcOrtho points outward  (got 2.400000e+01, expected <= 0.000000e+00)
+
+-- Gate 14: constant-I lifted element rhs orbit drift --
+    constant-I lifted drift: iface worst=0.000e+00  bface worst=1.000e+00
+  PASSED: Gate 14a: constant-I lifted interior rhs orbit-uniform (element-level)  (got 0.000000e+00, tol 1.000000e-10)
+  FAILED [2784]: Gate 14b: constant-I lifted boundary rhs orbit-uniform (element-level)  (got 1.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 15: affine trace reconstruction probe --
+    worst interior self trace error : 2.220e-16  on field x+z
+    worst interior nbr  trace error : 2.220e-16  on field x+z
+    worst interior self-nbr jump    : 0.000e+00  on field x
+    worst boundary self trace error : 2.220e-16  on field x+z
+  PASSED: Gate 15a: interior self trace reproduces affine field  (got 2.220446e-16, tol 1.000000e-12)
+  PASSED: Gate 15b: interior neighbor trace reproduces affine field  (got 2.220446e-16, tol 1.000000e-12)
+  PASSED: Gate 15c: interior self/nbr traces agree on affine field  (got 0.000000e+00, tol 1.000000e-12)
+  PASSED: Gate 15d: boundary self trace reproduces affine field  (got 2.220446e-16, tol 1.000000e-12)
+
+-- Gate 16: analytic-trace lift probe --
+    worst analytic-trace interior lifted drift : 1.831e-14  on field x+z
+    worst analytic-trace boundary lifted drift : 2.000e+00  on field x+z
+  PASSED: Gate 16a: analytic interior traces remain orbit-uniform after lift  (got 1.830817e-14, tol 1.000000e-10)
+  FAILED [2833]: Gate 16b: analytic boundary traces remain orbit-uniform after lift  (got 2.000000e+00, expected <= 1.000000e-10)
+
+-- Gate 13: raw per-face nor / I_self / F_h dump on x=0 side --
+    f=9  e1=2  nor=(-1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=6.728e+17  F_h[SXY]=2.563e+17  F_h[SXZ]=2.883e+17
+    f=12  e1=3  nor=(1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=-6.728e+17  F_h[SXY]=-2.563e+17  F_h[SXZ]=-2.883e+17
+    f=25  e1=8  nor=(1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=-6.728e+17  F_h[SXY]=-2.563e+17  F_h[SXZ]=-2.883e+17
+    f=28  e1=9  nor=(-1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=6.728e+17  F_h[SXY]=2.563e+17  F_h[SXZ]=2.883e+17
+    f=71  e1=26  nor=(-1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=6.728e+17  F_h[SXY]=2.563e+17  F_h[SXZ]=2.883e+17
+    f=74  e1=27  nor=(1.0000,0.0000,0.0000)  nor_len=2.500e+05  shape_sum=1.000000  I_self[SXX]=1.000e+06  F_h[SXX]=-6.728e+17  F_h[SXY]=-2.563e+17  F_h[SXZ]=-2.883e+17
+
+========================================
+  Results: 38 passed, 47 failed out of 85 tests
+========================================

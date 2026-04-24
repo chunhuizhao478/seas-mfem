@@ -77,6 +77,17 @@ inline void InitializeFaultDOFs(std::vector<DOFData> &dof_data, int ndof,
       d.tau1_0   = 0.0;                      // no dip pre-stress
       d.tau2_0   = TPV102Params::tau_ini;    // along-strike pre-stress
 
+      // v9.4.0 Commit 1 / R-003: persistent nucleation channel.
+      // Evaluate() now reads data.tau*_nuc / sigma_n_nuc into the
+      // friction input.  DOFData default-ctor already zeroes these
+      // fields, but zeroing explicitly here defends against a reused
+      // vector carrying stale bits from a prior run.  ApplyNucleation
+      // Prestress overwrites tau2_nuc per call; tau1_nuc / sigma_n_nuc
+      // stay zero for TPV102 (pure strike-slip, no normal-stress nuc).
+      d.sigma_n_nuc = 0.0;
+      d.tau1_nuc    = 0.0;
+      d.tau2_nuc    = 0.0;
+
       // Fault coordinates: x = along-strike, z = depth
       real_t along_strike = fault_coords[i](0);
       real_t down_dip = std::abs(fault_coords[i](2));  // depth as positive distance

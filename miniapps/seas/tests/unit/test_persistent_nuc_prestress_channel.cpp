@@ -15,26 +15,29 @@
 //
 // THE FIX:
 //   1. New DOFData fields {sigma_n_nuc, tau1_nuc, tau2_nuc} (default 0).
-//   2. FaultFaceFlux::EvaluateTotal adds them to the trial traction
-//      after ComputeTrialTraction — re-imposed at every Riemann solve.
-//   3. New helper ApplyNucleationTotalPrestress(dof_data, ..., t)
-//      OVERWRITES dof_data[i].tau2_nuc per call (mirrors the working
-//      fluctuation-Q ApplyNucleation overwrite at
-//      tpv102_setup.hpp:135-148).  Bulk Q is never touched by
-//      nucleation.
+//   2. FaultFaceFlux::Evaluate (v9.4.0 Commit 1) adds them to the
+//      friction-input total traction after ComputeTrialTraction — the
+//      persistent channel is re-imposed at every Riemann solve.
+//   3. New helper ApplyNucleationPrestress(dof_data, ..., t) OVERWRITES
+//      dof_data[i].tau2_nuc per call (mirrors the working fluctuation-Q
+//      ApplyNucleation overwrite at tpv102_setup.hpp:135-148).  Bulk Q
+//      is never touched by nucleation.
 //
 // WHAT THIS TEST CHECKS:
-//   Test A (additivity) — direct EvaluateTotal call with hand-set Q±:
-//     - tau2_nuc = 0  → trial traction matches ComputeTrialTraction.
-//     - tau2_nuc = X  → trial traction shifts by exactly X (modulo the
-//                        eta_s*V friction reaction, bounded by V_ini).
-//   Test B (overwrite semantics) — ApplyNucleationTotalPrestress called
+//   Test A (additivity) — direct Evaluate call with hand-set Q±
+//     in the v9.4.0 fluctuation-Q contract (bulk Q carries fluctuation
+//     only; static pre-stress lives in DOFData.tau*_0):
+//     - tau2_nuc = 0  → friction-input traction matches tau*_0 + trial.
+//     - tau2_nuc = X  → friction-input traction shifts by exactly X
+//                        (modulo the eta_s*V friction reaction,
+//                        bounded by V_ini).
+//   Test B (overwrite semantics) — ApplyNucleationPrestress called
 //     repeatedly at increasing t produces the corresponding
 //     NucleationPerturbation(...) value in dof_data[i].tau2_nuc each
 //     time (no add-delta drift).
 //   Test C (default no-op) — DOFData with tau*_nuc=0 yields the same
-//     EvaluateTotal output as a fixture without the new channel: the
-//     fix is a strict no-op for callers that do not opt in.
+//     Evaluate output as a fixture without the new channel: the fix
+//     is a strict no-op for callers that do not opt in.
 //
 // Runs in <1 s on the local laptop, no MPI needed.
 
@@ -77,19 +80,24 @@ static int num_tests = 0, num_passed = 0, num_failed = 0;
 
 namespace {
 
-// Build a locked-fault DOFData fixture in TPV102 conditions, but with
-// {sigma_n0, tau1_0, tau2_0} zero (the total-Q dispatch contract — bulk
-// Q carries the static prestress).  Friction solver is in equilibrium
-// at V_ini so the eta_s*V reaction term is bounded by ~Zs*V_ini ≈ 1e-5
-// Pa, well below the test tolerances.
-DOFData MakeTotalLockedDOF(real_t a)
+// Build a locked-fault DOFData fixture in TPV102 conditions, under the
+// v9.4.0 fluctuation-Q dispatch contract: static pre-stress lives in
+// DOFData (sigma_n0, tau2_0) and bulk Q carries only the fluctuation.
+// Friction solver is in equilibrium at V_ini so the eta_s*V reaction
+// term is bounded by ~Zs*V_ini ≈ 1e-5 Pa, well below the test
+// tolerances.
+DOFData MakeLockedDOF(real_t a)
 {
    DOFData d;
    d.Zp_plus = TPV102Params::Zp; d.Zp_minus = TPV102Params::Zp;
    d.Zs_plus = TPV102Params::Zs; d.Zs_minus = TPV102Params::Zs;
    d.eta_p = TPV102Params::Zp / 2.0;
    d.eta_s = TPV102Params::eta_s;
-   d.sigma_n0 = 0;  d.tau1_0 = 0;  d.tau2_0 = 0;
+   // v9.4.0 fluctuation-Q: static pre-stress stored in DOFData fields
+   // (InitializeFaultDOFs convention), bulk Q starts at 0.
+   d.sigma_n0 = TPV102Params::sigma_n;
+   d.tau1_0   = 0.0;
+   d.tau2_0   = TPV102Params::tau_ini;
    d.sigma_n_nuc = 0;  d.tau1_nuc = 0;  d.tau2_nuc = 0;
    d.a = a;
    d.Dc = TPV102Params::Dc;
@@ -99,33 +107,14 @@ DOFData MakeTotalLockedDOF(real_t a)
    return d;
 }
 
-// Symmetric Q± at TPV102 background, in FAULT-LOCAL coordinates as
-// supplied to FaultFaceFlux::EvaluateTotal by the wave operator.
-//
-// InitializeStateTotal lays down GLOBAL stress
-//   Q[SYY_global] = +sigma_n,   Q[SXY_global] = -tau_ini
-// (see tpv102_setup_total.hpp:38-50 for the BP5 canonical-frame
-// rotation derivation: t1=(0,0,-1), t2=(+1,0,0), n=(0,-1,0)).
-// The wave operator rotates Q to fault-local before EvaluateTotal:
-// under the Voigt rotation R = [n; t1; t2]_rows we have
-//   sigma_local_NN  = sigma_yy_global         = +sigma_n
-//   sigma_local_NT2 = -sigma_xy_global        = +tau_ini
-// where local index NN = SXX (1st diag in the (n, t1, t2) frame),
-// NT2 = SXZ (off-diag between normal and tangent2 = strike).
-//
-// The earlier draft of this fixture wrote SXZ = -tau_ini, which is
-// the GLOBAL sign — symmetric Q masked the error in tau2_corr (the
-// magnitude is the same), but any directional check (e.g. the
-// Riemann velocity jump direction in Test A8) would have inverted.
-// Use the fault-local sign here for parity with InitializeStateTotal.
-void SetSymmetricBackgroundQ(real_t *Qp, real_t *Qm)
+// Zero fluctuation-Q on both sides — represents the rest state of
+// the bulk wave field at t = 0 before any slip has radiated.  Under
+// v9.4.0 fluctuation-Q, the static pre-stress DOES NOT live in bulk
+// Q (it lives in DOFData).  Therefore the symmetric "background" to
+// feed FaultFaceFlux::Evaluate at a locked fault is Q = 0.
+void SetZeroBackgroundQ(real_t *Qp, real_t *Qm)
 {
    for (int c = 0; c < NUM_STATE; c++) { Qp[c] = 0; Qm[c] = 0; }
-   // SXX is the fault-NORMAL stress in the rotated frame.
-   Qp[SXX] = TPV102Params::sigma_n;  Qm[SXX] = TPV102Params::sigma_n;
-   // SXZ = sigma_NT2 = +tau_ini in fault-local coordinates (sign flip
-   // from global -tau_ini under the BP5 rotation; see header above).
-   Qp[SXZ] = +TPV102Params::tau_ini; Qm[SXZ] = +TPV102Params::tau_ini;
 }
 
 } // anonymous
@@ -147,11 +136,11 @@ int main()
 
       // Baseline: tau2_nuc = 0.  The friction solver sees the bulk
       // background only; data.tau2_corr ≈ +tau_ini (locked fault,
-      // V≈V_ini) — fault-local sigma_NT2 sign per SetSymmetricBackgroundQ.
-      DOFData d_base = MakeTotalLockedDOF(a);
+      // V≈V_ini) — fault-local sigma_NT2 sign per SetZeroBackgroundQ.
+      DOFData d_base = MakeLockedDOF(a);
       real_t Qp[NUM_STATE], Qm[NUM_STATE], Qip[NUM_STATE], Qim[NUM_STATE];
-      SetSymmetricBackgroundQ(Qp, Qm);
-      flux.EvaluateTotal(d_base, Qp, Qm, Qip, Qim);
+      SetZeroBackgroundQ(Qp, Qm);
+      flux.Evaluate(d_base, Qp, Qm, Qip, Qim);
       const real_t tau2_corr_base = d_base.tau2_corr;
       // Sanity: locked fault at V_ini → tau2_corr ≈ +tau_ini, eta_s*V_ini
       // ≈ Zs*V_ini/2 ≈ 5e-3 Pa drift.  Allow 10 Pa slack.
@@ -165,10 +154,10 @@ int main()
       // by the rupture release (a few MPa at most for TPV102 numbers).
       // The shift therefore must be POSITIVE (nuc adds upward) AND
       // at least 80% of nuc_dtau.
-      DOFData d_nuc = MakeTotalLockedDOF(a);
+      DOFData d_nuc = MakeLockedDOF(a);
       d_nuc.tau2_nuc = TPV102Params::nuc_dtau;
-      SetSymmetricBackgroundQ(Qp, Qm);  // Q untouched — nuc not in bulk
-      flux.EvaluateTotal(d_nuc, Qp, Qm, Qip, Qim);
+      SetZeroBackgroundQ(Qp, Qm);  // Q untouched — nuc not in bulk
+      flux.Evaluate(d_nuc, Qp, Qm, Qip, Qim);
       const real_t shift = d_nuc.tau2_corr - tau2_corr_base;
       std::cout << "    baseline tau2_corr  = " << std::scientific
                 << std::setprecision(6) << tau2_corr_base << " Pa\n"
@@ -186,19 +175,19 @@ int main()
       // tau1_corr / sigma_n_corr correspondingly with no cross-talk
       // into tau2_corr.  This guards against future code that confuses
       // the dip vs strike vs normal indices on the new fields.
-      DOFData d_t1 = MakeTotalLockedDOF(a);
+      DOFData d_t1 = MakeLockedDOF(a);
       d_t1.tau1_nuc = 1.0e6;
-      SetSymmetricBackgroundQ(Qp, Qm);
-      flux.EvaluateTotal(d_t1, Qp, Qm, Qip, Qim);
+      SetZeroBackgroundQ(Qp, Qm);
+      flux.Evaluate(d_t1, Qp, Qm, Qip, Qim);
       TEST_ASSERT(d_t1.tau1_corr > 1e5,
                   "A5: tau1_nuc=+1 MPa shifts tau1_corr (dip channel)");
       TEST_NEAR(d_t1.tau2_corr, tau2_corr_base, 1e3,
                 "A6: tau1_nuc does not leak into tau2_corr");
 
-      DOFData d_sn = MakeTotalLockedDOF(a);
+      DOFData d_sn = MakeLockedDOF(a);
       d_sn.sigma_n_nuc = 1.0e6;
-      SetSymmetricBackgroundQ(Qp, Qm);
-      flux.EvaluateTotal(d_sn, Qp, Qm, Qip, Qim);
+      SetZeroBackgroundQ(Qp, Qm);
+      flux.Evaluate(d_sn, Qp, Qm, Qip, Qim);
       const real_t expected_sn = TPV102Params::sigma_n + 1.0e6;
       TEST_NEAR(d_sn.sigma_n_corr, expected_sn, 1.0,
                 "A7: sigma_n_nuc shifts sigma_n_corr by exactly the offset");
@@ -227,14 +216,14 @@ int main()
       //
       // Re-run the d_nuc fixture and inspect Qip / Qim returned by
       // the same EvaluateTotal call (the ones written into the
-      // baseline already; redo since ApplyNucleationTotalPrestress
+      // baseline already; redo since ApplyNucleationPrestress
       // doesn't update Qip/Qim).
-      DOFData d_a8 = MakeTotalLockedDOF(a);
+      DOFData d_a8 = MakeLockedDOF(a);
       d_a8.tau2_nuc = TPV102Params::nuc_dtau;
       real_t Qp8[NUM_STATE], Qm8[NUM_STATE];
       real_t Qip8[NUM_STATE], Qim8[NUM_STATE];
-      SetSymmetricBackgroundQ(Qp8, Qm8);
-      flux.EvaluateTotal(d_a8, Qp8, Qm8, Qip8, Qim8);
+      SetZeroBackgroundQ(Qp8, Qm8);
+      flux.Evaluate(d_a8, Qp8, Qm8, Qip8, Qim8);
       const real_t jump_VZ = std::abs(Qip8[VZ] - Qim8[VZ]);
       const real_t v_abs   = d_a8.slip_rate;
       std::cout << "    A8 V_abs            = " << std::scientific
@@ -251,9 +240,9 @@ int main()
    }
 
    // -----------------------------------------------------------------
-   // Test B: ApplyNucleationTotalPrestress overwrite semantics.
+   // Test B: ApplyNucleationPrestress overwrite semantics.
    // -----------------------------------------------------------------
-   std::cout << "\n-- Test B: ApplyNucleationTotalPrestress overwrite --\n";
+   std::cout << "\n-- Test B: ApplyNucleationPrestress overwrite --\n";
    {
       // 3 fault QPs: hypocenter, off-hypo (ramp partially active),
       // far-field (outside nucleation radius — should stay 0).
@@ -277,7 +266,7 @@ int main()
       // Saturated time: dtau at hypo = nuc_dtau; off-hypo < nuc_dtau;
       // far-field = 0.
       const real_t t = TPV102Params::nuc_T + 0.5;
-      ApplyNucleationTotalPrestress(dof_data, coords, t);
+      ApplyNucleationPrestress(dof_data, coords, t);
 
       const real_t expected_0 = NucleationPerturbation(
          coords[0][0], std::abs(coords[0][2]), t);
@@ -299,7 +288,7 @@ int main()
                 "B4: hypo at saturation t > nuc_T → tau2_nuc = nuc_dtau");
 
       // Idempotency under repeated call at same t.
-      ApplyNucleationTotalPrestress(dof_data, coords, t);
+      ApplyNucleationPrestress(dof_data, coords, t);
       TEST_NEAR(dof_data[0].tau2_nuc, expected_0,
                 1e-9 * std::max(std::abs(expected_0), 1.0),
                 "B5: repeated call at same t is idempotent");
@@ -307,7 +296,7 @@ int main()
       // Time advance: at t' < t, hypo dtau drops back to a smaller
       // value (overwrite, not add).
       const real_t t_early = TPV102Params::nuc_T * 0.3;
-      ApplyNucleationTotalPrestress(dof_data, coords, t_early);
+      ApplyNucleationPrestress(dof_data, coords, t_early);
       const real_t expected_0_early = NucleationPerturbation(
          coords[0][0], std::abs(coords[0][2]), t_early);
       TEST_NEAR(dof_data[0].tau2_nuc, expected_0_early,
@@ -335,16 +324,16 @@ int main()
       Qp[SXX] = 100e6; Qp[SXZ] = -60e6; Qp[VZ] = 0.5;
       Qm[SXX] = 110e6; Qm[SXZ] = -65e6; Qm[VZ] = -0.4;
 
-      DOFData d1 = MakeTotalLockedDOF(TPV102Params::a_vw);
-      DOFData d2 = MakeTotalLockedDOF(TPV102Params::a_vw);
+      DOFData d1 = MakeLockedDOF(TPV102Params::a_vw);
+      DOFData d2 = MakeLockedDOF(TPV102Params::a_vw);
       // d2 is the "no nuc field" reference — but since the new field
       // defaults to 0, d1 == d2 by construction.  This test still has
       // value: it documents that the addition is invisible to non-nuc
       // callers, locking that behavior in for future maintainers.
       real_t Qip1[NUM_STATE], Qim1[NUM_STATE];
       real_t Qip2[NUM_STATE], Qim2[NUM_STATE];
-      flux.EvaluateTotal(d1, Qp, Qm, Qip1, Qim1);
-      flux.EvaluateTotal(d2, Qp, Qm, Qip2, Qim2);
+      flux.Evaluate(d1, Qp, Qm, Qip1, Qim1);
+      flux.Evaluate(d2, Qp, Qm, Qip2, Qim2);
 
       bool bit_exact = true;
       for (int c = 0; c < NUM_STATE; c++)

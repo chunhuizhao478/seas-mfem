@@ -495,31 +495,37 @@ int main(int argc, char *argv[])
    std::vector<DOFData> dof_data;
    if (num_fault_total > 0)
    {
+      // v9.4.0 Commit 2: fluctuation-Q dispatch.  Bulk Q carries the
+      // dynamic fluctuation only (Q = 0 below); static pre-stress
+      // (sigma_n0, tau2_0) lives in the DOFData fields set by
+      // InitializeFaultDOFs, and the time-varying nucleation driver
+      // lives in DOFData.tau2_nuc (overwritten by ApplyNucleationPrestress
+      // at each step).  FaultFaceFlux::Evaluate (v9.4.0 Commit 1) sums
+      // tau*_total = tau*_0 + tau*_nuc + tau*_trial(Q) internally, so we
+      // must NOT zero the DOFData pre-stress fields here — doing so
+      // would make the fault effectively unloaded.
       InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
-      // Round-6 purpose change #2 (total-Q only): zero the DOFData
-      // pre-stress fields so the wave operator's EvaluateTotal /
-      // EvaluateADERTotal dispatch does not double-count pre-stress
-      // (pre-stress lives in bulk Q via InitializeStateTotal below).
-      ZeroDOFDataPreStressTotal(dof_data, num_fault_total);
    }
 
    FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp, TPV102Params::cs);
    wave.SetFaultFlux(&fault_flux);
    wave.SetFaultDOFData(&dof_data, nqp_per_face);
 
-   // Round-6 purpose change #2: supply the bulk background state for the
-   // total-Q-aware BC variants (AbsorbingTotal / FreeSurface*Total / PML
-   // damping toward Q_bg).  Q_bg mirrors the TPV102 pre-stress tensor
-   // in global coordinates (same rotation as InitializeStateTotal).
+   // v9.4.0 Commit 2 (R-004): supply Q_bg = 0 to the wave operator's
+   // BC dispatch.  Under fluctuation-Q, bulk Q carries the fluctuation
+   // only, so the absorbing / free-surface / PML branches damp toward
+   // zero.  The total-Q-aware BC variants still run
+   // (AbsorbingTotal(Q_self, 0) = Absorbing(Q_self) bit-exactly) and
+   // the has_bulk_bg_ guards in wave_operator.inl fire with a valid
+   // call site.  Zero-Q_bg is sufficient for the BP5 / TPV102
+   // fluctuation dispatch contract.
    {
       real_t Q_bg[NUM_STATE] = {0};
-      Q_bg[SYY] =  TPV102Params::sigma_n;
-      Q_bg[SXY] = -TPV102Params::tau_ini;
       wave.SetAbsorbingBackground(Q_bg);
    }
 
    // Nucleation under total-Q now uses the persistent-prestress channel:
-   // ApplyNucleationTotalPrestress overwrites DOFData.tau2_nuc per call;
+   // ApplyNucleationPrestress overwrites DOFData.tau2_nuc per call;
    // FaultFaceFlux::EvaluateTotal adds it to the trial traction so the
    // requested dtau is re-imposed at every Riemann solve.  No bulk-Q
    // injection — see debug_document/tpv102_debug_document/
@@ -582,28 +588,22 @@ int main(int argc, char *argv[])
 #endif
 
    // -----------------------------------------------------------------------
-   // 6. Initialize state Q = TPV102 pre-stress tensor at every DOF
-   //    (Round-6 purpose change #2: total-Q only — bulk Q carries the
-   //    pre-stress, nucleation writes deltas into Q[SXY] at fault QPs,
-   //    the fault face flux dispatches `EvaluateTotal` / `EvaluateADERTotal`).
+   // 6. v9.4.0 Commit 2: initialize bulk Q = 0 (fluctuation-Q dispatch).
+   //    Static pre-stress lives in DOFData (sigma_n0, tau2_0), nucleation
+   //    in DOFData.tau2_nuc; bulk Q carries only the dynamic fluctuation
+   //    and starts at rest.  FaultFaceFlux::Evaluate adds
+   //    tau*_0 + tau*_nuc onto the trial traction internally.
    // -----------------------------------------------------------------------
-   Vector Q;
-   InitializeStateTotal(Q, ndof_total,
-                        TPV102Params::sigma_n, TPV102Params::tau_ini);
+   Vector Q(NUM_STATE * ndof_total);
+   Q = 0.0;
 
-   // Round-6 purpose change #2: total-Q is the only supported driver
-   // mode.  Fail loud if SetAbsorbingBackground was never called — the
-   // wave operator's non-fault BC branches + fault dispatch fall
-   // through to fluctuation semantics in that case and would silently
-   // radiate the pre-stress / disable the fault.  This is the
-   // driver-level hardening analogue of R-004's wave-operator-level
-   // MFEM_VERIFY proposal: keeping the wave-operator else branches
-   // alive (they support BP5 + the non-TPV102 unit tests) while
-   // making sure the TPV102 driver cannot accidentally dispatch
-   // through them.
+   // SetAbsorbingBackground must have been called above with Q_bg = 0;
+   // the wave operator's has_bulk_bg_ guards will not fire unless a
+   // driver forgets to call it (e.g. a future refactor).  Keep the
+   // invariant loud so a missed call is caught at driver init.
    MFEM_VERIFY(wave.GetAbsorbingBackground() != nullptr,
-               "tpv102_driver: total-Q migration requires "
-               "wave.SetAbsorbingBackground() to have been called "
+               "tpv102_driver: wave.SetAbsorbingBackground() must be "
+               "called (with Q_bg = 0 under fluctuation-Q dispatch) "
                "before any Mult / AdvanceADER; none detected.");
 
    if (rank == 0)
@@ -1086,7 +1086,7 @@ int main(int argc, char *argv[])
          // (re-imposed at every Riemann solve, not radiated through Q).
          if (num_fault_total > 0)
          {
-            ApplyNucleationTotalPrestress(dof_data, fault_coords,
+            ApplyNucleationPrestress(dof_data, fault_coords,
                                           t + dt_step / 2.0);
          }
 
@@ -1243,7 +1243,7 @@ int main(int argc, char *argv[])
       // driver re-imposed at every wave-operator Riemann solve.
       if (num_fault_total > 0)
       {
-         ApplyNucleationTotalPrestress(dof_data, fault_coords, t);
+         ApplyNucleationPrestress(dof_data, fault_coords, t);
       }
       wave.Mult(Q, k1);
       for (int i = 0; i < num_fault_total; i++)
@@ -1261,7 +1261,7 @@ int main(int argc, char *argv[])
       // RK4 stage 2: at time t + dt/2, psi = psi_n + (dt/2) * psi_k1
       if (num_fault_total > 0)
       {
-         ApplyNucleationTotalPrestress(dof_data, fault_coords,
+         ApplyNucleationPrestress(dof_data, fault_coords,
                                        t + dt_step / 2.0);
       }
       add(Q, dt_step / 2.0, k1, Q_tmp);
@@ -1297,7 +1297,7 @@ int main(int argc, char *argv[])
       // RK4 stage 4: at time t + dt, psi = psi_n + dt * psi_k3
       if (num_fault_total > 0)
       {
-         ApplyNucleationTotalPrestress(dof_data, fault_coords, t + dt_step);
+         ApplyNucleationPrestress(dof_data, fault_coords, t + dt_step);
       }
       add(Q, dt_step, k3, Q_tmp);
       wave.Mult(Q_tmp, k4);
@@ -1415,7 +1415,7 @@ int main(int argc, char *argv[])
          // stage-4 even though stage-4 already set tau2_nuc(t+dt).
          if (num_fault_total > 0)
          {
-            ApplyNucleationTotalPrestress(dof_data, fault_coords, t);
+            ApplyNucleationPrestress(dof_data, fault_coords, t);
          }
          wave.Mult(Q, k_endpoint);
          // dof_data[i].{tau1_corr, tau2_corr, sigma_n_corr, V1, V2,

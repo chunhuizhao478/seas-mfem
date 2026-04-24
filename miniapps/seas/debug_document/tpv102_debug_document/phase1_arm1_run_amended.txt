@@ -1,0 +1,46 @@
+=== TPV102 Phase 3 STOP — Arm 1 localization probes ===
+
+--- G_CONST_VOL ---
+  ||rhs_vol||_inf = 1.560549e+07
+PROBE G_CONST_VOL: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_VOL_MINV ---
+  ||M^-1 rhs_vol||_inf = 1.498e+01
+PROBE G_CONST_VOL_MINV: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_BFACE_LIFT ---
+  ||rhs_runtime||_inf = 2.500e+14
+  ||rhs_precomp||_inf = 2.500e+14
+    component 0 max diff = 1.041e-01 at dof 41
+    component 1 max diff = 4.737e-02 at dof 45
+    component 2 max diff = 4.521e-02 at dof 43
+    component 3 max diff = 2.034e-02 at dof 12
+    component 4 max diff = 0.000e+00 at dof -1
+    component 5 max diff = 2.034e-02 at dof 16
+    component 6 max diff = 1.118e-08 at dof 16
+    component 7 max diff = 6.853e-09 at dof 20
+    component 8 max diff = 5.414e-09 at dof 13
+  ||rhs_runtime - rhs_precomp||_inf = 1.041e-01   (worst @ comp=0 dof=41)
+  path_diff / ||rhs_runtime||_inf = 4.163e-16  (< 1e-14 → ULP noise; >~1e-3 → concentrated outlier)
+  worst_dof=41 lives in element 10
+  elements with > 10% of worst diff: 32 / 48  (concentration: < 10% elems → localized; >~50% elems → diffuse ULP)
+  runtime  orbit drift = 0.000e+00  (worst )
+  precomp  orbit drift = 0.000e+00  (worst )
+PROBE G_CONST_BFACE_LIFT (runtime orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (precomp orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (runtime vs precomp): drift=1.041e-01  tol=1.000e-06  verdict=FAIL
+
+--- G_ORBIT_DOF_MAP ---
+  orbits examined:                       8
+  orbits with any mismatch:              8
+  keys not found (vertex non-coincident): 16
+  coincident keys checked:               16
+  indices mismatched on coincident keys: 16
+  worst idx diff on coincident keys:     1
+PROBE G_ORBIT_DOF_MAP (vertex coincidence): drift=1.600e+01  tol=5.000e-01  verdict=FAIL
+PROBE G_ORBIT_DOF_MAP (index ordering on coincident pts): drift=1.600e+01  tol=5.000e-01  verdict=FAIL
+
+=== Summary ===
+Total:  7
+Passed: 4
+Failed: 3

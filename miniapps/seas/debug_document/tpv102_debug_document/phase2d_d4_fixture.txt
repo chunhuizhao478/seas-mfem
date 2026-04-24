@@ -1,0 +1,12 @@
+=== R-002: BuildD4Mesh vertex-set y-mirror equivariance ===
+
+  orbit buckets with both halves populated: 24
+  element pairs checked:                    24
+  slot-wise y-mirror mismatches:            0
+  of which: xa not ANY y-mirror of e_b:     0
+  worst slot y-mirror error:                0.000e+00
+
+  slot-wise equivariance: PASS   (needed for basis-layer Arm 1 probe on D4)
+  set-wise equivariance:  PASS   (needed for vertex coincidence at all)
+
+  overall verdict: PASS (vertex coincidence established)

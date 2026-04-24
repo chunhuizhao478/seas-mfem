@@ -17,6 +17,7 @@
 #include "godunov_flux.hpp"
 #include "pml_layer.hpp"
 #include "fault_face_flux.hpp"
+#include "precomputed_face_fluxes.hpp"
 #include "shared_fault_key.hpp"
 #include "../domain/boundary_config.hpp"
 #include "../fault/fault_basis.hpp"
@@ -40,7 +41,7 @@ namespace seas
 /// - Godunov: characteristic Godunov projection (SeisSol parity).
 /// Controlled at runtime via WaveOperator::SetFreeSurfaceBCMode.  Default
 /// is Gamma so drivers that don't set it reproduce pre-v9.3.0 behaviour.
-enum class FreeSurfaceBCMode { Gamma = 0, Godunov = 1 };
+enum class FreeSurfaceBCMode : int { Gamma = 0, Godunov = 1 };
 
 /// @brief DG wave operator for the 3D velocity-stress elastic wave equation.
 ///
@@ -103,19 +104,38 @@ public:
    void SetFreeSurfaceBCMode(FreeSurfaceBCMode m) { free_surface_bc_mode_ = m; }
    FreeSurfaceBCMode GetFreeSurfaceBCMode() const { return free_surface_bc_mode_; }
 
-   /// Face-averaged friction-solve mode (option 1 of the 2026-04-22
-   /// pepper fix).  Default false (per-QP friction, byte-identical to
-   /// pre-fix behaviour).  When true, fault-face dispatch uses a
-   /// face-level pre-pass to compute Q_self_avg / Q_nbr_avg across
-   /// the face's QPs, calls FaultFaceFlux::EvaluateTotalFaceAveraged
-   /// once per face, and uses face-uniform Q_imp values to compute
-   /// F_h identical at every QP.  Eliminates per-QP rhs deposition
-   /// variation that compounds through the DG×nonlinear-friction
-   /// amplification chain (the per-tet pepper observed in production).
-   void SetFaceAveragedFrictionMode(bool on)
-   { face_averaged_friction_mode_ = on; }
-   bool GetFaceAveragedFrictionMode() const
-   { return face_averaged_friction_mode_; }
+   /// TPV102 "Topology-Based Precomputed Face-Rotation" plan 2026-04-23
+   /// Phase 2a (§6.3, R4-001 + R5-002 FIXES): opt-in dispatch switch for
+   /// local non-fault face flux.  Default OFF — drivers that don't set it
+   /// reproduce the pre-patch runtime Godunov path bit-identically.
+   ///
+   /// On the first call with `enable == true`, populates `fault_face_set_`
+   /// from `fault_interior_faces_` / `fault_shared_faces_` (R5-002 late
+   /// population per §6.3a) and calls `precomputed_face_fluxes_.Init(...)`.
+   /// Subsequent calls just flip the flag; `Init` is idempotent via
+   /// `IsInitialized()` guard.
+   ///
+   /// `UsingPrecomputedFaceFluxes()` exposes the current flag value for
+   /// test introspection (e.g. `test_precomputed_fluxes_phase2a_switch`).
+   ///
+   /// `GetPrecomputedFaceFluxes()` is a test-only accessor used by
+   /// `test_R5_002_fault_face_set_populated_at_init_time` to verify that
+   /// `fault_face_set_` faces are absent from `face_elem_to_entry_`.
+   void UsePrecomputedFaceFluxes(bool enable);
+   bool UsingPrecomputedFaceFluxes() const { return use_precomputed_face_fluxes_; }
+   const PrecomputedFaceFluxes &GetPrecomputedFaceFluxes() const
+   { return precomputed_face_fluxes_; }
+   const std::set<int> &GetFaultFaceSet() const { return fault_face_set_; }
+
+   /// R-003 (v9.5.0): opt in to Arm 3d topology-based shape-table
+   /// precomputation.  Default OFF.  Must be set BEFORE the first call
+   /// to `UsePrecomputedFaceFluxes(true)` — the flag is read at Init
+   /// time and ignored afterwards (Init is idempotent).  Production
+   /// drivers leave it off; the Arm 3d unit test opts in so its
+   /// AddInteriorFaceRhsFull / AddBoundaryFaceRhsFull probes have the
+   /// shape tables they need.
+   void EnableArm3dShapeTables(bool enable) { arm3d_tables_enabled_ = enable; }
+   bool Arm3dShapeTablesEnabled() const { return arm3d_tables_enabled_; }
 
    /// I-06 migration: supply a bulk background state used by all total-Q
    /// BC variants (R-I06-001 absorbing, R-I06-005 free-surface, R-I06-007
@@ -396,7 +416,28 @@ private:
    /// I-04: free-surface BC flux dispatch mode.  Defaults to Gamma so
    /// setup-free drivers keep pre-v9.3.0 output.
    FreeSurfaceBCMode free_surface_bc_mode_ = FreeSurfaceBCMode::Gamma;
-   bool face_averaged_friction_mode_ = false;
+
+   /// TPV102 Phase 2a (§6.3): opt-in flag + cached precomputed flux tables.
+   /// `precomputed_face_fluxes_` is mutable because the const dispatch
+   /// paths (`Mult`, `AdvanceADER` via `ComputeADERFaceFluxRHS`) apply its
+   /// matrices to accumulate into `rhs`; `Init` is only called from the
+   /// non-const `UsePrecomputedFaceFluxes(true)` public setter.
+   /// R4-002 / R5-002 FIX: `fault_face_set_` is populated inside
+   /// `UsePrecomputedFaceFluxes(true)` (see §6.3a), NOT in the ctor;
+   /// it holds the union of `fault_interior_faces_` and
+   /// `fault_shared_faces_` so `PrecomputedFaceFluxes::Init` can skip
+   /// fault faces (they go through `FaultFaceFlux`).
+   bool use_precomputed_face_fluxes_ = false;
+   mutable PrecomputedFaceFluxes precomputed_face_fluxes_;
+   std::set<int> fault_face_set_;
+
+   /// R-003 (v9.5.0): opt-in flag for the Arm 3d topology-based
+   /// shape-table precomputation.  When true, the first
+   /// `UsePrecomputedFaceFluxes(true)` call asks `Init` to populate
+   /// `FaceEntry::shape_self` / `shape_nbr` / `w_qp`; when false the
+   /// tables are left empty (production default — the Full path is
+   /// not wired into dispatch).  Read only at Init time.
+   bool arm3d_tables_enabled_ = false;
 
    /// I-06: bulk background state for total-Q BC dispatch
    /// (R-I06-001 absorbing / R-I06-005 free-surface / R-I06-007 PML).
@@ -453,6 +494,20 @@ private:
    mutable std::unique_ptr<ParGridFunction> ghost_gf_;
 #endif
 
+   // Test-visibility accessors — exposed for the Arm 1 localization probes
+   // (Phase 3 STOP investigation).  Production code uses `Mult` /
+   // `AdvanceADER`; these wrappers forward to the private impls so unit
+   // tests can probe volume-only / face-only / mass-inverse-only paths
+   // without reassembling the call graph.
+public:
+   void ComputeVolumeRHS_ForTest(const Vector &Q, Vector &rhs) const
+   { ComputeVolumeRHS(Q, rhs); }
+   void ComputeFaceFluxRHS_ForTest(const Vector &Q, Vector &rhs) const
+   { ComputeFaceFluxRHS(Q, rhs); }
+   void ApplyMassInverse_ForTest(Vector &rhs) const
+   { ApplyMassInverse(rhs); }
+
+private:
    void ComputeVolumeRHS(const Vector &Q, Vector &rhs) const;
    void ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) const;
    void ComputeSharedFaceFluxRHS(const Vector &Q, Vector &rhs) const;

@@ -10,6 +10,7 @@
 // CONTRIBUTING.md for details.
 
 #include "friction_solver.hpp"
+#include "tpv104_friction_solver.hpp"
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -57,11 +58,37 @@ real_t FrictionSolver::Solve(real_t tau, real_t psi, real_t sigma_n,
 
    switch (method)
    {
-      case Method::Brent:    return SolveBrent(tau, psi, sigma_n, eta, a);
-      case Method::NewtonRaphson: return SolveNR(tau, psi, sigma_n, eta, a);
-      case Method::HybridNRBisection: return SolveHybrid(tau, psi, sigma_n, eta, a);
-      default: return SolveBrent(tau, psi, sigma_n, eta, a);
+      case Method::Brent:               return SolveBrent(tau, psi, sigma_n, eta, a);
+      case Method::NewtonRaphson:       return SolveNR(tau, psi, sigma_n, eta, a);
+      case Method::NewtonRaphsonStable: return SolveNRStable(tau, psi, sigma_n, eta, a);
+      case Method::HybridNRBisection:   return SolveHybrid(tau, psi, sigma_n, eta, a);
+      default:                          return SolveBrent(tau, psi, sigma_n, eta, a);
    }
+}
+
+// R5-003 / Plan §4.10 Step 5: TPV104-canonical stable-asinh Newton.
+// Thin wrapper — all Newton logic lives in `SolveSlipRateNewtonStable`.
+// `FrictionSolver::Solve` has no V_prev parameter, so we warm-start
+// from Brent's root; on the TPV104 envelope this gives single-digit
+// Newton iterations.  A future Step-9 optimisation may extend Solve's
+// signature to accept V_prev from DOFData.slip_rate.
+real_t FrictionSolver::SolveNRStable(real_t tau, real_t psi,
+                                     real_t sigma_n, real_t eta,
+                                     real_t a) const
+{
+   if (tau <= 0.0)   { return 0.0; }
+   if (sigma_n <= 0.0) { return (eta > 0.0) ? (tau / eta) : 0.0; }
+
+   const real_t V_warm = SolveBrent(tau, psi, sigma_n, eta, a);
+   int    iterations = 0;
+   bool   converged  = false;
+   const real_t V = SolveSlipRateNewtonStable(
+      tau, psi, std::abs(sigma_n), eta, a, /*V0=*/V0,
+      /*V_prev=*/std::max<real_t>(V_warm, static_cast<real_t>(0)),
+      /*max_iter=*/60, /*tol=*/1e-8, &iterations, &converged);
+   // Paranoia fallback: TPV104 envelope is monotone so non-convergence
+   // never fires here; if it ever does, return the Brent warm-start.
+   return converged ? V : V_warm;
 }
 
 // ---------------------------------------------------------------------------

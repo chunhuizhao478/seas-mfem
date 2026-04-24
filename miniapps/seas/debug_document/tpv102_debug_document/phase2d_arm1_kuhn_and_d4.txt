@@ -1,0 +1,132 @@
+=== TPV102 Phase 3 STOP — Arm 1 localization probes ===
+
+--- G_CONST_VOL ---
+  ||rhs_vol||_inf = 1.560549e+07
+PROBE G_CONST_VOL: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_VOL_MINV ---
+  ||M^-1 rhs_vol||_inf = 1.498e+01
+PROBE G_CONST_VOL_MINV: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_BFACE_LIFT ---
+  ||rhs_runtime||_inf = 2.500e+14
+  ||rhs_precomp||_inf = 2.500e+14
+    component 0 max diff = 1.041e-01 at dof 41
+    component 1 max diff = 4.737e-02 at dof 45
+    component 2 max diff = 4.521e-02 at dof 43
+    component 3 max diff = 2.034e-02 at dof 12
+    component 4 max diff = 0.000e+00 at dof -1
+    component 5 max diff = 2.034e-02 at dof 16
+    component 6 max diff = 1.118e-08 at dof 16
+    component 7 max diff = 6.853e-09 at dof 20
+    component 8 max diff = 5.414e-09 at dof 13
+  ||rhs_runtime - rhs_precomp||_inf = 1.041e-01   (worst @ comp=0 dof=41)
+  path_diff / ||rhs_runtime||_inf = 4.163e-16  (< 1e-14 → ULP noise; >~1e-3 → concentrated outlier)
+  worst_dof=41 lives in element 10
+  elements with > 10% of worst diff: 32 / 48  (concentration: < 10% elems → localized; >~50% elems → diffuse ULP)
+  runtime  orbit drift = 0.000e+00  (worst )
+  precomp  orbit drift = 0.000e+00  (worst )
+PROBE G_CONST_BFACE_LIFT (runtime orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (precomp orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (runtime vs precomp): drift=1.041e-01  tol=1.000e-06  verdict=FAIL
+
+--- G_ORBIT_DOF_MAP ---
+  orbits examined:                       8
+  orbits with any mismatch:              8
+  keys not found (vertex non-coincident): 16
+  coincident keys checked:               16
+  indices mismatched on coincident keys: 16
+  worst idx diff on coincident keys:     1
+PROBE G_ORBIT_DOF_MAP (vertex coincidence): drift=1.600e+01  tol=5.000e-01  verdict=FAIL
+PROBE G_ORBIT_DOF_MAP (index ordering on coincident pts): drift=1.600e+01  tol=5.000e-01  verdict=FAIL
+
+=== R-003 ADDENDUM: non-constant-Q probes ===
+
+--- G_NONCONST_VOL ---
+  ||rhs_vol||_inf = 3.219e+07
+  cell-mean drift    = 0.000e+00   (worst )
+  per-DOF paired drift = 2.682e+07   (n_pairs=144, worst VX orbit=875000000,250000000,625000000)
+  cell-mean rel drift = 0.000e+00   (STRUCTURALLY 0 for divergence-form rhs; do NOT use to rule out Phase 2A)
+  per-DOF rel drift  = 8.333e-01
+PROBE G_NONCONST_VOL (per-DOF rel): drift=8.333e-01  tol=1.000e-13  verdict=FAIL
+
+--- G_NONCONST_VOL_MINV ---
+  ||M^-1 rhs_vol||_inf = 3.090e+01
+  cell-mean drift      = 8.882e-16   (worst VX orbit=375000000,250000000,625000000)
+  per-DOF paired drift = 2.575e+01   (n_pairs=144, worst VX orbit=625000000,250000000,875000000)
+  cell-mean rel drift = 2.874e-17   (cell-mean of M^-1·rhs is similarly weakly-sensitive; per-DOF is the evidence-bearing probe)
+  per-DOF rel drift  = 8.333e-01
+PROBE G_NONCONST_VOL_MINV (per-DOF rel): drift=8.333e-01  tol=1.000e-13  verdict=FAIL
+
+--- G_NONCONST_BFACE_LIFT ---
+  ||rhs_runtime||_inf = 6.328e+14
+  ||rhs_precomp||_inf = 6.328e+14
+  path_diff = 1.630e-01
+  relative path_diff = 2.575e-16
+PROBE G_NONCONST_BFACE_LIFT (runtime vs precomp, rel): drift=2.575e-16  tol=1.000e-13  verdict=PASS
+  cell-mean runtime drift = 1.406e+14  rel = 2.222e-01  (worst SXX orbit=875000000,250000000,625000000)
+  cell-mean precomp drift = 1.406e+14  rel = 2.222e-01  (worst SXX orbit=875000000,250000000,625000000)
+  per-DOF runtime drift   = 1.406e+14  (n_pairs=144)
+  per-DOF precomp drift   = 1.406e+14  (n_pairs=144)
+PROBE G_NONCONST_BFACE_LIFT (per-DOF runtime rel): drift=2.222e-01  tol=1.000e-13  verdict=FAIL
+PROBE G_NONCONST_BFACE_LIFT (per-DOF precomp rel): drift=2.222e-01  tol=1.000e-13  verdict=FAIL
+
+=== R-004 round 2 ADDENDUM: bface vertex-selection probe ===
+
+--- G_BFACE_VERTEX_SELECTION ---
+  lower-y boundary triangles: 24
+  upper-y boundary triangles: 24
+  pairs checked: 8
+  buckets with no cross-half match: 16
+  set-wise mismatches: 0
+PROBE G_BFACE_VERTEX_SELECTION (set-wise mismatches): drift=0.000e+00  tol=5.000e-01  verdict=PASS
+  H3 ruled OUT on Kuhn: FACE2NODES picks y-mirror-paired triangle vertex sets across orbit halves.
+  Phase 2D D4-fixture fix will NOT be masking a separate H3 bug.
+
+============================================================
+=== D4 fixture sweep (Phase 2D) ===
+============================================================
+
+--- D4: G_CONST_VOL ---
+  ||rhs||_inf=1.561e+07  cell=0.000e+00  per-DOF=3.121e+07  n_pairs=864
+PROBE D4: G_CONST_VOL (per-DOF): drift=3.121e+07  tol=1.000e-10  verdict=FAIL
+
+--- D4: G_CONST_VOL_MINV ---
+  ||M^-1 rhs||_inf=1.498e+01  cell=0.000e+00  per-DOF=0.000e+00  n_pairs=864
+PROBE D4: G_CONST_VOL_MINV (per-DOF): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- D4: G_CONST_BFACE_LIFT ---
+  ||rhs_rt||_inf=2.500e+14  path_diff/rel=1.248e-07  orbit_rt_rel=1.873e-07  orbit_pc_rel=8.039e-17
+PROBE D4: G_CONST_BFACE_LIFT (runtime orbit rel): drift=1.873e-07  tol=1.000e-10  verdict=FAIL
+PROBE D4: G_CONST_BFACE_LIFT (precomp orbit rel): drift=8.039e-17  tol=1.000e-10  verdict=PASS
+PROBE D4: G_CONST_BFACE_LIFT (runtime vs precomp rel): drift=1.248e-07  tol=1.000e-13  verdict=FAIL
+
+--- D4: G_ORBIT_DOF_MAP ---
+  keys_not_found=0  coincident=96  idx_mismatched=0  worst_idx_diff=0
+PROBE D4: G_ORBIT_DOF_MAP (vertex coincidence): drift=0.000e+00  tol=5.000e-01  verdict=PASS
+PROBE D4: G_ORBIT_DOF_MAP (index ordering on coincident): drift=0.000e+00  tol=5.000e-01  verdict=PASS
+
+--- D4: G_NONCONST_VOL ---
+  ||rhs||_inf=2.975e+07  cell_rel=0.000e+00  per-DOF_rel=2.000e+00  n_pairs=864
+PROBE D4: G_NONCONST_VOL (per-DOF rel): drift=2.000e+00  tol=1.000e-13  verdict=FAIL
+
+--- D4: G_NONCONST_VOL_MINV ---
+  ||M^-1 rhs||_inf=2.856e+01  cell_rel=0.000e+00  per-DOF_rel=0.000e+00  n_pairs=864
+PROBE D4: G_NONCONST_VOL_MINV (per-DOF rel): drift=0.000e+00  tol=1.000e-13  verdict=PASS
+
+--- D4: G_NONCONST_BFACE_LIFT ---
+PROBE D4: G_NONCONST_BFACE_LIFT (runtime vs precomp rel): drift=1.216e-07  tol=1.000e-13  verdict=FAIL
+  ||rhs_rt||_inf=6.094e+14  path_rel=1.216e-07
+  cell_rel_rt=1.473e-07  cell_rel_pc=6.733e-17
+  per-DOF_rel_rt=2.337e-07  per-DOF_rel_pc=1.043e-16  n_pairs=(864,864)
+PROBE D4: G_NONCONST_BFACE_LIFT (per-DOF runtime rel): drift=2.337e-07  tol=1.000e-13  verdict=FAIL
+PROBE D4: G_NONCONST_BFACE_LIFT (per-DOF precomp rel): drift=1.043e-16  tol=1.000e-13  verdict=PASS
+
+--- D4: G_BFACE_VERTEX_SELECTION ---
+  pairs_checked=96  no_cross_half_match=0  set_mismatches=0
+PROBE D4: G_BFACE_VERTEX_SELECTION (set mismatches): drift=0.000e+00  tol=5.000e-01  verdict=PASS
+
+=== Summary ===
+Total:  26
+Passed: 13
+Failed: 13

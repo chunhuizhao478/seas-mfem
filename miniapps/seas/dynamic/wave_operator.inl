@@ -6,9 +6,11 @@
 // so any `#include` here would be nested).
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
@@ -478,6 +480,113 @@ template <typename MeshType>
 WaveOperator<MeshType>::~WaveOperator() = default;
 
 // ---------------------------------------------------------------------------
+// TPV102 "Topology-Based Precomputed Face-Rotation" plan 2026-04-23
+// Phase 2a (§6.3 + §6.3a): opt-in precomputed-flux switch with late
+// `fault_face_set_` population (R4-001 + R5-002 FIXES).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::UsePrecomputedFaceFluxes(bool enable)
+{
+   if (enable)
+   {
+      // === §6.3a (R5-002 FIX) — late population of fault_face_set_ ===
+      //
+      // fault_interior_faces_ and fault_shared_faces_ are populated by
+      // the WaveOperator ctor (see wave_operator.inl construction block
+      // above: `fault_interior_faces_.Append(face_idx)` loop and the
+      // parallel `fault_shared_faces_.Append(sf)` loop).  Populating
+      // fault_face_set_ HERE — not in the ctor — is robust against
+      // future refactors that might move the fault-face array population
+      // to a post-ctor helper, and it keeps the initialization at one
+      // unambiguous call site.
+      //
+      // R-002 (v9.5.0): empty local fault arrays are legitimate on MPI
+      // ranks whose partition contains no fault-adjacent elements.  The
+      // former MFEM_VERIFY(fault_interior_faces_ + fault_shared_faces_
+      // > 0) aborted those ranks on any call to UsePrecomputedFaceFluxes
+      // (true), even though the condition is a normal consequence of
+      // domain decomposition on a fault that touches only a minority of
+      // ranks.  The remaining logic below is already a no-op for empty
+      // arrays (the fault_face_set_ stays empty), so we simply drop the
+      // guard.  A globally-empty-fault / bc_.fault_attr > 0 mis-config
+      // is not detectable here without an MPI_Allreduce; that check
+      // belongs to the mesh/config layer.
+      if (bc_.fault_attr > 0)
+      {
+         fault_face_set_.clear();
+         for (int i = 0; i < fault_interior_faces_.Size(); i++)
+         {
+            fault_face_set_.insert(fault_interior_faces_[i]);
+         }
+         for (int i = 0; i < fault_shared_faces_.Size(); i++)
+         {
+            // fault_shared_faces_ stores shared-face indices (sf), not
+            // mesh face indices; we need the mesh face index for the
+            // set.  ParMesh::GetSharedFace translates sf → mesh face.
+            if constexpr (IsParallelMesh<MeshType>::value)
+            {
+#ifdef MFEM_USE_MPI
+               auto &pmesh = static_cast<const ParMesh &>(mesh_);
+               int mesh_face_idx = const_cast<ParMesh &>(pmesh).GetSharedFace(
+                  fault_shared_faces_[i]);
+               fault_face_set_.insert(mesh_face_idx);
+#endif
+            }
+         }
+      }
+      else
+      {
+         fault_face_set_.clear();
+      }
+      // === end §6.3a population =====================================
+
+      if (!precomputed_face_fluxes_.IsInitialized())
+      {
+         // R-002 (v9.5.0): the companion fault_face_set_ emptiness guard
+         // is the same class of false-positive on fault-free MPI ranks.
+         // Empty set on a rank whose partition contains no fault slice
+         // is legitimate; only the face_bdr_attr_ sizing check remains
+         // as a meaningful ctor-bookkeeping tripwire.
+         MFEM_VERIFY(face_bdr_attr_.size() ==
+                     static_cast<size_t>(mesh_.GetNumFaces()),
+                     "WaveOperator::UsePrecomputedFaceFluxes: "
+                     "face_bdr_attr_ not sized to mesh.GetNumFaces(); "
+                     "WaveOperator ctor bookkeeping is incomplete.");
+
+         precomputed_face_fluxes_.Init(
+            mesh_,                                         // Mesh &     (R3-008)
+            *fes_,                                         // const FES&
+            bc_,                                           // const BoundaryConfig&
+            flux_,                                         // const GodunovFlux&
+            free_surface_bc_mode_,                         // FreeSurfaceBCMode
+            fault_face_set_,                               // R4-002 / R5-002
+            face_bdr_attr_,                                // R3-003
+            shared_mesh_face_set_,                         // R3-002
+            arm3d_tables_enabled_);                        // R-003 v9.5.0 (Arm 3d gate)
+
+         // Phase 2b (§7.2): extend Init with a ParMesh-aware shared-face
+         // pass.  One FaceEntry per shared non-fault face per rank, keyed
+         // by (face_idx, Elem1No).  No-op on serial builds.
+         if constexpr (IsParallelMesh<MeshType>::value)
+         {
+#ifdef MFEM_USE_MPI
+            auto *pmesh_ptr = dynamic_cast<ParMesh *>(&mesh_);
+            if (pmesh_ptr)
+            {
+               precomputed_face_fluxes_.InitSharedFaces(
+                  *pmesh_ptr,
+                  *fes_,
+                  flux_,
+                  fault_face_set_);
+            }
+#endif
+         }
+      }
+   }
+   use_precomputed_face_fluxes_ = enable;
+}
+
+// ---------------------------------------------------------------------------
 // Mult: dQ/dt = M^{-1} * (-Face + Vol)   [Eq. (3)]
 // ---------------------------------------------------------------------------
 template <typename MeshType>
@@ -916,30 +1025,49 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
 
          if (is_boundary)
          {
+            // R-001 (v9.5.0): honor `use_precomputed_face_fluxes_` in the
+            // RK4 Mult path, symmetric with ComputeADERFaceFluxRHS
+            // (wave_operator.inl:2101).  Pre-fix the flag was consulted
+            // only by the ADER dispatch, so drivers that mixed Mult + the
+            // ADER switch silently got mixed dispatches and the Arm 1
+            // boundary-lift probe was a vacuous no-op.  `bulk_bg_zero`
+            // matches the linearity contract the Phase 1 probe used to
+            // construct the precomputed-boundary tables (Q_bg = 0).
+            if (use_precomputed_face_fluxes_)
+            {
+               real_t bulk_bg_zero[NUM_STATE] = {0.0};
+               precomputed_face_fluxes_.AddBoundaryFaceRhs(
+                  f, Q_self, bulk_bg_zero, w, shape1.GetData(),
+                  ndof, dof_offset1, ndof_total_, rhs);
+               continue;
+            }
+
             FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
 
             switch (bc_type)
             {
                case FaceBC::Absorbing:
-                  // Round-6 R-002: total-Q is the only supported BC
-                  // dispatch mode.  Callers must supply a bulk background
-                  // via `WaveOperator::SetAbsorbingBackground(Q_bg)`;
-                  // `Q_bg = 0` is valid (reproduces the old fluctuation
-                  // behavior bit-exactly since AbsorbingTotal(Q_self, 0)
+                  // v9.4.0 (REVIEW R-007): updated stale "Total-Q only"
+                  // wording.  Callers must supply a bulk background via
+                  // `WaveOperator::SetAbsorbingBackground(Q_bg)`; under
+                  // fluctuation-Q dispatch, Q_bg = 0 is the natural and
+                  // correct choice (AbsorbingTotal(Q_self, 0)
                   // = Interior(Q_self, 0) = Absorbing(Q_self)).
                   MFEM_VERIFY(has_bulk_bg_,
-                              "Total-Q only: SetAbsorbingBackground(Q_bg) "
-                              "must be called before wave.Mult().");
+                              "wave.Mult(): SetAbsorbingBackground(Q_bg) "
+                              "must be called before Absorbing BC dispatch "
+                              "(Q_bg = 0 is valid under fluctuation-Q).");
                   flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
                case FaceBC::FreeSurface:
-                  // Round-6 R-002: Total-Q-only dispatch.  The mode flag
-                  // selects gamma-mirror vs Godunov-projection; both
-                  // variants now honor the bulk background so tilted
-                  // free surfaces do not radiate the pre-stress.
+                  // v9.4.0 (REVIEW R-007): updated stale "Total-Q only"
+                  // wording.  The mode flag selects gamma-mirror vs
+                  // Godunov-projection; both variants honor the bulk
+                  // background (Q_bg = 0 under fluctuation-Q).
                   MFEM_VERIFY(has_bulk_bg_,
-                              "Total-Q only: SetAbsorbingBackground(Q_bg) "
-                              "must be called before wave.Mult().");
+                              "wave.Mult(): SetAbsorbingBackground(Q_bg) "
+                              "must be called before FreeSurface BC "
+                              "dispatch (Q_bg = 0 is valid).");
                   if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
                   {
                      flux_.FreeSurfaceGodunovTotal(nor, Q_self,
@@ -980,8 +1108,9 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                default:
                   // Default fallback mirrors the FaceBC::Absorbing branch.
                   MFEM_VERIFY(has_bulk_bg_,
-                              "Total-Q only: SetAbsorbingBackground(Q_bg) "
-                              "must be called before wave.Mult().");
+                              "wave.Mult(): SetAbsorbingBackground(Q_bg) "
+                              "must be called before the default BC "
+                              "dispatch (Q_bg = 0 is valid).");
                   flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
             }
@@ -1113,23 +1242,19 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                   const real_t *Q_minus_local = elem1_on_plus ? Q_nbr_can
                                                               : Q_self_can;
 
-                  // 2. Round-6 R-002: Total-Q is the only supported fault
-                  //    dispatch mode — bulk Q carries the pre-stress in
-                  //    global coords (InitializeStateTotal +
-                  //    ZeroDOFDataPreStressTotal) and fault_flux_'s
-                  //    EvaluateTotal reads Q_{plus,minus}_local as
-                  //    rotated TOTAL fault-local stress + velocity.
-                  //    DOFData pre-stress fields are zeroed by the driver
-                  //    (ZeroDOFDataPreStressTotal) so no double-counting
-                  //    through ComputeTrialTraction.
+                  // 2. v9.4.0 Commit 3: fluctuation-Q dispatch.  Bulk Q
+                  //    carries only the dynamic fluctuation (Q = 0 at
+                  //    rest); static pre-stress and nucleation live in
+                  //    DOFData (tau*_0, tau*_nuc).  FaultFaceFlux::
+                  //    Evaluate sums tau*_total = tau*_0 + tau*_nuc +
+                  //    tau*_trial(Q) internally (v9.4.0 Commit 1).
+                  //    Fault dispatch does NOT read Q_bg (REVIEW R-003);
+                  //    Q_bg is consumed only by Absorbing/FreeSurface/
+                  //    PML BC branches, which carry their own guards.
                   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-                  MFEM_VERIFY(has_bulk_bg_,
-                              "Total-Q only: SetAbsorbingBackground(Q_bg) "
-                              "must be called before wave.Mult() for a "
-                              "fault-bearing mesh.");
-                  fault_flux_->EvaluateTotal(fdata,
-                                             Q_plus_local, Q_minus_local,
-                                             Q_imp_plus, Q_imp_minus);
+                  fault_flux_->Evaluate(fdata,
+                                        Q_plus_local, Q_minus_local,
+                                        Q_imp_plus, Q_imp_minus);
 
                   // 3. Rotate imposed states back to global via T_can.
                   real_t Q_imp_plus_g[NUM_STATE], Q_imp_minus_g[NUM_STATE];
@@ -1270,17 +1395,36 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
             }
             else
             {
-               // Regular interior face: standard Godunov flux
-               flux_.Interior(nor, Q_self, Q_nbr, F_h);
-
-               for (int c = 0; c < NUM_STATE; c++)
+               // R-001 (v9.5.0): honor `use_precomputed_face_fluxes_` in
+               // the RK4 Mult interior non-fault path.  Symmetric with
+               // ComputeADERFaceFluxRHS (wave_operator.inl:2117); both
+               // sides are deposited via AddInteriorFaceRhs, keyed by
+               // (face, Elem1) and (face, Elem2) respectively.
+               if (use_precomputed_face_fluxes_)
                {
-                  for (int i = 0; i < ndof; i++)
+                  precomputed_face_fluxes_.AddInteriorFaceRhs(
+                     f, /*caller_elem=*/e1, Q_self, Q_nbr, w,
+                     shape1.GetData(), ndof, dof_offset1, ndof_total_,
+                     rhs);
+                  precomputed_face_fluxes_.AddInteriorFaceRhs(
+                     f, /*caller_elem=*/e2, Q_nbr, Q_self, w,
+                     shape2.GetData(), ndof, dof_offset2, ndof_total_,
+                     rhs);
+               }
+               else
+               {
+                  // Regular interior face: standard Godunov flux
+                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
+
+                  for (int c = 0; c < NUM_STATE; c++)
                   {
-                     rhs[c * ndof_total_ + dof_offset1 + i] -=
-                        w * shape1(i) * F_h[c];
-                     rhs[c * ndof_total_ + dof_offset2 + i] +=
-                        w * shape2(i) * F_h[c];
+                     for (int i = 0; i < ndof; i++)
+                     {
+                        rhs[c * ndof_total_ + dof_offset1 + i] -=
+                           w * shape1(i) * F_h[c];
+                        rhs[c * ndof_total_ + dof_offset2 + i] +=
+                           w * shape2(i) * F_h[c];
+                     }
                   }
                }
             }
@@ -1456,6 +1600,13 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
             && (sf_to_basis_idx[sf] >= 0);
          const int basis_idx = sf_fault ? sf_to_basis_idx[sf] : -1;
 
+         // R-001 (v9.5.0): mesh face index for the precomputed-table
+         // lookup.  `sf` is the shared-face index; the precomputed-face
+         // entry key is (mesh_face_idx, Elem1No).  Symmetric with
+         // ComputeADERSharedFaceFluxRHS (wave_operator.inl:2308).
+         const int mesh_face_idx =
+            const_cast<ParMesh &>(pmesh).GetSharedFace(sf);
+
          for (int q = 0; q < ir.GetNPoints(); q++)
          {
             const IntegrationPoint &ip = ir.IntPoint(q);
@@ -1605,16 +1756,12 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
 
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
                   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-                  // Round-6 R-002: Total-Q is the only supported shared-
-                  // fault dispatch mode, symmetric with the interior-
-                  // fault branch and the ADER shared-face path.
-                  MFEM_VERIFY(has_bulk_bg_,
-                              "Total-Q only: SetAbsorbingBackground(Q_bg) "
-                              "must be called before wave.Mult() for a "
-                              "fault-bearing mesh.");
-                  fault_flux_->EvaluateTotal(fdata,
-                                             Q_plus_local, Q_minus_local,
-                                             Q_imp_plus, Q_imp_minus);
+                  // v9.4.0 Commit 3: fluctuation-Q dispatch.  REVIEW
+                  // R-003: no has_bulk_bg_ guard — fault dispatch does
+                  // not consume Q_bg.
+                  fault_flux_->Evaluate(fdata,
+                                        Q_plus_local, Q_minus_local,
+                                        Q_imp_plus, Q_imp_minus);
 
                   // Rotate imposed states back to global via T_can (same
                   // on both ranks).  Q_imp_plus_g, Q_imp_minus_g are
@@ -1678,6 +1825,20 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                              << " physical.");
                }
             }
+            else if (use_precomputed_face_fluxes_)
+            {
+               // R-001 (v9.5.0): one-sided precomputed interior dispatch
+               // for shared non-fault faces, symmetric with
+               // ComputeADERSharedFaceFluxRHS (wave_operator.inl:2459).
+               // Uses the LEGACY AddInteriorFaceRhs path because the
+               // neighbor DOFs live in the ghost buffer; the Arm 3d
+               // Full-path's dof_offset_nbr assumes local Q indexing.
+               precomputed_face_fluxes_.AddInteriorFaceRhs(
+                  mesh_face_idx, /*caller_elem=*/e1,
+                  Q_self, Q_nbr, w, shape1.GetData(),
+                  ndof, dof_offset1, ndof_total_, rhs);
+               continue;
+            }
             else
             {
                // Non-fault shared face: standard welded Godunov flux.
@@ -1728,8 +1889,9 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
 //     background is scaled by `dt` so the resulting flux equals
 //     `dt · F_h(Q_avg, Q_bg)` — the correctly time-integrated boundary
 //     flux.
-//   * Fault faces dispatch to `fault_flux_->EvaluateADER[Total]` which
-//     handle the 1/dt → dt scaling internally (see Phase 5).
+//   * Fault faces dispatch to `fault_flux_->EvaluateADER` (v9.4.0
+//     Commit 3: fluctuation-Q dispatch) which handles the 1/dt → dt
+//     scaling internally (see Phase 5).
 //
 // The duplication (vs. refactoring ComputeFaceFluxRHS into a shared core)
 // is intentional: `wave_operator.inl` is on the CLAUDE.md "Files Requiring
@@ -1745,10 +1907,16 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    MFEM_VERIFY(I.Size() == NUM_STATE * ndof_total_,
                "ComputeADERFaceFluxRHS: I size mismatch");
 
-   // Round-6 R-002: Total-Q is the only supported ADER dispatch mode.
+   // v9.4.0: Q_bg feeds Absorbing / FreeSurface / PML BC branches and
+   // the PML damp-toward-bg loop.  Q_bg = 0 is valid under fluctuation-Q
+   // dispatch, but SetAbsorbingBackground() must still be called so
+   // downstream reads of bulk_bg_ are from an initialised buffer rather
+   // than the default-ctor zero-fill (defensive gate, kept for explicit
+   // contract).  REVIEW R-007: updated stale "Total-Q only" wording.
    MFEM_VERIFY(has_bulk_bg_,
-               "Total-Q only: SetAbsorbingBackground(Q_bg) must be called "
-               "before wave.AdvanceADER().");
+               "wave.AdvanceADER() requires SetAbsorbingBackground(Q_bg) "
+               "to have been called (Q_bg = 0 is valid under "
+               "fluctuation-Q dispatch).");
 
    const real_t *I_data = I.GetData();
 
@@ -1766,6 +1934,50 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   << bc_.fault_attr << " > 0 but fault_flux_ or "
                   "fault_dof_data_ is null.");
    }
+
+   // Round-12 Patch 2: per-face stage-averaging hook (test-only).  When
+   // SEAS_TEST_EVAL_FACE_AVG_STAGE is set to "trial" / "theta" / "vabs"
+   // / "tcorr", the fault branch below batches all QPs on a face,
+   // averages the selected `FaultFaceFlux::EvalStageState` field across
+   // the face, then completes the downstream chain.  Unset (or
+   // "") → None → existing per-QP path is used verbatim, byte-identical
+   // to the pre-patch code.  This hook MUST live in the face-face loop
+   // (not inside `FaultFaceFlux::Evaluate`) because averaging requires
+   // simultaneous access to every QP on a face — `Evaluate` only sees
+   // one.
+   enum class FaultEvalStageAvgMode { None, Trial, Theta, Vabs, Tcorr };
+   FaultEvalStageAvgMode eval_avg_mode = FaultEvalStageAvgMode::None;
+   {
+      const char *env = std::getenv("SEAS_TEST_EVAL_FACE_AVG_STAGE");
+      if (env && env[0] != '\0')
+      {
+         if      (std::strcmp(env, "trial") == 0) { eval_avg_mode = FaultEvalStageAvgMode::Trial; }
+         else if (std::strcmp(env, "theta") == 0) { eval_avg_mode = FaultEvalStageAvgMode::Theta; }
+         else if (std::strcmp(env, "vabs")  == 0) { eval_avg_mode = FaultEvalStageAvgMode::Vabs;  }
+         else if (std::strcmp(env, "tcorr") == 0) { eval_avg_mode = FaultEvalStageAvgMode::Tcorr; }
+         else
+         {
+            MFEM_VERIFY(false,
+                        "ComputeADERFaceFluxRHS: unknown "
+                        "SEAS_TEST_EVAL_FACE_AVG_STAGE=\"" << env
+                        << "\" (expected one of: trial, theta, vabs, tcorr).");
+         }
+      }
+   }
+
+   // Round-13C Patch 1: test-only n ↔ -n symmetrization of the ADER
+   // local non-fault branches (both interior non-fault and boundary).
+   // When `SEAS_TEST_NONFAULT_BOTH_SYM=1`, the per-QP flux is replaced
+   // by 0.5 * (F(nor) + F(-nor)) at every non-fault face.  Mirrors
+   // `ComputeInteriorFhSym` / `ComputeBoundaryFhSym` in
+   // `test_adjacent_triangle_fault_first_step_audit.cpp`.  Fault faces
+   // and shared faces are unaffected in this round.  Unset env →
+   // byte-identical to the pre-patch path.
+   const bool nonfault_both_sym = []()
+   {
+      const char *env = std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM");
+      return env && env[0] == '1';
+   }();
 
    for (int f = 0; f < mesh_.GetNumFaces(); f++)
    {
@@ -1821,75 +2033,58 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 
          real_t F_h[NUM_STATE];
 
-         if (is_boundary)
-         {
-            FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
+         // === §6.2.hoist (R5-001 FIX) ================================
+         // The pre-patch ComputeADERFaceFluxRHS declared dof_offset2,
+         // shape2, I_nbr, and is_fault INSIDE its `else (interior)`
+         // branch.  §6.2's new dispatch ordering must branch on
+         // is_fault as the OUTERMOST predicate, so we hoist these four
+         // declarations to outer scope.  The `!is_boundary` guard
+         // ensures boundary faces never evaluate e2 * ndof_per_el_
+         // with e2 < 0 (which would produce a negative offset and
+         // out-of-bounds reads).
+         int    dof_offset2 = -1;
+         Vector shape2;
+         real_t I_nbr[NUM_STATE] = {0};
+         bool   is_fault = false;
 
-            // Round-6 R-002: total-Q only; has_bulk_bg_ already asserted
-            // at the top of ComputeADERFaceFluxRHS.
-            switch (bc_type)
-            {
-               case FaceBC::Absorbing:
-                  flux_.AbsorbingTotal(nor, I_self, bulk_bg_scaled, F_h);
-                  break;
-               case FaceBC::FreeSurface:
-                  if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
-                  {
-                     flux_.FreeSurfaceGodunovTotal(nor, I_self,
-                                                   bulk_bg_scaled, F_h);
-                  }
-                  else
-                  {
-                     flux_.FreeSurfaceTotal(nor, I_self,
-                                            bulk_bg_scaled, F_h);
-                  }
-                  break;
-               case FaceBC::Fault:
-                  MFEM_ABORT("ComputeADERFaceFluxRHS: fault face " << f
-                             << " is 1-sided (no neighbor).  Fault faces "
-                             "must be 2-sided interior faces.");
-                  break;
-               default:
-                  flux_.AbsorbingTotal(nor, I_self, bulk_bg_scaled, F_h);
-                  break;
-            }
-
-            for (int c = 0; c < NUM_STATE; c++)
-            {
-               for (int i = 0; i < ndof; i++)
-               {
-                  rhs[c * ndof_total_ + dof_offset1 + i] -= w * shape1(i) * F_h[c];
-               }
-            }
-         }
-         else
+         if (!is_boundary)
          {
             const FiniteElement *fe2 = fes_->GetFE(e2);
-            int dof_offset2 = e2 * ndof_per_el_;
-
+            dof_offset2 = e2 * ndof_per_el_;
+            shape2.SetSize(ndof);
             IntegrationPoint ip2;
             ftr->Loc2.Transform(ip, ip2);
-            Vector shape2(ndof);
             fe2->CalcShape(ip2, shape2);
-
-            real_t I_nbr[NUM_STATE];
             for (int c = 0; c < NUM_STATE; c++)
             {
                I_nbr[c] = 0.0;
                for (int i = 0; i < ndof; i++)
                {
-                  I_nbr[c] += shape2(i) * I_data[c * ndof_total_ + dof_offset2 + i];
+                  I_nbr[c] += shape2(i) * I_data[c * ndof_total_
+                                                  + dof_offset2 + i];
                }
             }
+            is_fault = (bdr_attr == bc_.fault_attr) && (bc_.fault_attr > 0);
+         }
+         // is_fault remains `false` on boundary faces by construction of
+         // the `!is_boundary` guard.  A 1-sided face tagged with
+         // bc_.fault_attr is a mesh-configuration error caught below in
+         // the boundary dispatch (ClassifyBoundaryFace → FaceBC::Fault →
+         // MFEM_ABORT).
+         // === end §6.2.hoist =========================================
 
-            bool is_fault = (bdr_attr == bc_.fault_attr) && (bc_.fault_attr > 0);
+         if (is_fault)
+         {
+            // R2-008 FIX — fault-branch body lifted verbatim from the
+            // pre-patch ComputeADERFaceFluxRHS interior-else branch.
+            // Every line is load-bearing (BP5 canonical frame +
+            // FaultFaceFlux::EvaluateADER + per-side accumulation).
+            MFEM_ASSERT(fault_flux_ && fault_dof_data_,
+                        "R-204-ader: bookkeeping hoisted check should "
+                        "have fired at the top of ComputeADERFaceFluxRHS.");
 
-            if (is_fault)
+            if (eval_avg_mode == FaultEvalStageAvgMode::None)
             {
-               MFEM_ASSERT(fault_flux_ && fault_dof_data_,
-                           "R-204-ader: bookkeeping hoisted check should "
-                           "have fired at the top of ComputeADERFaceFluxRHS.");
-
                auto it = fault_face_dof_offset_.find(f);
                int dof_idx = -1;
                if (it != fault_face_dof_offset_.end())
@@ -1952,12 +2147,13 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                                               : I_self_can;
 
                   real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // Round-6 R-002: Total-Q only; has_bulk_bg_ already
-                  // asserted at the top of ComputeADERFaceFluxRHS.
-                  fault_flux_->EvaluateADERTotal(fdata,
-                                                 I_plus_local, I_minus_local,
-                                                 dt,
-                                                 I_imp_plus, I_imp_minus);
+                  // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
+                  // has_bulk_bg_ already asserted at the top of
+                  // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
+                  fault_flux_->EvaluateADER(fdata,
+                                            I_plus_local, I_minus_local,
+                                            dt,
+                                            I_imp_plus, I_imp_minus);
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -2008,20 +2204,444 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   MFEM_ABORT("ComputeADERFaceFluxRHS: interior fault face f="
                              << f << " has no FaultBasis/DOFData mapping.");
                }
+            }  // end if (mode == None)
+            else
+            {
+               // Round-12 Patch 2: face-averaging path.  Process at
+               // q == 0; for q > 0 on this fault face, skip the rest
+               // of the outer-q body (the face was fully batched at
+               // q = 0 already).
+               if (q != 0) { continue; }
+
+               auto it = fault_face_dof_offset_.find(f);
+               MFEM_VERIFY(it != fault_face_dof_offset_.end(),
+                           "ComputeADERFaceFluxRHS (avg): fault face "
+                           << f << " has no DOFData offset.");
+               const int face_dof_base = it->second;
+
+               const int fb_idx = LookupInteriorFaultBasisIndex(f);
+               MFEM_VERIFY(fault_basis_ && fb_idx >= 0 &&
+                           fb_idx < fault_basis_->NumFaces(),
+                           "ComputeADERFaceFluxRHS (avg): fault face "
+                           << f << " has no FaultBasis mapping.");
+               const FaultBasisData &bd = fault_basis_->GetBasis(fb_idx);
+               MFEM_VERIFY(nqp == static_cast<int>(bd.qp_data.size()),
+                           "ComputeADERFaceFluxRHS (avg): face nqp="
+                           << nqp << " != basis qp_data size="
+                           << bd.qp_data.size());
+
+               const FiniteElement *fe2_avg = fes_->GetFE(e2);
+               const int face_nqp = nqp;
+               const real_t inv_dt = 1.0 / dt;
+
+               std::vector<EvalStageState> states(face_nqp);
+               std::vector<real_t>   w_per_qp(face_nqp);
+               std::vector<Vector>   shape1_per_qp(face_nqp);
+               std::vector<Vector>   shape2_per_qp(face_nqp);
+               std::vector<std::array<real_t, 3>> can_n_per_qp(face_nqp);
+               std::vector<DenseMatrix> T_can_per_qp(face_nqp);
+               std::vector<bool>     elem1_on_plus_per_qp(face_nqp);
+               std::vector<int>      dof_idx_per_qp(face_nqp);
+               std::vector<std::array<real_t, NUM_STATE>> I_plus_loc_per_qp(face_nqp);
+               std::vector<std::array<real_t, NUM_STATE>> I_minus_loc_per_qp(face_nqp);
+
+               // Pass 1: reconstruct everything per QP and compute the
+               // full stage chain (ComputeStageState).
+               for (int qq = 0; qq < face_nqp; qq++)
+               {
+                  const IntegrationPoint &ip_qq = ir.IntPoint(qq);
+                  ftr->SetAllIntPoints(&ip_qq);
+
+                  Vector nor_vec_qq(3);
+                  CalcOrtho(ftr->Face->Jacobian(), nor_vec_qq);
+                  const real_t nor_len_qq = nor_vec_qq.Norml2();
+                  if (nor_len_qq > 0) { nor_vec_qq /= nor_len_qq; }
+                  w_per_qp[qq] = ip_qq.weight * nor_len_qq;
+
+                  IntegrationPoint ip1_qq;
+                  ftr->Loc1.Transform(ip_qq, ip1_qq);
+                  shape1_per_qp[qq].SetSize(ndof);
+                  fe1->CalcShape(ip1_qq, shape1_per_qp[qq]);
+
+                  IntegrationPoint ip2_qq;
+                  ftr->Loc2.Transform(ip_qq, ip2_qq);
+                  shape2_per_qp[qq].SetSize(ndof);
+                  fe2_avg->CalcShape(ip2_qq, shape2_per_qp[qq]);
+
+                  real_t I_self_qq[NUM_STATE], I_nbr_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     I_self_qq[c] = 0.0; I_nbr_qq[c] = 0.0;
+                     for (int i = 0; i < ndof; i++)
+                     {
+                        I_self_qq[c] += shape1_per_qp[qq](i)
+                           * I_data[c * ndof_total_ + dof_offset1 + i];
+                        I_nbr_qq[c]  += shape2_per_qp[qq](i)
+                           * I_data[c * ndof_total_ + dof_offset2 + i];
+                     }
+                  }
+
+                  dof_idx_per_qp[qq] = face_dof_base + qq;
+                  MFEM_VERIFY(dof_idx_per_qp[qq] >= 0 &&
+                              dof_idx_per_qp[qq] <
+                                 static_cast<int>(fault_dof_data_->size()),
+                              "ComputeADERFaceFluxRHS (avg): dof_idx out of range");
+
+                  const FaultBasisQPData &qpd = bd.qp_data[qq];
+                  real_t can_t1[3], can_t2[3];
+                  for (int d = 0; d < 3; d++)
+                  {
+                     can_n_per_qp[qq][d] = qpd.sign_flipped ? -qpd.normal[d]
+                                                            :  qpd.normal[d];
+                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
+                                                  :  qpd.tangent1[d];
+                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
+                                                  :  qpd.tangent2[d];
+                  }
+
+                  T_can_per_qp[qq].SetSize(NUM_STATE);
+                  DenseMatrix Tinv_can_qq(NUM_STATE);
+                  GodunovFlux::BuildRotation(can_n_per_qp[qq].data(),
+                                              can_t1, can_t2,
+                                              T_can_per_qp[qq]);
+                  GodunovFlux::BuildRotationInverse(can_n_per_qp[qq].data(),
+                                                     can_t1, can_t2,
+                                                     Tinv_can_qq);
+
+                  elem1_on_plus_per_qp[qq] = !qpd.sign_flipped;
+
+                  real_t I_self_can_qq[NUM_STATE], I_nbr_can_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     I_self_can_qq[c] = 0.0; I_nbr_can_qq[c] = 0.0;
+                     for (int k = 0; k < NUM_STATE; k++)
+                     {
+                        I_self_can_qq[c] += Tinv_can_qq(c, k) * I_self_qq[k];
+                        I_nbr_can_qq[c]  += Tinv_can_qq(c, k) * I_nbr_qq[k];
+                     }
+                  }
+
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     if (elem1_on_plus_per_qp[qq])
+                     {
+                        I_plus_loc_per_qp[qq][c]  = I_self_can_qq[c];
+                        I_minus_loc_per_qp[qq][c] = I_nbr_can_qq[c];
+                     }
+                     else
+                     {
+                        I_plus_loc_per_qp[qq][c]  = I_nbr_can_qq[c];
+                        I_minus_loc_per_qp[qq][c] = I_self_can_qq[c];
+                     }
+                  }
+
+                  real_t Q_avg_plus_qq[NUM_STATE];
+                  real_t Q_avg_minus_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     Q_avg_plus_qq[c]  = I_plus_loc_per_qp[qq][c]  * inv_dt;
+                     Q_avg_minus_qq[c] = I_minus_loc_per_qp[qq][c] * inv_dt;
+                  }
+
+                  const DOFData &fdata_const =
+                     (*fault_dof_data_)[dof_idx_per_qp[qq]];
+                  fault_flux_->ComputeStageState(fdata_const,
+                                                  Q_avg_plus_qq,
+                                                  Q_avg_minus_qq,
+                                                  states[qq]);
+               }
+
+               // Pass 2: average the selected stage field and run the
+               // appropriate completion helper.
+               const real_t inv_nqp = 1.0 / static_cast<real_t>(face_nqp);
+               if (eval_avg_mode == FaultEvalStageAvgMode::Trial)
+               {
+                  real_t sn_avg = 0.0, t1_avg = 0.0, t2_avg = 0.0;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     sn_avg += states[qq].sigma_n_trial;
+                     t1_avg += states[qq].tau1_trial;
+                     t2_avg += states[qq].tau2_trial;
+                  }
+                  sn_avg *= inv_nqp; t1_avg *= inv_nqp; t2_avg *= inv_nqp;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     states[qq].sigma_n_trial = sn_avg;
+                     states[qq].tau1_trial    = t1_avg;
+                     states[qq].tau2_trial    = t2_avg;
+                     const DOFData &fdata_c =
+                        (*fault_dof_data_)[dof_idx_per_qp[qq]];
+                     fault_flux_->CompleteFromTrial(fdata_c, states[qq]);
+                  }
+               }
+               else if (eval_avg_mode == FaultEvalStageAvgMode::Theta)
+               {
+                  real_t Theta_avg = 0.0;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     Theta_avg += states[qq].Theta;
+                  }
+                  Theta_avg *= inv_nqp;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     states[qq].Theta = Theta_avg;
+                     const DOFData &fdata_c =
+                        (*fault_dof_data_)[dof_idx_per_qp[qq]];
+                     fault_flux_->CompleteFromTheta(fdata_c, states[qq]);
+                  }
+               }
+               else if (eval_avg_mode == FaultEvalStageAvgMode::Vabs)
+               {
+                  real_t Vabs_avg = 0.0;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     Vabs_avg += states[qq].V_abs;
+                  }
+                  Vabs_avg *= inv_nqp;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     states[qq].V_abs = Vabs_avg;
+                     const DOFData &fdata_c =
+                        (*fault_dof_data_)[dof_idx_per_qp[qq]];
+                     fault_flux_->CompleteFromVabs(fdata_c, states[qq]);
+                  }
+               }
+               else if (eval_avg_mode == FaultEvalStageAvgMode::Tcorr)
+               {
+                  real_t sn_avg = 0.0, t1_avg = 0.0, t2_avg = 0.0;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     sn_avg += states[qq].sigma_n_corr;
+                     t1_avg += states[qq].tau1_corr;
+                     t2_avg += states[qq].tau2_corr;
+                  }
+                  sn_avg *= inv_nqp; t1_avg *= inv_nqp; t2_avg *= inv_nqp;
+                  for (int qq = 0; qq < face_nqp; qq++)
+                  {
+                     states[qq].sigma_n_corr = sn_avg;
+                     states[qq].tau1_corr    = t1_avg;
+                     states[qq].tau2_corr    = t2_avg;
+                     // Tcorr: no downstream recompute — per plan spec.
+                  }
+               }
+
+               // Pass 3: build imposed states, write back DOFData,
+               // compute per-side flux, deposit into rhs.
+               for (int qq = 0; qq < face_nqp; qq++)
+               {
+                  DOFData &fdata_qq =
+                     (*fault_dof_data_)[dof_idx_per_qp[qq]];
+
+                  real_t Q_avg_plus_qq[NUM_STATE];
+                  real_t Q_avg_minus_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     Q_avg_plus_qq[c]  = I_plus_loc_per_qp[qq][c]  * inv_dt;
+                     Q_avg_minus_qq[c] = I_minus_loc_per_qp[qq][c] * inv_dt;
+                  }
+
+                  real_t Q_imp_plus_qq[NUM_STATE];
+                  real_t Q_imp_minus_qq[NUM_STATE];
+                  fault_flux_->BuildImposedState(fdata_qq, states[qq],
+                                                  Q_avg_plus_qq,
+                                                  Q_avg_minus_qq,
+                                                  Q_imp_plus_qq,
+                                                  Q_imp_minus_qq);
+
+                  real_t I_imp_plus_qq[NUM_STATE];
+                  real_t I_imp_minus_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     I_imp_plus_qq[c]  = Q_imp_plus_qq[c]  * dt;
+                     I_imp_minus_qq[c] = Q_imp_minus_qq[c] * dt;
+                  }
+
+                  fault_flux_->WriteBackState(fdata_qq, states[qq]);
+
+                  real_t I_imp_plus_g_qq[NUM_STATE];
+                  real_t I_imp_minus_g_qq[NUM_STATE];
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     I_imp_plus_g_qq[c]  = 0.0;
+                     I_imp_minus_g_qq[c] = 0.0;
+                     for (int k = 0; k < NUM_STATE; k++)
+                     {
+                        I_imp_plus_g_qq[c]  +=
+                           T_can_per_qp[qq](c, k) * I_imp_plus_qq[k];
+                        I_imp_minus_g_qq[c] +=
+                           T_can_per_qp[qq](c, k) * I_imp_minus_qq[k];
+                     }
+                  }
+
+                  real_t F_h_plus_qq[NUM_STATE];
+                  real_t F_h_minus_qq[NUM_STATE];
+                  flux_.Interior(can_n_per_qp[qq].data(),
+                                  I_imp_plus_g_qq, I_imp_plus_g_qq,
+                                  F_h_plus_qq);
+                  flux_.Interior(can_n_per_qp[qq].data(),
+                                  I_imp_minus_g_qq, I_imp_minus_g_qq,
+                                  F_h_minus_qq);
+
+                  const Vector &sh1_qq = shape1_per_qp[qq];
+                  const Vector &sh2_qq = shape2_per_qp[qq];
+                  const real_t   w_qq  = w_per_qp[qq];
+
+                  if (elem1_on_plus_per_qp[qq])
+                  {
+                     for (int c = 0; c < NUM_STATE; c++)
+                     {
+                        for (int i = 0; i < ndof; i++)
+                        {
+                           rhs[c * ndof_total_ + dof_offset1 + i] -=
+                              w_qq * sh1_qq(i) * F_h_plus_qq[c];
+                           rhs[c * ndof_total_ + dof_offset2 + i] +=
+                              w_qq * sh2_qq(i) * F_h_minus_qq[c];
+                        }
+                     }
+                  }
+                  else
+                  {
+                     for (int c = 0; c < NUM_STATE; c++)
+                     {
+                        for (int i = 0; i < ndof; i++)
+                        {
+                           rhs[c * ndof_total_ + dof_offset1 + i] +=
+                              w_qq * sh1_qq(i) * F_h_minus_qq[c];
+                           rhs[c * ndof_total_ + dof_offset2 + i] -=
+                              w_qq * sh2_qq(i) * F_h_plus_qq[c];
+                        }
+                     }
+                  }
+               }
+            }  // end avg-mode path
+         }
+         else if (use_precomputed_face_fluxes_ && is_boundary)
+         {
+            // Phase 2a (§6.2): boundary dispatch through precomputed
+            // table.  bulk_bg_scaled must be bit-zero (Phase 1 probe
+            // construction required Q_bg = 0 for linearity).
+            // NOTE: Arm 3d Full-path (AddBoundaryFaceRhsFull) is
+            // available but NOT wired into this dispatch yet — it showed
+            // 3.9e-01 rel drift vs runtime on plane-wave inputs in
+            // P_SWITCH_ON_LINEAR_EQ despite reducing orbit drift by 9+
+            // orders of magnitude on constant-Q.  Root cause under
+            // investigation; keep legacy path until Full matches runtime
+            // bit-for-bit on non-orbit-asymmetric inputs.
+            precomputed_face_fluxes_.AddBoundaryFaceRhs(
+               f, I_self, bulk_bg_scaled, w, shape1.GetData(),
+               ndof, dof_offset1, ndof_total_, rhs);
+         }
+         else if (use_precomputed_face_fluxes_)   // interior non-fault
+         {
+            // Phase 2a (§6.2 R2-003): legacy AddInteriorFaceRhs path.
+            // Arm 3d Full-path available via direct call
+            // (AddInteriorFaceRhsFull) — used by the Phase 3 audit with
+            // SEAS_TEST_USE_ARM3D=1 as an opt-in diagnostic, but not
+            // wired here pending plane-wave equivalence investigation.
+            precomputed_face_fluxes_.AddInteriorFaceRhs(
+               f, /*caller_elem=*/e1, I_self, I_nbr, w, shape1.GetData(),
+               ndof, dof_offset1, ndof_total_, rhs);
+            precomputed_face_fluxes_.AddInteriorFaceRhs(
+               f, /*caller_elem=*/e2, I_nbr, I_self, w, shape2.GetData(),
+               ndof, dof_offset2, ndof_total_, rhs);
+         }
+         else if (is_boundary)
+         {
+            // Runtime boundary dispatch — lifted VERBATIM from the
+            // pre-patch `if (is_boundary) { switch(bc_type) {...} ... }`
+            // block of ComputeADERFaceFluxRHS (R2-008 discipline:
+            // preserved unchanged when the flag is off).  Round-13C
+            // Patch 1 wraps the dispatch with an optional n↔-n
+            // symmetrization (SEAS_TEST_NONFAULT_BOTH_SYM=1); unset
+            // env → byte-identical.
+            FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
+
+            auto compute_bc_flux = [&](const real_t *nvec, real_t *F_out)
+            {
+               switch (bc_type)
+               {
+                  case FaceBC::Absorbing:
+                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     break;
+                  case FaceBC::FreeSurface:
+                     if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
+                     {
+                        flux_.FreeSurfaceGodunovTotal(nvec, I_self,
+                                                      bulk_bg_scaled, F_out);
+                     }
+                     else
+                     {
+                        flux_.FreeSurfaceTotal(nvec, I_self,
+                                               bulk_bg_scaled, F_out);
+                     }
+                     break;
+                  case FaceBC::Fault:
+                     MFEM_ABORT("ComputeADERFaceFluxRHS: fault face " << f
+                                << " is 1-sided (no neighbor).  Fault faces "
+                                "must be 2-sided interior faces.");
+                     break;
+                  default:
+                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     break;
+               }
+            };
+
+            if (!nonfault_both_sym)
+            {
+               compute_bc_flux(nor, F_h);
             }
             else
             {
-               flux_.Interior(nor, I_self, I_nbr, F_h);
-
+               real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
+               real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
+               compute_bc_flux(nor,     F_pos);
+               compute_bc_flux(nor_neg, F_neg);
                for (int c = 0; c < NUM_STATE; c++)
                {
-                  for (int i = 0; i < ndof; i++)
-                  {
-                     rhs[c * ndof_total_ + dof_offset1 + i] -=
-                        w * shape1(i) * F_h[c];
-                     rhs[c * ndof_total_ + dof_offset2 + i] +=
-                        w * shape2(i) * F_h[c];
-                  }
+                  F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
+               }
+            }
+
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               for (int i = 0; i < ndof; i++)
+               {
+                  rhs[c * ndof_total_ + dof_offset1 + i] -=
+                     w * shape1(i) * F_h[c];
+               }
+            }
+         }
+         else
+         {
+            // Runtime interior dispatch — lifted VERBATIM from the
+            // pre-patch `else { flux_.Interior(nor, I_self, I_nbr, F_h); ... }`
+            // block (non-fault interior fallback; R2-008 discipline).
+            // Round-13C Patch 1 wraps with optional n↔-n,L↔R symmetrization
+            // (SEAS_TEST_NONFAULT_BOTH_SYM=1); unset → byte-identical.
+            if (!nonfault_both_sym)
+            {
+               flux_.Interior(nor, I_self, I_nbr, F_h);
+            }
+            else
+            {
+               real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
+               real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
+               flux_.Interior(nor,     I_self, I_nbr, F_pos);
+               flux_.Interior(nor_neg, I_nbr,  I_self, F_neg);
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
+               }
+            }
+
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               for (int i = 0; i < ndof; i++)
+               {
+                  rhs[c * ndof_total_ + dof_offset1 + i] -=
+                     w * shape1(i) * F_h[c];
+                  rhs[c * ndof_total_ + dof_offset2 + i] +=
+                     w * shape2(i) * F_h[c];
                }
             }
          }
@@ -2060,10 +2680,12 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
       int n_shared = pmesh.GetNSharedFaces();
       if (n_shared == 0) { return; }
 
-      // Round-6 R-002: Total-Q is the only supported ADER dispatch mode.
+      // v9.4.0: see ComputeADERFaceFluxRHS top-level note.  REVIEW R-007:
+      // updated stale "Total-Q only" wording.
       MFEM_VERIFY(has_bulk_bg_,
-                  "Total-Q only: SetAbsorbingBackground(Q_bg) must be "
-                  "called before wave.AdvanceADER().");
+                  "wave.AdvanceADER() requires SetAbsorbingBackground("
+                  "Q_bg) to have been called (Q_bg = 0 is valid under "
+                  "fluctuation-Q dispatch).");
 
       if (bc_.fault_attr > 0)
       {
@@ -2072,6 +2694,17 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      "bc_.fault_attr=" << bc_.fault_attr
                      << " > 0 but fault bookkeeping unset.");
       }
+
+      // Round-14C: reuse SEAS_TEST_NONFAULT_BOTH_SYM for MPI/Frontera
+      // parity with the local-face hook added in Round-13C Patch 1.
+      // Applies only to shared NON-FAULT faces (the runtime else
+      // branch below); shared fault faces and the precomputed path
+      // are untouched.  Env unset → byte-identical to pre-patch.
+      const bool nonfault_both_sym = []()
+      {
+         const char *env = std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM");
+         return env && env[0] == '1';
+      }();
 
       const real_t *I_data = I.GetData();
       MFEM_VERIFY(ghost_gf_, "Ghost GF not initialized");
@@ -2134,6 +2767,12 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             && (bc_.fault_attr > 0)
             && (sf_to_basis_idx[sf] >= 0);
          const int basis_idx = sf_fault ? sf_to_basis_idx[sf] : -1;
+
+         // Phase 2b (§7.2): mesh face index for the precomputed-table
+         // lookup.  `sf` is the shared-face index; the key for
+         // AddInteriorFaceRhs is (mesh_face_idx, Elem1No).
+         const int mesh_face_idx =
+            const_cast<ParMesh &>(pmesh).GetSharedFace(sf);
 
          for (int q = 0; q < ir.GetNPoints(); q++)
          {
@@ -2241,12 +2880,13 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
                   real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // Round-6 R-002: Total-Q only; has_bulk_bg_ asserted
-                  // at the top of ComputeADERSharedFaceFluxRHS.
-                  fault_flux_->EvaluateADERTotal(fdata,
-                                                 I_plus_local, I_minus_local,
-                                                 dt,
-                                                 I_imp_plus, I_imp_minus);
+                  // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
+                  // has_bulk_bg_ asserted at the top of
+                  // ComputeADERSharedFaceFluxRHS (Q_bg = 0 is valid).
+                  fault_flux_->EvaluateADER(fdata,
+                                            I_plus_local, I_minus_local,
+                                            dt,
+                                            I_imp_plus, I_imp_minus);
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -2282,9 +2922,47 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                              "face sf=" << sf << " missing DOFData.");
                }
             }
+            else if (use_precomputed_face_fluxes_)
+            {
+               // Phase 2b (§7.2): one-sided precomputed interior dispatch
+               // for shared non-fault faces.  Uses the LEGACY
+               // AddInteriorFaceRhs path rather than Arm 3d's Full path,
+               // because the Full path reads I_nbr from the LOCAL Q array
+               // at dof_offset_nbr, and on shared faces the neighbor DOFs
+               // live in the ghost buffer (pfes->GetFaceNbrFE /
+               // q_gf.FaceNbrData) at a different offset.  The legacy
+               // path already handles the ghost-buffer sampling via
+               // MFEM's shape2 on the face-nbr FE.  Arm 3d's shared-face
+               // extension (Full_Shared with Q_local + Q_ghost) is
+               // deferred — not required for the Phase 3 audit (which
+               // runs serial).
+               precomputed_face_fluxes_.AddInteriorFaceRhs(
+                  mesh_face_idx, /*caller_elem=*/e1,
+                  I_self, I_nbr, w, shape1.GetData(),
+                  ndof, dof_offset1, ndof_total_, rhs);
+               continue;
+            }
             else
             {
-               flux_.Interior(nor, I_self, I_nbr, F_h);
+               // Round-14C: optional n↔-n symmetrization for shared
+               // non-fault faces, parallel to the Round-13C hook in
+               // ComputeADERFaceFluxRHS.  Env unset → verbatim
+               // pre-patch path.
+               if (!nonfault_both_sym)
+               {
+                  flux_.Interior(nor, I_self, I_nbr, F_h);
+               }
+               else
+               {
+                  real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
+                  real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
+                  flux_.Interior(nor,     I_self, I_nbr, F_pos);
+                  flux_.Interior(nor_neg, I_nbr,  I_self, F_neg);
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
+                  }
+               }
             }
 
             for (int c = 0; c < NUM_STATE; c++)

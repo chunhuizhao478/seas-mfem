@@ -1,0 +1,7 @@
+=== Phase 2D Step B: BuildD4Mesh(true) fault sanity ===
+  attr=3 boundary triangles      : 8   (expected 8)
+  attr=3 triangles not at y=L/2  : 0   (expected 0)
+  GetFaultInteriorFaces().Size() : 8   (expected 8)
+  GetFaultSharedFaces().Size()   : 0   (expected 0 serial)
+
+  overall: PASS   (Phase 2D may proceed)

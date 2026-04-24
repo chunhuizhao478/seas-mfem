@@ -45,6 +45,7 @@
 #include "../../dynamic/fault_face_flux.hpp"
 #include "../../dynamic/tpv102_setup.hpp"
 #include "../../dynamic/tpv102_setup_total.hpp"
+#include "../../dynamic/d4_tet_mesh.hpp"
 #include "../../config/tpv102_params.hpp"
 #include "../../domain/boundary_config.hpp"
 
@@ -87,6 +88,9 @@ constexpr real_t kL = 1000.0;       // 1 km cube; dt safe for p=1 ADER
 constexpr real_t kDt = 5.0e-5;
 constexpr int    kNSteps = 20;
 constexpr int    kOrder = 1;
+int g_nx = 2;
+int g_ny = 2;
+int g_nz = 2;
 // ADER order: 1 = no predictor (forward Euler-like), 2 = Cauchy-Kovalevskaya
 // 1st-order time predictor.  Production tpv102_200m_p1_*.sbatch uses 2.
 // Override at runtime: env var SEAS_TEST_ADER_ORDER (default 2).
@@ -97,11 +101,26 @@ int kAderOrder = 2;
 // giving 4 hex-faces = 8 fault triangles (each hex face = 2 tet triangles).
 Mesh BuildCartesianFaultMesh()
 {
+   // R3-R002 (2026-04-23): honor SEAS_TEST_FIXTURE env var.  "d4"
+   // swaps the Kuhn split for BuildD4Mesh(true) so the pepper guard
+   // can close §C R-006 criterion #2 on the D4 fixture at the same
+   // 2x2x2 dimensions.
+   const char *fx = std::getenv("SEAS_TEST_FIXTURE");
+   const bool use_d4 = (fx != nullptr && std::string(fx) == "d4");
+   if (use_d4)
+   {
+      std::cout << "  [SEAS_TEST_FIXTURE=d4] using BuildD4Mesh(true).\n";
+      Mesh d4 = mfem::seas::BuildD4Mesh(/*add_fault=*/true, kL);
+      std::cout << "  [R4-R001] pepper-guard D4 fixture invariants:\n";
+      mfem::seas::AssertD4FixtureValid(d4, kL, /*abort_on_fail=*/true);
+      return d4;
+   }
+
    // Cartesian 2 × 2 × 2 hex mesh spanning [0, L]^3; y = L/2 cuts the
    // middle.  Use Hexahedron elements and then FinalizeTet-style split.
    // MFEM's Mesh::MakeCartesian3D with Element::TETRAHEDRON already
    // produces a tet mesh with conforming fault-plane triangles.
-   Mesh mesh = Mesh::MakeCartesian3D(2, 2, 2, Element::TETRAHEDRON,
+   Mesh mesh = Mesh::MakeCartesian3D(g_nx, g_ny, g_nz, Element::TETRAHEDRON,
                                      kL, kL, kL, /*sfc_ordering=*/false);
    mesh.FinalizeTopology();
    mesh.Finalize();
@@ -130,6 +149,20 @@ Mesh BuildCartesianFaultMesh()
    mesh.Finalize();
    mesh.SetAttributes();
    return mesh;
+}
+
+void ReadMeshDimsFromEnv()
+{
+   auto read_dim = [](const char *name, int fallback) {
+      const char *env = std::getenv(name);
+      if (!env) { return fallback; }
+      const int parsed = std::atoi(env);
+      if (parsed < 2 || (parsed % 2) != 0) { return fallback; }
+      return parsed;
+   };
+   g_nx = read_dim("SEAS_TEST_FAULT_NX", g_nx);
+   g_ny = read_dim("SEAS_TEST_FAULT_NY", g_ny);
+   g_nz = read_dim("SEAS_TEST_FAULT_NZ", g_nz);
 }
 
 template <typename MeshT>
@@ -197,11 +230,20 @@ int SetupFault(WaveOperator<MeshT> &wave, MeshT &mesh, int order,
    if (n_fault > 0)
    {
       InitializeFaultDOFs(dof_data, n_fault, fault_coords);
-      ZeroDOFDataPreStressTotal(dof_data, n_fault);
-      // Persistent nucleation uniform across every fault QP.
+      // v9.4.0: fluctuation-Q dispatch — static pre-stress stays in
+      // DOFData (sigma_n0, tau2_0 seeded by InitializeFaultDOFs),
+      // bulk Q carries fluctuation only.  Do NOT zero the pre-stress
+      // fields here; that would make the fault effectively unloaded.
+      // Persistent nucleation UNIFORM across every fault QP.  Matches
+      // this test's declared contract at the file-header line 21 ("Set
+      // DOFData.tau2_nuc = nuc_dtau UNIFORMLY on every fault QP"): the
+      // guard for pepper-under-rupture-drive, not equilibrium
+      // conservation.  An earlier localization-diagnostic patch set
+      // this to 0.0 and was never reverted, silently converting this
+      // pepper guard into an equilibrium test (REVIEW R-001).
       for (int i = 0; i < n_fault; i++)
       {
-         dof_data[i].tau2_nuc = 0.0;  // HARDCODED for diagnostic
+         dof_data[i].tau2_nuc = TPV102Params::nuc_dtau;
 #ifdef SEAS_DIAG_FAULT_FLUX
          dof_data[i].diag_print = true;
 #endif
@@ -288,6 +330,7 @@ int main(int argc, char *argv[])
       kAderOrder = std::atoi(env);
       if (kAderOrder < 1 || kAderOrder > 4) { kAderOrder = 2; }
    }
+   ReadMeshDimsFromEnv();
    if (rank == 0)
    {
       std::cout << "  ADER order = " << kAderOrder
@@ -300,7 +343,8 @@ int main(int argc, char *argv[])
                 << "UNIFORMITY test ===\n"
                 << "  MPI ranks: " << nprocs
                 << "  (is_parallel=" << (is_parallel?"yes":"no") << ")\n"
-                << "  fixture: 2x2x2 Cartesian hex → tets, fault at y=L/2\n"
+                << "  fixture: " << g_nx << "x" << g_ny << "x" << g_nz
+                << " Cartesian hex → tets, fault at y=L/2\n"
                 << "  L = " << kL << " m, dt = " << std::scientific
                 << std::setprecision(3) << kDt << " s, N = " << kNSteps
                 << " ADER-2 steps\n"
@@ -314,9 +358,10 @@ int main(int argc, char *argv[])
    bc.natural_attrs = {1};
    bc.fault_attr = 3;
    bc.absorbing_attrs = {};
+   // v9.4.0 fluctuation-Q: bulk Q carries fluctuation only, so the
+   // BC / PML damping target is Q_bg = 0.  (The variant probes below
+   // temporarily override this to stress-test BC interactions.)
    real_t bulk_bg[NUM_STATE] = {0};
-   bulk_bg[SYY] =  TPV102Params::sigma_n;
-   bulk_bg[SXY] = -TPV102Params::tau_ini;
 
    Mesh serial_mesh = BuildCartesianFaultMesh();
    if (rank == 0)
@@ -360,8 +405,8 @@ int main(int argc, char *argv[])
       ndof_total = wave.GetFESpace().GetNDofs();
       size = wave.Height();
       Q.SetSize(size); Q_new.SetSize(size);
-      InitializeStateTotal(Q, ndof_total, TPV102Params::sigma_n,
-                           TPV102Params::tau_ini);
+      // v9.4.0 fluctuation-Q dispatch: bulk Q starts at rest (= 0).
+      Q = 0.0;
 
       // Run-and-check loop.
       real_t worst_slip_spread = 0.0, worst_tau1_spread = 0.0;
@@ -492,8 +537,8 @@ int main(int argc, char *argv[])
       ndof_total = wave.GetFESpace().GetNDofs();
       size = wave.Height();
       Q.SetSize(size); Q_new.SetSize(size);
-      InitializeStateTotal(Q, ndof_total, TPV102Params::sigma_n,
-                           TPV102Params::tau_ini);
+      // v9.4.0 fluctuation-Q dispatch: bulk Q starts at rest (= 0).
+      Q = 0.0;
 
       // CONSERVATION TEST: for uniform Q == Q_bg, no nucleation, the
       // wave operator MUST give rhs == 0 at every DOF (divergence
@@ -546,37 +591,24 @@ int main(int argc, char *argv[])
             wave.SetAbsorbingBackground(bulk_bg);
          }
 
-         // VARIANT 2: Q_bg has SYY only (drop SXY).  If rhs IS zero
-         // here but NOT in baseline, SXY in Q_bg is the trigger.
-         {
-            real_t bg_syy_only[NUM_STATE] = {0};
-            bg_syy_only[SYY] = TPV102Params::sigma_n;
-            wave.SetAbsorbingBackground(bg_syy_only);
-            Vector Q_syy(size); Q_syy = 0.0;
-            for (int i = 0; i < ndof_total; i++)
-            { Q_syy[SYY * ndof_total + i] = TPV102Params::sigma_n; }
-            Vector k2(size);
-            wave.Mult(Q_syy, k2);
-            dump_rhs("[Q,Q_bg = SYY=sigma_n only]            ", k2);
-            wave.SetAbsorbingBackground(bulk_bg);
-         }
+         // R-005 (v9.5.0): VARIANT 2 / VARIANT 3 (total-Q component-
+         // isolated conservation probes) were removed here.  Under
+         // v9.4.0 fluctuation-Q DOFData the probes re-entered the wave
+         // operator with total pre-stress in Q while sigma_n0 / tau2_0
+         // remained live in DOFData, so FaultFaceFlux::Evaluate
+         // double-counted the pre-stress (see REVIEW.md R-005).  The
+         // reported rhs values were not conservation residuals and
+         // pre-biased the pepper-guard diagnosis.  VARIANT 1 (Q == 0,
+         // Q_bg == 0) remains above — it is the correct conservation
+         // probe under the v9.4.0 dispatch contract.
 
-         // VARIANT 3: Q_bg has SXY only (drop SYY).  Reverse of V2.
-         {
-            real_t bg_sxy_only[NUM_STATE] = {0};
-            bg_sxy_only[SXY] = -TPV102Params::tau_ini;
-            wave.SetAbsorbingBackground(bg_sxy_only);
-            Vector Q_sxy(size); Q_sxy = 0.0;
-            for (int i = 0; i < ndof_total; i++)
-            { Q_sxy[SXY * ndof_total + i] = -TPV102Params::tau_ini; }
-            Vector k3(size);
-            wave.Mult(Q_sxy, k3);
-            dump_rhs("[Q,Q_bg = SXY=-tau only]               ", k3);
-            wave.SetAbsorbingBackground(bulk_bg);
-         }
-
-         // INTENTIONALLY do NOT restore tau2_nuc — leave at 0 so the
-         // step-by-step loop tests pepper WITHOUT rupture drive.
+         // REVIEW R-001 fix: the conservation probes above use tau2_nuc=0
+         // to isolate the conservation-law check from rupture drive.
+         // Restore the uniform nucleation amplitude before the step-
+         // by-step loop so the pepper guard exercises rupture-driven
+         // uniformity as the file-header §1 contract intends.
+         for (int i = 0; i < n_fault_local; i++)
+         { dof_data[i].tau2_nuc = TPV102Params::nuc_dtau; }
       }
 
       real_t worst_slip_spread = 0.0, worst_tau1_spread = 0.0;

@@ -68,6 +68,7 @@
 #include "../../dynamic/wave_operator.hpp"
 #include "../../dynamic/fault_face_flux.hpp"
 #include "../../dynamic/tpv102_setup.hpp"
+#include "../../dynamic/tpv102_setup_total.hpp"
 #include "../../config/tpv102_params.hpp"
 #include "../../domain/boundary_config.hpp"
 #include "../../fault/fault_basis.hpp"
@@ -486,6 +487,10 @@ int main(int argc, char *argv[])
                               TPV102Params::lambda,
                               TPV102Params::mu,
                               TPV102Params::rho, bc);
+   real_t bulk_bg[NUM_STATE] = {0.0};
+   bulk_bg[SYY] =  TPV102Params::sigma_n;
+   bulk_bg[SXY] = -TPV102Params::tau_ini;
+   wave.SetAbsorbingBackground(bulk_bg);
 
    const Array<int> &int_faces = wave.GetFaultInteriorFaces();
    const Array<int> &shr_faces = wave.GetFaultSharedFaces();
@@ -539,6 +544,7 @@ int main(int argc, char *argv[])
    if (num_fault_total > 0)
    {
       InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
+      ZeroDOFDataPreStressTotal(dof_data, num_fault_total);
    }
 
    FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp,
@@ -618,7 +624,10 @@ int main(int argc, char *argv[])
    // ========================================================================
    {
       num_tests++;
-      Vector Q(wave.Height()); Q = 0.0;
+      const int ndof_total = wave.GetFESpace().GetNDofs();
+      Vector Q;
+      InitializeStateTotal(Q, ndof_total,
+                           TPV102Params::sigma_n, TPV102Params::tau_ini);
       CheckSXYSpread(Q, "phase B");
       Vector k(Q.Size());
       wave.Mult(Q, k);
@@ -647,27 +656,24 @@ int main(int argc, char *argv[])
       if (num_fault_total > 0)
       {
          InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
+         ZeroDOFDataPreStressTotal(dof_data, num_fault_total);
       }
 
       const int size = wave.Height();
-      Vector Q(size);
-      Q = 0.0;
+      const auto &pfes = wave.GetFESpace();
+      const int ndof_total = pfes.GetNDofs();
+      Vector Q;
+      InitializeStateTotal(Q, ndof_total,
+                           TPV102Params::sigma_n, TPV102Params::tau_ini);
       // Uniform pre-stress on every DOF: set σ_xy channel = tau_ini.
       // The Q storage layout in WaveOperator is component-major:
       //   Q[c * ndof_total + dof] for c in [0, NUM_STATE)
       // where ndof_total = fes->GetNDofs().  The interior Q is a
-      // DG field so every element's DOFs get the uniform pre-stress.
-      const auto &pfes = wave.GetFESpace();
-      const int ndof_total = pfes.GetNDofs();
+      // DG field so every element's DOFs get the same perturbation.
       for (int dof = 0; dof < ndof_total; dof++)
       {
-         Q(SXY * ndof_total + dof) = TPV102Params::tau_ini;
-         // Small rank-invariant perturbation (deterministic in the
-         // GLOBAL dof index) — but pfes->GetNDofs() is per-rank,
-         // so we use a rank-invariant proxy: the global vertex id
-         // of the DOF's supporting cell.  Simpler: use a uniform
-         // nonzero in σ_xx = 1e5 Pa so Tinv·Q has a nontrivial
-         // structure, independent of dof ordering.
+         // Small rank-invariant perturbation in σ_xx so Tinv·Q has a
+         // nontrivial structure, independent of dof ordering.
          Q(SXX * ndof_total + dof) = 1.0e5;
       }
 
@@ -723,6 +729,7 @@ int main(int argc, char *argv[])
       if (num_fault_total > 0)
       {
          InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
+         ZeroDOFDataPreStressTotal(dof_data, num_fault_total);
       }
 
       const auto &fes_const = wave.GetFESpace();
@@ -730,10 +737,12 @@ int main(int argc, char *argv[])
       const int ndof_total = fes.GetNDofs();
       const int size = wave.Height();
 
-      Vector Q(size);
-      Q = 0.0;
+      Vector Q;
+      InitializeStateTotal(Q, ndof_total,
+                           TPV102Params::sigma_n, TPV102Params::tau_ini);
 
-      // Project σ_xy = τ_ini · tanh(y / L0) onto the DG FESpace.
+      // Project a strike-stress perturbation Δσ_xy = τ_ini · tanh(y / L0)
+      // onto the DG FESpace and add it on top of the total-Q background.
       const double L0 = 500.0;
       FunctionCoefficient sxy_coeff(
          [L0](const Vector &x) -> real_t {
@@ -743,7 +752,7 @@ int main(int argc, char *argv[])
       sxy_gf.ProjectCoefficient(sxy_coeff);
       for (int i = 0; i < ndof_total; i++)
       {
-         Q(SXY * ndof_total + i) = sxy_gf(i);
+         Q(SXY * ndof_total + i) += sxy_gf(i);
       }
 
       // Pre-step Q_self vs Q_nbr check — expected NONZERO (≈ 2·τ_ini).

@@ -1,0 +1,55 @@
+
+=== Round-6 Phase 2E: rupture-driven amplification chain ===
+  Fixture: Kuhn M0 (2x2x2, fault y=L/2)
+  Steps: 20  dt: 5e-05  ADER order: 2
+
+  Fault QPs: 24  nqp/face: 3  int_faces: 8
+  fault-adjacent elements: 22   orbit buckets (>=2): 2
+
+  step | T1: Q_self SXY spread | T3: tau1_corr spread | T3: tau2_corr spread | T4: rhs SXY spread
+  -----|-----------------------|-----------------------|-----------------------|---------------------
+     0 |          0.000000e+00 |          0.000000e+00 |          0.000000e+00 |       2.826779e+03
+     1 |          0.000000e+00 |          0.000000e+00 |          0.000000e+00 |       5.550873e+03
+     2 |          0.000000e+00 |          5.910225e-16 |          1.086508e+00 |       8.173423e+03
+     3 |          0.000000e+00 |          2.507590e-03 |          3.246253e+00 |       1.069556e+04
+     4 |          0.000000e+00 |          9.978644e-03 |          6.466109e+00 |       1.311840e+04
+     5 |          0.000000e+00 |          2.481792e-02 |          1.073308e+01 |       1.544305e+04
+     6 |          0.000000e+00 |          4.937962e-02 |          1.603433e+01 |       1.767060e+04
+     7 |          0.000000e+00 |          8.596803e-02 |          2.235714e+01 |       1.980214e+04
+     8 |          0.000000e+00 |          1.368380e-01 |          2.968892e+01 |       2.183875e+04
+     9 |          0.000000e+00 |          2.041957e-01 |          3.801724e+01 |       2.378147e+04
+    10 |          0.000000e+00 |          2.901989e-01 |          4.732979e+01 |       2.563137e+04
+    11 |          0.000000e+00 |          3.969578e-01 |          5.761439e+01 |       2.738947e+04
+    12 |          0.000000e+00 |          5.265355e-01 |          6.885900e+01 |       2.905682e+04
+    13 |          0.000000e+00 |          6.809484e-01 |          8.105170e+01 |       3.063442e+04
+    14 |          0.000000e+00 |          8.621671e-01 |          9.418069e+01 |       3.212328e+04
+    15 |          0.000000e+00 |          1.072117e+00 |          1.082343e+02 |       3.352440e+04
+    16 |          0.000000e+00 |          1.312677e+00 |          1.232011e+02 |       3.483876e+04
+    17 |          0.000000e+00 |          1.585684e+00 |          1.390695e+02 |       3.606734e+04
+    18 |          0.000000e+00 |          1.892930e+00 |          1.558284e+02 |       3.721110e+04
+    19 |          0.000000e+00 |          2.236162e+00 |          1.734665e+02 |       3.827100e+04
+
+=== Worst spreads across 20 steps ===
+  T1 Q_self SXY orbit spread   : 0.000000e+00   (worst step -1)
+  T3 tau1_corr spread (global) : 2.236162e+00   (worst step 19)
+  T3 tau2_corr spread (global) : 1.734665e+02   (worst step 19)
+  T4 rhs SXY orbit spread      : 3.827100e+04   (worst step 19)
+
+=== Stage ratios ===
+  T3(tau1_corr) / T1(Q_self SXY) = 0.000000e+00
+  T4(rhs SXY)   / T3(tau1_corr)  = 1.711459e+04
+
+=== Named target per dominant stage ===
+  v9.4.0 §11 tau1_corr acceptance reference: 2.24 Pa
+  → T3 (friction-output) ABOVE the v9.4.0 gate.
+    Named targets per round-6 plan:
+      - FaultFaceFlux::Evaluate friction-solver re-eval per step
+      - friction-output coupling (tau1_corr writeback)
+
+=== Phase 2E verdict framework ===
+  Per reviewer round-6 rule:
+    First stage with ratio T_{k+1}/T_k > 1 names the source.
+  If T1 >> 0 and T3/T1 ~ O(1), T1 is the upstream seed.
+  If T1 ~ 0 and T3 ~ 2.24, amplification happens INSIDE T3
+    (friction solver / rate-state coupling).
+  If T4 >> T3, deposition amplifies friction output.

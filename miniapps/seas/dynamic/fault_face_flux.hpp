@@ -65,6 +65,25 @@ struct DOFData
 #endif
 };
 
+/// Per-QP working state for the `FaultFaceFlux::Evaluate` pipeline
+/// (Round-12 Patch 1).  Exposes every intermediate of the friction
+/// solve so that callers can (a) compute the full chain via
+/// `ComputeStageState`, (b) overwrite one stage (e.g. face-averaged
+/// trial traction in `wave_operator.inl`), and (c) drive the
+/// downstream recompute via one of the four `CompleteFrom*` helpers.
+/// Fields are populated in stage order; early stages are valid after
+/// `ComputeTrialTraction` alone, later stages after their respective
+/// helper runs.
+struct EvalStageState
+{
+   real_t sigma_n_trial = 0, tau1_trial = 0, tau2_trial = 0;
+   real_t sigma_n_total = 0, tau1_total = 0, tau2_total = 0;
+   real_t Theta = 0;
+   real_t V_abs = 0;
+   real_t V1 = 0, V2 = 0;
+   real_t sigma_n_corr = 0, tau1_corr = 0, tau2_corr = 0;
+};
+
 /// @brief Fault-face Riemann solver for dynamic rupture.
 ///
 /// Implements the trial-and-correction approach (plan Section 2.4):
@@ -113,6 +132,23 @@ public:
    ///
    /// Pipeline: Eq. (7) → (8) → (9) → (10) → (11)-(12).
    ///
+   /// v9.4.0 Commit 1: the friction-input total traction is
+   ///   tau*_total = data.tau*_0 + data.tau*_nuc + tau*_trial
+   /// where `tau*_trial` comes from bulk Q via ComputeTrialTraction,
+   /// `data.tau*_0` carries the static background pre-stress (split-
+   /// prestress fluctuation dispatch: bulk Q carries only the dynamic
+   /// fluctuation), and `data.tau*_nuc` carries the time-varying
+   /// nucleation driver overwritten per step by the driver.  The
+   /// Riemann imposed state uses `tau*_corr = tau*_trial - eta_s·V*`
+   /// (TRIAL scale) so the velocity jump only carries the friction
+   /// reaction — the persistent channel does NOT radiate through
+   /// bulk Q every step.  On user output `data.tau*_corr` is stored
+   /// as TOTAL = tau*_0 + tau*_nuc + tau*_corr.
+   ///
+   /// For callers that leave `tau*_nuc` / `sigma_n_nuc` at their
+   /// default 0 (all non-TPV102 callers, including BP5), behavior is
+   /// byte-identical to the pre-v9.4.0 `Evaluate`.
+   ///
    /// @param[in,out] data  Per-DOF data (psi, slip_rate updated).
    /// @param[in] Q_plus  State on + side (fault-local, 9 components).
    /// @param[in] Q_minus  State on − side (fault-local, 9 components).
@@ -123,6 +159,57 @@ public:
                  const real_t *Q_plus, const real_t *Q_minus,
                  real_t *Q_imp_plus, real_t *Q_imp_minus,
                  FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
+   /// Round-12 Patch 1 stage helpers — split the body of `Evaluate` into
+   /// reusable pieces so face-averaging experiments in
+   /// `wave_operator.inl` can substitute per-QP stage values with face
+   /// averages without duplicating any physics.  Composing
+   /// `ComputeStageState` + `BuildImposedState` + `WriteBackState` is
+   /// byte-identical to calling `Evaluate` directly on the same inputs.
+   ///
+   /// Full baseline chain: trial → total → Θ → V_abs → V1/V2 → tau*_corr.
+   /// Leaves `data` unchanged.
+   void ComputeStageState(const DOFData &data,
+                          const real_t *Q_plus, const real_t *Q_minus,
+                          EvalStageState &s,
+                          FrictionSolver::Method method =
+                             FrictionSolver::Method::Brent) const;
+
+   /// Completion helpers: assume a specific stage field in `s` is
+   /// already overwritten (e.g. by face-averaging), then recompute
+   /// every downstream stage.  Do not touch earlier stages.
+   ///
+   /// `CompleteFromTrial` — trial traction was modified; recompute
+   /// total → Θ → V_abs → V1/V2 → corrected.
+   void CompleteFromTrial(const DOFData &data,
+                          EvalStageState &s,
+                          FrictionSolver::Method method =
+                             FrictionSolver::Method::Brent) const;
+
+   /// `CompleteFromTheta` — Θ was modified (e.g. face-averaged);
+   /// recompute V_abs → V1/V2 → corrected.  Assumes total traction
+   /// (sigma_n_total, tau*_total) is already valid.
+   void CompleteFromTheta(const DOFData &data,
+                          EvalStageState &s,
+                          FrictionSolver::Method method =
+                             FrictionSolver::Method::Brent) const;
+
+   /// `CompleteFromVabs` — V_abs was modified; recompute V1/V2 →
+   /// corrected.  Assumes total traction and Θ are already valid.
+   void CompleteFromVabs(const DOFData &data, EvalStageState &s) const;
+
+   /// Construct the imposed states (Eq. 11-12) from a completed
+   /// `EvalStageState`.  Pure function on `s` + per-side bulk Q.
+   void BuildImposedState(const DOFData &data,
+                          const EvalStageState &s,
+                          const real_t *Q_plus, const real_t *Q_minus,
+                          real_t *Q_imp_plus, real_t *Q_imp_minus) const;
+
+   /// Write `slip_rate`, `V1`, `V2`, `tau1_corr`, `tau2_corr`, and
+   /// `sigma_n_corr` onto `data` (same convention as `Evaluate`: the
+   /// tau*_corr / sigma_n_corr fields carry TOTAL physical traction,
+   /// i.e. pre-stress + nucleation + trial-scale corrected).
+   void WriteBackState(DOFData &data, const EvalStageState &s) const;
 
    /// Total-stress variant of Evaluate (I-06 Phase 3).  Expects Q_plus,
    /// Q_minus to carry TOTAL stresses (pre-stress + fluctuation); outputs
@@ -151,49 +238,6 @@ public:
                       const real_t *Q_plus, const real_t *Q_minus,
                       real_t *Q_imp_plus, real_t *Q_imp_minus,
                       FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
-
-   /// FACE-AVERAGED friction-solve variant (option 1 of the
-   /// 2026-04-22 pepper investigation).
-   ///
-   /// Pepper-bug diagnosis: per-QP friction outputs differ slightly
-   /// across QPs of a single fault triangle due to per-DOF DG
-   /// non-uniformity in bulk Q after one stage's flux deposition.
-   /// Under strong rupture drive (V_abs O(0.1) m/s), the per-QP
-   /// variations compound step-over-step to produce visible per-tet
-   /// pepper.  See debug_document/tpv102_debug_document/
-   /// tpv102_debug_2026-04-22 documents.
-   ///
-   /// This variant takes face-averaged trial inputs (the AVERAGE
-   /// across QPs of one fault triangle) and writes face-uniform
-   /// outputs back to every per-QP DOFData entry of that face.
-   /// The friction solver runs ONCE PER FACE.  The wave operator
-   /// then deposits the same Q_imp at every QP via shape1·F_h.
-   /// All per-QP F_h values are identical → no per-QP variation in
-   /// rhs deposition → no compounding pepper.
-   ///
-   /// Mirrors SeisSol's approach in spirit (per-face DR processing
-   /// in BaseFrictionLaw::evaluate) while being a minimal patch on
-   /// MFEM's per-QP wave operator dispatch.
-   ///
-   /// @param[in,out] dof_data        Per-QP DOFData array for ONE
-   ///                                fault face.  All entries are
-   ///                                updated to the face-averaged
-   ///                                friction output (uniform per
-   ///                                face).
-   /// @param[in]  nqp_per_face       Number of QPs on this face
-   ///                                (== dof_data.size()).
-   /// @param[in]  Q_plus_avg         Face-averaged total-Q on +side
-   ///                                (fault-local frame, 9 components).
-   /// @param[in]  Q_minus_avg        Face-averaged total-Q on -side.
-   /// @param[out] Q_imp_plus         Face-uniform imposed +state,
-   ///                                same value used for every QP.
-   /// @param[out] Q_imp_minus        Face-uniform imposed -state.
-   /// @param[in]  method             Friction solver method.
-   void EvaluateTotalFaceAveraged(
-      DOFData *dof_data, int nqp_per_face,
-      const real_t *Q_plus_avg, const real_t *Q_minus_avg,
-      real_t *Q_imp_plus, real_t *Q_imp_minus,
-      FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
 
    /// ADER Phase 5: time-integrated friction solve (fluctuation-Q variant).
    ///

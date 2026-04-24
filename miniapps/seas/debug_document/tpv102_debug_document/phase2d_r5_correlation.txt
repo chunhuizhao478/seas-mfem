@@ -1,0 +1,37 @@
+=== Round-5 Option 1: Gate-14′-to-pepper correlation test ===
+  Fixture: Kuhn M0 (2x2x2 tet, fault at y=L/2)
+  Baseline tau1_corr ≈ 2.24 (v9.4.0 §11 acceptance gate)
+  Test: does orbit-projecting Q on fault-adjacent tets close the pepper?
+  fault-adjacent elements: 22
+  orbit buckets (size >= 2): 2
+
+--- Running: A. BASELINE (Kuhn, no projection)  (project=no) ---
+  worst spreads over 20 steps:
+    slip_rate    : 4.557465e-05
+    tau1_corr    : 2.236162e+00
+    tau2_corr    : 1.734665e+02
+    sigma_n_corr : 2.458748e+02
+
+--- Running: B. PROJECTED (Kuhn, orbit-uniform on fault-adjacent)  (project=yes) ---
+  worst spreads over 20 steps:
+    slip_rate    : 4.569721e-05
+    tau1_corr    : 4.309328e+00
+    tau2_corr    : 1.758532e+02
+    sigma_n_corr : 2.458748e+02
+
+=== Correlation verdict (tau1_corr) ===
+  baseline  tau1_corr spread: 2.236162e+00 Pa
+  projected tau1_corr spread: 4.309328e+00 Pa
+  projected / baseline       : 1.9271
+
+  decision rule:
+    ratio ≤ 0.1  → Phase 2C-fault JUSTIFIED
+    ratio ≥ 0.5  → Phase 2C-fault NOT justified
+    0.1 < ratio < 0.5 → inconclusive
+
+  VERDICT: Phase 2C-fault NOT justified (orbit projection leaves >= 50% of pepper untouched; the Gate 14′ residual is NOT a primary pepper driver)
+
+=== Other channels (informational) ===
+  slip_rate    baseline=4.557e-05  projected=4.570e-05  ratio=1.0027
+  tau2_corr    baseline=1.735e+02  projected=1.759e+02  ratio=1.0138
+  sigma_n_corr baseline=2.459e+02  projected=2.459e+02  ratio=1.0000

@@ -13,6 +13,7 @@
 #include "seas_diag_rank.hpp"
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 
 namespace mfem
@@ -65,6 +66,145 @@ void FaultFaceFlux::ComputeTrialTraction(const DOFData &data,
 }
 
 // ---------------------------------------------------------------------------
+// Round-12 Patch 1: stage helpers.  `Evaluate` below composes
+// ComputeStageState + BuildImposedState + WriteBackState; the split
+// exists so wave_operator.inl can face-average one stage field without
+// duplicating any physics.  The arithmetic ordering inside
+// ComputeStageState → CompleteFromTrial → CompleteFromTheta →
+// CompleteFromVabs is identical to the pre-refactor `Evaluate`, so the
+// composition is byte-identical on baseline inputs.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::ComputeStageState(const DOFData &data,
+                                      const real_t *Q_plus,
+                                      const real_t *Q_minus,
+                                      EvalStageState &s,
+                                      FrictionSolver::Method method) const
+{
+   // Step 1: Trial traction (Eq. 7)
+   ComputeTrialTraction(data, Q_plus, Q_minus,
+                        s.sigma_n_trial, s.tau1_trial, s.tau2_trial);
+   CompleteFromTrial(data, s, method);
+}
+
+void FaultFaceFlux::CompleteFromTrial(const DOFData &data,
+                                      EvalStageState &s,
+                                      FrictionSolver::Method method) const
+{
+   // v9.4.0 Commit 1: Total traction = static pre-stress
+   // (`tau*_0` / `sigma_n0`) + persistent nucleation channel
+   // (`tau*_nuc` / `sigma_n_nuc`) + dynamic trial from bulk Q
+   // (`tau*_trial`).
+   s.sigma_n_total = data.sigma_n0 + data.sigma_n_nuc + s.sigma_n_trial;
+   s.tau1_total    = data.tau1_0   + data.tau1_nuc    + s.tau1_trial;
+   s.tau2_total    = data.tau2_0   + data.tau2_nuc    + s.tau2_trial;
+
+   // Traction magnitude Θ = sqrt(tau1_total² + tau2_total²)
+   s.Theta = std::sqrt(s.tau1_total * s.tau1_total
+                       + s.tau2_total * s.tau2_total);
+
+   CompleteFromTheta(data, s, method);
+}
+
+void FaultFaceFlux::CompleteFromTheta(const DOFData &data,
+                                      EvalStageState &s,
+                                      FrictionSolver::Method method) const
+{
+   // Step 2: Solve friction equation for |V̂| (Eq. 8)
+   s.V_abs = 0.0;
+   if (s.Theta > 0.0)
+   {
+      s.V_abs = solver_.Solve(s.Theta, data.psi, std::abs(s.sigma_n_total),
+                              data.eta_s, data.a, method);
+   }
+   CompleteFromVabs(data, s);
+}
+
+void FaultFaceFlux::CompleteFromVabs(const DOFData &data,
+                                     EvalStageState &s) const
+{
+   // Step 3: Decompose slip rate into components (Eq. 9).  Defaults
+   // mirror the pre-refactor code: V1 = V2 = 0 and tau*_corr =
+   // tau*_trial when the friction solver returns V_abs = 0 (or
+   // Theta = 0 at entry).
+   s.V1 = 0.0; s.V2 = 0.0;
+   s.tau1_corr = s.tau1_trial;
+   s.tau2_corr = s.tau2_trial;
+   // Normal traction is unchanged by slip (Eq. 10), regardless of
+   // whether the friction solver ran.
+   s.sigma_n_corr = s.sigma_n_trial;
+
+   if (s.Theta > 0.0 && s.V_abs > 0.0)
+   {
+      // Friction strength
+      real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
+      real_t f_V = data.a * std::asinh(s.V_abs * C);
+      real_t strength = std::abs(s.sigma_n_total) * f_V;
+
+      // Slip rate decomposition (Eq. 9)
+      s.V1 = s.V_abs * (s.tau1_total) / (strength + data.eta_s * s.V_abs);
+      s.V2 = s.V_abs * (s.tau2_total) / (strength + data.eta_s * s.V_abs);
+
+      // Step 4: Corrected traction (Eq. 10)
+      s.tau1_corr = s.tau1_trial - data.eta_s * s.V1;
+      s.tau2_corr = s.tau2_trial - data.eta_s * s.V2;
+   }
+}
+
+void FaultFaceFlux::BuildImposedState(const DOFData &data,
+                                      const EvalStageState &s,
+                                      const real_t *Q_plus,
+                                      const real_t *Q_minus,
+                                      real_t *Q_imp_plus,
+                                      real_t *Q_imp_minus) const
+{
+   // Step 5: Construct imposed states (Eq. 11-12).  Initialize with
+   // current state so non-normal stresses (SYY/SZZ/SYZ) and unused
+   // velocity components carry through unchanged.
+   std::memcpy(Q_imp_minus, Q_minus, NUM_STATE * sizeof(real_t));
+   std::memcpy(Q_imp_plus,  Q_plus,  NUM_STATE * sizeof(real_t));
+
+   // Minus side (Eq. 11a-d): v^{-,imp} = v^- - (1/Z)(sigma_corr - sigma^-)
+   const real_t invZp_m = 1.0 / data.Zp_minus;
+   const real_t invZs_m = 1.0 / data.Zs_minus;
+
+   Q_imp_minus[VX] = Q_minus[VX] - invZp_m * (s.sigma_n_corr - Q_minus[SXX]);
+   Q_imp_minus[VY] = Q_minus[VY] - invZs_m * (s.tau1_corr    - Q_minus[SXY]);
+   Q_imp_minus[VZ] = Q_minus[VZ] - invZs_m * (s.tau2_corr    - Q_minus[SXZ]);
+
+   // Plus side (Eq. 12a-d): v^{+,imp} = v^+ + (1/Z)(sigma_corr - sigma^+)
+   const real_t invZp_p = 1.0 / data.Zp_plus;
+   const real_t invZs_p = 1.0 / data.Zs_plus;
+
+   Q_imp_plus[VX] = Q_plus[VX] + invZp_p * (s.sigma_n_corr - Q_plus[SXX]);
+   Q_imp_plus[VY] = Q_plus[VY] + invZs_p * (s.tau1_corr    - Q_plus[SXY]);
+   Q_imp_plus[VZ] = Q_plus[VZ] + invZs_p * (s.tau2_corr    - Q_plus[SXZ]);
+
+   // Both sides: imposed stress = corrected traction (Eq. 11d/12d)
+   Q_imp_minus[SXX] = s.sigma_n_corr;
+   Q_imp_minus[SXY] = s.tau1_corr;
+   Q_imp_minus[SXZ] = s.tau2_corr;
+
+   Q_imp_plus[SXX]  = s.sigma_n_corr;
+   Q_imp_plus[SXY]  = s.tau1_corr;
+   Q_imp_plus[SXZ]  = s.tau2_corr;
+}
+
+void FaultFaceFlux::WriteBackState(DOFData &data,
+                                   const EvalStageState &s) const
+{
+   // v9.4.0 Commit 1: store TOTAL physical traction (static +
+   // nucleation + trial-scale corrected).  Riemann imposed-state
+   // construction above uses TRIAL-scale `tau*_corr` to match
+   // SeisSol's `tractionResults.traction*`.
+   data.slip_rate = s.V_abs;
+   data.V1 = s.V1;
+   data.V2 = s.V2;
+   data.tau1_corr    = data.tau1_0   + data.tau1_nuc    + s.tau1_corr;
+   data.tau2_corr    = data.tau2_0   + data.tau2_nuc    + s.tau2_corr;
+   data.sigma_n_corr = data.sigma_n0 + data.sigma_n_nuc + s.sigma_n_corr;
+}
+
+// ---------------------------------------------------------------------------
 // Full Evaluate pipeline: Eq. (7) → (8) → (9) → (10) → (11)-(12)
 // ---------------------------------------------------------------------------
 void FaultFaceFlux::Evaluate(DOFData &data,
@@ -108,15 +248,10 @@ void FaultFaceFlux::Evaluate(DOFData &data,
                "homogeneous material.  Extend GodunovFlux to per-side A "
                "before running this configuration.");
 
-   // Step 1: Trial traction (Eq. 7)
-   real_t sigma_n_trial, tau1_trial, tau2_trial;
-   ComputeTrialTraction(data, Q_plus, Q_minus,
-                        sigma_n_trial, tau1_trial, tau2_trial);
-
-   // Total traction = pre-stress + trial (Eq. 8 setup)
-   real_t sigma_n_total = data.sigma_n0 + sigma_n_trial;
-   real_t tau1_total = data.tau1_0 + tau1_trial;
-   real_t tau2_total = data.tau2_0 + tau2_trial;
+   // Round-12 Patch 1: compose the stage helpers.  Byte-identical to
+   // the pre-refactor inline implementation.
+   EvalStageState s;
+   ComputeStageState(data, Q_plus, Q_minus, s, method);
 
 #ifdef SEAS_DIAG_FAULT_FLUX
    // C-1 EVAL: v9.0.0 §0.5 checkpoint — printf only, no MPI.  Prints only
@@ -128,87 +263,15 @@ void FaultFaceFlux::Evaluate(DOFData &data,
          "|Q_plus[VY]|=%.3e  |Q_plus[SXY]|=%.3e  |Q_plus[VZ]|=%.3e  "
          "|Q_plus[SXZ]|=%.3e  psi=%.3e\n",
          g_seas_my_rank,
-         tau1_trial, tau2_trial,
+         s.tau1_trial, s.tau2_trial,
          std::abs(Q_plus[VY]),  std::abs(Q_plus[SXY]),
          std::abs(Q_plus[VZ]),  std::abs(Q_plus[SXZ]),
          data.psi);
    }
 #endif
 
-
-   // Traction magnitude Θ = sqrt(tau1_total² + tau2_total²)
-   real_t Theta = std::sqrt(tau1_total * tau1_total + tau2_total * tau2_total);
-
-   // Step 2: Solve friction equation for |V̂| (Eq. 8)
-   real_t V_abs = 0.0;
-   if (Theta > 0.0)
-   {
-      V_abs = solver_.Solve(Theta, data.psi, std::abs(sigma_n_total),
-                            data.eta_s, data.a, method);
-   }
-
-   // Step 3: Decompose slip rate into components (Eq. 9)
-   real_t V1 = 0.0, V2 = 0.0;
-   real_t tau1_corr = tau1_trial, tau2_corr = tau2_trial;
-
-   if (Theta > 0.0 && V_abs > 0.0)
-   {
-      // Friction strength
-      real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
-      real_t f_V = data.a * std::asinh(V_abs * C);
-      real_t strength = std::abs(sigma_n_total) * f_V;
-
-      // Slip rate decomposition (Eq. 9)
-      V1 = V_abs * (tau1_total) / (strength + data.eta_s * V_abs);
-      V2 = V_abs * (tau2_total) / (strength + data.eta_s * V_abs);
-
-      // Step 4: Corrected traction (Eq. 10)
-      tau1_corr = tau1_trial - data.eta_s * V1;
-      tau2_corr = tau2_trial - data.eta_s * V2;
-   }
-
-   real_t sigma_n_corr = sigma_n_trial;  // normal traction unchanged by slip
-
-   // Step 5: Construct imposed states (Eq. 11-12)
-   // Initialize with current state
-   std::memcpy(Q_imp_minus, Q_minus, NUM_STATE * sizeof(real_t));
-   std::memcpy(Q_imp_plus, Q_plus, NUM_STATE * sizeof(real_t));
-
-   // Minus side (Eq. 11a-d): v^{-,imp} = v^- - (1/Z)(sigma_corr - sigma^-)
-   real_t invZp_m = 1.0 / data.Zp_minus;
-   real_t invZs_m = 1.0 / data.Zs_minus;
-
-   Q_imp_minus[VX]  = Q_minus[VX]  - invZp_m * (sigma_n_corr - Q_minus[SXX]);
-   Q_imp_minus[VY]  = Q_minus[VY]  - invZs_m * (tau1_corr - Q_minus[SXY]);
-   Q_imp_minus[VZ]  = Q_minus[VZ]  - invZs_m * (tau2_corr - Q_minus[SXZ]);
-
-   // Plus side (Eq. 12a-d): v^{+,imp} = v^+ + (1/Z)(sigma_corr - sigma^+)
-   real_t invZp_p = 1.0 / data.Zp_plus;
-   real_t invZs_p = 1.0 / data.Zs_plus;
-
-   Q_imp_plus[VX]  = Q_plus[VX]  + invZp_p * (sigma_n_corr - Q_plus[SXX]);
-   Q_imp_plus[VY]  = Q_plus[VY]  + invZs_p * (tau1_corr - Q_plus[SXY]);
-   Q_imp_plus[VZ]  = Q_plus[VZ]  + invZs_p * (tau2_corr - Q_plus[SXZ]);
-
-   // Both sides: imposed stress = corrected traction (Eq. 11d/12d)
-   Q_imp_minus[SXX] = sigma_n_corr;
-   Q_imp_minus[SXY] = tau1_corr;
-   Q_imp_minus[SXZ] = tau2_corr;
-
-   Q_imp_plus[SXX]  = sigma_n_corr;
-   Q_imp_plus[SXY]  = tau1_corr;
-   Q_imp_plus[SXZ]  = tau2_corr;
-
-   // Non-normal stresses are unchanged (Eq. 11d/12d: sigma_yy, sigma_zz, sigma_yz)
-   // Already copied from Q_plus/Q_minus above.
-
-   // Update fault state
-   data.slip_rate = V_abs;
-   data.V1 = V1;
-   data.V2 = V2;
-   data.tau1_corr = data.tau1_0 + tau1_corr;  // total corrected traction
-   data.tau2_corr = data.tau2_0 + tau2_corr;
-   data.sigma_n_corr = data.sigma_n0 + sigma_n_corr;
+   BuildImposedState(data, s, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus);
+   WriteBackState(data, s);
 
 #ifndef NDEBUG
    // R-V92-H07: psi must be pristine for the driver's coupled RK4 to be
@@ -409,88 +472,6 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
 }
 
 // ---------------------------------------------------------------------------
-// FACE-AVERAGED EvaluateTotal (option 1, 2026-04-22 pepper fix).
-//
-// Calls EvaluateTotal on the FACE-AVERAGED tau_trial / sigma_n_trial
-// using a representative DOFData snapshot (averaged psi, averaged
-// tau*_nuc) for the friction solve, then writes the friction outputs
-// uniformly to every per-QP DOFData entry of the face.  The wave
-// operator can then deposit the face-uniform Q_imp via shape1·F_h at
-// every QP — all per-QP F_h values are identical.
-//
-// Effect: eliminates per-QP rhs deposition variation that compounds
-// through the DG×nonlinear-friction amplification chain (per-DOF
-// non-uniformity → per-QP friction outputs differ → per-QP rhs
-// variation → next stage sees more variation, etc.).  Diagnosed in
-// test_adjacent_triangle_fault_uniformity; see commits e686867 +
-// 81ae35a for the full diagnostic chain.
-// ---------------------------------------------------------------------------
-void FaultFaceFlux::EvaluateTotalFaceAveraged(
-   DOFData *dof_data, int nqp_per_face,
-   const real_t *Q_plus_avg, const real_t *Q_minus_avg,
-   real_t *Q_imp_plus, real_t *Q_imp_minus,
-   FrictionSolver::Method method) const
-{
-   MFEM_VERIFY(dof_data != nullptr,
-               "EvaluateTotalFaceAveraged: dof_data must not be null");
-   MFEM_VERIFY(nqp_per_face > 0,
-               "EvaluateTotalFaceAveraged: nqp_per_face must be > 0, got "
-               << nqp_per_face);
-
-   // Build a face-representative DOFData by averaging the per-QP fields
-   // that the friction solver reads (psi, tau*_nuc, sigma_n_nuc).
-   // Material parameters (Zp, Zs, eta_p, eta_s, a, Dc) are uniform per
-   // face by physics; assert the first QP matches the rest as a sanity
-   // gate.  V1, V2, slip_rate, slip1, slip2, tau*_corr, sigma_n_corr
-   // are OUTPUTS — overwritten by EvaluateTotal.
-   DOFData face_data = dof_data[0];
-   real_t psi_avg = 0.0, tau1_nuc_avg = 0.0, tau2_nuc_avg = 0.0;
-   real_t sigma_n_nuc_avg = 0.0;
-   for (int q = 0; q < nqp_per_face; q++)
-   {
-      psi_avg          += dof_data[q].psi;
-      tau1_nuc_avg     += dof_data[q].tau1_nuc;
-      tau2_nuc_avg     += dof_data[q].tau2_nuc;
-      sigma_n_nuc_avg  += dof_data[q].sigma_n_nuc;
-   }
-   const real_t inv_nqp = 1.0 / static_cast<real_t>(nqp_per_face);
-   face_data.psi         = psi_avg          * inv_nqp;
-   face_data.tau1_nuc    = tau1_nuc_avg     * inv_nqp;
-   face_data.tau2_nuc    = tau2_nuc_avg     * inv_nqp;
-   face_data.sigma_n_nuc = sigma_n_nuc_avg  * inv_nqp;
-   face_data.tau1_0      = 0.0;  // total-Q contract: must be zero
-   face_data.tau2_0      = 0.0;
-   face_data.sigma_n0    = 0.0;
-
-   // Run the standard EvaluateTotal on face-averaged inputs.  The
-   // outputs (V1, V2, slip_rate, tau*_corr, sigma_n_corr) are written
-   // into face_data; Q_imp_plus / Q_imp_minus are the face-uniform
-   // imposed states.
-   EvaluateTotal(face_data, Q_plus_avg, Q_minus_avg,
-                 Q_imp_plus, Q_imp_minus, method);
-
-   // Distribute the friction outputs UNIFORMLY across every per-QP
-   // DOFData entry of this face.  psi is intentionally NOT
-   // overwritten: the caller's coupled-RK4-on-psi integrator owns
-   // psi evolution per QP, and the EvaluateTotal contract guarantees
-   // psi is unchanged inside.  We restore each QP's per-QP psi
-   // (already preserved by EvaluateTotal contract on face_data; we
-   // just leave per-QP dof_data[q].psi untouched).
-   for (int q = 0; q < nqp_per_face; q++)
-   {
-      dof_data[q].slip_rate    = face_data.slip_rate;
-      dof_data[q].V1           = face_data.V1;
-      dof_data[q].V2           = face_data.V2;
-      dof_data[q].tau1_corr    = face_data.tau1_corr;
-      dof_data[q].tau2_corr    = face_data.tau2_corr;
-      dof_data[q].sigma_n_corr = face_data.sigma_n_corr;
-      // psi: untouched (per-QP integrated by driver's coupled RK4).
-      // {tau*_0, tau*_nuc, sigma_n_*} are INPUTS to friction; not
-      // overwritten here.
-   }
-}
-
-// ---------------------------------------------------------------------------
 // ADER I-05 Phase 5: time-integrated Riemann solve (fluctuation variant).
 // ---------------------------------------------------------------------------
 // I± = ∫_0^{dt} Q±(τ) dτ  ⇒  Q̄± = I±/dt.  Call the standard Evaluate on
@@ -525,7 +506,30 @@ void FaultFaceFlux::EvaluateADER(DOFData &data,
    }
 
    real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-   Evaluate(data, Q_avg_plus, Q_avg_minus, Q_imp_plus, Q_imp_minus, method);
+
+   // Round-11 FREEZE-A hook (test-only).  When SEAS_TEST_FREEZE_A=1,
+   // bypass the friction Evaluate entirely: leave `data` unchanged
+   // and pass the time-averaged bulk state through as the imposed
+   // state.  This makes the fault face apply no flux correction
+   // ("fault locked") so the pepper-guard test can distinguish
+   // "asymmetry driven by fault friction / feedback" (closes under
+   // FREEZE-A) from "asymmetry generated by the MFEM wave update
+   // even with the fault locked" (persists under FREEZE-A).
+   // Minimal hook — production builds with SEAS_TEST_FREEZE_A unset
+   // are byte-identical to the pre-hook path.
+   const char *freeze_a = std::getenv("SEAS_TEST_FREEZE_A");
+   if (freeze_a && freeze_a[0] == '1')
+   {
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         Q_imp_plus[c]  = Q_avg_plus[c];
+         Q_imp_minus[c] = Q_avg_minus[c];
+      }
+   }
+   else
+   {
+      Evaluate(data, Q_avg_plus, Q_avg_minus, Q_imp_plus, Q_imp_minus, method);
+   }
 
    for (int c = 0; c < NUM_STATE; c++)
    {

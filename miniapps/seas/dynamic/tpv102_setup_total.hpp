@@ -571,161 +571,27 @@ struct FaultQPNucleationState
    }
 };
 
-/// @brief Inject the TPV102 nucleation delta into bulk Q (I-06 Phase 5,
-///        R-I06-003 + R-I06-004 revision).
-///
-/// At each fault QP:
-///  1. Compute dtau_new = NucleationPerturbation(x, z, t).
-///  2. Compute delta = dtau_new - dtau_applied[i] (the change since the
-///     last call on this QP).
-///  3. ADD -delta / shape_max[i] to Q[SXY, DOF_nearest[i]] on each side
-///     that is locally owned.  The -1/shape_max factor makes the shape-
-///     weighted QP sum increment by -delta (R-002 sign + R-I06-003
-///     amplitude correction).
-///  4. Update dtau_applied[i] = dtau_new.
-///
-/// Semantic change vs the original overwrite (R-I06-004): this is an
-/// ADD, not an OVERWRITE.  Wave perturbations integrated into Q at the
-/// fault-QP DOFs BETWEEN calls are PRESERVED — only the delta in
-/// nucleation amplitude is applied.  The shape-weighted QP amplitude
-/// effective in ComputeTrialTraction is:
-///     SXY(QP) = sum_j shape_j(QP) · Q[SXY, elem_dof(j)]
-///             = initial value (= -tau_ini - previous dtau_applied)
-///               + wave contributions from stages
-///               + shape_max · (-delta / shape_max)     ← our add here
-///             = initial value + wave - delta
-///             = -tau_ini - (previous + delta) + wave
-///             = -tau_ini - dtau_new + wave
-/// which is precisely the fluctuation-path semantic (dtau is a constant
-/// additive offset on the static pre-stress, bulk Q carries wave
-/// fluctuations).
-///
-/// R-002 sign: sigma_xy_global = -tau_nt2_local, so tau_nt2_local += dtau
-/// (strike-shear increase) maps to Q[SXY] -= dtau.  The -delta sign in
-/// the add below carries this.
-///
-/// Typical call sites (driver):
-///   - ADER one-shot per step (at midpoint for 2nd-order accuracy):
-///        ApplyNucleationTotal(Q, map, state, coords, ..., t + dt/2,
-///                              /*update_state=*/true);
-///     Updates state.dtau_applied[i] to dtau(t+dt/2).  Because the
-///     delta is computed against the previous step's committed state,
-///     the update is idempotent under repeated calls at the same `t`.
-///   - RK4 per-stage (driver's chosen simplification, round-6 R-003):
-///     Call ApplyNucleationTotal ONCE PER STAGE on the BASE bulk Q
-///     with `update_state=true` (the default), at the stage's time
-///     argument t_k ∈ {t, t+dt/2, t+dt}:
-///        ApplyNucleationTotal(Q, map, state, coords, ..., t_k,
-///                              /*update_state=*/true);
-///     Each call advances state.dtau_applied to dtau(t_k) and injects
-///     the incremental `dtau(t_k) - dtau(t_{k-1})` into Q, so after all
-///     four stages Q carries dtau(t+dt) in a single bulk vector.  The
-///     endpoint re-eval call at `t+dt` is then a no-op (state already
-///     at dtau(t+dt), delta=0).  This per-stage-with-update pattern is
-///     mathematically equivalent to the earlier docstring's
-///     `update_state=false` per-stage pattern on a per-stage Q_tmp, but
-///     it avoids the need for a separate post-step commit call and
-///     keeps Q = "bulk state with current-time nucleation injected" as
-///     the single authoritative invariant.
-///
-///     The alternative pattern — per-stage writes to a Q_tmp with
-///     `update_state=false`, then a final `update_state=true` commit
-///     on the base Q — is ALSO supported by this function; the two
-///     patterns produce bit-identical post-step Q at the step end,
-///     just via different intermediate states.  The driver picked the
-///     simpler (per-stage on base Q) pattern.
-///
-/// @param[in,out] Q            Bulk state vector (post-RK4 or per-stage).
-/// @param[in]     map          Fault-QP-to-elem-DOF map (built once at init).
-/// @param[in,out] state        Per-QP dtau_applied tracker (step-base).
-/// @param[in]     fault_coords Physical (x, y, z) per fault QP.
-/// @param[in]     ndof_per_el  Scalar DOFs per element.
-/// @param[in]     ndof_total   Scalar DOFs across the whole mesh.
-/// @param[in]     tau_ini      TPV102 along-strike pre-stress [Pa] (kept
-///                             in the signature for parity with
-///                             ApplyNucleation and to document the
-///                             implicit baseline; not used directly in
-///                             the add-delta formula).
-/// @param[in]     t            Simulation time [s] for the temporal ramp.
-/// @param[in]     update_state If true (default), commit dtau_new into
-///                             state.dtau_applied[i] after applying the
-///                             delta to Q.  Post-step callers use true;
-///                             per-stage callers use false.
-inline void ApplyNucleationTotal(Vector &Q,
-                                 const FaultQPNodalMap &map,
-                                 FaultQPNucleationState &state,
-                                 const std::vector<Vector> &fault_coords,
-                                 int ndof_per_el, int ndof_total,
-                                 real_t tau_ini, real_t t,
-                                 bool update_state = true)
-{
-   (void)tau_ini;  // doc-only; see add-delta derivation above
-   const int n_qp = static_cast<int>(fault_coords.size());
-   MFEM_VERIFY(static_cast<int>(map.qp_to_elem_plus.size()) == n_qp,
-               "ApplyNucleationTotal: map / fault_coords size mismatch");
-   MFEM_VERIFY(map.Consistent(),
-               "ApplyNucleationTotal: FaultQPNodalMap has inconsistent "
-               "elem/dof pairings (valid elem with invalid dof or vice versa)");
-   MFEM_VERIFY(static_cast<int>(state.dtau_applied_plus.size())  == n_qp &&
-               static_cast<int>(state.dtau_applied_minus.size()) == n_qp,
-               "ApplyNucleationTotal: state size mismatch (did you call "
-               "FaultQPNucleationState::Reset(n_qp) after map setup?)");
+// v9.4.0 R-006 (review): bulk-Q `ApplyNucleationTotal` removed.
+// Rationale: it poked nucleation as a single-DOF point source into
+// Q[SXY] at the fault QP, then relied on the wave operator's
+// shape-weighted QP reconstruction to surface it.  The point source
+// radiates in O(h/cp), diluting the requested nucleation amplitude
+// by 1e4-1e5x by the time the friction solver reads it.  Replaced
+// by `ApplyNucleationPrestress` (DOFData persistent channel, below)
+// and the supporting FaultQPNodalMap / FaultQPNucleationState
+// infrastructure above is retained only for legacy-test access;
+// under v9.4.0 production dispatch nothing reads it.
 
-   for (int i = 0; i < n_qp; i++)
-   {
-      const real_t along_strike = fault_coords[i](0);
-      const real_t down_dip     = std::abs(fault_coords[i](2));
-      const real_t dtau_new     = NucleationPerturbation(along_strike,
-                                                          down_dip, t);
-
-      // + side
-      if (map.qp_to_elem_plus[i] >= 0)
-      {
-         const real_t shape_max = map.qp_shape_max_plus[i];
-         MFEM_ASSERT(shape_max > 0.0,
-                     "ApplyNucleationTotal: qp_shape_max_plus[" << i <<
-                     "] = " << shape_max << " — missing setup from "
-                     "BuildFaultQPNodalMap");
-         const real_t delta = dtau_new - state.dtau_applied_plus[i];
-         // R-002 sign + R-I06-003 shape_max scaling:
-         //   Q[SXY, node] += -delta / shape_max
-         // so that sum_j shape_j(QP) * Q[SXY, DOF_j] increments by
-         // -delta (QP-effective amplitude change).
-         const int e = map.qp_to_elem_plus[i];
-         const int d = map.qp_to_dof_plus[i];
-         const int off = e * ndof_per_el + d;
-         Q[SXY * ndof_total + off] += -delta / shape_max;
-         if (update_state) { state.dtau_applied_plus[i] = dtau_new; }
-      }
-
-      // - side
-      if (map.qp_to_elem_minus[i] >= 0)
-      {
-         const real_t shape_max = map.qp_shape_max_minus[i];
-         MFEM_ASSERT(shape_max > 0.0,
-                     "ApplyNucleationTotal: qp_shape_max_minus[" << i <<
-                     "] = " << shape_max << " — missing setup from "
-                     "BuildFaultQPNodalMap");
-         const real_t delta = dtau_new - state.dtau_applied_minus[i];
-         const int e = map.qp_to_elem_minus[i];
-         const int d = map.qp_to_dof_minus[i];
-         const int off = e * ndof_per_el + d;
-         Q[SXY * ndof_total + off] += -delta / shape_max;
-         if (update_state) { state.dtau_applied_minus[i] = dtau_new; }
-      }
-   }
-}
-
-/// @brief Persistent-prestress nucleation channel for TPV102 total-Q
-///        (replacement for `ApplyNucleationTotal` in the production driver).
+/// @brief Persistent-prestress nucleation channel for TPV102
+///        (production driver's only nucleation entry point after v9.4.0).
 ///
-/// Mirrors the working fluctuation-Q `ApplyNucleation` at
-/// `tpv102_setup.hpp:135-148` — OVERWRITES the per-DOF nucleation prestress
-/// each call.  `FaultFaceFlux::EvaluateTotal` reads `data.tau2_nuc` and
-/// adds it to the trial traction, so the requested `dtau` is re-imposed
-/// at every Riemann solve and never gets diluted by wave radiation.
+/// OVERWRITES the per-DOF nucleation prestress each call.
+/// `FaultFaceFlux::Evaluate` (v9.4.0 Commit 1) reads `data.tau2_nuc` and
+/// adds it to the friction-input traction, so the requested `dtau` is
+/// re-imposed at every Riemann solve and never gets diluted by wave
+/// radiation.
 ///
-/// Why this replaces the bulk-Q `ApplyNucleationTotal`:
+/// Why this replaces the bulk-Q `ApplyNucleationTotal` (DEPRECATED):
 ///   The bulk-Q version pokes a single nodal DOF in `Q[SXY]` with
 ///   `-delta/shape_max`.  The wave operator at `wave_operator.inl:905-913`
 ///   reads Q via `Q_self[c] = sum_i shape1(i) * Q[..., dof_i]`, treating
@@ -740,8 +606,8 @@ inline void ApplyNucleationTotal(Vector &Q,
 ///
 /// The persistent-prestress channel sidesteps the wave-radiation problem
 /// entirely: nucleation does not enter bulk Q at all.  At every
-/// EvaluateTotal call the friction solver sees
-///     tau2_total_trial = tau2_trial(Q) + data.tau2_nuc
+/// Evaluate call the friction solver sees
+///     tau2_total = tau2_0 + data.tau2_nuc + tau2_trial(Q)
 /// where `tau2_nuc` is overwritten per call from this function.  Bulk Q
 /// at the fault DOFs evolves naturally under the slip-driven Riemann
 /// imposed-state coupling.
@@ -758,13 +624,13 @@ inline void ApplyNucleationTotal(Vector &Q,
 /// @param[in]     t             Simulation time [s].  The per-QP
 ///                              nucleation amplitude is
 ///                              `NucleationPerturbation(x, |z|, t)`.
-inline void ApplyNucleationTotalPrestress(std::vector<DOFData> &dof_data,
-                                          const std::vector<Vector> &fault_coords,
-                                          real_t t)
+inline void ApplyNucleationPrestress(std::vector<DOFData> &dof_data,
+                                     const std::vector<Vector> &fault_coords,
+                                     real_t t)
 {
    const int n = static_cast<int>(dof_data.size());
    MFEM_VERIFY(static_cast<int>(fault_coords.size()) >= n,
-               "ApplyNucleationTotalPrestress: fault_coords size "
+               "ApplyNucleationPrestress: fault_coords size "
                << fault_coords.size() << " < dof_data size " << n);
    for (int i = 0; i < n; i++)
    {
@@ -776,6 +642,21 @@ inline void ApplyNucleationTotalPrestress(std::vector<DOFData> &dof_data,
       // tau1_nuc / sigma_n_nuc intentionally left at their default 0
       // (TPV102 is pure strike-slip, no normal-stress nucleation).
    }
+}
+
+/// @brief DEPRECATED alias preserved for out-of-tree callers.
+///
+/// v9.4.0 renames `ApplyNucleationTotalPrestress` to
+/// `ApplyNucleationPrestress` (the function no longer has anything
+/// "total"-specific to it — it writes a persistent channel read by the
+/// fluctuation-path `Evaluate`).  In-tree callers migrate in Commit 2;
+/// this alias remains solely so that any external driver that never got
+/// updated still compiles.  Prefer the new name for all new code.
+inline void ApplyNucleationTotalPrestress(std::vector<DOFData> &dof_data,
+                                          const std::vector<Vector> &fault_coords,
+                                          real_t t)
+{
+   ApplyNucleationPrestress(dof_data, fault_coords, t);
 }
 
 } // namespace seas

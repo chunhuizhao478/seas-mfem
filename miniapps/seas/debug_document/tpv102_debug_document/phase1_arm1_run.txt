@@ -1,0 +1,28 @@
+=== TPV102 Phase 3 STOP — Arm 1 localization probes ===
+
+--- G_CONST_VOL ---
+  ||rhs_vol||_inf = 1.560549e+07
+PROBE G_CONST_VOL: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_VOL_MINV ---
+  ||M^-1 rhs_vol||_inf = 1.498e+01
+PROBE G_CONST_VOL_MINV: drift=0.000e+00  tol=1.000e-10  verdict=PASS
+
+--- G_CONST_BFACE_LIFT ---
+  ||rhs_runtime - rhs_precomp||_inf = 1.041e-01
+  runtime  orbit drift = 0.000e+00  (worst )
+  precomp  orbit drift = 0.000e+00  (worst )
+PROBE G_CONST_BFACE_LIFT (runtime orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (precomp orbit drift): drift=0.000e+00  tol=1.000e-10  verdict=PASS
+PROBE G_CONST_BFACE_LIFT (runtime vs precomp): drift=1.041e-01  tol=1.000e-06  verdict=FAIL
+
+--- G_ORBIT_DOF_MAP ---
+  orbits examined:      8
+  orbits with DOF-map mismatch: 8
+  worst local-index diff: 99
+PROBE G_ORBIT_DOF_MAP (fraction mismatched): drift=8.000e+00  tol=5.000e-01  verdict=FAIL
+
+=== Summary ===
+Total:  6
+Passed: 4
+Failed: 2
