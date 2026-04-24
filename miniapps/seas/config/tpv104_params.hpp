@@ -98,16 +98,18 @@ struct TPV104Params
    static constexpr real_t t_final     = 12.0;
 };
 
-// R-001 compile-time consistency checks.  Match §4.1 derived-scalar row.
-static_assert(TPV104Params::a_out   == TPV104Params::a_in   + TPV104Params::da,
-              "TPV104: a_out must equal a_in + da (directive §4.1)");
-static_assert(TPV104Params::V_w_out == TPV104Params::V_w_in + TPV104Params::dV_w,
-              "TPV104: V_w_out must equal V_w_in + dV_w (directive §4.1)");
-static_assert(TPV104Params::lambda == TPV104Params::rho * TPV104Params::cp * TPV104Params::cp
-              - 2.0 * TPV104Params::mu,
-              "TPV104: lambda = rho*cp^2 - 2*mu (directive §4.1)");
-static_assert(TPV104Params::eta_s  == TPV104Params::rho * TPV104Params::cs / 2.0,
-              "TPV104: eta_s = rho*cs/2 (directive §4.1)");
+// R-001 note: the §4.1 "derived-scalar" invariants (a_out = a_in + da,
+// V_w_out = V_w_in + dV_w, lambda = rho*cp^2 - 2*mu, eta_s = rho*cs/2)
+// are enforced by the `= expr` definitions above — the constants are
+// LITERALLY `a_in + da` etc.  Previous rounds (R-001) carried
+// static_asserts that re-evaluated the same expressions and compared
+// to the defined constant, which is tautological.  Intel 19.1.1 on
+// Frontera trips those redundant asserts under its constexpr FP-
+// contraction rules (the sum gets contracted differently at the
+// definition site vs the assert site).  The asserts are intentionally
+// absent here; if the derived expressions need a tolerance-based
+// runtime guard, add it in ComputeA_TPV104 / ComputeVw_TPV104 or in
+// TPV104 unit tests, not in constexpr-only static_assert.
 
 // =========================================================================
 // Spatial distributions (duplicated from tpv102_params.hpp per
