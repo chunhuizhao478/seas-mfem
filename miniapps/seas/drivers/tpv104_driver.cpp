@@ -535,13 +535,19 @@ int main(int argc, char *argv[])
       pmesh_ptr.reset(new ParMesh(comm, serial_mesh,
                                   custom_partitioning.GetData()));
       // Verify ParMesh actually used our partition: each rank's local
-      // element count should equal rank_count[my_rank].
+      // element count must equal rank_count[my_rank].  ABORT if not —
+      // job 7677864 silently produced bit-exact baseline output despite
+      // --partition-file being passed; we want loud failure if MFEM
+      // ignores the partition.
       const int local_ne = pmesh_ptr->GetNE();
       int expected_ne = 0;
       for (int e = 0; e < custom_partitioning.Size(); e++)
       {
          if (custom_partitioning[e] == rank) { expected_ne++; }
       }
+      int local_honored = (local_ne == expected_ne) ? 1 : 0;
+      int all_honored = 0;
+      MPI_Allreduce(&local_honored, &all_honored, 1, MPI_INT, MPI_MIN, comm);
       int sum_local = 0, sum_expected = 0;
       MPI_Allreduce(&local_ne, &sum_local, 1, MPI_INT, MPI_SUM, comm);
       MPI_Allreduce(&expected_ne, &sum_expected, 1, MPI_INT, MPI_SUM, comm);
@@ -551,8 +557,20 @@ int main(int argc, char *argv[])
                    << local_ne << " rank0_expected=" << expected_ne
                    << "  global_actual=" << sum_local
                    << " global_expected=" << sum_expected
-                   << "  honored=" << (local_ne == expected_ne ? "YES" : "NO")
+                   << "  all_honored=" << (all_honored ? "YES" : "NO")
                    << std::endl;
+      }
+      if (!all_honored)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "[partition] FATAL: at least one rank's local NE "
+                      << "does not match the partition file.  MFEM is not "
+                      << "applying our custom partitioning array.  Aborting "
+                      << "to avoid silent fallback to ParMETIS-default."
+                      << std::endl;
+         }
+         MPI_Abort(comm, 73);
       }
    }
    else if (fault_locality_part)
