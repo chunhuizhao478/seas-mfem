@@ -2958,6 +2958,63 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      w * shape2(i) * F_h[c];
                }
             }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+            // C-2B NONFAULT-FACE (ADER path): per-AdvanceADER-call dump
+            // on the 6 non-fault interior faces of the hypocenter's two
+            // adjacent tets.  Captures I_self, I_nbr (time-integrated
+            // states on both sides) and F_h (Godunov flux).  Fires
+            // FIRST QP per face per AdvanceADER call (q==0,
+            // user-decision: per-Mult, not per-stage / per-QP).
+            if (q == 0 && !diag_nonfault_faces_.empty())
+            {
+               bool match = false;
+               for (size_t kk = 0;
+                    kk < diag_nonfault_faces_.size(); kk++)
+               {
+                  if (diag_nonfault_faces_[kk] == f) { match = true; break; }
+               }
+               if (match)
+               {
+                  const char *side_p = (e1 == diag_elem_plus_  ||
+                                        e2 == diag_elem_plus_)  ? "P" : "";
+                  const char *side_m = (e1 == diag_elem_minus_ ||
+                                        e2 == diag_elem_minus_) ? "M" : "";
+                  std::fprintf(stderr,
+                     "[C-2B NONFAULT-FACE] rank=%d face=%d e1=%d e2=%d "
+                     "side=%s%s nor=(%+.4e,%+.4e,%+.4e) w=%.4e\n",
+                     g_seas_my_rank, f, e1, e2, side_p, side_m,
+                     nor[0], nor[1], nor[2], w);
+                  std::fprintf(stderr,
+                     "[C-2B NONFAULT-FACE I_self] rank=%d face=%d "
+                     "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                     "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                     "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                     g_seas_my_rank, f,
+                     I_self[SXX], I_self[SYY], I_self[SZZ],
+                     I_self[SXY], I_self[SYZ], I_self[SXZ],
+                     I_self[VX],  I_self[VY],  I_self[VZ]);
+                  std::fprintf(stderr,
+                     "[C-2B NONFAULT-FACE I_nbr]  rank=%d face=%d "
+                     "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                     "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                     "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                     g_seas_my_rank, f,
+                     I_nbr[SXX], I_nbr[SYY], I_nbr[SZZ],
+                     I_nbr[SXY], I_nbr[SYZ], I_nbr[SXZ],
+                     I_nbr[VX],  I_nbr[VY],  I_nbr[VZ]);
+                  std::fprintf(stderr,
+                     "[C-2B NONFAULT-FACE F_h]    rank=%d face=%d "
+                     "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                     "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                     "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                     g_seas_my_rank, f,
+                     F_h[SXX], F_h[SYY], F_h[SZZ],
+                     F_h[SXY], F_h[SYZ], F_h[SXZ],
+                     F_h[VX],  F_h[VY],  F_h[VZ]);
+               }
+            }
+#endif
          }
       }
    }
@@ -3448,6 +3505,63 @@ void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
          }
       }
    }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // C-2A BULK-DOF (ADER path): per-AdvanceADER-call dump of bulk Q
+   // (input) and the corrector rhs at the hypocenter face's two
+   // adjacent tets' diag DOFs.  rhs here is the time-INTEGRATED
+   // corrector residual (volume + non-fault flux + fault flux,
+   // pre-mass-inverse, pre-Q+rhs accumulation).
+   if (diag_elem_plus_ >= 0 && diag_elem_minus_ >= 0 &&
+       diag_face_dof_plus_ >= 0 && diag_face_dof_minus_ >= 0)
+   {
+      const real_t *Qd = Q.GetData();
+      const real_t *Rd = rhs.GetData();
+      const int dof_off_p = diag_elem_plus_  * ndof_per_el_;
+      const int dof_off_m = diag_elem_minus_ * ndof_per_el_;
+      const int idx_p = diag_face_dof_plus_;
+      const int idx_m = diag_face_dof_minus_;
+      if (idx_p < ndof_per_el_ && idx_m < ndof_per_el_)
+      {
+         real_t Qp[NUM_STATE], Qm[NUM_STATE], Rp[NUM_STATE], Rm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            Qp[c] = Qd[c*ndof_total_ + dof_off_p + idx_p];
+            Qm[c] = Qd[c*ndof_total_ + dof_off_m + idx_m];
+            Rp[c] = Rd[c*ndof_total_ + dof_off_p + idx_p];
+            Rm[c] = Rd[c*ndof_total_ + dof_off_m + idx_m];
+         }
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF Q+]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_plus_,
+            Qp[SXX], Qp[SYY], Qp[SZZ], Qp[SXY], Qp[SYZ], Qp[SXZ],
+            Qp[VX],  Qp[VY],  Qp[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF Q-]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_minus_,
+            Qm[SXX], Qm[SYY], Qm[SZZ], Qm[SXY], Qm[SYZ], Qm[SXZ],
+            Qm[VX],  Qm[VY],  Qm[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF k+]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_plus_,
+            Rp[SXX], Rp[SYY], Rp[SZZ], Rp[SXY], Rp[SYZ], Rp[SXZ],
+            Rp[VX],  Rp[VY],  Rp[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF k-]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_minus_,
+            Rm[SXX], Rm[SYY], Rm[SZZ], Rm[SXY], Rm[SYZ], Rm[SXZ],
+            Rm[VX],  Rm[VY],  Rm[VZ]);
+      }
+   }
+#endif
 
    // 3. rhs *= M^{-1}.
    ApplyMassInverse(rhs);
