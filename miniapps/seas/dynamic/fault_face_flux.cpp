@@ -83,6 +83,32 @@ void FaultFaceFlux::ComputeStageState(const DOFData &data,
    // Step 1: Trial traction (Eq. 7)
    ComputeTrialTraction(data, Q_plus, Q_minus,
                         s.sigma_n_trial, s.tau1_trial, s.tau2_trial);
+
+   // Diagnostic (TPV104 normal-traction freeze).  When env var
+   // SEAS_TPV104_FREEZE_SIGMA_N is set (and not "0"), override the
+   // dynamic trial normal traction with a constant.  This pins
+   // sigma_n_total = data.sigma_n0 + data.sigma_n_nuc + override
+   // through CompleteFromTrial → CompleteFromTheta → CompleteFromVabs,
+   // so the friction solver sees a fixed normal stress and the
+   // imposed-state SXX does not respond to bulk-Q fluctuations.
+   //   For TPV104 (sigma_n0=0 in DOFData under total-Q, sigma_n_nuc=0):
+   //     SEAS_TPV104_FREEZE_SIGMA_N=120e6  -> sigma_n_total = 120 MPa
+   //     SEAS_TPV104_FREEZE_SIGMA_N=1      -> 120 MPa (default)
+   //     unset / =0                         -> baseline (no override)
+   // Sign: positive = compression in this code's fault-local frame
+   // (TPV104Params::sigma_n is positive-compression).
+   {
+      const char *freeze = std::getenv("SEAS_TPV104_FREEZE_SIGMA_N");
+      if (freeze && freeze[0] != '\0' &&
+          !(freeze[0] == '0' && freeze[1] == '\0'))
+      {
+         char *endp = nullptr;
+         const real_t parsed = std::strtod(freeze, &endp);
+         s.sigma_n_trial =
+            (endp != freeze && parsed > 0.0) ? parsed : 120.0e6;
+      }
+   }
+
    CompleteFromTrial(data, s, method);
 }
 
