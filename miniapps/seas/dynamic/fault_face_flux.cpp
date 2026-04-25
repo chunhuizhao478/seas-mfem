@@ -267,6 +267,40 @@ void FaultFaceFlux::Evaluate(DOFData &data,
          std::abs(Q_plus[VY]),  std::abs(Q_plus[SXY]),
          std::abs(Q_plus[VZ]),  std::abs(Q_plus[SXZ]),
          data.psi);
+
+      // C-1n NORMAL: trace the σ_n_trial decomposition to identify what
+      // drives the trial-normal-stress perturbation we observe at the
+      // hypocenter (~0.5 MPa during rupture transit).  σ_n_trial =
+      // etaP * ((Q_minus[VX] − Q_plus[VX]) + Q_plus[SXX]/Zp+
+      //         Q_minus[SXX]/Zp_neig).  All Q components are in
+      // FAULT-LOCAL coords.  The two terms are physically:
+      //   v_jump_term   = etaP * (Q_minus[VX] − Q_plus[VX])
+      //                 = etaP × the fault-normal velocity jump.  Should
+      //                   be ≡0 for pure strike-slip with mirror-
+      //                   symmetric mesh.
+      //   stress_term   = etaP * (Q_plus[SXX]/Zp + Q_minus[SXX]/Zp_neig)
+      //                 = etaP × twice the fault-normal stress average.
+      //                   For fluctuation-Q, both Q[SXX] should be ≡0
+      //                   at fault QPs (pre-stress lives in DOFData,
+      //                   not in Q).  Non-zero ⇒ wave operator's flux
+      //                   back-feed has populated SXX_fluctuation, OR
+      //                   the imposed-state back-flux is leaking
+      //                   normal-stress into bulk Q.
+      const real_t inv_Zp_p = 1.0 / data.Zp_plus;
+      const real_t inv_Zp_m = 1.0 / data.Zp_minus;
+      const real_t v_jump_term =
+         data.eta_p * (Q_minus[VX] - Q_plus[VX]);
+      const real_t stress_term =
+         data.eta_p * (Q_plus[SXX] * inv_Zp_p
+                     + Q_minus[SXX] * inv_Zp_m);
+      std::fprintf(stderr,
+         "[C-1n NORMAL] rank=%d  sigma_n_trial=%+.4e Pa  "
+         "v_jump_term=%+.4e Pa  stress_term=%+.4e Pa  | "
+         "Q_plus[VX]=%+.4e  Q_minus[VX]=%+.4e  "
+         "Q_plus[SXX]=%+.4e  Q_minus[SXX]=%+.4e\n",
+         g_seas_my_rank,
+         s.sigma_n_trial, v_jump_term, stress_term,
+         Q_plus[VX], Q_minus[VX], Q_plus[SXX], Q_minus[SXX]);
    }
 #endif
 
