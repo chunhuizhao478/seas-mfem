@@ -47,6 +47,7 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <climits>
 #include <memory>
 #include <string>
 #include <vector>
@@ -482,27 +483,77 @@ int main(int argc, char *argv[])
    // beyond y=0 mirror to arbitrary fault geometries.
    //
    // BP5 path NOT touched per user directive 2026-04-25.
+   //
+   // Lifetime note: Array<int> custom_partitioning is hoisted OUTSIDE
+   // the if-block to guarantee its data outlives the ParMesh ctor, in
+   // case MFEM stores the pointer rather than copying.  Job 7677864
+   // showed bit-exact baseline output despite --partition-file being
+   // passed, suggesting the partition was being silently dropped.
    std::unique_ptr<ParMesh> pmesh_ptr;
+   Array<int> custom_partitioning;
    if (!partition_file.empty())
    {
       // Load explicit partitioning array from a sidecar file (typically
       // produced by tpv104/mesh/build_symmirror_mesh.py --emit-partition).
-      // This gives bit-exact reproducibility across rank counts when the
-      // file encodes a Cartesian or otherwise mirror-respecting partition.
-      Array<int> partitioning;
       const bool ok = seas::LoadPartitioningFromFile(partition_file, nprocs,
                                                      serial_mesh.GetNE(),
-                                                     partitioning);
+                                                     custom_partitioning);
       MFEM_VERIFY(ok, "Failed to load partition file: " << partition_file
                   << " (np_expected=" << nprocs
                   << ", ne_expected=" << serial_mesh.GetNE() << ")");
       if (rank == 0)
       {
-         std::cout << "[partition] using explicit partition file: "
-                   << partition_file << " (np=" << nprocs << ", ne="
-                   << serial_mesh.GetNE() << ")" << std::endl;
+         // Verify partition is actually distributed across all ranks (not
+         // accidentally all-zeros or all-one-rank).  Compute count of
+         // unique ranks and per-rank element count from the loaded array.
+         std::vector<int> rank_count(nprocs, 0);
+         for (int e = 0; e < custom_partitioning.Size(); e++)
+         {
+            const int r = custom_partitioning[e];
+            if (r >= 0 && r < nprocs) { rank_count[r]++; }
+         }
+         int n_used = 0, min_e = INT_MAX, max_e = 0;
+         for (int r = 0; r < nprocs; r++)
+         {
+            if (rank_count[r] > 0)
+            {
+               n_used++;
+               if (rank_count[r] < min_e) { min_e = rank_count[r]; }
+               if (rank_count[r] > max_e) { max_e = rank_count[r]; }
+            }
+         }
+         std::cout << "[partition] loaded from " << partition_file
+                   << " (np=" << nprocs << ", ne=" << custom_partitioning.Size()
+                   << ", ranks_used=" << n_used << "/" << nprocs
+                   << ", elems_per_rank=" << min_e << ".." << max_e
+                   << ", first_5=[" << custom_partitioning[0] << ","
+                   << custom_partitioning[1] << ","
+                   << custom_partitioning[2] << ","
+                   << custom_partitioning[3] << ","
+                   << custom_partitioning[4] << "])" << std::endl;
       }
-      pmesh_ptr.reset(new ParMesh(comm, serial_mesh, partitioning.GetData()));
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh,
+                                  custom_partitioning.GetData()));
+      // Verify ParMesh actually used our partition: each rank's local
+      // element count should equal rank_count[my_rank].
+      const int local_ne = pmesh_ptr->GetNE();
+      int expected_ne = 0;
+      for (int e = 0; e < custom_partitioning.Size(); e++)
+      {
+         if (custom_partitioning[e] == rank) { expected_ne++; }
+      }
+      int sum_local = 0, sum_expected = 0;
+      MPI_Allreduce(&local_ne, &sum_local, 1, MPI_INT, MPI_SUM, comm);
+      MPI_Allreduce(&expected_ne, &sum_expected, 1, MPI_INT, MPI_SUM, comm);
+      if (rank == 0)
+      {
+         std::cout << "[partition] ParMesh local NE: rank0_actual="
+                   << local_ne << " rank0_expected=" << expected_ne
+                   << "  global_actual=" << sum_local
+                   << " global_expected=" << sum_expected
+                   << "  honored=" << (local_ne == expected_ne ? "YES" : "NO")
+                   << std::endl;
+      }
    }
    else if (fault_locality_part)
    {
