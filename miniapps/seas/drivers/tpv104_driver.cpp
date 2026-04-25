@@ -40,6 +40,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstddef>
 #include <cstring>
 #include <fstream>
 #include <iomanip>
@@ -650,6 +651,56 @@ int main(int argc, char *argv[])
       InitializeFaultDOFs_TPV104(dof_data, num_fault_total, fault_coords);
       PopulateVwSideChannel_TPV104(V_w, fault_coords);
    }
+
+   // Resolve the rank that owns the hypocenter QP (closest local fault QP
+   // to (hypo_along_strike, -hypo_down_dip) in x/z), then tag that DOF
+   // with diag_print = true so the C-1 EVAL / C-1n NORMAL probes in
+   // dynamic/fault_face_flux.cpp emit one line per Evaluate call instead
+   // of flooding stderr from every QP.  Mirrors the TPV102 pattern at
+   // tpv102_driver.cpp:540-588.
+   int hypo_rank = 0;
+   int hypo_dof_local = -1;
+   {
+      real_t local_min_dist2 = std::numeric_limits<real_t>::max();
+      for (int i = 0; i < num_fault_total; i++)
+      {
+         real_t dx = fault_coords[i](0) - TPV104Params::hypo_along_strike;
+         real_t dz = std::abs(fault_coords[i](2)) - TPV104Params::hypo_down_dip;
+         real_t d2 = dx*dx + dz*dz;
+         if (d2 < local_min_dist2)
+         {
+            local_min_dist2 = d2;
+            hypo_dof_local = i;
+         }
+      }
+#ifdef MFEM_USE_MPI
+      struct MinDist { double d; int r; };
+      static_assert(offsetof(MinDist, d) == 0,
+                    "MinDist.d must be at offset 0 for MPI_DOUBLE_INT");
+      static_assert(offsetof(MinDist, r) == sizeof(double),
+                    "MinDist.r must follow d with no padding for MPI_DOUBLE_INT");
+      MinDist in{static_cast<double>(local_min_dist2), rank};
+      MinDist out{};
+      MPI_Allreduce(&in, &out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+      hypo_rank = out.r;
+#endif
+   }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // Only the rank that won the MINLOC sets diag_print = true on its
+   // closest hypocenter DOF; at most one DOF is flagged globally.
+   // Probe block: dynamic/fault_face_flux.cpp:259-303 (C-1 EVAL +
+   // C-1n NORMAL).  Single-rank stderr printf, no MPI calls — no
+   // deadlock at any rank count.
+   if (rank == hypo_rank && hypo_dof_local >= 0 && num_fault_total > 0)
+   {
+      dof_data[hypo_dof_local].diag_print = true;
+      const Vector &hpos = fault_coords[hypo_dof_local];
+      std::fprintf(stderr,
+         "[diag] rank %d tagging hypo DOF %d at (%.1f, %.1f, %.1f)\n",
+         rank, hypo_dof_local, hpos(0), hpos(1), hpos(2));
+   }
+#endif
 
    FaultFaceFlux fault_flux(TPV104Params::rho, TPV104Params::cp,
                             TPV104Params::cs);

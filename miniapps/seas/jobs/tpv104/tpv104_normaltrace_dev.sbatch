@@ -135,7 +135,7 @@ mkdir -p "${RESULT_DIR}"
 rm -f seas_tpv104_driver drivers/tpv104_driver.o \
       dynamic/tpv104_substep_iterator.o dynamic/friction_solver.o \
       dynamic/fault_face_flux.o
-make MFEM_CPPFLAGS="-DSEAS_DIAG_FAULT_FLUX" seas_tpv104_driver -j"${JOBS}" \
+make SEAS_EXTRA_CPPFLAGS="-DSEAS_DIAG_FAULT_FLUX" seas_tpv104_driver -j"${JOBS}" \
    || { echo "BUILD FAILED"; exit 1; }
 
 if [ ! -s tpv104/mesh/tpv104_200m.msh ]; then
