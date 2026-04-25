@@ -1268,6 +1268,64 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                      }
                   }
 
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-1s STRESS-ROT (interior-fault path): rotation-
+                  // pipeline trace at the hypocenter QP.  Records the
+                  // 9-component Q on each canonical side at four
+                  // pipeline stages so the C-1n NORMAL stress-channel
+                  // leak (debug doc 2026-04-25) can be back-traced:
+                  //   GLOB-IN:  bulk Q the wave op reads (global)
+                  //   LOC-IN:   after Tinv*Q (fault-local; Evaluate input)
+                  //   LOC-IMP:  after BuildImposedState (local)
+                  //   GLOB-OUT: after T*Q_imp (global; injected to bulk)
+                  // BASIS line dumps can_n/can_t1/can_t2 + sign-flip so
+                  // we can verify the rotation matrix per-QP.  Gated by
+                  // data.diag_print → only fires at the tagged hypo QP.
+                  if (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print)
+                  {
+                     std::fprintf(stderr,
+                        "[C-1s INT BASIS] rank=%d  "
+                        "can_n=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t1=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t2=(%+.4e,%+.4e,%+.4e)  "
+                        "sign_flipped=%d  elem1_on_plus=%d\n",
+                        g_seas_my_rank,
+                        can_n[0], can_n[1], can_n[2],
+                        can_t1[0], can_t1[1], can_t1[2],
+                        can_t2[0], can_t2[1], can_t2[2],
+                        qpd.sign_flipped ? 1 : 0,
+                        elem1_on_plus  ? 1 : 0);
+
+                     auto _c1s_print = [&](const char *tag, const real_t *q)
+                     {
+                        std::fprintf(stderr,
+                           "[C-1s INT %s] rank=%d  "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e  "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           tag, g_seas_my_rank,
+                           q[SXX], q[SYY], q[SZZ],
+                           q[SXY], q[SYZ], q[SXZ],
+                           q[VX],  q[VY],  q[VZ]);
+                     };
+
+                     // Self/Nbr → canonical ± mapping for global-frame Q.
+                     const real_t *Q_glob_p = elem1_on_plus ? Q_self : Q_nbr;
+                     const real_t *Q_glob_m = elem1_on_plus ? Q_nbr  : Q_self;
+
+                     _c1s_print("GLOB-IN+",  Q_glob_p);
+                     _c1s_print("GLOB-IN-",  Q_glob_m);
+                     _c1s_print("LOC-IN+",   Q_plus_local);
+                     _c1s_print("LOC-IN-",   Q_minus_local);
+                     _c1s_print("LOC-IMP+",  Q_imp_plus);
+                     _c1s_print("LOC-IMP-",  Q_imp_minus);
+                     _c1s_print("GLOB-OUT+", Q_imp_plus_g);
+                     _c1s_print("GLOB-OUT-", Q_imp_minus_g);
+                  }
+#endif
+
                   // v9.0.0 Pelties-9 per-side flux (plan §14.2).  Each
                   // side's bulk rhs gets its OWN imposed-state flux
                   // `A_{can_n} . Q_imp_side` in the global frame,
@@ -1776,6 +1834,57 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                         Q_imp_minus_g[c] += T_can(c, k) * Q_imp_minus[k];
                      }
                   }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-1s STRESS-ROT (shared-fault path): same trace as
+                  // the interior-fault block above, but tagged "SHR" so
+                  // we can tell whether the hypocenter QP sits on a
+                  // rank-internal interior fault face or a rank-boundary
+                  // shared fault face.  Both paths share the rotation
+                  // pipeline; only one fires per QP per macro step.
+                  if (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print)
+                  {
+                     std::fprintf(stderr,
+                        "[C-1s SHR BASIS] rank=%d  "
+                        "can_n=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t1=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t2=(%+.4e,%+.4e,%+.4e)  "
+                        "sign_flipped=%d  elem1_on_plus=%d\n",
+                        g_seas_my_rank,
+                        can_n[0], can_n[1], can_n[2],
+                        can_t1[0], can_t1[1], can_t1[2],
+                        can_t2[0], can_t2[1], can_t2[2],
+                        qpd.sign_flipped ? 1 : 0,
+                        elem1_on_plus  ? 1 : 0);
+
+                     auto _c1s_print = [&](const char *tag, const real_t *q)
+                     {
+                        std::fprintf(stderr,
+                           "[C-1s SHR %s] rank=%d  "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e  "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           tag, g_seas_my_rank,
+                           q[SXX], q[SYY], q[SZZ],
+                           q[SXY], q[SYZ], q[SXZ],
+                           q[VX],  q[VY],  q[VZ]);
+                     };
+
+                     const real_t *Q_glob_p = elem1_on_plus ? Q_self : Q_nbr;
+                     const real_t *Q_glob_m = elem1_on_plus ? Q_nbr  : Q_self;
+
+                     _c1s_print("GLOB-IN+",  Q_glob_p);
+                     _c1s_print("GLOB-IN-",  Q_glob_m);
+                     _c1s_print("LOC-IN+",   Q_plus_local);
+                     _c1s_print("LOC-IN-",   Q_minus_local);
+                     _c1s_print("LOC-IMP+",  Q_imp_plus);
+                     _c1s_print("LOC-IMP-",  Q_imp_minus);
+                     _c1s_print("GLOB-OUT+", Q_imp_plus_g);
+                     _c1s_print("GLOB-OUT-", Q_imp_minus_g);
+                  }
+#endif
 
                   // R-802 fix: use canonical normal `can_n` (bit-identical
                   // on both ranks, by construction) for the Godunov flux so

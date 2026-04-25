@@ -173,7 +173,7 @@ ibrun ./seas_tpv104_driver \
 JOB_ERR="${SBATCH_LOG_DIR}/tpv104_normaltrace_${SLURM_JOB_ID}.err"
 PROBE_LOG="${RESULT_DIR}/c1n_probe.log"
 if [ -f "${JOB_ERR}" ]; then
-   grep -E "C-1 EVAL|C-1n NORMAL|\[diag\]" "${JOB_ERR}" > "${PROBE_LOG}"
+   grep -E "C-1 EVAL|C-1n NORMAL|C-1s |\[diag\]" "${JOB_ERR}" > "${PROBE_LOG}"
    echo "Captured $(wc -l < "${PROBE_LOG}") probe lines into ${PROBE_LOG}"
 else
    echo "WARN: ${JOB_ERR} not found at post-run check"
