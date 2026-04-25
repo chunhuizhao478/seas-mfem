@@ -1,9 +1,36 @@
 # SeisSol vs MFEM — TPV104 Workflow Inconsistency Research Report
 
-**Date:** 2026-04-24 (revised — TPV104-specific sources, not TPV102)
+**Date:** 2026-04-24 (revised — reflects commits 4d2f9e8 + ffffc35: R7/R8 honest-dispatch driver + TPV102 pepper/BP5 support files)
 **Objective:** Audit the *actual* TPV104 MFEM implementation (the `tpv104_*.hpp`/`.cpp` family, `SlipLawSRWPsi`, `FrictionCoefficientStable`, `Tpv104SubStepIterator`, `tpv104_driver.cpp`) against the SeisSol FL=103 reference, and document every inconsistency with real code, file paths, and line numbers.
 
-**Note on scope**: An earlier version of this report audited TPV102 code as the "closest analogue". The user redirected the audit to TPV104 proper. The MFEM TPV104 implementation DOES exist — the files below are real, compiled, and tested.
+**Critical scope update (commit 4d2f9e8)**: The production TPV104 driver runs under **R7-001 option (b)**: Brent + one-shot ADER + macro-step ψ + macro-step nucleation. The `Tpv104SubStepIterator`, `SlipLawSRWPsi::SetProductionMode`, and `SolveSlipRateNewtonStable` library code **exists and passes unit tests** but is **NOT wired into the driver's time loop** because doing so requires editing `dynamic/wave_operator.inl` (extreme-care, [C2] no-touch). The CLI flags `--friction-solver`, `--fault-iterator`, `--fric-law` are parsed and validated but do **not** reach the dispatched code path — they are banner-only. The `--verify-dispatch` flag emits `[dispatch]` lines disclosing the *actual* code path per rank.
+
+This is surfaced explicitly in `drivers/tpv104_driver.cpp:104-108`:
+
+```cpp
+// Map the --friction-solver CLI name to FrictionSolver::Method (plan §4.10.X).
+//
+// R7-001/R7-005 note: on the current driver path this value is kept only
+// for future iterator wiring.  The production time loop runs Brent via
+// wave.AdvanceADER -> FaultFaceFlux::EvaluateADERTotal (see the honest
+```
+
+and again at `tpv104_driver.cpp:314-324`:
+
+```cpp
+   // R7-001/R7-003/R7-006: these flags are accepted so smoke tests and
+   // sbatch scripts from the plan can pass CLI values, but on the current
+   // driver path (one-shot wave.AdvanceADER) they have NO effect on the
+   // dispatched solver / iterator / friction law.  Runtime is:
+   //   - friction solver: Brent (hard-coded via EvaluateADERTotal)
+   //   - fault iterator : one-shot (Tpv104SubStepIterator not wired
+   //                      because doing so requires editing
+   //                      wave_operator.inl, on the extreme-care list)
+   //   - friction law   : slip-SRW via per-QP
+   //                      UpdateStateAnalyticSlipLawSRW (per-macro-step)
+```
+
+This changes the category tags in §2: several items that would be CONSISTENT under the iterator path become DIFFERENT-EXPECTED or OPEN under option (b). Each affected entry is re-tagged below with an **R7-001(b) note**.
 
 **MFEM TPV104 files audited** (under `/Users/chunhuizhao/projects/seas-mfem/miniapps/seas/`):
 
@@ -52,53 +79,77 @@ Per ADER macro-step, per fault cell:
 3. `postcomputeImposedStateFromNewStress` — accumulate `imposedState±` as `Σ_o timeWeights[o] · (normalStress, tractions)`.
 4. `resampleStateVar` — project Δψ onto a lower-order basis (post-hook).
 
-### MFEM TPV104 (`dynamic/tpv104_substep_iterator.cpp:191-493`)
+### MFEM TPV104 — PRODUCTION PATH (R7-001 option (b), `drivers/tpv104_driver.cpp:718-771`)
 
-Per ADER macro-step, per fault QP:
+The production time loop is a **macro-step-only** pipeline. Per ADER macro-step:
 
-1. Driver computes ADER predictor `I_± = ∫ Q_±(τ) dτ` (the same time-integrated bulk state SeisSol's ADER produces — see `drivers/tpv104_driver.cpp` use of `wave.AdvanceADER`).
-2. `Tpv104SubStepIterator::Advance` with `SetSubSteps(deltaT, timeWeights)`:
-   * For `o = 0 .. O-1`:
-     1. `ApplyNucleationIncremental_TPV104` — `tau2_nuc += dS · F(r) · Δτ₀` at sub-step endpoint (matches SeisSol's cumulative pattern).
-     2. Per QP: `ComputeStageState` on `Q̄ = I_±/dt_macro` (Newton/stable-μ friction solve).
-     3. Per QP: accumulate `slip1 += V1·dt_sub`, `slip2 += V2·dt_sub`.
-     4. Per QP: `UpdateStateAnalyticSlipLawSRW` — one analytic exponential relaxation step, per-QP `V_w[i]` + `a[i]`.
-     5. Per QP: `BuildImposedState` on `Q̄`.
-     6. Accumulate `I_imp_± += timeWeights[o] · dt_macro · Q_imp_±^{(o)}`.
-     7. On last sub-step: `WriteBackState` to DOFData.
+1. `ApplyNucleationIncremental_TPV104(dof_data, fault_coords, t + dt_step, dt_step)` — ONE cumulative nucleation increment per macro-step (not per sub-step). `tpv104_driver.cpp:726-730`.
+2. `wave.AdvanceADER(Q, dt_step, ader_order, Q_new)` — one-shot ADER predictor-corrector. Internally dispatches to `FaultFaceFlux::EvaluateADERTotal` which hard-codes `FrictionSolver::Method::Brent` and calls `Evaluate` ONCE on `Q̄ = I_±/dt_macro`. Writes V1/V2/slip_rate/tau*_corr/sigma_n_corr back onto DOFData. `tpv104_driver.cpp:732-739`.
+3. Per-QP loop: `UpdateStateAnalyticSlipLawSRW` ONCE with `V = dof_data[i].slip_rate` (ADER-macro-averaged V), `dt = dt_step`; accumulate `slip1 += V1·dt_step`, `slip2 += V2·dt_step`. `tpv104_driver.cpp:756-771`.
 
-**Key architectural differences** that drive the inconsistencies below:
+Explicit R7-007 disclosure at `tpv104_driver.cpp:746-755`:
 
-1. SeisSol re-evaluates `precomputeStressFromQInterpolated` at **every sub-step** `o` using distinct `qInterpolated[o]`; MFEM evaluates `ComputeStageState` at every sub-step but feeds the same `Q̄ = I_±/dt_macro` each time (see I-05 below).
-2. SeisSol's friction residual runs inside an outer `numberStateVariableUpdates = 2` loop that re-updates ψ between Newton iterations (Kaneko 2008 averaging); MFEM's solver is one Newton-only call followed by one analytic ψ step.
-3. Both codes now **cumulatively** inject nucleation per sub-step (TPV104 matches SeisSol's pattern — this closed a bug in TPV102's overwrite-based path).
-4. Both codes use the same analytic ψ-step formula `ψ_ss + (ψ_0 - ψ_ss) · exp(-V·dt/L)` (MFEM byte-matches the SeisSol reference to 1e-13 via T_SRW_5).
+```cpp
+      // R7-007 disclosure: plan §3.12 mandates PER-SUB-STEP ψ integration
+      // ("follow exactly SeisSol did").  On this driver path ψ is
+      // integrated ONCE per macro-step with V = dof_data[i].slip_rate
+      // (ADER-averaged V over the whole dt_step).  The per-sub-step
+      // cadence requires wiring Tpv104SubStepIterator into the time
+      // loop (blocked by R7-001 option a), which in turn requires
+      // exposing per-sub-step I± from wave_operator.inl (extreme-care
+      // no-touch).  Under a rapidly-changing V the macro-step ψ deviates
+      // from the per-sub-step result by O(dt_macro²); Phase-3 probe 2
+      // against SeisSol will quantify the gap.
+```
+
+### MFEM TPV104 — LIBRARY PATH (shipped, not wired) (`dynamic/tpv104_substep_iterator.cpp:191-493`)
+
+`Tpv104SubStepIterator::Advance` implements the per-sub-step pipeline that *would* run if the extreme-care wiring were permitted. It is linked, unit-tested (`test_tpv104_substep_iterator.cpp`), and invoked by probe-format tests only. Per sub-step it does:
+
+1. `ApplyNucleationIncremental_TPV104` at sub-step endpoint (`tpv104_substep_iterator.cpp:295-296`).
+2. Per QP: `ComputeStageState` on `Q̄ = I_±/dt_macro` (reused every sub-step — see I-05).
+3. Per QP: accumulate `slip1 += V1·dt_sub`, `slip2 += V2·dt_sub`.
+4. Per QP: `UpdateStateAnalyticSlipLawSRW` with per-QP `V_w[i]` + `a[i]`.
+5. Per QP: `BuildImposedState` on `Q̄`.
+6. Accumulate `I_imp_± += timeWeights[o] · dt_macro · Q_imp_±^{(o)}`.
+7. On last sub-step: `WriteBackState` to DOFData.
+
+### Key architectural differences (driver-path = production)
+
+1. **Nucleation cadence**: SeisSol adds `smoothStepIncrement` per sub-step of the ADER macro-step; MFEM R7-001(b) driver adds ONCE per macro-step (`tpv104_driver.cpp:728-730`). For `dt_macro ≲ dt_ref_sub × O` the cumulative totals agree at end of ramp, but the per-probe snapshots differ at sub-step granularity.
+2. **ψ cadence**: SeisSol runs `updateStateVariable` inside the per-sub-step friction loop (analytic exponential step per sub-step, with `numberStateVariableUpdates = 2` outer iterations using Kaneko averaging); MFEM R7-001(b) calls `UpdateStateAnalyticSlipLawSRW` ONCE per macro-step with the ADER-averaged V.
+3. **Friction-solver dispatch**: SeisSol SIMD Newton (ψ re-updated inside the outer 2×iteration Kaneko loop); MFEM R7-001(b) dispatches **Brent** via `FaultFaceFlux::EvaluateADERTotal` → `Evaluate` → `FrictionSolver::Solve(..., Method::Brent)` (the CLI `--friction-solver newton-stable` is IGNORED on this path).
+4. **Trial-traction cadence**: SeisSol uses `qInterpolated[o]` per sub-step; MFEM's `EvaluateADERTotal` uses `Q̄ = I_±/dt_macro` once.
+5. **Analytic ψ formula**: `ψ_ss + (ψ_0 - ψ_ss) · exp(-V·dt/L)` byte-matches SeisSol when called with matched (V, ψ_0, dt) inputs — MFEM's `UpdateStateAnalyticSlipLawSRW` passes T_SRW_5 at 1e-13 relative.
 
 ---
 
 ## 2. Inconsistency inventory
 
-| # | Title | Category |
-|---|-------|----------|
-| I-01 | Trial traction precompute — same algorithm | CONSISTENT |
-| I-02 | Friction coefficient stable asinh-exp | CONSISTENT |
-| I-03 | State-evolution ODE + analytic integrator (FVW) | CONSISTENT |
-| I-04 | Nucleation cumulative accumulator + SmoothStepIncrement | CONSISTENT |
-| I-05 | Trial traction sub-step cadence — Q̄ reused vs qInterpolated[o] | CONSISTENT-WITH-DEVIATION |
-| I-06 | Friction solver outer loop — 2× Kaneko vs single call | DIFFERENT-EXPECTED |
-| I-07 | Slip-rate decomposition — parallel to total traction | CONSISTENT |
-| I-08 | Corrected traction (trial scale) to Riemann | CONSISTENT |
-| I-09 | Imposed-state time-weighted accumulation | CONSISTENT |
-| I-10 | Pre-stress storage — side-channel (both) | CONSISTENT |
-| I-11 | Tangent-frame convention (t1/t2) | DIFFERENT-REQUIRES-MAPPING |
-| I-12 | Normal-stress sign convention | DIFFERENT-REQUIRES-MAPPING |
-| I-13 | Initial ψ inversion | CONSISTENT |
-| I-14 | `f_LV` `max(0, ...)` clamp sign | OPEN (plan typo in §4.2.1) |
-| I-15 | Default solver — Newton-stable (MFEM) vs Newton-SIMD (SeisSol) | CONSISTENT |
-| I-16 | State-variable resampling (postHook) | OPEN |
-| I-17 | MFEM `Rate_SRW` ignores `Σ deltaT == dt_macro` of friction residual | CONSISTENT |
-| I-18 | Parameter values | CONSISTENT |
-| I-19 | Mesh / ADER order / station coordinates | DIFFERENT-EXPECTED |
+**Category column reflects the production R7-001 option (b) driver path.** The parenthesised "library" category is what the tag *would* be if `Tpv104SubStepIterator` were wired in — provided for future Phase 2 scope.
+
+| # | Title | Category (R7-001(b) driver) | Category (library if wired) |
+|---|-------|----------------------------|------------------------------|
+| I-01 | Trial traction precompute | CONSISTENT | CONSISTENT |
+| I-02 | Friction coefficient stable asinh-exp (library only — NOT on driver path) | DIFFERENT-EXPECTED | CONSISTENT |
+| I-03 | State-evolution ODE + analytic integrator (FVW) | CONSISTENT | CONSISTENT |
+| I-04 | Nucleation cumulative accumulator cadence | DIFFERENT-EXPECTED (macro-step) | CONSISTENT (per-sub-step) |
+| I-05 | Trial traction sub-step cadence — Q̄ reused vs qInterpolated[o] | CONSISTENT-WITH-DEVIATION | CONSISTENT-WITH-DEVIATION |
+| I-06 | Friction solver — Brent (driver) vs Newton (library) vs Newton-SIMD (SeisSol) | DIFFERENT-EXPECTED | DIFFERENT-EXPECTED |
+| I-07 | Slip-rate decomposition — parallel to total traction | CONSISTENT | CONSISTENT |
+| I-08 | Corrected traction (trial scale) to Riemann | CONSISTENT | CONSISTENT |
+| I-09 | Imposed-state time-weighted accumulation | DIFFERENT-EXPECTED (single-shot) | CONSISTENT (O-weighted sum) |
+| I-10 | Pre-stress storage — side-channel (both) | CONSISTENT | CONSISTENT |
+| I-11 | Tangent-frame convention (t1/t2) | DIFFERENT-REQUIRES-MAPPING | DIFFERENT-REQUIRES-MAPPING |
+| I-12 | Normal-stress sign convention | DIFFERENT-REQUIRES-MAPPING | DIFFERENT-REQUIRES-MAPPING |
+| I-13 | Initial ψ inversion | CONSISTENT | CONSISTENT |
+| I-14 | `f_LV` `max(0, ...)` clamp sign | OPEN | OPEN |
+| I-15 | Default solver dispatch — Brent (driver) vs Newton-stable (library) vs Newton-SIMD (SeisSol) | DIFFERENT-EXPECTED | CONSISTENT |
+| I-16 | State-variable resampling (postHook) | OPEN | OPEN |
+| I-17 | ψ integration cadence — macro-step vs per-sub-step | DIFFERENT-EXPECTED | CONSISTENT |
+| I-18 | Parameter values | CONSISTENT | CONSISTENT |
+| I-19 | Mesh / ADER order / station coordinates | DIFFERENT-EXPECTED | DIFFERENT-EXPECTED |
+| I-20 | CLI flags parsed but not routed (R7-001(b)) | DIFFERENT-EXPECTED (banner-only) | N/A |
 
 ---
 
@@ -150,7 +201,10 @@ with `TPV104Params::eta_s = Zs / 2.0` (`config/tpv104_params.hpp:49`). For homog
 
 ---
 
-### I-02 Friction coefficient stable asinh-exp [CONSISTENT]
+### I-02 Friction coefficient stable asinh-exp [DIFFERENT-EXPECTED on driver, CONSISTENT in library]
+
+**R7-001(b) note**: `FrictionCoefficientStable` is exercised by `SolveSlipRateNewtonStable` and the `Tpv104SubStepIterator` — neither is on the production driver path. The production path calls `FaultFaceFlux::EvaluateADERTotal` → `Evaluate` → `friction/dieterich_ruina.hpp::FrictionCoefficientPsi` (the legacy MFEM evaluator with the `ψ/a > 700` asymptotic branch). For TPV104's envelope `ψ/a ≤ 80`, both evaluators give ULP-equivalent results.
+
 
 **What SeisSol does** — `DynamicRupture/FrictionLaws/RateAndStateCommon.h:60-87`:
 
@@ -340,7 +394,10 @@ inline real_t LogSinhStable(real_t x, real_t c)
 
 ---
 
-### I-04 Nucleation cumulative accumulator + SmoothStepIncrement [CONSISTENT]
+### I-04 Nucleation cumulative accumulator + SmoothStepIncrement [DIFFERENT-EXPECTED on driver, CONSISTENT in library]
+
+**R7-001(b) note**: The production driver calls `ApplyNucleationIncremental_TPV104(..., t + dt_step, dt_step)` ONCE per macro-step at `tpv104_driver.cpp:726-730`, not per sub-step. SeisSol calls `adjustInitialStress` inside the per-sub-step loop of `BaseFrictionLaw::evaluate`. The cumulative smoothStep increment telescopes to the same full-ramp value at the end regardless of cadence, so end-state `tau2_nuc = Δτ₀·F(r)` matches; transient per-ADER-stage snapshots differ at sub-step granularity. The library iterator `tpv104_substep_iterator.cpp:295-296` does call per-sub-step.
+
 
 **What SeisSol does** — `Numerical/GaussianNucleationFunction.h:22-39`:
 
@@ -661,7 +718,10 @@ Same trial-scale — no pre-stress/nucleation baseline re-added — so `tau_corr
 
 ---
 
-### I-09 Imposed-state time-weighted accumulation [CONSISTENT]
+### I-09 Imposed-state time-weighted accumulation [DIFFERENT-EXPECTED on driver, CONSISTENT in library]
+
+**R7-001(b) note**: The production driver runs `wave.AdvanceADER` → `FaultFaceFlux::EvaluateADERTotal` → `EvaluateTotal` on `Q̄ = I_±/dt_macro` ONCE per macro-step. The imposed state is a single `(1.0) · dt_macro · Q_imp_±` — equivalent to the library path only in the `O = 1` single-sub-step limit with `time_weights = {1.0}`. For SeisSol's genuine O-sub-step `Σ_o timeWeights[o] · Q_imp_±^{(o)}` accumulation, the MFEM production matches SeisSol to O(dt_macro²) by the Simpson-rule / Lipschitz-smooth-residual argument — same O(dt²) that TPV102's `EvaluateADER` (§3.8 of the debug plan) was justified under.
+
 
 **What SeisSol does** — `FrictionSolverCommon.h:329-362` accumulates across `misc::TimeSteps` sub-steps using `timeWeights[o]` (see §1 overview).
 
@@ -930,7 +990,17 @@ i.e. `f_LV = max(0, f₀ - (b - a)·ln(V/V₀))`. **Note the minus sign** — fo
 
 ---
 
-### I-15 Default solver — Newton-stable (MFEM) vs Newton-SIMD (SeisSol) [CONSISTENT]
+### I-15 Default solver dispatch — Brent (driver) vs Newton-stable (library) vs Newton-SIMD (SeisSol) [DIFFERENT-EXPECTED on driver, CONSISTENT in library]
+
+**R7-001(b) note**: The default under the production driver path is **Brent in log10(V) space** via `friction/dieterich_ruina.hpp::SolveSlipRatePsi`, not `SolveSlipRateNewtonStable`. This is hard-coded by `FaultFaceFlux::EvaluateADERTotal` calling `FrictionSolver::Solve(..., FrictionSolver::Method::Brent)`. The `MapSolver` function + its `FrictionSolver::Method` enum + `kTpv104AlmostZero` Newton code are live but reachable only through the library `Tpv104SubStepIterator`. `drivers/tpv104_driver.cpp:406-414`:
+
+```cpp
+   const FrictionSolver::Method method = MapSolver(friction_solver);
+   (void)method;  // R7-001 option (b): not routed through the time loop.
+```
+
+Both Brent and SeisSol's Newton converge on the same root of a Lipschitz-smooth residual to within `tol = 1e-8`; Probe 4 (V_abs) is expected to agree at 1e-8 relative. The `--verify-dispatch` CLI flag emits `[dispatch] rank=* solver=brent` lines per rank, making the actual dispatch observable in Frontera logs.
+
 
 **What SeisSol does** — `RateAndState.h:299-340` runs a SIMD loop of Newton iterates over `NumPaddedPoints` QPs simultaneously:
 
@@ -1017,21 +1087,47 @@ with `kTpv104AlmostZero = 1e-45` (line 47), `max_iter = 60`, `tol = 1e-8`.
 
 ---
 
-### I-17 MFEM `Rate_SRW` ignores `Σ deltaT == dt_macro` of friction residual [CONSISTENT]
+### I-17 ψ integration cadence — macro-step vs per-sub-step [DIFFERENT-EXPECTED on driver, CONSISTENT in library]
 
-**What SeisSol does** — no such scheme; friction residual is evaluated per-sub-step.
+**What SeisSol does** — ψ is updated inside the per-sub-step friction loop at `BaseFrictionLaw.h:116-121` via `updateFrictionAndSlip` → `updateStateVariableIterative` (`RateAndState.h:151-195`) with `numberStateVariableUpdates = 2` Kaneko outer iterations. Each outer iteration runs `updateStateVariable` (analytic exponential step) followed by Newton on V using the averaged prior V guess.
 
-**What MFEM does** — `dynamic/tpv104_substep_iterator.cpp:245-261`:
+**What MFEM R7-001(b) driver does** — `drivers/tpv104_driver.cpp:756-771`:
+
+```cpp
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         dof_data[i].psi = UpdateStateAnalyticSlipLawSRW(
+            psi_n[i],
+            dof_data[i].slip_rate,
+            dof_data[i].Dc,
+            dt_step,
+            V_w[i],
+            dof_data[i].a,
+            TPV104Params::b,
+            TPV104Params::V0,
+            TPV104Params::f0,
+            TPV104Params::f_w);
+         dof_data[i].slip1 += dof_data[i].V1 * dt_step;
+         dof_data[i].slip2 += dof_data[i].V2 * dt_step;
+      }
+```
+
+ONE analytic step per macro-step with `V = dof_data[i].slip_rate` (the ADER-averaged V over the whole `dt_step`, as written by `EvaluateTotal`'s `WriteBackState`).
+
+**Implication** (explicitly disclosed by the driver at `tpv104_driver.cpp:746-755`):
+
+* End-of-macro-step ψ agrees with SeisSol at equilibrium because `UpdateStateAnalyticSlipLawSRW` is exact for constant V.
+* During rapidly-changing V (nucleation ramp-up), ψ deviates from the per-sub-step result by O(dt_macro²).
+* Phase 3 probe 2 (ψ in→out) will quantify the gap. Probe 2 must accept the O(dt_macro²) drift in the R7-001(b) comparison band — tighter bounds only apply if Phase 4 wires the iterator in.
+
+### I-17b (library-only) `Σ deltaT == dt_macro` defensive check
+
+`dynamic/tpv104_substep_iterator.cpp:245-261` enforces that configured sub-step sizes sum to `dt_macro`:
 
 ```cpp
    const real_t dtsum = std::accumulate(deltaT_.begin(), deltaT_.end(),
                                         static_cast<real_t>(0));
-   const real_t rel = std::abs(dtsum - dt_macro) / std::max(dt_macro,
-                                                            1e-300);
-   const int    O_size = static_cast<int>(deltaT_.size());
-   const real_t sum_tol = std::max<real_t>(1e-12,
-                                           static_cast<real_t>(10.0) * O_size
-                                             * std::numeric_limits<real_t>::epsilon());
+   // ...
    if (rel > sum_tol)
    {
       throw std::runtime_error(
@@ -1043,9 +1139,7 @@ with `kTpv104AlmostZero = 1e-45` (line 47), `max_iter = 60`, `tol = 1e-8`.
    }
 ```
 
-MFEM enforces that configured sub-step sizes sum to `dt_macro` before running — otherwise the sub-step quadrature and the ADER predictor disagree on the macro-step duration.
-
-**Implication**: Defensive programming; SeisSol doesn't need this check because its sub-step cadence is internal and fixed by `misc::TimeSteps`. **No action.**
+Defensive programming; SeisSol's cadence is internal and fixed by `misc::TimeSteps`. CONSISTENT behaviour; library code only.
 
 ---
 
@@ -1136,25 +1230,69 @@ matching SeisSol's nine canonical stations.
 
 ---
 
+### I-20 CLI flags parsed but not routed [DIFFERENT-EXPECTED]
+
+**What SeisSol does** — N/A (SeisSol has no equivalent CLI toggle; friction-law class is picked by FL-number in the parameter file).
+
+**What MFEM does** — `drivers/tpv104_driver.cpp:314-325` accepts `--friction-solver`, `--fault-iterator`, `--fric-law` but they do NOT reach the dispatched code path under R7-001(b):
+
+```cpp
+   // R7-001/R7-003/R7-006: these flags are accepted so smoke tests and
+   // sbatch scripts from the plan can pass CLI values, but on the current
+   // driver path (one-shot wave.AdvanceADER) they have NO effect on the
+   // dispatched solver / iterator / friction law.  Runtime is:
+   //   - friction solver: Brent (hard-coded via EvaluateADERTotal)
+   //   - fault iterator : one-shot (Tpv104SubStepIterator not wired
+   //                      because doing so requires editing
+   //                      wave_operator.inl, on the extreme-care list)
+   //   - friction law   : slip-SRW via per-QP
+   //                      UpdateStateAnalyticSlipLawSRW (per-macro-step)
+```
+
+The `MapSolver` call is still invoked and validated — unknown values abort eagerly via `MFEM_ABORT` — so the CLI is syntactically live, just not routed. The **`--verify-dispatch` flag** (line 302) emits one line per rank describing the actually-dispatched solver/iterator/friction law so Frontera logs can be grepped to confirm.
+
+**Implication**: A user or sbatch script passing `--friction-solver newton-stable` silently runs Brent instead. The banner + the `--verify-dispatch [dispatch]` line are the only protection against this being mistaken for a silent mismatch. Phase 3 probe-diff must read the `[dispatch]` lines from the MFEM log and propagate them into the diff report.
+
+**Action**: Phase 3 probe-diff reads `[dispatch]` lines; any sbatch script that passes a non-Brent solver while `[dispatch]` reports `solver=brent` must warn in the report. When `Tpv104SubStepIterator` is eventually wired into the driver (requires editing `wave_operator.inl` — currently [C2] no-touch), `MapSolver` + the `method` value become live and this entry becomes CONSISTENT.
+
+---
+
 ## 4. Summary
+
+### 4.1 Production R7-001(b) driver path (what actually runs on Frontera today)
 
 | Category | Count | Entries |
 |----------|-------|---------|
-| **CONSISTENT** | 13 | I-01, I-02, I-03, I-04, I-07, I-08, I-09, I-10, I-13, I-15, I-17, I-18 (+ I-14 assuming SeisSol is ground truth) |
-| **CONSISTENT-WITH-DEVIATION** | 1 | I-05 (per-sub-step cadence — probe-diff masks) |
-| **DIFFERENT-EXPECTED** | 2 | I-06 (Kaneko averaging), I-19 (mesh/order/dt) |
+| **CONSISTENT** | 8 | I-01, I-03, I-07, I-08, I-10, I-13, I-18 (+ I-14 assuming SeisSol is ground truth) |
+| **CONSISTENT-WITH-DEVIATION** | 1 | I-05 (per-sub-step cadence masking) |
+| **DIFFERENT-EXPECTED** | 7 | I-02 (stable-μ unused), I-04 (macro-step nucleation), I-06 (Brent vs Newton-SIMD), I-09 (single-shot imposed state), I-15 (Brent dispatch), I-17 (macro-step ψ), I-19 (mesh/order/dt), I-20 (CLI not routed) |
 | **DIFFERENT-REQUIRES-MAPPING** | 2 | I-11 (t1/t2 swap), I-12 (σ_n sign) |
 | **OPEN** | 2 | I-14 (plan typo vs SCEC PDF), I-16 (resample — monitor probe 2) |
 
-**Headline: the MFEM TPV104 pipeline is now algorithmically consistent with SeisSol FL=103** on all 13 CONSISTENT items, closing the gaps that TPV102 had (overwrite-vs-cumulative nucleation, aging-law-vs-FVW state evolution, 700-threshold-vs-stable-asinh friction μ, single-shot-vs-per-sub-step iteration).
+### 4.2 If/when `Tpv104SubStepIterator` is wired in (future Phase 2+)
 
-Phase 3 probe-diff must:
-1. Mask/coarsen the trial-traction probe (I-05).
-2. Swap MFEM tau1/tau2 and V1/V2 against SeisSol traction1/traction2 and slipRate1/slipRate2 (I-11).
-3. Flip sign on MFEM σ_n channels (I-12).
-4. Interpolate both codes' traces onto a common time grid (I-19).
-5. Flag and report any probe-2 drift that could indicate the resample gap (I-16).
-6. Confirm sign of `f_LV` matches SCEC PDF (I-14).
+| Category | Count | Entries |
+|----------|-------|---------|
+| **CONSISTENT** | 13 | I-01, I-02, I-03, I-04, I-07, I-08, I-09, I-10, I-13, I-15, I-17, I-18 (+ I-14) |
+| **CONSISTENT-WITH-DEVIATION** | 1 | I-05 |
+| **DIFFERENT-EXPECTED** | 2 | I-06, I-19 |
+| **DIFFERENT-REQUIRES-MAPPING** | 2 | I-11, I-12 |
+| **OPEN** | 2 | I-14, I-16 |
+| **N/A** | 1 | I-20 |
+
+**Headline**: The MFEM TPV104 **library** code (`SlipLawSRWPsi`, `FrictionCoefficientStable`, `Tpv104SubStepIterator`, `SolveSlipRateNewtonStable`, `ApplyNucleationIncremental_TPV104`) is algorithmically consistent with SeisSol FL=103 on 13/20 items. However, the **production driver** dispatches only to Brent + `EvaluateADERTotal` + macro-step ψ + macro-step nucleation — a deliberately conservative R7-001 option (b) because the per-sub-step wiring requires editing `dynamic/wave_operator.inl` (extreme-care [C2] no-touch list). Under R7-001(b) the consistency drops to 8 CONSISTENT + 7 DIFFERENT-EXPECTED items.
+
+Phase 3 probe-diff MUST:
+1. Read `[dispatch]` lines from MFEM logs and propagate to the diff report (I-20).
+2. Accept O(dt_macro²) drift on probe 2 (ψ) because MFEM updates ψ once per macro-step, not per sub-step (I-17).
+3. Accept O(dt_macro) drift on probe 1 (nucleation amplitude snapshot) because MFEM injects once per macro-step (I-04).
+4. Accept O(dt_macro²) drift on probe 5 (imposed state) because MFEM runs `EvaluateADERTotal` once on Q̄ (I-09).
+5. Mask/coarsen the trial-traction probe (I-05).
+6. Swap MFEM tau1/tau2 and V1/V2 against SeisSol traction1/traction2 and slipRate1/slipRate2 (I-11).
+7. Flip sign on MFEM σ_n channels (I-12).
+8. Interpolate both codes' traces onto a common time grid (I-19).
+9. Monitor probe 2 drift for evidence of the resample gap (I-16).
+10. Confirm sign of `f_LV` matches SCEC PDF (I-14) — if SCEC PDF is ground truth and differs, BOTH codes need the flip.
 
 ---
 
@@ -1191,6 +1329,12 @@ Phase 3 probe-diff must:
 
 ---
 
-**Report generated**: 2026-04-24 (revised; TPV104-specific, not TPV102).
+**Report generated**: 2026-04-24 (revised to reflect commits 4d2f9e8 + ffffc35).
 **Audit method**: Verbatim code inspection of every cited file+line range on both sides.
-**Next step**: Phase 3 execution; pass/fail per the probe-diff thresholds above. No Phase 2 coding changes required — the gap list is down to mapping + masking in the comparator plus two OPEN items (I-14, I-16) to be confirmed by probe-2 outcome.
+**Commits audited**:
+* `4d2f9e8` — "TPV104 miniapp: R7/R8 honest-dispatch driver + full Phase-2 scope" — adds the TPV104 driver, library, sbatch scripts, probe-diff tooling, 264 unit tests; explicitly discloses R7-001 option (b) dispatch (banner + `--verify-dispatch` + docstrings).
+* `ffffc35` — "TPV102 pepper + BP5 in-progress scope: debug dumps, build support" — Makefile + `FaultFaceFlux::EvaluateTotalFaceAveraged` infrastructure; the TPV104 miniapp builds against this commit's Makefile changes.
+
+**Next step**: Phase 3 execution on Frontera (requires user approval per `feedback_frontera_approval.md`).
+* **R7-001(b) path**: 8/20 CONSISTENT, 7/20 DIFFERENT-EXPECTED items accepted as O(dt²) or architectural baseline; probe thresholds must be widened accordingly (see §4.1).
+* **Phase 2+ scope** (future): wire `Tpv104SubStepIterator` into the time loop by editing `dynamic/wave_operator.inl` (requires lifting the extreme-care [C2] no-touch rule via a separate approval); this would collapse I-02, I-04, I-09, I-15, I-17, I-20 to CONSISTENT or N/A.
