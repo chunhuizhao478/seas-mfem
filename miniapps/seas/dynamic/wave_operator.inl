@@ -2130,6 +2130,32 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 
                   const bool elem1_on_plus = !qpd.sign_flipped;
 
+#ifdef SEAS_DIAG_TPV104_FAULT_BASIS
+                  // D1 instrumentation (TPV104 σ_n perturbation diagnostic).
+                  // For each fault QP, print sign_flipped and the resulting
+                  // canonical basis once.  A planar TPV104 fault SHOULD have
+                  // sign_flipped uniform across all QPs.  Bimodal distribution
+                  // = the per-QP rotation-asymmetry bug we suspect.  Build with
+                  //   make CXXFLAGS_USER='-DSEAS_DIAG_TPV104_FAULT_BASIS' ...
+                  static std::set<int> seen_dofs;
+                  if (seen_dofs.insert(dof_idx).second)
+                  {
+                     std::fprintf(stderr,
+                        "[diag-flip] dof=%d sf=%d "
+                        "raw_n=(%+.6f,%+.6f,%+.6f) "
+                        "raw_t1=(%+.6f,%+.6f,%+.6f) "
+                        "raw_t2=(%+.6f,%+.6f,%+.6f) "
+                        "can_n=(%+.6f,%+.6f,%+.6f) "
+                        "elem1_on_plus=%d\n",
+                        dof_idx, qpd.sign_flipped ? 1 : 0,
+                        qpd.normal[0], qpd.normal[1], qpd.normal[2],
+                        qpd.tangent1[0], qpd.tangent1[1], qpd.tangent1[2],
+                        qpd.tangent2[0], qpd.tangent2[1], qpd.tangent2[2],
+                        can_n[0], can_n[1], can_n[2],
+                        elem1_on_plus ? 1 : 0);
+                  }
+#endif
+
                   real_t I_self_can[NUM_STATE], I_nbr_can[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {

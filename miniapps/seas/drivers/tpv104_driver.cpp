@@ -628,6 +628,20 @@ int main(int argc, char *argv[])
                 << ", shared: " << num_shared_fault << ")\n";
    }
 
+#ifdef SEAS_DIAG_TPV104_FAULT_BASIS
+   // D1 instrumentation companion: dump fault QP coordinates indexed
+   // by dof_idx (= the same index keyed by [diag-flip] in
+   // wave_operator.inl).  Join via:
+   //   awk '/diag-coords/{c[$2]=$0} /diag-flip/{f[$2]=$0} END{for(k in f)print f[k]" "c[k]}'
+   for (int i = 0; i < num_fault_total; ++i)
+   {
+      const Vector &xqp = fault_coords[i];
+      std::fprintf(stderr,
+         "[diag-coords] dof=%d (x,y,z)=(%+9.1f,%+9.1f,%+9.1f) rank=%d\n",
+         i, xqp(0), xqp(1), xqp(2), rank);
+   }
+#endif
+
    std::vector<DOFData> dof_data;
    std::vector<real_t>  V_w;
    if (num_fault_total > 0)
