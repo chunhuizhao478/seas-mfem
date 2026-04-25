@@ -751,17 +751,31 @@ int main(int argc, char *argv[])
                diag_elem_minus = elem1_on_plus ? e2 : e1;
 
                // Find the local DOF index on each tet that is closest
-               // to the hypocenter QP physical position.  ndof_per_el =
-               // (order+1)(order+2)(order+3)/6 for tet; for order=1
-               // there are 4 DOFs per element, one at each vertex.
-               auto closest_dof_idx = [&](int e) -> int
+               // to the hypocenter QP physical position AND lies ON
+               // THE FAULT FACE (|y - hpos.y| < tol).  Without the
+               // on-face restriction, the apex DOF (y ≈ ±141 m for a
+               // 200 m mesh) can win the closest-by-Euclidean-distance
+               // contest when hpos is near a fault-face edge, putting
+               // C-2A at qualitatively different positions on E+ vs
+               // E- and producing a spurious asymmetry signature.
+               // Returns the on-face DOF closest to hpos in (x,z); if
+               // no DOF is within tol of hpos.y, falls back to the
+               // closest by full distance and reports the y offset.
+               auto closest_face_dof_idx = [&](int e,
+                                               real_t &out_y_off) -> int
                {
                   const FiniteElement *fe = wave.GetFESpace().GetFE(e);
                   ElementTransformation *Tr =
                      wave.GetFESpace().GetElementTransformation(e);
                   const IntegrationRule &nodes = fe->GetNodes();
-                  int best = -1;
-                  real_t best_d2 = std::numeric_limits<real_t>::max();
+                  const real_t y_tol = 1e-3;  // 1 mm — much smaller than 200 m mesh
+                  int best_on_face = -1;
+                  real_t best_d2_on_face =
+                     std::numeric_limits<real_t>::max();
+                  int best_any = -1;
+                  real_t best_d2_any =
+                     std::numeric_limits<real_t>::max();
+                  real_t best_y_any = 0.0;
                   for (int k = 0; k < nodes.GetNPoints(); k++)
                   {
                      Vector phys(3);
@@ -769,13 +783,55 @@ int main(int argc, char *argv[])
                      const real_t dx = phys(0) - hpos(0);
                      const real_t dy = phys(1) - hpos(1);
                      const real_t dz = phys(2) - hpos(2);
-                     const real_t d2 = dx*dx + dy*dy + dz*dz;
-                     if (d2 < best_d2) { best_d2 = d2; best = k; }
+                     const real_t d2_full = dx*dx + dy*dy + dz*dz;
+                     const real_t d2_xz   = dx*dx + dz*dz;
+                     if (std::abs(dy) < y_tol && d2_xz < best_d2_on_face)
+                     {
+                        best_d2_on_face = d2_xz; best_on_face = k;
+                     }
+                     if (d2_full < best_d2_any)
+                     {
+                        best_d2_any = d2_full; best_any = k;
+                        best_y_any = phys(1);
+                     }
                   }
-                  return best;
+                  if (best_on_face >= 0)
+                  {
+                     out_y_off = 0.0;
+                     return best_on_face;
+                  }
+                  out_y_off = best_y_any - hpos(1);
+                  return best_any;
                };
-               diag_face_dof_plus  = closest_dof_idx(diag_elem_plus);
-               diag_face_dof_minus = closest_dof_idx(diag_elem_minus);
+               real_t y_off_p = 0.0, y_off_m = 0.0;
+               diag_face_dof_plus  =
+                  closest_face_dof_idx(diag_elem_plus,  y_off_p);
+               diag_face_dof_minus =
+                  closest_face_dof_idx(diag_elem_minus, y_off_m);
+
+               // Print physical coordinates of the two diag DOFs so
+               // the C-2A/B/C analysis can verify they are at mirror
+               // positions before drawing conclusions about bulk
+               // asymmetry.
+               auto dof_phys = [&](int e, int k) -> Vector
+               {
+                  const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+                  ElementTransformation *Tr =
+                     wave.GetFESpace().GetElementTransformation(e);
+                  Vector phys(3);
+                  Tr->Transform(fe->GetNodes().IntPoint(k), phys);
+                  return phys;
+               };
+               Vector p_plus  = dof_phys(diag_elem_plus,  diag_face_dof_plus);
+               Vector p_minus = dof_phys(diag_elem_minus, diag_face_dof_minus);
+               std::fprintf(stderr,
+                  "[diag-c2-pos] rank=%d  DOF+ at (%+.3e,%+.3e,%+.3e) "
+                  "y_off=%+.3e   DOF- at (%+.3e,%+.3e,%+.3e) y_off=%+.3e   "
+                  "dx=%+.3e dz=%+.3e\n",
+                  rank,
+                  p_plus(0),  p_plus(1),  p_plus(2),  y_off_p,
+                  p_minus(0), p_minus(1), p_minus(2), y_off_m,
+                  p_plus(0) - p_minus(0), p_plus(2) - p_minus(2));
 
                // Collect the non-fault interior faces of the two diag
                // tets.  For tets, GetElementFaces returns 4 faces; we
