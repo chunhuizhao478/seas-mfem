@@ -692,6 +692,17 @@ int main(int argc, char *argv[])
    // Probe block: dynamic/fault_face_flux.cpp:259-303 (C-1 EVAL +
    // C-1n NORMAL).  Single-rank stderr printf, no MPI calls — no
    // deadlock at any rank count.
+   //
+   // C-2 BULK-PROBE EXTENSION: also identify the fault face containing
+   // the diag DOF and the two adjacent tets, plus the 6 non-fault
+   // interior faces of those tets.  Pushed to WaveOperator via setters
+   // so the C-2A (Mult per-call) and C-2B (per non-fault face) probes
+   // can fire without MPI on this single rank.  Other ranks have the
+   // setters left at default -1 → silent.
+   int diag_face_idx_for_dof = -1;
+   int diag_elem_plus  = -1, diag_elem_minus = -1;
+   int diag_face_dof_plus = -1, diag_face_dof_minus = -1;
+   std::vector<int> diag_nonfault_faces;
    if (rank == hypo_rank && hypo_dof_local >= 0 && num_fault_total > 0)
    {
       dof_data[hypo_dof_local].diag_print = true;
@@ -699,7 +710,110 @@ int main(int argc, char *argv[])
       std::fprintf(stderr,
          "[diag] rank %d tagging hypo DOF %d at (%.1f, %.1f, %.1f)\n",
          rank, hypo_dof_local, hpos(0), hpos(1), hpos(2));
+
+      // Map hypo_dof_local back to (interior fault face index, q-of-face).
+      // Layout: dof_data[i] lives on interior face i / nqp_per_face,
+      // QP index = i % nqp_per_face.  Shared-fault DOFs follow at
+      // [num_fault_local, num_fault_total) — currently not used as
+      // diag target (the hypo nucleus lives on interior faces).
+      if (hypo_dof_local < num_fault_local)
+      {
+         const int fi = hypo_dof_local / nqp_per_face;     // index into fault_int_faces
+         const int qi = hypo_dof_local % nqp_per_face;
+         if (fi >= 0 && fi < fault_int_faces.Size())
+         {
+            diag_face_idx_for_dof = fault_int_faces[fi];
+            FaceElementTransformations *ftr =
+               pmesh.GetInteriorFaceTransformations(diag_face_idx_for_dof);
+            if (ftr)
+            {
+               const int e1 = ftr->Elem1No;
+               const int e2 = ftr->Elem2No;
+               // Determine canonical + / - via FaultBasis sign_flipped at
+               // this QP (matches wave_operator.inl:1226 logic:
+               // elem1_on_plus = !sign_flipped).
+               bool elem1_on_plus = true;
+               const FaultBasis *fb = wave.GetFaultBasis();
+               if (fb)
+               {
+                  const int fb_idx =
+                     wave.LookupInteriorFaultBasisIndex(diag_face_idx_for_dof);
+                  if (fb_idx >= 0 && fb_idx < fb->NumFaces())
+                  {
+                     const FaultBasisData &bd = fb->GetBasis(fb_idx);
+                     if (qi < static_cast<int>(bd.qp_data.size()))
+                     {
+                        elem1_on_plus = !bd.qp_data[qi].sign_flipped;
+                     }
+                  }
+               }
+               diag_elem_plus  = elem1_on_plus ? e1 : e2;
+               diag_elem_minus = elem1_on_plus ? e2 : e1;
+
+               // Find the local DOF index on each tet that is closest
+               // to the hypocenter QP physical position.  ndof_per_el =
+               // (order+1)(order+2)(order+3)/6 for tet; for order=1
+               // there are 4 DOFs per element, one at each vertex.
+               auto closest_dof_idx = [&](int e) -> int
+               {
+                  const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+                  ElementTransformation *Tr =
+                     wave.GetFESpace().GetElementTransformation(e);
+                  const IntegrationRule &nodes = fe->GetNodes();
+                  int best = -1;
+                  real_t best_d2 = std::numeric_limits<real_t>::max();
+                  for (int k = 0; k < nodes.GetNPoints(); k++)
+                  {
+                     Vector phys(3);
+                     Tr->Transform(nodes.IntPoint(k), phys);
+                     const real_t dx = phys(0) - hpos(0);
+                     const real_t dy = phys(1) - hpos(1);
+                     const real_t dz = phys(2) - hpos(2);
+                     const real_t d2 = dx*dx + dy*dy + dz*dz;
+                     if (d2 < best_d2) { best_d2 = d2; best = k; }
+                  }
+                  return best;
+               };
+               diag_face_dof_plus  = closest_dof_idx(diag_elem_plus);
+               diag_face_dof_minus = closest_dof_idx(diag_elem_minus);
+
+               // Collect the non-fault interior faces of the two diag
+               // tets.  For tets, GetElementFaces returns 4 faces; we
+               // skip the fault face itself and any boundary faces
+               // (which are still printed elsewhere).
+               Array<int> faces_p, ori_p, faces_m, ori_m;
+               pmesh.GetElementFaces(diag_elem_plus,  faces_p, ori_p);
+               pmesh.GetElementFaces(diag_elem_minus, faces_m, ori_m);
+               auto add_nonfault = [&](const Array<int> &fs)
+               {
+                  for (int k = 0; k < fs.Size(); k++)
+                  {
+                     if (fs[k] == diag_face_idx_for_dof) { continue; }
+                     diag_nonfault_faces.push_back(fs[k]);
+                  }
+               };
+               add_nonfault(faces_p);
+               add_nonfault(faces_m);
+
+               std::fprintf(stderr,
+                  "[diag-c2] rank %d face=%d e+=%d e-=%d "
+                  "face_dof+=%d face_dof-=%d nonfault_faces=[",
+                  rank, diag_face_idx_for_dof,
+                  diag_elem_plus, diag_elem_minus,
+                  diag_face_dof_plus, diag_face_dof_minus);
+               for (size_t k = 0; k < diag_nonfault_faces.size(); k++)
+               {
+                  std::fprintf(stderr, "%s%d",
+                               k == 0 ? "" : ",", diag_nonfault_faces[k]);
+               }
+               std::fprintf(stderr, "]\n");
+            }
+         }
+      }
    }
+   wave.SetDiagBulkElems(diag_elem_plus, diag_elem_minus);
+   wave.SetDiagBulkFaceDofs(diag_face_dof_plus, diag_face_dof_minus);
+   wave.SetDiagNonFaultFaces(diag_nonfault_faces);
 #endif
 
    FaultFaceFlux fault_flux(TPV104Params::rho, TPV104Params::cp,
@@ -1084,6 +1198,51 @@ int main(int argc, char *argv[])
       wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
       Q.Swap(Q_new);
       t += dt_step;
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+      // C-2C BULK-DELTA: per-macro-step delta of bulk Q at the diag
+      // DOFs.  Captures the NET change Q^{n+1} - Q^n at the two diag
+      // tets' face DOFs after one full ADER step (predictor + corrector
+      // including fault Riemann + bulk wave op).  Lets the post-run
+      // analyzer correlate per-step asymmetry growth against C-1n.
+      if (diag_elem_plus >= 0 && diag_elem_minus >= 0 &&
+          diag_face_dof_plus >= 0 && diag_face_dof_minus >= 0)
+      {
+         static std::vector<real_t> prev_Qp(NUM_STATE, 0.0);
+         static std::vector<real_t> prev_Qm(NUM_STATE, 0.0);
+         static bool have_prev = false;
+
+         const real_t *Qd = Q.GetData();
+         const int dof_off_p = diag_elem_plus  * wave.GetNDof();
+         const int dof_off_m = diag_elem_minus * wave.GetNDof();
+         real_t Qp[NUM_STATE], Qm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            Qp[c] = Qd[c*ndof_total + dof_off_p + diag_face_dof_plus];
+            Qm[c] = Qd[c*ndof_total + dof_off_m + diag_face_dof_minus];
+         }
+         real_t dQp[NUM_STATE], dQm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            dQp[c] = have_prev ? (Qp[c] - prev_Qp[c]) : 0.0;
+            dQm[c] = have_prev ? (Qm[c] - prev_Qm[c]) : 0.0;
+            prev_Qp[c] = Qp[c];
+            prev_Qm[c] = Qm[c];
+         }
+         have_prev = true;
+         std::fprintf(stderr,
+            "[C-2C BULK-DELTA] rank=%d t=%.4e  "
+            "Q+_SXX=%+.4e Q-_SXX=%+.4e diff_SXX=%+.4e  "
+            "dQ+_SXX=%+.4e dQ-_SXX=%+.4e d_diff_SXX=%+.4e  "
+            "Q+_SYY=%+.4e Q-_SYY=%+.4e diff_SYY=%+.4e  "
+            "Q+_SZZ=%+.4e Q-_SZZ=%+.4e diff_SZZ=%+.4e\n",
+            g_seas_my_rank, t,
+            Qp[SXX], Qm[SXX], Qp[SXX] - Qm[SXX],
+            dQp[SXX], dQm[SXX], dQp[SXX] - dQm[SXX],
+            Qp[SYY], Qm[SYY], Qp[SYY] - Qm[SYY],
+            Qp[SZZ], Qm[SZZ], Qp[SZZ] - Qm[SZZ]);
+      }
+#endif
 
       // ψ update + slip accumulation per plan §3.3 / §4.10 Step 9.
       // Replaces TPV102's forward-Euler on AgingLawPsi with the FVW

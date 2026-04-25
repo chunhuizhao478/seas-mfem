@@ -173,6 +173,24 @@ public:
    /// Get shared face boundary attributes (for driver's shared fault DOFData collection).
    const std::vector<int> &GetSharedFaceBdrAttr() const { return shared_face_bdr_attr_; }
 
+   /// SEAS_DIAG_FAULT_FLUX C-2 bulk-probe wiring.  Driver records the
+   /// hypocenter face's two adjacent elements + the 6 non-fault interior
+   /// faces of those tets; Mult dumps per-element Q (C-2A) and
+   /// ComputeFaceFluxRHS dumps per-non-fault-face flux contributions
+   /// (C-2B).  Default (-1, -1, empty) → probe is silent.  Single-rank
+   /// only (gated upstream by the driver's MPI_MINLOC selection).
+   void SetDiagBulkElems(int e_plus, int e_minus)
+   { diag_elem_plus_ = e_plus; diag_elem_minus_ = e_minus; }
+
+   void SetDiagBulkFaceDofs(int dof_plus, int dof_minus)
+   { diag_face_dof_plus_ = dof_plus; diag_face_dof_minus_ = dof_minus; }
+
+   void SetDiagNonFaultFaces(const std::vector<int> &faces)
+   { diag_nonfault_faces_ = faces; }
+
+   int  GetDiagElemPlus()  const { return diag_elem_plus_; }
+   int  GetDiagElemMinus() const { return diag_elem_minus_; }
+
    /// ADER Phase 1: L2-projected element-local spatial derivative.
    ///
    /// Computes `dQ_dxdir[c,i] = (M_e^{-1} · K_d^e · Q_c)[i]` on every element,
@@ -465,6 +483,15 @@ private:
    /// ref_normal), so it is robust to whatever CalcOrtho orientation
    /// convention MFEM uses for shared faces.  Populated in the ctor.
    std::vector<bool> shared_fault_elem1_on_plus_;
+
+   /// SEAS_DIAG_FAULT_FLUX C-2 bulk-probe state.  Set on a single rank
+   /// (the one that wins the hypocenter MPI_MINLOC); silent on others
+   /// (default -1).  Read in Mult (C-2A) and ComputeFaceFluxRHS (C-2B).
+   int diag_elem_plus_       = -1;
+   int diag_elem_minus_      = -1;
+   int diag_face_dof_plus_   = -1;
+   int diag_face_dof_minus_  = -1;
+   std::vector<int> diag_nonfault_faces_;
 
    // Canonical fault-face geometry lists (built in constructor).
    // See GetFaultInteriorFaces / GetFaultSharedFaces for layout contract.

@@ -612,6 +612,65 @@ void WaveOperator<MeshType>::Mult(const Vector &Q, Vector &dQdt) const
       ApplyPMLDamping(Q, dQdt);
    }
 
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // C-2A BULK-DOF: per-Mult-call dump of bulk Q (input) and dQdt
+   // (pre-mass-inverse RHS) at the hypocenter face's two adjacent tets.
+   // Reads the two driver-tagged DOFs (one per side) directly from the
+   // bulk Q vector — no face-QP interpolation, no fault-Riemann logic.
+   // Single-rank stderr printf (other ranks have diag_elem_*_=-1).
+   if (diag_elem_plus_ >= 0 && diag_elem_minus_ >= 0 &&
+       diag_face_dof_plus_ >= 0 && diag_face_dof_minus_ >= 0)
+   {
+      const real_t *Qd = Q.GetData();
+      const real_t *Rd = dQdt.GetData();
+      const int dof_off_p = diag_elem_plus_  * ndof_per_el_;
+      const int dof_off_m = diag_elem_minus_ * ndof_per_el_;
+      const int idx_p = diag_face_dof_plus_;
+      const int idx_m = diag_face_dof_minus_;
+
+      // Bounds check: silent on bogus indices (defensive).
+      if (idx_p < ndof_per_el_ && idx_m < ndof_per_el_)
+      {
+         real_t Qp[NUM_STATE], Qm[NUM_STATE], Rp[NUM_STATE], Rm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            Qp[c] = Qd[c*ndof_total_ + dof_off_p + idx_p];
+            Qm[c] = Qd[c*ndof_total_ + dof_off_m + idx_m];
+            Rp[c] = Rd[c*ndof_total_ + dof_off_p + idx_p];
+            Rm[c] = Rd[c*ndof_total_ + dof_off_m + idx_m];
+         }
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF Q+]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_plus_,
+            Qp[SXX], Qp[SYY], Qp[SZZ], Qp[SXY], Qp[SYZ], Qp[SXZ],
+            Qp[VX],  Qp[VY],  Qp[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF Q-]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_minus_,
+            Qm[SXX], Qm[SYY], Qm[SZZ], Qm[SXY], Qm[SYZ], Qm[SXZ],
+            Qm[VX],  Qm[VY],  Qm[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF k+]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_plus_,
+            Rp[SXX], Rp[SYY], Rp[SZZ], Rp[SXY], Rp[SYZ], Rp[SXZ],
+            Rp[VX],  Rp[VY],  Rp[VZ]);
+         std::fprintf(stderr,
+            "[C-2A BULK-DOF k-]  rank=%d e=%d  "
+            "SXX=%+.4e SYY=%+.4e SZZ=%+.4e SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+            g_seas_my_rank, diag_elem_minus_,
+            Rm[SXX], Rm[SYY], Rm[SZZ], Rm[SXY], Rm[SYZ], Rm[SXZ],
+            Rm[VX],  Rm[VY],  Rm[VZ]);
+      }
+   }
+#endif
+
    ApplyMassInverse(dQdt);
 }
 
@@ -1484,6 +1543,66 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                            w * shape2(i) * F_h[c];
                      }
                   }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-2B NONFAULT-FACE: per-flux dump on the 6 non-fault
+                  // interior faces of the hypocenter's two adjacent tets.
+                  // Captures Q_self, Q_nbr, F_h and the per-DOF
+                  // contribution at the diag DOF (when one of the two
+                  // diag elements participates as Elem1 or Elem2).
+                  // Fires only on the diag rank (others have empty list)
+                  // and only on the FIRST QP per face per Mult call (q==0,
+                  // user-decision: per-Mult, not per-stage / per-QP).
+                  if (q == 0 && !diag_nonfault_faces_.empty())
+                  {
+                     bool match = false;
+                     for (size_t kk = 0;
+                          kk < diag_nonfault_faces_.size(); kk++)
+                     {
+                        if (diag_nonfault_faces_[kk] == f) { match = true; break; }
+                     }
+                     if (match)
+                     {
+                        // Determine which side (+ or -) this face touches.
+                        const char *side_p = (e1 == diag_elem_plus_  ||
+                                              e2 == diag_elem_plus_)  ? "P" : "";
+                        const char *side_m = (e1 == diag_elem_minus_ ||
+                                              e2 == diag_elem_minus_) ? "M" : "";
+                        std::fprintf(stderr,
+                           "[C-2B NONFAULT-FACE] rank=%d face=%d e1=%d e2=%d "
+                           "side=%s%s nor=(%+.4e,%+.4e,%+.4e) w=%.4e\n",
+                           g_seas_my_rank, f, e1, e2, side_p, side_m,
+                           nor[0], nor[1], nor[2], w);
+                        std::fprintf(stderr,
+                           "[C-2B NONFAULT-FACE Q_self] rank=%d face=%d "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           g_seas_my_rank, f,
+                           Q_self[SXX], Q_self[SYY], Q_self[SZZ],
+                           Q_self[SXY], Q_self[SYZ], Q_self[SXZ],
+                           Q_self[VX],  Q_self[VY],  Q_self[VZ]);
+                        std::fprintf(stderr,
+                           "[C-2B NONFAULT-FACE Q_nbr]  rank=%d face=%d "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           g_seas_my_rank, f,
+                           Q_nbr[SXX], Q_nbr[SYY], Q_nbr[SZZ],
+                           Q_nbr[SXY], Q_nbr[SYZ], Q_nbr[SXZ],
+                           Q_nbr[VX],  Q_nbr[VY],  Q_nbr[VZ]);
+                        std::fprintf(stderr,
+                           "[C-2B NONFAULT-FACE F_h]    rank=%d face=%d "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           g_seas_my_rank, f,
+                           F_h[SXX], F_h[SYY], F_h[SZZ],
+                           F_h[SXY], F_h[SYZ], F_h[SXZ],
+                           F_h[VX],  F_h[VY],  F_h[VZ]);
+                     }
+                  }
+#endif
                }
             }
          }
