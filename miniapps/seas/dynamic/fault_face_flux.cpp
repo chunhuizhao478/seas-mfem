@@ -85,18 +85,24 @@ void FaultFaceFlux::ComputeStageState(const DOFData &data,
                         s.sigma_n_trial, s.tau1_trial, s.tau2_trial);
 
    // Diagnostic (TPV104 normal-traction freeze).  When env var
-   // SEAS_TPV104_FREEZE_SIGMA_N is set (and not "0"), override the
-   // dynamic trial normal traction with a constant.  This pins
-   // sigma_n_total = data.sigma_n0 + data.sigma_n_nuc + override
-   // through CompleteFromTrial → CompleteFromTheta → CompleteFromVabs,
-   // so the friction solver sees a fixed normal stress and the
-   // imposed-state SXX does not respond to bulk-Q fluctuations.
-   //   For TPV104 (sigma_n0=0 in DOFData under total-Q, sigma_n_nuc=0):
-   //     SEAS_TPV104_FREEZE_SIGMA_N=120e6  -> sigma_n_total = 120 MPa
-   //     SEAS_TPV104_FREEZE_SIGMA_N=1      -> 120 MPa (default)
-   //     unset / =0                         -> baseline (no override)
-   // Sign: positive = compression in this code's fault-local frame
-   // (TPV104Params::sigma_n is positive-compression).
+   // SEAS_TPV104_FREEZE_SIGMA_N is set (and not "0"), pin the
+   // resulting `sigma_n_total = data.sigma_n0 + data.sigma_n_nuc +
+   // s.sigma_n_trial` to the override value by setting
+   //     s.sigma_n_trial = override - data.sigma_n0 - data.sigma_n_nuc
+   // which works in BOTH modes:
+   //   - fluctuation-Q (TPV104, data.sigma_n0 = 120 MPa, nuc = 0):
+   //       s.sigma_n_trial = 0 → sigma_n_total = 120 MPa, Q_imp[SXX] = 0
+   //   - total-Q (TPV102 v9.3.0, data.sigma_n0 = 0, nuc = 0):
+   //       s.sigma_n_trial = 120e6 → sigma_n_total = 120 MPa,
+   //       Q_imp[SXX] = 120e6 (full physical stress)
+   //   SEAS_TPV104_FREEZE_SIGMA_N=120e6  -> sigma_n_total = 120 MPa
+   //   SEAS_TPV104_FREEZE_SIGMA_N=1      -> 120 MPa (default)
+   //   unset / =0                         -> baseline (no override)
+   // Sign: positive = compression (TPV104Params::sigma_n convention).
+   //
+   // Earlier revision pinned s.sigma_n_trial directly to the override,
+   // which silently doubled sigma_n_total in fluctuation mode (TPV104
+   // job 7677661 produced sigma_n_corr = 240 MPa).
    {
       const char *freeze = std::getenv("SEAS_TPV104_FREEZE_SIGMA_N");
       if (freeze && freeze[0] != '\0' &&
@@ -104,8 +110,9 @@ void FaultFaceFlux::ComputeStageState(const DOFData &data,
       {
          char *endp = nullptr;
          const real_t parsed = std::strtod(freeze, &endp);
-         s.sigma_n_trial =
+         const real_t target =
             (endp != freeze && parsed > 0.0) ? parsed : 120.0e6;
+         s.sigma_n_trial = target - data.sigma_n0 - data.sigma_n_nuc;
       }
    }
 

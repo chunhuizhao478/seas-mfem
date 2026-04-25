@@ -2530,6 +2530,7 @@ TEST_TPV104_SUBSTEP_ITERATOR_SRC     = tests/unit/test_tpv104_substep_iterator.c
 TEST_TPV104_PROBE_FORMAT_SRC         = tests/unit/test_tpv104_probe_format.cpp
 TEST_TPV104_SMOKE_SRC                = tests/unit/test_tpv104_smoke.cpp
 TEST_TPV104_SIGMA_N_INVARIANCE_SRC   = tests/unit/test_tpv104_sigma_n_invariance.cpp
+TEST_TPV104_FREEZE_SIGMA_N_GATE_SRC  = tests/unit/test_tpv104_freeze_sigma_n_gate.cpp
 
 TPV104_DRIVER_SRC                    = drivers/tpv104_driver.cpp
 TPV104_SUBSTEP_ITERATOR_SRC          = dynamic/tpv104_substep_iterator.cpp
@@ -2547,6 +2548,7 @@ TEST_TPV104_SUBSTEP_ITERATOR_OBJ     = $(TEST_TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.
 TEST_TPV104_PROBE_FORMAT_OBJ         = $(TEST_TPV104_PROBE_FORMAT_SRC:.cpp=.o)
 TEST_TPV104_SMOKE_OBJ                = $(TEST_TPV104_SMOKE_SRC:.cpp=.o)
 TEST_TPV104_SIGMA_N_INVARIANCE_OBJ   = $(TEST_TPV104_SIGMA_N_INVARIANCE_SRC:.cpp=.o)
+TEST_TPV104_FREEZE_SIGMA_N_GATE_OBJ  = $(TEST_TPV104_FREEZE_SIGMA_N_GATE_SRC:.cpp=.o)
 
 TPV104_DRIVER_OBJ                    = $(TPV104_DRIVER_SRC:.cpp=.o)
 TPV104_SUBSTEP_ITERATOR_OBJ          = $(TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.o)
@@ -2608,6 +2610,10 @@ $(TEST_TPV104_SIGMA_N_INVARIANCE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV104
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_TPV104_FREEZE_SIGMA_N_GATE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV104_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TPV104_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV104_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2653,6 +2659,9 @@ seas_test_tpv104_smoke: $(TEST_TPV104_SMOKE_OBJ)
 seas_test_tpv104_sigma_n_invariance: $(TEST_TPV104_SIGMA_N_INVARIANCE_OBJ) dynamic/fault_face_flux.o dynamic/friction_solver.o
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV104_SIGMA_N_INVARIANCE_OBJ) dynamic/fault_face_flux.o dynamic/friction_solver.o $(MFEM_LIBS)
 
+seas_test_tpv104_freeze_sigma_n_gate: $(TEST_TPV104_FREEZE_SIGMA_N_GATE_OBJ) dynamic/fault_face_flux.o dynamic/friction_solver.o
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV104_FREEZE_SIGMA_N_GATE_OBJ) dynamic/fault_face_flux.o dynamic/friction_solver.o $(MFEM_LIBS)
+
 seas_tpv104_driver: $(TPV104_DRIVER_OBJ) $(TPV104_SHARED_OBJS) \
                     $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) \
                     $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
@@ -2678,7 +2687,8 @@ test-tpv104: seas_tpv104_driver \
              seas_test_tpv104_substep_iterator \
              seas_test_tpv104_probe_format \
              seas_test_tpv104_smoke \
-             seas_test_tpv104_sigma_n_invariance
+             seas_test_tpv104_sigma_n_invariance \
+             seas_test_tpv104_freeze_sigma_n_gate
 	@echo "=== TPV104 unit tests ==="
 	./seas_test_tpv104_params
 	./seas_test_slip_law_srw_psi
@@ -2692,6 +2702,7 @@ test-tpv104: seas_tpv104_driver \
 	./seas_test_tpv104_probe_format
 	./seas_test_tpv104_smoke
 	./seas_test_tpv104_sigma_n_invariance
+	./seas_test_tpv104_freeze_sigma_n_gate
 	@echo "=== TPV104 suite complete ==="
 
 # Gmsh-generated mesh .msh files (built on demand in the pythonenv
