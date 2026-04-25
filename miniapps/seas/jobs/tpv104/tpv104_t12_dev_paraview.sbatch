@@ -34,8 +34,10 @@
 # Output cadence:
 #   --output-dt 0.1                  # 9 fault stations + 6 surface stations every 0.1 s
 #   --paraview --paraview-dt 0.1     # fault-surface VTU/PVD every 0.1 s
-#   --paraview-bulk-dt 0.5           # volume velocity + sigma_yy/xy/xz every 0.5 s
-#                                    # (bulk volume is large; coarser cadence).
+#   --paraview-bulk-dt 1.0           # volume velocity + sigma_yy/xy/xz every 1.0 s
+#                                    # (bulk volume is GB per frame; 1 s cadence
+#                                    # gives ~12 frames over tfinal=12 s, total
+#                                    # ~25-60 GB on /scratch2).
 #
 # Pre-requisites:
 #   1. tpv104_build_banner_sanity.sbatch — PASS (banner + dispatch).
@@ -117,7 +119,7 @@ ibrun ./seas_tpv104_driver \
       --output-dt 0.1 \
       --paraview \
       --paraview-dt 0.1 \
-      --paraview-bulk-dt 0.5
+      --paraview-bulk-dt 1.0
 
 # Post-run check: dev-queue run is intentionally killed before tfinal,
 # so the production sbatch's "≥50 rows / 9 fault stations" gate does
