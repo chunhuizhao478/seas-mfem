@@ -55,7 +55,7 @@ struct TPV104Params
    static constexpr real_t V0     = 1.0e-6;         ///< Reference slip rate [m/s]
    static constexpr real_t b      = 0.014;          ///< Slowness effect parameter
    static constexpr real_t L      = 0.4;            ///< Critical slip distance [m]
-   static constexpr real_t f_w    = 0.1;            ///< Weakening friction coefficient
+   static constexpr real_t f_w    = 0.2;            ///< Weakening friction coefficient (SCEC TPV104 table, page 2 of SCEC_validation_slip_law.pdf — was 0.1 prior to 2026-04-24 audit, half the spec value, contributing to the 1.7-2.7× V_strike over-shoot vs the SeisSol reference traces)
    static constexpr real_t muW    = f_w;            ///< alias used by friction coeff port
 
    // Direct effect `a` — spatially varying.

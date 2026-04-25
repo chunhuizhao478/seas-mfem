@@ -1,0 +1,20 @@
+# SCEC TPV104 — SeisSol material (homogeneous half-space)
+#
+# Constants from `config/tpv104_params.hpp` (MFEM side, identical SCEC values):
+#   ρ      = 2670  kg/m³
+#   c_s    = 3464  m/s
+#   c_p    = 6000  m/s
+#   μ      = ρ·c_s²       = 2670·3464²  = 32,038,120,320 Pa ≈ 32.038 GPa
+#   λ      = ρ·c_p² − 2μ  = 2670·6000² − 2·32.038e9 = 32,043,759,360 Pa ≈ 32.044 GPa
+#
+# Plain ConstantMap — uniform across the entire half-space.  No attenuation,
+# no plasticity (TPV104 is purely elastic).
+#
+# Reference: SeisSol docs/parameters.par MaterialFileName field, easi
+# !ConstantMap syntax used in tests/Initializer/TimeStepping/material.yaml.
+
+!ConstantMap
+  map:
+    rho:    2670.0
+    mu:     3.2038120320e10
+    lambda: 3.2043759360e10

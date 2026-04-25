@@ -1,0 +1,88 @@
+# SCEC TPV104 — SeisSol fault initial-stress + per-QP friction parameters
+#
+# Direct port of SeisSol/Examples/tpv104/fault.yaml (commit 2019-09-24)
+# with NO physics edits — same signs, same Lua function body, same field
+# names.  The only change is to support our paired full-domain mesh
+# (tpv104_seisol_*.geo + pumgen) instead of the half-mesh-and-mirror
+# approach the upstream uses; the easi expressions evaluate the same
+# regardless of mesh topology since they only depend on (x, y, z).
+#
+# Key parameter values (read from SeisSol/Examples upstream, not from the
+# SCEC TPV104 PDF — the upstream parameters are what generated the
+# reference traces in benchmark_data/seisol/, so reproducing them
+# requires using these exact numbers):
+#
+#   s_yy   = -120e6 Pa     compression negative (SeisSol convention)
+#   s_xy   = +40e6  Pa     POSITIVE (right-lateral on +y face per
+#                          SeisSol's strike convention; sign opposite
+#                          to MFEM's tpv104_setup.hpp tau2_0 = +40e6
+#                          which uses BP5 t1=dip / t2=strike framing.
+#                          SeisSol uses tangent1=strike / tangent2=dip.
+#                          Both produce equivalent right-lateral slip
+#                          AFTER the rotation chain on each side.)
+#   nuc_xy = +45e6·F(r)    nucleation perturbation, also POSITIVE
+#   F(r)   = exp(r²/(r²-R²)) for r < R = 3 km, else 0
+#   r²     = x² + y² + (z+7500)²   3-D distance (y=0 on fault)
+#   rs_a   = 0.01 inside VW box, 0.02 outside, smooth tanh transition
+#   rs_srW = 0.1  inside VW box, 1.0  outside, smooth tanh transition
+#   rs_sl0 = 0.4 m  uniform
+#
+# Coordinate convention: x = strike, y = fault-normal (fault at y=0),
+# z = depth (free surface at z=0, depth into earth z<0).  Hypocenter at
+# (0, 0, -7500) m.  Same as upstream.
+
+!Switch
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz, nuc_xx, nuc_yy, nuc_zz, nuc_yz, nuc_xz]: !ConstantMap
+  map:
+    s_xx:    0
+    s_yy:   -120e6
+    s_zz:    0
+    s_xy:    40e6
+    s_yz:    0
+    s_xz:    0
+    nuc_xx:  0
+    nuc_yy:  0
+    nuc_zz:  0
+    nuc_yz:  0
+    nuc_xz:  0
+
+[rs_a, rs_srW, nuc_xy]: !LuaMap
+  returns: [rs_a, rs_srW, nuc_xy]
+  function: |
+      function f (x)
+        x1 = math.abs(x["x"])
+        box_x = 0.5*(1.0+math.tanh(3000.0/(x1-18000.0) + 3000.0 / (x1-15000.0)))
+        if (x1 >= 18000.0) then
+          box_x = 0.0
+        end
+        if (x1 <= 15000.) then
+          box_x = 1.0
+        end
+
+        z1 = math.abs(x["z"] + 7500)
+        box_z = 0.5*(1.0+math.tanh(3000.0/(z1-10500.0) + 3000.0 / (z1-7500.0)))
+        if (z1 >= 10500.0) then
+          box_z = 0.0
+        end
+        if (z1 <= 7500.) then
+          box_z = 1.0
+        end
+
+        r = math.sqrt(x["x"]^2 + x["y"]^2 + (x["z"]+7500)^2)
+
+        if (r <= 3000.0) then
+          nuc_xy = 45000000.0 * math.exp(r*r / (r*r - 9000000))
+        else
+          nuc_xy = 0.0
+        end
+
+        return {
+          rs_a   = 0.01 + 0.01 * (1.0 - box_x*box_z),
+          rs_srW = 0.1  + 0.9  * (1.0 - box_x*box_z),
+          nuc_xy = nuc_xy
+        }
+      end
+
+[rs_sl0]: !ConstantMap
+  map:
+    rs_sl0: 0.4
