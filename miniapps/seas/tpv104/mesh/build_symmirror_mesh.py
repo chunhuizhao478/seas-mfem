@@ -170,6 +170,48 @@ def write_msh(path, vertices, tets, bdr_triangles):
         f.write("$EndElements\n")
 
 
+def factor_2d(np):
+    """Find (nx_ranks, nz_ranks) closest to sqrt(np) with nx_ranks * nz_ranks == np."""
+    best = (1, np)
+    for a in range(1, int(np**0.5) + 1):
+        if np % a == 0:
+            best = (a, np // a)
+    return best
+
+
+def write_partition(path, nx, ny, nz, np_target):
+    """Emit a partitioning sidecar file: Cartesian X+Z tiling, full Y per rank.
+
+    For a y-mirror-symmetric problem (e.g. TPV104 fault at y=0), this layout
+    guarantees each rank owns the FULL y-extent of its (X, Z) tile, so:
+      - The y=0 plane is never cut by a partition boundary.
+      - Each rank's local domain is internally y-mirror-symmetric.
+      - Per-rank flux accumulations are FP-deterministic and bit-equivalent
+        to the serial run.
+
+    File format matches LoadPartitioningFromFile in
+    dynamic/fault_locality_partition.hpp.
+    """
+    nx_ranks, nz_ranks = factor_2d(np_target)
+    # Hex (i, j, k) lives in tile (i*nx_ranks // nx, k*nz_ranks // nz).
+    # Each hex maps to 6 tets, all on the same rank.
+    parts = []
+    for k in range(nz):
+        for j in range(ny):
+            for i in range(nx):
+                rx = (i * nx_ranks) // nx
+                rz = (k * nz_ranks) // nz
+                rank = rx + rz * nx_ranks
+                parts.extend([rank] * 6)
+    ne = len(parts)
+    with open(path, "w") as f:
+        f.write(f"np {np_target}\n")
+        f.write(f"ne {ne}\n")
+        for r in parts:
+            f.write(f"{r}\n")
+    return nx_ranks, nz_ranks
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__,
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -183,11 +225,21 @@ def main():
                    help="Domain depth (Z, downward) in meters (default: 16000)")
     p.add_argument("--out", type=str, default="tpv104_symmirror_200m.msh",
                    help="Output .msh path")
+    p.add_argument("--emit-partition", type=int, nargs="+", metavar="NP",
+                   help="Also emit <out>.np<NP>.partition for each NP")
     args = p.parse_args()
 
     vertices, tets, bdr_tris, (nx, ny, nz) = build_mesh(
         args.dx, args.lx, args.ly, args.lz)
     write_msh(args.out, vertices, tets, bdr_tris)
+
+    if args.emit_partition:
+        for np_target in args.emit_partition:
+            part_path = f"{args.out}.np{np_target}.partition"
+            nx_ranks, nz_ranks = write_partition(part_path, nx, ny, nz, np_target)
+            print(f"  partition np={np_target}: "
+                  f"nx_ranks={nx_ranks} nz_ranks={nz_ranks} "
+                  f"(full y-extent per rank) -> {part_path}")
 
     n_fault = sum(1 for t in bdr_tris if t[3] == 3)
     n_free = sum(1 for t in bdr_tris if t[3] == 1)

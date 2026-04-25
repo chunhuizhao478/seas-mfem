@@ -36,6 +36,7 @@
 #include "../domain/boundary_config.hpp"
 #include "../friction/slip_law_srw_psi.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
+#include "../dynamic/fault_locality_partition.hpp"
 #include "../io/paraview_output.hpp"
 
 #include <algorithm>
@@ -302,6 +303,8 @@ int main(int argc, char *argv[])
    bool debug_qnorm      = HasFlag(argc, argv, "--debug-qnorm");
    bool dry_run          = HasFlag(argc, argv, "--dry-run");
    bool verify_dispatch  = HasFlag(argc, argv, "--verify-dispatch");
+   bool fault_locality_part = HasFlag(argc, argv, "--partition-fault-locality");
+   std::string partition_file = GetStringArg(argc, argv, "--partition-file", "");
 
    // ParaView output controls — mirror tpv102_driver.cpp + BP5 conventions:
    //   --paraview              : enable PVD/VTU output, interval matches --output-dt
@@ -469,7 +472,70 @@ int main(int argc, char *argv[])
    }
 
 #ifdef MFEM_USE_MPI
-   ParMesh pmesh(comm, serial_mesh);
+   // G1 fault-locality partition (TPV104 dynamic only).  See
+   // dynamic/fault_locality_partition.hpp for the algorithm and the
+   // 2026-04-25_pm debug doc Section 13 for the motivation: ParMETIS
+   // splits the mesh across the fault plane at np ≥ 4, producing a
+   // partition-induced mirror-symmetry break that the rupture amplifies
+   // to mm-scale slip_dip pollution.  G1 forces every fault face's two
+   // adjacent elements to be co-resident on the same rank — generalizes
+   // beyond y=0 mirror to arbitrary fault geometries.
+   //
+   // BP5 path NOT touched per user directive 2026-04-25.
+   std::unique_ptr<ParMesh> pmesh_ptr;
+   if (!partition_file.empty())
+   {
+      // Load explicit partitioning array from a sidecar file (typically
+      // produced by tpv104/mesh/build_symmirror_mesh.py --emit-partition).
+      // This gives bit-exact reproducibility across rank counts when the
+      // file encodes a Cartesian or otherwise mirror-respecting partition.
+      Array<int> partitioning;
+      const bool ok = seas::LoadPartitioningFromFile(partition_file, nprocs,
+                                                     serial_mesh.GetNE(),
+                                                     partitioning);
+      MFEM_VERIFY(ok, "Failed to load partition file: " << partition_file
+                  << " (np_expected=" << nprocs
+                  << ", ne_expected=" << serial_mesh.GetNE() << ")");
+      if (rank == 0)
+      {
+         std::cout << "[partition] using explicit partition file: "
+                   << partition_file << " (np=" << nprocs << ", ne="
+                   << serial_mesh.GetNE() << ")" << std::endl;
+      }
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh, partitioning.GetData()));
+   }
+   else if (fault_locality_part)
+   {
+      // Identify fault faces in the serial mesh by bdr_attr == bc_fault.
+      // bc_fault default is 3 per TPV104 driver; same convention used by
+      // wave_operator.inl when populating fault_interior_faces_.
+      const int bc_fault_attr = GetIntArg(argc, argv, "--bc-fault", 3);
+      Array<int> fault_faces;
+      seas::FindFaultFaceIndices(serial_mesh, bc_fault_attr, fault_faces);
+      Array<int> partitioning;
+      int n_relocated = 0;
+      seas::BuildFaultLocalityPartitioning(serial_mesh, fault_faces, nprocs,
+                                            partitioning, &n_relocated);
+      const int violations = seas::VerifyFaultLocality(serial_mesh,
+                                                       fault_faces,
+                                                       partitioning);
+      if (rank == 0)
+      {
+         std::cout << "[partition] fault-locality partitioning enabled: "
+                   << fault_faces.Size() << " fault faces, "
+                   << n_relocated << " elements relocated, "
+                   << violations << " violations" << std::endl;
+      }
+      MFEM_VERIFY(violations == 0,
+                  "Fault-locality partition has " << violations
+                  << " violations — partitioning logic bug.");
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh, partitioning.GetData()));
+   }
+   else
+   {
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh));
+   }
+   ParMesh &pmesh = *pmesh_ptr;
    using MeshT = ParMesh;
 #else
    Mesh &pmesh = serial_mesh;
