@@ -81,6 +81,25 @@
 #     --fault-iterator substep (banner-only; production path is
 #     Brent + one-shot ADER + macro-step ψ per R7-001(b)).
 #
+# ParaView output (added: bulk + free-surface every 0.5 s)
+# --------------------------------------------------------
+#   --paraview              enable PVD/VTU output
+#   --paraview-dt 0.25      free-surface velocity collection at 0.25 s
+#                           cadence (output_dir/ParaView/, default
+#                           ParaView output; for TPV104 absorbing BC this
+#                           is the surface "free" velocity series the
+#                           spec figures use).  9 frames over [0, 2 s].
+#   --paraview-bulk-dt 0.5  separate full-volume collection at 0.5 s
+#                           (output_dir/ParaView_bulk/) — velocity +
+#                           sigma_yy + sigma_xy + sigma_xz + mpi_rank.
+#                           5 frames over [0, 2 s].  Critical for C-2
+#                           analysis: lets us visualize the bulk SXX
+#                           asymmetry directly on the volumetric mesh,
+#                           not just at the hypocenter probe DOF.
+#
+#   ParaView output is small relative to the probe stderr (~tens of MB)
+#   so no significant overhead.
+#
 # Run economics
 # -------------
 #   Stderr volume estimate:
@@ -198,7 +217,10 @@ ibrun ./seas_tpv104_driver \
       --fault-iterator substep \
       --output-dir "${RESULT_DIR}" \
       --output-prefix tpv104_bulk_asym \
-      --output-dt 0.05
+      --output-dt 0.05 \
+      --paraview \
+      --paraview-dt 0.25 \
+      --paraview-bulk-dt 0.5
 
 # Capture the C-2 probe output from the slurm .err into dedicated
 # per-stream logs inside the result dir.  Slurm appends all ranks'
