@@ -2301,6 +2301,66 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      }
                   }
 
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-1s STRESS-ROT (ADER interior-fault path): production
+                  // dispatch goes through EvaluateADER here, NOT the
+                  // per-stage Evaluate path probed by C-1s INT/SHR above
+                  // (Frontera 7677529 confirmed 0 INT/SHR lines, 7024
+                  // C-1n NORMAL → production path is this ADER one).
+                  // Variables are time-integrated I_* — print Q_avg = I/dt
+                  // to match C-1n NORMAL probe semantics (which sees Q_avg
+                  // inside Evaluate via EvaluateADER's I/dt division).
+                  if (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print &&
+                      dt > 0)
+                  {
+                     const real_t inv_dt = 1.0 / dt;
+
+                     std::fprintf(stderr,
+                        "[C-1s ADER-INT BASIS] rank=%d  "
+                        "can_n=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t1=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t2=(%+.4e,%+.4e,%+.4e)  "
+                        "sign_flipped=%d  elem1_on_plus=%d  dt=%.4e\n",
+                        g_seas_my_rank,
+                        can_n[0], can_n[1], can_n[2],
+                        can_t1[0], can_t1[1], can_t1[2],
+                        can_t2[0], can_t2[1], can_t2[2],
+                        qpd.sign_flipped ? 1 : 0,
+                        elem1_on_plus  ? 1 : 0,
+                        dt);
+
+                     auto _c1s_print = [&](const char *tag, const real_t *I)
+                     {
+                        // Q_avg = I / dt — matches Evaluate's view.
+                        std::fprintf(stderr,
+                           "[C-1s ADER-INT %s] rank=%d  "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e  "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           tag, g_seas_my_rank,
+                           I[SXX]*inv_dt, I[SYY]*inv_dt, I[SZZ]*inv_dt,
+                           I[SXY]*inv_dt, I[SYZ]*inv_dt, I[SXZ]*inv_dt,
+                           I[VX]*inv_dt,  I[VY]*inv_dt,  I[VZ]*inv_dt);
+                     };
+
+                     // I_self/I_nbr are GLOBAL frame (read at line ~2167).
+                     // Map to canonical ± via elem1_on_plus.
+                     const real_t *I_glob_p = elem1_on_plus ? I_self : I_nbr;
+                     const real_t *I_glob_m = elem1_on_plus ? I_nbr  : I_self;
+
+                     _c1s_print("GLOB-IN+",  I_glob_p);
+                     _c1s_print("GLOB-IN-",  I_glob_m);
+                     _c1s_print("LOC-IN+",   I_plus_local);
+                     _c1s_print("LOC-IN-",   I_minus_local);
+                     _c1s_print("LOC-IMP+",  I_imp_plus);
+                     _c1s_print("LOC-IMP-",  I_imp_minus);
+                     _c1s_print("GLOB-OUT+", I_imp_plus_g);
+                     _c1s_print("GLOB-OUT-", I_imp_minus_g);
+                  }
+#endif
+
                   real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
                   flux_.Interior(can_n, I_imp_plus_g,  I_imp_plus_g,
                                  F_h_plus);
@@ -3033,6 +3093,59 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                         I_imp_minus_g[c] += T_can(c, k) * I_imp_minus[k];
                      }
                   }
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // C-1s STRESS-ROT (ADER shared-fault path): same trace
+                  // as ADER-INT above, tagged ADER-SHR for distinguishing
+                  // when the hypocenter QP sits on a rank-boundary
+                  // shared face.  Print Q_avg = I/dt.
+                  if (dof_idx >= 0 &&
+                      dof_idx < static_cast<int>(fault_dof_data_->size()) &&
+                      (*fault_dof_data_)[dof_idx].diag_print &&
+                      dt > 0)
+                  {
+                     const real_t inv_dt = 1.0 / dt;
+
+                     std::fprintf(stderr,
+                        "[C-1s ADER-SHR BASIS] rank=%d  "
+                        "can_n=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t1=(%+.4e,%+.4e,%+.4e)  "
+                        "can_t2=(%+.4e,%+.4e,%+.4e)  "
+                        "sign_flipped=%d  elem1_on_plus=%d  dt=%.4e\n",
+                        g_seas_my_rank,
+                        can_n[0], can_n[1], can_n[2],
+                        can_t1[0], can_t1[1], can_t1[2],
+                        can_t2[0], can_t2[1], can_t2[2],
+                        qpd.sign_flipped ? 1 : 0,
+                        elem1_on_plus  ? 1 : 0,
+                        dt);
+
+                     auto _c1s_print = [&](const char *tag, const real_t *I)
+                     {
+                        std::fprintf(stderr,
+                           "[C-1s ADER-SHR %s] rank=%d  "
+                           "SXX=%+.4e SYY=%+.4e SZZ=%+.4e  "
+                           "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e  "
+                           "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
+                           tag, g_seas_my_rank,
+                           I[SXX]*inv_dt, I[SYY]*inv_dt, I[SZZ]*inv_dt,
+                           I[SXY]*inv_dt, I[SYZ]*inv_dt, I[SXZ]*inv_dt,
+                           I[VX]*inv_dt,  I[VY]*inv_dt,  I[VZ]*inv_dt);
+                     };
+
+                     const real_t *I_glob_p = elem1_on_plus ? I_self : I_nbr;
+                     const real_t *I_glob_m = elem1_on_plus ? I_nbr  : I_self;
+
+                     _c1s_print("GLOB-IN+",  I_glob_p);
+                     _c1s_print("GLOB-IN-",  I_glob_m);
+                     _c1s_print("LOC-IN+",   I_plus_local);
+                     _c1s_print("LOC-IN-",   I_minus_local);
+                     _c1s_print("LOC-IMP+",  I_imp_plus);
+                     _c1s_print("LOC-IMP-",  I_imp_minus);
+                     _c1s_print("GLOB-OUT+", I_imp_plus_g);
+                     _c1s_print("GLOB-OUT-", I_imp_minus_g);
+                  }
+#endif
 
                   real_t F_h_side[NUM_STATE];
                   const real_t *I_imp_side = elem1_on_plus
