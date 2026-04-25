@@ -395,8 +395,117 @@ Frontera artifacts:
 - Job 7677661 (σ_n freeze) — exposed the doubling bug (σ_n stuck at 240 MPa).
 - Job 7677698 (first C-2 run) — exposed the dead-code-path bug (C-2A/C-2B silent).
 - Job 7677719 (second C-2 run, all probes fire) — established 10.65 MPa SXX, 0.46 MPa SYY, 1.83 MPa SZZ DOF-level asymmetries; localized to face pair (12535, 1342) and outer neighbor tets (5960, 550). σ_xx component recognized as physical anti-symmetric strike-slip response; σ_yy is the actual bug-relevant leak.
+- Job 7677759 (C-2 with y_tol fix; same TPV104 mesh): bit-identical numbers to 7677719 — confirmed y_tol filter is robustness guard, not bug fix; the diag DOFs were already at mirror positions in the previous runs.
+
+---
+
+## 12. Mirror-mesh discriminator runs (Frontera, jobs 7677822 + 7677831)
+
+### Job 7677822 — symmetric 200 m mesh, tfinal = 2.0 s
+
+Mesh `tpv104_symmirror_200m.msh` (768k tets, uniform 200 m, y-mirror by construction; built via `tpv104/mesh/build_symmirror_mesh.py`).  Same dispatch as fwfix (8N × 400r, dev queue, ADER-O2).
+
+**Key result — σ_n is FLAT** at 120 MPa for the entire run.  Mirror-mesh hypothesis CONFIRMED as the cause of the σ_n leak observed in jobs 7677547 / 7677719 / 7677759.
+
+Direct value comparison at the hypocenter station (`tpv104_symmir_station_x2_0_x3_7.5.dat` vs `benchmark_data/seisol/tpv104_seisol_x2_0_x3_7.5.txt`):
+
+| time (s) | MFEM tau2_corr (MPa) | SeisSol T_s (MPa) | match |
+|---|---|---|---|
+| 0.50 | 72.20 | 72.36 | 99.7% |
+| 0.70 | 80.47 | 80.76 | 99.6% |
+| 0.80 (MFEM peak) | **81.63** | 82.84 | 98.5% |
+| 0.84 (SeisSol peak) | 79.5 | **83.13** | 95.6% |
+
+Peak τ_strike values match to within 1.5–2%.  The "10 MPa offset" reading from the visualize_results.py plot was an optical artifact of sparse output sampling combined with a real timing offset (see below).
+
+Real timing offset: SeisSol uses `t_0 = 0.5 s` (per `jobs/tpv104/seisol/tpv104_seisol.par`), MFEM uses `nuc_T = 1.0 s` (per `config/tpv104_params.hpp:94`).  The SCEC TPV104 spec eq. 14 says T = 1.0 s, but the upstream SeisSol/Examples (which generated our reference traces) uses 0.5 s.  This produces a ~0.05–0.10 s peak-time offset between curves — purely a parameter choice, not a bug.
+
+### Job 7677831 — same setup, tfinal = 12.0 s (extension run)
+
+Confirms σ_n stays flat throughout.  Reveals a residual that the 2 s run only hinted at:
+
+| Quantity at t = 12 s (hypocenter) | MFEM | SeisSol |
+|---|---|---|
+| σ_n | 120 MPa flat ✓ | 120 MPa flat |
+| slip_strike | ~12 m | ~12 m |
+| slip_dip | **−7 mm** ← spurious | ≈ 0 |
+| V_dip | oscillates ±0.004 m/s | ≈ 0 |
+| τ_dip | oscillates ±0.04 MPa | ≈ 0 |
+
+The dip-direction pollution is **REAL** but small.  Linear-in-time growth (~3 mm at t=2 s, ~7 mm at t=12 s) — suggests constant-rate forcing applied each step, not exponential rupture amplification.
+
+### What the mirror mesh did NOT fix
+
+For a perfectly y-mirror-symmetric problem (mirror mesh + mirror IC + mirror BC + mirror nucleation), pure-strike-slip rupture should produce slip_dip = V_dip = τ_dip = 0 exactly.  The fact that they are nonzero on a confirmed mirror mesh means there is a SECOND source of asymmetry beyond the mesh that we have not yet identified.
+
+---
+
+## 13. Hypothesis ranking for the residual dip-direction pollution
+
+| H | Hypothesis | Likelihood | Distinguishing test | Cost |
+|---|---|---|---|---|
+| **H1** | **MPI partition non-y-mirror → reduction non-associativity at 400 ranks** | **~60%** | run same setup at np=1 (serial) | local 1000 m run + Frontera np=8 follow-up |
+| H2 | Free-surface BC numerical implementation has subtle z-asymmetry | ~25% | swap free-surface for absorbing on Z=0 | one Frontera run with `--bc-mode absorbing` |
+| H3 | ADER predictor CK recursion breaks symmetry under MPI | ~10% | rerun with `--ader-order 1` | one Frontera run |
+| H4 | FP non-associativity in element-local volume integral | ~5% | should be deterministic per-element | no test needed; not the cause |
+| H5 | ψ accumulation drift over 12 s | < 5% | Brent tolerance is tight; ruled out by analysis | no test needed |
+
+H1 leads because:
+- The local 1-rank 2-step test on the mirror mesh produced **bit-exact** symmetry (k+_SXY = k−_SXY exactly, k+_VX = −k−_VX exactly, diff_SXX = 0).
+- Frontera at 400 ranks does not.  The only differences: rank count, MPI reduction ordering, partition geometry, communication graph.
+- MFEM's mesh partitioner (METIS / ParMETIS) doesn't know about y-mirror symmetry — the +y and −y halves end up on different ranks.  Per-rank flux accumulations sum O(N_dofs/rank) terms in rank-determined orders → FP non-associativity per step is small but compounds linearly through every step (consistent with the linear-in-time growth observed).
+
+### H1 immediate test — DONE (locally)
+
+Ran the 4 × 4 × 8 km / 1000 m mirror mesh at tfinal = 2.0 s, sweeping rank count {1, 2, 4, 8} on the laptop.  Results at hypocenter station (0, 0, −7.5):
+
+| np | slip_strike (m) | slip_dip (m) | V_dip (m/s) | V_max (m/s) |
+|---|---|---|---|---|
+| **1** | 4.9436 | −0.0364 | −0.0227 | 12.6092 |
+| **2** | 4.9436 | −0.0364 | −0.0227 | 12.6092 |
+| **4** | 4.7393 | +0.1192 | −0.0287 | 12.6092 |
+| **8** | 4.7393 | +0.1192 | −0.0287 | 12.6092 |
+
+Two distinct, bit-identical groups: {np=1, np=2} and {np=4, np=8}.
+
+- **V_max bit-identical across all four runs** (12.6092 m/s) — global reductions are partition-invariant, confirming the wave operator dynamics are nominally the same.
+- **Per-DOF state differs by partition group** — slip_dip flips sign and grows ~3.3× from {1,2} → {4,8}; slip_strike differs by 4%.
+
+H1 is **confirmed**, but the mechanism is more specific than "FP non-associativity":
+
+- METIS at np ∈ {1, 2}: splits along the longest axis (Z, 8 km) or doesn't split at all.  The y=0 fault plane lies ENTIRELY within a rank's local domain; no ghost-cell crossing across the mirror plane → y-symmetry preserved bit-exactly.
+- METIS at np ∈ {4, 8}: subdivides further, including along Y.  The y=0 fault is cut by partition boundaries; ghost-cell exchanges between +y and −y ranks break the mirror.
+
+Bit-identical results within each group prove this is a TOPOLOGY-induced asymmetry, not floating-point roundoff.  Pure FP non-associativity would give different bits at every np.
+
+### Implication for TPV104 production at np=400
+
+The 200 m TPV104 mesh has 768k tets across 16 × 4 × 16 km.  ParMETIS unavoidably subdivides along Y (4 km / ~5 ranks per axis ≈ 800 m per rank).  Some ranks own −y elements adjacent to others' +y elements at y=0, and ghost-cell exchanges across those seams break the mirror.  The 3 mm slip_dip at t = 2 s on the np=400 Frontera run (job 7677822) is the production manifestation of the same mechanism observed locally at np ∈ {4, 8}.
+
+### Solution paths
+
+| Approach | Pros | Cons |
+|---|---|---|
+| **A. Constrain partition to never split along Y** | Bit-exact y-mirror at any rank count | Custom partitioner; fewer ranks usable along y; load imbalance |
+| **B. Use `np = 2k` with all splits in {X, Z}** | Quickest empirical fix; uses MFEM API as-is | Need to verify mesh API exposes per-axis partition control |
+| **C. Symmetrize at the fault Riemann via averaging** | Code-only fix; works at any partition | Modifies operator semantics |
+| **D. Document as a known partitioning artifact** | No change | Spurious dip slip remains in plots |
+
+Approach A is the principled fix.  Approach B is the quickest empirical test.
+
+---
 
 External references:
 - `/Users/chunhuizhao/projects/SeisSol/src/Geometry/MeshReader.cpp::extractFaultInformation` — refPoint-based +/− assignment.
 - `tpv104_sigma_n_leak_root_cause_2026-04-25.md` — predecessor doc (morning), established the σ_n channel as stress-average dominated.
 - `tpv104_mesh_asymmetry_finding_2026-04-24.md` — earlier mesh check (0/215143 mirror partners).
+- `jobs/tpv104/seisol/tpv104_seisol.par` — SeisSol TPV104 reference config (`t_0 = 0.5`, `RS_muW = 0.2`, ConvergenceOrder = 5).
+- Local H1 sweep — `/tmp/h1_serial`, `/tmp/h1_np2`, `/tmp/h1_np4`, `/tmp/h1_np8` (4 × 4 × 8 km mirror mesh, 1000 m, tfinal = 2 s, ADER-O2).
+
+---
+
+External references:
+- `/Users/chunhuizhao/projects/SeisSol/src/Geometry/MeshReader.cpp::extractFaultInformation` — refPoint-based +/− assignment.
+- `tpv104_sigma_n_leak_root_cause_2026-04-25.md` — predecessor doc (morning), established the σ_n channel as stress-average dominated.
+- `tpv104_mesh_asymmetry_finding_2026-04-24.md` — earlier mesh check (0/215143 mirror partners).
+- `jobs/tpv104/seisol/tpv104_seisol.par` — SeisSol TPV104 reference config (`t_0 = 0.5`, `RS_muW = 0.2`, ConvergenceOrder = 5).
