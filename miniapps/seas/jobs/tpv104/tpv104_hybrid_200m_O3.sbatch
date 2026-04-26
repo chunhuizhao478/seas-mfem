@@ -132,7 +132,7 @@ echo "               y-mirror prism strip + graded unstructured outer"
 echo "Partition:     default ParMETIS (no sidecar partition file)"
 echo "Pelties order: 𝒪3 (--order 2 + --ader-order 3)"
 echo "Iterator:      one-shot (default; substep is np=1-only until R-1003 lands)"
-echo "Target:        tfinal = 2.0 s at 16N×800r"
+echo "Target:        tfinal = 12.0 s at 16N×800r"
 echo "Goal:          slip_dip ≪ 1 mm with no reflection contamination"
 echo "Reference:     symmirror P=2 dx=500m (small domain) -> -5.80e-5 m"
 echo "========================================"
@@ -143,7 +143,7 @@ ibrun ./seas_tpv104_driver \
       --order 2 \
       --bc-mode absorbing \
       --cfl 0.5 \
-      --tfinal 2.0 \
+      --tfinal 12.0 \
       --ader-order 3 \
       --friction-solver newton-stable \
       --fric-law slip-srw \
@@ -152,7 +152,7 @@ ibrun ./seas_tpv104_driver \
       --output-dt 0.05 \
       --paraview \
       --paraview-dt 0.5 \
-      --paraview-bulk-dt 0.5 \
+      --paraview-bulk-dt 1.0 \
       --verify-dispatch
 
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
@@ -232,7 +232,7 @@ fi
    echo "Polynomial order:        --order 2 + --ader-order 3 (canonical Pelties 𝒪3)"
    echo "Iterator:                one-shot (default; substep is np=1-only until R-1003)"
    echo "Partition:               default ParMETIS"
-   echo "tfinal:                  2.0 s"
+   echo "tfinal:                  12.0 s"
    echo "f_w (compiled):          $(echo "${F_W_LINE}" | grep -oE '[01]\.[0-9]+' | head -1)"
    echo ""
    echo "peak |V_strike| at hypo  : ${PEAK_V_HYPO} m/s at t = ${PEAK_T_HYPO} s"
@@ -241,7 +241,7 @@ fi
    echo "peak |σ_n − 120 MPa| at hypo : ${SIGMA_N_PERTURB_HYPO} Pa"
    echo "σ_n verdict                  : ${SIGMA_N_VERDICT}"
    echo ""
-   echo "slip_dip at hypocenter (t=2s)  : ${SLIP_DIP_END} m"
+   echo "slip_dip at hypocenter (t=12s) : ${SLIP_DIP_END} m"
    echo "  symmirror P=2 dx=500m local  : -5.80e-05 m (174× reduction vs P=1)"
    echo "slip_dip verdict             : ${SLIP_DIP_VERDICT}"
    echo ""
