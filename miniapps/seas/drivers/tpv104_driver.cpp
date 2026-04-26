@@ -45,6 +45,7 @@
 #include <cstring>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
 #include <iostream>
 #include <limits>
 #include <climits>
@@ -622,6 +623,40 @@ int main(int argc, char *argv[])
                 << nprocs << " ranks\n";
    }
 
+   // H_α diagnostic: dump per-rank local-element-order vs physical
+   // y-coordinate so we can detect when MFEM's re-ordering breaks the
+   // y-mirror-pairing within a single rank's local domain.  Gated by
+   // env var SEAS_DIAG_PARMESH_ORDER=1.
+   if (std::getenv("SEAS_DIAG_PARMESH_ORDER") != nullptr)
+   {
+      // Each rank writes its local element centroids to a sidecar file:
+      //   /tmp/parmesh_order_rank<R>.txt with lines:
+      //     local_id  cx  cy  cz
+      // Then offline we compare across ranks for the y-mirror property.
+      char fname[256];
+      std::snprintf(fname, sizeof(fname),
+                    "/tmp/parmesh_order_rank%d_np%d.txt", rank, nprocs);
+      std::ofstream ofs(fname);
+      ofs.precision(15);
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         ElementTransformation *Tr = pmesh.GetElementTransformation(e);
+         IntegrationPoint ip;
+         ip.x = ip.y = ip.z = 0.25;   // tet barycentre in reference
+         Vector phys(3);
+         Tr->Transform(ip, phys);
+         ofs << e << " " << phys(0) << " " << phys(1)
+             << " " << phys(2) << "\n";
+      }
+      ofs.close();
+      if (rank == 0)
+      {
+         std::cout << "[diag-order] Wrote per-rank local element "
+                   << "ordering to /tmp/parmesh_order_rank*_np"
+                   << nprocs << ".txt" << std::endl;
+      }
+   }
+
    // -----------------------------------------------------------------------
    // 2. Boundary conditions
    // -----------------------------------------------------------------------
@@ -1035,6 +1070,74 @@ int main(int argc, char *argv[])
 
    MFEM_VERIFY(wave.GetAbsorbingBackground() != nullptr,
                "tpv104_driver: SetAbsorbingBackground(Q_bg=0) not called.");
+
+   // R-403 PROBE: end-to-end y-mirror test of the wave operator.
+   // Triggered by SEAS_DIAG_R403=1.  Bypasses the time loop entirely:
+   //   - Q = 0 (already)
+   //   - tau*_nuc = 0 (no nucleation injected; Q stays zero in bulk)
+   //   - call wave.Mult(Q, dQdt) once
+   //   - dump dQdt per-DOF with physical position to a text file
+   //   - exit
+   // Post-processing (separate Python) verifies that for every
+   // (+y, -y) DOF mirror pair, the channel-signed antisymmetric-mirror
+   // relation holds at FP-bit precision.  This is a STRICT SUPERSET of
+   // probing CalcOrtho normals: a PASS rules out every operator-side
+   // mirror leak (CalcOrtho, Loc1.Transform, CalcShape, face-flux
+   // accumulation order, Elem1/Elem2 assignment, etc.).
+   {
+      const char *r403 = std::getenv("SEAS_DIAG_R403");
+      if (r403 && r403[0] != '\0' &&
+          !(r403[0] == '0' && r403[1] == '\0'))
+      {
+         Vector dQdt(NUM_STATE * ndof_total);
+         dQdt = 0.0;
+         wave.Mult(Q, dQdt);
+
+         std::ostringstream pathss;
+         pathss << output_dir << "/r403_rhs_rank" << rank << ".txt";
+         std::ofstream fs(pathss.str());
+         if (fs.is_open())
+         {
+            fs << std::scientific << std::setprecision(17);
+            fs << "# columns: dof_global_idx x y z channel value\n";
+            const int ne_local = pmesh.GetNE();
+            const int ndof_per_el = wave.GetFESpace().GetFE(0)->GetDof();
+            for (int e = 0; e < ne_local; e++)
+            {
+               const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+               ElementTransformation *Tr =
+                  wave.GetFESpace().GetElementTransformation(e);
+               const IntegrationRule &nodes = fe->GetNodes();
+               for (int i = 0; i < ndof_per_el; i++)
+               {
+                  const IntegrationPoint &ip = nodes.IntPoint(i);
+                  Tr->SetIntPoint(&ip);
+                  Vector x(3);
+                  Tr->Transform(ip, x);
+                  const int dof_global = e * ndof_per_el + i;
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     fs << dof_global << " "
+                        << x(0) << " " << x(1) << " " << x(2) << " "
+                        << c << " "
+                        << dQdt[c * ndof_total + dof_global] << "\n";
+                  }
+               }
+            }
+            fs.close();
+         }
+         if (rank == 0)
+         {
+            std::cout << "[R-403] dumped per-DOF rhs to "
+                      << output_dir << "/r403_rhs_rank<R>.txt\n"
+                      << "[R-403] exiting after probe.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 0;
+      }
+   }
 
    if (rank == 0)
    {
@@ -1539,6 +1642,43 @@ int main(int argc, char *argv[])
    surface_writer.Flush();
    surface_writer.Close();
    Tpv104SubStepIterator::CloseAllProbeFiles();
+
+   // Diagnostic dump: end-of-run per-fault-QP state, gated by env var.
+   // Writes <output_dir>/fault_qp_dump_rank<R>.txt, one row per local
+   // fault QP.  No MPI calls; each rank writes only its own file.
+   {
+      const char *dump_env = std::getenv("SEAS_DIAG_DUMP_FAULT_QPS");
+      if (dump_env && dump_env[0] != '\0' &&
+          !(dump_env[0] == '0' && dump_env[1] == '\0'))
+      {
+         std::ostringstream pathss;
+         pathss << output_dir << "/fault_qp_dump_rank" << rank << ".txt";
+         std::ofstream fs(pathss.str());
+         if (fs.is_open())
+         {
+            fs << std::scientific << std::setprecision(17);
+            fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
+                  "tau1_corr tau2_corr sigma_n_corr psi\n";
+            const int n = static_cast<int>(dof_data.size());
+            for (int i = 0; i < n; i++)
+            {
+               const Vector &c = fault_coords[i];
+               const DOFData &d = dof_data[i];
+               fs << i << " " << c(0) << " " << c(1) << " " << c(2)
+                  << " " << d.V1 << " " << d.V2
+                  << " " << d.slip1 << " " << d.slip2
+                  << " " << d.tau1_corr << " " << d.tau2_corr
+                  << " " << d.sigma_n_corr << " " << d.psi << "\n";
+            }
+            fs.close();
+            if (rank == 0)
+            {
+               std::cout << "[diag-dump] wrote " << n
+                         << " fault QPs to fault_qp_dump_rank<R>.txt\n";
+            }
+         }
+      }
+   }
 
    if (rank == 0)
    {

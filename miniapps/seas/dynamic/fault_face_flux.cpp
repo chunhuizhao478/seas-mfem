@@ -117,6 +117,39 @@ void FaultFaceFlux::ComputeStageState(const DOFData &data,
    }
 
    CompleteFromTrial(data, s, method);
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   // R-501 probe: full per-call diagnostic at the hypocenter QP.
+   // Gated by SEAS_DIAG_FAULT_FLUX (build) AND SEAS_DIAG_V1_DRIFT
+   // (runtime) AND data.diag_print (single DOF).  Prints AFTER
+   // CompleteFromTrial so all derived quantities (V_abs, V1, V2,
+   // tau1_corr, tau2_corr) are populated.  One line per Evaluate
+   // call on the hypo QP — no MPI, single rank.  Sequence number
+   // `seq` is a process-local counter that lets post-processing
+   // sort calls in temporal order even when ADER substeps interleave.
+   if (data.diag_print)
+   {
+      static const bool probe_enabled = []() {
+         const char *e = std::getenv("SEAS_DIAG_V1_DRIFT");
+         return e && e[0] != '\0' &&
+                !(e[0] == '0' && e[1] == '\0');
+      }();
+      if (probe_enabled)
+      {
+         static long long seq = 0;
+         ++seq;
+         std::fprintf(stderr,
+            "[R-501] seq=%lld  tau1_trial=%+.17e  tau2_trial=%+.17e  "
+            "V_abs=%+.17e  Theta=%+.17e  V1=%+.17e  V2=%+.17e  "
+            "tau1_corr=%+.17e  tau2_corr=%+.17e  "
+            "Qp_VY=%+.17e  Qm_VY=%+.17e  Qp_SXY=%+.17e  Qm_SXY=%+.17e\n",
+            seq, s.tau1_trial, s.tau2_trial,
+            s.V_abs, s.Theta, s.V1, s.V2,
+            s.tau1_corr, s.tau2_corr,
+            Q_plus[VY], Q_minus[VY], Q_plus[SXY], Q_minus[SXY]);
+      }
+   }
+#endif
 }
 
 void FaultFaceFlux::CompleteFromTrial(const DOFData &data,
@@ -173,13 +206,36 @@ void FaultFaceFlux::CompleteFromVabs(const DOFData &data,
       real_t f_V = data.a * std::asinh(s.V_abs * C);
       real_t strength = std::abs(s.sigma_n_total) * f_V;
 
-      // Slip rate decomposition (Eq. 9)
-      s.V1 = s.V_abs * (s.tau1_total) / (strength + data.eta_s * s.V_abs);
-      s.V2 = s.V_abs * (s.tau2_total) / (strength + data.eta_s * s.V_abs);
+      // H2 experiment (env-var SEAS_FORCE_V1_ZERO).  For pure-strike-slip
+      // configurations (TPV104: tau1_0 = 0, tau1_nuc = 0, ideal V1 ≡ 0)
+      // the closed-loop V1 amplification is structurally unstable: a 1-ULP
+      // perturbation in tau1_total grows by ~1.07 per step during rupture,
+      // reaching cm-scale slip_dip in ~1 s.  Locking V1 = 0 routes all
+      // V_abs into V2 and zeros the dip-channel friction reaction,
+      // breaking the loop at the friction-decomposition layer.  This is
+      // the antiplane formulation; correct only for strike-slip.
+      static const bool v1_zero_lock = []() {
+         const char *e = std::getenv("SEAS_FORCE_V1_ZERO");
+         return e && e[0] != '\0' &&
+                !(e[0] == '0' && e[1] == '\0');
+      }();
+      if (v1_zero_lock)
+      {
+         s.V1 = 0.0;
+         s.V2 = (s.tau2_total >= 0.0 ? +1.0 : -1.0) * s.V_abs;
+         s.tau1_corr = 0.0;
+         s.tau2_corr = s.tau2_trial - data.eta_s * s.V2;
+      }
+      else
+      {
+         // Slip rate decomposition (Eq. 9)
+         s.V1 = s.V_abs * (s.tau1_total) / (strength + data.eta_s * s.V_abs);
+         s.V2 = s.V_abs * (s.tau2_total) / (strength + data.eta_s * s.V_abs);
 
-      // Step 4: Corrected traction (Eq. 10)
-      s.tau1_corr = s.tau1_trial - data.eta_s * s.V1;
-      s.tau2_corr = s.tau2_trial - data.eta_s * s.V2;
+         // Step 4: Corrected traction (Eq. 10)
+         s.tau1_corr = s.tau1_trial - data.eta_s * s.V1;
+         s.tau2_corr = s.tau2_trial - data.eta_s * s.V2;
+      }
    }
 }
 

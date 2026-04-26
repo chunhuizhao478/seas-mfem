@@ -1,586 +1,528 @@
-# Code Review: 2026-04-23 Round 10 — §K Round-9 Frozen-Friction + dt-Refinement Verdict
+# Code Review: 2026-04-25 — Remove Option 3 (cfm_trim) and produce overlap-free subset meshes
 
 ## Review Scope
-- Plan: `phase1_arm1_findings_2026-04-23.md` §K (round-9 deliverable, three-option verdict).
-- New artifacts:
-  - `phase2e_r9_freezeC_kuhn.txt`, `phase2e_r9_freezeC_d4.txt` (raw logs).
-- Domain context: REVIEW round 9 R-001..R-006, prior rounds 1-8,
-  CLAUDE.md (Tandem reference), MEMORY rules.
+- Plan: `miniapps/seas/safs/PLAN_smoke_millcreek.md` (smoke + bug catalog), follow-up directive in conversation: "remove Option 3 and just build meshes without any overlap".
+- Files reviewed:
+  - `miniapps/seas/safs/mesh/cfm_trim.py` (436 lines, to be deleted)
+  - `miniapps/seas/safs/mesh/run_full_2000m.sh` (94 lines, calls cfm_trim — must change)
+  - `miniapps/seas/safs/mesh/generate_safs_mesh.py` (457 lines, `_combine_stls` and includes-writer)
+  - `miniapps/seas/safs/mesh/audit_ts_quality.py` (overlap-pair detection — KEEP, used by ts_to_stl)
+  - `miniapps/seas/safs/mesh/ts_to_stl.py` (`--repair-overlaps` — KEEP, single-fault repair is still useful)
+- Domain context: project `CLAUDE.md`, `miniapps/seas/CLAUDE.md`, `miniapps/seas/safs/PLAN.md`, `PLAN_origin.md`, `PLAN_domain.md`, `PLAN_smoke_millcreek.md`. Diagnostic data from this conversation: 10 fault-pair combinations have 3-D triangle intersections (Mill Creek × SBMT-SAF: 163 pairs, etc.); 18 pair combinations have NO intersection. The drop-only trim cannot make multi-fault assemblies conformal regardless of proximity buffer (verified up to proximity = 2000 m, dropping 17.3% of triangles, still rejected).
 
-## Bottom-line up front
+## Background — what works after the smoke test
 
-**§K is the most epistemically honest deliverable in 9 rounds.**  The
-implementer correctly admits no single-line localization has been
-found, identifies the seed-hunting pattern as exhausted, and presents
-three options for the user to decide.
+| status | item |
+| --- | --- |
+| ✓ | `safs_origin.py` + `transform.schema.json` |
+| ✓ | `audit_ts_quality.py` (with `n_overlap_pairs` metric — KEEP) |
+| ✓ | `ts_to_stl.py` (with `--repair-overlaps` flag for in-fault overlap pairs — KEEP) |
+| ✓ | `safs.geo` (single-fault Embed pipeline) |
+| ✓ | `generate_safs_mesh.py` (single-fault path) |
+| ✓ | `write_fault_provenance.py`, `validate_msh.py`, `convert_msh.py` |
+| ✓ | `run_smoke_millcreek.sh` (passes 10/10 smoke checks) |
+| ✗ | `cfm_trim.py` — removable per user directive |
+| ✗ | `run_full_2000m.sh` — calls cfm_trim, must change |
+| partial | `_combine_stls` in `generate_safs_mesh.py` — written for 8-fault path but still useful for any multi-fault subset; works but writes output to the input dir (R-005) |
 
-**But the §K options are NOT equivalent in information gain.**  Two
-critical empirical anomalies in §K's data + one option-mislabeling
-mean the user, if presented the three options as currently framed,
-would likely pick a path that doesn't disambiguate the underlying
-question.
+## Conflict graph (which fault pairs cross in 3-D)
 
-The recommendation is straightforward: **Option X (Tandem benchmark)
-first**, defer Y/Z.  Option X is the only one that can disprove the
-"diffuse-noise floor" hypothesis — and disproving it is the only way
-to redirect the investigation toward an actual fix.  Y can wait;
-Z (accept the floor + adjust gate) is Direction D in disguise, which
-the user already rejected.
+From the diagnostic earlier in this conversation, the 10 fault pairs whose triangulations cross in 3-D:
+
+```
+1.  safs_coav_missioncreek    × safs_mult_ssaf_banning   ( 26)
+2.  safs_coav_missioncreek    × safs_sbmt_missioncreek   ( 28)
+3.  safs_mjvs_saf             × safs_sbmt_saf            (  8)
+4.  safs_mult_banning         × safs_sbmt_saf            ( 11)
+5.  safs_pmfz_pinto           × safs_sbmt_millcreek      ( 42)
+6.  safs_pmfz_pinto           × safs_sbmt_missioncreek   ( 18)
+7.  safs_pmfz_pinto           × safs_sbmt_saf            ( 20)
+8.  safs_sbmt_millcreek       × safs_sbmt_missioncreek   ( 41)
+9.  safs_sbmt_millcreek       × safs_sbmt_saf            (163)
+10. safs_sbmt_missioncreek    × safs_sbmt_saf            (135)
+```
+
+A complete partition of all 8 faults into mutually-non-overlapping subsets:
+
+| subset | members | size |
+|---|---|---|
+| **NW**  | `safs_mjvs_saf`, `safs_pmfz_pinto`, `safs_mult_banning`, `safs_mult_ssaf_banning` | 4 |
+| **South** | `safs_sbmt_saf`, `safs_coav_missioncreek` | 2 |
+| **Mill** | `safs_sbmt_millcreek` | 1 |
+| **MissionSBMT** | `safs_sbmt_missioncreek` | 1 |
+
+Verification (subset NW): MJVS×Pinto, MJVS×Banning, MJVS×SSAF-Banning, Pinto×Banning, Pinto×SSAF-Banning, Banning×SSAF-Banning — none of the 6 pairs is in the conflict list. ✓
+
+Verification (subset South): SBMT-SAF×COAV — not in the conflict list. ✓
+
+Per the user directive, the new wrapper `run_subsets_2000m.sh` should build these 4 subset meshes independently. Each subset goes through the existing pipeline (audit → ts_to_stl → generate_safs_mesh → provenance → validate → convert) with `--include-fault` constrained to the subset's members.
+
+## Findings
 
 ---
 
-## Findings (Round 10)
+### [R-001] [MODERATE] [cfm_trim.py] — Delete the file (Option 3 abandoned)
 
-### [R-001] [CRITICAL] [phase2e_r9_freezeC_*.txt / dt-exponent -0.17 anomaly] — Pepper WORSENS with smaller dt; this fits neither "sub-resolved physics" nor "per-step injection" cleanly; needs explanation before being used as evidence
-
-**Category:** ASSUMPTION (data interpretation may be wrong)
+**Category:** DEVIATION (user-directed scope reduction)
 
 **Description:**
-§K reports dt-refinement result:
-> dt exponent = -0.17 on BOTH fixtures → NOT sub-resolved physics.
+`cfm_trim.py` (436 lines) implements the simplified drop-only Option 3 trim. Empirical testing in this conversation showed it cannot produce a meshable multi-fault assembly even at proximity = 2000 m (drops 17.3% of triangles, HXT still rejects with 266 missing facets due to T-junctions on the trimmed boundaries). The user has directed to abandon this approach in favor of building per-subset meshes that have no inter-fault overlaps by construction.
 
-Pepper exponent -0.17 means `tau1_corr ∝ dt^(-0.17)`.  As dt → 0
-(more refined), pepper INCREASES weakly.  The implementer correctly
-notes this rules out sub-resolved physics (which would give positive
-exponent — pepper decreases as dt → 0, since the under-resolved
-instability frequency scales with dt).
+The geometric primitives in this file (`tri_tri_intersect_3d`, `edge_pierces_tri`, `_point_to_tri_distance`, `seg_seg_cross_2d`) are correct and could in principle be reused by a future proper Option 3 (with triangle splitting), but per the directive there is no caller for them now. Keeping them as dead code creates maintenance burden and confuses future readers about whether multi-fault overlaps "are handled".
 
-But the negative exponent is unusual and the implementer doesn't
-explain WHY pepper grows with refinement.  Two distinct mechanisms
-predict negative exponents, with very different interpretations:
+**Trigger:** running `bash run_full_2000m.sh` invokes `cfm_trim`, which produces a mesh-input that HXT rejects.
 
-(M1) **Per-step ULP injection accumulating linearly in N=t/dt.**  If
-the source injects ULP-magnitude noise per step regardless of dt,
-total noise after fixed simulation time `t` scales as N·ULP = t/dt·ULP
-→ pepper ∝ dt^(-1).  Pure per-step injection gives exponent -1.
+**Actual behavior:** wrapper invokes cfm_trim → produces stl_trimmed → gmsh fails. End-to-end build never produces a valid mesh.
 
-(M2) **Numerical drift in the friction-solver tolerance.**  Brent's
-method tolerance is typically a fixed value (~1e-8); per-iteration
-work is the same regardless of dt.  Smaller dt = more friction calls
-(N times), so cumulative drift scales as N · drift_per_call.  Same
-exponent -1.
+**Expected behavior:** the cfm_trim stage does not exist; instead the user runs the new subset wrapper (R-003).
 
-(M3) **Mixed mechanism.**  Per-step injection (M1, exponent -1)
-combined with amplitude saturation at large N (exponent +1) gives a
-net intermediate exponent.  -0.17 is consistent with such a mix where
-the saturation barely beats the injection.
-
-(M4) **Dimensional artifact.**  The dt-refinement test runs to fixed
-SIMULATION TIME or fixed STEP COUNT?  The two give different scaling.
-At fixed time t = 20·dt_baseline, halving dt doubles N but keeps t
-constant.  Pepper ∝ dt^(-0.17) at fixed t.  At fixed N=20 steps
-(varying simulation time t = 20·dt), pepper would have a very
-different scaling.  The implementer doesn't specify which.
-
-The -0.17 exponent is INFORMATIVE but incompletely interpreted:
-- It does rule out "sub-resolved physics" (would need positive
-  exponent).
-- It does NOT confirm "code bug outside friction and outside ψ"
-  cleanly.  M1, M2, and M3 all predict the observed sign without
-  being a code bug per se.
-- M2 in particular suggests the friction solver IS contributing
-  per-call drift, contradicting §K's matrix-branch verdict.
-
-**Trigger:** The user picks Option Y (authorize FREEZE-A/B) on the
-basis of "amplifier ruled out, must be friction mechanism (FREEZE-A/B
-domain)"; FREEZE-A/B tests then return mixed verdicts because the
-underlying mechanism is per-step injection scaling with N (M1/M2),
-not a "single-line friction bug".
-
-**Actual behavior:** §K reports `-0.17 → NOT sub-resolved physics`
-and stops there.  The negative-but-not-near-(-1) exponent is not
-explained.
-
-**Expected behavior:** Disambiguate M1 vs M2 vs M3 vs M4 before
-relying on the dt-scaling result as Phase 2C-fault evidence.  Two
-specific tests:
-
-1. **Verify dt-scaling test design.**  Document whether dt-refinement
-   runs to fixed t or fixed N.  If fixed-N, repeat with fixed-t (or
-   vice versa) to identify which mechanism is sensitive to which
-   parameter.
-2. **Test friction-call count vs pepper.**  Run the pepper guard at
-   N steps but with the friction solver called once per step (current)
-   vs once every k steps (skip friction on intermediate steps).  If
-   pepper scales with friction-call count, M2 (friction-solver per-call
-   drift) is confirmed.  If it doesn't, M1 (per-step injection from
-   another source) stands.
-
-**Suggested fix (documentation only):**
+**Suggested fix:** delete the file.
 ```diff
-@@ phase1_arm1_findings_2026-04-23.md §K dt-refinement section
-- dt exponent = -0.17 on BOTH fixtures → NOT sub-resolved physics.
-+ dt exponent = -0.17 on BOTH fixtures.
-+
-+ Sign analysis:
-+ - Positive exponent (pepper drops as dt → 0): would indicate
-+   sub-resolved physics.  RULED OUT.
-+ - Exponent near -1: would indicate per-step injection (per-call
-+   ULP noise accumulating linearly in N).
-+ - Observed exponent -0.17: between zero and -1.  Compatible with
-+   either (a) per-step injection partially saturated at large N,
-+   (b) mixed injection + amplification mechanism, or (c) test-design
-+   artifact (fixed-time vs fixed-step scaling).
-+
-+ Open: which scaling protocol was used (fixed t = 20·dt_baseline,
-+ varying N; vs fixed N=20, varying t)?  Re-run with the alternate
-+ protocol to disambiguate.
-+
-+ Open: friction-call-count test (run pepper guard with friction
-+ called every k steps) — distinguishes per-call drift (friction
-+ contributes ULP each invocation) from per-step injection (some
-+ other source contributes per step regardless of friction calls).
+- miniapps/seas/safs/mesh/cfm_trim.py
 ```
 
 **Test case:**
-```cpp
-// tests/unit/test_R001_round10_dt_friction_call_count.cpp
-TEST(R001Round10, PepperScalesWithFrictionCallCountNotJustDt) {
-   for (int friction_skip : {1, 2, 4}) {  // call friction every k steps
-      auto pepper = RunPepperGuardWithFrictionSkip("kuhn",
-                                                     friction_skip);
-      std::cout << "friction skip=" << friction_skip
-                << ": tau1_corr=" << pepper.tau1_corr << "\n";
-   }
-   // If pepper drops by ~k× when friction is called 1/k as often,
-   // friction is contributing per-call drift (M2).  If invariant,
-   // M1 stands.
-}
+```bash
+test "$(ls miniapps/seas/safs/mesh/cfm_trim.py 2>&1 | grep -c 'No such file')" = "1"
 ```
 
 ---
 
-### [R-002] [CRITICAL] [phase2e_r9_freezeC_*.txt / FREEZE-C ratio = 1.0000 exactly] — Both fixtures report ratio = exactly 1.0000; either ψ has no effect (genuine but surprising) OR the FREEZE-C implementation is a no-op (test bug)
+### [R-002] [MODERATE] [run_full_2000m.sh] — Delete the failing 8-fault wrapper
 
-**Category:** ASSUMPTION (verification needed)
+**Category:** DEVIATION (replaced by subset wrapper, R-003)
 
 **Description:**
-§K reports:
-> FREEZE-C ratio = 1.0000 on BOTH fixtures → ψ rate-state feedback
-> NOT amplifier.
+`run_full_2000m.sh` is the 7-stage wrapper that invokes `cfm_trim`. Even with cfm_trim removed, building all 8 CFM faults into a single mesh is infeasible (the diagnostic showed 10 pairs with genuine 3-D triangulation crossings). Leaving this script in the repo as-is is misleading: it advertises an 8-fault assembly that does not work.
 
-Ratio = exactly 1.0000 (4 decimal places, no perturbation) on BOTH
-fixtures is suspicious.  If FREEZE-C made ANY change to the simulation
-state, the result should differ by SOMETHING — even at machine
-precision.  The exact-1.0000 result has three explanations:
+**Trigger:** anyone running `bash run_full_2000m.sh` after R-001 will see Stage 3/7 fail because `cfm_trim.py` no longer exists; if R-001 is reverted, the gmsh stage fails with "missing facets".
 
-(A) **Genuine: ψ literally doesn't change between steps in this 20-step
-    test, so freezing it is a no-op.**  Possible if the rupture drive
-    is short enough that ψ updates by < 1 ULP per step.  But: under
-    `tau2_nuc = nuc_dtau` rupture drive over 20 steps with dt=5e-5,
-    `psi` should evolve measurably (rate-state evolution at high V is
-    fast).  Verify by printing ψ before and after the 20-step run.
+**Actual behavior:** advertises 8-fault assembly that produces no valid mesh.
 
-(B) **Test bug: the FREEZE-C implementation is a no-op.**  If the
-    implementation didn't actually freeze ψ (e.g., wrong field hooked,
-    or freeze was applied to a copy that gets reset), the test ran
-    standard physics and reported the standard result vs itself →
-    ratio = 1.0000.  The "verdict: ψ NOT amplifier" would then be
-    based on a non-test.
+**Expected behavior:** the file does not exist; the user runs `run_subsets_2000m.sh` (R-003) which builds 4 separate meshes.
 
-(C) **Pepper is fully determined by quantities ψ doesn't affect.**
-    Genuine result: ψ enters the friction solve as
-    `theta = exp(psi/a)/(2V0)`, but if Theta dominates (high V,
-    rupture phase), the V_abs solution is essentially independent of
-    `theta` for this regime.  Possible at high V where the
-    `eta_s·V` term dominates `strength·f(V)`.
-
-The implementer's verification report doesn't show the ψ values to
-prove (A) or rule out (B).  An exact 1.0000 result calls for direct
-verification.
-
-**Trigger:** The user picks Option Y or Z based on the "ψ NOT
-amplifier" verdict; the verdict is actually a no-op test; round 10
-or 11 discovers ψ IS the amplifier and the diagnostic was broken.
-
-**Actual behavior:** Ratio = 1.0000 reported as evidence; no
-verification of whether ψ values actually differed.
-
-**Expected behavior:** Print ψ at step 0 and step 20 in BOTH baseline
-AND FREEZE-C runs.  If baseline ψ at step 20 differs from step 0 (ψ
-DID evolve), and FREEZE-C ψ at step 20 EQUALS step 0 (freeze took
-effect), the result is genuine.  If baseline ψ doesn't evolve, the
-test is too short.  If FREEZE-C ψ ALSO evolved, the freeze didn't
-take.
-
-**Suggested fix:**
-Add to the test:
+**Suggested fix:** delete the file.
 ```diff
-@@ tests/unit/test_r9_frozen_friction_C.cpp main()
-+   // R-002 round 10 verification: confirm FREEZE-C actually froze ψ.
-+   // If baseline ψ_step20 == ψ_step0 (no evolution), test is too short.
-+   // If FREEZE-C ψ_step20 != ψ_step0 (freeze did NOT take), the test
-+   // is broken and the "ψ not amplifier" verdict is unsupported.
-+   std::cout << "  baseline ψ at step 0:  " << dof_data_baseline[0].psi << "\n";
-+   std::cout << "  baseline ψ at step 20: " << dof_data_baseline[0].psi_after_20 << "\n";
-+   std::cout << "  FREEZE-C ψ at step 0:  " << dof_data_freezeC[0].psi << "\n";
-+   std::cout << "  FREEZE-C ψ at step 20: " << dof_data_freezeC[0].psi_after_20 << "\n";
-+   ASSERT_NE(dof_data_baseline[0].psi_after_20, dof_data_baseline[0].psi)
-+      << "Baseline ψ did not evolve — test is too short to exercise ψ feedback.";
-+   ASSERT_EQ(dof_data_freezeC[0].psi_after_20, dof_data_freezeC[0].psi)
-+      << "FREEZE-C ψ did evolve — freeze did NOT take effect.";
+- miniapps/seas/safs/mesh/run_full_2000m.sh
 ```
 
-**Test case:** The verification print itself.
-
----
-
-### [R-003] [CRITICAL] [phase1_arm1_findings_2026-04-23.md §K Option Y framing] — Option Y is described as "authorize FREEZE-A/B flux-layer modifications", but FREEZE-A/B are TEST-LEVEL interventions; they do not require flux-layer freeze unblock
-
-**Category:** BUG (option mislabeled, may falsely block diagnostic)
-
-**Description:**
-§K presents Option Y:
-> Option Y (freeze unblock required): authorize FREEZE-A/B flux-layer
-> modifications.
-
-Per round-9 R-003's specification, FREEZE-A and FREEZE-B are
-implemented as test-level wrappers around the friction-solve call
-site:
-- FREEZE-A: skip the `fault_flux_->Evaluate(...)` call in
-  `tpv102_driver.cpp`'s RK4 loop; substitute `tau*_corr = tau*_trial,
-  V = 0`.
-- FREEZE-B: cache the step-1 `dof_data` after one Evaluate call;
-  reuse cached values at subsequent steps without calling Evaluate.
-
-Neither modifies `FaultFaceFlux::Evaluate`, `wave_operator.inl`'s
-fault dispatch, `PrecomputedFaceFluxes`, or any production flux-layer
-code.  Both modify ONLY:
-- `tpv102_driver.cpp` (test-driver scope; not production), AND/OR
-- A new test binary that calls the production code differently.
-
-The flux-layer freeze (per §C R-006) covers production code changes
-to `wave_operator.inl`, `PrecomputedFaceFluxes`, `FaultFaceFlux`, etc.
-It does NOT cover test-level wrappers around production functions.
-
-By mislabeling Option Y as requiring freeze unblock, §K artificially
-blocks a freeze-allowed diagnostic.  The user might decline Option Y
-on the basis "I don't want to authorize flux-layer changes" when in
-fact Option Y is identical in scope to the round-9 FREEZE-C work that
-was already done.
-
-**Trigger:** User reads "freeze unblock required" and declines Option
-Y; instead picks Option X or Z; the next-most-informative diagnostic
-is skipped on a process technicality.
-
-**Actual behavior:** Option Y mislabeled.  Round-9 already implemented
-FREEZE-C without unblock authorization; FREEZE-A/B are no different in
-scope.
-
-**Expected behavior:** Re-classify Option Y as freeze-allowed, same
-as Options X and Z.
-
-**Suggested fix:**
-```diff
-@@ phase1_arm1_findings_2026-04-23.md §K options
-- Option Y (freeze unblock required): authorize FREEZE-A/B flux-layer
-- modifications.
-+ Option Y (freeze-allowed): run FREEZE-A and FREEZE-B variants.
-+ Both are test-level wrappers around the friction-solve call site
-+ (analogous in scope to round-9's FREEZE-C); neither modifies
-+ production flux-layer code.  The flux-layer freeze (per §C R-006)
-+ applies to production code changes; test-level wrappers around
-+ production-code call sites are diagnostic and freeze-allowed.
-+
-+ User authorization is only required if FREEZE-A/B verdicts INDICATE
-+ a fix to FaultFaceFlux source code.  Until then, the diagnostic
-+ runs are freeze-allowed.
-```
-
-**Test case:** N/A (process clarification).
-
----
-
-### [R-004] [MODERATE] [phase1_arm1_findings_2026-04-23.md §K Option X / Y / Z framing] — Three options presented as user choice; they're not equivalent in information gain; Option X (Tandem) should be the strong recommendation
-
-**Category:** DEVIATION (decision framing)
-
-**Description:**
-§K presents three options as a user-decision menu.  The framing
-treats them as roughly equivalent paths.  They are not:
-
-| Option | Informs | Decisive? | Info gain |
-|---|---|---|---|
-| X (Tandem benchmark) | Whether ANY MFEM-specific bug exists at this resolution | YES — Tandem clean → bug exists; Tandem dirty → diffuse-noise floor confirmed | HIGH |
-| Y (FREEZE-A/B) | Whether friction MECHANISM contributes (vs ψ which is ruled out) | Partially — verdicts could be ambiguous (per round-9 R-001 mixed-regime concern) | MODERATE |
-| Z (accept floor + adjust gate) | Nothing new | NO — commits to "accept" without further investigation | ZERO |
-
-Option X has the unique property of being able to **disprove** the
-"diffuse-noise floor / no localizable bug" hypothesis.  If Tandem at
-the same 2×2×2 fixture with same ψ-update parameters and same dt
-shows tau1_corr near ULP, then:
-- The diffuse-noise hypothesis is FALSE.
-- A localizable bug DOES exist in MFEM SEAS specifically.
-- The next investigation step is to identify where MFEM and Tandem
-  diverge.
-
-If Tandem shows ~Pa-scale pepper at the same fixture, then:
-- The diffuse-noise hypothesis is supported.
-- The pepper is a discretization-floor artifact common to both
-  codes.
-- Direction D applies (with cross-code validation).
-
-Option X is the **only** option that can falsify §K's diffuse-noise
-hypothesis.  Option Y at best refines the candidate space within
-the assumption that a bug exists.  Option Z assumes no bug exists.
-
-§K should strongly recommend X.  Y can run in parallel if compute
-budget allows.  Z is Direction D — already user-rejected.
-
-**Trigger:** User picks Option Y or Z without running X first; round
-10 spends its budget refining within an unverified hypothesis.
-
-**Suggested fix:**
-```diff
-@@ phase1_arm1_findings_2026-04-23.md §K options
-- Verdict: §K ends with THREE OPTIONS requiring user decision:
-- - Option X (freeze-allowed, recommended): benchmark against Tandem at same fixture resolution.
-- - Option Y (freeze unblock required): authorize FREEZE-A/B flux-layer modifications.
-- - Option Z (freeze-allowed, pragmatic): accept the 2–3 Pa pepper floor at 2×2×2 fixture and adjust unit-test gate tolerance.
-+ Verdict: §K's diffuse-noise hypothesis is consistent with current
-+ data but is NOT proven.  The three options have very different
-+ information-gain profiles:
-+
-+ STRONGLY RECOMMENDED: Option X (Tandem benchmark, freeze-allowed,
-+ ~1 day).  Tandem at the same 2×2×2 / dt / ψ params is the only
-+ test that can disprove the diffuse-noise hypothesis.
-+ - If Tandem clean (tau1_corr ≤ ULP) → bug exists in MFEM SEAS;
-+   round 10 targets the MFEM-vs-Tandem code-path diff.
-+ - If Tandem dirty (tau1_corr ~ Pa) → diffuse-noise hypothesis
-+   confirmed by independent reference implementation.  Consider
-+   Direction D (which user previously rejected, but with new
-+   cross-code evidence).
-+
-+ DEFERRED: Option Y (FREEZE-A/B variants).  Useful if Option X
-+ confirms an MFEM-specific bug; redundant if Option X confirms
-+ diffuse-noise.  Run after X.
-+
-+ NOT RECOMMENDED: Option Z (accept floor + adjust gate).  This is
-+ Direction D, which the user explicitly rejected.  Re-presenting it
-+ as "pragmatic" without new evidence does not change the user's
-+ prior decision.
-```
-
-**Test case:** N/A (recommendation framing).
-
----
-
-### [R-005] [MODERATE] [phase1_arm1_findings_2026-04-23.md §K diffuse-noise hypothesis] — "No uniquely localizable bug exists" is unfalsifiable as currently stated; Option X is the only proposed test that can falsify it
-
-**Category:** ASSUMPTION (epistemic framing)
-
-**Description:**
-§K's honest assessment:
-> the pepper signature is consistent with DIFFUSE per-step numerical
-> noise (NOT a single-line bug).  Rounds 5–9 have each named a
-> target rescinded by the next round — pattern suggests no uniquely
-> localizable bug exists.
-
-This is reasonable inductive reasoning from 5 rounds of failed
-localization.  But "no uniquely localizable bug exists" is not
-falsifiable in the strict Popperian sense — absence of evidence is
-not evidence of absence.  The five rounds show "we couldn't find one
-with these methods", not "one doesn't exist".
-
-Possible alternative hypotheses §K doesn't address:
-- (H1) The bug IS uniquely localizable but at a layer Arm 1 / Phase
-  2D static + amplifier diagnostics don't probe (e.g., MFEM internal
-  element-local mass-matrix lumping, FE-collection orientation
-  tables, MPI ghost-buffer state).
-- (H2) The bug is in a code path that's BIT-EXACT under the test
-  fixtures (which is why the diagnostics never see it) but
-  ULP-noisy under production-scale conditions.  Not measurable on
-  the 2×2×2 fixture but real at TPV102 scale.
-- (H3) The bug is a missing term (not an incorrect term) — e.g., a
-  consistent-mass-matrix correction that should be applied but isn't.
-  Diagnostics that compare existing terms can't see a missing term.
-
-Option X (Tandem benchmark) is the only proposed test that can
-disprove the diffuse-noise hypothesis without needing to enumerate
-H1/H2/H3.  Tandem at the same fixture with bit-exact-equivalent
-inputs would either show pepper (confirms diffuse-noise) or not
-(falsifies it).
-
-**Suggested fix:**
-```diff
-@@ phase1_arm1_findings_2026-04-23.md §K honest assessment
-- Honest assessment: the pepper signature is consistent with DIFFUSE
-- per-step numerical noise (NOT a single-line bug).  Rounds 5–9 have
-- each named a target rescinded by the next round — pattern suggests
-- no uniquely localizable bug exists.
-+ Honest assessment: the pepper signature is consistent with DIFFUSE
-+ per-step numerical noise.  This hypothesis is supported by 5 rounds
-+ of failed localization (rounds 5-9 each named a target rescinded
-+ by the next round) but is NOT proven.
-+
-+ Alternative hypotheses not yet ruled out:
-+ - The bug is at a code layer Arm 1 / Phase 2D doesn't probe
-+   (mass-matrix lumping, FE-collection orientation tables, MPI
-+   ghost state).
-+ - The bug is bit-exact-clean on the 2×2×2 fixture but ULP-noisy
-+   at production scale.
-+ - The bug is a MISSING term (consistent-mass correction, etc.) —
-+   diagnostics that compare existing terms cannot see this.
-+
-+ Option X (Tandem benchmark) is the unique test that can falsify
-+ the diffuse-noise hypothesis without enumerating these
-+ alternatives.  Recommend X first.
+**Test case:**
+```bash
+test "$(ls miniapps/seas/safs/mesh/run_full_2000m.sh 2>&1 | grep -c 'No such file')" = "1"
 ```
 
 ---
 
-### [R-006] [LOW] [phase1_arm1_findings_2026-04-23.md §K user-decision framing] — After 5 rounds of failed seed-hunting, asking the user to choose without a clear recommendation pushes ownership of an investigative decision to a non-investigator
+### [R-003] [CRITICAL] [run_subsets_2000m.sh] — Add the new subset-wrapper (does not exist)
 
-**Category:** QUALITY (process)
+**Category:** DEVIATION (new feature required to honor the directive)
 
 **Description:**
-§K's closing:
-> Please indicate which option to pursue for round 10: X (Tandem
-> benchmark), Y (authorize FREEZE-A/B), or Z (accept floor + adjust
-> gate).
+The user directive "build meshes without any overlap" requires a wrapper that runs the existing per-subset pipeline once per overlap-free subset. The 4 subsets are listed at the top of this REVIEW.md. Each subset is built into its own output directory under `miniapps/seas/safs/mesh/output/subset_<name>_2000m/`.
 
-After 5 rounds of investigation, the implementer has the deepest
-context for which option will yield the most information.  Asking
-the user to choose without a recommendation:
-- Defers an investigative decision to a non-investigator.
-- Spreads decision overhead across the user's time budget.
-- Invites the user to pick based on time/cost considerations rather
-  than information-gain.
+For subsets with one fault (Mill, MissionSBMT), the existing single-fault path used by `run_smoke_millcreek.sh` is reused verbatim. For subsets with two or more faults (NW with 4 faults, South with 2 faults), the existing `_combine_stls` step in `generate_safs_mesh.py` handles the conformity-via-shared-vertex requirement. **Note**: the multi-fault path of `_combine_stls` has not been validated end-to-end after R-005/R-006/R-007 land; the wrapper must do at minimum a smoke validation that every subset produces a `.msh` with the expected BP5 tag inventory. Use `validate_msh.py` for this.
 
-A better framing: implementer recommends Option X with reasoning;
-user can override if Tandem isn't installed/accessible OR if the
-user wants to commit to Y/Z directly.
+**Trigger:** running `bash run_subsets_2000m.sh` from a clean repo.
 
-Per CLAUDE.md, Tandem is a primary reference for SEAS implementation
-(`Always refer to Tandem code at /Users/chunhuizhao/projects/tandem`).
-The Tandem benchmark is institutionally established as the validation
-path; recommending Option X aligns with project guidance.
+**Actual behavior:** file does not exist.
+
+**Expected behavior:** the wrapper builds 4 subset meshes, each passing all `validate_msh.py` checks (the 1-fault subsets via the single-fault Embed path; the 4-fault NW and 2-fault South subsets via the combined-STL path).
+
+**Suggested fix:** create the file at `miniapps/seas/safs/mesh/run_subsets_2000m.sh` with the contents below, and `chmod +x` it.
+
+```bash
+#!/usr/bin/env bash
+# Build 4 overlap-free SAFS subset meshes at 2000 m.  Each subset's faults
+# are mutually non-intersecting (verified against the 3-D triangle-triangle
+# intersection scan in REVIEW.md's conflict graph).
+#
+# Per-subset outputs:  output/subset_<name>_2000m/
+#                          ├── stl/
+#                          ├── transform.json
+#                          ├── bbox.json
+#                          ├── cleanup_log_2000m.csv
+#                          └── output/
+#                              ├── safs_subset_<name>_2000m.msh
+#                              ├── safs_subset_<name>_2000m.vtu   (ParaView)
+#                              ├── safs_subset_<name>_2000m.xml   (Dolfin)
+#                              ├── safs_subset_<name>_2000m_facet_region.xml
+#                              ├── domain_box.json
+#                              ├── sizing.json
+#                              ├── fault_provenance.json
+#                              └── validation_report.txt
+#
+# Usage:
+#     conda activate pythonenv
+#     bash miniapps/seas/safs/mesh/run_subsets_2000m.sh
+set -euo pipefail
+cd "$(dirname "$0")"
+
+RES="${SAFS_RES:-2000}"
+CLEARANCE="${SAFS_CLEARANCE:-100}"
+RES_F="${SAFS_RES_F:-2000}"
+RES_FF="${SAFS_RES_FF:-25000}"
+RAMP="${SAFS_RAMP:-35000}"
+BUF="${SAFS_BUF:-50000}"
+DEPTH="${SAFS_DEPTH:-50000}"
+CFM_DIR="${SAFS_CFM_DIR:-$HOME/Documents/Earthquake Cycle Modeling of San Andreas Fault System/CFM_data}"
+
+# subset_name : space-separated short_names
+SUBSETS=(
+    "NW:safs_mjvs_saf safs_pmfz_pinto safs_mult_banning safs_mult_ssaf_banning"
+    "South:safs_sbmt_saf safs_coav_missioncreek"
+    "Mill:safs_sbmt_millcreek"
+    "MissionSBMT:safs_sbmt_missioncreek"
+)
+
+for spec in "${SUBSETS[@]}"; do
+    name="${spec%%:*}"
+    members="${spec#*:}"
+    OUTDIR="output/subset_${name}_${RES}m"
+    echo "############# Building subset ${name} (${members}) #############"
+    rm -rf "$OUTDIR"
+    mkdir -p "$OUTDIR/stl" "$OUTDIR/output"
+
+    incl=()
+    for m in $members; do incl+=( --include-fault "$m" ); done
+
+    echo "==> 1/6 audit"
+    python audit_ts_quality.py --cfm-dir "$CFM_DIR" --res "$RES" \
+        "${incl[@]}" --out "$OUTDIR/cfm_audit_${RES}m.csv"
+
+    echo "==> 2/6 ts_to_stl"
+    python ts_to_stl.py --cfm-dir "$CFM_DIR" --res "$RES" \
+        "${incl[@]}" --out-dir "$OUTDIR/stl" \
+        --transform-json "$OUTDIR/transform.json" \
+        --bbox-json "$OUTDIR/bbox.json" \
+        --log-csv "$OUTDIR/cleanup_log_${RES}m.csv" \
+        --free-surface-clearance "$CLEARANCE" --repair-overlaps
+
+    echo "==> 3/6 generate_safs_mesh"
+    python generate_safs_mesh.py "${incl[@]}" \
+        --stl-dir "$OUTDIR/stl" \
+        --bbox-json "$OUTDIR/bbox.json" \
+        --transform-json "$OUTDIR/transform.json" \
+        --buf-x "$BUF" --buf-y "$BUF" --depth "$DEPTH" \
+        --res-f "$RES_F" --res-ff "$RES_FF" --ramp-dist "$RAMP" \
+        -o "$OUTDIR/output/safs_subset_${name}_${RES}m.msh"
+
+    echo "==> 4/6 write_fault_provenance"
+    python write_fault_provenance.py \
+        --msh "$OUTDIR/output/safs_subset_${name}_${RES}m.msh" \
+        --stl-dir "$OUTDIR/stl" \
+        --transform-json "$OUTDIR/transform.json" \
+        "${incl[@]}" --out "$OUTDIR/output/fault_provenance.json"
+
+    echo "==> 5/6 validate_msh"
+    python validate_msh.py \
+        --msh "$OUTDIR/output/safs_subset_${name}_${RES}m.msh" \
+        --transform-json "$OUTDIR/transform.json" \
+        --bbox-json "$OUTDIR/bbox.json" \
+        --provenance-json "$OUTDIR/output/fault_provenance.json" \
+        --domain-box-json "$OUTDIR/output/domain_box.json" \
+        --sizing-json "$OUTDIR/output/sizing.json" \
+        --report "$OUTDIR/output/validation_report.txt" || true
+
+    echo "==> 6/6 convert_msh"
+    python convert_msh.py \
+        --msh "$OUTDIR/output/safs_subset_${name}_${RES}m.msh"
+    echo
+done
+
+echo "All subsets built.  Per-subset outputs:"
+for spec in "${SUBSETS[@]}"; do
+    name="${spec%%:*}"
+    echo "  output/subset_${name}_${RES}m/output/safs_subset_${name}_${RES}m.{msh,vtu,xml}"
+done
+```
+
+**Test case:**
+```python
+def test_R003_subset_wrapper_runs():
+    """All 4 subsets build, each produces a valid .msh + .vtu + .xml,
+    and validate_msh.py reports 10/10 checks pass for each."""
+    import subprocess, os
+    os.chdir("miniapps/seas/safs/mesh")
+    r = subprocess.run(["bash", "run_subsets_2000m.sh"],
+                        capture_output=True, text=True, timeout=900)
+    assert r.returncode == 0, r.stderr
+    for name in ("NW", "South", "Mill", "MissionSBMT"):
+        d = f"output/subset_{name}_2000m/output"
+        assert os.path.exists(f"{d}/safs_subset_{name}_2000m.msh")
+        assert os.path.exists(f"{d}/safs_subset_{name}_2000m.vtu")
+        assert os.path.exists(f"{d}/safs_subset_{name}_2000m.xml")
+        with open(f"{d}/validation_report.txt") as fh:
+            tail = fh.read().splitlines()[-1]
+            assert "10/10" in tail, f"{name}: {tail}"
+```
+
+---
+
+### [R-004] [LOW] [README pointer] — Document the per-subset workflow
+
+**Category:** QUALITY (discoverability)
+
+**Description:**
+The repo has `PLAN_smoke_millcreek.md` and the smoke wrapper, but no top-level pointer explaining "how to build the SAFS mesh in production". After R-001/R-002/R-003 land, a `README.md` next to the wrappers should explain: 8 CFM faults cannot be assembled into a single conformal mesh in this version; instead, 4 spatially-disjoint subsets are built; the partition was determined by the 3-D triangle-triangle intersection scan; future work (proper Option 3 with triangle splitting) would unify the subsets.
+
+**Suggested fix:** create `miniapps/seas/safs/mesh/README.md`:
+
+```markdown
+# SAFS mesh build entry points
+
+| script | purpose |
+|---|---|
+| `run_smoke_millcreek.sh` | end-to-end single-fault smoke test (Mill Creek strand) |
+| `run_subsets_2000m.sh`   | production: 4 overlap-free subset meshes at 2000 m |
+
+The 8 CFM faults cannot be assembled into a single conformal Steiner-
+constraint set with the current pipeline (`Embed`-based, no triangle
+splitting at fault-fault intersections).  Instead, the 8 faults are
+partitioned into 4 mutually-non-overlapping subsets (see the conflict
+graph in REVIEW.md).  Each subset is meshed independently.
+
+Future work: implement proper triangle splitting along fault-fault
+intersection curves so subsets NW + South + Mill + MissionSBMT can be
+unified into a single mesh.  This is the full version of "Option 3"
+described in conversation logs.
+```
+
+**Test case:** none (documentation).
+
+---
+
+### [R-005] [MODERATE] [generate_safs_mesh.py:_combine_stls] — Combined STL is written into the *input* directory
+
+**Category:** BUG
+
+**Description:**
+`_combine_stls` is called with `combined_stl = args.stl_dir / "safs_combined.stl"`. The combined STL is written *into* the input STL directory. Side effects:
+1. A future caller that auto-discovers STLs in `stl-dir` would pick up `safs_combined.stl` as an "input" (today the driver only iterates the explicit `included` list, so the bug is dormant — it activates with the next refactor).
+2. Tools that delete the input dir (e.g., the wrapper's `rm -rf "$OUTDIR/stl"`) destroy the combined STL too — that's fine but conflates "user-provided per-fault inputs" with "pipeline-generated combined output".
+3. Combined STL silently appears in input dir on every multi-fault build with no opt-out flag.
+
+**Trigger:** any multi-fault build (e.g., subset NW or South in R-003).
+
+**Actual behavior:**
+```python
+combined_stl = args.stl_dir / "safs_combined.stl"
+meta = _combine_stls(combined_stl, included, args.stl_dir, ...)
+```
+Writes alongside per-fault STLs.
+
+**Expected behavior:** write into the OUTPUT directory next to `safs_*.msh`.
+
+**Suggested fix:** in `generate_safs_mesh.py:main`, around line ~390 (the `if len(included) > 1` block):
+```diff
+-    if len(included) > 1:
+-        combined_stl = args.stl_dir / "safs_combined.stl"
+-        meta = _combine_stls(combined_stl, included, args.stl_dir,
+-                              snap_m=args.combine_snap_m)
+-        (args.output.parent / "combine_meta.json").parent.mkdir(
+-            parents=True, exist_ok=True)
+-        (args.output.parent / "combine_meta.json").write_text(
+-            json.dumps(meta, indent=2) + "\n"
+-        )
++    if len(included) > 1:
++        args.output.parent.mkdir(parents=True, exist_ok=True)
++        combined_stl = args.output.parent / "safs_combined.stl"
++        meta = _combine_stls(combined_stl, included, args.stl_dir,
++                              snap_m=args.combine_snap_m)
++        (args.output.parent / "combine_meta.json").write_text(
++            json.dumps(meta, indent=2) + "\n"
++        )
+```
+
+**Test case:**
+```python
+def test_R005_combined_stl_in_output_dir(tmp_path):
+    """generate_safs_mesh.py with len(included) >= 2 writes
+    safs_combined.stl next to the .msh, NOT into the input stl-dir."""
+    # Setup tmp_path/stl with 2 valid per-fault STLs.
+    # Setup tmp_path/{transform.json,bbox.json}.
+    # Run generate_safs_mesh.py with --include-fault A --include-fault B
+    #     -o tmp_path/output/m.msh
+    # Assert: tmp_path/output/safs_combined.stl exists
+    # Assert: tmp_path/stl/safs_combined.stl does NOT exist
+```
+
+---
+
+### [R-006] [MODERATE] [generate_safs_mesh.py:_combine_stls] — Each per-fault STL is read twice
+
+**Category:** BUG (correctness-fragile + performance)
+
+**Description:**
+`_combine_stls` calls `_read_ascii_stl(p)` twice per fault: once in the first pass (vertex collection) and once in the second pass (raw-coord recovery via `for short in included: ... verts, tris = _read_ascii_stl(p) ... for v in verts: r = int(inverse[cursor]) ... cursor += 1`).
+
+Two independent reads from disk are an integrity hazard: file could change between reads (extremely unlikely in practice but possible in CI/parallel jobs), and the cursor arithmetic relies on identical vertex counts in both reads. If the second read returns even one different vertex count for any reason, the `inverse` array is misindexed silently and the final triangulation is corrupted.
+
+**Trigger:** any multi-fault build, any time. Today no failure observed because file reads are stable, but the silent-corruption mode is real.
+
+**Actual behavior:** two reads of the same file.
+
+**Expected behavior:** read once, cache, reuse.
 
 **Suggested fix:**
 ```diff
-@@ phase1_arm1_findings_2026-04-23.md §K closing
-- Please indicate which option to pursue for round 10: X (Tandem
-- benchmark), Y (authorize FREEZE-A/B), or Z (accept floor + adjust
-- gate).
-+ Recommended: Option X (Tandem benchmark).  Tandem is the project's
-+ established SEAS reference (per CLAUDE.md), is locally available
-+ at /Users/chunhuizhao/projects/tandem, and Option X is the unique
-+ test that can falsify the diffuse-noise hypothesis.  ~1 day cost.
-+
-+ Override paths (if user prefers not Option X):
-+ - Y (FREEZE-A/B): run as supplemental diagnostic; redundant if X
-+   resolves but useful as parallel evidence.
-+ - Z (accept floor): user already rejected Direction D; not
-+   recommended unless cross-code validation (Option X) confirms
-+   floor-is-floor.
-+
-+ Awaiting user confirmation to proceed with Option X.
++    cache: dict[str, tuple[list, list]] = {}
+     for short in included:
+         p = stl_dir / f"{short}.stl"
+         if not p.exists():
+             raise SystemExit(f"missing STL: {p}")
+         verts, tris = _read_ascii_stl(p)
++        cache[short] = (verts, tris)
+         # ... existing append logic unchanged ...
+     # ...
+     cursor = 0
+     for short in included:
+-        p = stl_dir / f"{short}.stl"
+-        verts, tris = _read_ascii_stl(p)
++        verts, tris = cache[short]
+         for v in verts:
+             r = int(inverse[cursor])
+             if r not in raw_coords:
+                 raw_coords[r] = v
+             cursor += 1
 ```
+
+**Test case:**
+```python
+def test_R006_combine_stls_no_double_read(monkeypatch, tmp_path):
+    """_combine_stls reads each input STL exactly once."""
+    import generate_safs_mesh as gsm
+    call_count = {"n": 0}
+    real_read = gsm._read_ascii_stl
+    def counting(p):
+        call_count["n"] += 1
+        return real_read(p)
+    monkeypatch.setattr(gsm, "_read_ascii_stl", counting)
+    # Setup 2 STLs in tmp_path/stl/, each with a few facets.
+    gsm._combine_stls(tmp_path / "out.stl",
+                       ["a", "b"], tmp_path / "stl", snap_m=0.01)
+    assert call_count["n"] == 2  # once per fault, not twice
+```
+
+---
+
+### [R-007] [MODERATE] [generate_safs_mesh.py:_combine_stls] — Degenerate-triangle filter desynchronizes `fault_ranges`
+
+**Category:** EDGE_CASE
+
+**Description:**
+After deduplication, `_combine_stls` drops triangles where any two of the three remapped indices coincide:
+```python
+new_tris = [(a, b, c) for (a, b, c) in new_tris
+            if a != b and b != c and a != c]
+```
+The function returns `n_triangles = len(new_tris)` AFTER the drop, but `fault_ranges` records `[start, end]` based on the *pre-drop* offsets. After the drop, `fault_ranges['NW'] = [0, 417]` may point past the end of `new_tris` or into a slice owned by a different fault.
+
+`combine_meta.json` is only used for diagnostics today, but if any future code consumes it for per-fault attribution the result is silently wrong.
+
+**Trigger:** multi-fault build where snap deduplication collapses any triangle's vertices to a degenerate. Likely whenever snap > vertex spacing somewhere in the input.
+
+**Actual behavior:** `fault_ranges` is stale after the degenerate drop.
+
+**Expected behavior:** `fault_ranges` accurately points into the post-drop triangle list.
+
+**Suggested fix:** track per-fault keep-counts during the filter:
+```diff
+-    new_tris = [tuple(int(inverse[i]) for i in tri) for tri in all_tris]
+-    # Drop triangles that became degenerate (shared vertex collapse).
+-    new_tris = [(a, b, c) for (a, b, c) in new_tris
+-                if a != b and b != c and a != c]
++    new_tris_pre = [tuple(int(inverse[i]) for i in tri) for tri in all_tris]
++    new_tris: list[tuple[int, int, int]] = []
++    range_remap: dict[str, list[int]] = {s: [0, 0] for s in fault_ranges}
++    n_dropped_degenerate = 0
++    for short, (start, end) in fault_ranges.items():
++        out_start = len(new_tris)
++        for k in range(start, end):
++            a, b, c = new_tris_pre[k]
++            if a == b or b == c or a == c:
++                n_dropped_degenerate += 1
++                continue
++            new_tris.append((a, b, c))
++        out_end = len(new_tris)
++        range_remap[short] = [out_start, out_end]
++    fault_ranges = range_remap
+```
+Add `"n_dropped_degenerate": n_dropped_degenerate` to the returned meta dict.
+
+**Test case:**
+```python
+def test_R007_fault_ranges_post_drop(tmp_path):
+    """fault_ranges in combine_meta.json indexes into the post-drop
+    triangle list, never the pre-drop list."""
+    # Construct 2 STLs where snap-dedup forces fault A to lose 1 triangle.
+    # Run _combine_stls.
+    # Assert: each fault_ranges[k][1] - fault_ranges[k][0]
+    #         equals the actual number of surviving triangles for fault k.
+    # Assert: sum of (end-start) over all faults == n_triangles.
+```
+
+---
+
+### [R-008] [LOW] [generate_safs_mesh.py:_write_includes] — `combined_stl` parameter silently ignored when `len(included) <= 1`
+
+**Category:** QUALITY (silent override)
+
+**Description:**
+`_write_includes` accepts a `combined_stl` argument and uses it only inside `if combined_stl is not None`. There is no guard against passing both `combined_stl=<path>` AND a single-fault `included`. The caller in `main` correctly conditions on `len(included) > 1`, so the bug is dormant. But a future caller could pass mismatched arguments and silently get the per-fault path written instead.
+
+**Suggested fix:** assert the precondition.
+```diff
+ def _write_includes(path: Path, included: list[str], stl_dir: Path,
+                      combined_stl: Path | None = None) -> None:
++    if combined_stl is not None and len(included) < 2:
++        raise ValueError(
++            "combined_stl was supplied but only "
++            f"{len(included)} fault(s) included; "
++            "the combine step is unnecessary at this scale"
++        )
+     path.parent.mkdir(parents=True, exist_ok=True)
+```
+
+**Test case:**
+```python
+def test_R008_combined_stl_with_single_fault_raises(tmp_path):
+    from generate_safs_mesh import _write_includes
+    import pytest
+    with pytest.raises(ValueError, match="only 1 fault"):
+        _write_includes(tmp_path / "x.geo", ["safs_mjvs_saf"],
+                         tmp_path / "stl",
+                         combined_stl=tmp_path / "c.stl")
+```
+
+---
+
+### [R-009] [LOW] [run_smoke_millcreek.sh] — Smoke test must be re-verified after Option 3 removal
+
+**Category:** ASSUMPTION (POSSIBLE)
+
+**Description:**
+`run_smoke_millcreek.sh` does NOT call `cfm_trim`. After R-001 deletes `cfm_trim.py`, the smoke test should continue to work (no Python script imports from `cfm_trim`; no shell wrapper sources it). Verified by `grep -l 'cfm_trim' miniapps/seas/safs/mesh/*.py` showing only `cfm_trim.py` itself.
+
+**Suggested fix (verification only):** the /code-fix agent must run after applying R-001/R-002/R-003/R-005/R-006/R-007:
+```bash
+cd miniapps/seas/safs/mesh
+bash run_smoke_millcreek.sh
+# Expected last line: "10/10 checks passed"
+```
+If the smoke test breaks, the trigger is in `generate_safs_mesh.py` changes (R-005/R-006/R-007), not in the deletes.
+
+**Test case:** the verification command above.
 
 ---
 
 ## Summary
-- Critical issues: **3** (R-001 dt exponent unexplained; R-002
-  FREEZE-C ratio = exactly 1.0000 needs verification; R-003 Option
-  Y mislabeled as flux-layer-modification).
-- Moderate issues: **2** (R-004 three options not equivalent in
-  info gain; R-005 diffuse-noise hypothesis unfalsifiable without X).
-- Low issues: **1** (R-006 user-decision framing).
-- Plan compliance: **PARTIAL** — round-9 R-001..R-006 verifications
-  closed; new findings are about how §K interprets and presents
-  the round-9 verdict.
-- Verdict: **PASS WITH FIXES — §K should be amended per R-002 (verify
-  FREEZE-C took effect) and R-003 (re-classify Option Y as freeze-
-  allowed) before the user is asked to choose.  Strong recommendation
-  per R-004: Option X first.**
+- Critical issues: 1 (R-003 — new wrapper required)
+- Moderate issues: 5 (R-001, R-002, R-005, R-006, R-007)
+- Low issues: 3 (R-004, R-008, R-009)
+- Plan compliance: PARTIAL (the smoke test plan is fully implemented; the implicit "8-fault production assembly" is dropped per user directive in favor of subset assembly)
+- Verdict: **PASS WITH FIXES** — must apply R-001 (delete cfm_trim.py), R-002 (delete run_full_2000m.sh), R-003 (add run_subsets_2000m.sh), and the bug fixes R-005, R-006, R-007 before the next user-visible build.
 
 ## Unreviewed Areas
-- The `test_r9_frozen_friction_C.cpp` source itself — only the verdict
-  was inspected; the FREEZE-C implementation (where ψ is reset) was
-  not directly read.  R-002 verification depends on this.
-- The dt-refinement test design (fixed-time vs fixed-step protocol)
-  — needed to apply R-001's M1/M2/M3/M4 disambiguation.
-- Tandem's TPV102 setup — would benefit from a quick read of
-  `/Users/chunhuizhao/projects/tandem` to confirm the 2×2×2 fixture
-  is reproducible there before Option X is selected.
-
----
-
-## Suggested Next Step
-
-The investigation has reached a real decision point.  The implementer
-correctly admits no single-line localization has been found and
-presents three options.  But the options are mis-equivalent and one
-is mis-labeled — the user, presented as-is, would likely make a
-suboptimal choice.
-
-### Round 10 Step 0 (~1 hour, freeze-allowed) — fix §K presentation
-
-Apply REVIEW round 10 R-002 (verify FREEZE-C took effect) and R-003
-(re-classify Option Y as freeze-allowed) and R-004 (recommend X
-strongly).  These are documentation-only fixes; no test re-run
-needed.
-
-### Round 10 Step 1 (~1 day, freeze-allowed) — execute Option X
-
-**Tandem benchmark at the same 2×2×2 fixture:**
-
-1. Set up Tandem with the same TPV102 parameters (per CLAUDE.md
-   guidance).
-2. Configure Tandem to use the SAME mesh as the test fixture
-   (`Mesh::MakeCartesian3D(2, 2, 2, TETRAHEDRON, 1000.0, 1000.0,
-   1000.0)`).  If Tandem doesn't accept arbitrary meshes, use the
-   closest equivalent (typically Tandem uses simplicial meshes from
-   Gmsh).
-3. Run Tandem for 20 steps with `dt = 5e-5`, uniform `tau2_nuc =
-   nuc_dtau` rupture drive.
-4. Measure tau1_corr spread across fault QPs at step 19.
-5. Compare to MFEM SEAS's 2.236 Pa.
-
-**Verdict matrix:**
-
-| Tandem tau1_corr | MFEM tau1_corr | Conclusion |
-|---|---|---|
-| ≤ 1e-6 (clean) | 2.24 (dirty) | Bug exists in MFEM specifically; round-11 targets MFEM-vs-Tandem code-path diff |
-| ~1 Pa (similar) | 2.24 | Discretization floor common to both implementations; supports diffuse-noise hypothesis with cross-code evidence; Direction D becomes defensible |
-| ~10× MFEM (much worse) | 2.24 | Tandem has a different bug; not informative for MFEM |
-| Cannot run on equivalent fixture | — | Option X infeasible; fall back to Option Y |
-
-### Round 10 Step 2 (depends on Step 1 verdict)
-
-**If Tandem clean (MFEM-specific bug):**
-- Round 11 inspects the code-path diff.  Tandem uses (per CLAUDE.md
-  references) the same Pelties Eq. 7 trial-traction formula and same
-  Brent friction solve.  Diff is in the DG operator (face flux,
-  basis), the time integrator, OR auxiliary infrastructure.
-- Use git-diff-style enumeration of the differences.
-- Pick the highest-leverage diff for round 11 instrumentation.
-
-**If Tandem dirty (cross-code floor):**
-- Direction D becomes defensible with cross-code evidence.  User can
-  re-evaluate the prior rejection.
-- Alternative: discretization refinement.  Run pepper guard at
-  4×4×4 fixture (8× refinement); check if pepper drops below the
-  v9.4.0 §11 1e-10 gate.  If yes, the production mesh (which is
-  much finer than 2×2×2) may be already below floor.
-
-**If Tandem infeasible:**
-- Fall back to Option Y (FREEZE-A/B), but only after R-002 verifies
-  the round-9 FREEZE-C wasn't a no-op.
-
-### What NOT to do
-
-- Do not present §K's three options to the user without applying
-  R-002, R-003, R-004 fixes first.  The user, presented as-is, may
-  decline Option Y on the false-positive "freeze unblock required"
-  label, or pick Option Z without realizing it's Direction D.
-- Do not commit to Direction D without cross-code evidence.  The
-  user's prior rejection of Direction D was made without Tandem
-  data; with cross-code confirmation the rejection might be revised,
-  but it should be the user's revised decision, not an implementer
-  re-presentation of a previously-rejected option.
-- Do not run round 11 on a layer-level localization.  After 5 rounds
-  of failed seed-naming, the next round must produce either a
-  cross-code verdict (X), a clean FREEZE-A/B disambiguation (Y), or
-  an explicit Direction-D decision (Z).  No more "we localized to a
-  layer".
+- `safs_origin.py`, `audit_ts_quality.py`, `ts_to_stl.py`, `safs.geo`, `validate_msh.py`, `convert_msh.py`, `write_fault_provenance.py`, `run_smoke_millcreek.sh` — these all passed the 10/10 smoke check end-to-end and have no relationship to Option 3. Out of scope for this review.
+- The proper "Option 3 with triangle splitting" path is explicitly out of scope per user directive; not reviewed.
+- The single-fault Embed pipeline (`safs.geo` Steiner-constraint embedding) was reviewed and validated in the smoke-test review round; not re-reviewed here.

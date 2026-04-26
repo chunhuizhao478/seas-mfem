@@ -388,6 +388,59 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
 #endif
       }
 
+      // R-101: per-interior-fault-face elem1_on_plus computed from
+      // geometry (element centroid vs face centroid projected onto
+      // ref_normal), identical recipe to the shared-fault block below.
+      // Replaces the per-QP `!qpd.sign_flipped` derivation that was
+      // FP-sensitive on near-axis-aligned faces (the per-QP CalcOrtho
+      // normal can flip sign across QPs of the same face when the
+      // dot product with ref_normal is near zero, producing per-QP
+      // bimodal flux orientation and breaking y-mirror invariance).
+      // The per-face flag is FP-stable: the centroid-projection margin
+      // is O(dx/2), far above any FP noise.
+      interior_fault_elem1_on_plus_.assign(fault_interior_faces_.Size(),
+                                           false);
+      for (int i = 0; i < fault_interior_faces_.Size(); i++)
+      {
+         int f = fault_interior_faces_[i];
+         FaceElementTransformations *ftr =
+            mesh_.GetInteriorFaceTransformations(f);
+         if (!ftr) { continue; }
+
+         // Face centroid.
+         const IntegrationPoint &ip_center =
+            Geometries.GetCenter(ftr->GetGeometryType());
+         ftr->Face->SetIntPoint(&ip_center);
+         Vector face_c(3);
+         ftr->Face->Transform(ip_center, face_c);
+
+         // Elem1 centroid (vertex-average; sufficient for tet/hex).
+         Array<int> e1_verts;
+         mesh_.GetElementVertices(ftr->Elem1No, e1_verts);
+         Vector elem1_c(3);
+         elem1_c = 0.0;
+         for (int v = 0; v < e1_verts.Size(); v++)
+         {
+            const real_t *vp = mesh_.GetVertex(e1_verts[v]);
+            for (int d = 0; d < 3; d++) { elem1_c(d) += vp[d]; }
+         }
+         if (e1_verts.Size() > 0)
+         {
+            elem1_c /= static_cast<real_t>(e1_verts.Size());
+         }
+
+         // Same convention as the shared-fault block: a point with
+         // SMALLER (more negative) projection onto ref_normal is on
+         // the "+" side (side opposite where ref_normal points).
+         real_t face_proj = 0.0, elem1_proj = 0.0;
+         for (int d = 0; d < 3; d++)
+         {
+            face_proj  += face_c(d)  * ref_normal(d);
+            elem1_proj += elem1_c(d) * ref_normal(d);
+         }
+         interior_fault_elem1_on_plus_[i] = (elem1_proj < face_proj);
+      }
+
       // R-701 swap-flag: determine per shared-fault face whether this rank's
       // Elem1 sits on the canonical "+" side (side FROM WHICH ref_normal
       // points AWAY — origin of the arrow).  We cannot use FaultBasis's
@@ -1257,32 +1310,46 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                {
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
 
-                  // 1. Reconstruct canonical (pre-Step-5) BP5 frame from
-                  // (stored_basis, sign_flipped) — ref-normal-aligned.
+                  // R-101: per-face geometric flag (computed at ctor
+                  // from element/face centroid projection on ref_normal),
+                  // FP-stable across all QPs of this face.  Replaces the
+                  // per-QP `!qpd.sign_flipped` derivation, which on
+                  // near-axis-aligned faces could flip sign between QPs
+                  // due to FP noise in the CalcOrtho dot product and
+                  // produced y-mirror non-invariance of the per-side
+                  // assembly.
+                  MFEM_ASSERT(fb_idx >= 0 &&
+                              fb_idx < static_cast<int>(
+                                 interior_fault_elem1_on_plus_.size()),
+                              "R-101: interior_fault_elem1_on_plus_ "
+                              "missing entry for fb_idx=" << fb_idx);
+                  const bool elem1_on_plus =
+                     interior_fault_elem1_on_plus_[fb_idx];
+
+                  // 1. Reconstruct canonical (pre-Step-5) BP5 frame.
                   // BP5 convention: can_t1 = dip, can_t2 = strike.
+                  // Use the per-face flag (R-101) to decide whether to
+                  // negate qpd.{normal,tangent1,tangent2} so can_n
+                  // points along ref_normal.  Equivalent in exact
+                  // arithmetic to `qpd.sign_flipped ? -x : x` but
+                  // FP-stable per face (no per-QP sign bimodality).
                   const FaultBasisQPData &qpd = *qpd_ptr;
+                  const bool should_negate_frame = !elem1_on_plus;
                   real_t can_n[3], can_t1[3], can_t2[3];
                   for (int d = 0; d < 3; d++)
                   {
-                     can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
-                                                  :  qpd.normal[d];
-                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
-                                                  :  qpd.tangent1[d];
-                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
-                                                  :  qpd.tangent2[d];
+                     can_n[d]  = should_negate_frame ? -qpd.normal[d]
+                                                     :  qpd.normal[d];
+                     can_t1[d] = should_negate_frame ? -qpd.tangent1[d]
+                                                     :  qpd.tangent1[d];
+                     can_t2[d] = should_negate_frame ? -qpd.tangent2[d]
+                                                     :  qpd.tangent2[d];
                   }
 
                   DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
                   GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
                   GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
                                                     Tinv_can);
-
-                  // For interior faces MFEM's CalcOrtho returns Elem1-outward
-                  // normal; sign_flipped = true iff that is anti-aligned with
-                  // ref_normal.  can_n points along ref_normal (+→−).  So
-                  // Elem1 sits on the canonical + side iff its outward lies
-                  // along can_n iff sign_flipped == false.
-                  const bool elem1_on_plus = !qpd.sign_flipped;
 
                   // Rotate self/nbr into canonical frame.
                   real_t Q_self_can[NUM_STATE], Q_nbr_can[NUM_STATE];
@@ -2339,24 +2406,35 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                {
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
 
+                  // R-101: per-face geometric flag (FP-stable across
+                  // all QPs of this face); see ctor population around
+                  // line ~395 and the corresponding Mult-path block
+                  // around line ~1290.
+                  MFEM_ASSERT(fb_idx >= 0 &&
+                              fb_idx < static_cast<int>(
+                                 interior_fault_elem1_on_plus_.size()),
+                              "R-101: interior_fault_elem1_on_plus_ "
+                              "missing entry for fb_idx=" << fb_idx);
+                  const bool elem1_on_plus =
+                     interior_fault_elem1_on_plus_[fb_idx];
+
                   const FaultBasisQPData &qpd = *qpd_ptr;
+                  const bool should_negate_frame = !elem1_on_plus;
                   real_t can_n[3], can_t1[3], can_t2[3];
                   for (int d = 0; d < 3; d++)
                   {
-                     can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
-                                                  :  qpd.normal[d];
-                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
-                                                  :  qpd.tangent1[d];
-                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
-                                                  :  qpd.tangent2[d];
+                     can_n[d]  = should_negate_frame ? -qpd.normal[d]
+                                                     :  qpd.normal[d];
+                     can_t1[d] = should_negate_frame ? -qpd.tangent1[d]
+                                                     :  qpd.tangent1[d];
+                     can_t2[d] = should_negate_frame ? -qpd.tangent2[d]
+                                                     :  qpd.tangent2[d];
                   }
 
                   DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
                   GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
                   GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
                                                     Tinv_can);
-
-                  const bool elem1_on_plus = !qpd.sign_flipped;
 
 #ifdef SEAS_DIAG_TPV104_FAULT_BASIS
                   // D1 instrumentation (TPV104 σ_n perturbation diagnostic).
@@ -2601,16 +2679,28 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                  static_cast<int>(fault_dof_data_->size()),
                               "ComputeADERFaceFluxRHS (avg): dof_idx out of range");
 
+                  // R-101: per-face geometric flag, FP-stable across QPs.
+                  MFEM_ASSERT(fb_idx >= 0 &&
+                              fb_idx < static_cast<int>(
+                                 interior_fault_elem1_on_plus_.size()),
+                              "R-101: interior_fault_elem1_on_plus_ "
+                              "missing entry for fb_idx=" << fb_idx);
+                  elem1_on_plus_per_qp[qq] =
+                     interior_fault_elem1_on_plus_[fb_idx];
+
                   const FaultBasisQPData &qpd = bd.qp_data[qq];
+                  const bool should_negate_frame_qq =
+                     !elem1_on_plus_per_qp[qq];
                   real_t can_t1[3], can_t2[3];
                   for (int d = 0; d < 3; d++)
                   {
-                     can_n_per_qp[qq][d] = qpd.sign_flipped ? -qpd.normal[d]
-                                                            :  qpd.normal[d];
-                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
-                                                  :  qpd.tangent1[d];
-                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
-                                                  :  qpd.tangent2[d];
+                     can_n_per_qp[qq][d] = should_negate_frame_qq
+                                              ? -qpd.normal[d]
+                                              :  qpd.normal[d];
+                     can_t1[d] = should_negate_frame_qq ? -qpd.tangent1[d]
+                                                        :  qpd.tangent1[d];
+                     can_t2[d] = should_negate_frame_qq ? -qpd.tangent2[d]
+                                                        :  qpd.tangent2[d];
                   }
 
                   T_can_per_qp[qq].SetSize(NUM_STATE);
@@ -2621,8 +2711,6 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   GodunovFlux::BuildRotationInverse(can_n_per_qp[qq].data(),
                                                      can_t1, can_t2,
                                                      Tinv_can_qq);
-
-                  elem1_on_plus_per_qp[qq] = !qpd.sign_flipped;
 
                   real_t I_self_can_qq[NUM_STATE], I_nbr_can_qq[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)

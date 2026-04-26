@@ -77,6 +77,17 @@ def build_mesh(dx, lx, ly, lz):
     # Cube vertex labels with bit encoding (x=bit0, y=bit1, z=bit2):
     #   0=(0,0,0)  1=(1,0,0)  2=(0,1,0)  3=(1,1,0)
     #   4=(0,0,1)  5=(1,0,1)  6=(0,1,1)  7=(1,1,1)
+    #
+    # Note (R-104 audit, 2026-04-25): pattern_b = swap_y(pattern_a) is
+    # *not* tuple-mirror at the +y / -y halves after reorient.  This is
+    # mathematically unavoidable: y-mirror reverses orientation, so
+    # exactly one of {pattern_a, swap_y(pattern_a)} produces det<0 tets
+    # that reorient must permute (v3 <-> v4), breaking pure tuple
+    # mirror.  The vertex SETS are still y-mirror; only the per-tet
+    # tuple ORDER differs.  Confirming this defect is the cause of the
+    # np=1 slip_dip baseline requires either (i) a self-mirror-symmetric
+    # tet split (e.g. 12-tet Kuhn) or (ii) probing CalcOrtho normals
+    # on non-fault interior faces for mirror consistency.
     pattern_a = [
         (0, 1, 3, 7),
         (0, 3, 2, 7),
@@ -180,21 +191,14 @@ def factor_2d(np):
 
 
 def write_partition(path, nx, ny, nz, np_target):
-    """Emit a partitioning sidecar file: Cartesian X+Z tiling, full Y per rank.
+    """Emit a partitioning sidecar file: pure Cartesian X+Z tiling, full
+    Y per rank.
 
-    For a y-mirror-symmetric problem (e.g. TPV104 fault at y=0), this layout
-    guarantees each rank owns the FULL y-extent of its (X, Z) tile, so:
-      - The y=0 plane is never cut by a partition boundary.
-      - Each rank's local domain is internally y-mirror-symmetric.
-      - Per-rank flux accumulations are FP-deterministic and bit-equivalent
-        to the serial run.
-
-    File format matches LoadPartitioningFromFile in
-    dynamic/fault_locality_partition.hpp.
+    For a y-mirror-symmetric problem (TPV104 fault at y=0), each rank
+    owns the full y-extent of its (X, Z) tile, so the y=0 plane is
+    never cut by a partition boundary.
     """
     nx_ranks, nz_ranks = factor_2d(np_target)
-    # Hex (i, j, k) lives in tile (i*nx_ranks // nx, k*nz_ranks // nz).
-    # Each hex maps to 6 tets, all on the same rank.
     parts = []
     for k in range(nz):
         for j in range(ny):
@@ -202,7 +206,9 @@ def write_partition(path, nx, ny, nz, np_target):
                 rx = (i * nx_ranks) // nx
                 rz = (k * nz_ranks) // nz
                 rank = rx + rz * nx_ranks
-                parts.extend([rank] * 6)
+                for _ in range(6):
+                    parts.append(rank)
+
     ne = len(parts)
     with open(path, "w") as f:
         f.write(f"np {np_target}\n")
@@ -236,10 +242,12 @@ def main():
     if args.emit_partition:
         for np_target in args.emit_partition:
             part_path = f"{args.out}.np{np_target}.partition"
-            nx_ranks, nz_ranks = write_partition(part_path, nx, ny, nz, np_target)
+            nx_ranks, nz_ranks = write_partition(part_path, nx, ny, nz,
+                                                 np_target)
             print(f"  partition np={np_target}: "
                   f"nx_ranks={nx_ranks} nz_ranks={nz_ranks} "
-                  f"(full y-extent per rank) -> {part_path}")
+                  f"(pure Cartesian X+Z, full y-extent per rank) "
+                  f"-> {part_path}")
 
     n_fault = sum(1 for t in bdr_tris if t[3] == 3)
     n_free = sum(1 for t in bdr_tris if t[3] == 1)

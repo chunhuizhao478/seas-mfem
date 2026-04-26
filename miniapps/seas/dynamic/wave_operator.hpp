@@ -387,6 +387,17 @@ public:
    GetSharedFaultElem1OnPlus() const
    { return shared_fault_elem1_on_plus_; }
 
+   /// R-101: per-interior-fault-face (positionally indexed in
+   /// `fault_interior_faces_`) flag: true iff Elem1 sits on the canonical
+   /// "+" side (the side opposite where `ref_normal` points).  Computed
+   /// at constructor time from element/face centroid geometry — robust
+   /// to FP-noise in MFEM's per-QP CalcOrtho normal that previously
+   /// produced per-QP bimodal `sign_flipped` and broke y-mirror
+   /// invariance of the per-side DG assembly.
+   const std::vector<bool> &
+   GetInteriorFaultElem1OnPlus() const
+   { return interior_fault_elem1_on_plus_; }
+
    const std::map<int, int> &
    GetFaultFaceDofOffset() const
    { return fault_face_dof_offset_; }
@@ -483,6 +494,16 @@ private:
    /// ref_normal), so it is robust to whatever CalcOrtho orientation
    /// convention MFEM uses for shared faces.  Populated in the ctor.
    std::vector<bool> shared_fault_elem1_on_plus_;
+
+   /// R-101: same per-face flag as `shared_fault_elem1_on_plus_` but for
+   /// interior fault faces, indexed by position in `fault_interior_faces_`.
+   /// Computed once at constructor time from element/face centroid
+   /// geometry; used by every interior-fault QP in `ComputeFaceFluxRHS`,
+   /// `ComputeADERFaceFluxRHS`, and the ADER averaged sub-step branch in
+   /// place of the per-QP `qpd.sign_flipped` derived from CalcOrtho.
+   /// Eliminates per-QP bimodality on near-axis-aligned faces and
+   /// restores y-mirror invariance of the per-side DG assembly.
+   std::vector<bool> interior_fault_elem1_on_plus_;
 
    /// SEAS_DIAG_FAULT_FLUX C-2 bulk-probe state.  Set on a single rank
    /// (the one that wins the hypocenter MPI_MINLOC); silent on others
