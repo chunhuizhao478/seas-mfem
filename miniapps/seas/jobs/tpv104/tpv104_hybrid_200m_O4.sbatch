@@ -3,8 +3,8 @@
 #SBATCH -o tpv104_hybrid_O4_%j.out
 #SBATCH -e tpv104_hybrid_O4_%j.err
 #SBATCH -p normal
-#SBATCH -N 32
-#SBATCH -n 1600
+#SBATCH -N 16
+#SBATCH -n 800
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
@@ -30,10 +30,10 @@
 #
 # Wall time / resources
 # ---------------------
-# 32N×1600r doubles the 𝒪3 envelope (16N×800r) to absorb the ~3.6×
-# 𝒪4 cost increase.  Hybrid 𝒪3 estimated 6-8 h on 16N×800r => hybrid
-# 𝒪4 expected ~12-15 h on 32N×1600r.  48 h normal-queue allocation
-# gives headroom for slow startup, partition cost, and paraview output.
+# 16N×800r matches the 𝒪3 envelope.  𝒪4 has ~3.6× the per-step cost of
+# 𝒪3 (P=3 doubles DOFs vs P=2, steps scale ~1.4×, ADER-O4 ~1.3× over O3),
+# so expected wall time is ~22-28 h on 16N×800r — fits in the 48 h
+# normal-queue allocation with headroom for partition + paraview output.
 #
 # Pelties order
 # -------------
@@ -109,7 +109,7 @@ echo "               y-mirror prism strip + graded unstructured outer"
 echo "Partition:     default ParMETIS (no sidecar partition file)"
 echo "Pelties order: 𝒪4 (--order 3 + --ader-order 4)"
 echo "Iterator:      one-shot (default; substep is np=1-only until R-1003 lands)"
-echo "Target:        tfinal = 12.0 s at 32N×1600r"
+echo "Target:        tfinal = 12.0 s at 16N×800r"
 echo "Goal:          highest-precision-floor reduction on hybrid mesh"
 echo "========================================"
 
