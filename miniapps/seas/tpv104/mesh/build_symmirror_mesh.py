@@ -54,11 +54,152 @@ import sys
 from collections import defaultdict
 
 
-def build_mesh(dx, lx, ly, lz):
-    """Build mesh data: vertices, tets, boundary triangles."""
-    nx, ny, nz = int(round(lx / dx)), int(round(ly / dx)), int(round(lz / dx))
+def _make_symmetric_widths(d_fine, inner_half, outer_half, ratio):
+    """Build a y-mirror-symmetric cell-width sequence about the origin.
+
+    Inner zone: |coord| <= inner_half is uniform with width d_fine.
+    Outer zone: cells geometrically grow by `ratio` each step until the
+    cumulative outer extent reaches (outer_half - inner_half).  The final
+    outer cell is clipped if needed so the total cumulative half-extent
+    equals exactly `outer_half`.
+
+    Returns a list of widths in order from -outer_half to +outer_half.
+    The list is symmetric: widths[j] == widths[len-1-j], guaranteeing
+    that y-mirror partner cells (j, len-1-j) have identical geometry.
+
+    Edge cases:
+      - outer_half <= inner_half: no grading; pure uniform inner.
+      - ratio == 1.0: outer cells are uniform too at width d_fine.
+    """
+    if outer_half <= 0 or inner_half < 0:
+        raise ValueError(
+            f"_make_symmetric_widths: outer_half={outer_half} must be > 0 and "
+            f"inner_half={inner_half} must be >= 0")
+    if inner_half > outer_half:
+        raise ValueError(
+            f"_make_symmetric_widths: inner_half={inner_half} > "
+            f"outer_half={outer_half}")
+    if d_fine <= 0:
+        raise ValueError(f"_make_symmetric_widths: d_fine={d_fine} must be > 0")
+    if ratio <= 0:
+        raise ValueError(f"_make_symmetric_widths: ratio={ratio} must be > 0")
+
+    # Inner zone: 2*N_inner cells of width d_fine, where 2*N_inner*d_fine
+    # = 2*inner_half exactly (we require inner_half to be a multiple of
+    # d_fine for clean placement of the y=0 vertex).
+    n_inner_per_side = int(round(inner_half / d_fine))
+    if abs(n_inner_per_side * d_fine - inner_half) > 1e-9 * max(d_fine, 1.0):
+        raise ValueError(
+            f"_make_symmetric_widths: inner_half={inner_half} must be an "
+            f"integer multiple of d_fine={d_fine} (got {inner_half/d_fine} cells)")
+    inner = [d_fine] * (2 * n_inner_per_side)
+
+    # Outer zone: cells of width d_fine*ratio, d_fine*ratio^2, ..., up to
+    # (outer_half - inner_half).  Final cell clipped to fit exactly.
+    outer_span = outer_half - inner_half
+    outer_per_side = []
+    span = 0.0
+    w = d_fine
+    while span < outer_span - 1e-9 * max(d_fine, 1.0):
+        w_next = w * ratio
+        remaining = outer_span - span
+        if w_next >= remaining:
+            outer_per_side.append(remaining)
+            span = outer_span
+            break
+        outer_per_side.append(w_next)
+        span += w_next
+        w = w_next
+
+    # Assemble: reverse(outer) + inner + outer (mirror about 0).
+    return list(reversed(outer_per_side)) + inner + outer_per_side
+
+
+def _make_asymmetric_widths_z(d_fine, inner_depth, outer_depth, ratio):
+    """Build a cell-width sequence for the z-axis (depth direction).
+
+    Free surface at z=0 → no grading on top.  Fine 200m for z in
+    [-inner_depth, 0] (the rupture-active zone).  Below z=-inner_depth,
+    cells grow geometrically by `ratio` until the cumulative depth
+    reaches `outer_depth` (final cell clipped if needed).
+
+    Returns widths in order from z=0 (top) to z=-outer_depth (bottom),
+    so z-coordinate of vertex k is -sum(widths[:k]).
+    """
+    if outer_depth <= 0 or inner_depth < 0:
+        raise ValueError(
+            f"_make_asymmetric_widths_z: outer_depth={outer_depth} must be > 0 "
+            f"and inner_depth={inner_depth} must be >= 0")
+    if inner_depth > outer_depth:
+        raise ValueError(
+            f"_make_asymmetric_widths_z: inner_depth={inner_depth} > "
+            f"outer_depth={outer_depth}")
+    if d_fine <= 0:
+        raise ValueError(f"_make_asymmetric_widths_z: d_fine={d_fine} must be > 0")
+
+    n_inner = int(round(inner_depth / d_fine))
+    if abs(n_inner * d_fine - inner_depth) > 1e-9 * max(d_fine, 1.0):
+        raise ValueError(
+            f"_make_asymmetric_widths_z: inner_depth={inner_depth} must be an "
+            f"integer multiple of d_fine={d_fine}")
+    inner = [d_fine] * n_inner
+
+    outer_span = outer_depth - inner_depth
+    outer = []
+    span = 0.0
+    w = d_fine
+    while span < outer_span - 1e-9 * max(d_fine, 1.0):
+        w_next = w * ratio
+        remaining = outer_span - span
+        if w_next >= remaining:
+            outer.append(remaining)
+            span = outer_span
+            break
+        outer.append(w_next)
+        span += w_next
+        w = w_next
+
+    return inner + outer
+
+
+def build_mesh(dx, lx, ly, lz,
+               x_inner_half=None, y_inner_half=None, z_inner_depth=None,
+               x_ratio=1.0, y_ratio=1.0, z_ratio=1.0):
+    """Build mesh data: vertices, tets, boundary triangles.
+
+    If `*_inner_half` / `z_inner_depth` are None, defaults to lx/2, ly/2,
+    lz, respectively (the entire domain is uniform — backward compatible
+    with pre-grading callers).
+
+    `*_ratio` is the geometric grading ratio outside the inner zone.
+    Ratio == 1.0 reproduces uniform spacing in the outer zone.
+    """
+    if x_inner_half is None: x_inner_half = lx / 2
+    if y_inner_half is None: y_inner_half = ly / 2
+    if z_inner_depth is None: z_inner_depth = lz
+
+    x_widths = _make_symmetric_widths(dx, x_inner_half, lx / 2, x_ratio)
+    y_widths = _make_symmetric_widths(dx, y_inner_half, ly / 2, y_ratio)
+    z_widths = _make_asymmetric_widths_z(dx, z_inner_depth, lz, z_ratio)
+
+    nx = len(x_widths)
+    ny = len(y_widths)
+    nz = len(z_widths)
     if ny % 2 != 0:
-        raise ValueError(f"ly/dx={ny} must be even so Y=0 is a vertex plane")
+        raise ValueError(
+            f"ly/dx-equivalent ny={ny} must be even so Y=0 is a vertex plane "
+            f"(check y_inner_half={y_inner_half} is multiple of dx={dx})")
+
+    # Cumulative vertex coordinates.
+    xs = [-lx / 2]
+    for w in x_widths:
+        xs.append(xs[-1] + w)
+    ys = [-ly / 2]
+    for w in y_widths:
+        ys.append(ys[-1] + w)
+    zs = [0.0]                         # free surface at z = 0
+    for w in z_widths:
+        zs.append(zs[-1] - w)          # depth increases downward
 
     def vid(i, j, k):
         return 1 + i + (nx + 1) * j + (nx + 1) * (ny + 1) * k
@@ -67,7 +208,7 @@ def build_mesh(dx, lx, ly, lz):
     for k in range(nz + 1):
         for j in range(ny + 1):
             for i in range(nx + 1):
-                vertices.append((-lx / 2 + i * dx, -ly / 2 + j * dx, -k * dx))
+                vertices.append((xs[i], ys[j], zs[k]))
 
     def hex_corner(i, j, k, lv):
         di, dj, dk = lv & 1, (lv >> 1) & 1, (lv >> 2) & 1
@@ -103,7 +244,9 @@ def build_mesh(dx, lx, ly, lz):
     for k in range(nz):
         for j in range(ny):
             for i in range(nx):
-                yc = -ly / 2 + (j + 0.5) * dx
+                # Cell-center y from cumulative vertex coordinates (handles
+                # graded spacing where (j+0.5)*dx is wrong).
+                yc = 0.5 * (ys[j] + ys[j + 1])
                 pat = pattern_a if yc > 0 else pattern_b
                 for tet_local in pat:
                     tets.append(tuple(hex_corner(i, j, k, lv) for lv in tet_local))
@@ -233,10 +376,39 @@ def main():
                    help="Output .msh path")
     p.add_argument("--emit-partition", type=int, nargs="+", metavar="NP",
                    help="Also emit <out>.np<NP>.partition for each NP")
+    # Per-axis grading: defaults reproduce the uniform mesh.  When set,
+    # the inner zone (|x| <= x_inner_half, |y| <= y_inner_half, depth <=
+    # z_inner_depth) is uniform at `dx`; the outer zone uses geometric
+    # grading with the corresponding ratio.  inner_half / inner_depth
+    # MUST be integer multiples of dx.
+    p.add_argument("--x-inner-half", type=float, default=None,
+                   help="Inner uniform-dx half-extent along strike (X) "
+                        "[m].  Default: lx/2 (entire domain uniform).")
+    p.add_argument("--y-inner-half", type=float, default=None,
+                   help="Inner uniform-dx half-extent fault-normal (Y) "
+                        "[m].  Default: ly/2 (entire domain uniform).")
+    p.add_argument("--z-inner-depth", type=float, default=None,
+                   help="Inner uniform-dx depth from free surface [m]. "
+                        "Default: lz (entire depth uniform).")
+    p.add_argument("--x-ratio", type=float, default=1.0,
+                   help="Geometric grading ratio outside x-inner zone. "
+                        "1.0 = uniform.  (default: 1.0)")
+    p.add_argument("--y-ratio", type=float, default=1.0,
+                   help="Geometric grading ratio outside y-inner zone. "
+                        "(default: 1.0)")
+    p.add_argument("--z-ratio", type=float, default=1.0,
+                   help="Geometric grading ratio below z-inner zone. "
+                        "(default: 1.0)")
     args = p.parse_args()
 
     vertices, tets, bdr_tris, (nx, ny, nz) = build_mesh(
-        args.dx, args.lx, args.ly, args.lz)
+        args.dx, args.lx, args.ly, args.lz,
+        x_inner_half=args.x_inner_half,
+        y_inner_half=args.y_inner_half,
+        z_inner_depth=args.z_inner_depth,
+        x_ratio=args.x_ratio,
+        y_ratio=args.y_ratio,
+        z_ratio=args.z_ratio)
     write_msh(args.out, vertices, tets, bdr_tris)
 
     if args.emit_partition:
@@ -256,7 +428,13 @@ def main():
     print(f"  domain  : [-{args.lx/2:.0f}, {args.lx/2:.0f}] x "
           f"[-{args.ly/2:.0f}, {args.ly/2:.0f}] x "
           f"[-{args.lz:.0f}, 0] m")
-    print(f"  cells   : {nx} x {ny} x {nz}  (dx = {args.dx:.0f} m)")
+    print(f"  cells   : {nx} x {ny} x {nz}  (dx_fine = {args.dx:.0f} m)")
+    if args.x_inner_half is not None or args.y_inner_half is not None \
+       or args.z_inner_depth is not None:
+        print(f"  inner   : x_half={args.x_inner_half} m  "
+              f"y_half={args.y_inner_half} m  z_depth={args.z_inner_depth} m")
+        print(f"  ratios  : x={args.x_ratio}  y={args.y_ratio}  "
+              f"z={args.z_ratio}")
     print(f"  nodes   : {len(vertices)}")
     print(f"  tets    : {len(tets)}")
     print(f"  bdr     : free={n_free}  fault={n_fault}  absorb={n_abs}")
