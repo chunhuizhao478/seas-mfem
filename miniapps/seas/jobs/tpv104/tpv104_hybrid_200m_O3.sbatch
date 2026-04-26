@@ -131,7 +131,7 @@ echo "Mesh:          tpv104_200m_hybrid.msh (533 k nodes, 3.24 M tets)"
 echo "               y-mirror prism strip + graded unstructured outer"
 echo "Partition:     default ParMETIS (no sidecar partition file)"
 echo "Pelties order: 𝒪3 (--order 2 + --ader-order 3)"
-echo "Iterator:      --fault-iterator substep (ADER sub-step time integration)"
+echo "Iterator:      one-shot (default; substep is np=1-only until R-1003 lands)"
 echo "Target:        tfinal = 2.0 s at 16N×800r"
 echo "Goal:          slip_dip ≪ 1 mm with no reflection contamination"
 echo "Reference:     symmirror P=2 dx=500m (small domain) -> -5.80e-5 m"
@@ -147,7 +147,6 @@ ibrun ./seas_tpv104_driver \
       --ader-order 3 \
       --friction-solver newton-stable \
       --fric-law slip-srw \
-      --fault-iterator substep \
       --output-dir "${RESULT_DIR}" \
       --output-prefix tpv104_hybrid_O3 \
       --output-dt 0.05 \
@@ -231,7 +230,7 @@ fi
    echo "TPV104 𝒪3 (P=2 + ADER-O3) HYBRID-mesh production run"
    echo "Mesh:                    tpv104_200m_hybrid (3.24 M tets, structured strip + graded outer)"
    echo "Polynomial order:        --order 2 + --ader-order 3 (canonical Pelties 𝒪3)"
-   echo "Iterator:                substep (ADER sub-step time integration)"
+   echo "Iterator:                one-shot (default; substep is np=1-only until R-1003)"
    echo "Partition:               default ParMETIS"
    echo "tfinal:                  2.0 s"
    echo "f_w (compiled):          $(echo "${F_W_LINE}" | grep -oE '[01]\.[0-9]+' | head -1)"
