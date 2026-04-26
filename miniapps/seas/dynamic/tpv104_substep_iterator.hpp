@@ -152,6 +152,51 @@ public:
                 FrictionSolver::Method method
                    = FrictionSolver::Method::NewtonRaphsonStable);
 
+   /// SeisSol-equivalent variant of `Advance`: takes per-sub-step pointwise
+   /// Q at fault QPs in the canonical fault-local frame, instead of a single
+   /// macro-step time-integrated I.  At each sub-step `o`, the friction
+   /// pipeline runs on `Q_pointwise_*_per_substep[o]` directly — matching
+   /// SeisSol's `qInterpolated[o]` → `precomputeStressFromQInterpolated[o]`
+   /// pattern (closes the R4-004 cadence-deviation note).
+   ///
+   /// At O = 1 with `deltaT = {dt_macro}`, `time_weights = {1.0}`, and
+   /// `Q_pointwise_*[0]` equal to `I_plus_flat / dt_macro`, this method
+   /// produces bit-identical DOFData to `Advance` (T_TPV104_SSI_3 contract
+   /// extended to the per-sub-step Q path).
+   ///
+   /// Layout: `Q_pointwise_plus_per_substep[o]` is a flat vector of size
+   /// `NUM_STATE * num_fault_qps`; entry `[i * NUM_STATE + c]` is component
+   /// c of Q at fault QP i on the canonical-+ side at sub-step time
+   /// `t_macro_start + Σ_{o'<o} deltaT[o'] + tau_local[o]` (the predictor
+   /// supplies whichever node convention the driver chose; the iterator
+   /// does not enforce a specific node distribution).
+   ///
+   /// @param[in,out] dof_data           Per-DOF state.
+   /// @param[in]     fault_coords       Per-DOF physical coords.
+   /// @param[in]     V_w                Per-DOF weakening velocity.
+   /// @param[in]     Q_pointwise_plus_per_substep   O Vectors, each
+   ///                                   `NUM_STATE * n` in canonical frame.
+   /// @param[in]     Q_pointwise_minus_per_substep  Same.
+   /// @param[in]     dt_macro           Macro-step size (> 0).
+   /// @param[in]     t_macro_start      Absolute start time.
+   /// @param[out]    I_imp_plus_flat    Accumulated time-integrated +
+   ///                                   imposed state (zeroed on entry).
+   /// @param[out]    I_imp_minus_flat   Accumulated time-integrated −
+   ///                                   imposed state.
+   /// @param[in]     method             Friction solver dispatch.
+   void AdvanceWithSubStepStates(
+      std::vector<DOFData> &dof_data,
+      const std::vector<Vector> &fault_coords,
+      const std::vector<real_t> &V_w,
+      const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+      const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+      real_t dt_macro,
+      real_t t_macro_start,
+      real_t *I_imp_plus_flat,
+      real_t *I_imp_minus_flat,
+      FrictionSolver::Method method
+         = FrictionSolver::Method::NewtonRaphsonStable);
+
    /// Accessor for the configured sub-step sizes (test hook).
    const std::vector<real_t> &GetDeltaT() const { return deltaT_; }
 

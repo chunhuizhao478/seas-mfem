@@ -164,8 +164,17 @@ static DispatchedSolver GetDispatchedSolver(const std::string &/*friction_solver
    // iterator is wired (option a).
    return DispatchedSolver::Brent;
 }
-static DispatchedIterator GetDispatchedIterator(const std::string &/*fault_iterator_cli*/)
+static DispatchedIterator GetDispatchedIterator(const std::string &fault_iterator_cli)
 {
+   // R-602/R-603 (round-7 implementation): the CLI value now controls
+   // dispatch.  "substep" routes the time loop through the
+   // Tpv104SubStepIterator + per-sub-step ADER predictor path; any other
+   // value (including "one-shot") keeps the legacy single-shot
+   // wave.AdvanceADER call.  Default unchanged: one-shot.
+   if (fault_iterator_cli == "substep")
+   {
+      return DispatchedIterator::SubStep;
+   }
    return DispatchedIterator::OneShot;
 }
 static DispatchedLaw GetDispatchedLaw(const std::string &/*fric_law_cli*/)
@@ -224,10 +233,11 @@ static std::string BannerOf(DispatchedIterator i)
    switch (i)
    {
       case DispatchedIterator::OneShot:
-         return "one-shot (sub-step iterator NOT wired; "
-                "--fault-iterator flag IGNORED — R7-001)";
+         return "one-shot (default; legacy wave.AdvanceADER dispatch)";
       case DispatchedIterator::SubStep:
-         return "sub-step (Tpv104SubStepIterator, plan §4.10 Step 7)";
+         return "sub-step (Tpv104SubStepIterator + per-sub-step ADER "
+                "predictor — round-7 R-602/R-603, opt-in via "
+                "--fault-iterator substep)";
    }
    return "unknown";
 }
@@ -242,6 +252,152 @@ static std::string BannerOf(DispatchedLaw l)
          return "aging (ψ-space, forward-Euler)";
    }
    return "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// AdvanceADERWithSubStep — round-7 implementation of the SeisSol-equivalent
+// per-sub-step ADER dispatch.  Composes:
+//
+//   1. wave.ComputeADERSubStepStates(Q, dt, order, tau_nodes) → Q_per_node[o]
+//   2. wave.EvaluateBulkAtFaultQPsCanonical(Q_per_node[o]) for each o →
+//        Q_pointwise_plus_per_substep, Q_pointwise_minus_per_substep
+//   3. iterator.AdvanceWithSubStepStates(...) →
+//        accumulated I_imp_plus_flat, I_imp_minus_flat, plus DOFData updates
+//   4. wave.SetSubStepFaultImposedStates(...) — the fault branch of the
+//        upcoming AdvanceADER call will consume these.
+//   5. wave.AdvanceADER(...) — bulk corrector runs as usual but the fault
+//        branch substitutes the iterator's I_imp instead of running
+//        EvaluateADER inline.
+//   6. wave.ResetSubStepFaultImposedStates() — restore default for safety.
+//
+// Sub-step quadrature: `iterator.GetDeltaT()` and `iterator.GetTimeWeights()`
+// must be configured by SetSubSteps before this is called.  The driver
+// passes the cumulative-prefix nodes
+//   tau_nodes[o] = Σ_{o'<=o} deltaT[o']
+// (the SUB-STEP END NODES on [0, dt]).  This matches the cadence the
+// existing iterator uses for nucleation endpoints (`t_sub_end`) and ψ
+// updates (`dt_sub` per sub-step), so trial traction at sub-step `o`
+// is now consistent with the rest of that sub-step's bookkeeping.
+//
+// Returns 0 on success.  Aborts via MFEM_ABORT on contract violations
+// (predictor / iterator size mismatches).
+// ---------------------------------------------------------------------------
+template <typename WaveOpT>
+static void AdvanceADERWithSubStep(
+   WaveOpT &wave,
+   mfem::seas::Tpv104SubStepIterator &iterator,
+   std::vector<mfem::seas::DOFData> &dof_data,
+   const std::vector<mfem::Vector> &fault_coords,
+   const std::vector<mfem::real_t> &V_w,
+   const mfem::Vector &Q,
+   mfem::real_t dt_step,
+   int ader_order,
+   mfem::real_t t_step_start,
+   mfem::seas::FrictionSolver::Method method,
+   mfem::Vector &Q_new)
+{
+   using mfem::real_t;
+   using mfem::Vector;
+
+   MFEM_VERIFY(dt_step > 0.0,
+               "AdvanceADERWithSubStep: dt_step must be > 0, got "
+               << dt_step);
+   MFEM_VERIFY(ader_order >= 2 && ader_order <= 4,
+               "AdvanceADERWithSubStep: ader_order must be in {2,3,4}, "
+               "got " << ader_order);
+
+   // R-1002: read configured deltaT/weights ONCE up front; then rescale
+   // deltaT per call so the iterator's Σ deltaT == dt_step verify holds
+   // even when the time loop's dt_step varies (e.g., the final time
+   // step where dt_step = tfinal - t < auto-CFL dt).  The configured
+   // ratios deltaT[o]/Σ deltaT are preserved; weights stay unchanged.
+   const std::vector<real_t> configured_deltaT = iterator.GetDeltaT();
+   const std::vector<real_t> configured_weights = iterator.GetTimeWeights();
+   const int O = static_cast<int>(configured_deltaT.size());
+   MFEM_VERIFY(O >= 1,
+               "AdvanceADERWithSubStep: iterator has empty deltaT; "
+               "SetSubSteps must be called before dispatching this path.");
+   const mfem::real_t configured_sum =
+      std::accumulate(configured_deltaT.begin(), configured_deltaT.end(),
+                      static_cast<mfem::real_t>(0));
+   MFEM_VERIFY(configured_sum > 0.0,
+               "AdvanceADERWithSubStep: configured Σ deltaT = "
+               << configured_sum << " ≤ 0");
+
+   const mfem::real_t dt_scale = dt_step / configured_sum;
+   std::vector<mfem::real_t> deltaT_scaled(O);
+   for (int o = 0; o < O; o++)
+   {
+      deltaT_scaled[o] = configured_deltaT[o] * dt_scale;
+   }
+   iterator.SetSubSteps(deltaT_scaled, configured_weights);
+   const std::vector<real_t> &deltaT = iterator.GetDeltaT();   // = deltaT_scaled
+
+   // R-1001: SUB-STEP MIDPOINT nodes on [0, dt_step].  tau_nodes[o] is
+   // the midpoint of sub-step o relative to the macro-step start.  For
+   // ADER-2 predictor (Q linear in τ), the midpoint Q(τ_o) equals the
+   // sub-step's time-average — restoring the T_TPV104_SSI_3 contract
+   // (substep at O=1 with deltaT={dt}, weights={1.0} == one-shot at
+   // O=1).  Pre-fix: cumulative-end nodes (τ_0=dt) gave Q(dt) instead
+   // of Q̄=I/dt, breaking the SSI_3 bit-equivalence.  For O ≥ 3,
+   // midpoint rule is O(dt²)-accurate; full SeisSol parity (Gauss-
+   // Lobatto) is R-1005, separate.
+   std::vector<real_t> tau_nodes(O);
+   real_t acc = 0.0;
+   for (int o = 0; o < O; o++)
+   {
+      tau_nodes[o] = acc + 0.5 * deltaT[o];
+      acc += deltaT[o];
+   }
+
+   // Predictor: per-sub-step pointwise Q in the bulk.
+   std::vector<Vector> Q_per_node;
+   wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes,
+                                 Q_per_node);
+   MFEM_VERIFY(static_cast<int>(Q_per_node.size()) == O,
+               "AdvanceADERWithSubStep: ComputeADERSubStepStates returned "
+               << Q_per_node.size() << " nodes, expected " << O);
+
+   // Per-sub-step Q at fault QPs in canonical frame.
+   const int n_local_fault_qps = wave.GetNumLocalFaultQPs();
+   std::vector<std::vector<real_t>> Q_pointwise_plus(O), Q_pointwise_minus(O);
+   for (int o = 0; o < O; o++)
+   {
+      wave.EvaluateBulkAtFaultQPsCanonical(Q_per_node[o],
+                                           Q_pointwise_plus[o],
+                                           Q_pointwise_minus[o]);
+   }
+
+   // Iterator: per-sub-step friction + ψ + slip + accumulator.
+   const size_t n_words =
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_local_fault_qps);
+   std::vector<real_t> I_imp_plus_flat(n_words, 0.0);
+   std::vector<real_t> I_imp_minus_flat(n_words, 0.0);
+
+   if (n_local_fault_qps > 0)
+   {
+      iterator.AdvanceWithSubStepStates(dof_data, fault_coords, V_w,
+                                        Q_pointwise_plus,
+                                        Q_pointwise_minus,
+                                        dt_step, t_step_start,
+                                        I_imp_plus_flat.data(),
+                                        I_imp_minus_flat.data(),
+                                        method);
+   }
+
+   // Hand the iterator's output to the wave op so the upcoming
+   // AdvanceADER's fault branch substitutes it for inline EvaluateADER.
+   wave.SetSubStepFaultImposedStates(
+      n_local_fault_qps > 0 ? I_imp_plus_flat.data()  : nullptr,
+      n_local_fault_qps > 0 ? I_imp_minus_flat.data() : nullptr,
+      n_local_fault_qps);
+
+   // Bulk corrector: runs unchanged for non-fault faces; fault branch
+   // consumes the side-channel imposed states.
+   wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+
+   // Restore default behavior for any subsequent direct AdvanceADER call.
+   wave.ResetSubStepFaultImposedStates();
 }
 
 int main(int argc, char *argv[])
@@ -357,8 +513,33 @@ int main(int argc, char *argv[])
       GetStringArg(argc, argv, "--friction-solver", "newton-stable");
    std::string fric_law =
       GetStringArg(argc, argv, "--fric-law", "slip-srw");
+   // Default = "one-shot": legacy wave.AdvanceADER dispatch (production
+   // path, byte-identical to pre-R-602 behavior).  Pass --fault-iterator
+   // substep to opt in to the per-sub-step Tpv104SubStepIterator path.
+   // (Pre-R-602 the default was "substep" but DispatchedIterator unconditionally
+   //  returned OneShot; the string was banner-only.  Now that
+   //  GetDispatchedIterator routes the string, the default has to flip
+   //  to keep production behavior unchanged.)
    std::string fault_iterator =
-      GetStringArg(argc, argv, "--fault-iterator", "substep");
+      GetStringArg(argc, argv, "--fault-iterator", "one-shot");
+
+   // Round-11 Mixed-Flux dispatch (Zhang et al. 2023, MIXED_FLUX_PLAN.md).
+   // Default = "none": upwind everywhere, byte-identical to pre-Mixed-Flux
+   // behavior.  Accepted values:
+   //   - "none"           upwind everywhere (default)
+   //   - "adjacent"       central flux on faces adjacent to fault (Mixed-Flux 2)
+   //   - "all-continuous" central on every interior non-fault face (Mixed-Flux 1)
+   std::string mixed_flux_str =
+      GetStringArg(argc, argv, "--mixed-flux", "none");
+   MixedFluxMode mixed_flux_mode = MixedFluxMode::None;
+   if      (mixed_flux_str == "none")           { mixed_flux_mode = MixedFluxMode::None; }
+   else if (mixed_flux_str == "adjacent")       { mixed_flux_mode = MixedFluxMode::Adjacent; }
+   else if (mixed_flux_str == "all-continuous") { mixed_flux_mode = MixedFluxMode::AllContinuous; }
+   else
+   {
+      MFEM_ABORT("--mixed-flux: unknown value '" << mixed_flux_str
+                 << "'.  Accepted: none | adjacent | all-continuous.");
+   }
 
    // ader-order is accepted verbatim; wave.AdvanceADER clamps/validates
    // internally.  Allowing it through avoids false warnings when the
@@ -396,6 +577,18 @@ int main(int argc, char *argv[])
       std::cout << "Fault iterator: " << BannerOf(actual_iter) << "\n";
       std::cout << "Friction solver: " << BannerOf(actual_solver) << "\n";
       std::cout << "Friction law: " << BannerOf(actual_law) << "\n";
+      // Round-11 Mixed-Flux banner (Zhang et al. 2023).
+      const char *mixed_flux_banner =
+         (mixed_flux_mode == MixedFluxMode::None)
+            ? "none (upwind everywhere, default)"
+       : (mixed_flux_mode == MixedFluxMode::Adjacent)
+            ? "adjacent (Mixed-Flux 2 per Zhang et al. 2023, central on "
+              "fault-adjacent non-fault interior faces)"
+       : (mixed_flux_mode == MixedFluxMode::AllContinuous)
+            ? "all-continuous (Mixed-Flux 1, central on every interior "
+              "non-fault face)"
+            : "?";
+      std::cout << "Mixed flux: " << mixed_flux_banner << "\n";
       std::cout << "Nucleation: "
                 << (disable_nucleation ? "DISABLED"
                                        : "enabled (TPV104, macro-step "
@@ -404,7 +597,8 @@ int main(int argc, char *argv[])
       std::cout << "CLI parsed (banner-only, not dispatched): "
                 << "friction_solver=" << friction_solver
                 << ", fault_iterator=" << fault_iterator
-                << ", fric_law=" << fric_law << "\n";
+                << ", fric_law=" << fric_law
+                << ", mixed_flux=" << mixed_flux_str << "\n";
       std::cout << "========================================\n\n";
       mkdir(output_dir.c_str(), 0755);
    }
@@ -440,8 +634,11 @@ int main(int argc, char *argv[])
    // required edit is a single site: remove `(void)method;` and pass
    // `method` into `Tpv104SubStepIterator::Advance`.  Keeping the
    // named local ensures grep / IDE reference finds the linkage point.
+   // R-602/R-603 (round-7): `method` is now passed into
+   // AdvanceADERWithSubStep on the substep dispatch path.  On the
+   // legacy one-shot path it remains unused (Brent is hard-coded inside
+   // EvaluateADERTotal); the previous (void)method silencer is removed.
    const FrictionSolver::Method method = MapSolver(friction_solver);
-   (void)method;  // R7-001 option (b): not routed through the time loop.
 
    // --dry-run: no mesh, no simulation.  Print a canonical end-of-run
    // line that test_tpv104_smoke.cpp scrapes ("[dry-run] OK.").  Used
@@ -1053,15 +1250,90 @@ int main(int argc, char *argv[])
       wave.SetAbsorbingBackground(Q_bg);
    }
 
-   // R7-002: no SlipLawSRWPsi instance is constructed here.  The ψ
-   // update is invoked via the free function
-   // UpdateStateAnalyticSlipLawSRW(...) in the time loop below with
-   // per-QP (V_w, a), bypassing the base-virtual dispatch entirely.
-   // SlipLawSRWPsi::SetProductionMode()'s R-001 safety net is a guard
-   // against silent base-virtual fallthrough, which cannot occur on
-   // this path.  When the sub-step iterator is eventually wired into
-   // the time loop (R7-001 option a), a SlipLawSRWPsi instance with
-   // SetProductionMode() should be constructed and bound here.
+   // Round-11 Mixed-Flux dispatch wiring (R-1205 required call order):
+   //   1. WaveOperator ctor (already done)
+   //   2. wave.SetFaultFlux         (already done)
+   //   3. wave.SetFaultDOFData      (already done)
+   //   4. wave.SetAbsorbingBackground (already done)
+   //   5. wave.SetMixedFluxMode     <-- HERE; setter cross-checks
+   //                                    bc_.fault_attr > 0 for Adjacent,
+   //                                    and aborts if precomputed-flux
+   //                                    is also enabled (R-1203).
+   wave.SetMixedFluxMode(mixed_flux_mode);
+   if (rank == 0 && mixed_flux_mode != MixedFluxMode::None)
+   {
+      std::cout << "[mixed-flux] mode=" << mixed_flux_str
+                << "  |central_set|="
+                << wave.GetCentralFluxFaceSet().size()
+                << "  (Zhang et al. 2023 mixed-flux dispatch)\n";
+   }
+
+   // R7-002 (round-7): SlipLawSRWPsi instance is now constructed here so
+   // the optional Tpv104SubStepIterator dispatch can hold a `const
+   // SlipLawSRWPsi&` reference for global friction scalars (b, V0, f0,
+   // muW).  The default one-shot dispatch path still uses the free
+   // function `UpdateStateAnalyticSlipLawSRW(...)` directly with per-QP
+   // (V_w, a), bypassing this object — so its presence is byte-identical
+   // for the legacy path.  The base-virtual fallthrough guard is enabled
+   // via SetProductionMode().
+   //
+   // Instance constants follow TPV104Params: a_scalar=a_in (per-QP a is
+   // overridden in the time loop), b/V0/f0/muW from the spec, V_w_default
+   // = V_w_out (used only when caller forgets per-QP V_w; per-QP V_w[i]
+   // shadows it via UpdateStateAnalyticSlipLawSRW's signature).
+   mfem::seas::SlipLawSRWPsi state_evo(
+      TPV104Params::a_in, TPV104Params::b, TPV104Params::V0,
+      TPV104Params::f0, TPV104Params::muW, TPV104Params::V_w_out);
+   state_evo.SetProductionMode();
+
+   // R-602/R-603 substep iterator (default OFF; opt-in via
+   // --fault-iterator substep).  SetSubSteps configures the ADER-O
+   // quadrature: at order O, equal-width sub-steps with equal weights
+   // 1/O is the simplest valid quadrature on [0, dt] satisfying
+   //   Σ deltaT[o] == dt_macro,  Σ time_weights[o] == 1.
+   // The iterator's own per-call argument validation enforces this.
+   mfem::seas::Tpv104SubStepIterator substep_iterator(fault_flux, state_evo);
+   {
+      const int O = std::max(1, ader_order);
+      std::vector<real_t> deltaT(O, 1.0 / static_cast<real_t>(O));
+      std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
+      // The iterator interprets deltaT in absolute (physical) time units,
+      // so scale by the FIRST macro-step dt to seed the quadrature.
+      // The Σ deltaT==dt_macro check inside Advance/AdvanceWithSubStepStates
+      // is RELATIVE so the same configuration handles every macro-step
+      // even though dt may vary slightly (it doesn't in TPV104, but the
+      // iterator is general).  Using `dt` (the auto-CFL initial value)
+      // here works because TPV104 uses fixed dt in the time loop.
+      for (int o = 0; o < O; o++) { deltaT[o] = dt / static_cast<real_t>(O); }
+      substep_iterator.SetSubSteps(deltaT, weights);
+   }
+
+   const bool use_substep_iterator =
+      (GetDispatchedIterator(fault_iterator) == DispatchedIterator::SubStep);
+   if (rank == 0 && use_substep_iterator)
+   {
+      std::cout << "[tpv104_driver] --fault-iterator substep ACTIVE: "
+                << "ADER-O" << ader_order
+                << " per-sub-step Q via ComputeADERSubStepStates + "
+                << "Tpv104SubStepIterator::AdvanceWithSubStepStates.\n";
+   }
+   // R-1003: substep guard fires only on local-fault branch in
+   // ComputeADERFaceFluxRHS.  Shared-fault branch in
+   // ComputeADERSharedFaceFluxRHS still runs inline EvaluateADER on
+   // macro-step Q̄, producing a non-conservative fault Riemann at every
+   // partition seam through the fault.  Until the guard is extended to
+   // shared faces, REJECT MPI runs with the substep flag rather than
+   // silently producing wrong results.
+   if (use_substep_iterator && nprocs > 1)
+   {
+      MFEM_ABORT("--fault-iterator substep is not yet supported with "
+                 "MPI (nprocs=" << nprocs << ").  The substep guard "
+                 "fires only on the interior-fault branch; shared-fault "
+                 "faces would diverge from the iterator's per-sub-step "
+                 "semantic.  Run with np=1 or remove --fault-iterator "
+                 "substep until R-1003 (shared-fault path extension) "
+                 "lands.");
+   }
    // -----------------------------------------------------------------------
    // 6. Initialize Q = 0 (fluctuation-Q).
    // -----------------------------------------------------------------------
@@ -1478,18 +1750,50 @@ int main(int argc, char *argv[])
       // ApplyNucleationIncremental_TPV104 adds  Δτ · smoothStepIncrement
       // to `tau2_nuc` at every call, so over [0, T_nuc] the channel
       // telescopes to the full perturbation.
-      if (!disable_nucleation && num_fault_total > 0)
+      //
+      // R-1008 (round-10) NUCLEATION DOUBLE-COUNT FIX:
+      //   The substep path's Tpv104SubStepIterator::AdvanceWithSubStepStates
+      //   (and legacy Advance) already calls ApplyNucleationIncremental_TPV104
+      //   ONCE PER SUB-STEP internally (line 295 / its AdvanceWithSubStepStates
+      //   sibling).  Σ_o ΔS over the sub-steps telescopes to the same
+      //   macro-step increment ΔS(t+dt) − ΔS(t).  If the driver ALSO
+      //   calls the accumulator here, tau2_nuc is incremented TWICE per
+      //   macro-step → 2× the spec Δτ₀ at full ramp → 2-million× rupture
+      //   over-acceleration (terminal velocity by t=0.5 s instead of
+      //   ~t=1 s).  Skip the driver-level call when the iterator owns
+      //   nucleation cadence; one-shot path keeps the driver-level call.
+      if (!disable_nucleation && num_fault_total > 0 && !use_substep_iterator)
       {
          ApplyNucleationIncremental_TPV104(dof_data, fault_coords,
                                            t + dt_step, dt_step);
       }
 
-      // One-shot ADER predictor-corrector.  AdvanceADER runs the bulk
-      // wave update + the fault-face Riemann solve (through
-      // FaultFaceFlux::EvaluateADERTotal); the solve reads DOFData.psi
-      // and DOFData.tau*_nuc as set above, and writes V1/V2/slip_rate/
-      // tau*_corr/sigma_n_corr back onto DOFData.
-      wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+      // ADER predictor-corrector.  Default (use_substep_iterator==false):
+      // one-shot AdvanceADER runs the bulk wave update + the fault-face
+      // Riemann solve (through FaultFaceFlux::EvaluateADERTotal); the
+      // solve reads DOFData.psi and DOFData.tau*_nuc as set above, and
+      // writes V1/V2/slip_rate/tau*_corr/sigma_n_corr back onto DOFData.
+      //
+      // Sub-step path (use_substep_iterator==true, --fault-iterator
+      // substep):  AdvanceADERWithSubStep composes ComputeADERSubStepStates
+      // (per-sub-step pointwise Q via Taylor expansion),
+      // EvaluateBulkAtFaultQPsCanonical (per-sub-step canonical Q at fault
+      // QPs), Tpv104SubStepIterator::AdvanceWithSubStepStates (per-sub-step
+      // friction + ψ + slip + accumulated I_imp), and AdvanceADER (with
+      // the iterator's I_imp installed via SetSubStepFaultImposedStates so
+      // the fault branch consumes them in lieu of inline EvaluateADER).
+      // At O=1 the two paths are bit-identical (T_TPV104_SSI_3 contract).
+      if (use_substep_iterator)
+      {
+         AdvanceADERWithSubStep(wave, substep_iterator, dof_data,
+                                fault_coords, V_w, Q, dt_step,
+                                ader_order, /*t_step_start=*/t,
+                                method, Q_new);
+      }
+      else
+      {
+         wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+      }
       Q.Swap(Q_new);
       t += dt_step;
 
@@ -1553,6 +1857,34 @@ int main(int argc, char *argv[])
       // no-touch).  Under a rapidly-changing V the macro-step ψ deviates
       // from the per-sub-step result by O(dt_macro²); Phase-3 probe 2
       // against SeisSol will quantify the gap.
+      // R-1009 (round-10) SLIP DOUBLE-COUNT FIX:
+      //   Tpv104SubStepIterator::AdvanceWithSubStepStates (and legacy
+      //   Advance) accumulates slip1/slip2 PER SUB-STEP at line 651–652
+      //   / 410–411 of tpv104_substep_iterator.cpp.  Σ_o dt_sub = dt_step
+      //   regardless of O, so on the substep dispatch path the iterator
+      //   already integrated `slip += V·dt_step` once.  The driver-level
+      //   integration below would double-count, producing ~2× the
+      //   correct slip at every macro-step (observed empirically as the
+      //   order-independent 2.01/2.02 ratio at O=2/O=3).  Skip the
+      //   driver-level slip update on the substep path; one-shot path
+      //   keeps it (wave.AdvanceADER does not touch d.slip*).
+      //
+      //   Same pattern as R-1008 (nucleation double-count): a quantity
+      //   the iterator owns must NOT be re-applied by the driver.
+      //   ψ update stays driver-side: the iterator's per-sub-step ψ
+      //   advance lands the SAME final ψ as a single macro-step
+      //   exponential update would (analytic SRW law is exactly
+      //   integrable per sub-step), but the driver's snapshot+rebuild
+      //   pattern depends on psi_n[i] = state-at-step-start, which the
+      //   iterator's per-sub-step writes have already overwritten.
+      //   Use UpdateStateAnalyticSlipLawSRW on the slip_rate that
+      //   reflects the iterator's last-sub-step write (consistent with
+      //   the legacy macro-step ψ cadence).  TODO if SeisSol-equivalent
+      //   ψ cadence is needed: remove the driver-level ψ update on the
+      //   substep path too (the iterator already does it per sub-step),
+      //   replacing psi_n with iterator-supplied state.  Out of scope
+      //   for R-1009 — TPV104 ψ cadence is documented as macro-step on
+      //   both paths.
       for (int i = 0; i < num_fault_total; ++i)
       {
          dof_data[i].psi = UpdateStateAnalyticSlipLawSRW(
@@ -1566,8 +1898,11 @@ int main(int argc, char *argv[])
             TPV104Params::V0,
             TPV104Params::f0,
             TPV104Params::f_w);
-         dof_data[i].slip1 += dof_data[i].V1 * dt_step;
-         dof_data[i].slip2 += dof_data[i].V2 * dt_step;
+         if (!use_substep_iterator)
+         {
+            dof_data[i].slip1 += dof_data[i].V1 * dt_step;
+            dof_data[i].slip2 += dof_data[i].V2 * dt_step;
+         }
       }
 
       // V_max tracking.

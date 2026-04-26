@@ -59,3 +59,18 @@ tpv102/run_200m_p1_dt5ms_3step/
 tpv102/mesh/tpv102_200m.msh
 tpv102/mesh/tpv102_100m.msh
 tpv102/mesh/tpv102_1000m.msh
+
+# TPV104 simulation outputs and post-run plot dirs (cluster-job artifacts)
+# Covers e.g. plots_results_t12_dev_job7677022,
+#             plots_results_dthalf_job7677079,
+#             plots_results_fwfix_job7677251,
+#             plots_results_freezesn_job7677661,
+#             plots_results_bulk_asym_job7677759,
+#             plots_results_symmirror_job7677822,
+#             plots_results_symmirror_job7677831,
+#             plots_results_partfile_job7677864,
+#             plots_results_p2_partfile_job7678275,
+#             plots_results_p2_partfile_job7678303,
+#             plots_results_orig_p2_job7678258
+tpv104/results/
+tpv104/plots_results_*/

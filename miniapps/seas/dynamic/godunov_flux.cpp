@@ -374,6 +374,55 @@ void GodunovFlux::Interior(const real_t *nor, const real_t *Q_self,
 }
 
 // ---------------------------------------------------------------------------
+// Central (non-dissipative) flux for Zhang et al. 2023 Mixed-Flux dispatch.
+// F_h = 0.5 · A_n · (Q_self + Q_nbr) — same rotation as Interior, but the
+// rotated-frame inner step uses (Ax_plus_ + Ax_minus_) (= full A_x_face_local)
+// instead of the eigenvalue-split upwind combination.
+// ---------------------------------------------------------------------------
+void GodunovFlux::Central(const real_t *nor, const real_t *Q_self,
+                          const real_t *Q_nbr, real_t *F_h) const
+{
+   // 1. Build orthonormal frame (same as Interior).
+   real_t t1[3], t2[3];
+   BuildFrame(nor, t1, t2);
+
+   // 2. Build rotation matrices (same as Interior).
+   DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+   DenseMatrix T(NUM_STATE, NUM_STATE);
+   BuildRotationInverse(nor, t1, t2, Tinv);
+   BuildRotation(nor, t1, t2, T);
+
+   // 3. Rotate states to face-normal frame (same as Interior).
+   real_t Q_self_rot[NUM_STATE], Q_nbr_rot[NUM_STATE];
+   Tinv.Mult(Q_self, Q_self_rot);
+   Tinv.Mult(Q_nbr, Q_nbr_rot);
+
+   // 4. Central flux in rotated frame:
+   //    F_rot = 0.5 · (Ax_plus_ + Ax_minus_) · (Q_self_rot + Q_nbr_rot)
+   //    Note: (Ax_plus_ + Ax_minus_) is the FULL face-normal Jacobian A_x
+   //    in the face-rotated frame, NOT the global GetReferenceStarMatrix(0)
+   //    (which is A_x in global Cartesian coords).
+   real_t Q_sum[NUM_STATE];
+   for (int i = 0; i < NUM_STATE; i++)
+   {
+      Q_sum[i] = Q_self_rot[i] + Q_nbr_rot[i];
+   }
+   real_t F_rot[NUM_STATE];
+   for (int i = 0; i < NUM_STATE; i++)
+   {
+      real_t s = 0.0;
+      for (int j = 0; j < NUM_STATE; j++)
+      {
+         s += (Ax_plus_(i, j) + Ax_minus_(i, j)) * Q_sum[j];
+      }
+      F_rot[i] = 0.5 * s;
+   }
+
+   // 5. Rotate back to global frame (same as Interior).
+   T.Mult(F_rot, F_h);
+}
+
+// ---------------------------------------------------------------------------
 // Absorbing BC flux: F_abs = A_n^+ Q_self (Eq. 5)
 // ---------------------------------------------------------------------------
 void GodunovFlux::Absorbing(const real_t *nor, const real_t *Q_self,

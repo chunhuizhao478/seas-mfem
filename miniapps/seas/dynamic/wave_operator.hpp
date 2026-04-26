@@ -28,6 +28,7 @@
 #include <memory>
 #include <vector>
 #include <map>
+#include <unordered_set>
 #include <set>
 #include <sstream>
 
@@ -42,6 +43,19 @@ namespace seas
 /// Controlled at runtime via WaveOperator::SetFreeSurfaceBCMode.  Default
 /// is Gamma so drivers that don't set it reproduce pre-v9.3.0 behaviour.
 enum class FreeSurfaceBCMode : int { Gamma = 0, Godunov = 1 };
+
+/// Zhang et al. 2023 mixed-flux mode for interior non-fault face flux.
+/// - None:           upwind everywhere (DEFAULT, byte-identical to
+///                   pre-Mixed-Flux behavior).
+/// - Adjacent:       central flux on faces immediately adjacent to a
+///                   fault element, upwind elsewhere (Mixed-Flux 2,
+///                   recommended; Zhang 2023 Fig. 4b).
+/// - AllContinuous:  central flux on every interior non-fault face
+///                   (Mixed-Flux 1, Zhang 2023 Fig. 4a; eliminates SSOs
+///                   but allows minor HFOs).
+/// Controlled at runtime via WaveOperator::SetMixedFluxMode.  Mutually
+/// exclusive with `UsePrecomputedFaceFluxes(true)` (R-1203).
+enum class MixedFluxMode : int { None = 0, Adjacent = 1, AllContinuous = 2 };
 
 /// @brief DG wave operator for the 3D velocity-stress elastic wave equation.
 ///
@@ -103,6 +117,24 @@ public:
    /// characteristic projection.
    void SetFreeSurfaceBCMode(FreeSurfaceBCMode m) { free_surface_bc_mode_ = m; }
    FreeSurfaceBCMode GetFreeSurfaceBCMode() const { return free_surface_bc_mode_; }
+
+   /// Zhang et al. 2023 mixed-flux mode (round-11 R-602/R-1201–R-1207).
+   /// Default `None`: byte-identical to pre-Mixed-Flux behavior.
+   /// `Adjacent` populates `central_flux_face_set_` with non-fault interior
+   /// faces touching a fault element.  `AllContinuous` populates with
+   /// every interior non-fault face.  Mutually exclusive with
+   /// `UsePrecomputedFaceFluxes(true)` (R-1203 cross-check fires in BOTH
+   /// setters).  `Adjacent` requires `bc_.fault_attr > 0` and a populated
+   /// fault face list (set by the constructor); aborts otherwise.
+   void SetMixedFluxMode(MixedFluxMode m);
+   MixedFluxMode GetMixedFluxMode() const { return mixed_flux_mode_; }
+
+   /// Test-only accessor exposing the currently-populated central-flux
+   /// face index set.  Used by `test_mixed_flux_face_set` to verify the
+   /// Phase 3 set-construction algorithm.  Returns an empty set when
+   /// `mixed_flux_mode_ == None`.
+   const std::unordered_set<int> &GetCentralFluxFaceSet() const
+   { return central_flux_face_set_; }
 
    /// TPV102 "Topology-Based Precomputed Face-Rotation" plan 2026-04-23
    /// Phase 2a (§6.3, R4-001 + R5-002 FIXES): opt-in dispatch switch for
@@ -233,6 +265,72 @@ public:
                                   real_t dt,
                                   int order,
                                   Vector &I) const;
+
+   /// Sub-step state evaluation: pointwise Q at supplied time nodes within
+   /// [0, dt].  Same Cauchy-Kovalevskaya recursion as
+   /// `ComputeADERTimeIntegrated`; instead of integrating, evaluates the
+   /// Taylor polynomial Q(τ) = Σ_{k=0}^{O-1} (τ^k / k!) · D(k) at each τ in
+   /// `tau_nodes`.  Used by `Tpv104SubStepIterator::AdvanceWithSubStepStates`
+   /// to match SeisSol's per-substep `qInterpolated[o]` semantics.
+   ///
+   /// @param[in]  Q          State at t.  Size NUM_STATE * ndof_total_.
+   /// @param[in]  dt         Macro-step size; bounds the validity of the
+   ///                        Taylor expansion.  Must be > 0.
+   /// @param[in]  order      ADER order in {2, 3, 4}.
+   /// @param[in]  tau_nodes  Sub-step nodes in [0, dt] (typically Gauss-
+   ///                        Lobatto on [0, dt]).  Each entry must be
+   ///                        finite and in [0, dt].
+   /// @param[out] Q_per_node Pointwise Q at each sub-step node.  Resized to
+   ///                        tau_nodes.size(); each element sized
+   ///                        NUM_STATE * ndof_total_.
+   void ComputeADERSubStepStates(const Vector &Q,
+                                 real_t dt,
+                                 int order,
+                                 const std::vector<real_t> &tau_nodes,
+                                 std::vector<Vector> &Q_per_node) const;
+
+   /// Sub-step iterator side-channel: when the pointer pair is set, the
+   /// fault branch of `ComputeADERFaceFluxRHS` consumes the pre-computed
+   /// per-substep imposed states (in canonical fault-local frame, layout
+   /// `flat[dof_idx * NUM_STATE + c]`) instead of running
+   /// `FaultFaceFlux::EvaluateADER` inline.  Default: pointers null,
+   /// inline path used (bit-identical to pre-change behavior).  The driver
+   /// sets these before calling `AdvanceADER` on the substep dispatch path
+   /// and resets them after via `ResetSubStepFaultImposedStates`.
+   ///
+   /// Caller owns the buffers; this class stores raw pointers only.
+   void SetSubStepFaultImposedStates(const real_t *I_imp_plus_flat,
+                                     const real_t *I_imp_minus_flat,
+                                     int n_local_fault_qps) const;
+
+   /// Pair to `SetSubStepFaultImposedStates`; clears the pointers so the
+   /// inline EvaluateADER path is restored on subsequent calls.
+   void ResetSubStepFaultImposedStates() const;
+
+   /// SubStep helper: evaluate bulk Q at every interior fault QP and
+   /// rotate into the canonical fault-local frame, packing into flat
+   /// arrays in the same layout the iterator's
+   /// `AdvanceWithSubStepStates` expects (entry
+   /// `[dof_idx * NUM_STATE + c]`).  `dof_idx` matches
+   /// `wave_operator.inl`'s fault-branch indexing
+   /// (`fault_face_dof_offset_[f] + q`).
+   ///
+   /// On a fault face, Elem1 is on the canonical-+ side iff
+   /// `interior_fault_elem1_on_plus_[i]` is true (R-101); the helper
+   /// uses that flag to route Elem1's evaluation into the correct
+   /// + or − output bucket.
+   ///
+   /// Per-side rotation uses the canonical (sign-corrected) frame
+   /// reconstructed from FaultBasis — bit-identical to the rotation
+   /// used by `ComputeADERFaceFluxRHS` at the same fault QP.
+   ///
+   /// @param[in]  Q_bulk        Bulk state, size NUM_STATE * ndof_total_.
+   /// @param[out] Q_plus_flat   Output, sized NUM_STATE * GetNumLocalFaultQPs().
+   /// @param[out] Q_minus_flat  Output, same size.
+   void EvaluateBulkAtFaultQPsCanonical(
+      const Vector &Q_bulk,
+      std::vector<real_t> &Q_plus_flat,
+      std::vector<real_t> &Q_minus_flat) const;
 
    /// ADER Phase 4: volume-integral contribution of the ADER corrector.
    ///
@@ -442,9 +540,32 @@ private:
    PMLLayer *pml_layer_ = nullptr;
    FaultFaceFlux *fault_flux_ = nullptr;
 
+   /// Sub-step iterator side-channel (R-602/R-603): non-null when the
+   /// driver has precomputed per-substep imposed states via the iterator;
+   /// fault branch of ComputeADERFaceFluxRHS consumes them in lieu of
+   /// inline EvaluateADER.  All three reset to defaults in the ctor and
+   /// after each ResetSubStepFaultImposedStates call.  `mutable` so the
+   /// const-method setters can update them; the data they reference is
+   /// owned by the driver.
+   mutable const real_t *substep_I_imp_plus_flat_  = nullptr;
+   mutable const real_t *substep_I_imp_minus_flat_ = nullptr;
+   mutable int substep_n_local_fault_qps_ = 0;
+
    /// I-04: free-surface BC flux dispatch mode.  Defaults to Gamma so
    /// setup-free drivers keep pre-v9.3.0 output.
    FreeSurfaceBCMode free_surface_bc_mode_ = FreeSurfaceBCMode::Gamma;
+
+   /// Round-11 Mixed-Flux dispatch (Zhang et al. 2023).  Default `None`.
+   /// `central_flux_face_set_` is built by `BuildCentralFluxFaceSet_`
+   /// when the mode is set to `Adjacent` or `AllContinuous`.  Cleared
+   /// when mode is `None`.  `unordered_set` per R-1206 (O(1) lookup at
+   /// dispatch sites; load-bearing for production performance).
+   MixedFluxMode mixed_flux_mode_ = MixedFluxMode::None;
+   std::unordered_set<int> central_flux_face_set_;
+
+   /// Phase 3 helper: populate `central_flux_face_set_` per the mode.
+   /// Called from `SetMixedFluxMode`.  Clears the set first.
+   void BuildCentralFluxFaceSet_();
 
    /// TPV102 Phase 2a (§6.3): opt-in flag + cached precomputed flux tables.
    /// `precomputed_face_fluxes_` is mutable because the const dispatch

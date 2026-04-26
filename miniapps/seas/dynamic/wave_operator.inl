@@ -540,6 +540,20 @@ WaveOperator<MeshType>::~WaveOperator() = default;
 template <typename MeshType>
 void WaveOperator<MeshType>::UsePrecomputedFaceFluxes(bool enable)
 {
+   // R-1203 cross-check: precomputed-flux and mixed-flux are mutually
+   // exclusive.  The precomputed flux cache bakes upwind into its tables;
+   // mixed-flux at any non-None mode would be silently ignored if the
+   // precomputed-flux dispatch fires first.  Abort if the OTHER setter
+   // is in a non-default state.  Symmetric guard in SetMixedFluxMode.
+   if (enable && mixed_flux_mode_ != MixedFluxMode::None)
+   {
+      MFEM_ABORT("UsePrecomputedFaceFluxes(true): mutually exclusive "
+                 "with mixed-flux mode (currently "
+                 << static_cast<int>(mixed_flux_mode_)
+                 << ").  Disable mixed flux first via "
+                 "SetMixedFluxMode(MixedFluxMode::None).");
+   }
+
    if (enable)
    {
       // === §6.3a (R5-002 FIX) — late population of fault_face_set_ ===
@@ -1011,6 +1025,420 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
 }
 
 // ---------------------------------------------------------------------------
+// R-602: ComputeADERSubStepStates — pointwise Q at sub-step nodes via
+//        Cauchy-Kovalevskaya Taylor expansion.
+//
+// Same recursion D(k+1) = -Σ_d A_d · ∂_{x_d} D(k) as
+// ComputeADERTimeIntegrated; instead of integrating with weight
+// dt^{k+1}/(k+1)!, this evaluates the Taylor polynomial
+//   Q(τ) = Σ_{k=0}^{O-1} (τ^k / k!) · D(k)
+// at each supplied τ in tau_nodes.
+//
+// Used by Tpv104SubStepIterator::AdvanceWithSubStepStates (and the driver's
+// AdvanceADERWithSubStep helper) to match SeisSol's per-substep
+// `qInterpolated[o]` semantics.  The Gauss-Lobatto nodes on [0, dt] are
+// the standard ADER-O sub-step quadrature.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeADERSubStepStates(
+   const Vector &Q, real_t dt, int order,
+   const std::vector<real_t> &tau_nodes,
+   std::vector<Vector> &Q_per_node) const
+{
+   MFEM_VERIFY(order >= 2 && order <= 4,
+               "ComputeADERSubStepStates: order must be in {2,3,4}, got "
+               << order);
+   MFEM_VERIFY(dt > 0.0,
+               "ComputeADERSubStepStates: dt must be > 0, got " << dt);
+   MFEM_VERIFY(Q.Size() == NUM_STATE * ndof_total_,
+               "ComputeADERSubStepStates: Q size " << Q.Size()
+               << " != NUM_STATE * ndof_total_ = "
+               << NUM_STATE * ndof_total_);
+   const int O_nodes = static_cast<int>(tau_nodes.size());
+   MFEM_VERIFY(O_nodes >= 1,
+               "ComputeADERSubStepStates: tau_nodes must be non-empty");
+   for (int o = 0; o < O_nodes; o++)
+   {
+      MFEM_VERIFY(std::isfinite(tau_nodes[o]),
+                  "ComputeADERSubStepStates: tau_nodes[" << o
+                  << "] must be finite, got " << tau_nodes[o]);
+      MFEM_VERIFY(tau_nodes[o] >= 0.0 && tau_nodes[o] <= dt,
+                  "ComputeADERSubStepStates: tau_nodes[" << o
+                  << "] = " << tau_nodes[o]
+                  << " is out of [0, dt] = [0, " << dt << "]");
+   }
+
+   Q_per_node.resize(O_nodes);
+   for (int o = 0; o < O_nodes; o++)
+   {
+      Q_per_node[o].SetSize(NUM_STATE * ndof_total_);
+      Q_per_node[o] = 0.0;
+   }
+
+   if (ndof_total_ == 0) { return; }
+
+   // Ping-pong buffers for the CK recursion.
+   Vector D_curr(Q);                              // D(0) = Q
+   Vector D_next(NUM_STATE * ndof_total_);
+   Vector dQ_dxd(NUM_STATE * ndof_total_);
+
+   // k = 0 contribution: Q(τ) += (τ^0 / 0!) * D(0) = D(0).
+   for (int o = 0; o < O_nodes; o++)
+   {
+      Q_per_node[o].Add(1.0, D_curr);
+   }
+
+   // Recursion factor f(k) = τ^k / k!, evolved per node as
+   //   f(k+1) = f(k) * τ / (k+1)
+   std::vector<real_t> fac(O_nodes, 1.0);
+
+   for (int k = 0; k < order - 1; k++)
+   {
+      // D_next = L(D_curr) = -Σ_d A_d · ∂_{x_d} D_curr.  Same kernel as
+      // ComputeADERTimeIntegrated; element-local, no cross-element coupling.
+      D_next = 0.0;
+      for (int d = 0; d < 3; d++)
+      {
+         ApplySpatialDerivative(d, D_curr, dQ_dxd);
+         const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
+         ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+      }
+
+      // Update factorial factors and accumulate D(k+1) into each node.
+      const real_t denom = static_cast<real_t>(k + 1);
+      for (int o = 0; o < O_nodes; o++)
+      {
+         fac[o] *= tau_nodes[o] / denom;
+         Q_per_node[o].Add(fac[o], D_next);
+      }
+
+      // Swap buffers: D_curr <- D_next for the next iteration.
+      mfem::Swap(D_curr, D_next);
+   }
+}
+
+// ---------------------------------------------------------------------------
+// R-602/R-603: SubStep iterator side-channel setters.  See header docstring.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::SetSubStepFaultImposedStates(
+   const real_t *I_imp_plus_flat, const real_t *I_imp_minus_flat,
+   int n_local_fault_qps) const
+{
+   MFEM_VERIFY(n_local_fault_qps >= 0,
+               "SetSubStepFaultImposedStates: n_local_fault_qps must be "
+               ">= 0, got " << n_local_fault_qps);
+   if (n_local_fault_qps > 0)
+   {
+      MFEM_VERIFY(I_imp_plus_flat != nullptr && I_imp_minus_flat != nullptr,
+                  "SetSubStepFaultImposedStates: both pointers must be "
+                  "non-null when n_local_fault_qps > 0");
+   }
+   substep_I_imp_plus_flat_  = I_imp_plus_flat;
+   substep_I_imp_minus_flat_ = I_imp_minus_flat;
+   substep_n_local_fault_qps_ = n_local_fault_qps;
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ResetSubStepFaultImposedStates() const
+{
+   substep_I_imp_plus_flat_  = nullptr;
+   substep_I_imp_minus_flat_ = nullptr;
+   substep_n_local_fault_qps_ = 0;
+}
+
+// ---------------------------------------------------------------------------
+// Round-11 Mixed-Flux mode setter (Zhang et al. 2023).  Default `None` ==
+// pre-Mixed-Flux behavior.  Mode flip rebuilds central_flux_face_set_.
+// R-1203 cross-check with precomputed-flux state; symmetric guard in
+// UsePrecomputedFaceFluxes.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
+{
+   // R-1203 cross-check.
+   if (m != MixedFluxMode::None && use_precomputed_face_fluxes_)
+   {
+      MFEM_ABORT("SetMixedFluxMode("
+                 << (m == MixedFluxMode::Adjacent ? "Adjacent"
+                                                  : "AllContinuous")
+                 << "): mutually exclusive with precomputed face flux "
+                 "(UsePrecomputedFaceFluxes is currently true).  "
+                 "Disable precomputed flux first.");
+   }
+
+   // R-1205: Adjacent mode requires fault attribute and a populated fault
+   // face list.  AllContinuous works even without a fault.
+   if (m == MixedFluxMode::Adjacent)
+   {
+      MFEM_VERIFY(bc_.fault_attr > 0,
+                  "SetMixedFluxMode(Adjacent): bc_.fault_attr = "
+                  << bc_.fault_attr << " (≤ 0).  Adjacent mode requires "
+                  "a fault attribute; use AllContinuous or None for "
+                  "no-fault meshes.");
+   }
+
+   mixed_flux_mode_ = m;
+   BuildCentralFluxFaceSet_();
+}
+
+// ---------------------------------------------------------------------------
+// BuildCentralFluxFaceSet_ — populate central_flux_face_set_ per the
+// configured mixed-flux mode.  Algorithm follows Zhang 2023 §3.2 / Fig 5.
+// R-1207: explicit "is interior" predicate that handles MPI shared seams.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::BuildCentralFluxFaceSet_()
+{
+   central_flux_face_set_.clear();
+   if (mixed_flux_mode_ == MixedFluxMode::None) { return; }
+
+   // R-1207 membership predicate factored as a lambda for reuse.
+   auto is_interior_face = [&](int f) -> bool
+   {
+      FaceElementTransformations *ftr =
+         mesh_.GetFaceElementTransformations(f);
+      const bool two_sided_interior =
+         (ftr != nullptr && ftr->Elem2No >= 0);
+      const bool shared_seam =
+         (shared_mesh_face_set_.count(f) > 0);
+      return two_sided_interior || shared_seam;
+   };
+   auto is_fault_face = [&](int f) -> bool
+   {
+      return (bc_.fault_attr > 0 &&
+              f < static_cast<int>(face_bdr_attr_.size()) &&
+              face_bdr_attr_[f] == bc_.fault_attr);
+   };
+
+   if (mixed_flux_mode_ == MixedFluxMode::AllContinuous)
+   {
+      // Mixed-Flux 1 (Zhang Fig 4a): central on every interior non-fault.
+      for (int f = 0; f < mesh_.GetNumFaces(); f++)
+      {
+         if (is_interior_face(f) && !is_fault_face(f))
+         {
+            central_flux_face_set_.insert(f);
+         }
+      }
+      return;
+   }
+
+   // Mixed-Flux 2 (Zhang Fig 4b): central only on faces immediately
+   // adjacent to a fault element.
+
+   // Step 1: build E_fault_adj from interior + shared fault faces.
+   std::unordered_set<int> E_fault_adj;
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      const int f = fault_interior_faces_[i];
+      FaceElementTransformations *ftr =
+         mesh_.GetInteriorFaceTransformations(f);
+      if (!ftr) { continue; }
+      if (ftr->Elem1No >= 0) { E_fault_adj.insert(ftr->Elem1No); }
+      if (ftr->Elem2No >= 0) { E_fault_adj.insert(ftr->Elem2No); }
+   }
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      for (int sf_i = 0; sf_i < fault_shared_faces_.Size(); sf_i++)
+      {
+         const int sf = fault_shared_faces_[sf_i];
+         FaceElementTransformations *ftr =
+            pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+         if (ftr->Elem1No >= 0) { E_fault_adj.insert(ftr->Elem1No); }
+         // Elem2 of a shared face is on a remote rank (Elem2No < 0 with
+         // ghost-block index); only this rank's Elem1 is added.
+      }
+#endif
+   }
+
+   // Step 2: for each element in E_fault_adj, walk its faces; insert any
+   // interior non-fault face into central_flux_face_set_.
+   Array<int> elem_faces, elem_orient;
+   for (int e : E_fault_adj)
+   {
+      mesh_.GetElementFaces(e, elem_faces, elem_orient);
+      for (int j = 0; j < elem_faces.Size(); j++)
+      {
+         const int f = elem_faces[j];
+         if (is_interior_face(f) && !is_fault_face(f))
+         {
+            central_flux_face_set_.insert(f);
+         }
+      }
+   }
+}
+
+// ---------------------------------------------------------------------------
+// EvaluateBulkAtFaultQPsCanonical — read bulk Q at every interior fault QP,
+// rotate to the canonical fault-local frame, route Elem1's evaluation into
+// the canonical-+/− output bucket, and pack into flat per-QP arrays.
+//
+// Layout:
+//   Q_*_flat[ dof_idx * NUM_STATE + c ]
+// where dof_idx = fault_face_dof_offset_[f] + q for interior fault face f
+// at QP index q — the same indexing used by the fault branch of
+// ComputeADERFaceFluxRHS.
+//
+// Reuses the canonical frame from FaultBasis (sign_flipped reconstruction)
+// and the per-face elem1_on_plus flag (R-101) so the rotation and side-
+// labeling are bit-identical to the production fault flux path.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
+   const Vector &Q_bulk,
+   std::vector<real_t> &Q_plus_flat,
+   std::vector<real_t> &Q_minus_flat) const
+{
+   MFEM_VERIFY(Q_bulk.Size() == NUM_STATE * ndof_total_,
+               "EvaluateBulkAtFaultQPsCanonical: Q_bulk size "
+               << Q_bulk.Size() << " != NUM_STATE * ndof_total_ = "
+               << NUM_STATE * ndof_total_);
+
+   const int n_local_qps = GetNumLocalFaultQPs();
+   const size_t expect_words =
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_local_qps);
+   Q_plus_flat.assign(expect_words, 0.0);
+   Q_minus_flat.assign(expect_words, 0.0);
+
+   if (n_local_qps == 0 || !fault_basis_) { return; }
+
+   const real_t *Q_data = Q_bulk.GetData();
+
+   for (int fi = 0; fi < fault_interior_faces_.Size(); fi++)
+   {
+      const int f = fault_interior_faces_[fi];
+      FaceElementTransformations *ftr =
+         mesh_.GetInteriorFaceTransformations(f);
+      // R-1004: ftr should NEVER be null on a face in fault_interior_faces_
+      // (the ctor populates this list filtering on
+      // GetInteriorFaceTransformations(f) != nullptr).  Silently skipping
+      // here would leave the corresponding entries of Q_*_flat at zero,
+      // producing wrong friction inputs for the substep iterator.  Abort
+      // loudly instead.
+      MFEM_VERIFY(ftr != nullptr,
+                  "EvaluateBulkAtFaultQPsCanonical: face " << f
+                  << " (fault_interior_faces_[" << fi << "]) has no "
+                  "InteriorFaceTransformations.  This violates the "
+                  "invariant established at WaveOperator ctor; the "
+                  "fault face list has been corrupted.");
+
+      const int e1 = ftr->Elem1No;
+      const int e2 = ftr->Elem2No;
+      const FiniteElement *fe1 = fes_->GetFE(e1);
+      const FiniteElement *fe2 = fes_->GetFE(e2);
+      const int ndof = fe1->GetDof();
+      MFEM_ASSERT(ndof == ndof_per_el_,
+                  "Heterogeneous DOF counts not supported in "
+                  "EvaluateBulkAtFaultQPsCanonical.");
+      const int dof_offset1 = e1 * ndof_per_el_;
+      const int dof_offset2 = e2 * ndof_per_el_;
+
+      const IntegrationRule &ir = IntRules.Get(
+         ftr->GetGeometryType(), 2 * order_);
+      const int nqp = ir.GetNPoints();
+      MFEM_VERIFY(nqp == nbf_per_face_,
+                  "EvaluateBulkAtFaultQPsCanonical: face nqp "
+                  << nqp << " != nbf_per_face_ " << nbf_per_face_);
+
+      auto it_off = fault_face_dof_offset_.find(f);
+      MFEM_VERIFY(it_off != fault_face_dof_offset_.end(),
+                  "EvaluateBulkAtFaultQPsCanonical: fault_face_dof_offset_"
+                  " missing entry for fault face " << f);
+      const int base_dof_idx = it_off->second;
+
+      // R-101: per-face geometric side label (matches ComputeADERFaceFluxRHS).
+      MFEM_VERIFY(fi >= 0 &&
+                  fi < static_cast<int>(interior_fault_elem1_on_plus_.size()),
+                  "EvaluateBulkAtFaultQPsCanonical: "
+                  "interior_fault_elem1_on_plus_ size mismatch");
+      const bool elem1_on_plus = interior_fault_elem1_on_plus_[fi];
+
+      // FaultBasis index for this interior fault face.
+      const int fb_idx = LookupInteriorFaultBasisIndex(f);
+      MFEM_VERIFY(fb_idx >= 0 && fb_idx < fault_basis_->NumFaces(),
+                  "EvaluateBulkAtFaultQPsCanonical: invalid FaultBasis "
+                  "index for face " << f);
+      const FaultBasisData &bd = fault_basis_->GetBasis(fb_idx);
+
+      for (int q = 0; q < nqp; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         ftr->SetAllIntPoints(&ip);
+
+         IntegrationPoint ip1, ip2;
+         ftr->Loc1.Transform(ip, ip1);
+         ftr->Loc2.Transform(ip, ip2);
+         Vector shape1(ndof), shape2(ndof);
+         fe1->CalcShape(ip1, shape1);
+         fe2->CalcShape(ip2, shape2);
+
+         // Bulk Q at the QP from each side, in the global frame.
+         real_t Q_self[NUM_STATE], Q_nbr[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t s_self = 0.0, s_nbr = 0.0;
+            for (int i = 0; i < ndof; i++)
+            {
+               s_self += shape1(i) * Q_data[c * ndof_total_ + dof_offset1 + i];
+               s_nbr  += shape2(i) * Q_data[c * ndof_total_ + dof_offset2 + i];
+            }
+            Q_self[c] = s_self;
+            Q_nbr[c]  = s_nbr;
+         }
+
+         // Reconstruct the canonical frame from FaultBasis (sign-corrected).
+         MFEM_VERIFY(q < static_cast<int>(bd.qp_data.size()),
+                     "EvaluateBulkAtFaultQPsCanonical: qp_data missing q="
+                     << q << " for face " << f);
+         const FaultBasisQPData &qpd = bd.qp_data[q];
+         real_t can_n[3], can_t1[3], can_t2[3];
+         const bool should_negate_frame = !elem1_on_plus;
+         for (int d = 0; d < 3; d++)
+         {
+            can_n[d]  = should_negate_frame ? -qpd.normal[d]
+                                            :  qpd.normal[d];
+            can_t1[d] = should_negate_frame ? -qpd.tangent1[d]
+                                            :  qpd.tangent1[d];
+            can_t2[d] = should_negate_frame ? -qpd.tangent2[d]
+                                            :  qpd.tangent2[d];
+         }
+         DenseMatrix Tinv_can(NUM_STATE);
+         GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2, Tinv_can);
+
+         real_t Q_self_can[NUM_STATE], Q_nbr_can[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            real_t s_self = 0.0, s_nbr = 0.0;
+            for (int k = 0; k < NUM_STATE; k++)
+            {
+               s_self += Tinv_can(c, k) * Q_self[k];
+               s_nbr  += Tinv_can(c, k) * Q_nbr[k];
+            }
+            Q_self_can[c] = s_self;
+            Q_nbr_can[c]  = s_nbr;
+         }
+
+         // Route Elem1's evaluation into the +/− bucket per elem1_on_plus.
+         const real_t *src_plus  = elem1_on_plus ? Q_self_can : Q_nbr_can;
+         const real_t *src_minus = elem1_on_plus ? Q_nbr_can  : Q_self_can;
+
+         const int dof_idx = base_dof_idx + q;
+         real_t *dst_p = Q_plus_flat.data()  + dof_idx * NUM_STATE;
+         real_t *dst_m = Q_minus_flat.data() + dof_idx * NUM_STATE;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            dst_p[c] = src_plus[c];
+            dst_m[c] = src_minus[c];
+         }
+      }
+   }
+}
+
+// ---------------------------------------------------------------------------
 // ADER I-05 Phase 4: volume-integral contribution on the time-integrated state.
 // ---------------------------------------------------------------------------
 // Forwards to ComputeVolumeRHS, which already (a) uses the strong-form DG
@@ -1052,6 +1480,12 @@ template <typename MeshType>
 void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) const
 {
    const real_t *Q_data = Q.GetData();
+
+   // Round-11 Mixed-Flux dispatch flag (R-1206 short-circuit): hoisted
+   // ONCE per Mult call so the per-face dispatch can short-circuit the
+   // unordered_set lookup when mode == None.  Bit-identical to pre-
+   // Mixed-Flux path AND zero per-face overhead in default mode.
+   const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
 
    // R-204: hoist the R-002 fault-bookkeeping guard out of the per-QP
    // loop.  If bc_.fault_attr > 0 the mesh has a fault, and the
@@ -1597,8 +2031,19 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                }
                else
                {
-                  // Regular interior face: standard Godunov flux
-                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
+                  // Round-11 Mixed-Flux dispatch (R-1206 short-circuit):
+                  // when mixed-flux mode is None (default), the mf_on
+                  // boolean is false and `count(f)` is never evaluated —
+                  // bit-identical AND zero-cost vs pre-Mixed-Flux path.
+                  if (mf_on && central_flux_face_set_.count(f) > 0)
+                  {
+                     flux_.Central(nor, Q_self, Q_nbr, F_h);
+                  }
+                  else
+                  {
+                     // Regular interior face: standard Godunov flux
+                     flux_.Interior(nor, Q_self, Q_nbr, F_h);
+                  }
 
                   for (int c = 0; c < NUM_STATE; c++)
                   {
@@ -1693,6 +2138,9 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
 #ifdef MFEM_USE_MPI
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
+
+      // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
+      const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
 
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
       int n_shared = pmesh.GetNSharedFaces();
@@ -2149,7 +2597,18 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                // also carries a free-surface attribute), the BC-mode flag
                // will be silently ignored here — add a symmetric branch
                // or a loud MFEM_VERIFY at that time.
-               flux_.Interior(nor, Q_self, Q_nbr, F_h);
+               //
+               // Round-11 Mixed-Flux dispatch (R-1206 short-circuit + R-1207
+               // shared-seam membership): when mf_on, check the central
+               // set keyed by global mesh face index.
+               if (mf_on && central_flux_face_set_.count(mesh_face_idx) > 0)
+               {
+                  flux_.Central(nor, Q_self, Q_nbr, F_h);
+               }
+               else
+               {
+                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
+               }
             }
 
             // Accumulate into local element only (no ghost writes).
@@ -2221,6 +2680,9 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    {
       bulk_bg_scaled[c] = dt * bulk_bg_[c];
    }
+
+   // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
+   const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
 
    if (bc_.fault_attr > 0)
    {
@@ -2479,13 +2941,42 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                                               : I_self_can;
 
                   real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
-                  // has_bulk_bg_ already asserted at the top of
-                  // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
-                  fault_flux_->EvaluateADER(fdata,
-                                            I_plus_local, I_minus_local,
-                                            dt,
-                                            I_imp_plus, I_imp_minus);
+                  // R-602/R-603 substep dispatch:  if the driver has
+                  // pre-computed per-substep imposed states via
+                  // Tpv104SubStepIterator::AdvanceWithSubStepStates and
+                  // installed them via SetSubStepFaultImposedStates, consume
+                  // them here in lieu of running EvaluateADER inline.  Layout:
+                  //   substep_I_imp_*_flat_[dof_idx * NUM_STATE + c]
+                  // Both arrays are in the canonical fault-local frame —
+                  // SAME frame as EvaluateADER's outputs — so the downstream
+                  // T_can rotation back to global is unchanged.  When the
+                  // pointers are null (default), the inline EvaluateADER
+                  // path runs unchanged (bit-identical to pre-change).
+                  if (substep_I_imp_plus_flat_ != nullptr &&
+                      substep_I_imp_minus_flat_ != nullptr &&
+                      dof_idx >= 0 &&
+                      dof_idx < substep_n_local_fault_qps_)
+                  {
+                     const real_t *src_p =
+                        substep_I_imp_plus_flat_ + dof_idx * NUM_STATE;
+                     const real_t *src_m =
+                        substep_I_imp_minus_flat_ + dof_idx * NUM_STATE;
+                     for (int c = 0; c < NUM_STATE; c++)
+                     {
+                        I_imp_plus[c]  = src_p[c];
+                        I_imp_minus[c] = src_m[c];
+                     }
+                  }
+                  else
+                  {
+                     // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
+                     // has_bulk_bg_ already asserted at the top of
+                     // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
+                     fault_flux_->EvaluateADER(fdata,
+                                               I_plus_local, I_minus_local,
+                                               dt,
+                                               I_imp_plus, I_imp_minus);
+                  }
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -3020,16 +3511,31 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
             // block (non-fault interior fallback; R2-008 discipline).
             // Round-13C Patch 1 wraps with optional n↔-n,L↔R symmetrization
             // (SEAS_TEST_NONFAULT_BOTH_SYM=1); unset → byte-identical.
+            //
+            // Round-11 Mixed-Flux dispatch (R-1206): pick Central or
+            // Interior based on the central-flux face set.  Both
+            // symmetrization branches honor the mode.
+            const bool use_central_here =
+               (mf_on && central_flux_face_set_.count(f) > 0);
+            auto interior_or_central = [&](const real_t *n_arg,
+                                           const real_t *Q_a,
+                                           const real_t *Q_b,
+                                           real_t *F_out)
+            {
+               if (use_central_here) { flux_.Central(n_arg, Q_a, Q_b, F_out); }
+               else                  { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
+            };
+
             if (!nonfault_both_sym)
             {
-               flux_.Interior(nor, I_self, I_nbr, F_h);
+               interior_or_central(nor, I_self, I_nbr, F_h);
             }
             else
             {
                real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
                real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
-               flux_.Interior(nor,     I_self, I_nbr, F_pos);
-               flux_.Interior(nor_neg, I_nbr,  I_self, F_neg);
+               interior_or_central(nor,     I_self, I_nbr, F_pos);
+               interior_or_central(nor_neg, I_nbr,  I_self, F_neg);
                for (int c = 0; c < NUM_STATE; c++)
                {
                   F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
@@ -3131,6 +3637,9 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   "ComputeADERSharedFaceFluxRHS: dt must be > 0");
       MFEM_VERIFY(I.Size() == NUM_STATE * ndof_total_,
                   "ComputeADERSharedFaceFluxRHS: I size mismatch");
+
+      // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
+      const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
 
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
@@ -3460,16 +3969,34 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                // non-fault faces, parallel to the Round-13C hook in
                // ComputeADERFaceFluxRHS.  Env unset → verbatim
                // pre-patch path.
+               //
+               // Round-11 Mixed-Flux dispatch (R-1206 + R-1207): central
+               // flux on shared non-fault faces if their global mesh face
+               // index is in central_flux_face_set_ (the set construction
+               // honors shared seams via shared_mesh_face_set_).
+               const bool use_central_here_shared =
+                  (mf_on && central_flux_face_set_.count(mesh_face_idx) > 0);
+               auto interior_or_central_shared = [&](const real_t *n_arg,
+                                                     const real_t *Q_a,
+                                                     const real_t *Q_b,
+                                                     real_t *F_out)
+               {
+                  if (use_central_here_shared)
+                     { flux_.Central(n_arg, Q_a, Q_b, F_out); }
+                  else
+                     { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
+               };
+
                if (!nonfault_both_sym)
                {
-                  flux_.Interior(nor, I_self, I_nbr, F_h);
+                  interior_or_central_shared(nor, I_self, I_nbr, F_h);
                }
                else
                {
                   real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
                   real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
-                  flux_.Interior(nor,     I_self, I_nbr, F_pos);
-                  flux_.Interior(nor_neg, I_nbr,  I_self, F_neg);
+                  interior_or_central_shared(nor,     I_self, I_nbr, F_pos);
+                  interior_or_central_shared(nor_neg, I_nbr,  I_self, F_neg);
                   for (int c = 0; c < NUM_STATE; c++)
                   {
                      F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);

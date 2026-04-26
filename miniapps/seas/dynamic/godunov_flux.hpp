@@ -53,6 +53,31 @@ public:
    void Interior(const real_t *nor, const real_t *Q_self,
                  const real_t *Q_nbr, real_t *F_h) const;
 
+   /// Central (non-dissipative) flux for the Zhang et al. 2023 mixed-flux
+   /// dispatch.  Computes
+   ///   F_h = 0.5 · A_n · (Q_self + Q_nbr)
+   /// where A_n is the face-normal Jacobian.  Same rotation pipeline as
+   /// `Interior`; differs only in the rotated-frame inner step:
+   /// uses `(Ax_plus_ + Ax_minus_)` (= full A_x_face_local) instead of
+   /// the eigenvalue-split upwind combination.
+   ///
+   /// Algebraic identity (verified in test_godunov_central_flux):
+   ///   Interior(nor, Q_self, Q_nbr, F_up)
+   ///   - Central(nor, Q_self, Q_nbr, F_ce)
+   ///       = +0.5 · |A_n| · (Q_self - Q_nbr)
+   ///   where |A_n| (in global frame) = T · (Ax_plus_ - Ax_minus_) · Tinv.
+   ///
+   /// Used by `WaveOperator` Mixed-Flux dispatch ONLY at non-fault
+   /// interior faces.  Fault faces continue to use `Interior` (or the
+   /// per-side imposed-state flux pattern).
+   ///
+   /// @param[in] nor  Unit outward normal from Elem1 (3 components).
+   /// @param[in] Q_self  State on the self (Elem1) side (9 components).
+   /// @param[in] Q_nbr  State on the neighbor (Elem2) side (9 components).
+   /// @param[out] F_h  Numerical flux (9 components).
+   void Central(const real_t *nor, const real_t *Q_self,
+                const real_t *Q_nbr, real_t *F_h) const;
+
    /// First-order absorbing BC flux: F_abs = A_n^+ Q_self (Eq. 5).
    /// Sets incoming waves to zero (no reflection for normal incidence).
    /// Correct for FLUCTUATION-Q drivers (the ambient background is zero,

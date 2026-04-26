@@ -86,12 +86,16 @@ void TestBannerDefaults()
    const std::vector<std::pair<std::string, std::string>> must_have = {
       {"Time integrator: ADER-O2 (one-shot via wave.AdvanceADER)",
        "ADER-O2 + one-shot disclosure"},
-      {"Fault iterator: one-shot (sub-step iterator NOT wired",
-       "sub-step iterator NOT wired disclosure (R7-001)"},
+      {"Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)",
+       "default one-shot disclosure (round-7 R-602/R-603)"},
       {"Friction solver: Brent (hard-coded via EvaluateADERTotal",
        "Brent hard-coded disclosure (R7-001)"},
       {"Friction law: slip-SRW (ψ-space, macro-step analytic",
        "slip-SRW macro-step cadence disclosure (R7-007)"},
+      {"Mixed flux: none (upwind everywhere, default)",
+       "round-11 Mixed-Flux default-OFF disclosure"},
+      {"mixed_flux=none",
+       "CLI echo includes mixed_flux=none on default flag"},
    };
    for (const auto &kv : must_have)
    {
@@ -157,12 +161,14 @@ void TestBannerNonDefault()
       != std::string::npos,
       "banner reflects --ader-order 5");
 
-   // Dispatch lines are always the same regardless of CLI values
-   // (R7-001 disclosure invariant): Brent + one-shot.
+   // Round-7 R-602/R-603: friction-solver dispatch remains R7-001
+   // hard-coded Brent (CLI value is banner-only); fault-iterator
+   // dispatch IS now CLI-routed.  This non-default test passes
+   // --fault-iterator oneshot, so the banner must still show one-shot.
    TEST_ASSERT(
-      out.find("Fault iterator: one-shot (sub-step iterator NOT wired")
+      out.find("Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)")
       != std::string::npos,
-      "fault iterator disclosure is constant on non-default flags");
+      "fault iterator banner is one-shot when --fault-iterator oneshot");
    TEST_ASSERT(
       out.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
       != std::string::npos,
@@ -222,10 +228,19 @@ void TestDispatchMatchesBanner()
          out.find("[dispatch] rank=0 friction_solver_actual=brent")
          != std::string::npos,
          ("dispatch shows friction_solver=brent under CLI: " + cli).c_str());
+
+      // Round-7 R-602/R-603: --fault-iterator substep ROUTES the
+      // substep dispatch (no longer a banner-only string).  Default
+      // (no flag, or --fault-iterator oneshot) → oneshot dispatch.
+      const bool requested_substep =
+         (cli.find("--fault-iterator substep") != std::string::npos);
+      const std::string expected_iter = requested_substep
+                                        ? "substep" : "oneshot";
       TEST_ASSERT(
-         out.find("[dispatch] rank=0 fault_iterator_actual=oneshot")
+         out.find("[dispatch] rank=0 fault_iterator_actual=" + expected_iter)
          != std::string::npos,
-         ("dispatch shows fault_iterator=oneshot under CLI: " + cli).c_str());
+         ("dispatch shows fault_iterator=" + expected_iter
+          + " under CLI: " + cli).c_str());
       TEST_ASSERT(
          out.find("[dispatch] rank=0 friction_law_actual=slip-srw")
          != std::string::npos,
@@ -235,10 +250,12 @@ void TestDispatchMatchesBanner()
          out.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
          != std::string::npos,
          ("banner shows Brent hard-coded under CLI: " + cli).c_str());
+      const std::string expected_banner = requested_substep
+         ? "Fault iterator: sub-step (Tpv104SubStepIterator"
+         : "Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)";
       TEST_ASSERT(
-         out.find("Fault iterator: one-shot (sub-step iterator NOT wired")
-         != std::string::npos,
-         ("banner shows one-shot under CLI: " + cli).c_str());
+         out.find(expected_banner) != std::string::npos,
+         ("banner shows " + expected_banner + " under CLI: " + cli).c_str());
    }
 }
 
@@ -270,6 +287,62 @@ void TestUnknownSolverAborts()
    // And the dry-run OK line must NOT appear (abort happens before).
    TEST_ASSERT(out.find("[dry-run] OK.") == std::string::npos,
                "unknown-solver abort prevents [dry-run] OK.");
+}
+
+// --------------------------------------------------------------------------
+// T_TPV104_SMOKE_3e — round-11 Mixed-Flux flag round-trip.
+//   - default (omitted): banner shows "Mixed flux: none (upwind everywhere, default)"
+//   - --mixed-flux adjacent: banner shows the adjacent description
+//   - --mixed-flux all-continuous: banner shows the all-continuous description
+//   - --mixed-flux foobar: aborts loudly
+// --------------------------------------------------------------------------
+void TestMixedFluxBanner()
+{
+   std::cout << "\n[T_TPV104_SMOKE_3e] round-11 Mixed-Flux flag round-trip\n";
+
+   const std::string binary = LocateDriver();
+   if (binary.empty())
+   {
+      std::cout << "  SKIPPED (no driver binary).\n";
+      return;
+   }
+
+   // (1) --mixed-flux adjacent
+   {
+      const std::string out = RunDriver(binary, "--dry-run --mixed-flux adjacent");
+      TEST_ASSERT(
+         out.find("Mixed flux: adjacent (Mixed-Flux 2 per Zhang et al. 2023")
+         != std::string::npos,
+         "--mixed-flux adjacent → banner shows adjacent description");
+      TEST_ASSERT(
+         out.find("mixed_flux=adjacent") != std::string::npos,
+         "--mixed-flux adjacent → CLI echo line shows mixed_flux=adjacent");
+   }
+
+   // (2) --mixed-flux all-continuous
+   {
+      const std::string out = RunDriver(binary, "--dry-run --mixed-flux all-continuous");
+      TEST_ASSERT(
+         out.find("Mixed flux: all-continuous (Mixed-Flux 1, central")
+         != std::string::npos,
+         "--mixed-flux all-continuous → banner shows all-continuous description");
+      TEST_ASSERT(
+         out.find("mixed_flux=all-continuous") != std::string::npos,
+         "--mixed-flux all-continuous → CLI echo shows mixed_flux=all-continuous");
+   }
+
+   // (3) --mixed-flux foobar (unknown value): MFEM_ABORT.
+   {
+      const std::string out = RunDriver(binary, "--dry-run --mixed-flux foobar");
+      const bool aborted =
+         out.find("--mixed-flux: unknown value") != std::string::npos
+         || out.find("MFEM abort") != std::string::npos
+         || out.find("MFEM_ABORT") != std::string::npos;
+      TEST_ASSERT(aborted,
+                  "typo in --mixed-flux aborts loudly (round-11)");
+      TEST_ASSERT(out.find("[dry-run] OK.") == std::string::npos,
+                  "unknown --mixed-flux value prevents [dry-run] OK.");
+   }
 }
 
 // --------------------------------------------------------------------------
@@ -312,6 +385,7 @@ int main(int argc, char *argv[])
    TestBannerNonDefault();
    TestDispatchMatchesBanner();
    TestUnknownSolverAborts();
+   TestMixedFluxBanner();
    TestDryRunNoNaN();
    DeclareDeferredGates();
 
