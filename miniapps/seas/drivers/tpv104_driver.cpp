@@ -359,7 +359,15 @@ static void AdvanceADERWithSubStep(
                << Q_per_node.size() << " nodes, expected " << O);
 
    // Per-sub-step Q at fault QPs in canonical frame.
-   const int n_local_fault_qps = wave.GetNumLocalFaultQPs();
+   //
+   // R-1003: sized to GetNumTotalFaultQPs() (interior + shared) so the
+   // shared-fault iterator slice has storage.  The iterator's verify at
+   // tpv104_substep_iterator.cpp:573-589 expects each Q_pointwise_*[o]
+   // and the I_imp_*_flat output to be sized NUM_STATE * dof_data.size(),
+   // and dof_data is sized num_fault_total = local + shared (driver L1015).
+   // At np=1, shared == 0 so total == local and the buffer is byte-identical
+   // to the pre-R-1003 sizing.
+   const int n_total_fault_qps = wave.GetNumTotalFaultQPs();
    std::vector<std::vector<real_t>> Q_pointwise_plus(O), Q_pointwise_minus(O);
    for (int o = 0; o < O; o++)
    {
@@ -370,11 +378,11 @@ static void AdvanceADERWithSubStep(
 
    // Iterator: per-sub-step friction + ψ + slip + accumulator.
    const size_t n_words =
-      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_local_fault_qps);
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_total_fault_qps);
    std::vector<real_t> I_imp_plus_flat(n_words, 0.0);
    std::vector<real_t> I_imp_minus_flat(n_words, 0.0);
 
-   if (n_local_fault_qps > 0)
+   if (n_total_fault_qps > 0)
    {
       iterator.AdvanceWithSubStepStates(dof_data, fault_coords, V_w,
                                         Q_pointwise_plus,
@@ -388,9 +396,9 @@ static void AdvanceADERWithSubStep(
    // Hand the iterator's output to the wave op so the upcoming
    // AdvanceADER's fault branch substitutes it for inline EvaluateADER.
    wave.SetSubStepFaultImposedStates(
-      n_local_fault_qps > 0 ? I_imp_plus_flat.data()  : nullptr,
-      n_local_fault_qps > 0 ? I_imp_minus_flat.data() : nullptr,
-      n_local_fault_qps);
+      n_total_fault_qps > 0 ? I_imp_plus_flat.data()  : nullptr,
+      n_total_fault_qps > 0 ? I_imp_minus_flat.data() : nullptr,
+      n_total_fault_qps);
 
    // Bulk corrector: runs unchanged for non-fault faces; fault branch
    // consumes the side-channel imposed states.
@@ -523,6 +531,18 @@ int main(int argc, char *argv[])
    std::string fault_iterator =
       GetStringArg(argc, argv, "--fault-iterator", "one-shot");
 
+   // R-1601: validate `--fault-iterator` value at parse time.  Without
+   // this, typos (e.g., `sub-step` with a hyphen, `SUBSTEP` mixed case)
+   // silently fall through to one-shot AND bypass the R-1503 guard
+   // (`fault_iterator == "substep"` exact-match), defeating both the
+   // user's intended dispatch routing AND the safety net.  Mirror the
+   // loud-abort pattern used by `--mixed-flux` and `--friction-solver`.
+   if (fault_iterator != "one-shot" && fault_iterator != "substep")
+   {
+      MFEM_ABORT("--fault-iterator: unknown value '" << fault_iterator
+                 << "'.  Accepted: one-shot | substep.");
+   }
+
    // Round-11 Mixed-Flux dispatch (Zhang et al. 2023, MIXED_FLUX_PLAN.md).
    // Default = "none": upwind everywhere, byte-identical to pre-Mixed-Flux
    // behavior.  Accepted values:
@@ -539,6 +559,124 @@ int main(int argc, char *argv[])
    {
       MFEM_ABORT("--mixed-flux: unknown value '" << mixed_flux_str
                  << "'.  Accepted: none | adjacent | all-continuous.");
+   }
+
+   // R-1105 / Phase 6 §2: driver-level fast-fail mutual-exclusion guard
+   // for `--use-precomputed-face-fluxes` × `--mixed-flux != none`.  The
+   // wave-operator-level guard at SetMixedFluxMode (wave_operator.inl
+   // L1160-1167) catches the combination, but only AFTER mesh
+   // construction and ParMesh distribution — wasting minutes of work
+   // on a doomed run at production scale (e.g., 1.5M tets at np=128).
+   // This driver-level check fires at CLI-parse time, before the mesh
+   // is read.  TPV104 currently doesn't expose
+   // `--use-precomputed-face-fluxes` (the precomputed-flux path is a
+   // TPV102 opt-in); the guard is defensive — kicks in the moment a
+   // future driver enhancement adds the flag.
+   if (HasFlag(argc, argv, "--use-precomputed-face-fluxes") &&
+       mixed_flux_mode != MixedFluxMode::None)
+   {
+      if (rank == 0)
+      {
+         std::cerr
+            << "[FATAL] --use-precomputed-face-fluxes is mutually "
+            "exclusive with --mixed-flux != none.  The precomputed-flux "
+            "path bakes upwind dispatch into its tables; mixed-flux "
+            "would be silently ignored.  Pick one or the other.\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+      std::abort();
+#endif
+   }
+
+   // R-1204: --mixed-flux adjacent has no test coverage at --ader-order > 2.
+   // Plan §Risk R5 flagged this; until a higher-order MPI gate lands, abort
+   // on the unvalidated combination.  Override via
+   //   SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1
+   // for experimental runs.  This guard is at CLI-parse time, before mesh
+   // construction.
+   if (mixed_flux_mode != MixedFluxMode::None && ader_order > 2)
+   {
+      const char *force = std::getenv("SEAS_FORCE_MIXED_FLUX_ADER_O_GT2");
+      if (!(force && force[0] == '1'))
+      {
+         if (rank == 0)
+         {
+            std::cerr
+               << "[FATAL] --mixed-flux " << mixed_flux_str
+               << " --ader-order " << ader_order
+               << ": untested combination (R-1204, plan §Risk R5).  "
+               "Mixed-flux dispatch was validated at ADER-O2 only.  "
+               "Set SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1 to override "
+               "for experimental runs.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+         std::abort();
+#endif
+      }
+      else if (rank == 0)
+      {
+         // R-1407: override exercised — emit a loud warning so a user
+         // who set the env var in their shell rc can see they're
+         // running unverified code paths.  No silent bypass.
+         std::cerr
+            << "[WARNING] SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1 — running "
+            "--mixed-flux " << mixed_flux_str
+            << " --ader-order " << ader_order
+            << " is UNTESTED.  Numerical correctness is NOT guaranteed.  "
+            "If a regression is observed, cite R-1204/R-1407 in the "
+            "report.  Disable the override (`unset "
+            "SEAS_FORCE_MIXED_FLUX_ADER_O_GT2`) for production runs.\n";
+      }
+   }
+
+   // R-1503 + R-1605 / Plan §Risk R5: substep iterator + mixed-flux has
+   // NO test coverage at ANY rank count.  The substep dispatch path
+   // interleaves per-substep fault-state setting with the predictor /
+   // corrector; a subtle ordering bug interacting with the mixed-flux
+   // central dispatch could produce wrong rupture-front velocities.
+   // The guard fires on np >= 1 (R-1605: np=1 is also uncovered — the
+   // local-reproducer configuration a developer would use; see plan
+   // §Risk R5).  Override via
+   //   SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1
+   // for experimental runs (loud warning when used).
+   if (mixed_flux_mode != MixedFluxMode::None &&
+       fault_iterator == "substep")
+   {
+      const char *force =
+         std::getenv("SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI");
+      if (!(force && force[0] == '1'))
+      {
+         if (rank == 0)
+         {
+            std::cerr
+               << "[FATAL] --mixed-flux " << mixed_flux_str
+               << " --fault-iterator substep at np=" << nprocs
+               << ": untested combination (R-1503/R-1605, Plan §Risk "
+               "R5).  No test exercises substep iterator + mixed-flux "
+               "dispatch at ANY np (np=1 included; the local-reproducer "
+               "configuration is also uncovered).  Set "
+               "SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1 to override for "
+               "experimental runs.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+         std::abort();
+#endif
+      }
+      else if (rank == 0)
+      {
+         std::cerr
+            << "[WARNING] SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1 — running "
+            "--fault-iterator substep + --mixed-flux " << mixed_flux_str
+            << " at np=" << nprocs << " is UNTESTED at any rank count.  "
+            "Numerical correctness is NOT guaranteed.  Cite R-1503/R-1605 "
+            "if a regression is observed.\n";
+      }
    }
 
    // ader-order is accepted verbatim; wave.AdvanceADER clamps/validates
@@ -1260,12 +1398,71 @@ int main(int argc, char *argv[])
    //                                    and aborts if precomputed-flux
    //                                    is also enabled (R-1203).
    wave.SetMixedFluxMode(mixed_flux_mode);
-   if (rank == 0 && mixed_flux_mode != MixedFluxMode::None)
+   // R-1202: report the GLOBAL central-set size and per-rank min/max
+   // for load-balance diagnostic.  The Round-2 banner reported rank-0's
+   // local size as if it were global, masking 127× of the count at
+   // np=128 production.  All ranks participate in the reduction; only
+   // rank 0 prints.
+   if (mixed_flux_mode != MixedFluxMode::None)
    {
+      const long long local_size_ll =
+         static_cast<long long>(wave.GetCentralFluxFaceSet().size());
+#ifdef MFEM_USE_MPI
+      // R-1409: Allreduce so EVERY rank can self-verify its own log
+      // (per-rank log-grep parity with R8-004's tri-consistency lines).
+      // Cost is negligible (3 × long_long per call, called once per run).
+      // R-1602: use the WaveOperator's ParMesh communicator
+      // (`pmesh.GetComm()`), not `MPI_COMM_WORLD`, for symmetry with
+      // SetMixedFluxMode's consensus check (which uses `pmesh.GetComm()`
+      // at wave_operator.inl:1199-1213).  Currently both communicators
+      // coincide because TPV104 builds its ParMesh on MPI_COMM_WORLD,
+      // but a future multi-region driver running on a sub-comm would
+      // deadlock or diverge if the two collectives use mismatched
+      // communicators.
+      MPI_Comm wave_comm = pmesh.GetComm();
+      long long global_sum = 0, local_max = 0, local_min = 0;
+      MPI_Allreduce(&local_size_ll, &global_sum, 1, MPI_LONG_LONG, MPI_SUM,
+                    wave_comm);
+      MPI_Allreduce(&local_size_ll, &local_max, 1, MPI_LONG_LONG, MPI_MAX,
+                    wave_comm);
+      MPI_Allreduce(&local_size_ll, &local_min, 1, MPI_LONG_LONG, MPI_MIN,
+                    wave_comm);
+      if (rank == 0)
+      {
+         std::cout << "[mixed-flux] mode=" << mixed_flux_str
+                   << "  |central_set|_global=" << global_sum
+                   << "  per-rank min=" << local_min
+                   << " max=" << local_max
+                   << "  (Zhang et al. 2023 mixed-flux dispatch)\n";
+         if (local_min > 0 && local_max > 4 * local_min)
+         {
+            std::cout << "[mixed-flux] WARNING: rank load imbalance "
+                      << static_cast<double>(local_max) /
+                         static_cast<double>(local_min)
+                      << "× (max/min); consider "
+                      << "--partition-fault-locality\n";
+         }
+         else if (local_min == 0 && local_max > 0)
+         {
+            std::cout << "[mixed-flux] WARNING: at least one rank has "
+                      << "zero central-set entries while another has "
+                      << local_max << "; partition is severely "
+                      << "fault-asymmetric.\n";
+         }
+      }
+      // R-1409: machine-readable per-rank line.  Every rank prints once;
+      // log parsers can grep "[mixed-flux] rank=N" to verify dispatch
+      // engagement and global counts visible from any single log file.
+      std::cout << "[mixed-flux] rank=" << rank
+                << "  local_set_size=" << local_size_ll
+                << "  global_sum=" << global_sum
+                << "  global_min=" << local_min
+                << "  global_max=" << local_max << "\n";
+#else
       std::cout << "[mixed-flux] mode=" << mixed_flux_str
-                << "  |central_set|="
-                << wave.GetCentralFluxFaceSet().size()
-                << "  (Zhang et al. 2023 mixed-flux dispatch)\n";
+                << "  |central_set|=" << local_size_ll
+                << " (serial)  (Zhang et al. 2023 mixed-flux dispatch)\n";
+#endif
    }
 
    // R7-002 (round-7): SlipLawSRWPsi instance is now constructed here so
@@ -1317,22 +1514,23 @@ int main(int argc, char *argv[])
                 << " per-sub-step Q via ComputeADERSubStepStates + "
                 << "Tpv104SubStepIterator::AdvanceWithSubStepStates.\n";
    }
-   // R-1003: substep guard fires only on local-fault branch in
-   // ComputeADERFaceFluxRHS.  Shared-fault branch in
-   // ComputeADERSharedFaceFluxRHS still runs inline EvaluateADER on
-   // macro-step Q̄, producing a non-conservative fault Riemann at every
-   // partition seam through the fault.  Until the guard is extended to
-   // shared faces, REJECT MPI runs with the substep flag rather than
-   // silently producing wrong results.
-   if (use_substep_iterator && nprocs > 1)
+   // R-1003 (LANDED): the shared-fault ADER branch
+   // (`ComputeADERSharedFaceFluxRHS`) now consults `substep_I_imp_*_flat_`
+   // under the same absolute-index gate as the interior branch.  Driver
+   // sizing (this file, `AdvanceADERWithSubStep` helper above) and
+   // `WaveOperator::EvaluateBulkAtFaultQPsCanonical` (wave_operator.inl)
+   // cover the full `[0, GetNumTotalFaultQPs())` index space, including
+   // `[GetNumLocalFaultQPs(), GetNumTotalFaultQPs())` for shared-fault QPs.
+   // The pre-R-1003 abort that rejected np>1 with --fault-iterator substep
+   // is therefore retired.  See miniapps/seas/debug_document/
+   // tpv104_debug_document/SUBSTEP_ITERATOR_MPI_REVIEW.md for the
+   // pre-landing review and the merge-blocking MPI parity tests
+   // (`test_tpv104_substep_iterator_mpi.cpp` and friends).
+   if (use_substep_iterator && nprocs > 1 && rank == 0)
    {
-      MFEM_ABORT("--fault-iterator substep is not yet supported with "
-                 "MPI (nprocs=" << nprocs << ").  The substep guard "
-                 "fires only on the interior-fault branch; shared-fault "
-                 "faces would diverge from the iterator's per-sub-step "
-                 "semantic.  Run with np=1 or remove --fault-iterator "
-                 "substep until R-1003 (shared-fault path extension) "
-                 "lands.");
+      std::cout << "[tpv104_driver] R-1003 path: --fault-iterator substep "
+                << "active under MPI (nprocs=" << nprocs << ").  Shared-"
+                << "fault QPs flow through the substep side-channel.\n";
    }
    // -----------------------------------------------------------------------
    // 6. Initialize Q = 0 (fluctuation-Q).

@@ -153,7 +153,7 @@ void TestBannerNonDefault()
 
    const std::string out = RunDriver(
       binary,
-      "--dry-run --friction-solver newton-legacy --fault-iterator oneshot "
+      "--dry-run --friction-solver newton-legacy --fault-iterator one-shot "
       "--ader-order 5");
 
    TEST_ASSERT(
@@ -164,11 +164,11 @@ void TestBannerNonDefault()
    // Round-7 R-602/R-603: friction-solver dispatch remains R7-001
    // hard-coded Brent (CLI value is banner-only); fault-iterator
    // dispatch IS now CLI-routed.  This non-default test passes
-   // --fault-iterator oneshot, so the banner must still show one-shot.
+   // --fault-iterator one-shot, so the banner must still show one-shot.
    TEST_ASSERT(
       out.find("Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)")
       != std::string::npos,
-      "fault iterator banner is one-shot when --fault-iterator oneshot");
+      "fault iterator banner is one-shot when --fault-iterator one-shot");
    TEST_ASSERT(
       out.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
       != std::string::npos,
@@ -179,8 +179,8 @@ void TestBannerNonDefault()
       out.find("friction_solver=newton-legacy") != std::string::npos,
       "CLI echo shows --friction-solver=newton-legacy");
    TEST_ASSERT(
-      out.find("fault_iterator=oneshot") != std::string::npos,
-      "CLI echo shows --fault-iterator=oneshot");
+      out.find("fault_iterator=one-shot") != std::string::npos,
+      "CLI echo shows --fault-iterator=one-shot (R-1601 canonical)");
 
    // Explicit 'brent' does NOT change dispatch (it already was brent)
    // but also must not trip the CLI validator.
@@ -216,7 +216,7 @@ void TestDispatchMatchesBanner()
       "--dry-run --verify-dispatch --friction-solver newton-stable "
       "--fault-iterator substep",
       "--dry-run --verify-dispatch --friction-solver newton-legacy "
-      "--fault-iterator oneshot",
+      "--fault-iterator one-shot",
       "--dry-run --verify-dispatch --friction-solver brent",
       "--dry-run --verify-dispatch --friction-solver newton",
    };
@@ -231,9 +231,11 @@ void TestDispatchMatchesBanner()
 
       // Round-7 R-602/R-603: --fault-iterator substep ROUTES the
       // substep dispatch (no longer a banner-only string).  Default
-      // (no flag, or --fault-iterator oneshot) → oneshot dispatch.
+      // (no flag, or --fault-iterator one-shot) → oneshot dispatch.
       const bool requested_substep =
          (cli.find("--fault-iterator substep") != std::string::npos);
+      // R-1601: CLI accepts "one-shot" / "substep" (canonical), but the
+      // dispatch tag (driver L200 `TagOf(OneShot)`) still uses "oneshot".
       const std::string expected_iter = requested_substep
                                         ? "substep" : "oneshot";
       TEST_ASSERT(
@@ -287,6 +289,22 @@ void TestUnknownSolverAborts()
    // And the dry-run OK line must NOT appear (abort happens before).
    TEST_ASSERT(out.find("[dry-run] OK.") == std::string::npos,
                "unknown-solver abort prevents [dry-run] OK.");
+
+   // R-1601: typo in --fault-iterator must also abort loudly.  The
+   // historical silent-fallback (any non-"substep" string → one-shot
+   // dispatch) was a usability bug and a safety bug (it bypasses the
+   // R-1503 substep+mixed-flux abort guard on a typo).
+   const std::string out_iter = RunDriver(
+      binary, "--dry-run --fault-iterator sub-step");
+   const bool iter_aborted =
+      out_iter.find("--fault-iterator: unknown value") != std::string::npos
+      || out_iter.find("MFEM abort") != std::string::npos
+      || out_iter.find("MFEM_ABORT") != std::string::npos;
+   TEST_ASSERT(iter_aborted,
+               "R-1601: typo in --fault-iterator (hyphenated 'sub-step') "
+               "aborts loudly");
+   TEST_ASSERT(out_iter.find("[dry-run] OK.") == std::string::npos,
+               "R-1601: unknown --fault-iterator value prevents [dry-run] OK.");
 }
 
 // --------------------------------------------------------------------------

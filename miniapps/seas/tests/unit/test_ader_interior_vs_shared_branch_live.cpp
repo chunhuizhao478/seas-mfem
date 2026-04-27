@@ -168,6 +168,37 @@ void AddSideConstant(const MeshT &mesh, const FiniteElementSpace &fes,
    }
 }
 
+// R-1502: in-element per-DOF perturbation that makes Q non-constant within
+// each tet so the L2-projected spatial derivative is non-zero and higher-
+// order CK terms `dt^{k+1}/(k+1)! · D(k)` are numerically non-trivial.
+// This is what makes the parallel test sensitive to the (k+2) factorial
+// coefficient arithmetic and the per-substep ghost data — without an
+// in-element gradient, D(k≥1) ≈ 0 and a coefficient bug produces
+// 0 × wrong-coef = 0 (silent pass).
+//
+// Implementation: per local DOF index j of each element, add
+// `amp · (j + 1)`.  The local DOF basis is determined by the FE collection
+// (P1 L2 tet → 4 reference-element nodes), independent of mesh partitioning,
+// so the same physical Q field is built on serial and parallel.  The
+// resulting Q is a piecewise-linear DG field whose ∂_x is non-zero per
+// element.
+template <typename MeshT>
+void AddInElementGradient(const MeshT &mesh, const FiniteElementSpace &fes,
+                          Vector &Q, int comp, real_t amplitude)
+{
+   const int ndof_total = fes.GetNDofs();
+   for (int e = 0; e < mesh.GetNE(); e++)
+   {
+      Array<int> edofs;
+      fes.GetElementDofs(e, edofs);
+      for (int j = 0; j < edofs.Size(); j++)
+      {
+         const real_t local_factor = static_cast<real_t>(j + 1);
+         Q(comp * ndof_total + edofs[j]) += amplitude * local_factor;
+      }
+   }
+}
+
 template <typename MeshT>
 void BuildExcitedState(const MeshT &mesh, const WaveOperator<MeshT> &wave, Vector &Q)
 {
@@ -179,16 +210,29 @@ void BuildExcitedState(const MeshT &mesh, const WaveOperator<MeshT> &wave, Vecto
    AddSideConstant(mesh, fes, Q, VZ,  +0.3 * kVelAmp,  -0.2 * kVelAmp);
    AddSideConstant(mesh, fes, Q, SXY, +kStressAmp,     -0.6 * kStressAmp);
    AddSideConstant(mesh, fes, Q, SXZ, -0.5 * kStressAmp, +0.4 * kStressAmp);
+
+   // R-1502: superpose a small in-element gradient on three components so
+   // ApplySpatialDerivative produces non-zero output per element.  This
+   // makes D(k≥1) numerically non-zero in the CK recursion and exercises
+   // the (k+2) factorial coefficient at O=3, O=4.  Amplitudes are 1% of
+   // the side-constant amplitudes — small enough that the slope match
+   // tolerance (1e-10 relative) is achievable, large enough to make the
+   // higher-order CK contribution `dt^3/6 · D(2)` ~1e-12 absolute (well
+   // above the FP noise floor on a m/s-scale slope).
+   AddInElementGradient(mesh, fes, Q, VX, 0.01 * kVelAmp);
+   AddInElementGradient(mesh, fes, Q, SXY, 0.01 * kStressAmp);
+   AddInElementGradient(mesh, fes, Q, SXZ, -0.01 * kStressAmp);
 }
 
 template <typename MeshT>
-void ExtractMinusSideSlope(MeshT &mesh, WaveOperator<MeshT> &wave, Vector &slope)
+void ExtractMinusSideSlope(MeshT &mesh, WaveOperator<MeshT> &wave,
+                           int ader_order, Vector &slope)
 {
    const auto &fes = wave.GetFESpace();
    Vector Q;
    BuildExcitedState(mesh, wave, Q);
    Vector Q_new(Q.Size());
-   wave.AdvanceADER(Q, kDt, /*order=*/2, Q_new);
+   wave.AdvanceADER(Q, kDt, ader_order, Q_new);
 
    const int ndof_total = fes.GetNDofs();
    int e_minus = -1;
@@ -219,24 +263,31 @@ void ExtractMinusSideSlope(MeshT &mesh, WaveOperator<MeshT> &wave, Vector &slope
 
 } // namespace
 
-int main(int argc, char *argv[])
+// R-1502: parametric ADER-O slice check.  Runs the same serial-vs-parallel
+// equivalence test for one ADER order and returns 0 on pass, 1 on
+// numerical mismatch.  Pre-R-1502 only ader_order = 2 was exercised; the
+// CK recursion exits after a single iteration at O=2 (k loop in
+// ComputeADERTimeIntegrated runs k ∈ [0, order-1)), masking any bug that
+// fires at O=3 or O=4.  Production sbatch scripts run ADER-O ∈ {3, 4}.
+//
+// `BuildExcitedState` superposes a per-side constant perturbation AND an
+// in-element per-DOF gradient (`AddInElementGradient`) so that
+// ApplySpatialDerivative produces non-zero output and the higher-order CK
+// contributions `dt^{k+2}/(k+2)! · D(k+1)` are numerically non-trivial.
+// Without that gradient the CK recursion would exit with D(k≥1) ≈ 0 and
+// any (k+2) coefficient bug would be masked by zero × wrong-coef = zero.
+static int RunAderEquivalenceSlice(int rank, int /*nprocs*/, int ader_order)
 {
-   MPI_Init(&argc, &argv);
-   int rank = 0, nprocs = 1;
-   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
-   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
-
-   if (nprocs != 2)
-   {
-      if (rank == 0)
-      {
-         std::cout << "SKIPPED: test_ader_interior_vs_shared_branch_live requires np=2\n";
-      }
-      MPI_Finalize();
-      return 77;
-   }
-
-   const int order = 1;
+   // R-1502: FE polynomial order = 3 (NOT ADER order) so the L2 basis
+   // can carry up to cubic spatial variation per tet.  At P=1 the CK
+   // recursion's k≥1 iterations would produce D(k) ≡ 0 (a constant
+   // function's derivative is 0, so a piecewise-linear Q's iterated
+   // derivative collapses after one step), masking any wrong-coefficient
+   // bug at O=3, O=4 even with a non-trivial in-element gradient.
+   // P=3 lets D(2) ≠ 0 (so dt³/6 coefficient at O=3 is loaded) and D(3)
+   // ≠ 0 (so dt⁴/24 coefficient at O=4 is loaded).  A 2-tet P=3 mesh has
+   // 40 DOFs total — comfortably tractable as a unit test fixture.
+   const int order = 3;
    real_t bulk_bg[NUM_STATE] = {0.0};
    bulk_bg[SYY] =  TPV102Params::sigma_n;
    bulk_bg[SXY] = -TPV102Params::tau_ini;
@@ -259,7 +310,7 @@ int main(int argc, char *argv[])
       std::vector<DOFData> dof_data;
       std::vector<Vector> fault_coords;
       SetupFault(wave, mesh, order, dof_data, ff, fault_coords);
-      ExtractMinusSideSlope(mesh, wave, slope_serial);
+      ExtractMinusSideSlope(mesh, wave, ader_order, slope_serial);
    }
 
    MPI_Bcast(slope_serial.GetData(), NUM_STATE, MPI_DOUBLE, 0, MPI_COMM_WORLD);
@@ -293,12 +344,13 @@ int main(int argc, char *argv[])
    SetupFault(wave, pmesh, order, dof_data, ff, fault_coords);
 
    Vector slope_parallel(NUM_STATE);
-   ExtractMinusSideSlope(pmesh, wave, slope_parallel);
+   ExtractMinusSideSlope(pmesh, wave, ader_order, slope_parallel);
 
-   int exit_code = 0;
+   int slice_fail = 0;
    if (rank == 0)
    {
-      std::cout << "\n=== ADER live interior-vs-shared branch cross-check ===\n";
+      std::cout << "\n--- ADER-O" << ader_order
+                << ": interior-vs-shared branch cross-check ---\n";
       int n_fail = 0;
       real_t worst_rel = 0.0;
       for (int c = 0; c < NUM_STATE; c++)
@@ -317,15 +369,68 @@ int main(int argc, char *argv[])
                    << "  rel=" << rel << "\n";
          if (rel > 1.0e-10) { n_fail++; }
       }
-      std::cout << "  worst relative mismatch = " << worst_rel << "\n";
+      std::cout << "  ADER-O" << ader_order
+                << " worst relative mismatch = " << worst_rel << "\n";
       if (n_fail == 0)
       {
-         std::cout << "  PASSED: ADER interior branch matches shared branch\n";
+         std::cout << "  PASSED: ADER-O" << ader_order
+                   << " interior branch matches shared branch\n";
       }
       else
       {
-         std::cout << "  FAILED: ADER interior/shared branch divergence\n";
-         exit_code = 1;
+         std::cout << "  FAILED: ADER-O" << ader_order
+                   << " interior/shared branch divergence\n";
+         slice_fail = 1;
+      }
+   }
+
+   MPI_Bcast(&slice_fail, 1, MPI_INT, 0, MPI_COMM_WORLD);
+   return slice_fail;
+}
+
+int main(int argc, char *argv[])
+{
+   MPI_Init(&argc, &argv);
+   int rank = 0, nprocs = 1;
+   MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+   MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
+
+   if (nprocs != 2)
+   {
+      if (rank == 0)
+      {
+         std::cout << "SKIPPED: test_ader_interior_vs_shared_branch_live requires np=2\n";
+      }
+      MPI_Finalize();
+      return 77;
+   }
+
+   if (rank == 0)
+   {
+      std::cout << "\n=== R-1502: ADER-O sweep — interior vs shared "
+                << "branch parity at np=2 ===\n";
+   }
+
+   // R-1502: sweep all production-relevant ADER orders.  Pre-R-1502 only
+   // O=2 was tested (CK recursion exits after one iteration → masks
+   // higher-order coefficient bugs).  Production sbatch scripts use
+   // ader_order ∈ {3, 4}.
+   int exit_code = 0;
+   for (int O : {2, 3, 4})
+   {
+      exit_code |= RunAderEquivalenceSlice(rank, nprocs, O);
+   }
+
+   if (rank == 0)
+   {
+      std::cout << "\n========================================\n";
+      if (exit_code == 0)
+      {
+         std::cout << "  R-1502 ADER-O sweep: ALL orders {2,3,4} PASSED\n";
+      }
+      else
+      {
+         std::cout << "  R-1502 ADER-O sweep: FAILED at one or more orders\n";
       }
       std::cout << "========================================\n";
    }

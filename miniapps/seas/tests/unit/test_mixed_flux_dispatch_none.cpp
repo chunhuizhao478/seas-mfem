@@ -193,6 +193,35 @@ int main()
            "Q_new bit-identical between paths after AdvanceADER "
            "(SetMixedFluxMode(None) is a true no-op)");
 
+   // R-1103: Path C — SetMixedFluxMode(Adjacent) followed by
+   // SetMixedFluxMode(None) on the SAME wave operator.  Catches a
+   // leaked-state bug where the central set is cleared but lingering
+   // bookkeeping (e.g., a residual flag set during the Adjacent build)
+   // affects dispatch.  The 2-tet fixture has |central_flux_face_set_|
+   // == 0 in Adjacent mode (no interior non-fault faces) so this
+   // primarily tests the setter's clear-state path; combined with R-1102
+   // Gate 3 on a 24-tet fixture (which has non-empty central set), the
+   // Adjacent → None transition is verified across both empty and
+   // non-empty Adjacent states.
+   Mesh mesh_c = BuildTwoTetFaultMesh();
+   WaveOperator<Mesh> wave_c(mesh_c, order,
+                             TPV102Params::lambda,
+                             TPV102Params::mu,
+                             TPV102Params::rho, bc);
+   FaultFaceFlux ff_c(TPV102Params::rho, TPV102Params::cp, TPV102Params::cs);
+   wave_c.SetFaultFlux(&ff_c);
+   std::vector<DOFData> dof_c;
+   wave_c.SetMixedFluxMode(MixedFluxMode::Adjacent);
+   wave_c.SetMixedFluxMode(MixedFluxMode::None);
+   Vector Q_init_c, Q_new_c;
+   RunOneStep(wave_c, dof_c, mesh_c, order, ader_order, Q_init_c, Q_new_c);
+   const real_t err_round_trip = MaxAbsDiff(Q_new_a, Q_new_c);
+   std::cout << "  max |Q_new_a − Q_new_c (Adjacent->None)| = "
+             << std::scientific << err_round_trip << "\n";
+   TEST_LE(err_round_trip, 0.0,
+           "Q_new bit-identical after Adjacent->None transition "
+           "(R-1103: mode-flip idempotency)");
+
    std::cout << "\n========================================\n";
    std::cout << "  Results: " << num_passed << " passed, "
              << num_failed << " failed out of " << num_tests << " tests\n";

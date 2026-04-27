@@ -2,8 +2,8 @@
 //
 // Contract gates (from MIXED_FLUX_PLAN.md Phase 5 R-1102):
 //
-// Gate 1 (R-1202 primary fixture): on a 24-tet Cartesian fixture with an
-//        interior fault plane at y = Ly/2,
+// Gate 1 (R-1202 primary fixture): on a 48-tet Cartesian fixture
+//        (8 hexes × 6-tet split) with an interior fault plane at y = Ly/2,
 //   - |central_flux_face_set_| > 0 (set is non-empty in Adjacent mode)
 //   - every face in the set is interior + non-fault (R-1207 predicate)
 //   - every face in the set has at least one element in E_fault_adj
@@ -64,7 +64,7 @@ constexpr real_t kCs     = 3464.0;
 constexpr real_t kMu     = kRho * kCs * kCs;
 constexpr real_t kLambda = kRho * kCp * kCp - 2.0 * kMu;
 
-// Build a 24-tet Cartesian mesh (2 cells per axis, 6-tet hex split = 48 tets;
+// Build a 48-tet Cartesian mesh (2 cells per axis, 6-tet hex split = 48 tets;
 // MFEM's default split actually produces 6 tets per hex so 8 hexes × 6 = 48
 // tets. The exact count is irrelevant; what matters is that the mesh has
 // interior non-fault faces touching fault elements.
@@ -321,8 +321,22 @@ int main()
    }
 
    // -----------------------------------------------------------------
-   // R-1202 sub-gate: 2-tet fixture has |set| == 0 in Adjacent mode.
-   // Reason: every non-fault face is a boundary face, not interior.
+   // R-1202 sub-gate (clarified per R-1406): 2-tet fixture has
+   // |central_set| == 0 in BOTH Adjacent AND AllContinuous modes.
+   //
+   // Reasoning:
+   //   - 6 of the 7 unique faces are external (Elem2No < 0); the
+   //     `is_interior_face` predicate correctly returns false for these
+   //     in both modes (no insertion).
+   //   - 1 face is the y=0 fault triangle (Elem2No >= 0, bdr_attr=3);
+   //     `is_fault_face` correctly excludes it in both modes.
+   //
+   // This sub-gate catches: (a) an implementer relaxing the
+   // `Elem2No >= 0` interior check (would wrongly insert external
+   // faces in AllContinuous), and (b) `is_fault_face`
+   // mis-classification (would insert the fault face in either mode).
+   // The R-1406 addition exercises the latter under AllContinuous —
+   // the original test only covered Adjacent.
    // -----------------------------------------------------------------
    {
       std::cout << "\n-- R-1202 sub-gate: 2-tet fixture, |set| == 0 --\n";
@@ -341,10 +355,23 @@ int main()
 
       wave2.SetMixedFluxMode(MixedFluxMode::Adjacent);
       const auto &S2 = wave2.GetCentralFluxFaceSet();
-      std::cout << "  |central_flux_face_set_| on 2-tet = " << S2.size() << "\n";
+      std::cout << "  |central_flux_face_set_| on 2-tet (Adjacent) = "
+                << S2.size() << "\n";
       TEST_ASSERT(S2.empty(),
-                  "2-tet fixture: set is EMPTY (all non-fault faces "
-                  "are boundary faces); R-1202 sub-gate passes");
+                  "2-tet Adjacent: set is EMPTY — 6 external faces "
+                  "fail is_interior_face, 1 fault face is excluded");
+
+      // R-1406: also exercise AllContinuous on the 2-tet to catch the
+      // same fault-misclassification bug under the broader code path.
+      wave2.SetMixedFluxMode(MixedFluxMode::AllContinuous);
+      const auto &S2_all = wave2.GetCentralFluxFaceSet();
+      std::cout << "  |central_flux_face_set_| on 2-tet (AllContinuous) = "
+                << S2_all.size() << "\n";
+      TEST_ASSERT(S2_all.empty(),
+                  "2-tet AllContinuous: set is EMPTY — the only non-"
+                  "external face IS the fault and must be excluded "
+                  "(R-1406: catches is_fault_face regressions under "
+                  "the broader AllContinuous walk)");
    }
 
    std::cout << "\n========================================\n";

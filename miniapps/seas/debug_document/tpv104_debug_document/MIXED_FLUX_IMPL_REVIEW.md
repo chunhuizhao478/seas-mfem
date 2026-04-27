@@ -1,4 +1,28 @@
-# Code Review: Mixed-Flux DG implementation (Round-11) — 2026-04-25
+# Code Review: Mixed-Flux DG implementation (Round-11) — 2026-04-25 (fixes applied 2026-04-26)
+
+## Status (2026-04-26)
+**All 3 findings FIXED and verified.**  Verdict upgraded **PASS WITH FIXES → PASS.**
+
+| ID | Status | Fix landed in |
+|----|--------|---------------|
+| R-001 | ✅ FIXED | `dynamic/wave_operator.inl` `BuildCentralFluxFaceSet_` (post-local-walk Allgatherv exchange of shared-face global-vertex keys; ~50 LOC, mirrors the ctor's `global_fault_keys` pattern at lines 159–219) |
+| R-002 | ✅ FIXED | `tests/parallel/test_mixed_flux_adjacent_mpi.cpp` (NEW) + Makefile target `seas_test_mixed_flux_adjacent_mpi`. 1×2×2 hex fixture with explicit z-skewed partition; `pat[1]` of each fault-adjacent hex has both a fault face (+y) and a rank-seam face (±z) — the exact R-001 trigger. Verified by toggling the R-001 fix off (test FAILS 0/1) then on (test PASSES 1/1). |
+| R-003 | ✅ FIXED | `tests/unit/test_godunov_central_flux.cpp` Gate 2 switched to relative tolerance `\|err\| / max(\|F_up\|, \|F_ce\|) ≤ 1e-12` (matches the plan's intended contract). Now passes at `1.272e-16` relative — 4 orders of magnitude inside the spec. |
+
+### Final test matrix
+- Mixed-flux dedicated tests: **68 / 68 pass**  (3 + 9 + 2 + 53 + 1)
+  - `seas_test_godunov_central_flux` 3/3
+  - `seas_test_mixed_flux_face_set` 9/9
+  - `seas_test_mixed_flux_dispatch_none` 2/2
+  - `seas_test_tpv104_smoke` 53/53
+  - `seas_test_mixed_flux_adjacent_mpi` (mpirun -np 2) 1/1 — **NEW**
+- Curated regression on touched code paths: **111 / 111 pass** (godunov-flux, wave-operator, fault-face-flux, tpv102-setup, ader-tpv102-smoke, ader-linear-wave-equivalence, fault-face-flux-ader-equivalence)
+- R-001-fix-disabled sanity check: test correctly FAILS (0/1) without the fix → confirms the test detects the bug it was written for.
+
+Multi-rank production runs of `--mixed-flux adjacent` are now safe to ship.
+
+---
+
 
 ## Review Scope
 - Plan: `miniapps/seas/debug_document/tpv104_debug_document/MIXED_FLUX_PLAN.md`
@@ -17,7 +41,7 @@
 
 ## Findings
 
-### [R-001] [CRITICAL] [wave_operator.inl:BuildCentralFluxFaceSet_] — Adjacent mode is not MPI-consistent across rank seams
+### [R-001] [CRITICAL] ✅ FIXED [wave_operator.inl:BuildCentralFluxFaceSet_] — Adjacent mode is not MPI-consistent across rank seams
 
 **Category:** BUG
 
@@ -157,7 +181,7 @@ void test_R001_adjacent_consistency_across_seam() {
 
 ---
 
-### [R-002] [MODERATE] [tests/unit/test_mixed_flux_*.cpp] — No multi-rank coverage of mixed-flux dispatch
+### [R-002] [MODERATE] ✅ FIXED [tests/unit/test_mixed_flux_*.cpp] — No multi-rank coverage of mixed-flux dispatch
 
 **Category:** EDGE_CASE / coverage gap
 
@@ -212,7 +236,7 @@ See sub-tests 1 and 2 above — they ARE the test cases.
 
 ---
 
-### [R-003] [LOW] [test_godunov_central_flux.cpp:166,235,282] — Test tolerances exceed plan-acceptance by 9 orders of magnitude
+### [R-003] [LOW] ✅ FIXED [test_godunov_central_flux.cpp:166,235,282] — Test tolerances exceed plan-acceptance by 9 orders of magnitude
 
 **Category:** QUALITY / DEVIATION
 
@@ -274,11 +298,11 @@ The test_godunov_central_flux test itself, with the relative tolerance change ab
 ---
 
 ## Summary
-- Critical issues: 1 (R-001)
-- Moderate issues: 1 (R-002)
-- Low issues: 1 (R-003)
-- Plan compliance: PARTIAL — Phase 1–6 are implemented and pass single-rank tests; the multi-rank correctness contract implicitly required by Phase 4 ("Phase 4 handles both `ComputeSharedFaceFluxRHS` and `ComputeADERSharedFaceFluxRHS` with the same dispatch logic" — Risk Assessment R5) is **not** met. Plan §Risk Assessment R5 anticipated this exact failure mode ("MPI shared-face inconsistency") and proposed an `R-1003-style abort guard if nprocs > 1 AND use_substep AND mixed_flux != none may be needed if the testing reveals inconsistency". No abort guard exists, and no MPI test was added that could surface the inconsistency.
-- Verdict: **PASS WITH FIXES** — single-rank functionality is correct and well-tested. Before any production multi-rank `--mixed-flux adjacent` run, R-001 must be fixed (or an `nprocs > 1 && Adjacent` abort guard must be installed) and R-002 must be addressed with a parallel test that catches the bug. R-003 can be deferred.
+- Critical issues: 1 (R-001) — ✅ FIXED 2026-04-26
+- Moderate issues: 1 (R-002) — ✅ FIXED 2026-04-26
+- Low issues: 1 (R-003) — ✅ FIXED 2026-04-26
+- Plan compliance (post-fix): **FULL** — Phase 1–6 implemented and verified at both single-rank and multi-rank scope.  The Risk Assessment R5 multi-rank consistency requirement now has both an MPI exchange in `BuildCentralFluxFaceSet_` and a dedicated parallel regression test (`seas_test_mixed_flux_adjacent_mpi`).
+- Verdict: **PASS** — `--mixed-flux adjacent` is safe to enable in multi-rank production.  No abort guard required.
 
 ## Unreviewed Areas
 

@@ -126,6 +126,23 @@ public:
    /// `UsePrecomputedFaceFluxes(true)` (R-1203 cross-check fires in BOTH
    /// setters).  `Adjacent` requires `bc_.fault_attr > 0` and a populated
    /// fault face list (set by the constructor); aborts otherwise.
+   ///
+   /// IMPORTANT (R-1408 lifecycle invariant): `central_flux_face_set_` is
+   /// COMPUTED at this call and CACHED.  If the underlying
+   /// `fault_interior_faces_`, `fault_shared_faces_`,
+   /// `shared_mesh_face_set_`, or `face_bdr_attr_` change after
+   /// `SetMixedFluxMode` returns, the cache becomes STALE and the
+   /// dispatch is incorrect.  Any driver that mutates fault bookkeeping
+   /// post-construction (e.g., dynamic re-meshing across SEAS quasi-
+   /// static cycles) MUST re-invoke `SetMixedFluxMode(currentMode)` to
+   /// rebuild the cache.  In production TPV104 these structures are
+   /// constructor-only, so the cache is always valid.
+   ///
+   /// All ranks must call `SetMixedFluxMode` with the SAME mode in the
+   /// same call order (R-1205).  An `MPI_Allreduce` consensus check at
+   /// the top of the setter aborts with a clear error message on
+   /// mismatched callers, rather than deadlocking at the post-walk
+   /// Allgatherv exchange.
    void SetMixedFluxMode(MixedFluxMode m);
    MixedFluxMode GetMixedFluxMode() const { return mixed_flux_mode_; }
 
@@ -299,33 +316,66 @@ public:
    /// and resets them after via `ResetSubStepFaultImposedStates`.
    ///
    /// Caller owns the buffers; this class stores raw pointers only.
+   ///
+   /// R-1003: `n_total_fault_qps` is `GetNumTotalFaultQPs()` (interior +
+   /// shared).  Both the interior-fault branch of `ComputeADERFaceFluxRHS`
+   /// and the shared-fault branch of `ComputeADERSharedFaceFluxRHS` consume
+   /// the side-channel under a single absolute-index gate
+   /// `dof_idx < substep_n_total_fault_qps_`.  Pre-R-1003 the parameter was
+   /// `n_local_fault_qps` (interior only) and the shared branch always ran
+   /// inline `EvaluateADER`, producing inconsistent ADER semantics across
+   /// partition seams; the driver aborted at np>1 to fail-loud.
    void SetSubStepFaultImposedStates(const real_t *I_imp_plus_flat,
                                      const real_t *I_imp_minus_flat,
-                                     int n_local_fault_qps) const;
+                                     int n_total_fault_qps) const;
 
    /// Pair to `SetSubStepFaultImposedStates`; clears the pointers so the
    /// inline EvaluateADER path is restored on subsequent calls.
    void ResetSubStepFaultImposedStates() const;
 
-   /// SubStep helper: evaluate bulk Q at every interior fault QP and
-   /// rotate into the canonical fault-local frame, packing into flat
-   /// arrays in the same layout the iterator's
+   /// SubStep helper: evaluate bulk Q at every fault QP (interior AND
+   /// shared, R-1003) and rotate into the canonical fault-local frame,
+   /// packing into flat arrays in the same layout the iterator's
    /// `AdvanceWithSubStepStates` expects (entry
    /// `[dof_idx * NUM_STATE + c]`).  `dof_idx` matches
    /// `wave_operator.inl`'s fault-branch indexing
-   /// (`fault_face_dof_offset_[f] + q`).
+   /// (`fault_face_dof_offset_[f] + q` for interior,
+   /// `shared_fault_dof_offset_[sf] + q` for shared — the latter already
+   /// includes the `GetNumLocalFaultQPs()` offset).
    ///
    /// On a fault face, Elem1 is on the canonical-+ side iff
-   /// `interior_fault_elem1_on_plus_[i]` is true (R-101); the helper
-   /// uses that flag to route Elem1's evaluation into the correct
-   /// + or − output bucket.
+   /// `interior_fault_elem1_on_plus_[i]` (interior) or
+   /// `shared_fault_elem1_on_plus_[sf_idx]` (shared) is true; the helper
+   /// uses that flag to route Elem1's evaluation into the correct + or −
+   /// output bucket.
    ///
    /// Per-side rotation uses the canonical (sign-corrected) frame
-   /// reconstructed from FaultBasis — bit-identical to the rotation
-   /// used by `ComputeADERFaceFluxRHS` at the same fault QP.
+   /// reconstructed from FaultBasis — bit-identical to the rotation used by
+   /// `ComputeADERFaceFluxRHS` and `ComputeADERSharedFaceFluxRHS` at the
+   /// same fault QP.
+   ///
+   /// Parallel: on a `ParMesh`, the shared-face slice reads neighbour-side
+   /// Q from the face-nbr ghost layer, performing one component-wise
+   /// `ParGridFunction::ExchangeFaceNbrData` per call.  This mirrors the
+   /// macro-step pattern in `ComputeADERSharedFaceFluxRHS`.  At np=1 the
+   /// shared loop is empty and no MPI is involved.
+   ///
+   /// @warning R-1600 PAIRWISE-COLLECTIVE CONTRACT.  At np>1, every rank
+   /// with `pmesh.GetNSharedFaces() > 0` MUST call this function whenever
+   /// any peer rank does.  The internal `q_gf.ExchangeFaceNbrData` is a
+   /// pairwise MPI exchange among the rank's face-neighbour set; a rank
+   /// that skipped the call (e.g., gating on a fault-only count) would
+   /// leave its peers' MPI_Irecv unmatched and they would hang in
+   /// MPI_Wait at 100% CPU.  Output sizing is `NUM_STATE *
+   /// GetNumTotalFaultQPs()` — zero-sized on a rank with no fault QPs is
+   /// a valid "this rank produces no fault output" state, and that rank
+   /// still participates in the collective so the per-substep ghost
+   /// exchange stays matched across the comm.  See the production hang
+   /// debugged in `SUBSTEP_NP_GT_1_HANG_REVIEW.md` for the failure mode
+   /// this contract prevents.
    ///
    /// @param[in]  Q_bulk        Bulk state, size NUM_STATE * ndof_total_.
-   /// @param[out] Q_plus_flat   Output, sized NUM_STATE * GetNumLocalFaultQPs().
+   /// @param[out] Q_plus_flat   Output, sized NUM_STATE * GetNumTotalFaultQPs().
    /// @param[out] Q_minus_flat  Output, same size.
    void EvaluateBulkAtFaultQPsCanonical(
       const Vector &Q_bulk,
@@ -359,6 +409,17 @@ public:
    /// On a linear (no-friction) problem, `AdvanceADER(Q, dt, 2, Q_new)`
    /// matches the 4-stage RK4 output to O(dt²); O(dt^min(O,4)) for higher
    /// ADER order O.  RK4 path is unchanged (this is a parallel entry point).
+   ///
+   /// @warning R-1510 — assumes a STATIC ParMesh.  Both `ParMesh::Exchange`
+   /// FaceNbrData() and `ParFiniteElementSpace::ExchangeFaceNbrData()` are
+   /// called ONCE in the constructor (`wave_operator.inl:137-138`), and the
+   /// face-neighbour topology is not re-exchanged across macro-steps.  A
+   /// future AMR or moving-mesh extension MUST re-call both before every
+   /// `AdvanceADER` if the partition graph or face-neighbour set mutates,
+   /// or the per-substep ghost data exchange via `q_gf.ExchangeFaceNbrData`
+   /// will silently consume stale topology and produce wrong shared-face
+   /// fluxes.  TPV104 production uses a static mesh so this is currently
+   /// only a documentation hazard.
    ///
    /// @param[in]  Q      State at t.  Size NUM_STATE * ndof_total_.
    /// @param[in]  dt     Time step.  Must be > 0.
@@ -549,7 +610,33 @@ private:
    /// owned by the driver.
    mutable const real_t *substep_I_imp_plus_flat_  = nullptr;
    mutable const real_t *substep_I_imp_minus_flat_ = nullptr;
-   mutable int substep_n_local_fault_qps_ = 0;
+   /// R-1003: total (interior + shared) fault QPs in the buffers above.
+   /// Both `ComputeADERFaceFluxRHS` (interior branch) and
+   /// `ComputeADERSharedFaceFluxRHS` (shared branch) gate on
+   /// `dof_idx < substep_n_total_fault_qps_`; `dof_idx` is absolute and
+   /// already in `[0, total)` because `shared_fault_dof_offset_` is built
+   /// with `fault_interior_faces_.Size() * nbf_per_face_` baked in.
+   mutable int substep_n_total_fault_qps_ = 0;
+
+   /// R-1501: ADER scratch buffers, lazy-initialised on first
+   /// `AdvanceADER` / `ComputeADERTimeIntegrated` call and reused across
+   /// macro-steps.  Pre-R-1501 these were stack-allocated `Vector`s on
+   /// every call (5 buffers of `NUM_STATE * ndof_total_` doubles each),
+   /// producing ~32 TB of `malloc`/`free` traffic over a 60 s TPV104
+   /// production run with 12 000 macro-steps × 2.7 GB/step.  Lazy
+   /// `SetSize` is byte-identical to the prior behaviour on the first
+   /// call and a no-op on every subsequent call (size doesn't change for
+   /// a static mesh; if a future AMR path resizes ndof_total_, SetSize
+   /// reallocates exactly once at the new size).  Mirrors the existing
+   /// `ghost_gf_` / `central_flux_face_set_` mutable-member pattern.
+   mutable Vector ader_I_buf_;          ///< AdvanceADER predictor I
+   mutable Vector ader_rhs_buf_;        ///< AdvanceADER corrector RHS
+   mutable Vector ck_D_curr_buf_;       ///< CK recursion D(k) ping-pong
+   mutable Vector ck_D_next_buf_;       ///< CK recursion D(k+1) ping-pong
+   mutable Vector ck_dQ_dxd_buf_;       ///< spatial derivative scratch
+   mutable Vector ck_substep_D_curr_buf_;  ///< SubStepStates D(k) buf
+   mutable Vector ck_substep_D_next_buf_;  ///< SubStepStates D(k+1) buf
+   mutable Vector ck_substep_dQ_dxd_buf_;  ///< SubStepStates ∂_x scratch
 
    /// I-04: free-surface BC flux dispatch mode.  Defaults to Gamma so
    /// setup-free drivers keep pre-v9.3.0 output.
@@ -561,6 +648,11 @@ private:
    /// when mode is `None`.  `unordered_set` per R-1206 (O(1) lookup at
    /// dispatch sites; load-bearing for production performance).
    MixedFluxMode mixed_flux_mode_ = MixedFluxMode::None;
+   /// R-1208 cached short-circuit: kept in sync with `mixed_flux_mode_` by
+   /// `SetMixedFluxMode`.  Read at every dispatch site (4 in Mult/AdvanceADER
+   /// face-flux loops); recomputing per-call from the enum is correct but
+   /// wasteful.
+   bool mf_on_ = false;
    std::unordered_set<int> central_flux_face_set_;
 
    /// Phase 3 helper: populate `central_flux_face_set_` per the mode.
@@ -661,6 +753,21 @@ private:
 #ifdef MFEM_USE_MPI
    /// Reusable ParGridFunction for ghost exchange (mutable: used in const Mult).
    mutable std::unique_ptr<ParGridFunction> ghost_gf_;
+   /// R-1601: vdim=NUM_STATE byNODES ParGridFunction used by
+   /// `EvaluateBulkAtFaultQPsCanonical` to batch the per-substep ghost
+   /// exchange.  Pre-R-1601 the function did 9 sequential per-component
+   /// `q_gf.ExchangeFaceNbrData()` calls (one per state component) per
+   /// invocation, totalling 9·O collectives per macro-step on the substep
+   /// dispatch path.  With this batched ParFiniteElementSpace (vdim=9),
+   /// a single `ExchangeFaceNbrData` call covers all NUM_STATE components
+   /// in one MPI round → O collectives per macro-step → saves 8·O.
+   /// Allocated once in the ctor parallel branch; topology is exchanged
+   /// at construction (the static-mesh assumption R-1510 still applies).
+   /// The macro-step path (`ComputeADERSharedFaceFluxRHS`) intentionally
+   /// keeps the legacy vdim=1 `ghost_gf_` because of the deep-copy
+   /// correctness guard at L2636-2639 (R-1504 deferred).
+   mutable std::unique_ptr<ParFiniteElementSpace> pfes_full_state_;
+   mutable std::unique_ptr<ParGridFunction>       ghost_gf_full_state_;
 #endif
 
    // Test-visibility accessors — exposed for the Arm 1 localization probes

@@ -644,6 +644,7 @@ void Tpv104SubStepIterator::AdvanceWithSubStepStates(
          const real_t *Q_tilde_minus =
             Qm_o + static_cast<ptrdiff_t>(i) * NUM_STATE;
 
+
          EvalStageState s;
          flux_.ComputeStageState(d, Q_tilde_plus, Q_tilde_minus, s, method);
 

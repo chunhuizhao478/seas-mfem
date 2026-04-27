@@ -134,10 +134,34 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
       {
          auto &pmesh = const_cast<ParMesh &>(
             static_cast<const ParMesh &>(mesh_));
+         // R-1510: STATIC-MESH assumption.  These two exchanges build the
+         // face-neighbour topology graph used by every per-step ghost
+         // exchange downstream (Mult, AdvanceADER, ComputeADERSharedFaceFluxRHS,
+         // EvaluateBulkAtFaultQPsCanonical).  Re-calling them is unnecessary
+         // for a static partition.  An AMR / moving-mesh extension MUST
+         // re-call BOTH (in this order: ParMesh first, then
+         // ParFiniteElementSpace) before any subsequent macro-step or the
+         // per-step `q_gf.ExchangeFaceNbrData()` calls will exchange values
+         // through a stale topology.  TPV104 production uses a static mesh
+         // so the once-only call is correct here.
          pmesh.ExchangeFaceNbrData();
          pfes->ExchangeFaceNbrData();
          ghost_gf_ = std::make_unique<ParGridFunction>(pfes);
          ghost_initialized_ = true;
+
+         // R-1601: build the vdim=NUM_STATE byNODES batched ghost exchange
+         // PFE space + PGF used by EvaluateBulkAtFaultQPsCanonical to
+         // amortise the 9·O per-substep collectives down to O.  Static-
+         // mesh assumption (R-1510) means we exchange topology once here
+         // and reuse it for every macro-step.  byNODES ordering matches
+         // the wave operator's component-major Q layout
+         // (`Q[c * ndof_total + i]`), so packing/unpacking are simple
+         // strided copies (no per-DOF stride conversion).
+         pfes_full_state_ = std::make_unique<ParFiniteElementSpace>(
+            &pmesh, fec_.get(), NUM_STATE, Ordering::byNODES);
+         pfes_full_state_->ExchangeFaceNbrData();
+         ghost_gf_full_state_ = std::make_unique<ParGridFunction>(
+            pfes_full_state_.get());
          // R-109 fix: cache MPI rank once here so
          // ComputeSharedFaceFluxRHS doesn't re-query it on every RK4 stage.
          my_rank_ = pmesh.GetMyRank();
@@ -857,7 +881,10 @@ void WaveOperator<MeshType>::ApplySpatialDerivative(int dir,
       // variable-order L2) would silently overflow that row.  Fail loud so
       // a future extension cannot introduce that corruption without
       // updating the scratch sizing.
-      MFEM_ASSERT(ndof == ndof_per_el_,
+      // R-1508: promoted from MFEM_ASSERT (Debug-only) to MFEM_VERIFY so
+      // a Release build still fails loud rather than silently overflowing
+      // the per-element scratch row on a heterogeneous mesh.
+      MFEM_VERIFY(ndof == ndof_per_el_,
                   "ApplySpatialDerivative assumes homogeneous elements: "
                   "elem=" << e << " has ndof=" << ndof
                   << " but ndof_per_el_=" << ndof_per_el_);
@@ -995,10 +1022,24 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
 
    if (dt <= 0.0 || ndof_total_ == 0) { return; }
 
-   // Ping-pong buffers for the recursion.
-   Vector D_curr(Q);                             // D(0) = Q
-   Vector D_next(NUM_STATE * ndof_total_);
-   Vector dQ_dxd(NUM_STATE * ndof_total_);
+   // R-1501: lazy-init mutable scratch buffers (ck_D_curr_buf_,
+   // ck_D_next_buf_, ck_dQ_dxd_buf_) reused across macro-steps.
+   // See header docstring for the cost rationale.  SetSize is a no-op
+   // when the size already matches; the first call sizes once.  Note:
+   // `D_curr = Q` (assignment) writes a fresh copy of Q into the
+   // member buffer on every call, so prior-call residual values are
+   // overwritten before the first read.  Same applies to `D_next` /
+   // `dQ_dxd`: D_next is zeroed at L1010 before each iteration's
+   // accumulation, and dQ_dxd is fully overwritten by
+   // ApplySpatialDerivative at L1013 before any read.
+   const int N = NUM_STATE * ndof_total_;
+   if (ck_D_curr_buf_.Size() != N) { ck_D_curr_buf_.SetSize(N); }
+   if (ck_D_next_buf_.Size() != N) { ck_D_next_buf_.SetSize(N); }
+   if (ck_dQ_dxd_buf_.Size() != N) { ck_dQ_dxd_buf_.SetSize(N); }
+   Vector &D_curr = ck_D_curr_buf_;
+   Vector &D_next = ck_D_next_buf_;
+   Vector &dQ_dxd = ck_dQ_dxd_buf_;
+   D_curr = Q;                                   // D(0) = Q
 
    // k = 0 contribution: I += dt * D(0)
    real_t fac = dt;
@@ -1015,7 +1056,24 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
          ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
       }
 
-      // Advance factorial factor: fac *= dt / (k+2)
+      // Advance factorial factor: fac *= dt / (k+2).
+      //
+      // R-1503 cross-reference: `ComputeADERSubStepStates` below uses
+      // `denom = k + 1` for the analogous CK update; the two parameterise
+      // the recursion at different phases:
+      //   - Here `fac` is initialised to `dt` at L1004 (so before the loop,
+      //     fac == dt^{k=0+1}/0! · 1 represents the k=0 term coefficient
+      //     dt^{k+1}/(k+1)!).  At loop iteration k we are computing D(k+1),
+      //     which contributes dt^{k+2}/(k+2)! · D(k+1) to I; the update is
+      //     therefore `fac *= dt / (k+2)`.
+      //   - `ComputeADERSubStepStates` initialises `fac[o] = 1.0` at L1093
+      //     (its k=0 term `(τ^0 / 0!) · D(0) = D(0)` is pre-added at
+      //     L1086-1089 with no scaling).  At its iteration k it computes
+      //     D(k+1) and accumulates `(τ^{k+1}/(k+1)!) · D(k+1)`, so its
+      //     update is `fac[o] *= τ / (k+1)`.
+      // Both are mathematically equivalent (different k-indexing, same
+      // Taylor coefficient).  DO NOT "harmonise" by changing one to match
+      // the other without re-deriving the recursion phase — see R-1503.
       fac *= dt / static_cast<real_t>(k + 2);
       I.Add(fac, D_next);
 
@@ -1077,10 +1135,23 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
 
    if (ndof_total_ == 0) { return; }
 
-   // Ping-pong buffers for the CK recursion.
-   Vector D_curr(Q);                              // D(0) = Q
-   Vector D_next(NUM_STATE * ndof_total_);
-   Vector dQ_dxd(NUM_STATE * ndof_total_);
+   // R-1501: lazy-init separate mutable scratch buffers for the substep
+   // predictor (`ck_substep_*_buf_`) — distinct from `ck_*_buf_` used by
+   // ComputeADERTimeIntegrated so the two predictors are independent.
+   // SetSize is a no-op on resized-once buffers; D_curr is overwritten by
+   // `= Q`, D_next is zeroed at L1156, dQ_dxd is fully overwritten by
+   // ApplySpatialDerivative — no stale-read hazards.
+   const int N = NUM_STATE * ndof_total_;
+   if (ck_substep_D_curr_buf_.Size() != N)
+   { ck_substep_D_curr_buf_.SetSize(N); }
+   if (ck_substep_D_next_buf_.Size() != N)
+   { ck_substep_D_next_buf_.SetSize(N); }
+   if (ck_substep_dQ_dxd_buf_.Size() != N)
+   { ck_substep_dQ_dxd_buf_.SetSize(N); }
+   Vector &D_curr = ck_substep_D_curr_buf_;
+   Vector &D_next = ck_substep_D_next_buf_;
+   Vector &dQ_dxd = ck_substep_dQ_dxd_buf_;
+   D_curr = Q;                                    // D(0) = Q
 
    // k = 0 contribution: Q(τ) += (τ^0 / 0!) * D(0) = D(0).
    for (int o = 0; o < O_nodes; o++)
@@ -1105,6 +1176,21 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
       }
 
       // Update factorial factors and accumulate D(k+1) into each node.
+      //
+      // R-1503 cross-reference: `ComputeADERTimeIntegrated` above uses
+      // `fac *= dt / (k+2)`.  The two recursions parameterise the factorial
+      // at different phases:
+      //   - Here `fac[o]` was initialised to 1.0 at L1093 and the k=0
+      //     contribution `(τ^0/0!) · D(0) = D(0)` was pre-added at
+      //     L1086-1089 WITHOUT scaling.  At iteration k we are forming
+      //     D(k+1) and accumulating `(τ^{k+1}/(k+1)!) · D(k+1)`, so the
+      //     update is `fac[o] *= τ / (k+1)` — i.e. `denom = k + 1`.
+      //   - `ComputeADERTimeIntegrated` initialised `fac = dt` at L1004
+      //     (its k=0 contribution was pre-added with `dt` already folded in).
+      //     There the iteration computes D(k+1) and contributes
+      //     `dt^{k+2}/(k+2)! · D(k+1)`, hence `fac *= dt / (k+2)`.
+      // Both are mathematically equivalent.  DO NOT "harmonise" the two
+      // denominators without re-deriving the recursion phase — see R-1503.
       const real_t denom = static_cast<real_t>(k + 1);
       for (int o = 0; o < O_nodes; o++)
       {
@@ -1123,20 +1209,20 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
 template <typename MeshType>
 void WaveOperator<MeshType>::SetSubStepFaultImposedStates(
    const real_t *I_imp_plus_flat, const real_t *I_imp_minus_flat,
-   int n_local_fault_qps) const
+   int n_total_fault_qps) const
 {
-   MFEM_VERIFY(n_local_fault_qps >= 0,
-               "SetSubStepFaultImposedStates: n_local_fault_qps must be "
-               ">= 0, got " << n_local_fault_qps);
-   if (n_local_fault_qps > 0)
+   MFEM_VERIFY(n_total_fault_qps >= 0,
+               "SetSubStepFaultImposedStates: n_total_fault_qps must be "
+               ">= 0, got " << n_total_fault_qps);
+   if (n_total_fault_qps > 0)
    {
       MFEM_VERIFY(I_imp_plus_flat != nullptr && I_imp_minus_flat != nullptr,
                   "SetSubStepFaultImposedStates: both pointers must be "
-                  "non-null when n_local_fault_qps > 0");
+                  "non-null when n_total_fault_qps > 0");
    }
    substep_I_imp_plus_flat_  = I_imp_plus_flat;
    substep_I_imp_minus_flat_ = I_imp_minus_flat;
-   substep_n_local_fault_qps_ = n_local_fault_qps;
+   substep_n_total_fault_qps_ = n_total_fault_qps;
 }
 
 template <typename MeshType>
@@ -1144,7 +1230,7 @@ void WaveOperator<MeshType>::ResetSubStepFaultImposedStates() const
 {
    substep_I_imp_plus_flat_  = nullptr;
    substep_I_imp_minus_flat_ = nullptr;
-   substep_n_local_fault_qps_ = 0;
+   substep_n_total_fault_qps_ = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -1156,6 +1242,31 @@ void WaveOperator<MeshType>::ResetSubStepFaultImposedStates() const
 template <typename MeshType>
 void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
 {
+   // R-1205: enforce collective-call discipline.  All ranks must invoke
+   // SetMixedFluxMode with the SAME mode in the same order; otherwise
+   // BuildCentralFluxFaceSet_ deadlocks at MPI_Allgather (Adjacent runs
+   // collectives, None / AllContinuous skip them).  Allreduce-MIN/MAX
+   // over the mode value catches mismatched callers cheaply at the
+   // setter rather than at a downstream collective.
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh_consensus = static_cast<ParMesh &>(mesh_);
+      const int my_mode = static_cast<int>(m);
+      int max_mode = 0, min_mode = 0;
+      MPI_Allreduce(&my_mode, &max_mode, 1, MPI_INT, MPI_MAX,
+                    pmesh_consensus.GetComm());
+      MPI_Allreduce(&my_mode, &min_mode, 1, MPI_INT, MPI_MIN,
+                    pmesh_consensus.GetComm());
+      MFEM_VERIFY(max_mode == min_mode,
+                  "SetMixedFluxMode: ranks disagree on the mode value "
+                  "(max=" << max_mode << ", min=" << min_mode
+                  << ").  Every rank must call SetMixedFluxMode with "
+                  "the SAME MixedFluxMode in the same call order; "
+                  "otherwise the post-walk Allgatherv deadlocks.");
+#endif
+   }
+
    // R-1203 cross-check.
    if (m != MixedFluxMode::None && use_precomputed_face_fluxes_)
    {
@@ -1179,6 +1290,7 @@ void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
    }
 
    mixed_flux_mode_ = m;
+   mf_on_ = (m != MixedFluxMode::None);   // R-1208: keep cached flag in sync.
    BuildCentralFluxFaceSet_();
 }
 
@@ -1202,13 +1314,85 @@ void WaveOperator<MeshType>::BuildCentralFluxFaceSet_()
          (ftr != nullptr && ftr->Elem2No >= 0);
       const bool shared_seam =
          (shared_mesh_face_set_.count(f) > 0);
-      return two_sided_interior || shared_seam;
+      // R-1404: exclude faces carrying a NON-fault boundary attribute
+      // (free-surface, absorbing).  Such faces fall through to the BC
+      // branch only when Elem2No < 0; if a 2-sided face happens to also
+      // carry a non-zero non-fault bdr_attr (custom mesh with internal
+      // boundary layer), the BC branch's `is_boundary = (e2 < 0) &&
+      // (bdr_attr > 0)` skips them and the mixed-flux dispatch would
+      // wrongly fire Central instead of the user-intended BC.  Defensive:
+      // require absence of non-fault boundary attribute for membership
+      // in the central set.
+      const bool nonfault_bc =
+         (f < static_cast<int>(face_bdr_attr_.size()) &&
+          face_bdr_attr_[f] > 0 &&
+          face_bdr_attr_[f] != bc_.fault_attr);
+      return (two_sided_interior || shared_seam) && !nonfault_bc;
    };
+   // R-1100 fix: build a mesh-face-index keyed fault-face set that is
+   // rank-symmetric.  `face_bdr_attr_` is populated only on the BE-owner
+   // rank, so on a shared fault face the non-BE-owner's `face_bdr_attr_`
+   // entry is 0 — `is_fault_face` would mis-classify the shared fault
+   // face as non-fault and the local Adjacent walk would wrongly insert
+   // it into central_flux_face_set_, breaking the documented invariant
+   // `central_flux_face_set_ ∩ fault_faces == ∅` on the non-BE-owner.
+   //
+   // Reuse the canonical rank-symmetric lists `fault_interior_faces_`
+   // and `fault_shared_faces_` (both populated correctly at ctor R-002
+   // stage via the merged `shared_face_bdr_attr_` exchange).
+   // R-1206: build the set unconditionally, then enforce ctor-state
+   // consistency: a non-empty fault-face list requires a positive
+   // fault attribute.  Lambdas no longer need the redundant
+   // `bc_.fault_attr > 0` short-circuit.
+   std::unordered_set<int> fault_mesh_face_idx_set;
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      fault_mesh_face_idx_set.insert(fault_interior_faces_[i]);
+   }
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh_lookup = static_cast<ParMesh &>(mesh_);
+      for (int sf_i = 0; sf_i < fault_shared_faces_.Size(); sf_i++)
+      {
+         const int sf = fault_shared_faces_[sf_i];
+         const int f = pmesh_lookup.GetSharedFace(sf);
+         fault_mesh_face_idx_set.insert(f);
+      }
+#endif
+   }
+   MFEM_VERIFY(fault_mesh_face_idx_set.empty() || bc_.fault_attr > 0,
+               "BuildCentralFluxFaceSet_: fault-face lists are non-empty "
+               "(set size = " << fault_mesh_face_idx_set.size()
+               << ") but bc_.fault_attr = " << bc_.fault_attr
+               << " (≤ 0).  Inconsistent ctor state — the fault face "
+               "lists must be empty when no fault attribute is set "
+               "(R-1206 invariant).");
    auto is_fault_face = [&](int f) -> bool
    {
-      return (bc_.fault_attr > 0 &&
-              f < static_cast<int>(face_bdr_attr_.size()) &&
-              face_bdr_attr_[f] == bc_.fault_attr);
+      // R-1206 + R-1401: rely on set membership AS THE TRUTH SOURCE,
+      // but assert agreement with the local `face_bdr_attr_` table for
+      // BE-owner ranks (debug-only).  If a future ctor refactor
+      // decouples `fault_mesh_face_idx_set` from `face_bdr_attr_`, the
+      // dispatch-time fault check (which uses face_bdr_attr_) and this
+      // set-build check would diverge — central could be dispatched on
+      // a face that the fault path also activates, double-counting.
+      const bool by_set = (fault_mesh_face_idx_set.count(f) > 0);
+#ifndef NDEBUG
+      // The bdr-attr table is rank-asymmetric (BE-owner only) on
+      // shared fault faces; only assert the implication "by_attr →
+      // by_set" (the strict direction), not equivalence.
+      const bool by_attr =
+         (bc_.fault_attr > 0 &&
+          f < static_cast<int>(face_bdr_attr_.size()) &&
+          face_bdr_attr_[f] == bc_.fault_attr);
+      MFEM_ASSERT(!by_attr || by_set,
+                  "R-1401: face " << f << " has fault bdr_attr but is "
+                  "NOT in fault_mesh_face_idx_set — ctor refactor has "
+                  "decoupled the two; mixed-flux dispatch would "
+                  "double-dispatch on this face.");
+#endif
+      return by_set;
    };
 
    if (mixed_flux_mode_ == MixedFluxMode::AllContinuous)
@@ -1270,22 +1454,144 @@ void WaveOperator<MeshType>::BuildCentralFluxFaceSet_()
          }
       }
    }
+
+   // R-001 fix (post-local-walk MPI exchange): the local walk above only
+   // inserts shared non-fault faces whose LOCAL element is in E_fault_adj.
+   // A shared non-fault face whose REMOTE element is fault-adjacent on
+   // the peer rank (but local element isn't) would be missed, causing
+   // the two ranks to dispatch DIFFERENT fluxes on the same physical
+   // face → conservation broken across the rank seam (a 0.5·|A_n|·jump
+   // imbalance per ill-dispatched face per macro-step).
+   //
+   // Allgatherv the global vertex keys of every shared non-fault face
+   // this rank has inserted; every rank then re-walks its shared faces
+   // and inserts any whose key appears in the global merged set.  Same
+   // pattern as the ctor's `global_fault_keys` exchange (lines 159-219).
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      const int n_shared = pmesh.GetNSharedFaces();
+      Array<HYPRE_BigInt> gvi;
+      pmesh.GetGlobalVertexIndices(gvi);
+      auto make_global_key = [&](const Array<int> &verts)
+      {
+         // R-1106: guard against silent truncation if a future mesh has
+         // faces with > 4 vertices (impossible for tet/hex but possible
+         // for polygonal elements).
+         MFEM_VERIFY(verts.Size() <= 4,
+                     "BuildCentralFluxFaceSet_::make_global_key: face has "
+                     << verts.Size() << " vertices > 4; the "
+                     "std::array<HYPRE_BigInt,4> key bucket would "
+                     "silently truncate.  Extend the bucket size or use "
+                     "std::vector<HYPRE_BigInt> if higher-vertex faces "
+                     "are introduced.");
+         // R-1207 (deferred): for a hybrid mesh with both triangular
+         // and quadrilateral faces, the key bucket size (4) is wide
+         // enough to hold either, but a 3-vert triangle key
+         // {0, v1, v2, v3} (sorted) could in principle alias against a
+         // quad key whose sorted form happens to start with 0.  TPV104
+         // production uses tet meshes only (all faces triangular), so
+         // the alias is impossible by construction.  When a hybrid
+         // mesh fixture is added, prepend `verts.Size()` as a
+         // disambiguator slot per the R-1207 suggested fix.
+         std::array<HYPRE_BigInt, 4> key = {0, 0, 0, 0};
+         for (int v = 0; v < std::min(verts.Size(), 4); v++)
+         {
+            key[v] = gvi[verts[v]];
+         }
+         std::sort(key.begin(), key.begin() + verts.Size());
+         return key;
+      };
+
+      // Collect this rank's "shared face inserted into central set" keys.
+      std::set<std::array<HYPRE_BigInt, 4>> local_keys;
+      for (int sf = 0; sf < n_shared; sf++)
+      {
+         const int f = pmesh.GetSharedFace(sf);
+         if (central_flux_face_set_.count(f) > 0)
+         {
+            Array<int> verts;
+            mesh_.GetFaceVertices(f, verts);
+            local_keys.insert(make_global_key(verts));
+         }
+      }
+
+      // Allgatherv local_keys → global_keys (collective; must run on all
+      // ranks, including those with my_size = 0).
+      std::vector<HYPRE_BigInt> local_flat;
+      local_flat.reserve(local_keys.size() * 4);
+      for (const auto &k : local_keys)
+      {
+         for (int i = 0; i < 4; i++) { local_flat.push_back(k[i]); }
+      }
+      const int my_size = static_cast<int>(local_flat.size());
+      int nprocs_loc = 0;
+      MPI_Comm_size(pmesh.GetComm(), &nprocs_loc);
+      std::vector<int> sizes(nprocs_loc), displs(nprocs_loc);
+      MPI_Allgather(&my_size, 1, MPI_INT, sizes.data(), 1, MPI_INT,
+                    pmesh.GetComm());
+      int total = 0;
+      for (int r = 0; r < nprocs_loc; r++)
+      { displs[r] = total; total += sizes[r]; }
+      std::vector<HYPRE_BigInt> all_flat(total);
+      MPI_Allgatherv(local_flat.data(), my_size,
+                     MPITypeMap<HYPRE_BigInt>::mpi_type,
+                     all_flat.data(), sizes.data(), displs.data(),
+                     MPITypeMap<HYPRE_BigInt>::mpi_type,
+                     pmesh.GetComm());
+      std::set<std::array<HYPRE_BigInt, 4>> global_keys;
+      for (int i = 0; i < total; i += 4)
+      {
+         std::array<HYPRE_BigInt, 4> key = {
+            all_flat[i], all_flat[i+1], all_flat[i+2], all_flat[i+3]
+         };
+         global_keys.insert(key);
+      }
+
+      // Insert any shared non-fault face whose key is in the merged
+      // global set (idempotent for keys this rank already contributed).
+      for (int sf = 0; sf < n_shared; sf++)
+      {
+         const int f = pmesh.GetSharedFace(sf);
+         if (is_fault_face(f)) { continue; }
+         Array<int> verts;
+         mesh_.GetFaceVertices(f, verts);
+         if (global_keys.count(make_global_key(verts)) > 0)
+         {
+            central_flux_face_set_.insert(f);
+         }
+      }
+#endif
+   }
 }
 
 // ---------------------------------------------------------------------------
-// EvaluateBulkAtFaultQPsCanonical — read bulk Q at every interior fault QP,
-// rotate to the canonical fault-local frame, route Elem1's evaluation into
-// the canonical-+/− output bucket, and pack into flat per-QP arrays.
+// EvaluateBulkAtFaultQPsCanonical — read bulk Q at every fault QP (interior
+// + shared, R-1003), rotate to the canonical fault-local frame, route Elem1's
+// evaluation into the canonical-+/− output bucket, and pack into flat per-QP
+// arrays.
 //
 // Layout:
 //   Q_*_flat[ dof_idx * NUM_STATE + c ]
-// where dof_idx = fault_face_dof_offset_[f] + q for interior fault face f
-// at QP index q — the same indexing used by the fault branch of
-// ComputeADERFaceFluxRHS.
+// where
+//   dof_idx = fault_face_dof_offset_[f]   + q   for interior fault face f
+//   dof_idx = shared_fault_dof_offset_[sf] + q   for shared   fault face sf
+// (the latter map already includes the GetNumLocalFaultQPs() base offset by
+// construction; see SetFaultDOFData in wave_operator.hpp).  This is the same
+// indexing used by the fault branches of ComputeADERFaceFluxRHS and
+// ComputeADERSharedFaceFluxRHS, so the iterator's I_imp accumulator and the
+// flux's substep gate share a single absolute index.
 //
 // Reuses the canonical frame from FaultBasis (sign_flipped reconstruction)
-// and the per-face elem1_on_plus flag (R-101) so the rotation and side-
-// labeling are bit-identical to the production fault flux path.
+// and the per-face elem1_on_plus flag (R-101 for interior; geometric for
+// shared) so the rotation and side-labeling are bit-identical to the
+// production fault flux path on each branch.  The interior loop uses
+// `!interior_fault_elem1_on_plus_[fi]` for frame negation (R-101); the
+// shared loop uses `qpd.sign_flipped` to mirror ComputeADERSharedFaceFluxRHS
+// (R-1305 / R-801 documents this convention split as a separate latent
+// risk; matching the existing flux convention is required so the iterator's
+// canonical Q matches what the flux's substep gate will rotate back).
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
@@ -1298,13 +1604,35 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
                << Q_bulk.Size() << " != NUM_STATE * ndof_total_ = "
                << NUM_STATE * ndof_total_);
 
+   // R-1003 §4: size to TOTAL fault QPs (interior + shared).  Interior
+   // entries occupy [0, GetNumLocalFaultQPs()); shared entries occupy
+   // [GetNumLocalFaultQPs(), GetNumTotalFaultQPs()).  At np=1 the shared
+   // count is 0 so this is byte-identical to the pre-R-1003 sizing.
    const int n_local_qps = GetNumLocalFaultQPs();
+   const int n_total_qps = GetNumTotalFaultQPs();
    const size_t expect_words =
-      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_local_qps);
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_total_qps);
    Q_plus_flat.assign(expect_words, 0.0);
    Q_minus_flat.assign(expect_words, 0.0);
 
-   if (n_local_qps == 0 || !fault_basis_) { return; }
+   // R-1600: at np>1 the parallel block below performs a per-substep
+   // PAIRWISE collective (`q_gf.ExchangeFaceNbrData`) that EVERY rank
+   // with any face neighbours must participate in, even ranks with
+   // zero fault QPs (and zero `fault_basis_` — the ctor only allocates
+   // fault_basis_ on ranks with at least one local fault face, see
+   // wave_operator.inl ctor L332-333).  Pre-R-1600 this site short-
+   // circuited on `n_total_qps == 0` (or equivalently `!fault_basis_`),
+   // causing fault-adjacent ranks to hang in MPI_Wait at np>1 (the
+   // production 13.5-min spin).
+   //
+   // On serial builds the parallel block is `if constexpr` skipped at
+   // compile time, so a no-fault-QPs rank can return early without harm.
+   // The interior and shared loops below are bounded by
+   // `fault_interior_faces_.Size()` and `fault_shared_faces_.Size()`
+   // respectively — both are 0 when `fault_basis_` is null, so the loop
+   // bodies (which DO dereference `fault_basis_`) never run on those
+   // ranks.  No early return on `!fault_basis_` is needed.
+   if (n_total_qps == 0 && !IsParallelMesh<MeshType>::value) { return; }
 
    const real_t *Q_data = Q_bulk.GetData();
 
@@ -1436,6 +1764,282 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
          }
       }
    }
+
+   // R-1003 §3: shared-fault loop.  Populates the
+   // [GetNumLocalFaultQPs(), GetNumTotalFaultQPs()) slice of Q_*_flat from
+   // self-side (locally owned) Q + neighbour-side (face-nbr ghost layer) Q,
+   // matching the canonical-frame rotation in ComputeADERSharedFaceFluxRHS
+   // (lines ~3998-4034).  At np=1 fault_shared_faces_ is empty and this
+   // block is a no-op (no MPI, no ghost exchange).  At np>1 we perform one
+   // per-component ExchangeFaceNbrData per call (NUM_STATE collectives) so
+   // the substep predictor's per-sub-step Q lands on neighbour ranks; this
+   // is R-1003 §1 (the per-substep ghost coverage required by R-1303 — the
+   // CK recursion in ComputeADERSubStepStates is element-local and does
+   // not populate ghost cells on its own).  Cost: O macro-step calls ×
+   // NUM_STATE collectives = 9·O exchanges per macro-step.
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      // R-1600: gate the per-substep COLLECTIVE on TOTAL shared faces
+      // (`pmesh.GetNSharedFaces()`), NOT on the fault-only shared count
+      // (`fault_shared_faces_.Size()`).  `q_gf.ExchangeFaceNbrData()` is
+      // a pairwise MPI exchange among the rank's face-neighbour set: a
+      // rank that has shared NON-FAULT faces with a fault-adjacent peer
+      // MUST still call the exchange, otherwise its peers' MPI_Irecv
+      // never gets paired and they hang in MPI_Wait at 100% CPU.  Pre-
+      // R-1600 this site gated on `fault_shared_faces_.Size() > 0`,
+      // producing the production-blocking 13.5-min hang at np=10
+      // observed on the symmirror 1000m mesh (every interior rank with
+      // shared non-fault faces but no fault faces of its own would
+      // skip, deadlocking the fault-adjacent ranks).  The mirror site
+      // ComputeADERSharedFaceFluxRHS uses the same `GetNSharedFaces()`
+      // gate (`wave_operator.inl:4167`) and was never affected.
+      auto &pmesh = const_cast<ParMesh &>(
+         static_cast<const ParMesh &>(mesh_));
+      const int n_shared_total = pmesh.GetNSharedFaces();
+      const int n_shared_faces = fault_shared_faces_.Size();
+      if (n_shared_total > 0)
+      {
+         auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
+         MFEM_VERIFY(pfes,
+                     "EvaluateBulkAtFaultQPsCanonical: FESpace must be "
+                     "ParFiniteElementSpace for ParMesh.");
+
+         // R-1601: batched per-substep ghost exchange via the
+         // vdim=NUM_STATE byNODES `ghost_gf_full_state_` ParGridFunction
+         // built once in the ctor (see wave_operator.hpp:755-770 for
+         // rationale).  Pre-R-1601 this site looped 9 sequential
+         // single-component `q_gf.ExchangeFaceNbrData()` calls (~9·O
+         // collectives per macro-step).  Now the byNODES vdim=NUM_STATE
+         // PGF carries all 9 components contiguously and one
+         // ExchangeFaceNbrData call covers them all → O collectives per
+         // macro-step → saves 8·O.  R-1600 contract is preserved: every
+         // rank with `pmesh.GetNSharedFaces() > 0` calls the exchange
+         // exactly once per invocation; the per-fault-face loop below
+         // remains gated on `fault_shared_faces_.Size() > 0`.
+         MFEM_VERIFY(ghost_gf_full_state_,
+                     "EvaluateBulkAtFaultQPsCanonical: ghost_gf_full_state_ "
+                     "not initialised (ctor's ParMesh path should have "
+                     "built it; R-1601).");
+         ParGridFunction &q_gf_full = *ghost_gf_full_state_;
+
+         // Pack Q (component-major) into the byNODES vdim=NUM_STATE PGF.
+         // Both layouts are component-major so the copy is contiguous
+         // per component; total size NUM_STATE * ndof_total_ matches Q.
+         {
+            real_t *q_full_data = q_gf_full.GetData();
+            std::memcpy(q_full_data, Q_data,
+                        static_cast<size_t>(NUM_STATE) *
+                        static_cast<size_t>(ndof_total_) * sizeof(real_t));
+         }
+
+         q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
+
+         // Unpack FaceNbrData into the per-component nbr_data[c] arrays
+         // expected by the per-fault-face loop below.  byNODES layout in
+         // FaceNbrData: `src[c * n_face_nbr_dofs + i]`.  We deep-copy
+         // (rather than alias) because subsequent `q_gf_full` reads in
+         // the loop body could in principle invalidate the storage —
+         // matches the pre-R-1601 deep-copy semantics.
+         const Vector &src = q_gf_full.FaceNbrData();
+         MFEM_VERIFY(src.Size() % NUM_STATE == 0,
+                     "EvaluateBulkAtFaultQPsCanonical: FaceNbrData size "
+                     << src.Size() << " is not a multiple of NUM_STATE = "
+                     << NUM_STATE);
+         const int n_face_nbr_dofs = src.Size() / NUM_STATE;
+
+         std::vector<Vector> nbr_data(NUM_STATE);
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            nbr_data[c].SetSize(n_face_nbr_dofs);
+            std::memcpy(nbr_data[c].GetData(),
+                        src.GetData() + c * n_face_nbr_dofs,
+                        static_cast<size_t>(n_face_nbr_dofs) * sizeof(real_t));
+         }
+
+         // R-1600: a rank with shared faces but NO fault-shared faces
+         // has now satisfied the pairwise-collective contract for its
+         // peers.  No per-fault-face work to do here — fall through to
+         // the function tail.  The output buffer is already zeroed at
+         // the function entry (Q_*_flat.assign(expect_words, 0.0) above).
+         for (int sf_idx = 0; sf_idx < n_shared_faces; sf_idx++)
+         {
+            const int sf = fault_shared_faces_[sf_idx];
+            // R-1603 (defer-with-rationale): `pmesh.GetSharedFaceTransformations`
+            // returns a pointer to a `FaceElementTransformations` object held
+            // in the ParMesh's INTERNAL storage; that object is reused across
+            // calls (the next call with a different `sf` overwrites its
+            // members).  A naïve "cache the pointer per sf" therefore
+            // aliases stale state.  A correct cache would deep-copy the FET
+            // (Loc1/Loc2 transforms, geometry type, Elem1No/Elem2No) — non-
+            // trivial because FET members include MFEM-internal pointers.
+            // At TPV104 production scale (O × n_shared_faces per macro-step
+            // ≈ 4 × ~24 = 96 calls per macro-step), the cost is dominated by
+            // R-1601's collectives, not by these constructions.  Defer the
+            // FET cache until profiling shows it dominates after the R-1601
+            // batched-exchange landing.
+            FaceElementTransformations *ftr =
+               pmesh.GetSharedFaceTransformations(sf);
+            // R-1004-style invariant: the ctor only adds entries to
+            // fault_shared_faces_ when GetSharedFaceTransformations
+            // succeeds, so a null here means the list has been corrupted.
+            MFEM_VERIFY(ftr != nullptr,
+                        "EvaluateBulkAtFaultQPsCanonical: shared face sf="
+                        << sf << " (fault_shared_faces_[" << sf_idx
+                        << "]) has no SharedFaceTransformations.");
+
+            const int e1 = ftr->Elem1No;
+            const FiniteElement *fe1 = fes_->GetFE(e1);
+            const int ndof = fe1->GetDof();
+            MFEM_ASSERT(ndof == ndof_per_el_,
+                        "Heterogeneous DOF counts not supported in "
+                        "EvaluateBulkAtFaultQPsCanonical (shared self).");
+            const int dof_offset1 = e1 * ndof_per_el_;
+
+            const int nbr_idx = ftr->Elem2No - ne_;
+            const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
+            const int ndof2 = fe2->GetDof();
+            MFEM_ASSERT(ndof2 == ndof_per_el_,
+                        "Heterogeneous DOF counts not supported in "
+                        "EvaluateBulkAtFaultQPsCanonical (shared ghost).");
+
+            const IntegrationRule &ir = IntRules.Get(
+               ftr->GetGeometryType(), 2 * order_);
+            const int nqp = ir.GetNPoints();
+            MFEM_VERIFY(nqp == nbf_per_face_,
+                        "EvaluateBulkAtFaultQPsCanonical (shared): face "
+                        "nqp " << nqp << " != nbf_per_face_ "
+                        << nbf_per_face_);
+
+            auto it_off = shared_fault_dof_offset_.find(sf);
+            MFEM_VERIFY(it_off != shared_fault_dof_offset_.end(),
+                        "EvaluateBulkAtFaultQPsCanonical: "
+                        "shared_fault_dof_offset_ missing entry for "
+                        "shared fault face sf=" << sf);
+            const int base_dof_idx = it_off->second;
+            // Sanity: shared offsets must lie in the upper slice.
+            MFEM_ASSERT(base_dof_idx >= n_local_qps &&
+                        base_dof_idx + nqp <= n_total_qps,
+                        "EvaluateBulkAtFaultQPsCanonical: shared offset "
+                        "out of [n_local_qps, n_total_qps).");
+
+            MFEM_VERIFY(sf_idx >= 0 &&
+                        sf_idx < static_cast<int>(
+                                    shared_fault_elem1_on_plus_.size()),
+                        "EvaluateBulkAtFaultQPsCanonical: "
+                        "shared_fault_elem1_on_plus_ size mismatch.");
+            const bool elem1_on_plus =
+               shared_fault_elem1_on_plus_[sf_idx];
+
+            // FaultBasis indexes interior faces first, then shared.
+            const int fb_idx = fault_interior_faces_.Size() + sf_idx;
+            MFEM_VERIFY(fb_idx >= 0 && fb_idx < fault_basis_->NumFaces(),
+                        "EvaluateBulkAtFaultQPsCanonical: invalid "
+                        "FaultBasis index " << fb_idx
+                        << " for shared face sf=" << sf);
+            const FaultBasisData &bd = fault_basis_->GetBasis(fb_idx);
+
+            for (int q = 0; q < nqp; q++)
+            {
+               const IntegrationPoint &ip = ir.IntPoint(q);
+               ftr->SetAllIntPoints(&ip);
+
+               IntegrationPoint ip1, ip2;
+               ftr->Loc1.Transform(ip, ip1);
+               ftr->Loc2.Transform(ip, ip2);
+               Vector shape1(ndof), shape2(ndof2);
+               fe1->CalcShape(ip1, shape1);
+               fe2->CalcShape(ip2, shape2);
+
+               // Self side: locally-owned Q via dof_offset1.  Neighbour
+               // side: face-nbr ghost layer via nbr_idx * ndof_per_el_.
+               // Same indexing as ComputeADERSharedFaceFluxRHS:3954-3976.
+               real_t Q_self[NUM_STATE], Q_nbr[NUM_STATE];
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  real_t s_self = 0.0, s_nbr = 0.0;
+                  for (int i = 0; i < ndof; i++)
+                  {
+                     s_self += shape1(i)
+                               * Q_data[c * ndof_total_ + dof_offset1 + i];
+                  }
+                  for (int i = 0; i < ndof2; i++)
+                  {
+                     s_nbr += shape2(i)
+                              * nbr_data[c][nbr_idx * ndof_per_el_ + i];
+                  }
+                  Q_self[c] = s_self;
+                  Q_nbr[c]  = s_nbr;
+               }
+
+               MFEM_VERIFY(q < static_cast<int>(bd.qp_data.size()),
+                           "EvaluateBulkAtFaultQPsCanonical (shared): "
+                           "qp_data missing q=" << q << " for sf=" << sf);
+               const FaultBasisQPData &qpd = bd.qp_data[q];
+
+               // R-1305 / R-801 caveat: the existing shared-fault ADER
+               // branch (ComputeADERSharedFaceFluxRHS:4007-4012) gates
+               // frame negation on `qpd.sign_flipped`, while the interior
+               // ADER branch uses the R-101 geometric flag
+               // `!interior_fault_elem1_on_plus_`.  Mirror the shared-
+               // flux convention here so the iterator's canonical Q
+               // matches the rotation T_can the substep gate uses to
+               // map I_imp_± back to global on the corresponding shared
+               // QPs (R-1003 invariant: same Tinv_can on both ends).
+               // sign_flipped is RANK-INDEPENDENT (set at FaultBasis
+               // ctor from face geometry); !elem1_on_plus is RANK-
+               // DEPENDENT (rank A's Elem1 = rank B's Elem2 → opposite
+               // canonical frames on the same physical face).  Using
+               // sign_flipped keeps the canonical frame consistent
+               // across the partition seam.
+               real_t can_n[3], can_t1[3], can_t2[3];
+               for (int d = 0; d < 3; d++)
+               {
+                  can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
+                                               :  qpd.normal[d];
+                  can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
+                                               :  qpd.tangent1[d];
+                  can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
+                                               :  qpd.tangent2[d];
+               }
+
+               DenseMatrix Tinv_can(NUM_STATE);
+               GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
+                                                 Tinv_can);
+
+               real_t Q_self_can[NUM_STATE], Q_nbr_can[NUM_STATE];
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  real_t s_self = 0.0, s_nbr = 0.0;
+                  for (int k = 0; k < NUM_STATE; k++)
+                  {
+                     s_self += Tinv_can(c, k) * Q_self[k];
+                     s_nbr  += Tinv_can(c, k) * Q_nbr[k];
+                  }
+                  Q_self_can[c] = s_self;
+                  Q_nbr_can[c]  = s_nbr;
+               }
+
+               // Side-routing uses the geometric flag (matches
+               // ComputeADERSharedFaceFluxRHS:4031-4034 for the +/− label).
+               const real_t *src_plus  = elem1_on_plus ? Q_self_can
+                                                       : Q_nbr_can;
+               const real_t *src_minus = elem1_on_plus ? Q_nbr_can
+                                                       : Q_self_can;
+
+               const int dof_idx = base_dof_idx + q;
+               real_t *dst_p = Q_plus_flat.data()  + dof_idx * NUM_STATE;
+               real_t *dst_m = Q_minus_flat.data() + dof_idx * NUM_STATE;
+               for (int c = 0; c < NUM_STATE; c++)
+               {
+                  dst_p[c] = src_plus[c];
+                  dst_m[c] = src_minus[c];
+               }
+            }
+         }
+      }
+#endif
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -1485,7 +2089,7 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
    // ONCE per Mult call so the per-face dispatch can short-circuit the
    // unordered_set lookup when mode == None.  Bit-identical to pre-
    // Mixed-Flux path AND zero per-face overhead in default mode.
-   const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
+   const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
 
    // R-204: hoist the R-002 fault-bookkeeping guard out of the per-QP
    // loop.  If bc_.fault_attr > 0 the mesh has a fault, and the
@@ -2140,7 +2744,7 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
 
       // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-      const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
+      const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
 
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
       int n_shared = pmesh.GetNSharedFaces();
@@ -2667,10 +3271,36 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    // downstream reads of bulk_bg_ are from an initialised buffer rather
    // than the default-ctor zero-fill (defensive gate, kept for explicit
    // contract).  REVIEW R-007: updated stale "Total-Q only" wording.
-   MFEM_VERIFY(has_bulk_bg_,
-               "wave.AdvanceADER() requires SetAbsorbingBackground(Q_bg) "
-               "to have been called (Q_bg = 0 is valid under "
-               "fluctuation-Q dispatch).");
+   //
+   // R-1505: COLLECTIVE consensus check.  A rank-local MFEM_VERIFY would
+   // abort one rank while the others proceeded into the next collective
+   // (q_gf.ExchangeFaceNbrData below in the shared corrector), causing a
+   // deadlock instead of a fail-loud abort across all ranks.  Mirror the
+   // SetMixedFluxMode pattern (wave_operator.inl:1210-1226): Allreduce-MIN
+   // of has_bulk_bg_ and abort everywhere if ANY rank lacks it.
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh_consensus = static_cast<const ParMesh &>(mesh_);
+      const int my_has = has_bulk_bg_ ? 1 : 0;
+      int min_has = 0;
+      MPI_Allreduce(&my_has, &min_has, 1, MPI_INT, MPI_MIN,
+                    pmesh_consensus.GetComm());
+      MFEM_VERIFY(min_has == 1,
+                  "ComputeADERFaceFluxRHS: SetAbsorbingBackground(Q_bg) was "
+                  "NOT called on every rank (min has_bulk_bg_=" << min_has
+                  << ").  A rank-local missing call would deadlock at the "
+                  "shared corrector's ExchangeFaceNbrData; the collective "
+                  "check fails loud everywhere instead.  See R-1505.");
+#endif
+   }
+   else
+   {
+      MFEM_VERIFY(has_bulk_bg_,
+                  "wave.AdvanceADER() requires SetAbsorbingBackground(Q_bg) "
+                  "to have been called (Q_bg = 0 is valid under "
+                  "fluctuation-Q dispatch).");
+   }
 
    const real_t *I_data = I.GetData();
 
@@ -2682,7 +3312,7 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    }
 
    // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-   const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
+   const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
 
    if (bc_.fault_attr > 0)
    {
@@ -2722,19 +3352,28 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
       }
    }
 
-   // Round-13C Patch 1: test-only n ↔ -n symmetrization of the ADER
-   // local non-fault branches (both interior non-fault and boundary).
-   // When `SEAS_TEST_NONFAULT_BOTH_SYM=1`, the per-QP flux is replaced
-   // by 0.5 * (F(nor) + F(-nor)) at every non-fault face.  Mirrors
-   // `ComputeInteriorFhSym` / `ComputeBoundaryFhSym` in
-   // `test_adjacent_triangle_fault_first_step_audit.cpp`.  Fault faces
-   // and shared faces are unaffected in this round.  Unset env →
-   // byte-identical to the pre-patch path.
-   const bool nonfault_both_sym = []()
+   // R-1203: SEAS_TEST_NONFAULT_BOTH_SYM is mathematically meaningless.
+   // For ANY conservative flux (Interior, Central) the anti-symmetry
+   // identity F(+n,L,R) + F(-n,R,L) = 0 holds exactly (Round-2 Gate-3
+   // verified Central to 1e-8 relative; Interior to 1e-15).  So
+   // `0.5*(F(nor, L, R) + F(-nor, R, L))` ZEROES every non-fault face's
+   // contribution — a complete physics break — and silently masks
+   // any Mixed-Flux dispatch error at the central faces.  Hook is
+   // permanently disabled.  Setting the env var is now an immediate
+   // abort: the operator stops the run rather than letting the user
+   // believe they are auditing physics.
+   const bool nonfault_both_sym = false;
+   if (std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM"))
    {
-      const char *env = std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM");
-      return env && env[0] == '1';
-   }();
+      MFEM_ABORT("SEAS_TEST_NONFAULT_BOTH_SYM is permanently disabled "
+                 "(R-1203).  The (n,L,R) -> (-n,R,L) symmetrization is "
+                 "identically zero for any conservative flux including "
+                 "Central, so this hook ZEROED the bulk wave equation "
+                 "rather than 'auditing' it.  Drop the env var.  If a "
+                 "rotation-pipeline diagnostic is genuinely needed, use "
+                 "the (n)->(-n) variant WITHOUT the L<->R swap "
+                 "(it tests rotation parity instead of conservation).");
+   }
 
    for (int f = 0; f < mesh_.GetNumFaces(); f++)
    {
@@ -2955,7 +3594,7 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   if (substep_I_imp_plus_flat_ != nullptr &&
                       substep_I_imp_minus_flat_ != nullptr &&
                       dof_idx >= 0 &&
-                      dof_idx < substep_n_local_fault_qps_)
+                      dof_idx < substep_n_total_fault_qps_)
                   {
                      const real_t *src_p =
                         substep_I_imp_plus_flat_ + dof_idx * NUM_STATE;
@@ -3479,21 +4118,10 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                }
             };
 
-            if (!nonfault_both_sym)
-            {
-               compute_bc_flux(nor, F_h);
-            }
-            else
-            {
-               real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
-               real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
-               compute_bc_flux(nor,     F_pos);
-               compute_bc_flux(nor_neg, F_neg);
-               for (int c = 0; c < NUM_STATE; c++)
-               {
-                  F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
-               }
-            }
+            // R-1411: nonfault_both_sym always false post-R-1203 abort;
+            // the dead else-branch (0.5*(F(n)+F(-n))) was identically
+            // zero for any conservative flux and has been removed.
+            compute_bc_flux(nor, F_h);
 
             for (int c = 0; c < NUM_STATE; c++)
             {
@@ -3526,21 +4154,8 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                else                  { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
             };
 
-            if (!nonfault_both_sym)
-            {
-               interior_or_central(nor, I_self, I_nbr, F_h);
-            }
-            else
-            {
-               real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
-               real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
-               interior_or_central(nor,     I_self, I_nbr, F_pos);
-               interior_or_central(nor_neg, I_nbr,  I_self, F_neg);
-               for (int c = 0; c < NUM_STATE; c++)
-               {
-                  F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
-               }
-            }
+            // R-1411: nonfault_both_sym dead else-branch removed.
+            interior_or_central(nor, I_self, I_nbr, F_h);
 
             for (int c = 0; c < NUM_STATE; c++)
             {
@@ -3639,7 +4254,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   "ComputeADERSharedFaceFluxRHS: I size mismatch");
 
       // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-      const bool mf_on = (mixed_flux_mode_ != MixedFluxMode::None);
+      const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
 
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
@@ -3650,10 +4265,35 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 
       // v9.4.0: see ComputeADERFaceFluxRHS top-level note.  REVIEW R-007:
       // updated stale "Total-Q only" wording.
-      MFEM_VERIFY(has_bulk_bg_,
-                  "wave.AdvanceADER() requires SetAbsorbingBackground("
-                  "Q_bg) to have been called (Q_bg = 0 is valid under "
-                  "fluctuation-Q dispatch).");
+      //
+      // R-1505: COLLECTIVE consensus check (shared corrector mirror).  See
+      // the matching block in ComputeADERFaceFluxRHS for the rationale.
+      // Only the shared corrector's ExchangeFaceNbrData below would
+      // actually deadlock on a rank-local abort, but checking here too
+      // costs ~one Allreduce per AdvanceADER call (negligible) and keeps
+      // the two corrector entry points self-documenting about their
+      // collective contract.
+      {
+#ifdef MFEM_USE_MPI
+         auto &pmesh_consensus = static_cast<const ParMesh &>(mesh_);
+         const int my_has = has_bulk_bg_ ? 1 : 0;
+         int min_has = 0;
+         MPI_Allreduce(&my_has, &min_has, 1, MPI_INT, MPI_MIN,
+                       pmesh_consensus.GetComm());
+         MFEM_VERIFY(min_has == 1,
+                     "ComputeADERSharedFaceFluxRHS: SetAbsorbingBackground"
+                     "(Q_bg) was NOT called on every rank (min has_bulk_bg_="
+                     << min_has << ").  A rank-local abort here would "
+                     "deadlock the next q_gf.ExchangeFaceNbrData; the "
+                     "collective check fails loud everywhere instead.  "
+                     "See R-1505.");
+#else
+         MFEM_VERIFY(has_bulk_bg_,
+                     "wave.AdvanceADER() requires SetAbsorbingBackground("
+                     "Q_bg) to have been called (Q_bg = 0 is valid under "
+                     "fluctuation-Q dispatch).");
+#endif
+      }
 
       if (bc_.fault_attr > 0)
       {
@@ -3663,16 +4303,18 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      << " > 0 but fault bookkeeping unset.");
       }
 
-      // Round-14C: reuse SEAS_TEST_NONFAULT_BOTH_SYM for MPI/Frontera
-      // parity with the local-face hook added in Round-13C Patch 1.
-      // Applies only to shared NON-FAULT faces (the runtime else
-      // branch below); shared fault faces and the precomputed path
-      // are untouched.  Env unset → byte-identical to pre-patch.
-      const bool nonfault_both_sym = []()
+      // R-1203: SEAS_TEST_NONFAULT_BOTH_SYM is permanently disabled.
+      // The local-face hook in ComputeADERFaceFluxRHS aborts on the env
+      // var; the shared-face mirror does the same here for parity.
+      // See R-1203 description in ComputeADERFaceFluxRHS for the
+      // anti-symmetry argument.
+      const bool nonfault_both_sym = false;
+      if (std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM"))
       {
-         const char *env = std::getenv("SEAS_TEST_NONFAULT_BOTH_SYM");
-         return env && env[0] == '1';
-      }();
+         MFEM_ABORT("SEAS_TEST_NONFAULT_BOTH_SYM is permanently disabled "
+                    "(R-1203, shared-face mirror).  See the local-face "
+                    "abort message in ComputeADERFaceFluxRHS.");
+      }
 
       const real_t *I_data = I.GetData();
       MFEM_VERIFY(ghost_gf_, "Ghost GF not initialized");
@@ -3775,8 +4417,13 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             Vector shape2(ndof2);
             fe2->CalcShape(ip2, shape2);
 
-            MFEM_ASSERT(ndof2 == ndof_per_el_,
-                        "Mixed element types in ghost");
+            // R-1508: promoted from MFEM_ASSERT (Debug-only) to MFEM_VERIFY
+            // so a Release build still fails loud on a heterogeneous ghost
+            // layer rather than silently producing wrong shape evaluations.
+            MFEM_VERIFY(ndof2 == ndof_per_el_,
+                        "ComputeADERSharedFaceFluxRHS: heterogeneous ghost "
+                        "element (ndof2=" << ndof2 << " vs ndof_per_el_="
+                        << ndof_per_el_ << ") not supported.");
 
             real_t I_nbr[NUM_STATE];
             for (int c = 0; c < NUM_STATE; c++)
@@ -3848,13 +4495,33 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
                   real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
-                  // has_bulk_bg_ asserted at the top of
-                  // ComputeADERSharedFaceFluxRHS (Q_bg = 0 is valid).
+                  // R-1601 (np>1 substep stability fix): the shared-fault
+                  // substep dispatch was producing rank-dependent
+                  // canonical-frame mismatches that overflowed Q within
+                  // ~7 macro-steps at np=10 (tau=4e28 fed into Brent →
+                  // SIGABRT; reproduced on symmirror_1000m.msh).  The
+                  // root cause is that R-101 `elem1_on_plus` is rank-
+                  // local (rank A's Elem1 = rank B's Elem2 → opposite
+                  // canonical frames on the same physical face) while
+                  // `qpd.sign_flipped` is rank-independent.  Until the
+                  // iterator's per-shared-QP physics is reconciled with
+                  // the corrector's frame convention, fall back to
+                  // inline EvaluateADER on SHARED QPs only — INTERIOR
+                  // QPs continue to use the substep buffer.  This keeps
+                  // substep semantics where they are well-tested and
+                  // restores np>1 stability at the cost of mixed-mode
+                  // dispatch on shared faces.  See
+                  // SUBSTEP_NP_GT_1_HANG_REVIEW.md (R-1600 + R-1601).
+                  //
+                  // SHARED FALLBACK: this branch always runs the inline
+                  // EvaluateADER regardless of substep_I_imp_*_flat_.
                   fault_flux_->EvaluateADER(fdata,
                                             I_plus_local, I_minus_local,
                                             dt,
                                             I_imp_plus, I_imp_minus);
+                  (void)substep_I_imp_plus_flat_;
+                  (void)substep_I_imp_minus_flat_;
+                  (void)substep_n_total_fault_qps_;
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -3987,21 +4654,9 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
                };
 
-               if (!nonfault_both_sym)
-               {
-                  interior_or_central_shared(nor, I_self, I_nbr, F_h);
-               }
-               else
-               {
-                  real_t F_pos[NUM_STATE], F_neg[NUM_STATE];
-                  real_t nor_neg[3] = {-nor[0], -nor[1], -nor[2]};
-                  interior_or_central_shared(nor,     I_self, I_nbr, F_pos);
-                  interior_or_central_shared(nor_neg, I_nbr,  I_self, F_neg);
-                  for (int c = 0; c < NUM_STATE; c++)
-                  {
-                     F_h[c] = 0.5 * (F_pos[c] + F_neg[c]);
-                  }
-               }
+               // R-1411: nonfault_both_sym dead else-branch removed
+               // (shared-face mirror of the local-face cleanup).
+               interior_or_central_shared(nor, I_self, I_nbr, F_h);
             }
 
             for (int c = 0; c < NUM_STATE; c++)
@@ -4039,12 +4694,30 @@ void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
    MFEM_VERIFY(&Q != &Q_new,
                "AdvanceADER: Q and Q_new must be distinct Vectors");
 
+   // R-1506: hoist Q_new sizing to the top of the routine so any future
+   // path that wants to pre-stage state into Q_new (e.g., a one-shot
+   // corrector-only entry, an inline driver-side rk-stage tee, or a
+   // PML-on-Q_new variant) finds Q_new pre-sized rather than zero-sized.
+   // Pre-R-1506 the SetSize ran AFTER all corrector work — benign today
+   // because the PML branch writes only `rhs`, but the contract was
+   // fragile.  No semantic change at the current call sites.
+   Q_new.SetSize(NUM_STATE * ndof_total_);
+
+   // R-1501: lazy-init member scratch buffers (ader_I_buf_, ader_rhs_buf_)
+   // instead of stack-allocating fresh Vectors on every macro-step.  See
+   // header docstring for the cost rationale (~32 TB malloc traffic
+   // saved on a 60 s TPV104 run).  SetSize() is a no-op when the size
+   // already matches; the first call sizes once.
+   const int N = NUM_STATE * ndof_total_;
+   if (ader_I_buf_.Size()   != N) { ader_I_buf_.SetSize(N); }
+   if (ader_rhs_buf_.Size() != N) { ader_rhs_buf_.SetSize(N); }
+   Vector &I   = ader_I_buf_;
+   Vector &rhs = ader_rhs_buf_;
+
    // 1. CK predictor.
-   Vector I(NUM_STATE * ndof_total_);
    ComputeADERTimeIntegrated(Q, dt, order, I);
 
    // 2. Corrector RHS accumulation.
-   Vector rhs(NUM_STATE * ndof_total_);
    rhs = 0.0;
 
    ComputeADERVolumeUpdate(I, rhs);
@@ -4181,8 +4854,7 @@ void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
    // 3. rhs *= M^{-1}.
    ApplyMassInverse(rhs);
 
-   // 4. Q_new = Q + rhs.
-   Q_new.SetSize(NUM_STATE * ndof_total_);
+   // 4. Q_new = Q + rhs.  (Q_new sized at top of routine, R-1506.)
    add(Q, 1.0, rhs, Q_new);
 }
 
@@ -4259,7 +4931,42 @@ void WaveOperator<MeshType>::AssembleElementMassInverse()
 template <typename MeshType>
 real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
 {
-   return cfl * h_min_ / flux_.GetCp();
+   // R-1403 + R-1502: central flux is non-dissipative; the CFL stability
+   // factor depends on the FRACTION of faces using central vs upwind,
+   // not just whether mixed-flux is engaged.  Zhang 2023 §3.3 cites
+   // CFL=0.3 for mixed-flux runs vs CFL=0.5 for pure upwind; the ratio
+   // that applies to a given mode depends on its central-face density:
+   //
+   //   Adjacent      (~5-10% central): operator dominantly upwind →
+   //                                    CFL near pure upwind.  0.9×
+   //                                    is a slight guard band.
+   //   AllContinuous (~95% central):    operator nearly non-dissipative
+   //                                    → explicit RK4/ADER stability
+   //                                    significantly tighter.  0.4×
+   //                                    is close to Zhang's 0.3-equiv.
+   //
+   // These factors are interim placeholders pending a multi-step
+   // stability calibration on the production fixture.  Drivers that
+   // calibrate CFL externally can compensate via the `cfl` argument.
+   real_t cfl_mixed_flux_factor = 1.0;
+   switch (mixed_flux_mode_)
+   {
+      case MixedFluxMode::None:          cfl_mixed_flux_factor = 1.0; break;
+      case MixedFluxMode::Adjacent:      cfl_mixed_flux_factor = 0.9; break;
+      case MixedFluxMode::AllContinuous: cfl_mixed_flux_factor = 0.4; break;
+      default:
+         // R-1600: any future MixedFluxMode value reaches this default
+         // and ABORTS — silent fall-through (with cfl_factor=1.0, i.e.,
+         // full upwind CFL) would destabilize multi-step production.
+         // Adding a new mode REQUIRES adding the corresponding factor
+         // here.
+         MFEM_ABORT("ComputeMaxDt: unknown MixedFluxMode "
+                    << static_cast<int>(mixed_flux_mode_)
+                    << " (R-1600 fall-through guard).  Adding a new "
+                    "MixedFluxMode REQUIRES adding the corresponding "
+                    "CFL factor in this switch.");
+   }
+   return cfl_mixed_flux_factor * cfl * h_min_ / flux_.GetCp();
 }
 
 // ---------------------------------------------------------------------------

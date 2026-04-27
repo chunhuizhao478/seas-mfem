@@ -73,4 +73,5 @@ tpv102/mesh/tpv102_1000m.msh
 #             plots_results_p2_partfile_job7678303,
 #             plots_results_orig_p2_job7678258
 tpv104/results/
+tpv104/results_*/
 tpv104/plots_results_*/
