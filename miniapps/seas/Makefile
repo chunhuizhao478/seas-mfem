@@ -174,6 +174,7 @@ TEST_FAULT_FACE_FLUX_SRC = tests/unit/test_fault_face_flux.cpp
 TEST_FRICTION_SOLVER_SRC = tests/unit/test_friction_solver.cpp
 TEST_TPV102_SETUP_SRC = tests/unit/test_tpv102_setup.cpp
 TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
+TPV102_SUBSTEP_ITERATOR_SRC = dynamic/tpv102_substep_iterator.cpp
 TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
 TEST_R101_SHARED_FAULT_SRC = tests/parallel/test_r101_shared_fault.cpp
 # TPV102 v9.0.0 Phase 1 unit tests (§3.1, §3.1b, §3.1c, §3.1d)
@@ -346,6 +347,25 @@ TEST_FAULT_FACE_FLUX_OBJ = $(TEST_FAULT_FACE_FLUX_SRC:.cpp=.o)
 TEST_FRICTION_SOLVER_OBJ = $(TEST_FRICTION_SOLVER_SRC:.cpp=.o)
 TEST_TPV102_SETUP_OBJ = $(TEST_TPV102_SETUP_SRC:.cpp=.o)
 TPV102_DRIVER_OBJ = $(TPV102_DRIVER_SRC:.cpp=.o)
+TPV102_SUBSTEP_ITERATOR_OBJ = $(TPV102_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+
+# TPV102 driver rebuilt against the TPV104 code flow — depends on the new
+# tpv102_friction_solver / tpv102_nucleation / tpv102_substep_iterator
+# headers and the existing tpv102_setup / tpv102_params headers.
+TPV102_HEADERS = config/tpv102_params.hpp \
+                 friction/state_evolution.hpp \
+                 friction/friction_coeff_stable.hpp \
+                 dynamic/tpv102_setup.hpp \
+                 dynamic/tpv102_friction_solver.hpp \
+                 dynamic/tpv102_nucleation.hpp \
+                 dynamic/tpv102_substep_iterator.hpp
+
+# Shared object bundle for TPV102 driver/tests: substep iterator + the
+# shared fault_face_flux + friction_solver objects.  Same pattern as
+# TPV104_SHARED_OBJS.
+TPV102_SHARED_OBJS = $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                     dynamic/fault_face_flux.o \
+                     dynamic/friction_solver.o
 TEST_TPV102_LOCAL_OBJ = $(TEST_TPV102_LOCAL_SRC:.cpp=.o)
 TEST_R101_SHARED_FAULT_OBJ = $(TEST_R101_SHARED_FAULT_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_FRAME_OBJ = $(TEST_FAULT_FACE_FLUX_FRAME_SRC:.cpp=.o)
@@ -1146,9 +1166,15 @@ seas_test_friction_solver: $(TEST_FRICTION_SOLVER_OBJ) $(FRICTION_SOLVER_OBJ)
 seas_test_tpv102_setup: $(TEST_TPV102_SETUP_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_SETUP_OBJ) $(MFEM_LIBS)
 
-# Phase 4a: TPV102 driver
-seas_tpv102_driver: $(TPV102_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TPV102_DRIVER_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+# Phase 4a: TPV102 driver — rebuilt against the TPV104 code flow
+# (substep iterator, AgingLawPsi state evolution, mixed-flux dispatch).
+seas_tpv102_driver: $(TPV102_DRIVER_OBJ) $(TPV102_SHARED_OBJS) \
+                    $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                    $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TPV102_DRIVER_OBJ) \
+	    $(TPV102_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) \
+	    $(PML_LAYER_OBJ) $(MFEM_LIBS)
 
 # Phase 4a: TPV102 local integration tests
 seas_test_tpv102_local: $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -1693,9 +1719,13 @@ $(TEST_TPV102_SETUP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CO
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
-$(TPV102_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+$(TPV102_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV102_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TPV102_SUBSTEP_ITERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV102_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
 $(TEST_TPV102_LOCAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)

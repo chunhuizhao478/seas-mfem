@@ -128,14 +128,21 @@ inline real_t NucleationPerturbation(real_t along_strike, real_t down_dip, real_
 /// Invert: theta_ini = (Dc/V0) * exp((tau_ini/(sigma_n*a) - f0 - a*ln(V_ini/(2*V0))) / b)
 /// Using psi = f0 + b * ln(V0 * theta / Dc):
 ///   psi_ini such that tau_ini = sigma_n * a * asinh(V_ini/(2*V0) * exp(psi_ini/a))
+///
+/// Numerically stable logsinh form (matches ComputeInitialPsiTPV104 in
+/// tpv104_params.hpp:210-219).  Stable for arbitrarily large `arg`:
+///   log(x * sinh(c)) = |c| + log((x/2) * -sign(c) * expm1(-2|c|))
+/// At a_vw = 0.008, arg ≈ 78 — sinh(arg) is still in double range, but
+/// any sweep that pushes `a` lower (or `tau_ini` higher) toward
+/// arg ≥ 367 overflows the naive `sinh(arg)` form.
 inline real_t ComputeInitialPsi(real_t a)
 {
-   // From tau = sigma_n * a * asinh(V/(2*V0) * exp(psi/a)):
-   //   sinh(tau/(sigma_n*a)) = V/(2*V0) * exp(psi/a)
-   //   psi = a * ln(2*V0/V * sinh(tau/(sigma_n*a)))
-   real_t arg = TPV102Params::tau_ini / (TPV102Params::sigma_n * a);
-   real_t psi = a * std::log(2.0 * TPV102Params::V0 / TPV102Params::V_ini * std::sinh(arg));
-   return psi;
+   const real_t arg = TPV102Params::tau_ini / (TPV102Params::sigma_n * a);
+   const real_t x   = 2.0 * TPV102Params::V0 / TPV102Params::V_ini;
+   const real_t sign_c = (arg >= 0.0) ? 1.0 : -1.0;
+   const real_t absC   = std::abs(arg);
+   return a * (absC + std::log(x / 2.0 * -sign_c
+                               * std::expm1(-2.0 * absC)));
 }
 
 } // namespace seas

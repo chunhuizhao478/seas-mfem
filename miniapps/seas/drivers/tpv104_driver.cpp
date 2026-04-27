@@ -110,8 +110,9 @@ static bool HasFlag(int argc, char *argv[], const char *flag)
 //
 // R7-001/R7-005 note: on the current driver path this value is kept only
 // for future iterator wiring.  The production time loop runs Brent via
-// wave.AdvanceADER -> FaultFaceFlux::EvaluateADERTotal (see the honest
-// banner below); the returned Method is not routed through that call.
+// wave.AdvanceADER -> FaultFaceFlux::EvaluateADER (fluctuation-Q
+// dispatch — wave_operator.inl:3614); the returned Method is not
+// routed through that call.
 // Nevertheless, MapSolver is kept strict so that (a) `newton` (bare) is
 // the canonical shorthand for the stable-asinh variant and (b) unknown
 // strings abort loudly rather than silently defaulting — both become
@@ -158,7 +159,7 @@ enum class DispatchedLaw { SlipSRW, Aging };
 
 static DispatchedSolver GetDispatchedSolver(const std::string &/*friction_solver_cli*/)
 {
-   // R7-001 option (b): wave.AdvanceADER -> EvaluateADERTotal hard-codes
+   // R7-001 option (b): wave.AdvanceADER -> EvaluateADER hard-codes
    // the default Method::Brent argument; the CLI value does not reach
    // the solver dispatch.  Replace with a CLI-aware switch when the
    // iterator is wired (option a).
@@ -217,8 +218,8 @@ static std::string BannerOf(DispatchedSolver s)
    switch (s)
    {
       case DispatchedSolver::Brent:
-         return "Brent (hard-coded via EvaluateADERTotal; "
-                "--friction-solver flag IGNORED)";
+         return "Brent (hard-coded via EvaluateADER fluctuation-Q "
+                "dispatch; --friction-solver flag IGNORED)";
       case DispatchedSolver::NewtonRaphsonStable:
          return "Newton-Raphson (stable-asinh, plan §4.10 Step 5)";
       case DispatchedSolver::NewtonRaphsonLegacy:
@@ -509,7 +510,7 @@ int main(int argc, char *argv[])
    // sbatch scripts can exercise banner parity, but on the current
    // driver path (one-shot wave.AdvanceADER) they have NO effect on the
    // dispatched solver / iterator / friction law.  Runtime is:
-   //   - friction solver: Brent (hard-coded via EvaluateADERTotal)
+   //   - friction solver: Brent (hard-coded via EvaluateADER)
    //   - fault iterator : one-shot (Tpv104SubStepIterator not wired
    //                      — requires exposing per-sub-step I± from
    //                      wave_operator.inl; that file is on the
@@ -775,7 +776,7 @@ int main(int argc, char *argv[])
    // R-602/R-603 (round-7): `method` is now passed into
    // AdvanceADERWithSubStep on the substep dispatch path.  On the
    // legacy one-shot path it remains unused (Brent is hard-coded inside
-   // EvaluateADERTotal); the previous (void)method silencer is removed.
+   // EvaluateADER); the previous (void)method silencer is removed.
    const FrictionSolver::Method method = MapSolver(friction_solver);
 
    // --dry-run: no mesh, no simulation.  Print a canonical end-of-run
@@ -1495,12 +1496,12 @@ int main(int argc, char *argv[])
       std::vector<real_t> deltaT(O, 1.0 / static_cast<real_t>(O));
       std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
       // The iterator interprets deltaT in absolute (physical) time units,
-      // so scale by the FIRST macro-step dt to seed the quadrature.
-      // The Σ deltaT==dt_macro check inside Advance/AdvanceWithSubStepStates
-      // is RELATIVE so the same configuration handles every macro-step
-      // even though dt may vary slightly (it doesn't in TPV104, but the
-      // iterator is general).  Using `dt` (the auto-CFL initial value)
-      // here works because TPV104 uses fixed dt in the time loop.
+      // so seed it with the auto-CFL `dt` here.  The Σ deltaT==dt_macro
+      // check inside Advance/AdvanceWithSubStepStates is RELATIVE; the
+      // helper AdvanceADERWithSubStep rescales the configured deltaT to
+      // the actual dt_step at each call (see the dt_scale loop above),
+      // so the final macro-step (where dt_step = tfinal - t < dt) is
+      // handled correctly.
       for (int o = 0; o < O; o++) { deltaT[o] = dt / static_cast<real_t>(O); }
       substep_iterator.SetSubSteps(deltaT, weights);
    }
@@ -1882,6 +1883,11 @@ int main(int argc, char *argv[])
                                       pv_local_traction, pv_local_state,
                                       pv_local_normal_stress);
          pv_out->ForceSave(step_num, time);
+         // ForceSave only advances last_write_time_; the V_max-adaptive
+         // schedule additionally needs current_regime_ / last_v_max_
+         // advanced for the next PeekShouldWrite to use the correct
+         // regime interval (paraview_output.hpp:985-990).
+         pv_out->CommitSchedule(time, V_max);
       }
 
       pv_out->WriteFaultSurfaceVTU(
@@ -1968,9 +1974,9 @@ int main(int argc, char *argv[])
 
       // ADER predictor-corrector.  Default (use_substep_iterator==false):
       // one-shot AdvanceADER runs the bulk wave update + the fault-face
-      // Riemann solve (through FaultFaceFlux::EvaluateADERTotal); the
-      // solve reads DOFData.psi and DOFData.tau*_nuc as set above, and
-      // writes V1/V2/slip_rate/tau*_corr/sigma_n_corr back onto DOFData.
+      // Riemann solve (through FaultFaceFlux::EvaluateADER); the solve
+      // reads DOFData.psi and DOFData.tau*_nuc as set above, and writes
+      // V1/V2/slip_rate/tau*_corr/sigma_n_corr back onto DOFData.
       //
       // Sub-step path (use_substep_iterator==true, --fault-iterator
       // substep):  AdvanceADERWithSubStep composes ComputeADERSubStepStates

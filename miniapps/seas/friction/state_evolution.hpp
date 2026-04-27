@@ -215,6 +215,12 @@ public:
 
    const char *GetName() const override { return "AgingLawPsi"; }
 
+   /// Accessors for global friction scalars — symmetric with `SlipLawSRWPsi`.
+   /// Used by TPV102 sub-step iterator for the analytic ψ update.
+   real_t GetB()  const { return b_;  }
+   real_t GetV0() const { return V0_; }
+   real_t GetF0() const { return f0_; }
+
 private:
    real_t b_;
    real_t V0_;

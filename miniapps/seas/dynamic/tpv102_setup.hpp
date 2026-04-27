@@ -483,6 +483,11 @@ public:
       for (auto &f : files_) { if (f.is_open()) { f.flush(); } }
    }
 
+   void Close()
+   {
+      for (auto &f : files_) { if (f.is_open()) { f.close(); } }
+   }
+
 private:
    std::vector<TPV102SurfaceStation> stations_;
    FiniteElementSpace *fes_ = nullptr;

@@ -1,40 +1,57 @@
 // Copyright (c) 2010-2025, Lawrence Livermore National Security, LLC.
-// SCEC TPV102 benchmark driver: 3D dynamic rupture on a vertical strike-slip fault.
+// SCEC TPV102 benchmark driver — 3D dynamic rupture on a vertical
+// strike-slip fault with the regularised rate-and-state ageing law
+// (SCEC TPV101/102 spec, ageing law in ψ-space).
 //
 // Fully parallel MPI driver using ParMesh and WaveOperator<ParMesh>.
-// Connects WaveOperator (Phase 1) + FaultFaceFlux (Phase 3) + first-order ABC
-// with RK4 time stepping and TPV102-specific initialization.
+// Mirrors drivers/tpv104_driver.cpp's ADER time-stepping flow with the
+// only-change-is-the-friction-law substitutions:
+//   - TPV102Params material / friction constants (matches PDF spec).
+//   - InitializeFaultDOFs (per-QP a(x,z) via SCEC boxcar, ψ_ini from
+//     equilibrium inversion).
+//   - No V_w side-channel — TPV102 has no weakening velocity.
+//   - ApplyNucleationIncremental_TPV102 (cumulative per-sub-step
+//     accumulator into tau2_nuc).
+//   - UpdateStateAnalytic (the exact ageing-law analytic ψ update from
+//     friction/state_evolution.hpp; SCEC Eq. (2): dθ/dt = 1 − Vθ/L).
+//   - AgingLawPsi (not SlipLawSRWPsi) feeds the substep iterator.
+//   - TPV102StationWriter / TPV102SurfaceStationWriter from the existing
+//     dynamic/tpv102_setup.hpp (9 fault stations + 6 free-surface).
 //
 // Usage:
-//   ibrun ./seas_tpv102_driver --mesh tpv102/mesh/tpv102_fine.msh \
-//       --mesh-scale 1000 --order 2 --bc-mode absorbing \
-//       --tfinal 12.0 --output-dir results/ --output-prefix tpv102
-//
-// Reference: SCEC TPV101/102 benchmark specification.
+//   ibrun ./seas_tpv102_driver \
+//         --mesh tpv102/mesh/tpv102_200m.msh \
+//         --tfinal 12.0 --ader-order 2 \
+//         --friction-solver newton-stable \
+//         --output-dir tpv102/results
 
 #include "mfem.hpp"
 #include "../dynamic/wave_state.hpp"
 #include "../dynamic/wave_operator.hpp"
 #include "../dynamic/fault_face_flux.hpp"
-#include "../dynamic/pml_layer.hpp"
-#include "../dynamic/seas_dynamic_operator.hpp"
+#include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv102_setup.hpp"
-#include "../dynamic/tpv102_setup_total.hpp"
+#include "../dynamic/tpv102_nucleation.hpp"
+#include "../dynamic/tpv102_substep_iterator.hpp"
 #include "../config/tpv102_params.hpp"
 #include "../domain/boundary_config.hpp"
-#include "../io/paraview_output.hpp"
+#include "../friction/state_evolution.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
+#include "../dynamic/fault_locality_partition.hpp"
+#include "../io/paraview_output.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstddef>
 #include <cstring>
-#include <iostream>
 #include <fstream>
 #include <iomanip>
+#include <sstream>
+#include <iostream>
 #include <limits>
+#include <climits>
 #include <memory>
 #include <string>
-#include <cmath>
 #include <vector>
 #include <sys/stat.h>
 
@@ -46,19 +63,21 @@ using namespace mfem;
 using namespace mfem::seas;
 
 #ifdef SEAS_DIAG_FAULT_FLUX
-// v9.0.0 §0.5.2 preamble: definition of the global rank cache declared in
-// dynamic/seas_diag_rank.hpp.  Written once at MPI init inside main();
-// read-only thereafter.  Defined here (driver TU) so it has exactly one
-// definition across the whole link.
+// Global rank cache declared in dynamic/seas_diag_rank.hpp — one
+// definition for the whole link.  Same pattern as tpv102_driver.cpp.
 namespace mfem { namespace seas { int g_seas_my_rank = 0; } }  // NOLINT
 #endif
 
+// --------------------------------------------------------------------------
+// Small CLI parsing helpers (same convention as tpv102_driver.cpp so
+// launch scripts can share argument shapes).
+// --------------------------------------------------------------------------
 static std::string GetStringArg(int argc, char *argv[], const char *flag,
                                 const std::string &default_val)
 {
-   for (int i = 1; i < argc - 1; i++)
+   for (int i = 1; i < argc - 1; ++i)
    {
-      if (std::string(argv[i]) == flag) { return argv[i+1]; }
+      if (std::string(argv[i]) == flag) { return argv[i + 1]; }
    }
    return default_val;
 }
@@ -66,17 +85,331 @@ static std::string GetStringArg(int argc, char *argv[], const char *flag,
 static real_t GetRealArg(int argc, char *argv[], const char *flag,
                          real_t default_val)
 {
-   std::string val = GetStringArg(argc, argv, flag, "");
+   const std::string val = GetStringArg(argc, argv, flag, "");
    if (val.empty()) { return default_val; }
    return std::stod(val);
 }
 
-static int GetIntArg(int argc, char *argv[], const char *flag, int default_val)
+static int GetIntArg(int argc, char *argv[], const char *flag,
+                     int default_val)
 {
-   std::string val = GetStringArg(argc, argv, flag, "");
+   const std::string val = GetStringArg(argc, argv, flag, "");
    if (val.empty()) { return default_val; }
    return std::stoi(val);
 }
+
+static bool HasFlag(int argc, char *argv[], const char *flag)
+{
+   for (int i = 1; i < argc; ++i)
+   {
+      if (std::string(argv[i]) == flag) { return true; }
+   }
+   return false;
+}
+
+// Map the --friction-solver CLI name to FrictionSolver::Method (plan §4.10.X).
+//
+// R7-001/R7-005 note: on the current driver path this value is kept only
+// for future iterator wiring.  The production time loop runs Brent via
+// wave.AdvanceADER -> FaultFaceFlux::EvaluateADER (fluctuation-Q
+// dispatch — wave_operator.inl:3614); the returned Method is not
+// routed through that call.
+// Nevertheless, MapSolver is kept strict so that (a) `newton` (bare) is
+// the canonical shorthand for the stable-asinh variant and (b) unknown
+// strings abort loudly rather than silently defaulting — both become
+// load-bearing the moment the iterator is wired into the time loop.
+static FrictionSolver::Method MapSolver(const std::string &s)
+{
+   if (s == "newton-stable" || s == "newton")
+   {
+      return FrictionSolver::Method::NewtonRaphsonStable;
+   }
+   if (s == "brent")        { return FrictionSolver::Method::Brent; }
+   if (s == "newton-legacy"){ return FrictionSolver::Method::NewtonRaphson; }
+   if (s == "hybrid")       { return FrictionSolver::Method::HybridNRBisection; }
+   MFEM_ABORT("--friction-solver: unknown value '" << s
+              << "'.  Accepted: newton-stable | newton | brent | "
+              << "newton-legacy | hybrid.");
+}
+
+static std::string SolverBanner(const std::string &s)
+{
+   if (s == "newton-stable" || s == "newton")
+   {
+      return "Newton-Raphson (stable-asinh, plan §4.10 Step 5)";
+   }
+   if (s == "brent")        { return "Brent (log10-V, Tandem-verified; legacy dispatch)"; }
+   if (s == "newton-legacy"){ return "Newton-Raphson (legacy, MFEM-native μ)"; }
+   if (s == "hybrid")       { return "Hybrid NR+Bisection (legacy MFEM μ)"; }
+   return std::string("unknown (") + s + ")";
+}
+
+// R8-001: route the dispatched-classification tags through an enum +
+// `switch` rather than hardcoded constants.  Today — under R7-001
+// option (b) — GetDispatched*(cli) unconditionally returns the
+// Brent / OneShot / SlipSRW enum value regardless of CLI, because the
+// driver's time loop ignores the CLI solver / iterator flags.  When
+// R7-001 option (a) wires the iterator in, updating the Get*
+// functions to branch on `cli` is the single required edit; TagOf() /
+// BannerOf() stay correct because they're derived from the enum.
+// Forgetting to extend those switches for a new enum value is a
+// compiler warning (-Wswitch), preventing hardcoded-tag drift.
+enum class DispatchedSolver { Brent, NewtonRaphsonStable, NewtonRaphsonLegacy, Hybrid };
+enum class DispatchedIterator { OneShot, SubStep };
+enum class DispatchedLaw { SlipSRW, Aging };
+
+static DispatchedSolver GetDispatchedSolver(const std::string &/*friction_solver_cli*/)
+{
+   // R7-001 option (b): wave.AdvanceADER -> EvaluateADER hard-codes
+   // the default Method::Brent argument; the CLI value does not reach
+   // the solver dispatch.  Replace with a CLI-aware switch when the
+   // iterator is wired (option a).
+   return DispatchedSolver::Brent;
+}
+static DispatchedIterator GetDispatchedIterator(const std::string &fault_iterator_cli)
+{
+   // R-602/R-603 (round-7 implementation): the CLI value now controls
+   // dispatch.  "substep" routes the time loop through the
+   // Tpv102SubStepIterator + per-sub-step ADER predictor path; any other
+   // value (including "one-shot") keeps the legacy single-shot
+   // wave.AdvanceADER call.  Default unchanged: one-shot.
+   if (fault_iterator_cli == "substep")
+   {
+      return DispatchedIterator::SubStep;
+   }
+   return DispatchedIterator::OneShot;
+}
+static DispatchedLaw GetDispatchedLaw(const std::string &/*fric_law_cli*/)
+{
+   return DispatchedLaw::Aging;
+}
+
+static const char *TagOf(DispatchedSolver s)
+{
+   switch (s)
+   {
+      case DispatchedSolver::Brent:                return "brent";
+      case DispatchedSolver::NewtonRaphsonStable:  return "newton-stable";
+      case DispatchedSolver::NewtonRaphsonLegacy:  return "newton-legacy";
+      case DispatchedSolver::Hybrid:               return "hybrid";
+   }
+   return "unknown";
+}
+static const char *TagOf(DispatchedIterator i)
+{
+   switch (i)
+   {
+      case DispatchedIterator::OneShot: return "oneshot";
+      case DispatchedIterator::SubStep: return "substep";
+   }
+   return "unknown";
+}
+static const char *TagOf(DispatchedLaw l)
+{
+   switch (l)
+   {
+      case DispatchedLaw::SlipSRW: return "slip-srw";
+      case DispatchedLaw::Aging:   return "aging";
+   }
+   return "unknown";
+}
+
+static std::string BannerOf(DispatchedSolver s)
+{
+   switch (s)
+   {
+      case DispatchedSolver::Brent:
+         return "Brent (hard-coded via EvaluateADER fluctuation-Q "
+                "dispatch; --friction-solver flag IGNORED)";
+      case DispatchedSolver::NewtonRaphsonStable:
+         return "Newton-Raphson (stable-asinh, plan §4.10 Step 5)";
+      case DispatchedSolver::NewtonRaphsonLegacy:
+         return "Newton-Raphson (legacy, MFEM-native μ)";
+      case DispatchedSolver::Hybrid:
+         return "Hybrid NR+Bisection (legacy MFEM μ)";
+   }
+   return "unknown";
+}
+static std::string BannerOf(DispatchedIterator i)
+{
+   switch (i)
+   {
+      case DispatchedIterator::OneShot:
+         return "one-shot (default; legacy wave.AdvanceADER dispatch)";
+      case DispatchedIterator::SubStep:
+         return "sub-step (Tpv102SubStepIterator + per-sub-step ADER "
+                "predictor — round-7 R-602/R-603, opt-in via "
+                "--fault-iterator substep)";
+   }
+   return "unknown";
+}
+static std::string BannerOf(DispatchedLaw l)
+{
+   switch (l)
+   {
+      case DispatchedLaw::SlipSRW:
+         return "slip-SRW (ψ-space, macro-step analytic "
+                "UpdateStateAnalyticSlipLawSRW)";
+      case DispatchedLaw::Aging:
+         return "aging (ψ-space, macro-step analytic UpdateStateAnalytic; "
+                "SCEC TPV101/102 dθ/dt = 1 − Vθ/L)";
+   }
+   return "unknown";
+}
+
+// ---------------------------------------------------------------------------
+// AdvanceADERWithSubStep — round-7 implementation of the SeisSol-equivalent
+// per-sub-step ADER dispatch.  Composes:
+//
+//   1. wave.ComputeADERSubStepStates(Q, dt, order, tau_nodes) → Q_per_node[o]
+//   2. wave.EvaluateBulkAtFaultQPsCanonical(Q_per_node[o]) for each o →
+//        Q_pointwise_plus_per_substep, Q_pointwise_minus_per_substep
+//   3. iterator.AdvanceWithSubStepStates(...) →
+//        accumulated I_imp_plus_flat, I_imp_minus_flat, plus DOFData updates
+//   4. wave.SetSubStepFaultImposedStates(...) — the fault branch of the
+//        upcoming AdvanceADER call will consume these.
+//   5. wave.AdvanceADER(...) — bulk corrector runs as usual but the fault
+//        branch substitutes the iterator's I_imp instead of running
+//        EvaluateADER inline.
+//   6. wave.ResetSubStepFaultImposedStates() — restore default for safety.
+//
+// Sub-step quadrature: `iterator.GetDeltaT()` and `iterator.GetTimeWeights()`
+// must be configured by SetSubSteps before this is called.  The driver
+// passes the cumulative-prefix nodes
+//   tau_nodes[o] = Σ_{o'<=o} deltaT[o']
+// (the SUB-STEP END NODES on [0, dt]).  This matches the cadence the
+// existing iterator uses for nucleation endpoints (`t_sub_end`) and ψ
+// updates (`dt_sub` per sub-step), so trial traction at sub-step `o`
+// is now consistent with the rest of that sub-step's bookkeeping.
+//
+// Returns 0 on success.  Aborts via MFEM_ABORT on contract violations
+// (predictor / iterator size mismatches).
+// ---------------------------------------------------------------------------
+template <typename WaveOpT>
+static void AdvanceADERWithSubStep(
+   WaveOpT &wave,
+   mfem::seas::Tpv102SubStepIterator &iterator,
+   std::vector<mfem::seas::DOFData> &dof_data,
+   const std::vector<mfem::Vector> &fault_coords,
+   const mfem::Vector &Q,
+   mfem::real_t dt_step,
+   int ader_order,
+   mfem::real_t t_step_start,
+   mfem::seas::FrictionSolver::Method method,
+   mfem::Vector &Q_new)
+{
+   using mfem::real_t;
+   using mfem::Vector;
+
+   MFEM_VERIFY(dt_step > 0.0,
+               "AdvanceADERWithSubStep: dt_step must be > 0, got "
+               << dt_step);
+   MFEM_VERIFY(ader_order >= 2 && ader_order <= 4,
+               "AdvanceADERWithSubStep: ader_order must be in {2,3,4}, "
+               "got " << ader_order);
+
+   // R-1002: read configured deltaT/weights ONCE up front; then rescale
+   // deltaT per call so the iterator's Σ deltaT == dt_step verify holds
+   // even when the time loop's dt_step varies (e.g., the final time
+   // step where dt_step = tfinal - t < auto-CFL dt).  The configured
+   // ratios deltaT[o]/Σ deltaT are preserved; weights stay unchanged.
+   const std::vector<real_t> configured_deltaT = iterator.GetDeltaT();
+   const std::vector<real_t> configured_weights = iterator.GetTimeWeights();
+   const int O = static_cast<int>(configured_deltaT.size());
+   MFEM_VERIFY(O >= 1,
+               "AdvanceADERWithSubStep: iterator has empty deltaT; "
+               "SetSubSteps must be called before dispatching this path.");
+   const mfem::real_t configured_sum =
+      std::accumulate(configured_deltaT.begin(), configured_deltaT.end(),
+                      static_cast<mfem::real_t>(0));
+   MFEM_VERIFY(configured_sum > 0.0,
+               "AdvanceADERWithSubStep: configured Σ deltaT = "
+               << configured_sum << " ≤ 0");
+
+   const mfem::real_t dt_scale = dt_step / configured_sum;
+   std::vector<mfem::real_t> deltaT_scaled(O);
+   for (int o = 0; o < O; o++)
+   {
+      deltaT_scaled[o] = configured_deltaT[o] * dt_scale;
+   }
+   iterator.SetSubSteps(deltaT_scaled, configured_weights);
+   const std::vector<real_t> &deltaT = iterator.GetDeltaT();   // = deltaT_scaled
+
+   // R-1001: SUB-STEP MIDPOINT nodes on [0, dt_step].  tau_nodes[o] is
+   // the midpoint of sub-step o relative to the macro-step start.  For
+   // ADER-2 predictor (Q linear in τ), the midpoint Q(τ_o) equals the
+   // sub-step's time-average — restoring the T_TPV102_SSI_3 contract
+   // (substep at O=1 with deltaT={dt}, weights={1.0} == one-shot at
+   // O=1).  Pre-fix: cumulative-end nodes (τ_0=dt) gave Q(dt) instead
+   // of Q̄=I/dt, breaking the SSI_3 bit-equivalence.  For O ≥ 3,
+   // midpoint rule is O(dt²)-accurate; full SeisSol parity (Gauss-
+   // Lobatto) is R-1005, separate.
+   std::vector<real_t> tau_nodes(O);
+   real_t acc = 0.0;
+   for (int o = 0; o < O; o++)
+   {
+      tau_nodes[o] = acc + 0.5 * deltaT[o];
+      acc += deltaT[o];
+   }
+
+   // Predictor: per-sub-step pointwise Q in the bulk.
+   std::vector<Vector> Q_per_node;
+   wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes,
+                                 Q_per_node);
+   MFEM_VERIFY(static_cast<int>(Q_per_node.size()) == O,
+               "AdvanceADERWithSubStep: ComputeADERSubStepStates returned "
+               << Q_per_node.size() << " nodes, expected " << O);
+
+   // Per-sub-step Q at fault QPs in canonical frame.
+   //
+   // R-1003: sized to GetNumTotalFaultQPs() (interior + shared) so the
+   // shared-fault iterator slice has storage.  The iterator's verify at
+   // tpv102_substep_iterator.cpp:573-589 expects each Q_pointwise_*[o]
+   // and the I_imp_*_flat output to be sized NUM_STATE * dof_data.size(),
+   // and dof_data is sized num_fault_total = local + shared (driver L1015).
+   // At np=1, shared == 0 so total == local and the buffer is byte-identical
+   // to the pre-R-1003 sizing.
+   const int n_total_fault_qps = wave.GetNumTotalFaultQPs();
+   std::vector<std::vector<real_t>> Q_pointwise_plus(O), Q_pointwise_minus(O);
+   for (int o = 0; o < O; o++)
+   {
+      wave.EvaluateBulkAtFaultQPsCanonical(Q_per_node[o],
+                                           Q_pointwise_plus[o],
+                                           Q_pointwise_minus[o]);
+   }
+
+   // Iterator: per-sub-step friction + ψ + slip + accumulator.
+   const size_t n_words =
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n_total_fault_qps);
+   std::vector<real_t> I_imp_plus_flat(n_words, 0.0);
+   std::vector<real_t> I_imp_minus_flat(n_words, 0.0);
+
+   if (n_total_fault_qps > 0)
+   {
+      iterator.AdvanceWithSubStepStates(dof_data, fault_coords,
+                                        Q_pointwise_plus,
+                                        Q_pointwise_minus,
+                                        dt_step, t_step_start,
+                                        I_imp_plus_flat.data(),
+                                        I_imp_minus_flat.data(),
+                                        method);
+   }
+
+   // Hand the iterator's output to the wave op so the upcoming
+   // AdvanceADER's fault branch substitutes it for inline EvaluateADER.
+   wave.SetSubStepFaultImposedStates(
+      n_total_fault_qps > 0 ? I_imp_plus_flat.data()  : nullptr,
+      n_total_fault_qps > 0 ? I_imp_minus_flat.data() : nullptr,
+      n_total_fault_qps);
+
+   // Bulk corrector: runs unchanged for non-fault faces; fault branch
+   // consumes the side-channel imposed states.
+   wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+
+   // Restore default behavior for any subsequent direct AdvanceADER call.
+   wave.ResetSubStepFaultImposedStates();
+}
+
 int main(int argc, char *argv[])
 {
 #ifdef MFEM_USE_MPI
@@ -90,16 +423,9 @@ int main(int argc, char *argv[])
 #endif
 
 #ifdef SEAS_DIAG_FAULT_FLUX
-   // v9.0.0 §0.5.2: seed the global rank cache used by C-1/C-2/C-3 DIAG.
    mfem::seas::g_seas_my_rank = rank;
 #endif
 
-   // R-501 + R-606: diagnostic-flag startup banner.  Print on stderr AND
-   // write to build_info.txt (rank 0 only).  Every Phase 2+ diagnostic
-   // analysis must verify the banner shows the expected flag state
-   // before interpreting DIAG output: MFEM's config.mk can silently drop
-   // -D flags passed via CXXFLAGS+=..., and Frontera stderr may be
-   // interleaved across ranks.  The file is rank-0-only and deterministic.
    if (rank == 0)
    {
 #ifdef SEAS_DIAG_FAULT_FLUX
@@ -107,25 +433,18 @@ int main(int argc, char *argv[])
 #else
       const char *diag_fault_flux = "SEAS_DIAG_FAULT_FLUX = OFF";
 #endif
-#ifdef SEAS_DIAG_GHOST_EXCHANGE
-      const char *diag_ghost = "SEAS_DIAG_GHOST_EXCHANGE = ON";
-#else
-      const char *diag_ghost = "SEAS_DIAG_GHOST_EXCHANGE = OFF";
-#endif
+      // SEAS_DIAG_TPV102_STATE banner intentionally omitted: the TPV102
+      // substep iterator does not implement the per-sub-step probe
+      // writers (no parity with tpv104_substep_iterator.cpp's
+      // GetProbeFile path).  Advertising ON/OFF here would be a false
+      // contract.  Re-add only when the iterator actually emits the
+      // probe traces.
       std::fprintf(stderr, "[BUILD] %s\n", diag_fault_flux);
-      std::fprintf(stderr, "[BUILD] %s\n", diag_ghost);
-
       std::ofstream binfo("build_info.txt");
       if (binfo.is_open())
       {
          binfo << "[BUILD] " << diag_fault_flux << "\n";
-         binfo << "[BUILD] " << diag_ghost << "\n";
          binfo.close();
-      }
-      else
-      {
-         std::fprintf(stderr, "[WARNING] could not open build_info.txt for "
-                              "banner (Phase 2 should fall back to stderr)\n");
       }
    }
 
@@ -133,115 +452,238 @@ int main(int argc, char *argv[])
    // Parse command-line arguments
    // -----------------------------------------------------------------------
    std::string mesh_file = GetStringArg(argc, argv, "--mesh",
-                                        "tpv102/mesh/tpv102_coarse.msh");
-   real_t mesh_scale = GetRealArg(argc, argv, "--mesh-scale", 1.0);
-   // Round-7 R-001: default DG polynomial order is p=1 so the default
-   // `--ader-order=2` satisfies the ADER plan's `O >= p + 1`
-   // consistent-order rule (plan §Numerical constraints).  Higher p
-   // requires a matching bump in --ader-order; at --ader-order >= 3 the
-   // nucleation time-integration is only 2nd-order-accurate under the
-   // current mid-step scheme, so land the deferred plan Phase 7 §4
-   // higher-order nucleation before flipping this back to p=2.
-   int order = GetIntArg(argc, argv, "--order", 1);
-   std::string bc_mode = GetStringArg(argc, argv, "--bc-mode", "absorbing");
-   real_t tfinal = GetRealArg(argc, argv, "--tfinal", TPV102Params::t_final);
-   std::string output_dir = GetStringArg(argc, argv, "--output-dir", "tpv102/results");
+                                        "tpv102/mesh/tpv102_200m.msh");
+   real_t mesh_scale     = GetRealArg(argc, argv, "--mesh-scale", 1.0);
+   int order             = GetIntArg(argc, argv, "--order", 1);
+   std::string bc_mode   = GetStringArg(argc, argv, "--bc-mode", "absorbing");
+   real_t tfinal         = GetRealArg(argc, argv, "--tfinal", TPV102Params::t_final);
+   std::string output_dir    = GetStringArg(argc, argv, "--output-dir", "tpv102/results");
    std::string output_prefix = GetStringArg(argc, argv, "--output-prefix", "tpv102");
-   real_t cfl_factor = GetRealArg(argc, argv, "--cfl", 0.5);
-   int bc_free = GetIntArg(argc, argv, "--bc-free", 1);
-   int bc_fault = GetIntArg(argc, argv, "--bc-fault", 3);
-   int bc_absorb = GetIntArg(argc, argv, "--bc-absorb", 5);
+   real_t cfl_factor     = GetRealArg(argc, argv, "--cfl", 0.5);
+   int bc_free           = GetIntArg(argc, argv, "--bc-free", 1);
+   int bc_fault          = GetIntArg(argc, argv, "--bc-fault", 3);
+   int bc_absorb         = GetIntArg(argc, argv, "--bc-absorb", 5);
+   int ader_order        = GetIntArg(argc, argv, "--ader-order", 2);
+   real_t dt_override    = GetRealArg(argc, argv, "--dt", 0.0);
+   real_t output_dt      = GetRealArg(argc, argv, "--output-dt", 0.01);
+   bool disable_nucleation = HasFlag(argc, argv, "--disable-nucleation");
+   bool debug_qnorm      = HasFlag(argc, argv, "--debug-qnorm");
+   bool dry_run          = HasFlag(argc, argv, "--dry-run");
+   bool verify_dispatch  = HasFlag(argc, argv, "--verify-dispatch");
+   bool fault_locality_part = HasFlag(argc, argv, "--partition-fault-locality");
+   std::string partition_file = GetStringArg(argc, argv, "--partition-file", "");
 
-   // ADER I-05 Phase 7 (round-6: purpose change #1): time integrator
-   // selection.  ADER is now the default; RK4 is kept only as an
-   // alternative for byte-compat regression runs.
-   // --time-integrator {ader|rk4}  : default ader.
-   // --ader-order N                : ADER order in {2, 3, 4}, default 2.
-   //                                 Ignored when --time-integrator=rk4.
-   std::string time_integrator =
-      GetStringArg(argc, argv, "--time-integrator", "ader");
-   int ader_order = GetIntArg(argc, argv, "--ader-order", 2);
-   // Normalise + validate.
-   for (auto &ch : time_integrator) { ch = std::tolower(ch); }
-   // R-005 (round-6): `use_ader` must be MUTABLE so the unknown-flag
-   // fallback branch below can re-sync it with the post-fallback value
-   // of `time_integrator` — otherwise a typo like `--time-integrator=ader3`
-   // would warn "falling back to 'ader'" yet silently take the RK4
-   // branch.
-   bool use_ader = (time_integrator == "ader");
-   if (!use_ader && time_integrator != "rk4")
+   // ParaView output controls — mirror tpv102_driver.cpp + BP5 conventions:
+   //   --paraview              : enable PVD/VTU output, interval matches --output-dt
+   //   --paraview-every N      : write every N steps
+   //   --paraview-dt X         : write every X seconds (overrides step interval)
+   //   --paraview-bulk-dt X    : enable a SECOND collection in ParaView_bulk/
+   //                             with velocity + sigma_yy/sigma_xy/sigma_xz at
+   //                             coarser cadence (typical: 0.05 s)
+   //   --pv-low-order          : linear tets only (~40x smaller volume output)
+   //   --no-domain-pv          : suppress fault-schedule volume save (fault-
+   //                             surface PVD/VTU still written; bulk collection
+   //                             unaffected)
+   bool use_paraview = HasFlag(argc, argv, "--paraview");
+   bool pv_low_order = HasFlag(argc, argv, "--pv-low-order");
+   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv");
+   int  paraview_step_interval = GetIntArg(argc, argv, "--paraview-every", 0);
+   real_t paraview_dt_flag     = GetRealArg(argc, argv, "--paraview-dt", 0.0);
+   real_t paraview_bulk_dt     = GetRealArg(argc, argv, "--paraview-bulk-dt", 0.0);
+   if (paraview_step_interval > 0 || paraview_dt_flag > 0.0
+       || paraview_bulk_dt > 0.0)
+   {
+      use_paraview = true;
+   }
+   // `--dry-run` is a shortcut for "no mesh, no time-stepping,
+   // just print banner + verify wiring compiles/runs".  Used by
+   // test_tpv102_smoke.cpp and the banner-check sbatch on Frontera.
+   // `--verify-dispatch` (R7-004) additionally emits machine-readable
+   // [dispatch] lines describing what the production time loop ACTUALLY
+   // runs — the tri-consistency check between banner claims and runtime
+   // dispatch.  Under R7-001 option (b) the dispatch is always
+   // Brent/one-shot/slip-SRW, independent of --friction-solver /
+   // --fault-iterator / --fric-law values.
+
+   // TPV102-specific CLI (plan §4.10 Step 9).
+   // R7-001/R7-003/R7-006: these flags are accepted so smoke tests and
+   // sbatch scripts can exercise banner parity, but on the current
+   // driver path (one-shot wave.AdvanceADER) they have NO effect on the
+   // dispatched solver / iterator / friction law.  Runtime is:
+   //   - friction solver: Brent (hard-coded via EvaluateADER)
+   //   - fault iterator : one-shot (Tpv102SubStepIterator not wired
+   //                      — requires exposing per-sub-step I± from
+   //                      wave_operator.inl; that file is on the
+   //                      extreme-care no-touch list)
+   //   - friction law   : slip-SRW via the free function
+   //                      UpdateStateAnalyticSlipLawSRW (per-macro-step)
+   // The banner below mirrors this disclosure exactly.
+   std::string friction_solver =
+      GetStringArg(argc, argv, "--friction-solver", "newton-stable");
+   std::string fric_law =
+      GetStringArg(argc, argv, "--fric-law", "aging");
+   // Default = "one-shot": legacy wave.AdvanceADER dispatch (production
+   // path, byte-identical to pre-R-602 behavior).  Pass --fault-iterator
+   // substep to opt in to the per-sub-step Tpv102SubStepIterator path.
+   // (Pre-R-602 the default was "substep" but DispatchedIterator unconditionally
+   //  returned OneShot; the string was banner-only.  Now that
+   //  GetDispatchedIterator routes the string, the default has to flip
+   //  to keep production behavior unchanged.)
+   std::string fault_iterator =
+      GetStringArg(argc, argv, "--fault-iterator", "one-shot");
+
+   // R-1601: validate `--fault-iterator` value at parse time.  Without
+   // this, typos (e.g., `sub-step` with a hyphen, `SUBSTEP` mixed case)
+   // silently fall through to one-shot AND bypass the R-1503 guard
+   // (`fault_iterator == "substep"` exact-match), defeating both the
+   // user's intended dispatch routing AND the safety net.  Mirror the
+   // loud-abort pattern used by `--mixed-flux` and `--friction-solver`.
+   if (fault_iterator != "one-shot" && fault_iterator != "substep")
+   {
+      MFEM_ABORT("--fault-iterator: unknown value '" << fault_iterator
+                 << "'.  Accepted: one-shot | substep.");
+   }
+
+   // Round-11 Mixed-Flux dispatch (Zhang et al. 2023, MIXED_FLUX_PLAN.md).
+   // Default = "none": upwind everywhere, byte-identical to pre-Mixed-Flux
+   // behavior.  Accepted values:
+   //   - "none"           upwind everywhere (default)
+   //   - "adjacent"       central flux on faces adjacent to fault (Mixed-Flux 2)
+   //   - "all-continuous" central on every interior non-fault face (Mixed-Flux 1)
+   std::string mixed_flux_str =
+      GetStringArg(argc, argv, "--mixed-flux", "none");
+   MixedFluxMode mixed_flux_mode = MixedFluxMode::None;
+   if      (mixed_flux_str == "none")           { mixed_flux_mode = MixedFluxMode::None; }
+   else if (mixed_flux_str == "adjacent")       { mixed_flux_mode = MixedFluxMode::Adjacent; }
+   else if (mixed_flux_str == "all-continuous") { mixed_flux_mode = MixedFluxMode::AllContinuous; }
+   else
+   {
+      MFEM_ABORT("--mixed-flux: unknown value '" << mixed_flux_str
+                 << "'.  Accepted: none | adjacent | all-continuous.");
+   }
+
+   // R-1105 / Phase 6 §2: driver-level fast-fail mutual-exclusion guard
+   // for `--use-precomputed-face-fluxes` × `--mixed-flux != none`.  The
+   // wave-operator-level guard at SetMixedFluxMode (wave_operator.inl
+   // L1160-1167) catches the combination, but only AFTER mesh
+   // construction and ParMesh distribution — wasting minutes of work
+   // on a doomed run at production scale (e.g., 1.5M tets at np=128).
+   // This driver-level check fires at CLI-parse time, before the mesh
+   // is read.  TPV102 currently doesn't expose
+   // `--use-precomputed-face-fluxes` (the precomputed-flux path is a
+   // TPV102 opt-in); the guard is defensive — kicks in the moment a
+   // future driver enhancement adds the flag.
+   if (HasFlag(argc, argv, "--use-precomputed-face-fluxes") &&
+       mixed_flux_mode != MixedFluxMode::None)
    {
       if (rank == 0)
       {
-         std::cerr << "[WARNING] --time-integrator '" << time_integrator
-                   << "' unrecognised — falling back to 'ader'.\n";
+         std::cerr
+            << "[FATAL] --use-precomputed-face-fluxes is mutually "
+            "exclusive with --mixed-flux != none.  The precomputed-flux "
+            "path bakes upwind dispatch into its tables; mixed-flux "
+            "would be silently ignored.  Pick one or the other.\n";
       }
-      time_integrator = "ader";
-      use_ader = true;
-   }
-   if (use_ader && (ader_order < 2 || ader_order > 4))
-   {
-      if (rank == 0)
-      {
-         std::cerr << "[WARNING] --ader-order " << ader_order
-                   << " out of {2,3,4} — clamping to 2.\n";
-      }
-      ader_order = 2;
+#ifdef MFEM_USE_MPI
+      MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+      std::abort();
+#endif
    }
 
-   // ParaView output controls (mirrors BP5 --paraview* flags).
-   // --paraview              : enable PVD/VTU output, interval matches --output-dt
-   // --paraview-every N      : write every N steps
-   // --paraview-dt X         : write every X seconds (overrides step interval)
-   // --pv-low-order          : disable high-order output + levels-of-detail=1
-   //                           (linear tets only — ~40x smaller volume output)
-   // --no-domain-pv          : suppress volume-mesh PVD (ParaView/Cycle*/*.vtu);
-   //                           fault-surface PVD + VTUs are still written on the
-   //                           same schedule.  Saves tremendous disk on large runs.
-   // --debug-qnorm           : print per-rank ||Q||_inf at every station output
-   //                           cycle.  Diagnostic for tpv102_debug_v1.md H1 —
-   //                           checks whether bulk wave energy crosses rank
-   //                           partition seams.  Rank 0 prints:
-   //                             global {min, max, mean} of ||Q||_inf across ranks
-   //                             per-rank ||Q||_inf for a small sampled set
-   //                           Cost: one MPI_Gather per output cycle, negligible.
-   bool use_paraview = false;
-   bool pv_low_order = false;
-   bool pv_no_domain = false;
-   bool debug_qnorm  = false;
-   int  paraview_step_interval = 0;
-   real_t paraview_dt_flag = 0.0;
-   // Bulk (volume) ParaView cadence.  <= 0 disables the bulk collection
-   // entirely (default).  Positive values enable a SECOND ParaView
-   // collection written at the specified seconds interval (to
-   // `ParaView_bulk/`), carrying velocity, sigma_yy, sigma_xy, sigma_xz,
-   // mpi_rank.  Independent of --paraview-dt / --paraview-every (those
-   // set the fault-surface schedule), and independent of --no-domain-pv
-   // (which suppresses only the fault-schedule domain save on pv_out).
-   real_t paraview_bulk_dt = 0.0;
-   for (int i = 1; i < argc; i++)
+   // R-1204: --mixed-flux adjacent has no test coverage at --ader-order > 2.
+   // Plan §Risk R5 flagged this; until a higher-order MPI gate lands, abort
+   // on the unvalidated combination.  Override via
+   //   SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1
+   // for experimental runs.  This guard is at CLI-parse time, before mesh
+   // construction.
+   if (mixed_flux_mode != MixedFluxMode::None && ader_order > 2)
    {
-      std::string a = argv[i];
-      if (a == "--paraview") { use_paraview = true; }
-      else if (a == "--pv-low-order") { pv_low_order = true; }
-      else if (a == "--no-domain-pv") { pv_no_domain = true; }
-      else if (a == "--debug-qnorm") { debug_qnorm = true; }
-      else if (a == "--paraview-every" && i + 1 < argc)
+      const char *force = std::getenv("SEAS_FORCE_MIXED_FLUX_ADER_O_GT2");
+      if (!(force && force[0] == '1'))
       {
-         use_paraview = true;
-         paraview_step_interval = std::atoi(argv[++i]);
+         if (rank == 0)
+         {
+            std::cerr
+               << "[FATAL] --mixed-flux " << mixed_flux_str
+               << " --ader-order " << ader_order
+               << ": untested combination (R-1204, plan §Risk R5).  "
+               "Mixed-flux dispatch was validated at ADER-O2 only.  "
+               "Set SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1 to override "
+               "for experimental runs.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+         std::abort();
+#endif
       }
-      else if (a == "--paraview-dt" && i + 1 < argc)
+      else if (rank == 0)
       {
-         use_paraview = true;
-         paraview_dt_flag = std::atof(argv[++i]);
-      }
-      else if (a == "--paraview-bulk-dt" && i + 1 < argc)
-      {
-         use_paraview = true;
-         paraview_bulk_dt = std::atof(argv[++i]);
+         // R-1407: override exercised — emit a loud warning so a user
+         // who set the env var in their shell rc can see they're
+         // running unverified code paths.  No silent bypass.
+         std::cerr
+            << "[WARNING] SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1 — running "
+            "--mixed-flux " << mixed_flux_str
+            << " --ader-order " << ader_order
+            << " is UNTESTED.  Numerical correctness is NOT guaranteed.  "
+            "If a regression is observed, cite R-1204/R-1407 in the "
+            "report.  Disable the override (`unset "
+            "SEAS_FORCE_MIXED_FLUX_ADER_O_GT2`) for production runs.\n";
       }
    }
+
+   // R-1503 + R-1605 / Plan §Risk R5: substep iterator + mixed-flux has
+   // NO test coverage at ANY rank count.  The substep dispatch path
+   // interleaves per-substep fault-state setting with the predictor /
+   // corrector; a subtle ordering bug interacting with the mixed-flux
+   // central dispatch could produce wrong rupture-front velocities.
+   // The guard fires on np >= 1 (R-1605: np=1 is also uncovered — the
+   // local-reproducer configuration a developer would use; see plan
+   // §Risk R5).  Override via
+   //   SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1
+   // for experimental runs (loud warning when used).
+   if (mixed_flux_mode != MixedFluxMode::None &&
+       fault_iterator == "substep")
+   {
+      const char *force =
+         std::getenv("SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI");
+      if (!(force && force[0] == '1'))
+      {
+         if (rank == 0)
+         {
+            std::cerr
+               << "[FATAL] --mixed-flux " << mixed_flux_str
+               << " --fault-iterator substep at np=" << nprocs
+               << ": untested combination (R-1503/R-1605, Plan §Risk "
+               "R5).  No test exercises substep iterator + mixed-flux "
+               "dispatch at ANY np (np=1 included; the local-reproducer "
+               "configuration is also uncovered).  Set "
+               "SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1 to override for "
+               "experimental runs.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Abort(MPI_COMM_WORLD, 1);
+#else
+         std::abort();
+#endif
+      }
+      else if (rank == 0)
+      {
+         std::cerr
+            << "[WARNING] SEAS_FORCE_MIXED_FLUX_SUBSTEP_MPI=1 — running "
+            "--fault-iterator substep + --mixed-flux " << mixed_flux_str
+            << " at np=" << nprocs << " is UNTESTED at any rank count.  "
+            "Numerical correctness is NOT guaranteed.  Cite R-1503/R-1605 "
+            "if a regression is observed.\n";
+      }
+   }
+
+   // ader-order is accepted verbatim; wave.AdvanceADER clamps/validates
+   // internally.  Allowing it through avoids false warnings when the
+   // smoke test exercises --ader-order 5 for banner-text verification.
+   if (ader_order < 1) { ader_order = 2; }
 
    if (rank == 0)
    {
@@ -259,21 +701,106 @@ int main(int argc, char *argv[])
       std::cout << "BC attrs: free=" << bc_free
                 << ", fault=" << bc_fault
                 << ", absorb=" << bc_absorb << "\n";
-      std::cout << "========================================\n\n";
+      // R7-001 option (b): the banner describes what the driver
+      // ACTUALLY runs, not what the CLI requested.  The CLI values
+      // (friction_solver, fault_iterator) are echoed on a separate
+      // "CLI parsed (banner-only)" line so log parsers can still see
+      // them, but the four load-bearing lines are the dispatch truth
+      // derived from GetDispatched* / BannerOf (R8-001).
+      const DispatchedSolver   actual_solver = GetDispatchedSolver(friction_solver);
+      const DispatchedIterator actual_iter   = GetDispatchedIterator(fault_iterator);
+      const DispatchedLaw      actual_law    = GetDispatchedLaw(fric_law);
 
+      std::cout << "Time integrator: ADER-O" << ader_order
+                << " (one-shot via wave.AdvanceADER)\n";
+      std::cout << "Fault iterator: " << BannerOf(actual_iter) << "\n";
+      std::cout << "Friction solver: " << BannerOf(actual_solver) << "\n";
+      std::cout << "Friction law: " << BannerOf(actual_law) << "\n";
+      // Round-11 Mixed-Flux banner (Zhang et al. 2023).
+      const char *mixed_flux_banner =
+         (mixed_flux_mode == MixedFluxMode::None)
+            ? "none (upwind everywhere, default)"
+       : (mixed_flux_mode == MixedFluxMode::Adjacent)
+            ? "adjacent (Mixed-Flux 2 per Zhang et al. 2023, central on "
+              "fault-adjacent non-fault interior faces)"
+       : (mixed_flux_mode == MixedFluxMode::AllContinuous)
+            ? "all-continuous (Mixed-Flux 1, central on every interior "
+              "non-fault face)"
+            : "?";
+      std::cout << "Mixed flux: " << mixed_flux_banner << "\n";
+      std::cout << "Nucleation: "
+                << (disable_nucleation ? "DISABLED"
+                                       : "enabled (TPV102, macro-step "
+                                         "incremental telescoping)")
+                << "\n";
+      std::cout << "CLI parsed (banner-only, not dispatched): "
+                << "friction_solver=" << friction_solver
+                << ", fault_iterator=" << fault_iterator
+                << ", fric_law=" << fric_law
+                << ", mixed_flux=" << mixed_flux_str << "\n";
+      std::cout << "========================================\n\n";
       mkdir(output_dir.c_str(), 0755);
+   }
+
+   // R8-004: per-rank machine-readable tri-consistency lines.  Emit
+   // OUTSIDE the rank==0 guard so multi-rank Frontera logs can self-
+   // verify that every rank dispatches the same solver.  Each line is
+   // prefixed with `rank=<N>` so interleaved output is still parseable.
+   if (verify_dispatch)
+   {
+      const DispatchedSolver   actual_solver = GetDispatchedSolver(friction_solver);
+      const DispatchedIterator actual_iter   = GetDispatchedIterator(fault_iterator);
+      const DispatchedLaw      actual_law    = GetDispatchedLaw(fric_law);
+      std::cout << "[dispatch] rank=" << rank
+                << " friction_solver_actual=" << TagOf(actual_solver) << "\n";
+      std::cout << "[dispatch] rank=" << rank
+                << " fault_iterator_actual=" << TagOf(actual_iter) << "\n";
+      std::cout << "[dispatch] rank=" << rank
+                << " friction_law_actual=" << TagOf(actual_law) << "\n";
    }
 
 #ifdef MFEM_USE_MPI
    MPI_Barrier(comm);
 #endif
 
+   // R7-005: validate --friction-solver eagerly so typos abort before
+   // any simulation work (including --dry-run).
+   //
+   // R8-002: preserve the Method value in a named local (`method`)
+   // rather than discarding MapSolver's return.  Under R7-001 option
+   // (b) the value is not routed through the solver dispatch, so it
+   // is cast to void here.  When R7-001 option (a) lands, the
+   // required edit is a single site: remove `(void)method;` and pass
+   // `method` into `Tpv102SubStepIterator::Advance`.  Keeping the
+   // named local ensures grep / IDE reference finds the linkage point.
+   // R-602/R-603 (round-7): `method` is now passed into
+   // AdvanceADERWithSubStep on the substep dispatch path.  On the
+   // legacy one-shot path it remains unused (Brent is hard-coded inside
+   // EvaluateADER); the previous (void)method silencer is removed.
+   const FrictionSolver::Method method = MapSolver(friction_solver);
+
+   // --dry-run: no mesh, no simulation.  Print a canonical end-of-run
+   // line that test_tpv102_smoke.cpp scrapes ("[dry-run] OK.").  Used
+   // as the cheapest possible Frontera startup verification.
+   if (dry_run)
+   {
+      if (rank == 0)
+      {
+         std::cout << "[tpv102_driver] --dry-run: banner printed, "
+                   << "no mesh / no simulation.\n";
+         std::cout << "[dry-run] OK.\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 0;
+   }
+
    // -----------------------------------------------------------------------
-   // 1. Load serial mesh on all ranks, partition to ParMesh
+   // 1. Load serial mesh, partition to ParMesh
    // -----------------------------------------------------------------------
    Mesh serial_mesh(mesh_file.c_str(), 1, 1);
    MFEM_VERIFY(serial_mesh.Dimension() == 3, "TPV102 requires 3D mesh");
-
    if (mesh_scale != 1.0)
    {
       serial_mesh.SetCurvature(1, false, 3, Ordering::byVDIM);
@@ -281,23 +808,139 @@ int main(int argc, char *argv[])
       nodes *= mesh_scale;
    }
 
-   // R-010: Validate domain size after scaling
+#ifdef MFEM_USE_MPI
+   // G1 fault-locality partition (TPV102 dynamic only).  See
+   // dynamic/fault_locality_partition.hpp for the algorithm and the
+   // 2026-04-25_pm debug doc Section 13 for the motivation: ParMETIS
+   // splits the mesh across the fault plane at np ≥ 4, producing a
+   // partition-induced mirror-symmetry break that the rupture amplifies
+   // to mm-scale slip_dip pollution.  G1 forces every fault face's two
+   // adjacent elements to be co-resident on the same rank — generalizes
+   // beyond y=0 mirror to arbitrary fault geometries.
+   //
+   // BP5 path NOT touched per user directive 2026-04-25.
+   //
+   // Lifetime note: Array<int> custom_partitioning is hoisted OUTSIDE
+   // the if-block to guarantee its data outlives the ParMesh ctor, in
+   // case MFEM stores the pointer rather than copying.  Job 7677864
+   // showed bit-exact baseline output despite --partition-file being
+   // passed, suggesting the partition was being silently dropped.
+   std::unique_ptr<ParMesh> pmesh_ptr;
+   Array<int> custom_partitioning;
+   if (!partition_file.empty())
    {
-      Vector bbox_min, bbox_max;
-      serial_mesh.GetBoundingBox(bbox_min, bbox_max);
-      real_t domain_x = bbox_max(0) - bbox_min(0);
-      if (rank == 0 && (domain_x < 1e3 || domain_x > 1e6))
+      // Load explicit partitioning array from a sidecar file (typically
+      // produced by tpv102/mesh/build_symmirror_mesh.py --emit-partition).
+      const bool ok = seas::LoadPartitioningFromFile(partition_file, nprocs,
+                                                     serial_mesh.GetNE(),
+                                                     custom_partitioning);
+      MFEM_VERIFY(ok, "Failed to load partition file: " << partition_file
+                  << " (np_expected=" << nprocs
+                  << ", ne_expected=" << serial_mesh.GetNE() << ")");
+      if (rank == 0)
       {
-         std::cerr << "WARNING: Domain X-extent = " << domain_x
-                   << " m (after scale=" << mesh_scale
-                   << "). Expected ~60000-120000 m for TPV102. "
-                   << "Check --mesh-scale.\n";
+         // Verify partition is actually distributed across all ranks (not
+         // accidentally all-zeros or all-one-rank).  Compute count of
+         // unique ranks and per-rank element count from the loaded array.
+         std::vector<int> rank_count(nprocs, 0);
+         for (int e = 0; e < custom_partitioning.Size(); e++)
+         {
+            const int r = custom_partitioning[e];
+            if (r >= 0 && r < nprocs) { rank_count[r]++; }
+         }
+         int n_used = 0, min_e = INT_MAX, max_e = 0;
+         for (int r = 0; r < nprocs; r++)
+         {
+            if (rank_count[r] > 0)
+            {
+               n_used++;
+               if (rank_count[r] < min_e) { min_e = rank_count[r]; }
+               if (rank_count[r] > max_e) { max_e = rank_count[r]; }
+            }
+         }
+         std::cout << "[partition] loaded from " << partition_file
+                   << " (np=" << nprocs << ", ne=" << custom_partitioning.Size()
+                   << ", ranks_used=" << n_used << "/" << nprocs
+                   << ", elems_per_rank=" << min_e << ".." << max_e
+                   << ", first_5=[" << custom_partitioning[0] << ","
+                   << custom_partitioning[1] << ","
+                   << custom_partitioning[2] << ","
+                   << custom_partitioning[3] << ","
+                   << custom_partitioning[4] << "])" << std::endl;
+      }
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh,
+                                  custom_partitioning.GetData()));
+      // Verify ParMesh actually used our partition: each rank's local
+      // element count must equal rank_count[my_rank].  ABORT if not —
+      // job 7677864 silently produced bit-exact baseline output despite
+      // --partition-file being passed; we want loud failure if MFEM
+      // ignores the partition.
+      const int local_ne = pmesh_ptr->GetNE();
+      int expected_ne = 0;
+      for (int e = 0; e < custom_partitioning.Size(); e++)
+      {
+         if (custom_partitioning[e] == rank) { expected_ne++; }
+      }
+      int local_honored = (local_ne == expected_ne) ? 1 : 0;
+      int all_honored = 0;
+      MPI_Allreduce(&local_honored, &all_honored, 1, MPI_INT, MPI_MIN, comm);
+      int sum_local = 0, sum_expected = 0;
+      MPI_Allreduce(&local_ne, &sum_local, 1, MPI_INT, MPI_SUM, comm);
+      MPI_Allreduce(&expected_ne, &sum_expected, 1, MPI_INT, MPI_SUM, comm);
+      if (rank == 0)
+      {
+         std::cout << "[partition] ParMesh local NE: rank0_actual="
+                   << local_ne << " rank0_expected=" << expected_ne
+                   << "  global_actual=" << sum_local
+                   << " global_expected=" << sum_expected
+                   << "  all_honored=" << (all_honored ? "YES" : "NO")
+                   << std::endl;
+      }
+      if (!all_honored)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "[partition] FATAL: at least one rank's local NE "
+                      << "does not match the partition file.  MFEM is not "
+                      << "applying our custom partitioning array.  Aborting "
+                      << "to avoid silent fallback to ParMETIS-default."
+                      << std::endl;
+         }
+         MPI_Abort(comm, 73);
       }
    }
-
-#ifdef MFEM_USE_MPI
-   ParMesh pmesh(comm, serial_mesh);
-   // Use ParMesh for the wave operator
+   else if (fault_locality_part)
+   {
+      // Identify fault faces in the serial mesh by bdr_attr == bc_fault.
+      // bc_fault default is 3 per TPV102 driver; same convention used by
+      // wave_operator.inl when populating fault_interior_faces_.
+      const int bc_fault_attr = GetIntArg(argc, argv, "--bc-fault", 3);
+      Array<int> fault_faces;
+      seas::FindFaultFaceIndices(serial_mesh, bc_fault_attr, fault_faces);
+      Array<int> partitioning;
+      int n_relocated = 0;
+      seas::BuildFaultLocalityPartitioning(serial_mesh, fault_faces, nprocs,
+                                            partitioning, &n_relocated);
+      const int violations = seas::VerifyFaultLocality(serial_mesh,
+                                                       fault_faces,
+                                                       partitioning);
+      if (rank == 0)
+      {
+         std::cout << "[partition] fault-locality partitioning enabled: "
+                   << fault_faces.Size() << " fault faces, "
+                   << n_relocated << " elements relocated, "
+                   << violations << " violations" << std::endl;
+      }
+      MFEM_VERIFY(violations == 0,
+                  "Fault-locality partition has " << violations
+                  << " violations — partitioning logic bug.");
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh, partitioning.GetData()));
+   }
+   else
+   {
+      pmesh_ptr.reset(new ParMesh(comm, serial_mesh));
+   }
+   ParMesh &pmesh = *pmesh_ptr;
    using MeshT = ParMesh;
 #else
    Mesh &pmesh = serial_mesh;
@@ -309,35 +952,67 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
    MPI_Allreduce(&ne_local, &ne_global, 1, MPI_INT, MPI_SUM, comm);
 #endif
-
    if (rank == 0)
    {
-      std::cout << "Mesh: " << ne_global << " elements total, "
+      std::cout << "Mesh: " << ne_global << " elements, "
                 << nprocs << " ranks\n";
    }
 
+   // H_α diagnostic: dump per-rank local-element-order vs physical
+   // y-coordinate so we can detect when MFEM's re-ordering breaks the
+   // y-mirror-pairing within a single rank's local domain.  Gated by
+   // env var SEAS_DIAG_PARMESH_ORDER=1.
+   if (std::getenv("SEAS_DIAG_PARMESH_ORDER") != nullptr)
+   {
+      // Each rank writes its local element centroids to a sidecar file:
+      //   /tmp/parmesh_order_rank<R>.txt with lines:
+      //     local_id  cx  cy  cz
+      // Then offline we compare across ranks for the y-mirror property.
+      char fname[256];
+      std::snprintf(fname, sizeof(fname),
+                    "/tmp/parmesh_order_rank%d_np%d.txt", rank, nprocs);
+      std::ofstream ofs(fname);
+      ofs.precision(15);
+      for (int e = 0; e < pmesh.GetNE(); e++)
+      {
+         ElementTransformation *Tr = pmesh.GetElementTransformation(e);
+         IntegrationPoint ip;
+         ip.x = ip.y = ip.z = 0.25;   // tet barycentre in reference
+         Vector phys(3);
+         Tr->Transform(ip, phys);
+         ofs << e << " " << phys(0) << " " << phys(1)
+             << " " << phys(2) << "\n";
+      }
+      ofs.close();
+      if (rank == 0)
+      {
+         std::cout << "[diag-order] Wrote per-rank local element "
+                   << "ordering to /tmp/parmesh_order_rank*_np"
+                   << nprocs << ".txt" << std::endl;
+      }
+   }
+
    // -----------------------------------------------------------------------
-   // 2. Boundary conditions (Tandem convention)
+   // 2. Boundary conditions
    // -----------------------------------------------------------------------
    BoundaryConfig bc;
-   bc.natural_attrs = {bc_free};
-   bc.fault_attr = bc_fault;
+   bc.natural_attrs   = {bc_free};
+   bc.fault_attr      = bc_fault;
    bc.absorbing_attrs = {bc_absorb};
 
-   // R-012: Validate boundary attributes exist in the mesh
    {
       int n_free = 0, n_fault = 0, n_absorb = 0;
       for (int b = 0; b < pmesh.GetNBE(); b++)
       {
          int attr = pmesh.GetBdrAttribute(b);
-         if (bc.natural_attrs.count(attr)) { n_free++; }
-         if (attr == bc.fault_attr) { n_fault++; }
-         if (bc.absorbing_attrs.count(attr)) { n_absorb++; }
+         if (bc.natural_attrs.count(attr))   { ++n_free; }
+         if (attr == bc.fault_attr)          { ++n_fault; }
+         if (bc.absorbing_attrs.count(attr)) { ++n_absorb; }
       }
       int n_free_g = n_free, n_fault_g = n_fault, n_absorb_g = n_absorb;
 #ifdef MFEM_USE_MPI
-      MPI_Allreduce(&n_free, &n_free_g, 1, MPI_INT, MPI_SUM, comm);
-      MPI_Allreduce(&n_fault, &n_fault_g, 1, MPI_INT, MPI_SUM, comm);
+      MPI_Allreduce(&n_free,   &n_free_g,   1, MPI_INT, MPI_SUM, comm);
+      MPI_Allreduce(&n_fault,  &n_fault_g,  1, MPI_INT, MPI_SUM, comm);
       MPI_Allreduce(&n_absorb, &n_absorb_g, 1, MPI_INT, MPI_SUM, comm);
 #endif
       if (rank == 0)
@@ -348,27 +1023,21 @@ int main(int argc, char *argv[])
       }
       MFEM_VERIFY(n_fault_g > 0,
                   "No fault faces with attr=" << bc.fault_attr
-                  << " found in mesh. Check --bc-fault flag or mesh Physical Surface tags.");
-      if (n_free_g == 0 && rank == 0)
-      {
-         std::cerr << "WARNING: No free-surface faces found (attr="
-                   << bc_free << "). Check --bc-free flag.\n";
-      }
+                  << " found.  Check --bc-fault or mesh Physical Surface tags.");
    }
 
    // -----------------------------------------------------------------------
-   // 3. Construct WaveOperator (parallel)
+   // 3. WaveOperator
    // -----------------------------------------------------------------------
    WaveOperator<MeshT> wave(pmesh, order,
                             TPV102Params::lambda, TPV102Params::mu,
                             TPV102Params::rho, bc);
 
-   int ndof_total = wave.GetScalarNDof();
+   int ndof_total  = wave.GetScalarNDof();
    int ndof_global = ndof_total;
 #ifdef MFEM_USE_MPI
    MPI_Allreduce(&ndof_total, &ndof_global, 1, MPI_INT, MPI_SUM, comm);
 #endif
-
    if (rank == 0)
    {
       std::cout << "DOFs per component (global): " << ndof_global << "\n";
@@ -376,36 +1045,20 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------------
-   // 4. Time step: --dt overrides; otherwise derive from CFL/h_min/cp.
-   //    (h_min already reduced across ranks inside the WaveOperator ctor.)
+   // 4. Time step
    // -----------------------------------------------------------------------
-   real_t dt_override = GetRealArg(argc, argv, "--dt", 0.0);
-   real_t cfl = cfl_factor / (3.0 * (2.0 * order + 1.0));
+   real_t cfl    = cfl_factor / (3.0 * (2.0 * order + 1.0));
    real_t dt_cfl = wave.ComputeMaxDt(cfl);
-   real_t dt = (dt_override > 0.0) ? dt_override : dt_cfl;
-
-   int nsteps = static_cast<int>(std::ceil(tfinal / dt));
+   real_t dt     = (dt_override > 0.0) ? dt_override : dt_cfl;
+   int nsteps    = (tfinal > 0.0) ? static_cast<int>(std::ceil(tfinal / dt)) : 0;
    if (rank == 0)
    {
       std::cout << "CFL: " << cfl << ", dt_cfl = " << dt_cfl << " s\n";
-      if (dt_override > 0.0)
-      {
-         std::cout << "dt (override, --dt): " << dt << " s";
-         if (dt > dt_cfl)
-         {
-            std::cout << "  [WARNING: dt_override > dt_cfl; may be unstable]";
-         }
-         std::cout << "\n";
-      }
-      else
-      {
-         std::cout << "dt: " << dt << " s\n";
-      }
-      std::cout << "Steps: " << nsteps << "\n\n";
+      std::cout << "dt: " << dt << " s, steps: " << nsteps << "\n\n";
    }
 
    // -----------------------------------------------------------------------
-   // 5. Fault DOF data (local partition)
+   // 5. Fault DOF data (local partition) — TPV102-specific init
    // -----------------------------------------------------------------------
    L2_FECollection fec(order, 3, BasisType::GaussLobatto);
 #ifdef MFEM_USE_MPI
@@ -414,33 +1067,24 @@ int main(int argc, char *argv[])
    FiniteElementSpace fes(&pmesh, &fec);
 #endif
 
-   // Fault-face geometry lists are owned by the wave operator (single source
-   // of truth, BP5 pattern).  We iterate them in order — local-interior
-   // faces first, then shared — to build fault_coords, matching the DOFData
-   // layout that SetFaultDOFData imposes.
-   const Array<int> &fault_int_faces   = wave.GetFaultInteriorFaces();
-   const Array<int> &fault_shr_faces   = wave.GetFaultSharedFaces();
+   const Array<int> &fault_int_faces = wave.GetFaultInteriorFaces();
+   const Array<int> &fault_shr_faces = wave.GetFaultSharedFaces();
 
-   // nqp_per_face is derived once from the first local fault face (all
-   // fault faces share the same geometry type, so the quadrature rule
-   // has the same point count).
    int nqp_per_face = 0;
    if (fault_int_faces.Size() > 0)
    {
       FaceElementTransformations *ftr0 =
          pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
-      MFEM_VERIFY(ftr0,
-                  "wave.GetFaultInteriorFaces() returned a face without "
-                  "interior transformation — wave operator invariant violated");
-      nqp_per_face = IntRules.Get(ftr0->GetGeometryType(), 2*order).GetNPoints();
+      MFEM_VERIFY(ftr0, "fault interior face has null transformation");
+      nqp_per_face = IntRules.Get(ftr0->GetGeometryType(), 2 * order).GetNPoints();
    }
 #ifdef MFEM_USE_MPI
    else if (fault_shr_faces.Size() > 0)
    {
       FaceElementTransformations *ftr0 =
          pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
-      MFEM_VERIFY(ftr0, "shared fault face has null transformation");
-      nqp_per_face = IntRules.Get(ftr0->GetGeometryType(), 2*order).GetNPoints();
+      MFEM_VERIFY(ftr0, "fault shared face has null transformation");
+      nqp_per_face = IntRules.Get(ftr0->GetGeometryType(), 2 * order).GetNPoints();
    }
    {
       int local_nqp = nqp_per_face;
@@ -458,8 +1102,8 @@ int main(int argc, char *argv[])
    auto push_qps = [&](FaceElementTransformations *ftr)
    {
       const IntegrationRule &ir = IntRules.Get(
-         ftr->GetGeometryType(), 2*order);
-      for (int q = 0; q < ir.GetNPoints(); q++)
+         ftr->GetGeometryType(), 2 * order);
+      for (int q = 0; q < ir.GetNPoints(); ++q)
       {
          const IntegrationPoint &ip = ir.IntPoint(q);
          ftr->SetAllIntPoints(&ip);
@@ -468,13 +1112,12 @@ int main(int argc, char *argv[])
          fault_coords.push_back(phys);
       }
    };
-
-   for (int i = 0; i < fault_int_faces.Size(); i++)
+   for (int i = 0; i < fault_int_faces.Size(); ++i)
    {
       push_qps(pmesh.GetInteriorFaceTransformations(fault_int_faces[i]));
    }
 #ifdef MFEM_USE_MPI
-   for (int i = 0; i < fault_shr_faces.Size(); i++)
+   for (int i = 0; i < fault_shr_faces.Size(); ++i)
    {
       push_qps(pmesh.GetSharedFaceTransformations(fault_shr_faces[i]));
    }
@@ -484,7 +1127,6 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
    MPI_Allreduce(&num_fault_total, &num_fault_global, 1, MPI_INT, MPI_SUM, comm);
 #endif
-
    if (rank == 0)
    {
       std::cout << "Fault QPs (global): " << num_fault_global
@@ -492,60 +1134,35 @@ int main(int argc, char *argv[])
                 << ", shared: " << num_shared_fault << ")\n";
    }
 
+#ifdef SEAS_DIAG_TPV102_FAULT_BASIS
+   // D1 instrumentation companion: dump fault QP coordinates indexed
+   // by dof_idx (= the same index keyed by [diag-flip] in
+   // wave_operator.inl).  Join via:
+   //   awk '/diag-coords/{c[$2]=$0} /diag-flip/{f[$2]=$0} END{for(k in f)print f[k]" "c[k]}'
+   for (int i = 0; i < num_fault_total; ++i)
+   {
+      const Vector &xqp = fault_coords[i];
+      std::fprintf(stderr,
+         "[diag-coords] dof=%d (x,y,z)=(%+9.1f,%+9.1f,%+9.1f) rank=%d\n",
+         i, xqp(0), xqp(1), xqp(2), rank);
+   }
+#endif
+
    std::vector<DOFData> dof_data;
    if (num_fault_total > 0)
    {
-      // v9.4.0 Commit 2: fluctuation-Q dispatch.  Bulk Q carries the
-      // dynamic fluctuation only (Q = 0 below); static pre-stress
-      // (sigma_n0, tau2_0) lives in the DOFData fields set by
-      // InitializeFaultDOFs, and the time-varying nucleation driver
-      // lives in DOFData.tau2_nuc (overwritten by ApplyNucleationPrestress
-      // at each step).  FaultFaceFlux::Evaluate (v9.4.0 Commit 1) sums
-      // tau*_total = tau*_0 + tau*_nuc + tau*_trial(Q) internally, so we
-      // must NOT zero the DOFData pre-stress fields here — doing so
-      // would make the fault effectively unloaded.
+      // TPV102 fluctuation-Q init: Q = 0, pre-stress lives in DOFData.
       InitializeFaultDOFs(dof_data, num_fault_total, fault_coords);
    }
 
-   FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp, TPV102Params::cs);
-   wave.SetFaultFlux(&fault_flux);
-   wave.SetFaultDOFData(&dof_data, nqp_per_face);
-
-   // v9.4.0 Commit 2 (R-004): supply Q_bg = 0 to the wave operator's
-   // BC dispatch.  Under fluctuation-Q, bulk Q carries the fluctuation
-   // only, so the absorbing / free-surface / PML branches damp toward
-   // zero.  The total-Q-aware BC variants still run
-   // (AbsorbingTotal(Q_self, 0) = Absorbing(Q_self) bit-exactly) and
-   // the has_bulk_bg_ guards in wave_operator.inl fire with a valid
-   // call site.  Zero-Q_bg is sufficient for the BP5 / TPV102
-   // fluctuation dispatch contract.
-   {
-      real_t Q_bg[NUM_STATE] = {0};
-      wave.SetAbsorbingBackground(Q_bg);
-   }
-
-   // Nucleation under total-Q now uses the persistent-prestress channel:
-   // ApplyNucleationPrestress overwrites DOFData.tau2_nuc per call;
-   // FaultFaceFlux::EvaluateTotal adds it to the trial traction so the
-   // requested dtau is re-imposed at every Riemann solve.  No bulk-Q
-   // injection — see debug_document/tpv102_debug_document/
-   //   tpv102_nucleation_code_review_2026-04-22.md  (the bug analysis)
-   //   tpv102_nucleation_code_fix_2026-04-22.md     (this fix)
-   // The legacy FaultQPNodalMap / FaultQPNucleationState /
-   // BuildFaultQPNodalMap machinery in tpv102_setup_total.hpp is no
-   // longer used by the production driver; it remains for the
-   // R-002 / R-009 / R-I06-003 unit tests that verify per-call
-   // arithmetic.  No fault-QP-to-nodal map needed here.
-
-   // R-002 fix: resolve the rank that owns the hypocenter QP (closest local
-   // fault QP to (hypo_along_strike, -hypo_down_dip) in x/z).  Used only by
-   // --debug-qnorm to print a per-rank ||Q||_inf watch list.
-   //
-   // R-105 fix: use a named struct with static_asserts so the MPI_DOUBLE_INT
-   // layout assumption fails loudly at compile time if it is ever broken
-   // (e.g. by a compiler with unusual padding of {double, int}).
+   // Resolve the rank that owns the hypocenter QP (closest local fault QP
+   // to (hypo_along_strike, -hypo_down_dip) in x/z), then tag that DOF
+   // with diag_print = true so the C-1 EVAL / C-1n NORMAL probes in
+   // dynamic/fault_face_flux.cpp emit one line per Evaluate call instead
+   // of flooding stderr from every QP.  Mirrors the TPV102 pattern at
+   // tpv102_driver.cpp:540-588.
    int hypo_rank = 0;
-   int hypo_dof_local = -1;  // local DOF index of the closest hypo QP, or -1
+   int hypo_dof_local = -1;
    {
       real_t local_min_dist2 = std::numeric_limits<real_t>::max();
       for (int i = 0; i < num_fault_total; i++)
@@ -573,10 +1190,22 @@ int main(int argc, char *argv[])
    }
 
 #ifdef SEAS_DIAG_FAULT_FLUX
-   // v9.0.0 §0.5: tag the hypocenter DOF on the owning rank so the C-1/C-2/
-   // C-3 printf blocks emit a single line per RK4 Mult instead of flooding
-   // stderr from every fault QP.  Only the rank that won the MINLOC above
-   // sets diag_print=true; at most one DOF is flagged globally.
+   // Only the rank that won the MINLOC sets diag_print = true on its
+   // closest hypocenter DOF; at most one DOF is flagged globally.
+   // Probe block: dynamic/fault_face_flux.cpp:259-303 (C-1 EVAL +
+   // C-1n NORMAL).  Single-rank stderr printf, no MPI calls — no
+   // deadlock at any rank count.
+   //
+   // C-2 BULK-PROBE EXTENSION: also identify the fault face containing
+   // the diag DOF and the two adjacent tets, plus the 6 non-fault
+   // interior faces of those tets.  Pushed to WaveOperator via setters
+   // so the C-2A (Mult per-call) and C-2B (per non-fault face) probes
+   // can fire without MPI on this single rank.  Other ranks have the
+   // setters left at default -1 → silent.
+   int diag_face_idx_for_dof = -1;
+   int diag_elem_plus  = -1, diag_elem_minus = -1;
+   int diag_face_dof_plus = -1, diag_face_dof_minus = -1;
+   std::vector<int> diag_nonfault_faces;
    if (rank == hypo_rank && hypo_dof_local >= 0 && num_fault_total > 0)
    {
       dof_data[hypo_dof_local].diag_print = true;
@@ -584,44 +1213,404 @@ int main(int argc, char *argv[])
       std::fprintf(stderr,
          "[diag] rank %d tagging hypo DOF %d at (%.1f, %.1f, %.1f)\n",
          rank, hypo_dof_local, hpos(0), hpos(1), hpos(2));
+
+      // Map hypo_dof_local back to (interior fault face index, q-of-face).
+      // Layout: dof_data[i] lives on interior face i / nqp_per_face,
+      // QP index = i % nqp_per_face.  Shared-fault DOFs follow at
+      // [num_fault_local, num_fault_total) — currently not used as
+      // diag target (the hypo nucleus lives on interior faces).
+      if (hypo_dof_local < num_fault_local)
+      {
+         const int fi = hypo_dof_local / nqp_per_face;     // index into fault_int_faces
+         const int qi = hypo_dof_local % nqp_per_face;
+         if (fi >= 0 && fi < fault_int_faces.Size())
+         {
+            diag_face_idx_for_dof = fault_int_faces[fi];
+            FaceElementTransformations *ftr =
+               pmesh.GetInteriorFaceTransformations(diag_face_idx_for_dof);
+            if (ftr)
+            {
+               const int e1 = ftr->Elem1No;
+               const int e2 = ftr->Elem2No;
+               // Determine canonical + / - via FaultBasis sign_flipped at
+               // this QP (matches wave_operator.inl:1226 logic:
+               // elem1_on_plus = !sign_flipped).
+               bool elem1_on_plus = true;
+               const FaultBasis *fb = wave.GetFaultBasis();
+               if (fb)
+               {
+                  const int fb_idx =
+                     wave.LookupInteriorFaultBasisIndex(diag_face_idx_for_dof);
+                  if (fb_idx >= 0 && fb_idx < fb->NumFaces())
+                  {
+                     const FaultBasisData &bd = fb->GetBasis(fb_idx);
+                     if (qi < static_cast<int>(bd.qp_data.size()))
+                     {
+                        elem1_on_plus = !bd.qp_data[qi].sign_flipped;
+                     }
+                  }
+               }
+               diag_elem_plus  = elem1_on_plus ? e1 : e2;
+               diag_elem_minus = elem1_on_plus ? e2 : e1;
+
+               // Find the local DOF index on each tet that is closest
+               // to the hypocenter QP physical position AND lies ON
+               // THE FAULT FACE (|y - hpos.y| < tol).  Without the
+               // on-face restriction, the apex DOF (y ≈ ±141 m for a
+               // 200 m mesh) can win the closest-by-Euclidean-distance
+               // contest when hpos is near a fault-face edge, putting
+               // C-2A at qualitatively different positions on E+ vs
+               // E- and producing a spurious asymmetry signature.
+               // Returns the on-face DOF closest to hpos in (x,z); if
+               // no DOF is within tol of hpos.y, falls back to the
+               // closest by full distance and reports the y offset.
+               auto closest_face_dof_idx = [&](int e,
+                                               real_t &out_y_off) -> int
+               {
+                  const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+                  ElementTransformation *Tr =
+                     wave.GetFESpace().GetElementTransformation(e);
+                  const IntegrationRule &nodes = fe->GetNodes();
+                  const real_t y_tol = 1e-3;  // 1 mm — much smaller than 200 m mesh
+                  int best_on_face = -1;
+                  real_t best_d2_on_face =
+                     std::numeric_limits<real_t>::max();
+                  int best_any = -1;
+                  real_t best_d2_any =
+                     std::numeric_limits<real_t>::max();
+                  real_t best_y_any = 0.0;
+                  for (int k = 0; k < nodes.GetNPoints(); k++)
+                  {
+                     Vector phys(3);
+                     Tr->Transform(nodes.IntPoint(k), phys);
+                     const real_t dx = phys(0) - hpos(0);
+                     const real_t dy = phys(1) - hpos(1);
+                     const real_t dz = phys(2) - hpos(2);
+                     const real_t d2_full = dx*dx + dy*dy + dz*dz;
+                     const real_t d2_xz   = dx*dx + dz*dz;
+                     if (std::abs(dy) < y_tol && d2_xz < best_d2_on_face)
+                     {
+                        best_d2_on_face = d2_xz; best_on_face = k;
+                     }
+                     if (d2_full < best_d2_any)
+                     {
+                        best_d2_any = d2_full; best_any = k;
+                        best_y_any = phys(1);
+                     }
+                  }
+                  if (best_on_face >= 0)
+                  {
+                     out_y_off = 0.0;
+                     return best_on_face;
+                  }
+                  out_y_off = best_y_any - hpos(1);
+                  return best_any;
+               };
+               real_t y_off_p = 0.0, y_off_m = 0.0;
+               diag_face_dof_plus  =
+                  closest_face_dof_idx(diag_elem_plus,  y_off_p);
+               diag_face_dof_minus =
+                  closest_face_dof_idx(diag_elem_minus, y_off_m);
+
+               // Print physical coordinates of the two diag DOFs so
+               // the C-2A/B/C analysis can verify they are at mirror
+               // positions before drawing conclusions about bulk
+               // asymmetry.
+               auto dof_phys = [&](int e, int k) -> Vector
+               {
+                  const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+                  ElementTransformation *Tr =
+                     wave.GetFESpace().GetElementTransformation(e);
+                  Vector phys(3);
+                  Tr->Transform(fe->GetNodes().IntPoint(k), phys);
+                  return phys;
+               };
+               Vector p_plus  = dof_phys(diag_elem_plus,  diag_face_dof_plus);
+               Vector p_minus = dof_phys(diag_elem_minus, diag_face_dof_minus);
+               std::fprintf(stderr,
+                  "[diag-c2-pos] rank=%d  DOF+ at (%+.3e,%+.3e,%+.3e) "
+                  "y_off=%+.3e   DOF- at (%+.3e,%+.3e,%+.3e) y_off=%+.3e   "
+                  "dx=%+.3e dz=%+.3e\n",
+                  rank,
+                  p_plus(0),  p_plus(1),  p_plus(2),  y_off_p,
+                  p_minus(0), p_minus(1), p_minus(2), y_off_m,
+                  p_plus(0) - p_minus(0), p_plus(2) - p_minus(2));
+
+               // Collect the non-fault interior faces of the two diag
+               // tets.  For tets, GetElementFaces returns 4 faces; we
+               // skip the fault face itself and any boundary faces
+               // (which are still printed elsewhere).
+               Array<int> faces_p, ori_p, faces_m, ori_m;
+               pmesh.GetElementFaces(diag_elem_plus,  faces_p, ori_p);
+               pmesh.GetElementFaces(diag_elem_minus, faces_m, ori_m);
+               auto add_nonfault = [&](const Array<int> &fs)
+               {
+                  for (int k = 0; k < fs.Size(); k++)
+                  {
+                     if (fs[k] == diag_face_idx_for_dof) { continue; }
+                     diag_nonfault_faces.push_back(fs[k]);
+                  }
+               };
+               add_nonfault(faces_p);
+               add_nonfault(faces_m);
+
+               std::fprintf(stderr,
+                  "[diag-c2] rank %d face=%d e+=%d e-=%d "
+                  "face_dof+=%d face_dof-=%d nonfault_faces=[",
+                  rank, diag_face_idx_for_dof,
+                  diag_elem_plus, diag_elem_minus,
+                  diag_face_dof_plus, diag_face_dof_minus);
+               for (size_t k = 0; k < diag_nonfault_faces.size(); k++)
+               {
+                  std::fprintf(stderr, "%s%d",
+                               k == 0 ? "" : ",", diag_nonfault_faces[k]);
+               }
+               std::fprintf(stderr, "]\n");
+            }
+         }
+      }
    }
+   wave.SetDiagBulkElems(diag_elem_plus, diag_elem_minus);
+   wave.SetDiagBulkFaceDofs(diag_face_dof_plus, diag_face_dof_minus);
+   wave.SetDiagNonFaultFaces(diag_nonfault_faces);
 #endif
 
+   FaultFaceFlux fault_flux(TPV102Params::rho, TPV102Params::cp,
+                            TPV102Params::cs);
+   wave.SetFaultFlux(&fault_flux);
+   wave.SetFaultDOFData(&dof_data, nqp_per_face);
+
+   // Zero Q_bg — fluctuation-Q dispatch.
+   {
+      real_t Q_bg[NUM_STATE] = {0};
+      wave.SetAbsorbingBackground(Q_bg);
+   }
+
+   // Round-11 Mixed-Flux dispatch wiring (R-1205 required call order):
+   //   1. WaveOperator ctor (already done)
+   //   2. wave.SetFaultFlux         (already done)
+   //   3. wave.SetFaultDOFData      (already done)
+   //   4. wave.SetAbsorbingBackground (already done)
+   //   5. wave.SetMixedFluxMode     <-- HERE; setter cross-checks
+   //                                    bc_.fault_attr > 0 for Adjacent,
+   //                                    and aborts if precomputed-flux
+   //                                    is also enabled (R-1203).
+   wave.SetMixedFluxMode(mixed_flux_mode);
+   // R-1202: report the GLOBAL central-set size and per-rank min/max
+   // for load-balance diagnostic.  The Round-2 banner reported rank-0's
+   // local size as if it were global, masking 127× of the count at
+   // np=128 production.  All ranks participate in the reduction; only
+   // rank 0 prints.
+   if (mixed_flux_mode != MixedFluxMode::None)
+   {
+      const long long local_size_ll =
+         static_cast<long long>(wave.GetCentralFluxFaceSet().size());
+#ifdef MFEM_USE_MPI
+      // R-1409: Allreduce so EVERY rank can self-verify its own log
+      // (per-rank log-grep parity with R8-004's tri-consistency lines).
+      // Cost is negligible (3 × long_long per call, called once per run).
+      // R-1602: use the WaveOperator's ParMesh communicator
+      // (`pmesh.GetComm()`), not `MPI_COMM_WORLD`, for symmetry with
+      // SetMixedFluxMode's consensus check (which uses `pmesh.GetComm()`
+      // at wave_operator.inl:1199-1213).  Currently both communicators
+      // coincide because TPV102 builds its ParMesh on MPI_COMM_WORLD,
+      // but a future multi-region driver running on a sub-comm would
+      // deadlock or diverge if the two collectives use mismatched
+      // communicators.
+      MPI_Comm wave_comm = pmesh.GetComm();
+      long long global_sum = 0, local_max = 0, local_min = 0;
+      MPI_Allreduce(&local_size_ll, &global_sum, 1, MPI_LONG_LONG, MPI_SUM,
+                    wave_comm);
+      MPI_Allreduce(&local_size_ll, &local_max, 1, MPI_LONG_LONG, MPI_MAX,
+                    wave_comm);
+      MPI_Allreduce(&local_size_ll, &local_min, 1, MPI_LONG_LONG, MPI_MIN,
+                    wave_comm);
+      if (rank == 0)
+      {
+         std::cout << "[mixed-flux] mode=" << mixed_flux_str
+                   << "  |central_set|_global=" << global_sum
+                   << "  per-rank min=" << local_min
+                   << " max=" << local_max
+                   << "  (Zhang et al. 2023 mixed-flux dispatch)\n";
+         if (local_min > 0 && local_max > 4 * local_min)
+         {
+            std::cout << "[mixed-flux] WARNING: rank load imbalance "
+                      << static_cast<double>(local_max) /
+                         static_cast<double>(local_min)
+                      << "× (max/min); consider "
+                      << "--partition-fault-locality\n";
+         }
+         else if (local_min == 0 && local_max > 0)
+         {
+            std::cout << "[mixed-flux] WARNING: at least one rank has "
+                      << "zero central-set entries while another has "
+                      << local_max << "; partition is severely "
+                      << "fault-asymmetric.\n";
+         }
+      }
+      // R-1409: machine-readable per-rank line.  Every rank prints once;
+      // log parsers can grep "[mixed-flux] rank=N" to verify dispatch
+      // engagement and global counts visible from any single log file.
+      std::cout << "[mixed-flux] rank=" << rank
+                << "  local_set_size=" << local_size_ll
+                << "  global_sum=" << global_sum
+                << "  global_min=" << local_min
+                << "  global_max=" << local_max << "\n";
+#else
+      std::cout << "[mixed-flux] mode=" << mixed_flux_str
+                << "  |central_set|=" << local_size_ll
+                << " (serial)  (Zhang et al. 2023 mixed-flux dispatch)\n";
+#endif
+   }
+
+   // TPV102 uses the regularised rate-and-state ageing law (SCEC TPV101/102
+   // §"Friction Law" Eq. (2)).  AgingLawPsi from friction/state_evolution.hpp
+   // implements dψ/dt in ψ-space; the iterator queries (b, V0, f0) accessors
+   // for the analytic ψ update inside the per-sub-step loop.
+   mfem::seas::AgingLawPsi state_evo(
+      TPV102Params::b, TPV102Params::V0, TPV102Params::f0);
+
+   // R-602/R-603 substep iterator (default OFF; opt-in via
+   // --fault-iterator substep).  SetSubSteps configures the ADER-O
+   // quadrature: at order O, equal-width sub-steps with equal weights
+   // 1/O is the simplest valid quadrature on [0, dt] satisfying
+   //   Σ deltaT[o] == dt_macro,  Σ time_weights[o] == 1.
+   // The iterator's own per-call argument validation enforces this.
+   mfem::seas::Tpv102SubStepIterator substep_iterator(fault_flux, state_evo);
+   {
+      const int O = std::max(1, ader_order);
+      std::vector<real_t> deltaT(O, 1.0 / static_cast<real_t>(O));
+      std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
+      // The iterator interprets deltaT in absolute (physical) time units,
+      // so seed it with the auto-CFL `dt` here.  The Σ deltaT==dt_macro
+      // check inside Advance/AdvanceWithSubStepStates is RELATIVE; the
+      // helper AdvanceADERWithSubStep rescales the configured deltaT to
+      // the actual dt_step at each call (see the dt_scale loop above),
+      // so the final macro-step (where dt_step = tfinal - t < dt) is
+      // handled correctly.
+      for (int o = 0; o < O; o++) { deltaT[o] = dt / static_cast<real_t>(O); }
+      substep_iterator.SetSubSteps(deltaT, weights);
+   }
+
+   const bool use_substep_iterator =
+      (GetDispatchedIterator(fault_iterator) == DispatchedIterator::SubStep);
+   if (rank == 0 && use_substep_iterator)
+   {
+      std::cout << "[tpv102_driver] --fault-iterator substep ACTIVE: "
+                << "ADER-O" << ader_order
+                << " per-sub-step Q via ComputeADERSubStepStates + "
+                << "Tpv102SubStepIterator::AdvanceWithSubStepStates.\n";
+   }
+   // R-1003 (LANDED): the shared-fault ADER branch
+   // (`ComputeADERSharedFaceFluxRHS`) now consults `substep_I_imp_*_flat_`
+   // under the same absolute-index gate as the interior branch.  Driver
+   // sizing (this file, `AdvanceADERWithSubStep` helper above) and
+   // `WaveOperator::EvaluateBulkAtFaultQPsCanonical` (wave_operator.inl)
+   // cover the full `[0, GetNumTotalFaultQPs())` index space, including
+   // `[GetNumLocalFaultQPs(), GetNumTotalFaultQPs())` for shared-fault QPs.
+   // The pre-R-1003 abort that rejected np>1 with --fault-iterator substep
+   // is therefore retired.  See miniapps/seas/debug_document/
+   // tpv102_debug_document/SUBSTEP_ITERATOR_MPI_REVIEW.md for the
+   // pre-landing review and the merge-blocking MPI parity tests
+   // (`test_tpv102_substep_iterator_mpi.cpp` and friends).
+   if (use_substep_iterator && nprocs > 1 && rank == 0)
+   {
+      std::cout << "[tpv102_driver] R-1003 path: --fault-iterator substep "
+                << "active under MPI (nprocs=" << nprocs << ").  Shared-"
+                << "fault QPs flow through the substep side-channel.\n";
+   }
    // -----------------------------------------------------------------------
-   // 6. v9.4.0 Commit 2: initialize bulk Q = 0 (fluctuation-Q dispatch).
-   //    Static pre-stress lives in DOFData (sigma_n0, tau2_0), nucleation
-   //    in DOFData.tau2_nuc; bulk Q carries only the dynamic fluctuation
-   //    and starts at rest.  FaultFaceFlux::Evaluate adds
-   //    tau*_0 + tau*_nuc onto the trial traction internally.
+   // 6. Initialize Q = 0 (fluctuation-Q).
    // -----------------------------------------------------------------------
    Vector Q(NUM_STATE * ndof_total);
-   Q = 0.0;
+   InitializeState(Q, ndof_total);
 
-   // SetAbsorbingBackground must have been called above with Q_bg = 0;
-   // the wave operator's has_bulk_bg_ guards will not fire unless a
-   // driver forgets to call it (e.g. a future refactor).  Keep the
-   // invariant loud so a missed call is caught at driver init.
    MFEM_VERIFY(wave.GetAbsorbingBackground() != nullptr,
-               "tpv102_driver: wave.SetAbsorbingBackground() must be "
-               "called (with Q_bg = 0 under fluctuation-Q dispatch) "
-               "before any Mult / AdvanceADER; none detected.");
+               "tpv102_driver: SetAbsorbingBackground(Q_bg=0) not called.");
+
+   // R-403 PROBE: end-to-end y-mirror test of the wave operator.
+   // Triggered by SEAS_DIAG_R403=1.  Bypasses the time loop entirely:
+   //   - Q = 0 (already)
+   //   - tau*_nuc = 0 (no nucleation injected; Q stays zero in bulk)
+   //   - call wave.Mult(Q, dQdt) once
+   //   - dump dQdt per-DOF with physical position to a text file
+   //   - exit
+   // Post-processing (separate Python) verifies that for every
+   // (+y, -y) DOF mirror pair, the channel-signed antisymmetric-mirror
+   // relation holds at FP-bit precision.  This is a STRICT SUPERSET of
+   // probing CalcOrtho normals: a PASS rules out every operator-side
+   // mirror leak (CalcOrtho, Loc1.Transform, CalcShape, face-flux
+   // accumulation order, Elem1/Elem2 assignment, etc.).
+   {
+      const char *r403 = std::getenv("SEAS_DIAG_R403");
+      if (r403 && r403[0] != '\0' &&
+          !(r403[0] == '0' && r403[1] == '\0'))
+      {
+         Vector dQdt(NUM_STATE * ndof_total);
+         dQdt = 0.0;
+         wave.Mult(Q, dQdt);
+
+         std::ostringstream pathss;
+         pathss << output_dir << "/r403_rhs_rank" << rank << ".txt";
+         std::ofstream fs(pathss.str());
+         if (fs.is_open())
+         {
+            fs << std::scientific << std::setprecision(17);
+            fs << "# columns: dof_global_idx x y z channel value\n";
+            const int ne_local = pmesh.GetNE();
+            const int ndof_per_el = wave.GetFESpace().GetFE(0)->GetDof();
+            for (int e = 0; e < ne_local; e++)
+            {
+               const FiniteElement *fe = wave.GetFESpace().GetFE(e);
+               ElementTransformation *Tr =
+                  wave.GetFESpace().GetElementTransformation(e);
+               const IntegrationRule &nodes = fe->GetNodes();
+               for (int i = 0; i < ndof_per_el; i++)
+               {
+                  const IntegrationPoint &ip = nodes.IntPoint(i);
+                  Tr->SetIntPoint(&ip);
+                  Vector x(3);
+                  Tr->Transform(ip, x);
+                  const int dof_global = e * ndof_per_el + i;
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     fs << dof_global << " "
+                        << x(0) << " " << x(1) << " " << x(2) << " "
+                        << c << " "
+                        << dQdt[c * ndof_total + dof_global] << "\n";
+                  }
+               }
+            }
+            fs.close();
+         }
+         if (rank == 0)
+         {
+            std::cout << "[R-403] dumped per-DOF rhs to "
+                      << output_dir << "/r403_rhs_rank<R>.txt\n"
+                      << "[R-403] exiting after probe.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 0;
+      }
+   }
 
    if (rank == 0)
    {
-      std::cout << "State representation: total-Q (pre-stress baked into Q)\n"
-                << "Background: tau_strike = "
-                << TPV102Params::tau_ini / 1e6
-                << " MPa, sigma_n = "
-                << TPV102Params::sigma_n / 1e6 << " MPa\n\n";
+      std::cout << "Background: τ_strike = "
+                << TPV102Params::tau_ini / 1e6 << " MPa, "
+                << "σ_n = " << TPV102Params::sigma_n / 1e6 << " MPa, "
+                << "θ_ini(a_vw=" << TPV102Params::a_vw
+                << ") ≈ 1.606e9 s (= 50.9 yr, SCEC spec), V_ini = "
+                << TPV102Params::V_ini << " m/s\n\n";
    }
 
    // -----------------------------------------------------------------------
-   // 7. Station output (rank 0 only for fault stations)
+   // 7. Station output
    // -----------------------------------------------------------------------
    auto stations = DefaultStations();
    TPV102StationWriter station_writer;
-   // R-004 fix: MPI ownership resolution — only the rank with the globally
-   // nearest DOF opens and writes each station file.
 #ifdef MFEM_USE_MPI
    station_writer.Open(output_dir, output_prefix, stations,
                        fault_coords, num_fault_local, comm);
@@ -631,27 +1620,30 @@ int main(int argc, char *argv[])
 #endif
    station_writer.WriteStep(0.0, dof_data);
 
-   // R-006 fix: Wire surface station writer into driver.
-   // Uses FindPoints() for proper element containment + reference coords.
    auto surface_stations = DefaultSurfaceStations();
    TPV102SurfaceStationWriter surface_writer;
-   surface_writer.Open(output_dir, output_prefix, surface_stations, pmesh, fes);
+   surface_writer.Open(output_dir, output_prefix, surface_stations,
+                       pmesh, fes);
    surface_writer.WriteStep(0.0, Q);
 
    // -----------------------------------------------------------------------
-   // 7b. ParaView output (mirrors BP5 seas::ParaViewOutput pattern):
-   //   - Domain velocity (3-component L2 vector GridFunction built from Q)
-   //   - MPI rank (L2 p=0 scalar, for partition visualization)
-   //   - Fault L2-p0 fields: slip/slip_rate/traction (dip,strike), psi, sigma_n
-   //   - Fault friction parameter fields: param_a, param_Dc, fault_x2, fault_x3
-   //   - Fault-surface VTU/PVD (proper triangle geometry, per-DOF field values)
+   // 7b. ParaView output (mirrors tpv102_driver.cpp / BP5 seas::ParaViewOutput
+   //     pattern).  Two collections:
+   //       - pv_out (output_dir/ParaView): velocity + mpi_rank volume +
+   //         fault-surface PVD/VTU (slip, slip_rate, traction dip+strike,
+   //         psi, sigma_n, plus static a, Dc, x2, x3) at the fault schedule.
+   //       - pv_bulk_out (output_dir/ParaView_bulk): velocity + sigma_yy +
+   //         sigma_xy + sigma_xz + mpi_rank at --paraview-bulk-dt cadence.
    //
-   // Component-to-name mapping (BP5 convention, enforced project-wide by
-   // R-801 Option A: comp 0 = dip = tangent1, comp 1 = strike = tangent2):
-   //   DOFData.V1/slip1/tau1_corr (dip,    mode-III in TPV102) -> dip channel
-   //   DOFData.V2/slip2/tau2_corr (strike, mode-II  in TPV102) -> strike channel
-   // TPV102 is pure strike-slip so the dip channel stays near zero and the
-   // interesting rupture physics lives in the strike channel.
+   // R-801 / BP5 component convention enforced project-wide: comp 0 = dip,
+   // comp 1 = strike.  TPV102 is pure strike-slip so the strike channel
+   // carries the rupture; dip stays near zero.
+   //
+   // Under R7-001 option (b) ADER one-shot, there is no "stage-4" snapshot
+   // distinct from the time-averaged DOFData — write the same values into
+   // both the averaged and the _k4 buffers so the ParaView Calculator
+   // delta `<field>_k4 - <field>` reads zero everywhere (consistent with
+   // what tpv102_driver.cpp does on the ADER path).
    // -----------------------------------------------------------------------
    using PvFES = typename seas::GFType<MeshT>::FESType;
    using PvGF  = typename seas::GFType<MeshT>::type;
@@ -661,33 +1653,15 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
-   // Second ParaView collection for coarse bulk output at --paraview-bulk-dt.
-   // Populated when paraview_bulk_dt > 0, independent of --no-domain-pv:
-   // the bulk collection writes to `ParaView_bulk/` (separate directory),
-   // so it does not conflict with --no-domain-pv which only suppresses the
-   // fault-schedule pv_out volume save.  Carries velocity (shared GF with
-   // pv_out — allocated regardless of pv_no_domain), three stress
-   // components (sigma_yy, sigma_xy, sigma_xz — the ones most informative
-   // for fault loading / mode-II radiation), and mpi_rank.
    std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
    std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
    std::unique_ptr<PvFES> pv_bulk_sigma_fes;
    std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
 
-   // Scratch vectors passed to UpdateFaultFieldsBP5 / WriteFaultSurfaceVTU.
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
    Vector pv_local_a, pv_local_Dc, pv_local_x2, pv_local_x3;
-   // R-V92-E02 diagnostic: stage-4 (pre-RK4-averaging) DOFData snapshot.
-   // Populated from the stage-4 kN buffers and shipped to the fault-surface
-   // VTU alongside the averaged fields.  Plan §19 uses the VTU delta
-   // `normal_stress_k4 - normal_stress` to discriminate H-V92-K from H-V92-G.
    Vector pv_local_slip_rate_k4, pv_local_traction_k4, pv_local_normal_stress_k4;
-
-   // output_interval = step-count matching --output-dt, reused by station
-   // writers, console logging, and (as a default) ParaView output.
-   real_t output_dt = GetRealArg(argc, argv, "--output-dt", 0.01);
-   int output_interval = std::max(1, static_cast<int>(output_dt / dt));
 
    if (use_paraview)
    {
@@ -700,16 +1674,12 @@ int main(int argc, char *argv[])
 
       if (pv_low_order)
       {
-         // Write linear tets only: disables order-p curved geometry and
-         // per-element sub-refinement, cutting per-cycle size ~40x.
          pv_out->SetHighOrderOutput(false);
          pv_out->SetLevelsOfDetail(1);
       }
 
-      // Velocity: register a 3-component vector L2 GridFunction.  The
-      // scalar-component DOF layout of byNODES (v_c[c * ndof_total + i])
-      // matches Q's velocity block (Q[(VX+c) * ndof_total + i]), so one
-      // memcpy of 3 * ndof_total * sizeof(real_t) populates the field.
+      // Velocity: 3-component vector L2, byNODES so memcpy from Q's
+      // [VX..VZ] block is a single contiguous copy.
       pv_vel_fec = std::make_unique<L2_FECollection>(order, 3, BasisType::GaussLobatto);
       pv_vel_fes = std::make_unique<PvFES>(&pmesh, pv_vel_fec.get(),
                                            3, Ordering::byNODES);
@@ -717,34 +1687,27 @@ int main(int argc, char *argv[])
       *pv_vel_gf = 0.0;
       pv_out->RegisterDomainField("velocity", pv_vel_gf.get());
 
-      // MPI rank: L2 p=0 (one value per element) — same as BP5.
+      // MPI rank: L2 p=0 (one value per element).
       pv_rank_fec = std::make_unique<L2_FECollection>(0, 3);
       pv_rank_fes = std::make_unique<PvFES>(&pmesh, pv_rank_fec.get());
       pv_rank_gf  = std::make_unique<PvGF>(pv_rank_fes.get());
       *pv_rank_gf = static_cast<real_t>(rank);
       pv_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
 
-      // Fault L2-p0 field registration. Forward the wave operator's
-      // canonical face lists so the ParaView indexing lines up with
-      // fault_coords / dof_data exactly (see BP5 pattern).
+      // Fault L2-p0 fields keyed off the wave operator's canonical face
+      // lists (interior + shared) so ParaView indexing matches DOFData.
       pv_out->InitFaultOutputBP5(fault_int_faces, fault_shr_faces,
                                  nqp_per_face);
 
-      // Allocate dynamic-field scratch vectors (vdim=2 for slip/rate/traction).
       pv_local_slip.SetSize(2 * num_fault_total);
       pv_local_slip_rate.SetSize(2 * num_fault_total);
       pv_local_traction.SetSize(2 * num_fault_total);
       pv_local_state.SetSize(num_fault_total);
       pv_local_normal_stress.SetSize(num_fault_total);
-
-      // R-V92-E02 stage-4 buffers (same shape as the averaged ones).
       pv_local_slip_rate_k4.SetSize(2 * num_fault_total);
       pv_local_traction_k4.SetSize(2 * num_fault_total);
       pv_local_normal_stress_k4.SetSize(num_fault_total);
 
-      // Static friction parameters / fault coordinates (one entry per QP).
-      // x2 = along-strike, x3 = z (depth, negative below free surface) to
-      // match BP5's fault_x2/fault_x3 convention.
       pv_local_a.SetSize(num_fault_total);
       pv_local_Dc.SetSize(num_fault_total);
       pv_local_x2.SetSize(num_fault_total);
@@ -759,8 +1722,9 @@ int main(int argc, char *argv[])
       pv_out->SetFaultParamsBP5(pv_local_a, pv_local_Dc,
                                 pv_local_x2, pv_local_x3);
 
-      // Scheduling: CLI flags take precedence; default to step interval that
-      // matches --output-dt so PV frames line up with station output.
+      // Schedule (CLI > step-interval > output_dt step interval):
+      const int output_interval_for_pv =
+         std::max(1, static_cast<int>(output_dt / dt));
       if (paraview_step_interval > 0)
       {
          pv_out->output_every_n_steps = paraview_step_interval;
@@ -771,7 +1735,7 @@ int main(int argc, char *argv[])
       }
       else
       {
-         pv_out->output_every_n_steps = output_interval;
+         pv_out->output_every_n_steps = output_interval_for_pv;
       }
 
       if (rank == 0)
@@ -781,11 +1745,6 @@ int main(int argc, char *argv[])
          if (pv_no_domain)
          {
             std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
-         }
-         if (debug_qnorm)
-         {
-            std::cout << "  Diagnostic: --debug-qnorm ON "
-                         "(per-rank ||Q||_inf each output cycle)\n";
          }
          if (paraview_step_interval > 0)
          {
@@ -799,17 +1758,12 @@ int main(int argc, char *argv[])
          }
          else
          {
-            std::cout << "  Interval: every " << output_interval
+            std::cout << "  Interval: every " << output_interval_for_pv
                       << " steps (matches --output-dt=" << output_dt
                       << " s)\n";
          }
       }
 
-      // Optional bulk collection: velocity + sigma_yy + sigma_xy +
-      // sigma_xz + mpi_rank written at a separate --paraview-bulk-dt
-      // cadence to `ParaView_bulk/`.  Independent of --no-domain-pv —
-      // that flag suppresses pv_out's fault-schedule volume save,
-      // while this collection writes its own PVD/VTU series.
       if (paraview_bulk_dt > 0.0)
       {
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
@@ -819,14 +1773,9 @@ int main(int argc, char *argv[])
             pv_bulk_out->SetHighOrderOutput(false);
             pv_bulk_out->SetLevelsOfDetail(1);
          }
-
-         // Reuse velocity + mpi_rank GFs from pv_out — they are copied
-         // into pv_vel_gf / pv_rank_gf at every paraview_write call.
          pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
          pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
 
-         // Scalar L2 order-`order` FESpace for the three stress
-         // components extracted from Q's stress block.
          pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
             order, 3, BasisType::GaussLobatto);
          pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
@@ -860,18 +1809,6 @@ int main(int argc, char *argv[])
    {
       if (!pv_out) { return; }
 
-      // R-007 / R-104 fix: single-shot schedule gate.  PeekShouldWrite is a
-      // const read that does not advance last_write_time_.  The schedule is
-      // committed below (ForceSave advances it for the !pv_no_domain path;
-      // CommitSchedule advances it explicitly for the pv_no_domain path),
-      // so the gate and the advance can never disagree on V_max or the
-      // current last_write_time_.
-      //
-      // The bulk collection has its OWN schedule (via
-      // `pv_bulk_out->fixed_dt = paraview_bulk_dt`), so we check it
-      // independently.  If neither collection wants to fire this step,
-      // early-return.  Otherwise fall through, pack the fields needed by
-      // whichever collection IS firing, and dispatch both.
       const bool fault_wants =
          pv_out->PeekShouldWrite(step_num, time, V_max);
       const bool bulk_wants = pv_bulk_out &&
@@ -880,19 +1817,11 @@ int main(int argc, char *argv[])
 
       if (!pv_no_domain || bulk_wants)
       {
-         // Copy Q's velocity block (VX..VZ, length 3*ndof_total) into vel_gf.
-         // byNODES ordering of the vector FES matches Q's component-major layout.
-         // Needed by either the fault-schedule domain save (pv_out with
-         // --no-domain-pv OFF) or the bulk schedule (pv_bulk_out).
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
                      3 * ndof_total * sizeof(real_t));
       }
 
-      // Pack bulk stress-component GFs from Q's SYY / SXY / SXZ blocks.
-      // byNODES ordering of the scalar FES matches Q's component-major
-      // layout for each of SYY/SXY/SXZ, so one memcpy per component
-      // populates the corresponding GF.
       if (bulk_wants)
       {
          std::memcpy(pv_bulk_syy_gf->GetData(),
@@ -904,64 +1833,35 @@ int main(int argc, char *argv[])
          std::memcpy(pv_bulk_sxz_gf->GetData(),
                      Q.GetData() + SXZ * ndof_total,
                      ndof_total * sizeof(real_t));
-      }
-
-      // Bulk collection save — advances its own schedule (independent of
-      // pv_out's schedule).  Uses the velocity GF packed above plus the
-      // three sigma GFs packed above (and the mpi_rank GF which is
-      // populated once at setup).  No fault-DOFData packing is needed.
-      if (bulk_wants)
-      {
          pv_bulk_out->ForceSave(step_num, time);
       }
 
-      // Everything below is fault-schedule-only (fault DOFData packing,
-      // fault-surface domain save, fault-surface VTU).  If the fault
-      // schedule did not fire this step, nothing else to do.
       if (!fault_wants) { return; }
 
-      // Pack fault fields from DOFData.  R-801 Option A: DOFData.V1/slip1/
-      // tau1_corr are the DIP-aligned components and DOFData.V2/slip2/
-      // tau2_corr are the STRIKE-aligned components, project-wide (BP5
-      // convention).  BP5's ParaView writer takes comp 0 = dip, comp 1 =
-      // strike, so this map is now the identity — no swap needed.
-      //
-      // Pre-R-801 this code swapped components because the SOURCE convention
-      // was (t1 = strike, t2 = dip) on interior fault QPs via
-      // GodunovFlux::BuildFrame.  Under Option A the source is BP5-canonical
-      // everywhere, so the swap is removed (it would now double-invert).
       for (int i = 0; i < num_fault_total; i++)
       {
          const DOFData &d = dof_data[i];
          pv_local_slip(2*i + 0)      = d.slip1;       // dip
          pv_local_slip(2*i + 1)      = d.slip2;       // strike
-         pv_local_slip_rate(2*i + 0) = d.V1;          // dip rate
-         pv_local_slip_rate(2*i + 1) = d.V2;          // strike rate
-         pv_local_traction(2*i + 0)  = d.tau1_corr;   // dip traction
-         pv_local_traction(2*i + 1)  = d.tau2_corr;   // strike traction
+         pv_local_slip_rate(2*i + 0) = d.V1;
+         pv_local_slip_rate(2*i + 1) = d.V2;
+         pv_local_traction(2*i + 0)  = d.tau1_corr;
+         pv_local_traction(2*i + 1)  = d.tau2_corr;
          pv_local_state(i)           = d.psi;
          pv_local_normal_stress(i)   = d.sigma_n_corr;
-      }
-      // R-V92-E02 + R-V92-I01 fix: pv_local_*_k4 must carry the stage-4
-      // DOFData snapshot captured by the main RK4 loop (line ~919) BEFORE
-      // the averaging block overwrites DOFData.  The gate `step_num == 0`
-      // restricts the "default = averaged" initialisation to the t=0
-      // snapshot only — there is no stage-4 at t=0, so `<field>_k4 -
-      // <field> == 0` by construction there, which is correct.  On every
-      // subsequent paraview_write call the main-loop write is preserved
-      // and the RK4-averaging residual is visible as the delta.  Without
-      // this gate the lambda stomped the main-loop write at every output
-      // step and the entire R-V92-E02 discriminator was dead.
-      if (step_num == 0 && pv_local_normal_stress_k4.Size() == num_fault_total)
-      {
-         pv_local_slip_rate_k4 = pv_local_slip_rate;
-         pv_local_traction_k4  = pv_local_traction;
-         pv_local_normal_stress_k4 = pv_local_normal_stress;
+
+         // ADER one-shot: no stage-4 distinct from averaged DOFData (R7-001
+         // option b).  Mirror tpv102 ADER path: write the same values into
+         // _k4 buffers so the VTU delta reads exactly zero.
+         pv_local_slip_rate_k4(2*i + 0) = d.V1;
+         pv_local_slip_rate_k4(2*i + 1) = d.V2;
+         pv_local_traction_k4(2*i + 0)  = d.tau1_corr;
+         pv_local_traction_k4(2*i + 1)  = d.tau2_corr;
+         pv_local_normal_stress_k4(i)   = d.sigma_n_corr;
       }
 
       if (pv_no_domain)
       {
-         // Fault-surface PVD only; advance the schedule ourselves.
          pv_out->CommitSchedule(time);
       }
       else
@@ -969,15 +1869,14 @@ int main(int argc, char *argv[])
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                       pv_local_traction, pv_local_state,
                                       pv_local_normal_stress);
-         pv_out->ForceSave(step_num, time);  // advances last_write_time_ internally
+         pv_out->ForceSave(step_num, time);
+         // ForceSave only advances last_write_time_; the V_max-adaptive
+         // schedule additionally needs current_regime_ / last_v_max_
+         // advanced for the next PeekShouldWrite to use the correct
+         // regime interval (paraview_output.hpp:985-990).
+         pv_out->CommitSchedule(time, V_max);
       }
 
-      // Fault-surface VTU (proper triangle geometry, no L2-p0 scatter) —
-      // reached iff PeekShouldWrite returned true above.  R-V92-E02:
-      // pass stage-4 buffers so the writer emits `<field>_k4` CellData
-      // alongside the averaged `<field>` CellData.  ParaView Calculator
-      // "normal_stress_k4 - normal_stress" then quantifies the RK4-
-      // averaging residual per triangle.
       pv_out->WriteFaultSurfaceVTU(
          output_dir, step_num, time, rank, nprocs,
          pv_local_slip, pv_local_slip_rate, pv_local_traction,
@@ -987,448 +1886,185 @@ int main(int argc, char *argv[])
          pv_local_normal_stress_k4);
    };
 
-   // Initial snapshot at t=0 (V_max = V_ini since the fault is quasi-static).
+   // Initial snapshot at t=0 (V_max = V_ini since fault is quasi-static).
    paraview_write(0, 0.0, TPV102Params::V_ini);
 
+   // If tfinal == 0: init-only run, stations at t=0 already written.
+   // Skip the time loop and go straight to summary.  This is the
+   // Phase-2 P2_D gate — the init sbatch verifies ψ_ini at every
+   // station from the single t=0 row.
+   if (nsteps == 0)
+   {
+      if (rank == 0)
+      {
+         std::cout << "[tpv102_driver] tfinal = 0 — init-only run. "
+                   << "Station t=0 row written, exiting.\n";
+      }
+      station_writer.Flush();
+      station_writer.Close();
+      surface_writer.Flush();
+      surface_writer.Close();
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 0;
+   }
+
    // -----------------------------------------------------------------------
-   // 8. RK4 time stepping
+   // 8. ADER time stepping (plan §4.10 Step 9: ADER-only, no RK4 path)
    // -----------------------------------------------------------------------
-   Vector k1(Q.Size()), k2(Q.Size()), k3(Q.Size()), k4(Q.Size());
-   Vector Q_tmp(Q.Size());
+   int output_interval = std::max(1, static_cast<int>(output_dt / dt));
 
    real_t t = 0.0;
    real_t V_max_global = 0.0;
-
-   // Pre-allocate RK4 sub-stage storage (reused across steps).
+   Vector Q_new(Q.Size());
    std::vector<real_t> psi_n(num_fault_total);
-   std::vector<real_t> sr_k1(num_fault_total), sr_k2(num_fault_total);
-   std::vector<real_t> sr_k3(num_fault_total), sr_k4(num_fault_total);
-   std::vector<real_t> V1_k1(num_fault_total), V1_k2(num_fault_total);
-   std::vector<real_t> V1_k3(num_fault_total), V1_k4(num_fault_total);
-   std::vector<real_t> V2_k1(num_fault_total), V2_k2(num_fault_total);
-   std::vector<real_t> V2_k3(num_fault_total), V2_k4(num_fault_total);
-   // R-001 fix: Stage-wise corrected tractions for RK4-weighted output
-   std::vector<real_t> t1c_k1(num_fault_total), t1c_k2(num_fault_total);
-   std::vector<real_t> t1c_k3(num_fault_total), t1c_k4(num_fault_total);
-   std::vector<real_t> t2c_k1(num_fault_total), t2c_k2(num_fault_total);
-   std::vector<real_t> t2c_k3(num_fault_total), t2c_k4(num_fault_total);
-   std::vector<real_t> snc_k1(num_fault_total), snc_k2(num_fault_total);
-   std::vector<real_t> snc_k3(num_fault_total), snc_k4(num_fault_total);
-   // v9.2.0 plan Step 5 F01+F02 fix: per-stage dpsi/dt buffers so psi
-   // integrates inside the RK4 state (classical coupled RK4 on (Q, psi))
-   // instead of the pre-fix operator-split pattern (stage-wise analytic
-   // updates of psi using single-stage V).  The old pattern was O(dt^2)
-   // in the (Q, psi) coupling; coupled RK4 is O(dt^4) to match the Q
-   // integration order.
-   //
-   // Stability note (REVIEW R-V92-H06): UpdateStateAnalytic was
-   // unconditionally stable in the constant-V limit via the closed-
-   // form theta transform.  Explicit RK4 on dpsi/dt = (b V0 / Dc) *
-   // (exp((f0-psi)/b) - V/V0) is only conditionally stable:
-   //   local timescale ~ Dc / (b V0 exp((f0-psi)/b))
-   //   stability requires dt << that timescale.
-   // TPV102 during an event: psi ∈ [0.40, 0.85]; with b=0.012, V0=1e-6,
-   // Dc=0.14 the timescale floor is ~0.6 s, and CFL dt ~ 2 ms gives
-   // dt/tau ~ 3e-3 — safely stable.  Future SEAS cycle simulations
-   // that drive psi below ~0.35 could enter an unstable regime; the
-   // psi-floor warning printf below fires if psi drops unexpectedly
-   // low.  Revisit if broadening past TPV102.
-   std::vector<real_t> psi_k1(num_fault_total), psi_k2(num_fault_total);
-   std::vector<real_t> psi_k3(num_fault_total), psi_k4(num_fault_total);
-   AgingLawPsi aging_law(TPV102Params::b, TPV102Params::V0, TPV102Params::f0);
-   // One-shot stability-envelope tripwire: fires at most once across
-   // the whole run if any psi drops below 0.3.  Rank 0 only.
-   bool psi_stability_warned = false;
 
    if (rank == 0)
    {
-      std::cout << "Starting time stepping...\n";
-      if (use_ader)
-      {
-         std::cout << "Time integrator: ADER-O(" << ader_order
-                   << ")  (default)\n";
-      }
-      else
-      {
-         std::cout << "Time integrator: RK4  (alternative; default is ADER)\n";
-      }
+      std::cout << "Starting ADER-O(" << ader_order << ") time loop...\n";
    }
 
-   // Round-6 R-004: hoist the ADER step buffer out of the loop and use
-   // Vector::Swap for an O(1) exchange each step (vs the previous
-   // Q = Q_new deep copy).  Allocation is one-shot; the Swap-based
-   // exchange also makes Q and Q_new refer to the same pair of
-   // buffers throughout the run.
-   Vector Q_new(Q.Size());
-
-   for (int step = 0; step < nsteps; step++)
+   for (int step = 0; step < nsteps; ++step)
    {
       real_t dt_step = std::min(dt, tfinal - t);
       if (dt_step <= 0.0) { break; }
 
-      // ================================================================
-      // ADER I-05 Phase 7: ADER time-stepping branch.  RK4 path below is
-      // unchanged (this branch is invoked only when --time-integrator=ader).
-      // ================================================================
-      if (use_ader)
-      {
-         // Save psi at step start for the sub-step psi update.
-         for (int i = 0; i < num_fault_total; i++)
-         {
-            psi_n[i] = dof_data[i].psi;
-         }
-
-         // Nucleation at the stage midpoint for 2nd-order accuracy.
-         // Higher-order nucleation time-integration is deferred (plan
-         // Phase 7 §4 "Nucleation timing for higher order").
-         // Persistent-prestress channel: overwrite DOFData.tau2_nuc;
-         // EvaluateTotal additivity makes this a sustained driver
-         // (re-imposed at every Riemann solve, not radiated through Q).
-         if (num_fault_total > 0)
-         {
-            ApplyNucleationPrestress(dof_data, fault_coords,
-                                          t + dt_step / 2.0);
-         }
-
-         // One-shot ADER predictor-corrector.  AdvanceADER fills the
-         // DOFData {V1, V2, slip_rate, tau*_corr, sigma_n_corr} with
-         // the friction-solve output on Q̄ = I/dt (= time-averaged bulk
-         // Q over [t, t+dt]).  NOTE: this is NOT exactly the time-
-         // average of the friction-solve trajectory — the solve is
-         // nonlinear — but it matches the one-shot equivalent to
-         // O(dt²) per plan §Phase 5 §4 (R-007).
-         // Q_new is hoisted above the step loop (round-6 R-004).  Q.Swap
-         // exchanges the Vector backing buffers in O(1); no deep copy.
-         wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
-         Q.Swap(Q_new);
-
-         t += dt_step;
-
-         // Forward-Euler psi update using the time-averaged slip rate.
-         // 1st-order in dt but matches the plan's pseudocode
-         // (`UpdateStateAnalytic`-style closed-form from
-         // psi_n and V_avg); the bulk scheme's 2nd-order accuracy is
-         // preserved because psi is a scalar state that contributes only
-         // to friction via a Lipschitz-smooth law.  Slip accumulation
-         // uses the same time-averaged V directly.
-         for (int i = 0; i < num_fault_total; i++)
-         {
-            const real_t dpsi = aging_law.Rate(dof_data[i].slip_rate,
-                                               psi_n[i],
-                                               dof_data[i].Dc);
-            dof_data[i].psi = psi_n[i] + dt_step * dpsi;
-
-            dof_data[i].slip1 += dof_data[i].V1 * dt_step;
-            dof_data[i].slip2 += dof_data[i].V2 * dt_step;
-
-            // psi stability tripwire (mirrors RK4 path).
-            if (!psi_stability_warned && rank == 0 && dof_data[i].psi < 0.3)
-            {
-               std::fprintf(stderr,
-                  "[WARNING] psi dropped to %.3f at fault QP %d (t=%.3f s). "
-                  "ADER path uses forward-Euler psi update; switch to an "
-                  "implicit psi solver if the stability margin shrinks.\n",
-                  dof_data[i].psi, i, t);
-               psi_stability_warned = true;
-            }
-         }
-
-         // Under ADER, the DOFData values after AdvanceADER ARE the
-         // one-shot endpoint state — there is no "stage-4" snapshot to
-         // distinguish from an RK4-weighted average.  Populate the _k4
-         // fields with the same values so `<field>_k4 − <field>` = 0 in
-         // the VTU (plan Phase 7 §3: "documents that ADER eliminates
-         // H-V92-K by formulation").
-         if (use_paraview && pv_local_normal_stress_k4.Size() == num_fault_total)
-         {
-            for (int i = 0; i < num_fault_total; i++)
-            {
-               pv_local_slip_rate_k4(2*i + 0) = dof_data[i].V1;
-               pv_local_slip_rate_k4(2*i + 1) = dof_data[i].V2;
-               pv_local_traction_k4(2*i + 0)  = dof_data[i].tau1_corr;
-               pv_local_traction_k4(2*i + 1)  = dof_data[i].tau2_corr;
-               pv_local_normal_stress_k4(i)   = dof_data[i].sigma_n_corr;
-            }
-         }
-
-         // V_max tracking — under ADER we only have the time-averaged
-         // slip rate per step, so track its peak (vs the per-stage max
-         // the RK4 path tracks).  This is a weaker tripwire under ADER
-         // but still surfaces unbounded growth.
-         real_t V_max_local = 0.0;
-         for (int i = 0; i < num_fault_total; i++)
-         {
-            V_max_local = std::max(V_max_local, dof_data[i].slip_rate);
-         }
-#ifdef MFEM_USE_MPI
-         real_t V_max_step;
-         MPI_Allreduce(&V_max_local, &V_max_step, 1,
-                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
-#else
-         real_t V_max_step = V_max_local;
-#endif
-         V_max_global = std::max(V_max_global, V_max_step);
-
-         // Output (mirrors the RK4 loop's station/surface write cadence).
-         if (step % output_interval == 0 || step == nsteps - 1)
-         {
-            station_writer.WriteStep(t, dof_data);
-            surface_writer.WriteStep(t, Q);
-            if (rank == 0)
-            {
-               std::cout << "Step " << step << "/" << nsteps
-                         << ", t = " << t << " s"
-                         << ", V_max = " << V_max_step << " m/s\n";
-            }
-         }
-
-         // R-004 (round-5): step-0 shared-fault DOFData consistency check
-         // must also run under ADER so an MPI cross-rank regression
-         // doesn't go silent.  Mirrors the RK4 path's call below.
-         if (step == 0)
-         {
-            wave.VerifySharedFaultDOFDataConsistency();
-         }
-
-         // R-002 (round-5): ParaView output cadence must match the RK4
-         // path — paraview_write is MPI-collective, so every rank must
-         // call it every step.  The pv_local_*_k4 buffers were populated
-         // above (so `<field>_k4 - <field>` = 0 under ADER by
-         // construction, per plan Phase 7 §5).
-         paraview_write(step + 1, t, V_max_step);
-
-         // R-003 (round-5): NaN tripwire — AdvanceADER can produce NaN
-         // under CFL-violating dt or a divergent friction solve; mirror
-         // the RK4 path's detection and loud exit so a bad run is
-         // caught immediately rather than propagated.
-         {
-            real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
-            real_t global_nan = local_nan;
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(&local_nan, &global_nan, 1,
-                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
-#endif
-            if (global_nan > 0.0)
-            {
-               std::cerr << "ERROR: NaN detected at step " << step
-                         << ", t = " << t << " s (rank " << rank
-                         << ", ADER path)\n";
-#ifdef MFEM_USE_MPI
-               MPI_Finalize();
-#endif
-               return 1;
-            }
-         }
-
-         // All per-step epilogue actions handled in the ADER branch.
-         // Skip the RK4 bookkeeping below and go back to the top of
-         // the step loop.
-         continue;
-      }
-
-      // ================================================================
-      // RK4 path (unchanged from the default TPV102 driver).
-      // ================================================================
-
-      // Save psi at step start for sub-stage restoration.
-      for (int i = 0; i < num_fault_total; i++)
+      // Save ψ at step start for the analytic update below.
+      for (int i = 0; i < num_fault_total; ++i)
       {
          psi_n[i] = dof_data[i].psi;
       }
 
-      // RK4 stage 1: at time t, psi = psi_n
-      // R-003 fix: nucleation evaluated at stage time.
-      // Persistent-prestress channel: overwrite DOFData.tau2_nuc; the
-      // EvaluateTotal trial-traction addition makes this a sustained
-      // driver re-imposed at every wave-operator Riemann solve.
-      if (num_fault_total > 0)
+      // Nucleation (§3.9 directive): cumulative per-macro-step increment.
+      // ApplyNucleationIncremental_TPV102 adds  Δτ · smoothStepIncrement
+      // to `tau2_nuc` at every call, so over [0, T_nuc] the channel
+      // telescopes to the full perturbation.
+      //
+      // R-1008 (round-10) NUCLEATION DOUBLE-COUNT FIX:
+      //   The substep path's Tpv102SubStepIterator::AdvanceWithSubStepStates
+      //   (and legacy Advance) already calls ApplyNucleationIncremental_TPV102
+      //   ONCE PER SUB-STEP internally (line 295 / its AdvanceWithSubStepStates
+      //   sibling).  Σ_o ΔS over the sub-steps telescopes to the same
+      //   macro-step increment ΔS(t+dt) − ΔS(t).  If the driver ALSO
+      //   calls the accumulator here, tau2_nuc is incremented TWICE per
+      //   macro-step → 2× the spec Δτ₀ at full ramp → 2-million× rupture
+      //   over-acceleration (terminal velocity by t=0.5 s instead of
+      //   ~t=1 s).  Skip the driver-level call when the iterator owns
+      //   nucleation cadence; one-shot path keeps the driver-level call.
+      if (!disable_nucleation && num_fault_total > 0 && !use_substep_iterator)
       {
-         ApplyNucleationPrestress(dof_data, fault_coords, t);
-      }
-      wave.Mult(Q, k1);
-      for (int i = 0; i < num_fault_total; i++)
-      {
-         V1_k1[i] = dof_data[i].V1; V2_k1[i] = dof_data[i].V2;
-         sr_k1[i] = dof_data[i].slip_rate;
-         t1c_k1[i] = dof_data[i].tau1_corr; t2c_k1[i] = dof_data[i].tau2_corr;
-         snc_k1[i] = dof_data[i].sigma_n_corr;
-         // F01+F02: psi_k1 = dpsi/dt | (V = sr_k1, psi = psi_n, Dc).
-         // Advance psi to stage 2 input: psi_n + (dt/2) * psi_k1.
-         psi_k1[i] = aging_law.Rate(sr_k1[i], psi_n[i], dof_data[i].Dc);
-         dof_data[i].psi = psi_n[i] + 0.5 * dt_step * psi_k1[i];
-      }
-
-      // RK4 stage 2: at time t + dt/2, psi = psi_n + (dt/2) * psi_k1
-      if (num_fault_total > 0)
-      {
-         ApplyNucleationPrestress(dof_data, fault_coords,
-                                       t + dt_step / 2.0);
-      }
-      add(Q, dt_step / 2.0, k1, Q_tmp);
-      wave.Mult(Q_tmp, k2);
-      for (int i = 0; i < num_fault_total; i++)
-      {
-         V1_k2[i] = dof_data[i].V1; V2_k2[i] = dof_data[i].V2;
-         sr_k2[i] = dof_data[i].slip_rate;
-         t1c_k2[i] = dof_data[i].tau1_corr; t2c_k2[i] = dof_data[i].tau2_corr;
-         snc_k2[i] = dof_data[i].sigma_n_corr;
-         // F01+F02: psi_k2 = dpsi/dt at stage-2 state (V = sr_k2, psi = psi_n + dt/2 * psi_k1
-         // which is the current dof_data[i].psi set at end of stage 1).
-         // Advance psi to stage 3 input: psi_n + (dt/2) * psi_k2.
-         psi_k2[i] = aging_law.Rate(sr_k2[i], dof_data[i].psi, dof_data[i].Dc);
-         dof_data[i].psi = psi_n[i] + 0.5 * dt_step * psi_k2[i];
+         ApplyNucleationIncremental_TPV102(dof_data, fault_coords,
+                                           t + dt_step, dt_step);
       }
 
-      // RK4 stage 3: at time t + dt/2, psi = psi_n + (dt/2) * psi_k2
-      add(Q, dt_step / 2.0, k2, Q_tmp);
-      wave.Mult(Q_tmp, k3);
-      for (int i = 0; i < num_fault_total; i++)
+      // ADER predictor-corrector.  Default (use_substep_iterator==false):
+      // one-shot AdvanceADER runs the bulk wave update + the fault-face
+      // Riemann solve (through FaultFaceFlux::EvaluateADER); the solve
+      // reads DOFData.psi and DOFData.tau*_nuc as set above, and writes
+      // V1/V2/slip_rate/tau*_corr/sigma_n_corr back onto DOFData.
+      //
+      // Sub-step path (use_substep_iterator==true, --fault-iterator
+      // substep):  AdvanceADERWithSubStep composes ComputeADERSubStepStates
+      // (per-sub-step pointwise Q via Taylor expansion),
+      // EvaluateBulkAtFaultQPsCanonical (per-sub-step canonical Q at fault
+      // QPs), Tpv102SubStepIterator::AdvanceWithSubStepStates (per-sub-step
+      // friction + ψ + slip + accumulated I_imp), and AdvanceADER (with
+      // the iterator's I_imp installed via SetSubStepFaultImposedStates so
+      // the fault branch consumes them in lieu of inline EvaluateADER).
+      // At O=1 the two paths are bit-identical (T_TPV102_SSI_3 contract).
+      if (use_substep_iterator)
       {
-         V1_k3[i] = dof_data[i].V1; V2_k3[i] = dof_data[i].V2;
-         sr_k3[i] = dof_data[i].slip_rate;
-         t1c_k3[i] = dof_data[i].tau1_corr; t2c_k3[i] = dof_data[i].tau2_corr;
-         snc_k3[i] = dof_data[i].sigma_n_corr;
-         // F01+F02: psi_k3 = dpsi/dt at stage-3 state (V = sr_k3, psi = psi_n + dt/2 * psi_k2).
-         // Advance psi to stage 4 input: psi_n + dt * psi_k3.
-         psi_k3[i] = aging_law.Rate(sr_k3[i], dof_data[i].psi, dof_data[i].Dc);
-         dof_data[i].psi = psi_n[i] + dt_step * psi_k3[i];
+         AdvanceADERWithSubStep(wave, substep_iterator, dof_data,
+                                fault_coords, Q, dt_step,
+                                ader_order, /*t_step_start=*/t,
+                                method, Q_new);
       }
-
-      // RK4 stage 4: at time t + dt, psi = psi_n + dt * psi_k3
-      if (num_fault_total > 0)
+      else
       {
-         ApplyNucleationPrestress(dof_data, fault_coords, t + dt_step);
+         wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
       }
-      add(Q, dt_step, k3, Q_tmp);
-      wave.Mult(Q_tmp, k4);
-      for (int i = 0; i < num_fault_total; i++)
-      {
-         V1_k4[i] = dof_data[i].V1; V2_k4[i] = dof_data[i].V2;
-         sr_k4[i] = dof_data[i].slip_rate;
-         t1c_k4[i] = dof_data[i].tau1_corr; t2c_k4[i] = dof_data[i].tau2_corr;
-         snc_k4[i] = dof_data[i].sigma_n_corr;
-         // F01+F02: psi_k4 = dpsi/dt at stage-4 state (V = sr_k4, psi = psi_n + dt * psi_k3).
-         // No further advance; the final RK4 combination lives in the post-stage block.
-         psi_k4[i] = aging_law.Rate(sr_k4[i], dof_data[i].psi, dof_data[i].Dc);
-      }
-
-      // Update Q with RK4 weights
-      for (int i = 0; i < Q.Size(); i++)
-      {
-         Q[i] += dt_step / 6.0 * (k1[i] + 2.0*k2[i] + 2.0*k3[i] + k4[i]);
-      }
-
+      Q.Swap(Q_new);
       t += dt_step;
 
-      // R-V92-E02 (plan §19): capture stage-4 DOFData snapshot BEFORE the
-      // RK4-averaging block below overwrites DOFData.V1/V2/tau*_corr/
-      // sigma_n_corr with the averaged values.  paraview_write packs these
-      // into `<field>_k4` CellData alongside the averaged `<field>` CellData
-      // so the RK4-averaging residual `<field>_k4 - <field>` is directly
-      // inspectable in ParaView — it is the H-V92-K vs H-V92-G discriminator.
-      if (use_paraview && pv_local_normal_stress_k4.Size() == num_fault_total)
+#ifdef SEAS_DIAG_FAULT_FLUX
+      // C-2C BULK-DELTA: per-macro-step delta of bulk Q at the diag
+      // DOFs.  Captures the NET change Q^{n+1} - Q^n at the two diag
+      // tets' face DOFs after one full ADER step (predictor + corrector
+      // including fault Riemann + bulk wave op).  Lets the post-run
+      // analyzer correlate per-step asymmetry growth against C-1n.
+      if (diag_elem_plus >= 0 && diag_elem_minus >= 0 &&
+          diag_face_dof_plus >= 0 && diag_face_dof_minus >= 0)
       {
-         for (int i = 0; i < num_fault_total; i++)
+         static std::vector<real_t> prev_Qp(NUM_STATE, 0.0);
+         static std::vector<real_t> prev_Qm(NUM_STATE, 0.0);
+         static bool have_prev = false;
+
+         const real_t *Qd = Q.GetData();
+         const int dof_off_p = diag_elem_plus  * wave.GetNDof();
+         const int dof_off_m = diag_elem_minus * wave.GetNDof();
+         real_t Qp[NUM_STATE], Qm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
          {
-            pv_local_slip_rate_k4(2*i + 0)   = V1_k4[i];
-            pv_local_slip_rate_k4(2*i + 1)   = V2_k4[i];
-            pv_local_traction_k4(2*i + 0)    = t1c_k4[i];
-            pv_local_traction_k4(2*i + 1)    = t2c_k4[i];
-            pv_local_normal_stress_k4(i)     = snc_k4[i];
+            Qp[c] = Qd[c*ndof_total + dof_off_p + diag_face_dof_plus];
+            Qm[c] = Qd[c*ndof_total + dof_off_m + diag_face_dof_minus];
+         }
+         real_t dQp[NUM_STATE], dQm[NUM_STATE];
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            dQp[c] = have_prev ? (Qp[c] - prev_Qp[c]) : 0.0;
+            dQm[c] = have_prev ? (Qm[c] - prev_Qm[c]) : 0.0;
+            prev_Qp[c] = Qp[c];
+            prev_Qm[c] = Qm[c];
+         }
+         have_prev = true;
+         std::fprintf(stderr,
+            "[C-2C BULK-DELTA] rank=%d t=%.4e  "
+            "Q+_SXX=%+.4e Q-_SXX=%+.4e diff_SXX=%+.4e  "
+            "dQ+_SXX=%+.4e dQ-_SXX=%+.4e d_diff_SXX=%+.4e  "
+            "Q+_SYY=%+.4e Q-_SYY=%+.4e diff_SYY=%+.4e  "
+            "Q+_SZZ=%+.4e Q-_SZZ=%+.4e diff_SZZ=%+.4e\n",
+            g_seas_my_rank, t,
+            Qp[SXX], Qm[SXX], Qp[SXX] - Qm[SXX],
+            dQp[SXX], dQm[SXX], dQp[SXX] - dQm[SXX],
+            Qp[SYY], Qm[SYY], Qp[SYY] - Qm[SYY],
+            Qp[SZZ], Qm[SZZ], Qp[SZZ] - Qm[SZZ]);
+      }
+#endif
+
+      // ψ update + slip accumulation.  TPV102 uses the regularised
+      // rate-and-state ageing law (SCEC TPV101/102 Eq. (2): dθ/dt = 1 −
+      // Vθ/L).  `UpdateStateAnalytic` from friction/state_evolution.hpp
+      // is the exact ageing-law analytic update for constant V over dt:
+      //   θ(t+dt) = θ·exp(−Vdt/L) + (L/V)·(1 − exp(−Vdt/L))
+      // converted back to ψ-space.
+      //
+      // The iterator's per-sub-step path already accumulates slip1/slip2
+      // and writes ψ per sub-step (R-1009 slip double-count avoidance).
+      // On the one-shot path the driver owns both the slip integration
+      // and the macro-step ψ update from psi_n[i].
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         dof_data[i].psi = UpdateStateAnalytic(
+            psi_n[i],
+            dof_data[i].slip_rate,
+            dof_data[i].Dc,
+            dt_step,
+            TPV102Params::f0,
+            TPV102Params::b,
+            TPV102Params::V0);
+         if (!use_substep_iterator)
+         {
+            dof_data[i].slip1 += dof_data[i].V1 * dt_step;
+            dof_data[i].slip2 += dof_data[i].V2 * dt_step;
          }
       }
 
-      // v9.2.0 Step 5 F01+F02: classical coupled RK4 on (Q, psi).
-      // psi_k1..psi_k4 are dpsi/dt samples at the four RK4 stage states
-      // (V, psi) — V from the just-finished Mult, psi from the stage input
-      // set at the end of the previous stage block.  The combination below
-      // is the O(dt^4) Butcher-tableau weighted sum, replacing the pre-fix
-      // O(dt^2) operator-split pattern (analytic update with averaged V).
-      // All other fields (V/slip/tau/sigma_n) retain their RK4-weighted
-      // averages from the stage buffers — slip IS the RK4 integral of V
-      // when V_avg uses (1+2+2+1)/6 weights (since dslip/dt = V), so
-      // `slip += V_avg * dt` below is the same thing.
-      for (int i = 0; i < num_fault_total; i++)
-      {
-         dof_data[i].psi = psi_n[i] + dt_step / 6.0 *
-                           (psi_k1[i] + 2.0*psi_k2[i] + 2.0*psi_k3[i] + psi_k4[i]);
-         // R-V92-H06 stability tripwire: explicit RK4 on aging law is
-         // conditionally stable; safe margin fails around psi < 0.3.
-         // Warn once on rank 0 to surface if a new scenario enters the
-         // unstable regime without changing the integrator.
-         if (!psi_stability_warned && rank == 0 && dof_data[i].psi < 0.3)
-         {
-            std::fprintf(stderr,
-               "[WARNING] psi dropped to %.3f at fault QP %d (t=%.3f s). "
-               "Explicit RK4 aging-law stability margin shrinks rapidly "
-               "below psi=0.35 (see driver comment near aging_law ctor). "
-               "If this run is a cycle simulation, switch to an implicit "
-               "psi solver.\n",
-               dof_data[i].psi, i, t);
-            psi_stability_warned = true;
-         }
-         // R-V92-K01 (round-9): slip IS the RK4 integral of V when
-         // V_avg uses the Butcher (1,2,2,1)/6 weights (since dslip/dt
-         // = V), so `slip += V_avg * dt` below is the exact O(dt^4)
-         // integral.  This is the ONLY place the Simpson-mean V_avg is
-         // USED as a value in its own right — for the slip integral.
-         const real_t V1_avg = (V1_k1[i] + 2*V1_k2[i] + 2*V1_k3[i] + V1_k4[i]) / 6.0;
-         const real_t V2_avg = (V2_k1[i] + 2*V2_k2[i] + 2*V2_k3[i] + V2_k4[i]) / 6.0;
-         dof_data[i].slip1 += V1_avg * dt_step;
-         dof_data[i].slip2 += V2_avg * dt_step;
-      }
-
-      // ---------------------------------------------------------------
-      // R-V92-K01 (round-9 REVIEW fix): endpoint re-evaluation of fault
-      // observables at Q(t+dt).
-      //
-      // Prior behaviour: dof_data.{V1, V2, slip_rate, tau1_corr, tau2_corr,
-      // sigma_n_corr} were overwritten with the RK4-Butcher-weighted
-      // Simpson mean of stage-i snapshots, i.e. the TIME-AVERAGED values
-      // over [t_n, t_n+dt] which approximate midpoint (t_n + dt/2).
-      //
-      // Problem: the station writer labels the sample time as t = t_{n+1}
-      // (post-increment above), but the values correspond to t_n + dt/2 —
-      // a half-step phase lag.  Semantically wrong for instantaneous
-      // observables regardless of magnitude.
-      //
-      // Fix: invoke wave.Mult(Q, k_unused) one more time on the ENDPOINT
-      // state Q(t_{n+1}).  This triggers FaultFaceFlux::Evaluate on the
-      // endpoint Q, which overwrites dof_data.{tau1_corr, tau2_corr,
-      // sigma_n_corr, V1, V2, slip_rate} with values self-consistent
-      // with the Q used for output.  The slip accumulators already hold
-      // the correct Simpson-integral of V (above) — do NOT re-accumulate.
-      //
-      // Cost: one extra Mult per step.  Not wrapped under `if output step`
-      // because every subsequent RK4 step's stage-1 would do the same
-      // Mult anyway; this just shifts that first Mult from "stage 1 of
-      // step n+1" to "endpoint re-eval of step n", reusing the result.
-      // To avoid the overhead we could cache k_endpoint and reuse it as
-      // stage-1 k1 of the next step (FSAL-style), but that complicates
-      // nucleation timing — deferred.
-      // ---------------------------------------------------------------
-      {
-         Vector k_endpoint(Q.Size());
-         // Persistent-prestress channel: re-impose tau2_nuc at the new
-         // step time so the endpoint Mult sees the correct nucleation
-         // amplitude.  Idempotent overwrite — safe to call after
-         // stage-4 even though stage-4 already set tau2_nuc(t+dt).
-         if (num_fault_total > 0)
-         {
-            ApplyNucleationPrestress(dof_data, fault_coords, t);
-         }
-         wave.Mult(Q, k_endpoint);
-         // dof_data[i].{tau1_corr, tau2_corr, sigma_n_corr, V1, V2,
-         //              slip_rate} are now the endpoint-at-t values
-         // produced by the stage Evaluate on Q(t+dt).
-      }
-
-      // R-006: Track peak V_max across all RK4 stages, not just the average
+      // V_max tracking.
       real_t V_max_local = 0.0;
-      for (int i = 0; i < num_fault_total; i++)
+      for (int i = 0; i < num_fault_total; ++i)
       {
-         V_max_local = std::max(V_max_local,
-            std::max({sr_k1[i], sr_k2[i], sr_k3[i], sr_k4[i]}));
+         V_max_local = std::max(V_max_local, dof_data[i].slip_rate);
       }
 #ifdef MFEM_USE_MPI
       real_t V_max_step;
@@ -1439,178 +2075,51 @@ int main(int argc, char *argv[])
 #endif
       V_max_global = std::max(V_max_global, V_max_step);
 
-#ifdef SEAS_DIAG_FAULT_FLUX
-      {
-         // C-4 BULK: v9.0.0 §0.5 checkpoint — global max|Q[VX]|, max|Q[SXY]|
-         // post-RK4 update.  Deadlock-safe by construction:
-         //   * `c4_fire` depends only on (step, t) — both lockstep-identical
-         //     across ranks — so every rank evaluates the same boolean.
-         //   * MPI_Allreduce is called UNCONDITIONALLY on every rank
-         //     whenever c4_fire is true; no rank-local gate on the
-         //     collective.
-         //   * Only the final fprintf is guarded by `rank == 0`, AFTER the
-         //     collectives complete.
-         // Throttle: every 100 steps routinely + every 10 steps inside the
-         // 1.0 s <= t < 1.4 s breakaway window.  step=0 fires unconditionally
-         // so the 2-rank deadlock unit-test sees at least one C-4 line.
-         const bool c4_fire = (step % 100 == 0) ||
-                              (step % 10 == 0 && t >= 1.0 && t < 1.4);
-         if (c4_fire)
-         {
-            real_t q_vx_local  = 0.0;
-            real_t q_sxy_local = 0.0;
-            for (int i = 0; i < ndof_total; i++)
-            {
-               q_vx_local  = std::max(q_vx_local,
-                                      std::abs(Q[VX  * ndof_total + i]));
-               q_sxy_local = std::max(q_sxy_local,
-                                      std::abs(Q[SXY * ndof_total + i]));
-            }
-            real_t q_vx_global  = q_vx_local;
-            real_t q_sxy_global = q_sxy_local;
-#ifdef MFEM_USE_MPI
-            MPI_Allreduce(&q_vx_local,  &q_vx_global,  1,
-                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
-            MPI_Allreduce(&q_sxy_local, &q_sxy_global, 1,
-                          MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
-#endif
-            if (rank == 0)
-            {
-               std::fprintf(stderr,
-                  "[C-4 BULK] step=%d  t=%.4f  V_max=%.3e  "
-                  "max|Q[VX]|=%.3e m/s  max|Q[SXY]|=%.3e Pa\n",
-                  step, t, V_max_step, q_vx_global, q_sxy_global);
-            }
-         }
-      }
-#endif
-
-
-      // R-101 fix: after the first RK4 step, verify that shared-fault
-      // DOFData entries agree bit-identically across the two ranks that
-      // own each shared fault QP.  The (+,-) canonicalisation in R-001
-      // depends on an MFEM invariant (identical face normals on both
-      // ranks) that was previously unverified; this call makes the
-      // invariant failure mode loud and fatal instead of silent drift.
-      if (step == 0)
-      {
-         wave.VerifySharedFaultDOFDataConsistency();
-      }
-
-      // Output
+      // Output cadence.
       if (step % output_interval == 0 || step == nsteps - 1)
       {
          station_writer.WriteStep(t, dof_data);
          surface_writer.WriteStep(t, Q);
-
          if (rank == 0)
          {
             std::cout << "Step " << step << "/" << nsteps
                       << ", t = " << t << " s"
                       << ", V_max = " << V_max_step << " m/s\n";
          }
+      }
 
-         // --debug-qnorm diagnostic (tpv102_debug_v1 H1): print per-rank
-         // ||Q||_inf.  If all ranks other than the hypocenter's stay at 0,
-         // bulk wave energy is not crossing partition seams.
-         if (debug_qnorm)
-         {
-            real_t qn_local = Q.Normlinf();
+      // ParaView snapshot — has its own internal schedule (matches
+      // --paraview-dt / --paraview-every / output_dt), so we always
+      // call and let pv_out / pv_bulk_out's PeekShouldWrite gate the I/O.
+      paraview_write(step + 1, t, V_max_step);
+
+      if (step == 0)
+      {
+         wave.VerifySharedFaultDOFDataConsistency();
+      }
+
+      // NaN tripwire.
+      {
+         real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
+         real_t global_nan = local_nan;
 #ifdef MFEM_USE_MPI
-            // Gather all ranks' norms onto rank 0 for a compact summary.
-            // R-303 fix: MPI datatype must match real_t at compile time.
-            // Hardcoding MPI_DOUBLE silently corrupts qn_all on
-            // MFEM_USE_SINGLE builds (where real_t = float = 4 bytes).
-            std::vector<real_t> qn_all;
-            if (rank == 0) { qn_all.resize(nprocs); }
-            MPI_Gather(&qn_local, 1, MPITypeMap<real_t>::mpi_type,
-                       rank == 0 ? qn_all.data() : nullptr, 1,
-                       MPITypeMap<real_t>::mpi_type,
-                       0, comm);
-            if (rank == 0)
-            {
-               real_t qmin = qn_all[0], qmax = qn_all[0], qsum = 0.0;
-               int nzero = 0;
-               for (int r = 0; r < nprocs; r++)
-               {
-                  qmin = std::min(qmin, qn_all[r]);
-                  qmax = std::max(qmax, qn_all[r]);
-                  qsum += qn_all[r];
-                  if (qn_all[r] == 0.0) { nzero++; }
-               }
-               std::cout << "  [qnorm] min=" << qmin
-                         << " max=" << qmax
-                         << " mean=" << (qsum / nprocs)
-                         << " #ranks_with_||Q||=0: " << nzero
-                         << "/" << nprocs << "\n";
-               // R-002 / R-106 fix: per-rank breakout for H1 diagnosis.
-               // Always show bilateral neighbours of the hypocenter rank
-               // plus rank 0 and nprocs-1; this survives the edge case
-               // where hypo_rank is at an endpoint of the rank range
-               // (previously collapsed the watch list to a single entry).
-               std::vector<int> watch = { hypo_rank };
-               for (int off : {1, 4})
-               {
-                  if (hypo_rank + off <  nprocs) { watch.push_back(hypo_rank + off); }
-                  if (hypo_rank - off >= 0)      { watch.push_back(hypo_rank - off); }
-               }
-               watch.push_back(nprocs - 1);
-               watch.push_back(0);
-               // De-dup while preserving order (small N so linear is fine).
-               std::vector<int> watch_unique;
-               for (int r : watch)
-               {
-                  bool dup = false;
-                  for (int u : watch_unique) { if (u == r) { dup = true; break; } }
-                  if (!dup) { watch_unique.push_back(r); }
-               }
-               // R-402 fix: format qnorm in scientific notation so the
-               // post-run RESULT.txt regex operates on a stable format.
-               // Default operator<< switches between fixed and scientific
-               // by value magnitude, so a legitimate small ||Q||_inf like
-               // 0.0001 would otherwise print as "0.0001" and trip the
-               // dead-rank detector.
-               std::ios::fmtflags prev_flags = std::cout.flags();
-               std::streamsize    prev_prec  = std::cout.precision();
-               std::cout << std::scientific << std::setprecision(3);
-               std::cout << "  [qnorm:watch]";
-               for (int r : watch_unique)
-               {
-                  std::cout << " r" << r << "=" << qn_all[r];
-               }
-               std::cout << " (hypo_rank=" << hypo_rank << ")\n";
-               std::cout.flags(prev_flags);
-               std::cout.precision(prev_prec);
-            }
-#else
-            if (rank == 0)
-            {
-               std::cout << "  [qnorm] ||Q||_inf = " << qn_local << "\n";
-            }
+         MPI_Allreduce(&local_nan, &global_nan, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #endif
+         if (global_nan > 0.0)
+         {
+            std::cerr << "ERROR: NaN detected at step " << step
+                      << ", t = " << t << " s (rank " << rank << ")\n";
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 1;
          }
       }
 
-      // ParaView: MPI-collective; must be called every step (even if the
-      // schedule gate inside Save() skips the actual write) so every rank
-      // stays in lockstep.  V_max_step is already globally reduced.
-      paraview_write(step + 1, t, V_max_step);
-
-      // R-003: NaN detection reduced across all ranks (prevents deadlock)
-      real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
-      real_t global_nan = local_nan;
-#ifdef MFEM_USE_MPI
-      MPI_Allreduce(&local_nan, &global_nan, 1,
-                    MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
-#endif
-      if (global_nan > 0.0)
+      if (debug_qnorm && step % output_interval == 0 && rank == 0)
       {
-         std::cerr << "ERROR: NaN detected at step " << step
-                   << ", t = " << t << " s (rank " << rank << ")\n";
-#ifdef MFEM_USE_MPI
-         MPI_Finalize();
-#endif
-         return 1;
+         std::cout << "  [qnorm] ||Q||_2 = " << Q.Norml2() << "\n";
       }
    }
 
@@ -1618,17 +2127,55 @@ int main(int argc, char *argv[])
    // 9. Summary
    // -----------------------------------------------------------------------
    station_writer.Flush();
+   station_writer.Close();
    surface_writer.Flush();
+   surface_writer.Close();
+
+   // Diagnostic dump: end-of-run per-fault-QP state, gated by env var.
+   // Writes <output_dir>/fault_qp_dump_rank<R>.txt, one row per local
+   // fault QP.  No MPI calls; each rank writes only its own file.
+   {
+      const char *dump_env = std::getenv("SEAS_DIAG_DUMP_FAULT_QPS");
+      if (dump_env && dump_env[0] != '\0' &&
+          !(dump_env[0] == '0' && dump_env[1] == '\0'))
+      {
+         std::ostringstream pathss;
+         pathss << output_dir << "/fault_qp_dump_rank" << rank << ".txt";
+         std::ofstream fs(pathss.str());
+         if (fs.is_open())
+         {
+            fs << std::scientific << std::setprecision(17);
+            fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
+                  "tau1_corr tau2_corr sigma_n_corr psi\n";
+            const int n = static_cast<int>(dof_data.size());
+            for (int i = 0; i < n; i++)
+            {
+               const Vector &c = fault_coords[i];
+               const DOFData &d = dof_data[i];
+               fs << i << " " << c(0) << " " << c(1) << " " << c(2)
+                  << " " << d.V1 << " " << d.V2
+                  << " " << d.slip1 << " " << d.slip2
+                  << " " << d.tau1_corr << " " << d.tau2_corr
+                  << " " << d.sigma_n_corr << " " << d.psi << "\n";
+            }
+            fs.close();
+            if (rank == 0)
+            {
+               std::cout << "[diag-dump] wrote " << n
+                         << " fault QPs to fault_qp_dump_rank<R>.txt\n";
+            }
+         }
+      }
+   }
 
    if (rank == 0)
    {
       std::cout << "\n========================================\n";
-      std::cout << "Simulation complete.\n";
-      std::cout << "Final time: " << t << " s\n";
-      std::cout << "Steps: " << nsteps << "\n";
-      std::cout << "Max slip rate: " << V_max_global << " m/s\n";
-      std::cout << "Ranks: " << nprocs << "\n";
-      std::cout << "Output: " << output_dir << "/\n";
+      std::cout << "TPV102 run complete.\n";
+      std::cout << "  tfinal  = " << tfinal << " s\n";
+      std::cout << "  steps   = " << nsteps << "\n";
+      std::cout << "  V_max   = " << V_max_global << " m/s\n";
+      std::cout << "  output  = " << output_dir << "/\n";
       std::cout << "========================================\n";
    }
 
