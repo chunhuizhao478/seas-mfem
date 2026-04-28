@@ -11,17 +11,20 @@
 # TPV205 (SCEC TPV5) production run — MIXED FLUX ADJACENT,
 # P=2 + ADER-O3 one-shot.
 # =======================================================================
-# First production-scale TPV205 mixed-flux run on the rebuilt LSW
-# dispatch (Phase 1-4 of tpv205_lsw_native_fields_plan_2026-04-27):
-#   - DOFData::lsw_mu_s/lsw_mu_d/lsw_d_c LSW-native fields
-#   - FaultFaceFlux::EvaluateADER_LSW
+# Production-scale follow-up to the dev-queue mixed-flux smoke
+# (tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch).  Same rebuilt
+# TPV205 driver after the R-001 round-5 fixes (REVIEW.md 2026-04-27
+# final review), bumped from P=1+O=2 to P=2+O=3 with the normal-queue
+# 48 h envelope so tfinal=12 s completes:
+#   - DOFData::lsw_mu_s/lsw_mu_d/lsw_d_c LSW-native fields (Phase 1)
+#   - FaultFaceFlux::EvaluateADER_LSW (no slip accumulation; iterator
+#     owns slip evolution exclusively — REVIEW R-001)
 #   - WaveOperator::SetFaultFrictionLaw(LSW) wired in driver
-#   - Two LSW dispatch branches in wave_operator.inl (interior + R-1600
-#     shared-fault fallback) so np > 1 produces correct rupture physics
-#     across MPI rank boundaries.
+#   - Two LSW dispatch branches in wave_operator.inl (interior +
+#     R-1600/R-1601 shared-fault fallback)
 #
 # Baseline ADER-O3 + mixed-flux ADJACENT (Mixed-Flux 2 per Zhang 2023)
-# at the SCEC TPV5 spec parameters:
+# at the SCEC TPV5 §III spec parameters:
 #   τ_back=70 MPa, τ_nuc=81.6 MPa, τ_left=78 MPa, τ_right=62 MPa,
 #   σ_n=120 MPa, μ_s=0.677 (rupture area) / 10000 (barrier),
 #   μ_d=0.525, d_c=0.40 m, V_ini=0 m/s.  No time-varying nucleation —
@@ -34,22 +37,21 @@
 # Produce the canonical TPV205 traces for the 16 SCEC fault stations
 # (kStationsTPV205 in config/tpv205_params.hpp), the fault-surface
 # ParaView output, and the bulk-volume ParaView output for comparison
-# against the DRDG3D reference under tpv205/benchmark_data/DRDG3D_*.
+# against the DRDG3D reference under tpv205/benchmark_data/DRDG3D_*,
+# at production resolution and full SCEC TPV5 §III window.
 #
 # Wall-time budget
 # ----------------
 # Normal queue 48 h envelope.  At P=2 + ADER-O3 + mixed-flux on the
 # 200 m mesh at 500 ranks, dt scales as P=2 → ~1/3 of the P=1 dt and
-# ADER-O3 has higher per-step cost.  Assume effective ~12 s/step;
-# tfinal = 12.0 s typically requires ~2400 macro steps; budget allows
+# ADER-O3 has higher per-step cost.  Budget allows tfinal=12 s
 # completion with margin for the bulk ParaView I/O.
 #
 # Output cadence
 # --------------
-# --output-dt 0.01                  # station files every 10 ms (matches
-#                                     SCEC trace cadence)
-# --paraview --paraview-dt 0.05     # fault-surface VTU/PVD every 50 ms
-# --paraview-bulk-dt 0.10           # bulk volume VTU/PVD every 100 ms
+# --output-dt 0.05                  # 16 SCEC fault stations every 0.05 s
+# --paraview --paraview-dt 0.5      # fault-surface VTU/PVD every 0.5 s
+# --paraview-bulk-dt 0.5            # bulk volume VTU/PVD every 0.5 s
 #
 # R-1204 / mixed-flux ADER-O note
 # -------------------------------
@@ -60,10 +62,12 @@
 #
 # R-1503 / mixed-flux + substep iterator note
 # -------------------------------------------
-# The driver's R-1503 guard would fire for `--fault-iterator substep`
-# + `--mixed-flux != none` at any np.  This job uses
-# `--fault-iterator one-shot` so R-1503 is silent and no override is
-# needed.
+# This job uses `--fault-iterator one-shot` (O=1 quadrature inside the
+# Tpv205SubStepIterator) so R-1503 is silent and no override is
+# needed.  All TPV205 dispatch — interior + shared-fault — flows
+# through AdvanceADERWithSubStep regardless of the --fault-iterator
+# value (LSW is not implemented in the legacy rate-and-state
+# wave.AdvanceADER fault branch).
 
 export LC_ALL=C
 export LANG=C
@@ -114,12 +118,12 @@ echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir:    ${RESULT_DIR}"
 echo "Mesh:          tpv2053d_200m.msh"
 echo "Polynomial:    --order 2 + --ader-order 3"
-echo "Iterator:      one-shot (legacy AdvanceADERWithSubStep with O=1 quadrature)"
+echo "Iterator:      one-shot (Tpv205SubStepIterator with O=1 quadrature)"
 echo "Mixed flux:    adjacent (Mixed-Flux 2, Zhang et al. 2023)"
 echo "Friction law:  lsw (linear slip-weakening; closed-form, SCEC TPV5)"
 echo "Queue:         normal (10N x 500r, 48h)"
 echo "tfinal:        12.0 s (full SCEC TPV5 §III window)"
-echo "ParaView:      surface 0.05 s, bulk 0.10 s"
+echo "ParaView:      surface 0.5 s, bulk 0.5 s"
 echo "Override:      SEAS_FORCE_MIXED_FLUX_ADER_O_GT2=1 (R-1204 / R-1407)"
 echo "========================================"
 
@@ -137,16 +141,17 @@ ibrun ./seas_tpv205_driver \
       --mixed-flux adjacent \
       --output-dir "${RESULT_DIR}" \
       --output-prefix tpv205_mfadj_p2_O3 \
-      --output-dt 0.01 \
+      --output-dt 0.05 \
       --paraview \
-      --paraview-dt 0.05 \
-      --paraview-bulk-dt 0.10 \
+      --paraview-dt 0.5 \
+      --paraview-bulk-dt 0.5 \
       --verify-dispatch
 
-# Post-run summary — same template as the TPV102/TPV104 mixed-flux
-# dev-queue jobs.  Quick-check pattern: hypocenter-station peak |V_strike|,
-# peak |σ_n − 120 MPa|, slip2(t_end), plus the [mixed-flux] banner and
-# the [dispatch] rank=0 LSW banner (REVIEW R-004 / R-016).
+# Post-run summary — same template as the TPV205 dev-queue sbatch
+# (tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch).  Quick-check
+# pattern: hypocenter-station peak |V_strike|, peak |σ_n − 120 MPa|,
+# slip_strike(t_end), plus the [mixed-flux] banner and the [dispatch]
+# rank=0 LSW banner (REVIEW R-016).
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
 HYPO_FILE="${RESULT_DIR}/tpv205_mfadj_p2_O3_station_x2_0_x3_7.5.dat"
 
@@ -185,7 +190,7 @@ MIXED_FLUX_RANK_LINES=$(grep -c '\[mixed-flux\] rank=' "${DISPATCH_LOG}" 2>/dev/
 
 # Sanity gate: --mixed-flux adjacent should produce a non-empty central
 # set on the production mesh.  If the global count is 0 the dispatch did
-# not engage and the run is invalid.
+# not engage and the run is invalid for the comparison.
 MIXED_FLUX_VERDICT="UNKNOWN"
 if echo "${MIXED_FLUX_BANNER}" | grep -q "mode=adjacent"; then
    GSUM=$(echo "${MIXED_FLUX_BANNER}" \
@@ -206,7 +211,10 @@ else
 fi
 
 # REVIEW R-016 sanity: the dispatch banner must report the LSW
-# closed-form solver, not the rate-and-state Brent path.
+# closed-form solver, not the rate-and-state Brent path.  A REGRESSION
+# verdict means the SetFaultFrictionLaw(LSW) wiring did not reach the
+# wave operator's fault dispatch and the run silently produced
+# rate-and-state physics on the LSW DOFData.
 LSW_DISPATCH_VERDICT="UNKNOWN"
 if grep -q "friction_solver_actual=lsw-closed-form" "${DISPATCH_LOG}" 2>/dev/null; then
    LSW_DISPATCH_VERDICT="ENGAGED — friction_solver_actual=lsw-closed-form"
