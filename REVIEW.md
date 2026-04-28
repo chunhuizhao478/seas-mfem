@@ -1,508 +1,295 @@
-# Code Review: TPV102 setup & workflow vs TPV104 (proven working) — 2026-04-27
+# Code Review: TPV205 production-readiness audit + dev sbatch generation — 2026-04-27
 
 ## Review Scope
-- Plan: `/Users/chunhuizhao/projects/seas-mfem/PLAN.md` (BP5 ParaView; not the active TPV102 plan — used only to confirm shared paraview API).
-- Implementation report (commit log): `git log --oneline -- miniapps/seas/drivers/tpv102_driver.cpp` shows `ffffc35 TPV102 pepper + BP5 in-progress scope: debug dumps, build support` (HEAD), `28284b9 TPV102 nucleation: persistent-prestress channel`, `632ad03 TPV102 v9.3.0: ADER default + total-Q only + ADER+total-Q 400-rank sbatch pair`, with the current driver a fresh port of TPV104 per `Makefile:352–369` ("TPV102 driver rebuilt against the TPV104 code flow").
-- Files reviewed (TPV102 and the matched TPV104 reference):
-  - `miniapps/seas/drivers/tpv102_driver.cpp` (modified, 2181 lines) vs `drivers/tpv104_driver.cpp` (2231 lines)
-  - `miniapps/seas/dynamic/tpv102_setup.hpp` (modified, 504 lines) vs `dynamic/tpv104_setup.hpp` (552 lines)
-  - `miniapps/seas/dynamic/tpv102_friction_solver.hpp` (untracked, 48 lines) vs `dynamic/tpv104_friction_solver.hpp` (178 lines)
-  - `miniapps/seas/dynamic/tpv102_nucleation.hpp` (untracked, 133 lines) vs `dynamic/tpv104_nucleation.hpp` (143 lines)
-  - `miniapps/seas/dynamic/tpv102_substep_iterator.{hpp,cpp}` (untracked, 145 + 378 lines) vs `dynamic/tpv104_substep_iterator.{hpp,cpp}` (224 + 687 lines)
-  - `miniapps/seas/config/tpv102_params.hpp` vs `config/tpv104_params.hpp`
-  - `miniapps/seas/friction/state_evolution.hpp` (modified — adds `AgingLawPsi::GetB/GetV0/GetF0`)
-  - `miniapps/seas/Makefile` (TPV102_HEADERS / TPV102_SHARED_OBJS / `seas_tpv102_driver` rule)
-  - One representative TPV102 sbatch (`jobs/tpv102/tpv102_200m_p1_1.5s_400rank_dev.sbatch`) and the TPV102 setup unit test (`tests/unit/test_tpv102_setup.cpp`).
-- Domain context consulted: `CLAUDE.md` (project), `miniapps/seas/CLAUDE.md` (SEAS — *Friction Solver*, *Sign Conventions*), `tpv102/TPV102_GUIDE.md`, `feedback_tpv102_bp5_no_shared_edit`, `feedback_dynamic_folder_editable_for_tpv104`.
+- Plan: `miniapps/seas/document/system_dev/tpv205_lsw_native_fields_plan_2026-04-27.md` (1087 lines).
+- Prior review: REVIEW.md round 4 (R-001..R-005) closed by /code-fix in this session.
+- Files audited (post-fix state):
+  - `dynamic/fault_face_flux.{hpp,cpp}` — `EvaluateADER_LSW` (slip accumulation removed per R-001).
+  - `dynamic/tpv205_friction.hpp`, `dynamic/tpv205_setup.hpp`, `dynamic/tpv205_substep_iterator.{hpp,cpp}`.
+  - `drivers/tpv205_driver.cpp` — banner / disable_nucleation / paraview_write / SubStep init / time loop / diag-dump.
+  - `dynamic/wave_operator.{hpp,inl}` — `FaultFrictionLaw` enum + dispatch sites at 3617–3631 (interior) and 4539–4553 (R-1601 shared-fault fallback) + `VerifySharedFaultDOFDataConsistency`.
+  - `tests/unit/test_tpv205_evaluate_ader_lsw_parity.cpp`, `tests/verification/test_tpv205_mpi_rupture_crossing.cpp` (post-fix; `mpirun -np 2` reports R-001 ratio = 1.220 < 1.5 ✓).
+  - Existing `jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p2_O3_normal.sbatch` (P=2 + O=3, normal queue, 48h).
+  - Reference template: `jobs/tpv102/tpv102_mixed_flux_adjacent_200m_p1_O2_dev.sbatch`.
+- Domain context: `miniapps/seas/CLAUDE.md`, the tpv205 plan, prior REVIEW.md rounds, the SCEC TPV5 spec PDF (`tpv205/benchmark_document/TPV5_forwebsite.pdf`).
 
-The TPV102 path is structurally a faithful port of TPV104 — same call sequence, same WaveOperator API, same FaultFaceFlux dispatch, same paraview wiring. I did not find a smoking-gun runtime-fatal divergence on the default (one-shot, Brent, `--paraview-dt`) configuration that the active sbatch scripts exercise; the default path mirrors TPV104. The findings below are the substantive deviations between the two paths, prioritised by what would block a TPV102 substep / probe / parameter-sweep run.
+## Deliverable created
+- **`miniapps/seas/jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch`** — new dev-queue (8N × 400r × 2h) sbatch mirroring the TPV102 mixed-flux dev pattern, adapted for TPV205 (LSW friction, 4-patch pre-stress, 16-station SCEC layout, `tpv2053d_200m.msh`). Post-run summary parses the `x2_0_x3_7.5` hypocenter station and now also checks the `friction_solver_actual=lsw-closed-form` dispatch banner — a missing/`brent` value flags the R-001/R-016 fix as regressed.
 
 ## Findings
 
-### [R-001] [MODERATE] [POSSIBLE] [drivers/tpv102_driver.cpp:521,780,1971–1976; dynamic/tpv102_substep_iterator.hpp:111–127] — `--fault-iterator substep` defaults to NewtonRaphsonStable, contradicting CLAUDE.md "Brent required" for TPV102
-
-**Category:** BUG / ASSUMPTION
-
-**Description:**
-The TPV102 substep iterator path forwards `MapSolver(friction_solver)` (default `NewtonRaphsonStable`, see `tpv102_driver.cpp:521,780`) into `Tpv102SubStepIterator::AdvanceWithSubStepStates(... method)`, which in turn calls `FaultFaceFlux::ComputeStageState(d, Q+, Q-, s, NewtonRaphsonStable)` (`tpv102_substep_iterator.cpp:343`). Project-level `miniapps/seas/CLAUDE.md` (§ "Friction Solver") records that TPV102/BP5 require Brent because Newton fails when ψ/a is large — and TPV102's equilibrium ψ/a is large by spec.
-
-For `a_vw = 0.008`, `tau_ini = 75 MPa`, `sigma_n = 120 MPa`, `V_ini = 1e-12`, `V0 = 1e-6`:
-`ComputeInitialPsi(a)` at `tpv102_params.hpp:131–139` returns `psi ≈ 0.74` → `psi/a ≈ 92`. The legacy `Newton-Raphson` documented in `debug v1` failed at `psi/a` of similar magnitude. `NewtonRaphsonStable` uses `friction_stable::FrictionCoefficientStable` (asinh-form, better than legacy) but still applies an unbracketed Newton iterate seeded with `V_prev = 1e-12` (the very `V_lo` regime CLAUDE.md flags as the failure mode).
-
-By contrast, TPV104 has `a_in = 0.01`, ψ_ini ≈ 0.564, `psi/a ≈ 56` — well within the stable-asinh's empirical regime. So the same iterator default that's safe for TPV104 is risky for TPV102.
-
-Production runs default to `--fault-iterator one-shot` (Brent, hard-coded inside `EvaluateADER`), so this bug is dormant by default. It activates the moment a user passes `--fault-iterator substep` (or sets it via a sbatch).
-
-**Trigger:**
-Run with `--fault-iterator substep` on a TPV102 mesh at `t=0` (V_ini=1e-12, ψ ≈ 0.74). The Newton solve at the locked initial state with `V_prev = 1e-12` either fails to converge in 60 iterations or returns an unphysical iterate.
-
-**Actual behavior:**
-`SolveSlipRateNewtonStable` exits with `*has_converged = false` (silent — the convergence flag is captured but not asserted by the iterator). The `EvalStageState` carries this unconverged V and propagates into the imposed-state accumulator, eventually yielding NaN or non-physical V_max in the time loop.
-
-**Expected behavior:**
-The substep path on TPV102 should default to `Method::Brent` — the same dispatch the one-shot path uses today. Brent is bracketed and works at large ψ/a per `debug v1`.
-
-**Suggested fix:**
-Override the default at the TPV102 substep iterator declaration (smallest blast radius):
-```diff
---- a/miniapps/seas/dynamic/tpv102_substep_iterator.hpp
-+++ b/miniapps/seas/dynamic/tpv102_substep_iterator.hpp
-@@
-    void Advance(std::vector<DOFData> &dof_data,
-                 const std::vector<Vector> &fault_coords,
-                 const real_t *I_plus_flat,
-                 const real_t *I_minus_flat,
-                 real_t dt_macro,
-                 real_t t_macro_start,
-                 real_t *I_imp_plus_flat,
-                 real_t *I_imp_minus_flat,
-                 FrictionSolver::Method method
--                  = FrictionSolver::Method::NewtonRaphsonStable);
-+                  = FrictionSolver::Method::Brent);
-@@
-    void AdvanceWithSubStepStates(
-       std::vector<DOFData> &dof_data,
-       const std::vector<Vector> &fault_coords,
-       const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
-       const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
-       real_t dt_macro,
-       real_t t_macro_start,
-       real_t *I_imp_plus_flat,
-       real_t *I_imp_minus_flat,
-       FrictionSolver::Method method
--         = FrictionSolver::Method::NewtonRaphsonStable);
-+         = FrictionSolver::Method::Brent);
-```
-Defaults live only in the header; no `.cpp` change is needed beyond a matching comment update at `tpv102_substep_iterator.cpp:84,224` documenting the new default.
-
-This keeps the user's ability to override with `--friction-solver newton-stable` for cross-code diagnostics and remains symmetric with `tpv104_substep_iterator.hpp` (TPV104 retains its NewtonRaphsonStable default because its smaller ψ/a is empirically safe).
-
-**Test case:**
-```cpp
-// tests/unit/test_tpv102_substep_friction_solver_default.cpp
-TEST(R001_tpv102_substep_default_brent) {
-   // Synthetic single-QP DOFData at TPV102 equilibrium (ψ/a ≈ 92).
-   DOFData d{};
-   d.Zp_plus = d.Zp_minus = TPV102Params::Zp;
-   d.Zs_plus = d.Zs_minus = TPV102Params::Zs;
-   d.eta_p   = TPV102Params::Zp / 2.0;
-   d.eta_s   = TPV102Params::eta_s;
-   d.sigma_n0 = TPV102Params::sigma_n;
-   d.tau2_0   = TPV102Params::tau_ini;
-   d.a   = TPV102Params::a_vw;     // 0.008
-   d.Dc  = TPV102Params::Dc;
-   d.psi = ComputeInitialPsi(d.a); // ≈ 0.74 → ψ/a ≈ 92
-   d.slip_rate = TPV102Params::V_ini;          // 1e-12
-   d.V2 = TPV102Params::V_ini;
-
-   FaultFaceFlux flux(TPV102Params::rho, TPV102Params::cp, TPV102Params::cs);
-   AgingLawPsi state_evo(TPV102Params::b, TPV102Params::V0, TPV102Params::f0);
-   Tpv102SubStepIterator iter(flux, state_evo);
-   iter.SetSubSteps({1e-3}, {1.0});  // single-sub-step, dt=1ms
-
-   std::vector<DOFData> dof_data{d};
-   std::vector<Vector> coords(1, Vector(3));
-   coords[0] = 0.0; coords[0](2) = -7.5e3;
-
-   std::vector<std::vector<real_t>> Qp(1, std::vector<real_t>(NUM_STATE, 0.0));
-   std::vector<std::vector<real_t>> Qm(1, std::vector<real_t>(NUM_STATE, 0.0));
-   std::vector<real_t> Iimp_p(NUM_STATE, 0.0), Iimp_m(NUM_STATE, 0.0);
-
-   // Default method must be Brent and must converge.
-   iter.AdvanceWithSubStepStates(dof_data, coords, Qp, Qm,
-                                 1e-3, 0.0, Iimp_p.data(), Iimp_m.data());
-   EXPECT_TRUE(std::isfinite(dof_data[0].slip_rate));
-   EXPECT_LT(dof_data[0].slip_rate, 1e-6);  // still locked / quasi-locked
-}
-```
-Run as ASSERT under both default and explicit `Method::Brent` to confirm bracketed convergence; the legacy default (NewtonRaphsonStable) should produce NaN or absurdly large `slip_rate` at this equilibrium.
-
----
-
-### [R-002] [MODERATE] [drivers/tpv102_driver.cpp:435–449; dynamic/tpv102_substep_iterator.cpp (entire file)] — Driver advertises `SEAS_DIAG_TPV102_STATE = ON/OFF` but the iterator emits no probe trace
-
-**Category:** DEVIATION (banner / build-info contract not implemented)
-
-**Description:**
-`tpv102_driver.cpp:435–449` writes `[BUILD] SEAS_DIAG_TPV102_STATE = ON|OFF` to stderr and `build_info.txt`, mirroring `tpv104_driver.cpp:434–448`. The TPV104 sibling actually honors the macro: `tpv104_substep_iterator.cpp:14–23,30–116,322–390,420–468` opens `tpv104_probe_<name>_rank<R>.txt` files and writes per-sub-step `trial_traction`, `friction_coeff`, `state_evolution`, `slip_rate`, and `corrected_imposed` traces, plus a static `Tpv104SubStepIterator::CloseAllProbeFiles()` invoked from the driver before `MPI_Finalize()`.
-
-The TPV102 substep iterator (`tpv102_substep_iterator.cpp` start-to-end) has **no** `#ifdef SEAS_DIAG_TPV102_STATE` blocks at all — not the file-registry header, not any probe writes, not a `CloseAllProbeFiles` static. Building with `-DSEAS_DIAG_TPV102_STATE` therefore advertises probe diagnostics that never get emitted; Phase-3 cross-code probe-diff tooling (the same machinery TPV104 uses for SeisSol comparison per `tpv104_substep_iterator.cpp:104–108`) cannot run on TPV102.
-
-**Trigger:**
-`make seas_tpv102_driver SEAS_EXTRA_CPPFLAGS="-DSEAS_DIAG_TPV102_STATE"` and run with `--fault-iterator substep`. The banner says probe is ON; no `tpv102_probe_*_rank*.txt` files appear in the output dir.
-
-**Actual behavior:**
-Banner contract violated; users (and CI parsers) infer that probe data is being captured when in fact it is not. There is also no symmetric `Tpv102SubStepIterator::CloseAllProbeFiles()` for the driver to call before `MPI_Finalize()` — silently fine today (no probe files to close), but inconsistent with TPV104.
-
-**Expected behavior:**
-Either (i) implement the TPV102 probe-writer block as a near-mirror of `tpv104_substep_iterator.cpp:14–23,30–116,322–390,420–468` plus a static `Tpv102SubStepIterator::CloseAllProbeFiles()`, OR (ii) drop the build banner so it does not falsely claim a feature.
-
-**Suggested fix (low-effort path — drop the banner, keep symmetry honest):**
-```diff
---- a/miniapps/seas/drivers/tpv102_driver.cpp
-+++ b/miniapps/seas/drivers/tpv102_driver.cpp
-@@
-    if (rank == 0)
-    {
- #ifdef SEAS_DIAG_FAULT_FLUX
-       const char *diag_fault_flux = "SEAS_DIAG_FAULT_FLUX = ON";
- #else
-       const char *diag_fault_flux = "SEAS_DIAG_FAULT_FLUX = OFF";
- #endif
--#ifdef SEAS_DIAG_TPV102_STATE
--      const char *diag_tpv102 = "SEAS_DIAG_TPV102_STATE = ON";
--#else
--      const char *diag_tpv102 = "SEAS_DIAG_TPV102_STATE = OFF";
--#endif
-       std::fprintf(stderr, "[BUILD] %s\n", diag_fault_flux);
--      std::fprintf(stderr, "[BUILD] %s\n", diag_tpv102);
-       std::ofstream binfo("build_info.txt");
-       if (binfo.is_open())
-       {
-          binfo << "[BUILD] " << diag_fault_flux << "\n";
--         binfo << "[BUILD] " << diag_tpv102 << "\n";
-          binfo.close();
-       }
-    }
-```
-
-If the longer fix is wanted (full probe parity), it must add `static void Tpv102SubStepIterator::CloseAllProbeFiles();` plus the per-iteration `GetProbeFile(...)` writes mirroring `tpv104_substep_iterator.cpp:36–116` and the five Probe-1..Probe-5 emit blocks. The driver's normal exit and NaN-tripwire branches must then call `Tpv102SubStepIterator::CloseAllProbeFiles();` before `MPI_Finalize()` (compare `tpv104_driver.cpp:1914,2156,2177`).
-
-**Test case:**
-```cpp
-// tests/unit/test_tpv102_diag_state_banner.cpp
-TEST(R002_diag_state_banner_implies_probe_emit) {
-   // Build with -DSEAS_DIAG_TPV102_STATE.  Run --fault-iterator substep.
-   // Assert: at least one tpv102_probe_<name>_rank0.txt file exists in
-   //         the output dir AND the banner reports
-   //         "SEAS_DIAG_TPV102_STATE = ON".
-   //
-   // If the banner is dropped (low-effort fix), assert the symmetric
-   // negative: no probe files AND no [BUILD] SEAS_DIAG_TPV102_STATE line.
-}
-```
-
----
-
-### [R-003] [LOW] [config/tpv102_params.hpp:131–139] — `ComputeInitialPsi` uses naive `sinh(arg)` and is at the edge of double precision
-
-**Category:** ASSUMPTION / numerical robustness
-
-**Description:**
-`tpv102_params.hpp:131–139`:
-```cpp
-inline real_t ComputeInitialPsi(real_t a)
-{
-   real_t arg = TPV102Params::tau_ini / (TPV102Params::sigma_n * a);
-   real_t psi = a * std::log(2.0 * TPV102Params::V0 / TPV102Params::V_ini * std::sinh(arg));
-   return psi;
-}
-```
-
-For the production VW value `a_vw = 0.008` we have `arg = 75e6/(120e6·0.008) = 78.125`, so `std::sinh(78.125) ≈ 7.0e33`. That fits in `double` (max ≈ 1.8e308), so today this works.
-
-The TPV104 sibling `ComputeInitialPsiTPV104` (`tpv104_params.hpp:210–219`) instead uses the numerically stable `log(x · sinh(c)) = |c| + log((x/2)·-sign(c)·expm1(-2|c|))` reformulation, which is finite for arbitrarily large `|c|`. Any future tightening of TPV102 (lower `a_vw`, higher `tau_ini`, lower `V_ini`) — e.g. a TPV102-style probe with `a = 0.003` would push `arg ≈ 208`, `sinh(208) ≈ 8e89` (still in range); `a ≈ 0.0024` pushes `arg ≈ 260`, `sinh(260) ≈ 4e112`; `a ≈ 0.0017` pushes `arg ≈ 367`, `sinh` overflows to `+inf`. The naive form is a few parameter perturbations away from `inf` propagating into `psi`.
-
-The setup unit test (`tests/unit/test_tpv102_setup.cpp:101–121` — `TestInitialStateEquilibrium`) only checks the round-trip equilibrium for `a_vw = 0.008`, which masks this fragility.
-
-**Trigger:**
-A future TPV102-variant scenario reduces `a_vw` toward ≈ 0.0017 (arg ≥ 367 → sinh=+inf), or doubles `tau_ini`.
-
-**Actual behavior:**
-`std::sinh(arg)` returns `+inf`, `log(... · inf)` returns `+inf`, `psi = a · inf = inf`. Downstream `SolveSlipRateNewtonStable` (`tpv104_friction_solver.hpp:115–120`) throws `std::runtime_error` on non-finite `psi` — loud failure rather than silent NaN, which is an acceptable failure mode but unnecessary if the formula is stable.
-
-**Expected behavior:**
-Use the same logsinh-stable formulation as TPV104.
-
-**Suggested fix:**
-```diff
---- a/miniapps/seas/config/tpv102_params.hpp
-+++ b/miniapps/seas/config/tpv102_params.hpp
-@@
- inline real_t ComputeInitialPsi(real_t a)
- {
--   // From tau = sigma_n * a * asinh(V/(2*V0) * exp(psi/a)):
--   //   sinh(tau/(sigma_n*a)) = V/(2*V0) * exp(psi/a)
--   //   psi = a * ln(2*V0/V * sinh(tau/(sigma_n*a)))
--   real_t arg = TPV102Params::tau_ini / (TPV102Params::sigma_n * a);
--   real_t psi = a * std::log(2.0 * TPV102Params::V0 / TPV102Params::V_ini * std::sinh(arg));
--   return psi;
-+   // Numerically stable logsinh form (matches ComputeInitialPsiTPV104 in
-+   // tpv104_params.hpp:210–219).  Stable for arbitrarily large arg.
-+   const real_t arg = TPV102Params::tau_ini / (TPV102Params::sigma_n * a);
-+   const real_t x   = 2.0 * TPV102Params::V0 / TPV102Params::V_ini;
-+   const real_t sign_c = (arg >= 0.0) ? 1.0 : -1.0;
-+   const real_t absC   = std::abs(arg);
-+   return a * (absC + std::log(x / 2.0 * -sign_c * std::expm1(-2.0 * absC)));
- }
-```
-
-**Test case:**
-```cpp
-// tests/unit/test_tpv102_initial_psi_logsinh.cpp
-TEST(R003_compute_initial_psi_no_overflow) {
-   // Synthetic — pretend tau_ini/sigma_n is normal but a is small,
-   // pushing arg into the regime where naive sinh would overflow.
-   // (Drive via a parameter sweep, since TPV102Params is constexpr.)
-   const real_t arg_big = 367.0;  // sinh(367) overflows double
-   const real_t a_eq    = 1.0;    // no-op a, just exercises arg
-
-   const real_t x = 2.0 * 1e-6 / 1e-12;
-   const real_t sign_c = 1.0;
-   const real_t absC   = arg_big;
-   const real_t psi = a_eq * (absC + std::log(x / 2.0 * -sign_c
-                                              * std::expm1(-2.0 * absC)));
-   EXPECT_TRUE(std::isfinite(psi));
-
-   // Round-trip: tau_check = sigma * a * asinh(V/(2V0) * exp(psi/a))
-   //           = sigma * a * arg_big   (modulo round-off).
-   // Verify: psi/a + log(V/(2V0)) ≈ |arg_big| within 1e-12 abs.
-   EXPECT_NEAR(psi / a_eq + std::log(1.0 / x), arg_big, 1e-12);
-}
-```
-The test passes with the logsinh form and FAILS (non-finite or NaN) under the naive form.
-
----
-
-### [R-004] [LOW] [drivers/tpv102_driver.cpp:114,162,221,272,512] — Stale comments referring to `EvaluateADERTotal` mislead readers
+### [R-001] [LOW] [drivers/tpv205_driver.cpp:1713,2188–2199] — `psi` column in fault_qp_dump and ParaView comment is stale (TPV205 has no state variable)
 
 **Category:** QUALITY / documentation
 
 **Description:**
-Multiple driver comments and one banner string claim the production fault dispatch routes through `FaultFaceFlux::EvaluateADERTotal`. Audit:
-- `tpv102_driver.cpp:114` — "wave.AdvanceADER -> FaultFaceFlux::EvaluateADERTotal (see the honest banner below)"
-- `tpv102_driver.cpp:162` — "wave.AdvanceADER -> EvaluateADERTotal hard-codes the default Method::Brent argument"
-- `tpv102_driver.cpp:221` — `BannerOf(DispatchedSolver::Brent)` literally returns "Brent (hard-coded via EvaluateADERTotal; --friction-solver flag IGNORED)"
-- `tpv102_driver.cpp:272` and `512` — same misleading language.
+The end-of-run diagnostic dump (`SEAS_DIAG_DUMP_FAULT_QPS=1`) writes `d.psi` as the 12th column and labels the column header "psi" at line 2188:
+```cpp
+fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
+      "tau1_corr tau2_corr sigma_n_corr psi\n";
+…
+fs << … << " " << d.sigma_n_corr << " " << d.psi << "\n";
+```
+TPV205 uses linear slip-weakening, which has no state variable. `d.psi` is defensively zeroed at init (`tpv205_setup.hpp:135`) and never written. Every row of the dump therefore reports `psi = 0`, which (a) is misleading to anyone analysing the dump and (b) hides the actual TPV205-relevant per-QP scalar — μ_eff(δ).
 
-Empirically (`grep -n "EvaluateADERTotal" miniapps/seas/dynamic/wave_operator.inl` returns zero matches), `wave.AdvanceADER` calls `fault_flux_->EvaluateADER(...)` at `wave_operator.inl:3614` — the fluctuation-Q path — never `EvaluateADERTotal`. The driver initializes `Q = 0` (`tpv102_setup.hpp:128–132 InitializeState`) so the fluctuation form is correct; it's the comment that is wrong. Banner output that mentions a function not on the call graph pollutes log diffs against TPV104 and seeds incorrect mental models.
+Same channel mismatch appears in the ParaView setup comment at line 1713: "fault-surface PVD/VTU (slip, slip_rate, traction dip+strike, **psi**, sigma_n, …)". The actual ParaView state field carries `LSWFrictionCoefficient_TPV205(δ, μ_s, μ_d, d_c)` (driver line 1945–1948 — the R-005 fix from a prior round), not psi.
 
 **Trigger:**
-Any reader (or future maintainer) who debugs the fault dispatch by `grep`ping for `EvaluateADERTotal` will find no matches in the production path and conclude the driver is broken.
+Run with `SEAS_DIAG_DUMP_FAULT_QPS=1`. Inspect `fault_qp_dump_rank<R>.txt`: every row's last column is 0.
 
 **Actual behavior:**
-Comments and banner text mention a function that is not on the call graph.
+`# columns: ... sigma_n_corr psi` and a column of zeros.
 
 **Expected behavior:**
-Comments should refer to `FaultFaceFlux::EvaluateADER` (fluctuation-Q variant). The misleading "EvaluateADERTotal" banner text must be replaced.
+`# columns: ... sigma_n_corr mu_eff(delta)` where the dump computes `LSWFrictionCoefficient_TPV205(sqrt(slip1²+slip2²), d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c)` and writes that value.
 
 **Suggested fix:**
 ```diff
---- a/miniapps/seas/drivers/tpv102_driver.cpp
-+++ b/miniapps/seas/drivers/tpv102_driver.cpp
+--- a/miniapps/seas/drivers/tpv205_driver.cpp
++++ b/miniapps/seas/drivers/tpv205_driver.cpp
 @@
--// R7-001/R7-005 note: on the current driver path this value is kept only
--// for future iterator wiring.  The production time loop runs Brent via
--// wave.AdvanceADER -> FaultFaceFlux::EvaluateADERTotal (see the honest
--// banner below); the returned Method is not routed through that call.
-+// R7-001/R7-005 note: on the current driver path this value is kept only
-+// for future iterator wiring.  The production time loop runs Brent via
-+// wave.AdvanceADER -> FaultFaceFlux::EvaluateADER (fluctuation-Q
-+// dispatch — wave_operator.inl:3614); the returned Method is not routed
-+// through that call.
-@@
-    case DispatchedSolver::Brent:
--      return "Brent (hard-coded via EvaluateADERTotal; "
-+      return "Brent (hard-coded via EvaluateADER fluctuation-Q dispatch; "
-              "--friction-solver flag IGNORED)";
+             fs << std::scientific << std::setprecision(17);
+             fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
+-                  "tau1_corr tau2_corr sigma_n_corr psi\n";
++                  "tau1_corr tau2_corr sigma_n_corr mu_eff_delta\n";
+             const int n = static_cast<int>(dof_data.size());
+             for (int i = 0; i < n; i++)
+             {
+                const Vector &c = fault_coords[i];
+                const DOFData &d = dof_data[i];
++               const real_t delta = std::sqrt(d.slip1 * d.slip1
++                                              + d.slip2 * d.slip2);
++               const real_t mu_eff = mfem::seas::LSWFrictionCoefficient_TPV205(
++                                        delta, d.lsw_mu_s, d.lsw_mu_d,
++                                        d.lsw_d_c);
+                fs << i << " " << c(0) << " " << c(1) << " " << c(2)
+                   << " " << d.V1 << " " << d.V2
+                   << " " << d.slip1 << " " << d.slip2
+                   << " " << d.tau1_corr << " " << d.tau2_corr
+-                  << " " << d.sigma_n_corr << " " << d.psi << "\n";
++                  << " " << d.sigma_n_corr << " " << mu_eff << "\n";
+             }
 ```
-Apply the same `s/EvaluateADERTotal/EvaluateADER/` rewrite at lines 162, 272, and 512 of `tpv102_driver.cpp`. Apply the matching fix to `tpv104_driver.cpp:113,161,219,270,511` (the same stale comments are inherited there).
+Update the L1713 comment from "psi" to "mu_eff" likewise.
 
 **Test case:**
-None required — documentation-only change. A grep-based regression guard is sufficient:
+None — diagnostic-only dump; the column header rename is verified by grep:
 ```bash
-# expected output: zero matches once the cleanup lands
-grep -n "EvaluateADERTotal" miniapps/seas/drivers/tpv102_driver.cpp \
-                          miniapps/seas/drivers/tpv104_driver.cpp
+grep -n "psi\b" miniapps/seas/drivers/tpv205_driver.cpp
+# expected: zero matches in the diag-dump and ParaView-comment blocks
+# (only references in inherited TPV104 boilerplate / pre-existing comments
+# that have nothing to do with TPV205 LSW).
 ```
 
 ---
 
-### [R-005] [LOW] [drivers/tpv102_driver.cpp:1486–1493] — Substep deltaT seeded from initial `dt`, then rescaled per call — but driver claims "TPV102 uses fixed dt"
+### [R-002] [MODERATE] [POSSIBLE] [drivers/tpv205_driver.cpp:2138; dynamic/wave_operator.inl:5088–5466] — `VerifySharedFaultDOFDataConsistency()` after step 0 is uncovered for TPV205 at np > 1
 
-**Category:** QUALITY / latent assumption
+**Category:** ASSUMPTION / test gap
 
 **Description:**
-The driver seeds the substep iterator's quadrature with `deltaT[o] = dt / O` once before the time loop (`tpv102_driver.cpp:1491`), then `AdvanceADERWithSubStep` (`tpv102_driver.cpp:328–334`) rescales `deltaT_scaled[o] = configured_deltaT[o] * (dt_step / configured_sum)` every macro-step. The comment at lines 1486–1490 claims:
+The driver calls `wave.VerifySharedFaultDOFDataConsistency()` after the first macro-step (`tpv205_driver.cpp:2138`). The verify cross-rank-pairs every shared fault QP and aborts if any of the eight fields `{tau1_corr, tau2_corr, sigma_n_corr, V1, V2, psi, slip1, slip2}` differs by more than `tol = 1e-10` (relative).
 
-> "Using `dt` (the auto-CFL initial value) here works because TPV102 uses fixed dt in the time loop."
+The TPV205 dispatch on shared-fault QPs (R-1601 fallback, `wave_operator.inl:4539–4553`) calls `EvaluateADER_LSW(fdata, …)` independently on each rank that owns the shared QP. The function reads rank-local `I_plus_local / I_minus_local` derived from `elem1_on_plus = !qpd.sign_flipped`. The R-1601 comment (the ORIGIN of the SHARED FALLBACK) explicitly documents that "elem1_on_plus is rank-local while qpd.sign_flipped is rank-independent" — exactly the configuration that would make rank A and rank B compute opposite-sign V1/V2 for the same physical shared QP, which would trip the verify with relative diff ≈ 2.0.
 
-That promise is violated by `tpv102_driver.cpp:1925`:
-```cpp
-real_t dt_step = std::min(dt, tfinal - t);
-```
-On the LAST step, `dt_step < dt` whenever `tfinal` is not an exact multiple of `dt`. The rescale at L328–334 protects `Σ deltaT[o] == dt_step`, so the iterator's per-call verify (`tpv102_substep_iterator.cpp:121–137`) won't trip — but the comment is wrong, and the rescale-each-call is actually load-bearing. This contradicts the rationale that motivated seeding the quadrature once.
+The new `test_tpv205_mpi_rupture_crossing.cpp` does NOT call `VerifySharedFaultDOFDataConsistency()` — it bypasses this check. The TPV205 driver does call it (step==0), so a production np ≥ 2 run could abort on the first step with R-101 unpaired-entry messages and the user would not be able to predict it from the test suite.
 
-This is the same pattern in TPV104 (`tpv104_driver.cpp:1493–1505`) — both drivers inherit the same misleading comment.
+**Why this is POSSIBLE rather than CRITICAL**: TPV104 production np ≥ 4 runs use the same R-1601 inline-`EvaluateADER` fallback on shared faces and have not reported verify aborts. Either (a) the rank-frame logic actually produces consistent output through `Evaluate` despite the comment's framing concern, OR (b) the verify tolerance happens to absorb whatever rank-disagreement does exist for rate-and-state outputs. Whether LSW outputs follow the same pattern is unverified — the only TPV205 MPI test bypasses the verify.
 
 **Trigger:**
-Run with `tfinal` not aligned to the auto-CFL `dt`. The last macro-step has `dt_step < dt` and `AdvanceADERWithSubStep` rescales the configured quadrature.
+`mpirun -np N seas_tpv205_driver --mesh tpv205/mesh/tpv2053d_200m.msh ...` for N ≥ 2 with a partition that produces shared fault faces. The driver's first time-step completes, then `VerifySharedFaultDOFDataConsistency()` runs and may abort with `[R-101 rank-0 detail]` and `[UNPAIRED]` messages (or, on a less severe rank-mismatch, a value-tolerance abort with `max_rel_diff > 1e-10`).
 
 **Actual behavior:**
-The rescale path is hit on the final step. No correctness issue (both ends of the verify hold). The misleading comment leads a reader to think the quadrature is bit-stable across the run.
+Untested. The np=2 rupture-crossing test does not exercise this code path.
 
 **Expected behavior:**
-Either drop the "TPV102 uses fixed dt" claim or honestly document that the rescale at L328–334 handles dt_step variability.
+The verify must pass at np > 1 on a TPV205 mesh with shared-fault QPs (just as it does on TPV102/TPV104 production), OR the dispatch must be patched to write rank-consistent V1/V2/tau*_corr/slip* on shared QPs before the verify fires.
 
 **Suggested fix:**
+Extend `test_tpv205_mpi_rupture_crossing.cpp` to call the verify explicitly so any latent rank-mismatch surfaces in CI rather than at the first sbatch:
+
 ```diff
---- a/miniapps/seas/drivers/tpv102_driver.cpp
-+++ b/miniapps/seas/drivers/tpv102_driver.cpp
+--- a/miniapps/seas/tests/verification/test_tpv205_mpi_rupture_crossing.cpp
++++ b/miniapps/seas/tests/verification/test_tpv205_mpi_rupture_crossing.cpp
 @@
-       // The Σ deltaT==dt_macro check inside Advance/AdvanceWithSubStepStates
--      // is RELATIVE so the same configuration handles every macro-step
--      // even though dt may vary slightly (it doesn't in TPV102, but the
--      // iterator is general).  Using `dt` (the auto-CFL initial value)
--      // here works because TPV102 uses fixed dt in the time loop.
-+      // is RELATIVE; AdvanceADERWithSubStep rescales the configured
-+      // deltaT to the actual dt_step at each call (see the dt_scale loop
-+      // at L328–334).  Seeding with the auto-CFL `dt` is just a
-+      // convenient initial scale.  The final macro-step (where
-+      // dt_step = tfinal - t < dt) IS rescaled at runtime.
+    AdvanceADERWithSubStep(wave, iterator, dof_data, fault_coords,
+                           Q, dt, /*ader_order*/2, /*t_start*/0.0,
+                           Q_new);
++
++   // R-002 (final review): the production driver calls
++   // VerifySharedFaultDOFDataConsistency() after step 0 (see
++   // tpv205_driver.cpp:2138).  Replicate that here so any latent
++   // rank-canonical-frame mismatch in EvaluateADER_LSW surfaces in
++   // CI rather than at the first sbatch on Frontera.  Default tol
++   // = 1e-10 (relative).
++   try
++   {
++      wave.VerifySharedFaultDOFDataConsistency();
++      num_tests++;
++      num_passed++;
++      if (rank == 0)
++      {
++         std::cout << "  PASSED: VerifySharedFaultDOFDataConsistency "
++                   << "after one ADER-O2 step (default tol 1e-10)\n";
++      }
++   }
++   catch (...)
++   {
++      // MFEM_ABORT cannot actually be caught — this branch is
++      // documentation only; if the verify trips it calls MPI_Abort
++      // and the whole test fails loudly.  Keeping the try/catch
++      // makes the intent explicit for future maintainers.
++      num_tests++;
++      num_failed++;
++   }
 ```
+If the assertion trips on a real np > 1 run, the fix is in `EvaluateADER_LSW` — it must compute rank-consistent V1/V2 (e.g. by always orienting (V1, V2) along the canonical-+ tangent direction regardless of which rank owns Elem1). That fix is OUT OF SCOPE for /code-fix this round; the immediate action is to surface the issue in CI.
 
 **Test case:**
-None — comment-only change. A grep guard suffices:
+The diff above is the test. To validate without applying the fix:
 ```bash
-grep -nE "uses fixed dt in the time loop" miniapps/seas/drivers/tpv102_driver.cpp \
-                                          miniapps/seas/drivers/tpv104_driver.cpp
-# expected: 0 matches after the fix.
+# Build current TPV205 binary, run np=2 mpi test, observe whether
+# VerifySharedFaultDOFDataConsistency() trips:
+make seas_test_tpv205_mpi_rupture_crossing -j8
+mpirun -np 2 ./seas_test_tpv205_mpi_rupture_crossing
+# Expected (post-extension): if the verify trips, the test exits
+# with the [R-101 ...] abort message and a non-zero exit code;
+# if it passes, the new test slot reports "PASSED:
+# VerifySharedFaultDOFDataConsistency …".
 ```
 
 ---
 
-### [R-006] [LOW] [POSSIBLE] [drivers/tpv102_driver.cpp:1808–1882; io/paraview_output.hpp:985–1006,1076–1083] — `pv_no_domain` branch advances regime via `CommitSchedule`; the other branch does not, leading to drifting regime state
+### [R-003] [LOW] [tests/unit/test_tpv205_friction.cpp + Makefile] — Friction-helper unit test exists but has no Make rule, so it never runs in CI
 
-**Category:** EDGE_CASE
-
-**Description:**
-The `paraview_write` lambda's branching (TPV102 driver L1863–1873) is:
-```cpp
-if (pv_no_domain) {
-   pv_out->CommitSchedule(time);          // advances current_regime_ + last_write_time_ + last_v_max_
-} else {
-   pv_out->UpdateFaultFieldsBP5(...);
-   pv_out->ForceSave(step_num, time);     // advances last_write_time_ only
-}
-pv_out->WriteFaultSurfaceVTU(...);        // unrelated to scheduling state
-```
-
-`ForceSaveImpl` (`paraview_output.hpp:1076–1083`) updates `last_write_time_` but NOT `current_regime_` or `last_v_max_`. Consequently, on the domain-PV-enabled branch, the V_max-driven regime never advances even though `PeekShouldWrite` consults `adaptive_.NextRegime(V_max, current_regime_)` for its `Interval(...)` decision (`paraview_output.hpp:940–948`). The schedule effectively freezes at whatever regime was returned by the last `Save`/`ShouldWrite`/`CommitSchedule`. For TPV102 this is dormant (the production sbatch passes `--paraview-dt`, which sets `fixed_dt > 0` and bypasses adaptive), but it IS reachable via the ParaViewOutput default schedule when the user passes only `--paraview` (no `--paraview-dt`, no `--paraview-every`) — and the driver's fallback at L1738 sets `output_every_n_steps = output_interval_for_pv` which routes through the `output_every_n_steps > 0` branch in `PeekShouldWrite` (`paraview_output.hpp:966–969`), bypassing the adaptive regime entirely. So the regime drift is **dormant** on TPV102 today but is a footgun for any future TPV102 sbatch that wants the V_max-adaptive cadence.
-
-This is identical behaviour in TPV104 (`tpv104_driver.cpp:1875–1894`); not TPV102-specific, but it surfaces in this review because the user asked about workflow inconsistencies between the two drivers.
-
-**Trigger:**
-Pass only `--paraview` to either driver (no `--paraview-every`, no `--paraview-dt`, with `--no-domain-pv` OFF) AND configure the BP5 `AdaptiveSchedule` to non-step-based intervals. The first frame writes; subsequent frames consult a frozen regime.
-
-**Actual behavior:**
-`current_regime_` stays at 0 (interseismic), so `adaptive_.Interval(V_max, 0) = 1 yr`. No further frames write within a 12 s TPV102 run.
-
-**Expected behavior:**
-The `else` branch should also advance `current_regime_` / `last_v_max_` so the schedule stays consistent.
-
-**Suggested fix:**
-```diff
---- a/miniapps/seas/drivers/tpv102_driver.cpp
-+++ b/miniapps/seas/drivers/tpv102_driver.cpp
-@@
-       if (pv_no_domain)
-       {
-          pv_out->CommitSchedule(time);
-       }
-       else
-       {
-          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
-                                       pv_local_traction, pv_local_state,
-                                       pv_local_normal_stress);
-          pv_out->ForceSave(step_num, time);
-+         // ForceSave only advances last_write_time_; the V_max-adaptive
-+         // schedule additionally needs current_regime_ / last_v_max_
-+         // advanced for the next PeekShouldWrite to use the correct
-+         // regime interval (paraview_output.hpp:985–990).
-+         pv_out->CommitSchedule(time, V_max);
-       }
-```
-Apply the symmetric fix to `tpv104_driver.cpp:1875–1894`.
-
-**Test case:**
-```cpp
-// tests/unit/test_paraview_regime_drift.cpp
-TEST(R006_paraview_regime_advance_under_force_save) {
-   ParaViewOutput<Mesh> pv("/tmp/test_pv", mesh, /*order=*/1);
-   pv.GetSchedule().dt_coseismic   = 0.01;
-   pv.GetSchedule().v_coseismic    = 1e-3;
-   pv.GetSchedule().dt_interseismic = 1.0;
-   // V_max ramps from 1e-9 to 1e-2; the adaptive regime should switch.
-   EXPECT_TRUE (pv.PeekShouldWrite(0, 0.000, 1e-9));   // regime=0, interval=1s
-   pv.ForceSave(0, 0.000);
-   pv.CommitSchedule(0.000, 1e-9);                     // post-fix: applied here
-   bool peek_v_co = pv.PeekShouldWrite(1, 0.005, 1e-2);
-   // Pre-fix:  regime stays at 0, interval=1s, t<dt_out -> false.
-   // Post-fix: regime moves to coseismic (V_max ≥ 1e-3), interval=0.01s -> true.
-   EXPECT_TRUE(peek_v_co);
-}
-```
-
----
-
-### [R-007] [LOW] [Makefile:1722,2756] — `seas_tpv102_driver` is compiled with `-DSEAS_USE_MPI` but `seas_tpv104_driver` is not — both rely on `MFEM_USE_MPI`, so the macro is dead
-
-**Category:** QUALITY / build asymmetry
+**Category:** QUALITY / test wiring
 
 **Description:**
-```
-$(TPV102_DRIVER_OBJ): %.o: ...
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
-
-$(TPV104_DRIVER_OBJ): %.o: ...
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
-```
-
-The `SEAS_USE_MPI` macro is referenced only by `io/parallel_benchmark_output.hpp` and `io/bp5_parallel_output.hpp` (BP5-specific). `tpv102_driver.cpp` does NOT use `SEAS_USE_MPI` — it gates everything on `MFEM_USE_MPI`. `grep -rn "SEAS_USE_MPI" miniapps/seas/drivers miniapps/seas/dynamic` returns zero matches in either driver. The `-DSEAS_USE_MPI` flag is dead weight on the TPV102 driver and the asymmetry vs TPV104 is silent — anyone bisecting build flags will be misled.
+`tests/unit/test_tpv205_friction.cpp` (203 lines) covers the strength-barrier short-circuits R-002/R-003 from `tpv205_friction.hpp` (`LSWFrictionCoefficient_TPV205`, `SolveLSW_TPV205`). The file is present in the repo but the Makefile has no `seas_test_tpv205_friction` target. `make test` and the `test-tpv205` aggregate (if any) do not exercise it, so a regression in `LSWFrictionCoefficient_TPV205` (e.g. removing the `mu_s >= 0.5 * mu_s_barrier` short-circuit) would compile and link, would not break the parity test or the MPI test, and would only surface as a wrong rupture-area boundary on Frontera.
 
 **Trigger:**
-Build inconsistency search (e.g., `make print-FLAGS` or a CMake migration) trips on the asymmetric flag.
+`make seas_test_tpv205_friction` returns `make: *** No rule to make target 'seas_test_tpv205_friction'. Stop.` (verified during the build step of /code-fix in this session).
 
 **Actual behavior:**
-Same observable build, but the flag claims a feature that the driver does not consult.
+The test never runs.
 
 **Expected behavior:**
-Either remove `-DSEAS_USE_MPI` from the TPV102 driver rule (preferred — symmetry with TPV104) or add it to TPV104 with a comment explaining why both need it.
+Wire it into the Makefile alongside the existing TPV205 test targets at `Makefile:2851–2868`.
 
 **Suggested fix:**
 ```diff
 --- a/miniapps/seas/Makefile
 +++ b/miniapps/seas/Makefile
 @@
- $(TPV102_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV102_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+ # REVIEW R-016 Phase 4 — TPV205 LSW dispatch tests.
+ TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC = tests/unit/test_tpv205_evaluate_ader_lsw_parity.cpp
+ TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ = $(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC:.cpp=.o)
+ TEST_TPV205_MPI_RUPTURE_CROSSING_SRC = tests/verification/test_tpv205_mpi_rupture_crossing.cpp
+ TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ = $(TEST_TPV205_MPI_RUPTURE_CROSSING_SRC:.cpp=.o)
++TEST_TPV205_FRICTION_SRC = tests/unit/test_tpv205_friction.cpp
++TEST_TPV205_FRICTION_OBJ = $(TEST_TPV205_FRICTION_SRC:.cpp=.o)
+@@
+ $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
  	@mkdir -p $(@D)
--	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+ 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
++
++$(TEST_TPV205_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
++	@mkdir -p $(@D)
 +	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+@@
+ seas_test_tpv205_mpi_rupture_crossing: $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
+ 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
++
++seas_test_tpv205_friction: $(TEST_TPV205_FRICTION_OBJ)
++	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_FRICTION_OBJ) $(MFEM_LIBS)
 ```
 
+(The test depends only on `tpv205_friction.hpp` and `tpv205_params.hpp` — both header-only — plus `test_macros.hpp`, so no extra `.o` files are needed beyond MFEM itself.)
+
 **Test case:**
-None — build-rule change. Confirm with:
 ```bash
-grep -rn "SEAS_USE_MPI" miniapps/seas/drivers miniapps/seas/dynamic miniapps/seas/dynamic/*.inl
-# expected: zero matches in TPV102/TPV104 paths.
+make seas_test_tpv205_friction -j4 && ./seas_test_tpv205_friction
+# Expected: 3 sub-tests pass — barrier_mu_no_collapse,
+# barrier_locked_under_tensile, combined_barrier_stays_locked.
 ```
+
+---
+
+### [R-004] [LOW] [tpv205/mesh/] — `.msh` mesh files are not in the repo; production sbatch must build them on Frontera
+
+**Category:** ASSUMPTION / production gap
+
+**Description:**
+`tpv205/mesh/` contains only `.geo` source (`tpv2053d_100m.geo`, `tpv2053d_200m.geo`); no pre-built `.msh` exists. Both the existing normal-queue sbatch and the new dev sbatch generated this round include an explicit `[ ! -s tpv205/mesh/tpv2053d_200m.msh ] && exit 1` guard, so a missing mesh fails the job loudly rather than silently producing empty output. But there is no helper sbatch / script in `jobs/tpv205/` that runs gmsh on the `.geo` to produce the `.msh` — the user must do this manually on Frontera, which is fragile.
+
+TPV104 has `jobs/tpv104/tpv104_mesh_build.sbatch` for exactly this pattern. TPV205 lacks the equivalent.
+
+**Trigger:**
+Submit either TPV205 sbatch on a fresh Frontera workspace where the gmsh step has not been run.
+
+**Actual behavior:**
+The sbatch's `[ ! -s tpv205/mesh/tpv2053d_200m.msh ]` guard fires:
+```
+ERROR: tpv205/mesh/tpv2053d_200m.msh missing.  Run gmsh on tpv205/mesh/tpv2053d_200m.geo first.
+```
+Job aborts immediately. No data corruption, but a wasted submission.
+
+**Expected behavior:**
+A `jobs/tpv205/tpv205_mesh_build.sbatch` mirroring `jobs/tpv104/tpv104_mesh_build.sbatch` so the user can submit it once and get all standard `.msh` files built.
+
+**Suggested fix:**
+Out of scope for this review (the user asked for a code-running sbatch, not a mesh-build sbatch). Note as a follow-up: copy `jobs/tpv104/tpv104_mesh_build.sbatch` to `jobs/tpv205/tpv205_mesh_build.sbatch`, swap the gmsh inputs from `tpv104/mesh/*.geo` to `tpv205/mesh/*.geo`. The dev sbatch already documents the dependency.
+
+**Test case:**
+None — meta-tooling.
+
+---
+
+### [R-005] [LOW] [drivers/tpv205_driver.cpp:1664–1677] — Background banner reports `V_ini = 0 m/s` but does not echo the strength-barrier sentinel `μ_s = 10000`
+
+**Category:** QUALITY
+
+**Description:**
+The startup banner at lines 1664–1677 prints `μ_s = 0.677 (rupture area), 10000 (strength barrier)` and `V_ini = 0 m/s`. That's correct content but the dev-queue post-run summary template parses `peak |σ_n − 120 MPa|` from the hypocenter station file as the dominant production sanity check. There is no **equivalent banner field** for `μ_s_barrier` so a future driver edit that overrode `μ_s_barrier` (e.g. via a plan that introduces a CLI override) could silently drop the barrier without showing up in the banner or the post-run summary.
+
+This is a defensive-design comment — not a bug. Severity LOW because the existing `LSWFrictionCoefficient_TPV205` short-circuit + `SolveLSW_TPV205` short-circuit + `test_tpv205_friction` (once it's wired per R-003) cover the barrier semantics. The banner phrasing is fine for the dev sbatch.
+
+**Suggested fix:**
+None (note for future maintainers).
+
+**Test case:**
+None.
 
 ---
 
 ## Summary
 - Critical issues: 0
-- Moderate issues: 2  ([R-001] friction-solver default on substep path; [R-002] dead `SEAS_DIAG_TPV102_STATE` banner)
-- Low issues: 5  ([R-003] logsinh; [R-004] stale `EvaluateADERTotal`; [R-005] misleading "fixed dt" comment; [R-006] regime-drift on `ForceSave` branch; [R-007] dead `-DSEAS_USE_MPI`)
-- Plan compliance: PARTIAL — TPV102 path is structurally a faithful TPV104 port; the substep-default and probe-banner contracts deviate.
-- Verdict: PASS WITH FIXES — apply [R-001] and [R-002] before any TPV102 substep run; the rest are cleanups that prevent future regressions.
+- Moderate issues: 1  ([R-002] VerifySharedFaultDOFDataConsistency uncovered by tests for TPV205 — POSSIBLE)
+- Low issues: 4  ([R-001] stale `psi` column, [R-003] unwired friction test, [R-004] mesh `.msh` not in repo, [R-005] banner echo gap)
+- Plan compliance: FULL (all four phases of `tpv205_lsw_native_fields_plan_2026-04-27.md` landed; round-5 R-001..R-005 fixes verified by `seas_test_tpv205_evaluate_ader_lsw_parity` 14/14 and `mpirun -np 2 seas_test_tpv205_mpi_rupture_crossing` 6/6).
+- Verdict: **PASS WITH FIXES** — production-ready for the dev-queue smoke run; address R-002 (test-coverage gap) before submitting np ≥ 64 production jobs.
 
-## Notes for the user
+## New artefact
 
-The user reported "TPV102 doesn't run." This review did **not** identify a runtime-fatal divergence on the *default* (one-shot, Brent, `--paraview-dt`) configuration that the active sbatch scripts use; the default path is a faithful TPV104 mirror. If the failure mode is reproducible only with `--fault-iterator substep`, [R-001] is almost certainly the cause (Newton-stable failing at TPV102's large ψ/a). If the failure mode is silent banner/contract mismatch in CI parsers, [R-002] is the cause. If the user has a concrete failure log (stack trace, NaN site, hang signature, sbatch output), please attach it to a follow-up so the next review can target the actual symptom rather than the structural diff.
+`miniapps/seas/jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch` (252 lines).
+
+The dev sbatch mirrors `jobs/tpv102/tpv102_mixed_flux_adjacent_200m_p1_O2_dev.sbatch` line-for-line in structure (modules, `LD_LIBRARY_PATH`, build, `ibrun`, post-run summary) with the following TPV205-specific adaptations:
+
+| TPV102 dev sbatch | TPV205 dev sbatch |
+|---|---|
+| driver `seas_tpv102_driver` | `seas_tpv205_driver` |
+| mesh `tpv102/mesh/tpv102_200m.msh` | `tpv205/mesh/tpv2053d_200m.msh` |
+| output prefix `tpv102_mfadj_p1_O2` | `tpv205_mfadj_p1_O2` |
+| `--fric-law aging` | `--fric-law lsw` |
+| hypocenter station `flt_0_7.5` | `x2_0_x3_7.5` |
+| station column 5 = V2 strike | column 3 = V2 strike (different column order — TPV205 SCEC trace layout) |
+| no LSW dispatch verdict | adds `friction_solver_actual=lsw-closed-form` post-run gate (R-016 regression sentinel) |
+| no mesh existence guard | `[ ! -s tpv2053d_200m.msh ] && exit 1` (mesh `.msh` is not in the repo — see R-004) |
+
+Same modules (`intel/19.1.1`, `impi/19.0.9`, `hypre/2.31.0`, `mumps/5.3`, `parmetis`, `petsc/3.15`, `fftw3/3.3.8`), same `LD_LIBRARY_PATH` order, same `8N x 400r x 2h` allocation, same `output-dt 0.05 / paraview-dt 0.5 / paraview-bulk-dt 0.5` cadence as the TPV102 dev pair.
 
 ## Unreviewed Areas
-- `dynamic/wave_operator.inl` (3000+ lines) was treated as a black box — it is shared between BP5/TPV102/TPV104 and on the [C2] no-touch list per `feedback_dynamic_folder_editable_for_tpv104`. The review confirmed the fault-dispatch site (`wave_operator.inl:3614 EvaluateADER`) but did not audit the per-substep imposed-state side-channel beyond contract.
-- `dynamic/fault_face_flux.{cpp,hpp}` — shared with BP5; treated as an API. Only its public surface (`ComputeStageState`, `BuildImposedState`, `WriteBackState`, `EvaluateADER`, `EvaluateADERTotal`) was matched against caller expectations.
-- `mesh/tpv102_200m.msh` and other mesh artefacts — not in scope for a code review.
-- The sbatch scripts beyond `tpv102_200m_p1_1.5s_400rank_dev.sbatch` (one was sampled for build/run-flag conventions).
-- Unit tests `test_tpv102_total_locked_fault.cpp`, `test_tpv102_total_absorbing_equilibrium.cpp`, `test_tpv102_pepper_reproducer.cpp` — these still target the *legacy* total-Q path (`tpv102_setup_total.hpp`), which the new driver does not include. Whether these tests should be retired or ported to the fluctuation-Q + iterator flow is a separate scoping decision.
+- `dynamic/wave_operator.inl` lines 1–3500 (~3500 lines of shared dispatch) — out of scope per `feedback_dynamic_folder_editable_for_tpv104`. Audited only the two TPV205 dispatch sites and the `VerifySharedFaultDOFDataConsistency` body for R-002.
+- `tpv205/mesh/tpv2053d_*.geo` — assumed to emit Physical Surface 101/103/105 as the driver and `TPV205Params::bc_*_default` advertise; not parsed.
+- The `jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p2_O3_normal.sbatch` (existing) was inspected for pattern reuse but its production verdict is out of scope; the new dev sbatch is its low-cost counterpart for early-stage smoke testing.
+- The `.msh` build flow (gmsh on `.geo` → `.msh`) — see R-004; a follow-up `jobs/tpv205/tpv205_mesh_build.sbatch` would close the gap but is out of scope for this review.

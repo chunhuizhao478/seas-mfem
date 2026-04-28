@@ -175,6 +175,8 @@ TEST_FRICTION_SOLVER_SRC = tests/unit/test_friction_solver.cpp
 TEST_TPV102_SETUP_SRC = tests/unit/test_tpv102_setup.cpp
 TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
 TPV102_SUBSTEP_ITERATOR_SRC = dynamic/tpv102_substep_iterator.cpp
+TPV205_DRIVER_SRC = drivers/tpv205_driver.cpp
+TPV205_SUBSTEP_ITERATOR_SRC = dynamic/tpv205_substep_iterator.cpp
 TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
 TEST_R101_SHARED_FAULT_SRC = tests/parallel/test_r101_shared_fault.cpp
 # TPV102 v9.0.0 Phase 1 unit tests (§3.1, §3.1b, §3.1c, §3.1d)
@@ -364,6 +366,19 @@ TPV102_HEADERS = config/tpv102_params.hpp \
 # shared fault_face_flux + friction_solver objects.  Same pattern as
 # TPV104_SHARED_OBJS.
 TPV102_SHARED_OBJS = $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                     dynamic/fault_face_flux.o \
+                     dynamic/friction_solver.o
+
+# TPV205 (linear slip-weakening, SCEC TPV5 spec) driver + iterator.
+TPV205_DRIVER_OBJ = $(TPV205_DRIVER_SRC:.cpp=.o)
+TPV205_SUBSTEP_ITERATOR_OBJ = $(TPV205_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+
+TPV205_HEADERS = config/tpv205_params.hpp \
+                 dynamic/tpv205_friction.hpp \
+                 dynamic/tpv205_setup.hpp \
+                 dynamic/tpv205_substep_iterator.hpp
+
+TPV205_SHARED_OBJS = $(TPV205_SUBSTEP_ITERATOR_OBJ) \
                      dynamic/fault_face_flux.o \
                      dynamic/friction_solver.o
 TEST_TPV102_LOCAL_OBJ = $(TEST_TPV102_LOCAL_SRC:.cpp=.o)
@@ -1176,6 +1191,15 @@ seas_tpv102_driver: $(TPV102_DRIVER_OBJ) $(TPV102_SHARED_OBJS) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) \
 	    $(PML_LAYER_OBJ) $(MFEM_LIBS)
 
+# TPV205 (SCEC TPV5, linear slip-weakening) driver.
+seas_tpv205_driver: $(TPV205_DRIVER_OBJ) $(TPV205_SHARED_OBJS) \
+                    $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                    $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TPV205_DRIVER_OBJ) \
+	    $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) \
+	    $(PML_LAYER_OBJ) $(MFEM_LIBS)
+
 # Phase 4a: TPV102 local integration tests
 seas_test_tpv102_local: $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
@@ -1724,6 +1748,15 @@ $(TPV102_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV102_HEADERS) $(MFEM_
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
 $(TPV102_SUBSTEP_ITERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV102_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+# TPV205 compile rules.
+$(TPV205_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TPV205_SUBSTEP_ITERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
@@ -2813,6 +2846,39 @@ seas_test_tpv104_substep_iterator_parity: $(TEST_TPV104_SUBSTEP_ITERATOR_PARITY_
 
 seas_test_tpv104_substep_dispatch_parity: $(TEST_TPV104_SUBSTEP_DISPATCH_PARITY_OBJ) $(TPV104_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV104_SUBSTEP_DISPATCH_PARITY_OBJ) $(TPV104_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
+
+# REVIEW R-016 Phase 4 — TPV205 LSW dispatch tests.
+TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC = tests/unit/test_tpv205_evaluate_ader_lsw_parity.cpp
+TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ = $(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC:.cpp=.o)
+TEST_TPV205_MPI_RUPTURE_CROSSING_SRC = tests/verification/test_tpv205_mpi_rupture_crossing.cpp
+TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ = $(TEST_TPV205_MPI_RUPTURE_CROSSING_SRC:.cpp=.o)
+TEST_TPV205_FRICTION_SRC = tests/unit/test_tpv205_friction.cpp
+TEST_TPV205_FRICTION_OBJ = $(TEST_TPV205_FRICTION_SRC:.cpp=.o)
+
+$(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_TPV205_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_tpv205_evaluate_ader_lsw_parity: $(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ) $(TPV205_SHARED_OBJS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ) $(TPV205_SHARED_OBJS) $(MFEM_LIBS)
+
+seas_test_tpv205_mpi_rupture_crossing: $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
+
+# REVIEW R-003 (round 5): friction-helper unit test for the LSW
+# strength-barrier short-circuits R-002/R-003 in tpv205_friction.hpp.
+# Header-only test; depends on tpv205_friction.hpp + tpv205_params.hpp
+# + test_macros.hpp.  No additional .o files beyond MFEM.
+seas_test_tpv205_friction: $(TEST_TPV205_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_FRICTION_OBJ) $(MFEM_LIBS)
 
 # Round-11 Mixed-Flux unit tests (Zhang et al. 2023).
 seas_test_godunov_central_flux: $(TEST_GODUNOV_CENTRAL_FLUX_OBJ) $(GODUNOV_FLUX_OBJ)

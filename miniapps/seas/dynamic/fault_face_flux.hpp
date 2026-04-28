@@ -55,6 +55,25 @@ struct DOFData
    real_t tau1_corr = 0, tau2_corr = 0;  ///< Corrected tangential traction [Pa]
    real_t sigma_n_corr = 0;              ///< Corrected normal traction [Pa]
 
+   // -----------------------------------------------------------------------
+   // Linear slip-weakening (LSW) parameters — separate slot from the
+   // rate-and-state `a / psi / Dc` so that:
+   //   1. A code path that reads `data.a / data.psi / data.Dc` for
+   //      rate-and-state friction (Evaluate, EvaluateTotal, the TPV104
+   //      iterator, every Brent / Newton call) cannot accidentally
+   //      consume LSW values and produce off-by-orders-of-magnitude
+   //      strengths (REVIEW R-016).
+   //   2. A code path that reads these LSW fields cannot accidentally
+   //      consume rate-and-state values: zero defaults make
+   //      `LSWFrictionCoefficient_TPV205(δ, 0, 0, 0)` deterministic
+   //      and `EvaluateADER_LSW` aborts loudly via its own guard.
+   //
+   // Populated only by InitializeFaultDOFs_TPV205; pre-stress / nucleation /
+   // impedance fields above are shared with rate-and-state callers.
+   real_t lsw_mu_s = 0.0;   ///< LSW static friction μ_s (≥ mu_s_barrier ⇒ barrier QP)
+   real_t lsw_mu_d = 0.0;   ///< LSW dynamic friction μ_d
+   real_t lsw_d_c  = 0.0;   ///< LSW slip-weakening critical distance d_c [m]
+
 #ifdef SEAS_DIAG_FAULT_FLUX
    // v9.0.0 §0.5 DIAG gate for the C-1 / C-2 / C-3 bisection checkpoints.
    // Set true on exactly one hypocenter DOF (and optionally one off-hypo
@@ -291,6 +310,45 @@ public:
                           real_t dt,
                           real_t *I_imp_plus_tot, real_t *I_imp_minus_tot,
                           FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
+
+   /// @brief LSW counterpart to `EvaluateADER` — time-integrated Riemann
+   /// solve for the linear slip-weakening law (SCEC TPV5 / TPV205).
+   ///
+   /// I-form wrap pattern identical to `EvaluateADER`:
+   ///   Q̄± = I±/dt, run the LSW closed form on Q̄±, scale I_imp = dt·Q_imp.
+   /// The friction physics is the SCEC TPV5 §7-11 closed form:
+   ///   μ(δ) via `LSWFrictionCoefficient_TPV205`,
+   ///   V_abs / V1 / V2 / τ*_corr via `SolveLSW_TPV205`,
+   /// reading the LSW-native fields `data.lsw_mu_s / lsw_mu_d / lsw_d_c`.
+   /// `data.a / data.psi / data.Dc` are NOT read.
+   ///
+   /// On return `data.{slip_rate, V1, V2, tau1_corr, tau2_corr,
+   /// sigma_n_corr}` carry the values from the closed-form solve at the
+   /// macro-step's time-averaged Q, matching `EvaluateADER`'s station-
+   /// output convention; `data.tau*_corr` and `data.sigma_n_corr` are
+   /// TOTAL (= pre-stress + nuc + trial-scale corrected) per
+   /// `WriteBackState`. `data.psi` is NOT touched.
+   ///
+   /// R-001 (final review): `data.slip{1,2}` is NOT touched by this
+   /// call — slip evolution is owned exclusively by
+   /// `Tpv205SubStepIterator::StepOneQP_`, which integrates `slip{1,2}
+   /// += V{1,2} * dt_sub` once per sub-step over every fault QP.  The
+   /// wave operator's R-1601 shared-fault fallback re-invokes
+   /// `EvaluateADER_LSW` AFTER the iterator on shared QPs; if this
+   /// function also accumulated slip, shared-fault QPs at np > 1 would
+   /// double-count slip and the rupture front would accelerate
+   /// artificially across MPI rank boundaries.  See REVIEW R-001.
+   ///
+   /// @param[in,out] data   Per-DOF state.
+   /// @param[in]  I_plus    Time-integrated + side state (NUM_STATE).
+   /// @param[in]  I_minus   Time-integrated − side state (NUM_STATE).
+   /// @param[in]  dt        Time step (> 0).
+   /// @param[out] I_imp_plus   Time-integrated imposed + state (NUM_STATE).
+   /// @param[out] I_imp_minus  Time-integrated imposed − state (NUM_STATE).
+   void EvaluateADER_LSW(DOFData &data,
+                         const real_t *I_plus, const real_t *I_minus,
+                         real_t dt,
+                         real_t *I_imp_plus, real_t *I_imp_minus) const;
 
    /// Access the friction solver.
    const FrictionSolver &GetSolver() const { return solver_; }

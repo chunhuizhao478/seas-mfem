@@ -3611,10 +3611,24 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
                      // has_bulk_bg_ already asserted at the top of
                      // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
-                     fault_flux_->EvaluateADER(fdata,
-                                               I_plus_local, I_minus_local,
-                                               dt,
-                                               I_imp_plus, I_imp_minus);
+                     // REVIEW R-016: route LSW callers (TPV205) through
+                     // EvaluateADER_LSW; the default RateAndState path
+                     // is byte-identical to pre-change.
+                     if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                     {
+                        fault_flux_->EvaluateADER_LSW(
+                           fdata,
+                           I_plus_local, I_minus_local,
+                           dt,
+                           I_imp_plus, I_imp_minus);
+                     }
+                     else
+                     {
+                        fault_flux_->EvaluateADER(fdata,
+                                                  I_plus_local, I_minus_local,
+                                                  dt,
+                                                  I_imp_plus, I_imp_minus);
+                     }
                   }
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
@@ -4514,11 +4528,29 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   // SUBSTEP_NP_GT_1_HANG_REVIEW.md (R-1600 + R-1601).
                   //
                   // SHARED FALLBACK: this branch always runs the inline
-                  // EvaluateADER regardless of substep_I_imp_*_flat_.
-                  fault_flux_->EvaluateADER(fdata,
-                                            I_plus_local, I_minus_local,
-                                            dt,
-                                            I_imp_plus, I_imp_minus);
+                  // ADER closure regardless of substep_I_imp_*_flat_
+                  // (R-1600/R-1601 frame-mismatch on shared QPs).
+                  // REVIEW R-016: dispatch on the friction-law tag —
+                  // RateAndState keeps the original Brent path
+                  // byte-identical (TPV102/TPV104); LSW (TPV205) runs
+                  // the closed-form solver.  Without this branch,
+                  // TPV205 shared-fault QPs at np > 1 silently consume
+                  // LSW values via Brent and stall the rupture front.
+                  if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                  {
+                     fault_flux_->EvaluateADER_LSW(
+                        fdata,
+                        I_plus_local, I_minus_local,
+                        dt,
+                        I_imp_plus, I_imp_minus);
+                  }
+                  else
+                  {
+                     fault_flux_->EvaluateADER(fdata,
+                                               I_plus_local, I_minus_local,
+                                               dt,
+                                               I_imp_plus, I_imp_minus);
+                  }
                   (void)substep_I_imp_plus_flat_;
                   (void)substep_I_imp_minus_flat_;
                   (void)substep_n_total_fault_qps_;

@@ -57,6 +57,13 @@ enum class FreeSurfaceBCMode : int { Gamma = 0, Godunov = 1 };
 /// exclusive with `UsePrecomputedFaceFluxes(true)` (R-1203).
 enum class MixedFluxMode : int { None = 0, Adjacent = 1, AllContinuous = 2 };
 
+/// REVIEW R-016: friction-law tag the driver sets at init so the wave
+/// operator's fault dispatch (interior + R-1600 shared-fault fallback)
+/// can route to the correct ADER closure.  Default `RateAndState` keeps
+/// TPV102 / TPV104 byte-identical; `LSW` routes through
+/// `FaultFaceFlux::EvaluateADER_LSW` for TPV205.
+enum class FaultFrictionLaw : int { RateAndState = 0, LSW = 1 };
+
 /// @brief DG wave operator for the 3D velocity-stress elastic wave equation.
 ///
 /// Solves dQ/dt + A dQ/dx + B dQ/dy + C dQ/dz = 0 using DG with
@@ -110,6 +117,21 @@ public:
    /// Set/get FaultFaceFlux for fault face dispatch (R-002 fix).
    void SetFaultFlux(FaultFaceFlux *ff) { fault_flux_ = ff; }
    FaultFaceFlux *GetFaultFlux() { return fault_flux_; }
+
+   /// REVIEW R-016: select the ADER fault dispatch.  Default
+   /// `FaultFrictionLaw::RateAndState` runs `fault_flux_->EvaluateADER`
+   /// (Brent on the rate-and-state law) on both the interior fault
+   /// path and the R-1600 shared-fault fallback — byte-identical to
+   /// pre-change behaviour for TPV102 / TPV104 / BP5.
+   /// `FaultFrictionLaw::LSW` runs `fault_flux_->EvaluateADER_LSW`
+   /// (closed-form solve, no root finder) on both paths and is
+   /// required by TPV205; without it shared-fault QPs at np > 1
+   /// silently consume LSW values via Brent and stall the rupture
+   /// front at MPI rank boundaries.
+   void SetFaultFrictionLaw(FaultFrictionLaw law)
+   { fault_friction_law_ = law; }
+   FaultFrictionLaw GetFaultFrictionLaw() const
+   { return fault_friction_law_; }
 
    /// I-04: select which free-surface BC flux variant is dispatched by
    /// ComputeFaceFluxRHS at FaceBC::FreeSurface.  Default Gamma keeps
@@ -600,6 +622,11 @@ private:
 
    PMLLayer *pml_layer_ = nullptr;
    FaultFaceFlux *fault_flux_ = nullptr;
+
+   /// REVIEW R-016: ADER fault-dispatch selector.  Default
+   /// `RateAndState` keeps TPV102 / TPV104 / BP5 byte-identical;
+   /// `LSW` is set by TPV205 via `SetFaultFrictionLaw`.
+   FaultFrictionLaw fault_friction_law_ = FaultFrictionLaw::RateAndState;
 
    /// Sub-step iterator side-channel (R-602/R-603): non-null when the
    /// driver has precomputed per-substep imposed states via the iterator;
