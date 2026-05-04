@@ -31,6 +31,8 @@ seas_bp2_full
 seas_bp1_full
 seas_bp5_full
 seas_tpv102_driver
+seas_tpv104_driver
+seas_tpv205_driver
 seas_test_*
 
 # Checkpoint files
@@ -40,6 +42,10 @@ bp1_full_checkpoint_*.txt
 # Test output
 test_pv_*/
 test_r001_*/
+
+# Python bytecode caches
+__pycache__/
+*.pyc
 
 # Archive
 archive/

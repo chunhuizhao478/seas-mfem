@@ -1,295 +1,629 @@
-# Code Review: TPV205 production-readiness audit + dev sbatch generation — 2026-04-27
+# Code Review (round 2): 2026-05-04 — `safs/smoke_test/PLAN_safs_test.md`
 
 ## Review Scope
-- Plan: `miniapps/seas/document/system_dev/tpv205_lsw_native_fields_plan_2026-04-27.md` (1087 lines).
-- Prior review: REVIEW.md round 4 (R-001..R-005) closed by /code-fix in this session.
-- Files audited (post-fix state):
-  - `dynamic/fault_face_flux.{hpp,cpp}` — `EvaluateADER_LSW` (slip accumulation removed per R-001).
-  - `dynamic/tpv205_friction.hpp`, `dynamic/tpv205_setup.hpp`, `dynamic/tpv205_substep_iterator.{hpp,cpp}`.
-  - `drivers/tpv205_driver.cpp` — banner / disable_nucleation / paraview_write / SubStep init / time loop / diag-dump.
-  - `dynamic/wave_operator.{hpp,inl}` — `FaultFrictionLaw` enum + dispatch sites at 3617–3631 (interior) and 4539–4553 (R-1601 shared-fault fallback) + `VerifySharedFaultDOFDataConsistency`.
-  - `tests/unit/test_tpv205_evaluate_ader_lsw_parity.cpp`, `tests/verification/test_tpv205_mpi_rupture_crossing.cpp` (post-fix; `mpirun -np 2` reports R-001 ratio = 1.220 < 1.5 ✓).
-  - Existing `jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p2_O3_normal.sbatch` (P=2 + O=3, normal queue, 48h).
-  - Reference template: `jobs/tpv102/tpv102_mixed_flux_adjacent_200m_p1_O2_dev.sbatch`.
-- Domain context: `miniapps/seas/CLAUDE.md`, the tpv205 plan, prior REVIEW.md rounds, the SCEC TPV5 spec PDF (`tpv205/benchmark_document/TPV5_forwebsite.pdf`).
 
-## Deliverable created
-- **`miniapps/seas/jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch`** — new dev-queue (8N × 400r × 2h) sbatch mirroring the TPV102 mixed-flux dev pattern, adapted for TPV205 (LSW friction, 4-patch pre-stress, 16-station SCEC layout, `tpv2053d_200m.msh`). Post-run summary parses the `x2_0_x3_7.5` hypocenter station and now also checks the `friction_solver_actual=lsw-closed-form` dispatch banner — a missing/`brent` value flags the R-001/R-016 fix as regressed.
+- **Plan reviewed:** `miniapps/seas/safs/smoke_test/PLAN_safs_test.md` (and
+  its PDF render `PLAN_safs_test.pdf`).
+- **Reference spec for compliance:** `miniapps/seas/drivers/seas_driver.cpp`
+  — the existing BP5 driver. The plan's stated goal (lines 5–7) is "BP5-
+  derived ... that exercises the SAFS multi-fault `.msh` end-to-end" with
+  the only deltas being the boundary mapping (BoundaryConfig) and the
+  per-DOF parameter override (uniform-VW, no-nucleation). Every other
+  composition step should mirror BP5.
+- **Header surfaces verified:** `domain/{boundary_config,elasticity_operator,
+  domain_operator}.hpp`, `fault/{fault_geometry,rate_state_fault}.hpp`,
+  `solver/{seas_operator,time_stepper}.hpp`,
+  `friction/{dieterich_ruina,state_evolution}.hpp`,
+  `config/bp5_params.hpp`, `constitutive/linear_elastic.hpp`.
+- **Domain context:** `miniapps/seas/CLAUDE.md`.
+
+## Why R-001..R-003 are deviations even though "the goal is to mirror BP5"
+
+The user's challenge: if the plan mirrors BP5, where do these bugs come
+from? Answer: **the plan was rewritten from memory rather than
+copy-pasted from `drivers/seas_driver.cpp`, and three of its key code
+snippets drifted from the actual BP5 pattern**. The plan IS supposed to
+mirror BP5 and IS NOT supposed to have these. Specifically:
+
+| ID | Plan does | BP5 reference does | Drift type |
+|---|---|---|---|
+| R-001 | `Vector state;` (size 0) | `Vector state(fault_op.StateSize());` (line 364) | Plan dropped the constructor argument. |
+| R-002 | `ode_solver.GetNumDtRejects()` (no such API) | counts `!ode_solver.Step(...)` returns into a local int (lines 534, 588, 590) | Plan invented a getter. |
+| R-003 | `ListAttrs(bdr_attrs)` (no such helper) | doesn't exist in BP5 (BP5 doesn't pre-validate attrs) | Plan added a SAFS-specific check then forgot a sub-helper. |
+| R-008 (new) | `ode_solver.Step(state, t, dt)` (3 args) | `ode_solver.Step(seas_op, state, t, dt)` (4 args, line 590) | Plan dropped the operator argument. |
+
+In other words, the answer to "why we have these deviations if the goal is
+to mirror BP5" is: **they were NOT supposed to exist; they are not design
+choices, they are transcription errors**. The fix in every case is to
+rewrite the snippet to literally match the BP5 reference.
+
+R-003 is slightly different: BP5 doesn't have an analogous check at all.
+SAFS legitimately needs one because its tags (1=xm, 2=xp, ..., 100=fault,
+10=domain) differ from BP5's hardcoded numbering (1=Natural, 3=Fault,
+5=Dirichlet). So adding `AssertSafsAttrs` is reasonable; the bug is that
+its body uses `ListAttrs` without defining it.
+
+---
 
 ## Findings
 
-### [R-001] [LOW] [drivers/tpv205_driver.cpp:1713,2188–2199] — `psi` column in fault_qp_dump and ParaView comment is stale (TPV205 has no state variable)
+### [R-001] [CRITICAL] [PLAN_safs_test.md:501-502] — `Vector state` not pre-sized before `SetInitialCondition`
 
-**Category:** QUALITY / documentation
+**Category:** BUG (compile / runtime — abort at startup)
 
 **Description:**
-The end-of-run diagnostic dump (`SEAS_DIAG_DUMP_FAULT_QPS=1`) writes `d.psi` as the 12th column and labels the column header "psi" at line 2188:
+Plan code (lines 501–502):
+
 ```cpp
-fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
-      "tau1_corr tau2_corr sigma_n_corr psi\n";
-…
-fs << … << " " << d.sigma_n_corr << " " << d.psi << "\n";
+Vector state;
+seas_op.SetInitialCondition(state);
 ```
-TPV205 uses linear slip-weakening, which has no state variable. `d.psi` is defensively zeroed at init (`tpv205_setup.hpp:135`) and never written. Every row of the dump therefore reports `psi = 0`, which (a) is misleading to anyone analysing the dump and (b) hides the actual TPV205-relevant per-QP scalar — μ_eff(δ).
 
-Same channel mismatch appears in the ParaView setup comment at line 1713: "fault-surface PVD/VTU (slip, slip_rate, traction dip+strike, **psi**, sigma_n, …)". The actual ParaView state field carries `LSWFrictionCoefficient_TPV205(δ, μ_s, μ_d, d_c)` (driver line 1945–1948 — the R-005 fix from a prior round), not psi.
+`SEASQuasiDynamicOperator::SetInitialCondition` (`solver/seas_operator.hpp:217`)
+opens with:
 
-**Trigger:**
-Run with `SEAS_DIAG_DUMP_FAULT_QPS=1`. Inspect `fault_qp_dump_rank<R>.txt`: every row's last column is 0.
+```cpp
+MFEM_VERIFY(state.Size() == fault_->StateSize(),
+            "State vector size mismatch: got " << state.Size()
+            << ", expected " << fault_->StateSize());
+```
 
-**Actual behavior:**
-`# columns: ... sigma_n_corr psi` and a column of zeros.
+A default-constructed `Vector` has size 0, so this verify fires immediately.
 
-**Expected behavior:**
-`# columns: ... sigma_n_corr mu_eff(delta)` where the dump computes `LSWFrictionCoefficient_TPV205(sqrt(slip1²+slip2²), d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c)` and writes that value.
+BP5 reference (`drivers/seas_driver.cpp:364`) is the canonical pattern:
+
+```cpp
+Vector state(fault_op.StateSize());
+seas_op.SetInitialCondition(state);
+```
+
+**Trigger:** running the driver as written.
+
+**Actual behavior:** abort at startup with
+`"State vector size mismatch: got 0, expected <N>"`.
+
+**Expected behavior:** state pre-sized like BP5.
+
+**Suggested fix:**
+
+```diff
+-    // 9. Initial state from operator.
+-    Vector state;
+-    seas_op.SetInitialCondition(state);
++    // 9. Initial state from operator (mirrors BP5 driver line 364).
++    Vector state(fault_op.StateSize());
++    seas_op.SetInitialCondition(state);
+```
+
+**Test case:**
+```python
+def test_R001_state_vector_pre_sized_before_set_initial_condition():
+    pmesh = make_minimal_safs_mesh()
+    domain = ElasticityDomainOperator(pmesh, order=1, ...)
+    bp5 = BP5Params()
+    OverrideToUniformVW(bp5, SafsTestParams())
+    fault_geom = FaultGeometry(domain, bp5, mpi_ctx)
+    friction = DieterichRuinaFriction(...)
+    aging = AgingLawPsi(...)
+    fault_op = RateStateFaultOperator(fault_geom, friction, aging, bp5, mpi_ctx)
+    seas_op = SEASQuasiDynamicOperator(domain, fault_op, mpi_ctx)
+    state = Vector(fault_op.StateSize())   # required pre-size
+    seas_op.SetInitialCondition(state)     # must NOT throw
+    assert state.Size() == fault_op.StateSize()
+```
+
+---
+
+### [R-002] [CRITICAL] [PLAN_safs_test.md:533] — `ode_solver.GetNumDtRejects()` does not exist
+
+**Category:** BUG (compile-time)
+
+**Description:**
+Plan diagnostic line 533 reads:
+
+```cpp
+n_dt_rejects = ode_solver.GetNumDtRejects()
+```
+
+`DormandPrinceRK45` (`solver/time_stepper.hpp`) maintains `int total_rejections_;`
+as a *private* member (line 627) and increments it inside `Step` (lines 326,
+334, 351, 358, 376, 383, 401, 408, 427) but **exposes no public getter** by
+any name (`grep -rn 'GetNumDtRejects\|GetNumRejects\|TotalRejections'
+miniapps/seas/solver/time_stepper.hpp` returns nothing).
+
+BP5 reference (`drivers/seas_driver.cpp` lines 534, 587–590):
+
+```cpp
+int step_rejections = 0;        // line 534
+...
+real_t dt;
+bool accepted = ode_solver.Step(seas_op, state, t, dt);
+if (!accepted) { continue; }    // increment counter here for SAFS
+step++;
+```
+
+BP5 simply doesn't put rejects into a public getter — it relies on the
+boolean return of `Step` (`time_stepper.hpp:226`: "@return true if step
+accepted, false if rejected"). The plan invented a non-existent API.
+
+**Trigger:** compiling the driver as written.
+
+**Actual behavior:** compile error `'class DormandPrinceRK45' has no
+member named 'GetNumDtRejects'`.
+
+**Expected behavior:** count rejections in the driver via the boolean
+return of `Step`.
+
+**Suggested fix:** mirror BP5's pattern with a driver-local counter and an
+inner accept loop (so `step` increments only on accepted steps):
+
+```diff
+     real_t t = 0.0;
+     int step = 0;
++    int n_dt_rejects = 0;
+     while (step < n_steps_max) {
+         real_t dt = ode_solver.GetDt();
+-        ode_solver.Step(state, t, dt);
+-        ++step;
++        // Mirror BP5 driver lines 587-590: ode_solver.Step's bool return
++        // is the only rejection signal.  Loop until at least one
++        // accepted step is produced; count intermediate rejects.
++        bool accepted = false;
++        while (!accepted) {
++            accepted = ode_solver.Step(seas_op, state, t, dt);
++            if (!accepted) { ++n_dt_rejects; }
++        }
++        ++step;
+```
+
+Then write `n_dt_rejects` (driver-local) to the CSV instead of the
+non-existent getter.
+
+**Test case:**
+```python
+def test_R002_dt_rejects_counted_in_driver_not_solver():
+    csv = run_driver(n_steps=5)
+    assert all(csv["n_dt_rejects"] >= 0)
+    assert "GetNumDtRejects" not in compile_log()
+```
+
+---
+
+### [R-003] [CRITICAL] [PLAN_safs_test.md:583] — `ListAttrs()` referenced inside `MFEM_VERIFY` but not defined
+
+**Category:** BUG (compile-time)
+
+**Description:**
+`AssertSafsAttrs` (Phase-3 §3.3 lines 568–595) is a SAFS-specific check
+that verifies `pmesh.bdr_attributes` contains tags 1..6. Its error
+message is:
+
+```cpp
+// Plan lines 581-584
+MFEM_VERIFY(found,
+            "SAFS mesh missing required boundary attribute " << a
+            << " (mesh has [" << ListAttrs(bdr_attrs) << "])");
+```
+
+`grep -rn ListAttrs miniapps/seas/` returns this single reference. The
+helper does not exist.
+
+BP5 reference does not have an analogous check — BP5 mesh tags are
+hardcoded (1=Natural, 3=Fault, 5=Dirichlet) and the legacy `BCMode`
+constructor enforces them implicitly. So R-003 is an addition to the
+plan, not a deviation from BP5; but it is still a compile-stopper.
+
+**Trigger:** compiling the driver.
+
+**Actual behavior:** compile error `'ListAttrs' was not declared in this
+scope`.
+
+**Expected behavior:** define the helper or inline the formatting.
+
+**Suggested fix:** add a file-static lambda in the driver and use it:
+
+```diff
++    // File-local helper to format Array<int> for diagnostic messages.
++    auto fmt_attrs = [](const Array<int>& a) {
++        std::ostringstream oss;
++        for (int i = 0; i < a.Size(); ++i) {
++            if (i > 0) { oss << ", "; }
++            oss << a[i];
++        }
++        return oss.str();
++    };
+     ...
+-        MFEM_VERIFY(found,
+-                    "SAFS mesh missing required boundary attribute " << a
+-                    << " (mesh has [" << ListAttrs(bdr_attrs) << "])");
++        MFEM_VERIFY(found,
++                    "SAFS mesh missing required boundary attribute " << a
++                    << " (mesh has [" << fmt_attrs(bdr_attrs) << "])");
+```
+
+**Test case:**
+```python
+def test_R003_assert_safs_attrs_compiles_and_reports_attrs():
+    out = run_driver_expect_fail(mesh="missing_ztop.msh")
+    assert "SAFS mesh missing required boundary attribute 5" in out
+    assert "(mesh has [" in out
+    body = out.split("(mesh has [")[1].split("])")[0]
+    assert all(t.strip().isdigit() for t in body.split(","))
+```
+
+---
+
+### [R-008] [CRITICAL] [PLAN_safs_test.md:526] — `ode_solver.Step(state, t, dt)` has wrong arity
+
+**Category:** BUG (compile-time, NEW IN ROUND 2)
+
+**Description:**
+Plan time-step loop (line 526):
+
+```cpp
+real_t dt = ode_solver.GetDt();
+ode_solver.Step(state, t, dt);
+++step;
+```
+
+`DormandPrinceRK45::Step` signature (`solver/time_stepper.hpp:227`):
+
+```cpp
+bool Step(TimeDependentOperator &op, Vector &state, real_t &t, real_t &dt)
+```
+
+Step requires **four** arguments (operator + state + t + dt). The plan's
+3-argument call `Step(state, t, dt)` will fail to compile.
+
+BP5 reference (`drivers/seas_driver.cpp:590`):
+
+```cpp
+bool accepted = ode_solver.Step(seas_op, state, t, dt);
+```
+
+— passes `seas_op` as the first argument explicitly. The plan author
+likely confused this with the MFEM `ODESolver::Step` style which
+captures the operator from a prior `Init(...)` call. `DormandPrinceRK45`
+re-takes the operator on every `Step` invocation; the prior `Init` only
+allocates stage vectors (`time_stepper.hpp:205-214`).
+
+**Trigger:** compiling the driver.
+
+**Actual behavior:** compile error along the lines of
+`no matching function for call to DormandPrinceRK45::Step(Vector&,
+real_t&, real_t&)`.
+
+**Expected behavior:** pass `seas_op` as first arg, mirroring BP5.
+
+**Suggested fix:** combined with R-002 above into one corrected loop:
+
+```diff
+     while (step < n_steps_max) {
+         real_t dt = ode_solver.GetDt();
+-        ode_solver.Step(state, t, dt);
+-        ++step;
++        bool accepted = false;
++        while (!accepted) {
++            accepted = ode_solver.Step(seas_op, state, t, dt);
++            if (!accepted) { ++n_dt_rejects; }
++        }
++        ++step;
+```
+
+(The `seas_op` is the same `PBP5SEASOp` constructed at plan line 497.)
+
+**Test case:**
+```python
+def test_R008_step_passes_operator_explicitly():
+    # Compile must succeed; instrument Step to record that the
+    # operator argument is `seas_op`.
+    log = run_driver_with_step_trace(n_steps=2)
+    assert "Step(seas_op, state, t, dt)" in compile_log()
+```
+
+---
+
+### [R-004] [MODERATE] [PLAN_safs_test.md:312-349 vs 358] — `bp5.nucleation_eps = 0.0` promised in narrative but missing from `OverrideToUniformVW` body
+
+**Category:** DEVIATION (plan-internal inconsistency)
+
+**Description:**
+Narrative §2.3 line 358: "Set `bp5.nucleation_eps = 0.0` to be safe."
+The actual `OverrideToUniformVW` body in §2.2 (lines 312–349) sets
+`w_nuc`, `hs`, `ht`, `H`, `l_vw`, `Wf`, `lf`, but does NOT set
+`nucleation_eps` (default `1.0e-3` at `config/bp5_params.hpp:140`).
+
+The override is empirically still safe because `hs = 1.0e7` makes the
+`x3` condition fail by seven orders of magnitude. But narrative-vs-code
+mismatch is exactly the class of issue user-memory
+`feedback_complete_sign_sites.md` warns about: silent drift between
+documentation and implementation.
+
+**Trigger:** any reader cross-referencing §2.2 with §2.3.
+
+**Actual behavior:** override body does NOT set `nucleation_eps`;
+narrative claims it does.
+
+**Expected behavior:** set it. Match.
 
 **Suggested fix:**
 ```diff
---- a/miniapps/seas/drivers/tpv205_driver.cpp
-+++ b/miniapps/seas/drivers/tpv205_driver.cpp
-@@
-             fs << std::scientific << std::setprecision(17);
-             fs << "# columns: dof_idx x y z V1 V2 slip1 slip2 "
--                  "tau1_corr tau2_corr sigma_n_corr psi\n";
-+                  "tau1_corr tau2_corr sigma_n_corr mu_eff_delta\n";
-             const int n = static_cast<int>(dof_data.size());
-             for (int i = 0; i < n; i++)
-             {
-                const Vector &c = fault_coords[i];
-                const DOFData &d = dof_data[i];
-+               const real_t delta = std::sqrt(d.slip1 * d.slip1
-+                                              + d.slip2 * d.slip2);
-+               const real_t mu_eff = mfem::seas::LSWFrictionCoefficient_TPV205(
-+                                        delta, d.lsw_mu_s, d.lsw_mu_d,
-+                                        d.lsw_d_c);
-                fs << i << " " << c(0) << " " << c(1) << " " << c(2)
-                   << " " << d.V1 << " " << d.V2
-                   << " " << d.slip1 << " " << d.slip2
-                   << " " << d.tau1_corr << " " << d.tau2_corr
--                  << " " << d.sigma_n_corr << " " << d.psi << "\n";
-+                  << " " << d.sigma_n_corr << " " << mu_eff << "\n";
-             }
+     bp5.smooth_nucleation = false;
++    bp5.nucleation_eps = 0.0;   // narrative §2.3 promises this
 ```
-Update the L1713 comment from "psi" to "mu_eff" likewise.
 
 **Test case:**
-None — diagnostic-only dump; the column header rename is verified by grep:
-```bash
-grep -n "psi\b" miniapps/seas/drivers/tpv205_driver.cpp
-# expected: zero matches in the diag-dump and ParaView-comment blocks
-# (only references in inherited TPV104 boilerplate / pre-existing comments
-# that have nothing to do with TPV205 LSW).
+```python
+def test_R004_nucleation_eps_zeroed_in_override():
+    bp5 = BP5Params()                                # default 1e-3
+    OverrideToUniformVW(bp5, SafsTestParams())
+    assert bp5.nucleation_eps == 0.0
 ```
 
 ---
 
-### [R-002] [MODERATE] [POSSIBLE] [drivers/tpv205_driver.cpp:2138; dynamic/wave_operator.inl:5088–5466] — `VerifySharedFaultDOFDataConsistency()` after step 0 is uncovered for TPV205 at np > 1
+### [R-005] [MODERATE] [PLAN_safs_test.md:96-97, 511-513] — `dt_init` "clamped to dt_max" claim is false for default values
 
-**Category:** ASSUMPTION / test gap
-
-**Description:**
-The driver calls `wave.VerifySharedFaultDOFDataConsistency()` after the first macro-step (`tpv205_driver.cpp:2138`). The verify cross-rank-pairs every shared fault QP and aborts if any of the eight fields `{tau1_corr, tau2_corr, sigma_n_corr, V1, V2, psi, slip1, slip2}` differs by more than `tol = 1e-10` (relative).
-
-The TPV205 dispatch on shared-fault QPs (R-1601 fallback, `wave_operator.inl:4539–4553`) calls `EvaluateADER_LSW(fdata, …)` independently on each rank that owns the shared QP. The function reads rank-local `I_plus_local / I_minus_local` derived from `elem1_on_plus = !qpd.sign_flipped`. The R-1601 comment (the ORIGIN of the SHARED FALLBACK) explicitly documents that "elem1_on_plus is rank-local while qpd.sign_flipped is rank-independent" — exactly the configuration that would make rank A and rank B compute opposite-sign V1/V2 for the same physical shared QP, which would trip the verify with relative diff ≈ 2.0.
-
-The new `test_tpv205_mpi_rupture_crossing.cpp` does NOT call `VerifySharedFaultDOFDataConsistency()` — it bypasses this check. The TPV205 driver does call it (step==0), so a production np ≥ 2 run could abort on the first step with R-101 unpaired-entry messages and the user would not be able to predict it from the test suite.
-
-**Why this is POSSIBLE rather than CRITICAL**: TPV104 production np ≥ 4 runs use the same R-1601 inline-`EvaluateADER` fallback on shared faces and have not reported verify aborts. Either (a) the rank-frame logic actually produces consistent output through `Evaluate` despite the comment's framing concern, OR (b) the verify tolerance happens to absorb whatever rank-disagreement does exist for rate-and-state outputs. Whether LSW outputs follow the same pattern is unverified — the only TPV205 MPI test bypasses the verify.
-
-**Trigger:**
-`mpirun -np N seas_tpv205_driver --mesh tpv205/mesh/tpv2053d_200m.msh ...` for N ≥ 2 with a partition that produces shared fault faces. The driver's first time-step completes, then `VerifySharedFaultDOFDataConsistency()` runs and may abort with `[R-101 rank-0 detail]` and `[UNPAIRED]` messages (or, on a less severe rank-mismatch, a value-tolerance abort with `max_rel_diff > 1e-10`).
-
-**Actual behavior:**
-Untested. The np=2 rupture-crossing test does not exercise this code path.
-
-**Expected behavior:**
-The verify must pass at np > 1 on a TPV205 mesh with shared-fault QPs (just as it does on TPV102/TPV104 production), OR the dispatch must be patched to write rank-consistent V1/V2/tau*_corr/slip* on shared QPs before the verify fires.
-
-**Suggested fix:**
-Extend `test_tpv205_mpi_rupture_crossing.cpp` to call the verify explicitly so any latent rank-mismatch surfaces in CI rather than at the first sbatch:
-
-```diff
---- a/miniapps/seas/tests/verification/test_tpv205_mpi_rupture_crossing.cpp
-+++ b/miniapps/seas/tests/verification/test_tpv205_mpi_rupture_crossing.cpp
-@@
-    AdvanceADERWithSubStep(wave, iterator, dof_data, fault_coords,
-                           Q, dt, /*ader_order*/2, /*t_start*/0.0,
-                           Q_new);
-+
-+   // R-002 (final review): the production driver calls
-+   // VerifySharedFaultDOFDataConsistency() after step 0 (see
-+   // tpv205_driver.cpp:2138).  Replicate that here so any latent
-+   // rank-canonical-frame mismatch in EvaluateADER_LSW surfaces in
-+   // CI rather than at the first sbatch on Frontera.  Default tol
-+   // = 1e-10 (relative).
-+   try
-+   {
-+      wave.VerifySharedFaultDOFDataConsistency();
-+      num_tests++;
-+      num_passed++;
-+      if (rank == 0)
-+      {
-+         std::cout << "  PASSED: VerifySharedFaultDOFDataConsistency "
-+                   << "after one ADER-O2 step (default tol 1e-10)\n";
-+      }
-+   }
-+   catch (...)
-+   {
-+      // MFEM_ABORT cannot actually be caught — this branch is
-+      // documentation only; if the verify trips it calls MPI_Abort
-+      // and the whole test fails loudly.  Keeping the try/catch
-+      // makes the intent explicit for future maintainers.
-+      num_tests++;
-+      num_failed++;
-+   }
-```
-If the assertion trips on a real np > 1 run, the fix is in `EvaluateADER_LSW` — it must compute rank-consistent V1/V2 (e.g. by always orienting (V1, V2) along the canonical-+ tangent direction regardless of which rank owns Elem1). That fix is OUT OF SCOPE for /code-fix this round; the immediate action is to surface the issue in CI.
-
-**Test case:**
-The diff above is the test. To validate without applying the fix:
-```bash
-# Build current TPV205 binary, run np=2 mpi test, observe whether
-# VerifySharedFaultDOFDataConsistency() trips:
-make seas_test_tpv205_mpi_rupture_crossing -j8
-mpirun -np 2 ./seas_test_tpv205_mpi_rupture_crossing
-# Expected (post-extension): if the verify trips, the test exits
-# with the [R-101 ...] abort message and a non-zero exit code;
-# if it passes, the new test slot reports "PASSED:
-# VerifySharedFaultDOFDataConsistency …".
-```
-
----
-
-### [R-003] [LOW] [tests/unit/test_tpv205_friction.cpp + Makefile] — Friction-helper unit test exists but has no Make rule, so it never runs in CI
-
-**Category:** QUALITY / test wiring
+**Category:** DEVIATION (documentation vs code)
 
 **Description:**
-`tests/unit/test_tpv205_friction.cpp` (203 lines) covers the strength-barrier short-circuits R-002/R-003 from `tpv205_friction.hpp` (`LSWFrictionCoefficient_TPV205`, `SolveLSW_TPV205`). The file is present in the repo but the Makefile has no `seas_test_tpv205_friction` target. `make test` and the `test-tpv205` aggregate (if any) do not exercise it, so a regression in `LSWFrictionCoefficient_TPV205` (e.g. removing the `mu_s >= 0.5 * mu_s_barrier` short-circuit) would compile and link, would not break the parity test or the MPI test, and would only surface as a wrong rupture-area boundary on Frontera.
+Plan §Constraints (lines 96–97):
 
-**Trigger:**
-`make seas_test_tpv205_friction` returns `make: *** No rule to make target 'seas_test_tpv205_friction'. Stop.` (verified during the build step of /code-fix in this session).
+> Initial dt = `0.01 * L0 / Vp` = 1.4e6 s ~ 16 days, but **clamped to
+> `dt_max`** = 0.1 yr ~ 3.156e6 s.
 
-**Actual behavior:**
-The test never runs.
+Phase-3 implementation (lines 511–513):
+```cpp
+real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
+                 std::min(0.01 * params.L0 / params.Vp,
+                          0.1 * SafsTestParams::seconds_per_year);
+```
 
-**Expected behavior:**
-Wire it into the Makefile alongside the existing TPV205 test targets at `Makefile:2851–2868`.
+Numerically `0.01 * 0.14 / 1e-9 = 1.4e6 s` and `0.1 * 365.25 * 86400 =
+3.155e6 s`; since `1.4e6 < 3.155e6` the `min` returns the first arg and
+the clamp **never fires**. The narrative is misleading.
 
 **Suggested fix:**
 ```diff
---- a/miniapps/seas/Makefile
-+++ b/miniapps/seas/Makefile
-@@
- # REVIEW R-016 Phase 4 — TPV205 LSW dispatch tests.
- TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC = tests/unit/test_tpv205_evaluate_ader_lsw_parity.cpp
- TEST_TPV205_EVALUATE_ADER_LSW_PARITY_OBJ = $(TEST_TPV205_EVALUATE_ADER_LSW_PARITY_SRC:.cpp=.o)
- TEST_TPV205_MPI_RUPTURE_CROSSING_SRC = tests/verification/test_tpv205_mpi_rupture_crossing.cpp
- TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ = $(TEST_TPV205_MPI_RUPTURE_CROSSING_SRC:.cpp=.o)
-+TEST_TPV205_FRICTION_SRC = tests/unit/test_tpv205_friction.cpp
-+TEST_TPV205_FRICTION_OBJ = $(TEST_TPV205_FRICTION_SRC:.cpp=.o)
-@@
- $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
- 	@mkdir -p $(@D)
- 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
-+
-+$(TEST_TPV205_FRICTION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV205_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-+	@mkdir -p $(@D)
-+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
-@@
- seas_test_tpv205_mpi_rupture_crossing: $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ)
- 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_MPI_RUPTURE_CROSSING_OBJ) $(TPV205_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(MFEM_LIBS)
-+
-+seas_test_tpv205_friction: $(TEST_TPV205_FRICTION_OBJ)
-+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV205_FRICTION_OBJ) $(MFEM_LIBS)
+-- Time stepping: `DormandPrinceRK45` with BP5 tolerances (`atol=1e-7`,
+-  `rtol=1e-50`, `dt_min=1e-6`, `dt_max=0.1 yr`). Initial dt = `0.01 * L0 / Vp`
+-  = 1.4e6 s ≈ 16 days, but **clamped to `dt_max`** = 0.1 yr ≈ 3.156e6 s.
++- Time stepping: `DormandPrinceRK45` with BP5 tolerances (`atol=1e-7`,
++  `rtol=1e-50`, `dt_min=1e-6`, `dt_max=0.1 yr`). Initial dt =
++  `min(0.01 * L0 / Vp, dt_max)` = 1.4e6 s ≈ 16 days under default
++  parameters; the `dt_max` cap is a safety net for future overrides
++  that increase `L0/Vp` past 36 days.
 ```
 
-(The test depends only on `tpv205_friction.hpp` and `tpv205_params.hpp` — both header-only — plus `test_macros.hpp`, so no extra `.o` files are needed beyond MFEM itself.)
-
 **Test case:**
-```bash
-make seas_test_tpv205_friction -j4 && ./seas_test_tpv205_friction
-# Expected: 3 sub-tests pass — barrier_mu_no_collapse,
-# barrier_locked_under_tensile, combined_barrier_stays_locked.
+```python
+def test_R005_default_dt_init_is_not_clamped():
+    p = SafsTestParams()
+    dt_default = min(0.01 * p.L0 / p.Vp, 0.1 * p.seconds_per_year)
+    assert abs(dt_default - 1.4e6) < 1.0
+    assert dt_default < 0.1 * p.seconds_per_year   # cap not active
 ```
 
 ---
 
-### [R-004] [LOW] [tpv205/mesh/] — `.msh` mesh files are not in the repo; production sbatch must build them on Frontera
+### [R-006] [MODERATE] [PLAN_safs_test.md:511-513] — `dt_init` formula uses `params.Vp` rather than `max(V_init, V_nuc)`
 
-**Category:** ASSUMPTION / production gap
+**Category:** ASSUMPTION (silent breakage if invariant changes)
 
 **Description:**
-`tpv205/mesh/` contains only `.geo` source (`tpv2053d_100m.geo`, `tpv2053d_200m.geo`); no pre-built `.msh` exists. Both the existing normal-queue sbatch and the new dev sbatch generated this round include an explicit `[ ! -s tpv205/mesh/tpv2053d_200m.msh ] && exit 1` guard, so a missing mesh fails the job loudly rather than silently producing empty output. But there is no helper sbatch / script in `jobs/tpv205/` that runs gmsh on the `.geo` to produce the `.msh` — the user must do this manually on Frontera, which is fragile.
+CLAUDE.md mandates `dt_init = 0.01 * L_nuc / V_nuc` ("Too large -> RK45
+stage amplification during nucleation, debug v7"). The plan uses
+`0.01 * L0 / Vp` (lines 96, 512), which is correct **only under the
+implicit invariant `V_nuc == V_init == Vp` and `L_nuc == L0`** that the
+override establishes.
 
-TPV104 has `jobs/tpv104/tpv104_mesh_build.sbatch` for exactly this pattern. TPV205 lacks the equivalent.
+If a future tweak (e.g. someone adds a small overstress in
+`OverrideToUniformVW` and sets `V_nuc > V_init`) breaks the invariant,
+the dt_init formula becomes silently wrong — over-large dt for a now-
+fast nucleation seed → RK45 stage amplification.
 
-**Trigger:**
-Submit either TPV205 sbatch on a fresh Frontera workspace where the gmsh step has not been run.
+**Suggested fix:** reference the actually-active velocity scale:
 
-**Actual behavior:**
-The sbatch's `[ ! -s tpv205/mesh/tpv2053d_200m.msh ]` guard fires:
+```diff
+-    real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
+-                     std::min(0.01 * params.L0 / params.Vp,
+-                              0.1 * SafsTestParams::seconds_per_year);
++    // dt_init = 0.01 * L_min / V_max_init per CLAUDE.md.  For this plan
++    // V_init == V_nuc == Vp, so the three are equivalent — but write
++    // the safe form so future overrides do not silently break.
++    const real_t V_init_max = std::max(params.V_init, params.Vp);
++    real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
++                     std::min(0.01 * params.L0 / V_init_max,
++                              0.1 * SafsTestParams::seconds_per_year);
 ```
-ERROR: tpv205/mesh/tpv2053d_200m.msh missing.  Run gmsh on tpv205/mesh/tpv2053d_200m.geo first.
-```
-Job aborts immediately. No data corruption, but a wasted submission.
-
-**Expected behavior:**
-A `jobs/tpv205/tpv205_mesh_build.sbatch` mirroring `jobs/tpv104/tpv104_mesh_build.sbatch` so the user can submit it once and get all standard `.msh` files built.
-
-**Suggested fix:**
-Out of scope for this review (the user asked for a code-running sbatch, not a mesh-build sbatch). Note as a follow-up: copy `jobs/tpv104/tpv104_mesh_build.sbatch` to `jobs/tpv205/tpv205_mesh_build.sbatch`, swap the gmsh inputs from `tpv104/mesh/*.geo` to `tpv205/mesh/*.geo`. The dev sbatch already documents the dependency.
 
 **Test case:**
-None — meta-tooling.
+```python
+def test_R006_dt_init_uses_max_init_velocity():
+    p = SafsTestParams()
+    p.V_init = 1.0e-7    # someone increases V_init by 100x
+    expected = 0.01 * p.L0 / max(p.V_init, p.Vp)
+    actual = compute_dt_init(p)
+    assert abs(actual - expected) / expected < 1e-12
+```
 
 ---
 
-### [R-005] [LOW] [drivers/tpv205_driver.cpp:1664–1677] — Background banner reports `V_ini = 0 m/s` but does not echo the strength-barrier sentinel `μ_s = 10000`
+### [R-009] [MODERATE] [PLAN_safs_test.md:530] — Plan diagnostic pseudocode references getters that do not exist on `seas_op`
 
-**Category:** QUALITY
+**Category:** DEVIATION (NEW IN ROUND 2)
 
 **Description:**
-The startup banner at lines 1664–1677 prints `μ_s = 0.677 (rupture area), 10000 (strength barrier)` and `V_ini = 0 m/s`. That's correct content but the dev-queue post-run summary template parses `peak |σ_n − 120 MPa|` from the hypocenter station file as the dominant production sanity check. There is no **equivalent banner field** for `μ_s_barrier` so a future driver edit that overrode `μ_s_barrier` (e.g. via a plan that introduces a CLI override) could silently drop the barrier without showing up in the banner or the post-run summary.
+Plan lines 528–533 describe per-step CSV diagnostics:
 
-This is a defensive-design comment — not a bug. Severity LOW because the existing `LSWFrictionCoefficient_TPV205` short-circuit + `SolveLSW_TPV205` short-circuit + `test_tpv205_friction` (once it's wired per R-003) cover the barrier semantics. The banner phrasing is fine for the dev sbatch.
+```
+// Diagnostics on `state`:
+//   V_max, V_min, psi_max, psi_min from seas_op
+//   traction_max from seas_op.GetTraction()
+//   slip_l2 = ||slip components||
+//   n_dt_rejects = ode_solver.GetNumDtRejects()
+```
 
-**Suggested fix:**
-None (note for future maintainers).
+Available APIs (`solver/seas_operator.hpp` + `fault/rate_state_fault.hpp`):
+
+| Diagnostic the plan asks for | API actually available |
+|---|---|
+| `V_max from seas_op` | `seas_op.GetMaxSlipRate()` (exists) ✓ |
+| `V_min from seas_op` | NO `GetMinSlipRate()` exists |
+| `psi_max from seas_op` | NO `GetMaxPsi()` exists |
+| `psi_min from seas_op` | NO `GetMinPsi()` exists |
+| `traction_max from seas_op.GetTraction()` | `GetTraction()` returns the full vector; max requires manual reduction |
+| `slip_l2` | requires `fault_op.GetSlip(state, slip)` + manual L2 norm |
+
+The CSV columns spec on line 116 (`step, t, dt, V_max, V_min, psi_max,
+psi_min, traction_max, slip_l2, n_dt_rejects, success`) commits the
+implementer to all six diagnostics, but the plan does not show how to
+compute `V_min`, `psi_max`, `psi_min`, `traction_max`, or `slip_l2`.
+
+The implementer would have to:
+
+1. For `V_min`/`V_max` (both): iterate the state vector, extract slip-rate
+   components (`state(i*StatePerNode + 0..1)`), compute global max/min
+   under MPI reduction.
+2. For `psi_min`/`psi_max`: extract `state(i*StatePerNode + PsiIndex)`
+   per node, reduce.
+3. For `traction_max`: max-reduce over `seas_op.GetTraction()`.
+4. For `slip_l2`: call `fault_op.GetSlip(state, slip)` (line 585 of
+   `rate_state_fault.hpp`), then compute `slip.Norml2()` and reduce.
+
+This is a meaningful amount of code that the plan describes in one
+hand-waving line. Either the plan must show the extraction code, or the
+CSV column list must shrink to what the existing API directly exposes
+(`V_max`, traction_max via reduction, n_dt_rejects).
+
+**Suggested fix:** flesh out the pseudocode block in §3.2 to show all
+six diagnostics explicitly. Example (mirroring BP5's
+`bench_out.Write(...)` pattern lightly):
+
+```cpp
+// Diagnostics
+const real_t V_max = seas_op.GetMaxSlipRate();          // existing API
+const Vector& trac = seas_op.GetTraction();             // existing API
+
+real_t local_V_min = std::numeric_limits<real_t>::infinity();
+real_t local_psi_min =  std::numeric_limits<real_t>::infinity();
+real_t local_psi_max = -std::numeric_limits<real_t>::infinity();
+real_t local_trac_max = 0.0;
+const int spn = RateStateFaultOperator<ParMesh,2>::StatePerNode;  // = 3
+const int n_local = state.Size() / spn;
+for (int i = 0; i < n_local; ++i) {
+    real_t v0 = state(i*spn + 0), v1 = state(i*spn + 1);
+    real_t psi = state(i*spn + 2);
+    local_V_min  = std::min(local_V_min, std::hypot(v0, v1));
+    local_psi_min = std::min(local_psi_min, psi);
+    local_psi_max = std::max(local_psi_max, psi);
+}
+for (int k = 0; k < trac.Size(); ++k) {
+    local_trac_max = std::max(local_trac_max, std::abs(trac(k)));
+}
+real_t V_min       = mpi.GlobalReduceMin(local_V_min);
+real_t psi_min     = mpi.GlobalReduceMin(local_psi_min);
+real_t psi_max     = mpi.GlobalReduceMax(local_psi_max);
+real_t traction_max = mpi.GlobalReduceMax(local_trac_max);
+
+Vector slip;
+fault_op.GetSlip(state, slip);
+real_t slip_local2 = slip * slip;            // local sum-of-squares
+real_t slip_l2     = std::sqrt(mpi.GlobalSum(slip_local2));
+```
 
 **Test case:**
-None.
+```python
+def test_R009_csv_columns_populated_under_mpi():
+    csv = run_driver(np=4, n_steps=5)
+    for col in ["V_max", "V_min", "psi_max", "psi_min",
+                "traction_max", "slip_l2"]:
+        assert col in csv.columns
+        assert csv[col].notna().all()
+        assert (csv[col].abs() < 1e30).all()    # not Inf
+```
+
+---
+
+### [R-007] [LOW] [PLAN_safs_test.md:613-614] — Acceptance criterion ambiguous: "5 CSV rows"
+
+**Category:** QUALITY (specification clarity)
+
+**Description:**
+> CSV has 5 rows after the run, with monotone non-decreasing `t`.
+
+A typical CSV has a header plus N data rows. With `n_steps=5` the file
+should have 6 lines total (1 header + 5 data) or 5 data rows without a
+header. The plan does not specify which.
+
+**Suggested fix:**
+```diff
+-- [ ] CSV has 5 rows after the run, with monotone non-decreasing `t`.
++- [ ] CSV has 6 lines total (1 header line plus 5 data rows) after a
++      `--n-steps 5` run; the 5 data rows have monotone non-decreasing
++      `t`.
+```
+
+**Test case:** none — pure spec clarification.
 
 ---
 
 ## Summary
-- Critical issues: 0
-- Moderate issues: 1  ([R-002] VerifySharedFaultDOFDataConsistency uncovered by tests for TPV205 — POSSIBLE)
-- Low issues: 4  ([R-001] stale `psi` column, [R-003] unwired friction test, [R-004] mesh `.msh` not in repo, [R-005] banner echo gap)
-- Plan compliance: FULL (all four phases of `tpv205_lsw_native_fields_plan_2026-04-27.md` landed; round-5 R-001..R-005 fixes verified by `seas_test_tpv205_evaluate_ader_lsw_parity` 14/14 and `mpirun -np 2 seas_test_tpv205_mpi_rupture_crossing` 6/6).
-- Verdict: **PASS WITH FIXES** — production-ready for the dev-queue smoke run; address R-002 (test-coverage gap) before submitting np ≥ 64 production jobs.
 
-## New artefact
+- Critical issues: **4** (R-001, R-002, R-003, R-008 — all prevent the
+  driver from compiling/running)
+- Moderate issues: **4** (R-004 plan/code drift; R-005 misleading
+  documentation; R-006 hidden invariant; R-009 missing diagnostic
+  extraction code)
+- Low issues: **1** (R-007 spec clarity)
+- Plan compliance: **PARTIAL** — composition strategy is sound and
+  correctly identifies the BoundaryConfig route + BP5Params override
+  trick, but the actual code snippets diverge from the BP5 reference in
+  four compile-stopping ways (R-001, R-002, R-003, R-008) and three
+  documentation-vs-code drift sites (R-004, R-005, R-009). The plan was
+  most likely re-written from memory rather than mechanically copied
+  from `drivers/seas_driver.cpp`.
+- **Verdict:** **PASS WITH FIXES**. Must fix R-001, R-002, R-003, R-008
+  before the driver can be built; R-004..R-006, R-009 should be cleaned
+  up before handoff.
 
-`miniapps/seas/jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p1_O2_dev.sbatch` (252 lines).
+## Direct answer to the user's question
 
-The dev sbatch mirrors `jobs/tpv102/tpv102_mixed_flux_adjacent_200m_p1_O2_dev.sbatch` line-for-line in structure (modules, `LD_LIBRARY_PATH`, build, `ibrun`, post-run summary) with the following TPV205-specific adaptations:
+> "but why we have R-001 to R-003 deviations if the goal is to mirror
+> BP5 setup but with this SAFS mesh?"
 
-| TPV102 dev sbatch | TPV205 dev sbatch |
-|---|---|
-| driver `seas_tpv102_driver` | `seas_tpv205_driver` |
-| mesh `tpv102/mesh/tpv102_200m.msh` | `tpv205/mesh/tpv2053d_200m.msh` |
-| output prefix `tpv102_mfadj_p1_O2` | `tpv205_mfadj_p1_O2` |
-| `--fric-law aging` | `--fric-law lsw` |
-| hypocenter station `flt_0_7.5` | `x2_0_x3_7.5` |
-| station column 5 = V2 strike | column 3 = V2 strike (different column order — TPV205 SCEC trace layout) |
-| no LSW dispatch verdict | adds `friction_solver_actual=lsw-closed-form` post-run gate (R-016 regression sentinel) |
-| no mesh existence guard | `[ ! -s tpv2053d_200m.msh ] && exit 1` (mesh `.msh` is not in the repo — see R-004) |
+Because the plan author rewrote the BP5 driver pattern from memory and
+the resulting C++ snippets dropped or invented details. The deviations
+are NOT design choices — they are transcription errors. The fix is, in
+each case, to literally match the BP5 reference at
+`drivers/seas_driver.cpp:364, 590, 587-590`. The single exception is
+R-003 (`AssertSafsAttrs` / `ListAttrs`): BP5 has no analogue, but the
+plan introduced this new helper and forgot to define a sub-helper.
 
-Same modules (`intel/19.1.1`, `impi/19.0.9`, `hypre/2.31.0`, `mumps/5.3`, `parmetis`, `petsc/3.15`, `fftw3/3.3.8`), same `LD_LIBRARY_PATH` order, same `8N x 400r x 2h` allocation, same `output-dt 0.05 / paraview-dt 0.5 / paraview-bulk-dt 0.5` cadence as the TPV102 dev pair.
+Round 2 also found a fourth compile-stopper of the same class (R-008,
+3-arg `Step` call) that round 1 missed.
 
 ## Unreviewed Areas
-- `dynamic/wave_operator.inl` lines 1–3500 (~3500 lines of shared dispatch) — out of scope per `feedback_dynamic_folder_editable_for_tpv104`. Audited only the two TPV205 dispatch sites and the `VerifySharedFaultDOFDataConsistency` body for R-002.
-- `tpv205/mesh/tpv2053d_*.geo` — assumed to emit Physical Surface 101/103/105 as the driver and `TPV205Params::bc_*_default` advertise; not parsed.
-- The `jobs/tpv205/tpv205_mixed_flux_adjacent_200m_p2_O3_normal.sbatch` (existing) was inspected for pattern reuse but its production verdict is out of scope; the new dev sbatch is its low-cost counterpart for early-stage smoke testing.
-- The `.msh` build flow (gmsh on `.geo` → `.msh`) — see R-004; a follow-up `jobs/tpv205/tpv205_mesh_build.sbatch` would close the gap but is out of scope for this review.
+
+- **Phase-4 `check_safs_smoke.py`** — the plan describes acceptance
+  metrics but no Python source is included. Cannot review what does not
+  exist.
+- **Numerical-correctness verification of the override approach.** The
+  plan claims "Initial state is identically the steady-state plate-rate
+  configuration — by construction nothing should evolve to first
+  order." Verifying this claim requires running the driver and
+  inspecting the CSV; cannot be checked from the plan alone.
+- **Multi-fault FaultBasis behavior.** The plan acknowledges (Risk
+  Assessment line 733) that `ref_normal = (0,-1,0)` produces
+  inconsistent local frames across the 6 SAFS faults. Documented as
+  acceptable shakedown limitation, not a bug.
+- **`SetVGuard`** (BP5 driver line 451) — the plan does NOT call
+  `ode_solver.SetVGuard(100.0)` even though BP5 reference does. With
+  `V_init = Vp = 1e-9` the system should be at steady state and VGuard
+  is unlikely to fire, so this is probably intentional. Not flagged as
+  a bug. Mention only.
+- **`SetStatePerNode`** (plan line 515) — plan calls `SetStatePerNode(3)`,
+  BP5 reference does not. The default is 2 (BP2). For BP5 with VGuard
+  the correct value is 3. Plan is **more correct than BP5 reference
+  here**, not a bug; arguably it exposes a latent BP5 bug, but that's
+  out of scope.

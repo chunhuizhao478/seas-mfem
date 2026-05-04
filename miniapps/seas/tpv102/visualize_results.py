@@ -3,33 +3,54 @@
 TPV102 Benchmark Visualization Script
 
 Plots MFEM dynamic-rupture station output alongside SCEC reference data
-(DRDG3D, PyLith). Nine on-fault stations are compared.
+(DRDG3D, PyLith) for the SCEC TPV101/102 ageing-law benchmark.  Nine
+on-fault stations are compared.
 
-MFEM station format (tpv102_station_flt_{x}_{z}.dat), columns:
-  time(s) slip1(m) slip2(m) V1(m/s) V2(m/s) tau1(Pa) tau2(Pa) sigma_n(Pa) log10_theta
-  where 1 = dip (tangent1) and 2 = strike (tangent2). TPV102 is pure
-  strike-slip so the interesting physics is in column 2 (strike).
+MFEM station format (set in dynamic/tpv102_setup.hpp::TPV102StationWriter):
+    <output_prefix>_station_flt_<X>_<Y>.dat
+columns:
+    time(s) slip1(m) slip2(m) V1(m/s) V2(m/s) tau1(Pa) tau2(Pa) sigma_n(Pa) log10_theta
+where 1 = dip (tangent1) and 2 = strike (tangent2).  TPV102 is pure
+strike-slip so the interesting physics is in column 2 (strike); column 1
+remains ~0.  Filename uses 'n' as the minus-sign prefix
+(e.g. flt_n12_3.dat for x2 = -12 km, x3 = 3 km).
 
-SCEC benchmark format (tpv102_{code}_x2_{x2}_x3_{x3}.txt), columns:
-  time(s) h-slip(m) h-slip-rate(m/s) h-shear-stress(MPa)
-         v-slip(m) v-slip-rate(m/s) v-shear-stress(MPa)
-         n-stress(MPa) log-theta
-  where h = horizontal (strike) and v = vertical (dip).
+DRDG3D reference format (benchmark_data/scec_drdg3d/tpv102_drdg3d_x2_<X>_x3_<Y>.txt):
+    time(s) h-slip(m) h-slip-rate(m/s) h-shear-stress(MPa)
+            v-slip(m) v-slip-rate(m/s) v-shear-stress(MPa)
+            n-stress(MPa) log10_theta
+SCEC standard column order; stresses already in MPa.
+
+PyLith reference format (benchmark_data/scec_pylith/tpv102_pylith_x2_<X>_x3_<Y>.txt):
+    Identical 9-column SCEC layout to DRDG3D.
 
 Usage:
-    # MFEM results vs both DRDG3D and PyLith benchmarks
+    # Single MFEM run vs both references — easiest form, prefix is
+    # auto-detected from station files in the directory:
     python visualize_results.py \\
-        --mfem /path/to/results_200m_p1_1.5s_400r_v2 --benchmarks --save
+        --mfem /path/to/results_dir --benchmarks --save
 
-    # Only DRDG3D benchmark
+    # Compare TWO MFEM runs (each prefix auto-detected; directory basename
+    # becomes the legend label):
     python visualize_results.py \\
-        --mfem /path/to/results_dir --drdg3d --save
-
-    # Compare two MFEM runs plus benchmarks
-    python visualize_results.py \\
-        --mfem "p1 200m:/path/to/results_200m_p1" \\
-        --mfem "p2 100m:/path/to/results_100m_p2" \\
+        --mfem /path/to/run_a \\
+        --mfem /path/to/run_b \\
         --benchmarks --save
+
+    # Same, but with custom legend labels:
+    python visualize_results.py \\
+        --mfem "MF=adjacent:/path/to/run_a" \\
+        --mfem "MF=none:/path/to/run_b" \\
+        --benchmarks --save
+
+    # Force a specific prefix when auto-detection can't disambiguate
+    # (multiple distinct prefixes in the same dir): append @PREFIX.
+    python visualize_results.py \\
+        --mfem "/path/to/run_a@tpv102_mfadj_p1_O2" \\
+        --drdg3d --save
+
+    # Default benchmark directory is tpv102/benchmark_data/{scec_drdg3d,scec_pylith}
+    # relative to this script.  Override with --benchmark-dir.
 
     # Legacy mode (positional argument == MFEM results dir)
     python visualize_results.py /path/to/results_dir --benchmarks --save
@@ -41,29 +62,28 @@ import sys
 
 import numpy as np
 
-# SCEC TPV102 on-fault stations: (mfem_name, bench_x2_km, bench_x3_km)
-# The MFEM filename encodes negative along-strike as 'n' (e.g., n12 == -12).
-# Benchmark files use "-12". Both use decimal for 7.5.
+# SCEC TPV102 on-fault stations: (mfem_name, x2_km, x3_km).
+# The MFEM filename suffix encodes negative along-strike as 'n' (e.g.,
+# flt_n12_3.dat for x2 = -12 km).  Benchmark filenames use the
+# conventional "-12" minus sign.  Both use a decimal point for 7.5.
 SCEC_STATIONS = [
-    ("flt_0_3", 0, 3),
-    ("flt_0_7.5", 0, 7.5),
-    ("flt_0_12", 0, 12),
-    ("flt_9_7.5", 9, 7.5),
-    ("flt_12_3", 12, 3),
-    ("flt_12_12", 12, 12),
-    ("flt_n9_7.5", -9, 7.5),
-    ("flt_n12_3", -12, 3),
-    ("flt_n12_12", -12, 12),
+    ("flt_0_3",     0,    3),
+    ("flt_0_7.5",   0,    7.5),
+    ("flt_0_12",    0,   12),
+    ("flt_9_7.5",   9,    7.5),
+    ("flt_12_3",   12,    3),
+    ("flt_12_12",  12,   12),
+    ("flt_n9_7.5", -9,    7.5),
+    ("flt_n12_3", -12,    3),
+    ("flt_n12_12",-12,   12),
 ]
 
 PA_TO_MPA = 1.0e-6
 
 
 def _parse_numeric_table(filepath, min_cols=9):
-    """Load a whitespace-delimited numeric table, skipping '#' comments.
-
-    Also tolerates SCEC-style header lines that begin with a letter
-    (e.g., 't h-slip h-slip-rate ...').
+    """Load a whitespace-delimited numeric table, skipping '#' comments
+    and SCEC-style header lines that begin with a letter.
     """
     rows = []
     with open(filepath, "r") as f:
@@ -77,7 +97,6 @@ def _parse_numeric_table(filepath, min_cols=9):
             try:
                 rows.append([float(x) for x in parts[:min_cols]])
             except ValueError:
-                # Skip header/text lines like 't h-slip ...'
                 continue
     if not rows:
         return None
@@ -87,7 +106,8 @@ def _parse_numeric_table(filepath, min_cols=9):
 def load_mfem_file(filepath):
     """Load MFEM TPV102 fault-station file.
 
-    Columns in file:
+    Columns in file (TPV102StationWriter convention; BP5 frame where
+    1 = dip and 2 = strike):
       0: time (s)
       1: slip1 (m)      == dip slip
       2: slip2 (m)      == strike slip
@@ -95,29 +115,31 @@ def load_mfem_file(filepath):
       4: V2 (m/s)       == strike slip rate
       5: tau1 (Pa)      == dip shear stress
       6: tau2 (Pa)      == strike shear stress
-      7: sigma_n (Pa)   (MFEM convention: positive = compression)
+      7: sigma_n (Pa)   (positive = compression in MFEM's convention)
       8: log10(theta)
 
-    Returns dict in a unified (strike/dip, stresses in MPa) schema.
+    Returns dict in a unified (strike/dip, stresses in MPa) schema so
+    plot_station / plot_overview can compare against the SCEC references
+    without further remapping.
     """
     arr = _parse_numeric_table(filepath, min_cols=9)
     if arr is None:
         return None
     return {
-        "time_s": arr[:, 0],
+        "time_s":      arr[:, 0],
         "slip_strike": arr[:, 2],
-        "slip_dip": arr[:, 1],
-        "V_strike": arr[:, 4],
-        "V_dip": arr[:, 3],
-        "tau_strike": arr[:, 6] * PA_TO_MPA,
-        "tau_dip": arr[:, 5] * PA_TO_MPA,
-        "sigma_n": np.abs(arr[:, 7]) * PA_TO_MPA,
+        "slip_dip":    arr[:, 1],
+        "V_strike":    arr[:, 4],
+        "V_dip":       arr[:, 3],
+        "tau_strike":  arr[:, 6] * PA_TO_MPA,
+        "tau_dip":     arr[:, 5] * PA_TO_MPA,
+        "sigma_n":     np.abs(arr[:, 7]) * PA_TO_MPA,
         "log10_theta": arr[:, 8],
     }
 
 
 def load_scec_file(filepath):
-    """Load SCEC benchmark file (DRDG3D or PyLith).
+    """Load SCEC TPV102 reference file (DRDG3D or PyLith).
 
     SCEC standard columns (text; header lines prefixed with '#'):
       0: time (s)
@@ -136,16 +158,31 @@ def load_scec_file(filepath):
     if arr is None:
         return None
     return {
-        "time_s": arr[:, 0],
+        "time_s":      arr[:, 0],
         "slip_strike": arr[:, 1],
-        "slip_dip": arr[:, 4],
-        "V_strike": arr[:, 2],
-        "V_dip": arr[:, 5],
-        "tau_strike": arr[:, 3],
-        "tau_dip": arr[:, 6],
-        "sigma_n": np.abs(arr[:, 7]),
+        "slip_dip":    arr[:, 4],
+        "V_strike":    arr[:, 2],
+        "V_dip":       arr[:, 5],
+        "tau_strike":  arr[:, 3],
+        "tau_dip":     arr[:, 6],
+        "sigma_n":     np.abs(arr[:, 7]),
         "log10_theta": arr[:, 8],
     }
+
+
+def load_drdg3d_file(filepath):
+    """Load DRDG3D TPV102 reference file.
+
+    DRDG3D's column layout matches the SCEC standard exactly; wrapper
+    exists for symmetry with load_mfem_file / load_pylith_file in case
+    the format ever diverges.
+    """
+    return load_scec_file(filepath)
+
+
+def load_pylith_file(filepath):
+    """Load PyLith TPV102 reference file (same SCEC standard layout)."""
+    return load_scec_file(filepath)
 
 
 def mfem_coord_str(val_km):
@@ -161,41 +198,50 @@ def bench_coord_str(val_km):
     return f"{val_km:g}"
 
 
-def mfem_filename(results_dir, x2_km, x3_km):
-    fname = f"tpv102_station_flt_{mfem_coord_str(x2_km)}_{mfem_coord_str(x3_km)}.dat"
+def mfem_filename(results_dir, prefix, x2_km, x3_km):
+    """Build the MFEM station filename for this prefix and station coords.
+
+    Pattern: <prefix>_station_flt_<mfem_coord(x2)>_<mfem_coord(x3)>.dat
+    e.g. tpv102_station_flt_n12_3.dat or tpv102_mfadj_p1_O2_station_flt_0_7.5.dat.
+    """
+    suffix = f"flt_{mfem_coord_str(x2_km)}_{mfem_coord_str(x3_km)}"
+    fname = f"{prefix}_station_{suffix}.dat"
     return os.path.join(results_dir, fname)
 
 
 def drdg3d_filename(bench_dir, x2_km, x3_km):
-    fname = f"tpv102_drdg3d_x2_{bench_coord_str(x2_km)}_x3_{bench_coord_str(x3_km)}.txt"
+    fname = (f"tpv102_drdg3d_x2_{bench_coord_str(x2_km)}_"
+             f"x3_{bench_coord_str(x3_km)}.txt")
     return os.path.join(bench_dir, fname)
 
 
 def pylith_filename(bench_dir, x2_km, x3_km):
-    fname = f"tpv102_pylith_x2_{bench_coord_str(x2_km)}_x3_{bench_coord_str(x3_km)}.txt"
+    fname = (f"tpv102_pylith_x2_{bench_coord_str(x2_km)}_"
+             f"x3_{bench_coord_str(x3_km)}.txt")
     return os.path.join(bench_dir, fname)
 
 
 PANELS = [
-    ("V_strike", "Slip Rate V_strike (m/s)", False),
-    ("slip_strike", "Slip Strike (m)", False),
-    ("tau_strike", "Shear Stress \u03c4_strike (MPa)", False),
-    ("V_dip", "Slip Rate V_dip (m/s)", False),
-    ("slip_dip", "Slip Dip (m)", False),
-    ("tau_dip", "Shear Stress \u03c4_dip (MPa)", False),
-    ("sigma_n", "|Normal Stress| (MPa)", False),
-    ("log10_theta", "log\u2081\u2080(State) (s)", False),
+    ("V_strike",    "Slip Rate V_strike (m/s)",       False),
+    ("slip_strike", "Slip Strike (m)",                 False),
+    ("tau_strike",  "Shear Stress τ_strike (MPa)", False),
+    ("V_dip",       "Slip Rate V_dip (m/s)",           False),
+    ("slip_dip",    "Slip Dip (m)",                    False),
+    ("tau_dip",     "Shear Stress τ_dip (MPa)",   False),
+    ("sigma_n",     "|Normal Stress| (MPa)",           False),
+    ("log10_theta", "log₁₀(State) (s)",      False),
 ]
 
 
-def plot_station(datasets, station_name, x2_km, x3_km, save_path=None, t_max=None):
-    """Plot 8-panel station comparison. Time axis is seconds (dynamic rupture)."""
+def plot_station(datasets, station_name, x2_km, x3_km, save_path=None,
+                 t_max=None):
+    """Plot 8-panel station comparison."""
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(4, 2, figsize=(14, 16))
     title = f"TPV102: {station_name}  (x2={x2_km} km, x3={x3_km} km)"
     if t_max is not None:
-        title += f"   [0\u2013{t_max:g} s close-up]"
+        title += f"   [0–{t_max:g} s close-up]"
     fig.suptitle(title, fontsize=14, fontweight="bold")
 
     for ax, (key, ylabel, _use_log) in zip(axes.flat, PANELS):
@@ -210,7 +256,8 @@ def plot_station(datasets, station_name, x2_km, x3_km, save_path=None, t_max=Non
                     continue
                 t = t[mask]
                 y = y[mask]
-            ax.plot(t, y, ls, color=color, label=label, linewidth=0.9, alpha=0.85)
+            ax.plot(t, y, ls, color=color, label=label, linewidth=0.9,
+                    alpha=0.85)
         ax.set_xlabel("Time (s)")
         ax.set_ylabel(ylabel)
         if t_max is not None:
@@ -289,48 +336,100 @@ def parse_labeled_arg(spec):
     return None, spec
 
 
+def parse_mfem_spec(spec):
+    """Parse '[LABEL:]DIR[@PREFIX]' -> (label_or_None, dir, prefix_or_None).
+
+    Splits the optional '@PREFIX' suffix from the DIR before applying the
+    label parser, so a per-source prefix can be carried alongside the
+    directory.  Filesystem paths are not expected to contain '@' on the
+    target platforms; if they do, pass DIR via --mfem-prefix and skip the
+    suffix.
+    """
+    label, value = parse_labeled_arg(spec)
+    if "@" in value:
+        directory, prefix = value.rsplit("@", 1)
+    else:
+        directory, prefix = value, None
+    return label, directory, prefix
+
+
+def detect_mfem_prefix(directory):
+    """Auto-detect the station-file prefix used in `directory`.
+
+    Scans for files matching '*_station_flt_*.dat' and extracts the
+    common stem (everything before '_station_').  Returns the prefix
+    string when exactly one prefix is found; returns None when zero
+    matches OR when multiple distinct prefixes coexist (the caller
+    should fall back to --mfem-prefix in that case).
+    """
+    import glob
+    if not os.path.isdir(directory):
+        return None
+    files = glob.glob(os.path.join(directory, "*_station_flt_*.dat"))
+    prefixes = set()
+    for f in files:
+        name = os.path.basename(f)
+        if "_station_" not in name:
+            continue
+        prefixes.add(name.split("_station_", 1)[0])
+    if len(prefixes) == 1:
+        return next(iter(prefixes))
+    return None
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Visualize TPV102 output: MFEM vs SCEC reference data"
     )
-    # Primary datasets
     parser.add_argument(
         "mfem_dir_positional",
         nargs="?",
         default=None,
-        help="(Legacy) MFEM results directory containing tpv102_station_flt_*.dat",
+        help="(Legacy) MFEM results directory containing "
+             "<prefix>_station_flt_*.dat",
     )
     parser.add_argument(
         "--mfem",
         action="append",
-        metavar="[LABEL:]DIR",
-        help="MFEM results directory. Use 'label:dir' for a custom label. Repeatable.",
+        metavar="[LABEL:]DIR[@PREFIX]",
+        help="MFEM results directory.  Use 'label:dir' for a custom legend "
+             "label, '@prefix' to force a specific filename prefix.  "
+             "Repeatable.",
+    )
+    parser.add_argument(
+        "--mfem-prefix",
+        default="tpv102",
+        help="MFEM file prefix matching --output-prefix passed to "
+             "seas_tpv102_driver (default: 'tpv102').  Used as the "
+             "fallback when the per-source @PREFIX is absent and "
+             "auto-detection finds zero or multiple candidate prefixes.",
     )
 
-    # Benchmark references
     parser.add_argument(
         "--drdg3d", action="store_true",
-        help="Include DRDG3D (Wenqiang Zhang) benchmark data",
+        help="Include DRDG3D (Wenqiang Zhang) reference data.",
     )
     parser.add_argument(
         "--pylith", action="store_true",
-        help="Include PyLith (Brad Aagaard) benchmark data",
+        help="Include PyLith (Brad Aagaard) reference data.",
     )
     parser.add_argument(
         "--benchmarks", action="store_true",
-        help="Include both DRDG3D and PyLith benchmark data",
+        help="Shortcut: enable both --drdg3d and --pylith.",
     )
     parser.add_argument(
         "--benchmark-dir",
         default="benchmark_data",
-        help="Directory containing scec_drdg3d/ and scec_pylith/ subfolders",
+        help="Directory containing scec_drdg3d/ and scec_pylith/ "
+             "subfolders with reference traces.  Resolved relative to "
+             "this script if not absolute.",
     )
     parser.add_argument(
         "--no-benchmark", action="store_true",
-        help="Skip all benchmark references",
+        help="Skip ALL benchmark references (DRDG3D, PyLith) even if "
+             "--drdg3d / --pylith / --benchmarks is given.",
     )
 
-    # Output options
     parser.add_argument(
         "--stations", nargs="+", type=int, default=None,
         help="Specific station indices (1-9). Default: all",
@@ -345,7 +444,7 @@ def main():
     )
     parser.add_argument(
         "--closeup-t", type=float, default=None,
-        help="If set, additionally produce a close-up plot truncated to this time [s]",
+        help="Additionally produce a close-up plot truncated to this time [s]",
     )
 
     args = parser.parse_args()
@@ -354,7 +453,10 @@ def main():
         args.drdg3d = True
         args.pylith = True
 
-    # Default: both benchmarks if none specified and not --no-benchmark
+    # Default to including BOTH benchmarks when no benchmark flag was
+    # given and --no-benchmark wasn't requested.  If the user opted in
+    # to ANY single benchmark (e.g. --drdg3d alone), the default-on rule
+    # does NOT fire — they get only what they asked for.
     if (
         not args.no_benchmark
         and not args.drdg3d
@@ -363,7 +465,8 @@ def main():
         args.drdg3d = True
         args.pylith = True
 
-    # Build ordered sources following command-line order so colors/legend match
+    # Build ordered sources from command-line argv so legend colors match
+    # the order the user typed.
     ordered_sources = []
     if args.mfem_dir_positional:
         ordered_sources.append(("mfem", args.mfem_dir_positional))
@@ -380,12 +483,28 @@ def main():
         elif arg == "--mfem":
             ordered_sources.append(("mfem", next(mfem_iter)))
 
+    # If a benchmark was implicit (default), append it at the end so it
+    # still appears in the typed-source list when programmatic callers
+    # never put the flag in sys.argv.
+    if (
+        args.drdg3d
+        and not args.no_benchmark
+        and not any(s == "drdg3d" for s, _ in ordered_sources)
+    ):
+        ordered_sources.append(("drdg3d", None))
+    if (
+        args.pylith
+        and not args.no_benchmark
+        and not any(s == "pylith" for s, _ in ordered_sources)
+    ):
+        ordered_sources.append(("pylith", None))
+
     if not ordered_sources:
         parser.error(
-            "No data sources specified. Provide --mfem DIR and/or benchmark flags."
+            "No data sources specified.  Provide --mfem DIR and/or "
+            "--drdg3d / --pylith / --benchmarks."
         )
 
-    # If user only passed benchmark flags with no MFEM, still allow it.
     try:
         import matplotlib
         if args.save:
@@ -394,7 +513,7 @@ def main():
         print("Error: matplotlib required. Install with: pip install matplotlib")
         return 1
 
-    # Resolve benchmark directory
+    # Resolve benchmark directory.
     data_dir = os.path.join(
         os.path.dirname(os.path.abspath(__file__)), args.benchmark_dir
     )
@@ -403,7 +522,7 @@ def main():
     drdg3d_dir = os.path.join(data_dir, "scec_drdg3d")
     pylith_dir = os.path.join(data_dir, "scec_pylith")
 
-    # Select stations
+    # Select stations.
     if args.stations:
         stations = [
             SCEC_STATIONS[i - 1] for i in args.stations
@@ -412,13 +531,13 @@ def main():
     else:
         stations = SCEC_STATIONS
 
-    # Build sources list in command-line order; drop benchmarks if --no-benchmark
-    # Each tuple: (label, source_type, dir_or_None, color, linestyle)
+    # Build the typed-source list with colors and line styles.
     benchmark_types = {"drdg3d", "pylith"}
     benchmark_labels = {
         "drdg3d": "DRDG3D (ref)",
         "pylith": "PyLith (ref)",
     }
+    benchmark_linestyle = {"drdg3d": "--", "pylith": ":"}
     sources = []
     ci = 0
     for stype, spec in ordered_sources:
@@ -427,25 +546,40 @@ def main():
         color = COLORS[ci % len(COLORS)]
         ci += 1
         if stype in benchmark_types:
-            sources.append((benchmark_labels[stype], stype, None, color, "--"))
+            sources.append(
+                (benchmark_labels[stype], stype, None, color,
+                 benchmark_linestyle[stype])
+            )
         elif stype == "mfem":
-            label, directory = parse_labeled_arg(spec)
+            label, directory, prefix = parse_mfem_spec(spec)
             if label is None:
                 label = os.path.basename(os.path.normpath(directory))
-            sources.append((f"MFEM {label}", "mfem", directory, color, "-"))
+            # Prefix-resolution priority:
+            #   1. explicit '@PREFIX' in the spec
+            #   2. auto-detected unique prefix in <directory>/*_station_flt_*.dat
+            #   3. --mfem-prefix CLI flag (default 'tpv102')
+            if prefix is None:
+                prefix = detect_mfem_prefix(directory)
+            if prefix is None:
+                prefix = args.mfem_prefix
+            sources.append(
+                (f"MFEM {label}", "mfem",
+                 (directory, prefix), color, "-")
+            )
 
-    # Print summary
     print("=" * 60)
     print("TPV102 Visualization")
     print("=" * 60)
+    style_name = {"-": "solid", "--": "dashed", ":": "dotted"}
     for label, stype, info, _color, ls in sources:
-        style = "dashed" if ls == "--" else "solid"
+        style = style_name.get(ls, ls)
         if stype == "drdg3d":
             print(f"  [{style}] {label}: {drdg3d_dir}/")
         elif stype == "pylith":
             print(f"  [{style}] {label}: {pylith_dir}/")
         else:
-            print(f"  [{style}] {label}: {info}/tpv102_station_flt_*.dat")
+            directory, prefix = info
+            print(f"  [{style}] {label}: {directory}/{prefix}_station_flt_*.dat")
     print(f"  Stations: {len(stations)}")
     print()
 
@@ -457,13 +591,14 @@ def main():
             if stype == "drdg3d":
                 path = drdg3d_filename(drdg3d_dir, x2_km, x3_km)
                 if os.path.exists(path):
-                    data = load_scec_file(path)
+                    data = load_drdg3d_file(path)
             elif stype == "pylith":
                 path = pylith_filename(pylith_dir, x2_km, x3_km)
                 if os.path.exists(path):
-                    data = load_scec_file(path)
+                    data = load_pylith_file(path)
             elif stype == "mfem":
-                path = mfem_filename(info, x2_km, x3_km)
+                directory, prefix = info
+                path = mfem_filename(directory, prefix, x2_km, x3_km)
                 if os.path.exists(path):
                     data = load_mfem_file(path)
             datasets.append((label, data, color, ls))
@@ -479,7 +614,8 @@ def main():
                 pts_info.append(
                     f"{label}: {len(data['time_s'])} pts ({t_last:.2f} s)"
                 )
-        print(f"  {station_name} (x2={x2_km}, x3={x3_km}): {', '.join(pts_info)}")
+        print(f"  {station_name} (x2={x2_km}, x3={x3_km}): "
+              f"{', '.join(pts_info)}")
 
         all_results.append({
             "station_name": station_name,
@@ -490,11 +626,16 @@ def main():
 
         if args.save:
             os.makedirs(args.output_dir, exist_ok=True)
-            fname = os.path.join(args.output_dir, f"tpv102_{station_name}.png")
-            plot_station(datasets, station_name, x2_km, x3_km, save_path=fname)
+            fname = os.path.join(
+                args.output_dir, f"tpv102_{station_name}.png"
+            )
+            plot_station(
+                datasets, station_name, x2_km, x3_km, save_path=fname
+            )
             if args.closeup_t is not None:
                 fname_close = os.path.join(
-                    args.output_dir, f"tpv102_{station_name}_closeup.png"
+                    args.output_dir,
+                    f"tpv102_{station_name}_closeup.png"
                 )
                 plot_station(
                     datasets, station_name, x2_km, x3_km,
@@ -504,7 +645,8 @@ def main():
             plot_station(datasets, station_name, x2_km, x3_km)
             if args.closeup_t is not None:
                 plot_station(
-                    datasets, station_name, x2_km, x3_km, t_max=args.closeup_t,
+                    datasets, station_name, x2_km, x3_km,
+                    t_max=args.closeup_t,
                 )
 
     if len(all_results) > 1:

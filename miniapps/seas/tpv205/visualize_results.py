@@ -1,63 +1,58 @@
 #!/usr/bin/env python3
 """
-TPV104 Benchmark Visualization Script
+TPV205 (SCEC TPV5) Benchmark Visualization Script
 
-Plots MFEM dynamic-rupture station output alongside the SeisSol reference
-(SCEC TPV104 / FL=103, slip law with strong rate weakening). Nine on-fault
+Plots MFEM dynamic-rupture station output alongside the DRDG3D
+reference traces (Wenqiang Zhang, on-fault 200 m / 100 m at order 4)
+for the SCEC TPV5 linear-slip-weakening benchmark.  16 on-fault
 stations are compared.
 
-MFEM station format (set in dynamic/tpv104_setup.hpp::TPV104StationWriter):
-    <output_prefix>_station_x2_<X>_x3_<Y>.dat
-columns:
+MFEM station format (set in dynamic/tpv205_setup.hpp::TPV205StationWriter):
+    <output_prefix>_station_<x2_x3_label>.dat
+columns (LSW; final column is μ_eff(δ), not ψ as in TPV104):
     time(s) h-slip(m) h-slip-rate(m/s) h-shear-stress(Pa)
             v-slip(m) v-slip-rate(m/s) v-shear-stress(Pa)
-            n-stress(Pa) psi
+            n-stress(Pa) mu_eff
 where h = horizontal = strike (BP5 component 2 in MFEM's convention),
-v = vertical = dip (BP5 component 1).  TPV104 is pure strike-slip so the
-v-* channels remain ~0.  The MFEM writer already emits the SCEC column
-order — no in-Python remapping needed.
+v = vertical = dip (BP5 component 1).  TPV205 is right-lateral
+strike-slip so v-* channels remain near 0.  The MFEM writer emits the
+SCEC column order — no in-Python remapping needed.
 
-SeisSol reference format (benchmark_data/seisol/tpv104_seisol_x2_<X>_x3_<Y>.txt):
+DRDG3D reference format (benchmark_data/DRDG3D_{200m,100m}_O4/
+tpv205_drdg3d_<x2_x3_label>.txt):
     time(s) h-slip(m) h-slip-rate(m/s) h-shear-stress(MPa)
             v-slip(m) v-slip-rate(m/s) v-shear-stress(MPa)
-            n-stress(MPa) psi
-identical column order; stresses are in MPa instead of Pa.
-
-DRDG3D reference format (benchmark_data/DRDG3D/tpv104_drdg3d_x2_<X>_x3_<Y>.txt):
-    SCEC TPV104 / FL=103 reference produced by Wenqiang Zhang's DRDG3D
-    (DG-on-fault, 200 m, O4).  Same 9-column layout as SeisSol with
-    stresses already in MPa.  Opt in with --drdg3d.
+The DRDG3D file has only 7 columns; n-stress and mu_eff are NOT
+provided.  Those panels are blank for the reference dataset; the MFEM
+trace fills them.
 
 Usage:
-    # Single MFEM run vs both references — easiest form, prefix is
-    # auto-detected from station files in the directory:
+    # Single MFEM run vs the 200 m DRDG3D reference (default).  Prefix
+    # is auto-detected from station files in the directory:
     python visualize_results.py \\
-        --mfem /path/to/results_dir --seisol --drdg3d --save
+        --mfem /path/to/results_dir --save
 
-    # Compare TWO MFEM runs (each prefix auto-detected, no need to spell
-    # them out — directory basename becomes the legend label):
+    # Compare TWO MFEM runs (each prefix auto-detected; directory
+    # basename becomes the legend label):
     python visualize_results.py \\
         --mfem /path/to/run_a \\
         --mfem /path/to/run_b \\
-        --seisol --drdg3d --save
+        --save
 
-    # Same, but with custom legend labels:
+    # Compare against BOTH reference resolutions (200 m and 100 m):
     python visualize_results.py \\
-        --mfem "MF=adjacent:/path/to/run_a" \\
-        --mfem "MF=none:/path/to/run_b" \\
-        --seisol --drdg3d --save
+        --mfem /path/to/run --drdg3d-200m --drdg3d-100m --save
 
-    # Force a specific prefix when auto-detection can't disambiguate
-    # (multiple distinct prefixes in the same dir): append @PREFIX.
+    # Per-source label + forced filename prefix:
     python visualize_results.py \\
-        --mfem "/path/to/run_a@tpv104_hybrid_O2" \\
-        --seisol --save
+        --mfem "MF=adjacent:/path/to/run_a@tpv205_mfadj_p1_O2" \\
+        --save
 
-    # Default benchmark directory is tpv104/benchmark_data/{seisol,DRDG3D}
-    # relative to this script.  Override with --benchmark-dir.
+    # Default benchmark directory is tpv205/benchmark_data/ relative to
+    # this script.  Override with --benchmark-dir.
 
     # Legacy mode (positional argument == MFEM results dir)
-    python visualize_results.py /path/to/results_dir --seisol --save
+    python visualize_results.py /path/to/results_dir --save
 """
 
 import argparse
@@ -66,28 +61,35 @@ import sys
 
 import numpy as np
 
-# SCEC TPV104 on-fault stations: (mfem_label, x2_km, x3_km).
-# The label is the suffix used both by MFEM's TPV104StationWriter (via
-# kStationsTPV104 in config/tpv104_params.hpp) and by the SeisSol reference
-# filenames in benchmark_data/seisol/.
+# SCEC TPV5 / TPV205 on-fault stations: (mfem_label, x2_km, x3_km).
+# Label matches both the MFEM TPV205StationWriter (via kStationsTPV205
+# in config/tpv205_params.hpp) and the DRDG3D reference filenames in
+# benchmark_data/DRDG3D_{200m,100m}_O4/.
 SCEC_STATIONS = [
-    ("x2_0_x3_3",     0,    3),
-    ("x2_0_x3_7.5",   0,    7.5),
-    ("x2_0_x3_12",    0,   12),
-    ("x2_9_x3_7.5",   9,    7.5),
-    ("x2_12_x3_3",   12,    3),
-    ("x2_12_x3_12",  12,   12),
-    ("x2_-9_x3_7.5", -9,    7.5),
-    ("x2_-12_x3_3", -12,    3),
-    ("x2_-12_x3_12",-12,   12),
+    ("x2_-12_x3_0",   -12.0,  0.0),
+    ("x2_-12_x3_7.5", -12.0,  7.5),
+    ("x2_-7.5_x3_0",   -7.5,  0.0),
+    ("x2_-7.5_x3_7.5", -7.5,  7.5),
+    ("x2_-4.5_x3_0",   -4.5,  0.0),
+    ("x2_-4.5_x3_7.5", -4.5,  7.5),
+    ("x2_0_x3_0",       0.0,  0.0),
+    ("x2_0_x3_3",       0.0,  3.0),
+    ("x2_0_x3_7.5",     0.0,  7.5),
+    ("x2_0_x3_12",      0.0, 12.0),
+    ("x2_4.5_x3_0",     4.5,  0.0),
+    ("x2_4.5_x3_7.5",   4.5,  7.5),
+    ("x2_7.5_x3_0",     7.5,  0.0),
+    ("x2_7.5_x3_7.5",   7.5,  7.5),
+    ("x2_12_x3_0",     12.0,  0.0),
+    ("x2_12_x3_7.5",   12.0,  7.5),
 ]
 
 PA_TO_MPA = 1.0e-6
 
 
-def _parse_numeric_table(filepath, min_cols=9):
+def _parse_numeric_table(filepath, min_cols):
     """Load a whitespace-delimited numeric table, skipping '#' comments
-    and SCEC-style header lines that begin with a letter.
+    and DRDG3D-style header lines that begin with a letter.
     """
     rows = []
     with open(filepath, "r") as f:
@@ -101,6 +103,8 @@ def _parse_numeric_table(filepath, min_cols=9):
             try:
                 rows.append([float(x) for x in parts[:min_cols]])
             except ValueError:
+                # DRDG3D names its columns on a header line that begins
+                # with `t h-slip ...` — skip it.
                 continue
     if not rows:
         return None
@@ -108,10 +112,11 @@ def _parse_numeric_table(filepath, min_cols=9):
 
 
 def load_mfem_file(filepath):
-    """Load MFEM TPV104 station file.
+    """Load MFEM TPV205 fault-station file.
 
-    MFEM writes columns in SCEC order (per TPV104StationWriter), but with
-    stresses in **Pa** instead of MPa:
+    MFEM writes columns in SCEC TPV5 order (per TPV205StationWriter)
+    with stresses in **Pa** instead of MPa, and a final μ_eff column
+    in place of TPV104's ψ:
       0: time (s)
       1: h-slip (m)        == strike slip
       2: h-slip-rate (m/s) == strike slip rate
@@ -120,7 +125,7 @@ def load_mfem_file(filepath):
       5: v-slip-rate (m/s) == dip slip rate
       6: v-shear (Pa)      == dip shear stress
       7: n-stress (Pa)     (positive = compression in MFEM's convention)
-      8: psi (linear, not log10)
+      8: mu_eff            (LSW μ(δ); 0.677 → 0.525 over d_c = 0.4 m)
 
     Returns dict with stresses converted to MPa for plotting.
     """
@@ -136,14 +141,14 @@ def load_mfem_file(filepath):
         "V_dip":       arr[:, 5],
         "tau_dip":     arr[:, 6] * PA_TO_MPA,
         "sigma_n":     np.abs(arr[:, 7]) * PA_TO_MPA,
-        "psi":         arr[:, 8],
+        "mu_eff":      arr[:, 8],
     }
 
 
-def load_seisol_file(filepath):
-    """Load SeisSol TPV104 reference station file.
+def load_drdg3d_file(filepath):
+    """Load DRDG3D TPV205 reference station file.
 
-    Columns:
+    DRDG3D's TPV5 trace has 7 columns (no n-stress, no μ_eff):
       0: time (s)
       1: h-slip (m)            == strike slip
       2: h-slip-rate (m/s)     == strike slip rate
@@ -151,12 +156,12 @@ def load_seisol_file(filepath):
       4: v-slip (m)            == dip slip
       5: v-slip-rate (m/s)     == dip slip rate
       6: v-shear-stress (MPa)  == dip shear stress
-      7: n-stress (MPa)        (sign convention varies; plotted as |.|)
-      8: psi (linear)
+    Stresses are already in MPa.
     """
-    arr = _parse_numeric_table(filepath, min_cols=9)
+    arr = _parse_numeric_table(filepath, min_cols=7)
     if arr is None:
         return None
+    n = arr.shape[0]
     return {
         "time_s":      arr[:, 0],
         "slip_strike": arr[:, 1],
@@ -165,19 +170,11 @@ def load_seisol_file(filepath):
         "slip_dip":    arr[:, 4],
         "V_dip":       arr[:, 5],
         "tau_dip":     arr[:, 6],
-        "sigma_n":     np.abs(arr[:, 7]),
-        "psi":         arr[:, 8],
+        # DRDG3D does not report σ_n or μ_eff for TPV5; leave blank so
+        # the corresponding panels show only the MFEM trace.
+        "sigma_n":     np.full(n, np.nan),
+        "mu_eff":      np.full(n, np.nan),
     }
-
-
-def load_drdg3d_file(filepath):
-    """Load DRDG3D TPV104 reference station file.
-
-    DRDG3D's column layout matches SeisSol's exactly (9 columns, stresses
-    in MPa, same SCEC ordering).  Wrapper exists for symmetry with
-    load_mfem_file / load_seisol_file in case the format ever diverges.
-    """
-    return load_seisol_file(filepath)
 
 
 def mfem_filename(results_dir, prefix, label):
@@ -185,13 +182,8 @@ def mfem_filename(results_dir, prefix, label):
     return os.path.join(results_dir, fname)
 
 
-def seisol_filename(bench_dir, label):
-    fname = f"tpv104_seisol_{label}.txt"
-    return os.path.join(bench_dir, fname)
-
-
 def drdg3d_filename(bench_dir, label):
-    fname = f"tpv104_drdg3d_{label}.txt"
+    fname = f"tpv205_drdg3d_{label}.txt"
     return os.path.join(bench_dir, fname)
 
 
@@ -201,19 +193,24 @@ PANELS = [
     ("tau_strike",  "Shear Stress τ_strike (MPa)", False),
     ("V_dip",       "Slip Rate V_dip (m/s)",          False),
     ("slip_dip",    "Slip Dip (m)",                   False),
-    ("tau_dip",     "Shear Stress τ_dip (MPa)",   False),
-    ("sigma_n",     "|Normal Stress| (MPa)",           False),
-    ("psi",         "State Variable ψ",           False),
+    ("tau_dip",     "Shear Stress τ_dip (MPa)",  False),
 ]
 
 
 def plot_station(datasets, station_label, x2_km, x3_km, save_path=None,
                  t_max=None):
-    """Plot 8-panel station comparison."""
+    """Plot 6-panel station comparison.
+
+    Normal-stress and LSW μ_eff panels are intentionally omitted: the
+    DRDG3D TPV5 reference does not provide either channel (7-column
+    file), so those panels would show only the MFEM trace and serve no
+    cross-code-comparison purpose.
+    """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(4, 2, figsize=(14, 16))
-    title = f"TPV104: {station_label}  (x2={x2_km} km, x3={x3_km} km)"
+    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    title = (f"TPV205: {station_label}  "
+             f"(x2={x2_km} km, x3={x3_km} km)")
     if t_max is not None:
         title += f"   [0–{t_max:g} s close-up]"
     fig.suptitle(title, fontsize=14, fontweight="bold")
@@ -224,6 +221,9 @@ def plot_station(datasets, station_label, x2_km, x3_km, save_path=None,
                 continue
             t = data["time_s"]
             y = data[key]
+            # Skip channels that are all-NaN (DRDG3D σ_n / μ_eff).
+            if np.all(np.isnan(y)):
+                continue
             if t_max is not None:
                 mask = t <= t_max
                 if not np.any(mask):
@@ -254,12 +254,12 @@ def plot_overview(all_results, save_path=None):
 
     fig, ax = plt.subplots(1, 1, figsize=(14, 6))
     fig.suptitle(
-        "TPV104: Slip Rate V_strike at All Stations",
+        "TPV205: Slip Rate V_strike at All Stations",
         fontsize=14,
         fontweight="bold",
     )
 
-    cmap = plt.cm.tab10
+    cmap = plt.cm.tab20
     n = len(all_results)
     for i, res in enumerate(all_results):
         name = res["station_label"]
@@ -316,8 +316,8 @@ def parse_mfem_spec(spec):
     Splits the optional '@PREFIX' suffix from the DIR before applying the
     label parser, so a per-source prefix can be carried alongside the
     directory.  Filesystem paths are not expected to contain '@' on the
-    target platforms; if they do, the user can pass DIR via --mfem-prefix
-    and skip the suffix.
+    target platforms; if they do, pass DIR via --mfem-prefix and skip
+    the suffix.
     """
     label, value = parse_labeled_arg(spec)
     if "@" in value:
@@ -353,7 +353,7 @@ def detect_mfem_prefix(directory):
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Visualize TPV104 output: MFEM vs SeisSol reference"
+        description="Visualize TPV205 output: MFEM vs DRDG3D reference"
     )
     parser.add_argument(
         "mfem_dir_positional",
@@ -365,41 +365,47 @@ def main():
     parser.add_argument(
         "--mfem",
         action="append",
-        metavar="[LABEL:]DIR",
-        help="MFEM results directory. Use 'label:dir' for a custom legend "
-             "label. Repeatable.",
+        metavar="[LABEL:]DIR[@PREFIX]",
+        help="MFEM results directory.  Use 'label:dir' for a custom "
+             "legend label, '@prefix' to force a specific filename "
+             "prefix.  Repeatable.",
     )
     parser.add_argument(
         "--mfem-prefix",
-        default="tpv104",
+        default="tpv205",
         help="MFEM file prefix matching --output-prefix passed to "
-             "seas_tpv104_driver (default: 'tpv104').",
+             "seas_tpv205_driver (default: 'tpv205').  Used as the "
+             "fallback when the per-source @PREFIX is absent and "
+             "auto-detection finds zero or multiple candidate prefixes.",
     )
 
     parser.add_argument(
-        "--seisol", action="store_true",
-        help="Include SeisSol (SCEC TPV104 FL=103) reference data.",
+        "--drdg3d-200m", action="store_true",
+        help="Include DRDG3D reference at 200 m / O4 resolution.",
+    )
+    parser.add_argument(
+        "--drdg3d-100m", action="store_true",
+        help="Include DRDG3D reference at 100 m / O4 resolution.",
     )
     parser.add_argument(
         "--drdg3d", action="store_true",
-        help="Include DRDG3D (Wenqiang Zhang, 200 m, O4) reference data.",
+        help="Shortcut: enable both --drdg3d-200m and --drdg3d-100m.",
     )
     parser.add_argument(
         "--benchmark-dir",
         default="benchmark_data",
-        help="Directory containing seisol/ and DRDG3D/ subfolders with "
-             "reference traces.  Resolved relative to this script if not "
-             "absolute.",
+        help="Directory containing DRDG3D_{200m,100m}_O4/ subfolders.  "
+             "Resolved relative to this script if not absolute.",
     )
     parser.add_argument(
         "--no-benchmark", action="store_true",
-        help="Skip ALL benchmark references (SeisSol, DRDG3D) even if "
-             "--seisol or --drdg3d is given.",
+        help="Skip ALL benchmark references (DRDG3D 200 m, DRDG3D 100 m)"
+             " even if --drdg3d-* / --drdg3d is given.",
     )
 
     parser.add_argument(
         "--stations", nargs="+", type=int, default=None,
-        help="Specific station indices (1-9). Default: all",
+        help="Specific station indices (1-16). Default: all",
     )
     parser.add_argument(
         "--save", action="store_true",
@@ -416,48 +422,59 @@ def main():
 
     args = parser.parse_args()
 
-    # Default to including SeisSol when no benchmark was specified at all,
-    # unless --no-benchmark was requested explicitly.  If the user opted in
-    # to ANY benchmark (e.g. --drdg3d), the default-on rule does NOT fire —
-    # they get only what they asked for.
-    if not args.no_benchmark and not args.seisol and not args.drdg3d:
-        args.seisol = True
+    if args.drdg3d:
+        args.drdg3d_200m = True
+        args.drdg3d_100m = True
 
-    # Build ordered sources from command-line argv so legend colors match
-    # the order the user typed.
+    # Default to including the 200 m DRDG3D reference when no benchmark
+    # flag is given and --no-benchmark wasn't requested.  If the user
+    # opted in to ANY single benchmark, the default-on rule does NOT
+    # fire — they get only what they asked for.
+    if (
+        not args.no_benchmark
+        and not args.drdg3d_200m
+        and not args.drdg3d_100m
+    ):
+        args.drdg3d_200m = True
+
+    # Build ordered sources from command-line argv so legend colors
+    # match the order the user typed.
     ordered_sources = []
     if args.mfem_dir_positional:
         ordered_sources.append(("mfem", args.mfem_dir_positional))
 
     mfem_iter = iter(args.mfem or [])
     for arg in sys.argv[1:]:
-        if arg == "--seisol":
-            ordered_sources.append(("seisol", None))
-        elif arg == "--drdg3d":
-            ordered_sources.append(("drdg3d", None))
+        if arg == "--drdg3d":
+            ordered_sources.append(("drdg3d-200m", None))
+            ordered_sources.append(("drdg3d-100m", None))
+        elif arg == "--drdg3d-200m":
+            ordered_sources.append(("drdg3d-200m", None))
+        elif arg == "--drdg3d-100m":
+            ordered_sources.append(("drdg3d-100m", None))
         elif arg == "--mfem":
             ordered_sources.append(("mfem", next(mfem_iter)))
 
-    # If --seisol was implicit (default), append it at the end.
+    # If a benchmark was implicit (default), append it at the end so it
+    # still appears in the typed-source list when programmatic callers
+    # never put the flag in sys.argv.
     if (
-        args.seisol
+        args.drdg3d_200m
         and not args.no_benchmark
-        and not any(s == "seisol" for s, _ in ordered_sources)
+        and not any(s == "drdg3d-200m" for s, _ in ordered_sources)
     ):
-        ordered_sources.append(("seisol", None))
-    # --drdg3d is opt-in only (no default-on); honor explicit flag here in
-    # case argparse parsed it but it never appeared in sys.argv (e.g. when
-    # invoked programmatically via main(['--drdg3d', ...])).
+        ordered_sources.append(("drdg3d-200m", None))
     if (
-        args.drdg3d
+        args.drdg3d_100m
         and not args.no_benchmark
-        and not any(s == "drdg3d" for s, _ in ordered_sources)
+        and not any(s == "drdg3d-100m" for s, _ in ordered_sources)
     ):
-        ordered_sources.append(("drdg3d", None))
+        ordered_sources.append(("drdg3d-100m", None))
 
     if not ordered_sources:
         parser.error(
-            "No data sources specified. Provide --mfem DIR and/or --seisol."
+            "No data sources specified.  Provide --mfem DIR and/or "
+            "--drdg3d-200m / --drdg3d-100m / --drdg3d."
         )
 
     try:
@@ -474,8 +491,8 @@ def main():
     )
     if not os.path.isabs(args.benchmark_dir) and not os.path.isdir(data_dir):
         data_dir = args.benchmark_dir
-    seisol_dir = os.path.join(data_dir, "seisol")
-    drdg3d_dir = os.path.join(data_dir, "DRDG3D")
+    drdg3d_200m_dir = os.path.join(data_dir, "DRDG3D_200m_O4")
+    drdg3d_100m_dir = os.path.join(data_dir, "DRDG3D_100m_O4")
 
     # Select stations.
     if args.stations:
@@ -487,12 +504,16 @@ def main():
         stations = SCEC_STATIONS
 
     # Build the typed-source list with colors and line styles.
-    benchmark_types = {"seisol", "drdg3d"}
+    benchmark_types = {"drdg3d-200m", "drdg3d-100m"}
     benchmark_labels = {
-        "seisol": "seisol (O5)",
-        "drdg3d": "drdg3d (O4)",
+        "drdg3d-200m": "DRDG3D 200 m O4",
+        "drdg3d-100m": "DRDG3D 100 m O4",
     }
-    benchmark_linestyle = {"seisol": "--", "drdg3d": ":"}
+    benchmark_dirs = {
+        "drdg3d-200m": drdg3d_200m_dir,
+        "drdg3d-100m": drdg3d_100m_dir,
+    }
+    benchmark_linestyle = {"drdg3d-200m": "--", "drdg3d-100m": ":"}
     sources = []
     ci = 0
     for stype, spec in ordered_sources:
@@ -502,8 +523,8 @@ def main():
         ci += 1
         if stype in benchmark_types:
             sources.append(
-                (benchmark_labels[stype], stype, None, color,
-                 benchmark_linestyle[stype])
+                (benchmark_labels[stype], stype, benchmark_dirs[stype],
+                 color, benchmark_linestyle[stype])
             )
         elif stype == "mfem":
             label, directory, prefix = parse_mfem_spec(spec)
@@ -511,8 +532,9 @@ def main():
                 label = os.path.basename(os.path.normpath(directory))
             # Prefix-resolution priority:
             #   1. explicit '@PREFIX' in the spec
-            #   2. auto-detected unique prefix in <directory>/*_station_*.dat
-            #   3. --mfem-prefix CLI flag (default 'tpv104')
+            #   2. auto-detected unique prefix in
+            #      <directory>/*_station_x2_*_x3_*.dat
+            #   3. --mfem-prefix CLI flag (default 'tpv205')
             if prefix is None:
                 prefix = detect_mfem_prefix(directory)
             if prefix is None:
@@ -523,18 +545,17 @@ def main():
             )
 
     print("=" * 60)
-    print("TPV104 Visualization")
+    print("TPV205 Visualization")
     print("=" * 60)
     style_name = {"-": "solid", "--": "dashed", ":": "dotted"}
     for label, stype, info, _color, ls in sources:
         style = style_name.get(ls, ls)
-        if stype == "seisol":
-            print(f"  [{style}] {label}: {seisol_dir}/")
-        elif stype == "drdg3d":
-            print(f"  [{style}] {label}: {drdg3d_dir}/")
+        if stype in benchmark_types:
+            print(f"  [{style}] {label}: {info}/")
         else:
             directory, prefix = info
-            print(f"  [{style}] {label}: {directory}/{prefix}_station_*.dat")
+            print(f"  [{style}] {label}: "
+                  f"{directory}/{prefix}_station_x2_*_x3_*.dat")
     print(f"  Stations: {len(stations)}")
     print()
 
@@ -543,12 +564,9 @@ def main():
         datasets = []
         for label, stype, info, color, ls in sources:
             data = None
-            if stype == "seisol":
-                path = seisol_filename(seisol_dir, station_label)
-                if os.path.exists(path):
-                    data = load_seisol_file(path)
-            elif stype == "drdg3d":
-                path = drdg3d_filename(drdg3d_dir, station_label)
+            if stype in benchmark_types:
+                bench_dir = info
+                path = drdg3d_filename(bench_dir, station_label)
                 if os.path.exists(path):
                     data = load_drdg3d_file(path)
             elif stype == "mfem":
@@ -582,7 +600,7 @@ def main():
         if args.save:
             os.makedirs(args.output_dir, exist_ok=True)
             fname = os.path.join(
-                args.output_dir, f"tpv104_{station_label}.png"
+                args.output_dir, f"tpv205_{station_label}.png"
             )
             plot_station(
                 datasets, station_label, x2_km, x3_km, save_path=fname
@@ -590,7 +608,7 @@ def main():
             if args.closeup_t is not None:
                 fname_close = os.path.join(
                     args.output_dir,
-                    f"tpv104_{station_label}_closeup.png"
+                    f"tpv205_{station_label}_closeup.png"
                 )
                 plot_station(
                     datasets, station_label, x2_km, x3_km,
@@ -606,7 +624,7 @@ def main():
 
     if len(all_results) > 1:
         if args.save:
-            fname = os.path.join(args.output_dir, "tpv104_overview.png")
+            fname = os.path.join(args.output_dir, "tpv205_overview.png")
             plot_overview(all_results, save_path=fname)
         else:
             plot_overview(all_results)
