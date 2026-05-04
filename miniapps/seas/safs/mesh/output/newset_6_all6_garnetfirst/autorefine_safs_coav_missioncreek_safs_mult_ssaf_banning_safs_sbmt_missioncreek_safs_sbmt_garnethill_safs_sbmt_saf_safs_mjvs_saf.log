@@ -1,0 +1,16 @@
+[corefine_faults] mode=autorefine: single-pass global refinement (replaces pairwise cascade).
+[autorefine_faults] Fix P safs_coav_missioncreek: 346 -> 1200 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] Fix P safs_mult_ssaf_banning: 610 -> 2070 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] Fix P safs_sbmt_missioncreek: 449 -> 1657 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] Fix P safs_sbmt_garnethill: 950 -> 2454 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] Fix P safs_sbmt_saf: 1346 -> 4934 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] Fix P safs_mjvs_saf: 504 -> 1764 faces (target_edge_m=1000 m, iters=3)
+[autorefine_faults] safs_sbmt_garnethill: dropped 1 non-manifold face(s) when building per-fault Surface_mesh (snap rounding may have collapsed degenerate triangles).
+[corefine_faults] autorefine: 14079 input faces → 15689 output faces (1610 new from intersection refinement); had self-int: yes.
+[corefine_faults]   safs_coav_missioncreek: 1200 → 1421 faces
+[corefine_faults]   safs_mult_ssaf_banning: 2070 → 2243 faces
+[corefine_faults]   safs_sbmt_missioncreek: 1657 → 2027 faces
+[corefine_faults]   safs_sbmt_garnethill: 2454 → 2734 faces
+[corefine_faults]   safs_sbmt_saf: 4934 → 5500 faces
+[corefine_faults]   safs_mjvs_saf: 1764 → 1764 faces
+[corefine_faults] autorefine done.

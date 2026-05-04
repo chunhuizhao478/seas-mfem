@@ -1,0 +1,25 @@
+{
+  "res_f_m": 1000.0,
+  "res_ff_m": 20000.0,
+  "ramp_dist_m": 35000.0,
+  "tube_radius_m": 5000.0,
+  "algo3d": 10,
+  "conformal_input": true,
+  "fields": {
+    "distance_id": 1,
+    "threshold_id": 2,
+    "background_field_id": 2,
+    "distance_sampling_per_surface": 100
+  },
+  "measured": {
+    "n_points": 165537,
+    "triangle_tag_1": 160,
+    "triangle_tag_2": 160,
+    "triangle_tag_3": 224,
+    "triangle_tag_4": 224,
+    "triangle_tag_5": 27660,
+    "triangle_tag_6": 1218,
+    "triangle_tag_100": 15667,
+    "tetra_tag_10": 936933
+  }
+}

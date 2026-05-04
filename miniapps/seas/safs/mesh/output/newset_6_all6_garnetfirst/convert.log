@@ -1,0 +1,8 @@
+
+convert_msh OK: output/newset_6_all6_garnetfirst/output/safs_newset_6.msh
+  n_points   : 165537
+  n_triangles: 45313
+  n_tetra    : 936933
+  wrote      : output/newset_6_all6_garnetfirst/output/safs_newset_6.vtu
+  wrote      : output/newset_6_all6_garnetfirst/output/safs_newset_6.xml
+  wrote      : output/newset_6_all6_garnetfirst/output/safs_newset_6_facet_region.xml

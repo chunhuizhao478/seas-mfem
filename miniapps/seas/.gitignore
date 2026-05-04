@@ -15,7 +15,13 @@ tpv102/plots_*/
 
 # Mesh output
 *.vtk
+*.msh
 bp1/mesh/bp1_ss_12.5m.msh
+
+# SAFS Dolfin XML volume meshes (regenerable from .vtu via convert_msh.py;
+# the safs_newset_6*.xml volume files routinely exceed GitHub's 100 MB
+# hard limit for the production cavity mesh).
+safs/mesh/output/**/*.xml
 
 # Binaries
 seas_generate_mesh
@@ -75,3 +81,18 @@ tpv102/mesh/tpv102_1000m.msh
 tpv104/results/
 tpv104/results_*/
 tpv104/plots_results_*/
+# Strike-2x2 drdg3d post-processing dirs (e.g.
+# plots_strike_2x2_drdg3d_symmetric_mesh_O3_job7678716).
+tpv104/plots_strike_*/
+
+# TPV102 cluster-job result dirs (e.g.
+# results_mixed_flux_adjacent_p2_O3_normal_job7681805).  Note:
+# tpv102/plots_*/ already covers post-run plot dirs.
+tpv102/results_*/
+
+# TPV205 cluster-job artifacts (results + plots).  Covers e.g.
+# plots_results_mixed_flux_adjacent_p2_O3_normal_job7682076.
+tpv205/results/
+tpv205/results_*/
+tpv205/plots_*/
+tpv205/plots_results_*/

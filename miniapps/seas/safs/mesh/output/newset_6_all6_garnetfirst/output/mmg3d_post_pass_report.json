@@ -1,0 +1,259 @@
+{
+  "in_msh": "output/newset_6_all6_garnetfirst/output/safs_newset_6.msh",
+  "out_msh": "output/newset_6_all6_garnetfirst/output/safs_newset_6_mmg3d.msh",
+  "hmin": 100.0,
+  "hmax": 25000.0,
+  "hgrad": 1.3,
+  "hausd": 50.0,
+  "fault_tri_tag": 100,
+  "mode": "optim_relax_fault",
+  "binary": "mmg3d_O3",
+  "n_passes": 3,
+  "n_trials": 3,
+  "best_trial_idx": 0,
+  "best_gamma_min": 2.081335173534953e-06,
+  "best_min_edge_m": 0.19951564833100968,
+  "trials": [
+    {
+      "trial_idx": 0,
+      "final_msh": "output/newset_6_all6_garnetfirst/output/_mmg3d_work/trial0_final.msh",
+      "gamma_min": 2.081335173534953e-06,
+      "min_edge_m": 0.19951564833100968,
+      "passes": [
+        {
+          "pass_idx": 0,
+          "input_counts": {
+            "n_vertices": 165537,
+            "n_triangles": 45313,
+            "n_tets": 936933,
+            "n_required_triangles": 0,
+            "n_required_edges": 1177,
+            "n_required_vertices": 424,
+            "n_polyline_edges": 497,
+            "n_freesurface_edges": 332,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 424,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 192207,
+            "n_triangles": 45009,
+            "n_tets": 1105266
+          }
+        },
+        {
+          "pass_idx": 1,
+          "input_counts": {
+            "n_vertices": 192207,
+            "n_triangles": 45009,
+            "n_tets": 1105266,
+            "n_required_triangles": 0,
+            "n_required_edges": 1320,
+            "n_required_vertices": 446,
+            "n_polyline_edges": 727,
+            "n_freesurface_edges": 10,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 446,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 190393,
+            "n_triangles": 43368,
+            "n_tets": 1096042
+          }
+        },
+        {
+          "pass_idx": 2,
+          "input_counts": {
+            "n_vertices": 190393,
+            "n_triangles": 43368,
+            "n_tets": 1096042,
+            "n_required_triangles": 0,
+            "n_required_edges": 1675,
+            "n_required_vertices": 618,
+            "n_polyline_edges": 1059,
+            "n_freesurface_edges": 21,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 618,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 191028,
+            "n_triangles": 43593,
+            "n_tets": 1099627
+          }
+        }
+      ]
+    },
+    {
+      "trial_idx": 1,
+      "final_msh": "output/newset_6_all6_garnetfirst/output/_mmg3d_work/trial1_final.msh",
+      "gamma_min": 1.5124242337236512e-06,
+      "min_edge_m": 0.19951564833100968,
+      "passes": [
+        {
+          "pass_idx": 0,
+          "input_counts": {
+            "n_vertices": 165537,
+            "n_triangles": 45313,
+            "n_tets": 936933,
+            "n_required_triangles": 0,
+            "n_required_edges": 1177,
+            "n_required_vertices": 424,
+            "n_polyline_edges": 497,
+            "n_freesurface_edges": 332,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 424,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 192501,
+            "n_triangles": 44861,
+            "n_tets": 1107266
+          }
+        },
+        {
+          "pass_idx": 1,
+          "input_counts": {
+            "n_vertices": 192501,
+            "n_triangles": 44861,
+            "n_tets": 1107266,
+            "n_required_triangles": 0,
+            "n_required_edges": 1973,
+            "n_required_vertices": 824,
+            "n_polyline_edges": 1390,
+            "n_freesurface_edges": 4,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 824,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 189196,
+            "n_triangles": 42426,
+            "n_tets": 1089147
+          }
+        },
+        {
+          "pass_idx": 2,
+          "input_counts": {
+            "n_vertices": 189196,
+            "n_triangles": 42426,
+            "n_tets": 1089147,
+            "n_required_triangles": 0,
+            "n_required_edges": 1058,
+            "n_required_vertices": 268,
+            "n_polyline_edges": 417,
+            "n_freesurface_edges": 57,
+            "n_perimeter_edges": 598,
+            "n_polyline_keys": 268,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 189455,
+            "n_triangles": 42465,
+            "n_tets": 1090782
+          }
+        }
+      ]
+    },
+    {
+      "trial_idx": 2,
+      "final_msh": "output/newset_6_all6_garnetfirst/output/_mmg3d_work/trial2_final.msh",
+      "gamma_min": 9.571175928535602e-07,
+      "min_edge_m": 0.19951564833100968,
+      "passes": [
+        {
+          "pass_idx": 0,
+          "input_counts": {
+            "n_vertices": 165537,
+            "n_triangles": 45313,
+            "n_tets": 936933,
+            "n_required_triangles": 0,
+            "n_required_edges": 1177,
+            "n_required_vertices": 424,
+            "n_polyline_edges": 497,
+            "n_freesurface_edges": 332,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 424,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 192326,
+            "n_triangles": 44813,
+            "n_tets": 1106162
+          }
+        },
+        {
+          "pass_idx": 1,
+          "input_counts": {
+            "n_vertices": 192326,
+            "n_triangles": 44813,
+            "n_tets": 1106162,
+            "n_required_triangles": 0,
+            "n_required_edges": 1225,
+            "n_required_vertices": 407,
+            "n_polyline_edges": 626,
+            "n_freesurface_edges": 5,
+            "n_perimeter_edges": 599,
+            "n_polyline_keys": 407,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 190612,
+            "n_triangles": 43263,
+            "n_tets": 1097264
+          }
+        },
+        {
+          "pass_idx": 2,
+          "input_counts": {
+            "n_vertices": 190612,
+            "n_triangles": 43263,
+            "n_tets": 1097264,
+            "n_required_triangles": 0,
+            "n_required_edges": 1331,
+            "n_required_vertices": 381,
+            "n_polyline_edges": 680,
+            "n_freesurface_edges": 59,
+            "n_perimeter_edges": 598,
+            "n_polyline_keys": 381,
+            "fault_tri_tag": 100,
+            "mode": "optim_relax_fault"
+          },
+          "output_counts": {
+            "n_points": 190647,
+            "n_triangles": 43307,
+            "n_tets": 1097451
+          }
+        }
+      ]
+    }
+  ],
+  "input_counts": {
+    "n_vertices": 165537,
+    "n_triangles": 45313,
+    "n_tets": 936933,
+    "n_required_triangles": 0,
+    "n_required_edges": 1177,
+    "n_required_vertices": 424,
+    "n_polyline_edges": 497,
+    "n_freesurface_edges": 332,
+    "n_perimeter_edges": 599,
+    "n_polyline_keys": 424,
+    "fault_tri_tag": 100,
+    "mode": "optim_relax_fault"
+  },
+  "output_counts": {
+    "n_points": 191028,
+    "n_triangles": 43593,
+    "n_tets": 1099627
+  }
+}

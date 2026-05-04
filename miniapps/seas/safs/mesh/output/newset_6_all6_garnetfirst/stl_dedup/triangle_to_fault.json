@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "faults": {
+    "safs_coav_missioncreek": {"n_triangles": 1421, "range": [0, 1421]},
+    "safs_mult_ssaf_banning": {"n_triangles": 2243, "range": [1421, 3664]},
+    "safs_sbmt_missioncreek": {"n_triangles": 2027, "range": [3664, 5691]},
+    "safs_sbmt_garnethill": {"n_triangles": 2734, "range": [5691, 8425]},
+    "safs_sbmt_saf": {"n_triangles": 5500, "range": [8425, 13925]},
+    "safs_mjvs_saf": {"n_triangles": 1764, "range": [13925, 15689]}
+  },
+  "n_total_triangles": 15689
+}

@@ -1,0 +1,33 @@
+Start testing: Apr 29 23:05 PDT
+----------------------------------------------------------
+1/1 Testing: corefine_smoke
+1/1 Test: corefine_smoke
+Command: "/Users/chunhuizhao/projects/seas-mfem/miniapps/seas/safs/tools/build/test_corefine_smoke"
+Directory: /Users/chunhuizhao/projects/seas-mfem/miniapps/seas/safs/tools/build
+"corefine_smoke" start time: Apr 29 23:05 PDT
+Output:
+----------------------------------------------------------
+[smoke] test_two_squares
+[smoke] test_three_orthogonal_cascade
+[smoke] test_coincident_preflight
+[smoke] test_polyline_edge_coincidence_gate
+[smoke] test_mill_creek_pin
+[smoke]   uniformize did not fully converge (192 split + 238 collapse over 16 iter) — accepting partial improvement
+[smoke]   Mill×SAF post-Phase-2 mean polyline edge A=730.136 B=730.136 (target=1000)
+[smoke]   Mill×SAF post-Phase-2 max aspect A=4.67513 B=8.64509
+[smoke] test_sliver_collapse_symmetric
+[smoke] test_polyline_corridor_matches_target
+[smoke]   mean polyline edge len A=625 B=625 (target=1000)
+[smoke] test_remesh_protects_constrained
+[smoke] test_free_surface_violation_and_clamp
+[smoke] test_idempotency
+[smoke] all tests passed
+<end of output>
+Test time =   0.09 sec
+----------------------------------------------------------
+Test Passed.
+"corefine_smoke" end time: Apr 29 23:05 PDT
+"corefine_smoke" time elapsed: 00:00:00
+----------------------------------------------------------
+
+End testing: Apr 29 23:05 PDT

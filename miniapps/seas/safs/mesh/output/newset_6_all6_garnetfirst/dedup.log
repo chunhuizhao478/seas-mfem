@@ -1,0 +1,15 @@
+  load safs_coav_missioncreek: V=4263, T=1421
+  load safs_mult_ssaf_banning: V=6729, T=2243
+  load safs_mjvs_saf: V=5292, T=1764
+  load safs_sbmt_missioncreek: V=6081, T=2027
+  load safs_sbmt_saf: V=16500, T=5500
+  load safs_sbmt_garnethill: V=8199, T=2733
+  global unique vertices (snap=0.1): 7727
+  coplanar overlap losers: 9
+  write safs_coav_missioncreek: T=1421->1419 (dropped 0 coplanar overlaps)
+  write safs_mult_ssaf_banning: T=2243->2239 (dropped 0 coplanar overlaps)
+  write safs_mjvs_saf: T=1764->1764 (dropped 0 coplanar overlaps)
+  write safs_sbmt_missioncreek: T=2027->2027 (dropped 0 coplanar overlaps)
+  write safs_sbmt_saf: T=5500->5500 (dropped 0 coplanar overlaps)
+  write safs_sbmt_garnethill: T=2733->2718 (dropped 9 coplanar overlaps)
+  wrote output/newset_6_all6_garnetfirst/stl_dedup/dedup_coplanar_report.json
