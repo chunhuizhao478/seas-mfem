@@ -505,7 +505,18 @@ make -j"${JOBS}"
 echo ""
 echo "=== Building SEAS miniapps ==="
 cd miniapps/seas
-make seas_bp1_full seas_bp5_full seas_test_parallel_elasticity seas_test_bp5_parallel_smoke -j"${JOBS}"
+# Note: seas_bp1_full is intentionally NOT built on Frontera.  It pulls
+# in tests/verification/bp1_verification_full.cpp which instantiates
+# SEASQuasiDynamicOperator<ParMesh, AntiplaneDomainOperator<ParMesh>, ...>,
+# and that template calls ComputeTractionDiagnostics / IsFirstStepDebugEnabled
+# on the domain operator — methods that only exist on ElasticityDomainOperator
+# (added April 2026 in commits 8cb7c00 / b631c63 for BP5 face tracing).
+# Re-enable here after Antiplane gains the matching stubs or after the
+# template guards those calls.
+make seas_bp5_full \
+     seas_tpv102_driver seas_tpv104_driver seas_tpv205_driver \
+     seas_test_parallel_elasticity seas_test_bp5_parallel_smoke \
+     -j"${JOBS}"
 
 # Build TOML driver if toml11 is available
 if [ -f extern/toml11/toml.hpp ] || [ -f extern/toml11/include/toml.hpp ]; then
@@ -520,8 +531,10 @@ fi
 echo ""
 echo "=== Build complete ==="
 echo "Binaries:"
-echo "  $(pwd)/seas_bp1_full"
 echo "  $(pwd)/seas_bp5_full"
+echo "  $(pwd)/seas_tpv102_driver"
+echo "  $(pwd)/seas_tpv104_driver"
+echo "  $(pwd)/seas_tpv205_driver"
 echo "  $(pwd)/seas_test_parallel_elasticity"
 echo "  $(pwd)/seas_test_bp5_parallel_smoke"
 if [ "${DRIVER_BUILT}" = "1" ]; then
