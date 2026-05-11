@@ -60,8 +60,11 @@
 #                               # commit.  Phase 6 sbatch use this gmsh
 #                               # to regenerate .msh from .geo at submit
 #                               # time.  USE_GMSH=NO skips the download.
-#   GMSH_VERSION=4.13.1         # gmsh release to download (Linux64
-#                               # binary tarball from gmsh.info/bin/Linux).
+#   GMSH_VERSION=4.11.1         # gmsh release to install via pip wheel.
+#                               # 4.11.1 is the newest version compatible
+#                               # with Frontera's pip 19.2.3.  Set to
+#                               # 'latest' to drop the pin (use on hosts
+#                               # with a newer pip).
 #   JOBS=8                      # Parallel build jobs
 
 set -euo pipefail
@@ -75,7 +78,11 @@ HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
 QUICK="${QUICK:-1}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
 USE_GMSH="${USE_GMSH:-YES}"
-GMSH_VERSION="${GMSH_VERSION:-4.13.1}"
+# 4.11.1 is the newest gmsh wheel on PyPI that Frontera's pip 19.2.3 can
+# recognize (older pips don't understand manylinux_2_28 wheel tags, which
+# gmsh 4.12+ uses).  Set GMSH_VERSION=latest to remove the pin entirely
+# — useful on a system with modern pip.
+GMSH_VERSION="${GMSH_VERSION:-4.11.1}"
 JOBS="${JOBS:-8}"
 
 # FORCE_REBUILD=1 wins over QUICK=1: clear caches and rebuild from source.
