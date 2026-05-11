@@ -1,7 +1,0 @@
-  read output/newset_6_skip_patch/output/safs_newset_6_mmg3d.msh: V=190907, T=1099142, tris=43462
-  bad tets (γ < 0.001): 54
-  wrote output/newset_6_skip_patch/output/safs_newset_6_cavity.msh: V=190919, T=1099208
-  cavities built: 35, applied: 12, reverted (γ regression): 6, skipped (consumed): 19, skipped (inverted): 0
-  γ_min: 2.232e-06 → 6.414e-06  min_edge: 0.200 m → 0.200 m
-  wrote output/newset_6_skip_patch/output/local_cavity_retet_report.json
-

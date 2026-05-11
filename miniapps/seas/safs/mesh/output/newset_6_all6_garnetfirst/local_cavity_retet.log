@@ -1,7 +1,0 @@
-  read output/newset_6_all6_garnetfirst/output/safs_newset_6_mmg3d.msh: V=191028, T=1099627, tris=43593
-  bad tets (γ < 0.001): 55
-  wrote output/newset_6_all6_garnetfirst/output/safs_newset_6_cavity.msh: V=191041, T=1099696
-  cavities built: 33, applied: 13, reverted (γ regression): 5, skipped (consumed): 22, skipped (inverted): 0
-  γ_min: 2.081e-06 → 6.511e-06  min_edge: 0.200 m → 0.200 m
-  wrote output/newset_6_all6_garnetfirst/output/local_cavity_retet_report.json
-

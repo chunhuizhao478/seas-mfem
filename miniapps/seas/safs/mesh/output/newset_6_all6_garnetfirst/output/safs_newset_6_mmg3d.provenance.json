@@ -1,8 +1,0 @@
-{
-  "git_commit": "a3ee39a0498c234e5eee3fc113490faddf6e4a5d",
-  "gmsh_version": "4.15.0",
-  "msh_sha256": "28c1b06fa1dea3f8cd8eccb2429aae4b27fa44e26f48a86401cba0f4ba89a276",
-  "n_points": 191028,
-  "n_triangles": 43593,
-  "n_tetrahedra": 1099627
-}
