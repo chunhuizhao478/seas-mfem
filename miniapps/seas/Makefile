@@ -22,6 +22,17 @@ CONFIG_MK = $(or $(wildcard $(MFEM_BUILD_DIR)/config/config.mk),\
 MFEM_LIB_FILE = mfem_is_not_built
 -include $(CONFIG_MK)
 
+# macOS 26+ dyld rejects duplicate LC_RPATH; the conda mpicxx wrapper auto-
+# adds -Wl,-rpath,$CONDA_PREFIX/lib AND defaults.mk:209 MPI_LIB also injects
+# the same path, producing two LC_RPATH commands that abort the loader.
+# Strip one occurrence post-link.  No-op on Linux where this is not enforced.
+ifeq ($(shell uname -s),Darwin)
+SEAS_POST_LINK_DEDUP_RPATH = @install_name_tool -delete_rpath \
+    $(CONDA_PREFIX)/lib $@ 2>/dev/null || true
+else
+SEAS_POST_LINK_DEDUP_RPATH = @true
+endif
+
 # Optional TOML support (requires extern/toml11)
 # v3: toml.hpp at root; v4: toml.hpp in include/
 SEAS_USE_TOML ?= $(if $(wildcard extern/toml11/toml.hpp),YES,$(if $(wildcard extern/toml11/include/toml.hpp),YES,))
@@ -195,6 +206,23 @@ TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_str
 TEST_FAULT_SURFACE_VTU_K4_SRC              = tests/unit/test_fault_surface_vtu_k4.cpp
 # --paraview-fields / SetFaultVTUFields filter
 TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC    = tests/unit/test_fault_surface_vtu_field_filter.cpp
+# Phase 1 of PLAN_paraview_compaction_2026-04-28 — gather-to-rank-0 binary
+# VTU writer: serial bit-exactness + np=4 gather correctness
+TEST_FAULT_SURFACE_VTU_BINARY_SRC          = tests/unit/test_fault_surface_vtu_binary.cpp
+TEST_FAULT_SURFACE_VTU_GATHER_MPI_SRC      = tests/unit/test_fault_surface_vtu_gather_mpi.cpp
+# Phase 2a/2b of PLAN_paraview_compaction_2026-04-28 — VTKHDF single-file
+# fault output.  Conditional on MFEM_USE_HDF5 in the test sources.
+TEST_PARAVIEW_HDF_SMOKE_SRC                = tests/unit/test_paraview_hdf_smoke.cpp
+TEST_FAULT_SURFACE_VTKHDF_SRC              = tests/unit/test_fault_surface_vtkhdf.cpp
+TEST_FAULT_SURFACE_VTKHDF_MPI_SRC          = tests/unit/test_fault_surface_vtkhdf_mpi.cpp
+# Phase 2d.2 of PLAN_paraview_compaction_2026-04-28 — H5Z-ZFP gate
+TEST_VTKHDF_ZFP_SRC                        = tests/unit/test_vtkhdf_zfp.cpp
+# Phase 2d.3 of PLAN_paraview_compaction_2026-04-28 — seas fault path + ZFP
+TEST_FAULT_SURFACE_VTKHDF_ZFP_SRC          = tests/unit/test_fault_surface_vtkhdf_zfp.cpp
+# Phase 6.2 of PLAN_bulk_compression_and_size_estimator_2026-05-09 — volume + ZFP
+TEST_VOLUME_HDF_COMPRESSION_SRC            = tests/unit/test_volume_hdf_compression.cpp
+# Phase 3 of PLAN_paraview_compaction_2026-04-28 — adaptive snapshot cap
+TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_cap.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
@@ -397,6 +425,15 @@ TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMME
 TEST_FAULT_SURFACE_VTU_K4_OBJ              = $(TEST_FAULT_SURFACE_VTU_K4_SRC:.cpp=.o)
 # --paraview-fields field filter
 TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ    = $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC:.cpp=.o)
+TEST_FAULT_SURFACE_VTU_BINARY_OBJ          = $(TEST_FAULT_SURFACE_VTU_BINARY_SRC:.cpp=.o)
+TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ      = $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_SRC:.cpp=.o)
+TEST_PARAVIEW_HDF_SMOKE_OBJ                = $(TEST_PARAVIEW_HDF_SMOKE_SRC:.cpp=.o)
+TEST_FAULT_SURFACE_VTKHDF_OBJ              = $(TEST_FAULT_SURFACE_VTKHDF_SRC:.cpp=.o)
+TEST_FAULT_SURFACE_VTKHDF_MPI_OBJ          = $(TEST_FAULT_SURFACE_VTKHDF_MPI_SRC:.cpp=.o)
+TEST_VTKHDF_ZFP_OBJ                        = $(TEST_VTKHDF_ZFP_SRC:.cpp=.o)
+TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ          = $(TEST_FAULT_SURFACE_VTKHDF_ZFP_SRC:.cpp=.o)
+TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.cpp=.o)
+TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
@@ -953,14 +990,62 @@ seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GU
 # v9.1.0 plan §4.1 — fault-surface VTU CellData contract (post-R-001)
 seas_test_fault_surface_vtu_continuity: $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # v9.2.0 plan §19 — R-V92-E02 stage-4 VTU diagnostic
 seas_test_fault_surface_vtu_k4: $(TEST_FAULT_SURFACE_VTU_K4_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_K4_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # --paraview-fields / SetFaultVTUFields field filter
 seas_test_fault_surface_vtu_field_filter: $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 1 PLAN_paraview_compaction_2026-04-28 — single binary VTU writer
+seas_test_fault_surface_vtu_binary: $(TEST_FAULT_SURFACE_VTU_BINARY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_BINARY_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 1 PLAN_paraview_compaction_2026-04-28 — np=4 gather correctness
+seas_test_fault_surface_vtu_gather_mpi: $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 2a PLAN_paraview_compaction_2026-04-28 — VTKHDF build smoke gate
+seas_test_paraview_hdf_smoke: $(TEST_PARAVIEW_HDF_SMOKE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_HDF_SMOKE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 2b PLAN_paraview_compaction_2026-04-28 — VTKHDF serial bit-exact
+seas_test_fault_surface_vtkhdf: $(TEST_FAULT_SURFACE_VTKHDF_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTKHDF_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 2b PLAN_paraview_compaction_2026-04-28 — VTKHDF np=4 gather merge
+seas_test_fault_surface_vtkhdf_mpi: $(TEST_FAULT_SURFACE_VTKHDF_MPI_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTKHDF_MPI_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 2d.2 PLAN_paraview_compaction_2026-04-28 — H5Z-ZFP filter gate
+seas_test_vtkhdf_zfp: $(TEST_VTKHDF_ZFP_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VTKHDF_ZFP_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 2d.3 PLAN_paraview_compaction_2026-04-28 — seas fault path + ZFP
+seas_test_fault_surface_vtkhdf_zfp: $(TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 6.2 PLAN_bulk_compression_and_size_estimator_2026-05-09 — volume HDF + ZFP
+seas_test_volume_hdf_compression: $(TEST_VOLUME_HDF_COMPRESSION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_VOLUME_HDF_COMPRESSION_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 3 PLAN_paraview_compaction_2026-04-28 — adaptive snapshot cap
+seas_test_paraview_schedule_cap: $(TEST_PARAVIEW_SCHEDULE_CAP_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_SCHEDULE_CAP_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
 seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
@@ -1498,6 +1583,44 @@ $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(M
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# Phase 1 PLAN_paraview_compaction_2026-04-28 — Phase 1 binary VTU writer tests
+$(TEST_FAULT_SURFACE_VTU_BINARY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Phase 2 PLAN_paraview_compaction_2026-04-28 — VTKHDF tests
+$(TEST_PARAVIEW_HDF_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_SURFACE_VTKHDF_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_SURFACE_VTKHDF_MPI_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_VTKHDF_ZFP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_VOLUME_HDF_COMPRESSION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PARAVIEW_SCHEDULE_CAP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -2020,6 +2143,65 @@ test-fault-surface-vtu-k4: seas_test_fault_surface_vtu_k4
 test-fault-surface-vtu-field-filter: seas_test_fault_surface_vtu_field_filter
 	./seas_test_fault_surface_vtu_field_filter
 
+# Phase 1 PLAN_paraview_compaction_2026-04-28 — single binary VTU writer
+test-fault-surface-vtu-binary: seas_test_fault_surface_vtu_binary
+	./seas_test_fault_surface_vtu_binary
+
+# Phase 1 PLAN_paraview_compaction_2026-04-28 — np=4 gather correctness
+test-fault-surface-vtu-gather-mpi: seas_test_fault_surface_vtu_gather_mpi
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_surface_vtu_gather_mpi
+
+# Phase 2a PLAN_paraview_compaction_2026-04-28 — VTKHDF build prerequisite
+# Plan §2a.6: run serial AND mpirun -np 4.  The test self-skips on builds
+# without MFEM_USE_HDF5 (returns 0 with a SKIP message).
+test-paraview-hdf-smoke: seas_test_paraview_hdf_smoke
+	./seas_test_paraview_hdf_smoke
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_paraview_hdf_smoke
+
+# Phase 2b PLAN_paraview_compaction_2026-04-28 — VTKHDF serial bit-exact
+test-fault-surface-vtkhdf: seas_test_fault_surface_vtkhdf
+	./seas_test_fault_surface_vtkhdf
+
+# Phase 2b PLAN_paraview_compaction_2026-04-28 — VTKHDF np=4 merge
+test-fault-surface-vtkhdf-mpi: seas_test_fault_surface_vtkhdf_mpi
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_surface_vtkhdf_mpi
+
+# Phase 2d.2 PLAN_paraview_compaction_2026-04-28 — H5Z-ZFP MFEM core gate.
+# HDF5_PLUGIN_PATH must point at the directory containing libh5zzfp.{so,dylib}
+# (set by the user at the env level; conda install places it at
+# $CONDA_PREFIX/plugin).
+test-vtkhdf-zfp: seas_test_vtkhdf_zfp
+	HDF5_PLUGIN_PATH=$$CONDA_PREFIX/plugin ./seas_test_vtkhdf_zfp
+
+# Phase 2d.3 PLAN_paraview_compaction_2026-04-28 — seas fault + ZFP gate
+test-fault-surface-vtkhdf-zfp: seas_test_fault_surface_vtkhdf_zfp
+	HDF5_PLUGIN_PATH=$$CONDA_PREFIX/plugin ./seas_test_fault_surface_vtkhdf_zfp
+
+# Phase 6.2 PLAN_bulk_compression_and_size_estimator_2026-05-09 — volume HDF + ZFP
+test-volume-hdf-compression: seas_test_volume_hdf_compression
+	HDF5_PLUGIN_PATH=$$CONDA_PREFIX/plugin ./seas_test_volume_hdf_compression
+
+# R-312 / plan §Phase 2d.3 acceptance — bulk-vs-fault ZFP tolerance
+# isolation gate.  Reuses the existing fault-side ZFP test (which
+# proves fault tolerance is honoured at 1e-12) and skips the bulk
+# half explicitly because the volume `pv_` writer is currently
+# `mfem::ParaViewDataCollection` (per-rank VTU), not VTKHDF — so no
+# bulk HDF chunk filter is in scope until the volume writer is
+# promoted to `ParaViewHDFDataCollection` (deferred follow-up,
+# tracked via SetVolumeHDFCompression's runtime warning at
+# paraview_output.hpp:430).
+test-paraview-tolerance-isolation: seas_test_fault_surface_vtkhdf_zfp
+	HDF5_PLUGIN_PATH=$$CONDA_PREFIX/plugin ./seas_test_fault_surface_vtkhdf_zfp
+	@echo
+	@echo "R-312 NOTE: bulk-side ZFP isolation half is deferred — the"
+	@echo "  volume writer is currently VTU.  See paraview_output.hpp"
+	@echo "  SetVolumeHDFCompression for the runtime warning that fires"
+	@echo "  when --paraview-bulk-zfp-tol is requested today."
+
+# Phase 3 PLAN_paraview_compaction_2026-04-28 — snapshot cap unit test
+test-paraview-schedule-cap: seas_test_paraview_schedule_cap
+	./seas_test_paraview_schedule_cap
+
 test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
 	./seas_test_fault_basis_dip_strike_symmetry
 
@@ -2463,6 +2645,7 @@ test-r101-shared-fault: seas_test_r101_shared_fault
 # BP5 parallel smoke test
 seas_test_bp5_parallel_smoke: $(TEST_BP5_SMOKE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_SMOKE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 $(TEST_BP5_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)

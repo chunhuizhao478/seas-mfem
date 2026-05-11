@@ -132,6 +132,16 @@ inline void WriteFaultPackVTU(const std::string &vtu_path,
                               VTKFormat format = VTKFormat::BINARY,
                               int compression_level = 0)
 {
+   // R-304 / plan §Phase 1 Edge Cases: this writer assumes a
+   // little-endian host so per-array binary blocks can be written
+   // verbatim.  A big-endian host requires byte-swapping AND emitting
+   // `byte_order="BigEndian"` in the XML.  Hard-fail at compile time on
+   // big-endian builds.
+#if defined(__BYTE_ORDER__) && defined(__ORDER_LITTLE_ENDIAN__)
+   static_assert(__BYTE_ORDER__ == __ORDER_LITTLE_ENDIAN__,
+                 "WriteFaultPackVTU requires a little-endian host");
+#endif
+
    const int npts   = static_cast<int>(g.vertices.size());
    const int ncells = static_cast<int>(g.triangles.size());
    const std::size_t nfields = g.field_arrays.size();
@@ -147,117 +157,173 @@ inline void WriteFaultPackVTU(const std::string &vtu_path,
                   "' has " << g.field_arrays[k].size() <<
                   " entries; expected " << ncells);
    }
+   (void)compression_level;   // raw-appended path does not compress.
 
-   std::ofstream vtu(vtu_path);
+   std::ofstream vtu(vtu_path, std::ios::binary);
    MFEM_VERIFY(vtu.is_open(),
                "WriteFaultPackVTU: failed to open " << vtu_path);
+
+   // -- ASCII fallback (legacy unit-test parsers depend on this layout) --
    if (format == VTKFormat::ASCII)
    {
       vtu << std::setprecision(10);
+      vtu << "<?xml version=\"1.0\"?>\n";
+      vtu << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\">\n";
+      vtu << "<UnstructuredGrid>\n";
+      vtu << "<Piece NumberOfPoints=\"" << npts
+          << "\" NumberOfCells=\"" << ncells << "\">\n";
+      vtu << "<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\""
+             " format=\"ascii\">\n";
+      for (const auto &v : g.vertices)
+      { vtu << v[0] << " " << v[1] << " " << v[2] << "\n"; }
+      vtu << "</DataArray></Points>\n";
+      vtu << "<Cells>\n"
+             "<DataArray type=\"Int32\" Name=\"connectivity\" format=\"ascii\">\n";
+      for (const auto &t : g.triangles)
+      { vtu << t[0] << " " << t[1] << " " << t[2] << "\n"; }
+      vtu << "</DataArray>\n"
+             "<DataArray type=\"Int32\" Name=\"offsets\" format=\"ascii\">\n";
+      for (int i = 0; i < ncells; ++i) { vtu << (i + 1) * 3 << "\n"; }
+      vtu << "</DataArray>\n"
+             "<DataArray type=\"UInt8\" Name=\"types\" format=\"ascii\">\n";
+      for (int i = 0; i < ncells; ++i)
+      { vtu << static_cast<int>(VTKGeometry::TRIANGLE) << "\n"; }
+      vtu << "</DataArray>\n</Cells>\n<CellData>\n";
+      for (std::size_t k = 0; k < nfields; ++k)
+      {
+         vtu << "<DataArray type=\"Float64\" Name=\"" << g.field_names[k]
+             << "\" format=\"ascii\">\n";
+         for (double v : g.field_arrays[k]) { vtu << v << "\n"; }
+         vtu << "</DataArray>\n";
+      }
+      vtu << "</CellData>\n</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
+      return;
    }
 
-   const char *fmt_str = (format == VTKFormat::ASCII) ? "ascii" : "binary";
+   // -- Binary path (R-302 / plan §Phase 1 §3): raw appended encoding.
+   //
+   // Each DataArray's storage block is `[uint64 byte_length][raw_bytes]`
+   // concatenated under <AppendedData encoding="raw"> with a leading
+   // `_` marker.  `header_type="UInt64"` (R-303 / plan §3) future-proofs
+   // against the >4 GB single-array threshold; ParaView 5.5+ supports
+   // it (project minimum is 5.10).  Strict-aliasing-safe: we
+   // std::memcpy into a flat byte buffer rather than reinterpret_cast.
+   //
+   // Block layout (offsets are byte positions from start of appended
+   // data, AFTER the leading `_` marker):
+   //   block 0   : Points     (Float64, 3 components, npts vertices)
+   //   block 1   : connectivity (Int32, 3 per cell, ncells)
+   //   block 2   : offsets    (Int32, ncells)
+   //   block 3   : types      (UInt8, ncells)
+   //   block 4..K: CellData   (Float64, 1 per cell, ncells)
 
+   struct AppendedBlock { std::vector<unsigned char> bytes; };
+   std::vector<AppendedBlock> blocks;
+   blocks.reserve(4 + nfields);
+
+   auto add_block = [&](const void *src, std::size_t bytes)
+   {
+      AppendedBlock b;
+      b.bytes.resize(bytes);
+      if (bytes > 0) { std::memcpy(b.bytes.data(), src, bytes); }
+      blocks.push_back(std::move(b));
+   };
+
+   // Block 0: Points (Float64, 3 components per vertex).
+   {
+      std::vector<double> flat(static_cast<std::size_t>(npts) * 3);
+      for (int i = 0; i < npts; ++i)
+      {
+         flat[3 * i + 0] = g.vertices[i][0];
+         flat[3 * i + 1] = g.vertices[i][1];
+         flat[3 * i + 2] = g.vertices[i][2];
+      }
+      add_block(flat.data(), flat.size() * sizeof(double));
+   }
+   // Block 1: connectivity (Int32, 3 per cell).
+   {
+      std::vector<int32_t> flat(static_cast<std::size_t>(ncells) * 3);
+      for (int c = 0; c < ncells; ++c)
+      {
+         flat[3 * c + 0] = static_cast<int32_t>(g.triangles[c][0]);
+         flat[3 * c + 1] = static_cast<int32_t>(g.triangles[c][1]);
+         flat[3 * c + 2] = static_cast<int32_t>(g.triangles[c][2]);
+      }
+      add_block(flat.data(), flat.size() * sizeof(int32_t));
+   }
+   // Block 2: offsets (Int32, one per cell).
+   {
+      std::vector<int32_t> flat(ncells);
+      for (int c = 0; c < ncells; ++c) { flat[c] = (c + 1) * 3; }
+      add_block(flat.data(), flat.size() * sizeof(int32_t));
+   }
+   // Block 3: cell types (UInt8, one per cell).
+   {
+      std::vector<uint8_t> flat(
+         ncells, static_cast<uint8_t>(VTKGeometry::TRIANGLE));
+      add_block(flat.data(), flat.size() * sizeof(uint8_t));
+   }
+   // Blocks 4..K: per-field CellData (Float64).
+   for (std::size_t k = 0; k < nfields; ++k)
+   {
+      add_block(g.field_arrays[k].data(),
+                g.field_arrays[k].size() * sizeof(double));
+   }
+
+   // Compute offsets: each block's offset is the running byte position
+   // INCLUDING the 8-byte length headers for all preceding blocks.
+   std::vector<uint64_t> offsets(blocks.size(), 0);
+   {
+      uint64_t pos = 0;
+      for (std::size_t k = 0; k < blocks.size(); ++k)
+      {
+         offsets[k] = pos;
+         pos += sizeof(uint64_t) + blocks[k].bytes.size();
+      }
+   }
+
+   // Emit XML header.
    vtu << "<?xml version=\"1.0\"?>\n";
-   vtu << "<VTKFile type=\"UnstructuredGrid\" version=\"0.1\""
+   vtu << "<VTKFile type=\"UnstructuredGrid\" version=\"1.0\""
        << " byte_order=\"" << VTKByteOrder() << "\""
-       << " header_type=\"UInt32\""
+       << " header_type=\"UInt64\""
        << ">\n";
    vtu << "<UnstructuredGrid>\n";
    vtu << "<Piece NumberOfPoints=\"" << npts
        << "\" NumberOfCells=\"" << ncells << "\">\n";
 
-   // -- Points --
-   {
-      std::vector<char> buf;
-      vtu << "<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\""
-          << " format=\"" << fmt_str << "\">\n";
-      for (const auto &v : g.vertices)
-      {
-         WriteBinaryOrASCII(vtu, buf, v[0], " ", format);
-         WriteBinaryOrASCII(vtu, buf, v[1], " ", format);
-         WriteBinaryOrASCII(vtu, buf, v[2], "", format);
-         if (format == VTKFormat::ASCII) { vtu << '\n'; }
-      }
-      if (format != VTKFormat::ASCII)
-      {
-         WriteBase64WithSizeAndClear(vtu, buf, compression_level);
-      }
-      vtu << "</DataArray></Points>\n";
-   }
-
-   // -- Cells --
-   vtu << "<Cells>\n";
-   {
-      std::vector<char> buf;
-      vtu << "<DataArray type=\"Int32\" Name=\"connectivity\""
-          << " format=\"" << fmt_str << "\">\n";
-      for (const auto &t : g.triangles)
-      {
-         WriteBinaryOrASCII(vtu, buf, static_cast<int32_t>(t[0]), " ", format);
-         WriteBinaryOrASCII(vtu, buf, static_cast<int32_t>(t[1]), " ", format);
-         WriteBinaryOrASCII(vtu, buf, static_cast<int32_t>(t[2]), "", format);
-         if (format == VTKFormat::ASCII) { vtu << '\n'; }
-      }
-      if (format != VTKFormat::ASCII)
-      {
-         WriteBase64WithSizeAndClear(vtu, buf, compression_level);
-      }
-      vtu << "</DataArray>\n";
-   }
-   {
-      std::vector<char> buf;
-      vtu << "<DataArray type=\"Int32\" Name=\"offsets\""
-          << " format=\"" << fmt_str << "\">\n";
-      for (int i = 0; i < ncells; i++)
-      {
-         WriteBinaryOrASCII(vtu, buf, static_cast<int32_t>((i + 1) * 3),
-                            "\n", format);
-      }
-      if (format != VTKFormat::ASCII)
-      {
-         WriteBase64WithSizeAndClear(vtu, buf, compression_level);
-      }
-      vtu << "</DataArray>\n";
-   }
-   {
-      std::vector<char> buf;
-      vtu << "<DataArray type=\"UInt8\" Name=\"types\""
-          << " format=\"" << fmt_str << "\">\n";
-      for (int i = 0; i < ncells; i++)
-      {
-         WriteBinaryOrASCII(vtu, buf,
-                            static_cast<uint8_t>(VTKGeometry::TRIANGLE),
-                            "\n", format);
-      }
-      if (format != VTKFormat::ASCII)
-      {
-         WriteBase64WithSizeAndClear(vtu, buf, compression_level);
-      }
-      vtu << "</DataArray>\n";
-   }
-   vtu << "</Cells>\n";
-
-   // -- CellData --
-   vtu << "<CellData>\n";
+   vtu << "<Points><DataArray type=\"Float64\" NumberOfComponents=\"3\""
+       << " format=\"appended\" offset=\"" << offsets[0] << "\"/></Points>\n";
+   vtu << "<Cells>\n"
+       << "<DataArray type=\"Int32\" Name=\"connectivity\" format=\"appended\""
+          " offset=\"" << offsets[1] << "\"/>\n"
+       << "<DataArray type=\"Int32\" Name=\"offsets\" format=\"appended\""
+          " offset=\"" << offsets[2] << "\"/>\n"
+       << "<DataArray type=\"UInt8\" Name=\"types\" format=\"appended\""
+          " offset=\"" << offsets[3] << "\"/>\n"
+       << "</Cells>\n<CellData>\n";
    for (std::size_t k = 0; k < nfields; ++k)
    {
-      std::vector<char> buf;
-      vtu << "<DataArray type=\"Float64\" Name=\""
-          << g.field_names[k] << "\" format=\"" << fmt_str << "\">\n";
-      for (double v : g.field_arrays[k])
-      {
-         WriteBinaryOrASCII(vtu, buf, v, "\n", format);
-      }
-      if (format != VTKFormat::ASCII)
-      {
-         WriteBase64WithSizeAndClear(vtu, buf, compression_level);
-      }
-      vtu << "</DataArray>\n";
+      vtu << "<DataArray type=\"Float64\" Name=\"" << g.field_names[k]
+          << "\" format=\"appended\" offset=\"" << offsets[4 + k] << "\"/>\n";
    }
-   vtu << "</CellData>\n";
+   vtu << "</CellData>\n</Piece>\n</UnstructuredGrid>\n";
 
-   vtu << "</Piece>\n</UnstructuredGrid>\n</VTKFile>\n";
+   // Emit raw appended data block.  The leading `_` marker (after the
+   // newline) is required by the VTU spec; everything after it is
+   // binary until the closing tag.
+   vtu << "<AppendedData encoding=\"raw\">\n_";
+   for (const auto &b : blocks)
+   {
+      const uint64_t len = b.bytes.size();
+      vtu.write(reinterpret_cast<const char *>(&len), sizeof(len));
+      if (len > 0)
+      {
+         vtu.write(reinterpret_cast<const char *>(b.bytes.data()),
+                   static_cast<std::streamsize>(len));
+      }
+   }
+   vtu << "\n</AppendedData>\n</VTKFile>\n";
 }
 
 // =============================================================================
@@ -484,20 +550,24 @@ GatherFaultPackToRoot(const LocalFaultPack &local,
 }
 
 // =============================================================================
-// VTU CellData reader (used by tests; supports both ASCII and base64
-// inline-binary formats, the two formats this writer can emit).
+// VTU CellData reader (used by tests; supports ASCII, base64
+// inline-binary, AND raw appended formats — the three formats this
+// writer can emit / has historically emitted).
 // =============================================================================
 
 /// Read the named CellData scalar array from a VTU produced by
-/// `WriteFaultPackVTU`.  Supports `format="ascii"` (whitespace-separated
-/// doubles) and `format="binary"` (base64-encoded doubles, optionally
-/// zlib-compressed if the writer was compiled with MFEM_USE_ZLIB).
+/// `WriteFaultPackVTU`.  Supports:
+///   - `format="ascii"`     (whitespace-separated doubles)
+///   - `format="binary"`    (legacy: base64-encoded uint32-prefixed block)
+///   - `format="appended"`  (current default per R-302: raw bytes in
+///                           `<AppendedData encoding="raw">_<uint64
+///                           length><bytes>...`)
 /// Returns an empty vector if the field is not present.
 inline std::vector<double>
 ParseFaultVTUCellData(const std::string &path, const std::string &field)
 {
    std::vector<double> out;
-   std::ifstream in(path);
+   std::ifstream in(path, std::ios::binary);
    if (!in.is_open()) { return out; }
    std::stringstream ss;
    ss << in.rdbuf();
@@ -515,25 +585,102 @@ ParseFaultVTUCellData(const std::string &path, const std::string &field)
    const auto name_pos = cd.find(marker);
    if (name_pos == std::string::npos) { return out; }
    const auto tag_close = cd.find('>', name_pos);
-   const auto arr_close = cd.find("</DataArray>", name_pos);
-   if (tag_close == std::string::npos || arr_close == std::string::npos
-       || arr_close <= tag_close) { return out; }
+   if (tag_close == std::string::npos) { return out; }
 
-   // Extract format=
+   // Extract format= — read it BEFORE the self-close vs body check so
+   // we can dispatch on layout (raw appended uses self-closing tags
+   // and does NOT have a </DataArray> closer; ASCII / inline-binary
+   // are body-bearing tags that DO).
    const auto fmt_pos = cd.find("format=\"", name_pos);
-   bool is_binary = false;
+   std::string fmt_val = "ascii";
    if (fmt_pos != std::string::npos && fmt_pos < tag_close)
    {
       const auto fmt_qopen = fmt_pos + std::strlen("format=\"");
       const auto fmt_qclose = cd.find('"', fmt_qopen);
-      const std::string fmt_val = cd.substr(fmt_qopen,
-                                            fmt_qclose - fmt_qopen);
-      is_binary = (fmt_val == "binary");
+      fmt_val = cd.substr(fmt_qopen, fmt_qclose - fmt_qopen);
    }
 
+   if (fmt_val == "appended")
+   {
+      // R-302: raw appended layout.  Read the offset attribute on the
+      // DataArray, then locate the `_` marker after
+      // <AppendedData encoding="raw">, then read
+      //   uint64 byte_length followed by byte_length bytes of doubles
+      // at that offset.  header_type defaults to UInt64 for files this
+      // writer emits (see the writer); for forward-compat we honour the
+      // VTKFile root's `header_type` attribute too.
+      const auto off_pos = cd.find("offset=\"", name_pos);
+      if (off_pos == std::string::npos || off_pos > tag_close)
+      { return out; }
+      const auto off_qopen  = off_pos + std::strlen("offset=\"");
+      const auto off_qclose = cd.find('"', off_qopen);
+      const uint64_t da_offset =
+         std::stoull(cd.substr(off_qopen, off_qclose - off_qopen));
+
+      // Header type (uint32 vs uint64) per the VTKFile attribute.
+      bool header_is_uint64 = true;
+      const auto vfk = content.find("<VTKFile");
+      if (vfk != std::string::npos)
+      {
+         const auto vfk_close = content.find('>', vfk);
+         const auto ht = content.find("header_type=\"", vfk);
+         if (ht != std::string::npos && ht < vfk_close)
+         {
+            const auto ht_qopen = ht + std::strlen("header_type=\"");
+            const auto ht_qclose = content.find('"', ht_qopen);
+            const std::string ht_val =
+               content.substr(ht_qopen, ht_qclose - ht_qopen);
+            header_is_uint64 = (ht_val == "UInt64");
+         }
+      }
+
+      // Find the leading `_` marker in <AppendedData encoding="raw">.
+      const auto ad_open = content.find("<AppendedData");
+      if (ad_open == std::string::npos) { return out; }
+      const auto ad_tag_close = content.find('>', ad_open);
+      if (ad_tag_close == std::string::npos) { return out; }
+      const auto under = content.find('_', ad_tag_close);
+      if (under == std::string::npos) { return out; }
+      const std::size_t blob_start = under + 1;
+
+      // Read header @ blob_start + da_offset.
+      const std::size_t header_pos = blob_start + da_offset;
+      const std::size_t header_size = header_is_uint64
+                                      ? sizeof(uint64_t) : sizeof(uint32_t);
+      if (header_pos + header_size > content.size()) { return out; }
+      uint64_t byte_length = 0;
+      if (header_is_uint64)
+      {
+         std::memcpy(&byte_length, content.data() + header_pos,
+                     sizeof(uint64_t));
+      }
+      else
+      {
+         uint32_t hdr32 = 0;
+         std::memcpy(&hdr32, content.data() + header_pos, sizeof(uint32_t));
+         byte_length = hdr32;
+      }
+      const std::size_t data_pos = header_pos + header_size;
+      if (data_pos + byte_length > content.size()) { return out; }
+      const std::size_t n = byte_length / sizeof(double);
+      out.resize(n);
+      if (n > 0)
+      {
+         std::memcpy(out.data(), content.data() + data_pos,
+                     n * sizeof(double));
+      }
+      return out;
+   }
+
+   // For body-bearing formats (ascii, binary), locate the </DataArray>
+   // closer.  Raw appended uses self-closing tags so this lookup is
+   // unused on that path (handled above).
+   const auto arr_close = cd.find("</DataArray>", name_pos);
+   if (arr_close == std::string::npos || arr_close <= tag_close)
+   { return out; }
    const std::string body = cd.substr(tag_close + 1,
                                       arr_close - tag_close - 1);
-   if (!is_binary)
+   if (fmt_val == "ascii")
    {
       std::istringstream body_ss(body);
       double v;
@@ -541,15 +688,11 @@ ParseFaultVTUCellData(const std::string &path, const std::string &field)
       return out;
    }
 
-   // Binary path: strip whitespace, base64-decode, then interpret the
-   // length-prefixed binary block emitted by `WriteBase64WithSize
-   // AndClear`.  Layout (uncompressed):
-   //   [uint32 byte_length] [byte_length bytes of raw doubles]
-   // Layout (zlib-compressed): handled by recognising the leading 12
-   // bytes as a 3-uint32 header (num_blocks, block_size, last_block_size)
-   // followed by per-block compressed sizes; this file does not link
-   // zlib so we cannot decompress.  Tests using compressed mode must
-   // set compression_level=0 on the writer (which is the default).
+   // fmt_val == "binary": legacy inline-base64 path retained for
+   // backward compat with files emitted before R-302.  Layout
+   // (uncompressed): `[uint32 byte_length] [byte_length bytes of
+   // raw doubles]`, base64-encoded.  Compressed mode is not supported
+   // by this tests-only reader.
    std::string b64;
    b64.reserve(body.size());
    for (char c : body)

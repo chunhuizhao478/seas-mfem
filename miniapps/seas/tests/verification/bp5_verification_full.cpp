@@ -730,6 +730,26 @@ int main(int argc, char *argv[])
    real_t pv_v_nu     = -1.0;         // nucleation V threshold override (m/s)
    real_t pv_hyst     = -1.0;         // hysteresis factor override (must be >= 1)
    bool   pv_fault_only = false;      // if true, skip volume PVD Save()
+   // Phase 4 (volume PV decouple) — `--paraview-fault-only` is the
+   // BP5 driver's pre-existing equivalent of `--no-volume-pv`; the
+   // tpv-style names are accepted as aliases for cross-driver parity.
+   real_t pv_volume_pv_dt = 0.0;      // --volume-pv-dt X (overrides off)
+   // Phase 2b — fault back-end selectors.
+   bool   pv_force_vtu          = false;
+   bool   pv_force_hdf5         = false;
+   bool   pv_legacy_ascii_vtu   = false;
+   // Phase 2d.3 — chunk filter selectors (HDF5 only).  -1 / 0 = unset.
+   real_t pv_fault_zfp_tol      = 0.0;
+   int    pv_fault_deflate_level = -1;
+   real_t pv_bulk_zfp_tol       = 0.0;
+   int    pv_bulk_deflate_level = -1;
+   // Phase 6.3 / 6.3a — volume back-end + primary-collection compression.
+   bool   pv_volume_force_vtu   = false;
+   bool   pv_volume_force_hdf5  = false;
+   real_t pv_volume_zfp_tol     = 0.0;
+   int    pv_volume_deflate_level = -1;
+   // Phase 3 — snapshot cap.
+   int    pv_max_snapshots      = 0;
    // Fault-surface VTU field filter.  Empty ⇒ emit all 12 standard
    // fields + the 5 _k4 fields when stage-4 buffers are present
    // (backward-compatible default).  Non-empty ⇒ only the named
@@ -887,6 +907,84 @@ int main(int argc, char *argv[])
       {
          use_paraview = true;
          pv_fault_only = true;
+      }
+      // Phase 4 — `--no-volume-pv` is the canonical (tpv-driver) name.
+      // `--no-domain-pv` is preserved as a deprecated alias.  Both map
+      // to the BP5 driver's `pv_fault_only`.
+      if (arg == "--no-volume-pv" || arg == "--no-domain-pv")
+      {
+         use_paraview = true;
+         pv_fault_only = true;
+      }
+      if (arg == "--volume-pv-dt" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_pv_dt = std::atof(argv[++i]);
+      }
+      // Phase 2b — fault back-end selector.
+      if (arg == "--paraview-fault-vtu")
+      {
+         use_paraview = true;
+         pv_force_vtu = true;
+      }
+      if (arg == "--paraview-fault-hdf5")
+      {
+         use_paraview = true;
+         pv_force_hdf5 = true;
+      }
+      if (arg == "--paraview-fault-legacy-ascii")
+      {
+         use_paraview = true;
+         pv_legacy_ascii_vtu = true;
+      }
+      // Phase 2d.3 — chunk filter selectors.
+      if (arg == "--paraview-fault-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_fault_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-fault-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_fault_deflate_level = std::atoi(argv[++i]);
+      }
+      if (arg == "--paraview-bulk-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_bulk_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-bulk-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_bulk_deflate_level = std::atoi(argv[++i]);
+      }
+      // Phase 6.3 — volume back-end selectors.
+      if (arg == "--paraview-volume-vtu")
+      {
+         use_paraview = true;
+         pv_volume_force_vtu = true;
+      }
+      if (arg == "--paraview-volume-hdf5")
+      {
+         use_paraview = true;
+         pv_volume_force_hdf5 = true;
+      }
+      // Phase 6.3a — volume PRIMARY-collection compression.
+      if (arg == "--paraview-volume-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-volume-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_deflate_level = std::atoi(argv[++i]);
+      }
+      // Phase 3 — snapshot cap.
+      if (arg == "--paraview-max-snapshots" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_max_snapshots = std::atoi(argv[++i]);
       }
       if (arg == "--paraview-fields" && i + 1 < argc)
       {
@@ -1541,8 +1639,67 @@ int main(int argc, char *argv[])
    Vector pv_local_normal_stress;
    if (use_paraview)
    {
+      // Phase 6.3 / 6.3a: validate volume CLI flags + select volume back end.
+      if (pv_volume_force_vtu && pv_volume_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                    "mutually exclusive.");
+      }
+#ifndef MFEM_USE_HDF5
+      if (pv_volume_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-volume-hdf5 requires the seas-mfem build to "
+                    "define MFEM_USE_HDF5=YES; current build has it disabled.");
+      }
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_HDF5=YES; "
+                    "current build has it disabled.");
+      }
+      if (pv_volume_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-volume-deflate-level requires MFEM_USE_HDF5=YES; "
+                    "current build has it disabled.");
+      }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_H5Z_ZFP=YES; "
+                    "current build has it disabled.");
+      }
+#endif
+      if (pv_volume_zfp_tol > 0.0 && pv_volume_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol and "
+                    "--paraview-volume-deflate-level are mutually exclusive — "
+                    "choose ZFP-accuracy OR deflate, not both.");
+      }
+      // Phase 6.4: BP5 has no secondary collection; --paraview-bulk-* is a
+      // no-op (R-310 migration note).  Warn so the user knows.
+      if (pv_bulk_zfp_tol > 0.0 || pv_bulk_deflate_level >= 0)
+      {
+         if (mpi.IsRoot())
+         {
+            mfem::out
+               << "warning: --paraview-bulk-zfp-tol / "
+                  "--paraview-bulk-deflate-level set on BP5 driver; "
+                  "BP5 has no secondary 'bulk' collection — the flags "
+                  "have no effect.  To compress the volume PV use "
+                  "--paraview-volume-zfp-tol / "
+                  "--paraview-volume-deflate-level instead.\n";
+         }
+      }
+
+      auto volume_mode =
+         seas::ParaViewOutput<ParMesh>::DefaultVolumeOutputMode();
+      if (pv_volume_force_vtu)
+      { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Vtu; }
+      if (pv_volume_force_hdf5)
+      { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5; }
       pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
-         output_dir + "/ParaView", pmesh, order);
+         output_dir + "/ParaView", pmesh, order,
+         /*collection_name=*/"volume", volume_mode);
       // Displacement: non-owning pointer to the live ParGridFunction in seas_op
       pv_out->RegisterDomainField("displacement",
          const_cast<ParGridFunction*>(
@@ -1622,8 +1779,125 @@ int main(int argc, char *argv[])
          if (pv_v_co     > 0) { sched.v_coseismic       = pv_v_co; }
          if (pv_v_nu     > 0) { sched.v_nucleation      = pv_v_nu; }
          if (pv_hyst     > 0) { sched.hysteresis_factor = pv_hyst; }
+         // Phase 3 — snapshot cap.
+         if (pv_max_snapshots > 0)
+         { sched.max_total_snapshots = pv_max_snapshots; }
          sched.Validate();
       }
+
+      // Phase 3 — total run time required for cap projection.  Set
+      // unconditionally so the cap engages as soon as the user opts in.
+      pv_out->SetTotalRunTime(t_final);
+
+      // Phase 4 — volume-PV decouple.  `--volume-pv-dt X` (when > 0)
+      // re-enables the volume save at an independent cadence even if
+      // `--paraview-fault-only` / `--no-volume-pv` is also set ("the
+      // explicit dt wins").  Otherwise `pv_fault_only` translates
+      // directly to `SetVolumeSaveEnabled(false)`.
+      const bool volume_save_enabled =
+         (pv_volume_pv_dt > 0.0) || !pv_fault_only;
+      pv_out->SetVolumeSaveEnabled(volume_save_enabled);
+      if (pv_volume_pv_dt > 0.0)
+      { pv_out->SetVolumePVDt(pv_volume_pv_dt); }
+
+      // Phase 2b — fault back-end selector.
+      if (pv_force_vtu && pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                    "mutually exclusive.");
+      }
+      if (pv_legacy_ascii_vtu && pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-legacy-ascii implies the binary "
+                    "VTU back end and is incompatible with "
+                    "--paraview-fault-hdf5.");
+      }
+#ifndef MFEM_USE_HDF5
+      if (pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-hdf5 requires the seas-mfem build "
+                    "to define MFEM_USE_HDF5=YES; current build has it "
+                    "disabled.");
+      }
+      if (pv_fault_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-fault-deflate-level requires the seas-mfem "
+                    "build to define MFEM_USE_HDF5=YES; current build has "
+                    "it disabled.");
+      }
+      if (pv_bulk_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-bulk-deflate-level requires the seas-mfem "
+                    "build to define MFEM_USE_HDF5=YES; current build has "
+                    "it disabled.");
+      }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+      if (pv_fault_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-fault-zfp-tol requires the seas-mfem "
+                    "build to define MFEM_USE_H5Z_ZFP=YES; current build "
+                    "has it disabled.");
+      }
+      if (pv_bulk_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-bulk-zfp-tol requires the seas-mfem "
+                    "build to define MFEM_USE_H5Z_ZFP=YES; current build "
+                    "has it disabled.");
+      }
+#endif
+      if (pv_fault_zfp_tol > 0.0 && pv_fault_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-fault-zfp-tol and "
+                    "--paraview-fault-deflate-level are mutually "
+                    "exclusive — choose ZFP-accuracy OR deflate, not both.");
+      }
+      if (pv_bulk_zfp_tol > 0.0 && pv_bulk_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-bulk-zfp-tol and "
+                    "--paraview-bulk-deflate-level are mutually "
+                    "exclusive — choose ZFP-accuracy OR deflate, not both.");
+      }
+      if (pv_force_vtu)
+      { pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Vtu); }
+      if (pv_force_hdf5)
+      { pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Hdf5); }
+      if (pv_legacy_ascii_vtu)
+      {
+         pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Vtu);
+         pv_out->SetLegacyAsciiVTU(true);
+      }
+#ifdef MFEM_USE_HDF5
+      // Phase 2d.3 — chunk filter (fault).
+      if (pv_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            pv_fault_zfp_tol);
+      }
+      else if (pv_fault_deflate_level >= 0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(pv_fault_deflate_level));
+      }
+      // Phase 6.3a (R-301): --paraview-volume-* controls primary `pv_out`
+      // compression.  BP5 has no secondary `pv_bulk_out` so
+      // --paraview-bulk-* flags do not route here — see the
+      // "no effect" warning above.
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            pv_volume_zfp_tol);
+      }
+      else if (pv_volume_deflate_level >= 0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(pv_volume_deflate_level));
+      }
+#endif
 
       if (mpi.IsRoot())
       {
@@ -1706,7 +1980,14 @@ int main(int argc, char *argv[])
       // surface VTU.  We skip pv_out->UpdateFaultFieldsBP5 (volume-PVD
       // GridFunction update) and pv_out->Save (volume PVD write) — neither
       // is needed when the volume mesh is not being output.
-      if (pv_fault_only)
+      //
+      // Phase 4: query the library's `GetVolumeSaveEnabled()` rather
+      // than the driver-local `pv_fault_only`, so `--volume-pv-dt X`
+      // (which re-enables the volume save with an independent cadence
+      // even when `--no-volume-pv` is also set) takes the volume-PVD
+      // path instead of being silently dropped.  Mirrors the
+      // tpv102/104/205 driver pattern.
+      if (!pv_out->GetVolumeSaveEnabled())
       {
          if (!pv_out->PeekShouldWrite(step_num, time, V_max)) { return; }
 

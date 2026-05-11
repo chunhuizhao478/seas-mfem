@@ -90,17 +90,27 @@ struct FaultHDFState
    // The data collection — owns the .vtkhdf file handle.
    std::unique_ptr<ParaViewHDFDataCollection>     dc;
 
+   // Phase 2d.3: chunk-filter selector applied to `dc` at Init time.
+   // Default Deflate-level-6 reproduces Phase 2b lossless behaviour;
+   // ZfpAccuracy switches to LLNL ZFP filter id 32013 (requires
+   // MFEM_USE_H5Z_ZFP at build time and HDF5_PLUGIN_PATH at run time).
+   ParaViewHDFDataCollection::HDFCompression compression_alg =
+       ParaViewHDFDataCollection::HDFCompression::Deflate;
+   double compression_param = 6.0;
+
    bool initialised = false;
 
    /// Construct the rank-0 mesh + L2-p0 fields from the first gathered
    /// pack.  Subsequent saves reuse this state.
    ///
-   /// @param prefix       Output directory prefix (the .vtkhdf will
-   ///                     live at <prefix>/fault_surface.vtkhdf).
-   /// @param compression  zlib compression level (0..9); 0 disables.
+   /// @param prefix  Output directory prefix (the .vtkhdf will live at
+   ///                <prefix>/fault_surface.vtkhdf).  The chunk filter
+   ///                (Deflate level OR ZFP tolerance) is read from
+   ///                `compression_alg` / `compression_param` on `*this`,
+   ///                which the seas wrapper sets via
+   ///                `SetFaultHDFCompression` BEFORE the first save.
    void Init(const std::string &prefix,
-             const vtu::GatheredFaultPack &g,
-             int compression_level)
+             const vtu::GatheredFaultPack &g)
    {
       // R-005 (REVIEW.md 2026-04-28): defensive checks at Init entry.
       // GatheredFaultPack invariants are normally enforced inside the
@@ -147,6 +157,15 @@ struct FaultHDFState
       // ParaView consumer that requests vtkPolyDataNormals or surface
       // lighting gets consistent normals.  Costs nothing for cell-data
       // bit-exactness (the data layout is unchanged).
+      //
+      // R-111: fix_orientation MAY swap the order of vertices within a
+      // triangle to enforce a positive Jacobian.  This is invariant for
+      // SCALAR cell-data (one value per triangle, the only data this
+      // writer emits).  If you ever add per-vertex or per-edge data, OR
+      // vector cell-data with an implicit per-vertex direction, this
+      // call must be revisited because the gathered (3*c, 3*c+1, 3*c+2)
+      // ordering will no longer match the rendered triangle's vertex
+      // ordering.
       mesh->FinalizeTriMesh(/*generate_edges=*/0, /*refine=*/0,
                             /*fix_orientation=*/true);
 
@@ -171,13 +190,15 @@ struct FaultHDFState
                                                         mesh.get());
       dc->SetPrefixPath(prefix);
       dc->SetDataFormat(VTKFormat::BINARY);
-      // R-001 (REVIEW.md 2026-04-28): plan §Phase 2 §4 mandates HDF5
-      // compression always ON.  HDF5's internal compression is
-      // independent of MFEM_USE_ZLIB (per fem/datacollection.hpp:673).
-      // A `compression_level` of 0 or negative falls back to the plan-
-      // mandated level 3 ("fast"); a positive value is honoured.
-      dc->SetCompression(true);
-      dc->SetCompressionLevel(compression_level > 0 ? compression_level : 3);
+      // R-107: route the user-selected chunk filter through ONE call.
+      // SetHDFCompression(Deflate, level) syncs `compression` and
+      // `compression_level` internally (R-102 fix), so a separate
+      // SetCompression / SetCompressionLevel pair is no longer needed
+      // and would just be over-written.  ZfpAccuracy mode applies ZFP
+      // to FP datasets and uses `compression_level` (kept >= 0 by the
+      // R-102 sync for Deflate, or by the EnableCompression fallback
+      // for ZfpAccuracy) for integer-dataset deflate.
+      dc->SetHDFCompression(compression_alg, compression_param);
       dc->SetHighOrderOutput(false);
       for (std::size_t k = 0; k < gfs.size(); ++k)
       {
@@ -194,23 +215,28 @@ struct FaultHDFState
 /// state on first use and writes the timestep.  Non-root ranks return
 /// after the gather.
 ///
-/// @param state       Persistent rank-0 state (constructed in-place on
-///                    first call).  Must outlive the program / data
-///                    collection lifetime.
-/// @param prefix      Output directory.  The .vtkhdf is written to
-///                    `<prefix>/fault_surface.vtkhdf`.
-/// @param cycle       Time step index (passed to dc.SetCycle).
-/// @param time        Simulation time (passed to dc.SetTime).
-/// @param compression zlib compression level (0..9); ignored after
-///                    first call (locked in at Init time).
-/// @param local       This rank's `LocalFaultPack`; gathered to rank 0.
-/// @param rank        MPI rank.
-/// @param nranks      Total ranks.
-/// @param comm        Communicator (MPI_COMM_NULL on serial builds).
+/// The chunk filter (Deflate level OR ZFP tolerance) is read from
+/// `state.compression_alg` / `state.compression_param`, which the seas
+/// wrapper configures via `SetFaultHDFCompression` BEFORE the first
+/// save.  R-107: there is no per-call filter argument because the
+/// underlying ParaViewHDFDataCollection is built lazily on first use
+/// and locks in its filter at construction; a per-call argument would
+/// silently no-op after the first call.
+///
+/// @param state   Persistent rank-0 state (constructed in-place on
+///                first call).  Must outlive the program / data
+///                collection lifetime.
+/// @param prefix  Output directory.  The .vtkhdf is written to
+///                `<prefix>/fault_surface.vtkhdf`.
+/// @param cycle   Time step index (passed to dc.SetCycle).
+/// @param time    Simulation time (passed to dc.SetTime).
+/// @param local   This rank's `LocalFaultPack`; gathered to rank 0.
+/// @param rank    MPI rank.
+/// @param nranks  Total ranks.
+/// @param comm    Communicator (MPI_COMM_NULL on serial builds).
 inline void WriteFaultPackHdf(FaultHDFState &state,
                               const std::string &prefix,
                               int cycle, real_t time,
-                              int compression_level,
                               const vtu::LocalFaultPack &local,
                               int rank, int nranks
 #ifdef MFEM_USE_MPI
@@ -232,7 +258,7 @@ inline void WriteFaultPackHdf(FaultHDFState &state,
    // 3. First call on rank 0: construct mesh + GFs + dc.
    if (!state.initialised)
    {
-      state.Init(prefix, g, compression_level);
+      state.Init(prefix, g);
    }
    else
    {

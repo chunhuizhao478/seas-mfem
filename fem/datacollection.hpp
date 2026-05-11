@@ -674,11 +674,39 @@ public:
    /// compression does not require MFEM to be compiled with zlib support.
    void SetCompression(bool compression_) override;
 
+   /// @brief Selector for the underlying VTKHDF chunk filter.
+   ///
+   /// `Deflate` (the default) maps to lossless zlib compression at the
+   /// level set via SetCompressionLevel.  `ZfpAccuracy` switches to LLNL
+   /// ZFP (filter id 32013) in absolute-error accuracy mode at the
+   /// tolerance @a param; integer connectivity / offsets / types stay
+   /// lossless via deflate.  Requires `MFEM_USE_H5Z_ZFP=YES` and the
+   /// H5Z-ZFP plugin to be discoverable via `HDF5_PLUGIN_PATH` at run time.
+   enum class HDFCompression { Deflate, ZfpAccuracy };
+
+   /// @brief Choose the chunk filter for this collection.
+   ///
+   /// @a param is the deflate level (0..9; -1 disables) when
+   /// @a alg == Deflate, or the ZFP accuracy tolerance (must be > 0)
+   /// when @a alg == ZfpAccuracy.  Stored on the collection and applied
+   /// to the underlying VTKHDF on the next Save.
+   void SetHDFCompression(HDFCompression alg, double param);
+
+   /// @brief Current chunk-filter algorithm for this collection.
+   HDFCompression GetHDFCompression() const { return hdf_alg_; }
+
+   /// @brief Current filter parameter (deflate level OR ZFP tolerance).
+   double GetHDFCompressionParam() const { return hdf_param_; }
+
    /// Save the collection.
    void Save() override;
 
    /// Destructor.
    ~ParaViewHDFDataCollection();
+
+private:
+   HDFCompression hdf_alg_   = HDFCompression::Deflate;
+   double         hdf_param_ = 6.0;   // deflate level default
 };
 
 #endif

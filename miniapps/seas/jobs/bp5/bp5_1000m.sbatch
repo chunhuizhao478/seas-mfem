@@ -14,6 +14,21 @@ export LANG=C
 module load hypre/2.31.0
 module load mumps/5.3
 module load parmetis
+# R-309 / plan §Phase 2b "Files to Modify": parallel HDF5 module is
+# required by VTKHDF fault output (the production default on
+# MFEM_USE_HDF5=YES builds).  Module name on Frontera follows the
+# `phdf5/<version>` convention; some clusters prefer `hdf5/1.14.x`.
+# Tolerate both via `||`.
+module load phdf5 2>/dev/null || module load hdf5/1.14.4 2>/dev/null || true
+
+# R-309 / plan §Phase 2d.3: opt-in ZFP lossy compression flags.
+# Defaults (CLAUDE.md "ZFP lossy output"):
+#   bulk:  1e-3 (m/s, velocity)
+#   fault: 1e-12 (slip-rate floor)
+# Uncomment AFTER H5Z-ZFP is verified on this cluster (Phase 2d.4 gate).
+# export HDF5_PLUGIN_PATH=$WORK/h5z-zfp/lib/plugin
+# PARAVIEW_BULK_ZFP="--paraview-bulk-zfp-tol 1e-3"
+# PARAVIEW_FAULT_ZFP="--paraview-fault-zfp-tol 1e-12"
 module list
 
 # Ensure hypre/2.31.0 is found before PETSc's old bundled libHYPRE.so

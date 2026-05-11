@@ -1,20 +1,47 @@
 #!/bin/bash
 # Build MFEM + SEAS miniapp on Frontera (TACC), with PETSc enabled for
-# `seas_bp5_full --petsc-ts`.
+# `seas_bp5_full --petsc-ts` and HDF5 + H5Z-ZFP enabled for the Phase 6
+# ParaView output (VTKHDF + lossy floating-point compression).
 #
 # Usage:
 #   bash build_frontera.sh
+#   QUICK=1 bash build_frontera.sh          # skip h5z-zfp / zfp rebuild
 #
 # Optional environment overrides:
-#   PETSC_MODULE=petsc/3.23   # Frontera PETSc module to load
-#   USE_MUMPS=0               # Disable MFEM's direct MUMPS integration
-#   JOBS=8                    # Parallel build jobs
+#   PETSC_MODULE=petsc/3.23     # Frontera PETSc module to load
+#   PHDF5_MODULE=phdf5/1.14.4   # Frontera parallel-HDF5 module to load
+#                                 (1.14.4 is the recommended default; the
+#                                 1.10.x line is EOL upstream.  File format
+#                                 is fully compatible with 1.10.x.)
+#   USE_MUMPS=0                 # Disable MFEM's direct MUMPS integration
+#   USE_HDF5=NO                 # Disable HDF5 + H5Z-ZFP integration
+#   QUICK=1                     # Skip the zfp / h5z-zfp clone + rebuild
+#                               # step (reuse an existing install if
+#                               # libh5zzfp.so is already present).
+#   ZFP_VERSION=1.0.1           # ZFP base library tag to check out
+#   H5Z_ZFP_VERSION=v1.1.1      # H5Z-ZFP plugin tag to check out
+#   ZFP_PREFIX=...              # Override the ZFP install prefix
+#                               # (default: $SCRIPT_DIR/extern/zfp/install)
+#   H5Z_ZFP_PREFIX=...          # Override the H5Z-ZFP install prefix
+#                               # (default: $SCRIPT_DIR/extern/h5z-zfp/install).
+#                               # NOTE: the Phase 6 sbatch defaults look
+#                               # for the plugin at $WORK/h5z-zfp/install/
+#                               # plugin — if you change this prefix you
+#                               # also need to update HDF5_PLUGIN_PATH in
+#                               # miniapps/seas/jobs/{bp5,tpv*}/*phase6*.sbatch
+#                               # (or set HDF5_PLUGIN_PATH at runtime).
+#   JOBS=8                      # Parallel build jobs
 
 set -euo pipefail
 
 PETSC_MODULE="${PETSC_MODULE:-petsc/3.15}"
+PHDF5_MODULE="${PHDF5_MODULE:-phdf5/1.14.4}"
 USE_MUMPS="${USE_MUMPS:-YES}"
+USE_HDF5="${USE_HDF5:-YES}"
+QUICK="${QUICK:-0}"
 JOBS="${JOBS:-8}"
+ZFP_VERSION="${ZFP_VERSION:-1.0.1}"
+H5Z_ZFP_VERSION="${H5Z_ZFP_VERSION:-v1.1.1}"
 
 # Intel classic compiler wrappers on Frontera can abort during config probes when
 # the login shell carries an empty or invalid locale. Match the working batch
@@ -35,6 +62,12 @@ module load mumps/5.3 2>/dev/null || true
 module load parmetis 2>/dev/null || true
 module load "${PETSC_MODULE}" 2>/dev/null || true
 module load fftw3/3.3.8 2>/dev/null || true   # PETSc links against libfftw3_mpi
+# Phase 6 ParaView output uses VTKHDF + H5Z-ZFP.  Parallel-HDF5 is
+# required so MFEM_PARALLEL_HDF5 is defined (see mesh/vtkhdf.hpp:25);
+# the serial `hdf5/*` modules on Frontera do NOT define H5_HAVE_PARALLEL.
+if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
+    module load "${PHDF5_MODULE}" 2>/dev/null || true
+fi
 
 resolve_petsc_dir() {
     local candidates=(
@@ -82,12 +115,17 @@ PETSC_OPT_RESOLVED=""
 
 # Verify modules
 echo "=== Checking environment ==="
-for var in \
-    TACC_HYPRE_INC TACC_HYPRE_LIB \
-    TACC_MUMPS_INC TACC_MUMPS_LIB \
-    TACC_PARMETIS_INC TACC_PARMETIS_LIB \
-    TACC_FFTW3_LIB \
-    MKLROOT TACC_MKL_LIB; do
+REQUIRED_VARS=(
+    TACC_HYPRE_INC TACC_HYPRE_LIB
+    TACC_MUMPS_INC TACC_MUMPS_LIB
+    TACC_PARMETIS_INC TACC_PARMETIS_LIB
+    TACC_FFTW3_LIB
+    MKLROOT TACC_MKL_LIB
+)
+if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
+    REQUIRED_VARS+=(TACC_HDF5_INC TACC_HDF5_LIB)
+fi
+for var in "${REQUIRED_VARS[@]}"; do
     val="$(eval echo \$$var)"
     if [ -z "${val}" ]; then
         echo "ERROR: ${var} is not set. Check module loads."
@@ -143,6 +181,119 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
+# Install prefixes for the zfp / h5z-zfp builds.  Default to a tree
+# inside the MFEM checkout so the build is self-contained.  Override
+# via env vars if you want them installed elsewhere (e.g. $WORK to
+# match the path the Phase 6 sbatch use).
+ZFP_PREFIX="${ZFP_PREFIX:-${SCRIPT_DIR}/extern/zfp/install}"
+H5Z_ZFP_PREFIX="${H5Z_ZFP_PREFIX:-${SCRIPT_DIR}/extern/h5z-zfp/install}"
+
+# Locate the parallel-HDF5 root from TACC_HDF5_LIB.  MFEM's make-based
+# HDF5 wiring expects HDF5_OPT / HDF5_LIB rather than HDF5_DIR.
+if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
+    USE_HDF5_RESOLVED="YES"
+    HDF5_DIR_RESOLVED="$(cd "${TACC_HDF5_LIB}/.." 2>/dev/null && pwd || true)"
+    if [ -z "${HDF5_DIR_RESOLVED}" ] || [ ! -f "${TACC_HDF5_INC}/hdf5.h" ]; then
+        echo "ERROR: could not locate hdf5.h under TACC_HDF5_INC=${TACC_HDF5_INC:-<unset>}."
+        echo "Check that ${PHDF5_MODULE} is loaded (or override USE_HDF5=NO to skip)."
+        exit 1
+    fi
+    echo "  HDF5_DIR     = ${HDF5_DIR_RESOLVED}"
+    # Detect parallel-HDF5 support so the user sees the same flag MFEM
+    # is going to check (`H5_HAVE_PARALLEL` in `<hdf5.h>` ⇒
+    # `MFEM_PARALLEL_HDF5`, see mesh/vtkhdf.hpp:25).  Required for
+    # `ParaViewOutput<ParMesh>::DefaultVolumeOutputMode() == Hdf5`.
+    if grep -q '^#define *H5_HAVE_PARALLEL' "${TACC_HDF5_INC}/H5pubconf.h" 2>/dev/null; then
+        echo "  HDF5         = parallel (H5_HAVE_PARALLEL defined)"
+    else
+        echo "  WARNING: HDF5 build does NOT define H5_HAVE_PARALLEL — Phase 6"
+        echo "           ParMesh runs will fail at the static_assert in"
+        echo "           paraview_output.hpp:126.  Load a parallel-HDF5 module."
+    fi
+else
+    USE_HDF5_RESOLVED="NO"
+fi
+
+# Build the H5Z-ZFP plugin (+ its dependency, ZFP) for Phase 6 lossy
+# floating-point compression in VTKHDF output.  The plugin lands at
+# ${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.so and is discovered at runtime
+# via HDF5_PLUGIN_PATH (the Phase 6 sbatch do this conditionally).
+build_zfp_and_h5z_zfp() {
+    if [ "${USE_HDF5_RESOLVED}" != "YES" ]; then
+        echo ""
+        echo "=== Skipping zfp / h5z-zfp build (USE_HDF5=${USE_HDF5}) ==="
+        return 0
+    fi
+
+    local plugin_so="${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.so"
+    local plugin_dylib="${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.dylib"
+    if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
+        if [ -f "${plugin_so}" ] || [ -f "${plugin_dylib}" ]; then
+            echo ""
+            echo "=== QUICK=1: reusing existing H5Z-ZFP plugin at ${H5Z_ZFP_PREFIX}/plugin ==="
+            return 0
+        fi
+        echo ""
+        echo "=== QUICK=1 set but ${plugin_so} is missing — building anyway ==="
+    fi
+
+    echo ""
+    echo "=== Building ZFP ${ZFP_VERSION} ==="
+    mkdir -p "${SCRIPT_DIR}/extern"
+    if [ ! -d "${SCRIPT_DIR}/extern/zfp/.git" ]; then
+        git clone --quiet --depth 1 --branch "${ZFP_VERSION}" \
+            https://github.com/LLNL/zfp.git "${SCRIPT_DIR}/extern/zfp"
+    fi
+    (
+        cd "${SCRIPT_DIR}/extern/zfp"
+        # Fetch the tag if the shallow clone landed on a different ref
+        # (e.g. when the directory was pre-populated).
+        git fetch --tags --quiet || true
+        git checkout --quiet "${ZFP_VERSION}" 2>/dev/null \
+            || git checkout --quiet "tags/${ZFP_VERSION}" 2>/dev/null || true
+        mkdir -p build
+        cd build
+        cmake .. \
+            -DCMAKE_INSTALL_PREFIX="${ZFP_PREFIX}" \
+            -DCMAKE_C_COMPILER="$(which mpicc)" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DBUILD_TESTING=OFF \
+            -DBUILD_EXAMPLES=OFF \
+            -DZFP_WITH_OPENMP=OFF
+        cmake --build . --target install -j "${JOBS}"
+    )
+
+    echo ""
+    echo "=== Building H5Z-ZFP ${H5Z_ZFP_VERSION} ==="
+    if [ ! -d "${SCRIPT_DIR}/extern/H5Z-ZFP/.git" ]; then
+        git clone --quiet --depth 1 --branch "${H5Z_ZFP_VERSION}" \
+            https://github.com/LLNL/H5Z-ZFP.git "${SCRIPT_DIR}/extern/H5Z-ZFP"
+    fi
+    (
+        cd "${SCRIPT_DIR}/extern/H5Z-ZFP"
+        git fetch --tags --quiet || true
+        git checkout --quiet "${H5Z_ZFP_VERSION}" 2>/dev/null \
+            || git checkout --quiet "tags/${H5Z_ZFP_VERSION}" 2>/dev/null || true
+        # The H5Z-ZFP Makefile reads HDF5_HOME / ZFP_HOME and writes
+        # the plugin to ${PREFIX}/plugin.  Use the Makefile build path
+        # (not the cmake one) because it is the canonical install
+        # layout the runtime probe in paraview_output.hpp expects.
+        make CC="$(which mpicc)" \
+             HDF5_HOME="${HDF5_DIR_RESOLVED}" \
+             ZFP_HOME="${ZFP_PREFIX}" \
+             PREFIX="${H5Z_ZFP_PREFIX}" \
+             install -j "${JOBS}"
+    )
+
+    if [ ! -f "${plugin_so}" ] && [ ! -f "${plugin_dylib}" ]; then
+        echo "ERROR: H5Z-ZFP build finished but ${plugin_so} is missing."
+        exit 1
+    fi
+    echo "  H5Z-ZFP plugin installed at ${H5Z_ZFP_PREFIX}/plugin"
+}
+
+build_zfp_and_h5z_zfp
+
 # Initialize toml11 submodule (header-only, v3.8.1 for GCC 8.3 compat)
 echo ""
 echo "=== Initializing toml11 submodule ==="
@@ -184,6 +335,19 @@ if [ "${USE_MUMPS_RESOLVED}" = "YES" ]; then
     )
 fi
 
+# Phase 6: VTKHDF + H5Z-ZFP.  MFEM_USE_H5Z_ZFP is a pure preprocessor
+# flag (no link line — the plugin is loaded at runtime via
+# HDF5_PLUGIN_PATH); the only link flags are HDF5_OPT / HDF5_LIB
+# (the parallel-HDF5 module's libhdf5{_hl}).
+if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
+    CONFIG_ARGS+=(
+      MFEM_USE_HDF5=YES
+      MFEM_USE_H5Z_ZFP=YES
+      HDF5_OPT="-I${TACC_HDF5_INC}"
+      HDF5_LIB="-L${TACC_HDF5_LIB} -Wl,-rpath,${TACC_HDF5_LIB} -lhdf5_hl -lhdf5 -lz"
+    )
+fi
+
 make config "${CONFIG_ARGS[@]}"
 
 echo ""
@@ -214,6 +378,29 @@ echo "  $(pwd)/seas_test_parallel_elasticity"
 echo "  $(pwd)/seas_test_bp5_parallel_smoke"
 if [ "${DRIVER_BUILT}" = "1" ]; then
     echo "  $(pwd)/seas_driver          (TOML-based, new code paths)"
+fi
+if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
+    echo ""
+    echo "H5Z-ZFP plugin:"
+    echo "  ${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.so"
+    echo "  (set HDF5_PLUGIN_PATH=${H5Z_ZFP_PREFIX}/plugin at runtime)"
+    # The Phase 6 sbatch currently look for the plugin under
+    # $WORK/h5z-zfp/install/plugin (see jobs/{bp5,tpv*}/*phase6*.sbatch).
+    # Flag the mismatch so the user updates either the sbatch or
+    # symlinks the new install into place.
+    SBATCH_DEFAULT_PATH="${WORK:-\$WORK}/h5z-zfp/install/plugin"
+    if [ "${H5Z_ZFP_PREFIX}/plugin" != "${SBATCH_DEFAULT_PATH}" ]; then
+        echo ""
+        echo "NOTE: the Phase 6 sbatch in miniapps/seas/jobs/{bp5,tpv*}/"
+        echo "      *phase6_paraview_zfp* default to HDF5_PLUGIN_PATH ="
+        echo "      ${SBATCH_DEFAULT_PATH}"
+        echo "      To keep the sbatch unchanged, either:"
+        echo "        (a) re-run this script with H5Z_ZFP_PREFIX="
+        echo "            \$WORK/h5z-zfp/install, or"
+        echo "        (b) symlink the install:"
+        echo "              mkdir -p \$WORK/h5z-zfp"
+        echo "              ln -s ${H5Z_ZFP_PREFIX} \$WORK/h5z-zfp/install"
+    fi
 fi
 echo ""
 echo "Run examples:"

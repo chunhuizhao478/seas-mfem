@@ -171,10 +171,12 @@ struct Fixture
    Vector local_normal, local_a, local_Dc, local_x2, local_x3;
    Vector local_slip_rate_k4, local_traction_k4, local_normal_k4;
 
+   // R-006: prepend /tmp/ so test artefacts do not pollute the working
+   // tree.  Caller passes a bare scenario name; the fixture absolutises it.
    Fixture(const std::string &p)
       : mesh(MakeTinyTetMesh()),
         nbf(3),
-        prefix(p)
+        prefix("/tmp/" + p)
    {
       fault_faces = CollectInteriorFaces(mesh, 4);
       n_int = fault_faces.Size();
@@ -183,6 +185,11 @@ struct Fixture
       ::mkdir(prefix.c_str(), 0755);
       pv = std::make_unique<ParaViewOutput<Mesh>>(prefix, mesh, 1);
       pv->InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+      // The fixture below parses both VTU and PVTU with regex.  Phase 1's
+      // single binary VTU writer drops the per-rank PVTU entirely, so opt
+      // into the legacy ASCII back end to keep the existing assertions
+      // intact (the filter contract itself is identical between writers).
+      pv->SetLegacyAsciiVTU(true);
 
       local_slip     .SetSize(2 * total_dofs);  local_slip      = 0.1;
       local_slip_rate.SetSize(2 * total_dofs);  local_slip_rate = 0.2;

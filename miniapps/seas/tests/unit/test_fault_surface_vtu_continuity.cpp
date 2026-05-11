@@ -188,10 +188,14 @@ static void TestLinearFieldFaceCentroid()
    const int total_dofs = n_total * nbf;
 
    // Build the ParaViewOutput and initialize fault output path.
-   const std::string prefix = "test_r001_continuity";
+   const std::string prefix = "/tmp/test_r001_continuity";
    ::mkdir(prefix.c_str(), 0755);
    ParaViewOutput<Mesh> pv(prefix, mesh, /*order=*/1);
    pv.InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+   // This test parses the per-rank ASCII VTU layout (`fault_surface_r0_c0.vtu`)
+   // with regex.  Phase 1's binary single-VTU writer emits a different
+   // file layout, so opt into the legacy ASCII back end here.
+   pv.SetLegacyAsciiVTU(true);
 
    // Integration rule matches wave_operator / SetFaultDOFData for order=1.
    const IntegrationRule &ir = IntRules.Get(Geometry::TRIANGLE, 2 /*= 2*order*/);
@@ -331,10 +335,12 @@ static void TestNbf6AverageAllQPs()
    const int n_int = fault_faces.Size();
    const int total_dofs = n_int * nbf;
 
-   const std::string prefix = "test_r001_nbf6";
+   const std::string prefix = "/tmp/test_r001_nbf6";
    ::mkdir(prefix.c_str(), 0755);
    ParaViewOutput<Mesh> pv(prefix, mesh, /*order=*/1);
    pv.InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+   // Same rationale as the order=1 path above — parser is ASCII-regex.
+   pv.SetLegacyAsciiVTU(true);
 
    Vector local_slip      (2 * total_dofs);  local_slip      = 0.0;
    Vector local_slip_rate (2 * total_dofs);  local_slip_rate = 0.0;

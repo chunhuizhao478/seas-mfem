@@ -35,6 +35,12 @@ seas_tpv104_driver
 seas_tpv205_driver
 seas_test_*
 
+# Standalone H5Z-ZFP smoke-test compile artefacts (Mach-O executable
+# + object).  Rebuild from test_h5z_zfp_smoke.c via the standalone
+# directory's local Makefile.
+tests/unit/standalone/test_h5z_zfp_smoke
+tests/unit/standalone/*.o
+
 # Checkpoint files
 bp2_full_checkpoint_*.txt
 bp1_full_checkpoint_*.txt

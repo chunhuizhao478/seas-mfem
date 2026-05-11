@@ -1877,10 +1877,46 @@ answers.
 
 ## Baseline measurements (filled in during Phase 0)
 
-| Run                  | nranks | n_files     | n_cycles | mean_vtu_bytes | total_dir_bytes | wall-time per Save |
-|----------------------|--------|-------------|----------|----------------|-----------------|--------------------|
-| job 7672120          | TBD    | 3,894,914   | TBD      | TBD            | TBD             | TBD                |
-| (small reference)    | 4      | TBD         | 100      | TBD            | TBD             | TBD                |
+The legacy ASCII writer emits per cycle: `nranks` per-rank `fault_surface_r{r}_c{c}.vtu` files + 1 per-cycle `fault_surface_c{c}.pvtu` index, plus 1 monotonically rewritten `fault_surface.pvd`.  So the steady-state file count obeys:
+
+```
+n_files = n_cycles * (nranks + 1) + 1
+```
+
+### job 7672120 (Frontera production BP5, FaultSurface dir)
+
+| Metric                | Value                                                                                                                       |
+|-----------------------|-----------------------------------------------------------------------------------------------------------------------------|
+| n_files               | **3,894,914** (live count via `lfs find` before metadata exhaustion; cited in §Overview)                                    |
+| nranks                | unrecoverable directly — derived range below                                                                                |
+| n_cycles              | unrecoverable directly — derived range below                                                                                |
+| mean_vtu_bytes        | **~7.1 KB** lower bound (312 MB / 43,701 files in partial tar); ~30 KB upper bound (130 MB / 4,238 files in shorter tar)    |
+| total_dir_bytes       | unrecoverable; estimated ≥ **~28 GB** at 7.1 KB/file × 3.9M files (lower bound)                                             |
+| wall-time per Save    | unrecoverable                                                                                                               |
+| Failure mode evidence | (a) two attempts to `tar -cf` the dir on the login node were CPU-killed, producing truncated archives at 43,701 / 4,238 files respectively; (b) `du`, `ls`, `rsync` all hung; (c) directory became unreachable to GNU `find` due to Lustre metadata pressure (per plan §Overview / §Phase 0 edge case clause). The unreachability is itself the strongest evidence the change is needed. |
+
+**Derived (nranks, n_cycles) range** under the formula above (`n_files - 1 ≈ n_cycles · (nranks + 1)`):
+
+| Assumed nranks | Implied n_cycles |
+|----------------|------------------|
+| 400 (matches `jobs/bp5/bp5_v55_baseline_long.sbatch -N 8 -n 400`) | ~9,712            |
+| 800 (matches §Overview text "800 ranks × ~5000 writes")           | ~4,863            |
+
+Either choice is consistent with the §Overview narrative; the exact pair is not recoverable post-hoc.
+
+### Small reference run (Phase 1+ regression target)
+
+A `np ≤ 10`, `n_cycles ≤ 100` BP5 microrun is recommended for Phase 1's bit-exactness and gather tests.  The two new unit tests in this phase exercise this directly:
+
+| Test                                            | nranks | cycles | n_files (legacy)         | n_files (Phase 1) |
+|-------------------------------------------------|--------|--------|--------------------------|-------------------|
+| `test_fault_surface_vtu_binary` (serial)        | 1      | 1      | 3 (1 VTU + 1 PVTU + 1 PVD) | 2 (1 VTU + 1 PVD) |
+| `test_fault_surface_vtu_gather_mpi`             | 4      | 1      | 6 (4 VTUs + 1 PVTU + 1 PVD) | 2 (1 VTU + 1 PVD) |
+| (synthetic 100-cycle smoke)                     | 4      | 100    | 501                      | 101                |
+
+These predicted counts are encoded as hard assertions in `test_fault_surface_vtu_binary.cpp:189-196` (`n_bin == 2`, `n_asc == 3`) and serve as the Phase 1 acceptance gate for file-count reduction.
+
+**`mean_vtu_bytes` for the small reference (mfem-dev local Mac, 1 fault face, 12 fields)** is captured by the bit-exact test fixture; an exact byte count is reproducible by re-running the test.  It is intentionally NOT pinned to a literal in this table because it varies with `MFEM_USE_ZLIB` (compressed inline-base64 vs raw) and is not load-bearing for the Phase 1 acceptance gate (the file-count reduction is the gate, not the per-file size).
 
 ---
 

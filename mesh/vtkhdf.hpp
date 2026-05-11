@@ -73,6 +73,36 @@ private:
    /// Compression level (-1 means disabled, 0 through 9 enabled). Default is 6.
    int compression_level = 6;
 
+public:
+   /// @brief Selector for the HDF5 chunk filter applied to floating-point
+   /// datasets in this VTKHDF file.
+   ///
+   ///   `None`        - no filter; raw chunked data.
+   ///   `Deflate`     - default; zlib (DEFLATE) at @a compression_level,
+   ///                   preceded by the byte shuffle filter.  Lossless.
+   ///   `ZfpAccuracy` - LLNL ZFP (filter id 32013) in absolute-error
+   ///                   "accuracy" mode at tolerance @a zfp_accuracy_tol.
+   ///                   Applied only to F32/F64 datasets; integer
+   ///                   connectivity / offsets / types datasets fall back
+   ///                   to lossless deflate so the mesh topology is
+   ///                   preserved exactly.  Requires the H5Z-ZFP plugin
+   ///                   to be discoverable via HDF5_PLUGIN_PATH at run
+   ///                   time AND the build to define MFEM_USE_H5Z_ZFP.
+   enum class CompressionAlgorithm
+   {
+      None,
+      Deflate,
+      ZfpAccuracy
+   };
+
+private:
+   /// Active filter algorithm for newly-created datasets.
+   CompressionAlgorithm algorithm = CompressionAlgorithm::Deflate;
+
+   /// ZFP accuracy-mode tolerance (used only when @a algorithm ==
+   /// ZfpAccuracy).  Absolute-error bound on each compressed value.
+   double zfp_accuracy_tol = 1e-3;
+
    /// Wrapper for storing dataset dimensions (max ndims is 2D in VTKHDF).
    struct Dims
    {
@@ -315,6 +345,37 @@ public:
    ///
    /// @a level must be between 0 and 9, in increasing order of compression.
    void EnableCompression(int level = 6) { compression_level = level; }
+
+   /// @brief Select the chunk filter algorithm for newly-created datasets.
+   ///
+   /// Existing datasets retain whatever filter chain they were created
+   /// with; this setter only affects subsequent EnsureDataset calls.
+   /// `Deflate` is the default; switching to `ZfpAccuracy` also requires
+   /// a positive @a zfp_accuracy_tol set via SetZfpAccuracy.
+   void SetCompressionAlgorithm(CompressionAlgorithm alg) { algorithm = alg; }
+
+   /// @brief Current chunk-filter algorithm.
+   CompressionAlgorithm GetCompressionAlgorithm() const { return algorithm; }
+
+   /// @brief Switch to ZFP accuracy-mode compression at @a tol absolute
+   /// error.
+   ///
+   /// Sets the algorithm to `ZfpAccuracy` and stores @a tol.  Calling
+   /// EnableCompression afterwards reverts to `Deflate`.  Requires
+   /// `MFEM_USE_H5Z_ZFP=YES` at build time and the H5Z-ZFP plugin to be
+   /// discoverable via `HDF5_PLUGIN_PATH` at run time.
+   void SetZfpAccuracy(double tol)
+   {
+      MFEM_VERIFY(tol > 0.0,
+                  "VTKHDF::SetZfpAccuracy: tolerance must be > 0, got "
+                  << tol);
+      zfp_accuracy_tol = tol;
+      algorithm = CompressionAlgorithm::ZfpAccuracy;
+   }
+
+   /// @brief Current ZFP tolerance (only meaningful when algorithm is
+   /// ZfpAccuracy).
+   double GetZfpAccuracy() const { return zfp_accuracy_tol; }
 
    /// @brief Save the mesh, appending as a new time step.
    ///

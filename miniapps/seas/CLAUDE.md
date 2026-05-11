@@ -151,3 +151,75 @@ mpirun -np 8 seas_bp5_full --mesh bp5/mesh/bp5_1000m.msh --tfinal 56844000000
 - Mix structural refactoring with numerical changes in one commit
 - Revert a previous fix without citing the debug document and getting explicit approval
 - Assume Tandem is always correct; follow SCEC spec when they differ
+
+## ParaView output mode
+
+(Per plan §Phase 2b.  See `document/io_dev/PLAN_paraview_compaction_2026-04-28.md`.)
+
+| Build flag                | Default fault back end | Notes |
+|---------------------------|-----------------------|-------|
+| `MFEM_USE_HDF5=YES`       | `FaultOutputMode::Hdf5` (single `.vtkhdf` per run) | production target; ParaView 5.11+ |
+| `MFEM_USE_HDF5=NO`        | `FaultOutputMode::Vtu` (one binary VTU per cycle, raw appended UInt64) | non-HDF5 fallback |
+
+Driver CLI (tpv102 / tpv104 / tpv205):
+
+- `--paraview-fault-hdf5` — explicit opt-in (rejected at parse time on non-HDF5 builds).
+- `--paraview-fault-vtu` — force the binary VTU back end (overrides the HDF5 default).
+- `--paraview-fault-legacy-ascii` — revert to the pre-Phase-1 per-rank ASCII writer.  Debugging only; implies `--paraview-fault-vtu` and is incompatible with `--paraview-fault-hdf5`.
+
+`seas_driver.cpp` does not currently construct a `ParaViewOutput`; the plan-mandated BP5 default of `--no-volume-pv` is therefore moot for that driver.  When ParaView output is added to `seas_driver.cpp` in a future change, the default volume save MUST be off unless `--volume-pv-dt X` is set explicitly.
+
+### Phase 4 deferred deviation (R-313)
+
+Plan §Phase 4 step 1 calls for `seas_driver.cpp` to default to `--no-volume-pv` for BP5 production runs.  This is **deferred** because `seas_driver.cpp` currently uses `ProbeOutput` and `ParallelBP5BenchmarkOutput` for its output — there is no `seas::ParaViewOutput` instance in that driver to apply the gate to.  Adding ParaView output to `seas_driver.cpp` is a substantial new feature out of scope for the io_dev compaction work.
+
+Until ParaView output is wired into `seas_driver.cpp`:
+- BP5 production runs through `seas_bp5_full` write probe-based station output and benchmark CSVs only — no volume PVD/VTU and no fault PVD/VTU.
+- The `--no-volume-pv` / `--volume-pv-dt X` flags are accepted by `tpv102/104/205` only.
+- When PV is added to `seas_driver.cpp`, the new defaults from plan §Phase 4 step 1 must be honoured at that time.
+
+## ZFP lossy output
+
+(Per plan §Phase 2d.3 + §Phase 6.  Requires `MFEM_USE_HDF5=YES` AND `MFEM_USE_H5Z_ZFP=YES` AND `HDF5_PLUGIN_PATH` set to the directory containing `libh5zzfp.{so,dylib}` at run time.)
+
+Recommended defaults:
+
+| Driver             | `--paraview-volume-zfp-tol`  | `--paraview-bulk-zfp-tol`    | `--paraview-fault-zfp-tol` |
+|--------------------|------------------------------|------------------------------|----------------------------|
+| seas (BP5)         | 1e-3 (m, displacement)       | n/a (no secondary collection) | 1e-12 (slip-rate floor)    |
+| tpv102 / 104 / 205 | 1e-3 (primary velocity)      | 1e-3 (secondary stresses)    | 1e-12                      |
+
+**Fault tolerance must be smaller than bulk/volume** because slip-rate spans 1e-9..1e0 m/s during nucleation→event; using a bulk-style 1e-3 on fault would erase six decades of dynamic range.  Bulk velocity, by contrast, spans ~3 decades and 1e-3 is invisible in ParaView.
+
+### Phase 6 — volume PV via VTKHDF + ZFP (R-310 SEMANTIC FLIP)
+
+As of plan §Phase 6, the **primary** volume `pv_dc_` member of `seas::ParaViewOutput` defaults to `mfem::ParaViewHDFDataCollection` (single `.vtkhdf` file per run) on `MFEM_USE_HDF5=YES` builds AND `MFEM_PARALLEL_HDF5=YES` for parallel ParMesh runs.  Driver flags:
+
+- `--paraview-volume-vtu` — force the legacy per-rank VTU back end (Phase 1 default).  Use this for backwards compatibility with downstream scripts that hard-code `<output>/ParaView/<basename>_<rank>_<cycle>.vtu` paths.
+- `--paraview-volume-hdf5` — explicit opt-in (rejected at parse time on non-HDF5 builds).
+- `--paraview-volume-zfp-tol <tol>` / `--paraview-volume-deflate-level <N>` — apply compression to the **primary** volume collection (e.g., velocity in TPV* / displacement in BP5).  These flags are no-ops in `--paraview-volume-vtu` mode (warn-and-ignore on rank 0).
+
+**`--paraview-bulk-*` semantics changed in Phase 6.4**: these flags now route to the **secondary** `pv_bulk_out` collection (TPV* stress fields), NOT the primary volume collection.  Pre-Phase-6 the bulk flags were a one-time rank-0 warning on the primary collection; that wiring has been removed.  BP5 has no secondary collection, so `--paraview-bulk-*` on BP5 is a one-time warning that the flag has no effect.
+
+Cross-driver-uniform default collection name: `"volume"` for the primary collection (per R-305).  Files land at `<output_prefix>/volume.vtkhdf` (HDF5 mode) or `<output_prefix>/ParaView/volume/...vtu` (VTU mode).
+
+## Pre-submit output-size estimator
+
+Phase 7 ships `miniapps/seas/scripts/estimate_output_size.py`, a standard-library Python tool that estimates `du -sb $OUTPUT_DIR` before submitting a job.  Quick check:
+
+```
+python3 miniapps/seas/scripts/estimate_output_size.py \
+    --driver bp5 \
+    --inline-mesh \
+    --tfinal 250yr \
+    --paraview \
+    --paraview-fault-zfp-tol 1e-12 \
+    --paraview-max-snapshots 5000 \
+    --no-volume-pv \
+    --np 800 \
+    --scratch-quota 1TB
+```
+
+The estimator parses the same `--paraview-*` flags the C++ drivers accept, integrates the `AdaptiveSchedule` over `tfinal`, and multiplies per-write bytes by the driver's registered-field schema.  Compression ratios marked `PLACEHOLDER` in `_io_size_compression.py` produce a one-time `UserWarning` per `(field_kind, filter)` pair; suppress with `--quiet`.
+
+Tests: `pytest miniapps/seas/scripts/test_estimate_output_size.py` (28 currently passing; 3 reference-run skips pending Frontera replication).  The drift-detection test re-grep's the four driver source files for `RegisterDomainField("name", ...)` / `RegisterField("name", ...)` and fails when the source registers a string-literal field name not in `_io_size_schemas.py`.

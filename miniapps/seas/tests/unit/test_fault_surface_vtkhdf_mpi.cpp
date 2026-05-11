@@ -142,8 +142,7 @@ int main(int argc, char *argv[])
       // destructor relies on HDF5's MPI_COMM_SELF still being live.
       vtkhdf::FaultHDFState state;
       vtkhdf::WriteFaultPackHdf(state, out_dir, /*cycle=*/0, /*time=*/0.0,
-                                /*compression=*/0, pack, rank, nranks,
-                                MPI_COMM_WORLD);
+                                pack, rank, nranks, MPI_COMM_WORLD);
    }
 
    // 3. Rank 0 reads back the merged file and verifies the

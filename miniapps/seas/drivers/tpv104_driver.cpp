@@ -481,12 +481,22 @@ int main(int argc, char *argv[])
    //                             with velocity + sigma_yy/sigma_xy/sigma_xz at
    //                             coarser cadence (typical: 0.05 s)
    //   --pv-low-order          : linear tets only (~40x smaller volume output)
-   //   --no-domain-pv          : suppress fault-schedule volume save (fault-
-   //                             surface PVD/VTU still written; bulk collection
-   //                             unaffected)
+   //   --no-volume-pv / --no-domain-pv (deprecated alias) :
+   //                             suppress fault-schedule volume save.
+   //   --volume-pv-dt X        : volume cadence override (s).  Re-enables
+   //                             the volume save even with --no-volume-pv.
+   //   --paraview-fault-{vtu,hdf5,legacy-ascii} : back-end selection.
+   //   --paraview-{fault,bulk}-{zfp-tol,deflate-level} : VTKHDF chunk filter.
+   //   --paraview-max-snapshots N / --paraview-{co,nucleation,inter}seismic-dt X :
+   //                             snapshot cap and per-regime cadences.
+   //   See tpv102_driver.cpp for the canonical doc-block.
    bool use_paraview = HasFlag(argc, argv, "--paraview");
    bool pv_low_order = HasFlag(argc, argv, "--pv-low-order");
-   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv");
+   // Phase 4: see tpv102_driver.cpp for the canonical doc-block on
+   // --no-volume-pv / --volume-pv-dt.
+   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv")
+                       || HasFlag(argc, argv, "--no-volume-pv");
+   real_t volume_pv_dt = GetRealArg(argc, argv, "--volume-pv-dt", 0.0);
    int  paraview_step_interval = GetIntArg(argc, argv, "--paraview-every", 0);
    real_t paraview_dt_flag     = GetRealArg(argc, argv, "--paraview-dt", 0.0);
    real_t paraview_bulk_dt     = GetRealArg(argc, argv, "--paraview-bulk-dt", 0.0);
@@ -494,6 +504,146 @@ int main(int argc, char *argv[])
        || paraview_bulk_dt > 0.0)
    {
       use_paraview = true;
+   }
+
+   // R-101 / PLAN_paraview_compaction_2026-04-28 §Phase 2b / 2d.3 / 3
+   // CLI flags.  See tpv102_driver.cpp for the canonical doc-block.
+   const bool   paraview_force_vtu       = HasFlag(argc, argv, "--paraview-fault-vtu");
+   const bool   paraview_force_hdf5      = HasFlag(argc, argv, "--paraview-fault-hdf5");
+   // R-305: legacy per-rank ASCII back end (debugging only).  See
+   // tpv102_driver.cpp for canonical doc-block.
+   const bool   paraview_legacy_ascii    = HasFlag(argc, argv, "--paraview-fault-legacy-ascii");
+   const real_t paraview_fault_zfp_tol   = GetRealArg(argc, argv, "--paraview-fault-zfp-tol",   0.0);
+   const int    paraview_fault_deflate   = GetIntArg (argc, argv, "--paraview-fault-deflate-level", -1);
+   // Phase 2d.3: bulk-side flags (see tpv102_driver.cpp for canonical comment).
+   const real_t paraview_bulk_zfp_tol    = GetRealArg(argc, argv, "--paraview-bulk-zfp-tol",   0.0);
+   const int    paraview_bulk_deflate    = GetIntArg (argc, argv, "--paraview-bulk-deflate-level", -1);
+   // Phase 6.3 / 6.3a: volume back-end + primary-collection compression.
+   const bool   paraview_volume_force_vtu  = HasFlag(argc, argv, "--paraview-volume-vtu");
+   const bool   paraview_volume_force_hdf5 = HasFlag(argc, argv, "--paraview-volume-hdf5");
+   const real_t paraview_volume_zfp_tol    = GetRealArg(argc, argv, "--paraview-volume-zfp-tol",   0.0);
+   const int    paraview_volume_deflate    = GetIntArg (argc, argv, "--paraview-volume-deflate-level", -1);
+   const int    paraview_max_snapshots   = GetIntArg (argc, argv, "--paraview-max-snapshots", 0);
+   const real_t paraview_coseismic_dt    = GetRealArg(argc, argv, "--paraview-coseismic-dt",   -1.0);
+   const real_t paraview_nucleation_dt   = GetRealArg(argc, argv, "--paraview-nucleation-dt",  -1.0);
+   const real_t paraview_interseismic_dt = GetRealArg(argc, argv, "--paraview-interseismic-dt",-1.0);
+   if (paraview_force_vtu || paraview_force_hdf5
+       || paraview_fault_zfp_tol > 0.0
+       || paraview_fault_deflate >= 0
+       || paraview_bulk_zfp_tol > 0.0
+       || paraview_bulk_deflate >= 0
+       || paraview_volume_force_vtu || paraview_volume_force_hdf5
+       || paraview_volume_zfp_tol > 0.0
+       || paraview_volume_deflate >= 0
+       || paraview_max_snapshots > 0
+       || paraview_coseismic_dt > 0.0
+       || paraview_nucleation_dt > 0.0
+       || paraview_interseismic_dt > 0.0)
+   {
+      use_paraview = true;
+   }
+   if (paraview_force_vtu && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                 "mutually exclusive.");
+   }
+   if (paraview_legacy_ascii && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-legacy-ascii implies the binary VTU "
+                 "back end and is incompatible with --paraview-fault-hdf5.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_fault_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_HDF5
+   // R-306 / plan §Phase 2d.3: deflate-level flags require HDF5.
+   if (paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+   if (paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+#endif
+   if (paraview_fault_zfp_tol > 0.0 && paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol and --paraview-fault-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0 && paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol and --paraview-bulk-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   // Phase 6.3 / 6.3a: volume back-end + volume compression validation.
+   if (paraview_volume_force_vtu && paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                 "mutually exclusive.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_H5Z_ZFP=YES; "
+                 "current build has it disabled.");
+   }
+#endif
+   if (paraview_volume_zfp_tol > 0.0 && paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol and --paraview-volume-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   if (paraview_bulk_dt <= 0.0
+       && (paraview_bulk_zfp_tol > 0.0 || paraview_bulk_deflate >= 0))
+   {
+      mfem::out
+         << "warning: --paraview-bulk-zfp-tol / --paraview-bulk-deflate-level "
+            "set but --paraview-bulk-dt not provided; the secondary bulk "
+            "collection is disabled, the flag has no effect.\n";
    }
    // `--dry-run` is a shortcut for "no mesh, no time-stepping,
    // just print banner + verify wiring compiles/runs".  Used by
@@ -1682,8 +1832,16 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
       MPI_Barrier(comm);
 #endif
+      // Phase 6.3: select the volume back end.
+      auto volume_mode =
+         seas::ParaViewOutput<MeshT>::DefaultVolumeOutputMode();
+      if (paraview_volume_force_vtu)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Vtu; }
+      if (paraview_volume_force_hdf5)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5; }
       pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-         output_dir + "/ParaView", pmesh, order);
+         output_dir + "/ParaView", pmesh, order,
+         /*collection_name=*/"volume", volume_mode);
 
       if (pv_low_order)
       {
@@ -1751,13 +1909,83 @@ int main(int argc, char *argv[])
          pv_out->output_every_n_steps = output_interval_for_pv;
       }
 
+      // R-101 wiring: Phase 2b / 2d.3 / 3 CLI overrides.  See
+      // tpv102_driver.cpp for the canonical doc-block.
+      if (paraview_force_vtu)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+      }
+      if (paraview_force_hdf5)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Hdf5);
+      }
+      if (paraview_legacy_ascii)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+         pv_out->SetLegacyAsciiVTU(true);
+      }
+#ifdef MFEM_USE_HDF5
+      if (paraview_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_fault_zfp_tol);
+      }
+      else if (paraview_fault_deflate >= 0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_fault_deflate));
+      }
+      // Phase 6.3a: --paraview-volume-* controls primary `pv_out`.
+      // R-310: --paraview-bulk-* is RE-ROUTED to `pv_bulk_out` below.
+      if (paraview_volume_zfp_tol > 0.0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_volume_zfp_tol);
+      }
+      else if (paraview_volume_deflate >= 0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_volume_deflate));
+      }
+#endif
+      if (paraview_max_snapshots > 0)
+      {
+         pv_out->GetSchedule().max_total_snapshots = paraview_max_snapshots;
+      }
+      if (paraview_coseismic_dt    > 0.0)
+      { pv_out->GetSchedule().dt_coseismic    = paraview_coseismic_dt; }
+      if (paraview_nucleation_dt   > 0.0)
+      { pv_out->GetSchedule().dt_nucleation   = paraview_nucleation_dt; }
+      if (paraview_interseismic_dt > 0.0)
+      { pv_out->GetSchedule().dt_interseismic = paraview_interseismic_dt; }
+      pv_out->GetSchedule().Validate();
+      pv_out->SetTotalRunTime(tfinal);
+
+      // Phase 4: volume-PV decouple (see tpv102_driver.cpp for canonical comment).
+      const bool volume_save_enabled = (volume_pv_dt > 0.0) || !pv_no_domain;
+      pv_out->SetVolumeSaveEnabled(volume_save_enabled);
+      if (volume_pv_dt > 0.0) { pv_out->SetVolumePVDt(volume_pv_dt); }
+
       if (rank == 0)
       {
          std::cout << "ParaView output: ON (prefix="
                    << output_dir << "/ParaView)\n";
-         if (pv_no_domain)
+         if (pv_no_domain && volume_pv_dt <= 0.0)
          {
-            std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
+            std::cout << "  Mode: fault-surface PVD only "
+                         "(--no-volume-pv / --no-domain-pv)\n";
+         }
+         if (volume_pv_dt > 0.0)
+         {
+            std::cout << "  Volume cadence: every " << volume_pv_dt
+                      << " s (--volume-pv-dt)\n";
          }
          if (paraview_step_interval > 0)
          {
@@ -1779,8 +2007,11 @@ int main(int argc, char *argv[])
 
       if (paraview_bulk_dt > 0.0)
       {
+         // Phase 6.4: secondary collection inherits the primary's
+         // back end; distinct collection name "wave_bulk".
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-            output_dir + "/ParaView_bulk", pmesh, order);
+            output_dir + "/ParaView_bulk", pmesh, order,
+            /*collection_name=*/"wave_bulk", volume_mode);
          if (pv_low_order)
          {
             pv_bulk_out->SetHighOrderOutput(false);
@@ -1805,6 +2036,24 @@ int main(int argc, char *argv[])
 
          pv_bulk_out->fixed_dt = paraview_bulk_dt;
 
+         // Phase 6.4 R-310: --paraview-bulk-* SEMANTIC FLIP — was
+         // warn-and-ignore on pv_out (Phase 2d.3); now applies to
+         // pv_bulk_out (the secondary wavefield collection).
+#ifdef MFEM_USE_HDF5
+         if (paraview_bulk_zfp_tol > 0.0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+               paraview_bulk_zfp_tol);
+         }
+         else if (paraview_bulk_deflate >= 0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+               static_cast<double>(paraview_bulk_deflate));
+         }
+#endif
+
          if (rank == 0)
          {
             std::cout << "  Bulk collection: ON (prefix="
@@ -1828,7 +2077,9 @@ int main(int argc, char *argv[])
          pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
       if (!fault_wants && !bulk_wants) { return; }
 
-      if (!pv_no_domain || bulk_wants)
+      // Phase 4: see tpv102_driver.cpp for canonical comment.
+      const bool volume_active = pv_out->GetVolumeSaveEnabled();
+      if (volume_active || bulk_wants)
       {
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
@@ -1873,11 +2124,8 @@ int main(int argc, char *argv[])
          pv_local_normal_stress_k4(i)   = d.sigma_n_corr;
       }
 
-      if (pv_no_domain)
-      {
-         pv_out->CommitSchedule(time);
-      }
-      else
+      // Phase 4: see tpv102_driver.cpp for canonical comment.
+      if (pv_out->GetVolumeSaveEnabled())
       {
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                       pv_local_traction, pv_local_state,
@@ -1888,6 +2136,10 @@ int main(int argc, char *argv[])
          // advanced for the next PeekShouldWrite to use the correct
          // regime interval (paraview_output.hpp:985-990).
          pv_out->CommitSchedule(time, V_max);
+      }
+      else
+      {
+         pv_out->CommitSchedule(time);
       }
 
       pv_out->WriteFaultSurfaceVTU(
