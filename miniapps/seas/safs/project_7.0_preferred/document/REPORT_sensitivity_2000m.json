@@ -1,0 +1,130 @@
+{
+  "runs": [
+    {
+      "config": {
+        "name": "baseline",
+        "mesh_edge_size": 1500,
+        "min_edge": 100,
+        "polyline_spacing": 750
+      },
+      "elapsed_s": 0.378709077835083,
+      "exit_code": 0,
+      "out_dir": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/code_preprocess/work/sweep/baseline/out",
+      "status": "OK",
+      "n_meshes": 6,
+      "n_pairs": 7,
+      "n_conformal_pairs": 7,
+      "total_faces": 6098,
+      "faces_per_mesh_min": 395,
+      "faces_per_mesh_max": 1678,
+      "edge_overall_min": 0.035127321345257,
+      "edge_overall_med": 1557.12824074346,
+      "edge_overall_max": 3341.39077616057,
+      "q_overall_min": 0.416757162494176,
+      "q_overall_med": 0.916066707723332,
+      "n_edges_below_floor_total": 2902,
+      "score": 0.8719257843501431
+    },
+    {
+      "config": {
+        "name": "coarser",
+        "mesh_edge_size": 2000,
+        "min_edge": 100,
+        "polyline_spacing": 1000
+      },
+      "elapsed_s": 0.3242959976196289,
+      "exit_code": 0,
+      "out_dir": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/code_preprocess/work/sweep/coarser/out",
+      "status": "OK",
+      "n_meshes": 6,
+      "n_pairs": 7,
+      "n_conformal_pairs": 7,
+      "total_faces": 4223,
+      "faces_per_mesh_min": 190,
+      "faces_per_mesh_max": 1210,
+      "edge_overall_min": 0.035127321345257,
+      "edge_overall_med": 494.906851245194,
+      "edge_overall_max": 4358.07961458606,
+      "q_overall_min": 0.418789604677196,
+      "q_overall_med": 0.8942534481015795,
+      "n_edges_below_floor_total": 2467,
+      "score": 0.6579939486222183
+    },
+    {
+      "config": {
+        "name": "finer",
+        "mesh_edge_size": 1000,
+        "min_edge": 100,
+        "polyline_spacing": 500
+      },
+      "elapsed_s": 0.5727331638336182,
+      "exit_code": 0,
+      "out_dir": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/code_preprocess/work/sweep/finer/out",
+      "status": "OK",
+      "n_meshes": 6,
+      "n_pairs": 7,
+      "n_conformal_pairs": 7,
+      "total_faces": 11249,
+      "faces_per_mesh_min": 952,
+      "faces_per_mesh_max": 3266,
+      "edge_overall_min": 0.035127321345257,
+      "edge_overall_med": 1187.91790583555,
+      "edge_overall_max": 2101.17357641163,
+      "q_overall_min": 0.260850994805541,
+      "q_overall_med": 0.9317277214570605,
+      "n_edges_below_floor_total": 3650,
+      "score": 0.7957948272104431
+    },
+    {
+      "config": {
+        "name": "tighter_floor",
+        "mesh_edge_size": 1500,
+        "min_edge": 200,
+        "polyline_spacing": 750
+      },
+      "elapsed_s": 0.37795495986938477,
+      "exit_code": 0,
+      "out_dir": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/code_preprocess/work/sweep/tighter_floor/out",
+      "status": "OK",
+      "n_meshes": 6,
+      "n_pairs": 7,
+      "n_conformal_pairs": 7,
+      "total_faces": 6049,
+      "faces_per_mesh_min": 395,
+      "faces_per_mesh_max": 1672,
+      "edge_overall_min": 0.035127321345257,
+      "edge_overall_med": 1555.689171074785,
+      "edge_overall_max": 3341.39077616057,
+      "q_overall_min": 0.342273166121229,
+      "q_overall_med": 0.9159268494103995,
+      "n_edges_below_floor_total": 3197,
+      "score": 0.8573167990092888
+    },
+    {
+      "config": {
+        "name": "fine_floor",
+        "mesh_edge_size": 1500,
+        "min_edge": 50,
+        "polyline_spacing": 750
+      },
+      "elapsed_s": 0.3900332450866699,
+      "exit_code": 0,
+      "out_dir": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/code_preprocess/work/sweep/fine_floor/out",
+      "status": "OK",
+      "n_meshes": 6,
+      "n_pairs": 7,
+      "n_conformal_pairs": 7,
+      "total_faces": 6098,
+      "faces_per_mesh_min": 395,
+      "faces_per_mesh_max": 1678,
+      "edge_overall_min": 0.035127321345257,
+      "edge_overall_med": 1557.12824074346,
+      "edge_overall_max": 3341.39077616057,
+      "q_overall_min": 0.416757162494176,
+      "q_overall_med": 0.916066707723332,
+      "n_edges_below_floor_total": 2519,
+      "score": 0.8719257843501431
+    }
+  ],
+  "best": "baseline"
+}

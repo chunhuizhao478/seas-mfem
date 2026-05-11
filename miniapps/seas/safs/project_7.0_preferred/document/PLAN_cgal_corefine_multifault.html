@@ -1,0 +1,1630 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta charset="utf-8" />
+  <meta name="generator" content="pandoc" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=yes" />
+  <title>Implementation Plan: CGAL co-refinement + quality remesh for the SAFS 6-fault network</title>
+  <style>
+    /* Default styles provided by pandoc.
+    ** See https://pandoc.org/MANUAL.html#variables-for-html for config info.
+    */
+    span.smallcaps{font-variant: small-caps;}
+    div.columns{display: flex; gap: min(4vw, 1.5em);}
+    div.column{flex: auto; overflow-x: auto;}
+    div.hanging-indent{margin-left: 1.5em; text-indent: -1.5em;}
+    /* The extra [class] is a hack that increases specificity enough to
+       override a similar rule in reveal.js */
+    ul.task-list[class]{list-style: none;}
+    ul.task-list li input[type="checkbox"] {
+      font-size: inherit;
+      width: 0.8em;
+      margin: 0 0.8em 0.2em -1.6em;
+      vertical-align: middle;
+    }
+    .display.math{display: block; text-align: center; margin: 0.5rem auto;}
+    /* CSS for syntax highlighting */
+    html { -webkit-text-size-adjust: 100%; }
+    pre > code.sourceCode { white-space: pre; position: relative; }
+    pre > code.sourceCode > span { display: inline-block; line-height: 1.25; }
+    pre > code.sourceCode > span:empty { height: 1.2em; }
+    .sourceCode { overflow: visible; }
+    code.sourceCode > span { color: inherit; text-decoration: inherit; }
+    div.sourceCode { margin: 1em 0; }
+    pre.sourceCode { margin: 0; }
+    @media screen {
+    div.sourceCode { overflow: auto; }
+    }
+    @media print {
+    pre > code.sourceCode { white-space: pre-wrap; }
+    pre > code.sourceCode > span { text-indent: -5em; padding-left: 5em; }
+    }
+    pre.numberSource code
+      { counter-reset: source-line 0; }
+    pre.numberSource code > span
+      { position: relative; left: -4em; counter-increment: source-line; }
+    pre.numberSource code > span > a:first-child::before
+      { content: counter(source-line);
+        position: relative; left: -1em; text-align: right; vertical-align: baseline;
+        border: none; display: inline-block;
+        -webkit-touch-callout: none; -webkit-user-select: none;
+        -khtml-user-select: none; -moz-user-select: none;
+        -ms-user-select: none; user-select: none;
+        padding: 0 4px; width: 4em;
+        color: #aaaaaa;
+      }
+    pre.numberSource { margin-left: 3em; border-left: 1px solid #aaaaaa;  padding-left: 4px; }
+    div.sourceCode
+      {   }
+    @media screen {
+    pre > code.sourceCode > span > a:first-child::before { text-decoration: underline; }
+    }
+    code span.al { color: #ff0000; font-weight: bold; } /* Alert */
+    code span.an { color: #60a0b0; font-weight: bold; font-style: italic; } /* Annotation */
+    code span.at { color: #7d9029; } /* Attribute */
+    code span.bn { color: #40a070; } /* BaseN */
+    code span.bu { color: #008000; } /* BuiltIn */
+    code span.cf { color: #007020; font-weight: bold; } /* ControlFlow */
+    code span.ch { color: #4070a0; } /* Char */
+    code span.cn { color: #880000; } /* Constant */
+    code span.co { color: #60a0b0; font-style: italic; } /* Comment */
+    code span.cv { color: #60a0b0; font-weight: bold; font-style: italic; } /* CommentVar */
+    code span.do { color: #ba2121; font-style: italic; } /* Documentation */
+    code span.dt { color: #902000; } /* DataType */
+    code span.dv { color: #40a070; } /* DecVal */
+    code span.er { color: #ff0000; font-weight: bold; } /* Error */
+    code span.ex { } /* Extension */
+    code span.fl { color: #40a070; } /* Float */
+    code span.fu { color: #06287e; } /* Function */
+    code span.im { color: #008000; font-weight: bold; } /* Import */
+    code span.in { color: #60a0b0; font-weight: bold; font-style: italic; } /* Information */
+    code span.kw { color: #007020; font-weight: bold; } /* Keyword */
+    code span.op { color: #666666; } /* Operator */
+    code span.ot { color: #007020; } /* Other */
+    code span.pp { color: #bc7a00; } /* Preprocessor */
+    code span.sc { color: #4070a0; } /* SpecialChar */
+    code span.ss { color: #bb6688; } /* SpecialString */
+    code span.st { color: #4070a0; } /* String */
+    code span.va { color: #19177c; } /* Variable */
+    code span.vs { color: #4070a0; } /* VerbatimString */
+    code span.wa { color: #60a0b0; font-weight: bold; font-style: italic; } /* Warning */
+  </style>
+  <link rel="stylesheet" href="/dev/null" />
+  <style>body{font-family:-apple-system,Helvetica,Arial,sans-serif;max-width:50rem;margin:2rem auto;line-height:1.5;color:#222;padding:0 1rem}h1{font-size:1.5em;border-bottom:1px solid #ccc;padding-bottom:.3em}h2{font-size:1.25em;border-bottom:1px solid #eee;padding-bottom:.3em;margin-top:2em}h3{font-size:1.1em;margin-top:1.5em}h4{font-size:1em;margin-top:1em}code{background:#f5f5f5;padding:.1em .3em;border-radius:3px;font-size:.9em}pre{background:#f5f5f5;padding:.7em;border-radius:5px;overflow-x:auto;font-size:.85em}pre code{background:transparent;padding:0}table{border-collapse:collapse;margin:1em 0;font-size:.9em}th,td{border:1px solid #ccc;padding:.3em .6em;text-align:left;vertical-align:top}th{background:#eee}blockquote{border-left:4px solid #ddd;margin:1em 0;padding:.3em 1em;color:#555}a{color:#0366d6}@media print{body{max-width:none;margin:0}h1,h2,h3{page-break-after:avoid}pre,table{page-break-inside:avoid}}</style>
+</head>
+<body>
+<header id="title-block-header">
+<h1 class="title">Implementation Plan: CGAL co-refinement + quality
+remesh for the SAFS 6-fault network</h1>
+</header>
+<h1
+id="implementation-plan-cgal-co-refinement-quality-remesh-for-the-safs-6-fault-network">Implementation
+Plan: CGAL co-refinement + quality remesh for the SAFS 6-fault
+network</h1>
+<p>Working directory anchor:
+<code>/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_preferred/</code>.
+All relative paths below are anchored to that directory unless an
+absolute path is given.</p>
+<h2 id="overview">Overview</h2>
+<p><code>project_7.0_preferred/</code> produces
+<code>data_cleanfreesurf/*_clean_clip.stl</code> (six SAFS CFM faults ×
+three resolutions, each clipped at z=0 and isotropically remeshed by
+<code>code_preprocess/clean_freesurface_mesh.py</code>). Each STL is
+internally clean — manifold, no z&gt;0, well-shaped triangles — but the
+six STLs <strong>do not share a triangulation along their pairwise
+intersections</strong>. Eight intersecting pairs exist (documented at <a
+href="../../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md"><code>../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md</code></a>,
+spatial-overlap table). Without conformal sharing, <code>gmsh -3</code>
+with <code>Merge</code>+<code>Surface{} In Volume{}</code> produces
+ill-shaped tets along every fault-fault crossing or fails to close the
+volume.</p>
+<p>This plan builds the same CGAL corefine + Delaunay-remesh pipeline
+that <a
+href="../../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md"><code>../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md</code></a>
+prescribes for the single-fault Fuis case, but <strong>specialised to
+the 6-fault preferred set, run on the already-clipped
+<code>_clean_clip.stl</code> inputs</strong>, and accountable to the
+user’s two stated quality factors:</p>
+<ol type="1">
+<li><strong>Mesh size</strong>: every output triangle edge ≥ a hard
+floor (<code>MIN_EDGE_M</code>, default 100 m) and ≤ a hard ceiling
+(<code>MAX_EDGE_M</code>, default = <code>target_length</code>);
+polyline sub-edges respect both bounds.</li>
+<li><strong>Triangle/tet quality</strong>: surface triangles satisfy
+<code>q_tri = 4√3·A/Σe² ≥ 0.3</code>; downstream tets satisfy
+<code>q_tet ≥ 0.1</code> (worst) and ≥ 0.3 for ≥ 99.9 % (bulk-quality
+contract from the alternative plan).</li>
+</ol>
+<p>Why CGAL is unavoidable: the EXPLORE document <a
+href="../../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md"><code>../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md</code></a>
+demonstrates empirically that <strong>pymeshlab cannot produce conformal
+multi-fault output</strong> — its boolean filter rejects open surfaces,
+its uniform-resampler destroys the source triangulation, and
+<code>meshing_isotropic_explicit_remeshing</code> is single-mesh by
+construction. CGAL <code>PMP::corefine</code> is the only library
+function in the conda environment (<code>cgal-61</code> ships
+<code>cgal-cpp 6.1.1</code>) that inserts <code>A∩B</code> exactly into
+both <code>A</code> and <code>B</code> while sharing vertex coordinates
+bit-identically.</p>
+<p>This is a planning document. No code is written here. The deliverable
+is a phased, file-level plan whose acceptance criteria the implementer
+can verify mechanically.</p>
+<h2 id="inputs-and-outputs-file-system-contract">Inputs and outputs
+(file-system contract)</h2>
+<pre><code>INPUT  (already exists, produced by clean_freesurface_mesh.py):
+  data_cleanfreesurf/SAFS-SAFZ-COAV-Mission_Creek_fault_strand-CFM4_&lt;R&gt;m_clean_clip.stl
+  data_cleanfreesurf/SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_&lt;R&gt;m_clean_clip.stl
+  data_cleanfreesurf/SAFS-SAFZ-MULT-Southern_San_Andreas_fault_and_Banning-CFM6_&lt;R&gt;m_clean_clip.stl
+  data_cleanfreesurf/SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_&lt;R&gt;m_clean_clip.stl
+  data_cleanfreesurf/SAFS-SAFZ-SBMT-Mission_Creek_fault_strand-CFM4_&lt;R&gt;m_clean_clip.stl
+  data_cleanfreesurf/SAFS-SAFZ-SBMT-San_Andreas_fault-CFM6_&lt;R&gt;m_clean_clip.stl
+  R ∈ {2000, 1000, 500}; this plan validates R = 2000 only (per locked-in decision Q3).
+
+INTERMEDIATE (created by this plan):
+  code_preprocess/work/&lt;R&gt;m/*.off                 # full-precision OFF intermediates
+  code_preprocess/work/&lt;R&gt;m/manifest.json         # per-pair / per-fault stats
+
+OUTPUT (created by this plan, consumed by gmsh):
+  data_corefined/SAFS-SAFZ-*-CFM*-&lt;R&gt;m_corefined.stl   # 6 high-precision ASCII STLs
+  data_corefined/manifest.json                          # listing for the .geo generator
+  code_meshing/safs_multifault_box_&lt;R&gt;m.geo             # generated multi-fault .geo</code></pre>
+<p>Naming conventions: - <code>data_corefined/</code> is
+<strong>new</strong>; sits alongside <code>data_cleanfreesurf/</code>,
+<code>data_preprocess/</code>, <code>raw_data/</code>. Created by Phase
+3. - <code>code_preprocess/corefine_cgal/</code> is <strong>new</strong>
+(the C++ tools). Created by Phase 1. -
+<code>code_preprocess/work/</code> is gitignored; created on demand. -
+<code>code_meshing/</code> already exists but is empty; this plan
+populates it (Phase 4).</p>
+<h2 id="constraints">Constraints</h2>
+<h3 id="hard-constraints-each-verified-by-an-acceptance-criterion">Hard
+constraints (each verified by an acceptance criterion)</h3>
+<ul>
+<li><strong>Surface edge floor</strong>: every output <code>.stl</code>
+has <code>min(edge_length) ≥ MIN_EDGE_M</code> (default 100 m).</li>
+<li><strong>Surface edge ceiling</strong>: every output
+<code>.stl</code> has
+<code>max(edge_length) ≤ 1.5 · target_length</code> (the
+<code>4/3 · target</code> upper bound from
+<code>isotropic_remeshing</code> semantics, with a small margin).</li>
+<li><strong>Surface quality</strong>: every output <code>.stl</code> has
+<code>min(q_tri) ≥ 0.3</code> and the <em>median</em>
+<code>q_tri ≥ 0.85</code>.</li>
+<li><strong>Pairwise conformality</strong>: for every intersecting pair
+<code>(A, B)</code> reported by <code>PMP::intersecting_meshes</code>,
+every vertex on the corefined polyline appears at
+<strong>bit-identical</strong> coordinates in both meshes when read from
+OFF, and within <code>1e-6 · bbox_diag</code> after STL ASCII round-trip
+with the high-precision writer.</li>
+<li><strong>Bulk tet quality</strong> (Phase 4): on the
+merged-and-meshed <code>.msh</code>, <code>min(q_tet) ≥ 0.1</code> and
+<code>≥ 99.9 %</code> of tets have <code>q_tet ≥ 0.3</code> per
+<code>code_preprocess/msh_to_vtu.py</code>’s isoperimetric-ratio
+metric.</li>
+</ul>
+<h3 id="interface-constraints">Interface constraints</h3>
+<ul>
+<li>The downstream consumer is gmsh’s
+<code>Merge "*.stl"; Surface{tag} In Volume{1}; Mesh.Algorithm3D = 1;</code>
+recipe, identical to
+<code>../project_7.0_alternative/code_meshing/safs_fault_box_freesurface_clip.geo</code>.
+<strong>Do not introduce <code>BooleanFragments</code>,
+<code>ClassifySurfaces</code>, or HXT (Algorithm3D=10)</strong> — all
+three were tested and rejected for discrete-STL embedding (see notes in
+<code>../project_7.0_alternative/code_meshing/safs_fault_box_buried.geo:L84-L89</code>
+and the explanatory header of
+<code>safs_fault_box_freesurface_clip.geo:L7-L21</code>).</li>
+<li><code>code_preprocess/ts_to_stl.py</code>,
+<code>code_preprocess/clean_freesurface_mesh.py</code>,
+<code>code_preprocess/msh_to_vtu.py</code> are <strong>not
+modified</strong>. The new tooling is additive.</li>
+</ul>
+<h3 id="dependency-constraints">Dependency constraints</h3>
+<ul>
+<li>C++ stage is built against the user’s <code>cgal-61</code> conda env
+(<code>cgal-cpp 6.1.1</code>, <code>clang 19.1.7</code>,
+<code>cmake 4.3</code>, <code>eigen 3.4</code>, <code>boost</code>).
+This env contains no Python interpreter — it is for <em>compiling</em>
+CGAL programs only.</li>
+<li>Python orchestration lives in <code>code_preprocess/</code> and runs
+in <code>pythonenv</code> (the env that already runs
+<code>clean_freesurface_mesh.py</code>, <code>ts_to_stl.py</code>,
+<code>msh_to_vtu.py</code>). New deps allowed: none beyond what’s
+already present (<code>numpy</code>, <code>meshio</code>, optionally
+<code>pymeshlab</code>).</li>
+<li>gmsh is invoked from <code>pythonenv</code> (where <code>gmsh</code>
+Python bindings already exist).</li>
+<li>Build artefacts under
+<code>code_preprocess/corefine_cgal/build/</code> are gitignored.</li>
+</ul>
+<h3 id="convention-constraints">Convention constraints</h3>
+<ul>
+<li>C++ source style: match CGAL examples —
+<code>using K = CGAL::Exact_predicates_inexact_constructions_kernel;</code>,
+<code>using Mesh = CGAL::Surface_mesh&lt;K::Point_3&gt;;</code>,
+<code>namespace PMP = CGAL::Polygon_mesh_processing;</code>,
+<code>namespace pp = PMP::parameters;</code>.</li>
+<li>Python style: argparse CLI, <code>main() -&gt; int</code>, output
+prints in the same format as
+<code>clean_freesurface_mesh.py</code>.</li>
+<li>Constraint-edge property map idiom:
+<code>auto ecm = get(boost::dynamic_edge_property_t&lt;bool&gt;(), mesh);</code>
+— same as the alternative plan.</li>
+</ul>
+<h3 id="numerical-constraints">Numerical constraints</h3>
+<ul>
+<li>Kernel: <code>Epick</code>
+(<code>Exact_predicates_inexact_constructions_kernel</code>) — exact
+predicates, double constructions. This matches
+<code>igl::copyleft::cgal::mesh_boolean</code> already linked into
+pymeshlab and avoids precision drift.</li>
+<li>UTM coordinates ~10⁶ m. ASCII I/O must use ≥ 10 significant decimal
+digits (<code>%.10g</code> or 15-digit <code>printf</code>); STL
+conformality is lost if the writer rounds to 6 digits.</li>
+<li><code>gmsh.option.setNumber("Geometry.Tolerance", 1e-3)</code> —
+explicit, 1 mm; well above the writer precision and well below the
+smallest expected polyline sub-edge after resampling.</li>
+</ul>
+<h2
+id="mathematical-content-summary-full-statements-live-inside-each-phase">Mathematical
+content (summary; full statements live inside each phase)</h2>
+<h3
+id="triangle-quality-metric-used-in-phase-1-phase-5-acceptance">Triangle
+quality metric (used in Phase 1 / Phase 5 acceptance)</h3>
+<p>For a triangle with edge lengths <code>e_a, e_b, e_c</code> and area
+<code>A</code>, <span class="math display">$$q_{\\mathrm{tri}} =
+\\frac{4\\sqrt{3}\\,A}{e_a^2 + e_b^2 + e_c^2} \\in [0,1],\\qquad
+q_{\\mathrm{tri}}=1 \\Leftrightarrow \\text{equilateral}.$$</span>
+Matches <code>code_preprocess/msh_to_vtu.py</code>.</p>
+<h3 id="pipeline-core-per-pair">Pipeline core (per-pair)</h3>
+<p>For two open triangulated surfaces <code>A</code>, <code>B</code>
+with non-empty intersection: 1.
+<code>polylines = PMP::surface_intersection(A, B)</code> — read-only,
+exact polyline of <code>A∩B</code>. 2.
+<code>resampled = arc_length_resample(polylines, spacing=POLYLINE_SPACING_M, min_edge=MIN_EDGE_M)</code>
+— uniform sub-edges in
+<code>[MIN_EDGE_M, 1.5·POLYLINE_SPACING_M]</code>. 3.
+<code>PMP::corefine(A, B, ecm_A, ecm_B)</code> — A and B mutated
+in-place; the constraint maps mark every newly-inserted edge. 4.
+<code>A_out = PMP::surface_Delaunay_remeshing(A, polyline_constraints=resampled, protect_constraints=true, mesh_edge_size=MAX_EDGE_M)</code>
+— same for B; polyline shared so vertex sequences agree. 5.
+<code>PMP::remove_almost_degenerate_faces(A_out, ecm=mark_polyline(resampled), needle_threshold=4, cap_threshold=cos(160°), collapse_length_threshold=1.5·MAX_EDGE_M)</code>
+— same for B; closes the slivers that the Delaunay refinement may leave
+behind.</p>
+<h3 id="n-fault-generalisation">N-fault generalisation</h3>
+<p>With <code>N=6</code> faults and the 8 known intersecting pairs
+(overlap table in <a
+href="../../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md"><code>../project_7.0_alternative/code_preprocess/EXPLORE_pymeshlab_intersections.md</code></a>:L75-L83),
+iterate the per-pair core in <strong>descending order of bbox-overlap
+volume</strong>, accumulating per-mesh polyline sets. Each mesh is then
+Delaunay-remeshed <em>once</em> with all of its polyline constraints
+simultaneously. Triple junctions (≥3 faults meeting at one polyline) are
+handled implicitly by the per-pair <code>surface_intersection</code>; a
+Phase 5 sentinel test verifies they did not introduce T-vertices.</p>
+<p>The “do every pair, then remesh per mesh” ordering is taken verbatim
+from <a
+href="../../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md"><code>../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md</code></a>:L424-L496,
+Phase 2. This plan does <strong>not</strong> re-derive that algorithm;
+it inherits it and tunes parameters for the 6-fault SAFS network.</p>
+<h2 id="phase-1-build-the-c-corefine-repair-tooling">Phase 1: Build the
+C++ corefine + repair tooling</h2>
+<h3 id="goal">Goal</h3>
+<p>A pair of CLI binaries (<code>corefine_pair</code>,
+<code>corefine_set</code>) that take <code>.off</code> inputs and emit
+corefined, Delaunay-remeshed, sliver-repaired <code>.off</code> outputs
+satisfying the hard constraints above. After this phase, on the
+SBMT-Garnet_Hill × SBMT-Mission_Creek 2000 m pair, a single
+<code>corefine_pair</code> invocation produces two output meshes with
+<code>min_edge ≥ 100 m</code>, <code>min(q_tri) ≥ 0.3</code>, polyline
+conformality verified.</p>
+<h3 id="files-to-create">Files to Create</h3>
+<ul>
+<li><code>code_preprocess/corefine_cgal/CMakeLists.txt</code> — cmake
+project, finds <code>CGAL</code>, <code>Boost</code>,
+<code>Eigen3</code> from <code>cgal-61</code>’s
+<code>CMAKE_PREFIX_PATH</code>.</li>
+<li><code>code_preprocess/corefine_cgal/corefine_pair.cpp</code> —
+single-pair driver. Specification: see “CLI” and “Algorithm” tables
+below.</li>
+<li><code>code_preprocess/corefine_cgal/corefine_set.cpp</code> —
+N-fault driver (uses Phase 1 helpers).</li>
+<li><code>code_preprocess/corefine_cgal/polyline_resample.h</code> —
+header-only, arc-length-uniform polyline resampler. Same interface as
+the alternative-plan Phase 1 (see <a
+href="../../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md"><code>../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md</code></a>:L158-L195).</li>
+<li><code>code_preprocess/corefine_cgal/quality_repair.h</code> —
+header-only <code>Stats</code> struct +
+<code>run</code>/<code>compute_stats</code>/<code>validate</code>
+template functions. Same interface as alternative-plan Phase 1
+(PLAN_corefine_pipeline.md:L197-L240).</li>
+<li><code>code_preprocess/corefine_cgal/intersection_graph.h</code> —
+<code>find_intersecting_pairs(meshes)</code> and
+<code>sort_by_overlap_volume(pairs, meshes)</code> for the multi-fault
+driver. Same as alternative-plan Phase 2
+(PLAN_corefine_pipeline.md:L498-L513).</li>
+<li><code>code_preprocess/corefine_cgal/io_helpers.h</code> —
+<code>read_polygon_mesh_any(path, mesh)</code>,
+<code>write_off(path, mesh)</code>,
+<code>write_stl_high_precision(path, mesh, "%.10g")</code>. The custom
+STL writer is required because CGAL’s default uses <code>&lt;&lt;</code>
+with default precision (~6 digits) which is
+<strong>insufficient</strong> for the UTM coordinate magnitudes —
+empirically loses conformality.</li>
+<li><code>code_preprocess/corefine_cgal/.gitignore</code> — line
+<code>build/</code>.</li>
+</ul>
+<h3 id="files-to-modify">Files to Modify</h3>
+<ul>
+<li>None.</li>
+</ul>
+<h3 id="detailed-requirements">Detailed Requirements</h3>
+<h4 id="cli-of-corefine_pair">CLI of <code>corefine_pair</code></h4>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IN_A</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>first input <code>.off</code>/<code>.stl</code></td>
+</tr>
+<tr>
+<td><code>IN_B</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>second input</td>
+</tr>
+<tr>
+<td><code>OUT_A</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>first output</td>
+</tr>
+<tr>
+<td><code>OUT_B</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>second output</td>
+</tr>
+<tr>
+<td><code>--mesh-edge-size</code></td>
+<td>double, m</td>
+<td>1500.0</td>
+<td><code>MAX_EDGE_M</code>; passed to
+<code>surface_Delaunay_remeshing</code></td>
+</tr>
+<tr>
+<td><code>--min-edge</code></td>
+<td>double, m</td>
+<td>100.0</td>
+<td><code>MIN_EDGE_M</code>; floor checked at
+<code>quality_repair::validate</code></td>
+</tr>
+<tr>
+<td><code>--polyline-spacing</code></td>
+<td>double, m</td>
+<td><code>0.5 · mesh-edge-size</code> (clamped ≥
+<code>min-edge</code>)</td>
+<td>uniform spacing for resampled polyline</td>
+</tr>
+<tr>
+<td><code>--features-angle-bound</code></td>
+<td>double, deg</td>
+<td>60.0</td>
+<td>passed to <code>surface_Delaunay_remeshing</code></td>
+</tr>
+<tr>
+<td><code>--max-iterations</code></td>
+<td>unsigned</td>
+<td>5</td>
+<td>repair-pass iterations</td>
+</tr>
+<tr>
+<td><code>--verbose</code></td>
+<td>flag</td>
+<td>off</td>
+<td>print per-step stats</td>
+</tr>
+</tbody>
+</table>
+<h4 id="cli-of-corefine_set">CLI of <code>corefine_set</code></h4>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>IN_DIR</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>directory of input <code>.off</code></td>
+</tr>
+<tr>
+<td><code>OUT_DIR</code> (positional)</td>
+<td>path</td>
+<td>required</td>
+<td>directory for output <code>.off</code> and
+<code>manifest.json</code></td>
+</tr>
+<tr>
+<td><code>--ext</code></td>
+<td>string</td>
+<td><code>.off</code></td>
+<td>input extension to scan</td>
+</tr>
+<tr>
+<td><code>--mesh-edge-size</code></td>
+<td>double, m</td>
+<td>1500.0</td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>--min-edge</code></td>
+<td>double, m</td>
+<td>100.0</td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>--polyline-spacing</code></td>
+<td>double, m</td>
+<td><code>0.5 · mesh-edge-size</code></td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>--features-angle-bound</code></td>
+<td>double, deg</td>
+<td>60.0</td>
+<td>as above</td>
+</tr>
+<tr>
+<td><code>--manifest</code></td>
+<td>path</td>
+<td><code>OUT_DIR/manifest.json</code></td>
+<td>output JSON file</td>
+</tr>
+<tr>
+<td><code>--verbose</code></td>
+<td>flag</td>
+<td>off</td>
+<td>as above</td>
+</tr>
+</tbody>
+</table>
+<h4 id="algorithm-of-corefine_pairmain-literal-in-order">Algorithm of
+<code>corefine_pair::main</code> (literal, in order)</h4>
+<ol type="1">
+<li>Parse CLI; default
+<code>--polyline-spacing = max(0.5*mesh-edge-size, min-edge)</code>.</li>
+<li><code>Mesh A, B; io_helpers::read_polygon_mesh_any(args.in_a, A);</code>
+same for B. Auto-detects
+<code>.off</code>/<code>.stl</code>/<code>.ply</code>/<code>.obj</code>
+by extension.</li>
+<li><strong>Self-intersection guard</strong> (PMP_corefine
+precondition): for each of <code>A</code>, <code>B</code>, if
+<code>PMP::does_self_intersect(M)</code> then
+<code>PMP::autorefine(M)</code> and warn. Reason: SAFS data may have
+near-coincident overlapping triangles at fault perimeters; corefine
+throws <code>Self_intersection_exception</code> if
+<code>throw_on_self_intersection=true</code>, or silently produces
+malformed output if not.</li>
+<li><code>std::vector&lt;std::vector&lt;Point&gt;&gt; polylines; PMP::surface_intersection(A, B, std::back_inserter(polylines));</code>.
+If <code>polylines.empty()</code>, copy A→OUT_A and B→OUT_B verbatim and
+exit code 2 (“no intersection”).</li>
+<li><code>auto resampled = polyline_resample::resample_all(polylines, args.polyline_spacing, args.min_edge);</code>.
+Reject any input polyline with &lt; 2 vertices.</li>
+<li><code>auto ecmA = get(boost::dynamic_edge_property_t&lt;bool&gt;(), A); auto ecmB = ...;</code>
+and
+<code>PMP::corefine(A, B, pp::edge_is_constrained_map(ecmA), pp::edge_is_constrained_map(ecmB));</code>.</li>
+<li><code>Mesh A_out = PMP::surface_Delaunay_remeshing&lt;Mesh&gt;(A, pp::polyline_constraints(resampled).protect_constraints(true).mesh_edge_size(args.mesh_edge_size).features_angle_bound(args.features_angle_bound));</code>
+and same for <code>B_out</code>.
+<strong><code>protect_constraints(true)</code> is correct here</strong>
+because the polyline has <em>already been resampled</em> in step 5 to
+satisfy the <code>≤ 4/3·mesh_edge_size</code> precondition — the trap
+documented at PLAN_corefine_pipeline.md:L342-L351 (locking corefine
+slivers in place) is avoided by the prior resampling.</li>
+<li><code>mark_polyline_as_constrained(A_out, resampled, ecm_out_A, tol=1e-9)</code>
+— re-derive an edge-constraint map by matching vertex coordinates
+against <code>resampled</code>. Same for B.</li>
+<li><code>auto stA = quality_repair::run(A_out, ecm_out_A, args.min_edge, /*q_floor=*/0.3, /*cap_threshold_cos=*/cos(160°), /*needle_threshold=*/4.0, args.max_iterations);</code>
+same for B. The function iterates
+<code>PMP::remove_almost_degenerate_faces</code> until convergence or
+<code>max-iterations</code>, then runs
+<code>PMP::tangential_relaxation</code> once for final smoothing.</li>
+<li><strong>Conformality check</strong>: every polyline vertex must
+appear (within 1e-9 m) in both <code>A_out</code> and
+<code>B_out</code>. If any miss, exit 3 with offender list.</li>
+<li><strong>Hard-floor validation</strong>:
+<code>quality_repair::validate(A_out, ecm_out_A, args.min_edge, 0.3)</code>
+and same for B. If false, exit 4 with first 10 offending edge/face
+coords.</li>
+<li><code>io_helpers::write_off(args.out_a, A_out);</code> (and B). If
+output paths end in <code>.stl</code>,
+<code>write_stl_high_precision(...)</code> instead.</li>
+<li>Print stats block (format below).</li>
+</ol>
+<h4 id="algorithm-of-corefine_setmain">Algorithm of
+<code>corefine_set::main</code></h4>
+<ol type="1">
+<li><p>Glob <code>IN_DIR/*&lt;ext&gt;</code>; load each into
+<code>std::vector&lt;Mesh&gt; meshes</code> and remember
+basenames.</p></li>
+<li><p><code>auto pairs = intersection_graph::find_intersecting_pairs(meshes);</code>
+(uses <code>PMP::intersecting_meshes</code>).</p></li>
+<li><p><code>intersection_graph::sort_by_overlap_volume(pairs, meshes);</code>
+— descending bbox-overlap volume.</p></li>
+<li><p>Per-mesh accumulator:
+<code>std::vector&lt;std::vector&lt;std::vector&lt;Point&gt;&gt;&gt; all_polylines(meshes.size());</code>.</p></li>
+<li><p>For each <code>(i, j)</code> in sorted order:</p>
+<ul>
+<li><code>polylines = PMP::surface_intersection(meshes[i], meshes[j])</code>.</li>
+<li><code>resampled = polyline_resample::resample_all(polylines, args.polyline_spacing, args.min_edge);</code>.</li>
+<li><code>PMP::corefine(meshes[i], meshes[j], ecm[i], ecm[j])</code>.</li>
+<li><code>all_polylines[i].insert(...resampled)</code> and same for
+<code>j</code>.</li>
+</ul></li>
+<li><p>Per mesh:
+<code>output_meshes[i] = PMP::surface_Delaunay_remeshing&lt;Mesh&gt;(meshes[i], pp::polyline_constraints(flatten(all_polylines[i])).protect_constraints(true).mesh_edge_size(args.mesh_edge_size).features_angle_bound(args.features_angle_bound));</code>.</p></li>
+<li><p><code>quality_repair::run(output_meshes[i], ...)</code> for each
+i.</p></li>
+<li><p><strong>Pairwise conformality re-check</strong>: for every
+<code>(i, j)</code> in <code>pairs</code>, count polyline-vertex matches
+between <code>output_meshes[i]</code> and <code>output_meshes[j]</code>.
+Both counts equal <code>|resampled[(i,j)]|</code>. If not, exit 7 with
+the failing pair list.</p></li>
+<li><p><strong>Manifest emission</strong>
+(<code>OUT_DIR/manifest.json</code>):</p>
+<div class="sourceCode" id="cb2"><pre
+class="sourceCode json"><code class="sourceCode json"><span id="cb2-1"><a href="#cb2-1" aria-hidden="true" tabindex="-1"></a><span class="fu">{</span></span>
+<span id="cb2-2"><a href="#cb2-2" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;ext&quot;</span><span class="fu">:</span> <span class="st">&quot;.off&quot;</span><span class="fu">,</span></span>
+<span id="cb2-3"><a href="#cb2-3" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;mesh_edge_size&quot;</span><span class="fu">:</span> <span class="fl">1500.0</span><span class="fu">,</span></span>
+<span id="cb2-4"><a href="#cb2-4" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;min_edge&quot;</span><span class="fu">:</span> <span class="fl">100.0</span><span class="fu">,</span></span>
+<span id="cb2-5"><a href="#cb2-5" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;polyline_spacing&quot;</span><span class="fu">:</span> <span class="fl">750.0</span><span class="fu">,</span></span>
+<span id="cb2-6"><a href="#cb2-6" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;meshes&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-7"><a href="#cb2-7" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span></span>
+<span id="cb2-8"><a href="#cb2-8" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;input&quot;</span><span class="fu">:</span> <span class="st">&quot;&lt;basename&gt;.off&quot;</span><span class="fu">,</span></span>
+<span id="cb2-9"><a href="#cb2-9" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;output&quot;</span><span class="fu">:</span> <span class="st">&quot;&lt;basename&gt;_corefined.off&quot;</span><span class="fu">,</span></span>
+<span id="cb2-10"><a href="#cb2-10" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;n_verts&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;n_faces&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span></span>
+<span id="cb2-11"><a href="#cb2-11" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;bbox&quot;</span><span class="fu">:</span> <span class="fu">{</span> <span class="dt">&quot;x_lo&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;x_hi&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="er">...</span> <span class="fu">},</span></span>
+<span id="cb2-12"><a href="#cb2-12" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;edge_stats&quot;</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">&quot;min&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;median&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;max&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">},</span></span>
+<span id="cb2-13"><a href="#cb2-13" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;tri_q_stats&quot;</span><span class="fu">:</span> <span class="fu">{</span><span class="dt">&quot;min&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;p1&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">,</span> <span class="dt">&quot;median&quot;</span><span class="fu">:</span> <span class="er">...</span><span class="fu">},</span></span>
+<span id="cb2-14"><a href="#cb2-14" aria-hidden="true" tabindex="-1"></a>      <span class="dt">&quot;intersects_with&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-15"><a href="#cb2-15" aria-hidden="true" tabindex="-1"></a>        <span class="fu">{</span><span class="dt">&quot;partner&quot;</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span> <span class="dt">&quot;polyline_vertex_count&quot;</span><span class="fu">:</span> <span class="dv">47</span><span class="fu">,</span> <span class="dt">&quot;polyline_length_m&quot;</span><span class="fu">:</span> <span class="fl">38600.0</span><span class="fu">}</span></span>
+<span id="cb2-16"><a href="#cb2-16" aria-hidden="true" tabindex="-1"></a>      <span class="ot">]</span></span>
+<span id="cb2-17"><a href="#cb2-17" aria-hidden="true" tabindex="-1"></a>    <span class="fu">}</span></span>
+<span id="cb2-18"><a href="#cb2-18" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span><span class="fu">,</span></span>
+<span id="cb2-19"><a href="#cb2-19" aria-hidden="true" tabindex="-1"></a>  <span class="dt">&quot;pairs&quot;</span><span class="fu">:</span> <span class="ot">[</span></span>
+<span id="cb2-20"><a href="#cb2-20" aria-hidden="true" tabindex="-1"></a>    <span class="fu">{</span><span class="dt">&quot;i&quot;</span><span class="fu">:</span> <span class="dv">0</span><span class="fu">,</span> <span class="dt">&quot;j&quot;</span><span class="fu">:</span> <span class="dv">1</span><span class="fu">,</span> <span class="dt">&quot;n_polyline_verts&quot;</span><span class="fu">:</span> <span class="dv">47</span><span class="fu">,</span> <span class="dt">&quot;conformal&quot;</span><span class="fu">:</span> <span class="kw">true</span><span class="fu">}</span></span>
+<span id="cb2-21"><a href="#cb2-21" aria-hidden="true" tabindex="-1"></a>  <span class="ot">]</span></span>
+<span id="cb2-22"><a href="#cb2-22" aria-hidden="true" tabindex="-1"></a><span class="fu">}</span></span></code></pre></div></li>
+<li><p>Write each <code>output_meshes[i]</code> to
+<code>OUT_DIR/&lt;basename&gt;_corefined.off</code>.</p></li>
+</ol>
+<h4
+id="print-stats-format-used-by-both-binaries-matches-clean_freesurface_mesh.py-style">Print-stats
+format (used by both binaries; matches
+<code>clean_freesurface_mesh.py</code> style)</h4>
+<pre><code>A:  V_in=&lt;n&gt;  F_in=&lt;n&gt;  V_out=&lt;n&gt;  F_out=&lt;n&gt;
+    edge:  min=&lt;m&gt;  p1=&lt;m&gt;  median=&lt;m&gt;  max=&lt;m&gt;
+    q_tri: min=&lt;&gt;   p1=&lt;&gt;   median=&lt;&gt;
+B:  ... same ...
+Polyline:  count=&lt;n&gt;  resampled_count=&lt;n&gt;  min_seg=&lt;m&gt;  max_seg=&lt;m&gt;
+Conformality: &lt;K&gt;/&lt;K&gt; polyline verts match in both meshes (max diff &lt;m&gt;).
+Quality floor passed: yes</code></pre>
+<h4 id="cmakelists.txt-skeleton"><code>CMakeLists.txt</code>
+skeleton</h4>
+<div class="sourceCode" id="cb4"><pre
+class="sourceCode cmake"><code class="sourceCode cmake"><span id="cb4-1"><a href="#cb4-1" aria-hidden="true" tabindex="-1"></a><span class="kw">cmake_minimum_required</span>(<span class="ot">VERSION</span> <span class="dt">3.20</span>)</span>
+<span id="cb4-2"><a href="#cb4-2" aria-hidden="true" tabindex="-1"></a><span class="kw">project</span>(safs_corefine <span class="ot">LANGUAGES</span> <span class="ot">CXX</span>)</span>
+<span id="cb4-3"><a href="#cb4-3" aria-hidden="true" tabindex="-1"></a><span class="kw">set</span>(<span class="dv">CMAKE_CXX_STANDARD</span> 17)</span>
+<span id="cb4-4"><a href="#cb4-4" aria-hidden="true" tabindex="-1"></a><span class="kw">set</span>(<span class="dv">CMAKE_CXX_STANDARD_REQUIRED</span> <span class="ot">ON</span>)</span>
+<span id="cb4-5"><a href="#cb4-5" aria-hidden="true" tabindex="-1"></a><span class="kw">find_package</span>(CGAL <span class="ot">REQUIRED</span>)</span>
+<span id="cb4-6"><a href="#cb4-6" aria-hidden="true" tabindex="-1"></a><span class="kw">find_package</span>(<span class="im">Boost</span> <span class="ot">REQUIRED</span>)</span>
+<span id="cb4-7"><a href="#cb4-7" aria-hidden="true" tabindex="-1"></a><span class="kw">find_package</span>(Eigen3 <span class="ot">REQUIRED</span> <span class="ot">NO_MODULE</span>)</span>
+<span id="cb4-8"><a href="#cb4-8" aria-hidden="true" tabindex="-1"></a><span class="kw">include_directories</span>(<span class="dv">${CMAKE_CURRENT_SOURCE_DIR}</span>)</span>
+<span id="cb4-9"><a href="#cb4-9" aria-hidden="true" tabindex="-1"></a><span class="kw">add_executable</span>(<span class="bn">corefine_pair</span> corefine_pair.cpp)</span>
+<span id="cb4-10"><a href="#cb4-10" aria-hidden="true" tabindex="-1"></a><span class="kw">add_executable</span>(<span class="bn">corefine_set</span>  corefine_set.cpp)</span>
+<span id="cb4-11"><a href="#cb4-11" aria-hidden="true" tabindex="-1"></a><span class="kw">target_link_libraries</span>(<span class="bn">corefine_pair</span> <span class="ot">PRIVATE</span> <span class="bn">CGAL::CGAL</span> <span class="bn">Eigen3::Eigen</span>)</span>
+<span id="cb4-12"><a href="#cb4-12" aria-hidden="true" tabindex="-1"></a><span class="kw">target_link_libraries</span>(<span class="bn">corefine_set</span>  <span class="ot">PRIVATE</span> <span class="bn">CGAL::CGAL</span> <span class="bn">Eigen3::Eigen</span>)</span>
+<span id="cb4-13"><a href="#cb4-13" aria-hidden="true" tabindex="-1"></a><span class="cf">foreach</span>(t corefine_pair corefine_set)</span>
+<span id="cb4-14"><a href="#cb4-14" aria-hidden="true" tabindex="-1"></a>  <span class="kw">target_compile_options</span>(<span class="dv">${t}</span> <span class="bn">PRIVATE</span> -O2 -Wall -Wno-deprecated-copy)</span>
+<span id="cb4-15"><a href="#cb4-15" aria-hidden="true" tabindex="-1"></a><span class="cf">endforeach</span>()</span></code></pre></div>
+<p>Build invocation (used by Phase 5 test harness and by the user
+locally):</p>
+<div class="sourceCode" id="cb5"><pre
+class="sourceCode bash"><code class="sourceCode bash"><span id="cb5-1"><a href="#cb5-1" aria-hidden="true" tabindex="-1"></a><span class="ex">conda</span> activate cgal-61</span>
+<span id="cb5-2"><a href="#cb5-2" aria-hidden="true" tabindex="-1"></a><span class="bu">cd</span> code_preprocess/corefine_cgal</span>
+<span id="cb5-3"><a href="#cb5-3" aria-hidden="true" tabindex="-1"></a><span class="fu">mkdir</span> <span class="at">-p</span> build <span class="kw">&amp;&amp;</span> <span class="bu">cd</span> build</span>
+<span id="cb5-4"><a href="#cb5-4" aria-hidden="true" tabindex="-1"></a><span class="fu">cmake</span> .. <span class="at">-DCMAKE_BUILD_TYPE</span><span class="op">=</span>Release <span class="kw">&amp;&amp;</span> <span class="fu">cmake</span> <span class="at">--build</span> . <span class="at">-j</span> 4</span></code></pre></div>
+<h3 id="interfaces">Interfaces</h3>
+<p>The C++ binaries expose only their CLI; Phase 3 invokes them via
+<code>subprocess.run</code>. The headers
+(<code>polyline_resample.h</code>, <code>quality_repair.h</code>,
+<code>intersection_graph.h</code>, <code>io_helpers.h</code>) are
+private to <code>code_preprocess/corefine_cgal/</code> — no other code
+includes them.</p>
+<h3 id="edge-cases-to-handle">Edge Cases to Handle</h3>
+<ul>
+<li><strong>Empty intersection</strong> (Phase-1 step 4): exit 2; copy
+inputs verbatim. Justification: <code>MJVS-SAF × SBMT-SAF</code>
+overlaps only by 0.1×0.1×14.8 km, may not actually intersect; pipeline
+must not abort the whole batch.</li>
+<li><strong>Single-point intersection</strong> producing a zero-length
+polyline: filter at <code>polyline_resample::resample</code> (skip
+polylines with &lt; 2 vertices or total length &lt;
+<code>min_edge</code>).</li>
+<li><strong>Closed polyline</strong> (a fault loops through another):
+detect via first==last (1e-9 tolerance) and produce a closed resampled
+polyline. Closing edge length in
+<code>[0.5·spacing, 1.5·spacing]</code>.</li>
+<li><strong>Coplanar overlap</strong> (two faults sharing a 2-D patch,
+not a 1-D curve): not expected geologically, but the
+<code>surface_intersection</code> may emit polyline vertices of degree ≥
+3. Detect via degree count; abort with exit 5 and a clear error.
+<strong>Mitigation</strong>: cleanfreesurf isotropic remesher may snap
+two close faults into coplanar overlap if <code>target-length</code> is
+large; tune <code>--target-length</code> upstream.</li>
+<li><strong>Polyline endpoint lies on a fault perimeter</strong> (the
+polyline opens onto the free surface or onto a buried fault edge):
+expected at the SAFS surface trace where intersection lines hit z=0. The
+Delaunay remesher handles this naturally because perimeter edges are
+constrained-by-default; verify via the conformality check.</li>
+<li><strong>Self-intersection in input</strong> (Phase-1 step 3):
+repaired by <code>PMP::autorefine</code>, with a logged warning.</li>
+<li><strong>OFF / STL read failure</strong>: exit 6 with
+<code>errno</code>-style message.</li>
+<li><strong>Polyline sub-edge &lt; <code>min_edge</code> after
+resampling</strong>: the resampler merges adjacent sub-edges &lt;
+<code>min_edge</code> (PLAN_corefine_pipeline.md:L172-L177). Must not
+produce sub-edges &lt; <code>min_edge</code> even at polyline
+endpoints.</li>
+</ul>
+<h3 id="acceptance-criteria">Acceptance Criteria</h3>
+<ul class="task-list">
+<li><label><input type="checkbox" />Builds with
+<code>conda activate cgal-61 &amp;&amp; cd code_preprocess/corefine_cgal &amp;&amp; mkdir build &amp;&amp; cd build &amp;&amp; cmake .. &amp;&amp; make</code>.
+Zero compiler warnings except
+<code>-Wno-deprecated-copy</code>.</label></li>
+<li><label><input type="checkbox" /><code>corefine_pair --help</code>
+prints all flags above.</label></li>
+<li><label><input type="checkbox" /><strong>Synthetic two-rectangles
+test</strong> (built into Phase 5; uses two perpendicular 10×10 m
+rectangles triangulated 4×4 each, intersecting at y=5,z=0): both outputs
+contain a polyline vertex at every <code>polyline-spacing</code>
+interval; vertex coordinates bit-identical between A and B at every
+polyline vertex; <code>min_edge ≥ min_edge</code> arg.</label></li>
+<li><label><input type="checkbox" /><strong>SBMT-Garnet_Hill ×
+SBMT-Mission_Creek 2000 m smoke test</strong> (largest XY overlap,
+38.6×8.1×16.2 km): exit 0; both outputs satisfy
+<code>min_edge ≥ 100 m</code>, <code>min(q_tri) ≥ 0.3</code>,
+<code>n_edges_below_floor == 0</code>. Wall-clock &lt; 60 s on the
+user’s laptop.</label></li>
+<li><label><input type="checkbox" /><strong>STL ASCII round-trip
+preserves conformality</strong>: write outputs as <code>.stl</code> via
+the high-precision writer; read back through <code>meshio</code>; for
+every polyline vertex,
+<code>||A_coord - B_coord|| &lt; 1e-6 · bbox_diag</code>. (Justifies the
+explicit <code>Geometry.Tolerance = 1e-3</code> in Phase
+4.)</label></li>
+<li><label><input type="checkbox" /><code>corefine_set OUT_DIR=…</code>
+produces a <code>manifest.json</code> that parses with
+<code>python -m json.tool</code> and contains the schema documented
+above.</label></li>
+</ul>
+<h3 id="dependencies">Dependencies</h3>
+<ul>
+<li>Depends on: <code>cgal-cpp 6.1.1</code> in <code>cgal-61</code> env
+(specifically <code>PMP::corefine</code>,
+<code>surface_intersection</code>,
+<code>surface_Delaunay_remeshing</code>,
+<code>remove_almost_degenerate_faces</code>,
+<code>tangential_relaxation</code>, <code>autorefine</code>,
+<code>does_self_intersect</code>,
+<code>intersecting_meshes</code>).</li>
+<li>Required by: Phase 2 (Python orchestration consumes both binaries),
+Phase 5 (validation harness).</li>
+</ul>
+<h2 id="phase-2-python-orchestration-corefine_faults.py">Phase 2: Python
+orchestration <code>corefine_faults.py</code></h2>
+<h3 id="goal-1">Goal</h3>
+<p>A single Python script in <code>code_preprocess/</code> that, given a
+resolution <code>R</code> ∈ {2000, 1000, 500} (this plan validates only
+2000), reads the six
+<code>data_cleanfreesurf/*_&lt;R&gt;m_clean_clip.stl</code> files,
+converts them to <code>.off</code> (full-precision), invokes
+<code>corefine_set</code>, and emits the six
+<code>data_corefined/*_&lt;R&gt;m_corefined.stl</code> files plus the
+<code>manifest.json</code>. Wraps build-instruction printing if
+<code>corefine_set</code> is missing.</p>
+<h3 id="files-to-create-1">Files to Create</h3>
+<ul>
+<li><code>code_preprocess/corefine_faults.py</code>. Module-level
+constant <code>RESOLUTIONS = (2000, 1000, 500)</code>; CLI default
+<code>--res 2000</code>.</li>
+</ul>
+<h3 id="files-to-modify-1">Files to Modify</h3>
+<ul>
+<li><code>.gitignore</code> (project root, if it exists at
+<code>miniapps/seas/safs/.gitignore</code>): add
+<code>data_corefined/</code>, <code>code_preprocess/work/</code>,
+<code>code_preprocess/corefine_cgal/build/</code>.</li>
+</ul>
+<h3 id="detailed-requirements-1">Detailed Requirements</h3>
+<h4 id="cli">CLI</h4>
+<table>
+<colgroup>
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+<col style="width: 25%" />
+</colgroup>
+<thead>
+<tr>
+<th>Flag</th>
+<th>Type</th>
+<th>Default</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>--in-dir</code></td>
+<td>path</td>
+<td><code>data_cleanfreesurf</code></td>
+<td>directory of <code>*_clean_clip.stl</code></td>
+</tr>
+<tr>
+<td><code>--out-dir</code></td>
+<td>path</td>
+<td><code>data_corefined</code></td>
+<td>output directory</td>
+</tr>
+<tr>
+<td><code>--res</code></td>
+<td>int</td>
+<td>2000</td>
+<td>resolution suffix to scan; only 2000 is validated by this plan</td>
+</tr>
+<tr>
+<td><code>--mesh-edge-size</code></td>
+<td>float, m</td>
+<td><code>--res</code> (e.g. 2000)</td>
+<td>passed through to <code>corefine_set</code></td>
+</tr>
+<tr>
+<td><code>--min-edge</code></td>
+<td>float, m</td>
+<td>100.0</td>
+<td>passed through</td>
+</tr>
+<tr>
+<td><code>--polyline-spacing</code></td>
+<td>float, m</td>
+<td><code>0.5*mesh-edge-size</code> (clamped ≥ min-edge)</td>
+<td>passed through</td>
+</tr>
+<tr>
+<td><code>--cgal-bin</code></td>
+<td>path</td>
+<td><code>corefine_cgal/build/corefine_set</code></td>
+<td>location of the C++ binary</td>
+</tr>
+<tr>
+<td><code>--workdir</code></td>
+<td>path</td>
+<td><code>code_preprocess/work/&lt;R&gt;m</code></td>
+<td>OFF intermediates</td>
+</tr>
+<tr>
+<td><code>--keep-intermediate</code></td>
+<td>flag</td>
+<td>off</td>
+<td>skip <code>workdir</code> cleanup</td>
+</tr>
+<tr>
+<td><code>--verbose</code></td>
+<td>flag</td>
+<td>off</td>
+<td>propagated to <code>corefine_set</code></td>
+</tr>
+</tbody>
+</table>
+<h4 id="algorithm">Algorithm</h4>
+<ol type="1">
+<li><p>Locate inputs:
+<code>glob(in_dir / f"*_{res}m_clean_clip.stl")</code>. If empty, exit 1
+with message <code>no inputs in {in_dir} for res={res}m</code>.</p></li>
+<li><p>Verify there are exactly <strong>6</strong> inputs (at 2000 m the
+preferred set has six faults). If not, warn and continue.</p></li>
+<li><p>Convert each <code>.stl</code> to <code>.off</code> in
+<code>workdir</code>:</p>
+<ul>
+<li><code>import meshio</code>; read STL; write OFF with full double
+precision via <code>meshio.write(off, mesh, file_format="off")</code>
+<em>or</em> a custom writer that does <code>f"{x:.15g}"</code> per
+coordinate (preferred — <code>meshio</code>’s OFF writer precision
+varies by version).</li>
+<li>Output filename strips <code>_clean_clip</code> →
+<code>&lt;basename&gt;_&lt;R&gt;m.off</code>.</li>
+</ul></li>
+<li><p>Verify <code>cgal-bin</code> exists; if not, print:</p>
+<pre><code>error: corefine_set binary not found at {cgal_bin}
+  to build:  conda activate cgal-61 &amp;&amp; cd code_preprocess/corefine_cgal &amp;&amp;
+             mkdir build &amp;&amp; cd build &amp;&amp; cmake .. &amp;&amp; make</code></pre>
+<p>and exit 1.</p></li>
+<li><p><code>subprocess.run([str(cgal_bin), str(workdir), str(workdir), "--ext", ".off", "--mesh-edge-size", str(mesh_edge_size), "--min-edge", str(min_edge), "--polyline-spacing", str(polyline_spacing), "--manifest", str(workdir / "manifest.json")] + (["--verbose"] if verbose else []), check=True, capture_output=False)</code>.</p></li>
+<li><p>Convert each <code>*_corefined.off</code> in <code>workdir</code>
+to ASCII STL with <code>meshio</code>
+(<code>file_format="stl-ascii"</code>); write to
+<code>out_dir / f"{base}_corefined.stl"</code>.</p></li>
+<li><p>Read <code>manifest.json</code>; assert every pair has
+<code>"conformal": true</code>. If not, abort with exit 7 and print the
+offending pair list.</p></li>
+<li><p>Copy <code>manifest.json</code> to
+<code>out_dir/manifest.json</code>.</p></li>
+<li><p>If not <code>--keep-intermediate</code>:
+<code>shutil.rmtree(workdir)</code>.</p></li>
+<li><p>Print human-readable summary (per-fault and per-pair
+stats).</p></li>
+</ol>
+<h3 id="edge-cases-to-handle-1">Edge Cases to Handle</h3>
+<ul>
+<li><strong>Missing <code>meshio</code></strong> in
+<code>pythonenv</code>: catch <code>ImportError</code>, print
+<code>pip install meshio</code> instruction, exit 1.</li>
+<li><strong>Subprocess non-zero return</strong>: stderr from C++ tool
+already streamed; re-raise via
+<code>subprocess.CalledProcessError</code>.</li>
+<li><strong>Mesh count != 6</strong>: not fatal at 2000 m; print
+warning. (The 1000 m and 500 m sets may add or omit faults; out of scope
+here.)</li>
+<li><strong><code>out_dir</code> not empty</strong>: warn but overwrite
+(predictable behavior; the user re-runs frequently).</li>
+</ul>
+<h3 id="acceptance-criteria-1">Acceptance Criteria</h3>
+<ul class="task-list">
+<li><label><input type="checkbox" />On
+<code>data_cleanfreesurf/*_2000m_clean_clip.stl</code> (six inputs):
+produces <code>data_corefined/*_2000m_corefined.stl</code> (six outputs)
+and <code>data_corefined/manifest.json</code>. Wall-clock &lt; 5 minutes
+on the user’s laptop.</label></li>
+<li><label><input type="checkbox" />Each output STL parses with
+<code>meshio.read(...)</code> without warnings; vertex/face counts match
+the manifest within ±0 (no silent dedup).</label></li>
+<li><label><input type="checkbox" />Manifest has 8 pairs all with
+<code>"conformal": true</code>.</label></li>
+<li><label><input type="checkbox" />All six outputs satisfy
+<code>min(edge) ≥ 100 m</code>, <code>min(q_tri) ≥ 0.3</code>,
+<code>median(q_tri) ≥ 0.85</code> (re-verified in Python from the
+manifest).</label></li>
+<li><label><input type="checkbox" />Re-running with the same args is
+idempotent (same number of vertices/faces in each output to within 1 % —
+modulo any non-determinism in
+<code>surface_Delaunay_remeshing</code>).</label></li>
+</ul>
+<h3 id="dependencies-1">Dependencies</h3>
+<ul>
+<li>Depends on: Phase 1 (<code>corefine_set</code> binary).</li>
+<li>Required by: Phase 4 (<code>.geo</code> generator reads
+<code>data_corefined/manifest.json</code> and
+<code>*_corefined.stl</code>); Phase 5 (validation harness invokes this
+script).</li>
+</ul>
+<h2 id="phase-3-multi-fault-gmsh-.geo-and-generator">Phase 3:
+Multi-fault gmsh <code>.geo</code> and generator</h2>
+<h3 id="goal-2">Goal</h3>
+<p>A generated <code>code_meshing/safs_multifault_box_2000m.geo</code>
+that mirrors
+<code>../project_7.0_alternative/code_meshing/safs_fault_box_freesurface_clip.geo</code>
+but merges and embeds <strong>all six</strong> corefined faults inside a
+single bounding-box volume. Generated by a Python helper that reads
+<code>data_corefined/manifest.json</code> and writes the
+<code>.geo</code>. Verifies that gmsh meshes the geometry with the
+proven <code>Surface{} In Volume{}</code> recipe and produces
+tet-quality satisfying the bulk constraints.</p>
+<h3 id="files-to-create-2">Files to Create</h3>
+<ul>
+<li><code>code_meshing/safs_multifault_box_2000m.geo</code> — generated,
+multi-fault, free-surface variant. Hard-coded box bounds (from manifest)
+and hard-coded fault filenames.</li>
+<li><code>code_preprocess/generate_multifault_geo.py</code> — generator
+that reads the manifest and produces the <code>.geo</code>.</li>
+</ul>
+<h3 id="files-to-modify-2">Files to Modify</h3>
+<ul>
+<li>None.</li>
+</ul>
+<h3 id="detailed-requirements-2">Detailed Requirements</h3>
+<h4
+id="geo-template-literal-the-generator-instantiates-the-placeholders"><code>.geo</code>
+template (literal; the generator instantiates the <code>&lt;…&gt;</code>
+placeholders)</h4>
+<pre class="gmsh"><code>// =============================================================
+// safs_multifault_box_2000m.geo  (generated; do not edit by hand)
+//
+// Embed the six corefined SAFS faults inside a 3-D bounding box.
+// Fault sources: ../data_corefined/*_2000m_corefined.stl, produced by
+// code_preprocess/corefine_faults.py (CGAL corefine + Delaunay remesh,
+// see document/PLAN_cgal_corefine_multifault.md).
+//
+// Generated: &lt;YYYY-MM-DD&gt;  by  generate_multifault_geo.py
+// Manifest:  ../data_corefined/manifest.json
+//
+// Generate mesh:
+//   gmsh -3 safs_multifault_box_2000m.geo -o safs_multifault_box_2000m.msh
+//
+// All units: meters.  Coordinates: UTM.
+// =============================================================
+SetFactory(&quot;OpenCASCADE&quot;);
+
+// 1. Domain bounds: union of corefined-fault bboxes + paddings.
+//    Filled in from manifest by the generator.
+xmin_fault = &lt;XMIN&gt;;  xmax_fault = &lt;XMAX&gt;;
+ymin_fault = &lt;YMIN&gt;;  ymax_fault = &lt;YMAX&gt;;
+zmin_fault = &lt;ZMIN&gt;;  zmax_fault =     0.00;     // top trace clipped at z=0
+
+PAD_XY     = 50000.0;   // 50 km horizontal margin
+PAD_TOP    =   100.0;   // 100 m of rock above the free surface
+PAD_BOTTOM = 25000.0;   // 25 km of rock below deepest fault vertex
+
+xmin = xmin_fault - PAD_XY;
+xmax = xmax_fault + PAD_XY;
+ymin = ymin_fault - PAD_XY;
+ymax = ymax_fault + PAD_XY;
+zmin = zmin_fault - PAD_BOTTOM;
+zmax = zmax_fault + PAD_TOP;
+dx = xmax - xmin;  dy = ymax - ymin;  dz = zmax - zmin;
+
+// 2. Mesh size controls (HARD floor: LC_MIN must equal Phase 1 --min-edge).
+LC_MIN     =  100.0;
+LC_NEAR    = 1500.0;
+LC_FAR     = 10000.0;
+DIST_INNER =  3000.0;
+DIST_OUTER = 40000.0;
+
+Mesh.MeshSizeMin               = LC_MIN;
+Mesh.MeshSizeMax               = LC_FAR;
+Mesh.MeshSizeExtendFromBoundary = 0;
+Mesh.MeshSizeFromPoints         = 0;
+Mesh.MeshSizeFromCurvature      = 0;
+Geometry.Tolerance              = 1e-3;          // 1 mm; tighter than STL writer
+
+// 3. Box volume.  OCC tags 1..6 for box faces; volume tag 1.
+Box(1) = {xmin, ymin, zmin, dx, dy, dz};
+
+// 4. Merge each corefined fault.
+//    Discrete-surface tags 7..6+N_FAULTS in order of merge.
+Merge &quot;../data_corefined/&lt;fault_1&gt;_2000m_corefined.stl&quot;;  // tag 7
+Merge &quot;../data_corefined/&lt;fault_2&gt;_2000m_corefined.stl&quot;;  // tag 8
+Merge &quot;../data_corefined/&lt;fault_3&gt;_2000m_corefined.stl&quot;;  // tag 9
+Merge &quot;../data_corefined/&lt;fault_4&gt;_2000m_corefined.stl&quot;;  // tag 10
+Merge &quot;../data_corefined/&lt;fault_5&gt;_2000m_corefined.stl&quot;;  // tag 11
+Merge &quot;../data_corefined/&lt;fault_6&gt;_2000m_corefined.stl&quot;;  // tag 12
+
+N_FAULTS    = 6;
+fault_tag_start = 7;
+fault_surfs[] = {7, 8, 9, 10, 11, 12};
+
+// 5. Embed each fault.  Do NOT call ClassifySurfaces.
+For k In {0 : N_FAULTS - 1}
+    Surface{fault_surfs[k]} In Volume{1};
+EndFor
+
+// 6. Distance-based size field (uses ALL fault surfaces).
+Field[1] = Distance;
+Field[1].SurfacesList = {fault_surfs[]};
+Field[1].Sampling     = 100;
+
+Field[2] = Threshold;
+Field[2].InField  = 1;
+Field[2].SizeMin  = LC_NEAR;
+Field[2].SizeMax  = LC_FAR;
+Field[2].DistMin  = DIST_INNER;
+Field[2].DistMax  = DIST_OUTER;
+Background Field = 2;
+
+// 7. Physical groups.
+Physical Volume(&quot;rock&quot;, 1) = {1};
+Physical Surface(&quot;fault_COAV_Mission_Creek&quot;,        101) = {fault_surfs[0]};
+Physical Surface(&quot;fault_MJVS_San_Andreas&quot;,          102) = {fault_surfs[1]};
+Physical Surface(&quot;fault_MULT_S_SAF_Banning&quot;,        103) = {fault_surfs[2]};
+Physical Surface(&quot;fault_SBMT_Garnet_Hill&quot;,          104) = {fault_surfs[3]};
+Physical Surface(&quot;fault_SBMT_Mission_Creek&quot;,        105) = {fault_surfs[4]};
+Physical Surface(&quot;fault_SBMT_San_Andreas&quot;,          106) = {fault_surfs[5]};
+Physical Surface(&quot;top&quot;,    200) = {6};
+Physical Surface(&quot;bottom&quot;, 201) = {5};
+Physical Surface(&quot;sides&quot;,  202) = {1, 2, 3, 4};
+
+// 8. Mesh algorithms (proven on single-fault freesurface_clip variant).
+Mesh.Algorithm   = 6;     // 2-D: Frontal-Delaunay
+Mesh.Algorithm3D = 1;     // 3-D: Delaunay (HXT/Algorithm3D=10 fails on
+                          // embedded discrete STLs)</code></pre>
+<p>The generator emits the <strong>canonical fault order</strong>
+(alphabetical by fault tag string); the per-Physical-Surface IDs
+(101..106) are stable across runs so MFEM’s BC-attribute mappings remain
+valid. If a fault is removed or added in a future run, the IDs above
+must be updated by hand or the generator extended to assign IDs from the
+manifest.</p>
+<h4
+id="generate_multifault_geo.py-requirements"><code>generate_multifault_geo.py</code>
+requirements</h4>
+<ul>
+<li>Reads <code>data_corefined/manifest.json</code>.</li>
+<li>Computes the union bbox (<code>xmin_fault</code>,
+<code>xmax_fault</code>, …) by walking <code>meshes[].bbox</code>.</li>
+<li>Fills the <code>&lt;XMIN&gt;</code>, <code>&lt;XMAX&gt;</code>, etc.
+placeholders.</li>
+<li>Fills the six <code>&lt;fault_k&gt;</code> placeholders in the
+merged-files block, in alphabetical order of basename.</li>
+<li>Writes the <code>.geo</code> to
+<code>code_meshing/safs_multifault_box_&lt;R&gt;m.geo</code>.</li>
+<li>CLI: <code>--manifest</code>, <code>--res</code>,
+<code>--out-geo</code>, <code>--pad-xy</code>, <code>--pad-top</code>,
+<code>--pad-bottom</code>. Defaults match the template.</li>
+<li>Idempotent: re-running with the same manifest produces a byte-equal
+<code>.geo</code> (so <code>git diff</code> is meaningful).</li>
+</ul>
+<h4 id="conformality-preservation-through-stl-merge">Conformality
+preservation through STL Merge</h4>
+<p>gmsh’s <code>Merge</code> for STL deduplicates vertices within
+<code>Geometry.Tolerance</code>. Default is
+<code>1e-8 · bbox_diag</code>; for a box ~500 km across that’s ~5 mm,
+<strong>insufficient at the writer-precision floor of
+<code>%.10g</code></strong> (which gives sub-mm). The template sets
+<code>Geometry.Tolerance = 1e-3</code> (1 mm) explicitly to make
+tolerance independent of bbox size. The Phase 1 high-precision STL
+writer is required for this guarantee.</p>
+<h4 id="verification-protocol">Verification protocol</h4>
+<p>After
+<code>gmsh -3 safs_multifault_box_2000m.geo -o safs_multifault_box_2000m.msh</code>:
+1. Run <code>code_preprocess/msh_to_vtu.py</code> to split into
+<code>*_bulk.vtu</code> + per-fault <code>*_&lt;fault&gt;.vtu</code>.
+(No code change needed; <code>msh_to_vtu.py</code> already iterates over
+physical surfaces.) 2. Run the existing quality analysis (the same code
+that produced <code>safs_fault_box_buried_bulk.vtu</code> quality stats
+in the alternative project) to verify: - Shortest edge anywhere
+<code>≥ LC_MIN = 100 m</code>. - Worst tet <code>q_tet ≥ 0.1</code>. -
+<code>≥ 99.9 %</code> of tets have <code>q_tet ≥ 0.3</code>.</p>
+<h3 id="edge-cases-to-handle-2">Edge Cases to Handle</h3>
+<ul>
+<li><strong>Disjoint fault subsets</strong> (intersection graph has
+multiple components): no special handling — each component meshes as a
+set of constraints inside the same volume.</li>
+<li><strong>Fault touching box boundary</strong>: with
+<code>PAD_XY = 50 km</code> and <code>PAD_BOTTOM = 25 km</code>, no
+fault should reach a side or bottom face. If the bbox dimensions in the
+manifest say otherwise, the generator must fail loudly with
+<code>assert pad_top &gt; 0 and zmax_fault + pad_top &gt; zmax_fault</code>.
+(Top edge at z=0 is fine — we use the freesurface convention.)</li>
+<li><strong>Triple-junction at z=0</strong> (three faults meeting on the
+free surface): handled by the Phase 1/2 triple-junction sentinel test
+(Phase 5 Test 4b). If sentinel passes, gmsh sees a degree-3 polyline
+vertex on the box top face which is a topologically valid
+configuration.</li>
+<li><strong>Manifest missing required fields</strong>: generator
+validates schema; exits 1 with the missing field listed.</li>
+</ul>
+<h3 id="acceptance-criteria-2">Acceptance Criteria</h3>
+<ul class="task-list">
+<li><label><input
+type="checkbox" /><code>python code_preprocess/generate_multifault_geo.py --res 2000</code>
+produces a <code>code_meshing/safs_multifault_box_2000m.geo</code> whose
+MD5 is stable across re-runs.</label></li>
+<li><label><input
+type="checkbox" /><code>gmsh -3 safs_multifault_box_2000m.geo -o /tmp/x.msh</code>
+exits 0; gmsh log reports <code>0 ill-shaped tets</code>.</label></li>
+<li><label><input type="checkbox" />The generated <code>.msh</code>
+parses via <code>meshio</code>, has 1 volume + 6 fault surface physical
+groups (IDs 101..106) + 3 boundary groups (IDs 200..202).</label></li>
+<li><label><input type="checkbox" />Bulk tet quality:
+<code>min q_tet ≥ 0.1</code>, <code>≥ 99.9 % q_tet ≥ 0.3</code>,
+shortest edge <code>≥ 100 m</code>.</label></li>
+<li><label><input type="checkbox" />Each fault Physical Surface has the
+same triangle count as the corresponding <code>_corefined.stl</code> —
+gmsh preserved the triangulation as a 2-D constraint without re-meshing
+it (the proven behavior of <code>Surface{} In Volume{}</code> with
+<code>Algorithm = 6, Algorithm3D = 1</code>).</label></li>
+<li><label><input type="checkbox" />Wall-clock for <code>gmsh -3</code>
+on the 2000 m geometry &lt; 30 minutes on the user’s laptop. (Time
+budget; not a correctness criterion.)</label></li>
+</ul>
+<h3 id="dependencies-2">Dependencies</h3>
+<ul>
+<li>Depends on: Phase 2 (<code>data_corefined/*_corefined.stl</code> and
+<code>manifest.json</code>).</li>
+<li>Required by: nothing in this plan; downstream MFEM consumes the
+resulting <code>.msh</code> via the existing BP5/SAFS driver (out of
+scope).</li>
+</ul>
+<h2 id="phase-4-sensitivity-sweep-over-the-two-factors">Phase 4:
+Sensitivity sweep over the two factors</h2>
+<h3 id="goal-3">Goal</h3>
+<p>A short, automated parameter sweep that quantifies how output
+triangle/tet quality and mesh count depend on
+<code>mesh-edge-size</code> and <code>min-edge</code>. The deliverable
+is a markdown report with per-configuration stats; no code change to
+Phases 1–3 is required.</p>
+<p>This phase exists because the user’s two stated factors (mesh size,
+low triangle/tet quality) are the levers the implementer will tune. We
+need numbers, not assertions, to defend the default choices in the
+plan.</p>
+<h3 id="files-to-create-3">Files to Create</h3>
+<ul>
+<li><code>code_preprocess/sensitivity_sweep.py</code> — driver that
+loops over a small grid and runs Phases 2+3 each time into a temp
+dir.</li>
+<li><code>document/REPORT_sensitivity_&lt;DATE&gt;.md</code> — emitted
+by the driver; generated, not hand-written.</li>
+</ul>
+<h3 id="files-to-modify-3">Files to Modify</h3>
+<ul>
+<li>None.</li>
+</ul>
+<h3 id="detailed-requirements-3">Detailed Requirements</h3>
+<h4 id="sweep-grid-small-4-configs">Sweep grid (small; 4 configs)</h4>
+<table>
+<colgroup>
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+<col style="width: 20%" />
+</colgroup>
+<thead>
+<tr>
+<th>Config</th>
+<th>mesh-edge-size</th>
+<th>min-edge</th>
+<th>polyline-spacing</th>
+<th>Purpose</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>baseline</code></td>
+<td>1500</td>
+<td>100</td>
+<td>750</td>
+<td>the plan’s default</td>
+</tr>
+<tr>
+<td><code>coarser</code></td>
+<td>2000</td>
+<td>100</td>
+<td>1000</td>
+<td>matches the cleanfreesurf <code>_2000m</code> resolution; mesh-count
+baseline</td>
+</tr>
+<tr>
+<td><code>finer</code></td>
+<td>1000</td>
+<td>100</td>
+<td>500</td>
+<td>doubles polyline density; should improve worst tet</td>
+</tr>
+<tr>
+<td><code>tighter_floor</code></td>
+<td>1500</td>
+<td>200</td>
+<td>750</td>
+<td>tests whether raising <code>min-edge</code> to 200 m loses pairwise
+conformality on triple junctions</td>
+</tr>
+</tbody>
+</table>
+<p>Total: 4 runs of <code>corefine_faults.py --res 2000</code> and 4
+runs of <code>gmsh -3 …</code>. Estimated wall-clock 30–60 minutes.</p>
+<h4 id="per-config-metrics-extracted-from-manifest-msh">Per-config
+metrics (extracted from manifest + msh)</h4>
+<ul>
+<li>Output triangle count per fault.</li>
+<li><code>min(edge_length)</code> and <code>min(q_tri)</code> per
+fault.</li>
+<li>Bulk tet count.</li>
+<li><code>min(q_tet)</code>, <code>p1(q_tet)</code>, fraction
+<code>q_tet ≥ 0.3</code>.</li>
+<li>Wall-clock breakdown: corefine, remesh, gmsh.</li>
+</ul>
+<h4 id="report-layout">Report layout</h4>
+<div class="sourceCode" id="cb8"><pre
+class="sourceCode markdown"><code class="sourceCode markdown"><span id="cb8-1"><a href="#cb8-1" aria-hidden="true" tabindex="-1"></a><span class="fu"># Sensitivity sweep — CGAL corefine + gmsh — SAFS 2000 m</span></span>
+<span id="cb8-2"><a href="#cb8-2" aria-hidden="true" tabindex="-1"></a>Date: 2026-MM-DD</span>
+<span id="cb8-3"><a href="#cb8-3" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-4"><a href="#cb8-4" aria-hidden="true" tabindex="-1"></a><span class="fu">## Defaults defended by this sweep</span></span>
+<span id="cb8-5"><a href="#cb8-5" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>mesh-edge-size: 1500 m   (baseline outperforms coarser on min q_tet by …)</span>
+<span id="cb8-6"><a href="#cb8-6" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>min-edge:       100 m    (tighter_floor reduces min q_tri by … but doubles polyline merges)</span>
+<span id="cb8-7"><a href="#cb8-7" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>polyline-spacing: 750 m  (= 0.5 × mesh-edge-size; finer adds … verts for negligible quality gain)</span>
+<span id="cb8-8"><a href="#cb8-8" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb8-9"><a href="#cb8-9" aria-hidden="true" tabindex="-1"></a><span class="fu">## Per-config table</span></span>
+<span id="cb8-10"><a href="#cb8-10" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Config <span class="pp">|</span> min q_tri <span class="pp">|</span> median q_tri <span class="pp">|</span> min q_tet <span class="pp">|</span> % q_tet ≥ 0.3 <span class="pp">|</span> n_tets <span class="pp">|</span></span>
+<span id="cb8-11"><a href="#cb8-11" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|---|---|</span></span>
+<span id="cb8-12"><a href="#cb8-12" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> baseline      <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span></span>
+<span id="cb8-13"><a href="#cb8-13" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> coarser       <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span></span>
+<span id="cb8-14"><a href="#cb8-14" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> finer         <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span></span>
+<span id="cb8-15"><a href="#cb8-15" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> tighter_floor <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span>  …  <span class="pp">|</span></span></code></pre></div>
+<h3 id="edge-cases-to-handle-3">Edge Cases to Handle</h3>
+<ul>
+<li>A config that fails (<code>corefine_set</code> exit non-zero, or
+gmsh failure) is recorded as “FAILED” in the report with the captured
+stderr; the sweep continues.</li>
+</ul>
+<h3 id="acceptance-criteria-3">Acceptance Criteria</h3>
+<ul class="task-list">
+<li><label><input type="checkbox" />All 4 configs run end-to-end.
+Failures in one config do not abort the others.</label></li>
+<li><label><input type="checkbox" />Report exists at
+<code>document/REPORT_sensitivity_&lt;DATE&gt;.md</code> and is
+human-readable.</label></li>
+<li><label><input type="checkbox" />At least one config (the baseline)
+satisfies the hard quality contract (<code>min q_tri ≥ 0.3</code>,
+<code>min q_tet ≥ 0.1</code>,
+<code>≥ 99.9 % q_tet ≥ 0.3</code>).</label></li>
+<li><label><input type="checkbox" />If the baseline fails, the report
+explicitly recommends a different default.</label></li>
+</ul>
+<h3 id="dependencies-3">Dependencies</h3>
+<ul>
+<li>Depends on: Phases 1, 2, 3.</li>
+<li>Required by: nothing.</li>
+</ul>
+<h2 id="phase-5-validation-harness">Phase 5: Validation harness</h2>
+<h3 id="goal-4">Goal</h3>
+<p>End-to-end automated test that exercises Phases 1–3 on the SAFS
+6-fault 2000 m fixture, asserts every hard constraint, and emits a
+reproducibility log. The triple-junction sentinel test is a hard
+gate.</p>
+<h3 id="files-to-create-4">Files to Create</h3>
+<ul>
+<li><code>code_preprocess/test_corefine_pipeline.py</code> — pytest
+end-to-end test.</li>
+<li><code>document/VALIDATION_corefine_2000m_&lt;DATE&gt;.md</code> —
+generated validation report (per-fault stats, per-pair conformality
+matrix, per-triplet sentinel results).</li>
+</ul>
+<h3 id="files-to-modify-4">Files to Modify</h3>
+<ul>
+<li>None.</li>
+</ul>
+<h3 id="detailed-requirements-4">Detailed Requirements</h3>
+<h4 id="test-functions-pytest">Test functions (pytest)</h4>
+<ol type="1">
+<li><code>test_build_cgal_binaries</code>: build
+<code>corefine_pair</code>, <code>corefine_set</code>.
+<code>pytest.skip</code> if <code>cgal-61</code> is not active.</li>
+<li><code>test_corefine_synthetic_pair</code>: Phase 1 synthetic
+acceptance — two perpendicular rectangles; assert polyline conformality
+bit-identical.</li>
+<li><code>test_corefine_set_smoke_2000m</code>: run
+<code>corefine_faults.py --res 2000</code> into a temp dir; assert exit
+0 and 6 outputs.</li>
+<li><code>test_per_fault_quality</code>: load each
+<code>_corefined.stl</code>; assert <code>min(edge) ≥ 100 m</code>,
+<code>min(q_tri) ≥ 0.3</code>, <code>median(q_tri) ≥ 0.85</code>.</li>
+<li><code>test_pairwise_conformality</code>: for every pair in
+<code>manifest.pairs</code>, load both meshes; for every polyline
+vertex, assert it appears in both meshes within
+<code>1e-6 · bbox_diag</code>.</li>
+<li><code>test_triple_junction_sentinel</code> <strong>(hard gate, per
+locked-in decision Q2 in alternative-plan
+PLAN_corefine_pipeline.md:L965-L975)</strong>: for every triplet
+<code>(A, B, C)</code> such that all three pairwise corefines are
+non-empty, locate the polyline endpoints shared between pairs
+<code>(A,B)</code> and <code>(A,C)</code> in mesh A’s polyline-vertex
+set; assert each such endpoint also exists at identical coords (within
+<code>1e-6 m</code>) in B and in C. If any triplet fails, <strong>the
+test fails</strong> and the report enumerates the failing triplets so a
+follow-up plan can address them via “snap pre-extracted triple
+junctions” or “single autorefine on the union”.</li>
+<li><code>test_gmsh_3d</code>: run
+<code>gmsh -3 safs_multifault_box_2000m.geo</code>; parse the
+<code>.msh</code>; assert the bulk-tet criteria. Skip if
+<code>gmsh</code> is not on PATH.</li>
+<li><code>test_emit_report</code>: write the validation report.</li>
+</ol>
+<h4 id="report-layout-1">Report layout</h4>
+<div class="sourceCode" id="cb9"><pre
+class="sourceCode markdown"><code class="sourceCode markdown"><span id="cb9-1"><a href="#cb9-1" aria-hidden="true" tabindex="-1"></a><span class="fu"># CGAL multi-fault corefine — Validation report — 2000 m fixture</span></span>
+<span id="cb9-2"><a href="#cb9-2" aria-hidden="true" tabindex="-1"></a>Date: 2026-MM-DD</span>
+<span id="cb9-3"><a href="#cb9-3" aria-hidden="true" tabindex="-1"></a>Inputs: data_cleanfreesurf/*_2000m_clean_clip.stl  (6 faults)</span>
+<span id="cb9-4"><a href="#cb9-4" aria-hidden="true" tabindex="-1"></a>Outputs: data_corefined/*_2000m_corefined.stl</span>
+<span id="cb9-5"><a href="#cb9-5" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-6"><a href="#cb9-6" aria-hidden="true" tabindex="-1"></a><span class="fu">## Per-fault quality</span></span>
+<span id="cb9-7"><a href="#cb9-7" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Fault <span class="pp">|</span> n_verts <span class="pp">|</span> n_faces <span class="pp">|</span> min q_tri <span class="pp">|</span> median q_tri <span class="pp">|</span> min edge (m) <span class="pp">|</span></span>
+<span id="cb9-8"><a href="#cb9-8" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|---|---|</span></span>
+<span id="cb9-9"><a href="#cb9-9" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> <span class="dt">&lt;</span><span class="kw">fault_1</span><span class="dt">&gt;</span> <span class="pp">|</span> … <span class="pp">|</span> … <span class="pp">|</span> … <span class="pp">|</span> … <span class="pp">|</span> … <span class="pp">|</span></span>
+<span id="cb9-10"><a href="#cb9-10" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> ... <span class="pp">|</span></span>
+<span id="cb9-11"><a href="#cb9-11" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-12"><a href="#cb9-12" aria-hidden="true" tabindex="-1"></a><span class="fu">## Pairwise conformality (8 pairs expected)</span></span>
+<span id="cb9-13"><a href="#cb9-13" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Pair (i,j) <span class="pp">|</span> n polyline verts <span class="pp">|</span> conformal? <span class="pp">|</span> max diff (m) <span class="pp">|</span></span>
+<span id="cb9-14"><a href="#cb9-14" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|---|</span></span>
+<span id="cb9-15"><a href="#cb9-15" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> ... <span class="pp">|</span></span>
+<span id="cb9-16"><a href="#cb9-16" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-17"><a href="#cb9-17" aria-hidden="true" tabindex="-1"></a><span class="fu">## Triple-junction sentinel</span></span>
+<span id="cb9-18"><a href="#cb9-18" aria-hidden="true" tabindex="-1"></a><span class="pp">|</span> Triplet (i,j,k) <span class="pp">|</span> polyline endpoints checked <span class="pp">|</span> passed? <span class="pp">|</span></span>
+<span id="cb9-19"><a href="#cb9-19" aria-hidden="true" tabindex="-1"></a><span class="pp">|---|---|---|</span></span>
+<span id="cb9-20"><a href="#cb9-20" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-21"><a href="#cb9-21" aria-hidden="true" tabindex="-1"></a><span class="fu">## Bulk tet quality (gmsh)</span></span>
+<span id="cb9-22"><a href="#cb9-22" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>Total tets: …</span>
+<span id="cb9-23"><a href="#cb9-23" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>min q_tet:  …</span>
+<span id="cb9-24"><a href="#cb9-24" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>≥ 0.3 frac: …</span>
+<span id="cb9-25"><a href="#cb9-25" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>shortest edge: …</span>
+<span id="cb9-26"><a href="#cb9-26" aria-hidden="true" tabindex="-1"></a></span>
+<span id="cb9-27"><a href="#cb9-27" aria-hidden="true" tabindex="-1"></a><span class="fu">## Timing</span></span>
+<span id="cb9-28"><a href="#cb9-28" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>corefine pairs: … s</span>
+<span id="cb9-29"><a href="#cb9-29" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>per-fault remesh: … s</span>
+<span id="cb9-30"><a href="#cb9-30" aria-hidden="true" tabindex="-1"></a><span class="ss">- </span>gmsh -3: … s</span></code></pre></div>
+<h3 id="edge-cases-to-handle-4">Edge Cases to Handle</h3>
+<ul>
+<li><code>cgal-61</code> env not active: skip Phase 1 build test; the
+rest of the suite reuses pre-built binaries if <code>corefine_set</code>
+is on PATH.</li>
+<li><code>gmsh</code> not installed: skip <code>test_gmsh_3d</code>; the
+rest of the report is still emitted.</li>
+<li>Failed test: the report still emits, with the failing rows
+highlighted; pytest fails non-zero.</li>
+</ul>
+<h3 id="acceptance-criteria-4">Acceptance Criteria</h3>
+<ul class="task-list">
+<li><label><input
+type="checkbox" /><code>pytest code_preprocess/test_corefine_pipeline.py -v</code>
+passes on the 2000 m fixture.</label></li>
+<li><label><input type="checkbox" />Total wall-clock &lt; 10 minutes
+(allowing the gmsh test to dominate).</label></li>
+<li><label><input type="checkbox" />Validation report exists at
+<code>document/VALIDATION_corefine_2000m_&lt;DATE&gt;.md</code>.</label></li>
+<li><label><input type="checkbox" />Triple-junction sentinel passes on
+all detected triplets, OR the report explicitly enumerates failing
+triplets and links to a follow-up plan stub.</label></li>
+</ul>
+<h3 id="dependencies-4">Dependencies</h3>
+<ul>
+<li>Depends on: Phases 1, 2, 3.</li>
+<li>Required by: nothing.</li>
+</ul>
+<h2 id="testing-strategy">Testing Strategy</h2>
+<h3 id="unit-tests">Unit tests</h3>
+<ul>
+<li><code>polyline_resample::resample</code>: synthetic open and closed
+polylines; assert (a) first/last preserved, (b) all sub-segments in
+<code>[0.5, 1.5] · spacing</code>, (c) no sub-edge &lt;
+<code>min_edge</code>, (d) total length preserved within
+<code>spacing</code>.</li>
+<li><code>quality_repair::compute_stats</code>: hand-crafted mesh with
+known min edge, q_tri, n_below_floor; verify exact match.</li>
+<li><code>intersection_graph::sort_by_overlap_volume</code>: synthetic
+4-mesh case; assert deterministic order on tied volumes.</li>
+</ul>
+<h3 id="integration-tests-phase-1">Integration tests (Phase 1)</h3>
+<ul>
+<li>Two perpendicular rectangles (synthetic, exact analytical
+intersection).</li>
+<li>Two slightly-misaligned planes (1° dihedral):
+<code>features-angle-bound = 60°</code> should treat the intersection as
+a feature.</li>
+<li>Two near-coplanar planes (0.1°): expected to abort with the
+coplanar-overlap warning (Phase 1 edge case).</li>
+</ul>
+<h3 id="end-to-end-tests-phase-5">End-to-end tests (Phase 5)</h3>
+<ul>
+<li>6-fault SAFS 2000 m: covered by Phase 5 acceptance criteria. Hard
+gate.</li>
+<li>6-fault SAFS 1000 m, 500 m: explicitly <strong>out of scope</strong>
+for this plan (locked-in decision Q3 in alternative plan). A follow-up
+plan adds these once 2000 m is green.</li>
+</ul>
+<h3 id="reference-solutions">Reference solutions</h3>
+<ul>
+<li>For a single corefine pair, the analytic intersection line is known
+when the inputs are planes; use as ground truth.</li>
+<li>For multi-fault, no analytic reference; cross-check by:
+<ol type="1">
+<li>Total polyline-vertex count in mesh A across all its intersection
+partners equals the union (no double-counting).</li>
+<li>Euler characteristic <code>V − E + F</code> of each output mesh
+matches a manifold-with-boundary expectation.</li>
+<li>STL ASCII round-trip → re-read → re-compute manifest is bit-stable
+to within the documented tolerance.</li>
+</ol></li>
+</ul>
+<h2 id="risk-assessment">Risk Assessment</h2>
+<h3 id="high-risk">High risk</h3>
+<ul>
+<li><strong><code>surface_Delaunay_remeshing</code> instability on
+near-coplanar inputs.</strong> The Mesh_3 surface remesher uses 3-D
+Delaunay refinement internally; near-coplanar surfaces produce flat
+tetrahedra that may cause non-termination. Mitigation: detect via Phase
+1 coplanar edge case (exit 5); reject inputs with dihedral &lt; ~5°. The
+SAFS faults dip 60–90°; near-coplanar should not occur in practice but
+cleanfreesurf’s snap-strip <em>can</em> create coplanar overlap if the
+user re-tunes <code>--target-length</code>.</li>
+<li><strong>STL precision-induced conformality loss.</strong> Default
+ASCII STL writers use ~6-digit precision; UTM coordinates (~10⁶ m) need
+≥ 10 digits or polyline vertices drift by mm at the writer step, which
+gmsh’s default <code>Geometry.Tolerance</code> will then dedup as
+different vertices. Mitigation: custom <code>%.10g</code> writer in
+<code>io_helpers.h</code> (Phase 1) plus explicit
+<code>Geometry.Tolerance = 1e-3</code> in the <code>.geo</code> (Phase
+4). Acceptance criterion 4 of Phase 1 verifies this empirically.</li>
+<li><strong>Multi-pair corefine ordering.</strong>
+<code>corefine(A, B)</code> modifies A in-place; subsequent
+<code>corefine(A, C)</code> sees the modified A. If the (A,B) corefine
+introduces vertices very close to A∩C, exact predicates may produce a
+slightly different polyline than expected. Mitigation: process pairs in
+deterministic descending-bbox-overlap-volume order (Phase 1,
+<code>intersection_graph::sort_by_overlap_volume</code>); document that
+re-ordering may give bit-different but equally valid output.</li>
+</ul>
+<h3 id="medium-risk">Medium risk</h3>
+<ul>
+<li><strong><code>PMP::corefine</code> self-intersection
+precondition.</strong> Inputs with near-coincident faces (which SAFS
+data may exhibit at fault perimeters where two faults touch the surface
+trace) can cause <code>corefine</code> to throw. Mitigation: Phase 1
+step 3 pre-cleans each input with <code>PMP::autorefine</code> if
+<code>PMP::does_self_intersect</code> returns true.</li>
+<li><strong>Triple junctions via per-pair processing.</strong> CGAL’s
+<code>surface_intersection</code> precondition requires “all vertices
+but endpoints being of degree 2” <em>per pair</em>. In a triple
+junction, mesh A sees a degree-3 polyline vertex when its two incoming
+intersection lines (with B and C) cross. Mitigation: per-pair processing
+handles this naturally because each pair’s polyline is degree-2; the
+union of polylines in mesh A may have degree-3 <em>junction
+vertices</em>, but <code>surface_Delaunay_remeshing</code> accepts a
+polyline <em>set</em> and treats it as a constraint graph. The Phase 5
+sentinel test (<code>test_triple_junction_sentinel</code>) is the hard
+gate.</li>
+<li><strong><code>surface_Delaunay_remeshing</code> polyline-resampling
+determinism.</strong> Two calls with identical
+<code>polyline_constraints</code> <em>should</em> produce identical
+resampled vertex sequences, but this is not explicitly documented.
+Mitigation: pre-resample once at Phase 1 step 5 and pass already-uniform
+polylines; the remesher’s internal resampling becomes a no-op.</li>
+<li><strong>gmsh <code>Geometry.Tolerance</code> mismatch with bbox
+diagonal.</strong> Default is bbox-diag-relative; if the user shrinks
+the box, tolerance scales but STL precision does not. Mitigation: Phase
+4 sets <code>Geometry.Tolerance = 1e-3</code> explicitly.</li>
+</ul>
+<h3 id="low-risk">Low risk</h3>
+<ul>
+<li><strong>C++ build reproducibility</strong>: <code>cgal-61</code> env
+is pinned; <code>cgal-cpp 6.1.1</code> API stable.</li>
+<li><strong>Triangulation density blowup at
+<code>--res 500</code></strong>: not in scope here; flagged for the
+follow-up plan.</li>
+</ul>
+<h2 id="resolved-questions-locked-in-for-this-plan">Resolved questions
+(locked in for this plan)</h2>
+<p>These are inherited from the alternative plan (<a
+href="../../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md"><code>../project_7.0_alternative/code_preprocess/PLAN_corefine_pipeline.md</code></a>:L962-L977)
+and re-confirmed for the multi-fault preferred case.</p>
+<ul>
+<li><strong>Q1 — Free-surface clipping is OUT OF SCOPE for this
+plan.</strong> Inputs are
+<code>data_cleanfreesurf/*_clean_clip.stl</code>, already produced by
+the upstream <code>clean_freesurface_mesh.py</code>. This pipeline does
+not re-clip, re-snap, or re-remesh the free surface. Top edge sits at
+z=0 by upstream construction.</li>
+<li><strong>Q2 — Triple junctions: pure pairwise corefine.</strong>
+Per-pair <code>surface_intersection</code> + <code>corefine</code>,
+accumulate polyline sets, single <code>surface_Delaunay_remeshing</code>
+per mesh. Phase 5 <code>test_triple_junction_sentinel</code> is the hard
+gate. If it fails on the SAFS 2000 m fixture, escalate via a follow-up
+plan that implements the alternative-plan options (ii) “snap
+pre-extracted triple junctions” or (iii) “single autorefine on the
+union”.</li>
+<li><strong>Q3 — Validation scope: 2000 m only.</strong> Phase 5 fixture
+is <code>*_2000m_clean_clip.stl</code> × 6 faults. 1000 m and 500 m
+fixtures are deferred to a follow-up plan. The driver and binaries
+accept <code>--res 1000</code> and <code>--res 500</code> but those
+resolutions are not in the acceptance contract here.</li>
+</ul>
+<h2 id="open-questions-not-resolved-flagged-for-follow-up">Open
+questions (NOT resolved; flagged for follow-up)</h2>
+<ul>
+<li><strong>Should the sensitivity sweep (Phase 4) be promoted to a hard
+gate?</strong> Currently it is descriptive (defends the defaults). If a
+reviewer disagrees with the defaults, the sweep is the place to argue.
+No conditional decision tree is built into the plan; out of scope.</li>
+<li><strong>Does CGAL 6.1.1 have a multi-mesh corefine</strong> (e.g.,
+<code>corefine_with_constrained_edges</code> or an
+<code>autorefine</code>-style N-mesh variant)?
+PLAN_corefine_pipeline.md:L437-L449 flags this as worth verifying. If
+yes, the per-pair loop in Phase 1 (<code>corefine_set</code>) could be
+replaced by a single call. <strong>Action</strong>: Phase 1 implementer
+searches <code>corefinement.h</code> of <code>cgal-cpp 6.1.1</code>; if
+found, file an addendum to this plan before implementing the per-pair
+loop. If not found, proceed with per-pair as specified.</li>
+<li><strong>Does <code>data_corefined/</code> belong under version
+control?</strong> The corefined STLs are derived data and reproducible,
+but they are slow to regenerate (~5 min for 2000 m). Recommendation:
+gitignore them and keep <code>manifest.json</code> in source control as
+a lightweight provenance file. Out of scope; defer to user.</li>
+</ul>
+<h2 id="defence-why-this-plan-vs.-alternatives">Defence — why this plan
+vs. alternatives</h2>
+<ul>
+<li><strong>Why not pymeshlab/MeshLab only?</strong>
+EXPLORE_pymeshlab_intersections.md proves empirically that pymeshlab
+cannot produce conformal multi-fault output; its boolean filter requires
+closed solids, its uniform-resampler destroys the source triangulation,
+its merge filter only welds at exact coordinate coincidence. <strong>No
+combination of installed pymeshlab filters yields conformal A∩B for open
+meshes</strong> (EXPLORE_pymeshlab_intersections.md:L165-L167).</li>
+<li><strong>Why not a single-binary <code>PMP::autorefine</code> on the
+polygon-soup union?</strong> Possible but loses per-fault identity,
+which Phase 4 needs to assign Physical Surface tags. Per-pair
+<code>corefine</code> preserves the input mesh structure and lets us
+assign Physical Surfaces deterministically.</li>
+<li><strong>Why not gmsh’s <code>BooleanFragments</code>?</strong>
+Tested in the alternative project on a single-fault, single-box geometry
+(notes embedded in <code>safs_fault_box_buried.geo:L84-L89</code> and
+<code>safs_fault_box_freesurface_clip.geo:L7-L21</code>); produces “No
+tetrahedra in region 1” or “No closed volume” because OCC fragmentation
+does not work on <strong>discrete (STL-imported)</strong> surfaces — it
+requires parametric OCC surfaces. Phase 4 of the alternative plan
+documents an optional retest on the corefined output
+(PLAN_corefine_pipeline.md:L786-L825). This plan deliberately does not
+include that retest because the SAFS 6-fault network has 8 intersection
+lines and the BooleanFragments retest scales poorly. If a future
+reviewer wants the retest documented, it can be added as a Phase 4.5
+mirroring the alternative plan.</li>
+<li><strong>Why CGAL 6.1.1 specifically?</strong>
+<code>surface_Delaunay_remeshing</code> was added in 6.0;
+<code>Adaptive_sizing_field</code> and <code>relax_constraints</code>
+are 5.4+ and 6.0+; the user’s <code>cgal-61</code> env ships exactly
+6.1.1. EXPLORE_cgal_corefine.md:L382-L389 enumerates the
+version-specific features.</li>
+<li><strong>Why <code>protect_constraints=true</code> in
+<code>surface_Delaunay_remeshing</code> rather than
+<code>false</code>?</strong> Because the polyline is <em>already
+resampled</em> to satisfy the <code>≤ 4/3·mesh_edge_size</code>
+precondition; <code>true</code> then preserves the polyline exactly
+(highest quality), whereas <code>false</code> would re-collapse the
+resampled polyline (sliver-recovery, but at the cost of polyline drift
+between A and B). The trap (PLAN_corefine_pipeline.md:L342-L351) is “raw
+corefine output as the constraint with
+<code>protect_constraints=true</code>”, which we avoid by resampling
+first.</li>
+</ul>
+<h2 id="next-step-action-items-if-the-plan-is-approved">Next-step action
+items if the plan is approved</h2>
+<ol type="1">
+<li>Phase 1 (build C++ tools): ~1 day. Bulk of the work is the cmake
+configuration and the high-precision STL writer; algorithmic logic is
+borrowed from the alternative plan.</li>
+<li>Phase 2 (Python orchestration): ~half day.</li>
+<li>Phase 3 (gmsh <code>.geo</code> generator + smoke test): ~half
+day.</li>
+<li>Phase 4 (sensitivity sweep): ~half day; mostly running and
+tabulating.</li>
+<li>Phase 5 (validation harness + report): ~half day.</li>
+</ol>
+<p>Total estimate: 3 working days for a clean implementation including
+the report. If Phase 5’s triple-junction sentinel fails, add 1–2 days
+for the follow-up plan that implements alternative-plan option (ii) or
+(iii).</p>
+</body>
+</html>

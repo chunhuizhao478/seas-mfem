@@ -1,0 +1,54 @@
+{
+  "box_bbox": {
+    "x_hi": 672329.5,
+    "x_lo": 315072.3,
+    "y_hi": 3888985.0,
+    "y_lo": 3642278.0,
+    "z_hi": 100.0,
+    "z_lo": -43073.44
+  },
+  "coord_tol_m": 1e-06,
+  "faults": [
+    {
+      "basename": "SAFS-SAFZ-COAV-Mission_Creek_fault_strand-CFM4_2000m",
+      "first_tri": 4,
+      "n_dedup": 0,
+      "n_tri": 716
+    },
+    {
+      "basename": "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_2000m",
+      "first_tri": 720,
+      "n_dedup": 0,
+      "n_tri": 976
+    },
+    {
+      "basename": "SAFS-SAFZ-MULT-Southern_San_Andreas_fault_and_Banning-CFM6_2000m",
+      "first_tri": 1696,
+      "n_dedup": 31,
+      "n_tri": 1178
+    },
+    {
+      "basename": "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_2000m",
+      "first_tri": 2874,
+      "n_dedup": 17,
+      "n_tri": 1121
+    },
+    {
+      "basename": "SAFS-SAFZ-SBMT-Mission_Creek_fault_strand-CFM4_2000m",
+      "first_tri": 3995,
+      "n_dedup": 9,
+      "n_tri": 906
+    },
+    {
+      "basename": "SAFS-SAFZ-SBMT-San_Andreas_fault-CFM6_2000m",
+      "first_tri": 4901,
+      "n_dedup": 67,
+      "n_tri": 2685
+    }
+  ],
+  "n_box_triangles": 12,
+  "n_cross_fault_edges": 218,
+  "n_dedup_fault_vertices": 124,
+  "n_total_triangles": 7586,
+  "n_total_vertices": 4238
+}
