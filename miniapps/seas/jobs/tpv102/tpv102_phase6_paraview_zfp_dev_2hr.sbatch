@@ -2,10 +2,10 @@
 #SBATCH -J tpv102_p6_zfp
 #SBATCH -o tpv102_p6_zfp_%j.out
 #SBATCH -e tpv102_p6_zfp_%j.err
-#SBATCH -p development
+#SBATCH -p normal
 #SBATCH -N 8
 #SBATCH -n 400
-#SBATCH -t 02:00:00
+#SBATCH -t 06:00:00
 #SBATCH -A EAR20006
 
 # TPV102 — Phase 6 ParaView compaction reference run.
@@ -131,7 +131,7 @@ ibrun ./seas_tpv102_driver \
       --order 1 \
       --bc-mode absorbing \
       --cfl 0.5 \
-      --tfinal 5.0 \
+      --tfinal 12.0 \
       --ader-order 2 \
       --friction-solver newton-stable \
       --fric-law aging \
