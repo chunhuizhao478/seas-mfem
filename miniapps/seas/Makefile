@@ -2621,8 +2621,14 @@ test-parallel-elasticity: seas_test_parallel_elasticity
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_elasticity
 
 # Parallel wave operator tests (dynamic rupture)
-seas_test_parallel_wave_operator: $(TEST_PARALLEL_WAVE_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_WAVE_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+# Match the serial rule (line 847): the test instantiates
+# WaveOperator<ParMesh>, whose ComputeFaceFluxRHS calls non-template
+# methods on PrecomputedFaceFluxes (AddBoundaryFaceRhs, AddInteriorFaceRhs).
+# Those live in dynamic/precomputed_face_fluxes.cpp, so the .o must be on
+# the link line — and the same applies to the non-template parts of
+# WaveOperator itself.
+seas_test_parallel_wave_operator: $(TEST_PARALLEL_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 
 $(TEST_PARALLEL_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
