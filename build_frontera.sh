@@ -28,9 +28,19 @@
 #                                 module instead of building one).
 #   USE_MUMPS=0                 # Disable MFEM's direct MUMPS integration
 #   USE_HDF5=NO                 # Disable HDF5 + H5Z-ZFP integration
-#   QUICK=1                     # Skip the zfp / h5z-zfp clone + rebuild
-#                               # step (reuse an existing install if
-#                               # libh5zzfp.so is already present).
+#   QUICK=1   (default)         # Reuse already-installed deps when their
+#                               # key files are present (hdf5: libhdf5.so
+#                               # + hdf5.h; zfp/h5z-zfp: libh5zzfp.{so,
+#                               # dylib}).  Run with FORCE_REBUILD=1 (or
+#                               # QUICK=0) to clear the cache and build
+#                               # everything from scratch.
+#   FORCE_REBUILD=1             # Force fresh rebuild of HDF5, ZFP, and
+#                               # H5Z-ZFP even if existing installs look
+#                               # complete.  Useful after changing
+#                               # HDF5_VERSION or after switching from
+#                               # HDF5_USE_MODULE=YES to NO (the cached
+#                               # H5Z-ZFP plugin is linked against the
+#                               # old HDF5).
 #   ZFP_VERSION=1.0.1           # ZFP base library tag to check out
 #   H5Z_ZFP_VERSION=v1.1.1      # H5Z-ZFP plugin tag to check out
 #   ZFP_PREFIX=...              # Override the ZFP install prefix
@@ -53,8 +63,14 @@ USE_MUMPS="${USE_MUMPS:-YES}"
 USE_HDF5="${USE_HDF5:-YES}"
 HDF5_USE_MODULE="${HDF5_USE_MODULE:-NO}"
 HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
-QUICK="${QUICK:-0}"
+QUICK="${QUICK:-1}"
+FORCE_REBUILD="${FORCE_REBUILD:-0}"
 JOBS="${JOBS:-8}"
+
+# FORCE_REBUILD=1 wins over QUICK=1: clear caches and rebuild from source.
+if [ "${FORCE_REBUILD}" = "1" ] || [ "${FORCE_REBUILD}" = "YES" ] || [ "${FORCE_REBUILD}" = "yes" ]; then
+    QUICK=0
+fi
 ZFP_VERSION="${ZFP_VERSION:-1.0.1}"
 H5Z_ZFP_VERSION="${H5Z_ZFP_VERSION:-v1.1.1}"
 
@@ -245,11 +261,12 @@ build_hdf5() {
     if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
         if [ -f "${hdf5_lib}" ] && [ -f "${HDF5_PREFIX}/include/hdf5.h" ]; then
             echo ""
-            echo "=== QUICK=1: reusing existing HDF5 at ${HDF5_PREFIX} ==="
+            echo "=== Reusing existing HDF5 at ${HDF5_PREFIX} ==="
+            echo "    (set FORCE_REBUILD=1 to clear and rebuild)"
             return 0
         fi
         echo ""
-        echo "=== QUICK=1 set but ${hdf5_lib} is missing — building anyway ==="
+        echo "=== Cache miss: ${hdf5_lib} not found — building HDF5 ==="
     fi
 
     echo ""
@@ -342,16 +359,23 @@ build_zfp_and_h5z_zfp() {
         return 0
     fi
 
+    local zfp_lib_so="${ZFP_PREFIX}/lib64/libzfp.so"
+    local zfp_lib_so_alt="${ZFP_PREFIX}/lib/libzfp.so"
     local plugin_so="${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.so"
     local plugin_dylib="${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.dylib"
     if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
-        if [ -f "${plugin_so}" ] || [ -f "${plugin_dylib}" ]; then
+        # Reuse only when BOTH ZFP and the H5Z-ZFP plugin look complete —
+        # otherwise a half-finished extern/ tree would silently succeed.
+        if { [ -f "${zfp_lib_so}" ] || [ -f "${zfp_lib_so_alt}" ]; } &&
+           { [ -f "${plugin_so}" ] || [ -f "${plugin_dylib}" ]; }; then
             echo ""
-            echo "=== QUICK=1: reusing existing H5Z-ZFP plugin at ${H5Z_ZFP_PREFIX}/plugin ==="
+            echo "=== Reusing existing ZFP + H5Z-ZFP at ${H5Z_ZFP_PREFIX} ==="
+            echo "    (set FORCE_REBUILD=1 to clear and rebuild — necessary"
+            echo "     when HDF5_VERSION or HDF5_USE_MODULE has changed)"
             return 0
         fi
         echo ""
-        echo "=== QUICK=1 set but ${plugin_so} is missing — building anyway ==="
+        echo "=== Cache miss: ZFP or H5Z-ZFP install incomplete — building ==="
     fi
 
     echo ""
