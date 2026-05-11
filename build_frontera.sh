@@ -505,17 +505,40 @@ make -j"${JOBS}"
 echo ""
 echo "=== Building SEAS miniapps ==="
 cd miniapps/seas
-# Note: seas_bp1_full is intentionally NOT built on Frontera.  It pulls
-# in tests/verification/bp1_verification_full.cpp which instantiates
-# SEASQuasiDynamicOperator<ParMesh, AntiplaneDomainOperator<ParMesh>, ...>,
-# and that template calls ComputeTractionDiagnostics / IsFirstStepDebugEnabled
-# on the domain operator — methods that only exist on ElasticityDomainOperator
-# (added April 2026 in commits 8cb7c00 / b631c63 for BP5 face tracing).
-# Re-enable here after Antiplane gains the matching stubs or after the
-# template guards those calls.
-make seas_bp5_full \
+# Build target list:
+#   - Everything `make all` would build (MINIAPPS = SEQ_MINIAPPS +
+#     PAR_MINIAPPS + SEQ_LONG + PAR_LONG, see Makefile:570-700) ...
+#   - ... minus antiplane / BP1 / BP2 targets, which instantiate
+#     SEASQuasiDynamicOperator<..., AntiplaneDomainOperator<...>, ...>.
+#     That template calls ComputeTractionDiagnostics /
+#     IsFirstStepDebugEnabled on the domain operator (added April 2026 in
+#     commits 8cb7c00 / b631c63 for BP5 face tracing) — methods that
+#     only exist on ElasticityDomainOperator, not on Antiplane.
+#   - Plus the tpv102/104/205 dynamic-rupture drivers, which the seas
+#     Makefile keeps outside MINIAPPS.
+MINIAPPS_LIST="$(make -s -f Makefile -f - print-miniapps <<'PRINT_MAKEFILE'
+.PHONY: print-miniapps
+print-miniapps:
+	@echo $(MINIAPPS)
+PRINT_MAKEFILE
+)"
+FILTERED_TARGETS=""
+SKIPPED_TARGETS=""
+for t in ${MINIAPPS_LIST}; do
+    case "${t}" in
+        *bp1*|*bp2*|*antiplane*|*pseas*)
+            SKIPPED_TARGETS="${SKIPPED_TARGETS} ${t}"
+            ;;
+        *)
+            FILTERED_TARGETS="${FILTERED_TARGETS} ${t}"
+            ;;
+    esac
+done
+if [ -n "${SKIPPED_TARGETS}" ]; then
+    echo "  Skipping antiplane / BP1 / BP2 targets:${SKIPPED_TARGETS}"
+fi
+make ${FILTERED_TARGETS} \
      seas_tpv102_driver seas_tpv104_driver seas_tpv205_driver \
-     seas_test_parallel_elasticity seas_test_bp5_parallel_smoke \
      -j"${JOBS}"
 
 # Build TOML driver if toml11 is available
@@ -530,13 +553,16 @@ fi
 
 echo ""
 echo "=== Build complete ==="
-echo "Binaries:"
-echo "  $(pwd)/seas_bp5_full"
-echo "  $(pwd)/seas_tpv102_driver"
-echo "  $(pwd)/seas_tpv104_driver"
-echo "  $(pwd)/seas_tpv205_driver"
-echo "  $(pwd)/seas_test_parallel_elasticity"
-echo "  $(pwd)/seas_test_bp5_parallel_smoke"
+echo "Key binaries (full list under $(pwd)):"
+echo "  ./seas_bp5_full                            # BP5 verification driver"
+echo "  ./seas_tpv102_driver"
+echo "  ./seas_tpv104_driver"
+echo "  ./seas_tpv205_driver"
+echo "  ./seas_test_parallel_elasticity"
+echo "  ./seas_test_bp5_parallel_smoke"
+echo "  ./seas_test_bp5_integration"
+echo "  ./seas_test_bp5_fault_operator"
+echo "  ./seas_test_friction_law                   # (and ~50 other unit/parallel tests)"
 if [ "${DRIVER_BUILT}" = "1" ]; then
     echo "  $(pwd)/seas_driver          (TOML-based, new code paths)"
 fi
