@@ -21,6 +21,10 @@ set -euo pipefail
 
 SBATCH_LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 
+# Project checkout root.  Override at submit time when running from a
+# different clone, e.g. `SEAS_MFEM_ROOT=$(pwd) sbatch ...`.
+SEAS_MFEM_ROOT="${SEAS_MFEM_ROOT:-/scratch2/10024/zhaochun/seas-project/seas-mfem}"
+
 module load intel/19.1.1
 module load impi/19.0.9
 module load hypre/2.31.0
@@ -28,15 +32,26 @@ module load mumps/5.3
 module load parmetis
 module load petsc/3.15
 module load fftw3/3.3.8
-module load phdf5/1.14.4
+# NOTE: do NOT load phdf5 on Frontera.  The phdf5/1.14.x module
+# requires intel/23.1.0 + impi/21.9.0 (incompatible with the intel/19
+# hypre/mumps/petsc stack we use), and older modules (1.10/1.12) lack
+# symbols MFEM mesh/vtkhdf.cpp needs (H5S_BLOCK, the unsigned-long-long
+# hsize_t typedef).  build_frontera.sh builds HDF5 1.14.x from source
+# into ${SEAS_MFEM_ROOT}/extern/hdf5/install instead; we link/run
+# against that.
 
-export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${TACC_HDF5_LIB}:${LD_LIBRARY_PATH}"
+HDF5_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/hdf5/install"
+H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
 
-if [ -d "$WORK/h5z-zfp/install/plugin" ]; then
-   export HDF5_PLUGIN_PATH="$WORK/h5z-zfp/install/plugin"
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${HDF5_BUILT_DIR}/lib:${LD_LIBRARY_PATH:-}"
+
+if [ -d "${H5Z_ZFP_BUILT_DIR}/plugin" ]; then
+   export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin"
+else
+   echo "WARNING: ${H5Z_ZFP_BUILT_DIR}/plugin not found — run build_frontera.sh first."
 fi
 
-cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+cd "${SEAS_MFEM_ROOT}"
 
 JOBS=8
 
