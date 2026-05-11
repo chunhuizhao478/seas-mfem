@@ -595,24 +595,10 @@ if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
     echo ""
     echo "H5Z-ZFP plugin:"
     echo "  ${H5Z_ZFP_PREFIX}/plugin/libh5zzfp.so"
-    echo "  (set HDF5_PLUGIN_PATH=${H5Z_ZFP_PREFIX}/plugin at runtime)"
-    # The Phase 6 sbatch currently look for the plugin under
-    # $WORK/h5z-zfp/install/plugin (see jobs/{bp5,tpv*}/*phase6*.sbatch).
-    # Flag the mismatch so the user updates either the sbatch or
-    # symlinks the new install into place.
-    SBATCH_DEFAULT_PATH="${WORK:-\$WORK}/h5z-zfp/install/plugin"
-    if [ "${H5Z_ZFP_PREFIX}/plugin" != "${SBATCH_DEFAULT_PATH}" ]; then
-        echo ""
-        echo "NOTE: the Phase 6 sbatch in miniapps/seas/jobs/{bp5,tpv*}/"
-        echo "      *phase6_paraview_zfp* default to HDF5_PLUGIN_PATH ="
-        echo "      ${SBATCH_DEFAULT_PATH}"
-        echo "      To keep the sbatch unchanged, either:"
-        echo "        (a) re-run this script with H5Z_ZFP_PREFIX="
-        echo "            \$WORK/h5z-zfp/install, or"
-        echo "        (b) symlink the install:"
-        echo "              mkdir -p \$WORK/h5z-zfp"
-        echo "              ln -s ${H5Z_ZFP_PREFIX} \$WORK/h5z-zfp/install"
-    fi
+    echo "  (HDF5_PLUGIN_PATH=${H5Z_ZFP_PREFIX}/plugin at runtime — the"
+    echo "   Phase 6 sbatch in miniapps/seas/jobs/{bp5,tpv*}/*phase6*"
+    echo "   already point at \${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin,"
+    echo "   so no manual override is needed if you submit from this checkout.)"
 fi
 echo ""
 echo "Run examples:"
