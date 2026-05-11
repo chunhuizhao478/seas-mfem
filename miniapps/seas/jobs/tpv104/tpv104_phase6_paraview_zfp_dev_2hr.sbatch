@@ -64,8 +64,29 @@ grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZF
 
 cd miniapps/seas
 
-if [ ! -s tpv104/mesh/tpv104_200m.msh ]; then
-   echo "ERROR: tpv104/mesh/tpv104_200m.msh missing."
+# Regenerate the .msh from .geo on first run or when FORCE_MESHGEN=1.
+# The 200 m TPV meshes are too large to commit (~125 MB each); the .geo
+# source is tracked, gmsh is installed by build_frontera.sh.
+MESH_SRC="tpv104/mesh/tpv104_200m.geo"
+MESH_OUT="tpv104/mesh/tpv104_200m.msh"
+GMSH_BIN="${SEAS_MFEM_ROOT}/extern/gmsh/bin/gmsh"
+if [ ! -s "${MESH_OUT}" ] || [ "${FORCE_MESHGEN:-0}" = "1" ] || [ "${FORCE_MESHGEN:-}" = "YES" ]; then
+    if [ ! -x "${GMSH_BIN}" ]; then
+        echo "ERROR: ${GMSH_BIN} not found.  Run build_frontera.sh (or"
+        echo "       USE_GMSH=YES bash build_frontera.sh) on the login node first."
+        exit 1
+    fi
+    if [ ! -s "${MESH_SRC}" ]; then
+        echo "ERROR: ${MESH_SRC} missing from the checkout — cannot regenerate."
+        exit 1
+    fi
+    echo "=== Regenerating ${MESH_OUT} from ${MESH_SRC} (FORCE_MESHGEN=${FORCE_MESHGEN:-0}) ==="
+    "${GMSH_BIN}" -3 "${MESH_SRC}" -o "${MESH_OUT}" \
+        || { echo "MESH GENERATION FAILED"; exit 1; }
+fi
+
+if [ ! -s "${MESH_OUT}" ]; then
+   echo "ERROR: ${MESH_OUT} missing after mesh-regen step."
    exit 1
 fi
 

@@ -53,6 +53,15 @@
 #                               # also need to update HDF5_PLUGIN_PATH in
 #                               # miniapps/seas/jobs/{bp5,tpv*}/*phase6*.sbatch
 #                               # (or set HDF5_PLUGIN_PATH at runtime).
+#   USE_GMSH=YES                # Install gmsh from official Linux64
+#                               # tarball into extern/gmsh.  Frontera does
+#                               # not ship gmsh, and the 200 m TPV .msh
+#                               # files (~125 MB each) are too large to
+#                               # commit.  Phase 6 sbatch use this gmsh
+#                               # to regenerate .msh from .geo at submit
+#                               # time.  USE_GMSH=NO skips the download.
+#   GMSH_VERSION=4.13.1         # gmsh release to download (Linux64
+#                               # binary tarball from gmsh.info/bin/Linux).
 #   JOBS=8                      # Parallel build jobs
 
 set -euo pipefail
@@ -65,6 +74,8 @@ HDF5_USE_MODULE="${HDF5_USE_MODULE:-NO}"
 HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
 QUICK="${QUICK:-1}"
 FORCE_REBUILD="${FORCE_REBUILD:-0}"
+USE_GMSH="${USE_GMSH:-YES}"
+GMSH_VERSION="${GMSH_VERSION:-4.13.1}"
 JOBS="${JOBS:-8}"
 
 # FORCE_REBUILD=1 wins over QUICK=1: clear caches and rebuild from source.
@@ -240,6 +251,7 @@ cd "$SCRIPT_DIR"
 HDF5_PREFIX="${HDF5_PREFIX:-${SCRIPT_DIR}/extern/hdf5/install}"
 ZFP_PREFIX="${ZFP_PREFIX:-${SCRIPT_DIR}/extern/zfp/install}"
 H5Z_ZFP_PREFIX="${H5Z_ZFP_PREFIX:-${SCRIPT_DIR}/extern/h5z-zfp/install}"
+GMSH_PREFIX="${GMSH_PREFIX:-${SCRIPT_DIR}/extern/gmsh}"
 
 # Build HDF5 ${HDF5_VERSION} from source, configured with --enable-parallel
 # against the loaded intel/19 + impi/19 stack.  HDF5 1.14.x is required by
@@ -347,6 +359,67 @@ if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "ye
 else
     USE_HDF5_RESOLVED="NO"
 fi
+
+# Install gmsh ${GMSH_VERSION} from the official Linux64 binary tarball.
+# Frontera does not ship a gmsh module, and the Phase 6 TPV meshes
+# (~125 MB each) are too large to commit to git.  The .geo sources are
+# tracked; the Phase 6 sbatch use ${GMSH_PREFIX}/bin/gmsh to regenerate
+# the matching .msh at submit time.
+build_gmsh() {
+    if [ "${USE_GMSH}" != "YES" ] && [ "${USE_GMSH}" != "1" ] && [ "${USE_GMSH}" != "yes" ]; then
+        echo ""
+        echo "=== Skipping gmsh install (USE_GMSH=${USE_GMSH}) ==="
+        return 0
+    fi
+
+    local gmsh_bin="${GMSH_PREFIX}/bin/gmsh"
+    if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
+        if [ -x "${gmsh_bin}" ]; then
+            echo ""
+            echo "=== Reusing existing gmsh at ${gmsh_bin} ==="
+            echo "    (set FORCE_REBUILD=1 to redownload)"
+            return 0
+        fi
+        echo ""
+        echo "=== Cache miss: ${gmsh_bin} not found — downloading gmsh ==="
+    fi
+
+    echo ""
+    echo "=== Installing gmsh ${GMSH_VERSION} (Linux64 binary tarball) ==="
+    mkdir -p "${SCRIPT_DIR}/extern"
+    local tarball="${SCRIPT_DIR}/extern/gmsh-${GMSH_VERSION}-Linux64.tgz"
+    local url="https://gmsh.info/bin/Linux/gmsh-${GMSH_VERSION}-Linux64.tgz"
+    if [ ! -f "${tarball}" ]; then
+        echo "  Downloading from ${url}"
+        if command -v wget >/dev/null 2>&1; then
+            wget -q -O "${tarball}" "${url}"
+        elif command -v curl >/dev/null 2>&1; then
+            curl -sL -o "${tarball}" "${url}"
+        else
+            echo "ERROR: neither wget nor curl available."
+            exit 1
+        fi
+    fi
+
+    # The tarball extracts to ./gmsh-${VERSION}-Linux64/{bin,share}.
+    # Move it into ${GMSH_PREFIX} so its layout matches the other extern
+    # installs (extern/gmsh/{bin,share}, not extern/gmsh/gmsh-X.Y-Linux64).
+    rm -rf "${GMSH_PREFIX}"
+    tar -xzf "${tarball}" -C "${SCRIPT_DIR}/extern/"
+    mv "${SCRIPT_DIR}/extern/gmsh-${GMSH_VERSION}-Linux64" "${GMSH_PREFIX}"
+
+    if [ ! -x "${gmsh_bin}" ]; then
+        echo "ERROR: gmsh extraction finished but ${gmsh_bin} missing."
+        exit 1
+    fi
+    # Sanity check: the static binary should run on Frontera login nodes.
+    if ! "${gmsh_bin}" -version >/dev/null 2>&1; then
+        echo "WARNING: ${gmsh_bin} did not run cleanly — check ldd output."
+    fi
+    echo "  gmsh ${GMSH_VERSION} installed at ${gmsh_bin}"
+}
+
+build_gmsh
 
 # Build the H5Z-ZFP plugin (+ its dependency, ZFP) for Phase 6 lossy
 # floating-point compression in VTKHDF output.  The plugin lands at
