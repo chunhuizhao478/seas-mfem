@@ -6,15 +6,26 @@ Usage:
 
 The script parses the `ibrun ./seas_<driver>_driver ...` line out of each
 sbatch file, extracts the relevant `--mesh` / `--tfinal` /
-`--paraview-*` flags, and runs the estimator on each in turn.  Output
-is a single markdown table with one row per sbatch.
+`--paraview-*` flags, and runs the estimator on each in turn.
+
+Output format (default: terminal-friendly):
+  * 1 sbatch         -> vertical key-value block
+  * 2+ sbatch        -> aligned ASCII table
+  * --markdown       -> markdown table (useful for docs and PR descriptions)
+  * --json           -> JSON list of per-sbatch result dicts
+
+The PLACEHOLDER ZFP-calibration warnings from the underlying estimator
+are suppressed by default; pass --verbose to see them.
 
 Flag overrides:
     --tfinal-override <spec>     replace `--tfinal` from the sbatch
                                  (useful when the sbatch sets a long
                                  nominal tfinal but the SLURM wall is
                                  the binding constraint).
-    --quiet                      suppress PLACEHOLDER warnings.
+    --markdown                   markdown table output (for docs).
+    --json                       JSON output (for piping into other tools).
+    --verbose                    show estimator PLACEHOLDER warnings.
+    --quiet                      backwards-compatible alias for default.
 """
 
 from __future__ import annotations
@@ -339,7 +350,101 @@ def estimate_one(p: ParsedSbatch,
 # Output
 # ---------------------------------------------------------------------------
 
-def print_table(results):
+def _format_tfinal(tfinal_raw: str) -> str:
+    """Return tfinal with a human-readable suffix where useful."""
+    try:
+        seconds = float(tfinal_raw)
+    except (TypeError, ValueError):
+        return str(tfinal_raw)
+    # >1 year -> show years; >1 day -> days; >1 hour -> hours; else seconds
+    if seconds >= 365.25 * 86400:
+        return f"{seconds:g} s  ({seconds / (365.25 * 86400):.2f} yr)"
+    if seconds >= 86400:
+        return f"{seconds:g} s  ({seconds / 86400:.2f} day)"
+    if seconds >= 3600:
+        return f"{seconds:g} s  ({seconds / 3600:.2f} h)"
+    return f"{seconds:g} s"
+
+
+def print_pretty_single(r):
+    """Vertical key-value layout for a single sbatch."""
+    if "missing_mesh" in r:
+        print(f"  {r['label']}")
+        print(f"  ERROR: {r['missing_mesh']}")
+        return
+    label = r["label"]
+    print(f"  Sbatch       {label}")
+    print(f"  Driver       {r['driver']}")
+    print(f"  tfinal       {_format_tfinal(r['tfinal'])}")
+    print(f"  Mesh         {r['mesh_name']}  "
+          f"({r['n_elements']:,} tets, {r['n_fault_faces']:,} fault faces)")
+    print(f"  Writes       {r['n_writes_fault']} fault, "
+          f"{r['n_writes_volume']} volume")
+    print(f"  Filter       fault={r['fault_filter']}  "
+          f"volume={r['volume_filter']}")
+    print()
+    print(f"  Per-write    fault  = {format_bytes(r['per_write_fault']):>10}"
+          f"     volume = {format_bytes(r['per_write_volume']):>10}")
+    print(f"  Run totals   fault  = {format_bytes(r['fault_bytes']):>10}"
+          f"     volume = {format_bytes(r['volume_bytes']):>10}")
+    rule = "  " + "─" * 56
+    print(rule)
+    print(f"  TOTAL        {format_bytes(r['total_bytes'])}")
+
+
+def _short_tfinal(tfinal_raw: str) -> str:
+    """Compact tfinal for the table view: '250 yr' instead of '7.89e+09 s'."""
+    try:
+        seconds = float(tfinal_raw)
+    except (TypeError, ValueError):
+        return str(tfinal_raw)
+    if seconds >= 365.25 * 86400:
+        return f"{seconds / (365.25 * 86400):.0f} yr"
+    if seconds >= 86400:
+        return f"{seconds / 86400:.1f} day"
+    if seconds >= 3600:
+        return f"{seconds / 3600:.1f} h"
+    return f"{seconds:g} s"
+
+
+def print_pretty_table(results):
+    """Aligned ASCII table for multi-sbatch runs."""
+    headers = [
+        "Sbatch", "Driver", "tfinal",
+        "Tets", "Fault", "n_writes",
+        "fault/wr", "vol/wr",
+        "fault tot", "vol tot", "TOTAL",
+    ]
+    rows = []
+    for r in results:
+        if "missing_mesh" in r:
+            rows.append([r["label"], "ERROR", r["missing_mesh"][:48],
+                         "", "", "", "", "", "", "", ""])
+            continue
+        rows.append([
+            r["label"],
+            r["driver"],
+            _short_tfinal(r["tfinal"]),
+            f"{r['n_elements']:,}",
+            f"{r['n_fault_faces']:,}",
+            f"{r['n_writes_fault']}/{r['n_writes_volume']}",
+            format_bytes(r["per_write_fault"]),
+            format_bytes(r["per_write_volume"]),
+            format_bytes(r["fault_bytes"]),
+            format_bytes(r["volume_bytes"]),
+            format_bytes(r["total_bytes"]),
+        ])
+    widths = [max(len(h), max((len(row[i]) for row in rows), default=0))
+              for i, h in enumerate(headers)]
+    line = "  " + "  ".join(h.ljust(w) for h, w in zip(headers, widths))
+    print(line)
+    print("  " + "  ".join("-" * w for w in widths))
+    for row in rows:
+        print("  " + "  ".join(c.ljust(w) for c, w in zip(row, widths)))
+
+
+def print_markdown_table(results):
+    """Original markdown-row layout, useful for pasting into docs."""
     cols = (
         ("Sbatch",           "label"),
         ("Driver",           "driver"),
@@ -379,6 +484,23 @@ def print_table(results):
         print("| " + " | ".join(cells) + " |")
 
 
+def print_table(results, fmt: str = "pretty"):
+    """Dispatcher: vertical for 1 result, table otherwise; respect fmt."""
+    if fmt == "markdown":
+        print_markdown_table(results)
+        return
+    if fmt == "json":
+        import json
+        # bytes/int are JSON-safe; PosixPath etc. are not in our dicts.
+        print(json.dumps(results, indent=2, default=str))
+        return
+    # default: terminal-friendly
+    if len(results) == 1:
+        print_pretty_single(results[0])
+    else:
+        print_pretty_table(results)
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -394,12 +516,25 @@ def main(argv=None):
         "--tfinal-override", type=str, default=None,
         help="Override the --tfinal value parsed from each sbatch.  "
              "Required when the sbatch's --tfinal is a $(...) subshell.")
-    parser.add_argument(
+    fmt_group = parser.add_mutually_exclusive_group()
+    fmt_group.add_argument(
+        "--markdown", action="store_true",
+        help="Print a markdown table (useful for docs / PR descriptions).")
+    fmt_group.add_argument(
+        "--json", dest="json_out", action="store_true",
+        help="Print JSON list of per-sbatch result dicts.")
+    verbosity = parser.add_mutually_exclusive_group()
+    verbosity.add_argument(
+        "--verbose", action="store_true",
+        help="Show estimator PLACEHOLDER calibration warnings.")
+    verbosity.add_argument(
         "--quiet", action="store_true",
-        help="Suppress PLACEHOLDER warnings.")
+        help="Suppress PLACEHOLDER warnings (default; kept for backwards "
+             "compatibility).")
     args = parser.parse_args(argv)
 
-    if args.quiet:
+    # Default is quiet — only --verbose brings the warnings back.
+    if not args.verbose:
         import warnings
         warnings.simplefilter("ignore")
 
@@ -411,7 +546,22 @@ def main(argv=None):
         except Exception as e:
             results.append({"label": sb.name, "missing_mesh": str(e)})
 
-    print_table(results)
+    if args.markdown:
+        fmt = "markdown"
+    elif args.json_out:
+        fmt = "json"
+    else:
+        fmt = "pretty"
+    print_table(results, fmt=fmt)
+
+    # Calibration footer.  Skip for json output so the stdout stays
+    # machine-parseable.
+    if fmt != "json" and any("missing_mesh" not in r for r in results):
+        print()
+        print("  Note: ZFP compression ratios are PLACEHOLDERs pending "
+              "Phase 7.6 calibration;")
+        print("        estimates may be off by >2x.  "
+              "Pass --verbose to see per-field warnings.")
     return 0
 
 
