@@ -414,22 +414,33 @@ build_gmsh() {
         exit 1
     fi
 
-    # Wipe any prior install (e.g. leftover tarball-style extract) so pip
-    # has a clean slate.
+    # Wipe any prior install (e.g. leftover tarball-style extract) so we
+    # have a clean slate.
     rm -rf "${GMSH_PREFIX}"
     mkdir -p "${GMSH_PREFIX}"
 
-    # `pip install --target` keeps the install self-contained inside
-    # extern/gmsh; --upgrade ensures we pull the requested version on
-    # cache misses.  Pin to ${GMSH_VERSION} so the install is
-    # reproducible (drop the == if you want pip's latest).
+    # NB: `pip install --target` on pip < 20 has a known bug where wheel
+    # `data/` files (which contain libgmsh.so) are silently dropped.
+    # Frontera ships pip 19.2.3, so instead of `pip install --target`,
+    # we use `pip download` + manual unzip so we control the layout.
     local pin
     if [ -n "${GMSH_VERSION:-}" ] && [ "${GMSH_VERSION}" != "latest" ]; then
         pin="gmsh==${GMSH_VERSION}"
     else
         pin="gmsh"
     fi
-    python3 -m pip install --target "${GMSH_PREFIX}" --upgrade --quiet "${pin}"
+    local wheel_cache="${GMSH_PREFIX}/_wheel-cache"
+    mkdir -p "${wheel_cache}"
+    python3 -m pip download --no-deps --dest "${wheel_cache}" "${pin}"
+
+    local wheel
+    wheel="$(ls "${wheel_cache}"/gmsh-*.whl 2>/dev/null | head -n 1)"
+    if [ -z "${wheel}" ]; then
+        echo "ERROR: pip download did not produce a gmsh wheel under ${wheel_cache}"
+        exit 1
+    fi
+    echo "  downloaded: ${wheel}"
+    unzip -q -o "${wheel}" -d "${GMSH_PREFIX}"
 
     # The pip wheel installs:
     #   ${GMSH_PREFIX}/gmsh.py                Python wrapper
@@ -464,11 +475,24 @@ build_gmsh() {
         echo "  symlinked into ${GMSH_PREFIX}/lib/"
     fi
 
-    # Replace pip's Python launcher with a self-contained shell wrapper
-    # that sets PYTHONPATH + LD_LIBRARY_PATH, so downstream callers (the
-    # Phase 6 sbatch) can just exec ${GMSH_PREFIX}/bin/gmsh.
-    if [ -f "${GMSH_PREFIX}/bin/gmsh" ] && [ ! -L "${GMSH_PREFIX}/bin/gmsh" ]; then
-        mv "${GMSH_PREFIX}/bin/gmsh" "${GMSH_PREFIX}/bin/gmsh-pyimpl"
+    # The Python launcher from the wheel ends up at
+    # ${GMSH_PREFIX}/gmsh-X.Y.Z.data/scripts/gmsh after unzip.  Move it
+    # to ${GMSH_PREFIX}/bin/gmsh-pyimpl where our wrapper will exec it.
+    mkdir -p "${GMSH_PREFIX}/bin"
+    local pyimpl
+    pyimpl="$(find "${GMSH_PREFIX}" -path '*data/scripts/gmsh' -type f 2>/dev/null | head -n 1)"
+    if [ -z "${pyimpl}" ]; then
+        # Fallback: pip --target sometimes puts it at bin/gmsh directly.
+        pyimpl="${GMSH_PREFIX}/bin/gmsh"
+        [ ! -f "${pyimpl}" ] && pyimpl=""
+    fi
+    if [ -z "${pyimpl}" ]; then
+        echo "ERROR: gmsh Python launcher not found under ${GMSH_PREFIX}."
+        exit 1
+    fi
+    if [ "${pyimpl}" != "${GMSH_PREFIX}/bin/gmsh-pyimpl" ]; then
+        cp "${pyimpl}" "${GMSH_PREFIX}/bin/gmsh-pyimpl"
+        chmod +x "${GMSH_PREFIX}/bin/gmsh-pyimpl"
     fi
     cat > "${GMSH_PREFIX}/bin/gmsh" <<EOF
 #!/bin/bash
