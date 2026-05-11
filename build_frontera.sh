@@ -464,16 +464,25 @@ build_gmsh() {
     local libgmsh_dir
     libgmsh_dir="$(dirname "${libgmsh}")"
     echo "  libgmsh.so located at: ${libgmsh}"
-    if [ "${libgmsh_dir}" != "${GMSH_PREFIX}/lib" ]; then
-        mkdir -p "${GMSH_PREFIX}/lib"
-        # Symlink every libgmsh* file from its actual location into lib/.
-        # We also need libgmsh.so (the unversioned name) for ctypes to find it.
-        ( cd "${GMSH_PREFIX}/lib" && \
-          for f in "${libgmsh_dir}"/libgmsh*; do
-              ln -sf "${f}" "$(basename "${f}")"
-          done )
-        echo "  symlinked into ${GMSH_PREFIX}/lib/"
-    fi
+    # gmsh.py searches for libgmsh.so.X.Y in this order (see gmsh.py:46-80):
+    #   1. moduledir            (= ${GMSH_PREFIX} itself — where gmsh.py lives)
+    #   2. parentdir1/{lib,Lib} (= ${GMSH_PREFIX}/../{lib,Lib} — NOT what we want)
+    #   3. parentdir2/{lib,Lib}
+    #   4. ctypes.util.find_library("gmsh")   (relies on ldconfig + LD_LIBRARY_PATH;
+    #                                          flaky on Linux)
+    # The first match wins — so we symlink libgmsh* directly alongside gmsh.py.
+    # We also keep a copy under ${GMSH_PREFIX}/lib/ so LD_LIBRARY_PATH still
+    # works for any tool that goes through the dynamic loader.
+    mkdir -p "${GMSH_PREFIX}/lib"
+    ( cd "${GMSH_PREFIX}" && \
+      for f in "${libgmsh_dir}"/libgmsh*; do
+          ln -sf "${f}" "$(basename "${f}")"
+      done )
+    ( cd "${GMSH_PREFIX}/lib" && \
+      for f in "${libgmsh_dir}"/libgmsh*; do
+          ln -sf "${f}" "$(basename "${f}")"
+      done )
+    echo "  symlinked libgmsh.* into ${GMSH_PREFIX}/ and ${GMSH_PREFIX}/lib/"
 
     # The Python launcher from the wheel ends up at
     # ${GMSH_PREFIX}/gmsh-X.Y.Z.data/scripts/gmsh after unzip.  Move it
