@@ -64,9 +64,6 @@ module load mumps/5.3
 module load parmetis
 module load petsc/3.15
 module load fftw3/3.3.8
-# python3 needed by the gmsh CLI wrapper at runtime (CentOS 7 base
-# ships python2 only).
-module load python3
 # NOTE: do NOT load phdf5 on Frontera.  The phdf5/1.14.x module
 # requires intel/23.1.0 + impi/21.9.0 (incompatible with the intel/19
 # hypre/mumps/petsc stack we use), and older modules (1.10/1.12) lack
