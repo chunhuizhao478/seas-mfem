@@ -9,15 +9,23 @@
 #
 # Optional environment overrides:
 #   PETSC_MODULE=petsc/3.23     # Frontera PETSc module to load
-#   PHDF5_MODULE=phdf5/1.12.2   # Frontera parallel-HDF5 module to load
-#                                 (1.12.2 is the newest phdf5 module on
-#                                 Frontera that is built against the
-#                                 intel/19.1.1 + impi/19.0.9 toolchain the
-#                                 rest of this build uses.  phdf5/1.14.x
-#                                 on Frontera requires intel/23.1.0 +
-#                                 impi/21.9.0 (or gcc/13.2.0 + impi/21.9.0),
-#                                 which is incompatible with the
-#                                 hypre/mumps/petsc modules pinned below.)
+#   HDF5_USE_MODULE=NO          # By default, build HDF5 1.14.x from
+#                                 source under extern/hdf5/install rather
+#                                 than load Frontera's phdf5 module.
+#                                 Reason: MFEM mesh/vtkhdf.cpp requires
+#                                 HDF5 >= 1.14 (uses H5S_BLOCK and assumes
+#                                 hsize_t == unsigned long long).  The
+#                                 phdf5/1.14.x module on Frontera requires
+#                                 intel/23.1.0 + impi/21.9.0, incompatible
+#                                 with the intel/19.1.1 + impi/19.0.9
+#                                 hypre/mumps/petsc stack we use.  Older
+#                                 modules (1.10.x / 1.12.x) DO load with
+#                                 intel/19 but lack the symbols MFEM uses.
+#   HDF5_VERSION=1.14.6         # HDF5 release tag to build from source
+#                                 (matches local conda-env's 1.14.3 API).
+#   PHDF5_MODULE=phdf5/1.12.2   # Only used when HDF5_USE_MODULE=YES (the
+#                                 fallback path that loads a TACC phdf5
+#                                 module instead of building one).
 #   USE_MUMPS=0                 # Disable MFEM's direct MUMPS integration
 #   USE_HDF5=NO                 # Disable HDF5 + H5Z-ZFP integration
 #   QUICK=1                     # Skip the zfp / h5z-zfp clone + rebuild
@@ -43,6 +51,8 @@ PETSC_MODULE="${PETSC_MODULE:-petsc/3.15}"
 PHDF5_MODULE="${PHDF5_MODULE:-phdf5/1.12.2}"
 USE_MUMPS="${USE_MUMPS:-YES}"
 USE_HDF5="${USE_HDF5:-YES}"
+HDF5_USE_MODULE="${HDF5_USE_MODULE:-NO}"
+HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
 QUICK="${QUICK:-0}"
 JOBS="${JOBS:-8}"
 ZFP_VERSION="${ZFP_VERSION:-1.0.1}"
@@ -67,13 +77,14 @@ module load mumps/5.3 2>/dev/null || true
 module load parmetis 2>/dev/null || true
 module load "${PETSC_MODULE}" 2>/dev/null || true
 module load fftw3/3.3.8 2>/dev/null || true   # PETSc links against libfftw3_mpi
-# Phase 6 ParaView output uses VTKHDF + H5Z-ZFP.  Parallel-HDF5 is
-# required so MFEM_PARALLEL_HDF5 is defined (see mesh/vtkhdf.hpp:25);
-# the serial `hdf5/*` modules on Frontera do NOT define H5_HAVE_PARALLEL.
-if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
-    # Capture stderr so a load failure (wrong version, incompatible
-    # toolchain, etc.) is visible up-front instead of silently falling
-    # through to a "TACC_HDF5_INC unbound" error 60 lines later.
+# Phase 6 ParaView output uses VTKHDF + H5Z-ZFP.  We build HDF5 1.14.x
+# from source by default (see build_hdf5() below); only load Frontera's
+# phdf5 module when HDF5_USE_MODULE=YES.  Older Frontera modules
+# (1.10/1.12) load fine against intel/19 but lack symbols MFEM's
+# mesh/vtkhdf.cpp needs (H5S_BLOCK, the unsigned-long-long hsize_t typedef
+# both arrived in HDF5 1.14).
+if { [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; } &&
+   { [ "${HDF5_USE_MODULE}" = "YES" ] || [ "${HDF5_USE_MODULE}" = "1" ] || [ "${HDF5_USE_MODULE}" = "yes" ]; }; then
     if ! module load "${PHDF5_MODULE}" 2>&1; then
         echo "ERROR: failed to load ${PHDF5_MODULE}."
         echo "  Run 'module spider ${PHDF5_MODULE}' to see compatible prerequisites."
@@ -83,6 +94,9 @@ if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "ye
         echo "  Phase 6 VTKHDF output entirely."
         exit 1
     fi
+    echo "  NOTE: HDF5_USE_MODULE=YES — using ${PHDF5_MODULE}, which is"
+    echo "        1.10.x/1.12.x on intel-19.  MFEM mesh/vtkhdf.cpp build"
+    echo "        will fail unless you patch the H5S_BLOCK / hsize_t uses."
 fi
 
 resolve_petsc_dir() {
@@ -138,7 +152,10 @@ REQUIRED_VARS=(
     TACC_FFTW3_LIB
     MKLROOT TACC_MKL_LIB
 )
-if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
+if { [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; } &&
+   { [ "${HDF5_USE_MODULE}" = "YES" ] || [ "${HDF5_USE_MODULE}" = "1" ] || [ "${HDF5_USE_MODULE}" = "yes" ]; }; then
+    # Only required when sourcing HDF5 from a module; the from-source
+    # path resolves its own HDF5_DIR / INC / LIB below.
     REQUIRED_VARS+=(TACC_HDF5_INC TACC_HDF5_LIB)
 fi
 for var in "${REQUIRED_VARS[@]}"; do
@@ -200,21 +217,102 @@ fi
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
-# Install prefixes for the zfp / h5z-zfp builds.  Default to a tree
-# inside the MFEM checkout so the build is self-contained.  Override
-# via env vars if you want them installed elsewhere (e.g. $WORK to
-# match the path the Phase 6 sbatch use).
+# Install prefixes for the hdf5 / zfp / h5z-zfp builds.  Default to a
+# tree inside the MFEM checkout so the build is self-contained.
+# Override via env vars if you want them installed elsewhere (e.g.
+# $WORK to match the path the Phase 6 sbatch use).
+HDF5_PREFIX="${HDF5_PREFIX:-${SCRIPT_DIR}/extern/hdf5/install}"
 ZFP_PREFIX="${ZFP_PREFIX:-${SCRIPT_DIR}/extern/zfp/install}"
 H5Z_ZFP_PREFIX="${H5Z_ZFP_PREFIX:-${SCRIPT_DIR}/extern/h5z-zfp/install}"
 
-# Locate the parallel-HDF5 root from TACC_HDF5_LIB.  MFEM's make-based
-# HDF5 wiring expects HDF5_OPT / HDF5_LIB rather than HDF5_DIR.
+# Build HDF5 ${HDF5_VERSION} from source, configured with --enable-parallel
+# against the loaded intel/19 + impi/19 stack.  HDF5 1.14.x is required by
+# MFEM mesh/vtkhdf.cpp (H5S_BLOCK + unsigned-long-long hsize_t typedef);
+# Frontera's only intel-19-compatible phdf5 modules cap at 1.12.2.
+build_hdf5() {
+    if [ "${USE_HDF5_RESOLVED}" != "YES" ]; then
+        echo ""
+        echo "=== Skipping HDF5 build (USE_HDF5=${USE_HDF5}) ==="
+        return 0
+    fi
+    if [ "${HDF5_USE_MODULE}" = "YES" ] || [ "${HDF5_USE_MODULE}" = "1" ] || [ "${HDF5_USE_MODULE}" = "yes" ]; then
+        echo ""
+        echo "=== Skipping HDF5 build (HDF5_USE_MODULE=YES — using ${PHDF5_MODULE}) ==="
+        return 0
+    fi
+
+    local hdf5_lib="${HDF5_PREFIX}/lib/libhdf5.so"
+    if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
+        if [ -f "${hdf5_lib}" ] && [ -f "${HDF5_PREFIX}/include/hdf5.h" ]; then
+            echo ""
+            echo "=== QUICK=1: reusing existing HDF5 at ${HDF5_PREFIX} ==="
+            return 0
+        fi
+        echo ""
+        echo "=== QUICK=1 set but ${hdf5_lib} is missing — building anyway ==="
+    fi
+
+    echo ""
+    echo "=== Building HDF5 ${HDF5_VERSION} ==="
+    mkdir -p "${SCRIPT_DIR}/extern"
+    local hdf5_src="${SCRIPT_DIR}/extern/hdf5/src"
+    if [ ! -d "${hdf5_src}/.git" ]; then
+        rm -rf "${hdf5_src}"
+        mkdir -p "${SCRIPT_DIR}/extern/hdf5"
+        git clone --quiet --depth 1 --branch "hdf5_${HDF5_VERSION}" \
+            https://github.com/HDFGroup/hdf5.git "${hdf5_src}"
+    fi
+    (
+        cd "${hdf5_src}"
+        git fetch --tags --quiet || true
+        git checkout --quiet "hdf5_${HDF5_VERSION}" 2>/dev/null \
+            || git checkout --quiet "tags/hdf5_${HDF5_VERSION}" 2>/dev/null || true
+        # Out-of-tree build to keep the source clean across runs.
+        rm -rf build_${HDF5_VERSION}
+        mkdir -p build_${HDF5_VERSION}
+        cd build_${HDF5_VERSION}
+        CC="$(which mpicc)" CXX="$(which mpicxx)" \
+        ../configure \
+            --prefix="${HDF5_PREFIX}" \
+            --enable-parallel \
+            --enable-shared \
+            --enable-hl \
+            --disable-fortran \
+            --disable-cxx \
+            --disable-tests \
+            --disable-tools \
+            --without-szlib
+        make -j"${JOBS}"
+        make install
+    )
+
+    if [ ! -f "${hdf5_lib}" ] || [ ! -f "${HDF5_PREFIX}/include/hdf5.h" ]; then
+        echo "ERROR: HDF5 build finished but ${hdf5_lib} or hdf5.h is missing."
+        exit 1
+    fi
+    echo "  HDF5 ${HDF5_VERSION} installed at ${HDF5_PREFIX}"
+}
+
+# Resolve HDF5_DIR / INC / LIB.  Two paths:
+#   (a) HDF5_USE_MODULE=YES: use the loaded phdf5 module (TACC_HDF5_*).
+#   (b) default: build HDF5 from source under ${HDF5_PREFIX}.
 if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
     USE_HDF5_RESOLVED="YES"
-    HDF5_DIR_RESOLVED="$(cd "${TACC_HDF5_LIB}/.." 2>/dev/null && pwd || true)"
-    if [ -z "${HDF5_DIR_RESOLVED}" ] || [ ! -f "${TACC_HDF5_INC}/hdf5.h" ]; then
-        echo "ERROR: could not locate hdf5.h under TACC_HDF5_INC=${TACC_HDF5_INC:-<unset>}."
-        echo "Check that ${PHDF5_MODULE} is loaded (or override USE_HDF5=NO to skip)."
+
+    build_hdf5
+
+    if [ "${HDF5_USE_MODULE}" = "YES" ] || [ "${HDF5_USE_MODULE}" = "1" ] || [ "${HDF5_USE_MODULE}" = "yes" ]; then
+        HDF5_DIR_RESOLVED="$(cd "${TACC_HDF5_LIB}/.." 2>/dev/null && pwd || true)"
+        HDF5_INC_RESOLVED="${TACC_HDF5_INC}"
+        HDF5_LIB_RESOLVED="${TACC_HDF5_LIB}"
+    else
+        HDF5_DIR_RESOLVED="${HDF5_PREFIX}"
+        HDF5_INC_RESOLVED="${HDF5_PREFIX}/include"
+        HDF5_LIB_RESOLVED="${HDF5_PREFIX}/lib"
+    fi
+
+    if [ -z "${HDF5_DIR_RESOLVED}" ] || [ ! -f "${HDF5_INC_RESOLVED}/hdf5.h" ]; then
+        echo "ERROR: could not locate hdf5.h under HDF5_INC=${HDF5_INC_RESOLVED:-<unset>}."
         exit 1
     fi
     echo "  HDF5_DIR     = ${HDF5_DIR_RESOLVED}"
@@ -222,12 +320,12 @@ if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "ye
     # is going to check (`H5_HAVE_PARALLEL` in `<hdf5.h>` ⇒
     # `MFEM_PARALLEL_HDF5`, see mesh/vtkhdf.hpp:25).  Required for
     # `ParaViewOutput<ParMesh>::DefaultVolumeOutputMode() == Hdf5`.
-    if grep -q '^#define *H5_HAVE_PARALLEL' "${TACC_HDF5_INC}/H5pubconf.h" 2>/dev/null; then
+    if grep -q '^#define *H5_HAVE_PARALLEL' "${HDF5_INC_RESOLVED}/H5pubconf.h" 2>/dev/null; then
         echo "  HDF5         = parallel (H5_HAVE_PARALLEL defined)"
     else
         echo "  WARNING: HDF5 build does NOT define H5_HAVE_PARALLEL — Phase 6"
         echo "           ParMesh runs will fail at the static_assert in"
-        echo "           paraview_output.hpp:126.  Load a parallel-HDF5 module."
+        echo "           paraview_output.hpp:126.  Rebuild HDF5 with --enable-parallel."
     fi
 else
     USE_HDF5_RESOLVED="NO"
@@ -297,6 +395,13 @@ build_zfp_and_h5z_zfp() {
         # the plugin to ${PREFIX}/plugin.  Use the Makefile build path
         # (not the cmake one) because it is the canonical install
         # layout the runtime probe in paraview_output.hpp expects.
+        # Force a clean build so an existing plugin that was linked
+        # against a different HDF5 (e.g. an older Frontera module from a
+        # prior run) gets rebuilt against ${HDF5_DIR_RESOLVED}.
+        make HDF5_HOME="${HDF5_DIR_RESOLVED}" \
+             ZFP_HOME="${ZFP_PREFIX}" \
+             PREFIX="${H5Z_ZFP_PREFIX}" \
+             clean || true
         make CC="$(which mpicc)" \
              HDF5_HOME="${HDF5_DIR_RESOLVED}" \
              ZFP_HOME="${ZFP_PREFIX}" \
@@ -362,8 +467,8 @@ if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
     CONFIG_ARGS+=(
       MFEM_USE_HDF5=YES
       MFEM_USE_H5Z_ZFP=YES
-      HDF5_OPT="-I${TACC_HDF5_INC}"
-      HDF5_LIB="-L${TACC_HDF5_LIB} -Wl,-rpath,${TACC_HDF5_LIB} -lhdf5_hl -lhdf5 -lz"
+      HDF5_OPT="-I${HDF5_INC_RESOLVED}"
+      HDF5_LIB="-L${HDF5_LIB_RESOLVED} -Wl,-rpath,${HDF5_LIB_RESOLVED} -lhdf5_hl -lhdf5 -lz"
     )
 fi
 
