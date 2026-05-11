@@ -434,7 +434,13 @@ build_gmsh() {
         cd "${gmsh_src}"
         mkdir -p build_${GMSH_VERSION}
         cd build_${GMSH_VERSION}
+        # CMAKE_POLICY_VERSION_MINIMUM=3.5: gmsh's CMakeLists still
+        # carries `cmake_minimum_required(VERSION 2.8.12 ...)`, which
+        # modern CMake (>= 4.0) refuses with `Compatibility with
+        # CMake < 3.5 has been removed`.  Frontera's cmake is new
+        # enough to hit this.
         cmake .. \
+            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX="${GMSH_PREFIX}" \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_C_COMPILER="$(which mpicc)" \
