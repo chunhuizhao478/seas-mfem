@@ -1,629 +1,442 @@
-# Code Review (round 2): 2026-05-04 — `safs/smoke_test/PLAN_safs_test.md`
+# Code Review: 2026-05-10 — round 3, post-fix audit
 
 ## Review Scope
+- Plan: `miniapps/seas/safs/project_7.0_alternative/document/heterogeneous_material_plan.md` (after round-2 fixes)
+- Files reviewed (re-read fresh, all three passes):
+  - `miniapps/seas/safs/project_7.0_alternative/document/heterogeneous_material_plan.md`
+  - `miniapps/seas/io/field_coefficient.cpp` (R-009 round-2 fix)
+- Domain context consulted:
+  - `miniapps/seas/dynamic/godunov_flux.hpp` (confirmed 6 internal `DenseMatrix` members per `GodunovFlux`: `Ax_`, `Ax_plus_`, `Ax_minus_`, plus `std::array<DenseMatrix, 3> ref_star_`)
+  - `miniapps/seas/dynamic/wave_operator.hpp` / `wave_operator.inl` (`template <typename MeshType = Mesh>` design)
+  - Previous `REVIEW.md` (round 2, overwritten — but found via conversation history)
 
-- **Plan reviewed:** `miniapps/seas/safs/smoke_test/PLAN_safs_test.md` (and
-  its PDF render `PLAN_safs_test.pdf`).
-- **Reference spec for compliance:** `miniapps/seas/drivers/seas_driver.cpp`
-  — the existing BP5 driver. The plan's stated goal (lines 5–7) is "BP5-
-  derived ... that exercises the SAFS multi-fault `.msh` end-to-end" with
-  the only deltas being the boundary mapping (BoundaryConfig) and the
-  per-DOF parameter override (uniform-VW, no-nucleation). Every other
-  composition step should mirror BP5.
-- **Header surfaces verified:** `domain/{boundary_config,elasticity_operator,
-  domain_operator}.hpp`, `fault/{fault_geometry,rate_state_fault}.hpp`,
-  `solver/{seas_operator,time_stepper}.hpp`,
-  `friction/{dieterich_ruina,state_evolution}.hpp`,
-  `config/bp5_params.hpp`, `constitutive/linear_elastic.hpp`.
-- **Domain context:** `miniapps/seas/CLAUDE.md`.
-
-## Why R-001..R-003 are deviations even though "the goal is to mirror BP5"
-
-The user's challenge: if the plan mirrors BP5, where do these bugs come
-from? Answer: **the plan was rewritten from memory rather than
-copy-pasted from `drivers/seas_driver.cpp`, and three of its key code
-snippets drifted from the actual BP5 pattern**. The plan IS supposed to
-mirror BP5 and IS NOT supposed to have these. Specifically:
-
-| ID | Plan does | BP5 reference does | Drift type |
-|---|---|---|---|
-| R-001 | `Vector state;` (size 0) | `Vector state(fault_op.StateSize());` (line 364) | Plan dropped the constructor argument. |
-| R-002 | `ode_solver.GetNumDtRejects()` (no such API) | counts `!ode_solver.Step(...)` returns into a local int (lines 534, 588, 590) | Plan invented a getter. |
-| R-003 | `ListAttrs(bdr_attrs)` (no such helper) | doesn't exist in BP5 (BP5 doesn't pre-validate attrs) | Plan added a SAFS-specific check then forgot a sub-helper. |
-| R-008 (new) | `ode_solver.Step(state, t, dt)` (3 args) | `ode_solver.Step(seas_op, state, t, dt)` (4 args, line 590) | Plan dropped the operator argument. |
-
-In other words, the answer to "why we have these deviations if the goal is
-to mirror BP5" is: **they were NOT supposed to exist; they are not design
-choices, they are transcription errors**. The fix in every case is to
-rewrite the snippet to literally match the BP5 reference.
-
-R-003 is slightly different: BP5 doesn't have an analogous check at all.
-SAFS legitimately needs one because its tags (1=xm, 2=xp, ..., 100=fault,
-10=domain) differ from BP5's hardcoded numbering (1=Natural, 3=Fault,
-5=Dirichlet). So adding `AssertSafsAttrs` is reasonable; the bug is that
-its body uses `ListAttrs` without defining it.
-
----
+This pass treats the post-fix state as fresh and hunts for NEW issues introduced or left latent.
 
 ## Findings
 
-### [R-001] [CRITICAL] [PLAN_safs_test.md:501-502] — `Vector state` not pre-sized before `SetInitialCondition`
+### [R-001] CRITICAL `heterogeneous_material_plan.md` Phase 3 §Goal / §Acceptance Criteria — memory budget arithmetic understates `GodunovFlux` size by ~6x; the acceptance assertion uses `sizeof(GodunovFlux)` which IGNORES the heap-allocated DenseMatrix data
 
-**Category:** BUG (compile / runtime — abort at startup)
-
-**Description:**
-Plan code (lines 501–502):
-
-```cpp
-Vector state;
-seas_op.SetInitialCondition(state);
-```
-
-`SEASQuasiDynamicOperator::SetInitialCondition` (`solver/seas_operator.hpp:217`)
-opens with:
-
-```cpp
-MFEM_VERIFY(state.Size() == fault_->StateSize(),
-            "State vector size mismatch: got " << state.Size()
-            << ", expected " << fault_->StateSize());
-```
-
-A default-constructed `Vector` has size 0, so this verify fires immediately.
-
-BP5 reference (`drivers/seas_driver.cpp:364`) is the canonical pattern:
-
-```cpp
-Vector state(fault_op.StateSize());
-seas_op.SetInitialCondition(state);
-```
-
-**Trigger:** running the driver as written.
-
-**Actual behavior:** abort at startup with
-`"State vector size mismatch: got 0, expected <N>"`.
-
-**Expected behavior:** state pre-sized like BP5.
-
-**Suggested fix:**
-
-```diff
--    // 9. Initial state from operator.
--    Vector state;
--    seas_op.SetInitialCondition(state);
-+    // 9. Initial state from operator (mirrors BP5 driver line 364).
-+    Vector state(fault_op.StateSize());
-+    seas_op.SetInitialCondition(state);
-```
-
-**Test case:**
-```python
-def test_R001_state_vector_pre_sized_before_set_initial_condition():
-    pmesh = make_minimal_safs_mesh()
-    domain = ElasticityDomainOperator(pmesh, order=1, ...)
-    bp5 = BP5Params()
-    OverrideToUniformVW(bp5, SafsTestParams())
-    fault_geom = FaultGeometry(domain, bp5, mpi_ctx)
-    friction = DieterichRuinaFriction(...)
-    aging = AgingLawPsi(...)
-    fault_op = RateStateFaultOperator(fault_geom, friction, aging, bp5, mpi_ctx)
-    seas_op = SEASQuasiDynamicOperator(domain, fault_op, mpi_ctx)
-    state = Vector(fault_op.StateSize())   # required pre-size
-    seas_op.SetInitialCondition(state)     # must NOT throw
-    assert state.Size() == fault_op.StateSize()
-```
-
----
-
-### [R-002] [CRITICAL] [PLAN_safs_test.md:533] — `ode_solver.GetNumDtRejects()` does not exist
-
-**Category:** BUG (compile-time)
+**Category:** BUG
 
 **Description:**
-Plan diagnostic line 533 reads:
+The plan justifies "Option (a) — caching one `GodunovFlux` per element" with this estimate (line 296):
+> *"per-element matrices are small (9×9 doubles = 648 bytes; 1 M elements = 648 MB which is acceptable for an explicit DG run)"*
 
+This treats `GodunovFlux` as if it holds ONE 9×9 matrix. But the actual class (verified in `godunov_flux.hpp:235-243`) holds **six** 9×9 matrices:
 ```cpp
-n_dt_rejects = ode_solver.GetNumDtRejects()
+DenseMatrix Ax_;        // 9x9
+DenseMatrix Ax_plus_;   // 9x9
+DenseMatrix Ax_minus_;  // 9x9
+std::array<DenseMatrix, 3> ref_star_;  // three more 9x9
 ```
+Plus scalars (`lambda_, mu_, rho_, cp_, cs_, Zp_, Zs_`).
 
-`DormandPrinceRK45` (`solver/time_stepper.hpp`) maintains `int total_rejections_;`
-as a *private* member (line 627) and increments it inside `Step` (lines 326,
-334, 351, 358, 376, 383, 401, 408, 427) but **exposes no public getter** by
-any name (`grep -rn 'GetNumDtRejects\|GetNumRejects\|TotalRejections'
-miniapps/seas/solver/time_stepper.hpp` returns nothing).
+Per-instance heap cost: 6 × 81 × 8 bytes ≈ **3.9 KB per GodunovFlux** (just the matrix payload).  Each `mfem::DenseMatrix` also carries a small object header (capacity + height/width + data pointer ≈ 32 bytes per matrix).  Realistic per-instance total ≈ **4 KB**.
 
-BP5 reference (`drivers/seas_driver.cpp` lines 534, 587–590):
+For the SAFS z-graded 3.2 M-tet fixture, even with aggressive dedup down to 1 M unique fluxes (an optimistic factor of 3), memory = **4 GB**, NOT 1 GB.  For zero dedup (worst case in basin layers where every element has a unique sidecar sample), the cost is **12+ GB**.  The plan's "648 MB / 1 M elements" justification for picking Option (a) over Option (b) is off by 6x.
 
-```cpp
-int step_rejections = 0;        // line 534
-...
-real_t dt;
-bool accepted = ode_solver.Step(seas_op, state, t, dt);
-if (!accepted) { continue; }    // increment counter here for SAFS
-step++;
-```
+Worse, the acceptance test at line 439 reads:
+> *"`pool.NumUniqueFluxes() * sizeof(GodunovFlux) <= 1e9` is the concrete assertion."*
 
-BP5 simply doesn't put rejects into a public getter — it relies on the
-boolean return of `Step` (`time_stepper.hpp:226`: "@return true if step
-accepted, false if rejected"). The plan invented a non-existent API.
+`sizeof(GodunovFlux)` returns only the in-struct layout (`DenseMatrix` object headers + scalar members), NOT the heap-allocated `data` arrays inside each `DenseMatrix`.  In practice `sizeof(GodunovFlux)` is on the order of 400 bytes, NOT 4000.  The assertion as specified ALLOWS `NumUniqueFluxes()` up to ~2.5 M (1e9 / 400) — corresponding to **10 GB of actual memory** — and silently passes.  An implementer running the test will believe the budget is satisfied while real memory consumption is an order of magnitude over.
 
-**Trigger:** compiling the driver as written.
+**Trigger:** Any Mode::Coefficient / Mode::GridFunction run on a real SAFS-scale mesh.  The acceptance test passes (`sizeof`-based check) and the real memory blows past 1 GB and possibly past the host's RAM.
 
-**Actual behavior:** compile error `'class DormandPrinceRK45' has no
-member named 'GetNumDtRejects'`.
+**Actual behavior:** Test passes vacuously; real memory budget overshoots by 5-10x.
 
-**Expected behavior:** count rejections in the driver via the boolean
-return of `Step`.
-
-**Suggested fix:** mirror BP5's pattern with a driver-local counter and an
-inner accept loop (so `step` increments only on accepted steps):
-
-```diff
-     real_t t = 0.0;
-     int step = 0;
-+    int n_dt_rejects = 0;
-     while (step < n_steps_max) {
-         real_t dt = ode_solver.GetDt();
--        ode_solver.Step(state, t, dt);
--        ++step;
-+        // Mirror BP5 driver lines 587-590: ode_solver.Step's bool return
-+        // is the only rejection signal.  Loop until at least one
-+        // accepted step is produced; count intermediate rejects.
-+        bool accepted = false;
-+        while (!accepted) {
-+            accepted = ode_solver.Step(seas_op, state, t, dt);
-+            if (!accepted) { ++n_dt_rejects; }
-+        }
-+        ++step;
-```
-
-Then write `n_dt_rejects` (driver-local) to the CSV instead of the
-non-existent getter.
-
-**Test case:**
-```python
-def test_R002_dt_rejects_counted_in_driver_not_solver():
-    csv = run_driver(n_steps=5)
-    assert all(csv["n_dt_rejects"] >= 0)
-    assert "GetNumDtRejects" not in compile_log()
-```
-
----
-
-### [R-003] [CRITICAL] [PLAN_safs_test.md:583] — `ListAttrs()` referenced inside `MFEM_VERIFY` but not defined
-
-**Category:** BUG (compile-time)
-
-**Description:**
-`AssertSafsAttrs` (Phase-3 §3.3 lines 568–595) is a SAFS-specific check
-that verifies `pmesh.bdr_attributes` contains tags 1..6. Its error
-message is:
-
-```cpp
-// Plan lines 581-584
-MFEM_VERIFY(found,
-            "SAFS mesh missing required boundary attribute " << a
-            << " (mesh has [" << ListAttrs(bdr_attrs) << "])");
-```
-
-`grep -rn ListAttrs miniapps/seas/` returns this single reference. The
-helper does not exist.
-
-BP5 reference does not have an analogous check — BP5 mesh tags are
-hardcoded (1=Natural, 3=Fault, 5=Dirichlet) and the legacy `BCMode`
-constructor enforces them implicitly. So R-003 is an addition to the
-plan, not a deviation from BP5; but it is still a compile-stopper.
-
-**Trigger:** compiling the driver.
-
-**Actual behavior:** compile error `'ListAttrs' was not declared in this
-scope`.
-
-**Expected behavior:** define the helper or inline the formatting.
-
-**Suggested fix:** add a file-static lambda in the driver and use it:
-
-```diff
-+    // File-local helper to format Array<int> for diagnostic messages.
-+    auto fmt_attrs = [](const Array<int>& a) {
-+        std::ostringstream oss;
-+        for (int i = 0; i < a.Size(); ++i) {
-+            if (i > 0) { oss << ", "; }
-+            oss << a[i];
-+        }
-+        return oss.str();
-+    };
-     ...
--        MFEM_VERIFY(found,
--                    "SAFS mesh missing required boundary attribute " << a
--                    << " (mesh has [" << ListAttrs(bdr_attrs) << "])");
-+        MFEM_VERIFY(found,
-+                    "SAFS mesh missing required boundary attribute " << a
-+                    << " (mesh has [" << fmt_attrs(bdr_attrs) << "])");
-```
-
-**Test case:**
-```python
-def test_R003_assert_safs_attrs_compiles_and_reports_attrs():
-    out = run_driver_expect_fail(mesh="missing_ztop.msh")
-    assert "SAFS mesh missing required boundary attribute 5" in out
-    assert "(mesh has [" in out
-    body = out.split("(mesh has [")[1].split("])")[0]
-    assert all(t.strip().isdigit() for t in body.split(","))
-```
-
----
-
-### [R-008] [CRITICAL] [PLAN_safs_test.md:526] — `ode_solver.Step(state, t, dt)` has wrong arity
-
-**Category:** BUG (compile-time, NEW IN ROUND 2)
-
-**Description:**
-Plan time-step loop (line 526):
-
-```cpp
-real_t dt = ode_solver.GetDt();
-ode_solver.Step(state, t, dt);
-++step;
-```
-
-`DormandPrinceRK45::Step` signature (`solver/time_stepper.hpp:227`):
-
-```cpp
-bool Step(TimeDependentOperator &op, Vector &state, real_t &t, real_t &dt)
-```
-
-Step requires **four** arguments (operator + state + t + dt). The plan's
-3-argument call `Step(state, t, dt)` will fail to compile.
-
-BP5 reference (`drivers/seas_driver.cpp:590`):
-
-```cpp
-bool accepted = ode_solver.Step(seas_op, state, t, dt);
-```
-
-— passes `seas_op` as the first argument explicitly. The plan author
-likely confused this with the MFEM `ODESolver::Step` style which
-captures the operator from a prior `Init(...)` call. `DormandPrinceRK45`
-re-takes the operator on every `Step` invocation; the prior `Init` only
-allocates stage vectors (`time_stepper.hpp:205-214`).
-
-**Trigger:** compiling the driver.
-
-**Actual behavior:** compile error along the lines of
-`no matching function for call to DormandPrinceRK45::Step(Vector&,
-real_t&, real_t&)`.
-
-**Expected behavior:** pass `seas_op` as first arg, mirroring BP5.
-
-**Suggested fix:** combined with R-002 above into one corrected loop:
-
-```diff
-     while (step < n_steps_max) {
-         real_t dt = ode_solver.GetDt();
--        ode_solver.Step(state, t, dt);
--        ++step;
-+        bool accepted = false;
-+        while (!accepted) {
-+            accepted = ode_solver.Step(seas_op, state, t, dt);
-+            if (!accepted) { ++n_dt_rejects; }
-+        }
-+        ++step;
-```
-
-(The `seas_op` is the same `PBP5SEASOp` constructed at plan line 497.)
-
-**Test case:**
-```python
-def test_R008_step_passes_operator_explicitly():
-    # Compile must succeed; instrument Step to record that the
-    # operator argument is `seas_op`.
-    log = run_driver_with_step_trace(n_steps=2)
-    assert "Step(seas_op, state, t, dt)" in compile_log()
-```
-
----
-
-### [R-004] [MODERATE] [PLAN_safs_test.md:312-349 vs 358] — `bp5.nucleation_eps = 0.0` promised in narrative but missing from `OverrideToUniformVW` body
-
-**Category:** DEVIATION (plan-internal inconsistency)
-
-**Description:**
-Narrative §2.3 line 358: "Set `bp5.nucleation_eps = 0.0` to be safe."
-The actual `OverrideToUniformVW` body in §2.2 (lines 312–349) sets
-`w_nuc`, `hs`, `ht`, `H`, `l_vw`, `Wf`, `lf`, but does NOT set
-`nucleation_eps` (default `1.0e-3` at `config/bp5_params.hpp:140`).
-
-The override is empirically still safe because `hs = 1.0e7` makes the
-`x3` condition fail by seven orders of magnitude. But narrative-vs-code
-mismatch is exactly the class of issue user-memory
-`feedback_complete_sign_sites.md` warns about: silent drift between
-documentation and implementation.
-
-**Trigger:** any reader cross-referencing §2.2 with §2.3.
-
-**Actual behavior:** override body does NOT set `nucleation_eps`;
-narrative claims it does.
-
-**Expected behavior:** set it. Match.
+**Expected behavior:** Either (a) re-derive a realistic budget that accounts for the 6 matrices × heap payload, and update both the justification text and the acceptance criterion to use a per-instance constant like `kGodunovFluxBytes = 4096`, or (b) drop the cached `ref_star_[3]` triple in the pool (these are computed for ADER and can be re-derived from `Ax_`/`Ay_`/`Az_` on demand) — that halves the per-instance cost.
 
 **Suggested fix:**
 ```diff
-     bp5.smooth_nucleation = false;
-+    bp5.nucleation_eps = 0.0;   // narrative §2.3 promises this
+- This phase is structurally larger than Phase 2 because `GodunovFlux` was designed around a SINGLE constant `(λ, μ, ρ)` triple — its `Ax`, `Ax_plus_`, `Ax_minus_` matrices are precomputed once at construction. Going heterogeneous means either (a) caching one `GodunovFlux` per element, or (b) computing the 9×9 Jacobians per element on the fly. **Option (a)** is chosen because the per-element matrices are small (9×9 doubles = 648 bytes; 1 M elements = 648 MB which is acceptable for an explicit DG run) and the lookup is then a flat array index, preserving the hot-path access pattern.
++ This phase is structurally larger than Phase 2 because `GodunovFlux` was designed around a SINGLE constant `(λ, μ, ρ)` triple — its `Ax_`, `Ax_plus_`, `Ax_minus_` matrices (and the 3 cached `ref_star_` matrices used by the ADER recursion) are precomputed once at construction.  Each `GodunovFlux` instance therefore owns SIX 9×9 `DenseMatrix` objects, each carrying an 81-double heap payload — roughly **4 KB per instance** (R-001 round-3 — earlier "648 bytes per matrix; 1 M elements = 648 MB" estimate was off by 6× because only ONE matrix was counted).  Going heterogeneous means either (a) caching one `GodunovFlux` per element, or (b) computing the 9×9 Jacobians per element on the fly.  **Option (a)** is chosen because the lookup is a flat array index, preserving the hot-path access pattern, AND because the uniqueness map (Detailed Req. 2) typically dedups 5–10× across smoothly-varying layers, bringing realistic memory down to **400 MB – 2 GB** for the SAFS 3.2 M-tet fixture.
+
+- - [ ] **Memory budget (R-011):** on the SAFS z-graded 3.2 M-tet fixture with `Mode::Coefficient` and the 39-slice sidecar, `GodunovFluxPool` allocates AT MOST 1.0 GB total for `flux_storage_`.  If exceeded, the constructor's `dedup_sig_figs` is loosened (e.g., from 6 to 4) and re-run.  `pool.NumUniqueFluxes() * sizeof(GodunovFlux) <= 1e9` is the concrete assertion.
++ - [ ] **Memory budget (R-011 / R-001 round-3):** on the SAFS z-graded 3.2 M-tet fixture with `Mode::Coefficient` and the 39-slice sidecar, `GodunovFluxPool` allocates AT MOST 2 GB total of HEAP-INCLUSIVE memory (NOT `sizeof(GodunovFlux)`, which ignores the heap-allocated `DenseMatrix::data` arrays inside each instance).  The concrete assertion is:
++   ```cpp
++   // Realistic per-instance bytes including the 6 × (9×9 × sizeof(double)) heap payload.
++   constexpr size_t kGodunovFluxBytes = 6 * 81 * sizeof(double) + /*headers + scalars*/ 256;
++   assert(pool.NumUniqueFluxes() * kGodunovFluxBytes <= 2'000'000'000);
++   ```
++   If exceeded, either (a) loosen `dedup_sig_figs` (from 6 to 4, etc.), or (b) re-engineer the pool to drop the cached `ref_star_[3]` matrices on heterogeneous-mode paths (they are re-derivable from `Ax_`/`Ay_`/`Az_` per call at modest CPU cost) and revisit Option (b) — JIT Jacobian build.
 ```
 
 **Test case:**
 ```python
-def test_R004_nucleation_eps_zeroed_in_override():
-    bp5 = BP5Params()                                # default 1e-3
-    OverrideToUniformVW(bp5, SafsTestParams())
-    assert bp5.nucleation_eps == 0.0
+def test_R001_memory_budget_uses_heap_inclusive_bytes():
+    pool = GodunovFluxPool[ParMesh](mat_coef, safs_3M_pmesh, dedup_sig_figs=6)
+    n_unique = pool.NumUniqueFluxes()
+    # NOT sizeof(GodunovFlux) — that ignores the 6 × 648 bytes of heap.
+    bytes_per_instance = 6 * 81 * 8 + 256
+    assert n_unique * bytes_per_instance <= 2_000_000_000
 ```
 
 ---
 
-### [R-005] [MODERATE] [PLAN_safs_test.md:96-97, 511-513] — `dt_init` "clamped to dt_max" claim is false for default values
+### [R-002] MODERATE `heterogeneous_material_plan.md` Phase 3 §Files to Create — `GodunovFluxPool` ctor takes `const MeshType& mesh` but Detailed Req. 7a (option (a)) builds a `ParFiniteElementSpace` that requires non-const `ParMesh*`
 
-**Category:** DEVIATION (documentation vs code)
+**Category:** BUG (re-emerged after round-2 fix)
 
 **Description:**
-Plan §Constraints (lines 96–97):
-
-> Initial dt = `0.01 * L0 / Vp` = 1.4e6 s ~ 16 days, but **clamped to
-> `dt_max`** = 0.1 yr ~ 3.156e6 s.
-
-Phase-3 implementation (lines 511–513):
+The pool ctor signature (lines 310-312):
 ```cpp
-real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
-                 std::min(0.01 * params.L0 / params.Vp,
-                          0.1 * SafsTestParams::seconds_per_year);
+GodunovFluxPool(const MaterialField& material,
+                const MeshType& mesh,
+                int dedup_sig_figs = 6);
 ```
+is `const MeshType&`. But Detailed Req. 7a option (a) — the recommended option — instructs:
+> *"Build a **new** `mfem::L2_FECollection` of order 0 (DG0) and a **new** `mfem::ParFiniteElementSpace` over the supplied `ParMesh`."*
 
-Numerically `0.01 * 0.14 / 1e-9 = 1.4e6 s` and `0.1 * 365.25 * 86400 =
-3.155e6 s`; since `1.4e6 < 3.155e6` the `min` returns the first arg and
-the clamp **never fires**. The narrative is misleading.
+`mfem::ParFiniteElementSpace` ctor takes `ParMesh*` (NON-const, see mfem `fespace.hpp`).  Building one from a `const ParMesh&` requires `const_cast<ParMesh*>(&mesh)` — exactly the same const-correctness footgun that round-1 R-013 removed from `ComputeMeshBBoxParallel`.  An implementer will either:
+1. Add the `const_cast` (compiles, but inherits the same maintenance hazard the prior review explicitly called out).
+2. Or change `const MeshType&` → `MeshType&`, and inherit cascading non-const correctness changes through the call site in `WaveOperator`.
+
+The plan doesn't pick.
+
+**Trigger:** Phase 3 implementation; the first attempt to build the temporary DG0 ParFES inside the pool ctor.
+
+**Actual behavior:** Either compile error (if the implementer doesn't use `const_cast`) or a duplicated R-013 footgun.
+
+**Expected behavior:** Plan picks a consistent const policy. The cleanest is to drop the `const` on the ctor's mesh argument — `MeshType& mesh` — because building the DG0 ParFES is a legitimate, expected use of the mesh and the rest of `WaveOperator` already holds the mesh as a `MeshType&` reference.
 
 **Suggested fix:**
 ```diff
--- Time stepping: `DormandPrinceRK45` with BP5 tolerances (`atol=1e-7`,
--  `rtol=1e-50`, `dt_min=1e-6`, `dt_max=0.1 yr`). Initial dt = `0.01 * L0 / Vp`
--  = 1.4e6 s ≈ 16 days, but **clamped to `dt_max`** = 0.1 yr ≈ 3.156e6 s.
-+- Time stepping: `DormandPrinceRK45` with BP5 tolerances (`atol=1e-7`,
-+  `rtol=1e-50`, `dt_min=1e-6`, `dt_max=0.1 yr`). Initial dt =
-+  `min(0.01 * L0 / Vp, dt_max)` = 1.4e6 s ≈ 16 days under default
-+  parameters; the `dt_max` cap is a safety net for future overrides
-+  that increase `L0/Vp` past 36 days.
+   template <typename MeshType = mfem::Mesh>
+   class GodunovFluxPool
+   {
+   public:
+       GodunovFluxPool(const MaterialField& material,
+-                      const MeshType& mesh,
++                      MeshType& mesh,
+                       int dedup_sig_figs = 6);
+       ...
+   };
 ```
+Update the WaveOperator ctor's call site accordingly — `flux_pool_ = std::make_unique<GodunovFluxPool<MeshType>>(material, mesh_, ...)` — where `mesh_` is the operator's existing non-const `MeshType&` member.
 
 **Test case:**
 ```python
-def test_R005_default_dt_init_is_not_clamped():
-    p = SafsTestParams()
-    dt_default = min(0.01 * p.L0 / p.Vp, 0.1 * p.seconds_per_year)
-    assert abs(dt_default - 1.4e6) < 1.0
-    assert dt_default < 0.1 * p.seconds_per_year   # cap not active
+def test_R002_pool_ctor_compiles_for_parmesh_without_const_cast():
+    # Pool ctor signature must accept a ParMesh& without needing const_cast.
+    pmesh = ParMesh(...)
+    pool = GodunovFluxPool[ParMesh](material, pmesh)   # no const_cast
+    # Bug pre-fix: code review shows const_cast required.  Post-fix: clean.
+    assert pool.NumUniqueFluxes() > 0
 ```
 
 ---
 
-### [R-006] [MODERATE] [PLAN_safs_test.md:511-513] — `dt_init` formula uses `params.Vp` rather than `max(V_init, V_nuc)`
+### [R-003] MODERATE `heterogeneous_material_plan.md` Phase 3 §Edge Cases vs §Detailed Req. 5 — internal contradiction about MPI `dt` reduction
 
-**Category:** ASSUMPTION (silent breakage if invariant changes)
+**Category:** DEVIATION (internal inconsistency)
 
 **Description:**
-CLAUDE.md mandates `dt_init = 0.01 * L_nuc / V_nuc` ("Too large -> RK45
-stage amplification during nucleation, debug v7"). The plan uses
-`0.01 * L0 / Vp` (lines 96, 512), which is correct **only under the
-implicit invariant `V_nuc == V_init == Vp` and `L_nuc == L0`** that the
-override establishes.
+§Detailed Req. 5 (lines 372-391) explicitly REPLACES the legacy MPI `h_min_` reduction with a new per-call MPI_Allreduce of `dt_local` inside `ComputeMaxDt`:
+> *"a per-element walk **followed by an MPI_Allreduce(MIN) of `dt_local`** (the existing code did NOT reduce inside `ComputeMaxDt`; it only reduced `h_min_` once at construction)"*
 
-If a future tweak (e.g. someone adds a small overstress in
-`OverrideToUniformVW` and sets `V_nuc > V_init`) breaks the invariant,
-the dt_init formula becomes silently wrong — over-large dt for a now-
-fast nucleation seed → RK45 stage amplification.
+But §Edge Cases (line 430) still says:
+> *"`MaxCp()` does an `MPI_Allreduce(MAX)` over local maxima; `MIN dt` reduction over `dt_local` continues to use the existing MPI flow."*
 
-**Suggested fix:** reference the actually-active velocity scale:
+The phrase "existing MPI flow" is stale relative to the new Det. Req. 5 — the existing flow at lines 111-114 of `wave_operator.inl` reduces `h_min_`, not `dt_local`.  An implementer reading §Edge Cases in isolation may think no new MPI_Allreduce is needed in `ComputeMaxDt`, contradicting Det. Req. 5.
 
+**Trigger:** Phase 3 implementer reads §Edge Cases for MPI semantics and incorrectly believes the existing MPI flow already covers the new code.
+
+**Actual behavior:** Implementer either does nothing in `ComputeMaxDt` (breaking parallel CFL), or implements the Det. Req. 5 reduction but is confused by the contradiction.
+
+**Expected behavior:** The two sections agree.
+
+**Suggested fix:**
 ```diff
--    real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
--                     std::min(0.01 * params.L0 / params.Vp,
--                              0.1 * SafsTestParams::seconds_per_year);
-+    // dt_init = 0.01 * L_min / V_max_init per CLAUDE.md.  For this plan
-+    // V_init == V_nuc == Vp, so the three are equivalent — but write
-+    // the safe form so future overrides do not silently break.
-+    const real_t V_init_max = std::max(params.V_init, params.Vp);
-+    real_t dt_init = (cli_dt_init > 0.0) ? cli_dt_init :
-+                     std::min(0.01 * params.L0 / V_init_max,
-+                              0.1 * SafsTestParams::seconds_per_year);
+- - **MPI element ownership.** The pool indexes by LOCAL element ID. Each MPI rank constructs its own pool from its local elements. `MaxCp()` does an `MPI_Allreduce(MAX)` over local maxima; `MIN dt` reduction over `dt_local` continues to use the existing MPI flow.
++ - **MPI element ownership.** The pool indexes by LOCAL element ID. Each MPI rank constructs its own pool from its local elements. `MaxCp()` does an `MPI_Allreduce(MAX)` over local maxima (only in the parallel specialisation; serial `GodunovFluxPool<Mesh>` returns the local maximum directly).  The `MIN dt` reduction over `dt_local` lives in `WaveOperator::ComputeMaxDt` per Detailed Req. 5 — a new explicit `MPI_Allreduce(MIN)` call inside that function (the legacy reduction of `h_min_` at construction is REMOVED).
 ```
 
 **Test case:**
 ```python
-def test_R006_dt_init_uses_max_init_velocity():
-    p = SafsTestParams()
-    p.V_init = 1.0e-7    # someone increases V_init by 100x
-    expected = 0.01 * p.L0 / max(p.V_init, p.Vp)
-    actual = compute_dt_init(p)
-    assert abs(actual - expected) / expected < 1e-12
+def test_R003_edge_cases_section_matches_detailed_req_5():
+    # Static review of the plan: both sections must reference the
+    # SAME post-Phase-3 MPI flow (per-call MPI_Allreduce inside
+    # ComputeMaxDt, NOT a one-shot ctor-time reduce of h_min_).
+    plan_text = open("...heterogeneous_material_plan.md").read()
+    # Det. Req. 5 wording
+    assert "MPI_Allreduce(MIN) of `dt_local`" in plan_text
+    # Edge Cases wording must match (not "existing MPI flow")
+    assert "existing MPI flow" not in plan_text  # stale wording removed
 ```
 
 ---
 
-### [R-009] [MODERATE] [PLAN_safs_test.md:530] — Plan diagnostic pseudocode references getters that do not exist on `seas_op`
+### [R-004] MODERATE `heterogeneous_material_plan.md` Phase 3 §Files to Create — `MaxCp()` MPI reduction is unconditional but the serial `GodunovFluxPool<Mesh>` specialisation has no comm
 
-**Category:** DEVIATION (NEW IN ROUND 2)
+**Category:** BUG
 
 **Description:**
-Plan lines 528–533 describe per-step CSV diagnostics:
+The Phase 3 pool interface promises:
+> *"`real_t MaxCp() const;                                    // global maximum, MPI-reduced"*
 
+And §Detailed Req. 4:
+> *"`MaxCp()` is computed and MPI-reduced once at construction so callers can use it without per-call MPI."*
+
+But the pool is templated `<typename MeshType = mfem::Mesh>`.  For `GodunovFluxPool<mfem::Mesh>` (serial specialisation), there is no `comm` and no `MPI_Allreduce`.  The plan doesn't guard the MPI call with an `if constexpr (IsParallelMesh<MeshType>::value)` block — an implementer following the spec literally writes uncompilable code in the serial specialisation (`mesh.GetComm()` not a member of `Mesh`).
+
+**Trigger:** Phase 3 implementation; first build of the serial pool specialisation.
+
+**Actual behavior:** Build error in `GodunovFluxPool<Mesh>::MaxCp()`.
+
+**Expected behavior:** Plan explicitly says MaxCp's MPI reduction is gated on the parallel specialisation.
+
+**Suggested fix:** Update §Files to Create note and §Detailed Req. 4:
+```diff
+   real_t MaxCp() const;                                    // global maximum, MPI-reduced
++                                                           // (parallel specialisation only;
++                                                           //  serial returns local max).
 ```
-// Diagnostics on `state`:
-//   V_max, V_min, psi_max, psi_min from seas_op
-//   traction_max from seas_op.GetTraction()
-//   slip_l2 = ||slip components||
-//   n_dt_rejects = ode_solver.GetNumDtRejects()
+And Det. Req. 4:
+```diff
+ 4. **CFL helper**:
+    ```cpp
+    real_t GodunovFluxPool::CpForElement(int elem) const
+    { return At(elem).GetCp(); }
+    real_t GodunovFluxPool::MaxCp() const
+-   { /* return max over flux_storage_; MPI_Allreduce(MAX) at construction time */ }
++   { /* return cached `max_cp_` field.  Computed at ctor as max over
++      * flux_storage_; if MeshType==ParMesh (constexpr-if), the value
++      * is MPI_Allreduce(MAX) reduced across ranks at construction.
++      * For MeshType==Mesh the local maximum is returned directly. */ }
+    ```
 ```
 
-Available APIs (`solver/seas_operator.hpp` + `fault/rate_state_fault.hpp`):
+**Test case:**
+```python
+def test_R004_serial_pool_compiles_and_max_cp_returns_local_max():
+    # Serial path must compile and produce the local pool's max c_p.
+    pool = GodunovFluxPool[Mesh](mat_const, serial_mesh)
+    cp_max = pool.MaxCp()
+    assert cp_max > 0
+    # In serial, no MPI calls.  Verify by linking against an MPI-free
+    # MFEM build path (or by checking MaxCp() does not appear in
+    # the compiled binary's MPI symbol references on the serial test).
+```
 
-| Diagnostic the plan asks for | API actually available |
-|---|---|
-| `V_max from seas_op` | `seas_op.GetMaxSlipRate()` (exists) ✓ |
-| `V_min from seas_op` | NO `GetMinSlipRate()` exists |
-| `psi_max from seas_op` | NO `GetMaxPsi()` exists |
-| `psi_min from seas_op` | NO `GetMinPsi()` exists |
-| `traction_max from seas_op.GetTraction()` | `GetTraction()` returns the full vector; max requires manual reduction |
-| `slip_l2` | requires `fault_op.GetSlip(state, slip)` + manual L2 norm |
+---
 
-The CSV columns spec on line 116 (`step, t, dt, V_max, V_min, psi_max,
-psi_min, traction_max, slip_l2, n_dt_rejects, success`) commits the
-implementer to all six diagnostics, but the plan does not show how to
-compute `V_min`, `psi_max`, `psi_min`, `traction_max`, or `slip_l2`.
+### [R-005] LOW `field_coefficient.cpp::ComputeMeshBBoxParallel` — R-009 abort message prints only `xmin`/`xmax` even when the failing axis is y or z
 
-The implementer would have to:
+**Category:** QUALITY
 
-1. For `V_min`/`V_max` (both): iterate the state vector, extract slip-rate
-   components (`state(i*StatePerNode + 0..1)`), compute global max/min
-   under MPI reduction.
-2. For `psi_min`/`psi_max`: extract `state(i*StatePerNode + PsiIndex)`
-   per node, reduce.
-3. For `traction_max`: max-reduce over `seas_op.GetTraction()`.
-4. For `slip_l2`: call `fault_op.GetSlip(state, slip)` (line 585 of
-   `rate_state_fault.hpp`), then compute `slip.Norml2()` and reduce.
-
-This is a meaningful amount of code that the plan describes in one
-hand-waving line. Either the plan must show the extraction code, or the
-CSV column list must shrink to what the existing API directly exposes
-(`V_max`, traction_max via reduction, n_dt_rejects).
-
-**Suggested fix:** flesh out the pseudocode block in §3.2 to show all
-six diagnostics explicitly. Example (mirroring BP5's
-`bench_out.Write(...)` pattern lightly):
-
+**Description:**
+The R-009 round-2 guard reads:
 ```cpp
-// Diagnostics
-const real_t V_max = seas_op.GetMaxSlipRate();          // existing API
-const Vector& trac = seas_op.GetTraction();             // existing API
-
-real_t local_V_min = std::numeric_limits<real_t>::infinity();
-real_t local_psi_min =  std::numeric_limits<real_t>::infinity();
-real_t local_psi_max = -std::numeric_limits<real_t>::infinity();
-real_t local_trac_max = 0.0;
-const int spn = RateStateFaultOperator<ParMesh,2>::StatePerNode;  // = 3
-const int n_local = state.Size() / spn;
-for (int i = 0; i < n_local; ++i) {
-    real_t v0 = state(i*spn + 0), v1 = state(i*spn + 1);
-    real_t psi = state(i*spn + 2);
-    local_V_min  = std::min(local_V_min, std::hypot(v0, v1));
-    local_psi_min = std::min(local_psi_min, psi);
-    local_psi_max = std::max(local_psi_max, psi);
+if (xmin > xmax || ymin > ymax || zmin > zmax)
+{
+   MFEM_ABORT(
+      "FieldProjector::ComputeMeshBBoxParallel: global mesh bbox "
+      "is degenerate (xmin=" << xmin << " > xmax=" << xmax << ", "
+      "or analogous in y/z).  This typically indicates the mesh "
+      "has zero elements on every MPI rank — check that the mesh "
+      "file is non-empty and that the ParMesh partitioning did "
+      "not silently drop all elements.");
 }
-for (int k = 0; k < trac.Size(); ++k) {
-    local_trac_max = std::max(local_trac_max, std::abs(trac(k)));
-}
-real_t V_min       = mpi.GlobalReduceMin(local_V_min);
-real_t psi_min     = mpi.GlobalReduceMin(local_psi_min);
-real_t psi_max     = mpi.GlobalReduceMax(local_psi_max);
-real_t traction_max = mpi.GlobalReduceMax(local_trac_max);
-
-Vector slip;
-fault_op.GetSlip(state, slip);
-real_t slip_local2 = slip * slip;            // local sum-of-squares
-real_t slip_l2     = std::sqrt(mpi.GlobalSum(slip_local2));
 ```
 
-**Test case:**
-```python
-def test_R009_csv_columns_populated_under_mpi():
-    csv = run_driver(np=4, n_steps=5)
-    for col in ["V_max", "V_min", "psi_max", "psi_min",
-                "traction_max", "slip_l2"]:
-        assert col in csv.columns
-        assert csv[col].notna().all()
-        assert (csv[col].abs() < 1e30).all()    # not Inf
+If only the y-axis triggers (e.g., a contrived rank-distribution that produces `xmin < xmax` but `ymin = +inf, ymax = -inf`), the abort message says `"xmin=X > xmax=Y"` where `X <= Y` — confusing.  The phrase "or analogous in y/z" hints at the issue but doesn't print actual y/z values.
+
+**Trigger:** Hypothetical degenerate mesh where only y- or z-axis fails.
+
+**Suggested fix:** Print all six bounds in the abort message and let the user identify which axis failed:
+```diff
+   if (xmin > xmax || ymin > ymax || zmin > zmax)
+   {
+      MFEM_ABORT(
+         "FieldProjector::ComputeMeshBBoxParallel: global mesh bbox "
+-        "is degenerate (xmin=" << xmin << " > xmax=" << xmax << ", "
+-        "or analogous in y/z).  This typically indicates the mesh "
++        "is degenerate.  Global bounds: "
++        "x=[" << xmin << ", " << xmax << "], "
++        "y=[" << ymin << ", " << ymax << "], "
++        "z=[" << zmin << ", " << zmax << "].  "
++        "(A degenerate axis has min > max.)  This typically indicates the mesh "
+         "has zero elements on every MPI rank — check that the mesh "
+         "file is non-empty and that the ParMesh partitioning did "
+         "not silently drop all elements.");
+   }
 ```
+
+**Test case:** N/A (diagnostic message quality).
 
 ---
 
-### [R-007] [LOW] [PLAN_safs_test.md:613-614] — Acceptance criterion ambiguous: "5 CSV rows"
+### [R-006] LOW `heterogeneous_material_plan.md` Phase 1 §Files to Modify — `MakeGridFunction` tightening (round-2 Det. Req. 7) is not listed in §Files to Modify
 
-**Category:** QUALITY (specification clarity)
+**Category:** QUALITY (visibility)
 
 **Description:**
-> CSV has 5 rows after the run, with monotone non-decreasing `t`.
+The round-2 fix added a new Phase 1 Detailed Requirement 7 (lines ~140-160) that tightens the existing `MakeGridFunction` factory by adding an `MFEM_VERIFY` for null shared_ptrs.  But §Files to Modify (lines 52-64) only mentions:
+- `Mode::Coefficient = 2` enum addition
+- three new `Coefficient*` members
+- `MakeCoefficient` factory
+- `EvalAt` accessor
+- `MaxCpInElement` extension
+- delete-inline-body directive
 
-A typical CSV has a header plus N data rows. With `n_steps=5` the file
-should have 6 lines total (1 header + 5 data) or 5 data rows without a
-header. The plan does not specify which.
+The `MakeGridFunction` tightening is buried in Detailed Requirements and not surfaced in the file-level summary.  An implementer skimming §Files to Modify and jumping to §Acceptance Criteria may miss it entirely.
+
+**Trigger:** Implementer reads Phase 1 §Files to Modify, doesn't read all of §Detailed Requirements.
 
 **Suggested fix:**
 ```diff
--- [ ] CSV has 5 rows after the run, with monotone non-decreasing `t`.
-+- [ ] CSV has 6 lines total (1 header line plus 5 data rows) after a
-+      `--n-steps 5` run; the 5 data rows have monotone non-decreasing
-+      `t`.
+   - Extend `MaxCpInElement(int elem)` to accept an optional `ElementTransformation*` ...
+   - **The existing header-only inline body of `MaxCpInElement` MUST BE DELETED** (R-004). ...
++  - Tighten the existing `MakeGridFunction` factory with an `MFEM_VERIFY` that all three shared_ptr arguments are non-null (R-004 round-2; details in Detailed Req. 7).  The body remains header-inline.
 ```
 
-**Test case:** none — pure spec clarification.
+**Test case:** N/A (visibility / specification organisation).
+
+---
+
+### [R-007] LOW `heterogeneous_material_plan.md` Phase 4 §Detailed Req. 6 — audit step refers callers to `MaterialField::EvalAt(elem, T, ip)` but does not say how to obtain `(elem, T, ip)` for a FAULT DOF
+
+**Category:** ASSUMPTION
+
+**Description:**
+The audit step (added in round 2 to fix R-003) tells the implementer:
+> *"Any match that uses the returned value in a numerical formula (friction impedance, pre-stress amplitude, CFL helpers, etc.) MUST be rewritten to evaluate the operator's `MaterialField` at the relevant location (fault QP, element centroid, etc.) when the active mode is `Mode::Coefficient` or `Mode::GridFunction`."*
+
+But `MaterialField::EvalAt(int elem, ElementTransformation& T, const IntegrationPoint& ip, ...)` requires a 3-tuple.  For a **fault DOF** (the typical friction-init context), the DOF is a 2D point on the fault surface; its corresponding 3D `(elem, T, ip)` triple is non-obvious:
+1. Find the bulk element that owns the fault QP (could be on either side of the fault).
+2. Get that element's `ElementTransformation` (`mesh.GetElementTransformation(elem_idx)`).
+3. Compute the local `IntegrationPoint` for the fault QP (requires inverse-mapping the fault QP's physical coords back to reference coords of the bulk element).
+
+This is feasible but non-trivial.  The plan should either provide a helper (`MaterialField::EvalAtFaultQP(fault_qp_index, ...)`) or point the implementer to existing SEAS code that does the lookup (`FaultBasis::GetFaultQP3DCoords()` or similar).
+
+**Trigger:** Phase 4 implementer writes the friction-impedance audit fix and stalls on step 3 above.
+
+**Suggested fix:** Add a sub-bullet to Phase 4 §Detailed Req. 6:
+```diff
+   The expected audit set today includes:
+   - friction state init in `solver/seas_operator.hpp`
+   - pre-stress / nucleation in `drivers/tpv102_driver.cpp`, `tpv104_driver.cpp`, `tpv205_driver.cpp`
+   - any utility in `friction/` that hard-codes a Constant-coefficient model
++
++  Practical recipe for fault-DOF material lookup (the most common
++  consumer): given a fault QP's 3D physical coords `(x, y, z)` and
++  the local bulk element index `elem`, do
++  ```cpp
++  ElementTransformation* T = mesh.GetElementTransformation(elem);
++  IntegrationPoint ip;
++  T->TransformBack(Vector{x, y, z}, ip);   // inverse-map physical -> reference
++  material.EvalAt(elem, *T, ip, lambda, mu, rho);
++  real_t eta_p = std::sqrt((lambda + 2*mu) * rho);
++  ```
++  The fault basis already stores per-QP `(elem, x, y, z)` in
++  `FaultBasis::GetFaultQPCoords()`; reuse that for the inverse-map
++  inputs.
+```
+
+**Test case:** N/A (specification clarification).
+
+---
+
+### [R-008] POSSIBLE LOW `heterogeneous_material_plan.md` Phase 3 §Edge Cases — "Empty rank" note says `MaxCp()` initialises to `0.0`, but `0.0` will collide with finite c_p values on `MPI_Allreduce(MAX)`
+
+**Category:** EDGE_CASE
+
+**Description:**
+§Edge Cases line 431:
+> *"`MaxCp()` initialises to `0.0` and the `MPI_Allreduce(MAX)` recovers the correct global value."*
+
+If a rank is empty, its local `max_cp = 0.0` is sent to `MPI_Allreduce(MAX)`.  The reduce picks `max(0.0, finite_c_p_on_other_ranks)` = the finite value. ✓
+
+But the same comment also could mislead a reader: 0.0 is a VALID c_p value (a degenerate void medium), and 0.0 ≤ any positive c_p, so the MAX reduction always discards 0.0 in favour of any finite value.  Could `MaxCp()` legitimately return 0.0?  Only if EVERY rank has empty pools — same all-empty-mesh case that R-009 in `field_coefficient.cpp` already aborts on.  So the case is unreachable in practice IF the bbox check fires first.  But the plan doesn't cross-reference, and an implementer auditing the empty case may worry.
+
+**Trigger:** Hypothetical all-empty mesh that somehow escapes the bbox check.
+
+**Suggested fix:** Cross-reference the bbox guard, or use `-infinity` as the sentinel:
+```diff
+- **Empty rank.** If a rank has zero local elements (unusual but possible at high MPI counts), `MaxCp()` initialises to `0.0` and the `MPI_Allreduce(MAX)` recovers the correct global value.
++ **Empty rank.** If a rank has zero local elements (unusual but possible at high MPI counts), `MaxCp()` initialises to `-std::numeric_limits<real_t>::infinity()` and the `MPI_Allreduce(MAX)` recovers the correct global value from non-empty ranks.  Using `-inf` (instead of `0.0`) ensures any legitimate `c_p = 0.0` value would still survive the reduce; in practice an all-empty global mesh is impossible because `ComputeMeshBBoxParallel` aborts upstream (`field_coefficient.cpp` R-009 guard).
+```
+
+**Test case:** N/A (defensive sentinel choice).
+
+---
+
+### [R-009] LOW `heterogeneous_material_plan.md` Phase 4 §LoadSidecarMaterialBundle — abort message must name the failing field, but the plan doesn't reference the existing helper that already does so
+
+**Category:** QUALITY
+
+**Description:**
+§Implementation step 3 (post-fix) reads:
+> *"Run `DataField3D::ContainsBBox` on EACH of the three loaded fields and abort if any of the three fails the containment check (R-006 round-2 ...).  The abort message must name which field's bbox failed."*
+
+The existing `FieldProjector::AbortContainmentFailure(field, ...)` in `field_coefficient.cpp` already takes a `DataField3D&` and prints `field.FieldName()` in the message.  The plan should direct the implementer to reuse this helper rather than write a new abort path.
+
+**Trigger:** Phase 4 implementer rolls their own abort message and loses the field-name detail.
+
+**Suggested fix:**
+```diff
+- 3. Compute the mesh bbox via `FieldProjector::ComputeMeshBBoxParallel`.  Run `DataField3D::ContainsBBox` on EACH of the three loaded fields and abort if any of the three fails the containment check ... The abort message must name which field's bbox failed.
++ 3. Compute the mesh bbox via `FieldProjector::ComputeMeshBBoxParallel`.  For each of the three loaded fields, if `DataField3D::ContainsBBox(...)` returns false, call the existing `FieldProjector::AbortContainmentFailure(field, mxmin, ..., mzmax)` helper (in `field_coefficient.cpp`).  That helper prints both the mesh bbox table and the field's bbox table with the field name (via `field.FieldName()`), giving the user actionable diagnostic info without rolling a new abort path.
+```
+
+**Test case:** N/A (specification clarification).
+
+---
+
+### [R-010] LOW `heterogeneous_material_plan.md` Phase 3 §Detailed Req. 2 — `dedup_sig_figs` rounding algorithm still unspecified
+
+**Category:** ASSUMPTION (remains from round-2 R-005 LOW)
+
+**Description:**
+The round-2 fix introduced `dedup_sig_figs = 6` as a tunable knob but does not state how to round a `real_t` value to N significant figures.  Two common approaches:
+1. `std::round(value / std::pow(10.0, std::floor(std::log10(std::abs(value))) + 1 - sig_figs)) * std::pow(...)`.
+2. `snprintf` to a temp buffer with `%.6g` format, parse back.
+
+The two are NOT bit-equivalent at boundary values (e.g., `3.999999` rounds to `4.00000` in `%g` but to `3.99999` in numeric form for 6 sig figs).  Different implementations dedup differently → `NumUniqueFluxes()` is implementation-defined → test failures across compilers.
+
+**Trigger:** Different compilers / platforms produce different `NumUniqueFluxes()` for the same input.
+
+**Suggested fix:**
+```diff
+ 2. **Memory optimisation — uniqueness map** (R-011): ...  Rounding precision is controlled by the constructor's `dedup_sig_figs` parameter (default 6).  ...
++
++    Rounding algorithm:
++    ```cpp
++    inline real_t round_to_sig_figs(real_t v, int sig_figs)
++    {
++       if (v == 0.0 || std::isnan(v)) return v;
++       const real_t magnitude = std::pow(10.0,
++          std::floor(std::log10(std::abs(v))) + 1 - sig_figs);
++       return std::round(v / magnitude) * magnitude;
++    }
++    ```
++    Hash key is the std::tuple<real_t, real_t, real_t> of the rounded
++    triple, using `std::hash<real_t>` element-wise XOR-mixed (or
++    `boost::hash_combine` if MFEM uses it elsewhere).
+```
+
+**Test case:** N/A (specification clarification).
 
 ---
 
 ## Summary
+- Critical issues: **1** (R-001 — 6x memory underestimate + sizeof-based assertion that ignores heap; the budget acceptance test passes vacuously)
+- Moderate issues: **3** (R-002 const-correctness on pool ctor; R-003 internal contradiction between Edge Cases and Det. Req. 5; R-004 MaxCp MPI in serial specialisation)
+- Low issues: **6** (R-005 abort-message diagnostics; R-006 MakeGridFunction not listed in §Files to Modify; R-007 fault-DOF EvalAt recipe; R-008 MaxCp sentinel value; R-009 reuse existing AbortContainmentFailure; R-010 dedup rounding algorithm)
+- Plan compliance: **PARTIAL** — round-2 CRITICAL/MODERATE findings (R-001..R-004 from the previous round) are correctly addressed; the post-fix state introduces 1 new CRITICAL (memory math) and 3 new MODERATE issues (mostly spec-internal contradictions and unhandled serial-specialisation gaps).
+- Verdict: **PASS WITH FIXES** — R-001 must be resolved (the memory acceptance test is misleading and could let implementers ship a 10x-budget overrun); R-002..R-004 are smaller spec gaps that the implementer can plausibly catch but should be tightened before Phase 3 starts.
 
-- Critical issues: **4** (R-001, R-002, R-003, R-008 — all prevent the
-  driver from compiling/running)
-- Moderate issues: **4** (R-004 plan/code drift; R-005 misleading
-  documentation; R-006 hidden invariant; R-009 missing diagnostic
-  extraction code)
-- Low issues: **1** (R-007 spec clarity)
-- Plan compliance: **PARTIAL** — composition strategy is sound and
-  correctly identifies the BoundaryConfig route + BP5Params override
-  trick, but the actual code snippets diverge from the BP5 reference in
-  four compile-stopping ways (R-001, R-002, R-003, R-008) and three
-  documentation-vs-code drift sites (R-004, R-005, R-009). The plan was
-  most likely re-written from memory rather than mechanically copied
-  from `drivers/seas_driver.cpp`.
-- **Verdict:** **PASS WITH FIXES**. Must fix R-001, R-002, R-003, R-008
-  before the driver can be built; R-004..R-006, R-009 should be cleaned
-  up before handoff.
+### Why PASS WITH FIXES (not FAIL)
+- The single CRITICAL (R-001 round-3) is a memory accounting error confined to the plan document; no code is yet implemented; it surfaces during the first SAFS-scale acceptance test, NOT silently in production.
+- R-002 (const_cast) is the same hazard the prior round-1 review explicitly flagged; the fix-round successfully fixed it once in `field_coefficient.cpp` but it re-emerged in the Phase 3 spec — the implementer can recognise the pattern and fix it again.
+- R-003 / R-004 are textual contradictions in the plan; an implementer who reads top-to-bottom in order will follow the Detailed Requirements (latest authoritative spec) and skip the stale Edge Cases note.
 
-## Direct answer to the user's question
-
-> "but why we have R-001 to R-003 deviations if the goal is to mirror
-> BP5 setup but with this SAFS mesh?"
-
-Because the plan author rewrote the BP5 driver pattern from memory and
-the resulting C++ snippets dropped or invented details. The deviations
-are NOT design choices — they are transcription errors. The fix is, in
-each case, to literally match the BP5 reference at
-`drivers/seas_driver.cpp:364, 590, 587-590`. The single exception is
-R-003 (`AssertSafsAttrs` / `ListAttrs`): BP5 has no analogue, but the
-plan introduced this new helper and forgot to define a sub-helper.
-
-Round 2 also found a fourth compile-stopper of the same class (R-008,
-3-arg `Step` call) that round 1 missed.
+### Why this is the strictest standard so far
+With three review-fix rounds in, the remaining findings are concentrated in the plan document and have no compiled code impact yet. The plan's net trajectory is improving (round 1: 3 CRITICAL → round 2: 1 CRITICAL → round 3: 1 CRITICAL), but the round-3 CRITICAL is a NEW class of issue (a memory budget that is wrong by 6x, with a `sizeof`-based assertion that hides the discrepancy). Catching this before Phase 3 implementation begins saves a debug cycle later.
 
 ## Unreviewed Areas
-
-- **Phase-4 `check_safs_smoke.py`** — the plan describes acceptance
-  metrics but no Python source is included. Cannot review what does not
-  exist.
-- **Numerical-correctness verification of the override approach.** The
-  plan claims "Initial state is identically the steady-state plate-rate
-  configuration — by construction nothing should evolve to first
-  order." Verifying this claim requires running the driver and
-  inspecting the CSV; cannot be checked from the plan alone.
-- **Multi-fault FaultBasis behavior.** The plan acknowledges (Risk
-  Assessment line 733) that `ref_normal = (0,-1,0)` produces
-  inconsistent local frames across the 6 SAFS faults. Documented as
-  acceptable shakedown limitation, not a bug.
-- **`SetVGuard`** (BP5 driver line 451) — the plan does NOT call
-  `ode_solver.SetVGuard(100.0)` even though BP5 reference does. With
-  `V_init = Vp = 1e-9` the system should be at steady state and VGuard
-  is unlikely to fire, so this is probably intentional. Not flagged as
-  a bug. Mention only.
-- **`SetStatePerNode`** (plan line 515) — plan calls `SetStatePerNode(3)`,
-  BP5 reference does not. The default is 2 (BP2). For BP5 with VGuard
-  the correct value is 3. Plan is **more correct than BP5 reference
-  here**, not a bug; arguably it exposes a latent BP5 bug, but that's
-  out of scope.
+- `MaterialField::EvalAt` body in `Mode::Coefficient` (not yet implemented; covered by Phase 1 spec).
+- Phase 4 driver wiring scaffolding (not yet implemented; covered by Phase 4 spec).
+- The actual `data_field_3d.cpp` trilinear evaluator (already verified bit-perfect earlier).
+- Plot scripts under `code_preprocess/data_projection/` (research artifacts, not in scope).
+- `FaultFaceFlux::InitializeImpedancesFromMaterial` (explicitly deferred by the plan).

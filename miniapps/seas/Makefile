@@ -299,6 +299,34 @@ TEST_R001_DRIVER_DEFAULT_ADER_SRC          = tests/unit/test_R001_driver_default
 # Round-6 R-002 regression: driver init uses total-Q
 TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_total_q.cpp
 
+# Data-projection feature (Phase 3..5).  See document/features_dev/
+# data_projection_feature_plan_v2.md.
+DATA_FIELD_3D_HEADERS                       = io/data_field_3d.hpp
+DATA_FIELD_3D_SRC                           = io/data_field_3d.cpp
+FIELD_COEFFICIENT_HEADERS                   = io/field_coefficient.hpp \
+                                              io/data_field_3d.hpp
+FIELD_COEFFICIENT_SRC                       = io/field_coefficient.cpp
+HETEROGENEOUS_MATERIAL_HEADERS              = dynamic/heterogeneous_material.hpp
+HETEROGENEOUS_MATERIAL_SRC                  = dynamic/heterogeneous_material.cpp
+MATERIAL_COEFFICIENTS_HEADERS               = io/material_coefficients.hpp \
+                                              io/data_field_3d.hpp
+MATERIAL_COEFFICIENTS_SRC                   = io/material_coefficients.cpp
+TEST_DATA_FIELD_3D_SRC                      = tests/unit/test_data_field_3d.cpp
+TEST_FIELD_PROJECTOR_SRC                    = tests/unit/test_field_projector.cpp
+TEST_HETEROGENEOUS_MATERIAL_SRC             = tests/unit/test_heterogeneous_material.cpp
+
+# HDF5 (used by DataField3D).  HDF5 is provided by the conda env
+# (mfem-dev) used by the project; CONDA_PREFIX is set when that env
+# is active.  The HDF5_DIR variable lets a non-conda build override.
+HDF5_DIR ?= $(CONDA_PREFIX)
+ifeq ($(strip $(HDF5_DIR)),)
+   HDF5_INCFLAGS =
+   HDF5_LIBS     = -lhdf5
+else
+   HDF5_INCFLAGS = -I$(HDF5_DIR)/include
+   HDF5_LIBS     = -L$(HDF5_DIR)/lib -lhdf5
+endif
+
 # R-501: `make ... CXXFLAGS+=-D<FLAG>` may not reach the compile step
 # because MFEM's config.mk explicitly sets MFEM_CPPFLAGS/MFEM_CXXFLAGS.
 # Use this SEAS-specific variable for diagnostic flags, e.g.
@@ -307,6 +335,15 @@ TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_to
 SEAS_EXTRA_CPPFLAGS ?=
 
 # Object files
+DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
+FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
+HETEROGENEOUS_MATERIAL_OBJ       = $(HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
+MATERIAL_COEFFICIENTS_OBJ        = $(MATERIAL_COEFFICIENTS_SRC:.cpp=.o)
+TEST_DATA_FIELD_3D_OBJ           = $(TEST_DATA_FIELD_3D_SRC:.cpp=.o)
+TEST_FIELD_PROJECTOR_OBJ         = $(TEST_FIELD_PROJECTOR_SRC:.cpp=.o)
+TEST_HETEROGENEOUS_MATERIAL_OBJ  = $(TEST_HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
+PROJECT_VELOCITY_DRIVER_SRC      = drivers/project_velocity_to_mesh.cpp
+PROJECT_VELOCITY_DRIVER_OBJ      = $(PROJECT_VELOCITY_DRIVER_SRC:.cpp=.o)
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
 TEST_STATE_EVOLUTION_OBJ = $(TEST_STATE_EVOLUTION_SRC:.cpp=.o)
 TEST_ANTIPLANE_OBJ = $(TEST_ANTIPLANE_SRC:.cpp=.o)
@@ -701,6 +738,37 @@ all: $(MINIAPPS)
 %.o: %.cpp
 
 SEAS_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
+
+# Data-projection feature: DataField3D / FieldCoefficient / FieldProjector /
+# MaterialField unit tests (Phase 3..5 of plan v2).
+seas_test_data_field_3d: $(TEST_DATA_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+
+seas_test_field_projector: $(TEST_FIELD_PROJECTOR_OBJ) \
+                           $(DATA_FIELD_3D_OBJ) $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FIELD_PROJECTOR_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
+
+seas_test_heterogeneous_material: $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                  $(MATERIAL_COEFFICIENTS_OBJ) \
+                                  $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+
+# Data-projection feature: standalone driver that loads a mesh + a
+# schema-v1 sidecar, projects (Vp, Vs, rho, lambda, mu) onto the mesh,
+# and writes a ParaView .pvd / .vtu pair (R-003).
+seas_project_velocity_to_mesh: $(PROJECT_VELOCITY_DRIVER_OBJ) \
+                               $(DATA_FIELD_3D_OBJ) $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(PROJECT_VELOCITY_DRIVER_OBJ) $(FIELD_COEFFICIENT_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 
 # Phase 1: Friction law unit tests
 seas_test_friction_law: $(TEST_FRICTION_OBJ)
@@ -1209,6 +1277,56 @@ seas_generate_mesh: $(GENERATE_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(GENERATE_MESH_OBJ) $(MFEM_LIBS)
 
 # Object file rules
+# Data-projection feature object rules (need HDF5 include flags for
+# the .cpp side; MaterialField is header-only and so its test only
+# depends on MFEM headers).
+$(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
+                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(FIELD_COEFFICIENT_OBJ): %.o: $(SRC)%.cpp $(FIELD_COEFFICIENT_HEADERS) \
+                               $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_FIELD_PROJECTOR_OBJ): %.o: $(SRC)%.cpp $(FIELD_COEFFICIENT_HEADERS) \
+                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(HETEROGENEOUS_MATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                                    $(HETEROGENEOUS_MATERIAL_HEADERS) \
+                                    $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(MATERIAL_COEFFICIENTS_OBJ): %.o: $(SRC)%.cpp \
+                                    $(MATERIAL_COEFFICIENTS_HEADERS) \
+                                    $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	# R-007 round-4: HDF5_INCFLAGS not required — material_coefficients
+	# only touches DataField3D's public API (no hid_t in surface).
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_HETEROGENEOUS_MATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                                         $(HETEROGENEOUS_MATERIAL_HEADERS) \
+                                         $(MATERIAL_COEFFICIENTS_HEADERS) \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(PROJECT_VELOCITY_DRIVER_OBJ): %.o: $(SRC)%.cpp \
+                                      $(FIELD_COEFFICIENT_HEADERS) \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
 $(TEST_FRICTION_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -1812,6 +1930,18 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-ader-tpv102-smoke \
       test-R001-driver-defaults-to-ader \
       test-R002-driver-init-total-q
+
+test-data-projection: test-data-field-3d test-field-projector test-heterogeneous-material
+	@echo "data-projection feature: all C++ unit tests passed."
+
+test-data-field-3d: seas_test_data_field_3d
+	./seas_test_data_field_3d
+
+test-field-projector: seas_test_field_projector
+	./seas_test_field_projector
+
+test-heterogeneous-material: seas_test_heterogeneous_material
+	mpirun -np 1 ./seas_test_heterogeneous_material
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -2955,3 +3085,22 @@ seas_test_friction_solver_stable: $(TEST_FRICTION_SOLVER_STABLE_OBJ) dynamic/fri
 # Extend the umbrella so `make test-tpv104` also runs the §4.10.X test.
 test-tpv104: seas_test_friction_solver_stable
 	./seas_test_friction_solver_stable
+
+# =============================================================================
+# SAFS multi-fault SEAS smoke driver (Plan §3, additive)
+# =============================================================================
+# This stanza is strictly additive: it does not modify any existing variable
+# or rule. The SAFS driver lives entirely under safs/code/ and is intended
+# for Frontera; locally we only build it.
+SAFS_TEST_DRIVER_SRC = safs/code/seas_safs_test_driver.cpp
+SAFS_TEST_DRIVER_OBJ = $(SAFS_TEST_DRIVER_SRC:.cpp=.o)
+SAFS_TEST_DRIVER_HEADERS = safs/code/safs_test_params.hpp \
+                           safs/code/safs_boundary_config.hpp \
+                           safs/code/safs_fault_init.hpp
+
+$(SAFS_TEST_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SAFS_TEST_DRIVER_HEADERS) $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+seas_safs_test_driver: $(SAFS_TEST_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(SAFS_TEST_DRIVER_OBJ) $(MFEM_LIBS)
