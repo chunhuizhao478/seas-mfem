@@ -104,6 +104,10 @@ module load mumps/5.3 2>/dev/null || true
 module load parmetis 2>/dev/null || true
 module load "${PETSC_MODULE}" 2>/dev/null || true
 module load fftw3/3.3.8 2>/dev/null || true   # PETSc links against libfftw3_mpi
+# python3 is required by build_gmsh() (pip install) and by the Phase 6
+# sbatch (the gmsh wrapper execs python3 at runtime).  CentOS 7 base
+# ships python2 only, so loading the module is necessary.
+module load python3 2>/dev/null || true
 # Phase 6 ParaView output uses VTKHDF + H5Z-ZFP.  We build HDF5 1.14.x
 # from source by default (see build_hdf5() below); only load Frontera's
 # phdf5 module when HDF5_USE_MODULE=YES.  Older Frontera modules
@@ -360,11 +364,17 @@ else
     USE_HDF5_RESOLVED="NO"
 fi
 
-# Install gmsh ${GMSH_VERSION} from the official Linux64 binary tarball.
-# Frontera does not ship a gmsh module, and the Phase 6 TPV meshes
-# (~125 MB each) are too large to commit to git.  The .geo sources are
-# tracked; the Phase 6 sbatch use ${GMSH_PREFIX}/bin/gmsh to regenerate
-# the matching .msh at submit time.
+# Install gmsh via the pip wheel into ${GMSH_PREFIX}.  Frontera does not
+# ship a gmsh module, and the Phase 6 TPV meshes (~125 MB each) are too
+# large to commit to git; the .geo sources are tracked and the Phase 6
+# sbatch use ${GMSH_PREFIX}/bin/gmsh to regenerate the matching .msh at
+# submit time.
+#
+# Why pip instead of the gmsh.info Linux64 tarball: the tarball is built
+# against modern glibc (>= 2.23) and fails on Frontera (CentOS 7,
+# glibc 2.17) with `version GLIBC_2.23 not found`.  The gmsh package on
+# PyPI ships a manylinux2014 wheel, whose glibc 2.17 baseline IS
+# supported on CentOS 7.
 build_gmsh() {
     if [ "${USE_GMSH}" != "YES" ] && [ "${USE_GMSH}" != "1" ] && [ "${USE_GMSH}" != "yes" ]; then
         echo ""
@@ -374,49 +384,79 @@ build_gmsh() {
 
     local gmsh_bin="${GMSH_PREFIX}/bin/gmsh"
     if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
-        if [ -x "${gmsh_bin}" ]; then
+        if [ -x "${gmsh_bin}" ] && "${gmsh_bin}" -version >/dev/null 2>&1; then
             echo ""
             echo "=== Reusing existing gmsh at ${gmsh_bin} ==="
-            echo "    (set FORCE_REBUILD=1 to redownload)"
+            echo "    (set FORCE_REBUILD=1 to reinstall)"
             return 0
         fi
         echo ""
-        echo "=== Cache miss: ${gmsh_bin} not found — downloading gmsh ==="
+        echo "=== Cache miss or stale install: reinstalling gmsh ==="
     fi
 
     echo ""
-    echo "=== Installing gmsh ${GMSH_VERSION} (Linux64 binary tarball) ==="
-    mkdir -p "${SCRIPT_DIR}/extern"
-    local tarball="${SCRIPT_DIR}/extern/gmsh-${GMSH_VERSION}-Linux64.tgz"
-    local url="https://gmsh.info/bin/Linux/gmsh-${GMSH_VERSION}-Linux64.tgz"
-    if [ ! -f "${tarball}" ]; then
-        echo "  Downloading from ${url}"
-        if command -v wget >/dev/null 2>&1; then
-            wget -q -O "${tarball}" "${url}"
-        elif command -v curl >/dev/null 2>&1; then
-            curl -sL -o "${tarball}" "${url}"
-        else
-            echo "ERROR: neither wget nor curl available."
-            exit 1
-        fi
-    fi
+    echo "=== Installing gmsh via pip (manylinux wheel, CentOS 7 compatible) ==="
 
-    # The tarball extracts to ./gmsh-${VERSION}-Linux64/{bin,share}.
-    # Move it into ${GMSH_PREFIX} so its layout matches the other extern
-    # installs (extern/gmsh/{bin,share}, not extern/gmsh/gmsh-X.Y-Linux64).
-    rm -rf "${GMSH_PREFIX}"
-    tar -xzf "${tarball}" -C "${SCRIPT_DIR}/extern/"
-    mv "${SCRIPT_DIR}/extern/gmsh-${GMSH_VERSION}-Linux64" "${GMSH_PREFIX}"
-
-    if [ ! -x "${gmsh_bin}" ]; then
-        echo "ERROR: gmsh extraction finished but ${gmsh_bin} missing."
+    # python3 is needed for the install AND for the runtime launcher
+    # (the pip wheel installs a Python script that imports libgmsh.so via
+    # ctypes).  Frontera's `python3` modules expose it; CentOS 7's base
+    # only ships python2.
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: python3 not in PATH.  Run \`module load python3\` first,"
+        echo "       then re-run this script."
         exit 1
     fi
-    # Sanity check: the static binary should run on Frontera login nodes.
-    if ! "${gmsh_bin}" -version >/dev/null 2>&1; then
-        echo "WARNING: ${gmsh_bin} did not run cleanly — check ldd output."
+
+    # Wipe any prior install (e.g. leftover tarball-style extract) so pip
+    # has a clean slate.
+    rm -rf "${GMSH_PREFIX}"
+    mkdir -p "${GMSH_PREFIX}"
+
+    # `pip install --target` keeps the install self-contained inside
+    # extern/gmsh; --upgrade ensures we pull the requested version on
+    # cache misses.  Pin to ${GMSH_VERSION} so the install is
+    # reproducible (drop the == if you want pip's latest).
+    local pin
+    if [ -n "${GMSH_VERSION:-}" ] && [ "${GMSH_VERSION}" != "latest" ]; then
+        pin="gmsh==${GMSH_VERSION}"
+    else
+        pin="gmsh"
     fi
-    echo "  gmsh ${GMSH_VERSION} installed at ${gmsh_bin}"
+    python3 -m pip install --target "${GMSH_PREFIX}" --upgrade --quiet "${pin}"
+
+    # The pip wheel installs:
+    #   ${GMSH_PREFIX}/gmsh.py                Python wrapper
+    #   ${GMSH_PREFIX}/lib/libgmsh.so.X.Y     native library
+    #   ${GMSH_PREFIX}/bin/gmsh               Python launcher (`import gmsh`)
+    # The launcher needs PYTHONPATH and LD_LIBRARY_PATH set or libgmsh.so
+    # won't be found.  Replace the launcher with a self-contained shell
+    # wrapper that sets the env, so downstream callers (Phase 6 sbatch)
+    # don't need to manage it.
+    if [ -f "${GMSH_PREFIX}/bin/gmsh" ] && [ ! -L "${GMSH_PREFIX}/bin/gmsh" ]; then
+        mv "${GMSH_PREFIX}/bin/gmsh" "${GMSH_PREFIX}/bin/gmsh-pyimpl"
+    fi
+    cat > "${GMSH_PREFIX}/bin/gmsh" <<EOF
+#!/bin/bash
+# gmsh CLI wrapper — sets up PYTHONPATH/LD_LIBRARY_PATH for the
+# pip-installed manylinux gmsh wheel.  Generated by build_frontera.sh.
+GMSH_DIR="${GMSH_PREFIX}"
+export PYTHONPATH="\${GMSH_DIR}:\${PYTHONPATH:-}"
+if [ -d "\${GMSH_DIR}/lib" ]; then
+    export LD_LIBRARY_PATH="\${GMSH_DIR}/lib:\${LD_LIBRARY_PATH:-}"
+fi
+exec python3 "\${GMSH_DIR}/bin/gmsh-pyimpl" "\$@"
+EOF
+    chmod +x "${GMSH_PREFIX}/bin/gmsh"
+
+    if [ ! -x "${GMSH_PREFIX}/bin/gmsh" ]; then
+        echo "ERROR: pip install finished but ${GMSH_PREFIX}/bin/gmsh missing."
+        exit 1
+    fi
+    if ! "${GMSH_PREFIX}/bin/gmsh" -version >/dev/null 2>&1; then
+        echo "WARNING: ${GMSH_PREFIX}/bin/gmsh -version failed."
+        echo "         Check that python3 can \`import gmsh\` with PYTHONPATH=${GMSH_PREFIX}."
+    fi
+    echo "  gmsh installed at ${GMSH_PREFIX}/bin/gmsh"
 }
 
 build_gmsh
