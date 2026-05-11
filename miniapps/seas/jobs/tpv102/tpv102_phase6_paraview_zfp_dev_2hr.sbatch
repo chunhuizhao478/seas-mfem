@@ -38,9 +38,24 @@ set -euo pipefail
 
 SBATCH_LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 
-# Project checkout root.  Override at submit time when running from a
-# different clone, e.g. `SEAS_MFEM_ROOT=$(pwd) sbatch ...`.
+# Project checkout root.  Auto-detect by walking up from $SLURM_SUBMIT_DIR
+# (or $PWD if not running under Slurm) until we find build_frontera.sh.
+# Override at submit time when running from a different clone:
+#   SEAS_MFEM_ROOT=$(pwd) sbatch ...
+if [ -z "${SEAS_MFEM_ROOT:-}" ]; then
+    _probe="${SLURM_SUBMIT_DIR:-$PWD}"
+    while [ "${_probe}" != "/" ] && [ -n "${_probe}" ]; do
+        if [ -f "${_probe}/build_frontera.sh" ]; then
+            SEAS_MFEM_ROOT="${_probe}"
+            break
+        fi
+        _probe="$(dirname "${_probe}")"
+    done
+    unset _probe
+fi
+# Last-resort fallback if the probe walked off the top of the filesystem.
 SEAS_MFEM_ROOT="${SEAS_MFEM_ROOT:-/scratch2/10024/zhaochun/seas-project/seas-mfem}"
+echo "  SEAS_MFEM_ROOT = ${SEAS_MFEM_ROOT}"
 
 module load intel/19.1.1
 module load impi/19.0.9
