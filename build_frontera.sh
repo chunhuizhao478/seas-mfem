@@ -9,10 +9,15 @@
 #
 # Optional environment overrides:
 #   PETSC_MODULE=petsc/3.23     # Frontera PETSc module to load
-#   PHDF5_MODULE=phdf5/1.14.4   # Frontera parallel-HDF5 module to load
-#                                 (1.14.4 is the recommended default; the
-#                                 1.10.x line is EOL upstream.  File format
-#                                 is fully compatible with 1.10.x.)
+#   PHDF5_MODULE=phdf5/1.12.2   # Frontera parallel-HDF5 module to load
+#                                 (1.12.2 is the newest phdf5 module on
+#                                 Frontera that is built against the
+#                                 intel/19.1.1 + impi/19.0.9 toolchain the
+#                                 rest of this build uses.  phdf5/1.14.x
+#                                 on Frontera requires intel/23.1.0 +
+#                                 impi/21.9.0 (or gcc/13.2.0 + impi/21.9.0),
+#                                 which is incompatible with the
+#                                 hypre/mumps/petsc modules pinned below.)
 #   USE_MUMPS=0                 # Disable MFEM's direct MUMPS integration
 #   USE_HDF5=NO                 # Disable HDF5 + H5Z-ZFP integration
 #   QUICK=1                     # Skip the zfp / h5z-zfp clone + rebuild
@@ -35,7 +40,7 @@
 set -euo pipefail
 
 PETSC_MODULE="${PETSC_MODULE:-petsc/3.15}"
-PHDF5_MODULE="${PHDF5_MODULE:-phdf5/1.14.4}"
+PHDF5_MODULE="${PHDF5_MODULE:-phdf5/1.12.2}"
 USE_MUMPS="${USE_MUMPS:-YES}"
 USE_HDF5="${USE_HDF5:-YES}"
 QUICK="${QUICK:-0}"
@@ -66,7 +71,18 @@ module load fftw3/3.3.8 2>/dev/null || true   # PETSc links against libfftw3_mpi
 # required so MFEM_PARALLEL_HDF5 is defined (see mesh/vtkhdf.hpp:25);
 # the serial `hdf5/*` modules on Frontera do NOT define H5_HAVE_PARALLEL.
 if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "yes" ]; then
-    module load "${PHDF5_MODULE}" 2>/dev/null || true
+    # Capture stderr so a load failure (wrong version, incompatible
+    # toolchain, etc.) is visible up-front instead of silently falling
+    # through to a "TACC_HDF5_INC unbound" error 60 lines later.
+    if ! module load "${PHDF5_MODULE}" 2>&1; then
+        echo "ERROR: failed to load ${PHDF5_MODULE}."
+        echo "  Run 'module spider ${PHDF5_MODULE}' to see compatible prerequisites."
+        echo "  Pick a phdf5 version compatible with intel/19.1.1 + impi/19.0.9"
+        echo "  (e.g. phdf5/1.12.2, phdf5/1.12.0, or phdf5/1.10.4) and set"
+        echo "  PHDF5_MODULE accordingly, or re-run with USE_HDF5=NO to skip"
+        echo "  Phase 6 VTKHDF output entirely."
+        exit 1
+    fi
 fi
 
 resolve_petsc_dir() {
@@ -126,7 +142,10 @@ if [ "${USE_HDF5}" = "YES" ] || [ "${USE_HDF5}" = "1" ] || [ "${USE_HDF5}" = "ye
     REQUIRED_VARS+=(TACC_HDF5_INC TACC_HDF5_LIB)
 fi
 for var in "${REQUIRED_VARS[@]}"; do
-    val="$(eval echo \$$var)"
+    # Indirect expansion with a default keeps the check working under
+    # `set -u` — `eval echo \$$var` would itself trip the unbound-var
+    # error before we could print the intended diagnostic.
+    val="${!var:-}"
     if [ -z "${val}" ]; then
         echo "ERROR: ${var} is not set. Check module loads."
         exit 1
