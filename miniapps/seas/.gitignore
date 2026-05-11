@@ -16,6 +16,7 @@ tpv102/plots_*/
 # Mesh output
 *.vtk
 *.msh
+*.vtu
 bp1/mesh/bp1_ss_12.5m.msh
 
 # SAFS Dolfin XML volume meshes (regenerable from .vtu via convert_msh.py;
@@ -46,6 +47,10 @@ test_r001_*/
 # Python bytecode caches
 __pycache__/
 *.pyc
+.pytest_cache/
+
+# macOS metadata
+.DS_Store
 
 # Archive
 archive/
