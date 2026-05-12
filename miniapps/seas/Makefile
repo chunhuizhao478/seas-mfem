@@ -223,6 +223,8 @@ TEST_FAULT_SURFACE_VTKHDF_ZFP_SRC          = tests/unit/test_fault_surface_vtkhd
 TEST_VOLUME_HDF_COMPRESSION_SRC            = tests/unit/test_volume_hdf_compression.cpp
 # Phase 3 of PLAN_paraview_compaction_2026-04-28 — adaptive snapshot cap
 TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_cap.cpp
+# R-001 of PLAN_split_bulk_solutions_2026-05-12 — kinematics field set
+TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_set.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
@@ -434,6 +436,7 @@ TEST_VTKHDF_ZFP_OBJ                        = $(TEST_VTKHDF_ZFP_SRC:.cpp=.o)
 TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ          = $(TEST_FAULT_SURFACE_VTKHDF_ZFP_SRC:.cpp=.o)
 TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.cpp=.o)
 TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
+TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
@@ -1047,6 +1050,11 @@ seas_test_paraview_schedule_cap: $(TEST_PARAVIEW_SCHEDULE_CAP_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_SCHEDULE_CAP_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# R-001 of PLAN_split_bulk_solutions_2026-05-12 — kinematics field set
+seas_test_kinematics_field_set: $(TEST_KINEMATICS_FIELD_SET_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_KINEMATICS_FIELD_SET_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
 seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ) $(MFEM_LIBS)
@@ -1618,6 +1626,10 @@ $(TEST_VOLUME_HDF_COMPRESSION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_PARAVIEW_SCHEDULE_CAP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_KINEMATICS_FIELD_SET_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -2201,6 +2213,9 @@ test-paraview-tolerance-isolation: seas_test_fault_surface_vtkhdf_zfp
 # Phase 3 PLAN_paraview_compaction_2026-04-28 — snapshot cap unit test
 test-paraview-schedule-cap: seas_test_paraview_schedule_cap
 	./seas_test_paraview_schedule_cap
+
+test-kinematics-field-set: seas_test_kinematics_field_set
+	./seas_test_kinematics_field_set
 
 test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
 	./seas_test_fault_basis_dip_strike_symmetry

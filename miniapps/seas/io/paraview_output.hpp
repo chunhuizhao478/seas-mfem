@@ -430,6 +430,17 @@ public:
    /// callers anyway).
    VolumeOutputMode GetVolumeOutputMode() const { return volume_output_mode_; }
 
+   /// @brief Read-only handle on the underlying volume data collection.
+   ///
+   /// Used by unit tests that need to inspect which fields were
+   /// registered (via `HasField` / `GetField`).  Returns nullptr only
+   /// in the (currently unreachable) case where the constructor failed
+   /// to allocate `pv_dc_`.  Not intended for external write access;
+   /// driver code should go through `RegisterDomainField` /
+   /// `SetVolumeHDFCompression` / `SetVolumePVDt` instead.
+   const ParaViewDataCollectionBase *GetVolumeDataCollection() const
+   { return pv_dc_.get(); }
+
    // ---------------------------------------------------------------
    //  Domain field registration
    // ---------------------------------------------------------------
