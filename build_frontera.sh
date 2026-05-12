@@ -455,11 +455,10 @@ build_gmsh() {
             -DENABLE_FLTK=OFF \
             -DENABLE_OCC=OFF \
             -DENABLE_MED=OFF \
-            -DENABLE_HDF5=OFF \
             -DENABLE_PETSC=OFF \
             -DENABLE_SLEPC=OFF \
             -DENABLE_MPI=OFF \
-            -DENABLE_PYTHON=OFF \
+            -DENABLE_WRAP_PYTHON=OFF \
             -DENABLE_BUILD_LIB=OFF \
             -DENABLE_BUILD_DYNAMIC=OFF
         cmake --build . --target install -j "${JOBS}"
