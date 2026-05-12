@@ -439,12 +439,19 @@ build_gmsh() {
         # modern CMake (>= 4.0) refuses with `Compatibility with
         # CMake < 3.5 has been removed`.  Frontera's cmake is new
         # enough to hit this.
+        #
+        # CMAKE_*_COMPILER=gcc/g++:  Intel 19's icpc hits an internal
+        # compiler error on contrib/untangle/untangle3d.cpp ("internal
+        # error: null pointer").  GCC 8.3 (Frontera's default system
+        # gcc, picked up automatically when we don't force the MPI
+        # wrappers) compiles gmsh cleanly.  gmsh runs as a standalone
+        # CLI so there's no ABI overlap with the intel-built MFEM.
         cmake .. \
             -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
             -DCMAKE_INSTALL_PREFIX="${GMSH_PREFIX}" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER="$(which mpicc)" \
-            -DCMAKE_CXX_COMPILER="$(which mpicxx)" \
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++ \
             -DENABLE_FLTK=OFF \
             -DENABLE_OCC=OFF \
             -DENABLE_MED=OFF \
