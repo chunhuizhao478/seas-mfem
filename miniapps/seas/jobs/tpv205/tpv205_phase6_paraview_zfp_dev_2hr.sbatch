@@ -144,8 +144,7 @@ ibrun ./seas_tpv205_driver \
       --paraview-volume-zfp-tol 1e-3 \
       --paraview-bulk-zfp-tol 1e-3 \
       --paraview-fault-zfp-tol 1e-12 \
-      --paraview-max-snapshots 200 \
-      --verify-dispatch
+      --paraview-max-snapshots 200
 
 RESULT_FILE="${RESULT_DIR}/SIZE.txt"
 {
