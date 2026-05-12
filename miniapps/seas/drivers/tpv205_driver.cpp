@@ -1686,11 +1686,18 @@ int main(int argc, char *argv[])
       // R-1409: machine-readable per-rank line.  Every rank prints once;
       // log parsers can grep "[mixed-flux] rank=N" to verify dispatch
       // engagement and global counts visible from any single log file.
-      std::cout << "[mixed-flux] rank=" << rank
-                << "  local_set_size=" << local_size_ll
-                << "  global_sum=" << global_sum
-                << "  global_min=" << local_min
-                << "  global_max=" << local_max << "\n";
+      // Gated behind --verify-dispatch (the same flag that opts in to
+      // the [dispatch] rank=N tri-consistency lines) so production runs
+      // don't pay for 400+ lines of per-rank noise when only the global
+      // counts and rank-0 warnings actually matter.
+      if (verify_dispatch)
+      {
+         std::cout << "[mixed-flux] rank=" << rank
+                   << "  local_set_size=" << local_size_ll
+                   << "  global_sum=" << global_sum
+                   << "  global_min=" << local_min
+                   << "  global_max=" << local_max << "\n";
+      }
 #else
       std::cout << "[mixed-flux] mode=" << mixed_flux_str
                 << "  |central_set|=" << local_size_ll
