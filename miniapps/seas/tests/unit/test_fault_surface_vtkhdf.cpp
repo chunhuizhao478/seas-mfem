@@ -17,7 +17,7 @@
 // all 12 standard fault fields.
 //
 // Also asserts that the VTKHDF output produces a single file
-// `fault_surface.vtkhdf` (no FaultSurface/ subdir) — the production
+// `fault.vtkhdf` (no FaultSurface/ subdir) — the production
 // goal of Phase 2b.
 
 #include "mfem.hpp"
@@ -247,9 +247,9 @@ int main(int argc, char *argv[])
                               slip, slip_rate, traction, state, normal_stress,
                               a, Dc, x2, x3);
    }
-   const std::string vtkhdfB = prefixB + "/fault_surface.vtkhdf";
+   const std::string vtkhdfB = prefixB + "/fault.vtkhdf";
    TEST_ASSERT(std::ifstream(vtkhdfB).good(),
-               "HDF path emitted fault_surface.vtkhdf");
+               "HDF path emitted fault.vtkhdf");
 
    // File-count check: the HDF backend produces a single .vtkhdf at the
    // prefix root (no FaultSurface/ subdir).

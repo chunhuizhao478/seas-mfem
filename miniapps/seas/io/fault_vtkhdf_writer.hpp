@@ -186,7 +186,11 @@ struct FaultHDFState
 
       // Data collection.  COMM_SELF so dc.Save() is a serial HDF5 op;
       // rank 0 owns the entire .vtkhdf file.
-      dc = std::make_unique<ParaViewHDFDataCollection>("fault_surface",
+      // Renamed from "fault_surface" to "fault" per
+      // PLAN_split_bulk_solutions_2026-05-12.  On-disk filename becomes
+      // <prefix>/fault.vtkhdf; tests that grep for the literal name
+      // were updated in the same commit.
+      dc = std::make_unique<ParaViewHDFDataCollection>("fault",
                                                         mesh.get());
       dc->SetPrefixPath(prefix);
       dc->SetDataFormat(VTKFormat::BINARY);

@@ -200,9 +200,9 @@ int main(int argc, char *argv[])
                               slip, slip_rate, traction, state, normal_stress,
                               a, Dc, x2, x3);
    }
-   const std::string fileA = prefixA + "/fault_surface.vtkhdf";
+   const std::string fileA = prefixA + "/fault.vtkhdf";
    TEST_ASSERT(std::ifstream(fileA).good(),
-               "ZFP fault_surface.vtkhdf created");
+               "ZFP fault.vtkhdf created");
 
    // -- Path B: lossless deflate fault HDF (Phase 2b reference).
    const std::string prefixB = "/tmp/test_fault_vtkhdf_zfp_DEFLATE";
@@ -219,9 +219,9 @@ int main(int argc, char *argv[])
                               slip, slip_rate, traction, state, normal_stress,
                               a, Dc, x2, x3);
    }
-   const std::string fileB = prefixB + "/fault_surface.vtkhdf";
+   const std::string fileB = prefixB + "/fault.vtkhdf";
    TEST_ASSERT(std::ifstream(fileB).good(),
-               "Deflate fault_surface.vtkhdf created");
+               "Deflate fault.vtkhdf created");
 
    // -- Filter id presence: ZFP path uses filter 32013 on fault fields.
    {

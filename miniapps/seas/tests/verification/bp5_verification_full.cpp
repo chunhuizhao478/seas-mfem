@@ -1697,9 +1697,13 @@ int main(int argc, char *argv[])
       { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Vtu; }
       if (pv_volume_force_hdf5)
       { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5; }
+      // Renamed from "volume" to "kinematics" per
+      // PLAN_split_bulk_solutions_2026-05-12.  On-disk filename is
+      // <output>/ParaView/kinematics.vtkhdf.  BP5 has no stress
+      // collection (quasi-dynamic — no wavefield).
       pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
          output_dir + "/ParaView", pmesh, order,
-         /*collection_name=*/"volume", volume_mode);
+         /*collection_name=*/"kinematics", volume_mode);
       // Displacement: non-owning pointer to the live ParGridFunction in seas_op
       pv_out->RegisterDomainField("displacement",
          const_cast<ParGridFunction*>(

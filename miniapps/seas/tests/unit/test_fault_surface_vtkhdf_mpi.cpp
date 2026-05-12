@@ -150,7 +150,7 @@ int main(int argc, char *argv[])
    //    after gather (i.e. one entry per rank, each with rank-id*100+1).
    if (rank == 0)
    {
-      const std::string vtkhdf_path = out_dir + "/fault_surface.vtkhdf";
+      const std::string vtkhdf_path = out_dir + "/fault.vtkhdf";
       TEST_ASSERT(std::ifstream(vtkhdf_path).good(),
                   "merged .vtkhdf was created on rank 0");
 

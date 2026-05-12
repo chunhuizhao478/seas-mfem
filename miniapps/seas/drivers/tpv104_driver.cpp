@@ -1823,10 +1823,16 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
+   // Secondary `stress` collection (formerly "wave_bulk").  Holds the
+   // full symmetric stress tensor — all 6 independent components.
+   // velocity / mpi_rank are NOT registered here (they live in the
+   // primary `kinematics` collection only; this removes the byte-for-
+   // byte duplication that the Phase 6 sbatch defaults used to pay).
    std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
    std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
    std::unique_ptr<PvFES> pv_bulk_sigma_fes;
-   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxx_gf, pv_bulk_syy_gf, pv_bulk_szz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxy_gf, pv_bulk_sxz_gf, pv_bulk_syz_gf;
 
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
@@ -1848,7 +1854,7 @@ int main(int argc, char *argv[])
       { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5; }
       pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
          output_dir + "/ParaView", pmesh, order,
-         /*collection_name=*/"volume", volume_mode);
+         /*collection_name=*/"kinematics", volume_mode);
 
       if (pv_low_order)
       {
@@ -2018,28 +2024,34 @@ int main(int argc, char *argv[])
          // back end; distinct collection name "wave_bulk".
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
             output_dir + "/ParaView_bulk", pmesh, order,
-            /*collection_name=*/"wave_bulk", volume_mode);
+            /*collection_name=*/"stress", volume_mode);
          if (pv_low_order)
          {
             pv_bulk_out->SetHighOrderOutput(false);
             pv_bulk_out->SetLevelsOfDetail(1);
          }
-         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
-         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
-
          pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
             order, 3, BasisType::GaussLobatto);
          pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
                                                      pv_bulk_sigma_fec.get());
+         pv_bulk_sxx_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_szz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_syz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_sxx_gf = 0.0;
          *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_szz_gf = 0.0;
          *pv_bulk_sxy_gf = 0.0;
          *pv_bulk_sxz_gf = 0.0;
+         *pv_bulk_syz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_zz", pv_bulk_szz_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_yz", pv_bulk_syz_gf.get());
 
          pv_bulk_out->fixed_dt = paraview_bulk_dt;
 
@@ -2085,8 +2097,11 @@ int main(int argc, char *argv[])
       if (!fault_wants && !bulk_wants) { return; }
 
       // Phase 4: see tpv102_driver.cpp for canonical comment.
+      // After the split-bulk-solutions refactor (plan 2026-05-12),
+      // velocity is owned by `pv_out` (the kinematics collection)
+      // only; `pv_bulk_out` (stress) no longer registers it.
       const bool volume_active = pv_out->GetVolumeSaveEnabled();
-      if (volume_active || bulk_wants)
+      if (volume_active)
       {
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
@@ -2095,14 +2110,26 @@ int main(int argc, char *argv[])
 
       if (bulk_wants)
       {
+         // Full symmetric stress tensor — 6 independent components.
+         // Q-vector indices from dynamic/wave_state.hpp:
+         //   SXX=0, SYY=1, SZZ=2, SXY=3, SYZ=4, SXZ=5.
+         std::memcpy(pv_bulk_sxx_gf->GetData(),
+                     Q.GetData() + SXX * ndof_total,
+                     ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_syy_gf->GetData(),
                      Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_szz_gf->GetData(),
+                     Q.GetData() + SZZ * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxy_gf->GetData(),
                      Q.GetData() + SXY * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxz_gf->GetData(),
                      Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syz_gf->GetData(),
+                     Q.GetData() + SYZ * ndof_total,
                      ndof_total * sizeof(real_t));
          pv_bulk_out->ForceSave(step_num, time);
       }

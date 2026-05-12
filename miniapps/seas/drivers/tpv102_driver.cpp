@@ -1875,10 +1875,16 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
+   // Secondary `stress` collection (formerly "wave_bulk").  Holds the
+   // full symmetric stress tensor — all 6 independent components.
+   // velocity / mpi_rank are NOT registered here (they live in the
+   // primary `kinematics` collection only; this removes the byte-for-
+   // byte duplication that the Phase 6 sbatch defaults used to pay).
    std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
    std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
    std::unique_ptr<PvFES> pv_bulk_sigma_fes;
-   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxx_gf, pv_bulk_syy_gf, pv_bulk_szz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxy_gf, pv_bulk_sxz_gf, pv_bulk_syz_gf;
 
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
@@ -1901,9 +1907,15 @@ int main(int argc, char *argv[])
       { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Vtu; }
       if (paraview_volume_force_hdf5)
       { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5; }
+      // Primary collection — renamed from "volume" to "kinematics" per
+      // PLAN_split_bulk_solutions_2026-05-12.  File on disk:
+      // <output>/ParaView/kinematics.vtkhdf.  Carries velocity +
+      // mpi_rank (+ the L2-p0 fault projections from
+      // InitFaultOutputBP5; these will move to the fault file in a
+      // follow-up commit).
       pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
          output_dir + "/ParaView", pmesh, order,
-         /*collection_name=*/"volume", volume_mode);
+         /*collection_name=*/"kinematics", volume_mode);
 
       if (pv_low_order)
       {
@@ -2101,42 +2113,51 @@ int main(int argc, char *argv[])
 
       if (paraview_bulk_dt > 0.0)
       {
-         // Phase 6.4: secondary collection inherits the SAME volume
-         // back end as the primary `pv_out` (the binary-format choice
-         // is global to the run).  Distinct collection name
-         // ("wave_bulk") so the two .vtkhdf files don't collide.
+         // Phase 6.4 + plan_split_bulk_solutions_2026-05-12:
+         // secondary collection inherits the same volume back end as
+         // `pv_out` (binary-format choice is global to the run).
+         // Renamed from "wave_bulk" to "stress" and now holds the FULL
+         // symmetric stress tensor (sigma_xx, _yy, _zz, _xy, _xz, _yz).
+         // velocity + mpi_rank are NOT registered here — they live in
+         // the primary `kinematics` file only.
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
             output_dir + "/ParaView_bulk", pmesh, order,
-            /*collection_name=*/"wave_bulk", volume_mode);
+            /*collection_name=*/"stress", volume_mode);
          if (pv_low_order)
          {
             pv_bulk_out->SetHighOrderOutput(false);
             pv_bulk_out->SetLevelsOfDetail(1);
          }
-         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
-         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
 
          pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
             order, 3, BasisType::GaussLobatto);
          pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
                                                      pv_bulk_sigma_fec.get());
+         pv_bulk_sxx_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_szz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_syz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_sxx_gf = 0.0;
          *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_szz_gf = 0.0;
          *pv_bulk_sxy_gf = 0.0;
          *pv_bulk_sxz_gf = 0.0;
+         *pv_bulk_syz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_zz", pv_bulk_szz_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_yz", pv_bulk_syz_gf.get());
 
          pv_bulk_out->fixed_dt = paraview_bulk_dt;
 
          // Phase 6.4 (R-310 SEMANTIC FLIP): `--paraview-bulk-*` flags
-         // now route to `pv_bulk_out` (the secondary wavefield
-         // collection), not to `pv_out` as in Phase 2d.3.  This
-         // matches the historical intent of the "bulk" name and the
-         // CLI scope mapping documented in CLAUDE.md "ZFP lossy output".
+         // route to `pv_bulk_out` (the stress collection).  Plan-
+         // mandated CLI rename to `--paraview-stress-*` is deferred to
+         // a follow-up commit.
 #ifdef MFEM_USE_HDF5
          if (paraview_bulk_zfp_tol > 0.0)
          {
@@ -2154,11 +2175,11 @@ int main(int argc, char *argv[])
 
          if (rank == 0)
          {
-            std::cout << "  Bulk collection: ON (prefix="
+            std::cout << "  Stress collection: ON (prefix="
                       << output_dir << "/ParaView_bulk, every "
                       << paraview_bulk_dt
-                      << " s; fields: velocity, sigma_yy, sigma_xy, "
-                      << "sigma_xz, mpi_rank)\n";
+                      << " s; fields: sigma_xx, sigma_yy, sigma_zz, "
+                      << "sigma_xy, sigma_xz, sigma_yz)\n";
          }
       }
    }
@@ -2175,13 +2196,12 @@ int main(int argc, char *argv[])
          pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
       if (!fault_wants && !bulk_wants) { return; }
 
-      // Phase 4: the velocity GF is shared between pv_ and pv_bulk_out;
-      // update it whenever EITHER the volume save (gated by the
-      // library) or the bulk save will fire.  `volume_save_enabled`
-      // here mirrors the same flag passed to SetVolumeSaveEnabled, so
-      // the GF is up-to-date when the library actually emits.
+      // After the split-bulk-solutions refactor (plan 2026-05-12),
+      // velocity is owned by `pv_out` (the kinematics collection) only;
+      // `pv_bulk_out` (stress) no longer registers it.  Copy the
+      // velocity GF whenever the kinematics save will fire.
       const bool volume_active = pv_out->GetVolumeSaveEnabled();
-      if (volume_active || bulk_wants)
+      if (volume_active)
       {
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
@@ -2190,14 +2210,26 @@ int main(int argc, char *argv[])
 
       if (bulk_wants)
       {
+         // Full symmetric stress tensor — 6 independent components.
+         // Q-vector indices come from dynamic/wave_state.hpp:
+         //   SXX=0, SYY=1, SZZ=2, SXY=3, SYZ=4, SXZ=5.
+         std::memcpy(pv_bulk_sxx_gf->GetData(),
+                     Q.GetData() + SXX * ndof_total,
+                     ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_syy_gf->GetData(),
                      Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_szz_gf->GetData(),
+                     Q.GetData() + SZZ * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxy_gf->GetData(),
                      Q.GetData() + SXY * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxz_gf->GetData(),
                      Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syz_gf->GetData(),
+                     Q.GetData() + SYZ * ndof_total,
                      ndof_total * sizeof(real_t));
          pv_bulk_out->ForceSave(step_num, time);
       }
