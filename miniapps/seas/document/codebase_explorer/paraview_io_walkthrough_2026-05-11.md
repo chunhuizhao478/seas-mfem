@@ -109,6 +109,122 @@ The historical context (per `document/io_dev/PLAN_paraview_compaction_2026-04-28
 
 ---
 
+## How the split-bulk-solutions refactor works, and how to adjust outputs
+
+Before the 2026-05-12 refactor, the TPV drivers wrote two volume files (`volume.vtkhdf` + `wave_bulk.vtkhdf`) that BOTH carried `velocity` + `mpi_rank` — a byte-for-byte duplication whenever the cadences matched (the default). The primary file ALSO carried 12 fault projections that duplicated data already in `fault_surface.vtkhdf`. Three problems:
+
+1. ~50 % of `wave_bulk.vtkhdf` was a duplicate of `volume.vtkhdf`.
+2. The 12 fault projections in `volume.vtkhdf` duplicated `fault_surface.vtkhdf`.
+3. The names ("volume", "wave_bulk", "fault_surface") were physically vague.
+
+The refactor (`document/io_dev/PLAN_split_bulk_solutions_2026-05-12.md`) does three things:
+
+| Aspect | Old | New |
+|---|---|---|
+| Names | `volume.vtkhdf` / `wave_bulk.vtkhdf` / `fault_surface.vtkhdf` | `kinematics.vtkhdf` / `stress.vtkhdf` / `fault.vtkhdf` |
+| Stress fields | 3 components (sigma_yy, sigma_xy, sigma_xz) | **6** — full symmetric tensor (sigma_xx, sigma_yy, sigma_zz, sigma_xy, sigma_xz, sigma_yz) |
+| Velocity / mpi_rank | In BOTH volume + bulk | In `kinematics.vtkhdf` only |
+| 12 L2-p0 fault projections (slip_dip, slip_strike, slip_rate_*, traction_*, state_variable, normal_stress, param_a, param_Dc, fault_x2, fault_x3) | Always in `volume.vtkhdf` | Default OFF; opt back in via `SetRegisterFaultProjectionsInVolumePV(true)` (see "Layer 1" below) |
+
+### Three layers a user can adjust
+
+Output content + cadence + compression are controlled at three layers, from least to most invasive:
+
+#### Layer 1 — driver code, before the time loop (compile-time)
+
+For driver authors. Each TPV driver constructs two `seas::ParaViewOutput<MeshT>` instances:
+
+```cpp
+// drivers/tpv102_driver.cpp ~ line 1904
+pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
+   output_dir + "/ParaView", pmesh, order,
+   /*collection_name=*/"kinematics", volume_mode);
+pv_out->RegisterDomainField("velocity",   pv_vel_gf.get());
+pv_out->RegisterDomainField("mpi_rank",   pv_rank_gf.get());
+pv_out->InitFaultOutputBP5(...);              // allocates the 12 GFs but
+                                              // does NOT register them
+                                              // by default (R-001 fix)
+
+// drivers/tpv102_driver.cpp ~ line 2120 (only when --paraview-bulk-dt > 0)
+pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
+   output_dir + "/ParaView_bulk", pmesh, order,
+   /*collection_name=*/"stress", volume_mode);
+pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
+pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+// ... 4 more sigma components
+```
+
+To add a field, add a GridFunction and call `RegisterDomainField("name", gf)` on the appropriate collection before any `Save()`. To remove one, comment out its `RegisterDomainField` call. To put the 12 fault projections back into `kinematics.vtkhdf`, call `pv_out->SetRegisterFaultProjectionsInVolumePV(true)` **BEFORE** `InitFaultOutputBP5(...)`. The default is OFF.
+
+The unit test `seas_test_kinematics_field_set` (`tests/unit/test_kinematics_field_set.cpp`) guards both scenarios — flipping the default to true makes the test fail 13/31.
+
+#### Layer 2 — sbatch CLI flags (per-run)
+
+For job submitters. Per-run cadence and ZFP tolerance go on the `ibrun` line in the sbatch:
+
+```bash
+ibrun ./seas_tpv102_driver \
+    ...
+    --paraview                          # enable PV output
+    --paraview-dt 0.5                   # kinematics + fault cadence (s)
+    --paraview-bulk-dt 0.5              # stress cadence (s; 0 = no stress file)
+    --paraview-volume-zfp-tol 1e-3      # ZFP abs-error on kinematics.vtkhdf
+    --paraview-bulk-zfp-tol   1e-3      # ZFP abs-error on stress.vtkhdf
+    --paraview-fault-zfp-tol  1e-12     # ZFP abs-error on fault.vtkhdf
+    --paraview-max-snapshots  200       # soft cap on total fault writes
+    --no-volume-pv                      # BP5 production: suppress kinematics
+```
+
+The volume flag prefix is still `--paraview-volume-*` and `--paraview-bulk-*` after the refactor — the driver-side rename to `--paraview-kinematics-*` / `--paraview-stress-*` is queued as a follow-up. Same flag semantics; only the collection name on disk changed.
+
+To **drop the stress file entirely**, omit `--paraview-bulk-dt` (the secondary collection isn't constructed). To **drop the kinematics file**, pass `--no-volume-pv`. To skip `fault.vtkhdf`, well… don't pass `--paraview` (everything turns off).
+
+Independent ZFP tolerances are the architectural reason both volume files exist:
+
+| Field | Dynamic range | Recommended tol | Why |
+|---|---|---|---|
+| velocity (kinematics) | ~1e-6..10 m/s, mostly O(1) | `1e-3` | ±1 mm/s invisible at coseismic peak |
+| stress components | ~1e6..1e8 Pa | `1e-3` (Pa) | ~10 decades below peak; safe |
+| slip rate (fault) | 1e-9..1e0 m/s during nucleation->event | `1e-12` | 3 decades below smallest interesting value |
+
+Picking tolerances bigger than these will quantize interesting features. Picking smaller wastes storage with no science benefit.
+
+#### Layer 3 — TOML config (future, deferred per R-313)
+
+For `seas_driver` users, once PV wiring lands there. The planned schema:
+
+```toml
+[paraview]
+enabled = true
+
+[paraview.kinematics]
+fields    = ["velocity", "mpi_rank"]
+zfp_tol   = 1e-3
+dt        = 0.5
+backend   = "hdf5"
+
+[paraview.stress]
+fields  = ["sigma_xx", "sigma_yy", "sigma_zz",
+           "sigma_xy", "sigma_xz", "sigma_yz"]
+zfp_tol = 1e-3
+dt      = 0.5
+
+[paraview.fault]
+zfp_tol = 1e-12
+backend = "hdf5"
+```
+
+Currently `seas_driver.cpp` doesn't construct a `seas::ParaViewOutput` (R-313 deferred deviation; see `CLAUDE.md` § "Phase 4 deferred deviation"). The TOML schema lands here as a future-use spec; the parsing wiring follows when BP5 production runs through `seas_driver` actually need a `kinematics.vtkhdf`.
+
+### Quick recipes
+
+- **"I want stress data but no velocity"** -> add `--paraview-bulk-dt 0.5` to the sbatch, ALSO pass `--no-volume-pv` to suppress `kinematics.vtkhdf`. `stress.vtkhdf` will be the only volume file.
+- **"I want lossless ZFP"** -> pass `--paraview-{volume,bulk,fault}-deflate-level 6` (omit the `-zfp-tol` flags). Output is ~2-3× larger.
+- **"I want the fault projections in the kinematics file for visualization"** -> in your driver code, call `pv_out->SetRegisterFaultProjectionsInVolumePV(true)` before `InitFaultOutputBP5(...)`. No sbatch change needed. Note this re-introduces ~12× duplicate data with `fault.vtkhdf`.
+- **"I want a different sigma component subset"** -> patch the driver: comment out the unwanted `pv_bulk_out->RegisterDomainField("sigma_XX", ...)` calls in `tpv*_driver.cpp` (around line 2141–2148 for tpv102). Then the corresponding memcpy in `paraview_write` is dead code but harmless.
+
+---
+
 ## Architecture
 
 ### Three back ends, three switches
