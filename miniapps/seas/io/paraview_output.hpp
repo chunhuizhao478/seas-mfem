@@ -372,8 +372,9 @@ public:
    /// R-303: new `collection_name` and `mode` parameters appended at
    /// the end with defaults so the existing 3-arg call sites keep
    /// compiling unchanged.  R-305: default collection name = "volume"
-   /// for cross-driver uniformity (mirrors the fault path's
-   /// "fault_surface").
+   /// for cross-driver uniformity (mirrors the fault path's "fault"
+   /// — formerly "fault_surface", renamed in
+   /// PLAN_split_bulk_solutions_2026-05-12).
    ///
    /// @param prefix          Output directory.  The volume writer
    ///                        emits either per-rank VTU files into
@@ -690,6 +691,24 @@ public:
    }
    real_t GetVolumePVDt() const { return volume_pv_dt_; }
 
+   /// @brief PLAN_split_bulk_solutions_2026-05-12: opt-in registration
+   /// of the 12 L2-p0 fault projection fields with the primary
+   /// (kinematics) volume PV collection.
+   ///
+   /// Default `false` — `InitFaultOutputBP5` still allocates the 12
+   /// GridFunctions (so accessors and direct reads keep working) but
+   /// does NOT register them with `pv_dc_`, so they are excluded from
+   /// `kinematics.vtkhdf`.  Pass `true` BEFORE calling
+   /// `InitFaultOutputBP5` to opt back in to the pre-2026-05-12
+   /// behaviour where the projections appear alongside velocity /
+   /// displacement on the volume mesh.  Rationale: the projections
+   /// duplicate the per-DOF data already in `fault.vtkhdf` and were
+   /// the largest contributor to `volume.vtkhdf` file size.
+   void SetRegisterFaultProjectionsInVolumePV(bool enable)
+   { register_fault_projections_in_volume_pv_ = enable; }
+   bool GetRegisterFaultProjectionsInVolumePV() const
+   { return register_fault_projections_in_volume_pv_; }
+
    // ---------------------------------------------------------------
    //  BP5 fault field output (2-component tangential + 1 state)
    // ---------------------------------------------------------------
@@ -780,19 +799,29 @@ public:
       fault_coord_x2_  = make_gf();
       fault_coord_x3_  = make_gf();
 
-      // Register fields (Phase 6.1: forwards through abstract `pv_dc_`).
-      pv_dc_->RegisterField("slip_dip",         fault_slip_dip_.get());
-      pv_dc_->RegisterField("slip_strike",      fault_slip_strike_.get());
-      pv_dc_->RegisterField("slip_rate_dip",    fault_slip_rate_dip_.get());
-      pv_dc_->RegisterField("slip_rate_strike", fault_slip_rate_strike_.get());
-      pv_dc_->RegisterField("traction_dip",     fault_trac_dip_.get());
-      pv_dc_->RegisterField("traction_strike",  fault_trac_strike_.get());
-      pv_dc_->RegisterField("state_variable",   fault_state_.get());
-      pv_dc_->RegisterField("normal_stress",    fault_normal_stress_.get());
-      pv_dc_->RegisterField("param_a",          fault_param_a_.get());
-      pv_dc_->RegisterField("param_Dc",         fault_param_Dc_.get());
-      pv_dc_->RegisterField("fault_x2",         fault_coord_x2_.get());
-      pv_dc_->RegisterField("fault_x3",         fault_coord_x3_.get());
+      // PLAN_split_bulk_solutions_2026-05-12: register the 12 L2-p0
+      // projection fields with the kinematics collection ONLY when the
+      // opt-in toggle `register_fault_projections_in_volume_pv_` is
+      // set.  Default OFF — these duplicate the data in fault.vtkhdf
+      // and used to be the largest contributor to volume.vtkhdf file
+      // size.  The GFs are still allocated above so accessors and
+      // direct reads keep working; only the registration with `pv_dc_`
+      // (which controls what lands in the .vtkhdf) is gated.
+      if (register_fault_projections_in_volume_pv_)
+      {
+         pv_dc_->RegisterField("slip_dip",         fault_slip_dip_.get());
+         pv_dc_->RegisterField("slip_strike",      fault_slip_strike_.get());
+         pv_dc_->RegisterField("slip_rate_dip",    fault_slip_rate_dip_.get());
+         pv_dc_->RegisterField("slip_rate_strike", fault_slip_rate_strike_.get());
+         pv_dc_->RegisterField("traction_dip",     fault_trac_dip_.get());
+         pv_dc_->RegisterField("traction_strike",  fault_trac_strike_.get());
+         pv_dc_->RegisterField("state_variable",   fault_state_.get());
+         pv_dc_->RegisterField("normal_stress",    fault_normal_stress_.get());
+         pv_dc_->RegisterField("param_a",          fault_param_a_.get());
+         pv_dc_->RegisterField("param_Dc",         fault_param_Dc_.get());
+         pv_dc_->RegisterField("fault_x2",         fault_coord_x2_.get());
+         pv_dc_->RegisterField("fault_x3",         fault_coord_x3_.get());
+      }
 
       fault_interior_faces_ = fault_interior_faces;
       fault_shared_faces_ = fault_shared_faces;
@@ -1340,8 +1369,9 @@ public:
 
       // -- Phase 2b HDF5 dispatch.  WriteFaultPackHdf does its own
       //    collective gather to rank 0 (reuses Phase 1's gather helper)
-      //    and emits a single `<prefix>/fault_surface.vtkhdf` rather
-      //    than per-cycle VTUs.  No PVD bookkeeping in this mode.
+      //    and emits a single `<prefix>/fault.vtkhdf` (renamed from
+      //    fault_surface.vtkhdf in PLAN_split_bulk_solutions_2026-05-12)
+      //    rather than per-cycle VTUs.  No PVD bookkeeping in this mode.
       if (output_mode_ == FaultOutputMode::Hdf5)
       {
 #ifdef MFEM_USE_HDF5
@@ -1631,6 +1661,12 @@ private:
    // (backward-compatible default).  Non-empty ⇒ emit only the
    // named CellData arrays.  See SetFaultVTUFields.
    std::set<std::string> fault_vtu_fields_;
+
+   // PLAN_split_bulk_solutions_2026-05-12: opt-in for registering the
+   // 12 L2-p0 fault projections with the primary (kinematics) volume
+   // PV collection.  Default OFF.  See
+   // SetRegisterFaultProjectionsInVolumePV.
+   bool register_fault_projections_in_volume_pv_ = false;
 
    std::unique_ptr<FiniteElementCollection> fault_fec_;
    std::unique_ptr<FES> fault_fes_;

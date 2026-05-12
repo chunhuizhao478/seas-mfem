@@ -104,7 +104,7 @@ struct FaultHDFState
    /// pack.  Subsequent saves reuse this state.
    ///
    /// @param prefix  Output directory prefix (the .vtkhdf will live at
-   ///                <prefix>/fault_surface.vtkhdf).  The chunk filter
+   ///                <prefix>/fault.vtkhdf).  The chunk filter
    ///                (Deflate level OR ZFP tolerance) is read from
    ///                `compression_alg` / `compression_param` on `*this`,
    ///                which the seas wrapper sets via
@@ -231,7 +231,7 @@ struct FaultHDFState
 ///                first call).  Must outlive the program / data
 ///                collection lifetime.
 /// @param prefix  Output directory.  The .vtkhdf is written to
-///                `<prefix>/fault_surface.vtkhdf`.
+///                `<prefix>/fault.vtkhdf`.
 /// @param cycle   Time step index (passed to dc.SetCycle).
 /// @param time    Simulation time (passed to dc.SetTime).
 /// @param local   This rank's `LocalFaultPack`; gathered to rank 0.

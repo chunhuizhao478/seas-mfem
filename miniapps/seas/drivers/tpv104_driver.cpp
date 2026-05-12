@@ -1802,8 +1802,12 @@ int main(int argc, char *argv[])
    //       - pv_out (output_dir/ParaView): velocity + mpi_rank volume +
    //         fault-surface PVD/VTU (slip, slip_rate, traction dip+strike,
    //         psi, sigma_n, plus static a, Dc, x2, x3) at the fault schedule.
-   //       - pv_bulk_out (output_dir/ParaView_bulk): velocity + sigma_yy +
-   //         sigma_xy + sigma_xz + mpi_rank at --paraview-bulk-dt cadence.
+   //       - pv_bulk_out (output_dir/ParaView_bulk/stress.vtkhdf):
+   //         full symmetric stress tensor (sigma_xx, sigma_yy, sigma_zz,
+   //         sigma_xy, sigma_xz, sigma_yz) at --paraview-bulk-dt cadence.
+   //         velocity and mpi_rank are NOT in this file after
+   //         PLAN_split_bulk_solutions_2026-05-12 — they live in
+   //         pv_out (kinematics.vtkhdf) only.
    //
    // R-801 / BP5 component convention enforced project-wide: comp 0 = dip,
    // comp 1 = strike.  TPV104 is pure strike-slip so the strike channel
