@@ -523,13 +523,22 @@ build_zfp_and_h5z_zfp() {
             || git checkout --quiet "tags/${ZFP_VERSION}" 2>/dev/null || true
         mkdir -p build
         cd build
+        # ZFP_BIT_STREAM_WORD_SIZE=8 is REQUIRED for H5Z-ZFP to work:
+        # the plugin's H5Z_zfp_can_apply() callback (H5Zzfp.c:159)
+        # refuses to attach to any dataset unless ZFP's BIT_STREAM_WORD_TYPE
+        # is uint8.  Default ZFP is uint64, which makes every
+        # ZFP-filtered H5Dcreate2 fail with "I/O filters can't operate
+        # on this dataset" + "ZFP lib not compiled with
+        # -DBIT_STREAM_WORD_TYPE=uint8".  See the H5Z-ZFP install docs:
+        # https://h5z-zfp.readthedocs.io/en/latest/install.html
         cmake .. \
             -DCMAKE_INSTALL_PREFIX="${ZFP_PREFIX}" \
             -DCMAKE_C_COMPILER="$(which mpicc)" \
             -DBUILD_SHARED_LIBS=ON \
             -DBUILD_TESTING=OFF \
             -DBUILD_EXAMPLES=OFF \
-            -DZFP_WITH_OPENMP=OFF
+            -DZFP_WITH_OPENMP=OFF \
+            -DZFP_BIT_STREAM_WORD_SIZE=8
         cmake --build . --target install -j "${JOBS}"
     )
 
