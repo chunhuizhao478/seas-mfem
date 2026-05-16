@@ -1491,14 +1491,26 @@ int main(int argc, char *argv[])
    const bool debug_first_step_dump = env_truthy("SEAS_DEBUG_FIRST_STEP_DUMP");
    const int debug_first_step_rank =
       env_int("SEAS_DEBUG_FIRST_STEP_TARGET_RANK", 96);
+   // Debug gate for per-face trace CSVs (trace_faces / trace_timeseries /
+   // trace_events / trace_summary).  These were diagnostic outputs used
+   // during v59 fault-tip blowup investigations and are NOT needed for
+   // production runs.  Default OFF; opt in with `export
+   // SEAS_DEBUG_FACE_TRACE=1` when re-debugging.
+   const bool debug_face_trace = env_truthy("SEAS_DEBUG_FACE_TRACE");
 
    seas::TraceConfig trace_cfg;
-   trace_cfg.use_coord_window = true;
-   trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
-   trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
-   trace_cfg.num_control_faces = 2;
-   trace_cfg.max_traced_faces = 50;
+   if (debug_face_trace)
+   {
+      trace_cfg.use_coord_window = true;
+      trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
+      trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
+      trace_cfg.num_control_faces = 2;
+      trace_cfg.max_traced_faces = 50;
+   }
    trace_cfg.output_dir = output_dir;
+   // SelectFaces with `use_coord_window = false` and `explicit_rank = -1`
+   // (defaults) selects no faces, so `active_` stays false and no
+   // trace_*.csv files are opened on any rank.
    seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
    face_tracer.SelectFaces(domain, fault_geom);
    seas_op.SetFaceTracer(&face_tracer);
@@ -1538,7 +1550,46 @@ int main(int argc, char *argv[])
       (void)ghost_err;
    }
 
-   Vector state(fault_op.StateSize());
+   // R-003 (REVIEW.md 2026-05-16): PetscParVector::PlaceMemory /
+   // ResetMemory cannot tolerate a NULL-backed Memory.  On ranks with
+   // zero owned fault DOFs (a strike-slip fault embedded in a 3D box
+   // leaves many ranks touching no fault face when partitioned over
+   // hundreds of MPI tasks), `fault_op.StateSize() == 0`.  The naive
+   // `Vector state(0)` does NOT allocate (vector.hpp:574-582: the
+   // constructor's `data.New(s)` is gated on `s > 0`), so
+   // `state.GetMemory().Empty() == true` (h_ptr == NULL).
+   // PlaceMemory aliases the NULL pointer happily, but ResetMemory at
+   // the end of TSSolve checks `MFEM_VERIFY(!pdata.Empty(),...)` and
+   // aborts (petsc.cpp:899).  This crashed BP5 v62/v63-style runs
+   // late in TSSolve on Frontera 8N×400r.  The workaround below pads
+   // to at least one element so the underlying Memory is allocated,
+   // then shrinks back to the actual size: `SetSize` only
+   // re-allocates when `new_size > capacity` (vector.hpp:584-602),
+   // so the 1-element allocation survives the shrink.
+   //
+   // R-105 (REVIEW.md 2026-05-16 round 2) — FRAGILE DEPENDENCY:
+   // this fix DEPENDS on MFEM `Vector::SetSize` preserving the
+   // underlying Memory allocation on shrink (vector.hpp:584-602:
+   // re-allocate only when `new_size > capacity`).  If a future MFEM
+   // upgrade changes that contract — e.g., to "always reallocate" or
+   // "free memory when shrinking to 0" — the `SetSize(actual)` shrink
+   // would free the `SetSize(padded)` allocation and the workaround
+   // would silently regress to the original NULL-h_ptr crash.  The
+   // companion unit test `seas_test_bp5_petsc_ts_zero_fault_rank`
+   // pins this invariant; RUN IT after any MFEM bump (`make
+   // test-bp5-petsc-ts-zero-fault-rank` from miniapps/seas).
+   //
+   // Long-term fix: land the MFEM-side patch documented in the
+   // previous REVIEW.md round 1 (R-003 alternative — allow
+   // zero-length aliases in `PetscParVector::ResetMemory`), then
+   // delete this driver-side workaround.
+   Vector state;
+   {
+      const int actual = fault_op.StateSize();
+      const int padded = std::max(actual, 1);
+      state.SetSize(padded);
+      state.SetSize(actual);  // shrink back; allocation is preserved
+   }
    seas_op.SetInitialCondition(state);
 
    real_t V_init = seas_op.GetMaxSlipRate();
@@ -1935,14 +1986,28 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Fault DOF point cloud (VTP) — diagnostic for coordinate validation
+   // Fault DOF point cloud (CSV) — diagnostic for coordinate validation
    // =========================================================================
-   // Writes one VTP file per rank with the EXACT owned-DOF coordinates used
-   // by the friction parameter computation. If the points form a clean fault
+   // Writes one CSV per rank with the EXACT owned-DOF coordinates used by
+   // the friction parameter computation. If the points form a clean fault
    // rectangle, the coordinates are correct and any ParaView scatter is a
    // projection artifact. If points are scattered here too, the coordinates
    // are wrong and that's the root cause.
-   if (use_paraview)
+   //
+   // Gated behind `SEAS_DEBUG_FAULT_DOF_COORDS`.  Default OFF to keep
+   // production output directories clean.  Set the env var to 1 when
+   // debugging coordinate / projection issues.
+   //
+   // NOTE (R-106 REVIEW.md 2026-05-16 round 2): the per-face trace
+   // CSVs (trace_faces_*, trace_timeseries_*, trace_events_*,
+   // trace_summary_*) are controlled INDEPENDENTLY by
+   // `SEAS_DEBUG_FACE_TRACE` (see line ~1493).  Set BOTH env vars to
+   // recover the pre-fix "always-on" behaviour for the full debug
+   // bundle.  Earlier revisions tied fault_dof_coords to either gate,
+   // which was confusing.
+   const bool debug_fault_dof_coords =
+      env_truthy("SEAS_DEBUG_FAULT_DOF_COORDS");
+   if (use_paraview && debug_fault_dof_coords)
    {
       const int n_owned = fault_geom.NumFaultDOFs();  // owned count
       const Vector &x2 = fault_geom.GetCoordsX2();

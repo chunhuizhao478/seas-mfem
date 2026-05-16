@@ -23,22 +23,76 @@
 # surface (slip / slip-rate / traction / state-variable / normal-stress)
 # is emitted, at ZFP tol 1e-12.
 #
-# Phase 6 ParaView flag pair in use:
-#   --paraview-fault-zfp-tol 1e-12  (slip-rate floor preserved)
+# Phase 6 ParaView flag set in use:
+#   --paraview-fault-zfp-tol 1e-12  (slip-rate floor preserved;
+#                                    must stay <= 1e-12 because the
+#                                    interseismic V_p floor is 1e-9 m/s
+#                                    and ZFP absolute-error tol 1e-12
+#                                    keeps ~3 decades of precision at
+#                                    the floor; raising tol erases the
+#                                    floor).
 #   --no-volume-pv                  (volume displacement suppressed)
+#   --paraview-adaptive             (V_max-driven schedule; see below)
+#   --paraview-dt-co     1.0        (coseismic cadence,   1 s)
+#   --paraview-dt-nu     43200      (nucleation cadence,  12 hr = 0.5 day)
+#   --paraview-dt-inter-yr 1.0      (interseismic cadence, 1 yr)
 #
 # BP5 has NO secondary collection so --paraview-bulk-* is not used.
 #
-# Snapshot cap (--paraview-max-snapshots 5000) bounds the writer count
-# at the production default.  The Python schedule integrator
-# (miniapps/seas/scripts/_io_size_schedule.py) estimates ~86k uncapped
-# writes over 250 yr at n_events=1 (rounded from 250 yr / 240 yr
-# recurrence per CLAUDE.md "What Constitutes a Regression"), dominated
-# by the BP5 nucleation budget (1 event × NUCLEATION_DURATION_S["bp5"]
-# = 86 400 s, at dt_nucleation = 1.0 s ⇒ 86 400 writes).  The 5000 cap
-# therefore engages comfortably below the projected ceiling and bounds
-# the interseismic write count via paraview_output.hpp:
-# RecomputeIntervalForCap.  Cross-check:
+# --------------------------------------------------------------------
+# Per-regime cadence and expected frame count
+# --------------------------------------------------------------------
+# Empirical phase durations (from results_phase7_production_job7650438
+# over 1775.58 simulated years, ~7 events — see
+# debug_document/paraview_output_debug_document/regime_budget_2026-05-16.md):
+#
+#     Phase        | duration / event | total / 1775 yr run
+#     -------------+------------------+--------------------
+#     interseismic | ~250 yr          | 1775 yr
+#     nucleation   | ~19 days         | 134 days
+#     coseismic    | ~7 min           | 51 min = 3,080 s
+#
+# Projected frame count at the cadences set above (1775 yr × 7 events):
+#
+#     Phase        | cadence  | frames / 1775 yr run
+#     -------------+----------+---------------------
+#     interseismic | 1 yr     | ~1,775
+#     nucleation   | 12 hr    | ~268    (134 days / 12 hr)
+#     coseismic    | 1 s      | ~3,080  (3,080 s / 1 s)
+#     ----------------------------------+--------------
+#                                       | ~5,123 total
+#
+# Same cadences scaled down to the 250 yr / 1 event production target:
+#     interseismic ~250 + nucleation ~38 + coseismic ~420  =  ~708 total
+#
+# These are the actual numbers of fault.vtkhdf timesteps the writer
+# will produce.  No snapshot cap is applied.
+#
+# Why no --paraview-max-snapshots?
+# An earlier revision tried `--paraview-max-snapshots 5000` as a
+# defensive ceiling.  REVIEW.md round-2 (2026-05-16) showed the
+# hard-cap implementation (R-002) silently sub-samples coseismic and
+# nucleation to ~T/K = 18 days when K=5000, erasing all earthquake
+# detail.  Rather than rebuild the cap to be smarter, this sbatch just
+# trusts the cadence projection above (~5,123 frames worst case for a
+# 1775-yr / 7-event run, ~708 for the 250-yr / 1-event target).  Both
+# are well within any reasonable Frontera scratch budget at 1 MB/frame
+# fault.vtkhdf with ZFP 1e-12 — under 10 GB worst case.
+#
+# IMPORTANT CAVEAT.  --paraview-dt-co/-nu/-inter-yr only affect ParaView
+# fault/volume snapshots.  The station probe files (*_fltst_*.txt the
+# SCEC benchmark consumes) go through BP5BenchmarkOutput::OutputInterval
+# which has its OWN hard-coded thresholds and ignores these CLI flags
+# (miniapps/seas/io/bp5_benchmark_output.hpp, the
+# `BP5BenchmarkOutput::OutputInterval` static method).  The bench_out
+# probes therefore still write at:
+#     coseismic    V > 1e-3 m/s         every 0.1 s    (SCEC spec)
+#     nucleation   1e-6 < V <= 1e-3     every 0.1 s
+#     interseismic V <= 1e-6 m/s        every 0.1 yr   (SCEC spec)
+# regardless of the --paraview-dt-* flags.  Only the ParaView .vtkhdf
+# size is reduced by those flags.
+#
+# Cross-check disk budget:
 #   python3 miniapps/seas/scripts/estimate_from_sbatch.py \
 #       miniapps/seas/jobs/bp5/bp5_phase6_paraview_zfp_normal_48hr.sbatch
 #
@@ -131,7 +185,10 @@ echo "Output dir:    ${RESULT_DIR}"
 echo "Mesh:          bp5_tandem_exact.msh (1000 m, P=1 IP)"
 echo "Volume PV:     SUPPRESSED (--no-volume-pv per Plan §7.5 #1)"
 echo "Fault PV:      HDF5,           ZFP tol 1e-12 (slip-rate floor)"
-echo "Snapshot cap:  --paraview-max-snapshots 5000"
+echo "Cadence:       coseismic=1 s, nucleation=43200 s (12 hr), interseismic=1 yr"
+echo "Frames:        ~708 projected at 250 yr / 1 event"
+echo "               ~5,123 projected at 1775 yr / 7 events"
+echo "               (no snapshot cap — natural cadence trusted)"
 echo "Queue:         normal (8N x 400r, 48h, tfinal 250 yr)"
 echo "========================================"
 
@@ -151,7 +208,9 @@ ibrun ./seas_bp5_full \
       --paraview-adaptive \
       --no-volume-pv \
       --paraview-fault-zfp-tol 1e-12 \
-      --paraview-max-snapshots 5000 \
+      --paraview-dt-co     1.0 \
+      --paraview-dt-nu     43200 \
+      --paraview-dt-inter-yr 1.0 \
       --tfinal 7889400000 \
       --verify
 

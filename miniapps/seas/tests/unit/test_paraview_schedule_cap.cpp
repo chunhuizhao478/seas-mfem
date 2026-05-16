@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdio>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 #include <vector>
@@ -144,6 +145,26 @@ static RunResult RunSequence(int n_events, real_t recurrence_yr,
 int main(int argc, char *argv[])
 {
    (void)argc; (void)argv;
+   // R-001 note (REVIEW.md 2026-05-16): the rank-0 gate in
+   // `RecomputeIntervalForCap` only suppresses output on non-zero
+   // ranks when MPI is INITIALISED.  This test does NOT call
+   // `MPI_Init` to keep the other tests' `ParaViewDataCollection::Save`
+   // calls independent across ranks (initialising MPI would cause
+   // them to share `MFEM_COMM_WORLD` and deadlock on `MPI_Finalize`
+   // when one rank exits before the other reaches the end).
+   //
+   // The R-001 sub-test below therefore detects "MPI not init'd"
+   // and reports it as an INFO skip.  Manual verification is the
+   // documented procedure:
+   //
+   //   mpirun --oversubscribe -np 2 ./seas_test_paraview_schedule_cap
+   //
+   // Pre-fix: the cap-exhausted warning appears TWICE per scenario
+   // in the merged stdout (once per rank).  Post-fix: appears ONCE
+   // per scenario (rank 0 only).  The visual count difference
+   // confirms the gate is active in production builds where the
+   // driver (BP5 / TPV*) calls `MPIContext` which initialises MPI
+   // before any `ParaViewOutput` is constructed.
    std::cout << "=== test_paraview_schedule_cap (Phase 3) ===\n";
 
    // --- 1 cycle (1 event), uncapped baseline.
@@ -378,6 +399,170 @@ int main(int argc, char *argv[])
       pv.Save(1, 1.0, 1e-12);
       TEST_ASSERT(pv.GetTotalSnapshotsWritten() == 2,
                   "R-106: distinct cycle still bumps");
+   }
+
+   // --- R-001 (REVIEW.md 2026-05-16): cap-exhausted warning is rank-0-only.
+   //     Pre-fix every rank wrote its own copy of the warning (the
+   //     comment in RecomputeIntervalForCap claimed `mfem::out` was
+   //     rank-0-only on parallel builds, but `mfem::out` is just a
+   //     wrapper over `std::cout` and has no MPI filter).  Post-fix the
+   //     diagnostic is gated on `MPI_Comm_rank == 0`.
+   //
+   //     Capture `mfem::out` via a per-rank stringstream, exhaust the
+   //     cap, then MPI_Allreduce to count how many ranks printed.  We
+   //     require exactly one rank to have printed, and that rank must
+   //     be rank 0.  Serial / 1-rank runs are skipped (no rank-0 gate
+   //     to test).
+   {
+#ifdef MFEM_USE_MPI
+      int mpi_inited = 0;
+      MPI_Initialized(&mpi_inited);
+      if (mpi_inited)
+      {
+         int rank = 0, nranks = 1;
+         MPI_Comm_rank(MPI_COMM_WORLD, &rank);
+         MPI_Comm_size(MPI_COMM_WORLD, &nranks);
+         if (nranks >= 2)
+         {
+            std::ostringstream buf;
+            std::streambuf *orig = mfem::out.rdbuf(buf.rdbuf());
+
+            Mesh smesh = Mesh::MakeCartesian2D(1, 1, Element::TRIANGLE);
+            ParaViewOutput<Mesh> pv("/tmp/test_R001_warning_rank0",
+                                    smesh, /*order=*/1);
+            ::mkdir("/tmp/test_R001_warning_rank0", 0755);
+            pv.SetTotalRunTime(100.0);
+            pv.GetSchedule().max_total_snapshots = 2;
+            // Drive past the cap with coseismic-strength V.  Hard-cap
+            // post-fix will sub-sample, so we need to hit ShouldWrite
+            // enough times that we eventually exhaust the budget.
+            for (int i = 0; i < 200; ++i)
+            {
+               pv.ShouldWrite(i, mfem::real_t(i) * 0.5, 1.0);
+            }
+            mfem::out.rdbuf(orig);
+
+            const bool found = (buf.str().find("exhausted") !=
+                                std::string::npos);
+            int local = found ? 1 : 0;
+            int global = 0;
+            MPI_Allreduce(&local, &global, 1, MPI_INT, MPI_SUM,
+                          MPI_COMM_WORLD);
+            TEST_ASSERT(global == 1,
+                        "R-001: cap-exhausted warning must print "
+                        "exactly once across ranks (got "
+                        << global << " printers)");
+            TEST_ASSERT(rank != 0 || found,
+                        "R-001: rank 0 must be the rank that prints "
+                        "the cap-exhausted warning");
+         }
+         else
+         {
+            std::cout << "  INFO: R-001 rank-0 warning test skipped — "
+                         "needs np >= 2\n";
+         }
+      }
+      else
+      {
+         std::cout << "  INFO: R-001 rank-0 warning test skipped — "
+                      "MPI not initialised\n";
+      }
+#else
+      std::cout << "  INFO: R-001 rank-0 warning test skipped — "
+                   "serial build\n";
+#endif
+   }
+
+   // --- R-002 (REVIEW.md 2026-05-16, REVERTED in round 2):
+   //     The "hard cap across all regimes" experiment was reverted per
+   //     user direction.  Coseismic and nucleation now ALWAYS use their
+   //     natural cadence (`dt_coseismic`, `dt_nucleation`), regardless
+   //     of `max_total_snapshots`.  The cap throttles only the
+   //     interseismic regime.
+   //
+   //     This test pins that contract: 100,000 coseismic ticks at
+   //     0.01 s with K=100 must write at the natural cadence (~all
+   //     ticks).  If the hard cap ever sneaks back in, this test
+   //     fails by writing <<100k frames.
+   {
+      Mesh smesh = Mesh::MakeCartesian2D(1, 1, Element::TRIANGLE);
+      ParaViewOutput<Mesh> pv("/tmp/test_R002_soft_cap_coseismic",
+                              smesh, /*order=*/1);
+      ::mkdir("/tmp/test_R002_soft_cap_coseismic", 0755);
+      pv.SetTotalRunTime(1e6);                  // 1e6 s total
+      pv.GetSchedule().max_total_snapshots = 100;
+      pv.GetSchedule().dt_coseismic = 0.01;
+      pv.GetSchedule().Validate();
+      // 100,000 ticks at 0.01 s spacing (1000 s of simulated time),
+      // V = 1.0 → coseismic the whole time.
+      for (int i = 0; i < 100000; ++i)
+      {
+         pv.ShouldWrite(i, mfem::real_t(i) * 0.01, 1.0);
+      }
+      const int writes = pv.GetTotalSnapshotsWritten();
+      std::cout << "  INFO: R-002 K=100 / 100k coseismic ticks: "
+                << writes << " writes (cap is SOFT — coseismic at "
+                << "natural 0.01 s cadence, all ticks write)\n";
+      TEST_ASSERT(writes > 90000,
+                  "R-002 (reverted): coseismic regime must IGNORE the "
+                  "cap; expected ~100,000 writes at natural 0.01 s "
+                  "cadence, got " << writes);
+   }
+
+   // --- R-005 (REVIEW.md 2026-05-16): once the cap is EXHAUSTED, the
+   //     interseismic schedule can write MORE THAN ONCE more, at
+   //     geometrically-halving cadence (t/2, 3t/4, 7t/8, ...).  The
+   //     pre-fix warning text claimed "one final write" — that was
+   //     wrong, and the post-fix text now describes the real behaviour.
+   //
+   //     Setup: K=2, T=1000 s.  First two writes consume the budget
+   //     (coseismic at t=0 and t=499).  Then tick fine-grained
+   //     interseismic samples to 999 s and verify at least 1 further
+   //     write occurs (the cap-exhausted geometric halving boundary).
+   //
+   //     Trace with the post-fix algorithm:
+   //       t=0   V=1   : write (counter=1, last_write=0)
+   //       t=499 V=1   : write (counter=2, last_write=499; budget done)
+   //       t>499 V<<   : cap-exhausted branch returns time_to_end,
+   //                     geometric-halving kicks in.  At t=900,
+   //                     time_to_end=100 < (900-499)=401, so write.
+   //                     At t=990, time_to_end=10 < (990-900)=90, so
+   //                     write again.  Total >= 1 follow-up writes.
+   {
+      Mesh smesh = Mesh::MakeCartesian2D(1, 1, Element::TRIANGLE);
+      ParaViewOutput<Mesh> pv("/tmp/test_R005_geometric_halving",
+                              smesh, /*order=*/1);
+      ::mkdir("/tmp/test_R005_geometric_halving", 0755);
+      pv.SetTotalRunTime(1000.0);
+      pv.GetSchedule().max_total_snapshots = 2;
+      pv.GetSchedule().Validate();
+      // Two coseismic writes to consume the budget (the cadence-
+      // stretch makes them land at t=0 and t≈499, not t=0 and t=0.01).
+      pv.ShouldWrite(0, 0.0,    1.0);
+      pv.ShouldWrite(1, 499.0,  1.0);
+      const int writes_at_budget = pv.GetTotalSnapshotsWritten();
+      TEST_ASSERT(writes_at_budget == 2,
+                  "R-005 setup: K=2 budget filled by two coseismic "
+                  "writes (one at t=0, one at t=499 when cadence "
+                  "projection allows it)");
+
+      // Fine-grained interseismic samples up to 999 s.
+      int follow_up = 0;
+      for (int i = 0; i < 500; ++i)
+      {
+         const mfem::real_t t = 500.0 + mfem::real_t(i);
+         if (pv.ShouldWrite(2 + i, t, 1e-12)) { follow_up++; }
+      }
+      std::cout << "  INFO: R-005 K=2 geometric halving: "
+                << writes_at_budget << " then +" << follow_up
+                << " interseismic follow-ups\n";
+      TEST_ASSERT(follow_up >= 1,
+                  "R-005: cap-exhausted interseismic must produce at "
+                  "least one further write at the geometric-halving "
+                  "boundary (pre-fix warning text said 'one final "
+                  "write' but the algorithm allows more if the "
+                  "simulation runs long enough; post-fix text now "
+                  "describes the t/2, 3t/4, 7t/8, ... cadence)");
    }
 
    std::cout << "\n=== Summary: " << num_passed << " / " << num_tests

@@ -279,19 +279,69 @@ public:
          const int remaining_budget = max_total_snapshots - snapshots_so_far;
          if (remaining_budget <= 0)
          {
-            // R-002: plan §Phase 3 edge case 1 — print one rank-0
-            // warning the first time we hit the exhausted branch, so a
-            // user who reads the run log sees that coseismic events
-            // pushed past the cap.  `mfem::out` is rank-0-only on
-            // parallel builds and a no-op sink on serial.
+            // R-001 fix: gate the diagnostic print on rank 0 only.
+            // Pre-fix the comment claimed `mfem::out` was rank-0-only
+            // on parallel builds; that claim was false.  `mfem::out`
+            // wraps `std::cout` unconditionally (`general/globals.cpp:27`,
+            // `general/globals.hpp:29-60`), so without an explicit MPI
+            // rank check, every rank that entered this branch printed
+            // its own copy of the warning.  At np=400 with a coseismic
+            // plateau this floods the log with hundreds of duplicate
+            // lines, often torn at character boundaries by concurrent
+            // writes.  We still latch `cap_exhausted_warned_` on every
+            // rank so each rank skips re-entry, but only rank 0
+            // actually writes to the log.
+            //
+            // R-005 fix: warning text now describes the geometric-
+            // halving cadence that actually happens (interseismic dt is
+            // re-stretched each call to `time_to_end`, so successive
+            // writes fire at t/2, 3t/4, 7t/8, ... rather than "one final
+            // write").  Coseismic / nucleation regimes always use their
+            // natural cadence (`dt_coseismic` / `dt_nucleation`) and
+            // ignore the cap entirely — `SnapshotCapAwareInterval`
+            // early-returns `base` for `regime != 0` (REVIEW.md
+            // 2026-05-16 round-2 revert of R-002).
+            //
+            // R-203 (REVIEW.md round 3): the `regime` parameter that
+            // previously plumbed regime-naming into the warning text
+            // is GONE.  After the round-2 hard-cap revert, the only
+            // caller of this function (`SnapshotCapAwareInterval`)
+            // early-exits for non-interseismic regimes, so the warning
+            // branch is structurally only reachable from the
+            // interseismic path.  Hardcoding "interseismic" in the
+            // warning text matches the only situation that can fire
+            // it; the dead-code `coseismic` / `nucleation` branches
+            // are deleted.
             if (!cap_exhausted_warned_)
             {
-               mfem::out << "ParaViewOutput: max_total_snapshots="
-                         << max_total_snapshots << " exceeded by "
-                         "coseismic events (snapshots_so_far="
-                         << snapshots_so_far << ").  Spreading "
-                         "remaining " << time_to_end << " s into one "
-                         "final interseismic write.\n";
+#ifdef MFEM_USE_MPI
+               int _rank = 0;
+               int _mpi_inited = 0;
+               MPI_Initialized(&_mpi_inited);
+               if (_mpi_inited)
+               {
+                  MPI_Comm_rank(mfem::GetGlobalMPI_Comm(), &_rank);
+               }
+               if (_rank == 0)
+#endif
+               {
+                  mfem::out << "ParaViewOutput: max_total_snapshots="
+                            << max_total_snapshots
+                            << " exhausted in the interseismic regime "
+                            "(coseismic / nucleation regimes always "
+                            "use their natural cadence and never reach "
+                            "this branch; snapshots_so_far="
+                            << snapshots_so_far
+                            << ").  For the remaining " << time_to_end
+                            << " s, interseismic dt is stretched to "
+                            "time_to_end on each call so further "
+                            "interseismic writes fire at geometrically-"
+                            "halving cadence (t/2, 3t/4, 7t/8, ...).  "
+                            "Coseismic / nucleation writes continue at "
+                            "their natural cadence (dt_coseismic / "
+                            "dt_nucleation) regardless — the cap only "
+                            "throttles interseismic.\n";
+               }
                cap_exhausted_warned_ = true;
             }
             // R-005: when `time_to_end > 0` we honour the plan's "emit
@@ -1801,9 +1851,31 @@ private:
    }
 
    /// Phase 3: cap-aware variant of `adaptive_.Interval(V_max, regime)`.
-   /// In the interseismic regime AND when `max_total_snapshots > 0`,
-   /// inflates the interval per `RecomputeIntervalForCap`.  Coseismic
-   /// and nucleation regimes return their own (uncapped) cadence.
+   ///
+   /// The cap is SOFT — it only stretches the interseismic interval.
+   /// Coseismic and nucleation regimes always return their natural
+   /// cadence (`dt_coseismic` / `dt_nucleation`), regardless of how
+   /// many snapshots have been written.  Rationale:
+   ///
+   ///   * Earthquake dynamics happen on the coseismic timescale.
+   ///     Sub-sampling those frames defeats the purpose of having a
+   ///     ParaView movie at all.
+   ///   * The interseismic phase is long (hundreds of years for BP5)
+   ///     so it's where any disk-quota pressure comes from.  That's
+   ///     the regime worth stretching.
+   ///   * The R-002 round of REVIEW.md 2026-05-16 experimented with a
+   ///     "hard cap" that stretched every regime; the round-2 review
+   ///     showed that erased all coseismic / nucleation detail for any
+   ///     reasonable K.  Reverted per user direction
+   ///     (2026-05-16 follow-up).
+   ///
+   /// The cap is engineered for the natural-cadence write count to fit
+   /// comfortably under K.  Operators should size K against the
+   /// projection from
+   /// `miniapps/seas/scripts/estimate_from_sbatch.py` or
+   /// `regime_budget_2026-05-16.md`.  If the natural count is itself
+   /// bigger than K, fix the cadences (`--paraview-dt-co/-nu/-inter-yr`)
+   /// rather than relying on the cap to clip down.
    real_t SnapshotCapAwareInterval(real_t V_max, int regime,
                                     real_t time) const
    {
@@ -1812,11 +1884,9 @@ private:
       {
          return base;
       }
-      // R-001: the cap requires a known total run time to project the
-      // remaining budget over.  Drivers must call SetTotalRunTime(tfinal)
-      // BEFORE the time-stepping loop.  Without it the cap silently
-      // becomes a no-op — convert that into a clear abort so the user
-      // notices instead of getting uncapped behaviour.
+      // Interseismic-only soft cap.  Drivers must call
+      // SetTotalRunTime(tfinal) BEFORE the time-stepping loop, else
+      // the cap silently no-ops.  Convert that into a clear abort.
       MFEM_VERIFY(total_run_time_ > 0.0,
                   "ParaViewOutput: max_total_snapshots="
                   << adaptive_.max_total_snapshots

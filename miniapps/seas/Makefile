@@ -225,6 +225,10 @@ TEST_VOLUME_HDF_COMPRESSION_SRC            = tests/unit/test_volume_hdf_compress
 TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_cap.cpp
 # R-001 of PLAN_split_bulk_solutions_2026-05-12 — kinematics field set
 TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_set.cpp
+# R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank PETSc TS lifecycle
+TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC      = tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp
+# R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
+TEST_PARAVIEW_RANK0_WARNING_GATE_SRC       = tests/unit/test_paraview_rank0_warning_gate.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
@@ -437,6 +441,8 @@ TEST_FAULT_SURFACE_VTKHDF_ZFP_OBJ          = $(TEST_FAULT_SURFACE_VTKHDF_ZFP_SRC
 TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.cpp=.o)
 TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
 TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
+TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ      = $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC:.cpp=.o)
+TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
@@ -1055,6 +1061,16 @@ seas_test_kinematics_field_set: $(TEST_KINEMATICS_FIELD_SET_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_KINEMATICS_FIELD_SET_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank padded-shrink invariant
+seas_test_bp5_petsc_ts_zero_fault_rank: $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
+seas_test_paraview_rank0_warning_gate: $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # v9.1.0 plan §4.2 — FaultBasis orthonormality contract (post-R-003)
 seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ) $(MFEM_LIBS)
@@ -1633,6 +1649,14 @@ $(TEST_KINEMATICS_FIELD_SET_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FI
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ): %.o: $(SRC)%.cpp $(FAULT_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -1946,7 +1970,15 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-ader-linear-wave-equivalence \
       test-ader-tpv102-smoke \
       test-R001-driver-defaults-to-ader \
-      test-R002-driver-init-total-q
+      test-R002-driver-init-total-q \
+      test-paraview-schedule-cap \
+      test-kinematics-field-set \
+      test-bp5-petsc-ts-zero-fault-rank
+# Note: `test-paraview-rank0-warning-gate` is INTENTIONALLY excluded
+# from the `test:` umbrella above — it requires `mpirun -np 2` which
+# is not guaranteed available in every dev environment.  Run it
+# manually as a pre-submit check:
+#     make test-paraview-rank0-warning-gate
 
 test-friction: seas_test_friction_law
 	./seas_test_friction_law
@@ -2216,6 +2248,15 @@ test-paraview-schedule-cap: seas_test_paraview_schedule_cap
 
 test-kinematics-field-set: seas_test_kinematics_field_set
 	./seas_test_kinematics_field_set
+
+# R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF padded-shrink invariant.
+test-bp5-petsc-ts-zero-fault-rank: seas_test_bp5_petsc_ts_zero_fault_rank
+	./seas_test_bp5_petsc_ts_zero_fault_rank
+
+# R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate.
+# Requires np >= 2; skipped (returns 0) under serial.
+test-paraview-rank0-warning-gate: seas_test_paraview_rank0_warning_gate
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_paraview_rank0_warning_gate
 
 test-fault-basis-dip-strike-symmetry: seas_test_fault_basis_dip_strike_symmetry
 	./seas_test_fault_basis_dip_strike_symmetry
@@ -3120,7 +3161,8 @@ test-tpv104: seas_tpv104_driver \
              seas_test_tpv104_probe_format \
              seas_test_tpv104_smoke \
              seas_test_tpv104_sigma_n_invariance \
-             seas_test_tpv104_freeze_sigma_n_gate
+             seas_test_tpv104_freeze_sigma_n_gate \
+             seas_test_friction_solver_stable
 	@echo "=== TPV104 unit tests ==="
 	./seas_test_tpv104_params
 	./seas_test_slip_law_srw_psi
@@ -3135,6 +3177,7 @@ test-tpv104: seas_tpv104_driver \
 	./seas_test_tpv104_smoke
 	./seas_test_tpv104_sigma_n_invariance
 	./seas_test_tpv104_freeze_sigma_n_gate
+	./seas_test_friction_solver_stable
 	@echo "=== TPV104 suite complete ==="
 
 # Gmsh-generated mesh .msh files (built on demand in the pythonenv
@@ -3156,6 +3199,11 @@ $(TEST_FRICTION_SOLVER_STABLE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV104_HE
 seas_test_friction_solver_stable: $(TEST_FRICTION_SOLVER_STABLE_OBJ) dynamic/friction_solver.o
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRICTION_SOLVER_STABLE_OBJ) dynamic/friction_solver.o $(MFEM_LIBS)
 
-# Extend the umbrella so `make test-tpv104` also runs the §4.10.X test.
-test-tpv104: seas_test_friction_solver_stable
-	./seas_test_friction_solver_stable
+# R-004 (REVIEW.md 2026-05-16): seas_test_friction_solver_stable is
+# rolled into the primary `test-tpv104` umbrella above (prerequisite +
+# run line).  The previous block here re-declared `test-tpv104` with a
+# new recipe, which Make treats as REPLACING (not extending) the
+# original recipe — so `make test-tpv104` silently ran only this one
+# test and skipped the other 13.  The redeclaration also triggered the
+# "overriding recipe for target `test-tpv104`" warning that users saw
+# in BP5 Phase 6 production builds.

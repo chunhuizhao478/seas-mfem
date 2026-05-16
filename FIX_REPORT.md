@@ -1,84 +1,198 @@
-# Fix Report: REVIEW.md (2026-05-02) — General mesh-integrity check & fault-orientation fix
+# Fix Report — REVIEW.md round 3 (BP5 Phase 6 — post safety-net cleanup)
 
-Branch: `feature/elasticity-inertia`
-Date: 2026-05-02
+**Date:** 2026-05-16 (round 3)
+**Branch:** `feature/paraview-compaction`
+**Review document:** `REVIEW.md` (round 3, 4 findings: R-201, R-202, R-203, R-204)
 
-## Summary table
+## Summary
 
-| ID | Status | Files modified |
-|---|---|---|
-| R-001 | FIXED | `miniapps/seas/safs/mesh/validate_msh.py` (added `check_12_surface_closure`, registered in `main()`) |
-| R-002 | FIXED | `miniapps/seas/safs/mesh/validate_msh.py` (added `check_13_fault_orientation`; HARD-fail on `n_winding_flips_needed > 0`, WARN-only on non-manifold) |
-| R-003 | FIXED | `miniapps/seas/safs/mesh/orient_fault_surface.py` (NEW); wired into `run_newset_step_by_step.sh` after each mesh-mutating stage |
-| R-004 | FIXED | `miniapps/seas/safs/mesh/run_newset_step_by_step.sh` (validate failure now aborts pipeline at all 4 sites) |
-| R-005 | RESOLVED-BY-R-002 | n/a — non-manifold edge metric is reported by `check_13` |
-| R-006 | FIXED | `miniapps/seas/safs/mesh/mmg3d_local_patch.py` (`_stitch_back` raises `RuntimeError` on producer-side surface holes) |
+- Findings addressed: **4 of 4**
+- Files modified: **4** (Makefile, sbatch, paraview_output.hpp, test_bp5_petsc_ts_zero_fault_rank.cpp)
+- Tests added: **1 new sub-test** (R-204 driver-source grep), appended to existing R-003 test binary
+- Test suite: **PASS** locally — schedule-cap 23/23, R-003+R-204 8/8 (was 7/7), kinematics 31/31, R-104 PASS under `mpirun -np 2`
+- All four production drivers rebuild clean.
 
-## Files modified
+## Changes Made
 
-- `miniapps/seas/safs/mesh/validate_msh.py` — added `check_12_surface_closure` and `check_13_fault_orientation`; both registered in `main()`. Pre-fix the suite was 11 checks; post-fix it is 13 checks.
-- `miniapps/seas/safs/mesh/orient_fault_surface.py` — NEW (~7.4 KB). BFS-propagates fault-tri winding within each tag-100 connected component. Idempotent. Emits `components / flipped / nonmanifold` to stderr.
-- `miniapps/seas/safs/mesh/mmg3d_local_patch.py` — `_stitch_back()` now asserts the "every 1-tet bdry face has a tagged tri" invariant on its own output and raises `RuntimeError` with diagnostic centroids when violated.
-- `miniapps/seas/safs/mesh/run_newset_step_by_step.sh` — wired `python orient_fault_surface.py` immediately before each stage's `validate_msh.py` invocation (raw HXT, post-mmg3d, post-patch, post-cavity); converted the four `validate_msh.py` call sites from `set +e ... set -e` envelopes to `if !  ...; then return N; fi` so validation failure aborts the pipeline (R-004).
-- New unit tests:
-  - `miniapps/seas/safs/mesh/tests/test_validate_msh_check12_check13.py` (R-001 + R-002, 9 tests)
-  - `miniapps/seas/safs/mesh/tests/test_orient_fault_surface.py` (R-003, 6 tests)
-  - `test_mmg3d_local_patch.py::test_R006_stitch_back_raises_on_surface_hole` (R-006)
+### R-201 [MODERATE] — Wire new tests into `make test` umbrella
 
-## Unit test results
+**File:** `miniapps/seas/Makefile:1973-1979`
 
-- `pytest miniapps/seas/safs/mesh/tests/` — **136 passed, 0 failed, 1 deprecation warning** (1.50 s).
-- Of those 136, the R-fix tests are: 9 for R-001+R-002 (`test_validate_msh_check12_check13.py`), 6 for R-003 (`test_orient_fault_surface.py`), 1 for R-006 (in `test_mmg3d_local_patch.py`). All 16 R-fix tests pass.
-- Orphan/dead tests previously called out were removed by the prior agent before this run; the remaining 136 all pass cleanly.
+Added the three serial regression tests as prerequisites of the seas `test:` target. The MPI-only test stays out (per the reviewer's explicit guidance — `mpirun` is not guaranteed available in every dev environment) with an inline comment directing users to invoke it manually.
 
-## Step-6 RESULT lines (4 stages, post-fix)
-
-The live `run_newset_step_by_step.sh` was relaunched three times in this session; all three failed at `generate_safs_mesh` (gmsh HXT 3D self-intersecting facets) on a slightly different STL than the previously-completed runs (15676 tris vs 15667). The HXT failure is unrelated to R-001..R-006 — it is a known gmsh/CGAL non-determinism on the SAFS dedup output. To exercise the post-fix validation against real downstream-stage meshes, the new `orient_fault_surface.py` and `validate_msh.py` were run directly against the 4 stage outputs from the most recent successful end-to-end run at `output/newset_6_all6_cavity_retet/output/`. Logs at `/tmp/postfix_validate/validate_{raw,mmg3d,patch,cavity}.log`.
-
-```
-RESULT [raw]:    12/13 checks passed | gamma_min=2.44e-10  | min_edge=0.20 m | slivers=307 | n_tets=936933  | rc=1
-RESULT [mmg3d]:  12/13 checks passed | gamma_min=2.24e-06  | min_edge=0.20 m | slivers=282 | n_tets=1101972 | rc=1
-RESULT [patch]:  11/13 checks passed | gamma_min=2.53e-06  | min_edge=0.20 m | slivers=337 | n_tets=1108808 | rc=1
-RESULT [cavity]: 11/13 checks passed | gamma_min=6.61e-06  | min_edge=0.20 m | slivers=318 | n_tets=1108882 | rc=1
+```diff
+       test-ader-tpv102-smoke \
+       test-R001-driver-defaults-to-ader \
+-      test-R002-driver-init-total-q
++      test-R002-driver-init-total-q \
++      test-paraview-schedule-cap \
++      test-kinematics-field-set \
++      test-bp5-petsc-ts-zero-fault-rank
++# Note: `test-paraview-rank0-warning-gate` is INTENTIONALLY excluded
++# from the `test:` umbrella above — it requires `mpirun -np 2` which
++# is not guaranteed available in every dev environment.  Run it
++# manually as a pre-submit check:
++#     make test-paraview-rank0-warning-gate
 ```
 
-Per-stage failure breakdown:
-
-| Stage | Failed checks | Note |
-|---|---|---|
-| raw    | check_10 only (slivers, pre-existing R-402 gate) | check_12 PASS (0 unlabeled holes), check_13 PASS (0 winding flips, 393 non-manifold reported as branching, ok) |
-| mmg3d  | check_10 only | check_12 PASS, check_13 PASS (0 flips, 269 non-manifold) |
-| patch  | check_10 + **check_12 (3 unlabeled bdry faces)** | check_13 PASS (0 flips). check_12 catches the predicted `mmg3d_local_patch` regression. |
-| cavity | check_10 + check_12 (3 unlabeled bdry faces, inherited from patch) | check_13 PASS |
-
-`orient_fault_surface.py` was run idempotently on each stage before validate; output:
+Verification:
 ```
-raw:    components=2 flipped=0 nonmanifold=393   (would have flipped 6313 on un-oriented input)
-mmg3d:  components=2 flipped=0 nonmanifold=269   (would have flipped 9615)
-patch:  components=2 flipped=0 nonmanifold=274   (would have flipped 11338)
-cavity: components=2 flipped=0 nonmanifold=274   (would have flipped 11338)
+$ cd miniapps/seas && make --dry-run test | grep -c "./seas_test_paraview_schedule_cap"
+1   # was 0 pre-fix
+$ make --dry-run test | grep -c "./seas_test_bp5_petsc_ts_zero_fault_rank"
+1   # was 0 pre-fix
+$ make --dry-run test | grep -c "rank0_warning_gate"
+0   # MPI-only test correctly excluded
 ```
 
-## Topology metrics on final cavity.msh
+### R-202 [MODERATE] — Fix sbatch bench_out caveat (wrong file/line/cadence)
 
-Final cavity mesh: `output/newset_6_all6_cavity_retet/output/safs_newset_6_cavity.msh` (192,709 verts, 44,559 tris, 1,108,882 tets), after running `orient_fault_surface.py` (R-003).
+**File:** `miniapps/seas/jobs/bp5/bp5_phase6_paraview_zfp_normal_48hr.sbatch:82-93`
 
-| metric | pre-fix | post-fix |
-|---|---|---|
-| unlabeled 1-tet bdry faces | 3 | **3** (still present — produced upstream by `mmg3d_local_patch`; R-001 check_12 NOW DETECTS them, R-006 producer-side assertion would prevent them on a fresh run; see Recommendations) |
-| tag-100 fault orphans | 0 | 0 |
-| fault winding flips (BFS-propagated) | 229 | **0** |
-| non-manifold fault edges | 269 | **274** (intrinsic to branching SAFS geometry; unchanged by orient pass — reported as warn-only metric per R-002 spec) |
-| T-junctions | 0 | 0 |
+Replaced the misleading IMPORTANT CAVEAT block with the corrected file path (`bp5_benchmark_output.hpp`, no inline line number — line numbers go stale), and the actual cadences (0.1 s coseismic / 0.1 s nucleation / 0.1 yr interseismic from `BP5BenchmarkOutput::OutputInterval`).
 
-Numbers from `/tmp/global_check.py` and `/tmp/fault_orientation_check.py` on the orient-corrected cavity mesh.
+```diff
+ # IMPORTANT CAVEAT.  --paraview-dt-co/-nu/-inter-yr only affect ParaView
+ # fault/volume snapshots.  The station probe files (*_fltst_*.txt the
+ # SCEC benchmark consumes) go through BP5BenchmarkOutput::OutputInterval
+-# which constructs a FRESH AdaptiveSchedule from hardcoded defaults
+-# and ignores these CLI flags (paraview_output.hpp:1589-1593).  The
+-# bench_out probes therefore still write at 1 yr / 1 s / 0.01 s for
+-# SCEC compliance.  Only the ParaView .vtkhdf size is reduced here.
++# which has its OWN hard-coded thresholds and ignores these CLI flags
++# (miniapps/seas/io/bp5_benchmark_output.hpp, the
++# `BP5BenchmarkOutput::OutputInterval` static method).  The bench_out
++# probes therefore still write at:
++#     coseismic    V > 1e-3 m/s         every 0.1 s    (SCEC spec)
++#     nucleation   1e-6 < V <= 1e-3     every 0.1 s
++#     interseismic V <= 1e-6 m/s        every 0.1 yr   (SCEC spec)
++# regardless of the --paraview-dt-* flags.  Only the ParaView .vtkhdf
++# size is reduced by those flags.
+```
 
-## Verdict
+The new comment is verifiable against the actual code:
+```
+$ grep -A 12 "static real_t OutputInterval" miniapps/seas/io/bp5_benchmark_output.hpp
+   static real_t OutputInterval(real_t V_max)
+   {
+      if (V_max > 1e-3)         return 0.1;                          // coseismic
+      else if (V_max > 1e-6)    return 0.1;                          // nucleation
+      else                      return 0.1 * BP5Params::seconds_per_year;  // interseismic
+   }
+```
 
-**R-001..R-006 are FIXED and exercised on real Step-6 stage outputs. READY FOR RE-REVIEW with two notes:**
+### R-203 [LOW] — Drop dead `regime` parameter from `RecomputeIntervalForCap`
 
-1. **The 3 surface holes in `_patch.msh` and `_cavity.msh` are now DETECTED, not silently passed.** Pre-fix, `validate_patch.txt` reported `11/11 checks passed` on the broken mesh; post-fix, `validate_patch.log` reports `11/13 checks passed` with the explicit failure: `[FAIL] 12_surface_closure: 3 unlabeled 1-tet bdry face(s); first centroids: (55541,-19265,0), (55435,-19982,0), (55281,-19608,0)`. R-004's fail-fast policy means a fresh end-to-end run will now ABORT at the post-patch validate gate rather than producing a topology-broken cavity mesh.
+**File:** `miniapps/seas/io/paraview_output.hpp:275-276` (function signature) + `316-336` (warning text) + `1893-1894` (call site)
 
-2. **Recommendation per task spec: roll back `mmg3d_local_patch` for now.** Per the task instructions ("If check_12 fails on the post-patch output: that's the predicted bug — `mmg3d_local_patch.py` is a known producer of surface holes. Document in the fix report and recommend rolling back local_patch (set ENABLE_MMG3D_LOCAL_PATCH=0). Do NOT try to repair via additional patches."). Concretely: the 3 unlabeled bdry faces are introduced by `mmg3d_local_patch._stitch_back` (R-006 assertion would have caught them at the producer if the patch had been re-run after the R-006 fix went in). On a fresh run the producer-side `RuntimeError` from R-006 will halt the patch stage immediately rather than emit a broken mesh. If the user wants Step 6 to complete to cavity.msh in the meantime, run with `ENABLE_MMG3D_LOCAL_PATCH=0` (mmg3d post-pass only — gives a 12/13-passing mesh whose only failure is the pre-existing check_10 sliver gate).
+The parameter was structurally dead — the only caller is `SnapshotCapAwareInterval` which early-exits for non-interseismic regimes, so `regime` always arrived as `0`. Removed the parameter, removed the dead `regime_name` lookup, and hardcoded "interseismic" in the warning text with an explanatory clause for the reader.
 
-3. **Live pipeline note.** The three relaunched Step-6 attempts in this session each failed at `generate_safs_mesh` (gmsh HXT 3D constrained-recovery error on a 15676-tri STL produced by CGAL 6.1 autorefine). This is HXT/CGAL non-determinism — not a regression caused by R-001..R-006 fixes — and is orthogonal to the validation-and-orientation gate this review addressed. Rerunning the cascade or perturbing the autorefine seed will eventually land on a HXT-friendly STL (the same script succeeded at this stage earlier in the session, producing a 15667-tri STL). The post-fix validation of the existing downstream outputs (table above) demonstrates the fixes work end-to-end on the pipeline's normal stage outputs.
+```diff
+       real_t RecomputeIntervalForCap(real_t time_to_end,
+-                                     int snapshots_so_far,
+-                                     int regime = 0) const
++                                     int snapshots_so_far) const
+       {
+          ...
+                {
+-                  const char *regime_name = (regime == 2) ? "coseismic"
+-                                          : (regime == 1) ? "nucleation"
+-                                                          : "interseismic";
+                   mfem::out << "ParaViewOutput: max_total_snapshots="
+                             << max_total_snapshots
+-                            << " exhausted (detected in "
+-                            << regime_name
+-                            << " regime; snapshots_so_far="
++                            << " exhausted in the interseismic regime "
++                               "(coseismic / nucleation regimes always "
++                               "use their natural cadence and never reach "
++                               "this branch; snapshots_so_far="
+                             << snapshots_so_far
+                             ...
+
+       const real_t time_to_end = total_run_time_ - time;
+       return adaptive_.RecomputeIntervalForCap(time_to_end,
+-                                               total_snapshots_written_,
+-                                               regime);
++                                               total_snapshots_written_);
+```
+
+Schedule-cap test still 23/23 PASS after the change. The new warning text appears in test output and accurately describes the only branch that can reach the warning.
+
+### R-204 [LOW] — Add driver-source grep sub-test to R-003 test
+
+**File:** `miniapps/seas/tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp:34-37` (new `#include`s) + `107-141` (new sub-test)
+
+The existing test verifies the underlying MFEM `Vector::SetSize` invariant the workaround depends on, but didn't verify that the BP5 driver itself still uses the workaround. Added a static-grep sub-test that opens `tests/verification/bp5_verification_full.cpp` and asserts the literal `padded = std::max(actual, 1)` and `state.SetSize(actual)` substrings are present.
+
+The sub-test gracefully skips (with an INFO message, not a failure) if the driver source isn't reachable from the current working directory — so the test remains runnable in arbitrary contexts. The seas `make test-bp5-petsc-ts-zero-fault-rank` invokes from `miniapps/seas/` where the relative path resolves correctly.
+
+```
+$ ./seas_test_bp5_petsc_ts_zero_fault_rank
+  ...
+  PASSED: R-204: BP5 driver must still contain the R-003 padded-shrink workaround
+    at tests/verification/bp5_verification_full.cpp;
+    a refactor that removed it would crash on Frontera on the next zero-fault-DOF rank.
+    (has_padded=1 has_shrink=1)
+=== Summary: 8 / 8 passed; 0 failed ===
+```
+
+If a future commit removes the workaround from the driver, the test fails with `has_padded=0 has_shrink=0` and a pointer back to the original R-003 fix discussion.
+
+## New Tests
+
+| Test                                                              | Purpose                                          | How to run                                       |
+|-------------------------------------------------------------------|--------------------------------------------------|--------------------------------------------------|
+| R-204 sub-test in `seas_test_bp5_petsc_ts_zero_fault_rank`         | Verify BP5 driver still applies the R-003 padded-shrink workaround | `make test-bp5-petsc-ts-zero-fault-rank` (also runs as part of `make test` post-R-201) |
+
+No standalone new binary; the sub-test is appended to the existing R-003 test.
+
+## Build / Test Verification
+
+```
+$ cd miniapps/seas
+$ make seas_bp5_full seas_tpv102_driver seas_tpv104_driver seas_tpv205_driver -j4
+  ... all four build clean.
+
+$ make seas_test_paraview_schedule_cap seas_test_kinematics_field_set \
+       seas_test_bp5_petsc_ts_zero_fault_rank seas_test_paraview_rank0_warning_gate -j4
+  ... all four test binaries link.
+
+$ ./seas_test_paraview_schedule_cap
+  === Summary: 23 / 23 passed; 0 failed ===
+
+$ ./seas_test_bp5_petsc_ts_zero_fault_rank
+  === Summary: 8 / 8 passed; 0 failed ===   (was 7/7 pre-R-204)
+
+$ ./seas_test_kinematics_field_set
+  === Summary: 31 / 31 passed; 0 failed ===
+
+$ mpirun --oversubscribe -np 2 ./seas_test_paraview_rank0_warning_gate
+  PASS [R-104]: cap-exhausted warning fires exactly once across 2 ranks, on rank 0.
+
+$ make --dry-run test | grep -c "./seas_test_paraview_schedule_cap"
+  1   (R-201 verified — was 0 pre-fix)
+
+$ make --dry-run test | grep -c "./seas_test_bp5_petsc_ts_zero_fault_rank"
+  1   (R-201 verified — was 0 pre-fix)
+```
+
+## Unresolved Findings
+
+None.
+
+## Deviations from the Review's Suggested Fixes
+
+None substantive. The R-201 fix added the comment block recommended by the reviewer to flag the deliberately-excluded MPI-only test. The R-204 fix uses a slightly different grep pattern than the reviewer sketched (the reviewer's `"padded = std::max(actual, 1)"` matches the literal in the driver — kept as-is), but adds a clearer error-message diagnostic line that prints which of the two substrings (`has_padded` / `has_shrink`) is missing.
+
+## Notes for Reviewer Re-Review
+
+- The sbatch comment in R-202 deliberately omits a specific line number for `BP5BenchmarkOutput::OutputInterval` to avoid the same "line numbers go stale" problem that the original comment had (line 1589 cited, actual was 794, then this round 794). The file path + function name + signature are enough to grep for.
+
+- The R-203 docstring update notes that the deleted `regime` parameter was REPLACED by an explanatory clause in the warning text ("coseismic / nucleation regimes always use their natural cadence and never reach this branch"). A future reader who wonders why the warning hardcodes "interseismic" has the answer in the warning itself.
+
+- The R-204 sub-test is a static-grep, not a structural / AST-based check. A pathological refactor (e.g., renaming `padded` to `_padded` or splitting the `std::max(actual, 1)` across lines) would defeat it. This is intentional — the goal is to catch innocent removals of the workaround, not to bullet-proof against every conceivable refactor. The R-105 inline comment in the driver still documents the workaround clearly enough that a maintainer who edits that block will see they're touching load-bearing code.
+
+- The `make test` umbrella now picks up 3 new test binaries when invoked from `miniapps/seas/`. From the project root, `make test` runs MFEM's top-level test target which does not recurse into the seas miniapp's `test:` — so a CI that builds from the root will still miss the new tests. Wiring up the project-root umbrella to delegate to the seas one is OUT OF SCOPE for this fix (the seas miniapp has never been part of MFEM's top-level test set); flagged here so the reviewer can decide whether to track it as a separate task.
+
+## Ready for Re-Review: YES
