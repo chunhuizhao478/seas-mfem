@@ -57,10 +57,22 @@
 #   - #14: the sbatch can be re-submitted (we automate it here in one
 #     submission, but the same logic applies to a manual A→B chain).
 #
-# Why no ParaView output?  Restart correctness is unrelated to ParaView
-# size and ParaView I/O dominates the wall-clock for these small
-# durations.  Disable to keep both phases brisk (~30 min each) so the
-# 2h reservation has slack for validation + retries.
+# ParaView output ENABLED at production cadence — restart correctness is
+# NOT PV-independent.  The V2 trailing block carries six ParaView-
+# schedule fields (paraview_snapshots, last_write_time, last_v_max,
+# current_regime, last_committed_cycle, last_volume_write_time) added
+# precisely because R-304 / R-004 / R-006 found that restart breaks the
+# adaptive schedule without them.  With ParaView disabled the driver's
+# `if (pv_out)` guard skips RestoreScheduleState / SetTotalSnapshotsWritten
+# / SetLastCommittedCycle entirely, leaving the most ParaView-coupled
+# parts of the V2 machinery unexercised on the cluster — exactly the
+# bits the unit test cannot reach because it has no ParMesh / no real
+# fault output.  Cost: ~13 fault snapshots/phase at the production
+# 1 yr interseismic cadence, ZFP tol 1e-12 (~1.4 MB/frame) ≈ 36 MB
+# total across both phases.  Negligible vs the wall-clock budget.
+#
+# Volume PV suppressed (--no-volume-pv) — matches the production 48h
+# sbatch.  Only fault-surface output is emitted.
 #
 # Why 8N x 400r (matching the production footprint) and not the dev
 # queue?  R-001 / R-302 of the restart plan documents that rank-count
@@ -146,7 +158,9 @@ echo "Footprint:     8N x 400r, 2h total (~30 min/phase + 60 min slack)"
 echo "Phase A tfinal: 4.0e8 s ≈ 12.7 yr (pure interseismic, no event)"
 echo "Phase B tfinal: 8.0e8 s ≈ 25.4 yr (continues from A; still no event)"
 echo "Checkpoint:    --checkpoint-interval 5000 (V1 + V2 trailing)"
-echo "ParaView:      DISABLED (restart correctness is PV-independent)"
+echo "ParaView:      ENABLED — fault HDF5 at ZFP 1e-12, 1 yr interseismic"
+echo "               cadence; --no-volume-pv (matches production 48h)"
+echo "               Exercises pv_out->Restore/Set* on the V2 restart path"
 echo "========================================"
 
 # =======================================================================
@@ -169,7 +183,12 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
+      --paraview-adaptive \
       --no-volume-pv \
+      --paraview-fault-zfp-tol 1e-12 \
+      --paraview-dt-co     1.0 \
+      --paraview-dt-nu     43200 \
+      --paraview-dt-inter-yr 1.0 \
       --tfinal 400000000 || PHASE_A_RC=$?
 PHASE_A_RC=${PHASE_A_RC:-0}
 echo "Phase A exit code: ${PHASE_A_RC}"
@@ -244,7 +263,12 @@ ibrun ./seas_bp5_full \
       --checkpoint-interval 5000 \
       --petsc-ts \
       --petsc-ts-options tests/verification/petsc_ts_rk45_tandem.cfg \
+      --paraview-adaptive \
       --no-volume-pv \
+      --paraview-fault-zfp-tol 1e-12 \
+      --paraview-dt-co     1.0 \
+      --paraview-dt-nu     43200 \
+      --paraview-dt-inter-yr 1.0 \
       --restart "${PHASE_A_PREFIX_PATH}" \
       --tfinal 800000000 || PHASE_B_RC=$?
 PHASE_B_RC=${PHASE_B_RC:-0}
@@ -342,6 +366,39 @@ else
    exit 7
 fi
 
+# Acceptance check #6 — paraview_snapshots is monotonic across the
+# restart seam (R-004 / R-006 driver-side wiring proof).  Phase A's
+# V2 stores the count at end-of-Phase-A; Phase B's V2 should store
+# Phase_A_count + Phase_B_count (because the V2 restart block calls
+# pv_out->SetTotalSnapshotsWritten(loaded_value), then Phase B
+# accumulates more snapshots on top).  If the driver's `if (pv_out)`
+# guard is broken or RestoreScheduleState fails to apply, Phase B's
+# stored value would equal Phase B's own count alone (< Phase A) — or
+# zero.
+echo ""
+echo "Validation #6: paraview_snapshots round-trips through V2 and is"
+echo "                monotonic across the restart seam"
+echo "----------------------------------------"
+A_PV_SNAP=$(awk '/^paraview_snapshots /{print $2}' \
+            "${PHASE_A_PREFIX_PATH}_checkpoint_r0.txt" | tail -1)
+B_PV_SNAP=$(awk '/^paraview_snapshots /{print $2}' \
+            "${PHASE_B_PREFIX_PATH}_checkpoint_r0.txt" | tail -1)
+echo "  Phase A paraview_snapshots (V2 field, rank 0): ${A_PV_SNAP}"
+echo "  Phase B paraview_snapshots (V2 field, rank 0): ${B_PV_SNAP}"
+if [ -z "${A_PV_SNAP}" ] || [ -z "${B_PV_SNAP}" ]; then
+   echo "  FAIL — could not parse paraview_snapshots from V2 blocks"
+   exit 8
+fi
+if [ "${B_PV_SNAP}" -ge "${A_PV_SNAP}" ] && [ "${A_PV_SNAP}" -gt 0 ]; then
+   echo "  PASS — Phase B (${B_PV_SNAP}) >= Phase A (${A_PV_SNAP}) > 0"
+   echo "         (proves driver pv_out->Restore/Set* fired on restart)"
+else
+   echo "  FAIL — paraview_snapshots not monotonic OR Phase A wrote 0"
+   echo "         snapshots (ParaView output may be broken, or R-004/"
+   echo "         R-006 wiring lost the saved count across the seam)"
+   exit 8
+fi
+
 # =======================================================================
 # Summary + disk usage record.
 # =======================================================================
@@ -378,6 +435,7 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo "  #3 Phase B trajectory continued past A: PASS (${PHASE_B_FINAL_TIME} > ${PHASE_A_FINAL_TIME})"
    echo "  #4 R-005 rejection monotonicity:        PASS (${PHASE_B_FINAL_REJECTS} >= ${PHASE_A_FINAL_REJECTS})"
    echo "  #5 Phase B V2 checkpoint chainable:     PASS (${B_V1}/${EXPECTED_RANKS})"
+   echo "  #6 R-004/R-006 pv_snapshot continuity:  PASS (${B_PV_SNAP} >= ${A_PV_SNAP} > 0)"
    echo ""
    echo "du -sh (Phase A): $(du -sh ${RESULT_DIR_A} | cut -f1)"
    echo "du -sh (Phase B): $(du -sh ${RESULT_DIR_B} | cut -f1)"
