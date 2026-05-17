@@ -344,6 +344,26 @@ TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_to
 #        SEAS_EXTRA_CPPFLAGS="-DSEAS_DIAG_FAULT_FLUX -DSEAS_DIAG_GHOST_EXCHANGE"
 SEAS_EXTRA_CPPFLAGS ?=
 
+# std::filesystem link probe (R-001 round 8 fix).  The BP5 + TPV104
+# driver safety checks include <filesystem> and call
+# fs::weakly_canonical / fs::path::parent_path.  On libstdc++ from
+# gcc < 9 (e.g., Frontera intel/19 + system gcc 8.3) these symbols
+# live in the separate library -lstdc++fs.  On gcc >= 9 + libstdc++,
+# on macOS conda mfem-dev (libc++), and on any newer libstdc++, the
+# symbols are in the main library and -lstdc++fs is a no-op (or the
+# library is missing entirely).  Auto-detect: compile + link a
+# minimal probe; if it succeeds without -lstdc++fs, leave SEAS_FS_LIB
+# empty; otherwise add -lstdc++fs.  Operator override:
+#   make seas_tpv104_driver SEAS_FS_LIB=-lstdc++fs
+SEAS_FS_LIB := $(shell \
+   tmp=$$(mktemp -d 2>/dev/null) && \
+   printf '%s\n' '\#include <filesystem>' \
+      'int main(){std::filesystem::weakly_canonical(std::filesystem::path("/tmp"));return 0;}' \
+      > $$tmp/probe.cpp && \
+   if $(MFEM_CXX) -std=c++17 $$tmp/probe.cpp -o $$tmp/probe 2>/dev/null; \
+   then echo ""; else echo "-lstdc++fs"; fi; \
+   rm -rf $$tmp 2>/dev/null)
+
 # Object files
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
 TEST_STATE_EVOLUTION_OBJ = $(TEST_STATE_EVOLUTION_SRC:.cpp=.o)
@@ -2879,7 +2899,7 @@ $(BP1_BDRLOAD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARAL
 
 # BP5 full multi-cycle simulation
 seas_bp5_full: $(BP5_FULL_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP5_FULL_OBJ) $(MFEM_LIBS)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BP5_FULL_OBJ) $(MFEM_LIBS) $(SEAS_FS_LIB)
 
 $(BP5_FULL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(PARALLEL_IO_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -3180,7 +3200,7 @@ seas_tpv104_driver: $(TPV104_DRIVER_OBJ) $(TPV104_SHARED_OBJS) \
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TPV104_DRIVER_OBJ) \
 	    $(TPV104_SHARED_OBJS) $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) \
-	    $(PML_LAYER_OBJ) $(MFEM_LIBS)
+	    $(PML_LAYER_OBJ) $(MFEM_LIBS) $(SEAS_FS_LIB)
 
 # ---- umbrella target ----
 # Build order: driver first (so test_tpv104_smoke has the binary available
