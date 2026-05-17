@@ -303,8 +303,13 @@ TEST_R002_DRIVER_INIT_TOTAL_Q_SRC          = tests/unit/test_R002_driver_init_to
 # data_projection_feature_plan_v2.md.
 DATA_FIELD_3D_HEADERS                       = io/data_field_3d.hpp
 DATA_FIELD_3D_SRC                           = io/data_field_3d.cpp
-FIELD_COEFFICIENT_HEADERS                   = io/field_coefficient.hpp \
+STRESS_FIELD_3D_HEADERS                     = io/stress_field_3d.hpp \
                                               io/data_field_3d.hpp
+STRESS_FIELD_3D_SRC                         = io/stress_field_3d.cpp
+FIELD_COEFFICIENT_HEADERS                   = io/field_coefficient.hpp \
+                                              io/data_field_3d.hpp \
+                                              io/stress_field_3d.hpp \
+                                              io/stress_field_coefficient.hpp
 FIELD_COEFFICIENT_SRC                       = io/field_coefficient.cpp
 HETEROGENEOUS_MATERIAL_HEADERS              = dynamic/heterogeneous_material.hpp
 HETEROGENEOUS_MATERIAL_SRC                  = dynamic/heterogeneous_material.cpp
@@ -312,6 +317,7 @@ MATERIAL_COEFFICIENTS_HEADERS               = io/material_coefficients.hpp \
                                               io/data_field_3d.hpp
 MATERIAL_COEFFICIENTS_SRC                   = io/material_coefficients.cpp
 TEST_DATA_FIELD_3D_SRC                      = tests/unit/test_data_field_3d.cpp
+TEST_STRESS_FIELD_3D_SRC                    = tests/unit/test_stress_field_3d.cpp
 TEST_FIELD_PROJECTOR_SRC                    = tests/unit/test_field_projector.cpp
 TEST_HETEROGENEOUS_MATERIAL_SRC             = tests/unit/test_heterogeneous_material.cpp
 
@@ -336,10 +342,12 @@ SEAS_EXTRA_CPPFLAGS ?=
 
 # Object files
 DATA_FIELD_3D_OBJ                = $(DATA_FIELD_3D_SRC:.cpp=.o)
+STRESS_FIELD_3D_OBJ              = $(STRESS_FIELD_3D_SRC:.cpp=.o)
 FIELD_COEFFICIENT_OBJ            = $(FIELD_COEFFICIENT_SRC:.cpp=.o)
 HETEROGENEOUS_MATERIAL_OBJ       = $(HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
 MATERIAL_COEFFICIENTS_OBJ        = $(MATERIAL_COEFFICIENTS_SRC:.cpp=.o)
 TEST_DATA_FIELD_3D_OBJ           = $(TEST_DATA_FIELD_3D_SRC:.cpp=.o)
+TEST_STRESS_FIELD_3D_OBJ         = $(TEST_STRESS_FIELD_3D_SRC:.cpp=.o)
 TEST_FIELD_PROJECTOR_OBJ         = $(TEST_FIELD_PROJECTOR_SRC:.cpp=.o)
 TEST_HETEROGENEOUS_MATERIAL_OBJ  = $(TEST_HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
 PROJECT_VELOCITY_DRIVER_SRC      = drivers/project_velocity_to_mesh.cpp
@@ -362,6 +370,27 @@ TEST_FAULT_BASIS_OBJ = $(TEST_FAULT_BASIS_SRC:.cpp=.o)
 TEST_ELASTICITY_BR2_OBJ = $(TEST_ELASTICITY_BR2_SRC:.cpp=.o)
 TEST_ELASTICITY_OPERATOR_OBJ = $(TEST_ELASTICITY_OPERATOR_SRC:.cpp=.o)
 TEST_BP5_FAULT_OPERATOR_OBJ = $(TEST_BP5_FAULT_OPERATOR_SRC:.cpp=.o)
+# Phase 6.A: FaultGeometry per-DOF coordinate / basis accessor test
+TEST_FAULT_DOF_BASIS_SRC = tests/unit/test_fault_dof_basis.cpp
+TEST_FAULT_DOF_BASIS_OBJ = $(TEST_FAULT_DOF_BASIS_SRC:.cpp=.o)
+# Phase 6 §4: ProjectFaultPreStress test
+TEST_PROJECT_FAULT_PRESTRESS_SRC = tests/unit/test_project_fault_prestress.cpp
+TEST_PROJECT_FAULT_PRESTRESS_OBJ = $(TEST_PROJECT_FAULT_PRESTRESS_SRC:.cpp=.o)
+# Phase 6 §5: FaultGeometry::ComputeSAFSParams test
+TEST_COMPUTE_SAFS_PARAMS_SRC = tests/unit/test_compute_safs_params.cpp
+TEST_COMPUTE_SAFS_PARAMS_OBJ = $(TEST_COMPUTE_SAFS_PARAMS_SRC:.cpp=.o)
+# Phase 6 §6: RateStateFaultOperator SAFS-mode wiring test
+TEST_SAFS_MODE_WIRING_SRC = tests/unit/test_safs_mode_wiring.cpp
+TEST_SAFS_MODE_WIRING_OBJ = $(TEST_SAFS_MODE_WIRING_SRC:.cpp=.o)
+# Phase 6 §7: SAFS sidecar StressConfig schema test
+TEST_SAFS_STRESS_CONFIG_SRC = tests/unit/test_safs_stress_config.cpp
+TEST_SAFS_STRESS_CONFIG_OBJ = $(TEST_SAFS_STRESS_CONFIG_SRC:.cpp=.o)
+# Phase 7: project_stress_to_mesh driver
+PROJECT_STRESS_DRIVER_SRC = drivers/project_stress_to_mesh.cpp
+PROJECT_STRESS_DRIVER_OBJ = $(PROJECT_STRESS_DRIVER_SRC:.cpp=.o)
+# Phase 7: driver round-trip test
+TEST_PROJECT_STRESS_TO_MESH_SRC = tests/unit/test_project_stress_to_mesh.cpp
+TEST_PROJECT_STRESS_TO_MESH_OBJ = $(TEST_PROJECT_STRESS_TO_MESH_SRC:.cpp=.o)
 TEST_BP5_INTEGRATION_OBJ = $(TEST_BP5_INTEGRATION_SRC:.cpp=.o)
 TEST_BP5_OUTPUT_OBJ = $(TEST_BP5_OUTPUT_SRC:.cpp=.o)
 TEST_BP5_MESH_OBJ = $(TEST_BP5_MESH_SRC:.cpp=.o)
@@ -576,6 +605,12 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_fault_basis \
                seas_test_elasticity_br2 seas_test_elasticity_operator \
                seas_test_bp5_fault_operator \
+               seas_test_fault_dof_basis \
+               seas_test_project_fault_prestress \
+               seas_test_compute_safs_params \
+               seas_test_safs_mode_wiring \
+               seas_test_safs_stress_config \
+               seas_test_project_stress_to_mesh \
                seas_test_bp5_integration \
                seas_test_bp5_output seas_test_bp5_mesh \
                seas_test_diag_vtk seas_test_mesh_regions \
@@ -746,9 +781,19 @@ seas_test_data_field_3d: $(TEST_DATA_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
 
 seas_test_field_projector: $(TEST_FIELD_PROJECTOR_OBJ) \
-                           $(DATA_FIELD_3D_OBJ) $(FIELD_COEFFICIENT_OBJ)
+                           $(DATA_FIELD_3D_OBJ) $(STRESS_FIELD_3D_OBJ) \
+                           $(FIELD_COEFFICIENT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FIELD_PROJECTOR_OBJ) \
-	    $(FIELD_COEFFICIENT_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(FIELD_COEFFICIENT_OBJ) $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
+	    $(HDF5_LIBS)
+
+# Phase 6 §1 of PLAN_onfaultstress.md: six-component Cauchy stress
+# sidecar reader test (StressField3D).
+seas_test_stress_field_3d: $(TEST_STRESS_FIELD_3D_OBJ) \
+                           $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STRESS_FIELD_3D_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
 	    $(HDF5_LIBS)
 
 seas_test_heterogeneous_material: $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
@@ -765,10 +810,26 @@ seas_test_heterogeneous_material: $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
 # schema-v1 sidecar, projects (Vp, Vs, rho, lambda, mu) onto the mesh,
 # and writes a ParaView .pvd / .vtu pair (R-003).
 seas_project_velocity_to_mesh: $(PROJECT_VELOCITY_DRIVER_OBJ) \
-                               $(DATA_FIELD_3D_OBJ) $(FIELD_COEFFICIENT_OBJ)
+                               $(DATA_FIELD_3D_OBJ) $(STRESS_FIELD_3D_OBJ) \
+                               $(FIELD_COEFFICIENT_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(PROJECT_VELOCITY_DRIVER_OBJ) $(FIELD_COEFFICIENT_OBJ) \
-	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	@# macOS dyld 4.x (macOS 15+) aborts binaries that carry duplicate
+	@# LC_RPATH entries.  MFEM_EXT_LIBS (autogenerated by `make config`)
+	@# embeds an explicit -Wl,-rpath,$(CONDA_PREFIX)/lib, and conda's
+	@# mpicxx wrapper auto-adds the same rpath in response to the
+	@# -L$(CONDA_PREFIX)/lib flag — producing two copies.  Collapse to
+	@# a single entry post-link so the binary runs.  Skip on non-Darwin
+	@# (no install_name_tool) or when conda is not active.
+	@if [ "$$(uname)" = "Darwin" ] && [ -n "$(CONDA_PREFIX)" ]; then \
+	    while [ "$$(otool -l $@ 2>/dev/null | \
+	                awk '/LC_RPATH/{f=1;next} f&&/path /{print $$2;f=0}' | \
+	                grep -cFx "$(CONDA_PREFIX)/lib")" -gt 1 ]; do \
+	        install_name_tool -delete_rpath "$(CONDA_PREFIX)/lib" $@ ; \
+	    done ; \
+	fi
 
 # Phase 1: Friction law unit tests
 seas_test_friction_law: $(TEST_FRICTION_OBJ)
@@ -841,6 +902,61 @@ seas_test_elasticity_operator: $(TEST_ELASTICITY_OPERATOR_OBJ)
 # BP5 Phase 3: BP5 fault operator tests
 seas_test_bp5_fault_operator: $(TEST_BP5_FAULT_OPERATOR_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_FAULT_OPERATOR_OBJ) $(MFEM_LIBS)
+
+# Phase 6.A: FaultGeometry per-DOF accessor tests (Phase 6.A of
+# PLAN_onfaultstress.md).
+seas_test_fault_dof_basis: $(TEST_FAULT_DOF_BASIS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_DOF_BASIS_OBJ) $(MFEM_LIBS)
+
+# Phase 6 §4: ProjectFaultPreStress test (Phase 6 §4 of PLAN_onfaultstress.md)
+seas_test_project_fault_prestress: $(TEST_PROJECT_FAULT_PRESTRESS_OBJ) \
+                                    $(STRESS_FIELD_3D_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ) \
+                                    $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PROJECT_FAULT_PRESTRESS_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+
+# Phase 6 §5: FaultGeometry::ComputeSAFSParams test
+seas_test_compute_safs_params: $(TEST_COMPUTE_SAFS_PARAMS_OBJ) \
+                                $(STRESS_FIELD_3D_OBJ) \
+                                $(DATA_FIELD_3D_OBJ) \
+                                $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_COMPUTE_SAFS_PARAMS_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+
+# Phase 6 §6: RateStateFaultOperator SAFS-mode wiring test
+seas_test_safs_mode_wiring: $(TEST_SAFS_MODE_WIRING_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SAFS_MODE_WIRING_OBJ) \
+	    $(MFEM_LIBS)
+
+# Phase 6 §7: StressConfig schema test
+seas_test_safs_stress_config: $(TEST_SAFS_STRESS_CONFIG_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SAFS_STRESS_CONFIG_OBJ) \
+	    $(MFEM_LIBS)
+
+# Phase 7: project_stress_to_mesh driver (mirrors seas_project_velocity_to_mesh)
+seas_project_stress_to_mesh: $(PROJECT_STRESS_DRIVER_OBJ) \
+                             $(DATA_FIELD_3D_OBJ) \
+                             $(STRESS_FIELD_3D_OBJ) \
+                             $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(PROJECT_STRESS_DRIVER_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+
+# Phase 7: driver round-trip test
+seas_test_project_stress_to_mesh: $(TEST_PROJECT_STRESS_TO_MESH_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PROJECT_STRESS_TO_MESH_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
 
 # BP5 Phase 4: BP5 integration tests
 seas_test_bp5_integration: $(TEST_BP5_INTEGRATION_OBJ)
@@ -1285,6 +1401,11 @@ $(DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
 
+$(STRESS_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(STRESS_FIELD_3D_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
 $(FIELD_COEFFICIENT_OBJ): %.o: $(SRC)%.cpp $(FIELD_COEFFICIENT_HEADERS) \
                                $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -1292,6 +1413,11 @@ $(FIELD_COEFFICIENT_OBJ): %.o: $(SRC)%.cpp $(FIELD_COEFFICIENT_HEADERS) \
 
 $(TEST_DATA_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(DATA_FIELD_3D_HEADERS) \
                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_STRESS_FIELD_3D_OBJ): %.o: $(SRC)%.cpp $(STRESS_FIELD_3D_HEADERS) \
+                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
 
@@ -1398,6 +1524,47 @@ $(TEST_ELASTICITY_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FIL
 $(TEST_BP5_FAULT_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FAULT_DOF_BASIS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PROJECT_FAULT_PRESTRESS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                          $(STRESS_FIELD_3D_HEADERS) \
+                                          $(FIELD_COEFFICIENT_HEADERS) \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_COMPUTE_SAFS_PARAMS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                      $(STRESS_FIELD_3D_HEADERS) \
+                                      $(FIELD_COEFFICIENT_HEADERS) \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_SAFS_MODE_WIRING_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_SAFS_STRESS_CONFIG_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(PROJECT_STRESS_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                   $(STRESS_FIELD_3D_HEADERS) \
+                                   $(FIELD_COEFFICIENT_HEADERS) \
+                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+$(TEST_PROJECT_STRESS_TO_MESH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
 
 $(TEST_BP5_INTEGRATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -1931,11 +2098,15 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-R001-driver-defaults-to-ader \
       test-R002-driver-init-total-q
 
-test-data-projection: test-data-field-3d test-field-projector test-heterogeneous-material
+test-data-projection: test-data-field-3d test-stress-field-3d test-field-projector test-heterogeneous-material
 	@echo "data-projection feature: all C++ unit tests passed."
 
 test-data-field-3d: seas_test_data_field_3d
 	./seas_test_data_field_3d
+
+# Phase 6 §1 of PLAN_onfaultstress.md (six-component stress reader).
+test-stress-field-3d: seas_test_stress_field_3d
+	./seas_test_stress_field_3d
 
 test-field-projector: seas_test_field_projector
 	./seas_test_field_projector
@@ -1996,6 +2167,31 @@ test-elasticity-operator: seas_test_elasticity_operator
 
 test-bp5-fault-operator: seas_test_bp5_fault_operator
 	./seas_test_bp5_fault_operator
+
+# Phase 6.A — FaultGeometry per-DOF coords / basis accessor test
+test-fault-dof-basis: seas_test_fault_dof_basis
+	./seas_test_fault_dof_basis
+
+# Phase 6 §4 — ProjectFaultPreStress test
+test-project-fault-prestress: seas_test_project_fault_prestress
+	./seas_test_project_fault_prestress
+
+# Phase 6 §5 — FaultGeometry::ComputeSAFSParams test
+test-compute-safs-params: seas_test_compute_safs_params
+	./seas_test_compute_safs_params
+
+# Phase 6 §6 — SAFS-mode wiring test
+test-safs-mode-wiring: seas_test_safs_mode_wiring
+	./seas_test_safs_mode_wiring
+
+# Phase 6 §7 — StressConfig schema test
+test-safs-stress-config: seas_test_safs_stress_config
+	./seas_test_safs_stress_config
+
+# Phase 7 — project_stress_to_mesh driver round-trip test
+test-project-stress-to-mesh: seas_test_project_stress_to_mesh \
+                              seas_project_stress_to_mesh
+	./seas_test_project_stress_to_mesh
 
 test-bp5-integration: seas_test_bp5_integration
 	./seas_test_bp5_integration

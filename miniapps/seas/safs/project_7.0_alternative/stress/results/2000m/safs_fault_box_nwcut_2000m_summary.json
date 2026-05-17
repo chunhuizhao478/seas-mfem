@@ -1,0 +1,83 @@
+{
+  "input_mesh": "/Users/chunhuizhao/projects/seas-mfem-safs/miniapps/seas/safs/project_7.0_alternative/code_meshing/safs_fault_box_nwcut_2000m_fault.vtu",
+  "fault_n_cells": 2685,
+  "fault_n_degenerate_basis": 0,
+  "bulk_n_cells": 145300,
+  "params": {
+    "SHmax_MPa": 113.0,
+    "Shmin_MPa": 49.0,
+    "Sv_MPa": 45.0,
+    "P_p_MPa": 16.0,
+    "SHmax_azimuth_deg": 23.0,
+    "rake_sense": "right-lateral",
+    "depth_model": "constant",
+    "SHmax_grad_MPa_per_m": 0.0,
+    "Shmin_grad_MPa_per_m": 0.0,
+    "Sv_grad_MPa_per_m": 0.0,
+    "P_p_grad_MPa_per_m": 0.0,
+    "fault_strike_azimuth_hint_deg": 314.0,
+    "fault_vtu_nan_vertex_count": 0
+  },
+  "sigma_global_at_z0_MPa": [
+    [
+      58.77093214531209,
+      23.018873610836838,
+      -0.0
+    ],
+    [
+      23.018873610836838,
+      103.22906785468793,
+      -0.0
+    ],
+    [
+      -0.0,
+      -0.0,
+      45.0
+    ]
+  ],
+  "stats": {
+    "sigma_n_total_MPa": {
+      "min": 50.40612201563454,
+      "median": 92.10823336654478,
+      "max": 112.99937765560782,
+      "nan_count": 0
+    },
+    "sigma_n_eff_MPa": {
+      "min": 34.40612201563454,
+      "median": 76.10823336654478,
+      "max": 96.99937765560782,
+      "nan_count": 0
+    },
+    "tau_strike_MPa": {
+      "min": -29.587756156141896,
+      "median": 3.7617455356534037,
+      "max": 27.477803560555913,
+      "nan_count": 0
+    },
+    "tau_dip_MPa": {
+      "min": -33.99629784336746,
+      "median": -26.488603650508175,
+      "max": 7.6287305972224795,
+      "nan_count": 0
+    },
+    "tau_magnitude_MPa": {
+      "min": 0.2051689943690084,
+      "median": 30.700869827819176,
+      "max": 33.999562248113875,
+      "nan_count": 0
+    },
+    "rake_deg": {
+      "min": -178.74071364747698,
+      "median": -75.97424034235989,
+      "max": 179.15896151243743,
+      "nan_count": 0
+    },
+    "mu_apparent": {
+      "min": 0.002115157842532271,
+      "median": 0.4100113539772241,
+      "max": 0.6404960081577146,
+      "nan_count": 0
+    }
+  },
+  "convention": "compression POSITIVE (SEAS internal); P_p positive; sigma_n_eff = sigma_n_total - P_p; tau_strike + = right-lateral (under Tandem fault basis s = up x n, d = s x n); frame (east, north, up) UTM Zone 11N; units MPa"
+}
