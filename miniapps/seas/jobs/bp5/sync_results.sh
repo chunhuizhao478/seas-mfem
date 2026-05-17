@@ -55,7 +55,20 @@ while [[ $# -gt 0 ]]; do
         --host)      REMOTE="$2"; shift 2 ;;
         --host=*)    REMOTE="${1#--host=}"; shift ;;
         -h|--help)   sed -n '2,36p' "$0"; exit 0 ;;
-        *)           JOB_FILTERS+=("$1"); shift ;;
+        *)
+            # Bug-fix: catch the common mistake of passing an SSH
+            # hostname as the first positional argument (which would
+            # otherwise be silently swallowed into JOB_FILTERS and the
+            # script would try ssh to the default `frontera` alias).
+            # If `$1` looks like a hostname (contains `@` or a dot
+            # plus no leading digit), bail with a hint.
+            if [[ "$1" == *"@"* ]] || [[ "$1" == *.*.* && ! "$1" =~ ^[0-9] ]]; then
+                echo "ERROR: '$1' looks like an SSH hostname, not a SLURM job ID." >&2
+                echo "       Use --host '$1' or set FRONTERA_HOST='$1'." >&2
+                echo "       SLURM job IDs are bare integers like 7725553." >&2
+                exit 2
+            fi
+            JOB_FILTERS+=("$1"); shift ;;
     esac
 done
 REMOTE="${REMOTE:-${FRONTERA_HOST:-frontera}}"
@@ -75,15 +88,43 @@ mkdir -p "$LOCAL_DEST" || {
     exit 1
 }
 
-echo "Querying cluster for results_phase6_* directories..."
+echo "Querying cluster for results_phase6_* directories on $REMOTE..."
+
+# Bug-fix: do the ssh call in a separate step so we can distinguish
+# "ssh failed (network/auth/DNS)" from "ssh succeeded but no dirs
+# found".  Previously both produced the same misleading "No
+# results_phase6_* dirs found" message, hiding the actual ssh error
+# (e.g., "Could not resolve hostname frontera") in the noise above.
+SSH_OUTPUT=$(ssh -o BatchMode=yes -o ConnectTimeout=10 "$REMOTE" \
+    "cd '$REMOTE_ROOT' 2>/dev/null && ls -d results_phase6_*/ 2>/dev/null | sed 's|/$||'" 2>&1)
+SSH_RC=$?
+if [[ $SSH_RC -ne 0 ]]; then
+    echo "ERROR: ssh to '$REMOTE' failed (exit $SSH_RC):" >&2
+    echo "  $SSH_OUTPUT" >&2
+    echo >&2
+    if [[ "$REMOTE" == "frontera" ]]; then
+        echo "Hint: the default host alias 'frontera' requires an entry in" >&2
+        echo "  ~/.ssh/config like:" >&2
+        echo "    Host frontera" >&2
+        echo "        HostName frontera.tacc.utexas.edu" >&2
+        echo "        User <your-tacc-username>" >&2
+        echo "  OR pass --host directly:" >&2
+        echo "    ./sync_results.sh --host <user>@frontera.tacc.utexas.edu $*" >&2
+        echo "  OR export FRONTERA_HOST=<user>@frontera.tacc.utexas.edu" >&2
+    fi
+    exit 1
+fi
+
 ALL_SUBDIRS=()
 while IFS= read -r _line; do
     [[ -n "$_line" ]] && ALL_SUBDIRS+=("$_line")
-done < <(
-    ssh "$REMOTE" "cd '$REMOTE_ROOT' 2>/dev/null && ls -d results_phase6_*/ 2>/dev/null | sed 's|/$||'"
-)
+done <<< "$SSH_OUTPUT"
+
 if [[ ${#ALL_SUBDIRS[@]} -eq 0 ]]; then
-    echo "No results_phase6_* dirs found under $REMOTE:$REMOTE_ROOT" >&2
+    echo "ssh to '$REMOTE' succeeded but found no results_phase6_* dirs under" >&2
+    echo "  $REMOTE_ROOT" >&2
+    echo "(check that the job has actually produced output; the dir is created" >&2
+    echo " by the sbatch's `mkdir -p \"\${RESULT_DIR}\"` call near the top.)" >&2
     exit 1
 fi
 

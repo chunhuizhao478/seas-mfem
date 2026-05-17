@@ -62,8 +62,12 @@
 #     ----------------------------------+--------------
 #                                       | ~5,123 total
 #
-# Same cadences scaled down to the 250 yr / 1 event production target:
-#     interseismic ~250 + nucleation ~38 + coseismic ~420  =  ~708 total
+# Same cadences scaled to the ~634 yr / ~2-3 event production target
+# (--tfinal 2e10 s; steady-state recurrence ~240 yr):
+#     interseismic ~634 + (2-3) × (nucleation ~38 + coseismic ~420)
+#                       = ~1,550 to ~2,000 total frames
+# At ~1.4 MB/frame (12 fields × ~6000 fault cells × ZFP 1e-12):
+#     fault.vtkhdf ≈ 2-3 GB.
 #
 # These are the actual numbers of fault.vtkhdf timesteps the writer
 # will produce.  No snapshot cap is applied.
@@ -74,10 +78,10 @@
 # hard-cap implementation (R-002) silently sub-samples coseismic and
 # nucleation to ~T/K = 18 days when K=5000, erasing all earthquake
 # detail.  Rather than rebuild the cap to be smarter, this sbatch just
-# trusts the cadence projection above (~5,123 frames worst case for a
-# 1775-yr / 7-event run, ~708 for the 250-yr / 1-event target).  Both
-# are well within any reasonable Frontera scratch budget at 1 MB/frame
-# fault.vtkhdf with ZFP 1e-12 — under 10 GB worst case.
+# trusts the cadence projection above (~1,500-2,000 frames for the
+# ~634 yr / 2-3 event target, ~5,123 for an 1775-yr / 7-event extended
+# run).  Both fit well within any reasonable Frontera scratch budget at
+# 1.4 MB/frame fault.vtkhdf with ZFP 1e-12 — under 10 GB worst case.
 #
 # IMPORTANT CAVEAT.  --paraview-dt-co/-nu/-inter-yr only affect ParaView
 # fault/volume snapshots.  The station probe files (*_fltst_*.txt the
@@ -96,14 +100,23 @@
 #   python3 miniapps/seas/scripts/estimate_from_sbatch.py \
 #       miniapps/seas/jobs/bp5/bp5_phase6_paraview_zfp_normal_48hr.sbatch
 #
-# R-701: --tfinal is the integer literal 7_889_400_000 (= 250 *
-# BP5Params::seconds_per_year = 250 * 31_557_600), NOT a $(python3 ...)
-# subshell.  Earlier revisions used a subshell that silently produced
-# t_final = 0 if python3 was missing on the compute node (atof of the
-# next flag), wasting the full 48 h reservation.
+# R-701: --tfinal is the integer literal 20_000_000_000 (= 2e10 s ≈
+# 633.78 yr at BP5Params::seconds_per_year = 31_557_600 s/yr), NOT a
+# $(python3 ...) subshell.  Earlier revisions used a subshell that
+# silently produced t_final = 0 if python3 was missing on the compute
+# node (atof of the next flag), wasting the full 48 h reservation.
+#
+# Why 633 yr instead of the original 250 yr?  BP5 quasi-dynamic
+# events repeat at roughly the same period after the startup
+# transient — running 250 yr captures ~1 event; running ~634 yr
+# captures 2-3 events (at the SCEC-spec ~240 yr recurrence) and
+# confirms the cycle is genuinely repetitive.  Beyond ~3 events the
+# trajectory is just more of the same and produces little new
+# diagnostic value.
 #
 # Wall-time budget:
-#   8 nodes x 400 ranks x 48h.  Production cycle target: 250 yr.
+#   8 nodes x 400 ranks x 48h.  Production cycle target: ~634 yr,
+#   ~2-3 events (steady-state recurrence ~240 yr).
 
 export LC_ALL=C
 export LANG=C
@@ -186,10 +199,9 @@ echo "Mesh:          bp5_tandem_exact.msh (1000 m, P=1 IP)"
 echo "Volume PV:     SUPPRESSED (--no-volume-pv per Plan §7.5 #1)"
 echo "Fault PV:      HDF5,           ZFP tol 1e-12 (slip-rate floor)"
 echo "Cadence:       coseismic=1 s, nucleation=43200 s (12 hr), interseismic=1 yr"
-echo "Frames:        ~708 projected at 250 yr / 1 event"
-echo "               ~5,123 projected at 1775 yr / 7 events"
-echo "               (no snapshot cap — natural cadence trusted)"
-echo "Queue:         normal (8N x 400r, 48h, tfinal 250 yr)"
+echo "Frames:        ~1,500-2,000 projected at ~634 yr / 2-3 events"
+echo "               (steady-state recurrence ~240 yr; no snapshot cap)"
+echo "Queue:         normal (8N x 400r, 48h, tfinal 2e10 s ≈ 634 yr)"
 echo "========================================"
 
 ibrun ./seas_bp5_full \
@@ -211,7 +223,7 @@ ibrun ./seas_bp5_full \
       --paraview-dt-co     1.0 \
       --paraview-dt-nu     43200 \
       --paraview-dt-inter-yr 1.0 \
-      --tfinal 7889400000 \
+      --tfinal 20000000000 \
       --verify
 
 RESULT_FILE="${RESULT_DIR}/SIZE.txt"
