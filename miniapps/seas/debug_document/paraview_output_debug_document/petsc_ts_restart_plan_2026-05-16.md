@@ -891,6 +891,20 @@ The new test is MPI-only. Per R-104 / FIX_REPORT decision, it stays OUT of `make
 - Binary (non-text) checkpoint format. The plain-text format is preserved for debuggability; binary would be a separate plan.
 - Snapshot-file (`.vtkhdf`) append-mode for restart. The VTKHDF writer currently overwrites; on restart the fault.vtkhdf for the second window would clobber the first. A workaround for now: rename the previous `fault.vtkhdf` to `fault_part1.vtkhdf` manually before submitting the restart, OR set `--output-dir` to a NEW directory on restart. Both are documented in the sbatch comment.
 
+- **TPV104 restart support — V1 ONLY (Phase 4 delivered 2026-05-17; V3 pending).**  REVOKED partial deferral: the user instructed "you must proceed with tpv104 as well" and a TPV104 V1 checkpoint port was delivered:
+  - `io/tpv104_checkpoint.hpp` — `TPV104_CHECKPOINT_V1` format (Q + dof_data dynamic fields), MPIContext* + raw-MPI overloads.
+  - `drivers/tpv104_driver.cpp` — `--restart` + `--checkpoint-interval` CLI flags, safety-check block, restart-load + write call sites.
+  - `tests/unit/test_tpv104_checkpoint.cpp` — 6 implemented sub-tests covering V1 round-trip (#1), wrong-format/dof-size/Q-size guards (#4/#5/#7 — SKIP, MFEM_VERIFY non-catchable in-process; opt-in subprocess runtime check at #8 via `SEAS_TEST_RUNTIME_QSIZE_CHECK=1`), driver+header source-grep covering R-001..R-007 + R-101/R-102/R-104 (#6), and cross-overload byte-identity round-trip (#9, gates R-007 dedup).
+  - `jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch` — dev queue, 8N×400r, two-phase verification.
+
+  **What V1 carries:** time `t`, dt, step, bulk wave field `Q` (NUM_STATE × ndof_total), 9 dynamic fault-DOF fields (psi, slip_rate, V1, V2, slip1, slip2, tau1_nuc, tau2_nuc, sigma_n_nuc).
+  **What V1 does NOT carry (deferred to V3):**
+  - The SECONDARY `pv_bulk_out` collection's schedule state (regime, last_write_time).  V2 today carries the PRIMARY `pv_out` collection only.  TPV104 with `--paraview-bulk-dt > 0` AND regime-adaptive cadence on the bulk collection will silently restart that collection from default regime — the driver emits a `WARNING: --restart resumes the PRIMARY ParaView collection's schedule state ... V3 will carry both collections.` at restart-load time.
+  - DOFData static fields (impedances, a, Dc, prestress, LSW params) — re-initialised by `InitializeFaultDOFs_TPV104`; do not need to round-trip.
+  - DOFData corrected-traction fields (tau1_corr, tau2_corr, sigma_n_corr) — recomputed on first post-restart step.
+
+  **V3 (future work, NOT in this plan):** extend the V2 trailing block to carry **per-collection** ParaView schedule state.  The V2 layout serializes one collection's 10 fields; V3 needs `n_collections` × {regime, last_write_time, last_v_max, last_committed_cycle, last_volume_write_time, snapshots, ...}.  When V3 lands, both the TPV104 driver warning and this Out-of-scope entry must be retracted.
+
 ---
 
 ## How to start implementing (for the next agent)

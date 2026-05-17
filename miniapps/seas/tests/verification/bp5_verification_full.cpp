@@ -75,6 +75,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <filesystem>   // weakly_canonical for the --restart / --output-dir safety check
 #include <sstream>
 #include <cmath>
 #include <cctype>
@@ -1268,6 +1269,115 @@ int main(int argc, char *argv[])
    double t_final = params.t_final;
    if (tfinal_override >= 0.0) { t_final = tfinal_override; }
    params.t_final = t_final;
+
+   // -------------------------------------------------------------------
+   // RESTART / OUTPUT-DIR collision safety check.
+   //
+   // When --restart PREFIX is supplied, the driver READS from
+   // <dirname(PREFIX)>/...  and WRITES new output (fault.vtkhdf,
+   // volume.vtkhdf, *_checkpoint_*.txt, *_fltst_*.txt, *_global.txt,
+   // ...) into <output-dir>/...  If those two directories are the
+   // same, the new run truncate-overwrites the previous run's
+   // outputs — the prior fault.vtkhdf is lost, the prior checkpoint
+   // is replaced with the post-restart-final version, etc.  The
+   // V2 PETSc-TS restart machinery (plan §"Phase 1") preserves
+   // SCHEDULE STATE across the seam, but the on-disk output files
+   // do NOT continue (plan §"Out of scope": "The VTKHDF writer
+   // currently overwrites").
+   //
+   // Refuse to start when those paths resolve to the same directory.
+   // Compare CANONICAL paths via std::filesystem::weakly_canonical so
+   // we catch trailing slashes, "./", relative-vs-absolute, etc.
+   // weakly_canonical (vs canonical) handles output_dir not existing
+   // yet (we may be about to mkdir it).
+   if (!restart_prefix.empty())
+   {
+      namespace fs = std::filesystem;
+      try
+      {
+         const fs::path restart_path(restart_prefix);
+         fs::path restart_dir_path = restart_path.parent_path();
+         if (restart_dir_path.empty()) { restart_dir_path = "."; }
+
+         const fs::path restart_canonical =
+            fs::weakly_canonical(restart_dir_path);
+         const fs::path output_canonical =
+            fs::weakly_canonical(fs::path(output_dir));
+
+         if (restart_canonical == output_canonical)
+         {
+            if (mpi.IsRoot())
+            {
+               std::cerr
+                  << "ERROR: --output-dir (" << output_dir
+                  << ") resolves to the SAME directory as the parent "
+                  "of --restart (" << restart_dir_path.string()
+                  << ").\n"
+                  "       Continuing would clobber the previous run's "
+                  "outputs (fault.vtkhdf, volume.vtkhdf, "
+                  "*_checkpoint_r*.txt, probe CSVs, ...).\n"
+                  "       The V2 PETSc-TS restart preserves SCHEDULE "
+                  "STATE across the seam, but the on-disk output "
+                  "files do NOT continue (the VTKHDF writer "
+                  "truncate-overwrites on construction).\n"
+                  "       Pick a DIFFERENT --output-dir for the "
+                  "restarted run.  Recommended chained-restart "
+                  "pattern (used by "
+                  "jobs/bp5/bp5_restart_test_v2_dev_2hr.sbatch — "
+                  "single base dir + segment_NNN subdirs):\n"
+                  "         --output-dir <BASE>/segment_001  (initial run)\n"
+                  "         --output-dir <BASE>/segment_002  (restart 1)\n"
+                  "         --output-dir <BASE>/segment_003  (restart 2)\n"
+                  "         ...                              (increment "
+                  "for each link in the chain)\n";
+            }
+            return 3;
+         }
+
+         // R-006 (REVIEW.md round 6): soft warning for parent/child
+         // path relationships.  Strict equality (above) catches the
+         // most common misuse, but the user can still cause partial
+         // clobber by pointing --output-dir at a parent or subdir of
+         // the restart's directory.  Print a warning so the operator
+         // can decide whether the layout is intentional.
+         {
+            const std::string r = restart_canonical.string();
+            const std::string o = output_canonical.string();
+            const bool r_is_parent_of_o =
+               (o.size() > r.size())
+               && (o.compare(0, r.size(), r) == 0)
+               && (o[r.size()] == '/');
+            const bool o_is_parent_of_r =
+               (r.size() > o.size())
+               && (r.compare(0, o.size(), o) == 0)
+               && (r[o.size()] == '/');
+            if ((r_is_parent_of_o || o_is_parent_of_r)
+                && mpi.IsRoot())
+            {
+               std::cerr
+                  << "WARNING: --output-dir and --restart have a "
+                  "parent/child directory relationship\n"
+                  "         (restart=" << r << ",\n"
+                  "          output =" << o << ").\n"
+                  "         Phase B's output may partially overlap with "
+                  "Phase A's if file names collide.  Consider distinct "
+                  "sibling dirs.\n";
+            }
+         }
+      }
+      catch (const fs::filesystem_error &e)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr
+               << "ERROR: failed to canonicalise --restart / "
+               "--output-dir paths: " << e.what() << "\n"
+               "       restart_prefix = " << restart_prefix << "\n"
+               "       output_dir     = " << output_dir << "\n";
+         }
+         return 3;
+      }
+   }
 
    std::string full_prefix = output_dir + "/" + output_prefix;
 

@@ -229,6 +229,8 @@ TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_se
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC      = tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp
 # Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip + restart-state restoration
 TEST_BP5_PETSC_TS_RESTART_SRC              = tests/unit/test_bp5_petsc_ts_restart.cpp
+# Phase 4 TPV104 port — V1 checkpoint round-trip
+TEST_TPV104_CHECKPOINT_SRC                 = tests/unit/test_tpv104_checkpoint.cpp
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
 TEST_PARAVIEW_RANK0_WARNING_GATE_SRC       = tests/unit/test_paraview_rank0_warning_gate.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
@@ -445,6 +447,7 @@ TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.c
 TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ      = $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_RESTART_OBJ              = $(TEST_BP5_PETSC_TS_RESTART_SRC:.cpp=.o)
+TEST_TPV104_CHECKPOINT_OBJ                 = $(TEST_TPV104_CHECKPOINT_SRC:.cpp=.o)
 TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
@@ -1074,6 +1077,11 @@ seas_test_bp5_petsc_ts_restart: $(TEST_BP5_PETSC_TS_RESTART_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_RESTART_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Phase 4 TPV104 port — V1 checkpoint round-trip
+seas_test_tpv104_checkpoint: $(TEST_TPV104_CHECKPOINT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV104_CHECKPOINT_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
 seas_test_paraview_rank0_warning_gate: $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ) $(MFEM_LIBS)
@@ -1662,6 +1670,10 @@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CO
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_BP5_PETSC_TS_RESTART_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_TPV104_CHECKPOINT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(TPV104_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -2275,6 +2287,10 @@ test-bp5-petsc-ts-zero-fault-rank: seas_test_bp5_petsc_ts_zero_fault_rank
 # added to the `test:` umbrella.
 test-bp5-petsc-ts-restart: seas_test_bp5_petsc_ts_restart
 	./seas_test_bp5_petsc_ts_restart
+
+# Phase 4 TPV104 V1 restart unit test (serial; not in `test:` umbrella).
+test-tpv104-checkpoint: seas_test_tpv104_checkpoint
+	./seas_test_tpv104_checkpoint
 
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate.
 # Requires np >= 2; skipped (returns 0) under serial.

@@ -2,28 +2,39 @@
 #SBATCH -J bp5_restart
 #SBATCH -o bp5_restart_test_%j.out
 #SBATCH -e bp5_restart_test_%j.err
-#SBATCH -p normal
+#SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# BP5 — V2 PETSc-TS restart end-to-end test (normal queue, 2h, 8N x 400r).
+# BP5 — V2 PETSc-TS restart end-to-end test (development queue, 2h, 8N x 400r).
 # =======================================================================
+# *** BP5 ONLY — do NOT adapt this sbatch for TPV104 ***
+#
+# The V1+V2 checkpoint format and the `--restart` + `--petsc-ts` driver
+# code path are BP5-specific (quasi-static, PETSc TS RK45).  TPV104 uses
+# an ADER-DG EXPLICIT time stepper (`dynamic/tpv104_substep_iterator.cpp`)
+# with no checkpoint/restart machinery: no `--restart` flag, no
+# `--checkpoint-interval`, no `--petsc-ts`.  Porting restart to TPV104
+# is a Phase-4 follow-up — see `petsc_ts_restart_plan_2026-05-16.md`
+# §"Out of scope" for the required new work.  R-002 (REVIEW.md round 6).
+#
 # Validates the petsc_ts_restart_plan_2026-05-16.md Phase-1 deliverable:
 # the `--restart` + `--petsc-ts` combination must now work end-to-end on
 # Frontera, replacing the old "ERROR: --restart is not supported with
 # --petsc-ts" early-abort.
 #
-# Two phases inside a SINGLE 2h reservation.
+# Two phases inside a SINGLE 2h development-queue reservation.
 #
 # Wall-time budget: the reference 48h Phase-6 sbatch covers 634 yr at
 # 8N x 400r (~13 yr/h baseline; pure interseismic is roughly 1.5-2x
-# faster than the event-included average).  2h reservation gives ~26
-# simulated years at the conservative baseline, ~50 yr if we got
+# faster than the event-included average).  2h on the dev queue gives
+# ~26 simulated years at the conservative baseline, ~50 yr if we got
 # lucky with pure interseismic.  Two phases of ~13 yr each is the
 # safe target, leaving room for the ~10 min build + ~1 min validation
-# block + retry slack.
+# block + minor queue-launch overhead.  Dev queue's faster turnaround
+# (vs `normal`) keeps launch latency small enough that 2h works.
 #
 #   Phase A — fresh run, ~12.7 yr (tfinal = 4e8 s).
 #             Pure interseismic regime (first BP5 earthquake at ~240 yr).
@@ -74,12 +85,13 @@
 # Volume PV suppressed (--no-volume-pv) — matches the production 48h
 # sbatch.  Only fault-surface output is emitted.
 #
-# Why 8N x 400r (matching the production footprint) and not the dev
-# queue?  R-001 / R-302 of the restart plan documents that rank-count
-# changes between checkpoint write and restart read are forbidden by
+# Why 8N x 400r matching the production footprint?  R-001 / R-302 of
+# the restart plan documents that rank-count changes between
+# checkpoint write and restart read are forbidden by
 # `ReadCheckpoint`'s `file_num_ranks == size` guard.  Running at the
 # production rank count ensures the production restart workflow is
-# what's being tested.
+# what's being tested.  Dev queue (vs `normal`) is fine for the
+# footprint and gives faster turnaround.
 
 export LC_ALL=C
 export LANG=C
@@ -142,19 +154,27 @@ make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 # checkpoint paths are unambiguous (--restart points at Phase A's
 # prefix; Phase B's own checkpoint lands in Phase B's dir).
 # =======================================================================
-RESULT_DIR_A="bp5/results_restart_test_A_job${SLURM_JOB_ID}"
-RESULT_DIR_B="bp5/results_restart_test_B_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX_A="bp5_restart_A_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX_B="bp5_restart_B_job${SLURM_JOB_ID}"
+# Chained-restart naming convention (matches the driver's recommended
+# pattern in the --restart / --output-dir collision safety check):
+# all segments live under a single base dir, each in its own
+# numbered `segment_NNN/` subdir.  Phase A → segment_001, Phase B →
+# segment_002.  Future chained restarts can drop into segment_003,
+# segment_004, ... without touching prior outputs.
+RESTART_TEST_BASE="bp5/results_restart_test_job${SLURM_JOB_ID}"
+RESULT_DIR_A="${RESTART_TEST_BASE}/segment_001"
+RESULT_DIR_B="${RESTART_TEST_BASE}/segment_002"
+OUTPUT_PREFIX_A="bp5_restart_seg001_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX_B="bp5_restart_seg002_job${SLURM_JOB_ID}"
 
 mkdir -p "${RESULT_DIR_A}" "${RESULT_DIR_B}"
 
 echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
-echo "Phase A dir:   ${RESULT_DIR_A}"
-echo "Phase B dir:   ${RESULT_DIR_B}"
-echo "Footprint:     8N x 400r, 2h total (~30 min/phase + 60 min slack)"
+echo "Base dir:      ${RESTART_TEST_BASE}"
+echo "Phase A dir:   ${RESULT_DIR_A}  (segment_001 — fresh)"
+echo "Phase B dir:   ${RESULT_DIR_B}  (segment_002 — restart from A)"
+echo "Footprint:     8N x 400r, dev queue, 2h total (~30 min/phase + 60 min slack)"
 echo "Phase A tfinal: 4.0e8 s ≈ 12.7 yr (pure interseismic, no event)"
 echo "Phase B tfinal: 8.0e8 s ≈ 25.4 yr (continues from A; still no event)"
 echo "Checkpoint:    --checkpoint-interval 5000 (V1 + V2 trailing)"
@@ -241,6 +261,15 @@ PHASE_A_FINAL_REJECTS=$(awk '/Step rejections:/ { print $3 }' "${PHASE_A_LOG}" |
 echo "  Phase A final time:     ${PHASE_A_FINAL_TIME} yr"
 echo "  Phase A total steps:    ${PHASE_A_FINAL_STEPS}"
 echo "  Phase A rejection count: ${PHASE_A_FINAL_REJECTS}"
+
+# Capture Phase A fault.vtkhdf size BEFORE Phase B runs.  Used by
+# Validation #8 (R-103) to confirm Phase B did not mutate Phase A's
+# fault output.  Without this capture, Validation #8 would be a no-op
+# (both stat calls after Phase B exits are guaranteed equal).
+FAULT_A_BEFORE_B_SIZE=$(stat -c %s "${RESULT_DIR_A}/fault.vtkhdf" 2>/dev/null \
+                     || stat -f %z "${RESULT_DIR_A}/fault.vtkhdf" 2>/dev/null \
+                     || echo 0)
+echo "  Phase A fault.vtkhdf size (before B): ${FAULT_A_BEFORE_B_SIZE} bytes"
 
 # =======================================================================
 # Phase B — restart from Phase A's checkpoint, run to t = 3e9 s.
@@ -389,14 +418,92 @@ if [ -z "${A_PV_SNAP}" ] || [ -z "${B_PV_SNAP}" ]; then
    echo "  FAIL — could not parse paraview_snapshots from V2 blocks"
    exit 8
 fi
-if [ "${B_PV_SNAP}" -ge "${A_PV_SNAP}" ] && [ "${A_PV_SNAP}" -gt 0 ]; then
-   echo "  PASS — Phase B (${B_PV_SNAP}) >= Phase A (${A_PV_SNAP}) > 0"
-   echo "         (proves driver pv_out->Restore/Set* fired on restart)"
+# R-004 (REVIEW.md round 6): dropped the `A_PV_SNAP > 0` gate.  The
+# strict round-trip check is now check #2 above (V2 block ran); the
+# "ParaView produced output" gate is now check #7 below (fault.vtkhdf
+# exists with > 1 KiB).  This loop just verifies monotonicity.
+if [ "${B_PV_SNAP}" -ge "${A_PV_SNAP}" ]; then
+   echo "  PASS — Phase B (${B_PV_SNAP}) >= Phase A (${A_PV_SNAP})"
+   echo "         (monotonic; proves driver pv_out->Restore/Set* fired"
+   echo "         on restart and the V2 paraview_snapshots field was"
+   echo "         loaded + propagated into Phase B's counter)"
 else
-   echo "  FAIL — paraview_snapshots not monotonic OR Phase A wrote 0"
-   echo "         snapshots (ParaView output may be broken, or R-004/"
-   echo "         R-006 wiring lost the saved count across the seam)"
+   echo "  FAIL — paraview_snapshots not monotonic across the restart"
+   echo "         seam: R-004/R-006 wiring lost the saved count"
    exit 8
+fi
+
+# Acceptance check #7 — fault.vtkhdf actually landed in BOTH phases'
+# output directories.  Catches the "ParaView silently emitted nothing"
+# failure mode that check #6's snapshot-count monotonicity cannot
+# distinguish from a legitimate "0 snapshots due to cadence/timing".
+# Without this gate, an entirely broken ParaView path passes #6 (both
+# A and B store paraview_snapshots = 0).  R-004 (REVIEW.md round 6).
+echo ""
+echo "Validation #7: fault.vtkhdf landed in both phases' output dirs"
+echo "----------------------------------------"
+FAULT_A="${RESULT_DIR_A}/fault.vtkhdf"
+FAULT_B="${RESULT_DIR_B}/fault.vtkhdf"
+# Cross-platform stat: GNU coreutils (-c %s) on Linux; BSD (-f %z) on
+# macOS / Frontera login.  Try both; fall back to 0.
+FAULT_A_SIZE=$(stat -c %s "${FAULT_A}" 2>/dev/null \
+            || stat -f %z "${FAULT_A}" 2>/dev/null \
+            || echo 0)
+FAULT_B_SIZE=$(stat -c %s "${FAULT_B}" 2>/dev/null \
+            || stat -f %z "${FAULT_B}" 2>/dev/null \
+            || echo 0)
+echo "  Phase A fault.vtkhdf size: ${FAULT_A_SIZE} bytes"
+echo "  Phase B fault.vtkhdf size: ${FAULT_B_SIZE} bytes"
+if [ "${FAULT_A_SIZE}" -gt 1024 ] && [ "${FAULT_B_SIZE}" -gt 1024 ]; then
+   echo "  PASS — both fault.vtkhdf files exist with > 1 KiB"
+else
+   echo "  FAIL — fault.vtkhdf missing or empty in at least one phase"
+   exit 9
+fi
+
+# Acceptance check #8 — Phase A's fault.vtkhdf size is UNCHANGED
+# after Phase B finishes.  Compares the size captured BEFORE Phase B
+# started (FAULT_A_BEFORE_B_SIZE, ~30 lines after Phase A's wall time
+# was recorded) against the size now.  Without the BEFORE-B capture
+# this would be a no-op (both stats after Phase B exit are guaranteed
+# equal).  R-002/R-004/R-103 (REVIEW.md rounds 6 + 8).
+echo ""
+echo "Validation #8: Phase A fault.vtkhdf untouched after Phase B finishes"
+echo "----------------------------------------"
+FAULT_A_SIZE_AFTER_B=$(stat -c %s "${FAULT_A}" 2>/dev/null \
+                    || stat -f %z "${FAULT_A}" 2>/dev/null \
+                    || echo 0)
+if [ "${FAULT_A_SIZE_AFTER_B}" = "${FAULT_A_BEFORE_B_SIZE}" ]; then
+   echo "  PASS — Phase A fault.vtkhdf size unchanged"
+   echo "         (was ${FAULT_A_BEFORE_B_SIZE} before B, still"
+   echo "          ${FAULT_A_SIZE_AFTER_B} after B)"
+else
+   echo "  FAIL — Phase A's fault.vtkhdf was modified during Phase B"
+   echo "         (was ${FAULT_A_BEFORE_B_SIZE} before B, now ${FAULT_A_SIZE_AFTER_B})"
+   echo "         The --output-dir safety check did not isolate Phase B"
+   exit 10
+fi
+
+# Acceptance check #9 — station / probe files (`*_fltst_*.txt`)
+# present in BOTH phases' output dirs and SEPARATE.  Objective #2
+# (REVIEW.md round 6 R-005) specifically called out station-file
+# preservation; absent this check, a regression in ProbeOutput's
+# path construction could silently route Phase B's station files
+# into Phase A's directory, overwriting them.
+echo ""
+echo "Validation #9: station files (*_fltst_*.txt) present + separate"
+echo "----------------------------------------"
+A_STATIONS=$(ls "${RESULT_DIR_A}"/*_fltst_*.txt 2>/dev/null | wc -l | tr -d ' ')
+B_STATIONS=$(ls "${RESULT_DIR_B}"/*_fltst_*.txt 2>/dev/null | wc -l | tr -d ' ')
+echo "  Phase A station files: ${A_STATIONS}"
+echo "  Phase B station files: ${B_STATIONS}"
+if [ "${A_STATIONS}" -gt 0 ] && [ "${B_STATIONS}" -gt 0 ]; then
+   echo "  PASS — both phases produced their own *_fltst_*.txt files"
+   echo "         (objective #2: V2 station files saved, V1 preserved)"
+else
+   echo "  FAIL — station files missing in at least one phase"
+   echo "         (Phase A=${A_STATIONS}, Phase B=${B_STATIONS})"
+   exit 11
 fi
 
 # =======================================================================
@@ -413,7 +520,7 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo "Git commit:  $(git rev-parse HEAD)"
    echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
    echo "Slurm job:   ${SLURM_JOB_ID}"
-   echo "Footprint:   8N x 400r, normal queue, 2h reservation"
+   echo "Footprint:   8N x 400r, dev queue, 2h reservation"
    echo ""
    echo "Phase A:"
    echo "  Output:      ${RESULT_DIR_A}"
@@ -435,7 +542,10 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo "  #3 Phase B trajectory continued past A: PASS (${PHASE_B_FINAL_TIME} > ${PHASE_A_FINAL_TIME})"
    echo "  #4 R-005 rejection monotonicity:        PASS (${PHASE_B_FINAL_REJECTS} >= ${PHASE_A_FINAL_REJECTS})"
    echo "  #5 Phase B V2 checkpoint chainable:     PASS (${B_V1}/${EXPECTED_RANKS})"
-   echo "  #6 R-004/R-006 pv_snapshot continuity:  PASS (${B_PV_SNAP} >= ${A_PV_SNAP} > 0)"
+   echo "  #6 pv_snapshot monotonic across seam:   PASS (${B_PV_SNAP} >= ${A_PV_SNAP})"
+   echo "  #7 fault.vtkhdf landed in both phases:  PASS (A=${FAULT_A_SIZE} B=${FAULT_B_SIZE} bytes)"
+   echo "  #8 Phase A fault.vtkhdf untouched:      PASS (size unchanged: ${FAULT_A_SIZE})"
+   echo "  #9 station files separate (obj #2):     PASS (A=${A_STATIONS} B=${B_STATIONS})"
    echo ""
    echo "du -sh (Phase A): $(du -sh ${RESULT_DIR_A} | cut -f1)"
    echo "du -sh (Phase B): $(du -sh ${RESULT_DIR_B} | cut -f1)"

@@ -38,11 +38,13 @@
 #include "../dynamic/seas_diag_rank.hpp"
 #include "../dynamic/fault_locality_partition.hpp"
 #include "../io/paraview_output.hpp"
+#include "../io/tpv104_checkpoint.hpp"   // Phase-4: V1 restart for TPV104
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>   // weakly_canonical for --restart / --output-dir safety check
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -472,6 +474,115 @@ int main(int argc, char *argv[])
    bool verify_dispatch  = HasFlag(argc, argv, "--verify-dispatch");
    bool fault_locality_part = HasFlag(argc, argv, "--partition-fault-locality");
    std::string partition_file = GetStringArg(argc, argv, "--partition-file", "");
+
+   // -----------------------------------------------------------------------
+   // Phase-4 V1 restart support (mirrors BP5 V1 schema; TPV104-specific
+   // format in `io/tpv104_checkpoint.hpp`).  ParaView schedule-state
+   // preservation (the V2 extension) is deferred — see header comment
+   // in tpv104_checkpoint.hpp.
+   //
+   //   --restart PREFIX           Resume from a previously-written
+   //                              TPV104 V1 checkpoint at PREFIX
+   //                              (driver looks for
+   //                              {PREFIX}_checkpoint_r{rank}.txt).
+   //   --checkpoint-interval N    Write a checkpoint every N steps
+   //                              (default 0 = end-of-run only).
+   // -----------------------------------------------------------------------
+   std::string restart_prefix     = GetStringArg(argc, argv, "--restart", "");
+   int         checkpoint_interval = GetIntArg(argc, argv,
+                                               "--checkpoint-interval", 0);
+
+   // -----------------------------------------------------------------------
+   // RESTART / OUTPUT-DIR collision safety check (mirror of the BP5
+   // driver's check at bp5_verification_full.cpp:1293+; same intent,
+   // same canonical-path compare).  Without this gate a user who
+   // re-uses the same --output-dir across a restart would silently
+   // lose Phase A's fault.vtkhdf / volume.vtkhdf /
+   // ParaView_bulk/volume.vtkhdf / *_station_*.dat /
+   // *_checkpoint_r*.txt files.  TPV104's TWO ParaView
+   // collections (pv_out + pv_bulk_out) make the clobber risk
+   // higher than BP5's, not lower.
+   // -----------------------------------------------------------------------
+   if (!restart_prefix.empty())
+   {
+      namespace fs = std::filesystem;
+      try
+      {
+         const fs::path restart_path(restart_prefix);
+         fs::path restart_dir_path = restart_path.parent_path();
+         if (restart_dir_path.empty()) { restart_dir_path = "."; }
+
+         const fs::path restart_canonical =
+            fs::weakly_canonical(restart_dir_path);
+         const fs::path output_canonical =
+            fs::weakly_canonical(fs::path(output_dir));
+
+         if (restart_canonical == output_canonical)
+         {
+            if (rank == 0)
+            {
+               std::cerr
+                  << "ERROR: --output-dir (" << output_dir
+                  << ") resolves to the SAME directory as the parent "
+                  "of --restart (" << restart_dir_path.string()
+                  << ").\n"
+                  "       Continuing would clobber Phase A's outputs "
+                  "(fault.vtkhdf, volume.vtkhdf, "
+                  "ParaView_bulk/volume.vtkhdf, "
+                  "*_station_*.dat, *_checkpoint_r*.txt).\n"
+                  "       Pick a DIFFERENT --output-dir for the "
+                  "restarted run.  Recommended chained-restart "
+                  "pattern (used by "
+                  "jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch — "
+                  "single base dir + segment_NNN subdirs):\n"
+                  "         --output-dir <BASE>/segment_001  (initial run)\n"
+                  "         --output-dir <BASE>/segment_002  (restart 1)\n"
+                  "         --output-dir <BASE>/segment_003  (restart 2)\n";
+            }
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 3;
+         }
+
+         // Soft warning for parent/child path overlap (mirror BP5
+         // R-006 round 6).
+         const std::string r = restart_canonical.string();
+         const std::string o = output_canonical.string();
+         const bool r_is_parent_of_o =
+            (o.size() > r.size())
+            && (o.compare(0, r.size(), r) == 0)
+            && (o[r.size()] == '/');
+         const bool o_is_parent_of_r =
+            (r.size() > o.size())
+            && (r.compare(0, o.size(), o) == 0)
+            && (r[o.size()] == '/');
+         if ((r_is_parent_of_o || o_is_parent_of_r) && rank == 0)
+         {
+            std::cerr << "WARNING: --output-dir and --restart have a "
+                         "parent/child relationship\n"
+                         "         (restart=" << r << ",\n"
+                         "          output =" << o << ").\n"
+                         "         Phase B's output may partially "
+                         "overlap with Phase A's if names collide.\n";
+         }
+      }
+      catch (const fs::filesystem_error &e)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: failed to canonicalise --restart / "
+                         "--output-dir paths: " << e.what() << "\n"
+                         "       restart_prefix = " << restart_prefix
+                      << "\n       output_dir     = " << output_dir
+                      << "\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 3;
+      }
+   }
 
    // ParaView output controls — mirror tpv102_driver.cpp + BP5 conventions:
    //   --paraview              : enable PVD/VTU output, interval matches --output-dt
@@ -2224,12 +2335,73 @@ int main(int argc, char *argv[])
    Vector Q_new(Q.Size());
    std::vector<real_t> psi_n(num_fault_total);
 
-   if (rank == 0)
+   // -----------------------------------------------------------------------
+   // Phase-4 V1 restart (mirror of BP5 V1 restart block at
+   // bp5_verification_full.cpp:2492).  Must run AFTER Q is sized
+   // (line 1696) and dof_data is initialised by
+   // InitializeFaultDOFs_TPV104 (line 1307) but BEFORE the time loop
+   // — otherwise the loaded state would be overwritten by the init
+   // sequence.  Loads `t`, `dt`, `step` into local restart_* vars +
+   // overwrites Q + dof_data dynamic fields in place.
+   // -----------------------------------------------------------------------
+   int    restart_step = 0;
+   real_t restart_dt   = 0.0;
+   if (!restart_prefix.empty())
    {
-      std::cout << "Starting ADER-O(" << ader_order << ") time loop...\n";
+      // R-002: pass Q.Size() (= NUM_STATE * ndof_total from line ~1806)
+      // as expected_Q_size so wrong-mesh restart aborts in
+      // ReadTpv104Checkpoint rather than silently resizing Q.
+      const int expected_Q_size = Q.Size();
+      const bool ok = mfem::seas::ReadTpv104Checkpoint(
+         restart_prefix, t, restart_dt, restart_step, Q,
+         expected_Q_size, dof_data,
+         rank, nprocs
+#ifdef MFEM_USE_MPI
+         , comm
+#endif
+         );
+      MFEM_VERIFY(ok,
+                  "Failed to load TPV104 checkpoint: " << restart_prefix
+                  << " (file missing or unreadable per-rank).");
+      if (rank == 0)
+      {
+         std::cout << "TPV104 restart loaded: t=" << t
+                   << " s, step=" << restart_step
+                   << ", dt(saved)=" << restart_dt
+                   << ".  Resuming time loop.\n";
+      }
+      if (paraview_bulk_dt > 0.0 && rank == 0)
+      {
+         std::cerr <<
+            "WARNING: --restart resumes the PRIMARY ParaView collection's "
+            "schedule state (last_write_time, regime).  The SECONDARY "
+            "(ParaView_bulk) collection re-initialises in its default "
+            "regime — its first post-restart frame is written immediately "
+            "at t=" << t << ", and regime-adaptive cadence (if any) "
+            "starts fresh.  This is a V2 limitation; V3 will carry "
+            "both collections.\n";
+      }
    }
 
-   for (int step = 0; step < nsteps; ++step)
+   if (rank == 0)
+   {
+      if (restart_step == 0)
+      {
+         std::cout << "Starting ADER-O(" << ader_order
+                   << ") time loop...\n";
+      }
+      else
+      {
+         std::cout << "Resuming ADER-O(" << ader_order
+                   << ") time loop from step " << restart_step
+                   << " (t=" << t << " s).\n";
+      }
+   }
+
+   // restart_step = 0 on a fresh run; the loop is otherwise unchanged.
+   // nsteps is computed from ABSOLUTE tfinal (see line 1309), so
+   // skipping the first restart_step iterations resumes correctly.
+   for (int step = restart_step; step < nsteps; ++step)
    {
       real_t dt_step = std::min(dt, tfinal - t);
       if (dt_step <= 0.0) { break; }
@@ -2461,6 +2633,48 @@ int main(int argc, char *argv[])
       {
          std::cout << "  [qnorm] ||Q||_2 = " << Q.Norml2() << "\n";
       }
+
+      // Phase-4 V1 checkpoint write at intervals.  step+1 because we
+      // want a CONSISTENT snapshot AFTER the step's wave update +
+      // fault solve (Q.Swap done above, t already advanced).  The
+      // file path is <output_dir>/<output_prefix>_checkpoint_r{rank}.txt
+      // — same naming scheme as BP5 (via CheckpointFilename helper).
+      if (checkpoint_interval > 0
+          && (step + 1) % checkpoint_interval == 0)
+      {
+         const std::string tpv104_ckpt_prefix =
+            output_dir + "/" + output_prefix;
+         mfem::seas::WriteTpv104Checkpoint(tpv104_ckpt_prefix, t, dt_step,
+                                            step + 1, Q, dof_data,
+                                            rank, nprocs
+#ifdef MFEM_USE_MPI
+                                            , comm
+#endif
+                                            );
+      }
+   }
+
+   // -----------------------------------------------------------------------
+   // End-of-run V1 checkpoint (Phase-4 restart).  Always writes when
+   // checkpoint_interval > 0 (matches BP5 final-checkpoint pattern).
+   // -----------------------------------------------------------------------
+   if (checkpoint_interval > 0)
+   {
+      const std::string tpv104_ckpt_prefix =
+         output_dir + "/" + output_prefix;
+      // Use the last dt the loop actually used.  If the loop ran
+      // zero steps (restart_step == nsteps), reuse restart_dt or
+      // dt.  Either way the final value is consistent with the
+      // saved-state semantics.
+      const real_t final_dt =
+         (restart_dt > 0.0 && nsteps == restart_step) ? restart_dt : dt;
+      mfem::seas::WriteTpv104Checkpoint(tpv104_ckpt_prefix, t, final_dt,
+                                         nsteps, Q, dof_data,
+                                         rank, nprocs
+#ifdef MFEM_USE_MPI
+                                         , comm
+#endif
+                                         );
    }
 
    // -----------------------------------------------------------------------

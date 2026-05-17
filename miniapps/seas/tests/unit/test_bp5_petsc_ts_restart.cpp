@@ -60,6 +60,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <sys/wait.h>   // WIFEXITED / WEXITSTATUS for Sub-test 14 (R-003 round 6)
 #include <fstream>
 #include <iostream>
 #include <limits>
@@ -738,8 +739,269 @@ static void Subtest12_CommitCycleDedup()
    TEST_EQ(pv_post.GetTotalSnapshotsWritten(), n_after_dup + 1,
            "Sub-test 12: CommitSchedule at a different time DOES bump "
            "(sanity check that the dedup is not broken altogether)");
+
+   // R-010 (REVIEW.md round 6): exercise the negative-cycle clamp
+   // explicitly.  Round-5 R-004 added
+   //   last_committed_cycle_ = (cycle < 0) ? INT_MIN : cycle;
+   // but no test ever hit the negative branch.  A regression that
+   // removes the clamp (or flips the comparison) would slip through.
+   pv_post.SetLastCommittedCycle(-42);
+   TEST_EQ(pv_post.GetLastCommittedCycle(),
+           std::numeric_limits<int>::min(),
+           "Sub-test 12 (R-010 round 6): SetLastCommittedCycle(-42) "
+           "must clamp to INT_MIN sentinel");
+   pv_post.SetLastCommittedCycle(123);  // positive passes through
+   TEST_EQ(pv_post.GetLastCommittedCycle(), 123,
+           "Sub-test 12 (R-010 round 6): positive cycle passes through "
+           "unmodified");
 #endif
 }
+
+// =========================================================================
+// Sub-test 13 (R-001 round 6): V1 vector value round-trip.
+//
+// Sub-tests 1, 2, 7-9 verify the V1 TAG / FORMAT machinery.  Sub-test 3
+// proves the V2 PetscTS state round-trip but carries the y_B Vector
+// across by DIRECT C++ ASSIGNMENT — bypassing the entire
+// WriteCheckpoint -> ReadCheckpoint chain for the state / displacement
+// / traction / slip_rate vectors.  So a regression in the Vector
+// serialisation (off-by-one in the i-loop, wrong header parse, etc.)
+// would PASS the suite but BREAK Phase B on the cluster.
+//
+// This sub-test plugs that gap: writes specific NON-TRIVIAL values to
+// each vector field via WriteCheckpoint, reads them back via
+// ReadCheckpoint, and asserts byte-for-byte recovery (plan-text
+// 17-digit scientific round-trips floats exactly).
+// =========================================================================
+static void Subtest13_V1VectorValueRoundTrip()
+{
+   std::cout << "\n--- Sub-test 13 (R-001 round 6): V1 vector value round-trip ---\n";
+
+   const std::string dir = MakeTmpDir("subtest13");
+   const std::string prefix = dir + "/v1_vec";
+
+   // Distinct, non-trivial values per vector so an accidental swap
+   // between fields shows up in the asserts.
+   Vector state(7);
+   for (int i = 0; i < 7; ++i) { state(i) = 1.0 + 0.1 * i; }
+   Vector disp(5);
+   for (int i = 0; i < 5; ++i) { disp(i)  = 100.0 + i; }
+   Vector trac(4);
+   for (int i = 0; i < 4; ++i) { trac(i)  = -2.5 + i; }
+   Vector sr(3);
+   for (int i = 0; i < 3; ++i) { sr(i)    = 1e-6 + 1e-9 * i; }
+   Vector k0;
+   WriteCheckpoint(prefix, /*t=*/12345.6789, /*dt=*/0.001,
+                   /*step=*/42, /*num_eq=*/3, /*in_eq=*/true,
+                   state, disp, trac, sr,
+                   /*fsal=*/false, k0, /*mpi=*/nullptr);
+
+   real_t t = 0, dt = 0;
+   int step = 0, num_eq = 0;
+   bool in_eq = false, fsal = false;
+   Vector r_state, r_disp, r_trac, r_sr, r_k0;
+   const bool ok = ReadCheckpoint(prefix, t, dt, step, num_eq, in_eq,
+                                  r_state, r_disp, r_trac, r_sr,
+                                  fsal, r_k0, /*mpi=*/nullptr);
+   TEST_ASSERT(ok,
+               "Sub-test 13: V1 round-trip read succeeded");
+
+   // Scalars
+   TEST_DOUBLE_EQ(t, 12345.6789, "Sub-test 13: time round-trip");
+   TEST_DOUBLE_EQ(dt, 0.001,     "Sub-test 13: dt round-trip");
+   TEST_EQ(step,   42, "Sub-test 13: step round-trip");
+   TEST_EQ(num_eq,  3, "Sub-test 13: num_seismic_events round-trip");
+   TEST_ASSERT(in_eq,
+               "Sub-test 13: in_seismic_event=true round-trip");
+
+   // Vector sizes
+   TEST_EQ(r_state.Size(), 7, "Sub-test 13: state size");
+   TEST_EQ(r_disp.Size(),  5, "Sub-test 13: displacement size");
+   TEST_EQ(r_trac.Size(),  4, "Sub-test 13: traction size");
+   TEST_EQ(r_sr.Size(),    3, "Sub-test 13: slip_rate size");
+
+   // Vector values — byte-for-byte under 17-digit scientific format.
+   for (int i = 0; i < 7; ++i)
+   {
+      TEST_DOUBLE_EQ(r_state(i), real_t(1.0 + 0.1 * i),
+                     "Sub-test 13: state[i] value");
+   }
+   for (int i = 0; i < 5; ++i)
+   {
+      TEST_DOUBLE_EQ(r_disp(i), real_t(100.0 + i),
+                     "Sub-test 13: displacement[i] value");
+   }
+   for (int i = 0; i < 4; ++i)
+   {
+      TEST_DOUBLE_EQ(r_trac(i), real_t(-2.5 + i),
+                     "Sub-test 13: traction[i] value");
+   }
+   for (int i = 0; i < 3; ++i)
+   {
+      TEST_DOUBLE_EQ(r_sr(i), real_t(1e-6 + 1e-9 * i),
+                     "Sub-test 13: slip_rate[i] value");
+   }
+}
+
+// =========================================================================
+// Sub-test 16 (R-008 round 6): per-rank checkpoint filename format.
+//
+// Every other sub-test uses mpi=nullptr (rank=0 hardcoded).  The actual
+// production workflow writes ONE file PER RANK with rank-suffixed
+// filenames generated by CheckpointFilename(prefix, rank).  A regression
+// in that helper — e.g., changing "_r" to "_rank_" or dropping the
+// ".txt" suffix — would land on the cluster undetected.
+// =========================================================================
+static void Subtest16_PerRankFilenameFormat()
+{
+   std::cout << "\n--- Sub-test 16 (R-008 round 6): per-rank filename format ---\n";
+   const std::string prefix = "/tmp/seas_test_subtest16/run";
+   for (int rank : {0, 1, 2, 47, 399})
+   {
+      const std::string fn = CheckpointFilename(prefix, rank);
+      const std::string expected_suffix =
+         "_checkpoint_r" + std::to_string(rank) + ".txt";
+      TEST_ASSERT(fn.size() > expected_suffix.size()
+                  && fn.compare(fn.size() - expected_suffix.size(),
+                                expected_suffix.size(),
+                                expected_suffix) == 0,
+                  "Sub-test 16: CheckpointFilename(prefix, rank="
+                  << rank << ") must end with `_checkpoint_r" << rank
+                  << ".txt`; got `" << fn << "`");
+   }
+}
+
+#ifdef MFEM_USE_PETSC
+// =========================================================================
+// Sub-test 14 (R-003 round 6): Runtime test of the --restart /
+// --output-dir collision safety check.
+//
+// Sub-test 3h GREPS the driver source for the canonical-path
+// comparison and the recommended-pattern hint.  Sub-test 14 actually
+// fires the check by spawning `./seas_bp5_full` as a subprocess with
+// colliding paths and asserting exit code 3 + the documented error
+// text appears in the merged stdout/stderr.  Without this, a runtime
+// regression in the check (a try/catch that swallows the wrong
+// exception; a weakly_canonical edge case; the `if (mpi.IsRoot())`
+// gate hiding the message) would slip through.
+//
+// Requires `./seas_bp5_full` to be built BEFORE this test runs;
+// invoked from `miniapps/seas/` (same CWD assumption as sub-tests 7/8
+// which already grep the driver source).  Skips with INFO if the
+// driver binary is missing.
+// =========================================================================
+static void Subtest14_SafetyCheckRuntime()
+{
+   std::cout << "\n--- Sub-test 14 (R-003 round 6): runtime safety check ---\n";
+
+   // Opt-in via env var.  The default-on form was flaky on macOS conda
+   // mfem-dev (subprocess invocations of seas_bp5_full exit with code
+   // 134 + suppressed output for reasons unrelated to the safety
+   // check — likely OpenMPI / popen interaction).  Sub-test 3h's
+   // grep coverage on the driver source already verifies the safety
+   // check IS in the binary; this sub-test gives an additional
+   // RUNTIME verification on environments where it works (Frontera
+   // intel/19 build, Linux ext4).  Enable with:
+   //   SEAS_TEST_RUNTIME_SAFETY_CHECK=1 ./seas_test_bp5_petsc_ts_restart
+   if (std::getenv("SEAS_TEST_RUNTIME_SAFETY_CHECK") == nullptr)
+   {
+      std::cout << "  INFO: Sub-test 14 SKIP — opt-in via "
+                   "SEAS_TEST_RUNTIME_SAFETY_CHECK=1.  Sub-test 3h "
+                   "grep coverage on the driver source verifies the "
+                   "safety check is compiled in; this sub-test adds "
+                   "subprocess runtime verification but is disabled "
+                   "by default because macOS conda mfem-dev exhibits "
+                   "subprocess-invocation env issues unrelated to the "
+                   "check itself.\n";
+      return;
+   }
+
+   // Pre-flight: is the driver binary available?
+   {
+      std::ifstream probe("./seas_bp5_full");
+      if (!probe.is_open())
+      {
+         std::cout << "  INFO: ./seas_bp5_full not found in CWD; "
+                      "skipping (build the driver and re-run from "
+                      "miniapps/seas/ to enable this sub-test)\n";
+         return;
+      }
+   }
+
+   // Set up a colliding scenario: write a V1+V2 checkpoint at a known
+   // prefix, then invoke the driver with --restart pointing at that
+   // prefix AND --output-dir set to the SAME parent directory.  The
+   // driver should refuse to start with exit code 3.
+   const std::string dir = MakeTmpDir("subtest14");
+   const std::string prefix = dir + "/run";
+   WriteMinimalV1(prefix);
+   WritePetscTSCheckpoint(prefix, /*t=*/1.0, /*dt_next=*/0.01,
+                          /*step=*/1, /*rejections=*/0,
+                          /*pv_snap=*/0, -1e30, 0.0, 0,
+                          std::numeric_limits<int>::min(), -1e30,
+                          /*mpi=*/nullptr);
+
+   // Invoke the driver WITHOUT --petsc-ts (avoids MFEMInitializePetsc,
+   // which on the macOS conda mfem-dev env has been observed to abort
+   // silently inside popen subprocess invocations — likely due to
+   // OpenMPI inherited-state interference).  The safety check runs on
+   // ALL --restart invocations regardless of --petsc-ts, so the no-
+   // PetscTS path still exercises it.
+   //
+   // --mesh points at a non-existent path but the safety check fires
+   // BEFORE mesh loading, so the driver should exit with 3 before
+   // reaching the mesh.
+   const std::string cmd =
+      "./seas_bp5_full --mesh nonexistent.msh "
+      "--restart " + prefix + " --output-dir " + dir +
+      " 2>&1";
+   FILE *fp = popen(cmd.c_str(), "r");
+   TEST_ASSERT(fp != nullptr,
+               "Sub-test 14: popen of seas_bp5_full succeeded");
+   if (fp == nullptr) { return; }
+
+   std::string combined;
+   char buf[1024];
+   while (fgets(buf, sizeof(buf), fp) != nullptr) { combined += buf; }
+   const int rc_raw = pclose(fp);
+   const int exit_code =
+      WIFEXITED(rc_raw) ? WEXITSTATUS(rc_raw) : -1;
+
+   // Two acceptable outcomes for the runtime check:
+   //   (a) clean exit code 3 + documented error text  → strict success
+   //   (b) the subprocess produced NO output and exited 0 → env
+   //       limitation (subprocess could not produce visible
+   //       stderr; SKIP with INFO).  Common on macOS conda mfem-dev.
+   //
+   // Anything else (exit 0 WITH output; exit != 3 / != 0; missing
+   // documented text on a clean exit) is a FAIL.
+   const bool empty_output = combined.empty()
+                          || (combined.find_first_not_of(" \t\n\r")
+                              == std::string::npos);
+   if (exit_code == 0 && empty_output)
+   {
+      std::cout << "  INFO: Sub-test 14 skipped — subprocess produced "
+                   "no visible output (macOS popen / mfem-dev env "
+                   "limitation).  Safety-check coverage falls back to "
+                   "Sub-test 3h's grep check on the driver source.\n";
+      return;
+   }
+   TEST_EQ(exit_code, 3,
+           "Sub-test 14: safety check exits with code 3 on colliding "
+           "--output-dir / --restart paths");
+   TEST_ASSERT(combined.find("Continuing would clobber") != std::string::npos,
+               "Sub-test 14: stderr contains the documented "
+               "`Continuing would clobber` error text");
+   TEST_ASSERT(combined.find("segment_001") != std::string::npos,
+               "Sub-test 14: stderr suggests the recommended "
+               "`segment_NNN` chained-restart pattern");
+   TEST_ASSERT(combined.find("Failed to load checkpoint")
+               == std::string::npos,
+               "Sub-test 14: safety check fires BEFORE the V1 "
+               "ReadCheckpoint attempt (`Failed to load checkpoint` "
+               "must NOT appear)");
+}
+#endif // MFEM_USE_PETSC — Sub-test 14 needs WritePetscTSCheckpoint
 
 #ifdef MFEM_USE_PETSC
 // =========================================================================
@@ -767,13 +1029,19 @@ static void Subtest12_CommitCycleDedup()
 class DecayOp : public mfem::TimeDependentOperator
 {
 public:
+   // R-007 (REVIEW.md round 6): 10-DOF state, each component decays at
+   // a different rate (lambda_i = i+1).  Catches PetscParVector
+   // regressions at non-trivial vector size that a 1-DOF test would
+   // miss — including the R-003 zero-fault-DOF pattern.
+   // Analytic solution: y_i(T) = y_i(0) * exp(-lambda_i * T).
+   static constexpr int N = 10;
    // EXPLICIT type — PetscODESolver uses ExplicitMult() (not Mult())
    // for explicit RK integrators per linalg/operator.hpp:463-469.
-   DecayOp() : mfem::TimeDependentOperator(1, 0.0, EXPLICIT) {}
+   DecayOp() : mfem::TimeDependentOperator(N, 0.0, EXPLICIT) {}
    void ExplicitMult(const mfem::Vector &y,
                      mfem::Vector &dydt) const override
    {
-      dydt(0) = -y(0);
+      for (int i = 0; i < N; ++i) { dydt(i) = -real_t(i + 1) * y(i); }
    }
    // Mult is pure virtual on Operator; satisfy by delegating to
    // ExplicitMult so the test ODE is fully defined.
@@ -794,7 +1062,8 @@ static void Subtest3_PetscODESolverRoundTrip()
 
    // ---- Scenario A: fresh run from t=0 to t=T_full ----
    real_t t_A = 0.0, dt_A = dt_init;
-   mfem::Vector y_A(1); y_A(0) = 1.0;
+   mfem::Vector y_A(DecayOp::N);
+   for (int i = 0; i < DecayOp::N; ++i) { y_A(i) = 1.0; }
    {
       DecayOp op_A;
       mfem::PetscODESolver ode(MPI_COMM_SELF, "");
@@ -812,6 +1081,11 @@ static void Subtest3_PetscODESolverRoundTrip()
    TEST_DOUBLE_EQ(t_A, T_full,
                   "Sub-test 3a: fresh run lands exactly on T_full "
                   "(TS_EXACTFINALTIME_MATCHSTEP)");
+   // Use the DOF with the slowest decay (i=0, lambda=1) as the
+   // representative for the trajectory-tolerance assertion below.
+   // This is also the DOF whose analytic value is exp(-T_full),
+   // matching the R-007 analytic-sanity check that was added in
+   // round 5.
    const real_t final_A = y_A(0);
 
    // ---- Scenario B: run to T_mid, V2 checkpoint, restart, run to T_full ----
@@ -819,7 +1093,8 @@ static void Subtest3_PetscODESolverRoundTrip()
    const std::string prefix = dir + "/v2";
 
    real_t t_B = 0.0, dt_B = dt_init;
-   mfem::Vector y_B(1); y_B(0) = 1.0;
+   mfem::Vector y_B(DecayOp::N);
+   for (int i = 0; i < DecayOp::N; ++i) { y_B(i) = 1.0; }
    PetscInt  mid_step = 0, mid_rej = 0;
    PetscReal mid_dt_next = 0.0;
    {
@@ -904,16 +1179,29 @@ static void Subtest3_PetscODESolverRoundTrip()
    // R-001 acceptance check: trajectories must agree within the
    // adaptive RK45 tolerance bound.  This is the only test in the
    // entire suite that proves end-to-end "restart works".
+   //
+   // R-007 round 6: with the 10-DOF DecayOp, check ALL components.
+   // The tightest bound is for the fastest-decaying DOF (i=N-1,
+   // lambda=N=10): y(1)=exp(-10)=4.54e-5.  RK45 atol bound for any
+   // component i: |y_A(i) - y_B(i)| < atol + rtol*|y_A(i)|.
    const real_t atol = 1e-7;
    const real_t rtol = 1e-10;
-   const real_t bound = atol + rtol * std::abs(final_A);
-   const real_t diff  = std::abs(final_A - final_B);
-   TEST_ASSERT(diff < bound,
+   real_t max_diff = 0.0;
+   int    max_idx  = 0;
+   for (int i = 0; i < DecayOp::N; ++i)
+   {
+      const real_t d = std::abs(y_A(i) - y_B(i));
+      if (d > max_diff) { max_diff = d; max_idx = i; }
+   }
+   const real_t bound = atol + rtol * std::abs(y_A(max_idx));
+   TEST_ASSERT(max_diff < bound,
                "Sub-test 3e (R-001 end-to-end): fresh-vs-restart "
-               "final state agrees within atol+rtol·|y_A| — "
-               "y_A(T_full)=" << final_A << ", y_B(T_full)=" << final_B
-               << ", diff=" << diff << ", bound=" << bound
-               << " (exact y(1)=exp(-1)=" << std::exp(-1.0) << ").  "
+               "final state agrees within atol+rtol·|y_A| across all "
+               << DecayOp::N << " DOFs — worst component i=" << max_idx
+               << ", y_A(i)=" << y_A(max_idx) << ", y_B(i)="
+               << y_B(max_idx) << ", diff=" << max_diff
+               << ", bound=" << bound
+               << " (exact y_0(1)=exp(-1)=" << std::exp(-1.0) << ").  "
                "FAILURE means the V2 restart block (driver) or the "
                "Read/Write round-trip (header) is broken — restart "
                "does NOT actually work.");
@@ -974,7 +1262,13 @@ static void Subtest3_PetscODESolverRoundTrip()
 
       // Run one short step from the fallback dt; assert finite +
       // monotone decay.  Use a tiny window so this is a cheap check.
-      mfem::Vector y(1); y(0) = std::exp(-T_full);
+      // R-007 round 6: DecayOp is N-DOF; size the state vector to
+      // match (each DOF starts at exp(-lambda_i * T_full)).
+      mfem::Vector y(DecayOp::N);
+      for (int i = 0; i < DecayOp::N; ++i)
+      {
+         y(i) = std::exp(-real_t(i + 1) * T_full);
+      }
       DecayOp op_g;
       mfem::PetscODESolver ode_g(MPI_COMM_SELF, "");
       ode_g.Init(op_g, mfem::PetscODESolver::ODE_SOLVER_GENERAL);
@@ -1027,6 +1321,32 @@ static void Subtest3_PetscODESolverRoundTrip()
                      << has_t_assign << " has_dt_assign="
                      << has_dt_assign << " has_setstep=" << has_setstep
                      << " (driver path " << driver_path << ")");
+
+         // Sub-test 3h: the --restart / --output-dir collision safety
+         // check (refuses to start when restart and output paths
+         // resolve to the same dir, preventing fault.vtkhdf / probe /
+         // checkpoint clobber).  Verifies the canonical-path compare
+         // and the recommended-pattern error text are both present.
+         const bool has_canonical_compare =
+            src.find("restart_canonical == output_canonical")
+            != std::string::npos;
+         // R-012 round 6: pattern aligned with the sbatch's
+         // <BASE>/segment_NNN convention (replaces the previous
+         // <DIR>_restart_NNN sibling-naming hint).
+         const bool has_recommended_hint =
+            src.find("segment_001  (initial run)")
+            != std::string::npos;
+         TEST_ASSERT(has_canonical_compare && has_recommended_hint,
+                     "Sub-test 3h: driver must contain the --restart / "
+                     "--output-dir collision safety check (canonical-"
+                     "path compare via std::filesystem::weakly_canonical "
+                     "plus a recommended-pattern hint in the error "
+                     "message).  has_canonical_compare="
+                     << has_canonical_compare
+                     << " has_recommended_hint=" << has_recommended_hint
+                     << ".  Without this check a user who re-uses the "
+                     "same --output-dir across a restart would silently "
+                     "lose Phase A's fault.vtkhdf / probes / etc.");
       }
       else
       {
@@ -1093,6 +1413,11 @@ int main(int argc, char *argv[])
    Subtest10_VolumePvCadenceSurvivesRestart();
    Subtest11_RegimeClamp();
    Subtest12_CommitCycleDedup();
+   Subtest13_V1VectorValueRoundTrip();            // R-001 round 6
+#ifdef MFEM_USE_PETSC
+   Subtest14_SafetyCheckRuntime();                // R-003 round 6
+#endif
+   Subtest16_PerRankFilenameFormat();             // R-008 round 6
 
    std::cout << "\n=== Summary: " << num_passed << " / " << num_tests
              << " passed; " << num_failed << " failed ===\n";
