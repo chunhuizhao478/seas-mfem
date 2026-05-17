@@ -158,6 +158,62 @@ public:
       }
    }
 
+   /// @brief Phase 6 §6 — enable SAFS-mode per-DOF normal stress and
+   /// per-DOF pre-stress sourced from a sidecar via FaultGeometry.
+   ///
+   /// When `enabled == false` (the default) every read site routes to
+   /// the original `sigma_n_bp5_` / `tau_pre_` scalars, preserving the
+   /// BP5 bit-exact contract (PLAN_onfaultstress.md §1972-1973).
+   ///
+   /// When `enabled == true`, both pointers MUST be non-null and the
+   /// referenced vectors MUST be sized as:
+   ///   - tau_pre_per_dof: 2 * num_fault_dofs (interleaved t1, t2)
+   ///   - sigma_n_per_dof: num_fault_dofs
+   /// The vectors are usually populated by
+   /// `FaultGeometry::ComputeSAFSParams` (Phase 6 §5).  The operator
+   /// stores raw pointers; the caller must keep the FaultGeometry
+   /// alive for the operator's lifetime.
+   ///
+   /// SAFS mode is only meaningful in the BP5 vector path
+   /// (SlipComponents == 2); calling on a BP2 instance is a no-op
+   /// (asserted under SlipComponents == 1).
+   void SetSAFSMode(bool enabled,
+                    const Vector* tau_pre_per_dof = nullptr,
+                    const Vector* sigma_n_per_dof = nullptr)
+   {
+      if constexpr (SlipComponents != 2)
+      {
+         MFEM_ASSERT(!enabled,
+                     "SetSAFSMode: only the BP5 vector path "
+                     "(SlipComponents == 2) supports SAFS mode");
+         return;
+      }
+      else
+      {
+         if (enabled)
+         {
+            MFEM_ASSERT(tau_pre_per_dof != nullptr,
+                        "SetSAFSMode: tau_pre_per_dof must be non-null");
+            MFEM_ASSERT(sigma_n_per_dof != nullptr,
+                        "SetSAFSMode: sigma_n_per_dof must be non-null");
+            MFEM_ASSERT(tau_pre_per_dof->Size() == 2 * num_nodes_,
+                        "SetSAFSMode: tau_pre_per_dof size "
+                        << tau_pre_per_dof->Size()
+                        << " != 2 * num_fault_dofs " << 2 * num_nodes_);
+            MFEM_ASSERT(sigma_n_per_dof->Size() == num_nodes_,
+                        "SetSAFSMode: sigma_n_per_dof size "
+                        << sigma_n_per_dof->Size()
+                        << " != num_fault_dofs " << num_nodes_);
+         }
+         safs_mode_       = enabled;
+         tau_pre_per_dof_ = tau_pre_per_dof;
+         sigma_n_per_dof_ = sigma_n_per_dof;
+      }
+   }
+
+   /// Whether SAFS mode is currently active.
+   bool IsSAFSMode() const { return safs_mode_; }
+
    // =========================================================================
    // State size information
    // =========================================================================
@@ -299,9 +355,11 @@ public:
          // ---- BP5 vector path ----
          for (int i = 0; i < num_nodes_; i++)
          {
-            // Vector stress: tau_pre + elastic traction
-            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
-                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            // Vector stress: tau_pre + elastic traction.  SAFS routes
+            // tau_pre via SetSAFSMode (Phase 6 §6); BP5 reads tau_pre_
+            // exactly as before — bit-exact.
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
             real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
                                        tau_vec[1]*tau_vec[1]);
             real_t V_abs_init = std::sqrt(
@@ -310,6 +368,9 @@ public:
 
             real_t a = a_values(i);
             real_t eta = eta_values(i);
+            // SAFS routes sigma_n via SetSAFSMode (Phase 6 §6); BP5
+            // reads sigma_n_bp5_ exactly as before — bit-exact.
+            const real_t sigma_n_init = SigmaNAt_(i);
 
             real_t psi0;
             if (scec_psi_init_)
@@ -323,14 +384,14 @@ public:
                // Tandem-style: absorb delta_tau into psi via InitialStatePsi
                // System starts in equilibrium at V = V_init (no immediate earthquake)
                psi0 = dr_friction_->InitialStatePsi(
-                  tau_abs, V_abs_init, sigma_n_bp5_, eta, a);
+                  tau_abs, V_abs_init, sigma_n_init, eta, a);
             }
             state(i * StatePerNode + PsiIndex) = psi0;
 
             // Verify by solving vector equation
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi0, sigma_n_bp5_, eta, a, V_vec);
+               tau_vec, psi0, sigma_n_init, eta, a, V_vec);
             slip_rate_(2*i) = V_vec[0];
             slip_rate_(2*i+1) = V_vec[1];
             real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
@@ -416,8 +477,8 @@ public:
             // all DOFs naturally, matching Tandem's approach.
 
             real_t psi = state(i * StatePerNode + PsiIndex);
-            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
-                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
             real_t a = a_values(i);
             real_t eta = eta_values(i);
             real_t Dc = Dc_values_(i);
@@ -427,12 +488,16 @@ public:
             //   MFEM:   normal_traction = -T·n (positive in compression, from NormalStress)
             //   Match:  sigma_n_eff = SnPre + normal_traction
             //           compression → normal_traction > 0 → sigma_n_eff > SnPre ✓
-            real_t sigma_n_eff = sigma_n_bp5_;
+            // Phase 6 §6: SnPre = SigmaNAt_(i) which routes between
+            // sigma_n_bp5_ (BP5, default) and (*sigma_n_per_dof_)(i)
+            // (SAFS).  No change to the elastic-feedback combination.
+            const real_t sigma_n_pre = SigmaNAt_(i);
+            real_t sigma_n_eff = sigma_n_pre;
             if (normal_traction)
             {
                // Tandem DieterichRuinaBase.h:87: snAbs = -sn + SnPre
                // No floor — match Tandem exactly.
-               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
+               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
             }
 
             // v58: catch first non-finite friction input or sigma_n_eff <= 0
@@ -534,8 +599,10 @@ public:
                for (int idx : stations)
                {
                   if (idx < 0 || idx >= num_nodes_) { continue; }
-                  real_t tp_d = tau_pre_(2*idx);
-                  real_t tp_s = tau_pre_(2*idx+1);
+                  // Phase 6 §6: route tau_pre via TauPreAt_ so the
+                  // monitor reflects what the operator actually consumes.
+                  real_t tp_d = TauPreAt_(2*idx);
+                  real_t tp_s = TauPreAt_(2*idx+1);
                   real_t tr_d = traction(2*idx);
                   real_t tr_s = traction(2*idx+1);
                   real_t tot_d = tp_d + tr_d;
@@ -735,7 +802,14 @@ public:
       }
    }
 
-   /// Get normal stress.
+   /// Get normal stress (scalar).
+   ///
+   /// In SAFS mode the per-DOF accessor `sigma_n_per_dof_` is
+   /// heterogeneous; this scalar getter still returns the legacy
+   /// `sigma_n_bp5_` for backward compatibility (e.g. diagnostic
+   /// printouts that just want a "typical" value).  SAFS-aware
+   /// callers should read the per-DOF view directly via
+   /// `FaultGeometry::sigma_n_per_dof()` instead.
    real_t GetSigmaN() const
    {
       if constexpr (SlipComponents == 1)
@@ -822,16 +896,18 @@ public:
          else
          {
             real_t psi = state(i * StatePerNode + PsiIndex);
-            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
-                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
             real_t a = a_values(i);
             real_t eta = eta_values(i);
 
-            // Match ComputeRHS() sigma_n_eff logic for elastic normal stress
-            real_t sigma_n_eff = sigma_n_bp5_;
+            // Match ComputeRHS() sigma_n_eff logic for elastic normal stress.
+            // Phase 6 §6: route SnPre via SigmaNAt_(i).
+            const real_t sigma_n_pre = SigmaNAt_(i);
+            real_t sigma_n_eff = sigma_n_pre;
             if (normal_traction)
             {
-               sigma_n_eff = sigma_n_bp5_ + (*normal_traction)(i);
+               sigma_n_eff = sigma_n_pre + (*normal_traction)(i);
             }
 
             real_t V_vec[2];
@@ -895,19 +971,21 @@ public:
          else
          {
             real_t psi = state(i * StatePerNode + PsiIndex);
-            real_t tau_vec[2] = {tau_pre_(2*i) + traction(2*i),
-                                 tau_pre_(2*i+1) + traction(2*i+1)};
+            real_t tau_vec[2] = {TauPreAt_(2*i) + traction(2*i),
+                                 TauPreAt_(2*i+1) + traction(2*i+1)};
             real_t tau_abs = std::sqrt(tau_vec[0]*tau_vec[0] +
                                        tau_vec[1]*tau_vec[1]);
             real_t a = a_values(i);
             real_t eta = eta_values(i);
+            // Phase 6 §6: route sigma_n via SigmaNAt_(i).
+            const real_t sigma_n_pre = SigmaNAt_(i);
 
             real_t V_vec[2];
             dr_friction_->SolveSlipRateVectorPsi(
-               tau_vec, psi, sigma_n_bp5_, eta, a, V_vec);
+               tau_vec, psi, sigma_n_pre, eta, a, V_vec);
             real_t V_abs = std::sqrt(V_vec[0]*V_vec[0] + V_vec[1]*V_vec[1]);
             real_t f = dr_friction_->FrictionCoefficientPsi(V_abs, psi, a);
-            real_t tau_computed = sigma_n_bp5_ * f + eta * V_abs;
+            real_t tau_computed = sigma_n_pre * f + eta * V_abs;
 
             real_t rel_error = std::abs(tau_abs - tau_computed) /
                                std::max(tau_abs, 1.0);
@@ -1042,6 +1120,51 @@ private:
    Vector Dc_values_;       ///< Per-DOF critical slip distance [NumNodes()]
    Vector tau_pre_;         ///< Per-DOF pre-stress [2 * NumNodes()] (BP5 only)
    Vector V_init_values_;   ///< Per-DOF initial velocity [2 * NumNodes()] (BP5 only)
+
+   // Phase 6 §6 — SAFS-mode wiring.  Strict opt-in:
+   //   safs_mode_ == false (default) → reads route to sigma_n_bp5_ /
+   //     tau_pre_ as before (BP5 bit-exact contract).
+   //   safs_mode_ == true            → reads route to *sigma_n_per_dof_ /
+   //     *tau_pre_per_dof_ supplied by the caller (FaultGeometry).
+   //
+   // The pointer members are non-owning views into FaultGeometry's
+   // per-DOF storage; they MUST remain valid for the lifetime of the
+   // operator.  Setter: SetSAFSMode(...).
+   bool          safs_mode_ = false;
+   const Vector* tau_pre_per_dof_  = nullptr;  ///< [2 * num_nodes_]
+   const Vector* sigma_n_per_dof_  = nullptr;  ///< [num_nodes_]
+
+   /// SAFS-mode helpers: return the appropriate per-DOF or scalar value
+   /// based on `safs_mode_`.  With safs_mode_ = false (BP5 path) these
+   /// reduce to the original literal reads and the BP5 bit-exact
+   /// invariant is preserved.
+   inline real_t SigmaNAt_(int i) const
+   {
+      // R-003: debug-only contract enforcement.  MFEM_ASSERT compiles
+      // out in release builds, so the BP5 hot path stays branchless
+      // there.  In debug builds a stale FaultGeometry pointer (or a
+      // resized backing vector) trips a clear message instead of
+      // silently dereferencing dangling memory.
+      MFEM_ASSERT(!safs_mode_ || sigma_n_per_dof_ != nullptr,
+                  "SigmaNAt_: safs_mode_ active but sigma_n_per_dof_ "
+                  "is null; SetSAFSMode contract violated.");
+      MFEM_ASSERT(!safs_mode_ ||
+                  sigma_n_per_dof_->Size() == num_nodes_,
+                  "SigmaNAt_: sigma_n_per_dof_ size mismatch "
+                  "(num_nodes_ = " << num_nodes_ << ")");
+      return safs_mode_ ? (*sigma_n_per_dof_)(i) : sigma_n_bp5_;
+   }
+   inline real_t TauPreAt_(int idx) const
+   {
+      MFEM_ASSERT(!safs_mode_ || tau_pre_per_dof_ != nullptr,
+                  "TauPreAt_: safs_mode_ active but tau_pre_per_dof_ "
+                  "is null; SetSAFSMode contract violated.");
+      MFEM_ASSERT(!safs_mode_ ||
+                  tau_pre_per_dof_->Size() == 2 * num_nodes_,
+                  "TauPreAt_: tau_pre_per_dof_ size mismatch "
+                  "(2 * num_nodes_ = " << 2 * num_nodes_ << ")");
+      return safs_mode_ ? (*tau_pre_per_dof_)(idx) : tau_pre_(idx);
+   }
 
    // Traction monitoring
    int monitor_interval_ = 0;        ///< Log every N ComputeRHS calls (0=off)

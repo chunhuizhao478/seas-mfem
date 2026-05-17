@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 
 #include "data_field_3d.hpp"
+#include "stress_field_3d.hpp"
 
 #include <atomic>
 #include <limits>
@@ -26,6 +27,11 @@ namespace mfem
 {
 namespace seas
 {
+
+// Forward declarations — keep field_coefficient.hpp's dep graph free of
+// fault/ to avoid an include cycle (fault_geometry.hpp can include this
+// header transitively via the SAFS-mode plumbing).
+template <typename MeshType> class FaultGeometry;
 
 /// Scalar `mfem::Coefficient` backed by a `DataField3D`.
 ///
@@ -149,10 +155,116 @@ public:
       real_t mu_max_pa     = 1.0e11,
       InterpMode interp    = InterpMode::Trilinear);
 
+   /// Six-component bulk Cauchy stress projection (Phase 6 §3 of
+   /// PLAN_onfaultstress.md).
+   ///
+   /// Loads the six schema-v1 sigma_* fields from `sidecar_path`
+   /// via a single `StressField3D` ctor (one HDF5 open per
+   /// component), then projects each onto `target_fes` independently
+   /// via the existing per-field `Project` path.  Six independent
+   /// `Project` calls means the static `CallCount` increments by
+   /// six per `ProjectStress` invocation.
+   ///
+   /// Sign convention: pure pass-through, compression POSITIVE
+   /// (SEAS internal).  The bulk-path source-site flip lives in
+   /// Phase 3's `bulk_stress_tensor_field`; this projector does
+   /// no sign manipulation (R-501 / R-502).
+   struct StressFields
+   {
+      // Components in schema-v1 canonical order: xx, yy, zz, xy, yz, xz.
+      std::shared_ptr<mfem::ParGridFunction> sigma_xx;
+      std::shared_ptr<mfem::ParGridFunction> sigma_yy;
+      std::shared_ptr<mfem::ParGridFunction> sigma_zz;
+      std::shared_ptr<mfem::ParGridFunction> sigma_xy;
+      std::shared_ptr<mfem::ParGridFunction> sigma_yz;
+      std::shared_ptr<mfem::ParGridFunction> sigma_xz;
+      real_t min_sigma_xx, max_sigma_xx;
+      real_t min_sigma_yy, max_sigma_yy;
+      real_t min_sigma_zz, max_sigma_zz;
+      real_t min_sigma_xy, max_sigma_xy;
+      real_t min_sigma_yz, max_sigma_yz;
+      real_t min_sigma_xz, max_sigma_xz;
+   };
+
+   /// Project all six bulk-stress components onto `target_fes`.
+   /// See `StressFields` docstring for the sign-convention contract.
+   ///
+   /// `interp` selects the in-sidecar interpolation scheme used by
+   /// each component reader, propagated to all six in lock-step via
+   /// `StressField3D::SetInterpMode`.
+   ///
+   /// `scale` and `offset` are forwarded uniformly to all six inner
+   /// `Project(...)` calls (mirrors the sibling `Project` /
+   /// `ProjectVelocity` API).  Default values (1.0, 0.0) preserve
+   /// the raw pass-through behaviour; non-default values are
+   /// applied uniformly to every component (R-904).
+   static StressFields ProjectStress(
+      const std::string&           sidecar_path,
+      mfem::ParFiniteElementSpace& target_fes,
+      InterpMode interp            = InterpMode::Trilinear,
+      real_t scale                 = 1.0,
+      real_t offset                = 0.0);
+
+   /// Rotate a sidecar bulk stress tensor onto the per-DOF fault basis
+   /// to produce SEAS-internal pre-stress slots (Phase 6 §4 of
+   /// PLAN_onfaultstress.md).
+   ///
+   /// Inputs from the sidecar are already in SEAS internal sign
+   /// convention (compression POSITIVE, Pa).  No sign flip is performed
+   /// here; the rotation is purely linear algebra:
+   ///
+   ///   sigma_n_per_dof(i)     = n_i^T σ(x_i) n_i
+   ///                            − (P_p_pa + P_p_grad_pa_per_m
+   ///                                          * max(0, -z_i))
+   ///   tau_pre_per_dof(2*i)   = t1_i^T σ(x_i) n_i   (dip,    BP5 t1)
+   ///   tau_pre_per_dof(2*i+1) = t2_i^T σ(x_i) n_i   (strike, BP5 t2)
+   ///
+   /// where (t1, t2, n) is the canonical SEAS fault-local frame
+   /// (CLAUDE.md "fault-local tangent frame" rule: t1 = dip, t2 = strike).
+   ///
+   /// The single source-site sign flip (R-501/R-502) lives in Phase 3
+   /// `bulk_stress_tensor_field`; Phase 5 sidecar writer and Phase 6
+   /// `StressField3D` reader are pure pass-throughs.  Per the plan
+   /// docstring (§1796-1839) this projector does not flip again.
+   ///
+   /// Pore pressure is subtracted from the normal stress: this
+   /// implements the standard effective normal stress σ_n − P_p with
+   /// the depth-dependent gradient `P_p_grad_pa_per_m * max(0, -z_i)`
+   /// (clamped at the free surface, z_i > 0).
+   ///
+   /// Negative or below-threshold effective normal stresses are NOT
+   /// clamped by default (`min_sigma_n_pa = 0.0`).  Callers can opt
+   /// into a Pa-valued floor that warns once per rank and clamps
+   /// sigma_n_per_dof(i) ← max(sigma_n_per_dof(i), min_sigma_n_pa)
+   /// only when the value is below the floor (plan §1944-1951).
+   ///
+   /// @param field            Loaded six-component sidecar (Phase 6 §1).
+   /// @param fault_geom       Source of the per-DOF coords and basis
+   ///                         (Phase 6.A, populated only on the
+   ///                         3-D / BP5 ctor path).
+   /// @param[out] sigma_n_per_dof   Sized to NumFaultDOFs.
+   /// @param[out] tau_pre_per_dof   Sized to 2 * NumFaultDOFs.
+   /// @param P_p_pa                  Constant pore pressure term [Pa].
+   /// @param P_p_grad_pa_per_m       Depth gradient of pore pressure
+   ///                                 [Pa / m]; effective P_p at z is
+   ///                                 P_p_pa + grad * max(0, -z).
+   /// @param min_sigma_n_pa          Optional floor [Pa]; default 0 → no clamp.
+   template <typename MeshType>
+   static void ProjectFaultPreStress(
+      const StressField3D&        field,
+      const FaultGeometry<MeshType>& fault_geom,
+      mfem::Vector&               sigma_n_per_dof,
+      mfem::Vector&               tau_pre_per_dof,
+      real_t                      P_p_pa = 0.0,
+      real_t                      P_p_grad_pa_per_m = 0.0,
+      real_t                      min_sigma_n_pa = 0.0);
+
    /// Test instrumentation: returns the number of times Project /
-   /// ProjectSerial / ProjectVelocity has been called since the
-   /// process started OR since the last ResetCallCount().  Used by
-   /// the one-time-load contract test (T-4-7).
+   /// ProjectSerial / ProjectVelocity / ProjectStress has been
+   /// called since the process started OR since the last
+   /// ResetCallCount().  Used by the one-time-load contract test
+   /// (T-4-7); each ProjectStress call advances CallCount by 6
+   /// (one per component).
    static int  CallCount()      { return call_count_.load(); }
    static void ResetCallCount() { call_count_.store(0); }
 

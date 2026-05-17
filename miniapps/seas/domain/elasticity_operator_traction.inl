@@ -141,6 +141,171 @@ void ElasticityDomainOperator<MeshType>::GetFaultCoords2D(
    coords_x3 = fault_x3_;
 }
 
+namespace
+{
+
+// R-104: per-face helpers shared between the interior- and shared-face
+// loops of GetFaultDOFCoords3D / GetFaultDOFBasis.  Keeping the per-DOF
+// computation in one place avoids the maintenance hazard of changing
+// it in one loop and forgetting the other.
+
+inline void WriteFaceDOFCoords3D_(
+   mfem::FaceElementTransformations *FTr,
+   int face_dof_offset, int nbf,
+   const mfem::IntegrationRule &nir,
+   mfem::Vector &dof_coords_3d)
+{
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      const mfem::IntegrationPoint &nip = nir.IntPoint(kk);
+      FTr->SetAllIntPoints(&nip);
+      mfem::Vector coords(3);
+      FTr->Elem1->Transform(FTr->GetElement1IntPoint(), coords);
+      const int dof_idx = face_dof_offset + kk;
+      dof_coords_3d(3 * dof_idx + 0) = coords(0);
+      dof_coords_3d(3 * dof_idx + 1) = coords(1);
+      dof_coords_3d(3 * dof_idx + 2) = coords(2);
+   }
+}
+
+inline void WriteFaceDOFBasis_(
+   mfem::FaceElementTransformations *FTr,
+   int face_dof_offset, int nbf, int dim,
+   const mfem::IntegrationRule &nir,
+   const mfem::Vector &ref_normal,
+   const mfem::Vector &up,
+   const char *face_kind,    // "face" or "shared face" — for error msg
+   int face_id_for_error,
+   mfem::DenseMatrix &dof_basis)
+{
+   for (int kk = 0; kk < nbf; kk++)
+   {
+      const mfem::IntegrationPoint &nip = nir.IntPoint(kk);
+      FTr->Face->SetIntPoint(&nip);
+
+      mfem::Vector n_raw(dim);
+      mfem::CalcOrtho(FTr->Face->Jacobian(), n_raw);
+
+      mfem::real_t normal[3], t1[3], t2[3];
+      bool sign_flipped;
+      mfem::real_t nl;
+      mfem::seas::FaultBasis::ComputeOrientedFrame(
+         n_raw, dim, ref_normal, up,
+         normal, t1, t2, sign_flipped, nl);
+      MFEM_VERIFY(nl > 0.0,
+                  "GetFaultDOFBasis: zero-length " << face_kind
+                  << " normal at " << face_kind << " "
+                  << face_id_for_error << " DOF " << kk);
+
+      const int dof_idx = face_dof_offset + kk;
+      for (int d = 0; d < 3; d++)
+      {
+         dof_basis(d,     dof_idx) = normal[d];
+         dof_basis(3 + d, dof_idx) = t1[d];
+         dof_basis(6 + d, dof_idx) = t2[d];
+      }
+   }
+}
+
+} // anonymous namespace
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GetFaultDOFCoords3D(
+   Vector &dof_coords_3d) const
+{
+   // Phase 6.A — per-DOF (x_i, y_i, z_i) global UTM coordinates for the
+   // SAFS sidecar lookup. Mirrors GetFaultCoords2D's iteration pattern;
+   // writes all three components without the GetFaultCoords2D depth flip.
+   dof_coords_3d.SetSize(3 * num_fault_dofs_);
+   dof_coords_3d = 0.0;
+
+   if (num_fault_dofs_ == 0) { return; }
+
+   const IntegrationRule &nir = face_quad_->GetNodalRule();
+   const int nbf = nbf_per_face_;
+
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      int face = fault_interior_faces_[i];
+      FaceElementTransformations *FTr =
+         mesh_.GetInteriorFaceTransformations(face);
+      if (FTr == nullptr) { continue; }
+      WriteFaceDOFCoords3D_(FTr, i * nbf, nbf, nir, dof_coords_3d);
+   }
+
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         int sf = fault_shared_faces_[i];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+         if (FTr == nullptr) { continue; }
+         const int face_idx = fault_interior_faces_.Size() + i;
+         WriteFaceDOFCoords3D_(FTr, face_idx * nbf, nbf, nir,
+                               dof_coords_3d);
+      }
+#endif
+   }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GetFaultDOFBasis(
+   DenseMatrix &dof_basis) const
+{
+   // Phase 6.A — per-DOF (n, t1, t2) basis via FaultBasis::ComputeOrientedFrame
+   // evaluated at the same nodal reference points used for the per-DOF
+   // coordinate accessors. Sign convention identical to fault_basis_
+   // (sign flip baked in, Tandem convention).
+   dof_basis.SetSize(9, num_fault_dofs_);
+   dof_basis = 0.0;
+
+   if (num_fault_dofs_ == 0) { return; }
+
+   const int dim = mesh_.Dimension();
+   MFEM_VERIFY(dim == 3,
+               "GetFaultDOFBasis: 3-D mesh required for per-DOF "
+               "(n, t1, t2) accessor (got dim = " << dim << ")");
+
+   const IntegrationRule &nir = face_quad_->GetNodalRule();
+   const int nbf = nbf_per_face_;
+
+   // Use the same up vector as the fault_basis_ initialiser
+   // (elasticity_operator_setup.inl:735-737) so per-DOF and per-face
+   // bases agree at constant-Jacobian faces.
+   Vector up(3);
+   up = 0.0;
+   up(2) = 1.0;
+
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      int face = fault_interior_faces_[i];
+      FaceElementTransformations *FTr =
+         mesh_.GetInteriorFaceTransformations(face);
+      if (FTr == nullptr) { continue; }
+      WriteFaceDOFBasis_(FTr, i * nbf, nbf, dim, nir, ref_normal_, up,
+                         "face", face, dof_basis);
+   }
+
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         int sf = fault_shared_faces_[i];
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(sf);
+         if (FTr == nullptr) { continue; }
+         const int face_idx = fault_interior_faces_.Size() + i;
+         WriteFaceDOFBasis_(FTr, face_idx * nbf, nbf, dim, nir,
+                            ref_normal_, up,
+                            "shared face", sf, dof_basis);
+      }
+#endif
+   }
+}
+
 template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::RestrictToOwnedFault(
    const Vector &local_data, Vector &owned_data, int comps_per_dof) const

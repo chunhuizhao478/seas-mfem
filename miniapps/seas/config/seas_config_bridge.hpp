@@ -17,6 +17,10 @@
 #include "../domain/boundary_config.hpp"
 #include "../domain/domain_config.hpp"
 #include "../domain/elasticity_operator.hpp"
+#include "../fault/fault_geometry.hpp"
+#include "../fault/fault_geometry_safs.inl"
+#include "../fault/rate_state_fault.hpp"
+#include "../io/stress_field_3d.hpp"
 
 namespace mfem
 {
@@ -100,6 +104,54 @@ inline DomainConfig BuildDomainConfig(const SolverConfig &solver)
    dc.blr_tol = solver.blr_tol;
    dc.check_residual = solver.check_residual;
    return dc;
+}
+
+/// Phase 6 §7 — Apply the SAFS sidecar configuration to a populated
+/// FaultGeometry + RateStateFaultOperator pair.
+///
+/// Strict no-op when `cfg.use_sidecar == false` (the default): the
+/// operator stays in BP5 mode, FaultGeometry's per-DOF stress slots
+/// stay empty.
+///
+/// When `cfg.use_sidecar == true`:
+///   1. Open the schema-v1 sidecar via `StressField3D` (asserts
+///      schema invariants on all six components).
+///   2. Call `geom.ComputeSAFSParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
+///   3. Toggle the operator into SAFS mode via SetSAFSMode, pointing
+///      at FaultGeometry's per-DOF vectors.
+///
+/// @tparam MeshType  `mfem::Mesh` (serial) or `mfem::ParMesh`.
+/// @tparam SlipComponents  1 (BP2) or 2 (BP5); SAFS is only meaningful
+///         for SlipComponents == 2, but the function is callable on
+///         the BP2 instantiation as a no-op (it asserts use_sidecar
+///         is false on the BP2 path to catch misconfiguration early).
+template <typename MeshType, int SlipComponents>
+void ApplySAFSMode(const StressConfig &cfg,
+                   FaultGeometry<MeshType> &geom,
+                   RateStateFaultOperator<MeshType, SlipComponents> &op)
+{
+   if (!cfg.use_sidecar) { return; }
+
+   if constexpr (SlipComponents != 2)
+   {
+      MFEM_ABORT("ApplySAFSMode: stress.use_sidecar = true requires "
+                 "the BP5 vector path (SlipComponents == 2). Got "
+                 << SlipComponents);
+   }
+   else
+   {
+      MFEM_VERIFY(!cfg.sidecar_path.empty(),
+                  "ApplySAFSMode: stress.sidecar_path must be set");
+
+      StressField3D field(cfg.sidecar_path);
+      geom.ComputeSAFSParams(field,
+                             cfg.P_p_pa,
+                             cfg.P_p_grad_pa_per_m,
+                             cfg.min_sigma_n_pa);
+      op.SetSAFSMode(true,
+                     &geom.GetTauPre(),
+                     &geom.sigma_n_per_dof());
+   }
 }
 
 } // namespace seas

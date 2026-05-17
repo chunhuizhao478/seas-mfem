@@ -252,6 +252,10 @@ public:
 
    void GetFaultCoords2D(Vector &coords_x2, Vector &coords_x3) const override;
 
+   void GetFaultDOFCoords3D(Vector &dof_coords_3d) const override;
+
+   void GetFaultDOFBasis(DenseMatrix &dof_basis) const override;
+
    void RestrictToOwnedFault(const Vector &local_data,
                              Vector &owned_data,
                              int comps_per_dof = 1) const override;

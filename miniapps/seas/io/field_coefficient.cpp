@@ -3,6 +3,7 @@
 // field_coefficient.cpp — implementation of FieldProjector.
 
 #include "field_coefficient.hpp"
+#include "../fault/fault_geometry.hpp"
 
 #include "mfem.hpp"
 
@@ -357,6 +358,176 @@ FieldProjector::VelocityFields FieldProjector::ProjectVelocity(
    vf.min_mu     = mu_lo; vf.max_mu     = mu_hi;
    return vf;
 }
+
+
+// ----------------------------------------------------------------------
+// ProjectStress (Phase 6 §3)
+// ----------------------------------------------------------------------
+
+FieldProjector::StressFields FieldProjector::ProjectStress(
+   const std::string&             sidecar_path,
+   mfem::ParFiniteElementSpace&   target_fes,
+   InterpMode interp,
+   real_t scale, real_t offset)
+{
+   // Single StressField3D ctor opens the sidecar once and constructs
+   // all six DataField3D component readers.  The InterpMode is then
+   // propagated to all six in lock-step.
+   StressField3D field(sidecar_path);
+   field.SetInterpMode(interp);
+
+   // Six independent per-component projections.  Each increments
+   // call_count_ (the six-per-ProjectStress contract is documented
+   // in the header).  `scale` / `offset` apply uniformly to every
+   // component (R-904).
+   Result rxx = Project(field.Field(0), target_fes, scale, offset);
+   Result ryy = Project(field.Field(1), target_fes, scale, offset);
+   Result rzz = Project(field.Field(2), target_fes, scale, offset);
+   Result rxy = Project(field.Field(3), target_fes, scale, offset);
+   Result ryz = Project(field.Field(4), target_fes, scale, offset);
+   Result rxz = Project(field.Field(5), target_fes, scale, offset);
+
+   auto xx_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(rxx.gf);
+   auto yy_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(ryy.gf);
+   auto zz_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(rzz.gf);
+   auto xy_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(rxy.gf);
+   auto yz_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(ryz.gf);
+   auto xz_pgf = std::dynamic_pointer_cast<mfem::ParGridFunction>(rxz.gf);
+   MFEM_VERIFY(xx_pgf && yy_pgf && zz_pgf &&
+               xy_pgf && yz_pgf && xz_pgf,
+               "FieldProjector::ProjectStress: parallel project did "
+               "not return ParGridFunction (internal error)");
+
+   StressFields sf;
+   sf.sigma_xx = xx_pgf;
+   sf.sigma_yy = yy_pgf;
+   sf.sigma_zz = zz_pgf;
+   sf.sigma_xy = xy_pgf;
+   sf.sigma_yz = yz_pgf;
+   sf.sigma_xz = xz_pgf;
+   sf.min_sigma_xx = rxx.min_value; sf.max_sigma_xx = rxx.max_value;
+   sf.min_sigma_yy = ryy.min_value; sf.max_sigma_yy = ryy.max_value;
+   sf.min_sigma_zz = rzz.min_value; sf.max_sigma_zz = rzz.max_value;
+   sf.min_sigma_xy = rxy.min_value; sf.max_sigma_xy = rxy.max_value;
+   sf.min_sigma_yz = ryz.min_value; sf.max_sigma_yz = ryz.max_value;
+   sf.min_sigma_xz = rxz.min_value; sf.max_sigma_xz = rxz.max_value;
+   return sf;
+}
+
+
+// ----------------------------------------------------------------------
+// ProjectFaultPreStress (Phase 6 §4 of PLAN_onfaultstress.md)
+// ----------------------------------------------------------------------
+
+template <typename MeshType>
+void FieldProjector::ProjectFaultPreStress(
+   const StressField3D&            field,
+   const FaultGeometry<MeshType>&  fault_geom,
+   mfem::Vector&                   sigma_n_per_dof,
+   mfem::Vector&                   tau_pre_per_dof,
+   real_t                          P_p_pa,
+   real_t                          P_p_grad_pa_per_m,
+   real_t                          min_sigma_n_pa)
+{
+   const int nf = fault_geom.NumFaultDOFs();
+   sigma_n_per_dof.SetSize(nf);
+   tau_pre_per_dof.SetSize(2 * nf);
+   sigma_n_per_dof = 0.0;
+   tau_pre_per_dof = 0.0;
+   if (nf == 0) { return; }
+
+   const mfem::Vector&      coords = fault_geom.fault_dof_coords_3d();
+   const mfem::DenseMatrix& basis  = fault_geom.fault_dof_basis();
+
+   // R-005: clearer message when the caller passes a BP2 / antiplane
+   // FaultGeometry.  The BP2 ctor does not populate the per-DOF 3-D
+   // coords / basis, so SAFS-mode projection cannot proceed.
+   if (coords.Size() == 0 || basis.Height() == 0)
+   {
+      MFEM_ABORT("ProjectFaultPreStress: FaultGeometry has "
+                 << nf << " fault DOFs but no per-DOF 3-D coords "
+                 "/ basis populated.  SAFS-mode requires the 3-D "
+                 "BP5 ctor that calls ComputePerDOFCoordsAndBasis_; "
+                 "the BP2 / antiplane ctor cannot be used here.");
+   }
+
+   MFEM_VERIFY(coords.Size() == 3 * nf,
+               "ProjectFaultPreStress: fault_dof_coords_3d size "
+               << coords.Size() << " != 3 * num_fault_dofs " << 3 * nf
+               << " — caller must use the 3-D BP5 FaultGeometry ctor.");
+   MFEM_VERIFY(basis.Height() == 9 && basis.Width() == nf,
+               "ProjectFaultPreStress: fault_dof_basis shape "
+               << "(" << basis.Height() << ", " << basis.Width()
+               << ") != (9, " << nf << ")");
+
+   int clamp_count = 0;
+   for (int i = 0; i < nf; i++)
+   {
+      const real_t x = coords(3 * i + 0);
+      const real_t y = coords(3 * i + 1);
+      const real_t z = coords(3 * i + 2);
+
+      const real_t n[3]  = { basis(0, i), basis(1, i), basis(2, i) };
+      const real_t t1[3] = { basis(3, i), basis(4, i), basis(5, i) };
+      const real_t t2[3] = { basis(6, i), basis(7, i), basis(8, i) };
+
+      // Evaluate the symmetric Cauchy stress at the DOF coordinate.
+      // S is compression-positive Pa (R-501/R-502 pass-through).
+      mfem::DenseMatrix S = field.Evaluate(x, y, z);
+
+      // Sn = S * n  (R^3 vector)
+      real_t Sn[3];
+      for (int r = 0; r < 3; r++)
+      {
+         Sn[r] = S(r, 0) * n[0] + S(r, 1) * n[1] + S(r, 2) * n[2];
+      }
+
+      const real_t sigma_n_total = n[0]  * Sn[0] + n[1]  * Sn[1] + n[2]  * Sn[2];
+      const real_t tau1          = t1[0] * Sn[0] + t1[1] * Sn[1] + t1[2] * Sn[2];
+      const real_t tau2          = t2[0] * Sn[0] + t2[1] * Sn[1] + t2[2] * Sn[2];
+
+      // Effective normal stress: subtract pore pressure with optional
+      // depth gradient.  z > 0 means above the free surface; clamp
+      // the gradient term at 0 there.
+      const real_t depth_below = std::max(static_cast<real_t>(0.0), -z);
+      const real_t P_p = P_p_pa + P_p_grad_pa_per_m * depth_below;
+      real_t sigma_n_eff = sigma_n_total - P_p;
+
+      // Optional Pa-valued floor (opt-in; default 0.0 = no clamp).
+      if (min_sigma_n_pa > 0.0 && sigma_n_eff < min_sigma_n_pa)
+      {
+         sigma_n_eff = min_sigma_n_pa;
+         clamp_count++;
+      }
+
+      sigma_n_per_dof(i)         = sigma_n_eff;
+      tau_pre_per_dof(2 * i)     = tau1;  // dip   (BP5 t1)
+      tau_pre_per_dof(2 * i + 1) = tau2;  // strike (BP5 t2)
+   }
+
+   if (clamp_count > 0)
+   {
+      mfem::out << "FieldProjector::ProjectFaultPreStress: clamped "
+                << clamp_count << " / " << nf
+                << " fault DOFs to min_sigma_n_pa = "
+                << min_sigma_n_pa << " Pa\n";
+   }
+}
+
+// Explicit instantiations for the two MeshType the FaultGeometry class
+// is instantiated with elsewhere in the code base.
+template void FieldProjector::ProjectFaultPreStress<mfem::Mesh>(
+   const StressField3D&,
+   const FaultGeometry<mfem::Mesh>&,
+   mfem::Vector&, mfem::Vector&,
+   real_t, real_t, real_t);
+#ifdef MFEM_USE_MPI
+template void FieldProjector::ProjectFaultPreStress<mfem::ParMesh>(
+   const StressField3D&,
+   const FaultGeometry<mfem::ParMesh>&,
+   mfem::Vector&, mfem::Vector&,
+   real_t, real_t, real_t);
+#endif
 
 } // namespace seas
 } // namespace mfem

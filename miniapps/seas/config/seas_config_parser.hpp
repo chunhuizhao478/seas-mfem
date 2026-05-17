@@ -302,6 +302,32 @@ private:
          config.simulation.mode = toml::find_or<std::string>(s, "mode", config.simulation.mode);
       }
 
+      // [stress] — SAFS sidecar configuration (Phase 6 §7 of
+      // PLAN_onfaultstress.md).  Strict opt-in.  Missing section
+      // leaves use_sidecar = false, which preserves every existing
+      // BP5 / BP2 / TPV* path bit-exact.
+      if (data.contains("stress"))
+      {
+         const auto &st = data.at("stress");
+         config.stress.use_sidecar = toml::find_or<bool>(
+            st, "use_sidecar", config.stress.use_sidecar);
+         config.stress.sidecar_path = toml::find_or<std::string>(
+            st, "sidecar_path", config.stress.sidecar_path);
+         config.stress.P_p_pa = toml::find_or<double>(
+            st, "P_p_pa", config.stress.P_p_pa);
+         config.stress.P_p_grad_pa_per_m = toml::find_or<double>(
+            st, "P_p_grad_pa_per_m", config.stress.P_p_grad_pa_per_m);
+         config.stress.min_sigma_n_pa = toml::find_or<double>(
+            st, "min_sigma_n_pa", config.stress.min_sigma_n_pa);
+
+         if (config.stress.use_sidecar &&
+             config.stress.sidecar_path.empty())
+         {
+            MFEM_ABORT("seas_config_parser: stress.use_sidecar = true "
+                       "requires stress.sidecar_path to be set");
+         }
+      }
+
       return config;
    }
 

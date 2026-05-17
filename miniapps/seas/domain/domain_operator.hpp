@@ -192,6 +192,41 @@ public:
    /// coordinate transformation on the fault surface.
    virtual const FaultBasis *GetFaultBasis() const { return nullptr; }
 
+   /// @brief Get the global 3-D coordinates (x_i, y_i, z_i) at each fault DOF.
+   ///
+   /// Interleaved layout: dof_coords_3d(3*i)..(3*i+2) for DOF `i`. Size
+   /// is `3 * GetNumFaultDOFs()`. Used by the SAFS sidecar-driven
+   /// pre-stress projection (Phase 6.A — sidecar lookup is keyed on the
+   /// global UTM coordinate, not the fault-local 2-D parametric coords).
+   ///
+   /// Default: returns an empty vector (size 0).  3-D operators MUST
+   /// override to expose the per-DOF global coordinate; an empty
+   /// vector signals to FaultGeometry that the per-DOF accessors are
+   /// not available and the SAFS branch should be skipped.  (R-006:
+   /// the previous default silently fabricated coordinates from the
+   /// 2-D accessors, which is wrong for any non-Y=0 / non-planar
+   /// fault.)
+   virtual void GetFaultDOFCoords3D(Vector &dof_coords_3d) const
+   {
+      dof_coords_3d.SetSize(0);
+   }
+
+   /// @brief Get the per-DOF unit fault basis vectors (n, t1, t2) per
+   /// the BP5 / FaultBasis Tandem convention (t1 = dip, t2 = strike).
+   ///
+   /// Layout: a 9-row dense matrix with one column per fault DOF; rows
+   /// 0..2 are the unit normal n_i, rows 3..5 the unit tangent1 (dip)
+   /// t1_i, rows 6..8 the unit tangent2 (strike) t2_i. All vectors
+   /// already carry the sign-flip baked in (FaultBasis convention),
+   /// so callers use them directly.
+   ///
+   /// Default fallback: returns a 0×0 matrix. 3-D operators with a
+   /// populated `FaultBasis` should override.
+   virtual void GetFaultDOFBasis(DenseMatrix &dof_basis) const
+   {
+      dof_basis.SetSize(0, 0);
+   }
+
    /// @brief Get off-fault displacement at specified spatial points
    ///
    /// Evaluates the current displacement field at given 3D points.

@@ -126,6 +126,24 @@ struct SimulationConfig
    std::string mode = "qd";   ///< "qd" (quasi-dynamic), "dynamic", "hybrid"
 };
 
+/// SAFS sidecar stress configuration (Phase 6 §7 of PLAN_onfaultstress.md).
+///
+/// Strict opt-in: `use_sidecar = false` (the default) preserves every
+/// existing BP5 / BP2 / TPV102 / TPV205 code path bit-exact.  When set
+/// to true, the driver must:
+///   1. Instantiate `StressField3D(sidecar_path)`.
+///   2. Call `FaultGeometry::ComputeSAFSParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
+///   3. Toggle `RateStateFaultOperator::SetSAFSMode(true, ...)` with
+///      pointers to FaultGeometry's per-DOF pre-stress / sigma_n.
+struct StressConfig
+{
+   bool use_sidecar = false;            ///< false (default) → BP5 path
+   std::string sidecar_path;            ///< Path to stress_safs.h5 (required if use_sidecar)
+   real_t P_p_pa = 0.0;                 ///< Constant pore-pressure offset [Pa]
+   real_t P_p_grad_pa_per_m = 0.0;      ///< Depth gradient of pore pressure [Pa/m]
+   real_t min_sigma_n_pa = 0.0;         ///< Optional Pa-valued floor on σ_n; 0 = no clamp
+};
+
 /// @brief Top-level SEAS simulation configuration.
 ///
 /// Pure data struct — no factory methods, no logic.
@@ -143,6 +161,7 @@ struct SEASConfig
    TimeConfig time;
    OutputConfig output;
    SimulationConfig simulation;
+   StressConfig stress;       ///< Phase 6 §7: SAFS sidecar (opt-in)
 };
 
 } // namespace seas

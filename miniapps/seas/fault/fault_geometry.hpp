@@ -20,6 +20,22 @@
 #include "../common/mpi_context.hpp"
 #include <iomanip>
 
+// Forward declarations to avoid pulling FieldProjector / StressField3D
+// into every translation unit that uses FaultGeometry.  Phase 6 §5's
+// ComputeSAFSParams calls FieldProjector::ProjectFaultPreStress which
+// is defined in io/field_coefficient.cpp with explicit instantiations
+// for Mesh and ParMesh; callers that exercise SAFS-mode must link
+// field_coefficient.o.
+
+namespace mfem
+{
+namespace seas
+{
+class StressField3D;
+class FieldProjector;
+} // seas
+} // mfem
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -132,6 +148,12 @@ public:
       {
          depths_(i) = coords_x3_(i);
       }
+
+      // Phase 6.A — per-DOF global 3-D coordinates and (n, t1, t2) basis.
+      // Write-once at init; read only by SAFS-mode consumers (Phase 6 §4-§7).
+      // BP5/BP2/TPV102 code paths do not read these members, so the BP5
+      // bit-exact contract is preserved.
+      ComputePerDOFCoordsAndBasis_(domain_op);
 
       // Precompute per-DOF parameters using BP5 2D functions
       ComputeBP5Params();
@@ -288,6 +310,75 @@ public:
    const Vector &GetCoordsX2() const { return coords_x2_; }
    const Vector &GetCoordsX3() const { return coords_x3_; }
 
+   /// @brief Get per-DOF global 3-D (x, y, z) coordinates [3 * NumFaultDOFs].
+   ///
+   /// Interleaved layout: entry `3*i + d` is the d-th coordinate of fault
+   /// DOF `i`. Populated by the BP5/3-D constructor only; for BP2/antiplane
+   /// the returned vector is empty.
+   ///
+   /// Phase 6.A — used by FieldProjector::ProjectFaultPreStress and
+   /// FaultGeometry::ComputeSAFSParams for sidecar lookups.
+   const Vector &fault_dof_coords_3d() const { return dof_coords_3d_; }
+
+   /// @brief Get per-DOF orthonormal fault basis [9 x NumFaultDOFs].
+   ///
+   /// Column `i` is `[n_i; t1_i; t2_i]` (BP5 / FaultBasis Tandem
+   /// convention: t1 = dip, t2 = strike). The sign-flip is baked into
+   /// each vector — callers use them directly. Re-orthonormalised via
+   /// Gram-Schmidt at init (Phase 2 `basis_to_node` convention).
+   ///
+   /// Empty in BP2/antiplane paths.
+   const DenseMatrix &fault_dof_basis() const { return dof_basis_; }
+
+   /// @brief Number of fault DOFs whose basis fell back to the up-vector
+   ///        derived t1 (sub-vertical or sub-horizontal degenerate cases).
+   ///
+   /// Reported once at init from the BP5 ctor. Always 0 for planar
+   /// faults; positive only for curvilinear SAFS-style meshes where some
+   /// projected dip vector hits the 1e-12 degeneracy threshold.
+   int NumDOFBasisFallbacks() const { return num_dof_basis_fallbacks_; }
+
+   /// @brief Get per-DOF normal stress [NumFaultDOFs].
+   ///
+   /// Populated by `ComputeSAFSParams` only — empty in the standard BP5
+   /// path (which uses the scalar `bp5_params_.sigma_n`).
+   const Vector &sigma_n_per_dof() const { return sigma_n_per_dof_; }
+
+   /// @brief Whether ComputeSAFSParams has been invoked successfully.
+   bool HasSAFSParams() const { return safs_params_computed_; }
+
+   /// @brief Phase 6 §5 — SAFS-mode pre-stress initialisation.
+   ///
+   /// Parallel slot to ComputeBP5Params: keeps the analytic spatial
+   /// `a(x2, x3)`, `Dc(x2, x3)`, `V_init(x2, x3)` and `eta` from
+   /// `bp5_params_`, but replaces the analytic `tau0_vec(x2, x3)` and
+   /// scalar `bp5_params_.sigma_n` with sidecar-sourced per-DOF values
+   /// (R-501/R-502 pass-through; the source-site sign flip lives in
+   /// Phase 3 `bulk_stress_tensor_field`).
+   ///
+   /// On return, `tau_pre_` and `sigma_n_per_dof_` are populated; the
+   /// remaining BP5-state arrays are unchanged from `ComputeBP5Params`.
+   /// `safs_params_computed_` is set to `true` so consumers can branch
+   /// on it via `HasSAFSParams()`.
+   ///
+   /// NOTE: SAFS-specific spatial `a(x)` / `Dc(x)` analytic forms are
+   /// out of scope here (plan §1869); the BP5 functions are reused as
+   /// a placeholder.  Substitute when the production analytic forms
+   /// are available.
+   ///
+   /// @param field             Six-component sidecar reader.
+   /// @param P_p_pa            Constant pore-pressure offset [Pa].
+   /// @param P_p_grad_pa_per_m Depth gradient of pore pressure
+   ///                           [Pa / m]; effective P_p at z is
+   ///                           P_p_pa + grad * max(0, -z).
+   /// @param min_sigma_n_pa    Optional Pa-valued floor on the
+   ///                           effective normal stress; default 0
+   ///                           means no clamp.
+   void ComputeSAFSParams(const StressField3D& field,
+                          real_t P_p_pa = 0.0,
+                          real_t P_p_grad_pa_per_m = 0.0,
+                          real_t min_sigma_n_pa = 0.0);
+
    /// @brief Find the DOF index closest to a target depth.
    ///
    /// @param target_depth Target depth (z coordinate, negative for below surface)
@@ -433,6 +524,15 @@ private:
    Vector V_init_vec_;  // Initial velocity [2*N for BP5]
    Vector coords_x2_;   // Along-strike coordinate
    Vector coords_x3_;   // Depth coordinate
+
+   // Phase 6.A: per-DOF 3-D coordinates and basis (BP5/3-D ctor only)
+   Vector       dof_coords_3d_;   // [3 * num_fault_dofs_]
+   DenseMatrix  dof_basis_;       // [9 x num_fault_dofs_], col i = [n_i; t1_i; t2_i]
+   int          num_dof_basis_fallbacks_ = 0;
+
+   // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeSAFSParams)
+   Vector sigma_n_per_dof_;       // [num_fault_dofs_]
+   bool   safs_params_computed_ = false;
 
    // MPI gather info (parallel only)
    std::vector<int> recv_counts_;
@@ -681,6 +781,194 @@ public:
    }
 
 private:
+   /// @brief Phase 6.A: populate per-DOF global 3-D coords and (n, t1, t2)
+   /// basis from the domain operator, restrict to owned DOFs, and
+   /// re-orthonormalise via Gram-Schmidt.
+   ///
+   /// Gram-Schmidt re-orthonormalises ALL THREE input vectors so the
+   /// resulting (n, t1, t2) matches the elasticity operator's per-face
+   /// FaultBasis sign convention element-wise (R-001 contract: the
+   /// SAFS pre-stress must live in the same frame as the elastic
+   /// traction produced by `FaultBasis::ProjectTraction`):
+   ///
+   ///   n_i  ← n_i / |n_i|
+   ///   t1_i ← (t1_i − (t1_i·n_i) n_i),  then  t1_i ← t1_i / |t1_i|
+   ///   t2_i ← (t2_i − (t2_i·n_i) n_i − (t2_i·t1_i) t1_i),
+   ///                                          then  t2_i ← t2_i / |t2_i|
+   ///
+   /// Note: the cross-product form `t2 = n × t1` *loses* the
+   /// FaultBasis sign-flip when `sign_flipped == true` (see
+   /// fault_basis.hpp:463-471); projecting the input t2 preserves it.
+   ///
+   /// Degenerate-case fallback (plan §1768-1773): if the projected t1
+   /// drops below 1e-12 in magnitude (sub-vertical or sub-horizontal
+   /// face where the up-vector lies in the face plane), derive a fresh
+   /// t1 from the reference up-vector via `t1 = n × (up × n)`, then
+   /// re-derive `t2 = n × t1_fallback` because the original input t2
+   /// is unreliable when its companion t1 was degenerate (R-103). The
+   /// number of fallbacks is counted and reported.
+   void ComputePerDOFCoordsAndBasis_(DomainOperator<MeshType> &domain_op)
+   {
+      // Gather full local (interior + shared) coords + basis from the operator
+      Vector full_coords;
+      DenseMatrix full_basis;
+      domain_op.GetFaultDOFCoords3D(full_coords);
+      domain_op.GetFaultDOFBasis(full_basis);
+
+      // If the operator did not populate either (e.g. antiplane fallback),
+      // leave both members empty.
+      if (full_coords.Size() == 0 || full_basis.Height() == 0)
+      {
+         dof_coords_3d_.SetSize(0);
+         dof_basis_.SetSize(0, 0);
+         return;
+      }
+
+      const int num_full = full_basis.Width();
+      MFEM_VERIFY(full_coords.Size() == 3 * num_full,
+                  "ComputePerDOFCoordsAndBasis_: coords size "
+                  << full_coords.Size() << " inconsistent with basis cols "
+                  << num_full);
+
+      // Restrict 3-D coords to the owned fault DOF view (matches the size
+      // of coords_x2_ / coords_x3_).
+      domain_op.RestrictToOwnedFault(full_coords, dof_coords_3d_, 3);
+
+      // Restrict the 9-row dense basis matrix to the owned view by
+      // packing into a Vector with comps_per_dof = 9 and unpacking.
+      Vector full_basis_flat(9 * num_full);
+      for (int j = 0; j < num_full; j++)
+      {
+         for (int r = 0; r < 9; r++)
+         {
+            full_basis_flat(9 * j + r) = full_basis(r, j);
+         }
+      }
+      Vector owned_basis_flat;
+      domain_op.RestrictToOwnedFault(full_basis_flat, owned_basis_flat, 9);
+
+      const int num_owned = num_fault_dofs_;
+      MFEM_VERIFY(owned_basis_flat.Size() == 9 * num_owned,
+                  "ComputePerDOFCoordsAndBasis_: owned basis flat size "
+                  << owned_basis_flat.Size()
+                  << " != 9 * num_owned " << 9 * num_owned);
+
+      dof_basis_.SetSize(9, num_owned);
+
+      // Reference up vector — matches the elasticity_operator setup.
+      const real_t up_ref[3] = {0.0, 0.0, 1.0};
+
+      // R-006 Gram-Schmidt re-orthonormalisation, mirroring Phase 2
+      // `basis_to_node` (project_to_fault_stress.py).
+      num_dof_basis_fallbacks_ = 0;
+      for (int i = 0; i < num_owned; i++)
+      {
+         real_t n[3] = { owned_basis_flat(9 * i + 0),
+                         owned_basis_flat(9 * i + 1),
+                         owned_basis_flat(9 * i + 2) };
+         real_t t1[3] = { owned_basis_flat(9 * i + 3),
+                          owned_basis_flat(9 * i + 4),
+                          owned_basis_flat(9 * i + 5) };
+         real_t t2[3] = { owned_basis_flat(9 * i + 6),
+                          owned_basis_flat(9 * i + 7),
+                          owned_basis_flat(9 * i + 8) };
+
+         // n_i ← n_i / |n_i|
+         const real_t n_len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
+         MFEM_VERIFY(n_len > 1e-12,
+                     "ComputePerDOFCoordsAndBasis_: zero-length normal at DOF "
+                     << i);
+         const real_t inv_n = 1.0 / n_len;
+         n[0] *= inv_n; n[1] *= inv_n; n[2] *= inv_n;
+
+         // t1 ← t1 − (t1·n) n
+         const real_t t1_dot_n = t1[0]*n[0] + t1[1]*n[1] + t1[2]*n[2];
+         t1[0] -= t1_dot_n * n[0];
+         t1[1] -= t1_dot_n * n[1];
+         t1[2] -= t1_dot_n * n[2];
+         real_t t1_len = std::sqrt(t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]);
+
+         bool used_t1_fallback = false;
+         if (t1_len < 1e-12)
+         {
+            // Degenerate fallback (plan §1768-1773): derive t1 from up.
+            // t1 = n × (up × n) = up − (up·n) n  (since up is a unit vector
+            // here, but to be safe normalise after).
+            const real_t up_dot_n = up_ref[0]*n[0] + up_ref[1]*n[1]
+                                    + up_ref[2]*n[2];
+            t1[0] = up_ref[0] - up_dot_n * n[0];
+            t1[1] = up_ref[1] - up_dot_n * n[1];
+            t1[2] = up_ref[2] - up_dot_n * n[2];
+            t1_len = std::sqrt(t1[0]*t1[0] + t1[1]*t1[1] + t1[2]*t1[2]);
+            MFEM_VERIFY(t1_len > 1e-12,
+                        "ComputePerDOFCoordsAndBasis_: degenerate fallback at "
+                        "DOF " << i << " — up vector nearly parallel to normal");
+            num_dof_basis_fallbacks_++;
+            used_t1_fallback = true;
+         }
+         const real_t inv_t1 = 1.0 / t1_len;
+         t1[0] *= inv_t1; t1[1] *= inv_t1; t1[2] *= inv_t1;
+
+         // R-103: when the fallback re-derived t1 from `up`, the
+         // original FaultBasis t2 is also unreliable (it was derived
+         // from the same near-zero `up × n` that made t1 degenerate),
+         // so the Gram-Schmidt projection below would collapse t2 to
+         // near zero and trip the t2_len > 1e-12 abort.  In that case
+         // re-derive t2 from the cross product `n × t1_fallback` —
+         // the FaultBasis sign convention was undefined for this DOF
+         // anyway, so sign loss is acceptable.
+         if (used_t1_fallback)
+         {
+            t2[0] = n[1]*t1[2] - n[2]*t1[1];
+            t2[1] = n[2]*t1[0] - n[0]*t1[2];
+            t2[2] = n[0]*t1[1] - n[1]*t1[0];
+         }
+
+         // R-001 (post-fix): Gram-Schmidt re-orthonormalise the input
+         // t2 against (n, t1) instead of redefining it as n × t1.
+         //
+         // The cross-product form `t2 = n × t1` *loses* the FaultBasis
+         // sign-flip convention (Tandem: `t2_face = -strike_can` when
+         // the CalcOrtho normal is anti-aligned with `ref_normal_` —
+         // see fault_basis.hpp:463-471).  Dropping the sign-flip would
+         // place the SAFS pre-stress in a different frame from the
+         // elastic traction that `FaultBasis::ProjectTraction`
+         // produces, leading to a mixed-frame `tau_vec = tau_pre +
+         // traction` inside `RateStateFaultOperator` and reversed
+         // slip direction on every sign-flipped DOF.
+         //
+         // Projecting the input `t2` preserves the sign convention
+         // baked into FaultBasis output while still enforcing
+         // orthonormality (defensive against FP drift from upstream).
+         const real_t t2_dot_n  = t2[0]*n[0]  + t2[1]*n[1]  + t2[2]*n[2];
+         const real_t t2_dot_t1 = t2[0]*t1[0] + t2[1]*t1[1] + t2[2]*t1[2];
+         t2[0] -= t2_dot_n * n[0] + t2_dot_t1 * t1[0];
+         t2[1] -= t2_dot_n * n[1] + t2_dot_t1 * t1[1];
+         t2[2] -= t2_dot_n * n[2] + t2_dot_t1 * t1[2];
+         const real_t t2_len = std::sqrt(t2[0]*t2[0] + t2[1]*t2[1]
+                                         + t2[2]*t2[2]);
+         MFEM_VERIFY(t2_len > 1e-12,
+                     "ComputePerDOFCoordsAndBasis_: degenerate t2 at DOF "
+                     << i);
+         const real_t inv_t2 = 1.0 / t2_len;
+         t2[0] *= inv_t2; t2[1] *= inv_t2; t2[2] *= inv_t2;
+
+         for (int d = 0; d < 3; d++)
+         {
+            dof_basis_(d,     i) = n[d];
+            dof_basis_(3 + d, i) = t1[d];
+            dof_basis_(6 + d, i) = t2[d];
+         }
+      }
+
+      if (num_dof_basis_fallbacks_ > 0)
+      {
+         mfem::out << "FaultGeometry: " << num_dof_basis_fallbacks_
+                   << " / " << num_owned
+                   << " fault DOFs hit the t1 degeneracy fallback.\n";
+      }
+   }
+
    /// @brief Compute 2D spatially varying parameters for BP5.
    ///
    /// Following Tandem's approach: ALL parameters are evaluated at each
