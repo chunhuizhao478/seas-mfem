@@ -70,8 +70,21 @@ After this phase, the combination `--restart PREFIX --petsc-ts` is accepted by `
 
 - `miniapps/seas/tests/verification/bp5_verification_full.cpp`:
   - **Delete** the `--restart` + `--petsc-ts` early-abort at lines 1091-1099.
-  - **Add** the V2 restart block IMMEDIATELY AFTER the existing V1 restart block at lines 2346-2358.  **Ordering is load-bearing**: the V1 `ReadCheckpoint` call at line 2352 populates `t`, `current_dt`, `state`, `num_seismic_events`, `in_seismic_event` from the V1 fields; the V2 block then reads `ts_t`, `ts_dt_next`, `ts_step`, `ts_rejections`, `pv_snapshots` from the trailing `PETSC_TS_V2` block and calls `TSSetTime(ts, ts_t)`, `TSSetTimeStep(ts, ts_dt_next)`, `TSSetStepNumber(ts, ts_step)`.  The cross-check `std::abs(t - ts_t) < 1e-12 * std::abs(t)` is only meaningful BECAUSE `t` has been populated by the preceding V1 read.  **Do NOT place the V2 block inside the PetscTS init at line ~2269** — `t` is still 0 there, the cross-check would always fail, and every restart attempt would abort with a misleading "V1 time=0 differs from V2 time=..." error.
-  - **Modify** the checkpoint-writing call sites at lines 624-628 (in the monitor) and 2591 (mid-run) and 2635 (final) to ALSO call `WritePetscTSCheckpoint` immediately after `WriteCheckpoint`. The fields come from: `TSGetTime`, `TSGetTimeStep`, `TSGetStepNumber`, `TSGetStepRejections` on the `ts` handle; `snapshots_so_far = pv_out ? pv_out->GetTotalSnapshotsWritten() : 0`; per R-304, also `pv_out->GetLastWriteTime()`, `pv_out->GetLastVMax()`, `pv_out->GetCurrentRegime()` (new accessors — see item 6 below).
+  - **Add** the V2 restart block IMMEDIATELY AFTER the existing V1 restart block at lines 2346-2358.  **Ordering is load-bearing**: the V1 `ReadCheckpoint` call at line 2352 populates `t`, `current_dt`, `state`, `num_seismic_events`, `in_seismic_event` from the V1 fields; the V2 block then reads the 10 PETSC_TS_V2 fields, cross-checks `t == ts_t`, calls `TSSetStepNumber(ts, ts_step)`, and writes `t = ts_t; current_dt = ts_dt_next;` so that PetscODESolver::Run picks up the V2 values when it calls TSSetTime/TSSetTimeStep on entry (R-002: the explicit TSSetTime / TSSetTimeStep calls have been REMOVED because `Run` overwrites them).  The cross-check `std::abs(t - ts_t) < 1e-12 * std::abs(t)` is only meaningful BECAUSE `t` has been populated by the preceding V1 read.  **Do NOT place the V2 block inside the PetscTS init at line ~2269** — `t` is still 0 there, the cross-check would always fail, and every restart attempt would abort with a misleading "V1 time=0 differs from V2 time=..." error.
+  - **Modify** the PetscTS-path checkpoint-writing call sites — the monitor (lines 619-628) and the final checkpoint in main (lines 2631-2641) — to ALSO call `WritePetscTSCheckpoint` immediately after `WriteCheckpoint`.  The mid-run site at line 2591 is in the non-PetscTS `else` branch and does NOT get the V2 extension (R-009).  The fields come from: `TSGetTime`, `TSGetTimeStep`, `TSGetStepNumber`, `TSGetStepRejections` on the `ts` handle (monitor uses its `ts` parameter directly; main uses `*petsc_ode`); `snapshots_so_far = pv_out ? pv_out->GetTotalSnapshotsWritten() : 0`; per R-304, also `pv_out->GetLastWriteTime()`, `pv_out->GetLastVMax()`, `pv_out->GetCurrentRegime()`; per R-004, `pv_out->GetLastCommittedCycle()`; per R-006, `pv_out->GetLastVolumeWriteTime()` (new accessors — see item 6 below).
+
+  - **Extend** `BP5MonitorCtx` (defined at `bp5_verification_full.cpp:483-513`) so the monitor callback can reach the data the V2 checkpoint needs.  The monitor sees ONLY its `void *ctx` (→ `BP5MonitorCtx*`) and the `TS ts` parameter — `pv_out`, `use_petsc_ts`, `petsc_ode`, and `restart_rejections_carryover` are all local to `main` and OUT OF SCOPE in the monitor (R-001).  Add two members at the end of the struct:
+    ```cpp
+    // V2 PETSc-TS restart support (R-001 / R-005).
+    seas::ParaViewOutput<ParMesh> *pv_out = nullptr;     // may be nullptr
+    int restart_rejections_carryover = 0;                 // R-303 / R-005
+    ```
+    And initialise both in main, alongside the existing `petsc_mon_ctx.* = ...` block at lines 2296-2313:
+    ```cpp
+    petsc_mon_ctx.pv_out = pv_out.get();                   // R-001
+    petsc_mon_ctx.restart_rejections_carryover = restart_rejections_carryover;  // R-005
+    ```
+    The monitor-side V2 snippet (see §5 below) then dereferences `mon->pv_out` and `mon->restart_rejections_carryover` instead of the out-of-scope main locals, and the TS handle comes from the callback's `ts` parameter directly (no `*petsc_ode` indirection).
   - **Add** in the `paraview_write` lambda (or in the PetscTS init block): after `pv_out` is constructed, if `!restart_prefix.empty() && use_petsc_ts`, restore the snapshot counter via a new `pv_out->SetTotalSnapshotsWritten(snapshots_so_far_from_ckpt)` setter (added in next bullet).
 
 - `miniapps/seas/io/paraview_output.hpp`:
@@ -94,18 +107,26 @@ namespace mfem { namespace seas {
 /// Must be called AFTER WriteCheckpoint on the same prefix.  Opens the
 /// file in append mode and writes the PETSC_TS_V2 trailing block:
 ///   PETSC_TS_V2
-///   petsc_ts_time              <real_t>
-///   petsc_ts_dt_next           <real_t>
-///   petsc_ts_step              <int>
-///   petsc_ts_rejections        <int>
-///   paraview_snapshots         <int>
-///   paraview_last_write_time   <real_t>   (R-304)
-///   paraview_last_v_max        <real_t>   (R-304)
-///   paraview_current_regime    <int>      (R-304)
+///   petsc_ts_time                  <real_t>
+///   petsc_ts_dt_next               <real_t>
+///   petsc_ts_step                  <int>
+///   petsc_ts_rejections            <int>  (cumulative across restarts; R-005)
+///   paraview_snapshots             <int>
+///   paraview_last_write_time       <real_t>   (R-304)
+///   paraview_last_v_max            <real_t>   (R-304)
+///   paraview_current_regime        <int>      (R-304)
+///   paraview_last_committed_cycle  <int>      (R-004)
+///   paraview_last_volume_write_time <real_t>  (R-006)
 ///
 /// `petsc_ts_dt_next` is the dt PETSc will use for the NEXT step, as
 /// returned by TSGetTimeStep AFTER the just-completed step.  This is
 /// the value we need to feed back via TSSetTimeStep on restart.
+///
+/// `petsc_ts_rejections` is the CUMULATIVE rejection count across the
+/// entire restart chain — the WRITE-side caller is responsible for
+/// adding `restart_rejections_carryover` + `TSGetStepRejections(ts)`
+/// before passing the sum here.  Saving the per-run value alone would
+/// lose all prior restarts' rejections on a 2+-link chain (R-005).
 ///
 /// `paraview_last_write_time`, `paraview_last_v_max`,
 /// `paraview_current_regime` capture the ParaViewOutput adaptive
@@ -113,6 +134,18 @@ namespace mfem { namespace seas {
 /// ShouldWrite call does not fire unconditionally (the default
 /// `last_write_time_ = -1e30` would otherwise make any `time - last`
 /// look huge and trigger an extra snapshot at t=saved_t).  See R-304.
+///
+/// `paraview_last_committed_cycle` (R-004) is the dedup key used by
+/// ParaViewOutput::CommitSchedule's same-step guard.  Without it,
+/// `last_committed_cycle_` stays at INT_MIN on restart and the first
+/// post-restart CommitSchedule cannot dedup against the (-INT_MIN)
+/// default; the snapshot counter then over-bumps by 1 per restart event.
+///
+/// `paraview_last_volume_write_time` (R-006) preserves the independent
+/// volume-PV cadence across restart.  Without it the first
+/// ForceSaveImpl after restart fires the volume save unconditionally
+/// because `last_volume_write_time_` defaults to -1e30 and
+/// `time - (-1e30) ~ +inf` always exceeds `volume_pv_dt_ * tol`.
 inline void WritePetscTSCheckpoint(const std::string &prefix,
                                    real_t t, real_t dt_next,
                                    int step, int rejections,
@@ -120,6 +153,8 @@ inline void WritePetscTSCheckpoint(const std::string &prefix,
                                    real_t paraview_last_write_time,
                                    real_t paraview_last_v_max,
                                    int paraview_current_regime,
+                                   int paraview_last_committed_cycle,
+                                   real_t paraview_last_volume_write_time,
                                    const MPIContext *mpi);
 #endif
 
@@ -140,6 +175,18 @@ out << "paraview_snapshots " << paraview_snapshots << "\n";
 out << "paraview_last_write_time " << paraview_last_write_time << "\n";
 out << "paraview_last_v_max " << paraview_last_v_max << "\n";
 out << "paraview_current_regime " << paraview_current_regime << "\n";
+out << "paraview_last_committed_cycle "
+    << paraview_last_committed_cycle << "\n";        // R-004
+out << "paraview_last_volume_write_time "
+    << paraview_last_volume_write_time << "\n";      // R-006
+
+// R-012: mirror the WriteCheckpoint pattern — explicit close, then
+// barrier — so the "after this returns, all ranks have committed"
+// contract holds for the V2 trailing block too.  Without it, rank N
+// may still be appending when rank 0 advances to the next
+// checkpoint iteration and TRUNC-opens the file.
+out.close();
+if (mpi) { mpi->Barrier(); }
 ```
 
 **2. `ReadPetscTSCheckpoint` signature and body.**
@@ -169,11 +216,13 @@ inline bool ReadPetscTSCheckpoint(const std::string &prefix,
                                   real_t &paraview_last_write_time,
                                   real_t &paraview_last_v_max,
                                   int &paraview_current_regime,
+                                  int &paraview_last_committed_cycle,
+                                  real_t &paraview_last_volume_write_time,
                                   const MPIContext *mpi);
 #endif
 ```
 
-Body: reopens the file, skips past the V1 block (uses a temporary inner reader for the V1 fields, discarding values — OR, simpler, reads the whole file into a string and seeks for the `PETSC_TS_V2` tag). Recommended: just open the file, read tags one at a time until `PETSC_TS_V2` is found OR EOF is hit; on EOF return false; on found, parse the 5 fields.
+Body: reopens the file, scans past the V1 block by reading whitespace-separated tokens until the `PETSC_TS_V2` tag is found or EOF is hit (numeric tokens in the V1 body cannot match the alpha-numeric tag, so the scan is robust).  On EOF, return `false` (the file is V1-only).  On a found tag, parse the 10 fields IN THE ORDER WRITTEN by §1 above — `petsc_ts_time`, `petsc_ts_dt_next`, `petsc_ts_step`, `petsc_ts_rejections`, `paraview_snapshots`, `paraview_last_write_time`, `paraview_last_v_max`, `paraview_current_regime`, `paraview_last_committed_cycle`, `paraview_last_volume_write_time` (R-008 + R-004 + R-006).  Each field uses the same `read_tag(expected_name); in >> value;` pattern as `ReadCheckpoint`.  Abort via `MFEM_VERIFY` on any tag mismatch.
 
 **3. Format version detection.**
 
@@ -201,10 +250,14 @@ if (use_petsc_ts && !restart_prefix.empty())
    real_t ts_last_write_time = -1e30;        // R-304
    real_t ts_last_v_max       = 0.0;         // R-304
    int    ts_current_regime   = 0;           // R-304
+   int    ts_last_committed_cycle =
+             std::numeric_limits<int>::min();   // R-004
+   real_t ts_last_volume_write_time = -1e30; // R-006
    const bool have_ts_state = ReadPetscTSCheckpoint(
       restart_prefix, ts_t, ts_dt_next, ts_step, ts_rejections,
       pv_snapshots, ts_last_write_time, ts_last_v_max,
-      ts_current_regime, &mpi);
+      ts_current_regime, ts_last_committed_cycle,
+      ts_last_volume_write_time, &mpi);
    MFEM_VERIFY(have_ts_state,
                "--restart with --petsc-ts requires a V2 checkpoint "
                "(written by a build >= 2026-05-XX).  V1 checkpoints "
@@ -218,9 +271,40 @@ if (use_petsc_ts && !restart_prefix.empty())
 
    petsc::TS ts = *petsc_ode;
    PetscErrorCode ierr;
-   ierr = TSSetTime(ts, ts_t);            PCHKERRQ(ts, ierr);
-   ierr = TSSetTimeStep(ts, ts_dt_next);  PCHKERRQ(ts, ierr);
-   ierr = TSSetStepNumber(ts, ts_step);   PCHKERRQ(ts, ierr);
+   // R-002: PetscODESolver::Run() unconditionally calls
+   // TSSetTime(ts, t) and TSSetTimeStep(ts, dt) on entry
+   // (linalg/petsc.cpp:4362-4363).  An explicit TSSetTime /
+   // TSSetTimeStep call HERE would be silently overwritten on
+   // the next call to `petsc_ode->Run(state, t, current_dt,
+   // t_final)`.  Instead, update the C++ `t` and `current_dt`
+   // variables that Run() reads on entry — those are the
+   // load-bearing ones.  Only TSSetStepNumber survives Run()
+   // (Run never resets the step counter), so it stays.
+   ierr = TSSetStepNumber(ts, static_cast<PetscInt>(ts_step));  // R-010
+   PCHKERRQ(ts, ierr);
+
+   // V1 ReadCheckpoint already set `t = ts_t_v1`; the cross-check
+   // above guarantees ts_t == t, so the reassignment is a no-op
+   // today.  But `current_dt` was set to V1's restart_dt, which
+   // may diverge from ts_dt_next in any future change that adds a
+   // CFL clamp or dt_init override.  Make V2 authoritative.
+   t          = ts_t;
+   current_dt = ts_dt_next;
+
+   // R-003: TSGetTimeStep can return 0 if the checkpoint was
+   // written before the first accepted step or just after a
+   // TSSetConvergedReason(TS_DIVERGED_*).  Fall back to dt_init
+   // and log on rank 0 so PETSc has a non-zero starting dt.
+   if (current_dt <= 0.0)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout << "PETSc TS restart: V2 ts_dt_next was "
+                   << current_dt << " <= 0; falling back to "
+                   << "dt_init = " << dt_init << " s\n";
+      }
+      current_dt = dt_init;
+   }
 
    if (pv_out)
    {
@@ -228,10 +312,21 @@ if (use_petsc_ts && !restart_prefix.empty())
       // R-304: also restore the schedule state (last_write_time,
       // last_v_max, current_regime) so the first ShouldWrite after
       // restart does not fire unconditionally and the regime
-      // state-machine carries hysteresis across the seam.
+      // state-machine carries hysteresis across the seam.  R-006:
+      // RestoreScheduleState now also takes last_volume_write_time
+      // so the volume-PV cadence survives restart (without this,
+      // the first ForceSaveImpl after restart fires the volume save
+      // unconditionally because last_volume_write_time_ defaults to
+      // -1e30 and time - (-1e30) ~ +inf).
       pv_out->RestoreScheduleState(ts_last_write_time,
                                    ts_last_v_max,
-                                   ts_current_regime);
+                                   ts_current_regime,
+                                   ts_last_volume_write_time);
+      // R-004: restore the dedup cycle key so CommitSchedule's
+      // same-step guard works correctly on the first post-restart
+      // commit (otherwise total_snapshots_written_ over-bumps by 1
+      // per restart event).
+      pv_out->SetLastCommittedCycle(ts_last_committed_cycle);
    }
    // R-303: PRE-restart rejection count.  The post-Run code at
    // line 2414-2422 will OVERWRITE `step_rejections` with the
@@ -273,11 +368,50 @@ Modify the post-Run rejection-accumulation code at `bp5_verification_full.cpp:24
 
 Three sites currently call `WriteCheckpoint`:
 
-- Monitor (line 619-628): every `checkpoint_interval` steps
-- Mid-run (line 2588-2594): the non-PetscTS path's per-step checkpointing
-- Final (line 2632-2638): once at end-of-run
+- Monitor (line 619-628): every `checkpoint_interval` steps  → V2 extension required
+- Mid-run (line 2588-2594): the non-PetscTS path's per-step checkpointing  → NO V2 extension (R-009)
+- Final (line 2632-2638): once at end-of-run  → V2 extension required on the PetscTS path
 
-The monitor and final sites are reached on the PetscTS path. After each `WriteCheckpoint(...)` call (in the monitor and final blocks), add an immediately-following:
+The monitor and final sites need DIFFERENT snippets because they have DIFFERENT identifiers in scope:
+
+- the monitor sees only its `TS ts` parameter and `mon = static_cast<BP5MonitorCtx*>(ctx)`, so it MUST go through `mon->pv_out` / `mon->mpi` / `mon->restart_rejections_carryover` (R-001) and use the parameter `ts` directly (no `petsc_ode` indirection);
+- the final-checkpoint site is in `main`, where `petsc_ode`, `use_petsc_ts`, `pv_out`, and `restart_rejections_carryover` are all in scope as locals.
+
+**Monitor site** — replace the existing `WriteCheckpoint(...)` call at lines 619-628 with the existing call PLUS the following V2 trailing block immediately after:
+
+```cpp
+#ifdef MFEM_USE_PETSC
+{
+   // Note: the monitor is installed ONLY when --petsc-ts is active,
+   // so the use_petsc_ts gate is structurally true and elided.
+   // `ts` is the callback's TS parameter — no *petsc_ode indirection
+   // (petsc_ode is local to main and OUT OF SCOPE here; R-001).
+   PetscReal ts_dt_next_q;
+   PetscInt  ts_step_q, ts_rejections_q;
+   TSGetTimeStep(ts, &ts_dt_next_q);
+   TSGetStepNumber(ts, &ts_step_q);
+   TSGetStepRejections(ts, &ts_rejections_q);
+   const int    pv_snap          = mon->pv_out ? mon->pv_out->GetTotalSnapshotsWritten() : 0;
+   const real_t pv_last_write    = mon->pv_out ? mon->pv_out->GetLastWriteTime()         : -1e30;
+   const real_t pv_last_vmax     = mon->pv_out ? mon->pv_out->GetLastVMax()              :  0.0;
+   const int    pv_regime        = mon->pv_out ? mon->pv_out->GetCurrentRegime()         :  0;
+   const int    pv_last_commit   = mon->pv_out ? mon->pv_out->GetLastCommittedCycle()    : std::numeric_limits<int>::min();   // R-004
+   const real_t pv_last_vol_time = mon->pv_out ? mon->pv_out->GetLastVolumeWriteTime()   : -1e30;                              // R-006
+   // R-005: save the CUMULATIVE rejection count, not this-run's
+   // count, so chained restarts do not lose prior runs' rejections.
+   const int    cum_rejects      = mon->restart_rejections_carryover
+                                   + static_cast<int>(ts_rejections_q);
+   WritePetscTSCheckpoint(mon->full_prefix, time, ts_dt_next_q,
+                          static_cast<int>(ts_step_q),
+                          cum_rejects,
+                          pv_snap, pv_last_write, pv_last_vmax,
+                          pv_regime, pv_last_commit, pv_last_vol_time,
+                          mon->mpi);
+}
+#endif
+```
+
+**Final site** — replace the existing `WriteCheckpoint(...)` call at lines 2632-2641 with the existing call PLUS the following V2 trailing block immediately after:
 
 ```cpp
 #ifdef MFEM_USE_PETSC
@@ -285,28 +419,35 @@ if (use_petsc_ts && petsc_ode)
 {
    petsc::TS ts = *petsc_ode;
    PetscReal ts_dt_next_q;
-   PetscInt ts_step_q, ts_rejections_q;
+   PetscInt  ts_step_q, ts_rejections_q;
    TSGetTimeStep(ts, &ts_dt_next_q);
    TSGetStepNumber(ts, &ts_step_q);
    TSGetStepRejections(ts, &ts_rejections_q);
-   const int    pv_snap       = pv_out ? pv_out->GetTotalSnapshotsWritten() : 0;
-   const real_t pv_last_write = pv_out ? pv_out->GetLastWriteTime()        : -1e30;
-   const real_t pv_last_vmax  = pv_out ? pv_out->GetLastVMax()             :  0.0;
-   const int    pv_regime     = pv_out ? pv_out->GetCurrentRegime()        :  0;
-   WritePetscTSCheckpoint(full_prefix, time, ts_dt_next_q,
+   const int    pv_snap          = pv_out ? pv_out->GetTotalSnapshotsWritten() : 0;
+   const real_t pv_last_write    = pv_out ? pv_out->GetLastWriteTime()         : -1e30;
+   const real_t pv_last_vmax     = pv_out ? pv_out->GetLastVMax()              :  0.0;
+   const int    pv_regime        = pv_out ? pv_out->GetCurrentRegime()         :  0;
+   const int    pv_last_commit   = pv_out ? pv_out->GetLastCommittedCycle()    : std::numeric_limits<int>::min();   // R-004
+   const real_t pv_last_vol_time = pv_out ? pv_out->GetLastVolumeWriteTime()   : -1e30;                              // R-006
+   // R-005: save the CUMULATIVE rejection count, not this-run's
+   // count, so chained restarts do not lose prior runs' rejections.
+   const int    cum_rejects      = restart_rejections_carryover
+                                   + static_cast<int>(ts_rejections_q);
+   WritePetscTSCheckpoint(full_prefix, t, ts_dt_next_q,
                           static_cast<int>(ts_step_q),
-                          static_cast<int>(ts_rejections_q),
+                          cum_rejects,
                           pv_snap, pv_last_write, pv_last_vmax,
-                          pv_regime, mon->mpi);
+                          pv_regime, pv_last_commit, pv_last_vol_time,
+                          &mpi);
 }
 #endif
 ```
 
 The mid-run site (non-PetscTS path) does NOT need the TS extension.
 
-**6. `SetTotalSnapshotsWritten` + `RestoreScheduleState` setters and three new getters.**
+**6. `SetTotalSnapshotsWritten` + `RestoreScheduleState` + `SetLastCommittedCycle` setters and five new getters.**
 
-Add to `paraview_output.hpp` near `GetTotalSnapshotsWritten` (existing read-only getter at line 368):
+Add to `paraview_output.hpp` near `GetTotalSnapshotsWritten` (existing read-only getter at line 418):
 
 ```cpp
 /// @brief Restore the snapshot counter from a checkpoint.
@@ -321,7 +462,8 @@ void SetTotalSnapshotsWritten(int n)
    total_snapshots_written_ = std::max(n, 0);
 }
 
-/// @brief R-304: Restore the adaptive-schedule state from a checkpoint.
+/// @brief R-304 + R-006: Restore the adaptive-schedule state from a
+/// checkpoint.
 ///
 /// Pairs with `SetTotalSnapshotsWritten`.  Use ONLY at restart time,
 /// before any Save/ShouldWrite call.  Without this restoration the
@@ -329,32 +471,58 @@ void SetTotalSnapshotsWritten(int n)
 /// `last_write_time_` defaults to -1e30 and `time - (-1e30)` always
 /// exceeds dt_out * tol) and the regime state machine resets to
 /// interseismic regardless of where the pre-checkpoint trajectory was.
+///
+/// R-006: `last_volume_write_time` preserves the independent volume-PV
+/// cadence across restart — without it the first ForceSaveImpl after
+/// restart fires the volume save unconditionally for the same -1e30
+/// reason as above.
 void RestoreScheduleState(real_t last_write_time, real_t last_v_max,
-                          int current_regime)
+                          int current_regime,
+                          real_t last_volume_write_time)
 {
-   last_write_time_ = last_write_time;
-   last_v_max_      = last_v_max;
-   current_regime_  = current_regime;
+   last_write_time_        = last_write_time;
+   last_v_max_             = last_v_max;
+   // R-007: clamp to the documented [0,2] range to defend against a
+   // corrupted or forward-incompatible V2 block.  NextRegime's switch
+   // has a default-0 branch that would self-recover on the next call,
+   // but the assignment itself should not silently install an invalid
+   // sentinel.
+   current_regime_         = std::clamp(current_regime, 0, 2);
+   last_volume_write_time_ = last_volume_write_time;          // R-006
 }
 
-/// @brief R-304: read-only accessors for the schedule state.
-/// Used by `WritePetscTSCheckpoint` to snapshot the state at
-/// checkpoint time.  These were previously private; exposing them
-/// is necessary for the restart machinery.
-real_t GetLastWriteTime() const { return last_write_time_; }
-real_t GetLastVMax()      const { return last_v_max_; }
-int    GetCurrentRegime() const { return current_regime_; }
+/// @brief R-004: restore the dedup-key cycle counter used by
+/// CommitSchedule's same-step guard.
+///
+/// Use ONLY at restart time, alongside SetTotalSnapshotsWritten and
+/// RestoreScheduleState.  Without this restoration the first
+/// post-restart CommitSchedule cannot dedup against the (-INT_MIN)
+/// default sentinel and `total_snapshots_written_` over-bumps by 1
+/// per restart event (this leaks budget for long-running cap-aware
+/// jobs that restart many times).
+void SetLastCommittedCycle(int cycle) { last_committed_cycle_ = cycle; }
+
+/// @brief R-304 + R-004 + R-006: read-only accessors for the schedule
+/// state.  Used by `WritePetscTSCheckpoint` to snapshot the state at
+/// checkpoint time.  These fields were previously private; exposing
+/// them is necessary for the restart machinery.
+real_t GetLastWriteTime()       const { return last_write_time_; }
+real_t GetLastVMax()            const { return last_v_max_; }
+int    GetCurrentRegime()       const { return current_regime_; }
+int    GetLastCommittedCycle()  const { return last_committed_cycle_; }      // R-004
+real_t GetLastVolumeWriteTime() const { return last_volume_write_time_; }    // R-006
 ```
 
 ### Interfaces
 
 **New exposed functions:**
 
-- `mfem::seas::WritePetscTSCheckpoint(prefix, t, dt_next, step, rejections, pv_snapshots, pv_last_write_time, pv_last_v_max, pv_current_regime, mpi)` — header-only, inline. (R-304: includes the three pv schedule-state fields.)
-- `mfem::seas::ReadPetscTSCheckpoint(prefix, t, dt_next, step, rejections, pv_snapshots, pv_last_write_time, pv_last_v_max, pv_current_regime, mpi)` — header-only, inline, returns `bool`. (R-304: includes the three pv schedule-state out-params.)
+- `mfem::seas::WritePetscTSCheckpoint(prefix, t, dt_next, step, rejections, pv_snapshots, pv_last_write_time, pv_last_v_max, pv_current_regime, pv_last_committed_cycle, pv_last_volume_write_time, mpi)` — header-only, inline.  10 fields (5 PetscTS + 5 paraview-schedule).  `rejections` is the CUMULATIVE count across the restart chain (R-005).
+- `mfem::seas::ReadPetscTSCheckpoint(prefix, t, dt_next, step, rejections, pv_snapshots, pv_last_write_time, pv_last_v_max, pv_current_regime, pv_last_committed_cycle, pv_last_volume_write_time, mpi)` — header-only, inline, returns `bool`.  Same 10 fields as out-params.  R-004 + R-006: extended schema vs the original R-304 draft.
 - `mfem::seas::ParaViewOutput::SetTotalSnapshotsWritten(int)` — public method, clamps negative input; no behaviour change for callers that don't restart.
-- `mfem::seas::ParaViewOutput::RestoreScheduleState(real_t, real_t, int)` — public method, restores the schedule's last-write-time, last-v-max, and regime; no behaviour change for callers that don't restart. (R-304)
-- `mfem::seas::ParaViewOutput::GetLastWriteTime()`, `GetLastVMax()`, `GetCurrentRegime()` — three new public const accessors, used by `WritePetscTSCheckpoint` to snapshot the schedule state. (R-304)
+- `mfem::seas::ParaViewOutput::RestoreScheduleState(real_t, real_t, int, real_t)` — public method, restores the schedule's last-write-time, last-v-max, regime, and last-volume-write-time; no behaviour change for callers that don't restart.  R-007: clamps `regime` to [0,2].  R-006: 4th param added.
+- `mfem::seas::ParaViewOutput::SetLastCommittedCycle(int)` — public method, restores the dedup cycle key (R-004).  No behaviour change for callers that don't restart.
+- `mfem::seas::ParaViewOutput::GetLastWriteTime()`, `GetLastVMax()`, `GetCurrentRegime()`, `GetLastCommittedCycle()`, `GetLastVolumeWriteTime()` — five public const accessors, used by `WritePetscTSCheckpoint` to snapshot the schedule state.  R-004 / R-006 added the last two.
 
 **Connection to existing code:**
 
@@ -371,7 +539,7 @@ int    GetCurrentRegime() const { return current_regime_; }
 
 - **Zero-fault-DOF rank restart.** `ReadCheckpoint` calls `state.SetSize(0)`. The R-003 padded-shrink at line 1572-1591 must run BEFORE `ReadCheckpoint`, so capacity is already >= 1; the SetSize(0) shrink preserves the allocation. Verified by an extension of `seas_test_bp5_petsc_ts_zero_fault_rank` (Phase 1 test 5 below).
 
-- **`dt_next == 0`.** Can happen if TSGetTimeStep is called BEFORE the first step or after `TSSetConvergedReason(TS_DIVERGED_*)`. Detect on read: if `dt_next <= 0`, fall back to `dt_init`. Log a one-line warning on rank 0.
+- **`dt_next == 0`.** Can happen if TSGetTimeStep is called BEFORE the first step or after `TSSetConvergedReason(TS_DIVERGED_*)`. Detect in the V2 driver block (§4): if `current_dt <= 0` after `current_dt = ts_dt_next`, fall back to `dt_init` and log a one-line warning on rank 0.  R-003 implementation lives in §4; do NOT push this guard inside `ReadPetscTSCheckpoint` (the reader is value-blind and should faithfully return the stored value).
 
 - **`paraview_snapshots > max_total_snapshots`.** Means the previous run already exhausted the cap. Restart should preserve this state — `SetTotalSnapshotsWritten(n)` accepts any non-negative `n`. The cap-exhausted branch will fire on the first `ShouldWrite` call after restart (per `RecomputeIntervalForCap`'s `remaining_budget <= 0` path) which is the correct behaviour.
 
@@ -382,9 +550,15 @@ int    GetCurrentRegime() const { return current_regime_; }
 - [ ] `seas_bp5_full --restart PREFIX --petsc-ts` no longer aborts with "ERROR: --restart is not supported with --petsc-ts".
 - [ ] A V1 checkpoint (written by an old build) read by a V2-aware driver with `--petsc-ts` aborts with a clear message naming the missing V2 fields.
 - [ ] A V1 checkpoint read by a V2-aware driver WITHOUT `--petsc-ts` (i.e., MFEM time stepper path) still works exactly as today (V1 backwards compatibility).
-- [ ] A V2 checkpoint contains both the V1 block and the `PETSC_TS_V2` trailing block, in that order, in the same file `{prefix}_checkpoint_r{rank}.txt`.
+- [ ] A V2 checkpoint contains both the V1 block and the `PETSC_TS_V2` trailing block, in that order, in the same file `{prefix}_checkpoint_r{rank}.txt`.  The V2 trailing block has exactly 10 fields in the order documented in §1 (R-008): `petsc_ts_time`, `petsc_ts_dt_next`, `petsc_ts_step`, `petsc_ts_rejections` (cumulative; R-005), `paraview_snapshots`, `paraview_last_write_time`, `paraview_last_v_max`, `paraview_current_regime`, `paraview_last_committed_cycle` (R-004), `paraview_last_volume_write_time` (R-006).
 - [ ] Test `seas_test_bp5_petsc_ts_restart` passes: a short synthetic run that checkpoints mid-way and restarts produces a final state matching a fresh-run final state to within atol+rtol*|y|.
-- [ ] Test `seas_test_bp5_petsc_ts_zero_fault_rank` continues to pass (R-003 invariant preserved through restart).
+- [ ] Test `seas_test_bp5_petsc_ts_zero_fault_rank` continues to pass (R-003-padded-shrink invariant preserved through restart — NOTE: this is the OLDER R-003 from the round-1 review, not the R-003 dt_next-guard in this plan).
+- [ ] R-002 regression: corrupting V1.dt while leaving V2.ts_dt_next correct, the restart still produces the correct trajectory (proves V2 actually drives the post-restart dt rather than being silently overwritten by `PetscODESolver::Run`).
+- [ ] R-003 regression: a V2 checkpoint with `ts_dt_next = 0` triggers the `dt_init` fallback path and prints the documented rank-0 warning.
+- [ ] R-004 regression: `total_snapshots_written_` after restart matches the fresh-run count (no over-bump by 1 per restart).
+- [ ] R-005 regression: in a 3-link restart chain (A → B → C), `step_rejections` reported at the end of C is the SUM of A+B+C rejections.
+- [ ] R-006 regression: with `--volume-pv-dt 0.1`, the number of volume snapshots in window `[T_mid, T_full]` matches between a fresh run and a restart-from-T_mid run (no extra snapshot at the seam).
+- [ ] R-007 regression: a V2 checkpoint with `paraview_current_regime = 7` is loaded successfully and the in-memory `current_regime_` is clamped to 0.
 - [ ] Existing schedule-cap (23/23) and kinematics (31/31) tests continue to pass (no regression on non-restart paths).
 - [ ] `make seas_bp5_full seas_tpv102_driver seas_tpv104_driver seas_tpv205_driver` builds clean (no warnings).
 - [ ] The bp5_phase6_paraview_zfp_normal_48hr.sbatch can be re-submitted (after a one-time edit to enable restart on second submission via `--restart`) and resume cleanly.
@@ -528,11 +702,15 @@ Procedure (in pseudocode):
         and state Vector (full teardown — verifies the checkpoint
         round-trip is robust to memory recycling).
      e. Re-construct everything fresh from the same problem-setup code.
-     f. Apply the R-003 padded-shrink to state, then call
-        ReadCheckpoint + ReadPetscTSCheckpoint.  Apply TSSetTime,
-        TSSetTimeStep, TSSetStepNumber from the V2 fields, and
-        SetTotalSnapshotsWritten + RestoreScheduleState on pv_out
-        (per R-304).
+     f. Apply the R-003-padded-shrink (round-1; the older R-003) to
+        `state`, then call ReadCheckpoint + ReadPetscTSCheckpoint.
+        Apply `TSSetStepNumber(ts, ts_step)` (the only one Run does
+        not overwrite, per R-002), and set `t = ts_t; current_dt =
+        ts_dt_next; if (current_dt <= 0) current_dt = dt_init;`
+        (per R-002 + R-003), then `pv_out->SetTotalSnapshotsWritten`,
+        `pv_out->RestoreScheduleState(..., ts_last_volume_write_time)`
+        (R-006 fourth arg), and `pv_out->SetLastCommittedCycle(...)`
+        (R-004).
      g. Call petsc_ode->Run(state, t, dt, T_full).
      h. Save final state_B, final t_B.
 4. Assert:
@@ -567,10 +745,7 @@ Procedure (in pseudocode):
 
 **Sub-test 6: Rank-count mismatch.**
 
-```cpp
-// Write a 2-rank checkpoint.  Try to read it on a 1-rank run.
-// Assert MFEM_VERIFY fires with "num_ranks mismatch" message.
-```
+R-011: dropped from this test binary.  Inside an `mpirun -np 2` launch, switching from 2 ranks to 1 rank requires spawning a `system("mpirun -np 1 ./helper")` subprocess or leaking into MPIContext internals — both fragile.  The V1 `ReadCheckpoint` already catches rank-count mismatch at `checkpoint.hpp:196-201` via `MFEM_VERIFY(file_num_ranks == size, ...)`, and V2 inherits this because the V2 trailing block is per-rank like V1 (mismatch is detected before the V2 reader is even invoked).  The existing `seas_test_bp5_petsc_ts_zero_fault_rank` already exercises the rank-count guard implicitly; no new dedicated test for V2 is added.
 
 **Sub-test 7: V1 file rejected when --petsc-ts.**
 
@@ -579,6 +754,63 @@ Procedure (in pseudocode):
 // the V2 driver with --restart + --petsc-ts.  Assert MFEM_VERIFY
 // fires with the documented "V1 checkpoint does not contain PETSc
 // TS state" message.
+```
+
+**Sub-test 8: `dt_next == 0` fallback (R-003).**
+
+```cpp
+// Write a V2 checkpoint with ts_dt_next = 0.0 (synthesise by hand,
+// or fish out a real one from a forced TS_DIVERGED checkpoint).
+// Restart with that file; capture rank-0 stdout.  Assert:
+//   (a) the run completes without aborting;
+//   (b) rank-0 log contains "V2 ts_dt_next was 0 <= 0; falling back
+//       to dt_init";
+//   (c) the first post-restart dt equals dt_init.
+```
+
+**Sub-test 9: Multi-restart rejection accumulation (R-005).**
+
+```cpp
+// Three-link chain: run A from t=0 to T_A, checkpoint, restart to
+// T_B, checkpoint, restart to T_C.  Read PETSc rejection counts
+// from each run's summary line.  Assert:
+//   (a) n_AB >= n_A and n_ABC >= n_AB (monotonicity);
+//   (b) the V2 rejections field in prefix_B equals n_AB (cumulative
+//       up to that checkpoint), NOT just n_B alone.
+```
+
+**Sub-test 10: Volume-PV cadence survives restart (R-006).**
+
+```cpp
+// Set --volume-pv-dt 0.1, --paraview-volume-vtu (or hdf5).  Run
+// scenario A from t=0 to 2.0 s, checkpoint at 1.0 s.  Restart from
+// 1.0 s, run to 2.0 s.  Assert:
+//   snap_count_in_window(prefix_A, 1.0, 2.0)
+// == snap_count_in_window(prefix_B, 1.0, 2.0)
+// (i.e. no extra snapshot at the post-restart seam from
+//  last_volume_write_time_ defaulting to -1e30).
+```
+
+**Sub-test 11: Regime clamp on V2 corruption (R-007).**
+
+```cpp
+// Hand-write a V2 trailing block with paraview_current_regime = 7.
+// Restart; assert ReadPetscTSCheckpoint returns true (the value is
+// faithfully read) AND pv_out->GetCurrentRegime() == 0 (the setter
+// clamped it).  Sanity-check that the next ShouldWrite call doesn't
+// take the invalid-regime path.
+```
+
+**Sub-test 12: First post-restart commit doesn't over-bump snapshot counter (R-004).**
+
+```cpp
+// Run scenario A producing N writes, checkpoint with
+// total_snapshots_written_ = N and last_committed_cycle_ = C.
+// Restart, then call CommitSchedule at exactly the saved
+// last_write_time_ (within tol).  Assert:
+//   pv_out->GetTotalSnapshotsWritten() == N  (NOT N+1, i.e. the
+//   dedup correctly recognised "same step as last commit" thanks
+//   to SetLastCommittedCycle(C) being called in the V2 restore).
 ```
 
 ### Phase 2 — Tighten Sub-test 3 to bit-exact first-step dt
@@ -606,14 +838,19 @@ Procedure (in pseudocode):
 $ cd miniapps/seas
 $ make seas_test_bp5_petsc_ts_restart        # Phase 1+
 $ mpirun -np 2 ./seas_test_bp5_petsc_ts_restart
-  Sub-test 1 (V1 backwards compat) ... PASS
-  Sub-test 2 (V2 round-trip) ........ PASS
-  Sub-test 3 (fresh-vs-restart) ..... PASS (within atol)
-  Sub-test 4 (snapshot counter) ..... PASS
-  Sub-test 5 (zero-fault-rank) ...... PASS
-  Sub-test 6 (rank mismatch) ........ PASS
-  Sub-test 7 (V1 + --petsc-ts) ...... PASS
-  === Summary: 7 / 7 passed; 0 failed ===
+  Sub-test 1  (V1 backwards compat) ............ PASS
+  Sub-test 2  (V2 round-trip) .................. PASS
+  Sub-test 3  (fresh-vs-restart) ............... PASS (within atol)
+  Sub-test 4  (snapshot counter) ............... PASS
+  Sub-test 5  (zero-fault-rank) ................ PASS
+  Sub-test 6  (rank mismatch — see R-011 note) . SKIP (covered by V1 path)
+  Sub-test 7  (V1 + --petsc-ts) ................ PASS
+  Sub-test 8  (dt_next=0 fallback / R-003) ..... PASS
+  Sub-test 9  (multi-restart rejects / R-005) .. PASS
+  Sub-test 10 (volume-PV cadence / R-006) ...... PASS
+  Sub-test 11 (regime clamp / R-007) ........... PASS
+  Sub-test 12 (commit-cycle dedup / R-004) ..... PASS
+  === Summary: 11 / 11 passed; 0 failed; 1 skipped (sub-test 6) ===
 ```
 
 The new test is MPI-only. Per R-104 / FIX_REPORT decision, it stays OUT of `make test` umbrella (mpirun not portable). It DOES get its own target `test-bp5-petsc-ts-restart` and a one-line README note in `regime_budget_2026-05-16.md` that operators should run it as a pre-submit step.
@@ -629,9 +866,9 @@ The new test is MPI-only. Per R-104 / FIX_REPORT decision, it stays OUT of `make
 | TSADAPTBASIC has hidden multi-step history not captured by `TSGetTimeStep` | Sub-test 3 fails (trajectory divergence > atol)    | Read PETSc 3.15 source `src/ts/adapt/impls/basic/adaptbasic.c` to verify; if history exists, add to V2 schema |
 | FSAL stage NOT inherited produces > 1% trajectory drift over many steps | Long-window variant of Sub-test 3 (10k steps not 200) | Phase 3 fix; until then document as expected behaviour                  |
 | `TSSetStepNumber` doesn't reset PETSc's internal `_TSMonitorSet` log; output cycle counts drift | Manual check: monitor callback's `step` arg vs. the saved counter | Test that the monitor fires with `step == saved_step + 1` after restart |
-| Append-mode writing of V2 block races with WriteCheckpoint's close | Always serial (one rank, one file at a time); no race | None needed                                                             |
+| Append-mode writing of V2 block races with the NEXT WriteCheckpoint's TRUNC-open on a different rank | Each rank owns its file; intra-rank order is sequential | R-012: WritePetscTSCheckpoint ends with explicit `close()` + `Barrier()`, mirroring WriteCheckpoint, so the "all ranks committed before next checkpoint" invariant holds for the V2 block too |
 | ParaView snapshot files overwritten on restart (cycle numbers reset) | Sub-test would catch — check `<output_dir>/fault.vtkhdf` doesn't lose timesteps | Append-mode for VTKHDF or rename strategy — out of scope for Phase 1; document as known limitation |
-| Restart breaks the cap-aware `last_committed_cycle_` dedup        | Sub-test 4 catches double-bump                     | Save `last_committed_cycle_` in V2; restore in `SetTotalSnapshotsWritten` |
+| Restart breaks the cap-aware `last_committed_cycle_` dedup        | Sub-test 12 catches the over-bump-by-1             | R-004: save `paraview_last_committed_cycle` as the 9th V2 field; new `pv_out->SetLastCommittedCycle(...)` setter restores it at V2 read time |
 
 ### Known tricky areas
 
@@ -641,7 +878,7 @@ The new test is MPI-only. Per R-104 / FIX_REPORT decision, it stays OUT of `make
 
 3. **`TSGetTimeStep` returns the NEXT-step dt, not the JUST-COMPLETED dt** (per the comment at `petsc.cpp:4345`). This is the dt we want to save for restart — it's the controller's prediction for the next step. Correct.
 
-4. **`TSSetTime` on a TS that was already initialised — does it work?** Yes, PETSc allows it. From PETSc docs: "TSSetTime: Sets the time. Logically Collective on TS. Must be called before TSSolve, OR can be called inside a monitor to manually advance time. Usually called only at problem setup." Calling it AFTER `TSSetFromOptions` but BEFORE `TSSolve` (which is what `petsc_ode->Run()` does internally) is safe.
+4. **`TSSetTime` / `TSSetTimeStep` on a TS that was already initialised — does it work?  R-002 caveat.**  Yes, PETSc allows it, BUT `MFEM::PetscODESolver::Run()` unconditionally calls `TSSetTime(ts, t)` and `TSSetTimeStep(ts, dt)` on entry (`linalg/petsc.cpp:4362-4363`), using the C++ `t` / `dt` args you pass in.  So any explicit `TSSetTime(ts, ts_t)` or `TSSetTimeStep(ts, ts_dt_next)` you call BEFORE `Run` is silently overwritten the moment `Run` starts.  The load-bearing thing to update at restart time is the C++ `t` and `current_dt` variables themselves (NOT just the TS internal state).  `TSSetStepNumber` is the only of the three that `Run` does NOT overwrite, so it stays in the V2 restart block.  See R-002 in REVIEW.md round 4 for the full diagnosis.
 
 5. **`TSSetSolution` vs. PlaceMemory.** MFEM's `PetscODESolver::Run` calls `X->PlaceMemory(x.GetMemory(), true)` then `TSSolve(ts, X->x)`. The Vec `X->x` aliases the user's state Vector. After restart, we have a fresh `state` Vector (with the loaded values from `ReadCheckpoint`). The next `petsc_ode->Run(state, ...)` will PlaceMemory afresh, picking up the loaded values. So we do NOT need to call `TSSetSolution` explicitly — the PlaceMemory in Run does it.
 
@@ -661,7 +898,7 @@ The new test is MPI-only. Per R-104 / FIX_REPORT decision, it stays OUT of `make
 1. Read this plan top to bottom.
 2. Confirm with `git log --oneline -5` that you're on `feature/paraview-compaction` at or after commit `407f456` ("BP5 Phase 6 ParaView: fix ResetMemory crash + cap rework + per-regime cadence").
 3. Implement Phase 1 in a SINGLE atomic commit; do not bleed it into Phase 2 or 3.
-4. Run `make seas_test_bp5_petsc_ts_restart` + `mpirun -np 2 ./seas_test_bp5_petsc_ts_restart` and confirm 7/7 PASS before marking Phase 1 done.
+4. Run `make seas_test_bp5_petsc_ts_restart` + `mpirun -np 2 ./seas_test_bp5_petsc_ts_restart` and confirm 11/11 PASS + 1 SKIP (sub-test 6, per R-011) before marking Phase 1 done.
 5. Run `make test-paraview-schedule-cap test-bp5-petsc-ts-zero-fault-rank test-kinematics-field-set` to confirm no regression on the previously-fixed bugs.
 6. Submit a new test sbatch for Frontera (a derivative of `bp5_phase6_paraview_zfp_normal_48hr.sbatch` that runs for ~2 h with `--checkpoint-interval 1000`) to gather a V2 checkpoint. Then submit a follow-up `--restart` job and verify the trajectory continues cleanly.
 7. Defer Phases 2 and 3; they are documented for a later pass. The R-203 cleanup (round-3 review) is unrelated to this plan but should be in place; verify `RecomputeIntervalForCap` does NOT take a `regime` parameter (post-R-203 cleanup state).

@@ -227,6 +227,8 @@ TEST_PARAVIEW_SCHEDULE_CAP_SRC             = tests/unit/test_paraview_schedule_c
 TEST_KINEMATICS_FIELD_SET_SRC              = tests/unit/test_kinematics_field_set.cpp
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF rank PETSc TS lifecycle
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC      = tests/unit/test_bp5_petsc_ts_zero_fault_rank.cpp
+# Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip + restart-state restoration
+TEST_BP5_PETSC_TS_RESTART_SRC              = tests/unit/test_bp5_petsc_ts_restart.cpp
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
 TEST_PARAVIEW_RANK0_WARNING_GATE_SRC       = tests/unit/test_paraview_rank0_warning_gate.cpp
 # v9.2.0 plan §4.1-§4.4 regression gates
@@ -442,6 +444,7 @@ TEST_VOLUME_HDF_COMPRESSION_OBJ            = $(TEST_VOLUME_HDF_COMPRESSION_SRC:.
 TEST_PARAVIEW_SCHEDULE_CAP_OBJ             = $(TEST_PARAVIEW_SCHEDULE_CAP_SRC:.cpp=.o)
 TEST_KINEMATICS_FIELD_SET_OBJ              = $(TEST_KINEMATICS_FIELD_SET_SRC:.cpp=.o)
 TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ      = $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_SRC:.cpp=.o)
+TEST_BP5_PETSC_TS_RESTART_OBJ              = $(TEST_BP5_PETSC_TS_RESTART_SRC:.cpp=.o)
 TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_SRC:.cpp=.o)
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
@@ -1066,6 +1069,11 @@ seas_test_bp5_petsc_ts_zero_fault_rank: $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip
+seas_test_bp5_petsc_ts_restart: $(TEST_BP5_PETSC_TS_RESTART_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_PETSC_TS_RESTART_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate
 seas_test_paraview_rank0_warning_gate: $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ) $(MFEM_LIBS)
@@ -1650,6 +1658,10 @@ $(TEST_KINEMATICS_FIELD_SET_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FI
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_BP5_PETSC_TS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BP5_PETSC_TS_RESTART_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -2252,6 +2264,17 @@ test-kinematics-field-set: seas_test_kinematics_field_set
 # R-003 of REVIEW.md 2026-05-16 — zero-fault-DOF padded-shrink invariant.
 test-bp5-petsc-ts-zero-fault-rank: seas_test_bp5_petsc_ts_zero_fault_rank
 	./seas_test_bp5_petsc_ts_zero_fault_rank
+
+# Phase 1 of petsc_ts_restart_plan_2026-05-16 — V2 checkpoint round-trip
+# + restart-state restoration.  Sub-tests are mostly serial-runnable
+# (file I/O round-trip + ParaViewOutput setter/getter contracts) so the
+# target runs the binary directly without mpiexec.  Full driver-level
+# integration (sub-test 3 fresh-vs-restart trajectory) is deferred to
+# the bp5_phase6_paraview_zfp_normal_48hr.sbatch re-submission flow,
+# per plan §"Testing Strategy".  Per R-104 / R-011, this target is NOT
+# added to the `test:` umbrella.
+test-bp5-petsc-ts-restart: seas_test_bp5_petsc_ts_restart
+	./seas_test_bp5_petsc_ts_restart
 
 # R-104 of REVIEW.md 2026-05-16 round 2 — MPI-only rank-0 warning gate.
 # Requires np >= 2; skipped (returns 0) under serial.

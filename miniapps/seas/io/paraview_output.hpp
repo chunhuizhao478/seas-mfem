@@ -25,6 +25,7 @@
 #include "fault_vtkhdf_writer.hpp" // vtkhdf::FaultHDFState, WriteFaultPackHdf
 #endif
 
+#include <algorithm>   // std::clamp, std::max (R-007 setter)
 #include <string>
 #include <cmath>
 #include <cstdlib>
@@ -416,6 +417,88 @@ public:
    /// Phase 3: read-only counter of fault snapshots committed by Save /
    /// ShouldWrite / ForceSave so far this run.
    int GetTotalSnapshotsWritten() const { return total_snapshots_written_; }
+
+   // ---------------------------------------------------------------
+   //  PETSc TS restart support (plan §"Phase 1" §6).
+   //  Set* APIs are called ONLY at restart time (immediately after
+   //  construction, before any Save/ShouldWrite/ForceSave call).
+   //  Get* APIs are called by `WritePetscTSCheckpoint` to snapshot
+   //  the schedule state at checkpoint time.
+   // ---------------------------------------------------------------
+
+   /// @brief Restore the snapshot counter from a V2 checkpoint.
+   ///
+   /// Use ONLY at restart time, before any Save/ShouldWrite call.  The
+   /// cap-aware schedule needs the counter to survive restart;
+   /// otherwise the cap budget resets and a restarted long run will
+   /// over-write past `max_total_snapshots`.  Clamps negative values
+   /// to 0 (defends against a corrupted / truncated V2 block).
+   void SetTotalSnapshotsWritten(int n)
+   {
+      total_snapshots_written_ = std::max(n, 0);
+   }
+
+   /// @brief R-304 + R-006: Restore the adaptive-schedule state from a
+   /// V2 checkpoint.
+   ///
+   /// Pairs with `SetTotalSnapshotsWritten`.  Use ONLY at restart
+   /// time, before any Save/ShouldWrite call.  Without this
+   /// restoration the first ShouldWrite after restart fires
+   /// unconditionally (because `last_write_time_` defaults to -1e30
+   /// and `time - (-1e30)` always exceeds `dt_out * tol`) and the
+   /// regime state machine resets to interseismic regardless of where
+   /// the pre-checkpoint trajectory was.
+   ///
+   /// R-006: `last_volume_write_time` preserves the independent
+   /// volume-PV cadence across restart — without it the first
+   /// `ForceSaveImpl` after restart fires the volume save
+   /// unconditionally for the same -1e30 reason as above.
+   ///
+   /// R-007: `current_regime` is clamped to [0, 2] to defend against
+   /// a corrupted or forward-incompatible V2 block.
+   void RestoreScheduleState(real_t last_write_time, real_t last_v_max,
+                             int current_regime,
+                             real_t last_volume_write_time)
+   {
+      last_write_time_        = last_write_time;
+      last_v_max_             = last_v_max;
+      current_regime_         = std::clamp(current_regime, 0, 2);  // R-007
+      last_volume_write_time_ = last_volume_write_time;            // R-006
+   }
+
+   /// @brief R-004: restore the dedup-key cycle counter used by
+   /// CommitSchedule's same-step guard.
+   ///
+   /// Use ONLY at restart time, alongside `SetTotalSnapshotsWritten`
+   /// and `RestoreScheduleState`.  Without this restoration the first
+   /// post-restart `CommitSchedule` cannot dedup against the (-INT_MIN)
+   /// default sentinel and `total_snapshots_written_` over-bumps by 1
+   /// per restart event.
+   ///
+   /// R-004 (REVIEW.md round 5): negative inputs other than the
+   /// documented INT_MIN sentinel are clamped to INT_MIN.  This
+   /// treats any corrupted-but-negative V2 value as "no prior
+   /// commit", which is the safer default — falsely identifying
+   /// "fresh state" causes at most one extra bump on the first
+   /// CommitSchedule, whereas a corrupted positive value can cause
+   /// legitimate dedups to misfire (silent under-count for the rest
+   /// of the run).
+   void SetLastCommittedCycle(int cycle)
+   {
+      last_committed_cycle_ = (cycle < 0)
+                              ? std::numeric_limits<int>::min()
+                              : cycle;
+   }
+
+   /// @brief R-304 + R-004 + R-006: read-only accessors used by
+   /// `WritePetscTSCheckpoint` to snapshot the schedule state at
+   /// checkpoint time.  These fields were previously private; exposing
+   /// them is necessary for the restart machinery.
+   real_t GetLastWriteTime()       const { return last_write_time_; }
+   real_t GetLastVMax()            const { return last_v_max_; }
+   int    GetCurrentRegime()       const { return current_regime_; }
+   int    GetLastCommittedCycle()  const { return last_committed_cycle_; }     // R-004
+   real_t GetLastVolumeWriteTime() const { return last_volume_write_time_; }   // R-006
 
    /// @brief Construct the ParaView output manager.
    ///
