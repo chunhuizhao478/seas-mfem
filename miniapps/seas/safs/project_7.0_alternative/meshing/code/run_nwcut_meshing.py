@@ -208,7 +208,17 @@ def run_gmsh(stl_path: Path, bbox: np.ndarray, msh_path: Path,
         "-setnumber", "pad_top",   f"{pad_top}",
         "-setnumber", "lc_min",    f"{lc_floor}",
         "-nt", str(threads),
-        "-format", "msh4",
+        # MFEM's mesh/mesh_readers.cpp:ReadGmshMesh is a Gmsh v2.2-only
+        # parser (the function accepts version >= 2.2 but then runs the
+        # v2.2 body unconditionally — there is no v4 branch).  Emitting
+        # `msh4` here would produce artifacts unreadable by every MFEM
+        # driver in this tree (seas_spatial_dyn_driver,
+        # seas_project_velocity_to_mesh, seas_project_stress_to_mesh,
+        # any future quasi-dynamic driver) with the misleading abort
+        # "Gmsh file : vertices indices are not unique" at
+        # mesh_readers.cpp:1628.  See
+        # docs/DEBUG_msh4_mfem_incompat.md for the full investigation.
+        "-format", "msh22",
         "-o", str(msh_path),
     ]
     if size_field_pos is not None:

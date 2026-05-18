@@ -150,6 +150,9 @@ TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ   = $(TEST_PHASEH_LSW_FORCED_RUPTURE_SRC:.cpp
 # (MaterialField, BoundaryConfig) ctor (H.1 + H.3 + H.4).
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC = tests/unit/test_phaseh_wave_operator_constant_parity.cpp
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ = $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC:.cpp=.o)
+# Phase 4 of spatial_dynamic_rupture_plan.md (rev-3): generic dynamic-rupture driver.
+SPATIAL_DYN_DRIVER_SRC               = drivers/spatial_dyn_driver.cpp
+SPATIAL_DYN_DRIVER_OBJ               = $(SPATIAL_DYN_DRIVER_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -1884,6 +1887,62 @@ seas_tpv205_driver: $(TPV205_DRIVER_OBJ) $(TPV205_SHARED_OBJS) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) \
 	    $(PML_LAYER_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 4 of spatial_dynamic_rupture_plan.md (rev-3):
+# seas_spatial_dyn_driver — generic spatially-varying dynamic-rupture
+# driver.  Reuses the TPV205 LSW closed-form machinery + the new
+# Phase H LSW_ForcedRupture dispatch.  Object compilation needs HDF5
+# + toml11 include flags (spatial_friction.hpp pulls in
+# heterogeneous_material.hpp which optionally includes the sidecar
+# plumbing).
+$(SPATIAL_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp \
+                                $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
+                          $(TPV205_SHARED_OBJS) \
+                          $(WAVE_OPERATOR_OBJ) \
+                          $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                          $(GODUNOV_FLUX_OBJ) \
+                          $(GODUNOV_FLUX_POOL_OBJ) \
+                          $(PML_LAYER_OBJ) \
+                          $(SPATIAL_FRICTION_OBJ) \
+                          $(SPATIAL_VELOCITY_OBJ) \
+                          $(SPATIAL_STRESS_OBJ) \
+                          $(HETEROGENEOUS_MATERIAL_OBJ) \
+                          $(MATERIAL_COEFFICIENTS_OBJ) \
+                          $(DATA_FIELD_3D_OBJ) \
+                          $(STRESS_FIELD_3D_OBJ) \
+                          $(FIELD_COEFFICIENT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(SPATIAL_DYN_DRIVER_OBJ) \
+	    $(TPV205_SHARED_OBJS) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_VELOCITY_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 4 smoke target: build + dry-run on the EXAMPLE LSW TOML fixture.
+test-spatial-dyn-driver: seas_spatial_dyn_driver
+	./seas_spatial_dyn_driver \
+	    --config safs/project_7.0_alternative/friction/EXAMPLE_spatial_friction_slip_weakening_safs.toml \
+	    --mesh safs/project_7.0_alternative/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh \
+	    --no-sidecar-material \
+	    --dry-run
 
 # Phase 4a: TPV102 local integration tests
 seas_test_tpv102_local: $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)

@@ -561,16 +561,18 @@ re-run; the README chart is refreshed.
                                 results/msh/safs_fault_box_nwcut_*_lcfar3000.msh
    echo "exit=$?"   # must be 0
    ```
-3. Mesh re-conversion for MFEM (msh4 → msh2) and re-projection of the
-   `1000m_zgraded` variant for each of the three CVM versions:
+3. Re-project the `1000m_zgraded` variant for each of the three CVM
+   versions.  The intermediate `msh4 -> msh2` conversion previously
+   needed here has been REMOVED: as of `run_nwcut_meshing.py` commit
+   <2026-05-18>, the mesher emits Gmsh v2.2 (`-format msh22`) directly,
+   so MFEM consumers load `results/msh/*.msh` without conversion.  See
+   `docs/DEBUG_msh4_mfem_incompat.md` for the underlying root cause
+   (MFEM ships a v2.2-only Gmsh reader).
    ```bash
-   gmsh ../../meshing/results/msh/safs_fault_box_nwcut_1000m_zgraded.msh \
-        -format msh2 -save \
-        -o /tmp/safs_msh2/safs_fault_box_nwcut_1000m_zgraded.msh -v 0
    for ver in cvmh cvm_s4.26.m01 multiscale_statewise_cvm; do
        cd /…/velocity/results/$ver/preview
        …/seas_project_velocity_to_mesh \
-           --mesh /tmp/safs_msh2/safs_fault_box_nwcut_1000m_zgraded.msh \
+           --mesh ../../meshing/results/msh/safs_fault_box_nwcut_1000m_zgraded.msh \
            --sidecar ../velocity_safs.h5 \
            --out projected_velocity_1000m_zgraded
    done

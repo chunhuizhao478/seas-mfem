@@ -94,6 +94,22 @@ Any change to these files requires running full verification tests:
 | `solver/time_stepper.hpp` | RK45, error control | Parallel error reduction critical for MPI |
 | `config/bp5_params.hpp` | Spatial parameter functions | Wrong a(z) or Dc -> wrong friction regime |
 
+## Known limitation — Gmsh `.msh` format
+
+`mfem::Mesh::ReadGmshMesh` is a **Gmsh v2.2-only ASCII parser** (the
+function accepts `version >= 2.2` but unconditionally runs the v2.2
+body; there is no v4 branch).  All `.msh` artifacts consumed by this
+miniapp's drivers and tests MUST be emitted in Gmsh v2.2 format
+(`gmsh ... -format msh22 -o file.msh`).  A v4.x file aborts at
+`mesh/mesh_readers.cpp:1628` with the misleading message
+`Gmsh file : vertices indices are not unique` (the indices are fine;
+the parser is misaligned on the v4 `$Nodes` header).
+
+The SAFS mesher (`safs/project_7.0_alternative/meshing/code/run_nwcut_meshing.py`)
+emits v2.2 directly.  When writing a new mesh producer or
+documenting a `gmsh` command for a contributor, default to `msh22`.
+Full investigation: `safs/project_7.0_alternative/meshing/docs/DEBUG_msh4_mfem_incompat.md`.
+
 ## Building and Testing
 
 ### Environment

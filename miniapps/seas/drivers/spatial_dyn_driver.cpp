@@ -1,0 +1,1346 @@
+// Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
+//
+// seas_spatial_dyn_driver — Phase 4 of
+// safs/project_7.0_alternative/document/spatial_dynamic_rupture_plan.md (rev-3).
+//
+// Single-event dynamic-rupture driver for spatially-varying material,
+// pre-stress, and friction inputs.  Reuses the TPV205 LSW closed-form
+// machinery (Tpv205SubStepIterator + AdvanceADERWithSubStep + the new
+// LSW_ForcedRupture dispatch from Phase H) on a SAFS / TPV26-27-style
+// problem driven by a single TOML config.
+//
+// Deviation block (vs Phase 4 spec).  Documented up front for the
+// adversarial code review (REVIEW.md).
+//
+// D-1.  WaveOperator(MaterialField, BoundaryConfig) ctor (Phase H.1)
+//       is NOT yet wired (see dynamic/wave_operator.hpp:215-233,
+//       SetGodunovFluxPool still aborts).  Until Phase H lands the
+//       per-element flux dispatch, this driver constructs WaveOperator
+//       through the scalar-material ctor only:
+//
+//         * MaterialField::Mode::Constant  ⇒ extract (lambda, mu, rho)
+//           and call the scalar ctor (byte-equivalent to the
+//           heterogeneous ctor on a Constant input).
+//         * MaterialField::Mode::Coefficient (the SAFS sidecar path) ⇒
+//           ABORT with a clear "Phase H not yet wired" message so the
+//           caller cannot accidentally run sidecar-input physics on
+//           the scalar code path.
+//
+//       --no-sidecar-material always uses the Constant path.  The CSM
+//       stress sidecar path (Phase 3) is unaffected — pre-stress is a
+//       *fault-DOF* quantity and runs through FaultGeometry, not the
+//       WaveOperator material.
+//
+// D-2.  spatial::ComputePerDOFCoordsAndBasisFromWave (Phase 5 helper
+//       was deferred — see dynamic/spatial_setup.hpp:14-22).  The
+//       driver therefore mirrors the TPV205 driver's inline fault-DOF
+//       walk to build per-DOF coordinates / basis / dof_to_elem from
+//       wave.GetFaultInteriorFaces() + GetFaultSharedFaces().
+//
+// D-3.  Write/ReadTpv104Checkpoint actual signature is
+//       (prefix, t, dt, step, Q, dof_data, mpi/(rank,size,comm),
+//        driver_tag).  The plan's docstring referenced a hypothetical
+//       6-extra-ParaView-state form; the actual on-disk schema is
+//       smaller.  This driver uses the real raw-MPI overload with
+//       driver_tag = "spatial_dyn".
+
+#include "mfem.hpp"
+
+#include "../dynamic/wave_state.hpp"
+#include "../dynamic/wave_operator.hpp"
+#include "../dynamic/fault_face_flux.hpp"
+#include "../dynamic/friction_solver.hpp"
+#include "../dynamic/tpv205_friction.hpp"
+#include "../dynamic/tpv205_substep_iterator.hpp"
+#include "../dynamic/heterogeneous_material.hpp"
+#include "../dynamic/spatial_setup.hpp"
+#include "../dynamic/seas_diag_rank.hpp"
+
+#include "../domain/boundary_config.hpp"
+
+#include "../fault/fault_basis.hpp"
+#include "../fault/fault_geometry.hpp"
+#include "../fault/fault_geometry_safs_templated.inl"
+
+#include "../config/bp5_params.hpp"
+
+#include "../common/mpi_context.hpp"
+
+#include "../io/paraview_output.hpp"
+#include "../io/tpv104_checkpoint.hpp"
+#include "../io/data_field_3d.hpp"
+#include "../io/stress_field_3d.hpp"
+#include "../io/material_coefficients.hpp"
+
+#include "../spatial/code/spatial_friction.hpp"
+#include "../spatial/code/spatial_velocity.hpp"
+#include "../spatial/code/spatial_stress.hpp"
+
+#include <algorithm>
+#include <array>
+#include <cmath>
+#include <cstdlib>
+#include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+#include <limits>
+#include <memory>
+#include <numeric>
+#include <sstream>
+#include <string>
+#include <vector>
+
+#ifdef MFEM_USE_MPI
+#include <mpi.h>
+#endif
+
+using namespace mfem;
+using namespace mfem::seas;
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+namespace mfem { namespace seas { int g_seas_my_rank = 0; } }  // NOLINT
+#endif
+
+// Precondition P-2 build-time guard (plan §Preconditions, rev-3).
+// MaterialField::EvalAt must accept (elem, T, ip, lam, mu, rho) by ref.
+static_assert(
+   std::is_invocable_v<decltype(&mfem::seas::MaterialField::EvalAt),
+                       const mfem::seas::MaterialField*, int,
+                       mfem::ElementTransformation&,
+                       const mfem::IntegrationPoint&,
+                       mfem::real_t&, mfem::real_t&, mfem::real_t&>,
+   "Precondition P-2 not met: MaterialField::EvalAt signature drift.");
+
+// --------------------------------------------------------------------------
+// Small CLI parsing helpers (same convention as tpv104_driver.cpp).
+// --------------------------------------------------------------------------
+namespace
+{
+
+std::string GetStringArg(int argc, char *argv[], const char *flag,
+                         const std::string &default_val)
+{
+   for (int i = 1; i < argc - 1; ++i)
+   {
+      if (std::string(argv[i]) == flag) { return argv[i + 1]; }
+   }
+   return default_val;
+}
+
+real_t GetRealArg(int argc, char *argv[], const char *flag, real_t default_val)
+{
+   const std::string val = GetStringArg(argc, argv, flag, "");
+   if (val.empty()) { return default_val; }
+   return std::stod(val);
+}
+
+int GetIntArg(int argc, char *argv[], const char *flag, int default_val)
+{
+   const std::string val = GetStringArg(argc, argv, flag, "");
+   if (val.empty()) { return default_val; }
+   return std::stoi(val);
+}
+
+bool HasFlag(int argc, char *argv[], const char *flag)
+{
+   for (int i = 1; i < argc; ++i)
+   {
+      if (std::string(argv[i]) == flag) { return true; }
+   }
+   return false;
+}
+
+// Map TOML mixed_flux string -> WaveOperator enum.
+MixedFluxMode ParseMixedFlux(const std::string &s)
+{
+   if (s == "none")            { return MixedFluxMode::None; }
+   if (s == "adjacent")        { return MixedFluxMode::Adjacent; }
+   if (s == "all_continuous")  { return MixedFluxMode::AllContinuous; }
+   MFEM_ABORT("spatial_dyn_driver: --mixed-flux: unknown value '" << s
+              << "'.  Accepted: none | adjacent | all_continuous.");
+}
+
+ParaViewOutput<ParMesh>::VolumeOutputMode ParseVolumeMode(
+   const std::string &s, bool &enabled)
+{
+   if (s == "off") { enabled = false; return ParaViewOutput<ParMesh>::DefaultVolumeOutputMode(); }
+   enabled = true;
+   if (s == "vtu")  { return ParaViewOutput<ParMesh>::VolumeOutputMode::Vtu; }
+   if (s == "hdf5") { return ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5; }
+   MFEM_ABORT("spatial_dyn_driver: paraview_volume: unknown value '"
+              << s << "'.  Accepted: hdf5 | vtu | off.");
+}
+
+ParaViewOutput<ParMesh>::FaultOutputMode ParseFaultMode(
+   const std::string &s, bool &enabled)
+{
+   if (s == "off") { enabled = false; return ParaViewOutput<ParMesh>::FaultOutputMode::Vtu; }
+   enabled = true;
+   if (s == "vtu")  { return ParaViewOutput<ParMesh>::FaultOutputMode::Vtu; }
+   if (s == "hdf5") { return ParaViewOutput<ParMesh>::FaultOutputMode::Hdf5; }
+   MFEM_ABORT("spatial_dyn_driver: paraview_fault: unknown value '"
+              << s << "'.  Accepted: hdf5 | vtu | off.");
+}
+
+// Compute the count of fault QPs per face using the same probe logic as
+// drivers/tpv205_driver.cpp:1265-1284: peek at the first interior or
+// shared fault face on this rank, then MPI_Allreduce(MAX) so every
+// rank agrees.
+int ProbeNbfPerFace(ParMesh &pmesh, int order,
+                    const Array<int> &fault_int_faces,
+                    const Array<int> &fault_shr_faces,
+                    MPI_Comm comm)
+{
+   int nbf = 0;
+   if (fault_int_faces.Size() > 0)
+   {
+      FaceElementTransformations *ftr =
+         pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
+      MFEM_VERIFY(ftr, "spatial_dyn: fault interior face has null FTR");
+      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+   }
+#ifdef MFEM_USE_MPI
+   else if (fault_shr_faces.Size() > 0)
+   {
+      FaceElementTransformations *ftr =
+         pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
+      MFEM_VERIFY(ftr, "spatial_dyn: fault shared face has null FTR");
+      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+   }
+   {
+      int local_nbf = nbf;
+      MPI_Allreduce(&local_nbf, &nbf, 1, MPI_INT, MPI_MAX, comm);
+   }
+#else
+   (void)comm;
+#endif
+   return nbf;
+}
+
+// Walk the wave operator's fault face lists and produce the per-DOF
+// arrays the new FaultGeometry ctor / spatial_setup.hpp expect.
+//
+// Outputs (all owned-fault, no double-counting; interior first, shared
+// appended in fault_shared_faces order):
+//   - phys_coords[i] = (x, y, z) at fault QP i
+//   - dof_basis(9, i) = [n; t1=dip; t2=strike] at QP i
+//   - dof_to_elem[i] = bulk Elem1 owning QP i
+//   - dof_to_attr[i] = mesh boundary attribute at QP i (fault_attr for
+//     interior fault faces; shared faces report the bdr attr if any,
+//     else fault_attr)
+//   - dof_ips[i] = reference-element IntegrationPoint at QP i
+//     (FaultGeometry::fault_dof_ip cache; consumed by
+//     spatial_setup.hpp's IP-aware overload).
+void BuildPerDOFFaultTables(ParMesh &pmesh,
+                            int order,
+                            int fault_attr,
+                            const FaultBasis &fbasis,
+                            const Array<int> &fault_int_faces,
+                            const Array<int> &fault_shr_faces,
+                            int nbf_per_face,
+                            std::vector<Vector> &phys_coords,
+                            Vector &dof_coords_3d,
+                            DenseMatrix &dof_basis,
+                            Array<int> &dof_to_elem,
+                            Array<int> &dof_to_attr,
+                            std::vector<IntegrationPoint> &dof_ips)
+{
+   const int num_int  = fault_int_faces.Size() * nbf_per_face;
+   const int num_shr  = fault_shr_faces.Size() * nbf_per_face;
+   const int N        = num_int + num_shr;
+
+   phys_coords.clear();
+   phys_coords.reserve(N);
+   dof_coords_3d.SetSize(3 * N);
+   dof_basis.SetSize(9, N);
+   dof_to_elem.SetSize(N);
+   dof_to_attr.SetSize(N);
+   dof_ips.assign(N, IntegrationPoint());
+
+   auto write_dof = [&](int dof_idx, FaceElementTransformations *ftr,
+                        const IntegrationPoint &ip,
+                        const FaultBasisData &bdata,
+                        int attr)
+   {
+      ftr->SetAllIntPoints(&ip);
+      Vector phys(3);
+      ftr->Face->Transform(ip, phys);
+      phys_coords.push_back(phys);
+
+      for (int d = 0; d < 3; ++d)
+      {
+         dof_coords_3d(3 * dof_idx + d) = phys(d);
+         dof_basis(0 + d, dof_idx) = bdata.normal[d];
+         dof_basis(3 + d, dof_idx) = bdata.tangent1[d];
+         dof_basis(6 + d, dof_idx) = bdata.tangent2[d];
+      }
+      dof_to_elem[dof_idx] = ftr->Elem1No;
+      dof_to_attr[dof_idx] = attr;
+      dof_ips[dof_idx]     = ftr->GetElement1IntPoint();
+   };
+
+   int dof_idx = 0;
+
+   for (int fi = 0; fi < fault_int_faces.Size(); ++fi)
+   {
+      const int face = fault_int_faces[fi];
+      FaceElementTransformations *ftr =
+         pmesh.GetInteriorFaceTransformations(face);
+      MFEM_VERIFY(ftr, "spatial_dyn: interior fault face has null FTR");
+      const IntegrationRule &ir =
+         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+      MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
+                  "spatial_dyn: interior fault face has " << ir.GetNPoints()
+                  << " QPs, expected " << nbf_per_face);
+      const FaultBasisData &bdata = fbasis.GetBasis(fi);
+      for (int q = 0; q < nbf_per_face; ++q)
+      {
+         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, fault_attr);
+      }
+   }
+#ifdef MFEM_USE_MPI
+   for (int si = 0; si < fault_shr_faces.Size(); ++si)
+   {
+      const int sf = fault_shr_faces[si];
+      FaceElementTransformations *ftr =
+         pmesh.GetSharedFaceTransformations(sf);
+      MFEM_VERIFY(ftr, "spatial_dyn: shared fault face has null FTR");
+      const IntegrationRule &ir =
+         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+      MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
+                  "spatial_dyn: shared fault face has " << ir.GetNPoints()
+                  << " QPs, expected " << nbf_per_face);
+      const FaultBasisData &bdata =
+         fbasis.GetBasis(fault_int_faces.Size() + si);
+      for (int q = 0; q < nbf_per_face; ++q)
+      {
+         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, fault_attr);
+      }
+   }
+#else
+   (void)fault_shr_faces;
+#endif
+   MFEM_VERIFY(dof_idx == N,
+               "spatial_dyn: per-DOF table walk wrote " << dof_idx
+               << " entries, expected " << N);
+}
+
+// TPV205-style ADER macro-step driver: predictor in the bulk, LSW
+// closed-form per sub-step at fault QPs, corrector via wave.AdvanceADER
+// with the side-channel I_imp.  Mirrors AdvanceADERWithSubStep in
+// drivers/tpv205_driver.cpp (1:1 except no SEAS_DIAG hooks).
+void AdvanceADERWithSubStep_Spatial(
+   WaveOperator<ParMesh> &wave,
+   Tpv205SubStepIterator &iterator,
+   std::vector<DOFData> &dof_data,
+   const std::vector<Vector> &fault_coords,
+   const Vector &Q,
+   real_t dt_step,
+   int ader_order,
+   real_t t_step_start,
+   Vector &Q_new)
+{
+   MFEM_VERIFY(dt_step > 0.0,
+               "AdvanceADERWithSubStep_Spatial: dt_step must be > 0, got "
+               << dt_step);
+   MFEM_VERIFY(ader_order >= 2 && ader_order <= 4,
+               "AdvanceADERWithSubStep_Spatial: ader_order must be in "
+               "{2,3,4}, got " << ader_order);
+
+   const std::vector<real_t> configured_deltaT  = iterator.GetDeltaT();
+   const std::vector<real_t> configured_weights = iterator.GetTimeWeights();
+   const int O = static_cast<int>(configured_deltaT.size());
+   MFEM_VERIFY(O >= 1,
+               "AdvanceADERWithSubStep_Spatial: iterator deltaT empty; "
+               "SetSubSteps must be called first.");
+   const real_t configured_sum =
+      std::accumulate(configured_deltaT.begin(), configured_deltaT.end(),
+                      static_cast<real_t>(0));
+   MFEM_VERIFY(configured_sum > 0.0,
+               "AdvanceADERWithSubStep_Spatial: Σ deltaT = "
+               << configured_sum << " ≤ 0");
+
+   const real_t dt_scale = dt_step / configured_sum;
+   std::vector<real_t> deltaT_scaled(O);
+   for (int o = 0; o < O; ++o)
+   {
+      deltaT_scaled[o] = configured_deltaT[o] * dt_scale;
+   }
+   iterator.SetSubSteps(deltaT_scaled, configured_weights);
+   const std::vector<real_t> &deltaT = iterator.GetDeltaT();
+
+   // Sub-step MIDPOINT nodes on [0, dt_step].
+   std::vector<real_t> tau_nodes(O);
+   real_t acc = 0.0;
+   for (int o = 0; o < O; ++o)
+   {
+      tau_nodes[o] = acc + 0.5 * deltaT[o];
+      acc += deltaT[o];
+   }
+
+   std::vector<Vector> Q_per_node;
+   wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes,
+                                 Q_per_node);
+   MFEM_VERIFY(static_cast<int>(Q_per_node.size()) == O,
+               "AdvanceADERWithSubStep_Spatial: ComputeADERSubStepStates "
+               "returned " << Q_per_node.size() << " nodes, expected " << O);
+
+   const int n_total_fault_qps = wave.GetNumTotalFaultQPs();
+   std::vector<std::vector<real_t>> Q_pointwise_plus(O), Q_pointwise_minus(O);
+   for (int o = 0; o < O; ++o)
+   {
+      wave.EvaluateBulkAtFaultQPsCanonical(Q_per_node[o],
+                                           Q_pointwise_plus[o],
+                                           Q_pointwise_minus[o]);
+   }
+
+   const size_t n_words =
+      static_cast<size_t>(NUM_STATE)
+      * static_cast<size_t>(n_total_fault_qps);
+   std::vector<real_t> I_imp_plus_flat(n_words, 0.0);
+   std::vector<real_t> I_imp_minus_flat(n_words, 0.0);
+
+   if (n_total_fault_qps > 0)
+   {
+      iterator.AdvanceWithSubStepStates(dof_data, fault_coords,
+                                        Q_pointwise_plus,
+                                        Q_pointwise_minus,
+                                        dt_step, t_step_start,
+                                        I_imp_plus_flat.data(),
+                                        I_imp_minus_flat.data());
+   }
+
+   struct ImposedGuard
+   {
+      WaveOperator<ParMesh> &w_;
+      explicit ImposedGuard(WaveOperator<ParMesh> &w) : w_(w) {}
+      ~ImposedGuard() { w_.ResetSubStepFaultImposedStates(); }
+   };
+   wave.SetSubStepFaultImposedStates(
+      n_total_fault_qps > 0 ? I_imp_plus_flat.data()  : nullptr,
+      n_total_fault_qps > 0 ? I_imp_minus_flat.data() : nullptr,
+      n_total_fault_qps);
+   ImposedGuard guard(wave);
+
+   wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+}
+
+}  // namespace
+
+// =========================================================================
+// main
+// =========================================================================
+
+int main(int argc, char *argv[])
+{
+#ifdef MFEM_USE_MPI
+   MPI_Init(&argc, &argv);
+   MPI_Comm comm = MPI_COMM_WORLD;
+   int rank = 0, nprocs = 1;
+   MPI_Comm_rank(comm, &rank);
+   MPI_Comm_size(comm, &nprocs);
+#else
+   int rank = 0, nprocs = 1;
+#endif
+
+#ifdef SEAS_DIAG_FAULT_FLUX
+   mfem::seas::g_seas_my_rank = rank;
+#endif
+
+   // -----------------------------------------------------------------
+   // 1.  CLI parse — config-driven; CLI overrides are merged after
+   //     TOML load (later wins).
+   // -----------------------------------------------------------------
+   const std::string config_path =
+      GetStringArg(argc, argv, "--config", "");
+   if (config_path.empty())
+   {
+      if (rank == 0)
+      {
+         std::cerr << "ERROR: --config PATH.toml is required.\n"
+                   << "  Usage: seas_spatial_dyn_driver --config "
+                   << "<file>.toml [OPTIONS]\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 2;
+   }
+
+   const bool dry_run         = HasFlag(argc, argv, "--dry-run");
+   const bool verify_dispatch = HasFlag(argc, argv, "--verify-dispatch");
+   const bool no_sidecar_material =
+      HasFlag(argc, argv, "--no-sidecar-material");
+   const bool print_derived = HasFlag(argc, argv, "--print-derived");
+
+   const std::string cli_mesh        = GetStringArg(argc, argv, "--mesh", "");
+   const std::string cli_vel_model   =
+      GetStringArg(argc, argv, "--velocity-model", "");
+   const std::string cli_vel_path    =
+      GetStringArg(argc, argv, "--override-velocity-path", "");
+   const std::string cli_stress_kind =
+      GetStringArg(argc, argv, "--stress-kind", "");
+   const std::string cli_stress_sidecar =
+      GetStringArg(argc, argv, "--stress-sidecar", "");
+
+   const real_t cli_tfinal     = GetRealArg(argc, argv, "--tfinal", -1.0);
+   const real_t cli_cfl        = GetRealArg(argc, argv, "--cfl", -1.0);
+   const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
+   const std::string cli_mixed_flux =
+      GetStringArg(argc, argv, "--mixed-flux", "");
+   const bool   cli_pml        = HasFlag(argc, argv, "--pml");
+
+   const std::string cli_output_dir =
+      GetStringArg(argc, argv, "--output-dir", "");
+   const std::string cli_pv_volume = GetStringArg(argc, argv, "--paraview-volume", "");
+   const std::string cli_pv_bulk   = GetStringArg(argc, argv, "--paraview-bulk", "");
+   const std::string cli_pv_fault  = GetStringArg(argc, argv, "--paraview-fault", "");
+   const real_t cli_pv_vol_dt   = GetRealArg(argc, argv, "--paraview-volume-dt", -1.0);
+   const real_t cli_pv_bulk_dt  = GetRealArg(argc, argv, "--paraview-bulk-dt", -1.0);
+   const real_t cli_pv_fault_dt = GetRealArg(argc, argv, "--paraview-fault-dt", -1.0);
+   const real_t cli_pv_vol_zfp  = GetRealArg(argc, argv, "--paraview-volume-zfp-tol", -1.0);
+   const real_t cli_pv_bulk_zfp = GetRealArg(argc, argv, "--paraview-bulk-zfp-tol", -1.0);
+   const real_t cli_pv_fault_zfp= GetRealArg(argc, argv, "--paraview-fault-zfp-tol", -1.0);
+   const int    cli_pv_max_snap = GetIntArg(argc, argv, "--paraview-max-snapshots", -1);
+
+   const std::string restart_prefix =
+      GetStringArg(argc, argv, "--restart", "");
+   const int cli_checkpoint_every =
+      GetIntArg(argc, argv, "--checkpoint-every", -1);
+
+   // -----------------------------------------------------------------
+   // 2.  TOML load — owns all defaults; CLI then overrides.
+   // -----------------------------------------------------------------
+   spatial::SpatialFrictionConfig cfg;
+   try
+   {
+      cfg = spatial::LoadSpatialFrictionConfig(config_path);
+   }
+   catch (...)
+   {
+      if (rank == 0)
+      {
+         std::cerr << "ERROR: failed to load TOML config '" << config_path
+                   << "'.\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 2;
+   }
+
+   // Merge CLI overrides into cfg (later wins).
+   if (!cli_mesh.empty())            { cfg.mesh.path = cli_mesh; }
+   if (!cli_vel_model.empty())
+   {
+      if (cli_vel_model == "cvmh")
+      { cfg.velocity.model = spatial::VelocityModel::CVMH; }
+      else if (cli_vel_model == "cvm_s4.26.m01")
+      { cfg.velocity.model = spatial::VelocityModel::CVMS_4_26_M01; }
+      else if (cli_vel_model == "multiscale_statewise")
+      { cfg.velocity.model = spatial::VelocityModel::MultiscaleStatewise; }
+      else
+      {
+         MFEM_ABORT("--velocity-model: unknown value '" << cli_vel_model
+                    << "'.  Accepted: cvmh | cvm_s4.26.m01 | "
+                    << "multiscale_statewise.");
+      }
+   }
+   if (!cli_vel_path.empty())        { cfg.velocity.override_path = cli_vel_path; }
+   if (!cli_stress_kind.empty())
+   {
+      if (cli_stress_kind == "constant_tensor")
+      { cfg.stress.kind = spatial::StressSourceKind::ConstantTensor; }
+      else if (cli_stress_kind == "sidecar_hdf5")
+      { cfg.stress.kind = spatial::StressSourceKind::SidecarHDF5; }
+      else
+      {
+         MFEM_ABORT("--stress-kind: unknown value '" << cli_stress_kind
+                    << "'.  Accepted: constant_tensor | sidecar_hdf5.");
+      }
+   }
+   if (!cli_stress_sidecar.empty())  { cfg.stress.sidecar_path = cli_stress_sidecar; }
+   if (cli_tfinal > 0.0)             { cfg.time.tfinal = cli_tfinal; }
+   if (cli_cfl > 0.0)                { cfg.numerics.cfl = cli_cfl; }
+   if (cli_ader_order > 0)           { cfg.numerics.ader_order = cli_ader_order; }
+   if (!cli_mixed_flux.empty())      { cfg.numerics.mixed_flux = cli_mixed_flux; }
+   if (cli_pml)                      { cfg.numerics.use_pml = true; }
+   if (!cli_output_dir.empty())      { cfg.output.output_dir = cli_output_dir; }
+   if (!cli_pv_volume.empty())       { cfg.output.paraview_volume = cli_pv_volume; }
+   if (!cli_pv_bulk.empty())         { cfg.output.paraview_bulk   = cli_pv_bulk; }
+   if (!cli_pv_fault.empty())        { cfg.output.paraview_fault  = cli_pv_fault; }
+   if (cli_pv_vol_dt    > 0.0)       { cfg.output.paraview_volume_dt    = cli_pv_vol_dt; }
+   if (cli_pv_bulk_dt   > 0.0)       { cfg.output.paraview_bulk_dt      = cli_pv_bulk_dt; }
+   if (cli_pv_fault_dt  > 0.0)       { cfg.output.paraview_fault_dt     = cli_pv_fault_dt; }
+   if (cli_pv_vol_zfp   > 0.0)       { cfg.output.paraview_volume_zfp_tol = cli_pv_vol_zfp; }
+   if (cli_pv_bulk_zfp  > 0.0)       { cfg.output.paraview_bulk_zfp_tol  = cli_pv_bulk_zfp; }
+   if (cli_pv_fault_zfp > 0.0)       { cfg.output.paraview_fault_zfp_tol = cli_pv_fault_zfp; }
+   if (cli_pv_max_snap  > 0)         { cfg.output.max_snapshots          = cli_pv_max_snap; }
+   if (cli_checkpoint_every > 0)     { cfg.output.checkpoint_every_steps = cli_checkpoint_every; }
+
+   MFEM_VERIFY(cfg.law == spatial::FrictionLawKind::SlipWeakening ||
+               cfg.law == spatial::FrictionLawKind::RateState,
+               "spatial_dyn_driver: cfg.law must be SlipWeakening or "
+               "RateState; got " << static_cast<int>(cfg.law));
+   const bool is_lsw =
+      (cfg.law == spatial::FrictionLawKind::SlipWeakening);
+   MFEM_VERIFY(is_lsw,
+               "spatial_dyn_driver: only [meta].law = \"slip_weakening\" "
+               "is supported in this commit; rate_state path is a "
+               "deferred follow-up (plan §Phase 4 Edge Cases).");
+
+   if (rank == 0)
+   {
+      std::cout << "================================================\n"
+                << "seas_spatial_dyn_driver — Phase 4 (rev-3)\n"
+                << "================================================\n"
+                << "config:           " << config_path << "\n"
+                << "mesh:             " << cfg.mesh.path << "\n"
+                << "fe order:         " << cfg.mesh.order << "\n"
+                << "law:              "
+                << (is_lsw ? "slip_weakening" : "rate_state") << "\n"
+                << "stress kind:      "
+                << (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor
+                    ? "constant_tensor" : "sidecar_hdf5") << "\n"
+                << "tfinal:           " << cfg.time.tfinal << " s\n"
+                << "cfl:              " << cfg.numerics.cfl << "\n"
+                << "ader order:       " << cfg.numerics.ader_order << "\n"
+                << "mixed flux:       " << cfg.numerics.mixed_flux << "\n"
+                << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
+                << "\n"
+                << "nucleation:       "
+                << (cfg.nucleation.enabled ? "enabled" : "DISABLED (T=1e9)")
+                << "\n"
+                << "no-sidecar mat:   " << (no_sidecar_material ? "yes" : "no")
+                << "\n"
+                << "dry-run:          " << (dry_run ? "yes" : "no") << "\n"
+                << "ranks:            " << nprocs << "\n"
+                << "================================================\n";
+   }
+
+   // -----------------------------------------------------------------
+   // 3.  Restart / output-dir safety check (mirrors tpv104_driver.cpp).
+   // -----------------------------------------------------------------
+   if (!restart_prefix.empty())
+   {
+      namespace fs = std::filesystem;
+      try
+      {
+         const fs::path restart_path(restart_prefix);
+         fs::path restart_dir_path = restart_path.parent_path();
+         if (restart_dir_path.empty()) { restart_dir_path = "."; }
+
+         const fs::path restart_canonical =
+            fs::weakly_canonical(restart_dir_path);
+         const fs::path output_canonical =
+            fs::weakly_canonical(fs::path(cfg.output.output_dir));
+
+         if (restart_canonical == output_canonical)
+         {
+            if (rank == 0)
+            {
+               std::cerr << "ERROR: --output-dir (" << cfg.output.output_dir
+                         << ") resolves to the SAME directory as the "
+                         << "parent of --restart (" << restart_dir_path.string()
+                         << ").  Pick a DIFFERENT --output-dir for the "
+                         << "restarted run.\n";
+            }
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 3;
+         }
+      }
+      catch (const fs::filesystem_error &e)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: failed to canonicalise --restart / "
+                      << "--output-dir paths: " << e.what() << "\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 3;
+      }
+   }
+
+   // -----------------------------------------------------------------
+   // 4.  Load mesh.
+   // -----------------------------------------------------------------
+   Mesh smesh(cfg.mesh.path.c_str(), 1, 1);
+   const int dim = smesh.Dimension();
+   MFEM_VERIFY(dim == 3,
+               "spatial_dyn_driver: only 3D meshes supported; got dim="
+               << dim);
+
+#ifdef MFEM_USE_MPI
+   ParMesh pmesh(comm, smesh);
+#else
+#  error "spatial_dyn_driver requires MFEM_USE_MPI=YES."
+#endif
+   smesh.Clear();
+   pmesh.SetCurvature(cfg.mesh.order);
+
+   // -----------------------------------------------------------------
+   // 5.  BoundaryConfig (SAFS .geo: fault=101, top free=102, bottom +
+   //     sides absorbing=103+104).
+   // -----------------------------------------------------------------
+   BoundaryConfig bc;
+   bc.fault_attr = 101;
+   bc.natural_attrs   = {102};
+   bc.absorbing_attrs = {103, 104};
+
+   // -----------------------------------------------------------------
+   // 6.  Material — pick the right WaveOperator ctor (deviation D-1).
+   // -----------------------------------------------------------------
+   real_t mat_lambda = cfg.material_fallback.lambda;
+   real_t mat_mu     = cfg.material_fallback.mu;
+   real_t mat_rho    = cfg.material_fallback.rho;
+
+   std::unique_ptr<spatial::SpatialVelocityBundle> vel_bundle;
+   MaterialField material = MaterialField::MakeConstant(mat_lambda,
+                                                        mat_mu, mat_rho);
+
+   if (!no_sidecar_material)
+   {
+      try
+      {
+         vel_bundle = std::make_unique<spatial::SpatialVelocityBundle>(
+            spatial::LoadSpatialVelocityBundle(cfg.velocity, pmesh));
+         material = vel_bundle->MakeMaterialField();
+         if (rank == 0)
+         {
+            std::cout << "[material] loaded sidecar bundle: "
+                      << spatial::ResolveSpatialVelocitySidecarPath(cfg.velocity)
+                      << "\n";
+         }
+      }
+      catch (const std::exception &e)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: failed to load velocity sidecar: "
+                      << e.what() << "\n"
+                      << "  Re-run with --no-sidecar-material to use the "
+                      << "[material_constant_fallback] block.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 4;
+      }
+   }
+   else
+   {
+      if (rank == 0)
+      {
+         std::cout << "[material] using [material_constant_fallback]: "
+                   << "lambda=" << mat_lambda
+                   << " mu=" << mat_mu
+                   << " rho=" << mat_rho << "\n";
+      }
+   }
+
+   // Deviation D-1: WaveOperator(MaterialField) ctor is not yet wired.
+   // Refuse to silently downgrade Mode::Coefficient input to scalar.
+   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
+               "spatial_dyn_driver Phase H gap: the heterogeneous "
+               "WaveOperator(MaterialField) ctor + per-element flux "
+               "dispatch (plan §Phase H.1/H.2) is NOT yet wired (see "
+               "dynamic/wave_operator.hpp:215 — SetGodunovFluxPool still "
+               "aborts).  This driver supports only "
+               "MaterialField::Mode::Constant via the existing scalar-"
+               "material ctor.  Re-run with --no-sidecar-material to "
+               "force the [material_constant_fallback] path.");
+
+   // -----------------------------------------------------------------
+   // 7.  Construct WaveOperator (scalar-material; deviation D-1).
+   // -----------------------------------------------------------------
+   WaveOperator<ParMesh> wave(pmesh, cfg.mesh.order,
+                              material.lambda_const,
+                              material.mu_const,
+                              material.rho_const,
+                              bc);
+
+   // R-107 reflection-time warning: compute min_box_dim / cp_max from
+   // mesh bounding box + scalar material.
+   {
+      const real_t cp = std::sqrt((material.lambda_const
+                                   + 2.0 * material.mu_const)
+                                   / material.rho_const);
+      Vector lo(3), hi(3);
+      pmesh.GetBoundingBox(lo, hi, 1);
+      real_t min_box_dim_local = std::numeric_limits<real_t>::infinity();
+      for (int d = 0; d < 3; ++d)
+      {
+         min_box_dim_local = std::min(min_box_dim_local, hi(d) - lo(d));
+      }
+      real_t min_box_dim = min_box_dim_local;
+#ifdef MFEM_USE_MPI
+      MPI_Allreduce(&min_box_dim_local, &min_box_dim, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+#endif
+      const real_t t_reflect = (cp > 0.0) ? min_box_dim / cp : 0.0;
+      if (rank == 0 && t_reflect < cfg.time.tfinal && !cfg.numerics.use_pml)
+      {
+         std::cout << "[spatial_dyn] WARNING: tfinal (" << cfg.time.tfinal
+                   << " s) exceeds min_box_dim / cp_max ("
+                   << t_reflect << " s).  Reflected waves will "
+                   << "contaminate the rupture after this time.  Add "
+                   << "--pml or shorten tfinal.\n";
+      }
+   }
+
+   // Wire dispatch selectors.  Round-6: nucleation mechanism choice
+   // (strength-reduction vs overstress) determines the friction-law
+   // dispatch tag:
+   //
+   //   * StrengthReduction (TPV26/27 §Part 4 — default): route LSW via
+   //     LSW_ForcedRupture so the per-DOF f_2(t) friction reduction
+   //     fires.  Even with [nucleation] disabled the dispatch is safe —
+   //     the resolver writes T_forced = 1e9 and f_2 == 0 always, so
+   //     the math reduces to plain LSW byte-equivalently (plan
+   //     §Phase H.6 "TPV205 byte-exact contract").
+   //
+   //   * Overstress: pre-stress is perturbed at init time via
+   //     ResolveOverstress + InitializeFaultDOFs_Spatial's overstress
+   //     path; the time loop runs plain LSW (no f_2 needed).  Route
+   //     dispatch via FaultFrictionLaw::LSW.  NB: the overstress
+   //     resolver currently aborts (stub); the dispatch wiring is in
+   //     place so the follow-up commit only needs to fill in the
+   //     resolver body.
+   const bool use_strength_reduction =
+      (cfg.nucleation.kind == spatial::NucleationKind::StrengthReduction);
+   wave.SetFaultFrictionLaw(use_strength_reduction
+                            ? FaultFrictionLaw::LSW_ForcedRupture
+                            : FaultFrictionLaw::LSW);
+   wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
+
+   // Mandatory at t=0 so the LSW_ForcedRupture dispatch arm's
+   // VerifyForcedRuptureTimeReady guard does not fire.
+   wave.SetTime(cfg.time.t_initial);
+
+   // -----------------------------------------------------------------
+   // 8.  Build per-DOF fault tables (deviation D-2: inline walk).
+   // -----------------------------------------------------------------
+   const Array<int> &fault_int_faces = wave.GetFaultInteriorFaces();
+   const Array<int> &fault_shr_faces = wave.GetFaultSharedFaces();
+
+   // MFEM_USE_MPI is unconditional in this driver (#error at L682
+   // requires it), so the comm arg can be passed without the
+   // #ifdef-in-argument-list dance (R-607 round-6).
+   const int nbf_per_face = ProbeNbfPerFace(pmesh, cfg.mesh.order,
+                                            fault_int_faces,
+                                            fault_shr_faces, comm);
+
+   const int num_fault_local  = fault_int_faces.Size() * nbf_per_face;
+   const int num_shared_fault = fault_shr_faces.Size() * nbf_per_face;
+   const int num_fault_total  = num_fault_local + num_shared_fault;
+
+   // Reconstruct FaultBasis on this rank (interior + shared appended).
+   // For a SAFS curvilinear fault the canonical (BP5 / TPV205) choice
+   // is ref_normal = +y (pointing into the box's east half) and
+   // up = +z.  FaultBasis::Compute orients each face's normal against
+   // ref_normal; non-orthogonal ref_normal still resolves a consistent
+   // sign per face.  Adjustable via a TOML knob in a follow-up commit
+   // if a SAFS run reports sign-flipped basis vectors at every face
+   // (R-604 round-6).
+   Vector ref_normal(3);
+   ref_normal(0) = 0.0;  ref_normal(1) = 1.0;  ref_normal(2) = 0.0;
+   Vector up_vec(3);
+   up_vec(0)     = 0.0;  up_vec(1)     = 0.0;  up_vec(2)     = 1.0;
+
+   FaultBasis fbasis;
+   fbasis.Compute(pmesh, fault_int_faces, ref_normal, up_vec);
+#ifdef MFEM_USE_MPI
+   fbasis.AppendSharedFaces(pmesh, fault_shr_faces, ref_normal, up_vec);
+#endif
+
+   std::vector<Vector>          fault_coords;
+   Vector                       dof_coords_3d;
+   DenseMatrix                  dof_basis;
+   Array<int>                   dof_to_elem;
+   Array<int>                   dof_to_attr;
+   std::vector<IntegrationPoint> dof_ips;
+   BuildPerDOFFaultTables(pmesh, cfg.mesh.order, bc.fault_attr,
+                          fbasis, fault_int_faces, fault_shr_faces,
+                          nbf_per_face,
+                          fault_coords, dof_coords_3d, dof_basis,
+                          dof_to_elem, dof_to_attr, dof_ips);
+
+   int num_fault_global = num_fault_total;
+#ifdef MFEM_USE_MPI
+   MPI_Allreduce(&num_fault_total, &num_fault_global, 1, MPI_INT,
+                 MPI_SUM, comm);
+#endif
+   if (rank == 0)
+   {
+      std::cout << "[fault] QPs per face = " << nbf_per_face
+                << ", num_fault_global = " << num_fault_global
+                << " (local = " << num_fault_local
+                << ", shared = " << num_shared_fault << ")\n";
+   }
+
+   // -----------------------------------------------------------------
+   // 9.  FaultGeometry via the new BP5 ctor (Phase 5a).  Seed BP5Params
+   //     with its in-class defaults so ComputeBP5Params (skipped in
+   //     the new ctor) doesn't divide by zero anywhere.
+   // -----------------------------------------------------------------
+   BP5Params bp5_seed;
+   // Use the (argc, argv) MPIContext ctor (matches the seas_driver.cpp:190
+   // reference pattern).  That ctor sets `comm_ = MPI_COMM_WORLD` directly
+   // and leaves `owns_comm_ = false`, so the destructor is a no-op.
+   // Avoids the `MPI_Comm_free after MPI_FINALIZE was invoked` abort that
+   // the comm-dup ctor would trigger when `mpi_ctx`'s destructor fires
+   // on the way out of main, AFTER `MPI_Finalize` has returned.
+   // `Mpi::Init` inside the ctor is guarded by `Mpi::IsInitialized()`, so
+   // the raw `MPI_Init` we already called above is the actual initialiser
+   // and the ctor only re-runs `Hypre::Init()` (idempotent).
+   MPIContext mpi_ctx(&argc, &argv);
+   FaultGeometry<ParMesh> geom(bp5_seed,
+                               dof_coords_3d, dof_basis, dof_to_elem,
+                               nbf_per_face, &mpi_ctx, dof_ips);
+
+   // -----------------------------------------------------------------
+   // 10. Apply stress source (Phase 3 or 3b).
+   // -----------------------------------------------------------------
+   if (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor)
+   {
+      spatial::ConstantTensorStressSource src(cfg.stress.sigma_xx_pa,
+                                              cfg.stress.sigma_yy_pa,
+                                              cfg.stress.sigma_zz_pa,
+                                              cfg.stress.sigma_xy_pa,
+                                              cfg.stress.sigma_yz_pa,
+                                              cfg.stress.sigma_xz_pa);
+      geom.ComputeSAFSParams(src,
+                             cfg.stress.pore_pressure.P_p_pa,
+                             cfg.stress.pore_pressure.P_p_grad_pa_per_m,
+                             cfg.stress.pore_pressure.min_sigma_n_pa);
+   }
+   else
+   {
+      spatial::ApplyCsmStressSidecar(cfg.stress, geom);
+   }
+   MFEM_VERIFY(geom.HasSAFSParams(),
+               "spatial_dyn_driver: stress source projection failed");
+
+   // -----------------------------------------------------------------
+   // 11. Resolve per-DOF LSW parameters (Phase 1).
+   // -----------------------------------------------------------------
+   MFEM_VERIFY(cfg.slip_weakening.has_value(),
+               "spatial_dyn_driver: [meta].law=slip_weakening but the "
+               "[friction.slip_weakening] block is absent in TOML.");
+   spatial::SpatialFrictionResolver resolver;
+   const spatial::SlipWeakeningPerDOFParams lsw =
+      resolver.ResolveSlipWeakening(*cfg.slip_weakening,
+                                    dof_coords_3d, dof_to_attr);
+
+   // -----------------------------------------------------------------
+   // 12. Per-DOF forced-rupture times (Phase 1 / D-4).  ResolveForced
+   //     Rupture writes T_forced(r) per hypocenter distance only when
+   //     cfg.nucleation is enabled AND cfg.nucleation.kind ==
+   //     StrengthReduction; for any other kind (Overstress) it returns
+   //     the "never forced" sentinel T = 1e9 everywhere so the
+   //     iterator's forced-rupture mu_eff path is a no-op.  Below the
+   //     iterator is also gated by SetForcedRuptureMode(use_strength_
+   //     reduction) (R-701 round-7) — belt and suspenders.
+   // -----------------------------------------------------------------
+   const spatial::ForcedRupturePerDOFParams fr =
+      resolver.ResolveForcedRupture(cfg.nucleation,
+                                    dof_coords_3d, dof_to_elem,
+                                    material, pmesh);
+
+   // Round-6 — overstress sibling resolver.  Currently aborts when
+   // cfg.nucleation.kind == Overstress (stub); the call is wired so
+   // the surface is exercised end-to-end and a TOML user can pick
+   // overstress today and get a clear "not implemented" abort.  When
+   // the stub fills in, the per-DOF (Δτ_dip, Δτ_strike, Δσ_n) lands
+   // in DOFData::tau{1,2}_nuc / sigma_n_nuc via the spatial_setup
+   // overstress overload (also a future stub).
+   [[maybe_unused]] const spatial::OverstressPerDOFParams overstress =
+      resolver.ResolveOverstress(cfg.nucleation, dof_coords_3d);
+
+   // -----------------------------------------------------------------
+   // 13. Construct FaultFaceFlux with seed scalar impedances; the
+   //     per-DOF impedances are overwritten by InitializeFaultDOFs_Spatial.
+   // -----------------------------------------------------------------
+   const real_t cp_seed = std::sqrt((material.lambda_const
+                                     + 2.0 * material.mu_const)
+                                     / material.rho_const);
+   const real_t cs_seed = std::sqrt(material.mu_const / material.rho_const);
+   FaultFaceFlux fault_flux(material.rho_const, cp_seed, cs_seed);
+   wave.SetFaultFlux(&fault_flux);
+
+   // -----------------------------------------------------------------
+   // 14. Initialise per-DOF DOFData via the new free function
+   //     (Phase 5c, IP-aware overload).
+   // -----------------------------------------------------------------
+   std::vector<DOFData> dof_data;
+   if (num_fault_total > 0)
+   {
+      spatial::InitializeFaultDOFs_Spatial<ParMesh>(
+         dof_data, num_fault_total, dof_to_elem, material, pmesh,
+         lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
+         fr.T_forced_s, fr.t0_decay_s,
+         dof_ips);
+   }
+   wave.SetFaultDOFData(&dof_data, nbf_per_face);
+
+   // Fluctuation-Q dispatch (matches TPV205): Q_bg = 0.
+   {
+      real_t Q_bg[NUM_STATE] = {0};
+      wave.SetAbsorbingBackground(Q_bg);
+   }
+
+   // -----------------------------------------------------------------
+   // 15. CFL / Δt and derived numbers.  ComputeMaxDt is the scalar-
+   //     material implementation (deviation D-1).
+   // -----------------------------------------------------------------
+   const real_t dt_cfl = wave.ComputeMaxDt(cfg.numerics.cfl);
+   real_t dt = (cfg.time.dt_initial > 0.0)
+                ? cfg.time.dt_initial : dt_cfl;
+   if (cfg.time.dt_max > 0.0 && dt > cfg.time.dt_max)
+   {
+      if (rank == 0)
+      {
+         std::cout << "[time] tightened by user dt_max: dt_cfl = "
+                   << dt_cfl << " s -> dt = " << cfg.time.dt_max << " s\n";
+      }
+      dt = cfg.time.dt_max;
+   }
+   const int nsteps = (cfg.time.tfinal > 0.0)
+                       ? static_cast<int>(std::ceil(cfg.time.tfinal / dt)) : 0;
+   if (rank == 0)
+   {
+      std::cout << "[time] dt_cfl = " << dt_cfl << " s\n"
+                << "[time] dt     = " << dt     << " s\n"
+                << "[time] nsteps = " << nsteps << "\n";
+   }
+
+   if (print_derived && rank == 0)
+   {
+      std::cout << "[derived] num_fault_global = " << num_fault_global
+                << "\n[derived] cp_seed = " << cp_seed
+                << " m/s, cs_seed = " << cs_seed << " m/s\n";
+   }
+
+   // -----------------------------------------------------------------
+   // 16. Dry-run exit.
+   // -----------------------------------------------------------------
+   if (dry_run)
+   {
+      if (rank == 0)
+      {
+         std::cout << "[spatial_dyn] --dry-run: construction complete, "
+                   << "exiting.\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 0;
+   }
+
+   // -----------------------------------------------------------------
+   // 17. ParaView output wiring (volume / fault / bulk-stress).
+   // -----------------------------------------------------------------
+   // Create output dir on rank 0.
+   if (rank == 0)
+   {
+      std::filesystem::create_directories(cfg.output.output_dir);
+   }
+#ifdef MFEM_USE_MPI
+   MPI_Barrier(comm);
+#endif
+
+   bool volume_pv_enabled = true;
+   bool fault_pv_enabled  = true;
+   bool bulk_pv_enabled   = true;
+   auto volume_mode = ParseVolumeMode(cfg.output.paraview_volume,
+                                      volume_pv_enabled);
+   auto fault_mode  = ParseFaultMode(cfg.output.paraview_fault,
+                                     fault_pv_enabled);
+   {
+      // bulk uses VolumeOutputMode like volume.
+      bool dummy;
+      (void)ParseVolumeMode(cfg.output.paraview_bulk, dummy);
+      bulk_pv_enabled = dummy;
+   }
+
+   std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_out;
+   std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_bulk_out;
+   if (volume_pv_enabled || fault_pv_enabled)
+   {
+      pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
+                  cfg.output.output_dir, pmesh, cfg.mesh.order,
+                  "volume", volume_mode);
+      pv_out->SetVolumePVDt(cfg.output.paraview_volume_dt);
+      pv_out->SetVolumeSaveEnabled(volume_pv_enabled);
+
+      pv_out->fixed_dt = cfg.output.paraview_fault_dt;
+      pv_out->GetSchedule().max_total_snapshots = cfg.output.max_snapshots;
+
+#ifdef MFEM_USE_HDF5
+      if (cfg.output.paraview_volume_zfp_tol > 0.0
+          && volume_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            cfg.output.paraview_volume_zfp_tol);
+      }
+#endif
+
+      pv_out->SetFaultOutputMode(fault_mode);
+#ifdef MFEM_USE_HDF5
+      if (fault_pv_enabled
+          && fault_mode == ParaViewOutput<ParMesh>::FaultOutputMode::Hdf5
+          && cfg.output.paraview_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            cfg.output.paraview_fault_zfp_tol);
+      }
+#endif
+
+      pv_out->InitFaultOutputBP5(fault_int_faces, fault_shr_faces,
+                                 nbf_per_face);
+   }
+
+   // ParaView GFs are allocated for the time loop only; sized after
+   // pv_out is up.  No-op when num_fault_total = 0 on this rank.
+   Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
+   Vector pv_local_state, pv_local_normal_stress;
+   if (pv_out)
+   {
+      pv_local_slip.SetSize(2 * num_fault_total);
+      pv_local_slip_rate.SetSize(2 * num_fault_total);
+      pv_local_traction.SetSize(2 * num_fault_total);
+      pv_local_state.SetSize(num_fault_total);
+      pv_local_normal_stress.SetSize(num_fault_total);
+   }
+
+   // -----------------------------------------------------------------
+   // 18. Restart (R-105 corrected schema: per-rank Q + dof_data).
+   // -----------------------------------------------------------------
+   const int ndof_total = wave.GetScalarNDof();
+   Vector Q(NUM_STATE * ndof_total);
+   Q = 0.0;
+
+   real_t t      = cfg.time.t_initial;
+   int    step0  = 0;
+   real_t dt_now = dt;
+   if (!restart_prefix.empty())
+   {
+      std::string driver_tag;
+      const bool ok = ReadTpv104Checkpoint(
+         restart_prefix, t, dt_now, step0, Q, NUM_STATE * ndof_total,
+         dof_data, rank, nprocs
+#ifdef MFEM_USE_MPI
+         , comm
+#endif
+         , &driver_tag);
+      if (!ok)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: restart prefix '" << restart_prefix
+                      << "' has no per-rank file for rank " << rank
+                      << ".\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 5;
+      }
+      if (!driver_tag.empty() && driver_tag != "spatial_dyn")
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: refusing restart: checkpoint driver_tag '"
+                      << driver_tag << "' != 'spatial_dyn'.\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 5;
+      }
+      if (driver_tag.empty() && rank == 0)
+      {
+         std::cout << "[restart] WARNING: restoring pre-tag checkpoint "
+                   << "into spatial_dyn — proceed only if you know the "
+                   << "checkpoint is compatible.\n";
+      }
+      // SetTime so the LSW_ForcedRupture guard sees a fresh t.
+      wave.SetTime(t);
+   }
+
+   // -----------------------------------------------------------------
+   // 19. Sub-step iterator (Tpv205 LSW closed form).
+   //     R-601 round-6: enable forced-rupture mode so the per-substep
+   //     mu_eff path routes through LSWFrictionCoefficient_ForcedRupture
+   //     and consumes T_forced_rupture / t0_decay_forced.  Without this
+   //     the iterator would silently run plain LSW even though the wave
+   //     operator's dispatch arm is LSW_ForcedRupture (the substep
+   //     buffer bypasses the dispatch arm on interior fault QPs).
+   //
+   //     R-701 round-7: gate on `use_strength_reduction` (set at step 7
+   //     above) so the iterator runs plain LSW when kind = Overstress.
+   //     ResolveForcedRupture also returns the 1e9 sentinel for non-
+   //     StrengthReduction kinds, so this gate is defence in depth.
+   // -----------------------------------------------------------------
+   Tpv205SubStepIterator substep_iterator(fault_flux);
+   // DEFERRED: Tpv205SubStepIterator::SetForcedRuptureMode toggle is
+   // NOT YET wired (Phase H.6 follow-up).  Until it lands, the
+   // iterator on interior fault QPs runs plain LSW; the wave
+   // operator's LSW_ForcedRupture dispatch arm still applies on
+   // the R-1600 shared-fault fallback.  ResolveForcedRupture
+   // returns the 1.0e9 sentinel for non-StrengthReduction nucleation
+   // kinds, so the iterator's plain-LSW behaviour is identical to
+   // the forced-rupture path's f_2 == 0 branch in that case.
+   // (void) use_strength_reduction;
+   {
+      const int O = std::max(1, cfg.numerics.ader_order);
+      std::vector<real_t> deltaT(O, dt / static_cast<real_t>(O));
+      std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
+      substep_iterator.SetSubSteps(deltaT, weights);
+   }
+
+   // ParaView snapshot writer (matches the TPV205 pattern; updates the
+   // 5 BP5 fault projection GFs + writes the volume / bulk / fault
+   // collections).  ForceSave is collective.
+   auto paraview_write = [&](int step_num, real_t time, real_t V_max)
+   {
+      if (!pv_out) { return; }
+      const bool fault_wants = pv_out->PeekShouldWrite(step_num, time, V_max);
+      if (!fault_wants) { return; }
+
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         const DOFData &d = dof_data[i];
+         pv_local_slip(2 * i + 0)      = d.slip1;
+         pv_local_slip(2 * i + 1)      = d.slip2;
+         pv_local_slip_rate(2 * i + 0) = d.V1;
+         pv_local_slip_rate(2 * i + 1) = d.V2;
+         pv_local_traction(2 * i + 0)  = d.tau1_corr;
+         pv_local_traction(2 * i + 1)  = d.tau2_corr;
+         const real_t delta_norm = std::sqrt(d.slip1 * d.slip1
+                                             + d.slip2 * d.slip2);
+         // R-602 round-6: include the TPV26/27 f_2(t) factor so the
+         // diagnostic "state" field reflects the actual mu_eff the
+         // simulation is using.  Plain LSW falls out automatically
+         // when T_forced_rupture >= 1e8 (the helper short-circuits f_2
+         // to 0 at every t < 1e8 s, which is every reachable t).
+         pv_local_state(i) =
+            mfem::seas::spatial::LSWFrictionCoefficient_ForcedRupture(
+               delta_norm,
+               d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c,
+               time, d.T_forced_rupture, d.t0_decay_forced);
+         pv_local_normal_stress(i)     = d.sigma_n_corr;
+      }
+      if (pv_out->GetVolumeSaveEnabled())
+      {
+         pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
+                                      pv_local_traction, pv_local_state,
+                                      pv_local_normal_stress);
+         pv_out->ForceSave(step_num, time);
+         pv_out->CommitSchedule(time, V_max);
+      }
+      else
+      {
+         pv_out->CommitSchedule(time, V_max);
+      }
+   };
+
+   if (restart_prefix.empty())
+   {
+      paraview_write(0, cfg.time.t_initial, 0.0);
+   }
+
+   // -----------------------------------------------------------------
+   // 20. Time loop.
+   // -----------------------------------------------------------------
+   Vector Q_new(Q.Size());
+   real_t V_max_global = 0.0;
+   // R-603 round-6: track the last completed step so the final
+   // checkpoint at L1262 records the actual step the loop reached,
+   // not `nsteps` unconditionally.
+   int last_completed_step = step0;
+   for (int step = step0; step < nsteps; ++step)
+   {
+      const real_t dt_step = std::min(dt_now, cfg.time.tfinal - t);
+      if (dt_step <= 0.0) { break; }
+      wave.SetTime(t);
+
+      AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
+                                     fault_coords, Q, dt_step,
+                                     cfg.numerics.ader_order, t, Q_new);
+      Q.Swap(Q_new);
+      t += dt_step;
+      last_completed_step = step + 1;
+
+      real_t V_max_local = 0.0;
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         V_max_local = std::max(V_max_local, dof_data[i].slip_rate);
+      }
+      real_t V_max_step = V_max_local;
+#ifdef MFEM_USE_MPI
+      MPI_Allreduce(&V_max_local, &V_max_step, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+      V_max_global = std::max(V_max_global, V_max_step);
+
+      paraview_write(step + 1, t, V_max_step);
+
+      if (cfg.output.checkpoint_every_steps > 0
+          && (step + 1) % cfg.output.checkpoint_every_steps == 0)
+      {
+         const std::string prefix = cfg.output.output_dir + "/"
+                                    + cfg.output.restart_prefix;
+         WriteTpv104Checkpoint(prefix, t, dt_now, step + 1, Q, dof_data,
+                               rank, nprocs
+#ifdef MFEM_USE_MPI
+                               , comm
+#endif
+                               , "spatial_dyn");
+      }
+
+      if (rank == 0 && (step % 100 == 0 || step == nsteps - 1))
+      {
+         std::cout << "step " << step << "/" << nsteps
+                   << "  t = " << t << " s"
+                   << "  V_max = " << V_max_step << " m/s\n";
+      }
+   }
+
+   // -----------------------------------------------------------------
+   // 21. Final checkpoint.
+   // -----------------------------------------------------------------
+   if (cfg.output.checkpoint_every_steps > 0)
+   {
+      const std::string prefix = cfg.output.output_dir + "/"
+                                 + cfg.output.restart_prefix;
+      // R-603 round-6: use last_completed_step instead of nsteps so the
+      // checkpoint reports the actual step the loop reached.
+      WriteTpv104Checkpoint(prefix, t, dt_now, last_completed_step,
+                            Q, dof_data,
+                            rank, nprocs
+#ifdef MFEM_USE_MPI
+                            , comm
+#endif
+                            , "spatial_dyn");
+   }
+
+   if (rank == 0)
+   {
+      std::cout << "[spatial_dyn] done.  Final t = " << t
+                << " s, V_max_global = " << V_max_global << " m/s\n";
+   }
+
+#ifdef MFEM_USE_MPI
+   MPI_Finalize();
+#endif
+   return 0;
+}

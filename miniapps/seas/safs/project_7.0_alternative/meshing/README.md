@@ -35,6 +35,24 @@ results/
                     immediately after each .msh
 ```
 
+## ⚠️ Known limitation: emit Gmsh v2.2 only (`-format msh22`)
+
+Every MFEM driver in this tree (`seas_spatial_dyn_driver`,
+`seas_project_velocity_to_mesh`, `seas_project_stress_to_mesh`, the
+TPV / BP5 drivers, and the unit tests) consumes `.msh` files through
+`mfem::Mesh::ReadGmshMesh`, which is a **Gmsh v2.2-only parser** — it
+silently runs the v2.2 body on any `version >= 2.2` header and aborts
+on misaligned reads from v4.x files with the misleading message
+`Gmsh file : vertices indices are not unique`.
+
+`run_nwcut_meshing.py` therefore passes `-format msh22` to gmsh.  Do
+not change this to `-format msh4` (or any other v4 variant) without
+either (a) writing a v4 reader for MFEM upstream and rebasing, or
+(b) inserting a `gmsh -format msh2 -save` conversion step in every
+downstream consumer.  Full root-cause analysis, format-difference
+table, and the size cost (~+17 % vs v4.1) are in
+`docs/DEBUG_msh4_mfem_incompat.md`.
+
 ## ⚠️ Free-surface invariant: `mesh_zmax == 0`
 
 The mesh's **top face is the free surface** and **must sit at z = 0
