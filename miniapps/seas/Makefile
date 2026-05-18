@@ -126,10 +126,14 @@ TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ = $(TEST_PHASEH_GODUNOV_FLUX_POOL_SRC:.cpp=.o)
 # 5a / 5b header additions are re-applied (see CODEBASE_GUIDE TBD).
 SPATIAL_FRICTION_SRC                 = spatial/code/spatial_friction.cpp
 SPATIAL_FRICTION_OBJ                 = $(SPATIAL_FRICTION_SRC:.cpp=.o)
+SPATIAL_VELOCITY_SRC                 = spatial/code/spatial_velocity.cpp
+SPATIAL_VELOCITY_OBJ                 = $(SPATIAL_VELOCITY_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
+TEST_SPATIAL_VELOCITY_BUNDLE_SRC     = tests/unit/test_spatial_velocity_bundle.cpp
+TEST_SPATIAL_VELOCITY_BUNDLE_OBJ     = $(TEST_SPATIAL_VELOCITY_BUNDLE_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -732,6 +736,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_phaseh_godunov_flux_pool \
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
+               seas_test_spatial_velocity_bundle \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1155,6 +1160,27 @@ seas_test_spatial_friction_resolver: $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Spatial Phase 2: SpatialVelocityBundle + sidecar loader test.
+seas_test_spatial_velocity_bundle: $(TEST_SPATIAL_VELOCITY_BUNDLE_OBJ) \
+                                    $(SPATIAL_VELOCITY_OBJ) \
+                                    $(SPATIAL_FRICTION_OBJ) \
+                                    $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                    $(MATERIAL_COEFFICIENTS_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ) \
+                                    $(FIELD_COEFFICIENT_OBJ) \
+                                    $(STRESS_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_VELOCITY_BUNDLE_OBJ) \
+	    $(SPATIAL_VELOCITY_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
@@ -1979,6 +2005,26 @@ $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
 
+# Spatial Phase 2: SpatialVelocityBundle.  Needs HDF5_INCFLAGS because the
+# .cpp pulls in io/data_field_3d.hpp + io/material_coefficients.hpp.
+$(SPATIAL_VELOCITY_OBJ): %.o: $(SRC)%.cpp \
+                              spatial/code/spatial_velocity.hpp \
+                              spatial/code/spatial_friction.hpp \
+                              io/data_field_3d.hpp \
+                              io/material_coefficients.hpp \
+                              io/field_coefficient.hpp \
+                              $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_VELOCITY_BUNDLE_OBJ): %.o: $(SRC)%.cpp \
+                                          spatial/code/spatial_velocity.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
 $(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2514,6 +2560,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-godunov-flux test-wave-operator \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
+      test-spatial-velocity-bundle \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -2774,6 +2821,9 @@ test-spatial-friction-config: seas_test_spatial_friction_config
 
 test-spatial-friction-resolver: seas_test_spatial_friction_resolver
 	./seas_test_spatial_friction_resolver
+
+test-spatial-velocity-bundle: seas_test_spatial_velocity_bundle
+	./seas_test_spatial_velocity_bundle
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator

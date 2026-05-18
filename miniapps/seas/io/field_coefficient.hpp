@@ -289,13 +289,6 @@ private:
    static void ComputeGridFunctionMinMaxParallel(
       const mfem::ParGridFunction& gf, real_t& lo, real_t& hi);
 
-   /// Throw the "mesh not contained" abort with a formatted bbox table.
-   static void AbortContainmentFailure(
-      const DataField3D& field,
-      real_t mxmin, real_t mxmax,
-      real_t mymin, real_t mymax,
-      real_t mzmin, real_t mzmax);
-
    /// Throw the "post-projection out of declared bounds" abort.
    static void AbortRangeFailure(
       const std::string& field_name,
@@ -303,6 +296,21 @@ private:
       real_t declared_lo, real_t declared_hi);
 
    static std::atomic<int> call_count_;
+
+public:
+   /// Throw the "mesh not contained" abort with a formatted bbox table.
+   ///
+   /// Exposed publicly (was private) so external consumers can reuse the
+   /// same containment-failure abort message instead of duplicating its
+   /// formatting.  Consumers: spatial/code/spatial_velocity.cpp (Spatial
+   /// Phase 2 of spatial_dynamic_rupture_plan.md rev-3 — sidecar
+   /// containment pre-flight) and spatial/code/spatial_stress.cpp
+   /// (Spatial Phase 3 — CSM stress sidecar wrapper).
+   static void AbortContainmentFailure(
+      const DataField3D& field,
+      real_t mxmin, real_t mxmax,
+      real_t mymin, real_t mymax,
+      real_t mzmin, real_t mzmax);
 };
 
 } // namespace seas
