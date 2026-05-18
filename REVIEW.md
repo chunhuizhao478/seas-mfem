@@ -1,502 +1,649 @@
-# Code Review: PETSc TS restart — round 5 (post round-4 fixes)
-
-**Date:** 2026-05-17
-**Reviewer:** fresh adversarial pass on the round-4 fix work
-**Objective:** Find new bugs the round-4 fixes introduced or that round-4 missed.  Treat this as a first-look review — do NOT just check off round-4 items.
+# Code Review: Round 8 — Post-Round-7 TPV104 Fix Audit (2026-05-17)
 
 ## Review Scope
 
 - Plan: `miniapps/seas/debug_document/paraview_output_debug_document/petsc_ts_restart_plan_2026-05-16.md`
-- Files reviewed (current working tree):
-  - `miniapps/seas/io/petsc_ts_checkpoint.hpp` (R-006 probe added)
-  - `miniapps/seas/tests/unit/test_bp5_petsc_ts_restart.cpp` (Sub-test 3 + MPI init + R-004/R-005 changes)
-  - `miniapps/seas/tests/verification/bp5_verification_full.cpp` (R-002 doc, R-003 scale fix, R-008 `v2_authoritative_dt`, R-009 comment)
-  - `miniapps/seas/io/paraview_output.hpp` (R-004 setters; unchanged from round 4)
-  - `setup_mfem.sh` (R-007 hint)
-- Cross-checked: `linalg/petsc.cpp:4357-4394` (PetscODESolver::Run), `linalg/petsc.hpp:949-980` (PetscODESolver API), `linalg/operator.hpp:343-500` (TimeDependentOperator + ExplicitMult signature).
-- Domain context: `CLAUDE.md`, `miniapps/seas/CLAUDE.md`, prior REVIEW.md round 4 (now overwritten).
+  (V2 PETSc TS restart + Phase 4 TPV104 V1 restart)
+- Files reviewed (round 7 fix outputs):
+  - `miniapps/seas/io/tpv104_checkpoint.hpp` (R-007 dedup + R-002 expected_Q_size)
+  - `miniapps/seas/drivers/tpv104_driver.cpp` (R-001/R-002/R-003/R-005/R-006)
+  - `miniapps/seas/jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch` (R-004/R-009)
+  - `miniapps/seas/tests/unit/test_tpv104_checkpoint.cpp` (R-008 extensions)
+  - `miniapps/seas/debug_document/paraview_output_debug_document/petsc_ts_restart_plan_2026-05-16.md` (R-006 plan note)
+  - `miniapps/seas/Makefile` (test target wiring)
+  - `miniapps/seas/jobs/bp5/bp5_restart_test_v2_dev_2hr.sbatch` (BP5 parity check for R-103)
+- Domain context consulted:
+  - `CLAUDE.md` (root)
+  - `miniapps/seas/CLAUDE.md` (Phase 6.4 R-310 paths, FaultBasis convention)
+  - `FIX.md` (round-7 implementer report)
+- Round-7 round-trip verification: `make seas_test_tpv104_checkpoint && ./seas_test_tpv104_checkpoint`
+  → 139/139 PASS, 0 FAIL.  Cross-overload Sub-test 9 PASS confirms R-007 dedup forwarding works.
 
----
+This round is a FRESH adversarial pass — I am hunting for new bugs the
+round-7 fixes introduced or for round-7 misses.  I am NOT just checking
+off R-001 through R-009.
 
 ## Findings
 
-### [R-001] [MODERATE] [test_bp5_petsc_ts_restart.cpp:main + all sub-tests] — Test races / corrupts files under `mpirun -np N>=2`
+### [R-101] MODERATE [tpv104_restart_test_v1_dev_2hr.sbatch:127–131,287–290,309,326–328,343–347] — Stale "no-restart gap" / "restart silently ignored" comments throughout the sbatch
 
-**Category:** BUG (latent — does not fire under the current Makefile target, but the plan explicitly mandated MPI launch)
+**Category:** QUALITY (documentation drift that actively misleads)
 
 **Description:**
-The plan §"Testing Strategy" / build wiring originally specified `mpirun -np 2 ./seas_test_bp5_petsc_ts_restart`.  The implementer documented a deviation: the Makefile target now invokes `./seas_test_bp5_petsc_ts_restart` directly (serial).  Round-4 added `MPI_Init` to `main()` for Sub-test 3's PetscODESolver init, so the test is now half-MPI-aware: it INITIALISES MPI but never CHECKS rank/size.
+The round-7 R-009 fix updated SOME stale comments to reflect that V1
+restart now works, but missed at least FIVE stale comment blocks that
+still claim restart is a no-op or that the driver has no safety check:
 
-Every sub-test passes `mpi=nullptr` to `WriteCheckpoint` / `WritePetscTSCheckpoint`, which hard-codes `rank = mpi ? mpi->Rank() : 0`.  Result: every rank writes to `*_checkpoint_r0.txt`.  Under `mpirun -np 2`:
-- Both ranks call `MakeTmpDir("subtest1")` → `mkdir` race (probably harmless).
-- Both ranks call `WriteCheckpoint("/tmp/.../subtest1/v1_only", ...)` → write to `/tmp/.../subtest1/v1_only_checkpoint_r0.txt` SIMULTANEOUSLY.  File contents corrupted / interleaved.
-- Sub-test 2 / 3 / 4 / 7 / 8 / 9 all have the same race.
-- Sub-test 3 additionally creates a PetscODESolver on `MPI_COMM_SELF` on each rank; each rank tries to write to the same V2 file via `WritePetscTSCheckpoint(..., nullptr)`.
+- **Line 127–131** (chained-restart header):
+  > "Today, segment_002 is a SECOND FRESH RUN (Phase B's --restart is
+  > silently ignored — see header)."
+  WRONG.  V1 restart is fully wired; Phase B actually restarts.
 
-The fact that the Makefile target doesn't use mpirun masks the bug, but:
-1. Anyone running the test under `mpirun -np 2 ./seas_test_bp5_petsc_ts_restart` (matching the plan) hits silent file corruption.
-2. The plan's `test-bp5-petsc-ts-restart` target was originally `$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./...` — the implementer changed it.  A future regression to the planned target reintroduces the race.
+- **Line 287–290** (Validation #1 comment):
+  > "the basic output layout is what restart would need to preserve."
+  Implies restart doesn't yet preserve it.  WRONG.
+
+- **Line 306–309** (Validation #2 comment):
+  > "Even though restart was a no-op, the --output-dir separation is
+  > the operator's primary protection against clobber.  Same gate as
+  > BP5's safety check (which TPV104 lacks)."
+  Both clauses are WRONG.  Restart is not a no-op; TPV104 has the
+  safety check (added at `tpv104_driver.cpp:495-579`).
+
+- **Line 325–328** (Validation #3 comment):
+  > "This is the only thing protecting V1 results today (no safety
+  > check in the TPV104 driver)."
+  WRONG.  TPV104 has the safety check.
+
+- **Line 343–347** (Validation #4 comment):
+  > "Acceptance check #4 — CONFIRMS the no-restart gap."
+  WRONG.  Validation #4 confirms restart FIRED, not that it didn't.
+
+A future debugger reading the sbatch will be misled into thinking
+restart is broken.  Combined with the (also-stale) `SBATCH -J
+tpv104_restart_scaff` job name and `tpv104_restart_scaffolding_%j.out`
+log paths (lines 2–4), the artefact still presents itself as
+"scaffolding only" when it is now a real end-to-end test.
 
 **Trigger:**
-`mpirun -np 2 ./seas_test_bp5_petsc_ts_restart`
+Read the sbatch.
 
 **Actual behavior:**
-File-format sub-tests (1, 2, 4, 7, 8, 9, 10, 11, 12) race on `/tmp/seas_test_bp5_petsc_ts_restart/subtestN/*_checkpoint_r0.txt`.  Sub-test 3 races on its V2 file.  Asserts may pass or fail nondeterministically; in the worst case, the binary segfaults inside `std::ifstream` parsing of a half-written file.
+Comments contradict the validation logic.  E.g., line 343 says #4
+"CONFIRMS the no-restart gap" but the actual #4 block (lines 348–365)
+checks for `"TPV104 restart loaded:"` log line — the opposite signal.
 
 **Expected behavior:**
-Either:
-(a) Detect `MPI_Comm_size > 1` at `main()` start and SKIP all sub-tests on non-rank-0 (with a clear "test is serial-only; running on rank 0 only" message); OR
-(b) Use rank-suffixed `/tmp` paths so each rank has its own sandbox.
-
-Option (a) is cleaner since the sub-tests are designed as serial unit tests.
+All comments reflect the post-R-001..R-009 reality: restart works,
+safety check is in place, validations gate end-to-end correctness.
 
 **Suggested fix:**
 ```diff
- int main(int argc, char *argv[])
- {
- #ifdef MFEM_USE_PETSC
-    int already_inited = 0;
-    MPI_Initialized(&already_inited);
-    if (!already_inited) { MPI_Init(&argc, &argv); }
-    mfem::MFEMInitializePetsc(&argc, &argv, NULL, NULL);
-+
-+   // R-001 (REVIEW.md round 5): the sub-tests use file I/O with
-+   // mpi=nullptr (hard-coding rank=0 in the filename), so under
-+   // mpirun -np N>=2 every rank would race on the same /tmp paths.
-+   // Detect parallel launch and run sub-tests only on rank 0; the
-+   // rest spin idle until MPI_Finalize.
-+   int mpi_size = 1, mpi_rank = 0;
-+   MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
-+   MPI_Comm_rank(MPI_COMM_WORLD, &mpi_rank);
-+   if (mpi_size > 1 && mpi_rank != 0)
-+   {
-+      mfem::MFEMFinalizePetsc();
-+      if (!already_inited) { MPI_Finalize(); }
-+      return 0;
-+   }
-+   if (mpi_size > 1 && mpi_rank == 0)
-+   {
-+      std::cout << "INFO: launched under mpirun -np " << mpi_size
-+                << "; sub-tests run on rank 0 only (file I/O is "
-+                << "serial-only and would race on shared /tmp paths "
-+                << "otherwise).  Use np=1 for the full suite.\n";
-+   }
- #else
-    (void)argc; (void)argv;
- #endif
+@@ jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch:127-131
+-# Chained-restart naming convention (matches the BP5 sbatch +
+-# bp5_verification_full.cpp safety-check hint): single base dir +
+-# segment_NNN subdirs.  Today, segment_002 is a SECOND FRESH RUN
+-# (Phase B's --restart is silently ignored — see header).
++# Chained-restart naming convention (matches the BP5 sbatch +
++# bp5_verification_full.cpp safety-check hint): single base dir +
++# segment_NNN subdirs.  segment_002 is RESTARTED from segment_001's
++# end-of-run V1 checkpoint via `--restart ${RESULT_DIR_A}/${OUTPUT_PREFIX_A}`.
+
+@@ :287-290
+-# Acceptance check #1 — Phase A produced fault.vtkhdf.  Sanity check
+-# that the driver is functioning at all and the basic output layout
+-# is what restart would need to preserve.
++# Acceptance check #1 — Phase A produced fault.vtkhdf.  Sanity check
++# that the driver is functioning at all and Phase A's output layout
++# matches what Phase B's --restart load expects.
+
+@@ :306-309
+-# Acceptance check #2 — Phase B produced its own fault.vtkhdf in a
+-# DIFFERENT directory.  Even though restart was a no-op, the
+-# --output-dir separation is the operator's primary protection against
+-# clobber.  Same gate as BP5's safety check (which TPV104 lacks).
++# Acceptance check #2 — Phase B produced its own fault.vtkhdf in a
++# DIFFERENT directory.  The --output-dir separation is enforced by
++# the canonical-path collision check in tpv104_driver.cpp:495-579;
++# this validation confirms Phase B's outputs landed in segment_002.
+
+@@ :325-328
+-# Acceptance check #3 — Phase A's fault.vtkhdf untouched after Phase B
+-# finishes.  Confirms the --output-dir separation protects Phase A's
+-# output from any partial writes by Phase B.  This is the only thing
+-# protecting V1 results today (no safety check in the TPV104 driver).
++# Acceptance check #3 — Phase A's fault.vtkhdf size unchanged across
++# Phase B's run.  Confirms the --output-dir separation + driver
++# safety check kept Phase B's writes out of Phase A's directory.
++# (See R-103 — current implementation is broken-by-design; both stat
++# calls happen AFTER Phase B finishes.)
+
+@@ :343-347
+-# Acceptance check #4 — CONFIRMS the no-restart gap.  Phase B's stdout
+-# SHOULD contain the "TPV104 restart loaded:" log line printed by the
++# Acceptance check #4 — proves Phase B's V1 restart actually fired.
++# Phase B's stdout MUST contain the "TPV104 restart loaded:" log line
++# printed by the
+```
+
+Also rename the SBATCH job/log identifiers:
+```diff
+@@ :1-4
+ #!/bin/bash
+-#SBATCH -J tpv104_restart_scaff
+-#SBATCH -o tpv104_restart_scaffolding_%j.out
+-#SBATCH -e tpv104_restart_scaffolding_%j.err
++#SBATCH -J tpv104_restart_v1
++#SBATCH -o tpv104_restart_v1_%j.out
++#SBATCH -e tpv104_restart_v1_%j.err
+```
+**WARNING**: the rename will require updating `PHASE_LOG` at line 286
+to match (`tpv104_restart_v1_${SLURM_JOB_ID}.out` instead of
+`tpv104_restart_scaffolding_${SLURM_JOB_ID}.out`), or else
+Validation #4 will FAIL — it greps `${PHASE_LOG}` for the restart-loaded
+line.
+
+**Test case:**
+Add a grep assertion to `test_tpv104_checkpoint.cpp` Sub-test 6 that
+the sbatch does NOT contain the misleading strings:
+```cpp
+std::ifstream sb("jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch");
+std::stringstream sbuf; sbuf << sb.rdbuf();
+const std::string sbsrc = sbuf.str();
+MFEM_VERIFY(sbsrc.find("silently ignored") == std::string::npos,
+            "R-101: sbatch must not claim restart is silently ignored");
+MFEM_VERIFY(sbsrc.find("no-restart gap") == std::string::npos,
+            "R-101: sbatch must not claim there is a 'no-restart gap'");
+MFEM_VERIFY(sbsrc.find("no safety check in the TPV104 driver")
+            == std::string::npos,
+            "R-101: sbatch must not claim TPV104 driver has no safety check");
+MFEM_VERIFY(sbsrc.find("restart was a no-op") == std::string::npos,
+            "R-101: sbatch must not claim restart was a no-op");
+```
+
+---
+
+### [R-102] MODERATE [test_tpv104_checkpoint.cpp:7] — Header comment references the non-existent `tpv104_restart_test_dev_2hr.sbatch`
+
+**Category:** BUG (documentation — same as the round-7 R-005 in driver, not propagated to the test)
+
+**Description:**
+`test_tpv104_checkpoint.cpp:7` reads:
+
+```cpp
+// (jobs/tpv104/tpv104_restart_test_dev_2hr.sbatch).
+```
+
+This is the identical wrong filename that round 7's R-005 fixed in the
+driver (`tpv104_driver.cpp:534`).  The test file's header comment
+references the SAME non-existent file.  The actual file is
+`tpv104_restart_test_v1_dev_2hr.sbatch` (with the `_v1_` infix).
+
+Sub-test 6's own R-005 grep check on the driver does not cover the
+test file's own header, so the regression test for R-005 silently
+allowed the same bug to survive in a sibling file.
+
+**Trigger:**
+Read the test header.  Try to `ls` the sbatch it points at.
+
+**Actual behavior:**
+`ls jobs/tpv104/tpv104_restart_test_dev_2hr.sbatch` → "No such file".
+
+**Expected behavior:**
+Header references the real sbatch filename.
+
+**Suggested fix:**
+```diff
+@@ tests/unit/test_tpv104_checkpoint.cpp:7
+-// (jobs/tpv104/tpv104_restart_test_dev_2hr.sbatch).
++// (jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch).
 ```
 
 **Test case:**
+Extend Sub-test 6 to grep its OWN source file too:
+```cpp
+// R-102: test header must reference the actual sbatch filename.
+std::ifstream self("tests/unit/test_tpv104_checkpoint.cpp");
+std::stringstream selfbuf; selfbuf << self.rdbuf();
+const std::string selfsrc = selfbuf.str();
+MFEM_VERIFY(
+   selfsrc.find("tpv104_restart_test_v1_dev_2hr.sbatch")
+   != std::string::npos,
+   "R-102: test header must reference the actual sbatch name");
+MFEM_VERIFY(
+   selfsrc.find("(jobs/tpv104/tpv104_restart_test_dev_2hr.sbatch)")
+   == std::string::npos,
+   "R-102: test header must not point at a non-existent sbatch");
+```
+
+---
+
+### [R-103] MODERATE [tpv104_restart_test_v1_dev_2hr.sbatch:288–341, bp5_restart_test_v2_dev_2hr.sbatch:440–474] — Validation #3 fault.vtkhdf-unchanged check is a no-op (broken-by-design)
+
+**Category:** BUG (logic error inherited from BP5 sbatch; round-7 R-004 fixed the analogous station-file gap correctly, but Validation #3 still has the same defect)
+
+**Description:**
+The intent of TPV104 Validation #3 (and BP5 Validation #8) is to
+verify Phase B did NOT clobber Phase A's `fault.vtkhdf`.  The
+implementation:
+
 ```bash
-# Without fix:
-mpirun -np 2 ./seas_test_bp5_petsc_ts_restart
-# Expect: file corruption, asserts may pass/fail nondeterministically,
-# OR segfault parsing half-written files.
-
-# With fix:
-mpirun -np 2 ./seas_test_bp5_petsc_ts_restart
-# Expect: rank 0 runs all sub-tests as if serial (51/51 pass), rank 1
-# prints "running on rank 0 only", both ranks exit 0.
+# Line 294-297 (Validation #1, runs AFTER Phase B finishes):
+FAULT_A_SIZE=$(stat ... "${FAULT_A}" ...)
+...
+# Line 332-335 (Validation #3, also AFTER Phase B finishes):
+FAULT_A_SIZE_AFTER_B=$(stat ... "${FAULT_A}" ...)
+if [ "${FAULT_A_SIZE_AFTER_B}" = "${FAULT_A_SIZE}" ]; then
+   echo "  PASS — Phase A fault.vtkhdf size unchanged"
 ```
 
----
+Both `stat` calls happen AFTER Phase B has already cleanly exited
+(line 257–262 verifies `PHASE_B_RC == 0`).  After Phase B exits, NO
+process is writing to Phase A's file — so the two `stat` calls are
+GUARANTEED to return the same byte count.  The `if` always evaluates
+true; Validation #3 always PASSes.
 
-### [R-002] [MODERATE] [test_bp5_petsc_ts_restart.cpp:Subtest3] — Test mirrors the driver's restart sequence but never invokes the actual driver source — deletions in the driver's V2 block go undetected
+The check cannot catch a real clobber.
 
-**Category:** DEVIATION (round-4 R-001 partial fix — Sub-test 3 proves PetscODESolver+file format work together, but does NOT prove the DRIVER's V2 restart block calls them correctly)
+The new Validation #7 (R-004) does this correctly: it captures
+md5sums BEFORE Phase B starts (line 211–213, between Phase A and
+Phase B) and re-captures after (line 439–441).  The same pattern
+should be applied to fault.vtkhdf.
 
-**Description:**
-Sub-test 3 hand-rolls the V2 restart sequence:
-```cpp
-// Lines 894-897:
-TSSetStepNumber(ts, static_cast<PetscInt>(r_step));
-real_t t_post  = r_t;
-real_t dt_post = r_dt;
-ode.Run(y_B, t_post, dt_post, T_full);
-```
-
-This proves the V2 restart MACHINERY (file format + PetscODESolver semantics) works.  But it does NOT prove the DRIVER at `bp5_verification_full.cpp:2441-2563` contains the corresponding calls.
-
-Concretely: if I delete these load-bearing lines from the driver
-- `t = ts_t;` (line 2530)
-- `current_dt = ts_dt_next;` (line 2533)
-- `TSSetStepNumber(ts, static_cast<PetscInt>(ts_step));` (line 2522)
-
-then Sub-test 3 still passes (because it has its own copy of those lines), but BP5 production restart is broken.  The other "grep" sub-tests (7, 8, 9) catch text strings but NOT these specific lines.
-
-Round-4 R-001's intent was to verify end-to-end restart works.  The current Sub-test 3 verifies that the BUILDING BLOCKS work; it does NOT verify that the driver assembles them correctly.
+The same defect exists in BP5's
+`jobs/bp5/bp5_restart_test_v2_dev_2hr.sbatch:440–474` (Validation #8),
+because the TPV104 sbatch was modelled on it.
 
 **Trigger:**
-A refactor that accidentally deletes line 2530 / 2533 / 2522 from the driver.  Sub-test 3 still passes.  BP5 production restart silently uses wrong t / dt / step.
+Phase B intentionally clobbers Phase A's fault.vtkhdf (e.g., remove
+the safety check, point `--output-dir` at Phase A's dir).  Validation
+#3 still PASSes.
 
 **Actual behavior:**
-Sub-test 3 passes regardless of what the driver does.
+`FAULT_A_SIZE` and `FAULT_A_SIZE_AFTER_B` are both captured after the
+clobber finished, so they match the clobbered size.  PASS is reported.
 
 **Expected behavior:**
-The test should fail if the driver's V2 restart block loses its load-bearing assignments.  Either add grep-style source checks (matching R-204 / R-007 / R-008 / R-009 patterns), OR refactor the driver's V2 block into a callable helper that the test can invoke directly.
+Capture `FAULT_A_SIZE` (or md5sum) BEFORE Phase B runs.  Re-capture
+AFTER Phase B finishes.  Compare — that's the only way to detect a
+clobber.
 
-**Suggested fix (grep-style, minimal):**
-Add to Sub-test 3 (after the trajectory assertion, before the `}`):
+**Suggested fix:**
+Move FAULT_A_SIZE capture to BEFORE the Phase B ibrun (parallel to
+the new md5sum capture at lines 210–215):
 
 ```diff
-    TEST_ASSERT(diff < bound,
-                "Sub-test 3e (R-001 end-to-end): fresh-vs-restart "
-                ...
-                "does NOT actually work.");
-+
-+   // R-002 (REVIEW.md round 5): grep the driver source for the
-+   // three load-bearing assignments in the V2 restart block.  Sub-test
-+   // 3 above proves the building blocks work; this check proves the
-+   // driver assembles them correctly.  Without this, a refactor that
-+   // accidentally deletes any of `t = ts_t`, `current_dt = ts_dt_next`,
-+   // or `TSSetStepNumber(ts, ...)` from the driver's V2 restart block
-+   // would silently break BP5 production restart while sub-test 3
-+   // continues to pass.
-+   const std::string driver_path =
-+      "tests/verification/bp5_verification_full.cpp";
-+   std::ifstream driver(driver_path);
-+   if (driver.is_open())
-+   {
-+      std::stringstream buf; buf << driver.rdbuf();
-+      const std::string src = buf.str();
-+      const bool has_t_assign  =
-+         src.find("t          = ts_t;") != std::string::npos
-+         || src.find("t = ts_t;") != std::string::npos;
-+      const bool has_dt_assign =
-+         src.find("current_dt = ts_dt_next;") != std::string::npos;
-+      const bool has_setstep   =
-+         src.find("TSSetStepNumber(ts, static_cast<PetscInt>(ts_step))")
-+         != std::string::npos;
-+      TEST_ASSERT(has_t_assign && has_dt_assign && has_setstep,
-+                  "Sub-test 3f (R-002 round 5): driver V2 restart block "
-+                  "must contain `t = ts_t`, `current_dt = ts_dt_next`, "
-+                  "and `TSSetStepNumber(ts, static_cast<PetscInt>"
-+                  "(ts_step))`.  has_t_assign=" << has_t_assign
-+                  << " has_dt_assign=" << has_dt_assign
-+                  << " has_setstep=" << has_setstep);
-+   }
-+   else
-+   {
-+      std::cout << "  INFO: Sub-test 3f driver-grep skipped — could "
-+                   "not open " << driver_path << " (CWD?)\n";
-+   }
+@@ jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch:206-216
+ # Capture Phase A station-file fingerprints BEFORE Phase B runs.
+ ...
+ echo "Captured $(wc -l < "${PHASE_A_STATION_HASHES_BEFORE_B}") Phase A"
+ echo "  station-file md5sums before Phase B starts (R-004 unchanged check)."
+
++# Capture Phase A fault.vtkhdf size BEFORE Phase B runs.  Used by
++# Validation #3 (R-103) to confirm Phase B did not mutate Phase A's
++# fault output.  Without this, Validation #3 is a no-op (both stats
++# happen after Phase B exits and are guaranteed equal).
++FAULT_A_BEFORE_B_SIZE=$(stat -c %s "${RESULT_DIR_A}/fault.vtkhdf" 2>/dev/null \
++                     || stat -f %z "${RESULT_DIR_A}/fault.vtkhdf" 2>/dev/null \
++                     || echo 0)
++echo "Captured Phase A fault.vtkhdf size: ${FAULT_A_BEFORE_B_SIZE} bytes"
++echo "  (before Phase B starts; R-103 unchanged check)."
 ```
 
+Then update Validation #3:
+
+```diff
+@@ jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch:332-335
+ FAULT_A_SIZE_AFTER_B=$(stat -c %s "${FAULT_A}" 2>/dev/null \
+                     || stat -f %z "${FAULT_A}" 2>/dev/null \
+                     || echo 0)
+-if [ "${FAULT_A_SIZE_AFTER_B}" = "${FAULT_A_SIZE}" ]; then
+-   echo "  PASS — Phase A fault.vtkhdf size unchanged (${FAULT_A_SIZE})"
++if [ "${FAULT_A_SIZE_AFTER_B}" = "${FAULT_A_BEFORE_B_SIZE}" ]; then
++   echo "  PASS — Phase A fault.vtkhdf size unchanged"
++   echo "         (was ${FAULT_A_BEFORE_B_SIZE} before B, still ${FAULT_A_SIZE_AFTER_B} after B)"
+ else
+-   echo "  FAIL — Phase A fault.vtkhdf was modified during Phase B"
+-   echo "         (was ${FAULT_A_SIZE}, now ${FAULT_A_SIZE_AFTER_B})"
++   echo "  FAIL — Phase A fault.vtkhdf was modified during Phase B"
++   echo "         (was ${FAULT_A_BEFORE_B_SIZE} before B, now ${FAULT_A_SIZE_AFTER_B})"
+    exit 5
+ fi
+```
+
+Apply the equivalent fix to the BP5 sbatch's Validation #8 at
+`jobs/bp5/bp5_restart_test_v2_dev_2hr.sbatch:440–474`.
+
 **Test case:**
-```cpp
-// Demonstration: delete `current_dt = ts_dt_next;` from
-// bp5_verification_full.cpp:2533 and re-run.
-//
-// Without the fix: ./seas_test_bp5_petsc_ts_restart → 51/51 PASS
-//                  (Sub-test 3 doesn't catch it).
-// With the fix:    ./seas_test_bp5_petsc_ts_restart → Sub-test 3f
-//                  FAILS with "has_dt_assign=0".
+Local synthetic fixture:
+```bash
+mkdir -p /tmp/rfix && cd /tmp/rfix
+echo "phase A original" > fault.vtkhdf
+FAULT_BEFORE=$(stat -c %s fault.vtkhdf)
+# Simulate Phase B clobbering Phase A:
+echo "phase B clobber padded out to a different byte count xxx" > fault.vtkhdf
+FAULT_AFTER=$(stat -c %s fault.vtkhdf)
+[ "${FAULT_BEFORE}" = "${FAULT_AFTER}" ] && echo "OLD CHECK: PASS (wrong)" \
+                                          || echo "NEW CHECK: FAIL (correct)"
 ```
 
 ---
 
-### [R-003] [LOW] [petsc_ts_checkpoint.hpp:WritePetscTSCheckpoint probe] — V1 probe catches missing files but not empty / truncated ones
+### [R-104] MODERATE [tpv104_checkpoint.hpp:118–121,161–168,295–298] — `expected_Q_size = -1` sentinel allows silent bypass in production code
 
-**Category:** EDGE_CASE
+**Category:** ASSUMPTION (defensive-design hole introduced by round-7 R-002)
 
 **Description:**
-The R-006 round-4 fix added a probe before opening in `ios::app` mode:
+The round-7 R-002 fix correctly adds an `int expected_Q_size`
+parameter to both Read overloads.  But it also adds a sentinel
+escape: passing `-1` SKIPS the check.
+
 ```cpp
+// io/tpv104_checkpoint.hpp:161-168
+if (expected_Q_size >= 0)
 {
-   std::ifstream probe(filename);
-   MFEM_VERIFY(probe.good(),
-               "WritePetscTSCheckpoint: prerequisite V1 checkpoint "
-               "file " << filename << " does not exist; ...");
+   MFEM_VERIFY(Q_size == expected_Q_size, ...);
 }
 ```
 
-`probe.good()` returns true if the file exists and was opened successfully — regardless of contents.  If the file is EMPTY (0 bytes) or TRUNCATED (writer crashed mid-V1), the probe passes and `WritePetscTSCheckpoint` appends the V2 trailing block to a header-less file.  Downstream `ReadCheckpoint` then aborts with "expected 'SEAS_CHECKPOINT_V1', got '...'", pointing at the reader rather than at the writer that produced the half-formed file.
+The header doc comment justifies the sentinel as "Unit-test callers
+that round-trip a synthetic Q (no live mesh) pass -1 to skip the
+check."  But the unit tests DO pass the actual size — Sub-test 1 at
+line 157 passes `expected_Q_size=Qsize` (= 27); Sub-test 9 at line
+484 passes `expected_Q_size=Qsize` (= 18).  No caller uses `-1`.  The
+sentinel exists only as a footgun: a future driver developer who
+forgets to pass `Q.Size()` (e.g., passes `0` or refactors to default
+the arg to `-1`) silently re-enables the original R-002 bug.
 
-Not a critical bug — the system fails loudly, just with a confusing message — but the round-4 fix didn't fully address the failure mode it documented.
-
-**Trigger:**
-Any scenario where the V1 file exists but is empty or truncated — e.g., disk full mid-write, MPI_Abort during WriteCheckpoint, manual `> file` to zero-out for testing.
-
-**Actual behavior:**
-`WritePetscTSCheckpoint` appends V2 to an empty file.  `ReadCheckpoint` later reports confusing parse error.
-
-**Expected behavior:**
-Probe should also verify the file ends with a recognizable V1 trailer.  Cheapest check: stat for `size > min_v1_size` where `min_v1_size` is the size of an empty-vector V1 file (header + 0-element vectors ≈ 250 bytes).
-
-**Suggested fix:**
-Either accept this as a known limitation (cheapest), or add a size check:
-
-```diff
-    {
-       std::ifstream probe(filename);
-       MFEM_VERIFY(probe.good(),
-                   "WritePetscTSCheckpoint: prerequisite V1 checkpoint "
-                   "file " << filename << " does not exist; call "
-                   "WriteCheckpoint on the same prefix first.");
-+      // R-003 (REVIEW.md round 5): also verify the file is non-empty.
-+      // probe.good() is true for empty files too, so without this
-+      // check a truncated V1 file (e.g., from a crashed write) would
-+      // have V2 appended to it and later confuse ReadCheckpoint.
-+      probe.seekg(0, std::ios::end);
-+      const auto file_size = probe.tellg();
-+      MFEM_VERIFY(file_size > 0,
-+                  "WritePetscTSCheckpoint: prerequisite V1 checkpoint "
-+                  "file " << filename << " exists but is empty "
-+                  "(prior WriteCheckpoint crashed mid-stream?).  "
-+                  "Cannot safely append the V2 trailing block.");
-    }
-```
-
-**Test case:**
-N/A (would require simulating a crashed write; downgrade or drop if not worth the complexity).
-
----
-
-### [R-004] [LOW] [paraview_output.hpp:SetLastCommittedCycle] — No input validation; arbitrary negative or sentinel-collision values accepted
-
-**Category:** ASSUMPTION
-
-**Description:**
-The R-004 round-4 fix added:
-```cpp
-void SetLastCommittedCycle(int cycle) { last_committed_cycle_ = cycle; }
-```
-
-This setter accepts ANY int.  The CommitSchedule dedup logic at `paraview_output.hpp:1607-1609` uses:
-```cpp
-const bool same_step_as_last_commit =
-   (last_committed_cycle_ != std::numeric_limits<int>::min())
-   && (std::abs(time - last_write_time_) <= tol);
-```
-
-The first conjunct (`!= INT_MIN`) is the only thing distinguishing "fresh" from "post-commit" state.  If a V2 checkpoint accidentally stored `INT_MIN` (e.g., from a never-committed pre-checkpoint run that somehow wrote V2), the post-restart dedup would falsely treat the state as "no prior commit ever happened", over-bumping the counter on the first CommitSchedule.
-
-A V2-aware writer always sets `paraview_last_committed_cycle` to either a real cycle number or `INT_MIN` (from the `mon->pv_out ? ... : INT_MIN` default), so a real `INT_MIN` value can legitimately appear in a V2 file (paraview disabled scenario).  Restoring `INT_MIN` is correct in that case.
-
-But the setter does NOT distinguish "you intended INT_MIN" from "the V2 read returned garbage that happens to be INT_MIN".  For other corruption modes (e.g., a negative-but-not-INT_MIN value), the setter accepts it silently.
-
-Compare R-007 round-4 (regime clamp) — that fix DID add validation.  The dedup-cycle setter omits it.
+The round-7 reviewer's R-002 suggested fix explicitly called for a
+REQUIRED parameter: "Extend the signature of `ReadTpv104Checkpoint(...)`
+... to accept an extra parameter `int expected_Q_size`."  Sentinel
+defaults defeat that intent.
 
 **Trigger:**
-A corrupted V2 file that contains a negative `paraview_last_committed_cycle` other than `INT_MIN`.  Or any value that violates the implicit invariant "monotonically non-decreasing cycle".
+A future driver edit passes `-1`, or passes `expected_Q_size` from a
+variable that ends up zero or negative (e.g., uninitialised `int`).
 
 **Actual behavior:**
-Setter accepts silently.  Subsequent dedup behavior depends on whether the corrupted value happens to be `INT_MIN` or not.
+With `-1`, no MFEM_VERIFY.  Wrong-mesh restart silently accepted —
+the exact bug R-002 was meant to close.
 
 **Expected behavior:**
-Either clamp negative values to `INT_MIN` (treating "any negative" as "no prior commit"), or document explicitly that the setter is unvalidated and the V2 producer is trusted.
+No sentinel.  Require every caller to pass a non-negative size.
 
 **Suggested fix:**
+Remove the sentinel branch; assert that the parameter is non-negative
+and the file's size matches:
+
 ```diff
--   void SetLastCommittedCycle(int cycle) { last_committed_cycle_ = cycle; }
-+   void SetLastCommittedCycle(int cycle)
-+   {
-+      // R-004 (REVIEW.md round 5): clamp negative values other than
-+      // the documented INT_MIN sentinel to INT_MIN.  This treats any
-+      // corrupted-but-negative V2 value as "no prior commit", which
-+      // is the safest default — falsely identifying "fresh state"
-+      // leads to one extra bump on the first CommitSchedule (minor
-+      // over-count), whereas a corrupted positive value can cause
-+      // legitimate dedups to misfire (silent under-count for the
-+      // remainder of the run).
-+      last_committed_cycle_ = (cycle < 0)
-+                              ? std::numeric_limits<int>::min()
-+                              : cycle;
-+   }
+@@ io/tpv104_checkpoint.hpp:161-168
+    int Q_size = 0;
+    read_tag("Q_size"); in >> Q_size;
+-   if (expected_Q_size >= 0)
+-   {
+-      MFEM_VERIFY(Q_size == expected_Q_size,
+-                  "ReadTpv104Checkpoint: Q size mismatch: file has "
+-                  << Q_size << " doubles but the current driver expects "
+-                  << expected_Q_size << " (NUM_STATE * ndof_total). "
+-                  "Different mesh, polynomial order, or partition?");
+-   }
++   MFEM_VERIFY(expected_Q_size >= 0,
++               "ReadTpv104Checkpoint: caller passed expected_Q_size="
++               << expected_Q_size << " (must be >= 0; this parameter "
++               "is REQUIRED to gate wrong-mesh restart per R-002).");
++   MFEM_VERIFY(Q_size == expected_Q_size,
++               "ReadTpv104Checkpoint: Q size mismatch: file has "
++               << Q_size << " doubles but the current driver expects "
++               << expected_Q_size << " (NUM_STATE * ndof_total). "
++               "Different mesh, polynomial order, or partition?");
+    Q.SetSize(Q_size);
 ```
 
+Update the doc-comment to remove the sentinel rationale:
+
+```diff
+@@ io/tpv104_checkpoint.hpp:117-122
+-/// Single body for ReadTpv104Checkpoint (raw rank/size).  Both public
+-/// overloads forward here.  `expected_Q_size` enforces R-002: if it is
+-/// >= 0, the file's Q_size must equal it; if < 0, the check is skipped
+-/// (legacy unit-test callers that want to round-trip a synthetic Q
+-/// pass -1).  All production callers pass the driver's
+-/// NUM_STATE * ndof_total via Q.Size() before this function resizes Q.
++/// Single body for ReadTpv104Checkpoint (raw rank/size).  Both public
++/// overloads forward here.  `expected_Q_size` enforces R-002:
++/// MUST be >= 0; the file's Q_size MUST equal it or the function
++/// aborts via MFEM_VERIFY.  All callers pass the live wave-field
++/// size (NUM_STATE * ndof_total) so wrong-mesh restart fails loudly.
+```
+
+Same edit to the public-overload comment at lines 295-298.
+
+Unit-test changes — no source changes needed; Sub-test 1 and Sub-test
+9 already pass the right size.
+
 **Test case:**
+Sub-test 6 grep that no `>= 0` sentinel branch remains:
 ```cpp
-// Add to sub-test 12 after the existing assertions:
-pv_post.SetLastCommittedCycle(-42);
-TEST_EQ(pv_post.GetLastCommittedCycle(),
-        std::numeric_limits<int>::min(),
-        "Sub-test 12 (R-004 round 5): negative cycle key clamped to "
-        "INT_MIN (any negative is treated as 'no prior commit')");
+// R-104: no sentinel branch — Q_size check must be unconditional.
+MFEM_VERIFY(
+   hsrc.find("if (expected_Q_size >= 0)") == std::string::npos,
+   "R-104: ReadTpv104CheckpointImpl must not have a sentinel "
+   "branch that skips the Q-size check");
 ```
 
 ---
 
-### [R-005] [LOW] [test_bp5_petsc_ts_restart.cpp:Subtest3] — Mid-run `mid_dt_next` may be exactly 0 in unusual scenarios; test doesn't exercise R-003 driver fallback
+### [R-105] LOW [test_tpv104_checkpoint.cpp:9–14] — Header lists Sub-tests 2 and 3 that are not implemented
 
-**Category:** EDGE_CASE / QUALITY
+**Category:** QUALITY (documentation drift, pre-existing but inherited by R-008 extension)
 
 **Description:**
-Sub-test 3 saves `mid_dt_next` from `TSGetTimeStep` after a Run that ended at `T_mid` via `TS_EXACTFINALTIME_MATCHSTEP`.  Per PETSc source, this can produce a near-zero `mid_dt_next` because the controller may shrink dt at the final-step match.  In a typical run, `mid_dt_next` is some small positive value (the test logged it implicitly via the trajectory check).
+The header comment lists 8 sub-tests (1, 2, 3, 4, 5, 6, 7, 9 — note 8
+is skipped, which is intentional).  But `Subtest2_*` and `Subtest3_*`
+functions do not exist; `main()` calls only 1, 4, 5, 6, 7, 9.  The
+header header lies about coverage.
 
-But the test does NOT explicitly verify what `mid_dt_next` is, nor exercise the R-003 driver-side fallback (`if (current_dt <= 0.0) current_dt = dt_init;` at `bp5_verification_full.cpp:2539-2548`).  Sub-test 8's grep covers the source-text existence; nothing covers actual runtime behavior.
-
-If a future PETSc upgrade changes the post-MATCHSTEP `TSGetTimeStep` behavior to return exactly 0 (instead of a small positive), the driver's fallback would fire and the test would silently continue, but a separate code path is now exercised that we have no regression test for.
+This is pre-existing (sub-tests 2 and 3 were never implemented), but
+the round-7 R-008 extension added 7 and 9 to the same lying list
+without removing or marking the absent 2/3 entries.
 
 **Trigger:**
-A PETSc version change OR a checkpoint taken from a TSSetConvergedReason(TS_DIVERGED_*) state, where TSGetTimeStep returns 0.
-
-**Actual behavior:**
-The driver falls back to `dt_init` silently; no test catches misbehavior in the fallback path.
-
-**Expected behavior:**
-Either explicitly test the dt_next=0 case end-to-end, or accept the grep-test coverage as sufficient.
+Read the header.
 
 **Suggested fix:**
-Add a small variant of Sub-test 3 that hand-writes V2 with `dt_next = 0`, drives the restart sequence (using `dt_init` as the fallback the driver would compute), and asserts trajectory continuity:
+Either implement 2 and 3 (wrong-rank and wrong-num-ranks guards —
+same SKIP pattern as 4/5 since MFEM_VERIFY isn't catchable), or mark
+them explicitly as NOT IMPLEMENTED:
+
+```diff
+@@ tests/unit/test_tpv104_checkpoint.cpp:11-14
+-//   2. Wrong-rank guard: a checkpoint written for rank=R must NOT
+-//      be readable as rank=R+1.
+-//   3. Wrong-num-ranks guard: a checkpoint written under N ranks
+-//      must NOT be readable under M != N ranks.
++//   2. (NOT IMPLEMENTED) Wrong-rank guard — same MFEM_VERIFY
++//      non-catchable caveat as Sub-tests 4/5; covered by source-level
++//      MFEM_VERIFY in ReadTpv104CheckpointImpl.
++//   3. (NOT IMPLEMENTED) Wrong-num-ranks guard — same caveat as #2.
+```
+
+---
+
+### [R-106] LOW [tpv104_driver.cpp:500] — Block comment still references `bulk.vtkhdf`
+
+**Category:** QUALITY (documentation drift — round-7 R-003 fixed the user-facing error message but missed the surrounding block comment)
+
+**Description:**
+The block comment above the safety-check block reads:
 
 ```cpp
-// In Sub-test 3, after the main test:
+// Without this gate a user who
+// re-uses the same --output-dir across a restart would silently
+// lose Phase A's fault.vtkhdf / volume.vtkhdf / bulk.vtkhdf /
+// station files / checkpoint files.
+```
+
+The actual user-facing error message (lines 528–531, fixed by R-003)
+correctly says `ParaView_bulk/volume.vtkhdf` and `*_station_*.dat`.
+The block comment was not updated, so it still says `bulk.vtkhdf`
+(which TPV104 does not write — per Phase 6.4 R-310 the secondary
+collection writes `<output_dir>/ParaView_bulk/volume.vtkhdf`).
+
+**Suggested fix:**
+```diff
+@@ drivers/tpv104_driver.cpp:498-501
+    // Without this gate a user who
+    // re-uses the same --output-dir across a restart would silently
+-   // lose Phase A's fault.vtkhdf / volume.vtkhdf / bulk.vtkhdf /
+-   // station files / checkpoint files.  TPV104's TWO ParaView
++   // lose Phase A's fault.vtkhdf / volume.vtkhdf /
++   // ParaView_bulk/volume.vtkhdf / *_station_*.dat /
++   // *_checkpoint_r*.txt files.  TPV104's TWO ParaView
+    // collections (pv_out + pv_bulk_out) make the clobber risk
+```
+
+---
+
+### [R-107] LOW [petsc_ts_restart_plan_2026-05-16.md:897] — "6 sub-tests" outdated count
+
+**Category:** QUALITY (plan doc inventory drift)
+
+**Description:**
+The plan doc R-006 entry says:
+
+> `tests/unit/test_tpv104_checkpoint.cpp` — 6 sub-tests covering
+> round-trip, wrong-format guard, and driver-grep.
+
+After round 7 the test has Sub-tests 1, 4, 5, 6, 7, 9 (6 implemented,
+2 documented-but-not).  R-008 added Sub-test 9 (the cross-overload
+round-trip) — a substantively new piece of coverage worth naming in
+the inventory.
+
+**Suggested fix:**
+```diff
+@@ debug_document/.../petsc_ts_restart_plan_2026-05-16.md:897
+-  - `tests/unit/test_tpv104_checkpoint.cpp` — 6 sub-tests covering round-trip, wrong-format guard, and driver-grep.
++  - `tests/unit/test_tpv104_checkpoint.cpp` — 6 implemented sub-tests covering V1 round-trip (#1), wrong-format/dof-size/Q-size guards (#4/#5/#7 — SKIP, MFEM_VERIFY non-catchable), driver+header source-grep covering R-001..R-007 (#6), and cross-overload byte-identity round-trip (#9, gates R-007 dedup).
+```
+
+---
+
+### [R-108] POSSIBLE MODERATE [tpv104_checkpoint.hpp:163-168 + test_tpv104_checkpoint.cpp:Sub-test 7] — R-002 runtime behavior not tested; only static grep coverage
+
+**Category:** EDGE_CASE (test coverage gap)
+
+**Description:**
+Sub-test 6's R-002 grep verifies the SOURCE CODE contains the string
+`"Q size mismatch"`.  But it does not verify the runtime check FIRES.
+If a future refactor introduces an off-by-one in the comparison
+(e.g., `Q_size == expected_Q_size + 1`), the grep still passes but
+the check is broken.
+
+Sub-test 7 is SKIPed for the same reason as Sub-tests 4/5 —
+MFEM_VERIFY isn't catchable.  But BP5's Sub-test 14 demonstrates an
+opt-in subprocess-based runtime test pattern (`SEAS_TEST_RUNTIME_SAFETY_CHECK=1`
+env var) that could provide actual runtime coverage.
+
+**Trigger:**
+Refactor `if (expected_Q_size >= 0) MFEM_VERIFY(Q_size == expected_Q_size,...)`
+to `MFEM_VERIFY(Q_size != expected_Q_size, ...)` (inverted operator).
+All current tests still PASS — the grep finds the string, Sub-tests
+1 and 9 pass because the size match would invert into a fail.  Wait
+— Sub-tests 1 and 9 would actually catch this because they pass the
+CORRECT size which would now MFEM_VERIFY-fail (`Q_size != expected_Q_size`
+is false → abort).  OK so this specific refactor would be caught.
+
+But a subtler refactor — `MFEM_VERIFY(Q_size >= 0, ...)` (drop the
+== comparison) — would silently pass all current tests because the
+grep finds "Q size mismatch", Sub-tests 1/9 trivially pass any
+Q_size >= 0, and the runtime check would never fire on wrong sizes.
+
+**Suggested fix:**
+Add an opt-in subprocess test (mirror of BP5's Sub-test 14):
+
+```cpp
+static void Subtest8_WrongQSizeRuntime()
 {
-   // Verify the R-003 driver-side fallback path produces a stable
-   // restart even when V2 ts_dt_next == 0.  We simulate the driver's
-   // fallback explicitly here (test doesn't invoke driver).
-   const std::string prefix_zero = MakeTmpDir("subtest3_dtzero") + "/v2";
-   WriteMinimalV1(prefix_zero);
-   WritePetscTSCheckpoint(prefix_zero, T_mid, /*dt_next=*/0.0,
-                          static_cast<int>(mid_step),
-                          static_cast<int>(mid_rej),
-                          0, -1e30, 0.0, 0,
-                          std::numeric_limits<int>::min(), -1e30,
-                          nullptr);
-   real_t r_t2 = 0, r_dt2 = 0, r_lw2 = 0, r_vmax2 = 0, r_voltime2 = 0;
-   int r_step2 = 0, r_rej2 = 0, r_snap2 = 0, r_regime2 = 0, r_commit2 = 0;
-   const bool ok2 = ReadPetscTSCheckpoint(prefix_zero, r_t2, r_dt2,
-                                          r_step2, r_rej2, r_snap2,
-                                          r_lw2, r_vmax2, r_regime2,
-                                          r_commit2, r_voltime2, nullptr);
-   TEST_ASSERT(ok2, "Sub-test 3g: V2 read with dt_next=0 succeeds");
-   TEST_DOUBLE_EQ(r_dt2, 0.0, "Sub-test 3g: dt_next=0 round-trips");
-
-   // Apply the driver's R-003 fallback explicitly.
-   real_t dt_post2 = r_dt2;
-   if (dt_post2 <= 0.0) { dt_post2 = dt_init; }
-   TEST_ASSERT(dt_post2 > 0.0,
-               "Sub-test 3g (R-005 round 5): R-003 driver-side "
-               "fallback produces a positive dt when V2 returns 0");
-
-   // Run with the fallback dt; trajectory should still land at T_full.
-   mfem::Vector y_B2(1); y_B2(0) = final_B;  // continue from y_B
-   DecayOp op_B3;
-   mfem::PetscODESolver ode2(MPI_COMM_SELF, "");
-   ode2.Init(op_B3, mfem::PetscODESolver::ODE_SOLVER_GENERAL);
-   mfem::petsc::TS ts2 = ode2;
-   TSSetType(ts2, TSRK); TSRKSetType(ts2, TSRK5DP);
-   TSAdapt tsad2; TSGetAdapt(ts2, &tsad2);
-   TSAdaptSetType(tsad2, TSADAPTBASIC);
-   ode2.SetAbsTol(1e-7); ode2.SetRelTol(1e-10);
-   real_t t_post2 = T_full;  // already at T_full from main Sub-test 3
-   // Push to T_full + epsilon to exercise one more step
-   ode2.Run(y_B2, t_post2, dt_post2, T_full + 1e-3);
-   TEST_ASSERT(std::isfinite(y_B2(0)),
-               "Sub-test 3g: R-003 fallback produces finite state");
+   std::cout << "\n--- Sub-test 8: wrong-Q-size runtime guard (opt-in) ---\n";
+   if (!std::getenv("SEAS_TEST_RUNTIME_QSIZE_CHECK"))
+   {
+      std::cout << "  INFO: SKIP — opt-in via SEAS_TEST_RUNTIME_QSIZE_CHECK=1\n";
+      return;
+   }
+   // Write a checkpoint with Q_size = 27, then fork+exec self with
+   // a magic argv that re-runs READ via raw-MPI overload with
+   // expected_Q_size = 100.  The child MUST exit non-zero (MFEM_VERIFY
+   // abort).  Parent reaps the child and asserts exit != 0.
+   // (Pattern lifted from test_bp5_petsc_ts_restart.cpp Sub-test 14.)
 }
 ```
 
-OR, accept this as a documented gap (the grep test in Sub-test 8 verifies the source text exists).
+**POSSIBLE flag rationale:** I cannot prove the current grep+SKIP
+combination is insufficient — Sub-tests 1 and 9 do exercise the
+correct-size path.  But the gap exists for INVERTED OR ABSENT
+runtime check refactors.  Downgrade to LOW if you accept the risk.
 
-**Test case:** As above.
-
----
-
-### [R-006] [LOW] [bp5_verification_full.cpp:R-008 guard] — Assertion at Run() site uses bit-exact `==` on real_t; may false-positive if any intervening code legitimately recomputes dt
-
-**Category:** POSSIBLE / ASSUMPTION
-
-**Description:**
-The R-008 round-4 fix added:
-```cpp
-if (v2_authoritative_dt > 0.0)
-{
-   MFEM_VERIFY(current_dt == v2_authoritative_dt,
-               "R-008: current_dt (" << current_dt
-               << ") was modified between the V2 restart block "
-               "and the Run() call ...");
-}
-```
-
-This uses bit-exact `==` on `real_t`.  The assertion's intent is "no code between V2 block and Run() modified current_dt".  Today, that's true (verified by grep).
-
-But a LEGITIMATE future change could introduce a no-op-looking modification that nonetheless changes the bit pattern.  E.g., `current_dt = std::min(current_dt, dt_max);` where dt_max > current_dt always — semantically a no-op, but the assignment may or may not produce the same bit pattern depending on compiler.  The assertion would fire on what is actually a correct change.
-
-A `std::abs(current_dt - v2_authoritative_dt) < 1e-15 * v2_authoritative_dt` check would be more robust, but ALSO masks real bugs (a CFL clamp at the second ULP could be a real concern in some configurations).
-
-Trade-off: bit-exact is stricter (catches more, but false-positives on harmless code motion).  Reviewer judgment: keep the bit-exact check for now since it's exactly what we want today.  Flag as POSSIBLE so the next reviewer sees the concern.
-
-**Trigger:**
-A future change inserts a value-preserving but bit-changing assignment to `current_dt` between V2 block and Run().
-
-**Actual behavior:**
-Assertion fires; restart aborts.
-
-**Expected behavior:**
-For value-preserving changes, no abort.  But this is a value judgment.
-
-**Suggested fix:**
-Document the trade-off in the assertion comment:
-
-```diff
-       if (v2_authoritative_dt > 0.0)
-       {
-+         // R-006 (REVIEW.md round 5): bit-exact `==` is intentional —
-+         // any modification of current_dt between the V2 block and
-+         // here, even a value-preserving one (e.g., `current_dt =
-+         // std::min(current_dt, dt_max)`), would change the bit
-+         // pattern under some compilers and fire this assertion.
-+         // That's by design: any insertion HERE deserves a deliberate
-+         // re-examination of whether V2 is still the authoritative
-+         // source of post-restart dt.  If you legitimately need to
-+         // clamp post-V2 dt, update `v2_authoritative_dt` in the
-+         // same statement, OR widen this check to a relative
-+         // tolerance with a documented bound.
-          MFEM_VERIFY(current_dt == v2_authoritative_dt,
-                      "R-008: current_dt (" << current_dt
-```
-
-**Test case:** N/A.
-
----
-
-### [R-007] [LOW] [test_bp5_petsc_ts_restart.cpp:Subtest3] — `final_A` and `final_B` not asserted to be within atol of the analytic solution `exp(-T_full)`
-
-**Category:** QUALITY (missing sanity check)
-
-**Description:**
-Sub-test 3 asserts `|final_A - final_B| < atol + rtol·|final_A|`.  This catches fresh-vs-restart divergence.  But if BOTH are equally wrong (e.g., a PETSc bug that consistently produces 2.0 instead of 0.368), the test passes silently.
-
-Adding an absolute check against the analytic solution `exp(-1)` would catch this class of "consistently wrong" bugs.
-
-**Suggested fix:**
-```diff
-    TEST_ASSERT(diff < bound,
-                "Sub-test 3e (R-001 end-to-end): fresh-vs-restart "
-                ...
-                "does NOT actually work.");
-+
-+   // R-007 (REVIEW.md round 5): sanity check against the analytic
-+   // solution.  Catches the failure mode "fresh and restart agree
-+   // with each other but are both wrong" (e.g., PETSc adapter bug,
-+   // RK type mismatch).  exp(-T_full) for T_full=1 is 0.367879...
-+   const real_t exact = std::exp(-T_full);
-+   TEST_ASSERT(std::abs(final_A - exact) < 1e-5,
-+               "Sub-test 3e (R-007 round 5): fresh-run final state "
-+               "agrees with the analytic solution exp(-T_full) — "
-+               "y_A(T_full)=" << final_A << ", exact=" << exact
-+               << ", diff=" << std::abs(final_A - exact)
-+               << ".  Catches 'both runs equally wrong' bugs that "
-+               "the relative comparison alone would miss.");
-```
-
-**Test case:** N/A.
+**Test case:**
+See suggested fix.  Manually invoke with
+`SEAS_TEST_RUNTIME_QSIZE_CHECK=1 ./seas_test_tpv104_checkpoint`
+on a build with the subprocess pattern implemented.
 
 ---
 
 ## Summary
 
 - Critical issues: **0**
-- Moderate issues: **2** (R-001 mpirun race, R-002 driver-grep gap)
-- Low issues: **5** (R-003, R-004, R-005, R-006, R-007)
-- Plan compliance: **PARTIAL** — Sub-test 3 satisfies the round-4 spirit of R-001 but with the qualifications in R-002 (driver-internal calls unverified) and the unfixed parallel-launch race from R-001.
-- Verdict: **PASS WITH FIXES** — the implementation correctly proves the PetscODESolver round-trip works; restart works **for the components tested**.  The two MODERATE findings (R-001, R-002) close the remaining "is the driver actually wired up correctly + does the test handle parallel launch" gaps.  None of the findings indicate the existing implementation is wrong; they identify coverage gaps and a parallel-launch race.
+- Moderate issues: **4** (R-101, R-102, R-103, R-104)
+- Low issues: **3** (R-105, R-106, R-107)
+- POSSIBLE issues: **1** (R-108)
+- Plan compliance: **FULL** for R-001..R-009; **PARTIAL** for round-8
+  audit (R-103 reveals a long-standing logic flaw in BOTH BP5 and
+  TPV104 sbatches that pre-dates round 7; R-101 documentation drift
+  partly caused by round 7's incomplete sweep).
+- Verdict: **PASS WITH FIXES** — no Critical issues; round 7's
+  fixes for R-001..R-009 are all correctly applied and tested.
+  The MODERATE findings are documentation drift (R-101, R-102) and
+  pre-existing logic flaws now exposed by the round-7 improvements
+  (R-103, R-104).  None block cluster submission, but each one is a
+  silent correctness gap that should be closed before the BP5/TPV104
+  pair is treated as fully verified.
+
+## Answer to the three review focus questions (still applicable from round 7)
+
+1. **Does restart work in both BP5 and TPV104?**
+   - BP5: YES (V2 PETSc TS restart, 94/94 unit-test PASS).
+   - TPV104: YES (V1 checkpoint, 139/139 unit-test PASS, driver builds
+     clean, cross-overload Sub-test 9 confirms R-007 dedup forwards
+     correctly).  Open: R-104 sentinel hole; R-006 secondary-collection
+     limitation documented + warned.
+
+2. **Do all saved quantities continue to be saved in a separate file?**
+   - LANDING is correctly separated (driver safety check enforces; both
+     ParaView collections route by `output_dir`).
+   - VERIFICATION of separation: station files now correctly checked
+     (Validation #5/#6, #7 md5sum unchanged).  fault.vtkhdf check is
+     INERT (R-103) — same flaw in BP5 sbatch.
+
+3. **Is the sbatch job created for cluster verification with guards?**
+   - TPV104: YES — `tpv104_restart_test_v1_dev_2hr.sbatch`, dev queue,
+     2h, 8N×400r, 7 acceptance checks (exit codes 3–9).  Validations
+     #5/#6/#7 now actually exercise station-file isolation post R-004.
+     But: Validation #3 is inert (R-103); 5 stale comments mislead
+     (R-101); job name + log path strings still say "scaffolding"
+     (R-101).
 
 ## Unreviewed Areas
 
-- **The `seas_bp5_full --restart --petsc-ts` workflow under actual BP5 conditions** — only the building blocks (file format, PetscODESolver round-trip) are unit-tested; the BP5 driver's V2 block has not been exercised end-to-end.  The plan AC #14 (sbatch re-submission with `--restart`) is the gate for this.  Out of scope for the unit-test review round.
-- **The `setup_mfem.sh` external-build path** — only in-tree builds were exercised this round.  No regressions reported.
-- **R-008 round 4** — the bit-exact guard at the Run() site is documented but not exercised by any test (it only fires on broken futures).  Acceptable as a tripwire; flagged in R-006 above as a possible source of false-positive aborts.
-- **Phase 2 / Phase 3 of the plan** — still deferred per the plan §"Dependencies".  No new findings.
+- The actual checkpoint round-trip on a real TPV104 mesh + 8N parallel
+  decomposition (only unit-tested with synthetic 18- and 27-DOF
+  vectors at rank=0/size=1).  Cluster-only verification.
+- Whether `seas_driver.cpp` (BP5 production) needs the same restart
+  hooks (per `seas/CLAUDE.md` Phase 4 deferred deviation, it doesn't
+  use `ParaViewOutput`).  Same out-of-scope conclusion as round 7.
+- BP5 sbatch's Validation #8 (the equivalent of TPV104's broken
+  Validation #3) — flagged at R-103, fix should be applied to BOTH
+  sbatches in the next fix round.
+- `make test-checkpoint` (BP5 V1 checkpoint test) has a pre-existing
+  compile error in `AntiplaneDomainOperator::ComputeTractionDiagnostics`
+  / `IsFirstStepDebugEnabled`.  Files unmodified by round 7; out of
+  scope here.

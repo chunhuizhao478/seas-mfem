@@ -1,7 +1,7 @@
 # ParaView I/O — Codebase Walkthrough
 
-**Date:** 2026-05-11
-**Scope:** ParaView visualization output for the seas miniapp (BP5 + TPV102/104/205 drivers), including the Phase 6 VTKHDF+ZFP compaction work. Covers the wrapper `seas::ParaViewOutput<MeshType>`, its three underlying collections, the MFEM-level VTKHDF substrate, the ZFP compression layer, and the driver-side glue.
+**Date:** 2026-05-11 (originally) — last expanded 2026-05-17
+**Scope:** ParaView visualization output for the seas miniapp (BP5 + TPV102/104/205 drivers), including the Phase 6 VTKHDF+ZFP compaction work, the 2026-05-12 split-bulk-solutions refactor, the 2026-05-16 schedule-cap rework / zero-fault-rank crash fix, and the 2026-05-17 V2 restart support. Covers the wrapper `seas::ParaViewOutput<MeshType>`, its three underlying collections, the MFEM-level VTKHDF substrate, the ZFP compression layer, the new `petsc_ts_checkpoint.hpp` / `tpv104_checkpoint.hpp` machinery, and the driver-side glue.
 **Audience:** Computational scientist who has never read this code before. The math is elsewhere — this document is exclusively about I/O.
 
 ---
@@ -251,13 +251,32 @@ CLI overrides on every driver (`tpv102`, `tpv104`, `tpv205`):
 
 ```
 miniapps/seas/io/
-├── paraview_output.hpp        2093 lines — main wrapper template
-│                              `seas::ParaViewOutput<MeshType>`
+├── paraview_output.hpp       ~2280 lines — main wrapper template
+│                              `seas::ParaViewOutput<MeshType>`.
+│                              2026-05-12: SetRegisterFaultProjectionsInVolumePV
+│                              + GetVolumeDataCollection.
+│                              2026-05-17: Set/Get accessors for V2
+│                              restart (TotalSnapshotsWritten,
+│                              RestoreScheduleState, LastCommittedCycle,
+│                              LastVolumeWriteTime, ...).
 ├── fault_vtu_binary.hpp        735 lines — Phase 1 gather-to-rank-0
 │                              binary VTU + LocalFaultPack /
-│                              GatheredFaultPack data structures
-└── fault_vtkhdf_writer.hpp     304 lines — Phase 2b rank-0 VTKHDF
-                                writer for the fault surface
+│                              GatheredFaultPack data structures.
+├── fault_vtkhdf_writer.hpp     304 lines — Phase 2b rank-0 VTKHDF
+│                              writer for the fault surface.
+├── petsc_ts_checkpoint.hpp     ~220 lines (new 2026-05-17) — V2
+│                              `PETSC_TS_V2` trailing block reader /
+│                              writer.  Appends to the per-rank V1
+│                              checkpoint produced by checkpoint.hpp's
+│                              WriteCheckpoint.  Used by
+│                              bp5_verification_full.cpp on the
+│                              `--restart` + `--petsc-ts` path.
+└── tpv104_checkpoint.hpp       ~370 lines (new 2026-05-17) — TPV104
+                                V1 checkpoint format (distinct magic
+                                tag TPV104_CHECKPOINT_V1).  Per-rank
+                                file, round-trips wave-field Q + 9
+                                dynamic DOFData fields.  No ParaView
+                                schedule state yet (deferred V3).
 
 mesh/vtkhdf.{hpp,cpp}           Low-level VTKHDF (HDF5) writer.
                                 Used by ParaViewHDFDataCollection.
@@ -384,8 +403,9 @@ tpv*_driver.cpp::main()
 `seas_bp5_full` (= `tests/verification/bp5_verification_full.cpp`) is similar but:
 
 - No secondary `pv_bulk_out`.
-- Adaptive-schedule (V_max-driven) is the default cadence; `--paraview-dt`/`--paraview-every` override it.
-- Production runs default to `--no-volume-pv` (or `--paraview-fault-only`) — only `fault_surface.vtkhdf` and station-CSV are emitted.
+- Adaptive-schedule (V_max-driven) is the default cadence; `--paraview-dt`/`--paraview-every` override it. Per-regime overrides use **BP5-specific** flag names `--paraview-dt-co / -nu / -inter-yr` (TPV* uses `--paraview-{co,nucleation,inter}seismic-dt`).
+- Production runs default to `--no-volume-pv` (or `--paraview-fault-only`) — only `fault.vtkhdf` and station-CSV are emitted.
+- **V2 restart hook** (new 2026-05-17): when `--restart PREFIX` AND `--petsc-ts` AND the V2 trailing block is present, the driver's restart block at `bp5_verification_full.cpp:2583–2691` calls `ReadPetscTSCheckpoint` then (inside `if (pv_out)`) the three setters `pv_out->SetTotalSnapshotsWritten(...)`, `pv_out->RestoreScheduleState(...)`, `pv_out->SetLastCommittedCycle(...)` BEFORE the time loop starts. The monitor callback at lines 643–679 and the end-of-run write at lines 3020–3058 call `WritePetscTSCheckpoint` with the five `ParaViewOutput` getters (`GetTotalSnapshotsWritten / GetLastWriteTime / GetLastVMax / GetCurrentRegime / GetLastCommittedCycle / GetLastVolumeWriteTime`).
 
 ---
 
@@ -610,9 +630,155 @@ If the plugin isn't on `HDF5_PLUGIN_PATH` at run time, HDF5 fails the first ZFP 
 | Phase 3 | (folded in) | `max_total_snapshots` cap + `--paraview-{co,nucleation,inter}seismic-dt` CLI overrides. |
 | Phase 4 | (folded in) | `--no-volume-pv` / `--paraview-fault-only`, decoupling fault from volume PV. |
 | Phase 6 | de73e7d | **Primary volume goes VTKHDF by default** on `MFEM_USE_HDF5=YES` builds. `--paraview-volume-hdf5/--paraview-volume-vtu` CLI selector. `SetVolumeHDFCompression(...)` actually applies. Secondary `pv_bulk_out` reroutes `--paraview-bulk-*` from `pv_out` to a new collection in `<prefix>/ParaView_bulk/wave_bulk.vtkhdf`. |
-| Phase 6 runtime fixes | (current session, multiple commits) | HDF5 1.14.6 from-source on Frontera; gmsh from-source; `module load python3`; SEAS_MFEM_ROOT auto-detect in sbatch; `MFEM_USE_H5Z_ZFP` placeholder in `config/config.mk.in`. |
+| Phase 6 runtime fixes | (multiple commits) | HDF5 1.14.6 from-source on Frontera; gmsh from-source; `module load python3`; SEAS_MFEM_ROOT auto-detect in sbatch; `MFEM_USE_H5Z_ZFP` placeholder in `config/config.mk.in`. |
+| Split-bulk refactor | 7c16e62 / 64ea4cf / 78fe29d / b69f7ca | File renames `volume`→`kinematics`, `wave_bulk`→`stress`, `fault_surface`→`fault`. Stress collection now carries the FULL 6-component symmetric tensor. Velocity/mpi_rank deduplicated. 12 L2-p0 fault projections OFF-by-default on kinematics; opt back in via `SetRegisterFaultProjectionsInVolumePV(true)`. New `seas_test_kinematics_field_set` unit test (31/31). New `GetVolumeDataCollection()` read-only accessor. |
+| Phase 6 ParaView hardening | 407f456 (2026-05-16) | **Hard cap reverted to SOFT (interseismic-only)** — coseismic/nucleation regimes always use natural cadence. R-001 rank-0 gate on cap-exhausted warning (was N-rank flood). R-005 honest warning text (geometric-halving cadence). ResetMemory crash on zero-fault-DOF ranks fixed via driver-side padded-shrink. Trace + fault_dof_coords debug outputs gated behind `SEAS_DEBUG_FACE_TRACE` / `SEAS_DEBUG_FAULT_DOF_COORDS` env vars (default OFF). Production sbatch passes `--paraview-dt-co/-nu/-inter-yr` explicitly. New tests: `seas_test_paraview_schedule_cap` (23/23), `seas_test_bp5_petsc_ts_zero_fault_rank` (8/8), `seas_test_paraview_rank0_warning_gate` (MPI-only). |
+| BP5 V2 restart + PETSc TS | 19e128e + a921246 (2026-05-17) | `--restart` + `--petsc-ts` now works end-to-end. New `io/petsc_ts_checkpoint.hpp` adds a `PETSC_TS_V2` trailing block (10 fields: 4 PETSc TS + 5 ParaView schedule + cumulative rejections) appended to the existing per-rank V1 checkpoint. New `ParaViewOutput::{SetTotalSnapshotsWritten, RestoreScheduleState, SetLastCommittedCycle}` setters + 5 getters thread schedule state across the restart seam (R-304 / R-004 / R-006). New unit test `seas_test_bp5_petsc_ts_restart` (57/57) + cluster sbatch `bp5_restart_test_v2_dev_2hr.sbatch` (two-phase fresh→restart inside one reservation). |
+| TPV104 V1 checkpoint | 63373f8 + 6cbbb9d (2026-05-17) | New `io/tpv104_checkpoint.hpp` (TPV104-distinct magic tag `TPV104_CHECKPOINT_V1`, per-rank file like BP5). Round-trips wave-field Q + 9 dynamic DOFData fields. No ParaView-state extension yet (Phase-4b follow-up). New `seas_test_tpv104_checkpoint`. Makefile auto-detects `-lstdc++fs` for the `<filesystem>` use in `--restart` / `--output-dir` safety check. |
 
-The bulk-compression plan (`PLAN_bulk_compression_and_size_estimator_2026-05-09.md`) is the Phase 6 spec; the older `PLAN_paraview_compaction_2026-04-28.md` carries Phases 0–5.
+The bulk-compression plan (`PLAN_bulk_compression_and_size_estimator_2026-05-09.md`) is the Phase 6 spec; the older `PLAN_paraview_compaction_2026-04-28.md` carries Phases 0–5. The 2026-05-17 restart work is specified in `debug_document/paraview_output_debug_document/petsc_ts_restart_plan_2026-05-16.md` (Phase 1 is the production deliverable; Phases 2–3 are documented follow-ups for bit-exact restart). Cumulative state snapshot: `document/io_dev/STATUS_2026-05-12.md`.
+
+---
+
+## Updates since 2026-05-12 — Restart, cap rework, hardening
+
+This section catalogues the changes that landed between 2026-05-13 and 2026-05-17, in commit order. The earlier walkthrough sections describe steady-state behaviour; this section documents new mechanisms and their justifications.
+
+### Snapshot cap reverted to SOFT (interseismic-only) — 407f456
+
+**What changed.** The R-002 "hard cap" attempt that stretched every regime's interval to fit a fixed snapshot budget was reverted after the round-2 review of `REVIEW.md 2026-05-16` showed it erased coseismic / nucleation detail for any plausible K. The cap is back to the pre-existing soft semantics: `SnapshotCapAwareInterval` returns the **base** (uncapped) cadence whenever `regime != 0`, so only the interseismic regime is throttled.
+
+**How sbatch should use this.** Production runs should size cadences directly using per-regime flags rather than relying on the cap to clip down:
+
+| BP5 driver flag | TPV* driver flag | Default | Recommended |
+|---|---|---|---|
+| `--paraview-dt-co <s>` | `--paraview-coseismic-dt <s>` | 0.01 s | 1.0 s |
+| `--paraview-dt-nu <s>` | `--paraview-nucleation-dt <s>` | 1.0 s | 43200 s (12 h) |
+| `--paraview-dt-inter-yr <yr>` | `--paraview-interseismic-dt <s>` | 1.0 yr | 1.0 yr |
+
+`bp5_phase6_paraview_zfp_normal_48hr.sbatch` now passes all three explicitly (~708 frames per 250 yr / 1-event run; ~5,123 per 1775 yr / 7-event run) and does NOT pass `--paraview-max-snapshots` — the natural cadence is trusted.
+
+`bp5_verification_full.cpp` and `tpv*_driver.cpp` use DIFFERENT flag names (BP5 chose `-dt-co/-nu/-inter-yr`, TPV* kept the older long-form names). Both wire through to the same `AdaptiveSchedule::Set{Coseismic,Nucleation,Interseismic}Dt` setters. The follow-up to unify the flag names is queued but not blocking.
+
+**Warning text + rank-0 gate (R-001, R-005, R-203).** When the interseismic budget exhausts, the diagnostic line:
+
+- Now prints **once on rank 0 only** (was N copies, one per rank, torn at character boundaries at np=400).
+- Now correctly describes the **geometric-halving** cadence (`t/2, 3t/4, 7t/8, ...`) that the soft cap actually produces, instead of the pre-revert "one final write" phrasing that was inherited from the hard-cap branch.
+- Hard-codes "interseismic regime" in the text because the soft cap is structurally only reachable from regime 0 (the `regime != 0` early-return in `SnapshotCapAwareInterval` makes the coseismic / nucleation cases dead code).
+
+The implementation uses `mfem::GetGlobalMPI_Comm()` for the rank query because `mfem::out` wraps `std::cout` unconditionally on parallel builds — the older comment claiming "rank-0-only" was wrong.
+
+### ResetMemory crash on zero-fault-DOF ranks — 407f456 (R-003 / R-204)
+
+On the 8N × 400-rank Frontera BP5 run, ranks whose subdomain contains no fault DOFs construct `Vector state(0)` whose underlying `Memory` is NULL-backed. `PetscODESolver::Run` calls `PetscParVector::ResetMemory` which cannot tolerate that, killing the job mid-loop.
+
+**Driver-side workaround** at `bp5_verification_full.cpp:1740–1747`:
+
+```cpp
+const int actual = state.Size();
+const int padded = std::max(actual, 1);
+state.SetSize(padded);     // ensures a real allocation
+state.SetSize(actual);     // shrink back; allocation is preserved
+```
+
+The two-step `SetSize` is **load-bearing**: the second call shrinks the logical size but the underlying allocation survives, so `PlaceMemory` aliases a valid pointer and `ResetMemory` finds something to release.
+
+A dedicated unit test `seas_test_bp5_petsc_ts_zero_fault_rank` (8/8 PASS) covers:
+- The padded-shrink invariant (R-003).
+- A driver-source grep guard (R-204) that fails if the two-call pattern is ever refactored away.
+
+The proper fix lives in MFEM's `PetscParVector::ResetMemory` itself; documented as a deferred upstream PR.
+
+### V2 PETSc-TS restart format — 19e128e (`io/petsc_ts_checkpoint.hpp`)
+
+**Old behaviour.** The driver hard-aborted at `bp5_verification_full.cpp:1091–1099` if you combined `--restart` with `--petsc-ts`. The V1 checkpoint carried MFEM-side state only (slip+psi vector, displacement, traction, slip_rate, FSAL k0) — PETSc TS's internal `t / dt / step / rejections` were absent, so a naive resume would silently lose adaptive-dt history.
+
+**New behaviour.** A `PETSC_TS_V2` block is **appended** to the existing V1 file (no V1 reformat — V1-only files still parse cleanly). Ten fields in fixed order:
+
+```
+PETSC_TS_V2
+petsc_ts_time                    <real_t>
+petsc_ts_dt_next                 <real_t>
+petsc_ts_step                    <int>
+petsc_ts_rejections              <int>   (cumulative across restart chain — R-005)
+paraview_snapshots               <int>   (R-304)
+paraview_last_write_time         <real_t>  (R-304)
+paraview_last_v_max              <real_t>  (R-304)
+paraview_current_regime          <int>   (R-304; clamped to [0,2] on read — R-007)
+paraview_last_committed_cycle    <int>   (R-004 dedup key; negative → INT_MIN sentinel)
+paraview_last_volume_write_time  <real_t>  (R-006 independent volume-PV cadence)
+```
+
+The five `paraview_*` fields are what makes restart work correctly with ParaView output enabled — without them the first `ShouldWrite` after restart fires unconditionally (because the default `last_write_time_ = -1e30` makes `time - last_write_time_` look like +infinity), and the regime FSM resets to interseismic regardless of where the pre-checkpoint trajectory was. R-006 specifically protects the independent `--volume-pv-dt` cadence.
+
+**Driver wiring sites** (`bp5_verification_full.cpp`):
+
+1. **Read at restart** (lines 2583–2691): the V2 block is read AFTER the V1 block — ordering is load-bearing because the V1→V2 cross-check `std::abs(t - ts_t) < 1e-12 * max(|t|,1)` (R-003 round-5 scale-aware tolerance) is only meaningful once `t` has been populated by V1. Updates `t`, `current_dt` BEFORE `PetscODESolver::Run()` because `Run` overwrites `TSSetTime`/`TSSetTimeStep` internally (R-002); `TSSetStepNumber(ts, ts_step)` survives `Run` and is set explicitly. R-008 dt-survival guard: `v2_authoritative_dt` sentinel + bit-exact `MFEM_VERIFY` at the `Run()` call site catches any future CFL clamp that would silently re-introduce the R-002 failure mode.
+
+2. **Write at checkpoint sites**: two sites, both calling `WritePetscTSCheckpoint` immediately after `WriteCheckpoint` (V1):
+   - Monitor callback (lines 643–679) — installed only when `--petsc-ts` is active. Sees only `void* ctx → BP5MonitorCtx*`, so `BP5MonitorCtx` was extended (lines 519–523) with two members `pv_out*` and `restart_rejections_carryover` that are wired up in `main()` before `TSMonitorSet`.
+   - Final checkpoint in `main` (lines 3020–3058) — same fields, sourced directly from in-scope locals.
+
+3. **Cumulative rejection accumulator (R-005)**: `restart_rejections_carryover` plumbs the prior-chain rejection count into every `WritePetscTSCheckpoint` call site (`cum_rejects = carryover + TSGetStepRejections(ts)`), so the count survives an arbitrary-length restart chain.
+
+4. **`dt_next <= 0` fallback (R-003)**: at seam edges PETSc can return 0 from `TSGetTimeStep`; the driver falls back to `dt_init` rather than passing 0 into `TSSetTimeStep`.
+
+**Caller contract on `ReadPetscTSCheckpoint`.** Returns `true` when a V2 block was parsed; returns `false` (out-params untouched) when the file is V1-only. Driver MUST treat the V1-only case as a hard error when `--petsc-ts` is active — V1-only fallback ("restart MFEM state but let PETSc TS start fresh from dt_init") produces a misleading trajectory and is rejected via `MFEM_VERIFY`.
+
+**`ParaViewOutput` accessors used by the restart machinery** (paraview_output.hpp:418–501):
+
+| Setter (restart-time only, before any Save/ShouldWrite) | Getter (checkpoint-time) |
+|---|---|
+| `SetTotalSnapshotsWritten(int n)` — clamps negative → 0 | `GetTotalSnapshotsWritten()` |
+| `RestoreScheduleState(t_last, V_max_last, regime, t_last_vol)` — clamps regime to [0,2] | `GetLastWriteTime() / GetLastVMax() / GetCurrentRegime() / GetLastVolumeWriteTime()` |
+| `SetLastCommittedCycle(int)` — negative input clamps to `INT_MIN` sentinel | `GetLastCommittedCycle()` |
+
+Cluster validation: `bp5_restart_test_v2_dev_2hr.sbatch` runs a two-phase fresh→restart inside a single 2 h development reservation (Phase A ~12.7 yr → V1+V2 checkpoint → Phase B restart to ~25.4 yr), with five built-in acceptance checks (V1+V2 coverage, V2-block log line, t advanced, R-005 monotonic, chainable Phase-B checkpoint) and distinct exit codes 1–7 for diagnosis. ParaView is enabled at production cadence on purpose — the V2 schedule-state fields exist precisely because restart breaks the adaptive schedule without them, and `--no-paraview` would skip every `RestoreScheduleState` / `SetTotalSnapshotsWritten` / `SetLastCommittedCycle` call site behind the `if (pv_out)` guard.
+
+### TPV104 V1 checkpoint — 63373f8 (`io/tpv104_checkpoint.hpp`)
+
+A separate, TPV104-only checkpoint format. Distinct magic tag `TPV104_CHECKPOINT_V1` so cross-driver restarts fail loudly at the header check instead of corrupting state. Per-rank files, one file per MPI rank, reusing BP5's `CheckpointFilename` helper for the path scheme.
+
+Round-trips:
+- Wave-field state `Q` (bulk fluctuation, `NUM_STATE * ndof_total`).
+- 9 dynamic DOFData fields per fault DOF: `psi, slip_rate, V1, V2, slip1, slip2, tau1_nuc, tau2_nuc, sigma_n_nuc`.
+- Scalars: `time, dt, step`.
+
+Two public overloads on each of read/write — one takes `MPIContext*` (BP5 pattern), the other takes raw `(rank, size, MPI_Comm)` (TPV104's pattern, because the TPV104 driver doesn't define `SEAS_USE_MPI` globally). Both forward into an `internal::WriteImpl` / `ReadImpl` body so R-002 + R-104's `expected_Q_size` enforcement lives in exactly one place — the sentinel "skip the check" mode was removed in R-104 to close the silent-bypass hole.
+
+**Out of scope for V1 (deferred to V3):**
+- ParaView schedule state for BOTH `pv_out` AND `pv_bulk_out` collections (V2 carries the PRIMARY collection only; TPV104's V1 carries no PV state yet).
+- DOFData STATIC fields (impedances, a, Dc, prestress, LSW params) — re-initialised by `InitializeFaultDOFs_TPV104` and don't need to round-trip.
+- DOFData corrected-traction fields (`tau1_corr, tau2_corr, sigma_n_corr`) — recomputed by `FaultFaceFlux::Evaluate` on the first post-restart step.
+
+Driver wiring: `tpv104_driver.cpp` reads at line 2355 and writes at lines 2647 / 2671 (intermediate via `--checkpoint-interval` and final-of-run). Restart is mutually exclusive with `--paraview`'s schedule replay — a `WARNING: --restart resumes the PRIMARY ParaView collection's ...` line at line 2376 alerts the operator that the TPV104 V1 checkpoint does not carry PV schedule state.
+
+Unit test: `seas_test_tpv104_checkpoint` (699 lines) covers magic-tag mismatch, rank-count mismatch, Q-size mismatch (R-002 / R-104), and DOFData round-trip.
+
+### Per-collection field-set introspection — `GetVolumeDataCollection()`
+
+A new read-only accessor on `seas::ParaViewOutput`:
+
+```cpp
+const ParaViewDataCollectionBase *GetVolumeDataCollection() const;
+```
+
+Returns the underlying `pv_dc_` (either `ParaViewDataCollection` or `ParaViewHDFDataCollection`). The motivating user is `seas_test_kinematics_field_set`, which calls `HasField("name")` on the returned handle to verify that the 12 L2-p0 fault projections are NOT registered with the kinematics collection by default and ARE registered when `SetRegisterFaultProjectionsInVolumePV(true)` is set before `InitFaultOutputBP5`. Returns `nullptr` only in the currently-unreachable case where the constructor failed to allocate. Not intended for external write access.
+
+### Debug diagnostic outputs gated behind env vars
+
+The face-trace and fault-DOF-coords diagnostics that production sbatch was leaving on the scratch dir now require explicit env-var opt-in:
+
+| Env var | What it gates | Default |
+|---|---|---|
+| `SEAS_DEBUG_FACE_TRACE` | The per-rank `[face-trace] ...` log lines + the per-cycle trace CSV | OFF |
+| `SEAS_DEBUG_FAULT_DOF_COORDS` | The one-shot `fault_dof_coords_r<rank>.vtp` dump | OFF |
+
+Both are independent (a user who needs the VTP for visualization sanity-check can enable only that one). Earlier revisions had `fault_dof_coords` piggy-back on either gate, which meant the trace-debug bundle silently emitted a 50 MB-per-rank VTP that nobody read. The two-env-var design is documented at `bp5_verification_full.cpp:2153–2174`.
+
+### Build glue — `-lstdc++fs` auto-detect (6cbbb9d)
+
+The BP5 + TPV104 driver `--restart` / `--output-dir` safety check includes `<filesystem>` and calls `std::filesystem::weakly_canonical`. On Frontera's gcc-8.3 + libstdc++ combination, `weakly_canonical` lives in the separate library `-lstdc++fs`; on gcc-9+ it's in the main library and `-lstdc++fs` is a no-op. The Makefile (around line 360) now runs a tiny compile probe at make time and conditionally adds `-lstdc++fs` to `SEAS_FS_LIB`. Operators can override with `make seas_tpv104_driver SEAS_FS_LIB=-lstdc++fs`.
 
 ---
 
@@ -659,7 +825,23 @@ The bulk-compression plan (`PLAN_bulk_compression_and_size_estimator_2026-05-09.
 
 - **Mid-run mesh swap is unsupported on the Hdf5 path.** The `.vtkhdf` file is keyed on the first mesh handed to the writer; rewiring `pv_dc_->SetMesh(new_mesh)` would invalidate the dataset shapes. Document at paraview_output.hpp:384–386.
 
-- **Reruns overwrite `.vtkhdf` files.** No restart-mode wiring yet; the file is opened with `H5F_ACC_TRUNC` on every run. Planned follow-up.
+- **Reruns overwrite `.vtkhdf` files.** The V2 restart machinery (2026-05-17) preserves the ParaView **schedule state** across restart (snapshot count, last-write times, regime, dedup cycle) so the cap budget and adaptive cadence survive, but the `.vtkhdf` **file itself** is still opened with `H5F_ACC_TRUNC` on every run — the post-restart write starts a fresh time series, it does not append to the pre-checkpoint one. Operators currently rename the pre-restart `kinematics.vtkhdf` / `stress.vtkhdf` / `fault.vtkhdf` files before restart and concatenate the two series in post. Single-file append-on-restart for VTKHDF is a planned follow-up.
+
+- **V2 restart accessors must be called BEFORE any Save / ShouldWrite / ForceSave.** `SetTotalSnapshotsWritten`, `RestoreScheduleState`, and `SetLastCommittedCycle` set the internal `last_write_time_ / last_v_max_ / current_regime_ / last_committed_cycle_ / last_volume_write_time_` directly; calling them after the schedule has already advanced silently discards the just-computed state and re-runs the regime FSM from a stale baseline. The driver wires them at the V2-restart block immediately after `ReadPetscTSCheckpoint` succeeds, before entering the time loop.
+
+- **V1-only file + `--petsc-ts` + `--restart` is now a hard error**, not a silent degradation. `ReadPetscTSCheckpoint` returns `false` and the driver's `MFEM_VERIFY` aborts with a message pointing the operator at either (a) re-running fresh, or (b) dropping `--petsc-ts` to use MFEM's RK45 (which doesn't need TS-internal state). Don't try to "salvage" by editing the checkpoint by hand — the V2 block expects 10 fields in fixed order.
+
+- **TPV104's V1 checkpoint format is distinct from BP5's V1.** Magic tags are `TPV104_CHECKPOINT_V1` vs `SEAS_CHECKPOINT_V1`. Reading a BP5 checkpoint with the TPV104 reader (or vice versa) aborts at the first `read_tag` line — the failure is loud, not silent, but the error message points at the magic-tag mismatch rather than at the operator's cross-driver `--restart` invocation. Check the `prefix` you passed.
+
+- **Hard cap is gone — soft cap throttles only the interseismic regime.** `--paraview-max-snapshots K` used to (briefly, in an interim R-002 attempt) stretch every regime's cadence to fit K. That was reverted because it sub-sampled the coseismic frames that earthquake animations exist to show. Today K only throttles interseismic; coseismic + nucleation always use their natural cadence. **Operators must size the natural cadences directly via `--paraview-dt-co / -dt-nu / -dt-inter-yr` (BP5) or `--paraview-{co,nucleation,inter}seismic-dt` (TPV*).** If the natural-cadence count is bigger than K, fix the cadences — the cap will NOT save you.
+
+- **The BP5 driver `--paraview-dt-co / -nu / -inter-yr` flags differ in name from the TPV* `--paraview-{co,nucleation,inter}seismic-dt` flags.** They wire through to the same `AdaptiveSchedule` setters; only the spelling differs. A copy-paste between BP5 and TPV* sbatch will silently parse as "unknown flag" and the schedule will keep its defaults. A flag-name unification is queued but not blocking.
+
+- **Zero-fault-DOF ranks need the padded-shrink workaround.** `bp5_verification_full.cpp:1740–1747` does `state.SetSize(max(actual,1))` then `state.SetSize(actual)` so the allocation survives the second shrink. Don't refactor this away — `seas_test_bp5_petsc_ts_zero_fault_rank` greps the driver source for the two-call pattern and fails if it disappears. The proper fix lives in MFEM's `PetscParVector::ResetMemory` upstream.
+
+- **Cap-exhausted warning is silent on non-zero ranks.** R-001's rank-0 gate means only rank 0 prints the "max_total_snapshots= K exhausted" line. On a 400-rank run that's the right behaviour; on a 1-rank serial run nothing changes. But if your grep filter only matches the line text and you forget that it's per-run not per-rank, you'll think it was emitted "once" when actually the latch (`cap_exhausted_warned_` on each rank) guarantees it's emitted at most once per run **per rank**, and rank 0 is the only rank that actually writes.
+
+- **Debug-CSV outputs are now opt-in.** `[face-trace]` log lines and `fault_dof_coords_r<rank>.vtp` files no longer appear unless `SEAS_DEBUG_FACE_TRACE=1` / `SEAS_DEBUG_FAULT_DOF_COORDS=1` are set in the sbatch's `export` block. Old sbatch that relied on the pre-2026-05-16 default-ON behaviour will produce a cleaner results dir than they did before — which is correct, but unexpected.
 
 ---
 
@@ -673,6 +855,18 @@ The bulk-compression plan (`PLAN_bulk_compression_and_size_estimator_2026-05-09.
 
 - **The bulk collection inherits the same `VolumeOutputMode` as the primary.** The TPV drivers pin `pv_bulk_out`'s mode to whatever `pv_out` chose. If you want a per-collection back-end choice (e.g. lossless deflate on bulk velocity, lossy ZFP on bulk stresses), the API doesn't currently allow that — you'd need to split the bulk into two more collections.
 
-- **`output_mode_uniformity_checked_` only covers `legacy_ascii_ + output_mode_`.** Other state that must be uniform across ranks (filter algorithm, ZFP tolerance, snapshot cap) is not checked. In practice these are set from CLI parsing which is uniform, but the assumption isn't enforced.
+- **`output_mode_uniformity_checked_` only covers `legacy_ascii_ + output_mode_`.** Other state that must be uniform across ranks (filter algorithm, ZFP tolerance, snapshot cap, the new `register_fault_projections_in_volume_pv_` toggle, the V2 restart accessors) is not checked. In practice these are set from CLI / V2-block parsing which is uniform, but the assumption isn't enforced. A rank-divergent `SetRegisterFaultProjectionsInVolumePV` would deadlock on the gather collective inside `WriteFaultSurfaceVTU`.
 
 - **`MFEM_USE_H5Z_ZFP` doesn't actually gate any link-time code** — it's pure preprocessor, used by `seas::ParaViewOutput::ProbeH5ZZfpPluginOrAbort` to know whether to probe. The flag exists mostly so the sbatch grep gate can fail fast. Could be inlined.
+
+### Restart-specific open questions
+
+- **VTKHDF append-on-restart is not implemented.** The V2 checkpoint preserves the ParaView **schedule** state but the `.vtkhdf` files themselves are truncated on every fresh run; restart writes a new series rather than appending to the pre-checkpoint one. Operators currently post-concatenate. A clean fix would be to detect "restart mode" in `EnsureVTKHDF` and open with `H5F_ACC_RDWR` + seek-to-end on the unlimited datasets, but `Steps/PartOffsets` and the global `NumberOfPoints / NumberOfCells / NumberOfConnectivityIds` accumulators would all need new "resume" code paths.
+
+- **TPV104 V2 (PV-state extension) is not designed yet.** TPV104's V1 carries no `ParaViewOutput` schedule state — restart loses both the snapshot count and the regime FSM. BP5's V2 trailing block carries only the PRIMARY collection's state; even when ported to TPV104, the SECONDARY `pv_bulk_out` collection's `last_volume_write_time_` for stress fields would need a parallel set of fields (or a single block that loops over collections). Plan: V3 layout to be designed.
+
+- **The `restart_rejections_carryover` accumulator (R-005) is BP5-only.** TPV104 uses ADER-DG explicit substepping (`tpv104_substep_iterator.cpp`) which has no rejection concept, so this is fine for TPV104 specifically. But if a future PETSc-TS-based explicit-RK TPV driver appears, it'll need the same accumulator pattern.
+
+- **The V1 ↔ V2 cross-check uses `1e-12 * max(|t|, 1)` (R-003 round 5).** For runs near `t = 0` (a fresh restart of an early-aborted run, say) the `max(|t|, 1)` floor gives a fixed tolerance of `1e-12 s`, which is below dt for any realistic SEAS problem. For runs at `t ~ 1e12 s` (millions of years), the relative tolerance scales appropriately. But the analysis assumes the V1 write and V2 write happen in the **same** SLURM step — if they're separated by a `Barrier` + collective write that touches `t` between them, the check could spuriously fail. Currently the two writes are bracketed tightly enough that this hasn't been observed, but it's not enforced.
+
+- **`bp5_restart_test_v2_dev_2hr.sbatch` has not yet been ported to a production-queue 48h reservation.** The dev-queue 2h reservation is sized for the two-phase fresh→restart proof of concept (12.7 yr + 12.7 yr); a real long-run scenario (250 yr → checkpoint → 1775 yr) needs a `normal`-queue analogue with the V1+V2 file management (the V2 trailing block from Phase A becomes Phase B's restart prefix, etc.).
