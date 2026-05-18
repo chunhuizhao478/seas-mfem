@@ -513,6 +513,51 @@ static void Subtest6_DriverGrep()
       hsrc.find("expected_Q_size >= 0,") != std::string::npos,
       "Sub-test 6 R-104: ReadTpv104CheckpointImpl must MFEM_VERIFY "
       "that expected_Q_size >= 0 (required, not defaulted)");
+
+   // Frontera job 7729560 Validation #5 bug: the driver's initial
+   // station_writer.WriteStep(0.0, dof_data) and
+   // surface_writer.WriteStep(0.0, Q) calls must be GUARDED with
+   // `if (restart_prefix.empty())` so that on restart Phase B's
+   // station file does not begin with a stale t=0 row before the
+   // restart-load block has set t = restart_t.  See
+   // debug_document/paraview_output_debug_document/
+   //   tpv104_restart_station_t0_bug_2026-05-17.md
+   const std::size_t station_init_pos =
+      src.find("station_writer.WriteStep(0.0,");
+   const std::size_t surface_init_pos =
+      src.find("surface_writer.WriteStep(0.0,");
+   bool station_init_guarded = false;
+   bool surface_init_guarded = false;
+   if (station_init_pos != std::string::npos)
+   {
+      // Look in the ~200 chars preceding the WriteStep call for the
+      // restart_prefix.empty() guard.
+      const std::size_t window_start =
+         station_init_pos > 200 ? station_init_pos - 200 : 0;
+      const std::string window =
+         src.substr(window_start, station_init_pos - window_start);
+      station_init_guarded =
+         window.find("restart_prefix.empty()") != std::string::npos;
+   }
+   if (surface_init_pos != std::string::npos)
+   {
+      const std::size_t window_start =
+         surface_init_pos > 200 ? surface_init_pos - 200 : 0;
+      const std::string window =
+         src.substr(window_start, surface_init_pos - window_start);
+      surface_init_guarded =
+         window.find("restart_prefix.empty()") != std::string::npos;
+   }
+   TEST_ASSERT(
+      station_init_guarded,
+      "Sub-test 6 (Frontera #5): station_writer.WriteStep(0.0,...) "
+      "must be guarded with restart_prefix.empty() so Phase B's "
+      "station file does not start at t=0");
+   TEST_ASSERT(
+      surface_init_guarded,
+      "Sub-test 6 (Frontera #5): surface_writer.WriteStep(0.0, Q) "
+      "must be guarded with restart_prefix.empty() so Phase B's "
+      "surface file does not start at t=0 with zero-Q");
 }
 
 // =========================================================================

@@ -1899,13 +1899,28 @@ int main(int argc, char *argv[])
    station_writer.Open(output_dir, output_prefix, stations,
                        fault_coords, num_fault_local);
 #endif
-   station_writer.WriteStep(0.0, dof_data);
+   // Write the pre-evolution t=0 state ONLY on a fresh run.  On
+   // restart, the first in-loop WriteStep at step >= restart_step
+   // writes the first row at t = restart_t.  Without this gate,
+   // Phase B's station file starts at t=0 even though restart
+   // loaded t=restart_t (Frontera job 7729560 Validation #5;
+   // tpv104_restart_station_t0_bug_2026-05-17.md).
+   if (restart_prefix.empty())
+   {
+      station_writer.WriteStep(0.0, dof_data);
+   }
 
    auto surface_stations = DefaultSurfaceStations_TPV104();
    TPV104SurfaceStationWriter surface_writer;
    surface_writer.Open(output_dir, output_prefix, surface_stations,
                        pmesh, fes);
-   surface_writer.WriteStep(0.0, Q);
+   // Same gate: on restart, Q is still the uninitialised zero vector
+   // here — restart load overwrites it.  Skip the t=0 write so the
+   // first in-loop WriteStep records the LOADED Q at t = restart_t.
+   if (restart_prefix.empty())
+   {
+      surface_writer.WriteStep(0.0, Q);
+   }
 
    // -----------------------------------------------------------------------
    // 7b. ParaView output (mirrors tpv102_driver.cpp / BP5 seas::ParaViewOutput
