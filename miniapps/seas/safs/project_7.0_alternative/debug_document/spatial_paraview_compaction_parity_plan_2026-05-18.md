@@ -22,8 +22,8 @@ No TPV* / BP5 driver change — byte-exact contracts preserved.
 ## Why this matters now
 
 The round-7 review (`spatial_dynamic_rupture_review_round7_2026-05-18.md`)
-confirmed the dispatch chain (LSW_ForcedRupture → iterator → mu_eff) is
-correctly wired on the production strength-reduction path.  The next user-
+confirmed the dispatch chain (gradual_overstress → iterator → mu_eff) is
+correctly wired on the production nucleation path.  The next user-
 visible defect on the SAFS production path is **observability**: today, even
 when the driver runs end-to-end, the operator gets `fault.vtkhdf` with only the
 five BP5-style fault projections (slip, slip_rate, traction, mu_eff, sigma_n).
@@ -94,8 +94,10 @@ The driver behind those flags (`drivers/tpv104_driver.cpp:597-770` for parsing,
 - **Spatial-friction static fields are heterogeneous per DOF** (unlike TPV104),
   so the fault-static-parameter array set published via `SetFaultParamsBP5`
   MUST be a SAFS-specific overload that publishes `lsw_mu_s`, `lsw_mu_d`,
-  `lsw_d_c`, `T_forced_rupture`, `sigma_n_corr` (initial), `tau1_corr` (initial),
-  `tau2_corr` (initial) — NOT the BP5 `a, Dc, x2, x3`.
+  `lsw_d_c`, `nuc_amplitude` (per-DOF `F(r) · |Δτ|` from
+  `gradual_overstress`), `nuc_radial_factor` (per-DOF `F(r)`),
+  `sigma_n_corr` (initial), `tau1_corr` (initial), `tau2_corr` (initial)
+  — NOT the BP5 `a, Dc, x2, x3`.
 
 ## Phase 1: CLI flag surface + build guards
 
@@ -633,11 +635,13 @@ wavefield, not just the fault projections.
 
 ### Goal
 After Phase 6, the fault collection includes per-DOF heterogeneous static
-arrays: `lsw_mu_s`, `lsw_mu_d`, `lsw_d_c`, `T_forced_rupture`,
-`sigma_n_init`, `tau1_init`, `tau2_init`.  This replaces TPV104's
-`SetFaultParamsBP5(a, Dc, x2, x3)` (which assumes homogeneous a, Dc) with a
-SAFS-specific call that publishes the spatial heterogeneity the driver
-already has in `dof_data`.
+arrays: `lsw_mu_s`, `lsw_mu_d`, `lsw_d_c`, `nuc_amplitude` (the per-DOF
+full-ramp δτ magnitude `F(r) · |Δτ|` from the `gradual_overstress`
+resolver), `nuc_radial_factor` (the per-DOF Gaussian factor `F(r) ∈
+[0, 1]`), `sigma_n_init`, `tau1_init`, `tau2_init`.  This replaces
+TPV104's `SetFaultParamsBP5(a, Dc, x2, x3)` (which assumes homogeneous
+a, Dc) with a SAFS-specific call that publishes the spatial
+heterogeneity the driver already has in `dof_data`.
 
 ### Files to Create
 - None.
@@ -675,38 +679,46 @@ already has in `dof_data`.
 
 2. **Spatial driver pushes the 7 SAFS arrays** at `pv_out` setup time
    (insert after the existing `pv_out->InitFaultOutputBP5(...)` call at
-   `spatial_dyn_driver.cpp:1106`):
+   `spatial_dyn_driver.cpp:1106`).  The `nuc_amplitude` and
+   `nuc_radial_factor` values are produced by the
+   `gradual_overstress` resolver alongside the per-DOF accumulator
+   targets (see `spatial_dynamic_rupture_plan.md` and the schema doc's
+   `[nucleation.gradual_overstress]` block):
    ```cpp
-   Vector pv_lsw_mu_s   (num_fault_total),
-          pv_lsw_mu_d   (num_fault_total),
-          pv_lsw_d_c    (num_fault_total),
-          pv_T_forced   (num_fault_total),
-          pv_sig_n_init (num_fault_total),
-          pv_tau1_init  (num_fault_total),
-          pv_tau2_init  (num_fault_total);
+   Vector pv_lsw_mu_s     (num_fault_total),
+          pv_lsw_mu_d     (num_fault_total),
+          pv_lsw_d_c      (num_fault_total),
+          pv_nuc_amplitude(num_fault_total),
+          pv_nuc_radial   (num_fault_total),
+          pv_sig_n_init   (num_fault_total),
+          pv_tau1_init    (num_fault_total),
+          pv_tau2_init    (num_fault_total);
    for (int i = 0; i < num_fault_total; ++i)
    {
       const DOFData &d = dof_data[i];
-      pv_lsw_mu_s  (i) = d.lsw_mu_s;
-      pv_lsw_mu_d  (i) = d.lsw_mu_d;
-      pv_lsw_d_c   (i) = d.lsw_d_c;
-      pv_T_forced  (i) = d.T_forced_rupture;
-      pv_sig_n_init(i) = d.sigma_n_corr;   // captured at init time
-      pv_tau1_init (i) = d.tau1_corr;
-      pv_tau2_init (i) = d.tau2_corr;
+      pv_lsw_mu_s     (i) = d.lsw_mu_s;
+      pv_lsw_mu_d     (i) = d.lsw_mu_d;
+      pv_lsw_d_c      (i) = d.lsw_d_c;
+      // From the gradual_overstress resolver's per-DOF arrays:
+      pv_nuc_amplitude(i) = nuc_per_dof.amplitude(i);   // F(r) · |Δτ|
+      pv_nuc_radial   (i) = nuc_per_dof.radial(i);      // F(r) ∈ [0, 1]
+      pv_sig_n_init   (i) = d.sigma_n_corr;
+      pv_tau1_init    (i) = d.tau1_corr;
+      pv_tau2_init    (i) = d.tau2_corr;
    }
    pv_out->SetFaultParamsSpatial({
-      {"lsw_mu_s",         &pv_lsw_mu_s},
-      {"lsw_mu_d",         &pv_lsw_mu_d},
-      {"lsw_d_c",          &pv_lsw_d_c},
-      {"T_forced_rupture", &pv_T_forced},
-      {"sigma_n_init",     &pv_sig_n_init},
-      {"tau1_init",        &pv_tau1_init},
-      {"tau2_init",        &pv_tau2_init},
+      {"lsw_mu_s",          &pv_lsw_mu_s},
+      {"lsw_mu_d",          &pv_lsw_mu_d},
+      {"lsw_d_c",           &pv_lsw_d_c},
+      {"nuc_amplitude",     &pv_nuc_amplitude},
+      {"nuc_radial_factor", &pv_nuc_radial},
+      {"sigma_n_init",      &pv_sig_n_init},
+      {"tau1_init",         &pv_tau1_init},
+      {"tau2_init",         &pv_tau2_init},
    });
    ```
-   The 7 arrays MUST live for the lifetime of `pv_out` — store them in the
-   enclosing scope, not inside the construction block.
+   The 8 arrays MUST live for the lifetime of `pv_out` — store them in
+   the enclosing scope, not inside the construction block.
 
 3. **Set `pv_out->SetTotalRunTime(cfg.time.tfinal)`** so the AdaptiveSchedule
    has a horizon (mirroring `tpv104_driver.cpp:2113`).  Insert immediately
@@ -733,10 +745,15 @@ already has in `dof_data`.
 - All other interfaces unchanged.
 
 ### Edge Cases to Handle
-- A SAFS DOF with `T_forced_rupture = 1e9` (the "never forced" sentinel) —
-  the array publishes the sentinel value; ParaView users see `1e9` as a clear
-  "outside nucleation zone" marker.
-- `num_fault_total == 0` on a rank with no fault DOFs — the 7 arrays are
+- A SAFS DOF outside the nucleation Gaussian's `~3·radius_*` support —
+  `nuc_radial_factor ≈ 0` and `nuc_amplitude ≈ 0`; ParaView users see
+  zero in both fields as a clear "outside nucleation zone" marker.
+- A run with the `[nucleation]` block ABSENT — the resolver returns
+  zero-filled per-DOF arrays, both `nuc_amplitude` and
+  `nuc_radial_factor` publish zero everywhere; the static field still
+  exists so ParaView state files don't break across the with/without
+  configurations.
+- `num_fault_total == 0` on a rank with no fault DOFs — the 8 arrays are
   empty Vectors; `SetFaultParamsSpatial` accepts zero-size and is a no-op
   on that rank.
 - Restart: the static arrays are re-published from the post-init `dof_data`
@@ -747,8 +764,9 @@ already has in `dof_data`.
       is additive; existing `SetFaultParamsBP5` call sites untouched).
 - [ ] Smoke test: `seas_spatial_dyn_driver --paraview --paraview-fault hdf5`
       produces a `fault.vtkhdf` with 5 dynamic fields (slip, slip_rate,
-      traction, mu_eff, sigma_n) + 7 static fields (lsw_mu_s, lsw_mu_d,
-      lsw_d_c, T_forced_rupture, sigma_n_init, tau1_init, tau2_init).
+      traction, mu_eff, sigma_n) + 8 static fields (lsw_mu_s, lsw_mu_d,
+      lsw_d_c, nuc_amplitude, nuc_radial_factor, sigma_n_init,
+      tau1_init, tau2_init).
 - [ ] On a heterogeneous TOML (e.g. spatial rule sets `lsw_mu_s = 1.2` inside
       a depth band), the fault VTKHDF shows the depth-band step in the
       `lsw_mu_s` field.

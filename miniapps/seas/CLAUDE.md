@@ -239,3 +239,15 @@ python3 miniapps/seas/scripts/estimate_output_size.py \
 The estimator parses the same `--paraview-*` flags the C++ drivers accept, integrates the `AdaptiveSchedule` over `tfinal`, and multiplies per-write bytes by the driver's registered-field schema.  Compression ratios marked `PLACEHOLDER` in `_io_size_compression.py` produce a one-time `UserWarning` per `(field_kind, filter)` pair; suppress with `--quiet`.
 
 Tests: `pytest miniapps/seas/scripts/test_estimate_output_size.py` (28 currently passing; 3 reference-run skips pending Frontera replication).  The drift-detection test re-grep's the four driver source files for `RegisterDomainField("name", ...)` / `RegisterField("name", ...)` and fails when the source registers a string-literal field name not in `_io_size_schemas.py`.
+
+## Spatial driver nucleation mechanism
+
+`seas_spatial_dyn_driver` (the SAFS dynamic-rupture driver) supports a single nucleation kind: **`gradual_overstress`**.  It is a per-DOF shear-stress accumulator that ramps smoothly from 0 to a full-amplitude target `Δτ · F(r)` over `[0, T_nuc_s]`:
+
+- **Spatial factor** `F(r)`: Gaussian centred on `(center_x_m, center_y_m, center_z_m)` with e-fold radii `radius_dip_m` (down-dip) and `radius_strike_m` (along-strike).  `F = 1` at the centre; numerically zero outside `~3 · radius_*`.
+- **Temporal factor**: SCEC smoothStep function `smoothStep(t, t0) = 0` for `t ≤ 0`, `exp(τ²/(t·(t − 2·t0)))` for `0 < t < t0` (where `τ = t − t0`), `1` for `t ≥ t0`.  `C∞` everywhere except `t = 0`; no step discontinuity unlike one-shot overstress.
+- **Per-sub-step apply**: the resolver writes `ΔS(t, Δt) · F(r) · Δτ` into `DOFData[i].tau1_nuc` (dip) and `DOFData[i].tau2_nuc` (strike) every sub-step; summed over `[0, T_nuc_s]` the increments telescope to the full target.  At `t ≥ T_nuc_s` the accumulator is a no-op.
+
+User-facing schema: `[nucleation] kind = "gradual_overstress"` + `[nucleation.gradual_overstress]` sub-block.  Schema doc: `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`.  Workflow runbook: `safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md`.
+
+The native TPV104 (rate-state) and TPV205 (instantaneous-overstress LSW) drivers continue to use their own nucleation paths verbatim — `gradual_overstress` is the spatial-driver-specific choice and does NOT touch the TPV*/BP5 byte-exact regression contract.

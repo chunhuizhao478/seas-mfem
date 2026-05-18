@@ -1,17 +1,19 @@
 # EXAMPLE: spatial-friction config for the SAFS dynamic-rupture driver.
-# Linear slip-weakening (TPV205-like) with geoffrey2010.md reference
-# friction parameters and TPV26/27-style gradual forced-rupture
-# nucleation.  This file is parsed verbatim by the Phase-1 unit test
-# `test_spatial_friction_config` and is the user-editable starting
-# point for SAFS LSW runs.
+# Linear slip-weakening with geoffrey2010.md reference friction parameters
+# and `gradual_overstress` nucleation (smoothStep-ramped, Gaussian-shaped
+# per-DOF δτ accumulator).  This file is parsed verbatim by the Phase-1
+# unit test `test_spatial_friction_config` and is the user-editable
+# starting point for SAFS LSW runs.
 #
 # Schema reference:
 #   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+# Workflow runbook:
+#   safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md
 
 [meta]
 schema_version = 1
 law            = "slip_weakening"
-description    = "SAFS-ALT6 LSW, geoffrey2010 reference parameters, TPV26/27 gradual nucleation"
+description    = "SAFS-ALT6 LSW, geoffrey2010 reference parameters, gradual_overstress nucleation"
 
 [material_constant_fallback]
 # Used if --no-sidecar-material is passed OR the velocity sidecar load
@@ -78,15 +80,26 @@ max_snapshots           = 5000
 checkpoint_every_steps  = 10000
 
 [nucleation]
-# TPV26/27-style gradual forced rupture (D-4).  Hypocenter coords are
-# UTM 11N (mesh is in UTM; see meshing/README).  r_crit_m = 4000 and
-# t0_decay_s = 0.5 are the TPV26/27 defaults.  When this block is
-# absent, the driver runs without forced rupture (T = 1e9 everywhere).
-hypocenter_x_m = 480000.0
-hypocenter_y_m = 3750000.0
-hypocenter_z_m =   -7000.0
-r_crit_m       =    4000.0
-t0_decay_s     =       0.5
+# Time-domain nucleation perturbation.  When this block is absent the
+# driver runs without any nucleation perturbation (rupture is driven
+# entirely by the static initial stress field).
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+# Per-DOF δτ accumulator: a Gaussian spatial factor F(r) centred on
+# (center_*_m) with e-fold radii (radius_*_m), ramped smoothly from 0
+# to the full amplitude (delta_tau_*_pa) over [0, T_nuc_s] using the
+# SCEC smoothStep temporal function.  Hypocenter coords are UTM 11N
+# (mesh is in UTM; see meshing/README).
+center_x_m          =  480000.0
+center_y_m          = 3750000.0
+center_z_m          =   -7000.0
+radius_dip_m        =     3000.0
+radius_strike_m     =     3000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     25.0e6
+T_nuc_s             =        1.0
+# R-007: t0_smooth_s field removed — T_nuc_s is the smoothStep t0.
 
 [friction.slip_weakening]
 # Defaults match friction/slip-weakening/geoffrey2010.md verbatim (R-113).

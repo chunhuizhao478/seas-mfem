@@ -692,32 +692,21 @@ static void R_8_rs_eta_auto_collision()
 }
 
 // =====================================================================
-//  ResolveForcedRupture tests
+//  ResolveForcedRupture tests — REMOVED in Phase N
 // =====================================================================
+//
+// F-1 / F-2 / F-3 / F-4 / F-5 were removed when the spatial driver's
+// nucleation surface collapsed to the single `gradual_overstress` kind.
+// The TPV26/27 forced-rupture path (ResolveForcedRupture +
+// ResolveOverstress + NucleationKind::{StrengthReduction,Overstress})
+// is no longer reachable from the spatial code path; the helper
+// `LSWFrictionCoefficient_ForcedRupture` stays in spatial_friction.hpp
+// for native TPV* consumers and is exercised by H-1 below.
+//
+// New unit tests for the replacement path live in
+// `tests/unit/test_spatial_nucleation.cpp` (T-N01..T-N12).
 
-// F-1  disabled nucleation → T = 1e9 everywhere, t_0 = 0
-static void F_1_disabled_returns_sentinel()
-{
-   std::cout << "\n[F-1] disabled nucleation → T_forced = 1e9, t_0 = 0\n";
-   const int N = 4;
-   Vector dofs; Array<int> attr, elem;
-   make_synthetic_dofs(N, 10000.0, dofs, attr, elem);
-
-   NucleationSpec nuc;  nuc.enabled = false;
-   auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
-   TinyMeshHolder mh;
-   SpatialFrictionResolver R;
-
-   auto p = R.ResolveForcedRupture(nuc, dofs, elem, mat, mh.mesh());
-   TEST_ASSERT(p.T_forced_s.Size() == N, "T_forced sized N");
-   for (int i = 0; i < N; ++i)
-   {
-      TEST_NEAR(p.T_forced_s(i), 1.0e9, 0.0, "T_forced = 1e9");
-      TEST_NEAR(p.t0_decay_s(i), 0.0,   0.0, "t0_decay = 0");
-   }
-}
-
-// F-2  enabled with const material: T(0)=0 and T(r→r_crit) blows up
+#if 0  // Disabled in Phase N; left in place commented out for archive.
 static void F_2_T_of_r_constant_material()
 {
    std::cout << "\n[F-2] T(r) on constant material: T(0)=0; growing with r\n";
@@ -1016,6 +1005,95 @@ static void F_5_resolve_overstress_stub_behaviour()
    TEST_ASSERT(aborted,
                "ResolveOverstress stub aborts on Overstress kind");
 }
+#endif  // Disabled in Phase N
+
+// =====================================================================
+// R-9 — rate-state path eta_auto uses centroid (still live; spatial
+// driver does not depend on this code path, but the resolver test
+// covers it directly).  Defines its own coefficient fixtures since
+// the old F-3 RhoConst / MuFromZ / LambdaFromZ classes were folded
+// into the disabled Phase-N block.
+// =====================================================================
+
+namespace
+{
+class RhoConst_R9 : public mfem::Coefficient
+{
+public:
+   real_t Eval(mfem::ElementTransformation& /*T*/,
+               const mfem::IntegrationPoint& /*ip*/) override
+   { return 2670.0; }
+};
+class MuFromZ_R9 : public mfem::Coefficient
+{
+public:
+   real_t Eval(mfem::ElementTransformation& T,
+               const mfem::IntegrationPoint& ip) override
+   {
+      real_t x[3] = { 0.0, 0.0, 0.0 };
+      mfem::Vector p(x, 3);
+      T.Transform(ip, p);
+      const real_t Vs = 1000.0 + 4000.0 * p(2);
+      return 2670.0 * Vs * Vs;
+   }
+};
+class LambdaFromZ_R9 : public mfem::Coefficient
+{
+public:
+   real_t Eval(mfem::ElementTransformation& T,
+               const mfem::IntegrationPoint& ip) override
+   {
+      real_t x[3] = { 0.0, 0.0, 0.0 };
+      mfem::Vector p(x, 3);
+      T.Transform(ip, p);
+      const real_t Vs = 1000.0 + 4000.0 * p(2);
+      const real_t Vp = 1.8 * Vs;
+      return 2670.0 * (Vp*Vp - 2.0 * Vs*Vs);
+   }
+};
+}  // namespace
+
+static void R_9_eta_auto_uses_centroid()
+{
+   std::cout << "\n[R-9] R-003 regression: eta_auto reads (mu, rho) at "
+                "element centroid\n";
+   Vector dofs(3);  Array<int> attr(1), elem(1);
+   dofs(0) = 0.5; dofs(1) = 0.5; dofs(2) = 0.5;
+   attr[0] = 101; elem[0] = 0;
+   Vector sn_total(1); sn_total = 50.0e6;
+
+   RateStateBlock cfg;
+   cfg.a_default = 0.010; cfg.b_default = 0.015;
+   cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
+   cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
+   cfg.sigma_n_default = 50.0e6;
+   cfg.eta_auto    = true;
+   cfg.eta_default = 0.0;
+
+   RhoConst_R9    rho_c;
+   MuFromZ_R9     mu_c;
+   LambdaFromZ_R9 lam_c;
+   auto mat = MaterialField::MakeCoefficient(&lam_c, &mu_c, &rho_c);
+   TinyMeshHolder mh;
+   PorePressureSpec pp;
+   SpatialFrictionResolver R;
+#ifdef MFEM_USE_MPI
+   mfem::Mesh& srl = mh.mesh();
+   auto p = R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+   const real_t Vs_centroid = 3000.0;
+   const real_t mu_expected = 2670.0 * Vs_centroid * Vs_centroid;
+   const real_t eta_expect  = 0.5 * std::sqrt(mu_expected * 2670.0);
+   TEST_NEAR(p.eta(0), eta_expect, 1e-3,
+             "eta = 0.5 * sqrt(mu(centroid) * rho)");
+   const real_t mu_corner  = 2670.0 * 1000.0 * 1000.0;
+   const real_t eta_corner = 0.5 * std::sqrt(mu_corner * 2670.0);
+   TEST_ASSERT(std::abs(p.eta(0) - eta_expect)
+               < std::abs(p.eta(0) - eta_corner),
+               "eta closer to centroid value than to corner value");
+#else
+   std::cout << "  SKIP (no MPI build)\n";
+#endif
+}
 
 // =====================================================================
 //  LSWFrictionCoefficient_ForcedRupture helper sanity
@@ -1072,12 +1150,10 @@ int main(int argc, char** argv)
    R_7_rs_negative_sigma_n_aborts();
    R_8_rs_eta_auto_collision();
 
-   // Forced rupture
-   F_1_disabled_returns_sentinel();
-   F_2_T_of_r_constant_material();
-   F_3_T_uses_centroid_not_corner();
-   F_4_overstress_kind_returns_sentinel();
-   F_5_resolve_overstress_stub_behaviour();
+   // Forced rupture / Overstress — REMOVED in Phase N (the spatial
+   // driver no longer dispatches into ResolveForcedRupture /
+   // ResolveOverstress; the single replacement kind
+   // `gradual_overstress` is covered by seas_test_spatial_nucleation).
    R_9_eta_auto_uses_centroid();
 
    // Helper

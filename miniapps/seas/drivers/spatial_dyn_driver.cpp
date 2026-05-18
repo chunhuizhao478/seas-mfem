@@ -72,6 +72,9 @@
 #include "../io/stress_field_3d.hpp"
 #include "../io/material_coefficients.hpp"
 
+#include "../dynamic/spatial_nucleation.hpp"
+#include "../dynamic/spatial_print_derived.hpp"
+
 #include "../spatial/code/spatial_friction.hpp"
 #include "../spatial/code/spatial_velocity.hpp"
 #include "../spatial/code/spatial_stress.hpp"
@@ -331,6 +334,12 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
 // closed-form per sub-step at fault QPs, corrector via wave.AdvanceADER
 // with the side-channel I_imp.  Mirrors AdvanceADERWithSubStep in
 // drivers/tpv205_driver.cpp (1:1 except no SEAS_DIAG hooks).
+//
+// Phase N: the trailing `nuc_callback` arg is forwarded to the
+// per-sub-step callback overload of
+// `Tpv205SubStepIterator::AdvanceWithSubStepStates`; the callback fires
+// ONCE per ADER sub-step BEFORE the per-QP friction pipeline.  Pass
+// `[](real_t, real_t){}` to opt out (no nucleation perturbation).
 void AdvanceADERWithSubStep_Spatial(
    WaveOperator<ParMesh> &wave,
    Tpv205SubStepIterator &iterator,
@@ -340,7 +349,8 @@ void AdvanceADERWithSubStep_Spatial(
    real_t dt_step,
    int ader_order,
    real_t t_step_start,
-   Vector &Q_new)
+   Vector &Q_new,
+   const std::function<void(real_t, real_t)> &nuc_callback)
 {
    MFEM_VERIFY(dt_step > 0.0,
                "AdvanceADERWithSubStep_Spatial: dt_step must be > 0, got "
@@ -409,7 +419,8 @@ void AdvanceADERWithSubStep_Spatial(
                                         Q_pointwise_minus,
                                         dt_step, t_step_start,
                                         I_imp_plus_flat.data(),
-                                        I_imp_minus_flat.data());
+                                        I_imp_minus_flat.data(),
+                                        nuc_callback);
    }
 
    struct ImposedGuard
@@ -505,6 +516,22 @@ int main(int argc, char *argv[])
    const real_t cli_pv_fault_zfp= GetRealArg(argc, argv, "--paraview-fault-zfp-tol", -1.0);
    const int    cli_pv_max_snap = GetIntArg(argc, argv, "--paraview-max-snapshots", -1);
 
+   // Parity Phase 1: extended ParaView CLI flag surface.
+   const bool   cli_pv                   = HasFlag(argc, argv, "--paraview");
+   const real_t cli_pv_dt                = GetRealArg(argc, argv, "--paraview-dt", -1.0);
+   const int    cli_pv_every             = GetIntArg (argc, argv, "--paraview-every", 0);
+   const bool   cli_pv_force_fault_vtu   = HasFlag(argc, argv, "--paraview-fault-vtu");
+   const bool   cli_pv_force_fault_hdf5  = HasFlag(argc, argv, "--paraview-fault-hdf5");
+   const bool   cli_pv_legacy_ascii      = HasFlag(argc, argv, "--paraview-fault-legacy-ascii");
+   const int    cli_pv_fault_deflate     = GetIntArg (argc, argv, "--paraview-fault-deflate-level", -1);
+   const int    cli_pv_bulk_deflate      = GetIntArg (argc, argv, "--paraview-bulk-deflate-level",  -1);
+   const bool   cli_pv_force_vol_vtu     = HasFlag(argc, argv, "--paraview-volume-vtu");
+   const bool   cli_pv_force_vol_hdf5    = HasFlag(argc, argv, "--paraview-volume-hdf5");
+   const int    cli_pv_volume_deflate    = GetIntArg (argc, argv, "--paraview-volume-deflate-level", -1);
+   const real_t cli_pv_coseismic_dt      = GetRealArg(argc, argv, "--paraview-coseismic-dt",    -1.0);
+   const real_t cli_pv_nucleation_dt     = GetRealArg(argc, argv, "--paraview-nucleation-dt",   -1.0);
+   const real_t cli_pv_interseismic_dt   = GetRealArg(argc, argv, "--paraview-interseismic-dt", -1.0);
+
    const std::string restart_prefix =
       GetStringArg(argc, argv, "--restart", "");
    const int cli_checkpoint_every =
@@ -573,12 +600,90 @@ int main(int argc, char *argv[])
    if (!cli_pv_fault.empty())        { cfg.output.paraview_fault  = cli_pv_fault; }
    if (cli_pv_vol_dt    > 0.0)       { cfg.output.paraview_volume_dt    = cli_pv_vol_dt; }
    if (cli_pv_bulk_dt   > 0.0)       { cfg.output.paraview_bulk_dt      = cli_pv_bulk_dt; }
-   if (cli_pv_fault_dt  > 0.0)       { cfg.output.paraview_fault_dt     = cli_pv_fault_dt; }
    if (cli_pv_vol_zfp   > 0.0)       { cfg.output.paraview_volume_zfp_tol = cli_pv_vol_zfp; }
    if (cli_pv_bulk_zfp  > 0.0)       { cfg.output.paraview_bulk_zfp_tol  = cli_pv_bulk_zfp; }
    if (cli_pv_fault_zfp > 0.0)       { cfg.output.paraview_fault_zfp_tol = cli_pv_fault_zfp; }
    if (cli_pv_max_snap  > 0)         { cfg.output.max_snapshots          = cli_pv_max_snap; }
    if (cli_checkpoint_every > 0)     { cfg.output.checkpoint_every_steps = cli_checkpoint_every; }
+
+   // Parity Phase 1: extended ParaView CLI overrides.  Order matters:
+   // apply the umbrella `--paraview-dt` FIRST so that the more-specific
+   // `--paraview-fault-dt` below overrides it when both are given (R-007
+   // fix: specific flag wins over umbrella).
+   if (cli_pv)                            { cfg.output.paraview_enabled = true; }
+   if (cli_pv_dt              > 0.0)      { cfg.output.paraview_fault_dt    = cli_pv_dt;
+                                            cfg.output.paraview_enabled    = true; }
+   if (cli_pv_fault_dt  > 0.0)            { cfg.output.paraview_fault_dt   = cli_pv_fault_dt; }
+   if (cli_pv_every           > 0)        { cfg.output.paraview_every_steps = cli_pv_every; }
+   if (cli_pv_fault_deflate  >= 0)        { cfg.output.paraview_fault_deflate_level   = cli_pv_fault_deflate; }
+   if (cli_pv_bulk_deflate   >= 0)        { cfg.output.paraview_bulk_deflate_level    = cli_pv_bulk_deflate; }
+   if (cli_pv_volume_deflate >= 0)        { cfg.output.paraview_volume_deflate_level  = cli_pv_volume_deflate; }
+   if (cli_pv_coseismic_dt    > 0.0)      { cfg.output.paraview_coseismic_dt    = cli_pv_coseismic_dt; }
+   if (cli_pv_nucleation_dt   > 0.0)      { cfg.output.paraview_nucleation_dt   = cli_pv_nucleation_dt; }
+   if (cli_pv_interseismic_dt > 0.0)      { cfg.output.paraview_interseismic_dt = cli_pv_interseismic_dt; }
+   if (cli_pv_force_fault_vtu)            { cfg.output.paraview_fault  = "vtu";  }
+   if (cli_pv_force_fault_hdf5)           { cfg.output.paraview_fault  = "hdf5"; }
+   if (cli_pv_force_vol_vtu)              { cfg.output.paraview_volume = "vtu";  }
+   if (cli_pv_force_vol_hdf5)             { cfg.output.paraview_volume = "hdf5"; }
+   if (cli_pv_legacy_ascii)               { cfg.output.paraview_fault_legacy_ascii = true;
+                                            cfg.output.paraview_fault = "vtu"; }
+
+   // Parity Phase 1 build guards.  Fire BEFORE any pv_out construction
+   // so a bad flag combination fails at parse time, not after the run.
+   if (cli_pv_force_fault_vtu && cli_pv_force_fault_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                 "mutually exclusive.");
+   }
+   if (cli_pv_legacy_ascii && cli_pv_force_fault_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-legacy-ascii implies --paraview-fault-vtu; "
+                 "it cannot be combined with --paraview-fault-hdf5.");
+   }
+   if (cli_pv_force_vol_vtu && cli_pv_force_vol_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                 "mutually exclusive.");
+   }
+   // ZFP + deflate combos are mutually exclusive per collection.
+   if (cli_pv_vol_zfp > 0.0 && cli_pv_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol and --paraview-volume-deflate-level "
+                 "are mutually exclusive.");
+   }
+   if (cli_pv_bulk_zfp > 0.0 && cli_pv_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol and --paraview-bulk-deflate-level "
+                 "are mutually exclusive.");
+   }
+   if (cli_pv_fault_zfp > 0.0 && cli_pv_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol and --paraview-fault-deflate-level "
+                 "are mutually exclusive.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (cli_pv_force_fault_hdf5 || cli_pv_force_vol_hdf5
+       || cli_pv_vol_zfp > 0.0 || cli_pv_bulk_zfp > 0.0 || cli_pv_fault_zfp > 0.0
+       || cli_pv_fault_deflate >= 0 || cli_pv_bulk_deflate >= 0
+       || cli_pv_volume_deflate >= 0
+       || cfg.output.paraview_volume == "hdf5"
+       || cfg.output.paraview_bulk   == "hdf5"
+       || cfg.output.paraview_fault  == "hdf5")
+   {
+      MFEM_ABORT("--paraview-*-hdf5 / --paraview-*-zfp-tol / "
+                 "--paraview-*-deflate-level require an MFEM build with "
+                 "MFEM_USE_HDF5=YES.  Re-run with --paraview-*-vtu or "
+                 "switch the per-collection mode to \"vtu\" / \"off\".");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (cli_pv_vol_zfp > 0.0 || cli_pv_bulk_zfp > 0.0 || cli_pv_fault_zfp > 0.0)
+   {
+      MFEM_ABORT("--paraview-*-zfp-tol requires an MFEM build with "
+                 "MFEM_USE_H5Z_ZFP=YES.  Use --paraview-*-deflate-level "
+                 "for lossless compression instead.");
+   }
+#endif
 
    MFEM_VERIFY(cfg.law == spatial::FrictionLawKind::SlipWeakening ||
                cfg.law == spatial::FrictionLawKind::RateState,
@@ -611,7 +716,9 @@ int main(int argc, char *argv[])
                 << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
                 << "\n"
                 << "nucleation:       "
-                << (cfg.nucleation.enabled ? "enabled" : "DISABLED (T=1e9)")
+                << (cfg.nucleation.enabled
+                    ? "gradual_overstress (enabled)"
+                    : "DISABLED")
                 << "\n"
                 << "no-sidecar mat:   " << (no_sidecar_material ? "yes" : "no")
                 << "\n"
@@ -794,33 +901,17 @@ int main(int argc, char *argv[])
       }
    }
 
-   // Wire dispatch selectors.  Round-6: nucleation mechanism choice
-   // (strength-reduction vs overstress) determines the friction-law
-   // dispatch tag:
-   //
-   //   * StrengthReduction (TPV26/27 §Part 4 — default): route LSW via
-   //     LSW_ForcedRupture so the per-DOF f_2(t) friction reduction
-   //     fires.  Even with [nucleation] disabled the dispatch is safe —
-   //     the resolver writes T_forced = 1e9 and f_2 == 0 always, so
-   //     the math reduces to plain LSW byte-equivalently (plan
-   //     §Phase H.6 "TPV205 byte-exact contract").
-   //
-   //   * Overstress: pre-stress is perturbed at init time via
-   //     ResolveOverstress + InitializeFaultDOFs_Spatial's overstress
-   //     path; the time loop runs plain LSW (no f_2 needed).  Route
-   //     dispatch via FaultFrictionLaw::LSW.  NB: the overstress
-   //     resolver currently aborts (stub); the dispatch wiring is in
-   //     place so the follow-up commit only needs to fill in the
-   //     resolver body.
-   const bool use_strength_reduction =
-      (cfg.nucleation.kind == spatial::NucleationKind::StrengthReduction);
-   wave.SetFaultFrictionLaw(use_strength_reduction
-                            ? FaultFrictionLaw::LSW_ForcedRupture
-                            : FaultFrictionLaw::LSW);
+   // Phase N: the spatial driver supports exactly one nucleation kind
+   // (`gradual_overstress`) — the friction law is always plain LSW.
+   // The gradual_overstress accumulator writes time-domain perturbations
+   // into DOFData::tau{1,2}_nuc; the LSW solver consumes them via
+   // s.tau{1,2}_total = tau{1,2}_0 + tau{1,2}_nuc + trial.  The obsolete
+   // LSW_ForcedRupture dispatch arm + f_2(t) per-DOF friction reduction
+   // are NOT used.  Native TPV* drivers continue to set
+   // FaultFrictionLaw::LSW_ForcedRupture verbatim.
+   wave.SetFaultFrictionLaw(FaultFrictionLaw::LSW);
    wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
 
-   // Mandatory at t=0 so the LSW_ForcedRupture dispatch arm's
-   // VerifyForcedRuptureTimeReady guard does not fire.
    wave.SetTime(cfg.time.t_initial);
 
    // -----------------------------------------------------------------
@@ -872,8 +963,11 @@ int main(int argc, char *argv[])
                           dof_to_elem, dof_to_attr, dof_ips);
 
    int num_fault_global = num_fault_total;
+   int num_shared_global = num_shared_fault;
 #ifdef MFEM_USE_MPI
-   MPI_Allreduce(&num_fault_total, &num_fault_global, 1, MPI_INT,
+   MPI_Allreduce(&num_fault_total,  &num_fault_global,  1, MPI_INT,
+                 MPI_SUM, comm);
+   MPI_Allreduce(&num_shared_fault, &num_shared_global, 1, MPI_INT,
                  MPI_SUM, comm);
 #endif
    if (rank == 0)
@@ -939,29 +1033,42 @@ int main(int argc, char *argv[])
                                     dof_coords_3d, dof_to_attr);
 
    // -----------------------------------------------------------------
-   // 12. Per-DOF forced-rupture times (Phase 1 / D-4).  ResolveForced
-   //     Rupture writes T_forced(r) per hypocenter distance only when
-   //     cfg.nucleation is enabled AND cfg.nucleation.kind ==
-   //     StrengthReduction; for any other kind (Overstress) it returns
-   //     the "never forced" sentinel T = 1e9 everywhere so the
-   //     iterator's forced-rupture mu_eff path is a no-op.  Below the
-   //     iterator is also gated by SetForcedRuptureMode(use_strength_
-   //     reduction) (R-701 round-7) — belt and suspenders.
+   // 12. Phase N: resolve the single nucleation kind
+   //     (`gradual_overstress`).  Per-DOF amplitude_dip(i) /
+   //     amplitude_strike(i) = F(r_i) · Δτ; per-DOF radial(i) = F(r_i).
+   //     When `cfg.nucleation.enabled == false`, the resolver returns
+   //     three zero-sized Vectors — the per-sub-step accumulator
+   //     early-returns and the simulation runs with no nucleation.
    // -----------------------------------------------------------------
-   const spatial::ForcedRupturePerDOFParams fr =
-      resolver.ResolveForcedRupture(cfg.nucleation,
-                                    dof_coords_3d, dof_to_elem,
-                                    material, pmesh);
+   const spatial::GradualOverstressPerDOFParams nuc_params =
+      spatial::ResolveGradualOverstress(
+         cfg.nucleation.gradual_overstress,
+         cfg.nucleation.enabled,
+         dof_coords_3d,
+         dof_basis);
 
-   // Round-6 — overstress sibling resolver.  Currently aborts when
-   // cfg.nucleation.kind == Overstress (stub); the call is wired so
-   // the surface is exercised end-to-end and a TOML user can pick
-   // overstress today and get a clear "not implemented" abort.  When
-   // the stub fills in, the per-DOF (Δτ_dip, Δτ_strike, Δσ_n) lands
-   // in DOFData::tau{1,2}_nuc / sigma_n_nuc via the spatial_setup
-   // overstress overload (also a future stub).
-   [[maybe_unused]] const spatial::OverstressPerDOFParams overstress =
-      resolver.ResolveOverstress(cfg.nucleation, dof_coords_3d);
+   // R-008: warn when a non-trivial fraction of fault DOFs live on
+   // shared faces.  The wave operator's shared-face EvaluateADER_LSW
+   // call reads DOFData::tau{1,2}_nuc AFTER the Phase N per-substep
+   // iterator has accumulated the full smoothStep increment for the
+   // macrostep, so those DOFs see the perturbation as an end-of-
+   // macrostep step rather than a smooth ramp (1st-order time-
+   // accuracy degradation).  Quantify and warn so the user can
+   // tighten dt or accept the trade-off.
+   if (cfg.nucleation.enabled && num_shared_global > 0 && rank == 0)
+   {
+      const real_t shared_frac = (num_fault_global > 0)
+         ? (static_cast<real_t>(num_shared_global)
+            / static_cast<real_t>(num_fault_global))
+         : 0.0;
+      std::cout << "[spatial_dyn] WARNING: " << num_shared_global
+                << " of " << num_fault_global << " fault DOFs ("
+                << (100.0 * shared_frac) << "%) live on shared faces "
+                << "and will see the gradual_overstress perturbation as "
+                << "an end-of-macrostep step rather than a smooth ramp.  "
+                << "Tighten dt (smaller macrostep) to reduce the "
+                << "1st-order time-accuracy error on shared faces.\n";
+   }
 
    // -----------------------------------------------------------------
    // 13. Construct FaultFaceFlux with seed scalar impedances; the
@@ -977,14 +1084,24 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    // 14. Initialise per-DOF DOFData via the new free function
    //     (Phase 5c, IP-aware overload).
+   //
+   //     R-003 (Phase N): InitializeFaultDOFs_Spatial requires
+   //     T_forced_s / t0_decay_s vectors of size num_fault_total (size-
+   //     validated at spatial_setup.hpp:194-200).  Under the LSW
+   //     dispatch (not LSW_ForcedRupture) these are NEVER read — supply
+   //     the "never forced" sentinel so the size validator passes.  The
+   //     dummy values are inert by construction.
    // -----------------------------------------------------------------
+   Vector dummy_T_forced(num_fault_total);  dummy_T_forced = 1.0e9;
+   Vector dummy_t0_decay(num_fault_total);  dummy_t0_decay = 0.0;
+
    std::vector<DOFData> dof_data;
    if (num_fault_total > 0)
    {
       spatial::InitializeFaultDOFs_Spatial<ParMesh>(
          dof_data, num_fault_total, dof_to_elem, material, pmesh,
          lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
-         fr.T_forced_s, fr.t0_decay_s,
+         dummy_T_forced, dummy_t0_decay,
          dof_ips);
    }
    wave.SetFaultDOFData(&dof_data, nbf_per_face);
@@ -1020,11 +1137,39 @@ int main(int argc, char *argv[])
                 << "[time] nsteps = " << nsteps << "\n";
    }
 
-   if (print_derived && rank == 0)
+   if (print_derived)
    {
-      std::cout << "[derived] num_fault_global = " << num_fault_global
-                << "\n[derived] cp_seed = " << cp_seed
-                << " m/s, cs_seed = " << cs_seed << " m/s\n";
+      // Compute mesh h_min for the L_nuc / h_min ratio.
+      real_t h_min_local = std::numeric_limits<real_t>::infinity();
+      for (int e = 0; e < pmesh.GetNE(); ++e)
+      {
+         h_min_local = std::min(h_min_local, pmesh.GetElementSize(e, 0));
+      }
+      real_t h_min_global = h_min_local;
+#ifdef MFEM_USE_MPI
+      MPI_Allreduce(&h_min_local, &h_min_global, 1,
+                    MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+#endif
+      spatial::PrintDerivedConfig pd_cfg;
+      pd_cfg.enabled                = true;
+      pd_cfg.abort_on_failure       = true;
+      pd_cfg.outside_safety_factor  = 3.0;
+      (void)spatial::PrintDerivedAndCheck(
+         pd_cfg, lsw,
+         geom.GetTauPre(), geom.sigma_n_per_dof(),
+         dof_coords_3d,
+         cfg.nucleation, nuc_params,
+         cfg.stress,
+         /*mu_bulk=*/material.mu_const,
+         cp_seed, cs_seed,
+         h_min_global,
+         dt_cfl, cfg.time.tfinal,
+         num_fault_global,
+         geom.NumZeroNormalFallbacks()
+#ifdef MFEM_USE_MPI
+         , comm
+#endif
+         , rank);
    }
 
    // -----------------------------------------------------------------
@@ -1044,9 +1189,21 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 17. ParaView output wiring (volume / fault / bulk-stress).
+   // 17. ParaView output wiring (parity Phases 1-6).
+   //
+   //     Parity Phase 3 master gate: if paraview_enabled == false AND
+   //     every per-collection mode is "off", construct NOTHING.  The
+   //     CLI `--paraview` / `--paraview-dt` overrides flip paraview_
+   //     enabled on automatically (see merge block above).
    // -----------------------------------------------------------------
-   // Create output dir on rank 0.
+   // Parity Phase 4/5: wave-state component ordering assumptions.
+   static_assert(SXX == 0 && SYY == 1 && SZZ == 2
+                 && SXY == 3 && SYZ == 4 && SXZ == 5,
+                 "Phase 4 sigma memcpy assumes wave_state.hpp ordering.");
+   static_assert(VX == 6 && VY == 7 && VZ == 8,
+                 "Phase 5 velocity memcpy assumes contiguous VX/VY/VZ; "
+                 "wave_state.hpp ordering changed.");
+
    if (rank == 0)
    {
       std::filesystem::create_directories(cfg.output.output_dir);
@@ -1063,24 +1220,72 @@ int main(int argc, char *argv[])
    auto fault_mode  = ParseFaultMode(cfg.output.paraview_fault,
                                      fault_pv_enabled);
    {
-      // bulk uses VolumeOutputMode like volume.
       bool dummy;
       (void)ParseVolumeMode(cfg.output.paraview_bulk, dummy);
       bulk_pv_enabled = dummy;
    }
 
+   // Parity Phase 1 §4 / Phase 3 §1: paraview_enabled is the HARD master
+   // gate.  When false, force every per-collection enabled flag to false
+   // regardless of the per-collection mode strings.  The CLI `--paraview`
+   // merge above flips paraview_enabled to true when the user opts in.
+   if (!cfg.output.paraview_enabled)
+   {
+      volume_pv_enabled = false;
+      fault_pv_enabled  = false;
+      bulk_pv_enabled   = false;
+   }
+
+   const bool any_pv_requested = volume_pv_enabled
+                                || fault_pv_enabled
+                                || bulk_pv_enabled;
+   const bool primary_pv_active = any_pv_requested
+                                  && (volume_pv_enabled || fault_pv_enabled);
+   const bool bulk_pv_active    = any_pv_requested && bulk_pv_enabled;
+
    std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_out;
    std::unique_ptr<seas::ParaViewOutput<ParMesh>> pv_bulk_out;
-   if (volume_pv_enabled || fault_pv_enabled)
+
+   // Parity Phase 5: volume velocity + mpi_rank fields (lifetime of pv_out).
+   std::unique_ptr<L2_FECollection> pv_vel_fec, pv_rank_fec;
+   std::unique_ptr<ParFiniteElementSpace> pv_vel_fes, pv_rank_fes;
+   std::unique_ptr<ParGridFunction>       pv_vel_gf, pv_rank_gf;
+
+   // Parity Phase 4: secondary collection stress GFs (lifetime of pv_bulk_out).
+   std::unique_ptr<L2_FECollection>       pv_bulk_sigma_fec;
+   std::unique_ptr<ParFiniteElementSpace> pv_bulk_sigma_fes;
+   std::unique_ptr<ParGridFunction>
+      pv_bulk_sxx_gf, pv_bulk_syy_gf, pv_bulk_szz_gf,
+      pv_bulk_sxy_gf, pv_bulk_syz_gf, pv_bulk_sxz_gf;
+
+   // Parity Phase 6: SAFS fault static-parameter arrays (lifetime of pv_out).
+   Vector pv_lsw_mu_s, pv_lsw_mu_d, pv_lsw_d_c;
+   Vector pv_nuc_amplitude, pv_nuc_radial;
+   Vector pv_sig_n_init, pv_tau1_init, pv_tau2_init;
+
+   if (primary_pv_active)
    {
       pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
                   cfg.output.output_dir, pmesh, cfg.mesh.order,
                   "volume", volume_mode);
       pv_out->SetVolumePVDt(cfg.output.paraview_volume_dt);
       pv_out->SetVolumeSaveEnabled(volume_pv_enabled);
+      if (cfg.output.paraview_every_steps > 0)
+      {
+         pv_out->output_every_n_steps = cfg.output.paraview_every_steps;
+      }
 
       pv_out->fixed_dt = cfg.output.paraview_fault_dt;
       pv_out->GetSchedule().max_total_snapshots = cfg.output.max_snapshots;
+
+      // Parity Phase 6: regime-adaptive cadence from TOML/CLI.
+      pv_out->SetTotalRunTime(cfg.time.tfinal);
+      if (cfg.output.paraview_coseismic_dt    > 0.0)
+      { pv_out->GetSchedule().dt_coseismic    = cfg.output.paraview_coseismic_dt; }
+      if (cfg.output.paraview_nucleation_dt   > 0.0)
+      { pv_out->GetSchedule().dt_nucleation   = cfg.output.paraview_nucleation_dt; }
+      if (cfg.output.paraview_interseismic_dt > 0.0)
+      { pv_out->GetSchedule().dt_interseismic = cfg.output.paraview_interseismic_dt; }
 
 #ifdef MFEM_USE_HDF5
       if (cfg.output.paraview_volume_zfp_tol > 0.0
@@ -1089,6 +1294,13 @@ int main(int argc, char *argv[])
          pv_out->SetVolumeHDFCompression(
             mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
             cfg.output.paraview_volume_zfp_tol);
+      }
+      else if (cfg.output.paraview_volume_deflate_level >= 0
+               && volume_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(cfg.output.paraview_volume_deflate_level));
       }
 #endif
 
@@ -1106,6 +1318,177 @@ int main(int argc, char *argv[])
 
       pv_out->InitFaultOutputBP5(fault_int_faces, fault_shr_faces,
                                  nbf_per_face);
+
+      // Parity Phase 5: register velocity (3-component L2 p=order) and
+      // mpi_rank (L2 p=0).  Only when the volume mode is opted in.
+      if (volume_pv_enabled)
+      {
+         pv_vel_fec = std::make_unique<L2_FECollection>(cfg.mesh.order, 3,
+                                                        BasisType::GaussLobatto);
+         pv_vel_fes = std::make_unique<ParFiniteElementSpace>(
+                         &pmesh, pv_vel_fec.get(), 3, Ordering::byNODES);
+         pv_vel_gf  = std::make_unique<ParGridFunction>(pv_vel_fes.get());
+         *pv_vel_gf = 0.0;
+         pv_out->RegisterDomainField("velocity", pv_vel_gf.get());
+
+         pv_rank_fec = std::make_unique<L2_FECollection>(0, 3);
+         pv_rank_fes = std::make_unique<ParFiniteElementSpace>(
+                          &pmesh, pv_rank_fec.get());
+         pv_rank_gf  = std::make_unique<ParGridFunction>(pv_rank_fes.get());
+         *pv_rank_gf = static_cast<real_t>(rank);
+         pv_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
+      }
+
+      // Parity Phase 6: SAFS fault static fields.
+      if (num_fault_total > 0)
+      {
+         pv_lsw_mu_s     .SetSize(num_fault_total);
+         pv_lsw_mu_d     .SetSize(num_fault_total);
+         pv_lsw_d_c      .SetSize(num_fault_total);
+         pv_nuc_amplitude.SetSize(num_fault_total);
+         pv_nuc_radial   .SetSize(num_fault_total);
+         pv_sig_n_init   .SetSize(num_fault_total);
+         pv_tau1_init    .SetSize(num_fault_total);
+         pv_tau2_init    .SetSize(num_fault_total);
+         for (int i = 0; i < num_fault_total; ++i)
+         {
+            const DOFData &d = dof_data[i];
+            pv_lsw_mu_s(i) = d.lsw_mu_s;
+            pv_lsw_mu_d(i) = d.lsw_mu_d;
+            pv_lsw_d_c (i) = d.lsw_d_c;
+            const real_t ad = (nuc_params.amplitude_dip.Size()    == num_fault_total)
+                              ? nuc_params.amplitude_dip(i)    : 0.0;
+            const real_t as = (nuc_params.amplitude_strike.Size() == num_fault_total)
+                              ? nuc_params.amplitude_strike(i) : 0.0;
+            pv_nuc_amplitude(i) = std::sqrt(ad*ad + as*as);
+            pv_nuc_radial   (i) = (nuc_params.radial.Size() == num_fault_total)
+                                  ? nuc_params.radial(i)   : 0.0;
+            pv_sig_n_init   (i) = d.sigma_n_corr;
+            pv_tau1_init    (i) = d.tau1_corr;
+            pv_tau2_init    (i) = d.tau2_corr;
+         }
+      }
+      // Parity Phase 6: publish all 8 SAFS static fields via the new
+      // SetFaultParamsSpatial method on seas::ParaViewOutput (added in
+      // io/paraview_output.hpp).  Each field lands in fault.vtkhdf
+      // under its proper SAFS-semantic name (NOT TPV104's a/Dc/x2/x3).
+      // SetFaultParamsSpatial is safe to call on a rank with zero
+      // local fault DOFs.
+      pv_out->SetFaultParamsSpatial({
+         {"lsw_mu_s",          &pv_lsw_mu_s},
+         {"lsw_mu_d",          &pv_lsw_mu_d},
+         {"lsw_d_c",           &pv_lsw_d_c},
+         {"nuc_amplitude",     &pv_nuc_amplitude},
+         {"nuc_radial_factor", &pv_nuc_radial},
+         {"sigma_n_init",      &pv_sig_n_init},
+         {"tau1_init",         &pv_tau1_init},
+         {"tau2_init",         &pv_tau2_init},
+      });
+   }
+
+   // Parity Phase 4: secondary `pv_bulk_out` collection (6 stress
+   // components → ParaView_bulk/stress.vtkhdf).
+   if (bulk_pv_active)
+   {
+      const std::string bulk_dir = cfg.output.output_dir + "/ParaView_bulk";
+      if (rank == 0)
+      {
+         std::filesystem::create_directories(bulk_dir);
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Barrier(comm);
+#endif
+      bool bulk_mode_enabled = bulk_pv_enabled;
+      auto bulk_mode = ParseVolumeMode(cfg.output.paraview_bulk,
+                                       bulk_mode_enabled);
+      pv_bulk_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
+                       bulk_dir, pmesh, cfg.mesh.order,
+                       "stress", bulk_mode);
+      pv_bulk_out->fixed_dt = cfg.output.paraview_bulk_dt;
+
+      pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
+                            cfg.mesh.order, 3, BasisType::GaussLobatto);
+      pv_bulk_sigma_fes = std::make_unique<ParFiniteElementSpace>(
+                            &pmesh, pv_bulk_sigma_fec.get());
+      pv_bulk_sxx_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      pv_bulk_syy_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      pv_bulk_szz_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      pv_bulk_sxy_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      pv_bulk_syz_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      pv_bulk_sxz_gf = std::make_unique<ParGridFunction>(pv_bulk_sigma_fes.get());
+      *pv_bulk_sxx_gf = 0.0; *pv_bulk_syy_gf = 0.0; *pv_bulk_szz_gf = 0.0;
+      *pv_bulk_sxy_gf = 0.0; *pv_bulk_syz_gf = 0.0; *pv_bulk_sxz_gf = 0.0;
+      pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
+      pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+      pv_bulk_out->RegisterDomainField("sigma_zz", pv_bulk_szz_gf.get());
+      pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
+      pv_bulk_out->RegisterDomainField("sigma_yz", pv_bulk_syz_gf.get());
+      pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+
+#ifdef MFEM_USE_HDF5
+      if (cfg.output.paraview_bulk_zfp_tol > 0.0
+          && bulk_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
+      {
+         pv_bulk_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            cfg.output.paraview_bulk_zfp_tol);
+      }
+      else if (cfg.output.paraview_bulk_deflate_level >= 0
+               && bulk_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
+      {
+         pv_bulk_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(cfg.output.paraview_bulk_deflate_level));
+      }
+#endif
+   }
+
+   // Parity Phase 3: rank-0 banner.
+   if (rank == 0)
+   {
+      if (any_pv_requested)
+      {
+         std::cout << "ParaView output: ON (prefix=" << cfg.output.output_dir
+                   << ")\n"
+                   << "  Volume:   " << cfg.output.paraview_volume
+                   << " (dt=" << cfg.output.paraview_volume_dt << " s)\n"
+                   << "  Bulk:     " << cfg.output.paraview_bulk
+                   << " (dt=" << cfg.output.paraview_bulk_dt   << " s)\n"
+                   << "  Fault:    " << cfg.output.paraview_fault
+                   << " (dt=" << cfg.output.paraview_fault_dt  << " s)\n";
+         if (cfg.output.paraview_volume_zfp_tol > 0.0)
+         {
+            std::cout << "  Volume ZFP tol: "
+                      << cfg.output.paraview_volume_zfp_tol << "\n";
+         }
+         if (cfg.output.paraview_bulk_zfp_tol > 0.0)
+         {
+            std::cout << "  Bulk   ZFP tol: "
+                      << cfg.output.paraview_bulk_zfp_tol   << "\n";
+         }
+         if (cfg.output.paraview_fault_zfp_tol > 0.0)
+         {
+            std::cout << "  Fault  ZFP tol: "
+                      << cfg.output.paraview_fault_zfp_tol  << "\n";
+         }
+         if (cfg.output.paraview_coseismic_dt > 0.0
+             || cfg.output.paraview_nucleation_dt > 0.0
+             || cfg.output.paraview_interseismic_dt > 0.0)
+         {
+            std::cout << "  Regime-adaptive cadence active.\n";
+         }
+         if (cfg.output.paraview_enabled
+             && !primary_pv_active && !bulk_pv_active)
+         {
+            std::cout << "  WARNING: paraview_enabled = true but every "
+                      << "per-collection mode is 'off' — no ParaView files "
+                      << "will be written.\n";
+         }
+      }
+      else
+      {
+         std::cout << "ParaView output: OFF\n";
+      }
    }
 
    // ParaView GFs are allocated for the time loop only; sized after
@@ -1177,29 +1560,11 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 19. Sub-step iterator (Tpv205 LSW closed form).
-   //     R-601 round-6: enable forced-rupture mode so the per-substep
-   //     mu_eff path routes through LSWFrictionCoefficient_ForcedRupture
-   //     and consumes T_forced_rupture / t0_decay_forced.  Without this
-   //     the iterator would silently run plain LSW even though the wave
-   //     operator's dispatch arm is LSW_ForcedRupture (the substep
-   //     buffer bypasses the dispatch arm on interior fault QPs).
-   //
-   //     R-701 round-7: gate on `use_strength_reduction` (set at step 7
-   //     above) so the iterator runs plain LSW when kind = Overstress.
-   //     ResolveForcedRupture also returns the 1e9 sentinel for non-
-   //     StrengthReduction kinds, so this gate is defence in depth.
+   // 19. Sub-step iterator (TPV205 LSW closed form).  Phase N: only the
+   //     plain LSW path is used in this driver — the forced-rupture
+   //     mode toggle is gone with the dispatch flip above.
    // -----------------------------------------------------------------
    Tpv205SubStepIterator substep_iterator(fault_flux);
-   // DEFERRED: Tpv205SubStepIterator::SetForcedRuptureMode toggle is
-   // NOT YET wired (Phase H.6 follow-up).  Until it lands, the
-   // iterator on interior fault QPs runs plain LSW; the wave
-   // operator's LSW_ForcedRupture dispatch arm still applies on
-   // the R-1600 shared-fault fallback.  ResolveForcedRupture
-   // returns the 1.0e9 sentinel for non-StrengthReduction nucleation
-   // kinds, so the iterator's plain-LSW behaviour is identical to
-   // the forced-rupture path's f_2 == 0 branch in that case.
-   // (void) use_strength_reduction;
    {
       const int O = std::max(1, cfg.numerics.ader_order);
       std::vector<real_t> deltaT(O, dt / static_cast<real_t>(O));
@@ -1207,13 +1572,53 @@ int main(int argc, char *argv[])
       substep_iterator.SetSubSteps(deltaT, weights);
    }
 
-   // ParaView snapshot writer (matches the TPV205 pattern; updates the
-   // 5 BP5 fault projection GFs + writes the volume / bulk / fault
-   // collections).  ForceSave is collective.
+   // Phase N: per-sub-step gradual_overstress accumulator hook.  Closes
+   // over nuc_params + dof_data + cfg; fires inside
+   // Tpv205SubStepIterator::AdvanceWithSubStepStates (callback overload)
+   // BEFORE each sub-step's per-QP friction solve so that the perturbed
+   // tau{1,2}_nuc is visible to s.tau{1,2}_total in the LSW path.
+   auto nuc_cb = [&nuc_params, &dof_data, &cfg]
+                 (real_t t_sub_end, real_t dt_sub)
+   {
+      if (!cfg.nucleation.enabled) { return; }
+      spatial::ApplyGradualOverstressIncrement(
+         dof_data, nuc_params,
+         cfg.nucleation.gradual_overstress.T_nuc_s,
+         t_sub_end, dt_sub);
+   };
+
+   // ParaView snapshot writer (Parity Phases 1-6).  Updates the 5 BP5
+   // fault projection GFs + writes the primary / bulk collections.
+   // Splits writes into "fault collection wants" (primary pv_out) and
+   // "bulk wants" (pv_bulk_out) so each can fire on its own cadence.
    auto paraview_write = [&](int step_num, real_t time, real_t V_max)
    {
-      if (!pv_out) { return; }
-      const bool fault_wants = pv_out->PeekShouldWrite(step_num, time, V_max);
+      const bool fault_wants = pv_out
+                              && pv_out->PeekShouldWrite(step_num, time, V_max);
+      const bool bulk_wants  = pv_bulk_out
+                              && pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
+      if (!fault_wants && !bulk_wants) { return; }
+
+      // Parity Phase 4: publish 6 stress components to pv_bulk_out.
+      if (bulk_wants)
+      {
+         const real_t* Q_data = Q.GetData();
+         std::memcpy(pv_bulk_sxx_gf->GetData(), Q_data + SXX * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syy_gf->GetData(), Q_data + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_szz_gf->GetData(), Q_data + SZZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxy_gf->GetData(), Q_data + SXY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syz_gf->GetData(), Q_data + SYZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_sxz_gf->GetData(), Q_data + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         pv_bulk_out->ForceSave(step_num, time);
+         pv_bulk_out->CommitSchedule(time, V_max);
+      }
+
       if (!fault_wants) { return; }
 
       for (int i = 0; i < num_fault_total; ++i)
@@ -1227,18 +1632,23 @@ int main(int argc, char *argv[])
          pv_local_traction(2 * i + 1)  = d.tau2_corr;
          const real_t delta_norm = std::sqrt(d.slip1 * d.slip1
                                              + d.slip2 * d.slip2);
-         // R-602 round-6: include the TPV26/27 f_2(t) factor so the
-         // diagnostic "state" field reflects the actual mu_eff the
-         // simulation is using.  Plain LSW falls out automatically
-         // when T_forced_rupture >= 1e8 (the helper short-circuits f_2
-         // to 0 at every t < 1e8 s, which is every reachable t).
-         pv_local_state(i) =
-            mfem::seas::spatial::LSWFrictionCoefficient_ForcedRupture(
-               delta_norm,
-               d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c,
-               time, d.T_forced_rupture, d.t0_decay_forced);
+         // Phase N: spatial driver uses plain LSW.
+         pv_local_state(i) = mfem::seas::LSWFrictionCoefficient_TPV205(
+                                delta_norm,
+                                d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
+         (void)time;
          pv_local_normal_stress(i)     = d.sigma_n_corr;
       }
+
+      // Parity Phase 5: refresh the volume velocity field directly from
+      // Q (byNODES so VX/VY/VZ are contiguous 3*ndof block).
+      if (pv_out->GetVolumeSaveEnabled() && pv_vel_gf)
+      {
+         std::memcpy(pv_vel_gf->GetData(),
+                     Q.GetData() + VX * ndof_total,
+                     3 * ndof_total * sizeof(real_t));
+      }
+
       if (pv_out->GetVolumeSaveEnabled())
       {
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
@@ -1275,7 +1685,8 @@ int main(int argc, char *argv[])
 
       AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
                                      fault_coords, Q, dt_step,
-                                     cfg.numerics.ader_order, t, Q_new);
+                                     cfg.numerics.ader_order, t, Q_new,
+                                     nuc_cb);
       Q.Swap(Q_new);
       t += dt_step;
       last_completed_step = step + 1;

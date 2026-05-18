@@ -24,7 +24,8 @@ document must be edited in the same commit.
 [numerics]                     # mandatory
 [time]                         # mandatory
 [output]                       # mandatory
-[nucleation]                   # optional (when absent, no forced rupture)
+[nucleation]                   # optional (when absent, no nucleation perturbation)
+[nucleation.gradual_overstress]       # required when [nucleation].kind = "gradual_overstress"
 [friction.slip_weakening]      # required when [meta].law = "slip_weakening"
 [[friction.slip_weakening.spatial]]   # zero or more
 [friction.rate_state]          # required when [meta].law = "rate_state"
@@ -176,30 +177,73 @@ Time strings accept the `s` suffix (only): `"12s"`, `"0.001s"`,
 
 ---
 
-## `[nucleation]` (D-4, optional)
+## `[nucleation]` (optional)
 
-TPV26/27-style gradual forced rupture.  When the entire block is
-absent, the parser sets `NucleationSpec::enabled = false` and the
-driver runs WITHOUT forced rupture.  When the block is present, the
-parser sets `enabled = true` and the keys below are required.
+Time-domain nucleation perturbation.  When the entire block is absent,
+the parser sets `NucleationSpec::enabled = false` and the driver runs
+without any nucleation perturbation (the rupture is driven entirely by
+the static initial stress field).  When the block is present, the
+parser sets `enabled = true`, validates `kind`, and reads the matching
+sub-block.
 
-| Key                | Unit | Default  | Validation               |
-|--------------------|------|----------|--------------------------|
-| `hypocenter_x_m`   | m    | —        | none                     |
-| `hypocenter_y_m`   | m    | —        | none                     |
-| `hypocenter_z_m`   | m    | —        | typically `< 0` (depth)  |
-| `r_crit_m`         | m    | `4000.0` | `> 0`                    |
-| `t0_decay_s`       | s    | `0.5`    | `> 0`                    |
+| Key    | Type   | Default | Validation                  |
+|--------|--------|---------|-----------------------------|
+| `kind` | string | —       | `"gradual_overstress"` (only supported kind) |
 
-The per-DOF time-of-forced-rupture `T(r)` is computed in Phase 1
-`ResolveForcedRupture` from the local shear-wave speed `Vs(r)` per
-TPV26/27 §Part 5 (variable-speed rupture front):
+### `[nucleation.gradual_overstress]` (required when `kind = "gradual_overstress"`)
+
+Per-DOF shear-stress perturbation that ramps smoothly from 0 to the
+full amplitude `Δτ · F(r)` over the interval `[0, T_nuc_s]`, where:
+
+- `F(r)` is a Gaussian spatial factor centred on `(center_x_m,
+  center_y_m, center_z_m)` with e-fold radii `radius_dip_m` (down-dip
+  direction) and `radius_strike_m` (along-strike direction);
+- the temporal ramp is the SCEC smoothStep function
+  `exp(τ²/(t·(t − 2·T_nuc_s)))` on `(0, T_nuc_s)`, 0 below, 1 above —
+  `C∞` everywhere except at `t = 0`.  `T_nuc_s` plays both roles of
+  "ramp duration" and smoothStep `t0` parameter (R-007);
+- per sub-step the resolver writes the increment
+  `ΔS(t, Δt) · F(r) · Δτ` into `DOFData[i].tau1_nuc` (dip component)
+  and `DOFData[i].tau2_nuc` (strike component), so that summed over
+  `[0, T_nuc_s]` the accumulated perturbation telescopes to the full
+  `Δτ · F(r)`.
+
+| Key                   | Unit | Default | Validation                                |
+|-----------------------|------|---------|-------------------------------------------|
+| `center_x_m`          | m    | —       | required; in mesh bbox                    |
+| `center_y_m`          | m    | —       | required; in mesh bbox                    |
+| `center_z_m`          | m    | —       | required; typically `< 0` (depth)         |
+| `radius_dip_m`        | m    | —       | required; `> 0`; recommended `≥ 3 · h_min`|
+| `radius_strike_m`     | m    | —       | required; `> 0`; recommended `≥ 3 · h_min`|
+| `delta_tau_dip_pa`    | Pa   | `0.0`   | none                                      |
+| `delta_tau_strike_pa` | Pa   | `0.0`   | none                                      |
+| `T_nuc_s`             | s    | —       | required; `> 0`; recommended `≤ tfinal/10`.  Plays both roles of "ramp duration" and smoothStep `t0` parameter (the redundant `t0_smooth_s` field was dropped per PLAN_first_safs_run R-007). |
+
+The Gaussian spatial factor is
 
 ```
-T(r) = r / (0.7 Vs) + 0.081 r_crit / (0.7 Vs) * (1 / (1 - (r/r_crit)^2) - 1)
-                                                     for r < r_crit
-T(r) = 1.0e9                                          for r >= r_crit
+F(r) = exp( - ((dx/radius_dip_m)^2 + (ds/radius_strike_m)^2) )
 ```
+
+where `dx` and `ds` are the DOF-to-centre offsets resolved in the
+fault-local dip and strike directions (using each DOF's local
+`FaultBasis`).  At `r = 0`, `F = 1`; outside ~`3 · radius_*`, `F` is
+numerically zero and the accumulator is a no-op on those DOFs.
+
+The per-sub-step smoothStep increment is
+
+```
+ΔS(t, Δt) = smoothStep(t, t₀_smooth) − smoothStep(t − Δt, t₀_smooth)
+```
+
+with `smoothStep(t, t₀) = 0` for `t ≤ 0`, `exp(τ²/(t·(t − 2·t₀)))`
+for `0 < t < t₀`, and `1` for `t ≥ t₀` (where `τ = t − t₀`).  At any
+`t ≥ T_nuc_s` the perturbation has telescoped to its full value
+`F(r) · |Δτ|` and the accumulator is a no-op for the rest of the run.
+
+Rate-and-state runs (`law = "rate_state"`) ignore the `[nucleation]`
+block entirely — nucleation in the rate-state path is achieved via
+the `V_init` field, not via a stress accumulator.
 
 ---
 
@@ -235,9 +279,10 @@ Per-key overrides (NaN sentinel = "do not override"):
 
 - `mu_s`, `mu_d`, `d_c` (alias `d_o`), `cohesion`
 
-**Rev-3 D-4 removes** the `nucleation_box` kind that existed in rev-1
-and rev-2.  Nucleation is now entirely time-domain (`[nucleation]`
-block); spatial rules NEVER override `tau_pre_*` or `sigma_n`.
+Nucleation is entirely time-domain (`[nucleation]` block, kind =
+`gradual_overstress`); friction spatial rules NEVER override
+`tau_pre_*` or `sigma_n`.  (The `nucleation_box` kind that existed in
+rev-1 and rev-2 was removed in rev-3.)
 
 **Barrier (R-114):** `kind = "barrier"` locks the DOF.  The resolver
 internally sets `mu_s = 1.0e6` (the existing `fault_face_flux.hpp`
@@ -268,8 +313,8 @@ Per-key overrides (NaN sentinel = "do not override"):
 - `a`, `b`, `Dc`, `V_init`, `f_0`, `V_0`, `eta`, `sigma_n`
 
 Rate-and-state nucleation is achieved through the `V_init` field, NOT
-through `[nucleation]` (the `[nucleation]` block is for LSW forced
-rupture only and is ignored when `law = "rate_state"`).
+through `[nucleation]` (the `[nucleation]` block is for LSW
+`gradual_overstress` only and is ignored when `law = "rate_state"`).
 
 ---
 
@@ -309,8 +354,11 @@ rupture only and is ignored when `law = "rate_state"`).
     `hdf5`/`vtu`/`off`; ZFP tolerances `>= 0`; `max_snapshots >= 1`;
     `checkpoint_every_steps >= 1`.
 13. **Nucleation:** when the `[nucleation]` block is present,
-    `r_crit_m > 0` and `t0_decay_s > 0`.  When absent,
-    `NucleationSpec::enabled = false`.
+    `kind = "gradual_overstress"` (the only supported kind) AND the
+    `[nucleation.gradual_overstress]` sub-block is populated with
+    `center_*_m`, `radius_*_m > 0`, and `T_nuc_s > 0`.  When absent,
+    `NucleationSpec::enabled = false` and the driver runs without any
+    nucleation perturbation.
 
 ---
 
@@ -321,7 +369,8 @@ Three `EXAMPLE_*.toml` files are committed under
 
 1. `EXAMPLE_spatial_friction_slip_weakening_safs.toml` — LSW with
    `geoffrey2010.md` defaults (`mu_s=1.1, mu_d=0.5, d_c=0.5`), the
-   `[nucleation]` block populated, and a single barrier rule.
+   `[nucleation]` block populated with `kind = "gradual_overstress"`,
+   and a single barrier rule.
 2. `EXAMPLE_spatial_friction_rate_state_safs.toml` — rate-and-state
    (Aging law) with BP5-style scalars + a single VW box rule.
 3. `EXAMPLE_spatial_stress_constant_tensor_safs.toml` — minimum-viable

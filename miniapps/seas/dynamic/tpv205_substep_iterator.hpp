@@ -33,6 +33,7 @@
 #include "fault_face_flux.hpp"
 #include "wave_state.hpp"
 
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -108,6 +109,30 @@ public:
       real_t t_macro_start,
       real_t *I_imp_plus_flat,
       real_t *I_imp_minus_flat);
+
+   /// @brief Phase N callback-aware overload of `AdvanceWithSubStepStates`.
+   ///
+   /// `nuc_callback(t_substep_end, dt_substep)` is invoked ONCE per
+   /// ADER sub-step BEFORE the per-QP friction pipeline (mirrors the
+   /// internal call to `ApplyNucleationIncremental_TPV104` at
+   /// `tpv104_substep_iterator.cpp:295`).  The callback MUST mutate
+   /// ONLY `DOFData::tau1_nuc / tau2_nuc / sigma_n_nuc` channels.
+   /// Callers may pass `[](real_t, real_t){}` to opt out (no-op).
+   ///
+   /// Bit-equivalent to the no-callback overload when `nuc_callback`
+   /// is a no-op lambda; the no-callback overload now routes through
+   /// this method with a no-op callback (R-N-005 — keeps the original
+   /// API working byte-for-byte while exposing the new hook).
+   void AdvanceWithSubStepStates(
+      std::vector<DOFData> &dof_data,
+      const std::vector<Vector> &fault_coords,
+      const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+      const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+      real_t dt_macro,
+      real_t t_macro_start,
+      real_t *I_imp_plus_flat,
+      real_t *I_imp_minus_flat,
+      const std::function<void(real_t, real_t)> &nuc_callback);
 
    /// Accessors for the configured quadrature (test hook).
    const std::vector<real_t> &GetDeltaT() const { return deltaT_; }

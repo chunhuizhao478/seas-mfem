@@ -652,8 +652,11 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const auto& o = root.at("output");
       cfg.output.output_dir              = toml_str (o, "output_dir",              std::string());
       cfg.output.restart_prefix          = toml_str (o, "restart_prefix",          "cp");
-      cfg.output.paraview_volume         = toml_str (o, "paraview_volume",         "hdf5");
-      cfg.output.paraview_bulk           = toml_str (o, "paraview_bulk",           "hdf5");
+      // Parity Phase 2: default-flip to "off" for volume + bulk;
+      // fault stays "hdf5" for backwards compatibility with existing
+      // SAFS workflows that depend on fault output.
+      cfg.output.paraview_volume         = toml_str (o, "paraview_volume",         "off");
+      cfg.output.paraview_bulk           = toml_str (o, "paraview_bulk",           "off");
       cfg.output.paraview_fault          = toml_str (o, "paraview_fault",          "hdf5");
       cfg.output.paraview_volume_dt      = toml_time_seconds(o, "paraview_volume_dt", 0.05);
       cfg.output.paraview_bulk_dt        = toml_time_seconds(o, "paraview_bulk_dt",   0.05);
@@ -663,6 +666,18 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.output.paraview_fault_zfp_tol  = toml_real(o, "paraview_fault_zfp_tol",  1e-12);
       cfg.output.max_snapshots           = toml_int (o, "max_snapshots",           5000);
       cfg.output.checkpoint_every_steps  = toml_int (o, "checkpoint_every_steps",  10000);
+
+      // Parity Phase 2: 9 new fields (master gate + every-step + legacy
+      // ASCII + per-collection deflate levels + regime-adaptive cadences).
+      cfg.output.paraview_enabled              = toml_bool(o, "paraview_enabled",              false);
+      cfg.output.paraview_every_steps          = toml_int (o, "paraview_every_steps",          0);
+      cfg.output.paraview_fault_legacy_ascii   = toml_bool(o, "paraview_fault_legacy_ascii",   false);
+      cfg.output.paraview_volume_deflate_level = toml_int (o, "paraview_volume_deflate_level", -1);
+      cfg.output.paraview_bulk_deflate_level   = toml_int (o, "paraview_bulk_deflate_level",   -1);
+      cfg.output.paraview_fault_deflate_level  = toml_int (o, "paraview_fault_deflate_level",  -1);
+      cfg.output.paraview_coseismic_dt         = toml_time_seconds(o, "paraview_coseismic_dt",    -1.0);
+      cfg.output.paraview_nucleation_dt        = toml_time_seconds(o, "paraview_nucleation_dt",   -1.0);
+      cfg.output.paraview_interseismic_dt      = toml_time_seconds(o, "paraview_interseismic_dt", -1.0);
    }
    MFEM_VERIFY(!cfg.output.output_dir.empty(),
                "[output].output_dir must be non-empty");
@@ -696,59 +711,72 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                "[output].max_snapshots must be >= 1");
    MFEM_VERIFY(cfg.output.checkpoint_every_steps >= 1,
                "[output].checkpoint_every_steps must be >= 1");
+   // Parity Phase 2 validators.
+   MFEM_VERIFY(cfg.output.paraview_every_steps >= 0,
+               "[output].paraview_every_steps must be >= 0; got "
+               << cfg.output.paraview_every_steps);
+   for (const auto& kv : {
+        std::pair<std::string, int>{"paraview_volume_deflate_level",
+                                    cfg.output.paraview_volume_deflate_level},
+        std::pair<std::string, int>{"paraview_bulk_deflate_level",
+                                    cfg.output.paraview_bulk_deflate_level},
+        std::pair<std::string, int>{"paraview_fault_deflate_level",
+                                    cfg.output.paraview_fault_deflate_level}})
+   {
+      MFEM_VERIFY(kv.second == -1 || (kv.second >= 0 && kv.second <= 9),
+                  "[output]." << kv.first
+                  << " must be -1 (none) or in [0..9]; got " << kv.second);
+   }
+   for (const auto& kv : {
+        std::pair<std::string, real_t>{"paraview_coseismic_dt",
+                                       cfg.output.paraview_coseismic_dt},
+        std::pair<std::string, real_t>{"paraview_nucleation_dt",
+                                       cfg.output.paraview_nucleation_dt},
+        std::pair<std::string, real_t>{"paraview_interseismic_dt",
+                                       cfg.output.paraview_interseismic_dt}})
+   {
+      MFEM_VERIFY(kv.second < 0.0 || kv.second > 0.0,
+                  "[output]." << kv.first
+                  << " must be unset (negative) or > 0; got " << kv.second);
+   }
 
    if (root.contains("nucleation"))
    {
       const auto& nuc = root.at("nucleation");
-      cfg.nucleation.enabled        = true;
-      cfg.nucleation.hypocenter_x_m = toml_real(nuc, "hypocenter_x_m", 0.0);
-      cfg.nucleation.hypocenter_y_m = toml_real(nuc, "hypocenter_y_m", 0.0);
-      cfg.nucleation.hypocenter_z_m = toml_real(nuc, "hypocenter_z_m", 0.0);
-      cfg.nucleation.r_crit_m       = toml_real(nuc, "r_crit_m",       4000.0);
-      cfg.nucleation.t0_decay_s     = toml_real(nuc, "t0_decay_s",     0.5);
-      MFEM_VERIFY(cfg.nucleation.r_crit_m   > 0.0,
-                  "[nucleation].r_crit_m must be > 0");
-      MFEM_VERIFY(cfg.nucleation.t0_decay_s > 0.0,
-                  "[nucleation].t0_decay_s must be > 0");
+      cfg.nucleation.enabled = true;
 
-      // Round-6: optional `kind` switch — default "strength_reduction"
-      // preserves round-1..5 behaviour byte-equivalently.
-      const std::string kind_s =
-         toml_str(nuc, "kind", "strength_reduction");
-      if (kind_s == "strength_reduction")
-      {
-         cfg.nucleation.kind = NucleationKind::StrengthReduction;
-      }
-      else if (kind_s == "overstress")
-      {
-         cfg.nucleation.kind = NucleationKind::Overstress;
-      }
-      else
-      {
-         MFEM_ABORT("[nucleation].kind must be \"strength_reduction\" or "
-                    "\"overstress\"; got '" << kind_s << "'");
-      }
+      const std::string kind_s = toml_str(nuc, "kind", "");
+      MFEM_VERIFY(kind_s == "gradual_overstress",
+                  "[nucleation].kind must be \"gradual_overstress\" "
+                  "(the only supported kind in this driver); got '"
+                  << kind_s << "'");
+      cfg.nucleation.kind = NucleationKind::GradualOverstress;
 
-      // Optional [nucleation.overstress] sub-block.  Stub fields; the
-      // resolver currently aborts on NucleationKind::Overstress (see
-      // ResolveOverstress).
-      if (nuc.contains("overstress"))
-      {
-         const auto& os = nuc.at("overstress");
-         cfg.nucleation.overstress.delta_tau_pa =
-            toml_real(os, "delta_tau_pa", 0.0);
-         cfg.nucleation.overstress.direction =
-            toml_int(os, "direction", 1);
-         cfg.nucleation.overstress.delta_sigma_n_pa =
-            toml_real(os, "delta_sigma_n_pa", 0.0);
-         MFEM_VERIFY(cfg.nucleation.overstress.direction == 0
-                     || cfg.nucleation.overstress.direction == 1,
-                     "[nucleation.overstress].direction must be 0 (dip) "
-                     "or 1 (strike); got "
-                     << cfg.nucleation.overstress.direction);
-      }
+      MFEM_VERIFY(nuc.contains("gradual_overstress"),
+                  "[nucleation] kind=\"gradual_overstress\" requires a "
+                  "[nucleation.gradual_overstress] sub-block");
+      const auto& g = nuc.at("gradual_overstress");
+      auto& gs = cfg.nucleation.gradual_overstress;
+      gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
+      gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
+      gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
+      gs.radius_dip_m        = toml_real(g, "radius_dip_m",        0.0);
+      gs.radius_strike_m     = toml_real(g, "radius_strike_m",     0.0);
+      gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
+      gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
+      gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
+
+      MFEM_VERIFY(gs.radius_dip_m    > 0.0,
+                  "[nucleation.gradual_overstress].radius_dip_m must be > 0; "
+                  "got " << gs.radius_dip_m);
+      MFEM_VERIFY(gs.radius_strike_m > 0.0,
+                  "[nucleation.gradual_overstress].radius_strike_m must be > 0; "
+                  "got " << gs.radius_strike_m);
+      MFEM_VERIFY(gs.T_nuc_s         > 0.0,
+                  "[nucleation.gradual_overstress].T_nuc_s must be > 0; "
+                  "got " << gs.T_nuc_s);
    }
-   // else: enabled stays false; driver runs without nucleation.
+   // else: enabled stays false; driver runs without nucleation perturbation.
 
    // Friction-law-specific block.  Both-or-neither rule (Validator §3).
    const bool has_lsw = root.contains("friction")
@@ -1079,167 +1107,6 @@ RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
    return resolve_rs_impl<mfem::Mesh>(cfg, dof_coords_3d, dof_to_elem,
                                       dof_to_attr, material, mesh, pp,
                                       sigma_n_total_per_dof);
-}
-
-namespace
-{
-
-template <typename MeshT>
-ForcedRupturePerDOFParams resolve_forced_impl(
-   const NucleationSpec&     nuc,
-   const Vector&             dof_coords_3d,
-   const Array<int>&         dof_to_elem,
-   const MaterialField&      material,
-   MeshT&                    mesh)
-{
-   const int N = dof_coords_3d.Size() / 3;
-   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
-               "ResolveForcedRupture: dof_coords_3d.Size() must be 3 * N");
-
-   ForcedRupturePerDOFParams p;
-   p.T_forced_s.SetSize(N);
-   p.t0_decay_s.SetSize(N);
-
-   if (!nuc.enabled
-       || nuc.kind != NucleationKind::StrengthReduction)
-   {
-      // TPV205 byte-exact default: T = 1e9, t_0 = 0.
-      // Also returned for non-StrengthReduction kinds (Overstress)
-      // so the iterator's forced-rupture mu_eff path is a no-op in
-      // those modes — the overstress perturbation lives in
-      // DOFData::tau{1,2}_nuc / sigma_n_nuc and is consumed by plain
-      // LSW (the driver dispatches FaultFrictionLaw::LSW for
-      // kind=Overstress).  R-701 round-7.
-      p.T_forced_s = 1.0e9;
-      p.t0_decay_s = 0.0;
-      return p;
-   }
-
-   MFEM_VERIFY(dof_to_elem.Size() == N,
-               "ResolveForcedRupture: dof_to_elem.Size() != N");
-   MFEM_VERIFY(nuc.r_crit_m  > 0.0,
-               "ResolveForcedRupture: nuc.r_crit_m must be > 0");
-   MFEM_VERIFY(nuc.t0_decay_s > 0.0,
-               "ResolveForcedRupture: nuc.t0_decay_s must be > 0");
-
-   for (int i = 0; i < N; ++i)
-   {
-      const real_t dx = dof_coords_3d(3*i + 0) - nuc.hypocenter_x_m;
-      const real_t dy = dof_coords_3d(3*i + 1) - nuc.hypocenter_y_m;
-      const real_t dz = dof_coords_3d(3*i + 2) - nuc.hypocenter_z_m;
-      const real_t r  = std::sqrt(dx*dx + dy*dy + dz*dz);
-
-      if (r >= nuc.r_crit_m)
-      {
-         p.T_forced_s(i) = 1.0e9;
-         p.t0_decay_s(i) = nuc.t0_decay_s;
-         continue;
-      }
-
-      // Local Vs at the DOF's bulk element.
-      const int e = dof_to_elem[i];
-      ElementTransformation* T = mesh.GetElementTransformation(e);
-      // True reference centroid for the bulk element.  ip.Init(0)
-      // would land on the reference origin (a CORNER), which biases
-      // Vs by the heterogeneity scale of one element when MaterialField
-      // is in Mode::Coefficient.  The centroid is the best per-element
-      // stop-gap until Phase 5 wires FaultGeometry::fault_dof_ip(i)
-      // (R-111).
-      const Geometry::Type gtype = mesh.GetElementBaseGeometry(e);
-      const IntegrationPoint& ip = Geometries.GetCenter(gtype);
-      real_t lam_e, mu_e, rho_e;
-      material.EvalAt(e, *T, ip, lam_e, mu_e, rho_e);
-      MFEM_VERIFY(mu_e > 0.0 && rho_e > 0.0,
-                  "ResolveForcedRupture: mu > 0 and rho > 0 required "
-                  "to compute Vs at DOF " << i << " (got mu=" << mu_e
-                  << ", rho=" << rho_e << ")");
-      const real_t Vs = std::sqrt(mu_e / rho_e);
-      MFEM_VERIFY(Vs > 0.0,
-                  "ResolveForcedRupture: Vs <= 0 at DOF " << i);
-
-      const real_t r_over_rc = r / nuc.r_crit_m;
-      const real_t denom = 1.0 - r_over_rc * r_over_rc;
-      MFEM_VERIFY(denom > 0.0,
-                  "ResolveForcedRupture: 1 - (r/r_crit)^2 <= 0 at DOF "
-                  << i << " (r=" << r << ", r_crit="
-                  << nuc.r_crit_m << ")");
-      p.T_forced_s(i) = r / (0.7 * Vs)
-                        + 0.081 * nuc.r_crit_m / (0.7 * Vs)
-                          * (1.0 / denom - 1.0);
-      p.t0_decay_s(i) = nuc.t0_decay_s;
-   }
-   return p;
-}
-
-}  // namespace
-
-ForcedRupturePerDOFParams SpatialFrictionResolver::ResolveForcedRupture(
-   const NucleationSpec&     nuc,
-   const Vector&             dof_coords_3d,
-   const Array<int>&         dof_to_elem,
-   const MaterialField&      material,
-   ParMesh&                  pmesh) const
-{
-   return resolve_forced_impl<ParMesh>(nuc, dof_coords_3d, dof_to_elem,
-                                       material, pmesh);
-}
-
-ForcedRupturePerDOFParams SpatialFrictionResolver::ResolveForcedRupture(
-   const NucleationSpec&     nuc,
-   const Vector&             dof_coords_3d,
-   const Array<int>&         dof_to_elem,
-   const MaterialField&      material,
-   mfem::Mesh&               mesh) const
-{
-   return resolve_forced_impl<mfem::Mesh>(nuc, dof_coords_3d, dof_to_elem,
-                                          material, mesh);
-}
-
-// =====================================================================
-//  Round-6 — overstress-mode nucleation (STUB)
-// =====================================================================
-//
-// Sibling to ResolveForcedRupture.  When the overstress physics is
-// dialled in, this resolver will compute per-DOF Δτ_{dip,strike} and
-// optional Δσ_n perturbations inside the nucleation zone — to be
-// applied ONCE at init via InitializeFaultDOFs_Spatial's overstress
-// path (also a stub).
-//
-// Currently this method aborts when invoked with
-// `NucleationKind::Overstress` so a SAFS run that picks the overstress
-// kind fails LOUD instead of silently running with zero perturbation.
-// `NucleationKind::StrengthReduction` and `nuc.enabled == false`
-// return empty vectors — the driver treats this as "no overstress
-// component" (the strength-reduction path is handled by
-// ResolveForcedRupture instead).
-OverstressPerDOFParams SpatialFrictionResolver::ResolveOverstress(
-   const NucleationSpec&     nuc,
-   const Vector&             dof_coords_3d) const
-{
-   OverstressPerDOFParams p;   // zero-sized by default
-   if (!nuc.enabled
-       || nuc.kind == NucleationKind::StrengthReduction)
-   {
-      return p;
-   }
-
-   // nuc.kind == NucleationKind::Overstress.
-   const int N = dof_coords_3d.Size() / 3;
-   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
-               "ResolveOverstress: dof_coords_3d.Size() must be 3 * N");
-   MFEM_VERIFY(nuc.r_crit_m > 0.0,
-               "ResolveOverstress: nuc.r_crit_m must be > 0");
-
-   MFEM_ABORT("ResolveOverstress: overstress-mode nucleation is not yet "
-              "implemented.  The structural surface (NucleationKind, "
-              "OverstressSpec, OverstressPerDOFParams) is in place so "
-              "the resolver, driver, and tests can be wired up; the "
-              "actual Δτ / Δσ_n computation lands in a follow-up "
-              "commit.  Until then, set [nucleation].kind = "
-              "\"strength_reduction\" (the default).");
-
-   // Unreachable; placeholder to satisfy the return type.
-   return p;
 }
 
 }  // namespace spatial

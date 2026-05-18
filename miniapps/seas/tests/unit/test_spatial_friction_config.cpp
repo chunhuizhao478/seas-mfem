@@ -486,56 +486,165 @@ static void T_20_stress_kind_missing_aborts()
                "[stress] without 'kind' must abort");
 }
 
-// T-21  R-703 round-7 regression: [nucleation] without `kind` defaults
-//       to NucleationKind::StrengthReduction (round-1..5 behaviour).
-static void T_21_nucleation_kind_default_strength_reduction()
+// T-21  Phase N: the single nucleation kind is "gradual_overstress";
+//       absent-kind, "strength_reduction", and "overstress" all abort
+//       cleanly (validator rejects anything but the one supported kind).
+static void T_21_nucleation_kind_must_be_gradual_overstress()
 {
-   std::cout << "\n[T-21] [nucleation] default kind = StrengthReduction "
-                "(R-703)\n";
+   std::cout << "\n[T-21] [nucleation] kind must be gradual_overstress "
+                "(Phase N)\n";
+   // Absent `kind` (the round-7 default of "strength_reduction") aborts.
+   {
+      std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+      toml += "[nucleation]\n"
+              "[nucleation.gradual_overstress]\n"
+              "center_x_m=0\ncenter_y_m=0\ncenter_z_m=0\n"
+              "radius_dip_m=3000\nradius_strike_m=3000\n"
+              "delta_tau_dip_pa=0\ndelta_tau_strike_pa=25e6\n"
+              "T_nuc_s=\"1.0s\"\n";
+      TEST_ASSERT(ParseAbortsInChild(toml),
+                  "[nucleation] without `kind` aborts (no implicit default)");
+   }
+   // Old "strength_reduction" alias is no longer accepted.
+   {
+      std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+      toml += "[nucleation]\n"
+              "kind=\"strength_reduction\"\n";
+      TEST_ASSERT(ParseAbortsInChild(toml),
+                  "kind=\"strength_reduction\" aborts (Phase N removal)");
+   }
+}
+
+// T-22  Phase N: a minimal valid `[nucleation]` block with
+//       kind=\"gradual_overstress\" parses round-trip into the new
+//       GradualOverstressSpec fields.
+static void T_22_nucleation_kind_gradual_overstress_parses()
+{
+   std::cout << "\n[T-22] [nucleation].kind = gradual_overstress parses "
+                "(Phase N)\n";
    std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
    toml += "[nucleation]\n"
-           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
-           "r_crit_m=4000\nt0_decay_s=0.5\n";
+           "kind=\"gradual_overstress\"\n"
+           "[nucleation.gradual_overstress]\n"
+           "center_x_m=10.0\ncenter_y_m=20.0\ncenter_z_m=-30.0\n"
+           "radius_dip_m=1500.0\nradius_strike_m=2500.0\n"
+           "delta_tau_dip_pa=1.0e6\ndelta_tau_strike_pa=2.0e6\n"
+           "T_nuc_s=\"1.0s\"\n";
    const auto cfg = ParseSpatialFrictionConfigString(toml);
    TEST_ASSERT(cfg.nucleation.enabled,
                "[nucleation] block sets enabled = true");
-   TEST_ASSERT(cfg.nucleation.kind == NucleationKind::StrengthReduction,
-               "[nucleation] without `kind` defaults to StrengthReduction");
+   TEST_ASSERT(cfg.nucleation.kind == NucleationKind::GradualOverstress,
+               "kind round-trips to GradualOverstress");
+   const auto& g = cfg.nucleation.gradual_overstress;
+   TEST_ASSERT(g.center_x_m           ==   10.0, "center_x_m parses");
+   TEST_ASSERT(g.center_y_m           ==   20.0, "center_y_m parses");
+   TEST_ASSERT(g.center_z_m           ==  -30.0, "center_z_m parses");
+   TEST_ASSERT(g.radius_dip_m         == 1500.0, "radius_dip_m parses");
+   TEST_ASSERT(g.radius_strike_m      == 2500.0, "radius_strike_m parses");
+   TEST_ASSERT(g.delta_tau_dip_pa     ==  1.0e6, "delta_tau_dip_pa parses");
+   TEST_ASSERT(g.delta_tau_strike_pa  ==  2.0e6, "delta_tau_strike_pa parses");
+   TEST_ASSERT(g.T_nuc_s              ==    1.0, "T_nuc_s parses");
 }
 
-// T-22  R-703 round-7: kind = "overstress" round-trips into the enum
-//       and the optional [nucleation.overstress] sub-block parses.
-static void T_22_nucleation_kind_overstress_parses()
-{
-   std::cout << "\n[T-22] [nucleation].kind = \"overstress\" round-trips "
-                "(R-703)\n";
-   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
-   toml += "[nucleation]\n"
-           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
-           "r_crit_m=4000\nt0_decay_s=0.5\n"
-           "kind=\"overstress\"\n"
-           "[nucleation.overstress]\n"
-           "delta_tau_pa=1.0e6\ndirection=1\ndelta_sigma_n_pa=0\n";
-   const auto cfg = ParseSpatialFrictionConfigString(toml);
-   TEST_ASSERT(cfg.nucleation.kind == NucleationKind::Overstress,
-               "[nucleation].kind=\"overstress\" round-trips");
-   TEST_ASSERT(cfg.nucleation.overstress.delta_tau_pa == 1.0e6,
-               "delta_tau_pa parses");
-   TEST_ASSERT(cfg.nucleation.overstress.direction == 1,
-               "direction parses");
-}
-
-// T-23  R-703 round-7: typo'd kind aborts cleanly (no silent default).
+// T-23  Phase N: typo'd kind aborts cleanly.
 static void T_23_nucleation_kind_typo_aborts()
 {
-   std::cout << "\n[T-23] [nucleation].kind typo aborts (R-703)\n";
+   std::cout << "\n[T-23] [nucleation].kind typo aborts (Phase N)\n";
    std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
    toml += "[nucleation]\n"
-           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
-           "r_crit_m=4000\nt0_decay_s=0.5\n"
-           "kind=\"strenght_reduction\"\n";   // intentional typo
+           "kind=\"gradual_overstres\"\n"   // intentional typo
+           "[nucleation.gradual_overstress]\n"
+           "radius_dip_m=3000\nradius_strike_m=3000\nT_nuc_s=\"1.0s\"\n";
    TEST_ASSERT(ParseAbortsInChild(toml),
-               "[nucleation].kind = \"strenght_reduction\" (typo) must abort");
+               "[nucleation].kind = typo must abort");
+}
+
+// T-24  R-001 PARSER-LAYER coverage — verifies the Parity-Phase-2
+//       default flip (paraview_volume / paraview_bulk default to
+//       "off"; paraview_fault stays "hdf5"; paraview_enabled defaults
+//       to false).  Does NOT exercise the driver's master-gate logic
+//       at drivers/spatial_dyn_driver.cpp:1232-1237 — that lives in
+//       the C++ driver and is covered end-to-end by the smoke sbatch
+//       jobs/safs/spatial_dyn_smoke_8N_400r_dev_2hr_safs.sbatch
+//       (which asserts no PV files appear when paraview_enabled
+//       stays false).  R-004 round-3: closing this coverage gap with
+//       a free-function extraction is documented as a follow-up.
+static void T_24_paraview_default_flip()
+{
+   std::cout << "\n[T-24] R-001: Parity Phase 2 default flip (volume/bulk = "
+                "\"off\", fault stays \"hdf5\")\n";
+   // Build a TOML with NO paraview_* keys (deliberately stripping the
+   // explicit `paraview_volume = "hdf5"` from MinimalLSWHeader).
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\n"
+       << "lambda=32.0e9\nmu=32.0e9\nrho=2670.0\n"
+       << "[pore_pressure]\nP_p_pa=0.0\nP_p_grad_pa_per_m=0.0\nmin_sigma_n_pa=0.0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0.0\nsigma_yy_pa=0.0\nsigma_zz_pa=0.0\n"
+       << "sigma_xy_pa=0.0\nsigma_yz_pa=0.0\nsigma_xz_pa=0.0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\nuse_pml=false\n"
+       << "[time]\ntfinal=\"12s\"\nt_initial=0.0\ndt_initial=\"auto\"\ndt_max=\"0.1s\"\n"
+       << "[output]\noutput_dir=\"out\"\nrestart_prefix=\"cp\"\n"
+       // NO paraview_volume, paraview_bulk, paraview_fault keys —
+       // exercise the parser defaults.
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\n"
+       << "cohesion_default=0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(oss.str());
+   TEST_ASSERT(cfg.output.paraview_volume == "off",
+               "Parity-Phase-2 default paraview_volume = \"off\"");
+   TEST_ASSERT(cfg.output.paraview_bulk == "off",
+               "Parity-Phase-2 default paraview_bulk = \"off\"");
+   TEST_ASSERT(cfg.output.paraview_fault == "hdf5",
+               "paraview_fault default stays \"hdf5\" (documented)");
+   TEST_ASSERT(cfg.output.paraview_enabled == false,
+               "paraview_enabled default = false (master gate off)");
+}
+
+// T-25  PARSER-LAYER coverage of the Parity-Phase-2 OutputSpec
+//       extension: the 9 new fields (paraview_every_steps,
+//       paraview_fault_legacy_ascii, the three deflate levels, the
+//       three regime-adaptive cadences) parse to their documented
+//       defaults when omitted from the TOML.  As with T-24, this does
+//       NOT exercise the driver's master-gate logic.
+static void T_25_paraview_extended_defaults()
+{
+   std::cout << "\n[T-25] R-001: extended OutputSpec defaults round-trip\n";
+   // Same minimal TOML as T-24.
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\nP_p_grad_pa_per_m=0\nmin_sigma_n_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\nuse_pml=false\n"
+       << "[time]\ntfinal=\"12s\"\nt_initial=0\ndt_initial=\"auto\"\ndt_max=\"0.1s\"\n"
+       << "[output]\noutput_dir=\"out\"\nrestart_prefix=\"cp\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\ncohesion_default=0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(oss.str());
+   TEST_ASSERT(cfg.output.paraview_every_steps == 0,
+               "paraview_every_steps default 0");
+   TEST_ASSERT(cfg.output.paraview_fault_legacy_ascii == false,
+               "paraview_fault_legacy_ascii default false");
+   TEST_ASSERT(cfg.output.paraview_volume_deflate_level == -1,
+               "paraview_volume_deflate_level default -1");
+   TEST_ASSERT(cfg.output.paraview_bulk_deflate_level   == -1,
+               "paraview_bulk_deflate_level default -1");
+   TEST_ASSERT(cfg.output.paraview_fault_deflate_level  == -1,
+               "paraview_fault_deflate_level default -1");
+   TEST_ASSERT(cfg.output.paraview_coseismic_dt    < 0.0,
+               "paraview_coseismic_dt default unset (< 0)");
+   TEST_ASSERT(cfg.output.paraview_nucleation_dt   < 0.0,
+               "paraview_nucleation_dt default unset (< 0)");
+   TEST_ASSERT(cfg.output.paraview_interseismic_dt < 0.0,
+               "paraview_interseismic_dt default unset (< 0)");
 }
 
 // T-12 material fallback bounds
@@ -610,9 +719,11 @@ int main(int, char**)
    T_18_dt_initial_literal_negative_aborts();
    T_19_paraview_fault_dt_zero_aborts();
    T_20_stress_kind_missing_aborts();
-   T_21_nucleation_kind_default_strength_reduction();
-   T_22_nucleation_kind_overstress_parses();
+   T_21_nucleation_kind_must_be_gradual_overstress();
+   T_22_nucleation_kind_gradual_overstress_parses();
    T_23_nucleation_kind_typo_aborts();
+   T_24_paraview_default_flip();
+   T_25_paraview_extended_defaults();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

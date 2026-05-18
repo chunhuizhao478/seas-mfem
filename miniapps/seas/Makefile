@@ -130,6 +130,17 @@ SPATIAL_VELOCITY_SRC                 = spatial/code/spatial_velocity.cpp
 SPATIAL_VELOCITY_OBJ                 = $(SPATIAL_VELOCITY_SRC:.cpp=.o)
 SPATIAL_STRESS_SRC                   = spatial/code/spatial_stress.cpp
 SPATIAL_STRESS_OBJ                   = $(SPATIAL_STRESS_SRC:.cpp=.o)
+# Phase N of safs/.../05_18_2026/PLAN_first_safs_run.md — gradual_overstress
+# nucleation resolver + per-sub-step accumulator.
+SPATIAL_NUCLEATION_SRC               = dynamic/spatial_nucleation.cpp
+SPATIAL_NUCLEATION_OBJ               = $(SPATIAL_NUCLEATION_SRC:.cpp=.o)
+TEST_SPATIAL_NUCLEATION_SRC          = tests/unit/test_spatial_nucleation.cpp
+TEST_SPATIAL_NUCLEATION_OBJ          = $(TEST_SPATIAL_NUCLEATION_SRC:.cpp=.o)
+# Phase D of the same plan — --print-derived pre-flight gate.
+SPATIAL_PRINT_DERIVED_SRC            = dynamic/spatial_print_derived.cpp
+SPATIAL_PRINT_DERIVED_OBJ            = $(SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
+TEST_SPATIAL_PRINT_DERIVED_SRC       = tests/unit/test_spatial_print_derived.cpp
+TEST_SPATIAL_PRINT_DERIVED_OBJ       = $(TEST_SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
@@ -755,6 +766,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_phaseh_godunov_flux_pool \
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
+               seas_test_spatial_nucleation \
+               seas_test_spatial_print_derived \
+               seas_test_paraview_set_fault_params_spatial \
                seas_test_spatial_velocity_bundle \
                seas_test_spatial_stress_bundle \
                seas_test_spatial_constant_stress_source \
@@ -1910,6 +1924,8 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(GODUNOV_FLUX_POOL_OBJ) \
                           $(PML_LAYER_OBJ) \
                           $(SPATIAL_FRICTION_OBJ) \
+                          $(SPATIAL_NUCLEATION_OBJ) \
+                          $(SPATIAL_PRINT_DERIVED_OBJ) \
                           $(SPATIAL_VELOCITY_OBJ) \
                           $(SPATIAL_STRESS_OBJ) \
                           $(HETEROGENEOUS_MATERIAL_OBJ) \
@@ -1926,6 +1942,8 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(GODUNOV_FLUX_POOL_OBJ) \
 	    $(PML_LAYER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_PRINT_DERIVED_OBJ) \
 	    $(SPATIAL_VELOCITY_OBJ) \
 	    $(SPATIAL_STRESS_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
@@ -1935,6 +1953,94 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase N: spatial_nucleation object compile rule.
+$(SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Phase D: spatial_print_derived object compile rule.  Pulls
+# spatial_friction.hpp (for NucleationSpec / StressSpec / lsw types)
+# which in turn enables SEAS_USE_TOML conditionals — gate the build
+# the same way the friction object is built.
+$(SPATIAL_PRINT_DERIVED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+# Parity Phase 6 R-005 round-3: unit test for the new
+# seas::ParaViewOutput::SetFaultParamsSpatial method.  Verifies the
+# 8 SAFS fields are registered under their proper names (not TPV104's
+# a/Dc/x2/x3) and that the call is idempotent.
+TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_SRC = tests/unit/test_paraview_set_fault_params_spatial.cpp
+TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_OBJ = $(TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_SRC:.cpp=.o)
+
+$(TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_OBJ): %.o: $(SRC)%.cpp \
+                                                   $(SEAS_HEADERS) \
+                                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+seas_test_paraview_set_fault_params_spatial: \
+        $(TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PARAVIEW_SET_FAULT_PARAMS_SPATIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-paraview-set-fault-params-spatial: seas_test_paraview_set_fault_params_spatial
+	./seas_test_paraview_set_fault_params_spatial
+
+# Phase N test target: 12 unit tests T-N01..T-N12 covering smoothStep
+# math, GaussianFactorFaceLocal, ResolveGradualOverstress, the per-
+# sub-step accumulator, and the iterator callback overload.
+seas_test_spatial_nucleation: $(TEST_SPATIAL_NUCLEATION_OBJ) \
+                              $(SPATIAL_NUCLEATION_OBJ) \
+                              $(FAULT_FACE_FLUX_OBJ) \
+                              $(FRICTION_SOLVER_OBJ) \
+                              $(TPV205_SUBSTEP_ITERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-spatial-nucleation: seas_test_spatial_nucleation
+	./seas_test_spatial_nucleation
+
+# Phase D test target — print-derived pre-flight gate unit tests
+# T-D02 / T-D05 / T-D06 / T-D07 exercised in-process via the printer
+# interface; full T-D01..T-D05 integration tests use the driver.
+seas_test_spatial_print_derived: $(TEST_SPATIAL_PRINT_DERIVED_OBJ) \
+                                 $(SPATIAL_PRINT_DERIVED_OBJ) \
+                                 $(SPATIAL_NUCLEATION_OBJ) \
+                                 $(SPATIAL_FRICTION_OBJ) \
+                                 $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_PRINT_DERIVED_OBJ) \
+	    $(SPATIAL_PRINT_DERIVED_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_SPATIAL_PRINT_DERIVED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+test-spatial-print-derived: seas_test_spatial_print_derived
+	./seas_test_spatial_print_derived
 
 # Phase 4 smoke target: build + dry-run on the EXAMPLE LSW TOML fixture.
 test-spatial-dyn-driver: seas_spatial_dyn_driver

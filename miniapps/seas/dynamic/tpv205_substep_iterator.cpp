@@ -244,9 +244,31 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
    const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
    const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
    real_t dt_macro,
-   real_t /*t_macro_start*/,
+   real_t t_macro_start,
    real_t *I_imp_plus_flat,
    real_t *I_imp_minus_flat)
+{
+   // Phase N (R-N-005): route through the callback overload with a
+   // no-op callback so the original API stays bit-identical for any
+   // test still calling this signature.
+   AdvanceWithSubStepStates(dof_data, fault_coords,
+                            Q_pointwise_plus_per_substep,
+                            Q_pointwise_minus_per_substep,
+                            dt_macro, t_macro_start,
+                            I_imp_plus_flat, I_imp_minus_flat,
+                            [](real_t, real_t){});
+}
+
+void Tpv205SubStepIterator::AdvanceWithSubStepStates(
+   std::vector<DOFData> &dof_data,
+   const std::vector<Vector> &fault_coords,
+   const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+   const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+   real_t dt_macro,
+   real_t t_macro_start,
+   real_t *I_imp_plus_flat,
+   real_t *I_imp_minus_flat,
+   const std::function<void(real_t, real_t)> &nuc_callback)
 {
    if (deltaT_.empty())
    {
@@ -324,12 +346,22 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
    real_t Q_imp_plus[NUM_STATE];
    real_t Q_imp_minus[NUM_STATE];
 
+   // Track running sub-step end time so the nucleation callback gets
+   // the absolute simulation time `t_macro_start + Σ_{o'<=o} dt_sub`.
+   real_t t_substep_end = t_macro_start;
+
    for (int o = 0; o < O; ++o)
    {
       const real_t dt_sub      = deltaT_[o];
       const real_t weight      = time_weights_[o];
       const real_t accum_scale = weight * dt_macro;
       const bool last_sub_step = (o == O - 1);
+
+      // Phase N hook: nucleation callback fires BEFORE the per-QP
+      // friction pipeline (mirrors tpv104_substep_iterator.cpp:295).
+      // Sub-step end time is `t_macro_start + Σ_{k≤o} dt_k`.
+      t_substep_end += dt_sub;
+      nuc_callback(t_substep_end, dt_sub);
 
       const real_t *Qp_o = Q_pointwise_plus_per_substep[o].data();
       const real_t *Qm_o = Q_pointwise_minus_per_substep[o].data();

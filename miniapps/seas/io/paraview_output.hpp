@@ -1047,6 +1047,91 @@ public:
       }
    }
 
+   /// @brief Parity Phase 6 — SAFS analog of `SetFaultParamsBP5`.
+   /// Publishes named static per-DOF arrays as fault-surface L2-p0
+   /// fields under their own names (e.g. "lsw_mu_s", "nuc_amplitude").
+   /// Each Vector MUST have `Size() == num_fault_total` on this rank
+   /// (one value per fault DOF, dim-1 per face × nbf_per_face faces).
+   /// Internally allocates one L2-p0 GridFunction per named array on
+   /// the FIRST call, populates each by face-averaging the per-DOF
+   /// input the same way `SetFaultParamsBP5` does, and registers each
+   /// with the primary collection so they land in fault.vtkhdf /
+   /// fault VTU under the supplied names.
+   ///
+   /// Safe to call when `has_fault_output_ == false` (no-op).  Safe to
+   /// call when `num_fault_total == 0` on this rank — the GFs are
+   /// allocated/zeroed but never get any non-zero values.
+   void SetFaultParamsSpatial(
+      const std::vector<std::pair<std::string, const Vector*>>& named_arrays)
+   {
+      if (!has_fault_output_) { return; }
+
+      const int nbf   = nbf_per_face_;
+      const int n_int = n_interior_fault_faces_;
+      const int n_shr = n_shared_fault_faces_;
+      const int n_dofs_local = (n_int + n_shr) * nbf;
+
+      for (const auto& kv : named_arrays)
+      {
+         const std::string& name = kv.first;
+         const Vector*      data = kv.second;
+         MFEM_VERIFY(data != nullptr,
+                     "SetFaultParamsSpatial: null Vector pointer for field '"
+                     << name << "'");
+         MFEM_VERIFY(data->Size() == n_dofs_local
+                     || (n_dofs_local == 0 && data->Size() == 0),
+                     "SetFaultParamsSpatial: field '" << name
+                     << "' has Size() = " << data->Size()
+                     << " but this rank has " << n_dofs_local
+                     << " fault DOFs.");
+
+         // Allocate + register on first call for this name.
+         GF* gf = nullptr;
+         for (auto& entry : fault_spatial_params_)
+         {
+            if (entry.first == name) { gf = entry.second.get(); break; }
+         }
+         if (gf == nullptr)
+         {
+            auto fresh = std::make_unique<GF>(fault_fes_.get());
+            *fresh = 0.0;
+            gf = fresh.get();
+            fault_spatial_params_.emplace_back(name, std::move(fresh));
+            pv_dc_->RegisterField(name, gf);
+         }
+         else
+         {
+            *gf = 0.0;
+         }
+
+         // Face-average the per-DOF input onto the L2-p0 GF, same
+         // pattern as SetFaultParamsBP5 (Elem1 + Elem2 for interior
+         // faces, Elem1 only for shared faces).
+         for (int fi = 0; fi < n_int; ++fi)
+         {
+            const int base = fi * nbf;
+            real_t avg = 0.0;
+            for (int k = 0; k < nbf; ++k) { avg += (*data)(base + k); }
+            avg /= nbf;
+            const int e1 = fault_face_elem1_[fi];
+            const int e2 = fault_face_elem2_[fi];
+            if (e1 < 0) { continue; }
+            (*gf)(e1) = avg;
+            if (e2 >= 0) { (*gf)(e2) = avg; }
+         }
+         for (int si = 0; si < n_shr; ++si)
+         {
+            const int fi   = n_int + si;
+            const int base = fi * nbf;
+            real_t avg = 0.0;
+            for (int k = 0; k < nbf; ++k) { avg += (*data)(base + k); }
+            avg /= nbf;
+            const int e1 = fault_shared_elem1_[si];
+            (*gf)(e1) = avg;
+         }
+      }
+   }
+
    /// @brief Update all fault L2-p0 fields from owned-DOF vectors.
    ///
    /// Maps fault DOF values to the adjacent volume elements.  Each fault
@@ -1830,6 +1915,14 @@ private:
    std::unique_ptr<GF> fault_param_Dc_;
    std::unique_ptr<GF> fault_coord_x2_;
    std::unique_ptr<GF> fault_coord_x3_;
+
+   // Parity Phase 6 — SAFS-specific static parameter fields registered
+   // on demand by SetFaultParamsSpatial.  Holds one named L2-p0
+   // GridFunction per published array, lifetime tied to *this so the
+   // ParaView pv_dc_ collection's RegisterField pointer stays valid
+   // for the full run.
+   std::vector<std::pair<std::string, std::unique_ptr<GF>>>
+      fault_spatial_params_;
 
    // Interior fault face → element mapping
    std::vector<int> fault_face_elem1_;

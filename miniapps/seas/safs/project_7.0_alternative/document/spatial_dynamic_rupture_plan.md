@@ -126,33 +126,37 @@ Extend `spatial_friction_config_schema.md` (created by the QD plan's Phase 0) wi
    max_snapshots             = 5000
    checkpoint_every_steps    = 10000
 
+   [nucleation]
+   # Time-domain nucleation perturbation; see schema doc for the full
+   # sub-block grammar.  Absent block ⇒ driver runs without any
+   # nucleation perturbation.
+   kind = "gradual_overstress"
+
+   [nucleation.gradual_overstress]
+   center_x_m          = ...
+   center_y_m          = ...
+   center_z_m          = ...
+   radius_dip_m        = 3000.0
+   radius_strike_m     = 3000.0
+   delta_tau_dip_pa    =     0.0
+   delta_tau_strike_pa = 25.0e6
+   T_nuc_s             =     1.0
+   t0_smooth_s         =     0.5
+
    [friction.slip_weakening]
    # Scalar defaults (applied everywhere unless a spatial rule overrides).
+   # Friction spatial rules NEVER override tau_pre or sigma_n —
+   # nucleation lives entirely in the [nucleation] block (D-4).
    mu_s_default       = 0.677
    mu_d_default       = 0.525
    d_c_default        = 0.40       # m
    cohesion_default   = 0.0        # Pa
-   # Initial-stress override at the nucleation patch — overrides whatever
-   # the stress sidecar would otherwise produce in that region.
-   nuc_tau_override_pa = 81.6e6
-   nuc_sigma_n_override_pa = 120.0e6
 
    # Spatial rules, applied in order, last-match wins per key.
    [[friction.slip_weakening.spatial]]
-   kind        = "depth"
+   kind        = "barrier"
    z_min_m     = -20000.0
    z_max_m     = -15000.0
-   mu_s        = 1.0e6        # barrier (effectively infinite)
-
-   [[friction.slip_weakening.spatial]]
-   kind        = "box"        # nucleation patch
-   x_min_m     = ...
-   x_max_m     = ...
-   y_min_m     = ...
-   y_max_m     = ...
-   z_min_m     = ...
-   z_max_m     = ...
-   apply_nuc_override = true  # uses the [friction.slip_weakening] nuc_*_override_pa
    ```
 
 2. **Validation rules** (enforced in QD-Phase-1 parser, extended for LSW):
@@ -573,17 +577,17 @@ Production-ready sbatch for SAFS dynamic-rupture runs on Frontera + a small Pyth
 ### Low-confidence (need investigation before implementing)
 - **`Tpv104SubStepIterator` interaction with heterogeneous CFL.**  The sub-step iterator currently assumes a single global Δt.  With heterogeneous CFL, Δt may need to be the per-step `MaxDt` re-evaluated rather than the construction-time value.  Investigation: read `dynamic/tpv104_substep_iterator.cpp::Step` to confirm Δt is reused vs. re-fetched.  If reused, add a `RefreshDt` call at the top of each macro step.
 - **V1 checkpoint `driver_tag` schema extension** — adding a string field is additive, but every existing TPV104 checkpoint file on disk needs to round-trip without abort.  Mitigation: default `driver_tag = "tpv104"` if the field is absent in the file; aborts only when both file and runtime declare different non-empty tags.
-- **Rupture nucleation tuning for SAFS-scale fault.**  TPV205 nucleation patches are calibrated for ~30 km faults; SAFS multi-segment is ~500 km.  The `[friction.slip_weakening.spatial.apply_nuc_override]` mechanism lets the user place the nucleation patch precisely, but no plan-internal physical correctness is asserted — the user is responsible for choosing values that nucleate.  Mitigation: `--print-derived` reports `L_nuc = mu * d_c / (mu_s - mu_d) / (sigma_n_eff)` per region so the user can sanity-check.
+- **Rupture nucleation tuning for SAFS-scale fault.**  TPV205-style overstress patches are calibrated for ~30 km faults; SAFS multi-segment is ~500 km.  The `[nucleation.gradual_overstress]` block lets the user place the nucleation patch precisely (centre + Gaussian radii + Δτ + ramp duration), but no plan-internal physical correctness is asserted — the user is responsible for choosing values that nucleate.  Mitigation: `--print-derived` reports `L_nuc = mu * d_c / (mu_s - mu_d) / (sigma_n_eff)` per region AND the peak `F(r) · |Δτ|` against the local nucleation budget `(μ_s − μ_d) · σ_n_eff` so the user can sanity-check before time-stepping.
 
 ### Known tricky areas in existing code
-- **TPV104 mixed-flux dispatch** (`dynamic/wave_operator.inl` mixed_flux switch) — heterogeneous mode means each side of an interior face evaluates `flux_pool_->At(elem)`.  This is already covered by heterogeneous_material_plan Phase 3 Detailed Req. 6 (average flux).
+- **TPV104 mixed-flux dispatch** (`dynamic/wave_operator.inl` mixed_flux switch) — heterogeneous mode means each side of an interior face evaluates `flux_pool_->At(elem)`.  Coupled with Phase H Stage 2's per-element flux dispatch and the exact bi-material Riemann solver — see `PLAN_phase_R_exact_bimaterial_riemann.md`.  (The average-flux approximation referenced in earlier revisions of this plan has been promoted from a future-work item into a fully planned Phase R; Phase H Stage 2 lands together with Phase R.4 in the same commit so the production tree never sees the inferior average-flux physics on heterogeneous input.)
 - **Restart from TPV104 V1 checkpoint into spatial_dyn_driver** — guarded by the `driver_tag` extension; do not allow silent cross-driver restore.
 
 ---
 
 ## Out of Scope for This Plan
 
-1. **Exact bi-material Riemann solver** at heterogeneous interior faces.  We continue to use the average-flux approximation from heterogeneous_material_plan Phase 3.  Documented as a future-work item shared with that plan.
+1. ~~**Exact bi-material Riemann solver** at heterogeneous interior faces.~~  **Promoted to a fully planned phase.**  See `PLAN_phase_R_exact_bimaterial_riemann.md` (Phase R).  Phase R replaces the average-flux approximation from `heterogeneous_material_plan.md` Phase 3 with the exact linearised Riemann solution of LeVeque §22.4 / Pelties et al. 2012, dispatched per-side at every heterogeneous interior face.  Phase R lands AS PART OF Phase H Stage 2 (same commit) so the production code path goes directly from the scalar `flux_` member to the exact bi-material solver — no average-flux intermediate stage is ever exposed in production.
 2. **Pore-pressure spatial sidecar** (constant + depth-gradient only, same as QD plan).
 3. **Time-dependent / damage material** — material is static throughout the event.
 4. **GPU offload** — same constraint as the QD plan (`MaterialField::EvalAt` is CPU-only).

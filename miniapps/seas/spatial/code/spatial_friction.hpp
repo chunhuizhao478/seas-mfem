@@ -31,6 +31,7 @@
 #include "mfem.hpp"
 
 #include "../../dynamic/heterogeneous_material.hpp"
+#include "../../dynamic/spatial_nucleation.hpp"   // GradualOverstressSpec
 
 #include <array>
 #include <limits>
@@ -108,8 +109,10 @@ struct OutputSpec
 {
    std::string output_dir;
    std::string restart_prefix         = "cp";
-   std::string paraview_volume        = "hdf5";
-   std::string paraview_bulk          = "hdf5";
+   // Parity Phase 2 default flip: SAFS production turns volume + bulk
+   // OFF by default (multi-TB output otherwise).  Fault stays "hdf5".
+   std::string paraview_volume        = "off";
+   std::string paraview_bulk          = "off";
    std::string paraview_fault         = "hdf5";
    real_t      paraview_volume_dt     = 0.05;
    real_t      paraview_bulk_dt       = 0.05;
@@ -119,6 +122,17 @@ struct OutputSpec
    real_t      paraview_fault_zfp_tol  = 1e-12;
    int         max_snapshots          = 5000;
    int         checkpoint_every_steps = 10000;
+
+   // Parity Phase 2 additions (9 new fields).
+   bool        paraview_enabled              = false;  ///< master gate
+   int         paraview_every_steps          = 0;      ///< 0 = use *_dt
+   bool        paraview_fault_legacy_ascii   = false;  ///< debug only
+   int         paraview_volume_deflate_level = -1;     ///< -1 = none, [0..9]
+   int         paraview_bulk_deflate_level   = -1;
+   int         paraview_fault_deflate_level  = -1;
+   real_t      paraview_coseismic_dt         = -1.0;   ///< -1 = unset
+   real_t      paraview_nucleation_dt        = -1.0;
+   real_t      paraview_interseismic_dt      = -1.0;
 };
 
 enum class VelocityModel { CVMH, CVMS_4_26_M01, MultiscaleStatewise };
@@ -189,75 +203,24 @@ struct SpatialRule
    bool matches(real_t x, real_t y, real_t z, int attr) const;
 };
 
-/// @brief D-4 (round-6 extension) — choice of nucleation mechanism.
-///
-/// Two physically distinct approaches to nucleating a rupture inside
-/// a circular zone of radius `r_crit_m` around the hypocenter:
-///
-///   - `StrengthReduction` (default; TPV26/27 §Part 4): the friction
-///     coefficient `μ` is artificially reduced from `μ_s` toward `μ_d`
-///     inside the nucleation zone via the time-dependent factor
-///     `f_2(t, r)` that ramps over `t0_decay_s`.  Pre-stress is left
-///     UNTOUCHED — the rupture nucleates because strength drops below
-///     the static pre-stress.  Consumed by
-///     `Tpv205SubStepIterator::SetForcedRuptureMode(true)` and by
-///     `EvaluateADER_LSW_ForcedRupture` via `T_forced_rupture` /
-///     `t0_decay_forced` per-DOF fields.
-///
-///   - `Overstress` (TPV205-style): instead of reducing strength, the
-///     initial pre-stress is perturbed UPWARDS inside the nucleation
-///     zone (Δτ added to `tau1_nuc` / `tau2_nuc`, optionally also
-///     reducing `sigma_n_nuc`) so the local total traction exceeds the
-///     strength.  The simulation then runs with plain LSW (no `f_2(t)`)
-///     and rupture nucleates naturally.  Pre-stress perturbation lives
-///     in `DOFData::tau{1,2}_nuc` and `sigma_n_nuc`; written ONCE at
-///     init time by `ResolveOverstress` + `InitializeFaultDOFs_Spatial`.
-///
-/// Both modes share the same geometric parameters
-/// (`hypocenter_*_m`, `r_crit_m`).  `t0_decay_s` is only consumed by
-/// `StrengthReduction`.  Overstress-specific parameters (Δτ, Δσ_n) live
-/// in the `OverstressSpec` sub-block (filled in when the overstress
-/// resolver is implemented; see `ResolveOverstress` stub below).
-enum class NucleationKind { StrengthReduction, Overstress };
+/// @brief Phase N — the single nucleation mechanism for the spatial
+/// driver is `gradual_overstress` (per-DOF Δτ accumulator,
+/// smoothStep-ramped, Gaussian-shaped).  The obsolete `StrengthReduction`
+/// (TPV26/27 §Part 4) and `Overstress` (TPV205-style one-shot) kinds were
+/// removed from the spatial code path.  Native TPV* drivers keep their
+/// own paths via `dynamic/tpv104_nucleation.hpp` + the still-live
+/// `FaultFrictionLaw::LSW_ForcedRupture` flux dispatch.
+enum class NucleationKind { GradualOverstress };
 
-/// Overstress-mode parameters (stub — populated when the overstress
-/// resolver lands).  All values default to 0; the resolver will read
-/// these once `NucleationKind::Overstress` is wired into the parser.
-struct OverstressSpec
-{
-   /// Peak shear-traction perturbation applied at r = 0 (Pa).  Tapers
-   /// linearly (or Gaussian, TBD) to 0 at r = r_crit_m.
-   real_t delta_tau_pa = 0.0;
-   /// Direction of the shear perturbation in the fault basis: 0 = dip
-   /// (tau1), 1 = strike (tau2).  Default 1 (strike) matches the SCEC
-   /// TPV205 convention.
-   int    direction    = 1;
-   /// Optional normal-stress reduction at r = 0 (Pa, subtracted from
-   /// sigma_n_eff).  Default 0 = no normal-stress perturbation.
-   real_t delta_sigma_n_pa = 0.0;
-};
-
-/// D-4 nucleation spec (top-level [nucleation] TOML block).  When the
-/// block is absent in the TOML, `enabled = false` and the driver runs
-/// without nucleation (StrengthReduction: T_forced = 1e9 for every
-/// DOF; Overstress: tau_nuc = 0 everywhere).
+/// @brief Top-level `[nucleation]` TOML block.  When absent in the
+/// TOML, `enabled == false` and the driver runs with no nucleation
+/// perturbation (tau{1,2}_nuc stay at the init-time zero seeded by
+/// `InitializeFaultDOFs_Spatial`).
 struct NucleationSpec
 {
-   real_t hypocenter_x_m = 0.0;
-   real_t hypocenter_y_m = 0.0;
-   real_t hypocenter_z_m = 0.0;
-   real_t r_crit_m       = 4000.0;
-   real_t t0_decay_s     = 0.5;
-   bool   enabled        = false;
-
-   /// Round-6 extension: which nucleation mechanism to use.  Default
-   /// `StrengthReduction` keeps the round-1..5 behaviour byte-equivalent
-   /// (TOML files without `[nucleation].kind` parse to StrengthReduction).
-   NucleationKind kind   = NucleationKind::StrengthReduction;
-
-   /// Overstress-mode parameters (consumed only when
-   /// `kind == NucleationKind::Overstress`).
-   OverstressSpec overstress;
+   NucleationKind        kind     = NucleationKind::GradualOverstress;
+   bool                  enabled  = false;
+   GradualOverstressSpec gradual_overstress;
 };
 
 struct SlipWeakeningBlock
@@ -326,30 +289,6 @@ struct RateStatePerDOFParams
    Vector a, b, Dc, V_init, f_0, V_0, eta, sigma_n_eff;
 };
 
-/// D-4: per-DOF gradual-forced-rupture state.  T_forced_s(i) = 1e9
-/// means DOF i is never forced; t0_decay_s(i) is uniform across DOFs
-/// (= cfg.nucleation.t0_decay_s) but stored per-DOF so the LSW solver
-/// can read both from a single DOFData entry.
-struct ForcedRupturePerDOFParams
-{
-   Vector T_forced_s;
-   Vector t0_decay_s;
-};
-
-/// @brief Round-6 — overstress-mode nucleation per-DOF perturbation.
-/// `delta_tau1_pa(i)` / `delta_tau2_pa(i)` are added once to
-/// `DOFData::tau1_nuc` / `DOFData::tau2_nuc` at init (then never
-/// touched again).  `delta_sigma_n_pa(i)` is SUBTRACTED from the
-/// effective normal stress (positive value = compression reduced).
-/// All vectors are zero-sized when `nuc.enabled == false` or when
-/// `nuc.kind == NucleationKind::StrengthReduction`.
-struct OverstressPerDOFParams
-{
-   Vector delta_tau1_pa;
-   Vector delta_tau2_pa;
-   Vector delta_sigma_n_pa;
-};
-
 class SpatialFrictionResolver
 {
 public:
@@ -379,52 +318,6 @@ public:
       mfem::Mesh&               mesh,
       const PorePressureSpec&   pp,
       const Vector&             sigma_n_total_per_dof) const;
-
-   /// D-4: compute per-DOF T_forced(r) using TPV26/27 §Part 5 formula.
-   /// When nuc.enabled == false, returns vectors with T_forced_s(i) =
-   /// 1.0e9 and t0_decay_s(i) = 0.0 for all i (TPV205 byte-exact
-   /// default).  Otherwise computes T(r) per DOF using the local Vs
-   /// read from MaterialField::EvalAt at the DOF's bulk element.
-   ForcedRupturePerDOFParams ResolveForcedRupture(
-      const NucleationSpec&     nuc,
-      const Vector&             dof_coords_3d,
-      const Array<int>&         dof_to_elem,
-      const MaterialField&      material,
-      ParMesh&                  pmesh) const;
-
-   /// Serial-mesh overload for unit tests; mirrors the ParMesh path
-   /// exactly except the ElementTransformation lookup is via the
-   /// supplied mfem::Mesh.
-   ForcedRupturePerDOFParams ResolveForcedRupture(
-      const NucleationSpec&     nuc,
-      const Vector&             dof_coords_3d,
-      const Array<int>&         dof_to_elem,
-      const MaterialField&      material,
-      mfem::Mesh&               mesh) const;
-
-   /// @brief Round-6 — overstress-mode per-DOF perturbation (TPV205-
-   /// style nucleation by perturbing the pre-stress).  Sibling to
-   /// `ResolveForcedRupture`.
-   ///
-   /// **Stub for now**: when implemented, will compute per-DOF Δτ /
-   /// Δσ_n perturbations inside a circular zone of radius `r_crit_m`
-   /// around the hypocenter, tapering smoothly to zero at the edge.
-   /// The driver then writes the result into
-   /// `DOFData::tau{1,2}_nuc` and reduces `DOFData::sigma_n0` at init
-   /// via `InitializeFaultDOFs_Spatial_Overstress` (also stub).
-   ///
-   /// When `nuc.enabled == false` OR `nuc.kind !=
-   /// NucleationKind::Overstress`, returns zero-sized vectors (the
-   /// driver treats this as "no overstress perturbation").
-   ///
-   /// Stub-implementation contract: this method currently aborts via
-   /// MFEM_ABORT when `nuc.kind == NucleationKind::Overstress`.  The
-   /// callable surface is defined now so the driver and tests can
-   /// reference it; the body lands when the overstress physics is
-   /// dialled in.
-   OverstressPerDOFParams ResolveOverstress(
-      const NucleationSpec&     nuc,
-      const Vector&             dof_coords_3d) const;
 };
 
 // =====================================================================
