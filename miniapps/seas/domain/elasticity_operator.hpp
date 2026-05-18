@@ -226,7 +226,7 @@ public:
                                    Vector &jump_residual,
                                    Vector *normal_traction = nullptr,
                                    Vector *normal_stress = nullptr,
-                                   Vector *normal_correction = nullptr);
+                                   Vector *normal_correction = nullptr) override;
 
    /// Assemble only the fault-slip RHS contribution into the DG displacement
    /// space. This is a test/debug utility for checking K*u against b(slip)
@@ -311,7 +311,7 @@ public:
       debug_target_elems_cached_ = false;
    }
 
-   bool IsFirstStepDebugEnabled() const { return first_step_debug_.enabled; }
+   bool IsFirstStepDebugEnabled() const override { return first_step_debug_.enabled; }
 
 
 #include "elasticity_operator_verify.inl"

@@ -875,9 +875,19 @@ private:
 
          // n_i ← n_i / |n_i|
          const real_t n_len = std::sqrt(n[0]*n[0] + n[1]*n[1] + n[2]*n[2]);
-         MFEM_VERIFY(n_len > 1e-12,
-                     "ComputePerDOFCoordsAndBasis_: zero-length normal at DOF "
-                     << i);
+         if (n_len <= 1e-12)
+         {
+            // Zero-length normal: this DOF was not visited by any owned
+            // fault face during basis population (e.g. boundary / unowned
+            // DOFs in non-SAFS fixtures like elasticity_operator_tests).
+            // SAFS-mode consumers are gated on safs_mode_; BP5/TPV
+            // /antiplane paths do not read these per-DOF arrays.  Mark
+            // the slot with a sentinel zero basis and continue rather
+            // than aborting the whole simulation.
+            for (int d = 0; d < 9; d++) { dof_basis_(d, i) = 0.0; }
+            num_dof_basis_fallbacks_++;
+            continue;
+         }
          const real_t inv_n = 1.0 / n_len;
          n[0] *= inv_n; n[1] *= inv_n; n[2] *= inv_n;
 

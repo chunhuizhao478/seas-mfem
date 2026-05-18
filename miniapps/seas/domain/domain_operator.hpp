@@ -240,6 +240,38 @@ public:
       displacements.SetSize(0);
    }
 
+   /// @brief Per-stage debug toggle for SEASQuasiDynamicOperator::Mult.
+   ///
+   /// Default: false (no per-stage diagnostic output).  Overridden by
+   /// ElasticityDomainOperator to expose its `first_step_debug_.enabled`
+   /// flag.  AntiplaneDomainOperator inherits the no-op default.
+   virtual bool IsFirstStepDebugEnabled() const { return false; }
+
+   /// @brief Decomposed-traction + jump-residual variant of ComputeTraction.
+   ///
+   /// Default: forwards to ComputeTraction and leaves the diagnostic
+   /// outputs (traction_stress / _correction / jump_residual) empty.
+   /// ElasticityDomainOperator overrides to populate them.  Antiplane
+   /// inherits the default — the antiplane face_tracer path uses only
+   /// `traction` so the empty diagnostics are harmless.
+   virtual void ComputeTractionDiagnostics(const GridFuncType &displacement,
+                                           const Vector &slip_bc,
+                                           Vector &traction,
+                                           Vector &traction_stress,
+                                           Vector &traction_correction,
+                                           Vector &jump_residual,
+                                           Vector *normal_traction = nullptr,
+                                           Vector *normal_stress = nullptr,
+                                           Vector *normal_correction = nullptr)
+   {
+      ComputeTraction(displacement, slip_bc, traction, normal_traction);
+      traction_stress.SetSize(0);
+      traction_correction.SetSize(0);
+      jump_residual.SetSize(0);
+      if (normal_stress) { normal_stress->SetSize(0); }
+      if (normal_correction) { normal_correction->SetSize(0); }
+   }
+
 #ifdef MFEM_USE_MPI
    /// Get MPI communicator (parallel only)
    virtual MPI_Comm GetComm() const { return MPI_COMM_WORLD; }

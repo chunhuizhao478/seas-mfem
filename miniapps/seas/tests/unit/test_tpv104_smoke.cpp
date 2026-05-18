@@ -81,14 +81,14 @@ void TestBannerDefaults()
 
    // Four mandatory banner lines, R7-001-honest: the banner now
    // describes the runtime dispatch truthfully — Brent hard-coded via
-   // EvaluateADERTotal, one-shot wave.AdvanceADER (sub-step iterator
+   // EvaluateADER fluctuation-Q, one-shot wave.AdvanceADER (sub-step iterator
    // not wired), slip-SRW ψ-space with macro-step analytic cadence.
    const std::vector<std::pair<std::string, std::string>> must_have = {
       {"Time integrator: ADER-O2 (one-shot via wave.AdvanceADER)",
        "ADER-O2 + one-shot disclosure"},
       {"Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)",
        "default one-shot disclosure (round-7 R-602/R-603)"},
-      {"Friction solver: Brent (hard-coded via EvaluateADERTotal",
+      {"Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q",
        "Brent hard-coded disclosure (R7-001)"},
       {"Friction law: slip-SRW (ψ-space, macro-step analytic",
        "slip-SRW macro-step cadence disclosure (R7-007)"},
@@ -170,7 +170,7 @@ void TestBannerNonDefault()
       != std::string::npos,
       "fault iterator banner is one-shot when --fault-iterator one-shot");
    TEST_ASSERT(
-      out.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
+      out.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
       != std::string::npos,
       "friction solver disclosure is constant on non-default flags");
 
@@ -187,7 +187,7 @@ void TestBannerNonDefault()
    const std::string out_brent = RunDriver(
       binary, "--dry-run --friction-solver brent");
    TEST_ASSERT(
-      out_brent.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
+      out_brent.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
       != std::string::npos,
       "--friction-solver brent → still shows hard-coded Brent disclosure");
 }
@@ -249,7 +249,7 @@ void TestDispatchMatchesBanner()
          ("dispatch shows friction_law=slip-srw under CLI: " + cli).c_str());
       // Banner matches the dispatch:
       TEST_ASSERT(
-         out.find("Friction solver: Brent (hard-coded via EvaluateADERTotal")
+         out.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
          != std::string::npos,
          ("banner shows Brent hard-coded under CLI: " + cli).c_str());
       const std::string expected_banner = requested_substep
