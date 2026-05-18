@@ -36,22 +36,35 @@
 # block + minor queue-launch overhead.  Dev queue's faster turnaround
 # (vs `normal`) keeps launch latency small enough that 2h works.
 #
-#   Phase A — fresh run, ~12.7 yr (tfinal = 4e8 s).
-#             Pure interseismic regime (first BP5 earthquake at ~240 yr).
+#   Phase A — fresh run, 0 → ~0.001 yr (tfinal = 31558 s).  Despite
+#             the small simulated time, BP5's adaptive TS uses VERY
+#             small dt in the initial transient (~100 s/step), so
+#             reaching t=0.001 yr is ~12500 PETSc TS steps.  At
+#             ~140 steps/min on 8N x 400r, Phase A wall ~89 min.
 #             Driver writes V1 + V2 checkpoint at end-of-run
 #             (--checkpoint-interval triggers the final write at
 #             `bp5_verification_full.cpp:2814-2868`).
-#             Expected wall: ~30 min.
 #
-#   Phase B — RESTART from Phase A's checkpoint, run to ~25.4 yr
-#             (tfinal = 8e8 s).  Driver hits the V2 restart block
-#             at `bp5_verification_full.cpp:2441-2563` and replays
-#             the checkpointed t / current_dt / TSSetStepNumber.
+#   Phase B — RESTART from Phase A's checkpoint, run to 3 yr
+#             (tfinal = 9.46728e7 s = 3 * 31557600 s).  Driver hits
+#             the V2 restart block at `bp5_verification_full.cpp:2441-2563`
+#             and replays the checkpointed t / current_dt /
+#             TSSetStepNumber.  Phase B's dt is much larger (post-
+#             transient interseismic regime), so ~3 yr of additional
+#             simulated time takes ~20 min wall.
 #             Writes its own V1 + V2 checkpoint at end-of-run.
-#             Expected wall: ~30 min (Phase B covers ~12.7 yr MORE).
 #
-# Total expected wall: ~70 min (build + 2 x 30 min + validation),
-# leaving ~50 min slack inside the 2h reservation for variance.
+# REFERENCE comparison (gold-standard state-correctness check) lives
+# in a SEPARATE sbatch + comparison script (mirrors TPV104 pattern):
+#   jobs/bp5/bp5_reference_test_v2_dev_2hr.sbatch — runs 0 → 3 yr
+#   single-shot, no --restart.  Submit in parallel with this pair
+#   sbatch.  After both jobs finish, on the login node:
+#     scripts/bp5_restart_compare.sh <pair_base> <ref_base>
+#
+# Total pair wall: ~115 min (Phase A ~89 + Phase B ~20 + build +
+# validation), fits 2 h dev with ~5 min margin.  Reference wall:
+# same as pair (single-shot 0 → 3 yr crosses both the small-dt
+# transient AND the post-transient regime).
 #
 # Validation block at the end of the script:
 #   1. Phase A produced V1 + V2 trailing block in every per-rank file.
@@ -149,6 +162,20 @@ cd miniapps/seas
 make clean
 make seas_bp5_full -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
+# Per-job binary copy.  Two sbatches submitted concurrently would
+# otherwise race on the single ./seas_bp5_full binary file: one
+# sbatch's rebuild (gcc -o uses O_TRUNC) clobbers the other
+# sbatch's already-mapped binary mid-execution, producing the
+# "Error mmapping the file: Bad file descriptor" + hard hang seen
+# at TPV104 jobid 7729945 (see debug_document/paraview_output_debug_document/
+# tpv104_restart_state_verification_2026-05-17.md notes).  Copy
+# immediately after make to a per-jobid name + ibrun that copy.
+DRIVER_BIN="./seas_bp5_full_${SLURM_JOB_ID:-$$}"
+cp seas_bp5_full "${DRIVER_BIN}" \
+   || { echo "Failed to copy binary to ${DRIVER_BIN}"; exit 1; }
+chmod +x "${DRIVER_BIN}"
+echo "Using per-job binary: ${DRIVER_BIN}"
+
 # =======================================================================
 # Result directories.  Phase A and Phase B each get their own so the
 # checkpoint paths are unambiguous (--restart points at Phase A's
@@ -175,8 +202,13 @@ echo "Base dir:      ${RESTART_TEST_BASE}"
 echo "Phase A dir:   ${RESULT_DIR_A}  (segment_001 — fresh)"
 echo "Phase B dir:   ${RESULT_DIR_B}  (segment_002 — restart from A)"
 echo "Footprint:     8N x 400r, dev queue, 2h total (~30 min/phase + 60 min slack)"
-echo "Phase A tfinal: 4.0e8 s ≈ 12.7 yr (pure interseismic, no event)"
-echo "Phase B tfinal: 8.0e8 s ≈ 25.4 yr (continues from A; still no event)"
+echo "Phase A tfinal: 31558 s ≈ 0.001 yr (~12500 steps, ~89 min wall)"
+echo "Phase B tfinal: 9.46728e7 s ≈ 3 yr (post-transient regime, ~20 min wall)"
+echo "Pair wall:     ~115 min (fits 2 h dev with ~5 min margin)"
+echo "REFERENCE comparison: submit"
+echo "  jobs/bp5/bp5_reference_test_v2_dev_2hr.sbatch in parallel."
+echo "  After both finish, run on login node:"
+echo "    scripts/bp5_restart_compare.sh \${RESTART_TEST_BASE} <ref_base>"
 echo "Checkpoint:    --checkpoint-interval 5000 (V1 + V2 trailing)"
 echo "ParaView:      ENABLED — fault HDF5 at ZFP 1e-12, 1 yr interseismic"
 echo "               cadence; --no-volume-pv (matches production 48h)"
@@ -188,9 +220,9 @@ echo "========================================"
 # =======================================================================
 echo ""
 echo "========================================"
-echo "Phase A: fresh run to t = 4.0e8 s (≈ 12.7 yr)"
+echo "Phase A: fresh run to t = 31558 s (≈ 0.001 yr, ~12500 steps)"
 echo "========================================"
-ibrun ./seas_bp5_full \
+ibrun "${DRIVER_BIN}" \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
       --order 1 \
@@ -209,7 +241,7 @@ ibrun ./seas_bp5_full \
       --paraview-dt-co     1.0 \
       --paraview-dt-nu     43200 \
       --paraview-dt-inter-yr 1.0 \
-      --tfinal 400000000 || PHASE_A_RC=$?
+      --tfinal 31558 || PHASE_A_RC=$?
 PHASE_A_RC=${PHASE_A_RC:-0}
 echo "Phase A exit code: ${PHASE_A_RC}"
 if [ "${PHASE_A_RC}" -ne 0 ]; then
@@ -276,10 +308,10 @@ echo "  Phase A fault.vtkhdf size (before B): ${FAULT_A_BEFORE_B_SIZE} bytes"
 # =======================================================================
 echo ""
 echo "========================================"
-echo "Phase B: restart from Phase A, run to t = 3.0e9 s (≈ 95 yr)"
+echo "Phase B: restart from Phase A, run to t = 9.46728e7 s (≈ 3 yr)"
 echo "         --restart ${PHASE_A_PREFIX_PATH}"
 echo "========================================"
-ibrun ./seas_bp5_full \
+ibrun "${DRIVER_BIN}" \
       --mesh bp5/mesh/reference/bp5_tandem_exact.msh \
       --mesh-scale 1000 \
       --order 1 \
@@ -299,7 +331,7 @@ ibrun ./seas_bp5_full \
       --paraview-dt-nu     43200 \
       --paraview-dt-inter-yr 1.0 \
       --restart "${PHASE_A_PREFIX_PATH}" \
-      --tfinal 800000000 || PHASE_B_RC=$?
+      --tfinal 94672800 || PHASE_B_RC=$?
 PHASE_B_RC=${PHASE_B_RC:-0}
 echo "Phase B exit code: ${PHASE_B_RC}"
 if [ "${PHASE_B_RC}" -ne 0 ]; then
@@ -551,3 +583,7 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo "du -sh (Phase B): $(du -sh ${RESULT_DIR_B} | cut -f1)"
 } > "${SUMMARY_FILE}"
 cat "${SUMMARY_FILE}"
+
+# Clean up the per-job binary copy (build dir bloat protection).
+# Failure here is non-fatal — the SUMMARY has already been written.
+rm -f "${DRIVER_BIN}" || true
