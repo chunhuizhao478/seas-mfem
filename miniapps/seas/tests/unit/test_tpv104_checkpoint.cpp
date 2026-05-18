@@ -477,6 +477,30 @@ static void Subtest6_DriverGrep()
       TEST_ASSERT(sbsrc.find("FAULT_A_BEFORE_B_SIZE") != std::string::npos,
                   "Sub-test 6 R-103: TPV104 sbatch must capture "
                   "FAULT_A_BEFORE_B_SIZE before Phase B runs");
+      // R-200 / round-8 state-verification: sbatch must run a
+      // reference Phase C single-shot AND have SEAM + REFERENCE
+      // validations.  See tpv104_restart_state_verification_2026-05-17.md
+      TEST_ASSERT(sbsrc.find("RESULT_DIR_C") != std::string::npos
+                  && sbsrc.find("OUTPUT_PREFIX_C") != std::string::npos,
+                  "Sub-test 6 R-200: TPV104 sbatch must define a "
+                  "RESULT_DIR_C and OUTPUT_PREFIX_C for the reference "
+                  "Phase C single-shot");
+      TEST_ASSERT(sbsrc.find("Phase C") != std::string::npos
+                  && sbsrc.find("REFERENCE") != std::string::npos,
+                  "Sub-test 6 R-200: TPV104 sbatch must run a "
+                  "reference Phase C with no --restart");
+      TEST_ASSERT(sbsrc.find("Validation #10") != std::string::npos
+                  && sbsrc.find("SEAM") != std::string::npos,
+                  "Sub-test 6 R-200: TPV104 sbatch must include "
+                  "Validation #10 SEAM continuity (A last ↔ B first)");
+      TEST_ASSERT(sbsrc.find("Validation #11") != std::string::npos
+                  && sbsrc.find("REFERENCE comparison") != std::string::npos,
+                  "Sub-test 6 R-200: TPV104 sbatch must include "
+                  "Validation #11 REFERENCE comparison (B at t=2.0 ↔ "
+                  "C at t=2.0)");
+      TEST_ASSERT(sbsrc.find("compare_val") != std::string::npos,
+                  "Sub-test 6 R-200: TPV104 sbatch must define the "
+                  "compare_val helper used by Validations #10 and #11");
    }
 
    // R-102: this test file's own header must point at the real sbatch.
