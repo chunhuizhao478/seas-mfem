@@ -1,0 +1,1247 @@
+// Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
+//
+// spatial_friction.cpp — Phase 1 implementation of
+// spatial_dynamic_rupture_plan.md rev-3.
+//
+// All TOML I/O is gated by SEAS_USE_TOML.  Without toml11, the parser
+// entry points abort at runtime; the resolver and time-helper paths
+// compile unconditionally.
+
+#include "spatial_friction.hpp"
+
+#include <algorithm>
+#include <cctype>
+#include <cmath>
+#include <cstring>
+#include <fstream>
+#include <regex>
+#include <sstream>
+#include <string>
+
+#ifdef SEAS_USE_TOML
+#include <toml.hpp>
+#endif
+
+namespace mfem
+{
+namespace seas
+{
+namespace spatial
+{
+
+// =====================================================================
+//  SpatialTimeParseSeconds
+// =====================================================================
+
+real_t SpatialTimeParseSeconds(const std::string& s_in)
+{
+   // Strip surrounding whitespace.
+   auto lstrip = s_in.find_first_not_of(" \t\n\r");
+   auto rstrip = s_in.find_last_not_of(" \t\n\r");
+   std::string s = (lstrip == std::string::npos)
+                   ? std::string()
+                   : s_in.substr(lstrip, rstrip - lstrip + 1);
+
+   // Lower-case copy for sentinel checks.
+   std::string lower(s);
+   std::transform(lower.begin(), lower.end(), lower.begin(),
+                  [](unsigned char c) { return std::tolower(c); });
+
+   if (lower == "auto") { return -1.0; }
+
+   MFEM_VERIFY(!s.empty(),
+               "SpatialTimeParseSeconds: empty time string");
+
+   // Optional trailing "s" suffix; rest must parse as a floating-point
+   // number with std::strtod.
+   std::string numpart = s;
+   if (!numpart.empty() && (numpart.back() == 's' || numpart.back() == 'S'))
+   {
+      numpart.pop_back();
+   }
+   // Trim trailing whitespace between the number and the 's'.
+   while (!numpart.empty()
+          && (numpart.back() == ' ' || numpart.back() == '\t'))
+   {
+      numpart.pop_back();
+   }
+   MFEM_VERIFY(!numpart.empty(),
+               "SpatialTimeParseSeconds: empty numeric body in '" << s_in << "'");
+
+   const char* cstr = numpart.c_str();
+   char* end = nullptr;
+   const double val = std::strtod(cstr, &end);
+   MFEM_VERIFY(end != cstr && *end == '\0',
+               "SpatialTimeParseSeconds: cannot parse '" << s_in
+               << "' as a real with optional 's' suffix");
+   return static_cast<real_t>(val);
+}
+
+// =====================================================================
+//  SpatialRule::matches
+// =====================================================================
+
+bool SpatialRule::matches(real_t x, real_t y, real_t z, int attr) const
+{
+   const bool x_ok = (x >= x_min_m) && (x <= x_max_m);
+   const bool y_ok = (y >= y_min_m) && (y <= y_max_m);
+   const bool z_ok = (z >= z_min_m) && (z <= z_max_m);
+
+   switch (kind)
+   {
+   case Kind::Depth:
+      return z_ok;
+   case Kind::Box:
+      return x_ok && y_ok && z_ok;
+   case Kind::RegionAttribute:
+      return (region_attr >= 0) && (attr == region_attr);
+   case Kind::Barrier:
+      // Same as Depth, with any non-infinite x/y bounds also applied.
+      return z_ok && x_ok && y_ok;
+   }
+   return false;
+}
+
+// =====================================================================
+//  TOML parsing helpers
+// =====================================================================
+
+#ifdef SEAS_USE_TOML
+
+namespace
+{
+
+// Set of keys we've already shown the d_o deprecation notice for, so
+// each tag fires exactly once per process.
+struct DoNoticeOnce
+{
+   bool default_warned = false;
+   bool rule_warned    = false;
+};
+static DoNoticeOnce g_do_notice_once;
+
+real_t toml_real(const toml::value& tbl, const std::string& key,
+                 real_t default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& v = tbl.at(key);
+   if (v.is_floating()) { return static_cast<real_t>(v.as_floating()); }
+   if (v.is_integer())
+   {
+      return static_cast<real_t>(v.as_integer());
+   }
+   MFEM_ABORT("TOML key '" << key << "' must be a number (float or int)");
+   return default_val;
+}
+
+int toml_int(const toml::value& tbl, const std::string& key, int default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& v = tbl.at(key);
+   if (v.is_integer())
+   {
+      return static_cast<int>(v.as_integer());
+   }
+   MFEM_ABORT("TOML key '" << key << "' must be an integer");
+   return default_val;
+}
+
+bool toml_bool(const toml::value& tbl, const std::string& key, bool default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& v = tbl.at(key);
+   if (v.is_boolean()) { return v.as_boolean(); }
+   MFEM_ABORT("TOML key '" << key << "' must be a boolean (true/false)");
+   return default_val;
+}
+
+std::string toml_str(const toml::value& tbl, const std::string& key,
+                     const std::string& default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   return tbl.at(key).as_string();
+}
+
+/// Read a TOML value that may be either a string ("12s", "auto") or a
+/// number (12.0).  Returns the parsed seconds.
+real_t toml_time_seconds(const toml::value& tbl, const std::string& key,
+                         real_t default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& v = tbl.at(key);
+   if (v.is_string())
+   {
+      return SpatialTimeParseSeconds(v.as_string());
+   }
+   if (v.is_floating())
+   {
+      return static_cast<real_t>(v.as_floating());
+   }
+   if (v.is_integer())
+   {
+      return static_cast<real_t>(v.as_integer());
+   }
+   MFEM_ABORT("TOML key '" << key << "' must be a string (\"12s\"/\"auto\") "
+              "or a number");
+   return default_val;
+}
+
+/// Parse `[time].dt_initial`.  Returns the -1 sentinel ONLY when the
+/// value was the literal string "auto" (or the key is absent).  Any
+/// numeric or string-numeric value must be > 0; otherwise abort.  This
+/// prevents the validator collision where a literal `-1.0` or `"-1.0s"`
+/// would silently be treated as the "auto" sentinel (round-2 R-202).
+real_t parse_dt_initial(const toml::value& t)
+{
+   if (!t.contains("dt_initial")) { return -1.0; }   // missing => auto
+   const auto& v = t.at("dt_initial");
+   if (v.is_string())
+   {
+      const std::string s = v.as_string();
+      if (s == "auto") { return -1.0; }
+      const real_t parsed = SpatialTimeParseSeconds(s);
+      MFEM_VERIFY(parsed > 0.0,
+                  "[time].dt_initial = \"" << s << "\" must be > 0 or "
+                  "the literal string \"auto\"");
+      return parsed;
+   }
+   real_t val = 0.0;
+   if      (v.is_floating()) { val = static_cast<real_t>(v.as_floating()); }
+   else if (v.is_integer())  { val = static_cast<real_t>(v.as_integer()); }
+   else
+   {
+      MFEM_ABORT("[time].dt_initial must be a number or a string "
+                 "(\"<seconds>s\" or \"auto\")");
+   }
+   MFEM_VERIFY(val > 0.0,
+               "[time].dt_initial = " << val << " must be > 0 or the "
+               "literal string \"auto\"");
+   return val;
+}
+
+VelocityModel parse_velocity_model(const std::string& s)
+{
+   if (s == "cvmh")                 { return VelocityModel::CVMH; }
+   if (s == "cvm_s4.26.m01")        { return VelocityModel::CVMS_4_26_M01; }
+   if (s == "multiscale_statewise") { return VelocityModel::MultiscaleStatewise; }
+   MFEM_ABORT("velocity.model must be one of "
+              "{cvmh, cvm_s4.26.m01, multiscale_statewise}; got '"
+              << s << "'");
+   return VelocityModel::CVMH;
+}
+
+StressSourceKind parse_stress_kind(const std::string& s)
+{
+   if (s == "constant_tensor") { return StressSourceKind::ConstantTensor; }
+   if (s == "sidecar_hdf5")    { return StressSourceKind::SidecarHDF5; }
+   MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5}; "
+              "got '" << s << "'");
+   return StressSourceKind::ConstantTensor;
+}
+
+void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
+                        bool is_lsw)
+{
+   // Kind (required).
+   MFEM_VERIFY(rule_tbl.contains("kind"),
+               "[[spatial]] rule missing required key 'kind'");
+   const std::string kind_s = rule_tbl.at("kind").as_string();
+   if      (kind_s == "depth")             { out.kind = SpatialRule::Kind::Depth; }
+   else if (kind_s == "box")               { out.kind = SpatialRule::Kind::Box; }
+   else if (kind_s == "region_attribute")  { out.kind = SpatialRule::Kind::RegionAttribute; }
+   else if (kind_s == "barrier")           { out.kind = SpatialRule::Kind::Barrier; }
+   else
+   {
+      MFEM_ABORT("Unknown spatial.kind '" << kind_s
+                 << "'.  Valid kinds (rev-3): depth, box, region_attribute, "
+                 << "barrier.  (rev-1 'nucleation_box' removed by D-4; use "
+                 << "the [nucleation] block instead.)");
+   }
+
+   // Coordinate bounds (optional; sentinels are ±inf).
+   const real_t neg_inf = -std::numeric_limits<real_t>::infinity();
+   const real_t pos_inf =  std::numeric_limits<real_t>::infinity();
+   out.x_min_m = toml_real(rule_tbl, "x_min_m", neg_inf);
+   out.x_max_m = toml_real(rule_tbl, "x_max_m", pos_inf);
+   out.y_min_m = toml_real(rule_tbl, "y_min_m", neg_inf);
+   out.y_max_m = toml_real(rule_tbl, "y_max_m", pos_inf);
+   out.z_min_m = toml_real(rule_tbl, "z_min_m", neg_inf);
+   out.z_max_m = toml_real(rule_tbl, "z_max_m", pos_inf);
+   out.region_attr = toml_int(rule_tbl, "region_attr", -1);
+
+   const real_t nan = std::numeric_limits<real_t>::quiet_NaN();
+
+   if (is_lsw)
+   {
+      out.mu_s     = toml_real(rule_tbl, "mu_s",     nan);
+      out.mu_d     = toml_real(rule_tbl, "mu_d",     nan);
+      // D-3 alias: accept `d_o` in spatial rules as a synonym for `d_c`.
+      if (rule_tbl.contains("d_c"))
+      {
+         out.d_c = toml_real(rule_tbl, "d_c", nan);
+         MFEM_VERIFY(!rule_tbl.contains("d_o"),
+                     "[[spatial]] rule sets both 'd_c' and 'd_o'; supply only one");
+      }
+      else if (rule_tbl.contains("d_o"))
+      {
+         out.d_c = toml_real(rule_tbl, "d_o", nan);
+         if (!g_do_notice_once.rule_warned)
+         {
+            mfem::out << "[spatial_friction] notice: accepting deprecated "
+                         "alias 'd_o' for 'd_c' in [[spatial]] rule (D-3); "
+                         "this notice fires once per process.\n";
+            g_do_notice_once.rule_warned = true;
+         }
+      }
+      else
+      {
+         out.d_c = nan;
+      }
+      out.cohesion = toml_real(rule_tbl, "cohesion", nan);
+
+      // R-114: barrier-sentinel guard.  Reject any user-supplied
+      // mu_s > 1e5 in a spatial-rule override.  Barrier kind is the
+      // sanctioned route; the resolver assigns mu_s = 1e6 internally.
+      if (!std::isnan(out.mu_s) && out.mu_s > 1.0e5)
+      {
+         MFEM_ABORT("[[spatial]] rule sets mu_s = " << out.mu_s
+                    << " > 1.0e5 — to mark a barrier region, use "
+                    << "kind = \"barrier\" instead of a large mu_s "
+                    << "(R-114).");
+      }
+   }
+   else
+   {
+      out.a       = toml_real(rule_tbl, "a",       nan);
+      out.b       = toml_real(rule_tbl, "b",       nan);
+      out.Dc      = toml_real(rule_tbl, "Dc",      nan);
+      out.V_init  = toml_real(rule_tbl, "V_init",  nan);
+      out.f_0     = toml_real(rule_tbl, "f_0",     nan);
+      out.V_0     = toml_real(rule_tbl, "V_0",     nan);
+      out.sigma_n = toml_real(rule_tbl, "sigma_n", nan);
+      out.eta     = toml_real(rule_tbl, "eta",     nan);
+   }
+}
+
+void parse_slip_weakening(const toml::value& fw_tbl, SlipWeakeningBlock& out)
+{
+   out.mu_s_default     = toml_real(fw_tbl, "mu_s_default",     1.1);
+   out.mu_d_default     = toml_real(fw_tbl, "mu_d_default",     0.5);
+   // D-3 alias for d_c_default.
+   if (fw_tbl.contains("d_c_default"))
+   {
+      out.d_c_default = toml_real(fw_tbl, "d_c_default", 0.5);
+      MFEM_VERIFY(!fw_tbl.contains("d_o_default"),
+                  "[friction.slip_weakening] sets both 'd_c_default' and "
+                  "'d_o_default'; supply only one");
+   }
+   else if (fw_tbl.contains("d_o_default"))
+   {
+      out.d_c_default = toml_real(fw_tbl, "d_o_default", 0.5);
+      if (!g_do_notice_once.default_warned)
+      {
+         mfem::out << "[spatial_friction] notice: accepting deprecated "
+                      "alias 'd_o_default' for 'd_c_default' (D-3); this "
+                      "notice fires once per process.\n";
+         g_do_notice_once.default_warned = true;
+      }
+   }
+   else
+   {
+      out.d_c_default = 0.5;
+   }
+   out.cohesion_default = toml_real(fw_tbl, "cohesion_default", 0.0);
+
+   if (fw_tbl.contains("spatial"))
+   {
+      const auto& arr = fw_tbl.at("spatial").as_array();
+      out.spatial.reserve(arr.size());
+      for (const auto& r : arr)
+      {
+         SpatialRule rule;
+         parse_spatial_rule(r, rule, /*is_lsw=*/true);
+         out.spatial.push_back(rule);
+      }
+   }
+
+   // D-3 validator on defaults (relaxed: no upper bound on mu_s).
+   MFEM_VERIFY(out.mu_d_default > 0.0,
+               "[friction.slip_weakening] mu_d_default ("
+               << out.mu_d_default << ") must be > 0");
+   MFEM_VERIFY(out.mu_d_default < out.mu_s_default,
+               "[friction.slip_weakening] mu_d_default (" << out.mu_d_default
+               << ") must be < mu_s_default (" << out.mu_s_default << ")");
+   MFEM_VERIFY(out.d_c_default > 0.0,
+               "[friction.slip_weakening] d_c_default ("
+               << out.d_c_default << ") must be > 0");
+   MFEM_VERIFY(out.cohesion_default >= 0.0,
+               "[friction.slip_weakening] cohesion_default ("
+               << out.cohesion_default << ") must be >= 0");
+   // R-114 on defaults: a user-supplied mu_s_default > 1e5 is rejected.
+   MFEM_VERIFY(out.mu_s_default <= 1.0e5,
+               "[friction.slip_weakening] mu_s_default ("
+               << out.mu_s_default << ") > 1.0e5 — to mark every DOF as a "
+               "barrier, use a [[spatial]] rule with kind = \"barrier\" "
+               "(R-114).");
+}
+
+void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
+{
+   out.f_0_default     = toml_real(rs_tbl, "f_0_default",     0.6);
+   out.V_0_default     = toml_real(rs_tbl, "V_0_default",     1.0e-6);
+   out.a_default       = toml_real(rs_tbl, "a_default",       0.010);
+   out.b_default       = toml_real(rs_tbl, "b_default",       0.015);
+   out.Dc_default      = toml_real(rs_tbl, "Dc_default",      0.004);
+   out.V_init_default  = toml_real(rs_tbl, "V_init_default",  1.0e-9);
+   out.sigma_n_default = toml_real(rs_tbl, "sigma_n_default", 50.0e6);
+
+   if (rs_tbl.contains("eta"))
+   {
+      const auto& v = rs_tbl.at("eta");
+      if (v.is_string())
+      {
+         const std::string s = v.as_string();
+         if (s == "auto")
+         {
+            out.eta_auto = true;
+            out.eta_default = 0.0;
+         }
+         else
+         {
+            MFEM_ABORT("[friction.rate_state] eta must be 'auto' or a "
+                       "positive real; got string '" << s << "'");
+         }
+      }
+      else if (v.is_floating() || v.is_integer())
+      {
+         out.eta_auto = false;
+         out.eta_default = static_cast<real_t>(
+                              v.is_floating() ? v.as_floating()
+                                              : v.as_integer());
+         MFEM_VERIFY(out.eta_default > 0.0,
+                     "[friction.rate_state] eta (" << out.eta_default
+                     << ") must be > 0 when supplied as a number");
+      }
+      else
+      {
+         MFEM_ABORT("[friction.rate_state] eta must be 'auto' or a positive real");
+      }
+   }
+   else
+   {
+      out.eta_auto    = true;
+      out.eta_default = 0.0;
+   }
+
+   if (rs_tbl.contains("spatial"))
+   {
+      const auto& arr = rs_tbl.at("spatial").as_array();
+      out.spatial.reserve(arr.size());
+      for (const auto& r : arr)
+      {
+         SpatialRule rule;
+         parse_spatial_rule(r, rule, /*is_lsw=*/false);
+         out.spatial.push_back(rule);
+      }
+   }
+
+   // Defaults validator.
+   MFEM_VERIFY(out.a_default > 0.0,
+               "[friction.rate_state] a_default must be > 0; got "
+               << out.a_default);
+   MFEM_VERIFY(out.b_default > 0.0,
+               "[friction.rate_state] b_default must be > 0; got "
+               << out.b_default);
+   MFEM_VERIFY(out.a_default < out.b_default,
+               "[friction.rate_state] a_default (" << out.a_default
+               << ") must be < b_default (" << out.b_default << ")");
+   MFEM_VERIFY(out.Dc_default > 0.0,
+               "[friction.rate_state] Dc_default must be > 0");
+   MFEM_VERIFY(out.V_0_default > 0.0,
+               "[friction.rate_state] V_0_default must be > 0");
+   MFEM_VERIFY(out.sigma_n_default > 0.0,
+               "[friction.rate_state] sigma_n_default must be > 0");
+   MFEM_VERIFY(out.f_0_default > 0.0 && out.f_0_default < 1.0,
+               "[friction.rate_state] f_0_default must be in (0, 1)");
+}
+
+SpatialFrictionConfig parse_root(const toml::value& root)
+{
+   SpatialFrictionConfig cfg;
+
+   MFEM_VERIFY(root.contains("meta"),
+               "Top-level [meta] block missing");
+   const auto& meta = root.at("meta");
+   cfg.schema_version = toml_int(meta, "schema_version", 0);
+   MFEM_VERIFY(cfg.schema_version == 1,
+               "[meta].schema_version must be 1; got "
+               << cfg.schema_version);
+   {
+      const std::string law_s = toml_str(meta, "law", std::string());
+      if      (law_s == "slip_weakening") { cfg.law = FrictionLawKind::SlipWeakening; }
+      else if (law_s == "rate_state")     { cfg.law = FrictionLawKind::RateState; }
+      else
+      {
+         MFEM_ABORT("[meta].law must be 'slip_weakening' or 'rate_state'; "
+                    "got '" << law_s << "'");
+      }
+   }
+   cfg.description = toml_str(meta, "description", std::string());
+
+   // Top-level mandatory blocks per spatial_friction_config_schema.md
+   // §"Top-level layout".  Without these guards, an omitted block would
+   // silently default to the struct defaults (e.g. zero pre-stress for
+   // a missing [stress] block, tfinal=12s for a missing [time] block).
+   MFEM_VERIFY(root.contains("material_constant_fallback"),
+               "Top-level [material_constant_fallback] block missing");
+   MFEM_VERIFY(root.contains("pore_pressure"),
+               "Top-level [pore_pressure] block missing");
+   MFEM_VERIFY(root.contains("mesh"),
+               "Top-level [mesh] block missing");
+   MFEM_VERIFY(root.contains("velocity"),
+               "Top-level [velocity] block missing");
+   MFEM_VERIFY(root.contains("stress"),
+               "Top-level [stress] block missing");
+   MFEM_VERIFY(root.contains("numerics"),
+               "Top-level [numerics] block missing");
+   MFEM_VERIFY(root.contains("time"),
+               "Top-level [time] block missing");
+   MFEM_VERIFY(root.contains("output"),
+               "Top-level [output] block missing");
+
+   if (root.contains("material_constant_fallback"))
+   {
+      const auto& m = root.at("material_constant_fallback");
+      cfg.material_fallback.lambda = toml_real(m, "lambda", 32.0e9);
+      cfg.material_fallback.mu     = toml_real(m, "mu",     32.0e9);
+      cfg.material_fallback.rho    = toml_real(m, "rho",    2670.0);
+   }
+   // Material-fallback validator (D-3 doesn't relax these).
+   MFEM_VERIFY(cfg.material_fallback.mu > 0.0,
+               "[material_constant_fallback].mu must be > 0");
+   MFEM_VERIFY(cfg.material_fallback.rho > 0.0,
+               "[material_constant_fallback].rho must be > 0");
+   MFEM_VERIFY(cfg.material_fallback.lambda + 2.0 * cfg.material_fallback.mu > 0.0,
+               "[material_constant_fallback] (lambda + 2*mu) must be > 0");
+
+   if (root.contains("pore_pressure"))
+   {
+      const auto& pp = root.at("pore_pressure");
+      cfg.stress.pore_pressure.P_p_pa = toml_real(pp, "P_p_pa", 0.0);
+      cfg.stress.pore_pressure.P_p_grad_pa_per_m = toml_real(pp, "P_p_grad_pa_per_m", 0.0);
+      cfg.stress.pore_pressure.min_sigma_n_pa = toml_real(pp, "min_sigma_n_pa", 0.0);
+   }
+   MFEM_VERIFY(cfg.stress.pore_pressure.min_sigma_n_pa >= 0.0,
+               "[pore_pressure].min_sigma_n_pa must be >= 0");
+   if (cfg.stress.pore_pressure.P_p_grad_pa_per_m < 0.0)
+   {
+      mfem::out << "[spatial_friction] warning: [pore_pressure].P_p_grad_pa_per_m = "
+                << cfg.stress.pore_pressure.P_p_grad_pa_per_m
+                << " is negative (pore pressure decreases with depth) — "
+                << "unusual but permitted.\n";
+   }
+
+   if (root.contains("mesh"))
+   {
+      const auto& m = root.at("mesh");
+      cfg.mesh.path  = toml_str(m, "path", std::string());
+      cfg.mesh.order = toml_int(m, "order", 1);
+   }
+   MFEM_VERIFY(!cfg.mesh.path.empty(), "[mesh].path must be non-empty");
+   MFEM_VERIFY(cfg.mesh.order >= 1,    "[mesh].order must be >= 1");
+
+   if (root.contains("velocity"))
+   {
+      const auto& v = root.at("velocity");
+      cfg.velocity.model = parse_velocity_model(
+                              toml_str(v, "model", "cvmh"));
+      cfg.velocity.dataset_root = toml_str(v, "dataset_root", std::string());
+      cfg.velocity.override_path = toml_str(v, "override_path", std::string());
+   }
+   MFEM_VERIFY(!cfg.velocity.dataset_root.empty()
+               || !cfg.velocity.override_path.empty(),
+               "[velocity] must set either 'dataset_root' "
+               "(for model-based resolution) or 'override_path'");
+
+   if (root.contains("stress"))
+   {
+      const auto& s = root.at("stress");
+      MFEM_VERIFY(s.contains("kind"),
+                  "[stress].kind is required; must be "
+                  "\"constant_tensor\" or \"sidecar_hdf5\"");
+      cfg.stress.kind = parse_stress_kind(toml_str(s, "kind", "constant_tensor"));
+
+      const bool has_sxx = s.contains("sigma_xx_pa");
+      const bool has_syy = s.contains("sigma_yy_pa");
+      const bool has_szz = s.contains("sigma_zz_pa");
+      const bool has_sxy = s.contains("sigma_xy_pa");
+      const bool has_syz = s.contains("sigma_yz_pa");
+      const bool has_sxz = s.contains("sigma_xz_pa");
+      const bool has_path = s.contains("sidecar_path")
+                            && !toml_str(s, "sidecar_path", std::string()).empty();
+
+      if (cfg.stress.kind == StressSourceKind::ConstantTensor)
+      {
+         MFEM_VERIFY(has_sxx && has_syy && has_szz
+                     && has_sxy && has_syz && has_sxz,
+                     "[stress] kind=\"constant_tensor\" requires all six "
+                     "sigma_*_pa keys to be present");
+         MFEM_VERIFY(!has_path,
+                     "[stress] kind=\"constant_tensor\" must NOT set "
+                     "sidecar_path (it is for kind=\"sidecar_hdf5\" only)");
+         cfg.stress.sigma_xx_pa = toml_real(s, "sigma_xx_pa", 0.0);
+         cfg.stress.sigma_yy_pa = toml_real(s, "sigma_yy_pa", 0.0);
+         cfg.stress.sigma_zz_pa = toml_real(s, "sigma_zz_pa", 0.0);
+         cfg.stress.sigma_xy_pa = toml_real(s, "sigma_xy_pa", 0.0);
+         cfg.stress.sigma_yz_pa = toml_real(s, "sigma_yz_pa", 0.0);
+         cfg.stress.sigma_xz_pa = toml_real(s, "sigma_xz_pa", 0.0);
+      }
+      else
+      {
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
+                     && !has_sxy && !has_syz && !has_sxz,
+                     "[stress] kind=\"sidecar_hdf5\" must NOT set any of "
+                     "sigma_xx_pa..sigma_xz_pa (those are for "
+                     "kind=\"constant_tensor\" only)");
+         MFEM_VERIFY(has_path,
+                     "[stress] kind=\"sidecar_hdf5\" requires a non-empty "
+                     "sidecar_path");
+         cfg.stress.sidecar_path = toml_str(s, "sidecar_path", std::string());
+      }
+   }
+
+   if (root.contains("numerics"))
+   {
+      const auto& n = root.at("numerics");
+      cfg.numerics.ader_order = toml_int(n, "ader_order", 2);
+      cfg.numerics.mixed_flux = toml_str(n, "mixed_flux", "none");
+      cfg.numerics.cfl        = toml_real(n, "cfl", 0.5);
+      cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
+   }
+   MFEM_VERIFY(cfg.numerics.ader_order >= 1,
+               "[numerics].ader_order must be >= 1");
+   MFEM_VERIFY(cfg.numerics.mixed_flux == "none"
+               || cfg.numerics.mixed_flux == "adjacent"
+               || cfg.numerics.mixed_flux == "all_continuous",
+               "[numerics].mixed_flux must be one of "
+               "{none, adjacent, all_continuous}; got '"
+               << cfg.numerics.mixed_flux << "'");
+   MFEM_VERIFY(cfg.numerics.cfl > 0.0 && cfg.numerics.cfl < 1.0,
+               "[numerics].cfl must be in (0, 1)");
+
+   if (root.contains("time"))
+   {
+      const auto& t = root.at("time");
+      cfg.time.tfinal     = toml_time_seconds(t, "tfinal",     12.0);
+      cfg.time.t_initial  = toml_real        (t, "t_initial",  0.0);
+      cfg.time.dt_initial = parse_dt_initial (t);
+      cfg.time.dt_max     = toml_time_seconds(t, "dt_max",     0.1);
+   }
+   MFEM_VERIFY(cfg.time.tfinal > 0.0,
+               "[time].tfinal must be > 0; got " << cfg.time.tfinal);
+   MFEM_VERIFY(cfg.time.dt_max > 0.0,
+               "[time].dt_max must be > 0; got " << cfg.time.dt_max);
+   MFEM_VERIFY(cfg.time.t_initial >= 0.0,
+               "[time].t_initial must be >= 0; got " << cfg.time.t_initial);
+   // (dt_initial is fully validated inside parse_dt_initial — it is
+   // either > 0 or exactly the -1 "auto" sentinel set by the literal
+   // string "auto".  Literal numeric -1.0 is rejected per R-202.)
+
+   if (root.contains("output"))
+   {
+      const auto& o = root.at("output");
+      cfg.output.output_dir              = toml_str (o, "output_dir",              std::string());
+      cfg.output.restart_prefix          = toml_str (o, "restart_prefix",          "cp");
+      cfg.output.paraview_volume         = toml_str (o, "paraview_volume",         "hdf5");
+      cfg.output.paraview_bulk           = toml_str (o, "paraview_bulk",           "hdf5");
+      cfg.output.paraview_fault          = toml_str (o, "paraview_fault",          "hdf5");
+      cfg.output.paraview_volume_dt      = toml_time_seconds(o, "paraview_volume_dt", 0.05);
+      cfg.output.paraview_bulk_dt        = toml_time_seconds(o, "paraview_bulk_dt",   0.05);
+      cfg.output.paraview_fault_dt       = toml_time_seconds(o, "paraview_fault_dt",  0.001);
+      cfg.output.paraview_volume_zfp_tol = toml_real(o, "paraview_volume_zfp_tol", 1e-3);
+      cfg.output.paraview_bulk_zfp_tol   = toml_real(o, "paraview_bulk_zfp_tol",   1e-3);
+      cfg.output.paraview_fault_zfp_tol  = toml_real(o, "paraview_fault_zfp_tol",  1e-12);
+      cfg.output.max_snapshots           = toml_int (o, "max_snapshots",           5000);
+      cfg.output.checkpoint_every_steps  = toml_int (o, "checkpoint_every_steps",  10000);
+   }
+   MFEM_VERIFY(!cfg.output.output_dir.empty(),
+               "[output].output_dir must be non-empty");
+   MFEM_VERIFY(!cfg.output.restart_prefix.empty(),
+               "[output].restart_prefix must be non-empty");
+   for (const auto& mode_name : { std::pair<std::string, std::string>
+                                  {"paraview_volume", cfg.output.paraview_volume},
+                                  {"paraview_bulk",   cfg.output.paraview_bulk},
+                                  {"paraview_fault",  cfg.output.paraview_fault} })
+   {
+      MFEM_VERIFY(mode_name.second == "hdf5"
+                  || mode_name.second == "vtu"
+                  || mode_name.second == "off",
+                  "[output]." << mode_name.first << " must be one of "
+                  "{hdf5, vtu, off}; got '" << mode_name.second << "'");
+   }
+   MFEM_VERIFY(cfg.output.paraview_volume_zfp_tol >= 0.0
+               && cfg.output.paraview_bulk_zfp_tol >= 0.0
+               && cfg.output.paraview_fault_zfp_tol >= 0.0,
+               "[output] paraview_*_zfp_tol must all be >= 0");
+   MFEM_VERIFY(cfg.output.paraview_volume_dt > 0.0,
+               "[output].paraview_volume_dt must be > 0; got "
+               << cfg.output.paraview_volume_dt);
+   MFEM_VERIFY(cfg.output.paraview_bulk_dt > 0.0,
+               "[output].paraview_bulk_dt must be > 0; got "
+               << cfg.output.paraview_bulk_dt);
+   MFEM_VERIFY(cfg.output.paraview_fault_dt > 0.0,
+               "[output].paraview_fault_dt must be > 0; got "
+               << cfg.output.paraview_fault_dt);
+   MFEM_VERIFY(cfg.output.max_snapshots >= 1,
+               "[output].max_snapshots must be >= 1");
+   MFEM_VERIFY(cfg.output.checkpoint_every_steps >= 1,
+               "[output].checkpoint_every_steps must be >= 1");
+
+   if (root.contains("nucleation"))
+   {
+      const auto& nuc = root.at("nucleation");
+      cfg.nucleation.enabled        = true;
+      cfg.nucleation.hypocenter_x_m = toml_real(nuc, "hypocenter_x_m", 0.0);
+      cfg.nucleation.hypocenter_y_m = toml_real(nuc, "hypocenter_y_m", 0.0);
+      cfg.nucleation.hypocenter_z_m = toml_real(nuc, "hypocenter_z_m", 0.0);
+      cfg.nucleation.r_crit_m       = toml_real(nuc, "r_crit_m",       4000.0);
+      cfg.nucleation.t0_decay_s     = toml_real(nuc, "t0_decay_s",     0.5);
+      MFEM_VERIFY(cfg.nucleation.r_crit_m   > 0.0,
+                  "[nucleation].r_crit_m must be > 0");
+      MFEM_VERIFY(cfg.nucleation.t0_decay_s > 0.0,
+                  "[nucleation].t0_decay_s must be > 0");
+
+      // Round-6: optional `kind` switch — default "strength_reduction"
+      // preserves round-1..5 behaviour byte-equivalently.
+      const std::string kind_s =
+         toml_str(nuc, "kind", "strength_reduction");
+      if (kind_s == "strength_reduction")
+      {
+         cfg.nucleation.kind = NucleationKind::StrengthReduction;
+      }
+      else if (kind_s == "overstress")
+      {
+         cfg.nucleation.kind = NucleationKind::Overstress;
+      }
+      else
+      {
+         MFEM_ABORT("[nucleation].kind must be \"strength_reduction\" or "
+                    "\"overstress\"; got '" << kind_s << "'");
+      }
+
+      // Optional [nucleation.overstress] sub-block.  Stub fields; the
+      // resolver currently aborts on NucleationKind::Overstress (see
+      // ResolveOverstress).
+      if (nuc.contains("overstress"))
+      {
+         const auto& os = nuc.at("overstress");
+         cfg.nucleation.overstress.delta_tau_pa =
+            toml_real(os, "delta_tau_pa", 0.0);
+         cfg.nucleation.overstress.direction =
+            toml_int(os, "direction", 1);
+         cfg.nucleation.overstress.delta_sigma_n_pa =
+            toml_real(os, "delta_sigma_n_pa", 0.0);
+         MFEM_VERIFY(cfg.nucleation.overstress.direction == 0
+                     || cfg.nucleation.overstress.direction == 1,
+                     "[nucleation.overstress].direction must be 0 (dip) "
+                     "or 1 (strike); got "
+                     << cfg.nucleation.overstress.direction);
+      }
+   }
+   // else: enabled stays false; driver runs without nucleation.
+
+   // Friction-law-specific block.  Both-or-neither rule (Validator §3).
+   const bool has_lsw = root.contains("friction")
+                        && root.at("friction").contains("slip_weakening");
+   const bool has_rs  = root.contains("friction")
+                        && root.at("friction").contains("rate_state");
+
+   if (cfg.law == FrictionLawKind::SlipWeakening)
+   {
+      MFEM_VERIFY(has_lsw,
+                  "[meta].law=\"slip_weakening\" requires "
+                  "[friction.slip_weakening] block");
+      MFEM_VERIFY(!has_rs,
+                  "[meta].law=\"slip_weakening\" forbids "
+                  "[friction.rate_state] block");
+      SlipWeakeningBlock blk;
+      parse_slip_weakening(root.at("friction").at("slip_weakening"), blk);
+      cfg.slip_weakening = blk;
+   }
+   else
+   {
+      MFEM_VERIFY(has_rs,
+                  "[meta].law=\"rate_state\" requires "
+                  "[friction.rate_state] block");
+      MFEM_VERIFY(!has_lsw,
+                  "[meta].law=\"rate_state\" forbids "
+                  "[friction.slip_weakening] block");
+      RateStateBlock blk;
+      parse_rate_state(root.at("friction").at("rate_state"), blk);
+      cfg.rate_state = blk;
+   }
+
+   return cfg;
+}
+
+}  // namespace
+
+#endif  // SEAS_USE_TOML
+
+// =====================================================================
+//  LoadSpatialFrictionConfig / ParseSpatialFrictionConfigString
+// =====================================================================
+
+SpatialFrictionConfig LoadSpatialFrictionConfig(const std::string& toml_path)
+{
+#ifdef SEAS_USE_TOML
+   try
+   {
+      const toml::value root = toml::parse(toml_path);
+      return parse_root(root);
+   }
+   catch (const std::exception& e)
+   {
+      MFEM_ABORT("LoadSpatialFrictionConfig('" << toml_path
+                 << "'): toml parse error: " << e.what());
+      return {};
+   }
+#else
+   (void)toml_path;
+   MFEM_ABORT("LoadSpatialFrictionConfig: SEAS_USE_TOML is not defined.  "
+              "Rebuild with extern/toml11/toml.hpp present (the Makefile "
+              "auto-enables SEAS_USE_TOML when the file exists).");
+   return {};
+#endif
+}
+
+SpatialFrictionConfig ParseSpatialFrictionConfigString(const std::string& toml_text)
+{
+#ifdef SEAS_USE_TOML
+   try
+   {
+      std::istringstream iss(toml_text);
+      const toml::value root = toml::parse(iss, "<inline-test>");
+      return parse_root(root);
+   }
+   catch (const std::exception& e)
+   {
+      MFEM_ABORT("ParseSpatialFrictionConfigString: toml parse error: "
+                 << e.what());
+      return {};
+   }
+#else
+   (void)toml_text;
+   MFEM_ABORT("ParseSpatialFrictionConfigString: SEAS_USE_TOML not defined.");
+   return {};
+#endif
+}
+
+// =====================================================================
+//  SpatialFrictionResolver
+// =====================================================================
+
+SlipWeakeningPerDOFParams SpatialFrictionResolver::ResolveSlipWeakening(
+   const SlipWeakeningBlock& cfg,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_attr) const
+{
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveSlipWeakening: dof_coords_3d.Size() must be 3 * N; "
+               "got " << dof_coords_3d.Size());
+   MFEM_VERIFY(dof_to_attr.Size() == N,
+               "ResolveSlipWeakening: dof_to_attr.Size() ("
+               << dof_to_attr.Size() << ") must equal num_dofs (" << N << ")");
+
+   // Validate every default is not NaN (R-014).
+   MFEM_VERIFY(!std::isnan(cfg.mu_s_default)
+               && !std::isnan(cfg.mu_d_default)
+               && !std::isnan(cfg.d_c_default)
+               && !std::isnan(cfg.cohesion_default),
+               "ResolveSlipWeakening: every LSW default must be a number "
+               "(no NaN sentinels at the block level)");
+
+   SlipWeakeningPerDOFParams p;
+   p.mu_s.SetSize(N);
+   p.mu_d.SetSize(N);
+   p.d_c.SetSize(N);
+   p.cohesion.SetSize(N);
+
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t x = dof_coords_3d(3*i + 0);
+      const real_t y = dof_coords_3d(3*i + 1);
+      const real_t z = dof_coords_3d(3*i + 2);
+
+      real_t mu_s_i = cfg.mu_s_default;
+      real_t mu_d_i = cfg.mu_d_default;
+      real_t d_c_i  = cfg.d_c_default;
+      real_t coh_i  = cfg.cohesion_default;
+
+      for (const auto& r : cfg.spatial)
+      {
+         if (!r.matches(x, y, z, dof_to_attr[i])) { continue; }
+         if (r.kind == SpatialRule::Kind::Barrier)
+         {
+            // R-114 sentinel: locks the DOF.  Users never type 1.0e6.
+            mu_s_i = 1.0e6;
+            // Leave mu_d, d_c, cohesion at their pre-barrier values:
+            // the barrier short-circuit in
+            // LSWFrictionCoefficient_ForcedRupture only reads mu_s.
+            continue;
+         }
+         if (!std::isnan(r.mu_s))     { mu_s_i = r.mu_s; }
+         if (!std::isnan(r.mu_d))     { mu_d_i = r.mu_d; }
+         if (!std::isnan(r.d_c))      { d_c_i  = r.d_c; }
+         if (!std::isnan(r.cohesion)) { coh_i  = r.cohesion; }
+      }
+
+      // Per-DOF validator.  Barrier DOFs have mu_s = 1e6 ≫ mu_d, so
+      // the inequality is automatically satisfied.
+      MFEM_VERIFY(mu_d_i > 0.0,
+                  "ResolveSlipWeakening: mu_d <= 0 at DOF " << i
+                  << " (got " << mu_d_i << ")");
+      MFEM_VERIFY(mu_d_i < mu_s_i,
+                  "ResolveSlipWeakening: mu_d (" << mu_d_i << ") >= mu_s ("
+                  << mu_s_i << ") at DOF " << i);
+      MFEM_VERIFY(d_c_i > 0.0,
+                  "ResolveSlipWeakening: d_c <= 0 at DOF " << i
+                  << " (got " << d_c_i << ")");
+      MFEM_VERIFY(coh_i >= 0.0,
+                  "ResolveSlipWeakening: cohesion < 0 at DOF " << i
+                  << " (got " << coh_i << ")");
+
+      p.mu_s(i)     = mu_s_i;
+      p.mu_d(i)     = mu_d_i;
+      p.d_c(i)      = d_c_i;
+      p.cohesion(i) = coh_i;
+   }
+
+   return p;
+}
+
+namespace
+{
+
+template <typename MeshT>
+RateStatePerDOFParams resolve_rs_impl(
+   const RateStateBlock&     cfg,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const Array<int>&         dof_to_attr,
+   const MaterialField&      material,
+   MeshT&                    mesh,
+   const PorePressureSpec&   pp,
+   const Vector&             sigma_n_total_per_dof)
+{
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveRateState: dof_coords_3d.Size() must be 3 * N");
+   MFEM_VERIFY(dof_to_elem.Size() == N,
+               "ResolveRateState: dof_to_elem.Size() != N");
+   MFEM_VERIFY(dof_to_attr.Size() == N,
+               "ResolveRateState: dof_to_attr.Size() != N");
+   MFEM_VERIFY(sigma_n_total_per_dof.Size() == N || sigma_n_total_per_dof.Size() == 0,
+               "ResolveRateState: sigma_n_total_per_dof.Size() must be 0 or N");
+
+   RateStatePerDOFParams p;
+   p.a.SetSize(N);   p.b.SetSize(N);   p.Dc.SetSize(N);
+   p.V_init.SetSize(N);
+   p.f_0.SetSize(N); p.V_0.SetSize(N); p.eta.SetSize(N);
+   p.sigma_n_eff.SetSize(N);
+
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t x = dof_coords_3d(3*i + 0);
+      const real_t y = dof_coords_3d(3*i + 1);
+      const real_t z = dof_coords_3d(3*i + 2);
+
+      // Seed defaults.
+      real_t a_i      = cfg.a_default;
+      real_t b_i      = cfg.b_default;
+      real_t Dc_i     = cfg.Dc_default;
+      real_t V_init_i = cfg.V_init_default;
+      real_t f0_i     = cfg.f_0_default;
+      real_t V0_i     = cfg.V_0_default;
+      real_t eta_i    = cfg.eta_default;
+      real_t sn_i     = cfg.sigma_n_default;
+
+      bool   eta_rule_set = false;
+
+      for (const auto& r : cfg.spatial)
+      {
+         if (!r.matches(x, y, z, dof_to_attr[i])) { continue; }
+         // RS resolver ignores Barrier (LSW-only concept).
+         if (r.kind == SpatialRule::Kind::Barrier) { continue; }
+         if (!std::isnan(r.a))       { a_i      = r.a; }
+         if (!std::isnan(r.b))       { b_i      = r.b; }
+         if (!std::isnan(r.Dc))      { Dc_i     = r.Dc; }
+         if (!std::isnan(r.V_init))  { V_init_i = r.V_init; }
+         if (!std::isnan(r.f_0))     { f0_i     = r.f_0; }
+         if (!std::isnan(r.V_0))     { V0_i     = r.V_0; }
+         if (!std::isnan(r.sigma_n)) { sn_i     = r.sigma_n; }
+         if (!std::isnan(r.eta))     { eta_i = r.eta;  eta_rule_set = true; }
+      }
+
+      // Effective normal stress (depth convention: z<0 below surface).
+      real_t sigma_n_total;
+      if (sigma_n_total_per_dof.Size() == N)
+      {
+         sigma_n_total = sigma_n_total_per_dof(i);
+      }
+      else
+      {
+         sigma_n_total = sn_i;
+      }
+      const real_t depth = std::max(static_cast<real_t>(0.0), -z);
+      const real_t P_p   = pp.P_p_pa + pp.P_p_grad_pa_per_m * depth;
+      real_t sigma_n_eff = sigma_n_total - P_p;
+      if (pp.min_sigma_n_pa > 0.0 && sigma_n_eff < pp.min_sigma_n_pa)
+      {
+         sigma_n_eff = pp.min_sigma_n_pa;
+      }
+
+      // eta: auto path computes 0.5 * sqrt(mu * rho) per DOF.
+      if (cfg.eta_auto)
+      {
+         MFEM_VERIFY(!eta_rule_set,
+                     "ResolveRateState: eta='auto' and a spatial rule "
+                     "also set 'eta' at DOF " << i
+                     << " — one source of truth required");
+         const int e = dof_to_elem[i];
+         ElementTransformation* T = mesh.GetElementTransformation(e);
+         // True reference centroid for the bulk element.  For
+         // MaterialField::Mode::Coefficient, ip.Init(0) lands on the
+         // reference origin (a CORNER), not the centroid, which biases
+         // mu and rho by the heterogeneity scale of one element.  The
+         // centroid is the best per-element stop-gap until Phase 5
+         // wires FaultGeometry::fault_dof_ip(i) (R-111).
+         const Geometry::Type gtype = mesh.GetElementBaseGeometry(e);
+         const IntegrationPoint& ip = Geometries.GetCenter(gtype);
+         real_t lam_e, mu_e, rho_e;
+         material.EvalAt(e, *T, ip, lam_e, mu_e, rho_e);
+         MFEM_VERIFY(mu_e > 0.0 && rho_e > 0.0,
+                     "ResolveRateState: eta=auto needs mu>0 and rho>0 at "
+                     "DOF " << i << " (got mu=" << mu_e << ", rho="
+                     << rho_e << ")");
+         eta_i = 0.5 * std::sqrt(mu_e * rho_e);
+      }
+
+      // Per-DOF validator.
+      MFEM_VERIFY(a_i > 0.0, "ResolveRateState: a <= 0 at DOF " << i);
+      MFEM_VERIFY(b_i > 0.0, "ResolveRateState: b <= 0 at DOF " << i);
+      MFEM_VERIFY(a_i < b_i, "ResolveRateState: a >= b at DOF " << i);
+      MFEM_VERIFY(Dc_i > 0.0, "ResolveRateState: Dc <= 0 at DOF " << i);
+      MFEM_VERIFY(V0_i > 0.0, "ResolveRateState: V_0 <= 0 at DOF " << i);
+      MFEM_VERIFY(sigma_n_eff > 0.0,
+                  "ResolveRateState: sigma_n_eff <= 0 at DOF " << i);
+      MFEM_VERIFY(f0_i > 0.0 && f0_i < 1.0,
+                  "ResolveRateState: f_0 not in (0,1) at DOF " << i);
+
+      p.a(i) = a_i;   p.b(i) = b_i;   p.Dc(i) = Dc_i;
+      p.V_init(i) = V_init_i;
+      p.f_0(i) = f0_i; p.V_0(i) = V0_i;
+      p.eta(i) = eta_i;
+      p.sigma_n_eff(i) = sigma_n_eff;
+   }
+
+   return p;
+}
+
+}  // namespace
+
+RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
+   const RateStateBlock&     cfg,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const Array<int>&         dof_to_attr,
+   const MaterialField&      material,
+   ParMesh&                  pmesh,
+   const PorePressureSpec&   pp,
+   const Vector&             sigma_n_total_per_dof) const
+{
+   return resolve_rs_impl<ParMesh>(cfg, dof_coords_3d, dof_to_elem,
+                                   dof_to_attr, material, pmesh, pp,
+                                   sigma_n_total_per_dof);
+}
+
+RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
+   const RateStateBlock&     cfg,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const Array<int>&         dof_to_attr,
+   const MaterialField&      material,
+   mfem::Mesh&               mesh,
+   const PorePressureSpec&   pp,
+   const Vector&             sigma_n_total_per_dof) const
+{
+   return resolve_rs_impl<mfem::Mesh>(cfg, dof_coords_3d, dof_to_elem,
+                                      dof_to_attr, material, mesh, pp,
+                                      sigma_n_total_per_dof);
+}
+
+namespace
+{
+
+template <typename MeshT>
+ForcedRupturePerDOFParams resolve_forced_impl(
+   const NucleationSpec&     nuc,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const MaterialField&      material,
+   MeshT&                    mesh)
+{
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveForcedRupture: dof_coords_3d.Size() must be 3 * N");
+
+   ForcedRupturePerDOFParams p;
+   p.T_forced_s.SetSize(N);
+   p.t0_decay_s.SetSize(N);
+
+   if (!nuc.enabled
+       || nuc.kind != NucleationKind::StrengthReduction)
+   {
+      // TPV205 byte-exact default: T = 1e9, t_0 = 0.
+      // Also returned for non-StrengthReduction kinds (Overstress)
+      // so the iterator's forced-rupture mu_eff path is a no-op in
+      // those modes — the overstress perturbation lives in
+      // DOFData::tau{1,2}_nuc / sigma_n_nuc and is consumed by plain
+      // LSW (the driver dispatches FaultFrictionLaw::LSW for
+      // kind=Overstress).  R-701 round-7.
+      p.T_forced_s = 1.0e9;
+      p.t0_decay_s = 0.0;
+      return p;
+   }
+
+   MFEM_VERIFY(dof_to_elem.Size() == N,
+               "ResolveForcedRupture: dof_to_elem.Size() != N");
+   MFEM_VERIFY(nuc.r_crit_m  > 0.0,
+               "ResolveForcedRupture: nuc.r_crit_m must be > 0");
+   MFEM_VERIFY(nuc.t0_decay_s > 0.0,
+               "ResolveForcedRupture: nuc.t0_decay_s must be > 0");
+
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t dx = dof_coords_3d(3*i + 0) - nuc.hypocenter_x_m;
+      const real_t dy = dof_coords_3d(3*i + 1) - nuc.hypocenter_y_m;
+      const real_t dz = dof_coords_3d(3*i + 2) - nuc.hypocenter_z_m;
+      const real_t r  = std::sqrt(dx*dx + dy*dy + dz*dz);
+
+      if (r >= nuc.r_crit_m)
+      {
+         p.T_forced_s(i) = 1.0e9;
+         p.t0_decay_s(i) = nuc.t0_decay_s;
+         continue;
+      }
+
+      // Local Vs at the DOF's bulk element.
+      const int e = dof_to_elem[i];
+      ElementTransformation* T = mesh.GetElementTransformation(e);
+      // True reference centroid for the bulk element.  ip.Init(0)
+      // would land on the reference origin (a CORNER), which biases
+      // Vs by the heterogeneity scale of one element when MaterialField
+      // is in Mode::Coefficient.  The centroid is the best per-element
+      // stop-gap until Phase 5 wires FaultGeometry::fault_dof_ip(i)
+      // (R-111).
+      const Geometry::Type gtype = mesh.GetElementBaseGeometry(e);
+      const IntegrationPoint& ip = Geometries.GetCenter(gtype);
+      real_t lam_e, mu_e, rho_e;
+      material.EvalAt(e, *T, ip, lam_e, mu_e, rho_e);
+      MFEM_VERIFY(mu_e > 0.0 && rho_e > 0.0,
+                  "ResolveForcedRupture: mu > 0 and rho > 0 required "
+                  "to compute Vs at DOF " << i << " (got mu=" << mu_e
+                  << ", rho=" << rho_e << ")");
+      const real_t Vs = std::sqrt(mu_e / rho_e);
+      MFEM_VERIFY(Vs > 0.0,
+                  "ResolveForcedRupture: Vs <= 0 at DOF " << i);
+
+      const real_t r_over_rc = r / nuc.r_crit_m;
+      const real_t denom = 1.0 - r_over_rc * r_over_rc;
+      MFEM_VERIFY(denom > 0.0,
+                  "ResolveForcedRupture: 1 - (r/r_crit)^2 <= 0 at DOF "
+                  << i << " (r=" << r << ", r_crit="
+                  << nuc.r_crit_m << ")");
+      p.T_forced_s(i) = r / (0.7 * Vs)
+                        + 0.081 * nuc.r_crit_m / (0.7 * Vs)
+                          * (1.0 / denom - 1.0);
+      p.t0_decay_s(i) = nuc.t0_decay_s;
+   }
+   return p;
+}
+
+}  // namespace
+
+ForcedRupturePerDOFParams SpatialFrictionResolver::ResolveForcedRupture(
+   const NucleationSpec&     nuc,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const MaterialField&      material,
+   ParMesh&                  pmesh) const
+{
+   return resolve_forced_impl<ParMesh>(nuc, dof_coords_3d, dof_to_elem,
+                                       material, pmesh);
+}
+
+ForcedRupturePerDOFParams SpatialFrictionResolver::ResolveForcedRupture(
+   const NucleationSpec&     nuc,
+   const Vector&             dof_coords_3d,
+   const Array<int>&         dof_to_elem,
+   const MaterialField&      material,
+   mfem::Mesh&               mesh) const
+{
+   return resolve_forced_impl<mfem::Mesh>(nuc, dof_coords_3d, dof_to_elem,
+                                          material, mesh);
+}
+
+// =====================================================================
+//  Round-6 — overstress-mode nucleation (STUB)
+// =====================================================================
+//
+// Sibling to ResolveForcedRupture.  When the overstress physics is
+// dialled in, this resolver will compute per-DOF Δτ_{dip,strike} and
+// optional Δσ_n perturbations inside the nucleation zone — to be
+// applied ONCE at init via InitializeFaultDOFs_Spatial's overstress
+// path (also a stub).
+//
+// Currently this method aborts when invoked with
+// `NucleationKind::Overstress` so a SAFS run that picks the overstress
+// kind fails LOUD instead of silently running with zero perturbation.
+// `NucleationKind::StrengthReduction` and `nuc.enabled == false`
+// return empty vectors — the driver treats this as "no overstress
+// component" (the strength-reduction path is handled by
+// ResolveForcedRupture instead).
+OverstressPerDOFParams SpatialFrictionResolver::ResolveOverstress(
+   const NucleationSpec&     nuc,
+   const Vector&             dof_coords_3d) const
+{
+   OverstressPerDOFParams p;   // zero-sized by default
+   if (!nuc.enabled
+       || nuc.kind == NucleationKind::StrengthReduction)
+   {
+      return p;
+   }
+
+   // nuc.kind == NucleationKind::Overstress.
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveOverstress: dof_coords_3d.Size() must be 3 * N");
+   MFEM_VERIFY(nuc.r_crit_m > 0.0,
+               "ResolveOverstress: nuc.r_crit_m must be > 0");
+
+   MFEM_ABORT("ResolveOverstress: overstress-mode nucleation is not yet "
+              "implemented.  The structural surface (NucleationKind, "
+              "OverstressSpec, OverstressPerDOFParams) is in place so "
+              "the resolver, driver, and tests can be wired up; the "
+              "actual Δτ / Δσ_n computation lands in a follow-up "
+              "commit.  Until then, set [nucleation].kind = "
+              "\"strength_reduction\" (the default).");
+
+   // Unreachable; placeholder to satisfy the return type.
+   return p;
+}
+
+}  // namespace spatial
+}  // namespace seas
+}  // namespace mfem

@@ -1,0 +1,119 @@
+# EXAMPLE: spatial-friction config for the SAFS dynamic-rupture driver.
+# Linear slip-weakening (TPV205-like) with geoffrey2010.md reference
+# friction parameters and TPV26/27-style gradual forced-rupture
+# nucleation.  This file is parsed verbatim by the Phase-1 unit test
+# `test_spatial_friction_config` and is the user-editable starting
+# point for SAFS LSW runs.
+#
+# Schema reference:
+#   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SAFS-ALT6 LSW, geoffrey2010 reference parameters, TPV26/27 gradual nucleation"
+
+[material_constant_fallback]
+# Used if --no-sidecar-material is passed OR the velocity sidecar load
+# fails.  Equal lambda = mu => Poisson ratio = 0.25 (typical crust).
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# Effective normal stress = sigma_n_total - P_p.  z < 0 is below the
+# free surface; hydrostatic gradient ~ 1.0e4 Pa/m.
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "safs/project_7.0_alternative/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
+order = 1
+
+[velocity]
+model         = "cvmh"
+dataset_root  = "safs/project_7.0_alternative"
+override_path = ""
+
+[stress]
+# D-1 testing primitive: constant background tensor + rotation onto fault.
+# Replace with `kind = "sidecar_hdf5"` + `sidecar_path = "..."` once CSM is trusted.
+kind = "constant_tensor"
+# Cauchy tensor, EAST-NORTH-UP frame, compression POSITIVE.  This example
+# uses a simple uniaxial NE-ward SHmax = 100 MPa with Sv = 80 MPa,
+# Shmin = 60 MPa, no shear components.
+sigma_xx_pa = 80.0e6
+sigma_yy_pa = 80.0e6
+sigma_zz_pa = 80.0e6
+sigma_xy_pa = 20.0e6
+sigma_yz_pa =  0.0
+sigma_xz_pa =  0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "none"
+cfl        = 0.5
+use_pml    = false
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+output_dir              = "output_safs_dyn_1000m"
+restart_prefix          = "cp"
+paraview_volume         = "hdf5"
+paraview_bulk           = "hdf5"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.05s"
+paraview_bulk_dt        = "0.05s"
+paraview_fault_dt       = "0.001s"
+paraview_volume_zfp_tol = 1.0e-3
+paraview_bulk_zfp_tol   = 1.0e-3
+paraview_fault_zfp_tol  = 1.0e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+# TPV26/27-style gradual forced rupture (D-4).  Hypocenter coords are
+# UTM 11N (mesh is in UTM; see meshing/README).  r_crit_m = 4000 and
+# t0_decay_s = 0.5 are the TPV26/27 defaults.  When this block is
+# absent, the driver runs without forced rupture (T = 1e9 everywhere).
+hypocenter_x_m = 480000.0
+hypocenter_y_m = 3750000.0
+hypocenter_z_m =   -7000.0
+r_crit_m       =    4000.0
+t0_decay_s     =       0.5
+
+[friction.slip_weakening]
+# Defaults match friction/slip-weakening/geoffrey2010.md verbatim (R-113).
+# The D-3 validator drops the rev-1 upper bound `mu_s < 1`, so mu_s = 1.1
+# loads without aborting.  The `d_o_default` alias is also accepted.
+mu_s_default     = 1.1
+mu_d_default     = 0.5
+d_c_default      = 0.5
+cohesion_default = 0.0
+
+# Spatial rules apply in document order; last-match wins per key.
+# "barrier" kind locks the DOF (resolver sets internal mu_s = 1.0e6
+# sentinel; users never type 1.0e6).
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_min_m = -20000.0
+z_max_m = -15000.0
+
+# Example "box" rule (no nucleation override — nucleation is time-domain).
+[[friction.slip_weakening.spatial]]
+kind    = "box"
+x_min_m = 478000.0
+x_max_m = 486000.0
+y_min_m = 3748000.0
+y_max_m = 3756000.0
+z_min_m = -9000.0
+z_max_m = -5000.0
+mu_s    = 1.05
+mu_d    = 0.5
+d_c     = 0.5

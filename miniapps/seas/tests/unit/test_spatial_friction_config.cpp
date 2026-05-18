@@ -1,0 +1,623 @@
+// Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
+//
+// test_spatial_friction_config.cpp — Phase 1 of
+// spatial_dynamic_rupture_plan.md (rev-3).
+//
+// Plan §Phase 1 §Acceptance: 12 tests covering every validation rule
+// (schema_version mismatch, missing law, both laws present, unknown
+// keys, the D-3 alias `d_o`, barrier-sentinel guard R-114, stress-mode
+// conflict, time parse, material fallback bounds, mesh.path presence).
+//
+// MFEM is built WITHOUT MFEM_USE_EXCEPTIONS in this environment, so
+// MFEM_ABORT calls std::abort().  We isolate abort-expected tests in a
+// child process via fork() + waitpid() so the parent test driver
+// survives.  Success-path tests run inline.
+
+#include "mfem.hpp"
+
+#include "../../spatial/code/spatial_friction.hpp"
+
+#include <cstdlib>
+#include <exception>
+#include <iostream>
+#include <sstream>
+#include <string>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+using namespace mfem;
+using namespace mfem::seas::spatial;
+
+static int num_tests = 0, num_passed = 0, num_failed = 0;
+
+#define TEST_ASSERT(c, m) do { num_tests++; if (!(c)) { \
+   std::cerr << "FAILED: " << m << " line " << __LINE__ << "\n"; \
+   num_failed++; } else { std::cout << "  PASSED: " << m << "\n"; \
+   num_passed++; } } while (0)
+
+namespace
+{
+
+// Run a parse inside a forked child.  Returns true iff the child
+// process aborted (any non-zero exit, signal, or core dump).  The
+// child's stderr is silenced to keep test output clean.
+bool ParseAbortsInChild(const std::string& toml_text)
+{
+   ::fflush(stdout);
+   ::fflush(stderr);
+   const pid_t pid = ::fork();
+   if (pid < 0)
+   {
+      std::cerr << "fork() failed: " << ::strerror(errno) << "\n";
+      return false;
+   }
+   if (pid == 0)
+   {
+      // Child: silence stderr, attempt the parse, exit 0 on success.
+      ::freopen("/dev/null", "w", stderr);
+      try
+      {
+         (void)ParseSpatialFrictionConfigString(toml_text);
+      }
+      catch (...)
+      {
+         ::_exit(1);
+      }
+      ::_exit(0);
+   }
+   int status = 0;
+   while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
+   if (WIFEXITED(status))   { return WEXITSTATUS(status) != 0; }
+   if (WIFSIGNALED(status)) { return true; }
+   return true;
+}
+
+std::string MinimalLSWHeader(int schema_version = 1,
+                             const std::string& law = "slip_weakening")
+{
+   std::ostringstream oss;
+   oss << "[meta]\n";
+   oss << "schema_version = " << schema_version << "\n";
+   if (!law.empty())
+   {
+      oss << "law = \"" << law << "\"\n";
+   }
+   oss << "[material_constant_fallback]\n"
+       << "lambda=32.0e9\nmu=32.0e9\nrho=2670.0\n"
+       << "[pore_pressure]\nP_p_pa=0.0\nP_p_grad_pa_per_m=0.0\nmin_sigma_n_pa=0.0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0.0\nsigma_yy_pa=0.0\nsigma_zz_pa=0.0\n"
+       << "sigma_xy_pa=0.0\nsigma_yz_pa=0.0\nsigma_xz_pa=0.0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\nuse_pml=false\n"
+       << "[time]\ntfinal=\"12s\"\nt_initial=0.0\ndt_initial=\"auto\"\ndt_max=\"0.1s\"\n"
+       << "[output]\noutput_dir=\"out\"\nrestart_prefix=\"cp\"\n"
+       << "paraview_volume=\"hdf5\"\nparaview_bulk=\"hdf5\"\nparaview_fault=\"hdf5\"\n"
+       << "paraview_volume_dt=\"0.05s\"\nparaview_bulk_dt=\"0.05s\"\nparaview_fault_dt=\"0.001s\"\n"
+       << "paraview_volume_zfp_tol=1e-3\nparaview_bulk_zfp_tol=1e-3\nparaview_fault_zfp_tol=1e-12\n"
+       << "max_snapshots=5000\ncheckpoint_every_steps=10000\n";
+   return oss.str();
+}
+
+std::string MinimalLSWBlock(real_t mu_s = 1.1, real_t mu_d = 0.5,
+                            real_t d_c = 0.5,
+                            const std::string& d_key = "d_c_default")
+{
+   std::ostringstream oss;
+   oss << "[friction.slip_weakening]\n"
+       << "mu_s_default = " << mu_s << "\n"
+       << "mu_d_default = " << mu_d << "\n"
+       << d_key << " = "    << d_c  << "\n"
+       << "cohesion_default = 0.0\n";
+   return oss.str();
+}
+
+std::string MinimalRSBlock()
+{
+   return std::string(
+      "[friction.rate_state]\n"
+      "f_0_default = 0.6\n"
+      "V_0_default = 1.0e-6\n"
+      "eta = \"auto\"\n"
+      "a_default = 0.010\n"
+      "b_default = 0.015\n"
+      "Dc_default = 0.004\n"
+      "V_init_default = 1.0e-9\n"
+      "sigma_n_default = 50.0e6\n");
+}
+
+}  // namespace
+
+// T-1  minimal valid LSW config parses (geoffrey2010 values survive D-3)
+static void T_1_minimal_lsw_parses_geoffrey2010()
+{
+   std::cout << "\n[T-1] minimal LSW config parses with mu_s=1.1\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock(1.1, 0.5, 0.5);
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.schema_version == 1, "schema_version round-trip");
+   TEST_ASSERT(cfg.law == FrictionLawKind::SlipWeakening, "law round-trip");
+   TEST_ASSERT(cfg.slip_weakening.has_value(), "slip_weakening present");
+   TEST_ASSERT(!cfg.rate_state.has_value(), "rate_state absent");
+   TEST_ASSERT(cfg.slip_weakening->mu_s_default == 1.1, "mu_s_default = 1.1");
+}
+
+// T-2  schema_version mismatch aborts
+static void T_2_schema_version_mismatch_aborts()
+{
+   std::cout << "\n[T-2] schema_version != 1 aborts\n";
+   const std::string toml = MinimalLSWHeader(/*schema_version=*/2)
+                            + MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml), "schema_version=2 must abort");
+}
+
+// T-3  missing law aborts
+static void T_3_missing_law_aborts()
+{
+   std::cout << "\n[T-3] missing [meta].law aborts\n";
+   const std::string toml = MinimalLSWHeader(1, /*law=*/"")
+                            + MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml), "missing law must abort");
+}
+
+// T-4  both friction blocks present aborts
+static void T_4_both_friction_blocks_aborts()
+{
+   std::cout << "\n[T-4] both [friction.slip_weakening] AND "
+                "[friction.rate_state] aborts\n";
+   const std::string toml = MinimalLSWHeader()
+                            + MinimalLSWBlock()
+                            + MinimalRSBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml), "both LSW and RS blocks must abort");
+}
+
+// T-5  D-3 alias d_o_default works
+static void T_5_d_o_alias_works()
+{
+   std::cout << "\n[T-5] D-3 d_o_default alias resolves to d_c_default\n";
+   const std::string toml = MinimalLSWHeader()
+                            + MinimalLSWBlock(1.1, 0.5, 0.5, "d_o_default");
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.slip_weakening->d_c_default == 0.5,
+               "d_c_default resolved from d_o_default alias");
+}
+
+// T-6  D-3 alias collision (both d_c and d_o) aborts
+static void T_6_d_o_collision_aborts()
+{
+   std::cout << "\n[T-6] supplying both d_c_default AND d_o_default aborts\n";
+   std::string toml = MinimalLSWHeader();
+   toml +=
+      "[friction.slip_weakening]\n"
+      "mu_s_default = 1.1\n"
+      "mu_d_default = 0.5\n"
+      "d_c_default = 0.5\n"
+      "d_o_default = 0.4\n"
+      "cohesion_default = 0.0\n";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "both d_c_default and d_o_default must abort");
+}
+
+// T-7  R-114 barrier-sentinel guard on default
+static void T_7_r114_default_guard()
+{
+   std::cout << "\n[T-7] mu_s_default > 1.0e5 aborts (R-114)\n";
+   const std::string toml = MinimalLSWHeader()
+                            + MinimalLSWBlock(1.0e6, 0.5, 0.5);
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "mu_s_default = 1e6 must abort");
+}
+
+// T-8  R-114 barrier-sentinel guard on spatial rule
+static void T_8_r114_rule_guard()
+{
+   std::cout << "\n[T-8] [[spatial]] rule with mu_s > 1.0e5 aborts (R-114)\n";
+   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   toml +=
+      "[[friction.slip_weakening.spatial]]\n"
+      "kind=\"box\"\n"
+      "x_min_m=-1e6\nx_max_m=1e6\n"
+      "y_min_m=-1e6\ny_max_m=1e6\n"
+      "z_min_m=-1e6\nz_max_m=1e6\n"
+      "mu_s = 1e6\nmu_d = 0.5\nd_c = 0.5\n";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "spatial rule with mu_s = 1e6 must abort");
+}
+
+// T-9  stress mode conflict: kind=constant_tensor with sidecar_path
+static void T_9_stress_mode_conflict_const_with_path()
+{
+   std::cout << "\n[T-9] [stress] kind=constant_tensor + sidecar_path aborts\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+P_p_grad_pa_per_m=0
+min_sigma_n_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+override_path=""
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+sidecar_path = "/tmp/conflict.h5"
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+use_pml=false
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "constant_tensor + sidecar_path must abort");
+}
+
+// T-10 stress mode conflict: kind=sidecar_hdf5 with sigma_*_pa
+static void T_10_stress_mode_conflict_sidecar_with_sigma()
+{
+   std::cout << "\n[T-10] [stress] kind=sidecar_hdf5 + sigma_xx_pa aborts\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "sidecar_hdf5"
+sidecar_path = "/tmp/s.h5"
+sigma_xx_pa = 1e6
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "sidecar_hdf5 + sigma_xx_pa must abort");
+}
+
+// T-11 time parser round-trips
+static void T_11_time_parser()
+{
+   std::cout << "\n[T-11] SpatialTimeParseSeconds round-trips\n";
+   TEST_ASSERT(SpatialTimeParseSeconds("0.05s") == 0.05, "0.05s");
+   TEST_ASSERT(SpatialTimeParseSeconds("12s") == 12.0, "12s");
+   TEST_ASSERT(SpatialTimeParseSeconds("1.5e-2s") == 1.5e-2, "1.5e-2s");
+   TEST_ASSERT(SpatialTimeParseSeconds("3.14") == 3.14, "no suffix");
+   TEST_ASSERT(SpatialTimeParseSeconds("auto") == -1.0, "auto sentinel");
+}
+
+// T-13  R-004 regression: missing top-level [stress] block aborts.
+static void T_13_missing_stress_block_aborts()
+{
+   std::cout << "\n[T-13] missing [stress] block aborts (R-004)\n";
+   // Build header WITHOUT the [stress] block by hand.
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       // (no [stress] block)
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\n"
+       << "[time]\ntfinal=\"12s\"\n"
+       << "[output]\noutput_dir=\"out\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\n"
+       << "cohesion_default=0\n";
+   TEST_ASSERT(ParseAbortsInChild(oss.str()),
+               "missing [stress] block must abort");
+}
+
+// T-14  R-004 regression: missing top-level [time] block aborts.
+static void T_14_missing_time_block_aborts()
+{
+   std::cout << "\n[T-14] missing [time] block aborts (R-004)\n";
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\n"
+       // (no [time] block)
+       << "[output]\noutput_dir=\"out\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\n"
+       << "cohesion_default=0\n";
+   TEST_ASSERT(ParseAbortsInChild(oss.str()),
+               "missing [time] block must abort");
+}
+
+// T-15  R-006 regression: dt_initial = 0 aborts (must be > 0 or "auto").
+static void T_15_dt_initial_zero_aborts()
+{
+   std::cout << "\n[T-15] [time].dt_initial = 0 aborts (R-006)\n";
+   std::string toml = MinimalLSWHeader();
+   const std::string before = "dt_initial=\"auto\"";
+   const std::string after  = "dt_initial=0.0";
+   const auto pos = toml.find(before);
+   MFEM_VERIFY(pos != std::string::npos,
+               "MinimalLSWHeader changed shape — re-grep dt_initial");
+   toml.replace(pos, before.size(), after);
+   toml += MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "dt_initial = 0 must abort (must be > 0 or \"auto\")");
+}
+
+// T-16  R-007 regression: use_pml as a quoted string aborts with a
+// clean toml_bool message (not a toml11 internal abort).
+static void T_16_use_pml_string_aborts()
+{
+   std::cout << "\n[T-16] [numerics].use_pml = \"false\" (quoted) aborts (R-007)\n";
+   std::string toml = MinimalLSWHeader();
+   const std::string before = "use_pml=false";
+   const std::string after  = "use_pml=\"false\"";
+   const auto pos = toml.find(before);
+   MFEM_VERIFY(pos != std::string::npos,
+               "MinimalLSWHeader changed shape — re-grep use_pml");
+   toml.replace(pos, before.size(), after);
+   toml += MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "use_pml=\"false\" (quoted) must abort");
+}
+
+// T-17  R-201 regression: missing [pore_pressure] block aborts.
+static void T_17_missing_pore_pressure_block_aborts()
+{
+   std::cout << "\n[T-17] missing [pore_pressure] block aborts (R-201)\n";
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       // (no [pore_pressure] block)
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\n"
+       << "[time]\ntfinal=\"12s\"\n"
+       << "[output]\noutput_dir=\"out\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\n"
+       << "cohesion_default=0\n";
+   TEST_ASSERT(ParseAbortsInChild(oss.str()),
+               "missing [pore_pressure] block must abort");
+}
+
+// T-18  R-202 regression: literal numeric dt_initial = -1.0 aborts
+// (must not be silently treated as the "auto" sentinel).
+static void T_18_dt_initial_literal_negative_aborts()
+{
+   std::cout << "\n[T-18] dt_initial = -1.0 (literal) aborts (R-202)\n";
+   std::string toml = MinimalLSWHeader();
+   const std::string before = "dt_initial=\"auto\"";
+   const std::string after  = "dt_initial=-1.0";
+   const auto pos = toml.find(before);
+   MFEM_VERIFY(pos != std::string::npos,
+               "MinimalLSWHeader changed shape — re-grep dt_initial");
+   toml.replace(pos, before.size(), after);
+   toml += MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "literal dt_initial = -1.0 must abort (not silently \"auto\")");
+}
+
+// T-19  R-203 regression: paraview_fault_dt = 0 aborts.
+static void T_19_paraview_fault_dt_zero_aborts()
+{
+   std::cout << "\n[T-19] paraview_fault_dt = 0 aborts (R-203)\n";
+   std::string toml = MinimalLSWHeader();
+   const std::string before = "paraview_fault_dt=\"0.001s\"";
+   const std::string after  = "paraview_fault_dt=0.0";
+   const auto pos = toml.find(before);
+   MFEM_VERIFY(pos != std::string::npos,
+               "MinimalLSWHeader changed shape — re-grep paraview_fault_dt");
+   toml.replace(pos, before.size(), after);
+   toml += MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "paraview_fault_dt = 0 must abort");
+}
+
+// T-20  R-205 regression: [stress] block without `kind` key aborts.
+static void T_20_stress_kind_missing_aborts()
+{
+   std::cout << "\n[T-20] [stress] without 'kind' key aborts (R-205)\n";
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version = 1\nlaw = \"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nmodel=\"cvmh\"\ndataset_root=\"/tmp/x\"\noverride_path=\"\"\n"
+       // [stress] present but missing `kind` key
+       << "[stress]\nsigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\n"
+       << "[time]\ntfinal=\"12s\"\n"
+       << "[output]\noutput_dir=\"out\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\n"
+       << "cohesion_default=0\n";
+   TEST_ASSERT(ParseAbortsInChild(oss.str()),
+               "[stress] without 'kind' must abort");
+}
+
+// T-21  R-703 round-7 regression: [nucleation] without `kind` defaults
+//       to NucleationKind::StrengthReduction (round-1..5 behaviour).
+static void T_21_nucleation_kind_default_strength_reduction()
+{
+   std::cout << "\n[T-21] [nucleation] default kind = StrengthReduction "
+                "(R-703)\n";
+   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   toml += "[nucleation]\n"
+           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
+           "r_crit_m=4000\nt0_decay_s=0.5\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.nucleation.enabled,
+               "[nucleation] block sets enabled = true");
+   TEST_ASSERT(cfg.nucleation.kind == NucleationKind::StrengthReduction,
+               "[nucleation] without `kind` defaults to StrengthReduction");
+}
+
+// T-22  R-703 round-7: kind = "overstress" round-trips into the enum
+//       and the optional [nucleation.overstress] sub-block parses.
+static void T_22_nucleation_kind_overstress_parses()
+{
+   std::cout << "\n[T-22] [nucleation].kind = \"overstress\" round-trips "
+                "(R-703)\n";
+   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   toml += "[nucleation]\n"
+           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
+           "r_crit_m=4000\nt0_decay_s=0.5\n"
+           "kind=\"overstress\"\n"
+           "[nucleation.overstress]\n"
+           "delta_tau_pa=1.0e6\ndirection=1\ndelta_sigma_n_pa=0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.nucleation.kind == NucleationKind::Overstress,
+               "[nucleation].kind=\"overstress\" round-trips");
+   TEST_ASSERT(cfg.nucleation.overstress.delta_tau_pa == 1.0e6,
+               "delta_tau_pa parses");
+   TEST_ASSERT(cfg.nucleation.overstress.direction == 1,
+               "direction parses");
+}
+
+// T-23  R-703 round-7: typo'd kind aborts cleanly (no silent default).
+static void T_23_nucleation_kind_typo_aborts()
+{
+   std::cout << "\n[T-23] [nucleation].kind typo aborts (R-703)\n";
+   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   toml += "[nucleation]\n"
+           "hypocenter_x_m=0\nhypocenter_y_m=0\nhypocenter_z_m=0\n"
+           "r_crit_m=4000\nt0_decay_s=0.5\n"
+           "kind=\"strenght_reduction\"\n";   // intentional typo
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "[nucleation].kind = \"strenght_reduction\" (typo) must abort");
+}
+
+// T-12 material fallback bounds
+static void T_12_material_fallback_bounds()
+{
+   std::cout << "\n[T-12] material fallback validator (mu <= 0 aborts)\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=-1.0
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml), "mu <= 0 must abort");
+}
+
+int main(int, char**)
+{
+#ifndef SEAS_USE_TOML
+   std::cout << "SEAS_USE_TOML not defined — skipping test.\n";
+   return 0;
+#else
+   std::cout << "Running Phase 1 test_spatial_friction_config\n";
+   T_1_minimal_lsw_parses_geoffrey2010();
+   T_2_schema_version_mismatch_aborts();
+   T_3_missing_law_aborts();
+   T_4_both_friction_blocks_aborts();
+   T_5_d_o_alias_works();
+   T_6_d_o_collision_aborts();
+   T_7_r114_default_guard();
+   T_8_r114_rule_guard();
+   T_9_stress_mode_conflict_const_with_path();
+   T_10_stress_mode_conflict_sidecar_with_sigma();
+   T_11_time_parser();
+   T_12_material_fallback_bounds();
+   T_13_missing_stress_block_aborts();
+   T_14_missing_time_block_aborts();
+   T_15_dt_initial_zero_aborts();
+   T_16_use_pml_string_aborts();
+   T_17_missing_pore_pressure_block_aborts();
+   T_18_dt_initial_literal_negative_aborts();
+   T_19_paraview_fault_dt_zero_aborts();
+   T_20_stress_kind_missing_aborts();
+   T_21_nucleation_kind_default_strength_reduction();
+   T_22_nucleation_kind_overstress_parses();
+   T_23_nucleation_kind_typo_aborts();
+   std::cout << "\n========================================\n";
+   std::cout << "Phase 1 test_spatial_friction_config: "
+             << num_passed << " / " << num_tests
+             << " passed, " << num_failed << " failed\n";
+   std::cout << "========================================\n";
+   return (num_failed == 0) ? 0 : 1;
+#endif
+}

@@ -114,6 +114,22 @@ GODUNOV_FLUX_SRC = dynamic/godunov_flux.cpp
 WAVE_OPERATOR_SRC = dynamic/wave_operator.cpp
 GODUNOV_FLUX_OBJ = $(GODUNOV_FLUX_SRC:.cpp=.o)
 WAVE_OPERATOR_OBJ = $(WAVE_OPERATOR_SRC:.cpp=.o)
+# Phase H.1 of spatial_dynamic_rupture_plan.md (rev-3): per-element flux cache.
+GODUNOV_FLUX_POOL_SRC = dynamic/godunov_flux_pool.cpp
+GODUNOV_FLUX_POOL_OBJ = $(GODUNOV_FLUX_POOL_SRC:.cpp=.o)
+TEST_PHASEH_GODUNOV_FLUX_POOL_SRC = tests/unit/test_phaseh_godunov_flux_pool.cpp
+TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ = $(TEST_PHASEH_GODUNOV_FLUX_POOL_SRC:.cpp=.o)
+# Spatial Phase 1 of spatial_dynamic_rupture_plan.md: TOML schema parser +
+# per-DOF friction resolver + LSW forced-rupture friction helper.
+# Phases 2 / 3 / 3b (spatial_velocity, spatial_stress) and their tests
+# follow in a subsequent commit once the prerequisite Phase 3 / 3b /
+# 5a / 5b header additions are re-applied (see CODEBASE_GUIDE TBD).
+SPATIAL_FRICTION_SRC                 = spatial/code/spatial_friction.cpp
+SPATIAL_FRICTION_OBJ                 = $(SPATIAL_FRICTION_SRC:.cpp=.o)
+TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
+TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
+TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
+TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -713,6 +729,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_logging \
                seas_test_config_bridge \
                seas_test_godunov_flux \
+               seas_test_phaseh_godunov_flux_pool \
+               seas_test_spatial_friction_config \
+               seas_test_spatial_friction_resolver \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1103,6 +1122,40 @@ seas_test_cross_verify: $(TEST_CROSS_VERIFY_OBJ)
 # Dynamic rupture Phase 1: Godunov flux tests
 seas_test_godunov_flux: $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase H.1 of spatial_dynamic_rupture_plan.md: GodunovFluxPool dedup tests
+seas_test_phaseh_godunov_flux_pool: $(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ) \
+                                    $(GODUNOV_FLUX_POOL_OBJ) \
+                                    $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Spatial Phase 1 of spatial_dynamic_rupture_plan.md: TOML parser tests
+seas_test_spatial_friction_config: $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
+                                    $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_spatial_friction_resolver: $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
+                                      $(SPATIAL_FRICTION_OBJ) \
+                                      $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                      $(MATERIAL_COEFFICIENTS_OBJ) \
+                                      $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Dynamic rupture Phase 1: Wave operator tests
@@ -1890,6 +1943,42 @@ $(GODUNOV_FLUX_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONF
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
+# Phase H.1: GodunovFluxPool object + its dedup test.
+$(GODUNOV_FLUX_POOL_OBJ): %.o: $(SRC)%.cpp \
+                               dynamic/godunov_flux_pool.hpp \
+                               dynamic/godunov_flux.hpp \
+                               $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ): %.o: $(SRC)%.cpp \
+                                           dynamic/godunov_flux_pool.hpp \
+                                           dynamic/godunov_flux.hpp \
+                                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Spatial Phase 1: TOML parser + resolver objects + tests.  Requires
+# $(TOML_FLAGS) for extern/toml11/toml.hpp.
+$(SPATIAL_FRICTION_OBJ): %.o: $(SRC)%.cpp \
+                              spatial/code/spatial_friction.hpp \
+                              dynamic/heterogeneous_material.hpp \
+                              $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_FRICTION_CONFIG_OBJ): %.o: $(SRC)%.cpp \
+                                          spatial/code/spatial_friction.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_FRICTION_RESOLVER_OBJ): %.o: $(SRC)%.cpp \
+                                            spatial/code/spatial_friction.hpp \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
 $(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2423,6 +2512,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-boundary-classification \
       test-logging test-config-bridge test-config-parser \
       test-godunov-flux test-wave-operator \
+      test-phaseh-godunov-flux-pool \
+      test-spatial-friction-config test-spatial-friction-resolver \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -2672,6 +2763,17 @@ test-config-parser: seas_test_config_parser
 
 test-godunov-flux: seas_test_godunov_flux
 	./seas_test_godunov_flux
+
+# Phase H.1: GodunovFluxPool dedup tests.
+test-phaseh-godunov-flux-pool: seas_test_phaseh_godunov_flux_pool
+	./seas_test_phaseh_godunov_flux_pool
+
+# Spatial Phase 1: TOML parser + per-DOF friction resolver tests.
+test-spatial-friction-config: seas_test_spatial_friction_config
+	./seas_test_spatial_friction_config
+
+test-spatial-friction-resolver: seas_test_spatial_friction_resolver
+	./seas_test_spatial_friction_resolver
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator
