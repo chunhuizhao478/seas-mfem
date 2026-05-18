@@ -107,6 +107,19 @@ fi
 rm -f seas_tpv104_driver drivers/tpv104_driver.o
 make seas_tpv104_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
+# Per-job binary copy.  Two sbatches submitted concurrently would
+# otherwise race on the single ./seas_tpv104_driver binary file:
+# one sbatch's `rm` + `make` (truncate-and-write via gcc -o) clobbers
+# the other sbatch's already-mapped binary mid-execution, producing
+# the "Error mmapping the file: Bad file descriptor" + hard hang we
+# saw at jobid 7729945.  Copying immediately after make to a
+# per-jobid name decouples the run from any subsequent rebuilds.
+DRIVER_BIN="./seas_tpv104_driver_${SLURM_JOB_ID:-$$}"
+cp seas_tpv104_driver "${DRIVER_BIN}" \
+   || { echo "Failed to copy binary to ${DRIVER_BIN}"; exit 1; }
+chmod +x "${DRIVER_BIN}"
+echo "Using per-job binary: ${DRIVER_BIN}"
+
 # =======================================================================
 # Reference single-shot output layout.  Distinct base dir from the
 # pair sbatch's `results_pair_test_job<...>` so the compare script
@@ -139,7 +152,7 @@ echo ""
 echo "========================================"
 echo "Reference: single-shot TPV104 run, 0 → 5.0 s  (~2 hr wall)"
 echo "========================================"
-ibrun ./seas_tpv104_driver \
+ibrun "${DRIVER_BIN}" \
       --mesh tpv104/mesh/tpv104_200m.msh \
       --mesh-scale 1 \
       --order 1 \
@@ -267,3 +280,7 @@ SUMMARY_FILE="${RESULT_DIR_R}/REFERENCE_SUMMARY.txt"
    echo "du -sh: $(du -sh ${RESULT_DIR_R} | cut -f1)"
 } > "${SUMMARY_FILE}"
 cat "${SUMMARY_FILE}"
+
+# Clean up the per-job binary copy (build dir bloat protection).
+# Failure here is non-fatal — the SUMMARY has already been written.
+rm -f "${DRIVER_BIN}" || true

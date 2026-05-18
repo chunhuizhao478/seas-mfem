@@ -498,6 +498,18 @@ static void Subtest6_DriverGrep()
          && sbsrc.find("tpv104_restart_compare.sh") != std::string::npos,
          "Sub-test 6 R-200: pair sbatch must point at the reference "
          "sbatch + compare script for the gold-standard REFERENCE check");
+      // R-201 / Frontera jobid 7729945 hang: both sbatches must use
+      // a per-job binary copy (DRIVER_BIN), not the shared
+      // ./seas_tpv104_driver, to avoid the concurrent-rebuild race
+      // that hung the reference job mid-MPI_Init.  See
+      // debug_document/paraview_output_debug_document/
+      //   hdf5_diag_noise_2026-05-17.md (related diagnostic context)
+      TEST_ASSERT(
+         sbsrc.find("DRIVER_BIN=") != std::string::npos
+         && sbsrc.find("ibrun \"${DRIVER_BIN}\"") != std::string::npos,
+         "Sub-test 6 R-201: pair sbatch must use a per-job DRIVER_BIN "
+         "copy, not ./seas_tpv104_driver directly (concurrent-rebuild "
+         "race, Frontera jobid 7729945)");
    }
    // R-200: reference sbatch must exist and be a single-shot 0 → 5.0.
    const std::string ref_sb_path =
@@ -525,6 +537,12 @@ static void Subtest6_DriverGrep()
                   && rsrc.find("single_shot") != std::string::npos,
                   "Sub-test 6 R-200: reference sbatch must use "
                   "REFERENCE_BASE/single_shot output layout");
+      // R-201: reference sbatch must also use per-job DRIVER_BIN.
+      TEST_ASSERT(
+         rsrc.find("DRIVER_BIN=") != std::string::npos
+         && rsrc.find("ibrun \"${DRIVER_BIN}\"") != std::string::npos,
+         "Sub-test 6 R-201: reference sbatch must use a per-job "
+         "DRIVER_BIN copy (concurrent-rebuild race, Frontera jobid 7729945)");
    }
    // R-200: compare script must exist and call compare_val on
    // h-slip, h-slip-rate, psi at the seam station.
