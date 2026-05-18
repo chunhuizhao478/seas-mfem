@@ -68,6 +68,7 @@
 #include "../../io/checkpoint.hpp"
 #include "../../io/petsc_ts_checkpoint.hpp"   // V2 PETSc-TS restart support
 #include "../../io/paraview_output.hpp"
+#include "../../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 #include "../../common/mpi_context.hpp"
 #include "../../trace/face_trace_logger.hpp"
 #include "../../config/bp5_mesh_utils.hpp"
@@ -719,6 +720,15 @@ static PetscErrorCode bp5_ts_monitor_callback(
 int main(int argc, char *argv[])
 {
    MPIContext mpi(&argc, &argv);
+
+   // Suppress HDF5 auto-print of internal error stacks.  On the
+   // Frontera build, PETSc 3.15 pulls in HDF5 1.10 (libhdf5.so.200)
+   // while seas/MFEM uses HDF5 1.14 (libhdf5.so.310); each instance
+   // has its own ID table and cross-instance closes produce noisy
+   // "can't locate ID (already closed?)" stacks on every ParaView
+   // write.  See debug_document/paraview_output_debug_document/
+   //   hdf5_diag_noise_2026-05-17.md
+   mfem::seas::InstallHdf5ErrorFilter();
 
    // =========================================================================
    // Parse command-line arguments

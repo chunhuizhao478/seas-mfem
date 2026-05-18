@@ -39,6 +39,7 @@
 #include "../dynamic/fault_locality_partition.hpp"
 #include "../io/paraview_output.hpp"
 #include "../io/tpv104_checkpoint.hpp"   // Phase-4: V1 restart for TPV104
+#include "../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 
 #include <algorithm>
 #include <cmath>
@@ -422,6 +423,15 @@ int main(int argc, char *argv[])
 #else
    int rank = 0, nprocs = 1;
 #endif
+
+   // Suppress HDF5 auto-print of internal error stacks.  On the
+   // Frontera build, PETSc 3.15 pulls in HDF5 1.10 (libhdf5.so.200)
+   // while seas/MFEM uses HDF5 1.14 (libhdf5.so.310); each instance
+   // has its own ID table and cross-instance closes produce noisy
+   // "can't locate ID (already closed?)" stacks on every ParaView
+   // write.  See debug_document/paraview_output_debug_document/
+   //   hdf5_diag_noise_2026-05-17.md
+   mfem::seas::InstallHdf5ErrorFilter();
 
 #ifdef SEAS_DIAG_FAULT_FLUX
    mfem::seas::g_seas_my_rank = rank;
