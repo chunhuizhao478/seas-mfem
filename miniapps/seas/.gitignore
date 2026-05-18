@@ -34,6 +34,8 @@ seas_bp5_full
 seas_tpv102_driver
 seas_tpv104_driver
 seas_tpv205_driver
+seas_project_stress_to_mesh
+seas_project_velocity_to_mesh
 seas_test_*
 
 # Checkpoint files
@@ -107,3 +109,34 @@ tpv205/results/
 tpv205/results_*/
 tpv205/plots_*/
 tpv205/plots_results_*/
+
+# -----------------------------------------------------------------------------
+# SAFS data + outputs (regenerable; too large for git)
+# -----------------------------------------------------------------------------
+# Per-model velocity raw extractions and projected outputs.  Top-level
+# README.md / *.py / preview .png stay tracked; only the per-model data
+# subdirs are ignored (each is 25 MB - 7.8 GB).
+safs/project_7.0_alternative/velocity/raw/cvmh/
+safs/project_7.0_alternative/velocity/raw/cvm_s4.26.m01/
+safs/project_7.0_alternative/velocity/raw/multiscale_statewise_cvm/
+safs/project_7.0_alternative/velocity/results/cvmh/
+safs/project_7.0_alternative/velocity/results/cvm_s4.26.m01/
+safs/project_7.0_alternative/velocity/results/multiscale_statewise_cvm/
+
+# Per-model stress raw + projected outputs (top-level CSVs stay tracked).
+safs/project_7.0_alternative/stress/raw/csm_johnson_hearn/
+safs/project_7.0_alternative/stress/results/*.h5
+safs/project_7.0_alternative/stress/results/*.vtr
+safs/project_7.0_alternative/stress/results/1000m_lcfar3000/
+
+# SAFS mesh STLs (regenerable from .ts via meshing pipeline).
+safs/project_7.0_alternative/meshing/results/stl_nwcut/
+
+# Pre-meshing gOcad solid-mesh outputs (.inp / .vtu, ~100 MB each).
+safs/project_7.0_preferred/meshing/results_gocad/
+
+# Reference PDFs (large, available via citations).
+safs/project_7.0_alternative/friction/*.pdf
+
+# CFM CAD originals (STEP files, large; regenerable from upstream CFM).
+safs/CFM_data_step/*.step

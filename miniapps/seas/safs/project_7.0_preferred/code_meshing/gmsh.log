@@ -1,9 +1,0 @@
-Warning : 0 duplicate/1756 degenerate triangles in STL file
-Error   : Invalid boundary mesh (overlapping facets) on surface 7 surface 7
-Warning : No elements in volume 1
-Error   : ------------------------------
-Error   : Mesh generation error summary
-Error   :     1 warning
-Error   :     1 error
-Error   : Check the full log for details
-Error   : ------------------------------
