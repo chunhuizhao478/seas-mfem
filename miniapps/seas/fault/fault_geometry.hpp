@@ -829,6 +829,16 @@ private:
    /// number of fallbacks is counted and reported.
    void ComputePerDOFCoordsAndBasis_(DomainOperator<MeshType> &domain_op)
    {
+      // R-205: reset fallback counters BEFORE the early-return branch
+      // so the antiplane-fallback path (full_coords/full_basis empty)
+      // is observably "no fallbacks" rather than carrying over whatever
+      // a previous invocation left.  Kept here at function entry so any
+      // future re-use of this function does not leak stale counts into
+      // the SAFS guard at rate_state_fault.hpp:214.
+      num_dof_basis_fallbacks_   = 0;
+      num_zero_normal_fallbacks_ = 0;
+      num_t1_fallbacks_          = 0;
+
       // Gather full local (interior + shared) coords + basis from the operator
       Vector full_coords;
       DenseMatrix full_basis;
@@ -880,9 +890,8 @@ private:
 
       // R-006 Gram-Schmidt re-orthonormalisation, mirroring Phase 2
       // `basis_to_node` (project_to_fault_stress.py).
-      num_dof_basis_fallbacks_   = 0;
-      num_zero_normal_fallbacks_ = 0;
-      num_t1_fallbacks_          = 0;
+      // R-205: counter reset moved to function preamble so the early-
+      // return branch also observes a clean count.
       for (int i = 0; i < num_owned; i++)
       {
          real_t n[3] = { owned_basis_flat(9 * i + 0),
@@ -1001,10 +1010,15 @@ private:
                    << num_zero_normal_fallbacks_ << " zero-normal + "
                    << num_t1_fallbacks_ << " t1-degenerate (of "
                    << num_owned << " owned fault DOFs) hit the basis "
-                   << "fallback path. The zero-normal slots have zeroed "
-                   << "basis and would silently project to zero pre-stress "
-                   << "and zero sigma_n in SAFS mode. SetSAFSMode refuses "
-                   << "to enable when zero-normal fallbacks > 0.\n";
+                   "fallback path.  Zero-normal slots have a zeroed "
+                   "basis and would silently project to zero pre-stress "
+                   "and zero sigma_n in SAFS mode.  t1-degenerate slots "
+                   "have a sign-flip-undefined basis (see lines 961-976) "
+                   "that can place the projected sidecar stress "
+                   "ANTIPARALLEL to the elastic traction at that DOF, "
+                   "creating the positive-feedback failure documented in "
+                   "CLAUDE.md (debug v8).  SetSAFSMode refuses to enable "
+                   "in either case (see rate_state_fault.hpp:214).\n";
       }
    }
 

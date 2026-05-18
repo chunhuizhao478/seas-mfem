@@ -28,6 +28,7 @@
 #include <algorithm>   // std::clamp, std::max (R-007 setter)
 #include <string>
 #include <cmath>
+#include <cstdio>      // std::rename (R-204 atomic PVD swap)
 #include <cstdlib>
 #include <limits>
 #include <memory>
@@ -2252,8 +2253,14 @@ private:
    /// Write (or overwrite) the fault surface PVD file with all entries so far.
    void WriteFaultPVD(const std::string &fault_dir)
    {
-      std::string pvd_name = fault_dir + "/fault_surface.pvd";
-      std::ofstream pvd(pvd_name, std::ios::trunc);
+      // R-204: write to `.partial` and atomic-rename so a job killed
+      // mid-write does NOT leave a truncated PVD that ParaView rejects.
+      // The cumulative O(N^2) rewrite is unchanged — that follow-up is a
+      // streaming-append refactor — but the atomic rename costs nothing
+      // and removes the corruption-on-kill hazard immediately.
+      const std::string pvd_name = fault_dir + "/fault_surface.pvd";
+      const std::string tmp_name = pvd_name + ".partial";
+      std::ofstream pvd(tmp_name, std::ios::trunc);
       pvd << std::setprecision(17);
       pvd << "<?xml version=\"1.0\"?>\n";
       pvd << "<VTKFile type=\"Collection\" version=\"0.1\">\n";
@@ -2265,6 +2272,7 @@ private:
       }
       pvd << "</Collection>\n</VTKFile>\n";
       pvd.close();
+      std::rename(tmp_name.c_str(), pvd_name.c_str());  // atomic on POSIX
    }
 
    // Factory for FES: serial vs parallel

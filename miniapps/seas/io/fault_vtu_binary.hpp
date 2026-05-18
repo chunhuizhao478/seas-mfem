@@ -431,7 +431,16 @@ GatherFaultPackToRoot(const LocalFaultPack &local,
    {
       std::string concat;
       for (const auto &n : local.field_names) { concat += n; concat += '|'; }
-      const uint64_t local_hash = std::hash<std::string>{}(concat);
+      // R-207: don't rely on std::hash<std::string> being deterministic
+      // across processes (implementation-defined per C++17 standard).
+      // FNV-1a 64-bit is 5 lines, deterministic across every libc++ /
+      // libstdc++ version and across heterogeneous-STL container setups.
+      uint64_t local_hash = 14695981039346656037ULL;  // FNV offset basis
+      for (unsigned char c : concat)
+      {
+         local_hash ^= c;
+         local_hash *= 1099511628211ULL;             // FNV prime
+      }
       uint64_t root_hash = local_hash;
       MPI_Bcast(&root_hash, 1, MPI_UNSIGNED_LONG_LONG, 0, comm);
       MFEM_VERIFY(local_hash == root_hash,

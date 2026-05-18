@@ -137,6 +137,20 @@ public:
       MFEM_ASSERT(geom_ != nullptr && geom_->IsBP5(),
                   "BP5 constructor requires BP5 FaultGeometry");
 
+      // R-206: this constructor caches geom_->tau_pre_ for the BP5
+      // (non-SAFS) hot path.  ComputeSAFSParams *overwrites* that
+      // FaultGeometry member with the sidecar projection
+      // (fault_geometry_safs.inl:55-61), so constructing the operator
+      // AFTER ComputeSAFSParams would silently cache the sidecar values
+      // and make SetSAFSMode(false) read sidecar pre-stress through the
+      // BP5 path — the opposite of what the user expects.  Abort early
+      // to enforce the canonical order:
+      //   ctor → ComputeSAFSParams → SetSAFSMode.
+      MFEM_VERIFY(geom_ == nullptr || !geom_->HasSAFSParams(),
+                  "RateStateFaultOperator: BP5 ctor must run BEFORE "
+                  "FaultGeometry::ComputeSAFSParams; otherwise BP5-mode "
+                  "tau_pre_ caches sidecar values silently.");
+
       if (num_nodes_ > 0)
       {
          // Slip rate: 2 components per node
@@ -204,23 +218,34 @@ public:
                         "SetSAFSMode: sigma_n_per_dof size "
                         << sigma_n_per_dof->Size()
                         << " != num_fault_dofs " << num_nodes_);
-            // R-001 silent-corruption guard: if FaultGeometry has any
-            // zero-normal fallbacks the basis at those DOFs is zeroed,
-            // which makes the sidecar tau_pre / sigma_n projection
-            // collapse to zero silently.  Refuse to enable rather than
-            // run with masked-zero stresses.  t1-degeneracy fallbacks
-            // produce a valid (sign-flip-undefined) basis and are
-            // allowed; user is warned via FaultGeometry's stderr message.
+            // R-001 + R-203 silent-corruption guard: reject BOTH
+            // fallback kinds.  Zero-normal fallbacks have zeroed basis
+            // and silently project tau_pre / sigma_n to zero.
+            // t1-degenerate fallbacks have a sign-flip-undefined basis
+            // (the FaultBasis sign convention is lost when t1 is
+            // re-derived from the up-vector; see fault_geometry.hpp
+            // lines 961-976) and can place the projected sidecar stress
+            // ANTIPARALLEL to the elastic traction at that DOF, which
+            // creates the positive-feedback regime CLAUDE.md flags as
+            // causing unbounded growth (debug v8).  Refuse to enable in
+            // either case rather than run with corrupted stresses.
             MFEM_VERIFY(geom_ == nullptr ||
-                        geom_->NumZeroNormalFallbacks() == 0,
+                        (geom_->NumZeroNormalFallbacks() == 0 &&
+                         geom_->NumT1Fallbacks() == 0),
                         "SetSAFSMode: cannot enable SAFS mode — "
                         "FaultGeometry has "
                         << geom_->NumZeroNormalFallbacks()
-                        << " fault DOF(s) with a zeroed basis (zero-length "
-                        "normal during ComputePerDOFCoordsAndBasis_).  "
-                        "Their sidecar pre-stress and sigma_n would silently "
-                        "project to zero.  Fix the operator's "
-                        "GetFaultDOFBasis to populate all owned fault DOFs.");
+                        << " zero-normal + " << geom_->NumT1Fallbacks()
+                        << " t1-degenerate fault DOF(s).  Zero-normal "
+                        "DOFs would silently project sidecar pre-stress "
+                        "and sigma_n to zero; t1-degenerate DOFs have a "
+                        "sign-flip-undefined basis that can place the "
+                        "projected stress ANTIPARALLEL to the elastic "
+                        "traction at that DOF, creating the positive-"
+                        "feedback regime CLAUDE.md documents (debug v8).  "
+                        "Fix the operator's GetFaultDOFBasis (zero-normal) "
+                        "and the upstream mesh / up-vector choice "
+                        "(t1-degenerate) before enabling SAFS.");
          }
          safs_mode_       = enabled;
          tau_pre_per_dof_ = tau_pre_per_dof;

@@ -355,6 +355,21 @@ public:
    {
       if (!IsActive()) { return; }
 
+      // R-202: the tracer's CommitStep indexes staged_traction_ /
+      // staged_stress_ / staged_corr_ / staged_jump_res_ with BP5 2-comp
+      // strides (2*dof and 2*dof+1).  If a future caller wires Antiplane
+      // (NumSlipComponents == 1) into here, the round-1 R-003 base
+      // default sizes those vectors to traction.Size() — which is half
+      // the stride — and CommitStep would OOB-read the second half on
+      // every iteration.  Refuse loudly rather than corrupt silently.
+      const int n_owned = static_cast<int>(traced_dofs_.size());
+      MFEM_VERIFY(n_owned == 0 || traction.Size() >= 2 * n_owned,
+                  "FaceTraceLogger::RecordMult: traction.Size()="
+                  << traction.Size() << " < 2 * n_owned=" << 2*n_owned
+                  << ".  Tracer requires BP5 2-component layout; "
+                  "Antiplane (1 comp) callers must template-specialise "
+                  "the tracer or skip tracer wiring.");
+
       staged_traction_ = traction;
       staged_stress_ = traction_stress;
       staged_corr_ = traction_correction;

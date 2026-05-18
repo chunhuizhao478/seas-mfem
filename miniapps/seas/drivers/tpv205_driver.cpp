@@ -2275,7 +2275,11 @@ int main(int argc, char *argv[])
       }
       else
       {
-         pv_out->CommitSchedule(time);
+         // R-201: PeekShouldWrite-gated path MUST use the 2-arg form so
+         // last_v_max_ / current_regime_ track the live trajectory.  The
+         // 1-arg shim uses stale last_v_max_ which silently breaks the
+         // regime state machine when hysteresis_factor > 1.
+         pv_out->CommitSchedule(time, V_max);
       }
 
       pv_out->WriteFaultSurfaceVTU(
