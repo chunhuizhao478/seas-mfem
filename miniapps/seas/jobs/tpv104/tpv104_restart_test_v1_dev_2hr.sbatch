@@ -17,29 +17,39 @@
 # SEAS_CHECKPOINT_V1; per-rank text files using the same
 # {prefix}_checkpoint_r{rank}.txt naming as BP5).
 #
-# Three phases inside a SINGLE 2h dev-queue reservation:
+# Two phases inside a SINGLE 2h dev-queue reservation (RESTART PAIR):
 #
-#   Phase A — fresh run 0 → 1.0 s (~24 min wall at 8N x 400r, dynamic
+#   Phase A — fresh run 0 → 2.5 s (~1 hr wall at 8N x 400r, dynamic
 #             rupture).  Driver writes V1 checkpoint at end-of-run
 #             (always when --checkpoint-interval > 0).
 #
-#   Phase B — RESTART from Phase A's checkpoint, runs 1.0 → 2.0 s
-#             (~24 min wall — driver loads Q + dof_data dynamic fields
+#   Phase B — RESTART from Phase A's checkpoint, runs 2.5 → 5.0 s
+#             (~1 hr wall — driver loads Q + dof_data dynamic fields
 #             + scalars, then resumes the time loop from
 #             `step = restart_step` instead of 0).  Writes its own
 #             V1 checkpoint at end-of-run (chainable).
 #
-#   Phase C — REFERENCE single-shot 0 → 2.0 s (~48 min wall, no
-#             --restart).  Produces the same physical endpoint as
-#             Phase A+B; serves as the gold-standard against which
-#             Phase B's final state is compared (Validation #11).
-#             Catches state-corruption bugs that the file-existence
-#             validations #1-#7 cannot detect.  See
-#             debug_document/paraview_output_debug_document/
-#               tpv104_restart_state_verification_2026-05-17.md
+# Rate: 2.5 s simulated time per 1 hr wall.  A+B total wall ~2 hr
+# fits the 2h dev queue.
 #
-# Rate: 2.5 s simulated time per 1 hr wall.  A+B+C total wall
-# ~96 min fits the 2h dev queue with 24 min margin.
+# REFERENCE comparison (gold-standard state-correctness check) lives
+# in a SEPARATE sbatch + comparison script:
+#   jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch — runs the same
+#   parameters as Phase A+B but in a single 0 → 5.0 s shot.  Submit
+#   it in parallel with this pair sbatch.
+#   scripts/tpv104_restart_compare.sh <pair_base> <ref_base> — runs
+#   on the login node after both jobs finish; reads
+#   <pair_base>/segment_002 final station state vs <ref_base>/single_shot
+#   final state and asserts agreement within tolerance.  See
+#   debug_document/paraview_output_debug_document/
+#     tpv104_restart_state_verification_2026-05-17.md
+#
+# Split rationale: the user's gold-standard verification is "run
+# 5.0 s single-shot vs run 2.5 s + restart 2.5 s, then compare".
+# A 0 → 5.0 single-shot needs ~2 h on its own (same rate); a 4 h
+# combined sbatch needs the normal queue.  Two independent 2 h dev
+# sbatches submitted in parallel get the same end-state without
+# leaving the dev queue.
 #
 # V3 deferral (out of scope for this V1 port; tracked in
 # `debug_document/paraview_output_debug_document/petsc_ts_restart_plan_2026-05-16.md`
@@ -139,30 +149,29 @@ make seas_tpv104_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 # segment_NNN subdirs.  segment_002 is RESTARTED from segment_001's
 # end-of-run V1 checkpoint via `--restart ${RESULT_DIR_A}/${OUTPUT_PREFIX_A}`.
 # =======================================================================
-RESTART_TEST_BASE="tpv104/results_restart_test_job${SLURM_JOB_ID}"
+RESTART_TEST_BASE="tpv104/results_pair_test_job${SLURM_JOB_ID}"
 RESULT_DIR_A="${RESTART_TEST_BASE}/segment_001"
 RESULT_DIR_B="${RESTART_TEST_BASE}/segment_002"
-RESULT_DIR_C="${RESTART_TEST_BASE}/segment_ref"
-OUTPUT_PREFIX_A="tpv104_restart_seg001_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX_B="tpv104_restart_seg002_job${SLURM_JOB_ID}"
-OUTPUT_PREFIX_C="tpv104_restart_segref_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX_A="tpv104_pair_seg001_job${SLURM_JOB_ID}"
+OUTPUT_PREFIX_B="tpv104_pair_seg002_job${SLURM_JOB_ID}"
 
-mkdir -p "${RESULT_DIR_A}" "${RESULT_DIR_B}" "${RESULT_DIR_C}"
+mkdir -p "${RESULT_DIR_A}" "${RESULT_DIR_B}"
 
 echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Base dir:      ${RESTART_TEST_BASE}"
-echo "Phase A dir:   ${RESULT_DIR_A}  (segment_001 — fresh, 0 → 1.0 s)"
-echo "Phase B dir:   ${RESULT_DIR_B}  (segment_002 — RESTART, 1.0 → 2.0 s)"
-echo "Phase C dir:   ${RESULT_DIR_C}  (segment_ref — single-shot, 0 → 2.0 s)"
+echo "Phase A dir:   ${RESULT_DIR_A}  (segment_001 — fresh, 0 → 2.5 s)"
+echo "Phase B dir:   ${RESULT_DIR_B}  (segment_002 — RESTART, 2.5 → 5.0 s)"
 echo "Footprint:     8N x 400r, dev queue, 2h total"
-echo "Phase A tfinal: 1.0 s  (~24 min wall, fresh)"
-echo "Phase B tfinal: 2.0 s  (~24 min wall — driver loads Phase A's V1"
-echo "                        checkpoint and resumes from t=1.0 s)"
-echo "Phase C tfinal: 2.0 s  (~48 min wall — fresh single-shot reference"
-echo "                        for state-trajectory comparison vs A+B)"
-echo "Rate:          2.5 s / 1 hr  →  total wall ~96 min, 24 min margin"
+echo "Phase A tfinal: 2.5 s  (~1 hr wall, fresh)"
+echo "Phase B tfinal: 5.0 s  (~1 hr wall — driver loads Phase A's V1"
+echo "                        checkpoint and resumes from t=2.5 s)"
+echo "Rate:          2.5 s / 1 hr  →  total wall ~2 hr matches reservation"
+echo "REFERENCE comparison (vs single-shot 0 → 5.0): submit the"
+echo "  jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch in parallel"
+echo "  with this sbatch; after BOTH jobs finish, run"
+echo "  scripts/tpv104_restart_compare.sh ${RESTART_TEST_BASE} <ref_base>"
 echo "ParaView:      ENABLED.  PRIMARY collection schedule state"
 echo "                        (last_write_time, regime) carries across"
 echo "                        the seam (V2 BP5 schema).  SECONDARY"
@@ -184,7 +193,7 @@ echo "========================================"
 # =======================================================================
 echo ""
 echo "========================================"
-echo "Phase A: fresh TPV104 run, 0 → 1.0 s  (~24 min wall)"
+echo "Phase A: fresh TPV104 run, 0 → 2.5 s  (~1 hr wall)"
 echo "========================================"
 ibrun ./seas_tpv104_driver \
       --mesh tpv104/mesh/tpv104_200m.msh \
@@ -192,7 +201,7 @@ ibrun ./seas_tpv104_driver \
       --order 1 \
       --bc-mode absorbing \
       --cfl 0.5 \
-      --tfinal 1.0 \
+      --tfinal 2.5 \
       --ader-order 2 \
       --friction-solver newton-stable \
       --fric-law aging \
@@ -242,15 +251,15 @@ echo "  (before Phase B starts; R-103 unchanged check)."
 # Phase B — RESTART from Phase A's V1 checkpoint.  Driver loads
 # Q + dof_data dynamic fields + (t, dt, step) from
 # {RESULT_DIR_A}/{OUTPUT_PREFIX_A}_checkpoint_r{rank}.txt, then
-# resumes the ADER time loop from `step = restart_step`.  tfinal=2.0
-# is ABSOLUTE (BP5 convention) so Phase B advances 1.0 s past
-# Phase A's tfinal, completing in ~24 min wall (same rate as A).
+# resumes the ADER time loop from `step = restart_step`.  tfinal=5.0
+# is ABSOLUTE (BP5 convention) so Phase B advances 2.5 s past
+# Phase A's tfinal, completing in ~1 hr wall (same rate as A).
 # Output to a SEPARATE dir (segment_002) enforced by the driver's
 # safety check.
 # =======================================================================
 echo ""
 echo "========================================"
-echo "Phase B: TPV104 RESTART, 1.0 → 2.0 s  (~24 min wall)"
+echo "Phase B: TPV104 RESTART, 2.5 → 5.0 s  (~1 hr wall)"
 echo "         --restart ${RESULT_DIR_A}/${OUTPUT_PREFIX_A}"
 echo "========================================"
 ibrun ./seas_tpv104_driver \
@@ -259,7 +268,7 @@ ibrun ./seas_tpv104_driver \
       --order 1 \
       --bc-mode absorbing \
       --cfl 0.5 \
-      --tfinal 2.0 \
+      --tfinal 5.0 \
       --ader-order 2 \
       --friction-solver newton-stable \
       --fric-law aging \
@@ -286,56 +295,21 @@ if [ "${PHASE_B_RC}" -ne 0 ]; then
 fi
 
 # =======================================================================
-# Phase C — REFERENCE single-shot 0 → 2.0 s.  No --restart; produces
-# the same physical endpoint as Phase A+B for comparison.  Used by
-# Validation #11 to confirm restart preserves trajectory.  See
-# debug_document/paraview_output_debug_document/
-#   tpv104_restart_state_verification_2026-05-17.md
-# for tolerance design + station-column reference.
-# =======================================================================
-echo ""
-echo "========================================"
-echo "Phase C: REFERENCE single-shot, 0 → 2.0 s  (~48 min wall, no --restart)"
-echo "========================================"
-ibrun ./seas_tpv104_driver \
-      --mesh tpv104/mesh/tpv104_200m.msh \
-      --mesh-scale 1 \
-      --order 1 \
-      --bc-mode absorbing \
-      --cfl 0.5 \
-      --tfinal 2.0 \
-      --ader-order 2 \
-      --friction-solver newton-stable \
-      --fric-law aging \
-      --fault-iterator one-shot \
-      --mixed-flux adjacent \
-      --output-dir "${RESULT_DIR_C}" \
-      --output-prefix "${OUTPUT_PREFIX_C}" \
-      --output-dt 0.05 \
-      --paraview \
-      --paraview-dt 0.1 \
-      --paraview-bulk-dt 0.1 \
-      --paraview-volume-zfp-tol 1e-3 \
-      --paraview-bulk-zfp-tol 1e-3 \
-      --paraview-fault-zfp-tol 1e-12 \
-      --paraview-max-snapshots 50 \
-      --checkpoint-interval 100 \
-      || PHASE_C_RC=$?
-PHASE_C_RC=${PHASE_C_RC:-0}
-echo "Phase C exit code: ${PHASE_C_RC}"
-if [ "${PHASE_C_RC}" -ne 0 ]; then
-   echo "FAIL: Phase C reference run did not exit cleanly."
-   exit 12
-fi
-
-# =======================================================================
-# Validation block — verifies TPV104 V1 restart end-to-end.
+# Validation block — verifies TPV104 V1 restart end-to-end (pair only).
 #
 # Expected outcome (Phase-4 V1 port landed): Phase B's --restart loads
 # Phase A's checkpoint, prints "TPV104 restart loaded:" on rank 0, and
-# resumes the time loop from t ≈ 1.0 s.  Each phase's outputs land in
-# its own --output-dir (no clobber).  Phase B's final state at t = 2.0
-# matches Phase C's single-shot state at t = 2.0 within tolerance.
+# resumes the time loop from t ≈ 2.5 s.  Each phase's outputs land in
+# its own --output-dir (no clobber).  At the t=2.5 seam, Phase A's
+# last station row and Phase B's first station row agree within
+# (loose) tolerance.
+#
+# REFERENCE comparison (Phase B's final state at t=5.0 vs the
+# single-shot reference at t=5.0) lives in a SEPARATE script:
+#   scripts/tpv104_restart_compare.sh <pair_base> <ref_base>
+# Submit jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch in parallel
+# with this sbatch to produce <ref_base>; once both jobs finish, run
+# the compare script on the login node.
 #
 # Acceptance checks (exit codes 3-12):
 #   #1  Phase A fault.vtkhdf landed (>1 KiB)
@@ -343,18 +317,15 @@ fi
 #   #3  Phase A fault.vtkhdf untouched after Phase B (size compare,
 #       BEFORE/AFTER capture per R-103)
 #   #4  Phase B's "TPV104 restart loaded:" log line present
-#   #5  Phase B station files start at t ≈ tfinal_A = 1.0 s
+#   #5  Phase B station files start at t ≈ tfinal_A = 2.5 s
 #   #6  Both Phase A and Phase B produced station files
 #   #7  Phase A station files md5 unchanged after Phase B (R-004)
-#   #8  Phase B last station t ≈ tfinal_B = 2.0 s (proves loop ran
+#   #8  Phase B last station t ≈ tfinal_B = 5.0 s (proves loop ran
 #       to completion, not just first restart-load step)
-#   #9  Phase C reference fault.vtkhdf landed in segment_ref (>1 KiB)
-#   #10 SEAM continuity: Phase A's last station row's h-slip and
+#   #9  SEAM continuity: Phase A's last station row's h-slip and
 #       h-slip-rate at x2_0_x3_7.5 agree with Phase B's first row
-#       (catches obvious state-load failures)
-#   #11 REFERENCE comparison: Phase B's last row vs Phase C's last
-#       row at x2_0_x3_7.5; h-slip, h-slip-rate, psi within tolerance
-#       (gold-standard state-trajectory correctness check)
+#       (catches obvious state-load failures; tighter check is the
+#       REFERENCE comparison in the compare script)
 # See debug_document/paraview_output_debug_document/
 #   tpv104_restart_state_verification_2026-05-17.md
 # for tolerance design and the SCEC column reference.
@@ -449,15 +420,15 @@ else
 fi
 
 # Acceptance check #5 — Phase B's *_station_*.dat station files start
-# at t ≈ 1.0 s (Phase A's tfinal), NOT t=0.  Proves the V1 restart
+# at t ≈ 2.5 s (Phase A's tfinal), NOT t=0.  Proves the V1 restart
 # correctly loaded t and the time loop is integrating from the saved
-# state.  Threshold 0.9 (rather than 1.0) gives a small tolerance
+# state.  Threshold 2.4 (rather than 2.5) gives a small tolerance
 # margin for the first post-restart probe-write that might fall a
 # few output_dt's after the restart point.  TPV104StationWriter
 # names files <prefix>_station_<name>.dat (dynamic/tpv104_setup.hpp:400);
 # the BP5 glob *_fltst_*.txt does NOT match.
 echo ""
-echo "Validation #5: Phase B station files start near t = 1.0 s"
+echo "Validation #5: Phase B station files start near t = 2.5 s"
 echo "                (proves V1 restart loaded the time correctly)"
 echo "----------------------------------------"
 B_STATIONS_FIRST=$(ls "${RESULT_DIR_B}"/*_station_*.dat 2>/dev/null | head -1)
@@ -476,13 +447,13 @@ if [ -z "${FIRST_T}" ]; then
    exit 7
 fi
 RESTART_TIME_OK=$(awk -v t="${FIRST_T}" \
-                 'BEGIN { print (t >= 0.9) ? "1" : "0" }')
+                 'BEGIN { print (t >= 2.4) ? "1" : "0" }')
 if [ "${RESTART_TIME_OK}" = "1" ]; then
    echo "  PASS — Phase B station file starts at t=${FIRST_T}"
-   echo "         (>= 0.9, proves restart loaded t ≈ Phase A tfinal)"
+   echo "         (>= 2.4, proves restart loaded t ≈ Phase A tfinal)"
 else
    echo "  FAIL — Phase B station file starts at t=${FIRST_T},"
-   echo "         expected >= 0.9 (Phase A tfinal was 1.0).  The"
+   echo "         expected >= 2.4 (Phase A tfinal was 2.5).  The"
    echo "         restart block didn't load t correctly, OR the"
    echo "         driver re-initialised station_writer from t=0"
    echo "         on restart.  Check ReadTpv104Checkpoint's t"
@@ -593,51 +564,36 @@ col() {
 # Validation #4 ("restart loaded:") cannot detect because the log
 # line is printed at restart-load time, NOT at end-of-run.
 echo ""
-echo "Validation #8: Phase B last station t ≈ tfinal_B = 2.0 s"
+echo "Validation #8: Phase B last station t ≈ tfinal_B = 5.0 s"
 echo "----------------------------------------"
 # Use the same station file Validation #5 used for the first-t check.
 B_LAST_ROW=$(extract_row "${B_STATIONS_FIRST}" last)
 B_LAST_T=$(col "${B_LAST_ROW}" 1)
 echo "  Last t in ${B_STATIONS_FIRST}: ${B_LAST_T:-(unparseable)}"
 B_LAST_T_OK=$(awk -v t="${B_LAST_T:-0}" \
-              'BEGIN { print (t >= 1.9) ? "1" : "0" }')
+              'BEGIN { print (t >= 4.9) ? "1" : "0" }')
 if [ "${B_LAST_T_OK}" = "1" ]; then
-   echo "  PASS — Phase B reached t=${B_LAST_T} (>= 1.9, near tfinal_B=2.0)"
+   echo "  PASS — Phase B reached t=${B_LAST_T} (>= 4.9, near tfinal_B=5.0)"
 else
    echo "  FAIL — Phase B's last station t = ${B_LAST_T} is too small;"
-   echo "         expected >= 1.9 (tfinal_B = 2.0 with margin for output_dt)."
+   echo "         expected >= 4.9 (tfinal_B = 5.0 with margin for output_dt)."
    echo "         The time loop terminated before reaching tfinal."
    exit 10
 fi
 
-# Acceptance check #9 — Phase C reference produced its own fault.vtkhdf.
-echo ""
-echo "Validation #9: Phase C produced fault.vtkhdf (reference run)"
-echo "----------------------------------------"
-FAULT_C="${RESULT_DIR_C}/fault.vtkhdf"
-FAULT_C_SIZE=$(stat -c %s "${FAULT_C}" 2>/dev/null \
-            || stat -f %z "${FAULT_C}" 2>/dev/null \
-            || echo 0)
-echo "  Phase C fault.vtkhdf size: ${FAULT_C_SIZE} bytes"
-if [ "${FAULT_C_SIZE}" -gt 1024 ]; then
-   echo "  PASS — Phase C wrote fault.vtkhdf (> 1 KiB) in segment_ref"
-else
-   echo "  FAIL — Phase C fault.vtkhdf missing or empty in ${FAULT_C}"
-   exit 11
-fi
-
-# Acceptance check #10 — SEAM continuity at central nucleation station.
+# Acceptance check #9 — SEAM continuity at central nucleation station.
 # Compare Phase A's LAST station row to Phase B's FIRST station row
 # at x2_0_x3_7.5 (central nucleation patch, most active during early
 # rupture).  Loose tolerances catch gross state-load failures (e.g.,
-# field-order swap that wipes slip-rate); strict comparison is left
-# to Validation #11 against the no-restart reference.  Column layout
-# (TPV104StationWriter):
+# field-order swap that wipes slip-rate); the gold-standard check
+# (REFERENCE comparison vs single-shot run at t=5.0) lives in
+# scripts/tpv104_restart_compare.sh, run after both this pair sbatch
+# AND the reference sbatch finish.  Column layout (TPV104StationWriter):
 #   $1 t  $2 h-slip  $3 h-slip-rate  $4 h-shear-stress
 #   $5 v-slip  $6 v-slip-rate  $7 v-shear-stress  $8 n-stress  $9 psi
 echo ""
-echo "Validation #10: SEAM continuity at station x2_0_x3_7.5"
-echo "                 (Phase A last row ↔ Phase B first row)"
+echo "Validation #9: SEAM continuity at station x2_0_x3_7.5"
+echo "                (Phase A last row ↔ Phase B first row)"
 echo "----------------------------------------"
 SEAM_STATION="x2_0_x3_7.5"
 A_SEAM_FILE="${RESULT_DIR_A}/${OUTPUT_PREFIX_A}_station_${SEAM_STATION}.dat"
@@ -645,14 +601,14 @@ B_SEAM_FILE="${RESULT_DIR_B}/${OUTPUT_PREFIX_B}_station_${SEAM_STATION}.dat"
 if [ ! -s "${A_SEAM_FILE}" ] || [ ! -s "${B_SEAM_FILE}" ]; then
    echo "  FAIL — seam station file missing.  A: ${A_SEAM_FILE}"
    echo "                                      B: ${B_SEAM_FILE}"
-   exit 12
+   exit 11
 fi
 A_SEAM_ROW=$(extract_row "${A_SEAM_FILE}" last)
 B_SEAM_ROW=$(extract_row "${B_SEAM_FILE}" first)
 echo "  A last:  ${A_SEAM_ROW}"
 echo "  B first: ${B_SEAM_ROW}"
 seam_fail=0
-compare_val "h-slip[t=1.0]" "$(col "${A_SEAM_ROW}" 2)" \
+compare_val "h-slip[t=2.5]" "$(col "${A_SEAM_ROW}" 2)" \
             "$(col "${B_SEAM_ROW}" 2)" 0.1 0.5 || seam_fail=1
 compare_val "h-slip-rate"   "$(col "${A_SEAM_ROW}" 3)" \
             "$(col "${B_SEAM_ROW}" 3)" 5.0 0.5 || seam_fail=1
@@ -660,45 +616,9 @@ if [ "${seam_fail}" -ne 0 ]; then
    echo "  FAIL — seam continuity violated at station ${SEAM_STATION}."
    echo "         Restart may have loaded state into wrong fields"
    echo "         (e.g., field-order swap in WriteTpv104Checkpoint)."
-   exit 12
+   exit 11
 fi
 echo "  PASS — seam continuity within tolerance"
-
-# Acceptance check #11 — REFERENCE comparison: Phase A+B at t=2.0 vs
-# Phase C at t=2.0.  Tight tolerances; gold-standard restart-
-# correctness check.  Both trajectories should match within MPI-
-# reduction-order non-determinism (~1e-9 over ~3500 steps) plus
-# checkpoint round-trip noise (zero — 17-digit scientific format
-# round-trips IEEE 754 exactly per tpv104_checkpoint.hpp:70).
-echo ""
-echo "Validation #11: REFERENCE comparison at station x2_0_x3_7.5"
-echo "                 (Phase A+B at t=2.0 ↔ Phase C at t=2.0)"
-echo "----------------------------------------"
-C_SEAM_FILE="${RESULT_DIR_C}/${OUTPUT_PREFIX_C}_station_${SEAM_STATION}.dat"
-if [ ! -s "${C_SEAM_FILE}" ]; then
-   echo "  FAIL — Phase C seam station file missing: ${C_SEAM_FILE}"
-   exit 13
-fi
-B_FINAL_ROW=$(extract_row "${B_SEAM_FILE}" last)
-C_FINAL_ROW=$(extract_row "${C_SEAM_FILE}" last)
-echo "  B last:  ${B_FINAL_ROW}"
-echo "  C last:  ${C_FINAL_ROW}"
-ref_fail=0
-compare_val "h-slip[t=2.0]" "$(col "${B_FINAL_ROW}" 2)" \
-            "$(col "${C_FINAL_ROW}" 2)" 1e-3 0.01 || ref_fail=1
-compare_val "h-slip-rate"   "$(col "${B_FINAL_ROW}" 3)" \
-            "$(col "${C_FINAL_ROW}" 3)" 1e-3 0.05 || ref_fail=1
-compare_val "psi"           "$(col "${B_FINAL_ROW}" 9)" \
-            "$(col "${C_FINAL_ROW}" 9)" 1e-6 0.001 || ref_fail=1
-if [ "${ref_fail}" -ne 0 ]; then
-   echo "  FAIL — Phase B's t=2.0 state diverges from Phase C's t=2.0"
-   echo "         (single-shot reference) beyond tolerance.  Restart"
-   echo "         load corrupted state OR introduced silent drift."
-   echo "         See tpv104_restart_state_verification_2026-05-17.md"
-   echo "         for the tolerance design + diagnostic next steps."
-   exit 13
-fi
-echo "  PASS — Phase B state matches Phase C reference within tolerance"
 
 # =======================================================================
 # Summary + disk usage record.
@@ -727,17 +647,24 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo "  station files: ${B_STATIONS}"
    echo ""
    echo "Acceptance checks (all PASSED to reach this summary):"
-   echo "  #1  Phase A fault.vtkhdf landed:           PASS (${FAULT_A_SIZE} bytes)"
-   echo "  #2  Phase B fault.vtkhdf in own dir:       PASS (${FAULT_B_SIZE} bytes)"
-   echo "  #3  Phase A fault.vtkhdf untouched:        PASS"
-   echo "  #4  V1 restart block fired on Phase B:     PASS"
-   echo "  #5  Phase B station files start near 1.0:  PASS"
-   echo "  #6  station files present + separate:      PASS (A=${A_STATIONS} B=${B_STATIONS})"
-   echo "  #7  Phase A station md5 unchanged by B:    PASS"
-   echo "  #8  Phase B reached t ≈ tfinal_B = 2.0:    PASS (t=${B_LAST_T})"
-   echo "  #9  Phase C reference fault.vtkhdf:        PASS (${FAULT_C_SIZE} bytes)"
-   echo "  #10 SEAM continuity (A last ↔ B first):    PASS"
-   echo "  #11 REFERENCE (A+B at t=2.0 ↔ C at t=2.0): PASS"
+   echo "  #1 Phase A fault.vtkhdf landed:           PASS (${FAULT_A_SIZE} bytes)"
+   echo "  #2 Phase B fault.vtkhdf in own dir:       PASS (${FAULT_B_SIZE} bytes)"
+   echo "  #3 Phase A fault.vtkhdf untouched:        PASS"
+   echo "  #4 V1 restart block fired on Phase B:     PASS"
+   echo "  #5 Phase B station files start near 2.5:  PASS"
+   echo "  #6 station files present + separate:      PASS (A=${A_STATIONS} B=${B_STATIONS})"
+   echo "  #7 Phase A station md5 unchanged by B:    PASS"
+   echo "  #8 Phase B reached t ≈ tfinal_B = 5.0:    PASS (t=${B_LAST_T})"
+   echo "  #9 SEAM continuity (A last ↔ B first):    PASS"
+   echo ""
+   echo "NEXT STEP: REFERENCE comparison vs single-shot 0 → 5.0 run."
+   echo "  1. Submit jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch"
+   echo "     in parallel with this pair sbatch (independent 2 h dev job)."
+   echo "  2. Once both finish, on the login node:"
+   echo "     scripts/tpv104_restart_compare.sh \\"
+   echo "       ${RESTART_TEST_BASE} <ref_base>"
+   echo "     where <ref_base> is the reference sbatch's"
+   echo "     tpv104/results_reference_job<jobid> directory."
    echo ""
    echo "V3 deferred: per-collection ParaView schedule state (carry the"
    echo "             secondary pv_bulk_out collection's regime +"
@@ -746,6 +673,5 @@ SUMMARY_FILE="${RESULT_DIR_B}/RESTART_TEST_SUMMARY.txt"
    echo ""
    echo "du -sh (Phase A): $(du -sh ${RESULT_DIR_A} | cut -f1)"
    echo "du -sh (Phase B): $(du -sh ${RESULT_DIR_B} | cut -f1)"
-   echo "du -sh (Phase C): $(du -sh ${RESULT_DIR_C} | cut -f1)"
 } > "${SUMMARY_FILE}"
 cat "${SUMMARY_FILE}"

@@ -477,30 +477,77 @@ static void Subtest6_DriverGrep()
       TEST_ASSERT(sbsrc.find("FAULT_A_BEFORE_B_SIZE") != std::string::npos,
                   "Sub-test 6 R-103: TPV104 sbatch must capture "
                   "FAULT_A_BEFORE_B_SIZE before Phase B runs");
-      // R-200 / round-8 state-verification: sbatch must run a
-      // reference Phase C single-shot AND have SEAM + REFERENCE
-      // validations.  See tpv104_restart_state_verification_2026-05-17.md
-      TEST_ASSERT(sbsrc.find("RESULT_DIR_C") != std::string::npos
-                  && sbsrc.find("OUTPUT_PREFIX_C") != std::string::npos,
-                  "Sub-test 6 R-200: TPV104 sbatch must define a "
-                  "RESULT_DIR_C and OUTPUT_PREFIX_C for the reference "
-                  "Phase C single-shot");
-      TEST_ASSERT(sbsrc.find("Phase C") != std::string::npos
-                  && sbsrc.find("REFERENCE") != std::string::npos,
-                  "Sub-test 6 R-200: TPV104 sbatch must run a "
-                  "reference Phase C with no --restart");
-      TEST_ASSERT(sbsrc.find("Validation #10") != std::string::npos
-                  && sbsrc.find("SEAM") != std::string::npos,
-                  "Sub-test 6 R-200: TPV104 sbatch must include "
-                  "Validation #10 SEAM continuity (A last ↔ B first)");
-      TEST_ASSERT(sbsrc.find("Validation #11") != std::string::npos
-                  && sbsrc.find("REFERENCE comparison") != std::string::npos,
-                  "Sub-test 6 R-200: TPV104 sbatch must include "
-                  "Validation #11 REFERENCE comparison (B at t=2.0 ↔ "
-                  "C at t=2.0)");
+      // R-200 / round-8 state-verification: pair sbatch must do A + B
+      // restart pair (no Phase C inside), include the SEAM check at
+      // the t=2.5 seam, define the compare_val helper, and point the
+      // user at the reference sbatch + compare script.
+      TEST_ASSERT(sbsrc.find("Phase C") == std::string::npos,
+                  "Sub-test 6 R-200: pair sbatch must NOT include "
+                  "Phase C (reference single-shot moved to "
+                  "tpv104_reference_test_dev_2hr.sbatch)");
+      TEST_ASSERT(sbsrc.find("Validation #9: SEAM") != std::string::npos
+                  && sbsrc.find("SEAM continuity") != std::string::npos,
+                  "Sub-test 6 R-200: pair sbatch must include "
+                  "Validation #9 SEAM continuity (A last ↔ B first)");
       TEST_ASSERT(sbsrc.find("compare_val") != std::string::npos,
-                  "Sub-test 6 R-200: TPV104 sbatch must define the "
-                  "compare_val helper used by Validations #10 and #11");
+                  "Sub-test 6 R-200: pair sbatch must define the "
+                  "compare_val helper used by the SEAM check");
+      TEST_ASSERT(
+         sbsrc.find("tpv104_reference_test_dev_2hr.sbatch")
+         != std::string::npos
+         && sbsrc.find("tpv104_restart_compare.sh") != std::string::npos,
+         "Sub-test 6 R-200: pair sbatch must point at the reference "
+         "sbatch + compare script for the gold-standard REFERENCE check");
+   }
+   // R-200: reference sbatch must exist and be a single-shot 0 → 5.0.
+   const std::string ref_sb_path =
+      "jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch";
+   std::ifstream ref_sb(ref_sb_path);
+   TEST_ASSERT(ref_sb.is_open(),
+               "Sub-test 6 R-200: reference sbatch file must exist at "
+               "jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch");
+   if (ref_sb.is_open())
+   {
+      std::stringstream rbuf; rbuf << ref_sb.rdbuf();
+      const std::string rsrc = rbuf.str();
+      TEST_ASSERT(rsrc.find("--tfinal 5.0") != std::string::npos,
+                  "Sub-test 6 R-200: reference sbatch must run "
+                  "--tfinal 5.0 single-shot");
+      // Check the actual CLI flag form (--restart followed by a
+      // shell-expansion arg), not the bare string which appears in
+      // comments/echo lines explaining "no --restart".
+      TEST_ASSERT(rsrc.find("--restart \"$") == std::string::npos
+                  && rsrc.find("--restart $") == std::string::npos,
+                  "Sub-test 6 R-200: reference sbatch must NOT pass "
+                  "--restart as a CLI flag (it is the gold-standard "
+                  "single-shot reference, not a restart pair)");
+      TEST_ASSERT(rsrc.find("REFERENCE_BASE") != std::string::npos
+                  && rsrc.find("single_shot") != std::string::npos,
+                  "Sub-test 6 R-200: reference sbatch must use "
+                  "REFERENCE_BASE/single_shot output layout");
+   }
+   // R-200: compare script must exist and call compare_val on
+   // h-slip, h-slip-rate, psi at the seam station.
+   const std::string cmp_path = "scripts/tpv104_restart_compare.sh";
+   std::ifstream cmp(cmp_path);
+   TEST_ASSERT(cmp.is_open(),
+               "Sub-test 6 R-200: compare script must exist at "
+               "scripts/tpv104_restart_compare.sh");
+   if (cmp.is_open())
+   {
+      std::stringstream cbuf; cbuf << cmp.rdbuf();
+      const std::string csrc = cbuf.str();
+      TEST_ASSERT(csrc.find("compare_val") != std::string::npos,
+                  "Sub-test 6 R-200: compare script must define "
+                  "compare_val helper");
+      TEST_ASSERT(csrc.find("x2_0_x3_7.5") != std::string::npos,
+                  "Sub-test 6 R-200: compare script must read the "
+                  "central nucleation station x2_0_x3_7.5");
+      TEST_ASSERT(csrc.find("h-slip") != std::string::npos
+                  && csrc.find("h-slip-rate") != std::string::npos
+                  && csrc.find("psi") != std::string::npos,
+                  "Sub-test 6 R-200: compare script must compare "
+                  "h-slip, h-slip-rate, and psi");
    }
 
    // R-102: this test file's own header must point at the real sbatch.

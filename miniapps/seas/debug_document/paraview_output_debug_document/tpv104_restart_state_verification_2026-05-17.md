@@ -42,17 +42,38 @@ This update adds:
   tolerance.  Compares `h-slip`, `h-slip-rate`, and `psi`.  This is
   the gold-standard restart-correctness check.
 
-## Time budget
+## Time budget — split into two parallel sbatches
 
-| Phase | Original | New | Wall (@ 2.5s/hr) |
-|-------|----------|-----|------------------|
-| A     | 0 → 2.5  | 0 → 1.0   | ~24 min |
-| B     | 2.5 → 5.0 (restart) | 1.0 → 2.0 (restart) | ~24 min |
-| C (NEW) | —       | 0 → 2.0   | ~48 min |
-| Total | ~120 min | ~96 min | 24 min margin under 2h dev queue |
+User requirement: keep the 5.0 s rupture-physics coverage AND have
+the gold-standard reference comparison.  At 2.5 s/hr on 8N×400r,
+a full A+B+C single sbatch needs ~4 h (overflows dev queue).
+Resolution: split into TWO independent 2 h dev sbatches that can be
+submitted in parallel:
 
-A's tfinal=1.0 and B's tfinal=2.0 (absolute) chosen so A+B endpoint
-matches C's endpoint exactly at t=2.0 for the reference comparison.
+| Sbatch | Phases | tfinals | Wall |
+|--------|--------|---------|------|
+| `tpv104_restart_test_v1_dev_2hr.sbatch` (PAIR) | A + B (restart) | 0→2.5, 2.5→5.0 (absolute) | ~2 h |
+| `tpv104_reference_test_dev_2hr.sbatch` (REF)   | single-shot     | 0→5.0                     | ~2 h |
+
+Output layout:
+- Pair → `tpv104/results_pair_test_job<pair_jobid>/segment_001` and `segment_002`
+- Reference → `tpv104/results_reference_job<ref_jobid>/single_shot`
+
+Endpoints match exactly at t=5.0 so the REFERENCE comparison is well
+defined.  Each sbatch fits dev queue independently; both can run
+concurrently on Frontera if the allocation has the cycles.
+
+After both sbatches finish, a third step on the login node runs the
+comparison:
+
+```
+scripts/tpv104_restart_compare.sh <pair_base> <ref_base>
+```
+
+It reads each run's final station row at `x2_0_x3_7.5` and runs the
+same `compare_val` logic on h-slip, h-slip-rate, and psi.  Pure
+bash + awk; no MPI, no Slurm, no module loads.  Completes in
+seconds.
 
 ## Station-file column reference
 
@@ -97,13 +118,26 @@ If real Frontera output shows wider drift, document and loosen here.
 
 ## Implementation
 
-- `jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch` — add Phase C
-  invocation; shrink A/B tfinal; add 4 new validations (#8 final-t,
-  #9 reference-fault.vtkhdf, #10 seam, #11 reference).  Validation
-  helpers are inline awk/bash; no external deps.
-- `tests/unit/test_tpv104_checkpoint.cpp` Sub-test 6 — add grep
-  assertions that the sbatch contains the new sections so a future
-  regression that drops them is caught locally.
+- `jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch` (PAIR) — A + B
+  restart pair, 9 validations: #1-#7 original + #8 (Phase B reached
+  tfinal) + #9 (SEAM continuity at the t=2.5 seam).  Validation
+  helpers `compare_val` / `extract_row` / `col` defined inline so the
+  pair sbatch can run its own SEAM check without external deps.
+- `jobs/tpv104/tpv104_reference_test_dev_2hr.sbatch` (REFERENCE) —
+  single-shot 0→5.0, 3 validations: #1 fault.vtkhdf landed, #2
+  station files present, #3 reached tfinal.  Records its output dir
+  in a SUMMARY file for the compare script to pick up.
+- `scripts/tpv104_restart_compare.sh` — login-node script that takes
+  the pair base dir + reference base dir, reads the final station
+  row from each at `x2_0_x3_7.5`, runs `compare_val` on h-slip /
+  h-slip-rate / psi, exit 0 on PASS / 3 on tolerance violation.
+- `tests/unit/test_tpv104_checkpoint.cpp` Sub-test 6 — grep
+  assertions that the pair sbatch has #9 SEAM + compare_val helper
+  AND points at the reference sbatch + compare script; the reference
+  sbatch has --tfinal 5.0 + no --restart + the REFERENCE_BASE layout;
+  the compare script uses compare_val + reads x2_0_x3_7.5 + compares
+  h-slip / h-slip-rate / psi.  A future regression that drops any of
+  these is caught locally.
 
 ## Future tightening
 
