@@ -73,8 +73,21 @@ inline void WriteTpv104CheckpointImpl(const std::string &prefix,
                                       real_t t, real_t dt, int step,
                                       const Vector &Q,
                                       const std::vector<DOFData> &dof_data,
-                                      int rank, int size)
+                                      int rank, int size,
+                                      const std::string &driver_tag = "")
 {
+   // Phase 5b of spatial_dynamic_rupture_plan.md (rev-3): the optional
+   // DRIVER_TAG_V1 trailer is appended at EOF ONLY when `driver_tag`
+   // is non-empty.  When empty (the default), the function returns
+   // after the existing V1 body — the output file is byte-identical
+   // to what the pre-extension writer produced.  Validator rules: tag
+   // must contain no whitespace AND be <= 31 chars.
+   MFEM_VERIFY(driver_tag.empty()
+               || (driver_tag.size() <= 31
+                   && driver_tag.find_first_of(" \t\n\r") == std::string::npos),
+               "WriteTpv104Checkpoint: driver_tag '" << driver_tag
+               << "' must be <= 31 chars with no whitespace.");
+
    const std::string filename = Tpv104CheckpointFilename(prefix, rank);
    std::ofstream out(filename);
    MFEM_VERIFY(out.good(),
@@ -111,6 +124,14 @@ inline void WriteTpv104CheckpointImpl(const std::string &prefix,
       out << d.sigma_n_nuc << "\n";
    }
 
+   // Phase 5b: DRIVER_TAG_V1 trailer.  Skipped when driver_tag is
+   // empty so the file stays byte-identical to the pre-extension V1
+   // body (TPV/BP5 byte-exact contract).
+   if (!driver_tag.empty())
+   {
+      out << "DRIVER_TAG_V1\n" << driver_tag << "\n";
+   }
+
    out.close();
 }
 
@@ -125,7 +146,8 @@ inline bool ReadTpv104CheckpointImpl(const std::string &prefix,
                                      real_t &t, real_t &dt, int &step,
                                      Vector &Q, int expected_Q_size,
                                      std::vector<DOFData> &dof_data,
-                                     int rank, int size)
+                                     int rank, int size,
+                                     std::string *driver_tag = nullptr)
 {
    const std::string filename = Tpv104CheckpointFilename(prefix, rank);
    std::ifstream in(filename);
@@ -205,6 +227,29 @@ inline bool ReadTpv104CheckpointImpl(const std::string &prefix,
                "TPV104 checkpoint stream error in " << filename
                << " after reading " << nd << " DOF data blocks");
 
+   // Phase 5b of spatial_dynamic_rupture_plan.md (rev-3): peek for
+   // the optional DRIVER_TAG_V1 trailer.  Pre-extension files end
+   // here; peek-extract returns "" in that case (BACK-COMPAT).
+   if (driver_tag) { driver_tag->clear(); }
+   {
+      std::string maybe_tag;
+      if (in >> maybe_tag)
+      {
+         MFEM_VERIFY(maybe_tag == "DRIVER_TAG_V1",
+                     "TPV104 checkpoint trailer parse error: got '"
+                     << maybe_tag << "' (expected EOF or "
+                     "'DRIVER_TAG_V1') in " << filename);
+         std::string tag;
+         in >> tag;
+         MFEM_VERIFY(!in.fail() && !tag.empty(),
+                     "TPV104 checkpoint DRIVER_TAG_V1 trailer is "
+                     "malformed in " << filename
+                     << " (expected a non-empty tag on the line "
+                     "after DRIVER_TAG_V1).");
+         if (driver_tag) { *driver_tag = tag; }
+      }
+   }
+
    in.close();
    return true;
 }
@@ -236,13 +281,14 @@ inline void WriteTpv104Checkpoint(const std::string &prefix,
                                   real_t t, real_t dt, int step,
                                   const Vector &Q,
                                   const std::vector<DOFData> &dof_data,
-                                  const MPIContext *mpi)
+                                  const MPIContext *mpi,
+                                  const std::string &driver_tag = "")
 {
    const int rank = mpi ? mpi->Rank() : 0;
    const int size = mpi ? mpi->Size() : 1;
 
    internal::WriteTpv104CheckpointImpl(prefix, t, dt, step, Q, dof_data,
-                                       rank, size);
+                                       rank, size, driver_tag);
 
    if (mpi) { mpi->Barrier(); }
 
@@ -270,10 +316,11 @@ inline void WriteTpv104Checkpoint(const std::string &prefix,
 #ifdef MFEM_USE_MPI
                                   , MPI_Comm comm = MPI_COMM_NULL
 #endif
+                                  , const std::string &driver_tag = ""
                                   )
 {
    internal::WriteTpv104CheckpointImpl(prefix, t, dt, step, Q, dof_data,
-                                       rank, size);
+                                       rank, size, driver_tag);
 
 #ifdef MFEM_USE_MPI
    if (comm != MPI_COMM_NULL) { MPI_Barrier(comm); }
@@ -313,7 +360,8 @@ inline bool ReadTpv104Checkpoint(const std::string &prefix,
                                  real_t &t, real_t &dt, int &step,
                                  Vector &Q, int expected_Q_size,
                                  std::vector<DOFData> &dof_data,
-                                 const MPIContext *mpi)
+                                 const MPIContext *mpi,
+                                 std::string *driver_tag = nullptr)
 {
    const int rank = mpi ? mpi->Rank() : 0;
    const int size = mpi ? mpi->Size() : 1;
@@ -321,7 +369,7 @@ inline bool ReadTpv104Checkpoint(const std::string &prefix,
    const bool ok =
       internal::ReadTpv104CheckpointImpl(prefix, t, dt, step, Q,
                                          expected_Q_size, dof_data,
-                                         rank, size);
+                                         rank, size, driver_tag);
    if (!ok) { return false; }
 
    if (mpi) { mpi->Barrier(); }
@@ -344,12 +392,13 @@ inline bool ReadTpv104Checkpoint(const std::string &prefix,
 #ifdef MFEM_USE_MPI
                                  , MPI_Comm comm = MPI_COMM_NULL
 #endif
+                                 , std::string *driver_tag = nullptr
                                  )
 {
    const bool ok =
       internal::ReadTpv104CheckpointImpl(prefix, t, dt, step, Q,
                                          expected_Q_size, dof_data,
-                                         rank, size);
+                                         rank, size, driver_tag);
    if (!ok) { return false; }
 
 #ifdef MFEM_USE_MPI

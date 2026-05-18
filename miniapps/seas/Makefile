@@ -140,6 +140,11 @@ TEST_SPATIAL_STRESS_BUNDLE_SRC       = tests/unit/test_spatial_stress_bundle.cpp
 TEST_SPATIAL_STRESS_BUNDLE_OBJ       = $(TEST_SPATIAL_STRESS_BUNDLE_SRC:.cpp=.o)
 TEST_SPATIAL_CONSTANT_STRESS_SRC     = tests/unit/test_spatial_constant_stress_source.cpp
 TEST_SPATIAL_CONSTANT_STRESS_OBJ     = $(TEST_SPATIAL_CONSTANT_STRESS_SRC:.cpp=.o)
+# Spatial Phase 5c: spatial_setup.hpp test + Phase H.6 LSW forced-rupture test.
+TEST_SPATIAL_SETUP_SRC               = tests/unit/test_spatial_setup.cpp
+TEST_SPATIAL_SETUP_OBJ               = $(TEST_SPATIAL_SETUP_SRC:.cpp=.o)
+TEST_PHASEH_LSW_FORCED_RUPTURE_SRC   = tests/unit/test_phaseh_lsw_forced_rupture.cpp
+TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ   = $(TEST_PHASEH_LSW_FORCED_RUPTURE_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -745,6 +750,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_velocity_bundle \
                seas_test_spatial_stress_bundle \
                seas_test_spatial_constant_stress_source \
+               seas_test_spatial_setup \
+               seas_test_phaseh_lsw_forced_rupture \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1232,6 +1239,48 @@ seas_test_spatial_constant_stress_source: $(TEST_SPATIAL_CONSTANT_STRESS_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Spatial Phase 5c: spatial_setup.hpp tests (centroid + IP-aware
+# InitializeFaultDOFs_Spatial overloads).  Header-only; the test
+# pulls in the friction resolver + material objects to seed inputs.
+seas_test_spatial_setup: $(TEST_SPATIAL_SETUP_OBJ) \
+                         $(SPATIAL_FRICTION_OBJ) \
+                         $(HETEROGENEOUS_MATERIAL_OBJ) \
+                         $(MATERIAL_COEFFICIENTS_OBJ) \
+                         $(DATA_FIELD_3D_OBJ) \
+                         dynamic/fault_face_flux.o \
+                         dynamic/friction_solver.o
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SETUP_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    dynamic/fault_face_flux.o \
+	    dynamic/friction_solver.o \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase H.6: EvaluateADER_LSW_ForcedRupture tests.
+seas_test_phaseh_lsw_forced_rupture: $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ) \
+                                     $(SPATIAL_FRICTION_OBJ) \
+                                     dynamic/fault_face_flux.o \
+                                     dynamic/friction_solver.o \
+                                     dynamic/wave_operator.o \
+                                     dynamic/godunov_flux.o \
+                                     dynamic/pml_layer.o \
+                                     dynamic/precomputed_face_fluxes.o
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    dynamic/fault_face_flux.o \
+	    dynamic/friction_solver.o \
+	    dynamic/wave_operator.o \
+	    dynamic/godunov_flux.o \
+	    dynamic/pml_layer.o \
+	    dynamic/precomputed_face_fluxes.o \
+	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Dynamic rupture Phase 1: Wave operator tests
@@ -2101,6 +2150,21 @@ $(TEST_SPATIAL_CONSTANT_STRESS_OBJ): %.o: $(SRC)%.cpp \
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
 	    $(TOML_FLAGS) -c $< -o $@
 
+$(TEST_SPATIAL_SETUP_OBJ): %.o: $(SRC)%.cpp \
+                                dynamic/spatial_setup.hpp \
+                                dynamic/fault_face_flux.hpp \
+                                spatial/code/spatial_friction.hpp \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ): %.o: $(SRC)%.cpp \
+                                            dynamic/fault_face_flux.hpp \
+                                            spatial/code/spatial_friction.hpp \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
 $(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2638,6 +2702,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-spatial-friction-config test-spatial-friction-resolver \
       test-spatial-velocity-bundle \
       test-spatial-constant-stress-source \
+      test-spatial-setup \
+      test-phaseh-lsw-forced-rupture \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -2913,6 +2979,12 @@ test-spatial-stress-bundle: seas_test_spatial_stress_bundle
 
 test-spatial-constant-stress-source: seas_test_spatial_constant_stress_source
 	./seas_test_spatial_constant_stress_source
+
+test-spatial-setup: seas_test_spatial_setup
+	./seas_test_spatial_setup
+
+test-phaseh-lsw-forced-rupture: seas_test_phaseh_lsw_forced_rupture
+	./seas_test_phaseh_lsw_forced_rupture
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator

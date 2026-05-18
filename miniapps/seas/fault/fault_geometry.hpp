@@ -159,6 +159,162 @@ public:
       ComputeBP5Params();
    }
 
+   /// @brief Phase 5a of spatial_dynamic_rupture_plan.md (rev-3): NEW BP5
+   /// ctor overload that accepts pre-built per-DOF arrays directly,
+   /// avoiding the need to instantiate a throw-away
+   /// `ElasticityDomainOperator` (R-110 Option A).
+   ///
+   /// Lets the SAFS dynamic-rupture driver build a `FaultGeometry` from
+   /// the data it already walked out of `WaveOperator` (interior +
+   /// shared fault face arrays) without paying for a MUMPS_BLR
+   /// factorisation just to read 2D fault coordinates.
+   ///
+   /// - `dof_coords_3d` is the OWNED-fault view, interleaved
+   ///   `[x_0, y_0, z_0, x_1, y_1, z_1, ...]` of length `3 * N`.
+   /// - `dof_basis` is a `9 x N` matrix; columns `3*i .. 3*i+2` hold
+   ///   the (n, t1, t2) basis at fault DOF i (BP5 / Tandem convention:
+   ///   t1 = dip, t2 = strike).
+   /// - `dof_to_elem(i)` is the bulk-element index owning fault DOF i;
+   ///   consumed by `dynamic/spatial_setup.hpp::InitializeFaultDOFs_-
+   ///   Spatial` to query the MaterialField at the right element.
+   /// - `dof_ips` is OPTIONAL.  When non-empty its size MUST equal `N`
+   ///   and each entry is the reference `IntegrationPoint` at fault
+   ///   DOF i; populates `fault_dof_ip_` so IP-aware downstream
+   ///   helpers can evaluate Coefficients at the actual fault QP.
+   ///   When empty, `fault_dof_ip_` stays empty and IP-aware readers
+   ///   abort with a clear message.
+   ///
+   /// `coords_x2_` / `coords_x3_` are NaN-filled (R-310): the legacy
+   /// BP5 (along-strike, along-dip) convention does NOT apply to SAFS
+   /// curvilinear faults, so feeding world (x, z) into
+   /// `bp5_params_.a_of_x2_x3` would silently produce garbage.  All
+   /// BP5 analytic per-DOF arrays (`a_values_`, `dc_values_`,
+   /// `V_init_vec_`, BP5-side `tau_pre_`, `eta_values_`) are also
+   /// NaN-filled so any premature read from a non-SAFS path fails
+   /// loud rather than silently consuming out-of-range values.
+   ///
+   /// `depths_(i)` is populated from world z (the value the absorbing
+   /// / free-surface BC dispatch expects, R-404).  For a planar BP5
+   /// fault aligned with the z-axis the legacy ctor's
+   /// `depths_(i) = coords_x3_(i)` (along-dip x3) happens to equal
+   /// world z; for SAFS curvilinear faults this IS world depth and
+   /// callers that previously assumed BP5-x3 semantics see different
+   /// values.
+   ///
+   /// **The legacy `(DomainOperator&, BP5Params&, MPIContext*)` ctor
+   /// above is preserved verbatim** (§TPV Benchmark Isolation gate
+   /// `T-FAULTGEO-LEGACY-CTOR-BYTE-IDENTICAL`).
+   FaultGeometry(const BP5Params &params,
+                 const Vector &dof_coords_3d,
+                 const DenseMatrix &dof_basis,
+                 const Array<int> &dof_to_elem,
+                 int nbf_per_face,
+                 MPIContext *mpi_ctx = nullptr,
+                 const std::vector<mfem::IntegrationPoint> &dof_ips =
+                    std::vector<mfem::IntegrationPoint>())
+      : bp5_params_(params), mpi_ctx_(mpi_ctx), is_bp5_(true)
+   {
+      MFEM_VERIFY(nbf_per_face >= 1,
+                  "FaultGeometry(new BP5 ctor): nbf_per_face must be "
+                  ">= 1; got " << nbf_per_face);
+      const int N = dof_coords_3d.Size() / 3;
+      MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+                  "FaultGeometry(new BP5 ctor): dof_coords_3d.Size() ("
+                  << dof_coords_3d.Size() << ") must be 3 * N");
+      MFEM_VERIFY(dof_basis.Height() == 9 && dof_basis.Width() == N,
+                  "FaultGeometry(new BP5 ctor): dof_basis shape ("
+                  << dof_basis.Height() << ", " << dof_basis.Width()
+                  << ") must be (9, " << N << ")");
+      MFEM_VERIFY(dof_to_elem.Size() == N,
+                  "FaultGeometry(new BP5 ctor): dof_to_elem.Size() ("
+                  << dof_to_elem.Size() << ") must equal N (" << N << ")");
+      MFEM_VERIFY(dof_ips.empty()
+                  || static_cast<int>(dof_ips.size()) == N,
+                  "FaultGeometry(new BP5 ctor): dof_ips.size() ("
+                  << dof_ips.size() << ") must be either 0 or N (" << N
+                  << ")");
+
+      num_fault_dofs_         = N;
+      nbf_per_face_           = nbf_per_face;
+      num_fault_faces_        = (nbf_per_face_ > 0) ? N / nbf_per_face_ : 0;
+      num_local_fault_dofs_   = N;
+      num_global_fault_dofs_  = N;
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         if (mpi_ctx_)
+         {
+            num_global_fault_dofs_ =
+               mpi_ctx_->GlobalSumInt(num_local_fault_dofs_);
+            ComputeGatherInfo();
+         }
+      }
+
+      dof_to_elem_new_ctor_ = dof_to_elem;
+      if (!dof_ips.empty()) { fault_dof_ip_ = dof_ips; }
+
+      if (N == 0) { return; }
+
+      dof_coords_3d_ = dof_coords_3d;
+      dof_basis_     = dof_basis;
+
+      constexpr real_t k_nan = std::numeric_limits<real_t>::quiet_NaN();
+      coords_x2_.SetSize(N);
+      coords_x3_.SetSize(N);
+      depths_.SetSize(N);
+      for (int i = 0; i < N; ++i)
+      {
+         coords_x2_(i) = k_nan;
+         coords_x3_(i) = k_nan;
+         depths_(i)    = dof_coords_3d(3 * i + 2);
+      }
+
+      // Eagerly size + NaN-fill the BP5 analytic per-DOF arrays
+      // (R-402): any premature reader (Print, IsVelocityWeakening,
+      // GetAValues, GetEtaValues, GetTauPre, GetVInit) sees a
+      // consistent NaN-loud state instead of an out-of-bounds crash.
+      a_values_.SetSize(N);
+      eta_values_.SetSize(N);
+      dc_values_.SetSize(N);
+      tau_pre_.SetSize(2 * N);
+      V_init_vec_.SetSize(2 * N);
+      for (int i = 0; i < N; ++i)
+      {
+         a_values_(i)            = k_nan;
+         eta_values_(i)          = k_nan;
+         dc_values_(i)           = k_nan;
+         tau_pre_(2 * i + 0)     = k_nan;
+         tau_pre_(2 * i + 1)     = k_nan;
+         V_init_vec_(2 * i + 0)  = k_nan;
+         V_init_vec_(2 * i + 1)  = k_nan;
+      }
+
+      // R-304: count degenerate normal / tangent1 columns so the
+      // SAFS R-001 pre-flight guard in ApplyCsmStressSidecar can
+      // gate on `NumZeroNormalFallbacks() == 0`.
+      num_dof_basis_fallbacks_   = 0;
+      num_zero_normal_fallbacks_ = 0;
+      num_t1_fallbacks_          = 0;
+      constexpr real_t k_norm_tol = static_cast<real_t>(1e-10);
+      for (int i = 0; i < N; ++i)
+      {
+         const real_t nx  = dof_basis(0, i);
+         const real_t ny  = dof_basis(1, i);
+         const real_t nz  = dof_basis(2, i);
+         const real_t t1x = dof_basis(3, i);
+         const real_t t1y = dof_basis(4, i);
+         const real_t t1z = dof_basis(5, i);
+         const real_t n_norm  = std::sqrt(nx*nx + ny*ny + nz*nz);
+         const real_t t1_norm = std::sqrt(t1x*t1x + t1y*t1y + t1z*t1z);
+         if (n_norm < k_norm_tol)
+         {
+            ++num_zero_normal_fallbacks_;
+            ++num_dof_basis_fallbacks_;
+         }
+         if (t1_norm < k_norm_tol) { ++num_t1_fallbacks_; }
+      }
+   }
+
    /// @brief Number of fault DOFs (local in parallel, total in serial).
    int NumFaultDOFs() const { return num_fault_dofs_; }
 
@@ -355,6 +511,67 @@ public:
    /// @brief Of `NumDOFBasisFallbacks()`, how many were t1-degeneracy
    ///        (basis slot valid but sign-flip-undefined).
    int NumT1Fallbacks() const { return num_t1_fallbacks_; }
+
+   /// @brief Phase 5a (rev-3) — size of the per-DOF reference
+   /// `IntegrationPoint` cache populated by the new BP5 ctor.
+   ///
+   /// Returns 0 when this `FaultGeometry` was built by the LEGACY BP5
+   /// ctor `(DomainOperator&, BP5Params&, MPIContext*)` (which never
+   /// touches `fault_dof_ip_`).  Returns `N` (= NumFaultDOFs) when
+   /// built by the new BP5 ctor with a non-empty `dof_ips` argument.
+   ///
+   /// Use this to gate IP-aware downstream readers (e.g. the IP-aware
+   /// overload of `InitializeFaultDOFs_Spatial` in
+   /// `dynamic/spatial_setup.hpp`); when 0, fall back to the
+   /// centroid-based overload.
+   int fault_dof_ip_size() const
+   { return static_cast<int>(fault_dof_ip_.size()); }
+
+   /// @brief Phase 5a — accessor for the per-DOF reference
+   /// `IntegrationPoint` cache.  Aborts if the cache is empty
+   /// (legacy ctor was used or new ctor with `dof_ips.empty()`).
+   const mfem::IntegrationPoint &fault_dof_ip(int i) const
+   {
+      MFEM_ASSERT(!fault_dof_ip_.empty(),
+                  "FaultGeometry::fault_dof_ip(): cache is empty.  "
+                  "This FaultGeometry was built by the LEGACY BP5 "
+                  "ctor (or the NEW ctor with an empty dof_ips "
+                  "argument); IP-aware readers must gate on "
+                  "fault_dof_ip_size() > 0 before reading.");
+      MFEM_ASSERT(i >= 0 && i < static_cast<int>(fault_dof_ip_.size()),
+                  "FaultGeometry::fault_dof_ip(" << i
+                  << "): out of range.");
+      return fault_dof_ip_[i];
+   }
+
+   /// @brief Phase 5a — accessor for the per-DOF bulk-element ownership
+   /// cache populated by the new BP5 ctor.  Empty when built by the
+   /// legacy ctor.  Consumed by
+   /// `dynamic/spatial_setup.hpp::InitializeFaultDOFs_Spatial` to
+   /// look up `MaterialField::EvalAt` at the right element per DOF.
+   const Array<int> &dof_to_elem_new_ctor() const
+   { return dof_to_elem_new_ctor_; }
+
+   /// @brief Phase 5a — size of the per-DOF bulk-element ownership cache
+   /// populated by the new BP5 ctor.  Returns 0 when built by the
+   /// legacy ctor.
+   int dof_to_elem_new_ctor_size() const
+   { return dof_to_elem_new_ctor_.Size(); }
+
+   /// @brief Phase 5a — element index for fault DOF `i` (new BP5 ctor
+   /// path).  Aborts if the cache is empty (legacy ctor was used).
+   int dof_to_elem_new_ctor(int i) const
+   {
+      MFEM_ASSERT(dof_to_elem_new_ctor_.Size() > 0,
+                  "FaultGeometry::dof_to_elem_new_ctor(i): cache is "
+                  "empty.  This FaultGeometry was built by the LEGACY "
+                  "BP5 ctor; readers must gate on "
+                  "dof_to_elem_new_ctor_size() > 0 before reading.");
+      MFEM_ASSERT(i >= 0 && i < dof_to_elem_new_ctor_.Size(),
+                  "FaultGeometry::dof_to_elem_new_ctor(" << i
+                  << "): out of range.");
+      return dof_to_elem_new_ctor_[i];
+   }
 
    /// @brief Get per-DOF normal stress [NumFaultDOFs].
    ///
@@ -580,6 +797,22 @@ private:
    // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeSAFSParams)
    Vector sigma_n_per_dof_;       // [num_fault_dofs_]
    bool   safs_params_computed_ = false;
+
+   // Phase 5a of spatial_dynamic_rupture_plan.md (rev-3): per-DOF
+   // reference IntegrationPoint cache + per-DOF bulk-element ownership
+   // cache, BOTH populated only by the NEW BP5 ctor `(BP5Params&,
+   // Vector& coords, DenseMatrix& basis, Array<int>& dof_to_elem, int,
+   // MPIContext*, std::vector<IntegrationPoint>&)`.
+   //
+   // The LEGACY BP5 ctor `(DomainOperator&, BP5Params&, MPIContext*)`
+   // does NOT touch these — they stay default-constructed (empty).
+   // Downstream IP-aware readers (e.g. the IP-aware overload of
+   // `dynamic/spatial_setup.hpp::InitializeFaultDOFs_Spatial`) MUST
+   // gate on `fault_dof_ip_size() > 0` and call back to the centroid-
+   // based path when zero, so the legacy BP5 / TPV byte-exact
+   // contract is unaffected.
+   std::vector<mfem::IntegrationPoint> fault_dof_ip_;
+   Array<int>                          dof_to_elem_new_ctor_;
 
    // MPI gather info (parallel only)
    std::vector<int> recv_counts_;

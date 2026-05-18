@@ -74,6 +74,28 @@ struct DOFData
    real_t lsw_mu_d = 0.0;   ///< LSW dynamic friction μ_d
    real_t lsw_d_c  = 0.0;   ///< LSW slip-weakening critical distance d_c [m]
 
+   // Phase H.7 of spatial_dynamic_rupture_plan.md (rev-3): TPV26/27
+   // gradual forced-rupture fields.  In-class defaults are designed so
+   // that any DOFData not explicitly initialised for forced rupture
+   // produces f_2(t) = 0 for every physically reachable simulation
+   // time, which makes
+   // `EvaluateADER_LSW_ForcedRupture` (Phase H.6) bit-equivalent to
+   // the existing `EvaluateADER_LSW` on TPV205-init DOFData (the
+   // TPV205 byte-exact contract for the LSW path).
+   //
+   // - T_forced_rupture = 1.0e9 s is the "never forced" sentinel — for
+   //   any physically reachable t the f_2(t) branch always returns 0.
+   // - t0_decay_forced  = 0.0   is safe in combination with the
+   //   sentinel above because the `t < T_forced` branch in
+   //   LSWFrictionCoefficient_ForcedRupture fires unconditionally for
+   //   the sentinel; the t0_decay-as-divisor branch is never entered.
+   //
+   // SAFS dynamic-rupture drivers OVERWRITE both fields per-DOF via
+   // `InitializeFaultDOFs_Spatial` using values from
+   // `SpatialFrictionResolver::ResolveForcedRupture`.
+   real_t T_forced_rupture = 1.0e9;  ///< time-of-forced-rupture [s]
+   real_t t0_decay_forced  = 0.0;    ///< forced-rupture decay time [s]
+
 #ifdef SEAS_DIAG_FAULT_FLUX
    // v9.0.0 §0.5 DIAG gate for the C-1 / C-2 / C-3 bisection checkpoints.
    // Set true on exactly one hypocenter DOF (and optionally one off-hypo
@@ -349,6 +371,48 @@ public:
                          const real_t *I_plus, const real_t *I_minus,
                          real_t dt,
                          real_t *I_imp_plus, real_t *I_imp_minus) const;
+
+   /// @brief Phase H.6 of spatial_dynamic_rupture_plan.md (rev-3):
+   /// LSW Riemann solve with the TPV26/27 time-dependent forced-
+   /// rupture friction coefficient.
+   ///
+   /// Same as `EvaluateADER_LSW` but the friction coefficient is
+   ///   μ(t, δ) = μ_s + (μ_d − μ_s) · max(f_1(δ), f_2(t, T, t_0))
+   /// where `f_2` ramps from 0 → 1 over the interval
+   /// `[T_forced_rupture, T_forced_rupture + t0_decay_forced]`.  Reads
+   /// the two new `DOFData` fields (`T_forced_rupture`,
+   /// `t0_decay_forced`).
+   ///
+   /// BYTE-EXACT CONTRACT: with the in-class `DOFData` defaults
+   /// (`T_forced_rupture = 1.0e9`, `t0_decay_forced = 0`),
+   /// `f_2(t) = 0` for any physically reachable simulation time
+   /// (< 1.0e8 s), so the result reduces to plain LSW and equals
+   /// `EvaluateADER_LSW` to the last bit.  This preserves the TPV205
+   /// byte-exact gate: TPV205 stays on `FaultFrictionLaw::LSW` (the
+   /// existing path), and a hypothetical mistaken routing of TPV205
+   /// data through this method still produces TPV205-identical output.
+   ///
+   /// Slip-accumulation invariant from `EvaluateADER_LSW` applies
+   /// verbatim: this method does NOT update `data.slip{1,2}`.
+   ///
+   /// @param[in,out] data    Per-DOF state.  Reads
+   ///                        `T_forced_rupture` / `t0_decay_forced`;
+   ///                        writes V{1,2}, tau{1,2}_corr, sigma_n_corr.
+   /// @param[in]  I_plus     Time-integrated + side state (NUM_STATE).
+   /// @param[in]  I_minus    Time-integrated − side state (NUM_STATE).
+   /// @param[in]  dt         Time step (> 0).
+   /// @param[in]  t_now      Macro-step simulation time at which to
+   ///                        evaluate the f_2(t) factor.  Pass
+   ///                        `wave.GetTime()` from the dispatch site.
+   /// @param[out] I_imp_plus  Time-integrated imposed + state.
+   /// @param[out] I_imp_minus Time-integrated imposed − state.
+   void EvaluateADER_LSW_ForcedRupture(DOFData &data,
+                                       const real_t *I_plus,
+                                       const real_t *I_minus,
+                                       real_t dt,
+                                       real_t t_now,
+                                       real_t *I_imp_plus,
+                                       real_t *I_imp_minus) const;
 
    /// Access the friction solver.
    const FrictionSolver &GetSolver() const { return solver_; }

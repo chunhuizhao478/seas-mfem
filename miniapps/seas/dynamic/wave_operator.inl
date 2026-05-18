@@ -3611,10 +3611,26 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
                      // has_bulk_bg_ already asserted at the top of
                      // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
-                     // REVIEW R-016: route LSW callers (TPV205) through
-                     // EvaluateADER_LSW; the default RateAndState path
-                     // is byte-identical to pre-change.
-                     if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                     // REVIEW R-016 + Phase H.6 (rev-3): route LSW callers
+                     // (TPV205) through EvaluateADER_LSW; LSW_ForcedRupture
+                     // callers (SAFS dynamic-rupture driver, D-4 nucleation)
+                     // through the time-dependent variant; the default
+                     // RateAndState path is byte-identical to pre-change.
+                     if (fault_friction_law_ ==
+                         FaultFrictionLaw::LSW_ForcedRupture)
+                     {
+                        // R-401 / R-502 guard hoisted out of the per-DOF
+                        // loop: time_was_set_ is per-WaveOperator-call.
+                        WaveOperator<MeshType>::VerifyForcedRuptureTimeReady(
+                           time_was_set_, fdata.T_forced_rupture);
+                        fault_flux_->EvaluateADER_LSW_ForcedRupture(
+                           fdata,
+                           I_plus_local, I_minus_local,
+                           dt,
+                           GetTime(),
+                           I_imp_plus, I_imp_minus);
+                     }
+                     else if (fault_friction_law_ == FaultFrictionLaw::LSW)
                      {
                         fault_flux_->EvaluateADER_LSW(
                            fdata,
@@ -4530,13 +4546,26 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   // SHARED FALLBACK: this branch always runs the inline
                   // ADER closure regardless of substep_I_imp_*_flat_
                   // (R-1600/R-1601 frame-mismatch on shared QPs).
-                  // REVIEW R-016: dispatch on the friction-law tag —
-                  // RateAndState keeps the original Brent path
-                  // byte-identical (TPV102/TPV104); LSW (TPV205) runs
-                  // the closed-form solver.  Without this branch,
-                  // TPV205 shared-fault QPs at np > 1 silently consume
-                  // LSW values via Brent and stall the rupture front.
-                  if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                  // REVIEW R-016 + Phase H.6 (rev-3): dispatch on the
+                  // friction-law tag.  RateAndState keeps the Brent path
+                  // byte-identical (TPV102/TPV104); LSW (TPV205) runs the
+                  // closed-form solver; LSW_ForcedRupture (SAFS spatial
+                  // dyn-driver, D-4 nucleation) runs the time-dependent
+                  // variant.  Without LSW dispatch, TPV205 shared-fault
+                  // QPs at np > 1 silently consume LSW values via Brent
+                  // and stall the rupture front.
+                  if (fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
+                  {
+                     WaveOperator<MeshType>::VerifyForcedRuptureTimeReady(
+                        time_was_set_, fdata.T_forced_rupture);
+                     fault_flux_->EvaluateADER_LSW_ForcedRupture(
+                        fdata,
+                        I_plus_local, I_minus_local,
+                        dt,
+                        GetTime(),
+                        I_imp_plus, I_imp_minus);
+                  }
+                  else if (fault_friction_law_ == FaultFrictionLaw::LSW)
                   {
                      fault_flux_->EvaluateADER_LSW(
                         fdata,

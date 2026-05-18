@@ -12,6 +12,7 @@
 #include "fault_face_flux.hpp"
 #include "seas_diag_rank.hpp"
 #include "tpv205_friction.hpp"
+#include "../spatial/code/spatial_friction.hpp"  // Phase H.6: LSWFrictionCoefficient_ForcedRupture
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -815,6 +816,106 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
    WriteBackState(data, s);
 
    // Step 8: rescale Q_imp back to time-integrated form.
+   for (int c = 0; c < NUM_STATE; ++c)
+   {
+      I_imp_plus[c]  = Q_imp_plus[c]  * dt;
+      I_imp_minus[c] = Q_imp_minus[c] * dt;
+   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase H.6 of spatial_dynamic_rupture_plan.md (rev-3): LSW Riemann solve
+// with the TPV26/27 time-dependent forced-rupture friction coefficient.
+//
+// Implementation is a verbatim clone of EvaluateADER_LSW above with
+// exactly one substitution at Step 3: the `LSWFrictionCoefficient_TPV205`
+// call becomes `LSWFrictionCoefficient_ForcedRupture(delta, ..., t_now,
+// data.T_forced_rupture, data.t0_decay_forced)`.  All other steps
+// (trial-traction, total-traction, SolveLSW_TPV205, BuildImposedState,
+// WriteBackState, I_imp rescaling) are byte-equivalent to the LSW
+// path, so the BYTE-EXACT contract on TPV205-init DOFData
+// (T_forced_rupture = 1.0e9, t0_decay_forced = 0 ⇒ f_2 = 0 ⇒ μ reduces
+// to plain LSW) holds.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateADER_LSW_ForcedRupture(
+   DOFData &data,
+   const real_t *I_plus,
+   const real_t *I_minus,
+   real_t dt,
+   real_t t_now,
+   real_t *I_imp_plus,
+   real_t *I_imp_minus) const
+{
+   MFEM_VERIFY(dt > 0.0,
+               "FaultFaceFlux::EvaluateADER_LSW_ForcedRupture: dt must be > 0, "
+               "got " << dt);
+
+   MFEM_VERIFY(data.lsw_mu_s > 0.0 || data.lsw_mu_d > 0.0
+               || data.lsw_d_c > 0.0,
+               "FaultFaceFlux::EvaluateADER_LSW_ForcedRupture: all LSW-native "
+               "fields are zero (lsw_mu_s=" << data.lsw_mu_s
+               << " lsw_mu_d=" << data.lsw_mu_d
+               << " lsw_d_c=" << data.lsw_d_c
+               << ").  This DOFData was not initialized for LSW; the wave "
+               "operator dispatched the LSW_ForcedRupture path on rate-and-"
+               "state data.");
+
+   auto homog_ok = [](real_t a, real_t b)
+   {
+      return std::abs(a - b) <=
+             static_cast<real_t>(1e-12) * std::max(std::abs(a), std::abs(b));
+   };
+   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
+               homog_ok(data.Zs_plus, data.Zs_minus),
+               "FaultFaceFlux::EvaluateADER_LSW_ForcedRupture: bimaterial "
+               "fault face (Zp_plus=" << data.Zp_plus
+               << " Zp_minus=" << data.Zp_minus
+               << " Zs_plus=" << data.Zs_plus
+               << " Zs_minus=" << data.Zs_minus
+               << ").  Extend per-side handling before running this "
+               "configuration.");
+
+   real_t Q_avg_plus[NUM_STATE], Q_avg_minus[NUM_STATE];
+   const real_t inv_dt = static_cast<real_t>(1.0) / dt;
+   for (int c = 0; c < NUM_STATE; ++c)
+   {
+      Q_avg_plus[c]  = I_plus[c]  * inv_dt;
+      Q_avg_minus[c] = I_minus[c] * inv_dt;
+   }
+
+   EvalStageState s;
+   ComputeTrialTraction(data, Q_avg_plus, Q_avg_minus,
+                        s.sigma_n_trial, s.tau1_trial, s.tau2_trial);
+
+   s.sigma_n_total = data.sigma_n0 + data.sigma_n_nuc + s.sigma_n_trial;
+   s.tau1_total    = data.tau1_0   + data.tau1_nuc    + s.tau1_trial;
+   s.tau2_total    = data.tau2_0   + data.tau2_nuc    + s.tau2_trial;
+   s.Theta         = std::sqrt(s.tau1_total * s.tau1_total
+                              + s.tau2_total * s.tau2_total);
+
+   // Phase H.6 substitution: time-dependent friction coefficient that
+   // reads the new D-4 DOFData fields T_forced_rupture / t0_decay_forced.
+   const real_t delta = std::sqrt(data.slip1 * data.slip1
+                                  + data.slip2 * data.slip2);
+   const real_t mu_eff = spatial::LSWFrictionCoefficient_ForcedRupture(
+      delta, data.lsw_mu_s, data.lsw_mu_d, data.lsw_d_c,
+      t_now, data.T_forced_rupture, data.t0_decay_forced);
+
+   SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
+                   s.tau1_total, s.tau2_total,
+                   s.sigma_n_total, data.eta_s,
+                   mu_eff,
+                   s.V_abs, s.V1, s.V2,
+                   s.tau1_corr, s.tau2_corr);
+
+   s.sigma_n_corr = s.sigma_n_trial;
+
+   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
+   BuildImposedState(data, s, Q_avg_plus, Q_avg_minus,
+                     Q_imp_plus, Q_imp_minus);
+
+   WriteBackState(data, s);
+
    for (int c = 0; c < NUM_STATE; ++c)
    {
       I_imp_plus[c]  = Q_imp_plus[c]  * dt;

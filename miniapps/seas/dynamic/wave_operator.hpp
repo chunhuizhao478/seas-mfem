@@ -62,7 +62,21 @@ enum class MixedFluxMode : int { None = 0, Adjacent = 1, AllContinuous = 2 };
 /// can route to the correct ADER closure.  Default `RateAndState` keeps
 /// TPV102 / TPV104 byte-identical; `LSW` routes through
 /// `FaultFaceFlux::EvaluateADER_LSW` for TPV205.
-enum class FaultFrictionLaw : int { RateAndState = 0, LSW = 1 };
+// Phase H.6 of spatial_dynamic_rupture_plan.md (rev-3): a third arm
+// `LSW_ForcedRupture` routes through `FaultFaceFlux::EvaluateADER_LSW_-
+// ForcedRupture`, which adds the TPV26/27 time-dependent friction
+// factor `f_2(t, T_forced, t0_decay)` to the standard slip-weakening
+// `f_1(δ)`.  Existing enumerators keep their integer codes (TPV205
+// stays on `LSW = 1`, TPV102 / TPV104 / BP5 stay on `RateAndState = 0`)
+// so every existing driver call site continues to dispatch through the
+// preserved-verbatim `EvaluateADER_LSW` / `EvaluateADER` arms — the
+// TPV / BP5 byte-exact contract holds.
+enum class FaultFrictionLaw : int
+{
+   RateAndState      = 0,
+   LSW               = 1,
+   LSW_ForcedRupture = 2
+};
 
 /// @brief DG wave operator for the 3D velocity-stress elastic wave equation.
 ///
@@ -93,6 +107,51 @@ public:
 
    /// @brief Compute dQ/dt = (M^{-1}) * (-Face + Vol).
    void Mult(const Vector &Q, Vector &dQdt) const override;
+
+   /// @brief Override `TimeDependentOperator::SetTime` to track whether
+   /// the driver has ever supplied a simulation time.
+   ///
+   /// Phase H.6 (rev-3 round-4 R-401): the new `LSW_ForcedRupture`
+   /// dispatch arm reads `GetTime()` for the time-dependent friction
+   /// factor `f_2(t)`.  No SEAS code (TPV102 / TPV104 / TPV205 / BP5)
+   /// calls `SetTime` today because those laws are time-autonomous
+   /// (rate-and-state) or pure slip-weakening — so the LSW_ForcedRupture
+   /// dispatch would silently run at `t = 0` forever and forced rupture
+   /// would never fire.  The override flips `time_was_set_` so the
+   /// dispatch arm can MFEM_VERIFY the driver remembered to plumb the
+   /// macro-step time through.
+   void SetTime(const real_t t_) override
+   {
+      TimeDependentOperator::SetTime(t_);
+      time_was_set_ = true;
+   }
+   bool TimeWasSet() const { return time_was_set_; }
+
+   /// @brief Phase H.6 (rev-3 round-4 R-401) guard helper: aborts if a
+   /// `LSW_ForcedRupture` dispatch fires on a DOF with active forced
+   /// rupture (`T_forced_rupture < 1e8`) but the driver never called
+   /// `wave.SetTime(t)`.
+   ///
+   /// Exposed as a static helper so the wave_operator.inl dispatch
+   /// arms call it once per face (R-502 — hoisted out of the per-DOF
+   /// loop because `time_was_set` is per-WaveOperator-call, not
+   /// per-DOF) and so unit tests can exercise it directly with
+   /// synthetic inputs.  Combines the inputs with the
+   /// "either time was set OR forced rupture is inactive on this DOF"
+   /// invariant.
+   static void VerifyForcedRuptureTimeReady(bool time_was_set,
+                                            real_t T_forced_rupture)
+   {
+      MFEM_VERIFY(time_was_set || T_forced_rupture >= 1.0e8,
+                  "WaveOperator::LSW_ForcedRupture dispatch fired but "
+                  "wave.SetTime() was never called; GetTime() == 0 "
+                  "would freeze the f_2(t) factor at 0.  The driver "
+                  "MUST call wave.SetTime(t) before each Mult() so the "
+                  "forced-rupture factor receives the current sim "
+                  "time.  (DOF has T_forced_rupture = "
+                  << T_forced_rupture << " < 1e8, so the forced-rupture "
+                  "path is intended to fire on this DOF.)");
+   }
 
    /// @name Accessors
    ///@{
@@ -609,6 +668,13 @@ private:
    std::unique_ptr<FESpaceType> fes_;
 
    GodunovFlux flux_;
+
+   /// Phase H.6 (round-4 R-401): tracks whether SetTime() has ever been
+   /// called.  The LSW_ForcedRupture dispatch arm reads GetTime() for
+   /// the f_2(t) factor; without this flag we cannot distinguish
+   /// "driver supplied t=0" from "driver forgot to call SetTime".
+   bool time_was_set_ = false;
+
    BoundaryConfig bc_;
 
    DenseMatrix Ax_, Ay_, Az_;
