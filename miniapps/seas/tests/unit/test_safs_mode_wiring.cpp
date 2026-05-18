@@ -229,6 +229,42 @@ static void T_66_4_safs_mode_routes_tau_pre(Fixture &fix)
    fix.fault_op->SetSAFSMode(false);
 }
 
+// --------------------------------------------------------------------
+// T_66_5 — R-001 silent-corruption guard: positive control.
+//
+// On a healthy BP5 fixture the operator's GetFaultDOFBasis populates
+// every owned fault DOF, so FaultGeometry::NumZeroNormalFallbacks()
+// MUST be 0 and SetSAFSMode(true, ...) MUST succeed.
+//
+// The negative path (NumZeroNormalFallbacks() > 0 → SetSAFSMode aborts
+// via MFEM_VERIFY) is verified by static review — MFEM_VERIFY calls
+// std::abort which cannot be caught by try/catch within this process,
+// and fork-based runtime testing of MFEM aborts is out of scope here.
+// See REVIEW.md R-001 for the rationale.
+// --------------------------------------------------------------------
+static void T_66_5_safs_mode_guard_healthy_basis(const Fixture &fix)
+{
+   std::cout << "\n[T-66-5] R-001 SAFS guard: healthy basis path\n";
+   TEST_ASSERT(fix.fault_geom->NumZeroNormalFallbacks() == 0,
+               "healthy BP5 fixture has 0 zero-normal fallbacks");
+   TEST_ASSERT(fix.fault_geom->NumDOFBasisFallbacks() ==
+               fix.fault_geom->NumZeroNormalFallbacks()
+               + fix.fault_geom->NumT1Fallbacks(),
+               "Num{Zero,T1}Fallbacks accessors sum to NumDOFBasisFallbacks");
+
+   Vector tau_pd(2 * fix.nf), sn_pd(fix.nf);
+   tau_pd = 0.0;
+   sn_pd  = fix.params.sigma_n;
+   // Must NOT abort.  If R-001 guard is bogusly tripped on a healthy
+   // fixture the program would abort here and the test binary would
+   // exit nonzero — caught by `make test`.
+   fix.fault_op->SetSAFSMode(true, &tau_pd, &sn_pd);
+   TEST_ASSERT(fix.fault_op->IsSAFSMode(),
+               "SetSAFSMode(true) succeeds on healthy fixture (R-001 guard "
+               "passes when zero-normal fallbacks == 0)");
+   fix.fault_op->SetSAFSMode(false);
+}
+
 int main(int, char**)
 {
    std::cout << "Running Phase 6 §6 SAFS-mode wiring tests\n";
@@ -244,6 +280,7 @@ int main(int, char**)
    T_66_2_bp5_bit_exact_safs_off(*fix);
    T_66_3_safs_mode_routes_sigma_n(*fix);
    T_66_4_safs_mode_routes_tau_pre(*fix);
+   T_66_5_safs_mode_guard_healthy_basis(*fix);
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 6 §6: " << num_passed << " / " << num_tests

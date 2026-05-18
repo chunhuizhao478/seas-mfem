@@ -330,13 +330,31 @@ public:
    /// Empty in BP2/antiplane paths.
    const DenseMatrix &fault_dof_basis() const { return dof_basis_; }
 
-   /// @brief Number of fault DOFs whose basis fell back to the up-vector
-   ///        derived t1 (sub-vertical or sub-horizontal degenerate cases).
+   /// @brief Number of fault DOFs whose basis was replaced by a fallback —
+   ///        sum of zero-normal and t1-degenerate cases.
    ///
-   /// Reported once at init from the BP5 ctor. Always 0 for planar
-   /// faults; positive only for curvilinear SAFS-style meshes where some
-   /// projected dip vector hits the 1e-12 degeneracy threshold.
+   /// Reported once at init from the BP5 ctor. Always 0 for planar faults
+   /// with healthy fault basis on every owned DOF; positive when either:
+   ///   (a) the operator's GetFaultDOFBasis returned a zero-length normal
+   ///       for some DOF (e.g. boundary or non-fault DOFs in some
+   ///       fixtures) — counted in `NumZeroNormalFallbacks()`; the basis
+   ///       slot is zeroed and SAFS projection at that DOF would yield
+   ///       zero pre-stress and zero sigma_n, so SAFS mode must refuse
+   ///       to enable in that case (see `RateStateFaultOperator::SetSAFSMode`).
+   ///   (b) the projected dip t1 dropped below 1e-12 and a fallback was
+   ///       derived from the reference up-vector — counted in
+   ///       `NumT1Fallbacks()`; the slot has a valid (but FaultBasis-
+   ///       sign-flip-undefined) basis.  SAFS-mode users may proceed
+   ///       with a runtime warning.
    int NumDOFBasisFallbacks() const { return num_dof_basis_fallbacks_; }
+
+   /// @brief Of `NumDOFBasisFallbacks()`, how many were zero-normal
+   ///        (basis slot zeroed; SAFS would project to 0).
+   int NumZeroNormalFallbacks() const { return num_zero_normal_fallbacks_; }
+
+   /// @brief Of `NumDOFBasisFallbacks()`, how many were t1-degeneracy
+   ///        (basis slot valid but sign-flip-undefined).
+   int NumT1Fallbacks() const { return num_t1_fallbacks_; }
 
    /// @brief Get per-DOF normal stress [NumFaultDOFs].
    ///
@@ -528,7 +546,9 @@ private:
    // Phase 6.A: per-DOF 3-D coordinates and basis (BP5/3-D ctor only)
    Vector       dof_coords_3d_;   // [3 * num_fault_dofs_]
    DenseMatrix  dof_basis_;       // [9 x num_fault_dofs_], col i = [n_i; t1_i; t2_i]
-   int          num_dof_basis_fallbacks_ = 0;
+   int          num_dof_basis_fallbacks_ = 0;     // sum of both kinds
+   int          num_zero_normal_fallbacks_ = 0;   // basis slot zeroed
+   int          num_t1_fallbacks_ = 0;            // up-vector fallback
 
    // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeSAFSParams)
    Vector sigma_n_per_dof_;       // [num_fault_dofs_]
@@ -860,7 +880,9 @@ private:
 
       // R-006 Gram-Schmidt re-orthonormalisation, mirroring Phase 2
       // `basis_to_node` (project_to_fault_stress.py).
-      num_dof_basis_fallbacks_ = 0;
+      num_dof_basis_fallbacks_   = 0;
+      num_zero_normal_fallbacks_ = 0;
+      num_t1_fallbacks_          = 0;
       for (int i = 0; i < num_owned; i++)
       {
          real_t n[3] = { owned_basis_flat(9 * i + 0),
@@ -880,11 +902,12 @@ private:
             // Zero-length normal: this DOF was not visited by any owned
             // fault face during basis population (e.g. boundary / unowned
             // DOFs in non-SAFS fixtures like elasticity_operator_tests).
-            // SAFS-mode consumers are gated on safs_mode_; BP5/TPV
-            // /antiplane paths do not read these per-DOF arrays.  Mark
-            // the slot with a sentinel zero basis and continue rather
-            // than aborting the whole simulation.
+            // BP5/TPV/antiplane paths do not read these per-DOF arrays.
+            // Mark the slot with a sentinel zero basis and continue rather
+            // than aborting; SAFS mode is required to refuse if any such
+            // fallback occurred (see RateStateFaultOperator::SetSAFSMode).
             for (int d = 0; d < 9; d++) { dof_basis_(d, i) = 0.0; }
+            num_zero_normal_fallbacks_++;
             num_dof_basis_fallbacks_++;
             continue;
          }
@@ -913,6 +936,7 @@ private:
             MFEM_VERIFY(t1_len > 1e-12,
                         "ComputePerDOFCoordsAndBasis_: degenerate fallback at "
                         "DOF " << i << " — up vector nearly parallel to normal");
+            num_t1_fallbacks_++;
             num_dof_basis_fallbacks_++;
             used_t1_fallback = true;
          }
@@ -973,9 +997,14 @@ private:
 
       if (num_dof_basis_fallbacks_ > 0)
       {
-         mfem::out << "FaultGeometry: " << num_dof_basis_fallbacks_
-                   << " / " << num_owned
-                   << " fault DOFs hit the t1 degeneracy fallback.\n";
+         mfem::err << "FaultGeometry WARNING: "
+                   << num_zero_normal_fallbacks_ << " zero-normal + "
+                   << num_t1_fallbacks_ << " t1-degenerate (of "
+                   << num_owned << " owned fault DOFs) hit the basis "
+                   << "fallback path. The zero-normal slots have zeroed "
+                   << "basis and would silently project to zero pre-stress "
+                   << "and zero sigma_n in SAFS mode. SetSAFSMode refuses "
+                   << "to enable when zero-normal fallbacks > 0.\n";
       }
    }
 

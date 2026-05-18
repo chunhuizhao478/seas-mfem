@@ -204,6 +204,23 @@ public:
                         "SetSAFSMode: sigma_n_per_dof size "
                         << sigma_n_per_dof->Size()
                         << " != num_fault_dofs " << num_nodes_);
+            // R-001 silent-corruption guard: if FaultGeometry has any
+            // zero-normal fallbacks the basis at those DOFs is zeroed,
+            // which makes the sidecar tau_pre / sigma_n projection
+            // collapse to zero silently.  Refuse to enable rather than
+            // run with masked-zero stresses.  t1-degeneracy fallbacks
+            // produce a valid (sign-flip-undefined) basis and are
+            // allowed; user is warned via FaultGeometry's stderr message.
+            MFEM_VERIFY(geom_ == nullptr ||
+                        geom_->NumZeroNormalFallbacks() == 0,
+                        "SetSAFSMode: cannot enable SAFS mode — "
+                        "FaultGeometry has "
+                        << geom_->NumZeroNormalFallbacks()
+                        << " fault DOF(s) with a zeroed basis (zero-length "
+                        "normal during ComputePerDOFCoordsAndBasis_).  "
+                        "Their sidecar pre-stress and sigma_n would silently "
+                        "project to zero.  Fix the operator's "
+                        "GetFaultDOFBasis to populate all owned fault DOFs.");
          }
          safs_mode_       = enabled;
          tau_pre_per_dof_ = tau_pre_per_dof;

@@ -249,11 +249,14 @@ public:
 
    /// @brief Decomposed-traction + jump-residual variant of ComputeTraction.
    ///
-   /// Default: forwards to ComputeTraction and leaves the diagnostic
-   /// outputs (traction_stress / _correction / jump_residual) empty.
-   /// ElasticityDomainOperator overrides to populate them.  Antiplane
-   /// inherits the default — the antiplane face_tracer path uses only
-   /// `traction` so the empty diagnostics are harmless.
+   /// Default: forwards to ComputeTraction and fills the diagnostic
+   /// outputs (traction_stress / _correction / jump_residual) with zeros
+   /// sized to match `traction`, so downstream consumers like
+   /// FaceTraceLogger::RecordMult can iterate without OOB.
+   /// ElasticityDomainOperator overrides to populate them with the real
+   /// stress/correction decomposition.  Optional normal_* outputs stay
+   /// at size 0 — those are guarded by `elastic_sigma_n_ ? ... : nullptr`
+   /// at the call site in seas_operator.hpp.
    virtual void ComputeTractionDiagnostics(const GridFuncType &displacement,
                                            const Vector &slip_bc,
                                            Vector &traction,
@@ -265,9 +268,9 @@ public:
                                            Vector *normal_correction = nullptr)
    {
       ComputeTraction(displacement, slip_bc, traction, normal_traction);
-      traction_stress.SetSize(0);
-      traction_correction.SetSize(0);
-      jump_residual.SetSize(0);
+      traction_stress.SetSize(traction.Size());     traction_stress = 0.0;
+      traction_correction.SetSize(traction.Size()); traction_correction = 0.0;
+      jump_residual.SetSize(traction.Size());       jump_residual = 0.0;
       if (normal_stress) { normal_stress->SetSize(0); }
       if (normal_correction) { normal_correction->SetSize(0); }
    }

@@ -81,15 +81,18 @@ void TestBannerDefaults()
 
    // Four mandatory banner lines, R7-001-honest: the banner now
    // describes the runtime dispatch truthfully — Brent hard-coded via
-   // EvaluateADER fluctuation-Q, one-shot wave.AdvanceADER (sub-step iterator
-   // not wired), slip-SRW ψ-space with macro-step analytic cadence.
+   // the ADER dispatch path, one-shot wave.AdvanceADER (sub-step
+   // iterator not wired), slip-SRW ψ-space with macro-step analytic
+   // cadence.  Banner phrasing is intentionally checked via INVARIANT
+   // tokens (e.g. "Brent" + "hard-coded") rather than full literal
+   // strings, so that future reword in
+   // `tpv104_driver.cpp::BannerOf(DispatchedSolver::Brent)` does not
+   // silently break the test.  See REVIEW.md R-007.
    const std::vector<std::pair<std::string, std::string>> must_have = {
       {"Time integrator: ADER-O2 (one-shot via wave.AdvanceADER)",
        "ADER-O2 + one-shot disclosure"},
       {"Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)",
        "default one-shot disclosure (round-7 R-602/R-603)"},
-      {"Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q",
-       "Brent hard-coded disclosure (R7-001)"},
       {"Friction law: slip-SRW (ψ-space, macro-step analytic",
        "slip-SRW macro-step cadence disclosure (R7-007)"},
       {"Mixed flux: none (upwind everywhere, default)",
@@ -107,6 +110,22 @@ void TestBannerDefaults()
       {
          std::cerr << "  banner text was:\n" << out << "\n";
       }
+   }
+
+   // Invariant-token check for the Brent hard-coded disclosure (R-007).
+   // ALL of these tokens must appear inside the same banner line for
+   // the disclosure to remain semantically truthful.  This guards
+   // against future banner reword that drops any one of them.
+   const std::vector<std::string> brent_tokens = {
+      "Friction solver: Brent",
+      "hard-coded",
+      "--friction-solver flag IGNORED",
+   };
+   for (const auto &tok : brent_tokens)
+   {
+      TEST_ASSERT(out.find(tok) != std::string::npos,
+                  ("banner contains invariant Brent-disclosure token '"
+                   + tok + "' (R7-001, R-007)").c_str());
    }
 
    // The banner must NOT advertise any misleading "sub-step iterator"
@@ -169,9 +188,11 @@ void TestBannerNonDefault()
       out.find("Fault iterator: one-shot (default; legacy wave.AdvanceADER dispatch)")
       != std::string::npos,
       "fault iterator banner is one-shot when --fault-iterator one-shot");
+   // R-007: invariant-token check rather than literal banner match.
    TEST_ASSERT(
-      out.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
-      != std::string::npos,
+      out.find("Friction solver: Brent") != std::string::npos &&
+      out.find("hard-coded") != std::string::npos &&
+      out.find("--friction-solver flag IGNORED") != std::string::npos,
       "friction solver disclosure is constant on non-default flags");
 
    // CLI echo line captures what the user requested.
@@ -186,9 +207,11 @@ void TestBannerNonDefault()
    // but also must not trip the CLI validator.
    const std::string out_brent = RunDriver(
       binary, "--dry-run --friction-solver brent");
+   // R-007: invariant-token check rather than literal banner match.
    TEST_ASSERT(
-      out_brent.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
-      != std::string::npos,
+      out_brent.find("Friction solver: Brent") != std::string::npos &&
+      out_brent.find("hard-coded") != std::string::npos &&
+      out_brent.find("--friction-solver flag IGNORED") != std::string::npos,
       "--friction-solver brent → still shows hard-coded Brent disclosure");
 }
 
@@ -247,10 +270,11 @@ void TestDispatchMatchesBanner()
          out.find("[dispatch] rank=0 friction_law_actual=slip-srw")
          != std::string::npos,
          ("dispatch shows friction_law=slip-srw under CLI: " + cli).c_str());
-      // Banner matches the dispatch:
+      // Banner matches the dispatch (R-007: invariant-token check).
       TEST_ASSERT(
-         out.find("Friction solver: Brent (hard-coded via EvaluateADER fluctuation-Q")
-         != std::string::npos,
+         out.find("Friction solver: Brent") != std::string::npos &&
+         out.find("hard-coded") != std::string::npos &&
+         out.find("--friction-solver flag IGNORED") != std::string::npos,
          ("banner shows Brent hard-coded under CLI: " + cli).c_str());
       const std::string expected_banner = requested_substep
          ? "Fault iterator: sub-step (Tpv104SubStepIterator"

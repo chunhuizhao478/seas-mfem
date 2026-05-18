@@ -356,13 +356,11 @@ void TestParaViewOutput()
 void TestParaViewCombinedOutput()
 {
    std::cout << "\n=== Test: ParaView Combined Domain+Fault Output ===\n";
-   std::cout << "  SKIP: ParaViewOutput fault API was refactored "
-                "(InitFaultOutput → InitFaultOutputBP5 with shared-faces +\n"
-                "  nbf_per_face args; UpdateFaultFields replaced by "
-                "per-component setters).  This Phase 5 test predates the\n"
-                "  Phase 6 split-bulk-solutions refactor and needs to be "
-                "rewritten against the new API.  Until then it is\n"
-                "  short-circuited to keep `make test` green.\n";
+   std::cout << "  SKIP — tracked in tests/unit/KNOWN_DISABLED_TESTS.md\n"
+                "  (Phase 5 antiplane fault API obsoleted by Phase 6 "
+                "split-bulk-solutions; needs BP5 mesh fixture to rewrite.\n"
+                "   Related coverage in test_fault_surface_vtkhdf*, "
+                "test_fault_surface_vtu_*, test_paraview_schedule_cap.)\n";
    return;
 
 #if 0  // OBSOLETE — see SKIP message above
