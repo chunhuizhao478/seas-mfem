@@ -557,6 +557,176 @@ template <typename MeshType>
 WaveOperator<MeshType>::~WaveOperator() = default;
 
 // ---------------------------------------------------------------------------
+// Phase H.1 (Stage 1) — heterogeneous-material ctor.
+//
+// Delegates to the scalar ctor above with the constants extracted from
+// the MaterialField, so the resulting `flux_` member is byte-identical
+// to the scalar-ctor path on Mode::Constant input.  Then builds the
+// per-element flux pool (H.1), the per-element CFL length cache
+// (H.3 input), and the bi-material shared-face neighbour map stub
+// (H.4 Stage 1 in-place fill; real cross-rank exchange in Stage 2).
+//
+// Mode::Coefficient input is ABORTED unconditionally in Stage 1: the
+// per-element flux dispatch (H.2) at every flux_.X() call site in
+// wave_operator.inl is the Stage 2 deliverable.  Until then the
+// scalar `flux_` is still consulted by every Mult/AdvanceADER call;
+// dispatching it on a per-element-Eval seed would silently produce
+// wrong physics on heterogeneous input.  The abort here is the only
+// gate that prevents that.
+//
+// In Mode::Constant the new ctor's observable output is BYTE-IDENTICAL
+// to the scalar ctor's, proven by
+// `test_phaseh_wave_operator_constant_parity` (np=1 + np=4).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
+                                     const MaterialField &material,
+                                     const BoundaryConfig &bc)
+   : WaveOperator(mesh, order,
+                  material.mode == MaterialField::Mode::Constant
+                     ? material.lambda_const : real_t(1.0),
+                  material.mode == MaterialField::Mode::Constant
+                     ? material.mu_const     : real_t(1.0),
+                  material.mode == MaterialField::Mode::Constant
+                     ? material.rho_const    : real_t(1.0),
+                  bc)
+{
+   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant
+               || material.mode == MaterialField::Mode::Coefficient,
+               "WaveOperator(MaterialField): material.mode must be "
+               "Constant or Coefficient; got Mode::GridFunction ("
+               << static_cast<int>(material.mode) << ").  GridFunction "
+               "mode is consumed via At(elem, dof, ...), which has no "
+               "well-defined centroid evaluation needed by the per-"
+               "element flux pool.");
+
+   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
+               "WaveOperator(MaterialField) Phase H Stage 1 gap: "
+               "Mode::Coefficient input requires the per-element flux "
+               "dispatch in wave_operator.inl (plan Phase H.2), which "
+               "is NOT yet wired in this commit.  Constructing on a "
+               "Coefficient material would silently fall back to the "
+               "scalar `flux_` member built from the placeholder seed "
+               "(1.0, 1.0, 1.0) inside the delegating ctor above — "
+               "i.e., wrong physics on every Mult call.  Re-run with "
+               "MaterialField::MakeConstant(...) until Stage 2 lands.");
+
+   material_ = &material;
+
+   BuildGodunovFluxPool_(material);
+   ExchangeBiMaterialNeighbours_();
+}
+
+// ---------------------------------------------------------------------------
+// Phase H.1 helper — fill per_elem_lmr_ / per_elem_h_, then Build()
+// the owned flux pool.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::BuildGodunovFluxPool_(
+   const MaterialField &material)
+{
+   per_elem_lmr_.assign(static_cast<size_t>(ne_), std::array<real_t, 3>{0, 0, 0});
+   per_elem_h_.assign(static_cast<size_t>(ne_), real_t(0));
+
+   for (int e = 0; e < ne_; ++e)
+   {
+      ElementTransformation *T = mesh_.GetElementTransformation(e);
+      const Geometry::Type   gtype = mesh_.GetElementBaseGeometry(e);
+      const IntegrationPoint &ip   = Geometries.GetCenter(gtype);
+      real_t lam, mu, rho;
+      material.EvalAt(e, *T, ip, lam, mu, rho);
+      MFEM_VERIFY(rho > 0.0,
+                  "WaveOperator(MaterialField): rho (" << rho
+                  << ") must be > 0 at element " << e);
+      MFEM_VERIFY(lam + 2.0 * mu > 0.0,
+                  "WaveOperator(MaterialField): (lambda + 2*mu) ("
+                  << (lam + 2.0 * mu) << ") must be > 0 at element "
+                  << e << " (lambda=" << lam << ", mu=" << mu << ").");
+      per_elem_lmr_[e] = {lam, mu, rho};
+
+      // Mirror the scalar ctor's per-element CFL-length formula
+      // (inscribed diameter for tets, vol^{1/dim} for non-tets).
+      // Byte-exact equality with the scalar ctor's `h_min_` loop on
+      // Mode::Constant input.
+      const real_t vol = mesh_.GetElementVolume(e);
+      real_t h;
+      if (gtype == Geometry::TETRAHEDRON)
+      {
+         Array<int> vert;
+         mesh_.GetElementVertices(e, vert);
+         Vector v0(mesh_.GetVertex(vert[0]), 3);
+         Vector v1(mesh_.GetVertex(vert[1]), 3);
+         Vector v2(mesh_.GetVertex(vert[2]), 3);
+         Vector v3(mesh_.GetVertex(vert[3]), 3);
+         auto tri_area = [](const Vector &a, const Vector &b,
+                            const Vector &c) -> real_t {
+            real_t e1[3] = {b(0)-a(0), b(1)-a(1), b(2)-a(2)};
+            real_t e2[3] = {c(0)-a(0), c(1)-a(1), c(2)-a(2)};
+            real_t cx = e1[1]*e2[2] - e1[2]*e2[1];
+            real_t cy = e1[2]*e2[0] - e1[0]*e2[2];
+            real_t cz = e1[0]*e2[1] - e1[1]*e2[0];
+            return 0.5 * std::sqrt(cx*cx + cy*cy + cz*cz);
+         };
+         const real_t A_total = tri_area(v0, v1, v2) + tri_area(v0, v2, v3)
+                              + tri_area(v0, v3, v1) + tri_area(v1, v2, v3);
+         h = (A_total > 0) ? 6.0 * vol / A_total
+                           : std::pow(vol, 1.0 / 3.0);
+      }
+      else
+      {
+         h = std::pow(vol, 1.0 / mesh_.Dimension());
+      }
+      per_elem_h_[e] = h;
+   }
+
+   owned_flux_pool_ = std::make_unique<GodunovFluxPool>();
+   owned_flux_pool_->Build(ne_, per_elem_lmr_, /*dedup_sig_figs=*/6);
+}
+
+// ---------------------------------------------------------------------------
+// Phase H.4 helper — populate shared_face_neighbour_material_.
+//
+// Stage 1 contract:
+//   - Mode::Constant input is the only reachable path (the ctor
+//     MFEM_VERIFY above aborts Coefficient mode).
+//   - In Mode::Constant every neighbour's per-element material is, by
+//     construction, equal to the local material.  We therefore fill
+//     the map with the LOCAL-side (lambda, mu, rho) for every shared
+//     face on this rank — no MPI is performed.
+//   - On serial Mesh this is a no-op (no shared faces).
+//
+// Stage 2 will replace this body with the real MPI_Allgatherv exchange.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
+{
+   shared_face_neighbour_material_.clear();
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return;
+   }
+#ifdef MFEM_USE_MPI
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      const int n_shared = pmesh.GetNSharedFaces();
+      for (int sf = 0; sf < n_shared; ++sf)
+      {
+         FaceElementTransformations *ftr =
+            pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+         const int local_elem = ftr->Elem1No;
+         MFEM_ASSERT(local_elem >= 0 && local_elem < ne_,
+                     "ExchangeBiMaterialNeighbours_: shared face " << sf
+                     << " has Elem1No=" << local_elem
+                     << " outside [0, " << ne_ << ").");
+         shared_face_neighbour_material_[sf] = per_elem_lmr_[local_elem];
+      }
+   }
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // TPV102 "Topology-Based Precomputed Face-Rotation" plan 2026-04-23
 // Phase 2a (§6.3 + §6.3a): opt-in precomputed-flux switch with late
 // `fault_face_set_` population (R4-001 + R5-002 FIXES).
@@ -5027,6 +5197,52 @@ real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
                     "MixedFluxMode REQUIRES adding the corresponding "
                     "CFL factor in this switch.");
    }
+
+   // Phase H.3 (Stage 1): heterogeneous-CFL path.  When the
+   // heterogeneous ctor populated `per_elem_h_` / `per_elem_lmr_`,
+   // walk every owned element to compute
+   //   dt_e = cfl_factor * cfl * h_e / c_p,e
+   // and `MPI_Allreduce(MIN)` across ranks.
+   //
+   // For Mode::Constant input (Stage 1's only supported mode) every
+   // element shares the same (lambda, mu, rho), so c_p,e is constant
+   // and the local min over `cfl_factor * cfl * h_e / c_p` is exactly
+   // `cfl_factor * cfl * (min_e h_e) / c_p`.  The MPI MIN reduction
+   // over these per-rank locals matches the legacy path's reduction
+   // on `h_min_` (which was reduced over the same per-element `h_e`
+   // set in the scalar ctor).  So this branch is BYTE-IDENTICAL to
+   // the scalar formula below — proven by
+   // `test_phaseh_wave_operator_constant_parity` Test C-3.
+   if (!per_elem_h_.empty())
+   {
+      MFEM_ASSERT(per_elem_h_.size() == static_cast<size_t>(ne_)
+                  && per_elem_lmr_.size() == static_cast<size_t>(ne_),
+                  "ComputeMaxDt: per_elem_h_ / per_elem_lmr_ sizes ("
+                  << per_elem_h_.size() << ", " << per_elem_lmr_.size()
+                  << ") must equal ne_ (" << ne_ << ").");
+      real_t local_dt_min = std::numeric_limits<real_t>::infinity();
+      for (int e = 0; e < ne_; ++e)
+      {
+         const real_t lam = per_elem_lmr_[e][0];
+         const real_t mu  = per_elem_lmr_[e][1];
+         const real_t rho = per_elem_lmr_[e][2];
+         const real_t cp_e = std::sqrt((lam + 2.0 * mu) / rho);
+         const real_t h_e  = per_elem_h_[e];
+         const real_t dt_e = cfl_mixed_flux_factor * cfl * h_e / cp_e;
+         local_dt_min = std::min(local_dt_min, dt_e);
+      }
+      real_t dt_global = local_dt_min;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&local_dt_min, &dt_global, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MIN,
+                       static_cast<ParMesh &>(mesh_).GetComm());
+#endif
+      }
+      return dt_global;
+   }
+
    return cfl_mixed_flux_factor * cfl * h_min_ / flux_.GetCp();
 }
 

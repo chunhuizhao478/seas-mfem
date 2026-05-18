@@ -145,6 +145,11 @@ TEST_SPATIAL_SETUP_SRC               = tests/unit/test_spatial_setup.cpp
 TEST_SPATIAL_SETUP_OBJ               = $(TEST_SPATIAL_SETUP_SRC:.cpp=.o)
 TEST_PHASEH_LSW_FORCED_RUPTURE_SRC   = tests/unit/test_phaseh_lsw_forced_rupture.cpp
 TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ   = $(TEST_PHASEH_LSW_FORCED_RUPTURE_SRC:.cpp=.o)
+# Phase H Stage 1 gate `T-PHASEH-SCALAR-PARITY` — constant-material
+# parity between the scalar WaveOperator ctor and the new
+# (MaterialField, BoundaryConfig) ctor (H.1 + H.3 + H.4).
+TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC = tests/unit/test_phaseh_wave_operator_constant_parity.cpp
+TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ = $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -752,6 +757,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_constant_stress_source \
                seas_test_spatial_setup \
                seas_test_phaseh_lsw_forced_rupture \
+               seas_test_phaseh_wave_operator_constant_parity \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1280,6 +1286,33 @@ seas_test_phaseh_lsw_forced_rupture: $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ) \
 	    dynamic/godunov_flux.o \
 	    dynamic/pml_layer.o \
 	    dynamic/precomputed_face_fluxes.o \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase H Stage 1 byte-exact gate: scalar vs MaterialField ctor parity.
+# Pair with `mpirun -np 4` for the np=4 case (test target below runs both).
+seas_test_phaseh_wave_operator_constant_parity: \
+                  $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
 	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
@@ -2165,6 +2198,15 @@ $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
 
+$(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ): %.o: $(SRC)%.cpp \
+                                                       dynamic/wave_operator.hpp \
+                                                       dynamic/wave_operator.inl \
+                                                       dynamic/godunov_flux_pool.hpp \
+                                                       dynamic/heterogeneous_material.hpp \
+                                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2704,6 +2746,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-spatial-constant-stress-source \
       test-spatial-setup \
       test-phaseh-lsw-forced-rupture \
+      test-phaseh-wave-operator-constant-parity \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -2985,6 +3028,11 @@ test-spatial-setup: seas_test_spatial_setup
 
 test-phaseh-lsw-forced-rupture: seas_test_phaseh_lsw_forced_rupture
 	./seas_test_phaseh_lsw_forced_rupture
+
+# Phase H Stage 1 byte-exact gate; runs serial + np=4.
+test-phaseh-wave-operator-constant-parity: seas_test_phaseh_wave_operator_constant_parity
+	./seas_test_phaseh_wave_operator_constant_parity
+	mpirun -np 4 ./seas_test_phaseh_wave_operator_constant_parity
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator
