@@ -481,12 +481,51 @@ int main(int argc, char *argv[])
    //                             with velocity + sigma_yy/sigma_xy/sigma_xz at
    //                             coarser cadence (typical: 0.05 s)
    //   --pv-low-order          : linear tets only (~40x smaller volume output)
-   //   --no-domain-pv          : suppress fault-schedule volume save (fault-
+   //   --no-volume-pv          : suppress fault-schedule volume save (fault-
    //                             surface PVD/VTU still written; bulk collection
-   //                             unaffected)
+   //                             unaffected).  Replaces --no-domain-pv (kept
+   //                             as a deprecated alias).
+   //   --no-domain-pv          : deprecated alias for --no-volume-pv.
+   //   --volume-pv-dt X        : volume PV cadence override (s).  When > 0,
+   //                             the volume save fires every X seconds
+   //                             independently of the fault schedule, AND
+   //                             implicitly re-enables the volume save even
+   //                             if --no-volume-pv was also passed.
+   //   --paraview-fault-vtu / --paraview-fault-hdf5 :
+   //                             force the binary VTU or VTKHDF fault writer.
+   //   --paraview-fault-legacy-ascii :
+   //                             revert to the pre-Phase-1 per-rank ASCII
+   //                             VTU writer (debugging only; implies VTU).
+   //   --paraview-fault-zfp-tol X / --paraview-fault-deflate-level N :
+   //                             VTKHDF fault chunk filter (ZFP accuracy
+   //                             tol vs deflate level; mutually exclusive).
+   //                             Requires MFEM_USE_HDF5=YES (and
+   //                             MFEM_USE_H5Z_ZFP=YES for zfp-tol).
+   //   --paraview-volume-vtu / --paraview-volume-hdf5 :
+   //                             force the volume-PV writer back end
+   //                             (default = HDF5 on MFEM_USE_HDF5=YES
+   //                             builds; VTU otherwise).  Phase 6.3.
+   //   --paraview-volume-zfp-tol X / --paraview-volume-deflate-level N :
+   //                             VTKHDF chunk filter for the PRIMARY
+   //                             collection's volume PV (displacement,
+   //                             velocity, sigma_*).  Phase 6.3a.
+   //   --paraview-bulk-zfp-tol X / --paraview-bulk-deflate-level N :
+   //                             VTKHDF chunk filter for the SECONDARY
+   //                             collection (`pv_bulk_out`, only with
+   //                             --paraview-bulk-dt > 0).  Phase 6.4.
+   //   --paraview-max-snapshots N / --paraview-{co,nucleation,inter}seismic-dt X :
+   //                             snapshot cap and per-regime cadences.
    bool use_paraview = HasFlag(argc, argv, "--paraview");
    bool pv_low_order = HasFlag(argc, argv, "--pv-low-order");
-   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv");
+   // Phase 4: `--no-volume-pv` is the canonical name; `--no-domain-pv`
+   // is preserved as a deprecated alias so existing sbatch scripts keep
+   // working (plan §Phase 4 "Files to Modify").  The explicit
+   // `--volume-pv-dt X` overrides both: when > 0 the volume save is
+   // re-enabled at its own cadence (plan §Phase 4 edge case "the
+   // explicit dt wins").
+   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv")
+                       || HasFlag(argc, argv, "--no-volume-pv");
+   real_t volume_pv_dt = GetRealArg(argc, argv, "--volume-pv-dt", 0.0);
    int  paraview_step_interval = GetIntArg(argc, argv, "--paraview-every", 0);
    real_t paraview_dt_flag     = GetRealArg(argc, argv, "--paraview-dt", 0.0);
    real_t paraview_bulk_dt     = GetRealArg(argc, argv, "--paraview-bulk-dt", 0.0);
@@ -494,6 +533,182 @@ int main(int argc, char *argv[])
        || paraview_bulk_dt > 0.0)
    {
       use_paraview = true;
+   }
+
+   // R-101 / PLAN_paraview_compaction_2026-04-28 §Phase 2b / 2d.3 / 3
+   // CLI flags.  Behaviour summary:
+   //   --paraview-fault-vtu              force the Phase-1 binary VTU
+   //                                     output back end (default on
+   //                                     HDF5 builds is single-file
+   //                                     VTKHDF; this flag opts out).
+   //   --paraview-fault-hdf5             opt-in to VTKHDF (redundant
+   //                                     when MFEM_USE_HDF5=YES; aborts
+   //                                     at parse time on non-HDF5
+   //                                     builds).
+   //   --paraview-fault-zfp-tol X        Phase 2d.3 lossy ZFP at abs
+   //                                     tolerance X (m/s for slip
+   //                                     rate).  Requires
+   //                                     MFEM_USE_H5Z_ZFP=YES.
+   //   --paraview-fault-deflate-level N  override default deflate
+   //                                     level.  Mutually exclusive
+   //                                     with --paraview-fault-zfp-tol.
+   //   --paraview-max-snapshots N        Phase 3 cap on total writes.
+   //   --paraview-{co,nucleation,inter}seismic-dt X  override the
+   //                                     adaptive-schedule cadences.
+   const bool   paraview_force_vtu       = HasFlag(argc, argv, "--paraview-fault-vtu");
+   const bool   paraview_force_hdf5      = HasFlag(argc, argv, "--paraview-fault-hdf5");
+   // R-305 / plan §Phase 2b "Files to Modify": legacy per-rank ASCII
+   // VTU back end, preserved through Phase 1 for debugging only.
+   // Implies --paraview-fault-vtu (the legacy path is part of the Vtu
+   // back end, not Hdf5).
+   const bool   paraview_legacy_ascii    = HasFlag(argc, argv, "--paraview-fault-legacy-ascii");
+   const real_t paraview_fault_zfp_tol   = GetRealArg(argc, argv, "--paraview-fault-zfp-tol",   0.0);
+   const int    paraview_fault_deflate   = GetIntArg (argc, argv, "--paraview-fault-deflate-level", -1);
+   // Phase 2d.3 plan §"Files to Modify": bulk-side filter flags are
+   // accepted at parse time but currently emit only a one-time rank-0
+   // warning — the bulk path uses `mfem::ParaViewDataCollection` (VTU),
+   // not VTKHDF, so HDF filters do not apply.  Plan calls this out
+   // explicitly under "Driver only constructs a fault HDF collection
+   // (no bulk HDF)".
+   const real_t paraview_bulk_zfp_tol    = GetRealArg(argc, argv, "--paraview-bulk-zfp-tol",   0.0);
+   const int    paraview_bulk_deflate    = GetIntArg (argc, argv, "--paraview-bulk-deflate-level", -1);
+   // Phase 6.3: volume back-end selectors.  Default is HDF5 on
+   // MFEM_USE_HDF5=YES builds, VTU otherwise.
+   const bool   paraview_volume_force_vtu  = HasFlag(argc, argv, "--paraview-volume-vtu");
+   const bool   paraview_volume_force_hdf5 = HasFlag(argc, argv, "--paraview-volume-hdf5");
+   // Phase 6.3a (R-301): volume PRIMARY-collection compression.
+   // Distinct from --paraview-bulk-* (which Phase 6.4 routes to the
+   // SECONDARY pv_bulk_out).
+   const real_t paraview_volume_zfp_tol    = GetRealArg(argc, argv, "--paraview-volume-zfp-tol",   0.0);
+   const int    paraview_volume_deflate    = GetIntArg (argc, argv, "--paraview-volume-deflate-level", -1);
+   const int    paraview_max_snapshots   = GetIntArg (argc, argv, "--paraview-max-snapshots", 0);
+   const real_t paraview_coseismic_dt    = GetRealArg(argc, argv, "--paraview-coseismic-dt",   -1.0);
+   const real_t paraview_nucleation_dt   = GetRealArg(argc, argv, "--paraview-nucleation-dt",  -1.0);
+   const real_t paraview_interseismic_dt = GetRealArg(argc, argv, "--paraview-interseismic-dt",-1.0);
+   if (paraview_force_vtu || paraview_force_hdf5
+       || paraview_fault_zfp_tol > 0.0
+       || paraview_fault_deflate >= 0
+       || paraview_bulk_zfp_tol > 0.0
+       || paraview_bulk_deflate >= 0
+       || paraview_volume_force_vtu || paraview_volume_force_hdf5
+       || paraview_volume_zfp_tol > 0.0
+       || paraview_volume_deflate >= 0
+       || paraview_max_snapshots > 0
+       || paraview_coseismic_dt > 0.0
+       || paraview_nucleation_dt > 0.0
+       || paraview_interseismic_dt > 0.0)
+   {
+      use_paraview = true;
+   }
+   // Parse-time validation (plan §Phase 2b/2d.3 "rejected at parse time"):
+   if (paraview_force_vtu && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                 "mutually exclusive.");
+   }
+   if (paraview_legacy_ascii && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-legacy-ascii implies the binary VTU "
+                 "back end and is incompatible with --paraview-fault-hdf5.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_fault_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_HDF5
+   // R-306 / plan §Phase 2d.3 parse-time validation: deflate-level
+   // flags require the seas-mfem build to support HDF5 (and therefore
+   // VTKHDF), otherwise there is no HDF dataset to attach the deflate
+   // filter to.
+   if (paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+   if (paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+#endif
+   if (paraview_fault_zfp_tol > 0.0 && paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol and --paraview-fault-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0 && paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol and --paraview-bulk-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   // Phase 6.3 / 6.3a: volume back-end + volume compression validation.
+   if (paraview_volume_force_vtu && paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                 "mutually exclusive.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_H5Z_ZFP=YES; "
+                 "current build has it disabled.");
+   }
+#endif
+   if (paraview_volume_zfp_tol > 0.0 && paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol and --paraview-volume-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   // Phase 6.4: warn if user passed --paraview-bulk-* but did NOT set
+   // --paraview-bulk-dt (in which case pv_bulk_out is not constructed
+   // and the bulk flags have no effect).
+   if (paraview_bulk_dt <= 0.0
+       && (paraview_bulk_zfp_tol > 0.0 || paraview_bulk_deflate >= 0))
+   {
+      mfem::out
+         << "warning: --paraview-bulk-zfp-tol / --paraview-bulk-deflate-level "
+            "set but --paraview-bulk-dt not provided; the secondary bulk "
+            "collection is disabled, the flag has no effect.\n";
    }
    // `--dry-run` is a shortcut for "no mesh, no time-stepping,
    // just print banner + verify wiring compiles/runs".  Used by
@@ -1451,11 +1666,18 @@ int main(int argc, char *argv[])
       // R-1409: machine-readable per-rank line.  Every rank prints once;
       // log parsers can grep "[mixed-flux] rank=N" to verify dispatch
       // engagement and global counts visible from any single log file.
-      std::cout << "[mixed-flux] rank=" << rank
-                << "  local_set_size=" << local_size_ll
-                << "  global_sum=" << global_sum
-                << "  global_min=" << local_min
-                << "  global_max=" << local_max << "\n";
+      // Gated behind --verify-dispatch (the same flag that opts in to
+      // the [dispatch] rank=N tri-consistency lines) so production runs
+      // don't pay for 400+ lines of per-rank noise when only the global
+      // counts and rank-0 warnings actually matter.
+      if (verify_dispatch)
+      {
+         std::cout << "[mixed-flux] rank=" << rank
+                   << "  local_set_size=" << local_size_ll
+                   << "  global_sum=" << global_sum
+                   << "  global_min=" << local_min
+                   << "  global_max=" << local_max << "\n";
+      }
 #else
       std::cout << "[mixed-flux] mode=" << mixed_flux_str
                 << "  |central_set|=" << local_size_ll
@@ -1632,8 +1854,12 @@ int main(int argc, char *argv[])
    //       - pv_out (output_dir/ParaView): velocity + mpi_rank volume +
    //         fault-surface PVD/VTU (slip, slip_rate, traction dip+strike,
    //         psi, sigma_n, plus static a, Dc, x2, x3) at the fault schedule.
-   //       - pv_bulk_out (output_dir/ParaView_bulk): velocity + sigma_yy +
-   //         sigma_xy + sigma_xz + mpi_rank at --paraview-bulk-dt cadence.
+   //       - pv_bulk_out (output_dir/ParaView_bulk/stress.vtkhdf):
+   //         full symmetric stress tensor (sigma_xx, sigma_yy, sigma_zz,
+   //         sigma_xy, sigma_xz, sigma_yz) at --paraview-bulk-dt cadence.
+   //         velocity and mpi_rank are NOT in this file after
+   //         PLAN_split_bulk_solutions_2026-05-12 — they live in
+   //         pv_out (kinematics.vtkhdf) only.
    //
    // R-801 / BP5 component convention enforced project-wide: comp 0 = dip,
    // comp 1 = strike.  TPV102 is pure strike-slip so the strike channel
@@ -1653,10 +1879,16 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
+   // Secondary `stress` collection (formerly "wave_bulk").  Holds the
+   // full symmetric stress tensor — all 6 independent components.
+   // velocity / mpi_rank are NOT registered here (they live in the
+   // primary `kinematics` collection only; this removes the byte-for-
+   // byte duplication that the Phase 6 sbatch defaults used to pay).
    std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
    std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
    std::unique_ptr<PvFES> pv_bulk_sigma_fes;
-   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxx_gf, pv_bulk_syy_gf, pv_bulk_szz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxy_gf, pv_bulk_sxz_gf, pv_bulk_syz_gf;
 
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
@@ -1669,8 +1901,25 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
       MPI_Barrier(comm);
 #endif
+      // Phase 6.3: select the volume back end.  Default is HDF5 on
+      // builds with MFEM_USE_HDF5=YES (and MFEM_PARALLEL_HDF5=YES for
+      // ParMesh); --paraview-volume-vtu / --paraview-volume-hdf5 force
+      // the choice.
+      auto volume_mode =
+         seas::ParaViewOutput<MeshT>::DefaultVolumeOutputMode();
+      if (paraview_volume_force_vtu)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Vtu; }
+      if (paraview_volume_force_hdf5)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5; }
+      // Primary collection — renamed from "volume" to "kinematics" per
+      // PLAN_split_bulk_solutions_2026-05-12.  File on disk:
+      // <output>/ParaView/kinematics.vtkhdf.  Carries velocity +
+      // mpi_rank (+ the L2-p0 fault projections from
+      // InitFaultOutputBP5; these will move to the fault file in a
+      // follow-up commit).
       pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-         output_dir + "/ParaView", pmesh, order);
+         output_dir + "/ParaView", pmesh, order,
+         /*collection_name=*/"kinematics", volume_mode);
 
       if (pv_low_order)
       {
@@ -1738,13 +1987,115 @@ int main(int argc, char *argv[])
          pv_out->output_every_n_steps = output_interval_for_pv;
       }
 
+      // R-101 wiring: Phase 2b / 2d.3 / 3 CLI overrides.
+      if (paraview_force_vtu)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+      }
+      if (paraview_force_hdf5)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Hdf5);
+      }
+      if (paraview_legacy_ascii)
+      {
+         // R-305: legacy per-rank ASCII writer; implies Vtu back end.
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+         pv_out->SetLegacyAsciiVTU(true);
+      }
+#ifdef MFEM_USE_HDF5
+      if (paraview_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_fault_zfp_tol);
+      }
+      else if (paraview_fault_deflate >= 0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_fault_deflate));
+      }
+      // Phase 6.3a (R-301) — `--paraview-volume-*` controls the
+      // PRIMARY collection's volume PV (this `pv_out`).  After Phase
+      // 6.4 the formerly-warn-and-ignore `--paraview-bulk-*` flags
+      // are RE-ROUTED to `pv_bulk_out` (the secondary wavefield
+      // collection, see below) — `pv_out` no longer consumes them.
+      if (paraview_volume_zfp_tol > 0.0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_volume_zfp_tol);
+      }
+      else if (paraview_volume_deflate >= 0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_volume_deflate));
+      }
+#endif
+      if (paraview_max_snapshots > 0)
+      {
+         pv_out->GetSchedule().max_total_snapshots = paraview_max_snapshots;
+      }
+      if (paraview_coseismic_dt    > 0.0)
+      { pv_out->GetSchedule().dt_coseismic    = paraview_coseismic_dt; }
+      if (paraview_nucleation_dt   > 0.0)
+      { pv_out->GetSchedule().dt_nucleation   = paraview_nucleation_dt; }
+      if (paraview_interseismic_dt > 0.0)
+      { pv_out->GetSchedule().dt_interseismic = paraview_interseismic_dt; }
+      pv_out->GetSchedule().Validate();
+      // Phase 3 cap requires a known total run time to project the
+      // remaining-write budget (see paraview_output.hpp:SnapshotCapAware
+      // Interval R-001).  Always set it so the cap engages whenever
+      // max_total_snapshots > 0.
+      pv_out->SetTotalRunTime(tfinal);
+
+      // Phase 4: volume-PV decouple.  `--volume-pv-dt X` (when > 0)
+      // re-enables the volume save at an independent cadence even if
+      // `--no-volume-pv` / `--no-domain-pv` is also set (plan §Phase 4
+      // edge case "the explicit dt wins").  `--no-volume-pv` alone
+      // suppresses the volume save while keeping fault output.
+      const bool volume_save_enabled = (volume_pv_dt > 0.0) || !pv_no_domain;
+      pv_out->SetVolumeSaveEnabled(volume_save_enabled);
+      if (volume_pv_dt > 0.0) { pv_out->SetVolumePVDt(volume_pv_dt); }
+
       if (rank == 0)
       {
+         // Phase 6.3: report the active volume back end.
+         const bool vmode_hdf5 = (volume_mode ==
+            seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5);
          std::cout << "ParaView output: ON (prefix="
                    << output_dir << "/ParaView)\n";
-         if (pv_no_domain)
+         std::cout << "  Volume PV: ON ("
+                   << (vmode_hdf5 ? "HDF5; " : "VTU; ")
+                   << output_dir << "/ParaView/"
+                   << (vmode_hdf5 ? "volume.vtkhdf" : "volume_*.vtu")
+                   << ")\n";
+         // Phase 6.3a: report active primary-collection volume filter.
+         if (paraview_volume_zfp_tol > 0.0)
          {
-            std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
+            std::cout << "  Volume PV compression: ZFP @ "
+                      << paraview_volume_zfp_tol
+                      << " (--paraview-volume-zfp-tol)\n";
+         }
+         else if (paraview_volume_deflate >= 0)
+         {
+            std::cout << "  Volume PV compression: deflate level "
+                      << paraview_volume_deflate
+                      << " (--paraview-volume-deflate-level)\n";
+         }
+         if (pv_no_domain && volume_pv_dt <= 0.0)
+         {
+            std::cout << "  Mode: fault-surface PVD only "
+                         "(--no-volume-pv / --no-domain-pv)\n";
+         }
+         if (volume_pv_dt > 0.0)
+         {
+            std::cout << "  Volume cadence: every " << volume_pv_dt
+                      << " s (--volume-pv-dt)\n";
          }
          if (paraview_step_interval > 0)
          {
@@ -1766,39 +2117,73 @@ int main(int argc, char *argv[])
 
       if (paraview_bulk_dt > 0.0)
       {
+         // Phase 6.4 + plan_split_bulk_solutions_2026-05-12:
+         // secondary collection inherits the same volume back end as
+         // `pv_out` (binary-format choice is global to the run).
+         // Renamed from "wave_bulk" to "stress" and now holds the FULL
+         // symmetric stress tensor (sigma_xx, _yy, _zz, _xy, _xz, _yz).
+         // velocity + mpi_rank are NOT registered here — they live in
+         // the primary `kinematics` file only.
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-            output_dir + "/ParaView_bulk", pmesh, order);
+            output_dir + "/ParaView_bulk", pmesh, order,
+            /*collection_name=*/"stress", volume_mode);
          if (pv_low_order)
          {
             pv_bulk_out->SetHighOrderOutput(false);
             pv_bulk_out->SetLevelsOfDetail(1);
          }
-         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
-         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
 
          pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
             order, 3, BasisType::GaussLobatto);
          pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
                                                      pv_bulk_sigma_fec.get());
+         pv_bulk_sxx_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_szz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_syz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_sxx_gf = 0.0;
          *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_szz_gf = 0.0;
          *pv_bulk_sxy_gf = 0.0;
          *pv_bulk_sxz_gf = 0.0;
+         *pv_bulk_syz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_zz", pv_bulk_szz_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_yz", pv_bulk_syz_gf.get());
 
          pv_bulk_out->fixed_dt = paraview_bulk_dt;
 
+         // Phase 6.4 (R-310 SEMANTIC FLIP): `--paraview-bulk-*` flags
+         // route to `pv_bulk_out` (the stress collection).  Plan-
+         // mandated CLI rename to `--paraview-stress-*` is deferred to
+         // a follow-up commit.
+#ifdef MFEM_USE_HDF5
+         if (paraview_bulk_zfp_tol > 0.0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+               paraview_bulk_zfp_tol);
+         }
+         else if (paraview_bulk_deflate >= 0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+               static_cast<double>(paraview_bulk_deflate));
+         }
+#endif
+
          if (rank == 0)
          {
-            std::cout << "  Bulk collection: ON (prefix="
+            std::cout << "  Stress collection: ON (prefix="
                       << output_dir << "/ParaView_bulk, every "
                       << paraview_bulk_dt
-                      << " s; fields: velocity, sigma_yy, sigma_xy, "
-                      << "sigma_xz, mpi_rank)\n";
+                      << " s; fields: sigma_xx, sigma_yy, sigma_zz, "
+                      << "sigma_xy, sigma_xz, sigma_yz)\n";
          }
       }
    }
@@ -1815,7 +2200,12 @@ int main(int argc, char *argv[])
          pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
       if (!fault_wants && !bulk_wants) { return; }
 
-      if (!pv_no_domain || bulk_wants)
+      // After the split-bulk-solutions refactor (plan 2026-05-12),
+      // velocity is owned by `pv_out` (the kinematics collection) only;
+      // `pv_bulk_out` (stress) no longer registers it.  Copy the
+      // velocity GF whenever the kinematics save will fire.
+      const bool volume_active = pv_out->GetVolumeSaveEnabled();
+      if (volume_active)
       {
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
@@ -1824,14 +2214,26 @@ int main(int argc, char *argv[])
 
       if (bulk_wants)
       {
+         // Full symmetric stress tensor — 6 independent components.
+         // Q-vector indices come from dynamic/wave_state.hpp:
+         //   SXX=0, SYY=1, SZZ=2, SXY=3, SYZ=4, SXZ=5.
+         std::memcpy(pv_bulk_sxx_gf->GetData(),
+                     Q.GetData() + SXX * ndof_total,
+                     ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_syy_gf->GetData(),
                      Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_szz_gf->GetData(),
+                     Q.GetData() + SZZ * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxy_gf->GetData(),
                      Q.GetData() + SXY * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxz_gf->GetData(),
                      Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syz_gf->GetData(),
+                     Q.GetData() + SYZ * ndof_total,
                      ndof_total * sizeof(real_t));
          pv_bulk_out->ForceSave(step_num, time);
       }
@@ -1860,11 +2262,16 @@ int main(int argc, char *argv[])
          pv_local_normal_stress_k4(i)   = d.sigma_n_corr;
       }
 
-      if (pv_no_domain)
-      {
-         pv_out->CommitSchedule(time);
-      }
-      else
+      // Phase 4: when the volume save is enabled in the library
+      // (ForceSave fires pv_.Save() according to its emit_volume_save_
+      // / volume_pv_dt_ state), do the full UpdateFaultFieldsBP5 +
+      // ForceSave path so the per-element fault GFs registered with
+      // pv_ are populated.  When the library has volume_save_enabled
+      // = false (and no volume_pv_dt_ override), skip the GF refresh
+      // and just advance the schedule.  ForceSave self-suppresses
+      // pv_.Save(), so calling it is harmless if the library says
+      // "off" — but we keep the skip to save the per-DOF copy work.
+      if (pv_out->GetVolumeSaveEnabled())
       {
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                       pv_local_traction, pv_local_state,
@@ -1875,6 +2282,10 @@ int main(int argc, char *argv[])
          // advanced for the next PeekShouldWrite to use the correct
          // regime interval (paraview_output.hpp:985-990).
          pv_out->CommitSchedule(time, V_max);
+      }
+      else
+      {
+         pv_out->CommitSchedule(time);
       }
 
       pv_out->WriteFaultSurfaceVTU(

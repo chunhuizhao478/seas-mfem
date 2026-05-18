@@ -157,6 +157,12 @@ MFEM_USE_AMGX          = NO
 MFEM_USE_MAGMA         = NO
 MFEM_USE_GNUTLS        = NO
 MFEM_USE_HDF5          = NO
+# Use the H5Z-ZFP plugin (filter id 32013) for lossy floating-point
+# compression in VTKHDF output.  Requires MFEM_USE_HDF5=YES and the
+# H5Z-ZFP plugin to be installed (or linked statically).  At runtime,
+# set HDF5_PLUGIN_PATH to the directory containing libh5zzfp.{so,dylib}.
+# See miniapps/seas/io/PLAN_paraview_compaction_2026-04-28.md §Phase 2d.
+MFEM_USE_H5Z_ZFP       = NO
 MFEM_USE_NETCDF        = NO
 MFEM_USE_PETSC         = NO
 MFEM_USE_SLEPC         = NO

@@ -140,10 +140,12 @@ static void TestBackwardsCompatNoK4()
    const int n_int = fault_faces.Size();
    const int total_dofs = n_int * nbf;
 
-   const std::string prefix = "test_r_v92_e02_no_k4";
+   const std::string prefix = "/tmp/test_r_v92_e02_no_k4";
    ::mkdir(prefix.c_str(), 0755);
    ParaViewOutput<Mesh> pv(prefix, mesh, /*order=*/1);
    pv.InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+   // ASCII regex parser below depends on the legacy per-rank VTU layout.
+   pv.SetLegacyAsciiVTU(true);
 
    Vector local_slip      (2 * total_dofs);  local_slip      = 0.0;
    Vector local_slip_rate (2 * total_dofs);  local_slip_rate = 0.0;
@@ -193,10 +195,12 @@ static void TestK4FieldsPopulatedAndDistinct()
    const int n_int = fault_faces.Size();
    const int total_dofs = n_int * nbf;
 
-   const std::string prefix = "test_r_v92_e02_with_k4";
+   const std::string prefix = "/tmp/test_r_v92_e02_with_k4";
    ::mkdir(prefix.c_str(), 0755);
    ParaViewOutput<Mesh> pv(prefix, mesh, /*order=*/1);
    pv.InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+   // ASCII regex parser below depends on the legacy per-rank VTU layout.
+   pv.SetLegacyAsciiVTU(true);
 
    // Averaged inputs: constant.  sigma_n_avg = 120e6 (equilibrium).
    // V = 0 (pre-rupture).  traction_avg = 0.
@@ -327,10 +331,12 @@ static void TestPartialK4DisablesEmission()
    const int n_int = fault_faces.Size();
    const int total_dofs = n_int * nbf;
 
-   const std::string prefix = "test_r_v92_e02_partial";
+   const std::string prefix = "/tmp/test_r_v92_e02_partial";
    ::mkdir(prefix.c_str(), 0755);
    ParaViewOutput<Mesh> pv(prefix, mesh, /*order=*/1);
    pv.InitFaultOutputBP5(fault_faces, empty_shared, nbf);
+   // ASCII regex parser below depends on the legacy per-rank VTU layout.
+   pv.SetLegacyAsciiVTU(true);
 
    Vector local_slip      (2 * total_dofs);  local_slip      = 0.0;
    Vector local_slip_rate (2 * total_dofs);  local_slip_rate = 0.0;

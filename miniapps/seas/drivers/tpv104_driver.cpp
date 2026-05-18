@@ -38,11 +38,14 @@
 #include "../dynamic/seas_diag_rank.hpp"
 #include "../dynamic/fault_locality_partition.hpp"
 #include "../io/paraview_output.hpp"
+#include "../io/tpv104_checkpoint.hpp"   // Phase-4: V1 restart for TPV104
+#include "../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
 #include <cstring>
+#include <filesystem>   // weakly_canonical for --restart / --output-dir safety check
 #include <fstream>
 #include <iomanip>
 #include <sstream>
@@ -421,6 +424,15 @@ int main(int argc, char *argv[])
    int rank = 0, nprocs = 1;
 #endif
 
+   // Suppress HDF5 auto-print of internal error stacks.  On the
+   // Frontera build, PETSc 3.15 pulls in HDF5 1.10 (libhdf5.so.200)
+   // while seas/MFEM uses HDF5 1.14 (libhdf5.so.310); each instance
+   // has its own ID table and cross-instance closes produce noisy
+   // "can't locate ID (already closed?)" stacks on every ParaView
+   // write.  See debug_document/paraview_output_debug_document/
+   //   hdf5_diag_noise_2026-05-17.md
+   mfem::seas::InstallHdf5ErrorFilter();
+
 #ifdef SEAS_DIAG_FAULT_FLUX
    mfem::seas::g_seas_my_rank = rank;
 #endif
@@ -473,6 +485,115 @@ int main(int argc, char *argv[])
    bool fault_locality_part = HasFlag(argc, argv, "--partition-fault-locality");
    std::string partition_file = GetStringArg(argc, argv, "--partition-file", "");
 
+   // -----------------------------------------------------------------------
+   // Phase-4 V1 restart support (mirrors BP5 V1 schema; TPV104-specific
+   // format in `io/tpv104_checkpoint.hpp`).  ParaView schedule-state
+   // preservation (the V2 extension) is deferred — see header comment
+   // in tpv104_checkpoint.hpp.
+   //
+   //   --restart PREFIX           Resume from a previously-written
+   //                              TPV104 V1 checkpoint at PREFIX
+   //                              (driver looks for
+   //                              {PREFIX}_checkpoint_r{rank}.txt).
+   //   --checkpoint-interval N    Write a checkpoint every N steps
+   //                              (default 0 = end-of-run only).
+   // -----------------------------------------------------------------------
+   std::string restart_prefix     = GetStringArg(argc, argv, "--restart", "");
+   int         checkpoint_interval = GetIntArg(argc, argv,
+                                               "--checkpoint-interval", 0);
+
+   // -----------------------------------------------------------------------
+   // RESTART / OUTPUT-DIR collision safety check (mirror of the BP5
+   // driver's check at bp5_verification_full.cpp:1293+; same intent,
+   // same canonical-path compare).  Without this gate a user who
+   // re-uses the same --output-dir across a restart would silently
+   // lose Phase A's fault.vtkhdf / volume.vtkhdf /
+   // ParaView_bulk/volume.vtkhdf / *_station_*.dat /
+   // *_checkpoint_r*.txt files.  TPV104's TWO ParaView
+   // collections (pv_out + pv_bulk_out) make the clobber risk
+   // higher than BP5's, not lower.
+   // -----------------------------------------------------------------------
+   if (!restart_prefix.empty())
+   {
+      namespace fs = std::filesystem;
+      try
+      {
+         const fs::path restart_path(restart_prefix);
+         fs::path restart_dir_path = restart_path.parent_path();
+         if (restart_dir_path.empty()) { restart_dir_path = "."; }
+
+         const fs::path restart_canonical =
+            fs::weakly_canonical(restart_dir_path);
+         const fs::path output_canonical =
+            fs::weakly_canonical(fs::path(output_dir));
+
+         if (restart_canonical == output_canonical)
+         {
+            if (rank == 0)
+            {
+               std::cerr
+                  << "ERROR: --output-dir (" << output_dir
+                  << ") resolves to the SAME directory as the parent "
+                  "of --restart (" << restart_dir_path.string()
+                  << ").\n"
+                  "       Continuing would clobber Phase A's outputs "
+                  "(fault.vtkhdf, volume.vtkhdf, "
+                  "ParaView_bulk/volume.vtkhdf, "
+                  "*_station_*.dat, *_checkpoint_r*.txt).\n"
+                  "       Pick a DIFFERENT --output-dir for the "
+                  "restarted run.  Recommended chained-restart "
+                  "pattern (used by "
+                  "jobs/tpv104/tpv104_restart_test_v1_dev_2hr.sbatch — "
+                  "single base dir + segment_NNN subdirs):\n"
+                  "         --output-dir <BASE>/segment_001  (initial run)\n"
+                  "         --output-dir <BASE>/segment_002  (restart 1)\n"
+                  "         --output-dir <BASE>/segment_003  (restart 2)\n";
+            }
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 3;
+         }
+
+         // Soft warning for parent/child path overlap (mirror BP5
+         // R-006 round 6).
+         const std::string r = restart_canonical.string();
+         const std::string o = output_canonical.string();
+         const bool r_is_parent_of_o =
+            (o.size() > r.size())
+            && (o.compare(0, r.size(), r) == 0)
+            && (o[r.size()] == '/');
+         const bool o_is_parent_of_r =
+            (r.size() > o.size())
+            && (r.compare(0, o.size(), o) == 0)
+            && (r[o.size()] == '/');
+         if ((r_is_parent_of_o || o_is_parent_of_r) && rank == 0)
+         {
+            std::cerr << "WARNING: --output-dir and --restart have a "
+                         "parent/child relationship\n"
+                         "         (restart=" << r << ",\n"
+                         "          output =" << o << ").\n"
+                         "         Phase B's output may partially "
+                         "overlap with Phase A's if names collide.\n";
+         }
+      }
+      catch (const fs::filesystem_error &e)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "ERROR: failed to canonicalise --restart / "
+                         "--output-dir paths: " << e.what() << "\n"
+                         "       restart_prefix = " << restart_prefix
+                      << "\n       output_dir     = " << output_dir
+                      << "\n";
+         }
+#ifdef MFEM_USE_MPI
+         MPI_Finalize();
+#endif
+         return 3;
+      }
+   }
+
    // ParaView output controls — mirror tpv102_driver.cpp + BP5 conventions:
    //   --paraview              : enable PVD/VTU output, interval matches --output-dt
    //   --paraview-every N      : write every N steps
@@ -481,12 +602,22 @@ int main(int argc, char *argv[])
    //                             with velocity + sigma_yy/sigma_xy/sigma_xz at
    //                             coarser cadence (typical: 0.05 s)
    //   --pv-low-order          : linear tets only (~40x smaller volume output)
-   //   --no-domain-pv          : suppress fault-schedule volume save (fault-
-   //                             surface PVD/VTU still written; bulk collection
-   //                             unaffected)
+   //   --no-volume-pv / --no-domain-pv (deprecated alias) :
+   //                             suppress fault-schedule volume save.
+   //   --volume-pv-dt X        : volume cadence override (s).  Re-enables
+   //                             the volume save even with --no-volume-pv.
+   //   --paraview-fault-{vtu,hdf5,legacy-ascii} : back-end selection.
+   //   --paraview-{fault,bulk}-{zfp-tol,deflate-level} : VTKHDF chunk filter.
+   //   --paraview-max-snapshots N / --paraview-{co,nucleation,inter}seismic-dt X :
+   //                             snapshot cap and per-regime cadences.
+   //   See tpv102_driver.cpp for the canonical doc-block.
    bool use_paraview = HasFlag(argc, argv, "--paraview");
    bool pv_low_order = HasFlag(argc, argv, "--pv-low-order");
-   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv");
+   // Phase 4: see tpv102_driver.cpp for the canonical doc-block on
+   // --no-volume-pv / --volume-pv-dt.
+   bool pv_no_domain = HasFlag(argc, argv, "--no-domain-pv")
+                       || HasFlag(argc, argv, "--no-volume-pv");
+   real_t volume_pv_dt = GetRealArg(argc, argv, "--volume-pv-dt", 0.0);
    int  paraview_step_interval = GetIntArg(argc, argv, "--paraview-every", 0);
    real_t paraview_dt_flag     = GetRealArg(argc, argv, "--paraview-dt", 0.0);
    real_t paraview_bulk_dt     = GetRealArg(argc, argv, "--paraview-bulk-dt", 0.0);
@@ -494,6 +625,146 @@ int main(int argc, char *argv[])
        || paraview_bulk_dt > 0.0)
    {
       use_paraview = true;
+   }
+
+   // R-101 / PLAN_paraview_compaction_2026-04-28 §Phase 2b / 2d.3 / 3
+   // CLI flags.  See tpv102_driver.cpp for the canonical doc-block.
+   const bool   paraview_force_vtu       = HasFlag(argc, argv, "--paraview-fault-vtu");
+   const bool   paraview_force_hdf5      = HasFlag(argc, argv, "--paraview-fault-hdf5");
+   // R-305: legacy per-rank ASCII back end (debugging only).  See
+   // tpv102_driver.cpp for canonical doc-block.
+   const bool   paraview_legacy_ascii    = HasFlag(argc, argv, "--paraview-fault-legacy-ascii");
+   const real_t paraview_fault_zfp_tol   = GetRealArg(argc, argv, "--paraview-fault-zfp-tol",   0.0);
+   const int    paraview_fault_deflate   = GetIntArg (argc, argv, "--paraview-fault-deflate-level", -1);
+   // Phase 2d.3: bulk-side flags (see tpv102_driver.cpp for canonical comment).
+   const real_t paraview_bulk_zfp_tol    = GetRealArg(argc, argv, "--paraview-bulk-zfp-tol",   0.0);
+   const int    paraview_bulk_deflate    = GetIntArg (argc, argv, "--paraview-bulk-deflate-level", -1);
+   // Phase 6.3 / 6.3a: volume back-end + primary-collection compression.
+   const bool   paraview_volume_force_vtu  = HasFlag(argc, argv, "--paraview-volume-vtu");
+   const bool   paraview_volume_force_hdf5 = HasFlag(argc, argv, "--paraview-volume-hdf5");
+   const real_t paraview_volume_zfp_tol    = GetRealArg(argc, argv, "--paraview-volume-zfp-tol",   0.0);
+   const int    paraview_volume_deflate    = GetIntArg (argc, argv, "--paraview-volume-deflate-level", -1);
+   const int    paraview_max_snapshots   = GetIntArg (argc, argv, "--paraview-max-snapshots", 0);
+   const real_t paraview_coseismic_dt    = GetRealArg(argc, argv, "--paraview-coseismic-dt",   -1.0);
+   const real_t paraview_nucleation_dt   = GetRealArg(argc, argv, "--paraview-nucleation-dt",  -1.0);
+   const real_t paraview_interseismic_dt = GetRealArg(argc, argv, "--paraview-interseismic-dt",-1.0);
+   if (paraview_force_vtu || paraview_force_hdf5
+       || paraview_fault_zfp_tol > 0.0
+       || paraview_fault_deflate >= 0
+       || paraview_bulk_zfp_tol > 0.0
+       || paraview_bulk_deflate >= 0
+       || paraview_volume_force_vtu || paraview_volume_force_hdf5
+       || paraview_volume_zfp_tol > 0.0
+       || paraview_volume_deflate >= 0
+       || paraview_max_snapshots > 0
+       || paraview_coseismic_dt > 0.0
+       || paraview_nucleation_dt > 0.0
+       || paraview_interseismic_dt > 0.0)
+   {
+      use_paraview = true;
+   }
+   if (paraview_force_vtu && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                 "mutually exclusive.");
+   }
+   if (paraview_legacy_ascii && paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-legacy-ascii implies the binary VTU "
+                 "back end and is incompatible with --paraview-fault-hdf5.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-fault-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_fault_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_H5Z_ZFP=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_HDF5
+   // R-306 / plan §Phase 2d.3: deflate-level flags require HDF5.
+   if (paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+   if (paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has "
+                 "it disabled.");
+   }
+#endif
+   if (paraview_fault_zfp_tol > 0.0 && paraview_fault_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-fault-zfp-tol and --paraview-fault-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   if (paraview_bulk_zfp_tol > 0.0 && paraview_bulk_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-bulk-zfp-tol and --paraview-bulk-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   // Phase 6.3 / 6.3a: volume back-end + volume compression validation.
+   if (paraview_volume_force_vtu && paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                 "mutually exclusive.");
+   }
+#ifndef MFEM_USE_HDF5
+   if (paraview_volume_force_hdf5)
+   {
+      MFEM_ABORT("--paraview-volume-hdf5 requires the seas-mfem build to "
+                 "define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires the seas-mfem build "
+                 "to define MFEM_USE_HDF5=YES; current build has it disabled.");
+   }
+   if (paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-deflate-level requires the seas-mfem "
+                 "build to define MFEM_USE_HDF5=YES; current build has it "
+                 "disabled.");
+   }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+   if (paraview_volume_zfp_tol > 0.0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_H5Z_ZFP=YES; "
+                 "current build has it disabled.");
+   }
+#endif
+   if (paraview_volume_zfp_tol > 0.0 && paraview_volume_deflate >= 0)
+   {
+      MFEM_ABORT("--paraview-volume-zfp-tol and --paraview-volume-deflate-level "
+                 "are mutually exclusive — choose ZFP-accuracy OR deflate, "
+                 "not both.");
+   }
+   if (paraview_bulk_dt <= 0.0
+       && (paraview_bulk_zfp_tol > 0.0 || paraview_bulk_deflate >= 0))
+   {
+      mfem::out
+         << "warning: --paraview-bulk-zfp-tol / --paraview-bulk-deflate-level "
+            "set but --paraview-bulk-dt not provided; the secondary bulk "
+            "collection is disabled, the flag has no effect.\n";
    }
    // `--dry-run` is a shortcut for "no mesh, no time-stepping,
    // just print banner + verify wiring compiles/runs".  Used by
@@ -1454,11 +1725,18 @@ int main(int argc, char *argv[])
       // R-1409: machine-readable per-rank line.  Every rank prints once;
       // log parsers can grep "[mixed-flux] rank=N" to verify dispatch
       // engagement and global counts visible from any single log file.
-      std::cout << "[mixed-flux] rank=" << rank
-                << "  local_set_size=" << local_size_ll
-                << "  global_sum=" << global_sum
-                << "  global_min=" << local_min
-                << "  global_max=" << local_max << "\n";
+      // Gated behind --verify-dispatch (the same flag that opts in to
+      // the [dispatch] rank=N tri-consistency lines) so production runs
+      // don't pay for 400+ lines of per-rank noise when only the global
+      // counts and rank-0 warnings actually matter.
+      if (verify_dispatch)
+      {
+         std::cout << "[mixed-flux] rank=" << rank
+                   << "  local_set_size=" << local_size_ll
+                   << "  global_sum=" << global_sum
+                   << "  global_min=" << local_min
+                   << "  global_max=" << local_max << "\n";
+      }
 #else
       std::cout << "[mixed-flux] mode=" << mixed_flux_str
                 << "  |central_set|=" << local_size_ll
@@ -1631,13 +1909,28 @@ int main(int argc, char *argv[])
    station_writer.Open(output_dir, output_prefix, stations,
                        fault_coords, num_fault_local);
 #endif
-   station_writer.WriteStep(0.0, dof_data);
+   // Write the pre-evolution t=0 state ONLY on a fresh run.  On
+   // restart, the first in-loop WriteStep at step >= restart_step
+   // writes the first row at t = restart_t.  Without this gate,
+   // Phase B's station file starts at t=0 even though restart
+   // loaded t=restart_t (Frontera job 7729560 Validation #5;
+   // tpv104_restart_station_t0_bug_2026-05-17.md).
+   if (restart_prefix.empty())
+   {
+      station_writer.WriteStep(0.0, dof_data);
+   }
 
    auto surface_stations = DefaultSurfaceStations_TPV104();
    TPV104SurfaceStationWriter surface_writer;
    surface_writer.Open(output_dir, output_prefix, surface_stations,
                        pmesh, fes);
-   surface_writer.WriteStep(0.0, Q);
+   // Same gate: on restart, Q is still the uninitialised zero vector
+   // here — restart load overwrites it.  Skip the t=0 write so the
+   // first in-loop WriteStep records the LOADED Q at t = restart_t.
+   if (restart_prefix.empty())
+   {
+      surface_writer.WriteStep(0.0, Q);
+   }
 
    // -----------------------------------------------------------------------
    // 7b. ParaView output (mirrors tpv102_driver.cpp / BP5 seas::ParaViewOutput
@@ -1645,8 +1938,12 @@ int main(int argc, char *argv[])
    //       - pv_out (output_dir/ParaView): velocity + mpi_rank volume +
    //         fault-surface PVD/VTU (slip, slip_rate, traction dip+strike,
    //         psi, sigma_n, plus static a, Dc, x2, x3) at the fault schedule.
-   //       - pv_bulk_out (output_dir/ParaView_bulk): velocity + sigma_yy +
-   //         sigma_xy + sigma_xz + mpi_rank at --paraview-bulk-dt cadence.
+   //       - pv_bulk_out (output_dir/ParaView_bulk/stress.vtkhdf):
+   //         full symmetric stress tensor (sigma_xx, sigma_yy, sigma_zz,
+   //         sigma_xy, sigma_xz, sigma_yz) at --paraview-bulk-dt cadence.
+   //         velocity and mpi_rank are NOT in this file after
+   //         PLAN_split_bulk_solutions_2026-05-12 — they live in
+   //         pv_out (kinematics.vtkhdf) only.
    //
    // R-801 / BP5 component convention enforced project-wide: comp 0 = dip,
    // comp 1 = strike.  TPV104 is pure strike-slip so the strike channel
@@ -1666,10 +1963,16 @@ int main(int argc, char *argv[])
    std::unique_ptr<PvFES> pv_vel_fes, pv_rank_fes;
    std::unique_ptr<PvGF>  pv_vel_gf,  pv_rank_gf;
 
+   // Secondary `stress` collection (formerly "wave_bulk").  Holds the
+   // full symmetric stress tensor — all 6 independent components.
+   // velocity / mpi_rank are NOT registered here (they live in the
+   // primary `kinematics` collection only; this removes the byte-for-
+   // byte duplication that the Phase 6 sbatch defaults used to pay).
    std::unique_ptr<seas::ParaViewOutput<MeshT>> pv_bulk_out;
    std::unique_ptr<L2_FECollection> pv_bulk_sigma_fec;
    std::unique_ptr<PvFES> pv_bulk_sigma_fes;
-   std::unique_ptr<PvGF>  pv_bulk_syy_gf, pv_bulk_sxy_gf, pv_bulk_sxz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxx_gf, pv_bulk_syy_gf, pv_bulk_szz_gf;
+   std::unique_ptr<PvGF>  pv_bulk_sxy_gf, pv_bulk_sxz_gf, pv_bulk_syz_gf;
 
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
@@ -1682,8 +1985,16 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
       MPI_Barrier(comm);
 #endif
+      // Phase 6.3: select the volume back end.
+      auto volume_mode =
+         seas::ParaViewOutput<MeshT>::DefaultVolumeOutputMode();
+      if (paraview_volume_force_vtu)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Vtu; }
+      if (paraview_volume_force_hdf5)
+      { volume_mode = seas::ParaViewOutput<MeshT>::VolumeOutputMode::Hdf5; }
       pv_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-         output_dir + "/ParaView", pmesh, order);
+         output_dir + "/ParaView", pmesh, order,
+         /*collection_name=*/"kinematics", volume_mode);
 
       if (pv_low_order)
       {
@@ -1751,13 +2062,83 @@ int main(int argc, char *argv[])
          pv_out->output_every_n_steps = output_interval_for_pv;
       }
 
+      // R-101 wiring: Phase 2b / 2d.3 / 3 CLI overrides.  See
+      // tpv102_driver.cpp for the canonical doc-block.
+      if (paraview_force_vtu)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+      }
+      if (paraview_force_hdf5)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Hdf5);
+      }
+      if (paraview_legacy_ascii)
+      {
+         pv_out->SetFaultOutputMode(
+            seas::ParaViewOutput<MeshT>::FaultOutputMode::Vtu);
+         pv_out->SetLegacyAsciiVTU(true);
+      }
+#ifdef MFEM_USE_HDF5
+      if (paraview_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_fault_zfp_tol);
+      }
+      else if (paraview_fault_deflate >= 0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_fault_deflate));
+      }
+      // Phase 6.3a: --paraview-volume-* controls primary `pv_out`.
+      // R-310: --paraview-bulk-* is RE-ROUTED to `pv_bulk_out` below.
+      if (paraview_volume_zfp_tol > 0.0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            paraview_volume_zfp_tol);
+      }
+      else if (paraview_volume_deflate >= 0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(paraview_volume_deflate));
+      }
+#endif
+      if (paraview_max_snapshots > 0)
+      {
+         pv_out->GetSchedule().max_total_snapshots = paraview_max_snapshots;
+      }
+      if (paraview_coseismic_dt    > 0.0)
+      { pv_out->GetSchedule().dt_coseismic    = paraview_coseismic_dt; }
+      if (paraview_nucleation_dt   > 0.0)
+      { pv_out->GetSchedule().dt_nucleation   = paraview_nucleation_dt; }
+      if (paraview_interseismic_dt > 0.0)
+      { pv_out->GetSchedule().dt_interseismic = paraview_interseismic_dt; }
+      pv_out->GetSchedule().Validate();
+      pv_out->SetTotalRunTime(tfinal);
+
+      // Phase 4: volume-PV decouple (see tpv102_driver.cpp for canonical comment).
+      const bool volume_save_enabled = (volume_pv_dt > 0.0) || !pv_no_domain;
+      pv_out->SetVolumeSaveEnabled(volume_save_enabled);
+      if (volume_pv_dt > 0.0) { pv_out->SetVolumePVDt(volume_pv_dt); }
+
       if (rank == 0)
       {
          std::cout << "ParaView output: ON (prefix="
                    << output_dir << "/ParaView)\n";
-         if (pv_no_domain)
+         if (pv_no_domain && volume_pv_dt <= 0.0)
          {
-            std::cout << "  Mode: fault-surface PVD only (--no-domain-pv)\n";
+            std::cout << "  Mode: fault-surface PVD only "
+                         "(--no-volume-pv / --no-domain-pv)\n";
+         }
+         if (volume_pv_dt > 0.0)
+         {
+            std::cout << "  Volume cadence: every " << volume_pv_dt
+                      << " s (--volume-pv-dt)\n";
          }
          if (paraview_step_interval > 0)
          {
@@ -1779,31 +2160,58 @@ int main(int argc, char *argv[])
 
       if (paraview_bulk_dt > 0.0)
       {
+         // Phase 6.4: secondary collection inherits the primary's
+         // back end; distinct collection name "wave_bulk".
          pv_bulk_out = std::make_unique<seas::ParaViewOutput<MeshT>>(
-            output_dir + "/ParaView_bulk", pmesh, order);
+            output_dir + "/ParaView_bulk", pmesh, order,
+            /*collection_name=*/"stress", volume_mode);
          if (pv_low_order)
          {
             pv_bulk_out->SetHighOrderOutput(false);
             pv_bulk_out->SetLevelsOfDetail(1);
          }
-         pv_bulk_out->RegisterDomainField("velocity", pv_vel_gf.get());
-         pv_bulk_out->RegisterDomainField("mpi_rank", pv_rank_gf.get());
-
          pv_bulk_sigma_fec = std::make_unique<L2_FECollection>(
             order, 3, BasisType::GaussLobatto);
          pv_bulk_sigma_fes = std::make_unique<PvFES>(&pmesh,
                                                      pv_bulk_sigma_fec.get());
+         pv_bulk_sxx_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_syy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_szz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxy_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
          pv_bulk_sxz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         pv_bulk_syz_gf = std::make_unique<PvGF>(pv_bulk_sigma_fes.get());
+         *pv_bulk_sxx_gf = 0.0;
          *pv_bulk_syy_gf = 0.0;
+         *pv_bulk_szz_gf = 0.0;
          *pv_bulk_sxy_gf = 0.0;
          *pv_bulk_sxz_gf = 0.0;
+         *pv_bulk_syz_gf = 0.0;
+         pv_bulk_out->RegisterDomainField("sigma_xx", pv_bulk_sxx_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_yy", pv_bulk_syy_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_zz", pv_bulk_szz_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xy", pv_bulk_sxy_gf.get());
          pv_bulk_out->RegisterDomainField("sigma_xz", pv_bulk_sxz_gf.get());
+         pv_bulk_out->RegisterDomainField("sigma_yz", pv_bulk_syz_gf.get());
 
          pv_bulk_out->fixed_dt = paraview_bulk_dt;
+
+         // Phase 6.4 R-310: --paraview-bulk-* SEMANTIC FLIP — was
+         // warn-and-ignore on pv_out (Phase 2d.3); now applies to
+         // pv_bulk_out (the secondary wavefield collection).
+#ifdef MFEM_USE_HDF5
+         if (paraview_bulk_zfp_tol > 0.0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+               paraview_bulk_zfp_tol);
+         }
+         else if (paraview_bulk_deflate >= 0)
+         {
+            pv_bulk_out->SetVolumeHDFCompression(
+               mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+               static_cast<double>(paraview_bulk_deflate));
+         }
+#endif
 
          if (rank == 0)
          {
@@ -1828,7 +2236,12 @@ int main(int argc, char *argv[])
          pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
       if (!fault_wants && !bulk_wants) { return; }
 
-      if (!pv_no_domain || bulk_wants)
+      // Phase 4: see tpv102_driver.cpp for canonical comment.
+      // After the split-bulk-solutions refactor (plan 2026-05-12),
+      // velocity is owned by `pv_out` (the kinematics collection)
+      // only; `pv_bulk_out` (stress) no longer registers it.
+      const bool volume_active = pv_out->GetVolumeSaveEnabled();
+      if (volume_active)
       {
          std::memcpy(pv_vel_gf->GetData(),
                      Q.GetData() + VX * ndof_total,
@@ -1837,14 +2250,26 @@ int main(int argc, char *argv[])
 
       if (bulk_wants)
       {
+         // Full symmetric stress tensor — 6 independent components.
+         // Q-vector indices from dynamic/wave_state.hpp:
+         //   SXX=0, SYY=1, SZZ=2, SXY=3, SYZ=4, SXZ=5.
+         std::memcpy(pv_bulk_sxx_gf->GetData(),
+                     Q.GetData() + SXX * ndof_total,
+                     ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_syy_gf->GetData(),
                      Q.GetData() + SYY * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_szz_gf->GetData(),
+                     Q.GetData() + SZZ * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxy_gf->GetData(),
                      Q.GetData() + SXY * ndof_total,
                      ndof_total * sizeof(real_t));
          std::memcpy(pv_bulk_sxz_gf->GetData(),
                      Q.GetData() + SXZ * ndof_total,
+                     ndof_total * sizeof(real_t));
+         std::memcpy(pv_bulk_syz_gf->GetData(),
+                     Q.GetData() + SYZ * ndof_total,
                      ndof_total * sizeof(real_t));
          pv_bulk_out->ForceSave(step_num, time);
       }
@@ -1873,11 +2298,8 @@ int main(int argc, char *argv[])
          pv_local_normal_stress_k4(i)   = d.sigma_n_corr;
       }
 
-      if (pv_no_domain)
-      {
-         pv_out->CommitSchedule(time);
-      }
-      else
+      // Phase 4: see tpv102_driver.cpp for canonical comment.
+      if (pv_out->GetVolumeSaveEnabled())
       {
          pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
                                       pv_local_traction, pv_local_state,
@@ -1888,6 +2310,10 @@ int main(int argc, char *argv[])
          // advanced for the next PeekShouldWrite to use the correct
          // regime interval (paraview_output.hpp:985-990).
          pv_out->CommitSchedule(time, V_max);
+      }
+      else
+      {
+         pv_out->CommitSchedule(time);
       }
 
       pv_out->WriteFaultSurfaceVTU(
@@ -1934,12 +2360,73 @@ int main(int argc, char *argv[])
    Vector Q_new(Q.Size());
    std::vector<real_t> psi_n(num_fault_total);
 
-   if (rank == 0)
+   // -----------------------------------------------------------------------
+   // Phase-4 V1 restart (mirror of BP5 V1 restart block at
+   // bp5_verification_full.cpp:2492).  Must run AFTER Q is sized
+   // (line 1696) and dof_data is initialised by
+   // InitializeFaultDOFs_TPV104 (line 1307) but BEFORE the time loop
+   // — otherwise the loaded state would be overwritten by the init
+   // sequence.  Loads `t`, `dt`, `step` into local restart_* vars +
+   // overwrites Q + dof_data dynamic fields in place.
+   // -----------------------------------------------------------------------
+   int    restart_step = 0;
+   real_t restart_dt   = 0.0;
+   if (!restart_prefix.empty())
    {
-      std::cout << "Starting ADER-O(" << ader_order << ") time loop...\n";
+      // R-002: pass Q.Size() (= NUM_STATE * ndof_total from line ~1806)
+      // as expected_Q_size so wrong-mesh restart aborts in
+      // ReadTpv104Checkpoint rather than silently resizing Q.
+      const int expected_Q_size = Q.Size();
+      const bool ok = mfem::seas::ReadTpv104Checkpoint(
+         restart_prefix, t, restart_dt, restart_step, Q,
+         expected_Q_size, dof_data,
+         rank, nprocs
+#ifdef MFEM_USE_MPI
+         , comm
+#endif
+         );
+      MFEM_VERIFY(ok,
+                  "Failed to load TPV104 checkpoint: " << restart_prefix
+                  << " (file missing or unreadable per-rank).");
+      if (rank == 0)
+      {
+         std::cout << "TPV104 restart loaded: t=" << t
+                   << " s, step=" << restart_step
+                   << ", dt(saved)=" << restart_dt
+                   << ".  Resuming time loop.\n";
+      }
+      if (paraview_bulk_dt > 0.0 && rank == 0)
+      {
+         std::cerr <<
+            "WARNING: --restart resumes the PRIMARY ParaView collection's "
+            "schedule state (last_write_time, regime).  The SECONDARY "
+            "(ParaView_bulk) collection re-initialises in its default "
+            "regime — its first post-restart frame is written immediately "
+            "at t=" << t << ", and regime-adaptive cadence (if any) "
+            "starts fresh.  This is a V2 limitation; V3 will carry "
+            "both collections.\n";
+      }
    }
 
-   for (int step = 0; step < nsteps; ++step)
+   if (rank == 0)
+   {
+      if (restart_step == 0)
+      {
+         std::cout << "Starting ADER-O(" << ader_order
+                   << ") time loop...\n";
+      }
+      else
+      {
+         std::cout << "Resuming ADER-O(" << ader_order
+                   << ") time loop from step " << restart_step
+                   << " (t=" << t << " s).\n";
+      }
+   }
+
+   // restart_step = 0 on a fresh run; the loop is otherwise unchanged.
+   // nsteps is computed from ABSOLUTE tfinal (see line 1309), so
+   // skipping the first restart_step iterations resumes correctly.
+   for (int step = restart_step; step < nsteps; ++step)
    {
       real_t dt_step = std::min(dt, tfinal - t);
       if (dt_step <= 0.0) { break; }
@@ -2171,6 +2658,48 @@ int main(int argc, char *argv[])
       {
          std::cout << "  [qnorm] ||Q||_2 = " << Q.Norml2() << "\n";
       }
+
+      // Phase-4 V1 checkpoint write at intervals.  step+1 because we
+      // want a CONSISTENT snapshot AFTER the step's wave update +
+      // fault solve (Q.Swap done above, t already advanced).  The
+      // file path is <output_dir>/<output_prefix>_checkpoint_r{rank}.txt
+      // — same naming scheme as BP5 (via CheckpointFilename helper).
+      if (checkpoint_interval > 0
+          && (step + 1) % checkpoint_interval == 0)
+      {
+         const std::string tpv104_ckpt_prefix =
+            output_dir + "/" + output_prefix;
+         mfem::seas::WriteTpv104Checkpoint(tpv104_ckpt_prefix, t, dt_step,
+                                            step + 1, Q, dof_data,
+                                            rank, nprocs
+#ifdef MFEM_USE_MPI
+                                            , comm
+#endif
+                                            );
+      }
+   }
+
+   // -----------------------------------------------------------------------
+   // End-of-run V1 checkpoint (Phase-4 restart).  Always writes when
+   // checkpoint_interval > 0 (matches BP5 final-checkpoint pattern).
+   // -----------------------------------------------------------------------
+   if (checkpoint_interval > 0)
+   {
+      const std::string tpv104_ckpt_prefix =
+         output_dir + "/" + output_prefix;
+      // Use the last dt the loop actually used.  If the loop ran
+      // zero steps (restart_step == nsteps), reuse restart_dt or
+      // dt.  Either way the final value is consistent with the
+      // saved-state semantics.
+      const real_t final_dt =
+         (restart_dt > 0.0 && nsteps == restart_step) ? restart_dt : dt;
+      mfem::seas::WriteTpv104Checkpoint(tpv104_ckpt_prefix, t, final_dt,
+                                         nsteps, Q, dof_data,
+                                         rank, nprocs
+#ifdef MFEM_USE_MPI
+                                         , comm
+#endif
+                                         );
    }
 
    // -----------------------------------------------------------------------

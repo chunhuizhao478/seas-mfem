@@ -16,6 +16,7 @@
 #include "../general/binaryio.hpp"
 
 #include <algorithm>
+#include <cstring>
 #include <numeric>
 #include <hdf5_hl.h>
 
@@ -113,11 +114,62 @@ hid_t VTKHDF::EnsureDataset(hid_t f, const std::string &name, hid_t type,
       chunk[0] = chunk_size_bytes / t_bytes;
       const hid_t dcpl = H5Pcreate(H5P_DATASET_CREATE);
       H5Pset_chunk(dcpl, ndims, chunk);
-      if (compression_level >= 0)
+
+      // Filter dispatch (Phase 2d.2 of seas/io/PLAN_paraview_compaction
+      // _2026-04-28.md).  ZFP only compresses floating-point datasets;
+      // integer connectivity / offsets / types must stay lossless via
+      // deflate or the mesh topology is corrupted.  R-110: include big-
+      // endian and long-double aliases so the FP test does not silently
+      // miss a host that emits non-LE / non-double scientific arrays.
+      const bool type_is_fp = (H5Tequal(type, H5T_IEEE_F64LE) > 0
+                               || H5Tequal(type, H5T_IEEE_F32LE) > 0
+                               || H5Tequal(type, H5T_IEEE_F64BE) > 0
+                               || H5Tequal(type, H5T_IEEE_F32BE) > 0
+                               || H5Tequal(type, H5T_NATIVE_DOUBLE) > 0
+                               || H5Tequal(type, H5T_NATIVE_FLOAT) > 0
+                               || H5Tequal(type, H5T_NATIVE_LDOUBLE) > 0);
+      if (algorithm == CompressionAlgorithm::ZfpAccuracy && type_is_fp)
       {
+#ifdef MFEM_USE_H5Z_ZFP
+         // R-104 (revised): the H5Z-ZFP plugin's actual cd_values layout
+         // for ACCURACY mode is documented in
+         //     <H5Zzfp_plugin.h>:H5Pset_zfp_accuracy_cdata
+         //   cd[0]    = H5Z_ZFP_MODE_ACCURACY (= 3)
+         //   cd[1]    = 0
+         //   cd[2..3] = double accuracy tolerance
+         //   nelmts   = 4
+         // (NOT a 6-element layout with a version word — that version
+         // applies to a separate "properties API" path.)  The encoding
+         // below is the literal expansion of the plugin's macro.
+         // strict-aliasing safety: use std::memcpy in place of the
+         // plugin's reinterpret_cast<double*>; the on-disk byte
+         // representation is identical.
+         constexpr unsigned H5Z_FILTER_ZFP_ID     = 32013;
+         constexpr unsigned H5Z_ZFP_MODE_ACCURACY = 3;
+         unsigned cd_values[4] = {0};
+         cd_values[0] = H5Z_ZFP_MODE_ACCURACY;
+         cd_values[1] = 0;
+         std::memcpy(&cd_values[2], &zfp_accuracy_tol, sizeof(double));
+         constexpr size_t cd_nelmts = 4;
+         H5Pset_filter(dcpl, H5Z_FILTER_ZFP_ID, H5Z_FLAG_MANDATORY,
+                       cd_nelmts, cd_values);
+#else
+         MFEM_ABORT("VTKHDF::EnsureDataset: CompressionAlgorithm::"
+                    "ZfpAccuracy requested but MFEM was built without "
+                    "MFEM_USE_H5Z_ZFP=YES.");
+#endif
+      }
+      else if (compression_level >= 0)
+      {
+         // Default lossless deflate for either:
+         //   (a) algorithm == Deflate, or
+         //   (b) algorithm == ZfpAccuracy on a non-FP dataset (integer
+         //       connectivity / offsets / types — keep them lossless).
          H5Pset_shuffle(dcpl);
          H5Pset_deflate(dcpl, compression_level);
       }
+      // else: algorithm == None, or compression_level < 0 with Deflate —
+      // raw chunked storage with no filter.
 
       const hid_t d = H5Dcreate2(f, name_c, type, fspace, H5P_DEFAULT,
                                  dcpl, H5P_DEFAULT);

@@ -1371,6 +1371,27 @@ void ParaViewHDFDataCollection::SetCompression(bool compression_)
    compression = compression_;
 }
 
+void ParaViewHDFDataCollection::SetHDFCompression(
+   HDFCompression alg, double param)
+{
+   hdf_alg_   = alg;
+   hdf_param_ = param;
+   if (alg == HDFCompression::ZfpAccuracy)
+   {
+      MFEM_VERIFY(param > 0.0,
+                  "ParaViewHDFDataCollection::SetHDFCompression: "
+                  "ZfpAccuracy tolerance must be > 0, got " << param);
+   }
+   else if (alg == HDFCompression::Deflate)
+   {
+      // R-102: keep the legacy compression / compression_level fields in
+      // sync so a caller using only the new API gets the documented
+      // behaviour (param < 0 disables; param in [0,9] sets the level).
+      compression       = (param >= 0.0);
+      compression_level = (param >= 0.0) ? static_cast<int>(param) : -1;
+   }
+}
+
 void ParaViewHDFDataCollection::EnsureVTKHDF()
 {
    if (!vtkhdf)
@@ -1406,13 +1427,42 @@ void ParaViewHDFDataCollection::TSave()
 {
    EnsureVTKHDF();
 
-   if (compression)
+   // Phase 2d.2 of seas/io/PLAN_paraview_compaction_2026-04-28.md:
+   // route the high-level HDFCompression selector into the underlying
+   // VTKHDF instance.  Deflate-only callers (legacy SetCompression /
+   // SetCompressionLevel) hit the first branch unchanged.
+   switch (hdf_alg_)
    {
-      vtkhdf->EnableCompression(compression_level >= 0 ? compression_level : 6);
-   }
-   else
-   {
-      vtkhdf->DisableCompression();
+      case HDFCompression::Deflate:
+         vtkhdf->SetCompressionAlgorithm(VTKHDF::CompressionAlgorithm::Deflate);
+         if (compression)
+         {
+            vtkhdf->EnableCompression(compression_level >= 0
+                                      ? compression_level : 6);
+         }
+         else
+         {
+            vtkhdf->DisableCompression();
+         }
+         break;
+      case HDFCompression::ZfpAccuracy:
+         // ZFP for FP datasets; integer connectivity / offsets / types
+         // fall back to deflate (or raw, if `compression == false`) via
+         // the dispatch in VTKHDF::EnsureDataset.  R-103: respect the
+         // user's SetCompression(false) on the deflate fall-back path
+         // — disabling compression must disable it for integer datasets
+         // even when ZFP is selected for FP fields.
+         vtkhdf->SetZfpAccuracy(hdf_param_);
+         if (compression)
+         {
+            vtkhdf->EnableCompression(compression_level >= 0
+                                      ? compression_level : 6);
+         }
+         else
+         {
+            vtkhdf->DisableCompression();
+         }
+         break;
    }
 
    vtkhdf->SaveMesh<FP_T>(*mesh, high_order_output, levels_of_detail);

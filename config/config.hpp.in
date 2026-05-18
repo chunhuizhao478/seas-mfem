@@ -135,6 +135,12 @@
 // Enable functionality based on the HDF5 library
 // #define MFEM_USE_HDF5
 
+// Enable functionality based on the H5Z-ZFP plugin (filter id 32013) for
+// lossy compression of floating-point datasets in VTKHDF output.
+// Requires MFEM_USE_HDF5 and the H5Z-ZFP plugin at runtime via
+// HDF5_PLUGIN_PATH.  See seas/io/PLAN_paraview_compaction_2026-04-28.md.
+// #define MFEM_USE_H5Z_ZFP
+
 // Enable functionality based on the NetCDF library (reading CUBIT files).
 // #define MFEM_USE_NETCDF
 

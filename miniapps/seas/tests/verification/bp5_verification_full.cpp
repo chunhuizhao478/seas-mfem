@@ -66,7 +66,9 @@
 #include "../../io/bp5_parallel_output.hpp"
 #include "../../io/probe_output.hpp"
 #include "../../io/checkpoint.hpp"
+#include "../../io/petsc_ts_checkpoint.hpp"   // V2 PETSc-TS restart support
 #include "../../io/paraview_output.hpp"
+#include "../../io/hdf5_error_filter.hpp"   // Suppress dual-HDF5 noise on Frontera
 #include "../../common/mpi_context.hpp"
 #include "../../trace/face_trace_logger.hpp"
 #include "../../config/bp5_mesh_utils.hpp"
@@ -74,6 +76,7 @@
 #include <iostream>
 #include <iomanip>
 #include <fstream>
+#include <filesystem>   // weakly_canonical for the --restart / --output-dir safety check
 #include <sstream>
 #include <cmath>
 #include <cctype>
@@ -510,6 +513,15 @@ struct BP5MonitorCtx
    // ParaView output (may be nullptr if --paraview not set)
    std::function<void(int, real_t, real_t)> paraview_write_fn;
 
+   // V2 PETSc-TS restart support (R-001 / R-005).
+   // The monitor callback runs in a context where `pv_out`,
+   // `use_petsc_ts`, `petsc_ode`, and `restart_rejections_carryover`
+   // (all local to main) are OUT OF SCOPE.  Plumb them through here so
+   // the monitor-site WritePetscTSCheckpoint snippet can read them
+   // (R-001) and so the cumulative-rejection accumulator works across
+   // restart chains (R-005).
+   seas::ParaViewOutput<ParMesh> *pv_out = nullptr;     // may be nullptr
+   int restart_rejections_carryover = 0;                 // R-303 / R-005
 };
 
 /// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
@@ -626,6 +638,47 @@ static PetscErrorCode bp5_ts_monitor_callback(
                       state, u_vec,
                       mon->seas_op->GetTraction(), mon->fault_op->GetSlipRate(),
                       false, empty_k0, mon->mpi);
+
+      // V2 PETSc-TS trailing block (plan §5 monitor site).
+      //
+      // The monitor is installed ONLY when --petsc-ts is active, so the
+      // use_petsc_ts gate is structurally true and elided.  `ts` is the
+      // callback's TS parameter — no *petsc_ode indirection (petsc_ode
+      // is local to main and OUT OF SCOPE here; R-001).
+      PetscReal ts_dt_next_q;
+      PetscInt  ts_step_q, ts_rejections_q;
+      TSGetTimeStep(ts, &ts_dt_next_q);
+      TSGetStepNumber(ts, &ts_step_q);
+      TSGetStepRejections(ts, &ts_rejections_q);
+      const int    pv_snap          = mon->pv_out
+                                      ? mon->pv_out->GetTotalSnapshotsWritten()
+                                      : 0;
+      const real_t pv_last_write    = mon->pv_out
+                                      ? mon->pv_out->GetLastWriteTime()
+                                      : -1e30;
+      const real_t pv_last_vmax     = mon->pv_out
+                                      ? mon->pv_out->GetLastVMax()
+                                      :  0.0;
+      const int    pv_regime        = mon->pv_out
+                                      ? mon->pv_out->GetCurrentRegime()
+                                      :  0;
+      const int    pv_last_commit   = mon->pv_out
+                                      ? mon->pv_out->GetLastCommittedCycle()
+                                      : std::numeric_limits<int>::min();   // R-004
+      const real_t pv_last_vol_time = mon->pv_out
+                                      ? mon->pv_out->GetLastVolumeWriteTime()
+                                      : -1e30;                              // R-006
+      // R-005: save CUMULATIVE rejection count (carryover + this-run),
+      // not this-run alone, so chained restarts preserve prior counts.
+      const int    cum_rejects      = mon->restart_rejections_carryover
+                                      + static_cast<int>(ts_rejections_q);
+      seas::WritePetscTSCheckpoint(mon->full_prefix, time, ts_dt_next_q,
+                                   static_cast<int>(ts_step_q),
+                                   cum_rejects,
+                                   pv_snap, pv_last_write, pv_last_vmax,
+                                   pv_regime, pv_last_commit,
+                                   pv_last_vol_time,
+                                   mon->mpi);
    }
 
    // Console output
@@ -667,6 +720,15 @@ static PetscErrorCode bp5_ts_monitor_callback(
 int main(int argc, char *argv[])
 {
    MPIContext mpi(&argc, &argv);
+
+   // Suppress HDF5 auto-print of internal error stacks.  On the
+   // Frontera build, PETSc 3.15 pulls in HDF5 1.10 (libhdf5.so.200)
+   // while seas/MFEM uses HDF5 1.14 (libhdf5.so.310); each instance
+   // has its own ID table and cross-instance closes produce noisy
+   // "can't locate ID (already closed?)" stacks on every ParaView
+   // write.  See debug_document/paraview_output_debug_document/
+   //   hdf5_diag_noise_2026-05-17.md
+   mfem::seas::InstallHdf5ErrorFilter();
 
    // =========================================================================
    // Parse command-line arguments
@@ -730,6 +792,26 @@ int main(int argc, char *argv[])
    real_t pv_v_nu     = -1.0;         // nucleation V threshold override (m/s)
    real_t pv_hyst     = -1.0;         // hysteresis factor override (must be >= 1)
    bool   pv_fault_only = false;      // if true, skip volume PVD Save()
+   // Phase 4 (volume PV decouple) — `--paraview-fault-only` is the
+   // BP5 driver's pre-existing equivalent of `--no-volume-pv`; the
+   // tpv-style names are accepted as aliases for cross-driver parity.
+   real_t pv_volume_pv_dt = 0.0;      // --volume-pv-dt X (overrides off)
+   // Phase 2b — fault back-end selectors.
+   bool   pv_force_vtu          = false;
+   bool   pv_force_hdf5         = false;
+   bool   pv_legacy_ascii_vtu   = false;
+   // Phase 2d.3 — chunk filter selectors (HDF5 only).  -1 / 0 = unset.
+   real_t pv_fault_zfp_tol      = 0.0;
+   int    pv_fault_deflate_level = -1;
+   real_t pv_bulk_zfp_tol       = 0.0;
+   int    pv_bulk_deflate_level = -1;
+   // Phase 6.3 / 6.3a — volume back-end + primary-collection compression.
+   bool   pv_volume_force_vtu   = false;
+   bool   pv_volume_force_hdf5  = false;
+   real_t pv_volume_zfp_tol     = 0.0;
+   int    pv_volume_deflate_level = -1;
+   // Phase 3 — snapshot cap.
+   int    pv_max_snapshots      = 0;
    // Fault-surface VTU field filter.  Empty ⇒ emit all 12 standard
    // fields + the 5 _k4 fields when stage-4 buffers are present
    // (backward-compatible default).  Non-empty ⇒ only the named
@@ -888,6 +970,84 @@ int main(int argc, char *argv[])
          use_paraview = true;
          pv_fault_only = true;
       }
+      // Phase 4 — `--no-volume-pv` is the canonical (tpv-driver) name.
+      // `--no-domain-pv` is preserved as a deprecated alias.  Both map
+      // to the BP5 driver's `pv_fault_only`.
+      if (arg == "--no-volume-pv" || arg == "--no-domain-pv")
+      {
+         use_paraview = true;
+         pv_fault_only = true;
+      }
+      if (arg == "--volume-pv-dt" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_pv_dt = std::atof(argv[++i]);
+      }
+      // Phase 2b — fault back-end selector.
+      if (arg == "--paraview-fault-vtu")
+      {
+         use_paraview = true;
+         pv_force_vtu = true;
+      }
+      if (arg == "--paraview-fault-hdf5")
+      {
+         use_paraview = true;
+         pv_force_hdf5 = true;
+      }
+      if (arg == "--paraview-fault-legacy-ascii")
+      {
+         use_paraview = true;
+         pv_legacy_ascii_vtu = true;
+      }
+      // Phase 2d.3 — chunk filter selectors.
+      if (arg == "--paraview-fault-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_fault_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-fault-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_fault_deflate_level = std::atoi(argv[++i]);
+      }
+      if (arg == "--paraview-bulk-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_bulk_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-bulk-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_bulk_deflate_level = std::atoi(argv[++i]);
+      }
+      // Phase 6.3 — volume back-end selectors.
+      if (arg == "--paraview-volume-vtu")
+      {
+         use_paraview = true;
+         pv_volume_force_vtu = true;
+      }
+      if (arg == "--paraview-volume-hdf5")
+      {
+         use_paraview = true;
+         pv_volume_force_hdf5 = true;
+      }
+      // Phase 6.3a — volume PRIMARY-collection compression.
+      if (arg == "--paraview-volume-zfp-tol" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_zfp_tol = std::atof(argv[++i]);
+      }
+      if (arg == "--paraview-volume-deflate-level" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_volume_deflate_level = std::atoi(argv[++i]);
+      }
+      // Phase 3 — snapshot cap.
+      if (arg == "--paraview-max-snapshots" && i + 1 < argc)
+      {
+         use_paraview = true;
+         pv_max_snapshots = std::atoi(argv[++i]);
+      }
       if (arg == "--paraview-fields" && i + 1 < argc)
       {
          // Comma-separated list of CellData field names to emit.
@@ -987,18 +1147,13 @@ int main(int argc, char *argv[])
    }
 #endif
 
-   // PETSc TS does not yet serialize its internal state, so
-   // checkpoint/restart is not supported. Reject the combination
-   // early so users don't discover it mid-run.
-   if (use_petsc_ts && !restart_prefix.empty())
-   {
-      if (mpi.IsRoot())
-      {
-         std::cerr << "ERROR: --restart is not supported with --petsc-ts "
-                   << "(PETSc TS state is not serialized in checkpoints).\n";
-      }
-      return 2;
-   }
+   // PETSc TS restart: the V2 trailing-block checkpoint format
+   // (`miniapps/seas/io/petsc_ts_checkpoint.hpp`) carries the PETSc TS
+   // internal state needed to resume `--restart` + `--petsc-ts`.  The
+   // V2 read happens in the restart block below (see "Restart from
+   // checkpoint"); the V2 write happens in the monitor + final
+   // checkpoint sites.  The old early-abort at this location is
+   // intentionally removed.
 
    // Parse DG method
    DGMethod dg_method = DGMethod::BR2;
@@ -1124,6 +1279,115 @@ int main(int argc, char *argv[])
    double t_final = params.t_final;
    if (tfinal_override >= 0.0) { t_final = tfinal_override; }
    params.t_final = t_final;
+
+   // -------------------------------------------------------------------
+   // RESTART / OUTPUT-DIR collision safety check.
+   //
+   // When --restart PREFIX is supplied, the driver READS from
+   // <dirname(PREFIX)>/...  and WRITES new output (fault.vtkhdf,
+   // volume.vtkhdf, *_checkpoint_*.txt, *_fltst_*.txt, *_global.txt,
+   // ...) into <output-dir>/...  If those two directories are the
+   // same, the new run truncate-overwrites the previous run's
+   // outputs — the prior fault.vtkhdf is lost, the prior checkpoint
+   // is replaced with the post-restart-final version, etc.  The
+   // V2 PETSc-TS restart machinery (plan §"Phase 1") preserves
+   // SCHEDULE STATE across the seam, but the on-disk output files
+   // do NOT continue (plan §"Out of scope": "The VTKHDF writer
+   // currently overwrites").
+   //
+   // Refuse to start when those paths resolve to the same directory.
+   // Compare CANONICAL paths via std::filesystem::weakly_canonical so
+   // we catch trailing slashes, "./", relative-vs-absolute, etc.
+   // weakly_canonical (vs canonical) handles output_dir not existing
+   // yet (we may be about to mkdir it).
+   if (!restart_prefix.empty())
+   {
+      namespace fs = std::filesystem;
+      try
+      {
+         const fs::path restart_path(restart_prefix);
+         fs::path restart_dir_path = restart_path.parent_path();
+         if (restart_dir_path.empty()) { restart_dir_path = "."; }
+
+         const fs::path restart_canonical =
+            fs::weakly_canonical(restart_dir_path);
+         const fs::path output_canonical =
+            fs::weakly_canonical(fs::path(output_dir));
+
+         if (restart_canonical == output_canonical)
+         {
+            if (mpi.IsRoot())
+            {
+               std::cerr
+                  << "ERROR: --output-dir (" << output_dir
+                  << ") resolves to the SAME directory as the parent "
+                  "of --restart (" << restart_dir_path.string()
+                  << ").\n"
+                  "       Continuing would clobber the previous run's "
+                  "outputs (fault.vtkhdf, volume.vtkhdf, "
+                  "*_checkpoint_r*.txt, probe CSVs, ...).\n"
+                  "       The V2 PETSc-TS restart preserves SCHEDULE "
+                  "STATE across the seam, but the on-disk output "
+                  "files do NOT continue (the VTKHDF writer "
+                  "truncate-overwrites on construction).\n"
+                  "       Pick a DIFFERENT --output-dir for the "
+                  "restarted run.  Recommended chained-restart "
+                  "pattern (used by "
+                  "jobs/bp5/bp5_restart_test_v2_dev_2hr.sbatch — "
+                  "single base dir + segment_NNN subdirs):\n"
+                  "         --output-dir <BASE>/segment_001  (initial run)\n"
+                  "         --output-dir <BASE>/segment_002  (restart 1)\n"
+                  "         --output-dir <BASE>/segment_003  (restart 2)\n"
+                  "         ...                              (increment "
+                  "for each link in the chain)\n";
+            }
+            return 3;
+         }
+
+         // R-006 (REVIEW.md round 6): soft warning for parent/child
+         // path relationships.  Strict equality (above) catches the
+         // most common misuse, but the user can still cause partial
+         // clobber by pointing --output-dir at a parent or subdir of
+         // the restart's directory.  Print a warning so the operator
+         // can decide whether the layout is intentional.
+         {
+            const std::string r = restart_canonical.string();
+            const std::string o = output_canonical.string();
+            const bool r_is_parent_of_o =
+               (o.size() > r.size())
+               && (o.compare(0, r.size(), r) == 0)
+               && (o[r.size()] == '/');
+            const bool o_is_parent_of_r =
+               (r.size() > o.size())
+               && (r.compare(0, o.size(), o) == 0)
+               && (r[o.size()] == '/');
+            if ((r_is_parent_of_o || o_is_parent_of_r)
+                && mpi.IsRoot())
+            {
+               std::cerr
+                  << "WARNING: --output-dir and --restart have a "
+                  "parent/child directory relationship\n"
+                  "         (restart=" << r << ",\n"
+                  "          output =" << o << ").\n"
+                  "         Phase B's output may partially overlap with "
+                  "Phase A's if file names collide.  Consider distinct "
+                  "sibling dirs.\n";
+            }
+         }
+      }
+      catch (const fs::filesystem_error &e)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr
+               << "ERROR: failed to canonicalise --restart / "
+               "--output-dir paths: " << e.what() << "\n"
+               "       restart_prefix = " << restart_prefix << "\n"
+               "       output_dir     = " << output_dir << "\n";
+         }
+         return 3;
+      }
+   }
 
    std::string full_prefix = output_dir + "/" + output_prefix;
 
@@ -1393,14 +1657,26 @@ int main(int argc, char *argv[])
    const bool debug_first_step_dump = env_truthy("SEAS_DEBUG_FIRST_STEP_DUMP");
    const int debug_first_step_rank =
       env_int("SEAS_DEBUG_FIRST_STEP_TARGET_RANK", 96);
+   // Debug gate for per-face trace CSVs (trace_faces / trace_timeseries /
+   // trace_events / trace_summary).  These were diagnostic outputs used
+   // during v59 fault-tip blowup investigations and are NOT needed for
+   // production runs.  Default OFF; opt in with `export
+   // SEAS_DEBUG_FACE_TRACE=1` when re-debugging.
+   const bool debug_face_trace = env_truthy("SEAS_DEBUG_FACE_TRACE");
 
    seas::TraceConfig trace_cfg;
-   trace_cfg.use_coord_window = true;
-   trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
-   trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
-   trace_cfg.num_control_faces = 2;
-   trace_cfg.max_traced_faces = 50;
+   if (debug_face_trace)
+   {
+      trace_cfg.use_coord_window = true;
+      trace_cfg.x2_min = -45e3; trace_cfg.x2_max = -25e3;
+      trace_cfg.x3_min = 35e3; trace_cfg.x3_max = 40e3;
+      trace_cfg.num_control_faces = 2;
+      trace_cfg.max_traced_faces = 50;
+   }
    trace_cfg.output_dir = output_dir;
+   // SelectFaces with `use_coord_window = false` and `explicit_rank = -1`
+   // (defaults) selects no faces, so `active_` stays false and no
+   // trace_*.csv files are opened on any rank.
    seas::FaceTraceLogger<ParMesh> face_tracer(trace_cfg, mpi.Rank());
    face_tracer.SelectFaces(domain, fault_geom);
    seas_op.SetFaceTracer(&face_tracer);
@@ -1440,7 +1716,46 @@ int main(int argc, char *argv[])
       (void)ghost_err;
    }
 
-   Vector state(fault_op.StateSize());
+   // R-003 (REVIEW.md 2026-05-16): PetscParVector::PlaceMemory /
+   // ResetMemory cannot tolerate a NULL-backed Memory.  On ranks with
+   // zero owned fault DOFs (a strike-slip fault embedded in a 3D box
+   // leaves many ranks touching no fault face when partitioned over
+   // hundreds of MPI tasks), `fault_op.StateSize() == 0`.  The naive
+   // `Vector state(0)` does NOT allocate (vector.hpp:574-582: the
+   // constructor's `data.New(s)` is gated on `s > 0`), so
+   // `state.GetMemory().Empty() == true` (h_ptr == NULL).
+   // PlaceMemory aliases the NULL pointer happily, but ResetMemory at
+   // the end of TSSolve checks `MFEM_VERIFY(!pdata.Empty(),...)` and
+   // aborts (petsc.cpp:899).  This crashed BP5 v62/v63-style runs
+   // late in TSSolve on Frontera 8N×400r.  The workaround below pads
+   // to at least one element so the underlying Memory is allocated,
+   // then shrinks back to the actual size: `SetSize` only
+   // re-allocates when `new_size > capacity` (vector.hpp:584-602),
+   // so the 1-element allocation survives the shrink.
+   //
+   // R-105 (REVIEW.md 2026-05-16 round 2) — FRAGILE DEPENDENCY:
+   // this fix DEPENDS on MFEM `Vector::SetSize` preserving the
+   // underlying Memory allocation on shrink (vector.hpp:584-602:
+   // re-allocate only when `new_size > capacity`).  If a future MFEM
+   // upgrade changes that contract — e.g., to "always reallocate" or
+   // "free memory when shrinking to 0" — the `SetSize(actual)` shrink
+   // would free the `SetSize(padded)` allocation and the workaround
+   // would silently regress to the original NULL-h_ptr crash.  The
+   // companion unit test `seas_test_bp5_petsc_ts_zero_fault_rank`
+   // pins this invariant; RUN IT after any MFEM bump (`make
+   // test-bp5-petsc-ts-zero-fault-rank` from miniapps/seas).
+   //
+   // Long-term fix: land the MFEM-side patch documented in the
+   // previous REVIEW.md round 1 (R-003 alternative — allow
+   // zero-length aliases in `PetscParVector::ResetMemory`), then
+   // delete this driver-side workaround.
+   Vector state;
+   {
+      const int actual = fault_op.StateSize();
+      const int padded = std::max(actual, 1);
+      state.SetSize(padded);
+      state.SetSize(actual);  // shrink back; allocation is preserved
+   }
    seas_op.SetInitialCondition(state);
 
    real_t V_init = seas_op.GetMaxSlipRate();
@@ -1541,8 +1856,71 @@ int main(int argc, char *argv[])
    Vector pv_local_normal_stress;
    if (use_paraview)
    {
+      // Phase 6.3 / 6.3a: validate volume CLI flags + select volume back end.
+      if (pv_volume_force_vtu && pv_volume_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
+                    "mutually exclusive.");
+      }
+#ifndef MFEM_USE_HDF5
+      if (pv_volume_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-volume-hdf5 requires the seas-mfem build to "
+                    "define MFEM_USE_HDF5=YES; current build has it disabled.");
+      }
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_HDF5=YES; "
+                    "current build has it disabled.");
+      }
+      if (pv_volume_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-volume-deflate-level requires MFEM_USE_HDF5=YES; "
+                    "current build has it disabled.");
+      }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol requires MFEM_USE_H5Z_ZFP=YES; "
+                    "current build has it disabled.");
+      }
+#endif
+      if (pv_volume_zfp_tol > 0.0 && pv_volume_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-volume-zfp-tol and "
+                    "--paraview-volume-deflate-level are mutually exclusive — "
+                    "choose ZFP-accuracy OR deflate, not both.");
+      }
+      // Phase 6.4: BP5 has no secondary collection; --paraview-bulk-* is a
+      // no-op (R-310 migration note).  Warn so the user knows.
+      if (pv_bulk_zfp_tol > 0.0 || pv_bulk_deflate_level >= 0)
+      {
+         if (mpi.IsRoot())
+         {
+            mfem::out
+               << "warning: --paraview-bulk-zfp-tol / "
+                  "--paraview-bulk-deflate-level set on BP5 driver; "
+                  "BP5 has no secondary 'bulk' collection — the flags "
+                  "have no effect.  To compress the volume PV use "
+                  "--paraview-volume-zfp-tol / "
+                  "--paraview-volume-deflate-level instead.\n";
+         }
+      }
+
+      auto volume_mode =
+         seas::ParaViewOutput<ParMesh>::DefaultVolumeOutputMode();
+      if (pv_volume_force_vtu)
+      { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Vtu; }
+      if (pv_volume_force_hdf5)
+      { volume_mode = seas::ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5; }
+      // Renamed from "volume" to "kinematics" per
+      // PLAN_split_bulk_solutions_2026-05-12.  On-disk filename is
+      // <output>/ParaView/kinematics.vtkhdf.  BP5 has no stress
+      // collection (quasi-dynamic — no wavefield).
       pv_out = std::make_unique<seas::ParaViewOutput<ParMesh>>(
-         output_dir + "/ParaView", pmesh, order);
+         output_dir + "/ParaView", pmesh, order,
+         /*collection_name=*/"kinematics", volume_mode);
       // Displacement: non-owning pointer to the live ParGridFunction in seas_op
       pv_out->RegisterDomainField("displacement",
          const_cast<ParGridFunction*>(
@@ -1622,8 +2000,125 @@ int main(int argc, char *argv[])
          if (pv_v_co     > 0) { sched.v_coseismic       = pv_v_co; }
          if (pv_v_nu     > 0) { sched.v_nucleation      = pv_v_nu; }
          if (pv_hyst     > 0) { sched.hysteresis_factor = pv_hyst; }
+         // Phase 3 — snapshot cap.
+         if (pv_max_snapshots > 0)
+         { sched.max_total_snapshots = pv_max_snapshots; }
          sched.Validate();
       }
+
+      // Phase 3 — total run time required for cap projection.  Set
+      // unconditionally so the cap engages as soon as the user opts in.
+      pv_out->SetTotalRunTime(t_final);
+
+      // Phase 4 — volume-PV decouple.  `--volume-pv-dt X` (when > 0)
+      // re-enables the volume save at an independent cadence even if
+      // `--paraview-fault-only` / `--no-volume-pv` is also set ("the
+      // explicit dt wins").  Otherwise `pv_fault_only` translates
+      // directly to `SetVolumeSaveEnabled(false)`.
+      const bool volume_save_enabled =
+         (pv_volume_pv_dt > 0.0) || !pv_fault_only;
+      pv_out->SetVolumeSaveEnabled(volume_save_enabled);
+      if (pv_volume_pv_dt > 0.0)
+      { pv_out->SetVolumePVDt(pv_volume_pv_dt); }
+
+      // Phase 2b — fault back-end selector.
+      if (pv_force_vtu && pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-vtu and --paraview-fault-hdf5 are "
+                    "mutually exclusive.");
+      }
+      if (pv_legacy_ascii_vtu && pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-legacy-ascii implies the binary "
+                    "VTU back end and is incompatible with "
+                    "--paraview-fault-hdf5.");
+      }
+#ifndef MFEM_USE_HDF5
+      if (pv_force_hdf5)
+      {
+         MFEM_ABORT("--paraview-fault-hdf5 requires the seas-mfem build "
+                    "to define MFEM_USE_HDF5=YES; current build has it "
+                    "disabled.");
+      }
+      if (pv_fault_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-fault-deflate-level requires the seas-mfem "
+                    "build to define MFEM_USE_HDF5=YES; current build has "
+                    "it disabled.");
+      }
+      if (pv_bulk_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-bulk-deflate-level requires the seas-mfem "
+                    "build to define MFEM_USE_HDF5=YES; current build has "
+                    "it disabled.");
+      }
+#endif
+#ifndef MFEM_USE_H5Z_ZFP
+      if (pv_fault_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-fault-zfp-tol requires the seas-mfem "
+                    "build to define MFEM_USE_H5Z_ZFP=YES; current build "
+                    "has it disabled.");
+      }
+      if (pv_bulk_zfp_tol > 0.0)
+      {
+         MFEM_ABORT("--paraview-bulk-zfp-tol requires the seas-mfem "
+                    "build to define MFEM_USE_H5Z_ZFP=YES; current build "
+                    "has it disabled.");
+      }
+#endif
+      if (pv_fault_zfp_tol > 0.0 && pv_fault_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-fault-zfp-tol and "
+                    "--paraview-fault-deflate-level are mutually "
+                    "exclusive — choose ZFP-accuracy OR deflate, not both.");
+      }
+      if (pv_bulk_zfp_tol > 0.0 && pv_bulk_deflate_level >= 0)
+      {
+         MFEM_ABORT("--paraview-bulk-zfp-tol and "
+                    "--paraview-bulk-deflate-level are mutually "
+                    "exclusive — choose ZFP-accuracy OR deflate, not both.");
+      }
+      if (pv_force_vtu)
+      { pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Vtu); }
+      if (pv_force_hdf5)
+      { pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Hdf5); }
+      if (pv_legacy_ascii_vtu)
+      {
+         pv_out->SetFaultOutputMode(seas::ParaViewOutput<ParMesh>::FaultOutputMode::Vtu);
+         pv_out->SetLegacyAsciiVTU(true);
+      }
+#ifdef MFEM_USE_HDF5
+      // Phase 2d.3 — chunk filter (fault).
+      if (pv_fault_zfp_tol > 0.0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            pv_fault_zfp_tol);
+      }
+      else if (pv_fault_deflate_level >= 0)
+      {
+         pv_out->SetFaultHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(pv_fault_deflate_level));
+      }
+      // Phase 6.3a (R-301): --paraview-volume-* controls primary `pv_out`
+      // compression.  BP5 has no secondary `pv_bulk_out` so
+      // --paraview-bulk-* flags do not route here — see the
+      // "no effect" warning above.
+      if (pv_volume_zfp_tol > 0.0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
+            pv_volume_zfp_tol);
+      }
+      else if (pv_volume_deflate_level >= 0)
+      {
+         pv_out->SetVolumeHDFCompression(
+            mfem::ParaViewHDFDataCollection::HDFCompression::Deflate,
+            static_cast<double>(pv_volume_deflate_level));
+      }
+#endif
 
       if (mpi.IsRoot())
       {
@@ -1657,14 +2152,28 @@ int main(int argc, char *argv[])
    }
 
    // =========================================================================
-   // Fault DOF point cloud (VTP) — diagnostic for coordinate validation
+   // Fault DOF point cloud (CSV) — diagnostic for coordinate validation
    // =========================================================================
-   // Writes one VTP file per rank with the EXACT owned-DOF coordinates used
-   // by the friction parameter computation. If the points form a clean fault
+   // Writes one CSV per rank with the EXACT owned-DOF coordinates used by
+   // the friction parameter computation. If the points form a clean fault
    // rectangle, the coordinates are correct and any ParaView scatter is a
    // projection artifact. If points are scattered here too, the coordinates
    // are wrong and that's the root cause.
-   if (use_paraview)
+   //
+   // Gated behind `SEAS_DEBUG_FAULT_DOF_COORDS`.  Default OFF to keep
+   // production output directories clean.  Set the env var to 1 when
+   // debugging coordinate / projection issues.
+   //
+   // NOTE (R-106 REVIEW.md 2026-05-16 round 2): the per-face trace
+   // CSVs (trace_faces_*, trace_timeseries_*, trace_events_*,
+   // trace_summary_*) are controlled INDEPENDENTLY by
+   // `SEAS_DEBUG_FACE_TRACE` (see line ~1493).  Set BOTH env vars to
+   // recover the pre-fix "always-on" behaviour for the full debug
+   // bundle.  Earlier revisions tied fault_dof_coords to either gate,
+   // which was confusing.
+   const bool debug_fault_dof_coords =
+      env_truthy("SEAS_DEBUG_FAULT_DOF_COORDS");
+   if (use_paraview && debug_fault_dof_coords)
    {
       const int n_owned = fault_geom.NumFaultDOFs();  // owned count
       const Vector &x2 = fault_geom.GetCoordsX2();
@@ -1706,7 +2215,14 @@ int main(int argc, char *argv[])
       // surface VTU.  We skip pv_out->UpdateFaultFieldsBP5 (volume-PVD
       // GridFunction update) and pv_out->Save (volume PVD write) — neither
       // is needed when the volume mesh is not being output.
-      if (pv_fault_only)
+      //
+      // Phase 4: query the library's `GetVolumeSaveEnabled()` rather
+      // than the driver-local `pv_fault_only`, so `--volume-pv-dt X`
+      // (which re-enables the volume save with an independent cadence
+      // even when `--no-volume-pv` is also set) takes the volume-PVD
+      // path instead of being silently dropped.  Mirrors the
+      // tpv102/104/205 driver pattern.
+      if (!pv_out->GetVolumeSaveEnabled())
       {
          if (!pv_out->PeekShouldWrite(step_num, time, V_max)) { return; }
 
@@ -1871,6 +2387,19 @@ int main(int argc, char *argv[])
    }
    real_t current_dt = dt_init;
    int step_rejections = 0;
+   // R-005: pre-restart cumulative rejection count, loaded from the V2
+   // checkpoint when --restart is supplied with --petsc-ts.  Stays 0 on
+   // fresh runs.  Added to TSGetStepRejections at every WritePetscTS
+   // call site (so chained restarts don't lose prior runs' counts)
+   // and at the post-Run end-of-summary accumulation.
+   int restart_rejections_carryover = 0;
+   // R-008 (REVIEW.md round 4): captured copy of the V2-authoritative
+   // dt set by the V2 restart block.  Asserted equal to `current_dt`
+   // at the Run() call site below, so a future CFL clamp / dt_init
+   // override inserted between the V2 block and Run() trips a clear
+   // failure rather than silently clobbering the restart-state dt.
+   // Initialised to -1.0 (sentinel for "V2 block did not run").
+   real_t v2_authoritative_dt = -1.0;
    int print_step_interval = 10;
    Vector empty_k0;
 
@@ -1961,6 +2490,15 @@ int main(int argc, char *argv[])
       petsc_mon_ctx.V_threshold_interseismic = 1e-6;
       petsc_mon_ctx.paraview_write_fn = paraview_write;
       petsc_mon_ctx.current_dt = dt_init;
+      // R-001 / R-005: thread `pv_out` and the rejection carryover
+      // through to the monitor callback so its V2 WritePetscTSCheckpoint
+      // snippet can reach them (they are local to main and otherwise
+      // out of scope inside the static callback).  The carryover is 0
+      // on a fresh run; the V2 restart block (further down) will reload
+      // it from the checkpoint and re-propagate to petsc_mon_ctx.
+      petsc_mon_ctx.pv_out = pv_out.get();
+      petsc_mon_ctx.restart_rejections_carryover =
+         restart_rejections_carryover;
 
       ierr = TSMonitorSet(ts, bp5_ts_monitor_callback, &petsc_mon_ctx,
                           nullptr);
@@ -2009,6 +2547,19 @@ int main(int argc, char *argv[])
       current_dt = restart_dt;
       seas_op.SetDisplacement(restart_disp);
       fault_op.SetSlipRate(restart_slip_rate);
+      // R-002 (REVIEW.md round 4): `restart_traction` is intentionally
+      // NOT restored — `seas_op` has no `SetTraction` setter, and the
+      // traction field is recomputed on the next `ComputeTraction`
+      // call from the just-restored displacement + slip.  This means
+      // the FIRST post-restart step starts with a freshly-recomputed
+      // traction, NOT the byte-identical pre-checkpoint traction.
+      // For Phase-1's "tolerance-correct" restart contract this is
+      // acceptable: the recomputation differs from the pre-checkpoint
+      // traction by at most ~atol (1e-7), well below the trajectory
+      // tolerance bound of `atol + rtol*|y|`.  Phase 3 (bit-exact
+      // restart, plan §"Phase 3") would require either a SetTraction
+      // setter on seas_op + saving traction in V2, OR proving that the
+      // recomputation is bit-deterministic from (displacement, slip).
       if (!use_petsc_ts)
       {
          ode_solver.SetDt(restart_dt);
@@ -2026,6 +2577,150 @@ int main(int argc, char *argv[])
          std::cout << "  dt: " << restart_dt << " s\n";
       }
    }
+
+#ifdef MFEM_USE_PETSC
+   // =========================================================================
+   // V2 PETSc-TS restart (plan §"Phase 1" §4).
+   //
+   // Placed IMMEDIATELY AFTER the V1 restart block (R-302) — the cross-check
+   // below depends on `t` having been populated by the V1 `ReadCheckpoint`
+   // above.  Do NOT place this inside the PetscTS init block (~line 2269);
+   // `t` is still 0 there and the cross-check would always fail.
+   // =========================================================================
+   if (use_petsc_ts && !restart_prefix.empty())
+   {
+      real_t ts_t = 0.0, ts_dt_next = 0.0;
+      int ts_step = 0, ts_rejections = 0, pv_snapshots = 0;
+      real_t ts_last_write_time = -1e30;                          // R-304
+      real_t ts_last_v_max       = 0.0;                            // R-304
+      int    ts_current_regime   = 0;                              // R-304
+      int    ts_last_committed_cycle =
+                std::numeric_limits<int>::min();                   // R-004
+      real_t ts_last_volume_write_time = -1e30;                    // R-006
+
+      const bool have_ts_state = seas::ReadPetscTSCheckpoint(
+         restart_prefix, ts_t, ts_dt_next, ts_step, ts_rejections,
+         pv_snapshots, ts_last_write_time, ts_last_v_max,
+         ts_current_regime, ts_last_committed_cycle,
+         ts_last_volume_write_time, &mpi);
+      MFEM_VERIFY(have_ts_state,
+                  "--restart with --petsc-ts requires a V2 checkpoint "
+                  "(file with a PETSC_TS_V2 trailing block, written by a "
+                  "build that includes io/petsc_ts_checkpoint.hpp).  V1 "
+                  "checkpoints do not contain PETSc TS state; cannot "
+                  "continue.  Re-write with the current build or restart "
+                  "on the MFEM time-stepper (--no-petsc-ts).");
+
+      // V1 ReadCheckpoint already set `t = ts_t_v1`.  Cross-check vs. V2.
+      //
+      // R-003 (REVIEW.md round 4): use max(|t|, 1.0) as the scale so the
+      // tolerance does not degenerate to 0 when t == 0 (e.g., a debug
+      // checkpoint taken before the first accepted TS step, or a test
+      // fixture with a t=0 prefix).  The plan-text format round-trips
+      // real_t bit-exactly via 17-digit scientific, so the legitimate
+      // diff is 0 in practice; the tolerance only guards against file
+      // corruption.
+      const real_t cross_check_scale = std::max(std::abs(t), real_t(1.0));
+      MFEM_VERIFY(std::abs(t - ts_t) < 1e-12 * cross_check_scale,
+                  "Checkpoint inconsistency: V1 time=" << t
+                  << " differs from V2 time=" << ts_t);
+
+      petsc::TS ts = *petsc_ode;
+      PetscErrorCode ierr;
+      // R-002: PetscODESolver::Run() unconditionally calls
+      // TSSetTime(ts, t) and TSSetTimeStep(ts, dt) on entry
+      // (linalg/petsc.cpp:4362-4363).  An explicit TSSetTime /
+      // TSSetTimeStep call HERE would be silently overwritten on the
+      // next `petsc_ode->Run(state, t, current_dt, t_final)`.  Instead
+      // update the C++ `t` and `current_dt` variables that Run() reads
+      // on entry — those are the load-bearing ones.  Only
+      // TSSetStepNumber survives Run() (Run never resets the step
+      // counter), so it stays.
+      ierr = TSSetStepNumber(ts, static_cast<PetscInt>(ts_step));   // R-010
+      // The plan suggested PCHKERRQ here, but this driver does not
+      // pull in the PETSc private header that defines it.  Match the
+      // existing convention at lines 2279/2286 instead.
+      MFEM_VERIFY(ierr == PETSC_SUCCESS,
+                  "TSSetStepNumber(ts_step=" << ts_step << ") failed");
+
+      // Make V2 authoritative for `t` and `current_dt`.  V1 ReadCheckpoint
+      // already set `t = ts_t_v1`; the cross-check above guarantees
+      // ts_t == t, so the reassignment is a no-op today.  But
+      // `current_dt` was set to V1's restart_dt, which may diverge from
+      // ts_dt_next in any future change that adds a CFL clamp or
+      // dt_init override.
+      t          = ts_t;
+      current_dt = ts_dt_next;
+
+      // R-003: TSGetTimeStep can return 0 if the checkpoint was
+      // written before the first accepted step or just after a
+      // TSSetConvergedReason(TS_DIVERGED_*).  Fall back to dt_init
+      // and log on rank 0 so PETSc has a non-zero starting dt.
+      if (current_dt <= 0.0)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cout << "PETSc TS restart: V2 ts_dt_next was "
+                      << current_dt << " <= 0; falling back to "
+                      << "dt_init = " << dt_init << " s\n";
+         }
+         current_dt = dt_init;
+      }
+
+      // R-008 (REVIEW.md round 4): snapshot the V2-authoritative dt so
+      // the assertion at the Run() call site can catch any subsequent
+      // overwrite (CFL clamp, dt_init override).  Includes the R-003
+      // fallback so the asserted invariant is "current_dt at Run() ==
+      // current_dt at end of V2 block", not "current_dt == ts_dt_next".
+      v2_authoritative_dt = current_dt;
+
+      if (pv_out)
+      {
+         pv_out->SetTotalSnapshotsWritten(pv_snapshots);
+         // R-304 + R-006 + R-007: restore schedule state across the
+         // seam.  Without this the first ShouldWrite after restart
+         // fires unconditionally, the regime state machine resets to
+         // interseismic, and (with --volume-pv-dt) the first
+         // ForceSaveImpl emits a spurious volume snapshot.
+         pv_out->RestoreScheduleState(ts_last_write_time,
+                                      ts_last_v_max,
+                                      ts_current_regime,
+                                      ts_last_volume_write_time);
+         // R-004: restore the dedup cycle key so the first
+         // post-restart CommitSchedule does not over-bump
+         // total_snapshots_written_ by 1.
+         pv_out->SetLastCommittedCycle(ts_last_committed_cycle);
+      }
+
+      // R-303 / R-005: PRE-restart rejection count.  The post-Run code
+      // at the end of TSSolve will OVERWRITE `step_rejections` with
+      // the THIS-run count from TSGetStepRejections; we accumulate
+      // with the carryover so the summary line reports the sum across
+      // the restart seam (and the next checkpoint's V2 block stores
+      // the cumulative value, not just this-run's).
+      restart_rejections_carryover = ts_rejections;
+      // Thread the carryover into the monitor too, so monitor-site
+      // V2 writes save the correct cumulative count (R-001 + R-005).
+      //
+      // R-009 (REVIEW.md round 4): this thread-back is structurally
+      // unreachable on the `--no-petsc-ts` path because the V2 restart
+      // block entry gate (`use_petsc_ts && !restart_prefix.empty()`)
+      // at the top of this block prevents entry.  Therefore
+      // `petsc_mon_ctx` is guaranteed to have been initialised by the
+      // PetscTS init block earlier, and accessing its members here is
+      // safe.  Do NOT remove the gate without re-thinking this.
+      petsc_mon_ctx.restart_rejections_carryover =
+         restart_rejections_carryover;
+
+      if (mpi.IsRoot())
+      {
+         std::cout << "PETSc TS restart (V2): t=" << ts_t << " s, "
+                   << "dt_next=" << ts_dt_next << " s, step=" << ts_step
+                   << ", cumulative_rejections=" << ts_rejections
+                   << ", paraview_snapshots=" << pv_snapshots << "\n";
+      }
+   }
+#endif
 
    if (mpi.IsRoot())
    {
@@ -2058,6 +2753,39 @@ int main(int argc, char *argv[])
          std::cout.flush();
       }
 
+      // R-008 (REVIEW.md round 4): if the V2 restart block ran, assert
+      // that nothing between the V2 block and here has clobbered the
+      // restart-state dt.  `v2_authoritative_dt` is -1.0 on fresh runs
+      // (sentinel for "V2 block did not run"), so the check is gated
+      // on `v2_authoritative_dt > 0`.  Catches future CFL clamps /
+      // dt_init overrides inserted between the V2 block and Run() that
+      // would silently re-introduce the R-002 failure mode this whole
+      // V2 machinery was built to prevent.
+      if (v2_authoritative_dt > 0.0)
+      {
+         // R-006 (REVIEW.md round 5): bit-exact `==` is intentional.
+         // Any modification of current_dt between the V2 block and
+         // here — even a value-preserving one like
+         // `current_dt = std::min(current_dt, dt_max)` — may change
+         // the bit pattern under some compilers and fire this
+         // assertion.  That's by design: any insertion here deserves
+         // a deliberate re-examination of whether V2 is still the
+         // authoritative source of post-restart dt.  If you
+         // legitimately need to clamp post-V2 dt, update
+         // `v2_authoritative_dt` in the same statement, OR widen
+         // this check to a relative tolerance with a documented
+         // bound.
+         MFEM_VERIFY(current_dt == v2_authoritative_dt,
+                     "R-008: current_dt (" << current_dt
+                     << ") was modified between the V2 restart block "
+                     "and the Run() call (V2 set it to "
+                     << v2_authoritative_dt << ").  This breaks the "
+                     "R-002 contract that V2 is the source of truth "
+                     "for the post-restart dt.  Check for a CFL clamp "
+                     "or dt_init override that should be gated on "
+                     "restart_prefix.empty().");
+      }
+
       petsc_ode->Run(state, t, current_dt, t_final);
 
       // Retrieve final step count and rejection count from PETSc
@@ -2068,7 +2796,13 @@ int main(int argc, char *argv[])
          step = static_cast<int>(ts_steps);
          PetscInt rejects = 0;
          TSGetStepRejections(ts, &rejects);
-         step_rejections = static_cast<int>(rejects);
+         // R-303 / R-005: TSGetStepRejections returns THIS-Run's
+         // rejections only (it is NOT pre-populated from the V2
+         // checkpoint; the checkpointed value lives in
+         // restart_rejections_carryover).  Accumulate so the summary
+         // line reports the cumulative count across the restart seam.
+         step_rejections = restart_rejections_carryover
+                         + static_cast<int>(rejects);
       }
 
       // Copy monitor state back for summary
@@ -2289,6 +3023,48 @@ int main(int argc, char *argv[])
                       use_petsc_ts ? false : ode_solver.IsInitialized(),
                       use_petsc_ts ? empty_k0 : ode_solver.GetK0(),
                       &mpi);
+
+#ifdef MFEM_USE_PETSC
+      // V2 PETSc-TS trailing block (plan §5 final site).
+      // Final-site is in main, so petsc_ode, use_petsc_ts, pv_out, and
+      // restart_rejections_carryover are all in scope as locals.
+      if (use_petsc_ts && petsc_ode)
+      {
+         petsc::TS ts = *petsc_ode;
+         PetscReal ts_dt_next_q;
+         PetscInt  ts_step_q, ts_rejections_q;
+         TSGetTimeStep(ts, &ts_dt_next_q);
+         TSGetStepNumber(ts, &ts_step_q);
+         TSGetStepRejections(ts, &ts_rejections_q);
+         const int    pv_snap          = pv_out
+                                         ? pv_out->GetTotalSnapshotsWritten()
+                                         : 0;
+         const real_t pv_last_write    = pv_out
+                                         ? pv_out->GetLastWriteTime()
+                                         : -1e30;
+         const real_t pv_last_vmax     = pv_out
+                                         ? pv_out->GetLastVMax()
+                                         :  0.0;
+         const int    pv_regime        = pv_out
+                                         ? pv_out->GetCurrentRegime()
+                                         :  0;
+         const int    pv_last_commit   = pv_out
+                                         ? pv_out->GetLastCommittedCycle()
+                                         : std::numeric_limits<int>::min();  // R-004
+         const real_t pv_last_vol_time = pv_out
+                                         ? pv_out->GetLastVolumeWriteTime()
+                                         : -1e30;                             // R-006
+         // R-005: cumulative rejection count, not this-run alone.
+         const int    cum_rejects      = restart_rejections_carryover
+                                         + static_cast<int>(ts_rejections_q);
+         seas::WritePetscTSCheckpoint(full_prefix, t, ts_dt_next_q,
+                                      static_cast<int>(ts_step_q),
+                                      cum_rejects,
+                                      pv_snap, pv_last_write, pv_last_vmax,
+                                      pv_regime, pv_last_commit,
+                                      pv_last_vol_time, &mpi);
+      }
+#endif
    }
 
    // Face tracer: finalize (commit final step + write summary)

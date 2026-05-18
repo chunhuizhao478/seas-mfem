@@ -1,0 +1,105 @@
+# SEAS-MFEM ParaView output configuration — REFERENCE SCHEMA
+#
+# Future-use spec from PLAN_split_bulk_solutions_2026-05-12.md.
+# seas_driver.cpp does NOT currently construct seas::ParaViewOutput
+# (R-313 deferred deviation; see miniapps/seas/CLAUDE.md § "Phase 4
+# deferred deviation").  This file documents the planned TOML schema
+# that the parser should accept once that wiring lands.
+#
+# For TPV* drivers today, use the equivalent CLI flags in the sbatch
+# (--paraview-dt, --paraview-bulk-dt, --paraview-{volume,bulk,fault}-
+# zfp-tol, ...).  See PLAN_split_bulk_solutions_2026-05-12 § "Three
+# layers" or the walkthrough at
+# document/codebase_explorer/paraview_io_walkthrough_2026-05-11.md.
+
+# Top-level switch: master enable for all ParaView output.  Default
+# false — production BP5 runs can omit this whole section to suppress
+# all .vtkhdf writes.
+[paraview]
+enabled = true
+
+# ---------------------------------------------------------------------
+# Kinematics collection — <output>/ParaView/kinematics.vtkhdf
+#
+# Holds the time-evolving kinematic field (velocity for TPV*,
+# displacement for BP5) plus mpi_rank.  No fault projections by default
+# (those live in fault.vtkhdf only after PLAN_split_bulk_solutions_
+# 2026-05-12 R-001).  Set register_fault_projections = true to put the
+# 12 L2-p0 projections back in.
+# ---------------------------------------------------------------------
+[paraview.kinematics]
+# Optional whitelist; empty / omitted = driver-default field set.
+# TPV*  default = ["velocity", "mpi_rank"]
+# BP5   default = ["displacement", "mpi_rank"]
+fields = ["velocity", "mpi_rank"]
+
+# Mutually exclusive: pick ONE of (zfp_tol, deflate_level).
+# zfp_tol      = ZFP absolute-error tolerance (m/s for velocity,
+#                m for displacement).  Requires MFEM_USE_H5Z_ZFP=YES
+#                at build time and HDF5_PLUGIN_PATH at run time.
+# deflate_level = zlib level 0..9.  Lossless.
+zfp_tol = 1e-3
+# deflate_level = 6
+
+# Write cadence (seconds).  0 = adaptive V_max schedule (see
+# AdaptiveSchedule defaults in paraview_output.hpp).
+dt = 0.5
+
+# Back end: "hdf5" (default on MFEM_USE_HDF5=YES + MFEM_PARALLEL_HDF5)
+# or "vtu" (legacy per-rank).
+backend = "hdf5"
+
+# Opt back in to the 12 L2-p0 fault projections in kinematics.vtkhdf.
+# Default false.  Driver-side wires to
+# pv_out->SetRegisterFaultProjectionsInVolumePV(...).
+register_fault_projections = false
+
+# ---------------------------------------------------------------------
+# Stress collection — <output>/ParaView_bulk/stress.vtkhdf
+#
+# TPV* only — full symmetric stress tensor for wavefield diagnostics.
+# BP5 is quasi-dynamic (no wavefield) so this section is ignored.
+# Omit the whole section (or set enabled = false) to skip the file
+# entirely.
+# ---------------------------------------------------------------------
+[paraview.stress]
+enabled = true
+fields  = ["sigma_xx", "sigma_yy", "sigma_zz",
+           "sigma_xy", "sigma_xz", "sigma_yz"]
+zfp_tol = 1e-3
+# deflate_level = 6
+dt      = 0.5
+
+# ---------------------------------------------------------------------
+# Fault collection — <output>/fault.vtkhdf
+#
+# Triangulated fault surface with per-element slip / slip-rate /
+# traction / state.  This is the science output.  Slip-rate spans
+# 1e-9..1e0 m/s during nucleation -> coseismic, so the tolerance must
+# be MUCH tighter than the volume files.
+# ---------------------------------------------------------------------
+[paraview.fault]
+zfp_tol = 1e-12      # m/s; floor below which slip-rate is preserved
+# deflate_level = -1 # set >= 0 to use deflate instead of ZFP
+backend = "hdf5"     # "vtu" forces the Phase-1 binary VTU back end
+
+# Optional whitelist (empty = all available fields).  Names match
+# fault_vtkhdf_writer.hpp's registered set:
+#   slip_dip, slip_strike, slip_rate_dip, slip_rate_strike,
+#   traction_dip, traction_strike, state_variable, normal_stress,
+#   param_a, param_Dc, fault_x2, fault_x3
+fields = []
+
+# ---------------------------------------------------------------------
+# Adaptive V_max schedule (kinematics + fault share these).  Only used
+# when [paraview.kinematics].dt == 0 OR a similar adaptive opt-in is
+# enabled.
+# ---------------------------------------------------------------------
+[paraview.schedule]
+v_coseismic       = 1e-3       # m/s
+v_nucleation      = 1e-6       # m/s
+dt_coseismic      = 0.01       # s
+dt_nucleation     = 1.0        # s
+dt_interseismic   = 31557600.0 # 1 year in seconds
+hysteresis_factor = 1.0        # >= 1; 1.0 = no hysteresis
+max_total_snapshots = 5000     # soft cap on fault writes; 0 = uncapped

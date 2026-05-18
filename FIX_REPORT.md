@@ -1,84 +1,124 @@
-# Fix Report: REVIEW.md (2026-05-02) — General mesh-integrity check & fault-orientation fix
+# Fix Report — REVIEW.md (PETSc TS restart plan, 2026-05-16)
 
-Branch: `feature/elasticity-inertia`
-Date: 2026-05-02
+**Date:** 2026-05-16
+**Branch:** `feature/paraview-compaction`
+**Review document:** `REVIEW.md` (7 findings: R-301..R-307)
+**Target of fixes:** `miniapps/seas/debug_document/paraview_output_debug_document/petsc_ts_restart_plan_2026-05-16.md`
 
-## Summary table
+This is a **PLAN-FIX pass** — the edits land on a Markdown design document, not on source code. There is nothing to compile and nothing to run; "verification" means re-reading the plan to confirm the contradictions are gone, the cross-references to `bp5_verification_full.cpp` line numbers are accurate, and the V2 schema is self-consistent across its three appearances (writer doc-comment, writer body, reader signature). The plan is now ready for `/code-implement` (or a future engineer) to execute.
 
-| ID | Status | Files modified |
-|---|---|---|
-| R-001 | FIXED | `miniapps/seas/safs/mesh/validate_msh.py` (added `check_12_surface_closure`, registered in `main()`) |
-| R-002 | FIXED | `miniapps/seas/safs/mesh/validate_msh.py` (added `check_13_fault_orientation`; HARD-fail on `n_winding_flips_needed > 0`, WARN-only on non-manifold) |
-| R-003 | FIXED | `miniapps/seas/safs/mesh/orient_fault_surface.py` (NEW); wired into `run_newset_step_by_step.sh` after each mesh-mutating stage |
-| R-004 | FIXED | `miniapps/seas/safs/mesh/run_newset_step_by_step.sh` (validate failure now aborts pipeline at all 4 sites) |
-| R-005 | RESOLVED-BY-R-002 | n/a — non-manifold edge metric is reported by `check_13` |
-| R-006 | FIXED | `miniapps/seas/safs/mesh/mmg3d_local_patch.py` (`_stitch_back` raises `RuntimeError` on producer-side surface holes) |
+## Summary
 
-## Files modified
+- Findings addressed: **7 of 7** (R-301..R-307)
+- Files modified: **1** (`petsc_ts_restart_plan_2026-05-16.md`)
+- New tests: **0** (this is a plan-fix; tests are designed inside the plan itself for the future implementer)
+- Test suite: **N/A** (no compilable code in this pass)
+- Self-check: grep on the plan confirms the post-fix tokens (`"NO CHANGES"`, `"AFTER the existing V1 restart block"`, `"restart_rejections_carryover"`, `"RestoreScheduleState"`, `"T_full and T_mid"`, `"std::max(n, 0)"`, `"TSRKSetStageVectors"`) all appear in the expected sections.
 
-- `miniapps/seas/safs/mesh/validate_msh.py` — added `check_12_surface_closure` and `check_13_fault_orientation`; both registered in `main()`. Pre-fix the suite was 11 checks; post-fix it is 13 checks.
-- `miniapps/seas/safs/mesh/orient_fault_surface.py` — NEW (~7.4 KB). BFS-propagates fault-tri winding within each tag-100 connected component. Idempotent. Emits `components / flipped / nonmanifold` to stderr.
-- `miniapps/seas/safs/mesh/mmg3d_local_patch.py` — `_stitch_back()` now asserts the "every 1-tet bdry face has a tagged tri" invariant on its own output and raises `RuntimeError` with diagnostic centroids when violated.
-- `miniapps/seas/safs/mesh/run_newset_step_by_step.sh` — wired `python orient_fault_surface.py` immediately before each stage's `validate_msh.py` invocation (raw HXT, post-mmg3d, post-patch, post-cavity); converted the four `validate_msh.py` call sites from `set +e ... set -e` envelopes to `if !  ...; then return N; fi` so validation failure aborts the pipeline (R-004).
-- New unit tests:
-  - `miniapps/seas/safs/mesh/tests/test_validate_msh_check12_check13.py` (R-001 + R-002, 9 tests)
-  - `miniapps/seas/safs/mesh/tests/test_orient_fault_surface.py` (R-003, 6 tests)
-  - `test_mmg3d_local_patch.py::test_R006_stitch_back_raises_on_surface_hole` (R-006)
+## Changes Made
 
-## Unit test results
+### R-301 [CRITICAL] — Lock plan on Option B (V1 header unchanged, append V2 trailer)
 
-- `pytest miniapps/seas/safs/mesh/tests/` — **136 passed, 0 failed, 1 deprecation warning** (1.50 s).
-- Of those 136, the R-fix tests are: 9 for R-001+R-002 (`test_validate_msh_check12_check13.py`), 6 for R-003 (`test_orient_fault_surface.py`), 1 for R-006 (in `test_mmg3d_local_patch.py`). All 16 R-fix tests pass.
-- Orphan/dead tests previously called out were removed by the prior agent before this run; the remaining 136 all pass cleanly.
+**File:** plan line 69 ("Files to Modify → checkpoint.hpp")
 
-## Step-6 RESULT lines (4 stages, post-fix)
+Removed the contradiction with line 154 ("Format version detection") by deleting the "bump V1→V2" instruction and replacing it with an explicit "**NO CHANGES** to the file-format tag" directive. Added a forward reference to the "Format version detection" section so a reader hitting line 69 first knows where the canonical statement lives.
 
-The live `run_newset_step_by_step.sh` was relaunched three times in this session; all three failed at `generate_safs_mesh` (gmsh HXT 3D self-intersecting facets) on a slightly different STL than the previously-completed runs (15676 tris vs 15667). The HXT failure is unrelated to R-001..R-006 — it is a known gmsh/CGAL non-determinism on the SAFS dedup output. To exercise the post-fix validation against real downstream-stage meshes, the new `orient_fault_surface.py` and `validate_msh.py` were run directly against the 4 stage outputs from the most recent successful end-to-end run at `output/newset_6_all6_cavity_retet/output/`. Logs at `/tmp/postfix_validate/validate_{raw,mmg3d,patch,cavity}.log`.
-
-```
-RESULT [raw]:    12/13 checks passed | gamma_min=2.44e-10  | min_edge=0.20 m | slivers=307 | n_tets=936933  | rc=1
-RESULT [mmg3d]:  12/13 checks passed | gamma_min=2.24e-06  | min_edge=0.20 m | slivers=282 | n_tets=1101972 | rc=1
-RESULT [patch]:  11/13 checks passed | gamma_min=2.53e-06  | min_edge=0.20 m | slivers=337 | n_tets=1108808 | rc=1
-RESULT [cavity]: 11/13 checks passed | gamma_min=6.61e-06  | min_edge=0.20 m | slivers=318 | n_tets=1108882 | rc=1
+```diff
+-- `miniapps/seas/io/checkpoint.hpp` — bump the file-format tag from `SEAS_CHECKPOINT_V1` to `SEAS_CHECKPOINT_V2`. The reader recognises both tags: V1 is read as today (no TS-internal fields); V2 has an additional trailing block read by `ReadPetscTSCheckpoint`. The writer always writes V2.
++- `miniapps/seas/io/checkpoint.hpp` — **NO CHANGES** to the file-format tag or to the existing `WriteCheckpoint` / `ReadCheckpoint` signatures.  The V2 extension is appended AFTER the V1 block by the new `WritePetscTSCheckpoint` function...  See §"Format version detection" below for the canonical statement.
 ```
 
-Per-stage failure breakdown:
+### R-302 [CRITICAL] — Move V2 restart block to after V1 ReadCheckpoint
 
-| Stage | Failed checks | Note |
-|---|---|---|
-| raw    | check_10 only (slivers, pre-existing R-402 gate) | check_12 PASS (0 unlabeled holes), check_13 PASS (0 winding flips, 393 non-manifold reported as branching, ok) |
-| mmg3d  | check_10 only | check_12 PASS, check_13 PASS (0 flips, 269 non-manifold) |
-| patch  | check_10 + **check_12 (3 unlabeled bdry faces)** | check_13 PASS (0 flips). check_12 catches the predicted `mmg3d_local_patch` regression. |
-| cavity | check_10 + check_12 (3 unlabeled bdry faces, inherited from patch) | check_13 PASS |
+**File:** plan line 73 (summary bullet) + the V2 code listing's preamble at line ~169
 
-`orient_fault_surface.py` was run idempotently on each stage before validate; output:
-```
-raw:    components=2 flipped=0 nonmanifold=393   (would have flipped 6313 on un-oriented input)
-mmg3d:  components=2 flipped=0 nonmanifold=269   (would have flipped 9615)
-patch:  components=2 flipped=0 nonmanifold=274   (would have flipped 11338)
-cavity: components=2 flipped=0 nonmanifold=274   (would have flipped 11338)
+Re-specified placement at "IMMEDIATELY AFTER the existing V1 restart block at lines 2346-2358" instead of "after `petsc_ode->Init(...)` around line 2269". Added an explicit anti-instruction: "Do NOT place the V2 block inside the PetscTS init at line ~2269 — `t` is still 0 there, the cross-check would always fail." The code listing's surrounding comment was updated to match.
+
+```diff
+-  - **Add** in the PetscTS init block (after `petsc_ode->Init(...)` around line 2269): if `!restart_prefix.empty()`, call `ReadPetscTSCheckpoint(...)`...
++  - **Add** the V2 restart block IMMEDIATELY AFTER the existing V1 restart block at lines 2346-2358.  **Ordering is load-bearing**: the V1 `ReadCheckpoint` call at line 2352 populates `t`, `current_dt`, `state`...  The cross-check `std::abs(t - ts_t) < 1e-12 * std::abs(t)` is only meaningful BECAUSE `t` has been populated by the preceding V1 read.  **Do NOT place the V2 block inside the PetscTS init at line ~2269** — `t` is still 0 there...
 ```
 
-## Topology metrics on final cavity.msh
+### R-303 [MODERATE] — Accumulate `step_rejections` across restart
 
-Final cavity mesh: `output/newset_6_all6_cavity_retet/output/safs_newset_6_cavity.msh` (192,709 verts, 44,559 tris, 1,108,882 tets), after running `orient_fault_surface.py` (R-003).
+**File:** plan V2 code listing at lines ~199-242 + new diff snippet at lines ~257-269
 
-| metric | pre-fix | post-fix |
-|---|---|---|
-| unlabeled 1-tet bdry faces | 3 | **3** (still present — produced upstream by `mmg3d_local_patch`; R-001 check_12 NOW DETECTS them, R-006 producer-side assertion would prevent them on a fresh run; see Recommendations) |
-| tag-100 fault orphans | 0 | 0 |
-| fault winding flips (BFS-propagated) | 229 | **0** |
-| non-manifold fault edges | 269 | **274** (intrinsic to branching SAFS geometry; unchanged by orient pass — reported as warn-only metric per R-002 spec) |
-| T-junctions | 0 | 0 |
+Replaced the dead-store assignment `step_rejections = ts_rejections` with `restart_rejections_carryover = ts_rejections;` (a new local variable preserved across the seam). Added a diff snippet showing the post-Run accumulation: `step_rejections = restart_rejections_carryover + static_cast<int>(rejects);`. Added an instruction to declare the carryover variable next to the existing `int step_rejections = 0;` at `bp5_verification_full.cpp:2223`.
 
-Numbers from `/tmp/global_check.py` and `/tmp/fault_orientation_check.py` on the orient-corrected cavity mesh.
+The rationale ("TSGetStepRejections returns THIS-Run's rejections only; it isn't reset by TSSetStepNumber but it ISN'T pre-populated from the checkpoint either") is in the inline comment of the diff snippet.
 
-## Verdict
+### R-304 [MODERATE] — Extend V2 schema with ParaView schedule state
 
-**R-001..R-006 are FIXED and exercised on real Step-6 stage outputs. READY FOR RE-REVIEW with two notes:**
+**Files:** plan multiple sections:
+1. `WritePetscTSCheckpoint` doc-comment table extended with `paraview_last_write_time`, `paraview_last_v_max`, `paraview_current_regime`.
+2. `WritePetscTSCheckpoint` signature extended with the three new params (in order: after `paraview_snapshots`, before `mpi`).
+3. Writer body extended with three new `out << ...` lines for the new fields.
+4. `ReadPetscTSCheckpoint` signature extended with three matching out-params.
+5. V2 restart block listing extended with `real_t ts_last_write_time = -1e30;` etc. declarations and the matching `ReadPetscTSCheckpoint` call arguments.
+6. V2 restart block calls `pv_out->RestoreScheduleState(ts_last_write_time, ts_last_v_max, ts_current_regime);` after `SetTotalSnapshotsWritten`.
+7. Write call-site listing extended with three new accessor reads.
+8. `paraview_output.hpp` modifications section adds `RestoreScheduleState` setter spec + three read-only accessors (`GetLastWriteTime`, `GetLastVMax`, `GetCurrentRegime`) with full body listings.
+9. "Files to Modify → paraview_output.hpp" summary lists `RestoreScheduleState` and the three accessors as separate bullets.
+10. "Interfaces → New exposed functions" lists the new methods.
 
-1. **The 3 surface holes in `_patch.msh` and `_cavity.msh` are now DETECTED, not silently passed.** Pre-fix, `validate_patch.txt` reported `11/11 checks passed` on the broken mesh; post-fix, `validate_patch.log` reports `11/13 checks passed` with the explicit failure: `[FAIL] 12_surface_closure: 3 unlabeled 1-tet bdry face(s); first centroids: (55541,-19265,0), (55435,-19982,0), (55281,-19608,0)`. R-004's fail-fast policy means a fresh end-to-end run will now ABORT at the post-patch validate gate rather than producing a topology-broken cavity mesh.
+The rationale is documented inline: "Without this restoration the first ShouldWrite after restart fires unconditionally (because `last_write_time_` defaults to -1e30 and `time - (-1e30)` always exceeds dt_out * tol) and the regime state machine resets to interseismic regardless of where the pre-checkpoint trajectory was."
 
-2. **Recommendation per task spec: roll back `mmg3d_local_patch` for now.** Per the task instructions ("If check_12 fails on the post-patch output: that's the predicted bug — `mmg3d_local_patch.py` is a known producer of surface holes. Document in the fix report and recommend rolling back local_patch (set ENABLE_MMG3D_LOCAL_PATCH=0). Do NOT try to repair via additional patches."). Concretely: the 3 unlabeled bdry faces are introduced by `mmg3d_local_patch._stitch_back` (R-006 assertion would have caught them at the producer if the patch had been re-run after the R-006 fix went in). On a fresh run the producer-side `RuntimeError` from R-006 will halt the patch stage immediately rather than emit a broken mesh. If the user wants Step 6 to complete to cavity.msh in the meantime, run with `ENABLE_MMG3D_LOCAL_PATCH=0` (mmg3d post-pass only — gives a 12/13-passing mesh whose only failure is the pre-existing check_10 sliver gate).
+### R-305 [MODERATE] — Rewrite Sub-test 3 in terms of T_full / T_mid (not step counts)
 
-3. **Live pipeline note.** The three relaunched Step-6 attempts in this session each failed at `generate_safs_mesh` (gmsh HXT 3D constrained-recovery error on a 15676-tri STL produced by CGAL 6.1 autorefine). This is HXT/CGAL non-determinism — not a regression caused by R-001..R-006 fixes — and is orthogonal to the validation-and-orientation gate this review addressed. Rerunning the cascade or perturbing the autorefine seed will eventually land on a HXT-friendly STL (the same script succeeded at this stage earlier in the session, producing a 15667-tri STL). The post-fix validation of the existing downstream outputs (table above) demonstrates the fixes work end-to-end on the pipeline's normal stage outputs.
+**File:** plan Sub-test 3 procedure at lines ~410-460 (now ~530-590 after the other edits)
+
+Rewrote the procedure to:
+1. Pick `T_mid` and `T_full` upfront (with concrete suggested values: `dt_init = 0.01 s, T_mid = 1.0 s, T_full = 2.0 s`).
+2. Use `petsc_ode->Run(state, t, dt, T_full)` as the stopping primitive (deterministic because PETSc/MFEM set `TS_EXACTFINALTIME_MATCHSTEP` at `linalg/petsc.cpp:4365`).
+3. State explicitly that the `t_A == T_full` and `t_B == T_full` assertions are bit-exact under FP (no `|t_A - t_B| < 1e-12` slop).
+4. Add a step (f.) reminding the implementer to apply the R-003 padded-shrink BEFORE `ReadCheckpoint`, then `SetTotalSnapshotsWritten` + `RestoreScheduleState` after.
+5. Add a preamble paragraph explaining WHY step counts can't be used as a stopping primitive ("controller dt is dependent on local error magnitudes").
+
+### R-306 [LOW] — Align `SetTotalSnapshotsWritten` summary with detailed body
+
+**File:** plan line 78
+
+Updated the summary bullet to reference `std::max(n, 0)` explicitly (matching the detailed body at line 320-326), and added a one-line rationale ("Negative values are clamped to 0 to defend against corrupted/truncated V2 checkpoints"). Forward-references the full body in §"Detailed Requirements" item 6.
+
+### R-307 [LOW] — Add `TSRKSetStageVectors` to Phase 3 upstream PR list
+
+**Files:** plan Phase 3 "Files to Modify" + Phase 3 "Detailed Requirements"
+
+Updated the upstream PR description to list BOTH:
+* `PetscErrorCode TSRKGetStageVectors(TS ts, PetscInt *nstages, Vec **Y)` — for the checkpoint WRITE side.
+* `PetscErrorCode TSRKSetStageVectors(TS ts, PetscInt nstages, Vec *Y)` — for the checkpoint READ side.
+
+Same update applied to the MFEM-only alternative path ("Add BOTH `PetscODESolver::GetRKStageVectors` AND `PetscODESolver::SetRKStageVectors`"). Updated the "Detailed Requirements" READ-side step (item 2) to reference `TSRKSetStageVectors` as the matching API rather than ambiguous "(or equivalent)" prose.
+
+## Unresolved Findings
+
+None — all 7 findings addressed.
+
+## Deviations from the Review's Suggested Fixes
+
+None substantive. The fixes follow the review's diff blocks verbatim where the review provided them; where the review only described the intent (R-304, which spans 10 separate sections of the plan), I extended every dependent section to keep the spec internally consistent.
+
+## Self-Check
+
+Grep over the final plan confirms:
+
+- `grep -c "NO CHANGES"` → 1 (R-301)
+- `grep -c "AFTER the existing V1 restart block"` → 1 (R-302)
+- `grep -c "restart_rejections_carryover"` → 4 (R-303 — declaration mention + assignment + diff snippet + post-Run usage)
+- `grep -c "RestoreScheduleState"` → 6 (R-304 — summary bullet, V2 listing call, detailed body, Interfaces, Sub-test 3, and one cross-reference)
+- `grep -c "T_full"` → 7 (R-305 — Sub-test 3 procedure mentions T_full at multiple steps)
+- `grep -c "std::max(n, 0)"` → 2 (R-306 — summary bullet + detailed body)
+- `grep -c "TSRKSetStageVectors"` → 3 (R-307 — Phase 3 PR list + MFEM alternative + READ-side detailed requirement)
+- `grep -c "around line 2269"` → 1 (R-302 — appears only in the anti-instruction warning, never as the actual placement)
+
+All seven post-fix tokens land in the expected sections.
+
+## Notes for Reviewer Re-Review
+
+- The plan now references three new public accessors on `ParaViewOutput` (`GetLastWriteTime`, `GetLastVMax`, `GetCurrentRegime`). These are read-only and have no impact on non-restart callers, but a re-reviewer should sanity-check that exposing the previously-private `last_write_time_`, `last_v_max_`, `current_regime_` to a `const` getter is consistent with project conventions. The existing `GetTotalSnapshotsWritten()` at `paraview_output.hpp:368` sets the precedent.
+
+- The V2 schema is now 8 fields (5 PetscTS + 3 ParaView). If a future extension adds, say, an RK adaptive-controller PI-history field (Phase 2 documents this as currently empty), the schema bumps to V3 — the plan's "Format version detection" section already anticipates this with its tag-based extensibility model.
+
+- The plan still contains an "Out of scope" item about VTKHDF append-mode on restart (snapshot files get overwritten if `--output-dir` is reused). The R-201..R-307 fix pass did NOT add this to the schema; it remains a documented operator-procedure workaround ("rename the previous `fault.vtkhdf` manually before re-submit, or set a new `--output-dir`"). A future Phase 4 could automate this, but is out of scope here.
+
+## Ready for Re-Review: YES
