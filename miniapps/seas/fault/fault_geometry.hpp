@@ -397,6 +397,33 @@ public:
                           real_t P_p_grad_pa_per_m = 0.0,
                           real_t min_sigma_n_pa = 0.0);
 
+   /// @brief Templated overload for any StressSource3D-conformant type
+   /// (Phase 3b of spatial_dynamic_rupture_plan.md rev-3).
+   ///
+   /// Any class `S` exposing
+   ///   `mfem::DenseMatrix S::Evaluate(real_t x, real_t y, real_t z) const`
+   /// satisfies the concept and is accepted by this template.  Overload
+   /// resolution always selects the non-templated
+   /// `ComputeSAFSParams(const StressField3D&, ...)` overload above
+   /// for `StressField3D` arguments (a non-template wins by C++
+   /// overload-ranking rules), so the BP5 byte-exact contract is
+   /// preserved — this template fires only for *other* sources, e.g.
+   /// `mfem::seas::spatial::ConstantTensorStressSource`.
+   ///
+   /// The body lives in `fault/fault_geometry_safs_templated.inl`.
+   /// Callers that need the templated overload must include both
+   /// `fault_geometry.hpp` AND `fault_geometry_safs_templated.inl`
+   /// in the same translation unit so the compiler can instantiate.
+   /// BP5 / TPV callers that only consume the non-templated path
+   /// continue to include `fault_geometry.hpp` (+ the existing
+   /// `fault_geometry_safs.inl` non-template body) and never
+   /// instantiate this template.
+   template <typename StressSource>
+   void ComputeSAFSParams(const StressSource& source,
+                          real_t P_p_pa = 0.0,
+                          real_t P_p_grad_pa_per_m = 0.0,
+                          real_t min_sigma_n_pa = 0.0);
+
    /// @brief Find the DOF index closest to a target depth.
    ///
    /// @param target_depth Target depth (z coordinate, negative for below surface)

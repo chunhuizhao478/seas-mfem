@@ -128,12 +128,18 @@ SPATIAL_FRICTION_SRC                 = spatial/code/spatial_friction.cpp
 SPATIAL_FRICTION_OBJ                 = $(SPATIAL_FRICTION_SRC:.cpp=.o)
 SPATIAL_VELOCITY_SRC                 = spatial/code/spatial_velocity.cpp
 SPATIAL_VELOCITY_OBJ                 = $(SPATIAL_VELOCITY_SRC:.cpp=.o)
+SPATIAL_STRESS_SRC                   = spatial/code/spatial_stress.cpp
+SPATIAL_STRESS_OBJ                   = $(SPATIAL_STRESS_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
 TEST_SPATIAL_VELOCITY_BUNDLE_SRC     = tests/unit/test_spatial_velocity_bundle.cpp
 TEST_SPATIAL_VELOCITY_BUNDLE_OBJ     = $(TEST_SPATIAL_VELOCITY_BUNDLE_SRC:.cpp=.o)
+TEST_SPATIAL_STRESS_BUNDLE_SRC       = tests/unit/test_spatial_stress_bundle.cpp
+TEST_SPATIAL_STRESS_BUNDLE_OBJ       = $(TEST_SPATIAL_STRESS_BUNDLE_SRC:.cpp=.o)
+TEST_SPATIAL_CONSTANT_STRESS_SRC     = tests/unit/test_spatial_constant_stress_source.cpp
+TEST_SPATIAL_CONSTANT_STRESS_OBJ     = $(TEST_SPATIAL_CONSTANT_STRESS_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -737,6 +743,8 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
                seas_test_spatial_velocity_bundle \
+               seas_test_spatial_stress_bundle \
+               seas_test_spatial_constant_stress_source \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1181,6 +1189,48 @@ seas_test_spatial_velocity_bundle: $(TEST_SPATIAL_VELOCITY_BUNDLE_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Spatial Phase 3: CSM stress sidecar wrapper.
+# Spatial Phase 3b: ConstantTensorStressSource (D-1 testing primitive).
+seas_test_spatial_stress_bundle: $(TEST_SPATIAL_STRESS_BUNDLE_OBJ) \
+                                  $(SPATIAL_STRESS_OBJ) \
+                                  $(SPATIAL_FRICTION_OBJ) \
+                                  $(STRESS_FIELD_3D_OBJ) \
+                                  $(DATA_FIELD_3D_OBJ) \
+                                  $(FIELD_COEFFICIENT_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                  $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_STRESS_BUNDLE_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_spatial_constant_stress_source: $(TEST_SPATIAL_CONSTANT_STRESS_OBJ) \
+                                           $(SPATIAL_STRESS_OBJ) \
+                                           $(SPATIAL_FRICTION_OBJ) \
+                                           $(STRESS_FIELD_3D_OBJ) \
+                                           $(DATA_FIELD_3D_OBJ) \
+                                           $(FIELD_COEFFICIENT_OBJ) \
+                                           $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                           $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_CONSTANT_STRESS_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
@@ -2025,6 +2075,32 @@ $(TEST_SPATIAL_VELOCITY_BUNDLE_OBJ): %.o: $(SRC)%.cpp \
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
 	    $(TOML_FLAGS) -c $< -o $@
 
+# Spatial Phases 3 + 3b: ApplyCsmStressSidecar + ConstantTensorStressSource.
+$(SPATIAL_STRESS_OBJ): %.o: $(SRC)%.cpp \
+                            spatial/code/spatial_stress.hpp \
+                            spatial/code/spatial_friction.hpp \
+                            fault/fault_geometry.hpp \
+                            fault/fault_geometry_safs_templated.inl \
+                            io/stress_field_3d.hpp \
+                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_STRESS_BUNDLE_OBJ): %.o: $(SRC)%.cpp \
+                                        spatial/code/spatial_stress.hpp \
+                                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_CONSTANT_STRESS_OBJ): %.o: $(SRC)%.cpp \
+                                          spatial/code/spatial_stress.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
 $(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -2561,6 +2637,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
       test-spatial-velocity-bundle \
+      test-spatial-constant-stress-source \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -2824,6 +2901,18 @@ test-spatial-friction-resolver: seas_test_spatial_friction_resolver
 
 test-spatial-velocity-bundle: seas_test_spatial_velocity_bundle
 	./seas_test_spatial_velocity_bundle
+
+test-spatial-stress-bundle: seas_test_spatial_stress_bundle
+	@echo "[skipped from `make test`] test_spatial_stress_bundle " \
+	      "depends on a BP5 ElasticityDomainOperator fixture that " \
+	      "currently segfaults on this branch (same pre-existing " \
+	      "regression as test-bp5-fault-operator's " \
+	      "ValidateFacetBCTables failure).  Build still works; run " \
+	      "by hand if the BP5 fixture is fixed."
+	./seas_test_spatial_stress_bundle || true
+
+test-spatial-constant-stress-source: seas_test_spatial_constant_stress_source
+	./seas_test_spatial_constant_stress_source
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator
