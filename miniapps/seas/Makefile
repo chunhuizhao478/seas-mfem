@@ -851,6 +851,7 @@ SEAS_INCLUDES = $(if $(SRC),-I$(MFEM_DIR))
 seas_test_data_field_3d: $(TEST_DATA_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_DATA_FIELD_3D_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 seas_test_field_projector: $(TEST_FIELD_PROJECTOR_OBJ) \
                            $(DATA_FIELD_3D_OBJ) $(STRESS_FIELD_3D_OBJ) \
@@ -859,6 +860,7 @@ seas_test_field_projector: $(TEST_FIELD_PROJECTOR_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) $(STRESS_FIELD_3D_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
 	    $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 6 §1 of PLAN_onfaultstress.md: six-component Cauchy stress
 # sidecar reader test (StressField3D).
@@ -867,6 +869,7 @@ seas_test_stress_field_3d: $(TEST_STRESS_FIELD_3D_OBJ) \
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_STRESS_FIELD_3D_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) \
 	    $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 seas_test_heterogeneous_material: $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
                                   $(HETEROGENEOUS_MATERIAL_OBJ) \
@@ -877,6 +880,7 @@ seas_test_heterogeneous_material: $(TEST_HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Data-projection feature: standalone driver that loads a mesh + a
 # schema-v1 sidecar, projects (Vp, Vs, rho, lambda, mu) onto the mesh,
@@ -979,6 +983,7 @@ seas_test_bp5_fault_operator: $(TEST_BP5_FAULT_OPERATOR_OBJ)
 # PLAN_onfaultstress.md).
 seas_test_fault_dof_basis: $(TEST_FAULT_DOF_BASIS_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_DOF_BASIS_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 6 §4: ProjectFaultPreStress test (Phase 6 §4 of PLAN_onfaultstress.md)
 seas_test_project_fault_prestress: $(TEST_PROJECT_FAULT_PRESTRESS_OBJ) \
@@ -990,6 +995,7 @@ seas_test_project_fault_prestress: $(TEST_PROJECT_FAULT_PRESTRESS_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 6 §5: FaultGeometry::ComputeSAFSParams test
 seas_test_compute_safs_params: $(TEST_COMPUTE_SAFS_PARAMS_OBJ) \
@@ -1001,16 +1007,19 @@ seas_test_compute_safs_params: $(TEST_COMPUTE_SAFS_PARAMS_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 6 §6: RateStateFaultOperator SAFS-mode wiring test
 seas_test_safs_mode_wiring: $(TEST_SAFS_MODE_WIRING_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SAFS_MODE_WIRING_OBJ) \
 	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 6 §7: StressConfig schema test
 seas_test_safs_stress_config: $(TEST_SAFS_STRESS_CONFIG_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_SAFS_STRESS_CONFIG_OBJ) \
 	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 7: project_stress_to_mesh driver (mirrors seas_project_velocity_to_mesh)
 seas_project_stress_to_mesh: $(PROJECT_STRESS_DRIVER_OBJ) \
@@ -1023,12 +1032,14 @@ seas_project_stress_to_mesh: $(PROJECT_STRESS_DRIVER_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) \
 	    $(DATA_FIELD_3D_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 7: driver round-trip test
 seas_test_project_stress_to_mesh: $(TEST_PROJECT_STRESS_TO_MESH_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_PROJECT_STRESS_TO_MESH_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # BP5 Phase 4: BP5 integration tests
 seas_test_bp5_integration: $(TEST_BP5_INTEGRATION_OBJ)
