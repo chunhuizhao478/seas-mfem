@@ -1142,7 +1142,19 @@ int main(int argc, char *argv[])
                   "default (0,+1,0) need to update — see REVIEW R-003.)");
    }
 
-   const FaultBasis &fbasis = *wave.GetFaultBasis();
+   // GetFaultBasis() returns nullptr on ranks whose partition contains
+   // zero local fault boundary elements (METIS routinely produces this
+   // on 200+-rank runs of TPV205-scale meshes — the fault occupies a
+   // thin slab around y=0, so most ranks own none of it).  All other
+   // drivers (tpv102/tpv104/tpv205) treat the result as a pointer and
+   // guard with `if (fb)`; the lone unguarded dereference here was
+   // segfaulting at offset 0x4 (FaultBasis::num_faces_) on those ranks.
+   // Fall back to a default-constructed empty FaultBasis so the verify
+   // and BuildPerDOFFaultTables (which both no-op on empty inputs) see
+   // consistent zero-sized state instead of UB.
+   const FaultBasis *fbasis_ptr = wave.GetFaultBasis();
+   static const FaultBasis empty_fault_basis_;
+   const FaultBasis &fbasis = fbasis_ptr ? *fbasis_ptr : empty_fault_basis_;
    MFEM_VERIFY(fbasis.NumFaces() >=
                fault_int_faces.Size() + fault_shr_faces.Size(),
                "spatial_dyn_driver: wave.GetFaultBasis() has "
