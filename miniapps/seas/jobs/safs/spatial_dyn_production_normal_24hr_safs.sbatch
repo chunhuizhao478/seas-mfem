@@ -22,7 +22,8 @@
 #      empirical (BP5/TPV104 scaling); revisit if the first production
 #      run is dominated by MPI time.
 #
-# Resource budget (SAFS 1000m zgraded, constant material, tfinal=12s):
+# Resource budget (SAFS 1000m lcfar3000, constant material,
+# regional H&Z stress, mixed-flux "adjacent", O2 ADER, tfinal=12s):
 #   Mesh:       ~4M tets, ~120M DOFs (3D velocity-stress, order 1)
 #   Per-rank:   ~2.5 GB peak (wave Q + DOFData + GodunovFlux)
 #   Wall:       ~18-22 hr at cfl=0.5, dt~6e-5 s, ~200k steps
@@ -100,8 +101,8 @@ cd miniapps/seas
 make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_ROOT}/friction/EXAMPLE_spatial_friction_slip_weakening_safs.toml"
-MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_zgraded.msh"
+CONFIG_TOML="${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml"
+MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
 
 # Determinstic output dir (allows mid-run restart with the same path).
 # Override JOBNAME via --export=ALL,JOBNAME=foo to override.

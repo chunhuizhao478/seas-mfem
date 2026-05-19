@@ -13,10 +13,11 @@
 #
 # Purpose: end-to-end shakedown of the gradual_overstress nucleation +
 # --print-derived pre-flight gate + ParaView fault.vtkhdf + checkpoint
-# write pipeline on the 1000 m zgraded SAFS mesh.  Reads
-# `safs_smoke_8N_400r_dev.sbatch` for the queue / allocation header.
+# write pipeline on the 1000 m lcfar3000 SAFS mesh with regional H&Z
+# projected stress, constant material, mixed-flux "adjacent", and O2
+# ADER.  Reads `safs_smoke_8N_400r_dev.sbatch` for the queue header.
 #
-# Resource budget (SAFS 1000m zgraded, constant material, tfinal=0.5s):
+# Resource budget (SAFS 1000m lcfar3000, constant material, tfinal=0.5s):
 #   Mesh:       ~1.2M tets, ~36M DOFs (3D velocity-stress, order 1)
 #   Per-rank:   ~0.6 GB peak (wave Q + DOFData + GodunovFlux)
 #   Wall:       ~1.5-2 hr at cfl=0.5, dt~6e-5 s, ~8000 steps
@@ -95,8 +96,8 @@ cd miniapps/seas
 make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_ROOT}/friction/EXAMPLE_spatial_friction_slip_weakening_safs.toml"
-MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_zgraded.msh"
+CONFIG_TOML="${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml"
+MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
 OUT="${SCRATCH}/safs_dyn_smoke_${SLURM_JOB_ID}"
 mkdir -p "${OUT}"
 
