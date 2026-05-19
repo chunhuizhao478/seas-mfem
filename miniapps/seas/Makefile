@@ -299,6 +299,12 @@ TPV102_DRIVER_SRC = drivers/tpv102_driver.cpp
 TPV102_SUBSTEP_ITERATOR_SRC = dynamic/tpv102_substep_iterator.cpp
 TPV205_DRIVER_SRC = drivers/tpv205_driver.cpp
 TPV205_SUBSTEP_ITERATOR_SRC = dynamic/tpv205_substep_iterator.cpp
+# Hoisted from the TPV104 block (~line 4368) so the seas_spatial_dyn_driver
+# rule (~line 2147) can reference $(TPV104_SUBSTEP_ITERATOR_OBJ) in its
+# prerequisite list.  Make expands prerequisite-list variables at parse
+# time, so the late definition was producing an empty prereq and the
+# linker was being asked to consume an unbuilt .o (icpc error #10236).
+TPV104_SUBSTEP_ITERATOR_SRC = dynamic/tpv104_substep_iterator.cpp
 TEST_TPV102_LOCAL_SRC = tests/verification/test_tpv102_local.cpp
 TEST_R101_SHARED_FAULT_SRC = tests/parallel/test_r101_shared_fault.cpp
 # TPV102 v9.0.0 Phase 1 unit tests (§3.1, §3.1b, §3.1c, §3.1d)
@@ -611,6 +617,9 @@ TPV102_SHARED_OBJS = $(TPV102_SUBSTEP_ITERATOR_OBJ) \
 # TPV205 (linear slip-weakening, SCEC TPV5 spec) driver + iterator.
 TPV205_DRIVER_OBJ = $(TPV205_DRIVER_SRC:.cpp=.o)
 TPV205_SUBSTEP_ITERATOR_OBJ = $(TPV205_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+# Hoisted from the TPV104 block (~line 4393); see note at the SRC
+# definition above.  Required by seas_spatial_dyn_driver.
+TPV104_SUBSTEP_ITERATOR_OBJ = $(TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.o)
 
 TPV205_HEADERS = config/tpv205_params.hpp \
                  dynamic/tpv205_friction.hpp \
