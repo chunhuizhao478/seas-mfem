@@ -1227,10 +1227,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                "[output].output_dir must be non-empty");
    MFEM_VERIFY(!cfg.output.restart_prefix.empty(),
                "[output].restart_prefix must be non-empty");
-   for (const auto& mode_name : { std::pair<std::string, std::string>
-                                  {"paraview_volume", cfg.output.paraview_volume},
-                                  {"paraview_bulk",   cfg.output.paraview_bulk},
-                                  {"paraview_fault",  cfg.output.paraview_fault} })
+   for (const auto& mode_name : {
+        std::pair<std::string, std::string>{"paraview_volume", cfg.output.paraview_volume},
+        std::pair<std::string, std::string>{"paraview_bulk",   cfg.output.paraview_bulk},
+        std::pair<std::string, std::string>{"paraview_fault",  cfg.output.paraview_fault}})
    {
       MFEM_VERIFY(mode_name.second == "hdf5"
                   || mode_name.second == "vtu"
