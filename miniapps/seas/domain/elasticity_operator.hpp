@@ -26,6 +26,7 @@
 #include "../integrator/dg_elasticity_ip_penalty_integrator.hpp"
 #include "../integrator/dg_elasticity_ip_combined_integrator.hpp"
 #include "../fault/face_quadrature.hpp"
+#include "matrix_stats.hpp"
 
 #include <memory>
 #include <cmath>
@@ -297,6 +298,17 @@ public:
    void SetPenaltyFactor(real_t f) { penalty_factor_ = f; }
    void SetFaceBasisType(int bt) { face_basis_type_ = bt; }
 
+   /// Enable one-shot matrix analysis right after ParallelAssemble.
+   /// Computes nnz, symmetry, diagonal sanity, etc., and writes a JSON
+   /// summary to @a json_path (rank 0).  Implies MUMPS print-level 2
+   /// when a MUMPS solver is selected (so fill-in stats are logged too).
+   void SetMatrixStatsConfig(bool enable, const std::string &json_path)
+   {
+      matrix_stats_enabled_ = enable;
+      matrix_stats_path_    = json_path;
+   }
+   bool MatrixStatsEnabled() const { return matrix_stats_enabled_; }
+
    struct FirstStepDebugConfig
    {
       bool enabled = false;
@@ -395,6 +407,10 @@ private:
    bool match_quad_order_ = false;       // Use 2p instead of 2p+1 quadrature
    real_t penalty_factor_ = 1.0;  // v50a: scale IP penalty (1.0=default)
    int face_basis_type_ = BasisType::GaussLobatto;  // v50g: face DOF node type
+
+   // One-shot matrix analysis (enabled via SetMatrixStatsConfig).
+   bool matrix_stats_enabled_ = false;
+   std::string matrix_stats_path_;
 
    enum class DebugAssemblePhase { None, Slip, Dirichlet };
    mutable FirstStepDebugConfig first_step_debug_;

@@ -215,6 +215,32 @@
          cached_Ah_.SetType(Operator::Hypre_ParCSR);
          cached_a_->ParallelAssemble(cached_Ah_);
 
+         // One-shot matrix analysis (enabled via --matrix-stats).  Runs
+         // before solver factorization so it covers the same matrix the
+         // solver sees, and is cheap (O(global_nnz) for one Transpose +
+         // Add).
+         if (matrix_stats_enabled_)
+         {
+            auto *K = cached_Ah_.As<HypreParMatrix>();
+            const int dofs_per_elem = fes_->GetTypicalFE()->GetDof();
+            const int vdim = fes_->GetVDim();
+            MatrixStats stats =
+               ComputeMatrixStats(*K, dofs_per_elem, vdim, mesh_.GetComm(),
+                                  /*do_symmetry=*/true);
+            int my_rank = 0;
+            MPI_Comm_rank(mesh_.GetComm(), &my_rank);
+            if (my_rank == 0)
+            {
+               PrintMatrixStatsSummary(stats);
+               if (!matrix_stats_path_.empty())
+               {
+                  WriteMatrixStatsJson(stats, matrix_stats_path_);
+                  mfem::out << "  [MATRIX-STATS] JSON written to "
+                            << matrix_stats_path_ << "\n";
+               }
+            }
+         }
+
          // K·v diagnostic: apply global K to all-ones vector,
          // dump result at target elements for cross-code comparison.
          if (first_step_debug_.enabled)
@@ -287,11 +313,12 @@
          }
 
 #ifdef MFEM_USE_MUMPS
+         const int mumps_print_level = matrix_stats_enabled_ ? 2 : 1;
          if (solver_type_ == SolverType::MUMPS)
          {
             auto *mumps = new MUMPSSolver(mesh_.GetComm());
             mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(1);
+            mumps->SetPrintLevel(mumps_print_level);
             mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
             solver_.reset(mumps);
          }
@@ -299,7 +326,7 @@
          {
             auto *mumps = new MUMPSSolver(mesh_.GetComm());
             mumps->SetMatrixSymType(MUMPSSolver::MatType::SYMMETRIC_POSITIVE_DEFINITE);
-            mumps->SetPrintLevel(1);
+            mumps->SetPrintLevel(mumps_print_level);
             mumps->SetBLRTol(blr_tol_);
             mumps->SetOperator(*cached_Ah_.As<HypreParMatrix>());
             solver_.reset(mumps);

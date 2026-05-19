@@ -824,6 +824,9 @@ int main(int argc, char *argv[])
    bool verify_parallel = false;  // Run production-mesh verification diagnostics
    double regression_tolerance = -1.0;  // Negative = no regression check
    std::string ref_prefix;               // Reference file prefix (auto-detect if empty)
+   // One-shot stiffness-matrix analysis (writes JSON, optional early exit).
+   bool matrix_stats = false;
+   bool exit_after_factorize = false;
 
    for (int i = 1; i < argc; i++)
    {
@@ -889,6 +892,8 @@ int main(int argc, char *argv[])
       }
       if (arg == "--dump-bdr-vtk") { dump_bdr_vtk = true; }
       if (arg == "--verify") { verify_parallel = true; }
+      if (arg == "--matrix-stats") { matrix_stats = true; }
+      if (arg == "--exit-after-factorize") { exit_after_factorize = true; }
       if (arg == "--bc-mode" && i + 1 < argc) { bc_mode_str = argv[++i]; }
       if (arg == "--psi-init-mode" && i + 1 < argc)
       {
@@ -1549,6 +1554,22 @@ int main(int argc, char *argv[])
    if (check_residual) { domain.SetCheckResidual(true); }
    if (blr_tol != 1e-10) { domain.SetBLRTol(blr_tol); }
    if (match_quad_order) { domain.SetMatchQuadOrder(true); }
+   if (matrix_stats)
+   {
+      const std::string stats_path =
+         output_dir + "/" + output_prefix + "_matrix_stats.json";
+      domain.SetMatrixStatsConfig(true, stats_path);
+      if (mpi.IsRoot())
+      {
+         std::cout << "  [matrix-stats] enabled — JSON -> " << stats_path
+                   << "\n";
+         if (exit_after_factorize)
+         {
+            std::cout << "  [matrix-stats] --exit-after-factorize set: "
+                      << "will stop right after the first domain solve\n";
+         }
+      }
+   }
    if (penalty_factor != 1.0)
    {
       domain.SetPenaltyFactor(penalty_factor);
@@ -1757,6 +1778,26 @@ int main(int argc, char *argv[])
       state.SetSize(actual);  // shrink back; allocation is preserved
    }
    seas_op.SetInitialCondition(state);
+
+   // Matrix-stats / factorization-only mode: bail before the time loop.
+   // The stiffness matrix is assembled and the (MUMPS) solver factorized
+   // inside the first domain solve triggered by SetInitialCondition.
+   // MatrixStats JSON and MUMPS print-level-2 output have already been
+   // written by the elasticity operator.
+   if (exit_after_factorize)
+   {
+      if (mpi.IsRoot())
+      {
+         std::cout
+            << "\n  [matrix-stats] --exit-after-factorize: stiffness matrix "
+            << "assembled and solver factorized; exiting.\n";
+      }
+      MPI_Barrier(MPI_COMM_WORLD);
+#ifdef MFEM_USE_PETSC
+      if (petsc_initialized) { MFEMFinalizePetsc(); }
+#endif
+      return 0;
+   }
 
    real_t V_init = seas_op.GetMaxSlipRate();
    if (mpi.IsRoot())
