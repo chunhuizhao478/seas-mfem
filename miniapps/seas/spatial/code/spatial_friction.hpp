@@ -142,6 +142,12 @@ struct VelocitySpec
    VelocityModel model = VelocityModel::CVMH;
    std::string   dataset_root;
    std::string   override_path;       // "" ⇒ resolve from model
+   // When false, the driver skips the velocity-sidecar load entirely
+   // and uses [material_constant_fallback] for (lambda, mu, rho).  In
+   // that mode `model` / `dataset_root` / `override_path` are ignored
+   // and may be empty.  Equivalent to passing --no-sidecar-material on
+   // the CLI; the CLI flag still wins as an override.
+   bool          use_sidecar = true;
 };
 
 enum class StressSourceKind { ConstantTensor, SidecarHDF5 };

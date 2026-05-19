@@ -262,9 +262,31 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
    dof_to_attr.SetSize(N);
    dof_ips.assign(N, IntegrationPoint());
 
+   // R-005: per-QP basis for curvilinear-face fidelity.  When the caller
+   // populated `bdata.qp_data` (via `FaultBasis::ComputeQPBasis` /
+   // `ComputeQPBasisShared`) the per-QP frame at QP `q` is used; otherwise
+   // we fall back to the centroid frame (planar-face accuracy, byte-
+   // compatible with the pre-R-005 inline walk).
+   auto qp_normal = [](const FaultBasisData &bdata, int q, int d) -> real_t
+   {
+      return (static_cast<int>(bdata.qp_data.size()) > q)
+                ? bdata.qp_data[q].normal[d]   : bdata.normal[d];
+   };
+   auto qp_t1 = [](const FaultBasisData &bdata, int q, int d) -> real_t
+   {
+      return (static_cast<int>(bdata.qp_data.size()) > q)
+                ? bdata.qp_data[q].tangent1[d] : bdata.tangent1[d];
+   };
+   auto qp_t2 = [](const FaultBasisData &bdata, int q, int d) -> real_t
+   {
+      return (static_cast<int>(bdata.qp_data.size()) > q)
+                ? bdata.qp_data[q].tangent2[d] : bdata.tangent2[d];
+   };
+
    auto write_dof = [&](int dof_idx, FaceElementTransformations *ftr,
                         const IntegrationPoint &ip,
                         const FaultBasisData &bdata,
+                        int q,
                         int attr)
    {
       ftr->SetAllIntPoints(&ip);
@@ -275,9 +297,9 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
       for (int d = 0; d < 3; ++d)
       {
          dof_coords_3d(3 * dof_idx + d) = phys(d);
-         dof_basis(0 + d, dof_idx) = bdata.normal[d];
-         dof_basis(3 + d, dof_idx) = bdata.tangent1[d];
-         dof_basis(6 + d, dof_idx) = bdata.tangent2[d];
+         dof_basis(0 + d, dof_idx) = qp_normal(bdata, q, d);
+         dof_basis(3 + d, dof_idx) = qp_t1    (bdata, q, d);
+         dof_basis(6 + d, dof_idx) = qp_t2    (bdata, q, d);
       }
       dof_to_elem[dof_idx] = ftr->Elem1No;
       dof_to_attr[dof_idx] = attr;
@@ -300,7 +322,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
       const FaultBasisData &bdata = fbasis.GetBasis(fi);
       for (int q = 0; q < nbf_per_face; ++q)
       {
-         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, fault_attr);
+         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, q, fault_attr);
       }
    }
 #ifdef MFEM_USE_MPI
@@ -319,7 +341,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
          fbasis.GetBasis(fault_int_faces.Size() + si);
       for (int q = 0; q < nbf_per_face; ++q)
       {
-         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, fault_attr);
+         write_dof(dof_idx++, ftr, ir.IntPoint(q), bdata, q, fault_attr);
       }
    }
 #else
@@ -811,7 +833,38 @@ int main(int argc, char *argv[])
    MaterialField material = MaterialField::MakeConstant(mat_lambda,
                                                         mat_mu, mat_rho);
 
-   if (!no_sidecar_material)
+   // Material-sidecar gating: TOML [velocity].use_sidecar AND no CLI
+   // override.  The CLI flag always wins (it can force the constant
+   // path even when the TOML asks for a sidecar load).
+   const bool sidecar_requested =
+      cfg.velocity.use_sidecar && !no_sidecar_material;
+
+   // R-010 / D-1: heterogeneous WaveOperator(MaterialField) ctor +
+   // per-element flux dispatch is not yet wired (see
+   // dynamic/wave_operator.hpp:215).  A successful sidecar load would
+   // produce a non-Constant MaterialField that the scalar-material
+   // ctor below cannot consume.  Abort BEFORE the multi-minute HDF5
+   // read so the user does not burn a Frontera dev-queue allocation
+   // discovering this after the fact.
+   if (sidecar_requested)
+   {
+      if (rank == 0)
+      {
+         std::cerr << "ERROR: spatial_dyn_driver Phase H gap (D-1): the "
+                   << "heterogeneous WaveOperator(MaterialField) ctor + "
+                   << "per-element flux dispatch is NOT yet wired (see "
+                   << "dynamic/wave_operator.hpp:215).  Re-run with "
+                   << "--no-sidecar-material (or set "
+                   << "[velocity].use_sidecar = false in the TOML) to "
+                   << "use the [material_constant_fallback] block.\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Finalize();
+#endif
+      return 4;
+   }
+
+   if (sidecar_requested)
    {
       try
       {
@@ -831,8 +884,9 @@ int main(int argc, char *argv[])
          {
             std::cerr << "ERROR: failed to load velocity sidecar: "
                       << e.what() << "\n"
-                      << "  Re-run with --no-sidecar-material to use the "
-                      << "[material_constant_fallback] block.\n";
+                      << "  Re-run with --no-sidecar-material (or set "
+                      << "[velocity].use_sidecar = false in the TOML) "
+                      << "to use the [material_constant_fallback] block.\n";
          }
 #ifdef MFEM_USE_MPI
          MPI_Finalize();
@@ -844,7 +898,12 @@ int main(int argc, char *argv[])
    {
       if (rank == 0)
       {
-         std::cout << "[material] using [material_constant_fallback]: "
+         const char *gate_source =
+            (!cfg.velocity.use_sidecar && no_sidecar_material) ? "TOML+CLI"
+            : (!cfg.velocity.use_sidecar)                      ? "TOML"
+            :                                                    "CLI";
+         std::cout << "[material] using [material_constant_fallback] "
+                   << "(gated by " << gate_source << "): "
                    << "lambda=" << mat_lambda
                    << " mu=" << mat_mu
                    << " rho=" << mat_rho << "\n";
@@ -949,6 +1008,39 @@ int main(int argc, char *argv[])
 #ifdef MFEM_USE_MPI
    fbasis.AppendSharedFaces(pmesh, fault_shr_faces, ref_normal, up_vec);
 #endif
+
+   // R-005: populate per-QP basis vectors so curvilinear-face fidelity is
+   // not lost when `BuildPerDOFFaultTables` stamps `dof_basis(*, q)`.
+   // On a rank with no fault faces these calls are no-ops; on a rank with
+   // only shared faces the IR geometry is probed from the first shared
+   // face transformation.  `BuildPerDOFFaultTables` falls back to the
+   // centroid frame if `qp_data` is empty (e.g., planar TPV-style mesh
+   // where the probe IR doesn't match the per-face IR exactly).
+   {
+      FaceElementTransformations *ftr_probe = nullptr;
+      if (fault_int_faces.Size() > 0)
+      {
+         ftr_probe = pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
+      }
+#ifdef MFEM_USE_MPI
+      else if (fault_shr_faces.Size() > 0)
+      {
+         ftr_probe = pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
+      }
+#endif
+      if (ftr_probe)
+      {
+         const IntegrationRule &qp_ir =
+            IntRules.Get(ftr_probe->GetGeometryType(), 2 * cfg.mesh.order);
+         fbasis.ComputeQPBasis(pmesh, fault_int_faces,
+                               ref_normal, up_vec, qp_ir);
+#ifdef MFEM_USE_MPI
+         fbasis.ComputeQPBasisShared(pmesh, fault_shr_faces,
+                                     ref_normal, up_vec, qp_ir,
+                                     fault_int_faces.Size());
+#endif
+      }
+   }
 
    std::vector<Vector>          fault_coords;
    Vector                       dof_coords_3d;
@@ -1119,6 +1211,21 @@ int main(int argc, char *argv[])
    const real_t dt_cfl = wave.ComputeMaxDt(cfg.numerics.cfl);
    real_t dt = (cfg.time.dt_initial > 0.0)
                 ? cfg.time.dt_initial : dt_cfl;
+   // R-006: warn if the user override exceeds the explicit CFL bound.
+   // The ADER substep iterator is conditionally stable in dt; silently
+   // crossing CFL produces nucleation-like blow-up with no error
+   // pointing at the misconfiguration.
+   if (cfg.time.dt_initial > 0.0 && cfg.time.dt_initial > dt_cfl)
+   {
+      if (rank == 0)
+      {
+         std::cerr << "[spatial_dyn] WARNING: [time].dt_initial = "
+                   << cfg.time.dt_initial << " s exceeds CFL bound "
+                   << dt_cfl << " s (cfl = " << cfg.numerics.cfl
+                   << ").  ADER will be unconditionally unstable.  "
+                   << "Tighten dt_initial or raise cfl.\n";
+      }
+   }
    if (cfg.time.dt_max > 0.0 && dt > cfg.time.dt_max)
    {
       if (rank == 0)
@@ -1316,6 +1423,15 @@ int main(int argc, char *argv[])
       }
 #endif
 
+      // R-003: opt back into legacy behaviour where the 8 L2-p0 fault
+      // projection GFs are registered with the primary volume collection.
+      // Without this the dynamic slip / slip_rate / traction / state
+      // channels never reach `volume.vtkhdf` (only the static SAFS
+      // params registered via `SetFaultParamsSpatial` do).  Must be
+      // called BEFORE `InitFaultOutputBP5` (the registration happens
+      // inside that call).
+      pv_out->SetRegisterFaultProjectionsInVolumePV(true);
+
       pv_out->InitFaultOutputBP5(fault_int_faces, fault_shr_faces,
                                  nbf_per_face);
 
@@ -1368,10 +1484,14 @@ int main(int argc, char *argv[])
             pv_tau2_init    (i) = d.tau2_corr;
          }
       }
-      // Parity Phase 6: publish all 8 SAFS static fields via the new
-      // SetFaultParamsSpatial method on seas::ParaViewOutput (added in
-      // io/paraview_output.hpp).  Each field lands in fault.vtkhdf
-      // under its proper SAFS-semantic name (NOT TPV104's a/Dc/x2/x3).
+      // Parity Phase 6: publish all 8 SAFS static fields via
+      // SetFaultParamsSpatial on seas::ParaViewOutput.  Implementation
+      // registers each field with `pv_dc_` (the PRIMARY volume PV
+      // collection), so these fields land in `volume.vtkhdf` under
+      // their SAFS-semantic names (NOT TPV104's a/Dc/x2/x3).  The
+      // companion fault artefact (`fault.vtkhdf`) is populated
+      // separately by `WriteFaultSurfaceVTU` (R-001) and carries the
+      // dynamic slip / slip_rate / traction / state channels.
       // SetFaultParamsSpatial is safe to call on a rank with zero
       // local fault DOFs.
       pv_out->SetFaultParamsSpatial({
@@ -1495,6 +1615,16 @@ int main(int argc, char *argv[])
    // pv_out is up.  No-op when num_fault_total = 0 on this rank.
    Vector pv_local_slip, pv_local_slip_rate, pv_local_traction;
    Vector pv_local_state, pv_local_normal_stress;
+   // R-001: scratch buffers consumed by WriteFaultSurfaceVTU (ADER
+   // one-shot: _k4 copies of the live values so the VTU delta channel
+   // reads zero, mirroring drivers/tpv205_driver.cpp:2252-2259).  The
+   // four `local_a / local_Dc / local_x2 / local_x3` slots in the
+   // TPV-shaped signature stay empty — SAFS-semantic static params are
+   // already registered with `pv_dc_` via `SetFaultParamsSpatial` and
+   // appear in `volume.vtkhdf`.
+   Vector pv_local_slip_rate_k4, pv_local_traction_k4;
+   Vector pv_local_normal_stress_k4;
+   const Vector pv_empty_param;  // unused TPV-shaped param slots
    if (pv_out)
    {
       pv_local_slip.SetSize(2 * num_fault_total);
@@ -1502,6 +1632,9 @@ int main(int argc, char *argv[])
       pv_local_traction.SetSize(2 * num_fault_total);
       pv_local_state.SetSize(num_fault_total);
       pv_local_normal_stress.SetSize(num_fault_total);
+      pv_local_slip_rate_k4.SetSize(2 * num_fault_total);
+      pv_local_traction_k4.SetSize(2 * num_fault_total);
+      pv_local_normal_stress_k4.SetSize(num_fault_total);
    }
 
    // -----------------------------------------------------------------
@@ -1638,6 +1771,16 @@ int main(int argc, char *argv[])
                                 d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
          (void)time;
          pv_local_normal_stress(i)     = d.sigma_n_corr;
+
+         // R-001: ADER one-shot — no stage-4 distinct from averaged
+         // DOFData (mirror of tpv205_driver.cpp:2252-2259).  Writing
+         // the same values into the `_k4` buffers makes the VTU delta
+         // channel read exactly zero.
+         pv_local_slip_rate_k4(2 * i + 0) = d.V1;
+         pv_local_slip_rate_k4(2 * i + 1) = d.V2;
+         pv_local_traction_k4(2 * i + 0)  = d.tau1_corr;
+         pv_local_traction_k4(2 * i + 1)  = d.tau2_corr;
+         pv_local_normal_stress_k4(i)     = d.sigma_n_corr;
       }
 
       // Parity Phase 5: refresh the volume velocity field directly from
@@ -1649,18 +1792,33 @@ int main(int argc, char *argv[])
                      3 * ndof_total * sizeof(real_t));
       }
 
+      // R-002: refresh fault projections unconditionally — they feed
+      // both the volume PV (when registered via R-003) AND the fault
+      // VTU/VTKHDF writer (R-001).  Only the volume save itself
+      // (`ForceSave` → `pv_dc_->Save()`) is gated on the user toggle.
+      pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
+                                   pv_local_traction, pv_local_state,
+                                   pv_local_normal_stress);
       if (pv_out->GetVolumeSaveEnabled())
       {
-         pv_out->UpdateFaultFieldsBP5(pv_local_slip, pv_local_slip_rate,
-                                      pv_local_traction, pv_local_state,
-                                      pv_local_normal_stress);
          pv_out->ForceSave(step_num, time);
-         pv_out->CommitSchedule(time, V_max);
       }
-      else
-      {
-         pv_out->CommitSchedule(time, V_max);
-      }
+      pv_out->CommitSchedule(time, V_max);
+
+      // R-001: write the fault-surface VTU/VTKHDF artefact (the file
+      // `verify_spatial_dyn_smoke_safs.py` opens and the plan
+      // §Acceptance Criteria L491 requires).  Independent of volume
+      // save — fault is its own collection.  The four TPV-shaped
+      // param slots (`local_a / local_Dc / local_x2 / local_x3`) stay
+      // empty: SAFS-semantic static params are already published to
+      // `volume.vtkhdf` via `SetFaultParamsSpatial`.
+      pv_out->WriteFaultSurfaceVTU(
+         cfg.output.output_dir, step_num, time, rank, nprocs,
+         pv_local_slip, pv_local_slip_rate, pv_local_traction,
+         pv_local_state, pv_local_normal_stress,
+         pv_empty_param, pv_empty_param, pv_empty_param, pv_empty_param,
+         pv_local_slip_rate_k4, pv_local_traction_k4,
+         pv_local_normal_stress_k4);
    };
 
    if (restart_prefix.empty())
@@ -1718,7 +1876,15 @@ int main(int argc, char *argv[])
                                , "spatial_dyn");
       }
 
-      if (rank == 0 && (step % 100 == 0 || step == nsteps - 1))
+      // R-008: also print on the step that exhausts `tfinal` so the
+      // "final-step" log fires even when the loop exits via the early
+      // `dt_step <= 0.0` break (when `nsteps = ceil(tfinal/dt)` over-
+      // shoots, the last advance lands on a step != nsteps - 1).
+      const bool reached_tfinal =
+         (t + std::numeric_limits<real_t>::epsilon() >= cfg.time.tfinal);
+      if (rank == 0 && (step % 100 == 0
+                        || step == nsteps - 1
+                        || reached_tfinal))
       {
          std::cout << "step " << step << "/" << nsteps
                    << "  t = " << t << " s"
@@ -1729,7 +1895,14 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    // 21. Final checkpoint.
    // -----------------------------------------------------------------
-   if (cfg.output.checkpoint_every_steps > 0)
+   // R-011: skip when the last in-loop checkpoint already covered
+   // `last_completed_step` — the two writes would be byte-identical
+   // and waste Lustre metadata ops on production.
+   const bool already_checkpointed_final =
+      (cfg.output.checkpoint_every_steps > 0)
+      && (last_completed_step > step0)
+      && (last_completed_step % cfg.output.checkpoint_every_steps == 0);
+   if (cfg.output.checkpoint_every_steps > 0 && !already_checkpointed_final)
    {
       const std::string prefix = cfg.output.output_dir + "/"
                                  + cfg.output.restart_prefix;
@@ -1742,6 +1915,12 @@ int main(int argc, char *argv[])
                             , comm
 #endif
                             , "spatial_dyn");
+   }
+   else if (already_checkpointed_final && rank == 0)
+   {
+      std::cout << "[checkpoint] last in-loop checkpoint already covers "
+                << "step " << last_completed_step
+                << "; skipping redundant final write.\n";
    }
 
    if (rank == 0)

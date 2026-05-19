@@ -96,11 +96,12 @@ Hydrostatic gradient ≈ `1.0e4` Pa/m.
 
 | Key             | Type   | Default       | Validation                                       |
 |-----------------|--------|---------------|--------------------------------------------------|
-| `model`         | string | —             | `"cvmh"`, `"cvm_s4.26.m01"`, `"multiscale_statewise"` |
-| `dataset_root`  | string | —             | non-empty when `override_path` is empty          |
+| `model`         | string | `"cvmh"`      | `"cvmh"`, `"cvm_s4.26.m01"`, `"multiscale_statewise"` |
+| `dataset_root`  | string | `""`          | non-empty when `use_sidecar` is true AND `override_path` is empty |
 | `override_path` | string | `""`          | when non-empty, bypasses model-based resolution  |
+| `use_sidecar`   | bool   | `true`        | when `false`, the driver skips the sidecar load and uses `[material_constant_fallback]` — `model` / `dataset_root` / `override_path` are then ignored and may be empty |
 
-Path resolution (rev-3, R-003 corrected):
+Path resolution (rev-3, R-003 corrected; applies only when `use_sidecar = true`):
 
 ```
 cvmh                 → <dataset_root>/velocity/results/cvmh/velocity_safs.h5
@@ -109,6 +110,15 @@ multiscale_statewise → <dataset_root>/velocity/results/multiscale_statewise_cv
 ```
 
 There is **no `mesh_tag`** in the filename — one sidecar per CVM model.
+
+**CLI interaction.** The CLI flag `--no-sidecar-material` is honoured as an
+override: if either `use_sidecar = false` (TOML) or `--no-sidecar-material`
+(CLI) is set, the constant-fallback path is taken.  The rank-0 startup log
+prints `gated by TOML` / `CLI` / `TOML+CLI` to indicate which source
+forced the constant path.  This combination is intentional: TOMLs that
+require Phase H heterogeneous material (`use_sidecar = true`) can be
+temporarily forced through the scalar path from the CLI without editing
+the file.
 
 ---
 

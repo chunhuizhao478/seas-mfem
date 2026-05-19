@@ -557,11 +557,19 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                               toml_str(v, "model", "cvmh"));
       cfg.velocity.dataset_root = toml_str(v, "dataset_root", std::string());
       cfg.velocity.override_path = toml_str(v, "override_path", std::string());
+      cfg.velocity.use_sidecar  = toml_bool(v, "use_sidecar", true);
    }
-   MFEM_VERIFY(!cfg.velocity.dataset_root.empty()
-               || !cfg.velocity.override_path.empty(),
-               "[velocity] must set either 'dataset_root' "
-               "(for model-based resolution) or 'override_path'");
+   // When use_sidecar = false the driver consumes [material_constant_fallback]
+   // and never reads model/dataset_root/override_path; relax the non-empty
+   // check in that case.
+   if (cfg.velocity.use_sidecar)
+   {
+      MFEM_VERIFY(!cfg.velocity.dataset_root.empty()
+                  || !cfg.velocity.override_path.empty(),
+                  "[velocity] must set either 'dataset_root' "
+                  "(for model-based resolution) or 'override_path' when "
+                  "'use_sidecar' is true (the default)");
+   }
 
    if (root.contains("stress"))
    {

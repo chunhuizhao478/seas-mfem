@@ -647,6 +647,60 @@ static void T_25_paraview_extended_defaults()
                "paraview_interseismic_dt default unset (< 0)");
 }
 
+// T-26 [velocity].use_sidecar = false relaxes the dataset_root /
+// override_path non-empty check (production constant-material posture).
+static void T_26_velocity_use_sidecar_false_relaxes_dataset_root()
+{
+   std::cout << "\n[T-26] [velocity].use_sidecar = false parses with "
+             "empty dataset_root / override_path\n";
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version=1\nlaw=\"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\nP_p_grad_pa_per_m=0\nmin_sigma_n_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       << "[velocity]\nuse_sidecar=false\nmodel=\"cvmh\"\n"
+       << "dataset_root=\"\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\nuse_pml=false\n"
+       << "[time]\ntfinal=\"12s\"\nt_initial=0\ndt_initial=\"auto\"\ndt_max=\"0.1s\"\n"
+       << "[output]\noutput_dir=\"out\"\nrestart_prefix=\"cp\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\ncohesion_default=0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(oss.str());
+   TEST_ASSERT(cfg.velocity.use_sidecar == false,
+               "use_sidecar=false round-trip");
+   TEST_ASSERT(cfg.velocity.dataset_root.empty(),
+               "dataset_root empty when use_sidecar=false");
+}
+
+// T-27 default use_sidecar=true with empty dataset_root + override_path
+// must still abort (back-compat with pre-toggle behaviour).
+static void T_27_velocity_use_sidecar_true_default_still_requires_root()
+{
+   std::cout << "\n[T-27] [velocity] (default use_sidecar=true) with empty "
+             "dataset_root / override_path aborts\n";
+   std::ostringstream oss;
+   oss << "[meta]\nschema_version=1\nlaw=\"slip_weakening\"\n"
+       << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+       << "[pore_pressure]\nP_p_pa=0\nP_p_grad_pa_per_m=0\nmin_sigma_n_pa=0\n"
+       << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+       // use_sidecar omitted ⇒ default true; both paths empty ⇒ abort.
+       << "[velocity]\nmodel=\"cvmh\"\n"
+       << "dataset_root=\"\"\noverride_path=\"\"\n"
+       << "[stress]\nkind=\"constant_tensor\"\n"
+       << "sigma_xx_pa=0\nsigma_yy_pa=0\nsigma_zz_pa=0\n"
+       << "sigma_xy_pa=0\nsigma_yz_pa=0\nsigma_xz_pa=0\n"
+       << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\nuse_pml=false\n"
+       << "[time]\ntfinal=\"12s\"\nt_initial=0\ndt_initial=\"auto\"\ndt_max=\"0.1s\"\n"
+       << "[output]\noutput_dir=\"out\"\nrestart_prefix=\"cp\"\n"
+       << "[friction.slip_weakening]\n"
+       << "mu_s_default=1.1\nmu_d_default=0.5\nd_c_default=0.5\ncohesion_default=0\n";
+   TEST_ASSERT(ParseAbortsInChild(oss.str()),
+               "default use_sidecar=true with empty paths must abort");
+}
+
 // T-12 material fallback bounds
 static void T_12_material_fallback_bounds()
 {
@@ -724,6 +778,8 @@ int main(int, char**)
    T_23_nucleation_kind_typo_aborts();
    T_24_paraview_default_flip();
    T_25_paraview_extended_defaults();
+   T_26_velocity_use_sidecar_false_relaxes_dataset_root();
+   T_27_velocity_use_sidecar_true_default_still_requires_root();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

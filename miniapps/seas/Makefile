@@ -2042,13 +2042,43 @@ $(TEST_SPATIAL_PRINT_DERIVED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 test-spatial-print-derived: seas_test_spatial_print_derived
 	./seas_test_spatial_print_derived
 
-# Phase 4 smoke target: build + dry-run on the EXAMPLE LSW TOML fixture.
+# Phase 4 smoke target: build + dry-run on the production SAFS LSW config.
 test-spatial-dyn-driver: seas_spatial_dyn_driver
 	./seas_spatial_dyn_driver \
-	    --config safs/project_7.0_alternative/friction/EXAMPLE_spatial_friction_slip_weakening_safs.toml \
-	    --mesh safs/project_7.0_alternative/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh \
+	    --config safs/project_7.0_alternative/config/spatial_friction_slip_weakening_safs_projected_stress.toml \
 	    --no-sidecar-material \
 	    --dry-run
+
+# R-001 / R-002 / R-003 regression smoke: run a short (<= 0.01s) rupture
+# with --paraview, then verify that the fault VTU was written AND that
+# the volume VTU registered the dynamic fault projection fields.  VTU
+# (not HDF5) so the smoke runs on builds without MFEM_USE_H5Z_ZFP.
+test-spatial-dyn-driver-paraview-smoke: seas_spatial_dyn_driver
+	rm -rf /tmp/safs_paraview_smoke
+	./seas_spatial_dyn_driver \
+	    --config safs/project_7.0_alternative/config/spatial_friction_slip_weakening_safs_projected_stress.toml \
+	    --no-sidecar-material \
+	    --output-dir /tmp/safs_paraview_smoke \
+	    --tfinal 0.01 \
+	    --paraview \
+	    --paraview-volume vtu --paraview-bulk off --paraview-fault vtu
+	@echo "[R-001] checking fault VTU was written ..."
+	@test -f /tmp/safs_paraview_smoke/FaultSurface/fault_surface_c0.vtu \
+	    || (echo "R-001 FAIL: fault_surface_c0.vtu missing" && exit 1)
+	@grep -q 'Name="slip_rate_dip"' \
+	    /tmp/safs_paraview_smoke/FaultSurface/fault_surface_c0.vtu \
+	    || (echo "R-001 FAIL: slip_rate_dip channel missing" && exit 1)
+	@grep -q 'Name="traction_strike"' \
+	    /tmp/safs_paraview_smoke/FaultSurface/fault_surface_c0.vtu \
+	    || (echo "R-001 FAIL: traction_strike channel missing" && exit 1)
+	@echo "[R-003] checking volume VTU registered dynamic fault fields ..."
+	@grep -q 'Name="slip_rate_dip"' \
+	    /tmp/safs_paraview_smoke/volume/Cycle000000/proc000000.vtu \
+	    || (echo "R-003 FAIL: slip_rate_dip not in volume VTU" && exit 1)
+	@grep -q 'Name="lsw_mu_s"' \
+	    /tmp/safs_paraview_smoke/volume/Cycle000000/proc000000.vtu \
+	    || (echo "R-003 FAIL: lsw_mu_s (SAFS static) not in volume VTU" && exit 1)
+	@echo "[R-001 / R-002 / R-003] paraview-output smoke PASSED"
 
 # Phase 4a: TPV102 local integration tests
 seas_test_tpv102_local: $(TEST_TPV102_LOCAL_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
