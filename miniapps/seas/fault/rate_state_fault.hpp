@@ -138,17 +138,17 @@ public:
                   "BP5 constructor requires BP5 FaultGeometry");
 
       // R-206: this constructor caches geom_->tau_pre_ for the BP5
-      // (non-SAFS) hot path.  ComputeSAFSParams *overwrites* that
+      // (non-SAFS) hot path.  ComputeParams *overwrites* that
       // FaultGeometry member with the sidecar projection
       // (fault_geometry_safs.inl:55-61), so constructing the operator
-      // AFTER ComputeSAFSParams would silently cache the sidecar values
+      // AFTER ComputeParams would silently cache the sidecar values
       // and make SetSAFSMode(false) read sidecar pre-stress through the
       // BP5 path — the opposite of what the user expects.  Abort early
       // to enforce the canonical order:
-      //   ctor → ComputeSAFSParams → SetSAFSMode.
-      MFEM_VERIFY(geom_ == nullptr || !geom_->HasSAFSParams(),
+      //   ctor → ComputeParams → SetSAFSMode.
+      MFEM_VERIFY(geom_ == nullptr || !geom_->HasParams(),
                   "RateStateFaultOperator: BP5 ctor must run BEFORE "
-                  "FaultGeometry::ComputeSAFSParams; otherwise BP5-mode "
+                  "FaultGeometry::ComputeParams; otherwise BP5-mode "
                   "tau_pre_ caches sidecar values silently.");
 
       if (num_nodes_ > 0)
@@ -184,7 +184,7 @@ public:
    ///   - tau_pre_per_dof: 2 * num_fault_dofs (interleaved t1, t2)
    ///   - sigma_n_per_dof: num_fault_dofs
    /// The vectors are usually populated by
-   /// `FaultGeometry::ComputeSAFSParams` (Phase 6 §5).  The operator
+   /// `FaultGeometry::ComputeParams` (Phase 6 §5).  The operator
    /// stores raw pointers; the caller must keep the FaultGeometry
    /// alive for the operator's lifetime.
    ///

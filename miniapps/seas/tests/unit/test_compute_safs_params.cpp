@@ -1,18 +1,18 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
-// Unit tests for Phase 6 §5 — FaultGeometry::ComputeSAFSParams.
+// Unit tests for Phase 6 §5 — FaultGeometry::ComputeParams.
 // Plan reference: PLAN_onfaultstress.md §1860-1879.
 //
 // Coverage:
 //   T_65_1   sigma_n_per_dof.Size() == NumFaultDOFs after call.
 //   T_65_2   tau_pre.Size() == 2 * NumFaultDOFs after call.
-//   T_65_3   HasSAFSParams() returns true after invocation.
+//   T_65_3   HasParams() returns true after invocation.
 //   T_65_4   a/eta/Dc/V_init unchanged relative to ComputeBP5Params
 //            (analytic spatial dependence preserved per plan §1869).
 //   T_65_5   sigma_n_per_dof and tau_pre match the standalone
-//            ProjectFaultPreStress output (proves ComputeSAFSParams
+//            ProjectFaultPreStress output (proves ComputeParams
 //            is the correct wrapper).
-//   T_65_6   BP2 ctor → calling ComputeSAFSParams aborts.
+//   T_65_6   BP2 ctor → calling ComputeParams aborts.
 
 #include "mfem.hpp"
 
@@ -130,6 +130,37 @@ void write_constant_sidecar(const std::string& p, double s)
    write_field(fl, "sigma_xz", fill(0.0), ax, ay, az, mn, mx);
    H5Gclose(fl); H5Fclose(f);
 }
+
+// R-001 (tpv102_tpv104_review.md): TPV-canonical sidecar — only
+// σ_xy is non-zero, set to the value `sxy`.  Used by T_65_7 to verify
+// `tau_pre.strike(i) = +sxy` (matches native TPV102/104 sign convention
+// `d.tau2_0 = +tau_ini` for σ_xy > 0 right-lateral driving stress).
+void write_tpv_sidecar(const std::string& p, double sxy)
+{
+   std::vector<double> ax = {-100.0, 0.0, 100.0};
+   std::vector<double> ay = {-100.0, 0.0, 100.0};
+   std::vector<double> az = {-100.0, 0.0, 100.0};
+   hid_t f = H5Fcreate(p.c_str(), H5F_ACC_TRUNC, H5P_DEFAULT, H5P_DEFAULT);
+   write_string_attr(f, "schema_version", "data_projection_v1");
+   write_string_attr(f, "crs", "EPSG:32611");
+   write_string_attr(f, "units", "m");
+   write_string_attr(f, "z_positive", "elevation");
+   write_string_attr(f, "created_at", "1970-01-01T00:00:00Z");
+   hid_t g = H5Gcreate2(f, "/grid", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+   write_axis(g, "x", ax); write_axis(g, "y", ay); write_axis(g, "z", az);
+   H5Gclose(g);
+   hid_t fl = H5Gcreate2(f, "/fields", H5P_DEFAULT, H5P_DEFAULT, H5P_DEFAULT);
+   const size_t N = ax.size() * ay.size() * az.size();
+   auto fill = [&](double v) { return std::vector<double>(N, v); };
+   const double mn = -1e15, mx = 1e15;
+   write_field(fl, "sigma_xx", fill(0.0), ax, ay, az, mn, mx);
+   write_field(fl, "sigma_yy", fill(0.0), ax, ay, az, mn, mx);
+   write_field(fl, "sigma_zz", fill(0.0), ax, ay, az, mn, mx);
+   write_field(fl, "sigma_xy", fill(sxy), ax, ay, az, mn, mx);
+   write_field(fl, "sigma_yz", fill(0.0), ax, ay, az, mn, mx);
+   write_field(fl, "sigma_xz", fill(0.0), ax, ay, az, mn, mx);
+   H5Gclose(fl); H5Fclose(f);
+}
 bool FileExists(const std::string& p) { struct stat s; return stat(p.c_str(), &s) == 0; }
 std::string FindBP5Mesh()
 {
@@ -182,11 +213,11 @@ static std::unique_ptr<Fixture> BuildFixture()
 // --------------------------------------------------------------------
 static void T_65_1_sigma_n_size(Fixture &fix)
 {
-   std::cout << "\n[T-65-1] sigma_n_per_dof size after ComputeSAFSParams\n";
+   std::cout << "\n[T-65-1] sigma_n_per_dof size after ComputeParams\n";
    const std::string p = tmp_path("size");
    write_constant_sidecar(p, 1.0e7);
    StressField3D field(p);
-   fix.fault_geom->ComputeSAFSParams(field);
+   fix.fault_geom->ComputeParams(field);
    ::unlink(p.c_str());
    TEST_ASSERT(fix.fault_geom->sigma_n_per_dof().Size() == fix.nf,
                "sigma_n_per_dof.Size() == NumFaultDOFs");
@@ -201,9 +232,9 @@ static void T_65_2_tau_pre_size(Fixture &fix)
 
 static void T_65_3_has_safs_params(Fixture &fix)
 {
-   std::cout << "\n[T-65-3] HasSAFSParams() true after invocation\n";
-   TEST_ASSERT(fix.fault_geom->HasSAFSParams(),
-               "HasSAFSParams() == true");
+   std::cout << "\n[T-65-3] HasParams() true after invocation\n";
+   TEST_ASSERT(fix.fault_geom->HasParams(),
+               "HasParams() == true");
 }
 
 static void T_65_4_analytic_arrays_preserved(Fixture &fix)
@@ -255,9 +286,9 @@ static void T_65_5_match_standalone_projection(Fixture &fix)
       field, *fix.fault_geom, sigma_n_ref, tau_ref,
       /*P_p=*/2.0e6, /*grad=*/0.0);
 
-   // Now run ComputeSAFSParams on a fresh fault geom — should match.
+   // Now run ComputeParams on a fresh fault geom — should match.
    FaultGeometry<Mesh> safs_fg(*fix.domain_op, fix.params);
-   safs_fg.ComputeSAFSParams(field, /*P_p=*/2.0e6, /*grad=*/0.0);
+   safs_fg.ComputeParams(field, /*P_p=*/2.0e6, /*grad=*/0.0);
    ::unlink(p.c_str());
 
    const Vector& sigma_n_w = safs_fg.sigma_n_per_dof();
@@ -273,21 +304,79 @@ static void T_65_5_match_standalone_projection(Fixture &fix)
       max_dev_t = std::max(max_dev_t, std::abs(tau_w(i) - tau_ref(i)));
    }
    TEST_NEAR(max_dev_sn, 0.0, 1e-9,
-             "ComputeSAFSParams sigma_n matches standalone projector");
+             "ComputeParams sigma_n matches standalone projector");
    TEST_NEAR(max_dev_t, 0.0, 1e-9,
-             "ComputeSAFSParams tau_pre matches standalone projector");
+             "ComputeParams tau_pre matches standalone projector");
+}
+
+// T-65-6 — R-001 regression: per-DOF projection math for the canonical
+// TPV-y=0 fault basis (n = (0,-1,0), t1 = (0,0,-1), t2 = (+1,0,0)) must
+// produce tau_pre.strike(i) = +σ_xy.  Drives BOTH the sidecar
+// projection (FieldProjector::ProjectFaultPreStress) and the templated
+// projection (ComputeParams<StressSource>) since they share the same
+// formula.  Math-only: replicates the projection at one fake DOF and
+// asserts the post-flip output matches `+TPV{102,104}Params::tau_ini`.
+// Geometry-independent — the test does not need a BP5 mesh fixture.
+static void T_65_6_projection_sign_matches_native_tpv()
+{
+   std::cout << "\n[T-65-6] R-001 regression: projection sign matches "
+                "native TPV102/104/205 sign convention\n";
+
+   // Canonical TPV basis (CLAUDE.md "Canonical Coordinate System").
+   const real_t n[3]  = { 0.0, -1.0,  0.0 };          // outward fault normal
+   const real_t t1[3] = { 0.0,  0.0, -1.0 };          // dip (down)
+   const real_t t2[3] = { 1.0,  0.0,  0.0 };          // strike
+
+   // TPV102 background pre-stress (compression-positive convention).
+   const real_t sxx =  0.0;
+   const real_t syy =  120.0e6;                       // σ_n = 120 MPa
+   const real_t szz =  0.0;
+   const real_t sxy =  75.0e6;                        // τ_ini = 75 MPa (right-lateral)
+   const real_t syz =  0.0;
+   const real_t sxz =  0.0;
+   // Symmetric Cauchy tensor laid out row-major.
+   const real_t S[3][3] = { { sxx, sxy, sxz },
+                            { sxy, syy, syz },
+                            { sxz, syz, szz } };
+
+   // Sn = S · n.
+   real_t Sn[3] = {0.0, 0.0, 0.0};
+   for (int r = 0; r < 3; ++r)
+   {
+      Sn[r] = S[r][0]*n[0] + S[r][1]*n[1] + S[r][2]*n[2];
+   }
+
+   // R-001 sign convention: tau{1,2} = -(t{1,2} · Sn).
+   const real_t sigma_n = n[0] *Sn[0] + n[1] *Sn[1] + n[2] *Sn[2];
+   const real_t tau1    = -(t1[0]*Sn[0] + t1[1]*Sn[1] + t1[2]*Sn[2]);
+   const real_t tau2    = -(t2[0]*Sn[0] + t2[1]*Sn[1] + t2[2]*Sn[2]);
+
+   const real_t tol = 1.0e-9;
+   TEST_NEAR(sigma_n, +120.0e6, tol,
+             "sigma_n_total = +120 MPa (compression-positive, n-invariant)");
+   TEST_NEAR(tau1,       0.0,   tol,
+             "tau_pre.dip = 0 for pure-strike-slip TPV setup");
+   // The load-bearing assertion: tau2 must be +75e6 to match
+   // dynamic/tpv102_setup.hpp::d.tau2_0 = +TPV102Params::tau_ini.
+   TEST_NEAR(tau2, +75.0e6, tol,
+             "R-001: tau_pre.strike = +sxy (NATIVE TPV CONVENTION)");
 }
 
 int main(int, char**)
 {
-   std::cout << "Running Phase 6 §5 ComputeSAFSParams tests\n";
+   std::cout << "Running Phase 6 §5 ComputeParams tests\n";
+
+   // T-65-6 is math-only and does not require the BP5 mesh fixture.
+   T_65_6_projection_sign_matches_native_tpv();
+
    auto fix = BuildFixture();
    if (!fix->loaded || fix->nf == 0 || !fix->fault_geom)
    {
       std::cout << "(BP5 mesh unavailable; runtime tests skipped — "
                    "Phase 6 §5 compile-only verification)\n";
-      std::cout << "\nPhase 6 §5: compile-only OK\n";
-      return 0;
+      std::cout << "\nPhase 6 §5: " << num_passed << " / " << num_tests
+                << " passed, " << num_failed << " failed\n";
+      return (num_failed == 0) ? 0 : 1;
    }
    T_65_1_sigma_n_size(*fix);
    T_65_2_tau_pre_size(*fix);

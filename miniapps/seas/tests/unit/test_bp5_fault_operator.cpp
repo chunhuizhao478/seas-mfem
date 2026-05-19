@@ -68,7 +68,13 @@ static Mesh Create3DMesh(int nx, int ny, int nz,
       real_t tol = 1e-6;
       if (std::abs(center(0) - (-Lx)) < tol)      { mesh.SetBdrAttribute(be, 1); }
       else if (std::abs(center(0) - Lx) < tol)     { mesh.SetBdrAttribute(be, 2); }
-      else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 3); }
+      // attr 3 is the BP5 fault attribute (set by
+      // ElasticityDomainOperator's BoundaryConfig).  The +Ly outer
+      // face is a 1-sided boundary, NOT a fault — tagging it with 3
+      // would collide with the strict fault-validator (REVIEW R-001).
+      // Use attr 7 (unused by the BC machinery) for this fixture's
+      // +Ly face instead.
+      else if (std::abs(center(1) - Ly) < tol)     { mesh.SetBdrAttribute(be, 7); }
       else if (std::abs(center(1) - (-Ly)) < tol)  { mesh.SetBdrAttribute(be, 4); }
       else if (std::abs(center(2) - 0.0) < tol)    { mesh.SetBdrAttribute(be, 5); }
       else if (std::abs(center(2) + Lz) < tol)     { mesh.SetBdrAttribute(be, 6); }
@@ -1020,5 +1026,17 @@ int main()
 
    TEST_PRINT_RESULTS();
 
+   // REVIEW R-002 (round-4): a "0 tests ran" outcome (BP5Fixture::Setup
+   // returning false because GetNumFaultDOFs()==0) silently passes
+   // exit=0 — misleading CI signal.  Treat it as a failure so the
+   // user sees the fixture short-circuit.
+   if (num_tests == 0)
+   {
+      std::cerr << "*** FAIL: 0 tests ran (BP5Fixture::Setup likely "
+                << "returned false because GetNumFaultDOFs()==0).  "
+                << "Fix the fixture to produce fault DOFs or remove "
+                << "the test target.\n";
+      return 1;
+   }
    return num_failed;
 }

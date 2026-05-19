@@ -1,0 +1,240 @@
+# SCEC TPV205 — canonical config for seas_spatial_dyn_driver
+# (PLAN_phase_R_exact_bimaterial_riemann_rev3.md §R.4 step 1).
+#
+# This file mirrors drivers/tpv205_driver.cpp's startup parameters
+# verbatim per `config/tpv205_params.hpp::TPV205Params`:
+#   * Material (homogeneous):  ρ = 2670 kg/m³, c_p = 6000 m/s, c_s = 3464 m/s
+#                              → μ = ρ·c_s² = 32.03811952e9 Pa
+#                              → λ = ρ·c_p² − 2μ = 32.04376096e9 Pa
+#   * LSW friction (inside 30 × 15 km rupture area):
+#                              μ_s = 0.677, μ_d = 0.525, d_c = 0.40 m
+#                 (outside): μ_s = 10 000 (strength barrier), μ_d = 0.525
+#   * Mesh attributes (per tpv205/mesh/tpv2053d_200m.geo lines 208-211):
+#       Physical Surface(101) = top free surface
+#       Physical Surface(103) = fault
+#       Physical Surface(105) = absorbing (four side walls + bottom)
+#   * Hypocenter at (along_strike=0, down_dip=7.5 km) = (0, ?, 7500) in
+#     code coords (the TPV5 frame uses x = along-strike, depth = down-dip).
+#
+# NUCLEATION (spec-exact via static stress patches):
+#   The TPV205 spec puts the 3 nucleation/release patches into the
+#   INITIAL stress field (not as a time-dependent perturbation).  We
+#   encode them with `[stress] kind = "constant_tensor_with_patches"`,
+#   which lays a constant background (70 MPa shear / 120 MPa normal)
+#   and then applies three rectangular sigma_xy overrides at t = 0.
+#
+#   COORDINATE CONVENTION NOTE (REVIEW R-001 fix): all `center_*_m`
+#   and bounding-box fields below are in RAW MESH COORDS, NOT in the
+#   SCEC spec's positive-depth convention.  The TPV205 mesh
+#   (`tpv2053d_*.geo` line 84: `-Width_nucl*Sin(Fault_dip)`) places
+#   the fault z-axis with z = 0 at the free surface and z < 0 below.
+#   The native TPV205 driver converts via `down_dip = std::abs(z)`
+#   (see `dynamic/tpv205_setup.hpp:105`), but the spatial driver
+#   feeds raw mesh-z to `StressPatch::contains` and
+#   `SpatialRule::matches`.  Therefore SPEC depth 7.5 km ⇒ MESH
+#   center_z_m = -7500.
+#
+#     * §7 nucleation patch — (0, 0, -7500)     sigma_xy = 81.6 MPa
+#     * §9 left patch       — (-7500, 0, -7500) sigma_xy = 78.0 MPa
+#     * §8 right patch      — (+7500, 0, -7500) sigma_xy = 62.0 MPa
+#
+#   Each patch is 3 km × 3 km (half-side 1.5 km on x and z), spanning
+#   the full y range (the patch is a 2-D square on the y=0 fault
+#   plane, so `half_y_m` is left at its +inf default).  The nucleation
+#   patch's 81.6 MPa exceeds the static yield stress
+#   μ_s · σ_n = 0.677 · 120 MPa = 81.24 MPa, so rupture initiates at
+#   the central patch from t = 0+ with no time ramp — exactly the
+#   spec behaviour.  See `config/tpv205_params.hpp::TPV205Params` and
+#   `ComputeTau2_0_TPV205` for the byte-for-byte source.
+#
+#   Because the patches are in the INITIAL stress, no [nucleation]
+#   block is needed.  (The optional `square_overstress` nucleation kind
+#   exists for benchmarks that genuinely want a smoothStep-ramped
+#   rectangular perturbation — e.g. TPV5 variants — but TPV205 uses the
+#   static-IC path.)
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV205 — spec-exact 3-patch static IC (no time-ramp approximation)."
+
+[problem]
+tag = "tpv205"
+
+[boundary]
+# Verified against tpv205/mesh/tpv2053d_200m.geo lines 208-211.
+# Per `TPV205Params::bc_*_default` in config/tpv205_params.hpp.
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+# TPV205 fault is the y = 0 plane; rupture propagates in x (along strike)
+# and -z (down dip).  ref_normal / up inherit the canonical SEAS
+# convention (Tandem (0,-1,0)/(0,0,1)) from the schema default — see
+# `miniapps/seas/CLAUDE.md` "Canonical Coordinate System".  TPV102,
+# TPV104, TPV205, and BP5/SAFS all share this fault geometry; only
+# kind is benchmark-specific.
+kind = "tpv205_lsw"
+
+[hypocenter]
+# TPV5 §7: nucleation patch centred at along-strike = 0, down-dip = 7.5 km.
+# REVIEW R-008: z is in MESH coords (z < 0 below the free surface; see
+# `CLAUDE.md` "Canonical Coordinate System"), so spec depth 7.5 km maps
+# to mesh z = -7500.  The parser hard-fails on a positive z with
+# up_z > 0 to catch the SPEC-vs-mesh foot-gun.
+x                   = 0.0
+y                   = 0.0
+z                   = -7500.0
+# Documentation only — the actual nucleation is encoded in the
+# [[stress.patch]] array below.  These values are unused unless a
+# `[nucleation]` block is added (which TPV205 does NOT need).
+nucleation_radius_m = 1500.0
+nucleation_taper_m  = 0.0
+
+[material]
+# Homogeneous (TPV5 §10): values come from [material_constant_fallback].
+kind = "constant"
+
+[material_constant_fallback]
+# Computed from TPV205Params (rho=2670, cs=3464, cp=6000).  These are the
+# AUTHORITATIVE values that the existing TPV205 driver runs with.
+lambda = 32043760960.0       # = 2670 * 6000^2 - 2 * 2670 * 3464^2
+mu     = 32038119520.0       # = 2670 * 3464^2
+rho    = 2670.0
+
+[pore_pressure]
+# TPV5 doesn't use pore-pressure; leave all zero.
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Built via:  gmsh -format msh22 -3 tpv205/mesh/tpv2053d_200m.geo -o tpv205/mesh/tpv2053d_200m.msh
+# (CLAUDE.md "Known limitation — Gmsh .msh format": MFEM requires msh v2.2.)
+path  = "tpv205/mesh/tpv2053d_200m.msh"
+order = 1
+
+[stress]
+# TPV5 §10 background + §7-9 nucleation/release patches.  Compression
+# POSITIVE for σ_n (SEAS physical-stress convention).  REVIEW R-006:
+# components are in the EAST-NORTH-UP Cauchy frame; the projection onto
+# the fault-local (dip, strike) frame happens inside
+# FaultGeometry::ComputeSAFSParams<StressSource>.
+kind        = "constant_tensor_with_patches"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 120.0e6        # background normal stress σ_n on the y = 0 fault
+sigma_zz_pa = 0.0
+sigma_xy_pa = 70.0e6         # background along-strike shear (70 MPa)
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# TPV205 §7: central nucleation patch.  81.6 MPa exceeds the static
+# yield μ_s·σ_n = 81.24 MPa, so rupture starts here at t = 0+.
+# REVIEW R-001: center_z_m is MESH coord, not spec depth.  Spec depth
+# 7.5 km maps to mesh z = -7500 (see header comment above).
+[[stress.patch]]
+center_x_m  = 0.0
+center_y_m  = 0.0
+center_z_m  = -7500.0
+half_x_m    = 1500.0         # 3 km × 3 km square (half-side)
+half_z_m    = 1500.0
+sigma_xy_pa = 81.6e6
+
+# TPV205 §9: left release patch (high stress, sub-yield).
+[[stress.patch]]
+center_x_m  = -7500.0
+center_y_m  = 0.0
+center_z_m  = -7500.0
+half_x_m    = 1500.0
+half_z_m    = 1500.0
+sigma_xy_pa = 78.0e6
+
+# TPV205 §8: right release patch (low stress).
+[[stress.patch]]
+center_x_m  = 7500.0
+center_y_m  = 0.0
+center_z_m  = -7500.0
+half_x_m    = 1500.0
+half_z_m    = 1500.0
+sigma_xy_pa = 62.0e6
+
+[numerics]
+ader_order     = 2
+mixed_flux     = "none"      # REQUIRED for bi-material runs (R.2 R-002)
+cfl            = 0.5
+use_pml        = false
+# REVIEW R-004 / R-005: native-driver dispatch parity (CFL safety + iterator).
+cfl_safety     = "dg"        # cfl /= (3*(2p+1)) — matches tpv205_driver
+fault_iterator = "one-shot"  # O = 1 sub-step — matches tpv205_driver default
+# interior_flux omitted → defaults to "bimaterial" (heterogeneous Riemann
+# solver, the purpose of branch feature/heterogeneous_riemann_solver).
+# Set explicitly to "scalar" only for byte-parity regression against the
+# native TPV205 driver — NEVER for production runs on this branch.
+
+[time]
+tfinal     = "12s"           # TPV5 §III request
+t_initial  = "0s"
+dt_initial = "auto"
+dt_max     = "0.01s"
+
+[output]
+output_dir              = "tpv205/out"
+restart_prefix          = "cp"
+# Master gate (REVIEW R-004): paraview_enabled MUST be true for the
+# per-collection mode strings below to take effect.  Without it the
+# spatial driver's master gate at spatial_dyn_driver.cpp:1597 forces
+# every collection off regardless of the mode strings.
+paraview_enabled        = true
+paraview_volume         = "off"
+paraview_bulk           = "off"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.05s"
+paraview_bulk_dt        = "0.05s"
+paraview_fault_dt       = "0.001s"
+paraview_volume_zfp_tol = 1e-3
+paraview_bulk_zfp_tol   = 1e-3
+paraview_fault_zfp_tol  = 1e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[friction.slip_weakening]
+# Defaults are the INSIDE-rupture-area values from TPV5 §7.
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+# Strength barrier (TPV5 §11): outside the 30 km × 15 km rupture area
+# the static friction is mu_s = 10000 so rupture cannot escape.  We
+# encode this as a `barrier` spatial rule covering the complement of
+# the rupture area.  The resolver's `barrier` kind matches when ANY of
+# the listed bounds rejects the point — so we list the OUT-OF-RUPTURE
+# bounds in two non-overlapping rules.
+[[friction.slip_weakening.spatial]]
+# Out-of-rupture: |x| > 15 km (along-strike barriers).  The resolver
+# matches when EITHER x_min_m or x_max_m bound rejects, so two rules.
+# REVIEW R-009: epsilon nudge (1 mm) so the boundary DOFs at x = -15000
+# remain INSIDE the rupture area, matching the native driver's
+# `InRuptureArea_TPV205` semantic (`|along_strike| <= 15e3`).  The
+# 0.001 m epsilon is much smaller than any practical mesh spacing
+# (200 m for tpv2053d_200m.geo), so no interior DOF is affected.
+kind     = "barrier"
+x_max_m  = -15000.001 # left  barrier: x < -15 km
+
+[[friction.slip_weakening.spatial]]
+kind     = "barrier"
+x_min_m  =  15000.001 # right barrier: x > +15 km
+
+[[friction.slip_weakening.spatial]]
+# Bottom barrier: depth > 15 km.  Mesh z is NEGATIVE below the free
+# surface (z = 0 at surface; the mesh extends down to z = Zmin = -60 km
+# per tpv2053d_*.geo:56).  "Depth > 15 km" therefore corresponds to
+# mesh z <= -15000, encoded as z_max_m = -15000 (the barrier kind
+# treats x/y/z bounds as a `z >= z_min_m && z <= z_max_m` pair; leaving
+# z_min_m at -inf and tightening z_max_m to -15000 captures DOFs at
+# mesh z in (-inf, -15000], i.e., depth >= 15 km).
+# REVIEW R-009: 1 mm epsilon nudge so DOFs at z = -15000 stay inside
+# the rupture area, matching the native driver.
+kind     = "barrier"
+z_max_m  = -15000.001

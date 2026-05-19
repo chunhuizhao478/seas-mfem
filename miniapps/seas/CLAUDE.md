@@ -19,6 +19,72 @@ MFEM-based SIPG/BR2 Discontinuous Galerkin code for SCEC SEAS benchmark problems
 | SCEC BP5 spec | https://strike.scec.org/cvws/seas/download/SEAS_BP5_QD.pdf |
 | Architecture | `ARCHITECTURE.md` (this directory) |
 
+## Canonical Coordinate System (project-wide)
+
+**This is the single source of truth for fault geometry in mfem-seas.**
+Every benchmark in this project (BP1, BP2, BP5, TPV102, TPV104, TPV205,
+SAFS) is set up in the same Cartesian frame:
+
+| Axis | Meaning | Sign convention |
+|------|---------|-----------------|
+| **x** | along-strike (east) | + = east |
+| **y** | fault-normal | + = away from the canonical "+" side |
+| **z** | vertical | **z = 0 at free surface; z < 0 below** (depth is `\|z\|`) |
+
+The fault is the **y = 0** plane (vertical strike-slip).  The
+`FaultBasis` (Tandem convention) is seeded with:
+
+```
+ref_normal = (0, -1, 0)
+up         = (0,  0, 1)
+```
+
+This is **hard-coded** in `dynamic/wave_operator.inl:349-350`.  The
+`SpatialFrictionConfig` schema default in
+`spatial/code/spatial_friction.hpp::FaultGeometrySpec` matches.  TOML
+configs (TPV102/104/205, BP5/SAFS) should NOT re-state these values;
+they inherit them from the schema default.  The spatial driver
+hard-fails at startup if a TOML overrides them — see REVIEW R-003 in
+`debug_document/general_driver_debug_document/REVIEW.md`.
+
+Derived fault-local frame (from `FaultBasis::ComputeOrientedFrame`,
+`strike = up × n_ref`, `dip = strike × n_ref`):
+
+```
+normal   n  = (0, -1, 0)
+strike   t2 = (+1, 0, 0)
+dip      t1 = (0,  0, -1)   (down into earth)
+```
+
+Consequently in `DOFData`:
+- `V1`, `slip1`, `tau1_0`, `tau1_corr` are the **dip** components.
+- `V2`, `slip2`, `tau2_0`, `tau2_corr` are the **strike** components.
+
+TOML coordinates also use this frame.  E.g. for TPV205's `[hypocenter]`
+at spec depth 7.5 km below the surface:
+
+```
+[hypocenter]
+x = 0.0
+y = 0.0          # on the fault
+z = -7500.0      # MESH z = negative spec depth
+```
+
+Stress patches, friction depth bounds, nucleation centres, etc. all
+use the same `(x, y, z)` mesh-coord triple.  When the SCEC spec lists a
+quantity at "depth 7.5 km", encode it as `center_z_m = -7500.0` in the
+TOML.
+
+### Outliers
+
+- **TPV31** (`tpv31/configs/tpv31.toml`): the spec describes a fault on
+  the **z = 0** plane with **y** as the depth axis (orthogonal
+  geometry).  TPV31 currently overrides ref_normal/up to its own
+  frame, but this trips the spatial driver's R-003 guard.  Rotating
+  TPV31's mesh + TOML into the canonical y = 0 / z = depth frame is a
+  follow-up task tracked separately.  Until then, TPV31 cannot be run
+  through `seas_spatial_dyn_driver`.
+
 ## Critical Numerical Details
 
 These lessons were learned through extensive debugging (v1-v62). Violating any of them causes simulation failure.
@@ -242,12 +308,30 @@ Tests: `pytest miniapps/seas/scripts/test_estimate_output_size.py` (28 currently
 
 ## Spatial driver nucleation mechanism
 
-`seas_spatial_dyn_driver` (the SAFS dynamic-rupture driver) supports a single nucleation kind: **`gradual_overstress`**.  It is a per-DOF shear-stress accumulator that ramps smoothly from 0 to a full-amplitude target `Δτ · F(r)` over `[0, T_nuc_s]`:
+`seas_spatial_dyn_driver` (the SAFS dynamic-rupture driver) supports nucleation via TWO orthogonal mechanisms:
 
-- **Spatial factor** `F(r)`: Gaussian centred on `(center_x_m, center_y_m, center_z_m)` with e-fold radii `radius_dip_m` (down-dip) and `radius_strike_m` (along-strike).  `F = 1` at the centre; numerically zero outside `~3 · radius_*`.
-- **Temporal factor**: SCEC smoothStep function `smoothStep(t, t0) = 0` for `t ≤ 0`, `exp(τ²/(t·(t − 2·t0)))` for `0 < t < t0` (where `τ = t − t0`), `1` for `t ≥ t0`.  `C∞` everywhere except `t = 0`; no step discontinuity unlike one-shot overstress.
-- **Per-sub-step apply**: the resolver writes `ΔS(t, Δt) · F(r) · Δτ` into `DOFData[i].tau1_nuc` (dip) and `DOFData[i].tau2_nuc` (strike) every sub-step; summed over `[0, T_nuc_s]` the increments telescope to the full target.  At `t ≥ T_nuc_s` the accumulator is a no-op.
+1. **Static initial-stress patches** (`[stress] kind = "constant_tensor_with_patches"`).  Background constant Cauchy tensor + one or more `[[stress.patch]]` rectangular overrides applied at t = 0.  This is the spec-exact path for TPV205 — the patches are baked into `tau_pre_` by `FaultGeometry::ComputeSAFSParams<StressSource>` and have ZERO time dependence.  Per-component overrides (NaN sentinel = "inherit background"); last-match-wins on overlap.  Use this when the benchmark's nucleation is part of the *initial condition*, not a time-dependent perturbation.
 
-User-facing schema: `[nucleation] kind = "gradual_overstress"` + `[nucleation.gradual_overstress]` sub-block.  Schema doc: `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`.  Workflow runbook: `safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md`.
+2. **Time-dependent shear-stress perturbations** (`[nucleation]` block).  Per-DOF Δτ accumulator that ramps smoothly from 0 to full amplitude over `[0, T_nuc_s]` using the SCEC smoothStep function.  Two shapes:
+   - `kind = "gradual_overstress"`: Gaussian centred on `(center_*_m)` with e-fold radii `radius_dip_m`/`radius_strike_m`.
+   - `kind = "square_overstress"`: indicator-function rectangular patches via `[[nucleation.square_overstress.patch]]` array (shares one `T_nuc_s`).
+   - Per-sub-step apply writes `ΔS(t, Δt) · F(r) · Δτ` into `DOFData[i].tau1_nuc` (dip) and `tau2_nuc` (strike); summed over `[0, T_nuc_s]` the increments telescope to the full target.  At `t ≥ T_nuc_s` the accumulator is a no-op.
+   - The temporal factor is `smoothStep(t, t0) = 0` for `t ≤ 0`, `exp(τ²/(t·(t − 2·t0)))` for `0 < t < t0`, `1` for `t ≥ t0` — `C∞` everywhere except `t = 0`.
 
-The native TPV104 (rate-state) and TPV205 (instantaneous-overstress LSW) drivers continue to use their own nucleation paths verbatim — `gradual_overstress` is the spatial-driver-specific choice and does NOT touch the TPV*/BP5 byte-exact regression contract.
+3. **Instantaneous overstress** (`[nucleation] kind = "instantaneous_overstress_circular"`).  TPV31-style: circular cosine-tapered Δτ written ONCE into `DOFData::tau{1,2}_nuc` at init (no ramp), with per-DOF µ-scaling (`Δτ(r) · µ(point)/mu_ref_pa`).  Spec formula: full amplitude inside `r ≤ radius_inner_m`, cosine taper `0.5·(1+cos(π·(r-ri)/(ro-ri)))` between `ri` and `ro`, zero outside.  The driver reads µ via `MaterialField::EvalAt` at every fault DOF.
+
+**TPV205 specifically** uses the static-patches path (3 patches at ±7.5 km and 0 along-strike, all at z = 7.5 km, sigma_xy = 81.6/78/62 MPa) — see `tpv205/configs/tpv205.toml`.  Encoding via `gradual_overstress` was previously documented as an "adequate approximation" but produced three documented deviations from spec (Gaussian vs square, ramp vs instantaneous, single patch vs three) and has been retired.
+
+**TPV31 specifically** uses `instantaneous_overstress_circular` nucleation + `depth_proportional` stress + `depth_profile_1d` material + a `[[friction.slip_weakening.spatial]]` rule with the new `cohesion_grad_pa_per_m`/`cohesion_ref_depth_m`/`cohesion_floor_pa` linear-taper fields (for the spec's `C₀(y) = max(0, 0.000425 MPa/m · (2400 - y))` ramp).  See `tpv31/configs/tpv31.toml`.  Sign convention note: SEAS is compression-POSITIVE (matches the proven TPV102/TPV104/TPV205 native drivers — `config/tpv*_params.hpp::sigma_n = 120e6` Pa "(positive compression)").  The TPV31 spec uses compression-NEGATIVE; the toml flips the normal-component signs (`σ_xx, σ_zz: -60 → +60 MPa`) but keeps shear signs (right-lateral `σ_xz = +30` is positive in both conventions).
+
+User-facing schema: `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`.  Workflow runbook: `safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md`.
+
+The native TPV104 (rate-state) and TPV205 (`drivers/tpv205_driver.cpp` — uses `TPV205Params::ComputeTau2_0_TPV205` directly) drivers continue to use their own nucleation paths verbatim — the spatial-driver schema does NOT touch the TPV*/BP5 byte-exact regression contract.
+
+## Bi-material Riemann (Phase R)
+
+Bi-material exact linearised Riemann solver per Pelties et al. 2012 / SeisSol now runs on every interior face of any `WaveOperator` constructed via the `(MaterialField, BoundaryConfig)` ctor.  Verified on TPV205 (homogeneous regression — relative parity ≤ 1.4e-12 on serial, ≤ 1.6e-10 on ParMesh np=4 via the relaxed `T-PHASEH-SCALAR-PARITY` gate) and exercised on a 1D bi-material smoke fixture (`test_phaser_dispatch_smoke` R.2.T-3: two-cell heterogeneous fixture produces per-face flux matrices that differ from the homogeneous case by > 1e-6 relative).  See `safs/project_7.0_alternative/document/PLAN_phase_R_exact_bimaterial_riemann_rev3.md` for the full plan and acceptance gates.
+
+The scalar `WaveOperator(mesh, p, lambda, mu, rho, bc)` ctor is unchanged — every existing TPV / BP5 driver target produces BYTE-IDENTICAL output to the pre-Phase-R baseline (Commit b18bed5).  The bi-material code path is reached only when the heterogeneous ctor is used (`owned_flux_pool_ != nullptr`); the dispatch wraps the FOUR interior-face sites (RK4 local, RK4 shared, ADER local, ADER shared) while the fault-side imposed-state sites stay verbatim.
+
+`MixedFluxMode != None` is mutually exclusive with the heterogeneous ctor (R.2 R-002) — both replace the same interior-face flux; combining them would double-modify it.  `SetMixedFluxMode` aborts with a precise message if the heterogeneous ctor was used.

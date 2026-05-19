@@ -123,16 +123,33 @@ static SimResult RunTPV102(Mesh &mesh, int order, real_t tfinal, real_t cfl_fact
    result.V_max = 0.0;
    result.stable = true;
 
-   // Boundary config
+   // Boundary config.  CreateTestMesh tags only attr 1 (free surface)
+   // and attr 5 (absorbing); no face has attr 3.  Post-v9.0.0
+   // (commit 8dd7341, R-204), WaveOperator's per-Mult guard aborts
+   // when `bc.fault_attr > 0` unless fault_flux_/fault_dof_data_ are
+   // also wired (the pre-v9.0.0 welded-flux fallback is gone).  Set
+   // fault_attr = 0 explicitly — the default in BoundaryConfig is 3,
+   // which would trip the same guard — to declare "no fault" for
+   // this BC-only / wave-propagation-only fixture.
    BoundaryConfig bc;
    bc.natural_attrs = {1};     // free surface
-   bc.fault_attr = 3;          // fault
+   bc.fault_attr = 0;          // no fault on this inline Cartesian mesh
    bc.absorbing_attrs = {5};   // absorbing
 
    // Wave operator
    WaveOperator wave(mesh, order,
                      TPV102Params::lambda, TPV102Params::mu, TPV102Params::rho,
                      bc);
+
+   // Post-v9.0.0 (commit 8dd7341) the absorbing/free-surface BC dispatch
+   // requires the bulk background Q_bg to be set explicitly.  Q here is a
+   // pure perturbation field (Q(t=0) = 0 from InitializeState), so Q_bg = 0
+   // is the natural fluctuation-Q background.  See wave_operator.hpp:370
+   // "Setting to nullptr clears the background (reverts to fluctuation
+   // semantics)" — we use the explicit zero array form, which satisfies
+   // the has_bulk_bg_ guard at wave_operator.inl:2960.
+   real_t Q_bg_zero[NUM_STATE] = {0.0};
+   wave.SetAbsorbingBackground(Q_bg_zero);
 
    int ndof_total = wave.GetScalarNDof();
 

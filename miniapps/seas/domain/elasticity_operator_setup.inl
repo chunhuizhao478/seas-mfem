@@ -501,43 +501,59 @@
 
       std::set<FaceVertexKey> local_tagged_fault;
       std::set<FaceVertexKey> local_tagged_dir_recoverable;  // interior/shared only
+
+      // R-006: build a single lface_to_sface map once instead of
+      // scanning shared faces inside the per-boundary-element loop.
+      std::unordered_map<int, int> lf2sf;
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+#ifdef MFEM_USE_MPI
+         for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
+         {
+            lf2sf[mesh_.GetSharedFace(sf)] = sf;
+         }
+#endif
+      }
+
       for (int be = 0; be < mesh_.GetNBE(); be++)
       {
          int attr = mesh_.GetBdrAttribute(be);
          if (attr != fault_attr && !dir_attrs.count(attr)) { continue; }
          int face_idx = mesh_.GetBdrElementFaceIndex(be);
          FaceVertexKey key = MakeFaceKey(face_idx, gvert);
+
          if (attr == fault_attr)
          {
+            // Fault attrs MUST be on 2-sided interior or shared faces
+            // (split-mesh convention).  A 1-sided outer-boundary fault
+            // tag is almost always a mesh-construction bug — keep the
+            // strict tagging so the bidirectional equality check
+            // surfaces the issue loudly.  Tests that need an unused
+            // outer attribute should use a non-conflicting number
+            // (e.g., 7), not fault_attr (REVIEW R-001).
             local_tagged_fault.insert(key);
          }
          else
          {
-            // Is this face interior or shared? If so, it's recoverable.
-            bool is_interior = (mesh_.GetInteriorFaceTransformations(face_idx)
-                                != nullptr);
+            // Dirichlet attrs can legitimately be on 1-sided outer
+            // faces (far-field BC on +Lx, etc.).  Only the interior /
+            // shared subset is "recoverable" through the face_bc_
+            // machinery; 1-sided cases are handled elsewhere.  Filter
+            // to that subset before adding to the recoverable set.
+            const bool is_interior =
+               (mesh_.GetInteriorFaceTransformations(face_idx) != nullptr);
             bool is_shared = false;
             if constexpr (IsParallelMesh<MeshType>::value)
             {
 #ifdef MFEM_USE_MPI
-               if (!is_interior)
+               if (!is_interior && lf2sf.find(face_idx) != lf2sf.end())
                {
-                  // Check if face_idx corresponds to a shared face
-                  for (int sf = 0; sf < mesh_.GetNSharedFaces(); sf++)
-                  {
-                     if (mesh_.GetSharedFace(sf) == face_idx)
-                     {
-                        is_shared = true;
-                        break;
-                     }
-                  }
+                  is_shared = true;
                }
 #endif
             }
-            if (is_interior || is_shared)
-            {
-               local_tagged_dir_recoverable.insert(key);
-            }
+            if (!is_interior && !is_shared) { continue; }
+            local_tagged_dir_recoverable.insert(key);
          }
       }
       std::set<FaceVertexKey> global_tagged_fault =

@@ -22,7 +22,7 @@
 
 // Forward declarations to avoid pulling FieldProjector / StressField3D
 // into every translation unit that uses FaultGeometry.  Phase 6 §5's
-// ComputeSAFSParams calls FieldProjector::ProjectFaultPreStress which
+// ComputeParams calls FieldProjector::ProjectFaultPreStress which
 // is defined in io/field_coefficient.cpp with explicit instantiations
 // for Mesh and ParMesh; callers that exercise SAFS-mode must link
 // field_coefficient.o.
@@ -473,7 +473,7 @@ public:
    /// the returned vector is empty.
    ///
    /// Phase 6.A — used by FieldProjector::ProjectFaultPreStress and
-   /// FaultGeometry::ComputeSAFSParams for sidecar lookups.
+   /// FaultGeometry::ComputeParams for sidecar lookups.
    const Vector &fault_dof_coords_3d() const { return dof_coords_3d_; }
 
    /// @brief Get per-DOF orthonormal fault basis [9 x NumFaultDOFs].
@@ -575,31 +575,36 @@ public:
 
    /// @brief Get per-DOF normal stress [NumFaultDOFs].
    ///
-   /// Populated by `ComputeSAFSParams` only — empty in the standard BP5
+   /// Populated by `ComputeParams` only — empty in the standard BP5
    /// path (which uses the scalar `bp5_params_.sigma_n`).
    const Vector &sigma_n_per_dof() const { return sigma_n_per_dof_; }
 
-   /// @brief Whether ComputeSAFSParams has been invoked successfully.
-   bool HasSAFSParams() const { return safs_params_computed_; }
+   /// @brief Whether ComputeParams has been invoked successfully.
+   bool HasParams() const { return params_computed_; }
 
-   /// @brief Phase 6 §5 — SAFS-mode pre-stress initialisation.
+   /// @brief Phase 6 §5 — pre-stress initialisation from a six-component
+   /// stress sidecar.  Used project-wide (SAFS, TPV102/104/205, TPV31)
+   /// via the templated overload below; this overload handles the
+   /// `StressField3D` sidecar input.  Renamed from `ComputeSAFSParams`
+   /// to `ComputeParams` for general use (per `tpv102_tpv104_review.md`
+   /// R-001 directive: "no special case for the TPV sign convention —
+   /// it IS the project-wide convention").
    ///
    /// Parallel slot to ComputeBP5Params: keeps the analytic spatial
    /// `a(x2, x3)`, `Dc(x2, x3)`, `V_init(x2, x3)` and `eta` from
    /// `bp5_params_`, but replaces the analytic `tau0_vec(x2, x3)` and
-   /// scalar `bp5_params_.sigma_n` with sidecar-sourced per-DOF values
-   /// (R-501/R-502 pass-through; the source-site sign flip lives in
-   /// Phase 3 `bulk_stress_tensor_field`).
+   /// scalar `bp5_params_.sigma_n` with sidecar-sourced per-DOF values.
    ///
    /// On return, `tau_pre_` and `sigma_n_per_dof_` are populated; the
    /// remaining BP5-state arrays are unchanged from `ComputeBP5Params`.
-   /// `safs_params_computed_` is set to `true` so consumers can branch
-   /// on it via `HasSAFSParams()`.
+   /// `params_computed_` is set to `true` so consumers can branch on
+   /// it via `HasParams()`.
    ///
-   /// NOTE: SAFS-specific spatial `a(x)` / `Dc(x)` analytic forms are
-   /// out of scope here (plan §1869); the BP5 functions are reused as
-   /// a placeholder.  Substitute when the production analytic forms
-   /// are available.
+   /// Sign convention (CLAUDE.md project-wide, matches native
+   /// TPV102/104/205 drivers): positive `tau_pre(2*i+1)` represents
+   /// right-lateral driving stress in the +strike direction.  See
+   /// `FieldProjector::ProjectFaultPreStress` for the projection
+   /// implementation.
    ///
    /// @param field             Six-component sidecar reader.
    /// @param P_p_pa            Constant pore-pressure offset [Pa].
@@ -609,10 +614,10 @@ public:
    /// @param min_sigma_n_pa    Optional Pa-valued floor on the
    ///                           effective normal stress; default 0
    ///                           means no clamp.
-   void ComputeSAFSParams(const StressField3D& field,
-                          real_t P_p_pa = 0.0,
-                          real_t P_p_grad_pa_per_m = 0.0,
-                          real_t min_sigma_n_pa = 0.0);
+   void ComputeParams(const StressField3D& field,
+                      real_t P_p_pa = 0.0,
+                      real_t P_p_grad_pa_per_m = 0.0,
+                      real_t min_sigma_n_pa = 0.0);
 
    /// @brief Templated overload for any StressSource3D-conformant type
    /// (Phase 3b of spatial_dynamic_rupture_plan.md rev-3).
@@ -621,11 +626,12 @@ public:
    ///   `mfem::DenseMatrix S::Evaluate(real_t x, real_t y, real_t z) const`
    /// satisfies the concept and is accepted by this template.  Overload
    /// resolution always selects the non-templated
-   /// `ComputeSAFSParams(const StressField3D&, ...)` overload above
-   /// for `StressField3D` arguments (a non-template wins by C++
+   /// `ComputeParams(const StressField3D&, ...)` overload above for
+   /// `StressField3D` arguments (a non-template wins by C++
    /// overload-ranking rules), so the BP5 byte-exact contract is
-   /// preserved — this template fires only for *other* sources, e.g.
-   /// `mfem::seas::spatial::ConstantTensorStressSource`.
+   /// preserved — this template fires for *other* sources, e.g.
+   /// `mfem::seas::spatial::ConstantTensorStressSource` (TPV102/104,
+   /// SAFS) and `ConstantTensorWithPatchesStressSource` (TPV205).
    ///
    /// The body lives in `fault/fault_geometry_safs_templated.inl`.
    /// Callers that need the templated overload must include both
@@ -636,10 +642,10 @@ public:
    /// `fault_geometry_safs.inl` non-template body) and never
    /// instantiate this template.
    template <typename StressSource>
-   void ComputeSAFSParams(const StressSource& source,
-                          real_t P_p_pa = 0.0,
-                          real_t P_p_grad_pa_per_m = 0.0,
-                          real_t min_sigma_n_pa = 0.0);
+   void ComputeParams(const StressSource& source,
+                      real_t P_p_pa = 0.0,
+                      real_t P_p_grad_pa_per_m = 0.0,
+                      real_t min_sigma_n_pa = 0.0);
 
    /// @brief Find the DOF index closest to a target depth.
    ///
@@ -794,9 +800,9 @@ private:
    int          num_zero_normal_fallbacks_ = 0;   // basis slot zeroed
    int          num_t1_fallbacks_ = 0;            // up-vector fallback
 
-   // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeSAFSParams)
+   // Phase 6 §5: per-DOF normal stress (populated by ComputeParams)
    Vector sigma_n_per_dof_;       // [num_fault_dofs_]
-   bool   safs_params_computed_ = false;
+   bool   params_computed_ = false;
 
    // Phase 5a of spatial_dynamic_rupture_plan.md (rev-3): per-DOF
    // reference IntegrationPoint cache + per-DOF bulk-element ownership

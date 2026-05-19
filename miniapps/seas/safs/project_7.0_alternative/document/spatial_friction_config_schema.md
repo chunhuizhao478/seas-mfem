@@ -112,23 +112,56 @@ There is **no `mesh_tag`** in the filename — one sidecar per CVM model.
 
 ---
 
-## `[stress]` (D-1)
+## `[stress]` (D-1 + TPV205 patches extension)
 
-Two modes; exactly one is populated.
+Four modes; exactly one is populated.
 
-| Key                          | Mode             | Unit | Default | Validation                       |
-|------------------------------|------------------|------|---------|----------------------------------|
-| `kind`                       | always           | str  | —       | `"constant_tensor"` or `"sidecar_hdf5"` |
-| `sigma_xx_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sigma_yy_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sigma_zz_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sigma_xy_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sigma_yz_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sigma_xz_pa`                | constant_tensor  | Pa   | `0.0`   | required; absent in sidecar mode |
-| `sidecar_path`               | sidecar_hdf5     | str  | `""`    | required; absent in constant mode |
+| Key                          | Mode                                  | Unit | Default | Validation                       |
+|------------------------------|---------------------------------------|------|---------|----------------------------------|
+| `kind`                       | always                                | str  | —       | `"constant_tensor"`, `"sidecar_hdf5"`, `"depth_proportional"`, or `"constant_tensor_with_patches"` |
+| `sigma_xx_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sigma_yy_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sigma_zz_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sigma_xy_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sigma_yz_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sigma_xz_pa`                | constant_tensor / *_with_patches      | Pa   | `0.0`   | required; absent in sidecar/depth_proportional modes |
+| `sidecar_path`               | sidecar_hdf5                          | str  | `""`    | required; absent in other modes |
 
 Cauchy tensor is in EAST-NORTH-UP frame, **compression positive** (SEAS
 convention, matches `stress/code/hickman_and_zoback_*`).
+
+### `[[stress.patch]]` (required when `kind = "constant_tensor_with_patches"`)
+
+One or more rectangular static patches that REPLACE individual Cauchy
+components at t = 0 on top of the background `sigma_*_pa` tensor.
+Encodes the TPV205-family multi-patch initial-stress field exactly
+(byte-for-byte equivalent to `TPV205Params::ComputeTau2_0_TPV205`).
+Document order; last patch wins on overlap, per component.
+
+Indicator: a DOF at physical coord (x, y, z) is inside the patch when
+`|x - center_x_m| <= half_x_m` AND likewise for y, z.  Missing
+`half_*_m` defaults to `+inf` (no constraint along that axis), so a
+2-D square on the y = 0 fault plane sets `half_x_m` and `half_z_m`
+and omits `half_y_m`.
+
+| Key            | Unit | Default      | Validation                                |
+|----------------|------|--------------|-------------------------------------------|
+| `center_x_m`   | m    | NaN          | required when `half_x_m` is finite       |
+| `center_y_m`   | m    | NaN          | required when `half_y_m` is finite       |
+| `center_z_m`   | m    | NaN          | required when `half_z_m` is finite       |
+| `half_x_m`     | m    | `+inf`       | `>= 0` when finite                        |
+| `half_y_m`     | m    | `+inf`       | `>= 0` when finite                        |
+| `half_z_m`     | m    | `+inf`       | `>= 0` when finite                        |
+| `sigma_xx_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+| `sigma_yy_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+| `sigma_zz_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+| `sigma_xy_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+| `sigma_yz_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+| `sigma_xz_pa`  | Pa   | NaN          | optional; NaN ⇒ inherit background       |
+
+Each patch MUST set at least one `sigma_*_pa` (otherwise the patch is
+a no-op) AND at least one finite `half_*_m` (otherwise it spans the
+whole domain).
 
 ---
 
@@ -188,7 +221,7 @@ sub-block.
 
 | Key    | Type   | Default | Validation                  |
 |--------|--------|---------|-----------------------------|
-| `kind` | string | —       | `"gradual_overstress"` (only supported kind) |
+| `kind` | string | —       | `"gradual_overstress"`, `"square_overstress"`, or `"instantaneous_overstress_circular"` |
 
 ### `[nucleation.gradual_overstress]` (required when `kind = "gradual_overstress"`)
 
@@ -245,6 +278,78 @@ Rate-and-state runs (`law = "rate_state"`) ignore the `[nucleation]`
 block entirely — nucleation in the rate-state path is achieved via
 the `V_init` field, not via a stress accumulator.
 
+### `[nucleation.square_overstress]` (required when `kind = "square_overstress"`)
+
+Same temporal mechanism as `gradual_overstress` (per-DOF Δτ
+accumulator, SCEC smoothStep ramp over `[0, T_nuc_s]`) but with a
+RECTANGULAR indicator-function spatial shape instead of a Gaussian.
+The block contains one global `T_nuc_s` shared across all patches and
+a `[[nucleation.square_overstress.patch]]` array.
+
+For a static TPV205-style nucleation (zero ramp), use
+`[stress] kind = "constant_tensor_with_patches"` instead — that path
+bakes the patches into `tau_pre_` at t = 0 (no ramp), which is the
+spec interpretation for SCEC TPV205.  `square_overstress` exists for
+TPV5-family benchmarks that genuinely want a smoothStep-ramped
+rectangular perturbation on top of an otherwise-uniform initial
+stress.
+
+| Key       | Unit | Default | Validation                              |
+|-----------|------|---------|-----------------------------------------|
+| `T_nuc_s` | s    | —       | required; `> 0`; same role as in gradual_overstress |
+
+#### `[[nucleation.square_overstress.patch]]` (one or more)
+
+| Key                   | Unit | Default | Validation                        |
+|-----------------------|------|---------|-----------------------------------|
+| `center_x_m`          | m    | `0.0`   | required when `half_x_m` is finite |
+| `center_y_m`          | m    | `0.0`   | required when `half_y_m` is finite |
+| `center_z_m`          | m    | `0.0`   | required when `half_z_m` is finite |
+| `half_x_m`            | m    | `+inf`  | `>= 0` when finite                |
+| `half_y_m`            | m    | `+inf`  | `>= 0` when finite                |
+| `half_z_m`            | m    | `+inf`  | `>= 0` when finite                |
+| `delta_tau_dip_pa`    | Pa   | `0.0`   | may be 0                          |
+| `delta_tau_strike_pa` | Pa   | `0.0`   | may be 0                          |
+
+Patch indicator: `|x - center_x_m| <= half_x_m` AND likewise for y, z.
+Overlap semantics: last patch in the array wins.
+
+### `[nucleation.instantaneous_overstress_circular]` (required when `kind = "instantaneous_overstress_circular"`)
+
+TPV31-style nucleation: circular cosine-tapered overstress applied
+INSTANTANEOUSLY at t = 0 (no smoothStep ramp), with per-DOF µ-scaling.
+Spec formula (SCEC TPV31 §"Nucleation Shear Stress"):
+
+```
+tau_nuke(r) =
+   delta_tau_peak_pa · (µ(point) / mu_ref_pa)            if r ≤ radius_inner_m
+   (delta_tau_peak_pa / 2) · (1 + cos(π·(r-ri)/(ro-ri))) · (µ(point) / mu_ref_pa)
+                                                          if ri ≤ r ≤ ro
+   0                                                      otherwise
+```
+
+where `r = sqrt((x-cx)² + (y-cy)² + (z-cz)²)`, `ri = radius_inner_m`,
+`ro = radius_outer_m`.  The driver writes the full per-DOF amplitude
+into `DOFData::tau{1,2}_nuc` once during init; the per-sub-step
+nucleation hook is a no-op for this kind.
+
+| Key                 | Unit | Default          | Validation                       |
+|---------------------|------|------------------|----------------------------------|
+| `center_x_m`        | m    | `0.0`            | hypocenter x                     |
+| `center_y_m`        | m    | `0.0`            | hypocenter y                     |
+| `center_z_m`        | m    | `0.0`            | hypocenter z                     |
+| `radius_inner_m`    | m    | —                | required; `> 0`; full-amp radius |
+| `radius_outer_m`    | m    | —                | required; `>= radius_inner_m`    |
+| `delta_tau_peak_pa` | Pa   | `0.0`            | peak Δτ at µ = mu_ref_pa         |
+| `mu_ref_pa`         | Pa   | `32.03812032e9`  | `> 0`; µ_0 in the spec (TPV5/31)  |
+| `dip_fraction`      | —    | `0.0`            | fraction routed to tangent1=dip  |
+| `strike_fraction`   | —    | `1.0`            | fraction routed to tangent2=strike|
+
+Use case: TPV31 (pure right-lateral) — `dip_fraction = 0`,
+`strike_fraction = 1`.  For a dip-slip benchmark, swap to
+`dip_fraction = 1, strike_fraction = 0`.  Polarity flips by negative
+values.
+
 ---
 
 ## `[friction.slip_weakening]` (required when `law = "slip_weakening"`)
@@ -279,10 +384,26 @@ Per-key overrides (NaN sentinel = "do not override"):
 
 - `mu_s`, `mu_d`, `d_c` (alias `d_o`), `cohesion`
 
+**Depth-linear cohesion taper** (TPV31-style; optional):
+
+| Key                       | Unit | Default | Validation                              |
+|---------------------------|------|---------|-----------------------------------------|
+| `cohesion_grad_pa_per_m`  | Pa/m | NaN     | optional; when set, requires `cohesion_ref_depth_m` |
+| `cohesion_ref_depth_m`    | m    | NaN     | required when `cohesion_grad_pa_per_m` is set |
+| `cohesion_floor_pa`       | Pa   | `0.0`   | `>= 0`; lower clamp                     |
+| `cohesion_taper_axis`     | str  | `"y"`   | one of `"x"`, `"y"`, `"z"`              |
+
+Formula: `cohesion = max(floor, floor + grad · (ref_depth - axis_coord))`.
+When `cohesion_grad_pa_per_m` is set, this OVERRIDES any constant
+`cohesion` field above (the constant is ignored).  TPV31 encoding:
+`grad = 425, ref_depth = 2400, floor = 0, axis = "y"` reproduces
+`C₀(y) = max(0, 0.000425 MPa/m · (2400 - y))` exactly.
+
 Nucleation is entirely time-domain (`[nucleation]` block, kind =
-`gradual_overstress`); friction spatial rules NEVER override
-`tau_pre_*` or `sigma_n`.  (The `nucleation_box` kind that existed in
-rev-1 and rev-2 was removed in rev-3.)
+`gradual_overstress` / `square_overstress` /
+`instantaneous_overstress_circular`); friction spatial rules NEVER
+override `tau_pre_*` or `sigma_n`.  (The `nucleation_box` kind that
+existed in rev-1 and rev-2 was removed in rev-3.)
 
 **Barrier (R-114):** `kind = "barrier"` locks the DOF.  The resolver
 internally sets `mu_s = 1.0e6` (the existing `fault_face_flux.hpp`

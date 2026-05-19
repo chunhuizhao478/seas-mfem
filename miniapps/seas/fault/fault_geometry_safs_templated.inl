@@ -1,17 +1,20 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // fault_geometry_safs_templated.inl — out-of-class definition of the
-// TEMPLATED `FaultGeometry<MeshType>::ComputeSAFSParams<StressSource>`
-// overload (Phase 3b of spatial_dynamic_rupture_plan.md rev-3).
+// TEMPLATED `FaultGeometry<MeshType>::ComputeParams<StressSource>`
+// overload (Phase 3b of spatial_dynamic_rupture_plan.md rev-3;
+// renamed from `ComputeSAFSParams` to `ComputeParams` for general use
+// across TPV102/104/205, TPV31, and SAFS).
 //
 // This file is split from `fault_geometry_safs.inl` so that:
-//   1. The existing non-templated overload's body (defined in
-//      `fault_geometry_safs.inl`) is preserved VERBATIM — no edits.
+//   1. The non-templated overload's body lives next to it in
+//      `fault_geometry_safs.inl`.
 //   2. The templated body is a *separate* function with its own copy
 //      of the per-DOF projection loop.  It does NOT call into the
-//      existing `FieldProjector::ProjectFaultPreStress` helper (which
-//      is hard-coded to `StressField3D` and stays unchanged for the
-//      BP5 byte-exact contract).
+//      `FieldProjector::ProjectFaultPreStress` helper (which is
+//      hard-coded to `StressField3D`).  The sign convention applied
+//      to `tau1` / `tau2` MUST match the non-templated overload —
+//      see below.
 //
 // Callers that want the templated overload include both this file AND
 // `fault_geometry.hpp`.  BP5 / TPV callers that only want the
@@ -33,23 +36,23 @@ namespace seas
 
 template <typename MeshType>
 template <typename StressSource>
-void FaultGeometry<MeshType>::ComputeSAFSParams(
+void FaultGeometry<MeshType>::ComputeParams(
    const StressSource& source,
    real_t P_p_pa,
    real_t P_p_grad_pa_per_m,
    real_t min_sigma_n_pa)
 {
    MFEM_VERIFY(is_bp5_,
-               "FaultGeometry::ComputeSAFSParams<StressSource>: only the "
+               "FaultGeometry::ComputeParams<StressSource>: only the "
                "3-D / BP5 constructor populates per-DOF coords / basis; "
-               "the BP2 ctor cannot be used in SAFS mode.");
+               "the BP2 ctor cannot be used here.");
 
    if (num_fault_dofs_ == 0)
    {
       // Match the non-templated overload's early-out exactly: do NOT
       // touch tau_pre_ here.  (See fault_geometry_safs.inl §37–42.)
       sigma_n_per_dof_.SetSize(0);
-      safs_params_computed_ = true;
+      params_computed_ = true;
       return;
    }
 
@@ -65,11 +68,11 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
    const DenseMatrix& basis  = dof_basis_;
 
    MFEM_VERIFY(coords.Size() == 3 * num_fault_dofs_,
-               "ComputeSAFSParams<StressSource>: dof_coords_3d_ size "
+               "ComputeParams<StressSource>: dof_coords_3d_ size "
                << coords.Size() << " != 3 * num_fault_dofs " <<
                (3 * num_fault_dofs_));
    MFEM_VERIFY(basis.Height() == 9 && basis.Width() == num_fault_dofs_,
-               "ComputeSAFSParams<StressSource>: dof_basis_ shape ("
+               "ComputeParams<StressSource>: dof_basis_ shape ("
                << basis.Height() << ", " << basis.Width()
                << ") != (9, " << num_fault_dofs_ << ")");
 
@@ -99,8 +102,27 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
          Sn[r] = S(r, 0) * n[0] + S(r, 1) * n[1] + S(r, 2) * n[2];
       }
       const real_t sigma_n_total = n[0]*Sn[0]  + n[1]*Sn[1]  + n[2]*Sn[2];
-      const real_t tau1          = t1[0]*Sn[0] + t1[1]*Sn[1] + t1[2]*Sn[2];
-      const real_t tau2          = t2[0]*Sn[0] + t2[1]*Sn[1] + t2[2]*Sn[2];
+      // Sign convention (CLAUDE.md project-wide, set by the proven native
+      // TPV102/104/205 drivers): positive `tau2_0` represents the
+      // right-lateral driving stress in the +strike direction, e.g.,
+      //   drivers/tpv102_driver.cpp + dynamic/tpv102_setup.hpp:
+      //      d.tau2_0 = TPV102Params::tau_ini   ( = +75e6 for σ_xy = +75e6 )
+      //   drivers/tpv205_driver.cpp:
+      //      d.tau2_0 = ComputeTau2_0_TPV205(...)   ( returns +tau_back etc. )
+      //
+      // The raw Cauchy projection T = σ·n with n = (0,-1,0) returns the
+      // traction the +y side exerts on the −y side (which is in the
+      // OPPOSITE sense to the driving-stress convention used by the
+      // native drivers — Newton's 3rd-law mirror).  Negate `tau1` /
+      // `tau2` so the projection result feeds `DOFData::tau{1,2}_0`
+      // in the same sign convention as the native TPV setup.
+      //
+      // `sigma_n_total = n·S·n` is unchanged (it is sign-invariant
+      // under n → −n).
+      //
+      // See debug_document/general_driver_debug_document/tpv102_tpv104_review.md R-001.
+      const real_t tau1          = -(t1[0]*Sn[0] + t1[1]*Sn[1] + t1[2]*Sn[2]);
+      const real_t tau2          = -(t2[0]*Sn[0] + t2[1]*Sn[1] + t2[2]*Sn[2]);
 
       const real_t depth_below = std::max(static_cast<real_t>(0.0), -z);
       const real_t P_p         = P_p_pa + P_p_grad_pa_per_m * depth_below;
@@ -119,13 +141,13 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
 
    if (clamp_count > 0)
    {
-      mfem::out << "FaultGeometry::ComputeSAFSParams<StressSource>: clamped "
+      mfem::out << "FaultGeometry::ComputeParams<StressSource>: clamped "
                 << clamp_count << " / " << num_fault_dofs_
                 << " fault DOFs to min_sigma_n_pa = "
                 << min_sigma_n_pa << " Pa\n";
    }
 
-   safs_params_computed_ = true;
+   params_computed_ = true;
 }
 
 } // namespace seas

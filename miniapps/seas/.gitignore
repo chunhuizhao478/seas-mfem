@@ -147,3 +147,13 @@ safs/project_7.0_alternative/friction/*.pdf
 
 # CFM CAD originals (STEP files, large; regenerable from upstream CFM).
 safs/CFM_data_step/*.step
+
+# TPV run output dirs (checkpoints, stations, ParaView output — 100s of MB each).
+tpv102/out/
+tpv104/out/
+tpv205/out/
+tpv31/out/
+tpv102/results_*/
+tpv104/results_*/
+tpv205/results_*/
+tpv31/results_*/

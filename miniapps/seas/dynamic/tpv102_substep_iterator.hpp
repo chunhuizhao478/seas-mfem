@@ -45,6 +45,7 @@
 #include "tpv102_nucleation.hpp"
 #include "../friction/state_evolution.hpp"
 
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -123,6 +124,26 @@ public:
       real_t t_macro_start,
       real_t *I_imp_plus_flat,
       real_t *I_imp_minus_flat,
+      FrictionSolver::Method method
+         = FrictionSolver::Method::NewtonRaphsonStable);
+
+   /// @brief Callback-aware overload.  Replaces the hard-coded
+   /// `ApplyNucleationIncremental_TPV102` call with a user-supplied
+   /// `nuc_callback(t_substep_end, dt_substep)`, fired ONCE per sub-step
+   /// BEFORE the per-QP friction pipeline.  The callback MUST mutate
+   /// only the `DOFData::tau{1,2}_nuc / sigma_n_nuc` channels.  Pass
+   /// `[](real_t, real_t){}` to opt out entirely.  Mirrors the
+   /// callback-aware overload added on `Tpv205SubStepIterator` (Phase N).
+   void AdvanceWithSubStepStates(
+      std::vector<DOFData> &dof_data,
+      const std::vector<Vector> &fault_coords,
+      const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+      const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+      real_t dt_macro,
+      real_t t_macro_start,
+      real_t *I_imp_plus_flat,
+      real_t *I_imp_minus_flat,
+      const std::function<void(real_t, real_t)> &nuc_callback,
       FrictionSolver::Method method
          = FrictionSolver::Method::NewtonRaphsonStable);
 

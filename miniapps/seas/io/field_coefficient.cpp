@@ -483,8 +483,18 @@ void FieldProjector::ProjectFaultPreStress(
       }
 
       const real_t sigma_n_total = n[0]  * Sn[0] + n[1]  * Sn[1] + n[2]  * Sn[2];
-      const real_t tau1          = t1[0] * Sn[0] + t1[1] * Sn[1] + t1[2] * Sn[2];
-      const real_t tau2          = t2[0] * Sn[0] + t2[1] * Sn[1] + t2[2] * Sn[2];
+      // Sign convention (CLAUDE.md, project-wide): positive `tau{1,2}_pre`
+      // represents driving stress in the +dip / +strike direction —
+      // matches `DOFData::tau{1,2}_0 = +TPV*Params::tau_ini` hard-coded
+      // by the native TPV102/104/205 drivers.  The raw Cauchy projection
+      // T = σ·n with n = (0,-1,0) returns the traction the +y side
+      // exerts on the −y side (Newton's 3rd-law mirror of the driving
+      // stress), so flip the sign on `tau1` / `tau2`.  `sigma_n_total
+      // = n·S·n` is sign-invariant under n → −n and stays as-is.
+      //
+      // See debug_document/general_driver_debug_document/tpv102_tpv104_review.md R-001.
+      const real_t tau1          = -(t1[0] * Sn[0] + t1[1] * Sn[1] + t1[2] * Sn[2]);
+      const real_t tau2          = -(t2[0] * Sn[0] + t2[1] * Sn[1] + t2[2] * Sn[2]);
 
       // Effective normal stress: subtract pore pressure with optional
       // depth gradient.  z > 0 means above the free surface; clamp

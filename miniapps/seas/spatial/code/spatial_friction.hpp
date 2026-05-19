@@ -31,7 +31,7 @@
 #include "mfem.hpp"
 
 #include "../../dynamic/heterogeneous_material.hpp"
-#include "../../dynamic/spatial_nucleation.hpp"   // GradualOverstressSpec
+#include "../../dynamic/spatial_nucleation.hpp"   // GradualOverstressSpec, SquareOverstressSpec
 
 #include <array>
 #include <limits>
@@ -69,6 +69,99 @@ real_t SpatialTimeParseSeconds(const std::string& s);
 
 enum class FrictionLawKind { SlipWeakening, RateState };
 
+// =====================================================================
+//  Phase R.3 new top-level sections (plan §R.3 Detailed Requirements 1
+//  + plan §"Constraints" Convention constraints).
+// =====================================================================
+
+/// `[problem]` — free-form benchmark tag written into checkpoints'
+/// `driver_tag` field and printed at startup.  Human-use only; no
+/// code branches on this value.  Default "safs" preserves the
+/// existing SAFS hardcoded behaviour.
+struct ProblemSpec
+{
+   std::string tag = "safs";
+};
+
+/// `[boundary]` — mesh-attribute → BC-class mapping.  Single fault
+/// attribute; lists for natural (free-surface / traction-free) and
+/// absorbing.  Defaults match the existing SAFS hardcoded values:
+/// fault=101, natural=[102], absorbing=[103, 104].
+struct BoundarySpec
+{
+   int              fault_attr      = 101;
+   std::vector<int> natural_attrs   = {102};
+   std::vector<int> absorbing_attrs = {103, 104};
+};
+
+/// `[fault_geometry]` — FaultBasis seed orientation + FaultGeometry
+/// ctor / friction-law dispatch selector.
+///
+/// CANONICAL SEAS COORDINATE CONVENTION (REVIEW R-003 fix):
+/// Defaults match the Tandem-convention vertical y=0 fault used by
+/// TPV102 / TPV104 / TPV205 and the wave operator's INTERNAL FaultBasis
+/// at `dynamic/wave_operator.inl:349-350`:
+///     ref_normal = (0, -1, 0)
+///     up         = (0,  0, 1)
+/// These values are project-wide canonical for any planar y=0 fault.
+/// The spatial driver hard-fails at startup if a TOML overrides
+/// ref_normal/up to a different vector, because the wave operator's
+/// internal FaultBasis is hard-coded; an external override would put
+/// pre-stress (`tau_pre`) in a different fault-local frame from the
+/// runtime trial traction (REVIEW R-003).  See
+/// `miniapps/seas/CLAUDE.md` "Canonical Coordinate System".
+///
+/// `kind` values:
+///   * "bp5_safs"  — existing SAFS Phase 5a ctor with BP5Params seed.
+///   * "tpv205_lsw" — TPV205-style: planar fault, LSW, hypocenter-
+///                    centred strength-reduction nucleation.
+///   * "tpv31_lsw"  — TPV31-style: planar fault, 1D bi-material,
+///                    LSW with depth-dependent cohesion taper +
+///                    tau_nuke circular zone (overstress nucleation).
+///                    NOTE: TPV31's spec uses a different fault
+///                    geometry (fault on z=0 with y as depth axis).
+///                    Until TPV31 is rotated into the canonical
+///                    y=0/depth=-z frame (follow-up task), TPV31
+///                    configs explicitly override ref_normal/up and
+///                    will trip the R-003 guard in the spatial driver.
+struct FaultGeometrySpec
+{
+   std::array<real_t, 3> ref_normal = { 0.0, -1.0, 0.0 };
+   std::array<real_t, 3> up         = { 0.0,  0.0, 1.0 };
+   std::string           kind       = "bp5_safs";
+};
+
+/// `[hypocenter]` — nucleation patch geometry.  All units SI (metres).
+/// `nucleation_taper_m` is the linear cosine taper width beyond
+/// `nucleation_radius_m` over which the nucleation perturbation
+/// (StrengthReduction for TPV205, Overstress for TPV31) ramps to 0.
+struct HypocenterSpec
+{
+   real_t x                   = 0.0;
+   real_t y                   = 7500.0;
+   real_t z                   = 0.0;
+   real_t nucleation_radius_m = 1400.0;
+   real_t nucleation_taper_m  = 600.0;   // TPV31 uses 1400→2000 (taper=600)
+};
+
+/// `[material]` kind selector — picks how (lambda, mu, rho) varies
+/// across the mesh.  Defaults to "constant" (uses
+/// `MaterialConstantFallback` from the existing
+/// `[material_constant_fallback]` block).
+enum class MaterialKind
+{
+   Constant,           ///< MaterialField::MakeConstant from fallback
+   DepthProfile1D,     ///< Piecewise-1D profile parsed below
+   SidecarHDF5         ///< Existing sidecar bundle path
+};
+
+struct MaterialSpec
+{
+   MaterialKind                  kind         = MaterialKind::Constant;
+   std::vector<DepthProfileLayer> profile_layers;   // only when kind=DepthProfile1D
+   char                          depth_axis   = 'y'; // TPV31 spec p. 3
+};
+
 struct PorePressureSpec
 {
    real_t P_p_pa            = 0.0;
@@ -95,6 +188,41 @@ struct NumericsSpec
    std::string mixed_flux = "none";
    real_t      cfl        = 0.5;
    bool        use_pml    = false;
+
+   /// CFL safety-factor convention (REVIEW R-004).
+   ///   "raw"  — pass `cfl` directly to `WaveOperator::ComputeMaxDt`
+   ///            (SAFS legacy behaviour; dt = cfl_mixed_flux_factor *
+   ///             cfl * h_min / cp).
+   ///   "dg"   — pre-scale `cfl` by the DG safety factor
+   ///            1 / (3*(2*order+1)) before calling ComputeMaxDt; this
+   ///            matches the native TPV102/TPV104/TPV205 drivers
+   ///            (cfl_native = cfl / 9 for order=1).  Required for
+   ///            byte parity with the native driver outputs.
+   /// Default = "raw" preserves existing SAFS configs.
+   std::string cfl_safety = "raw";
+
+   /// Sub-step iterator quadrature (REVIEW R-005).
+   ///   "one-shot" — O = 1 sub-step per macro-step (matches native
+   ///                TPV205 default `--fault-iterator one-shot`).
+   ///   "substep"  — O = ader_order sub-steps per macro-step (per-
+   ///                sub-step ADER quadrature for tighter friction
+   ///                resolution at higher cost).
+   /// Default = "one-shot" for native TPV205 parity.
+   std::string fault_iterator = "one-shot";
+
+   /// Interior-face flux dispatch (REVIEW R-006).
+   ///   "bimaterial" — use the heterogeneous WaveOperator ctor;
+   ///                  every interior face runs the exact bi-material
+   ///                  Riemann solver (Phase R).  Even Mode::Constant
+   ///                  input routes through this path, with ~1e-12
+   ///                  relative drift from the scalar ctor.  Default;
+   ///                  required for any sidecar / depth-profile / etc.
+   ///                  spatially-varying material.
+   ///   "scalar"     — use the scalar WaveOperator(λ, μ, ρ) ctor;
+   ///                  byte-identical to native TPV102/TPV104/TPV205
+   ///                  for homogeneous material.  Aborts if
+   ///                  cfg.material.kind != Constant.
+   std::string interior_flux = "bimaterial";
 };
 
 struct TimeSpec
@@ -144,12 +272,81 @@ struct VelocitySpec
    std::string   override_path;       // "" ⇒ resolve from model
 };
 
-enum class StressSourceKind { ConstantTensor, SidecarHDF5 };
+enum class StressSourceKind
+{
+   ConstantTensor,
+   SidecarHDF5,
+   DepthProportionalToShearModulus,   // Phase R.5 (TPV31)
+   ConstantTensorWithPatches          // TPV205-style static square patches
+};
+
+/// @brief Per-patch override of the background constant tensor for
+/// `StressSourceKind::ConstantTensorWithPatches`.
+///
+/// A DOF at physical coord (x, y, z) is INSIDE the patch when
+/// `|x - center_x_m| <= half_x_m` AND likewise for y, z; missing/NaN
+/// `half_*_m` means "no constraint along that axis" (use `+inf`
+/// internally), so a 2D square patch on a planar y=0 fault is encoded
+/// by setting `half_x_m`/`half_z_m` to 1500 m and leaving `half_y_m`
+/// unset.
+///
+/// Each `sigma_*_pa` is a NaN-sentinel override: NaN ⇒ inherit the
+/// component from the background tensor; finite value ⇒ replace that
+/// component inside the patch.  TPV205 patches override `sigma_xy_pa`
+/// (along-strike shear) only; the normal-stress component stays at
+/// 120 MPa from the background.
+///
+/// Multiple patches may cover the same DOF; the LAST patch in the
+/// `[[stress.patch]]` array wins on per-component overrides (matches
+/// the spatial-friction-rule convention: "document order; last-match
+/// wins per key").
+struct StressPatch
+{
+   real_t center_x_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t center_y_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t center_z_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t half_x_m   = std::numeric_limits<real_t>::infinity();
+   real_t half_y_m   = std::numeric_limits<real_t>::infinity();
+   real_t half_z_m   = std::numeric_limits<real_t>::infinity();
+
+   real_t sigma_xx_pa = std::numeric_limits<real_t>::quiet_NaN();
+   real_t sigma_yy_pa = std::numeric_limits<real_t>::quiet_NaN();
+   real_t sigma_zz_pa = std::numeric_limits<real_t>::quiet_NaN();
+   real_t sigma_xy_pa = std::numeric_limits<real_t>::quiet_NaN();
+   real_t sigma_yz_pa = std::numeric_limits<real_t>::quiet_NaN();
+   real_t sigma_xz_pa = std::numeric_limits<real_t>::quiet_NaN();
+
+   /// True iff (x, y, z) lies inside all 3 half-width bounds.
+   bool contains(real_t x, real_t y, real_t z) const
+   {
+      return std::abs(x - center_x_m) <= half_x_m
+          && std::abs(y - center_y_m) <= half_y_m
+          && std::abs(z - center_z_m) <= half_z_m;
+   }
+};
+
+/// Phase R.5: TPV31 depth-proportional pre-stress.  Per spec p. 6, the
+/// six stress components are stored at the reference shear modulus
+/// `mu_ref_pa` (= 32.038e9 Pa for TPV5/TPV31 layered profile) and
+/// scaled at each fault DOF by the LOCAL `mu(y) / mu_ref`.  The
+/// driver applies this scaling at fault-DOF init time via the
+/// `DepthProportionalToShearModulusStressSource` in spatial_stress.cpp.
+struct DepthProportionalStressSpec
+{
+   real_t sigma_xx_per_mu = 0.0;   // MPa (TOML), converted to Pa internally
+   real_t sigma_yy_per_mu = 0.0;
+   real_t sigma_zz_per_mu = 0.0;
+   real_t sigma_xy_per_mu = 0.0;
+   real_t sigma_yz_per_mu = 0.0;
+   real_t sigma_xz_per_mu = 0.0;
+   real_t mu_ref_pa       = 32.03812032e9;  // TPV5/TPV31 spec
+};
 
 struct StressSpec
 {
    StressSourceKind kind = StressSourceKind::ConstantTensor;
-   // ConstantTensor (Phase 3b):
+   // ConstantTensor (Phase 3b) — also reused as the BACKGROUND tensor
+   // for ConstantTensorWithPatches.
    real_t sigma_xx_pa = 0.0;
    real_t sigma_yy_pa = 0.0;
    real_t sigma_zz_pa = 0.0;
@@ -158,6 +355,12 @@ struct StressSpec
    real_t sigma_xz_pa = 0.0;
    // SidecarHDF5 (Phase 3):
    std::string sidecar_path;
+   // DepthProportionalToShearModulus (Phase R.5 / TPV31):
+   DepthProportionalStressSpec depth_proportional;
+   // ConstantTensorWithPatches — zero or more static square patches
+   // applied on top of the background sigma_*_pa tensor.  See
+   // StressPatch.  TPV205 uses 3 patches.
+   std::vector<StressPatch> patches;
    // Common:
    PorePressureSpec pore_pressure;
 };
@@ -168,7 +371,7 @@ struct StressSpec
 /// from the stress source.
 struct SpatialRule
 {
-   enum class Kind { Depth, Box, RegionAttribute, Barrier };
+   enum class Kind { Depth, Box, RegionAttribute, Barrier, BoxcarTaper };
    Kind kind = Kind::Depth;
 
    real_t x_min_m = -std::numeric_limits<real_t>::infinity();
@@ -179,11 +382,52 @@ struct SpatialRule
    real_t z_max_m =  std::numeric_limits<real_t>::infinity();
    int    region_attr = -1;
 
+   // BoxcarTaper geometry (SCEC TPV101/102/104 Eq. (5) C∞ tanh boxcar).
+   //   B(x; W, w) = 1                       for |x − c| ≤ W
+   //              = 0.5(1 + tanh(w/(s−W−w) + w/(s−W)))
+   //                                          where s = |x − c|
+   //                                        for W < |x − c| < W + w
+   //              = 0                       for |x − c| ≥ W + w
+   // The rule applies a product `B(x) · B(y) · B(z)` along the
+   // constrained axes (any axis with `boxcar_half_*_m == NaN` is
+   // treated as B = 1, i.e., unconstrained on that axis).  Per
+   // parameter (a, b, Dc, V_init, V_w, mu_s, ...) the override blends
+   // the prior baseline into the override using this product:
+   //   value = baseline + (override − baseline) · B_total
+   // so B_total = 1 ⇒ value = override (inside) and B_total = 0 ⇒
+   // value = baseline (outside).  When `kind != BoxcarTaper`, every
+   // `boxcar_*_m` is NaN/+inf and ignored.
+   real_t boxcar_center_x_m = 0.0;
+   real_t boxcar_center_y_m = 0.0;
+   real_t boxcar_center_z_m = 0.0;
+   real_t boxcar_half_x_m   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t boxcar_half_y_m   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t boxcar_half_z_m   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t boxcar_trans_x_m  = std::numeric_limits<real_t>::quiet_NaN();
+   real_t boxcar_trans_y_m  = std::numeric_limits<real_t>::quiet_NaN();
+   real_t boxcar_trans_z_m  = std::numeric_limits<real_t>::quiet_NaN();
+
    // Per-key overrides.  NaN sentinel means "do not override".
    real_t mu_s    = std::numeric_limits<real_t>::quiet_NaN();
    real_t mu_d    = std::numeric_limits<real_t>::quiet_NaN();
    real_t d_c     = std::numeric_limits<real_t>::quiet_NaN();
    real_t cohesion= std::numeric_limits<real_t>::quiet_NaN();
+
+   // Depth-linear cohesion taper (TPV31-style: C0(y) = max(0, floor +
+   // grad * (ref_depth - y))).  When `cohesion_grad_pa_per_m` is NaN
+   // the linear taper is disabled and the `cohesion` override above
+   // applies as a constant.  When set, the linear taper takes
+   // precedence over `cohesion` (which is then ignored).
+   //
+   // Spec convention: positive `grad` means cohesion DECREASES with
+   // depth (`y` increasing).  For TPV31:
+   //   ref_depth = 2400 m, floor = 0 Pa, grad = 425 Pa/m
+   //   → C0(y) = max(0, 0 + 425 · (2400 - y))
+   //   → C0(0) = 1.02 MPa; C0(2400) = 0; C0(y>2400) = 0
+   real_t cohesion_grad_pa_per_m  = std::numeric_limits<real_t>::quiet_NaN();
+   real_t cohesion_ref_depth_m    = std::numeric_limits<real_t>::quiet_NaN();
+   real_t cohesion_floor_pa       = 0.0;
+   char   cohesion_taper_axis     = 'y';   // 'x' | 'y' | 'z'
 
    real_t a       = std::numeric_limits<real_t>::quiet_NaN();
    real_t b       = std::numeric_limits<real_t>::quiet_NaN();
@@ -193,6 +437,7 @@ struct SpatialRule
    real_t V_0     = std::numeric_limits<real_t>::quiet_NaN();
    real_t sigma_n = std::numeric_limits<real_t>::quiet_NaN();
    real_t eta     = std::numeric_limits<real_t>::quiet_NaN();
+   real_t V_w     = std::numeric_limits<real_t>::quiet_NaN();  ///< SRW only
 
    /// `matches` semantics per §Phase 1 Detailed Req. 4:
    ///   Depth            : only z bounds checked.
@@ -200,17 +445,66 @@ struct SpatialRule
    ///   RegionAttribute  : only region_attr checked.
    ///   Barrier          : same as Depth, plus any non-infinite
    ///                      x/y bounds also apply.
+   ///   BoxcarTaper      : always matches; the C∞ boxcar product
+   ///                      (computed by `BoxcarTaperFactor`) is the
+   ///                      blend weight applied by the resolver.
    bool matches(real_t x, real_t y, real_t z, int attr) const;
+
+   /// @brief SCEC C∞ Boxcar product B(x)·B(y)·B(z) for this rule.
+   /// Axes with `boxcar_half_*_m == NaN` are treated as B = 1.  Each
+   /// constrained axis requires both `boxcar_half_*_m` and
+   /// `boxcar_trans_*_m` to be finite and ≥ 0 (validated by the
+   /// parser).  Returns a value in `[0, 1]`.
+   real_t BoxcarTaperFactor(real_t x, real_t y, real_t z) const;
 };
 
-/// @brief Phase N — the single nucleation mechanism for the spatial
-/// driver is `gradual_overstress` (per-DOF Δτ accumulator,
-/// smoothStep-ramped, Gaussian-shaped).  The obsolete `StrengthReduction`
-/// (TPV26/27 §Part 4) and `Overstress` (TPV205-style one-shot) kinds were
-/// removed from the spatial code path.  Native TPV* drivers keep their
-/// own paths via `dynamic/tpv104_nucleation.hpp` + the still-live
+/// @brief Stand-alone SCEC C∞ Boxcar function B(|s − center|; W, w).
+/// Generic helper exposed for unit tests and re-use; the SpatialRule
+/// `BoxcarTaperFactor` is a 3-axis product of this scalar.
+real_t SCECBoxcar(real_t signed_offset, real_t half_width, real_t transition);
+
+/// @brief Phase N — nucleation mechanisms for the spatial driver:
+///   * `GradualOverstress` (Phase N): per-DOF Δτ accumulator,
+///     smoothStep-ramped, Gaussian-shaped.
+///   * `SquareOverstress` (TPV5/TPV205-family extension): per-DOF Δτ
+///     accumulator, smoothStep-ramped, indicator-function (sharp
+///     rectangular) shape with one or more disjoint patches.
+///   * `InstantaneousOverstressCircular` (TPV31): per-DOF Δτ written
+///     ONCE at init (no ramp), circular cosine-tapered shape, per-DOF
+///     µ-scaling.
+///
+/// The obsolete `StrengthReduction` (TPV26/27 §Part 4) and `Overstress`
+/// (TPV205-style one-shot) kinds were removed from the spatial code
+/// path.  Native TPV* drivers keep their own paths via
+/// `dynamic/tpv104_nucleation.hpp` + the still-live
 /// `FaultFrictionLaw::LSW_ForcedRupture` flux dispatch.
-enum class NucleationKind { GradualOverstress };
+enum class NucleationKind
+{
+   GradualOverstress,
+   SquareOverstress,
+   InstantaneousOverstressCircular,
+   GradualOverstressCompactCircular   ///< SCEC TPV101/102/104 spec Eq. (13)
+};
+
+/// @brief Stringify a NucleationKind for banners / logs.  Returns
+/// pointer to a static C string; safe to embed in std::string.
+/// (R-010 of tpv102_tpv104_review.md: the spatial driver's startup
+/// banner must echo the actual kind, not a hard-coded "gradual_overstress".)
+inline const char* NucleationKindToString(NucleationKind k)
+{
+   switch (k)
+   {
+   case NucleationKind::GradualOverstress:
+      return "gradual_overstress";
+   case NucleationKind::SquareOverstress:
+      return "square_overstress";
+   case NucleationKind::InstantaneousOverstressCircular:
+      return "instantaneous_overstress_circular";
+   case NucleationKind::GradualOverstressCompactCircular:
+      return "gradual_overstress_compact_circular";
+   }
+   return "unknown";
+}
 
 /// @brief Top-level `[nucleation]` TOML block.  When absent in the
 /// TOML, `enabled == false` and the driver runs with no nucleation
@@ -218,9 +512,12 @@ enum class NucleationKind { GradualOverstress };
 /// `InitializeFaultDOFs_Spatial`).
 struct NucleationSpec
 {
-   NucleationKind        kind     = NucleationKind::GradualOverstress;
-   bool                  enabled  = false;
-   GradualOverstressSpec gradual_overstress;
+   NucleationKind                              kind = NucleationKind::GradualOverstress;
+   bool                                        enabled = false;
+   GradualOverstressSpec                       gradual_overstress;
+   SquareOverstressSpec                        square_overstress;
+   InstantaneousOverstressCircularSpec         instantaneous_overstress_circular;
+   GradualOverstressCompactCircularSpec        gradual_overstress_compact_circular;
 };
 
 struct SlipWeakeningBlock
@@ -232,8 +529,16 @@ struct SlipWeakeningBlock
    std::vector<SpatialRule> spatial;
 };
 
+/// State evolution choice for rate-and-state friction.  `AgingLaw`
+/// (Dieterich–Ruina aging) is the default and what BP5 / TPV102 use.
+/// `SlipLawStrongRateWeakening` (FVW / SCEC FL=103) adds two parameters
+/// `f_w` and `V_w` consumed by `SlipLawSRWPsi` — see `dynamic/`
+/// `tpv104_substep_iterator.{hpp,cpp}` and `friction/slip_law_srw_psi.hpp`.
+enum class StateEvolutionKind { AgingLaw, SlipLawStrongRateWeakening };
+
 struct RateStateBlock
 {
+   StateEvolutionKind        state_evolution = StateEvolutionKind::AgingLaw;
    real_t f_0_default        = 0.6;
    real_t V_0_default        = 1.0e-6;
    bool   eta_auto           = true;
@@ -243,6 +548,20 @@ struct RateStateBlock
    real_t Dc_default         = 0.004;
    real_t V_init_default     = 1.0e-9;
    real_t sigma_n_default    = 50.0e6;
+   // Slip-law-strong-rate-weakening parameters (only consumed when
+   // state_evolution == SlipLawStrongRateWeakening).
+   //
+   // R-007 (tpv102_tpv104_review.md): under the AgingLaw branch
+   // (TPV102), these fields are read from TOML but are NEVER consumed
+   // by the friction solver — do not assume they are honoured at
+   // aging-law DOFs.  A future refactor that exposes `f_w` to the
+   // aging-law path must reinstate the per-DOF validator currently
+   // gated on `state_evolution == SlipLawStrongRateWeakening` (see
+   // `spatial_friction.cpp::resolve_rs_impl`).  TPV102 toml may omit
+   // these knobs; TPV104 toml must set them to the FL=103 spec
+   // (`f_w = 0.2`, `V_w_default = 1.0` outside the VW core).
+   real_t f_w_default        = 0.2;     ///< weakening-friction coefficient
+   real_t V_w_default        = 1.0;     ///< weakening velocity [m/s]
    std::vector<SpatialRule>  spatial;
 };
 
@@ -261,6 +580,14 @@ struct SpatialFrictionConfig
    NucleationSpec                      nucleation;       // D-4
    std::optional<SlipWeakeningBlock>   slip_weakening;
    std::optional<RateStateBlock>       rate_state;
+
+   // Phase R.3 additions — every section defaults to current SAFS
+   // hardcoded behaviour for backwards compatibility.
+   ProblemSpec                         problem;
+   BoundarySpec                        boundary;
+   FaultGeometrySpec                   fault_geometry;
+   HypocenterSpec                      hypocenter;
+   MaterialSpec                        material;
 };
 
 /// Parse + validate a TOML config.  Aborts on any schema violation with
@@ -287,6 +614,9 @@ struct SlipWeakeningPerDOFParams
 struct RateStatePerDOFParams
 {
    Vector a, b, Dc, V_init, f_0, V_0, eta, sigma_n_eff;
+   /// V_w(i) is populated only when state_evolution ==
+   /// SlipLawStrongRateWeakening.  Zero-sized otherwise.
+   Vector V_w;
 };
 
 class SpatialFrictionResolver

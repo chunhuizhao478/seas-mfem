@@ -15,6 +15,7 @@
 #include "mfem.hpp"
 #include "wave_state.hpp"
 #include "godunov_flux.hpp"
+#include "godunov_flux_bimaterial.hpp"  // Phase R.1: exact bi-material Riemann
 #include "godunov_flux_pool.hpp"        // Phase H.1: per-element flux cache
 #include "heterogeneous_material.hpp"   // Phase H.1: MaterialField for new ctor
 #include "pml_layer.hpp"
@@ -233,6 +234,16 @@ public:
    const std::unordered_map<int, std::array<real_t, 3>> &
    GetSharedFaceNeighbourMaterial() const
    { return shared_face_neighbour_material_; }
+
+   /// Phase R.2 test-only accessor: returns the per-(face, side) bi-
+   /// material flux matrix table populated by
+   /// `BuildPerFaceBimaterialFluxMatrices_`.  Empty when the scalar
+   /// ctor was used.  Indexed by mesh face index; inner array stores
+   /// [side][fluxLocal/fluxNeighbor] per the storage convention
+   /// documented above.
+   const std::vector<std::array<std::array<mfem::DenseMatrix, 2>, 2>> &
+   GetPerFaceBimaterialFlux() const
+   { return per_face_bimaterial_flux_; }
 
    int GetScalarNDof() const { return ndof_total_; }
    real_t ComputeMaxDt(real_t cfl) const;
@@ -774,6 +785,33 @@ private:
    /// continues to use the scalar `h_min_` member.
    std::vector<real_t> per_elem_h_;
 
+   /// Phase R.2: per-interior-face precomputed bi-material flux matrices,
+   /// indexed by (local mesh face index, side), where `side ∈ {0, 1}`
+   /// selects whose POV: side=0 = the POV of the element returned by
+   /// FaceElementTransformations::Elem1No on this face; side=1 = the POV
+   /// of Elem2No.  Inner array stores (fluxLocal, fluxNeighbor) from that
+   /// POV; `per_face_bimaterial_flux_[face_idx][side][0]` = fluxLocal,
+   /// `[face_idx][side][1]` = fluxNeighbor.
+   ///
+   /// Population rule (REVIEW R-004):
+   ///   * Fully-local interior face (both Elem1 and Elem2 on this rank):
+   ///       BOTH side=0 and side=1 are populated, because each cell
+   ///       assembles its own residual using its own A_self.
+   ///   * Shared face (Elem2 lives on another rank): ONLY side=0 is
+   ///       populated.  MFEM convention: on a shared
+   ///       FaceElementTransformations, Elem1No is always the local
+   ///       element; side=1 access on a shared face must abort.
+   ///   * Fault face / boundary face: NOT populated (skipped — the fault
+   ///     branch goes through FaultFaceFlux, boundary through BC dispatch).
+   ///
+   /// Populated by BuildPerFaceBimaterialFluxMatrices_; consumed at
+   /// every Mult / ComputeFaceFluxRHS call.  Indexed by local face index.
+   ///
+   /// Memory: 2 × 81 × sizeof(real_t) = 1.3 KB per (face, side).
+   /// Fully-local interior face uses 2.6 KB; shared face uses 1.3 KB.
+   std::vector<std::array<std::array<mfem::DenseMatrix, 2>, 2>>
+      per_face_bimaterial_flux_;
+
    /// Phase H.4 (Stage 1): bi-material shared-face neighbour material
    /// map.  Key = local shared-face index (position in
    /// `ParMesh::GetSharedFaces()`); value = (lambda, mu, rho) of the
@@ -795,6 +833,26 @@ private:
    /// the f_2(t) factor; without this flag we cannot distinguish
    /// "driver supplied t=0" from "driver forgot to call SetTime".
    bool time_was_set_ = false;
+
+private:
+   /// Phase R.2 R.2.T-2 instrumentation: counts every dispatch to
+   /// `BimaterialFlux::ApplyPerFaceFlux` from the four wrapped interior
+   /// face sites (RK4 local + shared, ADER local + shared).  Always
+   /// compiled — cost is one integer add per face (~24 instructions
+   /// total) vs ~600 cycles for the 162-multiply ApplyPerFaceFlux it
+   /// instruments.  `mutable` so the const Mult / Compute*FaceFluxRHS
+   /// paths can increment.  Underscore suffix per codebase convention
+   /// (private member); access via accessors below (REVIEW R-006).
+   mutable std::size_t phaser_dispatch_count_ = 0;
+
+public:
+   std::size_t GetPhaserDispatchCount() const
+   { return phaser_dispatch_count_; }
+   /// Non-const intentionally so callers must hold a non-const
+   /// WaveOperator& to reset — prevents the counter from being
+   /// inadvertently reset under a `const` view (REVIEW R-006).
+   void ResetPhaserDispatchCount() { phaser_dispatch_count_ = 0; }
+private:
 
    BoundaryConfig bc_;
 
@@ -888,6 +946,34 @@ private:
    /// the real cross-rank `MPI_Allgatherv` exchange logic lands in
    /// Stage 2 alongside the dispatch that would consume it.
    void ExchangeBiMaterialNeighbours_();
+
+   /// Phase R.2 helper: walk every interior + shared face on this rank,
+   /// skip fault and boundary faces, and precompute per-(face, side)
+   /// bi-material flux matrices into `per_face_bimaterial_flux_`.
+   /// Logs the (interior, shared) face counts + total bytes at rank 0.
+   ///
+   /// Called from the `(MaterialField, BoundaryConfig)` ctor after
+   /// `BuildGodunovFluxPool_` and `ExchangeBiMaterialNeighbours_`.
+   void BuildPerFaceBimaterialFluxMatrices_();
+
+public:
+   /// Phase R.2 (Detailed Requirement 2): for every shared non-fault
+   /// interior face, gather the (face_idx → side=0 fluxLocal,
+   /// fluxNeighbor) pair from BOTH ranks that own the face and assert
+   /// bit-equality.  Analogous to `VerifySharedFaultDOFDataConsistency`:
+   /// a documented diagnostic / regression-insurance helper that fires
+   /// once after R.2 lands (gated by R.6.T-3 in the parent plan).
+   ///
+   /// No-op on serial builds.
+   ///
+   /// @param[in] tol  Relative tolerance per matrix entry.  Default
+   ///                 1e-12 — the bi-material flux matrices on either
+   ///                 side of a partition seam are computed from the
+   ///                 SAME (n̂, materials) triple, so any disagreement
+   ///                 indicates a ctor-population bug.
+   void VerifySharedFaceBimaterialFlux(real_t tol = 1e-12) const;
+
+private:
 
    /// TPV102 Phase 2a (§6.3): opt-in flag + cached precomputed flux tables.
    /// `precomputed_face_fluxes_` is mutable because the const dispatch

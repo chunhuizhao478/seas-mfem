@@ -1,0 +1,177 @@
+# SCEC TPV104 — spec-exact config for seas_spatial_dyn_driver.
+#
+# Reference: SCEC TPV104 description (Fast Velocity Weakening, FL=103).
+#            See drivers/tpv104_driver.cpp + config/tpv104_params.hpp.
+#
+# This config encodes every TPV104 parameter byte-exact:
+#
+#   • Material — homogeneous (same as TPV102):
+#     rho=2670, cp=6000, cs=3464  → mu=32.038119520e9, lambda=32.043760960e9 Pa
+#   • Friction — slip-law strong-rate-weakening (Noda & Lapusta 2013,
+#     SCEC FL=103).  f0=0.6, V0=1e-6, b=0.014, Dc=L=0.4 m, f_w=0.2.
+#     `a` and `V_w` are BOTH spatially varying via the SCEC C∞ tanh
+#     boxcar (Eq. (4)+(5)):
+#       a_in = 0.01, a_out = 0.02
+#       V_w_in = 0.1 m/s, V_w_out = 1.0 m/s
+#     Inside the VW core (|x|≤Ls=15 km AND |z+z_hypo|≤W/2=7.5 km).
+#     Encoded verbatim via TWO `boxcar_taper` rules (one for `a`,
+#     one for `V_w` — same geometry, different parameters).
+#   • Loading — sigma_n = 120 MPa (compression positive), tau_ini =
+#     40 MPa parallel to +strike, V_init = 1e-16 m/s.
+#   • Nucleation — SCEC TPV104 spec Eqs. (13)+(14): same compact
+#     bell `F(r) = exp(r²/(r²−R²))` × smoothStep `G(t)`; peak
+#     Δτ₀ = 45 MPa, pure right-lateral, R=3 km, T=1 s.
+#
+# Fault: vertical y = 0 plane.  ref_normal = (0,−1,0), up = (0,0,1).
+# Hypocenter at (0, 0, −7500).
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV104 — slip-law strong-rate-weakening (FL=103) with C∞ tanh boxcar VW core + V_w core, and SCEC compact-bell nucleation."
+
+[problem]
+tag = "tpv104"
+
+[boundary]
+# Per tpv104/mesh/tpv104_1000m.geo lines 177-180.
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+# Vertical y=0 fault.  ref_normal / up inherit the canonical SEAS
+# Tandem convention (0,-1,0)/(0,0,1) from the schema default — see
+# `miniapps/seas/CLAUDE.md` "Canonical Coordinate System".
+kind = "tpv104_srw"
+
+[hypocenter]
+x                   = 0.0
+y                   = 0.0
+z                   = -7500.0
+nucleation_radius_m = 3000.0
+nucleation_taper_m  = 0.0
+
+[material]
+kind = "constant"
+
+[material_constant_fallback]
+lambda = 32043760960.0
+mu     = 32038119520.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Built via:  gmsh -format msh22 -3 tpv104/mesh/tpv104_1000m.geo -o tpv104/mesh/tpv104_1000m.msh
+path  = "tpv104/mesh/tpv104_1000m.msh"
+order = 1
+
+[stress]
+# σ_n = 120 MPa, τ_ini = 40 MPa right-lateral.  Compression-POSITIVE.
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 120.0e6        # normal stress on y = 0 fault
+sigma_zz_pa = 0.0
+sigma_xy_pa = 40.0e6         # τ_ini, right-lateral along-strike shear
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "none"
+cfl        = 0.5
+cfl_safety = "dg"            # cfl /= (3*(2p+1)) — matches drivers/tpv104_driver.cpp:1325
+use_pml    = false
+
+[time]
+tfinal     = "12s"
+t_initial  = 0.0
+dt_initial = "auto"
+# With cfl_safety = "dg" + cfl = 0.5 + p = 1, the auto-selected dt_cfl
+# is ≈ 0.00926 s at the 1000 m mesh — strictly smaller than this cap,
+# so dt_max is vestigial in the canonical configuration.  Kept as a
+# safety net against future mesh refinement that would otherwise push
+# dt > 0.01 s.  (R-009 of tpv102_tpv104_review.md.)
+dt_max     = "0.01s"
+
+[output]
+output_dir              = "tpv104/out"
+restart_prefix          = "cp"
+# Master gate (REVIEW R-004): paraview_enabled MUST be true for the
+# per-collection mode strings below to take effect.
+paraview_enabled        = true
+paraview_volume         = "off"
+paraview_bulk           = "off"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.05s"
+paraview_bulk_dt        = "0.05s"
+paraview_fault_dt       = "0.001s"
+paraview_volume_zfp_tol = 1e-3
+paraview_bulk_zfp_tol   = 1e-3
+paraview_fault_zfp_tol  = 1e-12
+max_snapshots           = 5000
+# Run length is ~1200 macro-steps (tfinal=12s, dt~0.01s with cfl_safety=dg).
+# 10000 means NO intermediate checkpoint fires — only the end-of-run
+# checkpoint is written.  Lower (e.g., 200) to add intermediate restart
+# points.  (R-008 of tpv102_tpv104_review.md.)
+checkpoint_every_steps  = 10000
+
+[friction.rate_state]
+# SCEC TPV104 (FL=103): slip-law with strong rate weakening.
+state_evolution = "slip_law_srw"
+
+# Outside-VW (a_out, V_w_out) values as the defaults; the two
+# boxcar_taper rules below blend them DOWN to the inside-VW values
+# inside the rupture core.
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+b_default       = 0.014
+Dc_default      = 0.4          # L in SCEC FL=103
+V_init_default  = 1.0e-16
+sigma_n_default = 120.0e6
+a_default       = 0.02         # a_out = a_in + da = 0.01 + 0.01
+f_w_default     = 0.2          # weakening friction coefficient (TPV104 spec)
+V_w_default     = 1.0          # V_w_out = 1.0 m/s
+
+eta             = "auto"
+
+# C∞ tanh boxcar for `a`: inside-core a = a_in = 0.01.
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0
+boxcar_trans_x_m  = 3000.0
+boxcar_center_z_m = -7500.0
+boxcar_half_z_m   = 7500.0
+boxcar_trans_z_m  = 3000.0
+a                 = 0.01       # a_in
+
+# C∞ tanh boxcar for `V_w`: inside-core V_w = V_w_in = 0.1 m/s.
+# Same geometry as the `a` rule (TPV104 spec: both fields use the
+# same boxcar product).
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+boxcar_center_x_m = 0.0
+boxcar_half_x_m   = 15000.0
+boxcar_trans_x_m  = 3000.0
+boxcar_center_z_m = -7500.0
+boxcar_half_z_m   = 7500.0
+boxcar_trans_z_m  = 3000.0
+V_w               = 0.1        # V_w_in
+
+[nucleation]
+# Same shape as TPV102, larger Δτ₀ (45 MPa) per TPV104 spec.
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m          = 0.0
+center_y_m          = 0.0
+center_z_m          = -7500.0
+radius_m            = 3000.0
+delta_tau_dip_pa    = 0.0
+delta_tau_strike_pa = 45.0e6
+T_nuc_s             = "1s"

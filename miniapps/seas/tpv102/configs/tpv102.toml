@@ -1,0 +1,197 @@
+# SCEC TPV102 — spec-exact config for seas_spatial_dyn_driver.
+#
+# Reference: SCEC TPV101/TPV102 description
+#            https://strike.scec.org/cvws/tpv101_102docs.html
+#
+# This config encodes every TPV102 parameter byte-exact per the spec, as
+# in drivers/tpv102_driver.cpp + config/tpv102_params.hpp:
+#
+#   • Material — homogeneous (rho=2670, cp=6000, cs=3464)
+#     → mu     = rho·cs²       = 32.038119520e9 Pa
+#     → lambda = rho·cp² − 2·mu = 32.043760960e9 Pa
+#   • Friction — regularised rate-and-state, ageing law (FL=101).
+#     Defaults: f0=0.6, V0=1e-6, b=0.012, Dc=0.02.
+#     `a` is spatially varying via the SCEC C∞ tanh boxcar
+#     (Eq. (4)+(5)): inside the VW core (|x|≤Ls=15 km AND
+#     |z+z_hypo|≤W/2=7.5 km) `a = a_vw = 0.008`; outside `a = a_vs =
+#     0.016`; C∞ tanh transition of width ws=w=3 km.  Encoded
+#     verbatim via `kind = "boxcar_taper"` (no approximation).
+#   • Loading — sigma_n = 120 MPa (compression positive), tau_ini =
+#     75 MPa parallel to +strike, V_init = 1e-12 m/s.
+#   • Nucleation — SCEC TPV102 spec Eqs. (13)+(14): circular compact
+#     bell `F(r) = exp(r²/(r²−R²))` (R = 3 km) times smoothStep
+#     temporal `G(t) = exp((t−T)²/(t·(t−2T)))` (T = 1 s); peak
+#     Δτ₀ = 25 MPa, pure right-lateral (strike-only).  Encoded via
+#     `kind = "gradual_overstress_compact_circular"`.
+#
+# Fault: vertical, y = 0 plane.  ref_normal = (0,−1,0), up = (0,0,1)
+# (CLAUDE.md "Fault-local tangent frame (BP5 / TPV102, project-wide)"
+# — tangent1 = dip = (0,0,−1), tangent2 = strike = (+1,0,0)).
+# Hypocenter at (along_strike=0, down_dip=7.5 km) → (0, 0, −7500) in
+# mesh coords (Z=0 free surface, Z<0 below).
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV102 — regularised rate-and-state aging law with C∞ tanh boxcar VW core and SCEC compact-bell nucleation."
+
+[problem]
+tag = "tpv102"
+
+[boundary]
+# Per tpv102/mesh/tpv102_1000m.geo lines 177-180.
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+# TPV102 fault: vertical y=0 plane.  ref_normal / up inherit the
+# canonical SEAS Tandem convention (0,-1,0)/(0,0,1) from the schema
+# default — see `miniapps/seas/CLAUDE.md` "Canonical Coordinate
+# System".  Derived basis: tangent1 = dip = (0,0,-1), tangent2 =
+# strike = (+1,0,0).
+kind = "tpv102_rs"
+
+[hypocenter]
+# SCEC TPV102: along-strike = 0, down-dip = 7.5 km below the free
+# surface.  In mesh coords (z = 0 at surface, z < 0 below):
+#   (x_hypo, y_hypo, z_hypo) = (0, 0, -7500).
+x                   = 0.0
+y                   = 0.0
+z                   = -7500.0
+# Documentation only — the actual nucleation is encoded in the
+# [nucleation.gradual_overstress_compact_circular] block below.
+nucleation_radius_m = 3000.0
+nucleation_taper_m  = 0.0
+
+[material]
+kind = "constant"
+
+[material_constant_fallback]
+# TPV102Params (rho=2670, cs=3464, cp=6000).
+lambda = 32043760960.0       # = 2670 * 6000^2 - 2 * 2670 * 3464^2
+mu     = 32038119520.0       # = 2670 * 3464^2
+rho    = 2670.0
+
+[pore_pressure]
+# TPV102 has no pore pressure.
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Built via:  gmsh -format msh22 -3 tpv102/mesh/tpv102_1000m.geo -o tpv102/mesh/tpv102_1000m.msh
+# (CLAUDE.md "Known limitation — Gmsh .msh format": MFEM requires msh v2.2.)
+path  = "tpv102/mesh/tpv102_1000m.msh"
+order = 1
+
+[stress]
+# Background uniform Cauchy tensor (SEAS compression-POSITIVE
+# convention).  TPV102 spec: σ_n = 120 MPa (fault-normal compression
+# on the y=0 plane → sigma_yy), τ_ini = 75 MPa right-lateral
+# (along-strike shear on the y=0 plane → sigma_xy).  All other
+# components zero.  The projection onto the fault-local (dip,
+# strike) frame is handled by FaultGeometry::ComputeSAFSParams.
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 120.0e6        # normal stress σ_n on the y = 0 fault
+sigma_zz_pa = 0.0
+sigma_xy_pa = 75.0e6         # background along-strike shear τ_ini
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "none"
+cfl        = 0.5
+cfl_safety = "dg"            # cfl /= (3*(2p+1)) — matches drivers/tpv102_driver.cpp:1265
+use_pml    = false
+
+[time]
+tfinal     = "12s"           # SCEC TPV102 spec
+t_initial  = 0.0
+dt_initial = "auto"
+# With cfl_safety = "dg" + cfl = 0.5 + p = 1, the auto-selected dt_cfl
+# is ≈ 0.00926 s at the 1000 m mesh — strictly smaller than this cap,
+# so dt_max is vestigial in the canonical configuration.  Kept as a
+# safety net against future mesh refinement that would otherwise push
+# dt > 0.01 s.  (R-009 of tpv102_tpv104_review.md.)
+dt_max     = "0.01s"
+
+[output]
+output_dir              = "tpv102/out"
+restart_prefix          = "cp"
+# Master gate (REVIEW R-004): paraview_enabled MUST be true for the
+# per-collection mode strings below to take effect.
+paraview_enabled        = true
+paraview_volume         = "off"
+paraview_bulk           = "off"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.05s"
+paraview_bulk_dt        = "0.05s"
+paraview_fault_dt       = "0.001s"
+paraview_volume_zfp_tol = 1e-3
+paraview_bulk_zfp_tol   = 1e-3
+paraview_fault_zfp_tol  = 1e-12
+max_snapshots           = 5000
+# Run length is ~1200 macro-steps (tfinal=12s, dt~0.01s with cfl_safety=dg).
+# 10000 means NO intermediate checkpoint fires — only the end-of-run
+# checkpoint is written.  Lower (e.g., 200) to add intermediate restart
+# points.  (R-008 of tpv102_tpv104_review.md.)
+checkpoint_every_steps  = 10000
+
+[friction.rate_state]
+# SCEC TPV102 (FL=101): regularised rate-and-state with the AGEING
+# law for ψ evolution.
+state_evolution = "aging_law"
+
+# Spec defaults — BEFORE any spatial rule applies.
+# `a_default` is set to the VS (strengthening) value so the boxcar
+# blend below tapers DOWN to the VW value inside the rupture core.
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+b_default       = 0.012
+Dc_default      = 0.02
+V_init_default  = 1.0e-12
+sigma_n_default = 120.0e6      # consumed only as a fallback (overridden by stress source)
+a_default       = 0.016        # a_vs
+
+# eta = "auto" → resolver computes per-DOF η = 0.5·sqrt(μ·ρ) from
+# the material field (matches TPV102Params::eta_s for homogeneous
+# inputs).
+eta             = "auto"
+
+# SCEC TPV102 Eq. (4)+(5): along-strike + down-dip C∞ tanh boxcar
+# for the direct-effect parameter `a`.
+#   a(x, z) = a_vs + (a_vw - a_vs) · B(x; Ls, ws) · B(z − z_hypo; W/2, w)
+# Encoded here as a `boxcar_taper` rule: `a_default = a_vs` (outside
+# baseline) and override `a = 0.008 = a_vw` (inside).  The resolver
+# blends `a = a_baseline + (a_override - a_baseline) · B(x)·B(z)` so
+# at B = 1 (inside) a = a_vw, at B = 0 (outside) a = a_vs.
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+boxcar_center_x_m = 0.0          # x_hypo
+boxcar_half_x_m   = 15000.0      # Ls
+boxcar_trans_x_m  = 3000.0       # ws
+boxcar_center_z_m = -7500.0      # z_hypo (mesh coords; surface at z=0)
+boxcar_half_z_m   = 7500.0       # W/2
+boxcar_trans_z_m  = 3000.0       # w
+a                 = 0.008        # a_vw (inside-core target)
+
+[nucleation]
+# SCEC TPV102 Eqs. (13)+(14): circular compact-support bell
+# `F(r) = exp(r²/(r²−R²))` (zero for r ≥ R) times the smoothStep
+# temporal ramp `G(t) = exp((t−T)²/(t·(t−2T)))`.  Encoded as a
+# `gradual_overstress_compact_circular` kind (generic; no benchmark
+# name in the function).  TPV102 is pure right-lateral, so the Δτ
+# routes entirely to the strike component.
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m          = 0.0           # x_hypo
+center_y_m          = 0.0           # y_hypo (fault plane)
+center_z_m          = -7500.0       # z_hypo
+radius_m            = 3000.0        # R = nuc_radius
+delta_tau_dip_pa    = 0.0           # no dip overstress
+delta_tau_strike_pa = 25.0e6        # Δτ₀ = 25 MPa, right-lateral
+T_nuc_s             = "1s"          # nuc rise time

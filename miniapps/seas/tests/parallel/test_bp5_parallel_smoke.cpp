@@ -32,6 +32,7 @@
 #include "../../common/mpi_context.hpp"
 #include "../../common/parallel_utils.hpp"
 
+#include <cstdlib>
 #include <iostream>
 #include <cmath>
 #include <memory>
@@ -47,6 +48,28 @@ using namespace mfem::seas;
 
 namespace
 {
+
+// REVIEW R-003 (round-4): pick the elasticity solver type once, with
+// an env-var override.  Production BP5 uses MUMPS_BLR by default, but
+// the conda-installed MUMPS on arm64-macOS has an alignment bug in
+// dmumps_scatter_dist_rhs_.  Setting SEAS_TEST_SOLVER=CG_AMG bypasses
+// MUMPS on local-dev runs; HPC CI leaves it unset to exercise the
+// production code path.
+SolverType PickTestSolverType()
+{
+   const char* env = std::getenv("SEAS_TEST_SOLVER");
+   if (env == nullptr) { return SolverType::MUMPS_BLR; }
+   const std::string s(env);
+   if (s == "CG_AMG")    { return SolverType::CG_AMG; }
+   if (s == "MUMPS_BLR") { return SolverType::MUMPS_BLR; }
+   if (s == "MUMPS")     { return SolverType::MUMPS; }
+   if (s == "GMRES_AMG") { return SolverType::GMRES_AMG; }
+   // Unknown value: fall back to the production default.  Emit a
+   // warning so the user knows their override was ignored.
+   std::cerr << "[seas-test] WARNING: SEAS_TEST_SOLVER='" << s
+             << "' not recognised; using MUMPS_BLR.\n";
+   return SolverType::MUMPS_BLR;
+}
 
 void AddFaultBoundaryElements(Mesh &mesh, real_t tol = 1e-6)
 {
@@ -386,9 +409,15 @@ ReferenceIPComparisonResult TestReferenceMeshIPSerialParallel(MPIContext &mpi)
    {
       auto serial_mesh = LoadScaledBP5Mesh(mesh_file, mesh_scale);
 
+      // Solver type picked once via SEAS_TEST_SOLVER env var (see
+      // PickTestSolverType helper above for rationale).  Default:
+      // MUMPS_BLR (production); local-dev runs on arm64-macOS conda
+      // should set SEAS_TEST_SOLVER=CG_AMG to bypass the broken
+      // libdmumps.
       ElasticityDomainOperator<Mesh> serial_domain(
          *serial_mesh, order, params.lambda(), params.mu(),
-         params.Vp, params.Wf, params.lf, dg_method);
+         params.Vp, params.Wf, params.lf, dg_method,
+         PickTestSolverType());
       FaultGeometry<Mesh> serial_geom(serial_domain, params);
 
       DieterichRuinaFriction::Constants fc;
@@ -431,9 +460,11 @@ ReferenceIPComparisonResult TestReferenceMeshIPSerialParallel(MPIContext &mpi)
    ParMesh pmesh(mpi.GetComm(), *parallel_mesh);
    parallel_mesh.reset();
 
+   // Same env-gated solver pick as the serial branch above.
    ElasticityDomainOperator<ParMesh> par_domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, params.Wf, params.lf, dg_method);
+      params.Vp, params.Wf, params.lf, dg_method,
+      PickTestSolverType());
    FaultGeometry<ParMesh> par_geom(par_domain, params, &mpi);
 
    DieterichRuinaFriction::Constants fc;
@@ -697,9 +728,11 @@ int main(int argc, char *argv[])
    int order = 1;
    // Use mesh-matching Wf/lf to ensure fault DOFs are detected on small mesh
    real_t Wf = Lz, lf_domain = 2.0 * Ly;
+   // Env-gated solver pick (see PickTestSolverType helper).
    ElasticityDomainOperator<ParMesh> domain(
       pmesh, order, params.lambda(), params.mu(),
-      params.Vp, Wf, lf_domain, DGMethod::BR2);
+      params.Vp, Wf, lf_domain, DGMethod::BR2,
+      PickTestSolverType());
 
    int local_fault_dofs = domain.GetNumFaultDOFs();
    int global_fault_dofs = mpi.GlobalSumInt(local_fault_dofs);

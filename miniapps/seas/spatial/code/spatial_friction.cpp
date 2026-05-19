@@ -81,6 +81,47 @@ real_t SpatialTimeParseSeconds(const std::string& s_in)
 //  SpatialRule::matches
 // =====================================================================
 
+// SCEC C∞ Boxcar B(s; W, w) — Eq. (5) of TPV101/102/104.  `signed_offset`
+// is `(coord − center)`; the function takes `|signed_offset|`.
+real_t SCECBoxcar(real_t signed_offset, real_t W, real_t w)
+{
+   MFEM_VERIFY(W >= 0.0,
+               "SCECBoxcar: half_width must be >= 0; got " << W);
+   MFEM_VERIFY(w >= 0.0,
+               "SCECBoxcar: transition must be >= 0; got " << w);
+   const real_t s = std::abs(signed_offset);
+   if (s <= W)         { return 1.0; }
+   if (s >= W + w)     { return 0.0; }
+   // s in (W, W+w): smooth tanh transition.  The two divisor terms
+   // (s − W − w) and (s − W) are both finite and non-zero throughout
+   // the open interval.
+   return 0.5 * (1.0 + std::tanh(w / (s - W - w) + w / (s - W)));
+}
+
+real_t SpatialRule::BoxcarTaperFactor(real_t x, real_t y, real_t z) const
+{
+   real_t B = 1.0;
+   if (!std::isnan(boxcar_half_x_m))
+   {
+      const real_t w = std::isnan(boxcar_trans_x_m)
+                       ? static_cast<real_t>(0.0) : boxcar_trans_x_m;
+      B *= SCECBoxcar(x - boxcar_center_x_m, boxcar_half_x_m, w);
+   }
+   if (!std::isnan(boxcar_half_y_m))
+   {
+      const real_t w = std::isnan(boxcar_trans_y_m)
+                       ? static_cast<real_t>(0.0) : boxcar_trans_y_m;
+      B *= SCECBoxcar(y - boxcar_center_y_m, boxcar_half_y_m, w);
+   }
+   if (!std::isnan(boxcar_half_z_m))
+   {
+      const real_t w = std::isnan(boxcar_trans_z_m)
+                       ? static_cast<real_t>(0.0) : boxcar_trans_z_m;
+      B *= SCECBoxcar(z - boxcar_center_z_m, boxcar_half_z_m, w);
+   }
+   return B;
+}
+
 bool SpatialRule::matches(real_t x, real_t y, real_t z, int attr) const
 {
    const bool x_ok = (x >= x_min_m) && (x <= x_max_m);
@@ -98,6 +139,12 @@ bool SpatialRule::matches(real_t x, real_t y, real_t z, int attr) const
    case Kind::Barrier:
       // Same as Depth, with any non-infinite x/y bounds also applied.
       return z_ok && x_ok && y_ok;
+   case Kind::BoxcarTaper:
+      // BoxcarTaper always matches; the per-DOF blend weight is
+      // computed by BoxcarTaperFactor in the resolver.  Returning true
+      // unconditionally avoids re-evaluating the boxcar in the
+      // resolver's match-test path.
+      return true;
    }
    return false;
 }
@@ -232,11 +279,26 @@ VelocityModel parse_velocity_model(const std::string& s)
 
 StressSourceKind parse_stress_kind(const std::string& s)
 {
-   if (s == "constant_tensor") { return StressSourceKind::ConstantTensor; }
-   if (s == "sidecar_hdf5")    { return StressSourceKind::SidecarHDF5; }
-   MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5}; "
-              "got '" << s << "'");
+   if (s == "constant_tensor")    { return StressSourceKind::ConstantTensor; }
+   if (s == "sidecar_hdf5")       { return StressSourceKind::SidecarHDF5; }
+   if (s == "depth_proportional") { return StressSourceKind::DepthProportionalToShearModulus; }
+   if (s == "constant_tensor_with_patches")
+   { return StressSourceKind::ConstantTensorWithPatches; }
+   MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5, "
+              "depth_proportional, constant_tensor_with_patches}; got '"
+              << s << "'");
    return StressSourceKind::ConstantTensor;
+}
+
+MaterialKind parse_material_kind(const std::string& s)
+{
+   if (s == "constant")          { return MaterialKind::Constant; }
+   if (s == "depth_profile_1d")  { return MaterialKind::DepthProfile1D; }
+   if (s == "sidecar_hdf5")      { return MaterialKind::SidecarHDF5; }
+   MFEM_ABORT("material.kind must be one of "
+              "{constant, depth_profile_1d, sidecar_hdf5}; got '"
+              << s << "'");
+   return MaterialKind::Constant;
 }
 
 void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
@@ -250,12 +312,64 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
    else if (kind_s == "box")               { out.kind = SpatialRule::Kind::Box; }
    else if (kind_s == "region_attribute")  { out.kind = SpatialRule::Kind::RegionAttribute; }
    else if (kind_s == "barrier")           { out.kind = SpatialRule::Kind::Barrier; }
+   else if (kind_s == "boxcar_taper")      { out.kind = SpatialRule::Kind::BoxcarTaper; }
    else
    {
       MFEM_ABORT("Unknown spatial.kind '" << kind_s
                  << "'.  Valid kinds (rev-3): depth, box, region_attribute, "
-                 << "barrier.  (rev-1 'nucleation_box' removed by D-4; use "
-                 << "the [nucleation] block instead.)");
+                 << "barrier, boxcar_taper.  (rev-1 'nucleation_box' removed "
+                 << "by D-4; use the [nucleation] block instead.)");
+   }
+
+   // BoxcarTaper geometry fields (validated only when this rule's kind
+   // is BoxcarTaper).  Each axis is OPTIONAL — an unset `boxcar_half_*`
+   // means the axis is unconstrained (B = 1 along that axis).
+   if (out.kind == SpatialRule::Kind::BoxcarTaper)
+   {
+      const real_t nan = std::numeric_limits<real_t>::quiet_NaN();
+      out.boxcar_center_x_m = toml_real(rule_tbl, "boxcar_center_x_m", 0.0);
+      out.boxcar_center_y_m = toml_real(rule_tbl, "boxcar_center_y_m", 0.0);
+      out.boxcar_center_z_m = toml_real(rule_tbl, "boxcar_center_z_m", 0.0);
+      out.boxcar_half_x_m   = toml_real(rule_tbl, "boxcar_half_x_m",   nan);
+      out.boxcar_half_y_m   = toml_real(rule_tbl, "boxcar_half_y_m",   nan);
+      out.boxcar_half_z_m   = toml_real(rule_tbl, "boxcar_half_z_m",   nan);
+      out.boxcar_trans_x_m  = toml_real(rule_tbl, "boxcar_trans_x_m",  nan);
+      out.boxcar_trans_y_m  = toml_real(rule_tbl, "boxcar_trans_y_m",  nan);
+      out.boxcar_trans_z_m  = toml_real(rule_tbl, "boxcar_trans_z_m",  nan);
+
+      const bool has_x = !std::isnan(out.boxcar_half_x_m);
+      const bool has_y = !std::isnan(out.boxcar_half_y_m);
+      const bool has_z = !std::isnan(out.boxcar_half_z_m);
+      MFEM_VERIFY(has_x || has_y || has_z,
+                  "[[spatial]] kind='boxcar_taper' requires at least one "
+                  "of boxcar_half_{x,y,z}_m to be set");
+      if (has_x)
+      {
+         MFEM_VERIFY(out.boxcar_half_x_m >= 0.0,
+                     "boxcar_half_x_m must be >= 0");
+         MFEM_VERIFY(!std::isnan(out.boxcar_trans_x_m)
+                     && out.boxcar_trans_x_m >= 0.0,
+                     "boxcar_trans_x_m required and >= 0 when "
+                     "boxcar_half_x_m is set");
+      }
+      if (has_y)
+      {
+         MFEM_VERIFY(out.boxcar_half_y_m >= 0.0,
+                     "boxcar_half_y_m must be >= 0");
+         MFEM_VERIFY(!std::isnan(out.boxcar_trans_y_m)
+                     && out.boxcar_trans_y_m >= 0.0,
+                     "boxcar_trans_y_m required and >= 0 when "
+                     "boxcar_half_y_m is set");
+      }
+      if (has_z)
+      {
+         MFEM_VERIFY(out.boxcar_half_z_m >= 0.0,
+                     "boxcar_half_z_m must be >= 0");
+         MFEM_VERIFY(!std::isnan(out.boxcar_trans_z_m)
+                     && out.boxcar_trans_z_m >= 0.0,
+                     "boxcar_trans_z_m required and >= 0 when "
+                     "boxcar_half_z_m is set");
+      }
    }
 
    // Coordinate bounds (optional; sentinels are ±inf).
@@ -299,6 +413,32 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
       }
       out.cohesion = toml_real(rule_tbl, "cohesion", nan);
 
+      // Depth-linear cohesion taper (TPV31-style).  All four fields
+      // are optional; when `cohesion_grad_pa_per_m` is set the resolver
+      // computes per-DOF cohesion via the linear ramp and the constant
+      // `cohesion` field is ignored.
+      out.cohesion_grad_pa_per_m = toml_real(rule_tbl,
+                                             "cohesion_grad_pa_per_m", nan);
+      out.cohesion_ref_depth_m   = toml_real(rule_tbl,
+                                             "cohesion_ref_depth_m", nan);
+      out.cohesion_floor_pa      = toml_real(rule_tbl,
+                                             "cohesion_floor_pa", 0.0);
+      const std::string axis_s = toml_str(rule_tbl, "cohesion_taper_axis",
+                                          std::string("y"));
+      MFEM_VERIFY(axis_s == "x" || axis_s == "y" || axis_s == "z",
+                  "[[spatial]] cohesion_taper_axis must be 'x', 'y', or 'z'; "
+                  "got '" << axis_s << "'");
+      out.cohesion_taper_axis = axis_s[0];
+      // Either both grad + ref_depth are set, or neither.
+      const bool has_grad  = !std::isnan(out.cohesion_grad_pa_per_m);
+      const bool has_ref   = !std::isnan(out.cohesion_ref_depth_m);
+      MFEM_VERIFY(has_grad == has_ref,
+                  "[[spatial]] cohesion_grad_pa_per_m and "
+                  "cohesion_ref_depth_m must both be set or both omitted");
+      MFEM_VERIFY(out.cohesion_floor_pa >= 0.0,
+                  "[[spatial]] cohesion_floor_pa must be >= 0; got "
+                  << out.cohesion_floor_pa);
+
       // R-114: barrier-sentinel guard.  Reject any user-supplied
       // mu_s > 1e5 in a spatial-rule override.  Barrier kind is the
       // sanctioned route; the resolver assigns mu_s = 1e6 internally.
@@ -320,6 +460,7 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
       out.V_0     = toml_real(rule_tbl, "V_0",     nan);
       out.sigma_n = toml_real(rule_tbl, "sigma_n", nan);
       out.eta     = toml_real(rule_tbl, "eta",     nan);
+      out.V_w     = toml_real(rule_tbl, "V_w",     nan);
    }
 }
 
@@ -387,6 +528,21 @@ void parse_slip_weakening(const toml::value& fw_tbl, SlipWeakeningBlock& out)
 
 void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
 {
+   // State-evolution kind (default = AgingLaw, matches BP5 / TPV102).
+   if (rs_tbl.contains("state_evolution"))
+   {
+      const std::string se = rs_tbl.at("state_evolution").as_string();
+      if      (se == "aging_law")
+      { out.state_evolution = StateEvolutionKind::AgingLaw; }
+      else if (se == "slip_law_srw")
+      { out.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening; }
+      else
+      {
+         MFEM_ABORT("[friction.rate_state].state_evolution must be "
+                    "\"aging_law\" or \"slip_law_srw\"; got '" << se << "'");
+      }
+   }
+
    out.f_0_default     = toml_real(rs_tbl, "f_0_default",     0.6);
    out.V_0_default     = toml_real(rs_tbl, "V_0_default",     1.0e-6);
    out.a_default       = toml_real(rs_tbl, "a_default",       0.010);
@@ -394,6 +550,8 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
    out.Dc_default      = toml_real(rs_tbl, "Dc_default",      0.004);
    out.V_init_default  = toml_real(rs_tbl, "V_init_default",  1.0e-9);
    out.sigma_n_default = toml_real(rs_tbl, "sigma_n_default", 50.0e6);
+   out.f_w_default     = toml_real(rs_tbl, "f_w_default",     0.2);
+   out.V_w_default     = toml_real(rs_tbl, "V_w_default",     1.0);
 
    if (rs_tbl.contains("eta"))
    {
@@ -452,9 +610,11 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
    MFEM_VERIFY(out.b_default > 0.0,
                "[friction.rate_state] b_default must be > 0; got "
                << out.b_default);
-   MFEM_VERIFY(out.a_default < out.b_default,
-               "[friction.rate_state] a_default (" << out.a_default
-               << ") must be < b_default (" << out.b_default << ")");
+   // Note: `a < b` (velocity-weakening) is intentionally NOT required
+   // at the default level — TPV102/104 use `a_vs > b > a_vw`, with the
+   // outside-VW (VS) region stable and the inside-VW (VW) core
+   // unstable.  The parser only requires positivity here; per-DOF
+   // physics regime is determined by the spatial rules + defaults.
    MFEM_VERIFY(out.Dc_default > 0.0,
                "[friction.rate_state] Dc_default must be > 0");
    MFEM_VERIFY(out.V_0_default > 0.0,
@@ -463,6 +623,225 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
                "[friction.rate_state] sigma_n_default must be > 0");
    MFEM_VERIFY(out.f_0_default > 0.0 && out.f_0_default < 1.0,
                "[friction.rate_state] f_0_default must be in (0, 1)");
+   if (out.state_evolution == StateEvolutionKind::SlipLawStrongRateWeakening)
+   {
+      MFEM_VERIFY(out.f_w_default > 0.0 && out.f_w_default < 1.0,
+                  "[friction.rate_state] f_w_default ("
+                  << out.f_w_default << ") must be in (0, 1) when "
+                  "state_evolution=\"slip_law_srw\"");
+      MFEM_VERIFY(out.V_w_default > 0.0,
+                  "[friction.rate_state] V_w_default ("
+                  << out.V_w_default << ") must be > 0 when "
+                  "state_evolution=\"slip_law_srw\"");
+   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase R.3 — helpers for the new top-level sections.
+// ---------------------------------------------------------------------------
+
+std::vector<int> toml_int_array(const toml::value& tbl, const std::string& key,
+                                const std::vector<int>& default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& arr = tbl.at(key).as_array();
+   std::vector<int> out;
+   out.reserve(arr.size());
+   for (const auto& v : arr)
+   {
+      MFEM_VERIFY(v.is_integer(),
+                  "TOML array key '" << key << "' must contain integers");
+      out.push_back(static_cast<int>(v.as_integer()));
+   }
+   return out;
+}
+
+std::array<real_t, 3> toml_real3(const toml::value& tbl,
+                                 const std::string& key,
+                                 const std::array<real_t, 3>& default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& arr = tbl.at(key).as_array();
+   MFEM_VERIFY(arr.size() == 3,
+               "TOML key '" << key << "' must be a length-3 array; got "
+               << arr.size());
+   std::array<real_t, 3> out{};
+   for (int i = 0; i < 3; ++i)
+   {
+      MFEM_VERIFY(arr[i].is_floating() || arr[i].is_integer(),
+                  "TOML key '" << key << "' element " << i
+                  << " must be numeric");
+      out[i] = arr[i].is_floating()
+               ? static_cast<real_t>(arr[i].as_floating())
+               : static_cast<real_t>(arr[i].as_integer());
+   }
+   return out;
+}
+
+void parse_problem(const toml::value& tbl, ProblemSpec& out)
+{
+   out.tag = toml_str(tbl, "tag", out.tag);
+}
+
+void parse_boundary(const toml::value& tbl, BoundarySpec& out)
+{
+   out.fault_attr      = toml_int      (tbl, "fault_attr",      out.fault_attr);
+   out.natural_attrs   = toml_int_array(tbl, "natural_attrs",   out.natural_attrs);
+   out.absorbing_attrs = toml_int_array(tbl, "absorbing_attrs", out.absorbing_attrs);
+
+   MFEM_VERIFY(out.fault_attr > 0,
+               "[boundary].fault_attr must be > 0; got " << out.fault_attr);
+   // Mutex check: no attribute appears in more than one of
+   // {fault, natural, absorbing}.
+   auto in_list = [](int a, const std::vector<int>& v) {
+      for (int x : v) { if (x == a) { return true; } }
+      return false;
+   };
+   MFEM_VERIFY(!in_list(out.fault_attr, out.natural_attrs)
+               && !in_list(out.fault_attr, out.absorbing_attrs),
+               "[boundary].fault_attr (" << out.fault_attr
+               << ") appears in natural_attrs or absorbing_attrs");
+   for (int a : out.natural_attrs)
+   {
+      MFEM_VERIFY(!in_list(a, out.absorbing_attrs),
+                  "[boundary] attr " << a
+                  << " appears in both natural_attrs and absorbing_attrs");
+   }
+}
+
+void parse_fault_geometry(const toml::value& tbl, FaultGeometrySpec& out)
+{
+   out.ref_normal = toml_real3(tbl, "ref_normal", out.ref_normal);
+   out.up         = toml_real3(tbl, "up",         out.up);
+   out.kind       = toml_str  (tbl, "kind",       out.kind);
+
+   // Unit-norm check on ref_normal.
+   const real_t n2 = out.ref_normal[0]*out.ref_normal[0]
+                   + out.ref_normal[1]*out.ref_normal[1]
+                   + out.ref_normal[2]*out.ref_normal[2];
+   MFEM_VERIFY(std::abs(n2 - 1.0) < 1e-10,
+               "[fault_geometry].ref_normal must be a unit vector; got "
+               "|n|^2=" << n2);
+
+   // up must NOT be parallel to ref_normal (otherwise FaultBasis::Compute
+   // would have an ambiguous tangent frame).
+   const real_t dot = out.ref_normal[0]*out.up[0]
+                    + out.ref_normal[1]*out.up[1]
+                    + out.ref_normal[2]*out.up[2];
+   const real_t up2 = out.up[0]*out.up[0] + out.up[1]*out.up[1]
+                    + out.up[2]*out.up[2];
+   MFEM_VERIFY(up2 > 0.0,
+               "[fault_geometry].up must be non-zero");
+   const real_t cos2 = dot * dot / up2;   // cos^2(angle), n is unit
+   MFEM_VERIFY(cos2 < 1.0 - 1e-10,
+               "[fault_geometry].up is parallel (or anti-parallel) to "
+               "ref_normal — FaultBasis cannot form a tangent frame");
+
+   // [fault_geometry].kind is INFORMATIONAL only — no code branches on
+   // this string.  Any non-empty value is accepted so users can tag
+   // configs with the benchmark name (e.g., "tpv102_rs", "tpv104_srw")
+   // without modifying the parser.
+   MFEM_VERIFY(!out.kind.empty(),
+               "[fault_geometry].kind must be a non-empty string");
+}
+
+void parse_hypocenter(const toml::value& tbl, HypocenterSpec& out)
+{
+   out.x                   = toml_real(tbl, "x",                   out.x);
+   out.y                   = toml_real(tbl, "y",                   out.y);
+   out.z                   = toml_real(tbl, "z",                   out.z);
+   out.nucleation_radius_m = toml_real(tbl, "nucleation_radius_m", out.nucleation_radius_m);
+   out.nucleation_taper_m  = toml_real(tbl, "nucleation_taper_m",  out.nucleation_taper_m);
+
+   MFEM_VERIFY(out.nucleation_radius_m > 0.0,
+               "[hypocenter].nucleation_radius_m must be > 0; got "
+               << out.nucleation_radius_m);
+   MFEM_VERIFY(out.nucleation_taper_m >= 0.0,
+               "[hypocenter].nucleation_taper_m must be >= 0; got "
+               << out.nucleation_taper_m);
+}
+
+void parse_material(const toml::value& tbl, MaterialSpec& out)
+{
+   const std::string kind_s = toml_str(tbl, "kind", "constant");
+   out.kind = parse_material_kind(kind_s);
+
+   if (out.kind == MaterialKind::DepthProfile1D)
+   {
+      MFEM_VERIFY(tbl.contains("depth_axis") == false
+                  || toml_str(tbl, "depth_axis", "y").size() == 1,
+                  "[material].depth_axis must be a single character "
+                  "from {'x','y','z'}");
+      const std::string axis_s = toml_str(tbl, "depth_axis", "y");
+      MFEM_VERIFY(axis_s.size() == 1 &&
+                  (axis_s[0] == 'x' || axis_s[0] == 'y' || axis_s[0] == 'z'),
+                  "[material].depth_axis must be 'x', 'y', or 'z'; got '"
+                  << axis_s << "'");
+      out.depth_axis = axis_s[0];
+   }
+}
+
+void parse_material_profile(const toml::value& root, MaterialSpec& out)
+{
+   if (out.kind != MaterialKind::DepthProfile1D) { return; }
+
+   MFEM_VERIFY(root.contains("material_profile"),
+               "[material].kind=\"depth_profile_1d\" requires a "
+               "[[material_profile.layer]] array of layer tables");
+   const auto& mp = root.at("material_profile");
+   MFEM_VERIFY(mp.contains("layer"),
+               "[material_profile] must contain a `layer` array "
+               "(use TOML syntax `[[material_profile.layer]]`)");
+   const auto& layers_arr = mp.at("layer").as_array();
+   MFEM_VERIFY(!layers_arr.empty(),
+               "[material_profile.layer] must have at least one entry");
+
+   out.profile_layers.clear();
+   out.profile_layers.reserve(layers_arr.size());
+   for (std::size_t i = 0; i < layers_arr.size(); ++i)
+   {
+      const auto& L = layers_arr[i];
+      DepthProfileLayer dpl;
+      dpl.depth_top_m  = toml_real(L, "depth_top_m", 0.0);
+      dpl.depth_bot_m  = toml_real(L, "depth_bot_m", 0.0);
+      dpl.vp_ms        = toml_real(L, "vp_ms",       0.0);
+      dpl.vs_ms        = toml_real(L, "vs_ms",       0.0);
+      dpl.rho_kgm3     = toml_real(L, "rho_kgm3",    0.0);
+      dpl.interp       = toml_str (L, "interp",      "constant");
+      MFEM_VERIFY(dpl.vp_ms > 0.0,
+                  "[[material_profile.layer]] " << i
+                  << ".vp_ms must be > 0; got " << dpl.vp_ms);
+      MFEM_VERIFY(dpl.vs_ms > 0.0,
+                  "[[material_profile.layer]] " << i
+                  << ".vs_ms must be > 0; got " << dpl.vs_ms);
+      MFEM_VERIFY(dpl.rho_kgm3 > 0.0,
+                  "[[material_profile.layer]] " << i
+                  << ".rho_kgm3 must be > 0; got " << dpl.rho_kgm3);
+      MFEM_VERIFY(dpl.interp == "constant" || dpl.interp == "linear",
+                  "[[material_profile.layer]] " << i
+                  << ".interp must be 'constant' or 'linear'; got '"
+                  << dpl.interp << "'");
+      out.profile_layers.push_back(dpl);
+   }
+}
+
+void parse_depth_proportional_stress(const toml::value& tbl,
+                                     DepthProportionalStressSpec& out)
+{
+   // Component values are stored in MPa in the TOML (per plan §R.5
+   // step 4: "Initial stress block... carrying the 6 scaled components
+   // in MPa + mu_ref_pa = 32.03812032e9").  Multiply by 1e6 internally.
+   const real_t mpa = 1.0e6;
+   out.sigma_xx_per_mu = mpa * toml_real(tbl, "sigma_xx_per_mu", 0.0);
+   out.sigma_yy_per_mu = mpa * toml_real(tbl, "sigma_yy_per_mu", 0.0);
+   out.sigma_zz_per_mu = mpa * toml_real(tbl, "sigma_zz_per_mu", 0.0);
+   out.sigma_xy_per_mu = mpa * toml_real(tbl, "sigma_xy_per_mu", 0.0);
+   out.sigma_yz_per_mu = mpa * toml_real(tbl, "sigma_yz_per_mu", 0.0);
+   out.sigma_xz_per_mu = mpa * toml_real(tbl, "sigma_xz_per_mu", 0.0);
+   out.mu_ref_pa       = toml_real(tbl, "mu_ref_pa", 32.03812032e9);
+   MFEM_VERIFY(out.mu_ref_pa > 0.0,
+               "[stress.depth_proportional].mu_ref_pa must be > 0; got "
+               << out.mu_ref_pa);
 }
 
 SpatialFrictionConfig parse_root(const toml::value& root)
@@ -498,8 +877,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                "Top-level [pore_pressure] block missing");
    MFEM_VERIFY(root.contains("mesh"),
                "Top-level [mesh] block missing");
-   MFEM_VERIFY(root.contains("velocity"),
-               "Top-level [velocity] block missing");
+   // Phase R.3: [velocity] is now OPTIONAL — only required when
+   // [material].kind = "sidecar_hdf5" (or when material is absent
+   // and the legacy sidecar-velocity workflow is in effect).  See
+   // material_kind dispatch below.
    MFEM_VERIFY(root.contains("stress"),
                "Top-level [stress] block missing");
    MFEM_VERIFY(root.contains("numerics"),
@@ -558,17 +939,16 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.velocity.dataset_root = toml_str(v, "dataset_root", std::string());
       cfg.velocity.override_path = toml_str(v, "override_path", std::string());
    }
-   MFEM_VERIFY(!cfg.velocity.dataset_root.empty()
-               || !cfg.velocity.override_path.empty(),
-               "[velocity] must set either 'dataset_root' "
-               "(for model-based resolution) or 'override_path'");
+   // Phase R.3: [velocity] requirement deferred until after the material
+   // section is parsed — only required when material.kind == sidecar_hdf5.
 
    if (root.contains("stress"))
    {
       const auto& s = root.at("stress");
       MFEM_VERIFY(s.contains("kind"),
-                  "[stress].kind is required; must be "
-                  "\"constant_tensor\" or \"sidecar_hdf5\"");
+                  "[stress].kind is required; must be one of "
+                  "\"constant_tensor\", \"sidecar_hdf5\", "
+                  "\"depth_proportional\"");
       cfg.stress.kind = parse_stress_kind(toml_str(s, "kind", "constant_tensor"));
 
       const bool has_sxx = s.contains("sigma_xx_pa");
@@ -579,7 +959,9 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const bool has_sxz = s.contains("sigma_xz_pa");
       const bool has_path = s.contains("sidecar_path")
                             && !toml_str(s, "sidecar_path", std::string()).empty();
+      const bool has_dp_block = s.contains("depth_proportional");
 
+      const bool has_patches = s.contains("patch");
       if (cfg.stress.kind == StressSourceKind::ConstantTensor)
       {
          MFEM_VERIFY(has_sxx && has_syy && has_szz
@@ -589,12 +971,148 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          MFEM_VERIFY(!has_path,
                      "[stress] kind=\"constant_tensor\" must NOT set "
                      "sidecar_path (it is for kind=\"sidecar_hdf5\" only)");
+         MFEM_VERIFY(!has_dp_block,
+                     "[stress] kind=\"constant_tensor\" must NOT set the "
+                     "[stress.depth_proportional] sub-block (it is for "
+                     "kind=\"depth_proportional\" only)");
+         MFEM_VERIFY(!has_patches,
+                     "[stress] kind=\"constant_tensor\" must NOT set any "
+                     "[[stress.patch]] entries (use "
+                     "kind=\"constant_tensor_with_patches\" instead)");
          cfg.stress.sigma_xx_pa = toml_real(s, "sigma_xx_pa", 0.0);
          cfg.stress.sigma_yy_pa = toml_real(s, "sigma_yy_pa", 0.0);
          cfg.stress.sigma_zz_pa = toml_real(s, "sigma_zz_pa", 0.0);
          cfg.stress.sigma_xy_pa = toml_real(s, "sigma_xy_pa", 0.0);
          cfg.stress.sigma_yz_pa = toml_real(s, "sigma_yz_pa", 0.0);
          cfg.stress.sigma_xz_pa = toml_real(s, "sigma_xz_pa", 0.0);
+      }
+      else if (cfg.stress.kind == StressSourceKind::ConstantTensorWithPatches)
+      {
+         // Same six-key requirement on the BACKGROUND tensor as
+         // constant_tensor; patches override individual components on
+         // top of it.
+         MFEM_VERIFY(has_sxx && has_syy && has_szz
+                     && has_sxy && has_syz && has_sxz,
+                     "[stress] kind=\"constant_tensor_with_patches\" "
+                     "requires all six background sigma_*_pa keys to "
+                     "be present");
+         MFEM_VERIFY(!has_path,
+                     "[stress] kind=\"constant_tensor_with_patches\" "
+                     "must NOT set sidecar_path");
+         MFEM_VERIFY(!has_dp_block,
+                     "[stress] kind=\"constant_tensor_with_patches\" "
+                     "must NOT set the [stress.depth_proportional] "
+                     "sub-block");
+         MFEM_VERIFY(has_patches,
+                     "[stress] kind=\"constant_tensor_with_patches\" "
+                     "requires at least one [[stress.patch]] entry "
+                     "(otherwise use kind=\"constant_tensor\")");
+
+         cfg.stress.sigma_xx_pa = toml_real(s, "sigma_xx_pa", 0.0);
+         cfg.stress.sigma_yy_pa = toml_real(s, "sigma_yy_pa", 0.0);
+         cfg.stress.sigma_zz_pa = toml_real(s, "sigma_zz_pa", 0.0);
+         cfg.stress.sigma_xy_pa = toml_real(s, "sigma_xy_pa", 0.0);
+         cfg.stress.sigma_yz_pa = toml_real(s, "sigma_yz_pa", 0.0);
+         cfg.stress.sigma_xz_pa = toml_real(s, "sigma_xz_pa", 0.0);
+
+         // Parse the [[stress.patch]] array.  toml11 represents an array
+         // of inline tables as a value with is_array()==true; each entry
+         // is itself a table.
+         const auto& parr = s.at("patch");
+         MFEM_VERIFY(parr.is_array(),
+                     "[stress.patch] must be a TOML array of tables");
+         const auto& vec = parr.as_array();
+         MFEM_VERIFY(!vec.empty(),
+                     "[stress.patch] must contain at least one patch");
+         const real_t nan = std::numeric_limits<real_t>::quiet_NaN();
+         const real_t pos_inf =  std::numeric_limits<real_t>::infinity();
+         cfg.stress.patches.clear();
+         cfg.stress.patches.reserve(vec.size());
+         for (std::size_t pi = 0; pi < vec.size(); ++pi)
+         {
+            const auto& pt = vec[pi];
+            MFEM_VERIFY(pt.is_table(),
+                        "[[stress.patch]] entry " << pi << " must be a table");
+            StressPatch sp;
+            sp.center_x_m  = toml_real(pt, "center_x_m", nan);
+            sp.center_y_m  = toml_real(pt, "center_y_m", nan);
+            sp.center_z_m  = toml_real(pt, "center_z_m", nan);
+            // Missing half-* ⇒ +inf (no constraint along that axis).
+            sp.half_x_m    = toml_real(pt, "half_x_m", pos_inf);
+            sp.half_y_m    = toml_real(pt, "half_y_m", pos_inf);
+            sp.half_z_m    = toml_real(pt, "half_z_m", pos_inf);
+            sp.sigma_xx_pa = toml_real(pt, "sigma_xx_pa", nan);
+            sp.sigma_yy_pa = toml_real(pt, "sigma_yy_pa", nan);
+            sp.sigma_zz_pa = toml_real(pt, "sigma_zz_pa", nan);
+            sp.sigma_xy_pa = toml_real(pt, "sigma_xy_pa", nan);
+            sp.sigma_yz_pa = toml_real(pt, "sigma_yz_pa", nan);
+            sp.sigma_xz_pa = toml_real(pt, "sigma_xz_pa", nan);
+
+            // Required: center_* on every axis that has a finite half-*.
+            // If half_x_m is +inf the patch spans all x and center_x_m is
+            // unused (NaN is fine); same for y / z.
+            const bool has_xc = !std::isnan(sp.center_x_m);
+            const bool has_yc = !std::isnan(sp.center_y_m);
+            const bool has_zc = !std::isnan(sp.center_z_m);
+            const bool x_constrained = std::isfinite(sp.half_x_m);
+            const bool y_constrained = std::isfinite(sp.half_y_m);
+            const bool z_constrained = std::isfinite(sp.half_z_m);
+            MFEM_VERIFY(!x_constrained || has_xc,
+                        "[[stress.patch]] entry " << pi
+                        << " sets half_x_m but not center_x_m");
+            MFEM_VERIFY(!y_constrained || has_yc,
+                        "[[stress.patch]] entry " << pi
+                        << " sets half_y_m but not center_y_m");
+            MFEM_VERIFY(!z_constrained || has_zc,
+                        "[[stress.patch]] entry " << pi
+                        << " sets half_z_m but not center_z_m");
+            MFEM_VERIFY(x_constrained || y_constrained || z_constrained,
+                        "[[stress.patch]] entry " << pi
+                        << " has all three half_*_m = +inf — the patch "
+                        "would cover the whole domain; supply at least "
+                        "one finite half_*_m");
+            MFEM_VERIFY(!x_constrained || sp.half_x_m >= 0.0,
+                        "[[stress.patch]] entry " << pi
+                        << " half_x_m must be >= 0; got " << sp.half_x_m);
+            MFEM_VERIFY(!y_constrained || sp.half_y_m >= 0.0,
+                        "[[stress.patch]] entry " << pi
+                        << " half_y_m must be >= 0; got " << sp.half_y_m);
+            MFEM_VERIFY(!z_constrained || sp.half_z_m >= 0.0,
+                        "[[stress.patch]] entry " << pi
+                        << " half_z_m must be >= 0; got " << sp.half_z_m);
+            // Require at least one stress override per patch.
+            const bool any_override =
+               !std::isnan(sp.sigma_xx_pa) || !std::isnan(sp.sigma_yy_pa) ||
+               !std::isnan(sp.sigma_zz_pa) || !std::isnan(sp.sigma_xy_pa) ||
+               !std::isnan(sp.sigma_yz_pa) || !std::isnan(sp.sigma_xz_pa);
+            MFEM_VERIFY(any_override,
+                        "[[stress.patch]] entry " << pi
+                        << " has no sigma_*_pa overrides — the patch "
+                        "would be a no-op");
+            cfg.stress.patches.push_back(sp);
+         }
+      }
+      else if (cfg.stress.kind == StressSourceKind::DepthProportionalToShearModulus)
+      {
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
+                     && !has_sxy && !has_syz && !has_sxz,
+                     "[stress] kind=\"depth_proportional\" must NOT set "
+                     "sigma_*_pa keys directly; put the 6 scaled "
+                     "components inside the [stress.depth_proportional] "
+                     "sub-block (in MPa)");
+         MFEM_VERIFY(!has_path,
+                     "[stress] kind=\"depth_proportional\" must NOT set "
+                     "sidecar_path");
+         MFEM_VERIFY(!has_patches,
+                     "[stress] kind=\"depth_proportional\" must NOT set "
+                     "[[stress.patch]] entries");
+         MFEM_VERIFY(has_dp_block,
+                     "[stress] kind=\"depth_proportional\" requires a "
+                     "[stress.depth_proportional] sub-block with "
+                     "sigma_xx_per_mu, ..., sigma_xz_per_mu (MPa) and "
+                     "mu_ref_pa");
+         parse_depth_proportional_stress(s.at("depth_proportional"),
+                                         cfg.stress.depth_proportional);
       }
       else
       {
@@ -603,6 +1121,12 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                      "[stress] kind=\"sidecar_hdf5\" must NOT set any of "
                      "sigma_xx_pa..sigma_xz_pa (those are for "
                      "kind=\"constant_tensor\" only)");
+         MFEM_VERIFY(!has_dp_block,
+                     "[stress] kind=\"sidecar_hdf5\" must NOT set the "
+                     "[stress.depth_proportional] sub-block");
+         MFEM_VERIFY(!has_patches,
+                     "[stress] kind=\"sidecar_hdf5\" must NOT set "
+                     "[[stress.patch]] entries");
          MFEM_VERIFY(has_path,
                      "[stress] kind=\"sidecar_hdf5\" requires a non-empty "
                      "sidecar_path");
@@ -613,10 +1137,14 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    if (root.contains("numerics"))
    {
       const auto& n = root.at("numerics");
-      cfg.numerics.ader_order = toml_int(n, "ader_order", 2);
-      cfg.numerics.mixed_flux = toml_str(n, "mixed_flux", "none");
-      cfg.numerics.cfl        = toml_real(n, "cfl", 0.5);
-      cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
+      cfg.numerics.ader_order     = toml_int (n, "ader_order",  2);
+      cfg.numerics.mixed_flux     = toml_str (n, "mixed_flux",  "none");
+      cfg.numerics.cfl            = toml_real(n, "cfl",         0.5);
+      cfg.numerics.use_pml        = toml_bool(n, "use_pml",     false);
+      // REVIEW R-004 / R-005 / R-006: TPV-parity opt-in knobs.
+      cfg.numerics.cfl_safety     = toml_str (n, "cfl_safety",     "raw");
+      cfg.numerics.fault_iterator = toml_str (n, "fault_iterator", "one-shot");
+      cfg.numerics.interior_flux  = toml_str (n, "interior_flux",  "bimaterial");
    }
    MFEM_VERIFY(cfg.numerics.ader_order >= 1,
                "[numerics].ader_order must be >= 1");
@@ -628,12 +1156,28 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                << cfg.numerics.mixed_flux << "'");
    MFEM_VERIFY(cfg.numerics.cfl > 0.0 && cfg.numerics.cfl < 1.0,
                "[numerics].cfl must be in (0, 1)");
+   MFEM_VERIFY(cfg.numerics.cfl_safety == "raw"
+               || cfg.numerics.cfl_safety == "dg",
+               "[numerics].cfl_safety must be one of {raw, dg}; got '"
+               << cfg.numerics.cfl_safety << "' (REVIEW R-004)");
+   MFEM_VERIFY(cfg.numerics.fault_iterator == "one-shot"
+               || cfg.numerics.fault_iterator == "substep",
+               "[numerics].fault_iterator must be one of {one-shot, substep}; "
+               "got '" << cfg.numerics.fault_iterator << "' (REVIEW R-005)");
+   MFEM_VERIFY(cfg.numerics.interior_flux == "bimaterial"
+               || cfg.numerics.interior_flux == "scalar",
+               "[numerics].interior_flux must be one of {bimaterial, scalar}; "
+               "got '" << cfg.numerics.interior_flux << "' (REVIEW R-006)");
 
    if (root.contains("time"))
    {
       const auto& t = root.at("time");
       cfg.time.tfinal     = toml_time_seconds(t, "tfinal",     12.0);
-      cfg.time.t_initial  = toml_real        (t, "t_initial",  0.0);
+      // Drive-by: t_initial now accepts both numeric and string ("0s")
+      // forms, matching the rest of the [time] block.  Previously a
+      // string here aborted with "t_initial must be a number" even
+      // though tpv205.toml writes it as "0s" for consistency.
+      cfg.time.t_initial  = toml_time_seconds(t, "t_initial",  0.0);
       cfg.time.dt_initial = parse_dt_initial (t);
       cfg.time.dt_max     = toml_time_seconds(t, "dt_max",     0.1);
    }
@@ -746,37 +1290,249 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.nucleation.enabled = true;
 
       const std::string kind_s = toml_str(nuc, "kind", "");
-      MFEM_VERIFY(kind_s == "gradual_overstress",
-                  "[nucleation].kind must be \"gradual_overstress\" "
-                  "(the only supported kind in this driver); got '"
+      MFEM_VERIFY(kind_s == "gradual_overstress"
+                  || kind_s == "square_overstress"
+                  || kind_s == "instantaneous_overstress_circular"
+                  || kind_s == "gradual_overstress_compact_circular",
+                  "[nucleation].kind must be \"gradual_overstress\", "
+                  "\"square_overstress\", "
+                  "\"instantaneous_overstress_circular\", or "
+                  "\"gradual_overstress_compact_circular\"; got '"
                   << kind_s << "'");
-      cfg.nucleation.kind = NucleationKind::GradualOverstress;
 
-      MFEM_VERIFY(nuc.contains("gradual_overstress"),
-                  "[nucleation] kind=\"gradual_overstress\" requires a "
-                  "[nucleation.gradual_overstress] sub-block");
-      const auto& g = nuc.at("gradual_overstress");
-      auto& gs = cfg.nucleation.gradual_overstress;
-      gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
-      gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
-      gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
-      gs.radius_dip_m        = toml_real(g, "radius_dip_m",        0.0);
-      gs.radius_strike_m     = toml_real(g, "radius_strike_m",     0.0);
-      gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
-      gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
-      gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
+      // Shared mutual-exclusion: only the sub-block matching `kind` may
+      // appear.  We collect the four optional sub-block names and check
+      // them once per branch below.
+      auto reject_extra_subblocks =
+         [&nuc](const std::string& allowed)
+      {
+         static const char* kAll[] = {
+            "gradual_overstress", "square_overstress",
+            "instantaneous_overstress_circular",
+            "gradual_overstress_compact_circular"
+         };
+         for (const char* k : kAll)
+         {
+            if (allowed == k) { continue; }
+            MFEM_VERIFY(!nuc.contains(k),
+                        "[nucleation] kind=\"" << allowed
+                        << "\" must NOT set the [nucleation." << k
+                        << "] sub-block");
+         }
+      };
 
-      MFEM_VERIFY(gs.radius_dip_m    > 0.0,
-                  "[nucleation.gradual_overstress].radius_dip_m must be > 0; "
-                  "got " << gs.radius_dip_m);
-      MFEM_VERIFY(gs.radius_strike_m > 0.0,
-                  "[nucleation.gradual_overstress].radius_strike_m must be > 0; "
-                  "got " << gs.radius_strike_m);
-      MFEM_VERIFY(gs.T_nuc_s         > 0.0,
-                  "[nucleation.gradual_overstress].T_nuc_s must be > 0; "
-                  "got " << gs.T_nuc_s);
+      if (kind_s == "gradual_overstress")
+      {
+         cfg.nucleation.kind = NucleationKind::GradualOverstress;
+         MFEM_VERIFY(nuc.contains("gradual_overstress"),
+                     "[nucleation] kind=\"gradual_overstress\" requires a "
+                     "[nucleation.gradual_overstress] sub-block");
+         reject_extra_subblocks("gradual_overstress");
+         const auto& g = nuc.at("gradual_overstress");
+         auto& gs = cfg.nucleation.gradual_overstress;
+         gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
+         gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
+         gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
+         gs.radius_dip_m        = toml_real(g, "radius_dip_m",        0.0);
+         gs.radius_strike_m     = toml_real(g, "radius_strike_m",     0.0);
+         gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
+         gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
+         gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
+
+         MFEM_VERIFY(gs.radius_dip_m    > 0.0,
+                     "[nucleation.gradual_overstress].radius_dip_m must be > 0; "
+                     "got " << gs.radius_dip_m);
+         MFEM_VERIFY(gs.radius_strike_m > 0.0,
+                     "[nucleation.gradual_overstress].radius_strike_m must be > 0; "
+                     "got " << gs.radius_strike_m);
+         MFEM_VERIFY(gs.T_nuc_s         > 0.0,
+                     "[nucleation.gradual_overstress].T_nuc_s must be > 0; "
+                     "got " << gs.T_nuc_s);
+      }
+      else if (kind_s == "square_overstress")
+      {
+         cfg.nucleation.kind = NucleationKind::SquareOverstress;
+         MFEM_VERIFY(nuc.contains("square_overstress"),
+                     "[nucleation] kind=\"square_overstress\" requires a "
+                     "[nucleation.square_overstress] sub-block");
+         reject_extra_subblocks("square_overstress");
+         const auto& sq = nuc.at("square_overstress");
+         auto& ss = cfg.nucleation.square_overstress;
+         ss.T_nuc_s = toml_time_seconds(sq, "T_nuc_s", 0.0);
+         MFEM_VERIFY(ss.T_nuc_s > 0.0,
+                     "[nucleation.square_overstress].T_nuc_s must be > 0; "
+                     "got " << ss.T_nuc_s);
+
+         MFEM_VERIFY(sq.contains("patch"),
+                     "[nucleation.square_overstress] requires at least one "
+                     "[[nucleation.square_overstress.patch]] entry");
+         const auto& parr = sq.at("patch");
+         MFEM_VERIFY(parr.is_array(),
+                     "[nucleation.square_overstress.patch] must be an array");
+         const auto& vec = parr.as_array();
+         MFEM_VERIFY(!vec.empty(),
+                     "[nucleation.square_overstress.patch] must be non-empty");
+         const real_t pos_inf = std::numeric_limits<real_t>::infinity();
+         ss.patches.clear();
+         ss.patches.reserve(vec.size());
+         for (std::size_t pi = 0; pi < vec.size(); ++pi)
+         {
+            const auto& pt = vec[pi];
+            MFEM_VERIFY(pt.is_table(),
+                        "[[nucleation.square_overstress.patch]] entry "
+                        << pi << " must be a table");
+            SquareOverstressPatch sp;
+            sp.center_x_m          = toml_real(pt, "center_x_m", 0.0);
+            sp.center_y_m          = toml_real(pt, "center_y_m", 0.0);
+            sp.center_z_m          = toml_real(pt, "center_z_m", 0.0);
+            sp.half_x_m            = toml_real(pt, "half_x_m",   pos_inf);
+            sp.half_y_m            = toml_real(pt, "half_y_m",   pos_inf);
+            sp.half_z_m            = toml_real(pt, "half_z_m",   pos_inf);
+            sp.delta_tau_dip_pa    = toml_real(pt, "delta_tau_dip_pa",    0.0);
+            sp.delta_tau_strike_pa = toml_real(pt, "delta_tau_strike_pa", 0.0);
+            const bool x_constrained = std::isfinite(sp.half_x_m);
+            const bool y_constrained = std::isfinite(sp.half_y_m);
+            const bool z_constrained = std::isfinite(sp.half_z_m);
+            MFEM_VERIFY(x_constrained || y_constrained || z_constrained,
+                        "[[nucleation.square_overstress.patch]] entry "
+                        << pi << " has all three half_*_m = +inf");
+            MFEM_VERIFY(!x_constrained || sp.half_x_m >= 0.0,
+                        "[[nucleation.square_overstress.patch]] entry "
+                        << pi << " half_x_m must be >= 0");
+            MFEM_VERIFY(!y_constrained || sp.half_y_m >= 0.0,
+                        "[[nucleation.square_overstress.patch]] entry "
+                        << pi << " half_y_m must be >= 0");
+            MFEM_VERIFY(!z_constrained || sp.half_z_m >= 0.0,
+                        "[[nucleation.square_overstress.patch]] entry "
+                        << pi << " half_z_m must be >= 0");
+            ss.patches.push_back(sp);
+         }
+      }
+      else if (kind_s == "instantaneous_overstress_circular")
+      {
+         cfg.nucleation.kind = NucleationKind::InstantaneousOverstressCircular;
+         MFEM_VERIFY(nuc.contains("instantaneous_overstress_circular"),
+                     "[nucleation] kind=\"instantaneous_overstress_circular\" "
+                     "requires a [nucleation.instantaneous_overstress_circular] "
+                     "sub-block");
+         reject_extra_subblocks("instantaneous_overstress_circular");
+         const auto& ic = nuc.at("instantaneous_overstress_circular");
+         auto& is = cfg.nucleation.instantaneous_overstress_circular;
+         is.center_x_m         = toml_real(ic, "center_x_m", 0.0);
+         is.center_y_m         = toml_real(ic, "center_y_m", 0.0);
+         is.center_z_m         = toml_real(ic, "center_z_m", 0.0);
+         is.radius_inner_m     = toml_real(ic, "radius_inner_m", 0.0);
+         is.radius_outer_m     = toml_real(ic, "radius_outer_m", 0.0);
+         is.delta_tau_peak_pa  = toml_real(ic, "delta_tau_peak_pa", 0.0);
+         is.mu_ref_pa          = toml_real(ic, "mu_ref_pa", 32.03812032e9);
+         is.dip_fraction       = toml_real(ic, "dip_fraction",    0.0);
+         is.strike_fraction    = toml_real(ic, "strike_fraction", 1.0);
+         MFEM_VERIFY(is.radius_inner_m > 0.0,
+                     "[nucleation.instantaneous_overstress_circular]"
+                     ".radius_inner_m must be > 0; got "
+                     << is.radius_inner_m);
+         MFEM_VERIFY(is.radius_outer_m >= is.radius_inner_m,
+                     "[nucleation.instantaneous_overstress_circular]"
+                     ".radius_outer_m (" << is.radius_outer_m
+                     << ") must be >= radius_inner_m ("
+                     << is.radius_inner_m << ")");
+         MFEM_VERIFY(is.mu_ref_pa > 0.0,
+                     "[nucleation.instantaneous_overstress_circular]"
+                     ".mu_ref_pa must be > 0; got " << is.mu_ref_pa);
+      }
+      else  // gradual_overstress_compact_circular
+      {
+         cfg.nucleation.kind =
+            NucleationKind::GradualOverstressCompactCircular;
+         MFEM_VERIFY(nuc.contains("gradual_overstress_compact_circular"),
+                     "[nucleation] kind=\"gradual_overstress_compact_circular\" "
+                     "requires a [nucleation.gradual_overstress_compact_circular] "
+                     "sub-block");
+         reject_extra_subblocks("gradual_overstress_compact_circular");
+         const auto& g = nuc.at("gradual_overstress_compact_circular");
+         auto& gs = cfg.nucleation.gradual_overstress_compact_circular;
+         gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
+         gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
+         gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
+         gs.radius_m            = toml_real(g, "radius_m",            0.0);
+         gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
+         gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
+         gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
+
+         MFEM_VERIFY(gs.radius_m > 0.0,
+                     "[nucleation.gradual_overstress_compact_circular]"
+                     ".radius_m must be > 0; got " << gs.radius_m);
+         MFEM_VERIFY(gs.T_nuc_s > 0.0,
+                     "[nucleation.gradual_overstress_compact_circular]"
+                     ".T_nuc_s must be > 0; got " << gs.T_nuc_s);
+      }
    }
    // else: enabled stays false; driver runs without nucleation perturbation.
+
+   // -----------------------------------------------------------------
+   // Phase R.3 new top-level sections.  Every one is OPTIONAL; missing
+   // sections fall back to the struct defaults, which match the SAFS
+   // hardcoded values (backwards-compatibility per plan §R.3 step 11).
+   // -----------------------------------------------------------------
+   if (root.contains("problem"))
+   {
+      parse_problem(root.at("problem"), cfg.problem);
+   }
+   if (root.contains("boundary"))
+   {
+      parse_boundary(root.at("boundary"), cfg.boundary);
+   }
+   if (root.contains("fault_geometry"))
+   {
+      parse_fault_geometry(root.at("fault_geometry"), cfg.fault_geometry);
+   }
+   if (root.contains("hypocenter"))
+   {
+      parse_hypocenter(root.at("hypocenter"), cfg.hypocenter);
+      // REVIEW R-008: catch the SPEC-depth-vs-mesh-z foot-gun.  Mesh z
+      // is NEGATIVE below the free surface (CLAUDE.md "Canonical
+      // Coordinate System"); hypocenter z should therefore be <= 0
+      // when up has positive z (the canonical case).  A positive
+      // hypocenter z with positive up_z would place the hypocenter
+      // above the free surface — almost certainly a SPEC-depth value
+      // copied without the sign flip.  The check is conditional on
+      // up[2] > 0 so TPV31's rotated frame (up = (0, -1, 0)) is not
+      // affected; TPV31 has up_z = 0 and hypocenter z = 0.
+      if (cfg.fault_geometry.up[2] > 0.0)
+      {
+         MFEM_VERIFY(cfg.hypocenter.z <= 0.0,
+                     "[hypocenter].z = " << cfg.hypocenter.z
+                     << " is positive, but [fault_geometry].up_z > 0 "
+                     "(canonical convention has z < 0 below the surface). "
+                     "A positive hypocenter z places the hypocenter ABOVE "
+                     "the free surface, almost certainly a SPEC-depth value "
+                     "copied without the mesh-z sign flip.  Set z = -<depth_m> "
+                     "in the TOML (e.g., z = -7500.0 for spec depth 7.5 km).  "
+                     "See REVIEW R-008 and `CLAUDE.md` \"Canonical Coordinate "
+                     "System\".");
+      }
+   }
+   if (root.contains("material"))
+   {
+      parse_material(root.at("material"), cfg.material);
+      parse_material_profile(root, cfg.material);
+   }
+
+   // Velocity requirement: now scoped to material.kind == sidecar_hdf5
+   // (the legacy SAFS dataset_root path).  For Constant + DepthProfile1D,
+   // the wave-operator material comes from the [material_constant_fallback]
+   // or [material_profile.layer] blocks respectively, and the [velocity]
+   // block is unused.
+   if (cfg.material.kind == MaterialKind::SidecarHDF5)
+   {
+      MFEM_VERIFY(root.contains("velocity"),
+                  "[material].kind=\"sidecar_hdf5\" requires a "
+                  "[velocity] block (legacy CVM-H / CVM-S dataset path)");
+      MFEM_VERIFY(!cfg.velocity.dataset_root.empty()
+                  || !cfg.velocity.override_path.empty(),
+                  "[velocity] must set either 'dataset_root' "
+                  "(for model-based resolution) or 'override_path'");
+   }
 
    // Friction-law-specific block.  Both-or-neither rule (Validator §3).
    const bool has_lsw = root.contains("friction")
@@ -919,10 +1675,51 @@ SlipWeakeningPerDOFParams SpatialFrictionResolver::ResolveSlipWeakening(
             // LSWFrictionCoefficient_ForcedRupture only reads mu_s.
             continue;
          }
+         if (r.kind == SpatialRule::Kind::BoxcarTaper)
+         {
+            // SCEC C∞ boxcar blend (symmetric with the RS path).
+            const real_t B = r.BoxcarTaperFactor(x, y, z);
+            if (B > 0.0)
+            {
+               if (!std::isnan(r.mu_s))     { mu_s_i += (r.mu_s     - mu_s_i) * B; }
+               if (!std::isnan(r.mu_d))     { mu_d_i += (r.mu_d     - mu_d_i) * B; }
+               if (!std::isnan(r.d_c))      { d_c_i  += (r.d_c      - d_c_i)  * B; }
+               if (!std::isnan(r.cohesion)) { coh_i  += (r.cohesion - coh_i)  * B; }
+            }
+            continue;
+         }
          if (!std::isnan(r.mu_s))     { mu_s_i = r.mu_s; }
          if (!std::isnan(r.mu_d))     { mu_d_i = r.mu_d; }
          if (!std::isnan(r.d_c))      { d_c_i  = r.d_c; }
          if (!std::isnan(r.cohesion)) { coh_i  = r.cohesion; }
+         // Depth-linear cohesion taper (TPV31).  Takes precedence over
+         // any constant `cohesion` set above; clamped from below by
+         // `cohesion_floor_pa` (typically 0).
+         if (!std::isnan(r.cohesion_grad_pa_per_m))
+         {
+            MFEM_VERIFY(!std::isnan(r.cohesion_ref_depth_m),
+                        "ResolveSlipWeakening: cohesion_grad_pa_per_m set "
+                        "but cohesion_ref_depth_m missing in spatial rule");
+            // For axis 'z' (canonical SEAS), interpret the axis value as
+            // POSITIVE depth (depth = max(0, -z)) so the taper formula
+            // `cohesion = floor + grad * (ref_depth - depth)` can be
+            // written with POSITIVE `ref_depth` and `grad` regardless of
+            // mesh-z sign — matches the MakeDepthProfile1DMaterial
+            // convention.  Axes 'x' and 'y' keep the legacy "axis_val is
+            // used literally" semantic for backwards compatibility with
+            // pre-rotation TPV31 (which encoded depth on +y).
+            real_t axis_val = (r.cohesion_taper_axis == 'x') ? x :
+                              (r.cohesion_taper_axis == 'z') ? z : y;
+            if (r.cohesion_taper_axis == 'z')
+            {
+               const real_t d = -axis_val;
+               axis_val = (d > 0.0) ? d : 0.0;
+            }
+            const real_t raw = r.cohesion_floor_pa
+               + r.cohesion_grad_pa_per_m
+                 * (r.cohesion_ref_depth_m - axis_val);
+            coh_i = (raw > r.cohesion_floor_pa) ? raw : r.cohesion_floor_pa;
+         }
       }
 
       // Per-DOF validator.  Barrier DOFs have mu_s = 1e6 ≫ mu_d, so
@@ -978,6 +1775,9 @@ RateStatePerDOFParams resolve_rs_impl(
    p.V_init.SetSize(N);
    p.f_0.SetSize(N); p.V_0.SetSize(N); p.eta.SetSize(N);
    p.sigma_n_eff.SetSize(N);
+   const bool fvw =
+      (cfg.state_evolution == StateEvolutionKind::SlipLawStrongRateWeakening);
+   if (fvw) { p.V_w.SetSize(N); }
 
    for (int i = 0; i < N; ++i)
    {
@@ -994,6 +1794,7 @@ RateStatePerDOFParams resolve_rs_impl(
       real_t V0_i     = cfg.V_0_default;
       real_t eta_i    = cfg.eta_default;
       real_t sn_i     = cfg.sigma_n_default;
+      real_t Vw_i     = cfg.V_w_default;
 
       bool   eta_rule_set = false;
 
@@ -1002,6 +1803,31 @@ RateStatePerDOFParams resolve_rs_impl(
          if (!r.matches(x, y, z, dof_to_attr[i])) { continue; }
          // RS resolver ignores Barrier (LSW-only concept).
          if (r.kind == SpatialRule::Kind::Barrier) { continue; }
+         if (r.kind == SpatialRule::Kind::BoxcarTaper)
+         {
+            // SCEC C∞ boxcar blend: blend the current baseline toward
+            // the override using `B = B(x)·B(y)·B(z)`.  `B = 1` ⇒
+            // value = override (inside), `B = 0` ⇒ value unchanged
+            // (outside).  No-op for parameters that this rule does
+            // NOT set (override stays NaN).
+            const real_t B = r.BoxcarTaperFactor(x, y, z);
+            if (B > 0.0)
+            {
+               if (!std::isnan(r.a))       { a_i      += (r.a      - a_i)      * B; }
+               if (!std::isnan(r.b))       { b_i      += (r.b      - b_i)      * B; }
+               if (!std::isnan(r.Dc))      { Dc_i     += (r.Dc     - Dc_i)     * B; }
+               if (!std::isnan(r.V_init))  { V_init_i += (r.V_init - V_init_i) * B; }
+               if (!std::isnan(r.f_0))     { f0_i     += (r.f_0    - f0_i)     * B; }
+               if (!std::isnan(r.V_0))     { V0_i     += (r.V_0    - V0_i)     * B; }
+               if (!std::isnan(r.sigma_n)) { sn_i     += (r.sigma_n- sn_i)     * B; }
+               if (!std::isnan(r.eta))
+               { eta_i += (r.eta - eta_i) * B; eta_rule_set = true; }
+               if (!std::isnan(r.V_w))     { Vw_i     += (r.V_w    - Vw_i)     * B; }
+            }
+            continue;
+         }
+         // Step-style rules (Depth / Box / RegionAttribute): direct
+         // override assignment, last-match wins.
          if (!std::isnan(r.a))       { a_i      = r.a; }
          if (!std::isnan(r.b))       { b_i      = r.b; }
          if (!std::isnan(r.Dc))      { Dc_i     = r.Dc; }
@@ -1010,6 +1836,7 @@ RateStatePerDOFParams resolve_rs_impl(
          if (!std::isnan(r.V_0))     { V0_i     = r.V_0; }
          if (!std::isnan(r.sigma_n)) { sn_i     = r.sigma_n; }
          if (!std::isnan(r.eta))     { eta_i = r.eta;  eta_rule_set = true; }
+         if (!std::isnan(r.V_w))     { Vw_i     = r.V_w; }
       }
 
       // Effective normal stress (depth convention: z<0 below surface).
@@ -1059,13 +1886,24 @@ RateStatePerDOFParams resolve_rs_impl(
       // Per-DOF validator.
       MFEM_VERIFY(a_i > 0.0, "ResolveRateState: a <= 0 at DOF " << i);
       MFEM_VERIFY(b_i > 0.0, "ResolveRateState: b <= 0 at DOF " << i);
-      MFEM_VERIFY(a_i < b_i, "ResolveRateState: a >= b at DOF " << i);
+      // `a < b` is the velocity-weakening criterion; SCEC TPV102/104
+      // intentionally use `a > b` outside the VW core (stable VS
+      // regions).  Do not enforce `a < b` per DOF — the regime
+      // (VW vs VS) is a physical input, not a validation rule.
       MFEM_VERIFY(Dc_i > 0.0, "ResolveRateState: Dc <= 0 at DOF " << i);
       MFEM_VERIFY(V0_i > 0.0, "ResolveRateState: V_0 <= 0 at DOF " << i);
       MFEM_VERIFY(sigma_n_eff > 0.0,
                   "ResolveRateState: sigma_n_eff <= 0 at DOF " << i);
       MFEM_VERIFY(f0_i > 0.0 && f0_i < 1.0,
                   "ResolveRateState: f_0 not in (0,1) at DOF " << i);
+
+      if (fvw)
+      {
+         MFEM_VERIFY(Vw_i > 0.0,
+                     "ResolveRateState: V_w <= 0 at DOF " << i
+                     << " (state_evolution=slip_law_srw)");
+         p.V_w(i) = Vw_i;
+      }
 
       p.a(i) = a_i;   p.b(i) = b_i;   p.Dc(i) = Dc_i;
       p.V_init(i) = V_init_i;

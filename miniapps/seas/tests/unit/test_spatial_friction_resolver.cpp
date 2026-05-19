@@ -565,37 +565,40 @@ static void R_4_rs_V_init_override()
 #endif
 }
 
-// R-5  RS validator aborts on a >= b
+// R-5  RS validator accepts a >= b (velocity-strengthening regime).
+// SCEC TPV102/104 intentionally place the rupture core in a < b
+// (velocity-weakening) while the surrounding region is a > b
+// (velocity-strengthening, stable).  The resolver must NOT abort on
+// a >= b per DOF — the regime is a physical input, not a validation
+// rule.  This test was previously the inverse ("a >= b should abort")
+// and was updated when the spec-exact TPV102/104 support landed.
 static void R_5_rs_validator_aborts()
 {
-   std::cout << "\n[R-5] RS validator aborts on a >= b at a DOF\n";
-#ifdef MFEM_USE_MPI
-   const bool aborted = RunInChild([]()
-   {
-      const int N = 1;
-      Vector dofs; Array<int> attr, elem;
-      make_synthetic_dofs(N, 1000.0, dofs, attr, elem);
-      Vector sn_total(N); sn_total = 50e6;
-      RateStateBlock cfg;
-      cfg.a_default = 0.010; cfg.b_default = 0.015;
-      cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
-      cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
-      cfg.sigma_n_default = 50e6;
-      cfg.eta_auto = false; cfg.eta_default = 5e6;
-      SpatialRule r;
-      r.kind = SpatialRule::Kind::Depth;
-      r.z_min_m = -1e9; r.z_max_m = 1e9;
-      r.a = 0.020;
-      cfg.spatial.push_back(r);
-      auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
-      TinyMeshHolder mh;
-      PorePressureSpec pp;
-      mfem::Mesh& srl = mh.mesh();
-      SpatialFrictionResolver R;
-      (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
-   });
-   TEST_ASSERT(aborted, "a >= b should abort the RS validator");
-#endif
+   std::cout << "\n[R-5] RS resolver accepts a >= b (VS region)\n";
+   const int N = 1;
+   Vector dofs; Array<int> attr, elem;
+   make_synthetic_dofs(N, 1000.0, dofs, attr, elem);
+   Vector sn_total(N); sn_total = 50e6;
+   RateStateBlock cfg;
+   cfg.a_default = 0.010; cfg.b_default = 0.015;
+   cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
+   cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
+   cfg.sigma_n_default = 50e6;
+   cfg.eta_auto = false; cfg.eta_default = 5e6;
+   SpatialRule r;
+   r.kind = SpatialRule::Kind::Depth;
+   r.z_min_m = -1e9; r.z_max_m = 1e9;
+   r.a = 0.020;      // a > b at every DOF → stable VS region
+   cfg.spatial.push_back(r);
+   auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
+   TinyMeshHolder mh;
+   PorePressureSpec pp;
+   mfem::Mesh& srl = mh.mesh();
+   SpatialFrictionResolver R;
+   auto p = R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+   TEST_NEAR(p.a(0), 0.020, 0.0, "a-override applied (VS region)");
+   TEST_NEAR(p.b(0), 0.015, 0.0, "b stays at default");
+   TEST_ASSERT(p.a(0) > p.b(0), "VS regime: a > b accepted by resolver");
 }
 
 // R-6  RS eta = explicit positive number

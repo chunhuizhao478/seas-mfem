@@ -210,22 +210,25 @@ public:
    /// PLAN_onfaultstress.md).
    ///
    /// Inputs from the sidecar are already in SEAS internal sign
-   /// convention (compression POSITIVE, Pa).  No sign flip is performed
-   /// here; the rotation is purely linear algebra:
+   /// convention (compression POSITIVE, Pa).  The rotation projects
+   /// the Cauchy tensor onto the fault-local frame:
    ///
    ///   sigma_n_per_dof(i)     = n_i^T σ(x_i) n_i
    ///                            − (P_p_pa + P_p_grad_pa_per_m
    ///                                          * max(0, -z_i))
-   ///   tau_pre_per_dof(2*i)   = t1_i^T σ(x_i) n_i   (dip,    BP5 t1)
-   ///   tau_pre_per_dof(2*i+1) = t2_i^T σ(x_i) n_i   (strike, BP5 t2)
+   ///   tau_pre_per_dof(2*i)   = − t1_i^T σ(x_i) n_i   (dip,    BP5 t1)
+   ///   tau_pre_per_dof(2*i+1) = − t2_i^T σ(x_i) n_i   (strike, BP5 t2)
    ///
    /// where (t1, t2, n) is the canonical SEAS fault-local frame
    /// (CLAUDE.md "fault-local tangent frame" rule: t1 = dip, t2 = strike).
-   ///
-   /// The single source-site sign flip (R-501/R-502) lives in Phase 3
-   /// `bulk_stress_tensor_field`; Phase 5 sidecar writer and Phase 6
-   /// `StressField3D` reader are pure pass-throughs.  Per the plan
-   /// docstring (§1796-1839) this projector does not flip again.
+   /// The leading minus sign on tau{1,2} matches the native
+   /// TPV102/104/205 driver convention `DOFData::tau{1,2}_0 = +tau_ini`
+   /// for σ_xy > 0 right-lateral driving stress (the raw T = σ·n
+   /// projection returns the +y-side traction on the −y side, which is
+   /// the Newton's-3rd-law mirror of the driving stress).  See R-001
+   /// in debug_document/general_driver_debug_document/tpv102_tpv104_review.md
+   /// and the implementation comment in field_coefficient.cpp.
+   /// `sigma_n_total = n·S·n` is sign-invariant under n → −n.
    ///
    /// Pore pressure is subtracted from the normal stress: this
    /// implements the standard effective normal stress σ_n − P_p with

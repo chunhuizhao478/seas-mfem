@@ -52,6 +52,20 @@
 #include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv205_friction.hpp"
 #include "../dynamic/tpv205_substep_iterator.hpp"
+#include "../dynamic/tpv102_substep_iterator.hpp"
+#include "../dynamic/tpv104_substep_iterator.hpp"
+// REVIEW R-009: SCEC-trace station writer parity with tpv205_driver.cpp.
+#include "../dynamic/tpv205_setup.hpp"
+// REVIEW R-007: SCEC-trace station writers for TPV102 (rate-and-state
+// aging law) and TPV104 (slip-law strong rate weakening).  Headers
+// expose `TPV102StationWriter` + `DefaultStations()` (TPV102) and
+// `TPV104StationWriter` + `DefaultStations_TPV104()`.  The unsuffixed
+// `DefaultStations()` and `InitializeFaultDOFs()` from tpv102_setup.hpp
+// do not collide with any other symbol in this translation unit.
+#include "../dynamic/tpv102_setup.hpp"
+#include "../dynamic/tpv104_setup.hpp"
+#include "../friction/state_evolution.hpp"
+#include "../friction/slip_law_srw_psi.hpp"
 #include "../dynamic/heterogeneous_material.hpp"
 #include "../dynamic/spatial_setup.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
@@ -91,6 +105,7 @@
 #include <limits>
 #include <memory>
 #include <numeric>
+#include <set>
 #include <sstream>
 #include <string>
 #include <vector>
@@ -330,21 +345,30 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
                << " entries, expected " << N);
 }
 
-// TPV205-style ADER macro-step driver: predictor in the bulk, LSW
-// closed-form per sub-step at fault QPs, corrector via wave.AdvanceADER
-// with the side-channel I_imp.  Mirrors AdvanceADERWithSubStep in
-// drivers/tpv205_driver.cpp (1:1 except no SEAS_DIAG hooks).
+// ADER macro-step driver: predictor in the bulk, per-QP fault solve
+// per sub-step, corrector via wave.AdvanceADER with the side-channel
+// I_imp.  Friction-law agnostic: the iterator-specific call (LSW closed
+// form / RS aging law / RS slip-law SRW) is wrapped by the
+// `do_iterate` lambda so this helper does not care which iterator is
+// driving the per-QP solve.
 //
-// Phase N: the trailing `nuc_callback` arg is forwarded to the
-// per-sub-step callback overload of
-// `Tpv205SubStepIterator::AdvanceWithSubStepStates`; the callback fires
-// ONCE per ADER sub-step BEFORE the per-QP friction pipeline.  Pass
-// `[](real_t, real_t){}` to opt out (no nucleation perturbation).
+// `set_substeps(deltaT_scaled, weights)` configures the wrapped
+// iterator's quadrature each call (mirrors what was done inline before
+// the refactor — the iterator owns its own quadrature state).
+// `do_iterate(Q_pointwise_plus, Q_pointwise_minus, dt_step,
+//             t_step_start, I_imp_plus, I_imp_minus, nuc_cb)`
+// performs the iterator-specific advance.
 void AdvanceADERWithSubStep_Spatial(
    WaveOperator<ParMesh> &wave,
-   Tpv205SubStepIterator &iterator,
-   std::vector<DOFData> &dof_data,
-   const std::vector<Vector> &fault_coords,
+   const std::function<void(const std::vector<real_t>&,
+                            const std::vector<real_t>&)> &set_substeps,
+   const std::function<void(const std::vector<std::vector<real_t>>&,
+                            const std::vector<std::vector<real_t>>&,
+                            real_t, real_t, real_t*, real_t*,
+                            const std::function<void(real_t, real_t)>&)>
+                            &do_iterate,
+   const std::vector<real_t> &configured_deltaT,
+   const std::vector<real_t> &configured_weights,
    const Vector &Q,
    real_t dt_step,
    int ader_order,
@@ -359,17 +383,17 @@ void AdvanceADERWithSubStep_Spatial(
                "AdvanceADERWithSubStep_Spatial: ader_order must be in "
                "{2,3,4}, got " << ader_order);
 
-   const std::vector<real_t> configured_deltaT  = iterator.GetDeltaT();
-   const std::vector<real_t> configured_weights = iterator.GetTimeWeights();
    const int O = static_cast<int>(configured_deltaT.size());
    MFEM_VERIFY(O >= 1,
-               "AdvanceADERWithSubStep_Spatial: iterator deltaT empty; "
-               "SetSubSteps must be called first.");
+               "AdvanceADERWithSubStep_Spatial: configured_deltaT empty");
+   MFEM_VERIFY(static_cast<int>(configured_weights.size()) == O,
+               "AdvanceADERWithSubStep_Spatial: configured_weights / "
+               "configured_deltaT size mismatch");
    const real_t configured_sum =
       std::accumulate(configured_deltaT.begin(), configured_deltaT.end(),
                       static_cast<real_t>(0));
    MFEM_VERIFY(configured_sum > 0.0,
-               "AdvanceADERWithSubStep_Spatial: Σ deltaT = "
+               "AdvanceADERWithSubStep_Spatial: Σ configured_deltaT = "
                << configured_sum << " ≤ 0");
 
    const real_t dt_scale = dt_step / configured_sum;
@@ -378,16 +402,15 @@ void AdvanceADERWithSubStep_Spatial(
    {
       deltaT_scaled[o] = configured_deltaT[o] * dt_scale;
    }
-   iterator.SetSubSteps(deltaT_scaled, configured_weights);
-   const std::vector<real_t> &deltaT = iterator.GetDeltaT();
+   set_substeps(deltaT_scaled, configured_weights);
 
    // Sub-step MIDPOINT nodes on [0, dt_step].
    std::vector<real_t> tau_nodes(O);
    real_t acc = 0.0;
    for (int o = 0; o < O; ++o)
    {
-      tau_nodes[o] = acc + 0.5 * deltaT[o];
-      acc += deltaT[o];
+      tau_nodes[o] = acc + 0.5 * deltaT_scaled[o];
+      acc += deltaT_scaled[o];
    }
 
    std::vector<Vector> Q_per_node;
@@ -414,13 +437,11 @@ void AdvanceADERWithSubStep_Spatial(
 
    if (n_total_fault_qps > 0)
    {
-      iterator.AdvanceWithSubStepStates(dof_data, fault_coords,
-                                        Q_pointwise_plus,
-                                        Q_pointwise_minus,
-                                        dt_step, t_step_start,
-                                        I_imp_plus_flat.data(),
-                                        I_imp_minus_flat.data(),
-                                        nuc_callback);
+      do_iterate(Q_pointwise_plus, Q_pointwise_minus,
+                 dt_step, t_step_start,
+                 I_imp_plus_flat.data(),
+                 I_imp_minus_flat.data(),
+                 nuc_callback);
    }
 
    struct ImposedGuard
@@ -691,10 +712,15 @@ int main(int argc, char *argv[])
                "RateState; got " << static_cast<int>(cfg.law));
    const bool is_lsw =
       (cfg.law == spatial::FrictionLawKind::SlipWeakening);
-   MFEM_VERIFY(is_lsw,
-               "spatial_dyn_driver: only [meta].law = \"slip_weakening\" "
-               "is supported in this commit; rate_state path is a "
-               "deferred follow-up (plan §Phase 4 Edge Cases).");
+   if (!is_lsw)
+   {
+      MFEM_VERIFY(cfg.rate_state.has_value(),
+                  "spatial_dyn_driver: [meta].law=\"rate_state\" but the "
+                  "[friction.rate_state] block is absent in TOML.");
+   }
+   const bool rs_use_srw = !is_lsw
+      && cfg.rate_state->state_evolution
+         == spatial::StateEvolutionKind::SlipLawStrongRateWeakening;
 
    if (rank == 0)
    {
@@ -705,10 +731,19 @@ int main(int argc, char *argv[])
                 << "mesh:             " << cfg.mesh.path << "\n"
                 << "fe order:         " << cfg.mesh.order << "\n"
                 << "law:              "
-                << (is_lsw ? "slip_weakening" : "rate_state") << "\n"
+                << (is_lsw ? "slip_weakening"
+                           : (rs_use_srw ? "rate_state (slip_law_srw)"
+                                         : "rate_state (aging_law)")) << "\n"
                 << "stress kind:      "
                 << (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor
-                    ? "constant_tensor" : "sidecar_hdf5") << "\n"
+                    ? "constant_tensor"
+                    : cfg.stress.kind ==
+                      spatial::StressSourceKind::ConstantTensorWithPatches
+                      ? "constant_tensor_with_patches"
+                      : cfg.stress.kind ==
+                        spatial::StressSourceKind::DepthProportionalToShearModulus
+                        ? "depth_proportional"
+                        : "sidecar_hdf5") << "\n"
                 << "tfinal:           " << cfg.time.tfinal << " s\n"
                 << "cfl:              " << cfg.numerics.cfl << "\n"
                 << "ader order:       " << cfg.numerics.ader_order << "\n"
@@ -717,8 +752,9 @@ int main(int argc, char *argv[])
                 << "\n"
                 << "nucleation:       "
                 << (cfg.nucleation.enabled
-                    ? "gradual_overstress (enabled)"
-                    : "DISABLED")
+                    ? (std::string(spatial::NucleationKindToString(cfg.nucleation.kind))
+                       + " (enabled)")
+                    : std::string("DISABLED"))
                 << "\n"
                 << "no-sidecar mat:   " << (no_sidecar_material ? "yes" : "no")
                 << "\n"
@@ -776,7 +812,30 @@ int main(int argc, char *argv[])
 
    // -----------------------------------------------------------------
    // 4.  Load mesh.
-   // -----------------------------------------------------------------
+   //
+   // REVIEW R-006: explicit preflight check.  MFEM's Mesh ctor emits a
+   // raw `MFEM_ABORT("could not open Gmsh file ...")` that doesn't tell
+   // the user how to regenerate it.  Surface a clearer error first so
+   // a fresh checkout against a `.geo`-only mesh directory points the
+   // user at the right `gmsh -format msh22` command.  (Per CLAUDE.md
+   // "Known limitation — Gmsh .msh format", MFEM requires v2.2 format.)
+   if (!std::filesystem::exists(cfg.mesh.path))
+   {
+      if (rank == 0)
+      {
+         std::cerr << "ERROR: mesh file '" << cfg.mesh.path
+                   << "' does not exist.  Generate it with:\n"
+                   << "    gmsh -format msh22 -3 <input>.geo -o "
+                   << cfg.mesh.path << "\n"
+                   << "  (Gmsh v2.2 — required by MFEM; see CLAUDE.md "
+                   << "\"Known limitation — Gmsh .msh format\".)\n";
+      }
+#ifdef MFEM_USE_MPI
+      MPI_Barrier(comm);
+      MPI_Finalize();
+#endif
+      return 4;
+   }
    Mesh smesh(cfg.mesh.path.c_str(), 1, 1);
    const int dim = smesh.Dimension();
    MFEM_VERIFY(dim == 3,
@@ -792,26 +851,86 @@ int main(int argc, char *argv[])
    pmesh.SetCurvature(cfg.mesh.order);
 
    // -----------------------------------------------------------------
-   // 5.  BoundaryConfig (SAFS .geo: fault=101, top free=102, bottom +
-   //     sides absorbing=103+104).
+   // 5.  BoundaryConfig — Phase R.3 step 2: read from cfg.boundary.
+   //
+   // Defaults in `spatial::BoundarySpec` (fault=101, natural=[102],
+   // absorbing=[103,104]) match the SAFS .geo so existing SAFS configs
+   // continue to behave unchanged (R.3 step 11 backward-compat).
+   // TPV205 + TPV31 configs override these via the new [boundary] TOML
+   // block.
    // -----------------------------------------------------------------
    BoundaryConfig bc;
-   bc.fault_attr = 101;
-   bc.natural_attrs   = {102};
-   bc.absorbing_attrs = {103, 104};
+   bc.fault_attr      = cfg.boundary.fault_attr;
+   bc.natural_attrs   = std::set<int>(cfg.boundary.natural_attrs.begin(),
+                                      cfg.boundary.natural_attrs.end());
+   bc.absorbing_attrs = std::set<int>(cfg.boundary.absorbing_attrs.begin(),
+                                      cfg.boundary.absorbing_attrs.end());
+   MFEM_VERIFY(bc.fault_attr > 0,
+               "spatial_dyn_driver: [boundary].fault_attr must be > 0; got "
+               << bc.fault_attr);
 
    // -----------------------------------------------------------------
-   // 6.  Material — pick the right WaveOperator ctor (deviation D-1).
+   // 6.  Material — Phase R.3 step 6 + step 1: dispatch on
+   //     cfg.material.kind.  Phase R.2 made the heterogeneous
+   //     `WaveOperator(MaterialField, BoundaryConfig)` ctor work for
+   //     all three modes at INTERIOR faces; the D-1 abort is removed.
+   //
+   //     Material kinds:
+   //       * constant         — Mode::Constant from [material_constant_fallback]
+   //       * depth_profile_1d — Mode::Coefficient from MakeDepthProfile1DMaterial
+   //       * sidecar_hdf5     — Mode::GridFunction or Mode::Coefficient
+   //                            (legacy SpatialVelocityBundle path)
+   //
+   //     Legacy CLI `--no-sidecar-material` forces "constant" regardless
+   //     of `cfg.material.kind` so existing scripts keep working.
    // -----------------------------------------------------------------
-   real_t mat_lambda = cfg.material_fallback.lambda;
-   real_t mat_mu     = cfg.material_fallback.mu;
-   real_t mat_rho    = cfg.material_fallback.rho;
+   const real_t mat_lambda = cfg.material_fallback.lambda;
+   const real_t mat_mu     = cfg.material_fallback.mu;
+   const real_t mat_rho    = cfg.material_fallback.rho;
 
    std::unique_ptr<spatial::SpatialVelocityBundle> vel_bundle;
+   std::unique_ptr<DepthProfile1DMaterial>         depth_profile_wrapper;
    MaterialField material = MaterialField::MakeConstant(mat_lambda,
                                                         mat_mu, mat_rho);
 
-   if (!no_sidecar_material)
+   const bool force_constant = no_sidecar_material
+                               || cfg.material.kind == spatial::MaterialKind::Constant;
+
+   if (force_constant)
+   {
+      if (rank == 0)
+      {
+         std::cout << "[material] kind=constant from "
+                   << "[material_constant_fallback]: "
+                   << "lambda=" << mat_lambda
+                   << " mu=" << mat_mu
+                   << " rho=" << mat_rho << "\n";
+      }
+   }
+   else if (cfg.material.kind == spatial::MaterialKind::DepthProfile1D)
+   {
+      depth_profile_wrapper = MakeDepthProfile1DMaterial(
+         cfg.material.profile_layers, cfg.material.depth_axis);
+      material = depth_profile_wrapper->field;
+      if (rank == 0)
+      {
+         std::cout << "[material] kind=depth_profile_1d (axis='"
+                   << cfg.material.depth_axis << "', "
+                   << cfg.material.profile_layers.size()
+                   << " layers)\n";
+         for (std::size_t i = 0; i < cfg.material.profile_layers.size(); ++i)
+         {
+            const auto &L = cfg.material.profile_layers[i];
+            std::cout << "  layer " << i
+                      << ": depth=[" << L.depth_top_m << ", "
+                      << L.depth_bot_m << "] m  "
+                      << "vp=" << L.vp_ms << " vs=" << L.vs_ms
+                      << " rho=" << L.rho_kgm3
+                      << " interp=" << L.interp << "\n";
+         }
+      }
+   }
+   else  // SidecarHDF5
    {
       try
       {
@@ -820,7 +939,7 @@ int main(int argc, char *argv[])
          material = vel_bundle->MakeMaterialField();
          if (rank == 0)
          {
-            std::cout << "[material] loaded sidecar bundle: "
+            std::cout << "[material] kind=sidecar_hdf5: "
                       << spatial::ResolveSpatialVelocitySidecarPath(cfg.velocity)
                       << "\n";
          }
@@ -840,44 +959,74 @@ int main(int argc, char *argv[])
          return 4;
       }
    }
-   else
+
+   // -----------------------------------------------------------------
+   // 7.  Construct WaveOperator.
+   //
+   //     Default (`[numerics] interior_flux = "bimaterial"`): use the
+   //     heterogeneous (MaterialField, BoundaryConfig) ctor (Phase R.2
+   //     / R.4 step 2).  Routes every interior face through
+   //     `BimaterialFlux::ApplyPerFaceFlux` and exercises the
+   //     bi-material precomputation on Mode::Constant input — drift
+   //     from the scalar ctor is ~1e-12 relative (verified by
+   //     T-PHASEH-SCALAR-PARITY).
+   //
+   //     REVIEW R-006 opt-in (`[numerics] interior_flux = "scalar"`):
+   //     use the scalar ctor `WaveOperator(mesh, order, λ, μ, ρ, bc)`
+   //     for byte parity with the native TPV102/TPV104/TPV205 drivers.
+   //     Only valid when material is Mode::Constant (homogeneous).
+   // -----------------------------------------------------------------
+   const bool use_scalar_ctor = (cfg.numerics.interior_flux == "scalar");
+   if (use_scalar_ctor)
    {
+      MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
+                  "spatial_dyn_driver: [numerics].interior_flux = \"scalar\" "
+                  "requires homogeneous material (Mode::Constant); current "
+                  "material kind cannot be reduced to scalar (λ, μ, ρ).  "
+                  "Either set material.kind = \"constant\" or remove the "
+                  "interior_flux opt-in to use the bimaterial path.  "
+                  "(REVIEW R-006)");
       if (rank == 0)
       {
-         std::cout << "[material] using [material_constant_fallback]: "
-                   << "lambda=" << mat_lambda
-                   << " mu=" << mat_mu
-                   << " rho=" << mat_rho << "\n";
+         std::cout << "[wave] interior_flux=scalar: using scalar "
+                   << "WaveOperator(λ, μ, ρ) ctor for byte parity with "
+                   << "native TPV102/TPV104/TPV205 (REVIEW R-006).\n";
       }
    }
+   std::unique_ptr<WaveOperator<ParMesh>> wave_ptr =
+      use_scalar_ctor
+         ? std::make_unique<WaveOperator<ParMesh>>(
+              pmesh, cfg.mesh.order,
+              material.lambda_const, material.mu_const, material.rho_const,
+              bc)
+         : std::make_unique<WaveOperator<ParMesh>>(
+              pmesh, cfg.mesh.order, material, bc);
+   WaveOperator<ParMesh> &wave = *wave_ptr;
 
-   // Deviation D-1: WaveOperator(MaterialField) ctor is not yet wired.
-   // Refuse to silently downgrade Mode::Coefficient input to scalar.
-   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
-               "spatial_dyn_driver Phase H gap: the heterogeneous "
-               "WaveOperator(MaterialField) ctor + per-element flux "
-               "dispatch (plan §Phase H.1/H.2) is NOT yet wired (see "
-               "dynamic/wave_operator.hpp:215 — SetGodunovFluxPool still "
-               "aborts).  This driver supports only "
-               "MaterialField::Mode::Constant via the existing scalar-"
-               "material ctor.  Re-run with --no-sidecar-material to "
-               "force the [material_constant_fallback] path.");
-
-   // -----------------------------------------------------------------
-   // 7.  Construct WaveOperator (scalar-material; deviation D-1).
-   // -----------------------------------------------------------------
-   WaveOperator<ParMesh> wave(pmesh, cfg.mesh.order,
-                              material.lambda_const,
-                              material.mu_const,
-                              material.rho_const,
-                              bc);
+   // Representative material values for downstream consumers that
+   // expect a scalar (reflection-time warning, FaultFaceFlux seed
+   // impedance, PrintDerivedAndCheck mu_bulk).  For Mode::Constant
+   // these ARE the actual constants; for non-constant modes they
+   // fall back to the [material_constant_fallback] block which is
+   // documented as the per-DOF override gets re-seeded by
+   // InitializeFaultDOFs_Spatial (the seed values matter only for
+   // initial diagnostics).
+   const real_t seed_lambda =
+      (material.mode == MaterialField::Mode::Constant)
+      ? material.lambda_const : mat_lambda;
+   const real_t seed_mu =
+      (material.mode == MaterialField::Mode::Constant)
+      ? material.mu_const     : mat_mu;
+   const real_t seed_rho =
+      (material.mode == MaterialField::Mode::Constant)
+      ? material.rho_const    : mat_rho;
 
    // R-107 reflection-time warning: compute min_box_dim / cp_max from
    // mesh bounding box + scalar material.
    {
-      const real_t cp = std::sqrt((material.lambda_const
-                                   + 2.0 * material.mu_const)
-                                   / material.rho_const);
+      const real_t cp = std::sqrt((seed_lambda
+                                   + 2.0 * seed_mu)
+                                   / seed_rho);
       Vector lo(3), hi(3);
       pmesh.GetBoundingBox(lo, hi, 1);
       real_t min_box_dim_local = std::numeric_limits<real_t>::infinity();
@@ -901,16 +1050,21 @@ int main(int argc, char *argv[])
       }
    }
 
-   // Phase N: the spatial driver supports exactly one nucleation kind
-   // (`gradual_overstress`) — the friction law is always plain LSW.
-   // The gradual_overstress accumulator writes time-domain perturbations
-   // into DOFData::tau{1,2}_nuc; the LSW solver consumes them via
-   // s.tau{1,2}_total = tau{1,2}_0 + tau{1,2}_nuc + trial.  The obsolete
-   // LSW_ForcedRupture dispatch arm + f_2(t) per-DOF friction reduction
-   // are NOT used.  Native TPV* drivers continue to set
-   // FaultFrictionLaw::LSW_ForcedRupture verbatim.
-   wave.SetFaultFrictionLaw(FaultFrictionLaw::LSW);
-   wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
+   // Dispatch the wave operator's per-face friction law on `cfg.law`:
+   //   - LSW: closed-form linear slip-weakening
+   //   - RateState: Brent/Newton-Raphson per-QP via fault_flux EvaluateADER
+   wave.SetFaultFrictionLaw(is_lsw ? FaultFrictionLaw::LSW
+                                   : FaultFrictionLaw::RateAndState);
+
+   // REVIEW R-007: `SetMixedFluxMode` is intentionally DEFERRED to
+   // AFTER `SetFaultFlux` + `SetFaultDOFData` + `SetAbsorbingBackground`
+   // (the R-1205 required call order, see `CLAUDE.md` and the native
+   // TPV205 driver's wiring at `tpv205_driver.cpp:1606-1633`).  The
+   // setter's internal cross-checks (e.g., bc.fault_attr > 0 for
+   // Adjacent mode) assume the fault wiring is already in place; calling
+   // it earlier would silently no-op for "none" but abort with a
+   // misleading message for any non-trivial value.  See call site
+   // further below (after SetAbsorbingBackground).
 
    wave.SetTime(cfg.time.t_initial);
 
@@ -931,24 +1085,71 @@ int main(int argc, char *argv[])
    const int num_shared_fault = fault_shr_faces.Size() * nbf_per_face;
    const int num_fault_total  = num_fault_local + num_shared_fault;
 
-   // Reconstruct FaultBasis on this rank (interior + shared appended).
-   // For a SAFS curvilinear fault the canonical (BP5 / TPV205) choice
-   // is ref_normal = +y (pointing into the box's east half) and
-   // up = +z.  FaultBasis::Compute orients each face's normal against
-   // ref_normal; non-orthogonal ref_normal still resolves a consistent
-   // sign per face.  Adjustable via a TOML knob in a follow-up commit
-   // if a SAFS run reports sign-flipped basis vectors at every face
-   // (R-604 round-6).
+   // REVIEW R-003 — basis-consistency fix: the wave operator builds its
+   // OWN `FaultBasis` internally at `dynamic/wave_operator.inl:349-350`
+   // with hard-coded ref_normal = (0, -1, 0), up = (0, 0, 1) (the
+   // Tandem convention used by `FaultFaceFlux::ComputeTrialTraction`).
+   // Previously this driver built a SEPARATE FaultBasis from the TOML's
+   // `[fault_geometry] ref_normal / up`, fed it to
+   // `FaultGeometry::ComputeParams<StressSource>`, and produced
+   // tau_pre in a basis that could disagree with the wave operator's
+   // internal one.  Specifically, since `strike = up × n_ref`, flipping
+   // the sign of ref_normal flips the strike basis vector — so a TOML
+   // with ref_normal = (0, +1, 0) (the SAFS schema default!) produced
+   // tau_pre.strike with the OPPOSITE sign of the runtime trial
+   // traction, sending rupture backwards.
+   //
+   // Fix: reuse `wave.GetFaultBasis()` directly so external (pre-stress
+   // projection) and internal (trial traction) live in the SAME frame
+   // by construction.  The TOML's `[fault_geometry].ref_normal / up`
+   // fields are now used ONLY for an early-startup check that the user
+   // is not inadvertently asking for a frame that disagrees with the
+   // wave operator's hard-coded one — this catches the SAFS-default-
+   // (0,+1,0) foot-gun before any physics runs.  TPV31's (0,0,-1)
+   // ref_normal also trips this check and surfaces the requirement
+   // that the wave operator gain a parametric ref_normal before TPV31
+   // is supported by this driver.
    Vector ref_normal(3);
-   ref_normal(0) = 0.0;  ref_normal(1) = 1.0;  ref_normal(2) = 0.0;
+   ref_normal(0) = cfg.fault_geometry.ref_normal[0];
+   ref_normal(1) = cfg.fault_geometry.ref_normal[1];
+   ref_normal(2) = cfg.fault_geometry.ref_normal[2];
    Vector up_vec(3);
-   up_vec(0)     = 0.0;  up_vec(1)     = 0.0;  up_vec(2)     = 1.0;
+   up_vec(0) = cfg.fault_geometry.up[0];
+   up_vec(1) = cfg.fault_geometry.up[1];
+   up_vec(2) = cfg.fault_geometry.up[2];
 
-   FaultBasis fbasis;
-   fbasis.Compute(pmesh, fault_int_faces, ref_normal, up_vec);
-#ifdef MFEM_USE_MPI
-   fbasis.AppendSharedFaces(pmesh, fault_shr_faces, ref_normal, up_vec);
-#endif
+   {
+      constexpr real_t kEps = 1e-12;
+      const bool n_matches =
+         std::abs(ref_normal(0) -  0.0) < kEps &&
+         std::abs(ref_normal(1) - -1.0) < kEps &&
+         std::abs(ref_normal(2) -  0.0) < kEps;
+      const bool up_matches =
+         std::abs(up_vec(0) - 0.0) < kEps &&
+         std::abs(up_vec(1) - 0.0) < kEps &&
+         std::abs(up_vec(2) - 1.0) < kEps;
+      MFEM_VERIFY(n_matches && up_matches,
+                  "spatial_dyn_driver: [fault_geometry].ref_normal / up = ("
+                  << ref_normal(0) << "," << ref_normal(1) << ","
+                  << ref_normal(2) << ") / (" << up_vec(0) << ","
+                  << up_vec(1) << "," << up_vec(2) << ") does NOT match "
+                  "the wave operator's internal Tandem convention (0,-1,0) "
+                  "/ (0,0,1) at dynamic/wave_operator.inl:349-350.  Set "
+                  "[fault_geometry] ref_normal = [0.0, -1.0, 0.0] and "
+                  "up = [0.0, 0.0, 1.0] in the TOML so the external "
+                  "Cauchy-projection basis matches the runtime trial-"
+                  "traction basis.  (Drivers running with the SAFS schema "
+                  "default (0,+1,0) need to update — see REVIEW R-003.)");
+   }
+
+   const FaultBasis &fbasis = *wave.GetFaultBasis();
+   MFEM_VERIFY(fbasis.NumFaces() >=
+               fault_int_faces.Size() + fault_shr_faces.Size(),
+               "spatial_dyn_driver: wave.GetFaultBasis() has "
+               << fbasis.NumFaces() << " faces but driver expects "
+               << (fault_int_faces.Size() + fault_shr_faces.Size())
+               << " (interior + shared); the wave operator's internal "
+               "FaultBasis is missing AppendSharedFaces?");
 
    std::vector<Vector>          fault_coords;
    Vector                       dof_coords_3d;
@@ -977,6 +1178,16 @@ int main(int argc, char *argv[])
                 << " (local = " << num_fault_local
                 << ", shared = " << num_shared_fault << ")\n";
    }
+   // REVIEW R-005: hard-abort if the configured fault_attr matches zero
+   // mesh faces.  Mirrors the native TPV205/TPV102/TPV104 drivers
+   // (drivers/tpv205_driver.cpp:1216-1218).  Without this, a typo'd
+   // [boundary].fault_attr produces a silent useless run that completes
+   // with no fault DOFs, no station traces, and no ParaView fault file.
+   MFEM_VERIFY(num_fault_global > 0,
+               "spatial_dyn_driver: no fault faces with attr="
+               << bc.fault_attr << " found in mesh '"
+               << cfg.mesh.path << "'.  Check [boundary].fault_attr in "
+               "the TOML and the mesh's Physical Surface tags.");
 
    // -----------------------------------------------------------------
    // 9.  FaultGeometry via the new BP5 ctor (Phase 5a).  Seed BP5Params
@@ -1009,41 +1220,181 @@ int main(int argc, char *argv[])
                                               cfg.stress.sigma_xy_pa,
                                               cfg.stress.sigma_yz_pa,
                                               cfg.stress.sigma_xz_pa);
-      geom.ComputeSAFSParams(src,
+      geom.ComputeParams(src,
+                             cfg.stress.pore_pressure.P_p_pa,
+                             cfg.stress.pore_pressure.P_p_grad_pa_per_m,
+                             cfg.stress.pore_pressure.min_sigma_n_pa);
+   }
+   else if (cfg.stress.kind ==
+            spatial::StressSourceKind::ConstantTensorWithPatches)
+   {
+      // TPV205-style: background constant tensor + N static square
+      // patches that override per-component shear at t = 0 (NOT a
+      // time-dependent perturbation — the patches are baked into
+      // tau_pre_ via ComputeParams<StressSource>).
+      spatial::ConstantTensorWithPatchesStressSource src(
+         cfg.stress.sigma_xx_pa, cfg.stress.sigma_yy_pa,
+         cfg.stress.sigma_zz_pa, cfg.stress.sigma_xy_pa,
+         cfg.stress.sigma_yz_pa, cfg.stress.sigma_xz_pa,
+         cfg.stress.patches);
+      geom.ComputeParams(src,
+                             cfg.stress.pore_pressure.P_p_pa,
+                             cfg.stress.pore_pressure.P_p_grad_pa_per_m,
+                             cfg.stress.pore_pressure.min_sigma_n_pa);
+   }
+   else if (cfg.stress.kind ==
+            spatial::StressSourceKind::DepthProportionalToShearModulus)
+   {
+      // REVIEW R-003: TPV31-style depth-proportional pre-stress.
+      //   σ(x, y, z) = sigma_*_per_mu · μ(x, y, z) / μ_ref
+      // The `mu_at_xyz` callback comes from the current MaterialField.
+      // Today the only material kind producing coordinate-only μ is
+      // `depth_profile_1d` (via `DepthProfile1DMaterial::eval_at_xyz`).
+      // For `constant` material, μ is a fixed scalar; for `sidecar_hdf5`
+      // a coordinate-only lookup would require a point locator we have
+      // not yet built — abort with a clear message in that case.
+      spatial::DepthProportionalToShearModulusStressSource::MuAtFn mu_at_xyz;
+      if (material.mode == MaterialField::Mode::Constant)
+      {
+         const real_t mu_const = material.mu_const;
+         mu_at_xyz = [mu_const](real_t /*x*/, real_t /*y*/, real_t /*z*/)
+                     { return mu_const; };
+      }
+      else if (depth_profile_wrapper != nullptr)
+      {
+         MFEM_VERIFY(static_cast<bool>(depth_profile_wrapper->eval_at_xyz),
+                     "spatial_dyn_driver: depth-profile material has no "
+                     "eval_at_xyz callback (heterogeneous_material.cpp "
+                     "wiring lost?).");
+         auto& eval = depth_profile_wrapper->eval_at_xyz;
+         mu_at_xyz = [&eval](real_t x, real_t y, real_t z) -> real_t {
+            real_t lam, mu, rho;
+            eval(x, y, z, lam, mu, rho);
+            return mu;
+         };
+      }
+      else
+      {
+         MFEM_ABORT("spatial_dyn_driver: [stress] kind = "
+                    "\"depth_proportional\" requires either [material] "
+                    "kind = \"constant\" or \"depth_profile_1d\".  "
+                    "Coordinate-only μ lookup for sidecar_hdf5 is not "
+                    "yet implemented.");
+      }
+      const auto& dp = cfg.stress.depth_proportional;
+      spatial::DepthProportionalToShearModulusStressSource src(
+         dp.sigma_xx_per_mu, dp.sigma_yy_per_mu, dp.sigma_zz_per_mu,
+         dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
+         dp.mu_ref_pa, std::move(mu_at_xyz));
+      geom.ComputeParams(src,
                              cfg.stress.pore_pressure.P_p_pa,
                              cfg.stress.pore_pressure.P_p_grad_pa_per_m,
                              cfg.stress.pore_pressure.min_sigma_n_pa);
    }
    else
    {
+      MFEM_VERIFY(cfg.stress.kind == spatial::StressSourceKind::SidecarHDF5,
+                  "spatial_dyn_driver: unhandled stress kind "
+                  << static_cast<int>(cfg.stress.kind)
+                  << ".  Valid kinds: constant_tensor, "
+                  "constant_tensor_with_patches, depth_proportional, "
+                  "sidecar_hdf5.");
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
    }
-   MFEM_VERIFY(geom.HasSAFSParams(),
+   MFEM_VERIFY(geom.HasParams(),
                "spatial_dyn_driver: stress source projection failed");
 
    // -----------------------------------------------------------------
-   // 11. Resolve per-DOF LSW parameters (Phase 1).
+   // 11. Resolve per-DOF friction parameters (LSW or RateState).
    // -----------------------------------------------------------------
-   MFEM_VERIFY(cfg.slip_weakening.has_value(),
-               "spatial_dyn_driver: [meta].law=slip_weakening but the "
-               "[friction.slip_weakening] block is absent in TOML.");
    spatial::SpatialFrictionResolver resolver;
-   const spatial::SlipWeakeningPerDOFParams lsw =
-      resolver.ResolveSlipWeakening(*cfg.slip_weakening,
-                                    dof_coords_3d, dof_to_attr);
+   spatial::SlipWeakeningPerDOFParams lsw;
+   spatial::RateStatePerDOFParams    rs;
+   if (is_lsw)
+   {
+      MFEM_VERIFY(cfg.slip_weakening.has_value(),
+                  "spatial_dyn_driver: [meta].law=slip_weakening but the "
+                  "[friction.slip_weakening] block is absent in TOML.");
+      lsw = resolver.ResolveSlipWeakening(*cfg.slip_weakening,
+                                          dof_coords_3d, dof_to_attr);
+   }
+   else
+   {
+      rs = resolver.ResolveRateState(*cfg.rate_state,
+                                     dof_coords_3d, dof_to_elem,
+                                     dof_to_attr, material, pmesh,
+                                     cfg.stress.pore_pressure,
+                                     geom.sigma_n_per_dof());
+   }
 
    // -----------------------------------------------------------------
-   // 12. Phase N: resolve the single nucleation kind
-   //     (`gradual_overstress`).  Per-DOF amplitude_dip(i) /
-   //     amplitude_strike(i) = F(r_i) · Δτ; per-DOF radial(i) = F(r_i).
-   //     When `cfg.nucleation.enabled == false`, the resolver returns
-   //     three zero-sized Vectors — the per-sub-step accumulator
-   //     early-returns and the simulation runs with no nucleation.
+   // 12. Phase N: resolve the active nucleation kind.  Four kinds:
+   //       `gradual_overstress`              (Gaussian, smoothStep ramp)
+   //       `square_overstress`               (rectangular, smoothStep ramp)
+   //       `instantaneous_overstress_circular` (TPV31: circular cosine
+   //                                            taper, INSTANTANEOUS,
+   //                                            per-DOF µ-scaling)
+   //       `gradual_overstress_compact_circular`
+   //                                         (SCEC TPV101/102/104 spec:
+   //                                          F(r)=exp(r²/(r²-R²)) +
+   //                                          smoothStep ramp)
+   //     Exactly one resolver returns non-empty per-DOF amplitudes; the
+   //     others return zero-sized Vectors.  When `enabled == false`, ALL
+   //     return zero-sized.
    // -----------------------------------------------------------------
+   const bool gradual_active = cfg.nucleation.enabled
+      && cfg.nucleation.kind == spatial::NucleationKind::GradualOverstress;
+   const bool square_active  = cfg.nucleation.enabled
+      && cfg.nucleation.kind == spatial::NucleationKind::SquareOverstress;
+   const bool instant_active = cfg.nucleation.enabled
+      && cfg.nucleation.kind
+         == spatial::NucleationKind::InstantaneousOverstressCircular;
+   const bool compact_circular_active = cfg.nucleation.enabled
+      && cfg.nucleation.kind
+         == spatial::NucleationKind::GradualOverstressCompactCircular;
+
    const spatial::GradualOverstressPerDOFParams nuc_params =
       spatial::ResolveGradualOverstress(
          cfg.nucleation.gradual_overstress,
-         cfg.nucleation.enabled,
+         gradual_active,
+         dof_coords_3d,
+         dof_basis);
+
+   const spatial::SquareOverstressPerDOFParams sq_nuc_params =
+      spatial::ResolveSquareOverstress(
+         cfg.nucleation.square_overstress,
+         square_active,
+         dof_coords_3d);
+
+   // Per-DOF µ for the instantaneous_overstress_circular µ-scaling.
+   // Empty (size 0) when this kind is inactive so the resolver
+   // early-returns.
+   Vector mu_per_fault_dof;
+   if (instant_active && num_fault_total > 0)
+   {
+      mu_per_fault_dof.SetSize(num_fault_total);
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         const int elem = dof_to_elem[i];
+         mfem::IsoparametricTransformation Tr;
+         pmesh.GetElementTransformation(elem, &Tr);
+         Tr.SetIntPoint(&dof_ips[i]);
+         real_t lam_i, mu_i, rho_i;
+         material.EvalAt(elem, Tr, dof_ips[i], lam_i, mu_i, rho_i);
+         mu_per_fault_dof(i) = mu_i;
+      }
+   }
+   const spatial::InstantaneousOverstressCircularPerDOFParams ic_nuc_params =
+      spatial::ResolveInstantaneousOverstressCircular(
+         cfg.nucleation.instantaneous_overstress_circular,
+         instant_active,
+         dof_coords_3d,
+         mu_per_fault_dof);
+
+   const spatial::GradualOverstressCompactCircularPerDOFParams cc_nuc_params =
+      spatial::ResolveGradualOverstressCompactCircular(
+         cfg.nucleation.gradual_overstress_compact_circular,
+         compact_circular_active,
          dof_coords_3d,
          dof_basis);
 
@@ -1074,11 +1425,11 @@ int main(int argc, char *argv[])
    // 13. Construct FaultFaceFlux with seed scalar impedances; the
    //     per-DOF impedances are overwritten by InitializeFaultDOFs_Spatial.
    // -----------------------------------------------------------------
-   const real_t cp_seed = std::sqrt((material.lambda_const
-                                     + 2.0 * material.mu_const)
-                                     / material.rho_const);
-   const real_t cs_seed = std::sqrt(material.mu_const / material.rho_const);
-   FaultFaceFlux fault_flux(material.rho_const, cp_seed, cs_seed);
+   const real_t cp_seed = std::sqrt((seed_lambda
+                                     + 2.0 * seed_mu)
+                                     / seed_rho);
+   const real_t cs_seed = std::sqrt(seed_mu / seed_rho);
+   FaultFaceFlux fault_flux(seed_rho, cp_seed, cs_seed);
    wave.SetFaultFlux(&fault_flux);
 
    // -----------------------------------------------------------------
@@ -1096,14 +1447,113 @@ int main(int argc, char *argv[])
    Vector dummy_t0_decay(num_fault_total);  dummy_t0_decay = 0.0;
 
    std::vector<DOFData> dof_data;
+   // Per-DOF V_w side-channel (FVW / SCEC FL=103 only).  Sized to
+   // num_fault_total when state_evolution == slip_law_srw; left empty
+   // otherwise.  Consumed by `Tpv104SubStepIterator::AdvanceWith...`.
+   std::vector<real_t> Vw_per_dof;
    if (num_fault_total > 0)
    {
-      spatial::InitializeFaultDOFs_Spatial<ParMesh>(
-         dof_data, num_fault_total, dof_to_elem, material, pmesh,
-         lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
-         dummy_T_forced, dummy_t0_decay,
-         dof_ips);
+      if (is_lsw)
+      {
+         spatial::InitializeFaultDOFs_Spatial<ParMesh>(
+            dof_data, num_fault_total, dof_to_elem, material, pmesh,
+            lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
+            dummy_T_forced, dummy_t0_decay,
+            dof_ips);
+      }
+      else
+      {
+         // REVIEW R-008: IP-aware overload so per-DOF impedances are
+         // evaluated at the actual fault QP, not at the bulk element
+         // centroid.  Required for any RS config with non-constant
+         // material (e.g., depth_profile_1d); harmless and consistent
+         // for constant material.
+         spatial::InitializeFaultDOFs_Spatial_RS<ParMesh>(
+            dof_data, num_fault_total, dof_to_elem, material, pmesh,
+            rs, geom.GetTauPre(), geom.sigma_n_per_dof(), dof_ips);
+
+         // Override the at-rest seeding for rate-state:
+         //   - psi from steady-state inversion using the friction
+         //     solver's own DOFData inputs:
+         //         tau = sigma_n0 * a * asinh((V/(2 V_0)) exp(psi/a))
+         //     ⇒  psi = a * ln( (2 V_0 / V) sinh(tau/(sigma_n0 a)) )
+         //     evaluated via the numerically stable
+         //         log(x · sinh(c)) = |c| + log((x/2)·-sign(c)·expm1(-2|c|))
+         //     identity (TPV102/TPV104 `ComputeInitialPsi*` helper).
+         //   - slip_rate / V{1,2} from V_init magnitude and the pre-stress
+         //     direction (V parallel to tau_pre, CLAUDE.md "Slip rate
+         //     direction").
+         //
+         // R-006 (tpv102_tpv104_review.md): the friction-equation inputs
+         // `a`, `sigma_n0`, `tau1_0`, `tau2_0` are read from `dof_data[i]`
+         // (the values the runtime solver actually consults), NOT from
+         // the resolver/geometry side-arrays.  `V_0` and `V_init` stay
+         // on the resolver side because they have no DOFData mirror
+         // (the spatial RS init does not duplicate them).  This keeps
+         // the at-rest equilibrium `|tau| = sigma_n0 * a * asinh(...)`
+         // self-consistent against whatever the underlying
+         // `InitializeFaultDOFs_Spatial_RS` populated.
+         for (int i = 0; i < num_fault_total; ++i)
+         {
+            DOFData &d = dof_data[i];
+            const real_t a_i      = d.a;
+            const real_t V0_i     = rs.V_0(i);
+            const real_t V_init_i = std::max(rs.V_init(i),
+                                             static_cast<real_t>(1.0e-300));
+            const real_t sn_i     = std::abs(d.sigma_n0);
+            const real_t tau1_pre = d.tau1_0;
+            const real_t tau2_pre = d.tau2_0;
+            const real_t tau_abs  = std::sqrt(tau1_pre * tau1_pre
+                                              + tau2_pre * tau2_pre);
+
+            // ψ from the stable-asinh inversion of the RS friction
+            // coefficient (TPV102/TPV104 `ComputeInitialPsi*`).
+            const real_t arg_c = tau_abs / (sn_i * a_i);
+            const real_t x     = 2.0 * V0_i / V_init_i;
+            const real_t sign_c =
+               (arg_c >= 0.0) ? static_cast<real_t>(1.0)
+                              : static_cast<real_t>(-1.0);
+            const real_t absC  = std::abs(arg_c);
+            d.psi = a_i * (absC + std::log(x / 2.0 * -sign_c
+                                           * std::expm1(-2.0 * absC)));
+
+            // Slip rate direction PARALLEL to tau_pre (R-801 BP5 frame:
+            // tangent1 = dip, tangent2 = strike).  CLAUDE.md "Slip rate
+            // direction": V_vec = (V_abs / tau_abs) · tau_vec.
+            d.slip_rate = V_init_i;
+            if (tau_abs > 0.0)
+            {
+               d.V1 = (V_init_i / tau_abs) * tau1_pre;
+               d.V2 = (V_init_i / tau_abs) * tau2_pre;
+            }
+            else
+            {
+               d.V1 = 0.0;
+               d.V2 = V_init_i;   // arbitrary tangential direction
+            }
+            d.slip1 = 0.0;
+            d.slip2 = 0.0;
+         }
+
+         if (rs_use_srw)
+         {
+            MFEM_VERIFY(rs.V_w.Size() == num_fault_total,
+                        "spatial_dyn_driver: rate_state.V_w size mismatch "
+                        "(expected " << num_fault_total << ", got "
+                        << rs.V_w.Size() << ")");
+            Vw_per_dof.resize(num_fault_total);
+            for (int i = 0; i < num_fault_total; ++i)
+            { Vw_per_dof[i] = rs.V_w(i); }
+         }
+      }
    }
+
+   // Instantaneous overstress (TPV31): write the full per-DOF Δτ into
+   // DOFData::tau{1,2}_nuc ONCE, right after init.  No per-sub-step
+   // ramp — the spec is `t = 0+`.  This is a no-op when the resolver
+   // returned zero-sized Vectors (i.e. instant_active == false).
+   spatial::ApplyInstantaneousOverstressCircular(dof_data, ic_nuc_params);
+
    wave.SetFaultDOFData(&dof_data, nbf_per_face);
 
    // Fluctuation-Q dispatch (matches TPV205): Q_bg = 0.
@@ -1112,11 +1562,34 @@ int main(int argc, char *argv[])
       wave.SetAbsorbingBackground(Q_bg);
    }
 
+   // REVIEW R-007: SetMixedFluxMode at the R-1205-mandated point in the
+   // setter sequence — AFTER ctor + SetFaultFlux + SetFaultDOFData +
+   // SetAbsorbingBackground.  Mirrors `tpv205_driver.cpp:1606-1633`.
+   wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
+
    // -----------------------------------------------------------------
    // 15. CFL / Δt and derived numbers.  ComputeMaxDt is the scalar-
    //     material implementation (deviation D-1).
+   //
+   // REVIEW R-004: apply the DG safety factor 1 / (3*(2p+1)) when the
+   // TOML opts in via `[numerics] cfl_safety = "dg"`.  This matches the
+   // native TPV102/TPV104/TPV205 drivers (`cfl_factor / (3*(2*order+1))`)
+   // and is required for byte parity with their outputs.  Default
+   // `cfl_safety = "raw"` keeps existing SAFS configs unchanged.
    // -----------------------------------------------------------------
-   const real_t dt_cfl = wave.ComputeMaxDt(cfg.numerics.cfl);
+   real_t cfl_for_max_dt = cfg.numerics.cfl;
+   if (cfg.numerics.cfl_safety == "dg")
+   {
+      cfl_for_max_dt /= (3.0 * (2.0 * cfg.mesh.order + 1.0));
+      if (rank == 0)
+      {
+         std::cout << "[time] cfl_safety=dg: scaled cfl from "
+                   << cfg.numerics.cfl << " to " << cfl_for_max_dt
+                   << " (= cfl / (3*(2p+1)) with p=" << cfg.mesh.order
+                   << ") to match native TPV/BP5 driver convention.\n";
+      }
+   }
+   const real_t dt_cfl = wave.ComputeMaxDt(cfl_for_max_dt);
    real_t dt = (cfg.time.dt_initial > 0.0)
                 ? cfg.time.dt_initial : dt_cfl;
    if (cfg.time.dt_max > 0.0 && dt > cfg.time.dt_max)
@@ -1137,7 +1610,7 @@ int main(int argc, char *argv[])
                 << "[time] nsteps = " << nsteps << "\n";
    }
 
-   if (print_derived)
+   if (print_derived && is_lsw)
    {
       // Compute mesh h_min for the L_nuc / h_min ratio.
       real_t h_min_local = std::numeric_limits<real_t>::infinity();
@@ -1160,7 +1633,7 @@ int main(int argc, char *argv[])
          dof_coords_3d,
          cfg.nucleation, nuc_params,
          cfg.stress,
-         /*mu_bulk=*/material.mu_const,
+         /*mu_bulk=*/seed_mu,
          cp_seed, cs_seed,
          h_min_global,
          dt_cfl, cfg.time.tfinal,
@@ -1353,16 +1826,41 @@ int main(int argc, char *argv[])
          for (int i = 0; i < num_fault_total; ++i)
          {
             const DOFData &d = dof_data[i];
+            // LSW slots only carry meaning for the LSW path; for RS the
+            // values are zero per `copy_lsw_and_forced_rupture_fields`
+            // -> `_RS` init.
             pv_lsw_mu_s(i) = d.lsw_mu_s;
             pv_lsw_mu_d(i) = d.lsw_mu_d;
             pv_lsw_d_c (i) = d.lsw_d_c;
-            const real_t ad = (nuc_params.amplitude_dip.Size()    == num_fault_total)
-                              ? nuc_params.amplitude_dip(i)    : 0.0;
-            const real_t as = (nuc_params.amplitude_strike.Size() == num_fault_total)
-                              ? nuc_params.amplitude_strike(i) : 0.0;
+            // Sum contributions from all nucleation kinds; exactly one
+            // resolver returned non-empty Vectors above.
+            real_t ad = 0.0, as = 0.0, rad = 0.0;
+            if (nuc_params.amplitude_dip.Size()    == num_fault_total)
+            { ad = nuc_params.amplitude_dip(i); }
+            if (nuc_params.amplitude_strike.Size() == num_fault_total)
+            { as = nuc_params.amplitude_strike(i); }
+            if (nuc_params.radial.Size()           == num_fault_total)
+            { rad = nuc_params.radial(i); }
+            if (sq_nuc_params.amplitude_dip.Size()    == num_fault_total)
+            { ad += sq_nuc_params.amplitude_dip(i); }
+            if (sq_nuc_params.amplitude_strike.Size() == num_fault_total)
+            { as += sq_nuc_params.amplitude_strike(i); }
+            if (sq_nuc_params.radial.Size()           == num_fault_total)
+            { rad += sq_nuc_params.radial(i); }
+            if (ic_nuc_params.amplitude_dip.Size()    == num_fault_total)
+            { ad += ic_nuc_params.amplitude_dip(i); }
+            if (ic_nuc_params.amplitude_strike.Size() == num_fault_total)
+            { as += ic_nuc_params.amplitude_strike(i); }
+            if (ic_nuc_params.radial.Size()           == num_fault_total)
+            { rad += ic_nuc_params.radial(i); }
+            if (cc_nuc_params.amplitude_dip.Size()    == num_fault_total)
+            { ad += cc_nuc_params.amplitude_dip(i); }
+            if (cc_nuc_params.amplitude_strike.Size() == num_fault_total)
+            { as += cc_nuc_params.amplitude_strike(i); }
+            if (cc_nuc_params.radial.Size()           == num_fault_total)
+            { rad += cc_nuc_params.radial(i); }
             pv_nuc_amplitude(i) = std::sqrt(ad*ad + as*as);
-            pv_nuc_radial   (i) = (nuc_params.radial.Size() == num_fault_total)
-                                  ? nuc_params.radial(i)   : 0.0;
+            pv_nuc_radial   (i) = rad;
             pv_sig_n_init   (i) = d.sigma_n_corr;
             pv_tau1_init    (i) = d.tau1_corr;
             pv_tau2_init    (i) = d.tau2_corr;
@@ -1560,31 +2058,109 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 19. Sub-step iterator (TPV205 LSW closed form).  Phase N: only the
-   //     plain LSW path is used in this driver — the forced-rupture
-   //     mode toggle is gone with the dispatch flip above.
+   // 19. Sub-step iterator — friction-law-dependent.  LSW uses the
+   //     TPV205 closed-form integrator; rate-state uses TPV102 (aging
+   //     law) or TPV104 (slip-law-strong-rate-weakening) iterators.
+   //     Each iterator's callback-aware `AdvanceWithSubStepStates`
+   //     drives the per-sub-step nucleation hook below.
+   //
+   // REVIEW R-005: `[numerics] fault_iterator` selects the sub-step
+   // quadrature:
+   //   "one-shot" — O = 1 (native TPV205 default; byte-parity).
+   //   "substep"  — O = ader_order (per-sub-step ADER quadrature).
    // -----------------------------------------------------------------
-   Tpv205SubStepIterator substep_iterator(fault_flux);
+   const bool substep_quadrature =
+      (cfg.numerics.fault_iterator == "substep");
+   const int substep_O = substep_quadrature
+      ? std::max(1, cfg.numerics.ader_order)
+      : 1;
+   const std::vector<real_t> substep_deltaT(substep_O,
+                                            dt / static_cast<real_t>(substep_O));
+   const std::vector<real_t> substep_weights(substep_O,
+                                             1.0 / static_cast<real_t>(substep_O));
+   if (rank == 0)
    {
-      const int O = std::max(1, cfg.numerics.ader_order);
-      std::vector<real_t> deltaT(O, dt / static_cast<real_t>(O));
-      std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
-      substep_iterator.SetSubSteps(deltaT, weights);
+      std::cout << "[time] fault iterator quadrature: O = " << substep_O
+                << " (" << cfg.numerics.fault_iterator << ")\n";
    }
 
-   // Phase N: per-sub-step gradual_overstress accumulator hook.  Closes
-   // over nuc_params + dof_data + cfg; fires inside
-   // Tpv205SubStepIterator::AdvanceWithSubStepStates (callback overload)
-   // BEFORE each sub-step's per-QP friction solve so that the perturbed
-   // tau{1,2}_nuc is visible to s.tau{1,2}_total in the LSW path.
-   auto nuc_cb = [&nuc_params, &dof_data, &cfg]
+   std::unique_ptr<Tpv205SubStepIterator>  iter_lsw;
+   std::unique_ptr<AgingLawPsi>            rs_aging_state;
+   std::unique_ptr<Tpv102SubStepIterator>  iter_rs_aging;
+   std::unique_ptr<SlipLawSRWPsi>          rs_srw_state;
+   std::unique_ptr<Tpv104SubStepIterator>  iter_rs_srw;
+
+   if (is_lsw)
+   {
+      iter_lsw = std::make_unique<Tpv205SubStepIterator>(fault_flux);
+      iter_lsw->SetSubSteps(substep_deltaT, substep_weights);
+   }
+   else if (!rs_use_srw)
+   {
+      // AgingLawPsi takes (b, V0, f0).  These are GLOBAL scalars (the
+      // resolver's per-DOF arrays are read elsewhere); seed from the
+      // block defaults so the global b/V0/f0 used inside the state
+      // analytic update match the per-DOF resolver output.  For TPV102
+      // these defaults already match the spec.
+      rs_aging_state = std::make_unique<AgingLawPsi>(
+         cfg.rate_state->b_default,
+         cfg.rate_state->V_0_default,
+         cfg.rate_state->f_0_default);
+      iter_rs_aging = std::make_unique<Tpv102SubStepIterator>(
+         fault_flux, *rs_aging_state);
+      iter_rs_aging->SetSubSteps(substep_deltaT, substep_weights);
+   }
+   else
+   {
+      // SlipLawSRWPsi takes (a, b, V0, f0, muW, V_w_default).  The
+      // `a` and `V_w_default` here are FALLBACKS — the per-QP friction
+      // pipeline reads `d.a` from DOFData and `V_w[i]` from the
+      // `Vw_per_dof` side-channel; these scalars are consumed only by
+      // the base-class virtuals (which the production-mode guard
+      // disables — see SlipLawSRWPsi::SetProductionMode).
+      rs_srw_state = std::make_unique<SlipLawSRWPsi>(
+         cfg.rate_state->a_default,
+         cfg.rate_state->b_default,
+         cfg.rate_state->V_0_default,
+         cfg.rate_state->f_0_default,
+         cfg.rate_state->f_w_default,
+         cfg.rate_state->V_w_default);
+      iter_rs_srw = std::make_unique<Tpv104SubStepIterator>(
+         fault_flux, *rs_srw_state);
+      iter_rs_srw->SetSubSteps(substep_deltaT, substep_weights);
+   }
+
+   // Per-sub-step nucleation accumulator hook.  Closes over the
+   // four `*_nuc_params` resolver outputs + cfg; fires BEFORE each
+   // sub-step's friction solve.
+   auto nuc_cb = [&nuc_params, &sq_nuc_params, &cc_nuc_params, &dof_data, &cfg]
                  (real_t t_sub_end, real_t dt_sub)
    {
       if (!cfg.nucleation.enabled) { return; }
-      spatial::ApplyGradualOverstressIncrement(
-         dof_data, nuc_params,
-         cfg.nucleation.gradual_overstress.T_nuc_s,
-         t_sub_end, dt_sub);
+      switch (cfg.nucleation.kind)
+      {
+      case spatial::NucleationKind::GradualOverstress:
+         spatial::ApplyGradualOverstressIncrement(
+            dof_data, nuc_params,
+            cfg.nucleation.gradual_overstress.T_nuc_s,
+            t_sub_end, dt_sub);
+         break;
+      case spatial::NucleationKind::SquareOverstress:
+         spatial::ApplySquareOverstressIncrement(
+            dof_data, sq_nuc_params,
+            cfg.nucleation.square_overstress.T_nuc_s,
+            t_sub_end, dt_sub);
+         break;
+      case spatial::NucleationKind::GradualOverstressCompactCircular:
+         spatial::ApplyGradualOverstressCompactCircularIncrement(
+            dof_data, cc_nuc_params,
+            cfg.nucleation.gradual_overstress_compact_circular.T_nuc_s,
+            t_sub_end, dt_sub);
+         break;
+      case spatial::NucleationKind::InstantaneousOverstressCircular:
+         // Applied ONCE at init; per-sub-step hook is a no-op.
+         break;
+      }
    };
 
    // ParaView snapshot writer (Parity Phases 1-6).  Updates the 5 BP5
@@ -1630,12 +2206,22 @@ int main(int argc, char *argv[])
          pv_local_slip_rate(2 * i + 1) = d.V2;
          pv_local_traction(2 * i + 0)  = d.tau1_corr;
          pv_local_traction(2 * i + 1)  = d.tau2_corr;
-         const real_t delta_norm = std::sqrt(d.slip1 * d.slip1
-                                             + d.slip2 * d.slip2);
-         // Phase N: spatial driver uses plain LSW.
-         pv_local_state(i) = mfem::seas::LSWFrictionCoefficient_TPV205(
-                                delta_norm,
-                                d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
+         if (is_lsw)
+         {
+            const real_t delta_norm = std::sqrt(d.slip1 * d.slip1
+                                                + d.slip2 * d.slip2);
+            pv_local_state(i) = mfem::seas::LSWFrictionCoefficient_TPV205(
+                                   delta_norm,
+                                   d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
+         }
+         else
+         {
+            // Rate-state: publish the state variable ψ (the spatial
+            // driver does not maintain a per-DOF Dc in DOFData for the
+            // LSW path, so the LSW friction coefficient is undefined —
+            // ψ is the natural diagnostic).
+            pv_local_state(i) = d.psi;
+         }
          (void)time;
          pv_local_normal_stress(i)     = d.sigma_n_corr;
       }
@@ -1669,6 +2255,97 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
+   // 19b. SCEC TPV205 station-trace writer (REVIEW R-009 parity with
+   //      drivers/tpv205_driver.cpp:1851-1875).  Active only when the
+   //      TOML's [problem].tag == "tpv205" so non-TPV205 SAFS / TPV31
+   //      runs see no behaviour change.  The 16 station files match
+   //      the SCEC TPV5 benchmark-trace filename convention so
+   //      downstream comparison scripts can consume the spatial
+   //      driver's output identically to the native driver's.
+   // -----------------------------------------------------------------
+   TPV205StationWriter tpv205_station_writer;
+   const bool tpv205_stations_active = (cfg.problem.tag == "tpv205");
+   if (tpv205_stations_active)
+   {
+      const std::vector<TPV205Station> stations = DefaultStations_TPV205();
+#ifdef MFEM_USE_MPI
+      tpv205_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv205",
+                                 stations, fault_coords,
+                                 num_fault_local, comm);
+#else
+      tpv205_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv205",
+                                 stations, fault_coords, num_fault_local);
+#endif
+      if (restart_prefix.empty())
+      {
+         tpv205_station_writer.WriteStep(cfg.time.t_initial, dof_data);
+      }
+      if (rank == 0)
+      {
+         std::cout << "[stations] TPV205 station writer active ("
+                   << stations.size() << " stations, prefix=tpv205_)\n";
+      }
+   }
+
+   // REVIEW R-007: TPV102 SCEC station traces — active only when
+   // `[problem].tag == "tpv102"`.  Mirrors the TPV205 wiring above.
+   TPV102StationWriter tpv102_station_writer;
+   const bool tpv102_stations_active = (cfg.problem.tag == "tpv102");
+   if (tpv102_stations_active)
+   {
+      const std::vector<TPV102Station> stations = DefaultStations();
+#ifdef MFEM_USE_MPI
+      tpv102_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv102",
+                                 stations, fault_coords,
+                                 num_fault_local, comm);
+#else
+      tpv102_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv102",
+                                 stations, fault_coords, num_fault_local);
+#endif
+      if (restart_prefix.empty())
+      {
+         tpv102_station_writer.WriteStep(cfg.time.t_initial, dof_data);
+      }
+      if (rank == 0)
+      {
+         std::cout << "[stations] TPV102 station writer active ("
+                   << stations.size() << " stations, prefix=tpv102_)\n";
+      }
+   }
+
+   // REVIEW R-007: TPV104 SCEC station traces — active only when
+   // `[problem].tag == "tpv104"`.
+   TPV104StationWriter tpv104_station_writer;
+   const bool tpv104_stations_active = (cfg.problem.tag == "tpv104");
+   if (tpv104_stations_active)
+   {
+      const std::vector<TPV104Station> stations = DefaultStations_TPV104();
+#ifdef MFEM_USE_MPI
+      tpv104_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv104",
+                                 stations, fault_coords,
+                                 num_fault_local, comm);
+#else
+      tpv104_station_writer.Open(cfg.output.output_dir,
+                                 /*prefix=*/"tpv104",
+                                 stations, fault_coords, num_fault_local);
+#endif
+      if (restart_prefix.empty())
+      {
+         tpv104_station_writer.WriteStep(cfg.time.t_initial, dof_data);
+      }
+      if (rank == 0)
+      {
+         std::cout << "[stations] TPV104 station writer active ("
+                   << stations.size() << " stations, prefix=tpv104_)\n";
+      }
+   }
+
+   // -----------------------------------------------------------------
    // 20. Time loop.
    // -----------------------------------------------------------------
    Vector Q_new(Q.Size());
@@ -1677,19 +2354,114 @@ int main(int argc, char *argv[])
    // checkpoint at L1262 records the actual step the loop reached,
    // not `nsteps` unconditionally.
    int last_completed_step = step0;
+
+   // Iterator-specific lambdas (one set captures whichever iterator
+   // pointer the cfg.law branch above instantiated).  `set_substeps`
+   // forwards to the iterator's SetSubSteps; `do_iterate` forwards to
+   // its callback-aware `AdvanceWithSubStepStates`.
+   auto set_substeps =
+      [&iter_lsw, &iter_rs_aging, &iter_rs_srw]
+      (const std::vector<real_t> &deltaT,
+       const std::vector<real_t> &weights)
+   {
+      if (iter_lsw)      { iter_lsw->SetSubSteps(deltaT, weights); }
+      else if (iter_rs_aging) { iter_rs_aging->SetSubSteps(deltaT, weights); }
+      else if (iter_rs_srw)   { iter_rs_srw->SetSubSteps(deltaT, weights); }
+   };
+   auto do_iterate =
+      [&iter_lsw, &iter_rs_aging, &iter_rs_srw,
+       &dof_data, &fault_coords, &Vw_per_dof]
+      (const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+       const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+       real_t dt_step, real_t t_step_start,
+       real_t *I_imp_plus, real_t *I_imp_minus,
+       const std::function<void(real_t, real_t)> &nuc_callback_inner)
+   {
+      if (iter_lsw)
+      {
+         iter_lsw->AdvanceWithSubStepStates(
+            dof_data, fault_coords,
+            Q_pointwise_plus, Q_pointwise_minus,
+            dt_step, t_step_start,
+            I_imp_plus, I_imp_minus,
+            nuc_callback_inner);
+      }
+      else if (iter_rs_aging)
+      {
+         iter_rs_aging->AdvanceWithSubStepStates(
+            dof_data, fault_coords,
+            Q_pointwise_plus, Q_pointwise_minus,
+            dt_step, t_step_start,
+            I_imp_plus, I_imp_minus,
+            nuc_callback_inner);
+      }
+      else if (iter_rs_srw)
+      {
+         iter_rs_srw->AdvanceWithSubStepStates(
+            dof_data, fault_coords, Vw_per_dof,
+            Q_pointwise_plus, Q_pointwise_minus,
+            dt_step, t_step_start,
+            I_imp_plus, I_imp_minus,
+            nuc_callback_inner);
+      }
+   };
+
    for (int step = step0; step < nsteps; ++step)
    {
       const real_t dt_step = std::min(dt_now, cfg.time.tfinal - t);
       if (dt_step <= 0.0) { break; }
       wave.SetTime(t);
 
-      AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
-                                     fault_coords, Q, dt_step,
+      AdvanceADERWithSubStep_Spatial(wave, set_substeps, do_iterate,
+                                     substep_deltaT, substep_weights,
+                                     Q, dt_step,
                                      cfg.numerics.ader_order, t, Q_new,
                                      nuc_cb);
       Q.Swap(Q_new);
       t += dt_step;
       last_completed_step = step + 1;
+
+      // REVIEW R-010: NaN tripwire — match the native TPV205 driver's
+      // per-step check at `drivers/tpv205_driver.cpp:2447-2464`.  Per
+      // `CLAUDE.md` "What Constitutes a Regression" #3, dt going to
+      // zero or NaN is a hard regression signature; without this
+      // tripwire the simulation would run to completion writing
+      // garbage.
+      {
+         real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
+         real_t global_nan = local_nan;
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&local_nan, &global_nan, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+         if (global_nan > 0.0)
+         {
+            if (rank == 0)
+            {
+               std::cerr << "ERROR: NaN detected at step " << step
+                         << ", t = " << t << " s (REVIEW R-010).\n";
+            }
+            if (tpv205_stations_active)
+            {
+               tpv205_station_writer.Flush();
+               tpv205_station_writer.Close();
+            }
+            if (tpv102_stations_active)
+            {
+               tpv102_station_writer.Flush();
+               tpv102_station_writer.Close();
+            }
+            if (tpv104_stations_active)
+            {
+               tpv104_station_writer.Flush();
+               tpv104_station_writer.Close();
+            }
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 1;
+         }
+      }
 
       real_t V_max_local = 0.0;
       for (int i = 0; i < num_fault_total; ++i)
@@ -1704,6 +2476,25 @@ int main(int argc, char *argv[])
       V_max_global = std::max(V_max_global, V_max_step);
 
       paraview_write(step + 1, t, V_max_step);
+
+      // REVIEW R-009: per-step SCEC trace write (active only when
+      // problem.tag == "tpv205").  Cadence is per-step here (matches
+      // the spatial driver's paraview_fault_dt = 0.001s default in
+      // TPV205 configs); the native TPV205 driver downsamples via
+      // `output_dt = 0.01s` but per-step is a strict superset.
+      if (tpv205_stations_active)
+      {
+         tpv205_station_writer.WriteStep(t, dof_data);
+      }
+      // REVIEW R-007: per-step SCEC trace write for TPV102 / TPV104.
+      if (tpv102_stations_active)
+      {
+         tpv102_station_writer.WriteStep(t, dof_data);
+      }
+      if (tpv104_stations_active)
+      {
+         tpv104_station_writer.WriteStep(t, dof_data);
+      }
 
       if (cfg.output.checkpoint_every_steps > 0
           && (step + 1) % cfg.output.checkpoint_every_steps == 0)
@@ -1742,6 +2533,24 @@ int main(int argc, char *argv[])
                             , comm
 #endif
                             , "spatial_dyn");
+   }
+
+   // REVIEW R-007 / R-009: flush + close SCEC trace files for whichever
+   // benchmark is active.  No-op for the inactive writers.
+   if (tpv205_stations_active)
+   {
+      tpv205_station_writer.Flush();
+      tpv205_station_writer.Close();
+   }
+   if (tpv102_stations_active)
+   {
+      tpv102_station_writer.Flush();
+      tpv102_station_writer.Close();
+   }
+   if (tpv104_stations_active)
+   {
+      tpv104_station_writer.Flush();
+      tpv104_station_writer.Close();
    }
 
    if (rank == 0)

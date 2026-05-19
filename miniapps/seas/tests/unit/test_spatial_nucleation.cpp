@@ -414,6 +414,97 @@ static void T_N12_iterator_callback_invocation()
    }
 }
 
+// =====================================================================
+// T-N13: GradualOverstressCompactCircular — compact-support bell at
+// r ≥ R returns 0; F(0) = 1; symmetric in (dip, strike).
+// =====================================================================
+static void T_N13_compact_circular_compact_support()
+{
+   std::cout << "\n[T-N13] ResolveGradualOverstressCompactCircular compact "
+             << "support + F(0) = 1\n";
+   const int N = 5;
+   // 5 DOFs along the strike axis at distances 0, 0.5R, R, 1.5R, 2R
+   // from the centre.  R = 1000 m.
+   const real_t R = 1000.0;
+   Vector dofs(3 * N);
+   const real_t offsets[N] = { 0.0, 500.0, 1000.0, 1500.0, 2000.0 };
+   for (int i = 0; i < N; ++i)
+   {
+      dofs(3 * i + 0) = 0.0;
+      dofs(3 * i + 1) = 0.0;
+      dofs(3 * i + 2) = offsets[i];   // along strike (basis row 6..8 below)
+   }
+   DenseMatrix basis(9, N);
+   basis = 0.0;
+   for (int i = 0; i < N; ++i)
+   {
+      basis(0, i) = 1.0;   // normal  = +x
+      basis(4, i) = 1.0;   // dip     = +y
+      basis(8, i) = 1.0;   // strike  = +z
+   }
+   GradualOverstressCompactCircularSpec spec;
+   spec.center_x_m = 0.0;
+   spec.center_y_m = 0.0;
+   spec.center_z_m = 0.0;
+   spec.radius_m   = R;
+   spec.delta_tau_strike_pa = 25.0e6;
+   spec.T_nuc_s    = 1.0;
+
+   const auto p = ResolveGradualOverstressCompactCircular(
+      spec, /*enabled=*/true, dofs, basis);
+   TEST_ASSERT(p.amplitude_strike.Size() == N, "amplitude_strike sized N");
+   TEST_NEAR(p.radial(0), 1.0,             1e-15, "F(r=0) = 1");
+   TEST_ASSERT(p.radial(1) > 0.0 && p.radial(1) < 1.0,
+               "F(r=0.5R) in (0, 1)");
+   TEST_NEAR(p.radial(2), 0.0,             0.0,   "F(r=R)  = 0 (compact)");
+   TEST_NEAR(p.radial(3), 0.0,             0.0,   "F(r>R)  = 0");
+   TEST_NEAR(p.radial(4), 0.0,             0.0,   "F(r=2R) = 0");
+   TEST_NEAR(p.amplitude_strike(0),
+             spec.delta_tau_strike_pa, 1e-6,
+             "amplitude_strike at centre = Δτ_strike_pa");
+   TEST_NEAR(p.amplitude_strike(2), 0.0, 0.0,
+             "amplitude_strike at r=R = 0");
+}
+
+// =====================================================================
+// T-N14: ApplyGradualOverstressCompactCircularIncrement telescopes
+// to the full target over [0, T_nuc] (smoothStep ramp).
+// =====================================================================
+static void T_N14_compact_circular_telescope()
+{
+   std::cout << "\n[T-N14] ApplyGradualOverstressCompactCircularIncrement "
+             << "telescopes to full target\n";
+   const int N = 2;
+   GradualOverstressCompactCircularPerDOFParams params;
+   params.amplitude_dip.SetSize(N);
+   params.amplitude_strike.SetSize(N);
+   params.radial.SetSize(N);
+   for (int i = 0; i < N; ++i)
+   {
+      params.amplitude_dip(i)    = 0.0;
+      params.amplitude_strike(i) = 25.0e6 * (i + 1);   // 25e6, 50e6
+      params.radial(i)           = 1.0;
+   }
+   std::vector<DOFData> dof_data(N);
+   const real_t T_nuc = 1.0;
+   const int    nsub  = 200;
+   const real_t dt    = T_nuc / nsub;
+   real_t t = 0.0;
+   for (int k = 1; k <= nsub; ++k)
+   {
+      t += dt;
+      ApplyGradualOverstressCompactCircularIncrement(dof_data, params,
+                                                     T_nuc, t, dt);
+   }
+   for (int i = 0; i < N; ++i)
+   {
+      TEST_NEAR(dof_data[i].tau2_nuc, params.amplitude_strike(i), 1e-3,
+                "tau2_nuc telescopes to amplitude_strike");
+      TEST_NEAR(dof_data[i].tau1_nuc, 0.0, 0.0,
+                "tau1_nuc untouched (Δτ_dip = 0)");
+   }
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase N test_spatial_nucleation\n";
@@ -429,6 +520,8 @@ int main(int /*argc*/, char** /*argv*/)
    T_N10_accumulator_telescope();
    T_N11_accumulator_post_tnuc_noop();
    T_N12_iterator_callback_invocation();
+   T_N13_compact_circular_compact_support();
+   T_N14_compact_circular_telescope();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase N test_spatial_nucleation: "

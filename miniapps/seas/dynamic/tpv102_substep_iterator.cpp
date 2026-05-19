@@ -374,5 +374,159 @@ void Tpv102SubStepIterator::AdvanceWithSubStepStates(
    }
 }
 
+void Tpv102SubStepIterator::AdvanceWithSubStepStates(
+   std::vector<DOFData> &dof_data,
+   const std::vector<Vector> &fault_coords,
+   const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+   const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+   real_t dt_macro,
+   real_t t_macro_start,
+   real_t *I_imp_plus_flat,
+   real_t *I_imp_minus_flat,
+   const std::function<void(real_t, real_t)> &nuc_callback,
+   FrictionSolver::Method method)
+{
+   // Validation mirrors the no-callback overload above.
+   if (deltaT_.empty())
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): SetSubSteps "
+         "has not been called; cannot iterate without a configured "
+         "quadrature.");
+   }
+   if (!std::isfinite(dt_macro) || dt_macro <= 0.0)
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): dt_macro "
+         "must be finite and positive; got " + std::to_string(dt_macro));
+   }
+   if (!std::isfinite(t_macro_start))
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): t_macro_start "
+         "must be finite; got " + std::to_string(t_macro_start));
+   }
+   if (I_imp_plus_flat == nullptr || I_imp_minus_flat == nullptr)
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): I_imp_*_flat "
+         "must both be non-null.");
+   }
+
+   const int O = static_cast<int>(deltaT_.size());
+   if (static_cast<int>(Q_pointwise_plus_per_substep.size()) != O ||
+       static_cast<int>(Q_pointwise_minus_per_substep.size()) != O)
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): "
+         "Q_pointwise_*_per_substep size != O");
+   }
+
+   const int n = static_cast<int>(dof_data.size());
+   if (static_cast<int>(fault_coords.size()) != n)
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): "
+         "dof_data and fault_coords size mismatch");
+   }
+
+   const size_t expected_words =
+      static_cast<size_t>(NUM_STATE) * static_cast<size_t>(n);
+   for (int o = 0; o < O; ++o)
+   {
+      if (Q_pointwise_plus_per_substep[o].size() != expected_words ||
+          Q_pointwise_minus_per_substep[o].size() != expected_words)
+      {
+         throw std::runtime_error(
+            "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): "
+            "Q_pointwise_*[" + std::to_string(o) + "] size mismatch");
+      }
+   }
+
+   const real_t dtsum = std::accumulate(deltaT_.begin(), deltaT_.end(),
+                                        static_cast<real_t>(0));
+   const real_t rel = std::abs(dtsum - dt_macro) / std::max(dt_macro,
+                                                            1e-300);
+   const real_t sum_tol = std::max<real_t>(
+      1e-12,
+      static_cast<real_t>(10.0) * O
+         * std::numeric_limits<real_t>::epsilon());
+   if (rel > sum_tol)
+   {
+      throw std::runtime_error(
+         "Tpv102SubStepIterator::AdvanceWithSubStepStates(cb): Σ deltaT "
+         "must equal dt_macro within " + std::to_string(sum_tol)
+         + " rel; got Σ = " + std::to_string(dtsum)
+         + ", dt_macro = " + std::to_string(dt_macro));
+   }
+
+   const size_t nwords = expected_words;
+   std::memset(I_imp_plus_flat,  0, nwords * sizeof(real_t));
+   std::memset(I_imp_minus_flat, 0, nwords * sizeof(real_t));
+
+   real_t Q_imp_plus[NUM_STATE];
+   real_t Q_imp_minus[NUM_STATE];
+
+   real_t t_sub_cursor = t_macro_start;
+
+   for (int o = 0; o < O; ++o)
+   {
+      const real_t dt_sub      = deltaT_[o];
+      const real_t weight      = time_weights_[o];
+      const real_t t_sub_end   = t_sub_cursor + dt_sub;
+      const real_t accum_scale = weight * dt_macro;
+
+      // User-supplied per-sub-step nucleation hook.  Replaces the
+      // hard-coded ApplyNucleationIncremental_TPV102 call.
+      nuc_callback(t_sub_end, dt_sub);
+
+      const bool last_sub_step = (o == O - 1);
+      const real_t *Qp_o = Q_pointwise_plus_per_substep[o].data();
+      const real_t *Qm_o = Q_pointwise_minus_per_substep[o].data();
+
+      for (int i = 0; i < n; ++i)
+      {
+         DOFData &d = dof_data[i];
+
+         const real_t *Q_tilde_plus  =
+            Qp_o + static_cast<ptrdiff_t>(i) * NUM_STATE;
+         const real_t *Q_tilde_minus =
+            Qm_o + static_cast<ptrdiff_t>(i) * NUM_STATE;
+
+         EvalStageState s;
+         flux_.ComputeStageState(d, Q_tilde_plus, Q_tilde_minus, s, method);
+
+         d.slip1 += s.V1 * dt_sub;
+         d.slip2 += s.V2 * dt_sub;
+
+         d.psi = UpdateStateAnalytic(d.psi, s.V_abs,
+                                     d.Dc, dt_sub,
+                                     state_evo_.GetF0(),
+                                     state_evo_.GetB(),
+                                     state_evo_.GetV0());
+
+         flux_.BuildImposedState(d, s, Q_tilde_plus, Q_tilde_minus,
+                                 Q_imp_plus, Q_imp_minus);
+
+         real_t *Iout_p = I_imp_plus_flat
+                          + static_cast<ptrdiff_t>(i) * NUM_STATE;
+         real_t *Iout_m = I_imp_minus_flat
+                          + static_cast<ptrdiff_t>(i) * NUM_STATE;
+         for (int c = 0; c < NUM_STATE; ++c)
+         {
+            Iout_p[c] += accum_scale * Q_imp_plus[c];
+            Iout_m[c] += accum_scale * Q_imp_minus[c];
+         }
+
+         if (last_sub_step)
+         {
+            flux_.WriteBackState(d, s);
+         }
+      }
+
+      t_sub_cursor = t_sub_end;
+   }
+}
+
 } // namespace seas
 } // namespace mfem

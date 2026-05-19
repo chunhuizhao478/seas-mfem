@@ -4,7 +4,7 @@
 Standalone Python reference for the per-DOF projection of a constant
 background Cauchy tensor onto a fault.  Mirrors the C++ logic in
 mfem::seas::spatial::ConstantTensorStressSource +
-FaultGeometry::ComputeSAFSParams<StressSource>.
+FaultGeometry::ComputeParams<StressSource>.
 
 Used by the Phase 3b acceptance criterion that compares the C++ output
 at 64 randomly sampled fault DOFs against this Python reference (L∞
@@ -58,12 +58,22 @@ def resolve_traction(
     t2: np.ndarray,
     P_p: float = 0.0,
 ) -> Tuple[float, float, float]:
-    """Per-DOF projection: returns (sigma_n_eff, tau_dip, tau_strike)."""
+    """Per-DOF projection: returns (sigma_n_eff, tau_dip, tau_strike).
+
+    Sign convention (CLAUDE.md project-wide; matches the native
+    TPV102/104/205 drivers): positive tau{1,2} represents driving
+    stress in the +dip / +strike direction.  The raw Cauchy projection
+    T = σ·n returns the traction the n-side block exerts on the
+    opposite block — the Newton's-3rd-law mirror of the driving stress
+    — so flip the sign on tau1 / tau2 to match the native convention.
+    sigma_n_total = n·S·n is unchanged (sign-invariant under n → −n).
+    See R-001 in tpv102_tpv104_review.md.
+    """
     S = sigma.matrix()
     Sn = S @ n
     sigma_n_total = float(n @ Sn)
-    tau1 = float(t1 @ Sn)
-    tau2 = float(t2 @ Sn)
+    tau1 = -float(t1 @ Sn)
+    tau2 = -float(t2 @ Sn)
     sigma_n_eff = sigma_n_total - P_p
     return sigma_n_eff, tau1, tau2
 

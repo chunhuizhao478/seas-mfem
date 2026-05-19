@@ -113,12 +113,33 @@ SEAS_DRIVER_SRC = drivers/seas_driver.cpp
 GODUNOV_FLUX_SRC = dynamic/godunov_flux.cpp
 WAVE_OPERATOR_SRC = dynamic/wave_operator.cpp
 GODUNOV_FLUX_OBJ = $(GODUNOV_FLUX_SRC:.cpp=.o)
-WAVE_OPERATOR_OBJ = $(WAVE_OPERATOR_SRC:.cpp=.o)
+# Phase R.2: BimaterialFlux symbols are referenced by every TU that
+# implicitly instantiates the WaveOperator template, because the .inl
+# now calls BimaterialFlux::{BuildPerFaceFluxMatricesGlobal,
+# ApplyPerFaceFlux} from BuildPerFaceBimaterialFluxMatrices_ and the
+# wrapped interior dispatch sites.  Include the bimaterial object in
+# WAVE_OPERATOR_OBJ so every existing link rule that already names it
+# picks up the new dependency without touching 150+ link lines.  The
+# obj rule below uses WAVE_OPERATOR_PRIMARY_OBJ explicitly so the
+# pattern match remains single-target.
+WAVE_OPERATOR_PRIMARY_OBJ = $(WAVE_OPERATOR_SRC:.cpp=.o)
+WAVE_OPERATOR_OBJ = $(WAVE_OPERATOR_PRIMARY_OBJ) \
+                    dynamic/godunov_flux_bimaterial.o
 # Phase H.1 of spatial_dynamic_rupture_plan.md (rev-3): per-element flux cache.
 GODUNOV_FLUX_POOL_SRC = dynamic/godunov_flux_pool.cpp
 GODUNOV_FLUX_POOL_OBJ = $(GODUNOV_FLUX_POOL_SRC:.cpp=.o)
 TEST_PHASEH_GODUNOV_FLUX_POOL_SRC = tests/unit/test_phaseh_godunov_flux_pool.cpp
 TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ = $(TEST_PHASEH_GODUNOV_FLUX_POOL_SRC:.cpp=.o)
+# Phase R.1 of PLAN_phase_R_exact_bimaterial_riemann_rev3.md: exact
+# linearised bi-material Riemann solver + unit tests.
+GODUNOV_FLUX_BIMATERIAL_SRC = dynamic/godunov_flux_bimaterial.cpp
+GODUNOV_FLUX_BIMATERIAL_OBJ = $(GODUNOV_FLUX_BIMATERIAL_SRC:.cpp=.o)
+TEST_PHASER_BIMATERIAL_FLUX_SRC = tests/unit/test_phaser_bimaterial_flux.cpp
+TEST_PHASER_BIMATERIAL_FLUX_OBJ = $(TEST_PHASER_BIMATERIAL_FLUX_SRC:.cpp=.o)
+# Phase R.2 acceptance gates R.2.T-2 / T-3 / T-4 — WaveOperator(MaterialField)
+# routes interior face flux through BimaterialFlux::ApplyPerFaceFlux.
+TEST_PHASER_DISPATCH_SMOKE_SRC = tests/unit/test_phaser_dispatch_smoke.cpp
+TEST_PHASER_DISPATCH_SMOKE_OBJ = $(TEST_PHASER_DISPATCH_SMOKE_SRC:.cpp=.o)
 # Spatial Phase 1 of spatial_dynamic_rupture_plan.md: TOML schema parser +
 # per-DOF friction resolver + LSW forced-rupture friction helper.
 # Phases 2 / 3 / 3b (spatial_velocity, spatial_stress) and their tests
@@ -143,6 +164,10 @@ TEST_SPATIAL_PRINT_DERIVED_SRC       = tests/unit/test_spatial_print_derived.cpp
 TEST_SPATIAL_PRINT_DERIVED_OBJ       = $(TEST_SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
+# Phase R.3 R.3.T-1/T-2: round-trip + back-compat tests for the new
+# [problem]/[boundary]/[fault_geometry]/[hypocenter]/[material] sections.
+TEST_SPATIAL_FRICTION_CONFIG_PHASER_SRC = tests/unit/test_spatial_friction_config_phaser.cpp
+TEST_SPATIAL_FRICTION_CONFIG_PHASER_OBJ = $(TEST_SPATIAL_FRICTION_CONFIG_PHASER_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
 TEST_SPATIAL_VELOCITY_BUNDLE_SRC     = tests/unit/test_spatial_velocity_bundle.cpp
@@ -151,6 +176,28 @@ TEST_SPATIAL_STRESS_BUNDLE_SRC       = tests/unit/test_spatial_stress_bundle.cpp
 TEST_SPATIAL_STRESS_BUNDLE_OBJ       = $(TEST_SPATIAL_STRESS_BUNDLE_SRC:.cpp=.o)
 TEST_SPATIAL_CONSTANT_STRESS_SRC     = tests/unit/test_spatial_constant_stress_source.cpp
 TEST_SPATIAL_CONSTANT_STRESS_OBJ     = $(TEST_SPATIAL_CONSTANT_STRESS_SRC:.cpp=.o)
+TEST_SPATIAL_STRESS_PATCHES_SRC      = tests/unit/test_spatial_stress_with_patches.cpp
+TEST_SPATIAL_STRESS_PATCHES_OBJ      = $(TEST_SPATIAL_STRESS_PATCHES_SRC:.cpp=.o)
+# REVIEW R-001..R-008 coverage for the TPV205 spatial-driver parity contract.
+TEST_SPATIAL_DYN_TPV205_REVIEW_SRC   = tests/unit/test_spatial_dyn_tpv205_review.cpp
+TEST_SPATIAL_DYN_TPV205_REVIEW_OBJ   = $(TEST_SPATIAL_DYN_TPV205_REVIEW_SRC:.cpp=.o)
+# tpv102_tpv104_review.md R-001..R-010 coverage for the TPV102/104
+# spatial-driver parity contract.
+TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_SRC = tests/unit/test_spatial_dyn_tpv102_tpv104_review.cpp
+TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_OBJ = $(TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_SRC:.cpp=.o)
+# TPV31 canonical-frame rotation (spec → canonical SEAS).  Verifies the
+# rotated TOML matches spec physics under R: (x_s,y_s,z_s) → (x_s,z_s,-y_s).
+TEST_TPV31_CANONICAL_ROTATION_SRC    = tests/unit/test_tpv31_canonical_rotation.cpp
+TEST_TPV31_CANONICAL_ROTATION_OBJ    = $(TEST_TPV31_CANONICAL_ROTATION_SRC:.cpp=.o)
+TEST_TPV31_NUC_COH_SRC               = tests/unit/test_tpv31_nucleation_and_cohesion.cpp
+TEST_TPV31_NUC_COH_OBJ               = $(TEST_TPV31_NUC_COH_SRC:.cpp=.o)
+# REVIEW 2026-05-19 (debug_document/general_driver_debug_document/
+# spatial_dyn_heterogeneous_riemann_review_2026-05-19.md) regression test:
+# covers R-001 (heterogeneous Riemann default), R-003 (DepthProfile
+# eval_at_xyz wired), R-004 (paraview_enabled set in all four canonical
+# TOMLs), and R-009 (TPV205 barrier-rule boundary fix).
+TEST_REVIEW_2026_05_19_SRC           = tests/unit/test_review_2026_05_19_fixes.cpp
+TEST_REVIEW_2026_05_19_OBJ           = $(TEST_REVIEW_2026_05_19_SRC:.cpp=.o)
 # Spatial Phase 5c: spatial_setup.hpp test + Phase H.6 LSW forced-rupture test.
 TEST_SPATIAL_SETUP_SRC               = tests/unit/test_spatial_setup.cpp
 TEST_SPATIAL_SETUP_OBJ               = $(TEST_SPATIAL_SETUP_SRC:.cpp=.o)
@@ -764,7 +811,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_config_bridge \
                seas_test_godunov_flux \
                seas_test_phaseh_godunov_flux_pool \
+               seas_test_phaser_bimaterial_flux \
                seas_test_spatial_friction_config \
+               seas_test_spatial_friction_config_phaser \
                seas_test_spatial_friction_resolver \
                seas_test_spatial_nucleation \
                seas_test_spatial_print_derived \
@@ -772,9 +821,15 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_velocity_bundle \
                seas_test_spatial_stress_bundle \
                seas_test_spatial_constant_stress_source \
+               seas_test_spatial_stress_with_patches \
+               seas_test_spatial_dyn_tpv205_review \
+               seas_test_review_2026_05_19_fixes \
+               seas_test_tpv31_canonical_rotation \
+               seas_test_tpv31_nucleation_and_cohesion \
                seas_test_spatial_setup \
                seas_test_phaseh_lsw_forced_rupture \
                seas_test_phaseh_wave_operator_constant_parity \
+               seas_test_phaser_dispatch_smoke \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1178,6 +1233,48 @@ seas_test_phaseh_godunov_flux_pool: $(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ) \
 	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# Phase R.1 of PLAN_phase_R_exact_bimaterial_riemann_rev3.md:
+# BimaterialFlux solver unit tests.
+seas_test_phaser_bimaterial_flux: $(TEST_PHASER_BIMATERIAL_FLUX_OBJ) \
+                                  $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                                  $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASER_BIMATERIAL_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase R.2 of PLAN_phase_R_exact_bimaterial_riemann_rev3.md:
+# WaveOperator(MaterialField) bi-material dispatch smoke (R.2.T-2..T-4).
+# NOTE: $(WAVE_OPERATOR_OBJ) already pulls in godunov_flux_bimaterial.o
+# (post Phase R.2 — see the WAVE_OPERATOR_OBJ definition above).  Do
+# NOT list $(GODUNOV_FLUX_BIMATERIAL_OBJ) separately on the link line
+# or the linker reports duplicate symbols.
+seas_test_phaser_dispatch_smoke: $(TEST_PHASER_DISPATCH_SMOKE_OBJ) \
+                                  $(WAVE_OPERATOR_OBJ) \
+                                  $(GODUNOV_FLUX_OBJ) \
+                                  $(GODUNOV_FLUX_POOL_OBJ) \
+                                  $(PML_LAYER_OBJ) \
+                                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                  $(FAULT_FACE_FLUX_OBJ) \
+                                  $(FRICTION_SOLVER_OBJ) \
+                                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASER_DISPATCH_SMOKE_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # Spatial Phase 1 of spatial_dynamic_rupture_plan.md: TOML parser tests
 seas_test_spatial_friction_config: $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
                                     $(SPATIAL_FRICTION_OBJ)
@@ -1186,6 +1283,21 @@ seas_test_spatial_friction_config: $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase R.3 R.3.T-1/T-2: new TOML sections.
+seas_test_spatial_friction_config_phaser: $(TEST_SPATIAL_FRICTION_CONFIG_PHASER_OBJ) \
+                                          $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_FRICTION_CONFIG_PHASER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_SPATIAL_FRICTION_CONFIG_PHASER_OBJ): %.o: $(SRC)%.cpp \
+                                                  spatial/code/spatial_friction.hpp \
+                                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
 
 seas_test_spatial_friction_resolver: $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
                                       $(SPATIAL_FRICTION_OBJ) \
@@ -1264,6 +1376,117 @@ seas_test_spatial_constant_stress_source: $(TEST_SPATIAL_CONSTANT_STRESS_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+seas_test_spatial_stress_with_patches: $(TEST_SPATIAL_STRESS_PATCHES_OBJ) \
+                                        $(SPATIAL_STRESS_OBJ) \
+                                        $(SPATIAL_FRICTION_OBJ) \
+                                        $(SPATIAL_NUCLEATION_OBJ) \
+                                        $(STRESS_FIELD_3D_OBJ) \
+                                        $(DATA_FIELD_3D_OBJ) \
+                                        $(FIELD_COEFFICIENT_OBJ) \
+                                        $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                        $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_STRESS_PATCHES_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# REVIEW R-001..R-008 coverage: loads tpv205.toml from disk and asserts
+# the parity contract (patches at mesh z = -7500, bottom barrier at
+# z_max_m = -15000, ref_normal = (0,-1,0), numerics opt-ins, hypocenter
+# z = -7500, parser guard on positive hypocenter z).
+seas_test_spatial_dyn_tpv205_review: $(TEST_SPATIAL_DYN_TPV205_REVIEW_OBJ) \
+                                      $(SPATIAL_STRESS_OBJ) \
+                                      $(SPATIAL_FRICTION_OBJ) \
+                                      $(SPATIAL_NUCLEATION_OBJ) \
+                                      $(STRESS_FIELD_3D_OBJ) \
+                                      $(DATA_FIELD_3D_OBJ) \
+                                      $(FIELD_COEFFICIENT_OBJ) \
+                                      $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                      $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_DYN_TPV205_REVIEW_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Review 2026-05-19 regression: heterogeneous-Riemann purpose test +
+# R-003 DepthProfile eval_at_xyz + R-004 paraview_enabled + R-009 TPV205
+# barrier-boundary fix.
+seas_test_review_2026_05_19_fixes: $(TEST_REVIEW_2026_05_19_OBJ) \
+                                    $(SPATIAL_STRESS_OBJ) \
+                                    $(SPATIAL_FRICTION_OBJ) \
+                                    $(SPATIAL_NUCLEATION_OBJ) \
+                                    $(STRESS_FIELD_3D_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ) \
+                                    $(FIELD_COEFFICIENT_OBJ) \
+                                    $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                    $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_REVIEW_2026_05_19_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# tpv102_tpv104_review.md R-001..R-010 coverage: loads tpv102.toml +
+# tpv104.toml and asserts the byte-parity contract (cfl_safety = "dg",
+# fault_iterator = "one-shot", canonical ref_normal/up, stress
+# constants match TPV102Params / TPV104Params).
+seas_test_spatial_dyn_tpv102_tpv104_review: $(TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_OBJ) \
+                                             $(SPATIAL_STRESS_OBJ) \
+                                             $(SPATIAL_FRICTION_OBJ) \
+                                             $(SPATIAL_NUCLEATION_OBJ) \
+                                             $(STRESS_FIELD_3D_OBJ) \
+                                             $(DATA_FIELD_3D_OBJ) \
+                                             $(FIELD_COEFFICIENT_OBJ) \
+                                             $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                             $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_tpv31_nucleation_and_cohesion: $(TEST_TPV31_NUC_COH_OBJ) \
+                                          $(SPATIAL_FRICTION_OBJ) \
+                                          $(SPATIAL_NUCLEATION_OBJ) \
+                                          $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_NUC_COH_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # Spatial Phase 5c: spatial_setup.hpp tests (centroid + IP-aware
 # InitializeFaultDOFs_Spatial overloads).  Header-only; the test
 # pulls in the friction resolver + material objects to seed inputs.
@@ -1292,6 +1515,7 @@ seas_test_phaseh_lsw_forced_rupture: $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ) \
                                      dynamic/friction_solver.o \
                                      dynamic/wave_operator.o \
                                      dynamic/godunov_flux.o \
+                                     dynamic/godunov_flux_bimaterial.o \
                                      dynamic/pml_layer.o \
                                      dynamic/precomputed_face_fluxes.o
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
@@ -1300,6 +1524,7 @@ seas_test_phaseh_lsw_forced_rupture: $(TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ) \
 	    dynamic/fault_face_flux.o \
 	    dynamic/friction_solver.o \
 	    dynamic/wave_operator.o \
+	    dynamic/godunov_flux_bimaterial.o \
 	    dynamic/godunov_flux.o \
 	    dynamic/pml_layer.o \
 	    dynamic/precomputed_face_fluxes.o \
@@ -1918,6 +2143,8 @@ $(SPATIAL_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp \
 
 seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(TPV205_SHARED_OBJS) \
+                          $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                          $(TPV104_SUBSTEP_ITERATOR_OBJ) \
                           $(WAVE_OPERATOR_OBJ) \
                           $(PRECOMPUTED_FACE_FLUXES_OBJ) \
                           $(GODUNOV_FLUX_OBJ) \
@@ -1936,6 +2163,8 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(TPV205_SHARED_OBJS) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV104_SUBSTEP_ITERATOR_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
 	    $(GODUNOV_FLUX_OBJ) \
@@ -2281,6 +2510,36 @@ $(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# Phase R.1: BimaterialFlux object + unit tests.
+$(GODUNOV_FLUX_BIMATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                                     dynamic/godunov_flux_bimaterial.hpp \
+                                     dynamic/godunov_flux.hpp \
+                                     dynamic/wave_state.hpp \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PHASER_BIMATERIAL_FLUX_OBJ): %.o: $(SRC)%.cpp \
+                                         dynamic/godunov_flux_bimaterial.hpp \
+                                         dynamic/godunov_flux.hpp \
+                                         dynamic/wave_state.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Phase R.2 dispatch smoke (R.2.T-2 / T-3 / T-4).  Counter is always
+# compiled into wave_operator.o, so no special build flags needed.
+$(TEST_PHASER_DISPATCH_SMOKE_OBJ): %.o: $(SRC)%.cpp \
+                                        dynamic/wave_operator.hpp \
+                                        dynamic/wave_operator.inl \
+                                        dynamic/wave_state.hpp \
+                                        dynamic/godunov_flux_bimaterial.hpp \
+                                        dynamic/heterogeneous_material.hpp \
+                                        domain/boundary_config.hpp \
+                                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 # Spatial Phase 1: TOML parser + resolver objects + tests.  Requires
 # $(TOML_FLAGS) for extern/toml11/toml.hpp.
 $(SPATIAL_FRICTION_OBJ): %.o: $(SRC)%.cpp \
@@ -2348,6 +2607,83 @@ $(TEST_SPATIAL_CONSTANT_STRESS_OBJ): %.o: $(SRC)%.cpp \
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
 	    $(TOML_FLAGS) -c $< -o $@
 
+$(TEST_SPATIAL_STRESS_PATCHES_OBJ): %.o: $(SRC)%.cpp \
+                                          spatial/code/spatial_stress.hpp \
+                                          spatial/code/spatial_friction.hpp \
+                                          dynamic/spatial_nucleation.hpp \
+                                          config/tpv205_params.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_DYN_TPV205_REVIEW_OBJ): %.o: $(SRC)%.cpp \
+                                             spatial/code/spatial_stress.hpp \
+                                             spatial/code/spatial_friction.hpp \
+                                             dynamic/spatial_nucleation.hpp \
+                                             config/tpv205_params.hpp \
+                                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_SPATIAL_DYN_TPV102_TPV104_REVIEW_OBJ): %.o: $(SRC)%.cpp \
+                                             spatial/code/spatial_friction.hpp \
+                                             dynamic/spatial_nucleation.hpp \
+                                             config/tpv102_params.hpp \
+                                             config/tpv104_params.hpp \
+                                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_TPV31_CANONICAL_ROTATION_OBJ): %.o: $(SRC)%.cpp \
+                                            spatial/code/spatial_stress.hpp \
+                                            spatial/code/spatial_friction.hpp \
+                                            dynamic/spatial_nucleation.hpp \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_REVIEW_2026_05_19_OBJ): %.o: $(SRC)%.cpp \
+                                     spatial/code/spatial_friction.hpp \
+                                     dynamic/heterogeneous_material.hpp \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv31_canonical_rotation: $(TEST_TPV31_CANONICAL_ROTATION_OBJ) \
+                                     $(SPATIAL_STRESS_OBJ) \
+                                     $(SPATIAL_FRICTION_OBJ) \
+                                     $(SPATIAL_NUCLEATION_OBJ) \
+                                     $(STRESS_FIELD_3D_OBJ) \
+                                     $(DATA_FIELD_3D_OBJ) \
+                                     $(FIELD_COEFFICIENT_OBJ) \
+                                     $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                     $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_CANONICAL_ROTATION_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_TPV31_NUC_COH_OBJ): %.o: $(SRC)%.cpp \
+                                spatial/code/spatial_friction.hpp \
+                                dynamic/spatial_nucleation.hpp \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
 $(TEST_SPATIAL_SETUP_OBJ): %.o: $(SRC)%.cpp \
                                 dynamic/spatial_setup.hpp \
                                 dynamic/fault_face_flux.hpp \
@@ -2372,7 +2708,7 @@ $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
-$(WAVE_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+$(WAVE_OPERATOR_PRIMARY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
@@ -2906,9 +3242,14 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-logging test-config-bridge test-config-parser \
       test-godunov-flux test-wave-operator \
       test-phaseh-godunov-flux-pool \
-      test-spatial-friction-config test-spatial-friction-resolver \
+      test-phaser-bimaterial-flux \
+      test-phaser-dispatch-smoke \
+      test-spatial-friction-config test-spatial-friction-config-phaser \
+      test-spatial-friction-resolver \
       test-spatial-velocity-bundle \
       test-spatial-constant-stress-source \
+      test-spatial-stress-with-patches \
+      test-tpv31-nucleation-and-cohesion \
       test-spatial-setup \
       test-phaseh-lsw-forced-rupture \
       test-phaseh-wave-operator-constant-parity \
@@ -3166,9 +3507,22 @@ test-godunov-flux: seas_test_godunov_flux
 test-phaseh-godunov-flux-pool: seas_test_phaseh_godunov_flux_pool
 	./seas_test_phaseh_godunov_flux_pool
 
+# Phase R.1: BimaterialFlux solver unit tests.
+test-phaser-bimaterial-flux: seas_test_phaser_bimaterial_flux
+	./seas_test_phaser_bimaterial_flux
+
+# Phase R.2: WaveOperator(MaterialField) bi-material dispatch smoke
+# (R.2.T-2 / T-3 / T-4).
+test-phaser-dispatch-smoke: seas_test_phaser_dispatch_smoke
+	./seas_test_phaser_dispatch_smoke
+
 # Spatial Phase 1: TOML parser + per-DOF friction resolver tests.
 test-spatial-friction-config: seas_test_spatial_friction_config
 	./seas_test_spatial_friction_config
+
+# Phase R.3 R.3.T-1/T-2 acceptance tests.
+test-spatial-friction-config-phaser: seas_test_spatial_friction_config_phaser
+	./seas_test_spatial_friction_config_phaser
 
 test-spatial-friction-resolver: seas_test_spatial_friction_resolver
 	./seas_test_spatial_friction_resolver
@@ -3187,6 +3541,12 @@ test-spatial-stress-bundle: seas_test_spatial_stress_bundle
 
 test-spatial-constant-stress-source: seas_test_spatial_constant_stress_source
 	./seas_test_spatial_constant_stress_source
+
+test-spatial-stress-with-patches: seas_test_spatial_stress_with_patches
+	./seas_test_spatial_stress_with_patches
+
+test-tpv31-nucleation-and-cohesion: seas_test_tpv31_nucleation_and_cohesion
+	./seas_test_tpv31_nucleation_and_cohesion
 
 test-spatial-setup: seas_test_spatial_setup
 	./seas_test_spatial_setup

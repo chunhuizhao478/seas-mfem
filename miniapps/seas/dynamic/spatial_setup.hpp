@@ -393,6 +393,58 @@ inline void InitializeFaultDOFs_Spatial(
    }
 }
 
+/// @brief IP-aware overload of `InitializeFaultDOFs_Spatial_RS` (REVIEW
+/// R-008).  Same shape as the centroid-based overload but accepts the
+/// per-DOF reference IntegrationPoint cache from
+/// `FaultGeometry::fault_dof_ip()`, so per-DOF impedances are evaluated
+/// at the actual fault QP rather than at the bulk element centroid.
+///
+/// Required for any RS config that combines `material.kind =
+/// "depth_profile_1d"` (or `"sidecar_hdf5"`) with rate-state friction;
+/// the centroid-based overload is correct only for `Mode::Constant`
+/// material.
+template <typename MeshT>
+inline void InitializeFaultDOFs_Spatial_RS(
+   std::vector<DOFData>&                       dof_data,
+   int                                          ndof,
+   const Array<int>&                            dof_to_elem,
+   const MaterialField&                         material,
+   MeshT&                                       mesh,
+   const RateStatePerDOFParams&                 rs,
+   const Vector&                                tau_pre,
+   const Vector&                                sigma_n_eff,
+   const std::vector<mfem::IntegrationPoint>&   dof_ips)
+{
+   MFEM_VERIFY(ndof >= 0,
+               "InitializeFaultDOFs_Spatial_RS(ip-aware): ndof must be "
+               ">= 0; got " << ndof);
+   MFEM_VERIFY(static_cast<int>(dof_ips.size()) == ndof,
+               "InitializeFaultDOFs_Spatial_RS(ip-aware): dof_ips.size() ("
+               << dof_ips.size() << ") != ndof (" << ndof << ")");
+   MFEM_VERIFY(dof_to_elem.Size() == ndof, "dof_to_elem size mismatch");
+   MFEM_VERIFY(rs.a.Size() == ndof,        "rs.a size mismatch");
+   MFEM_VERIFY(rs.b.Size() == ndof,        "rs.b size mismatch");
+   MFEM_VERIFY(rs.Dc.Size() == ndof,       "rs.Dc size mismatch");
+   MFEM_VERIFY(tau_pre.Size() == 2 * ndof, "tau_pre size mismatch");
+   MFEM_VERIFY(sigma_n_eff.Size() == ndof, "sigma_n_eff size mismatch");
+
+   internal::verify_dof_data_uninitialized(dof_data);
+   dof_data.resize(ndof);
+
+   for (int i = 0; i < ndof; ++i)
+   {
+      DOFData& d = dof_data[i];
+      internal::seed_static_dof_fields<MeshT>(d, dof_to_elem[i], mesh,
+                                              material, dof_ips[i],
+                                              tau_pre(2 * i + 0),
+                                              tau_pre(2 * i + 1),
+                                              sigma_n_eff(i));
+      d.a   = rs.a(i);
+      d.Dc  = rs.Dc(i);
+      d.psi = 0.0;
+   }
+}
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem
