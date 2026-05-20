@@ -108,12 +108,21 @@ if [[ ! -f "${MESH}" ]]; then
     exit 1
 fi
 
-OUT="${SCRATCH}/safs_dyn_smoke_${SLURM_JOB_ID}"
-mkdir -p "${OUT}"
+# ParaView/checkpoint output → repo safs/ tree (per request); this is a
+# shakedown run, so output lives next to the SAFS project for easy
+# inspection.  The run dir is gitignored (safs/safs_dyn_smoke_*/).
+OUT="${SEAS_MFEM_ROOT}/miniapps/seas/safs/safs_dyn_smoke_${SLURM_JOB_ID}"
+# Driver run log + post-run verify summary → jobs/safs (next to this
+# sbatch).  The SLURM %j.out/%j.err land in the submit dir, so submit
+# from miniapps/seas/jobs/safs to co-locate them here.
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
+LOG="${LOG_DIR}/spatial_dyn_smoke_${SLURM_JOB_ID}.log"
+mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${OUT}"
+echo "Log file:   ${LOG}"
 echo "Mesh:       ${MESH}"
 echo "Config:     ${CONFIG_TOML}"
 
@@ -129,11 +138,11 @@ ibrun ./seas_spatial_dyn_driver \
     --print-derived \
     --checkpoint-every 2000 \
     --output-dir "${OUT}" \
-    > "${OUT}/spatial_dyn_smoke.log" 2>&1
+    > "${LOG}" 2>&1
 RC=$?
 
 if [[ ${RC} -ne 0 ]]; then
-    echo "driver_rc=${RC} — see ${OUT}/spatial_dyn_smoke.log (probably "
+    echo "driver_rc=${RC} — see ${LOG} (probably "
     echo "  --print-derived ABORTed; check the [derived] lines)."
     exit ${RC}
 fi
@@ -148,8 +157,8 @@ CONFIG_TOML_ABS="${SEAS_MFEM_ROOT}/miniapps/seas/${CONFIG_TOML}"
 python3 "${VERIFIER}" \
     --fault-vtkhdf "${OUT}/fault.vtkhdf" \
     --toml-config "${CONFIG_TOML_ABS}" \
-    --log "${OUT}/spatial_dyn_smoke.log" \
-    > "${OUT}/verify_summary.txt"
+    --log "${LOG}" \
+    > "${LOG_DIR}/verify_summary_${SLURM_JOB_ID}.txt"
 CHECK_RC=$?
 
 echo "driver_rc=${RC}, verify_rc=${CHECK_RC}"

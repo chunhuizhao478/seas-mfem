@@ -147,3 +147,15 @@ safs/project_7.0_alternative/friction/*.pdf
 
 # CFM CAD originals (STEP files, large; regenerable from upstream CFM).
 safs/CFM_data_step/*.step
+
+# SAFS dynamic-rupture run outputs (cluster-job artifacts: ParaView
+# *.vtkhdf + cp_* checkpoints, regenerable).  Mirrors tpv205/results_*/.
+safs/safs_dyn_smoke_*/
+safs/results_*/
+
+# SAFS run logs + post-run verify summaries written next to the sbatch
+# in jobs/safs (the .sbatch files themselves stay tracked).
+jobs/safs/*.out
+jobs/safs/*.err
+jobs/safs/*.log
+jobs/safs/verify_summary_*.txt
