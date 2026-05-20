@@ -40,25 +40,8 @@ module load fftw3/3.3.8
 
 export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${LD_LIBRARY_PATH}"
 
-# ZFP plugin path — Frontera-specific; adjust if site changes its layout.
-# R-007 fix: validate ${WORK} is set and the plugin exists before using
-# the default path, so the user gets an actionable error instead of a
-# runtime VTKHDF abort at first write.
-if [[ -z "${HDF5_PLUGIN_PATH:-}" ]]; then
-    if [[ -z "${WORK:-}" ]]; then
-        echo "WARNING: \${WORK} is unset; cannot derive HDF5_PLUGIN_PATH."
-        echo "  Set HDF5_PLUGIN_PATH explicitly to the directory holding"
-        echo "  libh5zzfp.{so,dylib}, or omit --paraview-*-zfp-tol from"
-        echo "  the driver invocation."
-    else
-        export HDF5_PLUGIN_PATH="${WORK}/local/hdf5_plugins:${HDF5_PLUGIN_PATH:-}"
-        if [[ ! -e "${WORK}/local/hdf5_plugins/libh5zzfp.so" ]]; then
-            echo "WARNING: HDF5_PLUGIN_PATH=${WORK}/local/hdf5_plugins"
-            echo "  but libh5zzfp.so not found there.  ZFP-compressed"
-            echo "  ParaView output will abort at first write."
-        fi
-    fi
-fi
+# ZFP HDF5 filter plugin path is set below, after SEAS_MFEM_ROOT resolves
+# (it lives under ${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin).
 
 # R-006 fix (R-002 round-3 extension): resolve seas-mfem root from the
 # sbatch submit dir by walking UP until miniapps/seas/Makefile is found.
@@ -84,6 +67,21 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
     exit 1
 fi
 cd "${SEAS_MFEM_ROOT}"
+
+# ZFP HDF5 filter plugin (libh5zzfp.so), required at runtime for
+# --paraview-*-zfp-tol.  build_frontera.sh installs it under
+# ${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin (same convention as the
+# BP5 Phase-6 sbatches).  Fail fast with a build hint if it is missing.
+H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
+if [[ -e "${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so" ]]; then
+    export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin:${HDF5_PLUGIN_PATH:-}"
+else
+    echo "ERROR: ZFP plugin not found at"
+    echo "         ${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so"
+    echo "       Build it on Frontera with:  bash build_frontera.sh"
+    echo "       (or omit --paraview-*-zfp-tol from the driver invocation)."
+    exit 1
+fi
 
 JOBS=8
 
