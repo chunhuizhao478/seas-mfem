@@ -98,7 +98,10 @@ cd miniapps/seas
 make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml"
+# Config override for the post-event-blowup A/B experiments (default =
+# baseline projected-stress, mu_s=0.65).  Vary ONE knob at a time:
+#   H1 (raise mu_s): sbatch --export=ALL,SAFS_CONFIG=${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress_mus080.toml
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml}"
 MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
 
 # Fail fast before launching 400 ranks: the .msh is gitignored and does
@@ -123,18 +126,27 @@ LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
 LOG="${LOG_DIR}/spatial_dyn_smoke_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
+# CFL override for the time-stepping isolation test (default = the config's
+# cfl=0.5).  Keep the BASELINE config (mu_s=0.65) when using this so only
+# dt changes:
+#   H3 (halve dt): sbatch --export=ALL,SAFS_CFL=0.25
+CFL_ARG=""
+[[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
+
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir: ${OUT}"
 echo "Log file:   ${LOG}"
 echo "Mesh:       ${MESH}"
 echo "Config:     ${CONFIG_TOML}"
+echo "CFL arg:    ${CFL_ARG:-<config default>}"
 
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
     --no-sidecar-material \
     --tfinal 20s \
+    ${CFL_ARG} \
     --paraview \
     --paraview-fault-hdf5 \
     --paraview-fault-zfp-tol 1.0e-12 \

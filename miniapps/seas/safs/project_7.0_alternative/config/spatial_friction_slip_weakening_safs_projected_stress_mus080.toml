@@ -1,0 +1,158 @@
+# Production SAFS dynamic-rupture config:
+#   - constant material properties (via [velocity].use_sidecar = false)
+#   - regional Hickman & Zoback (H&Z) stress projected onto the fault
+#   - linear-slip-weakening friction
+#   - gradual_overstress nucleation (smoothStep-ramped Gaussian δτ)
+#
+# STRESS PROVENANCE
+# -----------------
+# The [stress] tensor below is hand-copied from the H&Z regional-stress
+# projection summary:
+#   stress/results/1000m_lcfar3000/safs_fault_box_nwcut_1000m_lcfar3000_summary.json
+#       params:  SHmax = 113 MPa, Shmin = 49 MPa, Sv = 45 MPa
+#                P_p   = 16  MPa, SHmax_azimuth = 23°, rake = right-lateral
+#                depth_model = "constant" (all *_grad_MPa_per_m = 0.0)
+#       sigma_global_at_z0_MPa (compression POSITIVE, EAST-NORTH-UP, MPa):
+#           [[ 58.77093  23.01887   0.0     ],
+#            [ 23.01887 103.22907   0.0     ],
+#            [  0.0       0.0      45.0     ]]
+#       Produced by stress/code/hickman_and_zoback_regional_stress_projection.py
+#
+# Because depth_model = "constant", the H&Z projection is bit-equivalent to
+# the existing kind = "constant_tensor" stress source (the C++ driver
+# rotates this 3×3 onto each fault DOF's local basis itself; the per-DOF
+# projection mirror lives in FaultGeometry::ComputeSAFSParams).  If a
+# future H&Z run uses non-zero depth gradients, this file must be
+# refreshed (or the driver upgraded to a depth-aware regional source).
+#
+# Run (from miniapps/seas — no CLI material flag needed; gated by TOML):
+#   mpirun -np 8 ./seas_spatial_dyn_driver \
+#       --config safs/project_7.0_alternative/config/spatial_friction_slip_weakening_safs_projected_stress.toml \
+#       --paraview --paraview-fault-hdf5 \
+#       --paraview-fault-zfp-tol 1e-12 \
+#       --print-derived
+#
+# Schema reference:
+#   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "EXPERIMENT (H1 test): mu_s 0.65->0.80 vs the baseline projected-stress config; tests whether the t~3.1s post-event blowup is the near-critical locked surroundings cascading"
+
+[material_constant_fallback]
+# Equal lambda = mu => Poisson ratio = 0.25 (typical crust).
+# Consumed when [velocity].use_sidecar = false (below).
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# Authoritative source of P_p for the SEAS effective-stress identity
+#   sigma_n_eff = sigma_n_total - P_p
+# Value matches params.P_p_MPa in the H&Z summary JSON so the driver
+# subtracts the same P_p the projection assumed.  z < 0 below free
+# surface; gradient zero because depth_model = "constant" upstream.
+P_p_pa            = 16.0e6    # 16 MPa (matches JSON params.P_p_MPa)
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # 1 MPa floor (JSON stats min is ~30 MPa)
+
+[mesh]
+path  = "safs/project_7.0_alternative/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
+order = 1
+
+[velocity]
+# use_sidecar = false => skip the CVMH/CVMS load and use
+# [material_constant_fallback].  In this mode the parser does not read
+# model / dataset_root / override_path, so they are omitted.  The
+# [velocity] table itself is still required (spatial_friction.cpp:501).
+use_sidecar = false
+
+[stress]
+# Regional H&Z tensor projected per-DOF.  Values from sigma_global_at_z0_MPa
+# in the summary JSON (see header), converted MPa → Pa.  Frame: (east,
+# north, up) UTM 11N, compression POSITIVE (SEAS internal convention).
+kind        = "constant_tensor"
+sigma_xx_pa = 5.877093214531209e+07
+sigma_yy_pa = 1.0322906785468793e+08
+sigma_zz_pa = 4.50e+07
+sigma_xy_pa = 2.3018873610836838e+07
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "adjacent"
+cfl        = 0.5
+use_pml    = false
+
+[time]
+tfinal     = "100s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+# Single-event dynamic rupture: fixed-dt cadence for ALL three
+# collections (no interseismic regime to optimize for).
+# Reflection-time warning fires at t ~= 7 s (min_box_dim / cp_max);
+# from then on the bulk fields carry 5-15% reflected energy off the
+# 1st-order absorbing bottom+sides.
+output_dir              = "output_safs_dyn_projected_1000m_100s"
+restart_prefix          = "cp"
+paraview_volume         = "hdf5"
+paraview_bulk           = "hdf5"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "1.0s"      # 100 snapshots
+paraview_bulk_dt        = "1.0s"      # 100 snapshots
+paraview_fault_dt       = "0.05s"     # 2000 snapshots
+paraview_volume_zfp_tol = 1.0e-3
+paraview_bulk_zfp_tol   = 1.0e-3
+paraview_fault_zfp_tol  = 1.0e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+# Time-domain nucleation: smoothStep-ramped Gaussian δτ.  Omit this
+# block to drive rupture purely by the static initial stress field.
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+# Hypocenter in UTM 11N (mesh frame), picked from ParaView on
+# safs_fault_box_nwcut_1000m_lcfar3000_fault.vtu (vertex id 36417).
+# Sits at the southern end of the SAF-ALT6 fault, ~5 km depth (the
+# southern slab only reaches z = -10.4 km, so 5 km is mid-depth there).
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+radius_dip_m        =     3000.0
+radius_strike_m     =     3000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     25.0e6
+T_nuc_s             =        1.0
+
+[friction.slip_weakening]
+# EXPERIMENT VARIANT (job 7738686 post-event blowup at t~3.1s).  Identical
+# to spatial_friction_slip_weakening_safs_projected_stress.toml EXCEPT
+# mu_s_default 0.65 -> 0.80.  Tests hypothesis H1: the blowup is the
+# near-critical LOCKED surroundings (prestress ratio 0.986) cascading once
+# the asperity afterslip transfers stress into them.
+#   - mu_s = 0.80: prestress ratio drops to mu_app.max/mu_s =
+#     0.6410/0.80 = 0.80 (~20% static margin vs the old 1.4%).
+#   - mu_d = 0.5: UNCHANGED.  NOTE: the dynamic overshoot
+#     tau_pre/(mu_d*sigma_n) ~= 1.28 is INDEPENDENT of mu_s, so this
+#     variant does NOT address runaway of already-weakened regions.  If
+#     the blowup persists, raise mu_d (or lower tau_pre) instead.
+#   - D_c  = 1.0 m.
+# Nucleation budget unchanged (Delta_tau 25 MPa); a higher mu_s raises the
+# required Delta_tau slightly but 25 MPa still overshoots.
+mu_s_default     = 0.80
+mu_d_default     = 0.50
+d_c_default      = 1.0
+cohesion_default = 0.0
+
+# Lock the deepest band as a barrier (resolver sets internal mu_s = 1.0e6).
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_min_m = -20000.0
+z_max_m = -15000.0
