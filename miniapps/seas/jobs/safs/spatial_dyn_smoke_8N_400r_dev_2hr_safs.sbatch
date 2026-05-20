@@ -9,7 +9,7 @@
 #SBATCH -A EAR20006
 
 # Phase Z smoke for seas_spatial_dyn_driver — first SAFS dynamic-rupture
-# production run, dev queue, 2 hr wall, 0.5 s simulated time.
+# production run, dev queue, 2 hr wall, 20 s simulated time.
 #
 # Purpose: end-to-end shakedown of the gradual_overstress nucleation +
 # --print-derived pre-flight gate + ParaView fault.vtkhdf + checkpoint
@@ -17,12 +17,16 @@
 # projected stress, constant material, mixed-flux "adjacent", and O2
 # ADER.  Reads `safs_smoke_8N_400r_dev.sbatch` for the queue header.
 #
-# Resource budget (SAFS 1000m lcfar3000, constant material, tfinal=0.5s):
+# Resource budget (SAFS 1000m lcfar3000, constant material, tfinal=20s):
 #   Mesh:       ~1.2M tets, ~36M DOFs (3D velocity-stress, order 1)
 #   Per-rank:   ~0.6 GB peak (wave Q + DOFData + GodunovFlux)
-#   Wall:       ~1.5-2 hr at cfl=0.5, dt~6e-5 s, ~8000 steps
-#   Output:     fault.vtkhdf ~5 GB with ZFP tol 1e-12
-#               cp files every 2000 steps × ~3 MB/rank
+#   Steps:      ~13,000 (20 s / dt_cfl 0.0015 s) — 40x the old 0.5 s smoke,
+#               and longer than the 12 s production run.
+#   WARNING:    this may EXCEED the 2 hr development-queue cap.  The smoke
+#               checkpoints every 2000 steps but has NO auto-restart (only
+#               the production sbatch does), so a walltime kill just dies.
+#               If it times out, resubmit on the normal queue or cut tfinal.
+#   Output:     fault.vtkhdf grows ~20x vs 0.5 s (200 snapshots, ZFP 1e-12)
 #   Scratch:    50 GB recommended
 
 export LC_ALL=C
@@ -130,7 +134,7 @@ ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
     --no-sidecar-material \
-    --tfinal 0.5s \
+    --tfinal 20s \
     --paraview \
     --paraview-fault-hdf5 \
     --paraview-fault-zfp-tol 1.0e-12 \
