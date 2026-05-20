@@ -3,9 +3,9 @@
 #SBATCH -o tpv205_spdyn_200m_p2_O3_norm_%j.out
 #SBATCH -e tpv205_spdyn_200m_p2_O3_norm_%j.err
 #SBATCH -p normal
-#SBATCH -N 16
-#SBATCH -n 800
-#SBATCH -t 24:00:00
+#SBATCH -N 10
+#SBATCH -n 500
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # TPV205 (SCEC TPV5) 200 m mesh, P=2 + ADER-O3, NORMAL-QUEUE production
@@ -25,13 +25,13 @@
 #
 # Rank count / wall time
 # ----------------------
-# Rank count matches the P1/O2 normal sibling (16 N x 800 r): the
+# Fixed at 10 N x 500 r (matches all tpv205_spatial normal jobs): the
 # BimaterialFlux precomputation footprint is per-FACE (order-independent),
-# so memory headroom is unchanged.  P2 raises per-step cost ~3-5x and the
-# CFL tightens, so the 24 h budget reaches noticeably less simulated time
-# than the P1/O2 run (which reached ~10 s).  Expect ~2-4 s simulated;
-# resume via `--restart <prefix>` for a follow-on block, or bump nodes/
-# walltime if the full 12 s tfinal is required.
+# so memory headroom is unchanged from P1.  P2 raises per-step cost ~3-5x
+# and the CFL tightens, so the 48 h budget reaches noticeably less
+# simulated time than the P1/O2 run.  Resume via `--restart <prefix>` for
+# follow-on blocks, or scale nodes/walltime if the full 12 s tfinal is
+# required.
 
 export LC_ALL=C
 export LANG=C
@@ -142,7 +142,7 @@ echo "Polynomial:    order 2 (TOML mesh.order override) + ader-order 3 (Pelties 
 echo "Interior flux: bimaterial (heterogeneous Riemann — branch purpose)"
 echo "Friction law:  slip_weakening (SCEC TPV5 LSW closed-form)"
 echo "Iterator:      one-shot (O=1 quadrature)"
-echo "Queue:         normal (16N x 800r, 24h)"
+echo "Queue:         normal (10N x 500r, 48h)"
 echo "tfinal:        12.0 s (24 h budget reaches less than the P1/O2 run)"
 echo "Checkpoint:    every 10000 steps (TOML default; resume via --restart)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"

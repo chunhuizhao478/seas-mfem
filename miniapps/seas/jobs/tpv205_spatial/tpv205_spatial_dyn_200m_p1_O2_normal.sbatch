@@ -3,9 +3,9 @@
 #SBATCH -o tpv205_spdyn_p1_O2_norm_%j.out
 #SBATCH -e tpv205_spdyn_p1_O2_norm_%j.err
 #SBATCH -p normal
-#SBATCH -N 16
-#SBATCH -n 800
-#SBATCH -t 24:00:00
+#SBATCH -N 10
+#SBATCH -n 500
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # TPV205 (SCEC TPV5) NORMAL-QUEUE production run through the
@@ -19,22 +19,18 @@
 #
 # Rank-count rationale
 # --------------------
-# Dev queue used 8 N × 400 r = 400 ranks.  At that scale the
-# BimaterialFlux precomputation is ~25 MB/rank (3.7 M interior faces ÷ 400
-# ≈ 9.3 k/rank × ~2.7 KB/face).  Going to 16 N × 800 r ≈ 12 MB/rank,
-# leaving plenty of headroom and roughly doubling step throughput (the
-# fault iterator and BimaterialFlux matvec are both face-local so they
-# strong-scale ~linearly until communication kicks in around 2000 ranks).
+# Fixed at 10 N x 500 r = 500 ranks (50 ranks/node) for all
+# tpv205_spatial normal jobs.  The BimaterialFlux precomputation is
+# face-local (~2.7 KB/face), so the 200 m mesh's ~3.7 M interior faces
+# give ~20 MB/rank at 500 ranks — well within the per-rank memory budget.
 #
 # Expected wall time
 # ------------------
 # 200 m mesh + P=1 + cfl_safety=dg + ADER-O2 → auto dt ≈ 2.34e-4 s and
-# 51 270 macro-steps to reach tfinal = 12 s.  At ~2 s/step on 800 ranks
-# (heterogeneous Riemann path with full precomputation) the run finishes
-# in ≈ 28 h.  The 24 h budget gets us to ~10 s simulated, which is
-# enough to capture the full bilateral rupture front and the start of
-# the wave-reflection contamination (the dev banner warned at t ≈ 10 s).
-# If the full 12 s tfinal is required, bump to 32 h or 32 nodes.
+# ~51 k macro-steps to reach tfinal = 12 s.  At 500 ranks the step
+# throughput is lower than a larger-rank sizing, so the 48 h budget
+# reaches a few seconds simulated.  Resume via `--restart <prefix>` for
+# follow-on 48 h blocks if the full 12 s tfinal is required.
 #
 # Production-output cadence
 # -------------------------
@@ -149,7 +145,7 @@ echo "Polynomial:    --order 1 + --ader-order 2 (Pelties O2)"
 echo "Interior flux: bimaterial (heterogeneous Riemann — branch purpose)"
 echo "Friction law:  slip_weakening (SCEC TPV5 LSW closed-form)"
 echo "Iterator:      one-shot (O=1 quadrature)"
-echo "Queue:         normal (16N x 800r, 24h)"
+echo "Queue:         normal (10N x 500r, 48h)"
 echo "tfinal:        12.0 s (24 h budget expected to reach t ≈ 10 s)"
 echo "Checkpoint:    every 10000 steps (TOML default)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"

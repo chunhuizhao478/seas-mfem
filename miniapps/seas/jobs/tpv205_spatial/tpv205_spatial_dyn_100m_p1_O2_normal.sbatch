@@ -3,8 +3,8 @@
 #SBATCH -o tpv205_spdyn_100m_p1_O2_%j.out
 #SBATCH -e tpv205_spdyn_100m_p1_O2_%j.err
 #SBATCH -p normal
-#SBATCH -N 64
-#SBATCH -n 3200
+#SBATCH -N 10
+#SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
@@ -12,11 +12,10 @@
 # =======================================================================
 #
 # Same driver/config as the 200 m sibling but on the refined
-# tpv205/mesh/tpv2053d_100m.geo.  ~8 × more elements (1.9 M → ~15 M)
-# pushes the BimaterialFlux precomputation past the 4 GB per-rank soft
-# cap unless rank count scales ≥ proportionally; 3200 ranks keeps it at
-# ~25 MB/rank (15 M faces ÷ 3200 ≈ 4.7 k/rank × ~2.7 KB/face ≈ 12 MB,
-# plus housekeeping).
+# tpv205/mesh/tpv2053d_100m.geo (~8x more elements).  Fixed at 10 N x
+# 500 r for all tpv205_spatial normal jobs.  The BimaterialFlux
+# precomputation is face-local (~2.7 KB/face); the ~15 M faces give
+# ~80 MB/rank at 500 ranks — still within the per-rank memory budget.
 #
 # Rationale
 # ---------
@@ -31,12 +30,10 @@
 # Wall time
 # ---------
 # At 100 m mesh + P=1 + cfl_safety=dg, auto dt ≈ 1.17e-4 s (CFL halves)
-# and ~103 k macro-steps to reach tfinal = 12 s.  Per-step cost scales
-# with face count × inverse-rank-count: ~3 s/step at 3200 ranks.  Full
-# tfinal ≈ 86 h.  The 48 h budget reaches t ≈ 6 s — enough for the
-# 30 km rupture to fully unzip but not enough for the wave reflection
-# back to the fault.  Resume via `--restart <prefix>` for a second
-# 48 h block to reach tfinal.
+# and ~103 k macro-steps to reach tfinal = 12 s.  At only 500 ranks
+# (10 nodes) the per-step cost is high, so the 48 h budget reaches well
+# under a second simulated — this is a small-allocation run.  Chain
+# multiple 48 h blocks via `--restart <prefix>` to advance further.
 
 export LC_ALL=C
 export LANG=C
@@ -148,7 +145,7 @@ echo "Polynomial:    --order 1 + --ader-order 2 (Pelties O2)"
 echo "Interior flux: bimaterial (heterogeneous Riemann)"
 echo "Friction law:  slip_weakening (SCEC TPV5 LSW)"
 echo "Iterator:      one-shot (O=1 quadrature)"
-echo "Queue:         normal (64N x 3200r, 48h)"
+echo "Queue:         normal (10N x 500r, 48h)"
 echo "tfinal:        12.0 s (48 h budget expected to reach t ≈ 6 s)"
 echo "Checkpoint:    every 10000 steps (TOML default; resume via --restart)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"
