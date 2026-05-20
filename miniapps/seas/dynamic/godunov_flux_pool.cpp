@@ -98,12 +98,29 @@ void GodunovFluxPool::Build(
       if (it == key_to_idx.end())
       {
          const int new_idx = static_cast<int>(unique_fluxes_.size());
-         // Use the rounded values for the cached flux so per-element
-         // queries are exactly consistent with the dedup decision.
-         const real_t rl = round_sig(lam, dedup_sig_figs);
-         const real_t rm = round_sig(mu,  dedup_sig_figs);
-         const real_t rr = round_sig(rho, dedup_sig_figs);
-         unique_fluxes_.emplace_back(std::make_unique<GodunovFlux>(rl, rm, rr));
+         // Phase H Stage 2 (R-002 prerequisite, PLAN_heterogeneous_volume_
+         // bc_fault_dispatch_2026-05-20.md §Phase 1 prereq + §8): build the
+         // cached GodunovFlux from the EXACT (lambda, mu, rho), NOT the
+         // rounded values.  `round_sig` is retained for the dedup KEY
+         // (`make_key` above) only.
+         //
+         // Why this changed: pre-Stage-2 the cached flux was built from the
+         // 6-sig-fig-rounded triple, so `At(e)` differed from the exact-
+         // material scalar `flux_` at ~1e-6 for any constant with >6
+         // significant figures.  That mismatch was MASKED while the
+         // WaveOperator volume term still used the exact `Ax_`.  Phase 1a
+         // routes the volume term through `At(e).GetReferenceStarMatrix(d)`,
+         // which removes the mask: with a rounded cached flux the
+         // Mode::Constant byte-parity gate would break for >6-sig-fig
+         // constants.  Building from exact values makes `At(e)` bit-identical
+         // to a fresh `GodunovFlux(lam, mu, rho)` for the first element that
+         // seeds each dedup bucket; on Mode::Constant input every element
+         // shares one bucket built from the exact constants, so the volume
+         // term is byte-identical to the scalar ctor.  For >6-sig-fig
+         // heterogeneous input the only change is at the LSB (the bucket
+         // representative's exact material vs the rounded key), which has no
+         // scalar reference and stays within the documented dedup budget.
+         unique_fluxes_.emplace_back(std::make_unique<GodunovFlux>(lam, mu, rho));
          key_to_idx.emplace(key, new_idx);
          elem_to_flux_idx_[e] = new_idx;
       }

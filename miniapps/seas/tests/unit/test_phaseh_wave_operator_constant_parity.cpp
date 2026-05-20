@@ -37,6 +37,9 @@
 #include "../../dynamic/wave_operator.hpp"
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/heterogeneous_material.hpp"
+#include "../../dynamic/fault_face_flux.hpp"   // Phase H Stage 2 fault parity
+#include "../../dynamic/tpv102_setup.hpp"      // InitializeFaultDOFs (fault parity)
+#include "../../config/tpv102_params.hpp"      // TPV102 material for fault fixture
 #include "../../domain/boundary_config.hpp"
 
 #include <algorithm>
@@ -85,10 +88,25 @@ Mesh MakeBoxMesh(int nx, int ny, int nz)
 
 // Sensible crustal material; matches geoffrey2010 fallback in the
 // SAFS EXAMPLE TOML so the test exercises a realistic parameter set.
+// These are CLEAN constants (≤6 significant figures), so they round-trip
+// exactly through the pool's 6-sig-fig dedup key.
 constexpr real_t k_lambda = 32.0e9;
 constexpr real_t k_mu     = 32.0e9;
 constexpr real_t k_rho    = 2670.0;
 constexpr int    k_order  = 1;
+
+// Phase H Stage 2 (R-002 mitigation): a material whose constants need
+// MORE than 6 significant figures.  Before the Phase 1 prerequisite fix
+// (godunov_flux_pool.cpp built the cached flux from the 6-sig-fig-ROUNDED
+// triple), `At(e)` differed from the exact-material scalar `flux_` at
+// ~1e-7 for these values.  That mismatch was masked while the volume term
+// used the exact `Ax_`; Phase 1a routes the volume term through
+// `At(e).GetReferenceStarMatrix(d)`, so the parity gate below would BREAK
+// unless the pool is built from EXACT values.  These constants are the
+// tripwire: parity holds iff the prerequisite fix is in place.
+constexpr real_t k_lambda6 = 3.14159265e10;   // ≠ its 6-sig-fig round
+constexpr real_t k_mu6     = 2.71828182e10;
+constexpr real_t k_rho6    = 2.66666667e3;
 
 // Fill the state vector with a deterministic plane-wave pattern so any
 // dispatch-path divergence shows up as a non-trivial residual.  Same
@@ -117,6 +135,91 @@ BoundaryConfig MakeAbsorbingBC()
    bc.absorbing_attrs = {};
    bc.dirichlet_attrs = {};
    return bc;
+}
+
+// Mixed BC: absorbing on attrs {1,3,5}, free-surface (natural) on {2,4,6}.
+// Exercises BOTH the Absorbing (B1/B2) and FreeSurface (B1/B2) per-element
+// dispatch paths in a single operator so the parity gate covers Group B.
+BoundaryConfig MakeMixedBC()
+{
+   BoundaryConfig bc;
+   bc.fault_attr      = 0;
+   bc.natural_attrs   = {2, 4, 6};
+   bc.absorbing_attrs = {1, 3, 5};
+   bc.dirichlet_attrs = {};
+   return bc;
+}
+
+// Box mesh with the y = L/2 plane of interior faces tagged as a fault
+// (attr 3); every outer boundary face tagged attr 1 (natural).  Mirrors
+// BuildCartesianFaultMesh in test_adjacent_triangle_fault_first_step_audit
+// so the WaveOperator ctor detects an interior fault and builds the
+// FaultBasis.  L matches TPV102 length scale so InitializeFaultDOFs's
+// depth = |z| seeding is physical.
+Mesh MakeFaultBoxMesh(int nx, int ny, int nz, real_t L)
+{
+   Mesh mesh = Mesh::MakeCartesian3D(nx, ny, nz, Element::TETRAHEDRON,
+                                     L, L, L, /*sfc_ordering=*/false);
+   mesh.FinalizeTopology();
+   mesh.Finalize();
+   for (int f = 0; f < mesh.GetNumFaces(); f++)
+   {
+      Array<int> fv;
+      mesh.GetFaceVertices(f, fv);
+      if (fv.Size() != 3) { continue; }
+      auto *ftr = mesh.GetFaceElementTransformations(f);
+      if (ftr && ftr->Elem2No >= 0)
+      {
+         real_t cy = 0.0;
+         for (int v = 0; v < fv.Size(); v++) { cy += mesh.GetVertex(fv[v])[1]; }
+         cy /= fv.Size();
+         if (std::abs(cy - 0.5 * L) < 1e-8)
+         {
+            mesh.AddBdrTriangle(fv[0], fv[1], fv[2], 3);   // fault
+         }
+         continue;
+      }
+      mesh.AddBdrTriangle(fv[0], fv[1], fv[2], 1);         // outer (natural)
+   }
+   mesh.FinalizeTopology();
+   mesh.Finalize();
+   mesh.SetAttributes();
+   return mesh;
+}
+
+// Relative-difference reduction over two equally-sized vectors.
+// denom = max(|a|, |b|, 1) so near-zero entries don't blow up the ratio.
+real_t MaxRelDiff(const Vector &a, const Vector &b, int *n_over = nullptr,
+                  real_t tol = 0.0)
+{
+   real_t mx = 0.0;
+   int over = 0;
+   const int n = a.Size();
+   for (int i = 0; i < n; ++i)
+   {
+      const real_t denom = std::max(std::max(std::abs(a(i)), std::abs(b(i))),
+                                    real_t(1.0));
+      const real_t rel = std::abs(a(i) - b(i)) / denom;
+      if (rel > mx) { mx = rel; }
+      if (tol > 0.0 && rel > tol) { ++over; }
+   }
+   if (n_over) { *n_over = over; }
+   return mx;
+}
+
+// Count bit-for-bit differing entries between two equally-sized vectors.
+// Used for the byte-exact gates (volume RHS, ADER CK predictor) where the
+// per-element path must reproduce the scalar path EXACTLY on Mode::Constant.
+int BitDiffCount(const Vector &a, const Vector &b)
+{
+   int n_diff = 0;
+   const int n = a.Size();
+   for (int i = 0; i < n; ++i)
+   {
+      const real_t ai = a(i), bi = b(i);
+      if (std::memcmp(&ai, &bi, sizeof(real_t)) != 0) { ++n_diff; }
+   }
+   return n_diff;
 }
 
 }  // namespace
@@ -392,6 +495,274 @@ static void C_4_pool_invariants_on_constant()
 }
 
 // =========================================================================
+// C-5  Non-fault parity: volume RHS + ADER CK predictor BYTE-IDENTICAL,
+//      Mult + AdvanceADER FP-equivalent (1e-9 rel), under MIXED BC
+//      (absorbing + free-surface).  Parameterised by material so it runs
+//      with BOTH a clean and a >6-sig-fig constant — the latter is the
+//      R-002 rounding-regression tripwire (Phase 1 prerequisite).
+// =========================================================================
+static void C_5_nonfault_parity(real_t lam, real_t mu, real_t rho,
+                                const char *label)
+{
+   if (g_rank == 0)
+   { std::cout << "\n[C-5] Non-fault parity (" << label << ")\n"; }
+#ifdef MFEM_USE_MPI
+   // Run on the serial-mesh branch from rank 0 only (the ParMesh C-2 path
+   // covers np>1 for Mult; AdvanceADER's per-element CK is element-local
+   // so the serial check is sufficient for A1/A2/A3 coverage).
+   if (g_rank != 0) { return; }
+#endif
+
+   Mesh smesh = MakeBoxMesh(2, 2, 2);
+   const BoundaryConfig bc = MakeMixedBC();
+
+   WaveOperator<Mesh> wave_scalar(smesh, k_order, lam, mu, rho, bc);
+   WaveOperator<Mesh> wave_hetero(smesh, k_order,
+                                  MaterialField::MakeConstant(lam, mu, rho),
+                                  bc);
+   real_t Q_bg[NUM_STATE] = {0};
+   wave_scalar.SetAbsorbingBackground(Q_bg);
+   wave_hetero.SetAbsorbingBackground(Q_bg);
+
+   const int n = NUM_STATE * wave_scalar.GetScalarNDof();
+   Vector Q(n);
+   FillQDeterministic(Q);
+
+   // --- A1: volume RHS byte-identical (per-element star matrices == Ax_) ---
+   {
+      Vector vs(n), vh(n);
+      vs = 0.0; vh = 0.0;
+      wave_scalar.ComputeVolumeRHS_ForTest(Q, vs);
+      wave_hetero.ComputeVolumeRHS_ForTest(Q, vh);
+      const int nd = BitDiffCount(vs, vh);
+      if (g_rank == 0)
+      { std::cout << "  volume RHS bit-diffs=" << nd << " (expect 0)\n"; }
+      TEST_ASSERT(nd == 0,
+                  std::string("volume RHS byte-identical (") + label + ")");
+   }
+
+   // --- A2: ADER CK predictor byte-identical (order 2 and 3) ---
+   const real_t dt = 0.2 * wave_scalar.ComputeMaxDt(0.5);
+   for (int order = 2; order <= 3; ++order)
+   {
+      Vector Is, Ih;
+      wave_scalar.ComputeADERTimeIntegrated(Q, dt, order, Is);
+      wave_hetero.ComputeADERTimeIntegrated(Q, dt, order, Ih);
+      const int nd = BitDiffCount(Is, Ih);
+      if (g_rank == 0)
+      { std::cout << "  CK predictor order=" << order
+                  << " bit-diffs=" << nd << " (expect 0)\n"; }
+      TEST_ASSERT(nd == 0,
+                  std::string("ADER CK predictor byte-identical order=")
+                  + std::to_string(order) + " (" + label + ")");
+   }
+
+   // --- Mult FP-equivalent (interior face flux routes through
+   //     BimaterialFlux on the hetero ctor → ~1e-10 rel, not bit) ---
+   const real_t k_rel_tol = 1e-9;
+   {
+      Vector ds(n), dh(n);
+      wave_scalar.Mult(Q, ds);
+      wave_hetero.Mult(Q, dh);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(ds, dh, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  Mult max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0,
+                  std::string("Mult parity (") + label + ")");
+   }
+
+   // --- AdvanceADER FP-equivalent (order 2 and 3) ---
+   for (int order = 2; order <= 3; ++order)
+   {
+      Vector Qs(n), Qh(n);
+      wave_scalar.AdvanceADER(Q, dt, order, Qs);
+      wave_hetero.AdvanceADER(Q, dt, order, Qh);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(Qs, Qh, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  AdvanceADER order=" << order << " max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0,
+                  std::string("AdvanceADER parity order=")
+                  + std::to_string(order) + " (" + label + ")");
+   }
+}
+
+// =========================================================================
+// C-6  Fault parity: a serial mesh with an interior fault (y = L/2 plane).
+//      Exercises Group C1 (RK4 fault bulk-side flux) and C3 (ADER fault
+//      bulk-side flux).  On Mode::Constant the per-side FluxForElem_(elem)
+//      equals the scalar flux_ (At(elem) built from the exact constants),
+//      so Mult and AdvanceADER must match the scalar ctor to FP precision.
+//      Uses TPV102 material so InitializeFaultDOFs + FaultFaceFlux are
+//      mutually consistent.
+// =========================================================================
+static void C_6_fault_parity()
+{
+   if (g_rank == 0)
+   { std::cout << "\n[C-6] Fault parity (interior fault, serial)\n"; }
+#ifdef MFEM_USE_MPI
+   if (g_rank != 0) { return; }
+#endif
+
+   const real_t L = 1.0e4;   // 10 km box; depth |z| up to 10 km
+   Mesh smesh = MakeFaultBoxMesh(2, 2, 2, L);
+
+   BoundaryConfig bc;
+   bc.fault_attr      = 3;
+   bc.natural_attrs   = {1};
+   bc.absorbing_attrs = {};
+   bc.dirichlet_attrs = {};
+
+   const real_t lam = TPV102Params::lambda;
+   const real_t mu  = TPV102Params::mu;
+   const real_t rho = TPV102Params::rho;
+
+   WaveOperator<Mesh> wave_scalar(smesh, k_order, lam, mu, rho, bc);
+   WaveOperator<Mesh> wave_hetero(smesh, k_order,
+                                  MaterialField::MakeConstant(lam, mu, rho),
+                                  bc);
+
+   const Array<int> &int_faces = wave_scalar.GetFaultInteriorFaces();
+   if (g_rank == 0)
+   { std::cout << "  interior fault faces detected = " << int_faces.Size()
+               << "\n"; }
+   TEST_ASSERT(int_faces.Size() > 0,
+               "fault mesh produced at least one interior fault face");
+   if (int_faces.Size() == 0) { return; }
+
+   // Per-operator fault wiring (each operator owns its own FaultFaceFlux +
+   // DOFData; the two DOFData arrays are seeded identically).
+   const int nqp =
+      IntRules.Get(smesh.GetInteriorFaceTransformations(int_faces[0])
+                      ->GetGeometryType(),
+                   2 * k_order).GetNPoints();
+
+   std::vector<Vector> fault_coords;
+   for (int i = 0; i < int_faces.Size(); i++)
+   {
+      auto *ftr = smesh.GetInteriorFaceTransformations(int_faces[i]);
+      const IntegrationRule &ir =
+         IntRules.Get(ftr->GetGeometryType(), 2 * k_order);
+      for (int q = 0; q < ir.GetNPoints(); q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         ftr->SetAllIntPoints(&ip);
+         Vector phys(3);
+         ftr->Face->Transform(ip, phys);
+         // Shift y so the fault sits at the canonical y=0; shift z so the
+         // surface is at z=0 and depth = |z| (InitializeFaultDOFs needs
+         // z <= 0).  Box spans [0,L]^3; fault at y=L/2.
+         phys(1) -= 0.5 * L;
+         phys(2) -= L;
+         fault_coords.push_back(phys);
+      }
+   }
+   const int n_fault = int_faces.Size() * nqp;
+
+   std::vector<DOFData> dof_scalar, dof_hetero;
+   InitializeFaultDOFs(dof_scalar, n_fault, fault_coords);
+   InitializeFaultDOFs(dof_hetero, n_fault, fault_coords);
+
+   FaultFaceFlux ff_scalar(rho, TPV102Params::cp, TPV102Params::cs);
+   FaultFaceFlux ff_hetero(rho, TPV102Params::cp, TPV102Params::cs);
+   wave_scalar.SetFaultFlux(&ff_scalar);
+   wave_scalar.SetFaultDOFData(&dof_scalar, nqp);
+   wave_hetero.SetFaultFlux(&ff_hetero);
+   wave_hetero.SetFaultDOFData(&dof_hetero, nqp);
+
+   real_t Q_bg[NUM_STATE] = {0};
+   wave_scalar.SetAbsorbingBackground(Q_bg);
+   wave_hetero.SetAbsorbingBackground(Q_bg);
+
+   // R-001 operator-level fault-routing gate: a UNIFORM Mode::Coefficient
+   // fault op.  owned_flux_pool_ is built (so the fault dispatch C1-C4 reads
+   // FluxForElem_(elem)) but its scalar flux_ is the (1,1,1) placeholder.
+   // Matching the scalar op's Mult/AdvanceADER to FP precision proves the
+   // fault bulk-side flux reads FluxForElem_(elem), NOT the placeholder.  The
+   // MakeConstant wave_hetero above seeds flux_ with the real constant, so it
+   // alone could not catch a C1-C4 revert to flux_; this op can.
+   ConstantCoefficient lam_cc(lam), mu_cc(mu), rho_cc(rho);
+   MaterialField mat_coef =
+      MaterialField::MakeCoefficient(&lam_cc, &mu_cc, &rho_cc);
+   WaveOperator<Mesh> wave_coef(smesh, k_order, mat_coef, bc);
+   TEST_ASSERT(wave_coef.UsesGodunovFluxPool(),
+               "uniform-Coefficient fault op built the per-element pool");
+   std::vector<DOFData> dof_coef;
+   InitializeFaultDOFs(dof_coef, n_fault, fault_coords);
+   FaultFaceFlux ff_coef(rho, TPV102Params::cp, TPV102Params::cs);
+   wave_coef.SetFaultFlux(&ff_coef);
+   wave_coef.SetFaultDOFData(&dof_coef, nqp);
+   wave_coef.SetAbsorbingBackground(Q_bg);
+
+   const int n = NUM_STATE * wave_scalar.GetScalarNDof();
+   Vector Q(n);
+   FillQDeterministic(Q);
+
+   const real_t k_rel_tol = 1e-9;
+
+   // --- C1: RK4 fault bulk-side flux parity ---
+   {
+      Vector ds(n), dh(n);
+      wave_scalar.Mult(Q, ds);
+      wave_hetero.Mult(Q, dh);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(ds, dh, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  fault Mult max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0, "fault Mult parity (C1)");
+   }
+
+   // --- C3: ADER fault bulk-side flux parity ---
+   const real_t dt = 0.2 * wave_scalar.ComputeMaxDt(0.5);
+   {
+      Vector Qs(n), Qh(n);
+      wave_scalar.AdvanceADER(Q, dt, /*order=*/2, Qs);
+      wave_hetero.AdvanceADER(Q, dt, /*order=*/2, Qh);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(Qs, Qh, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  fault AdvanceADER max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0, "fault AdvanceADER parity (C3)");
+   }
+
+   // --- R-001: uniform-Coefficient fault op vs scalar (placeholder-catch).
+   //     Unlike the MakeConstant wave_hetero above, wave_coef's flux_ is the
+   //     (1,1,1) placeholder, so these comparisons FAIL if any C1-C4 fault
+   //     site reverts to flux_ instead of FluxForElem_(elem). ---
+   {
+      Vector ds(n), dc(n);
+      wave_scalar.Mult(Q, ds);
+      wave_coef.Mult(Q, dc);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(ds, dc, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  fault Mult coef-vs-scalar max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0,
+                  "uniform-Coefficient fault Mult == scalar (C1 reads "
+                  "FluxForElem_(elem), not placeholder flux_)");
+   }
+   {
+      Vector Qs(n), Qc(n);
+      wave_scalar.AdvanceADER(Q, dt, /*order=*/2, Qs);
+      wave_coef.AdvanceADER(Q, dt, /*order=*/2, Qc);
+      int n_over = 0;
+      const real_t mx = MaxRelDiff(Qs, Qc, &n_over, k_rel_tol);
+      if (g_rank == 0)
+      { std::cout << "  fault AdvanceADER coef-vs-scalar max_rel_diff=" << mx
+                  << " (tol=" << k_rel_tol << ", n_over=" << n_over << ")\n"; }
+      TEST_ASSERT(n_over == 0,
+                  "uniform-Coefficient fault AdvanceADER == scalar (ADER C3 "
+                  "reads FluxForElem_(elem), not placeholder flux_)");
+   }
+}
+
+// =========================================================================
 // main
 // =========================================================================
 int main(int argc, char *argv[])
@@ -415,6 +786,13 @@ int main(int argc, char *argv[])
    C_2_mult_parity_parallel();
    C_3_compute_max_dt_parity();
    C_4_pool_invariants_on_constant();
+   // Phase H Stage 2 (PLAN §6): byte-exact volume + ADER-CK and
+   // FP-equivalent Mult + AdvanceADER under mixed (absorbing +
+   // free-surface) BC, with a CLEAN and a >6-sig-fig constant.
+   C_5_nonfault_parity(k_lambda,  k_mu,  k_rho,  "clean 6-sig constant");
+   C_5_nonfault_parity(k_lambda6, k_mu6, k_rho6, ">6-sig constant (R-002)");
+   // Phase H Stage 2 (PLAN §Phase 3): fault bulk-side flux parity (C1/C3).
+   C_6_fault_parity();
 
 #ifdef MFEM_USE_MPI
    int total = 0, passed = 0, failed = 0;

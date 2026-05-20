@@ -600,43 +600,56 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                "well-defined centroid evaluation needed by the per-"
                "element flux pool.");
 
-   // Phase R.2 (Phase H Stage 2): Mode::Coefficient is now supported at
-   // INTERIOR faces — every interior-face dispatch routes through the
-   // bi-material `BimaterialFlux::ApplyPerFaceFlux` path with per-(face,
-   // side) flux matrices built from the per-element material pool.
+   // Phase H Stage 2 (PLAN_heterogeneous_volume_bc_fault_dispatch_
+   // 2026-05-20.md §Phase 4): Mode::Coefficient is now supported with REAL
+   // boundary conditions and a fault.  The old R-002 guard rejected any
+   // Coefficient + (absorbing/natural/dirichlet/fault) config because BC
+   // and fault-side dispatch still consulted the (1,1,1)-placeholder
+   // scalar `flux_`.  That is no longer true: Group A (volume + ADER CK
+   // Jacobians), Group B (boundary-face flux), and Group C (fault
+   // bulk-side flux) all route through `FluxForElem_(e)` / per-element
+   // star matrices, so the per-element material — not the placeholder —
+   // drives every flux.  The scalar `flux_` is consulted ONLY when
+   // `owned_flux_pool_` is null (the scalar ctor); on this heterogeneous
+   // path the pool is always built, so the placeholder is never read.
    //
-   // KNOWN LIMITATION: boundary face dispatch (AbsorbingTotal,
-   // FreeSurfaceTotal, etc.) and fault-side imposed-state dispatch still
-   // consult the scalar `flux_` member, which the delegating ctor seeds
-   // with (1.0, 1.0, 1.0) placeholders for Coefficient input.  Runs that
-   // exercise BC / fault dispatch on a truly heterogeneous mesh require
-   // separately wiring per-element BC / fault dispatch — this is OUT OF
-   // SCOPE for Phase R per the parent plan §"Out of Scope".
-   //
-   // R-002 (round-3): reject Mode::Coefficient configurations that
-   // would silently exercise the placeholder-seeded BC / fault dispatch
-   // (any non-empty absorbing_attrs / natural_attrs / dirichlet_attrs
-   // or non-zero fault_attr).  Mode::Constant is fine because the
-   // delegating ctor seeds flux_ with the actual constants.
+   // STILL UNSUPPORTED (deliberately NOT relaxed):
+   //   - Mode::GridFunction: rejected by the MFEM_VERIFY above (no
+   //     centroid evaluation for the per-element pool).
+   //   - True bi-material ACROSS the fault (different (lambda, mu, rho) on
+   //     the + and - sides of the fault plane): OUT OF SCOPE (plan §7).
+   //     Not cheaply detectable at construction (would require comparing
+   //     material on both elements of every fault face), so it is caught
+   //     at RUN TIME by the `Zp_plus ≈ Zp_minus` assertions in
+   //     fault_face_flux.cpp.  TPV31's vertical fault sits in a depth-only
+   //     medium, so both sides share material at every fault QP and those
+   //     assertions hold.
+   //   - MixedFluxMode != None: rejected below (mutually exclusive with
+   //     the bi-material interior-face path); unchanged.
+   if (material.mode == MaterialField::Mode::Coefficient)
    {
       const bool has_real_bc =
          !bc.absorbing_attrs.empty()
          || !bc.natural_attrs.empty()
          || !bc.dirichlet_attrs.empty()
          || bc.fault_attr > 0;
-      MFEM_VERIFY(material.mode == MaterialField::Mode::Constant
-                  || !has_real_bc,
-                  "WaveOperator(MaterialField): Mode::Coefficient is "
-                  "wired for INTERIOR face dispatch only.  BC dispatch "
-                  "(absorbing/natural/dirichlet) and fault-side "
-                  "imposed-state dispatch still consult scalar flux_ "
-                  "built from placeholder (1,1,1).  Configuring "
-                  "absorbing_attrs / natural_attrs / dirichlet_attrs / "
-                  "fault_attr with Mode::Coefficient would silently "
-                  "produce wrong physics on those faces.  Either "
-                  "(a) use MaterialField::MakeConstant(...), or "
-                  "(b) wait for per-element BC/fault dispatch "
-                  "(Phase H Stage 2 follow-up).");
+      int banner_rank = 0;
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         MPI_Comm_rank(static_cast<ParMesh &>(mesh_).GetComm(), &banner_rank);
+      }
+#endif
+      if (has_real_bc && banner_rank == 0)
+      {
+         mfem::out
+            << "[wave_operator] Heterogeneous (Mode::Coefficient) material "
+               "with real BC / fault: per-element volume, boundary, and "
+               "fault dispatch ACTIVE (Phase H Stage 2).\n"
+            << "  True bi-material ACROSS the fault is out of scope; it is "
+               "guarded at run time by the Zp_plus == Zp_minus assertions "
+               "in FaultFaceFlux.\n";
+      }
    }
    material_ = &material;
 
@@ -1596,6 +1609,21 @@ void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) cons
 
       int dof_offset = e * ndof_per_el_;
 
+      // Phase H Stage 2 (Group A1): per-element reference star matrices.
+      // On the scalar ctor `FluxForElem_(e)` returns `flux_`, whose
+      // `GetReferenceStarMatrix(0/1/2)` is built by the same
+      // `BuildJacobian(d, .)` call as the cached `Ax_/Ay_/Az_` members —
+      // bit-identical, so TPV205/102/104/BP5 are byte-untouched.  On the
+      // heterogeneous ctor each element uses its own (lambda, mu, rho)
+      // Jacobian, which is what makes TPV31's depth-varying 1D velocity
+      // profile correct in the bulk.  The matrices are cached const refs
+      // (precomputed in each GodunovFlux ctor), so this is a pointer
+      // fetch, not a recompute.
+      const GodunovFlux &flux_e = FluxForElem_(e);
+      const DenseMatrix &Ax_e = flux_e.GetReferenceStarMatrix(0);
+      const DenseMatrix &Ay_e = flux_e.GetReferenceStarMatrix(1);
+      const DenseMatrix &Az_e = flux_e.GetReferenceStarMatrix(2);
+
       Vector shape(ndof);
       DenseMatrix dshape(ndof, 3);
 
@@ -1624,9 +1652,9 @@ void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) cons
             F[0][c] = 0.0; F[1][c] = 0.0; F[2][c] = 0.0;
             for (int k = 0; k < NUM_STATE; k++)
             {
-               F[0][c] += Ax_(c, k) * Q_qp[k];
-               F[1][c] += Ay_(c, k) * Q_qp[k];
-               F[2][c] += Az_(c, k) * Q_qp[k];
+               F[0][c] += Ax_e(c, k) * Q_qp[k];
+               F[1][c] += Ay_e(c, k) * Q_qp[k];
+               F[2][c] += Az_e(c, k) * Q_qp[k];
             }
          }
 
@@ -1810,6 +1838,58 @@ static inline void ApplyJacobianPerDOF(const DenseMatrix &A,
 }
 
 // ---------------------------------------------------------------------------
+// Phase H Stage 2 (Group A2/A3): per-element CK Jacobian.
+//
+// Per-element analogue of ApplyJacobianPerDOF.  Where the free function
+// applies ONE 9x9 Jacobian to every DOF, this loops elements and applies
+// element e's reference star matrix `FluxForElem_(e).GetReferenceStarMatrix
+// (dir)` to ONLY element e's `ndof_per_el_` DOFs (component-major layout,
+// element-contiguous: element e owns scalar DOFs [e*ndof_per_el_,
+// (e+1)*ndof_per_el_); component stride is ndof_total_).
+//
+// Mode::Constant invariant: the matrix A is identical on every element, so
+// every target DOF accumulates the SAME contributions in the SAME cp-order
+// as ApplyJacobianPerDOF — bit-identical output.  Only the heterogeneous
+// ctor (depth-varying star matrices) produces a different, correct result.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplyJacobianPerElementDOF_(
+   int dir, const Vector &X, Vector &Y, real_t sign) const
+{
+   MFEM_ASSERT(dir >= 0 && dir < 3,
+               "ApplyJacobianPerElementDOF_: dir must be in {0,1,2}, got "
+               << dir);
+   MFEM_ASSERT(X.Size() == NUM_STATE * ndof_total_,
+               "ApplyJacobianPerElementDOF_: X size mismatch");
+   MFEM_ASSERT(Y.Size() == NUM_STATE * ndof_total_,
+               "ApplyJacobianPerElementDOF_: Y size mismatch");
+
+   const real_t *Xd = X.GetData();
+   real_t *Yd = Y.GetData();
+
+   for (int e = 0; e < ne_; ++e)
+   {
+      const DenseMatrix &A = FluxForElem_(e).GetReferenceStarMatrix(dir);
+      const int base = e * ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; ++c)
+      {
+         real_t *Yc = Yd + c * ndof_total_ + base;
+         for (int cp = 0; cp < NUM_STATE; ++cp)
+         {
+            const real_t a = A(c, cp);
+            if (a == 0.0) { continue; }
+            const real_t w = sign * a;
+            const real_t *Xcp = Xd + cp * ndof_total_ + base;
+            for (int i = 0; i < ndof_per_el_; ++i)
+            {
+               Yc[i] += w * Xcp[i];
+            }
+         }
+      }
+   }
+}
+
+// ---------------------------------------------------------------------------
 // ADER I-05 Phase 3: Cauchy-Kovalevskaya time-integrated state predictor.
 // ---------------------------------------------------------------------------
 template <typename MeshType>
@@ -1864,8 +1944,19 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-         ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         if (owned_flux_pool_)
+         {
+            // Phase H Stage 2 (A2): per-element star matrices for the
+            // heterogeneous ctor.  Bit-identical to the scalar branch on
+            // Mode::Constant (same A on every element).
+            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
+         }
+         else
+         {
+            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
+            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_,
+                                /*sign=*/-1.0);
+         }
       }
 
       // Advance factorial factor: fac *= dt / (k+2).
@@ -1983,8 +2074,19 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-         ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         if (owned_flux_pool_)
+         {
+            // Phase H Stage 2 (A3): per-element star matrices for the
+            // heterogeneous ctor.  Bit-identical to the scalar branch on
+            // Mode::Constant (same A on every element).
+            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
+         }
+         else
+         {
+            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
+            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_,
+                                /*sign=*/-1.0);
+         }
       }
 
       // Update factorial factors and accumulate D(k+1) into each node.
@@ -3025,6 +3127,11 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
 
             FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
 
+            // Phase H Stage 2 (Group B1): BC faces are one-sided; the
+            // owning element is `e1`.  `FluxForElem_(e1)` returns the
+            // per-element flux (correct impedance for the depth-varying
+            // medium under the heterogeneous ctor) or the scalar `flux_`
+            // (byte-identical) under the scalar ctor.
             switch (bc_type)
             {
                case FaceBC::Absorbing:
@@ -3038,7 +3145,7 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "wave.Mult(): SetAbsorbingBackground(Q_bg) "
                               "must be called before Absorbing BC dispatch "
                               "(Q_bg = 0 is valid under fluctuation-Q).");
-                  flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
+                  FluxForElem_(e1).AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
                case FaceBC::FreeSurface:
                   // v9.4.0 (REVIEW R-007): updated stale "Total-Q only"
@@ -3051,12 +3158,12 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "dispatch (Q_bg = 0 is valid).");
                   if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
                   {
-                     flux_.FreeSurfaceGodunovTotal(nor, Q_self,
-                                                   bulk_bg_, F_h);
+                     FluxForElem_(e1).FreeSurfaceGodunovTotal(nor, Q_self,
+                                                          bulk_bg_, F_h);
                   }
                   else
                   {
-                     flux_.FreeSurfaceTotal(nor, Q_self, bulk_bg_, F_h);
+                     FluxForElem_(e1).FreeSurfaceTotal(nor, Q_self, bulk_bg_, F_h);
                   }
                   break;
                case FaceBC::Fault:
@@ -3092,7 +3199,7 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "wave.Mult(): SetAbsorbingBackground(Q_bg) "
                               "must be called before the default BC "
                               "dispatch (Q_bg = 0 is valid).");
-                  flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
+                  FluxForElem_(e1).AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
             }
 
@@ -3331,11 +3438,22 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                   // Using `can_n` (canonical, rank-invariant) rather
                   // than MFEM's local `nor` removes the L/R routing
                   // step and matches the shared-fault convention.
+                  //
+                  // Phase H Stage 2 (Group C1): each side applies its OWN
+                  // fault-adjacent element's A_n via FluxForElem_.  The
+                  // plus side is e1 when elem1_on_plus, else e2; minus is
+                  // the other.  For TPV31 both sides share material at
+                  // every fault QP (Zp_plus ≈ Zp_minus, asserted in
+                  // FaultFaceFlux), so this is a no-op there; it is the
+                  // correct per-element treatment for a depth-varying
+                  // medium and the scaffold a bi-material fault would use.
+                  const int elem_plus  = elem1_on_plus ? e1 : e2;
+                  const int elem_minus = elem1_on_plus ? e2 : e1;
                   real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
-                  flux_.Interior(can_n, Q_imp_plus_g,  Q_imp_plus_g,
-                                 F_h_plus);
-                  flux_.Interior(can_n, Q_imp_minus_g, Q_imp_minus_g,
-                                 F_h_minus);
+                  FluxForElem_(elem_plus).Interior(can_n, Q_imp_plus_g,
+                                                   Q_imp_plus_g, F_h_plus);
+                  FluxForElem_(elem_minus).Interior(can_n, Q_imp_minus_g,
+                                                    Q_imp_minus_g, F_h_minus);
 
 #ifdef SEAS_DIAG_FAULT_FLUX
                   // C-2 FLUX: print Elem1's own-side flux in the GLOBAL
@@ -4010,7 +4128,12 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   const real_t *Q_imp_side = elem1_on_plus
                                              ? Q_imp_plus_g
                                              : Q_imp_minus_g;
-                  flux_.Interior(can_n, Q_imp_side, Q_imp_side, F_h_side);
+                  // Phase H Stage 2 (Group C2): a shared fault face has
+                  // only ONE local element on this rank (Elem1 = e1); the
+                  // paired rank owns the other side.  Use that single
+                  // local element's flux — never At(e2) (e2 is off-rank).
+                  FluxForElem_(e1).Interior(can_n, Q_imp_side, Q_imp_side,
+                                            F_h_side);
 
                   const real_t assemble_sign = elem1_on_plus ? -1.0 : +1.0;
                   for (int c = 0; c < NUM_STATE; c++)
@@ -4599,11 +4722,15 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   }
 #endif
 
+                  // Phase H Stage 2 (Group C3, ADER local fault): per-side
+                  // element flux, same mapping as the RK4 C1 site.
+                  const int elem_plus  = elem1_on_plus ? e1 : e2;
+                  const int elem_minus = elem1_on_plus ? e2 : e1;
                   real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
-                  flux_.Interior(can_n, I_imp_plus_g,  I_imp_plus_g,
-                                 F_h_plus);
-                  flux_.Interior(can_n, I_imp_minus_g, I_imp_minus_g,
-                                 F_h_minus);
+                  FluxForElem_(elem_plus).Interior(can_n, I_imp_plus_g,
+                                                   I_imp_plus_g, F_h_plus);
+                  FluxForElem_(elem_minus).Interior(can_n, I_imp_minus_g,
+                                                    I_imp_minus_g, F_h_minus);
 
                   if (elem1_on_plus)
                   {
@@ -4916,14 +5043,22 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      }
                   }
 
+                  // Phase H Stage 2 (Group C3, per-QP-batched fault): the
+                  // plus/minus side element is chosen per-QP from the
+                  // batched elem1_on_plus flag (e1/e2 are the local
+                  // interior fault face's two elements).
+                  const int elem_plus_qq  =
+                     elem1_on_plus_per_qp[qq] ? e1 : e2;
+                  const int elem_minus_qq =
+                     elem1_on_plus_per_qp[qq] ? e2 : e1;
                   real_t F_h_plus_qq[NUM_STATE];
                   real_t F_h_minus_qq[NUM_STATE];
-                  flux_.Interior(can_n_per_qp[qq].data(),
-                                  I_imp_plus_g_qq, I_imp_plus_g_qq,
-                                  F_h_plus_qq);
-                  flux_.Interior(can_n_per_qp[qq].data(),
-                                  I_imp_minus_g_qq, I_imp_minus_g_qq,
-                                  F_h_minus_qq);
+                  FluxForElem_(elem_plus_qq).Interior(
+                     can_n_per_qp[qq].data(),
+                     I_imp_plus_g_qq, I_imp_plus_g_qq, F_h_plus_qq);
+                  FluxForElem_(elem_minus_qq).Interior(
+                     can_n_per_qp[qq].data(),
+                     I_imp_minus_g_qq, I_imp_minus_g_qq, F_h_minus_qq);
 
                   const Vector &sh1_qq = shape1_per_qp[qq];
                   const Vector &sh2_qq = shape2_per_qp[qq];
@@ -4999,23 +5134,29 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
             // env → byte-identical.
             FaceBC bc_type = ClassifyBoundaryFace(bdr_attr);
 
+            // Phase H Stage 2 (Group B2): BC faces are one-sided; the
+            // owning element is `e1` (captured by the [&] lambda).
+            // `FluxForElem_(e1)` returns the per-element flux under the
+            // heterogeneous ctor and the byte-identical scalar `flux_`
+            // under the scalar ctor.
             auto compute_bc_flux = [&](const real_t *nvec, real_t *F_out)
             {
                switch (bc_type)
                {
                   case FaceBC::Absorbing:
-                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     FluxForElem_(e1).AbsorbingTotal(nvec, I_self,
+                                                     bulk_bg_scaled, F_out);
                      break;
                   case FaceBC::FreeSurface:
                      if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
                      {
-                        flux_.FreeSurfaceGodunovTotal(nvec, I_self,
-                                                      bulk_bg_scaled, F_out);
+                        FluxForElem_(e1).FreeSurfaceGodunovTotal(
+                           nvec, I_self, bulk_bg_scaled, F_out);
                      }
                      else
                      {
-                        flux_.FreeSurfaceTotal(nvec, I_self,
-                                               bulk_bg_scaled, F_out);
+                        FluxForElem_(e1).FreeSurfaceTotal(
+                           nvec, I_self, bulk_bg_scaled, F_out);
                      }
                      break;
                   case FaceBC::Fault:
@@ -5024,7 +5165,8 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                 "must be 2-sided interior faces.");
                      break;
                   default:
-                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     FluxForElem_(e1).AbsorbingTotal(nvec, I_self,
+                                                     bulk_bg_scaled, F_out);
                      break;
                }
             };
@@ -5565,7 +5707,11 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   const real_t *I_imp_side = elem1_on_plus
                                              ? I_imp_plus_g
                                              : I_imp_minus_g;
-                  flux_.Interior(can_n, I_imp_side, I_imp_side, F_h_side);
+                  // Phase H Stage 2 (Group C4, ADER shared fault): only the
+                  // local element (Elem1 = e1) lives on this rank; use its
+                  // flux (never At(e2) — off-rank).
+                  FluxForElem_(e1).Interior(can_n, I_imp_side, I_imp_side,
+                                            F_h_side);
 
                   const real_t assemble_sign = elem1_on_plus ? -1.0 : +1.0;
                   for (int c = 0; c < NUM_STATE; c++)

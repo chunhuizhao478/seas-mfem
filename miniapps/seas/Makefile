@@ -211,6 +211,11 @@ TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ   = $(TEST_PHASEH_LSW_FORCED_RUPTURE_SRC:.cpp
 # (MaterialField, BoundaryConfig) ctor (H.1 + H.3 + H.4).
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC = tests/unit/test_phaseh_wave_operator_constant_parity.cpp
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ = $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC:.cpp=.o)
+# Phase H Stage 2 gates H-1 / H-2 / H-3 — heterogeneous correctness of the
+# per-element volume / boundary / fault dispatch
+# (PLAN_heterogeneous_volume_bc_fault_dispatch_2026-05-20.md §6).
+TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_SRC = tests/unit/test_phaseh_heterogeneous_correctness.cpp
+TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_OBJ = $(TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_SRC:.cpp=.o)
 # Phase 4 of spatial_dynamic_rupture_plan.md (rev-3): generic dynamic-rupture driver.
 SPATIAL_DYN_DRIVER_SRC               = drivers/spatial_dyn_driver.cpp
 SPATIAL_DYN_DRIVER_OBJ               = $(SPATIAL_DYN_DRIVER_SRC:.cpp=.o)
@@ -842,6 +847,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_setup \
                seas_test_phaseh_lsw_forced_rupture \
                seas_test_phaseh_wave_operator_constant_parity \
+               seas_test_phaseh_heterogeneous_correctness \
                seas_test_phaser_dispatch_smoke \
                seas_test_wave_operator \
                seas_test_wave_bc \
@@ -1559,6 +1565,32 @@ seas_test_phaseh_wave_operator_constant_parity: \
                   $(SPATIAL_FRICTION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase H Stage 2 heterogeneous-correctness gates (H-1 / H-2 / H-3).
+seas_test_phaseh_heterogeneous_correctness: \
+                  $(TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) \
 	    $(GODUNOV_FLUX_OBJ) \
 	    $(GODUNOV_FLUX_POOL_OBJ) \
@@ -2735,6 +2767,16 @@ $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_PHASEH_HETEROGENEOUS_CORRECTNESS_OBJ): %.o: $(SRC)%.cpp \
+                                                       dynamic/wave_operator.hpp \
+                                                       dynamic/wave_operator.inl \
+                                                       dynamic/godunov_flux_pool.hpp \
+                                                       dynamic/godunov_flux.hpp \
+                                                       dynamic/heterogeneous_material.hpp \
+                                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(WAVE_OPERATOR_PRIMARY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
@@ -3280,6 +3322,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-spatial-setup \
       test-phaseh-lsw-forced-rupture \
       test-phaseh-wave-operator-constant-parity \
+      test-phaseh-heterogeneous-correctness \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -3588,6 +3631,10 @@ test-phaseh-lsw-forced-rupture: seas_test_phaseh_lsw_forced_rupture
 test-phaseh-wave-operator-constant-parity: seas_test_phaseh_wave_operator_constant_parity
 	./seas_test_phaseh_wave_operator_constant_parity
 	mpirun -np 4 ./seas_test_phaseh_wave_operator_constant_parity
+
+# Phase H Stage 2 heterogeneous-correctness gates (H-1 / H-2 / H-3).
+test-phaseh-heterogeneous-correctness: seas_test_phaseh_heterogeneous_correctness
+	./seas_test_phaseh_heterogeneous_correctness
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator

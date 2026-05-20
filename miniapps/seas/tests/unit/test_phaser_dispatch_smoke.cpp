@@ -333,32 +333,38 @@ static void R_2_T_4_memory_log_fires()
 }
 
 // =========================================================================
-// R.2.T-extra-R002 — death test: Mode::Coefficient + non-trivial BC
-// must abort (REVIEW round-3 R-002).  Skipped at np>1 because fork
-// after MPI_Init is technically undefined.
+// R.2.T-extra — Phase H Stage 2 guard relaxation
+// (PLAN_heterogeneous_volume_bc_fault_dispatch_2026-05-20.md §Phase 4).
+//
+// Pre-Stage-2 the heterogeneous ctor REJECTED Mode::Coefficient with any
+// real BC (absorbing/natural/dirichlet/fault) via the R-002 guard, because
+// BC and fault dispatch consulted the (1,1,1)-placeholder scalar flux_.
+// Stage 2 wires per-element volume / BC / fault dispatch, so that guard is
+// relaxed: Coefficient + real BC now CONSTRUCTS SUCCESSFULLY.  This test
+// flips the old death-test expectations to the new contract.  Still
+// skipped at np>1 because fork-after-MPI_Init is undefined.
 // =========================================================================
-static void R_2_T_extra_coefficient_bc_aborts()
+static void R_2_T_extra_coefficient_bc_allowed()
 {
    if (g_rank == 0)
-   { std::cout << "\n[R.2.T-extra R-002] Coefficient + non-trivial BC "
-                  "abort\n"; }
+   { std::cout << "\n[R.2.T-extra Phase-H-S2] Coefficient + real BC "
+                  "now allowed\n"; }
    // Fork-after-MPI_Init hangs on this build (the OpenMPI runtime
    // child cannot cleanly exit once it's inherited the parent's MPI
-   // state).  Skip whenever MPI is enabled; the guard logic in the
-   // ctor is small and was inspection-verified.  A future non-MPI
-   // build of the test (or a refactored test that delays MPI_Init)
-   // can run the fork-based death checks.
+   // state).  Skip whenever MPI is enabled; the relaxed guard is small
+   // and inspection-verified.  A future non-MPI build (or a refactored
+   // test that delays MPI_Init) can run the fork-based checks.
 #ifdef MFEM_USE_MPI
    if (g_rank == 0)
    {
       std::cout << "  SKIPPED under MFEM_USE_MPI (fork-after-MPI_Init "
-                   "hangs).  Guard verified by inspection at "
-                   "wave_operator.inl R-002 block.\n";
+                   "hangs).  Relaxed guard verified by inspection at "
+                   "wave_operator.inl Phase H Stage 2 §Phase 4 block.\n";
    }
    return;
 #endif
 
-   // Absorbing BC + Coefficient → abort.
+   // Absorbing BC + Coefficient → constructs (no abort).
    const bool aborted_absorbing = RunInChild([](){
       Mesh m = MakeBoxMesh(1, 1, 1);
       BoundaryConfig bc;
@@ -372,10 +378,10 @@ static void R_2_T_extra_coefficient_bc_aborts()
          m, k_order,
          MaterialField::MakeCoefficient(&lc, &mc, &rc), bc);
    });
-   TEST_ASSERT(aborted_absorbing,
-               "Mode::Coefficient + absorbing_attrs aborts");
+   TEST_ASSERT(!aborted_absorbing,
+               "Mode::Coefficient + absorbing_attrs constructs (Stage 2)");
 
-   // Natural BC + Coefficient → abort.
+   // Natural BC + Coefficient → constructs (no abort).
    const bool aborted_natural = RunInChild([](){
       Mesh m = MakeBoxMesh(1, 1, 1);
       BoundaryConfig bc;
@@ -389,27 +395,10 @@ static void R_2_T_extra_coefficient_bc_aborts()
          m, k_order,
          MaterialField::MakeCoefficient(&lc, &mc, &rc), bc);
    });
-   TEST_ASSERT(aborted_natural,
-               "Mode::Coefficient + natural_attrs aborts");
+   TEST_ASSERT(!aborted_natural,
+               "Mode::Coefficient + natural_attrs constructs (Stage 2)");
 
-   // Fault attr + Coefficient → abort.
-   const bool aborted_fault = RunInChild([](){
-      Mesh m = MakeBoxMesh(1, 1, 1);
-      BoundaryConfig bc;
-      bc.fault_attr      = 3;
-      bc.natural_attrs   = {};
-      bc.absorbing_attrs = {};
-      StepInZCoefficient lc(k_lambda, 2 * k_lambda);
-      StepInZCoefficient mc(k_mu,     2 * k_mu);
-      StepInZCoefficient rc(k_rho,    1.5 * k_rho);
-      WaveOperator<Mesh> wave(
-         m, k_order,
-         MaterialField::MakeCoefficient(&lc, &mc, &rc), bc);
-   });
-   TEST_ASSERT(aborted_fault,
-               "Mode::Coefficient + fault_attr aborts");
-
-   // Mode::Constant + non-trivial BC: must NOT abort (control).
+   // Mode::Constant + non-trivial BC: also constructs (control, unchanged).
    const bool aborted_constant = RunInChild([](){
       Mesh m = MakeBoxMesh(1, 1, 1);
       BoundaryConfig bc;
@@ -421,7 +410,7 @@ static void R_2_T_extra_coefficient_bc_aborts()
          MaterialField::MakeConstant(k_lambda, k_mu, k_rho), bc);
    });
    TEST_ASSERT(!aborted_constant,
-               "Mode::Constant + natural_attrs does NOT abort (control)");
+               "Mode::Constant + natural_attrs constructs (control)");
 }
 
 // =========================================================================
@@ -447,7 +436,7 @@ int main(int argc, char *argv[])
    R_2_T_2_smoke_dispatch_fires();
    R_2_T_3_two_layer_differs();
    R_2_T_4_memory_log_fires();
-   R_2_T_extra_coefficient_bc_aborts();
+   R_2_T_extra_coefficient_bc_allowed();
 
 #ifdef MFEM_USE_MPI
    int total = 0, passed = 0, failed = 0;

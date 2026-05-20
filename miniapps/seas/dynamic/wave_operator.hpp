@@ -931,6 +931,34 @@ private:
    /// Called from `SetMixedFluxMode`.  Clears the set first.
    void BuildCentralFluxFaceSet_();
 
+   /// Phase H Stage 2 (PLAN_heterogeneous_volume_bc_fault_dispatch_
+   /// 2026-05-20.md §3): single dispatch rule for per-element material.
+   /// Returns the per-element `GodunovFlux` from `owned_flux_pool_` when
+   /// the heterogeneous ctor built it, else the scalar `flux_` member.
+   ///
+   /// Invariant: scalar-ctor drivers (TPV205/102/104, BP5) never set
+   /// `owned_flux_pool_`, so this returns `flux_` and every call site is
+   /// bit-for-bit the pre-change scalar path.  On Mode::Constant input the
+   /// pool's cached flux is built from the EXACT constants
+   /// (godunov_flux_pool.cpp), so `At(e)` is bit-identical to `flux_`.
+   const GodunovFlux &FluxForElem_(int e) const
+   {
+      return owned_flux_pool_ ? owned_flux_pool_->At(e) : flux_;
+   }
+
+   /// Phase H Stage 2 (Group A2/A3): per-element variant of the file-local
+   /// `ApplyJacobianPerDOF`.  The CK recursion in `ComputeADERTimeIntegrated`
+   /// / `ComputeADERSubStepStates` applies one global reference star matrix
+   /// to every DOF; that is wrong on a depth-varying mesh.  This member
+   /// loops elements, fetches `FluxForElem_(e).GetReferenceStarMatrix(dir)`,
+   /// and applies it ONLY to element `e`'s `ndof_per_el_` DOFs (offset
+   /// `e*ndof_per_el_`, component stride `ndof_total_`).  Adds
+   /// `sign * A_e * X` into `Y` (additive, like ApplyJacobianPerDOF).
+   /// Called only when `owned_flux_pool_` is set; the scalar path keeps the
+   /// single-matrix `ApplyJacobianPerDOF` so TPV/BP5 stay byte-identical.
+   void ApplyJacobianPerElementDOF_(int dir, const Vector &X, Vector &Y,
+                                    real_t sign) const;
+
    /// Phase H.1 (Stage 1) helper: walk every local element, evaluate
    /// `material.EvalAt` at the reference centroid, fill `per_elem_lmr_`
    /// and `per_elem_h_`, and `Build()` `owned_flux_pool_` from the
