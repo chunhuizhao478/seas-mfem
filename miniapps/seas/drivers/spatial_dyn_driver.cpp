@@ -64,6 +64,7 @@
 // do not collide with any other symbol in this translation unit.
 #include "../dynamic/tpv102_setup.hpp"
 #include "../dynamic/tpv104_setup.hpp"
+#include "../dynamic/tpv31_stations.hpp"
 #include "../friction/state_evolution.hpp"
 #include "../friction/slip_law_srw_psi.hpp"
 #include "../dynamic/heterogeneous_material.hpp"
@@ -2357,6 +2358,36 @@ int main(int argc, char *argv[])
       }
    }
 
+   // SCEC TPV31 on-fault station traces — active only when
+   // `[problem].tag == "tpv31"`.  30 stations (spec Part 5); same
+   // 9-column internal layout as the TPV205 writer (consumed by
+   // tpv31/scripts/compare_tpv31_traces.py).
+   TPV31StationWriter tpv31_station_writer;
+   const bool tpv31_stations_active = (cfg.problem.tag == "tpv31");
+   if (tpv31_stations_active)
+   {
+      const std::vector<TPV31Station> stations = DefaultStations_TPV31();
+#ifdef MFEM_USE_MPI
+      tpv31_station_writer.Open(cfg.output.output_dir,
+                                /*prefix=*/"tpv31",
+                                stations, fault_coords,
+                                num_fault_local, comm);
+#else
+      tpv31_station_writer.Open(cfg.output.output_dir,
+                                /*prefix=*/"tpv31",
+                                stations, fault_coords, num_fault_local);
+#endif
+      if (restart_prefix.empty())
+      {
+         tpv31_station_writer.WriteStep(cfg.time.t_initial, dof_data);
+      }
+      if (rank == 0)
+      {
+         std::cout << "[stations] TPV31 station writer active ("
+                   << stations.size() << " stations, prefix=tpv31_)\n";
+      }
+   }
+
    // -----------------------------------------------------------------
    // 20. Time loop.
    // -----------------------------------------------------------------
@@ -2468,6 +2499,11 @@ int main(int argc, char *argv[])
                tpv104_station_writer.Flush();
                tpv104_station_writer.Close();
             }
+            if (tpv31_stations_active)
+            {
+               tpv31_station_writer.Flush();
+               tpv31_station_writer.Close();
+            }
 #ifdef MFEM_USE_MPI
             MPI_Finalize();
 #endif
@@ -2506,6 +2542,10 @@ int main(int argc, char *argv[])
       if (tpv104_stations_active)
       {
          tpv104_station_writer.WriteStep(t, dof_data);
+      }
+      if (tpv31_stations_active)
+      {
+         tpv31_station_writer.WriteStep(t, dof_data);
       }
 
       if (cfg.output.checkpoint_every_steps > 0
@@ -2563,6 +2603,11 @@ int main(int argc, char *argv[])
    {
       tpv104_station_writer.Flush();
       tpv104_station_writer.Close();
+   }
+   if (tpv31_stations_active)
+   {
+      tpv31_station_writer.Flush();
+      tpv31_station_writer.Close();
    }
 
    if (rank == 0)

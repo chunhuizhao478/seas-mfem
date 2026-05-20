@@ -191,6 +191,9 @@ TEST_TPV31_CANONICAL_ROTATION_SRC    = tests/unit/test_tpv31_canonical_rotation.
 TEST_TPV31_CANONICAL_ROTATION_OBJ    = $(TEST_TPV31_CANONICAL_ROTATION_SRC:.cpp=.o)
 TEST_TPV31_NUC_COH_SRC               = tests/unit/test_tpv31_nucleation_and_cohesion.cpp
 TEST_TPV31_NUC_COH_OBJ               = $(TEST_TPV31_NUC_COH_SRC:.cpp=.o)
+# TPV31 on-fault station-trace writer (dynamic/tpv31_stations.hpp).
+TEST_TPV31_STATION_WRITER_SRC        = tests/unit/test_tpv31_station_writer.cpp
+TEST_TPV31_STATION_WRITER_OBJ        = $(TEST_TPV31_STATION_WRITER_SRC:.cpp=.o)
 # REVIEW 2026-05-19 (debug_document/general_driver_debug_document/
 # spatial_dyn_heterogeneous_riemann_review_2026-05-19.md) regression test:
 # covers R-001 (heterogeneous Riemann default), R-003 (DepthProfile
@@ -835,6 +838,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_review_2026_05_19_fixes \
                seas_test_tpv31_canonical_rotation \
                seas_test_tpv31_nucleation_and_cohesion \
+               seas_test_tpv31_station_writer \
                seas_test_spatial_setup \
                seas_test_phaseh_lsw_forced_rupture \
                seas_test_phaseh_wave_operator_constant_parity \
@@ -2655,6 +2659,20 @@ $(TEST_TPV31_CANONICAL_ROTATION_OBJ): %.o: $(SRC)%.cpp \
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
 	    $(TOML_FLAGS) -c $< -o $@
 
+$(TEST_TPV31_STATION_WRITER_OBJ): %.o: $(SRC)%.cpp \
+                                       dynamic/tpv31_stations.hpp \
+                                       dynamic/fault_face_flux.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv31_station_writer: $(TEST_TPV31_STATION_WRITER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_STATION_WRITER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 $(TEST_REVIEW_2026_05_19_OBJ): %.o: $(SRC)%.cpp \
                                      spatial/code/spatial_friction.hpp \
                                      dynamic/heterogeneous_material.hpp \
@@ -3556,6 +3574,9 @@ test-spatial-stress-with-patches: seas_test_spatial_stress_with_patches
 
 test-tpv31-nucleation-and-cohesion: seas_test_tpv31_nucleation_and_cohesion
 	./seas_test_tpv31_nucleation_and_cohesion
+
+test-tpv31-station-writer: seas_test_tpv31_station_writer
+	./seas_test_tpv31_station_writer
 
 test-spatial-setup: seas_test_spatial_setup
 	./seas_test_spatial_setup
