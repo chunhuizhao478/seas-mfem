@@ -154,6 +154,16 @@ Plane Surface(7) = {107};
 // ----------------------------------------------------------------------
 Surface Loop(1) = {2, 3, 4, 5, 6, 7};
 Volume(1) = {1};
+
+// The fault reaches the free surface: its top edge (Line 23, the
+// y = 0, z = 0 segment x ∈ [-15,15] km) lies IN the free-surface plane
+// (Surface 2 = z = 0 box top).  Embed that edge in Surface 2 so the
+// free-surface 2D mesh conforms to the fault trace.  Without this the
+// 3D mesher hits a segment-facet intersection along z = 0 and produces
+// "No elements in volume 1".  Mirrors the `Line{101} In Surface{1}`
+// trick in tpv205/mesh/tpv2053d_200m.geo (also a surface-reaching fault).
+Curve{23} In Surface{2};
+
 Surface{1} In Volume{1};
 
 // ----------------------------------------------------------------------
@@ -186,4 +196,9 @@ Physical Volume(1)   = {1};
 // ----------------------------------------------------------------------
 Mesh.MshFileVersion  = 2.2;
 Mesh.Algorithm3D     = 1;     // Delaunay
-Mesh.OptimizeNetgen  = 1;
+// NOTE: do NOT enable Mesh.OptimizeNetgen here.  The standard gmsh
+// optimizer already drives this mesh to "No ill-shaped tets" quality;
+// the extra Netgen pass (OptimizeNetgen=1) aborts with SIGABRT on this
+// surface-reaching-fault geometry ("illegal tets / badmax = 1e+24" in
+// SwapImprove).  The working tpv205/tpv102/tpv104 meshes likewise do
+// not set it.  Mesh.Optimize (standard) stays on by default.
