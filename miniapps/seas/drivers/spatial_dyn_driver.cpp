@@ -1153,7 +1153,7 @@ int main(int argc, char *argv[])
    // and BuildPerDOFFaultTables (which both no-op on empty inputs) see
    // consistent zero-sized state instead of UB.
    const FaultBasis *fbasis_ptr = wave.GetFaultBasis();
-   static const FaultBasis empty_fault_basis_;
+   static const FaultBasis empty_fault_basis_{};
    const FaultBasis &fbasis = fbasis_ptr ? *fbasis_ptr : empty_fault_basis_;
    MFEM_VERIFY(fbasis.NumFaces() >=
                fault_int_faces.Size() + fault_shr_faces.Size(),
