@@ -4352,23 +4352,3 @@ seas_test_friction_solver_stable: $(TEST_FRICTION_SOLVER_STABLE_OBJ) dynamic/fri
 # test and skipped the other 13.  The redeclaration also triggered the
 # "overriding recipe for target `test-tpv104`" warning that users saw
 # in BP5 Phase 6 production builds.
-
-# =============================================================================
-# SAFS multi-fault SEAS smoke driver (Plan §3, additive)
-# =============================================================================
-# This stanza is strictly additive: it does not modify any existing variable
-# or rule. The SAFS driver lives entirely under safs/code/ and is intended
-# for Frontera; locally we only build it.
-SAFS_TEST_DRIVER_SRC = safs/code/seas_safs_test_driver.cpp
-SAFS_TEST_DRIVER_OBJ = $(SAFS_TEST_DRIVER_SRC:.cpp=.o)
-SAFS_TEST_DRIVER_HEADERS = safs/code/safs_test_params.hpp \
-                           safs/code/safs_boundary_config.hpp \
-                           safs/code/safs_fault_init.hpp
-
-$(SAFS_TEST_DRIVER_OBJ): %.o: $(SRC)%.cpp $(SAFS_TEST_DRIVER_HEADERS) $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
-	@mkdir -p $(@D)
-	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
-
-seas_safs_test_driver: $(SAFS_TEST_DRIVER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(SAFS_TEST_DRIVER_OBJ) $(MFEM_LIBS)
-	$(SEAS_POST_LINK_DEDUP_RPATH)
