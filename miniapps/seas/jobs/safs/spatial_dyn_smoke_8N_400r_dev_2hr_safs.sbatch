@@ -98,6 +98,18 @@ make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 SAFS_ROOT=safs/project_7.0_alternative
 CONFIG_TOML="${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml"
 MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
+
+# Fail fast before launching 400 ranks: the .msh is gitignored and does
+# NOT arrive with `git pull`.  It must be scp'd to the cluster (or
+# regenerated via ${SAFS_ROOT}/meshing/code/run_nwcut_meshing.py).
+if [[ ! -f "${MESH}" ]]; then
+    echo "ERROR: SAFS mesh not found:"
+    echo "         $(pwd)/${MESH}"
+    echo "       The .msh is gitignored and is NOT pulled with the repo."
+    echo "       scp it to the path above before submitting this job."
+    exit 1
+fi
+
 OUT="${SCRATCH}/safs_dyn_smoke_${SLURM_JOB_ID}"
 mkdir -p "${OUT}"
 
