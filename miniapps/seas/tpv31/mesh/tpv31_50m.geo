@@ -33,8 +33,14 @@
 //   a 30 km box + 5 km PML.
 //
 // Mesh refinement (per plan §R.5 step 2):
-//   * 50 m near the fault (lc_fault).
-//   * Ramps to 500 m at the absorbing boundary (lc_far).
+//   * 50 m near the fault (lc_fault), held only in a thin band.
+//   * Coarsens QUICKLY away from the fault to lc_far at the absorbing
+//     boundary, using the tpv205/mesh/tpv2053d_200m.geo size-field
+//     recipe (Distance -> quadratic MathEval -> Threshold pin -> Min).
+//     The previous slow linear ramp (50 + 0.09*d) plus a 500 m far
+//     field produced a ~45 M-tet mesh that took >1 h to generate; this
+//     recipe targets a few-million-tet mesh while keeping 50 m on the
+//     fault itself.
 //
 // Boundary attribute conventions (REVIEW R-014; must match
 // tpv31/configs/tpv31.toml [boundary] block):
@@ -51,7 +57,9 @@
 // Mesh-size parameters
 // ----------------------------------------------------------------------
 lc_fault = 50.0;            // 50 m near the fault (spec p. 11)
-lc_far   = 500.0;           // 500 m at the absorbing boundary
+lc_far   = 5000.0;          // coarse far field at the absorbing boundary
+                            // (matches tpv205 lc=5e3; was 500 m -> 10x
+                            // over-refined over the 100x100x50 km box)
 
 // ----------------------------------------------------------------------
 // Domain box  (x, y, z) in metres — canonical SEAS frame.
@@ -167,16 +175,36 @@ Curve{23} In Surface{2};
 Surface{1} In Volume{1};
 
 // ----------------------------------------------------------------------
-// Mesh-size field: refined near the fault rectangle, coarsening
-// outward.
+// Mesh-size field — tpv205-style fast coarsening away from the fault.
+// (Mirrors tpv205/mesh/tpv2053d_200m.geo Field[1,2,6,7]; the linear
+// slope is steepened to 0.3 because tpv205's 0.05 was tuned for a 200 m
+// base and would still yield ~20 M tets on this 50 m base.)
+//
+//   * Field[1] : distance to the fault surface (the 30 km x 15 km plane).
+//   * Field[2] : smooth coarsening  size = 0.3*d + (d/2500)^2 + lc_fault
+//                -> 50 m at the fault, ~95 m at 150 m, ~500 m at 1.5 km.
+//   * Field[6] : Threshold — pin lc_fault within 2*lc_fault of the fault,
+//                then release to lc_far (tpv205 "propagation size" trick).
+//                Uses the IField/LcMin/LcMax/DistMin/DistMax spelling for
+//                Gmsh 4.13 (cluster) compatibility, matching tpv205.
+//   * Field[7] : Min(2,6) = active background field.
 // ----------------------------------------------------------------------
 Field[1] = Distance;
 Field[1].SurfacesList = {1};
 
 Field[2] = MathEval;
-Field[2].F = Sprintf("%g + %g*F1", lc_fault, (lc_far - lc_fault) / 5000.0);
+Field[2].F = Sprintf("0.3*F1 + (F1/2.5e3)^2 + %g", lc_fault);
 
-Background Field = 2;
+Field[6] = Threshold;
+Field[6].IField  = 1;
+Field[6].LcMin   = lc_fault;
+Field[6].LcMax   = lc_far;
+Field[6].DistMin = 2*lc_fault;
+Field[6].DistMax = 2*lc_fault + 0.001;
+
+Field[7] = Min;
+Field[7].FieldsList = {2, 6};
+Background Field = 7;
 
 // Force the surface MeshSize to lc_fault at the fault patch.
 Characteristic Length{ PointsOf{ Surface{1}; } } = lc_fault;

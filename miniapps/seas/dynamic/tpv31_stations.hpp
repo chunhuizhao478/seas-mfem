@@ -5,8 +5,7 @@
 //
 // Mirrors `TPV205StationWriter` (dynamic/tpv205_setup.hpp): one file per
 // station, same 9-column internal layout consumed by
-// `tpv31/scripts/compare_tpv31_traces.py` (which defers to
-// compare_tpv205_traces.py):
+// `tpv31/visualize_results.py` (MFEM vs SCEC EQdyna / SeisSol overlay):
 //
 //   t  h-slip  h-slip-rate  h-shear-stress  v-slip  v-slip-rate
 //      v-shear-stress  n-stress  mu_eff

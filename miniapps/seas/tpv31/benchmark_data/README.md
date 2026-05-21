@@ -1,8 +1,11 @@
 # TPV31 SCEC reference traces
 
 This directory holds the SCEC TPV31 on-fault station traces used as the
-reference for `compare_tpv31_traces.py` (plan §R.5 step 1,
-`PLAN_phase_R_exact_bimaterial_riemann_rev3.md`).
+reference for `tpv31/visualize_results.py` (the MFEM-vs-SCEC overlay
+tool; plan §R.5 step 1, `PLAN_phase_R_exact_bimaterial_riemann_rev3.md`).
+Two community submissions are committed: `scec_eqdyna/` (EQdyna, Benchun
+Duan) and `scec_seisol/` (SeisSol ADER-DG, Thomas Ulrich), 30 on-fault
+stations each.
 
 ## Source
 
@@ -35,9 +38,9 @@ header:
 # t  slip-rate-1  slip-rate-2  slip-1  slip-2  traction-1  traction-2
 ```
 
-The comparison harness (`compare_tpv31_traces.py`) parses the header
-to map columns to fields; if the header is absent, it falls back to
-the positional schema above.
+The overlay tool (`tpv31/visualize_results.py`) parses these 8-column
+SCEC files (stresses in MPa, n-stress compression-negative) and maps
+them onto the MFEM 9-column station layout for plotting.
 
 ## Acquisition gate (R.5.T-1)
 

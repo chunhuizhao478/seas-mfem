@@ -2361,7 +2361,7 @@ int main(int argc, char *argv[])
    // SCEC TPV31 on-fault station traces — active only when
    // `[problem].tag == "tpv31"`.  30 stations (spec Part 5); same
    // 9-column internal layout as the TPV205 writer (consumed by
-   // tpv31/scripts/compare_tpv31_traces.py).
+   // tpv31/visualize_results.py).
    TPV31StationWriter tpv31_station_writer;
    const bool tpv31_stations_active = (cfg.problem.tag == "tpv31");
    if (tpv31_stations_active)

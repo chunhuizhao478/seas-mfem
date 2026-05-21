@@ -1,28 +1,31 @@
 #!/bin/bash
-#SBATCH -J tpv31_spdyn_50m_p2_O3_norm
-#SBATCH -o tpv31_spdyn_50m_p2_O3_norm_%j.out
-#SBATCH -e tpv31_spdyn_50m_p2_O3_norm_%j.err
+#SBATCH -J tpv31_spdyn_50m_p1_O2_norm
+#SBATCH -o tpv31_spdyn_50m_p1_O2_norm_%j.out
+#SBATCH -e tpv31_spdyn_50m_p1_O2_norm_%j.err
 #SBATCH -p normal
-#SBATCH -N 16
-#SBATCH -n 800
+#SBATCH -N 10
+#SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# SCEC TPV31 — 50 m mesh, P=2 + ADER-O3, NORMAL-QUEUE production run,
+# SCEC TPV31 — 50 m mesh, P=1 + ADER-O2, NORMAL-QUEUE production run,
 # heterogeneous Riemann.
 # =======================================================================
 #
-# Same driver/mesh/config as tpv31_spatial_dyn_50m_p1_O2_dev.sbatch but
-# at polynomial order 2 (P2) with ADER time order 3 (Pelties O3), on the
-# normal queue with a 48 h budget.
+# Same driver/mesh/config as tpv31_spatial_dyn_50m_p1_O2_dev.sbatch but on
+# the normal queue with a 48 h budget (10 N x 500 r) instead of the 2 h
+# development-queue smoke envelope.  Polynomial order stays P1; ADER time
+# order stays O2 (Pelties O2).  The companion P2/O3 production run is
+# tpv31_spatial_dyn_50m_p2_O3_normal.sbatch.
 #
-# How P2/O3 is selected
+# How P1/O2 is selected
 # ---------------------
 # No --order CLI flag exists; the mesh polynomial order is set ONLY via
-# the TOML [mesh].order field.  We build a sed-override config that flips
-# `order = 1` -> `order = 2` (override file under RESULT_DIR for
-# provenance).  ADER order IS a CLI flag → `--ader-order 3` (validated in
-# {2,3,4}).
+# the TOML [mesh].order field, which is already `order = 1` in the
+# canonical tpv31.toml — so this run consumes the config VERBATIM (no
+# sed override, unlike the P2/O3 sbatch).  ADER order IS a CLI flag →
+# `--ader-order 2` (validated in {2,3,4}; matches tpv31.toml
+# [numerics].ader_order, stated explicitly for provenance).
 #
 # Why TPV31 needs the heterogeneous Riemann path
 # ----------------------------------------------
@@ -42,21 +45,28 @@
 #
 # Rank count / wall time
 # ----------------------
-# 16 N x 800 r.  The BimaterialFlux precomputation footprint is per-FACE
-# (order-independent), so memory headroom is unchanged from P1.  P2 raises
-# per-step cost ~3-5x and tightens the CFL, so the 48 h budget reaches
-# noticeably less simulated time than the P1/O2 run.  Resume via
-# `--restart <prefix>` for follow-on blocks (checkpoint every 10000 steps
-# per tpv31.toml [output].checkpoint_every_steps), or scale nodes/walltime
-# if the full 15 s tfinal is required in one shot.
+# 10 N x 500 r.  The BimaterialFlux precomputation footprint is per-FACE
+# (order-independent), so memory headroom matches the dev run.  At P1 the
+# per-step cost is the cheapest of the TPV31 jobs, so the 48 h budget
+# reaches the most simulated time per dollar of the three; even so, the
+# 50 m fault in a 100 km × 100 km × 50 km box with cfl_safety=dg + ADER-O2
+# gives a small auto dt (~1e-3 s) and tfinal = 15 s needs O(10^4) macro-
+# steps.  If 48 h does not reach the full 15 s, resume via
+# `--restart <prefix>` (checkpoint every 10000 steps per tpv31.toml
+# [output].checkpoint_every_steps).
 
 export LC_ALL=C
 export LANG=C
 
+# Fail fast on module-load / build / pipe failures.
 set -euo pipefail
 
 SBATCH_LOG_DIR="${SLURM_SUBMIT_DIR:-$PWD}"
 
+# Project checkout root.  Auto-detect by walking up from $SLURM_SUBMIT_DIR
+# (or $PWD if not running under Slurm) until we find build_frontera.sh.
+# Override at submit time when running from a different clone:
+#   SEAS_MFEM_ROOT=$(pwd) sbatch ...
 if [ -z "${SEAS_MFEM_ROOT:-}" ]; then
     _probe="${SLURM_SUBMIT_DIR:-$PWD}"
     while [ "${_probe}" != "/" ] && [ -n "${_probe}" ]; do
@@ -78,13 +88,18 @@ module load mumps/5.3
 module load parmetis
 module load petsc/3.15
 module load fftw3/3.3.8
-# NOTE: do NOT load phdf5 on Frontera.  See the dev sbatch for rationale.
+# NOTE: do NOT load phdf5 on Frontera.  The phdf5/1.14.x module requires
+# intel/23.1.0 + impi/21.9.0 (incompatible with the intel/19 stack);
+# build_frontera.sh builds HDF5 1.14.x from source into
+# ${SEAS_MFEM_ROOT}/extern/hdf5/install instead; we link/run against that.
 
 HDF5_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/hdf5/install"
 H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
 
 export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${HDF5_BUILT_DIR}/lib:${LD_LIBRARY_PATH:-}"
 
+# REQUIRED for tpv31.toml's `paraview_fault_zfp_tol = 1e-12`: the HDF5
+# ZFP filter plugin must be loadable at run time.
 if [ -d "${H5Z_ZFP_BUILT_DIR}/plugin" ]; then
    export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin"
 else
@@ -97,12 +112,16 @@ JOBS=8
 
 grep -q '^MFEM_USE_PETSC *= YES'    config/config.mk || { echo "ERROR: no PETSc";   exit 1; }
 grep -q '^MFEM_USE_MUMPS *= YES'    config/config.mk || { echo "ERROR: no MUMPS";   exit 1; }
-grep -q '^MFEM_USE_HDF5 *= YES'     config/config.mk || { echo "ERROR: no HDF5";    exit 1; }
+grep -q '^MFEM_USE_HDF5 *= YES'     config/config.mk || { echo "ERROR: no HDF5 (paraview_fault=hdf5 needs it)"; exit 1; }
+# tpv31.toml's `paraview_*_zfp_tol` fields make the driver abort at parse
+# time without H5Z-ZFP — fail before ibrun so we don't waste the slot.
 grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZFP (tpv31.toml paraview_*_zfp_tol requires it)"; exit 1; }
 
 cd miniapps/seas
 
 # Regenerate the .msh from .geo on first run or when FORCE_MESHGEN=1.
+# The 50 m TPV31 mesh is large; the .geo source is tracked, gmsh is
+# installed by build_frontera.sh.
 MESH_SRC="tpv31/mesh/tpv31_50m.geo"
 MESH_OUT="tpv31/mesh/tpv31_50m.msh"
 GMSH_BIN="${SEAS_MFEM_ROOT}/extern/gmsh/bin/gmsh"
@@ -117,6 +136,7 @@ if [ ! -s "${MESH_OUT}" ] || [ "${FORCE_MESHGEN:-0}" = "1" ] || [ "${FORCE_MESHG
         exit 1
     fi
     echo "=== Regenerating ${MESH_OUT} from ${MESH_SRC} (FORCE_MESHGEN=${FORCE_MESHGEN:-0}) ==="
+    # MFEM requires Gmsh v2.2 format (CLAUDE.md "Known limitation").
     "${GMSH_BIN}" -format msh22 -3 "${MESH_SRC}" -o "${MESH_OUT}" \
         || { echo "MESH GENERATION FAILED"; exit 1; }
 fi
@@ -126,14 +146,8 @@ if [ ! -s "${MESH_OUT}" ]; then
    exit 1
 fi
 
-# Build a P2-override config from the canonical tpv31.toml by sed-
-# replacing `order = 1` -> `order = 2` (mesh polynomial order; there is
-# no --order CLI flag).  Override file lives under RESULT_DIR.
-RESULT_DIR="tpv31/results_spatial_dyn_50m_p2_O3_normal_job${SLURM_JOB_ID}"
+RESULT_DIR="tpv31/results_spatial_dyn_50m_p1_O2_normal_job${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}"
-CONFIG_OVERRIDE="${RESULT_DIR}/tpv31_50m_p2.toml"
-sed 's|^order = 1|order = 2|' tpv31/configs/tpv31.toml \
-   > "${CONFIG_OVERRIDE}"
 
 rm -f seas_spatial_dyn_driver drivers/spatial_dyn_driver.o \
       dynamic/tpv205_substep_iterator.o dynamic/tpv102_substep_iterator.o \
@@ -147,31 +161,37 @@ echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Driver:        seas_spatial_dyn_driver (TOML-driven)"
-echo "Config:        ${CONFIG_OVERRIDE} (order=2-overridden tpv31.toml)"
+echo "Config:        tpv31/configs/tpv31.toml"
 echo "Mesh:          tpv31/mesh/tpv31_50m.msh"
-echo "Polynomial:    order 2 (TOML mesh.order override) + ader-order 3 (Pelties O3)"
+echo "Polynomial:    --order 1 (TOML mesh.order) + --ader-order 2 (Pelties O2)"
 echo "Interior flux: bimaterial (heterogeneous Riemann — REQUIRED for TPV31)"
 echo "Friction law:  slip_weakening (LSW + depth-linear cohesion)"
 echo "Iterator:      one-shot (O=1 quadrature)"
-echo "Queue:         normal (16N x 800r, 48h)"
+echo "Queue:         normal (10N x 500r, 48h)"
 echo "tfinal:        15.0 s (48 h budget may reach less; resume via --restart)"
 echo "Checkpoint:    every 10000 steps (TOML default; resume via --restart)"
 echo "Stations:      30 SCEC on-fault traces (prefix tpv31_; spec Part 5)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"
 echo "========================================"
 
+# CLI overrides: output_dir (avoid clobbering tpv31/out) + explicit
+# --ader-order 2 (matches tpv31.toml [numerics].ader_order; stated for
+# provenance/symmetry with the p2/O3 run).  All physics from the TOML;
+# P1 needs no config override (order = 1 is the canonical TOML default).
 ibrun ./seas_spatial_dyn_driver \
-      --config "${CONFIG_OVERRIDE}" \
+      --config tpv31/configs/tpv31.toml \
       --output-dir "${RESULT_DIR}" \
-      --ader-order 3 \
+      --ader-order 2 \
       --verify-dispatch
 
 # -----------------------------------------------------------------------
-# Post-run summary — same template as the dev sbatch.  Hypocenter station
-# = faultst000dp075 (0 km strike, 7.5 km down-dip).  Columns per
-# dynamic/tpv31_stations.hpp::WriteStep:
-#   1:t 2:h-slip 3:h-slip-rate 4:h-shear(Pa) 5:v-slip 6:v-slip-rate
-#   7:v-shear 8:n-stress(Pa,compression+) 9:mu_eff
+# Post-run summary.  TPV31 writes SCEC on-fault traces as
+# tpv31_station_<name>.dat (TPV31StationWriter, prefix tpv31).  The
+# hypocenter station is faultst000dp075 (0 km strike, 7.5 km down-dip).
+# Column layout (dynamic/tpv31_stations.hpp::WriteStep):
+#   1:t  2:h-slip(slip2)  3:h-slip-rate(V2)  4:h-shear(tau2_corr,Pa)
+#   5:v-slip(slip1)  6:v-slip-rate(V1)  7:v-shear(tau1_corr)
+#   8:n-stress(sigma_n_corr,Pa,compression+)  9:mu_eff
 # -----------------------------------------------------------------------
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
 HYPO_FILE="${RESULT_DIR}/tpv31_station_faultst000dp075.dat"
@@ -188,6 +208,8 @@ if [ -s "${HYPO_FILE}" ]; then
       v=$3; if (v<0) v=-v;
       if (v>m) { m=v; tm=$1 }
    } END { printf "%g %g\n", m, tm }' "${HYPO_FILE}")
+   # Normal-stress perturbation relative to its own initial value (the
+   # TPV31 background σ_n is depth-dependent, not a clean constant).
    SIGMA_N_PERTURB_HYPO=$(awk '!/^#/ && NF>=8 && $1+0==$1 {
       if (n==0) { base=$8 } n++;
       d=$8 - base; if (d<0) d=-d;
@@ -198,26 +220,29 @@ if [ -s "${HYPO_FILE}" ]; then
    N_ROWS=$(awk '!/^#/ && NF>=1 && $1+0==$1' "${HYPO_FILE}" | wc -l | tr -d ' ')
 fi
 
-DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv31_spdyn_50m_p2_O3_norm_${SLURM_JOB_ID}.out"
+DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv31_spdyn_50m_p1_O2_norm_${SLURM_JOB_ID}.out"
 
+# Gate 1 — heterogeneous Riemann precomputation banner.
 BIMAT_VERDICT="UNKNOWN"
 if grep -q '\[wave_operator\] BimaterialFlux precomputation' "${DISPATCH_LOG}" 2>/dev/null; then
    BIMAT_VERDICT="ENGAGED — heterogeneous Riemann path active (REQUIRED for TPV31)"
 elif grep -q '\[wave\] interior_flux=scalar' "${DISPATCH_LOG}" 2>/dev/null; then
-   BIMAT_VERDICT="REGRESSION — scalar ctor selected; TPV31 needs bimaterial"
+   BIMAT_VERDICT="REGRESSION — scalar ctor selected; TPV31 needs bimaterial (depth_profile_1d material)"
 else
    BIMAT_VERDICT="UNKNOWN — no interior-flux banner in log"
 fi
 
+# Gate 2 — ParaView fault output present.
 PARAVIEW_VERDICT="UNKNOWN"
 if [ -f "${RESULT_DIR}/fault.vtkhdf" ] || ls "${RESULT_DIR}"/*.vtkhdf 1>/dev/null 2>&1 || ls "${RESULT_DIR}"/*.pvd 1>/dev/null 2>&1; then
    PARAVIEW_VERDICT="ENGAGED — fault output written"
 elif grep -q 'ParaView output: OFF' "${DISPATCH_LOG}" 2>/dev/null; then
-   PARAVIEW_VERDICT="REGRESSION — driver banner reports 'OFF'"
+   PARAVIEW_VERDICT="REGRESSION — driver banner reports 'OFF'; check tpv31.toml [output].paraview_enabled"
 else
    PARAVIEW_VERDICT="UNKNOWN — no fault file and no 'OFF' banner"
 fi
 
+# Gate 3 — SCEC station traces written.
 STATION_VERDICT="UNKNOWN"
 if grep -q '\[stations\] TPV31 station writer active' "${DISPATCH_LOG}" 2>/dev/null; then
    STATION_VERDICT="ENGAGED — 30-station SCEC trace writer active"
@@ -226,15 +251,15 @@ else
 fi
 
 {
-   echo "TPV31 spatial_dyn_driver (heterogeneous Riemann, 50 m mesh, P=2 + ADER-O3, normal queue)"
-   echo "Driver:                  seas_spatial_dyn_driver"
-   echo "Config:                  ${CONFIG_OVERRIDE}"
+   echo "TPV31 spatial_dyn_driver (heterogeneous Riemann, 50 m mesh, P=1 + ADER-O2, normal queue)"
+   echo "Driver:                  seas_spatial_dyn_driver (TOML-driven)"
+   echo "Config:                  tpv31/configs/tpv31.toml"
    echo "Mesh:                    tpv31_50m.msh"
-   echo "Polynomial order:        order 2 + ader-order 3"
+   echo "Polynomial order:        --order 1 (TOML mesh.order) + --ader-order 2"
    echo "Interior flux:           bimaterial (heterogeneous Riemann; REQUIRED)"
-   echo "Iterator:                one-shot"
+   echo "Iterator:                one-shot (TOML default)"
    echo "Friction law:            slip_weakening (LSW + depth-linear cohesion)"
-   echo "tfinal target:           15.0 s"
+   echo "tfinal target:           15.0 s (48 h budget may reach less; resume via --restart)"
    echo "tfinal achieved (hypo):  ${T_END} s"
    echo "hypo station rows:       ${N_ROWS}  (faultst000dp075)"
    echo ""
