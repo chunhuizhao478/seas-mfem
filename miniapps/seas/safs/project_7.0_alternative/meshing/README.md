@@ -3,21 +3,47 @@
 Build the SAFS bulk + embedded-fault mesh from the CFM ALT6 fault
 representation.
 
+## ✅ Canonical mesh-generation path (LOCKED 2026-05-20)
+
+The active mesher is **`code/run_z0cut_meshing.py`** — it cuts the fault
+**exactly at z = 0** (surface-rupturing; z = 0 is the domain top), embedding
+the fault's z = 0 trace into the box top face as a *geometric* curve and
+welding the seam (`removeDuplicateNodes`).  This removes the ~100 m headroom
+wedge of the old buried-fault path and its near-surface slivers (the
+2026-05-20 north-tip blow-up seed).  Input is the **un-clamped**
+`results/stl_nwcut/…_clean_clip_nwcut.stl`; output is `…_z0embed.msh`.
+
+```bash
+PY=/Users/chunhuizhao/miniforge/envs/pythonenv/bin/python   # gmsh 4.15 + meshio + numpy
+cd code
+$PY run_z0cut_meshing.py \
+    --stl ../results/stl_nwcut/SAFS-…-ALT6_1000m_clean_clip_nwcut.stl \
+    --out ../results/msh/safs_fault_box_nwcut_1000m_lcfar3000_z0embed.msh
+$PY check_mesh_quality.py ../results/msh/…_z0embed.msh           # Q1/Q2 gates
+python3 locate_fault_slivers.py ../results/msh/…_z0embed.msh \
+    --target 448338 3798440 -249.7                               # fault-tri quality
+```
+
+The **superseded** buried-fault/zclamp path (`run_nwcut_meshing.py`, the
+`*.geo` templates) and the **upstream STL-prep pipeline** (`ts_to_stl.py` →
+`clean_freesurface_mesh.py` → `nw_cut_strip.py`) now live in **`code/archives/`**.
+Un-archive them only if you need to rebuild the input STL from the raw Fuis
+surface.  Fix history: `docs/DEBUG_z0cut_option_a_failure.md`.  The
+buried-fault sections below are retained as historical context.
+
 ```
 raw/                CFM .ts fault surfaces + their direct .stl conversions
                     (input to clean_freesurface_mesh.py)
 
-code/               ts_to_stl.py            .ts -> _unclipped.stl
-                    clean_freesurface_mesh.py
-                                            top-trace cleanup, isotropic remesh
-                    nw_cut_strip.py         hard-cut NW tail against the
-                                            project_7.0_preferred anchor
-                    run_nwcut_meshing.py    bbox + Gmsh template + size-field driver
-                    safs_fault_box*.geo     Gmsh templates (active: *_nwcut.geo)
-                    msh_to_vtu.py           .msh -> {bulk,fault}.vtu
-                    check_mesh_quality.py   Q1/Q2 verifier (PLAN_mesh_quality.md Phase 4)
-                    test_mesh_quality.py    pytest gates for Q1/Q2 + embedding + zmax
-                    test_nw_cut_strip.py    pytest suite (NW-cut strip)
+code/               run_z0cut_meshing.py    CANONICAL mesher: cut fault at z=0,
+                                            geometric trace embed + weld (gmsh API)
+                    check_mesh_quality.py   Q1/Q2 bulk verifier
+                    locate_fault_slivers.py fault-triangle sliver locator
+                    msh_to_vtu.py           .msh -> {bulk,fault}.vtu (+ quality field)
+                    archives/               superseded path + STL-prep (run_nwcut_meshing.py,
+                                            safs_fault_box*.geo, ts_to_stl.py,
+                                            clean_freesurface_mesh.py, nw_cut_strip.py,
+                                            test_*.py, raw 2000m STL)
 
 docs/               PLAN_mesh_quality.md    accepted plan + decision trail (Phases 1-5)
                     EXPLORE_*.md, PLAN_corefine_pipeline.md, PLAN_retriangulate.md,
