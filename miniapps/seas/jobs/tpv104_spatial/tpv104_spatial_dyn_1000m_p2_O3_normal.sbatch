@@ -1,62 +1,63 @@
 #!/bin/bash
-#SBATCH -J tpv31_spdyn_50m_p1_O2_dev
-#SBATCH -o tpv31_spdyn_50m_p1_O2_dev_%j.out
-#SBATCH -e tpv31_spdyn_50m_p1_O2_dev_%j.err
-#SBATCH -p development
-#SBATCH -N 8
-#SBATCH -n 400
-#SBATCH -t 02:00:00
+#SBATCH -J tpv104_spdyn_1000m_p2_O3_norm
+#SBATCH -o tpv104_spdyn_1000m_p2_O3_norm_%j.out
+#SBATCH -e tpv104_spdyn_1000m_p2_O3_norm_%j.err
+#SBATCH -p normal
+#SBATCH -N 10
+#SBATCH -n 500
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# SCEC TPV31 — 50 m mesh, P=1 + ADER-O2, DEV-QUEUE smoke run through the
-# heterogeneous Riemann solver via seas_spatial_dyn_driver.
+# TPV104 (SCEC FL=103 slip-law strong-rate-weakening) 1000 m mesh,
+# P=2 + ADER-O3, NORMAL-QUEUE production run, heterogeneous Riemann.
 # =======================================================================
 #
-# Branch: feature/heterogeneous_riemann_solver
-# Driver: drivers/spatial_dyn_driver.cpp (TOML-driven; NOT a native
-#         byte-parity driver — TPV31 has no native driver).
-# Config: tpv31/configs/tpv31.toml (rotated into the canonical SEAS
-#         frame; CLI overrides only output_dir / ader-order).
+# Runs TPV104 through the TOML-driven seas_spatial_dyn_driver (NOT the
+# native drivers/tpv104_driver.cpp) at polynomial order 2 (P2) with ADER
+# time order 3 (Pelties O3).  This is the heterogeneous-Riemann path
+# verification for TPV104 (R-001): on a homogeneous Mode::Constant
+# material the bimaterial interior flux is byte-identical to the scalar
+# ctor, so a clean match against the native TPV104 reference is expected.
 #
-# Why TPV31 needs the heterogeneous Riemann path
-# ----------------------------------------------
-# TPV31 uses a discontinuous 1D velocity structure (depth_profile_1d
-# material → MaterialField::Mode::Coefficient).  That is mutually
-# exclusive with the scalar WaveOperator ctor, so the bimaterial
-# interior-flux ctor is the ONLY viable path.  tpv31.toml omits
-# [numerics].interior_flux → defaults to "bimaterial".  The startup
-# banner must print `[wave_operator] BimaterialFlux precomputation: ...`.
+# How P2/O3 is selected
+# ---------------------
+# No --order CLI flag exists; the mesh polynomial order is set ONLY via
+# the TOML [mesh].order field.  We build a sed-override config that flips
+# `order = 1` -> `order = 2` (override file under RESULT_DIR for
+# provenance).  ADER order IS a CLI flag → `--ader-order 3` (validated in
+# {2,3,4}).  TPV104 has a single 1000 m mesh, so — unlike the
+# tpv205_spatial jobs — the sed does NOT rewrite a mesh path.
 #
-# Spec encoding (verbatim per tpv31/configs/tpv31.toml; spec
-# tpv31/benchmark_document/TPV31_32_Description_v03.pdf, rotated
-# (x_s,y_s,z_s) → (x_s,z_s,-y_s) into the canonical SEAS frame):
-#   * Material:   discontinuous 1D bi-material (depth_profile_1d, 5
-#                 layers): constant 0–2400 m, linear 2400–5000 m,
-#                 constant 5000–10000 m, constant >10000 m.
-#   * Stress:     depth-proportional Cauchy tensor σ_ij = (σ_ij/µ)·µ(z),
-#                 µ_ref = 32.03812032 GPa; canonical components
-#                 σ_xx=60, σ_yy=60, σ_zz=0, σ_xy=30 MPa-per-µ
-#                 (compression POSITIVE; spec compression-negative
-#                 normals flipped).  Background hypocenter shear
-#                 τ = 30·µ/µ0, normal σ_n = 60·µ/µ0.
-#   * Nucleation: INSTANTANEOUS circular cosine-tapered overstress at
-#                 the hypocenter (0,0,-7500): full Δτ=4.95 MPa·µ/µ0 for
-#                 r≤1400 m, cosine taper to 0 at r=2000 m.  Total hypo
-#                 shear → 34.95·µ/µ0 > yield 34.80·µ/µ0 ⇒ nucleates.
-#   * Friction:   linear slip-weakening µ_s=0.580, µ_d=0.450, d_c=0.18 m;
-#                 depth-linear cohesion C₀=0.000425 MPa/m·max(0,2400-z),
-#                 1.02 MPa at the surface, 0 below 2.4 km.
-#   * Fault:      vertical y=0 plane, 30 km along strike × 15 km deep,
-#                 right-lateral; reaches the free surface (z=0).
+# Why the heterogeneous Riemann path
+# ----------------------------------
+# tpv104.toml omits [numerics].interior_flux → defaults to "bimaterial",
+# so the heterogeneous (MaterialField, BoundaryConfig) ctor is used and
+# the banner must print `[wave_operator] BimaterialFlux precomputation: ...`.
+# The material is homogeneous (rho=2670, cs=3464, cp=6000), so the cached
+# per-face GodunovFlux is built from the exact (λ,μ,ρ) and the result is
+# byte-identical to the scalar path (CLAUDE.md "Phase H Stage 2").
 #
-# Wall-time budget
-# ----------------
-# Dev queue 2 h envelope.  The 50 m fault patch in a 100 km × 100 km ×
-# 50 km box is a large mesh; with P=1 + cfl_safety=dg + ADER-O2 the auto
-# dt is small (~1e-3 s) and tfinal = 15 s needs O(10^4) macro-steps.
-# Expect 2 h to reach only the early rupture front (the nucleation patch
-# unzipping); the full 15 s run is the companion `_p2_O3_normal.sbatch`
-# (and even that resumes via --restart for the full duration).
+# Spec encoding (verbatim per tpv104/configs/tpv104.toml):
+#   * Material:   homogeneous (μ=32.038119520e9, λ=32.043760960e9, ρ=2670).
+#   * Friction:   slip-law strong-rate-weakening (Noda & Lapusta 2013,
+#                 FL=103).  f0=0.6, V0=1e-6, b=0.014, Dc=L=0.4 m, f_w=0.2;
+#                 `a` AND `V_w` via C∞ tanh boxcar (a_in=0.01/a_out=0.02,
+#                 V_w_in=0.1/V_w_out=1.0 m/s) over |x|≤15 km ∧
+#                 |z+7.5 km|≤7.5 km with 3 km transition.
+#   * Loading:    σ_n=120 MPa (compression POSITIVE), τ_ini=40 MPa
+#                 right-lateral along-strike, V_init=1e-16 m/s.
+#   * Nucleation: SCEC compact bell F(r)=exp(r²/(r²−R²)) (R=3 km) ×
+#                 smoothStep G(t) (T=1 s); peak Δτ₀=45 MPa, strike-only.
+#   * Fault:      vertical y=0 plane; hypocenter (0,0,−7500).
+#
+# Rank count / wall time
+# ----------------------
+# Fixed at 10 N x 500 r.  The BimaterialFlux precomputation footprint is
+# per-FACE (order-independent), so memory headroom is unchanged from P1.
+# At P2 the per-step cost is ~3-5x P1 and the CFL tightens, so the 48 h
+# budget reaches less simulated time than a P1/O2 run; chain 48 h blocks
+# via `--restart <prefix>` (checkpoint every 10000 steps per tpv104.toml
+# [output].checkpoint_every_steps) to advance further.
 
 export LC_ALL=C
 export LANG=C
@@ -101,7 +102,7 @@ H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
 
 export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${HDF5_BUILT_DIR}/lib:${LD_LIBRARY_PATH:-}"
 
-# REQUIRED for tpv31.toml's `paraview_fault_zfp_tol = 1e-12`: the HDF5
+# REQUIRED for tpv104.toml's `paraview_fault_zfp_tol = 1e-12`: the HDF5
 # ZFP filter plugin must be loadable at run time.
 if [ -d "${H5Z_ZFP_BUILT_DIR}/plugin" ]; then
    export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin"
@@ -116,17 +117,15 @@ JOBS=8
 grep -q '^MFEM_USE_PETSC *= YES'    config/config.mk || { echo "ERROR: no PETSc";   exit 1; }
 grep -q '^MFEM_USE_MUMPS *= YES'    config/config.mk || { echo "ERROR: no MUMPS";   exit 1; }
 grep -q '^MFEM_USE_HDF5 *= YES'     config/config.mk || { echo "ERROR: no HDF5 (paraview_fault=hdf5 needs it)"; exit 1; }
-# tpv31.toml's `paraview_*_zfp_tol` fields make the driver abort at parse
+# tpv104.toml's `paraview_*_zfp_tol` fields make the driver abort at parse
 # time without H5Z-ZFP — fail before ibrun so we don't waste the slot.
-grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZFP (tpv31.toml paraview_*_zfp_tol requires it)"; exit 1; }
+grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZFP (tpv104.toml paraview_*_zfp_tol requires it)"; exit 1; }
 
 cd miniapps/seas
 
-# Regenerate the .msh from .geo on first run or when FORCE_MESHGEN=1.
-# The 50 m TPV31 mesh is large; the .geo source is tracked, gmsh is
-# installed by build_frontera.sh.
-MESH_SRC="tpv31/mesh/tpv31_50m.geo"
-MESH_OUT="tpv31/mesh/tpv31_50m.msh"
+# Regenerate the 1000 m .msh from .geo on first run or when FORCE_MESHGEN=1.
+MESH_SRC="tpv104/mesh/tpv104_1000m.geo"
+MESH_OUT="tpv104/mesh/tpv104_1000m.msh"
 GMSH_BIN="${SEAS_MFEM_ROOT}/extern/gmsh/bin/gmsh"
 if [ ! -s "${MESH_OUT}" ] || [ "${FORCE_MESHGEN:-0}" = "1" ] || [ "${FORCE_MESHGEN:-}" = "YES" ]; then
     if [ ! -x "${GMSH_BIN}" ]; then
@@ -149,8 +148,14 @@ if [ ! -s "${MESH_OUT}" ]; then
    exit 1
 fi
 
-RESULT_DIR="tpv31/results_spatial_dyn_50m_p1_O2_dev_job${SLURM_JOB_ID}"
+# Build a P2-override config from the canonical tpv104.toml by sed-
+# replacing `order = 1` -> `order = 2` (mesh polynomial order; there is
+# no --order CLI flag).  Override file lives under RESULT_DIR.
+RESULT_DIR="tpv104/results_spatial_dyn_1000m_p2_O3_normal_job${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}"
+CONFIG_OVERRIDE="${RESULT_DIR}/tpv104_1000m_p2.toml"
+sed 's|^order = 1|order = 2|' tpv104/configs/tpv104.toml \
+   > "${CONFIG_OVERRIDE}"
 
 # The seas_spatial_dyn_driver binary is built ONCE by the separate
 # one-shot build job (jobs/build_spatial_dyn_driver_dev.sbatch).  Submit
@@ -170,38 +175,32 @@ echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Driver:        seas_spatial_dyn_driver (TOML-driven)"
-echo "Config:        tpv31/configs/tpv31.toml"
-echo "Mesh:          tpv31/mesh/tpv31_50m.msh"
-echo "Polynomial:    --order 1 (TOML mesh.order) + --ader-order 2 (Pelties O2)"
-echo "Interior flux: bimaterial (heterogeneous Riemann — REQUIRED for TPV31)"
-echo "Friction law:  slip_weakening (LSW + depth-linear cohesion)"
+echo "Config:        ${CONFIG_OVERRIDE} (order=2-overridden tpv104.toml)"
+echo "Mesh:          tpv104/mesh/tpv104_1000m.msh"
+echo "Polynomial:    order 2 (TOML mesh.order override) + ader-order 3 (Pelties O3)"
+echo "Interior flux: bimaterial (heterogeneous Riemann; byte-identical on homogeneous material)"
+echo "Friction law:  rate_state (slip-law strong-rate-weakening, FL=103)"
 echo "Iterator:      one-shot (O=1 quadrature)"
-echo "Queue:         development (8N x 400r, 2h)"
-echo "tfinal:        15.0 s (dev-queue 2 h SLURM-kill expected long before this)"
-echo "Stations:      30 SCEC on-fault traces (prefix tpv31_; spec Part 5)"
+echo "Queue:         normal (10N x 500r, 48h)"
+echo "tfinal:        12.0 s (48 h budget may reach less; resume via --restart)"
+echo "Checkpoint:    every 10000 steps (TOML default; resume via --restart)"
+echo "Stations:      9 SCEC on-fault traces (prefix tpv104_)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"
 echo "========================================"
 
-# CLI overrides: output_dir (avoid clobbering tpv31/out) + explicit
-# --ader-order 2 (matches tpv31.toml [numerics].ader_order; stated for
-# provenance/symmetry with the p2/O3 run).  All physics from the TOML.
 ibrun ./seas_spatial_dyn_driver \
-      --config tpv31/configs/tpv31.toml \
+      --config "${CONFIG_OVERRIDE}" \
       --output-dir "${RESULT_DIR}" \
-      --ader-order 2 \
+      --ader-order 3 \
       --verify-dispatch
 
 # -----------------------------------------------------------------------
-# Post-run summary.  TPV31 writes SCEC on-fault traces as
-# tpv31_station_<name>.dat (TPV31StationWriter, prefix tpv31).  The
-# hypocenter station is faultst000dp075 (0 km strike, 7.5 km down-dip).
-# Column layout (dynamic/tpv31_stations.hpp::WriteStep):
-#   1:t  2:h-slip(slip2)  3:h-slip-rate(V2)  4:h-shear(tau2_corr,Pa)
-#   5:v-slip(slip1)  6:v-slip-rate(V1)  7:v-shear(tau1_corr)
-#   8:n-stress(sigma_n_corr,Pa,compression+)  9:mu_eff
+# Post-run summary.  TPV104 writes SCEC on-fault traces as
+# tpv104_station_<name>.dat (TPV104StationWriter, prefix tpv104).  The
+# hypocenter station is x2_0_x3_7.5 (0 km strike, 7.5 km down-dip).
 # -----------------------------------------------------------------------
 RESULT_FILE="${RESULT_DIR}/RESULT.txt"
-HYPO_FILE="${RESULT_DIR}/tpv31_station_faultst000dp075.dat"
+HYPO_FILE="${RESULT_DIR}/tpv104_station_x2_0_x3_7.5.dat"
 
 PEAK_V_HYPO="N/A"
 PEAK_T_HYPO="N/A"
@@ -215,11 +214,9 @@ if [ -s "${HYPO_FILE}" ]; then
       v=$3; if (v<0) v=-v;
       if (v>m) { m=v; tm=$1 }
    } END { printf "%g %g\n", m, tm }' "${HYPO_FILE}")
-   # Normal-stress perturbation relative to its own initial value (the
-   # TPV31 background σ_n is depth-dependent, not a clean constant).
+   # σ_n perturbation relative to the 120 MPa background.
    SIGMA_N_PERTURB_HYPO=$(awk '!/^#/ && NF>=8 && $1+0==$1 {
-      if (n==0) { base=$8 } n++;
-      d=$8 - base; if (d<0) d=-d;
+      d=$8 - 120e6; if (d<0) d=-d;
       if (d>m) m=d
    } END { printf "%.4e", m+0 }' "${HYPO_FILE}")
    SLIP_STRIKE_END=$(awk '!/^#/ && NF>=2 && $1+0==$1 {a=$2} END{printf "%.4e", a+0}' "${HYPO_FILE}")
@@ -227,14 +224,14 @@ if [ -s "${HYPO_FILE}" ]; then
    N_ROWS=$(awk '!/^#/ && NF>=1 && $1+0==$1' "${HYPO_FILE}" | wc -l | tr -d ' ')
 fi
 
-DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv31_spdyn_50m_p1_O2_dev_${SLURM_JOB_ID}.out"
+DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv104_spdyn_1000m_p2_O3_norm_${SLURM_JOB_ID}.out"
 
 # Gate 1 — heterogeneous Riemann precomputation banner.
 BIMAT_VERDICT="UNKNOWN"
 if grep -q '\[wave_operator\] BimaterialFlux precomputation' "${DISPATCH_LOG}" 2>/dev/null; then
-   BIMAT_VERDICT="ENGAGED — heterogeneous Riemann path active (REQUIRED for TPV31)"
+   BIMAT_VERDICT="ENGAGED — heterogeneous Riemann path active (R-001)"
 elif grep -q '\[wave\] interior_flux=scalar' "${DISPATCH_LOG}" 2>/dev/null; then
-   BIMAT_VERDICT="REGRESSION — scalar ctor selected; TPV31 needs bimaterial (depth_profile_1d material)"
+   BIMAT_VERDICT="REGRESSION — scalar ctor selected"
 else
    BIMAT_VERDICT="UNKNOWN — no interior-flux banner in log"
 fi
@@ -244,34 +241,34 @@ PARAVIEW_VERDICT="UNKNOWN"
 if [ -f "${RESULT_DIR}/fault.vtkhdf" ] || ls "${RESULT_DIR}"/*.vtkhdf 1>/dev/null 2>&1 || ls "${RESULT_DIR}"/*.pvd 1>/dev/null 2>&1; then
    PARAVIEW_VERDICT="ENGAGED — fault output written"
 elif grep -q 'ParaView output: OFF' "${DISPATCH_LOG}" 2>/dev/null; then
-   PARAVIEW_VERDICT="REGRESSION — driver banner reports 'OFF'; check tpv31.toml [output].paraview_enabled"
+   PARAVIEW_VERDICT="REGRESSION — driver banner reports 'OFF'; check tpv104.toml [output].paraview_enabled"
 else
    PARAVIEW_VERDICT="UNKNOWN — no fault file and no 'OFF' banner"
 fi
 
 # Gate 3 — SCEC station traces written.
 STATION_VERDICT="UNKNOWN"
-if grep -q '\[stations\] TPV31 station writer active' "${DISPATCH_LOG}" 2>/dev/null; then
-   STATION_VERDICT="ENGAGED — 30-station SCEC trace writer active"
+if grep -q '\[stations\] TPV104 station writer active' "${DISPATCH_LOG}" 2>/dev/null; then
+   STATION_VERDICT="ENGAGED — 9-station SCEC trace writer active"
 else
-   STATION_VERDICT="REGRESSION — no [stations] TPV31 banner; check problem.tag in TOML"
+   STATION_VERDICT="REGRESSION — no [stations] TPV104 banner; check problem.tag in TOML"
 fi
 
 {
-   echo "TPV31 spatial_dyn_driver (heterogeneous Riemann, 50 m mesh, P=1 + ADER-O2, dev queue)"
+   echo "TPV104 spatial_dyn_driver (heterogeneous Riemann, 1000 m mesh, P=2 + ADER-O3, normal queue)"
    echo "Driver:                  seas_spatial_dyn_driver (TOML-driven)"
-   echo "Config:                  tpv31/configs/tpv31.toml"
-   echo "Mesh:                    tpv31_50m.msh"
-   echo "Polynomial order:        --order 1 (TOML mesh.order) + --ader-order 2"
-   echo "Interior flux:           bimaterial (heterogeneous Riemann; REQUIRED)"
+   echo "Config:                  ${CONFIG_OVERRIDE}"
+   echo "Mesh:                    tpv104_1000m.msh"
+   echo "Polynomial order:        order 2 + ader-order 3"
+   echo "Interior flux:           bimaterial (heterogeneous Riemann; byte-identical on homogeneous)"
    echo "Iterator:                one-shot (TOML default)"
-   echo "Friction law:            slip_weakening (LSW + depth-linear cohesion)"
-   echo "tfinal target:           15.0 s (dev-queue 2 h SLURM-kill expected long before)"
+   echo "Friction law:            rate_state (slip-law strong-rate-weakening, FL=103)"
+   echo "tfinal target:           12.0 s (48 h budget may reach less; resume via --restart)"
    echo "tfinal achieved (hypo):  ${T_END} s"
-   echo "hypo station rows:       ${N_ROWS}  (faultst000dp075)"
+   echo "hypo station rows:       ${N_ROWS}  (x2_0_x3_7.5)"
    echo ""
    echo "peak |V_strike| at hypo  : ${PEAK_V_HYPO} m/s at t = ${PEAK_T_HYPO} s"
-   echo "peak |Δσ_n| at hypo      : ${SIGMA_N_PERTURB_HYPO} Pa (vs initial)"
+   echo "peak |σ_n − 120 MPa| @ h : ${SIGMA_N_PERTURB_HYPO} Pa"
    echo "slip_strike at hypo (end): ${SLIP_STRIKE_END} m"
    echo ""
    echo "Heterogeneous Riemann    : ${BIMAT_VERDICT}"

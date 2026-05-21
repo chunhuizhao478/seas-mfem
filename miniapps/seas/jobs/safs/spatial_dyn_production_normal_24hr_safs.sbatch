@@ -97,7 +97,19 @@ grep -q '^MFEM_USE_HDF5 *= YES'   config/config.mk || { echo "ERROR: no HDF5"; e
 grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || { echo "ERROR: no H5Z_ZFP"; exit 1; }
 
 cd miniapps/seas
-make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
+# The seas_spatial_dyn_driver binary is built ONCE by the separate
+# one-shot build job (jobs/build_spatial_dyn_driver_dev.sbatch).  Submit
+# that FIRST and let it reach COMPLETED before submitting this run job.
+# Run jobs do NOT build, so any number of them may run concurrently
+# without racing on the shared object files / binary (the cause of the
+# "drivers/spatial_dyn_driver.o: file truncated" link error).
+if [ ! -x seas_spatial_dyn_driver ]; then
+   echo "ERROR: seas_spatial_dyn_driver not found in $(pwd)."
+   echo "       Build it first (one-shot, development queue):"
+   echo "         sbatch ${SEAS_MFEM_ROOT}/miniapps/seas/jobs/build_spatial_dyn_driver_dev.sbatch"
+   echo "       Wait for COMPLETED, then resubmit this run job."
+   exit 1
+fi
 
 SAFS_ROOT=safs/project_7.0_alternative
 CONFIG_TOML="${SAFS_ROOT}/friction/EXAMPLE_spatial_friction_slip_weakening_safs.toml"

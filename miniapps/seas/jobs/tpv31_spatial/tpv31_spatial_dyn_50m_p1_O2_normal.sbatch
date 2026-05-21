@@ -149,13 +149,19 @@ fi
 RESULT_DIR="tpv31/results_spatial_dyn_50m_p1_O2_normal_job${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}"
 
-rm -f seas_spatial_dyn_driver drivers/spatial_dyn_driver.o \
-      dynamic/tpv205_substep_iterator.o dynamic/tpv102_substep_iterator.o \
-      dynamic/tpv104_substep_iterator.o dynamic/wave_operator.o \
-      dynamic/godunov_flux_bimaterial.o dynamic/fault_face_flux.o \
-      dynamic/heterogeneous_material.o spatial/code/spatial_friction.o \
-      spatial/code/spatial_stress.o dynamic/spatial_nucleation.o
-make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
+# The seas_spatial_dyn_driver binary is built ONCE by the separate
+# one-shot build job (jobs/build_spatial_dyn_driver_dev.sbatch).  Submit
+# that FIRST and let it reach COMPLETED before submitting this run job.
+# Run jobs do NOT build, so any number of them may run concurrently
+# without racing on the shared object files / binary (the cause of the
+# "drivers/spatial_dyn_driver.o: file truncated" link error).
+if [ ! -x seas_spatial_dyn_driver ]; then
+   echo "ERROR: seas_spatial_dyn_driver not found in $(pwd)."
+   echo "       Build it first (one-shot, development queue):"
+   echo "         sbatch ${SEAS_MFEM_ROOT}/miniapps/seas/jobs/build_spatial_dyn_driver_dev.sbatch"
+   echo "       Wait for COMPLETED, then resubmit this run job."
+   exit 1
+fi
 
 echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
