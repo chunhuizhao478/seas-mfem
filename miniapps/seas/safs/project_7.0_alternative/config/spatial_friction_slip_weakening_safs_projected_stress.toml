@@ -40,7 +40,7 @@
 [meta]
 schema_version = 1
 law            = "slip_weakening"
-description    = "SAFS-ALT6 LSW, constant material, H&Z 1671 m magnitudes with psi=37 deg (SHmax az=351 deg), gradual_overstress nucleation"
+description    = "SAFS-ALT6 LSW, constant material, H&Z 1671 m magnitudes with psi=37 deg (SHmax az=351 deg), gradual_overstress nucleation; subcritical recalibration (mu_s=0.85 -> outside ratio ~0.75) fixing the job-7744292 near-critical speckle blow-up"
 
 [material_constant_fallback]
 # Equal lambda = mu => Poisson ratio = 0.25 (typical crust).
@@ -93,7 +93,7 @@ sigma_xz_pa = 0.0
 [numerics]
 ader_order = 2
 mixed_flux = "adjacent"
-cfl        = 0.1
+cfl        = 0.5
 use_pml    = false
 
 [time]
@@ -140,55 +140,70 @@ kind = "gradual_overstress"
 #   sigma_n_eff ~= 49.27 MPa
 #   tau_strike0 ~= 26.32 MPa
 #   tau_dip0    ~= -12.65 MPa
-#   L_nuc       ~= 1.86 km
-# A center-targeted amplitude of ~4.84 MPa reaches
-#   |tau_final| ~= 1.05 * mu_s * sigma_n_eff
-# only at the center and leaves too little of the Gaussian core above
-# static failure.  A peak amplitude of 6.5 MPa instead pushes the
-# F(r) >= 0.5 core (~2.5 km effective radius) above static strength,
-# giving a nucleation region comfortably larger than L_nuc while
-# avoiding the old 25 MPa gross overdrive.
+#   |tau_pre|   ~= 29.20 MPa  (mu_app = |tau_pre|/sigma_n_eff = 0.593)
+#   L_nuc       ~= 1.18 km    (mu_s=0.85, mu_d=0.30 -> mu_s-mu_d=0.55)
+# RECALIBRATED (job-7744292 fix): raising mu_s to 0.85 (see [friction]
+# below) lifts the in-patch static yield to mu_s*sigma_n_eff ~= 41.9 MPa,
+# so the old 6.5 MPa delta_tau no longer reaches yield (would undershoot
+# by ~6 MPa and never nucleate).  delta_tau_strike = 20 MPa restores a
+# SUPERCRITICAL nucleation core comfortably larger than L_nuc, so the
+# event ruptures SPONTANEOUSLY and does NOT arrest when the T_nuc ramp
+# ends.  Spontaneous-rupture budget (Gaussian F(r)=exp(-(r/radius)^2)):
+#   yield gap at center  = mu_s*sigma_n_eff - |tau_pre| = 12.7 MPa
+#   supercritical radius  r_c = 3000*sqrt(-ln(12.7/20)) ~= 2.02 km
+#   margin r_c / L_nuc   ~= 1.71   (>1 required; 1.7 is a safe margin)
+#   center overshoot     = |tau_pre| + delta_tau - mu_s*sigma_n_eff
+#                        ~= 29.2 + 20 - 41.9 = +7.3 MPa  (gate TRIGGER ok)
+# 16-18 MPa also nucleate but with thinner core margins (1.22-1.50);
+# 20 MPa was chosen to robustly guarantee spontaneous propagation, and
+# is still below the 25 MPa "gross overdrive" ceiling.
 center_x_m          =  606971.0
 center_y_m          = 3707270.0
 center_z_m          =   -4965.62
 radius_dip_m        =     3000.0
 radius_strike_m     =     3000.0
 delta_tau_dip_pa    =        0.0
-delta_tau_strike_pa =      6.5e6
+delta_tau_strike_pa =     20.0e6
 T_nuc_s             =        1.0
 
 [friction.slip_weakening]
 # Uniform LSW friction across the active fault (no spatial overrides
-# except the deep barrier).  Rationale:
-#   - mu_s = 0.65: still above the new 500 m mesh's max apparent friction
-#     under the psi=37° / az351 tensor
-#     (mu_app.max = 0.6392 at (519538, 3760334, -489), shallow north end)
-#     but only by ~1.7%.  This is mathematically consistent for a
-#     near-critical fault, not a generous static safety margin.
-#   - mu_d = 0.30: still gives a POSITIVE dynamic stress drop on the
-#     active fault.  At the current nucleation center's nearest fault DOF
-#     mu_app = tau0/sigma_n_eff ~= 0.5926
-#     (sigma_n_eff ~= 49.3 MPa, |tau0| ~= 29.2 MPa), so mu_d MUST be < 0.5926
-#     or the rupture re-locks once nucleation forcing ends.
-#     mu_d = 0.30 -> tau_d = 14.8 MPa, dtau = +14.4 MPa.
-#   - D_c  = 1.0 m: upper end of published crustal LSW range.  With
-#     mu_d = 0.30 the cohesive zone shrinks:
-#     L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff) ~= 1.9 km at the patch
-#     (0.98-3.14 km globally over sigma_n_eff = 30.4-97.0 MPa).  NOW WIRED to the
-#     500 m near-fault z0embed mesh (~2.5 elems/cohesive zone); the old 1 km
-#     mesh under-resolved it (~1.3 elems) AND carried the near-surface slivers.
-#     Swap [mesh].path to the 250 m z0embed (~5 elems) for a convergence check.
-# Nucleation budget at the picked hypocenter's nearest fault DOF
-# (sigma_n_eff~49.3 MPa, tau_pre~29.2 MPa):
-#   static threshold           mu_s * sigma_n_eff      ~= 32.03 MPa
-#   5% overstressed threshold  1.05 * mu_s * sigma_n_eff ~= 33.63 MPa
-#   strike-only delta_tau required at the center        ~= 4.84 MPa
-# The configured 6.5 MPa is intentionally above that center-only value
-# so a finite Gaussian core is supercritical.  On the current 500 m
-# mesh, ~6.19 MPa is enough to make the entire F(r) >= 0.5 core exceed
-# static strength; 6.5 MPa adds modest margin while staying far below
-# the old 25 MPa gross overdrive.
-mu_s_default     = 0.65
+# except the deep barrier).  Rationale (RECALIBRATED — job-7744292 fix):
+#   - mu_s = 0.85 (was 0.65).  The old value left the background only
+#     ~1.4% below static yield: the run log reported
+#     |tau_pre|/(mu_s*sigma_n_eff) max OUTSIDE asperity = 0.986, i.e.
+#     mu_app.max ~= 0.641 (shallow north end).  At 0.986 the near-critical
+#     unbarriered background AMPLIFIED grid-scale rupture-front noise (the
+#     under-resolved cohesive zone) through slip-weakening positive
+#     feedback -> isolated-DOF (salt-and-pepper) slip-rate blow-up to
+#     ~1e145 m/s, OUTSIDE the nucleation patch.  mu_s = 0.85 drops the
+#     outside ratio to 0.641/0.85 ~= 0.75 (25% below yield), so radiated
+#     waves / grid noise can no longer tip the background, while a COHERENT
+#     rupture front (large, localized stress concentration) still
+#     propagates.  Contrast TPV205 (same fault code, stable): it locks
+#     everything outside the rupture area with a mu_s barrier; SAFS instead
+#     keeps the whole fault active but subcritical.
+#   - mu_d = 0.30 (UNCHANGED): strong POSITIVE dynamic stress drop, so the
+#     nucleated rupture sustains propagation.  At the patch DOF
+#     mu_app ~= 0.5926 (sigma_n_eff~49.3 MPa, |tau0|~29.2 MPa) >> mu_d,
+#     giving tau_d = 14.8 MPa, dtau = +14.4 MPa.  mu_app > 0.30 over the
+#     whole active fault -> stress drop positive everywhere.
+#   - TRADEOFF (accepted per run directive): raising mu_s widens
+#     (mu_s-mu_d) 0.35 -> 0.55, so L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff)
+#     shrinks ~1.86 km -> 1.18 km at the patch (global ~0.6-1.9 km).  On
+#     the 500 m z0embed mesh (h_min~197 m) that is L_nuc/h_min ~3.0-9.7
+#     (was 4.8-15.3) — the cohesive zone is MORE under-resolved.  This fix
+#     removes the AMPLIFIER (criticality), not the SEED (resolution); if
+#     residual front speckle appears, swap [mesh].path to the 250 m
+#     z0embed (~2x finer -> L_nuc/h_min ~6-19).
+#   - D_c = 1.0 m: unchanged (upper end of published crustal LSW range).
+# Nucleation budget at the patch DOF (sigma_n_eff~49.3 MPa, tau_pre~29.2 MPa):
+#   static threshold           mu_s * sigma_n_eff       ~= 41.9 MPa
+#   strike-only delta_tau to reach yield at the center  ~= 12.7 MPa
+# The configured 20 MPa (see [nucleation.gradual_overstress]) clears that
+# with a +7.3 MPa overshoot AND builds a supercritical core (r_c~2.0 km)
+# that is ~1.7x L_nuc, so the event ruptures spontaneously.
+mu_s_default     = 0.85
 mu_d_default     = 0.30
 d_c_default      = 1.0
 cohesion_default = 0.0
