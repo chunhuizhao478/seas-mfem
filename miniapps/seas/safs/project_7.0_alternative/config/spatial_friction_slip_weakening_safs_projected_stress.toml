@@ -7,14 +7,16 @@
 # STRESS PROVENANCE
 # -----------------
 # The [stress] tensor below is hand-copied from the H&Z regional-stress
-# projection summary:
-#   stress/results/1000m_lcfar3000/safs_fault_box_nwcut_1000m_lcfar3000_summary.json
+# projection summary for the paper-consistent "1671 m magnitudes + psi=37°"
+# orientation case on the same 500 m z0embed mesh used by this config:
+#   stress/results/safs_fault_box_nwcut_500m_lcfar3000_z0embed_hz1671_psi37_az351/
+#       safs_fault_box_nwcut_500m_lcfar3000_z0embed_hz1671_psi37_az351_summary.json
 #       params:  SHmax = 113 MPa, Shmin = 49 MPa, Sv = 45 MPa
-#                P_p   = 16  MPa, SHmax_azimuth = 23°, rake = right-lateral
+#                P_p   = 16  MPa, SHmax_azimuth = 351°, rake = right-lateral
 #                depth_model = "constant" (all *_grad_MPa_per_m = 0.0)
 #       sigma_global_at_z0_MPa (compression POSITIVE, EAST-NORTH-UP, MPa):
-#           [[ 58.77093  23.01887   0.0     ],
-#            [ 23.01887 103.22907   0.0     ],
+#           [[ 50.56619  -9.88854   0.0     ],
+#            [ -9.88854 111.43381   0.0     ],
 #            [  0.0       0.0      45.0     ]]
 #       Produced by stress/code/hickman_and_zoback_regional_stress_projection.py
 #
@@ -38,7 +40,7 @@
 [meta]
 schema_version = 1
 law            = "slip_weakening"
-description    = "SAFS-ALT6 LSW, constant material, regional H&Z stress at z=0, gradual_overstress nucleation"
+description    = "SAFS-ALT6 LSW, constant material, H&Z 1671 m magnitudes with psi=37 deg (SHmax az=351 deg), gradual_overstress nucleation"
 
 [material_constant_fallback]
 # Equal lambda = mu => Poisson ratio = 0.25 (typical crust).
@@ -81,10 +83,10 @@ use_sidecar = false
 # in the summary JSON (see header), converted MPa → Pa.  Frame: (east,
 # north, up) UTM 11N, compression POSITIVE (SEAS internal convention).
 kind        = "constant_tensor"
-sigma_xx_pa = 5.877093214531209e+07
-sigma_yy_pa = 1.0322906785468793e+08
+sigma_xx_pa = 5.056619147855508e+07
+sigma_yy_pa = 1.1143380852144492e+08
 sigma_zz_pa = 4.50e+07
-sigma_xy_pa = 2.3018873610836838e+07
+sigma_xy_pa = -9.888543819998317e+06
 sigma_yz_pa = 0.0
 sigma_xz_pa = 0.0
 
@@ -106,7 +108,7 @@ dt_max     = "0.1s"
 # Reflection-time warning fires at t ~= 7 s (min_box_dim / cp_max);
 # from then on the bulk fields carry 5-15% reflected energy off the
 # 1st-order absorbing bottom+sides.
-output_dir              = "output_safs_dyn_projected_500m_100s"
+output_dir              = "output_safs_dyn_projected_500m_hz1671_psi37_az351_100s"
 restart_prefix          = "cp"
 paraview_volume         = "hdf5"
 paraview_bulk           = "hdf5"
@@ -130,40 +132,62 @@ kind = "gradual_overstress"
 # safs_fault_box_nwcut_1000m_lcfar3000_fault.vtu (vertex id 36417).
 # Sits at the southern end of the SAF-ALT6 fault, ~5 km depth (the
 # southern slab only reaches z = -10.4 km, so 5 km is mid-depth there).
+# Peak overstress is tuned to the CURRENT psi=37° / az351 stress field
+# on the 500 m z0embed mesh to create a supercritical core that is
+# larger than the local L_nuc, not to force the entire Gaussian patch
+# to the exact 1.05*mu_s*sigma_n_eff target.
+# Patch-center numbers (nearest fault DOF):
+#   sigma_n_eff ~= 49.27 MPa
+#   tau_strike0 ~= 26.32 MPa
+#   tau_dip0    ~= -12.65 MPa
+#   L_nuc       ~= 1.86 km
+# A center-targeted amplitude of ~4.84 MPa reaches
+#   |tau_final| ~= 1.05 * mu_s * sigma_n_eff
+# only at the center and leaves too little of the Gaussian core above
+# static failure.  A peak amplitude of 6.5 MPa instead pushes the
+# F(r) >= 0.5 core (~2.5 km effective radius) above static strength,
+# giving a nucleation region comfortably larger than L_nuc while
+# avoiding the old 25 MPa gross overdrive.
 center_x_m          =  606971.0
 center_y_m          = 3707270.0
 center_z_m          =   -4965.62
 radius_dip_m        =     3000.0
 radius_strike_m     =     3000.0
 delta_tau_dip_pa    =        0.0
-delta_tau_strike_pa =     25.0e6
+delta_tau_strike_pa =      6.5e6
 T_nuc_s             =        1.0
 
 [friction.slip_weakening]
 # Uniform LSW friction across the active fault (no spatial overrides
 # except the deep barrier).  Rationale:
-#   - mu_s = 0.65: just above max apparent friction on the active fault
-#     (mu_app.max = 0.6410 at (477917, 3780180, -181.6), shallow north end)
-#     -> 1.4% stability margin against spontaneous failure
-#   - mu_d = 0.30: gives a POSITIVE dynamic stress drop on the active
-#     fault.  In the nucleation patch mu_app = tau0/sigma_n_eff ~= 0.449
-#     (sigma_n_eff ~= 72 MPa, |tau0| ~= 32.4 MPa), so mu_d MUST be < 0.449
-#     or the rupture re-locks once nucleation forcing ends.  The prior
-#     mu_d = 0.50 gave tau_d = 36.0 MPa > tau0 = 32.4 MPa => dtau = -3.6 MPa
-#     (re-locking).  mu_d = 0.30 -> tau_d = 21.6 MPa, dtau = +10.8 MPa,
-#     S-ratio = (mu_s-mu_app)/(mu_app-mu_d) ~= 1.34 (< 1.77 => self-
-#     sustaining 3D rupture).
+#   - mu_s = 0.65: still above the new 500 m mesh's max apparent friction
+#     under the psi=37° / az351 tensor
+#     (mu_app.max = 0.6392 at (519538, 3760334, -489), shallow north end)
+#     but only by ~1.7%.  This is mathematically consistent for a
+#     near-critical fault, not a generous static safety margin.
+#   - mu_d = 0.30: still gives a POSITIVE dynamic stress drop on the
+#     active fault.  At the current nucleation center's nearest fault DOF
+#     mu_app = tau0/sigma_n_eff ~= 0.5926
+#     (sigma_n_eff ~= 49.3 MPa, |tau0| ~= 29.2 MPa), so mu_d MUST be < 0.5926
+#     or the rupture re-locks once nucleation forcing ends.
+#     mu_d = 0.30 -> tau_d = 14.8 MPa, dtau = +14.4 MPa.
 #   - D_c  = 1.0 m: upper end of published crustal LSW range.  With
 #     mu_d = 0.30 the cohesive zone shrinks:
-#     L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff) ~= 1.3 km at the patch
-#     (0.94-3.0 km globally over sigma_n_eff = 30.5-97 MPa).  NOW WIRED to the
+#     L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff) ~= 1.9 km at the patch
+#     (0.98-3.14 km globally over sigma_n_eff = 30.4-97.0 MPa).  NOW WIRED to the
 #     500 m near-fault z0embed mesh (~2.5 elems/cohesive zone); the old 1 km
 #     mesh under-resolved it (~1.3 elems) AND carried the near-surface slivers.
 #     Swap [mesh].path to the 250 m z0embed (~5 elems) for a convergence check.
-# Nucleation budget at the picked hypocenter (sigma_n_eff~71.6 MPa,
-# tau_pre~32.5 MPa): Delta_tau_required = mu_s*sigma_n - tau0 ~= 14.4 MPa
-# (governed by mu_s, unaffected by the mu_d change); current setting
-# 25 MPa -> +10.6 MPa overshoot.
+# Nucleation budget at the picked hypocenter's nearest fault DOF
+# (sigma_n_eff~49.3 MPa, tau_pre~29.2 MPa):
+#   static threshold           mu_s * sigma_n_eff      ~= 32.03 MPa
+#   5% overstressed threshold  1.05 * mu_s * sigma_n_eff ~= 33.63 MPa
+#   strike-only delta_tau required at the center        ~= 4.84 MPa
+# The configured 6.5 MPa is intentionally above that center-only value
+# so a finite Gaussian core is supercritical.  On the current 500 m
+# mesh, ~6.19 MPa is enough to make the entire F(r) >= 0.5 core exceed
+# static strength; 6.5 MPa adds modest margin while staying far below
+# the old 25 MPa gross overdrive.
 mu_s_default     = 0.65
 mu_d_default     = 0.30
 d_c_default      = 1.0
