@@ -131,7 +131,10 @@ static void T_D06_sigma1_azimuth_45deg()
    std::string captured;
    (void)RunPrinter(s, /*mu_s=*/0.6, /*mu_d=*/0.4, /*d_c=*/0.5,
                     /*sigma_n=*/50.0e6, /*tau_dip=*/0.0,
-                    /*tau_strike=*/1.0e6,    // well below strength
+                    // tau_strike between mu_d·sigma_n (20 MPa) and
+                    // mu_s·sigma_n (30 MPa), so the patch is locked with a
+                    // positive stress drop and the 20 MPa overstress triggers.
+                    /*tau_strike=*/25.0e6,
                     /*nuc_enabled=*/true, gspec,
                     /*mu_bulk=*/32.0e9, captured);
    // Find "sigma_1 azimuth = " and parse the number.
@@ -156,7 +159,7 @@ static void T_D07_dt_cfl_passthrough()
    std::string captured;
    (void)RunPrinter(s, /*mu_s=*/0.6, /*mu_d=*/0.4, /*d_c=*/0.5,
                     /*sigma_n=*/50.0e6, /*tau_dip=*/0.0,
-                    /*tau_strike=*/1.0e6,
+                    /*tau_strike=*/25.0e6,   // valid nucleation (see T-D06)
                     /*nuc_enabled=*/true, gspec,
                     /*mu_bulk=*/32.0e9, captured);
    const auto pos = captured.find("dt_cfl = ");
@@ -290,6 +293,103 @@ static void T_D02_COORDS_outside_message_includes_xyz()
                "FAIL message includes z-coord");
 }
 
+// =====================================================================
+// T-D08: NUCLEATION-CRITERION REGRESSION (the job-7743351 numbers).
+//        mu_s=0.65, mu_d=0.30, sigma_n=71.5 MPa, |tau_pre|=32.5 MPa
+//        (strike), delta_tau=25 MPa.  The CORRECT trigger criterion is
+//        |tau_pre + delta_tau| = 57.5 MPa >= mu_s·sigma_n = 46.5 MPa, so
+//        overshoot = +11 MPa (SUFFICIENT) and the gate PASSes.  The old
+//        budget = (mu_s - mu_d)·sigma_n = 25 MPa gave overshoot = A - budget
+//        = -0.24 MPa and falsely printed "(INSUFFICIENT)".
+// =====================================================================
+static void T_D08_overshoot_uses_initiation_criterion()
+{
+   std::cout << "\n[T-D08] overshoot = |tau_pre+delta_tau| - mu_s·sigma_n "
+                "(initiation), not A - (mu_s-mu_d)·sigma_n\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 25.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinter(s, /*mu_s=*/0.65, /*mu_d=*/0.30, /*d_c=*/1.0,
+                    /*sigma_n=*/71.5e6, /*tau_dip=*/0.0,
+                    /*tau_strike=*/32.5e6,
+                    /*nuc_enabled=*/true, gspec,
+                    /*mu_bulk=*/32.0e9, captured);
+   TEST_ASSERT(captured.find("(sufficient)") != std::string::npos,
+               "overshoot labelled (sufficient)");
+   TEST_ASSERT(captured.find("(INSUFFICIENT)") == std::string::npos,
+               "overshoot NOT (INSUFFICIENT) — regression vs the old budget");
+   TEST_ASSERT(captured.find("PASS: initial conditions are well-posed")
+               != std::string::npos,
+               "well-posed nucleation PASSes the gate");
+   const auto pos = captured.find("nucleation overshoot");
+   TEST_ASSERT(pos != std::string::npos, "overshoot line printed");
+   const auto eq = captured.find("= ", pos);
+   const real_t ov = std::stod(captured.substr(eq + 2));
+   TEST_NEAR(ov, 11.025, 0.05, "overshoot ≈ +11 MPa (57.5 - 46.5)");
+}
+
+// =====================================================================
+// T-D09: NEGATIVE dynamic stress drop is caught.  Same prestress/overstress
+//        as T-D08 but mu_d=0.50 (the pre-fix value): tau_pre=32.5 MPa <
+//        mu_d·sigma_n = 35.75 MPa, so the dynamic ratio 0.909 < 1 and the
+//        rupture would re-lock (the debug-doc Issue [1]).  Warn-only so the
+//        in-process printer does not MFEM_ABORT.
+// =====================================================================
+static void T_D09_negative_stress_drop_caught()
+{
+   std::cout << "\n[T-D09] negative dynamic stress drop (mu_d too high) is "
+                "flagged\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 25.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinter(s, /*mu_s=*/0.65, /*mu_d=*/0.50, /*d_c=*/1.0,
+                    /*sigma_n=*/71.5e6, /*tau_dip=*/0.0,
+                    /*tau_strike=*/32.5e6,
+                    /*nuc_enabled=*/true, gspec,
+                    /*mu_bulk=*/32.0e9, captured,
+                    /*abort_on_failure=*/false);
+   TEST_ASSERT(captured.find("NEGATIVE dynamic stress drop") != std::string::npos,
+               "stress-drop FAIL message printed");
+   TEST_ASSERT(captured.find("gate downgraded") != std::string::npos,
+               "downgraded to WARNING (warn-only) instead of abort");
+   TEST_ASSERT(captured.find("PASS: initial conditions are well-posed")
+               == std::string::npos,
+               "negative stress drop does NOT PASS");
+}
+
+// =====================================================================
+// T-D10: INSUFFICIENT trigger is caught.  mu_s=0.65, sigma_n=71.5 MPa,
+//        tau_pre=32.5 MPa, but delta_tau=5 MPa only: nucleated 37.5 MPa <
+//        mu_s·sigma_n = 46.5 MPa, overshoot = -9 MPa.  Warn-only.
+// =====================================================================
+static void T_D10_insufficient_trigger_caught()
+{
+   std::cout << "\n[T-D10] insufficient overstress (never reaches yield) is "
+                "flagged\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 5.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinter(s, /*mu_s=*/0.65, /*mu_d=*/0.30, /*d_c=*/1.0,
+                    /*sigma_n=*/71.5e6, /*tau_dip=*/0.0,
+                    /*tau_strike=*/32.5e6,
+                    /*nuc_enabled=*/true, gspec,
+                    /*mu_bulk=*/32.0e9, captured,
+                    /*abort_on_failure=*/false);
+   TEST_ASSERT(captured.find("(INSUFFICIENT)") != std::string::npos,
+               "overshoot labelled (INSUFFICIENT)");
+   TEST_ASSERT(captured.find("never reaches static yield") != std::string::npos,
+               "trigger FAIL message printed");
+}
+
 int main(int argc, char** argv)
 {
 #ifdef MFEM_USE_MPI
@@ -304,6 +404,9 @@ int main(int argc, char** argv)
    T_D05_LITE_env_skip_gate_honored();
    T_D02_COORDS_outside_message_includes_xyz();
    T_D03_REASON_warn_prefix_attribution();
+   T_D08_overshoot_uses_initiation_criterion();
+   T_D09_negative_stress_drop_caught();
+   T_D10_insufficient_trigger_caught();
    std::cout << "\n========================================\n";
    std::cout << "Phase D test_spatial_print_derived: "
              << num_passed << " / " << num_tests

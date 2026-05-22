@@ -29,7 +29,6 @@ namespace
 
 constexpr real_t kBarrierSentinel        = 1.0e6;
 constexpr real_t kBarrierHalfThreshold   = 0.5 * kBarrierSentinel;
-constexpr real_t kNucleationOvershootGap = 0.9;   // 90% of budget
 
 bool EnvSkipEquilibriumGate()
 {
@@ -239,11 +238,27 @@ real_t PrintDerivedAndCheck(
 #endif
 
    // -----------------------------------------------------------------
-   // 3.  Nucleation-budget check (only when nuc enabled).
+   // 3.  Nucleation well-posedness, over DOFs INSIDE the nucleation
+   //     region (r <= outside_safety_factor · max(radius_*)).  Three
+   //     LSW forced-nucleation conditions:
+   //       (1) TRIGGER     : |tau_pre + delta_tau| >= mu_s · sigma_n_eff
+   //                         at the peak DOF (forcing reaches static yield).
+   //                         overshoot := |tau_pre + delta_tau| - mu_s·sigma_n.
+   //       (2) LOCKED      : |tau_pre| <  mu_s · sigma_n_eff everywhere
+   //                         in-patch (not already failing without forcing).
+   //       (3) STRESS-DROP : |tau_pre| >  mu_d · sigma_n_eff everywhere
+   //                         in-patch (positive dynamic stress drop, so the
+   //                         rupture is self-sustaining and does not re-lock
+   //                         when the forcing ends).
+   //     delta_tau is the VECTOR overstress (dip, strike); the trigger
+   //     compares the magnitude of (pre-stress + overstress), so an
+   //     overstress that is not parallel to tau_pre is handled correctly.
    // -----------------------------------------------------------------
-   real_t overshoot_local_best = -std::numeric_limits<real_t>::infinity();
-   int    overshoot_local_arg  = -1;
-   real_t nuc_peak_local       = 0.0;
+   real_t overshoot_local_best   = -std::numeric_limits<real_t>::infinity();
+   int    overshoot_local_arg    = -1;
+   real_t nuc_peak_local         = 0.0;
+   real_t static_ratio_local_max = 0.0;                                     // (2)
+   real_t dyn_ratio_local_min    = std::numeric_limits<real_t>::infinity(); // (3)
    if (nuc.enabled && nuc_params.amplitude_dip.Size() == N)
    {
       for (int i = 0; i < N; ++i)
@@ -254,18 +269,37 @@ real_t PrintDerivedAndCheck(
          const real_t dz = dof_coords_3d(3*i + 2) - cz;
          const real_t r  = std::sqrt(dx*dx + dy*dy + dz*dz);
          if (r > r_threshold) { continue; }
-         const real_t ad  = nuc_params.amplitude_dip(i);
-         const real_t as  = nuc_params.amplitude_strike(i);
-         const real_t A   = std::sqrt(ad*ad + as*as);
-         const real_t budget = (lsw.mu_s(i) - lsw.mu_d(i))
-                              * sigma_n_eff_per_dof(i);
-         const real_t overshoot = A - budget;
+         const real_t tau1 = tau_pre_per_dof(2*i + 0);
+         const real_t tau2 = tau_pre_per_dof(2*i + 1);
+         const real_t ad   = nuc_params.amplitude_dip(i);
+         const real_t as   = nuc_params.amplitude_strike(i);
+         const real_t A    = std::sqrt(ad*ad + as*as);
+         const real_t tau_pre_mag = std::sqrt(tau1*tau1 + tau2*tau2);
+         const real_t strength_s  = lsw.mu_s(i) * sigma_n_eff_per_dof(i);
+         const real_t strength_d  = lsw.mu_d(i) * sigma_n_eff_per_dof(i);
+         // (1) nucleated traction = pre-stress + overstress (vector sum).
+         const real_t tau_nuc1    = tau1 + ad;
+         const real_t tau_nuc2    = tau2 + as;
+         const real_t tau_nuc_mag = std::sqrt(tau_nuc1*tau_nuc1 + tau_nuc2*tau_nuc2);
+         const real_t overshoot   = tau_nuc_mag - strength_s;
          if (overshoot > overshoot_local_best)
          {
             overshoot_local_best = overshoot;
             overshoot_local_arg  = i;
          }
          nuc_peak_local = std::max(nuc_peak_local, A);
+         // (2) pre-stress static ratio: want < 1 everywhere in-patch.
+         if (strength_s > 0.0)
+         {
+            static_ratio_local_max =
+               std::max(static_ratio_local_max, tau_pre_mag / strength_s);
+         }
+         // (3) pre-stress dynamic ratio: want > 1 everywhere in-patch.
+         //     mu_d == 0 ⇒ zero residual strength ⇒ always positive drop.
+         const real_t dyn_ratio = (strength_d > 0.0)
+                                  ? (tau_pre_mag / strength_d)
+                                  : std::numeric_limits<real_t>::infinity();
+         dyn_ratio_local_min = std::min(dyn_ratio_local_min, dyn_ratio);
       }
    }
 #ifdef MFEM_USE_MPI
@@ -273,19 +307,24 @@ real_t PrintDerivedAndCheck(
                                        : 0.0;
    struct { double value; int rank_; } pin{overshoot_local_best, rank}, pout;
    MPI_Allreduce(&pin, &pout, 1, MPI_DOUBLE_INT, MPI_MAXLOC, comm);
-   const real_t overshoot_best = static_cast<real_t>(pout.value);
+   const real_t overshoot_best  = static_cast<real_t>(pout.value);
    const int    overshoot_owner = pout.rank_;
+   const real_t inpatch_static_ratio_max =
+      nuc.enabled ? AllreduceMax(static_ratio_local_max, comm) : 0.0;
+   const real_t inpatch_dyn_ratio_min =
+      nuc.enabled ? AllreduceMin(dyn_ratio_local_min, comm)
+                  : std::numeric_limits<real_t>::infinity();
 #else
-   const real_t nuc_peak       = nuc_peak_local;
-   const real_t overshoot_best = overshoot_local_best;
-   const int    overshoot_owner = 0;
+   const real_t nuc_peak                 = nuc_peak_local;
+   const real_t overshoot_best           = overshoot_local_best;
+   const int    overshoot_owner          = 0;
+   const real_t inpatch_static_ratio_max = static_ratio_local_max;
+   const real_t inpatch_dyn_ratio_min    = dyn_ratio_local_min;
 #endif
 
-   // Compute the budget at the overshoot-argmax DOF (for the print).
-   // Also detect the "no DOF inside nucleation patch on any rank" case
-   // so we don't silently PASS a configuration that can't possibly
-   // nucleate.
-   real_t budget_at_argmax = 0.0;
+   // Compute the amplitude + coords at the overshoot-argmax (peak) DOF for
+   // the print.  Also detect the "no DOF inside nucleation patch on any
+   // rank" case so we don't silently PASS a config that can't nucleate.
    real_t A_at_argmax      = 0.0;
    real_t coord_at_argmax[3] = { 0.0, 0.0, 0.0 };
    const int local_in_patch_count = (nuc.enabled && overshoot_local_arg >= 0)
@@ -293,7 +332,6 @@ real_t PrintDerivedAndCheck(
    if (nuc.enabled && overshoot_owner == rank && overshoot_local_arg >= 0)
    {
       const int i = overshoot_local_arg;
-      budget_at_argmax = (lsw.mu_s(i) - lsw.mu_d(i)) * sigma_n_eff_per_dof(i);
       const real_t ad = nuc_params.amplitude_dip(i);
       const real_t as = nuc_params.amplitude_strike(i);
       A_at_argmax = std::sqrt(ad*ad + as*as);
@@ -307,8 +345,6 @@ real_t PrintDerivedAndCheck(
    {
       MPI_Allreduce(&local_in_patch_count, &patch_count_global, 1, MPI_INT,
                     MPI_SUM, comm);
-      MPI_Bcast(&budget_at_argmax, 1, MPITypeMap<real_t>::mpi_type,
-                overshoot_owner, comm);
       MPI_Bcast(&A_at_argmax,      1, MPITypeMap<real_t>::mpi_type,
                 overshoot_owner, comm);
       MPI_Bcast(coord_at_argmax,   3, MPITypeMap<real_t>::mpi_type,
@@ -387,13 +423,19 @@ real_t PrintDerivedAndCheck(
             out << "[derived] most-overstressed DOF at (x="
                 << coord_at_argmax[0] << ", y=" << coord_at_argmax[1]
                 << ", z=" << coord_at_argmax[2] << ")\n";
-            out << "[derived] amplitude at that DOF = " << A_at_argmax << " Pa\n";
-            out << "[derived] (mu_s - mu_d)*sigma_n_eff at that DOF = "
-                << budget_at_argmax << " Pa\n";
-            out << "[derived] nucleation overshoot = "
+            out << "[derived] amplitude |delta_tau| at that DOF = "
+                << A_at_argmax << " Pa\n";
+            out << "[derived] nucleation overshoot "
+                   "(|tau_pre + delta_tau| - mu_s*sigma_n_eff) = "
                 << (overshoot_best / 1.0e6) << " MPa "
                 << ((overshoot_best >= 0.0) ? "(sufficient)" : "(INSUFFICIENT)")
                 << "\n";
+            out << "[derived] in-patch max |tau_pre| / (mu_s*sigma_n_eff) = "
+                << inpatch_static_ratio_max
+                << " (should be < 1: patch initially locked)\n";
+            out << "[derived] in-patch min |tau_pre| / (mu_d*sigma_n_eff) = "
+                << inpatch_dyn_ratio_min
+                << " (should be > 1: positive dynamic stress drop)\n";
          }
       }
       if (stress_const)
@@ -414,10 +456,14 @@ real_t PrintDerivedAndCheck(
    // -----------------------------------------------------------------
    // 6.  Gating.  Aborts (or warns) on:
    //    (a) all barriers,
-   //    (b) outside_max >= 1.0 (supercritical),
-   //    (c) nuc enabled and overshoot < (1 - 0.9) * budget == budget * (1 - 0.9)
-   //        [equivalent to A < 0.9 * budget],
-   //    (d) nuc disabled and outside_max < 1.0 (cannot nucleate at all).
+   //    (b) outside_max >= 1.0 (background supercritical),
+   //    (c) nuc enabled and TRIGGER fails: overshoot < 0, i.e. the peak
+   //        |tau_pre + delta_tau| never reaches mu_s·sigma_n_eff,
+   //    (d) nuc enabled and STRESS-DROP fails: in-patch min
+   //        |tau_pre|/(mu_d·sigma_n_eff) <= 1 (negative dynamic stress drop),
+   //    (e) nuc disabled and outside_max < 1.0 (cannot nucleate at all).
+   //  A WARNING (never an abort) also fires if the patch is already at
+   //  static yield before forcing (in-patch max |tau_pre|/(mu_s·sigma_n) >= 1).
    // -----------------------------------------------------------------
    auto fail = [&](const std::string& msg)
    {
@@ -475,19 +521,36 @@ real_t PrintDerivedAndCheck(
       }
       else
       {
-         // A < 0.9 * budget ⇒ overshoot = A - budget < budget * (-0.1).
-         const real_t budget_threshold =
-            budget_at_argmax * kNucleationOvershootGap;
-         const real_t safety_gap = budget_at_argmax - budget_threshold;
-         if (A_at_argmax < budget_threshold)
+         // (c) TRIGGER: the peak in-patch DOF must reach static yield.
+         if (overshoot_best < 0.0)
          {
             std::ostringstream m;
             m << "[derived] FAIL: nucleation overshoot = "
-              << (overshoot_best / 1.0e6)
-              << " MPa (INSUFFICIENT, gap = " << safety_gap
-              << " Pa).  Increase delta_tau_*_pa or reduce mu_s in the "
-                 "nucleation patch.";
+              << (overshoot_best / 1.0e6) << " MPa (INSUFFICIENT) — "
+                 "|tau_pre + delta_tau| < mu_s*sigma_n_eff at the peak DOF, so "
+                 "the forcing never reaches static yield.  Increase "
+                 "delta_tau_*_pa or reduce mu_s in the nucleation patch.";
             fail(m.str());
+         }
+         // (d) STRESS-DROP: positive dynamic stress drop everywhere in-patch.
+         if (inpatch_dyn_ratio_min <= 1.0)
+         {
+            std::ostringstream m;
+            m << "[derived] FAIL: in-patch min |tau_pre| / (mu_d*sigma_n_eff) = "
+              << inpatch_dyn_ratio_min << " <= 1 — NEGATIVE dynamic stress drop "
+                 "(tau_pre <= mu_d*sigma_n_eff somewhere in the nucleation "
+                 "patch), so the rupture re-locks once the forcing ends.  "
+                 "Lower mu_d or raise tau_pre in the nucleation patch.";
+            fail(m.str());
+         }
+         // LOCKED: warn (never abort) if the patch is already at static yield.
+         if (inpatch_static_ratio_max >= 1.0 && rank == 0)
+         {
+            out << "[derived] WARNING: in-patch max |tau_pre| / "
+                   "(mu_s*sigma_n_eff) = " << inpatch_static_ratio_max
+                << " >= 1 — the nucleation patch is already at static yield "
+                   "before forcing; it ruptures spontaneously (the "
+                   "gradual_overstress ramp is moot).\n";
          }
       }
    }
@@ -510,11 +573,14 @@ real_t PrintDerivedAndCheck(
              "gradual_overstress F(r) at those DOFs may be miscomputed.\n";
    }
 
+   // PASS iff the background is subcritical AND (no nuc, OR all barriers,
+   // OR the nucleation is well-posed: triggers AND has a positive dynamic
+   // stress drop).  The LOCKED check is warn-only, so it does not gate PASS.
+   const bool nuc_well_posed = !nuc_patch_empty
+                               && overshoot_best >= 0.0
+                               && inpatch_dyn_ratio_min > 1.0;
    if (rank == 0 && !warn_only && outside_max < 1.0
-       && (!nuc.enabled
-           || all_barriers
-           || (!nuc_patch_empty
-               && A_at_argmax >= budget_at_argmax * kNucleationOvershootGap)))
+       && (!nuc.enabled || all_barriers || nuc_well_posed))
    {
       out << "[derived] PASS: initial conditions are well-posed.\n";
    }
