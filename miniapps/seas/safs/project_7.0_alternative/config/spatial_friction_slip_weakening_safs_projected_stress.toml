@@ -93,7 +93,7 @@ sigma_xz_pa = 0.0
 [numerics]
 ader_order = 2
 mixed_flux = "adjacent"
-cfl        = 0.5
+cfl        = 0.25
 use_pml    = false
 
 [time]
@@ -164,8 +164,8 @@ kind = "gradual_overstress"
 center_x_m          =  606971.0
 center_y_m          = 3707270.0
 center_z_m          =   -4965.62
-radius_dip_m        =     4000.0
-radius_strike_m     =     4000.0
+radius_dip_m        =     3000.0
+radius_strike_m     =     3000.0
 delta_tau_dip_pa    =        0.0
 delta_tau_strike_pa =     20.0e6
 T_nuc_s             =        1.0
@@ -217,7 +217,7 @@ T_nuc_s             =        1.0
 # event ruptures spontaneously.
 mu_s_default     = 0.85
 mu_d_default     = 0.30
-d_c_default      = 2.0
+d_c_default      = 1.0
 cohesion_default = 0.0
 
 # Lock the deepest band as a barrier (resolver sets internal mu_s = 1.0e6).
