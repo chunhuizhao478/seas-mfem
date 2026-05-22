@@ -89,6 +89,39 @@ The `[derived]` well-posedness gate (`spatial_print_derived.cpp`) gates only
 on `outside_max ≥ 1.0` (0.986 squeaked by) and `L_nuc/h_min` is **printed,
 never gated** — so the run launched straight into the known blow-up regime.
 
+### Spatial evolution (ParaView, slip_rate_strike) — it is a TRAVELING band
+Frames at t = 0.94 / 1.64 / 2.09 / 3.23 / 4.57 s show the checkerboard is NOT
+static — it RIDES the rupture front:
+- t=0.94: ignites **down-dip of the patch** (smooth Gaussian intact).
+- t=1.64: semicircular checkerboard on the hypocenter + a **detached** blob
+  ahead along-strike (→ the near-critical background also ignites REMOTELY,
+  not only at the front).
+- t=2.09–3.23: a checkerboard band with a sharp front sweeps north along strike.
+- t=4.57: the southern region has **HEALED to dark blue**; the band is mid-fault,
+  front at the **geometric bend/stepover**.
+
+Mechanism: the band ignites where the fault is actively weakening, grows on the
+near-critical background, **heals behind** (DOFs slip past D_c → μ pins to μ_d →
+the weakening gradient feeding it is gone → it radiates away), and the front
+**arrests at the geometric bend** at t≈4.5 s. That arrest IS the V_max recovery
+(steps 13000→13200): the front stops at the kink, the last band heals, the
+global max drops back to the genuine ~3 m/s. So this is a *rupture-front* grid
+instability, not a static IC defect.
+
+### Why the fix works — the seismic S-ratio
+S = (μ_s·σ_n_eff − |τ_pre|)/(|τ_pre| − μ_d·σ_n_eff) at the patch:
+- OLD: (32.0 − 29.2)/(29.2 − 14.8) = 2.8/14.4 = **0.20** (violently supercritical
+  → fast rupture, razor-thin dynamic cohesive zone → grid checkerboard).
+- NEW: (41.9 − 29.2)/14.4 = 12.7/14.4 = **0.88**, stress drop UNCHANGED (μ_d=0.30).
+
+Raising μ_s lifts S 0.20 → 0.88, still **below the Andrews threshold ~1.77** so
+spontaneous rupture is preserved, but far more stable. It helps two ways:
+(1) no remote background ignition (the 0.75-subcritical bet → kills the detached
+blobs); (2) slower rupture → the *dynamic* cohesive zone is Lorentz-widened at
+lower speed, partially offsetting the static L_nuc shrinkage from the wider
+(μ_s−μ_d). Whether the FRONT checkerboard is fully killed or merely bounded is
+the open question the re-run answers.
+
 ---
 
 ## Fix (applied) — lower background criticality, keep spontaneous rupture
@@ -142,9 +175,111 @@ robust combination.
 
 ## Status
 - CONFIRMED (code read): fault machinery identical to proven TPV205; LSW
-  solve, slip accumulation, CFL all correct. Root cause = under-resolution
-  (seed) + near-critical unbarriered background (amplifier).
+  solve, slip accumulation, CFL all correct.
 - APPLIED (config): μ_s 0.65→0.85, δτ_strike 6.5→20 MPa; spontaneous-rupture
   margin r_c/L_nuc ≈ 1.71 verified by hand.
-- PENDING (re-run): Frontera `--print-derived` to confirm the gate numbers,
-  then a full run to confirm the speckle is gone and the rupture propagates.
+
+---
+
+## UPDATE — Round 2 (job 7745103): μ_s recalibration did NOT fix it
+
+The μ_s=0.85 run (outside ratio confirmed 0.754, all `[derived]` gates PASS)
+**still blows up**: V_max healthy ~4–6 m/s for ~1300 steps after nucleation,
+then exponential growth from step ~2700 (t≈0.95 s): 58 → 1437 → 33066 m/s …
+— essentially the same physical time as the μ_s=0.65 run.
+
+**This ELIMINATES the criticality-amplification hypothesis.** A fault loaded
+to only 0.754 of static yield cannot be tipped over by small radiated noise,
+yet it blew up anyway. The Round-1 "near-critical background amplifier" story
+was WRONG as the dominant cause. The growth is intrinsic to the actively-
+rupturing region, independent of background stress level.
+
+### New prime suspect: mixed-flux `adjacent` (non-dissipative central corridor)
+- `debug_document/mixed_flux_p2_debug.md` ("p=2 Mixed-Flux Adjacent —
+  Catastrophic Blow-up") documents THIS EXACT failure for TPV104/TPV205 +
+  adjacent: slip rate → 1e10–1e11 m/s, "isolated high values across the
+  propagated area, not just at peaks — consistent with an instability that
+  grows wherever a wave passes a fault-adjacent (central-flux) face."  That
+  is the SAFS speckle verbatim.
+- Mechanism (that doc, Hyp 5 LIKELY): the central flux on fault-adjacent
+  faces is NON-DISSIPATIVE (`godunov_flux.cpp:382` = ½·A·(Q_self+Q_nbr), no
+  |A| term), and the element-local ADER corrector's single face-flux pass
+  cannot damp the HF modes the way drdg3d's multi-stage RK does.
+- `ComputeMaxDt` still uses `cfl_mixed_flux_factor = 0.9` for Adjacent
+  (`wave_operator.inl:5186`) — only a 10% dt cut; the doc's recommended
+  ~0.3 (Zhang 2023 §3.3) was never applied.
+- SAFS extends the doc's p=2 finding to p=1: the under-resolved curvilinear
+  front (`L_nuc/h_min` = 3.05) supplies the grid noise that the
+  zero-dissipation central corridor then amplifies, even at p=1.
+- TPV205 ran stably with adjacent because it is well-resolved (little front
+  noise) — the flux is not inherently fatal; the SAFS noise source is.
+
+### Discriminator (in flight): the no-mixed-flux run
+`spatial_dyn_smoke_nomixedflux_*.sbatch` with `--mixed-flux none` (upwind
+everywhere → fully dissipative).  The mixed_flux_p2 doc predicts `none` is
+stable.
+- `none` bounded → CONFIRMS mixed-flux adjacent.  Fix: `mixed_flux = "none"`
+  for SAFS (simplest), or keep adjacent + tighten its CFL factor to ~0.3
+  (doc Fix A; preserves the SSO benefit at higher cost).
+- `none` also blows up → eliminates the flux → under-resolution/geometry;
+  fix = 250 m z0embed mesh.
+
+### Note on the Round-1 fix
+The μ_s=0.85 / δτ=20 MPa recalibration is NOT reverted: a 0.75 subcritical
+background is still desirable (no spontaneous background failure), and the
+spontaneous-rupture margin is intact.  But it is NOT sufficient on its own.
+
+---
+
+## UPDATE — Round 3 (job 7745138): mixed-flux is ELIMINATED too
+
+`--mixed-flux none` (log confirms `central-flux faces = 0`, full upwind
+dissipation everywhere) **also blows up**: V_max healthy ~4–6 m/s through
+step ~2600, then exponential from step 2700 (t≈1.05 s): 22 → 303 → 4035 m/s.
+Same onset, same character.
+
+So the Round-2 prediction ("none will be stable") was WRONG, and **mixed flux
+is eliminated** as the cause. One real signal survives: `none` grew **slower**
+(~2.6 %/step) than `adjacent` (~3.2 %/step) — the central flux was a genuine
+*amplifier* (consistent with `mixed_flux_p2_debug.md`) but **not the source**.
+The instability survives full upwind dissipation.
+
+### Two hypotheses now falsified by runs
+- μ_s / criticality (Round 2): 0.754 subcritical still blew up.
+- mixed flux (Round 3): `none` (upwind) still blew up.
+
+The blow-up is **invariant** to both → the source is a common factor of all
+three runs: the **500 m mesh (L_nuc/h_min = 3.05, under-resolved)**, μ_d/d_c,
+ADER-O2, or the curvilinear surface-rupturing geometry.  The screenshots show
+a checkerboard **riding the rupture front** (igniting down-dip of the patch,
+not at the free surface), and it onsets ~0.5 s after nucleation — consistent
+with the *accelerating* front's cohesive zone Lorentz-contracting below the
+grid as the rupture speeds up.  **Leading surviving hypothesis: cohesive-zone
+under-resolution.**
+
+Ruled out by code read this round:
+- Nucleation is **fault-only** — `ApplyGradualOverstressIncrement`
+  (`spatial_nucleation.cpp:174`) writes only `dof_data[i].tau{1,2}_nuc`
+  (fault QP DOFData), consumed as fault traction; never a bulk-Q body force.
+- Free surface is `natural_attrs={102}` and the fault reaches z=0, but the
+  speckle ignites at depth (down-dip), not at the surface tip.
+
+### Round-3 test (applied to config): D_c 1.0 → 2.0 m
+Single-variable resolution test on the SAME 500 m mesh: D_c=2.0 raises the
+patch `L_nuc/h_min` from 5.99 to **~12** (clears the ≥10 requirement;
+global ~6.1–19.4).  D_c doubles L_nuc (1.18→2.36 km), so the nucleation
+radius is enlarged 3000→4000 m to keep the supercritical core above L_nuc
+(`r_c≈2.70 km`, margin 1.14) — otherwise the rupture would go subcritical and
+arrest, confounding the test.  δτ stays 20 MPa.
+- **bounded** → confirms under-resolution is the source; production path is
+  the 250 m z0embed mesh at a *physical* D_c (2.0 m is inflated).
+- **still blows up** → eliminates static cohesive-zone resolution too; the
+  source is then the geometry (curvilinear/surface-rupturing front) or a
+  resolution-independent code issue at the ADER LSW front — escalate to the
+  250 m mesh and a per-element onset-locator.
+
+### Expected `[derived]` for the D_c=2.0 / radius=4000 run
+- `L_nuc/h_min` min/max ≈ **6.1 / 19.4** (patch ≈ 12; the printed *min* 6.1 is
+  the far high-σ_n region, not the patch).
+- `outside ratio` ≈ 0.754, `overshoot` ≈ +6.3 MPa, `in-patch dynamic` ≈ 1.96,
+  `in-patch static` ≈ 0.70 — all unchanged (D_c/radius don't affect them).

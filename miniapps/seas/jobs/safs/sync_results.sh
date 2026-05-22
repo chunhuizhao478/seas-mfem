@@ -5,9 +5,11 @@
 #
 # Run this on your LOCAL machine (Mac), not on Frontera.
 #
-# Auto-detects every `safs_dyn_smoke_*` directory under
+# Auto-detects every `safs_dyn_*` directory under
 #   <REMOTE_ROOT>   (default: the smoke output tree, see below)
-# and rsync's each one to a same-named local subdir.
+# and rsync's each one to a same-named local subdir.  This covers both the
+# smoke runs (safs_dyn_smoke_<jobid>) and the mixed-flux A/B runs
+# (safs_dyn_{none,adjacent,all_continuous}_<jobid>).
 #
 # By DEFAULT only `fault.vtkhdf` is transferred (the fault-surface artefact
 # you inspect).  Use --all to also grab volume.vtkhdf + ParaView_bulk/*.vtkhdf
@@ -21,6 +23,8 @@
 #   ./sync_results.sh                                # fault.vtkhdf, all smoke dirs
 #   ./sync_results.sh 7738686                        # only matching job(s)
 #   ./sync_results.sh 7738686 7738999                # multiple
+#   ./sync_results.sh none                           # mixed-flux A/B: --mixed-flux none run(s)
+#   ./sync_results.sh adjacent                       # mixed-flux A/B: adjacent run(s)
 #   ./sync_results.sh --all                          # fault + volume + bulk
 #   ./sync_results.sh --dry-run                      # preview, transfer nothing
 #   ./sync_results.sh --dest /Volumes/SSD/seas/safs
@@ -37,11 +41,15 @@
 
 set -u
 
-# Smoke output tree (per spatial_dyn_smoke_*_safs.sbatch:
-#   OUT=${SEAS_MFEM_ROOT}/miniapps/seas/safs/safs_dyn_smoke_${SLURM_JOB_ID}).
-# For a PRODUCTION run (output on $SCRATCH/<JOBNAME>), pass --remote-root.
+# Output tree.  Both sbatches write under
+#   ${SEAS_MFEM_ROOT}/miniapps/seas/safs/ :
+#   - spatial_dyn_smoke_*_safs.sbatch         -> safs_dyn_smoke_${SLURM_JOB_ID}
+#   - spatial_dyn_smoke_nomixedflux_*.sbatch  -> safs_dyn_${MIXED_FLUX}_${SLURM_JOB_ID}
+#       (MIXED_FLUX = none | adjacent | all_continuous)
+# The glob `safs_dyn_*` matches both families.  For a PRODUCTION run
+# (output on $SCRATCH/<JOBNAME>), pass --remote-root.
 REMOTE_ROOT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs"
-REMOTE_GLOB="safs_dyn_smoke_*"
+REMOTE_GLOB="safs_dyn_*"
 DEFAULT_DEST="$HOME/Downloads/seas-mfem/safs"
 
 # --- parse args ---

@@ -141,27 +141,31 @@ kind = "gradual_overstress"
 #   tau_strike0 ~= 26.32 MPa
 #   tau_dip0    ~= -12.65 MPa
 #   |tau_pre|   ~= 29.20 MPa  (mu_app = |tau_pre|/sigma_n_eff = 0.593)
-#   L_nuc       ~= 1.18 km    (mu_s=0.85, mu_d=0.30 -> mu_s-mu_d=0.55)
-# RECALIBRATED (job-7744292 fix): raising mu_s to 0.85 (see [friction]
-# below) lifts the in-patch static yield to mu_s*sigma_n_eff ~= 41.9 MPa,
-# so the old 6.5 MPa delta_tau no longer reaches yield (would undershoot
-# by ~6 MPa and never nucleate).  delta_tau_strike = 20 MPa restores a
-# SUPERCRITICAL nucleation core comfortably larger than L_nuc, so the
-# event ruptures SPONTANEOUSLY and does NOT arrest when the T_nuc ramp
-# ends.  Spontaneous-rupture budget (Gaussian F(r)=exp(-(r/radius)^2)):
+#   L_nuc       ~= 2.36 km    (mu_s=0.85, mu_d=0.30, D_c=2.0 m)
+# RECALIBRATED in rounds (jobs 7744292 / 7745103 / 7745138):
+#  (1) mu_s 0.65->0.85 dropped the background to 0.75 of yield; delta_tau
+#      6.5->20 MPa restored the trigger (see [friction]).  Did NOT stop the
+#      salt-and-pepper blow-up -> criticality was not the cause.
+#  (2) --mixed-flux none (full upwind dissipation) also still blew up ->
+#      the central flux was only an amplifier, not the source.
+#  (3) D_c 1.0->2.0 m raises the cohesive zone to L_nuc/h_min ~= 12 in the
+#      patch (the >=10 requirement) to test the UNDER-RESOLUTION hypothesis
+#      on the 500 m mesh.  D_c doubles L_nuc (1.18->2.36 km), so the
+#      nucleation RADIUS is enlarged 3000->4000 m to keep the supercritical
+#      core above L_nuc (otherwise the rupture goes subcritical and
+#      arrests, which would confound the resolution test).
+# Spontaneous-rupture budget (Gaussian F(r)=exp(-(r/radius)^2)):
 #   yield gap at center  = mu_s*sigma_n_eff - |tau_pre| = 12.7 MPa
-#   supercritical radius  r_c = 3000*sqrt(-ln(12.7/20)) ~= 2.02 km
-#   margin r_c / L_nuc   ~= 1.71   (>1 required; 1.7 is a safe margin)
+#   supercritical radius  r_c = 4000*sqrt(-ln(12.7/20)) ~= 2.70 km
+#   margin r_c / L_nuc   ~= 1.14   (>1 required for spontaneous rupture)
 #   center overshoot     = |tau_pre| + delta_tau - mu_s*sigma_n_eff
 #                        ~= 29.2 + 20 - 41.9 = +7.3 MPa  (gate TRIGGER ok)
-# 16-18 MPa also nucleate but with thinner core margins (1.22-1.50);
-# 20 MPa was chosen to robustly guarantee spontaneous propagation, and
-# is still below the 25 MPa "gross overdrive" ceiling.
+# delta_tau stays 20 MPa (below the 25 MPa "gross overdrive" ceiling).
 center_x_m          =  606971.0
 center_y_m          = 3707270.0
 center_z_m          =   -4965.62
-radius_dip_m        =     3000.0
-radius_strike_m     =     3000.0
+radius_dip_m        =     4000.0
+radius_strike_m     =     4000.0
 delta_tau_dip_pa    =        0.0
 delta_tau_strike_pa =     20.0e6
 T_nuc_s             =        1.0
@@ -191,21 +195,29 @@ T_nuc_s             =        1.0
 #   - TRADEOFF (accepted per run directive): raising mu_s widens
 #     (mu_s-mu_d) 0.35 -> 0.55, so L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff)
 #     shrinks ~1.86 km -> 1.18 km at the patch (global ~0.6-1.9 km).  On
-#     the 500 m z0embed mesh (h_min~197 m) that is L_nuc/h_min ~3.0-9.7
-#     (was 4.8-15.3) — the cohesive zone is MORE under-resolved.  This fix
-#     removes the AMPLIFIER (criticality), not the SEED (resolution); if
-#     residual front speckle appears, swap [mesh].path to the 250 m
-#     z0embed (~2x finer -> L_nuc/h_min ~6-19).
-#   - D_c = 1.0 m: unchanged (upper end of published crustal LSW range).
+#     the 500 m z0embed mesh (h_min~197 m) that WOULD be L_nuc/h_min
+#     ~3.0-9.7 at D_c=1.0 — MORE under-resolved.  The D_c bump below
+#     compensates this (and then some).
+#   - D_c = 2.0 m (was 1.0): RAISED to resolve the cohesive zone on the
+#     500 m mesh.  At D_c=2.0, L_nuc/h_min ~= 12 in the patch (global
+#     ~6.1-19.4), clearing the >=10 requirement the [derived] check prints.
+#     This is the SEED (resolution) lever, distinct from the mu_s
+#     (criticality) and mixed-flux levers that did NOT stop the blow-up.
+#     Doubling D_c doubles L_nuc, so the nucleation radius is enlarged to
+#     4000 m to keep r_c > L_nuc (see [nucleation.gradual_overstress]).
+#     2.0 m is at/above the upper end of published crustal LSW D_c; if it
+#     stops the speckle, the production path is the 250 m z0embed mesh at a
+#     physical D_c, not this inflated value.
 # Nucleation budget at the patch DOF (sigma_n_eff~49.3 MPa, tau_pre~29.2 MPa):
 #   static threshold           mu_s * sigma_n_eff       ~= 41.9 MPa
 #   strike-only delta_tau to reach yield at the center  ~= 12.7 MPa
 # The configured 20 MPa (see [nucleation.gradual_overstress]) clears that
-# with a +7.3 MPa overshoot AND builds a supercritical core (r_c~2.0 km)
-# that is ~1.7x L_nuc, so the event ruptures spontaneously.
+# with a +7.3 MPa overshoot AND, with radius=4000 m, builds a supercritical
+# core (r_c~2.70 km) that is ~1.14x L_nuc (=2.36 km at D_c=2.0), so the
+# event ruptures spontaneously.
 mu_s_default     = 0.85
 mu_d_default     = 0.30
-d_c_default      = 1.0
+d_c_default      = 2.0
 cohesion_default = 0.0
 
 # Lock the deepest band as a barrier (resolver sets internal mu_s = 1.0e6).
