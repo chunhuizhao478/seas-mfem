@@ -93,7 +93,7 @@ sigma_xz_pa = 0.0
 [numerics]
 ader_order = 2
 mixed_flux = "adjacent"
-cfl        = 0.5
+cfl        = 0.1
 use_pml    = false
 
 [time]
