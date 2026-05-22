@@ -99,14 +99,32 @@ make seas_spatial_dyn_driver -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 SAFS_ROOT=safs/project_7.0_alternative
 # Config override for the post-event-blowup A/B experiments (default =
-# baseline projected-stress, mu_s=0.65).  Vary ONE knob at a time:
-#   H1 (raise mu_s): sbatch --export=ALL,SAFS_CONFIG=${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress_mus080.toml
+# baseline projected-stress: mu_s=0.65 / mu_d=0.30, 500 m z0embed mesh).
+# Vary ONE knob at a time, e.g. swap in a calibration variant:
+#   sbatch --export=ALL,SAFS_CONFIG=${SAFS_ROOT}/config/<variant>.toml
 CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress.toml}"
-MESH="${SAFS_ROOT}/meshing/results/msh/safs_fault_box_nwcut_1000m_lcfar3000.msh"
+
+# Mesh: the config's [mesh].path is the SINGLE SOURCE OF TRUTH — read it
+# from the config rather than hardcoding a path here, so the sbatch can
+# never again pin a stale mesh while the config has moved on.  That exact
+# drift ran the slivered 1000m mesh under the mu_d=0.30 config in job
+# 7743351 and re-triggered the 2026-05-20 north-tip blow-up.  Override for
+# mesh-refinement A/B experiments with --export=ALL,SAFS_MESH=<path>.msh.
+if [[ -n "${SAFS_MESH:-}" ]]; then
+    MESH="${SAFS_MESH}"
+else
+    MESH=$(sed -n '/^\[mesh\]/,/^\[/p' "${CONFIG_TOML}" \
+            | grep -E '^[[:space:]]*path[[:space:]]*=' | head -1 \
+            | sed -E 's/^[^=]*=[[:space:]]*"?([^"#]*)"?.*/\1/; s/[[:space:]]+$//')
+fi
 
 # Fail fast before launching 400 ranks: the .msh is gitignored and does
 # NOT arrive with `git pull`.  It must be scp'd to the cluster (or
-# regenerated via ${SAFS_ROOT}/meshing/code/run_nwcut_meshing.py).
+# regenerated via ${SAFS_ROOT}/meshing/code/run_z0cut_meshing.py).
+if [[ -z "${MESH}" ]]; then
+    echo "ERROR: could not resolve [mesh].path from ${CONFIG_TOML}"
+    exit 1
+fi
 if [[ ! -f "${MESH}" ]]; then
     echo "ERROR: SAFS mesh not found:"
     echo "         $(pwd)/${MESH}"
