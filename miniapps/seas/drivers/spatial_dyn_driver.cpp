@@ -1207,8 +1207,17 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    // 15. CFL / Δt and derived numbers.  ComputeMaxDt is the scalar-
    //     material implementation (deviation D-1).
+   //
+   //     The ADER-DG stable step carries a 1/(2N+1) spatial-order factor
+   //     (N = cfg.mesh.order) plus a safety margin; ComputeMaxDt applies
+   //     NEITHER (only its internal mixed-flux factor).  Mirror the
+   //     verified tpv205_driver.cpp:1242 conversion so cfg.numerics.cfl
+   //     is a TPV205-style safety knob, not the raw CFL number.  Passing
+   //     0.5 raw stepped at 9x TPV205's dt -> above the N=1 stability
+   //     boundary -> nucleation-end velocity blow-up (job 7743554).
    // -----------------------------------------------------------------
-   const real_t dt_cfl = wave.ComputeMaxDt(cfg.numerics.cfl);
+   const real_t dt_cfl = wave.ComputeMaxDt(
+      cfg.numerics.cfl / (3.0 * (2.0 * cfg.mesh.order + 1.0)));
    real_t dt = (cfg.time.dt_initial > 0.0)
                 ? cfg.time.dt_initial : dt_cfl;
    // R-006: warn if the user override exceeds the explicit CFL bound.
