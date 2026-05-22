@@ -991,15 +991,13 @@ int main(int argc, char *argv[])
    const int num_fault_total  = num_fault_local + num_shared_fault;
 
    // Reconstruct FaultBasis on this rank (interior + shared appended).
-   // For a SAFS curvilinear fault the canonical (BP5 / TPV205) choice
-   // is ref_normal = +y (pointing into the box's east half) and
-   // up = +z.  FaultBasis::Compute orients each face's normal against
-   // ref_normal; non-orthogonal ref_normal still resolves a consistent
-   // sign per face.  Adjustable via a TOML knob in a follow-up commit
-   // if a SAFS run reports sign-flipped basis vectors at every face
-   // (R-604 round-6).
+   // IMPORTANT: this basis must match WaveOperator's runtime fault basis
+   // exactly, otherwise tau_pre / sigma_n / nucleation are resolved in one
+   // signed local frame and consumed by the friction solve in another.
+   // WaveOperator uses the BP5 / Tandem convention ref_normal = -y and
+   // up = +z (wave_operator.inl ctor path).  Keep the same convention here.
    Vector ref_normal(3);
-   ref_normal(0) = 0.0;  ref_normal(1) = 1.0;  ref_normal(2) = 0.0;
+   ref_normal(0) = 0.0;  ref_normal(1) = -1.0; ref_normal(2) = 0.0;
    Vector up_vec(3);
    up_vec(0)     = 0.0;  up_vec(1)     = 0.0;  up_vec(2)     = 1.0;
 
