@@ -1,18 +1,18 @@
 #!/bin/bash
-#SBATCH -J tpv102_spdyn_1000m_p1_O2_dev
-#SBATCH -o tpv102_spdyn_1000m_p1_O2_dev_%j.out
-#SBATCH -e tpv102_spdyn_1000m_p1_O2_dev_%j.err
+#SBATCH -J tpv102_spdyn_200m_p1_O2_dev
+#SBATCH -o tpv102_spdyn_200m_p1_O2_dev_%j.out
+#SBATCH -e tpv102_spdyn_200m_p1_O2_dev_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# TPV102 (SCEC FL=101 rate-and-state) 1000 m mesh, P=1 + ADER-O2,
+# TPV102 (SCEC FL=101 rate-and-state) 200 m mesh, P=1 + ADER-O2,
 # DEV-QUEUE smoke run through the heterogeneous Riemann solver.
 # =======================================================================
 #
-# Same driver/mesh/config as tpv102_spatial_dyn_1000m_p2_O3_normal.sbatch
+# Same driver/mesh/config as tpv102_spatial_dyn_200m_p2_O3_normal.sbatch
 # but at polynomial order 1 (P1) with ADER time order 2 (Pelties O2), on
 # the development queue with a 2 h envelope.  Use this to confirm the run
 # starts cleanly (build OK, mesh OK, bimaterial banner, station + ParaView
@@ -22,8 +22,8 @@
 # ---------------------
 # No --order CLI flag exists; the mesh polynomial order is set ONLY via
 # the TOML [mesh].order field, which is already `order = 1` in the
-# canonical tpv102.toml — so this run consumes the config VERBATIM (no
-# sed override, unlike the P2/O3 sbatch).  ADER order IS a CLI flag →
+# canonical tpv102.toml, so no ORDER sed is needed; but we DO sed the
+# mesh path (1000m -> 200m) into an override config.  ADER order IS a CLI flag →
 # `--ader-order 2` (matches tpv102.toml [numerics].ader_order; stated
 # explicitly for provenance).
 #
@@ -44,7 +44,7 @@
 #
 # Wall-time budget
 # ----------------
-# Dev queue 2 h envelope.  At P1/O2 on the 1000 m mesh the auto dt is
+# Dev queue 2 h envelope.  At P1/O2 on the 200 m mesh the auto dt is
 # ~9e-3 s (cfl_safety=dg) and tfinal = 12 s needs O(10^3) macro-steps; a
 # 2 h dev slot at 400 ranks should reach a meaningful fraction of (or all
 # of) the run.  The full-fidelity run is the companion
@@ -114,9 +114,9 @@ grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZF
 
 cd miniapps/seas
 
-# Regenerate the 1000 m .msh from .geo on first run or when FORCE_MESHGEN=1.
-MESH_SRC="tpv102/mesh/tpv102_1000m.geo"
-MESH_OUT="tpv102/mesh/tpv102_1000m.msh"
+# Regenerate the 200 m .msh from .geo on first run or when FORCE_MESHGEN=1.
+MESH_SRC="tpv102/mesh/tpv102_200m.geo"
+MESH_OUT="tpv102/mesh/tpv102_200m.msh"
 GMSH_BIN="${SEAS_MFEM_ROOT}/extern/gmsh/bin/gmsh"
 if [ ! -s "${MESH_OUT}" ] || [ "${FORCE_MESHGEN:-0}" = "1" ] || [ "${FORCE_MESHGEN:-}" = "YES" ]; then
     if [ ! -x "${GMSH_BIN}" ]; then
@@ -139,8 +139,15 @@ if [ ! -s "${MESH_OUT}" ]; then
    exit 1
 fi
 
-RESULT_DIR="tpv102/results_spatial_dyn_1000m_p1_O2_dev_job${SLURM_JOB_ID}"
+RESULT_DIR="tpv102/results_spatial_dyn_200m_p1_O2_dev_job${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}"
+
+# Build a 200m override config from the canonical tpv102.toml by sed-
+# replacing the mesh path (1000m -> 200m).  Order stays 1 (P1), so no
+# order sed is needed.  Override file lives under RESULT_DIR.
+CONFIG_OVERRIDE="${RESULT_DIR}/tpv102_200m_p1.toml"
+sed 's|tpv102_1000m\.msh|tpv102_200m.msh|' tpv102/configs/tpv102.toml \
+   > "${CONFIG_OVERRIDE}"
 
 # The seas_spatial_dyn_driver binary is built ONCE by the separate
 # one-shot build job (jobs/build_spatial_dyn_driver_dev.sbatch).  Submit
@@ -160,8 +167,8 @@ echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Driver:        seas_spatial_dyn_driver (TOML-driven)"
-echo "Config:        tpv102/configs/tpv102.toml"
-echo "Mesh:          tpv102/mesh/tpv102_1000m.msh"
+echo "Config:        ${CONFIG_OVERRIDE} (mesh 200m override of tpv102.toml)"
+echo "Mesh:          tpv102/mesh/tpv102_200m.msh"
 echo "Polynomial:    --order 1 (TOML mesh.order) + --ader-order 2 (Pelties O2)"
 echo "Interior flux: bimaterial (heterogeneous Riemann; byte-identical on homogeneous material)"
 echo "Friction law:  rate_state (regularised R&S, ageing law, FL=101)"
@@ -172,12 +179,11 @@ echo "Stations:      9 SCEC on-fault traces (prefix tpv102_)"
 echo "ParaView:      fault=hdf5 every 0.001 s (TOML default)"
 echo "========================================"
 
-# CLI overrides: output_dir (avoid clobbering tpv102/out) + explicit
-# --ader-order 2 (matches tpv102.toml [numerics].ader_order; stated for
-# provenance/symmetry with the p2/O3 run).  All physics from the TOML;
-# P1 needs no config override (order = 1 is the canonical TOML default).
+# CLI overrides: output_dir + --ader-order 2 (matches tpv102.toml
+# [numerics].ader_order).  --config is the 200m mesh-path-overridden copy;
+# order stays 1 (P1), so no order sed is needed.
 ibrun ./seas_spatial_dyn_driver \
-      --config tpv102/configs/tpv102.toml \
+      --config "${CONFIG_OVERRIDE}" \
       --output-dir "${RESULT_DIR}" \
       --ader-order 2 \
       --verify-dispatch
@@ -212,7 +218,7 @@ if [ -s "${HYPO_FILE}" ]; then
    N_ROWS=$(awk '!/^#/ && NF>=1 && $1+0==$1' "${HYPO_FILE}" | wc -l | tr -d ' ')
 fi
 
-DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv102_spdyn_1000m_p1_O2_dev_${SLURM_JOB_ID}.out"
+DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv102_spdyn_200m_p1_O2_dev_${SLURM_JOB_ID}.out"
 
 # Gate 1 — heterogeneous Riemann precomputation banner.
 BIMAT_VERDICT="UNKNOWN"
@@ -243,10 +249,10 @@ else
 fi
 
 {
-   echo "TPV102 spatial_dyn_driver (heterogeneous Riemann, 1000 m mesh, P=1 + ADER-O2, dev queue)"
+   echo "TPV102 spatial_dyn_driver (heterogeneous Riemann, 200 m mesh, P=1 + ADER-O2, dev queue)"
    echo "Driver:                  seas_spatial_dyn_driver (TOML-driven)"
-   echo "Config:                  tpv102/configs/tpv102.toml"
-   echo "Mesh:                    tpv102_1000m.msh"
+   echo "Config:                  ${CONFIG_OVERRIDE}"
+   echo "Mesh:                    tpv102_200m.msh"
    echo "Polynomial order:        --order 1 (TOML mesh.order) + --ader-order 2"
    echo "Interior flux:           bimaterial (heterogeneous Riemann; byte-identical on homogeneous)"
    echo "Iterator:                one-shot (TOML default)"

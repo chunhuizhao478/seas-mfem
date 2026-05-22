@@ -1,14 +1,14 @@
 #!/bin/bash
-#SBATCH -J tpv104_spdyn_1000m_p2_O3_norm
-#SBATCH -o tpv104_spdyn_1000m_p2_O3_norm_%j.out
-#SBATCH -e tpv104_spdyn_1000m_p2_O3_norm_%j.err
+#SBATCH -J tpv104_spdyn_100m_p2_O3_norm
+#SBATCH -o tpv104_spdyn_100m_p2_O3_norm_%j.out
+#SBATCH -e tpv104_spdyn_100m_p2_O3_norm_%j.err
 #SBATCH -p normal
 #SBATCH -N 10
 #SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# TPV104 (SCEC FL=103 slip-law strong-rate-weakening) 1000 m mesh,
+# TPV104 (SCEC FL=103 slip-law strong-rate-weakening) 100 m mesh,
 # P=2 + ADER-O3, NORMAL-QUEUE production run, heterogeneous Riemann.
 # =======================================================================
 #
@@ -25,8 +25,8 @@
 # the TOML [mesh].order field.  We build a sed-override config that flips
 # `order = 1` -> `order = 2` (override file under RESULT_DIR for
 # provenance).  ADER order IS a CLI flag → `--ader-order 3` (validated in
-# {2,3,4}).  TPV104 has a single 1000 m mesh, so — unlike the
-# tpv205_spatial jobs — the sed does NOT rewrite a mesh path.
+# {2,3,4}).  The sed-override rewrites BOTH the mesh path (1000m -> 100m) AND
+# the order, exactly like the tpv205_spatial jobs.
 #
 # Why the heterogeneous Riemann path
 # ----------------------------------
@@ -123,9 +123,9 @@ grep -q '^MFEM_USE_H5Z_ZFP *= YES'  config/config.mk || { echo "ERROR: no H5Z-ZF
 
 cd miniapps/seas
 
-# Regenerate the 1000 m .msh from .geo on first run or when FORCE_MESHGEN=1.
-MESH_SRC="tpv104/mesh/tpv104_1000m.geo"
-MESH_OUT="tpv104/mesh/tpv104_1000m.msh"
+# Regenerate the 100 m .msh from .geo on first run or when FORCE_MESHGEN=1.
+MESH_SRC="tpv104/mesh/tpv104_100m.geo"
+MESH_OUT="tpv104/mesh/tpv104_100m.msh"
 GMSH_BIN="${SEAS_MFEM_ROOT}/extern/gmsh/bin/gmsh"
 if [ ! -s "${MESH_OUT}" ] || [ "${FORCE_MESHGEN:-0}" = "1" ] || [ "${FORCE_MESHGEN:-}" = "YES" ]; then
     if [ ! -x "${GMSH_BIN}" ]; then
@@ -148,13 +148,14 @@ if [ ! -s "${MESH_OUT}" ]; then
    exit 1
 fi
 
-# Build a P2-override config from the canonical tpv104.toml by sed-
-# replacing `order = 1` -> `order = 2` (mesh polynomial order; there is
-# no --order CLI flag).  Override file lives under RESULT_DIR.
-RESULT_DIR="tpv104/results_spatial_dyn_1000m_p2_O3_normal_job${SLURM_JOB_ID}"
+# Build a 100m+P2 override config from the canonical tpv104.toml by sed-
+# replacing the mesh path (1000m -> 100m) AND `order = 1` -> `order = 2`
+# (no --order CLI flag).  Override file lives under RESULT_DIR.
+RESULT_DIR="tpv104/results_spatial_dyn_100m_p2_O3_normal_job${SLURM_JOB_ID}"
 mkdir -p "${RESULT_DIR}"
-CONFIG_OVERRIDE="${RESULT_DIR}/tpv104_1000m_p2.toml"
-sed 's|^order = 1|order = 2|' tpv104/configs/tpv104.toml \
+CONFIG_OVERRIDE="${RESULT_DIR}/tpv104_100m_p2.toml"
+sed -e 's|tpv104_1000m\.msh|tpv104_100m.msh|' \
+    -e 's|^order = 1|order = 2|' tpv104/configs/tpv104.toml \
    > "${CONFIG_OVERRIDE}"
 
 # The seas_spatial_dyn_driver binary is built ONCE by the separate
@@ -175,8 +176,8 @@ echo "========================================"
 echo "Git commit:    $(git rev-parse HEAD)"
 echo "Git branch:    $(git rev-parse --abbrev-ref HEAD)"
 echo "Driver:        seas_spatial_dyn_driver (TOML-driven)"
-echo "Config:        ${CONFIG_OVERRIDE} (order=2-overridden tpv104.toml)"
-echo "Mesh:          tpv104/mesh/tpv104_1000m.msh"
+echo "Config:        ${CONFIG_OVERRIDE} (mesh 100m + order=2 override of tpv104.toml)"
+echo "Mesh:          tpv104/mesh/tpv104_100m.msh"
 echo "Polynomial:    order 2 (TOML mesh.order override) + ader-order 3 (Pelties O3)"
 echo "Interior flux: bimaterial (heterogeneous Riemann; byte-identical on homogeneous material)"
 echo "Friction law:  rate_state (slip-law strong-rate-weakening, FL=103)"
@@ -224,7 +225,7 @@ if [ -s "${HYPO_FILE}" ]; then
    N_ROWS=$(awk '!/^#/ && NF>=1 && $1+0==$1' "${HYPO_FILE}" | wc -l | tr -d ' ')
 fi
 
-DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv104_spdyn_1000m_p2_O3_norm_${SLURM_JOB_ID}.out"
+DISPATCH_LOG="${SBATCH_LOG_DIR}/tpv104_spdyn_100m_p2_O3_norm_${SLURM_JOB_ID}.out"
 
 # Gate 1 — heterogeneous Riemann precomputation banner.
 BIMAT_VERDICT="UNKNOWN"
@@ -255,10 +256,10 @@ else
 fi
 
 {
-   echo "TPV104 spatial_dyn_driver (heterogeneous Riemann, 1000 m mesh, P=2 + ADER-O3, normal queue)"
+   echo "TPV104 spatial_dyn_driver (heterogeneous Riemann, 100 m mesh, P=2 + ADER-O3, normal queue)"
    echo "Driver:                  seas_spatial_dyn_driver (TOML-driven)"
    echo "Config:                  ${CONFIG_OVERRIDE}"
-   echo "Mesh:                    tpv104_1000m.msh"
+   echo "Mesh:                    tpv104_100m.msh"
    echo "Polynomial order:        order 2 + ader-order 3"
    echo "Interior flux:           bimaterial (heterogeneous Riemann; byte-identical on homogeneous)"
    echo "Iterator:                one-shot (TOML default)"
