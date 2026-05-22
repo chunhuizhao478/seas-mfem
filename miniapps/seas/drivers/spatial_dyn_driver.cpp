@@ -971,6 +971,35 @@ int main(int argc, char *argv[])
    wave.SetFaultFrictionLaw(FaultFrictionLaw::LSW);
    wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
 
+   // Prove the mixed-flux mode is NOT a silent no-op: report the GLOBAL
+   // count of central-flux faces actually populated by
+   // BuildCentralFluxFaceSet_.  The startup banner only echoes the config
+   // STRING ("mixed flux: adjacent"); this prints what the operator really
+   // built.  none -> 0 (upwind everywhere); adjacent / all_continuous -> > 0
+   // iff fault-adjacent non-fault interior faces exist on this mesh.
+   // (Rank-summed; a shared non-fault face is counted on each rank that
+   // owns it, so seam faces are slightly over-counted — fine as an
+   // "is it active" signal.  Compare none vs adjacent: 0 vs N.)
+   {
+      long long central_local =
+         static_cast<long long>(wave.GetCentralFluxFaceSet().size());
+      long long central_global = central_local;
+#ifdef MFEM_USE_MPI
+      MPI_Reduce(&central_local, &central_global, 1, MPI_LONG_LONG,
+                 MPI_SUM, 0, comm);
+#endif
+      if (rank == 0)
+      {
+         std::cout << "[mixed-flux] mode = " << cfg.numerics.mixed_flux
+                   << ", central-flux faces (rank-summed) = "
+                   << central_global
+                   << (central_global == 0
+                       ? "  (upwind everywhere — mode is a NO-OP)"
+                       : "  (central flux ACTIVE on these faces)")
+                   << "\n";
+      }
+   }
+
    wave.SetTime(cfg.time.t_initial);
 
    // -----------------------------------------------------------------
