@@ -98,13 +98,15 @@ Job script: `jobs/safs/spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch`.
   the mechanism already exists, commit `fc28454`, and the call site is correct:
   `spatial_dyn_driver.cpp:1994` passes `tol, &worst_rel, &worst_field,
   abort_on_fail=!nonfatal`).
-- Expected: the run advances with no V_max blow-up (Part A fixed). The R-101
-  `worst_rel` stays bounded because with no dip slip there is nothing for the
-  cross-rank inconsistency to run away into (see "why dip, not strike" below).
+- Result (job 7747119, MEASURED): the run advances with **no V_max blow-up**
+  (`V_max` peaks ~6.3 m/s then decreases) — **Part A is fixed.** Crucially, the
+  R-101 non-fatal log still goes `worst_rel → 1.0` at t≈0.595 s (in the STRIKE
+  fields V2/slip2): so Part A removed the *blow-up*, but **issue B (the cross-rank
+  speckle) is still present** — direction-blind, just non-catastrophic without dip.
 
-**Acceptance for Part A (already met / re-confirm):** the zerodip job runs past
-the old blow-up window with `V_max` physical (no 10³) and the non-fatal R-101
-log shows `worst_rel` bounded (not → O(1)).
+**Acceptance for Part A (met):** `V_max` physical (no 10³, peaks ~6 then decays).
+The persistent `worst_rel → 1.0` and the speckled slip-rate elements are **issue
+B**, addressed by Part B below — NOT a Part-A regression.
 
 ---
 
@@ -249,12 +251,23 @@ blow up while zerodip doesn't?** Two parts, kept honest:
     along the surface) does not. So a dip inconsistency leaks into the
     **unconstrained** normal channel (fact 3) and runs away; a strike
     inconsistency does not feed an un-capped channel and stays bounded.
-  - **Empirical confirmation:** zero the dip pre-stress (`SEAS_ZERO_DIP_PRESTRESS=1`)
-    → no dip slip → the *same code with the same 1e-14 split* runs without blowing
-    up (R-101 non-fatal `worst_rel` stays bounded). The zerodip sbatch states this
-    hypothesis: "that dip-slip drive (via slip↔normal-stress coupling) is what
-    makes the rupture blow up." I label the coupling a HYPOTHESIS because it lives
-    in the bulk, not in the fault-flux equations above; the zerodip run is its test.
+  - **Empirical result (zerodip job 7747119, MEASURED):** zeroing the dip
+    pre-stress separates the two effects cleanly:
+    - **Blow-up is gone** — `V_max` stays 0 to t=0.525 s, peaks at **~6.3 m/s**
+      (t=0.66 s), then *decreases* to ~3. A healthy rupture, no runaway. So the
+      dip load IS what drives the *catastrophic blow-up* (its absence → no
+      blow-up), consistent with the dip↔normal-coupling hypothesis (which lives
+      in the bulk, not the flux equations; this run is its test).
+    - **But the cross-rank inconsistency is STILL THERE** — the R-101 non-fatal
+      log shows `worst_rel` at machine precision (≤1.8e-14) through step 1500,
+      then jumping to **0.13 (step 1600, t=0.56 s) → 1.0 (step 1700)**, in fields
+      **V2 (strike velocity) and slip2 (strike slip)**. So the inconsistency
+      diverges in STRIKE here — **it is direction-blind** (corrects my earlier
+      "strike works"). It coincides exactly with the **speckled slip-rate elements
+      outside the rupture** seen in ParaView → **the speckle IS issue B**.
+    - **Net:** the cross-rank speckle (issue B) is present for any slip direction;
+      whether it then BLOWS UP depends on the dip↔normal runaway. zerodip keeps
+      it bounded (speckle ~O(1) m/s, no blow-up); the oblique run does not.
 
 **Bottom line for the fix.** Because the local solve is direction-symmetric and
 the trigger corrupts the whole slip vector, the fix must make the slip decision
@@ -564,14 +577,20 @@ config-agnostic.
    identical V1/V2/τ*_corr through t=0.478 s; R-101 passes; reaches tfinal.
 3. Re-run the physical `D_c=1.0` baseline config (not just the inflated Dc2) to
    confirm the fix is not tuned to Dc2.
-4. Re-confirm Part A: the `zerodip` job still runs clean (the reconcile must not
-   regress the strike-only path).
+4. **zerodip as an issue-B oracle (job 7747119 baseline = `worst_rel → 1.0` +
+   visible speckle):** re-run zerodip post-fix; `worst_rel` must stay ≤1e-13 (no
+   `DIVERGED`) AND the speckled slip-rate elements outside the rupture must
+   vanish. This is the cleanest already-set-up confirmation that the reconcile
+   fixes issue B in the strike-only (non-catastrophic) case — separate from the
+   blow-up.
 
 ### Acceptance Criteria
 - [ ] Local regression green (modulo documented pre-existing).
 - [ ] Frontera Dc2 AND `D_c=1.0`: no R-101 abort, no blow-up; `V_max` peaks then
       decreases.
-- [ ] zerodip job unchanged (still clean).
+- [ ] **zerodip post-fix:** `worst_rel ≤ 1e-13` for the whole run (was → 1.0 at
+      t≈0.595 s) AND no speckle in ParaView (was scattered cyan elements). `V_max`
+      unchanged (~6 m/s, still physical).
 
 ### Dependencies
 - Depends on: Phase 2, Phase 3.
