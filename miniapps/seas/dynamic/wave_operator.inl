@@ -453,14 +453,31 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
             elem1_c /= static_cast<real_t>(e1_verts.Size());
          }
 
-         // Same convention as the shared-fault block: a point with
-         // SMALLER (more negative) projection onto ref_normal is on
-         // the "+" side (side opposite where ref_normal points).
+         // R-SAFS (curvilinear-fault side fix): project the centroid offset
+         // onto the CANONICAL FACE NORMAL, not the hardcoded ref_normal.
+         // Projecting onto ref_normal mislabels the +/- side once the fault
+         // tilts enough that ref_normal's tangential component dominates the
+         // (asymmetric) centroid offset — the margin |elem1_proj - face_proj|
+         // is O(|n·ref_normal|) and flips sign at a geometry-set tilt angle,
+         // breaking the "exactly one side is +" invariant on shared faces
+         // (tilted-fault serial-vs-parallel test).  The true face normal gives
+         // a robust O(element-size) margin at EVERY fault-trace angle.  For
+         // planar TPV/BP5 faults the canonical normal == ref_normal (up to a
+         // positive |J_F| scale), so the comparison sign — hence the stored
+         // bool — is unchanged (byte-exact).  Convention preserved: a point
+         // with SMALLER projection onto the canonical normal is on the "+"
+         // side.
+         Vector fn(3);
+         CalcOrtho(ftr->Face->Jacobian(), fn);
+         if (FaultBasis::NormalNeedsFlipToCanonical(fn, ref_normal, 3))
+         {
+            fn.Neg();
+         }
          real_t face_proj = 0.0, elem1_proj = 0.0;
          for (int d = 0; d < 3; d++)
          {
-            face_proj  += face_c(d)  * ref_normal(d);
-            elem1_proj += elem1_c(d) * ref_normal(d);
+            face_proj  += face_c(d)  * fn(d);
+            elem1_proj += elem1_c(d) * fn(d);
          }
          interior_fault_elem1_on_plus_[i] = (elem1_proj < face_proj);
       }
@@ -511,16 +528,30 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                elem1_c /= static_cast<real_t>(e1_verts.Size());
             }
 
-            // Projections along ref_normal: canonical arrow points in
-            // ref_normal direction.  "+ side" = origin half-space =
-            // opposite to ref_normal direction.  A point with SMALLER
-            // (more negative) projection onto ref_normal is on the
-            // +side.  So elem1_on_plus = (elem1_proj < face_proj).
+            // R-SAFS (curvilinear-fault side fix): project the centroid offset
+            // onto the CANONICAL FACE NORMAL, not the hardcoded ref_normal —
+            // see the interior-fault block above for the full rationale.  On a
+            // shared face CalcOrtho gives OPPOSITE raw normals on the two
+            // ranks (±n_phys); NormalNeedsFlipToCanonical maps both to the SAME
+            // canonical direction (a pure function of the physical normal
+            // line), so projecting each rank's local elem1 centroid offset
+            // onto it yields exactly ONE rank with elem1_on_plus == true at
+            // every fault-trace angle (the invariant the old ref_normal
+            // projection broke past a geometry-set tilt).  Convention
+            // preserved: SMALLER projection onto the canonical normal => "+"
+            // side.  Planar TPV/BP5: canonical normal == ref_normal => bool
+            // unchanged (byte-exact).
+            Vector fn(3);
+            CalcOrtho(ftr->Face->Jacobian(), fn);
+            if (FaultBasis::NormalNeedsFlipToCanonical(fn, ref_normal, 3))
+            {
+               fn.Neg();
+            }
             real_t face_proj  = 0.0, elem1_proj = 0.0;
             for (int d = 0; d < 3; d++)
             {
-               face_proj  += face_c(d)  * ref_normal(d);
-               elem1_proj += elem1_c(d) * ref_normal(d);
+               face_proj  += face_c(d)  * fn(d);
+               elem1_proj += elem1_c(d) * fn(d);
             }
             shared_fault_elem1_on_plus_[sf_idx] = (elem1_proj < face_proj);
 

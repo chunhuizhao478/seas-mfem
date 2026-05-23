@@ -283,3 +283,98 @@ arrest, confounding the test.  δτ stays 20 MPa.
   the far high-σ_n region, not the patch).
 - `outside ratio` ≈ 0.754, `overshoot` ≈ +6.3 MPa, `in-patch dynamic` ≈ 1.96,
   `in-patch static` ≈ 0.70 — all unchanged (D_c/radius don't affect them).
+
+---
+
+## ROOT CAUSE CONFIRMED + FIXED (2026-05-22, local tilted-fault test)
+
+The "resolution" hypotheses above were all **wrong**: the blow-up is invariant
+to D_c (Dc=10 over-resolved still blew up), cfl, μ_s, mixed-flux, and
+dip-prestress because the source is an **MPI/geometry orientation bug**, not a
+front-resolution problem.
+
+### The discriminator test
+`tests/unit/test_rupture_tilted_fault_serial_vs_parallel.cpp` runs the SAME
+2-tet TPV102 fault problem **serial vs np=2**, sweeping the fault-trace tilt
+`θ` (background stress rotated with the fault so the physical loading is
+θ-invariant), and asserts serial==parallel to 1e-10.  Nucleation is a uniform
+fixed scalar in the local strike channel — the only way serial/parallel can
+disagree is an orientation/side flip.
+
+**Result (before fix):** serial==parallel to ~1e-15 for θ ≤ 60°, then a clean
+**sign flip** (worst_rel = 2.0, component SYZ; max|V| 0.1164 → 0.1202) for
+θ ≥ 75°.
+
+### The mechanism (diagnostic-confirmed to the digit)
+NOT `FaultBasis::ComputeOrientedFrame`'s `sign_flipped` (changing that rule is
+a no-op — the cross-rank flip is symmetric under any line-canonicalization).
+The bug is the **+/- side determination** in `wave_operator.inl`
+(`interior_fault_elem1_on_plus_`, lines 459-465; `shared_fault_elem1_on_plus_`,
+lines 519-525):
+
+```
+elem1_on_plus = ( (elem1_c - face_c) · ref_normal  <  0 )      // OLD (buggy)
+```
+
+It projects the centroid offset onto the **hardcoded `ref_normal=(0,-1,0)`**.
+For an asymmetric tet the offset `(elem1_c - face_c)` has a tangential part; as
+the fault tilts, `ref_normal`'s tangential component makes that term overtake
+the true normal-offset term and the comparison flips.  For the test fixture the
+margin is `kL·(sinθ/12 − cosθ/4)`, zero-crossing at `tanθ = 3 → θ = 71.57°`
+(measured: θ=60 margin −52.8 → true; θ=75 margin +15.8 → FALSE).  Past the flip
+**both** ranks report `elem1_on_plus = false`, breaking the "exactly one side is
++" invariant on the shared face → wrong ± role → the fixed-sign nucleation is
+applied with the wrong sign on one side → blow-up.  Planar TPV/BP5 faults have
+`n_phys = ±ref_normal` (`|dot| = 1`) so the margin is O(element-size) and never
+flips — which is why TPV102/104/205 are stable on the same code.
+
+### The fix
+Project the centroid offset onto the **canonical face normal**, not
+`ref_normal`, in BOTH side-determination blocks:
+
+```
+CalcOrtho(ftr->Face->Jacobian(), fn);                              // raw normal
+if (FaultBasis::NormalNeedsFlipToCanonical(fn, ref_normal, 3)) { fn.Neg(); }
+elem1_on_plus = ( (elem1_c - face_c) · fn  <  0 );                 // NEW
+```
+
+`NormalNeedsFlipToCanonical` (new shared static in `fault_basis.hpp`)
+canonicalizes the physical normal **line** ±n to a rank/QP-independent
+direction: `sign(n·ref_normal)`, with a largest-magnitude-component fallback in
+the `|n·ref_normal| → 0` degenerate band (θ→90°).  On a shared face CalcOrtho
+gives opposite raw normals on the two ranks; both map to the SAME canonical
+direction → exactly one rank gets `elem1_on_plus=true` at every angle.
+`ComputeOrientedFrame`'s `sign_flipped` now also routes through this helper
+(single source of the rule).  For planar faults `canonical normal == ref_normal`
+(up to a positive |J_F| scale) so the stored bool is unchanged — **byte-exact**.
+
+### Verification (local, `conda activate mfem-dev`)
+| test | before | after |
+|------|--------|-------|
+| **tilted-fault serial-vs-parallel** (the fix target) | FAIL worst_rel **2.0** @θ=75° | **PASS 7.4e-14** at all θ (0..90°) |
+| sign-flipped-elem1-on-plus-truth-table | — | PASS 40/0 |
+| rupture-multistep-serial-vs-parallel (planar) | — | PASS 7.2e-16 |
+| fault-basis / dip-strike-symmetry / qp-orthonormality | — | PASS 219/0, 17/0, 1/0 (real TPV102 mesh) |
+| shared-fault-role-consistency / dof-data-consistency | — | PASS 5/0, 4/0 |
+| interior-fault-flux-path (+asym +rupture-regime) | — | PASS 6/0, 5/0, 3/0 |
+| shared-fault-flux-path-analytic / godunov-interior-equal-sides | — | PASS, 135/0 |
+| tpv102 locked-fault / absorbing-eq / pepper / ader-smoke | — | PASS 4/0, 1/0, 6/0, 4/0 |
+
+**Confirmed pre-existing (byte-exact baseline match, NOT caused by this change):**
+- `adjacent-triangle-fault-uniformity` (serial+parallel) — known **pepper-bug
+  reproducer** (Frontera 7672897); stashed-baseline gives the IDENTICAL failure
+  values (tau1_corr **2.236**, tau2_corr 1.744e-6, σ_n 2.049e-6) → planar fault,
+  my change is a verified no-op here.  `first-step-audit` (Gate 16b) is the same
+  planar fixture/family.
+- `r101-shared-fault` — aborts on a missing `SetAbsorbingBackground` precondition
+  (test-setup gap); side-role coverage is provided by the two passing
+  shared-fault consistency tests above.
+- `serial-parallel-consistency` — macOS **MUMPS Bus error** in the antiplane
+  (BP1/BP2) `AntiplaneDomainOperator::Solve` path; not the 3D SAFS path.
+
+### Remaining
+- Re-run **Dc10 on Frontera** post-fix to confirm end-to-end (the step-0
+  cross-rank check passed there because that partition's shared faces were at
+  well-conditioned angles; the real fix is the side test, now angle-robust).
+- The largest-component fallback (θ→90° exactly) is gated at 1e-6; production
+  hardening with sorted-global-vertex-ID orientation (option c) remains optional.

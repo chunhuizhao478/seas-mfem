@@ -340,6 +340,44 @@ private:
    std::vector<FaultBasisData> basis_;
 
 public:
+   /// Canonicalize the orientation of a raw face normal so the result is a
+   /// pure function of the physical normal LINE (±n_raw) — identical on
+   /// every rank/QP sharing the face, independent of which element's
+   /// CalcOrtho seeded `n_raw`.  Returns TRUE iff `n_raw` points OPPOSITE to
+   /// the canonical orientation (i.e. it must be negated to reach canonical).
+   ///
+   /// Canonical = "n · ref_normal > 0".  In the degenerate band where the
+   /// fault normal is ~perpendicular to ref_normal (`|n · ref_normal| → 0`,
+   /// e.g. a ~N-S-striking SAFS segment with ref_normal=(0,-1,0)), `sign(dot)`
+   /// is FP-noise-determined, so fall back to "largest-magnitude component
+   /// positive" (ties → lowest index) — still a pure function of ±n_raw.
+   ///
+   /// Used in TWO places so both derive from ONE orientation rule:
+   ///   (1) ComputeOrientedFrame's `sign_flipped` (fault-frame sign), and
+   ///   (2) the wave-operator +/- side test (project centroid offset onto the
+   ///       canonical face normal, NOT the hardcoded ref_normal).
+   /// Planar faults have `|dot| = nl` so the largest-component branch is never
+   /// taken and the result equals the historical `sign(dot)` (TPV/BP5 byte-
+   /// exact preserved).
+   static bool NormalNeedsFlipToCanonical(const Vector &n_raw,
+                                          const Vector &ref_normal, int dim)
+   {
+      const real_t nl = n_raw.Norml2();
+      real_t dot = 0.0;
+      for (int d = 0; d < dim; d++) { dot += n_raw(d) * ref_normal(d); }
+      constexpr real_t kRefNormalDegenerateRelTol = 1e-6;
+      if (nl > 0.0 && std::abs(dot) > kRefNormalDegenerateRelTol * nl)
+      {
+         return (dot < 0.0);
+      }
+      int kmax = 0;
+      for (int d = 1; d < dim; d++)
+      {
+         if (std::abs(n_raw(d)) > std::abs(n_raw(kmax))) { kmax = d; }
+      }
+      return (n_raw(kmax) < 0.0);
+   }
+
    /// Compute oriented fault frame (normal, dip, strike) from a raw face
    /// normal, replicating Tandem's AdapterBase::prepare() convention exactly.
    ///
@@ -381,10 +419,12 @@ public:
    {
       nl = n_raw.Norml2();
 
-      // Step 1-2: Determine orientation relative to reference normal
-      real_t dot = 0.0;
-      for (int d = 0; d < dim; d++) { dot += n_raw(d) * ref_normal(d); }
-      sign_flipped = (dot < 0.0);
+      // Step 1-2: Determine orientation relative to the reference normal via
+      // the shared canonicalization rule (sign(n·ref_normal), with a
+      // largest-component fallback only in the |n·ref_normal|→0 degenerate
+      // band — see NormalNeedsFlipToCanonical).  For planar TPV/BP5 faults
+      // |dot| = nl so this is byte-identical to the historical `sign(dot)`.
+      sign_flipped = NormalNeedsFlipToCanonical(n_raw, ref_normal, dim);
 
       // Step 3: Flip to ref-aligned (Tandem AdapterBase.cpp:72-73)
       if (sign_flipped) { n_raw.Neg(); }
