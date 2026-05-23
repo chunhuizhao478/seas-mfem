@@ -155,6 +155,43 @@ same slip-weakening switch as SAFS, but its rupture front sweeps past a point in
 one step (no slow knife's-edge dwell). Only SAFS combines the slip-weakening
 switch **and** a slow nucleation that parks a shared point on the threshold.
 
+### B.1.5 Root-cause status — what is CONFIRMED vs what is still INFERRED
+
+Be honest about the chain, because it decides which fix is correct.
+
+**Confirmed (Frontera XRANK trace, job 7747036):**
+- The shared-QP friction state is computed **redundantly** on both ranks.
+- At the diverging QP the two ranks' inputs match to **11 printed digits** yet the
+  friction outputs **split** (one slips, one locks) at the `max(0,·)` kink. Since
+  the solve is deterministic, identical-to-11-digits inputs producing different
+  outputs **proves there is a sub-11-digit cross-rank input difference**, and that
+  the non-smooth onset amplifies it. This is the *mechanism* of the divergence.
+
+**NOT yet measured (the open part of the root cause):**
+- The **magnitude** of that input difference ("~1e-14" is an assumption, never
+  measured).
+- Its **source**, which is one of:
+  1. **Interpolation:** the same physical QP is evaluated through two different
+     element parametrisations (`shape1∘Loc1` on rank A vs `shape2∘Loc2` on rank
+     B's ghost) — mathematically equal, differently rounded. Inherent to DG
+     shared faces; unavoidable.
+  2. **Ghost-exchange not bit-exact:** rank B's ghost copy of rank A's element
+     stress should be bit-identical to rank A's own, but isn't. A real defect —
+     potentially fixable AT THE SOURCE.
+  3. **Accumulated bulk divergence:** the distributed bulk solve drifts across
+     ranks over the run (different reduction/matvec order). Generally unavoidable.
+
+**Why this matters for the fix (decision gate):**
+- Source = (1) or (3) → the gap is inherent → the **reconcile** (Phase 2) is the
+  correct, general fix.
+- Source = (2) → make the ghost copy bit-exact → both ranks get identical inputs
+  → identical outputs → **no reconcile needed** (this would *vindicate* R-701's
+  no-broadcast design and be cheaper/more local).
+
+**Phase 0 (below) measures the magnitude and localises the source, and chooses
+between the two fixes. We do not commit to the reconcile until Phase 0 says the
+seed is inherent.**
+
 ### B.2 Why the DIP direction is the one flagged — what the equations actually say
 
 I earlier hand-waved "dip couples to normal stress." You asked for equations, and
@@ -309,6 +346,54 @@ relax the strict byte-exact rule. Flagged again here.
 - **Files Requiring Extreme Care:** `wave_operator.inl/.hpp`, `fault_face_flux.cpp`.
 - Do not touch the friction solvers; do not add hardcoded constants.
 
+## Phase 0: pin the seed — magnitude + source (DIAGNOSTIC; gates the fix choice)
+
+### Goal
+Close the open part of the root cause (B.1.5): measure the cross-rank input
+difference at the diverging QP at FULL precision, and localise its source to
+interpolation (1) / ghost-exchange bug (2) / bulk divergence (3) — so we know
+whether the reconcile (Phase 2) is the right fix or a cheaper source-fix exists.
+
+### Files to Modify
+- `dynamic/wave_operator.inl` — extend the existing `SEAS_DIAG_XRANK` trace
+  (`ComputeADERSharedFaceFluxRHS`, already committed `a9bd4d2`/`a28a5c5`):
+  1. Print `I_self_can` / `I_nbr_can` at **`%.17e`** (full double precision), not
+     `%.10e`, so the sub-11-digit difference is visible.
+  2. Add a **raw-DOF** comparison: alongside the interpolated `I_*_can`, also dump
+     the owning element's stored DOFs that feed the QP (before `shape×DOF`
+     interpolation) for both the local element and the ghost copy. This separates
+     "DOFs identical but interpolation differs" (source 1) from "ghost DOFs differ
+     from the owner's" (source 2/3).
+
+### Detailed Requirements
+1. At the target QP, print per rank, per sub-step: `I_self_can[SXX/SXY/SXZ]` and
+   `I_nbr_can[SXX/SXY/SXZ]` at `%.17e`.
+2. Print the raw face-neighbour DOF buffer entries the QP interpolates from
+   (`nbr_data[c][nbr_idx*ndof_per_el_ + i]`) and the local DOFs
+   (`Q_data[c*ndof_total_ + dof_offset1 + i]`) at `%.17e`, for one matched
+   (local-on-A == ghost-on-B) element, so the two ranks' copies can be diffed.
+3. Run the existing `spatial_dyn_resDc2_XRANKdiag_*.sbatch` (already supports the
+   env-gated trace + auto-extract per rank).
+
+### Decision (recorded in the diagnosis doc, drives Phase 2 vs a source-fix)
+- **Raw ghost DOFs == owner DOFs (bit-exact) but `I_*_can` differ** → source (1)
+  interpolation → inherent → proceed to Phase 2 (reconcile).
+- **Raw ghost DOFs differ from owner DOFs** → source (2) ghost-exchange bug →
+  STOP and write a separate plan to fix the exchange (cheaper; would let R-701's
+  no-broadcast design stand). Do NOT build the reconcile yet.
+- **DOFs identical at step 0 but drift apart over steps** → source (3) bulk
+  divergence → inherent → proceed to Phase 2.
+
+### Acceptance Criteria
+- [ ] The `%.17e` trace shows the exact magnitude of the cross-rank input gap at
+      the onset QP.
+- [ ] The raw-DOF comparison localises the source to (1), (2), or (3).
+- [ ] The diagnosis doc records the source and the resulting fix decision.
+
+### Dependencies
+- Depends on: nothing (extends the shipped diagnostic). Required by: the choice
+  of Phase 2 (reconcile) vs a source-fix.
+
 ## Phase 1: reproducible local test (injection-based, np=2, both laws)
 
 ### Goal
@@ -355,9 +440,16 @@ rate-state and LSW (proving the fix is method-invariant).
 - [ ] Production build (`SEAS_TEST_INTERNAL` off): hook compiles out.
 
 ### Dependencies
-- Depends on: nothing. Required by: Phase 2 (oracle), Phase 4.
+- Depends on: nothing (built regardless of Phase 0). Required by: Phase 2
+  (oracle), Phase 4. Note: if Phase 0 finds a ghost-exchange bug (source 2), the
+  oracle's GREEN target becomes the source-fix, not the reconcile — the test
+  (cross-rank bit-identity at the threshold) is the right oracle either way.
 
-## Phase 2: the reconcile (the fix)
+## Phase 2: the reconcile (the fix) — CONDITIONAL on Phase 0 = inherent seed (source 1 or 3)
+
+> If Phase 0 finds source (2) (ghost-exchange not bit-exact), skip this phase and
+> fix the exchange instead (separate plan); the reconcile is for the inherent-seed
+> case where both ranks' inputs cannot be made bit-identical.
 
 ### Goal
 After the friction solve on a shared fault face, both ranks hold bit-identical
