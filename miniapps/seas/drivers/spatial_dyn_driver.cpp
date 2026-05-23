@@ -1977,7 +1977,32 @@ int main(int argc, char *argv[])
               && t <= cfg.nucleation.gradual_overstress.T_nuc_s
               && (step % 100 == 0)))
       {
-         wave.VerifySharedFaultDOFDataConsistency();
+         // SEAS_R101_NONFATAL (env-gated, OFF by default => zero behaviour
+         // change for TPV/BP5/production SAFS): downgrade this shared-fault
+         // consistency tripwire from a hard MFEM_ABORT to a per-check rank-0
+         // diagnostic.  Lets a run with a KNOWN cross-rank DOFData divergence
+         // (the curvilinear-fault strike-frame flip) proceed to completion so
+         // we can test whether a candidate fix (e.g. the fault-normal
+         // canonicalization change in fault_basis.hpp) keeps worst_rel bounded
+         // AND avoids the V_max blow-up.  The routine still runs every MPI
+         // collective; abort_on_fail=false just suppresses the abort and writes
+         // worst_rel / worst_field instead (wave_operator.inl:5826).
+         const bool r101_nonfatal =
+            (std::getenv("SEAS_R101_NONFATAL") != nullptr);
+         double r101_worst_rel = 0.0;
+         int    r101_worst_field = -1;
+         wave.VerifySharedFaultDOFDataConsistency(
+            /*tol=*/1e-10, &r101_worst_rel, &r101_worst_field,
+            /*abort_on_fail=*/!r101_nonfatal);
+         if (r101_nonfatal && rank == 0)
+         {
+            std::cout << "  [R-101 nonfatal] step " << step << " t=" << t
+                      << "s  worst_rel=" << r101_worst_rel
+                      << "  worst_field=" << r101_worst_field
+                      << (r101_worst_rel > 1e-10 ? "  (DIVERGED)"
+                                                 : "  (ok)")
+                      << std::endl;
+         }
       }
 
       // NaN tripwire — follows tpv104_driver.cpp:2641-2659 /

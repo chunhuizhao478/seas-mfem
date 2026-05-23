@@ -110,6 +110,12 @@ if [[ "${ZERO_DIP}" == "1" ]]; then
 fi
 # rupture-area + onset diagnostic (print-only; confirms the run still ruptures)
 export SEAS_DIAG_BLOWUP=1
+# Downgrade the R-101 shared-fault DOFData consistency tripwire from a hard
+# MFEM_ABORT to a per-check rank-0 diagnostic, so this run proceeds past the
+# known curvilinear-fault cross-rank divergence and we can read whether the
+# fault-normal canonicalization change (fault_basis.hpp) shrinks worst_rel and
+# keeps V_max bounded.  Look for "[R-101 nonfatal] ... worst_rel=... (DIVERGED|ok)".
+export SEAS_R101_NONFATAL=1
 
 TFINAL="${SAFS_TFINAL:-2s}"
 CFL="${SAFS_CFL:-0.5}"
@@ -125,6 +131,7 @@ echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}"
 echo "Config:      ${CONFIG_TOML}"
 echo "Zero dip:    ${ZERO_DIP}  (SEAS_ZERO_DIP_PRESTRESS=${SEAS_ZERO_DIP_PRESTRESS:-<unset>})"
+echo "R-101 gate:  NON-FATAL (SEAS_R101_NONFATAL=${SEAS_R101_NONFATAL:-<unset>}) -- run proceeds past cross-rank divergence"
 echo "cfl:         ${CFL}    tfinal: ${TFINAL}    (mixed flux = config default = adjacent)"
 
 # stdout-only (no ParaView) so the diagnostic is fast; V_max + [DIAG] lines
@@ -142,5 +149,5 @@ ibrun ./seas_spatial_dyn_driver \
 RC=$?
 echo "driver_rc=${RC}"
 echo "=== V_max + DIAG tail ==="
-grep -E "^step |\[DIAG\]|\[DIAG-ONSET\]|PASS|FAIL|done\." "${LOG}" | tail -30
+grep -E "^step |\[DIAG\]|\[DIAG-ONSET\]|\[R-101 nonfatal\]|PASS|FAIL|done\." "${LOG}" | tail -30
 exit ${RC}
