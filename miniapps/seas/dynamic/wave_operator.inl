@@ -5122,7 +5122,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          if (!FaultFaceFlux::s_seas_test_disable_reconcile)
 #endif
          {
-         constexpr int NPAY = 8 + 2 * NUM_STATE;  // 8 DOFData fields + I_imp +/-
+         constexpr int NPAY = 9 + 2 * NUM_STATE + 9;  // 9 DOFData (incl slip_rate) + I_imp +/- + can_{n,t1,t2} (R-005 diag)
          std::vector<double> payload;
          payload.reserve(fault_qp_buf.size() * NPAY);
          for (const auto &qa : fault_qp_buf)
@@ -5136,8 +5136,16 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             payload.push_back(d.psi);
             payload.push_back(d.slip1);
             payload.push_back(d.slip2);
+            payload.push_back(d.slip_rate);   // R-001: the field every SAFS diagnostic reads
             for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_plus_can[c]); }
             for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_minus_can[c]); }
+            // R-005 (diagnostic, option B): carry the boss's canonical frame so
+            // the non-boss can check whether the two ranks' frames coincide.
+            // Pass 2 rotates the boss's I_imp by THIS rank's frame; if frames
+            // differ, the assembled bulk flux re-seeds the cross-rank gap.
+            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_n[k]); }
+            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_t1[k]); }
+            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_t2[k]); }
          }
 
          // We overwrite our copy iff the PEER is the boss (peer_rank < my_rank_):
@@ -5149,12 +5157,13 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             {
                SharedFaultQPAssembly &qa = fault_qp_buf[local_qp];
                DOFData &d = (*fault_dof_data_)[qa.dof_idx];
-               // DIAG (env SEAS_DIAG_XRANK, target QP): trace the reconcile —
-               // slip2/V2 local vs peer + whether THIS rank overwrites.  Fires
-               // on BOTH ranks BEFORE the boss-check.  Post-reconcile the
-               // non-boss (overwrite=1) adopts the peer's value, so both ranks
-               // should then hold the boss's slip2.  If the R-101 verify STILL
-               // diverges, the divergence is re-introduced AFTER this point.
+               // DIAG (env SEAS_DIAG_XRANK, target QP): confirm the slip_rate
+               // reconcile (R-001) and CHECK the R-005 frame assumption — the
+               // max cross-rank diff of can_n/can_t1/can_t2.  Fires on BOTH
+               // ranks before the boss-check.  dcan_* ~ 0 => frames coincide
+               // (R-005 refuted); dcan_* large => the two ranks' canonical
+               // frames differ, so Pass 2 re-seeds the bulk (R-005 confirmed,
+               // option A needed).
                {
                   static const bool rdiag = []{
                      const char *e = std::getenv("SEAS_DIAG_XRANK");
@@ -5173,13 +5182,21 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                                ez = qa.cz-rtgt[2];
                   if (rdiag && ex*ex + ey*ey + ez*ez <= rrad*rrad)
                   {
+                     const int FOFF = 9 + 2 * NUM_STATE;  // peer can_* base
+                     double dn = 0, dt1 = 0, dt2 = 0;
+                     for (int k = 0; k < 3; k++)
+                     {
+                        dn  = std::max(dn,  std::abs(qa.can_n[k]  - peer[FOFF+k]));
+                        dt1 = std::max(dt1, std::abs(qa.can_t1[k] - peer[FOFF+3+k]));
+                        dt2 = std::max(dt2, std::abs(qa.can_t2[k] - peer[FOFF+6+k]));
+                     }
                      std::fprintf(stderr,
                         "[RECON] t=%.6e rank=%d peer=%d overwrite=%d dof=%d "
-                        "slip2_loc=%+.10e slip2_peer=%+.10e "
-                        "V2_loc=%+.10e V2_peer=%+.10e\n",
+                        "sliprate_loc=%+.10e sliprate_peer=%+.10e "
+                        "dcan_n=%.3e dcan_t1=%.3e dcan_t2=%.3e\n",
                         GetTime(), my_rank_, peer_rank,
                         (peer_rank < my_rank_) ? 1 : 0, qa.dof_idx,
-                        d.slip2, peer[7], d.V2, peer[4]);
+                        d.slip_rate, peer[8], dn, dt1, dt2);
                      std::fflush(stderr);
                   }
                }
@@ -5192,8 +5209,9 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                d.psi          = peer[5];
                d.slip1        = peer[6];
                d.slip2        = peer[7];
-               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_plus_can[c]  = peer[8 + c]; }
-               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_minus_can[c] = peer[8 + NUM_STATE + c]; }
+               d.slip_rate    = peer[8];   // R-001
+               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_plus_can[c]  = peer[9 + c]; }
+               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_minus_can[c] = peer[9 + NUM_STATE + c]; }
             });
          MFEM_VERIFY(n_paired == static_cast<int>(fault_qp_buf.size()),
                      "ComputeADERSharedFaceFluxRHS reconcile: " << n_paired
@@ -5691,7 +5709,12 @@ int WaveOperator<MeshType>::ExchangeAndPairSharedFaultQPs(
       // Collective short-circuit: every rank must reach the Allreduce +
       // Allgatherv even with nothing to contribute, or ranks with shared
       // fault faces would deadlock against ranks without any (R-1600 class).
-      int any_shared_local = (fault_dof_data_ &&
+      // R-006: mirror the caller's `fault_active` exactly (fault_flux_ /
+      // nbf_per_face_ / fault_basis_), else a rank with fault_dof_data_ +
+      // shared faces but no flux/basis builds records the caller never paid
+      // payload for, hitting the payload-size MFEM_VERIFY.
+      int any_shared_local = (fault_flux_ && fault_dof_data_ && fault_basis_ &&
+                              nbf_per_face_ > 0 &&
                               fault_shared_faces_.Size() > 0) ? 1 : 0;
       int any_shared_global = 0;
       MPI_Allreduce(&any_shared_local, &any_shared_global, 1, MPI_INT,
@@ -5944,17 +5967,21 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       // physical QP on both ranks deterministically: IntRules is deterministic
       // given the same geometry type, so rank A's qp_idx=k and rank B's
       // qp_idx=k are the same reference point on the same canonical face.
-      constexpr int REC = 16;
+      // R-002: slip_rate added to the checked field set — it is written
+      // per-rank by WriteBackState and is the field every SAFS diagnostic
+      // reads (V_max, n_rupturing, [DIAG-ONSET], the fault.vtkhdf speckle).
+      // Must stay in lockstep with the reconcile payload (R-001).
+      constexpr int REC = 17;
       constexpr int KEY_OFFSET = 0;
       constexpr int NUM_KEY_COMPONENTS = 3;
       constexpr int QP_IDX_OFFSET = 3;
       constexpr int CENTROID_OFFSET = 4;
       constexpr int FIELD_BASE = 7;
-      constexpr int NUM_FIELDS = 8;
-      constexpr int RANK_OFFSET = 15;
+      constexpr int NUM_FIELDS = 9;
+      constexpr int RANK_OFFSET = 16;
       static const char *FIELD_NAMES[NUM_FIELDS] = {
          "tau1_corr", "tau2_corr", "sigma_n_corr",
-         "V1", "V2", "psi", "slip1", "slip2"
+         "V1", "V2", "psi", "slip1", "slip2", "slip_rate"
       };
 
       // Need the global vertex index table to build face keys.
@@ -6006,6 +6033,7 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
             local_data.push_back(d.psi);
             local_data.push_back(d.slip1);
             local_data.push_back(d.slip2);
+            local_data.push_back(d.slip_rate);   // R-002
             local_data.push_back(static_cast<double>(my_rank_));
          }
       }

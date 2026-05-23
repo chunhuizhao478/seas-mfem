@@ -625,7 +625,7 @@ TEST_RUPTURE_TILTED_OBJ                    = $(TEST_RUPTURE_TILTED_SRC:.cpp=.o)
 TEST_RUPTURE_RAKE_SWEEP_OBJ                = $(TEST_RUPTURE_RAKE_SWEEP_SRC:.cpp=.o)
 TEST_RECONCILE_XRANK_OBJ                   = $(TEST_RECONCILE_XRANK_SRC:.cpp=.o)
 # fault_face_flux built WITH -DSEAS_TEST_INTERNAL for the reconcile oracle's
-# 1-ULP injection hook (lives in the .cpp behind that macro).
+# absolute-Pa injection hook (lives in the .cpp behind that macro).
 FAULT_FACE_FLUX_TESTINTERNAL_OBJ           = dynamic/fault_face_flux_testinternal.o
 TEST_ADJACENT_TRI_UNIFORMITY_OBJ           = $(TEST_ADJACENT_TRI_UNIFORMITY_SRC:.cpp=.o)
 TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_OBJ     = $(TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_SRC:.cpp=.o)
@@ -2734,7 +2734,7 @@ $(TEST_RECONCILE_XRANK_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -DSEAS_USE_MPI -c $< -o $@
 
 # Same source as $(FAULT_FACE_FLUX_OBJ) but compiled WITH -DSEAS_TEST_INTERNAL
-# so the reconcile oracle's 1-ULP injection hook + static knob are present.
+# so the reconcile oracle's absolute-Pa injection hook + static knob are present.
 $(FAULT_FACE_FLUX_TESTINTERNAL_OBJ): $(SRC)dynamic/fault_face_flux.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -c $< -o $@
@@ -3771,7 +3771,7 @@ test-parallel-fault: seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_fault
 
-test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel test-parallel-fault
+test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel test-parallel-fault test-shared-fault-reconcile-cross-rank
 
 # Phase 9: Verification and scaling targets
 seas_test_serial_parallel_consistency: $(TEST_SERIAL_PARALLEL_OBJ)

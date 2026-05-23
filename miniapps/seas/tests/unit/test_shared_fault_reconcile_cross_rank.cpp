@@ -16,8 +16,9 @@
 //
 // The clean 2-tet planar fixture is naturally bit-identical across ranks
 // (shape1==shape2 by symmetry), so it cannot make the seed on its own.  We
-// therefore INJECT a deterministic 1-ULP cross-rank difference on ONE rank via
-// the SEAS_TEST_INTERNAL hook in FaultFaceFlux::ComputeTrialTraction, then run
+// therefore INJECT a deterministic absolute-Pa cross-rank seed on ONE rank
+// (1e7 Pa LSW / 1e-6 Pa rate-state) via the SEAS_TEST_INTERNAL hook in
+// FaultFaceFlux::ComputeTrialTraction, then run
 // the np=2 shared-fault path and check WaveOperator's own R-101 consistency
 // verifier (the exact Frontera check) every step.
 //
@@ -236,7 +237,7 @@ ParMesh MakePartitioned2Tet()
    return ParMesh(MPI_COMM_WORLD, serial_mesh, part.data());
 }
 
-// Run the np=2 shared-fault path for one friction law with the 1-ULP seed
+// Run the np=2 shared-fault path for one friction law with the injected seed
 // injected on rank 0; return the every-step max of the R-101 worst_rel and
 // whether the fault ever slipped (onset sanity).
 struct LegResult { double max_wr = 0.0; double max_slip_rate = 0.0; int onset_steps = 0; };
@@ -406,7 +407,7 @@ int main(int argc, char *argv[])
                 << "\n  np=" << nprocs << ", planar 2-tet fault, dt="
                 << std::scientific << std::setprecision(2) << kDt
                 << ", N=" << nsteps << " ADER-2 steps"
-                << "\n  injecting a 1-ULP strike-traction seed on rank 0 "
+                << "\n  injecting an absolute-Pa strike-traction seed on rank 0 "
                    "(SEAS_TEST_INTERNAL)\n";
    }
    if (nprocs != 2)
