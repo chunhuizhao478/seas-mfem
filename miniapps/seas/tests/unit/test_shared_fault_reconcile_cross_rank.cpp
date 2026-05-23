@@ -194,7 +194,8 @@ ParMesh MakePartitioned2Tet()
 // whether the fault ever slipped (onset sanity).
 struct LegResult { double max_wr = 0.0; double max_slip_rate = 0.0; int onset_steps = 0; };
 
-LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps)
+LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps,
+                 bool disable_reconcile = false)
 {
    BoundaryConfig bc;
    bc.natural_attrs = {1};
@@ -296,8 +297,11 @@ LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps)
    const real_t inject_pa = lsw ? 1.0e7 : 1.0e-6;
 #ifdef SEAS_TEST_INTERNAL
    FaultFaceFlux::s_seas_test_tau2_trial_perturb_pa = (rank == 0) ? inject_pa : 0.0;
+   // Set IDENTICALLY on all ranks (the reconcile's MPI exchange is collective).
+   FaultFaceFlux::s_seas_test_disable_reconcile = disable_reconcile;
 #endif
    (void)inject_pa;
+   (void)disable_reconcile;
 
    LegResult res;
    for (int step = 0; step < nsteps; step++)
@@ -378,11 +382,29 @@ int main(int argc, char *argv[])
                    << std::setprecision(6) << g_wr
                    << "  (slipped: " << (r.onset_steps > 0 ? "yes" : "no")
                    << ", max|V|=" << r.max_slip_rate << ")\n";
-         // GREEN target (post Phase-2 reconcile): cross-rank bit-identical.
-         // RED today: the injected seed makes the two ranks differ.
+         // GREEN (post Phase-2 reconcile): cross-rank bit-identical.
          TEST_TRUE(g_wr == 0.0,
                    std::string("cross-rank DOFData bit-identical despite "
                                "injected strike-traction seed — ") + leg.name);
+      }
+   }
+
+   // Phase-3 NEGATIVE leg: disable the reconcile -> the R-101 guard must TRIP
+   // (worst_rel > tol), proving the guard is not a no-op and the reconcile is
+   // what makes the ranks consistent.  LSW (the O(1) split) is the sharp case.
+   {
+      LegResult r = RunLeg(FaultFrictionLaw::LSW, rank, nsteps,
+                           /*disable_reconcile=*/true);
+      double g_wr = r.max_wr;
+      MPI_Reduce(&r.max_wr, &g_wr, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+      if (rank == 0)
+      {
+         std::cout << "\n  [NEGATIVE: LSW, reconcile DISABLED]"
+                   << "  max worst_rel = " << std::scientific
+                   << std::setprecision(6) << g_wr << "\n";
+         TEST_TRUE(g_wr > 1.0e-10,
+                   "R-101 guard TRIPS with the reconcile disabled (proves the "
+                   "guard catches a real cross-rank desync)");
       }
    }
 

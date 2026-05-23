@@ -26,6 +26,8 @@ namespace seas
 #ifdef SEAS_TEST_INTERNAL
 // TEST-ONLY cross-rank seed knob [Pa] (see header).  Zero => no-op / byte-exact.
 real_t FaultFaceFlux::s_seas_test_tau2_trial_perturb_pa = 0.0;
+// TEST-ONLY: disable the Phase-2 reconcile (negative-test leg).  False => runs.
+bool FaultFaceFlux::s_seas_test_disable_reconcile = false;
 #endif
 
 // ---------------------------------------------------------------------------

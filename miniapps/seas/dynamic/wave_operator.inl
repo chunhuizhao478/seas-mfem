@@ -5109,6 +5109,14 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
       // and B.3.  Collective-safe even when this rank buffered nothing: the
       // helper's Allreduce/Allgatherv are reached unconditionally.
       {
+#ifdef SEAS_TEST_INTERNAL
+         // Negative-test leg (test switch, set identically on all ranks): skip
+         // the reconcile so the R-101 guard trips on the un-reconciled cross-
+         // rank desync — proving the guard is not a no-op and the reconcile is
+         // what fixes it.  Compiles out in production (block then runs always).
+         if (!FaultFaceFlux::s_seas_test_disable_reconcile)
+#endif
+         {
          constexpr int NPAY = 8 + 2 * NUM_STATE;  // 8 DOFData fields + I_imp +/-
          std::vector<double> payload;
          payload.reserve(fault_qp_buf.size() * NPAY);
@@ -5153,6 +5161,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      << " of " << fault_qp_buf.size() << " local shared fault "
                      "QPs paired with a cross-rank peer (each must pair exactly "
                      "once).");
+         }  // reconcile broadcast (test-switchable; always runs in production)
 
          // Pass 2: assemble each buffered QP from the (possibly reconciled)
          // canonical imposed state, rotated to global via T_can rebuilt from the
@@ -6392,23 +6401,25 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          const char *field_name =
             (field_off >= 0 && field_off < NUM_FIELDS)
                ? FIELD_NAMES[field_off] : "<unknown>";
-         // R-504: generic diagnostic wording.  Prior to R-501 this blamed
-         // "R-001's (+,-) canonicalisation"; with the owner-broadcast fix
-         // in place the underlying R-001 path no longer runs, so any
-         // future trip is from a different bug (missed field in the
-         // broadcast, R-501 MPI exchange error, stale auth_state, ...).
+         // Phase 2 (PLAN_shared_fault_reconcile_fix_2026-05-23.md): with the
+         // method-invariant reconcile in ComputeADERSharedFaceFluxRHS in place,
+         // both ranks adopt the boss's single-valued friction state, so the
+         // EXPECTED post-fix max_rel_diff is exactly 0.  Any nonzero trip here
+         // is a REAL regression (not roundoff): a mutable DOFData field missing
+         // from the reconcile payload, an ExchangeAndPairSharedFaultQPs pairing
+         // error, or a friction-law code path that does not reach the reconcile
+         // (e.g. the non-ADER ComputeSharedFaceFluxRHS, not yet reconciled).
          MFEM_ABORT("R-101 shared-fault DOFData consistency FAILED.  "
                     "Field '" << field_name << "' at centroid ("
                     << cx << ", " << cy << ", " << cz
                     << ") differs by " << max_diff_abs
                     << " across the two ranks sharing the face (scale="
                     << max_diff_scale << ", rel_diff=" << max_rel_diff
-                    << ", rel_tol=" << tol << ").  The two ranks' DOFData "
-                    "diverged — check that the R-501 owner-broadcast in "
-                    "ComputeSharedFaceFluxRHS covers every mutable field "
-                    "written by FaultFaceFlux::Evaluate and the driver's "
-                    "RK4 averaging step, and that the Q_imp exchange is "
-                    "packed/unpacked in a consistent order on both ranks.");
+                    << ", rel_tol=" << tol << ").  Post Phase-2 reconcile this "
+                    "must be 0 — verify the ComputeADERSharedFaceFluxRHS "
+                    "reconcile broadcasts every mutable DOFData field + both "
+                    "canonical imposed states, and that this friction law's "
+                    "code path actually reaches the reconcile.");
       }
 
       if (my_rank_ == 0)

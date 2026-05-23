@@ -178,6 +178,17 @@ public:
    /// is the faithful, controllable stand-in.  Consumed only by
    /// `test_shared_fault_reconcile_cross_rank`.  Zero default => no-op.
    static real_t s_seas_test_tau2_trial_perturb_pa;
+
+   /// TEST-ONLY (compiled out unless `SEAS_TEST_INTERNAL`): when true,
+   /// `ComputeADERSharedFaceFluxRHS` SKIPS the Phase-2 cross-rank reconcile
+   /// (the boss-broadcast) and assembles from each rank's own un-reconciled
+   /// friction state.  Drives the NEGATIVE leg of
+   /// `test_shared_fault_reconcile_cross_rank`, proving the R-101 guard still
+   /// trips on a real desync (and that the reconcile is what fixes it).  Must
+   /// be set IDENTICALLY on all ranks — the reconcile's MPI exchange is
+   /// collective, so a per-rank disable would deadlock.  False default =>
+   /// reconcile runs (production behaviour).
+   static bool s_seas_test_disable_reconcile;
 #endif
 
    /// @brief Full fault-face Riemann solver pipeline.
