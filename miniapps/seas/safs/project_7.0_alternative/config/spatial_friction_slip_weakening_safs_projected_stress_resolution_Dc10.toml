@@ -1,0 +1,248 @@
+# =========================================================================
+# RESOLUTION-TEST VARIANT (D_c = 10 m) — NOT production.
+# =========================================================================
+# Extreme cohesive-zone OVER-RESOLUTION sibling, cloned from the D_c=2.0
+# resolution variant (..._resolution_Dc2.toml).  ONLY difference from that
+# variant: D_c 2.0 -> 10.0 m.  (radius held 4000 m, delta_tau 20 MPa,
+# mu_s=0.85, mu_d=0.30, cfl=0.5, same 500 m z0embed mesh.)
+#
+#   - D_c = 10.0 m -> patch L_nuc = mu*D_c/((mu_s-mu_d)*sigma_n_eff)
+#                     ~= 11.8 km, i.e. L_nuc/h_min ~= 60 in the patch
+#                     (global ~30-97).  Grossly over-resolves the cohesive
+#                     zone on the SAME 500 m mesh -- well past the >=10 gate.
+#
+# *** CAVEAT — NO SPONTANEOUS PROPAGATION AT D_c=10 ***
+# r_c (the supercritical core from the Gaussian overstress) is set by radius
+# and delta_tau, NOT by D_c, so it stays ~2.70 km while L_nuc balloons to
+# ~11.8 km.  The margin r_c/L_nuc ~= 0.23 << 1, so the patch is FAR
+# subcritical: the rupture is DRIVEN by the gradual_overstress ramp over
+# T_nuc=1 s and ARRESTS once the ramp ends -- it does NOT run as a
+# spontaneous crack.  Restoring r_c/L_nuc > 1 would need radius > ~17.5 km
+# (larger than the fault), so it is NOT attempted here.
+#
+# Purpose: a DELIBERATELY non-propagating, grossly over-resolved probe of the
+# normal-channel (fault-opening) blow-up -- does the opening runaway still
+# appear in a driven patch whose cohesive zone is ~60 cells wide?  Read it:
+#   bounded   -> the opening blow-up needs an under-resolved cohesive zone OR
+#                a fast propagating front (both absent here); it is NOT
+#                intrinsic to a smooth driven patch.
+#   blows up  -> the normal-channel opening runaway is intrinsic and
+#                resolution-independent (does not need front grid-noise).
+# A clean SPONTANEOUS-rupture resolution test CANNOT be done at D_c=10 (see
+# caveat); use the D_c=2.0 variant or the 250 m mesh for that.
+# See debug_document/spatial_dynamic_rupture_speckle_blowup_2026-05-22.md.
+#
+# Production SAFS dynamic-rupture config (the parent .toml):
+#   - constant material properties (via [velocity].use_sidecar = false)
+#   - regional Hickman & Zoback (H&Z) stress projected onto the fault
+#   - linear-slip-weakening friction
+#   - gradual_overstress nucleation (smoothStep-ramped Gaussian δτ)
+#
+# STRESS PROVENANCE
+# -----------------
+# The [stress] tensor below is hand-copied from the H&Z regional-stress
+# projection summary for the paper-consistent "1671 m magnitudes + psi=37°"
+# orientation case on the same 500 m z0embed mesh used by this config:
+#   stress/results/safs_fault_box_nwcut_500m_lcfar3000_z0embed_hz1671_psi37_az351/
+#       safs_fault_box_nwcut_500m_lcfar3000_z0embed_hz1671_psi37_az351_summary.json
+#       params:  SHmax = 113 MPa, Shmin = 49 MPa, Sv = 45 MPa
+#                P_p   = 16  MPa, SHmax_azimuth = 351°, rake = right-lateral
+#                depth_model = "constant" (all *_grad_MPa_per_m = 0.0)
+#       sigma_global_at_z0_MPa (compression POSITIVE, EAST-NORTH-UP, MPa):
+#           [[ 50.56619  -9.88854   0.0     ],
+#            [ -9.88854 111.43381   0.0     ],
+#            [  0.0       0.0      45.0     ]]
+#       Produced by stress/code/hickman_and_zoback_regional_stress_projection.py
+#
+# Because depth_model = "constant", the H&Z projection is bit-equivalent to
+# the existing kind = "constant_tensor" stress source (the C++ driver
+# rotates this 3×3 onto each fault DOF's local basis itself; the per-DOF
+# projection mirror lives in FaultGeometry::ComputeSAFSParams).  If a
+# future H&Z run uses non-zero depth gradients, this file must be
+# refreshed (or the driver upgraded to a depth-aware regional source).
+#
+# Run (from miniapps/seas — no CLI material flag needed; gated by TOML):
+#   mpirun -np 8 ./seas_spatial_dyn_driver \
+#       --config safs/project_7.0_alternative/config/spatial_friction_slip_weakening_safs_projected_stress_resolution_Dc10.toml \
+#       --paraview --paraview-fault-hdf5 \
+#       --paraview-fault-zfp-tol 1e-12 \
+#       --print-derived
+#
+# Schema reference:
+#   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SAFS-ALT6 LSW EXTREME OVER-RESOLUTION variant: mu_s=0.85, D_c=10.0 m + radius=4000 m on the 500 m mesh (patch L_nuc/h_min ~60). NON-PROPAGATING: r_c/L_nuc ~0.23, the patch is far subcritical and arrests after the T_nuc ramp -- a driven-patch probe of the normal-channel opening blow-up, NOT a spontaneous-rupture resolution test. NOT production (D_c far above physical)."
+
+[material_constant_fallback]
+# Equal lambda = mu => Poisson ratio = 0.25 (typical crust).
+# Consumed when [velocity].use_sidecar = false (below).
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# Authoritative source of P_p for the SEAS effective-stress identity
+#   sigma_n_eff = sigma_n_total - P_p
+# Value matches params.P_p_MPa in the H&Z summary JSON so the driver
+# subtracts the same P_p the projection assumed.  z < 0 below free
+# surface; gradient zero because depth_model = "constant" upstream.
+P_p_pa            = 16.0e6    # 16 MPa (matches JSON params.P_p_MPa)
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # 1 MPa floor (JSON stats min is ~30 MPa)
+
+[mesh]
+# 500 m near-fault z0embed mesh: fault cut EXACTLY at z=0 (surface-rupturing),
+# sliver-free, ~2.5 elems across the cohesive zone.  Replaces the old
+# 1000m_lcfar3000 (zclamp) mesh, which buried the fault top at z=-100 m and
+# carried the near-surface slivers tied to the 2026-05-20 north-tip blow-up.
+# Built by meshing/code/run_z0cut_meshing.py
+#   (--lc-near 500 --surface-buffer-size 1500 --surface-buffer-depth 1000);
+# 3.69 M tets, mesh_zmax=0, 100% fault-embedded.  Gmsh v2.2, tags
+# fault=101/top=102/bottom=103/sides=104/rock=1 (driver-compatible).
+path  = "safs/project_7.0_alternative/meshing/results/msh/safs_fault_box_nwcut_500m_lcfar3000_z0embed.msh"
+order = 1
+
+[velocity]
+# use_sidecar = false => skip the CVMH/CVMS load and use
+# [material_constant_fallback].  In this mode the parser does not read
+# model / dataset_root / override_path, so they are omitted.  The
+# [velocity] table itself is still required (spatial_friction.cpp:501).
+use_sidecar = false
+
+[stress]
+# Regional H&Z tensor projected per-DOF.  Values from sigma_global_at_z0_MPa
+# in the summary JSON (see header), converted MPa → Pa.  Frame: (east,
+# north, up) UTM 11N, compression POSITIVE (SEAS internal convention).
+kind        = "constant_tensor"
+sigma_xx_pa = 5.056619147855508e+07
+sigma_yy_pa = 1.1143380852144492e+08
+sigma_zz_pa = 4.50e+07
+sigma_xy_pa = -9.888543819998317e+06
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "adjacent"
+cfl        = 0.5
+use_pml    = false
+
+[time]
+tfinal     = "100s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+# Single-event dynamic rupture: fixed-dt cadence for ALL three
+# collections (no interseismic regime to optimize for).
+# Reflection-time warning fires at t ~= 7 s (min_box_dim / cp_max);
+# from then on the bulk fields carry 5-15% reflected energy off the
+# 1st-order absorbing bottom+sides.
+output_dir              = "output_safs_dyn_projected_500m_hz1671_psi37_az351_100s"
+restart_prefix          = "cp"
+paraview_volume         = "hdf5"
+paraview_bulk           = "hdf5"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "1.0s"      # 100 snapshots
+paraview_bulk_dt        = "1.0s"      # 100 snapshots
+paraview_fault_dt       = "0.05s"     # 2000 snapshots
+paraview_volume_zfp_tol = 1.0e-3
+paraview_bulk_zfp_tol   = 1.0e-3
+paraview_fault_zfp_tol  = 1.0e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+# Time-domain nucleation: smoothStep-ramped Gaussian δτ.  Omit this
+# block to drive rupture purely by the static initial stress field.
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+# Hypocenter in UTM 11N (mesh frame), picked from ParaView on
+# safs_fault_box_nwcut_1000m_lcfar3000_fault.vtu (vertex id 36417).
+# Sits at the southern end of the SAF-ALT6 fault, ~5 km depth (the
+# southern slab only reaches z = -10.4 km, so 5 km is mid-depth there).
+# Peak overstress is tuned to the CURRENT psi=37° / az351 stress field
+# on the 500 m z0embed mesh.
+# Patch-center numbers (nearest fault DOF):
+#   sigma_n_eff ~= 49.27 MPa
+#   tau_strike0 ~= 26.32 MPa
+#   tau_dip0    ~= -12.65 MPa
+#   |tau_pre|   ~= 29.20 MPa  (mu_app = |tau_pre|/sigma_n_eff = 0.593)
+#   L_nuc       ~= 11.8 km    (mu_s=0.85, mu_d=0.30, D_c=10.0 m)
+# Spontaneous-rupture budget (Gaussian F(r)=exp(-(r/radius)^2)):
+#   yield gap at center  = mu_s*sigma_n_eff - |tau_pre| = 12.7 MPa
+#   supercritical radius  r_c = 4000*sqrt(-ln(12.7/20)) ~= 2.70 km  (D_c-independent)
+#   margin r_c / L_nuc   ~= 0.23   (<< 1: SUBCRITICAL — NO spontaneous
+#                                   propagation; the driven patch slips during
+#                                   the T_nuc ramp and ARRESTS after.  This is
+#                                   intentional for the D_c=10 over-resolution
+#                                   probe; see header caveat.)
+#   center overshoot     = |tau_pre| + delta_tau - mu_s*sigma_n_eff
+#                        ~= 29.2 + 20 - 41.9 = +7.3 MPa  (gate TRIGGER ok ->
+#                                   the patch yields and slips during the ramp)
+# delta_tau stays 20 MPa (below the 25 MPa "gross overdrive" ceiling).
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+radius_dip_m        =     4000.0
+radius_strike_m     =     4000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     20.0e6
+T_nuc_s             =        1.0
+
+[friction.slip_weakening]
+# Uniform LSW friction across the active fault (no spatial overrides
+# except the deep barrier).  Rationale (RECALIBRATED — job-7744292 fix):
+#   - mu_s = 0.85 (was 0.65).  The old value left the background only
+#     ~1.4% below static yield: the run log reported
+#     |tau_pre|/(mu_s*sigma_n_eff) max OUTSIDE asperity = 0.986, i.e.
+#     mu_app.max ~= 0.641 (shallow north end).  At 0.986 the near-critical
+#     unbarriered background AMPLIFIED grid-scale rupture-front noise (the
+#     under-resolved cohesive zone) through slip-weakening positive
+#     feedback -> isolated-DOF (salt-and-pepper) slip-rate blow-up to
+#     ~1e145 m/s, OUTSIDE the nucleation patch.  mu_s = 0.85 drops the
+#     outside ratio to 0.641/0.85 ~= 0.75 (25% below yield), so radiated
+#     waves / grid noise can no longer tip the background, while a COHERENT
+#     rupture front (large, localized stress concentration) still
+#     propagates.  Contrast TPV205 (same fault code, stable): it locks
+#     everything outside the rupture area with a mu_s barrier; SAFS instead
+#     keeps the whole fault active but subcritical.
+#   - mu_d = 0.30 (UNCHANGED): strong POSITIVE dynamic stress drop, so the
+#     nucleated rupture sustains propagation.  At the patch DOF
+#     mu_app ~= 0.5926 (sigma_n_eff~49.3 MPa, |tau0|~29.2 MPa) >> mu_d,
+#     giving tau_d = 14.8 MPa, dtau = +14.4 MPa.  mu_app > 0.30 over the
+#     whole active fault -> stress drop positive everywhere.
+#   - D_c = 10.0 m (was 1.0; the D_c=2.0 variant used 2.0): RAISED FAR past
+#     the resolution requirement to grossly over-resolve the cohesive zone
+#     on the 500 m mesh.  At D_c=10, L_nuc/h_min ~= 60 in the patch (global
+#     ~30-97), far above the >=10 gate.  But D_c x10 grows L_nuc to ~11.8 km,
+#     LARGER than the supercritical core (r_c~2.70 km, fixed by
+#     radius/delta_tau), so r_c/L_nuc ~0.23 << 1 and the rupture CANNOT
+#     propagate spontaneously — it is driven by the T_nuc ramp and arrests.
+#     This is intentional: the variant probes whether the normal-channel
+#     opening blow-up is intrinsic to the driven patch, independent of BOTH
+#     cohesive-zone resolution AND a fast propagating front.  10 m is far
+#     above any physical crustal LSW D_c (a diagnostic value only).
+# Nucleation budget at the patch DOF (sigma_n_eff~49.3 MPa, tau_pre~29.2 MPa):
+#   static threshold           mu_s * sigma_n_eff       ~= 41.9 MPa
+#   strike-only delta_tau to reach yield at the center  ~= 12.7 MPa
+# The configured 20 MPa (see [nucleation.gradual_overstress]) clears that
+# with a +7.3 MPa overshoot, so the patch YIELDS and slips during the ramp.
+# But with D_c=10 the supercritical core (r_c~2.70 km) is ~0.23x L_nuc
+# (=11.8 km), so the patch is far subcritical and the rupture ARRESTS after
+# the T_nuc ramp rather than propagating (intentional — see header caveat).
+mu_s_default     = 0.85
+mu_d_default     = 0.30
+d_c_default      = 10.0
+cohesion_default = 0.0
+
+# Lock the deepest band as a barrier (resolver sets internal mu_s = 1.0e6).
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_min_m = -20000.0
+z_max_m = -15000.0
