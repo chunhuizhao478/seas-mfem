@@ -4785,6 +4785,76 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   (void)substep_I_imp_minus_flat_;
                   (void)substep_n_total_fault_qps_;
 
+                  // R-DIP2: cross-rank divergence diagnostic (RUNTIME env-gated,
+                  // zero overhead when off).  At the target shared fault QP
+                  // (env SEAS_DIAG_XRANK_QP="x,y,z"; default = the Frontera Dc2
+                  // diverging QP) dump, per rank per sub-step, the decomposition
+                  // INPUTS (canonical dip tangent + rotated bulk shear I_*_can)
+                  // and OUTPUTS (DOFData dip/strike traction + slip-rate).
+                  // Diff the two ranks' lines to localise the seed:
+                  //   can_t1 differs            => H-C (curvilinear frame not
+                  //                                bit-identical across ranks)
+                  //   frame same, I_*_can differ => bulk-Q FP seed (H-B
+                  //                                substrate; self vs nbr tells
+                  //                                local-bulk vs ghost)
+                  //   tau1_0 / tau1_nuc differ   => H-A (prestress/nuc gap)
+                  //   then V1 growth over steps  => the weak-channel loop gain.
+                  {
+                     static const bool diag_on = []{
+                        const char *e = std::getenv("SEAS_DIAG_XRANK");
+                        return e && e[0] && !(e[0]=='0' && e[1]=='\0');
+                     }();
+                     if (diag_on && dof_idx >= 0 &&
+                         dof_idx < static_cast<int>(fault_dof_data_->size()))
+                     {
+                        static const std::array<double,3> tgt = []{
+                           std::array<double,3> t = {6.0751786666666670e+05,
+                                                     3.7063591666666665e+06,
+                                                     -4.5430145000000002e+03};
+                           if (const char *e = std::getenv("SEAS_DIAG_XRANK_QP"))
+                           { std::sscanf(e, "%lf,%lf,%lf", &t[0], &t[1], &t[2]); }
+                           return t;
+                        }();
+                        static const double rad = []{
+                           const char *e = std::getenv("SEAS_DIAG_XRANK_R");
+                           return e ? std::atof(e) : 250.0;
+                        }();
+                        static const double tmin = []{
+                           const char *e = std::getenv("SEAS_DIAG_XRANK_TMIN");
+                           return e ? std::atof(e) : 0.0;
+                        }();
+                        Vector _phys(3);
+                        ftr->Face->Transform(ip, _phys);
+                        const double _dx = _phys(0)-tgt[0];
+                        const double _dy = _phys(1)-tgt[1];
+                        const double _dz = _phys(2)-tgt[2];
+                        if (_dx*_dx + _dy*_dy + _dz*_dz <= rad*rad &&
+                            GetTime() >= tmin)
+                        {
+                           std::fprintf(stderr,
+                              "[XRANK] rank=%d t=%.6e c=(%.1f,%.1f,%.1f) "
+                              "can_t1=(%+.10e,%+.10e,%+.10e) "
+                              "Iself_xy=%+.10e Iself_xz=%+.10e "
+                              "Inbr_xy=%+.10e Inbr_xz=%+.10e "
+                              "tau1_0=%+.10e tau1_nuc=%+.10e "
+                              "tau1_corr=%+.10e tau2_corr=%+.10e "
+                              "V1=%+.10e V2=%+.10e "
+                              "sign_flipped=%d elem1_on_plus=%d\n",
+                              my_rank_, GetTime(),
+                              _phys(0), _phys(1), _phys(2),
+                              can_t1[0], can_t1[1], can_t1[2],
+                              I_self_can[SXY], I_self_can[SXZ],
+                              I_nbr_can[SXY],  I_nbr_can[SXZ],
+                              fdata.tau1_0, fdata.tau1_nuc,
+                              fdata.tau1_corr, fdata.tau2_corr,
+                              fdata.V1, fdata.V2,
+                              qpd.sign_flipped ? 1 : 0,
+                              elem1_on_plus ? 1 : 0);
+                           std::fflush(stderr);
+                        }
+                     }
+                  }
+
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
                   {
@@ -5362,8 +5432,15 @@ void WaveOperator<MeshType>::ApplyPMLDamping(const Vector &Q, Vector &rhs) const
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
-   real_t tol) const
+   real_t tol, double *worst_rel_out, int *worst_field_out,
+   bool abort_on_fail) const
 {
+   // R-DIP1: default the monitoring out-params so the serial / no-shared-face
+   // short-circuits below report "no divergence" rather than leaving them
+   // uninitialised.
+   if (worst_rel_out)   { *worst_rel_out = 0.0; }
+   if (worst_field_out) { *worst_field_out = -1; }
+
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       return;  // Serial: nothing to compare.
@@ -5736,6 +5813,17 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
       int fail_local = (max_rel_diff > tol || n_unpaired > 0) ? 1 : 0;
       int fail_global = 0;
       MPI_Allreduce(&fail_local, &fail_global, 1, MPI_INT, MPI_MAX, comm);
+
+      // R-DIP1: report the worst pairing diff via the out-params (every rank
+      // holds the full allgathered record set, so max_rel_diff/max_diff_field
+      // are identical across ranks).  Set on BOTH success and failure.
+      if (worst_rel_out)   { *worst_rel_out = max_rel_diff; }
+      if (worst_field_out) { *worst_field_out = max_diff_field; }
+
+      // R-DIP1: non-aborting diagnostic mode (tests) — return on mismatch
+      // without the verbose dump / MFEM_ABORT.  Collective-safe: every rank
+      // computed the same `fail_global`, so all return together.
+      if (fail_global && !abort_on_fail) { return; }
 
       if (fail_global)
       {

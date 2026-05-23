@@ -683,7 +683,17 @@ public:
    ///                 Under R-701's canonical frame this is expected to
    ///                 report `max_rel_diff=0` always; it remains as
    ///                 regression insurance.
-   void VerifySharedFaultDOFDataConsistency(real_t tol = 1e-10) const;
+   /// R-DIP1: optional non-aborting diagnostic mode.  Default args preserve
+   /// the original behaviour (abort on mismatch) for production drivers.  Tests
+   /// pass `abort_on_fail=false` and read `worst_rel_out` (max cross-rank
+   /// relative diff) / `worst_field_out` (field index 0..NUM_FIELDS-1 that
+   /// attained it) to MONITOR the divergence per step instead of aborting.
+   /// Both out-params are written on every call (success or failure) on every
+   /// rank; 0 / -1 on the serial and no-shared-face short-circuits.
+   void VerifySharedFaultDOFDataConsistency(real_t tol = 1e-10,
+                                            double *worst_rel_out = nullptr,
+                                            int *worst_field_out = nullptr,
+                                            bool abort_on_fail = true) const;
    ///@}
 
 #ifdef SEAS_TEST_INTERNAL

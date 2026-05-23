@@ -321,6 +321,7 @@ TEST_INTERIOR_VS_SHARED_LIVE_SRC           = tests/unit/test_interior_vs_shared_
 # Pepper-bug: MULTI-STEP rupture-regime serial-vs-parallel cross-check
 TEST_RUPTURE_MULTISTEP_SRC                 = tests/unit/test_rupture_multistep_serial_vs_parallel.cpp
 TEST_RUPTURE_TILTED_SRC                    = tests/unit/test_rupture_tilted_fault_serial_vs_parallel.cpp
+TEST_RUPTURE_RAKE_SWEEP_SRC                = tests/unit/test_rupture_rake_sweep_cross_rank.cpp
 # Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY test (8-fault-triangle fixture)
 TEST_ADJACENT_TRI_UNIFORMITY_SRC           = tests/unit/test_adjacent_triangle_fault_uniformity.cpp
 TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_SRC     = tests/unit/test_adjacent_triangle_fault_first_step_audit.cpp
@@ -620,6 +621,7 @@ TEST_BULK_PLANE_WAVE_OBJ                   = $(TEST_BULK_PLANE_WAVE_SRC:.cpp=.o)
 TEST_INTERIOR_VS_SHARED_LIVE_OBJ           = $(TEST_INTERIOR_VS_SHARED_LIVE_SRC:.cpp=.o)
 TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.o)
 TEST_RUPTURE_TILTED_OBJ                    = $(TEST_RUPTURE_TILTED_SRC:.cpp=.o)
+TEST_RUPTURE_RAKE_SWEEP_OBJ                = $(TEST_RUPTURE_RAKE_SWEEP_SRC:.cpp=.o)
 TEST_ADJACENT_TRI_UNIFORMITY_OBJ           = $(TEST_ADJACENT_TRI_UNIFORMITY_SRC:.cpp=.o)
 TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_OBJ     = $(TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_SRC:.cpp=.o)
 TEST_GODUNOV_ROUNDTRIP_OBJ                 = $(TEST_GODUNOV_ROUNDTRIP_SRC:.cpp=.o)
@@ -1668,6 +1670,9 @@ seas_test_rupture_multistep_serial_vs_parallel: $(TEST_RUPTURE_MULTISTEP_OBJ) $(
 
 seas_test_rupture_tilted_fault_serial_vs_parallel: $(TEST_RUPTURE_TILTED_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_TILTED_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+seas_test_rupture_rake_sweep_cross_rank: $(TEST_RUPTURE_RAKE_SWEEP_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_RAKE_SWEEP_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 seas_test_adjacent_triangle_fault_uniformity: $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -2715,6 +2720,10 @@ $(TEST_RUPTURE_TILTED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
+$(TEST_RUPTURE_RAKE_SWEEP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_ADJACENT_TRI_UNIFORMITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
@@ -3427,6 +3436,9 @@ test-rupture-multistep-serial-vs-parallel: seas_test_rupture_multistep_serial_vs
 
 test-rupture-tilted-fault-serial-vs-parallel: seas_test_rupture_tilted_fault_serial_vs_parallel
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_tilted_fault_serial_vs_parallel
+
+test-rupture-rake-sweep-cross-rank: seas_test_rupture_rake_sweep_cross_rank
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_rake_sweep_cross_rank
 
 # Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY (serial + np=4 variants)
 test-adjacent-triangle-fault-uniformity-serial: seas_test_adjacent_triangle_fault_uniformity

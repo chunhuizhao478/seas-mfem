@@ -378,3 +378,64 @@ direction → exactly one rank gets `elem1_on_plus=true` at every angle.
   well-conditioned angles; the real fix is the side test, now angle-robust).
 - The largest-component fallback (θ→90° exactly) is gated at 1e-6; production
   hardening with sorted-global-vertex-ID orientation (option c) remains optional.
+
+---
+
+## Frontera Dc2 re-run (job 7746601, commit 800b328) — side fix NECESSARY but NOT sufficient; dip-channel blow-up remains
+
+CORRECTION (user, 2026-05-22): the blow-up is **NOT fixed**.  It would still
+occur at **t≈1.0 s**; the run aborts EARLY at **t≈0.455 s** only because the
+hard R-101 DOFData-consistency guard trips first.  The side-determination fix
+(removing the 71.6° side-flip) is necessary and real — the run now advances
+cleanly to t≈0.455 s with `V_max=0` and R-101 passing at machine precision
+(1.28e-15 → 1.75e-14) — but the underlying **dip-channel (V1/tau1) cross-rank
+inconsistency + structural instability is still the driver of the t≈1.0 s
+blow-up**.  The guard converts a t≈1.0 s numerical blow-up into a clean t≈0.455 s
+abort on the first detectable inconsistency.  **Resolution was never the issue**;
+the side-flip was one cause, the dip channel is the other.  Decision (user): the
+dip channel MUST be made cross-rank-consistent AND numerically stable — the
+strike-slip-only `SEAS_FORCE_V1_ZERO` lock is NOT acceptable (SAFS has genuine
+dip slip).
+
+It then trips a DIFFERENT, pre-existing failure the R-101 guard catches:
+
+```
+R-101 ... FAILED.  Field 'V1' at centroid (607518, 3706359, -4543)
+differs by 1.6368 across the two ranks (rel_diff=1.0).  [t≈0.455 s, nucleation patch]
+```
+
+### Diagnosis: the DIP channel (V1/tau1) is exercised for the FIRST time
+- `SolveLSW_TPV205` (`tpv205_friction.hpp:146-165`): `V1 = V_abs·tau1_total/|τ|`,
+  `tau1_corr = tau1_trial − η_s·V1`.  So **V1=0 exactly ⟺ tau1_total=0 exactly**.
+  One rank has dip total-traction ≈0 (V1=0), the other nonzero (V1=1.637).
+- The R-101 verifier reports the MAX-rel-diff field (`wave_operator.inl:5893`),
+  so `tau1_corr` ALSO diverged (rel≈0.29, ~7.6 MPa = η_s·1.637) but V1's rel=1.0
+  is larger, hence V1 is named.  Both are dip-channel quantities → the divergence
+  is in `tau1_total = tau1_0 + tau1_nuc + tau1_trial` (dip), not strike.
+- **Why never seen before:** ALL benchmarks (TPV102/104/205, BP5) are pure
+  strike-slip → V1≡0 by construction.  `fault_face_flux.cpp:211-218` documents a
+  KNOWN structural instability in this very channel ("closed-loop V1 amplification
+  …1-ULP perturbation grows ~1.07/step…correct only for strike-slip") whose only
+  mitigation is the strike-slip-only env-var lock `SEAS_FORCE_V1_ZERO`.  SAFS is
+  the first config with GENUINE dip slip, so it cannot use the lock and is the
+  first to actually run the dip channel.
+
+### Leading hypotheses (need a local dip-slip reproducer to distinguish)
+- **H-A (most likely): dip-prestress `tau1_0` projected on the per-rank STORED
+  `tangent1`** (which is sign-flipped across a shared face: `t1_A = −t1_B`,
+  v61 design) **instead of the canonical `can_t1`** → `tau1_0` inconsistent
+  across ranks → `tau1_total` diverges.  Clean, fixable (project prestress onto
+  the canonical frame).
+- **H-B: the documented structural V1 instability** amplifies an unavoidable
+  1-ULP cross-rank seed (different FP op-order on the two ranks) by ~1.07/step.
+  Formulation-level; harder.
+- **H-C: `can_t1` not actually bit-identical across ranks.**  Less likely (the
+  tilted test exercised the canonical frame — but only with STRIKE nucleation, so
+  the dip channel was never validated cross-rank).
+
+### Proposed next step
+Extend `test_rupture_tilted_fault_serial_vs_parallel` (the tool that nailed the
+side bug) to drive DIP slip — nucleate in `tau1_nuc` and/or add a dip-shear
+prestress — and assert cross-rank `V1` consistency at np=2, printing per-rank
+`tau1_0 / can_t1 / tau1_total`.  That distinguishes H-A/H-B/H-C locally before
+any change to the friction code ("Files Requiring Extreme Care").
