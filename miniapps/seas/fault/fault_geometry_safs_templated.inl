@@ -25,6 +25,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>
 
 namespace mfem
 {
@@ -113,7 +114,15 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
       }
 
       sigma_n_per_dof_(i)        = sigma_n_eff;
-      tau_pre_(2 * i)            = tau1;    // dip
+      // INVESTIGATION TOGGLE (SEAS_ZERO_DIP_PRESTRESS): zero the dip
+      // pre-stress component (keep strike + normal) to test whether the
+      // large dip-slip prestress on the ~32deg-dipping SAFS fault drives
+      // the blow-up.  Unphysical (discards real stress); diagnostic only.
+      // Applied at the SOURCE so BOTH the [derived] gate and the DOF init
+      // (which read GetTauPre()) see the zeroed dip.  Off => unchanged.
+      static const bool zero_dip_prestress =
+         (std::getenv("SEAS_ZERO_DIP_PRESTRESS") != nullptr);
+      tau_pre_(2 * i)            = zero_dip_prestress ? 0.0 : tau1;  // dip
       tau_pre_(2 * i + 1)        = tau2;    // strike
    }
 

@@ -1897,6 +1897,61 @@ int main(int argc, char *argv[])
 #endif
       V_max_global = std::max(V_max_global, V_max_step);
 
+      // DIAG (env-gated, debug only): rupture-area proxy + onset localizer.
+      // SEAS_DIAG_BLOWUP=1 enables.  Prints (a) global count of fault DOFs
+      // with V>0.5 m/s (rupturing-area proxy: growing => propagating front,
+      // ~constant => only the forced patch) + global max slip, and (b) at
+      // onset (V_max>10) the owning rank dumps the argmax DOF's full state
+      // so we can see WHAT runs away first (sigma_n? shear? slip?).
+      if (std::getenv("SEAS_DIAG_BLOWUP")
+          && (step % 100 == 0 || V_max_step > 10.0))
+      {
+         long long n_rup_local = 0;
+         real_t    maxslip_local = 0.0;
+         int       argmax_local = -1;
+         real_t    vloc = -1.0;
+         for (int i = 0; i < num_fault_total; ++i)
+         {
+            const DOFData &d = dof_data[i];
+            if (d.slip_rate > 0.5) { n_rup_local++; }
+            const real_t s = std::sqrt(d.slip1 * d.slip1 + d.slip2 * d.slip2);
+            if (s > maxslip_local) { maxslip_local = s; }
+            if (d.slip_rate > vloc) { vloc = d.slip_rate; argmax_local = i; }
+         }
+         long long n_rup_g = n_rup_local;
+         real_t    maxslip_g = maxslip_local;
+         struct { double v; int r; } in_{V_max_local, rank}, out_{V_max_local, rank};
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&n_rup_local, &n_rup_g, 1, MPI_LONG_LONG, MPI_SUM, comm);
+         MPI_Allreduce(&maxslip_local, &maxslip_g, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+         MPI_Allreduce(&in_, &out_, 1, MPI_DOUBLE_INT, MPI_MAXLOC, comm);
+#endif
+         if (rank == 0)
+         {
+            std::cout << "[DIAG] step " << step << " t=" << t
+                      << " V_max=" << V_max_step
+                      << " n_rupturing(V>0.5)=" << n_rup_g
+                      << " max_slip=" << maxslip_g << " m\n";
+         }
+         if (V_max_step > 10.0 && rank == out_.r && argmax_local >= 0)
+         {
+            const DOFData &d = dof_data[argmax_local];
+            std::cout << "[DIAG-ONSET] rank " << rank << " dof " << argmax_local
+                      << " xyz=(" << dof_coords_3d(3 * argmax_local) << ","
+                      << dof_coords_3d(3 * argmax_local + 1) << ","
+                      << dof_coords_3d(3 * argmax_local + 2) << ")"
+                      << " V=" << d.slip_rate << " V1=" << d.V1
+                      << " V2=" << d.V2 << " slip1=" << d.slip1
+                      << " slip2=" << d.slip2
+                      << " sigma_n_corr=" << d.sigma_n_corr
+                      << " tau1_corr=" << d.tau1_corr
+                      << " tau2_corr=" << d.tau2_corr
+                      << " tau1_nuc=" << d.tau1_nuc
+                      << " tau2_nuc=" << d.tau2_nuc << "\n";
+         }
+      }
+
       paraview_write(step + 1, t, V_max_step);
 
       if (cfg.output.checkpoint_every_steps > 0
