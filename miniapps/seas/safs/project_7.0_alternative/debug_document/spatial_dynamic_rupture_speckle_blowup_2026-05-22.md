@@ -439,3 +439,62 @@ side bug) to drive DIP slip — nucleate in `tau1_nuc` and/or add a dip-shear
 prestress — and assert cross-rank `V1` consistency at np=2, printing per-rank
 `tau1_0 / can_t1 / tau1_total`.  That distinguishes H-A/H-B/H-C locally before
 any change to the friction code ("Files Requiring Extreme Care").
+
+---
+
+## ROOT CAUSE CONFIRMED on the REAL mesh (Frontera job 7747036, SEAS_DIAG_XRANK)
+
+The env-gated [XRANK] trace on the actual Dc2 run pinpointed the divergence onset
+at the diverging QP (607518, 3706359, -4543), t=0.478 s. It REFUTES the
+weak-channel/covariance hypothesis (and H-A/H-C):
+
+At the onset sub-step (line 1368), the two ranks (114, 104) sharing the face had
+**bit-identical inputs to all 11 printed digits**:
+- `can_t1` identical (and static) → frame consistent (H-C out).
+- `tau1_0=-1.1714678189e7` identical → dip prestress consistent (H-A out).
+- `Iself`(114) == `Inbr`(104) and `Inbr`(114) == `Iself`(104) to 11 digits → both
+  ranks feed `EvaluateADER_LSW` the SAME `(Q_plus, Q_minus)` (the self/nbr swap is
+  exactly the expected `elem1_on_plus` pairing; my side fix is correct).
+
+Yet the OUTPUTS split: rank 104 `V1=-5.06e-3, V2=+1.66e-2` (SLIPS), rank 114
+`V1=V2=0` (LOCKED). Context: `tau2_corr≈38 MPa` ramping (nucleation),
+`tau1_0=-11.7 MPa` → `|τ|≈40 MPa` ≈ strength `μ_s·σ_n` (μ_s=0.85). **The QP is
+exactly at the slip-onset threshold**, where the LSW solver
+`V_abs = max(0, (|τ|−τ_str)/η_s)` has a non-smooth **kink**. The two ranks' `|τ|`
+differ only at FP-roundoff (~1e-14, below the 11-digit print) because the
+distributed bulk solve / per-substep ghost exchange of the predictor Q is not
+bit-exact across ranks. That 1e-14 tips rank 104 just over the kink (slips) and
+rank 114 just under (locked). One sub-step later (1369) rank 104's imposed state
+radiates (its `Iself` jumps to (+0.11,−0.37)); the two ranks fully desync — one
+ruptures, one stays locked — and `V1` diverges to O(1) (1.6368) by the abort.
+
+### Why this is the real cause, and why benchmarks never hit it
+- **Redundant computation of a shared quantity.** Each rank computes the shared-QP
+  friction solve INDEPENDENTLY. R-701 (`wave_operator.inl:3026-3043`) deleted the
+  v5 R-501 owner-broadcast on the premise that the canonical frame makes both
+  ranks' `Evaluate` inputs bit-identical → identical outputs → no broadcast. The
+  XRANK trace proves the premise FALSE: the *frame* is bit-identical but the
+  *bulk Q* is not (≈1e-14), and a non-smooth solver amplifies that to a full
+  branch split.
+- **TPV102/104** are rate-and-state (smooth `asinh` solve, no `max(0,·)` kink) →
+  no branch split. **TPV205** is LSW but its rupture front sweeps fast and no
+  shared QP sits AT the threshold for many sub-steps. **SAFS** uses
+  `gradual_overstress` that SLOWLY ramps the QP THROUGH the slip-onset threshold
+  over many sub-steps → maximal time at the kink → the 1e-14 seed reliably splits
+  the two ranks. So the bug is specific to LSW + slow-nucleation + long
+  distributed runs — exactly SAFS, and nothing in the benchmark suite.
+
+### Fix direction (supersedes the covariant-decomposition plan)
+Make the shared-fault DOFData **single-valued across the two ranks** — restore an
+owner-broadcast / cross-rank reconciliation in the ADER shared-fault path
+(`ComputeADERSharedFaceFluxRHS`): one rank (the canonical owner, e.g.
+`elem1_on_plus==true` or lowest global element id) computes the friction solve
+and the imposed state, and broadcasts (V1, V2, tau1_corr, tau2_corr,
+sigma_n_corr, slip1, slip2, psi, and Q_imp_plus/minus) to the peer. Both ranks
+then hold identical DOFData and assemble their own side's flux from the SAME
+imposed state. This is law-/rake-/geometry-agnostic (genuinely general), is
+robust to ANY sub-ULP input difference, and is precisely what R-701 removed.
+The covariant-decomposition / weak-channel Phase 3 is dropped — it was treating a
+symptom. R-701 revert is justified by NEW evidence (its bit-identical-inputs
+premise is false for long LSW runs); rate-state (TPV102/104) keeps the no-broadcast
+path byte-exact, so the reconcile must be gated to the LSW shared-fault path.

@@ -1,5 +1,123 @@
 # Implementation Plan: GENERAL fault tangential-traction stability + cross-rank consistency
 
+> ## ⚠ REVISION 2 (2026-05-23) — root cause CONFIRMED on Frontera; plan pivots
+> The `SEAS_DIAG_XRANK` trace on the real Dc2 mesh (job 7747036) **refuted the
+> weak-channel/covariant-decomposition hypothesis** (and H-A/H-C). Confirmed
+> mechanism: a **redundant-computation + slip-onset-kink cross-rank desync**.
+>
+> At the rupture front (t=0.478 s) the two ranks sharing the diverging QP feed
+> `EvaluateADER_LSW` **bit-identical-to-11-digits** inputs (`can_t1` identical &
+> static; `tau1_0` identical; `Iself(A)==Inbr(B)` ⇒ same `(Q_plus,Q_minus)` —
+> side fix correct), yet the **outputs split**: one rank slips (V1=−5e−3), the
+> other stays locked (V1=0). The QP sits exactly at `|τ|≈μ_s·σ_n` (the LSW
+> `V_abs=max(0,(|τ|−τ_str)/η_s)` **kink**); the ~1e−14 cross-rank difference in the
+> (non-bit-exact, because the same physical QP is interpolated through two
+> different element parametrizations — `shape1∘Loc1` vs `shape2∘Loc2`) bulk Q tips
+> the two ranks onto opposite slip/lock branches → full desync → V1 → O(1).
+>
+> **Root cause:** R-701 (`wave_operator.inl:3026-3043`) deleted the v5 R-501
+> owner-broadcast on the premise that the canonical frame makes both ranks'
+> `Evaluate` inputs bit-identical. The *frame* is bit-identical; the *bulk Q* is
+> not. So the premise is false for long LSW runs whose front crawls through the
+> kink (SAFS `gradual_overstress`). Benchmarks miss it: TPV102/104 rate-state is
+> smooth (no kink); TPV205's front sweeps fast.
+>
+> **FIX (this revision):** make the shared-fault DOFData **single-valued across
+> the two ranks** — restore an owner-broadcast / reconcile in the ADER LSW
+> shared-fault path (see "## REVISED FIX DESIGN" below). The covariant-
+> decomposition Phase 3 (rotational covariance / rake sweep) is **DROPPED** — it
+> treated a symptom. Phase 1's rake-sweep test stays as a regression oracle.
+> Everything from "## Overview" down is the SUPERSEDED original plan, retained
+> for the record.
+
+## REVISED FIX DESIGN (owner-broadcast / reconcile — supersedes Phases 2–3)
+
+### Constraints (unchanged + new)
+- **Byte-exact for rate-state (TPV102/104) and TPV205**: the reconcile must be
+  gated to the LSW shared-fault path used by SAFS, and must be a no-op /
+  bit-identical for the rate-state path and for any run where the two ranks
+  already agree. Gate: full TPV/BP5 regression `worst_rel ≤ 1e-13`.
+- **MPI-collective-safe (R-1600 lesson)**: every rank with shared fault faces
+  participates; ranks without must not deadlock. Mirror the existing
+  point-to-point face-neighbour topology (as `ExchangeFaceNbrData` /
+  `GetSharedFaceTransformations` use), not an unguarded global collective.
+- **R-701 revert is justified** by the XRANK evidence (its bit-identical-inputs
+  premise is false); cite job 7747036 + `wave_operator.inl:3026-3043`.
+
+### Phase A — confirm the seed source is interpolation, not a real input gap (DIAGNOSTIC, ~done)
+The XRANK trace already shows `Iself(A)==Inbr(B)` to 11 digits and the split is
+at the kink. One more cheap check before coding: in the diagnostic, also dump
+`I_self_can`/`I_nbr_can` to **17 digits** (`%.17e`) at the onset QP to confirm the
+two ranks differ at ~1e−14 (interpolation FP), not at a larger scale (which would
+indicate a real exchange bug to fix instead). If the diff is ≤ a few ULP·|I|,
+proceed to Phase B. (Optional; the mechanism is already clear.)
+
+### Phase B — owner-broadcast/reconcile of shared-fault DOFData (THE FIX)
+**Goal:** after the LSW friction solve, the two ranks sharing a fault QP hold
+**bit-identical** DOFData (V1,V2,tau1_corr,tau2_corr,sigma_n_corr,slip1,slip2) and
+assemble their side's flux from a consistent imposed state, so the slip/lock
+decision is made ONCE (by the owner) and copied — immune to the ~1e−14 input
+difference.
+
+**Owner rule:** the rank with `elem1_on_plus==true` (exactly one per shared face,
+guaranteed by the side fix). Deterministic, already computed.
+
+**Mechanism (`ComputeADERSharedFaceFluxRHS`, LSW branch only):**
+1. Both ranks compute `EvaluateADER_LSW` as today (gives each rank's DOFData +
+   `I_imp_plus/minus`).
+2. **Exchange** the post-solve DOFData fields for every shared fault QP across the
+   shared-face neighbour topology (one packed buffer per neighbour rank,
+   non-blocking send/recv — same pattern/topology as the predictor-Q ghost
+   exchange the substep path already does each sub-step; reuse
+   `pmesh.GetSharedFace*` / the R-101 face-key pairing so each QP is matched to
+   its peer).
+3. **Reconcile:** the non-owner overwrites its DOFData with the owner's
+   (received) values. The owner keeps its own.
+4. **Imposed state:** broadcast the owner's `I_imp_plus/minus` (canonical-frame)
+   alongside the DOFData; both ranks rotate the OWNER's imposed state to global
+   (`T_can`, identical on both) for their own side's assembly. This makes the
+   assembled fault RHS consistent too (not just the stored DOFData).
+5. Gate the whole exchange on `fault_friction_law_ ∈ {LSW, LSW_ForcedRupture}`;
+   rate-state skips it (byte-exact TPV102/104).
+
+**Open implementation choices to settle in design review (do NOT guess):**
+- (i) Reconcile every sub-step vs only when near the kink. Default: every
+  sub-step on shared fault QPs (correctness over micro-opt; the QP set is small).
+- (ii) Reuse the deleted v5 R-501 packing code (git history) vs new minimal
+  pack/unpack keyed on the R-101 face-vertex-key. Prefer new + the existing
+  face-key matcher (the R-101 verify already pairs shared QPs across ranks).
+- (iii) Whether to broadcast `I_imp` (step 4) or have the non-owner rebuild it
+  from the reconciled DOFData + its local `(Q_plus,Q_minus)`. Broadcasting is
+  fully consistent; rebuilding leaves a benign ~1e−14 in the flux (but the
+  DOFData — what R-101 checks — is then identical). Decide via Phase A's ULP
+  measurement + a regression check.
+
+### Phase C — verify
+- The `xrank`-instrumented Dc2 run: at the onset QP, both ranks now show
+  **identical** V1/V2/tau*_corr through and past t=0.478 s; R-101 no longer trips;
+  the run advances past t=1.0 s (no blow-up).
+- TPV102/104/205 + BP5 byte-exact regression `worst_rel ≤ 1e-13` (rate-state path
+  untouched; LSW path identical when ranks already agree).
+- `test_rupture_rake_sweep_cross_rank` (the existing oracle) + the local
+  fault/TPV suite green.
+- A NEW small unit test: a 2-tet np=2 LSW fixture driven exactly to the slip-onset
+  threshold with an INJECTED 1-ULP cross-rank perturbation on one side's bulk Q;
+  assert the reconciled DOFData is bit-identical across ranks (RED before Phase B,
+  GREEN after). This is the local oracle the clean fixture CAN provide (injection
+  makes the seed; the reconcile must absorb it).
+
+### Risks
+- **Deadlock / collective mismatch** (R-1600): the new exchange must use the same
+  neighbour topology + non-blocking pattern; test at np=2,4,8 locally.
+- **Perf**: per-sub-step fault exchange adds comm; bounded by #shared-fault QPs
+  (small). Measure; if hot, restrict to sub-steps where any owned shared QP is
+  within a small band of the kink.
+- **Byte-exact regression**: gate strictly to LSW; verify rate-state unchanged.
+
+---
+
+# (SUPERSEDED) original plan — covariant decomposition
+
 ## Overview
 The SAFS run (commit 800b328, side-fix landed) no longer blows up from the
 71.6° side-flip, but still diverges (would blow up ~t=1.0 s; the R-101 guard
