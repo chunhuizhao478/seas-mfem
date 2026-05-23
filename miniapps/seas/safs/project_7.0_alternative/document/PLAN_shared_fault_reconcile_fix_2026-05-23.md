@@ -656,8 +656,13 @@ config-agnostic.
 1. Local regression battery (Phase-2 AC) green; document unchanged pre-existing
    failures (adjacent-triangle pepper-bug, r101 missing-precondition, macOS MUMPS
    Bus error).
-2. Re-run the `SEAS_DIAG_XRANK` Dc2 sbatch: at the onset QP both ranks now show
-   identical V1/V2/τ*_corr through t=0.478 s; R-101 passes; reaches tfinal.
+2. Re-run the `SEAS_DIAG_XRANK` Dc2 sbatch: the R-101 verify (post-reconcile)
+   reports `worst_rel ≤ 1e-13` throughout (no `DIVERGED`) and reaches tfinal.
+   NOTE: the `[XRANK]` trace fires in Pass 1, BEFORE the reconcile, so it may
+   STILL show the two ranks' ~1e-14 interpolation seed — and even a per-rank
+   slip/lock split at the kink — which is expected and harmless: the reconcile
+   overwrites the non-boss AFTER the trace, so the R-101 `worst_rel` (post-
+   reconcile) is the validation metric, not the Pass-1 trace.
 3. Re-run the physical `D_c=1.0` baseline config (not just the inflated Dc2) to
    confirm the fix is not tuned to Dc2.
 4. **zerodip as an issue-B oracle (job 7747119 baseline = `worst_rel → 1.0` +
@@ -689,6 +694,37 @@ config-agnostic.
 
 ### Dependencies
 - Depends on: Phase 2, Phase 3.
+
+### Post-fix validation runbook (cluster)
+The reconcile (Phases 2+3) is on branch `safs` (commit `7761baf`, pushed).
+Local reconcile-path regression is already green (np=2): Phase-1 oracle
+RED→GREEN (rate-state + LSW `worst_rel=0`; negative leg trips at `1.0`);
+multistep serial-vs-parallel `7.2e-16`; tilted serial-vs-parallel `7.4e-14`;
+rake-sweep `0`. On Frontera:
+
+1. `git pull` the `safs` checkout (gets the reconcile + the Phase-1 oracle).
+2. Re-run `spatial_dyn_resDc2_XRANKdiag_8N_400r_dev_2hr_safs.sbatch` **as-is**
+   (it rebuilds `seas_spatial_dyn_driver`, so the reconcile is built in). This
+   is the oblique non-fatal run that PRE-fix gave `worst_rel → 1` + speckle +
+   `max_slip → 1.27e6 m` (job 7747304).
+3. Analyse with the SAME Phase-0 command block, now expecting the POST-fix result:
+   - **§1** `V_max` bounded (~6 m/s, peaks then holds) AND `max_slip` back to
+     **O(10 m)** (the speckle's garbage slip is gone).
+   - **§2** `worst_rel ≤ 1e-13` for the WHOLE run, `DIVERGED count = 0`.
+   - ParaView `fault.vtkhdf`: the scattered slip-rate speckle outside the
+     rupture is GONE.
+4. Optional cross-checks: re-run `spatial_dyn_zerodip_*.sbatch` (strike-only
+   oracle: same `worst_rel ≤ 1e-13` + no speckle) and the physical `D_c=1.0`
+   baseline (confirms the fix is not tuned to Dc2).
+
+**Reading the result:**
+- `worst_rel ≤ 1e-13` + no speckle + `max_slip` physical ⇒ **PASS** (issue B fixed).
+- `worst_rel` still O(1) ⇒ a mutable DOFData field is missing from the reconcile
+  payload, or a code path bypasses the reconcile (the R-101 abort message now
+  names these).
+- `worst_rel ≤ 1e-13` but the speckle SURVIVES ⇒ a co-present cause
+  (under-resolution `L_nuc/h_min < 10`, SSO) the reconcile is not meant to fix —
+  the symptom-attribution caveat (B.2.5) — decide next steps then.
 
 ## Testing Strategy
 
