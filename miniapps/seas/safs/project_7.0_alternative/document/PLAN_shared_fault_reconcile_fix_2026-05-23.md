@@ -1,349 +1,418 @@
-# Implementation Plan: method-invariant shared-fault cross-rank reconcile
+# Implementation Plan: shared-fault cross-rank DOFData consistency (SAFS)
 
-## Overview
-On a shared (cross-rank) fault face the per-QP friction state (`DOFData`) is
-computed **redundantly** on the two ranks that own the two sides. Their inputs
-(the bulk Q at the QP) are NOT bit-identical — the same physical QP is
-interpolated through two different element parametrisations (`shape1∘Loc1` vs
-`shape2∘Loc2`), so they differ at ~1e-14. R-701 deleted the v5 R-501
-owner-broadcast on the (false) premise that the canonical frame makes the inputs
-bit-identical. The Frontera XRANK trace (job 7747036) proved this is the SAFS
-blow-up: at the slip-onset kink `V_abs=max(0,(|τ|−τ_str)/η_s)` the 1e-14 tips one
-rank to slip and the other to lock → full desync → blow-up; the R-101 guard
-aborts first (t≈0.455 s).
+## TL;DR — there are TWO separate problems; this plan is about the second one
 
-This plan delivers, in one document, the three pieces requested:
-1. **Reproducible local test** — a deterministic np=2 unit test that injects a
-   1-ULP cross-rank input difference at the slip-onset threshold and reproduces
-   the desync (RED before the fix), for BOTH friction laws.
-2. **General (method-invariant) fix** — make the shared-fault `DOFData` and
-   imposed state **single-valued** across the two ranks (owner computes,
-   broadcasts; non-owner adopts), for ALL friction laws, before flux assembly.
-3. **Correctness guard** — the cross-rank consistency verify, kept as a runtime
-   guard (method-invariant), expected to report `max_rel_diff == 0` after the
-   fix, so any future regression aborts loudly.
+| | Problem A — the blow-up | Problem B — the cross-rank inconsistency |
+|---|---|---|
+| **What** | The fault +/- side was mislabeled on the tilted (curvilinear) fault, so the nucleation pushed with the wrong sign → V_max → 10³ blow-up. | The same fault quad-point is solved **twice** (once per MPI rank) from inputs that differ at the 16th digit; at the rupture onset that hair's-width difference makes the two ranks disagree (slip vs lock). |
+| **Scope** | Geometry (which side is "+"). Independent of friction law / dip / strike. | MPI / floating-point. Triggered the same way for any channel; only **runs away** when there is dip slip. |
+| **Status** | **FIXED** — commit `800b3281` (see Part A). Validated by the `zerodip` job. | **OPEN** — this plan. |
+| **Test** | `spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch` (no dip slip, guard non-fatal). | New local injection test + the Dc2 `XRANK` Frontera run. |
 
-Source of truth for the diagnosis: `spatial_dynamic_rupture_speckle_blowup_2026-05-22.md`.
-Design review (findings R-001..R-006): `spatial_dynamic_rupture_reconcile_review_2026-05-23.md`.
-This document SUPERSEDES the fix sections of
-`PLAN_dip_channel_v1_cross_rank_stability_2026-05-22.md` (covariant-decomposition
-direction — dropped as a symptom-treatment).
-
-## Constraints
-- **Method-invariant (review R-001):** the reconcile applies to LSW,
-  LSW_ForcedRupture, AND RateState in the shared-fault ADER path. No
-  per-law / per-rake / kink-proximity gating (that re-introduces
-  problem-specificity).
-- **Regression contract (REVISED, R-001) — needs the byte-exact relaxation that
-  the method-invariant directive implies:** any cross-rank reconcile makes the
-  non-owner adopt the owner's value, changing TPV102/104 by ~1e-14, so
-  bit-exactness vs the pre-fix binary is impossible. New contract:
-  TPV102/104/205 + BP5 **physically-exact** (`worst_rel ≤ 1e-13` vs pre-fix) AND
-  now **cross-rank bit-identical** (R-101 `max_rel_diff == 0`). The latter is a
-  strict correctness improvement over the current cross-rank-inconsistent-at-1e-14
-  baseline. (Overrides the CLAUDE.md "TPV/BP5 byte-exact" rule per the directive;
-  recorded here.)
-- **MPI-collective-safe (review R-005, R-1600 deadlock class):** every rank with
-  shared fault faces participates consistently; ranks without must not deadlock.
-- **Files Requiring Extreme Care** (`CLAUDE.md`): `wave_operator.inl/.hpp`,
-  `fault_face_flux.cpp`. Full verification suite required.
-- **Owner rule (review R-003):** owner = the **lower MPI rank** of the two
-  sharing the face (globally unique, deterministic, geometry-independent —
-  immune to the θ≈90° degenerate band that `elem1_on_plus` is fragile in).
-  `elem1_on_plus` stays ONLY for the +/- flux role.
-- **No hardcoded constants** (derive tolerances from η_s/σ_n/μ); **Brent** for
-  rate-state friction (unchanged); the reconcile does not touch the solvers.
-
-## Background math (what each rank computes, and the seed)
-Per shared fault QP, in the bit-identical canonical frame `(can_n, can_t1,
-can_t2)` (frame is static + bit-identical — confirmed; see diagnosis):
-```
-I_self_can = Tinv_can · I_self     I_nbr_can = Tinv_can · I_nbr
-(Q_plus, Q_minus) = elem1_on_plus ? (I_self_can, I_nbr_can) : (I_nbr_can, I_self_can)
-EvaluateADER_LSW / EvaluateADER : (Q_plus,Q_minus) → DOFData{V1,V2,τ*_corr,σn_corr,slip*}, I_imp_plus/minus(canonical)
-```
-Cross-rank, `I_self_can(A) == I_nbr_can(B)` only to ~11 digits (interpolation FP,
-~1e-14). The friction map is Lipschitz away from the kink (rate-state: bounded
-1e-14 divergence — invisible but real) and NON-smooth at `|τ|=τ_str` (LSW: 1e-14
-→ O(1) branch split). The fix removes the divergence at the source: the
-shared-QP `DOFData` + `I_imp` are computed once (owner) and copied — so both
-ranks hold identical values regardless of the 1e-14 input gap.
+Documents behind this plan: diagnosis `spatial_dynamic_rupture_speckle_blowup_2026-05-22.md`,
+design review `spatial_dynamic_rupture_reconcile_review_2026-05-23.md`.
 
 ---
 
-## Phase 1: Reproducible local test (injection-based, np=2, method-invariant)
+## Part A — the blow-up fix (DONE, commit `800b3281`) — documented for the record
+
+> **This part is already landed and is NOT implemented by this plan.** It is
+> documented here because the user asked to keep it separate and because it is
+> the reason the `zerodip` run is now stable.
+
+### What was wrong (plain language)
+On each fault face the code must decide which of the two touching elements is on
+the "+" side and which is on the "−" side (this sets the sign of the nucleation
+push and the flux). It decided by measuring which element sits "below" a FIXED
+reference direction `ref_normal = (0,−1,0)` — i.e. it projected the
+element-to-face offset onto that hardcoded direction. That works for a flat
+fault whose normal IS (0,±1,0). The meshed SAFS fault is **curvilinear**: where
+the fault swings to a roughly N–S strike, its normal becomes nearly
+perpendicular to `(0,−1,0)`, so the projection measures mostly the *sideways*
+part of the offset instead of the real "above/below." Past a tilt of ≈71.6° the
+sideways part wins and the side label **flips** — both ranks of a shared face
+then call themselves "−", the "exactly one + side" rule breaks, the nucleation
+is applied with the wrong sign, and the rupture blows up.
+
+### What we changed (commit `800b3281`)
+Project the element-to-face offset onto the **actual face normal** (canonicalized
+to a rank-independent direction), not the hardcoded `ref_normal`:
+- `fault/fault_basis.hpp` — new shared static
+  `FaultBasis::NormalNeedsFlipToCanonical(n_raw, ref_normal, dim)` (orient the
+  normal LINE to `n·ref_normal>0`, with a largest-component fallback when the
+  fault normal is ⟂ `ref_normal`); `ComputeOrientedFrame` routes its sign
+  decision through it.
+- `dynamic/wave_operator.inl` — both side-determination blocks (interior
+  `:459-465`, shared `:519-525`) compute the canonical face normal via
+  `CalcOrtho` and project the centroid offset onto it instead of `ref_normal`.
+- For a flat fault the canonical normal **equals** `ref_normal`, so TPV/BP5 are
+  byte-exact; the change only bites where the fault tilts.
+
+### How Part A is validated (per the user's directive)
+Job script: `jobs/safs/spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch`.
+- `SEAS_ZERO_DIP_PRESTRESS=1` (default) — zeroes the dip pre-stress at the source
+  so there is **no dip slip**; the fault is loaded in strike only.
+- `SEAS_R101_NONFATAL=1` — the cross-rank guard logs `worst_rel` each check
+  instead of aborting, so **Problem B does not force-abort the Problem-A run**
+  (this is the "do not force guard the MPI DOFData inconsistency" requirement;
+  the mechanism already exists, commit `fc28454`, and the call site is correct:
+  `spatial_dyn_driver.cpp:1994` passes `tol, &worst_rel, &worst_field,
+  abort_on_fail=!nonfatal`).
+- Expected: the run advances with no V_max blow-up (Part A fixed). The R-101
+  `worst_rel` stays bounded because with no dip slip there is nothing for the
+  cross-rank inconsistency to run away into (see "why dip, not strike" below).
+
+**Acceptance for Part A (already met / re-confirm):** the zerodip job runs past
+the old blow-up window with `V_max` physical (no 10³) and the non-fatal R-101
+log shows `worst_rel` bounded (not → O(1)).
+
+---
+
+## Part B — the cross-rank DOFData inconsistency (THIS PLAN)
+
+### B.1 The problem in plain language
+
+A fault quadrature point that lies on the boundary between two MPI ranks is a
+**shared** point: rank A owns the element on one side, rank B owns the element
+on the other. To advance the fault friction there, each rank needs the stress on
+**both** sides. Each rank already has its own side exactly, and gets the other
+side as a **ghost copy** from its neighbor. So both ranks have "both sides" and
+both run the friction solve for that point. **The same physics is computed
+twice, once on each rank.** (This is what R-701 set up: it deleted an older
+"one rank computes, tells the other" broadcast, betting that both ranks would
+get identical answers anyway.)
+
+That bet is wrong by a hair. The two ranks do **not** feed the friction solve
+bit-identical numbers. The reason is pure floating-point bookkeeping, not a
+logic bug:
+
+- The shared point is one physical location, but rank A reaches it through its
+  element's local coordinates and rank B reaches the *same* point through the
+  *neighbor* element's local coordinates. The interpolation weights
+  (`shape × DOFs`) are mathematically equal but rounded differently, so the bulk
+  stress the two ranks plug in differs at about the **16th significant digit**
+  (~1e-14). (Confirmed on Frontera: the two ranks' inputs match to 11 printed
+  digits and differ below that.)
+
+Normally a 1e-14 difference in → a 1e-14 difference out: invisible. The trouble
+is the **rupture onset is a yes/no switch**. The slip rate is
+`V = max(0, (|τ| − strength)/η_s)`: below the strength the point is **locked**
+(`V=0`); above it, it **slips**. Right at the threshold `|τ| = strength`, a
+hair's-width difference in `|τ|` flips the answer between "locked" and "slips."
+The SAFS nucleation ramps the stress up **slowly**, so the point sits **right on
+the knife's edge for several sub-steps** — and during that window the 1e-14
+difference makes **rank A slip while rank B stays locked** (or vice-versa). From
+that instant the two ranks are computing two different earthquakes at that point;
+the slip-weakening feedback then drives them apart, and the run is corrupted.
+
+A runtime guard (the R-101 check) compares the two ranks each step and aborts
+when they disagree — that is what stops the SAFS run at t≈0.455 s.
+
+**Why benchmarks never caught it:** TPV102/104 use rate-and-state friction,
+whose slip rate is a **smooth** function (no yes/no switch) — a 1e-14 input stays
+a 1e-14 output forever, so the ranks never visibly disagree. TPV205 uses the
+same slip-weakening switch as SAFS, but its rupture front sweeps past a point in
+one step (no slow knife's-edge dwell). Only SAFS combines the slip-weakening
+switch **and** a slow nucleation that parks a shared point on the threshold.
+
+### B.2 Why the DIP direction blows up but the STRIKE direction is fine
+
+This is the part that confused us, so here it is carefully.
+
+The **trigger** above is **blind to direction**: the yes/no slip switch is on the
+*total* shear magnitude `|τ|`, so the slip-vs-lock split corrupts the **whole**
+slip vector — both the strike component and the dip component become inconsistent
+across ranks at the same instant. (In the Frontera trace, when one rank slipped
+it had both `V2` (strike) and `V1` (dip) nonzero while the other rank had both
+zero.)
+
+What differs is the **consequence** — whether that inconsistency stays small or
+runs away — and that **is** direction-dependent, for a physical reason:
+
+- **Strike slip does not change the fault's normal stress.** Sliding along strike
+  is motion *in the fault plane, along the surface*; it doesn't push the two
+  sides together or pull them apart. So a strike inconsistency is just a small
+  error on a large, well-loaded quantity — it radiates away and stays bounded.
+- **Dip slip on the ~32°-dipping SAFS fault DOES change the normal stress**
+  (slip ↔ normal-stress coupling: dip motion on a dipping fault has a component
+  that compresses/decompresses the fault). And the fault's **normal-stress
+  channel is undamped** (unlike the shear channels, which radiation damping
+  `η_s·V` holds in check). So a dip inconsistency feeds the *un-damped* normal
+  channel: more dip slip → changed σ_n → changed strength → more slip → … a
+  positive feedback loop with no brake. That is the runaway that becomes the
+  blow-up.
+
+So: **strike inconsistency = small error on a stable channel (bounded); dip
+inconsistency = small error injected into an undamped feedback loop (runs away).**
+
+This is exactly what the **zerodip experiment proves empirically**: zero the dip
+pre-stress (no dip slip) and the *same code with the same 1e-14 split* runs
+without blowing up — the strike-only inconsistency stays bounded (the R-101
+non-fatal log shows `worst_rel` small). Restore the dip load and it runs away.
+(The zerodip sbatch header states this hypothesis directly: "that dip-slip drive
+(via slip↔normal-stress coupling) is what makes the rupture blow up.")
+
+**Important:** the fix below removes the inconsistency **at its source for every
+direction**, so we do NOT rely on strike being self-stabilizing. After the fix,
+strike and dip are both cross-rank-identical.
+
+### B.3 How the proposed fix works in plain language
+
+Stop computing the shared point twice and hoping the two answers match. Instead,
+**pick one rank to be the boss for that point; the boss computes the friction
+solve; it tells the other rank the answer; both ranks use the boss's answer.**
+Now there is only ONE answer, so the two ranks cannot disagree — the yes/no slip
+switch is decided once, by the boss, and copied. The 1e-14 input difference is
+irrelevant because the non-boss never uses its own solve.
+
+Concretely (still plain):
+1. Both ranks do their friction solve as today (cheap; we don't restructure the
+   solver).
+2. They **exchange** the results for every shared fault point (a small MPI
+   message — only the points on rank boundaries).
+3. For each point, the **non-boss overwrites its own answer with the boss's** —
+   both the friction state (slip rate, corrected traction, …) **and** the
+   "imposed stress" that gets pushed back into the bulk wave solve. (We must copy
+   the imposed stress too, not just the stored numbers — otherwise the bulk would
+   re-grow a fresh 1e-14 difference next step and we'd be back where we started.)
+4. THEN both ranks assemble their side of the flux from that single shared
+   answer.
+
+"Boss" = the rank with the **smaller MPI rank number** of the two sharing the
+point. It's a fixed, unique, geometry-independent choice (so it can't be confused
+by the curvilinear fault the way the +/- side label was).
+
+**Why this is the right kind of fix (general, not a patch):** it does the same
+thing for every friction law and every slip direction — it just makes the shared
+point single-valued. It does not tune a threshold, special-case the dip channel,
+or lean on strike being lucky. (An older "owner-broadcast" doing exactly this
+existed and was deleted by R-701; we are restoring it in the path R-701 left
+uncovered, now that we've proven R-701's "both ranks agree anyway" assumption is
+false.)
+
+**One honest consequence (needs your OK):** making the non-boss adopt the boss's
+value changes TPV102/104 by ~1e-14 (they currently differ across ranks by that
+much; after the fix they're bit-identical across ranks). So we trade
+"bit-identical to the old binary" for "physically identical (≤1e-13) AND now
+bit-identical across ranks" — a stronger correctness property, but it does
+relax the strict byte-exact rule. Flagged again here.
+
+---
+
+## Constraints
+- **Method- and direction-invariant:** the reconcile runs for LSW,
+  LSW_ForcedRupture, AND rate-state; no per-law / per-direction / threshold gate.
+- **Regression contract (relaxed, see B.3):** TPV102/104/205 + BP5
+  physically-exact (`worst_rel ≤ 1e-13` vs pre-fix) AND cross-rank bit-identical
+  (R-101 `max_rel_diff == 0`). Overrides CLAUDE.md byte-exact; recorded; needs
+  user sign-off.
+- **MPI-collective-safe** (R-1600 deadlock class): every rank reaches the
+  exchange; ranks with no shared fault faces contribute empty buffers and do not
+  hang.
+- **Boss = lower MPI rank** (unique, geometry-independent; `MFEM_VERIFY` exactly
+  one boss per shared point).
+- **Files Requiring Extreme Care:** `wave_operator.inl/.hpp`, `fault_face_flux.cpp`.
+- Do not touch the friction solvers; do not add hardcoded constants.
+
+## Phase 1: reproducible local test (injection-based, np=2, both laws)
 
 ### Goal
-A standalone np=2 unit test that DETERMINISTICALLY reproduces the cross-rank
-desync at the slip-onset threshold by injecting a 1-ULP input difference, and
-asserts the two ranks' `DOFData` are bit-identical — RED before Phase 2, GREEN
-after — for BOTH RateState and LSW (proving method-invariance, review R-001).
+A deterministic np=2 unit test that reproduces the cross-rank split by injecting
+a 1-ULP input difference at the slip-onset threshold and asserts the two ranks'
+`DOFData` are bit-identical — RED before Phase 2, GREEN after — for BOTH
+rate-state and LSW (proving the fix is method-invariant).
 
 ### Files to Create
-- `tests/unit/test_shared_fault_reconcile_cross_rank.cpp` — the reproducer.
+- `tests/unit/test_shared_fault_reconcile_cross_rank.cpp`.
 
 ### Files to Modify
-- `Makefile` — 5 entries mirroring the tilted-test wiring (SRC at ~323, OBJ at
-  ~623, link target `seas_test_shared_fault_reconcile_cross_rank` with the same
-  object set as `seas_test_rupture_tilted_fault_serial_vs_parallel` (Makefile
-  ~1671), compile rule (~2719), run target `test-shared-fault-reconcile-cross-rank`
-  invoking `$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2`). NOT in `make test`.
-- `dynamic/fault_face_flux.hpp` (TEST-ONLY hook, behind `#ifdef SEAS_TEST_INTERNAL`
-  which already exists): add an optional static debug perturbation
+- `Makefile` — 5 entries mirroring the tilted-test wiring (SRC ~323, OBJ ~623,
+  link target `seas_test_shared_fault_reconcile_cross_rank` with the tilted
+  test's object set, compile rule ~2719, run target
+  `test-shared-fault-reconcile-cross-rank` at np=2). Not in `make test`.
+- `dynamic/fault_face_flux.hpp` — behind the existing `#ifdef SEAS_TEST_INTERNAL`:
   `static real_t s_seas_test_qplus_xz_perturb_ulp = 0.0;` consumed in
-  `ComputeTrialTraction` to add `s*ULP*Q_plus[SXZ]` to `Q_plus[SXZ]` ONLY when
-  set — so the test can inject a controlled, rank-specific 1-ULP difference
-  without faking the whole bulk. If `SEAS_TEST_INTERNAL` is not defined the hook
-  compiles out (production byte-exact). (Alternative if a fault-flux hook is
-  undesirable: inject by perturbing one rank's bulk Q DOF directly in the test
-  before the step — preferred if it reproduces; decide at implementation.)
+  `ComputeTrialTraction` to add `s · ULP · Q_plus[SXZ]` ONLY when set (compiles
+  out in production). (Or, if it reproduces, inject by perturbing one rank's
+  bulk Q DOF in the test — preferred; decide at implementation.)
 
 ### Detailed Requirements
-1. **Fixture.** Reuse `BuildTwoTetFaultMesh()` (planar y=0, 2 tets) and the
-   `cy<0→rank0 / cy≥0→rank1` partition from
+1. Fixture: reuse `BuildTwoTetFaultMesh()` (planar y=0, 2 tets) + the
+   `cy<0→rank0/cy≥0→rank1` partition from
    `test_rupture_multistep_serial_vs_parallel.cpp`. One shared fault face, 3 QPs.
-2. **Drive to the slip-onset threshold.** Set per-DOF LSW params and a uniform
-   shear load such that `|τ_total|` crosses `μ_s·σ_n` during the run: derive the
-   load from `TPV205Params` so the QP is AT the kink at some step (assert the
-   run reaches a step where `0 < V_abs < V_small` on at least one rank, i.e. the
-   onset). For the rate-state leg use `TPV102Params` total-stress setup.
-3. **Inject a 1-ULP cross-rank seed.** On rank 0 only, set the test perturbation
-   so its `Q_plus[SXZ]` differs from rank 1's matching input by exactly 1 ULP
-   (`std::nextafter`). This emulates the interpolation seed deterministically.
-4. **Run** `kNSteps` ADER-2 steps through the threshold (≥ a few steps past
-   onset).
-5. **Assert (the captured bug).** After each step, gather the shared-QP `DOFData`
-   from both ranks (reuse `VerifySharedFaultDOFDataConsistency(tol, &wr, &wf,
-   /*abort=*/false)` from the diagnostic commit) and record `worst_rel`. The
-   test asserts `worst_rel == 0` (bit-identical) at every step.
-   - **Before Phase 2:** FAILS — LSW leg desyncs to `worst_rel≈1.0`; rate-state
-     leg shows `worst_rel≈1e-14` (bounded but nonzero — proves the defect is
-     method-invariant, just sub-threshold for rate-state).
-   - **After Phase 2:** PASSES — `worst_rel == 0` for both laws.
-6. **Run BOTH laws** in the same executable (loop over {RateState, LSW}); the
-   headline assertion is per-law. This is what proves method-invariance.
-
-### Interfaces
-- Reuse `VerifySharedFaultDOFDataConsistency(real_t, double*, int*, bool)`
-  (added in commit a9bd4d2).
-- `static real_t FaultFaceFlux::s_seas_test_qplus_xz_perturb_ulp` (TEST-ONLY).
-
-### Edge Cases to Handle
-- np≠2 → SKIPPED, return 77.
-- A run where the QP never reaches onset → assert nucleation/onset occurred,
-  else FAIL "load did not cross the slip-onset threshold".
+2. Drive `|τ|` across `μ_s·σ_n` during the run (derive load from `TPV205Params` /
+   `TPV102Params`); assert at least one step has `0 < V_abs < V_small` on one
+   rank (the onset is reached), else FAIL "did not cross slip-onset threshold."
+3. On rank 0 only, perturb its `Q_plus[SXZ]` by exactly 1 ULP (`std::nextafter`)
+   vs rank 1's matching input — the deterministic stand-in for the 1e-14
+   interpolation seed.
+4. Run `kNSteps` ADER-2 steps through the threshold.
+5. Each step gather both ranks' shared-QP `DOFData` via
+   `VerifySharedFaultDOFDataConsistency(tol,&wr,&wf,/*abort=*/false)` (added in
+   `a9bd4d2`); assert `wr == 0`.
+6. Loop over `{RateState, LSW}` in one executable; the assertion is per-law.
 
 ### Acceptance Criteria
-- [ ] `make test-shared-fault-reconcile-cross-rank` builds + runs at np=2.
-- [ ] Before Phase 2: RED (LSW `worst_rel→O(1)`; rate-state `worst_rel~1e-14`>0).
-- [ ] After Phase 2: GREEN — `worst_rel == 0` for BOTH laws, every step.
-- [ ] Production build (`SEAS_TEST_INTERNAL` undefined): the perturbation hook
-      compiles out; TPV/BP5 unaffected.
+- [ ] Builds + runs at np=2.
+- [ ] Before Phase 2: RED — LSW `wr→O(1)`; rate-state `wr~1e-14`>0 (shows the
+      defect is method-invariant, just sub-threshold for rate-state).
+- [ ] After Phase 2: GREEN — `wr == 0` for BOTH laws, every step.
+- [ ] Production build (`SEAS_TEST_INTERNAL` off): hook compiles out.
 
 ### Dependencies
 - Depends on: nothing. Required by: Phase 2 (oracle), Phase 4.
 
----
-
-## Phase 2: General method-invariant reconcile (the fix)
+## Phase 2: the reconcile (the fix)
 
 ### Goal
-After the friction solve on a shared fault face, the two ranks hold
-**bit-identical** `DOFData` and assemble their side's flux from the **owner's**
-imposed state — for ALL friction laws — so the slip/lock decision is made once
-and copied. The desync is impossible regardless of the 1e-14 input gap.
+After the friction solve on a shared fault face, both ranks hold bit-identical
+`DOFData` and assemble from the boss's imposed stress — for ALL friction laws —
+so the slip/lock decision is made once and copied.
 
 ### Files to Modify
-- `dynamic/wave_operator.inl` `ComputeADERSharedFaceFluxRHS` (LSW branch
-  ~4671-4797 AND the rate-state `else` at ~4779): restructure the shared-fault QP
-  handling into **two passes** with a reconcile between them (review R-002).
-- `dynamic/wave_operator.hpp`: declare the reconcile helper + a per-QP assembly
-  buffer struct.
-- (Reuse) the R-101 record gather/pair logic from
-  `VerifySharedFaultDOFDataConsistency` (`:5470+`): factor it into a shared
-  helper so the reconcile and the verify use ONE proven matcher (DRY).
+- `dynamic/wave_operator.inl` `ComputeADERSharedFaceFluxRHS` (~4671-4797): make
+  the shared-fault QP handling **two-pass** with a reconcile between them.
+- `dynamic/wave_operator.hpp`: declare the helper + assembly-buffer struct.
+- Factor the R-101 record gather/pair (`:5470+`) into a shared helper used by
+  both the verify and the reconcile (one matcher).
 
 ### Detailed Requirements
-1. **Factor the cross-rank pairing** out of `VerifySharedFaultDOFDataConsistency`
-   into:
+1. Helper (parallel-only):
    ```cpp
-   // Gathers one record per local shared-fault QP (face-vertex-key + qp_idx +
-   // rank + payload[NPAY]) via MPI_Allgatherv, pairs each QP across the two
-   // ranks by (face-key, qp_idx), and invokes cb(local_idx, peer_payload,
-   // peer_rank) for each local QP that has a peer.  Returns #unpaired.
    int WaveOperator<MeshType>::ExchangeAndPairSharedFaultQPs(
         int npay, const std::vector<double>& local_payload,
         const std::function<void(int local_qp, const double* peer_payload,
                                  int peer_rank)>& cb) const;
    ```
-   The verify calls it with `npay=8` (the 8 fields) and a compare callback; the
-   reconcile calls it with `npay = 8 + 2*NUM_STATE` (DOFData + I_imp_plus_can +
-   I_imp_minus_can) and an overwrite callback. Identical face-key construction
-   (sorted global vertex IDs) as today.
-2. **Per-QP assembly buffer.** Define
+   Gathers one record/local-shared-QP (face-vertex-key + qp_idx + rank + payload)
+   via the existing `MPI_Allgatherv`, pairs by (face-key, qp_idx), invokes `cb`
+   for each paired local QP. The verify uses `npay=8` + a compare callback; the
+   reconcile uses `npay = 8 + 2·NUM_STATE` (8 DOFData fields + `I_imp_plus_can` +
+   `I_imp_minus_can`) + an overwrite callback.
+2. Per-QP assembly buffer:
    ```cpp
    struct SharedFaultQPAssembly {
-      int    dof_offset1, ndof;            // local Elem1 assembly target
-      bool   elem1_on_plus;
-      real_t w;                            // ip.weight * |J_F|
+      int dof_offset1, ndof, dof_idx; bool elem1_on_plus; real_t w;
       real_t can_n[3], can_t1[3], can_t2[3];
-      real_t shape1[MAX_NDOF];             // fe1 shape at the QP
-      real_t I_imp_plus_can[NUM_STATE];    // owner-reconcilable
-      real_t I_imp_minus_can[NUM_STATE];
-      int    dof_idx;                      // into fault_dof_data_
+      real_t shape1[MAX_NDOF];
+      real_t I_imp_plus_can[NUM_STATE], I_imp_minus_can[NUM_STATE];
    };
    ```
-3. **Pass 1 (compute, no assembly).** Loop shared fault QPs exactly as today
-   through the friction dispatch (LSW / LSW_ForcedRupture / rate-state) to fill
-   `fault_dof_data_[dof_idx]` and `I_imp_plus/minus` (canonical frame). Store the
-   `SharedFaultQPAssembly` for each QP. Do NOT assemble `rhs` yet.
-4. **Reconcile.** Build the payload per QP = the 8 DOFData fields +
-   `I_imp_plus_can` + `I_imp_minus_can`. Call `ExchangeAndPairSharedFaultQPs`.
-   In the callback, if `peer_rank < my_rank_` (peer is owner), OVERWRITE this
-   rank's `fault_dof_data_[dof_idx]` (8 fields) and the buffer's
-   `I_imp_plus_can / I_imp_minus_can` with the peer's payload. (Owner = lower
-   rank, R-003.) `MFEM_VERIFY` every local shared-fault QP was paired (else the
-   classification is asymmetric — fail loud).
-5. **Pass 2 (assemble from reconciled state).** For each buffered QP, rotate the
-   (possibly-overwritten) `I_imp_*_can` to global via `T_can` (rebuilt from the
-   buffered `can_*`; bit-identical on both ranks) and assemble
-   `rhs[c·ndof_total_ + dof_offset1 + i] += assemble_sign · w · shape1[i] · F_h_side[c]`
-   exactly as the current inline code, but consuming the **reconciled** imposed
-   state (review R-002, R-004).
-6. **Method-invariant:** steps 3-5 run for every friction law; no gate. The
-   rate-state `else` branch is included.
-7. **Collective safety (R-005):** `ExchangeAndPairSharedFaultQPs` uses the same
-   global `MPI_Allreduce(any_shared)` short-circuit + `MPI_Allgatherv` as the
-   verify (every rank participates; ranks with no shared fault QPs contribute a
-   zero-length buffer). No participation depends on local fault presence.
-
-### Interfaces
-- `int ExchangeAndPairSharedFaultQPs(int npay, const std::vector<double>&,
-   const std::function<void(int,const double*,int)>&) const;` (new, in
-   `wave_operator.hpp`, parallel-only).
-- `struct SharedFaultQPAssembly` (new, file-scope in the .inl).
+3. Pass 1 — compute (no assembly): run the existing friction dispatch (LSW /
+   LSW_ForcedRupture / rate-state) → fill `fault_dof_data_[dof_idx]` and
+   `I_imp_*`; store the buffer; do NOT touch `rhs`.
+4. Reconcile: payload = 8 DOFData fields + `I_imp_plus_can` + `I_imp_minus_can`.
+   Call the helper; in the callback, if `peer_rank < my_rank_` (peer is boss),
+   overwrite this rank's `fault_dof_data_[dof_idx]` AND the buffer's
+   `I_imp_*_can` with the peer's payload. `MFEM_VERIFY` every local shared QP was
+   paired.
+5. Pass 2 — assemble from the (possibly overwritten) `I_imp_*_can`, rotated to
+   global via `T_can` (rebuilt from buffered `can_*`, bit-identical on both
+   ranks), exactly as the current inline assembly.
+6. No friction-law gate (method-invariant). Rate-state `else` branch included.
+7. Collective safety: the helper uses the same `MPI_Allreduce(any_shared)`
+   short-circuit + `MPI_Allgatherv` as the verify; empty contribution from ranks
+   with no shared fault QPs.
 
 ### Edge Cases to Handle
-- Rank with shared fault faces but a QP whose peer never appears (mesh
-  classification asymmetry) → `MFEM_VERIFY` fail (same policy as the verify's
-  `n_unpaired>0`).
-- A shared face where `elem1_on_plus` is the same on both ranks (the θ≈90°
-  side-fix edge) → owner-by-rank still picks exactly one owner, so the reconcile
-  is well-defined even if the +/- role were momentarily wrong (defense in depth).
-- Serial build / np=1 → no shared faces → the two-pass degenerates to the
-  current single-rank path (no exchange); byte-exact.
+- Unpaired shared QP → `MFEM_VERIFY` fail (same policy as the verify).
+- Same-`elem1_on_plus`-on-both-ranks edge (θ≈90°) → boss-by-rank still unique.
+- Serial / np=1 → no shared faces → two-pass degenerates to the current path
+  (byte-exact).
 
 ### Acceptance Criteria
-- [ ] Phase-1 test GREEN for both laws (`worst_rel == 0` every step).
-- [ ] TPV102/104/205 + BP5: physically-exact `worst_rel ≤ 1e-13` vs pre-fix AND
-      R-101 `max_rel_diff == 0` (cross-rank bit-identical — was ~1e-14).
-- [ ] The local fault/TPV suite (fault-basis trio, shared-fault role/dof-data
-      consistency, interior-flux-path ×3, godunov identity, tpv102
-      locked/absorbing/pepper/ader-smoke, multistep & tilted serial-vs-parallel,
-      sign-flipped truth table) all green.
-- [ ] np=2,4,8 smoke (incl. a partition where some ranks have NO shared fault
-      faces) — no deadlock (R-005).
+- [ ] Phase-1 test GREEN for both laws (`wr == 0` every step).
+- [ ] TPV102/104/205 + BP5: `worst_rel ≤ 1e-13` vs pre-fix AND R-101
+      `max_rel_diff == 0`.
+- [ ] Local fault/TPV suite green (fault-basis trio, shared-fault role/dof-data,
+      interior-flux ×3, godunov identity, tpv102 locked/absorbing/pepper/
+      ader-smoke, multistep + tilted serial-vs-parallel, sign-flipped truth
+      table).
+- [ ] np=2,4,8 incl. a partition with some rank lacking shared fault faces — no
+      deadlock.
 
 ### Dependencies
 - Depends on: Phase 1. Required by: Phase 4.
 
----
-
-## Phase 3: Correctness guard (runtime, method-invariant)
+## Phase 3: correctness guard (runtime, method-invariant)
 
 ### Goal
-A permanent, method-invariant runtime guard that the shared-fault `DOFData` is
-cross-rank-consistent, so any future regression (a missed field in the payload,
-an exchange bug, a new law that bypasses the reconcile) aborts loudly instead of
-silently desyncing.
+Keep `VerifySharedFaultDOFDataConsistency` as the permanent runtime sentinel so
+any future regression aborts loudly; post-fix it must report `max_rel_diff == 0`.
 
 ### Files to Modify
-- `dynamic/wave_operator.inl` `VerifySharedFaultDOFDataConsistency`: (a) refactor
-  it onto the shared `ExchangeAndPairSharedFaultQPs` helper from Phase 2 (one
-  matcher); (b) update the stale R-501 wording in the abort message to point at
-  the Phase-2 reconcile; (c) keep the default abort tol at `1e-10` but note that
-  POST-fix the expected `max_rel_diff` is `0` (the guard now also catches any
-  nonzero divergence as a real regression, not roundoff).
-- `drivers/spatial_dyn_driver.cpp` (and tpv104/tpv205 drivers if they call it):
-  keep the existing gated cadence (`step==0 || (nucleation.enabled && t≤T_nuc_s
-  && step%100==0)`); add a CLI/env to raise the cadence for debugging
-  (`SEAS_VERIFY_XRANK_EVERY=N`), default unchanged.
+- `dynamic/wave_operator.inl`: refactor the verify onto the shared
+  `ExchangeAndPairSharedFaultQPs` helper (one matcher); update the stale R-501
+  wording in the abort message to point at the Phase-2 reconcile.
+- Keep `SEAS_R101_NONFATAL` (commit `fc28454`) as the diagnostic escape hatch;
+  keep the existing gated cadence; add `SEAS_VERIFY_XRANK_EVERY=N` (default
+  unchanged) for debugging.
 
 ### Detailed Requirements
-1. The guard MUST remain method-invariant (it already checks all shared QPs
-   regardless of law — preserve).
-2. Post-fix the guard is the regression sentinel: a single `max_rel_diff > 0`
-   (beyond a derived ULP floor) is a real bug, not noise. Document this in the
-   verify header and the abort message.
-3. The guard's per-call cost (Allgatherv) is unchanged; its cadence is unchanged.
-   (The per-substep reconcile in Phase 2 is the always-on consistency mechanism;
-   this guard is the periodic audit.)
+1. The guard stays method-invariant (checks all shared QPs regardless of law).
+2. Document that post-fix the expected `max_rel_diff` is `0`; any nonzero is a
+   real regression, not roundoff.
+3. Negative test (Phase 1, with the reconcile disabled via a test switch): the
+   guard trips — proving it still catches a real desync.
 
 ### Acceptance Criteria
-- [ ] Post-fix Dc2 Frontera run: the guard reports `max_rel_diff == 0` through
-      and past the old t≈0.455 s abort point; no abort.
-- [ ] Inject a deliberate regression (skip one field in the Phase-2 payload) →
-      the guard aborts on that field. (A negative test in the Phase-1 unit test:
-      with the reconcile disabled via a test switch, the guard trips.)
+- [ ] Post-fix Dc2 `XRANK` Frontera run: guard reports `max_rel_diff == 0`
+      through and past t≈0.455 s; no abort; run advances past t=1.0 s.
+- [ ] Negative test trips the guard.
 
 ### Dependencies
 - Depends on: Phase 2. Required by: Phase 4.
 
----
-
-## Phase 4: Full regression + Frontera re-validation
+## Phase 4: full regression + Frontera re-validation
 
 ### Goal
-End-to-end: the Dc2 mesh advances past t=1.0 s (no R-101 abort, no blow-up);
-the fix is confirmed config-agnostic.
+End-to-end: the Dc2 mesh advances past t=1.0 s (no abort, no blow-up); fix is
+config-agnostic.
 
 ### Detailed Requirements
-1. Local regression battery (Phase-2 AC list) green; document unchanged
-   pre-existing failures (adjacent-triangle pepper-bug, r101 missing-precondition,
-   macOS MUMPS Bus error).
+1. Local regression battery (Phase-2 AC) green; document unchanged pre-existing
+   failures (adjacent-triangle pepper-bug, r101 missing-precondition, macOS MUMPS
+   Bus error).
 2. Re-run the `SEAS_DIAG_XRANK` Dc2 sbatch: at the onset QP both ranks now show
-   identical V1/V2/τ*_corr through t=0.478 s; R-101 passes; run reaches tfinal
-   (or well past t=1.0 s).
-3. Re-run (or have the user run) the physical `D_c=1.0` baseline config to
+   identical V1/V2/τ*_corr through t=0.478 s; R-101 passes; reaches tfinal.
+3. Re-run the physical `D_c=1.0` baseline config (not just the inflated Dc2) to
    confirm the fix is not tuned to Dc2.
+4. Re-confirm Part A: the `zerodip` job still runs clean (the reconcile must not
+   regress the strike-only path).
 
 ### Acceptance Criteria
 - [ ] Local regression green (modulo documented pre-existing).
-- [ ] Frontera Dc2 AND D_c=1.0: no R-101 abort, no blow-up; `V_max` peaks then
-      decreases (rupture, not runaway).
+- [ ] Frontera Dc2 AND `D_c=1.0`: no R-101 abort, no blow-up; `V_max` peaks then
+      decreases.
+- [ ] zerodip job unchanged (still clean).
 
 ### Dependencies
 - Depends on: Phase 2, Phase 3.
 
 ## Testing Strategy
-- **Primary local oracle:** Phase-1 injection test (np=2, both laws) — RED→GREEN,
-  proves method-invariance and that the reconcile absorbs the seed.
-- **Guard:** Phase-3 R-101 verify — post-fix `max_rel_diff==0`; negative test
-  (disable reconcile) trips it.
-- **Regression (physically-exact + cross-rank-identical):** TPV102/104/205 + BP5
-  via the listed targets; capture pre-fix outputs, assert `≤1e-13` AND R-101
-  `max_rel_diff==0`. Use the stash-rebuild-baseline method to quantify the
-  ~1e-14 TPV change and confirm it is the reconcile (non-owner→owner), not a
-  physics change.
+- **Local oracle:** Phase-1 injection test (np=2, both laws), RED→GREEN — proves
+  the reconcile absorbs the seed for any friction law.
+- **Guard:** Phase-3 verify, post-fix `max_rel_diff==0`; negative test trips it.
+- **Regression:** TPV102/104/205 + BP5 — capture pre-fix, assert `≤1e-13` AND
+  R-101 `max_rel_diff==0`; stash-rebuild-baseline to confirm the ~1e-14 TPV change
+  is the reconcile (non-boss→boss), not a physics change.
+- **Part-A non-regression:** the zerodip job stays clean.
 - **MPI robustness:** np=2/4/8, incl. a no-shared-fault-on-some-ranks partition.
 
 ## Risk Assessment
-- **Deadlock (R-005, R-1600 class):** the new Allgatherv must be reached by every
-  rank unconditionally (mirror the verify's `any_shared` short-circuit). Detect:
-  np=4/8 smoke hangs.
-- **Per-substep Allgatherv cost (R-006):** correctness-first; if hot on 400r,
-  migrate `ExchangeAndPairSharedFaultQPs` to point-to-point over the face-nbr
-  topology (same payload). Do NOT add a kink-proximity gate. Detect: step-rate
-  vs the pre-fix run.
-- **Two-pass refactor regressions:** buffering the assembly context risks an
-  indexing slip (dof_offset1/shape1/w). Mitigate: the interior-fault path is
-  untouched; the tilted + multistep + adjacent-triangle tests cover shared-face
+- **Deadlock (R-1600 class):** the new exchange must be reached by every rank;
+  detect via np=4/8 smoke hangs.
+- **Per-sub-step exchange cost:** correctness-first; if hot on 400r, move the
+  helper to point-to-point over the face-nbr topology (same payload). NO
+  kink-proximity gate (re-introduces problem-specificity).
+- **Two-pass refactor indexing slip** (dof_offset1/shape1/w): the interior path
+  is untouched; tilted + multistep + adjacent-triangle tests cover shared-face
   assembly; assert Pass-2 reproduces the pre-refactor RHS when the reconcile is a
-  no-op (ranks already agree — force via a serial-equivalent np=1).
+  no-op.
 - **Byte-exact relaxation:** the ~1e-14 TPV change overrides a CLAUDE.md
-  non-negotiable; recorded (review R-001) per the method-invariant directive.
+  non-negotiable; recorded; needs sign-off.
 - **Tricky existing code:** `ComputeADERSharedFaceFluxRHS` (4671-4797, the
-  R-1601 inline fallback + the assembly), `VerifySharedFaultDOFDataConsistency`
+  R-1601 inline fallback + assembly), `VerifySharedFaultDOFDataConsistency`
   (5364+, the matcher being factored), the canonical-frame reconstruction
-  (4695-4709, must stay bit-identical across ranks for `T_can` rotation in
-  Pass 2).
+  (4695-4709, must stay bit-identical across ranks for the Pass-2 `T_can`
+  rotation).
