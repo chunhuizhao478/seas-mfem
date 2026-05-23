@@ -67,14 +67,25 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
 fi
 cd "${SEAS_MFEM_ROOT}"
 
-# ZFP HDF5 filter plugin (only needed if --paraview-*-zfp-tol is used; we
-# run stdout-only here, so make it optional).
+# ZFP HDF5 filter plugin (libh5zzfp.so), required at runtime for the
+# --paraview-fault-zfp-tol below.  build_frontera.sh installs it under
+# ${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin (same convention as the
+# smoke / resolution sbatches).  Fail fast with a build hint if missing.
 H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
-[[ -e "${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so" ]] && \
+if [[ -e "${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so" ]]; then
     export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin:${HDF5_PLUGIN_PATH:-}"
+else
+    echo "ERROR: ZFP plugin not found at"
+    echo "         ${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so"
+    echo "       Build it on Frontera with:  bash build_frontera.sh"
+    echo "       (or drop --paraview-fault-zfp-tol from the driver invocation)."
+    exit 1
+fi
 
-grep -q '^MFEM_USE_PETSC *= YES'  config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
-grep -q '^MFEM_USE_MUMPS *= YES'  config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
+grep -q '^MFEM_USE_PETSC *= YES'   config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
+grep -q '^MFEM_USE_MUMPS *= YES'   config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
+grep -q '^MFEM_USE_HDF5 *= YES'    config/config.mk || { echo "ERROR: no HDF5"; exit 1; }
+grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || { echo "ERROR: no H5Z_ZFP"; exit 1; }
 
 cd miniapps/seas
 # The SEAS_ZERO_DIP_PRESTRESS toggle lives in the header-only
@@ -132,17 +143,25 @@ echo "Mesh:        ${MESH}"
 echo "Config:      ${CONFIG_TOML}"
 echo "Zero dip:    ${ZERO_DIP}  (SEAS_ZERO_DIP_PRESTRESS=${SEAS_ZERO_DIP_PRESTRESS:-<unset>})"
 echo "R-101 gate:  NON-FATAL (SEAS_R101_NONFATAL=${SEAS_R101_NONFATAL:-<unset>}) -- run proceeds past cross-rank divergence"
+echo "ParaView:    ${OUT}/fault.vtkhdf  (hdf5, zfp 1e-12, <=200 snapshots)"
 echo "cfl:         ${CFL}    tfinal: ${TFINAL}    (mixed flux = config default = adjacent)"
 
-# stdout-only (no ParaView) so the diagnostic is fast; V_max + [DIAG] lines
-# go to the log.  --print-derived runs the well-posedness gate (aborts early
-# on a mis-config, e.g. if zeroing dip breaks the nucleation stress drop).
+# ParaView fault.vtkhdf output (matches the smoke / resolution sbatches):
+# single .vtkhdf, ZFP-compressed at 1e-12 (slip-rate dynamic-range floor),
+# capped at 200 snapshots over the run.  --print-derived still runs the
+# well-posedness gate (aborts early on a mis-config, e.g. if zeroing dip
+# breaks the nucleation stress drop); V_max + [DIAG] + [R-101 nonfatal] lines
+# go to the log.
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
     --no-sidecar-material \
     --cfl "${CFL}" \
     --tfinal "${TFINAL}" \
+    --paraview \
+    --paraview-fault-hdf5 \
+    --paraview-fault-zfp-tol 1.0e-12 \
+    --paraview-max-snapshots 200 \
     --print-derived \
     --output-dir "${OUT}" \
     > "${LOG}" 2>&1
@@ -150,4 +169,7 @@ RC=$?
 echo "driver_rc=${RC}"
 echo "=== V_max + DIAG tail ==="
 grep -E "^step |\[DIAG\]|\[DIAG-ONSET\]|\[R-101 nonfatal\]|PASS|FAIL|done\." "${LOG}" | tail -30
+echo "=== fault.vtkhdf ==="
+ls -la "${OUT}/fault.vtkhdf" 2>/dev/null \
+    || echo "  (no fault.vtkhdf written -- run aborted before the first snapshot?)"
 exit ${RC}
