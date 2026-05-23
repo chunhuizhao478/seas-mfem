@@ -32,11 +32,20 @@
 
 ## REVISED FIX DESIGN (owner-broadcast / reconcile — supersedes Phases 2–3)
 
-### Constraints (unchanged + new)
-- **Byte-exact for rate-state (TPV102/104) and TPV205**: the reconcile must be
-  gated to the LSW shared-fault path used by SAFS, and must be a no-op /
-  bit-identical for the rate-state path and for any run where the two ranks
-  already agree. Gate: full TPV/BP5 regression `worst_rel ≤ 1e-13`.
+### Constraints (REVISED per review R-001 — method-invariant)
+- **Method-invariant (R-001):** the reconcile applies to ALL friction laws
+  (LSW, LSW_ForcedRupture, RateState) in the shared-fault ADER path — NOT gated
+  to LSW. The defect (redundant per-rank computation from ~1e-14-different
+  inputs) is method-invariant; rate-state simply does not blow up (smooth solve,
+  no kink) but is equally cross-rank-inconsistent.
+- **Regression contract (REVISED, R-001):** method-invariance and bit-exactness
+  are mutually exclusive (the reconcile makes the non-owner adopt the owner's
+  value, changing TPV102/104 by ~1e-14). New contract: TPV102/104/205 + BP5
+  **physically-exact** (`worst_rel ≤ 1e-13` vs pre-fix) AND now **cross-rank
+  bit-identical** (R-101 verify `max_rel_diff == 0`) — a strict improvement over
+  today's cross-rank-inconsistent-at-1e-14 baseline. ⚠ This relaxes the
+  CLAUDE.md "TPV/BP5 byte-exact" rule; the directive overrides it but the
+  decision is recorded (review R-001) and needs user sign-off.
 - **MPI-collective-safe (R-1600 lesson)**: every rank with shared fault faces
   participates; ranks without must not deadlock. Mirror the existing
   point-to-point face-neighbour topology (as `ExchangeFaceNbrData` /
@@ -59,38 +68,35 @@ assemble their side's flux from a consistent imposed state, so the slip/lock
 decision is made ONCE (by the owner) and copied — immune to the ~1e−14 input
 difference.
 
-**Owner rule:** the rank with `elem1_on_plus==true` (exactly one per shared face,
-guaranteed by the side fix). Deterministic, already computed.
+**Owner rule (REVISED, R-003):** owner = the rank holding the element with the
+smaller **global element id** of the two sharing the face (globally unique,
+robust at the θ≈90° degenerate band) — NOT `elem1_on_plus` (which relies on the
+exactly-one-true side invariant). `MFEM_VERIFY` exactly one rank claims
+ownership per shared QP. `elem1_on_plus` remains only for the +/- flux role.
 
-**Mechanism (`ComputeADERSharedFaceFluxRHS`, LSW branch only):**
-1. Both ranks compute `EvaluateADER_LSW` as today (gives each rank's DOFData +
-   `I_imp_plus/minus`).
-2. **Exchange** the post-solve DOFData fields for every shared fault QP across the
-   shared-face neighbour topology (one packed buffer per neighbour rank,
-   non-blocking send/recv — same pattern/topology as the predictor-Q ghost
-   exchange the substep path already does each sub-step; reuse
-   `pmesh.GetSharedFace*` / the R-101 face-key pairing so each QP is matched to
-   its peer).
-3. **Reconcile:** the non-owner overwrites its DOFData with the owner's
-   (received) values. The owner keeps its own.
-4. **Imposed state:** broadcast the owner's `I_imp_plus/minus` (canonical-frame)
-   alongside the DOFData; both ranks rotate the OWNER's imposed state to global
-   (`T_can`, identical on both) for their own side's assembly. This makes the
-   assembled fault RHS consistent too (not just the stored DOFData).
-5. Gate the whole exchange on `fault_friction_law_ ∈ {LSW, LSW_ForcedRupture}`;
-   rate-state skips it (byte-exact TPV102/104).
+**Mechanism (`ComputeADERSharedFaceFluxRHS`, ALL friction laws — R-001):**
+Two passes over shared fault QPs (R-002: reconcile BEFORE assembly):
+1. **Pass 1 — solve + exchange + reconcile:** each rank computes its friction
+   solve (`EvaluateADER_LSW` / `EvaluateADER` rate-state) → DOFData +
+   `I_imp_plus/minus`. Exchange the owner's post-solve DOFData (8 R-101 fields)
+   AND the owner's canonical-frame `I_imp_plus/minus` for every shared fault QP,
+   over the face-neighbour topology (one packed buffer per neighbour, non-
+   blocking; reuse the R-101 face-vertex-key matcher). The non-owner overwrites
+   its DOFData AND its `I_imp` with the owner's; the owner keeps its own.
+2. **Pass 2 — assemble:** assemble the per-side flux RHS from the **reconciled**
+   `I_imp` (rotated to global via `T_can`, bit-identical on both ranks). This
+   makes the assembled fault RHS cross-rank-consistent to 0 ULP, not just the
+   stored DOFData (R-002, R-004).
 
-**Open implementation choices to settle in design review (do NOT guess):**
-- (i) Reconcile every sub-step vs only when near the kink. Default: every
-  sub-step on shared fault QPs (correctness over micro-opt; the QP set is small).
-- (ii) Reuse the deleted v5 R-501 packing code (git history) vs new minimal
-  pack/unpack keyed on the R-101 face-vertex-key. Prefer new + the existing
-  face-key matcher (the R-101 verify already pairs shared QPs across ranks).
-- (iii) Whether to broadcast `I_imp` (step 4) or have the non-owner rebuild it
-  from the reconciled DOFData + its local `(Q_plus,Q_minus)`. Broadcasting is
-  fully consistent; rebuilding leaves a benign ~1e−14 in the flux (but the
-  DOFData — what R-101 checks — is then identical). Decide via Phase A's ULP
-  measurement + a regression check.
+Applied identically for every friction law (R-001); rate-state is NOT skipped.
+
+**Settled (was "open choices"):**
+- (i) Reconcile **every sub-step** on shared fault QPs (correctness; QP set small;
+  NO kink-proximity gate — that would re-introduce problem-specificity, R-006).
+- (ii) **New** minimal pack/unpack keyed on the R-101 face-vertex matcher (not
+  the deleted v5 R-501 code).
+- (iii) **Broadcast the owner's `I_imp`** (do NOT rebuild on the non-owner —
+  rebuild leaves a ~1e−14 re-seeding residual in the flux, R-004).
 
 ### Phase C — verify
 - The `xrank`-instrumented Dc2 run: at the onset QP, both ranks now show
