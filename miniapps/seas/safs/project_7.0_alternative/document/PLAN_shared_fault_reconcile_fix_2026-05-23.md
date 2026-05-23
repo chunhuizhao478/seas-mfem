@@ -105,8 +105,10 @@ Job script: `jobs/safs/spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch`.
   speckle) is still present** — direction-blind, just non-catastrophic without dip.
 
 **Acceptance for Part A (met):** `V_max` physical (no 10³, peaks ~6 then decays).
-The persistent `worst_rel → 1.0` and the speckled slip-rate elements are **issue
-B**, addressed by Part B below — NOT a Part-A regression.
+The persistent `worst_rel → 1.0` is **issue B** (confirmed active); the speckled
+slip-rate elements coincide with it *in time* (working hypothesis: the speckle is
+issue B, to be confirmed/refuted by the Phase-4 post-fix rerun) — either way NOT
+a Part-A regression.
 
 ---
 
@@ -263,17 +265,65 @@ blow up while zerodip doesn't?** Two parts, kept honest:
       then jumping to **0.13 (step 1600, t=0.56 s) → 1.0 (step 1700)**, in fields
       **V2 (strike velocity) and slip2 (strike slip)**. So the inconsistency
       diverges in STRIKE here — **it is direction-blind** (corrects my earlier
-      "strike works"). It coincides exactly with the **speckled slip-rate elements
-      outside the rupture** seen in ParaView → **the speckle IS issue B**.
-    - **Net:** the cross-rank speckle (issue B) is present for any slip direction;
-      whether it then BLOWS UP depends on the dip↔normal runaway. zerodip keeps
-      it bounded (speckle ~O(1) m/s, no blow-up); the oblique run does not.
+      "strike works"). It coincides *in time* with the **speckled slip-rate
+      elements outside the rupture** seen in ParaView, so the WORKING HYPOTHESIS
+      is that the speckle is issue B. Not yet proven *spatially* (`worst_rel` is
+      the max over shared QPs; the speckle is scattered) — **the Phase-4 post-fix
+      rerun is the confirmation**: reconcile clears the speckle ⇒ it WAS issue B;
+      speckle survives at `worst_rel≈0` ⇒ a co-present cause (under-resolution
+      `L_nuc/h_min≈3–10 < 10`, or SSO) the reconcile won't fix.
+    - **Net:** the cross-rank inconsistency (issue B) is present for any slip
+      direction; whether it then BLOWS UP depends on the dip↔normal runaway.
+      zerodip keeps it bounded (speckle ~O(1) m/s, no blow-up). Whether the
+      OBLIQUE (dip-loaded) run blows up or *also* stays bounded after Part A is
+      the **OPEN test** — exactly what `spatial_dyn_resDc2_XRANKdiag_*.sbatch`
+      (now non-fatal) checks. The pre-hard-gate Dc2 run (7746601) aborted at the
+      R-101 guard ~t=0.455 s, *before* the ~t=1.0 s blow-up window, so we never
+      actually observed whether it blows up.
 
 **Bottom line for the fix.** Because the local solve is direction-symmetric and
 the trigger corrupts the whole slip vector, the fix must make the slip decision
 single-valued for ALL directions — which it does. We do NOT rely on strike being
 self-stabilizing or on resolving the bulk dip-vs-normal question; the reconcile
 removes the inconsistency before it can feed any channel.
+
+### B.2.5 Scope — do TPV102/104/205 have this too? And the mixed-flux connection
+
+**Q1: yes, all three share the substrate, but only LSW is at risk.** The redundant
+per-rank shared-QP solve from ~1e-14-different inputs exists for EVERY config at
+np>1. Only the AMPLIFIER differs:
+- **TPV102 / TPV104 (rate-and-state):** the solve `V = solve(a·asinh(V·C) =
+  τ/σ_n)` (Brent, `friction_solver.cpp:34`) is **smooth & monotonic** — no
+  `max(0,·)` switch. A 1e-14 input → ~1e-14 output forever, so the cross-rank
+  inconsistency is PRESENT but pinned at the noise floor (`worst_rel ~1e-14 ≪
+  1e-10`); never diverges, invisible. **Latent but harmless.**
+- **TPV205 (LSW):** SAME `V = max(0,(|τ|−τ_str)/η_s)` switch as SAFS → amplifier
+  present → **latent-at-risk.** Not triggered in standard TPV205 because its front
+  sweeps each point in ~one step (no slow dwell at the threshold). A TPV205-class
+  config with a slow nucleation parking a shared QP on the threshold would diverge.
+- **SAFS (LSW + slow `gradual_overstress`):** switch AND slow dwell → **triggered**
+  (confirmed: zerodip `worst_rel → 1.0`).
+
+→ This is exactly why the reconcile must be **method-invariant**: the substrate is
+shared by all three; gating to LSW would leave rate-state latently inconsistent
+and would break the day a non-smooth rate-state cap is added.
+
+**Q1, mixed-flux connection (your memory is half-right).** The mixed-flux fix
+(`MIXED_FLUX_PLAN.md`) addressed a DIFFERENT speckle cause — **Spatial Spike
+Oscillations**: grid-scale ringing from the ADER predictor under-dissipating
+high-frequency modes at **p≥2** (a numerical-DISSIPATION deficit, *consistent*
+across ranks). Different axis from this bug:
+- SAFS runs at **p=1** (`fe order: 1`), where the SSO deficit is weak, AND an
+  SSO/dissipation speckle would be cross-rank *consistent* (`worst_rel` small).
+  Since SAFS shows `worst_rel → 1.0`, the speckle here is the **cross-rank**
+  issue, not SSO.
+- BUT the mixed-flux work flagged the SAME cross-rank PRINCIPLE
+  (`MIXED_FLUX_PLAN.md` R5: "shared-face dispatch must apply mixed-flux uniformly
+  across rank seams"; suggested an abort guard for `nprocs>1 AND use_substep AND
+  mixed_flux≠none`). The reconcile is the general form of that principle, applied
+  to the friction DOFData + imposed state instead of the flux mode. So it IS the
+  same FAMILY (cross-rank seam consistency); mixed-flux just fixed a different
+  symptom (dissipation) on a different field.
 
 ### B.3 How the proposed fix works in plain language
 
@@ -385,8 +435,14 @@ whether the reconcile (Phase 2) is the right fix or a cheaper source-fix exists.
    (`nbr_data[c][nbr_idx*ndof_per_el_ + i]`) and the local DOFs
    (`Q_data[c*ndof_total_ + dof_offset1 + i]`) at `%.17e`, for one matched
    (local-on-A == ghost-on-B) element, so the two ranks' copies can be diffed.
-3. Run the existing `spatial_dyn_resDc2_XRANKdiag_*.sbatch` (already supports the
-   env-gated trace + auto-extract per rank).
+3. Run `spatial_dyn_resDc2_XRANKdiag_8N_400r_dev_2hr_safs.sbatch` (the OBLIQUE
+   Dc2 sim, trace on, auto-extract per rank). It is now wired **non-fatal**
+   (`SEAS_R101_NONFATAL=1` + `SEAS_DIAG_BLOWUP=1`) so it does double duty:
+   (a) the `%.17e` + `RAWDOF` trace localises the seed (this phase); and
+   (b) dropping the hard gate lets the dip-loaded run proceed PAST the
+   divergence, so we also see whether it stays bounded like zerodip or blows up
+   (the B.2 open test) and it **reproduces the speckle as the pre-fix baseline**
+   for the Phase-4 final check.
 
 ### Decision (recorded in the diagnosis doc, drives Phase 2 vs a source-fix)
 - **Raw ghost DOFs == owner DOFs (bit-exact) but `I_*_can` differ** → source (1)
@@ -583,6 +639,14 @@ config-agnostic.
    vanish. This is the cleanest already-set-up confirmation that the reconcile
    fixes issue B in the strike-only (non-catastrophic) case — separate from the
    blow-up.
+5. **oblique non-fatal as the dip-channel speckle oracle
+   (`spatial_dyn_resDc2_XRANKdiag_*.sbatch`, now non-fatal):** the pre-fix run
+   reproduces the speckle WITH dip traction present (and records bounded-vs-blow-
+   up — the B.2 open test). Post-fix rerun: `worst_rel ≤ 1e-13` AND the speckle
+   clears. If the pre-fix oblique run also stays bounded (no blow-up after Part
+   A), this run alone is the full issue-B final check. If the speckle survives
+   at `worst_rel≈0`, a co-present cause (under-resolution / SSO) is implicated,
+   NOT the reconcile (decide next steps then).
 
 ### Acceptance Criteria
 - [ ] Local regression green (modulo documented pre-existing).
@@ -591,11 +655,38 @@ config-agnostic.
 - [ ] **zerodip post-fix:** `worst_rel ≤ 1e-13` for the whole run (was → 1.0 at
       t≈0.595 s) AND no speckle in ParaView (was scattered cyan elements). `V_max`
       unchanged (~6 m/s, still physical).
+- [ ] **oblique non-fatal post-fix:** `worst_rel ≤ 1e-13` AND the speckle clears
+      in ParaView (pre-fix baseline = this run with the gate non-fatal). The
+      bounded-vs-blow-up outcome of the pre-fix oblique run is recorded either way
+      (B.2 test); a surviving speckle at `worst_rel≈0` flags a co-present cause.
 
 ### Dependencies
 - Depends on: Phase 2, Phase 3.
 
 ## Testing Strategy
+
+### Q2 — can we reproduce the issue locally as a guard?  Three layers:
+1. **Deterministic local guard (primary):** the Phase-1 injection test (np=2). The
+   clean 2-tet fixture is bit-identical across ranks, so it CANNOT make the seed
+   naturally — we inject the 1-ULP cross-rank difference the real run gets from
+   interpolation/bulk drift, drive to the slip-onset threshold, and assert
+   cross-rank bit-identity. RED before Phase 2, GREEN after, for BOTH laws. It is
+   cheap (np=2, a few steps) and **MUST be added to the parallel CI target**
+   (`test-parallel`-class) so a future regression of the reconcile aborts CI —
+   this is the standing local guard. (Mark it in the Makefile as a parallel test
+   and wire it into the `test-parallel` aggregate, NOT only as a standalone
+   target like the tilted test.)
+2. **Natural local reproduction (optional, heavier):** a multi-element np≥2 LSW
+   fixture with a slow nucleation front crossing a shared QP at the threshold (a
+   "mini-SAFS"). It would reproduce the divergence WITHOUT injection, but the seed
+   magnitude is mesh-dependent and it is far heavier to stand up, so it is a
+   nice-to-have, not the guard. The injection test is the reliable guard.
+3. **Production runtime guard:** the Phase-3 R-101 verify (already shipped,
+   `SEAS_R101_NONFATAL` for diagnostics) — post-fix `max_rel_diff==0`; a negative
+   test (reconcile disabled) trips it. Plus the **zerodip job as a full-physics
+   guard** (post-fix `worst_rel ≤ 1e-13` + no speckle).
+
+### Other
 - **Local oracle:** Phase-1 injection test (np=2, both laws), RED→GREEN — proves
   the reconcile absorbs the seed for any friction law.
 - **Guard:** Phase-3 verify, post-fix `max_rel_diff==0`; negative test trips it.

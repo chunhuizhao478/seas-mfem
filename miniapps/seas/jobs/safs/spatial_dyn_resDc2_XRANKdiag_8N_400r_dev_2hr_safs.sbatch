@@ -8,32 +8,49 @@
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# CROSS-RANK DIP-CHANNEL DIAGNOSTIC run (R-DIP2).
+# OBLIQUE (DIP-LOADED) CROSS-RANK BASELINE + Phase-0 seed trace (R-DIP2).
 # =========================================================================
 # IDENTICAL simulation to spatial_dyn_resolution_Dc2_8N_400r_dev_2hr_safs.sbatch
-# (same config / mesh / driver flags) EXCEPT the runtime env-gated cross-rank
-# trace SEAS_DIAG_XRANK is turned ON (see the export block below).  Purpose:
-# diagnose WHY the R-101 guard trips at t~0.455 s on a cross-rank divergence of
-# V1 (dip slip-rate) at the shared fault QP (607518, 3706359, -4543).
+# (same config / mesh / driver flags — full oblique H&Z prestress, so dip
+# traction is PRESENT, unlike spatial_dyn_zerodip_*.sbatch) but with TWO
+# runtime env changes:
 #
-# The run is EXPECTED to abort at the R-101 guard (~t=0.455 s) — that is fine;
-# the [XRANK] trace fires on every sub-step up to the abort, so the FULL
-# divergence history is captured.  The script extracts the trace into a
-# separate file and splits it by the (two) ranks that own the diverging QP, so
-# you can diff them directly:
+#   (1) SEAS_R101_NONFATAL=1 — DROP the hard R-101 gate.  The hard gate used to
+#       abort this run at t~0.455 s on the cross-rank V1 (dip) divergence.  We
+#       now downgrade it to a per-check rank-0 log so the run PROCEEDS PAST the
+#       divergence.  Two things we want to see, that the abort hid:
+#         (a) does the DIP-loaded case stay BOUNDED (V_max peaks then decays,
+#             like the strike-only zerodip run, job 7747119) or BLOW UP
+#             (V_max -> 1e3, sigma_n -> tension; the dip<->normal runaway)?
+#             This is the direct test of PLAN B.2 "the blow-up needs dip."
+#         (b) the SPECKLE — the scattered slip-rate elements outside the
+#             rupture (the visible cross-rank symptom).  This run REPRODUCES
+#             the speckle (ParaView fault.vtkhdf below) as the PRE-FIX
+#             BASELINE; the post-reconcile rerun must CLEAR it.  That is the
+#             final check on the fix (PLAN Phase 4).
+#
+#   (2) SEAS_DIAG_XRANK=1 — the env-gated cross-rank trace (Phase 0: localise
+#       the ~1e-14 seed).  Default-off in code => only this job pays the cost.
+#
+# The script extracts the [XRANK] trace and splits it by the (two) ranks that
+# own the diverging QP so you can diff them directly:
 #
 #   diff <per-rank-A>.log <per-rank-B>.log   (or paste/awk step-by-step)
 #
-# How to read the diff — find the first sub-step where the two ranks differ and
-# which field goes first:
-#   can_t1 differs              => H-C  (canonical frame not bit-identical on the
-#                                        curvilinear face)
-#   frame same, I*_can differ   => H-B  (bulk-Q FP seed; self vs nbr = local vs
-#                                        ghost) — then V1 growth/step = the gain
+# How to read the diff (Phase 0 seed localisation, %.17e full precision):
+#   RAWDOF side=+ identical across ranks, but I*_can differ  => source (1)
+#                       interpolation (shape1.Loc1 vs shape2.Loc2; inherent)
+#   RAWDOF side=+ differ already at the first traced sub-step => source (2)
+#                       ghost-exchange not bit-exact (fixable at the source)
+#   RAWDOF identical early, then drift apart                  => source (3)
+#                       accumulated bulk divergence (inherent)
+#   can_t1 differs              => H-C  (canonical frame not bit-identical)
 #   tau1_0 / tau1_nuc differ    => H-A  (prestress/nucleation gap)
+# Source (1)/(3) => proceed to the reconcile (Phase 2); (2) => fix the
+# exchange instead.  See PLAN_shared_fault_reconcile_fix_2026-05-23.md §Phase 0.
 #
-# Requires commit a9bd4d2 or later on branch `safs` (the SEAS_DIAG_XRANK trace +
-# the non-aborting VerifySharedFaultDOFDataConsistency mode).
+# Requires the branch-`safs` commit carrying the %.17e + RAWDOF trace extension
+# (Phase 0) and the non-aborting VerifySharedFaultDOFDataConsistency mode.
 
 export LC_ALL=C
 export LANG=C
@@ -50,9 +67,22 @@ export SEAS_DIAG_XRANK_QP="607518,3706359,-4543"
 # mesh's nearest QPs are well inside this).
 export SEAS_DIAG_XRANK_R=200
 # Earliest sim-time [s] to print (0 => full history, incl. the bit-identical
-# pre-divergence phase so the FIRST divergence step is visible).  Raise to e.g.
-# 0.3 if the log volume is too large.
+# pre-divergence phase so the FIRST divergence step is visible — needed to
+# discriminate seed source (2) [differs at the first sub-step] from (3) [drifts
+# later]).  With the non-fatal gate this run goes to tfinal (no early abort), so
+# the trace volume is larger; raise to e.g. 0.3 if the log gets too big (you
+# lose the source-(2)-vs-(3) discrimination but keep the onset).
 export SEAS_DIAG_XRANK_TMIN=0.0
+
+# Drop the hard R-101 gate (see header (1)): downgrade the shared-fault DOFData
+# tripwire from MFEM_ABORT to a per-check rank-0 log so the oblique run proceeds
+# PAST the cross-rank divergence.  Look for "[R-101 nonfatal] ... worst_rel=...
+# (DIVERGED|ok)".  This is what lets us see bounded-vs-blowup and the speckle.
+export SEAS_R101_NONFATAL=1
+# Rupture-area + onset diagnostic (print-only): [DIAG]/[DIAG-ONSET] lines +
+# V_max history, so bounded (peaks then decays) vs blow-up is readable from the
+# log and we confirm the run still ruptures.
+export SEAS_DIAG_BLOWUP=1
 # -------------------------------------------------------------------------
 
 module load intel/19.1.1
@@ -157,8 +187,11 @@ echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}"
-echo "Config:      ${CONFIG_TOML}   (RESOLUTION test: D_c=2.0 / radius=4000)"
+echo "Config:      ${CONFIG_TOML}   (RESOLUTION test: D_c=2.0 / radius=4000; OBLIQUE: dip prestress PRESENT)"
+echo "R-101 gate:  NON-FATAL (SEAS_R101_NONFATAL=${SEAS_R101_NONFATAL:-<unset>}) -- run proceeds past cross-rank divergence"
+echo "Blowup diag: SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP:-<unset>}  (read V_max bounded-vs-blowup + [DIAG-ONSET])"
 echo "XRANK diag:  SEAS_DIAG_XRANK=${SEAS_DIAG_XRANK} QP=${SEAS_DIAG_XRANK_QP} R=${SEAS_DIAG_XRANK_R} TMIN=${SEAS_DIAG_XRANK_TMIN}"
+echo "ParaView:    ${OUT}/fault.vtkhdf  (speckle baseline -- post-fix rerun must clear it)"
 echo "tfinal:      ${TFINAL}"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"
 
@@ -195,21 +228,36 @@ if [[ "${NX}" -gt 0 ]]; then
         echo "  per-rank: ${LOG_DIR}/xrank_resDc2diag_${SLURM_JOB_ID}_r${rn}.log "\
              "($(wc -l < "${LOG_DIR}/xrank_resDc2diag_${SLURM_JOB_ID}_r${rn}.log") lines)"
     done
-    echo "  Diff the two per-rank files step-by-step to localise the seed"
-    echo "  (can_t1 => H-C; I*_can => bulk seed/H-B; tau1_0/nuc => H-A)."
+    echo "  Diff the two per-rank files to localise the seed (Phase 0):"
+    echo "    grep 'RAWDOF.*side=+' <rA> vs <rB> -> identical?  (=> source 1/3;"
+    echo "      differ at the first sub-step => source 2 ghost-exchange bug)"
+    echo "    I*_can (%.17e) differ but RAWDOF identical => source 1 interp."
+    echo "    can_t1 => H-C frame;  tau1_0/tau1_nuc => H-A prestress/nuc."
 else
     echo "  WARNING: no [XRANK] lines captured.  Either SEAS_DIAG_XRANK was not"
-    echo "  exported into the driver env, the run aborted before the target QP"
-    echo "  was processed, or the QP centroid (${SEAS_DIAG_XRANK_QP}) is wrong"
-    echo "  for this run — check the R-101 abort centroid in ${LOG}."
+    echo "  exported into the driver env, the run never reached the target QP,"
+    echo "  or the QP centroid (${SEAS_DIAG_XRANK_QP}) is wrong for this run"
+    echo "  — check the [R-101 nonfatal] centroid in ${LOG}."
 fi
+
+# --- bounded-vs-blowup + speckle baseline readout -------------------------
+echo "=== V_max + DIAG + R-101 tail (bounded peaks-then-decays vs blow-up) ==="
+grep -E "^step |\[DIAG\]|\[DIAG-ONSET\]|\[R-101 nonfatal\]|PASS|FAIL|done\." \
+    "${LOG}" | tail -40
+echo "=== fault.vtkhdf (speckle baseline for the post-fix comparison) ==="
+ls -la "${OUT}/fault.vtkhdf" 2>/dev/null \
+    || echo "  (no fault.vtkhdf -- run stopped before the first snapshot?)"
 
 if [[ ${RC} -ne 0 ]]; then
-    echo "driver_rc=${RC} — EXPECTED (R-101 guard abort at the divergence, or"
-    echo "  --print-derived).  The [XRANK] trace above is the deliverable; see"
-    echo "  ${LOG} for the R-101 abort centroid + the [derived] lines."
-    exit 0   # diagnostic job: a guard-abort is success, not failure.
+    echo "driver_rc=${RC} — with the R-101 gate NON-FATAL this is NOT an R-101"
+    echo "  abort.  It is either the --print-derived well-posedness gate (mis-"
+    echo "  config) OR a genuine BLOW-UP crash (V_max overflow -> Brent SIGABRT)"
+    echo "  — which is itself a RESULT (dip DID blow up).  Read the V_max tail"
+    echo "  above: peaks-then-decays => bounded like zerodip; runaway => blow-up."
+    exit 0   # diagnostic job: a crash at the divergence is a recorded result.
 fi
 
-echo "driver_rc=${RC} (ran to completion without tripping the R-101 guard)."
+echo "driver_rc=${RC} (ran to tfinal=${TFINAL} with the gate non-fatal)."
+echo "  Inspect ${OUT}/fault.vtkhdf in ParaView: the speckle outside the"
+echo "  rupture is the cross-rank symptom (issue B), the pre-fix baseline."
 exit 0

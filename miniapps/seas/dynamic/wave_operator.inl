@@ -4831,11 +4831,15 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                         if (_dx*_dx + _dy*_dy + _dz*_dz <= rad*rad &&
                             GetTime() >= tmin)
                         {
+                           // Phase 0 (PLAN_shared_fault_reconcile_fix):
+                           // I_*_can at %.17e (full double) so the sub-11-digit
+                           // cross-rank input gap is visible; SXX (normal)
+                           // added alongside the shear xy/xz.
                            std::fprintf(stderr,
                               "[XRANK] rank=%d t=%.6e c=(%.1f,%.1f,%.1f) "
                               "can_t1=(%+.10e,%+.10e,%+.10e) "
-                              "Iself_xy=%+.10e Iself_xz=%+.10e "
-                              "Inbr_xy=%+.10e Inbr_xz=%+.10e "
+                              "Iself_xx=%+.17e Iself_xy=%+.17e Iself_xz=%+.17e "
+                              "Inbr_xx=%+.17e Inbr_xy=%+.17e Inbr_xz=%+.17e "
                               "tau1_0=%+.10e tau1_nuc=%+.10e "
                               "tau1_corr=%+.10e tau2_corr=%+.10e "
                               "V1=%+.10e V2=%+.10e "
@@ -4843,13 +4847,63 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                               my_rank_, GetTime(),
                               _phys(0), _phys(1), _phys(2),
                               can_t1[0], can_t1[1], can_t1[2],
-                              I_self_can[SXY], I_self_can[SXZ],
-                              I_nbr_can[SXY],  I_nbr_can[SXZ],
+                              I_self_can[SXX], I_self_can[SXY], I_self_can[SXZ],
+                              I_nbr_can[SXX], I_nbr_can[SXY], I_nbr_can[SXZ],
                               fdata.tau1_0, fdata.tau1_nuc,
                               fdata.tau1_corr, fdata.tau2_corr,
                               fdata.V1, fdata.V2,
                               qpd.sign_flipped ? 1 : 0,
                               elem1_on_plus ? 1 : 0);
+                           std::fflush(stderr);
+
+                           // Phase 0 raw-DOF dump (localise the seed source).
+                           // For each physical side (+/-) print the stored,
+                           // *un-interpolated* element DOFs that feed the QP:
+                           // I_data when that side is the LOCAL (owned) element,
+                           // nbr_data when it is the GHOST (face-neighbour) copy.
+                           // The owner prints loc=LOCAL and the peer prints
+                           // loc=GHOST for the SAME side, so diffing rank-A
+                           // "side=+" against rank-B "side=+" localises the seed:
+                           //   bit-identical, but I_*_can differ  => source (1)
+                           //                          interpolation (shape1.Loc1
+                           //                          vs shape2.Loc2; inherent).
+                           //   differ already at step 0           => source (2)
+                           //                          ghost-exchange not bit-exact.
+                           //   identical at step 0, drift later    => source (3)
+                           //                          accumulated bulk divergence.
+                           // ndof2 == ndof_per_el_ == ndof (VERIFY above), so the
+                           // local and ghost buffers carry the same DOF count.
+                           auto _dump_raw = [&](char side, bool side_is_local)
+                           {
+                              const char *loc = side_is_local ? "LOCAL" : "GHOST";
+                              const int comps[3] = {SXX, SXY, SXZ};
+                              const char *cnames[3] = {"SXX", "SXY", "SXZ"};
+                              for (int ci = 0; ci < 3; ci++)
+                              {
+                                 const int c = comps[ci];
+                                 char vals[2048];
+                                 int off = 0;
+                                 for (int i = 0; i < ndof; i++)
+                                 {
+                                    if (off >= (int)sizeof(vals) - 32) { break; }
+                                    const real_t v = side_is_local
+                                       ? I_data[c * ndof_total_ + dof_offset1 + i]
+                                       : nbr_data[c][nbr_idx * ndof_per_el_ + i];
+                                    const int n = std::snprintf(
+                                       vals + off, sizeof(vals) - (size_t)off,
+                                       " %+.17e", v);
+                                    if (n < 0) { break; }
+                                    off += n;
+                                 }
+                                 std::fprintf(stderr,
+                                    "[XRANK] RAWDOF rank=%d t=%.6e side=%c "
+                                    "loc=%s comp=%s ndof=%d :%s\n",
+                                    my_rank_, GetTime(), side, loc,
+                                    cnames[ci], ndof, vals);
+                              }
+                           };
+                           _dump_raw('+', elem1_on_plus);
+                           _dump_raw('-', !elem1_on_plus);
                            std::fflush(stderr);
                         }
                      }
