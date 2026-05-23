@@ -28,6 +28,7 @@
 
 #include <algorithm>
 #include <array>
+#include <functional>
 #include <memory>
 #include <vector>
 #include <map>
@@ -1042,6 +1043,35 @@ private:
                                Vector &rhs) const;
    void ComputeADERSharedFaceFluxRHS(const Vector &I, real_t dt,
                                      Vector &rhs) const;
+
+   /// @brief Cross-rank exchange + pairing of shared fault QPs (Phase 2 of
+   /// PLAN_shared_fault_reconcile_fix_2026-05-23.md — the method-invariant
+   /// reconcile matcher).
+   ///
+   /// Iterates this rank's shared fault faces in the SAME order as the
+   /// shared-fault loop in `ComputeADERSharedFaceFluxRHS` and the R-101 verify
+   /// (`fault_shared_faces_` × QPs), builds one record per local shared QP
+   /// (face-vertex key + qp_idx + centroid + `npay` caller payload values +
+   /// emitting rank), `MPI_Allgatherv`s them, and pairs each local QP with its
+   /// unique cross-rank peer (face-key group + nearest-centroid match — the
+   /// same integer-exact matcher the verify uses, robust to the shared-face
+   /// orientation flip).  For every paired local QP it invokes
+   /// `cb(local_qp, peer_payload, peer_rank)`, where `local_qp` is the
+   /// iteration-order index (so the caller maps it back to its per-QP buffer)
+   /// and `peer_payload` points at the peer's `npay` payload doubles.
+   ///
+   /// `local_payload` MUST hold exactly `npay` doubles per local shared QP, in
+   /// the helper's iteration order.  Returns the number of local shared QPs
+   /// that were paired (callers `MFEM_VERIFY` it equals the local QP count).
+   ///
+   /// Collective-safe (R-1600 class): every rank reaches the `MPI_Allreduce`
+   /// short-circuit and the `MPI_Allgatherv`; ranks with no shared fault QPs
+   /// contribute an empty buffer and never invoke `cb`.  No-op (returns 0) on
+   /// a serial mesh.
+   int ExchangeAndPairSharedFaultQPs(
+      int npay, const std::vector<double> &local_payload,
+      const std::function<void(int local_qp, const double *peer_payload,
+                               int peer_rank)> &cb) const;
 
    enum class FaceBC { Interior, Absorbing, FreeSurface, Fault };
    FaceBC ClassifyBoundaryFace(int bdr_attr) const;

@@ -4584,6 +4584,30 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          }
       }
 
+      // Phase 2 (PLAN_shared_fault_reconcile_fix_2026-05-23.md): the shared-
+      // fault QP flux assembly is now TWO-PASS.  Pass 1 (this loop) runs the
+      // friction solve and buffers each shared fault QP WITHOUT assembling;
+      // after the loop the boss's friction state + canonical imposed state are
+      // broadcast to the peer (ExchangeAndPairSharedFaultQPs); Pass 2 then
+      // assembles from the single-valued (boss's) imposed state so both ranks
+      // build a bit-identical flux.  shape1 is runtime-sized (any order;
+      // resolves the plan's shape1[MAX_NDOF] without a magic constant).
+      struct SharedFaultQPAssembly
+      {
+         int  dof_offset1   = 0;
+         int  ndof          = 0;
+         int  dof_idx       = -1;
+         bool elem1_on_plus = false;
+         real_t w = 0.0;
+         real_t can_n[3]  = {0, 0, 0};
+         real_t can_t1[3] = {0, 0, 0};
+         real_t can_t2[3] = {0, 0, 0};
+         std::vector<real_t> shape1;
+         real_t I_imp_plus_can[NUM_STATE]  = {0};
+         real_t I_imp_minus_can[NUM_STATE] = {0};
+      };
+      std::vector<SharedFaultQPAssembly> fault_qp_buf;
+
       for (int sf = 0; sf < n_shared; sf++)
       {
          FaceElementTransformations *ftr =
@@ -4703,8 +4727,10 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                                                   :  qpd.tangent2[d];
                   }
 
-                  DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
-                  GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
+                  // Pass 1 needs only the inverse rotation (bulk ->
+                  // canonical); T_can (canonical -> global) is rebuilt
+                  // per QP in Pass 2 after the reconcile.
+                  DenseMatrix Tinv_can(NUM_STATE);
                   GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
                                                     Tinv_can);
 
@@ -4909,16 +4935,25 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      }
                   }
 
+#ifdef SEAS_DIAG_FAULT_FLUX
+                  // Canonical->global rotation for the build-gated debug
+                  // trace below ONLY; production assembly is deferred to
+                  // Pass 2 (after the reconcile), which rebuilds T_can.
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
-                  for (int c = 0; c < NUM_STATE; c++)
                   {
-                     I_imp_plus_g[c] = 0.0; I_imp_minus_g[c] = 0.0;
-                     for (int k = 0; k < NUM_STATE; k++)
+                     DenseMatrix T_can(NUM_STATE);
+                     GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
+                     for (int c = 0; c < NUM_STATE; c++)
                      {
-                        I_imp_plus_g[c]  += T_can(c, k) * I_imp_plus[k];
-                        I_imp_minus_g[c] += T_can(c, k) * I_imp_minus[k];
+                        I_imp_plus_g[c] = 0.0; I_imp_minus_g[c] = 0.0;
+                        for (int k = 0; k < NUM_STATE; k++)
+                        {
+                           I_imp_plus_g[c]  += T_can(c, k) * I_imp_plus[k];
+                           I_imp_minus_g[c] += T_can(c, k) * I_imp_minus[k];
+                        }
                      }
                   }
+#endif
 
 #ifdef SEAS_DIAG_FAULT_FLUX
                   // C-1s STRESS-ROT (ADER shared-fault path): same trace
@@ -4973,21 +5008,31 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   }
 #endif
 
-                  real_t F_h_side[NUM_STATE];
-                  const real_t *I_imp_side = elem1_on_plus
-                                             ? I_imp_plus_g
-                                             : I_imp_minus_g;
-                  flux_.Interior(can_n, I_imp_side, I_imp_side, F_h_side);
-
-                  const real_t assemble_sign = elem1_on_plus ? -1.0 : +1.0;
+                  // Phase 2: DEFER assembly.  Buffer this shared-fault QP
+                  // (canonical-frame per-side imposed state + geometry);
+                  // after the loop the boss's DOFData + imposed state are
+                  // broadcast to the peer, THEN Pass 2 rotates + assembles
+                  // so both ranks build a bit-identical flux.
+                  SharedFaultQPAssembly qa;
+                  qa.dof_offset1   = dof_offset1;
+                  qa.ndof          = ndof;
+                  qa.dof_idx       = dof_idx;
+                  qa.elem1_on_plus = elem1_on_plus;
+                  qa.w             = w;
+                  for (int d = 0; d < 3; d++)
+                  {
+                     qa.can_n[d]  = can_n[d];
+                     qa.can_t1[d] = can_t1[d];
+                     qa.can_t2[d] = can_t2[d];
+                  }
+                  qa.shape1.resize(ndof);
+                  for (int i = 0; i < ndof; i++) { qa.shape1[i] = shape1(i); }
                   for (int c = 0; c < NUM_STATE; c++)
                   {
-                     for (int i = 0; i < ndof; i++)
-                     {
-                        rhs[c * ndof_total_ + dof_offset1 + i] +=
-                           assemble_sign * w * shape1(i) * F_h_side[c];
-                     }
+                     qa.I_imp_plus_can[c]  = I_imp_plus[c];
+                     qa.I_imp_minus_can[c] = I_imp_minus[c];
                   }
+                  fault_qp_buf.push_back(std::move(qa));
                   continue;
                }
                else
@@ -5050,6 +5095,93 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                for (int i = 0; i < ndof; i++)
                {
                   rhs[c * ndof_total_ + dof_offset1 + i] -= w * shape1(i) * F_h[c];
+               }
+            }
+         }
+      }
+
+      // ---- Phase 2 (PLAN_shared_fault_reconcile_fix): reconcile + assemble ----
+      // Pass 1 filled fault_dof_data_ and buffered each shared fault QP without
+      // assembling.  Broadcast the boss's (lower-rank's) friction state +
+      // canonical imposed state to the peer so both ranks hold bit-identical
+      // DOFData and assemble from the SAME imposed state.  Method-invariant:
+      // runs for every friction law.  See plan B.1.5 (source-1 interpolation)
+      // and B.3.  Collective-safe even when this rank buffered nothing: the
+      // helper's Allreduce/Allgatherv are reached unconditionally.
+      {
+         constexpr int NPAY = 8 + 2 * NUM_STATE;  // 8 DOFData fields + I_imp +/-
+         std::vector<double> payload;
+         payload.reserve(fault_qp_buf.size() * NPAY);
+         for (const auto &qa : fault_qp_buf)
+         {
+            const DOFData &d = (*fault_dof_data_)[qa.dof_idx];
+            payload.push_back(d.tau1_corr);
+            payload.push_back(d.tau2_corr);
+            payload.push_back(d.sigma_n_corr);
+            payload.push_back(d.V1);
+            payload.push_back(d.V2);
+            payload.push_back(d.psi);
+            payload.push_back(d.slip1);
+            payload.push_back(d.slip2);
+            for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_plus_can[c]); }
+            for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_minus_can[c]); }
+         }
+
+         // We overwrite our copy iff the PEER is the boss (peer_rank < my_rank_):
+         // copy its 8 DOFData fields + both canonical imposed states so our
+         // Pass-2 assembly uses the boss's single-valued answer.
+         int n_paired = ExchangeAndPairSharedFaultQPs(
+            NPAY, payload,
+            [&](int local_qp, const double *peer, int peer_rank)
+            {
+               if (peer_rank >= my_rank_) { return; }   // we are boss: keep ours
+               SharedFaultQPAssembly &qa = fault_qp_buf[local_qp];
+               DOFData &d = (*fault_dof_data_)[qa.dof_idx];
+               d.tau1_corr    = peer[0];
+               d.tau2_corr    = peer[1];
+               d.sigma_n_corr = peer[2];
+               d.V1           = peer[3];
+               d.V2           = peer[4];
+               d.psi          = peer[5];
+               d.slip1        = peer[6];
+               d.slip2        = peer[7];
+               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_plus_can[c]  = peer[8 + c]; }
+               for (int c = 0; c < NUM_STATE; c++) { qa.I_imp_minus_can[c] = peer[8 + NUM_STATE + c]; }
+            });
+         MFEM_VERIFY(n_paired == static_cast<int>(fault_qp_buf.size()),
+                     "ComputeADERSharedFaceFluxRHS reconcile: " << n_paired
+                     << " of " << fault_qp_buf.size() << " local shared fault "
+                     "QPs paired with a cross-rank peer (each must pair exactly "
+                     "once).");
+
+         // Pass 2: assemble each buffered QP from the (possibly reconciled)
+         // canonical imposed state, rotated to global via T_can rebuilt from the
+         // buffered canonical frame (bit-identical across ranks => identical flux).
+         for (const auto &qa : fault_qp_buf)
+         {
+            DenseMatrix T_can(NUM_STATE);
+            GodunovFlux::BuildRotation(qa.can_n, qa.can_t1, qa.can_t2, T_can);
+            real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               I_imp_plus_g[c] = 0.0; I_imp_minus_g[c] = 0.0;
+               for (int k = 0; k < NUM_STATE; k++)
+               {
+                  I_imp_plus_g[c]  += T_can(c, k) * qa.I_imp_plus_can[k];
+                  I_imp_minus_g[c] += T_can(c, k) * qa.I_imp_minus_can[k];
+               }
+            }
+            const real_t *I_imp_side = qa.elem1_on_plus ? I_imp_plus_g
+                                                        : I_imp_minus_g;
+            real_t F_h_side[NUM_STATE];
+            flux_.Interior(qa.can_n, I_imp_side, I_imp_side, F_h_side);
+            const real_t assemble_sign = qa.elem1_on_plus ? -1.0 : +1.0;
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               for (int i = 0; i < qa.ndof; i++)
+               {
+                  rhs[c * ndof_total_ + qa.dof_offset1 + i] +=
+                     assemble_sign * qa.w * qa.shape1[i] * F_h_side[c];
                }
             }
          }
@@ -5478,6 +5610,227 @@ void WaveOperator<MeshType>::ApplyPMLDamping(const Vector &Q, Vector &rhs) const
             }
          }
       }
+   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 (PLAN_shared_fault_reconcile_fix_2026-05-23.md): cross-rank exchange
+// + pairing of shared fault QPs, the method-invariant reconcile matcher.  Same
+// integer-exact (face-key) + nearest-centroid pairing as the R-101 verify
+// (robust to the shared-face orientation flip); here generalised to carry an
+// arbitrary per-QP payload and to invoke a callback for each paired local QP.
+// See VerifySharedFaultDOFDataConsistency below for the record/pairing rationale.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+int WaveOperator<MeshType>::ExchangeAndPairSharedFaultQPs(
+   int npay, const std::vector<double> &local_payload,
+   const std::function<void(int local_qp, const double *peer_payload,
+                            int peer_rank)> &cb) const
+{
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return 0;  // Serial: no shared faces.
+   }
+   else
+   {
+#ifdef MFEM_USE_MPI
+      MFEM_VERIFY(npay > 0, "ExchangeAndPairSharedFaultQPs: npay must be > 0");
+      auto &pmesh = const_cast<ParMesh &>(static_cast<const ParMesh &>(mesh_));
+      MPI_Comm comm = pmesh.GetComm();
+      int nprocs;
+      MPI_Comm_size(comm, &nprocs);
+
+      // Collective short-circuit: every rank must reach the Allreduce +
+      // Allgatherv even with nothing to contribute, or ranks with shared
+      // fault faces would deadlock against ranks without any (R-1600 class).
+      int any_shared_local = (fault_dof_data_ &&
+                              fault_shared_faces_.Size() > 0) ? 1 : 0;
+      int any_shared_global = 0;
+      MPI_Allreduce(&any_shared_local, &any_shared_global, 1, MPI_INT,
+                    MPI_MAX, comm);
+      if (!any_shared_global) { return 0; }
+
+      // Record: [key(3), qp_idx(1), centroid(3), payload(npay), rank(1)].
+      const int REC               = 8 + npay;
+      const int NUM_KEY_COMPONENTS = 3;
+      const int CENTROID_OFFSET   = 4;
+      const int PAYLOAD_OFFSET    = 7;
+      const int RANK_OFFSET       = 7 + npay;
+
+      Array<HYPRE_BigInt> gvi;
+      pmesh.GetGlobalVertexIndices(gvi);
+
+      // Build local records IN THE SAME ORDER the caller built `local_payload`
+      // (ascending shared-face index × QP) — see fault_shared_faces_ ctor loop
+      // and the ComputeADERSharedFaceFluxRHS shared loop, which both iterate
+      // ascending sf.  `local_qp` is that iteration index.
+      std::vector<double> local_data;
+      int n_local_qp = 0;
+      for (int sf_idx = 0; sf_idx < fault_shared_faces_.Size(); sf_idx++)
+      {
+         int sf = fault_shared_faces_[sf_idx];
+         FaceElementTransformations *ftr = pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+         auto it = shared_fault_dof_offset_.find(sf);
+         if (it == shared_fault_dof_offset_.end()) { continue; }
+         int dof_base = it->second;
+
+         int local_face = pmesh.GetSharedFace(sf);
+         dynamic::FaceVertexKey key =
+            dynamic::MakeFaceKey(local_face, gvi, pmesh);
+
+         const IntegrationRule &ir =
+            IntRules.Get(ftr->GetGeometryType(), 2*order_);
+         for (int q = 0; q < ir.GetNPoints(); q++)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            ftr->SetAllIntPoints(&ip);
+            Vector phys(3);
+            ftr->Face->Transform(ip, phys);
+
+            int didx = dof_base + q;
+            if (didx < 0 ||
+                didx >= static_cast<int>(fault_dof_data_->size())) { continue; }
+
+            MFEM_VERIFY((n_local_qp + 1) * npay
+                        <= static_cast<int>(local_payload.size()),
+                        "ExchangeAndPairSharedFaultQPs: local_payload too short "
+                        "(have " << local_payload.size() << ", need "
+                        << (n_local_qp + 1) * npay << " for npay=" << npay
+                        << ").  Caller must supply npay doubles per shared "
+                        "fault QP in ascending-sf x QP order.");
+
+            local_data.push_back(static_cast<double>(key.v[0]));
+            local_data.push_back(static_cast<double>(key.v[1]));
+            local_data.push_back(static_cast<double>(key.v[2]));
+            local_data.push_back(static_cast<double>(q));
+            local_data.push_back(phys(0));
+            local_data.push_back(phys(1));
+            local_data.push_back(phys(2));
+            for (int k = 0; k < npay; k++)
+            { local_data.push_back(local_payload[n_local_qp * npay + k]); }
+            local_data.push_back(static_cast<double>(my_rank_));
+            n_local_qp++;
+         }
+      }
+
+      // Allgatherv all ranks' records.
+      int my_size = static_cast<int>(local_data.size());
+      std::vector<int> sizes(nprocs), displs(nprocs);
+      MPI_Allgather(&my_size, 1, MPI_INT, sizes.data(), 1, MPI_INT, comm);
+      int total = 0;
+      for (int r = 0; r < nprocs; r++) { displs[r] = total; total += sizes[r]; }
+      std::vector<double> all_data(total);
+      MPI_Allgatherv(local_data.data(), my_size, MPI_DOUBLE,
+                     all_data.data(), sizes.data(), displs.data(),
+                     MPI_DOUBLE, comm);
+
+      const int n_entries = total / REC;
+      // This rank's records form a contiguous block (Allgatherv preserves each
+      // rank's local order), so entry e is local iff it lies in that block, and
+      // its iteration index is e - my_entry_base.
+      const int my_entry_base  = displs[my_rank_] / REC;
+      const int my_entry_count = sizes[my_rank_] / REC;
+      MFEM_VERIFY(my_entry_count == n_local_qp,
+                  "ExchangeAndPairSharedFaultQPs: local record count mismatch");
+      if (n_entries == 0) { return 0; }
+
+      auto key_component = [&](int e, int k) -> HYPRE_BigInt
+      { return static_cast<HYPRE_BigInt>(all_data[e*REC + k]); };
+
+      std::vector<int> idx(n_entries);
+      std::iota(idx.begin(), idx.end(), 0);
+      std::sort(idx.begin(), idx.end(), [&](int a, int b)
+      {
+         for (int k = 0; k < NUM_KEY_COMPONENTS; k++)
+         {
+            HYPRE_BigInt va = key_component(a, k), vb = key_component(b, k);
+            if (va != vb) { return va < vb; }
+         }
+         for (int k = 0; k < 3; k++)
+         {
+            double va = all_data[a*REC + CENTROID_OFFSET + k];
+            double vb = all_data[b*REC + CENTROID_OFFSET + k];
+            if (va != vb) { return va < vb; }
+         }
+         return false;
+      });
+
+      auto same_face_key = [&](int a, int b)
+      {
+         for (int k = 0; k < NUM_KEY_COMPONENTS; k++)
+         { if (key_component(a, k) != key_component(b, k)) { return false; } }
+         return true;
+      };
+      auto centroid_max_dist = [&](int a, int b)
+      {
+         double dx = std::abs(all_data[a*REC + CENTROID_OFFSET + 0]
+                            - all_data[b*REC + CENTROID_OFFSET + 0]);
+         double dy = std::abs(all_data[a*REC + CENTROID_OFFSET + 1]
+                            - all_data[b*REC + CENTROID_OFFSET + 1]);
+         double dz = std::abs(all_data[a*REC + CENTROID_OFFSET + 2]
+                            - all_data[b*REC + CENTROID_OFFSET + 2]);
+         return std::max({dx, dy, dz});
+      };
+      constexpr double PAIR_TOL_M = 1e-6;
+
+      int n_paired_local = 0;
+      int i = 0;
+      while (i < n_entries)
+      {
+         int j = i + 1;
+         while (j < n_entries && same_face_key(idx[i], idx[j])) { j++; }
+         int n_in_group = j - i;
+
+         std::vector<bool> matched(n_in_group, false);
+         while (true)
+         {
+            double best_d = std::numeric_limits<double>::max();
+            int best_a = -1, best_b = -1;
+            for (int a = 0; a < n_in_group; a++)
+            {
+               if (matched[a]) { continue; }
+               int ea = idx[i + a];
+               int rank_a = static_cast<int>(all_data[ea*REC + RANK_OFFSET]);
+               for (int b = a + 1; b < n_in_group; b++)
+               {
+                  if (matched[b]) { continue; }
+                  int eb = idx[i + b];
+                  int rank_b = static_cast<int>(all_data[eb*REC + RANK_OFFSET]);
+                  if (rank_a == rank_b) { continue; }
+                  double d = centroid_max_dist(ea, eb);
+                  if (d < best_d) { best_d = d; best_a = a; best_b = b; }
+               }
+            }
+            if (best_a < 0 || best_d > PAIR_TOL_M) { break; }
+            matched[best_a] = true;
+            matched[best_b] = true;
+            int ea = idx[i + best_a];
+            int eb = idx[i + best_b];
+
+            // Exactly one of the pair is local (it is one of THIS rank's
+            // shared fault QPs); invoke the callback with the peer's payload.
+            auto is_local = [&](int e)
+            { return e >= my_entry_base && e < my_entry_base + my_entry_count; };
+            int local_e = -1, peer_e = -1;
+            if (is_local(ea) && !is_local(eb)) { local_e = ea; peer_e = eb; }
+            else if (is_local(eb) && !is_local(ea)) { local_e = eb; peer_e = ea; }
+            if (local_e >= 0)
+            {
+               int local_qp = local_e - my_entry_base;
+               int peer_rank =
+                  static_cast<int>(all_data[peer_e*REC + RANK_OFFSET]);
+               cb(local_qp, &all_data[peer_e*REC + PAYLOAD_OFFSET], peer_rank);
+               n_paired_local++;
+            }
+         }
+         i = j;
+      }
+      return n_paired_local;
+#else
+      (void)npay; (void)local_payload; (void)cb;
+      return 0;
+#endif
    }
 }
 
