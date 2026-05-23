@@ -1954,6 +1954,52 @@ int main(int argc, char *argv[])
 
       paraview_write(step + 1, t, V_max_step);
 
+      // ------------------------------------------------------------------
+      // MPI shared-fault consistency tripwire.  Follows tpv104_driver.cpp
+      // (:2636-2639) and tpv205_driver.cpp (:2442-2445), both of which call
+      // this once at step 0; the spatial driver had DROPPED it entirely.
+      //
+      // Extended past TPV104's step-0-only call to fire through the whole
+      // gradual_overstress nucleation window: on the CURVILINEAR SAFS fault
+      // the per-QP dip/strike frame (FaultBasis::ComputeOrientedFrame, via
+      // sign(n_raw . ref_normal) with ref_normal=(0,-1,0)) is ill-conditioned
+      // where the local normal is ~perpendicular to ref_normal, so the two
+      // ranks owning a shared face can pick OPPOSITE strike directions.  The
+      // fixed-sign nucleation increment (+F.dtau into tau2_nuc) then forces
+      // the two sides of a shared face in opposite physical directions.  The
+      // routine pairs same-physical-QP records across ranks and ABORTS with a
+      // field/QP diagnostic if the 8 evolved fields differ > tol (so the
+      // first offending shared QP inside the nucleation patch is pinpointed).
+      // TPV104's planar fault has |n_raw . ref_normal| = 1 everywhere, so it
+      // never flips and always passes this check.
+      if (step == 0
+          || (cfg.nucleation.enabled
+              && t <= cfg.nucleation.gradual_overstress.T_nuc_s
+              && (step % 100 == 0)))
+      {
+         wave.VerifySharedFaultDOFDataConsistency();
+      }
+
+      // NaN tripwire — follows tpv104_driver.cpp:2641-2659 /
+      // tpv205_driver.cpp:2447-2464 (also dropped by the spatial driver).
+      {
+         real_t local_nan = std::isnan(Q.Norml2()) ? 1.0 : 0.0;
+         real_t global_nan = local_nan;
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&local_nan, &global_nan, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
+         if (global_nan > 0.0)
+         {
+            std::cerr << "ERROR: NaN detected at step " << step
+                      << ", t = " << t << " s (rank " << rank << ")\n";
+#ifdef MFEM_USE_MPI
+            MPI_Finalize();
+#endif
+            return 1;
+         }
+      }
+
       if (cfg.output.checkpoint_every_steps > 0
           && (step + 1) % cfg.output.checkpoint_every_steps == 0)
       {
