@@ -171,7 +171,8 @@ Be honest about the chain, because it decides which fix is correct.
   outputs **proves there is a sub-11-digit cross-rank input difference**, and that
   the non-smooth onset amplifies it. This is the *mechanism* of the divergence.
 
-**NOT yet measured (the open part of the root cause):**
+**Was open — now MEASURED and RESOLVED (Phase 0, job 7747304); see the RESOLVED
+block below. The three candidate sources were:**
 - The **magnitude** of that input difference ("~1e-14" is an assumption, never
   measured).
 - Its **source**, which is one of:
@@ -192,9 +193,26 @@ Be honest about the chain, because it decides which fix is correct.
   → identical outputs → **no reconcile needed** (this would *vindicate* R-701's
   no-broadcast design and be cheaper/more local).
 
-**Phase 0 (below) measures the magnitude and localises the source, and chooses
-between the two fixes. We do not commit to the reconcile until Phase 0 says the
-seed is inherent.**
+**RESOLVED — Phase 0 ran (oblique non-fatal job `7747304`, 2026-05-23): source
+(1) interpolation.** At the diverging QP `(607517.9, 3706359.2, −4543)`, shared
+by ranks 104 (owns +) and 114 (ghosts +), the `%.17e` + `RAWDOF` trace shows:
+- the **raw +side element DOFs are bit-identical** across the two ranks at every
+  common sub-step, in all of SXX/SXY/SXZ → **rules out source (2)** (ghost-exchange
+  is bit-exact) **and source (3)** (no drift; identical all the way to t≈1.52 s);
+- the **interpolated** canonical-frame inputs differ at **~1e-14** (e.g. +side dip
+  shear `4.27409779095866838e+02` vs `…725e+02`; −side `…159172e-01` vs
+  `…159116e-01`) → the seed is the unavoidable DG shared-face interpolation gap
+  (`shape1∘Loc1` vs `shape2∘Loc2`);
+- at the slip-onset kink that 1e-14 tips the ranks onto opposite branches:
+  `V1 = −1.637 m/s` (rank 104, slipping) vs `0` (rank 114, locked) → `worst_rel=1`
+  at t≈0.49 s, field V1 (dip), spreading to slip2.
+
+⇒ **The reconcile (Phase 2) is the correct, necessary fix; a source-fix is NOT
+available** (the DOFs are already bit-exact — the gap is in interpolation).
+R-701's "both ranks agree anyway" premise is disproved. The oblique run is
+**bounded** (V_max peaks ~6 m/s; dip slip does NOT run away after Part A) and
+reproduces the speckle (`max_slip → 1.27e6 m`, unphysical, direction-blind — same
+as zerodip `4.45e6 m`) as the Phase-4 final-check baseline.
 
 ### B.2 Why the DIP direction is the one flagged — what the equations actually say
 
@@ -399,8 +417,13 @@ relax the strict byte-exact rule. Flagged again here.
   LSW_ForcedRupture, AND rate-state; no per-law / per-direction / threshold gate.
 - **Regression contract (relaxed, see B.3):** TPV102/104/205 + BP5
   physically-exact (`worst_rel ≤ 1e-13` vs pre-fix) AND cross-rank bit-identical
-  (R-101 `max_rel_diff == 0`). Overrides CLAUDE.md byte-exact; recorded; needs
-  user sign-off.
+  (R-101 `max_rel_diff == 0`). Overrides CLAUDE.md byte-exact.
+  **APPROVED by user 2026-05-23** — apply the reconcile to ALL friction laws
+  (method-invariant, per REVIEW R-001); the ~1e-14 TPV/BP5 change vs the pre-fix
+  binary is accepted because it removes a latent cross-rank inconsistency
+  (rationale: TPV104 already has SAFS's slow nucleation ramp and is one
+  friction-law change away from the same desync — see B.2.5 / the TPV-survival
+  analysis).
 - **MPI-collective-safe** (R-1600 deadlock class): every rank reaches the
   exchange; ranks with no shared fault faces contribute empty buffers and do not
   hang.
@@ -514,11 +537,15 @@ rate-state and LSW (proving the fix is method-invariant).
   oracle's GREEN target becomes the source-fix, not the reconcile — the test
   (cross-rank bit-identity at the threshold) is the right oracle either way.
 
-## Phase 2: the reconcile (the fix) — CONDITIONAL on Phase 0 = inherent seed (source 1 or 3)
+## Phase 2: the reconcile (the fix) — GO (Phase 0 confirmed source 1, job 7747304)
 
-> If Phase 0 finds source (2) (ghost-exchange not bit-exact), skip this phase and
-> fix the exchange instead (separate plan); the reconcile is for the inherent-seed
-> case where both ranks' inputs cannot be made bit-identical.
+> **Phase 0 confirmed the seed is source (1) interpolation** (raw DOFs bit-identical
+> across ranks, interpolated inputs differ at ~1e-14 — see B.1.5 RESOLVED). The
+> source (2) "fix the exchange instead" branch does NOT apply: the ghost DOFs are
+> already bit-exact, so the only fix is to reconcile the friction output. The one
+> remaining gate before implementation is the **byte-exact relaxation sign-off**
+> (see B.3 / Constraints): the reconcile makes TPV102/104 cross-rank bit-identical,
+> a ~1e-14 change vs the pre-fix binary.
 
 ### Goal
 After the friction solve on a shared fault face, both ranks hold bit-identical

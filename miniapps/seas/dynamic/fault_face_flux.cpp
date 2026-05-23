@@ -23,6 +23,11 @@ namespace mfem
 namespace seas
 {
 
+#ifdef SEAS_TEST_INTERNAL
+// TEST-ONLY cross-rank seed knob [Pa] (see header).  Zero => no-op / byte-exact.
+real_t FaultFaceFlux::s_seas_test_tau2_trial_perturb_pa = 0.0;
+#endif
+
 // ---------------------------------------------------------------------------
 // Construction
 // ---------------------------------------------------------------------------
@@ -65,6 +70,16 @@ void FaultFaceFlux::ComputeTrialTraction(const DOFData &data,
    tau2_trial = data.eta_s * (Q_minus[VZ] - Q_plus[VZ]
                               + Q_plus[SXZ] * invZs_plus
                               + Q_minus[SXZ] * invZs_minus);
+
+#ifdef SEAS_TEST_INTERNAL
+   // TEST-ONLY cross-rank seed (Phase 1 of the reconcile plan): when one rank
+   // sets the knob, add a small absolute [Pa] nudge to its strike-channel
+   // trial traction — the deterministic stand-in for the ~1e-14 (relative)
+   // shared-face interpolation gap that tips two ranks onto opposite slip/lock
+   // branches at the LSW kink.  Zero default => byte-exact; whole block
+   // compiles out in production.
+   tau2_trial += s_seas_test_tau2_trial_perturb_pa;
+#endif
 }
 
 // ---------------------------------------------------------------------------

@@ -165,6 +165,21 @@ public:
                                     real_t &tau1_trial,
                                     real_t &tau2_trial);
 
+#ifdef SEAS_TEST_INTERNAL
+   /// TEST-ONLY (compiled out unless `SEAS_TEST_INTERNAL`): inject a controlled
+   /// absolute [Pa] cross-rank seed into the strike-channel trial traction,
+   /// mimicking the ~1e-14 (relative) DG shared-face interpolation gap that
+   /// desyncs two ranks at the LSW slip-onset kink (Phase-0 result, job
+   /// 7747304).  Set NONZERO on exactly ONE rank; `ComputeTrialTraction` then
+   /// adds this value to `tau2_trial` every call.  An ABSOLUTE Pa (not a ULP):
+   /// at the deterministic prestress knife's edge the unperturbed trial is
+   /// exactly 0, where a ULP nudge is a useless denormal — a small absolute
+   /// nudge (~1e-6 Pa = ~1.6e-14 of a 60 MPa traction, the real seed scale)
+   /// is the faithful, controllable stand-in.  Consumed only by
+   /// `test_shared_fault_reconcile_cross_rank`.  Zero default => no-op.
+   static real_t s_seas_test_tau2_trial_perturb_pa;
+#endif
+
    /// @brief Full fault-face Riemann solver pipeline.
    ///
    /// Given Q± in fault-local coordinates, computes the imposed states

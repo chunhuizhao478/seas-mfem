@@ -498,3 +498,46 @@ The covariant-decomposition / weak-channel Phase 3 is dropped — it was treatin
 symptom. R-701 revert is justified by NEW evidence (its bit-identical-inputs
 premise is false for long LSW runs); rate-state (TPV102/104) keeps the no-broadcast
 path byte-exact, so the reconcile must be gated to the LSW shared-fault path.
+
+---
+
+## Phase 0 RESULT (oblique non-fatal job 7747304, 2026-05-23) — seed = source (1) interpolation
+
+Ran `spatial_dyn_resDc2_XRANKdiag_*.sbatch` reworked NON-FATAL
+(`SEAS_R101_NONFATAL=1` + `SEAS_DIAG_BLOWUP=1`) with the extended `%.17e` +
+`RAWDOF` trace (commit 6a3af3e). Diverging QP `(607517.9, 3706359.2, −4543)`,
+shared by ranks **104 (owns +)** and **114 (ghosts +)**.
+
+**1. Bounded — no blow-up.** V_max peaks ~**6.03 m/s** then holds (no nan/inf);
+`n_rupturing` grows 831→1044 (front propagating). Same bounded behaviour as
+strike-only zerodip (~6.3). With Part A in place, the dip-loaded run does NOT
+blow up — refutes the dip↔normal runaway as a *catastrophic* driver.
+
+**2. Cross-rank divergence — confirmed, fires at onset.** First `DIVERGED` at
+step 1400, **t≈0.490 s, field V1 (dip)**, spreading to slip2; max `worst_rel=1.03`.
+
+**3. SEED LOCALISED → source (1) interpolation.** RAWDOF diff (rank 104 LOCAL vs
+rank 114 GHOST, same +side element): **bit-identical at every common sub-step**
+in SXX/SXY/SXZ (only a single trailing line on one rank from the walltime kill).
+⇒ ghost-exchange bit-exact (**rules out source 2**), no drift (**rules out source
+3**). Yet the *interpolated* canonical inputs differ at ~1e-14 (+side dip shear
+`4.27409779095866838e+02` vs `…725e+02`; −side `…159172e-01` vs `…159116e-01`).
+At the kink that 1e-14 tips the ranks onto opposite branches:
+**V1 = −1.637 m/s (rank 104) vs 0 (rank 114)**. The trace shows the *slow dwell*:
++side dip shear ramps 357→392→427→461→495→529→563→596 over t=0.4888→0.4912 — the
+nucleation creeping the shear THROUGH `μ_s·σ_n`, the threshold-dwell that
+fast-sweeping LSW benchmark fronts never produce.
+
+**4. `max_slip` is the speckle signature, not a diagnostic bug.**
+`max_slip = maxᵢ sqrt(slip1ᵢ²+slip2ᵢ²)` (`spatial_dyn_driver.cpp:1913-1927`),
+MPI-MAX, metres. Ratchets to **1.27e6 m** (oblique) / **4.45e6 m** (zerodip) —
+unphysical (V_max~6 ⇒ real slip ~10 m), direction-blind, decoupled from the
+sampled V_max ⇒ corrupted slip accumulation on the diverged DOFs. Post-fix must
+restore it to O(10 m).
+
+**Decision:** seed = inherent DG shared-face interpolation gap; the **reconcile
+(Phase 2) is the correct, necessary fix** — a ghost-exchange source-fix is not
+available (DOFs already bit-exact). R-701's bit-identical-inputs premise is
+disproved. Per REVIEW R-001 the reconcile is **method-invariant** (all laws),
+superseding the earlier "gate to LSW" note above; remaining gate = byte-exact
+relaxation sign-off.
