@@ -44,9 +44,12 @@
 #include "../../dynamic/tpv102_setup.hpp"
 #include "../../dynamic/tpv102_setup_total.hpp"
 #include "../../dynamic/tpv205_setup.hpp"
+#include "../../dynamic/tpv205_substep_iterator.hpp"
 #include "../../config/tpv102_params.hpp"
 #include "../../config/tpv205_params.hpp"
 #include "../../domain/boundary_config.hpp"
+
+#include <numeric>
 
 #include <algorithm>
 #include <cmath>
@@ -175,6 +178,50 @@ int CollectFaultQPCoords(WaveOperator<MeshT> &wave, MeshT &mesh, int order,
    return (int_faces.Size() + shr_faces.Size()) * nqp;
 }
 
+// Replicates the SAFS driver's AdvanceADERWithSubStep_Spatial — the substep
+// iterator path (Tpv205SubStepIterator solves friction + accumulates slip per
+// rank, THEN AdvanceADER runs the corrector).  The bare-AdvanceADER leg does
+// NOT exercise this path; this is the production SAFS stepping.
+void AdvanceSubStepLSW(WaveOperator<ParMesh> &wave,
+                       Tpv205SubStepIterator &iterator,
+                       std::vector<DOFData> &dof_data,
+                       const std::vector<Vector> &fault_coords,
+                       const Vector &Q, real_t dt_step, int ader_order,
+                       real_t t_step_start, Vector &Q_new)
+{
+   const std::vector<real_t> cfgT = iterator.GetDeltaT();
+   const std::vector<real_t> cfgW = iterator.GetTimeWeights();
+   const int O = static_cast<int>(cfgT.size());
+   real_t sum = std::accumulate(cfgT.begin(), cfgT.end(), static_cast<real_t>(0));
+   const real_t scale = dt_step / sum;
+   std::vector<real_t> dT(O);
+   for (int o = 0; o < O; o++) { dT[o] = cfgT[o] * scale; }
+   iterator.SetSubSteps(dT, cfgW);
+   const std::vector<real_t> &deltaT = iterator.GetDeltaT();
+   std::vector<real_t> tau_nodes(O);
+   real_t acc = 0.0;
+   for (int o = 0; o < O; o++) { tau_nodes[o] = acc + 0.5 * deltaT[o]; acc += deltaT[o]; }
+   std::vector<Vector> Q_node;
+   wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes, Q_node);
+   const int nqp = wave.GetNumTotalFaultQPs();
+   std::vector<std::vector<real_t>> Qpp(O), Qpm(O);
+   for (int o = 0; o < O; o++)
+   { wave.EvaluateBulkAtFaultQPsCanonical(Q_node[o], Qpp[o], Qpm[o]); }
+   const size_t nw = static_cast<size_t>(NUM_STATE) * static_cast<size_t>(nqp);
+   std::vector<real_t> imp_p(nw, 0.0), imp_m(nw, 0.0);
+   if (nqp > 0)
+   {
+      iterator.AdvanceWithSubStepStates(dof_data, fault_coords, Qpp, Qpm,
+                                        dt_step, t_step_start,
+                                        imp_p.data(), imp_m.data(),
+                                        [](real_t, real_t) {});
+   }
+   wave.SetSubStepFaultImposedStates(nqp > 0 ? imp_p.data() : nullptr,
+                                     nqp > 0 ? imp_m.data() : nullptr, nqp);
+   wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+   wave.ResetSubStepFaultImposedStates();
+}
+
 ParMesh MakePartitioned2Tet()
 {
    Mesh serial_mesh = BuildTwoTetFaultMesh();
@@ -195,7 +242,7 @@ ParMesh MakePartitioned2Tet()
 struct LegResult { double max_wr = 0.0; double max_slip_rate = 0.0; int onset_steps = 0; };
 
 LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps,
-                 bool disable_reconcile = false)
+                 bool disable_reconcile = false, bool use_substep = false)
 {
    BoundaryConfig bc;
    bc.natural_attrs = {1};
@@ -250,7 +297,7 @@ LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps,
          for (int i = 0; i < n_fault; i++)
          {
             dof_data[i].lsw_mu_s = mu_s;
-            dof_data[i].lsw_mu_d = mu_s;          // no weakening: tau_str fixed
+            dof_data[i].lsw_mu_d = 0.40;          // mu_d < mu_s: REAL slip-weakening
             dof_data[i].lsw_d_c  = 0.40;
             dof_data[i].sigma_n0 = sig_n;
             dof_data[i].tau1_0   = 0.0;
@@ -303,10 +350,26 @@ LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps,
    (void)inject_pa;
    (void)disable_reconcile;
 
+   // Substep-iterator path (the SAFS production stepping): mirror the driver's
+   // SetSubSteps(O=ader_order, equal weights).  Only meaningful for LSW.
+   Tpv205SubStepIterator iter(ff);
+   if (use_substep)
+   {
+      iter.SetSubSteps({0.5, 0.5}, {0.5, 0.5});  // O=2; deltaT ratios rescaled
+   }
+
    LegResult res;
    for (int step = 0; step < nsteps; step++)
    {
-      wave.AdvanceADER(Q, kDt, /*ader_order=*/2, Q_new);
+      if (use_substep)
+      {
+         AdvanceSubStepLSW(wave, iter, dof_data, coords, Q, kDt,
+                           /*ader_order=*/2, /*t_step_start=*/step * kDt, Q_new);
+      }
+      else
+      {
+         wave.AdvanceADER(Q, kDt, /*ader_order=*/2, Q_new);
+      }
       Q.Swap(Q_new);
 
       double wr = 0.0; int wf = -1;
@@ -386,6 +449,29 @@ int main(int argc, char *argv[])
          TEST_TRUE(g_wr == 0.0,
                    std::string("cross-rank DOFData bit-identical despite "
                                "injected strike-traction seed — ") + leg.name);
+      }
+   }
+
+   // (A) SUBSTEP-PATH leg: step via the Tpv205SubStepIterator (the SAFS
+   // production stepping the bare-AdvanceADER legs above do NOT exercise).
+   // If the reconcile holds here too, worst_rel==0; if this is RED while the
+   // AdvanceADER LSW leg was GREEN, the reconcile does not cover the substep
+   // path — i.e. the Frontera (job 7747507) no-op is reproduced locally.
+   {
+      LegResult r = RunLeg(FaultFrictionLaw::LSW, rank, nsteps,
+                           /*disable_reconcile=*/false, /*use_substep=*/true);
+      double g_wr = r.max_wr;
+      MPI_Reduce(&r.max_wr, &g_wr, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+      if (rank == 0)
+      {
+         std::cout << "\n  [SUBSTEP: LSW via Tpv205SubStepIterator]"
+                   << "  max worst_rel = " << std::scientific
+                   << std::setprecision(6) << g_wr
+                   << "  (slipped: " << (r.onset_steps > 0 ? "yes" : "no")
+                   << ", max|V|=" << r.max_slip_rate << ")\n";
+         TEST_TRUE(g_wr == 0.0,
+                   "cross-rank DOFData bit-identical on the SUBSTEP path "
+                   "(the SAFS production stepping)");
       }
    }
 

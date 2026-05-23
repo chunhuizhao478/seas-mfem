@@ -4605,6 +4605,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          std::vector<real_t> shape1;
          real_t I_imp_plus_can[NUM_STATE]  = {0};
          real_t I_imp_minus_can[NUM_STATE] = {0};
+         real_t cx = 0, cy = 0, cz = 0;   // QP physical coords (diagnostic only)
       };
       std::vector<SharedFaultQPAssembly> fault_qp_buf;
 
@@ -5032,6 +5033,10 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      qa.I_imp_plus_can[c]  = I_imp_plus[c];
                      qa.I_imp_minus_can[c] = I_imp_minus[c];
                   }
+                  {
+                     Vector _p(3); ftr->Face->Transform(ip, _p);
+                     qa.cx = _p(0); qa.cy = _p(1); qa.cz = _p(2);
+                  }
                   fault_qp_buf.push_back(std::move(qa));
                   continue;
                }
@@ -5142,9 +5147,43 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             NPAY, payload,
             [&](int local_qp, const double *peer, int peer_rank)
             {
-               if (peer_rank >= my_rank_) { return; }   // we are boss: keep ours
                SharedFaultQPAssembly &qa = fault_qp_buf[local_qp];
                DOFData &d = (*fault_dof_data_)[qa.dof_idx];
+               // DIAG (env SEAS_DIAG_XRANK, target QP): trace the reconcile —
+               // slip2/V2 local vs peer + whether THIS rank overwrites.  Fires
+               // on BOTH ranks BEFORE the boss-check.  Post-reconcile the
+               // non-boss (overwrite=1) adopts the peer's value, so both ranks
+               // should then hold the boss's slip2.  If the R-101 verify STILL
+               // diverges, the divergence is re-introduced AFTER this point.
+               {
+                  static const bool rdiag = []{
+                     const char *e = std::getenv("SEAS_DIAG_XRANK");
+                     return e && e[0] && !(e[0]=='0' && e[1]=='\0'); }();
+                  static const std::array<double,3> rtgt = []{
+                     std::array<double,3> t = {6.0751786666666670e+05,
+                                               3.7063591666666665e+06,
+                                               -4.5430145000000002e+03};
+                     if (const char *e = std::getenv("SEAS_DIAG_XRANK_QP"))
+                     { std::sscanf(e, "%lf,%lf,%lf", &t[0], &t[1], &t[2]); }
+                     return t; }();
+                  static const double rrad = []{
+                     const char *e = std::getenv("SEAS_DIAG_XRANK_R");
+                     return e ? std::atof(e) : 250.0; }();
+                  const double ex = qa.cx-rtgt[0], ey = qa.cy-rtgt[1],
+                               ez = qa.cz-rtgt[2];
+                  if (rdiag && ex*ex + ey*ey + ez*ez <= rrad*rrad)
+                  {
+                     std::fprintf(stderr,
+                        "[RECON] t=%.6e rank=%d peer=%d overwrite=%d dof=%d "
+                        "slip2_loc=%+.10e slip2_peer=%+.10e "
+                        "V2_loc=%+.10e V2_peer=%+.10e\n",
+                        GetTime(), my_rank_, peer_rank,
+                        (peer_rank < my_rank_) ? 1 : 0, qa.dof_idx,
+                        d.slip2, peer[7], d.V2, peer[4]);
+                     std::fflush(stderr);
+                  }
+               }
+               if (peer_rank >= my_rank_) { return; }   // we are boss: keep ours
                d.tau1_corr    = peer[0];
                d.tau2_corr    = peer[1];
                d.sigma_n_corr = peer[2];
