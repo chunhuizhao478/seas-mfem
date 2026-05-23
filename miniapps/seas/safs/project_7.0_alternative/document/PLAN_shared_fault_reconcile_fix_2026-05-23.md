@@ -34,19 +34,59 @@ sideways part wins and the side label **flips** — both ranks of a shared face
 then call themselves "−", the "exactly one + side" rule breaks, the nucleation
 is applied with the wrong sign, and the rupture blows up.
 
+### The exact computation (old vs new)
+The side label is set in `wave_operator.inl` (interior `:459-465`, shared
+`:519-525`):
+```
+elem1_proj = elem1_c · ref_normal       face_proj = face_c · ref_normal
+elem1_on_plus = (elem1_proj < face_proj)   ⇔   (elem1_c − face_c) · ref_normal < 0
+```
+Let `d = elem1_c − face_c` be the vector from the face centroid to the owning
+element's centroid. Split it into the part along the TRUE face normal `n̂` and the
+in-plane (tangential) part: `d = d_n·n̂ + d_t`, where by definition `d_t · n̂ = 0`.
+The OLD test computes `d · ref_normal`:
+```
+d · ref_normal = d_n (n̂ · ref_normal) + (d_t · ref_normal)
+```
+- **Flat fault:** `n̂ = ±(0,1,0) = ±ref_normal`, so `n̂·ref_normal = ±1` and the
+  tangential term `d_t·ref_normal = 0` (because `d_t ⟂ ref_normal` too). Result:
+  `d·ref_normal = ±d_n` — it measures exactly how far the element sits
+  above/below the face. **Correct.**
+- **Tilted fault (face normal makes angle θ with `ref_normal`):**
+  `n̂·ref_normal = cos θ`, and the tangential part now projects with weight `~sin θ`.
+  A tetrahedron's centroid is NOT directly over its face centroid, so `d_t ≠ 0`.
+  Result: `d·ref_normal ≈ d_n cos θ + (d_t·ref_normal)`. As `θ → 90°` (N–S strike,
+  `n̂ ⟂ ref_normal`), `cos θ → 0` and the **tangential** term takes over. When
+  `|d_t·ref_normal| > |d_n cos θ|`, the SIGN is set by the sideways offset, not the
+  real above/below → **wrong label.**
+- On the 2-tet test fixture this margin is `d·ref_normal = kL·(sin θ/12 − cos θ/4)`,
+  which crosses zero at `tan θ = 3 → θ = 71.6°`: past that tilt the label flips,
+  both ranks of the shared face get the same sign on `(elem1_c−face_c)·ref_normal`
+  → both call themselves "−" → "exactly one +" breaks → the fixed-sign nucleation
+  vector is added to the wrong side → blow-up.
+
 ### What we changed (commit `800b3281`)
-Project the element-to-face offset onto the **actual face normal** (canonicalized
-to a rank-independent direction), not the hardcoded `ref_normal`:
+Project onto the ACTUAL face normal `n̂` (canonicalized so both ranks agree on its
+direction), not the hardcoded `ref_normal`:
+```
+CalcOrtho(face Jacobian) → n_raw
+if NormalNeedsFlipToCanonical(n_raw, ref_normal, dim): n_raw = −n_raw   // → n̂
+elem1_on_plus = ((elem1_c − face_c) · n̂ < 0)
+```
+Because `d_t ⟂ n̂` BY CONSTRUCTION, `d · n̂ = d_n` **exactly** — the tangential
+offset can never contaminate the sign, at any tilt. The decision margin is now
+`±|d_n| ~ O(element size)`, independent of θ, so it never flips.
 - `fault/fault_basis.hpp` — new shared static
-  `FaultBasis::NormalNeedsFlipToCanonical(n_raw, ref_normal, dim)` (orient the
-  normal LINE to `n·ref_normal>0`, with a largest-component fallback when the
-  fault normal is ⟂ `ref_normal`); `ComputeOrientedFrame` routes its sign
-  decision through it.
-- `dynamic/wave_operator.inl` — both side-determination blocks (interior
-  `:459-465`, shared `:519-525`) compute the canonical face normal via
-  `CalcOrtho` and project the centroid offset onto it instead of `ref_normal`.
-- For a flat fault the canonical normal **equals** `ref_normal`, so TPV/BP5 are
-  byte-exact; the change only bites where the fault tilts.
+  `FaultBasis::NormalNeedsFlipToCanonical(n_raw, ref_normal, dim)`: orient the
+  normal LINE so `n̂·ref_normal > 0`; in the degenerate band where `n̂ ⟂ ref_normal`
+  (the θ=90° case where even that sign is ill-defined) fall back to "largest-
+  magnitude component positive." Both ranks then compute the SAME `n̂` regardless
+  of which way `CalcOrtho` happened to point it. `ComputeOrientedFrame` routes its
+  sign decision through the same helper.
+- `dynamic/wave_operator.inl` — both side blocks compute `n̂` via `CalcOrtho` and
+  project the centroid offset onto it instead of `ref_normal`.
+- For a flat fault `n̂ = ±ref_normal` so the boolean is identical to before
+  (TPV/BP5 byte-exact); the change only differs where `θ > 0`.
 
 ### How Part A is validated (per the user's directive)
 Job script: `jobs/safs/spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch`.
@@ -115,46 +155,75 @@ same slip-weakening switch as SAFS, but its rupture front sweeps past a point in
 one step (no slow knife's-edge dwell). Only SAFS combines the slip-weakening
 switch **and** a slow nucleation that parks a shared point on the threshold.
 
-### B.2 Why the DIP direction blows up but the STRIKE direction is fine
+### B.2 Why the DIP direction is the one flagged — what the equations actually say
 
-This is the part that confused us, so here it is carefully.
+I earlier hand-waved "dip couples to normal stress." You asked for equations, and
+they are worth being exact about, because **the local fault solve is dip/strike
+SYMMETRIC** — there is no built-in per-direction instability, and any claim that
+"dip is unstable, strike is stable" is wrong at the solve level.
 
-The **trigger** above is **blind to direction**: the yes/no slip switch is on the
-*total* shear magnitude `|τ|`, so the slip-vs-lock split corrupts the **whole**
-slip vector — both the strike component and the dip component become inconsistent
-across ranks at the same instant. (In the Frontera trace, when one rank slipped
-it had both `V2` (strike) and `V1` (dip) nonzero while the other rank had both
-zero.)
+**The fault-local solve.** In the canonical (fault-aligned) frame the bulk state
+splits into THREE independent Riemann channels — normal (local X), dip (Y=t1),
+strike (Z=t2) — `ComputeTrialTraction`, `fault_face_flux.cpp:49`:
+```
+σ_n_trial = η_p (v_n⁻ − v_n⁺ + σ_n⁺/Zp⁺ + σ_n⁻/Zp⁻)        (normal,  Eq.7a)
+τ1_trial  = η_s (v_t1⁻ − v_t1⁺ + τ1⁺/Zs⁺ + τ1⁻/Zs⁻)         (dip,     Eq.7b)
+τ2_trial  = η_s (v_t2⁻ − v_t2⁺ + τ2⁺/Zs⁺ + τ2⁻/Zs⁻)         (strike,  Eq.7c)
+```
+Friction (`SolveLSW_TPV205`, `tpv205_friction.hpp:146-165`):
+```
+|τ|    = sqrt(τ1_total² + τ2_total²)        τ_str = μ_eff·|σ_n_total|
+V_abs  = max(0, (|τ| − τ_str)/η_s)
+V1 = V_abs·τ1_total/|τ|        V2 = V_abs·τ2_total/|τ|
+τ1_corr = τ1_trial − η_s·V1    τ2_corr = τ2_trial − η_s·V2
+σ_n_corr = σ_n_trial            ← normal traction NOT changed by slip (:202)
+```
+Three facts read directly off these:
+1. **Dip (1) and strike (2) are identical in form** (same `η_s`, same algebra).
+   The solver cannot prefer one over the other — there is NO per-direction
+   instability here.
+2. **Slip onset is a switch on the magnitude** `|τ|` (the `max(0,·)`). The 1e-14
+   cross-rank difference in `|τ|` at the threshold flips `V_abs` between 0 and >0,
+   so **`V1` AND `V2` flip across ranks together** (they share `V_abs` and `|τ|`).
+   The trigger corrupts the WHOLE slip vector, not one direction.
+3. **`σ_n_corr = σ_n_trial`:** slip does NOT change the normal stress *inside the
+   solve*. And friction caps only the SHEAR (`|τ_shear| ≤ μ|σ_n|`); there is no
+   cap on the normal channel (no "no-opening" limit — this is why the original
+   blow-up reached `σ_n = −124 GPa` tension). The normal channel is the
+   **unconstrained** one.
 
-What differs is the **consequence** — whether that inconsistency stays small or
-runs away — and that **is** direction-dependent, for a physical reason:
+**So why is `V1` (dip) the field the guard reports, and why does the oblique run
+blow up while zerodip doesn't?** Two parts, kept honest:
 
-- **Strike slip does not change the fault's normal stress.** Sliding along strike
-  is motion *in the fault plane, along the surface*; it doesn't push the two
-  sides together or pull them apart. So a strike inconsistency is just a small
-  error on a large, well-loaded quantity — it radiates away and stays bounded.
-- **Dip slip on the ~32°-dipping SAFS fault DOES change the normal stress**
-  (slip ↔ normal-stress coupling: dip motion on a dipping fault has a component
-  that compresses/decompresses the fault). And the fault's **normal-stress
-  channel is undamped** (unlike the shear channels, which radiation damping
-  `η_s·V` holds in check). So a dip inconsistency feeds the *un-damped* normal
-  channel: more dip slip → changed σ_n → changed strength → more slip → … a
-  positive feedback loop with no brake. That is the runaway that becomes the
-  blow-up.
+- **(reporting) Why `V1` is named.** The guard uses
+  `rel_diff = |a−b| / max(|a|,|b|)`. When one rank slips and the other locks, BOTH
+  `V1` and `V2` jump to `rel_diff = 1.0`; the verify reports the first field that
+  hit the max, and `V1` is checked before `V2`. So "dip" is partly a **reporting
+  artifact** — strike desynced too. (Equation-backed: same `rel_diff` formula.)
 
-So: **strike inconsistency = small error on a stable channel (bounded); dip
-inconsistency = small error injected into an undamped feedback loop (runs away).**
+- **(physics, partly hypothesis) Why the blow-up needs dip.** This is NOT
+  derivable from the local solve (which is symmetric, above). It comes from the
+  BULK + geometry, and the zerodip job is the experiment built to test it:
+  - The local channels are decoupled, but in the BULK the imposed slip velocity
+    (`BuildImposedState`, `:254-280`: `v_imp^± = v^± ± (1/Z)(τ_corr − τ^±)`,
+    `σ_imp = σ_corr`) radiates and propagates. On a **32°-dipping** fault, dip
+    slip has a vertical component that the bulk elastodynamics couple into the
+    fault-**normal** stress next step (`σ_n_trial` changes); strike slip (motion
+    along the surface) does not. So a dip inconsistency leaks into the
+    **unconstrained** normal channel (fact 3) and runs away; a strike
+    inconsistency does not feed an un-capped channel and stays bounded.
+  - **Empirical confirmation:** zero the dip pre-stress (`SEAS_ZERO_DIP_PRESTRESS=1`)
+    → no dip slip → the *same code with the same 1e-14 split* runs without blowing
+    up (R-101 non-fatal `worst_rel` stays bounded). The zerodip sbatch states this
+    hypothesis: "that dip-slip drive (via slip↔normal-stress coupling) is what
+    makes the rupture blow up." I label the coupling a HYPOTHESIS because it lives
+    in the bulk, not in the fault-flux equations above; the zerodip run is its test.
 
-This is exactly what the **zerodip experiment proves empirically**: zero the dip
-pre-stress (no dip slip) and the *same code with the same 1e-14 split* runs
-without blowing up — the strike-only inconsistency stays bounded (the R-101
-non-fatal log shows `worst_rel` small). Restore the dip load and it runs away.
-(The zerodip sbatch header states this hypothesis directly: "that dip-slip drive
-(via slip↔normal-stress coupling) is what makes the rupture blow up.")
-
-**Important:** the fix below removes the inconsistency **at its source for every
-direction**, so we do NOT rely on strike being self-stabilizing. After the fix,
-strike and dip are both cross-rank-identical.
+**Bottom line for the fix.** Because the local solve is direction-symmetric and
+the trigger corrupts the whole slip vector, the fix must make the slip decision
+single-valued for ALL directions — which it does. We do NOT rely on strike being
+self-stabilizing or on resolving the bulk dip-vs-normal question; the reconcile
+removes the inconsistency before it can feed any channel.
 
 ### B.3 How the proposed fix works in plain language
 
@@ -178,9 +247,35 @@ Concretely (still plain):
 4. THEN both ranks assemble their side of the flux from that single shared
    answer.
 
-"Boss" = the rank with the **smaller MPI rank number** of the two sharing the
-point. It's a fixed, unique, geometry-independent choice (so it can't be confused
-by the curvilinear fault the way the +/- side label was).
+**How the boss is chosen (no negotiation round-trip).** Every shared fault point
+appears on exactly two ranks. The reconcile exchange (the R-101 matcher, below)
+pairs the two records by their face-vertex key and hands each rank its PEER's
+rank number. Both ranks then independently compute the SAME value:
+```
+boss = min(my_rank, peer_rank)
+is_boss = (my_rank == boss)        // exactly one of the two ranks is true
+```
+The boss keeps its own answer; the non-boss (`my_rank > peer_rank`) overwrites.
+"Lower rank wins" is unique, deterministic, and **purely numeric** — so, unlike
+the +/- side label that Part A had to fix, it cannot be fooled by the curvilinear
+geometry. (Any fixed unique key would do; lower-rank is the cheapest because the
+pairing already carries `peer_rank`. We `MFEM_VERIFY` that each shared point pairs
+with exactly one peer.)
+
+**What is copied — and why the imposed stress must be too.** The boss sends, per
+point: (a) the friction state
+`DOFData{V1,V2,τ1_corr,τ2_corr,σ_n_corr,slip1,slip2}` and (b) the canonical-frame
+imposed state `Q_imp_plus`, `Q_imp_minus`. The imposed state is what gets pushed
+back into the bulk (`BuildImposedState`, `fault_face_flux.cpp:254-280`):
+```
+Q_imp^±[VY] = v_t1^± ± (1/Zs)(τ1_corr − τ1^±)     Q_imp^±[SXY] = τ1_corr
+Q_imp^±[VZ] = v_t2^± ± (1/Zs)(τ2_corr − τ2^±)     Q_imp^±[SXZ] = τ2_corr
+Q_imp^±[VX] = v_n^±  ± (1/Zp)(σ_n_corr − σ_n^±)   Q_imp^±[SXX] = σ_n_corr
+```
+If we copied only the stored `DOFData` but each rank assembled the flux from its
+OWN `Q_imp` (built from its own 1e-14-different `τ^±`/`v^±`), the bulk would
+re-grow a fresh cross-rank difference next sub-step and we'd be back at the start.
+Copying the boss's `Q_imp` makes the flux that BOTH ranks assemble bit-identical.
 
 **Why this is the right kind of fix (general, not a patch):** it does the same
 thing for every friction law and every slip direction — it just makes the shared
