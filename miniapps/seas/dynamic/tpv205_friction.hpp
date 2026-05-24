@@ -34,6 +34,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdlib>  // std::getenv for the SEAS_NOOPENING diagnostic cap
 
 namespace mfem
 {
@@ -122,6 +123,29 @@ inline void SolveLSW_TPV205(real_t tau1_trial, real_t tau2_trial,
       // (the imposed-state Riemann then carries the trial values
       // unchanged, consistent with the velocity-discontinuity-zero
       // boundary condition on a locked face).
+      tau1_corr = tau1_trial;
+      tau2_corr = tau2_trial;
+      return;
+   }
+
+   // DIAGNOSTIC no-opening cap (env SEAS_NOOPENING, default OFF).  Under
+   // tension (sigma_n_total <= 0) the standard LSW law below free-slides
+   // (sigma_n_pos clamps to 0 => tau_strength = 0 => V = |tau|/eta_s), which
+   // — when the trial normal channel collapses tensile — drives the
+   // unbounded slip runaway seen in the SAFS [SLIP] trace.  This env-gated
+   // branch zeros the frictional slip under tension (the physical "fault
+   // opens and decouples" limit) to TEST whether that free-slide path is the
+   // operative amplifier (REVIEW_speckle_tension_analysis test 1).  Mirrors
+   // the strength-barrier short-circuit above.  Default OFF => the branch is
+   // never taken => byte-exact for the TPV205 regression.  Parsed once.
+   static const bool s_no_opening = [] {
+      const char *e = std::getenv("SEAS_NOOPENING");
+      return e && e[0] && e[0] != '0'; }();
+   if (s_no_opening && sigma_n_total <= 0.0)
+   {
+      V_abs = 0.0;
+      V1 = 0.0;
+      V2 = 0.0;
       tau1_corr = tau1_trial;
       tau2_corr = tau2_trial;
       return;

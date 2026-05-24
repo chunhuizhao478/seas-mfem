@@ -3,6 +3,7 @@
 
 #include "tpv205_substep_iterator.hpp"
 #include "tpv205_friction.hpp"
+#include "wave_state.hpp"   // QIndex (VX, SXX) for the [SLIP] sigma_n decomposition
 
 #include <cmath>
 #include <cstring>
@@ -361,6 +362,15 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
    static const double slip_v_thr = [] {
       const char *e = std::getenv("SEAS_DIAG_SLIP_VTHR");
       return e ? std::atof(e) : 10.0; }();
+   // MPI world rank for the trace (so the two ranks sharing a QP can be
+   // diffed in post-processing).  Resolved once; serial build => 0.
+   static const int s_mpi_rank = [] {
+      int r = 0;
+#ifdef MFEM_USE_MPI
+      int inited = 0; MPI_Initialized(&inited);
+      if (inited) { MPI_Comm_rank(MPI_COMM_WORLD, &r); }
+#endif
+      return r; }();
 
    for (int o = 0; o < O; ++o)
    {
@@ -409,13 +419,31 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
             const real_t mu_eff = LSWFrictionCoefficient_TPV205(
                                      delta, d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
             const real_t sn_pos = std::max<real_t>(s.sigma_n_total, 0.0);
+            // Decompose the dynamic Godunov normal traction (sigma_n_trial,
+            // i.e. sigma_n_total - sigma_n0 - sigma_n_nuc) into its two terms
+            // (ComputeTrialTraction Eq. 7a) so the symmetry/causation read can
+            // tell an OPENING normal-velocity jump from a tensile bulk normal
+            // stress: sn_vjump + sn_sterm == sigma_n_trial.
+            const real_t sn_vjump = d.eta_p
+                                    * (Q_tilde_minus[VX] - Q_tilde_plus[VX]);
+            const real_t sn_sterm = d.eta_p
+                                    * (Q_tilde_plus[SXX]  / d.Zp_plus
+                                       + Q_tilde_minus[SXX] / d.Zp_minus);
+            // is_shared from the dof_data layout (interior [0,n_local) then
+            // shared); -1 if the driver did not set n_local.
+            const int is_shared = (diag_num_local_fault_qps_ < 0) ? -1
+                                  : (i >= diag_num_local_fault_qps_ ? 1 : 0);
+            const Vector &xyz = fault_coords[i];
             std::fprintf(stderr,
                "[SLIP] t=%.6e o=%d/%d qp=%d last=%d V_abs=%+.6e tau_abs=%+.6e "
                "tau_str=%+.6e sigma_n_tot=%+.6e sigma_n_pos=%+.6e delta=%+.6e "
-               "mu_eff=%+.6e d_c=%+.6e\n",
+               "mu_eff=%+.6e d_c=%+.6e rank=%d is_shared=%d sn_vjump=%+.6e "
+               "sn_sterm=%+.6e c=(%.1f,%.1f,%.1f)\n",
                t_substep_end, o, O, i, (o == O - 1) ? 1 : 0,
                s.V_abs, s.Theta, mu_eff * sn_pos, s.sigma_n_total, sn_pos,
-               delta, mu_eff, d.lsw_d_c);
+               delta, mu_eff, d.lsw_d_c,
+               s_mpi_rank, is_shared, sn_vjump, sn_sterm,
+               xyz(0), xyz(1), xyz(2));
             std::fflush(stderr);
          }
 

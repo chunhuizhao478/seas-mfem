@@ -1740,6 +1740,10 @@ int main(int argc, char *argv[])
       std::vector<real_t> weights(O, 1.0 / static_cast<real_t>(O));
       substep_iterator.SetSubSteps(deltaT, weights);
    }
+   // PLAN_speckle_slip_runaway (diag): tell the iterator how many fault QPs
+   // are LOCAL/interior so the env-gated [SLIP] trace can tag each QP shared
+   // vs interior (dof_data is laid out interior [0,n_local) then shared).
+   substep_iterator.SetDiagNumLocalFaultQPs(wave.GetNumLocalFaultQPs());
 
    // Phase N: per-sub-step gradual_overstress accumulator hook.  Closes
    // over nuc_params + dof_data + cfg; fires inside

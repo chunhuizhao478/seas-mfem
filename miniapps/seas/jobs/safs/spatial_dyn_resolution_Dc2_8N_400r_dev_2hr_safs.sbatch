@@ -47,6 +47,11 @@ export LANG=C
 export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-1}"
 export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"
 export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-10.0}"
+# No-opening cap EXPERIMENT (default OFF): SEAS_NOOPENING=1 zeros frictional
+# slip under tension (sigma_n_total<=0) in SolveLSW_TPV205 -- the decisive test
+# of whether the tension free-slide path is the runaway amplifier
+# (REVIEW_speckle_tension_analysis test 1).  OFF => byte-exact.
+export SEAS_NOOPENING="${SEAS_NOOPENING:-0}"
 
 module load intel/19.1.1
 module load impi/19.0.9
@@ -151,7 +156,7 @@ echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}"
 echo "Config:      ${CONFIG_TOML}   (RESOLUTION test / discriminator BASELINE: D_c=2.0 / radius=4000)"
-echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP}"
+echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX:-<config default = adjacent>}"
 echo "tfinal:      ${TFINAL}"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"

@@ -138,6 +138,13 @@ public:
    const std::vector<real_t> &GetDeltaT() const { return deltaT_; }
    const std::vector<real_t> &GetTimeWeights() const { return time_weights_; }
 
+   /// Diagnostic-only (PLAN_speckle_slip_runaway): number of LOCAL/interior
+   /// fault QPs.  The dof_data layout is interior QPs [0, n_local) followed by
+   /// shared QPs [n_local, n_total), so the env-gated [SLIP] trace tags each QP
+   /// is_shared = (i >= n_local).  Default -1 => unknown => trace prints
+   /// is_shared=-1.  Set once by the driver from GetNumLocalFaultQPs().
+   void SetDiagNumLocalFaultQPs(int n) { diag_num_local_fault_qps_ = n; }
+
 private:
    /// Per-QP LSW solve + imposed-state construction shared between
    /// `Advance` and `AdvanceWithSubStepStates`.  The caller supplies the
@@ -153,6 +160,7 @@ private:
    FaultFaceFlux        &flux_;
    std::vector<real_t>   deltaT_;
    std::vector<real_t>   time_weights_;
+   int                   diag_num_local_fault_qps_ = -1;  // [SLIP] is_shared tag (diag only)
 };
 
 } // namespace seas
