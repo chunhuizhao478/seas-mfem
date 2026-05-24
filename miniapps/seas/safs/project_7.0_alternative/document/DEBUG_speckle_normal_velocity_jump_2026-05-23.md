@@ -2,6 +2,18 @@
 
 ## TL;DR (root cause localized)
 
+> **ROOT CAUSE (2026-05-24, confirmed; see `REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24.md`,
+> the R-008 UPDATE blocks below, and §8):**
+> **(R-001)** on **shared (MPI-boundary) fault faces** SAFS violates the SeisSol/drdg3d
+> single-slip-rate invariant — the iterator weakens μ off the **predictor** slip while the
+> applied flux is a **separate** re-solve on `I/dt` (the iterator's `I_imp` is *discarded*,
+> `wave_operator.inl:4856-4895`); interior faces are correct (consume `I_imp`, :3871-3885).
+> **(R-004, CONFIRMED by `test_ghost_exchange_bynodes_vs_scalar`)** the seed of the predictor
+> divergence is the R-1601 `vdim=NUM_STATE` byNODES `FaceNbrData()` unpack reading **scrambled
+> neighbour components**. **The frame / tension / friction-law narrative in the rest of this
+> §TL;DR is SUPERSEDED** (frame refuted; tension refuted by the cap run; free-slide matches the
+> references). Fix order: R-004 then R-001 (see §8.5).
+
 The post-cross-rank-reconcile slip runaway (`max_slip → 1–3×10⁶ m` while sampled
 `V_max ≈ 4 m/s`) is driven by a **normal-velocity jump (opening) on the curvilinear
 SHARED fault**, which the Godunov flux turns into a tensile trial normal traction,
@@ -22,6 +34,140 @@ which the LSW **free-slide-under-tension** path then runs away.
 **Refuted along the way:** cohesive-zone under-resolution (R-007d), the "our LSW
 free-slide deviates from SeisSol" hypothesis (R-005d as a friction-law fix), and the
 "corrupted ghost bulk stress" hypothesis. See §Refuted.
+
+**UPDATE 2026-05-24 (run 7747889, `[FRAME]`+`[MACRO]` default-ON) — R-008 CONFIRMED: the
+runaway is ~100% in the per-sub-step PREDICTOR; the time-integrated macro solve is bounded
+and physical.** The instruments fired at the seed (rank 104, qp 480; 8705 `[SLIP]`, 11434
+`[FRAME]` on rank 104, 5717 `[MACRO]` lines; 319413/68604/34302 total) and split the two
+paths cleanly over the full run (t: 0→2 s, completed, no NaN; the tail `H5Fclose` errors are
+benign checkpoint-close ref-count noise):
+
+| quantity | path | end value (t≈2 s) | verdict |
+|---|---|---|---|
+| `V_max` (committed) | macro | ~5–7 m/s (final 6.97) | bounded ✓ |
+| `[MACRO] sigma_n_corr` (written σ_n) | macro | +46 MPa (run range 46–52) | bounded ✓ |
+| macro `dv_n` (`vn_minus−vn_plus`) | macro | 0.015 m/s | bounded ✓ |
+| `[MACRO] slip_rate` | macro | ~2.3 m/s | bounded ✓ |
+| `V_substep_max` | predictor | 1.10e7 m/s | **RUNAWAY** |
+| `[SLIP] sn_vjump ≈ sigma_n_tot` | predictor | +3.07e13 Pa | **RUNAWAY** |
+| `[FRAME] dv_n` (frame-indep.) | predictor | +3.84e6 m/s | **RUNAWAY** |
+| `max_slip` = ∫(predictor V)·dt | predictor | 4.62e6 m | **RUNAWAY** |
+
+- **Predictor vs integrated at the SAME QP:** predictor `dv_n`=3.8e6 m/s vs macro
+  `dv_n`=0.015 m/s — a factor ~2.6e8. The time-integrated state is smooth; the per-sub-step
+  predictor *traces* are discontinuous by millions of m/s. ⇒ **fix locus = the per-sub-step
+  predictor / ghost path on shared faces (R-1303/R-1601)** — NOT the frame (refuted), NOT
+  tension (refuted), NOT the integrated state.
+- **Symptom mechanism nailed (§4 confirmed directly):** the driver `[DIAG]` reports BOTH
+  `V_max` (committed, ~5 m/s) and `V_substep_max` (predictor, 1.1e7 m/s). `max_slip` is
+  accumulated from the *predictor* V (`tpv205_substep_iterator.cpp:122`), so it integrates the
+  runaway → 4.6e6 m, while `V_max`/σ_n (from the macro solve) stay physical. That is exactly
+  why the "slip runaway" is visible in the slip field but invisible in V/σ_n. It is
+  **spreading**: `n_rupturing(V>0.5)` climbs 1037→1882 and `max_slip` is monotone (more QPs
+  join the predictor runaway each step = the speckle growing).
+- **Onset → blowup:** predictor `dv_n` = −5.2 m/s at t=0.477 (matches the prior `sn_vjump/η_p`
+  read) → +4.4e11 Pa by t=0.547 (one downsample window, ~70 ms; sign flips compressive) →
+  monotone to +3.07e13 Pa. `mu_eff` weakens 0.847→0.300 (dynamic) by t=0.547 and stays.
+- **Diagnostic validated:** `sn_vjump/dv_n` = 3.0725e13 / 3.838e6 = **8.0e6 = 0.5·ρ·c_p**, so
+  the `[SLIP]`/`[FRAME]` identity `sn_vjump = η_p·dv_n` holds live; `sign_flipped=0` at the
+  seed throughout (no canonicalization pathology — the frame refutation stands).
+
+**Open question driving the root-cause `/code-debug`:** why does the shared-face predictor
+`Q̃⁺` (neighbor/ghost) diverge from `Q̃⁻` by millions of m/s in the normal-velocity trace when
+their time-integral `I/dt` agrees to 0.015 m/s? Locus = the CK extrapolation + ghost coverage
+on the shared seam (R-1303/R-1601).
+
+### Root-cause investigation (2026-05-24, `/code-debug`) — secular feedback, NOT CK overshoot
+
+Static code map + log analysis of run 7747889:
+
+- **Call flow (verified):** `spatial_dyn_driver.cpp:416` `ComputeADERSubStepStates(Q,…)`
+  builds the element-local CK predictor as a **point value** at each sub-step midpoint τ_o
+  → `:426` `EvaluateBulkAtFaultQPsCanonical(Q_per_node[o], …)` rotates to canonical and splits
+  ±, doing the R-1601 per-sub-step ghost exchange for the `+` side → `:439`
+  `iterator.AdvanceWithSubStepStates(…)` friction-solves on that predictor trial traction and
+  accumulates `slip += V·dt` (`tpv205_substep_iterator.cpp:125-126`). The macro corrector
+  (`ComputeADERSharedFaceFluxRHS`) instead consumes the **time-integral** `I/dt`.
+- **R-1601 ghost-exchange code reads correct** (`wave_operator.inl:2030-2174`): per-sub-step
+  `ExchangeFaceNbrData` of the predictor, `Q_self` from local DOFs, `Q_nbr` from the face-nbr
+  ghost layer with matching `nbr_idx*ndof_per_el_` indexing; frame via `sign_flipped`. No
+  staleness/indexing bug found by inspection.
+- **The growth is SECULAR (across macro steps), NOT a within-step CK overshoot.** At the seed,
+  within one macro step the predictor `sn_vjump` is flat (o=0→o=1: −4.170e7→−4.219e7, +1%);
+  **across** consecutive steps it grows geometrically −4.17e7→−5.50e7→−7.09e7→−8.96e7→−1.11e8
+  →−1.36e8 = **gain ≈1.32, 1.29, 1.26, 1.24, 1.23 per macro step** (dt≈3.5e-4 s). ⇒ a
+  **closed-loop instability, per-step gain ≈1.25–1.32**, not a CK large-τ artifact (that would
+  give o=1≫o=0). Confirms the §3 "loop gain >1/step" hypothesis with a number.
+- **Macro side individually bounded all run:** `vn_plus∈[−0.016,0.495]`, `vn_minus∈[−0.123,
+  0.231]` m/s. So the predictor jump (3.8e6 m/s) and the macro trial jump (0.015 m/s) diverge
+  despite both nominally deriving from the same base `Q` — they cannot be reading the same
+  effective state. Two surviving sub-hypotheses, **not yet discriminable from this log**:
+  - **H-A (bulk pumping):** the iterator's runaway imposed flux pumps the *bulk* velocity
+    field near the fault each step (gain ~1.3); the predictor reads the growing bulk state.
+    The committed friction `V_max` (≈5 m/s) would not show it — it's the bulk DG velocity at
+    the fault QP, not the friction output.
+  - **H-B (predictor-only feedback / exchange divergence):** the predictor/iterator path sees
+    a self-or-neighbor trace that the macro `I` exchange does not.
+- **Decisive next measurement (diagnostic only, no functional change):** in the `[FRAME]`
+  block (`wave_operator.inl` ~2196, `Q_self`/`Q_nbr` in scope at 2158-2173) additionally print
+  the predictor `Q_self[VX]` and `Q_nbr[VX]` **separately** (global frame, pre-rotation), the
+  base bulk `Q_data` normal velocity at that DOF, AND the predictor + macro **tangential**
+  (`VY`/`VZ`) so the tangential-pumping branch is observable. Reads: self alone grows ⇒ local
+  element / bulk pumping (H-A); nbr alone grows ⇒ ghost-exchange path; base `Q_data` grows ⇒
+  bulk pumping confirmed (H-A); macro tangential also runs away ⇒ the bulk IS pumped (the
+  `[MACRO]` normal-only trace hid it).
+
+### Static-read continuation + SeisSol comparison (2026-05-24, `/code-debug "also check against SeisSol"`)
+
+CK routines read in full (`wave_operator.inl`): `ComputeADERTimeIntegrated` (1205-1284, the
+integral `I`) and `ComputeADERSubStepStates` (1302-1405, the point predictor `Q̃(τ_o)`) use the
+**identical** element-local recursion `D(k+1)=-Σ_d A_d ∂_xd D(k)` (same `ApplySpatialDerivative`
++ `ApplyJacobianPerDOF`, same `A_d`, separate scratch buffers, correctly phased Taylor weights —
+R-1503). **Both are strictly element-local; neither reads neighbor data** (comment :1370). For
+the run's order 2 both reduce to `D(0)+c·D(1)`, so point-value and `I/dt` must agree per element
+to the small `D(1)` term — consistent with the measured within-step flatness. ⇒ **the bug is NOT
+in the CK recursion**, and since predictor-self ≈ macro-self ≈ base-Q (same polynomial), the 10⁸
+predictor-vs-macro jump divergence is in the **neighbor ghost** the predictor reads (R-1601) vs
+the macro's `I`, **or** a secular **tangential** bulk pumping invisible to the normal-only
+`[MACRO]` trace (predictor `dv_t1`=6.1e6 > `dv_n`=3.8e6).
+
+SeisSol (`/Users/chunhuizhao/projects/SeisSol`) cross-check:
+- **Trial-traction formula is term-for-term identical.** `FrictionSolverCommon.h:182-184`:
+  `normalStress[o] = etaP·(qIMinus[U] − qIPlus[U] + qIPlus[N]·invZp + qIMinus[N]·invZpNeig)` =
+  our Eq. 7a `η_p·(Δv_n + σ_n⁺/Zp⁺ + σ_n⁻/Zp⁻)`. Our physics is right; the difference is
+  upstream (what feeds `Δv_n`).
+- **`etaDamp` knob confirms this term is a KNOWN DR-DG instability.** SeisSol multiplies `etaP`
+  by `etaPDamp` (`FrictionSolverCommon.h:150,157`), sourced from the user param `etaDamp`
+  (`DRParameters.h:88`, **default 1.0 = OFF**; applied only for `t < etaDampEnd`,
+  `BaseFrictionLaw.h:70-71`). It exists specifically to damp the normal radiation term `η_p·Δv_n`
+  — exactly our runaway term — but defaults OFF and SeisSol is stable without it. ⇒ a candidate
+  *mitigation* (an `etaDamp` analog), NOT the reason SeisSol stays bounded.
+- **One-state vs our two-state — the leading STRUCTURAL difference.** SeisSol evaluates ONE
+  `qInterpolated[o]` at time-quadrature intervals (`spaceTimeInterpolation`, `DynamicRupture.cpp`)
+  for BOTH sides (neighbor via communicated time-derivatives, evaluated locally at the SAME
+  quadrature), and uses it for the friction solve, the slip integral
+  (`accumulatedSlip += timeWeight·slipRate`, `FrictionSolverCommon.h:595/603`), AND the
+  time-integrated `imposedState` flux (`postcomputeImposedStateFromNewStress`, same
+  `timeWeights`) — **one consistent computation**. Our path drives the friction solve + the
+  `slip += V·dt_sub` accumulator (`tpv205_substep_iterator.cpp:125`) from the per-sub-step
+  **point** predictor `Q_pointwise` (`spatial_dyn_driver.cpp:426,439`), while the written
+  output / trial decomposition comes from the **time-integrated `I`** path
+  (`ComputeADERSharedFaceFluxRHS` consumes the installed `I_imp` for the flux at
+  `wave_operator.inl:3871-3885`, else re-solves `EvaluateADER_LSW` on `I` at 4886-4892). The
+  slip-driving point-predictor is the state that runs away; SeisSol has no separate point-
+  predictor slip path.
+
+**Status (UPDATED 2026-05-24 — RESOLVED):** the "not yet discriminable / needs a Frontera split
+diagnostic" caveat above is **superseded**. The adversarial review
+`REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24.md` localized it to **R-001** (shared-face
+dual-solve / single-slip-rate violation — verified in code: `wave_operator.inl:4856-4895` discards
+`I_imp`, interior :3871-3885 consumes it), which also **excludes H-A** (the iterator's runaway flux
+is *discarded* on shared faces, so it cannot pump the bulk). The neighbour-side seed (**R-004**) is
+now **CONFIRMED by a local np=2 test** (`test_ghost_exchange_bynodes_vs_scalar`, no Frontera run
+needed): the R-1601 byNODES `FaceNbrData()` unpack reads scrambled neighbour components. Fix order
+**R-004 → R-001** (§8.5). `etaDamp`-analog is a known mitigation, not the fix.
+
+---
 
 **UPDATE 2026-05-23 (code audit `REVIEW_DEBUG_speckle_normal_velocity_jump`) — the FRAME
 root cause (§2.3, §2.4, §7, test #1) is REFUTED in code; corrections below.**
@@ -276,3 +422,153 @@ Because the runaway is **sign-indefinite** (tensile *and* compressive QPs blow u
 fix that addresses both is **eliminating the `[[v_n]]` leak at the source** — i.e. the
 **frame accuracy on the curvilinear shared fault** so that tangential slip produces
 `[[v_n]] = 0` and the loop gain drops below 1. Tension handling is a dead end.
+
+> **Note (2026-05-24): §7 is SUPERSEDED.** The frame-accuracy fix direction is wrong — the
+> frame is built identically in the predictor and macro paths (verified: `sign_flipped` at
+> `wave_operator.inl:2199` and `:4805`; orthonormal by construction) and cannot produce a
+> predictor-vs-macro divergence. The actual fix direction is **R-004** (fix the R-1601 byNODES
+> ghost-exchange unpack — CONFIRMED scrambled by `test_ghost_exchange_bynodes_vs_scalar`) then
+> **R-001** (restore the single-slip-rate invariant on shared faces). See §8.5 and
+> `REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24.md`. Do not send a fix agent at the frame.
+
+---
+
+## 8. Roadmap: function connections — ours vs SeisSol (2026-05-24)
+
+This section maps how the per-macro-step functions connect in each code and where the two
+architectures diverge. It is the reference companion to the R-008 confirmation (top) and the
+`/code-debug` static-read + SeisSol comparison.
+
+### 8.1 Our pipeline — `AdvanceADERWithSubStep_Spatial` (`spatial_dyn_driver.cpp:400-461`)
+
+```
+ base state Q  (committed solution; bounded — V_max ≈ 5 m/s, σ_n ≈ 46 MPa)
+   │
+   │ [1]  ComputeADERSubStepStates(Q, dt, O, tau_nodes → Q_per_node)   wave_operator.inl:1302
+   │        element-local CK Taylor;  POINT values  Q̃(τ_o)  at sub-step midpoints
+   │        ── no neighbor data ──
+   ▼
+ Q_per_node[o]
+   │
+   │ [2]  for each o:  EvaluateBulkAtFaultQPsCanonical(Q_per_node[o])  wave_operator.inl:1798
+   │        eval at fault QPs; SHARED face: self = local DOFs,
+   │        nbr = R-1601 per-sub-step ghost EXCHANGE of Q̃; rotate (sign_flipped), split ±
+   │        ►► [FRAME] diag  (dv_n here)
+   ▼
+ Q_pointwise_plus/minus[o]                          ◄── the state that RUNS AWAY
+   │
+   │ [3]  iterator.AdvanceWithSubStepStates(Q_pointwise_±)         tpv205_substep_iterator.cpp
+   │        per sub-step, per QP: ComputeTrialTraction (Eq 7a) → friction (Brent) → V
+   │        slip += V · dt_sub          ◄── SLIP ACCUMULATOR (→ max_slip 4.6e6 m)   :125
+   │        BuildImposedState → I_imp_±
+   │        ►► [SLIP] diag  (sn_vjump here)
+   ▼
+ I_imp_plus/minus_flat
+   │
+   │ [4]  SetSubStepFaultImposedStates(I_imp_±)                    wave_operator.inl:1411
+   │
+   │ [5]  AdvanceADER(Q, dt, O → Q_new)
+   │        ├─ ComputeADERTimeIntegrated(Q → I)   same CK, but the INTEGRAL ∫₀^dt    :1205
+   │        ├─ ComputeADERVolumeUpdate(I)
+   │        ├─ ComputeADERFaceFluxRHS(I)        [INTERIOR fault QPs]
+   │        │     if installed: CONSUME I_imp_± as the flux (ONE solve ✓)        :3871-3885
+   │        └─ ComputeADERSharedFaceFluxRHS(I)  [SHARED fault QPs]
+   │              "SHARED FALLBACK" — DISCARD I_imp_± (`(void)substep_I_imp_*`),
+   │              RE-SOLVE EvaluateADER_LSW on I/dt → flux + WRITTEN DOFData       :4856-4895
+   │              ►► [MACRO] diag   ◄── R-001: on shared, μ←δ(predictor V) but flux←V(I/dt) — DECOUPLED
+   ▼
+ Q_new  =  Q + dt·(volume + fault flux)
+```
+
+**Load-bearing fact — R-001 (`REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24`): on
+SHARED faces SAFS runs TWO friction solves on TWO different states, and the slip that weakens
+μ comes from the solve whose flux is thrown away.** Step [3]'s iterator solves on the **point
+predictor** `Q_pointwise` and is the *sole* slip-accumulation site (`slip += V·dt_sub`,
+`tpv205_substep_iterator.cpp:125`). On **interior** faces step [5]'s
+`ComputeADERFaceFluxRHS` *consumes* that iterator `I_imp_±` as the flux (3871-3885) → one
+solve, slip↔flux coupled, invariant holds. On **shared** faces
+`ComputeADERSharedFaceFluxRHS` *discards* it (the literal `(void)substep_I_imp_*` at
+4893-4895; "SHARED FALLBACK… always runs the inline ADER closure", 4856-4858) and **re-solves**
+`EvaluateADER_LSW` on the time-integral `I/dt` (4867-4892). So on shared QPs `μ ← δ(predictor
+V)` while `flux ← V(I/dt)` — the two slip rates are unrelated. SeisSol/drdg3d make this
+impossible (one slip rate drives both). The predictor jump diverges 10⁸ from the macro
+(3.8e6 vs 0.015 m/s) precisely because the two solves are decoupled and nothing couples the
+predictor's runaway back to the bounded applied flux. **This is the root design flaw — not a
+side effect of the "two-state" framing but its concrete, shared-face-only locus.**
+
+### 8.2 SeisSol pipeline — `BaseFrictionLaw::evaluate` (`CpuImpl/BaseFrictionLaw.h:49`)
+
+```
+ neighbor element time-DOFs ──(MPI: communicated derivatives)──┐
+ local element time-DOFs ──────────────────────────────────────┤
+                                                                ▼
+   spaceTimeInterpolation  →  qInterpolatedPlus/Minus[o]        Kernels/DynamicRupture.cpp:51
+      predictor evaluated at TIME-QUADRATURE points, BOTH sides, SAME quadrature
+                                                                │
+   BaseFrictionLaw::evaluate                                    │   CpuImpl/BaseFrictionLaw.h:49
+     ├─ precomputeStressFromQInterpolated(qI±, etaPDamp) → faultStresses (trial, all o)   :72
+     ├─ for timeIndex o = 0 … TimeSteps:
+     │      updateFrictionAndSlip(faultStresses, o) → slipRate, traction                  :116
+     │         slip accumulates here, SAME quadrature  (accumulatedSlip += timeWeight·slipRate)
+     └─ postcomputeImposedStateFromNewStress(qI±, timeWeights)                            :158
+            → imposedStatePlus/Minus   (TIME-INTEGRATED, friction-corrected)
+                                                                │
+            ▼  Neighbor/DR kernel:  imposedState  →  bulk flux
+```
+
+**One** `qInterpolated` → **one** friction loop → slip, imposed-state flux, *and* output, all
+from the same state with the same time-quadrature weights.
+
+### 8.3 The difference, point by point
+
+| Aspect | **Ours** | **SeisSol** |
+|---|---|---|
+| State the **friction/slip** solve consumes | per-sub-step **point** predictor `Q̃(τ_o)` (`Q_pointwise`) | `qInterpolated[o]` at **time-quadrature** points |
+| **Slip** accumulation | `slip += V·dt_sub` from the *point-predictor* solve (iterator) | `accumulatedSlip += timeWeight·slipRate` from the *same* solve |
+| State the **flux/output** uses | **interior:** the iterator's `I_imp` (consumed, :3871-3885); **shared:** a *separate* re-solve on `I/dt` (`I_imp` discarded, :4856-4895) | the **same** `qInterpolated` → `imposedState` |
+| # friction evals per face/step | **interior: one** (coupled ✓); **shared: two** (decoupled ✗ — R-001) | **one** |
+| Neighbor (+) side | per-sub-step **byNODES batched exchange** of the point predictor (R-1601) — **layout bug CONFIRMED, R-004** | communicated **time-DOFs**, evaluated locally on the *same* quadrature |
+| Normal radiation term `η_p·Δv_n` | undamped | optional **`etaDamp`** factor (`DRParameters.h:88`, default 1.0 = off) |
+
+### 8.4 Why this produces our symptom and SeisSol's doesn't
+
+- In SeisSol the slip, the flux, and the output are **the same computation** on **one** state.
+  If that state's normal-velocity jump ever blew up, *everything* would blow up together —
+  slip cannot run away while the flux/output stay bounded. The time-quadrature integration +
+  the optional `etaDamp` keep `η_p·Δv_n` controlled.
+- In our code, on **shared** faces, the **symptom-bearing slip** (from the iterator's point
+  predictor) and the **bounded applied flux/output** (the separate `I/dt` re-solve) are
+  computed from two different states whose `I_imp` link is *discarded* (R-001). That decoupling
+  is exactly what run 7747889 shows: the point-predictor jump diverges (→ `max_slip` 4.6e6 m
+  via `slip += V·dt_sub`) while the `I/dt` path keeps `V_max`/σ_n/the written output bounded and
+  **hides it**. The seed of the predictor divergence is now **confirmed**: the R-1601
+  `vdim=NUM_STATE` byNODES `FaceNbrData()` unpack `src[c·n_fn+j]` reads **scrambled neighbour
+  components** (`test_ghost_exchange_bynodes_vs_scalar`, np=2, 918 mismatched reads/rank;
+  e.g. the `(c=0,j=27)` slot returns `encode(c=1,i=108)` instead of `encode(c=0,i=135)`). The
+  macro path's per-component scalar exchange is unaffected — which is why predictor-self ≈
+  macro-self but predictor-neighbour diverges.
+
+### 8.5 Fix direction (root cause located; order matters)
+
+1. **R-004 — FIXED (2026-05-24).** The R-1601 unpack now reads the neighbour values through
+   `pfes_full_state_->GetFaceNbrElementVDofs(nbr_idx, nbr_vdofs)` →
+   `nbr_all[nbr_vdofs[c·ndof_per_el_ + i]]` (byNODES vdof ordering), the layout-agnostic MFEM
+   pattern (cf. `elasticity_operator_debug.inl:629-638`) — replacing the wrong component-slab
+   formula `src[c·n_fn+j]`. The batched R-1601 exchange is preserved (no per-component-exchange
+   perf regression). Guarded by `test_ghost_exchange_bynodes_vs_scalar` (now **GREEN**, in
+   `test-v92-regression-gates`): the `GetFaceNbrElementVDofs` read is bit-identical to the
+   per-component scalar exchange at every (element, component, dof); the old flat-slab formula
+   got ~918 reads/rank wrong. Verified locally (np=2): R-004 guard PASS, shared-fault reconcile
+   cross-rank 4/4 PASS (incl. the SUBSTEP/SAFS production path, cross-rank bit-identical),
+   interior-vs-shared-branch-live PASS, SAFS driver compiles. **Next: a Frontera SAFS Dc2 run to
+   confirm the runaway is gone** before doing R-001. (R1600 + TPV205-crossing not run locally —
+   pre-existing macOS `dyld` / missing-mesh-file env issues, unrelated to the fix.)
+2. **R-001 — restore the single-slip-rate invariant on shared faces.** Either consume the
+   iterator's `I_imp` on shared QPs like interior (only safe **after** R-004, else the now-
+   bounded-once-fixed predictor flux can be fed back), or — the lower-risk interim —
+   accumulate shared-QP slip from the *applied* macro V rather than the predictor V.
+   **Order: R-004 before R-001** — fixing R-001's "consume `I_imp`" variant while the predictor
+   is still scrambled would feed the runaway straight into the bulk (the np=10 `tau=4e28 →
+   SIGABRT` the R-1601 fallback was added to prevent).
+3. **`etaDamp` analog** on `η_p·Δv_n` — optional defense-in-depth (SeisSol's knob), not a
+   substitute for 1–2.

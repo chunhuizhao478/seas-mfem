@@ -228,6 +228,11 @@ TEST_R002_EMPTY_FAULT_RANK_OBJ             = $(TEST_R002_EMPTY_FAULT_RANK_SRC:.c
 # not skip its per-substep ExchangeFaceNbrData on ranks with no fault-shared faces.
 TEST_R1600_SUBSTEP_NO_FAULT_RANK_SRC       = tests/parallel/test_R1600_substep_no_fault_rank_no_hang.cpp
 TEST_R1600_SUBSTEP_NO_FAULT_RANK_OBJ       = $(TEST_R1600_SUBSTEP_NO_FAULT_RANK_SRC:.cpp=.o)
+# R-004 (REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24): the R-1601 batched
+# vdim=NUM_STATE byNODES ghost exchange (predictor path) must deliver bit-identical
+# neighbour values to the per-component scalar exchange (macro path).
+TEST_GHOST_EXCHANGE_BYNODES_SRC            = tests/parallel/test_ghost_exchange_bynodes_vs_scalar.cpp
+TEST_GHOST_EXCHANGE_BYNODES_OBJ            = $(TEST_GHOST_EXCHANGE_BYNODES_SRC:.cpp=.o)
 # Round-11 R-001/R-002: cross-rank Adjacent mixed-flux face-set consistency
 TEST_MIXED_FLUX_ADJACENT_MPI_SRC           = tests/parallel/test_mixed_flux_adjacent_mpi.cpp
 TEST_MIXED_FLUX_ADJACENT_MPI_OBJ           = $(TEST_MIXED_FLUX_ADJACENT_MPI_SRC:.cpp=.o)
@@ -932,6 +937,7 @@ MFEM_TESTS = MINIAPPS
         test-fault-basis-qp-orthonormality \
         test-frame-diag-projection-identity \
         test-macro-diag-decomposition-identity \
+        test-ghost-exchange-bynodes-vs-scalar \
         test-per-qp-vs-centroid-basis-planar-1el \
         test-v92-regression-gates \
         regression-check quick-check
@@ -1469,6 +1475,11 @@ seas_test_R002_empty_fault_rank_no_abort: $(TEST_R002_EMPTY_FAULT_RANK_OBJ) $(PR
 # TPV104 R-1600: substep np>1 deadlock-detection regression
 seas_test_R1600_substep_no_fault_rank_no_hang: $(TEST_R1600_SUBSTEP_NO_FAULT_RANK_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(WAVE_OPERATOR_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_R1600_SUBSTEP_NO_FAULT_RANK_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(WAVE_OPERATOR_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+# R-004 ghost-exchange bit-identity test — pure MFEM (replicates both exchange
+# mechanisms inline; no WaveOperator/fault deps; wave_state.hpp is header-only).
+seas_test_ghost_exchange_bynodes_vs_scalar: $(TEST_GHOST_EXCHANGE_BYNODES_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GHOST_EXCHANGE_BYNODES_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Round-11 R-001/R-002: cross-rank Adjacent mixed-flux dispatch consistency
@@ -2552,6 +2563,10 @@ $(TEST_R1600_SUBSTEP_NO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_GHOST_EXCHANGE_BYNODES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_MIXED_FLUX_ADJACENT_MPI_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -3493,6 +3508,15 @@ test-rupture-tilted-fault-serial-vs-parallel: seas_test_rupture_tilted_fault_ser
 test-shared-fault-reconcile-cross-rank: seas_test_shared_fault_reconcile_cross_rank
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_shared_fault_reconcile_cross_rank
 
+# R-004 (REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24): guards the fixed
+# predictor ghost read — the batched byNODES exchange read through
+# GetFaceNbrElementVDofs must be bit-identical to the per-component scalar
+# exchange (macro path).  GREEN as of the R-004 fix (2026-05-24); in
+# test-v92-regression-gates.  Would go RED if the pre-fix flat-slab unpack
+# src[c*n_fn+j] is reintroduced.
+test-ghost-exchange-bynodes-vs-scalar: seas_test_ghost_exchange_bynodes_vs_scalar
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_ghost_exchange_bynodes_vs_scalar
+
 test-rupture-rake-sweep-cross-rank: seas_test_rupture_rake_sweep_cross_rank
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_rake_sweep_cross_rank
 
@@ -3690,6 +3714,7 @@ test-v92-regression-gates: test-no-penalty-dynamic-rupture \
                           test-fault-basis-qp-orthonormality \
                           test-frame-diag-projection-identity \
                           test-macro-diag-decomposition-identity \
+                          test-ghost-exchange-bynodes-vs-scalar \
                           test-per-qp-vs-centroid-basis-planar-1el \
                           test-shared-fault-role-consistency \
                           test-shared-fault-dof-data-consistency \

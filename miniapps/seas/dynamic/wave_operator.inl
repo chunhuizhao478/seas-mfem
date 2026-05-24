@@ -2036,27 +2036,26 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
 
          q_gf_full.ExchangeFaceNbrData();   // 1 collective for all NUM_STATE components.
 
-         // Unpack FaceNbrData into the per-component nbr_data[c] arrays
-         // expected by the per-fault-face loop below.  byNODES layout in
-         // FaceNbrData: `src[c * n_face_nbr_dofs + i]`.  We deep-copy
-         // (rather than alias) because subsequent `q_gf_full` reads in
-         // the loop body could in principle invalidate the storage —
-         // matches the pre-R-1601 deep-copy semantics.
+         // R-004 fix (REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24):
+         // a vdim=NUM_STATE byNODES ParGridFunction's FaceNbrData() is NOT laid
+         // out as contiguous per-component slabs `src[c*n_face_nbr_dofs + i]`.
+         // The pre-fix unpack assumed it was, which scrambled neighbour
+         // components and was the seed of the SAFS shared-fault normal-velocity
+         // runaway (confirmed by test_ghost_exchange_bynodes_vs_scalar: the slab
+         // formula got ~918 reads/rank wrong vs the per-component scalar
+         // exchange).  Index the raw FaceNbrData below through the layout-
+         // agnostic pfes_full_state_->GetFaceNbrElementVDofs map (canonical MFEM
+         // pattern, cf. elasticity_operator_debug.inl:629-638).  Batched R-1601
+         // exchange is preserved (no per-component-exchange perf regression).
+         // R4F-003: `src` (the FaceNbrData reference) stays valid for the whole
+         // loop below — q_gf_full is not re-exchanged or modified — so alias it
+         // directly rather than deep-copying the full vector every call.
          const Vector &src = q_gf_full.FaceNbrData();
          MFEM_VERIFY(src.Size() % NUM_STATE == 0,
                      "EvaluateBulkAtFaultQPsCanonical: FaceNbrData size "
                      << src.Size() << " is not a multiple of NUM_STATE = "
                      << NUM_STATE);
-         const int n_face_nbr_dofs = src.Size() / NUM_STATE;
-
-         std::vector<Vector> nbr_data(NUM_STATE);
-         for (int c = 0; c < NUM_STATE; c++)
-         {
-            nbr_data[c].SetSize(n_face_nbr_dofs);
-            std::memcpy(nbr_data[c].GetData(),
-                        src.GetData() + c * n_face_nbr_dofs,
-                        static_cast<size_t>(n_face_nbr_dofs) * sizeof(real_t));
-         }
+         const Vector &nbr_all = src;
 
          // R-1600: a rank with shared faces but NO fault-shared faces
          // has now satisfied the pairwise-collective contract for its
@@ -2103,6 +2102,20 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
             MFEM_ASSERT(ndof2 == ndof_per_el_,
                         "Heterogeneous DOF counts not supported in "
                         "EvaluateBulkAtFaultQPsCanonical (shared ghost).");
+            // R-004: layout-agnostic map from (component c, neighbour local dof
+            // i) to the flat FaceNbrData index, via the vdim=NUM_STATE byNODES
+            // space.  byNODES vdof ordering ⇒ nbr_vdofs[c*ndof2 + i].
+            Array<int> nbr_vdofs;
+            pfes_full_state_->GetFaceNbrElementVDofs(nbr_idx, nbr_vdofs);
+            // R4F-001: release-checked (MFEM_VERIFY, not _ASSERT).  The read
+            // nbr_vdofs[c*ndof2 + i] below would scramble silently if this size
+            // invariant failed in a Release build — the very R-004 failure mode;
+            // mirrors the R-1508 ASSERT->VERIFY promotion in
+            // ComputeADERSharedFaceFluxRHS.
+            MFEM_VERIFY(nbr_vdofs.Size() == NUM_STATE * ndof2,
+                        "EvaluateBulkAtFaultQPsCanonical: neighbour vdof count "
+                        << nbr_vdofs.Size() << " != NUM_STATE * ndof2 = "
+                        << NUM_STATE * ndof2 << " (R-004 byNODES map).");
 
             const IntegrationRule &ir = IntRules.Get(
                ftr->GetGeometryType(), 2 * order_);
@@ -2152,9 +2165,10 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
                fe1->CalcShape(ip1, shape1);
                fe2->CalcShape(ip2, shape2);
 
-               // Self side: locally-owned Q via dof_offset1.  Neighbour
-               // side: face-nbr ghost layer via nbr_idx * ndof_per_el_.
-               // Same indexing as ComputeADERSharedFaceFluxRHS:3954-3976.
+               // Self side: locally-owned Q via dof_offset1.  Neighbour side:
+               // face-nbr ghost layer read through the R-004 layout-agnostic
+               // vdof map nbr_vdofs[c*ndof2 + i] (byNODES), NOT the pre-fix
+               // per-component slab `c*n_face_nbr_dofs + i`.
                real_t Q_self[NUM_STATE], Q_nbr[NUM_STATE];
                for (int c = 0; c < NUM_STATE; c++)
                {
@@ -2166,8 +2180,14 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
                   }
                   for (int i = 0; i < ndof2; i++)
                   {
+                     // R4F-001: stride = element-local ndof2 (self-consistent
+                     // with the vdof array), not the global ndof_per_el_.
+                     // R4F-002: decode the MFEM sign-encoded vdof — a no-op for
+                     // the L2/DG space used here, but guards a future oriented
+                     // space from an out-of-bounds negative index.
+                     const int vd = nbr_vdofs[c * ndof2 + i];
                      s_nbr += shape2(i)
-                              * nbr_data[c][nbr_idx * ndof_per_el_ + i];
+                              * nbr_all[vd >= 0 ? vd : -1 - vd];
                   }
                   Q_self[c] = s_self;
                   Q_nbr[c]  = s_nbr;
