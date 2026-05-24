@@ -1877,6 +1877,15 @@ int main(int argc, char *argv[])
       if (dt_step <= 0.0) { break; }
       wave.SetTime(t);
 
+      // PLAN_speckle_slip_runaway Phase 1 (R-004): reset the per-macro-step
+      // honest |V| max before the sub-step solve takes running max over it
+      // (iterator sub-steps + shared-fault macro solve).  Transient
+      // diagnostic field only; does not feed back into state.
+      for (int i = 0; i < num_fault_total; ++i)
+      {
+         dof_data[i].slip_rate_substep_max = 0.0;
+      }
+
       AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
                                      fault_coords, Q, dt_step,
                                      cfg.numerics.ader_order, t, Q_new,
@@ -1910,6 +1919,10 @@ int main(int argc, char *argv[])
          real_t    maxslip_local = 0.0;
          int       argmax_local = -1;
          real_t    vloc = -1.0;
+         // Phase 1 (R-004): honest sub-step-aware |V| = max(slip_rate,
+         // slip_rate_substep_max) so the print cannot under-report vs the
+         // last-sub-step-only slip_rate (shared-QP / reconcile safe).
+         real_t    vsub_local = 0.0;
          for (int i = 0; i < num_fault_total; ++i)
          {
             const DOFData &d = dof_data[i];
@@ -1917,20 +1930,26 @@ int main(int argc, char *argv[])
             const real_t s = std::sqrt(d.slip1 * d.slip1 + d.slip2 * d.slip2);
             if (s > maxslip_local) { maxslip_local = s; }
             if (d.slip_rate > vloc) { vloc = d.slip_rate; argmax_local = i; }
+            vsub_local = std::max(vsub_local,
+                                  std::max(d.slip_rate, d.slip_rate_substep_max));
          }
          long long n_rup_g = n_rup_local;
          real_t    maxslip_g = maxslip_local;
+         real_t    vsub_g = vsub_local;
          struct { double v; int r; } in_{V_max_local, rank}, out_{V_max_local, rank};
 #ifdef MFEM_USE_MPI
          MPI_Allreduce(&n_rup_local, &n_rup_g, 1, MPI_LONG_LONG, MPI_SUM, comm);
          MPI_Allreduce(&maxslip_local, &maxslip_g, 1,
                        MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
          MPI_Allreduce(&in_, &out_, 1, MPI_DOUBLE_INT, MPI_MAXLOC, comm);
+         MPI_Allreduce(&vsub_local, &vsub_g, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #endif
          if (rank == 0)
          {
             std::cout << "[DIAG] step " << step << " t=" << t
                       << " V_max=" << V_max_step
+                      << " V_substep_max=" << vsub_g
                       << " n_rupturing(V>0.5)=" << n_rup_g
                       << " max_slip=" << maxslip_g << " m\n";
          }

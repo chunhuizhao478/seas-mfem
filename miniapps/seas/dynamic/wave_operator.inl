@@ -4220,6 +4220,13 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   }
 
                   fault_flux_->WriteBackState(fdata_qq, states[qq]);
+                  // PLAN_speckle_slip_runaway Phase 1 (R-004): the shared-
+                  // fault macro-dt solve overwrites slip_rate for shared QPs;
+                  // fold its |V| into the per-macro-step honest max so the
+                  // monitor never under-reports there (the iterator sets it
+                  // for the same QPs from the sub-step solve).
+                  fdata_qq.slip_rate_substep_max =
+                     std::max(fdata_qq.slip_rate_substep_max, states[qq].V_abs);
 
                   real_t I_imp_plus_g_qq[NUM_STATE];
                   real_t I_imp_minus_g_qq[NUM_STATE];

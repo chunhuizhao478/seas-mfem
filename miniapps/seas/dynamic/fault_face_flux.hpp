@@ -48,6 +48,14 @@ struct DOFData
    real_t Dc = 0.14;                      ///< Critical slip distance [m]
    real_t psi = 0;                        ///< State variable (logarithmic)
    real_t slip_rate = 0;                  ///< Current slip rate |V| [m/s]
+   /// Max |V| over the CURRENT macro step's sub-step writes (iterator
+   /// sub-steps + shared-fault macro solve).  slip_rate records only the
+   /// last sub-step, so it is blind to an intermediate-node spike that
+   /// still integrates into slip; this is the honest peak the blow-up
+   /// monitor should sample.  TRANSIENT: reset to 0 each macro step by the
+   /// driver, recomputed every step — intentionally NOT serialized in the
+   /// checkpoint (PLAN_speckle_slip_runaway Phase 1, R-004 substrate).
+   real_t slip_rate_substep_max = 0;      ///< Per-macro-step max |V| [m/s]
    real_t V1 = 0, V2 = 0;               ///< Slip rate components [m/s] (from Eq. 9)
    real_t slip1 = 0, slip2 = 0;          ///< Accumulated slip components
 

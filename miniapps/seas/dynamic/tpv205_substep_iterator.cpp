@@ -10,6 +10,8 @@
 #include <stdexcept>
 #include <string>
 #include <limits>
+#include <cstdio>   // [SLIP] diagnostic trace (env-gated)
+#include <cstdlib>  // std::getenv / std::atof for the trace gates
 
 namespace mfem
 {
@@ -350,6 +352,16 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
    // the absolute simulation time `t_macro_start + Σ_{o'<=o} dt_sub`.
    real_t t_substep_end = t_macro_start;
 
+   // PLAN_speckle_slip_runaway Phase 1: per-sub-step diagnostic trace at
+   // spiking nodes (runtime env gate, zero overhead when SEAS_DIAG_SLIP
+   // is unset — byte-exact for the TPV205 regression).  Parsed once.
+   static const bool slip_diag = [] {
+      const char *e = std::getenv("SEAS_DIAG_SLIP");
+      return e && e[0] && e[0] != '0'; }();
+   static const double slip_v_thr = [] {
+      const char *e = std::getenv("SEAS_DIAG_SLIP_VTHR");
+      return e ? std::atof(e) : 10.0; }();
+
    for (int o = 0; o < O; ++o)
    {
       const real_t dt_sub      = deltaT_[o];
@@ -378,6 +390,34 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
          EvalStageState s;
          StepOneQP_(d, Q_tilde_plus, Q_tilde_minus, dt_sub,
                     last_sub_step, s, Q_imp_plus, Q_imp_minus);
+
+         // PLAN_speckle_slip_runaway Phase 1 (R-004 substrate): honest
+         // sub-step |V| max.  WriteBackState records slip_rate only on the
+         // last sub-step, so an intermediate-node spike inflates slip but
+         // is invisible to V_max; this captures the max over ALL sub-steps.
+         // Reset to 0 per macro step by the driver before this call.
+         d.slip_rate_substep_max = std::max(d.slip_rate_substep_max, s.V_abs);
+
+         // Phase 1 trace: self-selecting on the spike (no pre-chosen
+         // witness).  mu_eff/tau_str reconstructed here (mirrors
+         // StepOneQP_ line using LSWFrictionCoefficient_TPV205) so the
+         // shared helper stays untouched.  s.Theta == |tau_total|.
+         if (slip_diag && s.V_abs > slip_v_thr)
+         {
+            const real_t delta  = std::sqrt(d.slip1 * d.slip1
+                                            + d.slip2 * d.slip2);
+            const real_t mu_eff = LSWFrictionCoefficient_TPV205(
+                                     delta, d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
+            const real_t sn_pos = std::max<real_t>(s.sigma_n_total, 0.0);
+            std::fprintf(stderr,
+               "[SLIP] t=%.6e o=%d/%d qp=%d last=%d V_abs=%+.6e tau_abs=%+.6e "
+               "tau_str=%+.6e sigma_n_tot=%+.6e sigma_n_pos=%+.6e delta=%+.6e "
+               "mu_eff=%+.6e d_c=%+.6e\n",
+               t_substep_end, o, O, i, (o == O - 1) ? 1 : 0,
+               s.V_abs, s.Theta, mu_eff * sn_pos, s.sigma_n_total, sn_pos,
+               delta, mu_eff, d.lsw_d_c);
+            std::fflush(stderr);
+         }
 
          real_t *Iout_p = I_imp_plus_flat
                           + static_cast<ptrdiff_t>(i) * NUM_STATE;
