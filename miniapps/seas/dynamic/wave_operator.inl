@@ -2204,6 +2204,82 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
                                                :  qpd.tangent2[d];
                }
 
+               // -------------------------------------------------------------
+               // [FRAME] diagnostic (PLAN_frame_orthonormality_diag_2026-05-23,
+               // test #1/#6).  Runtime env-gated (SEAS_DIAG_FRAME); byte-exact
+               // when unset (gated fprintf only — no computed state touched).
+               // At the seed shared QPs it reports the GLOBAL bulk velocity-jump
+               // decomposition into normal/tangential parts (dv_n/dv_t1/dv_t2) —
+               // the INFORMATIVE, frame-independent signal: with the iterator's
+               // +/- routing, dv_n equals the [SLIP] sn_vjump/eta_p =
+               // (Q~minus - Q~plus)[VX] (cross-check).  It also prints
+               // sign_flipped/nl (degenerate-band read; n·ref_normal = -can_n[1]
+               // for SAFS ref=(0,-1,0)).  NB: the orthonormality fields
+               // (n.t1, n.t2, t1.t2, |.|-1) are ~0 (≈16 ULP) BY CONSTRUCTION
+               // (ComputeOrientedFrame cross products; already proven by
+               // test_fault_basis_qp_orthonormality) — they are a confirmatory
+               // sanity print, NOT diagnostic, and must not be read as evidence
+               // for/against a "frame error" (see REVIEW_DEBUG_speckle... R-002).
+               static const bool frame_diag = []{
+                  const char *e = std::getenv("SEAS_DIAG_FRAME");
+                  return e && e[0] && !(e[0]=='0' && e[1]=='\0');
+               }();
+               if (frame_diag)
+               {
+                  static const std::array<double,3> ftgt = []{
+                     std::array<double,3> t = {6.07518e+05, 3.706359e+06,
+                                               -4.543e+03};
+                     if (const char *e = std::getenv("SEAS_DIAG_FRAME_XYZ"))
+                     { std::sscanf(e, "%lf,%lf,%lf", &t[0], &t[1], &t[2]); }
+                     return t;
+                  }();
+                  static const double frad = []{
+                     const char *e = std::getenv("SEAS_DIAG_FRAME_R");
+                     const double r = e ? std::atof(e) : 300.0;
+                     return (r > 0.0) ? r : 300.0;
+                  }();
+                  Vector _fphys(3);
+                  ftr->Face->Transform(ip, _fphys);
+                  const double _fdx = _fphys(0) - ftgt[0];
+                  const double _fdy = _fphys(1) - ftgt[1];
+                  const double _fdz = _fphys(2) - ftgt[2];
+                  if (_fdx*_fdx + _fdy*_fdy + _fdz*_fdz <= frad*frad)
+                  {
+                     auto _dot3 = [](const real_t *a, const real_t *b)
+                     { return a[0]*b[0] + a[1]*b[1] + a[2]*b[2]; };
+                     const real_t n_t1  = _dot3(can_n,  can_t1);
+                     const real_t n_t2  = _dot3(can_n,  can_t2);
+                     const real_t t1_t2 = _dot3(can_t1, can_t2);
+                     const real_t dn_n  = std::sqrt(_dot3(can_n,  can_n))  - 1.0;
+                     const real_t dn_t1 = std::sqrt(_dot3(can_t1, can_t1)) - 1.0;
+                     const real_t dn_t2 = std::sqrt(_dot3(can_t2, can_t2)) - 1.0;
+                     // Global velocity jump with the iterator's +/- routing
+                     // (minus - plus) so dv_n matches [SLIP] sn_vjump/eta_p.
+                     const real_t *vp = elem1_on_plus ? Q_self : Q_nbr;
+                     const real_t *vm = elem1_on_plus ? Q_nbr  : Q_self;
+                     const real_t dvg[3] = { vm[VX] - vp[VX],
+                                             vm[VY] - vp[VY],
+                                             vm[VZ] - vp[VZ] };
+                     const real_t dv_n    = _dot3(can_n,  dvg);
+                     const real_t dv_t1   = _dot3(can_t1, dvg);
+                     const real_t dv_t2   = _dot3(can_t2, dvg);
+                     const real_t dvg_mag = std::sqrt(_dot3(dvg, dvg));
+                     std::fprintf(stderr,
+                        "[FRAME] qp=%d c=(%.1f,%.1f,%.1f) rank=%d "
+                        "sign_flipped=%d nl=%.6e "
+                        "n.t1=%+.3e n.t2=%+.3e t1.t2=%+.3e "
+                        "d|n|=%+.3e d|t1|=%+.3e d|t2|=%+.3e "
+                        "can_n=(%+.6e,%+.6e,%+.6e) "
+                        "|dvg|=%.6e dv_n=%+.6e dv_t1=%+.6e dv_t2=%+.6e\n",
+                        base_dof_idx + q, _fphys(0), _fphys(1), _fphys(2),
+                        my_rank_, qpd.sign_flipped ? 1 : 0, qpd.nl,
+                        n_t1, n_t2, t1_t2, dn_n, dn_t1, dn_t2,
+                        can_n[0], can_n[1], can_n[2],
+                        dvg_mag, dv_n, dv_t1, dv_t2);
+                     std::fflush(stderr);
+                  }
+               }
+
                DenseMatrix Tinv_can(NUM_STATE);
                GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
                                                  Tinv_can);
@@ -4817,6 +4893,76 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   (void)substep_I_imp_plus_flat_;
                   (void)substep_I_imp_minus_flat_;
                   (void)substep_n_total_fault_qps_;
+
+                  // ----------------------------------------------------------
+                  // [MACRO] diagnostic (PLAN_predictor_vs_macro_diag_2026-05-23,
+                  // test (B)).  Runtime env-gated (SEAS_DIAG_MACRO); byte-exact
+                  // when unset (gated fprintf only — no computed state touched).
+                  // At the SHARED seed QP, prints the macro-dt solve's normal-
+                  // traction decomposition on the TIME-INTEGRATED canonical +/-
+                  // state (I_{plus,minus}_local / dt — exactly what EvaluateADER_
+                  // LSW just consumed via ComputeTrialTraction) and the WRITTEN
+                  // output fdata.sigma_n_corr / slip_rate.  Compare against the
+                  // iterator's per-sub-step PREDICTOR [SLIP] sigma_n_tot /
+                  // [FRAME] dv_n at the same QP: bounded MACRO + collapsing SLIP
+                  // ⇒ the opening is born in the per-sub-step predictor / ghost
+                  // path (R-1303/R-1601), settling R-008.  Self-check:
+                  // sn_vjump+sn_sterm == sigma_n_trial (ComputeTrialTraction
+                  // Eq.7a on I/dt).  Seed locator shared with [FRAME]
+                  // (SEAS_DIAG_FRAME_XYZ/_R).  NB: this shared +/- routing uses
+                  // elem1_on_plus while the iterator uses sign_flipped — compare
+                  // MAGNITUDES/boundedness, not the sign of sn_vjump.
+                  {
+                     static const bool macro_diag = []{
+                        const char *e = std::getenv("SEAS_DIAG_MACRO");
+                        return e && e[0] && !(e[0]=='0' && e[1]=='\0');
+                     }();
+                     if (macro_diag && dof_idx >= 0 &&
+                         dof_idx < static_cast<int>(fault_dof_data_->size()))
+                     {
+                        static const std::array<double,3> mtgt = []{
+                           std::array<double,3> t = {6.07518e+05, 3.706359e+06,
+                                                     -4.543e+03};
+                           if (const char *e = std::getenv("SEAS_DIAG_FRAME_XYZ"))
+                           { std::sscanf(e, "%lf,%lf,%lf", &t[0], &t[1], &t[2]); }
+                           return t;
+                        }();
+                        static const double mrad = []{
+                           const char *e = std::getenv("SEAS_DIAG_FRAME_R");
+                           const double r = e ? std::atof(e) : 300.0;
+                           return (r > 0.0) ? r : 300.0;
+                        }();
+                        Vector _mphys(3);
+                        ftr->Face->Transform(ip, _mphys);
+                        const double _mdx = _mphys(0) - mtgt[0];
+                        const double _mdy = _mphys(1) - mtgt[1];
+                        const double _mdz = _mphys(2) - mtgt[2];
+                        if (_mdx*_mdx + _mdy*_mdy + _mdz*_mdz <= mrad*mrad)
+                        {
+                           const real_t inv_dt_m = 1.0 / dt;
+                           const real_t Qp_vx  = I_plus_local[VX]  * inv_dt_m;
+                           const real_t Qm_vx  = I_minus_local[VX] * inv_dt_m;
+                           const real_t Qp_sxx = I_plus_local[SXX]  * inv_dt_m;
+                           const real_t Qm_sxx = I_minus_local[SXX] * inv_dt_m;
+                           const real_t sn_vjump_macro =
+                              fdata.eta_p * (Qm_vx - Qp_vx);
+                           const real_t sn_sterm_macro =
+                              fdata.eta_p * (Qp_sxx / fdata.Zp_plus
+                                             + Qm_sxx / fdata.Zp_minus);
+                           std::fprintf(stderr,
+                              "[MACRO] qp=%d c=(%.1f,%.1f,%.1f) rank=%d t=%.6e "
+                              "vn_plus=%+.6e vn_minus=%+.6e sn_vjump=%+.6e "
+                              "sn_sterm=%+.6e sigma_n_trial=%+.6e "
+                              "sigma_n_corr=%+.6e slip_rate=%+.6e\n",
+                              dof_idx, _mphys(0), _mphys(1), _mphys(2),
+                              my_rank_, GetTime(),
+                              Qp_vx, Qm_vx, sn_vjump_macro, sn_sterm_macro,
+                              sn_vjump_macro + sn_sterm_macro,
+                              fdata.sigma_n_corr, fdata.slip_rate);
+                           std::fflush(stderr);
+                        }
+                     }
+                  }
 
                   // R-DIP2: cross-rank divergence diagnostic (RUNTIME env-gated,
                   // zero overhead when off).  At the target shared fault QP

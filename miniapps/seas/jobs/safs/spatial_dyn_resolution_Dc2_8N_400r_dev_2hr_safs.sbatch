@@ -52,6 +52,22 @@ export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-10.0}"
 # of whether the tension free-slide path is the runaway amplifier
 # (REVIEW_speckle_tension_analysis test 1).  OFF => byte-exact.
 export SEAS_NOOPENING="${SEAS_NOOPENING:-0}"
+# [FRAME] canonical-frame diagnostic (default ON): at the seed shared QPs prints
+# frame orthonormality, sign_flipped/nl (degenerate-band read), and the global
+# bulk velocity-jump decomposition dv_n/dv_t1/dv_t2 -- the decisive test of
+# whether [[v_n]] is a frame/sign_flipped defect or a genuine bulk opening
+# (PLAN_frame_orthonormality_diag_2026-05-23, test #1/#6).  dv_n cross-checks
+# the [SLIP] sn_vjump/eta_p.  OFF => byte-exact.  Target/radius overridable.
+export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-1}"
+export SEAS_DIAG_FRAME_XYZ="${SEAS_DIAG_FRAME_XYZ:-607518,3706359,-4543}"
+export SEAS_DIAG_FRAME_R="${SEAS_DIAG_FRAME_R:-300}"
+# [MACRO] predictor-vs-macro diagnostic (default ON): at the seed shared QP prints
+# the MACRO solve's normal-traction decomposition on the time-integrated state
+# (the bounded path that writes output) -- compare [MACRO] sigma_n_tot vs the
+# iterator's per-sub-step [SLIP] sigma_n_tot to localize whether the opening is
+# born in the per-sub-step predictor/ghost path (PLAN_predictor_vs_macro_diag,
+# test B / R-008).  Reuses the SEAS_DIAG_FRAME_XYZ/_R seed locator.  OFF => byte-exact.
+export SEAS_DIAG_MACRO="${SEAS_DIAG_MACRO:-1}"
 
 module load intel/19.1.1
 module load impi/19.0.9
@@ -157,6 +173,7 @@ echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}"
 echo "Config:      ${CONFIG_TOML}   (RESOLUTION test / discriminator BASELINE: D_c=2.0 / radius=4000)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
+echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX:-<config default = adjacent>}"
 echo "tfinal:      ${TFINAL}"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"

@@ -302,6 +302,10 @@ TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_id
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
 TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC     = tests/unit/test_fault_basis_qp_orthonormality.cpp
 TEST_PER_QP_VS_CENTROID_BASIS_SRC          = tests/unit/test_per_qp_vs_centroid_basis_planar_1el.cpp
+# PLAN_frame_orthonormality_diag_2026-05-23 §Phase 1 AC#3 — [FRAME] dv_n identity
+TEST_FRAME_DIAG_PROJECTION_IDENTITY_SRC    = tests/unit/test_frame_diag_projection_identity.cpp
+# PLAN_predictor_vs_macro_diag_2026-05-23 §Phase 1 AC#3 — [MACRO] decomposition identity
+TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_SRC = tests/unit/test_macro_diag_decomposition_identity.cpp
 # v9.2.0 plan §4.9 (rev-3f) — No-penalty regression gate (Pelties 2012 §3.1)
 TEST_NO_PENALTY_DR_SRC                     = tests/unit/test_no_penalty_dynamic_rupture.cpp
 # v9.2.0 plan Step 6 (H-V92-U probe) — interior-fault-path Pelties eq. (7)
@@ -611,6 +615,8 @@ TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SR
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
 TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ     = $(TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC:.cpp=.o)
 TEST_PER_QP_VS_CENTROID_BASIS_OBJ          = $(TEST_PER_QP_VS_CENTROID_BASIS_SRC:.cpp=.o)
+TEST_FRAME_DIAG_PROJECTION_IDENTITY_OBJ    = $(TEST_FRAME_DIAG_PROJECTION_IDENTITY_SRC:.cpp=.o)
+TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_OBJ = $(TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_SRC:.cpp=.o)
 TEST_SHARED_FAULT_ROLE_CONSIST_OBJ         = $(TEST_SHARED_FAULT_ROLE_CONSIST_SRC:.cpp=.o)
 TEST_NO_PENALTY_DR_OBJ                     = $(TEST_NO_PENALTY_DR_SRC:.cpp=.o)
 TEST_INTERIOR_FAULT_FLUX_PATH_OBJ          = $(TEST_INTERIOR_FAULT_FLUX_PATH_SRC:.cpp=.o)
@@ -924,6 +930,8 @@ MFEM_TESTS = MINIAPPS
         test-godunov-rotation-identity \
         test-canonical-rotation-pure-strikeslip \
         test-fault-basis-qp-orthonormality \
+        test-frame-diag-projection-identity \
+        test-macro-diag-decomposition-identity \
         test-per-qp-vs-centroid-basis-planar-1el \
         test-v92-regression-gates \
         regression-check quick-check
@@ -1615,6 +1623,16 @@ seas_test_fault_basis_dip_strike_symmetry: $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETR
 # v9.2.0 plan §4.1 — Godunov rotation identity T·Tinv = I
 seas_test_godunov_rotation_identity: $(TEST_GODUNOV_ROTATION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_ROTATION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# PLAN_frame_orthonormality_diag_2026-05-23 §Phase 1 AC#3 — [FRAME] dv_n identity
+seas_test_frame_diag_projection_identity: $(TEST_FRAME_DIAG_PROJECTION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRAME_DIAG_PROJECTION_IDENTITY_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# PLAN_predictor_vs_macro_diag_2026-05-23 §Phase 1 AC#3 — [MACRO] decomposition identity
+seas_test_macro_diag_decomposition_identity: $(TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # v9.2.0 plan §4.2 — canonical rotation pure strike-slip Tinv probe
@@ -2673,6 +2691,14 @@ $(TEST_GODUNOV_ROTATION_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFE
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_FRAME_DIAG_PROJECTION_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -3411,6 +3437,14 @@ test-fault-basis-qp-orthonormality: seas_test_fault_basis_qp_orthonormality
 test-per-qp-vs-centroid-basis-planar-1el: seas_test_per_qp_vs_centroid_basis_planar_1el
 	./seas_test_per_qp_vs_centroid_basis_planar_1el
 
+# PLAN_frame_orthonormality_diag_2026-05-23 §Phase 1 AC#3 — [FRAME] dv_n identity
+test-frame-diag-projection-identity: seas_test_frame_diag_projection_identity
+	./seas_test_frame_diag_projection_identity
+
+# PLAN_predictor_vs_macro_diag_2026-05-23 §Phase 1 AC#3 — [MACRO] decomposition identity
+test-macro-diag-decomposition-identity: seas_test_macro_diag_decomposition_identity
+	./seas_test_macro_diag_decomposition_identity
+
 # v9.2.0 plan §4.6 (rev-3b) — shared-fault role consistency
 # Uses 4 ranks on a 4 km inline fixture.  2 ranks is insufficient
 # because ParMETIS rarely cuts through the fault in a 2-way
@@ -3654,6 +3688,8 @@ test-v92-regression-gates: test-no-penalty-dynamic-rupture \
                           test-godunov-rotation-identity \
                           test-canonical-rotation-pure-strikeslip \
                           test-fault-basis-qp-orthonormality \
+                          test-frame-diag-projection-identity \
+                          test-macro-diag-decomposition-identity \
                           test-per-qp-vs-centroid-basis-planar-1el \
                           test-shared-fault-role-consistency \
                           test-shared-fault-dof-data-consistency \
