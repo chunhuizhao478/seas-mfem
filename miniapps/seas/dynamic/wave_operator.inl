@@ -4605,7 +4605,6 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          std::vector<real_t> shape1;
          real_t I_imp_plus_can[NUM_STATE]  = {0};
          real_t I_imp_minus_can[NUM_STATE] = {0};
-         real_t cx = 0, cy = 0, cz = 0;   // QP physical coords (diagnostic only)
       };
       std::vector<SharedFaultQPAssembly> fault_qp_buf;
 
@@ -5033,10 +5032,6 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                      qa.I_imp_plus_can[c]  = I_imp_plus[c];
                      qa.I_imp_minus_can[c] = I_imp_minus[c];
                   }
-                  {
-                     Vector _p(3); ftr->Face->Transform(ip, _p);
-                     qa.cx = _p(0); qa.cy = _p(1); qa.cz = _p(2);
-                  }
                   fault_qp_buf.push_back(std::move(qa));
                   continue;
                }
@@ -5122,7 +5117,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          if (!FaultFaceFlux::s_seas_test_disable_reconcile)
 #endif
          {
-         constexpr int NPAY = 9 + 2 * NUM_STATE + 9;  // 9 DOFData (incl slip_rate) + I_imp +/- + can_{n,t1,t2} (R-005 diag)
+         constexpr int NPAY = 9 + 2 * NUM_STATE;  // 9 DOFData (incl slip_rate) + I_imp +/-
          std::vector<double> payload;
          payload.reserve(fault_qp_buf.size() * NPAY);
          for (const auto &qa : fault_qp_buf)
@@ -5139,13 +5134,6 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             payload.push_back(d.slip_rate);   // R-001: the field every SAFS diagnostic reads
             for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_plus_can[c]); }
             for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_minus_can[c]); }
-            // R-005 (diagnostic, option B): carry the boss's canonical frame so
-            // the non-boss can check whether the two ranks' frames coincide.
-            // Pass 2 rotates the boss's I_imp by THIS rank's frame; if frames
-            // differ, the assembled bulk flux re-seeds the cross-rank gap.
-            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_n[k]); }
-            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_t1[k]); }
-            for (int k = 0; k < 3; k++) { payload.push_back(qa.can_t2[k]); }
          }
 
          // We overwrite our copy iff the PEER is the boss (peer_rank < my_rank_):
@@ -5157,49 +5145,6 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             {
                SharedFaultQPAssembly &qa = fault_qp_buf[local_qp];
                DOFData &d = (*fault_dof_data_)[qa.dof_idx];
-               // DIAG (env SEAS_DIAG_XRANK, target QP): confirm the slip_rate
-               // reconcile (R-001) and CHECK the R-005 frame assumption — the
-               // max cross-rank diff of can_n/can_t1/can_t2.  Fires on BOTH
-               // ranks before the boss-check.  dcan_* ~ 0 => frames coincide
-               // (R-005 refuted); dcan_* large => the two ranks' canonical
-               // frames differ, so Pass 2 re-seeds the bulk (R-005 confirmed,
-               // option A needed).
-               {
-                  static const bool rdiag = []{
-                     const char *e = std::getenv("SEAS_DIAG_XRANK");
-                     return e && e[0] && !(e[0]=='0' && e[1]=='\0'); }();
-                  static const std::array<double,3> rtgt = []{
-                     std::array<double,3> t = {6.0751786666666670e+05,
-                                               3.7063591666666665e+06,
-                                               -4.5430145000000002e+03};
-                     if (const char *e = std::getenv("SEAS_DIAG_XRANK_QP"))
-                     { std::sscanf(e, "%lf,%lf,%lf", &t[0], &t[1], &t[2]); }
-                     return t; }();
-                  static const double rrad = []{
-                     const char *e = std::getenv("SEAS_DIAG_XRANK_R");
-                     return e ? std::atof(e) : 250.0; }();
-                  const double ex = qa.cx-rtgt[0], ey = qa.cy-rtgt[1],
-                               ez = qa.cz-rtgt[2];
-                  if (rdiag && ex*ex + ey*ey + ez*ez <= rrad*rrad)
-                  {
-                     const int FOFF = 9 + 2 * NUM_STATE;  // peer can_* base
-                     double dn = 0, dt1 = 0, dt2 = 0;
-                     for (int k = 0; k < 3; k++)
-                     {
-                        dn  = std::max(dn,  std::abs(qa.can_n[k]  - peer[FOFF+k]));
-                        dt1 = std::max(dt1, std::abs(qa.can_t1[k] - peer[FOFF+3+k]));
-                        dt2 = std::max(dt2, std::abs(qa.can_t2[k] - peer[FOFF+6+k]));
-                     }
-                     std::fprintf(stderr,
-                        "[RECON] t=%.6e rank=%d peer=%d overwrite=%d dof=%d "
-                        "sliprate_loc=%+.10e sliprate_peer=%+.10e "
-                        "dcan_n=%.3e dcan_t1=%.3e dcan_t2=%.3e\n",
-                        GetTime(), my_rank_, peer_rank,
-                        (peer_rank < my_rank_) ? 1 : 0, qa.dof_idx,
-                        d.slip_rate, peer[8], dn, dt1, dt2);
-                     std::fflush(stderr);
-                  }
-               }
                if (peer_rank >= my_rank_) { return; }   // we are boss: keep ours
                d.tau1_corr    = peer[0];
                d.tau2_corr    = peer[1];

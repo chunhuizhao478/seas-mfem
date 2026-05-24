@@ -6,11 +6,31 @@
 |---|---|---|
 | **What** | The fault +/- side was mislabeled on the tilted (curvilinear) fault, so the nucleation pushed with the wrong sign → V_max → 10³ blow-up. | The same fault quad-point is solved **twice** (once per MPI rank) from inputs that differ at the 16th digit; at the rupture onset that hair's-width difference makes the two ranks disagree (slip vs lock). |
 | **Scope** | Geometry (which side is "+"). Independent of friction law / dip / strike. | MPI / floating-point. Triggered the same way for any channel; only **runs away** when there is dip slip. |
-| **Status** | **FIXED** — commit `800b3281` (see Part A). Validated by the `zerodip` job. | **OPEN** — this plan. |
+| **Status** | **FIXED** — commit `800b3281` (see Part A). Validated by the `zerodip` job. | **FIXED & VALIDATED** — this plan (Phases 2–4). Frontera job 7747525: `worst_rel 1.03 → 0` (exact), `DIVERGED 15 → 0`. See "Post-fix validation result" below. |
 | **Test** | `spatial_dyn_zerodip_8N_400r_dev_2hr_safs.sbatch` (no dip slip, guard non-fatal). | New local injection test + the Dc2 `XRANK` Frontera run. |
 
 Documents behind this plan: diagnosis `spatial_dynamic_rupture_speckle_blowup_2026-05-22.md`,
 design review `spatial_dynamic_rupture_reconcile_review_2026-05-23.md`.
+
+> **STATUS 2026-05-23 — Problem B FIXED & VALIDATED.** The reconcile (Phase 2) +
+> verify (Phase 3) are on branch `safs` and validated end-to-end on Frontera
+> (job 7747525). The complete cross-rank story was the **`slip_rate` field-set
+> gap** (review findings R-001/R-002): the reconcile copied 8 `DOFData` fields +
+> `I_imp` but **not** `DOFData::slip_rate` — the field every SAFS diagnostic
+> reads — and the verify checked the same 8, so the oracle was structurally
+> blind. Adding `slip_rate` to the payload+callback (NPAY `8+2N → 9+2N`) and to
+> the verify (REC `16 → 17`) turned the SUBSTEP leg RED then GREEN locally, and
+> on Frontera drove `worst_rel 1.03 → 0` (exact) and `DIVERGED 15 → 0`. The
+> R-005 frame-mismatch hypothesis was **REFUTED** by an in-place diagnostic
+> (`dcan_* ≤ 1.1e-16` cross-rank ⇒ the two ranks' canonical frames coincide), so
+> the heavier frame-reconcile (option A) was **not** needed and the R-005
+> diagnostic has been removed. See "Post-fix validation result" at the end of
+> Phase 4.
+>
+> **Still OPEN (separate problem):** the speckle / `max_slip` growth persists at
+> `worst_rel == 0`, which by the B.2.5 caveat is a co-present **single-rank
+> under-resolution / SSO** cause, NOT the reconcile. Path forward: finer mesh /
+> physical `D_c`. Tracked separately from this plan.
 
 ---
 
@@ -537,7 +557,14 @@ rate-state and LSW (proving the fix is method-invariant).
   oracle's GREEN target becomes the source-fix, not the reconcile — the test
   (cross-rank bit-identity at the threshold) is the right oracle either way.
 
-## Phase 2: the reconcile (the fix) — GO (Phase 0 confirmed source 1, job 7747304)
+## Phase 2: the reconcile (the fix) — DONE & VALIDATED (Frontera job 7747525)
+
+> **VALIDATED 2026-05-23.** Implemented on branch `safs`; the reconcile +
+> verify drove the Frontera oblique run to `worst_rel == 0` exactly (was 1.03)
+> with `DIVERGED == 0` (was 15). The critical correction over the first cut was
+> adding `DOFData::slip_rate` to the reconcile payload (R-001) — see the STATUS
+> banner at the top. The R-005 frame-mismatch worry was refuted in-place
+> (`dcan_* ≤ 1.1e-16`); option A (frame reconcile) is not needed.
 
 > **Phase 0 confirmed the seed is source (1) interpolation** (raw DOFs bit-identical
 > across ranks, interpolated inputs differ at ~1e-14 — see B.1.5 RESOLVED). The
@@ -646,7 +673,7 @@ any future regression aborts loudly; post-fix it must report `max_rel_diff == 0`
 ### Dependencies
 - Depends on: Phase 2. Required by: Phase 4.
 
-## Phase 4: full regression + Frontera re-validation
+## Phase 4: full regression + Frontera re-validation — DONE (cross-rank PASS; speckle is a separate problem)
 
 ### Goal
 End-to-end: the Dc2 mesh advances past t=1.0 s (no abort, no blow-up); fix is
@@ -681,16 +708,19 @@ config-agnostic.
    NOT the reconcile (decide next steps then).
 
 ### Acceptance Criteria
-- [ ] Local regression green (modulo documented pre-existing).
-- [ ] Frontera Dc2 AND `D_c=1.0`: no R-101 abort, no blow-up; `V_max` peaks then
-      decreases.
-- [ ] **zerodip post-fix:** `worst_rel ≤ 1e-13` for the whole run (was → 1.0 at
-      t≈0.595 s) AND no speckle in ParaView (was scattered cyan elements). `V_max`
-      unchanged (~6 m/s, still physical).
-- [ ] **oblique non-fatal post-fix:** `worst_rel ≤ 1e-13` AND the speckle clears
-      in ParaView (pre-fix baseline = this run with the gate non-fatal). The
-      bounded-vs-blow-up outcome of the pre-fix oblique run is recorded either way
-      (B.2 test); a surviving speckle at `worst_rel≈0` flags a co-present cause.
+- [x] Local regression green (modulo documented pre-existing). np=2 reconcile
+      oracle: 4/4 GREEN (rate-state + LSW + SUBSTEP `worst_rel=0`; negative leg
+      trips at `1.0`).
+- [x] **Cross-rank consistency (the issue-B target):** Frontera oblique
+      non-fatal (job 7747525) reports `worst_rel == 0` exactly for the whole run
+      (was 1.03), `DIVERGED == 0` (was 15). `slip_rate` bit-identical cross-rank.
+- [ ] **oblique non-fatal speckle / `max_slip`:** NOT cleared — `max_slip` still
+      grows (62875 → 105366 m) at `worst_rel == 0`. By B.2.5 this is a co-present
+      single-rank under-resolution / SSO cause, NOT the reconcile. **Re-scoped out
+      of this plan** (path: finer mesh / physical `D_c`).
+- [ ] Frontera physical `D_c=1.0` rerun (not just inflated Dc2) — pending; the
+      cross-rank fix is config-agnostic by construction (no Dc2-specific code).
+- [ ] zerodip post-fix rerun — pending (strike-only oracle; optional cross-check).
 
 ### Dependencies
 - Depends on: Phase 2, Phase 3.
@@ -725,6 +755,46 @@ rake-sweep `0`. On Frontera:
 - `worst_rel ≤ 1e-13` but the speckle SURVIVES ⇒ a co-present cause
   (under-resolution `L_nuc/h_min < 10`, SSO) the reconcile is not meant to fix —
   the symptom-attribution caveat (B.2.5) — decide next steps then.
+
+### Post-fix validation result (Frontera job 7747525, commit `b56a779`)
+
+The "third branch" above is exactly what was observed — **cross-rank PASS, speckle
+survives** — which by B.2.5 cleanly separates issue B (fixed) from a co-present
+under-resolution cause (open):
+
+| Metric | Pre-fix (job 7747507) | Post-fix (job 7747525) | Verdict |
+|---|---|---|---|
+| R-101 `worst_rel` (post-reconcile verify) | 1.03114 | **0.0 (exact)** | issue B FIXED |
+| `DIVERGED` count | 15 | **0** | issue B FIXED |
+| `slip_rate` cross-rank | divergent (R-001 gap) | **bit-identical** | R-001 fix confirmed |
+| `nan/inf` count | 5606 | 0 | — |
+| `max_slip` | 4.57e6 m | 62875 → 105366 m (still growing) | speckle OPEN (B.2.5) |
+| `V_max` | — | ~4.67 m/s (physical) | — |
+
+**What was the complete fix.** The cross-rank gap was the **`slip_rate` field-set
+gap** (R-001/R-002): the reconcile copied 8 `DOFData` fields + `I_imp` but not
+`DOFData::slip_rate`, and the verify checked the same 8 — so the oracle was
+structurally blind and the production observable stayed divergent. Adding
+`slip_rate` to the payload+callback (NPAY `8+2N → 9+2N`) and the verify
+(REC `16 → 17`) closed it. The substep-iterator test leg (R-003) was added so the
+local oracle exercises the authoritative slip evolver
+(`Tpv205SubStepIterator::AdvanceWithSubStepStates`), not the bypassed
+`AdvanceADER` path.
+
+**R-005 REFUTED (in-place).** Before the cleanup, the reconcile callback carried
+the boss's canonical frame (`can_n/can_t1/can_t2`) and a `[RECON]` diagnostic
+diffed it against the non-boss frame at the target QP. Result: `dcan_* ≤ 1.1e-16`
+cross-rank ⇒ the two ranks' canonical frames **coincide**, so Pass 2 does NOT
+re-seed the bulk. The heavier frame-reconcile (option A) is therefore **not
+needed**, and the R-005 diagnostic (payload `can_*`, `[RECON]` block, buffer
+`cx/cy/cz`) was removed in the cleanup commit. The env-gated Phase-0
+`[XRANK]`/RAWDOF trace is retained (zero-overhead when `SEAS_DIAG_XRANK` unset) as
+a tool for the open under-resolution investigation.
+
+**Open follow-up (separate plan).** `max_slip` grows while `V_max ~ 4.67 m/s`
+(physical slip should be ~4 m), and `max_slip ≫ V_max·t`. With `worst_rel == 0`
+this is single-rank, not cross-rank: a co-present under-resolution / SSO speckle.
+Path forward: finer mesh / physical `D_c`. Tracked outside this plan.
 
 ## Testing Strategy
 
