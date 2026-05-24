@@ -34,8 +34,9 @@
 # Flux: uses the config's mixed_flux ("adjacent", matching production + the
 # baseline 7745103) by NOT passing --mixed-flux.  Override with
 # SAFS_MIXED_FLUX={none|adjacent|all_continuous} for an A/B leg.
-# tfinal: 20 s (post-R-004 long-run check — bounded well past 2.0 s; won't
-# finish in 2 h, checkpoints to resume); override with SAFS_TFINAL=2s for short.
+# tfinal: 100 s (post-R-004 long-run check — bounded well past 2.0 s; won't
+# finish in 2 h — checkpoints + SAFS_RESTART hook to resume); override with
+# SAFS_TFINAL=2s for the old short run.
 
 export LC_ALL=C
 export LANG=C
@@ -157,14 +158,23 @@ if [[ -n "${SAFS_MIXED_FLUX:-}" ]]; then
     MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 fi
 
-# tfinal default 20 s — post-R-004-fix verification: confirm the slip stays
+# tfinal default 100 s — post-R-004-fix verification: confirm the slip stays
 # bounded WELL PAST the old t~0.5 s runaway window (and past 2.0 s, the prior
 # tfinal).  WILL NOT finish in the 2 h dev window; --checkpoint-every 2000
-# (below) lets a follow-up --restart resume past wherever the wall stops it.
+# (below) + the SAFS_RESTART hook let follow-up jobs resume toward 100 s.
 # Override with SAFS_TFINAL (e.g. SAFS_TFINAL=2s for the old short run).
-TFINAL="${SAFS_TFINAL:-20s}"
+TFINAL="${SAFS_TFINAL:-100s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
+
+# Restart hook — resume a long run past the 2 h dev wall toward tfinal.  Set
+# SAFS_RESTART to the PREVIOUS job's checkpoint PREFIX (the driver writes
+# "<output-dir>/cp", overwriting it every --checkpoint-every steps), e.g.
+#   SAFS_RESTART=${SEAS_MFEM_ROOT}/miniapps/seas/safs/safs_dyn_resDc2_<prevjobid>/cp
+# This job writes to its OWN job-id OUT (below), so the driver's
+# "--restart parent dir must differ from --output-dir" guard holds automatically.
+RESTART_ARG=""
+[[ -n "${SAFS_RESTART:-}" ]] && RESTART_ARG="--restart ${SAFS_RESTART}"
 
 OUT="${SEAS_MFEM_ROOT}/miniapps/seas/safs/safs_dyn_resDc2_${SLURM_JOB_ID}"
 LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
@@ -182,6 +192,7 @@ echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ}
 echo "Mixed flux:  ${SAFS_MIXED_FLUX:-<config default = adjacent>}"
 echo "tfinal:      ${TFINAL}"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"
+echo "Restart:     ${SAFS_RESTART:-<none — fresh start from t=0>}"
 
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
@@ -190,6 +201,7 @@ ibrun ./seas_spatial_dyn_driver \
     ${MIXFLUX_ARG} \
     --tfinal "${TFINAL}" \
     ${CFL_ARG} \
+    ${RESTART_ARG} \
     --paraview \
     --paraview-fault-hdf5 \
     --paraview-fault-zfp-tol 1.0e-12 \
