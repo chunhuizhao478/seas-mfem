@@ -16,12 +16,17 @@
 # instead of starting from t=0.
 #
 # Usage:
+#   # use the in-file default checkpoint (SAFS_RESTART_DEFAULT below):
+#   sbatch jobs/safs/spatial_dyn_resolution_Dc2_8N_400r_dev_2hr_restart_safs.sbatch
+#   # or override the checkpoint at submit time:
 #   sbatch --export=ALL,SAFS_RESTART=<prevOUT>/cp \
 #          jobs/safs/spatial_dyn_resolution_Dc2_8N_400r_dev_2hr_restart_safs.sbatch
 # where <prevOUT> is the previous job's output dir, e.g.
 #   ${SEAS_MFEM_ROOT}/miniapps/seas/safs/safs_dyn_resDc2_<prevjobid>
 # (the driver writes/overwrites "<OUT>/cp" every --checkpoint-every steps).
-# If SAFS_RESTART is unset, this job lists the available checkpoints and exits
+# The checkpoint PREFIX is a USER INPUT — edit SAFS_RESTART_DEFAULT below (or
+# pass SAFS_RESTART via --export to override it).  If the resolved prefix has no
+# checkpoint files, this job lists the available checkpoints and exits
 # (fail-fast, before the build — no wasted node time).  This job writes to its
 # OWN job-id OUT, so the driver's "--restart parent dir must differ from
 # --output-dir" guard holds automatically; chain job N -> N+1 by pointing
@@ -37,6 +42,13 @@
 
 export LC_ALL=C
 export LANG=C
+
+# =========================  USER INPUT  =========================
+# Checkpoint PREFIX ('<OUT>/cp' of a previous run) to resume from.
+# Edit this to point at the run you want to continue, or override at
+# submit time with:  sbatch --export=ALL,SAFS_RESTART=<prefix> ...
+SAFS_RESTART_DEFAULT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_resDc2_7748716/cp"
+# ================================================================
 
 # Per-sub-step seed diagnostics DEFAULT OFF on this continuation run.
 export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-0}"
@@ -78,10 +90,20 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
 fi
 cd "${SEAS_MFEM_ROOT}"
 
-# RESTART REQUIRED — fail fast (before the build) if SAFS_RESTART is unset,
-# listing the checkpoints that ARE available so the resubmit is one copy-paste.
-if [[ -z "${SAFS_RESTART:-}" ]]; then
-    echo "ERROR: this is the RESTART job — SAFS_RESTART is required."
+# Resolve the checkpoint prefix: --export SAFS_RESTART wins, else the in-file
+# USER INPUT default (SAFS_RESTART_DEFAULT).  Fail fast (before the build) if
+# the resolved prefix has NO checkpoint files, listing the ones that ARE
+# available so the resubmit is one copy-paste.
+SAFS_RESTART="${SAFS_RESTART:-${SAFS_RESTART_DEFAULT}}"
+if [[ -z "${SAFS_RESTART}" ]] || ! ls "${SAFS_RESTART}"* >/dev/null 2>&1; then
+    if [[ -z "${SAFS_RESTART}" ]]; then
+        echo "ERROR: no checkpoint prefix — SAFS_RESTART is empty and the in-file"
+        echo "       SAFS_RESTART_DEFAULT is unset."
+    else
+        echo "ERROR: no checkpoint files found for prefix:"
+        echo "         ${SAFS_RESTART}"
+        echo "       (expected files like '${SAFS_RESTART}...')."
+    fi
     echo "       Set it to a previous run's checkpoint PREFIX '<OUT>/cp'."
     echo
     echo "Available checkpoints (newest last):"
@@ -94,7 +116,7 @@ if [[ -z "${SAFS_RESTART:-}" ]]; then
     done
     [[ ${_found} -eq 0 ]] && echo "    (none found under ${SEAS_MFEM_ROOT}/miniapps/seas/safs)"
     echo
-    echo "Resubmit, e.g.:"
+    echo "Resubmit, e.g. (or edit SAFS_RESTART_DEFAULT in the sbatch):"
     echo "    sbatch --export=ALL,SAFS_RESTART=<prefix above> \\"
     echo "           jobs/safs/spatial_dyn_resolution_Dc2_8N_400r_dev_2hr_restart_safs.sbatch"
     exit 1
