@@ -34,7 +34,8 @@
 # Flux: uses the config's mixed_flux ("adjacent", matching production + the
 # baseline 7745103) by NOT passing --mixed-flux.  Override with
 # SAFS_MIXED_FLUX={none|adjacent|all_continuous} for an A/B leg.
-# tfinal: 2 s (covers the t~1.05 s onset + margin); override with SAFS_TFINAL.
+# tfinal: 20 s (post-R-004 long-run check — bounded well past 2.0 s; won't
+# finish in 2 h, checkpoints to resume); override with SAFS_TFINAL=2s for short.
 
 export LC_ALL=C
 export LANG=C
@@ -156,8 +157,12 @@ if [[ -n "${SAFS_MIXED_FLUX:-}" ]]; then
     MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 fi
 
-# tfinal default 2 s (covers the t~1.05 s onset); cfl default = config (0.5).
-TFINAL="${SAFS_TFINAL:-2s}"
+# tfinal default 20 s — post-R-004-fix verification: confirm the slip stays
+# bounded WELL PAST the old t~0.5 s runaway window (and past 2.0 s, the prior
+# tfinal).  WILL NOT finish in the 2 h dev window; --checkpoint-every 2000
+# (below) lets a follow-up --restart resume past wherever the wall stops it.
+# Override with SAFS_TFINAL (e.g. SAFS_TFINAL=2s for the old short run).
+TFINAL="${SAFS_TFINAL:-20s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
