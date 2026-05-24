@@ -27,10 +27,10 @@
 # --output-dir" guard holds automatically; chain job N -> N+1 by pointing
 # SAFS_RESTART at job N's <OUT>/cp.
 #
-# DIAGNOSTICS DEFAULT QUIET (continuation run): SEAS_DIAG_FRAME/_MACRO/_SLIP
-# default to 0; the always-on [DIAG] line (SEAS_DIAG_BLOWUP=1) carries
-# t/V_max/V_substep_max/max_slip for monitoring.  Override with --export to
-# re-enable the seed traces.
+# DIAGNOSTICS FULLY QUIET (continuation run): SEAS_DIAG_FRAME/_MACRO/_SLIP AND
+# SEAS_DIAG_BLOWUP ([DIAG]/[DIAG-ONSET]) all default to 0.  The ungated
+# "step N/M t=.. V_max=.." line still prints t/V_max every 100 steps.  Override
+# via --export (SEAS_DIAG_BLOWUP=1 -> V_substep_max/max_slip/[DIAG-ONSET]).
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX, SAFS_TFINAL, SAFS_CFL,
 # SEAS_DIAG_*.
@@ -46,7 +46,9 @@ export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-0}"
 export SEAS_DIAG_FRAME_XYZ="${SEAS_DIAG_FRAME_XYZ:-607518,3706359,-4543}"
 export SEAS_DIAG_FRAME_R="${SEAS_DIAG_FRAME_R:-300}"
 export SEAS_DIAG_MACRO="${SEAS_DIAG_MACRO:-0}"
-export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"
+# [DIAG]/[DIAG-ONSET] CLOSED by default (per request); the ungated
+# "step N/M t=.. V_max=.." line still prints.  SEAS_DIAG_BLOWUP=1 restores it.
+export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-0}"
 
 module load intel/19.1.1
 module load impi/19.0.9

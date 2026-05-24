@@ -21,19 +21,21 @@
 # max_slip physical), carry the SAFS rupture far in time on the normal queue.
 # 48 h reaches MUCH further than the 2 h dev window.
 #
-# DIAGNOSTICS DEFAULT QUIET here (this is a production run, not a localizer):
-# SEAS_DIAG_FRAME/_MACRO/_SLIP default to 0 so a 48 h run does NOT emit the
-# per-sub-step seed traces (which would balloon the log to many GB and add a
-# per-sub-step Transform+fprintf).  The always-on [DIAG] line (every 100 steps,
-# SEAS_DIAG_BLOWUP=1) carries t / V_max / V_substep_max / max_slip — everything
-# needed to monitor bounded-ness.  Re-enable any of them via --export if you
-# want the seed traces back.
+# DIAGNOSTICS FULLY QUIET here (production run): SEAS_DIAG_FRAME/_MACRO/_SLIP
+# AND SEAS_DIAG_BLOWUP ([DIAG]/[DIAG-ONSET]) all default to 0, so a 48 h run
+# emits neither the per-sub-step seed traces nor the per-100-step [DIAG] line.
+# The plain "step N/M  t = ... s  V_max = ..." progress line (NOT gated by any
+# of these; every 100 steps) still prints t and V_max for monitoring.  Re-enable
+# via --export (SEAS_DIAG_BLOWUP=1 -> V_substep_max / max_slip / [DIAG-ONSET];
+# SEAS_DIAG_FRAME/_MACRO/_SLIP=1 -> the seed traces).
 #
 # REFLECTION CAVEAT (physical, NOT a code issue): tfinal=100 s exceeds
-# min_box_dim/cp_max (~6.94 s), so reflected waves from the box boundaries
-# contaminate the rupture after ~7 s.  For a physically-clean late-time run add
-# --pml (changes the setup) or set SAFS_TFINAL to <=~6 s.  Left as "same setup"
-# (no --pml) by default; the early rupture (t<~7 s) is clean.
+# min_box_dim/cp_max (~6.94 s), so the first-order absorbing BC (bottom+sides;
+# top is the free surface) leaks reflected waves back into the rupture after
+# ~7 s.  NB: --pml is NOT wired into the spatial driver (the flag only silences
+# the in-driver warning — it builds NO absorbing layer), so do NOT rely on it.
+# For physically-clean late-time use SAFS_TFINAL<=~6 s or a larger box; a real
+# PML / higher-order ABC is deferred.  The early rupture (t<~7 s) is clean.
 #
 # Restart: --checkpoint-every 2000 + the SAFS_RESTART hook let a follow-up job
 # resume past the 48 h wall (or resume a dev checkpoint here, and vice versa —
@@ -54,9 +56,10 @@ export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-0}"
 export SEAS_DIAG_FRAME_XYZ="${SEAS_DIAG_FRAME_XYZ:-607518,3706359,-4543}"
 export SEAS_DIAG_FRAME_R="${SEAS_DIAG_FRAME_R:-300}"
 export SEAS_DIAG_MACRO="${SEAS_DIAG_MACRO:-0}"
-# [DIAG] step line (rupture-area proxy + V_substep_max + max_slip) stays ON —
-# the production monitoring signal, every 100 steps.
-export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"
+# [DIAG]/[DIAG-ONSET] CLOSED by default (per request).  The ungated
+# "step N/M t=.. V_max=.." line still prints t/V_max every 100 steps.
+# Set SEAS_DIAG_BLOWUP=1 to restore V_substep_max / max_slip / [DIAG-ONSET].
+export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-0}"
 
 module load intel/19.1.1
 module load impi/19.0.9
