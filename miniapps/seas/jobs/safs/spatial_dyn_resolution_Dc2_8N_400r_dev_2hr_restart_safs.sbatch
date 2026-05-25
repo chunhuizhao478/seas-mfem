@@ -47,7 +47,7 @@ export LANG=C
 # Checkpoint PREFIX ('<OUT>/cp' of a previous run) to resume from.
 # Edit this to point at the run you want to continue, or override at
 # submit time with:  sbatch --export=ALL,SAFS_RESTART=<prefix> ...
-SAFS_RESTART_DEFAULT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_resDc2_7748716/cp"
+SAFS_RESTART_DEFAULT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_resDc2_7748872/cp"
 # ================================================================
 
 # Per-sub-step seed diagnostics DEFAULT OFF on this continuation run.
