@@ -142,16 +142,28 @@ sigma_n_strength_floor_pa = 10.0e6
 
 [friction.rate_state]
 # Aging rate-and-state friction (the only RS law wired in Phases 1-3).
-# R-011: fully velocity-weakening (a < b everywhere) for the first smoke.
+# DEPTH-VARYING a(z)/b(z) via the [friction.rate_state.depth_profile] block
+# below (VW->VS transition ~11 km).  a_default / b_default are the scalar
+# FALLBACK, UNUSED for a/b while the profile is enabled (and the a<b default
+# check is skipped).
 # R-009: V_0_default MUST equal FrictionSolver::V0 (= 1e-6) or the
 # equilibrium-psi seed guard aborts.
 # Per-DOF a / Dc / V_init / sigma_n / eta spatial rules are allowed; per-DOF
 # b / f_0 / V_0 are rejected by ResolveRateState (AgingLawPsi is scalar).
-a_default       = 0.010
-b_default       = 0.015
+a_default       = 0.010      # unused (depth profile active); fallback only
+b_default       = 0.015      # unused (depth profile active); fallback only
 Dc_default      = 2.0        # m (smoke value; mirrors the LSW Dc2 resolution choice)
 V_0_default     = 1.0e-6     # MUST equal FrictionSolver::V0 (R-009)
 f_0_default     = 0.6
 V_init_default  = 1.0e-9     # quasi-static initial slip rate
 sigma_n_default = 50.0e6     # fallback only; driver uses geom.sigma_n_per_dof()
 eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF
+
+[friction.rate_state.depth_profile]
+# Two-CSV depth profile (Phase 11b).  Each row is `value, depth_km` (value
+# FIRST).  b(z) = a(z) - (a-b)(z), each interpolated on its own grid and
+# flat-clamped outside.  depth_units = "km" => CSV depth * 1000 -> metres.
+# These *_vwvs11km.csv profiles put the VW->VS transition (a-b = 0) at ~11 km.
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_vwvs11km.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_vwvs11km.csv"
+depth_units         = "km"

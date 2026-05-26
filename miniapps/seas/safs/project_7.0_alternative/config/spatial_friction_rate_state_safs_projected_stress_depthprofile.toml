@@ -8,9 +8,10 @@
 # whose direct-effect a and evolution b are functions of depth, supplied as two
 # CSV files and linearly interpolated onto the fault (Phase 11b):
 #
-#   a(z)     <- param_a.csv            (rows: value, depth_km)
-#   (a-b)(z) <- param_a_minus_b.csv    (rows: value, depth_km)
-#   b(z)     =  a(z) - (a-b)(z)         (computed per DOF)
+#   a(z)     <- param_a_vwvs11km.csv         (rows: value, depth_km)
+#   (a-b)(z) <- param_a_minus_b_vwvs11km.csv (rows: value, depth_km)
+#   b(z)     =  a(z) - (a-b)(z)               (computed per DOF)
+#   VW->VS transition (a-b = 0) at ~11 km.
 #
 # Each CSV is interpolated INDEPENDENTLY along depth (they may use different
 # depth grids), flat-clamped outside its sampled range.  depth = max(0, -z) in
@@ -38,7 +39,7 @@
 [meta]
 schema_version = 1
 law            = "rate_state"
-description    = "SAFS rate-and-state (aging) with DEPTH-VARYING a(z)/b(z) from param_a.csv + param_a_minus_b.csv (b = a - (a-b)), on the 500 m z0embed mesh, gradual_overstress nucleation."
+description    = "SAFS rate-and-state (aging) with DEPTH-VARYING a(z)/b(z) from param_a_vwvs11km.csv + param_a_minus_b_vwvs11km.csv (b = a - (a-b); VW->VS transition ~11 km), on the 500 m z0embed mesh, gradual_overstress nucleation."
 
 [material_constant_fallback]
 # Equal lambda = mu => Poisson ratio = 0.25 (typical crust).  cp ~= 5996 m/s.
@@ -143,6 +144,8 @@ eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF
 # Two-CSV depth profile (Phase 11b).  Each row is `value, depth_km` (value
 # FIRST).  b(z) = a(z) - (a-b)(z), each interpolated on its own grid and
 # flat-clamped outside.  depth_units = "km" => CSV depth * 1000 -> metres.
-param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a.csv"
-param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b.csv"
+# These *_vwvs11km.csv profiles put the VW->VS transition (a-b = 0) at ~11 km
+# (vs ~16.7 km for the original param_a.csv / param_a_minus_b.csv).
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_vwvs11km.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_vwvs11km.csv"
 depth_units         = "km"

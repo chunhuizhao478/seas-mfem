@@ -21,8 +21,9 @@
 #
 # Config (floor enabled):
 #   config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml
-#   ([friction].sigma_n_strength_floor_pa = 10.0e6; a(z) <- param_a.csv,
-#    (a-b)(z) <- param_a_minus_b.csv, b = a - (a-b); V_0=1e-6, Dc=0.02, f_0=0.6,
+#   ([friction].sigma_n_strength_floor_pa = 10.0e6; a(z) <- param_a_vwvs11km.csv,
+#    (a-b)(z) <- param_a_minus_b_vwvs11km.csv (VW->VS transition ~11 km),
+#    b = a - (a-b); V_0=1e-6, Dc=0.02, f_0=0.6,
 #    V_init=1e-12, eta=auto; gradual_overstress nucleation).
 #
 # CAP CAVEAT (REVIEW R-002): on the RATE-AND-STATE path the floor is applied
@@ -162,8 +163,8 @@ fi
 # Depth-profile CSVs (read at config-load time by the parser).  Fail early here
 # with a clearer message than a mid-parse abort.
 for _csv in \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a.csv" \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b.csv"; do
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_vwvs11km.csv" \
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b_vwvs11km.csv"; do
     if [[ ! -f "${_csv}" ]]; then
         echo "ERROR: depth-profile CSV not found: $(pwd)/${_csv}"
         exit 1
