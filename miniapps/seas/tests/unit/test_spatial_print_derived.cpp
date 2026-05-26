@@ -390,6 +390,201 @@ static void T_D10_insufficient_trigger_caught()
                "trigger FAIL message printed");
 }
 
+// =====================================================================
+// RATE-AND-STATE overload (PrintDerivedAndCheckRS) — PLAN DEVIATION.
+// The Phase-3 plan does not spec an RS --print-derived path; the RS
+// overload is added so the SAFS-RS sbatch (which passes --print-derived)
+// runs.  These T-RS* cases mirror the LSW ones for the RS-grounded
+// quantities: L_nuc = mu*Dc/((b-a)*sigma_n), f_ss(V_init), and the
+// velocity-weakening nucleation gate.
+// =====================================================================
+static real_t RunPrinterRS(const StressSpec& stress,
+                           real_t a, real_t b, real_t Dc,
+                           real_t V_init, real_t f0, real_t V0,
+                           real_t sigma_n_eff,
+                           real_t tau_dip, real_t tau_strike,
+                           bool nuc_enabled,
+                           const GradualOverstressSpec& gspec,
+                           real_t mu_bulk,
+                           std::string& captured,
+                           bool abort_on_failure = true,
+                           real_t dof_x = 0.0,
+                           real_t dof_y = 0.0,
+                           real_t dof_z = 0.0)
+{
+   RateStatePerDOFParams rs;
+   rs.a.SetSize(1);      rs.a(0)      = a;
+   rs.b.SetSize(1);      rs.b(0)      = b;
+   rs.Dc.SetSize(1);     rs.Dc(0)     = Dc;
+   rs.V_init.SetSize(1); rs.V_init(0) = V_init;
+   rs.f_0.SetSize(1);    rs.f_0(0)    = f0;
+   rs.V_0.SetSize(1);    rs.V_0(0)    = V0;
+   rs.eta.SetSize(1);    rs.eta(0)    = 0.0;
+   rs.sigma_n_eff.SetSize(1); rs.sigma_n_eff(0) = sigma_n_eff;
+
+   Vector tau_pre(2);  tau_pre(0) = tau_dip; tau_pre(1) = tau_strike;
+   Vector sn(1);       sn(0) = sigma_n_eff;
+   Vector coords(3);   coords(0) = dof_x; coords(1) = dof_y; coords(2) = dof_z;
+
+   NucleationSpec nuc;
+   nuc.enabled = nuc_enabled;
+   nuc.kind    = NucleationKind::GradualOverstress;
+   nuc.gradual_overstress = gspec;
+
+   GradualOverstressPerDOFParams nuc_params;
+   if (nuc_enabled)
+   {
+      DenseMatrix basis(9, 1); basis = 0.0;
+      basis(0, 0) = 1.0;        // normal +x
+      basis(4, 0) = 1.0;        // dip   +y
+      basis(8, 0) = 1.0;        // strike +z
+      nuc_params = ResolveGradualOverstress(gspec, true, coords, basis);
+   }
+
+   PrintDerivedConfig pd_cfg;
+   pd_cfg.enabled                = true;
+   pd_cfg.abort_on_failure       = abort_on_failure;
+   pd_cfg.outside_safety_factor  = 3.0;
+
+   std::ostringstream oss;
+   unsetenv("SEAS_SKIP_EQUILIBRIUM_GATE");
+   const real_t out_ratio = PrintDerivedAndCheckRS(
+      pd_cfg, rs, tau_pre, sn, coords, nuc, nuc_params, stress,
+      mu_bulk, /*cp=*/4877.0, /*cs=*/3458.0,
+      /*h_min=*/1000.0, /*dt_cfl=*/6.84e-5, /*tfinal=*/12.0,
+      /*num_fault_global=*/1, /*num_zero_normal_fallbacks=*/0,
+#ifdef MFEM_USE_MPI
+      MPI_COMM_WORLD,
+#endif
+      /*rank=*/0, oss);
+   captured = oss.str();
+   return out_ratio;
+}
+
+// Parse the numeric value following the FIRST occurrence of `key` in `text`.
+static real_t ParseAfter(const std::string& text, const std::string& key)
+{
+   const auto pos = text.find(key);
+   if (pos == std::string::npos) { return std::nan(""); }
+   return std::stod(text.substr(pos + key.size()));
+}
+
+// T-RS01: steady-state friction f_ss(V_init) matches the grounded formula
+//   f_ss = f0 + (a-b)*ln(V_init/V0)   (the asymptotic of the regularized law).
+//   a=0.010, b=0.015, f0=0.6, V0=1e-6, V_init=1e-9
+//   => 0.6 + (-0.005)*ln(1e-3) = 0.6 + 0.034539 = 0.634539.
+static void T_RS01_steady_state_friction()
+{
+   std::cout << "\n[T-RS01] RS steady-state friction f_ss(V_init)\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 20.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   // tau_strike near f_ss*sigma_n so the lone in-patch DOF is well-posed.
+   (void)RunPrinterRS(s, /*a=*/0.010, /*b=*/0.015, /*Dc=*/2.0,
+                      /*V_init=*/1e-9, /*f0=*/0.6, /*V0=*/1e-6,
+                      /*sigma_n=*/50.0e6, /*tau_dip=*/0.0,
+                      /*tau_strike=*/30.0e6,
+                      /*nuc_enabled=*/true, gspec,
+                      /*mu_bulk=*/32.0e9, captured);
+   const real_t fss = ParseAfter(captured,
+                                 "steady-state friction f_ss(V_init) min/max = ");
+   TEST_NEAR(fss, 0.634539, 1e-4, "f_ss(V_init) == f0 + (a-b)*ln(V_init/V0)");
+   TEST_ASSERT(captured.find("friction law = rate-and-state") != std::string::npos,
+               "RS banner printed");
+}
+
+// T-RS02: L_nuc(RS) = mu*Dc/((b-a)*sigma_n).
+//   32e9 * 2.0 / (0.005 * 50e6) = 256000 m.
+static void T_RS02_nucleation_length()
+{
+   std::cout << "\n[T-RS02] RS nucleation length L_nuc = mu*Dc/((b-a)*sigma_n)\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 20.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinterRS(s, 0.010, 0.015, /*Dc=*/2.0, 1e-9, 0.6, 1e-6,
+                      /*sigma_n=*/50.0e6, 0.0, 30.0e6,
+                      /*nuc_enabled=*/true, gspec, /*mu_bulk=*/32.0e9, captured);
+   const real_t Lnuc = ParseAfter(captured,
+      "L_nuc(RS)=mu*Dc/((b-a)*sigma_n) min/max/mean = ");
+   TEST_NEAR(Lnuc, 256000.0, 1.0, "L_nuc == mu*Dc/((b-a)*sigma_n)");
+}
+
+// T-RS03: fully velocity-strengthening (a > b) -> all-VS gate fires; warn-only
+//   so the in-process printer does not abort, and it must NOT PASS.
+static void T_RS03_all_velocity_strengthening()
+{
+   std::cout << "\n[T-RS03] all velocity-strengthening (a>b) gates as FAIL\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 20.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinterRS(s, /*a=*/0.020, /*b=*/0.015, /*Dc=*/2.0,
+                      1e-9, 0.6, 1e-6, 50.0e6, 0.0, 30.0e6,
+                      /*nuc_enabled=*/true, gspec, /*mu_bulk=*/32.0e9, captured,
+                      /*abort_on_failure=*/false);
+   TEST_ASSERT(captured.find("all fault DOFs are velocity-strengthening")
+               != std::string::npos,
+               "all-VS message printed");
+   TEST_ASSERT(captured.find("gate downgraded") != std::string::npos,
+               "all-VS downgraded to WARNING (warn-only)");
+   TEST_ASSERT(captured.find("PASS: rate-and-state") == std::string::npos,
+               "all-VS does NOT PASS");
+}
+
+// T-RS04: VW patch with sufficient overstress -> overshoot drives acceleration
+//   and the gate PASSes.  tau_pre=30 MPa, f_ss*sigma_n ~= 0.6345*50 = 31.7 MPa,
+//   delta_tau=20 MPa -> |tau_pre+dtau|=50 MPa > 31.7 MPa -> overshoot > 0.
+static void T_RS04_vw_nucleation_passes()
+{
+   std::cout << "\n[T-RS04] VW patch + sufficient overstress drives acceleration\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 20.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   (void)RunPrinterRS(s, 0.010, 0.015, 2.0, 1e-9, 0.6, 1e-6,
+                      50.0e6, 0.0, 30.0e6,
+                      /*nuc_enabled=*/true, gspec, /*mu_bulk=*/32.0e9, captured);
+   TEST_ASSERT(captured.find("(drives acceleration)") != std::string::npos,
+               "overshoot labelled (drives acceleration)");
+   TEST_ASSERT(captured.find("PASS: rate-and-state initial conditions are "
+                             "well-posed") != std::string::npos,
+               "well-posed RS nucleation PASSes");
+}
+
+// T-RS05: nucleation patch entirely velocity-strengthening (DOF in patch but
+//   a>b) -> patch-all-VS FAIL message; warn-only so no abort.
+static void T_RS05_patch_all_vs_fails()
+{
+   std::cout << "\n[T-RS05] in-patch entirely velocity-strengthening gates FAIL\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 20.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   // a>b but b>0,a>0: VS DOF placed AT the patch centre (in-patch, not all-fault
+   // VS gate first because all_vs also true here; use a mixed check via the
+   // message).  Single DOF => all_vs is also true, so assert the all-VS path.
+   (void)RunPrinterRS(s, /*a=*/0.020, /*b=*/0.015, 2.0, 1e-9, 0.6, 1e-6,
+                      50.0e6, 0.0, 30.0e6,
+                      /*nuc_enabled=*/true, gspec, /*mu_bulk=*/32.0e9, captured,
+                      /*abort_on_failure=*/false);
+   // With one DOF, all_vs fires first (it short-circuits the patch gate); both
+   // describe the same root cause.  Assert the VS diagnosis is reported.
+   TEST_ASSERT(captured.find("velocity-strengthening") != std::string::npos,
+               "velocity-strengthening diagnosis printed for an a>b patch");
+}
+
 int main(int argc, char** argv)
 {
 #ifdef MFEM_USE_MPI
@@ -407,6 +602,11 @@ int main(int argc, char** argv)
    T_D08_overshoot_uses_initiation_criterion();
    T_D09_negative_stress_drop_caught();
    T_D10_insufficient_trigger_caught();
+   T_RS01_steady_state_friction();
+   T_RS02_nucleation_length();
+   T_RS03_all_velocity_strengthening();
+   T_RS04_vw_nucleation_passes();
+   T_RS05_patch_all_vs_fails();
    std::cout << "\n========================================\n";
    std::cout << "Phase D test_spatial_print_derived: "
              << num_passed << " / " << num_tests

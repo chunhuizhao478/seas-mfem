@@ -1,0 +1,95 @@
+% =====================================================================
+% pdf-style.tex — shared pandoc/xelatex header for seas/document/parts_dev
+% Fonts (mainfont/sansfont/monofont), geometry, fontsize and the syntax-
+% highlight style are passed on the pandoc command line (see md2pdf.sh);
+% this header adds: Unicode->math mappings, colored sans headings with a
+% hairline rule, shaded/bordered code boxes, and colored links.
+%
+% Packages used here (NOT auto-loaded by pandoc): newunicodechar, titlesec,
+% tcolorbox, setspace.  xcolor/hyperref/fontspec/microtype are loaded by the
+% pandoc template, so we only \definecolor / \hypersetup / use them.
+% =====================================================================
+
+% ---- Unicode glyphs -> math equivalents (the body font lacks these) ----
+\usepackage{amssymb}   % \checkmark for U+2713
+\usepackage{newunicodechar}
+\newunicodechar{·}{\ensuremath{\cdot}}
+\newunicodechar{θ}{\ensuremath{\theta}}
+\newunicodechar{μ}{\ensuremath{\mu}}
+\newunicodechar{τ}{\ensuremath{\tau}}
+\newunicodechar{σ}{\ensuremath{\sigma}}
+\newunicodechar{Δ}{\ensuremath{\Delta}}
+\newunicodechar{±}{\ensuremath{\pm}}
+\newunicodechar{∓}{\ensuremath{\mp}}
+\newunicodechar{°}{\ensuremath{{}^{\circ}}}
+\newunicodechar{⊥}{\ensuremath{\perp}}
+\newunicodechar{⟂}{\ensuremath{\perp}}
+\newunicodechar{∈}{\ensuremath{\in}}
+\newunicodechar{≈}{\ensuremath{\approx}}
+\newunicodechar{≡}{\ensuremath{\equiv}}
+\newunicodechar{≤}{\ensuremath{\leq}}
+\newunicodechar{≥}{\ensuremath{\geq}}
+\newunicodechar{≠}{\ensuremath{\neq}}
+\newunicodechar{≪}{\ensuremath{\ll}}
+\newunicodechar{≫}{\ensuremath{\gg}}
+\newunicodechar{×}{\ensuremath{\times}}
+\newunicodechar{−}{\ensuremath{-}}
+\newunicodechar{→}{\ensuremath{\rightarrow}}
+\newunicodechar{↔}{\ensuremath{\leftrightarrow}}
+\newunicodechar{⇒}{\ensuremath{\Rightarrow}}
+\newunicodechar{∞}{\ensuremath{\infty}}
+\newunicodechar{√}{\ensuremath{\surd}}
+\newunicodechar{✓}{\ensuremath{\checkmark}}
+\newunicodechar{✗}{\ensuremath{\times}}
+\newunicodechar{⁰}{\ensuremath{{}^{0}}}
+
+% ---- palette ----
+\definecolor{accent}{HTML}{2563EB}   % links
+\definecolor{headclr}{HTML}{12386B}  % section headings (deep blue)
+\definecolor{subclr}{HTML}{1F5FAE}   % subsection headings
+\definecolor{rulegrey}{HTML}{C9D3DE} % hairline under sections
+\definecolor{codebg}{HTML}{F6F8FA}   % code-box background (GitHub-ish)
+\definecolor{codeframe}{HTML}{D7DEE6}% code-box border
+
+% ---- spacing / readability ----
+\usepackage{setspace}
+\setstretch{1.07}
+\setlength{\parskip}{0.55em}
+\setlength{\parindent}{0pt}
+\setlength{\emergencystretch}{2em}    % reduce overfull lines
+
+% ---- headings: sans, colored, hairline rule under \section ----
+\usepackage[explicit]{titlesec}
+\titleformat{\section}
+  {\sffamily\LARGE\bfseries\color{headclr}}
+  {\thesection\quad}{0pt}{#1}
+  [\vspace{2pt}{\color{rulegrey}\titlerule[0.7pt]}]
+\titleformat{\subsection}
+  {\sffamily\large\bfseries\color{subclr}}
+  {\thesubsection\quad}{0pt}{#1}
+\titleformat{\subsubsection}
+  {\sffamily\normalsize\bfseries\color{subclr}}
+  {}{0pt}{#1}
+\titlespacing*{\section}{0pt}{1.5em}{0.5em}
+\titlespacing*{\subsection}{0pt}{1.1em}{0.35em}
+\titlespacing*{\subsubsection}{0pt}{0.8em}{0.25em}
+
+% ---- shaded, bordered code boxes (wrap pandoc's Shaded/Highlighting) ----
+\usepackage{tcolorbox}
+\tcbuselibrary{skins,breakable}
+\AtBeginDocument{%
+  \renewenvironment{Shaded}{%
+    \begin{tcolorbox}[breakable, enhanced jigsaw, sharp corners=northwest,
+      boxrule=0.5pt, colback=codebg, colframe=codeframe, arc=2.5pt,
+      left=8pt, right=6pt, top=5pt, bottom=5pt, boxsep=1pt,
+      before skip=8pt, after skip=8pt]%
+  }{%
+    \end{tcolorbox}%
+  }%
+}
+
+% ---- links (hyperref is loaded by the pandoc template) ----
+\AtBeginDocument{%
+  \hypersetup{colorlinks=true, linkcolor=accent, urlcolor=accent,
+              citecolor=accent, filecolor=accent}%
+}

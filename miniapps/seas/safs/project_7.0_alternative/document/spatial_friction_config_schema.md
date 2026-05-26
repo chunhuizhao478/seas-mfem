@@ -26,6 +26,7 @@ document must be edited in the same commit.
 [output]                       # mandatory
 [nucleation]                   # optional (when absent, no nucleation perturbation)
 [nucleation.gradual_overstress]       # required when [nucleation].kind = "gradual_overstress"
+[friction]                     # optional table; holds the law-agnostic sigma_n strength floor
 [friction.slip_weakening]      # required when [meta].law = "slip_weakening"
 [[friction.slip_weakening.spatial]]   # zero or more
 [friction.rate_state]          # required when [meta].law = "rate_state"
@@ -257,6 +258,51 @@ the `V_init` field, not via a stress accumulator.
 
 ---
 
+## `[friction]` (optional; law-agnostic strength floor)
+
+A bare `[friction]` table (declared **before** the law sub-block) carries
+one optional key that applies to **both** friction laws:
+
+| Key                         | Unit | Default | Validation                                        |
+|-----------------------------|------|---------|---------------------------------------------------|
+| `sigma_n_strength_floor_pa` | Pa   | `-1.0`  | when present: finite **and** `>= 0` (a negative value is the disabled sentinel and must be expressed by OMITTING the key) |
+
+The **compressive normal-stress strength floor** (sliver-blowup plan
+2026-05-26).  The normal stress entering the **shear strength** is
+`max(sigma_n_total, sigma_n_strength_floor_pa)`; above the floor the
+strength is the usual `mu * sigma_n` (proportional), and below the floor
+it saturates at the cohesion-like constant `mu * floor` instead of the
+spurious tensile `0` (LSW `max(sigma_n, 0)`) or `|sigma_n|` (RS).  This
+breaks the `sigma_n -> strength -> radiation` feedback that drives the
+tensile free-slip runaway (job 7748818, debug doc §2c).
+
+- **Disabled by default** (`< 0` sentinel): each law keeps its exact
+  current strength expression, so the TPV205/102/104 and BP5 byte-exact
+  regressions are untouched.
+- Only the strength's `sigma_n` is floored; the written-back
+  `normal_stress` output channel and the friction-solver `sigma_n`
+  argument are NOT floored (v1; plan §Phase 3 decision 2).
+- The SAFS configs set `sigma_n_strength_floor_pa = 10.0e6` (10 MPa).
+- **The floor must be a TOP-LEVEL `[friction]` key.**  Nesting it under
+  `[friction.slip_weakening]` / `[friction.rate_state]` is a hard error
+  (the parser aborts), because the per-law sub-block parsers would
+  otherwise silently ignore it and leave the floor disabled.
+- **Effect differs by law.**  On the **LSW** path the floor directly
+  bounds `tau_strength = mu_eff * max(sigma_n, floor)`, so it actively
+  bounds the slip rate `V_abs = (|tau| - tau_strength)/eta_s` under a
+  tensile excursion — this is the blow-up fix.  On the **rate-and-state**
+  path the floor is applied only to the post-solve slip-rate
+  *decomposition* strength; the Brent solver that sets the slip-rate
+  *magnitude* `V_abs` still uses the unfloored `|sigma_n|` (decision 2).
+  Because a tensile `|sigma_n|` makes RS friction *stronger* (so the
+  solver locks `V_abs ≈ 0` and the decomposition strength is never
+  reached), the floor is largely inert on the RS path — RS does not have
+  the LSW tensile free-slip failure mode in the first place.  Enabling it
+  on RS configs is harmless but mostly a no-op; do not treat it as an
+  active tensile-slip safeguard for RS.
+
+---
+
 ## `[friction.slip_weakening]` (required when `law = "slip_weakening"`)
 
 | Key                | Unit | Default | Validation                  |
@@ -310,7 +356,7 @@ region, use `kind = \"barrier\"` instead of a large mu_s".
 | `V_0_default`      | m/s  | `1.0e-6` | `> 0`                    |
 | `eta`              | —/str| `"auto"` | `"auto"` (per-DOF eta = `0.5 * sqrt(mu * rho)`) OR a positive real; R-011 |
 | `a_default`        | —    | `0.010`  | `> 0`                    |
-| `b_default`        | —    | `0.015`  | `> 0`; `a_default < b_default` |
+| `b_default`        | —    | `0.015`  | `> 0`; `a_default < b_default` **only when `[friction.rate_state.depth_profile]` is absent** (Phase 11b) |
 | `Dc_default`       | m    | `0.004`  | `> 0`                    |
 | `V_init_default`   | m/s  | `1.0e-9` | `> 0`                    |
 | `sigma_n_default`  | Pa   | `50.0e6` | `> 0`                    |
@@ -320,11 +366,49 @@ region, use `kind = \"barrier\"` instead of a large mu_s".
 
 Per-key overrides (NaN sentinel = "do not override"):
 
-- `a`, `b`, `Dc`, `V_init`, `f_0`, `V_0`, `eta`, `sigma_n`
+- `a`, `b`, `Dc`, `V_init`, `eta`, `sigma_n` — **allowed** (per-DOF). `b` was
+  rejected pre-Phase-11a; it is now plumbed through `DOFData.b` + the aging-law
+  ψ-update + the equilibrium seed.
+- `f_0`, `V_0` — **rejected** (scalar aging-law globals; `V_0` is pinned to
+  `FrictionSolver::V0` by the R-009 guard). Set them only in the defaults above.
 
 Rate-and-state nucleation is achieved through the `V_init` field, NOT
 through `[nucleation]` (the `[nucleation]` block is for LSW
 `gradual_overstress` only and is ignored when `law = "rate_state"`).
+
+### `[friction.rate_state.depth_profile]` (optional; Phase 11b)
+
+Depth-varying `a(z)` and `b(z)` supplied as **two CSV files**, linearly
+interpolated onto each fault DOF at `depth = max(0, -z)` (metres). When present,
+the resolver seeds per-DOF `a`/`b` from the profile instead of the scalar
+`a_default`/`b_default` (those become an unused fallback, and the
+`a_default < b_default` default check is skipped). Per-DOF `[[…spatial]]`
+overrides still apply on top (last-match-wins).
+
+| Key                   | Type | Default | Validation                                  |
+|-----------------------|------|---------|---------------------------------------------|
+| `param_a_csv`         | str  | —       | required, non-empty; file readable at parse time |
+| `param_a_minus_b_csv` | str  | —       | required, non-empty; file readable at parse time |
+| `depth_units`         | str  | `"km"`  | `"km"` (depth × 1000 → m) or `"m"`          |
+
+Each CSV: no header, comma- OR whitespace-separated, **two columns per row
+`value, depth` (value FIRST, depth SECOND)**; `#` comments and blank lines are
+skipped; ≥ 2 rows; duplicate depths abort. `param_a.csv` holds `a` (must be
+`> 0`); `param_a_minus_b.csv` holds `a − b` (may be negative — velocity-
+weakening). The two files are interpolated **independently** (they may use
+different depth grids), then combined:
+
+```
+a(z) = interp(param_a)
+b(z) = a(z) − interp(param_a_minus_b)
+```
+
+Both curves are **flat-clamped** (constant) outside their sampled depth range —
+e.g. a fault deeper than the CSVs extends the deepest sampled value (so a future
+deeper re-mesh needs no profile change). The resulting per-DOF `b > 0` is
+enforced by the resolver (`a − (a−b) ≤ 0` aborts, naming `param_a_minus_b.csv`).
+`--print-derived` echoes the CSV paths, the sampled depth ranges, the mesh fault
+max depth, and the VW↔VS transition depth (where `a − b = 0`).
 
 ---
 
@@ -338,8 +422,11 @@ through `[nucleation]` (the `[nucleation]` block is for LSW
 4. **Friction validator (D-3 relaxed):**
    - LSW: `0 < mu_d`, `mu_d < mu_s`, `d_c > 0`, `cohesion >= 0` at
      every DOF after spatial rules.  **No upper bound on `mu_s`.**
-   - Rate-state: `0 < a`, `0 < b`, `a < b`, `Dc > 0`, `V_0 > 0`,
-     `sigma_n_eff > 0`, `0 < f_0 < 1` at every DOF.
+   - Rate-state: `0 < a`, `0 < b`, `Dc > 0`, `V_0 > 0`, `sigma_n_eff > 0`,
+     `0 < f_0 < 1` at every DOF.  **`a < b` is NOT required per-DOF** (R-011):
+     velocity-strengthening regions (`a > b`) are allowed (fault-edge / deep
+     arrest, depth-profile VS tapers).  The scalar `a_default < b_default` check
+     applies only to the fallback when no depth profile is configured.
 5. **`d_o` alias (D-3):** accepts `d_o_default` as a synonym for
    `d_c_default`, and `d_o` as a synonym for `d_c` inside spatial
    rules.  Emits a one-line `mfem::out` deprecation notice on first
@@ -369,6 +456,10 @@ through `[nucleation]` (the `[nucleation]` block is for LSW
     `center_*_m`, `radius_*_m > 0`, and `T_nuc_s > 0`.  When absent,
     `NucleationSpec::enabled = false` and the driver runs without any
     nucleation perturbation.
+14. **Sigma_n strength floor:** when `[friction].sigma_n_strength_floor_pa`
+    is present it must be finite and `>= 0`; an explicit negative value
+    aborts (the disabled state is expressed by OMITTING the key, which
+    defaults the field to `-1.0`).
 
 ---
 

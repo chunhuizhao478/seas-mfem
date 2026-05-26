@@ -220,10 +220,20 @@ void FaultFaceFlux::CompleteFromVabs(const DOFData &data,
 
    if (s.Theta > 0.0 && s.V_abs > 0.0)
    {
-      // Friction strength
+      // Friction strength.  σ_n strength floor (sliver-blowup plan
+      // 2026-05-26): when enabled (floor >= 0) the strength's σ_n is
+      // max(σ_n, floor) so a tensile excursion saturates at the floor
+      // instead of feeding back; disabled (sentinel < 0) keeps the
+      // historical |σ_n| ⇒ byte-exact for the TPV102/104 regressions.
+      // Only the explicit strength is floored; the friction-solver σ_n
+      // argument (CompleteFromTheta:201) is intentionally NOT floored in
+      // v1 (plan §Phase 3 decision 2).
       real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
       real_t f_V = data.a * std::asinh(s.V_abs * C);
-      real_t strength = std::abs(s.sigma_n_total) * f_V;
+      const real_t sn_str = (sigma_n_strength_floor_ >= 0.0)
+                            ? std::max(s.sigma_n_total, sigma_n_strength_floor_)
+                            : std::abs(s.sigma_n_total);
+      real_t strength = sn_str * f_V;
 
       // H2 experiment (env-var SEAS_FORCE_V1_ZERO).  For pure-strike-slip
       // configurations (TPV104: tau1_0 = 0, tau1_nuc = 0, ideal V1 ≡ 0)
@@ -559,7 +569,15 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
    {
       real_t C = std::exp(data.psi / data.a) / (2.0 * FrictionSolver::V0);
       real_t f_V = data.a * std::asinh(V_abs * C);
-      real_t strength = std::abs(sigma_n_fric) * f_V;
+      // σ_n strength floor (sliver-blowup plan 2026-05-26): enabled
+      // (floor >= 0) ⇒ max(σ_n_fric, floor); disabled (sentinel < 0) ⇒
+      // historical |σ_n_fric| (byte-exact TPV102/104).  Only the explicit
+      // strength is floored; the friction-solver σ_n argument (:548) is
+      // intentionally NOT floored in v1 (plan §Phase 3 decision 2).
+      const real_t sn_str = (sigma_n_strength_floor_ >= 0.0)
+                            ? std::max(sigma_n_fric, sigma_n_strength_floor_)
+                            : std::abs(sigma_n_fric);
+      real_t strength = sn_str * f_V;
       V1 = V_abs * tau1_fric / (strength + data.eta_s * V_abs);
       V2 = V_abs * tau2_fric / (strength + data.eta_s * V_abs);
       tau1_corr = tau1_trial - data.eta_s * V1;
@@ -800,13 +818,16 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
 
    // Step 4: closed-form LSW solve.  Sets s.V_abs, s.V{1,2}, s.tau{1,2}_corr.
    // R-003 barrier short-circuit (V = 0 in the barrier zone regardless of
-   // σ_n sign) lives inside the helper.
+   // σ_n sign) lives inside the helper.  Trailing arg = σ_n strength floor
+   // (sliver-blowup plan 2026-05-26); disabled (sentinel < 0) maps to 0.0
+   // ⇒ byte-exact `max(σ_n,0)`.
    SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
                    s.tau1_total, s.tau2_total,
                    s.sigma_n_total, data.eta_s,
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
-                   s.tau1_corr, s.tau2_corr);
+                   s.tau1_corr, s.tau2_corr,
+                   SigmaNStrengthFloorForLSW());
 
    // σ_n is unaffected by friction — TRIAL-scale value matches the
    // rate-and-state path's CompleteFromVabs convention.
@@ -918,12 +939,15 @@ void FaultFaceFlux::EvaluateADER_LSW_ForcedRupture(
       delta, data.lsw_mu_s, data.lsw_mu_d, data.lsw_d_c,
       t_now, data.T_forced_rupture, data.t0_decay_forced);
 
+   // Trailing arg = σ_n strength floor (sliver-blowup plan 2026-05-26);
+   // disabled (sentinel < 0) maps to 0.0 ⇒ byte-exact `max(σ_n,0)`.
    SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
                    s.tau1_total, s.tau2_total,
                    s.sigma_n_total, data.eta_s,
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
-                   s.tau1_corr, s.tau2_corr);
+                   s.tau1_corr, s.tau2_corr,
+                   SigmaNStrengthFloorForLSW());
 
    s.sigma_n_corr = s.sigma_n_trial;
 

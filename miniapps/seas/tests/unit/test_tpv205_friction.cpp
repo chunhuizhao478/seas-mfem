@@ -184,10 +184,80 @@ static void test_R002_R003_combined_BarrierStaysLockedThroughRupture()
    }
 }
 
+// ---------------------------------------------------------------------------
+// σ_n strength floor (sliver-blowup plan 2026-05-26 §Phase 2): the trailing
+// `sigma_n_floor` argument of SolveLSW_TPV205 floors the σ_n that enters the
+// SHEAR STRENGTH only.  The default 0.0 reproduces the historical "fault
+// opens under tension" free-slip (`max(σ_n, 0)`) byte-exactly; a positive
+// floor saturates the strength at μ_eff·floor so a tensile σ_n excursion can
+// no longer collapse the strength to 0 and free-slide.  Numbers verbatim from
+// the plan acceptance: σ_n=−2.9e9, μ_eff=0.3, η_s=4.6e6, |τ|=1.7e9.
+// ---------------------------------------------------------------------------
+static void test_lsw_strength_floor()
+{
+   const real_t sigma_n = -2.9e9;   // tensile (compression is +)
+   const real_t mu_eff  = 0.3;      // < 0.5·mu_s_barrier ⇒ NOT a barrier QP
+   const real_t eta_s   = 4.6e6;
+   const real_t tau_mag = 1.7e9;    // |τ| carried entirely in the strike chan
+   const real_t tau_abs = tau_mag;
+
+   // --- Floor disabled (0.0): standard free slip, τ_strength = 0. ---
+   real_t V_free, V1f, V2f, t1c_f, t2c_f;
+   SolveLSW_TPV205(/*tau1_trial=*/0.0, /*tau2_trial=*/tau_mag,
+                   /*tau1_total=*/0.0, /*tau2_total=*/tau_mag,
+                   sigma_n, eta_s, mu_eff,
+                   V_free, V1f, V2f, t1c_f, t2c_f,
+                   /*sigma_n_floor=*/0.0);
+   const real_t V_free_expected = tau_abs / eta_s;
+   TEST_REL_NEAR(V_free, V_free_expected, 1e-12,
+                 "floor=0: tensile sigma_n free-slides, V_abs = |tau|/eta_s");
+   // τ_strength backed out of the radiation balance: τ_strength = |τ| − η_s·V.
+   const real_t strength_free = tau_abs - eta_s * V_free;
+   TEST_NEAR(strength_free, 0.0, 1e-3,
+             "floor=0: tau_strength = 0 (free slip)");
+
+   // --- Default-argument byte-exactness: omitting the arg == floor 0.0. ---
+   real_t V_def, V1d, V2d, t1c_d, t2c_d;
+   SolveLSW_TPV205(0.0, tau_mag, 0.0, tau_mag,
+                   sigma_n, eta_s, mu_eff,
+                   V_def, V1d, V2d, t1c_d, t2c_d);  // default sigma_n_floor=0
+   TEST_NEAR(V_def, V_free, 0.0,
+             "default sigma_n_floor arg is byte-exact with explicit 0.0");
+
+   // --- Floor 10 MPa: strength saturates at μ_eff·floor = 3 MPa. ---
+   const real_t floor = 10.0e6;
+   real_t V_fl, V1l, V2l, t1c_l, t2c_l;
+   SolveLSW_TPV205(0.0, tau_mag, 0.0, tau_mag,
+                   sigma_n, eta_s, mu_eff,
+                   V_fl, V1l, V2l, t1c_l, t2c_l,
+                   floor);
+   const real_t strength_floor   = mu_eff * floor;             // 3e6
+   const real_t V_floor_expected = (tau_abs - strength_floor) / eta_s;
+   TEST_REL_NEAR(V_fl, V_floor_expected, 1e-12,
+                 "floor=10MPa: V_abs = (|tau| - mu_eff*floor)/eta_s (bounded)");
+   // τ_strength backed out == μ_eff·σ_n_floor.
+   const real_t strength_floored = tau_abs - eta_s * V_fl;
+   TEST_REL_NEAR(strength_floored, strength_floor, 1e-9,
+                 "floor=10MPa: tau_strength == mu_eff*sigma_n_floor (= 3 MPa)");
+   // The floored slip rate is strictly below the free-slip rate.
+   TEST_ASSERT(V_fl < V_free,
+               "floor=10MPa: floored V_abs < free-slip V_abs");
+
+   // --- Compressive σ_n is unaffected by a floor below it: max(σ_n,floor) ---
+   // == σ_n when σ_n > floor, so floor=10MPa and floor=0 agree at σ_n=120MPa.
+   real_t Vc0, Vc1, Vc2, tc1, tc2, Vc0b, Vc1b, Vc2b, tc1b, tc2b;
+   SolveLSW_TPV205(0.0, tau_mag, 0.0, tau_mag, /*sigma_n=*/120.0e6, eta_s,
+                   mu_eff, Vc0, Vc1, Vc2, tc1, tc2, /*floor=*/0.0);
+   SolveLSW_TPV205(0.0, tau_mag, 0.0, tau_mag, /*sigma_n=*/120.0e6, eta_s,
+                   mu_eff, Vc0b, Vc1b, Vc2b, tc1b, tc2b, /*floor=*/10.0e6);
+   TEST_NEAR(Vc0, Vc0b, 0.0,
+             "compressive sigma_n above floor: floor=10MPa == floor=0");
+}
+
 int main(int /*argc*/, char ** /*argv*/)
 {
    std::cout << "Running TPV205 friction unit tests "
-             << "(R-002, R-003 regression)...\n\n";
+             << "(R-002, R-003 regression + sigma_n strength floor)...\n\n";
 
    std::cout << "[test_R002_BarrierDoesNotCollapseAtLargeSlip]\n";
    test_R002_BarrierDoesNotCollapseAtLargeSlip();
@@ -197,6 +267,9 @@ int main(int /*argc*/, char ** /*argv*/)
 
    std::cout << "\n[test_R002_R003_combined_BarrierStaysLockedThroughRupture]\n";
    test_R002_R003_combined_BarrierStaysLockedThroughRupture();
+
+   std::cout << "\n[test_lsw_strength_floor]\n";
+   test_lsw_strength_floor();
 
    TEST_PRINT_RESULTS();
    return (num_failed == 0) ? 0 : 1;

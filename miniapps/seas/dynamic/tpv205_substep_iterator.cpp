@@ -107,12 +107,16 @@ void Tpv205SubStepIterator::StepOneQP_(DOFData &d,
 
    // Step 4: closed-form LSW solve.  Sets s.V_abs, s.V1, s.V2 and the
    // trial-scale corrected traction s.tau1_corr, s.tau2_corr.
+   // The trailing arg is the σ_n strength floor (sliver-blowup plan
+   // 2026-05-26): disabled (sentinel < 0) maps to 0.0 ⇒ byte-exact
+   // `max(σ_n,0)`; this is the SAFS LSW blow-up path the floor targets.
    SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
                    s.tau1_total, s.tau2_total,
                    s.sigma_n_total, d.eta_s,
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
-                   s.tau1_corr, s.tau2_corr);
+                   s.tau1_corr, s.tau2_corr,
+                   flux_.SigmaNStrengthFloorForLSW());
 
    // sigma_n is unaffected by friction; sigma_n_corr in EvalStageState
    // is the TRIAL-scale value (matches the rate-and-state path's

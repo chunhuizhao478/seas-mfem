@@ -75,6 +75,58 @@ real_t PrintDerivedAndCheck(
    , int                                    rank,
    std::ostream&                            out = std::cout);
 
+/// @brief Rate-and-state (aging-law) pre-flight pass — the RS sibling of the
+/// LSW @ref PrintDerivedAndCheck above.
+///
+/// **PLAN DEVIATION (documented):** the Phase-3 plan
+/// (PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24) does NOT specify a
+/// rate-and-state `--print-derived` path; the LSW overload aborts on an RS run
+/// because it dereferences `lsw.mu_s/mu_d/d_c` (absent for RS).  This overload
+/// is added so the Phase-3 SAFS-RS sbatch (which passes `--print-derived`) runs
+/// to completion.  All RS formulas are grounded in this repo's own machinery
+/// (no Tandem reference, per the SAFS-dynamic convention):
+///   * RS nucleation length  L_nuc = μ · Dc / ((b − a) · σ_n_eff)  — the direct
+///     rate-and-state analog of the LSW `μ · d_c / ((μ_s − μ_d) · σ_n)` formula
+///     (raw, no Day/Andrews prefactor), evaluated only on velocity-WEAKENING
+///     (b > a) DOFs.
+///   * Steady-state friction  f_ss(V) = a · asinh[(V / 2V_0) · exp(ψ_ss / a)]
+///     with ψ_ss = f_0 + b · ln(V_0 / V)  — the repo's regularized Dieterich-
+///     Ruina coefficient (friction/dieterich_ruina.hpp) at the seeded
+///     steady-state ψ (friction/state_evolution.hpp:196), evaluated at V_init.
+///
+/// @returns the maximum `|τ_pre| / (f_ss(V_init) · σ_n_eff)` ratio observed at
+/// any DOF OUTSIDE the nucleation patch (the RS analog of the LSW
+/// `|τ_pre| / (μ_s · σ_n)` return); 0.0 when `cfg.enabled == false`.
+///
+/// Gates (abort iff `cfg.abort_on_failure` and not `SEAS_SKIP_EQUILIBRIUM_GATE=1`):
+///   (a) every DOF is velocity-STRENGTHENING (b ≤ a) — nothing can nucleate;
+///   (b) nucleation enabled but ZERO fault DOFs inside the patch;
+///   (c) nucleation enabled but the in-patch region is entirely
+///       velocity-strengthening (b ≤ a) — the patch cannot host an instability.
+/// Resolution (L_nuc/h_min) and overstress-drive checks are WARN-only.
+real_t PrintDerivedAndCheckRS(
+   const PrintDerivedConfig&                cfg,
+   const RateStatePerDOFParams&             rs,
+   const Vector&                            tau_pre_per_dof,
+   const Vector&                            sigma_n_eff_per_dof,
+   const Vector&                            dof_coords_3d,
+   const NucleationSpec&                    nuc,
+   const GradualOverstressPerDOFParams&     nuc_params,
+   const StressSpec&                        stress,
+   real_t                                   mu_bulk,
+   real_t                                   cp,
+   real_t                                   cs,
+   real_t                                   h_min_global,
+   real_t                                   dt_cfl,
+   real_t                                   tfinal,
+   int                                      num_fault_global,
+   int                                      num_zero_normal_fallbacks
+#ifdef MFEM_USE_MPI
+   , MPI_Comm comm
+#endif
+   , int                                    rank,
+   std::ostream&                            out = std::cout);
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

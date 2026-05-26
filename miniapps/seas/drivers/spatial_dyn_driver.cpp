@@ -51,7 +51,10 @@
 #include "../dynamic/fault_face_flux.hpp"
 #include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv205_friction.hpp"
+#include "../dynamic/fault_state_channel.hpp"        // R-024: shared state-channel value
 #include "../dynamic/tpv205_substep_iterator.hpp"
+#include "../dynamic/friction_iterator.hpp"           // Phase 2: IFrictionIterator + adapters
+#include "../dynamic/friction_iterator_factory.hpp"   // Phase 3: MakeFrictionIterator
 #include "../dynamic/heterogeneous_material.hpp"
 #include "../dynamic/spatial_setup.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
@@ -358,13 +361,16 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
 // drivers/tpv205_driver.cpp (1:1 except no SEAS_DIAG hooks).
 //
 // Phase N: the trailing `nuc_callback` arg is forwarded to the
-// per-sub-step callback overload of
-// `Tpv205SubStepIterator::AdvanceWithSubStepStates`; the callback fires
+// per-sub-step `IFrictionIterator::Advance` callback; the callback fires
 // ONCE per ADER sub-step BEFORE the per-QP friction pipeline.  Pass
 // `[](real_t, real_t){}` to opt out (no nucleation perturbation).
+//
+// Phase 2 (R-010): the iterator is the runtime-dispatch IFrictionIterator
+// strategy (LSW or rate-and-state adapter), not the concrete
+// Tpv205SubStepIterator; the body calls only interface methods.
 void AdvanceADERWithSubStep_Spatial(
    WaveOperator<ParMesh> &wave,
-   Tpv205SubStepIterator &iterator,
+   IFrictionIterator &iterator,
    std::vector<DOFData> &dof_data,
    const std::vector<Vector> &fault_coords,
    const Vector &Q,
@@ -436,13 +442,13 @@ void AdvanceADERWithSubStep_Spatial(
 
    if (n_total_fault_qps > 0)
    {
-      iterator.AdvanceWithSubStepStates(dof_data, fault_coords,
-                                        Q_pointwise_plus,
-                                        Q_pointwise_minus,
-                                        dt_step, t_step_start,
-                                        I_imp_plus_flat.data(),
-                                        I_imp_minus_flat.data(),
-                                        nuc_callback);
+      iterator.Advance(dof_data, fault_coords,
+                       Q_pointwise_plus,
+                       Q_pointwise_minus,
+                       dt_step, t_step_start,
+                       I_imp_plus_flat.data(),
+                       I_imp_minus_flat.data(),
+                       nuc_callback);
    }
 
    struct ImposedGuard
@@ -713,10 +719,23 @@ int main(int argc, char *argv[])
                "RateState; got " << static_cast<int>(cfg.law));
    const bool is_lsw =
       (cfg.law == spatial::FrictionLawKind::SlipWeakening);
-   MFEM_VERIFY(is_lsw,
-               "spatial_dyn_driver: only [meta].law = \"slip_weakening\" "
-               "is supported in this commit; rate_state path is a "
-               "deferred follow-up (plan §Phase 4 Edge Cases).");
+   // Phase 3: both slip_weakening and rate_state are wired (the RS branch
+   // below resolves RS params, seeds equilibrium psi, and selects the aging
+   // iterator via MakeFrictionIterator).
+
+   // σ_n strength floor banner string (sliver-blowup plan 2026-05-26):
+   // "DISABLED" for the negative sentinel, else the value in MPa.
+   std::string sigma_n_floor_banner;
+   if (cfg.sigma_n_strength_floor_pa < 0.0)
+   {
+      sigma_n_floor_banner = "DISABLED";
+   }
+   else
+   {
+      std::ostringstream oss;
+      oss << (cfg.sigma_n_strength_floor_pa / 1.0e6) << " MPa";
+      sigma_n_floor_banner = oss.str();
+   }
 
    if (rank == 0)
    {
@@ -737,6 +756,7 @@ int main(int argc, char *argv[])
                 << "mixed flux:       " << cfg.numerics.mixed_flux << "\n"
                 << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
                 << "\n"
+                << "sigma_n strength floor: " << sigma_n_floor_banner << "\n"
                 << "nucleation:       "
                 << (cfg.nucleation.enabled
                     ? "gradual_overstress (enabled)"
@@ -968,7 +988,20 @@ int main(int argc, char *argv[])
    // LSW_ForcedRupture dispatch arm + f_2(t) per-DOF friction reduction
    // are NOT used.  Native TPV* drivers continue to set
    // FaultFrictionLaw::LSW_ForcedRupture verbatim.
-   wave.SetFaultFrictionLaw(FaultFrictionLaw::LSW);
+   wave.SetFaultFrictionLaw(is_lsw ? FaultFrictionLaw::LSW
+                                   : FaultFrictionLaw::RateAndState);
+   // R-020: at np>1 the shared (rank-seam) fault QPs run inline EvaluateADER at
+   // macro dt with END-OF-STEP psi (1st-order at ader_order>=2; the R-1601
+   // fallback), and the plan-mandated np=2 psi-consistency gate (R-004) is not
+   // yet validated.  Warn so a parallel RS result is not mistaken for validated.
+   if (!is_lsw && nprocs > 1 && rank == 0)
+   {
+      std::cout << "[spatial_dyn] WARNING: rate_state at np>1 (" << nprocs
+                << " ranks) — shared (rank-seam) fault QPs use end-of-step psi "
+                   "(1st-order) and the np=2 psi-consistency gate (plan R-004) "
+                   "is not yet validated.  Treat parallel RS results as "
+                   "PRELIMINARY.\n";
+   }
    wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
 
    // Prove the mixed-flux mode is NOT a silent no-op: report the GLOBAL
@@ -1122,10 +1155,24 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    if (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor)
    {
+      // D3.1: the TOML stores stress in the right-lateral-POSITIVE
+      // convention (tension-positive Cauchy shear sigma_xy^tens), while
+      // the regional StressSource is the SEAS compression-positive Cauchy
+      // tensor.  For the canonical y=0 vertical strike-slip fault the
+      // rotation that takes the input to the stored tensor inverts only
+      // the xy off-diagonal; normals (compression-positive) and the dip
+      // yz shear keep their sign.  Negating sigma_xy_pa at construction
+      // makes a positive (right-lateral) input map to a positive
+      // (right-lateral) on-fault tau_strike, with the stored Cauchy tensor
+      // and every on-fault quantity bit-identical to the pre-D3.1 configs
+      // (which stored the already-negated value).  R-007: this negation
+      // and the sign flip of sigma_xy_pa in all affected configs land
+      // together; the parametrized golden test_constant_tensor_sign guards
+      // every flipped config so a half-applied change fails loudly.
       spatial::ConstantTensorStressSource src(cfg.stress.sigma_xx_pa,
                                               cfg.stress.sigma_yy_pa,
                                               cfg.stress.sigma_zz_pa,
-                                              cfg.stress.sigma_xy_pa,
+                                              -cfg.stress.sigma_xy_pa,
                                               cfg.stress.sigma_yz_pa,
                                               cfg.stress.sigma_xz_pa);
       geom.ComputeSAFSParams(src,
@@ -1141,15 +1188,41 @@ int main(int argc, char *argv[])
                "spatial_dyn_driver: stress source projection failed");
 
    // -----------------------------------------------------------------
-   // 11. Resolve per-DOF LSW parameters (Phase 1).
+   // 11. Resolve per-DOF friction parameters (Phase 1/3).  Both result
+   //     structs live at outer scope so the DOF-init below sees whichever
+   //     the law selected; exactly one is filled.
    // -----------------------------------------------------------------
-   MFEM_VERIFY(cfg.slip_weakening.has_value(),
-               "spatial_dyn_driver: [meta].law=slip_weakening but the "
-               "[friction.slip_weakening] block is absent in TOML.");
-   spatial::SpatialFrictionResolver resolver;
-   const spatial::SlipWeakeningPerDOFParams lsw =
-      resolver.ResolveSlipWeakening(*cfg.slip_weakening,
-                                    dof_coords_3d, dof_to_attr);
+   spatial::SpatialFrictionResolver     resolver;
+   spatial::SlipWeakeningPerDOFParams   lsw;  // filled iff is_lsw
+   spatial::RateStatePerDOFParams       rs;   // filled iff !is_lsw
+   if (is_lsw)
+   {
+      // R-002: the slip_weakening-block check must be gated under is_lsw —
+      // the parser forbids a [friction.slip_weakening] block when
+      // law="rate_state", so an RS config has cfg.slip_weakening == nullopt
+      // and an un-gated guard would abort the SAFS-RS run during setup.
+      MFEM_VERIFY(cfg.slip_weakening.has_value(),
+                  "spatial_dyn_driver: [meta].law=slip_weakening but the "
+                  "[friction.slip_weakening] block is absent in TOML.");
+      lsw = resolver.ResolveSlipWeakening(*cfg.slip_weakening,
+                                          dof_coords_3d, dof_to_attr);
+   }
+   else
+   {
+      MFEM_VERIFY(cfg.rate_state.has_value(),
+                  "spatial_dyn_driver: [meta].law=rate_state but the "
+                  "[friction.rate_state] block is absent in TOML.");
+      // R-003: geom.sigma_n_per_dof() is ALREADY effective (sigma_n - P_p,
+      // from ProjectFaultPreStress).  ResolveRateState's last argument is
+      // sigma_n_total and it subtracts pp internally to fill rs.sigma_n_eff,
+      // so pass a ZERO PorePressureSpec{} here — passing
+      // cfg.stress.pore_pressure would double-subtract P_p.
+      rs = resolver.ResolveRateState(
+         *cfg.rate_state, dof_coords_3d, dof_to_elem, dof_to_attr,
+         material, pmesh,
+         spatial::PorePressureSpec{},
+         geom.sigma_n_per_dof());
+   }
 
    // -----------------------------------------------------------------
    // 12. Phase N: resolve the single nucleation kind
@@ -1198,6 +1271,11 @@ int main(int argc, char *argv[])
                                      / material.rho_const);
    const real_t cs_seed = std::sqrt(material.mu_const / material.rho_const);
    FaultFaceFlux fault_flux(material.rho_const, cp_seed, cs_seed);
+   // σ_n strength floor (sliver-blowup plan 2026-05-26).  Sentinel < 0 ⇒
+   // disabled (each law keeps its exact current strength expression ⇒
+   // byte-exact for the TPV/BP5 regressions); >= 0 floors the σ_n that
+   // enters the shear strength only.
+   fault_flux.SetSigmaNStrengthFloor(cfg.sigma_n_strength_floor_pa);
    wave.SetFaultFlux(&fault_flux);
 
    // -----------------------------------------------------------------
@@ -1217,11 +1295,27 @@ int main(int argc, char *argv[])
    std::vector<DOFData> dof_data;
    if (num_fault_total > 0)
    {
-      spatial::InitializeFaultDOFs_Spatial<ParMesh>(
-         dof_data, num_fault_total, dof_to_elem, material, pmesh,
-         lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
-         dummy_T_forced, dummy_t0_decay,
-         dof_ips);
+      if (is_lsw)
+      {
+         spatial::InitializeFaultDOFs_Spatial<ParMesh>(
+            dof_data, num_fault_total, dof_to_elem, material, pmesh,
+            lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
+            dummy_T_forced, dummy_t0_decay,
+            dof_ips);
+      }
+      else
+      {
+         // RS: InitializeFaultDOFs_Spatial_RS has no IP-aware overload
+         // (it uses the element centroid).  SAFS material is homogeneous,
+         // so centroid == IP — correct here; an IP-aware RS overload is a
+         // heterogeneous-material follow-up (not needed for SAFS).
+         spatial::InitializeFaultDOFs_Spatial_RS<ParMesh>(
+            dof_data, num_fault_total, dof_to_elem, material, pmesh,
+            rs, geom.GetTauPre(), geom.sigma_n_per_dof());
+         // Phase-1 helper: overwrite the psi=0 stub with the equilibrium
+         // state variable for the resolved pre-stress.
+         spatial::SeedEquilibriumPsi_RS(dof_data, rs, *cfg.rate_state);
+      }
    }
    wave.SetFaultDOFData(&dof_data, nbf_per_face);
 
@@ -1297,22 +1391,154 @@ int main(int argc, char *argv[])
       pd_cfg.enabled                = true;
       pd_cfg.abort_on_failure       = true;
       pd_cfg.outside_safety_factor  = 3.0;
-      (void)spatial::PrintDerivedAndCheck(
-         pd_cfg, lsw,
-         geom.GetTauPre(), geom.sigma_n_per_dof(),
-         dof_coords_3d,
-         cfg.nucleation, nuc_params,
-         cfg.stress,
-         /*mu_bulk=*/material.mu_const,
-         cp_seed, cs_seed,
-         h_min_global,
-         dt_cfl, cfg.time.tfinal,
-         num_fault_global,
-         geom.NumZeroNormalFallbacks()
+
+      // Phase 11b/c: depth-profile summary (informational).  The L_nuc / f_ss
+      // ranges printed by PrintDerivedAndCheckRS already reflect the depth-
+      // varying a/b through rs.a(i)/rs.b(i); this block just echoes the source
+      // CSVs, the coverage vs the mesh fault depth, and the VW->VS transition.
+      if (!is_lsw && cfg.rate_state && cfg.rate_state->depth_profile.enabled)
+      {
+         const auto& dp = cfg.rate_state->depth_profile;
+         real_t fault_depth_max_local = 0.0;
+         for (int i = 0; i < dof_coords_3d.Size() / 3; ++i)
+         {
+            const real_t z = dof_coords_3d(3 * i + 2);
+            fault_depth_max_local =
+               std::max(fault_depth_max_local, std::max(real_t(0.0), -z));
+         }
+         real_t fault_depth_max = fault_depth_max_local;
 #ifdef MFEM_USE_MPI
-         , comm
+         MPI_Allreduce(&fault_depth_max_local, &fault_depth_max, 1,
+                       MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #endif
-         , rank);
+         if (rank == 0)
+         {
+            const auto& acv = dp.profile.a_of_depth;
+            const auto& amb = dp.profile.amb_of_depth;
+            std::cout << "[derived] depth-profile ENABLED (Phase 11b):\n"
+                      << "[derived]   param_a_csv         = " << dp.param_a_csv << "\n"
+                      << "[derived]   param_a_minus_b_csv = " << dp.param_a_minus_b_csv << "\n"
+                      << "[derived]   depth scale         = " << dp.depth_to_m
+                      << " m per CSV depth unit\n"
+                      << "[derived]   a   depth range = [" << acv.x.front() << ", "
+                      << acv.x.back() << "] m\n"
+                      << "[derived]   a-b depth range = [" << amb.x.front() << ", "
+                      << amb.x.back() << "] m\n"
+                      << "[derived]   fault max depth (mesh) = " << fault_depth_max
+                      << " m  (profile flat-clamped beyond its sampled range)\n";
+            // R-029: a(z) and (a-b)(z) flat-clamp on their OWN depth grids.  If
+            // the fault reaches deeper than the shallower CSV's last sample,
+            // b = a - (a-b) there mixes a flat-clamped (constant) curve with a
+            // still-varying one — a modeling choice worth flagging.  Mesh-aware
+            // so it stays silent when the fault is shallower than both CSVs
+            // (the shipped config: fault ~16.5 km, CSVs to 52.7/60 km).
+            const real_t shallower_max = std::min(acv.x.back(), amb.x.back());
+            if (acv.x.back() != amb.x.back() && fault_depth_max > shallower_max)
+            {
+               const char* clamped = (acv.x.back() < amb.x.back()) ? "a" : "a-b";
+               const char* varying = (acv.x.back() < amb.x.back()) ? "a-b" : "a";
+               std::cout << "[derived]   WARNING (R-029): the two CSV depth ranges "
+                            "differ and the fault (" << fault_depth_max
+                         << " m) is deeper than the shallower CSV (" << shallower_max
+                         << " m); below that depth b = a-(a-b) mixes a flat-clamped "
+                         << clamped << "(z) with a varying " << varying
+                         << "(z) — extend " << clamped
+                         << "'s CSV to match if unintended.\n";
+            }
+            bool found = false;
+            for (std::size_t k = 1; k < amb.x.size(); ++k)
+            {
+               const bool straddles =
+                  (amb.y[k - 1] < 0.0) != (amb.y[k] < 0.0);
+               if (straddles)
+               {
+                  const real_t zc = amb.x[k - 1]
+                     + (0.0 - amb.y[k - 1]) / (amb.y[k] - amb.y[k - 1])
+                       * (amb.x[k] - amb.x[k - 1]);
+                  std::cout << "[derived]   VW->VS transition (a-b=0) at depth = "
+                            << zc << " m";
+                  if (zc > fault_depth_max)
+                  {
+                     std::cout << "  (BELOW the fault bottom: the meshed fault is "
+                                  "entirely velocity-weakening)";
+                  }
+                  std::cout << "\n";
+                  found = true;
+                  break;
+               }
+            }
+            if (!found)
+            {
+               std::cout << "[derived]   (a-b) does not cross 0 within the "
+                            "sampled range — fault is entirely "
+                         << (amb.y.front() >= 0.0 ? "velocity-strengthening"
+                                                  : "velocity-weakening")
+                         << "\n";
+            }
+         }
+      }
+      // PLAN DEVIATION (documented): PrintDerivedAndCheck is LSW-only (it reads
+      // lsw.mu_s/mu_d/d_c) and would abort on an RS run; the RS overload
+      // PrintDerivedAndCheckRS prints RS-grounded derived quantities (L_nuc =
+      // mu*Dc/((b-a)*sigma_n), steady-state friction f_ss, RS nucleation gate).
+      if (is_lsw)
+      {
+         (void)spatial::PrintDerivedAndCheck(
+            pd_cfg, lsw,
+            geom.GetTauPre(), geom.sigma_n_per_dof(),
+            dof_coords_3d,
+            cfg.nucleation, nuc_params,
+            cfg.stress,
+            /*mu_bulk=*/material.mu_const,
+            cp_seed, cs_seed,
+            h_min_global,
+            dt_cfl, cfg.time.tfinal,
+            num_fault_global,
+            geom.NumZeroNormalFallbacks()
+#ifdef MFEM_USE_MPI
+            , comm
+#endif
+            , rank);
+      }
+      else
+      {
+         (void)spatial::PrintDerivedAndCheckRS(
+            pd_cfg, rs,
+            geom.GetTauPre(), geom.sigma_n_per_dof(),
+            dof_coords_3d,
+            cfg.nucleation, nuc_params,
+            cfg.stress,
+            /*mu_bulk=*/material.mu_const,
+            cp_seed, cs_seed,
+            h_min_global,
+            dt_cfl, cfg.time.tfinal,
+            num_fault_global,
+            geom.NumZeroNormalFallbacks()
+#ifdef MFEM_USE_MPI
+            , comm
+#endif
+            , rank);
+      }
+   }
+
+   // --verify-dispatch: print the selected friction / iterator / nucleation
+   // dispatch so a --dry-run can confirm the law without running the time
+   // loop.  Diagnostic only (gated on the flag; no behaviour change off).
+   if (verify_dispatch && rank == 0)
+   {
+      std::cout << "[verify-dispatch] friction law  : "
+                << (is_lsw ? "LSW (slip-weakening)"
+                           : "RateAndState (aging)") << "\n"
+                << "[verify-dispatch] friction iter : "
+                << (is_lsw
+                       ? "LswFrictionIterator (Tpv205 closed-form)"
+                       : "RateStateAgingFrictionIterator (Tpv102 aging, Brent)")
+                << "\n"
+                << "[verify-dispatch] nucleation    : "
+                << (cfg.nucleation.enabled ? "gradual_overstress (enabled)"
+                                           : "none (disabled)") << "\n"
+                << "[verify-dispatch] interior flux : scalar (homogeneous "
+                   "WaveOperator; matrix is Phase 9)\n";
    }
 
    // -----------------------------------------------------------------
@@ -1729,11 +1955,30 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 19. Sub-step iterator (TPV205 LSW closed form).  Phase N: only the
-   //     plain LSW path is used in this driver — the forced-rupture
-   //     mode toggle is gone with the dispatch flip above.
+   // 19. Sub-step iterator (Phase 2/3): dispatch through the
+   //     IFrictionIterator strategy.  The LswFrictionIterator is a
+   //     transparent forwarder over the same Tpv205SubStepIterator, so an
+   //     LSW run is byte-identical to the pre-Phase-2 driver.
    // -----------------------------------------------------------------
-   Tpv205SubStepIterator substep_iterator(fault_flux);
+   // Phase 3: dispatch the friction iterator through the factory.  LSW ->
+   // LswFrictionIterator (byte-identical forwarder); rate_state -> the
+   // aging RateStateAgingFrictionIterator.  rs is passed only for the RS
+   // path (reserved for future per-DOF wiring; the aging adapter reads the
+   // scalar RateStateBlock).
+   auto friction_iterator =
+      MakeFrictionIterator(cfg, fault_flux, is_lsw ? nullptr : &rs);
+   IFrictionIterator &substep_iterator = *friction_iterator;
+   // R-023: keep IFrictionIterator::WaveOpLaw() live on the production path as
+   // a single-source-of-truth cross-check — the wave-op law was set from is_lsw
+   // (:975) ~900 lines earlier (before the iterator exists), so assert the
+   // iterator the factory built agrees with it rather than leaving WaveOpLaw()
+   // dead surface area.
+   MFEM_VERIFY(substep_iterator.WaveOpLaw() ==
+               (is_lsw ? FaultFrictionLaw::LSW : FaultFrictionLaw::RateAndState),
+               "spatial_dyn_driver: friction iterator WaveOpLaw() ("
+               << static_cast<int>(substep_iterator.WaveOpLaw())
+               << ") disagrees with the wave-operator fault law set from "
+                  "is_lsw — friction dispatch is inconsistent.");
    {
       const int O = std::max(1, cfg.numerics.ader_order);
       std::vector<real_t> deltaT(O, dt / static_cast<real_t>(O));
@@ -1803,12 +2048,13 @@ int main(int argc, char *argv[])
          pv_local_slip_rate(2 * i + 1) = d.V2;
          pv_local_traction(2 * i + 0)  = d.tau1_corr;
          pv_local_traction(2 * i + 1)  = d.tau2_corr;
-         const real_t delta_norm = std::sqrt(d.slip1 * d.slip1
-                                             + d.slip2 * d.slip2);
-         // Phase N: spatial driver uses plain LSW.
-         pv_local_state(i) = mfem::seas::LSWFrictionCoefficient_TPV205(
-                                delta_norm,
-                                d.lsw_mu_s, d.lsw_mu_d, d.lsw_d_c);
+         // R-005/R-024: LSW writes the friction coefficient; RS writes the
+         // state variable psi.  InitializeFaultDOFs_Spatial_RS never sets the
+         // lsw_* fields (they stay 0), so the LSW formula would emit 0/NaN for
+         // an RS run.  The selection lives in the shared FaultStateChannelValue
+         // (dynamic/fault_state_channel.hpp) so this writer and the R-005 test
+         // exercise the SAME code path.
+         pv_local_state(i) = mfem::seas::FaultStateChannelValue(is_lsw, d);
          (void)time;
          pv_local_normal_stress(i)     = d.sigma_n_corr;
 

@@ -45,6 +45,7 @@
 #include "tpv102_nucleation.hpp"
 #include "../friction/state_evolution.hpp"
 
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -126,17 +127,56 @@ public:
       FrictionSolver::Method method
          = FrictionSolver::Method::NewtonRaphsonStable);
 
+   /// @brief Nucleation-callback variant of `AdvanceWithSubStepStates`.
+   ///
+   /// Identical to the plain per-sub-step overload above EXCEPT the
+   /// hard-coded `ApplyNucleationIncremental_TPV102(...)` call (once per
+   /// ADER sub-step, before the per-QP loop) is replaced by
+   /// `nuc_callback(t_substep_end, dt_substep)`.  This lets the SAFS
+   /// spatial driver route its own (Gaussian gradual-overstress)
+   /// nucleation through the aging-law iterator without hard-coding the
+   /// TPV102 patch.  Mirrors `Tpv205SubStepIterator`'s callback overload.
+   ///
+   /// The callback MUST mutate only `DOFData::tau1_nuc / tau2_nuc /
+   /// sigma_n_nuc`.  Pass `[](real_t, real_t){}` to opt out (no-op) —
+   /// then the per-QP friction pipeline is byte-identical to a run with
+   /// nucleation suppressed.  `method` has NO default here (the trailing
+   /// `nuc_callback` is required), so callers must pass both; the SAFS
+   /// driver passes `FrictionSolver::Method::Brent` (CLAUDE.md).
+   ///
+   /// The plain overload above is left untouched (byte-identical) for
+   /// the standalone TPV102 driver; this overload is strictly additive.
+   void AdvanceWithSubStepStates(
+      std::vector<DOFData> &dof_data,
+      const std::vector<Vector> &fault_coords,
+      const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+      const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+      real_t dt_macro,
+      real_t t_macro_start,
+      real_t *I_imp_plus_flat,
+      real_t *I_imp_minus_flat,
+      FrictionSolver::Method method,
+      const std::function<void(real_t /*t_substep_end*/,
+                               real_t /*dt_substep*/)> &nuc_callback);
+
    /// Accessor for the configured sub-step sizes (test hook).
    const std::vector<real_t> &GetDeltaT() const { return deltaT_; }
 
    /// Accessor for the configured quadrature weights (test hook).
    const std::vector<real_t> &GetTimeWeights() const { return time_weights_; }
 
+   /// Diagnostic-only accessor (mirrors `Tpv205SubStepIterator:146`).
+   /// TPV102 has no `[SLIP]` is_shared trace, so this is a no-op store —
+   /// it exists purely so the Phase-2 adapter can satisfy the
+   /// `IFrictionIterator` interface uniformly across LSW and RS laws.
+   void SetDiagNumLocalFaultQPs(int n) { diag_num_local_fault_qps_ = n; }
+
 private:
    FaultFaceFlux        &flux_;
    const AgingLawPsi    &state_evo_;
    std::vector<real_t>   deltaT_;
    std::vector<real_t>   time_weights_;
+   int                   diag_num_local_fault_qps_ = -1;  // interface symmetry (diag only)
 };
 
 } // namespace seas

@@ -238,6 +238,51 @@ struct SlipWeakeningBlock
    std::vector<SpatialRule> spatial;
 };
 
+/// Generic flat-clamped piecewise-linear 1-D interpolant (Phase 11b).  Used for
+/// the depth-profile a(z) and (a-b)(z) curves.
+struct PiecewiseLinear1D
+{
+   std::vector<real_t> x;   ///< ascending, strictly increasing; size >= 2
+   std::vector<real_t> y;   ///< same length as x
+
+   /// Linear interpolation; FLAT (constant) clamp outside [x.front(), x.back()].
+   real_t operator()(real_t xq) const;
+
+   /// MFEM_VERIFY: size>=2, x.size()==y.size(), x strictly increasing, all finite.
+   void Validate() const;
+};
+
+/// Depth profile for rate-and-state a(z) and b(z), built from two CSV files
+/// (Phase 11b).  a(depth) and (a-b)(depth) are interpolated INDEPENDENTLY (the
+/// two files may use different depth grids) and combined as b = a - (a-b).
+/// Named to avoid collision with the MATERIAL DepthProfile1D (Phase 10,
+/// dynamic/heterogeneous_material.hpp).
+struct FrictionDepthProfile1D
+{
+   PiecewiseLinear1D a_of_depth;     ///< a(depth_m)        (from param_a.csv)
+   PiecewiseLinear1D amb_of_depth;   ///< (a-b)(depth_m)    (from param_a_minus_b.csv)
+   real_t a(real_t depth_m) const { return a_of_depth(depth_m); }
+   real_t b(real_t depth_m) const { return a_of_depth(depth_m) - amb_of_depth(depth_m); }
+};
+
+/// `[friction.rate_state.depth_profile]` block (Phase 11b).  When `enabled`,
+/// the resolver seeds per-DOF a/b from `profile` (evaluated at depth = max(0,-z)
+/// in metres) instead of the scalar a_default/b_default.
+struct FrictionDepthProfileSpec
+{
+   bool        enabled             = false;
+   std::string param_a_csv;          ///< path to param_a.csv (CWD-relative, like [mesh].path)
+   std::string param_a_minus_b_csv;  ///< path to param_a_minus_b.csv
+   real_t      depth_to_m          = 1000.0;  ///< depth_units="km" -> 1000; "m" -> 1
+   FrictionDepthProfile1D profile;            ///< built at parse time
+};
+
+/// Load + build a FrictionDepthProfile1D from the two CSVs named in `spec`
+/// (Phase 11b).  Each CSV data row is `value, depth_km` (value FIRST); depth is
+/// scaled by `spec.depth_to_m` to metres.  MFEM_ABORTs on a missing file, <2
+/// rows, a duplicate depth, a non-finite field, or a non-positive `a` value.
+FrictionDepthProfile1D LoadFrictionDepthProfileCSVs(const FrictionDepthProfileSpec& spec);
+
 struct RateStateBlock
 {
    real_t f_0_default        = 0.6;
@@ -250,6 +295,7 @@ struct RateStateBlock
    real_t V_init_default     = 1.0e-9;
    real_t sigma_n_default    = 50.0e6;
    std::vector<SpatialRule>  spatial;
+   FrictionDepthProfileSpec  depth_profile;   // Phase 11b: depth-varying a/b (optional)
 };
 
 struct SpatialFrictionConfig
@@ -257,6 +303,15 @@ struct SpatialFrictionConfig
    int                                 schema_version = 0;
    FrictionLawKind                     law = FrictionLawKind::SlipWeakening;
    std::string                         description;
+   /// Compressive normal-stress floor [Pa] applied to σ_n in the shear
+   /// strength only (σ_n cap on strength; see the sliver-blowup debug
+   /// plan 2026-05-26).  `< 0` is the disabled sentinel ⇒ each friction
+   /// law keeps its exact current expression (LSW `max(σ_n,0)`, RS
+   /// `|σ_n|`) so the TPV/BP5 byte-exact regressions are untouched.
+   /// `>= 0` floors the strength's σ_n at this value, breaking the
+   /// σ_n→strength→radiation feedback that drives the tensile free-slip
+   /// runaway.  Parsed from `[friction].sigma_n_strength_floor_pa`.
+   real_t                              sigma_n_strength_floor_pa = -1.0;
    MaterialConstantFallback            material_fallback;
    MeshSpec                            mesh;
    VelocitySpec                        velocity;

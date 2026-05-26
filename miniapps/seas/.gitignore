@@ -3,6 +3,16 @@ bp2/results_*/
 bp2_full_*.txt
 bp1/results_*/
 bp1_full_*.txt
+# SAFS spatial-dynamic run outputs (multi-GB ParaView/checkpoint dirs)
+output_safs_dyn_*/
+safs/safs_dyn_*/
+# SAFS mesh-refinement experiment: large STL source + compiled CGAL remesher
+# and its CMake build artifacts (regenerable from remesh_fault_cgal.cpp +
+# CMakeLists.txt; the .msh is already ignored via *.msh above).
+safs/project_7.0_alternative/experimental_mesh_refinement/*.stl
+safs/project_7.0_alternative/experimental_mesh_refinement/remesh_cgal/build/
+# Large reference papers (multi-MB PDFs) — keep out of git history.
+safs/project_7.0_alternative/friction/rate-and-state/*.pdf
 
 # Plots
 bp2/plots_*/

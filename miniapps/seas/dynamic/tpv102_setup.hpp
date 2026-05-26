@@ -94,6 +94,11 @@ inline void InitializeFaultDOFs(std::vector<DOFData> &dof_data, int ndof,
 
       // Spatially varying direct effect parameter
       d.a  = ComputeA(along_strike, down_dip);
+      // Phase 11a: the substep iterator now reads the state-evolution
+      // parameter per-DOF from d.b (was the scalar state_evo_.GetB()).  Set it
+      // to TPV102's scalar b so native TPV102 is byte-identical to the
+      // pre-Phase-11 path (AgingLawPsi in tpv102_driver.cpp uses TPV102Params::b).
+      d.b  = TPV102Params::b;
       d.Dc = TPV102Params::Dc;
 
       // Initial state from equilibrium

@@ -136,6 +136,25 @@ SPATIAL_NUCLEATION_SRC               = dynamic/spatial_nucleation.cpp
 SPATIAL_NUCLEATION_OBJ               = $(SPATIAL_NUCLEATION_SRC:.cpp=.o)
 TEST_SPATIAL_NUCLEATION_SRC          = tests/unit/test_spatial_nucleation.cpp
 TEST_SPATIAL_NUCLEATION_OBJ          = $(TEST_SPATIAL_NUCLEATION_SRC:.cpp=.o)
+# TPV-via-spatial-driver Phase 1 (RS primitives) unit tests.
+TEST_TPV102_NUC_CALLBACK_PARITY_SRC  = tests/unit/test_tpv102_nuc_callback_parity.cpp
+TEST_TPV102_NUC_CALLBACK_PARITY_OBJ  = $(TEST_TPV102_NUC_CALLBACK_PARITY_SRC:.cpp=.o)
+TEST_SEED_EQUILIBRIUM_PSI_RS_SRC     = tests/unit/test_seed_equilibrium_psi_rs.cpp
+TEST_SEED_EQUILIBRIUM_PSI_RS_OBJ     = $(TEST_SEED_EQUILIBRIUM_PSI_RS_SRC:.cpp=.o)
+# TPV-via-spatial-driver Phase 2 (friction strategy interface).
+FRICTION_ITERATOR_FACTORY_SRC        = dynamic/friction_iterator_factory.cpp
+FRICTION_ITERATOR_FACTORY_OBJ        = $(FRICTION_ITERATOR_FACTORY_SRC:.cpp=.o)
+TEST_FRICTION_ITERATOR_FACTORY_SRC   = tests/unit/test_friction_iterator_factory.cpp
+TEST_FRICTION_ITERATOR_FACTORY_OBJ   = $(TEST_FRICTION_ITERATOR_FACTORY_SRC:.cpp=.o)
+TEST_ADVANCE_INTERFACE_COMPILES_SRC  = tests/unit/test_advance_interface_compiles.cpp
+TEST_ADVANCE_INTERFACE_COMPILES_OBJ  = $(TEST_ADVANCE_INTERFACE_COMPILES_SRC:.cpp=.o)
+# TPV-via-spatial-driver Phase 3 (SAFS + rate-and-state run).
+TEST_RESOLVE_RATE_STATE_GUARDS_SRC   = tests/unit/test_resolve_rate_state_guards.cpp
+TEST_RESOLVE_RATE_STATE_GUARDS_OBJ   = $(TEST_RESOLVE_RATE_STATE_GUARDS_SRC:.cpp=.o)
+TEST_CONSTANT_TENSOR_SIGN_SRC        = tests/unit/test_constant_tensor_sign.cpp
+TEST_CONSTANT_TENSOR_SIGN_OBJ        = $(TEST_CONSTANT_TENSOR_SIGN_SRC:.cpp=.o)
+TEST_PARAVIEW_STATE_CHANNEL_RS_SRC   = tests/unit/test_paraview_state_channel_rs.cpp
+TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ   = $(TEST_PARAVIEW_STATE_CHANNEL_RS_SRC:.cpp=.o)
 # Phase D of the same plan — --print-derived pre-flight gate.
 SPATIAL_PRINT_DERIVED_SRC            = dynamic/spatial_print_derived.cpp
 SPATIAL_PRINT_DERIVED_OBJ            = $(SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
@@ -145,6 +164,10 @@ TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.c
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
+
+# Phase 11b: depth-varying a(z)/b(z) two-CSV profile (interpolant + loader).
+TEST_FRICTION_DEPTH_PROFILE_SRC      = tests/unit/test_friction_depth_profile.cpp
+TEST_FRICTION_DEPTH_PROFILE_OBJ      = $(TEST_FRICTION_DEPTH_PROFILE_SRC:.cpp=.o)
 TEST_SPATIAL_VELOCITY_BUNDLE_SRC     = tests/unit/test_spatial_velocity_bundle.cpp
 TEST_SPATIAL_VELOCITY_BUNDLE_OBJ     = $(TEST_SPATIAL_VELOCITY_BUNDLE_SRC:.cpp=.o)
 TEST_SPATIAL_STRESS_BUNDLE_SRC       = tests/unit/test_spatial_stress_bundle.cpp
@@ -332,6 +355,7 @@ TEST_RUPTURE_MULTISTEP_SRC                 = tests/unit/test_rupture_multistep_s
 TEST_RUPTURE_TILTED_SRC                    = tests/unit/test_rupture_tilted_fault_serial_vs_parallel.cpp
 TEST_RUPTURE_RAKE_SWEEP_SRC                = tests/unit/test_rupture_rake_sweep_cross_rank.cpp
 TEST_RECONCILE_XRANK_SRC                   = tests/unit/test_shared_fault_reconcile_cross_rank.cpp
+TEST_RS_PSI_NP2_SRC                        = tests/unit/test_shared_fault_rs_psi_consistency_np2.cpp
 # Pepper-bug: ADJACENT-TRIANGLE UNIFORMITY test (8-fault-triangle fixture)
 TEST_ADJACENT_TRI_UNIFORMITY_SRC           = tests/unit/test_adjacent_triangle_fault_uniformity.cpp
 TEST_ADJACENT_TRI_FIRST_STEP_AUDIT_SRC     = tests/unit/test_adjacent_triangle_fault_first_step_audit.cpp
@@ -635,6 +659,7 @@ TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.
 TEST_RUPTURE_TILTED_OBJ                    = $(TEST_RUPTURE_TILTED_SRC:.cpp=.o)
 TEST_RUPTURE_RAKE_SWEEP_OBJ                = $(TEST_RUPTURE_RAKE_SWEEP_SRC:.cpp=.o)
 TEST_RECONCILE_XRANK_OBJ                   = $(TEST_RECONCILE_XRANK_SRC:.cpp=.o)
+TEST_RS_PSI_NP2_OBJ                        = $(TEST_RS_PSI_NP2_SRC:.cpp=.o)
 # fault_face_flux built WITH -DSEAS_TEST_INTERNAL for the reconcile oracle's
 # absolute-Pa injection hook (lives in the .cpp behind that macro).
 FAULT_FACE_FLUX_TESTINTERNAL_OBJ           = dynamic/fault_face_flux_testinternal.o
@@ -747,6 +772,7 @@ DYNAMIC_HEADERS = dynamic/wave_state.hpp \
                   dynamic/fault_face_flux.hpp \
                   dynamic/precomputed_face_fluxes.hpp \
                   dynamic/seas_dynamic_operator.hpp \
+                  dynamic/fault_state_channel.hpp \
                   dynamic/tpv102_setup.hpp
 
 # All headers
@@ -787,6 +813,13 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
                seas_test_spatial_nucleation \
+               seas_test_tpv102_nuc_callback_parity \
+               seas_test_seed_equilibrium_psi_rs \
+               seas_test_friction_iterator_factory \
+               seas_test_advance_interface_compiles \
+               seas_test_resolve_rate_state_guards \
+               seas_test_constant_tensor_sign \
+               seas_test_paraview_state_channel_rs \
                seas_test_spatial_print_derived \
                seas_test_paraview_set_fault_params_spatial \
                seas_test_spatial_velocity_bundle \
@@ -794,6 +827,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_constant_stress_source \
                seas_test_spatial_setup \
                seas_test_phaseh_lsw_forced_rupture \
+               seas_test_tpv205_friction \
                seas_test_phaseh_wave_operator_constant_parity \
                seas_test_wave_operator \
                seas_test_wave_bc \
@@ -1217,6 +1251,21 @@ seas_test_spatial_friction_resolver: $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
                                       $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 11b: depth-varying a(z)/b(z) two-CSV profile test.
+seas_test_friction_depth_profile: $(TEST_FRICTION_DEPTH_PROFILE_OBJ) \
+                                   $(SPATIAL_FRICTION_OBJ) \
+                                   $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                   $(MATERIAL_COEFFICIENTS_OBJ) \
+                                   $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FRICTION_DEPTH_PROFILE_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
@@ -1709,6 +1758,12 @@ seas_test_shared_fault_reconcile_cross_rank: $(TEST_RECONCILE_XRANK_OBJ) $(WAVE_
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RECONCILE_XRANK_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_TESTINTERNAL_OBJ) $(FRICTION_SOLVER_OBJ) $(TPV205_SUBSTEP_ITERATOR_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# R-020(b): psi-explicit np=2 shared-fault RS consistency (bare AdvanceADER +
+# RateAndState; production reconcile, no SEAS_TEST_INTERNAL).
+seas_test_shared_fault_rs_psi_consistency_np2: $(TEST_RS_PSI_NP2_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RS_PSI_NP2_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 seas_test_rupture_rake_sweep_cross_rank: $(TEST_RUPTURE_RAKE_SWEEP_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_RAKE_SWEEP_OBJ) $(WAVE_OPERATOR_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
@@ -1966,6 +2021,8 @@ $(SPATIAL_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp \
 
 seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(TPV205_SHARED_OBJS) \
+                          $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                          $(FRICTION_ITERATOR_FACTORY_OBJ) \
                           $(WAVE_OPERATOR_OBJ) \
                           $(PRECOMPUTED_FACE_FLUXES_OBJ) \
                           $(GODUNOV_FLUX_OBJ) \
@@ -1984,6 +2041,8 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(TPV205_SHARED_OBJS) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
 	    $(GODUNOV_FLUX_OBJ) \
@@ -2064,6 +2123,196 @@ $(TEST_SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 test-spatial-nucleation: seas_test_spatial_nucleation
 	./seas_test_spatial_nucleation
+
+# TPV-via-spatial-driver Phase 1 (RS primitives): nucleation-callback
+# parity for Tpv102SubStepIterator.  Links the tpv102 iterator + the
+# shared fault_face_flux + friction_solver objects (same set the
+# standalone tpv102 driver uses, minus the wave-operator chain the test
+# does not exercise).
+$(TEST_TPV102_NUC_CALLBACK_PARITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                            $(TPV102_HEADERS) \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_tpv102_nuc_callback_parity: $(TEST_TPV102_NUC_CALLBACK_PARITY_OBJ) \
+                                      $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                                      $(FAULT_FACE_FLUX_OBJ) \
+                                      $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV102_NUC_CALLBACK_PARITY_OBJ) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv102-nuc-callback-parity: seas_test_tpv102_nuc_callback_parity
+	./seas_test_tpv102_nuc_callback_parity
+
+# TPV-via-spatial-driver Phase 1 (RS primitives): equilibrium-psi seed
+# for the SAFS RS path.  The test includes dynamic/spatial_setup.hpp
+# (-> spatial_friction.hpp + heterogeneous_material.hpp), so compile with
+# the same HDF5 + toml include flags the spatial driver uses for that
+# header chain.  Link only MFEM: SeedEquilibriumPsi_RS + DieterichRuina
+# are header-only and FrictionSolver::V0 is an inline constexpr (C++17).
+$(TEST_SEED_EQUILIBRIUM_PSI_RS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                         dynamic/spatial_setup.hpp \
+                                         friction/dieterich_ruina.hpp \
+                                         spatial/code/spatial_friction.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_seed_equilibrium_psi_rs: $(TEST_SEED_EQUILIBRIUM_PSI_RS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SEED_EQUILIBRIUM_PSI_RS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-seed-equilibrium-psi-rs: seas_test_seed_equilibrium_psi_rs
+	./seas_test_seed_equilibrium_psi_rs
+
+# TPV-via-spatial-driver Phase 2 (friction strategy interface).  These
+# objects pull friction_iterator.hpp -> wave_operator.hpp (FaultFrictionLaw)
+# + spatial_friction.hpp, so compile with the same HDF5 + toml include
+# flags the spatial driver uses for that header chain.  wave_operator.inl
+# is template-only, so no TU here instantiates WaveOperator -> no link dep
+# on wave_operator.o.
+$(FRICTION_ITERATOR_FACTORY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/friction_iterator.hpp \
+                                       dynamic/friction_iterator_factory.hpp \
+                                       spatial/code/spatial_friction.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_FRICTION_ITERATOR_FACTORY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                            dynamic/friction_iterator.hpp \
+                                            dynamic/friction_iterator_factory.hpp \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
+                                     $(FRICTION_ITERATOR_FACTORY_OBJ) \
+                                     $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+                                     $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                                     $(FAULT_FACE_FLUX_OBJ) \
+                                     $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
+	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-friction-iterator-factory: seas_test_friction_iterator_factory
+	./seas_test_friction_iterator_factory
+
+$(TEST_ADVANCE_INTERFACE_COMPILES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                             dynamic/friction_iterator.hpp \
+                                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+# R-010 compile guard: links only MFEM — the stub iterator + the
+# driver-mirror function exercise the interface without instantiating any
+# concrete adapter, so no iterator/flux objects are needed.
+seas_test_advance_interface_compiles: $(TEST_ADVANCE_INTERFACE_COMPILES_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_ADVANCE_INTERFACE_COMPILES_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-advance-interface-compiles: seas_test_advance_interface_compiles
+	./seas_test_advance_interface_compiles
+
+# Phase 3 (SAFS + rate-and-state): ResolveRateState guard tests (R-003 no
+# double pore-pressure, R-006 per-DOF b/f_0/V_0 reject, R-011 a>b allowed).
+$(TEST_RESOLVE_RATE_STATE_GUARDS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                            spatial/code/spatial_friction.hpp \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_resolve_rate_state_guards: $(TEST_RESOLVE_RATE_STATE_GUARDS_OBJ) \
+                                     $(SPATIAL_FRICTION_OBJ) \
+                                     $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                     $(MATERIAL_COEFFICIENTS_OBJ) \
+                                     $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_RESOLVE_RATE_STATE_GUARDS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-resolve-rate-state-guards: seas_test_resolve_rate_state_guards
+	./seas_test_resolve_rate_state_guards
+
+# Phase 3 (D3.1, R-007): constant_tensor right-lateral-positive sign test,
+# parametrized over {Dc2,Dc8,Dc10,rate_state}.
+$(TEST_CONSTANT_TENSOR_SIGN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       spatial/code/spatial_stress.hpp \
+                                       fault/fault_basis.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
+                                $(SPATIAL_STRESS_OBJ) \
+                                $(SPATIAL_FRICTION_OBJ) \
+                                $(STRESS_FIELD_3D_OBJ) \
+                                $(DATA_FIELD_3D_OBJ) \
+                                $(FIELD_COEFFICIENT_OBJ) \
+                                $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-constant-tensor-sign: seas_test_constant_tensor_sign
+	./seas_test_constant_tensor_sign
+
+# Phase 3 (R-005): ParaView RS state channel writes d.psi.
+$(TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                            $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_paraview_state_channel_rs: $(TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ) \
+                                     $(FAULT_FACE_FLUX_OBJ) \
+                                     $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-paraview-state-channel-rs: seas_test_paraview_state_channel_rs
+	./seas_test_paraview_state_channel_rs
 
 # Phase D test target — print-derived pre-flight gate unit tests
 # T-D02 / T-D05 / T-D06 / T-D07 exercised in-process via the printer
@@ -2377,6 +2626,12 @@ $(TEST_SPATIAL_FRICTION_CONFIG_OBJ): %.o: $(SRC)%.cpp \
 $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ): %.o: $(SRC)%.cpp \
                                             spatial/code/spatial_friction.hpp \
                                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_FRICTION_DEPTH_PROFILE_OBJ): %.o: $(SRC)%.cpp \
+                                         spatial/code/spatial_friction.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
 
@@ -2774,6 +3029,10 @@ $(TEST_RECONCILE_XRANK_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_TEST_INTERNAL -DSEAS_USE_MPI -c $< -o $@
 
+$(TEST_RS_PSI_NP2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 # Same source as $(FAULT_FACE_FLUX_OBJ) but compiled WITH -DSEAS_TEST_INTERNAL
 # so the reconcile oracle's absolute-Pa injection hook + static knob are present.
 $(FAULT_FACE_FLUX_TESTINTERNAL_OBJ): $(SRC)dynamic/fault_face_flux.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
@@ -3015,6 +3274,12 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-godunov-flux test-wave-operator \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
+      test-tpv205-friction \
+      test-friction-depth-profile \
+      test-tpv102-nuc-callback-parity test-seed-equilibrium-psi-rs \
+      test-friction-iterator-factory test-advance-interface-compiles \
+      test-resolve-rate-state-guards test-constant-tensor-sign \
+      test-paraview-state-channel-rs \
       test-spatial-velocity-bundle \
       test-spatial-constant-stress-source \
       test-spatial-setup \
@@ -3281,6 +3546,9 @@ test-spatial-friction-config: seas_test_spatial_friction_config
 test-spatial-friction-resolver: seas_test_spatial_friction_resolver
 	./seas_test_spatial_friction_resolver
 
+test-friction-depth-profile: seas_test_friction_depth_profile
+	./seas_test_friction_depth_profile
+
 test-spatial-velocity-bundle: seas_test_spatial_velocity_bundle
 	./seas_test_spatial_velocity_bundle
 
@@ -3301,6 +3569,12 @@ test-spatial-setup: seas_test_spatial_setup
 
 test-phaseh-lsw-forced-rupture: seas_test_phaseh_lsw_forced_rupture
 	./seas_test_phaseh_lsw_forced_rupture
+
+# TPV205 LSW friction-kernel unit tests (R-002/R-003 strength-barrier
+# short-circuits + the sigma_n strength floor, sliver-blowup plan
+# 2026-05-26).  Header-only; no .o beyond MFEM.
+test-tpv205-friction: seas_test_tpv205_friction
+	./seas_test_tpv205_friction
 
 # Phase H Stage 1 byte-exact gate; runs serial + np=4.
 test-phaseh-wave-operator-constant-parity: seas_test_phaseh_wave_operator_constant_parity
@@ -3507,6 +3781,11 @@ test-rupture-tilted-fault-serial-vs-parallel: seas_test_rupture_tilted_fault_ser
 
 test-shared-fault-reconcile-cross-rank: seas_test_shared_fault_reconcile_cross_rank
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_shared_fault_reconcile_cross_rank
+
+# R-020(b): psi-explicit np=2 shared-fault RS consistency.  Excluded from the
+# default `test:` umbrella (needs mpirun -np 2); run as a pre-submit check.
+test-shared-fault-rs-psi-consistency-np2: seas_test_shared_fault_rs_psi_consistency_np2
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_shared_fault_rs_psi_consistency_np2
 
 # R-004 (REVIEW_speckle_seissol_drdg3d_rootcause_2026-05-24): guards the fixed
 # predictor ghost read — the batched byNODES exchange read through

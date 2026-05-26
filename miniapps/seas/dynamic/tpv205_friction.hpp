@@ -91,12 +91,23 @@ inline real_t LSWFrictionCoefficient_TPV205(real_t delta,
 /// For LSW, σ_n is unaffected by friction: σ_n_corr = σ_n_trial (caller
 /// sets that directly when filling EvalStageState).  This function does
 /// NOT touch the normal-stress channel.
+///
+/// `sigma_n_floor` (compressive normal-stress strength floor [Pa],
+/// sliver-blowup plan 2026-05-26): the σ_n entering the SHEAR STRENGTH
+/// is `max(σ_n_total, sigma_n_floor)`.  The default `0.0` reproduces the
+/// current LSW "fault opens under tension" semantic (`max(σ_n,0)`)
+/// byte-exactly, so every caller that omits the argument is unchanged.
+/// A positive floor (e.g. 10 MPa) saturates the strength at `μ·floor`
+/// below the threshold, so a spurious tensile σ_n excursion can no
+/// longer collapse the strength to 0 and free-slide.  The floor affects
+/// ONLY the strength; `tau*_corr` / the normal channel are unchanged.
 inline void SolveLSW_TPV205(real_t tau1_trial, real_t tau2_trial,
                             real_t tau1_total, real_t tau2_total,
                             real_t sigma_n_total, real_t eta_s,
                             real_t mu_eff,
                             real_t &V_abs, real_t &V1, real_t &V2,
-                            real_t &tau1_corr, real_t &tau2_corr)
+                            real_t &tau1_corr, real_t &tau2_corr,
+                            real_t sigma_n_floor = 0.0)
 {
    MFEM_ASSERT(eta_s > 0.0,
                "SolveLSW_TPV205: eta_s must be positive; got " << eta_s);
@@ -151,10 +162,15 @@ inline void SolveLSW_TPV205(real_t tau1_trial, real_t tau2_trial,
       return;
    }
 
-   // Inside the rupture area the standard "fault opens under tension"
-   // semantic applies — σ_n_pos clamps to 0 so a tensile transient
-   // drops τ_strength to 0 and the fault freely slides.
-   const real_t sigma_n_pos = std::max<real_t>(sigma_n_total, 0.0);
+   // Inside the rupture area the strength's σ_n is floored at
+   // `sigma_n_floor`.  With the default `0.0` this is the standard
+   // "fault opens under tension" semantic — σ_n_pos clamps to 0 so a
+   // tensile transient drops τ_strength to 0 and the fault freely slides
+   // (byte-exact with the historical `max(σ_n,0)`).  With a positive
+   // floor the strength saturates at `μ_eff·sigma_n_floor` below the
+   // floor, breaking the tensile free-slip runaway (sliver-blowup plan
+   // 2026-05-26 §2c).
+   const real_t sigma_n_pos = std::max<real_t>(sigma_n_total, sigma_n_floor);
    const real_t tau_strength = mu_eff * sigma_n_pos;
 
    // Closed-form V_abs from radiation damping balance.

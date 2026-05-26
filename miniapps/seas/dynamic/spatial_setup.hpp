@@ -29,8 +29,14 @@
 #include "fault_face_flux.hpp"
 #include "heterogeneous_material.hpp"
 #include "../spatial/code/spatial_friction.hpp"
+// R-001: DieterichRuinaFriction (Constants / InitialStatePsi) is used by
+// SeedEquilibriumPsi_RS below and is not pulled in by any of the includes
+// above.  FrictionSolver (R-009 V0 guard) is visible transitively via
+// fault_face_flux.hpp -> friction_solver.hpp.
+#include "../friction/dieterich_ruina.hpp"
 
 #include <cmath>
+#include <cstddef>
 #include <vector>
 
 namespace mfem
@@ -332,6 +338,7 @@ inline void InitializeFaultDOFs_Spatial_RS(
 
       // RS fields (lsw_* stays zero — defensive).
       d.a   = rs.a(i);
+      d.b   = rs.b(i);   // Phase 11a: per-DOF state-evolution b (was scalar blk.b_default)
       d.Dc  = rs.Dc(i);
       // Initial state: derived from V_init magnitude / eta during the
       // 4-phase init (callers run the Brent solve later); here we seed
@@ -342,6 +349,127 @@ inline void InitializeFaultDOFs_Spatial_RS(
 
       // Forced-rupture fields stay at their in-class defaults
       // (T=1e9, t_0=0) — RS path does not consume them.
+   }
+}
+
+/// @brief Seed the per-DOF rate-and-state ψ to equilibrium for the
+/// resolved pre-stress (overwrites the `d.psi = 0.0` stub left by
+/// `InitializeFaultDOFs_Spatial_RS`).
+///
+/// For each DOF, ψ is chosen so the fault is in steady sliding at
+/// `rs.V_init(i)` under the current total pre-stress
+///   tau0 = |(tau1_0 + tau1_nuc, tau2_0 + tau2_nuc)|
+/// i.e. it inverts the regularized friction balance
+///   tau0 = σ_n0 · a · asinh[V_init/(2·V0) · exp(ψ/a)] + η · V_init
+/// via `DieterichRuinaFriction::InitialStatePsi`.  When the effective
+/// driving traction `tau_eff = tau0 − η·V_init` is non-positive (no
+/// pre-stress shear, or radiation damping `η·V_init` that exceeds tau0),
+/// `InitialStatePsi`'s `log[(2V0/V_init)·sinh(f/a)]` would go to inf/NaN,
+/// so the locked steady-state ψ = f0 + b·ln(V0/V_init) is used instead
+/// (R-014).
+///
+/// @param dof_data  Per-DOF state (already seeded by
+///                  `InitializeFaultDOFs_Spatial_RS`); only `psi` is
+///                  written.
+/// @param rs        Per-DOF RS params: a, b, Dc, V_init are read (Phase 11a:
+///                  b is now per-DOF `rs.b(ii)`, not the scalar blk.b_default).
+/// @param blk       Global RS scalars: V_0, f_0 are read (b moved to `rs`).
+///
+/// R-001 (CRITICAL): the radiation-damping argument is `d.eta_s` (a
+/// `DOFData` member set by `seed_static_dof_fields` at :82 == 0.5·sqrt(μρ),
+/// exactly what `FaultFaceFlux` uses in the friction solve), NOT
+/// `rs.eta_s` — `RateStatePerDOFParams` has only a per-DOF `eta` Vector
+/// (spatial_friction.hpp:295) and no `eta_s` member, so `rs.eta_s` would
+/// be a hard compile error.  For the homogeneous SAFS material
+/// `d.eta_s == rs.eta(i)` at the same element centroid, so the seed's
+/// damping matches the friction solve's.
+///
+/// R-009 (V0 single source of truth): the leading guard asserts the
+/// config `blk.V_0_default` equals the solver's compile-time
+/// `FrictionSolver::V0` (= 1e-6).  The force solve hard-codes
+/// `FrictionSolver::V0` (fault_face_flux.cpp:224) while this seed and the
+/// `AgingLawPsi` ψ-update use `blk.V_0_default`; if they disagree the
+/// fault is NOT at V_init at t=0 and the friction is wrong throughout
+/// with no error.  The deliverable uses the default V_0 = 1e-6 (the guard
+/// passes); it is a tripwire for future tuning.  (Proper fix — thread the
+/// resolved V0 into FrictionSolver — is a no-hardcoded-numbers follow-up
+/// gated out of the byte-exact TPV oracle path.)
+inline void SeedEquilibriumPsi_RS(
+   std::vector<DOFData>&            dof_data,
+   const RateStatePerDOFParams&     rs,   // a, b, Dc, V_init per-DOF
+   const RateStateBlock&            blk)  // V_0, f_0 scalar globals (b now per-DOF in rs)
+{
+   // R-012: the loop reads rs.{V_init,Dc,a}(ii) for ii in [0, nd); mfem::
+   // Vector::operator() is unchecked in release, so a too-short rs is an
+   // OOB read.  Validate up front like InitializeFaultDOFs_Spatial_RS.
+   const int nd = static_cast<int>(dof_data.size());
+   MFEM_VERIFY(rs.a.Size() >= nd && rs.b.Size() >= nd && rs.Dc.Size() >= nd
+               && rs.V_init.Size() >= nd,
+               "SeedEquilibriumPsi_RS: rs vectors (a=" << rs.a.Size()
+               << ", b=" << rs.b.Size() << ", Dc=" << rs.Dc.Size()
+               << ", V_init=" << rs.V_init.Size()
+               << ") must cover dof_data.size()=" << nd
+               << "; call after InitializeFaultDOFs_Spatial_RS with the same rs.");
+
+   // R-009: V_0 has two consumers — the config (this seed + AgingLawPsi)
+   // and the hardcoded FrictionSolver::V0 used by the force solve.  They
+   // MUST agree or the fault is not in equilibrium at t=0.
+   MFEM_VERIFY(std::abs(blk.V_0_default - FrictionSolver::V0)
+               <= 1e-30 + 1e-12 * FrictionSolver::V0,
+               "SeedEquilibriumPsi_RS: [friction.rate_state].V_0 ("
+               << blk.V_0_default << ") must equal FrictionSolver::V0 ("
+               << FrictionSolver::V0 << "); the force solve hardcodes V0.");
+
+   for (std::size_t i = 0; i < dof_data.size(); ++i)
+   {
+      const int ii = static_cast<int>(i);  // mfem::Vector accessors take int
+      DOFData& d = dof_data[i];
+
+      // R-028: tripwire that InitializeFaultDOFs_*_RS set the per-DOF d.b
+      // (Phase 11a) before seeding.  DOFData.b defaults to NaN; a forgotten
+      // init would otherwise reach the aging-law UpdateStateAnalytic where a
+      // NaN/0 b silently mis-evolves psi (b=0: psi snaps to f0 for psi<f0).
+      MFEM_VERIFY(std::isfinite(d.b) && d.b > 0.0,
+                  "SeedEquilibriumPsi_RS: DOFData.b not set (= " << d.b
+                  << ") at DOF " << ii << "; InitializeFaultDOFs_*_RS must set "
+                  "d.b > 0 before seeding (Phase 11a per-DOF b).");
+
+      // R-001 edge guard: else log()/InitialStatePsi -> inf/NaN psi.
+      MFEM_VERIFY(rs.V_init(ii) > 0.0,
+                  "SeedEquilibriumPsi_RS: V_init <= 0 at DOF " << ii
+                  << " (ill-posed steady state)");
+
+      // R-017: InitialStatePsi computes f = (tau0 - eta*V_init)/sigma_n0;
+      // sigma_n0 == 0 -> f = inf -> psi = inf, sigma_n0 < 0 -> log(negative)
+      // -> NaN, and InitialStatePsi's only check (MFEM_ASSERT log_arg>0) is
+      // debug-only and passes the +inf case.  ResolveRateState enforces
+      // sigma_n_eff > 0 upstream (spatial_friction.cpp:1073), so this guard
+      // is a defensive tripwire consistent with the V_init guard above.
+      MFEM_VERIFY(d.sigma_n0 > 0.0,
+                  "SeedEquilibriumPsi_RS: sigma_n0 <= 0 at DOF " << ii
+                  << " (" << d.sigma_n0 << "); effective normal stress must "
+                  "be compressive (>0) or InitialStatePsi seeds inf/NaN psi.");
+
+      const DieterichRuinaFriction fr(
+         DieterichRuinaFriction::Constants{
+            blk.V_0_default, blk.f_0_default, rs.b(ii), rs.Dc(ii)});
+
+      const real_t tau0 = std::hypot(d.tau1_0 + d.tau1_nuc,
+                                     d.tau2_0 + d.tau2_nuc);
+
+      // R-014: InitialStatePsi computes f = (tau0 - eta*V_init)/sigma_n
+      // and log[(2V0/V_init)*sinh(f/a)]; if the radiation damping eta*V_init
+      // exceeds the prestress (tau_eff <= 0) the log argument goes negative
+      // -> NaN psi.  Branch on the EFFECTIVE traction, not tau0, so the
+      // damping-dominated case falls back to the locked steady state.
+      // R-001: damping is d.eta_s (DOFData member), NEVER rs.eta_s
+      // (RateStatePerDOFParams has no such member).
+      const real_t tau_eff = tau0 - d.eta_s * rs.V_init(ii);
+      d.psi = (tau_eff > 0.0)
+         ? fr.InitialStatePsi(tau0, rs.V_init(ii),
+                              d.sigma_n0, d.eta_s, rs.a(ii))
+         : (blk.f_0_default
+            + rs.b(ii) * std::log(blk.V_0_default / rs.V_init(ii)));
    }
 }
 

@@ -701,6 +701,81 @@ static void T_27_velocity_use_sidecar_true_default_still_requires_root()
                "default use_sidecar=true with empty paths must abort");
 }
 
+// T-28  σ_n strength floor: `[friction].sigma_n_strength_floor_pa = 10.0e6`
+//        parses round-trip into SpatialFrictionConfig (sliver-blowup plan
+//        2026-05-26 §Phase 1).  The `[friction]` table is declared BEFORE
+//        the law sub-block.
+static void T_28_sigma_n_strength_floor_parses()
+{
+   std::cout << "\n[T-28] [friction].sigma_n_strength_floor_pa = 10.0e6 "
+                "parses\n";
+   const std::string toml = MinimalLSWHeader()
+                            + "[friction]\n"
+                              "sigma_n_strength_floor_pa = 10.0e6\n"
+                            + MinimalLSWBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.sigma_n_strength_floor_pa == 10.0e6,
+               "sigma_n_strength_floor_pa round-trips to 10e6");
+}
+
+// T-29  σ_n strength floor: absent key ⇒ disabled sentinel -1.0.
+static void T_29_sigma_n_strength_floor_absent_disabled()
+{
+   std::cout << "\n[T-29] absent sigma_n_strength_floor_pa ⇒ -1.0 "
+                "(disabled)\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.sigma_n_strength_floor_pa == -1.0,
+               "absent key defaults to -1.0 (disabled)");
+}
+
+// T-30  σ_n strength floor: an EXPLICIT negative value aborts (a negative
+//        floor is the disabled sentinel and must be expressed by omitting
+//        the key, not by setting it negative).
+static void T_30_sigma_n_strength_floor_negative_aborts()
+{
+   std::cout << "\n[T-30] explicit negative sigma_n_strength_floor_pa "
+                "aborts\n";
+   const std::string toml = MinimalLSWHeader()
+                            + "[friction]\n"
+                              "sigma_n_strength_floor_pa = -5.0\n"
+                            + MinimalLSWBlock();
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "explicit negative sigma_n_strength_floor_pa must abort");
+}
+
+// T-31  σ_n strength floor: 0.0 is a VALID value (≡ LSW max(σ_n,0); for RS
+//        switches |σ_n|→max(σ_n,0)).  Must parse, not abort.
+static void T_31_sigma_n_strength_floor_zero_allowed()
+{
+   std::cout << "\n[T-31] sigma_n_strength_floor_pa = 0.0 is allowed\n";
+   const std::string toml = MinimalLSWHeader()
+                            + "[friction]\n"
+                              "sigma_n_strength_floor_pa = 0.0\n"
+                            + MinimalLSWBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.sigma_n_strength_floor_pa == 0.0,
+               "sigma_n_strength_floor_pa = 0.0 parses (not aborts)");
+}
+
+// T-32  R-001: σ_n strength floor key mis-nested under a law sub-block
+//        (`[friction.slip_weakening]`) must ABORT, not silently parse to the
+//        disabled sentinel.  The floor is a TOP-LEVEL `[friction]` key.
+static void T_32_sigma_n_floor_misnested_aborts()
+{
+   std::cout << "\n[T-32] mis-nested sigma_n_strength_floor_pa "
+                "(under [friction.slip_weakening]) aborts (R-001)\n";
+   std::string toml = MinimalLSWHeader();
+   toml += "[friction.slip_weakening]\n"
+           "mu_s_default = 1.1\n"
+           "mu_d_default = 0.5\n"
+           "d_c_default = 0.5\n"
+           "cohesion_default = 0.0\n"
+           "sigma_n_strength_floor_pa = 10.0e6\n";   // WRONG: belongs under [friction]
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "floor key under [friction.slip_weakening] must abort (R-001)");
+}
+
 // T-12 material fallback bounds
 static void T_12_material_fallback_bounds()
 {
@@ -780,6 +855,11 @@ int main(int, char**)
    T_25_paraview_extended_defaults();
    T_26_velocity_use_sidecar_false_relaxes_dataset_root();
    T_27_velocity_use_sidecar_true_default_still_requires_root();
+   T_28_sigma_n_strength_floor_parses();
+   T_29_sigma_n_strength_floor_absent_disabled();
+   T_30_sigma_n_strength_floor_negative_aborts();
+   T_31_sigma_n_strength_floor_zero_allowed();
+   T_32_sigma_n_floor_misnested_aborts();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

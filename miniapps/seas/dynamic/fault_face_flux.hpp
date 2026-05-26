@@ -16,6 +16,8 @@
 #include "wave_state.hpp"
 #include "friction_solver.hpp"
 
+#include <limits>
+
 namespace mfem
 {
 namespace seas
@@ -45,6 +47,17 @@ struct DOFData
    real_t sigma_n_nuc = 0;               ///< Nucleation normal-stress driver
    real_t tau1_nuc = 0, tau2_nuc = 0;    ///< Nucleation shear-traction driver
    real_t a = 0.004;                      ///< Direct effect parameter
+   real_t b = std::numeric_limits<real_t>::quiet_NaN();
+                                          ///< RS state-evolution parameter (per-DOF; set by
+                                          ///< every RS init path: TPV102 = TPV102Params::b,
+                                          ///< SAFS-RS = rs.b(i)).  R-028: NaN default (NOT
+                                          ///< 0.0).  LSW DOFData never reads it; an RS path
+                                          ///< that forgot to set it propagates NaN through
+                                          ///< the aging-law UpdateStateAnalytic (psi -> NaN),
+                                          ///< caught by the blow-up / equilibrium checks.  A
+                                          ///< 0.0 default would be SILENT-WRONG: for psi<f0
+                                          ///< the analytic update snaps psi to f0 with no
+                                          ///< NaN.  SeedEquilibriumPsi_RS also guards d.b>0.
    real_t Dc = 0.14;                      ///< Critical slip distance [m]
    real_t psi = 0;                        ///< State variable (logarithmic)
    real_t slip_rate = 0;                  ///< Current slip rate |V| [m/s]
@@ -451,10 +464,35 @@ public:
    /// Access the friction solver.
    const FrictionSolver &GetSolver() const { return solver_; }
 
+   /// Set the compressive normal-stress strength floor [Pa] (sliver-
+   /// blowup plan 2026-05-26).  `v < 0` is the disabled sentinel: each
+   /// friction law keeps its exact current strength expression (LSW
+   /// `max(σ_n,0)`, RS `|σ_n|`) ⇒ byte-exact for the TPV/BP5
+   /// regressions.  `v >= 0` floors the σ_n that enters the SHEAR
+   /// STRENGTH (only) at `v`, so below `v` compression the strength is
+   /// the constant `μ·v` rather than the spurious tensile `0` (LSW) or
+   /// `|σ_n|` (RS).  The written-back `sigma_n_corr` channel is
+   /// untouched.  Set once from config by the driver; default disabled.
+   void SetSigmaNStrengthFloor(real_t v) { sigma_n_strength_floor_ = v; }
+
+   /// Raw floor value (the disabled sentinel `< 0` is preserved).
+   real_t GetSigmaNStrengthFloor() const { return sigma_n_strength_floor_; }
+
+   /// Floor value for the LSW path, with the disabled sentinel `< 0`
+   /// mapped to `0.0`.  Passing `0.0` to `SolveLSW_TPV205`'s
+   /// `sigma_n_floor` argument reproduces the current LSW `max(σ_n,0)`
+   /// behavior byte-exactly, so this is the value the LSW dispatch sites
+   /// forward when the floor is disabled.
+   real_t SigmaNStrengthFloorForLSW() const
+   { return sigma_n_strength_floor_ >= 0.0 ? sigma_n_strength_floor_ : 0.0; }
+
 private:
    real_t rho_, cp_, cs_;
    real_t Zp_, Zs_;  ///< Impedances (homogeneous)
    FrictionSolver solver_;
+   /// Compressive σ_n strength floor [Pa].  `< 0` ⇒ disabled (current
+   /// behavior).  See SetSigmaNStrengthFloor.
+   real_t sigma_n_strength_floor_ = -1.0;
 };
 
 } // namespace seas

@@ -120,7 +120,7 @@ kind        = "constant_tensor"
 sigma_xx_pa = 5.056619147855508e+07
 sigma_yy_pa = 1.1143380852144492e+08
 sigma_zz_pa = 4.50e+07
-sigma_xy_pa = -9.888543819998317e+06
+sigma_xy_pa = +9.888543819998317e+06   # D3.1: right-lateral-POSITIVE (negated at the source factory)
 sigma_yz_pa = 0.0
 sigma_xz_pa = 0.0
 
@@ -194,6 +194,15 @@ radius_strike_m     =     4000.0
 delta_tau_dip_pa    =        0.0
 delta_tau_strike_pa =     20.0e6
 T_nuc_s             =        1.0
+
+[friction]
+# sigma_n strength floor [Pa] (sliver-blowup plan 2026-05-26).  Below this
+# compression the shear strength saturates at a cohesion-like constant
+# (mu * floor) instead of free-sliding under a spurious tensile sigma_n —
+# breaks the late tensile-runaway blow-up (job 7748818, doc 2c).  Applies
+# to both laws.  Omit / set < 0 to disable (byte-exact with the historical
+# LSW max(sigma_n, 0)).
+sigma_n_strength_floor_pa = 10.0e6
 
 [friction.slip_weakening]
 # Uniform LSW friction across the active fault (no spatial overrides

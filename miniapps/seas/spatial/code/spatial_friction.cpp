@@ -17,6 +17,8 @@
 #include <regex>
 #include <sstream>
 #include <string>
+#include <utility>
+#include <vector>
 
 #ifdef SEAS_USE_TOML
 #include <toml.hpp>
@@ -100,6 +102,137 @@ bool SpatialRule::matches(real_t x, real_t y, real_t z, int attr) const
       return z_ok && x_ok && y_ok;
    }
    return false;
+}
+
+// =====================================================================
+//  Depth-profile interpolant + two-CSV loader (Phase 11b)
+//  (No toml11 dependency — the resolver uses these unconditionally.)
+// =====================================================================
+
+real_t PiecewiseLinear1D::operator()(real_t xq) const
+{
+   const std::size_t n = x.size();
+   MFEM_ASSERT(n >= 2 && y.size() == n,
+               "PiecewiseLinear1D: call Validate() before evaluating");
+   // Flat (constant) clamp outside the sampled range.
+   if (xq <= x.front()) { return y.front(); }
+   if (xq >= x.back())  { return y.back(); }
+   // Binary search for the bracketing interval [x[k-1], x[k]] (1 <= k <= n-1).
+   const auto it = std::upper_bound(x.begin(), x.end(), xq);
+   const std::size_t k = static_cast<std::size_t>(it - x.begin());
+   const real_t x0 = x[k - 1], x1 = x[k];
+   const real_t y0 = y[k - 1], y1 = y[k];
+   const real_t t = (xq - x0) / (x1 - x0);
+   return y0 + t * (y1 - y0);
+}
+
+void PiecewiseLinear1D::Validate() const
+{
+   MFEM_VERIFY(x.size() >= 2,
+               "PiecewiseLinear1D: need >= 2 samples (got " << x.size() << ")");
+   MFEM_VERIFY(x.size() == y.size(),
+               "PiecewiseLinear1D: x/y size mismatch (" << x.size()
+               << " vs " << y.size() << ")");
+   for (std::size_t k = 0; k < x.size(); ++k)
+   {
+      MFEM_VERIFY(std::isfinite(x[k]) && std::isfinite(y[k]),
+                  "PiecewiseLinear1D: non-finite sample at index " << k);
+      if (k > 0)
+      {
+         MFEM_VERIFY(x[k] > x[k - 1],
+                     "PiecewiseLinear1D: depths must be strictly increasing; x["
+                     << k << "]=" << x[k] << " <= x[" << (k - 1) << "]="
+                     << x[k - 1]);
+      }
+   }
+}
+
+namespace
+{
+
+// Parse one depth-profile CSV into a PiecewiseLinear1D.  Each data row is
+// `value, depth_km` (value FIRST, depth SECOND), comma- OR whitespace-
+// separated; `#` comments and blank lines are skipped.  depth_m = depth_csv *
+// depth_to_m.  Rows are sorted ascending by depth; duplicate depths abort.
+// When require_positive_y (the `a` curve), every value must be > 0; the `a-b`
+// curve may be negative (VW), so only finiteness is checked there.
+PiecewiseLinear1D load_one_depth_csv(const std::string& path,
+                                     real_t depth_to_m,
+                                     bool require_positive_y,
+                                     const char* which)
+{
+   std::ifstream ifs(path);
+   MFEM_VERIFY(ifs.good(),
+               "[friction.rate_state.depth_profile] cannot open " << which
+               << " file '" << path << "'");
+
+   std::vector<std::pair<real_t, real_t>> rows;   // (depth_m, value)
+   std::string line;
+   int lineno = 0;
+   while (std::getline(ifs, line))
+   {
+      ++lineno;
+      const auto hash = line.find('#');                 // strip inline comment
+      if (hash != std::string::npos) { line.erase(hash); }
+      for (char& c : line) { if (c == ',') { c = ' '; } }  // comma -> space
+      std::istringstream ss(line);
+      real_t value, depth_km;
+      if (!(ss >> value >> depth_km)) { continue; }     // blank / comment-only
+      real_t extra;
+      MFEM_VERIFY(!(ss >> extra),
+                  "[friction.rate_state.depth_profile] " << which << " '" << path
+                  << "' line " << lineno
+                  << ": expected exactly 2 fields 'value, depth_km'");
+      rows.emplace_back(depth_km * depth_to_m, value);
+   }
+   MFEM_VERIFY(rows.size() >= 2,
+               "[friction.rate_state.depth_profile] " << which << " '" << path
+               << "' needs >= 2 data rows (got " << rows.size() << ")");
+
+   std::sort(rows.begin(), rows.end(),
+             [](const std::pair<real_t, real_t>& l,
+                const std::pair<real_t, real_t>& r) { return l.first < r.first; });
+
+   PiecewiseLinear1D pl;
+   pl.x.reserve(rows.size());
+   pl.y.reserve(rows.size());
+   for (std::size_t k = 0; k < rows.size(); ++k)
+   {
+      if (k > 0)
+      {
+         MFEM_VERIFY(rows[k].first != rows[k - 1].first,
+                     "[friction.rate_state.depth_profile] " << which << " '"
+                     << path << "' has a duplicate depth " << rows[k].first
+                     << " m (ambiguous interpolation)");
+      }
+      if (require_positive_y)
+      {
+         MFEM_VERIFY(rows[k].second > 0.0,
+                     "[friction.rate_state.depth_profile] " << which << " '"
+                     << path << "': value " << rows[k].second << " at depth "
+                     << rows[k].first << " m must be > 0");
+      }
+      pl.x.push_back(rows[k].first);
+      pl.y.push_back(rows[k].second);
+   }
+   pl.Validate();
+   return pl;
+}
+
+}  // namespace
+
+FrictionDepthProfile1D LoadFrictionDepthProfileCSVs(
+   const FrictionDepthProfileSpec& spec)
+{
+   FrictionDepthProfile1D prof;
+   prof.a_of_depth = load_one_depth_csv(spec.param_a_csv, spec.depth_to_m,
+                                        /*require_positive_y=*/true,
+                                        "param_a_csv (a)");
+   prof.amb_of_depth = load_one_depth_csv(spec.param_a_minus_b_csv,
+                                          spec.depth_to_m,
+                                          /*require_positive_y=*/false,
+                                          "param_a_minus_b_csv (a-b)");
+   return prof;
 }
 
 // =====================================================================
@@ -445,6 +578,36 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
       }
    }
 
+   // Phase 11b: optional depth profile for a(z) / b(z) from two CSV files.
+   // When present, the resolver seeds per-DOF a/b from the profile and the
+   // scalar a_default/b_default become an unused fallback (the a<b default
+   // check below is gated off).  The CSVs are READ here at parse time so a
+   // missing/bad file aborts at config load, not mid-run.
+   if (rs_tbl.contains("depth_profile"))
+   {
+      const auto& dp = rs_tbl.at("depth_profile");
+      out.depth_profile.enabled = true;
+      out.depth_profile.param_a_csv =
+         toml_str(dp, "param_a_csv", std::string());
+      out.depth_profile.param_a_minus_b_csv =
+         toml_str(dp, "param_a_minus_b_csv", std::string());
+      MFEM_VERIFY(!out.depth_profile.param_a_csv.empty(),
+                  "[friction.rate_state.depth_profile] 'param_a_csv' is required");
+      MFEM_VERIFY(!out.depth_profile.param_a_minus_b_csv.empty(),
+                  "[friction.rate_state.depth_profile] 'param_a_minus_b_csv' "
+                  "is required");
+      const std::string units = toml_str(dp, "depth_units", std::string("km"));
+      if      (units == "km") { out.depth_profile.depth_to_m = 1000.0; }
+      else if (units == "m")  { out.depth_profile.depth_to_m = 1.0; }
+      else
+      {
+         MFEM_ABORT("[friction.rate_state.depth_profile] depth_units must be "
+                    "\"km\" or \"m\"; got '" << units << "'");
+      }
+      out.depth_profile.profile =
+         LoadFrictionDepthProfileCSVs(out.depth_profile);
+   }
+
    // Defaults validator.
    MFEM_VERIFY(out.a_default > 0.0,
                "[friction.rate_state] a_default must be > 0; got "
@@ -452,9 +615,15 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
    MFEM_VERIFY(out.b_default > 0.0,
                "[friction.rate_state] b_default must be > 0; got "
                << out.b_default);
-   MFEM_VERIFY(out.a_default < out.b_default,
-               "[friction.rate_state] a_default (" << out.a_default
-               << ") must be < b_default (" << out.b_default << ")");
+   // Phase 11b: a_default < b_default governs only the scalar fallback; when a
+   // depth profile is enabled the scalars are unused for a/b and the profile
+   // legitimately has a > b (a-b > 0, VS) at depth, so skip this check.
+   if (!out.depth_profile.enabled)
+   {
+      MFEM_VERIFY(out.a_default < out.b_default,
+                  "[friction.rate_state] a_default (" << out.a_default
+                  << ") must be < b_default (" << out.b_default << ")");
+   }
    MFEM_VERIFY(out.Dc_default > 0.0,
                "[friction.rate_state] Dc_default must be > 0");
    MFEM_VERIFY(out.V_0_default > 0.0,
@@ -817,6 +986,64 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.rate_state = blk;
    }
 
+   // Optional top-level `[friction].sigma_n_strength_floor_pa` (the σ_n
+   // strength floor; sliver-blowup plan 2026-05-26).  Applies to BOTH
+   // laws.  `[friction]` is guaranteed present here (one of the two law
+   // sub-blocks above was validated as required).  Default -1.0 ⇒
+   // disabled (each law keeps its exact current strength expression).
+   // When the key IS present it must be a finite value >= 0 — a negative
+   // floor is the disabled sentinel, not a usable value, so an explicit
+   // negative is a configuration error.
+   {
+      const auto& fr = root.at("friction");
+      // R-001: the floor is a TOP-LEVEL `[friction]` key, but the per-law
+      // sub-block parsers do NOT reject unknown keys — so a floor mistakenly
+      // nested under `[friction.slip_weakening]` / `[friction.rate_state]`
+      // (the natural place, since every other friction parameter lives there)
+      // would be SILENTLY ignored, disabling the safety feature with no error.
+      // Catch that mis-nesting loudly.
+      for (const char* sub : {"slip_weakening", "rate_state"})
+      {
+         if (fr.contains(sub)
+             && fr.at(sub).contains("sigma_n_strength_floor_pa"))
+         {
+            MFEM_ABORT("[friction." << sub
+                       << "].sigma_n_strength_floor_pa is mis-placed: the "
+                       "strength floor is a TOP-LEVEL [friction] key (it "
+                       "applies to both laws), not a per-law key.  Move it "
+                       "directly under [friction].");
+         }
+      }
+      cfg.sigma_n_strength_floor_pa =
+         toml_real(fr, "sigma_n_strength_floor_pa", -1.0);
+      if (fr.contains("sigma_n_strength_floor_pa"))
+      {
+         MFEM_VERIFY(std::isfinite(cfg.sigma_n_strength_floor_pa)
+                     && cfg.sigma_n_strength_floor_pa >= 0.0,
+                     "[friction].sigma_n_strength_floor_pa must be a finite "
+                     "value >= 0 (Pa); a negative value is the disabled "
+                     "sentinel and must be expressed by OMITTING the key, "
+                     "not by setting it negative.  Got "
+                     << cfg.sigma_n_strength_floor_pa);
+         // R-003: no upper bound is enforced (the floor's usable range is
+         // problem-dependent), but a floor far above any physical
+         // cohesion-like value almost certainly indicates an exponent typo
+         // (e.g. 10.0e9 for 10.0e6).  Because the strength uses
+         // max(sigma_n, floor), a floor exceeding the ambient normal stress
+         // silently LOCKS the fault (no rupture) — warn so the typo is caught.
+         if (cfg.sigma_n_strength_floor_pa > 1.0e9)
+         {
+            mfem::out << "[spatial_friction] WARNING: "
+                      << "[friction].sigma_n_strength_floor_pa = "
+                      << cfg.sigma_n_strength_floor_pa << " Pa (> 1 GPa) is far "
+                      << "above any physical cohesion-like floor; a floor "
+                      << "exceeding the ambient normal stress LOCKS the fault "
+                      << "(no rupture).  Did you mean "
+                      << (cfg.sigma_n_strength_floor_pa / 1.0e3) << " Pa?\n";
+         }
+      }
+   }
+
    return cfg;
 }
 
@@ -993,9 +1220,23 @@ RateStatePerDOFParams resolve_rs_impl(
       const real_t y = dof_coords_3d(3*i + 1);
       const real_t z = dof_coords_3d(3*i + 2);
 
-      // Seed defaults.
-      real_t a_i      = cfg.a_default;
-      real_t b_i      = cfg.b_default;
+      // Vertical depth (metres) for the profile + pore pressure (z<0 below).
+      const real_t depth_i = std::max(static_cast<real_t>(0.0), -z);
+
+      // Seed defaults.  Phase 11b: when a depth profile is enabled, a/b come
+      // from the profile (a = a(depth), b = a - (a-b)); otherwise the scalars.
+      real_t a_i;
+      real_t b_i;
+      if (cfg.depth_profile.enabled)
+      {
+         a_i = cfg.depth_profile.profile.a(depth_i);
+         b_i = cfg.depth_profile.profile.b(depth_i);
+      }
+      else
+      {
+         a_i = cfg.a_default;
+         b_i = cfg.b_default;
+      }
       real_t Dc_i     = cfg.Dc_default;
       real_t V_init_i = cfg.V_init_default;
       real_t f0_i     = cfg.f_0_default;
@@ -1010,12 +1251,23 @@ RateStatePerDOFParams resolve_rs_impl(
          if (!r.matches(x, y, z, dof_to_attr[i])) { continue; }
          // RS resolver ignores Barrier (LSW-only concept).
          if (r.kind == SpatialRule::Kind::Barrier) { continue; }
+         // Phase 11a relaxes R-006: per-DOF b is now supported.  DOFData.b
+         // routes it through the Tpv102SubStepIterator ψ-update + the
+         // equilibrium-ψ seed, so the original "knob that does nothing" reason
+         // no longer holds for b.  f_0 / V_0 stay scalar — they are built once
+         // from blk.{f_0,V_0}_default (the RateStateAgingFrictionIterator
+         // ctor) and V_0 is pinned to FrictionSolver::V0 by the R-009 guard, so
+         // a per-rule f_0 / V_0 would be silently dropped: reject it loudly.
+         // Per-DOF a / b / Dc / V_init / sigma_n / eta are allowed.
+         MFEM_VERIFY(std::isnan(r.f_0) && std::isnan(r.V_0),
+                     "ResolveRateState: per-DOF f_0/V_0 spatial overrides are "
+                     "not supported (scalar aging-law globals; V_0 pinned by "
+                     "R-009); set them only in the [friction.rate_state] "
+                     "defaults. Offending rule at DOF " << i);
          if (!std::isnan(r.a))       { a_i      = r.a; }
-         if (!std::isnan(r.b))       { b_i      = r.b; }
+         if (!std::isnan(r.b))       { b_i      = r.b; }  // Phase 11a: per-DOF b
          if (!std::isnan(r.Dc))      { Dc_i     = r.Dc; }
          if (!std::isnan(r.V_init))  { V_init_i = r.V_init; }
-         if (!std::isnan(r.f_0))     { f0_i     = r.f_0; }
-         if (!std::isnan(r.V_0))     { V0_i     = r.V_0; }
          if (!std::isnan(r.sigma_n)) { sn_i     = r.sigma_n; }
          if (!std::isnan(r.eta))     { eta_i = r.eta;  eta_rule_set = true; }
       }
@@ -1030,8 +1282,7 @@ RateStatePerDOFParams resolve_rs_impl(
       {
          sigma_n_total = sn_i;
       }
-      const real_t depth = std::max(static_cast<real_t>(0.0), -z);
-      const real_t P_p   = pp.P_p_pa + pp.P_p_grad_pa_per_m * depth;
+      const real_t P_p   = pp.P_p_pa + pp.P_p_grad_pa_per_m * depth_i;
       real_t sigma_n_eff = sigma_n_total - P_p;
       if (pp.min_sigma_n_pa > 0.0 && sigma_n_eff < pp.min_sigma_n_pa)
       {
@@ -1066,8 +1317,17 @@ RateStatePerDOFParams resolve_rs_impl(
 
       // Per-DOF validator.
       MFEM_VERIFY(a_i > 0.0, "ResolveRateState: a <= 0 at DOF " << i);
-      MFEM_VERIFY(b_i > 0.0, "ResolveRateState: b <= 0 at DOF " << i);
-      MFEM_VERIFY(a_i < b_i, "ResolveRateState: a >= b at DOF " << i);
+      MFEM_VERIFY(b_i > 0.0,
+                  "ResolveRateState: b <= 0 at DOF " << i << " (depth "
+                  << depth_i << " m)"
+                  << (cfg.depth_profile.enabled
+                      ? "; check param_a_minus_b.csv: a - (a-b) went non-positive"
+                      : ""));
+      // R-011: a > b (velocity-strengthening) is allowed — it is how aging-law
+      // ruptures arrest at the fault edges (TPV102 uses a high-a border).  Only
+      // require a, b finite and > 0; do NOT require a < b.
+      MFEM_VERIFY(std::isfinite(a_i) && std::isfinite(b_i),
+                  "ResolveRateState: a, b must be finite at DOF " << i);
       MFEM_VERIFY(Dc_i > 0.0, "ResolveRateState: Dc <= 0 at DOF " << i);
       MFEM_VERIFY(V0_i > 0.0, "ResolveRateState: V_0 <= 0 at DOF " << i);
       MFEM_VERIFY(sigma_n_eff > 0.0,

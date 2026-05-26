@@ -22,6 +22,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <functional>
 #include <iostream>
 #include <sys/types.h>
@@ -447,10 +448,10 @@ static void R_1b_rs_eta_auto_smoke_const_material()
 #endif
 }
 
-// R-2  RS a/b box override
+// R-2  RS a, b (and Dc) box override; per-DOF b accepted (Phase 11a relaxed R-006)
 static void R_2_rs_ab_override()
 {
-   std::cout << "\n[R-2] RS box override of (a, b)\n";
+   std::cout << "\n[R-2] RS box override of a and b (per-DOF b accepted, Phase 11a)\n";
    const int N = 3;
    Vector dofs; Array<int> attr, elem;
    make_synthetic_dofs(N, 10000.0, dofs, attr, elem);
@@ -468,7 +469,8 @@ static void R_2_rs_ab_override()
    r.x_min_m = -1e6; r.x_max_m = 1e6;
    r.y_min_m = -1e6; r.y_max_m = 1e6;
    r.z_min_m = -8000.0; r.z_max_m = -2000.0;
-   r.a = 0.005; r.b = 0.020;
+   r.a = 0.005;   // per-DOF a override
+   r.b = 0.020;   // Phase 11a: per-DOF b override now applied (was rejected, R-006)
    cfg.spatial.push_back(r);
 
    auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
@@ -487,7 +489,8 @@ static void R_2_rs_ab_override()
       if (z >= -8000.0 && z <= -2000.0)
       {
          TEST_NEAR(p.a(i), 0.005, 0.0, "in-slab a");
-         TEST_NEAR(p.b(i), 0.020, 0.0, "in-slab b");
+         TEST_NEAR(p.b(i), 0.020, 0.0,
+                   "in-slab b == per-DOF override (Phase 11a accepts per-DOF b)");
       }
       else
       {
@@ -565,12 +568,14 @@ static void R_4_rs_V_init_override()
 #endif
 }
 
-// R-5  RS validator aborts on a >= b
+// R-5  RS validator ALLOWS a >= b (R-011); still aborts on a <= 0
 static void R_5_rs_validator_aborts()
 {
-   std::cout << "\n[R-5] RS validator aborts on a >= b at a DOF\n";
+   std::cout << "\n[R-5] RS validator allows a >= b (R-011); aborts on a <= 0\n";
 #ifdef MFEM_USE_MPI
-   const bool aborted = RunInChild([]()
+   // (a) a >= b (velocity-strengthening) must NOT abort — it is how aging-law
+   //     ruptures arrest at the fault edges (R-011).
+   const bool ab_aborted = RunInChild([]()
    {
       const int N = 1;
       Vector dofs; Array<int> attr, elem;
@@ -585,7 +590,7 @@ static void R_5_rs_validator_aborts()
       SpatialRule r;
       r.kind = SpatialRule::Kind::Depth;
       r.z_min_m = -1e9; r.z_max_m = 1e9;
-      r.a = 0.020;
+      r.a = 0.020;   // a=0.020 >= b=0.015 (velocity-strengthening)
       cfg.spatial.push_back(r);
       auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
       TinyMeshHolder mh;
@@ -594,7 +599,31 @@ static void R_5_rs_validator_aborts()
       SpatialFrictionResolver R;
       (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
    });
-   TEST_ASSERT(aborted, "a >= b should abort the RS validator");
+   TEST_ASSERT(!ab_aborted,
+               "a >= b (velocity-strengthening) does NOT abort (R-011)");
+
+   // (b) a <= 0 still aborts — the positivity check is preserved.
+   const bool nonpos_aborted = RunInChild([]()
+   {
+      const int N = 1;
+      Vector dofs; Array<int> attr, elem;
+      make_synthetic_dofs(N, 1000.0, dofs, attr, elem);
+      Vector sn_total(N); sn_total = 50e6;
+      RateStateBlock cfg;
+      cfg.a_default = -0.001;   // a <= 0 (no spatial override): must abort
+      cfg.b_default = 0.015;
+      cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
+      cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
+      cfg.sigma_n_default = 50e6;
+      cfg.eta_auto = false; cfg.eta_default = 5e6;
+      auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
+      TinyMeshHolder mh;
+      PorePressureSpec pp;
+      mfem::Mesh& srl = mh.mesh();
+      SpatialFrictionResolver R;
+      (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+   });
+   TEST_ASSERT(nonpos_aborted, "a <= 0 still aborts (positivity preserved)");
 #endif
 }
 
@@ -1118,6 +1147,65 @@ static void H_1_T_1e9_reduces_to_plain_LSW()
    }
 }
 
+// R-10  RS depth-profile (two-CSV) a(z)/b(z) mapping (Phase 11b).
+static void R_10_rs_depth_profile_csv()
+{
+   std::cout << "\n[R-10] RS depth profile: a(z), b = a - (a-b) from two CSVs\n";
+   const int N = 3;
+   Vector dofs; Array<int> attr, elem;
+   make_synthetic_dofs(N, 20000.0, dofs, attr, elem);   // depths 0, 10 km, 20 km
+   Vector sn_total(N);  sn_total = 50.0e6;
+
+   // Two temp CSVs (value, depth_km).  a: 0.010@0 -> 0.020@20km;
+   // a-b: -0.005@0 (VW) -> +0.010@20km (VS).
+   const std::string a_csv   = "/tmp/seas_test_resolver_a.csv";
+   const std::string amb_csv = "/tmp/seas_test_resolver_amb.csv";
+   { std::ofstream o(a_csv,   std::ios::trunc); o << "0.010, 0\n0.020, 20\n"; }
+   { std::ofstream o(amb_csv, std::ios::trunc); o << "-0.005, 0\n0.010, 20\n"; }
+
+   RateStateBlock cfg;
+   cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
+   cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
+   cfg.sigma_n_default = 50.0e6;
+   cfg.eta_auto = false;   cfg.eta_default = 5.0e6;
+   cfg.depth_profile.enabled = true;
+   cfg.depth_profile.param_a_csv = a_csv;
+   cfg.depth_profile.param_a_minus_b_csv = amb_csv;
+   cfg.depth_profile.depth_to_m = 1000.0;   // km
+   cfg.depth_profile.profile = LoadFrictionDepthProfileCSVs(cfg.depth_profile);
+
+   auto mat = MaterialField::MakeConstant(32.0e9, 32.0e9, 2670.0);
+   TinyMeshHolder mh;
+   PorePressureSpec pp;
+   SpatialFrictionResolver R;
+
+#ifdef MFEM_USE_MPI
+   mfem::Mesh& srl = mh.mesh();
+   auto p = R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+#else
+   RateStatePerDOFParams p;
+   p.a.SetSize(N); p.b.SetSize(N);
+   const real_t ea[3] = {0.010, 0.015, 0.020};
+   const real_t eb[3] = {0.015, 0.0125, 0.010};
+   for (int i = 0; i < N; ++i) { p.a(i) = ea[i]; p.b(i) = eb[i]; }
+#endif
+
+   // depths 0 / 10 km / 20 km:
+   //   a(z)     = 0.010, 0.015, 0.020
+   //   (a-b)(z) = -0.005, 0.0025, 0.010
+   //   b        = 0.015, 0.0125, 0.010
+   TEST_NEAR(p.a(0), 0.010, 1e-12, "a(surface) from profile");
+   TEST_NEAR(p.b(0), 0.015, 1e-12, "b(surface) = a - (a-b) = 0.015");
+   TEST_ASSERT(p.a(0) < p.b(0), "surface: a < b (velocity-weakening)");
+
+   TEST_NEAR(p.a(1), 0.015,  1e-12, "a(10 km) from profile");
+   TEST_NEAR(p.b(1), 0.0125, 1e-12, "b(10 km) = a - (a-b) = 0.0125");
+
+   TEST_NEAR(p.a(2), 0.020, 1e-12, "a(20 km) from profile");
+   TEST_NEAR(p.b(2), 0.010, 1e-12, "b(20 km) = a - (a-b) = 0.010");
+   TEST_ASSERT(p.a(2) > p.b(2), "deep: a > b (velocity-strengthening)");
+}
+
 int main(int argc, char** argv)
 {
    // No MPI init: every resolver test uses the serial mfem::Mesh
@@ -1149,6 +1237,7 @@ int main(int argc, char** argv)
    R_6_rs_eta_explicit();
    R_7_rs_negative_sigma_n_aborts();
    R_8_rs_eta_auto_collision();
+   R_10_rs_depth_profile_csv();
 
    // Forced rupture / Overstress — REMOVED in Phase N (the spatial
    // driver no longer dispatches into ResolveForcedRupture /

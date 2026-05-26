@@ -472,6 +472,129 @@ void TestRotationPipeline()
              "Rotation pipeline: normal traction continuous in global frame");
 }
 
+// ===== σ_n strength floor: accessor sentinel mapping =====
+// (sliver-blowup plan 2026-05-26 §Phase 1/2.)  The disabled sentinel
+// (< 0) is preserved by GetSigmaNStrengthFloor() but mapped to 0.0 by
+// SigmaNStrengthFloorForLSW() so the LSW dispatch reproduces the
+// historical max(σ_n,0) byte-exactly.
+void TestSigmaNStrengthFloorAccessor()
+{
+   std::cout << "Test: TestSigmaNStrengthFloorAccessor\n";
+   FaultFaceFlux ff(RHO, CP, CS);
+
+   // Default: disabled sentinel -1.0.  (Exact-equality assertions use
+   // TEST_ASSERT(== ) because this file's TEST_NEAR uses a strict `<`
+   // tolerance and so cannot express an exact match with tol = 0.)
+   TEST_ASSERT(ff.GetSigmaNStrengthFloor() == -1.0,
+               "default floor is the disabled sentinel -1.0");
+   TEST_ASSERT(ff.SigmaNStrengthFloorForLSW() == 0.0,
+               "disabled sentinel maps to 0.0 for the LSW path");
+
+   // Enabled positive value round-trips through both accessors.
+   ff.SetSigmaNStrengthFloor(10.0e6);
+   TEST_ASSERT(ff.GetSigmaNStrengthFloor() == 10.0e6,
+               "positive floor round-trips through GetSigmaNStrengthFloor");
+   TEST_ASSERT(ff.SigmaNStrengthFloorForLSW() == 10.0e6,
+               "positive floor passes through SigmaNStrengthFloorForLSW");
+
+   // Zero is a valid (enabled) value, NOT the disabled sentinel.
+   ff.SetSigmaNStrengthFloor(0.0);
+   TEST_ASSERT(ff.SigmaNStrengthFloorForLSW() == 0.0,
+               "floor = 0.0 maps to 0.0 (enabled, == max(sigma_n,0))");
+
+   // Any negative is the disabled sentinel ⇒ LSW sees 0.0.
+   ff.SetSigmaNStrengthFloor(-5.0);
+   TEST_ASSERT(ff.GetSigmaNStrengthFloor() == -5.0,
+               "negative value preserved by GetSigmaNStrengthFloor");
+   TEST_ASSERT(ff.SigmaNStrengthFloorForLSW() == 0.0,
+               "negative (disabled) maps to 0.0 for the LSW path");
+}
+
+// ===== σ_n strength floor: rate-and-state strength gating =====
+// (sliver-blowup plan 2026-05-26 §Phase 3.)  Under a tensile σ_n the RS
+// shear strength is |σ_n|·f_V when disabled (free, large) but
+// max(σ_n,floor)·f_V = floor·f_V when enabled (bounded).  We drive
+// CompleteFromVabs directly with a fixed V_abs and back the strength out
+// of the slip-rate decomposition V_i = V_abs·τ_i/(strength + η_s·V_abs).
+void TestSigmaNStrengthFloorRateState()
+{
+   std::cout << "Test: TestSigmaNStrengthFloorRateState\n";
+
+   // RS DOFData; a/psi drive f_V, eta_s the radiation damping.
+   DOFData d = MakeHomogeneousDOF(/*sigma_n0=*/0.0, /*a=*/0.01);
+   d.psi = 0.6;
+   const real_t eta_s = d.eta_s;
+
+   // Fixed stage state: tensile σ_n, a 50 MPa tangential traction, a
+   // small fixed V_abs so the strength branch runs deterministically.
+   const real_t sigma_n_tensile = -1.0e9;
+   const real_t tau1 = 30.0e6, tau2 = 40.0e6;
+   const real_t tau_mag = std::sqrt(tau1 * tau1 + tau2 * tau2);  // 50 MPa
+   const real_t V_abs_fixed = 1.0e-6;
+
+   // f_V independent of the floor (depends only on a, psi, V_abs).
+   const real_t C   = std::exp(d.psi / d.a) / (2.0 * FrictionSolver::V0);
+   const real_t f_V = d.a * std::asinh(V_abs_fixed * C);
+
+   auto run_and_backout_strength = [&](real_t floor) -> real_t
+   {
+      FaultFaceFlux ff(RHO, CP, CS);
+      ff.SetSigmaNStrengthFloor(floor);
+      EvalStageState s;
+      s.sigma_n_total = sigma_n_tensile;
+      s.sigma_n_trial = sigma_n_tensile;
+      s.tau1_total = tau1; s.tau2_total = tau2;
+      s.tau1_trial = tau1; s.tau2_trial = tau2;
+      s.Theta = tau_mag;
+      s.V_abs = V_abs_fixed;
+      ff.CompleteFromVabs(d, s);
+      // V_i = V_abs·τ_i/(strength + η_s·V_abs) ⇒
+      // |V| = V_abs·|τ|/(strength + η_s·V_abs) ⇒
+      // strength = V_abs·|τ|/|V| − η_s·V_abs.
+      const real_t Vmag = std::sqrt(s.V1 * s.V1 + s.V2 * s.V2);
+      return V_abs_fixed * tau_mag / Vmag - eta_s * V_abs_fixed;
+   };
+
+   // Disabled (sentinel −1): strength = |σ_n|·f_V = 1e9·f_V.
+   const real_t strength_disabled = run_and_backout_strength(-1.0);
+   const real_t expected_disabled = 1.0e9 * f_V;
+   TEST_NEAR(strength_disabled, expected_disabled,
+             1e-6 * expected_disabled,
+             "RS floor disabled: strength = |σ_n|·f_V (= 1e9·f_V)");
+
+   // Enabled (10 MPa): strength = max(σ_n,floor)·f_V = 1e7·f_V (bounded).
+   const real_t strength_floored = run_and_backout_strength(10.0e6);
+   const real_t expected_floored = 10.0e6 * f_V;
+   TEST_NEAR(strength_floored, expected_floored,
+             1e-6 * expected_floored,
+             "RS floor 10MPa: strength = floor·f_V (= 1e7·f_V), not 1e9·f_V");
+
+   // The floor strictly bounds the tensile strength below the |σ_n| value.
+   TEST_ASSERT(strength_floored < strength_disabled,
+               "RS floor 10MPa: floored strength < |σ_n| strength");
+
+   // Compressive σ_n ABOVE the floor: max(σ_n,floor) == |σ_n|, so a floor
+   // below it is byte-identical to disabled (guards the TPV102/104
+   // byte-exact claim for compressive faults).
+   auto run_compressive = [&](real_t floor) -> real_t
+   {
+      FaultFaceFlux ff(RHO, CP, CS);
+      ff.SetSigmaNStrengthFloor(floor);
+      EvalStageState s;
+      s.sigma_n_total = 120.0e6;   // compressive, well above the floor
+      s.sigma_n_trial = 120.0e6;
+      s.tau1_total = tau1; s.tau2_total = tau2;
+      s.tau1_trial = tau1; s.tau2_trial = tau2;
+      s.Theta = tau_mag;
+      s.V_abs = V_abs_fixed;
+      ff.CompleteFromVabs(d, s);
+      return s.V1;
+   };
+   TEST_ASSERT(run_compressive(-1.0) == run_compressive(10.0e6),
+               "compressive sigma_n above floor: floor=10MPa == disabled "
+               "(byte-exact)");
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -489,6 +612,8 @@ int main()
    TestEnergyBalance();
    TestFaultFluxSignConvention();
    TestRotationPipeline();
+   TestSigmaNStrengthFloorAccessor();
+   TestSigmaNStrengthFloorRateState();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";
