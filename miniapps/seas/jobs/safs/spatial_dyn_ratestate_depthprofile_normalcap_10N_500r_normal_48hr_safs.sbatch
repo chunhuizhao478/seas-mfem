@@ -14,10 +14,10 @@
 # Same physics/config as the dev-queue sibling
 #   spatial_dyn_ratestate_depthprofile_normalcap_8N_400r_dev_2hr_safs.sbatch
 # but on the NORMAL queue at 10N/500r/48h.  WHY normal queue:
-#   The reflection-free 6 s run is ~17 k macro-steps (6 s / dt~3.5e-4 s); at
-#   these step counts it does NOT complete inside the 2 h development wall, so
-#   the dev sibling relies on restart-chaining.  Normal/48h completes the full
-#   6 s in ONE allocation; 500 (vs 400) ranks shortens wall-clock.
+#   tfinal is 100 s (~285 k macro-steps at dt~3.5e-4 s) — far beyond what the
+#   2 h development wall can reach.  Normal/48h + 500 ranks gets as far as
+#   possible per allocation; the run checkpoints and is resumed via
+#   SAFS_RESTART until it reaches 100 s.
 #
 # Config (floor enabled):
 #   config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml
@@ -42,9 +42,11 @@
 # drift bound passes.
 #
 # RUN WINDOW (R-025): the SAFS box is reflection-free only for ~6.94 s
-# (min_box_dim/cp) and PML is NOT wired.  tfinal defaults to 6 s so every saved
-# snapshot is physical.  Do NOT raise tfinal past ~7 s without a real PML layer
-# (the 48 h wall is to COMPLETE the 6 s run, NOT to run longer than physical).
+# (min_box_dim/cp) and PML is NOT wired.  tfinal defaults to 100 s (per the
+# all-normal-queue=100s directive), so RS seismic fields after ~7 s are
+# reflection-CONTAMINATED — treat this as a long cap/stability monitor (does
+# V_max stay bounded?), NOT a physical long rupture.  For physical RS fields
+# use the dev sibling's 6 s window (or wire a real PML layer).
 #
 # Flux: uses the config's mixed_flux ("adjacent") by NOT passing --mixed-flux;
 # override with SAFS_MIXED_FLUX={none|adjacent|all_continuous}.
@@ -178,9 +180,11 @@ if [[ -n "${SAFS_MIXED_FLUX:-}" ]]; then
     MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 fi
 
-# tfinal default 6 s — the R-025 reflection-free window (PML is not wired).  The
-# 48 h wall is to COMPLETE this 6 s run in one allocation, NOT to run longer.
-TFINAL="${SAFS_TFINAL:-6s}"
+# tfinal default 100 s (all-normal-queue directive).  This is past the ~6.94 s
+# reflection-free window (R-025) — see the RUN WINDOW note above.  The 48 h wall
+# will not reach 100 s in one allocation; the job checkpoints and is resumed via
+# SAFS_RESTART.
+TFINAL="${SAFS_TFINAL:-100s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
@@ -206,7 +210,7 @@ echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); floor=10
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX:-<config default = adjacent>}"
-echo "tfinal:      ${TFINAL}  (R-025 reflection-free window ~6.94 s; PML not wired)"
+echo "tfinal:      ${TFINAL}  (PAST the R-025 ~6.94 s reflection-free window; long stability monitor)"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"
 echo "Restart:     ${SAFS_RESTART:-<none — fresh start from t=0>}"
 

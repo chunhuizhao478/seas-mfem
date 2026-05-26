@@ -41,13 +41,13 @@
 # SEAS_DIAG_BLOWUP=1 so the [DIAG]/[DIAG-ONSET] V_max trace is directly
 # comparable to the 7748818 log.
 #
-# REFLECTION CAVEAT: tfinal 35 s > min_box_dim/cp_max (~6.94 s); the 1st-order
+# REFLECTION CAVEAT: tfinal 100 s > min_box_dim/cp_max (~6.94 s); the 1st-order
 # ABC leaks after ~7 s.  Reflections are present in BOTH this run and 7748818,
 # so they cancel as a variable — this isolates the FLOOR effect.  --pml is NOT
 # wired (flag only silences the warning).
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default = config adjacent),
-# SAFS_TFINAL (default 35s), SAFS_CFL, SAFS_RESTART, SEAS_DIAG_*.
+# SAFS_TFINAL (default 100s), SAFS_CFL, SAFS_RESTART, SEAS_DIAG_*.
 
 export LC_ALL=C
 export LANG=C
@@ -169,11 +169,13 @@ if [[ -n "${SAFS_MIXED_FLUX:-}" ]]; then
     MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 fi
 
-# tfinal default 35 s: a few s past the t~28 s no-floor onset; exits early if
-# stable.  (Reflection caveat: physical only to ~7 s; the V_max(t) trace past
-# t~7 s is still the apples-to-apples comparison to 7748818, which had the same
-# reflections.)
-TFINAL="${SAFS_TFINAL:-35s}"
+# tfinal default 100 s: the full original 7748818 run length (well past the
+# t~28 s no-floor onset and the t~64 s runaway).  At ~48 h / 35 s throughput the
+# 48 h wall will NOT reach 100 s in one allocation — the job checkpoints
+# (--checkpoint-every) and is resumed via SAFS_RESTART.  (Reflection caveat:
+# physical only to ~7 s; the V_max(t) trace past t~7 s is still the
+# apples-to-apples comparison to 7748818, which had the same reflections.)
+TFINAL="${SAFS_TFINAL:-100s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
