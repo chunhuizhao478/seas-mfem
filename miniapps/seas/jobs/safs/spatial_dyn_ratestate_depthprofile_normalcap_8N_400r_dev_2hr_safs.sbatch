@@ -43,15 +43,19 @@
 export LC_ALL=C
 export LANG=C
 
-# Speckle-runaway / frame diagnostics over the driven ramp window t in [0, T_nuc].
-export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-1}"
+# Lean diag (match the slip-weakening jobs): the V_max trace (SEAS_DIAG_BLOWUP)
+# is the cap/stability monitor; the verbose per-step [SLIP]/[FRAME]/[MACRO]
+# traces (frame-orthonormality + predictor/macro investigations, both already
+# characterized — NOT live errors) default OFF.  Re-enable via env for an RS
+# speckle debug rerun.
+export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-0}"
 export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"
 export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-10.0}"
 export SEAS_NOOPENING="${SEAS_NOOPENING:-0}"
-export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-1}"
+export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-0}"
 export SEAS_DIAG_FRAME_XYZ="${SEAS_DIAG_FRAME_XYZ:-607518,3706359,-4543}"
 export SEAS_DIAG_FRAME_R="${SEAS_DIAG_FRAME_R:-300}"
-export SEAS_DIAG_MACRO="${SEAS_DIAG_MACRO:-1}"
+export SEAS_DIAG_MACRO="${SEAS_DIAG_MACRO:-0}"
 
 module load intel/19.1.1
 module load impi/19.0.9
