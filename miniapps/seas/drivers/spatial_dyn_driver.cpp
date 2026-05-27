@@ -2134,8 +2134,13 @@ int main(int argc, char *argv[])
       for (int i = 0; i < num_fault_total; ++i)
       {
          dof_data[i].slip_rate_substep_max = 0.0;
-         dof_data[i].sigma_n_substep_min = 1.0e300;  // [DIAG-SIGN] tensile tracker
       }
+      // [DIAG-SIGN] NOTE (R-003): sigma_n_substep_min is intentionally NOT
+      // reset here.  It accumulates the most-tensile sub-step normal traction
+      // across the WHOLE diag interval and is reset only inside the diag block
+      // after it has been reported, so a tensile transient on a step the diag
+      // does not sample (step%100!=0, V<10) is still captured at the next
+      // print.  slip_rate_substep_max keeps its per-macro-step reset above.
 
       AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
                                      fault_coords, Q, dt_step,
@@ -2186,15 +2191,15 @@ int main(int argc, char *argv[])
          // test.  The floor only clamps the shear STRENGTH, not this imposed
          // normal traction (sigma_n_corr = sigma_n_trial), so tensile excursions
          // here still drive the bulk normal Riemann update ([[v_n]] opening).
+         const real_t SN_UNSET = std::numeric_limits<real_t>::max();
          const real_t sn_floor = cfg.sigma_n_strength_floor_pa;  // < 0 = disabled
-         real_t    sigman_min_local = 1.0e300;     // end-of-step sigma_n_corr
+         real_t    sigman_min_local = SN_UNSET;    // end-of-step sigma_n_corr
          int       argmin_sn_local  = -1;
          long long n_tensile_local     = 0;   // sigma_n_corr < 0 (tensile)
          long long n_below_floor_local = 0;   // sigma_n_corr < floor (engaged)
          // SUB-STEP trackers (the key signal: a tensile transient that the
          // end-of-step sigma_n_corr above has already recovered from).
-         real_t    ss_sigman_min_local = 1.0e300;  // min over sub-steps
-         int       argmin_ss_local     = -1;
+         real_t    ss_sigman_min_local = SN_UNSET;  // interval min over sub-steps
          long long n_ss_tensile_local     = 0;  // sigma_n_substep_min < 0
          long long n_ss_below_floor_local = 0;  // sigma_n_substep_min < floor
          for (int i = 0; i < num_fault_total; ++i)
@@ -2211,10 +2216,9 @@ int main(int argc, char *argv[])
             if (sn < 0.0) { n_tensile_local++; }
             if (sn_floor >= 0.0 && sn < sn_floor) { n_below_floor_local++; }
             const real_t snss = d.sigma_n_substep_min;
-            if (snss < 1.0e299)   // a sub-step value was recorded this macro step
+            if (snss < SN_UNSET)   // a sub-step value was recorded this interval
             {
-               if (snss < ss_sigman_min_local)
-               { ss_sigman_min_local = snss; argmin_ss_local = i; }
+               if (snss < ss_sigman_min_local) { ss_sigman_min_local = snss; }
                if (snss < 0.0) { n_ss_tensile_local++; }
                if (sn_floor >= 0.0 && snss < sn_floor) { n_ss_below_floor_local++; }
             }
@@ -2283,7 +2287,13 @@ int main(int argc, char *argv[])
          MPI_Allreduce(&sn_in, &sn_out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
          MPI_Allreduce(&ss_in, &ss_out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
 #endif
-         if (rank == 0)
+         // R-006: once V>10 the diag block fires every step; print the
+         // aggregate line only every 100 steps OR when something is actually
+         // tensile, so the log does not bloat with all-compressive lines.
+         // (step + n_ss_tensile_g are globally consistent, so all ranks agree
+         // -> no divergent collective / deadlock and a consistent reset below.)
+         const bool print_sign = (step % 100 == 0 || n_ss_tensile_g > 0);
+         if (rank == 0 && print_sign)
          {
             std::cout << "[DIAG-SIGN] step " << step << " t=" << t
                       << " floor="
@@ -2292,27 +2302,43 @@ int main(int argc, char *argv[])
                       << " | end-of-step: sigma_n_min=" << sn_out.v
                       << " n_tensile=" << n_tensile_g
                       << " n_below_floor=" << n_below_floor_g
-                      << " | SUB-STEP: sigma_n_min=" << ss_out.v
+                      << " | SUB-STEP(interval): sigma_n_min=" << ss_out.v
                       << " n_tensile=" << n_ss_tensile_g
                       << " n_below_floor=" << n_ss_below_floor_g << "\n";
          }
-         if (rank == ss_out.r && argmin_ss_local >= 0)
+         if (print_sign)
          {
-            const DOFData &d = dof_data[argmin_ss_local];
-            const int eng = (sn_floor >= 0.0 &&
-                             d.sigma_n_substep_min < sn_floor) ? 1 : 0;
-            std::cout << "[DIAG-SIGN-DOF] (most-tensile SUB-STEP) rank " << rank
-                      << " dof " << argmin_ss_local
-                      << " xyz=(" << dof_coords_3d(3 * argmin_ss_local) << ","
-                      << dof_coords_3d(3 * argmin_ss_local + 1) << ","
-                      << dof_coords_3d(3 * argmin_ss_local + 2) << ")"
-                      << " sigma_n_substep_min=" << d.sigma_n_substep_min
-                      << " sigma_n_corr(end)=" << d.sigma_n_corr
-                      << " floor_engaged_substep=" << eng
-                      << " V=" << d.slip_rate
-                      << " V_substep_max=" << d.slip_rate_substep_max
-                      << " tau1_corr=" << d.tau1_corr
-                      << " tau2_corr=" << d.tau2_corr << "\n";
+            // R-001: EVERY rank dumps ALL its local DOFs whose interval sub-step
+            // sigma_n is below the floor (or tensile, when the cap is off), so
+            // EVERY concurrent speckle spot is localized -- not just the single
+            // global-worst MINLOC DOF.  Capped per rank to bound log volume.
+            const real_t sign_thr = (sn_floor >= 0.0) ? sn_floor : 0.0;
+            int dumped = 0;
+            for (int i = 0; i < num_fault_total && dumped < 32; ++i)
+            {
+               const DOFData &d = dof_data[i];
+               if (d.sigma_n_substep_min < SN_UNSET &&
+                   d.sigma_n_substep_min < sign_thr)
+               {
+                  std::cout << "[DIAG-SIGN-DOF] rank " << rank << " dof " << i
+                            << " xyz=(" << dof_coords_3d(3 * i) << ","
+                            << dof_coords_3d(3 * i + 1) << ","
+                            << dof_coords_3d(3 * i + 2) << ")"
+                            << " sigma_n_substep_min=" << d.sigma_n_substep_min
+                            << " sigma_n_corr(end)=" << d.sigma_n_corr
+                            << " V=" << d.slip_rate
+                            << " V_substep_max=" << d.slip_rate_substep_max
+                            << " tau1_corr=" << d.tau1_corr
+                            << " tau2_corr=" << d.tau2_corr << "\n";
+                  ++dumped;
+               }
+            }
+            // R-003: the interval accumulator has now been reported; reset it on
+            // EVERY rank (consistent gate) so the next interval starts fresh.
+            for (int i = 0; i < num_fault_total; ++i)
+            {
+               dof_data[i].sigma_n_substep_min = SN_UNSET;
+            }
          }
       }
 

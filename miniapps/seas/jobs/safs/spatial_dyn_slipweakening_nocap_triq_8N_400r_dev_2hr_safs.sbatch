@@ -43,11 +43,15 @@
 export LC_ALL=C
 export LANG=C
 
-# Lean diag: V_max trace ON (the stability monitor); verbose frame/macro/slip
-# OFF.  Frame point preset to the 7748818 cluster-A blow-up DOF in case the
-# refined mesh still destabilizes there even without the cap.
-export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-0}"
-export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-10.0}"
+# Diag: V_max trace ON (stability monitor) + [DIAG-SIGN] tensile/floor tracker
+# (auto, via SEAS_DIAG_BLOWUP).  Slip trace ON (REVIEW R-002): [DIAG-SIGN]
+# localizes WHERE sigma_n goes tensile, but only the per-sub-step slip trace
+# emits the sn_vjump/sn_sterm split that says WHY (predictor/ghost OPENING vs
+# tensile bulk stress).  VTHR=15 m/s fires it on a speckle DOF (which spikes
+# locally above the ~13 m/s legitimate rupture front) without tracing the
+# whole front.  Frame point preset to the 7748818 cluster-A blow-up DOF.
+export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-1}"
+export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-15.0}"
 export SEAS_NOOPENING="${SEAS_NOOPENING:-0}"
 export SEAS_DIAG_FRAME="${SEAS_DIAG_FRAME:-0}"
 export SEAS_DIAG_FRAME_XYZ="${SEAS_DIAG_FRAME_XYZ:-365100,3838920,-2488}"
