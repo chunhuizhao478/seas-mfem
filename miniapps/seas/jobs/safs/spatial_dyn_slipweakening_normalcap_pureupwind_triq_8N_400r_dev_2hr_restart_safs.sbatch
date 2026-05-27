@@ -59,7 +59,7 @@ export LANG=C
 # MUST be a 400-rank checkpoint (this job runs -n 400 to match; a 500-rank
 # checkpoint aborts with a num_ranks mismatch).  Override at submit time:
 #   sbatch --export=ALL,RESTART_FROM=/path/to/run_dir <this script>
-RESTART_FROM="${RESTART_FROM:-/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_sw_triqN_pu_dev_7752380}"
+RESTART_FROM="${RESTART_FROM:-/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_sw_triqN_pu_dev_7753174}"
 # ================================================================================
 
 # Lean diag: V_max trace ON (the cap/stability monitor); verbose frame/macro/slip
@@ -226,8 +226,8 @@ ibrun ./seas_spatial_dyn_driver \
     ${CFL_ARG} \
     ${RESTART_ARG} \
     --paraview \
-    --paraview-fault-hdf5 \
-    --paraview-fault-zfp-tol 1.0e-12 \
+    --paraview-fault-vtu \
+    --paraview-fault-dt 1.0 \
     --paraview-max-snapshots 200 \
     --print-derived \
     --checkpoint-every 2000 \
