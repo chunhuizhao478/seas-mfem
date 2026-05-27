@@ -116,7 +116,7 @@ inline DomainConfig BuildDomainConfig(const SolverConfig &solver)
 /// When `cfg.use_sidecar == true`:
 ///   1. Open the schema-v1 sidecar via `StressField3D` (asserts
 ///      schema invariants on all six components).
-///   2. Call `geom.ComputeSAFSParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
+///   2. Call `geom.ComputeParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
 ///   3. Toggle the operator into SAFS mode via SetSAFSMode, pointing
 ///      at FaultGeometry's per-DOF vectors.
 ///
@@ -144,7 +144,7 @@ void ApplySAFSMode(const StressConfig &cfg,
                   "ApplySAFSMode: stress.sidecar_path must be set");
 
       StressField3D field(cfg.sidecar_path);
-      geom.ComputeSAFSParams(field,
+      geom.ComputeParams(field,
                              cfg.P_p_pa,
                              cfg.P_p_grad_pa_per_m,
                              cfg.min_sigma_n_pa);

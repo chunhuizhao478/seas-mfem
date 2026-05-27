@@ -5,7 +5,7 @@
 #include "spatial_stress.hpp"
 
 #include "../../fault/fault_geometry_safs.inl"
-// The templated ComputeSAFSParams<StressSource> overload (Phase 3b) is
+// The templated ComputeParams<StressSource> overload (Phase 3b) is
 // defined in this companion inline file:
 #include "../../fault/fault_geometry_safs_templated.inl"
 
@@ -36,7 +36,7 @@ void apply_csm_impl(const StressSpec& spec, FaultGeometry<MeshT>& geom)
    // Reject BP2 / antiplane FaultGeometry up front (before any accessor
    // that could read uninitialised per-DOF state).  The 3-D / BP5 ctor
    // is the only one that populates per-DOF coords, basis, and zero-
-   // normal counts; ComputeSAFSParams<StressField3D> later re-checks
+   // normal counts; ComputeParams<StressField3D> later re-checks
    // is_bp5_ but failing there mid-projection produces a less precise
    // diagnostic.
    MFEM_VERIFY(geom.IsBP5(),
@@ -56,13 +56,13 @@ void apply_csm_impl(const StressSpec& spec, FaultGeometry<MeshT>& geom)
                "applying the CSM sidecar.");
 
    StressField3D field(spec.sidecar_path);
-   geom.ComputeSAFSParams(field,
+   geom.ComputeParams(field,
                           spec.pore_pressure.P_p_pa,
                           spec.pore_pressure.P_p_grad_pa_per_m,
                           spec.pore_pressure.min_sigma_n_pa);
-   MFEM_VERIFY(geom.HasSAFSParams(),
-               "ApplyCsmStressSidecar: ComputeSAFSParams did not "
-               "set HasSAFSParams() = true");
+   MFEM_VERIFY(geom.HasParams(),
+               "ApplyCsmStressSidecar: ComputeParams did not "
+               "set HasParams() = true");
 }
 
 }  // namespace

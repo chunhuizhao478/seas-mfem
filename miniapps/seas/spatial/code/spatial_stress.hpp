@@ -21,11 +21,11 @@
 //      - mfem::seas::StressField3D                (Phase 3, CSM HDF5)
 //      - mfem::seas::spatial::ConstantTensorStressSource (Phase 3b, D-1)
 //
-//   The templated FaultGeometry::ComputeSAFSParams<StressSource>(...)
+//   The templated FaultGeometry::ComputeParams<StressSource>(...)
 //   overload (declared in fault/fault_geometry.hpp, defined in
 //   fault/fault_geometry_safs_templated.inl) consumes any S satisfying
 //   the concept.  Overload resolution always prefers the existing
-//   non-templated ComputeSAFSParams(const StressField3D&, ...) overload
+//   non-templated ComputeParams(const StressField3D&, ...) overload
 //   for StressField3D arguments, preserving the BP5 path byte-exact.
 
 #ifndef MFEM_SEAS_SPATIAL_STRESS_HPP
@@ -53,8 +53,8 @@ namespace spatial
 // =====================================================================
 
 /// Loads StressField3D from the sidecar and calls
-/// geom.ComputeSAFSParams(field, P_p_pa, ...).  After return,
-/// geom.HasSAFSParams() == true; geom.sigma_n_per_dof() and
+/// geom.ComputeParams(field, P_p_pa, ...).  After return,
+/// geom.HasParams() == true; geom.sigma_n_per_dof() and
 /// geom.GetTauPre() are populated.
 ///
 /// Pre-flight check: aborts with the same precise message as the
@@ -81,7 +81,7 @@ void ApplyCsmStressSidecar(const StressSpec&     spec,
 /// concept.
 ///
 /// The rotation onto the per-DOF fault normal happens inside
-/// FaultGeometry::ComputeSAFSParams<StressSource>(...), NOT in this
+/// FaultGeometry::ComputeParams<StressSource>(...), NOT in this
 /// class.  Evaluate(x, y, z) returns the same DenseMatrix for every
 /// query — the tensor is constant in space.
 ///

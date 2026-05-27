@@ -1,7 +1,7 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // fault_geometry_safs_templated.inl — out-of-class definition of the
-// TEMPLATED `FaultGeometry<MeshType>::ComputeSAFSParams<StressSource>`
+// TEMPLATED `FaultGeometry<MeshType>::ComputeParams<StressSource>`
 // overload (Phase 3b of spatial_dynamic_rupture_plan.md rev-3).
 //
 // This file is split from `fault_geometry_safs.inl` so that:
@@ -34,14 +34,14 @@ namespace seas
 
 template <typename MeshType>
 template <typename StressSource>
-void FaultGeometry<MeshType>::ComputeSAFSParams(
+void FaultGeometry<MeshType>::ComputeParams(
    const StressSource& source,
    real_t P_p_pa,
    real_t P_p_grad_pa_per_m,
    real_t min_sigma_n_pa)
 {
    MFEM_VERIFY(is_bp5_,
-               "FaultGeometry::ComputeSAFSParams<StressSource>: only the "
+               "FaultGeometry::ComputeParams<StressSource>: only the "
                "3-D / BP5 constructor populates per-DOF coords / basis; "
                "the BP2 ctor cannot be used in SAFS mode.");
 
@@ -50,7 +50,7 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
       // Match the non-templated overload's early-out exactly: do NOT
       // touch tau_pre_ here.  (See fault_geometry_safs.inl §37–42.)
       sigma_n_per_dof_.SetSize(0);
-      safs_params_computed_ = true;
+      params_computed_ = true;
       return;
    }
 
@@ -66,11 +66,11 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
    const DenseMatrix& basis  = dof_basis_;
 
    MFEM_VERIFY(coords.Size() == 3 * num_fault_dofs_,
-               "ComputeSAFSParams<StressSource>: dof_coords_3d_ size "
+               "ComputeParams<StressSource>: dof_coords_3d_ size "
                << coords.Size() << " != 3 * num_fault_dofs " <<
                (3 * num_fault_dofs_));
    MFEM_VERIFY(basis.Height() == 9 && basis.Width() == num_fault_dofs_,
-               "ComputeSAFSParams<StressSource>: dof_basis_ shape ("
+               "ComputeParams<StressSource>: dof_basis_ shape ("
                << basis.Height() << ", " << basis.Width()
                << ") != (9, " << num_fault_dofs_ << ")");
 
@@ -128,13 +128,13 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
 
    if (clamp_count > 0)
    {
-      mfem::out << "FaultGeometry::ComputeSAFSParams<StressSource>: clamped "
+      mfem::out << "FaultGeometry::ComputeParams<StressSource>: clamped "
                 << clamp_count << " / " << num_fault_dofs_
                 << " fault DOFs to min_sigma_n_pa = "
                 << min_sigma_n_pa << " Pa\n";
    }
 
-   safs_params_computed_ = true;
+   params_computed_ = true;
 }
 
 } // namespace seas

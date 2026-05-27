@@ -1,14 +1,14 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
 // fault_geometry_safs.inl — out-of-class definition of
-// FaultGeometry<MeshType>::ComputeSAFSParams (Phase 6 §5 of
+// FaultGeometry<MeshType>::ComputeParams (Phase 6 §5 of
 // PLAN_onfaultstress.md).
 //
 // This file is split from `fault_geometry.hpp` so that the include of
 // `io/field_coefficient.hpp` (which transitively pulls HDF5 / sidecar
 // readers) only happens in the TUs that actually use SAFS-mode.
 // Callers must include this header in addition to fault_geometry.hpp
-// before invoking ComputeSAFSParams.
+// before invoking ComputeParams.
 
 #ifndef MFEM_SEAS_FAULT_GEOMETRY_SAFS_INL
 #define MFEM_SEAS_FAULT_GEOMETRY_SAFS_INL
@@ -23,26 +23,26 @@ namespace seas
 {
 
 template <typename MeshType>
-void FaultGeometry<MeshType>::ComputeSAFSParams(
+void FaultGeometry<MeshType>::ComputeParams(
    const StressField3D& field,
    real_t P_p_pa,
    real_t P_p_grad_pa_per_m,
    real_t min_sigma_n_pa)
 {
    MFEM_VERIFY(is_bp5_,
-               "FaultGeometry::ComputeSAFSParams: only the 3-D / BP5 "
+               "FaultGeometry::ComputeParams: only the 3-D / BP5 "
                "constructor populates per-DOF coords / basis; the BP2 "
                "ctor cannot be used in SAFS mode.");
 
    if (num_fault_dofs_ == 0)
    {
       sigma_n_per_dof_.SetSize(0);
-      safs_params_computed_ = true;
+      params_computed_ = true;
       return;
    }
 
    // Make sure the BP5 analytic per-DOF arrays (a, eta, Dc, V_init,
-   // and the BP5 analytic tau_pre_) are populated.  ComputeSAFSParams
+   // and the BP5 analytic tau_pre_) are populated.  ComputeParams
    // overwrites tau_pre_ but keeps the BP5 analytic forms for the
    // remaining state vectors (plan §1869).
    if (a_values_.Size() != num_fault_dofs_)
@@ -60,7 +60,7 @@ void FaultGeometry<MeshType>::ComputeSAFSParams(
       P_p_grad_pa_per_m,
       min_sigma_n_pa);
 
-   safs_params_computed_ = true;
+   params_computed_ = true;
 }
 
 } // namespace seas

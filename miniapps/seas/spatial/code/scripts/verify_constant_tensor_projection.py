@@ -4,7 +4,7 @@
 Standalone Python reference for the per-DOF projection of a constant
 background Cauchy tensor onto a fault.  Mirrors the C++ logic in
 mfem::seas::spatial::ConstantTensorStressSource +
-FaultGeometry::ComputeSAFSParams<StressSource>.
+FaultGeometry::ComputeParams<StressSource>.
 
 Used by the Phase 3b acceptance criterion that compares the C++ output
 at 64 randomly sampled fault DOFs against this Python reference (L∞

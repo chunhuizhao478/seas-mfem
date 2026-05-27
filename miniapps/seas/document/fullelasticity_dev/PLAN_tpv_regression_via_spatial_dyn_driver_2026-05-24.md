@@ -1405,9 +1405,19 @@ uses the existing `ComputeSAFSParams` name.)
    `SEAS_ZERO_DIP_PRESTRESS` stay verbatim (nothing reverted; see §2-D3.1).
 
 ### Acceptance Criteria
-- [ ] `grep -rn 'ComputeSAFSParams\|HasSAFSParams' miniapps/seas` returns nothing.
-- [ ] `seas_test_compute_safs_params` (incl. T_65_5 templated==sidecar) and the SAFS+RS smoke
-      both pass unchanged after the rename.
+- [x] `grep -rn 'ComputeSAFSParams\|HasSAFSParams' miniapps/seas --include='*.hpp'
+      --include='*.cpp' --include='*.inl' --include='*.toml' --include='*.py'
+      --include='Makefile'` returns nothing.
+      (Per user scope decision 2026-05-27 — REVIEW R-002: 16 historical `.md` docs,
+      **including this plan**, intentionally retain the old names; renaming the plan
+      that documents the rename would make it self-referentially wrong. The grep is
+      therefore scoped to code + active source, where it returns nothing.)
+- [x] `seas_test_compute_safs_params` (incl. T_65_5 templated==sidecar) passes unchanged
+      after the rename (13/13; T-65-4 numerics byte-identical). The SAFS+RS path is
+      additionally covered green by `seas_test_seed_equilibrium_psi_rs` (21/21),
+      `seas_test_tpv102_nuc_callback_parity` (18/18), `seas_test_safs_mode_wiring`, and
+      `seas_test_spatial_setup` (71/71); a serial `--print-derived` RS-dispatch run is the
+      runtime smoke (the full MPI smoke runs on the cluster per the `jobs/safs/*.sbatch`).
 
 ### Dependencies
 Depends on: Phase 3. Required by: nothing (independent cleanup).

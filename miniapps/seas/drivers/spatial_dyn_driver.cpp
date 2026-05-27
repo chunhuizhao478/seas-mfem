@@ -1175,7 +1175,7 @@ int main(int argc, char *argv[])
                                               -cfg.stress.sigma_xy_pa,
                                               cfg.stress.sigma_yz_pa,
                                               cfg.stress.sigma_xz_pa);
-      geom.ComputeSAFSParams(src,
+      geom.ComputeParams(src,
                              cfg.stress.pore_pressure.P_p_pa,
                              cfg.stress.pore_pressure.P_p_grad_pa_per_m,
                              cfg.stress.pore_pressure.min_sigma_n_pa);
@@ -1184,7 +1184,7 @@ int main(int argc, char *argv[])
    {
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
    }
-   MFEM_VERIFY(geom.HasSAFSParams(),
+   MFEM_VERIFY(geom.HasParams(),
                "spatial_dyn_driver: stress source projection failed");
 
    // -----------------------------------------------------------------

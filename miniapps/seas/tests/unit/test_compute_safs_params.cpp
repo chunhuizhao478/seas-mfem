@@ -1,18 +1,18 @@
 // Copyright (c) 2010-2026, Lawrence Livermore National Security, LLC.
 //
-// Unit tests for Phase 6 §5 — FaultGeometry::ComputeSAFSParams.
+// Unit tests for Phase 6 §5 — FaultGeometry::ComputeParams.
 // Plan reference: PLAN_onfaultstress.md §1860-1879.
 //
 // Coverage:
 //   T_65_1   sigma_n_per_dof.Size() == NumFaultDOFs after call.
 //   T_65_2   tau_pre.Size() == 2 * NumFaultDOFs after call.
-//   T_65_3   HasSAFSParams() returns true after invocation.
+//   T_65_3   HasParams() returns true after invocation.
 //   T_65_4   a/eta/Dc/V_init unchanged relative to ComputeBP5Params
 //            (analytic spatial dependence preserved per plan §1869).
 //   T_65_5   sigma_n_per_dof and tau_pre match the standalone
-//            ProjectFaultPreStress output (proves ComputeSAFSParams
+//            ProjectFaultPreStress output (proves ComputeParams
 //            is the correct wrapper).
-//   T_65_6   BP2 ctor → calling ComputeSAFSParams aborts.
+//   T_65_6   BP2 ctor → calling ComputeParams aborts.
 
 #include "mfem.hpp"
 
@@ -182,11 +182,11 @@ static std::unique_ptr<Fixture> BuildFixture()
 // --------------------------------------------------------------------
 static void T_65_1_sigma_n_size(Fixture &fix)
 {
-   std::cout << "\n[T-65-1] sigma_n_per_dof size after ComputeSAFSParams\n";
+   std::cout << "\n[T-65-1] sigma_n_per_dof size after ComputeParams\n";
    const std::string p = tmp_path("size");
    write_constant_sidecar(p, 1.0e7);
    StressField3D field(p);
-   fix.fault_geom->ComputeSAFSParams(field);
+   fix.fault_geom->ComputeParams(field);
    ::unlink(p.c_str());
    TEST_ASSERT(fix.fault_geom->sigma_n_per_dof().Size() == fix.nf,
                "sigma_n_per_dof.Size() == NumFaultDOFs");
@@ -201,9 +201,9 @@ static void T_65_2_tau_pre_size(Fixture &fix)
 
 static void T_65_3_has_safs_params(Fixture &fix)
 {
-   std::cout << "\n[T-65-3] HasSAFSParams() true after invocation\n";
-   TEST_ASSERT(fix.fault_geom->HasSAFSParams(),
-               "HasSAFSParams() == true");
+   std::cout << "\n[T-65-3] HasParams() true after invocation\n";
+   TEST_ASSERT(fix.fault_geom->HasParams(),
+               "HasParams() == true");
 }
 
 static void T_65_4_analytic_arrays_preserved(Fixture &fix)
@@ -255,9 +255,9 @@ static void T_65_5_match_standalone_projection(Fixture &fix)
       field, *fix.fault_geom, sigma_n_ref, tau_ref,
       /*P_p=*/2.0e6, /*grad=*/0.0);
 
-   // Now run ComputeSAFSParams on a fresh fault geom — should match.
+   // Now run ComputeParams on a fresh fault geom — should match.
    FaultGeometry<Mesh> safs_fg(*fix.domain_op, fix.params);
-   safs_fg.ComputeSAFSParams(field, /*P_p=*/2.0e6, /*grad=*/0.0);
+   safs_fg.ComputeParams(field, /*P_p=*/2.0e6, /*grad=*/0.0);
    ::unlink(p.c_str());
 
    const Vector& sigma_n_w = safs_fg.sigma_n_per_dof();
@@ -273,14 +273,14 @@ static void T_65_5_match_standalone_projection(Fixture &fix)
       max_dev_t = std::max(max_dev_t, std::abs(tau_w(i) - tau_ref(i)));
    }
    TEST_NEAR(max_dev_sn, 0.0, 1e-9,
-             "ComputeSAFSParams sigma_n matches standalone projector");
+             "ComputeParams sigma_n matches standalone projector");
    TEST_NEAR(max_dev_t, 0.0, 1e-9,
-             "ComputeSAFSParams tau_pre matches standalone projector");
+             "ComputeParams tau_pre matches standalone projector");
 }
 
 int main(int, char**)
 {
-   std::cout << "Running Phase 6 §5 ComputeSAFSParams tests\n";
+   std::cout << "Running Phase 6 §5 ComputeParams tests\n";
    auto fix = BuildFixture();
    if (!fix->loaded || fix->nf == 0 || !fix->fault_geom)
    {

@@ -538,7 +538,7 @@ TEST_FAULT_DOF_BASIS_OBJ = $(TEST_FAULT_DOF_BASIS_SRC:.cpp=.o)
 # Phase 6 §4: ProjectFaultPreStress test
 TEST_PROJECT_FAULT_PRESTRESS_SRC = tests/unit/test_project_fault_prestress.cpp
 TEST_PROJECT_FAULT_PRESTRESS_OBJ = $(TEST_PROJECT_FAULT_PRESTRESS_SRC:.cpp=.o)
-# Phase 6 §5: FaultGeometry::ComputeSAFSParams test
+# Phase 6 §5: FaultGeometry::ComputeParams test
 TEST_COMPUTE_SAFS_PARAMS_SRC = tests/unit/test_compute_safs_params.cpp
 TEST_COMPUTE_SAFS_PARAMS_OBJ = $(TEST_COMPUTE_SAFS_PARAMS_SRC:.cpp=.o)
 # Phase 6 §6: RateStateFaultOperator SAFS-mode wiring test
@@ -1140,7 +1140,7 @@ seas_test_project_fault_prestress: $(TEST_PROJECT_FAULT_PRESTRESS_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
-# Phase 6 §5: FaultGeometry::ComputeSAFSParams test
+# Phase 6 §5: FaultGeometry::ComputeParams test
 seas_test_compute_safs_params: $(TEST_COMPUTE_SAFS_PARAMS_OBJ) \
                                 $(STRESS_FIELD_3D_OBJ) \
                                 $(DATA_FIELD_3D_OBJ) \
@@ -3400,7 +3400,7 @@ test-fault-dof-basis: seas_test_fault_dof_basis
 test-project-fault-prestress: seas_test_project_fault_prestress
 	./seas_test_project_fault_prestress
 
-# Phase 6 §5 — FaultGeometry::ComputeSAFSParams test
+# Phase 6 §5 — FaultGeometry::ComputeParams test
 test-compute-safs-params: seas_test_compute_safs_params
 	./seas_test_compute_safs_params
 

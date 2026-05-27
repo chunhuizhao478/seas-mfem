@@ -3,7 +3,7 @@
 // test_spatial_stress_bundle.cpp — Phase 3 of
 // spatial_dynamic_rupture_plan.md (rev-3).
 //
-// Plan §Phase 3 §Acceptance: 3 tests — sidecar loads, ComputeSAFSParams
+// Plan §Phase 3 §Acceptance: 3 tests — sidecar loads, ComputeParams
 // populates correctly, zero-normal pre-flight aborts.
 //
 // Real-invocation strategy (R-005 fix):
@@ -295,7 +295,7 @@ static void S_2_empty_path_aborts_through_apply()
 
 // S-3  ApplyCsmStressSidecar with kind=ConstantTensor aborts (this is
 //      the CSM-only entry point; constant_tensor must take the
-//      ComputeSAFSParams<StressSource> overload route instead).
+//      ComputeParams<StressSource> overload route instead).
 static void S_3_wrong_kind_aborts_through_apply()
 {
    std::cout << "\n[S-3] ApplyCsmStressSidecar(spec, geom) aborts on kind=ConstantTensor\n";
@@ -323,7 +323,7 @@ static void S_3_wrong_kind_aborts_through_apply()
 
 // S-4  ApplyCsmStressSidecar wired end-to-end against a synthetic
 //      constant sidecar that covers the BP5 mesh bbox.  Post-call,
-//      geom.HasSAFSParams() == true and the per-DOF arrays are
+//      geom.HasParams() == true and the per-DOF arrays are
 //      populated with the constant sigma_n value (modulo BP5 fault
 //      basis projection).  Skipped when BP5 mesh fixture is absent.
 //      (We can't use the real SAFS CSM sidecar here because its bbox
@@ -351,8 +351,8 @@ static void S_4_end_to_end_invocation_synthetic()
    ApplyCsmStressSidecar(spec, *fix->fault_geom);
    ::unlink(p.c_str());
 
-   TEST_ASSERT(fix->fault_geom->HasSAFSParams(),
-               "HasSAFSParams() == true after ApplyCsmStressSidecar");
+   TEST_ASSERT(fix->fault_geom->HasParams(),
+               "HasParams() == true after ApplyCsmStressSidecar");
    const int nf = fix->domain_op->GetNumFaultDOFs();
    TEST_ASSERT(fix->fault_geom->sigma_n_per_dof().Size() == nf,
                "sigma_n_per_dof.Size() == NumFaultDOFs");

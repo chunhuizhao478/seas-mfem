@@ -42,7 +42,7 @@
 # Because depth_model = "constant", the H&Z projection is bit-equivalent to
 # the existing kind = "constant_tensor" stress source (the C++ driver
 # rotates this 3×3 onto each fault DOF's local basis itself; the per-DOF
-# projection mirror lives in FaultGeometry::ComputeSAFSParams).  If a
+# projection mirror lives in FaultGeometry::ComputeParams).  If a
 # future H&Z run uses non-zero depth gradients, this file must be
 # refreshed (or the driver upgraded to a depth-aware regional source).
 #

@@ -132,7 +132,7 @@ struct SimulationConfig
 /// existing BP5 / BP2 / TPV102 / TPV205 code path bit-exact.  When set
 /// to true, the driver must:
 ///   1. Instantiate `StressField3D(sidecar_path)`.
-///   2. Call `FaultGeometry::ComputeSAFSParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
+///   2. Call `FaultGeometry::ComputeParams(field, P_p_pa, P_p_grad_pa_per_m, min_sigma_n_pa)`.
 ///   3. Toggle `RateStateFaultOperator::SetSAFSMode(true, ...)` with
 ///      pointers to FaultGeometry's per-DOF pre-stress / sigma_n.
 struct StressConfig

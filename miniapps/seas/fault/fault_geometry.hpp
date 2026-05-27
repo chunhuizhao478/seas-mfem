@@ -22,7 +22,7 @@
 
 // Forward declarations to avoid pulling FieldProjector / StressField3D
 // into every translation unit that uses FaultGeometry.  Phase 6 §5's
-// ComputeSAFSParams calls FieldProjector::ProjectFaultPreStress which
+// ComputeParams calls FieldProjector::ProjectFaultPreStress which
 // is defined in io/field_coefficient.cpp with explicit instantiations
 // for Mesh and ParMesh; callers that exercise SAFS-mode must link
 // field_coefficient.o.
@@ -473,7 +473,7 @@ public:
    /// the returned vector is empty.
    ///
    /// Phase 6.A — used by FieldProjector::ProjectFaultPreStress and
-   /// FaultGeometry::ComputeSAFSParams for sidecar lookups.
+   /// FaultGeometry::ComputeParams for sidecar lookups.
    const Vector &fault_dof_coords_3d() const { return dof_coords_3d_; }
 
    /// @brief Get per-DOF orthonormal fault basis [9 x NumFaultDOFs].
@@ -575,12 +575,12 @@ public:
 
    /// @brief Get per-DOF normal stress [NumFaultDOFs].
    ///
-   /// Populated by `ComputeSAFSParams` only — empty in the standard BP5
+   /// Populated by `ComputeParams` only — empty in the standard BP5
    /// path (which uses the scalar `bp5_params_.sigma_n`).
    const Vector &sigma_n_per_dof() const { return sigma_n_per_dof_; }
 
-   /// @brief Whether ComputeSAFSParams has been invoked successfully.
-   bool HasSAFSParams() const { return safs_params_computed_; }
+   /// @brief Whether ComputeParams has been invoked successfully.
+   bool HasParams() const { return params_computed_; }
 
    /// @brief Phase 6 §5 — SAFS-mode pre-stress initialisation.
    ///
@@ -593,8 +593,8 @@ public:
    ///
    /// On return, `tau_pre_` and `sigma_n_per_dof_` are populated; the
    /// remaining BP5-state arrays are unchanged from `ComputeBP5Params`.
-   /// `safs_params_computed_` is set to `true` so consumers can branch
-   /// on it via `HasSAFSParams()`.
+   /// `params_computed_` is set to `true` so consumers can branch
+   /// on it via `HasParams()`.
    ///
    /// NOTE: SAFS-specific spatial `a(x)` / `Dc(x)` analytic forms are
    /// out of scope here (plan §1869); the BP5 functions are reused as
@@ -609,7 +609,7 @@ public:
    /// @param min_sigma_n_pa    Optional Pa-valued floor on the
    ///                           effective normal stress; default 0
    ///                           means no clamp.
-   void ComputeSAFSParams(const StressField3D& field,
+   void ComputeParams(const StressField3D& field,
                           real_t P_p_pa = 0.0,
                           real_t P_p_grad_pa_per_m = 0.0,
                           real_t min_sigma_n_pa = 0.0);
@@ -621,7 +621,7 @@ public:
    ///   `mfem::DenseMatrix S::Evaluate(real_t x, real_t y, real_t z) const`
    /// satisfies the concept and is accepted by this template.  Overload
    /// resolution always selects the non-templated
-   /// `ComputeSAFSParams(const StressField3D&, ...)` overload above
+   /// `ComputeParams(const StressField3D&, ...)` overload above
    /// for `StressField3D` arguments (a non-template wins by C++
    /// overload-ranking rules), so the BP5 byte-exact contract is
    /// preserved — this template fires only for *other* sources, e.g.
@@ -636,7 +636,7 @@ public:
    /// `fault_geometry_safs.inl` non-template body) and never
    /// instantiate this template.
    template <typename StressSource>
-   void ComputeSAFSParams(const StressSource& source,
+   void ComputeParams(const StressSource& source,
                           real_t P_p_pa = 0.0,
                           real_t P_p_grad_pa_per_m = 0.0,
                           real_t min_sigma_n_pa = 0.0);
@@ -794,9 +794,9 @@ private:
    int          num_zero_normal_fallbacks_ = 0;   // basis slot zeroed
    int          num_t1_fallbacks_ = 0;            // up-vector fallback
 
-   // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeSAFSParams)
+   // Phase 6 §5: SAFS-mode per-DOF normal stress (populated by ComputeParams)
    Vector sigma_n_per_dof_;       // [num_fault_dofs_]
-   bool   safs_params_computed_ = false;
+   bool   params_computed_ = false;
 
    // Phase 5a of spatial_dynamic_rupture_plan.md (rev-3): per-DOF
    // reference IntegrationPoint cache + per-DOF bulk-element ownership
