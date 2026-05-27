@@ -91,6 +91,13 @@ public:
    virtual ~IFrictionIterator() = default;
 };
 
+/// DEPRECATED (Phase 5): `MakeFrictionIterator` now returns the unified
+/// `LinearSlipWeakeningIterator` (dynamic/friction_substep_iterator.hpp),
+/// which reproduces `Tpv205SubStepIterator` bit-for-bit
+/// (test_friction_substep_iterator_parity).  This adapter is retained only
+/// for the Phase-2 compile/factory tests; do NOT use it in new code — it
+/// still forwards to the standalone oracle, not the production unified path.
+///
 /// LSW adapter: a transparent forwarder over the existing
 /// `Tpv205SubStepIterator`.  Behaviour is byte-identical to the pre-
 /// Phase-2 driver, which constructed a `Tpv205SubStepIterator` directly.
@@ -149,6 +156,12 @@ private:
    Tpv205SubStepIterator it_;
 };
 
+/// DEPRECATED (Phase 5): `MakeFrictionIterator` now returns the unified
+/// `RateStateAgingIterator` (= RateStateSubStepIterator<RateStateAgingPolicy>,
+/// dynamic/friction_substep_iterator.hpp), which reproduces
+/// `Tpv102SubStepIterator` bit-for-bit.  This adapter is retained only for the
+/// Phase-2 compile/factory tests; do NOT use it in new code.
+///
 /// Aging rate-and-state adapter over the existing `Tpv102SubStepIterator`.
 /// Uses the Phase-1 nucleation-callback overload and the production RS
 /// friction method `FrictionSolver::Method::Brent` (CLAUDE.md).

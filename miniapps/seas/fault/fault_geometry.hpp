@@ -641,6 +641,49 @@ public:
                           real_t P_p_grad_pa_per_m = 0.0,
                           real_t min_sigma_n_pa = 0.0);
 
+   /// @brief D3.2 fault-local pre-stress seeding (Phase 6).
+   ///
+   /// Seeds the per-DOF pre-stress DIRECTLY in the canonical fault-local
+   /// frame — NO Cauchy projection (unlike the StressSource overloads).
+   /// Right-lateral / compression POSITIVE, matching the `tau_pre_` layout
+   /// that `FieldProjector::ProjectFaultPreStress` writes and
+   /// `InitializeFaultDOFs_Spatial` reads:
+   ///   tau_pre_(2i)        = tau_dip     (dip,    DOFData.tau1_0)
+   ///   tau_pre_(2i+1)      = tau_strike  (strike, DOFData.tau2_0)
+   ///   sigma_n_per_dof_(i) = sigma_n - P_p   (effective normal stress)
+   /// Uniform across all fault DOFs (TPV background; any rectangular
+   /// tau_strike patches are layered on separately).  Like the projection
+   /// path it preserves the BP5 analytic a / eta / Dc / V_init and sets
+   /// `HasParams() == true`.  Header-inline: no HDF5/sidecar dependency.
+   void ComputeParamsFaultLocal(real_t tau_strike, real_t tau_dip,
+                                real_t sigma_n, real_t P_p = 0.0)
+   {
+      MFEM_VERIFY(is_bp5_,
+                  "FaultGeometry::ComputeParamsFaultLocal: only the 3-D / "
+                  "BP5 constructor populates per-DOF coords / basis.");
+      if (num_fault_dofs_ == 0)
+      {
+         sigma_n_per_dof_.SetSize(0);
+         tau_pre_.SetSize(0);
+         params_computed_ = true;
+         return;
+      }
+      // Preserve the BP5 analytic per-DOF a/eta/Dc/V_init (same as the
+      // projection path); only tau_pre_ and sigma_n_per_dof_ are overwritten.
+      if (a_values_.Size() != num_fault_dofs_) { ComputeBP5Params(); }
+
+      const real_t sigma_n_eff = sigma_n - P_p;
+      sigma_n_per_dof_.SetSize(num_fault_dofs_);
+      tau_pre_.SetSize(2 * num_fault_dofs_);
+      for (int i = 0; i < num_fault_dofs_; ++i)
+      {
+         tau_pre_(2 * i)     = tau_dip;     // dip    (DOFData.tau1_0)
+         tau_pre_(2 * i + 1) = tau_strike;  // strike (DOFData.tau2_0)
+         sigma_n_per_dof_(i) = sigma_n_eff;
+      }
+      params_computed_ = true;
+   }
+
    /// @brief Find the DOF index closest to a target depth.
    ///
    /// @param target_depth Target depth (z coordinate, negative for below surface)

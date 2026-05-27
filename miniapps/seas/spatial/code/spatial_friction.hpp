@@ -150,7 +150,7 @@ struct VelocitySpec
    bool          use_sidecar = true;
 };
 
-enum class StressSourceKind { ConstantTensor, SidecarHDF5 };
+enum class StressSourceKind { ConstantTensor, SidecarHDF5, FaultLocalPrestress };
 
 struct StressSpec
 {
@@ -164,6 +164,13 @@ struct StressSpec
    real_t sigma_xz_pa = 0.0;
    // SidecarHDF5 (Phase 3):
    std::string sidecar_path;
+   // FaultLocalPrestress (Phase 6 / D3.2): constant background pre-stress in
+   // the canonical fault-local frame, right-lateral / compression POSITIVE.
+   // Seeded directly via FaultGeometry::ComputeParamsFaultLocal — NO Cauchy
+   // projection.  tau2_0 = tau_strike, tau1_0 = tau_dip, sigma_n0 = sigma_n - P_p.
+   real_t tau_strike_pa = 0.0;
+   real_t tau_dip_pa    = 0.0;
+   real_t sigma_n_pa    = 0.0;
    // Common:
    PorePressureSpec pore_pressure;
 };

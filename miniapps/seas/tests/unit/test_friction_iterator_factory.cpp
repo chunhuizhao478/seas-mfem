@@ -21,7 +21,8 @@
 #include "mfem.hpp"
 
 #include "../../dynamic/friction_iterator_factory.hpp"
-#include "../../dynamic/friction_iterator.hpp"     // FaultFrictionLaw, adapters
+#include "../../dynamic/friction_iterator.hpp"          // FaultFrictionLaw
+#include "../../dynamic/friction_substep_iterator.hpp"  // Phase 5 unified iterators
 #include "../../dynamic/fault_face_flux.hpp"
 #include "../../dynamic/friction_solver.hpp"       // FrictionSolver::V0
 #include "../../spatial/code/spatial_friction.hpp"
@@ -40,17 +41,19 @@
 using namespace mfem;
 using namespace mfem::seas;
 
-// R-015: the RS adapter binds it_.state_evo_ to its own law_ member, so a
-// copy/move would dangle.  It must be non-copyable and non-movable (held
-// only via unique_ptr).  Compile-time guard.
-static_assert(!std::is_copy_constructible<RateStateAgingFrictionIterator>::value,
-              "R-015: RateStateAgingFrictionIterator must not be copy-constructible");
-static_assert(!std::is_move_constructible<RateStateAgingFrictionIterator>::value,
-              "R-015: RateStateAgingFrictionIterator must not be move-constructible");
-static_assert(!std::is_copy_assignable<RateStateAgingFrictionIterator>::value,
-              "R-015: RateStateAgingFrictionIterator must not be copy-assignable");
-static_assert(!std::is_move_assignable<RateStateAgingFrictionIterator>::value,
-              "R-015: RateStateAgingFrictionIterator must not be move-assignable");
+// R-015 / Phase 5: the unified RS iterator holds a FaultFaceFlux& (and owns
+// its law by value); a copy/move would dangle the reference.  It is held only
+// via unique_ptr and forbids copy/move.  Compile-time guard on the factory's
+// re-pointed return type (RateStateAgingIterator =
+// RateStateSubStepIterator<RateStateAgingPolicy>).
+static_assert(!std::is_copy_constructible<RateStateAgingIterator>::value,
+              "R-015: RateStateAgingIterator must not be copy-constructible");
+static_assert(!std::is_move_constructible<RateStateAgingIterator>::value,
+              "R-015: RateStateAgingIterator must not be move-constructible");
+static_assert(!std::is_copy_assignable<RateStateAgingIterator>::value,
+              "R-015: RateStateAgingIterator must not be copy-assignable");
+static_assert(!std::is_move_assignable<RateStateAgingIterator>::value,
+              "R-015: RateStateAgingIterator must not be move-assignable");
 
 static int num_tests = 0, num_passed = 0, num_failed = 0;
 
@@ -110,8 +113,8 @@ static void F1_slip_weakening()
    TEST_ASSERT(fr != nullptr, "factory returns a non-null iterator");
    TEST_ASSERT(fr->WaveOpLaw() == FaultFrictionLaw::LSW,
                "SlipWeakening iterator WaveOpLaw() == LSW");
-   TEST_ASSERT(dynamic_cast<LswFrictionIterator*>(fr.get()) != nullptr,
-               "SlipWeakening iterator is a LswFrictionIterator");
+   TEST_ASSERT(dynamic_cast<LinearSlipWeakeningIterator*>(fr.get()) != nullptr,
+               "SlipWeakening iterator is a LinearSlipWeakeningIterator (Phase 5)");
 }
 
 // =====================================================================
@@ -128,8 +131,8 @@ static void F2_rate_state_aging()
    TEST_ASSERT(fr != nullptr, "factory returns a non-null iterator");
    TEST_ASSERT(fr->WaveOpLaw() == FaultFrictionLaw::RateAndState,
                "RateState iterator WaveOpLaw() == RateAndState");
-   TEST_ASSERT(dynamic_cast<RateStateAgingFrictionIterator*>(fr.get()) != nullptr,
-               "RateState iterator is a RateStateAgingFrictionIterator");
+   TEST_ASSERT(dynamic_cast<RateStateAgingIterator*>(fr.get()) != nullptr,
+               "RateState iterator is a RateStateAgingIterator (Phase 5)");
 }
 
 // =====================================================================
@@ -174,12 +177,14 @@ static void F4_v0_guard()
 }
 
 // =====================================================================
-// F5: R-016 — LswFrictionIterator::Advance rejects an empty callback with
-//     std::runtime_error (NOT std::bad_function_call) on the WIRED path.
+// F5: R-016 — the wired LSW iterator's Advance rejects an empty callback
+//     with std::runtime_error (NOT std::bad_function_call).  Phase 5: the
+//     factory now returns the unified LinearSlipWeakeningIterator, whose
+//     RunSubSteps_ rejects an empty callback as its first precondition.
 // =====================================================================
 static void F5_lsw_empty_callback_rejected()
 {
-   std::cout << "\n[F5] R-016 LswFrictionIterator empty callback rejected\n";
+   std::cout << "\n[F5] R-016 wired LSW iterator empty callback rejected\n";
    FaultFaceFlux flux(kRho, kCp, kCs);
    const spatial::SpatialFrictionConfig cfg = MakeLswConfig();
    std::unique_ptr<IFrictionIterator> fr =

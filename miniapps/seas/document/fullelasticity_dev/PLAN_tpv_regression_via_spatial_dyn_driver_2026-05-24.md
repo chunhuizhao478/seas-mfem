@@ -1431,6 +1431,33 @@ The three benchmark-named iterators collapse into the method-oriented set
 behind `IFrictionIterator`; the Phase-2 adapters are re-pointed to the unified classes,
 parity-tested bit-for-bit against the standalone oracle. Adds the SRW law.
 
+> **⚠️ PLAN DEVIATION (2026-05-27, user-approved) — `RunSubSteps_`/`step_fn` split corrected.**
+> Reading the three oracle iterators in full at implementation time found that the §5.1 / req-1
+> premise — *"the envelope is byte-for-byte identical across all three"* and *"`RunSubSteps_`
+> performs the slip accumulation"* — is **inaccurate**. Two concrete mismatches:
+> 1. **Slip-accumulation location differs.** LSW accumulates slip **inside** `StepOneQP_`
+>    (`tpv205_substep_iterator.cpp:129-130`), whereas the RS iterators accumulate in the
+>    per-QP loop body (`tpv102_substep_iterator.cpp:345-346`). If `RunSubSteps_` also did the
+>    slip accumulation while `LinearSlipWeakeningIterator` lifts `StepOneQP_` *verbatim*, slip
+>    would be **double-counted** on the LSW path.
+> 2. **LSW writes two `DOFData` diag fields the RS path does not.** `tpv205_substep_iterator.cpp:413`
+>    (`d.slip_rate_substep_max = std::max(...)`) and `:417` (`d.sigma_n_substep_min = std::min(...)`)
+>    run **unconditionally** in the LSW envelope (only the `[SLIP]` `fprintf` is env-gated). The
+>    RS iterators have no such writes. To stay bit-exact with standalone tpv205 these must be
+>    reproduced on the LSW path, but they would be wrong on the RS path.
+>
+> **Resolution (this is what is implemented):** `SubStepIteratorBase::RunSubSteps_` owns **only**
+> the *truly* common envelope — the `SetSubSteps` validator, the `Advance` preconditions, the
+> `Σ deltaT == dt_macro` check, `memset(I_imp_*,0)`, the per-sub-step loop with
+> `nuc_fn(t_sub_end,dt_sub)` + running `t_sub_end`, the per-(o,i) `Q±` slice from `Q_pointwise[o]`,
+> and the `I_imp += accum_scale·Q_imp` accumulation. **Slip accumulation, the ψ/LSW solve, the
+> LSW-only diag writes, and `WriteBackState` all move into a richer per-QP `step_fn`** with
+> signature `step_fn(i, d, Qp_i, Qm_i, dt_sub, t_sub_end, last_sub_step, Q_imp_p, Q_imp_m)`
+> (the iterator's `fault_coords`/`method_`/`law_`/`V_w_`/`diag_num_local_fault_qps_` are captured).
+> This still collapses the triplicated envelope into one skeleton and keeps each `step_fn` a
+> verbatim lift of the oracle's per-QP body, achieving the bit-exactness goal — it only moves the
+> slip-accumulation responsibility out of `RunSubSteps_`. Requirement 1 below is amended accordingly.
+
 ### Files to Create
 - `dynamic/friction_substep_iterator.{hpp,cpp}` — `SubStepIteratorBase` (skeleton),
   `RateStateSubStepIterator<StatePolicy>`, `LinearSlipWeakeningIterator`, the two `using`
@@ -1446,11 +1473,14 @@ parity-tested bit-for-bit against the standalone oracle. Adds the SRW law.
 - **None of the standalone `tpv{205,102,104}_substep_iterator.*`** (oracle, untouched).
 
 ### Detailed Requirements
-1. `SubStepIteratorBase::RunSubSteps_` lifts the common envelope verbatim (the `SetSubSteps`
-   validator, `Advance*` preconditions, `memset(I_imp_*,0)`, the per-(o,i) `Q±` build from
-   `I/dt_macro` or `Q_pointwise[o]` via a `QSource` adapter, `accum_scale` accumulation, slip
-   accumulation, `WriteBackState` on the last sub-step, `nuc_fn(t_sub_end,dt_sub)` once per
-   sub-step before the QP loop). See §5.1 for the full structure.
+1. `SubStepIteratorBase::RunSubSteps_` lifts the **common** envelope verbatim (the `SetSubSteps`
+   validator, `Advance` preconditions, `Σ deltaT == dt_macro` check, `memset(I_imp_*,0)`, the
+   per-(o,i) `Q±` slice from `Q_pointwise[o]`, the `accum_scale = weight·dt_macro` accumulation
+   `I_imp += accum_scale·Q_imp`, and `nuc_fn(t_sub_end,dt_sub)` once per sub-step with running
+   `t_sub_end`, before the QP loop). **Per the 2026-05-27 deviation above, slip accumulation and
+   `WriteBackState` are NOT in `RunSubSteps_`** — they live in `step_fn` (LSW does both inside the
+   lifted `StepOneQP_`; RS does slip accumulation in its `step_fn` body and `WriteBackState` on the
+   last sub-step). See §5.1 for the full structure.
 2. `RateStateSubStepIterator<StatePolicy>` per-QP `step_fn`:
    `flux_.ComputeStageState(d,Qp,Qm,s,method)` → slip accumulation →
    `d.psi = StatePolicy::UpdatePsi(law_, d, s.V_abs, dt_sub, extra_, i)` →

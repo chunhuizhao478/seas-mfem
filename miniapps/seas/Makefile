@@ -146,6 +146,11 @@ FRICTION_ITERATOR_FACTORY_SRC        = dynamic/friction_iterator_factory.cpp
 FRICTION_ITERATOR_FACTORY_OBJ        = $(FRICTION_ITERATOR_FACTORY_SRC:.cpp=.o)
 TEST_FRICTION_ITERATOR_FACTORY_SRC   = tests/unit/test_friction_iterator_factory.cpp
 TEST_FRICTION_ITERATOR_FACTORY_OBJ   = $(TEST_FRICTION_ITERATOR_FACTORY_SRC:.cpp=.o)
+# TPV-via-spatial-driver Phase 5 (unified method-oriented sub-step iterator).
+FRICTION_SUBSTEP_ITERATOR_SRC        = dynamic/friction_substep_iterator.cpp
+FRICTION_SUBSTEP_ITERATOR_OBJ        = $(FRICTION_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_SRC = tests/unit/test_friction_substep_iterator_parity.cpp
+TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_OBJ = $(TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_SRC:.cpp=.o)
 TEST_ADVANCE_INTERFACE_COMPILES_SRC  = tests/unit/test_advance_interface_compiles.cpp
 TEST_ADVANCE_INTERFACE_COMPILES_OBJ  = $(TEST_ADVANCE_INTERFACE_COMPILES_SRC:.cpp=.o)
 # TPV-via-spatial-driver Phase 3 (SAFS + rate-and-state run).
@@ -816,6 +821,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_tpv102_nuc_callback_parity \
                seas_test_seed_equilibrium_psi_rs \
                seas_test_friction_iterator_factory \
+               seas_test_friction_substep_iterator_parity \
                seas_test_advance_interface_compiles \
                seas_test_resolve_rate_state_guards \
                seas_test_constant_tensor_sign \
@@ -2023,6 +2029,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(TPV205_SHARED_OBJS) \
                           $(TPV102_SUBSTEP_ITERATOR_OBJ) \
                           $(FRICTION_ITERATOR_FACTORY_OBJ) \
+                          $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
                           $(WAVE_OPERATOR_OBJ) \
                           $(PRECOMPUTED_FACE_FLUXES_OBJ) \
                           $(GODUNOV_FLUX_OBJ) \
@@ -2043,6 +2050,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(TPV205_SHARED_OBJS) \
 	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
 	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
 	    $(GODUNOV_FLUX_OBJ) \
@@ -2199,6 +2207,7 @@ $(TEST_FRICTION_ITERATOR_FACTORY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
                                      $(FRICTION_ITERATOR_FACTORY_OBJ) \
+                                     $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
                                      $(TPV205_SUBSTEP_ITERATOR_OBJ) \
                                      $(TPV102_SUBSTEP_ITERATOR_OBJ) \
                                      $(FAULT_FACE_FLUX_OBJ) \
@@ -2206,6 +2215,7 @@ seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
 	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
 	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
 	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) \
@@ -2215,6 +2225,60 @@ seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
 
 test-friction-iterator-factory: seas_test_friction_iterator_factory
 	./seas_test_friction_iterator_factory
+
+# ---- Phase 5: unified method-oriented sub-step iterator + parity test ----
+# Explicit header prerequisites (TPV*_HEADERS are defined later in this file,
+# so they cannot be referenced here without expanding empty).
+$(FRICTION_SUBSTEP_ITERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/friction_substep_iterator.hpp \
+                                       friction/state_policies.hpp \
+                                       dynamic/friction_iterator.hpp \
+                                       dynamic/tpv205_friction.hpp \
+                                       friction/slip_law_srw_psi.hpp \
+                                       spatial/code/spatial_friction.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/friction_substep_iterator.hpp \
+                                       friction/state_policies.hpp \
+                                       dynamic/tpv205_substep_iterator.hpp \
+                                       dynamic/tpv102_substep_iterator.hpp \
+                                       dynamic/tpv104_substep_iterator.hpp \
+                                       friction/slip_law_srw_psi.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+# NOTE: TPV104_SUBSTEP_ITERATOR_OBJ is defined later in this file, so the
+# variable would expand empty in this prerequisite list (GNU Make expands
+# prereqs at parse time) and the stale .o would never be rebuilt — reference
+# the literal object path instead.  tpv205/tpv102/fault_face_flux/friction_solver
+# vars are all defined earlier, so they are safe to use by name.
+seas_test_friction_substep_iterator_parity: \
+        $(TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_OBJ) \
+        $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+        $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+        $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+        dynamic/tpv104_substep_iterator.o \
+        $(FAULT_FACE_FLUX_OBJ) \
+        $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FRICTION_SUBSTEP_ITERATOR_PARITY_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    dynamic/tpv104_substep_iterator.o \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-friction-substep-iterator-parity: seas_test_friction_substep_iterator_parity
+	./seas_test_friction_substep_iterator_parity
 
 $(TEST_ADVANCE_INTERFACE_COMPILES_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                                              dynamic/friction_iterator.hpp \
