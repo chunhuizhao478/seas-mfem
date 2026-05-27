@@ -131,7 +131,7 @@ center_z_m          =   -4965.62
 radius_dip_m        =     4000.0
 radius_strike_m     =     4000.0
 delta_tau_dip_pa    =        0.0
-delta_tau_strike_pa =     20.0e6
+delta_tau_strike_pa =     30.0e6   # 20->30 MPa: stronger nucleation (patch shear strength ~46 MPa; 20 MPa nucleated only weakly, job 7751862)
 T_nuc_s             =        1.0
 
 [friction]
@@ -150,7 +150,7 @@ sigma_n_strength_floor_pa = 10.0e6
 # scalar).
 a_default       = 0.008      # TPV102 a_vw (velocity-weakening; a < b)
 b_default       = 0.012      # TPV102 b
-Dc_default      = 0.02       # m (TPV102 L)
+Dc_default      = 0.1        # m (raised 0.02->0.1 for L_b process-zone resolution; no longer TPV102 L)
 V_0_default     = 1.0e-6     # TPV102 V0; MUST equal FrictionSolver::V0 (R-009)
 f_0_default     = 0.6        # TPV102 f0
 V_init_default  = 1.0e-12    # TPV102 V_ini (quasi-static)
