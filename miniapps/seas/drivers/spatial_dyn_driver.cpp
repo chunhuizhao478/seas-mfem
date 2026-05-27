@@ -2134,6 +2134,7 @@ int main(int argc, char *argv[])
       for (int i = 0; i < num_fault_total; ++i)
       {
          dof_data[i].slip_rate_substep_max = 0.0;
+         dof_data[i].sigma_n_substep_min = 1.0e300;  // [DIAG-SIGN] tensile tracker
       }
 
       AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
@@ -2173,6 +2174,29 @@ int main(int argc, char *argv[])
          // slip_rate_substep_max) so the print cannot under-report vs the
          // last-sub-step-only slip_rate (shared-QP / reconcile safe).
          real_t    vsub_local = 0.0;
+         // [DIAG-SIGN] speckle instrumentation (sliver_blowup plan 2026-05-26):
+         // track the MOST-TENSILE normal traction and how many fault DOFs have
+         // the sigma_n strength floor ENGAGED (sigma_n_corr < floor).  Two
+         // questions this answers directly: (a) "is the cap triggered at all?"
+         // -> n_below_floor; (b) "where/when does sigma_n go tensile?" ->
+         // sigma_n_min + its DOF (the speckle onset, which precedes the V>10
+         // blowup the [DIAG-ONSET] line catches).  NB: data.sigma_n_corr ==
+         // the flux's sigma_n_fric (= sigma_n_trial + sigma_n_nuc), so
+         // (sigma_n_corr < floor) is EXACTLY fault_face_flux.cpp's engagement
+         // test.  The floor only clamps the shear STRENGTH, not this imposed
+         // normal traction (sigma_n_corr = sigma_n_trial), so tensile excursions
+         // here still drive the bulk normal Riemann update ([[v_n]] opening).
+         const real_t sn_floor = cfg.sigma_n_strength_floor_pa;  // < 0 = disabled
+         real_t    sigman_min_local = 1.0e300;     // end-of-step sigma_n_corr
+         int       argmin_sn_local  = -1;
+         long long n_tensile_local     = 0;   // sigma_n_corr < 0 (tensile)
+         long long n_below_floor_local = 0;   // sigma_n_corr < floor (engaged)
+         // SUB-STEP trackers (the key signal: a tensile transient that the
+         // end-of-step sigma_n_corr above has already recovered from).
+         real_t    ss_sigman_min_local = 1.0e300;  // min over sub-steps
+         int       argmin_ss_local     = -1;
+         long long n_ss_tensile_local     = 0;  // sigma_n_substep_min < 0
+         long long n_ss_below_floor_local = 0;  // sigma_n_substep_min < floor
          for (int i = 0; i < num_fault_total; ++i)
          {
             const DOFData &d = dof_data[i];
@@ -2182,6 +2206,18 @@ int main(int argc, char *argv[])
             if (d.slip_rate > vloc) { vloc = d.slip_rate; argmax_local = i; }
             vsub_local = std::max(vsub_local,
                                   std::max(d.slip_rate, d.slip_rate_substep_max));
+            const real_t sn = d.sigma_n_corr;
+            if (sn < sigman_min_local) { sigman_min_local = sn; argmin_sn_local = i; }
+            if (sn < 0.0) { n_tensile_local++; }
+            if (sn_floor >= 0.0 && sn < sn_floor) { n_below_floor_local++; }
+            const real_t snss = d.sigma_n_substep_min;
+            if (snss < 1.0e299)   // a sub-step value was recorded this macro step
+            {
+               if (snss < ss_sigman_min_local)
+               { ss_sigman_min_local = snss; argmin_ss_local = i; }
+               if (snss < 0.0) { n_ss_tensile_local++; }
+               if (sn_floor >= 0.0 && snss < sn_floor) { n_ss_below_floor_local++; }
+            }
          }
          long long n_rup_g = n_rup_local;
          real_t    maxslip_g = maxslip_local;
@@ -2218,6 +2254,65 @@ int main(int argc, char *argv[])
                       << " tau2_corr=" << d.tau2_corr
                       << " tau1_nuc=" << d.tau1_nuc
                       << " tau2_nuc=" << d.tau2_nuc << "\n";
+         }
+
+         // [DIAG-SIGN]: tensile-normal-stress / floor-engagement tracker.
+         // Two timescales: end-of-step (sigma_n_corr, what ParaView shows) AND
+         // sub-step (sigma_n_substep_min).  A LARGE n_ss_below_floor with a
+         // SMALL n_below_floor is the signature of a sub-step tensile transient
+         // that recovered by output time — i.e. the cap engages on the sub-step
+         // even though the output field is never below the floor (resolves the
+         // "I checked those points, sigma_n is not below 10 MPa" puzzle).
+         long long n_tensile_g = n_tensile_local;
+         long long n_below_floor_g = n_below_floor_local;
+         long long n_ss_tensile_g = n_ss_tensile_local;
+         long long n_ss_below_floor_g = n_ss_below_floor_local;
+         struct { double v; int r; } sn_in{sigman_min_local, rank},
+                                     sn_out{sigman_min_local, rank},
+                                     ss_in{ss_sigman_min_local, rank},
+                                     ss_out{ss_sigman_min_local, rank};
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&n_tensile_local, &n_tensile_g, 1, MPI_LONG_LONG,
+                       MPI_SUM, comm);
+         MPI_Allreduce(&n_below_floor_local, &n_below_floor_g, 1, MPI_LONG_LONG,
+                       MPI_SUM, comm);
+         MPI_Allreduce(&n_ss_tensile_local, &n_ss_tensile_g, 1, MPI_LONG_LONG,
+                       MPI_SUM, comm);
+         MPI_Allreduce(&n_ss_below_floor_local, &n_ss_below_floor_g, 1,
+                       MPI_LONG_LONG, MPI_SUM, comm);
+         MPI_Allreduce(&sn_in, &sn_out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+         MPI_Allreduce(&ss_in, &ss_out, 1, MPI_DOUBLE_INT, MPI_MINLOC, comm);
+#endif
+         if (rank == 0)
+         {
+            std::cout << "[DIAG-SIGN] step " << step << " t=" << t
+                      << " floor="
+                      << (sn_floor >= 0.0 ? sn_floor / 1.0e6 : -1.0) << " MPa"
+                      << (sn_floor < 0.0 ? " (DISABLED)" : "")
+                      << " | end-of-step: sigma_n_min=" << sn_out.v
+                      << " n_tensile=" << n_tensile_g
+                      << " n_below_floor=" << n_below_floor_g
+                      << " | SUB-STEP: sigma_n_min=" << ss_out.v
+                      << " n_tensile=" << n_ss_tensile_g
+                      << " n_below_floor=" << n_ss_below_floor_g << "\n";
+         }
+         if (rank == ss_out.r && argmin_ss_local >= 0)
+         {
+            const DOFData &d = dof_data[argmin_ss_local];
+            const int eng = (sn_floor >= 0.0 &&
+                             d.sigma_n_substep_min < sn_floor) ? 1 : 0;
+            std::cout << "[DIAG-SIGN-DOF] (most-tensile SUB-STEP) rank " << rank
+                      << " dof " << argmin_ss_local
+                      << " xyz=(" << dof_coords_3d(3 * argmin_ss_local) << ","
+                      << dof_coords_3d(3 * argmin_ss_local + 1) << ","
+                      << dof_coords_3d(3 * argmin_ss_local + 2) << ")"
+                      << " sigma_n_substep_min=" << d.sigma_n_substep_min
+                      << " sigma_n_corr(end)=" << d.sigma_n_corr
+                      << " floor_engaged_substep=" << eng
+                      << " V=" << d.slip_rate
+                      << " V_substep_max=" << d.slip_rate_substep_max
+                      << " tau1_corr=" << d.tau1_corr
+                      << " tau2_corr=" << d.tau2_corr << "\n";
          }
       }
 

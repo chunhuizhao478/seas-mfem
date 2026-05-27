@@ -411,6 +411,10 @@ void Tpv205SubStepIterator::AdvanceWithSubStepStates(
          // is invisible to V_max; this captures the max over ALL sub-steps.
          // Reset to 0 per macro step by the driver before this call.
          d.slip_rate_substep_max = std::max(d.slip_rate_substep_max, s.V_abs);
+         // [DIAG-SIGN] most-tensile sub-step normal traction (speckle diag
+         // 2026-05-26): catches a tensile excursion that the end-of-step
+         // sigma_n_corr would miss after it recovers to compressive.
+         d.sigma_n_substep_min = std::min(d.sigma_n_substep_min, s.sigma_n_total);
 
          // Phase 1 trace: self-selecting on the spike (no pre-chosen
          // witness).  mu_eff/tau_str reconstructed here (mirrors

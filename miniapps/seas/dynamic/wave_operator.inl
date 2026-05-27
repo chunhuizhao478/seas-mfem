@@ -4323,6 +4323,11 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   // for the same QPs from the sub-step solve).
                   fdata_qq.slip_rate_substep_max =
                      std::max(fdata_qq.slip_rate_substep_max, states[qq].V_abs);
+                  // [DIAG-SIGN] most-tensile sub-step normal traction on
+                  // shared QPs (speckle diag 2026-05-26); mirrors the iterator.
+                  fdata_qq.sigma_n_substep_min =
+                     std::min(fdata_qq.sigma_n_substep_min,
+                              states[qq].sigma_n_total);
 
                   real_t I_imp_plus_g_qq[NUM_STATE];
                   real_t I_imp_minus_g_qq[NUM_STATE];

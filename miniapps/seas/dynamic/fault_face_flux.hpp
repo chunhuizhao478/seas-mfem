@@ -69,6 +69,13 @@ struct DOFData
    /// driver, recomputed every step — intentionally NOT serialized in the
    /// checkpoint (PLAN_speckle_slip_runaway Phase 1, R-004 substrate).
    real_t slip_rate_substep_max = 0;      ///< Per-macro-step max |V| [m/s]
+   /// Per-macro-step MOST-TENSILE (minimum) sub-step normal traction
+   /// sigma_n_total [Pa] (sliver_blowup speckle diag 2026-05-26).  The
+   /// end-of-step sigma_n_corr can RECOVER to compressive after a sub-step
+   /// tensile transient triggers the speckle, so this captures the worst
+   /// sub-step value any QP saw.  TRANSIENT: reset to +inf each macro step by
+   /// the driver; NOT serialized.
+   real_t sigma_n_substep_min = 1.0e300;
    real_t V1 = 0, V2 = 0;               ///< Slip rate components [m/s] (from Eq. 9)
    real_t slip1 = 0, slip2 = 0;          ///< Accumulated slip components
 
