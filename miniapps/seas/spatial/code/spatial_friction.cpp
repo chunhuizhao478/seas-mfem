@@ -1384,20 +1384,31 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       toml_vec3(f, "up",         cfg.fault_geometry.up);
       cfg.fault_geometry.kind = toml_str(f, "kind", std::string());
 
-      // req-7 guards: ref_normal and up must be unit-norm and non-parallel.
-      // The fault-local strike axis is t2 = normalize(up × n); if up ∥ n the
-      // cross product is zero and the frame is undefined.
+      // req-7 guards: ref_normal and up define the fault-local frame; the
+      // strike axis is t2 = normalize(up × ref_normal), so up must not be
+      // parallel to ref_normal (else the cross product is zero / frame
+      // undefined).  R-003: rather than demand an EXACT unit-norm (which would
+      // reject legitimately hand-entered direction vectors — e.g. a 45°
+      // dipping-fault normal [0.577,0.577,0.577] is off-unit by ~6e-4), accept
+      // any non-degenerate vector and NORMALIZE it in place.  Reject only a
+      // near-zero vector, which carries no direction.
       auto norm3 = [](const std::array<real_t, 3>& v)
       { return std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]); };
       const real_t nn = norm3(cfg.fault_geometry.ref_normal);
       const real_t un = norm3(cfg.fault_geometry.up);
-      MFEM_VERIFY(std::abs(nn - 1.0) <= 1e-9,
-                  "[fault_geometry].ref_normal must be unit-norm; |ref_normal| = "
-                  << nn);
-      MFEM_VERIFY(std::abs(un - 1.0) <= 1e-9,
-                  "[fault_geometry].up must be unit-norm; |up| = " << un);
-      const auto& n = cfg.fault_geometry.ref_normal;
-      const auto& u = cfg.fault_geometry.up;
+      MFEM_VERIFY(nn > 1e-8,
+                  "[fault_geometry].ref_normal must be a non-zero direction "
+                  "vector; |ref_normal| = " << nn);
+      MFEM_VERIFY(un > 1e-8,
+                  "[fault_geometry].up must be a non-zero direction vector; "
+                  "|up| = " << un);
+      for (int k = 0; k < 3; ++k)
+      {
+         cfg.fault_geometry.ref_normal[k] /= nn;
+         cfg.fault_geometry.up[k]         /= un;
+      }
+      const auto& n = cfg.fault_geometry.ref_normal;   // unit now
+      const auto& u = cfg.fault_geometry.up;           // unit now
       const real_t dot = n[0]*u[0] + n[1]*u[1] + n[2]*u[2];
       MFEM_VERIFY(std::abs(dot) <= 1.0 - 1e-9,
                   "[fault_geometry].up must not be parallel to ref_normal "
@@ -1553,6 +1564,27 @@ SlipWeakeningPerDOFParams SpatialFrictionResolver::ResolveSlipWeakening(
                "ResolveSlipWeakening: every LSW default must be a number "
                "(no NaN sentinels at the block level)");
 
+   // R-001 (Phase 6 req-5 deferral, justified): the boxcar_taper rule kind and
+   // its SCECBoxcar/BoxcarTaperFactor helpers are CONFIG-LEVEL ONLY this phase.
+   // req 5 specifies the kind + the helper functions but NOT how the resolver
+   // consumes the taper — the blend semantics and which parameters taper are
+   // unspecified, and req 6's sibling new kinds are likewise "config-only;
+   // applicator wired in a later phase".  The generic per-DOF override loop
+   // below would otherwise apply a matching boxcar_taper rule as a HARD region
+   // across the entire boxcar+transition footprint (matches()>0), silently
+   // dropping cohesion_inner/cohesion_outer and producing no taper — a
+   // wrong-physics trap.  Reject it explicitly until the consumption phase.
+   for (const auto& r : cfg.spatial)
+   {
+      MFEM_VERIFY(r.kind != SpatialRule::Kind::BoxcarTaper,
+                  "ResolveSlipWeakening: a 'boxcar_taper' spatial rule is not "
+                  "yet consumed by the resolver (Phase 6 req 5 is config-only — "
+                  "the kind + SCECBoxcar/BoxcarTaperFactor exist and parse, but "
+                  "the per-DOF cohesion/parameter taper blend is wired in a "
+                  "later phase).  Remove the boxcar_taper rule or use "
+                  "kind=\"box\"/\"depth\" for now.");
+   }
+
    SlipWeakeningPerDOFParams p;
    p.mu_s.SetSize(N);
    p.mu_d.SetSize(N);
@@ -1635,6 +1667,22 @@ RateStatePerDOFParams resolve_rs_impl(
                "ResolveRateState: dof_to_attr.Size() != N");
    MFEM_VERIFY(sigma_n_total_per_dof.Size() == N || sigma_n_total_per_dof.Size() == 0,
                "ResolveRateState: sigma_n_total_per_dof.Size() must be 0 or N");
+
+   // R-001 (Phase 6 req-5 deferral, justified): boxcar_taper is config-only
+   // this phase (see the same guard in ResolveSlipWeakening).  The per-DOF loop
+   // below would silently apply a matching boxcar_taper rule's a/b/Dc/... as a
+   // HARD region over the whole boxcar+transition footprint; reject it until
+   // the consumption phase wires the taper.
+   for (const auto& r : cfg.spatial)
+   {
+      MFEM_VERIFY(r.kind != SpatialRule::Kind::BoxcarTaper,
+                  "ResolveRateState: a 'boxcar_taper' spatial rule is not yet "
+                  "consumed by the resolver (Phase 6 req 5 is config-only — the "
+                  "kind + SCECBoxcar/BoxcarTaperFactor exist and parse, but the "
+                  "per-DOF parameter taper blend is wired in a later phase).  "
+                  "Remove the boxcar_taper rule or use kind=\"box\"/\"depth\" "
+                  "for now.");
+   }
 
    RateStatePerDOFParams p;
    p.a.SetSize(N);   p.b.SetSize(N);   p.Dc.SetSize(N);

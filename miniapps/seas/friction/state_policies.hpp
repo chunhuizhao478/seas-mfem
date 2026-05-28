@@ -22,9 +22,12 @@
 //      (as the plan snippet did, pre-Phase-11a) would break bit-exactness on a
 //      depth-profile run.  TPV104 was NOT touched by Phase 11a, so the SRW
 //      policy keeps the SCALAR `L.GetB()` (matches tpv104_substep_iterator.cpp:416).
-//  (b) `Extra` for SRW is `const std::vector<real_t>*` (non-owning), NOT
+//  (b) `Extra` for SRW is `const mfem::Vector*` (non-owning), NOT
 //      `std::span<const real_t>`: the toolchain is pre-C++20 and `std::span` is
-//      unavailable.  Aging carries no side-channel (`std::nullptr_t`).
+//      unavailable, and an `mfem::Vector` matches the resolver's
+//      `RateStatePerDOFParams.V_w` (Phase 6 req 4) so the factory passes
+//      `&rs->V_w` directly with no copy.  Aging carries no side-channel
+//      (`std::nullptr_t`).
 
 #ifndef MFEM_SEAS_STATE_POLICIES_HPP
 #define MFEM_SEAS_STATE_POLICIES_HPP

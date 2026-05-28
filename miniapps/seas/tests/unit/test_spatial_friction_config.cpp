@@ -1303,18 +1303,26 @@ static void T_42_boundary_overlap_aborts()
                "fault_attr=0 (non-positive) must abort");
 }
 
-// CFG1-4 (req 7): non-unit-norm or parallel [fault_geometry] axes abort.
+// CFG1-4 (req 7): degenerate (zero) or parallel [fault_geometry] axes abort.
+// R-003: a merely NON-UNIT vector is no longer an error — it is normalized on
+// read (see T_52); only a zero-length vector (no direction) and a parallel
+// up/ref_normal pair abort.
 static void T_43_fault_geometry_guards_abort()
 {
-   std::cout << "\n[CFG1-4] non-unit / parallel fault_geometry aborts\n";
-   const std::string non_unit = MinimalLSWHeader() + MinimalLSWBlock()
-      + "[fault_geometry]\nref_normal=[0.0,-2.0,0.0]\nup=[0.0,0.0,1.0]\n";
-   TEST_ASSERT(ParseAbortsInChild(non_unit),
-               "non-unit ref_normal must abort");
+   std::cout << "\n[CFG1-4] zero / parallel fault_geometry aborts\n";
+   const std::string zero_normal = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\nref_normal=[0.0,0.0,0.0]\nup=[0.0,0.0,1.0]\n";
+   TEST_ASSERT(ParseAbortsInChild(zero_normal),
+               "zero-length ref_normal must abort");
    const std::string parallel = MinimalLSWHeader() + MinimalLSWBlock()
       + "[fault_geometry]\nref_normal=[0.0,0.0,1.0]\nup=[0.0,0.0,1.0]\n";
    TEST_ASSERT(ParseAbortsInChild(parallel),
                "up parallel to ref_normal must abort");
+   // Non-unit-but-parallel must still abort (normalize-then-parallel-check).
+   const std::string nonunit_parallel = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\nref_normal=[0.0,0.0,2.0]\nup=[0.0,0.0,1.0]\n";
+   TEST_ASSERT(ParseAbortsInChild(nonunit_parallel),
+               "non-unit but parallel ref_normal/up must abort after normalize");
 }
 
 // CFG1-5 (req 7, R-008): hypocenter z > 0 with up[2] > 0 aborts.
@@ -1502,6 +1510,28 @@ static void T_50_boxcar_taper_geometry_guards()
                "boxcar_taper with negative half must abort");
 }
 
+// CFG1-8 (R-003): a non-unit / hand-rounded [fault_geometry] direction vector
+// is normalized on read (NOT rejected); the stored frame is unit-norm.
+static void T_52_fault_geometry_normalize_on_read()
+{
+   std::cout << "\n[CFG1-8] non-unit fault_geometry axes are normalized\n";
+   // [0,-2,0] (norm 2) and a 6-dp 1/sqrt(3) triple (norm ~0.999393).
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\n"
+        "ref_normal=[0.0,-2.0,0.0]\n"
+        "up=[0.577,0.577,0.577]\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   auto norm3 = [](const std::array<real_t,3>& v)
+   { return std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]); };
+   TEST_ASSERT(std::abs(norm3(cfg.fault_geometry.ref_normal) - 1.0) < 1e-12,
+               "ref_normal normalized to unit");
+   TEST_ASSERT(std::abs(norm3(cfg.fault_geometry.up) - 1.0) < 1e-12,
+               "up normalized to unit");
+   // Direction preserved: [0,-2,0] -> [0,-1,0].
+   TEST_ASSERT(std::abs(cfg.fault_geometry.ref_normal[1] + 1.0) < 1e-12,
+               "ref_normal direction preserved ([0,-2,0] -> [0,-1,0])");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1561,6 +1591,7 @@ int main(int, char**)
    T_48_boxcar_taper_rule_and_factor();
    T_49_boxcar_taper_r114_guard();
    T_50_boxcar_taper_geometry_guards();
+   T_52_fault_geometry_normalize_on_read();   // R-003
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

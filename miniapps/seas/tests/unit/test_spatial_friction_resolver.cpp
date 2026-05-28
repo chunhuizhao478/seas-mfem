@@ -357,6 +357,36 @@ static void B_2_barrier_with_x_bound()
    TEST_NEAR(p.mu_s(1), 1.1,   0.0, "DOF outside x = default");
 }
 
+// B-3  (R-001) a boxcar_taper rule is REJECTED by the LSW resolver — Phase 6
+// req 5 is config-only, so the resolver must abort rather than silently apply
+// the rule as a hard region (dropping the cohesion taper).
+static void B_3_boxcar_taper_rejected()
+{
+   std::cout << "\n[B-3] boxcar_taper LSW rule aborts at resolve (R-001)\n";
+   const bool aborted = RunInChild([]()
+   {
+      const int N = 3;
+      Vector dofs; Array<int> attr, elem;
+      make_synthetic_dofs(N, 10000.0, dofs, attr, elem);
+      SlipWeakeningBlock cfg;
+      cfg.mu_s_default = 1.1; cfg.mu_d_default = 0.5;
+      cfg.d_c_default = 0.5;  cfg.cohesion_default = 0.0;
+      SpatialRule r;
+      r.kind = SpatialRule::Kind::BoxcarTaper;
+      r.boxcar_center_z_m = -7500.0;
+      r.boxcar_half_z_m   = 7500.0;
+      r.boxcar_trans_z_m  = 3000.0;
+      r.cohesion_inner    = 1.0e6;
+      r.cohesion_outer    = 0.0;
+      cfg.spatial.push_back(r);
+      SpatialFrictionResolver R;
+      (void)R.ResolveSlipWeakening(cfg, dofs, attr);
+   });
+   TEST_ASSERT(aborted,
+               "boxcar_taper LSW rule must abort at resolve (config-only this "
+               "phase) rather than silently apply as a hard region");
+}
+
 // =====================================================================
 //  Rate-state resolver tests
 // =====================================================================
@@ -624,6 +654,41 @@ static void R_5_rs_validator_aborts()
       (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
    });
    TEST_ASSERT(nonpos_aborted, "a <= 0 still aborts (positivity preserved)");
+#endif
+}
+
+// R-11  (R-001) a boxcar_taper rule is REJECTED by the RS resolver — same
+// config-only deferral as the LSW path (B-3).
+static void R_11_boxcar_taper_rejected()
+{
+   std::cout << "\n[R-11] boxcar_taper RS rule aborts at resolve (R-001)\n";
+#ifdef MFEM_USE_MPI
+   const bool aborted = RunInChild([]()
+   {
+      const int N = 2;
+      Vector dofs; Array<int> attr, elem;
+      make_synthetic_dofs(N, 4000.0, dofs, attr, elem);
+      Vector sn_total(N); sn_total = 50e6;
+      RateStateBlock cfg;
+      cfg.a_default = 0.010; cfg.b_default = 0.015;
+      cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
+      cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
+      cfg.sigma_n_default = 50e6;
+      cfg.eta_auto = false; cfg.eta_default = 5e6;
+      SpatialRule r;
+      r.kind = SpatialRule::Kind::BoxcarTaper;
+      r.boxcar_half_z_m = 7500.0;
+      cfg.spatial.push_back(r);
+      auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
+      TinyMeshHolder mh;
+      PorePressureSpec pp;
+      mfem::Mesh& srl = mh.mesh();
+      SpatialFrictionResolver R;
+      (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+   });
+   TEST_ASSERT(aborted,
+               "boxcar_taper RS rule must abort at resolve (config-only this "
+               "phase)");
 #endif
 }
 
@@ -1226,6 +1291,7 @@ int main(int argc, char** argv)
    // Barrier
    B_1_barrier_sentinel();
    B_2_barrier_with_x_bound();
+   B_3_boxcar_taper_rejected();   // R-001 (Phase 6 req-5 deferral)
 
    // Rate-state
    R_1a_rs_defaults_eta_explicit();
@@ -1238,6 +1304,7 @@ int main(int argc, char** argv)
    R_7_rs_negative_sigma_n_aborts();
    R_8_rs_eta_auto_collision();
    R_10_rs_depth_profile_csv();
+   R_11_boxcar_taper_rejected();   // R-001 (Phase 6 req-5 deferral)
 
    // Forced rupture / Overstress — REMOVED in Phase N (the spatial
    // driver no longer dispatches into ResolveForcedRupture /

@@ -1575,15 +1575,35 @@ All seven detailed requirements implemented on `system/spatial_dyn_driver`:
   `SCECBoxcar`/`BoxcarTaperFactor` (commit d2ced8e).  req 6 — compact-circular
   + instantaneous-circular nucleation kinds.  req 7 — guards (schema_version,
   R-008 hypocenter-z, string time forms, [boundary] disjoint+fault_attr>0,
-  [fault_geometry] unit-norm+non-parallel; "R-003" = the pre-existing
-  no-double-PP guard in `test_resolve_rate_state_guards`).
+  [fault_geometry] non-degenerate + normalize-on-read + non-parallel; "R-003"
+  in the req-7 line = the pre-existing no-double-PP guard in
+  `test_resolve_rate_state_guards`).
 
-Verification (all objects freshly recompiled vs the new `spatial_friction.hpp`):
-spatial_friction_config 138/138, friction_iterator_factory 14/14,
+##### req 5 scope clarification — `boxcar_taper` is CONFIG-ONLY this phase (review R-001, 2026-05-27)
+Justification for the deferral (decided during the `REVIEW_phase456` /code-fix
+pass): req 5 specifies only the `BoxcarTaper` rule *kind*, its geometry/cohesion-
+taper *fields*, and the `SCECBoxcar` / `BoxcarTaperFactor` *helpers* — it does
+**not** specify how the resolver consumes the taper (the per-DOF blend formula
+and which parameters taper are unspecified).  Implementing a specific blend now
+would invent unspecified physics; and req 6's sibling new kinds (the nucleation
+methods) are likewise explicitly "config-only; applicator wired in a later
+phase".  For consistency and to avoid a silent wrong-result trap (the generic
+resolver loop would otherwise apply a matching `boxcar_taper` rule as a HARD
+region over the whole boxcar+transition footprint, dropping `cohesion_inner`/
+`cohesion_outer`), `SpatialFrictionResolver::Resolve{SlipWeakening,RateState}`
+now **explicitly reject** a `boxcar_taper` rule (`MFEM_VERIFY` abort with a
+"config-only this phase" message).  The kind + helpers still parse and are
+unit-tested; the per-DOF taper-blend consumption is deferred to the phase that
+authors the TPV TOMLs needing it.  Tests: resolver `B-3`/`R-11` (reject),
+config `BOX-1..4` (parse + factor).
+
+Verification (all objects freshly recompiled vs the new `spatial_friction.hpp`;
+counts include the `REVIEW_phase456` R-001/R-003 fixes):
+spatial_friction_config 142/142, friction_iterator_factory 14/14,
 friction_substep_iterator_parity 36/36, compute_safs_params 23/23,
 constant_tensor_sign 27/27, friction_depth_profile 23/23,
 phaseh_lsw_forced_rupture 47/47, resolve_rate_state_guards 10/10,
-spatial_setup 71/71, spatial_friction_resolver 98/98,
+spatial_setup 71/71, spatial_friction_resolver 100/100,
 spatial_print_derived 33/33, spatial_stress_bundle 5/5.
 
 ⚠️ Build-hygiene finding (not a code bug): the per-test `.o` rules in the

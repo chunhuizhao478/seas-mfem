@@ -248,7 +248,13 @@ struct SpatialRule
 {
    // Phase 6 req 5: `BoxcarTaper` is a smooth 3-D taper region (SCEC boxcar
    // product); unlike the hard Box/Depth kinds it returns a factor in [0,1]
-   // (see BoxcarTaperFactor), enabling cohesion / parameter tapers.
+   // (see BoxcarTaperFactor), intended to enable cohesion / parameter tapers.
+   // CONFIG-ONLY this phase (R-001): the kind + SCECBoxcar/BoxcarTaperFactor
+   // parse and are unit-tested, but the resolver does NOT yet consume the
+   // taper — `SpatialFrictionResolver::Resolve{SlipWeakening,RateState}`
+   // explicitly REJECT a boxcar_taper rule rather than silently apply it as a
+   // hard region.  The per-DOF taper-blend semantics are wired in a later
+   // phase (matching req 6's config-only nucleation kinds).
    enum class Kind { Depth, Box, RegionAttribute, Barrier, BoxcarTaper };
    Kind kind = Kind::Depth;
 
@@ -289,10 +295,11 @@ struct SpatialRule
    real_t boxcar_trans_x_m  = 0.0;
    real_t boxcar_trans_y_m  = 0.0;
    real_t boxcar_trans_z_m  = 0.0;
-   // Cohesion-taper endpoints (LSW BoxcarTaper rules): cohesion ramps from
-   // cohesion_inner (plateau, factor 1) to cohesion_outer (factor 0) via
-   // BoxcarTaperFactor.  NaN = unset (Phase 7 resolver falls back to the
-   // block default uniformly).
+   // Cohesion-taper endpoints (LSW BoxcarTaper rules): cohesion is intended to
+   // ramp from cohesion_inner (plateau, factor 1) to cohesion_outer (factor 0)
+   // via BoxcarTaperFactor.  NaN = unset.  CONFIG-ONLY this phase (R-001): the
+   // resolver does not yet read these — it rejects boxcar_taper rules (see the
+   // Kind enum note) rather than apply them without the taper.
    real_t cohesion_inner = std::numeric_limits<real_t>::quiet_NaN();
    real_t cohesion_outer = std::numeric_limits<real_t>::quiet_NaN();
 
