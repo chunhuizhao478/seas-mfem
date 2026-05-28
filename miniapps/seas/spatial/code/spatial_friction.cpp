@@ -895,6 +895,26 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.numerics.mixed_flux = toml_str(n, "mixed_flux", "none");
       cfg.numerics.cfl        = toml_real(n, "cfl", 0.5);
       cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
+
+      // Phase 6 req 3: cfl_safety / fault_iterator / interior_flux selectors.
+      // Defaults (raw / one-shot / scalar) keep existing configs unchanged.
+      const std::string cs = toml_str(n, "cfl_safety", "raw");
+      if      (cs == "raw") { cfg.numerics.cfl_safety = CflSafety::Raw; }
+      else if (cs == "dg")  { cfg.numerics.cfl_safety = CflSafety::Dg; }
+      else { MFEM_ABORT("[numerics].cfl_safety must be \"raw\" or \"dg\"; got '"
+                        << cs << "'"); }
+
+      const std::string fi = toml_str(n, "fault_iterator", "one-shot");
+      if      (fi == "one-shot") { cfg.numerics.fault_iterator = FaultIteratorKind::OneShot; }
+      else if (fi == "substep")  { cfg.numerics.fault_iterator = FaultIteratorKind::Substep; }
+      else { MFEM_ABORT("[numerics].fault_iterator must be \"one-shot\" or "
+                        "\"substep\"; got '" << fi << "'"); }
+
+      const std::string ifx = toml_str(n, "interior_flux", "scalar");
+      if      (ifx == "scalar") { cfg.numerics.interior_flux = InteriorFlux::Scalar; }
+      else if (ifx == "matrix") { cfg.numerics.interior_flux = InteriorFlux::Matrix; }
+      else { MFEM_ABORT("[numerics].interior_flux must be \"scalar\" or "
+                        "\"matrix\"; got '" << ifx << "'"); }
    }
    MFEM_VERIFY(cfg.numerics.ader_order >= 1,
                "[numerics].ader_order must be >= 1");
@@ -906,6 +926,16 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                << cfg.numerics.mixed_flux << "'");
    MFEM_VERIFY(cfg.numerics.cfl > 0.0 && cfg.numerics.cfl < 1.0,
                "[numerics].cfl must be in (0, 1)");
+   // Phase 6 req 3 mutual-exclusion (R-1203 sibling): mixed-flux is a
+   // scalar-path-only optimization, so interior_flux="matrix" forbids it.
+   MFEM_VERIFY(cfg.numerics.interior_flux == InteriorFlux::Scalar
+               || cfg.numerics.mixed_flux == "none",
+               "[numerics] interior_flux=\"matrix\" is incompatible with "
+               "mixed_flux=\"" << cfg.numerics.mixed_flux << "\" (mixed-flux "
+               "is valid only on the scalar interior-flux path); set "
+               "mixed_flux=\"none\" when using matrix.");
+   // NOTE: the companion guard "interior_flux=matrix requires material.kind !=
+   // Constant" lands with the [material] block (Phase 6 req 1).
 
    if (root.contains("time"))
    {

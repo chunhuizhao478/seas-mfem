@@ -989,6 +989,111 @@ cohesion_default=0
                "last-match-wins: x=0 in both patches -> later (78 MPa) wins");
 }
 
+// NUM-1 (Phase 6 req 3): [numerics] cfl_safety / fault_iterator / interior_flux
+// parse into the enums.  interior_flux="matrix" + mixed_flux="none" is allowed
+// (the matrix+mixed_flux mutual-exclusion only fires when mixed_flux != none).
+static void T_23_numerics_selectors_parse()
+{
+   std::cout << "\n[NUM-1] [numerics] cfl_safety/fault_iterator/interior_flux parse\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+cfl_safety="dg"
+fault_iterator="substep"
+interior_flux="matrix"
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.numerics.cfl_safety == CflSafety::Dg, "cfl_safety=dg");
+   TEST_ASSERT(cfg.numerics.fault_iterator == FaultIteratorKind::Substep,
+               "fault_iterator=substep");
+   TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Matrix,
+               "interior_flux=matrix");
+   // Defaults (raw / one-shot / scalar) are exercised by every other config
+   // test in this file (none of which set these keys) — those still pass,
+   // proving the new selectors default to current behaviour (no regression).
+}
+
+// NUM-2 (Phase 6 req 3): interior_flux="matrix" + mixed_flux != "none" aborts.
+static void T_24_matrix_mixed_flux_aborts()
+{
+   std::cout << "\n[NUM-2] interior_flux=matrix + mixed_flux=adjacent aborts\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="adjacent"
+cfl=0.5
+interior_flux="matrix"
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "interior_flux=matrix + mixed_flux=adjacent must abort");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1009,6 +1114,8 @@ int main(int, char**)
    T_20_fault_local_prestress_parses();
    T_21_fault_local_with_sigma_aborts();
    T_22_fault_local_patches_parse();
+   T_23_numerics_selectors_parse();
+   T_24_matrix_mixed_flux_aborts();
    T_11_time_parser();
    T_12_material_fallback_bounds();
    T_13_missing_stress_block_aborts();

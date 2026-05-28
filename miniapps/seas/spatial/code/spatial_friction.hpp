@@ -89,12 +89,26 @@ struct MeshSpec
    int         order = 1;
 };
 
+/// Phase 6 req 3 selectors.
+/// cfl_safety: Raw = use cfl as-is; Dg = apply the DG /(2p+1)·(1/3) safety
+///   factor (D2 decision).  Default Raw.
+/// fault_iterator: OneShot = single EvaluateADER per macro-step; Substep =
+///   the ADER sub-step iterator.  Default OneShot.
+/// interior_flux: Scalar = homogeneous Godunov (mixed_flux allowed); Matrix =
+///   heterogeneous/bimaterial Riemann (mixed_flux forbidden).  Default Scalar.
+enum class CflSafety        { Raw, Dg };
+enum class FaultIteratorKind { OneShot, Substep };
+enum class InteriorFlux     { Scalar, Matrix };
+
 struct NumericsSpec
 {
-   int         ader_order = 2;
-   std::string mixed_flux = "none";
-   real_t      cfl        = 0.5;
-   bool        use_pml    = false;
+   int               ader_order     = 2;
+   std::string       mixed_flux     = "none";
+   real_t            cfl            = 0.5;
+   bool              use_pml        = false;
+   CflSafety         cfl_safety     = CflSafety::Raw;            // Phase 6 req 3
+   FaultIteratorKind fault_iterator = FaultIteratorKind::OneShot;
+   InteriorFlux      interior_flux  = InteriorFlux::Scalar;
 };
 
 struct TimeSpec
