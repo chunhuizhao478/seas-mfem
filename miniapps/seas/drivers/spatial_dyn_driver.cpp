@@ -950,30 +950,24 @@ int main(int argc, char *argv[])
       }
    }
 
-   // Deviation D-1: WaveOperator(MaterialField) ctor is not yet wired.
-   // Refuse to silently downgrade Mode::Coefficient input to scalar.
-   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
-               "spatial_dyn_driver Phase H gap: the heterogeneous "
-               "WaveOperator(MaterialField) ctor + per-element flux "
-               "dispatch (plan §Phase H.1/H.2) is NOT yet wired (see "
-               "dynamic/wave_operator.hpp:215 — SetGodunovFluxPool still "
-               "aborts).  This driver supports only "
-               "MaterialField::Mode::Constant via the existing scalar-"
-               "material ctor.  Re-run with --no-sidecar-material to "
-               "force the [material_constant_fallback] path.");
+   // Phase 9 (Stage B): the heterogeneous WaveOperator(MaterialField) ctor is
+   // now wired.  On the SCALAR interior-flux path the scalar ctor still
+   // consumes only the constant (lambda,mu,rho), so a non-Constant material
+   // there would be silently downgraded — keep the guard for scalar.  On the
+   // MATRIX path the het ctor consumes the MaterialField directly (a
+   // non-Constant material is required and checked at the matrix branch below).
+   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant
+               || cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+               "spatial_dyn_driver: interior_flux=\"scalar\" requires a "
+               "MaterialField::Mode::Constant material (the scalar WaveOperator "
+               "ctor consumes only constant lambda/mu/rho).  Re-run with "
+               "--no-sidecar-material to force the "
+               "[material_constant_fallback] path, or set "
+               "interior_flux=\"matrix\".");
 
    // -----------------------------------------------------------------
-   // 7.  Construct WaveOperator (scalar-material; deviation D-1).
+   // 7.  Construct WaveOperator — scalar vs matrix interior flux (Phase 9).
    // -----------------------------------------------------------------
-   // REVIEW R-001: the matrix (bimaterial) interior-flux path is a deferred
-   // Phase-9 port; this driver only wires the scalar Godunov WaveOperator.
-   // A config that requests interior_flux="matrix" passes the parser guards
-   // (matrix + non-Constant material) but would otherwise SILENTLY run the
-   // scalar path here — fail loud instead.
-   MFEM_VERIFY(spatial::InteriorFluxSupported(cfg),
-               "spatial_dyn_driver: [numerics].interior_flux=\"matrix\" is "
-               "not yet supported (the bimaterial Riemann path is a deferred "
-               "Phase-9 port); use interior_flux=\"scalar\".");
    // REVIEW R-003: this driver always sub-steps (O = ader_order via the
    // IFrictionIterator below); [numerics].fault_iterator="one-shot" is not
    // implemented.  Reject it rather than silently sub-stepping under a
@@ -983,11 +977,37 @@ int main(int argc, char *argv[])
                "spatial_dyn_driver: [numerics].fault_iterator=\"one-shot\" is "
                "not implemented (the spatial driver always sub-steps with "
                "O=ader_order); use fault_iterator=\"substep\".");
-   WaveOperator<ParMesh> wave(pmesh, cfg.mesh.order,
-                              material.lambda_const,
-                              material.mu_const,
-                              material.rho_const,
-                              bc);
+   std::unique_ptr<WaveOperator<ParMesh>> wave_ptr;
+   if (cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar)
+   {
+      // Scalar (homogeneous Godunov) path — byte-identical to pre-Phase-9.
+      wave_ptr = std::make_unique<WaveOperator<ParMesh>>(
+                    pmesh, cfg.mesh.order,
+                    material.lambda_const,
+                    material.mu_const,
+                    material.rho_const,
+                    bc);
+   }
+   else  // spatial::InteriorFlux::Matrix
+   {
+      // Heterogeneous (bimaterial) Riemann path (Phase 9 Stage B): the het
+      // ctor consumes the MaterialField directly and builds owned_flux_pool_
+      // + the per-face bimaterial flux matrices.  A Constant material here
+      // would collapse to scalar and is forbidden by the parser (matrix
+      // requires material.kind != Constant); guard loudly so a mis-built
+      // homogeneous material cannot silently run as "matrix".
+      MFEM_VERIFY(material.mode != MaterialField::Mode::Constant,
+                  "spatial_dyn_driver: interior_flux=\"matrix\" requires a "
+                  "non-Constant MaterialField, but the constructed material is "
+                  "Mode::Constant.  The depth-profile (DepthProfile1D) material "
+                  "for [material].kind=\"depth_profile_1d\" is built in Phase 10 "
+                  "and is not yet wired into this driver; a CVM velocity sidecar "
+                  "(Mode::Coefficient) material needs [velocity].use_sidecar=true "
+                  "(and --no-sidecar-material OFF).");
+      wave_ptr = std::make_unique<WaveOperator<ParMesh>>(
+                    pmesh, cfg.mesh.order, material, bc);
+   }
+   WaveOperator<ParMesh> &wave = *wave_ptr;
 
    // R-107 reflection-time warning: compute min_box_dim / cp_max from
    // mesh bounding box + scalar material.

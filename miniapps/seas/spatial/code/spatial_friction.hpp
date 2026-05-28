@@ -543,15 +543,12 @@ inline real_t CflSafetyFactor(const SpatialFrictionConfig& cfg)
           : 1.0;
 }
 
-/// R-001: true iff the requested interior flux is supported by this
-/// driver.  Only the scalar (homogeneous) Godunov path is wired; the
-/// matrix (bimaterial) path is a deferred Phase-9 port.  The driver
-/// MFEM_VERIFYs this before constructing the WaveOperator so a `matrix`
-/// request fails loud rather than silently running the scalar path.
-inline bool InteriorFluxSupported(const SpatialFrictionConfig& cfg)
-{
-   return cfg.numerics.interior_flux == InteriorFlux::Scalar;
-}
+// (Phase 9: the former `InteriorFluxSupported` Phase-8 stopgap — which
+// aborted on interior_flux="matrix" until the bimaterial path landed — is
+// removed.  The driver now branches on cfg.numerics.interior_flux to build
+// either the scalar or the matrix WaveOperator ctor, so the matrix path is
+// supported; the parser's matrix⇒non-Constant-material + matrix⇒no-mixed-flux
+// guards remain the config-level checks.)
 
 /// R-003: true iff the requested fault iterator is supported.  The
 /// spatial driver always sub-steps (O = ader_order); a `one-shot`

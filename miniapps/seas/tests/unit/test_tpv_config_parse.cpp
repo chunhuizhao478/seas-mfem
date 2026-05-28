@@ -245,13 +245,9 @@ static void T_numerics_dispatch_helpers()
    TEST_NEAR(spatial::CflSafetyFactor(cfg), 1.0 / 15.0, 1e-15,
              "CflSafetyFactor(Dg, p=2) == 1/(3*5) = 1/15");
 
-   // R-001: InteriorFluxSupported — only Scalar is wired (matrix = Phase 9).
-   cfg.numerics.interior_flux = spatial::InteriorFlux::Scalar;
-   TEST_ASSERT(spatial::InteriorFluxSupported(cfg),
-               "interior_flux=scalar supported");
-   cfg.numerics.interior_flux = spatial::InteriorFlux::Matrix;
-   TEST_ASSERT(!spatial::InteriorFluxSupported(cfg),
-               "interior_flux=matrix rejected (deferred Phase 9)");
+   // (Phase 9: the InteriorFluxSupported Phase-8 stopgap is removed — the
+   // driver now branches on interior_flux to build the scalar or matrix
+   // WaveOperator ctor, so matrix is supported.)
 
    // R-003: FaultIteratorSupported — only Substep is implemented.
    cfg.numerics.fault_iterator = spatial::FaultIteratorKind::Substep;
