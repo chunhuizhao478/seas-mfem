@@ -92,7 +92,10 @@ struct MeshSpec
 
 /// Phase 6 req 3 selectors.
 /// cfl_safety: Raw = use cfl as-is; Dg = apply the DG /(2p+1)·(1/3) safety
-///   factor (D2 decision).  Default Raw.
+///   factor (D2 decision).  Default Dg (REVIEW R-002: the driver honors this
+///   selector, and every existing config omits the key, so the default must
+///   preserve the long-standing always-DG-factored behavior; "raw" is the
+///   explicit experimental escape hatch).
 /// fault_iterator: OneShot = single EvaluateADER per macro-step; Substep =
 ///   the ADER sub-step iterator.  Default OneShot.
 /// interior_flux: Scalar = homogeneous Godunov (mixed_flux allowed); Matrix =
@@ -107,7 +110,7 @@ struct NumericsSpec
    std::string       mixed_flux     = "none";
    real_t            cfl            = 0.5;
    bool              use_pml        = false;
-   CflSafety         cfl_safety     = CflSafety::Raw;            // Phase 6 req 3
+   CflSafety         cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
    FaultIteratorKind fault_iterator = FaultIteratorKind::OneShot;
    InteriorFlux      interior_flux  = InteriorFlux::Scalar;
 };
@@ -517,6 +520,47 @@ struct SpatialFrictionConfig
    HypocenterSpec                      hypocenter;
    MaterialSpec                        material;
 };
+
+// =====================================================================
+//  Phase 8 (REVIEW R-001/R-002/R-003): pure decision helpers for the
+//  [numerics] method selectors.  Extracted as inline free functions so
+//  the driver consumes them (the selectors were parsed + tested but
+//  previously NOT read by the driver) AND so they are unit-testable
+//  without running the full driver.  No struct layout change (additive
+//  inline functions) — safe under the header-deps-less Makefile.
+// =====================================================================
+
+/// R-002 / D2: the CFL safety factor applied to `[numerics].cfl`.
+///   Dg  -> the DG `1/(3·(2p+1))` factor (p = mesh order); matches the
+///          byte-exact native driver (tpv205_driver.cpp:1242).
+///   Raw -> 1.0 (no safety factor; experimental escape hatch).
+/// The driver multiplies `cfl` by this; the Dg branch is byte-identical
+/// to the previous unconditional hardcode.
+inline real_t CflSafetyFactor(const SpatialFrictionConfig& cfg)
+{
+   return (cfg.numerics.cfl_safety == CflSafety::Dg)
+          ? (1.0 / (3.0 * (2.0 * cfg.mesh.order + 1.0)))
+          : 1.0;
+}
+
+/// R-001: true iff the requested interior flux is supported by this
+/// driver.  Only the scalar (homogeneous) Godunov path is wired; the
+/// matrix (bimaterial) path is a deferred Phase-9 port.  The driver
+/// MFEM_VERIFYs this before constructing the WaveOperator so a `matrix`
+/// request fails loud rather than silently running the scalar path.
+inline bool InteriorFluxSupported(const SpatialFrictionConfig& cfg)
+{
+   return cfg.numerics.interior_flux == InteriorFlux::Scalar;
+}
+
+/// R-003: true iff the requested fault iterator is supported.  The
+/// spatial driver always sub-steps (O = ader_order); a `one-shot`
+/// request is not implemented, so the driver MFEM_VERIFYs this rather
+/// than silently sub-stepping under a misleading label.
+inline bool FaultIteratorSupported(const SpatialFrictionConfig& cfg)
+{
+   return cfg.numerics.fault_iterator == FaultIteratorKind::Substep;
+}
 
 /// Parse + validate a TOML config.  Aborts on any schema violation with
 /// a precise message; never returns a half-validated SpatialFrictionConfig.

@@ -1767,6 +1767,92 @@ references within tolerance; the review/sign/basis tests are green; np>1 parity 
 ### Dependencies
 Depends on: Phases 5, 6, 7. Required by: nothing (TPV31 is independent via Phases 9–10).
 
+#### Phase 8 status (2026-05-28) — code-authoring + tests + dry-run COMPLETE; runs/regression DEFERRED
+Scope this pass (user-chosen): the deterministic deliverables (TOMLs + unit
+tests + Makefile + driver dry-run); the heavy multi-rank smoke + gold
+regression were deferred to a run session.
+
+- **req 1 — three TPV TOMLs authored** (`tpv{205,102,104}/configs/*_spatial.toml`):
+  all `kind="fault_local_prestress"` (D3.2; tau_strike = +70/+75/+40 MPa,
+  sigma_n = +120 MPa), `interior_flux="scalar"`, `cfl_safety="dg"`,
+  `mixed_flux="adjacent"` (matches the gold `*_mfadj_p1_O2` runs).  TPV205:
+  LSW (mu_s/mu_d/d_c = 0.677/0.525/0.40) + 3 stress patches (nuc/left/right =
+  +81.6/+78/+62 MPa) + 3 barrier rules; `fault_iterator="one-shot"`; no
+  `[nucleation]` (static).  TPV102: aging RS; TPV104: slip-law SRW
+  (f_w=0.2); both `gradual_overstress_compact_circular` nucleation
+  (delta_tau = 25/45 MPa); `fault_iterator="substep"`.
+- **req 2 — `test_tpv_toml_stress_sign.cpp`**: parse each TOML, seed via
+  `ComputeParamsFaultLocal`, assert tau2_0(strike)=+tau_ini, tau1_0(dip)=0,
+  sigma_n0=sigma_n−P_p; canonical-frame precondition.  32/32 PASS.
+- **req 3 — `test_planar_tpv_basis.cpp` (D1)**: `FaultBasis::ComputeOrientedFrame`
+  yields the exact canonical frame dip=(0,0,−1)/strike=(+1,0,0) for the
+  ref-aligned y=0 normal; mesh-backed per-QP check (canonical up to the
+  documented v61 global sign-flip).  77/77 PASS.
+- **`test_tpv_config_parse.cpp`** (deterministic core of the `_review` tests
+  / AC "each config parses"): all three TOMLs parse + every Phase-8 field
+  lands as authored.  60/60 PASS.
+- **AC "each config `--dry-run` parses"**: ALL THREE construct successfully
+  (TPV205 fault=103 → 79980 fault DOFs; TPV102/104 fault=3 → 4938 each;
+  banner `stress kind: fault_local_prestress`, friction + nucleation wired).
+
+Deviations (documented):
+1. **Driver change (user-approved, outside Phase 8's stated file list).**
+   `spatial_dyn_driver.cpp` hardcoded the SAFS boundary attrs
+   (fault=101/natural=102/absorbing=103/104) and ignored `[boundary]`, so a
+   TPV dry-run found 0 fault DOFs and aborted.  Fixed: the driver now reads
+   `cfg.boundary.{fault_attr,natural_attrs,absorbing_attrs}` when present,
+   falling back to the hardcoded SAFS values when `[boundary]` is absent
+   (verified: none of the 8 SAFS configs set `[boundary]` → SAFS
+   byte-unchanged).  Also fixed the banner stress-kind ternary (was
+   display-only "sidecar_hdf5" for the FaultLocalPrestress case).  **TPV205
+   mesh uses fault=103/free=101/absorb=105** (not TPV102/104's 1/3/5).
+2. **`boxcar_taper` deferred → `box` rules.**  The resolver rejects
+   `boxcar_taper` rules (Phase 6 made the kind config-only).  TPV102/104's
+   VW-core a / V_w spatial variation is expressed with hard `box` rules (the
+   resolver's own recommended substitute); the smooth SCEC tanh transition
+   is deferred.
+3. **Inside-out VW/VS expression.**  The parser enforces `a_default <
+   b_default` (velocity-weakening) for the scalar fallback.  TPV102/104 set
+   the VW value as `a_default` (passes the guard) and the VS border via box
+   rules (the resolver permits per-DOF a>b, R-011).  Net per-DOF a / V_w
+   field is identical to the native "VS background + VW core" form.
+
+DEFERRED to a run session (heavy multi-rank compute + tolerance judgment):
+the `tfinal=0.2s` 8-rank smoke writing SCEC `.dat`, the trace-comparison
+`_spatial_dyn_tpv{205,102,104}_review` tests vs `tpv*/gold/*.dat`, the np=2
+MPI cross-rank parity test, and the gold/SCEC tolerance match (req 5/6 +
+the run-dependent ACs).  The smooth boxcar V_w/a taper (deviation 2) should
+be wired before claiming byte-exact TPV102/104 gold parity.
+
+##### Phase 8 review fixes (2026-05-28, REVIEW.md R-001…R-005)
+The adversarial review found the three `[numerics]` method selectors were
+parsed + tested but **not consumed by the driver** (dead knobs), plus a σ_n
+double-source.  Fixed (code-fix pass):
+- **R-001** — driver now `MFEM_VERIFY`s `InteriorFluxSupported(cfg)` before the
+  WaveOperator ctor: `interior_flux="matrix"` aborts (deferred Phase-9 port)
+  instead of silently running scalar.
+- **R-002** — driver honors `cfl_safety` via `CflSafetyFactor(cfg)`
+  (Dg=`1/(3·(2p+1))`, Raw=1.0); the Dg branch is byte-identical to the prior
+  hardcode (verified: TPV205 `dt_cfl=1.15225e-4`, nsteps=1736 unchanged).
+  **The parser/struct default flipped raw→dg** (user-approved) so every config
+  that omits the key (all 8 SAFS configs) keeps the long-standing
+  always-DG-factored behavior — `raw` is now an explicit opt-in.
+- **R-003** — driver `MFEM_VERIFY`s `FaultIteratorSupported(cfg)`: `one-shot`
+  aborts (the spatial driver always sub-steps).  TPV205 TOML relabeled
+  `one-shot`→`substep` (matches the O2-substep gold); parse test updated.
+- **R-004** — NOT fixed (tracked feature deferral): the hard-box VW/V_w
+  approximation still bounds byte-exact TPV102/104 gold parity; needs
+  `boxcar_taper` resolver consumption (= deviation 2 above).
+- **R-005** — parser asserts `sigma_n_default == sigma_n_pa − P_p` for a
+  fault_local_prestress RS config (gated; SAFS exempt).
+- New decision helpers `CflSafetyFactor` / `InteriorFluxSupported` /
+  `FaultIteratorSupported` (inline, `spatial_friction.hpp`) make the selectors
+  unit-testable.  Tests: config-parse 68/68 (+8 helper), spatial_friction_config
+  145/145 (+3 R-005), stress-sign 32/32, planar 77/77; resolver 100/100,
+  rate-state-guards 10/10, iterator-factory 14/14, constant-tensor-sign 27/27
+  (re-verified vs the edited header — no regression).  Driver one-shot abort +
+  TPV205/102/104 dry-run construction re-confirmed.
+
 ## Phase 9 — Heterogeneous (matrix) Riemann solver option (PORT from hrs-ref)
 
 ### Goal
@@ -2233,6 +2319,262 @@ The CSV inputs already exist (committed): `param_a.csv` (`a` vs depth-km) and `p
 
 #### Dependencies
 Depends on: Phase 11b. Required by: nothing (deliverable).
+
+---
+
+## Phase 12 — Absorbing boundaries (PML) for the SAFS dynamic-rupture run
+
+> Promoted from `document/pml_dev/PLAN_pml_safs_2026-05-27.md` (revised 2026-05-28
+> against the post-Phase-6/7 tree). That document is the long-form theory + sizing
+> reference; this section is the authoritative, reconciled plan. **Independent of
+> Phases 8–11** — touches only the PML path; gated on `pml_layer_ != nullptr`, so it
+> cannot perturb the TPV/BP5 byte-exact regressions.
+
+### Goal
+`seas_spatial_dyn_driver` can absorb outgoing waves at the box walls with a
+free-surface-safe convolutional PML, removing the post-`t≈7 s` reflection
+contamination of the SAFS run (`t_reflect = min_box_dim/cp ≈ 41.6 km / 5996 m/s ≈
+6.94 s` ≪ `tfinal = 100 s`) and thereby settling whether the LSW `V_max` departure
+at `t≈28 s` is reflection-driven or an intrinsic friction instability.
+
+### Background — what already exists vs. what is missing
+The codebase **already implements** the unsplit convolutional PML (`dynamic/pml_layer.{hpp,cpp}`),
+the `WaveOperator` hooks (`SetPML`/`GetPML` `wave_operator.hpp:246-247`; `ApplyPMLDamping` in
+`Mult` and the ADER corrector), the total-Q background (`SetAbsorbingBackground` driver `:1336`,
+`GetAbsorbingBackground()` `wave_operator.hpp:373`), and 4 passing unit tests
+(`tests/unit/test_pml.cpp`). **Missing (this phase):** (a) no driver ever constructs a
+`PMLLayer` or calls `wave.SetPML()` — `--pml` only suppresses the reflection warning; (b)
+`ComputeDamping` damps **both** z-walls (`pml_layer.cpp:84-91`), which would wrongly damp the
+**free surface** at `z=0` (attr 102); (c) no config knobs for thickness / target reflection /
+faces.
+
+### Background math (full derivation: standalone doc §A)
+The bulk solver advances the first-order velocity–stress system as $\partial_t\mathbf Q=\sum_k
+\mathbf A_k\partial_{x_k}\mathbf Q\equiv\mathcal L(\mathbf Q)$ with $\mathbf Q\in\mathbb R^9 =
+(\sigma_{xx},\sigma_{yy},\sigma_{zz},\sigma_{xy},\sigma_{yz},\sigma_{xz},v_x,v_y,v_z)$. The PML
+adds one local (zeroth-order) damping term that pulls $\mathbf Q$ toward the static-pre-stress
+background $\mathbf Q_{\mathrm{bg}}$ (total-Q mode — damping toward $\mathbf 0$ would erode the
+pre-stress and create an interface artefact):
+
+$$\partial_t\mathbf Q=\mathcal L(\mathbf Q)-\mathbf d(\mathbf x)\odot(\mathbf Q-\mathbf Q_{\mathrm{bg}}),\qquad\text{(Eq. 16)}$$
+
+with the per-component rate $d_c(\mathbf x)=d_x D^x_c+d_y D^y_c+d_z D^z_c$ summing the three
+directional cubic ramps $d_\xi=d_{\max}(s_\xi/L)^3$ ($s_\xi$ = penetration depth from the inner
+edge), and binary selection vectors $\mathbf D^x=(1,0,0,1,0,1,1,0,0)$,
+$\mathbf D^y=(0,1,0,1,1,0,0,1,0)$, $\mathbf D^z=(0,0,1,0,1,1,0,0,1)$ (`pml_layer.cpp:24-26`;
+corners add). The peak rate **as coded** (`pml_layer.cpp:44`) is
+
+$$d_{\max}=\frac{3\,c_p}{2\,L}\ln\frac1{R_0}.\qquad\text{(Eq. 17)}$$
+
+**Precision caveat (carry into 12.1):** the consistent constant for a cubic ($n=3$) profile is
+$\tfrac{n+1}{2}c_p/L=2c_p/L$, but the code uses the $n=2$ prefactor $\tfrac32$. The realized
+reflection is therefore $R_{\mathrm{eff}}=R_0^{3/4}$ (e.g. $R_0=10^{-3}\Rightarrow R_{\mathrm{eff}}
+\approx5.6\times10^{-3}$). **Decision:** either switch the prefactor to $2c_p/L$ (true $n=3$) or
+keep $\tfrac32$ and document that the knob is $R_{\mathrm{eff}}$, not $R_0$. The Phase-12.3 metrics
+measure the *true* reflection regardless, so this only affects how the `R0` input is labelled.
+The damping enters the **ADER corrector** (the operative path at `ader_order=2`), **not** the
+local predictor (intentional — `wave_operator.hpp:427`); the corrector damps the time-integrated
+state with target $\mathrm dt\cdot\mathbf Q_{\mathrm{bg}}$ (do **not** "simplify" it to the `Mult`
+form).
+
+### Phase 12.0 — Domain sizing (analysis only; no code)
+**Conclusion: no remesh / no box extension.** Measured 500 m triq geometry: box
+`X[314840,672330] Y[3642278,3888985] Z[-41608,0]` (357×247×42 km), fault
+`X[364840,622330] Y[3692278,3838985] Z[-16608,0]`, buffers ±50 km (x,y) / 25 km (bottom);
+$\lambda=\mu=3.2\times10^{10}$, $\rho=2670\Rightarrow c_p=5996.2$, $c_s=3461.9$ m/s; `lc_far=3000 m`,
+order 1, `ader_order=2`. A no-PML box reaching `tfinal=100 s` would need walls `>c_p\,t/2\approx300`
+km away (~600 km pads — infeasible). **Default `L_pml = 12 km` (4 far-field cells)**, keeping a 13 km
+bottom clearance; `15 km` (5 cells) optional. Resulting $d_{\max}$ ($c_p=5996$):
+
+| `L_pml` | `R0=1e-3` | `R0=1e-4` |
+|---|---|---|
+| 12 km | 5.18 s⁻¹ | 6.90 s⁻¹ |
+| 15 km | 4.14 s⁻¹ | 5.52 s⁻¹ |
+
+$1/d_{\max}\approx0.19$–$0.24$ s ≪ the 7 s reflection window. Body wavelengths $\lambda_s\approx0.7$,
+$\lambda_p\approx1.2$ km (rise time ~0.2 s) → a 12–15 km PML is many body-wavelengths thick (the
+dominant `t≈7 s` body-wave contamination absorbs to ~`R0`); the longest-period Rayleigh content
+(`λ≈3.5–35 km`) is the residual the 12.3 metrics quantify.
+
+### Constraints
+- **Do not modify** the elastic RHS, the friction laws (`fault_face_flux.*`, `tpv205_friction.hpp`),
+  `SetAbsorbingBackground`, or any TPV102/104/205/BP5 byte-exact path. PML is additive, gated on
+  `pml_layer_ != nullptr`.
+- **Preserve the `PMLLayer` ctor signature + the 4 existing tests** — extend, don't break.
+- **Free surface (attr 102) is never damped** — z-PML is bottom-only for SAFS.
+- No hardcoded magic numbers in the driver — thickness/R0/faces come from config or are derived
+  from the mesh bbox + `lc_far`.
+- The `PMLLayer` object must outlive the time loop (held by a `std::unique_ptr` in driver scope;
+  `wave.SetPML(pml.get())`).
+
+### Phase 12.1 — Make `PMLLayer` free-surface-safe (per-half-face mask) + tests
+**Goal.** `PMLLayer` damps any subset of the 6 half-faces (SAFS: x±, y±, z-min; **not** z-max),
+with today's symmetric behavior preserved as the default.
+
+**Files to modify:** `dynamic/pml_layer.hpp`, `dynamic/pml_layer.cpp`, `tests/unit/test_pml.cpp`.
+
+**Detailed requirements:**
+1. Add a 6-bit half-face mask with named constants `static constexpr int PMLLayer::FaceXLo=1, FaceXHi=2,
+   FaceYLo=4, FaceYHi=8, FaceZLo=16, FaceZHi=32, FaceAll=0x3F;`.
+2. Extend the ctor with an **optional trailing** arg, preserving the current signature:
+   `PMLLayer(const Vector&, const Vector&, real_t thickness, real_t cp, real_t target_R=1e-3,
+   int dirs=7, int half_face_mask=-1)`. When `half_face_mask==-1`, derive it from `dirs`
+   (`XLO|XHI` if `dirs&1`, `YLO|YHI` if `dirs&2`, `ZLO|ZHI` if `dirs&4`) so existing call sites are
+   byte-identical; store the resolved mask in `int face_mask_`.
+3. In `ComputeDamping`, gate each half-side on its bit, e.g.
+   `if (face_mask_ & FaceXLo) { real_t d=(x_min_(0)+L_pml_)-x; if (d>0) dx=DampingProfile(d); }`
+   `if (face_mask_ & FaceXHi) { real_t d=x-(x_max_(0)-L_pml_); if (d>0) dx=std::max(dx,DampingProfile(d)); }`
+   and likewise y/z. Keep `DampingProfile`, `Dx/Dy/Dz`, `d_max_`, accessors unchanged. Keep the `dirs`
+   ctor argument for source compatibility.
+4. **(Optional, from the Eq.17 caveat)** if the team elects true-$n=3$ grading, change the `d_max_`
+   prefactor in `pml_layer.cpp:44` from `3.0/2.0` to `2.0` and update the 4 tests' tolerance labels;
+   otherwise leave it and rename the config knob `pml_target_R` semantics to "effective `R`" in the
+   12.2 banner. Pick one; record the choice in the check doc.
+
+**Edge cases:** `mask==-1` → exact today's behavior (regression-critical for the 4 tests);
+`mask==0` → no damping (degenerate, allowed — "ABC-only" A/B); a point in a disabled half-face
+returns 0 for that direction even if geometrically inside the shell.
+
+**Acceptance criteria:**
+- [ ] The 4 existing `test_pml.cpp` tests pass **unchanged** (default mask = symmetric).
+- [ ] New `TestPMLFreeSurfaceTopUndamped`: PML on `XLO|XHI|YLO|YHI|ZLO` (not `ZHI`) ⇒ `dz==0`
+      within `L_pml` of `z_max`, `dz>0` within `L_pml` of `z_min`.
+- [ ] New `TestPMLFreeSurfacePulseStable`: a P-pulse reflecting off the undamped `z_max` stays
+      finite for 500 steps (no NaN); the `z_min` side absorbs (interior energy decays).
+- [ ] `make test` green.
+
+**Dependencies:** depends on nothing; required by 12.2.
+
+### Phase 12.2 — Construct + wire the PML in `seas_spatial_dyn_driver`
+**Goal.** When enabled, the driver builds a `PMLLayer` from the mesh bbox + config, calls
+`wave.SetPML(&pml)`, and the banner reports real parameters; when disabled, behavior is
+byte-identical to today.
+
+**Files to modify:** `spatial/code/spatial_friction.hpp` (+ `.cpp`), `drivers/spatial_dyn_driver.cpp`.
+
+**Detailed requirements:**
+1. **Config fields** added to `NumericsSpec` (the struct that already holds `use_pml`,
+   `cfl_safety`, `fault_iterator`, `interior_flux` — Phase 6 req 3), defaults meaning "derive":
+   `real_t pml_thickness_m=-1.0` (`<0` ⇒ `pml_cells*lc_far`); `real_t pml_target_R=1e-3`;
+   `int pml_cells=4`; `bool pml_damp_bottom=true`; `bool pml_damp_top=false` (**MUST stay false for
+   SAFS**). Parse in `parse_root`'s `[numerics]` block (where `cfl_safety`/`interior_flux` are read)
+   via `toml_bool/toml_real/toml_int`.
+2. **CLI overrides** alongside `--pml` (`:533`): `--pml-thickness <m>`, `--pml-target-R <r>`,
+   `--pml-cells <n>`, `--pml-damp-bottom {0,1}`, `--pml-damp-top {0,1}` via `GetRealArg/GetIntArg/HasFlag`;
+   CLI wins over config (the `cli_pml`→`use_pml` pattern at `:625`).
+3. **`lc_far` source.** `MeshSpec` is currently `{path, order}` only — **add `real_t lc_far_m=-1.0` to
+   `MeshSpec`** (+ parse from `[mesh]`). Derived thickness `L_pml = pml_cells * cfg.mesh.lc_far_m`. If
+   `lc_far_m` is unset **and** no `--pml-thickness` is given, **abort** with a clear message (do not
+   hardcode 3000 in C++).
+4. **Construct after the bbox is known.** The reflection-warning block (`:955-980`) computes
+   `pmesh.GetBoundingBox(lo,hi,1)` and `cp`; refactor so `lo/hi/cp` survive past it. Then, only when
+   `cfg.numerics.use_pml`, build the face mask (`FaceXLo|FaceXHi|FaceYLo|FaceYHi`, `|FaceZLo` if
+   `pml_damp_bottom`, `|FaceZHi` if `pml_damp_top`), construct
+   `pml = std::make_unique<PMLLayer>(lo,hi,L_pml,cp,cfg.numerics.pml_target_R,7,face_mask)`, and call
+   `wave.SetPML(pml.get())` **after** `SetAbsorbingBackground` (`:1336`) and **before** the time loop.
+   Guard: `MFEM_VERIFY(wave.GetAbsorbingBackground()!=nullptr, "PML requires a total-Q background")`
+   (the API exists — `wave_operator.hpp:373`). On **restart** (`!restart_prefix.empty()`) PML is
+   stateless — reconstruct identically post-restart; verify bbox/cp recompute the same.
+5. **Banner** (`:758`): when enabled, print real `L_pml`, `R0`(or `R_eff`), `d_max`, the PML inner
+   edges and the fault→PML clearances (computed from `lo/hi`, `L_pml`, and the fault bbox if known),
+   and the damped-face list incl. "free surface z=0 undamped".
+6. The `!cfg.numerics.use_pml` guard on the reflection warning (`:974`) already suppresses it
+   correctly — leave as-is.
+
+**Edge cases:** `use_pml=false` ⇒ no `PMLLayer`, no `SetPML` ⇒ byte-identical to today;
+`pml_damp_top=true` on SAFS ⇒ allowed but log a prominent WARNING (damping `z=0` is unphysical for a
+half-space); `L_pml ≥ buffer` (PML reaching the fault) ⇒ **abort** with the computed clearance + a
+remedy (reduce `pml_cells`/thickness or remesh).
+
+**Acceptance criteria:**
+- [ ] `use_pml=false`: a short SAFS smoke is byte-identical to the current binary (diff the first
+      200 `step`/`[DIAG]` lines).
+- [ ] `--pml`: banner prints real `L_pml`/`R0`/`d_max`/inner-edges/clearances; `wave.GetPML()!=nullptr`.
+- [ ] A 2–4 rank local `--pml` smoke runs with no `has_bulk_bg_` assert and no NaN through nucleation.
+- [ ] `make seas_spatial_dyn_driver` clean; `make test` green.
+
+**Dependencies:** depends on 12.1; required by 12.3.
+
+### Phase 12.3 — Validate PML effectiveness on the SAFS problem
+**Goal.** Quantitatively show the PML removes post-7 s reflection contamination and classify the
+`t≈28 s` LSW `V_max` departure.
+
+**Files to create:** `safs/project_7.0_alternative/spatial/code/scripts/pml_reflection_metrics.py`;
+three sbatch variants (`pml_on`, `pml_off`, `bigbox_ref`).
+
+**Detailed requirements (increasing strength):**
+1. **A/B `V_max(t)` overlay** — identical configs `--pml` vs no-PML to `tfinal ≥ 34 s` (ideally 40–50 s).
+   **Decision rule:** if the `t≈28 s` departure disappears/strongly delays with PML → reflection-driven;
+   if it persists → intrinsic friction/LSW instability. Either is a definitive result.
+2. **Reflection-free-window extension** — `[DIAG-SIGN]` `sigma_n_min(t)` / `V_max(t)` stay smooth past
+   7 s (no kink at the reflection arrival).
+3. **Big-box reference (gold standard)** — remesh `--pad-x/--pad-y 100000 --pad-bottom 60000`
+   (`t_reflect ≈ 14–17 s`), **no PML**; over `[0, ~14 s]` it is reflection-free truth. **Accept PML if**
+   `max_t |V_max^{PML}−V_max^{bigbox}| / V_max^{bigbox} < 5%`.
+4. **Near-boundary seismogram** — 2–3 receivers ~one wavelength inside the PML inner edge; reflected/incident
+   peak ratio target ≤~`R0`–1%.
+5. **Interior energy monitor** — elastic energy over the **interior only** (exclude the PML shell) rises
+   during rupture then decays monotonically; no `t≈7 s` re-injection bump (reuse `EnergyDensity` from
+   `test_pml.cpp`).
+
+**Acceptance criteria:**
+- [ ] `V_max(t)` PML-vs-no-PML overlay produced; the `t≈28 s` departure classified per req 1.
+- [ ] `max` relative `V_max` difference (PML vs big-box) `< 5%` over the big-box window.
+- [ ] near-boundary reflected/incident peak ratio ≤~1%.
+- [ ] interior energy decays monotonically (no `t≈7 s` bump).
+- [ ] PML step rate within ±20% of no-PML.
+
+**Dependencies:** depends on 12.2; required by 12.4 (optional).
+
+### Phase 12.4 (optional) — Production integration + deep-box remesh
+**Goal.** Promote the validated PML to production sbatches; ship a deeper-bottom mesh only if 12.3
+flags the bottom buffer.
+
+**Detailed requirements:**
+1. Add `--pml` (+ `[numerics] use_pml=true`, `pml_cells`, `pml_target_R`) to the normal-queue parents
+   + dev smokes, with a banner-grep guard ("PML: ACTIVE (L=… faces=…)") mirroring the floor-banner guard.
+2. **Only if 12.3 req-3/4 fail at the bottom:** remesh `run_z0cut_meshing.py --pad-bottom 40000`
+   (deepen 15 km, ≥25 km bottom clearance), regenerate the triq mesh, rerun 12.3 metrics.
+3. No change to `scripts/estimate_output_size.py` (PML registers no output fields).
+
+**Acceptance criteria:**
+- [ ] Production sbatch banners confirm PML active; a restart-chain dev run resumes with PML and stays bounded.
+- [ ] (If remeshed) bottom clearance ≥ 25 km; 12.3 metrics pass.
+
+**Dependencies:** depends on 12.3.
+
+### Risk assessment (PML)
+- **R1 ADER-corrector path** — PML is intentionally skipped in the predictor (`wave_operator.hpp:427`);
+  the SAFS `ader_order=2` corrector must be the active path. *Detect:* `--pml` must show interior-energy
+  decay; if PML looks inert, instrument the corrector branch with a one-time rank-0 "PML corrector active".
+- **R2 free-surface damping (main trap)** — if `FaceZHi` is ever enabled, the PML kills the free surface.
+  *Detect:* 12.1 `TestPMLFreeSurfaceTopUndamped` + the 12.2 banner face-list + the `pml_damp_top` WARNING.
+- **R3 PML reaching the fault** — `L_pml` > buffer (esp. the 13 km bottom) arrests slip. *Detect:* 12.2
+  clearance abort + banner clearance line + 12.3 big-box agreement.
+- **R4 long-period leakage** — 12–15 km is ~0.5 long-period Rayleigh wavelengths. *Detect:* near-boundary
+  seismogram (12.3 req 4); mitigate by thickening x/y PML or relying on the 35–50 km side buffer.
+- **R5 cost** — per-QP damping over the thin PML shell only (`if d_x=d_y=d_z=0 continue`). *Detect:* 12.3
+  step-rate comparison (< a few %).
+- **R6 restart determinism** — PML is stateless but bbox/cp must recompute identically. *Detect:* a
+  checkpoint→restart smoke reproduces the pre-checkpoint `V_max` to round-off.
+
+### File-touch summary
+| Step | File | Change |
+|---|---|---|
+| 12.1 | `dynamic/pml_layer.hpp` | half-face mask enum + optional ctor arg + `GetFaceMask`; (opt.) note prefactor |
+| 12.1 | `dynamic/pml_layer.cpp` | honor `face_mask_` in `ComputeDamping`; derive from `dirs` when `-1`; (opt.) `2c_p/L` |
+| 12.1 | `tests/unit/test_pml.cpp` | +2 free-surface tests; keep the 4 existing |
+| 12.2 | `spatial/code/spatial_friction.hpp` | +5 PML `NumericsSpec` fields; `+lc_far_m` on `MeshSpec` |
+| 12.2 | `spatial/code/spatial_friction.cpp` | parse PML fields + `lc_far_m` in `[numerics]`/`[mesh]` |
+| 12.2 | `drivers/spatial_dyn_driver.cpp` | construct `PMLLayer` from bbox+config, `SetPML`, CLI flags, banner, clearance + `Q_bg` guards |
+| 12.3 | `safs/.../scripts/pml_reflection_metrics.py` | new metric tool |
+| 12.3 | `jobs/safs/*pml*` | A/B + big-box sbatch variants |
+| 12.4 | production sbatches / mesher | optional promotion + deep-bottom remesh |
+
+### Dependencies
+Depends on: Phase 3 (the SAFS+RS driver path) + the existing PML machinery. Independent of Phases
+8–11. Required by: nothing (it is an orthogonal capability that unblocks the reflection-vs-instability
+question for the SAFS LSW/RS runs).
 
 ---
 

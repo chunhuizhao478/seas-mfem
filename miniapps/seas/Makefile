@@ -165,6 +165,13 @@ TEST_CONSTANT_TENSOR_SIGN_SRC        = tests/unit/test_constant_tensor_sign.cpp
 TEST_CONSTANT_TENSOR_SIGN_OBJ        = $(TEST_CONSTANT_TENSOR_SIGN_SRC:.cpp=.o)
 TEST_PARAVIEW_STATE_CHANNEL_RS_SRC   = tests/unit/test_paraview_state_channel_rs.cpp
 TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ   = $(TEST_PARAVIEW_STATE_CHANNEL_RS_SRC:.cpp=.o)
+# TPV-via-spatial-driver Phase 8 (TPV205/102/104 benchmark configs + tests).
+TEST_TPV_TOML_STRESS_SIGN_SRC        = tests/unit/test_tpv_toml_stress_sign.cpp
+TEST_TPV_TOML_STRESS_SIGN_OBJ        = $(TEST_TPV_TOML_STRESS_SIGN_SRC:.cpp=.o)
+TEST_PLANAR_TPV_BASIS_SRC            = tests/unit/test_planar_tpv_basis.cpp
+TEST_PLANAR_TPV_BASIS_OBJ            = $(TEST_PLANAR_TPV_BASIS_SRC:.cpp=.o)
+TEST_TPV_CONFIG_PARSE_SRC            = tests/unit/test_tpv_config_parse.cpp
+TEST_TPV_CONFIG_PARSE_OBJ            = $(TEST_TPV_CONFIG_PARSE_SRC:.cpp=.o)
 # Phase D of the same plan — --print-derived pre-flight gate.
 SPATIAL_PRINT_DERIVED_SRC            = dynamic/spatial_print_derived.cpp
 SPATIAL_PRINT_DERIVED_OBJ            = $(SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
@@ -831,6 +838,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_advance_interface_compiles \
                seas_test_resolve_rate_state_guards \
                seas_test_constant_tensor_sign \
+               seas_test_tpv_toml_stress_sign \
+               seas_test_planar_tpv_basis \
+               seas_test_tpv_config_parse \
                seas_test_paraview_state_channel_rs \
                seas_test_spatial_print_derived \
                seas_test_paraview_set_fault_params_spatial \
@@ -2403,6 +2413,90 @@ seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
 test-constant-tensor-sign: seas_test_constant_tensor_sign
 	./seas_test_constant_tensor_sign
 
+# =====================================================================
+#  Phase 8 — TPV205/102/104 benchmark config + sign/basis tests.
+# =====================================================================
+
+# (1) TPV TOML stress-sign (req 2 / D3.2): parser + fault geometry + basis.
+$(TEST_TPV_TOML_STRESS_SIGN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       spatial/code/spatial_friction.hpp \
+                                       fault/fault_basis.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv_toml_stress_sign: $(TEST_TPV_TOML_STRESS_SIGN_OBJ) \
+                                $(SPATIAL_STRESS_OBJ) \
+                                $(SPATIAL_FRICTION_OBJ) \
+                                $(STRESS_FIELD_3D_OBJ) \
+                                $(DATA_FIELD_3D_OBJ) \
+                                $(FIELD_COEFFICIENT_OBJ) \
+                                $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV_TOML_STRESS_SIGN_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv-toml-stress-sign: seas_test_tpv_toml_stress_sign
+	./seas_test_tpv_toml_stress_sign
+
+# (2) Planar-TPV basis (req 3 / D1): header-only FaultBasis + tiny mesh.
+$(TEST_PLANAR_TPV_BASIS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                   fault/fault_basis.hpp \
+                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_planar_tpv_basis: $(TEST_PLANAR_TPV_BASIS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PLANAR_TPV_BASIS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-planar-tpv-basis: seas_test_planar_tpv_basis
+	./seas_test_planar_tpv_basis
+
+# (3) TPV config-parse (AC "each config parses"): parser only.
+$(TEST_TPV_CONFIG_PARSE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                   spatial/code/spatial_friction.hpp \
+                                   $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv_config_parse: $(TEST_TPV_CONFIG_PARSE_OBJ) \
+                            $(SPATIAL_STRESS_OBJ) \
+                            $(SPATIAL_FRICTION_OBJ) \
+                            $(STRESS_FIELD_3D_OBJ) \
+                            $(DATA_FIELD_3D_OBJ) \
+                            $(FIELD_COEFFICIENT_OBJ) \
+                            $(HETEROGENEOUS_MATERIAL_OBJ) \
+                            $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV_CONFIG_PARSE_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv-config-parse: seas_test_tpv_config_parse
+	./seas_test_tpv_config_parse
+
 # Phase 3 (R-005): ParaView RS state channel writes d.psi.
 $(TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                                             $(MFEM_LIB_FILE) $(CONFIG_MK)
@@ -3388,6 +3482,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-tpv102-nuc-callback-parity test-seed-equilibrium-psi-rs \
       test-friction-iterator-factory test-advance-interface-compiles \
       test-resolve-rate-state-guards test-constant-tensor-sign \
+      test-tpv-toml-stress-sign test-planar-tpv-basis test-tpv-config-parse \
       test-paraview-state-channel-rs \
       test-spatial-velocity-bundle \
       test-spatial-constant-stress-source \

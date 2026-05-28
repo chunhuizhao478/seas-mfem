@@ -989,6 +989,51 @@ cohesion_default=0
                "last-match-wins: x=0 in both patches -> later (78 MPa) wins");
 }
 
+// FLP-4 (REVIEW R-005): σ_n double-source consistency for a
+// fault_local_prestress rate-state config.  sigma_n_default
+// ([friction.rate_state]) must equal sigma_n_pa − P_p ([stress]); a mismatch
+// aborts at parse time, a match parses.  (Gated on FaultLocalPrestress so SAFS
+// constant_tensor/sidecar RS configs are exempt.)
+static void T_fault_local_rs_sigma_n_consistency()
+{
+   std::cout << "\n[FLP-4] R-005 sigma_n double-source consistency (FLP + RS)\n";
+   auto make = [](real_t sigma_n_default, real_t sigma_n_pa, real_t P_p)
+   {
+      std::ostringstream oss;
+      oss << "[meta]\nschema_version=1\nlaw=\"rate_state\"\n"
+          << "[material_constant_fallback]\nlambda=32e9\nmu=32e9\nrho=2670\n"
+          << "[pore_pressure]\nP_p_pa=" << P_p << "\n"
+          << "[mesh]\npath=\"/dev/null\"\norder=1\n"
+          << "[velocity]\nuse_sidecar=false\n"
+          << "[stress]\nkind=\"fault_local_prestress\"\n"
+          << "tau_strike_pa=75.0e6\ntau_dip_pa=0.0\nsigma_n_pa=" << sigma_n_pa << "\n"
+          << "[numerics]\nader_order=2\nmixed_flux=\"none\"\ncfl=0.5\n"
+          << "[time]\ntfinal=\"12s\"\n[output]\noutput_dir=\"out\"\n"
+          << "[friction.rate_state]\na_default=0.008\nb_default=0.012\n"
+          << "Dc_default=0.02\nV_0_default=1.0e-6\nf_0_default=0.6\n"
+          << "V_init_default=1.0e-12\nsigma_n_default=" << sigma_n_default << "\n"
+          << "eta=\"auto\"\n";
+      return oss.str();
+   };
+   // Consistent: sigma_n_default == sigma_n_pa - P_p (120e6 - 0).
+   {
+      const auto cfg = ParseSpatialFrictionConfigString(make(120.0e6, 120.0e6, 0.0));
+      TEST_ASSERT(cfg.rate_state.has_value() &&
+                  cfg.rate_state->sigma_n_default == 120.0e6,
+                  "consistent sigma_n_default == sigma_n_pa - P_p parses");
+   }
+   // Inconsistent: sigma_n_default (50e6) != sigma_n_pa - P_p (120e6) -> abort.
+   TEST_ASSERT(ParseAbortsInChild(make(50.0e6, 120.0e6, 0.0)),
+               "mismatched sigma_n_default vs sigma_n_pa-P_p must abort (R-005)");
+   // Consistent with pore pressure: sigma_n_default == sigma_n_pa - P_p (90 = 120-30).
+   {
+      const auto cfg = ParseSpatialFrictionConfigString(make(90.0e6, 120.0e6, 30.0e6));
+      TEST_ASSERT(cfg.rate_state.has_value() &&
+                  cfg.rate_state->sigma_n_default == 90.0e6,
+                  "consistent with P_p (sigma_n_default == sigma_n_pa - P_p) parses");
+   }
+}
+
 // NUM-1 (Phase 6 req 3): [numerics] cfl_safety / fault_iterator / interior_flux
 // parse into the enums.  interior_flux="matrix" + mixed_flux="none" is allowed
 // (the matrix+mixed_flux mutual-exclusion only fires when mixed_flux != none).
@@ -1048,9 +1093,11 @@ cohesion_default=0
                "fault_iterator=substep");
    TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Matrix,
                "interior_flux=matrix");
-   // Defaults (raw / one-shot / scalar) are exercised by every other config
+   // Defaults (dg / one-shot / scalar) are exercised by every other config
    // test in this file (none of which set these keys) — those still pass,
    // proving the new selectors default to current behaviour (no regression).
+   // (REVIEW R-002: cfl_safety defaults to "dg", matching the driver's
+   // always-DG-factored behavior; "raw" is an explicit opt-in.)
 }
 
 // NUM-2 (Phase 6 req 3): interior_flux="matrix" + mixed_flux != "none" aborts.
@@ -1552,6 +1599,7 @@ int main(int, char**)
    T_20_fault_local_prestress_parses();
    T_21_fault_local_with_sigma_aborts();
    T_22_fault_local_patches_parse();
+   T_fault_local_rs_sigma_n_consistency();
    T_23_numerics_selectors_parse();
    T_24_matrix_mixed_flux_aborts();
    T_25_nucleation_compact_circular_parses();

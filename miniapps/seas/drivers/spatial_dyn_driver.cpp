@@ -750,7 +750,9 @@ int main(int argc, char *argv[])
                 << (is_lsw ? "slip_weakening" : "rate_state") << "\n"
                 << "stress kind:      "
                 << (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor
-                    ? "constant_tensor" : "sidecar_hdf5") << "\n"
+                    ? "constant_tensor"
+                    : cfg.stress.kind == spatial::StressSourceKind::FaultLocalPrestress
+                      ? "fault_local_prestress" : "sidecar_hdf5") << "\n"
                 << "tfinal:           " << cfg.time.tfinal << " s\n"
                 << "cfl:              " << cfg.numerics.cfl << "\n"
                 << "ader order:       " << cfg.numerics.ader_order << "\n"
@@ -835,13 +837,30 @@ int main(int argc, char *argv[])
    pmesh.SetCurvature(cfg.mesh.order);
 
    // -----------------------------------------------------------------
-   // 5.  BoundaryConfig (SAFS .geo: fault=101, top free=102, bottom +
-   //     sides absorbing=103+104).
+   // 5.  BoundaryConfig.
+   //     Phase 8: honor the [boundary] block from the config when present
+   //     (TPV meshes tag the fault as Physical Surface 3, free surface 1,
+   //     absorbing 5 — NOT the SAFS .geo convention).  When [boundary] is
+   //     ABSENT the parser leaves cfg.boundary.fault_attr = -1 (struct
+   //     default) with empty natural/absorbing lists; fall back to the SAFS
+   //     .geo convention (fault=101, top free=102, bottom+sides
+   //     absorbing=103/104) so existing SAFS configs are byte-unchanged.
    // -----------------------------------------------------------------
    BoundaryConfig bc;
-   bc.fault_attr = 101;
-   bc.natural_attrs   = {102};
-   bc.absorbing_attrs = {103, 104};
+   if (cfg.boundary.fault_attr > 0)
+   {
+      bc.fault_attr      = cfg.boundary.fault_attr;
+      bc.natural_attrs   = std::set<int>(cfg.boundary.natural_attrs.begin(),
+                                         cfg.boundary.natural_attrs.end());
+      bc.absorbing_attrs = std::set<int>(cfg.boundary.absorbing_attrs.begin(),
+                                         cfg.boundary.absorbing_attrs.end());
+   }
+   else
+   {
+      bc.fault_attr      = 101;
+      bc.natural_attrs   = {102};
+      bc.absorbing_attrs = {103, 104};
+   }
 
    // -----------------------------------------------------------------
    // 6.  Material — pick the right WaveOperator ctor (deviation D-1).
@@ -946,6 +965,24 @@ int main(int argc, char *argv[])
    // -----------------------------------------------------------------
    // 7.  Construct WaveOperator (scalar-material; deviation D-1).
    // -----------------------------------------------------------------
+   // REVIEW R-001: the matrix (bimaterial) interior-flux path is a deferred
+   // Phase-9 port; this driver only wires the scalar Godunov WaveOperator.
+   // A config that requests interior_flux="matrix" passes the parser guards
+   // (matrix + non-Constant material) but would otherwise SILENTLY run the
+   // scalar path here — fail loud instead.
+   MFEM_VERIFY(spatial::InteriorFluxSupported(cfg),
+               "spatial_dyn_driver: [numerics].interior_flux=\"matrix\" is "
+               "not yet supported (the bimaterial Riemann path is a deferred "
+               "Phase-9 port); use interior_flux=\"scalar\".");
+   // REVIEW R-003: this driver always sub-steps (O = ader_order via the
+   // IFrictionIterator below); [numerics].fault_iterator="one-shot" is not
+   // implemented.  Reject it rather than silently sub-stepping under a
+   // misleading label.  (Placed before the --dry-run exit so a dry-run
+   // catches it.)
+   MFEM_VERIFY(spatial::FaultIteratorSupported(cfg),
+               "spatial_dyn_driver: [numerics].fault_iterator=\"one-shot\" is "
+               "not implemented (the spatial driver always sub-steps with "
+               "O=ader_order); use fault_iterator=\"substep\".");
    WaveOperator<ParMesh> wave(pmesh, cfg.mesh.order,
                               material.lambda_const,
                               material.mu_const,
@@ -1181,6 +1218,40 @@ int main(int argc, char *argv[])
                              cfg.stress.pore_pressure.P_p_grad_pa_per_m,
                              cfg.stress.pore_pressure.min_sigma_n_pa);
    }
+   else if (cfg.stress.kind == spatial::StressSourceKind::FaultLocalPrestress)
+   {
+      // D3.2 (Phase 6 req 2): fault-local background pre-stress, seeded
+      // DIRECTLY (no Cauchy projection).  tau2_0=tau_strike (right-lateral
+      // POSITIVE), tau1_0=tau_dip, sigma_n0=sigma_n_pa-P_p (compression
+      // POSITIVE).  P_p here is the uniform scalar — the fault-local path
+      // has no depth-gradient input (constant background only).
+      geom.ComputeParamsFaultLocal(cfg.stress.tau_strike_pa,
+                                   cfg.stress.tau_dip_pa,
+                                   cfg.stress.sigma_n_pa,
+                                   cfg.stress.pore_pressure.P_p_pa);
+      // Optional rectangular tau_strike patches (last-match-wins over the
+      // patch list).  Only the strike slot is overridden; the background
+      // dip / sigma_n seeded above are untouched.
+      if (!cfg.stress.fault_local_patches.empty())
+      {
+         const auto &patches = cfg.stress.fault_local_patches;
+         geom.ApplyStrikePreStressOverride(
+            [&patches](real_t x, real_t y, real_t z,
+                       real_t &tau_strike_out) -> bool
+            {
+               bool matched = false;
+               for (const auto &p : patches)   // last-match-wins
+               {
+                  if (p.inside(x, y, z))
+                  {
+                     tau_strike_out = p.tau_strike_pa;
+                     matched = true;
+                  }
+               }
+               return matched;
+            });
+      }
+   }
    else
    {
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
@@ -1239,15 +1310,30 @@ int main(int argc, char *argv[])
       MakeNucleation(cfg, dof_coords_3d, dof_basis);
 
    // The PrintDerivedAndCheck* diagnostics + the static ParaView nucleation
-   // fields read the resolved per-DOF Gaussian amplitudes/radial.  Source them
-   // from the method (single resolve; identical data to the old inline
-   // nuc_params, since GaussianGradualOverstress holds exactly that resolve).
-   // Non-Gaussian kinds leave nuc_params zero-sized — those consumers already
-   // guard on `.Size() == num_fault_total`.
+   // fields read the resolved per-DOF amplitudes/radial.  Source them from the
+   // active method regardless of kind (single resolve; identical data to the
+   // old inline nuc_params for the Gaussian path).  R-002: the compact-circular
+   // (TPV102/104) and instantaneous-circular (TPV31) kinds resolve a real
+   // strike amplitude / radial factor; map those into the diagnostic struct so
+   // the ParaView nuc_amplitude / nuc_radial_factor fields and the derived
+   // banner are not silently zeroed for the non-Gaussian kinds.  The
+   // instantaneous kind has no radial field (one-shot patch), so only
+   // amplitude_strike is populated.  Static / disabled kinds leave nuc_params
+   // zero-sized — those consumers already guard on `.Size() == num_fault_total`.
    spatial::GradualOverstressPerDOFParams nuc_params;
    if (auto *g = dynamic_cast<GaussianGradualOverstress *>(nuc.get()))
    {
       nuc_params = g->Params();
+   }
+   else if (auto *c = dynamic_cast<CompactCircularGradualOverstress *>(nuc.get()))
+   {
+      nuc_params.amplitude_strike = c->Params().amplitude_strike;
+      nuc_params.radial           = c->Params().radial;
+   }
+   else if (auto *inst =
+               dynamic_cast<InstantaneousOverstressCircular *>(nuc.get()))
+   {
+      nuc_params.amplitude_strike = inst->Params().amplitude_strike;
    }
 
    // R-008: warn when a non-trivial fraction of fault DOFs live on
@@ -1347,9 +1433,14 @@ int main(int argc, char *argv[])
    //     is a TPV205-style safety knob, not the raw CFL number.  Passing
    //     0.5 raw stepped at 9x TPV205's dt -> above the N=1 stability
    //     boundary -> nucleation-end velocity blow-up (job 7743554).
+   //
+   //     REVIEW R-002 / plan D2: the DG factor is now opt-in via
+   //     [numerics].cfl_safety.  CflSafetyFactor returns 1/(3·(2N+1)) for
+   //     "dg" (byte-identical to the previous unconditional hardcode and to
+   //     the gold) and 1.0 for "raw" (experimental escape hatch).
    // -----------------------------------------------------------------
-   const real_t dt_cfl = wave.ComputeMaxDt(
-      cfg.numerics.cfl / (3.0 * (2.0 * cfg.mesh.order + 1.0)));
+   const real_t dt_cfl =
+      wave.ComputeMaxDt(cfg.numerics.cfl * spatial::CflSafetyFactor(cfg));
    real_t dt = (cfg.time.dt_initial > 0.0)
                 ? cfg.time.dt_initial : dt_cfl;
    // R-006: warn if the user override exceeds the explicit CFL bound.
@@ -2018,11 +2109,24 @@ int main(int argc, char *argv[])
    // ApplyGradualOverstressIncrement call as the pre-Phase-7 lambda (the
    // cfg.nucleation.enabled guard is subsumed: a disabled config yields a
    // StaticOverstress whose ApplyIncrement is a no-op).
-   auto nuc_cb = [&nuc, &dof_data]
-                 (real_t t_sub_end, real_t dt_sub)
+   // R-005: gate on IsPerSubStep() so the strategy's per-sub-step intent is
+   // honoured explicitly.  For kinds that do no per-sub-step work (Static,
+   // InstantaneousOverstressCircular) we pass an explicit no-op rather than
+   // calling their (already no-op) ApplyIncrement every sub-step.  Note the
+   // iterator REJECTS an empty std::function (friction_substep_iterator.hpp:108),
+   // so the opt-out must be a no-op lambda, not a default-constructed function.
+   std::function<void(real_t, real_t)> nuc_cb;
+   if (nuc->IsPerSubStep())
    {
-      nuc->ApplyIncrement(dof_data, t_sub_end, dt_sub);
-   };
+      nuc_cb = [&nuc, &dof_data](real_t t_sub_end, real_t dt_sub)
+      {
+         nuc->ApplyIncrement(dof_data, t_sub_end, dt_sub);
+      };
+   }
+   else
+   {
+      nuc_cb = [](real_t, real_t) {};
+   }
 
    // ParaView snapshot writer (Parity Phases 1-6).  Updates the 5 BP5
    // fault projection GFs + writes the primary / bulk collections.

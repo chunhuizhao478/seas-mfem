@@ -644,6 +644,13 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
                      "[friction.rate_state] state_evolution=slip_law_strong_"
                      "rate_weakening requires V_w_default > 0; got "
                      << out.V_w_default);
+         // R-004: f_w_default (the weakening friction muW) feeds
+         // SlipLawSRWPsi directly; a non-physical value silently produces a
+         // bad steady-state friction.  Guard the SRW path (aging ignores it).
+         MFEM_VERIFY(out.f_w_default > 0.0 && out.f_w_default < 1.0,
+                     "[friction.rate_state] state_evolution=slip_law_strong_"
+                     "rate_weakening requires f_w_default in (0,1); got "
+                     << out.f_w_default);
       }
       else
       {
@@ -870,7 +877,8 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const auto& s = root.at("stress");
       MFEM_VERIFY(s.contains("kind"),
                   "[stress].kind is required; must be "
-                  "\"constant_tensor\" or \"sidecar_hdf5\"");
+                  "\"constant_tensor\", \"sidecar_hdf5\", or "
+                  "\"fault_local_prestress\"");
       cfg.stress.kind = parse_stress_kind(toml_str(s, "kind", "constant_tensor"));
 
       const bool has_sxx = s.contains("sigma_xx_pa");
@@ -994,8 +1002,14 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
 
       // Phase 6 req 3: cfl_safety / fault_iterator / interior_flux selectors.
-      // Defaults (raw / one-shot / scalar) keep existing configs unchanged.
-      const std::string cs = toml_str(n, "cfl_safety", "raw");
+      // REVIEW R-002: cfl_safety defaults to "dg" (NOT "raw") so a config that
+      // omits the key keeps the driver's long-standing always-DG-factored
+      // behavior (every SAFS config omits it).  The driver now honors the
+      // selector (CflSafetyFactor), so a default of "raw" would have silently
+      // un-factored every existing SAFS run (~9x larger dt).  "raw" is the
+      // explicit experimental escape hatch.  fault_iterator/interior_flux keep
+      // their one-shot/scalar defaults (current behavior).
+      const std::string cs = toml_str(n, "cfl_safety", "dg");
       if      (cs == "raw") { cfg.numerics.cfl_safety = CflSafety::Raw; }
       else if (cs == "dg")  { cfg.numerics.cfl_safety = CflSafety::Dg; }
       else { MFEM_ABORT("[numerics].cfl_safety must be \"raw\" or \"dg\"; got '"
@@ -1320,6 +1334,30 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                       << (cfg.sigma_n_strength_floor_pa / 1.0e3) << " Pa?\n";
          }
       }
+   }
+
+   // REVIEW R-005: σ_n double-source consistency.  For a
+   // fault_local_prestress RS config, [stress].sigma_n_pa (seeded into
+   // geom.sigma_n_per_dof by ComputeParamsFaultLocal, MINUS P_p) and
+   // [friction.rate_state].sigma_n_default are two independent inputs for
+   // the same effective normal stress.  The resolver uses the seeded value
+   // (sigma_n_pa − P_p); sigma_n_default is the fallback when no seed is
+   // passed.  Require them to agree so a future edit to one cannot silently
+   // desync the RS resolver/initial-ψ fallback from the seeded σ_n.  Gated
+   // on fault_local_prestress so SAFS (constant_tensor / sidecar) configs —
+   // whose σ_n comes from a projection, not sigma_n_pa — are exempt.
+   if (cfg.stress.kind == StressSourceKind::FaultLocalPrestress
+       && cfg.rate_state.has_value())
+   {
+      const real_t sigma_n_eff =
+         cfg.stress.sigma_n_pa - cfg.stress.pore_pressure.P_p_pa;
+      MFEM_VERIFY(std::abs(cfg.rate_state->sigma_n_default - sigma_n_eff)
+                  <= 1e-6 * cfg.stress.sigma_n_pa,
+                  "[friction.rate_state].sigma_n_default ("
+                  << cfg.rate_state->sigma_n_default << ") must equal "
+                  "[stress].sigma_n_pa - [pore_pressure].P_p_pa ("
+                  << sigma_n_eff << ") for a fault_local_prestress "
+                  "rate-state config (σ_n double-source consistency, R-005).");
    }
 
    // =====================================================================
