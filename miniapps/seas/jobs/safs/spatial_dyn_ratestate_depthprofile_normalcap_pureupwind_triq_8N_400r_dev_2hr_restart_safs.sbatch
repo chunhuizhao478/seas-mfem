@@ -65,7 +65,7 @@ export LANG=C
 # MUST be a 400-rank checkpoint (this job runs -n 400 to match; a 500-rank
 # checkpoint aborts with a num_ranks mismatch).  Override at submit time:
 #   sbatch --export=ALL,RESTART_FROM=/path/to/run_dir <this script>
-RESTART_FROM="${RESTART_FROM:-/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_rsDP_triqN_pu_rst_7753175}"
+RESTART_FROM="${RESTART_FROM:-/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs/safs_dyn_rsDP_triqN_pu_rst_7753636}"
 # ================================================================================
 
 # Lean diag (match the slip-weakening jobs): the V_max trace (SEAS_DIAG_BLOWUP)
