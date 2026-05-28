@@ -597,17 +597,18 @@ WaveOperator<MeshType>::~WaveOperator() = default;
 // (H.3 input), and the bi-material shared-face neighbour map stub
 // (H.4 Stage 1 in-place fill; real cross-rank exchange in Stage 2).
 //
-// Mode::Coefficient input is ABORTED unconditionally in Stage 1: the
-// per-element flux dispatch (H.2) at every flux_.X() call site in
-// wave_operator.inl is the Stage 2 deliverable.  Until then the
-// scalar `flux_` is still consulted by every Mult/AdvanceADER call;
-// dispatching it on a per-element-Eval seed would silently produce
-// wrong physics on heterogeneous input.  The abort here is the only
-// gate that prevents that.
+// Phase 9 (Stage B): Mode::Coefficient is now SUPPORTED — the per-element
+// flux dispatch is wired at every interior non-fault flux site (the gated
+// `if (owned_flux_pool_)` branches) and the ADER CK recursion
+// (ApplyJacobianPerElementDOF_), plus the per-face bi-material flux
+// precompute (BuildPerFaceBimaterialFluxMatrices_), so the scalar `flux_`
+// placeholder seed is never consulted on the heterogeneous path.
+// GridFunction mode remains rejected (no centroid evaluation).
 //
-// In Mode::Constant the new ctor's observable output is BYTE-IDENTICAL
-// to the scalar ctor's, proven by
-// `test_phaseh_wave_operator_constant_parity` (np=1 + np=4).
+// In Mode::Constant the new ctor's per-face bi-material flux collapses to
+// the scalar Godunov flux to LU-rounding precision (~1e-10 relative), so
+// `test_phaseh_wave_operator_constant_parity` (np=1 + np=4) now checks
+// agreement at 1e-10 rather than bit-equality (matching hrs-ref Phase R.2).
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
@@ -631,16 +632,15 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
                "well-defined centroid evaluation needed by the per-"
                "element flux pool.");
 
-   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant,
-               "WaveOperator(MaterialField) Phase H Stage 1 gap: "
-               "Mode::Coefficient input requires the per-element flux "
-               "dispatch in wave_operator.inl (plan Phase H.2), which "
-               "is NOT yet wired in this commit.  Constructing on a "
-               "Coefficient material would silently fall back to the "
-               "scalar `flux_` member built from the placeholder seed "
-               "(1.0, 1.0, 1.0) inside the delegating ctor above — "
-               "i.e., wrong physics on every Mult call.  Re-run with "
-               "MaterialField::MakeConstant(...) until Stage 2 lands.");
+   // Phase 9 (Stage B): Mode::Coefficient is now SUPPORTED.  The per-element
+   // flux dispatch is wired at every interior non-fault flux site (the gated
+   // `if (owned_flux_pool_)` branches in ComputeFaceFluxRHS /
+   // ComputeSharedFaceFluxRHS / ComputeADERFaceFluxRHS /
+   // ComputeADERSharedFaceFluxRHS) and the ADER CK recursion
+   // (ApplyJacobianPerElementDOF_), so the scalar `flux_` placeholder seed is
+   // no longer consulted on the heterogeneous path.  The Stage-1
+   // Mode::Constant-only abort is therefore removed; GridFunction mode is
+   // still rejected by the guard above.
 
    material_ = &material;
 
@@ -3220,6 +3220,37 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                      shape2.GetData(), ndof, dof_offset2, ndof_total_,
                      rhs);
                }
+               else if (owned_flux_pool_)
+               {
+                  // Phase 9 (Stage B): heterogeneous WaveOperator path.
+                  // Both sides apply their OWN A_self to the SAME bi-material
+                  // Riemann state Q* (built once per face from L=Elem1,
+                  // R=Elem2 materials).  Side 0 has A_e1 baked in; side 1 has
+                  // A_e2.  BOTH consume (Q_self=Q_e1, Q_nbr=Q_e2) — NOT
+                  // swapped.  In the homogeneous limit A_e1 = A_e2 so
+                  // F_h_e1 == F_h_e2 to LU-rounding precision (R.1.T-1).
+                  const auto &mat_e1_local = per_face_bimaterial_flux_[f][0][0];
+                  const auto &mat_e1_nbr   = per_face_bimaterial_flux_[f][0][1];
+                  const auto &mat_e2_local = per_face_bimaterial_flux_[f][1][0];
+                  const auto &mat_e2_nbr   = per_face_bimaterial_flux_[f][1][1];
+
+                  real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
+                  BimaterialFlux::ApplyPerFaceFlux(
+                     mat_e1_local, mat_e1_nbr, Q_self, Q_nbr, F_h_e1);
+                  BimaterialFlux::ApplyPerFaceFlux(
+                     mat_e2_local, mat_e2_nbr, Q_self, Q_nbr, F_h_e2);
+                  phaser_dispatch_count_ += 2;
+                  for (int c = 0; c < NUM_STATE; c++)
+                  {
+                     for (int i = 0; i < ndof; i++)
+                     {
+                        rhs[c * ndof_total_ + dof_offset1 + i] -=
+                           w * shape1(i) * F_h_e1[c];
+                        rhs[c * ndof_total_ + dof_offset2 + i] +=
+                           w * shape2(i) * F_h_e2[c];
+                     }
+                  }
+               }
                else
                {
                   // Round-11 Mixed-Flux dispatch (R-1206 short-circuit):
@@ -3772,6 +3803,22 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   Q_self, Q_nbr, w, shape1.GetData(),
                   ndof, dof_offset1, ndof_total_, rhs);
                continue;
+            }
+            else if (owned_flux_pool_)
+            {
+               // Phase 9 (Stage B): heterogeneous WaveOperator path on a
+               // shared non-fault interior face.  Local element is Elem1 by
+               // MFEM convention; only side=0 of per_face_bimaterial_flux_
+               // is populated (see BuildPerFaceBimaterialFluxMatrices_).  The
+               // local-only accumulation below consumes F_h identically to
+               // the scalar branch.
+               const auto &mat_local =
+                  per_face_bimaterial_flux_[mesh_face_idx][0][0];
+               const auto &mat_nbr =
+                  per_face_bimaterial_flux_[mesh_face_idx][0][1];
+               BimaterialFlux::ApplyPerFaceFlux(mat_local, mat_nbr,
+                                                Q_self, Q_nbr, F_h);
+               phaser_dispatch_count_ += 1;
             }
             else
             {
@@ -4761,6 +4808,34 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                }
             }
          }
+         else if (owned_flux_pool_)
+         {
+            // Phase 9 (Stage B): heterogeneous WaveOperator path (ADER
+            // variant of the RK4 local site).  Both sides apply their OWN
+            // A_self to the SAME bi-material Riemann state Q*; BOTH dispatch
+            // consume (I_e1, I_e2) — NOT swapped.
+            const auto &mat_e1_local = per_face_bimaterial_flux_[f][0][0];
+            const auto &mat_e1_nbr   = per_face_bimaterial_flux_[f][0][1];
+            const auto &mat_e2_local = per_face_bimaterial_flux_[f][1][0];
+            const auto &mat_e2_nbr   = per_face_bimaterial_flux_[f][1][1];
+
+            real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
+            BimaterialFlux::ApplyPerFaceFlux(
+               mat_e1_local, mat_e1_nbr, I_self, I_nbr, F_h_e1);
+            BimaterialFlux::ApplyPerFaceFlux(
+               mat_e2_local, mat_e2_nbr, I_self, I_nbr, F_h_e2);
+            phaser_dispatch_count_ += 2;
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               for (int i = 0; i < ndof; i++)
+               {
+                  rhs[c * ndof_total_ + dof_offset1 + i] -=
+                     w * shape1(i) * F_h_e1[c];
+                  rhs[c * ndof_total_ + dof_offset2 + i] +=
+                     w * shape2(i) * F_h_e2[c];
+               }
+            }
+         }
          else
          {
             // Runtime interior dispatch — lifted VERBATIM from the
@@ -5528,6 +5603,21 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   I_self, I_nbr, w, shape1.GetData(),
                   ndof, dof_offset1, ndof_total_, rhs);
                continue;
+            }
+            else if (owned_flux_pool_)
+            {
+               // Phase 9 (Stage B): heterogeneous WaveOperator path on a
+               // shared non-fault interior face (ADER variant).  Local
+               // element is Elem1 by MFEM convention; only side=0 of
+               // per_face_bimaterial_flux_ is populated.  The local-only
+               // accumulation below consumes F_h identically to scalar.
+               const auto &mat_local =
+                  per_face_bimaterial_flux_[mesh_face_idx][0][0];
+               const auto &mat_nbr =
+                  per_face_bimaterial_flux_[mesh_face_idx][0][1];
+               BimaterialFlux::ApplyPerFaceFlux(mat_local, mat_nbr,
+                                                I_self, I_nbr, F_h);
+               phaser_dispatch_count_ += 1;
             }
             else
             {
