@@ -11,6 +11,10 @@ safs/safs_dyn_*/
 # CMakeLists.txt; the .msh is already ignored via *.msh above).
 safs/project_7.0_alternative/experimental_mesh_refinement/*.stl
 safs/project_7.0_alternative/experimental_mesh_refinement/remesh_cgal/build/
+# Pre-split per-rank mesh files (seas_partition_mesh output: <prefix>.NNNNNN +
+# <prefix>.np).  Large (sum ~= the .msh) and rank-count-specific — regenerate
+# on the cluster via spatial_dyn_partition_250m_safs.sbatch.
+safs/project_7.0_alternative/experimental_mesh_refinement/presplit/
 # Large reference papers (multi-MB PDFs) — keep out of git history.
 safs/project_7.0_alternative/friction/rate-and-state/*.pdf
 
@@ -45,6 +49,7 @@ seas_tpv102_driver
 seas_tpv104_driver
 seas_tpv205_driver
 seas_spatial_dyn_driver
+seas_partition_mesh
 seas_project_stress_to_mesh
 seas_project_velocity_to_mesh
 seas_test_*

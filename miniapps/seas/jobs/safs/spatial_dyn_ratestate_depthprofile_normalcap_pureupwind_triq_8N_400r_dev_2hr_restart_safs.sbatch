@@ -174,15 +174,40 @@ fi
 # with SAFS_MESH.  MUST match the mesh the RESTART_FROM checkpoint was built on
 # (a 500 m checkpoint mismatches this 250 m mesh's DOF layout).
 TRIQ_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_250m_lcfar3000_z0embed_triqsubdiv.msh"
-MESH="${SAFS_MESH:-${TRIQ_MESH}}"
-if [[ ! -f "${MESH}" ]]; then
-    echo "ERROR: triq mesh not found:"
-    echo "         $(pwd)/${MESH}"
-    echo "       The .msh is gitignored and is NOT pulled with the repo."
-    echo "       scp the re-triangulated mesh to the path above before submitting"
-    echo "       (it lives under ${SAFS_ROOT}/experimental_mesh_refinement/)."
-    exit 1
+
+# Mesh INPUT MODE (R-OOM) — same options as the fresh-start job, and likewise
+# DEFAULTS to presplit (restarts at this rank count hit the SAME serial-read
+# OOM).  Pre-build the per-rank files ONCE at THIS -n with
+# spatial_dyn_partition_250m_safs.sbatch, then `sbatch <thisjob>` (no flags).
+# Force serial via  sbatch --export=ALL,SAFS_MESH_MODE=serial ...
+SAFS_MESH_MODE="${SAFS_MESH_MODE:-presplit}"
+case "${SAFS_MESH_MODE}" in
+    serial|presplit) : ;;
+    *) echo "ERROR: SAFS_MESH_MODE='${SAFS_MESH_MODE}' invalid (serial|presplit)"; exit 1 ;;
+esac
+PRESPLIT_PREFIX="${SAFS_MESH_PREFIX:-${SAFS_ROOT}/experimental_mesh_refinement/presplit/safs_250m_triqsubdiv_np${SLURM_NTASKS}}"
+
+if [[ "${SAFS_MESH_MODE}" == "presplit" ]]; then
+    MESH="${SAFS_MESH:-${PRESPLIT_PREFIX}}"
+    if [[ ! -f "${MESH}.np" ]]; then
+        echo "ERROR: pre-split manifest not found: $(pwd)/${MESH}.np"
+        echo "       Generate the per-rank files at -n ${SLURM_NTASKS} FIRST:"
+        echo "         sbatch jobs/safs/spatial_dyn_partition_250m_safs.sbatch"
+        echo "       (or set SAFS_MESH_PREFIX to an existing <prefix> built at np=${SLURM_NTASKS})."
+        exit 1
+    fi
+else
+    MESH="${SAFS_MESH:-${TRIQ_MESH}}"
+    if [[ ! -f "${MESH}" ]]; then
+        echo "ERROR: triq mesh not found:"
+        echo "         $(pwd)/${MESH}"
+        echo "       The .msh is gitignored and is NOT pulled with the repo."
+        echo "       scp the re-triangulated mesh to the path above before submitting"
+        echo "       (it lives under ${SAFS_ROOT}/experimental_mesh_refinement/)."
+        exit 1
+    fi
 fi
+MESHMODE_ARG="--mesh-mode ${SAFS_MESH_MODE}"
 
 # Depth-profile CSVs (read at config-load time by the parser).  Fail early here
 # with a clearer message than a mid-parse abort.
@@ -245,6 +270,7 @@ echo "             on the 250 m triqsubdiv mesh, Dc=0.05, 7 km-dia nucleation (n
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}  (250 m triqsubdiv)"
+echo "Mesh mode:   ${SAFS_MESH_MODE}  (serial=read+partition on every rank; presplit=per-rank files, no replication)"
 echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); Dc=0.05; 7 km-dia nuc; floor=10 MPa)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
@@ -256,6 +282,7 @@ echo "Restart:     ${SAFS_RESTART:-<none — fresh start from t=0>}"
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
+    ${MESHMODE_ARG} \
     --no-sidecar-material \
     ${MIXFLUX_ARG} \
     --tfinal "${TFINAL}" \

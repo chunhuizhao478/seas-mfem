@@ -514,6 +514,13 @@ TEST_FIELD_PROJECTOR_OBJ         = $(TEST_FIELD_PROJECTOR_SRC:.cpp=.o)
 TEST_HETEROGENEOUS_MATERIAL_OBJ  = $(TEST_HETEROGENEOUS_MATERIAL_SRC:.cpp=.o)
 PROJECT_VELOCITY_DRIVER_SRC      = drivers/project_velocity_to_mesh.cpp
 PROJECT_VELOCITY_DRIVER_OBJ      = $(PROJECT_VELOCITY_DRIVER_SRC:.cpp=.o)
+# Pre-split mesh tool (seas_partition_mesh): partition a large serial .msh
+# into per-rank ParPrint files so production avoids the serial-mesh OOM.
+PARTITION_MESH_DRIVER_SRC        = drivers/partition_mesh.cpp
+PARTITION_MESH_DRIVER_OBJ        = $(PARTITION_MESH_DRIVER_SRC:.cpp=.o)
+# Round-trip test for the pre-split path (ParPrint <-> ParMesh(comm,istream)).
+TEST_PRESPLIT_MESH_SRC           = tests/unit/test_presplit_mesh.cpp
+TEST_PRESPLIT_MESH_OBJ           = $(TEST_PRESPLIT_MESH_SRC:.cpp=.o)
 TEST_FRICTION_OBJ = $(TEST_FRICTION_SRC:.cpp=.o)
 TEST_STATE_EVOLUTION_OBJ = $(TEST_STATE_EVOLUTION_SRC:.cpp=.o)
 TEST_ANTIPLANE_OBJ = $(TEST_ANTIPLANE_SRC:.cpp=.o)
@@ -926,14 +933,16 @@ PAR_MINIAPPS = seas_test_mpi_context seas_test_parallel_utils \
                seas_test_br2_consistency \
                seas_test_parallel_elasticity \
                seas_test_bp5_parallel_smoke \
-               seas_test_parallel_wave_operator
+               seas_test_parallel_wave_operator \
+               seas_test_presplit_mesh
 # Long-running parallel simulations (built by `make all`, not run by `make test`)
 PAR_LONG = seas_pseas \
            seas_bp2_benchmark_parallel \
            seas_bp2_verify seas_bp2_full seas_bp1_full \
            seas_bp1_bdrload \
            seas_bp5_full \
-           seas_driver
+           seas_driver \
+           seas_partition_mesh
 
 ifeq ($(MFEM_USE_MPI),NO)
    MINIAPPS = $(SEQ_MINIAPPS) $(SEQ_LONG)
@@ -950,6 +959,7 @@ MFEM_TESTS = MINIAPPS
         test-fault-operator test-quasi-dynamic test-bp2-short \
         test-io test-bp2-serial-smoke test-checkpoint \
         test-mpi-context test-parallel-utils test-fault-scatter test-parallel \
+        test-presplit-mesh \
         test-parallel-domain test-mms-parallel test-parallel-fault \
         test-serial-parallel test-bp2-parallel test-scaling \
         test-bp2-verify test-psi-state test-br2-consistency \
@@ -1030,6 +1040,21 @@ seas_project_velocity_to_mesh: $(PROJECT_VELOCITY_DRIVER_OBJ) \
 	    $(PROJECT_VELOCITY_DRIVER_OBJ) $(FIELD_COEFFICIENT_OBJ) \
 	    $(STRESS_FIELD_3D_OBJ) $(DATA_FIELD_3D_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Pre-split mesh tool: partition a large serial .msh into per-rank ParPrint
+# files so production runs read ~1/np of the mesh each and avoid the
+# serial-mesh-replication startup OOM (std::bad_alloc).  MFEM + MPI only.
+seas_partition_mesh: $(PARTITION_MESH_DRIVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(PARTITION_MESH_DRIVER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Round-trip test: ParPrint -> ParMesh(comm, istream) preserves global
+# element/boundary counts and attributes (incl. fault attr 101).  Needs np=2.
+seas_test_presplit_mesh: $(TEST_PRESPLIT_MESH_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_PRESPLIT_MESH_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 1: Friction law unit tests
@@ -2447,6 +2472,16 @@ $(PROJECT_VELOCITY_DRIVER_OBJ): %.o: $(SRC)%.cpp \
                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) -c $< -o $@
+
+# Pre-split mesh tool + its round-trip test: MFEM + MPI only (no HDF5/TOML/seas
+# headers).
+$(PARTITION_MESH_DRIVER_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_PRESPLIT_MESH_OBJ): %.o: $(SRC)%.cpp $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_FRICTION_OBJ): %.o: $(SRC)%.cpp $(FRICTION_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4057,6 +4092,11 @@ $(TEST_FAULT_SCATTER_OBJ): %.o: $(SRC)%.cpp $(PARALLEL_HEADERS) $(MFEM_LIB_FILE)
 test-fault-scatter: seas_test_fault_scatter
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_fault_scatter
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_scatter
+
+# Pre-split mesh round-trip (ParPrint <-> ParMesh(comm,istream)).  np=2 and 4.
+test-presplit-mesh: seas_test_presplit_mesh
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_presplit_mesh
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_presplit_mesh
 
 test-mpi-context: seas_test_mpi_context
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_mpi_context

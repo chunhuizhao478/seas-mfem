@@ -158,6 +158,64 @@ bool HasFlag(int argc, char *argv[], const char *flag)
    return false;
 }
 
+#ifdef MFEM_USE_MPI
+// Mesh input, mode "serial" (default): read one serial mesh on EVERY rank and
+// partition it in-memory with METIS.  Identical to the historical inline load;
+// the per-node startup peak scales as (ranks_per_node x total_elements) and
+// OOMs (std::bad_alloc) on very large meshes (16 M+ elements) at many
+// ranks/node.  Returned by move (ParMesh has a real move ctor: Swap-based).
+ParMesh LoadSerialParMesh(MPI_Comm comm, const std::string &path)
+{
+   Mesh smesh(path.c_str(), 1, 1);
+   MFEM_VERIFY(smesh.Dimension() == 3,
+               "spatial_dyn_driver: only 3D meshes supported; got dim="
+               << smesh.Dimension());
+   ParMesh pmesh(comm, smesh);
+   smesh.Clear();
+   return pmesh;
+}
+
+// Mesh input, mode "presplit": read this rank's own pre-partitioned file
+// written by seas_partition_mesh (ParPrint format).  No serial-mesh
+// replication -> per-rank memory ~ total_elements/np, so it scales to very
+// large meshes.  Mirrors MFEM's own parallel round-trip (ParPrint ->
+// ParMesh(comm, istream); fem/datacollection.cpp).  The per-rank files are
+// valid ONLY at the np they were written for, so a rank-count mismatch (which
+// would silently read an incomplete mesh) is rejected up front via the
+// <prefix>.np manifest.
+ParMesh LoadPresplitParMesh(MPI_Comm comm, const std::string &prefix,
+                            int rank, int nranks)
+{
+   // Manifest guard: rank 0 reads <prefix>.np, broadcasts, all ranks verify.
+   int np_file = -1;
+   if (rank == 0)
+   {
+      std::ifstream mfs((prefix + ".np").c_str());
+      if (mfs.good()) { mfs >> np_file; }
+   }
+   MPI_Bcast(&np_file, 1, MPI_INT, 0, comm);
+   MFEM_VERIFY(np_file > 0,
+               "spatial_dyn_driver: pre-split manifest '" << prefix
+               << ".np' is missing or unreadable.  Run seas_partition_mesh "
+               "with --out " << prefix << " before --mesh-mode presplit.");
+   MFEM_VERIFY(np_file == nranks,
+               "spatial_dyn_driver: pre-split mesh '" << prefix
+               << "' was partitioned for np=" << np_file << " but this run "
+               "has np=" << nranks << ".  Re-run seas_partition_mesh at np="
+               << nranks << ", or launch production with -n " << np_file
+               << ".");
+
+   const std::string fname = MakeParFilename(prefix + ".", rank);
+   std::ifstream ifs(fname.c_str());
+   MFEM_VERIFY(ifs.good(),
+               "spatial_dyn_driver: cannot open pre-split mesh file '" << fname
+               << "' (rank " << rank << ").  The manifest reports np="
+               << np_file << "; is the partition set complete and readable?");
+   ParMesh pmesh(comm, ifs);
+   return pmesh;
+}
+#endif // MFEM_USE_MPI
+
 // Map TOML mixed_flux string -> WaveOperator enum.
 MixedFluxMode ParseMixedFlux(const std::string &s)
 {
@@ -515,6 +573,14 @@ int main(int argc, char *argv[])
    const bool print_derived = HasFlag(argc, argv, "--print-derived");
 
    const std::string cli_mesh        = GetStringArg(argc, argv, "--mesh", "");
+   // Mesh input mode: "serial" (read+partition on every rank, default) or
+   // "presplit" (read per-rank seas_partition_mesh output; cfg.mesh.path is the
+   // prefix).  Validated here so a typo fails before any expensive setup.
+   const std::string mesh_mode =
+      GetStringArg(argc, argv, "--mesh-mode", "serial");
+   MFEM_VERIFY(mesh_mode == "serial" || mesh_mode == "presplit",
+               "spatial_dyn_driver: --mesh-mode must be 'serial' or "
+               "'presplit'; got '" << mesh_mode << "'.");
    const std::string cli_vel_model   =
       GetStringArg(argc, argv, "--velocity-model", "");
    const std::string cli_vel_path    =
@@ -744,6 +810,9 @@ int main(int argc, char *argv[])
                 << "================================================\n"
                 << "config:           " << config_path << "\n"
                 << "mesh:             " << cfg.mesh.path << "\n"
+                << "mesh mode:        " << mesh_mode
+                << (mesh_mode == "presplit"
+                    ? " (per-rank prefix; no serial replication)" : "") << "\n"
                 << "fe order:         " << cfg.mesh.order << "\n"
                 << "law:              "
                 << (is_lsw ? "slip_weakening" : "rate_state") << "\n"
@@ -817,20 +886,26 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 4.  Load mesh.
+   // 4.  Load mesh.  Two selectable input modes (--mesh-mode):
+   //       serial   (default) read one serial mesh on every rank and
+   //                partition it in-memory with METIS.  Per-node startup
+   //                memory ~ (ranks_per_node x total_elements); OOMs
+   //                (std::bad_alloc) on very large meshes at many ranks/node.
+   //       presplit read this rank's pre-partitioned file (seas_partition_mesh
+   //                output).  No serial-mesh replication -> scales to large
+   //                meshes; cfg.mesh.path is the per-rank PREFIX, not a .msh.
+   //     SetCurvature is applied identically to both so the ParMesh matches.
    // -----------------------------------------------------------------
-   Mesh smesh(cfg.mesh.path.c_str(), 1, 1);
-   const int dim = smesh.Dimension();
-   MFEM_VERIFY(dim == 3,
-               "spatial_dyn_driver: only 3D meshes supported; got dim="
-               << dim);
-
 #ifdef MFEM_USE_MPI
-   ParMesh pmesh(comm, smesh);
+   ParMesh pmesh = (mesh_mode == "presplit")
+                   ? LoadPresplitParMesh(comm, cfg.mesh.path, rank, nprocs)
+                   : LoadSerialParMesh(comm, cfg.mesh.path);
+   MFEM_VERIFY(pmesh.Dimension() == 3,
+               "spatial_dyn_driver: only 3D meshes supported; got dim="
+               << pmesh.Dimension());
 #else
 #  error "spatial_dyn_driver requires MFEM_USE_MPI=YES."
 #endif
-   smesh.Clear();
    pmesh.SetCurvature(cfg.mesh.order);
 
    // -----------------------------------------------------------------

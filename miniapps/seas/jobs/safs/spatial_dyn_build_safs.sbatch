@@ -72,13 +72,20 @@ BUILD_JOBS="${BUILD_JOBS:-48}"
 cd miniapps/seas
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
-echo "Building:    seas_spatial_dyn_driver  (make -j${BUILD_JOBS})"
+echo "Building:    seas_spatial_dyn_driver seas_partition_mesh  (make -j${BUILD_JOBS})"
 echo "In:          $(pwd)"
 
-make seas_spatial_dyn_driver -j"${BUILD_JOBS}" || { echo "BUILD FAILED"; exit 1; }
+# seas_partition_mesh is the pre-split tool (R-OOM): it partitions a large
+# serial .msh into per-rank files so production with --mesh-mode presplit avoids
+# the serial-mesh-replication startup OOM.  Cheap to build alongside the driver.
+make seas_spatial_dyn_driver seas_partition_mesh -j"${BUILD_JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     echo "ERROR: make returned 0 but ./seas_spatial_dyn_driver is missing/not executable."
+    exit 1
+fi
+if [[ ! -x ./seas_partition_mesh ]]; then
+    echo "ERROR: make returned 0 but ./seas_partition_mesh is missing/not executable."
     exit 1
 fi
 
