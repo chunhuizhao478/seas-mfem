@@ -1942,30 +1942,50 @@ integration into the core wave operator (affects every simulation).
     `per_elem_h_`/`shared_face_neighbour_material_` members) from a prior
     partial port — so reqs 2 (ctor) and the pool build/exchange are present.
 
-- **Stage B — DEFERRED (next focused session).**  Remaining work:
-  - `wave_operator.{hpp,inl}`: add `per_face_bimaterial_flux_` member +
-    `BuildPerFaceBimaterialFluxMatrices_()` (req 3, ~280 lines, hrs-ref
-    `wave_operator.inl:839–1115`) and `ApplyJacobianPerElementDOF_` (req 4
-    ADER CK, hrs-ref `:1856+`); call `BuildPerFaceBimaterialFluxMatrices_()`
-    from the het ctor after `ExchangeBiMaterialNeighbours_()`.
-  - Wire the **7 gated `else if (owned_flux_pool_)` dispatch sites**
-    (hrs-ref `wave_operator.inl` ~:1947, :2077 CK; :3585, :4179, :5188, :5753
-    Mult/ADER interior-face; :2200 mixed-flux guard) → `BimaterialFlux::
-    ApplyPerFaceFlux` for matrix, else the existing scalar/mixed path.
-    **Byte-exact scalar AC is preserved by construction** (scalar ctor leaves
-    `owned_flux_pool_ == nullptr` → no new branch executes).
-  - Driver (req 6): convert to `std::unique_ptr<WaveOperator>` scalar/matrix
-    branch; **update the Phase-8 R-001 guard** (`InteriorFluxSupported`) to
-    ALLOW `matrix` once wired; build `MaterialField` from `[material]`.
-  - Makefile (req 7): add `GODUNOV_FLUX_BIMATERIAL_OBJ` to the link line of
-    **every** target that includes `wave_operator.inl` (spatial driver +
-    native tpv drivers + `test_wave_operator` …) once the `.inl` references
-    `BimaterialFlux`.
-  - **Caution:** safs's `wave_operator.inl` has diverged from hrs-ref (1015+/
-    838−, 40 hunks) — Stage B is a per-site manual integration, NOT a patch.
-  - Verification: build; byte-exact scalar (TPV/SAFS dry-run construction +
-    dt unchanged); the 2-block bimaterial unit test (done); **np>1 parity
-    (AC #3) needs a heterogeneous-mesh multi-rank run — run-session.**
+- **Stage B — IN PROGRESS (parts 1–2 of 3 done + committed).**
+  - **Part 1 (DONE, `feb3863`) — infrastructure.** `wave_operator.{hpp,inl}`:
+    `per_face_bimaterial_flux_` member + accessor; `FluxForElem_` helper;
+    `ApplyJacobianPerElementDOF_` + `BuildPerFaceBimaterialFluxMatrices_`
+    (bodies ported from hrs-ref); `phaser_dispatch_count_` diagnostic; het
+    ctor now calls `BuildPerFaceBimaterialFluxMatrices_()`.  Makefile:
+    `$(GODUNOV_FLUX_BIMATERIAL_OBJ)` appended after every
+    `$(WAVE_OPERATOR_OBJ)` link reference (req 7 — the `.inl` now references
+    `BimaterialFlux`, so ALL wave_operator-linking targets need it; obj-rule
+    line excluded).  Verified: constant-parity 15/15 STILL bit-identical (the
+    precompute runs on the real Constant mesh but the scalar `flux_` is still
+    used — dispatch unwired); `seas_test_wave_operator` 17/0.
+  - **Part 2 (DONE, `1c7b5b3`) — CK-recursion dispatch.** The 2 ADER CK sites
+    (`wave_operator.inl` ComputeADERTimeIntegrated + ComputeADERSubStepStates)
+    gated `if (owned_flux_pool_)` → `ApplyJacobianPerElementDOF_`, else scalar.
+    Bit-identical on Mode::Constant → constant-parity stays 15/15 bit-identical.
+  - **Part 3 (REMAINING) — interior-face dispatch + activation.**
+    - The interior-face dispatch: hrs-ref local sites `:3585`(Mult)/`:5188`(ADER)
+      + shared (cross-rank ghost-Q) sites `:4179`/`:5753`.  safs has the 2
+      LOCAL sites at `wave_operator.inl:3231`(Mult)/`:3797`(ADER); the
+      shared-interior bimaterial sites must be MAPPED (safs has 2 clear local
+      sites vs hrs-ref's 4 — a divergence to resolve, esp. the ghost-buffer Q
+      indexing on shared faces).  The bimaterial branch computes F_h_e1 AND
+      F_h_e2 (each side's own A_self applied to the SAME Q*) and accumulates
+      each into its own element's DOFs — a DIFFERENT accumulation than the
+      scalar single-F_h-to-both, so each site is a careful manual insert.
+    - Relax the het-ctor **Mode::Coefficient abort** (`wave_operator.inl`
+      ~:634) — only after ALL dispatch sites are wired (else Coefficient runs
+      scalar `flux_` with a (1,1,1) placeholder on unwired sites → wrong
+      physics).  hrs-ref relaxed it (its ctor comment: "Coefficient is now
+      supported with REAL Coefficient").
+    - Relax `test_phaseh_wave_operator_constant_parity` from bit-equality to
+      **1e-10 relative** (matching hrs-ref Phase R.2) — once interior-face
+      dispatch is wired the Constant het ctor routes through BimaterialFlux,
+      which matches scalar only to LU-rounding.
+    - Driver (req 6): `std::unique_ptr<WaveOperator>` scalar/matrix branch +
+      **update the Phase-8 R-001 `InteriorFluxSupported` guard to ALLOW
+      `matrix`** + build `MaterialField` from `[material]`.
+    - **AC #3 (np>1 parity)** + a true heterogeneous (`DepthProfile1D`) run
+      need a multi-rank heterogeneous mesh — run-session (Phase 10).
+  - **Byte-exact scalar AC preserved by construction throughout** (scalar
+    ctor leaves `owned_flux_pool_ == nullptr` → no new branch executes).
+  - **Caution:** safs's `wave_operator.inl` diverged from hrs-ref (1015+/838−,
+    40 hunks) — the interior-face wiring is a per-site manual integration.
 
 ## Phase 10 — TPV31 (depth-heterogeneous LSW) verification case (PORT from hrs-ref)
 
