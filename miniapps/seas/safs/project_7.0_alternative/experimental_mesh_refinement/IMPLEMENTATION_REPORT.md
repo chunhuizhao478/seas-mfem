@@ -148,3 +148,104 @@ $PY -m pytest -q test_fault_triangle_quality.py
   (separate follow-up once the `_triq` mesh is accepted).
 - **CGAL binary is committed under `remesh_cgal/build/`** for convenience;
   rebuild it (step 1) if the `cgal-61` env changes.
+
+---
+
+# 250 m refinement (triqsubdiv) — 2026-05-27
+
+**Goal:** refine the proven 500 m `_triq` mesh to ~250 m near-fault resolution
+**without** re-introducing the shallow fault-trace needles (the 2026-05-20
+blow-up seed) and **without** bulk slivers (the 100 m failure mode,
+`meshing/docs/DEBUG_100m_mesh_fault_slivers_2026-05-27.md`).
+
+## Result — TARGET MET (all gates pass)
+
+| Metric | 500 m `_triq` | **250 m `_triqsubdiv`** | Gate | Pass |
+|---|---:|---:|---|:-:|
+| n_tet | 1,164,469 | 15,740,531 | — | — |
+| n_fault_tri | 60,658 | 242,632 | — | — |
+| Bulk `tet_emin` [m] | 113.45 | 67.85 | ≥ 50 (sub-km Q1) | ✓ |
+| Bulk `η_min` (Joe-Liu) | 0.2032 | 0.1083 | > 0.1 (Q2) | ✓ |
+| Bulk `η_med` | — | 0.8565 | — | — |
+| Fault worst min-angle | 26.59° | 26.59° | ≥ 25° | ✓ |
+| Fault `tri_qmin` | 0.6647 | 0.6647 | ≥ 0.5 | ✓ |
+| Fault tris < 25° | 0 | 0 | 0 | ✓ |
+| **η<0.1 tets ON fault** | 0 | **0** | 0 | ✓ |
+| `mesh_zmax` | 0.0 | 0.0 | 0 exactly | ✓ |
+| Fault edge (median) | 430 m | 215 m | — | — |
+
+The fault triangulation is **verbatim-embedded** from the subdivided STL, so the
+26.59° worst min-angle and 0.6647 `tri_qmin` carry over exactly — but on a 215 m
+fault with 0 bulk slivers (η_med 0.857, matching the proven recipe).  This is the
+first 250 m-class mesh that is simultaneously fine, sliver-free, **and** free of
+trace needles:
+
+| 250 m mesh | n_tet | fault min-angle | η_min | η<0.1 on fault |
+|---|---:|---:|---:|---:|
+| old `_subdiv` (raw STL, 2026-05-20) | 15,367,950 | **9.1°** ✗ | 0.121 | 0 |
+| 100 m (size-gradient mismatch) | 3,140,987 | — | <0.1 | **4402** |
+| **new `_triqsubdiv`** | 15,740,531 | **26.59°** ✓ | 0.1083 | **0** |
+
+## Why subdivision (not a finer CGAL remesh)
+
+A direct CGAL remesh to a 250 m target re-seeds sub-25° trace needles (the CGAL
+sweep above: target 250 → 23.3°, 4 bad tris; 200 → 21.5°).  A **1→4 midpoint
+subdivision** of the *good-shape* `_triq` STL instead yields 4 sub-triangles each
+*similar* to the parent, so every angle is preserved **exactly** (Δ worst min-angle
+= 7e-13) while the edge halves (430 → 215 m).  Midpoints lie on the parent facets,
+so the surface and the z=0 trace are geometrically exact (Hausdorff = 0), and the
+z=0 trace simply doubles (681 → 1362 edges), staying bit-exactly in-plane.
+
+The bulk element count (15.74 M) is set by `lc_near=250` + the surface buffer, NOT
+by the finer fault triangulation, so it matches the old 250 m budget (15.37 M)
+while gaining the good fault-triangle shape.
+
+## What was implemented
+
+1. **`subdivide_fault_stl.py`** — geometry-preserving 1→4 midpoint subdivision.
+   Dedupes midpoints per undirected edge (sorted index pair) so the surface stays
+   watertight (interior edges 2-incident); snaps |z|<tol to 0; writes STL.
+   Structural tripwires: tris ×4, trace/boundary edges ×2, max-edge-incidence == 2,
+   worst min-angle preserved, `zmax ≤ tol`.  Reuses `remesh_fault_stl.py` metric +
+   STL-write helpers so the surface is measured with the exact gate formulas.
+2. **`test_subdivide_fault_stl.py`** — 8 pytest cases pinning the contract
+   (counts, manifold weld of the shared-edge midpoint, exact angle preservation,
+   z=0 trace doubling + on-plane, planar-patch geometry exactness, 2-level ×16,
+   bad-shape rejection) + a tie-in test on the produced STL.
+3. **`verify_250m_mesh.py`** — one-pass mesh verifier (single large read):
+   Q1@50 / Q2 / fault shape gate / **η<0.1 sliver-on-fault count** / `mesh_zmax`.
+   Exit 0 iff all gates pass.
+4. Outputs (gitignored — regenerate via Reproduce):
+   `SAFS-…-ALT6_250m_clean_clip_nwcut_triqsubdiv.stl`,
+   `safs_fault_box_nwcut_250m_lcfar3000_z0embed_triqsubdiv.msh` (902 MB).
+
+## Reproduce
+
+```bash
+PY=/Users/chunhuizhao/miniforge/envs/pythonenv/bin/python
+cd experimental_mesh_refinement
+
+# 1. subdivide the proven _triq STL -> ~215 m (shape preserved EXACTLY)
+$PY subdivide_fault_stl.py \
+    SAFS-SAFZ-MULT-San_Andreas_fault_Fuis-ALT6_500m_clean_clip_nwcut_triq.stl \
+    SAFS-SAFZ-MULT-San_Andreas_fault_Fuis-ALT6_250m_clean_clip_nwcut_triqsubdiv.stl
+
+# 2. mesh with the EXISTING mesher (proven sliver-free recipe; ~16 M tets, multi-hour)
+$PY ../meshing/code/run_z0cut_meshing.py \
+    --stl SAFS-SAFZ-MULT-San_Andreas_fault_Fuis-ALT6_250m_clean_clip_nwcut_triqsubdiv.stl \
+    --out safs_fault_box_nwcut_250m_lcfar3000_z0embed_triqsubdiv.msh \
+    --lc-near 250 --surface-buffer-size 1500 --surface-buffer-depth 1000
+
+# 3. verify (all gates) + unit tests
+$PY verify_250m_mesh.py
+$PY -m pytest -q test_subdivide_fault_stl.py
+```
+
+## Known limitations / not done
+
+- **Element budget:** 15.74 M tets / 902 MB (comparable to the old 250 m).  The
+  fault lands at 215 m (finer than 250) because 1→4 subdivision halves the 430 m
+  `_triq` edge — this beats the 250 m target, at a higher element count than a
+  hypothetical exact-250 m surface would give.
+- **Downstream projections** (velocity/stress) onto the new mesh not re-run.
+- The `.msh` + `.stl` are gitignored (size); only the code is committed.
