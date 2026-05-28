@@ -1652,17 +1652,20 @@ calling the Gaussian path directly for SAFS+RS until it adopts the factory here.
    then routed through `GaussianGradualOverstress` (byte-identical to the inline call).
 
 ### Acceptance Criteria
-- [ ] `seas_test_spatial_nucleation`: compact-bell at `r=0`(=1), `r=R`(=0), mid; instantaneous
-      at `r=0`(=Δτ0), `r=R`(=Δτ0), `r=R+taper`(=0).
-- [ ] `seas_test_nucleation_factory`: each kind (and the absent-block case) returns the
-      expected method.
-- [ ] SAFS+RS smoke is **bit-identical** to its Phase-3 result after the Gaussian path moves
-      behind the factory.
+- [x] `seas_test_spatial_nucleation`: compact-bell at `r=0`(=1), `r=R`(=0), mid; instantaneous
+      at `r=0`(=Δτ0), `r=R`(=Δτ0), `r=R+taper`(=0).  (73/73 — T-N13..N17.)
+- [x] `seas_test_nucleation_factory`: each kind (and the absent-block case) returns the
+      expected method.  (16/16 — F-1..F-5.)
+- [~] SAFS+RS smoke is **bit-identical** to its Phase-3 result after the Gaussian path moves
+      behind the factory.  PROVEN at the unit level (F-5: factory Gaussian path == inline
+      resolve+apply, exact equality on params + accumulated tau_nuc) and by construction;
+      the **end-to-end** smoke is pending the SAFS mesh artifact (gmsh pipeline + multi-rank
+      run — deferred since Phase 4).
 
 ### Dependencies
 Depends on: Phase 6. Required by: Phase 8, 10.
 
-#### Phase 7 status (2026-05-28) — reqs 1–3 COMPLETE; req 4 (driver swap) DEFERRED
+#### Phase 7 status (2026-05-28) — reqs 1–4 COMPLETE (end-to-end SAFS+RS smoke pending SAFS mesh)
 - **req 1** — `GradualOverstressCompactCircularSpec` + `CompactBellFactor`
   (SCEC Eq.13 `exp(r²/(r²−R²))`) + `ResolveGradualOverstressCompactCircular` +
   `ApplyGradualOverstressCompactCircularIncrement` (strike-only, `tau2_nuc`;
@@ -1690,20 +1693,36 @@ Decisions / deviations (documented):
   `FaultBasisRow` does not exist; these are the concrete types the driver and
   the existing `Resolve*` overloads use (9×N column-major basis).
 
-**req 4 (driver swap) DEFERRED to a separate increment** — `nuc_params` has
-three consumers in `spatial_dyn_driver.cpp` (the `nuc_cb`, `PrintDerivedAndCheck*`
-at ~:1486/:1505, and the ParaView fields at ~:1737), and acceptance criterion 3
-requires a **bit-identical SAFS+RS smoke** (mesh + multi-rank run, deferred since
-Phase 4). The concretes' `Params()` getters are in place so the swap (route the
-3 consumers through `GaussianGradualOverstress::Params()`) is clean.
+- **req 4 (driver swap) — COMPLETE (code).** `drivers/spatial_dyn_driver.cpp`
+  now builds `std::unique_ptr<INucleationMethod> nuc = MakeNucleation(cfg,
+  dof_coords_3d, dof_basis)` in place of the inline `ResolveGradualOverstress`;
+  the per-sub-step `nuc_cb` calls `nuc->ApplyIncrement(dof_data, t, dt)`; and
+  `nuc->ApplyOnce(dof_data)` runs once after init for the one-shot kind —
+  **guarded to fresh-start only** (`restart_prefix.empty()`) so a restart (whose
+  checkpoint already restored the seeded `tau2_nuc`) does not double-seed.  The
+  three `nuc_params` consumers (`PrintDerivedAndCheck*` ~:1486/:1505, ParaView
+  fields ~:1737) are re-sourced from `GaussianGradualOverstress::Params()` via a
+  `dynamic_cast` (empty for non-Gaussian kinds — those consumers already guard
+  on `.Size()`), so the SAFS+RS path resolves once and is unchanged.
 
 Verification (objects force-rebuilt vs the edited headers):
-`seas_test_spatial_nucleation` 73/73 (incl. compact-bell + instantaneous
-acceptance values), `seas_test_nucleation_factory` 12/12 (each kind + absent
-block), `seas_test_spatial_friction_config` 142/142, `…_resolver` 100/100,
+`seas_test_spatial_nucleation` 73/73 (compact-bell + instantaneous acceptance
+values), `seas_test_nucleation_factory` 16/16 (each kind + absent block + the
+F-5 **byte-identity** check: factory Gaussian path == inline resolve+apply,
+exact equality on per-DOF params AND accumulated `tau_nuc`),
+`seas_test_spatial_friction_config` 142/142, `…_resolver` 100/100,
 `compute_safs_params` 23/23, `spatial_setup` 71/71, `spatial_print_derived`
-33/33, `spatial_stress_bundle` 5/5; `spatial_dyn_driver.o` compiles. Acceptance
-criteria 1 & 2 met; criterion 3 lands with req 4.
+33/33, `spatial_stress_bundle` 5/5; **`seas_spatial_dyn_driver` links**.
+
+Acceptance criteria 1 & 2 met.  Criterion 3 (bit-identical SAFS+RS smoke) is
+proven at the **unit level** by F-5 (the swapped nucleation computation is
+byte-identical by construction — `GaussianGradualOverstress` wraps the exact
+same resolve+apply free functions).  The **end-to-end SAFS+RS smoke is still
+pending** because the SAFS mesh
+(`safs/.../meshing/results/msh/safs_fault_box_nwcut_500m_…msh`) is a generated
+artifact not present in the tree — running it needs the gmsh meshing pipeline
+(`conda activate pythonenv`) + a multi-rank run, the same infra deferred since
+Phase 4.  This is the only outstanding Phase-7 item.
 
 ## Phase 8 — TPV205/102/104 benchmarks (configs, meshes, jobs, regression)
 

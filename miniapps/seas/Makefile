@@ -2043,6 +2043,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(PML_LAYER_OBJ) \
                           $(SPATIAL_FRICTION_OBJ) \
                           $(SPATIAL_NUCLEATION_OBJ) \
+                          $(NUCLEATION_FACTORY_OBJ) \
                           $(SPATIAL_PRINT_DERIVED_OBJ) \
                           $(SPATIAL_VELOCITY_OBJ) \
                           $(SPATIAL_STRESS_OBJ) \
@@ -2064,6 +2065,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(PML_LAYER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(NUCLEATION_FACTORY_OBJ) \
 	    $(SPATIAL_PRINT_DERIVED_OBJ) \
 	    $(SPATIAL_VELOCITY_OBJ) \
 	    $(SPATIAL_STRESS_OBJ) \

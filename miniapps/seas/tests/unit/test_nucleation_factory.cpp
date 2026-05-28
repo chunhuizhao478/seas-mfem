@@ -144,6 +144,79 @@ static void F4_instantaneous()
    TEST_ASSERT(dof[0].tau1_nuc == 0.0, "tau1_nuc stays 0 (pure strike-slip)");
 }
 
+// F-5: the Gaussian path through MakeNucleation is BYTE-IDENTICAL to the
+// pre-Phase-7 inline ResolveGradualOverstress + ApplyGradualOverstressIncrement
+// (acceptance criterion 3, at the unit level — proves the swapped computation
+// is unchanged without needing the full SAFS mesh / end-to-end smoke).
+static void F5_gaussian_path_byte_identical()
+{
+   std::cout << "\n[F-5] Gaussian path via factory == inline resolve+apply (bytewise)\n";
+   Vector coords; DenseMatrix basis; MakeFixture(coords, basis);
+   const int N = coords.Size() / 3;
+
+   GradualOverstressSpec spec;
+   spec.center_x_m = 0.0; spec.center_y_m = 0.0; spec.center_z_m = -5000.0;
+   spec.radius_dip_m = 1000.0; spec.radius_strike_m = 1000.0;
+   spec.delta_tau_dip_pa = 1.0e6; spec.delta_tau_strike_pa = 2.0e6;
+   spec.T_nuc_s = 1.0;
+
+   // OLD inline path: resolve directly.
+   const auto pold = ResolveGradualOverstress(spec, /*enabled=*/true, coords, basis);
+
+   // NEW path: through the factory -> GaussianGradualOverstress::Params().
+   SpatialFrictionConfig cfg;
+   cfg.nucleation.enabled = true;
+   cfg.nucleation.kind = NucleationKind::GradualOverstress;
+   cfg.nucleation.gradual_overstress = spec;
+   auto nuc = MakeNucleation(cfg, coords, basis);
+   auto* g = dynamic_cast<GaussianGradualOverstress*>(nuc.get());
+   TEST_ASSERT(g != nullptr, "factory built GaussianGradualOverstress");
+   const auto& pnew = g->Params();
+
+   // (a) Resolved per-DOF params bit-identical (exact equality, 0 tol).
+   bool params_match = (pnew.amplitude_dip.Size()    == pold.amplitude_dip.Size())
+                    && (pnew.amplitude_strike.Size() == pold.amplitude_strike.Size())
+                    && (pnew.radial.Size()           == pold.radial.Size());
+   for (int i = 0; params_match && i < N; ++i)
+   {
+      params_match = (pnew.amplitude_dip(i)    == pold.amplitude_dip(i))
+                  && (pnew.amplitude_strike(i) == pold.amplitude_strike(i))
+                  && (pnew.radial(i)           == pold.radial(i));
+   }
+   TEST_ASSERT(params_match, "resolved params bit-identical (factory == inline)");
+
+   // (b) Accumulated tau_nuc bit-identical after a full sub-step sweep.
+   std::vector<DOFData> dof_old(N), dof_new(N);
+   for (int i = 0; i < N; ++i)
+   {
+      dof_old[i].tau1_nuc = dof_old[i].tau2_nuc = 0.0;
+      dof_new[i].tau1_nuc = dof_new[i].tau2_nuc = 0.0;
+   }
+   const int O = 7;
+   const real_t dt = spec.T_nuc_s / O;
+   real_t t = 0.0;
+   for (int o = 0; o < O; ++o)
+   {
+      t += dt;
+      // OLD: inline apply with the old params + the cfg T_nuc.
+      ApplyGradualOverstressIncrement(dof_old, pold, spec.T_nuc_s, t, dt);
+      // NEW: the driver's nuc_cb body.
+      nuc->ApplyIncrement(dof_new, t, dt);
+   }
+   bool tau_match = true;
+   for (int i = 0; tau_match && i < N; ++i)
+   {
+      tau_match = (dof_old[i].tau1_nuc == dof_new[i].tau1_nuc)
+               && (dof_old[i].tau2_nuc == dof_new[i].tau2_nuc);
+   }
+   TEST_ASSERT(tau_match,
+               "accumulated tau_nuc bit-identical (factory ApplyIncrement == "
+               "inline ApplyGradualOverstressIncrement)");
+   // Non-triviality: the sweep must actually have moved tau2_nuc.
+   TEST_ASSERT(dof_new[0].tau2_nuc > 0.0,
+               "non-trivial: tau2_nuc accumulated at the bell centre");
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase 7 test_nucleation_factory\n";
@@ -151,6 +224,7 @@ int main(int /*argc*/, char** /*argv*/)
    F2_gaussian();
    F3_compact_circular();
    F4_instantaneous();
+   F5_gaussian_path_byte_identical();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 7 test_nucleation_factory: "

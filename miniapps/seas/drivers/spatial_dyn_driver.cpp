@@ -76,6 +76,7 @@
 #include "../io/material_coefficients.hpp"
 
 #include "../dynamic/spatial_nucleation.hpp"
+#include "../dynamic/nucleation_factory.hpp"   // Phase 7: MakeNucleation
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -1225,19 +1226,29 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
-   // 12. Phase N: resolve the single nucleation kind
-   //     (`gradual_overstress`).  Per-DOF amplitude_dip(i) /
-   //     amplitude_strike(i) = F(r_i) · Δτ; per-DOF radial(i) = F(r_i).
-   //     When `cfg.nucleation.enabled == false`, the resolver returns
-   //     three zero-sized Vectors — the per-sub-step accumulator
-   //     early-returns and the simulation runs with no nucleation.
+   // 12. Phase 7: build the nucleation method behind INucleationMethod.
+   //     MakeNucleation dispatches on cfg.nucleation.kind (absent block ->
+   //     StaticOverstress).  The SAFS+RS Gaussian path is routed through
+   //     GaussianGradualOverstress, which wraps the EXACT same
+   //     ResolveGradualOverstress + ApplyGradualOverstressIncrement as the
+   //     pre-Phase-7 inline call — byte-identical.  `nuc->ApplyIncrement`
+   //     replaces the per-sub-step nuc_cb; `nuc->ApplyOnce` (after init/restart)
+   //     seeds the one-shot instantaneous patch (no-op for Gaussian/static).
    // -----------------------------------------------------------------
-   const spatial::GradualOverstressPerDOFParams nuc_params =
-      spatial::ResolveGradualOverstress(
-         cfg.nucleation.gradual_overstress,
-         cfg.nucleation.enabled,
-         dof_coords_3d,
-         dof_basis);
+   std::unique_ptr<INucleationMethod> nuc =
+      MakeNucleation(cfg, dof_coords_3d, dof_basis);
+
+   // The PrintDerivedAndCheck* diagnostics + the static ParaView nucleation
+   // fields read the resolved per-DOF Gaussian amplitudes/radial.  Source them
+   // from the method (single resolve; identical data to the old inline
+   // nuc_params, since GaussianGradualOverstress holds exactly that resolve).
+   // Non-Gaussian kinds leave nuc_params zero-sized — those consumers already
+   // guard on `.Size() == num_fault_total`.
+   spatial::GradualOverstressPerDOFParams nuc_params;
+   if (auto *g = dynamic_cast<GaussianGradualOverstress *>(nuc.get()))
+   {
+      nuc_params = g->Params();
+   }
 
    // R-008: warn when a non-trivial fraction of fault DOFs live on
    // shared faces.  The wave operator's shared-face EvaluateADER_LSW
@@ -1954,6 +1965,16 @@ int main(int argc, char *argv[])
       wave.SetTime(t);
    }
 
+   // Phase 7: seed the one-shot instantaneous-overstress patch ONCE, after the
+   // fault DOFs are initialized.  No-op for the per-sub-step kinds (Gaussian /
+   // compact-circular) and for StaticOverstress.  Skipped on restart — the
+   // checkpoint already restored the seeded tau2_nuc into dof_data, so
+   // re-seeding would double-count the patch.
+   if (restart_prefix.empty())
+   {
+      nuc->ApplyOnce(dof_data);
+   }
+
    // -----------------------------------------------------------------
    // 19. Sub-step iterator (Phase 2/3): dispatch through the
    //     IFrictionIterator strategy.  The LswFrictionIterator is a
@@ -1990,19 +2011,17 @@ int main(int argc, char *argv[])
    // vs interior (dof_data is laid out interior [0,n_local) then shared).
    substep_iterator.SetDiagNumLocalFaultQPs(wave.GetNumLocalFaultQPs());
 
-   // Phase N: per-sub-step gradual_overstress accumulator hook.  Closes
-   // over nuc_params + dof_data + cfg; fires inside
-   // Tpv205SubStepIterator::AdvanceWithSubStepStates (callback overload)
-   // BEFORE each sub-step's per-QP friction solve so that the perturbed
-   // tau{1,2}_nuc is visible to s.tau{1,2}_total in the LSW path.
-   auto nuc_cb = [&nuc_params, &dof_data, &cfg]
+   // Phase 7: per-sub-step nucleation hook, dispatched through the
+   // INucleationMethod strategy.  Fires once per ADER sub-step BEFORE the
+   // per-QP friction solve so the perturbed tau{1,2}_nuc is visible to
+   // s.tau{1,2}_total.  For the Gaussian path ApplyIncrement is the same
+   // ApplyGradualOverstressIncrement call as the pre-Phase-7 lambda (the
+   // cfg.nucleation.enabled guard is subsumed: a disabled config yields a
+   // StaticOverstress whose ApplyIncrement is a no-op).
+   auto nuc_cb = [&nuc, &dof_data]
                  (real_t t_sub_end, real_t dt_sub)
    {
-      if (!cfg.nucleation.enabled) { return; }
-      spatial::ApplyGradualOverstressIncrement(
-         dof_data, nuc_params,
-         cfg.nucleation.gradual_overstress.T_nuc_s,
-         t_sub_end, dt_sub);
+      nuc->ApplyIncrement(dof_data, t_sub_end, dt_sub);
    };
 
    // ParaView snapshot writer (Parity Phases 1-6).  Updates the 5 BP5
