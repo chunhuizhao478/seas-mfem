@@ -272,17 +272,50 @@ struct SpatialRule
 /// removed from the spatial code path.  Native TPV* drivers keep their
 /// own paths via `dynamic/tpv104_nucleation.hpp` + the still-live
 /// `FaultFrictionLaw::LSW_ForcedRupture` flux dispatch.
-enum class NucleationKind { GradualOverstress };
+enum class NucleationKind
+{
+   GradualOverstress,                  ///< Gaussian gradual overstress (SAFS)
+   GradualOverstressCompactCircular,   ///< SCEC compact bell (TPV102/104)
+   InstantaneousOverstressCircular     ///< one-shot cosine-tapered patch (TPV31)
+};
+
+/// SCEC compact-circular gradual overstress (TPV102/104): radial bell
+/// F(r) = exp(r^2/(r^2 - R^2)) for r<R (0 outside) times the smoothStep
+/// temporal ramp over [0, T_nuc_s].  Config-only here; the resolver/applicator
+/// is Phase 7 (nucleation_methods module).
+struct GradualOverstressCompactCircularSpec
+{
+   real_t center_x_m   = 0.0;
+   real_t center_y_m   = 0.0;
+   real_t center_z_m   = 0.0;
+   real_t radius_m     = 0.0;   ///< R; > 0 required when enabled
+   real_t delta_tau_pa = 0.0;   ///< strike overstress amplitude [Pa]
+   real_t T_nuc_s      = 0.0;   ///< > 0 required when enabled
+};
+
+/// Instantaneous circular overstress (TPV31): a one-shot cosine-tapered
+/// strike-overstress patch.  Config-only here; the applicator is Phase 7.
+struct InstantaneousOverstressCircularSpec
+{
+   real_t center_x_m   = 0.0;
+   real_t center_y_m   = 0.0;
+   real_t center_z_m   = 0.0;
+   real_t radius_m     = 0.0;   ///< > 0 required when enabled
+   real_t taper_m      = 0.0;   ///< cosine taper width [m] (>= 0)
+   real_t delta_tau_pa = 0.0;   ///< overstress amplitude [Pa]
+};
 
 /// @brief Top-level `[nucleation]` TOML block.  When absent in the
 /// TOML, `enabled == false` and the driver runs with no nucleation
 /// perturbation (tau{1,2}_nuc stay at the init-time zero seeded by
-/// `InitializeFaultDOFs_Spatial`).
+/// `InitializeFaultDOFs_Spatial`).  TPV205 uses no [nucleation] block (static).
 struct NucleationSpec
 {
    NucleationKind        kind     = NucleationKind::GradualOverstress;
    bool                  enabled  = false;
    GradualOverstressSpec gradual_overstress;
+   GradualOverstressCompactCircularSpec compact_circular;        // Phase 6 req 6
+   InstantaneousOverstressCircularSpec  instantaneous_circular;  // Phase 6 req 6
 };
 
 struct SlipWeakeningBlock

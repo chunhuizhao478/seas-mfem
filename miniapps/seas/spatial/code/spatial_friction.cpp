@@ -1054,35 +1054,84 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.nucleation.enabled = true;
 
       const std::string kind_s = toml_str(nuc, "kind", "");
-      MFEM_VERIFY(kind_s == "gradual_overstress",
-                  "[nucleation].kind must be \"gradual_overstress\" "
-                  "(the only supported kind in this driver); got '"
-                  << kind_s << "'");
-      cfg.nucleation.kind = NucleationKind::GradualOverstress;
-
-      MFEM_VERIFY(nuc.contains("gradual_overstress"),
-                  "[nucleation] kind=\"gradual_overstress\" requires a "
-                  "[nucleation.gradual_overstress] sub-block");
-      const auto& g = nuc.at("gradual_overstress");
-      auto& gs = cfg.nucleation.gradual_overstress;
-      gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
-      gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
-      gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
-      gs.radius_dip_m        = toml_real(g, "radius_dip_m",        0.0);
-      gs.radius_strike_m     = toml_real(g, "radius_strike_m",     0.0);
-      gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
-      gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
-      gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
-
-      MFEM_VERIFY(gs.radius_dip_m    > 0.0,
-                  "[nucleation.gradual_overstress].radius_dip_m must be > 0; "
-                  "got " << gs.radius_dip_m);
-      MFEM_VERIFY(gs.radius_strike_m > 0.0,
-                  "[nucleation.gradual_overstress].radius_strike_m must be > 0; "
-                  "got " << gs.radius_strike_m);
-      MFEM_VERIFY(gs.T_nuc_s         > 0.0,
-                  "[nucleation.gradual_overstress].T_nuc_s must be > 0; "
-                  "got " << gs.T_nuc_s);
+      if (kind_s == "gradual_overstress")
+      {
+         cfg.nucleation.kind = NucleationKind::GradualOverstress;
+         MFEM_VERIFY(nuc.contains("gradual_overstress"),
+                     "[nucleation] kind=\"gradual_overstress\" requires a "
+                     "[nucleation.gradual_overstress] sub-block");
+         const auto& g = nuc.at("gradual_overstress");
+         auto& gs = cfg.nucleation.gradual_overstress;
+         gs.center_x_m          = toml_real(g, "center_x_m",          0.0);
+         gs.center_y_m          = toml_real(g, "center_y_m",          0.0);
+         gs.center_z_m          = toml_real(g, "center_z_m",          0.0);
+         gs.radius_dip_m        = toml_real(g, "radius_dip_m",        0.0);
+         gs.radius_strike_m     = toml_real(g, "radius_strike_m",     0.0);
+         gs.delta_tau_dip_pa    = toml_real(g, "delta_tau_dip_pa",    0.0);
+         gs.delta_tau_strike_pa = toml_real(g, "delta_tau_strike_pa", 0.0);
+         gs.T_nuc_s             = toml_time_seconds(g, "T_nuc_s",     0.0);
+         MFEM_VERIFY(gs.radius_dip_m    > 0.0,
+                     "[nucleation.gradual_overstress].radius_dip_m must be > 0; "
+                     "got " << gs.radius_dip_m);
+         MFEM_VERIFY(gs.radius_strike_m > 0.0,
+                     "[nucleation.gradual_overstress].radius_strike_m must be > 0; "
+                     "got " << gs.radius_strike_m);
+         MFEM_VERIFY(gs.T_nuc_s         > 0.0,
+                     "[nucleation.gradual_overstress].T_nuc_s must be > 0; "
+                     "got " << gs.T_nuc_s);
+      }
+      else if (kind_s == "gradual_overstress_compact_circular")
+      {
+         // Phase 6 req 6 (TPV102/104).  Config-only; the resolver is Phase 7.
+         cfg.nucleation.kind = NucleationKind::GradualOverstressCompactCircular;
+         MFEM_VERIFY(nuc.contains("gradual_overstress_compact_circular"),
+                     "[nucleation] kind=\"gradual_overstress_compact_circular\" "
+                     "requires a [nucleation.gradual_overstress_compact_circular]"
+                     " sub-block");
+         const auto& g = nuc.at("gradual_overstress_compact_circular");
+         auto& cc = cfg.nucleation.compact_circular;
+         cc.center_x_m   = toml_real(g, "center_x_m",   0.0);
+         cc.center_y_m   = toml_real(g, "center_y_m",   0.0);
+         cc.center_z_m   = toml_real(g, "center_z_m",   0.0);
+         cc.radius_m     = toml_real(g, "radius_m",     0.0);
+         cc.delta_tau_pa = toml_real(g, "delta_tau_pa", 0.0);
+         cc.T_nuc_s      = toml_time_seconds(g, "T_nuc_s", 0.0);
+         MFEM_VERIFY(cc.radius_m > 0.0,
+                     "[nucleation.gradual_overstress_compact_circular].radius_m "
+                     "must be > 0; got " << cc.radius_m);
+         MFEM_VERIFY(cc.T_nuc_s  > 0.0,
+                     "[nucleation.gradual_overstress_compact_circular].T_nuc_s "
+                     "must be > 0; got " << cc.T_nuc_s);
+      }
+      else if (kind_s == "instantaneous_overstress_circular")
+      {
+         // Phase 6 req 6 (TPV31).  Config-only; the applicator is Phase 7.
+         cfg.nucleation.kind = NucleationKind::InstantaneousOverstressCircular;
+         MFEM_VERIFY(nuc.contains("instantaneous_overstress_circular"),
+                     "[nucleation] kind=\"instantaneous_overstress_circular\" "
+                     "requires a [nucleation.instantaneous_overstress_circular]"
+                     " sub-block");
+         const auto& g = nuc.at("instantaneous_overstress_circular");
+         auto& ic = cfg.nucleation.instantaneous_circular;
+         ic.center_x_m   = toml_real(g, "center_x_m",   0.0);
+         ic.center_y_m   = toml_real(g, "center_y_m",   0.0);
+         ic.center_z_m   = toml_real(g, "center_z_m",   0.0);
+         ic.radius_m     = toml_real(g, "radius_m",     0.0);
+         ic.taper_m      = toml_real(g, "taper_m",      0.0);
+         ic.delta_tau_pa = toml_real(g, "delta_tau_pa", 0.0);
+         MFEM_VERIFY(ic.radius_m > 0.0,
+                     "[nucleation.instantaneous_overstress_circular].radius_m "
+                     "must be > 0; got " << ic.radius_m);
+         MFEM_VERIFY(ic.taper_m >= 0.0,
+                     "[nucleation.instantaneous_overstress_circular].taper_m "
+                     "must be >= 0; got " << ic.taper_m);
+      }
+      else
+      {
+         MFEM_ABORT("[nucleation].kind must be one of {gradual_overstress, "
+                    "gradual_overstress_compact_circular, "
+                    "instantaneous_overstress_circular}; got '" << kind_s << "'");
+      }
    }
    // else: enabled stays false; driver runs without nucleation perturbation.
 

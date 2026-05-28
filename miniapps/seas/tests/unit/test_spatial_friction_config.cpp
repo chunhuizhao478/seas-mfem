@@ -1094,6 +1094,135 @@ cohesion_default=0
                "interior_flux=matrix + mixed_flux=adjacent must abort");
 }
 
+// NUC-1 (Phase 6 req 6): [nucleation] kind=gradual_overstress_compact_circular
+// (TPV102/104) parses into compact_circular.
+static void T_25_nucleation_compact_circular_parses()
+{
+   std::cout << "\n[NUC-1] [nucleation] gradual_overstress_compact_circular parses\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+[nucleation.gradual_overstress_compact_circular]
+center_x_m = 0.0
+center_y_m = 0.0
+center_z_m = -7500.0
+radius_m = 3000.0
+delta_tau_pa = 45.0e6
+T_nuc_s = "1.0s"
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.nucleation.enabled, "nucleation enabled");
+   TEST_ASSERT(cfg.nucleation.kind
+               == NucleationKind::GradualOverstressCompactCircular,
+               "kind == GradualOverstressCompactCircular");
+   TEST_ASSERT(cfg.nucleation.compact_circular.radius_m == 3000.0,
+               "compact_circular.radius_m == 3000");
+   TEST_ASSERT(cfg.nucleation.compact_circular.delta_tau_pa == 45.0e6,
+               "compact_circular.delta_tau_pa == 45 MPa");
+   TEST_ASSERT(cfg.nucleation.compact_circular.T_nuc_s == 1.0,
+               "compact_circular.T_nuc_s == 1 s");
+}
+
+// NUC-2 (Phase 6 req 6): [nucleation] kind=instantaneous_overstress_circular
+// (TPV31) parses into instantaneous_circular.
+static void T_26_nucleation_instantaneous_circular_parses()
+{
+   std::cout << "\n[NUC-2] [nucleation] instantaneous_overstress_circular parses\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[nucleation]
+kind = "instantaneous_overstress_circular"
+[nucleation.instantaneous_overstress_circular]
+center_x_m = 0.0
+center_y_m = 0.0
+center_z_m = -10000.0
+radius_m = 1400.0
+taper_m = 200.0
+delta_tau_pa = 11.6e6
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.nucleation.kind
+               == NucleationKind::InstantaneousOverstressCircular,
+               "kind == InstantaneousOverstressCircular");
+   TEST_ASSERT(cfg.nucleation.instantaneous_circular.radius_m == 1400.0,
+               "instantaneous_circular.radius_m == 1400");
+   TEST_ASSERT(cfg.nucleation.instantaneous_circular.taper_m == 200.0,
+               "instantaneous_circular.taper_m == 200");
+   TEST_ASSERT(cfg.nucleation.instantaneous_circular.delta_tau_pa == 11.6e6,
+               "instantaneous_circular.delta_tau_pa == 11.6 MPa");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1116,6 +1245,8 @@ int main(int, char**)
    T_22_fault_local_patches_parse();
    T_23_numerics_selectors_parse();
    T_24_matrix_mixed_flux_aborts();
+   T_25_nucleation_compact_circular_parses();
+   T_26_nucleation_instantaneous_circular_parses();
    T_11_time_parser();
    T_12_material_fallback_bounds();
    T_13_missing_stress_block_aborts();
