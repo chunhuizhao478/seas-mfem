@@ -240,6 +240,7 @@ struct SpatialRule
    real_t V_0     = std::numeric_limits<real_t>::quiet_NaN();
    real_t sigma_n = std::numeric_limits<real_t>::quiet_NaN();
    real_t eta     = std::numeric_limits<real_t>::quiet_NaN();
+   real_t V_w     = std::numeric_limits<real_t>::quiet_NaN();  // Phase 6 req 4 (SRW per-QP V_w)
 
    /// `matches` semantics per §Phase 1 Detailed Req. 4:
    ///   Depth            : only z bounds checked.
@@ -324,6 +325,11 @@ struct FrictionDepthProfileSpec
 /// rows, a duplicate depth, a non-finite field, or a non-positive `a` value.
 FrictionDepthProfile1D LoadFrictionDepthProfileCSVs(const FrictionDepthProfileSpec& spec);
 
+/// Rate-and-state evolution-law selector (Phase 6 req 4).  Default AgingLaw
+/// (TPV102 / SAFS).  SlipLawStrongRateWeakening is TPV104 (FVW): per-QP V_w +
+/// the weakening friction f_w (= muW) feed the slip-law-SRW analytic step.
+enum class StateEvolutionKind { AgingLaw, SlipLawStrongRateWeakening };
+
 struct RateStateBlock
 {
    real_t f_0_default        = 0.6;
@@ -335,6 +341,11 @@ struct RateStateBlock
    real_t Dc_default         = 0.004;
    real_t V_init_default     = 1.0e-9;
    real_t sigma_n_default    = 50.0e6;
+   // Phase 6 req 4: SRW state-evolution.  Defaults keep existing RS configs
+   // byte-identical (AgingLaw ignores f_w_default / V_w_default).
+   StateEvolutionKind state_evolution = StateEvolutionKind::AgingLaw;
+   real_t f_w_default        = 0.1;   ///< SRW weakening friction (TPV104 muW); SRW only
+   real_t V_w_default        = 0.1;   ///< SRW weakening velocity (TPV104 V_w_in); SRW only
    std::vector<SpatialRule>  spatial;
    FrictionDepthProfileSpec  depth_profile;   // Phase 11b: depth-varying a/b (optional)
 };
@@ -389,6 +400,8 @@ struct SlipWeakeningPerDOFParams
 struct RateStatePerDOFParams
 {
    Vector a, b, Dc, V_init, f_0, V_0, eta, sigma_n_eff;
+   Vector V_w;   ///< Phase 6 req 4: per-DOF SRW weakening velocity (SRW only;
+                 ///< filled to V_w_default / per-rule V_w like `a`).
 };
 
 class SpatialFrictionResolver

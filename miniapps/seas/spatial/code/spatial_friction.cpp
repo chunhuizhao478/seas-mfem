@@ -454,6 +454,7 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
       out.V_0     = toml_real(rule_tbl, "V_0",     nan);
       out.sigma_n = toml_real(rule_tbl, "sigma_n", nan);
       out.eta     = toml_real(rule_tbl, "eta",     nan);
+      out.V_w     = toml_real(rule_tbl, "V_w",     nan);  // Phase 6 req 4 (SRW per-QP V_w)
    }
 }
 
@@ -528,6 +529,32 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
    out.Dc_default      = toml_real(rs_tbl, "Dc_default",      0.004);
    out.V_init_default  = toml_real(rs_tbl, "V_init_default",  1.0e-9);
    out.sigma_n_default = toml_real(rs_tbl, "sigma_n_default", 50.0e6);
+
+   // Phase 6 req 4: state-evolution selector + SRW scalars.  Default
+   // "aging_law" keeps existing RS configs byte-identical.
+   out.f_w_default     = toml_real(rs_tbl, "f_w_default",     0.1);
+   out.V_w_default     = toml_real(rs_tbl, "V_w_default",     0.1);
+   {
+      const std::string se = toml_str(rs_tbl, "state_evolution", "aging_law");
+      if (se == "aging_law")
+      {
+         out.state_evolution = StateEvolutionKind::AgingLaw;
+      }
+      else if (se == "slip_law_strong_rate_weakening" || se == "slip_law_srw")
+      {
+         out.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
+         MFEM_VERIFY(out.V_w_default > 0.0,
+                     "[friction.rate_state] state_evolution=slip_law_strong_"
+                     "rate_weakening requires V_w_default > 0; got "
+                     << out.V_w_default);
+      }
+      else
+      {
+         MFEM_ABORT("[friction.rate_state].state_evolution must be "
+                    "\"aging_law\" or \"slip_law_strong_rate_weakening\"; got '"
+                    << se << "'");
+      }
+   }
 
    if (rs_tbl.contains("eta"))
    {
@@ -1287,6 +1314,7 @@ RateStatePerDOFParams resolve_rs_impl(
    p.V_init.SetSize(N);
    p.f_0.SetSize(N); p.V_0.SetSize(N); p.eta.SetSize(N);
    p.sigma_n_eff.SetSize(N);
+   p.V_w.SetSize(N);   // Phase 6 req 4 (SRW per-DOF weakening velocity)
 
    for (int i = 0; i < N; ++i)
    {
@@ -1317,6 +1345,7 @@ RateStatePerDOFParams resolve_rs_impl(
       real_t V0_i     = cfg.V_0_default;
       real_t eta_i    = cfg.eta_default;
       real_t sn_i     = cfg.sigma_n_default;
+      real_t V_w_i    = cfg.V_w_default;   // Phase 6 req 4 (SRW)
 
       bool   eta_rule_set = false;
 
@@ -1344,6 +1373,7 @@ RateStatePerDOFParams resolve_rs_impl(
          if (!std::isnan(r.V_init))  { V_init_i = r.V_init; }
          if (!std::isnan(r.sigma_n)) { sn_i     = r.sigma_n; }
          if (!std::isnan(r.eta))     { eta_i = r.eta;  eta_rule_set = true; }
+         if (!std::isnan(r.V_w))     { V_w_i    = r.V_w; }  // Phase 6 req 4 (SRW)
       }
 
       // Effective normal stress (depth convention: z<0 below surface).
@@ -1408,12 +1438,22 @@ RateStatePerDOFParams resolve_rs_impl(
                   "ResolveRateState: sigma_n_eff <= 0 at DOF " << i);
       MFEM_VERIFY(f0_i > 0.0 && f0_i < 1.0,
                   "ResolveRateState: f_0 not in (0,1) at DOF " << i);
+      // Phase 6 req 4: V_w is consumed only by the slip-law-SRW state update;
+      // require it > 0 only on that path (the aging path fills but ignores it).
+      if (cfg.state_evolution == StateEvolutionKind::SlipLawStrongRateWeakening)
+      {
+         MFEM_VERIFY(V_w_i > 0.0,
+                     "ResolveRateState: V_w <= 0 at DOF " << i
+                     << " (required for state_evolution="
+                     "slip_law_strong_rate_weakening)");
+      }
 
       p.a(i) = a_i;   p.b(i) = b_i;   p.Dc(i) = Dc_i;
       p.V_init(i) = V_init_i;
       p.f_0(i) = f0_i; p.V_0(i) = V0_i;
       p.eta(i) = eta_i;
       p.sigma_n_eff(i) = sigma_n_eff;
+      p.V_w(i) = V_w_i;
    }
 
    return p;

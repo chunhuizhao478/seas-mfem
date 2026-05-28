@@ -214,6 +214,41 @@ static void F5_lsw_empty_callback_rejected()
                "LSW Advance rejects empty callback with runtime_error (R-016)");
 }
 
+// =====================================================================
+// F6 (Phase 6 req 4): RateState + state_evolution=slip_law_strong_rate_weakening
+//     -> RateStateSlipLawSrwIterator, given resolved per-DOF V_w (rs->V_w).
+// =====================================================================
+static void F6_rate_state_srw()
+{
+   std::cout << "\n[F6] RateState + SRW -> RateStateSlipLawSrwIterator\n";
+   FaultFaceFlux flux(kRho, kCp, kCs);
+   spatial::SpatialFrictionConfig cfg = MakeRateStateConfig(FrictionSolver::V0);
+   cfg.rate_state->state_evolution =
+      spatial::StateEvolutionKind::SlipLawStrongRateWeakening;
+   cfg.rate_state->V_w_default = 0.1;
+   cfg.rate_state->f_w_default = 0.1;
+   // The SRW dispatch needs the resolved per-DOF V_w (mfem::Vector).
+   spatial::RateStatePerDOFParams rs;
+   rs.V_w.SetSize(1);
+   rs.V_w = 0.1;
+   std::unique_ptr<IFrictionIterator> fr =
+      MakeFrictionIterator(cfg, flux, &rs);
+   TEST_ASSERT(fr != nullptr, "factory returns a non-null SRW iterator");
+   TEST_ASSERT(fr->WaveOpLaw() == FaultFrictionLaw::RateAndState,
+               "SRW iterator WaveOpLaw() == RateAndState");
+   TEST_ASSERT(dynamic_cast<RateStateSlipLawSrwIterator*>(fr.get()) != nullptr,
+               "SRW config dispatches to RateStateSlipLawSrwIterator");
+
+   // SRW without rs (V_w side-channel) must abort.
+   const bool srw_no_rs_aborts = RunInChild_([&]() {
+      FaultFaceFlux f2(kRho, kCp, kCs);
+      auto bad = MakeFrictionIterator(cfg, f2, /*rs=*/nullptr);
+      (void) bad;
+   });
+   TEST_ASSERT(srw_no_rs_aborts,
+               "SRW dispatch without rs (per-DOF V_w) aborts");
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase 2 test_friction_iterator_factory\n";
@@ -222,6 +257,7 @@ int main(int /*argc*/, char** /*argv*/)
    F3_rate_state_missing_block_aborts();
    F4_v0_guard();
    F5_lsw_empty_callback_rejected();
+   F6_rate_state_srw();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 2 test_friction_iterator_factory: "

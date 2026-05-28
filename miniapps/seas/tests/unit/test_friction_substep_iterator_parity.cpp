@@ -348,7 +348,10 @@ int main()
 
          std::vector<real_t> Ip_std(flat, 0.0), Im_std(flat, 0.0);
          std::vector<real_t> Ip_uni(flat, 0.0), Im_uni(flat, 0.0);
+         // Standalone Tpv104 takes std::vector<real_t>; the unified SRW iterator
+         // takes an mfem::Vector (matches the resolver's rs.V_w).  Same values.
          std::vector<real_t> V_w(n, 0.1);
+         mfem::Vector V_w_mfem(n); V_w_mfem = 0.1;
 
          const real_t a0 = 0.008, b = 0.012, V0 = 1.0e-6, f0 = 0.6, muW = 0.1;
          const real_t Vw_default = 0.1;
@@ -366,7 +369,7 @@ int main()
          // The unified iterator owns its law by value; build an equivalent one.
          SlipLawSRWPsi law_uni(a0, b, V0, f0, muW, Vw_default);
          law_uni.SetProductionMode();
-         RateStateSlipLawSrwIterator it_uni(flux, law_uni, method, &V_w);
+         RateStateSlipLawSrwIterator it_uni(flux, law_uni, method, &V_w_mfem);
          it_uni.SetSubSteps(deltaT, weights);
          // Replicate Tpv104's hard-coded per-sub-step nucleation on dof_uni.
          const auto nuc_tpv104 = [&](real_t t_sub_end, real_t dt_sub) {

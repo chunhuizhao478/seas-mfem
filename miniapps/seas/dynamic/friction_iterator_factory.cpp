@@ -19,10 +19,9 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
    FaultFaceFlux &flux,
    const spatial::RateStatePerDOFParams *rs /*nullptr for LSW*/)
 {
-   // `rs` is reserved for the Phase-3 driver wiring and the future
-   // slip-law-SRW path; the aging adapter reads only the scalar
-   // RateStateBlock from cfg.rate_state, so rs is unused here today.
-   (void) rs;
+   // `rs` (resolved per-DOF params) is consumed only by the SRW branch below
+   // (for the per-DOF V_w side-channel, rs->V_w); the LSW + aging paths build
+   // from the scalar config and ignore it.
 
    switch (cfg.law)
    {
@@ -49,18 +48,38 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
                      << FrictionSolver::V0
                      << "); the force solve hardcodes V0.");
 
-         // Phase 5: the unified RateStateAgingIterator owns its AgingLawPsi
-         // by value (b, V0, f0 from the scalar RateStateBlock) and uses the
-         // production RS friction method Brent (CLAUDE.md).  Reproduces the
-         // standalone Tpv102SubStepIterator bit-for-bit (parity test).
-         //
-         // Aging remains the ONLY RS law dispatched here: the slip-law
-         // strong-rate-weakening (SRW) iterator exists (Phase 5,
-         // RateStateSlipLawSrwIterator) but its per-DOF V_w side-channel and
-         // the [friction.rate_state] state_evolution selector land in
-         // Phase 6.  When that field exists, branch on it here to return a
-         // RateStateSlipLawSrwIterator (constructed with &rs->V_w); until
-         // then there is no SRW config to dispatch on.
+         // Phase 6 req 4: dispatch on the state-evolution selector.
+         if (cfg.rate_state->state_evolution
+             == spatial::StateEvolutionKind::SlipLawStrongRateWeakening)
+         {
+            // SRW (TPV104).  The law carries the scalar globals (b, V0, f0,
+            // muW=f_w_default); the per-DOF weakening velocity comes from the
+            // resolver's rs->V_w (an mfem::Vector — matches the policy Extra).
+            // The scalar `a` in the law is unused (the policy reads per-DOF
+            // d.a); pass a_default as a valid placeholder.
+            MFEM_VERIFY(rs != nullptr,
+                        "MakeFrictionIterator: state_evolution=slip_law_strong_"
+                        "rate_weakening requires resolved per-DOF params (rs) "
+                        "for the V_w side-channel.");
+            MFEM_VERIFY(rs->V_w.Size() > 0,
+                        "MakeFrictionIterator: SRW needs a non-empty rs->V_w "
+                        "(thread it through ResolveRateState).");
+            return std::make_unique<RateStateSlipLawSrwIterator>(
+               flux,
+               SlipLawSRWPsi(cfg.rate_state->a_default,
+                             cfg.rate_state->b_default,
+                             cfg.rate_state->V_0_default,
+                             cfg.rate_state->f_0_default,
+                             cfg.rate_state->f_w_default,
+                             cfg.rate_state->V_w_default),
+               FrictionSolver::Method::Brent,
+               &rs->V_w);
+         }
+
+         // Aging (default; TPV102 / SAFS).  The unified RateStateAgingIterator
+         // owns its AgingLawPsi by value (b, V0, f0 from the scalar block) and
+         // uses the production RS friction method Brent (CLAUDE.md); reproduces
+         // the standalone Tpv102SubStepIterator bit-for-bit (parity test).
          return std::make_unique<RateStateAgingIterator>(
             flux,
             AgingLawPsi(cfg.rate_state->b_default,

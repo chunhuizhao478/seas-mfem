@@ -71,26 +71,29 @@ struct RateStateAgingPolicy
 struct RateStateSlipLawSrwPolicy
 {
    using Law   = SlipLawSRWPsi;
-   using Extra = const std::vector<real_t> *;   ///< V_w, driver-owned (non-owning)
+   // V_w side-channel, non-owning.  An mfem::Vector (NOT std::vector) to match
+   // the resolver's RateStatePerDOFParams.V_w (Phase 6 req 4), so the factory
+   // can pass &rs->V_w directly with no copy/dangle.
+   using Extra = const mfem::Vector *;
 
    static real_t UpdatePsi(const Law &L, const DOFData &d, real_t V,
                            real_t dt, const Extra &Vw, int i)
    {
       return UpdateStateAnalyticSlipLawSRW(d.psi, V, d.Dc, dt,
-                                           (*Vw)[i], d.a,
+                                           (*Vw)(i), d.a,
                                            L.GetB(), L.GetV0(),
                                            L.GetF0(), L.GetMuW());
    }
 
-   /// The SRW path indexes `(*Vw)[i]` for every fault QP, so the V_w
+   /// The SRW path indexes `(*Vw)(i)` for every fault QP, so the V_w
    /// side-channel must be non-null and sized to the fault-QP count.
    static void ValidateExtra(const Extra &Vw, int n)
    {
       MFEM_VERIFY(Vw != nullptr,
                   "RateStateSlipLawSrwPolicy: V_w side-channel pointer is null; "
                   "the SRW iterator requires a per-QP V_w vector.");
-      MFEM_VERIFY(static_cast<int>(Vw->size()) == n,
-                  "RateStateSlipLawSrwPolicy: V_w size (" << Vw->size()
+      MFEM_VERIFY(Vw->Size() == n,
+                  "RateStateSlipLawSrwPolicy: V_w size (" << Vw->Size()
                   << ") must equal the fault-QP count (" << n << ").");
    }
 };
