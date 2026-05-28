@@ -1,0 +1,195 @@
+# =========================================================================
+# SAFS + RATE-AND-STATE (aging law) with DEPTH-VARYING a(z) / b(z) from CSV.
+# Dc=0.10 / 8 km-DIAMETER nucleation patch / 500 m _triq mesh VARIANT.
+# =========================================================================
+# Dedicated SEPARATE case (2026-05-28) for testing that nucleation works and
+# that a SPONTANEOUS rupture propagates, on the CHEAP 500 m _triq mesh
+#   experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh
+# (1.16 M tets -> serial mesh read is OOM-safe; no presplit needed, unlike the
+#  16 M-tet 250 m triqsubdiv mesh).
+#
+# Run sbatch:
+#   jobs/safs/spatial_dyn_ratestate_depthprofile_normalcap_pureupwind_triq_500m_8N_400r_dev_2hr_safs.sbatch
+#
+# WHY a SEPARATE config (vs the Dc=0.05/250 m parent): the 500 m mesh cannot
+# resolve the Dc=0.05 process zone (L_b=1.25 km -> only 2.5 cells @ 500 m), and
+# bumping Dc alone to fix L_b would push the critical nucleation length L_inf
+# past the ~10 km seismogenic depth.  The design REQUIRES co-tuning Dc AND the
+# velocity-weakening (b-a) — see the length-scale design below.
+#
+# ------------------------------------------------------------------------
+# LENGTH-SCALE DESIGN (sigma_n = 48.9 MPa, MEASURED at the patch from the
+# hz1671_psi37_az351 fault-stress projection; mu=32.04 GPa; nu=0.25):
+#   L_b   = mu*Dc/(b*sigma_n)                  [cohesive zone; mode III/dip = binding]
+#   L_nuc = mu*Dc/((b-a)*sigma_n)
+#   L_inf = (2/pi)*mu*b*Dc/((b-a)^2*sigma_n)   [aging-law critical nucleation length]
+#   Invariant ratio L_inf/L_b = (2/pi)*(b/(b-a))^2 — depends on a,b ONLY (not Dc, sigma).
+#
+# CHANGES FROM THE Dc=0.05 / 7 km / 250 m PARENT
+# (spatial_friction_rate_state_safs_projected_stress_depthprofile_Dc005_nuc7km_250m.toml):
+#   [friction.rate_state].Dc_default        0.05  -> 0.10   (sets absolute L_b scale)
+#   a(z) in VW zone  (patch)                0.0170 -> 0.0127 (b-a 0.0091 -> 0.0134;
+#                                                    shrinks L_inf so the patch is
+#                                                    comfortably supercritical AND fits)
+#   b(z) at patch                           0.0261 (UNCHANGED)
+#   [nucleation.gradual_overstress].radius  3500  -> 4000    (8 km-DIAMETER patch)
+#   [mesh].path           250m_..._triqsubdiv -> 500m_..._triq
+#   depth_profile CSVs    *_vwvs11km.csv  -> *_500m_strongvw.csv (stronger VW plateau;
+#                                            VW->VS transition kept at 11 km, b>0 to 16.6 km)
+#
+# RESULTING SCALES AT THE PATCH (depth ~4.97 km, a=0.0127, b=0.0261, Dc=0.10):
+#   L_b(dip,  mode III) = 2511 m = 5.0 cells @ 500 m   <- OBJECTIVE 1: L_b fully resolved
+#   L_b(strike,mode II) = 3347 m = 6.7 cells @ 500 m
+#   L_nuc               = 4890 m
+#   L_inf               = 6061 m
+#   8 km-dia patch (R=4000 m): 2R/L_inf = 1.32x supercritical, depth span [0.97, 8.97] km
+#                              (inside VW 0-11 km, clear of the free surface)  <- OBJECTIVE 2
+#
+# The depth profile keeps the VW->VS transition (a-b=0) at ~11 km, so down-dip
+# rupture still arrests in the VS region above the 16.6 km fault bottom.
+#
+# Schema reference:
+#   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SAFS rate-and-state (aging) with DEPTH-VARYING a(z)/b(z) from param_a_500m_strongvw.csv + param_a_minus_b_500m_strongvw.csv (b = a - (a-b); VW->VS ~11 km); Dc=0.10, 8 km-DIAMETER gradual_overstress nucleation, on the 500 m z0embed _triq mesh.  Designed for L_b=5 cells @500 m + a 1.32x-supercritical patch (spontaneous-rupture test)."
+
+[material_constant_fallback]
+# Equal lambda = mu => Poisson ratio = 0.25 (typical crust).  cp ~= 5996 m/s.
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# sigma_n_eff = sigma_n_total - P_p.  NOTE: the rate-state path passes a ZERO
+# PorePressureSpec to ResolveRateState (geom.sigma_n_per_dof() is already
+# effective); this P_p is still consumed by the regional stress projection.
+P_p_pa            = 16.0e6    # 16 MPa
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # 1 MPa floor
+
+[mesh]
+# 500 m near-fault z0embed mesh, shape-preserving _triq STL remesh (commit
+# da3cc80 family).  1.16 M tets -> serial mesh read is OOM-safe at 8N/400r (no
+# presplit needed).  NB the run sbatch overrides this via --mesh; this path
+# keeps the config self-consistent for standalone runs.
+path  = "safs/project_7.0_alternative/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+# Regional H&Z tensor projected per-DOF (compression POSITIVE, EAST-NORTH-UP);
+# this is the hz1671_psi37_az351 projection (SHmax=113/Shmin=49/Sv=45/P_p=16 MPa,
+# SHmax_az=351 deg).  D3.1: sigma_xy_pa is RIGHT-LATERAL-POSITIVE (negated at the
+# source factory).  Gives sigma_n_eff ~48.9 MPa at the nucleation patch.
+kind        = "constant_tensor"
+sigma_xx_pa = 5.056619147855508e+07
+sigma_yy_pa = 1.1143380852144492e+08
+sigma_zz_pa = 4.50e+07
+sigma_xy_pa = +9.888543819998317e+06   # D3.1: right-lateral-POSITIVE
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+mixed_flux = "adjacent"
+cfl        = 0.5
+# R-025: use_pml is NOT wired into seas_spatial_dyn_driver; keep tfinal within
+# the reflection-free window (see [time]).  Box exterior uses absorbing BCs.
+use_pml    = false
+
+[time]
+# tfinal 100 s per the all-normal-queue directive (the run sbatch also passes
+# --tfinal 100s, which overrides this value).  R-025: this is PAST the ~6.94 s
+# reflection-free window (box geometry unchanged from the 250/500 m meshes;
+# cp=5996), so seismic fields after ~7 s are reflection-CONTAMINATED — treat the
+# long tail as a cap/stability monitor, not a physical rupture.  For physical
+# fields use a 6 s window or wire a real PML layer.
+tfinal     = "100s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+output_dir              = "output_safs_dyn_ratestate_depthprofile_Dc010_nuc8km_500m_6s"
+restart_prefix          = "cp"
+paraview_volume         = "hdf5"
+paraview_bulk           = "hdf5"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.1s"      # ~60 snapshots over 6 s
+paraview_bulk_dt        = "0.1s"      # ~60 snapshots over 6 s
+paraview_fault_dt       = "0.02s"     # ~300 snapshots over 6 s
+paraview_volume_zfp_tol = 1.0e-3
+paraview_bulk_zfp_tol   = 1.0e-3
+paraview_fault_zfp_tol  = 1.0e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+# Time-domain nucleation: smoothStep-ramped Gaussian Δτ.  Law-agnostic.
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+# radius_*: e-fold Gaussian radii = 4000 m (8 km-DIAMETER patch; isotropic).
+# At Dc=0.10 / a=0.0127 / b=0.0261 / sigma_n=48.9 MPa the aging-law critical
+# nucleation length L_inf = (2/pi)*mu*b*Dc/((b-a)^2*sigma_n) ~= 6.06 km, so the
+# 8 km patch is 2R/L_inf = 1.32x SUPERCRITICAL — it self-nucleates and spreads
+# spontaneously; delta_tau is a SEED, not the sole propagation driver.  The
+# patch (centre -4965.62 m, R 4000 m) spans depth [0.97, 8.97] km, fully inside
+# the VW zone (0-11 km) and clear of the z=0 free surface.
+radius_dip_m        =     4000.0
+radius_strike_m     =     4000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     30.0e6   # seed; the supercritical patch carries propagation
+T_nuc_s             =        1.0
+
+[friction]
+# sigma_n strength floor [Pa] (sliver-blowup plan 2026-05-26).  Below this
+# compression the shear strength saturates at a cohesion-like constant
+# (f_V * floor) instead of using |sigma_n| under a tensile excursion.
+# Applies to both laws.  Omit / set < 0 to disable (byte-exact with the
+# historical RS |sigma_n|).  REQUIRED by the *_normalcap_* run sbatch
+# (pre-flight greps for this key).
+sigma_n_strength_floor_pa = 10.0e6
+
+[friction.rate_state]
+# Depth-varying a(z) / b(z) (Phase 11b).  a_default / b_default below are the
+# scalar FALLBACK used only when [friction.rate_state.depth_profile] is ABSENT;
+# with the profile enabled they are unused for a/b (and the a<b default check is
+# skipped).  R-009: V_0_default MUST equal FrictionSolver::V0 (= 1e-6).
+a_default       = 0.010      # unused (depth profile active); fallback only
+b_default       = 0.015      # unused (depth profile active); fallback only
+Dc_default      = 0.10       # m.  Was 0.05 in the Dc005_nuc7km_250m parent; raised
+                             #   2x so L_b=mu*Dc/(b*sigma_n) = 2.51 km = 5.0 cells @ 500 m
+                             #   (mode III/dip) in the VW zone.  Scalar, not depth-varying.
+                             #   L_nuc and L_inf scale ~linearly with Dc; the (b-a) bump
+                             #   (a 0.0170->0.0127 in the CSV) holds L_inf at ~6.06 km so the
+                             #   8 km patch stays supercritical and fits the ~10 km depth.
+V_0_default     = 1.0e-6     # MUST equal FrictionSolver::V0 (R-009)
+f_0_default     = 0.6        # TPV102 f0 (scalar)
+V_init_default  = 1.0e-12    # quasi-static initial slip rate (scalar)
+sigma_n_default = 120.0e6    # fallback only; driver uses geom.sigma_n_per_dof()
+eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF
+
+[friction.rate_state.depth_profile]
+# Two-CSV depth profile (Phase 11b).  Each row is `value, depth_km` (value
+# FIRST).  b(z) = a(z) - (a-b)(z), each interpolated on its own grid and
+# flat-clamped outside.  depth_units = "km" => CSV depth * 1000 -> metres.
+#
+# *_500m_strongvw.csv (2026-05-28): the *_vwvs11km.csv profiles shifted for the
+# 500 m / Dc=0.10 spontaneous-rupture test:
+#   - param_a: shifted DOWN 0.0043 (a(4.97 km) 0.0170 -> 0.0127).
+#   - param_a_minus_b: VW plateau -0.00914 -> -0.0134 (stronger velocity-weakening),
+#     with the (a-b)=0 VW->VS transition pinned at 11 km (added knot at 11 km) so
+#     b stays > 0 down to the 16.6 km fault bottom.
+# Net at the patch: a=0.0127, b=0.0261, b-a=0.0134.
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_500m_strongvw.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_500m_strongvw.csv"
+depth_units         = "km"
