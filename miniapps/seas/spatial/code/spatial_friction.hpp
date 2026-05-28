@@ -152,6 +152,37 @@ struct VelocitySpec
 
 enum class StressSourceKind { ConstantTensor, SidecarHDF5, FaultLocalPrestress };
 
+/// Rectangular `tau_strike` patch for the FaultLocalPrestress source (D3.2,
+/// Phase 6 req 2).  Inside the box `|coord - center| <= half` (per axis), the
+/// uniform background `tau_strike` is overridden by `tau_strike_pa`.  A NaN
+/// `center_*` or +inf `half_*` makes that axis unconstrained (always inside),
+/// so an all-default patch covers the whole fault.  Patches are applied
+/// last-match-wins (later patches in the list override earlier ones).  Used by
+/// TPV205 (background +70 MPa; central/left/right patches).
+struct FaultLocalPatch
+{
+   real_t center_x_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t center_y_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t center_z_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t half_x_m   = std::numeric_limits<real_t>::infinity();
+   real_t half_y_m   = std::numeric_limits<real_t>::infinity();
+   real_t half_z_m   = std::numeric_limits<real_t>::infinity();
+   real_t tau_strike_pa = 0.0;   ///< right-lateral POSITIVE strike pre-stress
+
+   /// True iff (x,y,z) lies inside this patch box.  An unconstrained axis
+   /// (NaN center or non-finite half) always matches.
+   bool inside(real_t x, real_t y, real_t z) const
+   {
+      auto axis = [](real_t c, real_t cen, real_t half) {
+         return std::isnan(cen) || !std::isfinite(half)
+                || std::abs(c - cen) <= half;
+      };
+      return axis(x, center_x_m, half_x_m)
+             && axis(y, center_y_m, half_y_m)
+             && axis(z, center_z_m, half_z_m);
+   }
+};
+
 struct StressSpec
 {
    StressSourceKind kind = StressSourceKind::ConstantTensor;
@@ -171,6 +202,9 @@ struct StressSpec
    real_t tau_strike_pa = 0.0;
    real_t tau_dip_pa    = 0.0;
    real_t sigma_n_pa    = 0.0;
+   // Optional rectangular tau_strike patches (last-match-wins), layered on
+   // the uniform background by FaultGeometry::ApplyFaultLocalStrikePatches.
+   std::vector<FaultLocalPatch> fault_local_patches;
    // Common:
    PorePressureSpec pore_pressure;
 };

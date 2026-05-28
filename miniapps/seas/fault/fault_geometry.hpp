@@ -673,6 +673,15 @@ public:
       if (a_values_.Size() != num_fault_dofs_) { ComputeBP5Params(); }
 
       const real_t sigma_n_eff = sigma_n - P_p;
+      // R-001: the friction solve requires a compressive effective normal
+      // stress (sigma_n > 0).  The projection path floors via min_sigma_n_pa;
+      // the fault-local path has no floor, so guard explicitly rather than
+      // silently seed a tensile (non-physical) sigma_n.
+      MFEM_VERIFY(sigma_n_eff > 0.0,
+                  "FaultGeometry::ComputeParamsFaultLocal: effective normal "
+                  "stress sigma_n - P_p must be > 0 (compression positive); got "
+                  "sigma_n=" << sigma_n << ", P_p=" << P_p
+                  << " -> sigma_n_eff=" << sigma_n_eff);
       sigma_n_per_dof_.SetSize(num_fault_dofs_);
       tau_pre_.SetSize(2 * num_fault_dofs_);
       for (int i = 0; i < num_fault_dofs_; ++i)
@@ -682,6 +691,41 @@ public:
          sigma_n_per_dof_(i) = sigma_n_eff;
       }
       params_computed_ = true;
+   }
+
+   /// @brief Apply a per-DOF strike pre-stress override on top of the uniform
+   /// fault-local background (D3.2 rectangular `tau_strike` patches, Phase 6
+   /// req 2).  `override_fn(x, y, z, tau_strike_out)` returns true (and sets
+   /// `tau_strike_out`) for DOFs whose strike pre-stress is replaced — e.g.
+   /// inside a patch box, last-match-wins; DOFs for which it returns false keep
+   /// the background `tau_pre_(2i+1)`.  Templated on the functor so
+   /// `FaultGeometry` stays agnostic of the patch config type (no
+   /// `spatial::FaultLocalPatch` include / layering dependency).  Requires
+   /// `tau_pre_` to be populated first (`ComputeParamsFaultLocal` or a
+   /// projection); only the strike slot `(2i+1)` is touched.
+   template <class OverrideFn>
+   void ApplyStrikePreStressOverride(OverrideFn&& override_fn)
+   {
+      MFEM_VERIFY(params_computed_,
+                  "FaultGeometry::ApplyStrikePreStressOverride: call "
+                  "ComputeParamsFaultLocal (or a stress projection) first.");
+      if (num_fault_dofs_ == 0) { return; }
+      MFEM_VERIFY(tau_pre_.Size() == 2 * num_fault_dofs_
+                  && dof_coords_3d_.Size() == 3 * num_fault_dofs_,
+                  "FaultGeometry::ApplyStrikePreStressOverride: tau_pre_ / "
+                  "dof_coords_3d_ size mismatch (need 2N / 3N for N="
+                  << num_fault_dofs_ << ").");
+      for (int i = 0; i < num_fault_dofs_; ++i)
+      {
+         const real_t x = dof_coords_3d_(3 * i);
+         const real_t y = dof_coords_3d_(3 * i + 1);
+         const real_t z = dof_coords_3d_(3 * i + 2);
+         real_t tau_strike_out = 0.0;
+         if (override_fn(x, y, z, tau_strike_out))
+         {
+            tau_pre_(2 * i + 1) = tau_strike_out;   // strike slot (DOFData.tau2_0)
+         }
+      }
    }
 
    /// @brief Find the DOF index closest to a target depth.

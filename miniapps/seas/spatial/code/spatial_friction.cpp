@@ -365,10 +365,11 @@ VelocityModel parse_velocity_model(const std::string& s)
 
 StressSourceKind parse_stress_kind(const std::string& s)
 {
-   if (s == "constant_tensor") { return StressSourceKind::ConstantTensor; }
-   if (s == "sidecar_hdf5")    { return StressSourceKind::SidecarHDF5; }
-   MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5}; "
-              "got '" << s << "'");
+   if (s == "constant_tensor")      { return StressSourceKind::ConstantTensor; }
+   if (s == "sidecar_hdf5")         { return StressSourceKind::SidecarHDF5; }
+   if (s == "fault_local_prestress"){ return StressSourceKind::FaultLocalPrestress; }
+   MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5, "
+              "fault_local_prestress}; got '" << s << "'");
    return StressSourceKind::ConstantTensor;
 }
 
@@ -756,6 +757,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const bool has_sxz = s.contains("sigma_xz_pa");
       const bool has_path = s.contains("sidecar_path")
                             && !toml_str(s, "sidecar_path", std::string()).empty();
+      // R-004: fault-local-prestress keys; rejected by the other two kinds.
+      const bool has_flp = s.contains("tau_strike_pa")
+                           || s.contains("tau_dip_pa")
+                           || s.contains("sigma_n_pa");
 
       if (cfg.stress.kind == StressSourceKind::ConstantTensor)
       {
@@ -766,12 +771,77 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          MFEM_VERIFY(!has_path,
                      "[stress] kind=\"constant_tensor\" must NOT set "
                      "sidecar_path (it is for kind=\"sidecar_hdf5\" only)");
+         MFEM_VERIFY(!has_flp,
+                     "[stress] kind=\"constant_tensor\" must NOT set "
+                     "tau_strike_pa/tau_dip_pa/sigma_n_pa (those are for "
+                     "kind=\"fault_local_prestress\" only)");
          cfg.stress.sigma_xx_pa = toml_real(s, "sigma_xx_pa", 0.0);
          cfg.stress.sigma_yy_pa = toml_real(s, "sigma_yy_pa", 0.0);
          cfg.stress.sigma_zz_pa = toml_real(s, "sigma_zz_pa", 0.0);
          cfg.stress.sigma_xy_pa = toml_real(s, "sigma_xy_pa", 0.0);
          cfg.stress.sigma_yz_pa = toml_real(s, "sigma_yz_pa", 0.0);
          cfg.stress.sigma_xz_pa = toml_real(s, "sigma_xz_pa", 0.0);
+      }
+      else if (cfg.stress.kind == StressSourceKind::FaultLocalPrestress)
+      {
+         // D3.2 (Phase 6): fault-local background pre-stress, right-lateral /
+         // compression POSITIVE.  Seeded DIRECTLY (no Cauchy projection) via
+         // FaultGeometry::ComputeParamsFaultLocal: tau2_0=tau_strike,
+         // tau1_0=tau_dip, sigma_n0=sigma_n_pa - P_p.
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
+                     && !has_sxy && !has_syz && !has_sxz,
+                     "[stress] kind=\"fault_local_prestress\" must NOT set any "
+                     "Cauchy sigma_*_pa key (those are for "
+                     "kind=\"constant_tensor\")");
+         MFEM_VERIFY(!has_path,
+                     "[stress] kind=\"fault_local_prestress\" must NOT set "
+                     "sidecar_path (it is for kind=\"sidecar_hdf5\" only)");
+         MFEM_VERIFY(s.contains("sigma_n_pa"),
+                     "[stress] kind=\"fault_local_prestress\" requires "
+                     "sigma_n_pa (compression POSITIVE)");
+         // R-003: tau_strike is the shear driver; a missing key would silently
+         // seed a zero-shear (locked) fault.
+         MFEM_VERIFY(s.contains("tau_strike_pa"),
+                     "[stress] kind=\"fault_local_prestress\" requires "
+                     "tau_strike_pa (the shear driver; right-lateral POSITIVE)");
+         cfg.stress.tau_strike_pa = toml_real(s, "tau_strike_pa", 0.0);
+         cfg.stress.tau_dip_pa    = toml_real(s, "tau_dip_pa", 0.0);
+         cfg.stress.sigma_n_pa    = toml_real(s, "sigma_n_pa", 0.0);
+         MFEM_VERIFY(cfg.stress.sigma_n_pa > 0.0,
+                     "[stress] kind=\"fault_local_prestress\" sigma_n_pa must "
+                     "be > 0 (compression positive); got "
+                     << cfg.stress.sigma_n_pa);
+         // R-002 (req 2): optional rectangular tau_strike patches
+         // ([[stress.patch]], last-match-wins).  center_* default NaN /
+         // half_* default +inf => that axis is unconstrained.  tau_strike_pa
+         // is required per patch (a patch with no override is meaningless).
+         if (s.contains("patch"))
+         {
+            const auto& arr = s.at("patch").as_array();
+            cfg.stress.fault_local_patches.reserve(arr.size());
+            for (const auto& pn : arr)
+            {
+               FaultLocalPatch p;
+               p.center_x_m = toml_real(pn, "center_x_m",
+                                        std::numeric_limits<real_t>::quiet_NaN());
+               p.center_y_m = toml_real(pn, "center_y_m",
+                                        std::numeric_limits<real_t>::quiet_NaN());
+               p.center_z_m = toml_real(pn, "center_z_m",
+                                        std::numeric_limits<real_t>::quiet_NaN());
+               p.half_x_m   = toml_real(pn, "half_x_m",
+                                        std::numeric_limits<real_t>::infinity());
+               p.half_y_m   = toml_real(pn, "half_y_m",
+                                        std::numeric_limits<real_t>::infinity());
+               p.half_z_m   = toml_real(pn, "half_z_m",
+                                        std::numeric_limits<real_t>::infinity());
+               p.tau_strike_pa = toml_real(pn, "tau_strike_pa",
+                                           std::numeric_limits<real_t>::quiet_NaN());
+               MFEM_VERIFY(!std::isnan(p.tau_strike_pa),
+                           "[[stress.patch]] requires tau_strike_pa "
+                           "(right-lateral POSITIVE)");
+               cfg.stress.fault_local_patches.push_back(p);
+            }
+         }
       }
       else
       {
@@ -783,6 +853,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          MFEM_VERIFY(has_path,
                      "[stress] kind=\"sidecar_hdf5\" requires a non-empty "
                      "sidecar_path");
+         MFEM_VERIFY(!has_flp,
+                     "[stress] kind=\"sidecar_hdf5\" must NOT set "
+                     "tau_strike_pa/tau_dip_pa/sigma_n_pa (those are for "
+                     "kind=\"fault_local_prestress\" only)");
          cfg.stress.sidecar_path = toml_str(s, "sidecar_path", std::string());
       }
    }

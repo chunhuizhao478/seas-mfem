@@ -278,6 +278,91 @@ static void T_65_5_match_standalone_projection(Fixture &fix)
              "ComputeParams tau_pre matches standalone projector");
 }
 
+// Phase 6 (D3.2): ComputeParamsFaultLocal seeds the per-DOF pre-stress
+// DIRECTLY in the canonical fault-local frame (NO Cauchy projection),
+// right-lateral / compression POSITIVE:
+//   tau_pre_(2i)   = tau_dip      (DOFData.tau1_0)
+//   tau_pre_(2i+1) = tau_strike   (DOFData.tau2_0)  -- positive == right-lateral
+//   sigma_n_per_dof_(i) = sigma_n - P_p             (effective normal stress)
+static void T_66_fault_local_prestress_seed(Fixture &fix)
+{
+   std::cout << "\n[T-66] ComputeParamsFaultLocal direct fault-local seeding "
+                "(D3.2 sign convention)\n";
+   const real_t tau_strike  = 75.0e6;            // + right-lateral (TPV102 tau_ini)
+   const real_t tau_dip     = 0.0;               // pure strike-slip
+   const real_t sigma_n     = 120.0e6;           // compression POSITIVE
+   const real_t P_p         = 16.0e6;
+   const real_t sigma_n_eff = sigma_n - P_p;     // 104 MPa
+
+   FaultGeometry<Mesh> fg(*fix.domain_op, fix.params);
+   fg.ComputeParamsFaultLocal(tau_strike, tau_dip, sigma_n, P_p);
+
+   TEST_ASSERT(fg.HasParams(),
+               "HasParams() == true after ComputeParamsFaultLocal");
+   TEST_ASSERT(fg.sigma_n_per_dof().Size() == fix.nf,
+               "sigma_n_per_dof.Size() == NumFaultDOFs");
+   TEST_ASSERT(fg.GetTauPre().Size() == 2 * fix.nf,
+               "tau_pre.Size() == 2 * NumFaultDOFs");
+
+   const Vector& sn  = fg.sigma_n_per_dof();
+   const Vector& tau = fg.GetTauPre();
+   real_t max_dev_sn = 0, max_dev_dip = 0, max_dev_strike = 0;
+   for (int i = 0; i < fix.nf; ++i)
+   {
+      max_dev_sn     = std::max(max_dev_sn,     std::abs(sn(i)         - sigma_n_eff));
+      max_dev_dip    = std::max(max_dev_dip,    std::abs(tau(2 * i)    - tau_dip));
+      max_dev_strike = std::max(max_dev_strike, std::abs(tau(2 * i + 1) - tau_strike));
+   }
+   TEST_NEAR(max_dev_sn, 0.0, 1e-9,
+             "sigma_n0 == sigma_n_pa - P_p (effective normal)");
+   TEST_NEAR(max_dev_dip, 0.0, 1e-9,
+             "tau1_0 (dip) == tau_dip_pa (== 0, pure strike-slip)");
+   TEST_NEAR(max_dev_strike, 0.0, 1e-9,
+             "tau2_0 (strike) == +tau_strike_pa (right-lateral POSITIVE, no projection)");
+   TEST_ASSERT(fix.nf == 0 || tau(1) > 0.0,
+               "positive tau_strike_pa maps to a positive strike pre-stress slot");
+}
+
+// Phase 6 (D3.2 patches, R-002): ApplyStrikePreStressOverride replaces the
+// per-DOF strike slot tau_pre_(2i+1) for DOFs the callback selects, leaving the
+// dip slot (2i) untouched.  Verified with a raw override-all / override-none
+// callback (the FaultLocalPatch last-match-wins logic is unit-tested in
+// test_spatial_friction_config).
+static void T_67_strike_prestress_override(Fixture &fix)
+{
+   std::cout << "\n[T-67] ApplyStrikePreStressOverride (D3.2 patch override)\n";
+
+   FaultGeometry<Mesh> fg(*fix.domain_op, fix.params);
+   fg.ComputeParamsFaultLocal(/*tau_strike=*/70.0e6, /*tau_dip=*/0.0,
+                              /*sigma_n=*/120.0e6, /*P_p=*/0.0);
+   // (a) override-all: every strike slot replaced; dip slot untouched.
+   fg.ApplyStrikePreStressOverride(
+      [](real_t, real_t, real_t, real_t &out) { out = 81.6e6; return true; });
+   const Vector &tau = fg.GetTauPre();
+   real_t max_dev_strike = 0, max_dev_dip = 0;
+   for (int i = 0; i < fix.nf; ++i)
+   {
+      max_dev_strike = std::max(max_dev_strike, std::abs(tau(2 * i + 1) - 81.6e6));
+      max_dev_dip    = std::max(max_dev_dip,    std::abs(tau(2 * i)     - 0.0));
+   }
+   TEST_NEAR(max_dev_strike, 0.0, 1e-9,
+             "override-all replaces every strike slot (81.6 MPa)");
+   TEST_NEAR(max_dev_dip, 0.0, 1e-9,
+             "override leaves the dip slot untouched");
+
+   // (b) override-none: background strike preserved.
+   FaultGeometry<Mesh> fg2(*fix.domain_op, fix.params);
+   fg2.ComputeParamsFaultLocal(70.0e6, 0.0, 120.0e6, 0.0);
+   fg2.ApplyStrikePreStressOverride(
+      [](real_t, real_t, real_t, real_t &) { return false; });
+   const Vector &tau2 = fg2.GetTauPre();
+   real_t max_dev_bg = 0;
+   for (int i = 0; i < fix.nf; ++i)
+   { max_dev_bg = std::max(max_dev_bg, std::abs(tau2(2 * i + 1) - 70.0e6)); }
+   TEST_NEAR(max_dev_bg, 0.0, 1e-9,
+             "override-none preserves the background strike (70 MPa)");
+}
+
 int main(int, char**)
 {
    std::cout << "Running Phase 6 §5 ComputeParams tests\n";
@@ -294,6 +379,8 @@ int main(int, char**)
    T_65_3_has_safs_params(*fix);
    T_65_4_analytic_arrays_preserved(*fix);
    T_65_5_match_standalone_projection(*fix);
+   T_66_fault_local_prestress_seed(*fix);
+   T_67_strike_prestress_override(*fix);
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 6 §5: " << num_passed << " / " << num_tests

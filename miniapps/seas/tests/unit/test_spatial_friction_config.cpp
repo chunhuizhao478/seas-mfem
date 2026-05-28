@@ -821,6 +821,174 @@ cohesion_default=0
    TEST_ASSERT(ParseAbortsInChild(toml), "mu <= 0 must abort");
 }
 
+// T-20 (Phase 6 / D3.2): kind="fault_local_prestress" parses; the
+// right-lateral / compression-POSITIVE fields land in StressSpec unchanged
+// (seeded directly — no Cauchy projection; see T-66 in
+// test_compute_safs_params for the per-DOF sign verification).
+static void T_20_fault_local_prestress_parses()
+{
+   std::cout << "\n[FLP-1] [stress] kind=fault_local_prestress parses\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "fault_local_prestress"
+tau_strike_pa = 75.0e6
+tau_dip_pa = 0.0
+sigma_n_pa = 120.0e6
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.stress.kind == StressSourceKind::FaultLocalPrestress,
+               "kind parses to FaultLocalPrestress");
+   TEST_ASSERT(cfg.stress.tau_strike_pa == 75.0e6,
+               "tau_strike_pa == +75 MPa (right-lateral positive)");
+   TEST_ASSERT(cfg.stress.tau_dip_pa == 0.0, "tau_dip_pa == 0 (pure strike-slip)");
+   TEST_ASSERT(cfg.stress.sigma_n_pa == 120.0e6,
+               "sigma_n_pa == 120 MPa (compression positive)");
+}
+
+// T-21 (Phase 6 / D3.2): fault_local_prestress + a Cauchy sigma key aborts
+// (mutual exclusion with kind=constant_tensor).
+static void T_21_fault_local_with_sigma_aborts()
+{
+   std::cout << "\n[FLP-2] [stress] kind=fault_local_prestress + sigma_xx_pa aborts\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "fault_local_prestress"
+sigma_n_pa = 120.0e6
+sigma_xx_pa = 1e6
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "fault_local_prestress + Cauchy sigma_xx_pa must abort");
+}
+
+// FLP-3 (Phase 6 / D3.2 R-002): [[stress.patch]] array parses into
+// fault_local_patches; FaultLocalPatch::inside() + last-match-wins behave.
+static void T_22_fault_local_patches_parse()
+{
+   std::cout << "\n[FLP-3] [[stress.patch]] parses + inside()/last-match-wins\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "fault_local_prestress"
+tau_strike_pa = 70.0e6
+tau_dip_pa = 0.0
+sigma_n_pa = 120.0e6
+[[stress.patch]]
+center_x_m = 0.0
+half_x_m = 1500.0
+tau_strike_pa = 81.6e6
+[[stress.patch]]
+center_x_m = 0.0
+half_x_m = 3000.0
+tau_strike_pa = 78.0e6
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   const auto &patches = cfg.stress.fault_local_patches;
+   TEST_ASSERT(patches.size() == 2, "two [[stress.patch]] parsed");
+   TEST_ASSERT(patches.size() == 2 && patches[0].tau_strike_pa == 81.6e6,
+               "patch[0] tau_strike = 81.6 MPa");
+   TEST_ASSERT(patches.size() == 2 && patches[0].center_x_m == 0.0
+               && patches[0].half_x_m == 1500.0,
+               "patch[0] box x in [-1500,1500]");
+   TEST_ASSERT(patches.size() == 2 && patches[1].tau_strike_pa == 78.0e6,
+               "patch[1] tau_strike = 78 MPa");
+   // inside(): unconstrained y/z (default NaN center / +inf half) always match.
+   TEST_ASSERT(patches.size() == 2 && patches[0].inside(0.0, 9999.0, -9999.0),
+               "patch[0] inside at x=0 (y/z unconstrained)");
+   TEST_ASSERT(patches.size() == 2 && !patches[0].inside(5000.0, 0.0, 0.0),
+               "patch[0] NOT inside at x=5000 (> half_x)");
+   // last-match-wins: x=0 is inside BOTH patches; the later patch wins.
+   real_t tau = cfg.stress.tau_strike_pa, out = 0.0;
+   bool hit = false;
+   for (const auto &p : patches)
+   { if (p.inside(0.0, 0.0, 0.0)) { out = p.tau_strike_pa; hit = true; } }
+   if (hit) { tau = out; }
+   TEST_ASSERT(hit && tau == 78.0e6,
+               "last-match-wins: x=0 in both patches -> later (78 MPa) wins");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -838,6 +1006,9 @@ int main(int, char**)
    T_8_r114_rule_guard();
    T_9_stress_mode_conflict_const_with_path();
    T_10_stress_mode_conflict_sidecar_with_sigma();
+   T_20_fault_local_prestress_parses();
+   T_21_fault_local_with_sigma_aborts();
+   T_22_fault_local_patches_parse();
    T_11_time_parser();
    T_12_material_fallback_bounds();
    T_13_missing_stress_block_aborts();
