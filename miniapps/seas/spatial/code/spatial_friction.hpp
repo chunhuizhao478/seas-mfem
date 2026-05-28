@@ -397,6 +397,59 @@ struct RateStateBlock
    FrictionDepthProfileSpec  depth_profile;   // Phase 11b: depth-varying a/b (optional)
 };
 
+// =====================================================================
+//  Phase 6 req 1: TPV problem / boundary / fault-frame / hypocenter /
+//  material config blocks.  All optional (defaults preserve existing SAFS
+//  behaviour); req-7 guards validate them when present.
+// =====================================================================
+
+/// Descriptive problem tag (informational only; no code branches on it).
+struct ProblemSpec { std::string tag; };
+
+/// Boundary-attribute assignment.  `fault_attr` is the mesh attribute of the
+/// fault interface; natural/absorbing list the outer-boundary attributes
+/// treated as free-surface / absorbing.  The three must be disjoint and
+/// fault_attr > 0 (req-7 guards).
+struct BoundarySpec
+{
+   int              fault_attr = -1;
+   std::vector<int> natural_attrs;
+   std::vector<int> absorbing_attrs;
+};
+
+/// Fault-local frame: `ref_normal` / `up` define the canonical
+/// (n, t1=dip, t2=strike) basis.  Defaults match the SAFS/TPV y=0 vertical
+/// strike-slip fault.  Both must be unit-norm and non-parallel (req-7 guards).
+struct FaultGeometrySpec
+{
+   std::array<real_t, 3> ref_normal = {{0.0, -1.0, 0.0}};
+   std::array<real_t, 3> up         = {{0.0,  0.0, 1.0}};
+   std::string           kind;   ///< informational (no code branches on it)
+};
+
+/// Hypocenter / nucleation centre.  R-008 guard: if up[2] > 0 (z increases
+/// upward) the hypocenter z must be <= 0 (at/below the free surface).
+struct HypocenterSpec
+{
+   real_t x_m = 0.0, y_m = 0.0, z_m = 0.0;
+   real_t nucleation_radius_m = 0.0;
+   real_t nucleation_taper_m  = 0.0;
+};
+
+/// Bulk-material model selector (req 1).  `matrix` interior_flux requires a
+/// non-Constant material (the deferred req-3 guard, completed here).
+///   Constant       -> [material_constant_fallback] (lambda, mu, rho)
+///   DepthProfile1D  -> a 1-D depth profile (TPV31; built in Phase 10)
+///   SidecarHDF5     -> CVM-H/CVM-S velocity sidecar
+enum class MaterialKind { Constant, DepthProfile1D, SidecarHDF5 };
+
+struct MaterialSpec
+{
+   MaterialKind kind = MaterialKind::Constant;
+   std::string  profile_csv;    ///< DepthProfile1D path (built in Phase 10)
+   std::string  sidecar_path;   ///< SidecarHDF5 velocity-model path
+};
+
 struct SpatialFrictionConfig
 {
    int                                 schema_version = 0;
@@ -421,6 +474,12 @@ struct SpatialFrictionConfig
    NucleationSpec                      nucleation;       // D-4
    std::optional<SlipWeakeningBlock>   slip_weakening;
    std::optional<RateStateBlock>       rate_state;
+   // Phase 6 req 1: optional TPV config blocks (defaults preserve SAFS).
+   ProblemSpec                         problem;
+   BoundarySpec                        boundary;
+   FaultGeometrySpec                   fault_geometry;
+   HypocenterSpec                      hypocenter;
+   MaterialSpec                        material;
 };
 
 /// Parse + validate a TOML config.  Aborts on any schema violation with

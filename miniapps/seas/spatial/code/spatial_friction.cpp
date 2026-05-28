@@ -319,6 +319,41 @@ real_t toml_time_seconds(const toml::value& tbl, const std::string& key,
    return default_val;
 }
 
+/// Phase 6 req 1: read a 3-element numeric TOML array (int or float
+/// elements) into a std::array<real_t,3>.  Leaves `out` untouched (keeps
+/// its struct default) when the key is absent.
+void toml_vec3(const toml::value& tbl, const std::string& key,
+               std::array<real_t, 3>& out)
+{
+   if (!tbl.contains(key)) { return; }
+   const auto& arr = tbl.at(key).as_array();
+   MFEM_VERIFY(arr.size() == 3,
+               "TOML key '" << key << "' must be a 3-element array; got "
+               << arr.size() << " elements");
+   for (int i = 0; i < 3; ++i)
+   {
+      const auto& e = arr[i];
+      if      (e.is_floating()) { out[i] = static_cast<real_t>(e.as_floating()); }
+      else if (e.is_integer())  { out[i] = static_cast<real_t>(e.as_integer()); }
+      else { MFEM_ABORT("TOML key '" << key << "'[" << i
+                        << "] must be a number (float or int)"); }
+   }
+}
+
+/// Phase 6 req 1: read an integer TOML array into a std::vector<int>
+/// (appends).  No-op when the key is absent.
+void toml_int_array(const toml::value& tbl, const std::string& key,
+                    std::vector<int>& out)
+{
+   if (!tbl.contains(key)) { return; }
+   for (const auto& e : tbl.at(key).as_array())
+   {
+      MFEM_VERIFY(e.is_integer(),
+                  "TOML key '" << key << "' entries must all be integers");
+      out.push_back(static_cast<int>(e.as_integer()));
+   }
+}
+
 /// Parse `[time].dt_initial`.  Returns the -1 sentinel ONLY when the
 /// value was the literal string "auto" (or the key is absent).  Any
 /// numeric or string-numeric value must be > 0; otherwise abort.  This
@@ -935,7 +970,8 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                "is valid only on the scalar interior-flux path); set "
                "mixed_flux=\"none\" when using matrix.");
    // NOTE: the companion guard "interior_flux=matrix requires material.kind !=
-   // Constant" lands with the [material] block (Phase 6 req 1).
+   // Constant" is enforced after the [material] block is parsed below (it
+   // needs cfg.material.kind, which is read further down in parse_root).
 
    if (root.contains("time"))
    {
@@ -1223,6 +1259,156 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          }
       }
    }
+
+   // =====================================================================
+   //  Phase 6 req 1: optional TPV config blocks ([problem], [boundary],
+   //  [fault_geometry], [hypocenter], [material]).  Each is OPTIONAL —
+   //  an absent block keeps the struct defaults, so all existing SAFS
+   //  TOMLs (which set none of these) parse unchanged.  req-7 guards
+   //  validate each block only when it is present.
+   // =====================================================================
+
+   if (root.contains("problem"))
+   {
+      // Informational tag only (no code branches on it).
+      cfg.problem.tag = toml_str(root.at("problem"), "tag", std::string());
+   }
+
+   if (root.contains("boundary"))
+   {
+      const auto& b = root.at("boundary");
+      cfg.boundary.fault_attr = toml_int(b, "fault_attr", -1);
+      toml_int_array(b, "natural_attrs",   cfg.boundary.natural_attrs);
+      toml_int_array(b, "absorbing_attrs", cfg.boundary.absorbing_attrs);
+
+      // req-7 guards.  fault_attr must be a positive mesh attribute (0 is
+      // the "interior" sentinel in MFEM; a missing/negative fault_attr would
+      // silently disable fault detection).
+      MFEM_VERIFY(cfg.boundary.fault_attr > 0,
+                  "[boundary].fault_attr must be a positive mesh attribute; got "
+                  << cfg.boundary.fault_attr);
+      auto require_positive = [](const std::vector<int>& v, const char* name)
+      {
+         for (int a : v)
+         {
+            MFEM_VERIFY(a > 0, "[boundary]." << name << " entries must be "
+                        "positive mesh attributes; got " << a);
+         }
+      };
+      require_positive(cfg.boundary.natural_attrs,   "natural_attrs");
+      require_positive(cfg.boundary.absorbing_attrs, "absorbing_attrs");
+
+      // Disjointness: an attribute assigned to two different roles (e.g. both
+      // natural and absorbing, or fault and natural) is an unresolvable BC
+      // conflict — abort rather than silently pick one.
+      auto has = [](const std::vector<int>& v, int a)
+      { return std::find(v.begin(), v.end(), a) != v.end(); };
+      MFEM_VERIFY(!has(cfg.boundary.natural_attrs,   cfg.boundary.fault_attr)
+                  && !has(cfg.boundary.absorbing_attrs, cfg.boundary.fault_attr),
+                  "[boundary].fault_attr (" << cfg.boundary.fault_attr
+                  << ") must not also appear in natural_attrs/absorbing_attrs");
+      for (int a : cfg.boundary.natural_attrs)
+      {
+         MFEM_VERIFY(!has(cfg.boundary.absorbing_attrs, a),
+                     "[boundary] natural_attrs and absorbing_attrs must be "
+                     "disjoint; attribute " << a << " appears in both");
+      }
+   }
+
+   if (root.contains("fault_geometry"))
+   {
+      const auto& f = root.at("fault_geometry");
+      toml_vec3(f, "ref_normal", cfg.fault_geometry.ref_normal);
+      toml_vec3(f, "up",         cfg.fault_geometry.up);
+      cfg.fault_geometry.kind = toml_str(f, "kind", std::string());
+
+      // req-7 guards: ref_normal and up must be unit-norm and non-parallel.
+      // The fault-local strike axis is t2 = normalize(up × n); if up ∥ n the
+      // cross product is zero and the frame is undefined.
+      auto norm3 = [](const std::array<real_t, 3>& v)
+      { return std::sqrt(v[0]*v[0] + v[1]*v[1] + v[2]*v[2]); };
+      const real_t nn = norm3(cfg.fault_geometry.ref_normal);
+      const real_t un = norm3(cfg.fault_geometry.up);
+      MFEM_VERIFY(std::abs(nn - 1.0) <= 1e-9,
+                  "[fault_geometry].ref_normal must be unit-norm; |ref_normal| = "
+                  << nn);
+      MFEM_VERIFY(std::abs(un - 1.0) <= 1e-9,
+                  "[fault_geometry].up must be unit-norm; |up| = " << un);
+      const auto& n = cfg.fault_geometry.ref_normal;
+      const auto& u = cfg.fault_geometry.up;
+      const real_t dot = n[0]*u[0] + n[1]*u[1] + n[2]*u[2];
+      MFEM_VERIFY(std::abs(dot) <= 1.0 - 1e-9,
+                  "[fault_geometry].up must not be parallel to ref_normal "
+                  "(|ref_normal·up| = " << std::abs(dot) << " ~ 1); the strike "
+                  "axis t2 = normalize(up x ref_normal) would be undefined");
+   }
+
+   if (root.contains("hypocenter"))
+   {
+      const auto& h = root.at("hypocenter");
+      cfg.hypocenter.x_m = toml_real(h, "x_m", 0.0);
+      cfg.hypocenter.y_m = toml_real(h, "y_m", 0.0);
+      cfg.hypocenter.z_m = toml_real(h, "z_m", 0.0);
+      cfg.hypocenter.nucleation_radius_m = toml_real(h, "nucleation_radius_m", 0.0);
+      cfg.hypocenter.nucleation_taper_m  = toml_real(h, "nucleation_taper_m",  0.0);
+
+      MFEM_VERIFY(cfg.hypocenter.nucleation_radius_m >= 0.0,
+                  "[hypocenter].nucleation_radius_m must be >= 0; got "
+                  << cfg.hypocenter.nucleation_radius_m);
+      MFEM_VERIFY(cfg.hypocenter.nucleation_taper_m >= 0.0,
+                  "[hypocenter].nucleation_taper_m must be >= 0; got "
+                  << cfg.hypocenter.nucleation_taper_m);
+      // R-008 guard: with an up-pointing vertical axis (up[2] > 0, z increases
+      // upward) a hypocenter must lie at or below the free surface (z <= 0).
+      // A positive z would place the nucleation patch in the air.
+      if (cfg.fault_geometry.up[2] > 0.0)
+      {
+         MFEM_VERIFY(cfg.hypocenter.z_m <= 0.0,
+                     "[hypocenter].z_m must be <= 0 when [fault_geometry].up[2] "
+                     "> 0 (z increases upward, free surface at z = 0); got z_m = "
+                     << cfg.hypocenter.z_m);
+      }
+   }
+
+   if (root.contains("material"))
+   {
+      const auto& m = root.at("material");
+      const std::string mk = toml_str(m, "kind", "constant");
+      if      (mk == "constant")         { cfg.material.kind = MaterialKind::Constant; }
+      else if (mk == "depth_profile_1d") { cfg.material.kind = MaterialKind::DepthProfile1D; }
+      else if (mk == "sidecar_hdf5")     { cfg.material.kind = MaterialKind::SidecarHDF5; }
+      else
+      {
+         MFEM_ABORT("[material].kind must be one of {constant, "
+                    "depth_profile_1d, sidecar_hdf5}; got '" << mk << "'");
+      }
+      cfg.material.profile_csv  = toml_str(m, "profile_csv",  std::string());
+      cfg.material.sidecar_path = toml_str(m, "sidecar_path", std::string());
+
+      if (cfg.material.kind == MaterialKind::DepthProfile1D)
+      {
+         MFEM_VERIFY(!cfg.material.profile_csv.empty(),
+                     "[material] kind=\"depth_profile_1d\" requires a non-empty "
+                     "profile_csv");
+      }
+      if (cfg.material.kind == MaterialKind::SidecarHDF5)
+      {
+         MFEM_VERIFY(!cfg.material.sidecar_path.empty(),
+                     "[material] kind=\"sidecar_hdf5\" requires a non-empty "
+                     "sidecar_path");
+      }
+   }
+
+   // Phase 6 req 3 (deferred guard, completed now that [material] is parsed):
+   // the matrix interior-flux path needs per-element material contrast to be
+   // meaningful — a spatially-Constant material has no contrast, so matrix is
+   // a wasteful no-op there and almost certainly a config mistake.
+   MFEM_VERIFY(cfg.numerics.interior_flux == InteriorFlux::Scalar
+               || cfg.material.kind != MaterialKind::Constant,
+               "[numerics].interior_flux=\"matrix\" requires a non-Constant "
+               "[material].kind (depth_profile_1d or sidecar_hdf5); a Constant "
+               "material has no element-to-element contrast for the matrix flux "
+               "to resolve.");
 
    return cfg;
 }

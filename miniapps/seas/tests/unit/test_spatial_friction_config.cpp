@@ -1026,6 +1026,9 @@ cfl=0.5
 cfl_safety="dg"
 fault_iterator="substep"
 interior_flux="matrix"
+[material]
+kind="depth_profile_1d"
+profile_csv="/tmp/profile.csv"
 [time]
 tfinal="12s"
 [output]
@@ -1036,6 +1039,9 @@ mu_d_default=0.5
 d_c_default=0.5
 cohesion_default=0
 )TOML";
+   // NOTE: interior_flux="matrix" now requires a non-Constant [material]
+   // (Phase 6 req-3 guard, completed with req 1); the depth_profile_1d block
+   // above satisfies it.
    const auto cfg = ParseSpatialFrictionConfigString(toml);
    TEST_ASSERT(cfg.numerics.cfl_safety == CflSafety::Dg, "cfl_safety=dg");
    TEST_ASSERT(cfg.numerics.fault_iterator == FaultIteratorKind::Substep,
@@ -1223,6 +1229,180 @@ cohesion_default=0
                "instantaneous_circular.delta_tau_pa == 11.6 MPa");
 }
 
+// =====================================================================
+//  Phase 6 req 1: [problem]/[boundary]/[fault_geometry]/[hypocenter]/
+//  [material] config blocks + their req-7 guards.
+// =====================================================================
+
+// CFG1-1: all five new blocks parse; values round-trip.
+static void T_40_new_config_blocks_parse()
+{
+   std::cout << "\n[CFG1-1] [problem]/[boundary]/[fault_geometry]/"
+                "[hypocenter]/[material] parse\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[problem]\ntag=\"tpv205\"\n"
+        "[boundary]\nfault_attr=3\nnatural_attrs=[1,2]\nabsorbing_attrs=[4,5,6]\n"
+        "[fault_geometry]\nref_normal=[0.0,-1.0,0.0]\nup=[0.0,0.0,1.0]\nkind=\"planar\"\n"
+        "[hypocenter]\nx_m=0.0\ny_m=0.0\nz_m=-7500.0\n"
+        "nucleation_radius_m=1500.0\nnucleation_taper_m=0.0\n"
+        "[material]\nkind=\"constant\"\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.problem.tag == "tpv205", "problem.tag round-trip");
+   TEST_ASSERT(cfg.boundary.fault_attr == 3, "boundary.fault_attr == 3");
+   TEST_ASSERT(cfg.boundary.natural_attrs.size() == 2
+               && cfg.boundary.natural_attrs[0] == 1
+               && cfg.boundary.natural_attrs[1] == 2, "natural_attrs == [1,2]");
+   TEST_ASSERT(cfg.boundary.absorbing_attrs.size() == 3, "absorbing_attrs size 3");
+   TEST_ASSERT(cfg.fault_geometry.ref_normal[1] == -1.0, "ref_normal[1] == -1");
+   TEST_ASSERT(cfg.fault_geometry.up[2] == 1.0, "up[2] == 1");
+   TEST_ASSERT(cfg.fault_geometry.kind == "planar", "fault_geometry.kind round-trip");
+   TEST_ASSERT(cfg.hypocenter.z_m == -7500.0, "hypocenter.z_m == -7500");
+   TEST_ASSERT(cfg.hypocenter.nucleation_radius_m == 1500.0,
+               "nucleation_radius_m == 1500");
+   TEST_ASSERT(cfg.material.kind == MaterialKind::Constant,
+               "material.kind == Constant");
+}
+
+// CFG1-2: defaults preserved when the new blocks are absent (no SAFS
+// regression — existing TOMLs set none of these).
+static void T_41_new_blocks_default_when_absent()
+{
+   std::cout << "\n[CFG1-2] absent new blocks -> struct defaults\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.problem.tag.empty(), "problem.tag default empty");
+   TEST_ASSERT(cfg.boundary.fault_attr == -1, "boundary.fault_attr default -1");
+   TEST_ASSERT(cfg.boundary.natural_attrs.empty(), "natural_attrs default empty");
+   TEST_ASSERT(cfg.fault_geometry.ref_normal[0] == 0.0
+               && cfg.fault_geometry.ref_normal[1] == -1.0
+               && cfg.fault_geometry.ref_normal[2] == 0.0,
+               "ref_normal default (0,-1,0)");
+   TEST_ASSERT(cfg.fault_geometry.up[0] == 0.0
+               && cfg.fault_geometry.up[1] == 0.0
+               && cfg.fault_geometry.up[2] == 1.0,
+               "up default (0,0,1)");
+   TEST_ASSERT(cfg.material.kind == MaterialKind::Constant,
+               "material default Constant");
+}
+
+// CFG1-3 (req 7): overlapping [boundary] attribute sets / bad fault_attr abort.
+static void T_42_boundary_overlap_aborts()
+{
+   std::cout << "\n[CFG1-3] overlapping/invalid boundary attributes abort\n";
+   const std::string fault_in_natural = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[boundary]\nfault_attr=3\nnatural_attrs=[1,3]\n";
+   TEST_ASSERT(ParseAbortsInChild(fault_in_natural),
+               "fault_attr in natural_attrs must abort");
+   const std::string nat_abs_overlap = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[boundary]\nfault_attr=3\nnatural_attrs=[1,2]\nabsorbing_attrs=[2,4]\n";
+   TEST_ASSERT(ParseAbortsInChild(nat_abs_overlap),
+               "natural/absorbing overlap must abort");
+   const std::string bad_fault_attr = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[boundary]\nfault_attr=0\n";
+   TEST_ASSERT(ParseAbortsInChild(bad_fault_attr),
+               "fault_attr=0 (non-positive) must abort");
+}
+
+// CFG1-4 (req 7): non-unit-norm or parallel [fault_geometry] axes abort.
+static void T_43_fault_geometry_guards_abort()
+{
+   std::cout << "\n[CFG1-4] non-unit / parallel fault_geometry aborts\n";
+   const std::string non_unit = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\nref_normal=[0.0,-2.0,0.0]\nup=[0.0,0.0,1.0]\n";
+   TEST_ASSERT(ParseAbortsInChild(non_unit),
+               "non-unit ref_normal must abort");
+   const std::string parallel = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\nref_normal=[0.0,0.0,1.0]\nup=[0.0,0.0,1.0]\n";
+   TEST_ASSERT(ParseAbortsInChild(parallel),
+               "up parallel to ref_normal must abort");
+}
+
+// CFG1-5 (req 7, R-008): hypocenter z > 0 with up[2] > 0 aborts.
+static void T_44_hypocenter_positive_z_aborts()
+{
+   std::cout << "\n[CFG1-5] hypocenter z>0 with up[2]>0 aborts\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[fault_geometry]\nref_normal=[0.0,-1.0,0.0]\nup=[0.0,0.0,1.0]\n"
+        "[hypocenter]\nx_m=0.0\ny_m=0.0\nz_m=500.0\n";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "z_m > 0 with up[2] > 0 must abort");
+}
+
+// CFG1-6: [material] kind selectors parse; bad kind / missing path abort.
+static void T_45_material_kinds()
+{
+   std::cout << "\n[CFG1-6] material kind selectors\n";
+   const std::string dp = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[material]\nkind=\"depth_profile_1d\"\nprofile_csv=\"/tmp/p.csv\"\n";
+   const auto cfg = ParseSpatialFrictionConfigString(dp);
+   TEST_ASSERT(cfg.material.kind == MaterialKind::DepthProfile1D,
+               "kind=depth_profile_1d");
+   TEST_ASSERT(cfg.material.profile_csv == "/tmp/p.csv", "profile_csv round-trip");
+
+   const std::string bad = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[material]\nkind=\"bogus\"\n";
+   TEST_ASSERT(ParseAbortsInChild(bad), "bad material.kind must abort");
+
+   const std::string dp_no_csv = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[material]\nkind=\"depth_profile_1d\"\n";
+   TEST_ASSERT(ParseAbortsInChild(dp_no_csv),
+               "depth_profile_1d without profile_csv must abort");
+
+   const std::string sc_no_path = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[material]\nkind=\"sidecar_hdf5\"\n";
+   TEST_ASSERT(ParseAbortsInChild(sc_no_path),
+               "sidecar_hdf5 without sidecar_path must abort");
+}
+
+// CFG1-7 (deferred req-3 guard): interior_flux=matrix + Constant material aborts.
+static void T_46_matrix_requires_nonconstant_material()
+{
+   std::cout << "\n[CFG1-7] interior_flux=matrix + Constant material aborts\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+model="cvmh"
+dataset_root="/tmp/x"
+[stress]
+kind = "constant_tensor"
+sigma_xx_pa=0
+sigma_yy_pa=0
+sigma_zz_pa=0
+sigma_xy_pa=0
+sigma_yz_pa=0
+sigma_xz_pa=0
+[numerics]
+ader_order=2
+mixed_flux="none"
+cfl=0.5
+interior_flux="matrix"
+[material]
+kind="constant"
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=1.1
+mu_d_default=0.5
+d_c_default=0.5
+cohesion_default=0
+)TOML";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "interior_flux=matrix with Constant material must abort");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1269,6 +1449,14 @@ int main(int, char**)
    T_30_sigma_n_strength_floor_negative_aborts();
    T_31_sigma_n_strength_floor_zero_allowed();
    T_32_sigma_n_floor_misnested_aborts();
+   // Phase 6 req 1 + req-7 guards on the new TPV config blocks.
+   T_40_new_config_blocks_parse();
+   T_41_new_blocks_default_when_absent();
+   T_42_boundary_overlap_aborts();
+   T_43_fault_geometry_guards_abort();
+   T_44_hypocenter_positive_z_aborts();
+   T_45_material_kinds();
+   T_46_matrix_requires_nonconstant_material();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests
