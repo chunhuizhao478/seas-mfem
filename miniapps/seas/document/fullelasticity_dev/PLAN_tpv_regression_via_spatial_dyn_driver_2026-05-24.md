@@ -1552,9 +1552,48 @@ flux/material extensions.)
    `[fault_geometry]` unit-norm + non-parallel + R-003.
 
 ### Acceptance Criteria
-- [ ] `seas_test_spatial_friction_config_phaser` + `seas_test_spatial_stress_with_patches` pass.
-- [ ] All three TPV TOMLs parse with no abort; all existing SAFS LSW/RS TOMLs still parse
-      (the new fields default to the current behaviour — no regression).
+- [x] `seas_test_spatial_friction_config_phaser` + `seas_test_spatial_stress_with_patches` pass.
+      (Implemented as `seas_test_spatial_friction_config` 138/138 — incl. FLP-1..3
+      patch coverage — plus `seas_test_compute_safs_params` T-66/T-67 for the
+      direct-seed / strike-override paths.)
+- [x] All existing SAFS LSW/RS TOMLs still parse (the new fields default to current
+      behaviour — no regression): all 8 `safs/.../config/*.toml` round-trip OK
+      through `LoadSpatialFrictionConfig` (3 RS, 5 LSW).
+- [ ] All three TPV TOMLs parse with no abort — **DEFERRED**: the dedicated TPV
+      TOMLs are authored in Phases 7–10 (TPV205/102/104/31 drivers). The schema
+      now *supports* them (fault_local_prestress + patches, the three nucleation
+      kinds, boxcar_taper, material kinds, numerics selectors, the [problem]/
+      [boundary]/[fault_geometry]/[hypocenter]/[material] blocks all parse).
+
+#### Phase 6 status (2026-05-27) — COMPLETE (reqs 1–7)
+All seven detailed requirements implemented on `system/spatial_dyn_driver`:
+- req 1 — `[problem]/[boundary]/[fault_geometry]/[hypocenter]/[material]` blocks
+  (commit caac616).  req 2 — fault_local_prestress + patches (D3.2).  req 3 —
+  cfl_safety/fault_iterator/interior_flux selectors + mutual-exclusion +
+  `matrix`⇒non-Constant-material guard (completed with req 1).  req 4 — SRW
+  state-evolution + per-DOF V_w threading.  req 5 — `boxcar_taper` rule +
+  `SCECBoxcar`/`BoxcarTaperFactor` (commit d2ced8e).  req 6 — compact-circular
+  + instantaneous-circular nucleation kinds.  req 7 — guards (schema_version,
+  R-008 hypocenter-z, string time forms, [boundary] disjoint+fault_attr>0,
+  [fault_geometry] unit-norm+non-parallel; "R-003" = the pre-existing
+  no-double-PP guard in `test_resolve_rate_state_guards`).
+
+Verification (all objects freshly recompiled vs the new `spatial_friction.hpp`):
+spatial_friction_config 138/138, friction_iterator_factory 14/14,
+friction_substep_iterator_parity 36/36, compute_safs_params 23/23,
+constant_tensor_sign 27/27, friction_depth_profile 23/23,
+phaseh_lsw_forced_rupture 47/47, resolve_rate_state_guards 10/10,
+spatial_setup 71/71, spatial_friction_resolver 98/98,
+spatial_print_derived 33/33, spatial_stress_bundle 5/5.
+
+⚠️ Build-hygiene finding (not a code bug): the per-test `.o` rules in the
+Makefile do NOT list `spatial_friction.hpp` as a prerequisite, so changing
+that header does not trigger recompilation.  This silently produced a struct-
+layout (ABI) mismatch in `test_friction_iterator_factory` until the stale `.o`
+was force-removed (same class as the Phase-5 `tpv104.o` staleness).  All Phase-6
+results above were obtained AFTER force-rebuilding the affected objects.
+Recommend a follow-up to add header prerequisites (or `-MMD` auto-deps) to the
+test `.o` rules; left out of Phase 6 scope as a build-system change.
 
 ### Dependencies
 Depends on: Phase 3. Required by: Phases 7, 8, 9, 10.
