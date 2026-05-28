@@ -16,6 +16,7 @@
 #include "wave_state.hpp"
 #include "godunov_flux.hpp"
 #include "godunov_flux_pool.hpp"        // Phase H.1: per-element flux cache
+#include "godunov_flux_bimaterial.hpp"  // Phase 9: BimaterialFlux dispatch
 #include "heterogeneous_material.hpp"   // Phase H.1: MaterialField for new ctor
 #include "pml_layer.hpp"
 #include "fault_face_flux.hpp"
@@ -234,6 +235,21 @@ public:
    const std::unordered_map<int, std::array<real_t, 3>> &
    GetSharedFaceNeighbourMaterial() const
    { return shared_face_neighbour_material_; }
+
+   /// Phase 9 (Stage B) test-only accessor: returns the per-(face, side)
+   /// bi-material flux matrix table populated by
+   /// `BuildPerFaceBimaterialFluxMatrices_`.  Empty when the scalar ctor
+   /// was used.  Indexed by mesh face index; inner array stores
+   /// [side][fluxLocal/fluxNeighbor] per the storage convention on the
+   /// `per_face_bimaterial_flux_` member.
+   const std::vector<std::array<std::array<mfem::DenseMatrix, 2>, 2>> &
+   GetPerFaceBimaterialFlux() const
+   { return per_face_bimaterial_flux_; }
+
+   /// Phase 9 (Stage B) diagnostic accessors: number of bi-material
+   /// per-face flux applies since the last reset.
+   std::size_t GetPhaserDispatchCount() const { return phaser_dispatch_count_; }
+   void ResetPhaserDispatchCount() const { phaser_dispatch_count_ = 0; }
 
    int GetScalarNDof() const { return ndof_total_; }
    real_t ComputeMaxDt(real_t cfl) const;
@@ -801,6 +817,29 @@ private:
    /// together with the per-element dispatch that would consume it.
    std::unordered_map<int, std::array<real_t, 3>> shared_face_neighbour_material_;
 
+   /// Phase 9 (Stage B): per-interior-face precomputed bi-material flux
+   /// matrices, indexed by (local mesh face index, side), where
+   /// `side ∈ {0, 1}` selects whose POV: side=0 = the POV of
+   /// FaceElementTransformations::Elem1No; side=1 = the POV of Elem2No.
+   /// Inner array stores (fluxLocal, fluxNeighbor) from that POV:
+   /// `per_face_bimaterial_flux_[face][side][0]` = fluxLocal,
+   /// `[face][side][1]` = fluxNeighbor.
+   ///
+   /// Population rule: fully-local interior face populates BOTH sides;
+   /// a shared (cross-rank) face populates ONLY side=0 (local element is
+   /// Elem1 by MFEM convention); fault / boundary faces are NOT populated
+   /// (fault -> FaultFaceFlux, boundary -> BC dispatch).  Populated by
+   /// `BuildPerFaceBimaterialFluxMatrices_`; consumed by the gated
+   /// `if (owned_flux_pool_)` dispatch in Mult / ADER.  Empty for the
+   /// scalar ctor (so the scalar path is byte-unchanged).
+   std::vector<std::array<std::array<mfem::DenseMatrix, 2>, 2>>
+      per_face_bimaterial_flux_;
+
+   /// Phase 9 (Stage B) diagnostic: count of bi-material per-face flux
+   /// applies (incremented in the `owned_flux_pool_` dispatch branches).
+   /// `mutable` because the dispatch runs inside const Mult/ADER paths.
+   mutable std::size_t phaser_dispatch_count_ = 0;
+
    /// Phase H.6 (round-4 R-401): tracks whether SetTime() has ever been
    /// called.  The LSW_ForcedRupture dispatch arm reads GetTime() for
    /// the f_2(t) factor; without this flag we cannot distinguish
@@ -899,6 +938,37 @@ private:
    /// the real cross-rank `MPI_Allgatherv` exchange logic lands in
    /// Stage 2 alongside the dispatch that would consume it.
    void ExchangeBiMaterialNeighbours_();
+
+   /// Phase 9 (Stage B): per-element GodunovFlux accessor.  Returns the
+   /// pool's cached flux for element `e` on the heterogeneous path
+   /// (`owned_flux_pool_` set), else the single scalar `flux_`.  In the
+   /// homogeneous limit the pool's cached flux is built from the EXACT
+   /// constants, so `At(e)` is bit-identical to `flux_`.
+   const GodunovFlux &FluxForElem_(int e) const
+   {
+      return owned_flux_pool_ ? owned_flux_pool_->At(e) : flux_;
+   }
+
+   /// Phase 9 (Stage B): per-element variant of the file-local
+   /// `ApplyJacobianPerDOF`.  The scalar CK recursion applies one global
+   /// reference star matrix to every DOF; that is wrong on a depth-varying
+   /// mesh.  This loops elements, fetches
+   /// `FluxForElem_(e).GetReferenceStarMatrix(dir)`, and applies it ONLY to
+   /// element `e`'s `ndof_per_el_` DOFs (offset `e*ndof_per_el_`, component
+   /// stride `ndof_total_`).  Adds `sign * A_e * X` into `Y` (additive, like
+   /// ApplyJacobianPerDOF).  Called only when `owned_flux_pool_` is set; the
+   /// scalar path keeps the single-matrix `ApplyJacobianPerDOF` so TPV/BP5
+   /// stay byte-identical.
+   void ApplyJacobianPerElementDOF_(int dir, const Vector &X, Vector &Y,
+                                    real_t sign) const;
+
+   /// Phase 9 (Stage B) helper: walk every interior + shared face on this
+   /// rank, skip fault and boundary faces, and precompute per-(face, side)
+   /// bi-material flux matrices into `per_face_bimaterial_flux_`.  Logs the
+   /// (interior, shared) face counts + total bytes at rank 0.  Called from
+   /// the `(MaterialField, BoundaryConfig)` ctor after `BuildGodunovFluxPool_`
+   /// and `ExchangeBiMaterialNeighbours_`.
+   void BuildPerFaceBimaterialFluxMatrices_();
 
    /// TPV102 Phase 2a (§6.3): opt-in flag + cached precomputed flux tables.
    /// `precomputed_face_fluxes_` is mutable because the const dispatch

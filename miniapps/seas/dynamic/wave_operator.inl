@@ -646,6 +646,7 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
 
    BuildGodunovFluxPool_(material);
    ExchangeBiMaterialNeighbours_();
+   BuildPerFaceBimaterialFluxMatrices_();   // Phase 9 (Stage B)
 }
 
 // ---------------------------------------------------------------------------
@@ -755,6 +756,275 @@ void WaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
       }
    }
 #endif
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9 (Stage B) — per-element CK Jacobian apply (ported from hrs-ref).
+// Loops elements, fetches FluxForElem_(e).GetReferenceStarMatrix(dir), and
+// applies it ONLY to element e's ndof_per_el_ DOFs.  Bit-identical to the
+// scalar ApplyJacobianPerDOF on Mode::Constant (same A on every element).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplyJacobianPerElementDOF_(
+   int dir, const Vector &X, Vector &Y, real_t sign) const
+{
+   MFEM_ASSERT(dir >= 0 && dir < 3,
+               "ApplyJacobianPerElementDOF_: dir must be in {0,1,2}, got "
+               << dir);
+   MFEM_ASSERT(X.Size() == NUM_STATE * ndof_total_,
+               "ApplyJacobianPerElementDOF_: X size mismatch");
+   MFEM_ASSERT(Y.Size() == NUM_STATE * ndof_total_,
+               "ApplyJacobianPerElementDOF_: Y size mismatch");
+
+   const real_t *Xd = X.GetData();
+   real_t *Yd = Y.GetData();
+
+   for (int e = 0; e < ne_; ++e)
+   {
+      const DenseMatrix &A = FluxForElem_(e).GetReferenceStarMatrix(dir);
+      const int base = e * ndof_per_el_;
+      for (int c = 0; c < NUM_STATE; ++c)
+      {
+         real_t *Yc = Yd + c * ndof_total_ + base;
+         for (int cp = 0; cp < NUM_STATE; ++cp)
+         {
+            const real_t a = A(c, cp);
+            if (a == 0.0) { continue; }
+            const real_t w = sign * a;
+            const real_t *Xcp = Xd + cp * ndof_total_ + base;
+            for (int i = 0; i < ndof_per_el_; ++i)
+            {
+               Yc[i] += w * Xcp[i];
+            }
+         }
+      }
+   }
+}
+
+// ---------------------------------------------------------------------------
+// Phase 9 (Stage B) — precompute per-(face, side) bi-material flux matrices
+// (ported from hrs-ref).  Skips fault and boundary faces.  Fully-local
+// interior faces populate BOTH sides; shared faces populate ONLY side=0.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::BuildPerFaceBimaterialFluxMatrices_()
+{
+   MFEM_VERIFY(owned_flux_pool_,
+               "BuildPerFaceBimaterialFluxMatrices_: owned_flux_pool_ "
+               "must be built first (call BuildGodunovFluxPool_).");
+
+   const int n_faces = mesh_.GetNumFaces();
+   per_face_bimaterial_flux_.assign(
+      static_cast<size_t>(n_faces),
+      std::array<std::array<DenseMatrix, 2>, 2>{});
+
+   // Build the union of fault face sets so we skip fault faces without
+   // depending on per-face boundary-attribute lookups (which may be 0
+   // on a 2-sided interior fault face that lives entirely within the
+   // mesh).
+   std::set<int> fault_face_idx_set;
+   for (int i = 0; i < fault_interior_faces_.Size(); ++i)
+   {
+      fault_face_idx_set.insert(fault_interior_faces_[i]);
+   }
+
+   // The per-(face, side) matrices share a single bi-material Riemann
+   // state Q* per face.  Q* is defined by (n̂, L=Elem1, R=Elem2) and does
+   // NOT depend on whose POV we compute from.  Both Elem1 and Elem2 apply
+   // their OWN Jacobian A_self to the SAME Q*; side 0 has A_e1 baked in,
+   // side 1 has A_e2.  The runtime apply on BOTH sides consumes
+   // (Q_self=Q_e1, Q_nbr=Q_e2) — NOT swapped.  In the homogeneous limit
+   // A_e1 = A_e2 so the two sides match `flux_.Interior(...)` to LU rounding.
+   auto build_face_matrices = [&](const real_t *nor_unit,
+                                  const GodunovFlux &flux_L,
+                                  const GodunovFlux &flux_R,
+                                  std::array<DenseMatrix, 2> &out_side0,
+                                  std::array<DenseMatrix, 2> &out_side1)
+   {
+      const real_t n2 = nor_unit[0]*nor_unit[0] + nor_unit[1]*nor_unit[1]
+                      + nor_unit[2]*nor_unit[2];
+      MFEM_VERIFY(std::abs(n2 - 1.0) < 1e-10,
+                  "BuildPerFaceBimaterialFluxMatrices_: face normal not "
+                  "unit (|nor|^2 = " << n2 << ").");
+
+      real_t t1[3], t2[3];
+      GodunovFlux::BuildFrame(nor_unit, t1, t2);
+      DenseMatrix T(NUM_STATE, NUM_STATE);
+      DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+      GodunovFlux::BuildRotation(nor_unit, t1, t2, T);
+      GodunovFlux::BuildRotationInverse(nor_unit, t1, t2, Tinv);
+
+      DenseMatrix qGodL_FL, qGodN_FL;
+      BimaterialFlux::BuildGodunovStateFaceLocal(
+         flux_L.GetLambda(), flux_L.GetMu(), flux_L.GetRho(),
+         flux_R.GetLambda(), flux_R.GetMu(), flux_R.GetRho(),
+         qGodL_FL, qGodN_FL);
+
+      auto compose_side = [&](const DenseMatrix &A_self_FL,
+                              std::array<DenseMatrix, 2> &out_pair)
+      {
+         DenseMatrix tmp1(NUM_STATE, NUM_STATE);
+         DenseMatrix tmp2(NUM_STATE, NUM_STATE);
+
+         mfem::Mult(A_self_FL, qGodL_FL, tmp1);
+         mfem::Mult(T, tmp1, tmp2);
+         out_pair[0].SetSize(NUM_STATE, NUM_STATE);
+         mfem::Mult(tmp2, Tinv, out_pair[0]);
+
+         mfem::Mult(A_self_FL, qGodN_FL, tmp1);
+         mfem::Mult(T, tmp1, tmp2);
+         out_pair[1].SetSize(NUM_STATE, NUM_STATE);
+         mfem::Mult(tmp2, Tinv, out_pair[1]);
+      };
+
+      compose_side(flux_L.GetAx(), out_side0);   // Elem1's POV (A_self = A_L)
+      compose_side(flux_R.GetAx(), out_side1);   // Elem2's POV (A_self = A_R)
+   };
+
+   auto build_shared_face_side0 = [&](const real_t *nor_unit,
+                                      const GodunovFlux &flux_local,
+                                      const GodunovFlux &flux_nbr,
+                                      std::array<DenseMatrix, 2> &out_pair)
+   {
+      BimaterialFlux::BuildPerFaceFluxMatricesGlobal(
+         nor_unit, flux_local, flux_nbr,
+         out_pair[0],   // fluxLocal (multiplier of Q_local)
+         out_pair[1]);  // fluxNeighbor (multiplier of Q_nbr)
+   };
+
+   auto compute_centroid_unit_normal = [](FaceElementTransformations *ftr,
+                                          real_t out_n[3])
+   {
+      const Geometry::Type gtype = ftr->GetGeometryType();
+      const IntegrationPoint &ip0 = Geometries.GetCenter(gtype);
+      ftr->SetAllIntPoints(&ip0);
+      Vector nor_vec(3);
+      CalcOrtho(ftr->Face->Jacobian(), nor_vec);
+      const real_t nor_len = nor_vec.Norml2();
+      MFEM_VERIFY(nor_len > 0,
+                  "BuildPerFaceBimaterialFluxMatrices_: face has zero "
+                  "Jacobian normal at centroid.");
+      nor_vec /= nor_len;
+      out_n[0] = nor_vec(0);
+      out_n[1] = nor_vec(1);
+      out_n[2] = nor_vec(2);
+   };
+
+   std::size_t n_int_built = 0;   // fully-local 2-sided interior faces
+   std::size_t n_shr_built = 0;   // shared (ParMesh) interior faces
+
+   // --- Pass 1: fully-local interior faces ---------------------------------
+   for (int f = 0; f < n_faces; ++f)
+   {
+      if (fault_face_idx_set.count(f) > 0) { continue; }
+
+      FaceElementTransformations *ftr =
+         mesh_.GetFaceElementTransformations(f);
+      if (!ftr) { continue; }
+
+      const int e1 = ftr->Elem1No;
+      const int e2 = ftr->Elem2No;
+
+      if (e2 < 0) { continue; }                  // 1-sided (boundary / seam)
+      if (face_bdr_attr_[f] != 0) { continue; }  // non-fault boundary face
+
+      real_t nor[3];
+      compute_centroid_unit_normal(ftr, nor);
+
+      const GodunovFlux &flux_e1 = owned_flux_pool_->At(e1);
+      const GodunovFlux &flux_e2 = owned_flux_pool_->At(e2);
+
+      build_face_matrices(nor, flux_e1, flux_e2,
+                          per_face_bimaterial_flux_[f][0],
+                          per_face_bimaterial_flux_[f][1]);
+
+      ++n_int_built;
+   }
+
+   // --- Pass 2: shared (cross-rank) faces, ParMesh only --------------------
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      const int n_shared = pmesh.GetNSharedFaces();
+      for (int sf = 0; sf < n_shared; ++sf)
+      {
+         FaceElementTransformations *ftr =
+            pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr) { continue; }
+
+         const int mesh_face_idx = pmesh.GetSharedFace(sf);
+         MFEM_VERIFY(mesh_face_idx >= 0 && mesh_face_idx < n_faces,
+                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
+                     << sf << " -> mesh face " << mesh_face_idx
+                     << " out of [0, " << n_faces << ").");
+
+         const bool sf_fault =
+            (sf < static_cast<int>(shared_face_bdr_attr_.size()))
+            && (shared_face_bdr_attr_[sf] == bc_.fault_attr)
+            && (bc_.fault_attr > 0);
+         if (sf_fault) { continue; }
+
+         const int local_elem = ftr->Elem1No;
+         MFEM_ASSERT(local_elem >= 0 && local_elem < ne_,
+                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
+                     << sf << " Elem1No=" << local_elem
+                     << " outside [0, " << ne_ << ").");
+
+         auto nbr_it = shared_face_neighbour_material_.find(sf);
+         MFEM_VERIFY(nbr_it != shared_face_neighbour_material_.end(),
+                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
+                     << sf << " missing entry in "
+                     "shared_face_neighbour_material_.");
+         const auto &lmr_nbr = nbr_it->second;
+         GodunovFlux flux_nbr(lmr_nbr[0], lmr_nbr[1], lmr_nbr[2]);
+
+         real_t nor[3];
+         compute_centroid_unit_normal(ftr, nor);
+
+         const GodunovFlux &flux_local = owned_flux_pool_->At(local_elem);
+
+         build_shared_face_side0(nor, flux_local, flux_nbr,
+                                 per_face_bimaterial_flux_[mesh_face_idx][0]);
+
+         ++n_shr_built;
+      }
+#endif
+   }
+
+   const std::size_t per_face_per_side_bytes =
+      2 * NUM_STATE * NUM_STATE * sizeof(real_t);
+   const std::size_t total_bytes =
+      (2 * n_int_built + n_shr_built) * per_face_per_side_bytes;
+
+   int print_rank = 0;
+#ifdef MFEM_USE_MPI
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      MPI_Comm_rank(pmesh.GetComm(), &print_rank);
+   }
+#endif
+   if (print_rank == 0)
+   {
+      mfem::out << "[wave_operator] BimaterialFlux precomputation:\n"
+                << "  interior faces processed = " << n_int_built
+                << "   (2 sides each)\n"
+                << "  shared faces processed   = " << n_shr_built
+                << "   (1 side each, Elem1 = local)\n"
+                << "  total bytes              = " << total_bytes
+                << " (per-rank)\n";
+
+      constexpr std::size_t kSoftCapBytes = 4ULL * 1024 * 1024 * 1024;
+      if (total_bytes > kSoftCapBytes)
+      {
+         mfem::out << "[wave_operator] WARNING: per-rank BimaterialFlux "
+                   << "precomputation = " << total_bytes
+                   << " bytes (> " << kSoftCapBytes
+                   << " soft cap).  Partition more aggressively or "
+                   << "enable a runtime-recompute fallback.\n";
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------
