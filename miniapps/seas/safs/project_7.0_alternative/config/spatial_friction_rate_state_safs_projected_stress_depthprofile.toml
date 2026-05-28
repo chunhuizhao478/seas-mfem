@@ -112,8 +112,15 @@ kind = "gradual_overstress"
 center_x_m          =  606971.0
 center_y_m          = 3707270.0
 center_z_m          =   -4965.62
-radius_dip_m        =     4000.0
-radius_strike_m     =     4000.0
+# radius_*: e-fold Gaussian radii.  Raised 4000->6000 (with Dc 0.1->0.25) to
+# cover the larger process zone L_b=mu*Dc/(b*sigma_n) ~3.0 km (dip/mode III) /
+# ~4.0 km (strike/mode II) in the VW zone.  Isotropic 6 km gives margin over L_b
+# in both directions; in dip the 1-efold reaches the ~-11 km VW base (center
+# z=-4966 m) and ~50% of delta_tau reaches the z=0 surface trace.  (NB the
+# nucleation length L_nuc ~9.6 km > patch radius, so propagation still relies on
+# the forced delta_tau overstress below, not a super-critical patch.)
+radius_dip_m        =     6000.0
+radius_strike_m     =     6000.0
 delta_tau_dip_pa    =        0.0
 delta_tau_strike_pa =     30.0e6   # 20->30 MPa: stronger nucleation (patch shear strength ~46 MPa; 20 MPa nucleated only weakly, job 7751862)
 T_nuc_s             =        1.0
@@ -133,7 +140,7 @@ sigma_n_strength_floor_pa = 10.0e6
 # skipped).  R-009: V_0_default MUST equal FrictionSolver::V0 (= 1e-6).
 a_default       = 0.010      # unused (depth profile active); fallback only
 b_default       = 0.015      # unused (depth profile active); fallback only
-Dc_default      = 0.1        # m (raised 0.02->0.1 for L_b process-zone resolution; scalar, not depth-varying)
+Dc_default      = 0.25       # m (raised 0.1->0.25 for process-zone resolution: L_b=mu*Dc/(b*sigma_n) ~3.0 km mode-III / ~4.0 km mode-II in the VW zone -> ~6 cells @500 m near-fault (~12 @ h_min=240 m), vs ~2.4-3.2 at Dc=0.1.  Scalar, not depth-varying.  NB L_nuc=mu*Dc/((b-a)*sigma_n) also scales x2.5 -> ~9.6 km min; nucleation patch sized accordingly below.)
 V_0_default     = 1.0e-6     # MUST equal FrictionSolver::V0 (R-009)
 f_0_default     = 0.6        # TPV102 f0 (scalar)
 V_init_default  = 1.0e-12    # quasi-static initial slip rate (scalar)
