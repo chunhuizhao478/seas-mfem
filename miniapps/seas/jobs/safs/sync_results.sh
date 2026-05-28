@@ -7,38 +7,42 @@
 #
 # Two things are transferred:
 #
-#   (1) ParaView artefacts (*.vtkhdf): auto-detects every `safs_dyn_*`
-#       directory under <REMOTE_ROOT> and rsync's each to a same-named local
-#       subdir.  This covers the smoke runs (safs_dyn_smoke_<jobid>), the
-#       mixed-flux A/B runs (safs_dyn_{none,adjacent,all_continuous}_<jobid>),
-#       the resolution sweep (safs_dyn_resDc2_<jobid>), and the dip-prestress
-#       diagnostic (safs_dyn_{control,zerodip}_<jobid>).  By DEFAULT only
-#       `fault.vtkhdf` is transferred; use --all for volume + bulk too.
+#   (1) ParaView fault artefacts (FaultSurface/fault_surface_c<N>.vtu +
+#       fault_surface.pvd): auto-detects every `safs_dyn_*` directory under
+#       <REMOTE_ROOT> and rsync's each to a same-named local subdir.  This
+#       covers the smoke runs (safs_dyn_smoke_<jobid>), the mixed-flux A/B runs
+#       (safs_dyn_{none,adjacent,all_continuous}_<jobid>), the resolution sweep
+#       (safs_dyn_resDc2_<jobid>), and the dip-prestress diagnostic
+#       (safs_dyn_{control,zerodip}_<jobid>).  The per-cycle .vtu snapshots are
+#       IMMUTABLE, so they are pulled with rsync --ignore-existing: a snapshot
+#       already downloaded is NEVER re-fetched, so re-running this script only
+#       transfers the NEW c<N>.vtu files.  The small .pvd time-series index is
+#       always refreshed.  Use --all to also pull legacy *.vtkhdf.
 #
 #   (2) Diagnostic logs (default ON): the driver log
 #       `spatial_dyn_<tag>_<jobid>.log` plus the SLURM `<name>_<jobid>.{out,err}`
 #       from <REMOTE_LOG_DIR> (the cluster's miniapps/seas/jobs/safs), into a
 #       local `logs/` subdir.  The scalar diagnostics (V_max + [DIAG] +
-#       [R-101 nonfatal] lines) live in the .log; the fault.vtkhdf carries the
+#       [R-101 nonfatal] lines) live in the .log; the fault VTUs carry the
 #       slip-rate field for ParaView.  Use --no-logs to skip the logs, or
 #       --logs-only to grab just the .log/.out/.err and skip the (possibly
-#       large) fault.vtkhdf.
+#       large) fault VTUs.
 #
 # Default destination:
 #   $HOME/Downloads/seas-mfem/safs   ( *.vtkhdf in <dest>/<dir>/, logs in <dest>/logs/ )
 # Override with --dest <path> or the LOCAL_DEST environment variable.
 #
 # Usage:
-#   ./sync_results.sh                                # fault.vtkhdf (all dirs) + logs
+#   ./sync_results.sh                                # fault VTUs (NEW only) + .pvd (all dirs) + logs
 #   ./sync_results.sh 7738686                        # only matching job(s)
 #   ./sync_results.sh 7738686 7738999                # multiple
 #   ./sync_results.sh none                           # mixed-flux A/B: --mixed-flux none run(s)
 #   ./sync_results.sh adjacent                       # mixed-flux A/B: adjacent run(s)
 #   ./sync_results.sh zerodip                         # dip diagnostic: zerodip run(s)
 #   ./sync_results.sh control                         # dip diagnostic: control run(s)
-#   ./sync_results.sh --logs-only zerodip            # just the .log/.out/.err (skip fault.vtkhdf)
-#   ./sync_results.sh --no-logs                       # vtkhdf only, skip logs
-#   ./sync_results.sh --all                          # fault + volume + bulk (+ logs)
+#   ./sync_results.sh --logs-only zerodip            # just the .log/.out/.err (skip the fault VTUs)
+#   ./sync_results.sh --no-logs                       # fault VTUs + .pvd only, skip logs
+#   ./sync_results.sh --all                          # fault VTUs + .pvd + legacy *.vtkhdf (+ logs)
 #   ./sync_results.sh --dry-run                      # preview, transfer nothing
 #   ./sync_results.sh --dest /Volumes/SSD/seas/safs
 #   ./sync_results.sh --host zhaochun@frontera.tacc.utexas.edu
@@ -53,8 +57,8 @@
 # If --host is not given, $FRONTERA_HOST is used, falling back to the ssh
 # alias `frontera` (configure in ~/.ssh/config).
 #
-# Whitelist (default): fault.vtkhdf  + spatial_dyn_*.log + SLURM *.out/*.err
-# Whitelist (--all):   *.vtkhdf      + the same logs  (fault, volume, bulk/stress)
+# Whitelist (default): FaultSurface/*.vtu (NEW only) + *.pvd + spatial_dyn_*.log + SLURM *.out/*.err
+# Whitelist (--all):   the above + legacy *.vtkhdf
 # Never transferred:   cp_* checkpoints, .msh meshes, *.sbatch, this script, source.
 # =============================================================================
 
@@ -174,13 +178,19 @@ if [[ -z "$LOGS_ONLY" ]]; then
     fi
 fi
 
-# Build the rsync include set for vtkhdf.
+# Build the rsync include sets for the fault ParaView output.
+#   * SNAPSHOT_INCLUDES — the per-cycle binary VTUs (FaultSurface/fault_surface_c<N>.vtu),
+#     transferred with --ignore-existing: immutable once written, so a snapshot
+#     already on disk locally is NEVER re-downloaded (only new c<N>.vtu come over).
+#   * INDEX_INCLUDES — the small, MUTABLE .pvd time-series index (+ legacy *.vtkhdf
+#     with --all), always refreshed so it references every snapshot pulled so far.
+SNAPSHOT_INCLUDES=( --include='*.vtu' )
 if [[ -n "$GRAB_ALL" ]]; then
-    FILE_INCLUDES=( --include='*.vtkhdf' )
-    WHAT="all *.vtkhdf (fault + volume + bulk)"
+    INDEX_INCLUDES=( --include='*.pvd' --include='*.vtkhdf' )
+    WHAT="fault VTUs (NEW only) + *.pvd + legacy *.vtkhdf (--all)"
 else
-    FILE_INCLUDES=( --include='fault.vtkhdf' )
-    WHAT="fault.vtkhdf only (use --all for volume + bulk)"
+    INDEX_INCLUDES=( --include='*.pvd' )
+    WHAT="fault VTUs (NEW only: FaultSurface/fault_surface_c<N>.vtu) + *.pvd index"
 fi
 
 echo "Remote:  $REMOTE:$REMOTE_ROOT"
@@ -190,18 +200,34 @@ echo "Logs:    $([[ -n "$SKIP_LOGS" ]] && echo 'skipped (--no-logs)' || echo "$R
 echo "Mode:    ${DRY:-live}$([[ -n "$LOGS_ONLY" ]] && echo '  (logs-only)')"
 if [[ -z "$LOGS_ONLY" ]]; then
     echo "Subdirs: ${#SUBDIRS[@]}"
-    for s in "${SUBDIRS[@]}"; do echo "  - $s"; done
+    # Guard the [@] expansion: under `set -u`, macOS bash 3.2 errors on an
+    # empty array ("unbound variable"); ${#..[@]} is always safe.
+    if [[ ${#SUBDIRS[@]} -gt 0 ]]; then
+        for s in "${SUBDIRS[@]}"; do echo "  - $s"; done
+    fi
 fi
 echo
 
-if [[ -z "$LOGS_ONLY" ]]; then
+if [[ -z "$LOGS_ONLY" && ${#SUBDIRS[@]} -gt 0 ]]; then
     for sub in "${SUBDIRS[@]}"; do
         echo "==> $sub"
         mkdir -p "$LOCAL_DEST/$sub"
-        rsync -avz --progress $DRY \
+        # (a) Per-cycle VTU snapshots — NEW files only.  --ignore-existing skips
+        #     any fault_surface_c<N>.vtu already present locally (they never change),
+        #     so re-running this transfers only the snapshots written since last sync.
+        rsync -avW --progress $DRY --ignore-existing \
             --prune-empty-dirs \
             --include='*/' \
-            "${FILE_INCLUDES[@]}" \
+            "${SNAPSHOT_INCLUDES[@]}" \
+            --exclude='*' \
+            "$REMOTE:$REMOTE_ROOT/$sub/" \
+            "$LOCAL_DEST/$sub/"
+        # (b) PVD index (+ legacy *.vtkhdf with --all) — always refreshed (small,
+        #     mutable; must list every snapshot, including the ones just pulled).
+        rsync -avW --progress $DRY \
+            --prune-empty-dirs \
+            --include='*/' \
+            "${INDEX_INCLUDES[@]}" \
             --exclude='*' \
             "$REMOTE:$REMOTE_ROOT/$sub/" \
             "$LOCAL_DEST/$sub/"
@@ -227,7 +253,7 @@ if [[ -z "$SKIP_LOGS" ]]; then
                        --include='*.out' \
                        --include='*.err' )
     fi
-    rsync -avz --progress $DRY \
+    rsync -avW --progress $DRY \
         "${LOG_INCLUDES[@]}" \
         --exclude='*' \
         "$REMOTE:$REMOTE_LOG_DIR/" \

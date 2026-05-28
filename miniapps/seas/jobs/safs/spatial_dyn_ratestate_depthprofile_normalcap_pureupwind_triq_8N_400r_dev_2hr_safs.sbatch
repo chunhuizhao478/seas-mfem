@@ -222,8 +222,8 @@ ibrun ./seas_spatial_dyn_driver \
     ${CFL_ARG} \
     ${RESTART_ARG} \
     --paraview \
-    --paraview-fault-hdf5 \
-    --paraview-fault-zfp-tol 1.0e-12 \
+    --paraview-fault-vtu \
+    --paraview-fault-dt 1.0 \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
