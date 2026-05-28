@@ -173,6 +173,109 @@ void ApplyGradualOverstressIncrement(
    real_t                                 t_substep_end,
    real_t                                 dt_substep);
 
+// =====================================================================
+// Phase 7 — compact-circular gradual overstress (TPV102/104).
+// =====================================================================
+
+/// @brief `[nucleation.gradual_overstress_compact_circular]` TOML sub-block
+/// (TPV102/104).  Moved here from spatial_friction.hpp in Phase 7 (req 1).
+/// `radius_m`, `T_nuc_s` MUST be > 0 when the `[nucleation]` block is enabled
+/// (validated by the parser).  Pure strike-slip: a single `delta_tau_pa` seeds
+/// the strike component only.
+struct GradualOverstressCompactCircularSpec
+{
+   real_t center_x_m   = 0.0;
+   real_t center_y_m   = 0.0;
+   real_t center_z_m   = 0.0;
+   real_t radius_m     = 0.0;   ///< R; > 0 required when enabled
+   real_t delta_tau_pa = 0.0;   ///< strike overstress amplitude [Pa]
+   real_t T_nuc_s      = 0.0;   ///< > 0 required when enabled
+};
+
+/// @brief SCEC compact-bell radial factor F(r) — Eq. (13) of the
+/// TPV101/102/104 spec: `F = exp(r²/(r²−R²))` for `r < R`, `0` for `r ≥ R`.
+/// `R` MUST be > 0 (`MFEM_ASSERT`).  Mirror of `NucleationSpatial_TPV104`
+/// (config/tpv104_params.hpp), kept here so the spatial driver does not depend
+/// on the standalone TPV params header.
+real_t CompactBellFactor(real_t r, real_t R);
+
+/// @brief Per-DOF resolved compact-circular targets (strike component only).
+///   amplitude_strike(i) = F(r_i) · delta_tau_pa   (seeds DOFData.tau2_nuc)
+///   radial(i)           = F(r_i) ∈ [0, 1]
+/// Both Vectors are zero-sized when nucleation is disabled.
+struct CompactCircularPerDOFParams
+{
+   Vector amplitude_strike;
+   Vector radial;
+};
+
+/// @brief Build per-DOF compact-circular amplitudes.  `r_i` is the in-fault-
+/// plane distance from the centre, measured via the per-DOF (dip, strike)
+/// basis: `r = sqrt(((dof−c)·dip)² + ((dof−c)·strike)²)` — equals the SCEC
+/// `sqrt(Δalong_strike² + Δdown_dip²)` for the planar y=0 fault.  `dof_basis`
+/// is the `(9, N)` column-major layout (rows 3..5 = dip, 6..8 = strike), as in
+/// `ResolveGradualOverstress`.  Returns zero-sized Vectors when `!enabled`.
+CompactCircularPerDOFParams ResolveGradualOverstressCompactCircular(
+   const GradualOverstressCompactCircularSpec& spec,
+   bool                                        enabled,
+   const Vector&                               dof_coords_3d,
+   const DenseMatrix&                          dof_basis);
+
+/// @brief Apply ONE ADER sub-step's worth of compact-circular increment to
+/// `DOFData::tau2_nuc` (strike).  Same smoothStep telescoping + `dS <= 0`
+/// guard + post-ramp fast path as `ApplyGradualOverstressIncrement`; `tau1_nuc`
+/// / `sigma_n_nuc` are left at 0 (pure strike-slip).
+void ApplyGradualOverstressCompactCircularIncrement(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t_substep_end,
+   real_t                                 dt_substep);
+
+// =====================================================================
+// Phase 7 — instantaneous circular overstress (TPV31, one-shot).
+// =====================================================================
+
+/// @brief `[nucleation.instantaneous_overstress_circular]` TOML sub-block
+/// (TPV31).  Moved here from spatial_friction.hpp in Phase 7 (req 1).
+/// `radius_m` MUST be > 0 and `taper_m` >= 0 when enabled (parser-validated).
+struct InstantaneousOverstressCircularSpec
+{
+   real_t center_x_m   = 0.0;
+   real_t center_y_m   = 0.0;
+   real_t center_z_m   = 0.0;
+   real_t radius_m     = 0.0;   ///< R; > 0 required when enabled
+   real_t taper_m      = 0.0;   ///< cosine taper width [m] (>= 0)
+   real_t delta_tau_pa = 0.0;   ///< overstress amplitude [Pa]
+};
+
+/// @brief Cosine-tapered radial factor for the one-shot patch (TPV31):
+///   1                              r ≤ R
+///   0.5·(1 + cos(π·(r−R)/taper))   R < r < R + taper
+///   0                              r ≥ R + taper
+/// `taper <= 0` degenerates to a hard cutoff (1 for r ≤ R, 0 beyond).  `R`
+/// MUST be > 0 (`MFEM_ASSERT`).  Returns a factor in [0, 1].
+real_t CosineTaperFactor(real_t r, real_t R, real_t taper);
+
+/// @brief Per-DOF resolved instantaneous-circular amplitudes (strike only).
+///   amplitude_strike(i) = CosineTaperFactor(r_i, R, taper) · delta_tau_pa
+/// Zero-sized when nucleation is disabled.
+struct InstantaneousOverstressPerDOFParams
+{
+   Vector amplitude_strike;
+};
+
+/// @brief Build per-DOF instantaneous-circular amplitudes (same in-fault-plane
+/// `r` measure as `ResolveGradualOverstressCompactCircular`).  The patch is
+/// seeded ONCE at t=0 by the caller (see `INucleationMethod::ApplyOnce`), which
+/// adds `amplitude_strike(i)` to `DOFData::tau2_nuc`.  Returns zero-sized when
+/// `!enabled`.
+InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
+   const InstantaneousOverstressCircularSpec& spec,
+   bool                                       enabled,
+   const Vector&                              dof_coords_3d,
+   const DenseMatrix&                         dof_basis);
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

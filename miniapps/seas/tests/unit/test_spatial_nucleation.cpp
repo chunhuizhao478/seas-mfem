@@ -414,6 +414,128 @@ static void T_N12_iterator_callback_invocation()
    }
 }
 
+// =====================================================================
+// Phase 7 — compact-circular (TPV102/104) + instantaneous (TPV31)
+// =====================================================================
+
+// T-N13: CompactBellFactor — SCEC Eq.(13) F(r)=exp(r²/(r²−R²)).
+static void T_N13_compact_bell_factor()
+{
+   std::cout << "\n[T-N13] CompactBellFactor: r=0 -> 1, r=R -> 0, mid in (0,1)\n";
+   const real_t R = 3000.0;
+   TEST_NEAR(CompactBellFactor(0.0, R), 1.0, 1e-15, "F(0,R) = 1");
+   TEST_NEAR(CompactBellFactor(R,   R), 0.0, 0.0,   "F(R,R) = 0 (r>=R)");
+   TEST_NEAR(CompactBellFactor(R + 1.0, R), 0.0, 0.0, "F(>R) = 0");
+   const real_t fmid = CompactBellFactor(0.5 * R, R);
+   TEST_ASSERT(fmid > 0.0 && fmid < 1.0, "F(R/2,R) in (0,1)");
+   // Monotone decreasing on [0, R).
+   TEST_ASSERT(CompactBellFactor(0.25 * R, R) > CompactBellFactor(0.75 * R, R),
+               "bell monotone decreasing");
+}
+
+// T-N14: ResolveGradualOverstressCompactCircular fixture (strike-only).
+static void T_N14_resolve_compact_circular()
+{
+   std::cout << "\n[T-N14] ResolveGradualOverstressCompactCircular fixture\n";
+   const int N = 3;
+   const real_t R = 1000.0;
+   // DOFs along strike (+z): centre, edge (r=R), mid (r=R/2).
+   Vector dofs(3 * N);
+   // DOF 0: centre.   DOF 1: r=R.   DOF 2: r=R/2.
+   dofs(0)=0.0; dofs(1)=0.0; dofs(2)=-5000.0;            // centre
+   dofs(3)=0.0; dofs(4)=0.0; dofs(5)=-5000.0 + R;        // strike +R
+   dofs(6)=0.0; dofs(7)=0.0; dofs(8)=-5000.0 + 0.5 * R;  // strike +R/2
+   DenseMatrix basis(9, N); basis = 0.0;
+   for (int i = 0; i < N; ++i)
+   {
+      basis(0, i) = 1.0;   // normal  +x
+      basis(4, i) = 1.0;   // dip     +y
+      basis(8, i) = 1.0;   // strike  +z
+   }
+   GradualOverstressCompactCircularSpec spec;
+   spec.center_x_m = 0.0; spec.center_y_m = 0.0; spec.center_z_m = -5000.0;
+   spec.radius_m = R; spec.delta_tau_pa = 45.0e6; spec.T_nuc_s = 1.0;
+
+   const auto p = ResolveGradualOverstressCompactCircular(spec, true, dofs, basis);
+   TEST_ASSERT(p.amplitude_strike.Size() == N, "amplitude_strike sized N");
+   TEST_ASSERT(p.radial.Size()           == N, "radial sized N");
+   TEST_NEAR(p.radial(0), 1.0, 1e-15, "radial at centre = 1");
+   TEST_NEAR(p.amplitude_strike(0), spec.delta_tau_pa, 1e-3,
+             "amplitude at centre = delta_tau_pa");
+   TEST_NEAR(p.radial(1), 0.0, 0.0, "radial at r=R = 0");
+   TEST_NEAR(p.amplitude_strike(1), 0.0, 0.0, "amplitude at r=R = 0");
+   TEST_ASSERT(p.radial(2) > 0.0 && p.radial(2) < 1.0, "radial at r=R/2 in (0,1)");
+}
+
+// T-N15: compact-circular accumulator telescopes to the strike amplitude and
+// leaves tau1_nuc / sigma_n_nuc at 0.
+static void T_N15_compact_accumulator_telescope()
+{
+   std::cout << "\n[T-N15] compact-circular accumulator telescopes (strike only)\n";
+   const int N = 2;
+   CompactCircularPerDOFParams params;
+   params.amplitude_strike.SetSize(N);
+   params.radial.SetSize(N);
+   params.amplitude_strike(0) = 45.0e6; params.radial(0) = 1.0;
+   params.amplitude_strike(1) = 10.0e6; params.radial(1) = 10.0e6 / 45.0e6;
+   const real_t T_nuc = 1.0;
+   std::vector<DOFData> dof(N);
+   for (auto& d : dof) { d.tau1_nuc = 0.0; d.tau2_nuc = 0.0; d.sigma_n_nuc = 0.0; }
+
+   const int O = 8;
+   const real_t dt = T_nuc / O;
+   real_t t = 0.0;
+   for (int o = 0; o < O; ++o)
+   {
+      t += dt;
+      ApplyGradualOverstressCompactCircularIncrement(dof, params, T_nuc, t, dt);
+   }
+   TEST_NEAR(dof[0].tau2_nuc, 45.0e6, 1e-3, "DOF0 tau2_nuc telescopes to amplitude");
+   TEST_NEAR(dof[1].tau2_nuc, 10.0e6, 1e-3, "DOF1 tau2_nuc telescopes to amplitude");
+   TEST_NEAR(dof[0].tau1_nuc, 0.0, 0.0, "tau1_nuc stays 0 (pure strike-slip)");
+   TEST_NEAR(dof[0].sigma_n_nuc, 0.0, 0.0, "sigma_n_nuc stays 0");
+}
+
+// T-N16: CosineTaperFactor — TPV31 one-shot taper.
+static void T_N16_cosine_taper_factor()
+{
+   std::cout << "\n[T-N16] CosineTaperFactor: r<=R -> 1, R+taper -> 0, mid = 0.5\n";
+   const real_t R = 1400.0, taper = 200.0;
+   TEST_NEAR(CosineTaperFactor(0.0,        R, taper), 1.0, 1e-15, "f(0) = 1");
+   TEST_NEAR(CosineTaperFactor(R,          R, taper), 1.0, 1e-15, "f(R) = 1 (plateau)");
+   TEST_NEAR(CosineTaperFactor(R + taper,  R, taper), 0.0, 1e-12, "f(R+taper) = 0");
+   TEST_NEAR(CosineTaperFactor(R + 0.5*taper, R, taper), 0.5, 1e-12,
+             "f(R+taper/2) = 0.5 (cos(pi/2))");
+   TEST_NEAR(CosineTaperFactor(R + 2*taper, R, taper), 0.0, 0.0, "f(>R+taper) = 0");
+   // taper = 0 degenerates to a hard cutoff.
+   TEST_NEAR(CosineTaperFactor(R,       R, 0.0), 1.0, 0.0, "hard cutoff f(R) = 1");
+   TEST_NEAR(CosineTaperFactor(R + 1.0, R, 0.0), 0.0, 0.0, "hard cutoff f(>R) = 0");
+}
+
+// T-N17: ResolveInstantaneousOverstressCircular fixture (acceptance values).
+static void T_N17_resolve_instantaneous_circular()
+{
+   std::cout << "\n[T-N17] ResolveInstantaneousOverstressCircular fixture\n";
+   const int N = 3;
+   const real_t R = 1400.0, taper = 200.0;
+   // DOFs along strike (+z): centre, r=R, r=R+taper.
+   Vector dofs(3 * N);
+   dofs(0)=0.0; dofs(1)=0.0; dofs(2)=-10000.0;                    // centre (r=0)
+   dofs(3)=0.0; dofs(4)=0.0; dofs(5)=-10000.0 + R;                // r=R
+   dofs(6)=0.0; dofs(7)=0.0; dofs(8)=-10000.0 + R + taper;        // r=R+taper
+   DenseMatrix basis(9, N); basis = 0.0;
+   for (int i = 0; i < N; ++i) { basis(0,i)=1.0; basis(4,i)=1.0; basis(8,i)=1.0; }
+   InstantaneousOverstressCircularSpec spec;
+   spec.center_x_m = 0.0; spec.center_y_m = 0.0; spec.center_z_m = -10000.0;
+   spec.radius_m = R; spec.taper_m = taper; spec.delta_tau_pa = 11.6e6;
+
+   const auto p = ResolveInstantaneousOverstressCircular(spec, true, dofs, basis);
+   TEST_ASSERT(p.amplitude_strike.Size() == N, "amplitude_strike sized N");
+   TEST_NEAR(p.amplitude_strike(0), 11.6e6, 1e-3, "r=0 -> delta_tau0");
+   TEST_NEAR(p.amplitude_strike(1), 11.6e6, 1e-3, "r=R -> delta_tau0 (plateau)");
+   TEST_NEAR(p.amplitude_strike(2), 0.0,    1e-6, "r=R+taper -> 0");
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase N test_spatial_nucleation\n";
@@ -429,6 +551,12 @@ int main(int /*argc*/, char** /*argv*/)
    T_N10_accumulator_telescope();
    T_N11_accumulator_post_tnuc_noop();
    T_N12_iterator_callback_invocation();
+   // Phase 7: compact-circular (TPV102/104) + instantaneous (TPV31).
+   T_N13_compact_bell_factor();
+   T_N14_resolve_compact_circular();
+   T_N15_compact_accumulator_telescope();
+   T_N16_cosine_taper_factor();
+   T_N17_resolve_instantaneous_circular();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase N test_spatial_nucleation: "

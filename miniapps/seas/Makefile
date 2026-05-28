@@ -136,6 +136,11 @@ SPATIAL_NUCLEATION_SRC               = dynamic/spatial_nucleation.cpp
 SPATIAL_NUCLEATION_OBJ               = $(SPATIAL_NUCLEATION_SRC:.cpp=.o)
 TEST_SPATIAL_NUCLEATION_SRC          = tests/unit/test_spatial_nucleation.cpp
 TEST_SPATIAL_NUCLEATION_OBJ          = $(TEST_SPATIAL_NUCLEATION_SRC:.cpp=.o)
+# Phase 7 — nucleation_methods module: INucleationMethod + MakeNucleation.
+NUCLEATION_FACTORY_SRC               = dynamic/nucleation_factory.cpp
+NUCLEATION_FACTORY_OBJ               = $(NUCLEATION_FACTORY_SRC:.cpp=.o)
+TEST_NUCLEATION_FACTORY_SRC          = tests/unit/test_nucleation_factory.cpp
+TEST_NUCLEATION_FACTORY_OBJ          = $(TEST_NUCLEATION_FACTORY_SRC:.cpp=.o)
 # TPV-via-spatial-driver Phase 1 (RS primitives) unit tests.
 TEST_TPV102_NUC_CALLBACK_PARITY_SRC  = tests/unit/test_tpv102_nuc_callback_parity.cpp
 TEST_TPV102_NUC_CALLBACK_PARITY_OBJ  = $(TEST_TPV102_NUC_CALLBACK_PARITY_SRC:.cpp=.o)
@@ -818,6 +823,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
                seas_test_spatial_nucleation \
+               seas_test_nucleation_factory \
                seas_test_tpv102_nuc_callback_parity \
                seas_test_seed_equilibrium_psi_rs \
                seas_test_friction_iterator_factory \
@@ -2131,6 +2137,43 @@ $(TEST_SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 
 test-spatial-nucleation: seas_test_spatial_nucleation
 	./seas_test_spatial_nucleation
+
+# Phase 7 — nucleation_methods module.  nucleation_factory.o pulls
+# spatial_friction.hpp (SpatialFrictionConfig / NucleationKind), so it is
+# built with TOML_FLAGS like the spatial_friction / spatial_print_derived
+# objects.
+$(NUCLEATION_FACTORY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+$(TEST_NUCLEATION_FACTORY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+# Phase 7 acceptance: MakeNucleation dispatch (each kind + absent block).
+# Links the nucleation factory + the spatial_nucleation resolvers + the
+# fault_face_flux/friction_solver/tpv205 iterator object set (same closed set
+# the spatial_nucleation test links; the factory adds no new dependencies).
+seas_test_nucleation_factory: $(TEST_NUCLEATION_FACTORY_OBJ) \
+                              $(NUCLEATION_FACTORY_OBJ) \
+                              $(SPATIAL_NUCLEATION_OBJ) \
+                              $(FAULT_FACE_FLUX_OBJ) \
+                              $(FRICTION_SOLVER_OBJ) \
+                              $(TPV205_SUBSTEP_ITERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_NUCLEATION_FACTORY_OBJ) \
+	    $(NUCLEATION_FACTORY_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-nucleation-factory: seas_test_nucleation_factory
+	./seas_test_nucleation_factory
 
 # TPV-via-spatial-driver Phase 1 (RS primitives): nucleation-callback
 # parity for Tpv102SubStepIterator.  Links the tpv102 iterator + the

@@ -177,6 +177,168 @@ void ApplyGradualOverstressIncrement(
    }
 }
 
+// =====================================================================
+// Phase 7 — shared in-fault-plane radial distance helper
+// =====================================================================
+
+namespace
+{
+/// In-fault-plane distance from `center` to `dof_xyz`, measured via the
+/// per-DOF (dip, strike) basis: r = sqrt(((dof−c)·dip)² + ((dof−c)·strike)²).
+/// For the planar y=0 fault (dip=(0,0,∓1), strike=(±1,0,0)) this is exactly
+/// the SCEC sqrt(Δalong_strike² + Δdown_dip²).
+real_t InFaultPlaneRadius(const real_t* dof_xyz,
+                          const real_t* center_xyz,
+                          const real_t* dip,
+                          const real_t* strike)
+{
+   const real_t v[3] = { dof_xyz[0] - center_xyz[0],
+                         dof_xyz[1] - center_xyz[1],
+                         dof_xyz[2] - center_xyz[2] };
+   const real_t pd = v[0]*dip[0]    + v[1]*dip[1]    + v[2]*dip[2];
+   const real_t ps = v[0]*strike[0] + v[1]*strike[1] + v[2]*strike[2];
+   return std::sqrt(pd * pd + ps * ps);
+}
+}  // namespace
+
+// =====================================================================
+// Phase 7 — compact-circular gradual overstress (TPV102/104)
+// =====================================================================
+
+real_t CompactBellFactor(real_t r, real_t R)
+{
+   MFEM_ASSERT(R > 0.0, "CompactBellFactor: R must be > 0; got " << R);
+   if (r >= R) { return 0.0; }
+   const real_t r2 = r * r;
+   const real_t R2 = R * R;
+   return std::exp(r2 / (r2 - R2));
+}
+
+CompactCircularPerDOFParams ResolveGradualOverstressCompactCircular(
+   const GradualOverstressCompactCircularSpec& spec,
+   bool                                        enabled,
+   const Vector&                               dof_coords_3d,
+   const DenseMatrix&                          dof_basis)
+{
+   CompactCircularPerDOFParams p;   // zero-sized by default
+   if (!enabled) { return p; }
+
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveGradualOverstressCompactCircular: dof_coords_3d.Size() "
+               "must be 3 * N; got " << dof_coords_3d.Size());
+   MFEM_VERIFY(dof_basis.Height() == 9 && dof_basis.Width() == N,
+               "ResolveGradualOverstressCompactCircular: dof_basis must have "
+               "shape (9, N); got (" << dof_basis.Height() << ", "
+               << dof_basis.Width() << ")");
+   MFEM_VERIFY(spec.radius_m > 0.0,
+               "ResolveGradualOverstressCompactCircular: spec.radius_m must be "
+               "> 0; got " << spec.radius_m);
+   MFEM_VERIFY(spec.T_nuc_s > 0.0,
+               "ResolveGradualOverstressCompactCircular: spec.T_nuc_s must be "
+               "> 0; got " << spec.T_nuc_s);
+
+   p.amplitude_strike.SetSize(N);
+   p.radial.SetSize(N);
+
+   const real_t center[3] = { spec.center_x_m, spec.center_y_m, spec.center_z_m };
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t* dof_xyz      = &dof_coords_3d(3 * i);
+      const real_t* basis_dip    = &dof_basis(3, i);
+      const real_t* basis_strike = &dof_basis(6, i);
+      const real_t  r = InFaultPlaneRadius(dof_xyz, center, basis_dip,
+                                           basis_strike);
+      const real_t  F = CompactBellFactor(r, spec.radius_m);
+      p.amplitude_strike(i) = F * spec.delta_tau_pa;
+      p.radial(i)           = F;
+   }
+   return p;
+}
+
+void ApplyGradualOverstressCompactCircularIncrement(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t_substep_end,
+   real_t                                 dt_substep)
+{
+   // Disabled (resolver returned zero-sized) or this rank has no fault DOFs.
+   if (params.amplitude_strike.Size() == 0) { return; }
+
+   // Telescoped to the full target — even a sub-ULP increment is a no-op.
+   if (t_substep_end >= T_nuc_s + dt_substep) { return; }
+
+   const int n = static_cast<int>(dof_data.size());
+   MFEM_VERIFY(params.amplitude_strike.Size() == n,
+               "ApplyGradualOverstressCompactCircularIncrement: "
+               "params.amplitude_strike size ("
+               << params.amplitude_strike.Size()
+               << ") != dof_data.size() (" << n << ")");
+
+   const real_t dS = SmoothStepIncrement(t_substep_end, dt_substep, T_nuc_s);
+   // Same monotone-non-decreasing round-off guard as the Gaussian path.
+   if (dS <= 0.0) { return; }
+
+   for (int i = 0; i < n; ++i)
+   {
+      dof_data[i].tau2_nuc += dS * params.amplitude_strike(i);
+      // tau1_nuc / sigma_n_nuc intentionally not updated (pure strike-slip).
+   }
+}
+
+// =====================================================================
+// Phase 7 — instantaneous circular overstress (TPV31, one-shot)
+// =====================================================================
+
+real_t CosineTaperFactor(real_t r, real_t R, real_t taper)
+{
+   MFEM_ASSERT(R > 0.0, "CosineTaperFactor: R must be > 0; got " << R);
+   if (r <= R) { return 1.0; }
+   if (taper <= 0.0 || r >= R + taper) { return 0.0; }
+   // r in (R, R+taper): cosine ramp from 1 (at R) to 0 (at R+taper).
+   return 0.5 * (1.0 + std::cos(M_PI * (r - R) / taper));
+}
+
+InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
+   const InstantaneousOverstressCircularSpec& spec,
+   bool                                       enabled,
+   const Vector&                              dof_coords_3d,
+   const DenseMatrix&                         dof_basis)
+{
+   InstantaneousOverstressPerDOFParams p;   // zero-sized by default
+   if (!enabled) { return p; }
+
+   const int N = dof_coords_3d.Size() / 3;
+   MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
+               "ResolveInstantaneousOverstressCircular: dof_coords_3d.Size() "
+               "must be 3 * N; got " << dof_coords_3d.Size());
+   MFEM_VERIFY(dof_basis.Height() == 9 && dof_basis.Width() == N,
+               "ResolveInstantaneousOverstressCircular: dof_basis must have "
+               "shape (9, N); got (" << dof_basis.Height() << ", "
+               << dof_basis.Width() << ")");
+   MFEM_VERIFY(spec.radius_m > 0.0,
+               "ResolveInstantaneousOverstressCircular: spec.radius_m must be "
+               "> 0; got " << spec.radius_m);
+   MFEM_VERIFY(spec.taper_m >= 0.0,
+               "ResolveInstantaneousOverstressCircular: spec.taper_m must be "
+               ">= 0; got " << spec.taper_m);
+
+   p.amplitude_strike.SetSize(N);
+   const real_t center[3] = { spec.center_x_m, spec.center_y_m, spec.center_z_m };
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t* dof_xyz      = &dof_coords_3d(3 * i);
+      const real_t* basis_dip    = &dof_basis(3, i);
+      const real_t* basis_strike = &dof_basis(6, i);
+      const real_t  r = InFaultPlaneRadius(dof_xyz, center, basis_dip,
+                                           basis_strike);
+      p.amplitude_strike(i) =
+         CosineTaperFactor(r, spec.radius_m, spec.taper_m) * spec.delta_tau_pa;
+   }
+   return p;
+}
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

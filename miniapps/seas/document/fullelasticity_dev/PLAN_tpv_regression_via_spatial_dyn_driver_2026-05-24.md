@@ -1662,6 +1662,49 @@ calling the Gaussian path directly for SAFS+RS until it adopts the factory here.
 ### Dependencies
 Depends on: Phase 6. Required by: Phase 8, 10.
 
+#### Phase 7 status (2026-05-28) — reqs 1–3 COMPLETE; req 4 (driver swap) DEFERRED
+- **req 1** — `GradualOverstressCompactCircularSpec` + `CompactBellFactor`
+  (SCEC Eq.13 `exp(r²/(r²−R²))`) + `ResolveGradualOverstressCompactCircular` +
+  `ApplyGradualOverstressCompactCircularIncrement` (strike-only, `tau2_nuc`;
+  smoothStep telescoping + `dS<=0` guard). Additive; Gaussian path untouched.
+- **req 2** — `InstantaneousOverstressCircularSpec` + `CosineTaperFactor`
+  (1 for r≤R, `0.5(1+cos(π(r−R)/taper))` over the taper, 0 beyond; `taper<=0` ⇒
+  hard cutoff) + `ResolveInstantaneousOverstressCircular` (strike-only, seeded
+  once via `ApplyOnce`).
+- **req 3** — `INucleationMethod` (§5.2) + `StaticOverstress`,
+  `GaussianGradualOverstress`, `CompactCircularGradualOverstress`,
+  `InstantaneousOverstressCircular` (each exposes `Params()` for the driver's
+  diagnostics/ParaView consumers); `MakeNucleation` dispatches on
+  `cfg.nucleation.kind`, absent block ⇒ `StaticOverstress`.
+
+Decisions / deviations (documented):
+- The two Phase-6 nucleation specs were **moved** from `spatial_friction.hpp`
+  to `dynamic/spatial_nucleation.hpp` (alongside `GradualOverstressSpec`), per
+  req 1's stated placement and to avoid a circular include
+  (`spatial_friction.hpp` already includes `spatial_nucleation.hpp`, so the
+  move is transparent to all consumers — verified: config 142/142, the driver
+  object still compiles).
+- `MakeNucleation` signature uses `(cfg, const Vector& dof_coords_3d, const
+  DenseMatrix& dof_basis)` instead of the plan's
+  `(cfg, std::vector<Vector>, std::vector<FaultBasisRow>)` because
+  `FaultBasisRow` does not exist; these are the concrete types the driver and
+  the existing `Resolve*` overloads use (9×N column-major basis).
+
+**req 4 (driver swap) DEFERRED to a separate increment** — `nuc_params` has
+three consumers in `spatial_dyn_driver.cpp` (the `nuc_cb`, `PrintDerivedAndCheck*`
+at ~:1486/:1505, and the ParaView fields at ~:1737), and acceptance criterion 3
+requires a **bit-identical SAFS+RS smoke** (mesh + multi-rank run, deferred since
+Phase 4). The concretes' `Params()` getters are in place so the swap (route the
+3 consumers through `GaussianGradualOverstress::Params()`) is clean.
+
+Verification (objects force-rebuilt vs the edited headers):
+`seas_test_spatial_nucleation` 73/73 (incl. compact-bell + instantaneous
+acceptance values), `seas_test_nucleation_factory` 12/12 (each kind + absent
+block), `seas_test_spatial_friction_config` 142/142, `…_resolver` 100/100,
+`compute_safs_params` 23/23, `spatial_setup` 71/71, `spatial_print_derived`
+33/33, `spatial_stress_bundle` 5/5; `spatial_dyn_driver.o` compiles. Acceptance
+criteria 1 & 2 met; criterion 3 lands with req 4.
+
 ## Phase 8 — TPV205/102/104 benchmarks (configs, meshes, jobs, regression)
 
 ### Goal
