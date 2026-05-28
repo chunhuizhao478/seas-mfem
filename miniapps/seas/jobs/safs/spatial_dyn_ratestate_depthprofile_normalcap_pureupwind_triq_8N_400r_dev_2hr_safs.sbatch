@@ -19,18 +19,21 @@
 # apples-to-apples comparison.  Analysis:
 #   safs/project_7.0_alternative/debug_document/spatial_dynamic_rupture_mixed_flux_analysis_2026-05-26.md
 #
-# Same physics/config as the normal-queue parent
+# This DEV job previously mirrored the 10N/500r normal-queue parent
 #   spatial_dyn_ratestate_depthprofile_normalcap_pureupwind_triq_10N_500r_normal_48hr_safs.sbatch
-# but on the DEVELOPMENT queue at 8N/400r/2 h (tfinal 100 s, checkpoints early), on the
-# re-triangulated (TMOP/retriangulated) mesh
-#   experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh
+# but now runs a DIVERGENT, exploratory config (Dc=0.05, 7 km-DIAMETER
+# nucleation, 250 m triqsubdiv mesh) — see CONFIG_TOML / TRIQ_MESH below.  The
+# normal-queue parent is UNCHANGED (still Dc=0.25 / 6 km radius / 500 m triq).
+# DEVELOPMENT queue at 8N/400r/2 h (tfinal 100 s, checkpoints early), on the
+# shape-preserving _triq STL-subdivision mesh
+#   experimental_mesh_refinement/safs_fault_box_nwcut_250m_lcfar3000_z0embed_triqsubdiv.msh
 # (overrides the config's [mesh].path via the driver's --mesh flag).
 #
 # Config (floor enabled):
-#   config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml
-#   ([friction].sigma_n_strength_floor_pa = 10.0e6; a(z) <- param_a_vwvs11km.csv,
+#   config/spatial_friction_rate_state_safs_projected_stress_depthprofile_Dc005_nuc7km_250m.toml
+#   ([friction].sigma_n_strength_floor_pa = 10.0e6; Dc=0.05; a(z) <- param_a_vwvs11km.csv,
 #    (a-b)(z) <- param_a_minus_b_vwvs11km.csv (VW->VS transition ~11 km);
-#    gradual_overstress nucleation).
+#    gradual_overstress nucleation, 7 km-DIAMETER patch / 3.5 km e-fold radius).
 # => CONFLATES the cap + the repaired mesh.  To isolate the MESH effect alone,
 #    rerun cap-OFF via SAFS_CONFIG (a config without sigma_n_strength_floor_pa).
 #
@@ -49,9 +52,9 @@
 # all-normal-queue=100s directive), so RS seismic fields after ~7 s are
 # reflection-CONTAMINATED — treat this as a long cap/stability monitor (does
 # V_max stay bounded?), NOT a physical long rupture.  For physical RS fields use
-# a 6 s window (or wire a real PML layer).  The 2 h dev wall reaches only
-# ~1.5-2 s; the job checkpoints and resumes via SAFS_RESTART (or the
-# normal-queue parent).
+# a 6 s window (or wire a real PML layer).  The 2 h dev wall reaches WELL UNDER
+# the 500 m job's ~1.5-2 s (the 250 m mesh has ~8x more elements and the smaller
+# cells force a smaller CFL dt); the job checkpoints and resumes via SAFS_RESTART.
 #
 # Flux: PURE UPWIND (--mixed-flux none) by DEFAULT (header note);
 # override with SAFS_MIXED_FLUX={none|adjacent|all_continuous}.
@@ -133,9 +136,11 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-# Default = the depth-varying rate-and-state variant (two-CSV a(z)/b(z)) WITH
-# [friction].sigma_n_strength_floor_pa = 10.0e6.
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml}"
+# Default = the Dc=0.05 / 7 km-DIAMETER-nucleation / 250 m-mesh variant of the
+# depth-varying rate-and-state config (two-CSV a(z)/b(z)) WITH
+# [friction].sigma_n_strength_floor_pa = 10.0e6.  This is a DEDICATED config;
+# the shared depthprofile.toml (and the normal-queue parent) is untouched.
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_depthprofile_Dc005_nuc7km_250m.toml}"
 
 # PRE-FLIGHT: this is the CAP run — fail loudly if the config does not enable the
 # floor.  (For a cap-OFF mesh-isolation run, set SAFS_CONFIG to a no-floor config.)
@@ -146,8 +151,10 @@ if ! grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOM
     exit 1
 fi
 
-# Mesh: DEFAULT = the sliver-repaired (triq) mesh; override with SAFS_MESH.
-TRIQ_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+# Mesh: DEFAULT = the 250 m shape-preserving _triq STL-subdivision mesh; override
+# with SAFS_MESH.  (Finer near-fault than the 500 m _triq mesh, for the Dc=0.05
+# process zone L_b ~0.6-0.8 km.)
+TRIQ_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_250m_lcfar3000_z0embed_triqsubdiv.msh"
 MESH="${SAFS_MESH:-${TRIQ_MESH}}"
 if [[ ! -f "${MESH}" ]]; then
     echo "ERROR: triq mesh not found:"
@@ -201,15 +208,15 @@ echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Queue/size:  development, 8N x 400r, 2 h"
 echo "EXPERIMENT:  RS depth-profile + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
-echo "             on the SLIVER-REPAIRED (triq) mesh (no central flux; DEV smoke, tfinal 100 s; cap largely INERT on RS — see R-002)"
+echo "             on the 250 m triqsubdiv mesh, Dc=0.05, 7 km-dia nucleation (no central flux; DEV smoke, tfinal 100 s; cap largely INERT on RS — see R-002)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
-echo "Mesh:        ${MESH}  (triq / sliver-repaired)"
-echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); floor=10 MPa)"
+echo "Mesh:        ${MESH}  (250 m triqsubdiv)"
+echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); Dc=0.05; 7 km-dia nuc; floor=10 MPa)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX} (pure upwind; CFL factor 1.0)"
-echo "tfinal:      ${TFINAL}  (PAST the R-025 ~6.94 s reflection-free window; 2 h dev wall reaches ~1.5-2 s; SAFS_RESTART for the rest)"
+echo "tfinal:      ${TFINAL}  (PAST the R-025 ~6.94 s reflection-free window; 2 h dev wall reaches WELL UNDER the 500 m job's ~1.5-2 s at 250 m; SAFS_RESTART for the rest)"
 echo "CFL arg:     ${CFL_ARG:-<config default = 0.5>}"
 echo "Restart:     ${SAFS_RESTART:-<none — fresh start from t=0>}"
 
