@@ -117,6 +117,11 @@ WAVE_OPERATOR_OBJ = $(WAVE_OPERATOR_SRC:.cpp=.o)
 # Phase H.1 of spatial_dynamic_rupture_plan.md (rev-3): per-element flux cache.
 GODUNOV_FLUX_POOL_SRC = dynamic/godunov_flux_pool.cpp
 GODUNOV_FLUX_POOL_OBJ = $(GODUNOV_FLUX_POOL_SRC:.cpp=.o)
+# Phase 9 (TPV-via-spatial-driver): bimaterial exact-Riemann flux (port hrs-ref).
+GODUNOV_FLUX_BIMATERIAL_SRC = dynamic/godunov_flux_bimaterial.cpp
+GODUNOV_FLUX_BIMATERIAL_OBJ = $(GODUNOV_FLUX_BIMATERIAL_SRC:.cpp=.o)
+TEST_GODUNOV_FLUX_BIMATERIAL_SRC = tests/unit/test_godunov_flux_bimaterial.cpp
+TEST_GODUNOV_FLUX_BIMATERIAL_OBJ = $(TEST_GODUNOV_FLUX_BIMATERIAL_SRC:.cpp=.o)
 TEST_PHASEH_GODUNOV_FLUX_POOL_SRC = tests/unit/test_phaseh_godunov_flux_pool.cpp
 TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ = $(TEST_PHASEH_GODUNOV_FLUX_POOL_SRC:.cpp=.o)
 # Spatial Phase 1 of spatial_dynamic_rupture_plan.md: TOML schema parser +
@@ -826,6 +831,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_logging \
                seas_test_config_bridge \
                seas_test_godunov_flux \
+               seas_test_godunov_flux_bimaterial \
                seas_test_phaseh_godunov_flux_pool \
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
@@ -2804,6 +2810,35 @@ $(GODUNOV_FLUX_POOL_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# Phase 9: BimaterialFlux object + its unit test (ported from hrs-ref).
+$(GODUNOV_FLUX_BIMATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                                     dynamic/godunov_flux_bimaterial.hpp \
+                                     dynamic/godunov_flux.hpp \
+                                     dynamic/wave_state.hpp \
+                                     $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_GODUNOV_FLUX_BIMATERIAL_OBJ): %.o: $(SRC)%.cpp \
+                                          dynamic/godunov_flux_bimaterial.hpp \
+                                          dynamic/godunov_flux.hpp \
+                                          dynamic/wave_state.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_godunov_flux_bimaterial: $(TEST_GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                                   $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                                   $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-godunov-flux-bimaterial: seas_test_godunov_flux_bimaterial
+	./seas_test_godunov_flux_bimaterial
+
 $(TEST_PHASEH_GODUNOV_FLUX_POOL_OBJ): %.o: $(SRC)%.cpp \
                                            dynamic/godunov_flux_pool.hpp \
                                            dynamic/godunov_flux.hpp \
@@ -3474,7 +3509,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-boundary-config test-boundary-config-operator \
       test-boundary-classification \
       test-logging test-config-bridge test-config-parser \
-      test-godunov-flux test-wave-operator \
+      test-godunov-flux test-godunov-flux-bimaterial test-wave-operator \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
       test-tpv205-friction \
