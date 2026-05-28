@@ -2312,25 +2312,46 @@ int main(int argc, char *argv[])
             // sigma_n is below the floor (or tensile, when the cap is off), so
             // EVERY concurrent speckle spot is localized -- not just the single
             // global-worst MINLOC DOF.  Capped per rank to bound log volume.
-            const real_t sign_thr = (sn_floor >= 0.0) ? sn_floor : 0.0;
-            int dumped = 0;
-            for (int i = 0; i < num_fault_total && dumped < 32; ++i)
+            //
+            // THROTTLE (job 7753174 / 7752380): in the LSW slip-weakening path
+            // the sub-step accumulator is populated, so n_ss_tensile_g>0 keeps
+            // print_sign true EVERY step; the per-rank dump then emits ~2M
+            // interleaved lines (485 MB) per run.  Gate ONLY the dump (not the
+            // rank-0 [DIAG-SIGN] summary above, not the R-003 reset below) to a
+            // coarse step stride.  SEAS_DIAG_SIGN_DOF_STRIDE: <=0 = off, 1 =
+            // every step (old behaviour, for a deep speckle debug), N = every
+            // Nth step.  Default 100 -> matches the summary baseline cadence and
+            // shrinks the per-DOF log ~100x.  step is globally consistent so the
+            // gate stays collective-safe; the R-003 reset stays on print_sign so
+            // the dumped sub-step min still reflects the most recent step.
+            static const int sign_dof_stride = []()
             {
-               const DOFData &d = dof_data[i];
-               if (d.sigma_n_substep_min < SN_UNSET &&
-                   d.sigma_n_substep_min < sign_thr)
+               const char *e = std::getenv("SEAS_DIAG_SIGN_DOF_STRIDE");
+               if (!e || !e[0]) { return 100; }
+               return std::atoi(e);
+            }();
+            if (sign_dof_stride > 0 && step % sign_dof_stride == 0)
+            {
+               const real_t sign_thr = (sn_floor >= 0.0) ? sn_floor : 0.0;
+               int dumped = 0;
+               for (int i = 0; i < num_fault_total && dumped < 32; ++i)
                {
-                  std::cout << "[DIAG-SIGN-DOF] rank " << rank << " dof " << i
-                            << " xyz=(" << dof_coords_3d(3 * i) << ","
-                            << dof_coords_3d(3 * i + 1) << ","
-                            << dof_coords_3d(3 * i + 2) << ")"
-                            << " sigma_n_substep_min=" << d.sigma_n_substep_min
-                            << " sigma_n_corr(end)=" << d.sigma_n_corr
-                            << " V=" << d.slip_rate
-                            << " V_substep_max=" << d.slip_rate_substep_max
-                            << " tau1_corr=" << d.tau1_corr
-                            << " tau2_corr=" << d.tau2_corr << "\n";
-                  ++dumped;
+                  const DOFData &d = dof_data[i];
+                  if (d.sigma_n_substep_min < SN_UNSET &&
+                      d.sigma_n_substep_min < sign_thr)
+                  {
+                     std::cout << "[DIAG-SIGN-DOF] rank " << rank << " dof " << i
+                               << " xyz=(" << dof_coords_3d(3 * i) << ","
+                               << dof_coords_3d(3 * i + 1) << ","
+                               << dof_coords_3d(3 * i + 2) << ")"
+                               << " sigma_n_substep_min=" << d.sigma_n_substep_min
+                               << " sigma_n_corr(end)=" << d.sigma_n_corr
+                               << " V=" << d.slip_rate
+                               << " V_substep_max=" << d.slip_rate_substep_max
+                               << " tau1_corr=" << d.tau1_corr
+                               << " tau2_corr=" << d.tau2_corr << "\n";
+                     ++dumped;
+                  }
                }
             }
             // R-003: the interval accumulator has now been reported; reset it on
