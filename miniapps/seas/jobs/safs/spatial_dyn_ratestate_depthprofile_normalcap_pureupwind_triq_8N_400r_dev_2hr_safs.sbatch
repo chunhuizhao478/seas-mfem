@@ -270,7 +270,7 @@ ibrun ./seas_spatial_dyn_driver \
     ${RESTART_ARG} \
     --paraview \
     --paraview-fault-vtu \
-    --paraview-fault-dt 1.0 \
+    --paraview-fault-dt 0.1 \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
