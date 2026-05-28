@@ -1403,6 +1403,105 @@ cohesion_default=0
                "interior_flux=matrix with Constant material must abort");
 }
 
+// =====================================================================
+//  Phase 6 req 5: boxcar_taper spatial rule + SCECBoxcar + BoxcarTaperFactor.
+// =====================================================================
+
+// BOX-1: the SCECBoxcar free function — plateau / transition / zero / hard.
+static void T_47_scec_boxcar_free_fn()
+{
+   std::cout << "\n[BOX-1] SCECBoxcar plateau/transition/zero\n";
+   // Plateau: |offset| <= half -> 1 (boundary inclusive).
+   TEST_ASSERT(SCECBoxcar(0.0, 10.0, 5.0) == 1.0, "B(0,10,5) == 1");
+   TEST_ASSERT(SCECBoxcar(10.0, 10.0, 5.0) == 1.0, "B(half,10,5) == 1 (inclusive)");
+   // Beyond half+trans -> 0 (boundary inclusive).
+   TEST_ASSERT(SCECBoxcar(15.0, 10.0, 5.0) == 0.0, "B(half+trans) == 0");
+   TEST_ASSERT(SCECBoxcar(20.0, 10.0, 5.0) == 0.0, "B(far) == 0");
+   // Transition: strictly in (0,1) and monotone decreasing.
+   const real_t f12 = SCECBoxcar(12.0, 10.0, 5.0);
+   TEST_ASSERT(f12 > 0.0 && f12 < 1.0, "B(12,10,5) in (0,1)");
+   TEST_ASSERT(SCECBoxcar(11.0, 10.0, 5.0) > SCECBoxcar(14.0, 10.0, 5.0),
+               "transition monotone decreasing");
+   // Symmetric in offset sign.
+   TEST_ASSERT(SCECBoxcar(-12.0, 10.0, 5.0) == f12, "B symmetric in sign");
+   // trans <= 0 degenerates to a hard boxcar (no division by zero).
+   TEST_ASSERT(SCECBoxcar(5.0, 10.0, 0.0) == 1.0, "hard boxcar inside == 1");
+   TEST_ASSERT(SCECBoxcar(12.0, 10.0, 0.0) == 0.0, "hard boxcar outside == 0");
+}
+
+// BOX-2: a boxcar_taper rule parses; BoxcarTaperFactor / matches behave.
+static void T_48_boxcar_taper_rule_and_factor()
+{
+   std::cout << "\n[BOX-2] boxcar_taper rule parses + BoxcarTaperFactor\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[[friction.slip_weakening.spatial]]\n"
+        "kind=\"boxcar_taper\"\n"
+        "boxcar_center_z_m=-7500.0\n"
+        "boxcar_half_z_m=7500.0\n"
+        "boxcar_trans_z_m=3000.0\n"
+        "cohesion_inner=1.0e6\ncohesion_outer=0.0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.slip_weakening.has_value(), "slip_weakening present");
+   TEST_ASSERT(cfg.slip_weakening->spatial.size() == 1, "one spatial rule");
+   const auto& r = cfg.slip_weakening->spatial.front();
+   TEST_ASSERT(r.kind == SpatialRule::Kind::BoxcarTaper, "kind == BoxcarTaper");
+   TEST_ASSERT(r.boxcar_half_z_m == 7500.0, "boxcar_half_z_m round-trip");
+   TEST_ASSERT(r.cohesion_inner == 1.0e6, "cohesion_inner round-trip");
+   TEST_ASSERT(r.cohesion_outer == 0.0, "cohesion_outer round-trip");
+
+   // Direct factor checks on a hand-built rule (x tapered, y/z untapered).
+   SpatialRule t;
+   t.kind = SpatialRule::Kind::BoxcarTaper;
+   t.boxcar_center_x_m = 0.0;
+   t.boxcar_half_x_m   = 10.0;
+   t.boxcar_trans_x_m  = 5.0;
+   TEST_ASSERT(t.BoxcarTaperFactor(0.0, 99.0, 99.0) == 1.0,
+               "factor == 1 at plateau (untapered y/z)");
+   TEST_ASSERT(t.BoxcarTaperFactor(20.0, 0.0, 0.0) == 0.0, "factor == 0 outside x");
+   const real_t ft = t.BoxcarTaperFactor(12.0, 0.0, 0.0);
+   TEST_ASSERT(ft > 0.0 && ft < 1.0, "factor in (0,1) in x transition");
+   TEST_ASSERT(t.matches(0.0, 0.0, 0.0, -1), "matches at plateau");
+   TEST_ASSERT(!t.matches(20.0, 0.0, 0.0, -1), "no match far outside");
+
+   // Non-BoxcarTaper kinds return factor 1 (no taper).
+   SpatialRule d; d.kind = SpatialRule::Kind::Depth;
+   TEST_ASSERT(d.BoxcarTaperFactor(99.0, 99.0, 99.0) == 1.0,
+               "non-taper kind factor == 1");
+}
+
+// BOX-3: R-114 still applies to a boxcar_taper LSW rule (mu_s > 1e5 aborts).
+static void T_49_boxcar_taper_r114_guard()
+{
+   std::cout << "\n[BOX-3] boxcar_taper + mu_s>1e5 aborts (R-114)\n";
+   const std::string toml = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[[friction.slip_weakening.spatial]]\n"
+        "kind=\"boxcar_taper\"\n"
+        "boxcar_half_z_m=7500.0\n"
+        "mu_s=1e6\nmu_d=0.5\nd_c=0.5\n";
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "boxcar_taper rule with mu_s=1e6 must abort");
+}
+
+// BOX-4: boxcar_taper geometry guards (all-untapered / negative half abort).
+static void T_50_boxcar_taper_geometry_guards()
+{
+   std::cout << "\n[BOX-4] boxcar_taper geometry guards\n";
+   // No finite half on any axis -> no-op taper -> abort.
+   const std::string no_half = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[[friction.slip_weakening.spatial]]\n"
+        "kind=\"boxcar_taper\"\n"
+        "boxcar_center_z_m=-7500.0\n";
+   TEST_ASSERT(ParseAbortsInChild(no_half),
+               "boxcar_taper with no finite half must abort");
+   // Negative half -> abort.
+   const std::string neg_half = MinimalLSWHeader() + MinimalLSWBlock()
+      + "[[friction.slip_weakening.spatial]]\n"
+        "kind=\"boxcar_taper\"\n"
+        "boxcar_half_z_m=-100.0\n";
+   TEST_ASSERT(ParseAbortsInChild(neg_half),
+               "boxcar_taper with negative half must abort");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1457,6 +1556,11 @@ int main(int, char**)
    T_44_hypocenter_positive_z_aborts();
    T_45_material_kinds();
    T_46_matrix_requires_nonconstant_material();
+   // Phase 6 req 5: boxcar_taper spatial rule.
+   T_47_scec_boxcar_free_fn();
+   T_48_boxcar_taper_rule_and_factor();
+   T_49_boxcar_taper_r114_guard();
+   T_50_boxcar_taper_geometry_guards();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

@@ -100,8 +100,26 @@ bool SpatialRule::matches(real_t x, real_t y, real_t z, int attr) const
    case Kind::Barrier:
       // Same as Depth, with any non-infinite x/y bounds also applied.
       return z_ok && x_ok && y_ok;
+   case Kind::BoxcarTaper:
+      // Phase 6 req 5: the taper geometry (not the coord bounds) governs the
+      // region; the rule applies wherever the boxcar factor is non-zero.
+      return BoxcarTaperFactor(x, y, z) > 0.0;
    }
    return false;
+}
+
+real_t SpatialRule::BoxcarTaperFactor(real_t x, real_t y, real_t z) const
+{
+   if (kind != Kind::BoxcarTaper) { return 1.0; }
+   // Per-axis SCEC boxcar; a non-finite half makes that axis untapered.
+   auto axis = [](real_t coord, real_t center, real_t half, real_t trans)
+   {
+      if (!std::isfinite(half)) { return static_cast<real_t>(1.0); }
+      return SCECBoxcar(coord - center, half, trans);
+   };
+   return axis(x, boxcar_center_x_m, boxcar_half_x_m, boxcar_trans_x_m)
+        * axis(y, boxcar_center_y_m, boxcar_half_y_m, boxcar_trans_y_m)
+        * axis(z, boxcar_center_z_m, boxcar_half_z_m, boxcar_trans_z_m);
 }
 
 // =====================================================================
@@ -419,12 +437,14 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
    else if (kind_s == "box")               { out.kind = SpatialRule::Kind::Box; }
    else if (kind_s == "region_attribute")  { out.kind = SpatialRule::Kind::RegionAttribute; }
    else if (kind_s == "barrier")           { out.kind = SpatialRule::Kind::Barrier; }
+   else if (kind_s == "boxcar_taper")      { out.kind = SpatialRule::Kind::BoxcarTaper; }
    else
    {
       MFEM_ABORT("Unknown spatial.kind '" << kind_s
-                 << "'.  Valid kinds (rev-3): depth, box, region_attribute, "
-                 << "barrier.  (rev-1 'nucleation_box' removed by D-4; use "
-                 << "the [nucleation] block instead.)");
+                 << "'.  Valid kinds (rev-3 + Phase 6): depth, box, "
+                 << "region_attribute, barrier, boxcar_taper.  (rev-1 "
+                 << "'nucleation_box' removed by D-4; use the [nucleation] "
+                 << "block instead.)");
    }
 
    // Coordinate bounds (optional; sentinels are ±inf).
@@ -439,6 +459,45 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
    out.region_attr = toml_int(rule_tbl, "region_attr", -1);
 
    const real_t nan = std::numeric_limits<real_t>::quiet_NaN();
+
+   // Phase 6 req 5: BoxcarTaper geometry (parsed for the boxcar_taper kind).
+   // Half defaults to +inf (untapered axis); center/trans default 0.
+   if (out.kind == SpatialRule::Kind::BoxcarTaper)
+   {
+      const real_t pinf = std::numeric_limits<real_t>::infinity();
+      out.boxcar_center_x_m = toml_real(rule_tbl, "boxcar_center_x_m", 0.0);
+      out.boxcar_center_y_m = toml_real(rule_tbl, "boxcar_center_y_m", 0.0);
+      out.boxcar_center_z_m = toml_real(rule_tbl, "boxcar_center_z_m", 0.0);
+      out.boxcar_half_x_m   = toml_real(rule_tbl, "boxcar_half_x_m",   pinf);
+      out.boxcar_half_y_m   = toml_real(rule_tbl, "boxcar_half_y_m",   pinf);
+      out.boxcar_half_z_m   = toml_real(rule_tbl, "boxcar_half_z_m",   pinf);
+      out.boxcar_trans_x_m  = toml_real(rule_tbl, "boxcar_trans_x_m",  0.0);
+      out.boxcar_trans_y_m  = toml_real(rule_tbl, "boxcar_trans_y_m",  0.0);
+      out.boxcar_trans_z_m  = toml_real(rule_tbl, "boxcar_trans_z_m",  0.0);
+      // Half-widths and transitions must be non-negative; a non-finite half
+      // is the sentinel for "this axis untapered".
+      for (const auto& kv : {
+           std::pair<const char*, real_t>{"boxcar_half_x_m",  out.boxcar_half_x_m},
+           std::pair<const char*, real_t>{"boxcar_half_y_m",  out.boxcar_half_y_m},
+           std::pair<const char*, real_t>{"boxcar_half_z_m",  out.boxcar_half_z_m},
+           std::pair<const char*, real_t>{"boxcar_trans_x_m", out.boxcar_trans_x_m},
+           std::pair<const char*, real_t>{"boxcar_trans_y_m", out.boxcar_trans_y_m},
+           std::pair<const char*, real_t>{"boxcar_trans_z_m", out.boxcar_trans_z_m}})
+      {
+         MFEM_VERIFY(kv.second >= 0.0,
+                     "[[spatial]] boxcar_taper rule: " << kv.first
+                     << " must be >= 0; got " << kv.second);
+      }
+      // A boxcar_taper rule with every axis untapered (all halves +inf) is a
+      // no-op taper (factor 1 everywhere) — almost certainly a config error
+      // (the author meant kind=\"depth\"/\"box\").
+      MFEM_VERIFY(std::isfinite(out.boxcar_half_x_m)
+                  || std::isfinite(out.boxcar_half_y_m)
+                  || std::isfinite(out.boxcar_half_z_m),
+                  "[[spatial]] boxcar_taper rule has no finite boxcar_half_* on "
+                  "any axis (all untapered) — the taper would be 1 everywhere; "
+                  "set at least one boxcar_half_{x,y,z}_m or use kind=\"box\".");
+   }
 
    if (is_lsw)
    {
@@ -467,6 +526,9 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
          out.d_c = nan;
       }
       out.cohesion = toml_real(rule_tbl, "cohesion", nan);
+      // Phase 6 req 5: cohesion-taper endpoints for a BoxcarTaper LSW rule.
+      out.cohesion_inner = toml_real(rule_tbl, "cohesion_inner", nan);
+      out.cohesion_outer = toml_real(rule_tbl, "cohesion_outer", nan);
 
       // R-114: barrier-sentinel guard.  Reject any user-supplied
       // mu_s > 1e5 in a spatial-rule override.  Barrier kind is the

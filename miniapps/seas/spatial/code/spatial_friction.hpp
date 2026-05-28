@@ -34,6 +34,7 @@
 #include "../../dynamic/spatial_nucleation.hpp"   // GradualOverstressSpec
 
 #include <array>
+#include <cmath>     // std::abs/std::tanh in inline SCECBoxcar (req 5)
 #include <limits>
 #include <optional>
 #include <string>
@@ -223,13 +224,32 @@ struct StressSpec
    PorePressureSpec pore_pressure;
 };
 
+/// Phase 6 req 5: SCEC boxcar B(offset, half, trans) — Eq.(5) of the
+/// SCEC TPV101/102/104 spec.  B = 1 for |offset| <= half, a C∞ tanh
+/// transition for half < |offset| < half+trans, and 0 beyond.  `trans <= 0`
+/// degenerates to a hard boxcar (1 inside, 0 outside, no transition).
+/// This is a config-frame copy of `Boxcar_TPV104` (config/tpv104_params.hpp);
+/// the spatial driver keeps its own so it does not pull in the standalone
+/// TPV params header.
+inline real_t SCECBoxcar(real_t offset, real_t half, real_t trans)
+{
+   const real_t ax = std::abs(offset);
+   if (ax <= half)              { return 1.0; }
+   if (trans <= 0.0 || ax >= half + trans) { return 0.0; }
+   return 0.5 * (1.0 + std::tanh(trans / (ax - half - trans)
+                                 + trans / (ax - half)));
+}
+
 /// Spatial rule (D-3 relaxed validator; R-014 explicit defaults).
 /// D-4 (rev-3): the `NucleationBox` kind is REMOVED.  Spatial rules
 /// never override `tau_pre_*` or `sigma_n` — pre-stress comes entirely
 /// from the stress source.
 struct SpatialRule
 {
-   enum class Kind { Depth, Box, RegionAttribute, Barrier };
+   // Phase 6 req 5: `BoxcarTaper` is a smooth 3-D taper region (SCEC boxcar
+   // product); unlike the hard Box/Depth kinds it returns a factor in [0,1]
+   // (see BoxcarTaperFactor), enabling cohesion / parameter tapers.
+   enum class Kind { Depth, Box, RegionAttribute, Barrier, BoxcarTaper };
    Kind kind = Kind::Depth;
 
    real_t x_min_m = -std::numeric_limits<real_t>::infinity();
@@ -256,13 +276,42 @@ struct SpatialRule
    real_t eta     = std::numeric_limits<real_t>::quiet_NaN();
    real_t V_w     = std::numeric_limits<real_t>::quiet_NaN();  // Phase 6 req 4 (SRW per-QP V_w)
 
+   // Phase 6 req 5: BoxcarTaper geometry.  Per-axis plateau half-width
+   // boxcar_half_* and tanh transition boxcar_trans_*, centred at
+   // boxcar_center_*.  A non-finite half makes that axis untapered (the
+   // axis contributes factor 1).  Consumed by BoxcarTaperFactor.
+   real_t boxcar_center_x_m = 0.0;
+   real_t boxcar_center_y_m = 0.0;
+   real_t boxcar_center_z_m = 0.0;
+   real_t boxcar_half_x_m   =  std::numeric_limits<real_t>::infinity();
+   real_t boxcar_half_y_m   =  std::numeric_limits<real_t>::infinity();
+   real_t boxcar_half_z_m   =  std::numeric_limits<real_t>::infinity();
+   real_t boxcar_trans_x_m  = 0.0;
+   real_t boxcar_trans_y_m  = 0.0;
+   real_t boxcar_trans_z_m  = 0.0;
+   // Cohesion-taper endpoints (LSW BoxcarTaper rules): cohesion ramps from
+   // cohesion_inner (plateau, factor 1) to cohesion_outer (factor 0) via
+   // BoxcarTaperFactor.  NaN = unset (Phase 7 resolver falls back to the
+   // block default uniformly).
+   real_t cohesion_inner = std::numeric_limits<real_t>::quiet_NaN();
+   real_t cohesion_outer = std::numeric_limits<real_t>::quiet_NaN();
+
    /// `matches` semantics per §Phase 1 Detailed Req. 4:
    ///   Depth            : only z bounds checked.
    ///   Box              : all 6 coord bounds checked.
    ///   RegionAttribute  : only region_attr checked.
    ///   Barrier          : same as Depth, plus any non-infinite
    ///                      x/y bounds also apply.
+   ///   BoxcarTaper      : matches wherever the boxcar factor is non-zero
+   ///                      (BoxcarTaperFactor(x,y,z) > 0); coord bounds are
+   ///                      ignored (the taper geometry governs the region).
    bool matches(real_t x, real_t y, real_t z, int attr) const;
+
+   /// Phase 6 req 5: smooth taper factor in [0,1] for a BoxcarTaper rule,
+   /// F = ∏_axis SCECBoxcar(coord - center, half, trans).  An axis with a
+   /// non-finite half contributes factor 1 (untapered).  Returns 1.0 for
+   /// any non-BoxcarTaper kind (those have no taper).
+   real_t BoxcarTaperFactor(real_t x, real_t y, real_t z) const;
 };
 
 /// @brief Phase N — the single nucleation mechanism for the spatial
