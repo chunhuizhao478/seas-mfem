@@ -1523,8 +1523,18 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-         ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         if (owned_flux_pool_)
+         {
+            // Phase 9 (Stage B): per-element star matrices for the
+            // heterogeneous ctor.  Bit-identical to the scalar branch on
+            // Mode::Constant (same A on every element).
+            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
+         }
+         else
+         {
+            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
+            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         }
       }
 
       // Advance factorial factor: fac *= dt / (k+2).
@@ -1642,8 +1652,18 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-         ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         if (owned_flux_pool_)
+         {
+            // Phase 9 (Stage B): per-element star matrices for the
+            // heterogeneous ctor.  Bit-identical to the scalar branch on
+            // Mode::Constant (same A on every element).
+            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
+         }
+         else
+         {
+            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
+            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
+         }
       }
 
       // Update factorial factors and accumulate D(k+1) into each node.
