@@ -1920,6 +1920,53 @@ paths; np>1 parity holds.
 ### Dependencies
 Depends on: Phases 3, 6. Required by: Phase 10.
 
+#### Phase 9 status (2026-05-28) — Stage A COMPLETE; Stage B (core dispatch) DEFERRED
+Split into two stages (user-approved) because Stage B is a high-risk
+integration into the core wave operator (affects every simulation).
+
+- **Stage A — COMPLETE (committed `dee6931`).**
+  - `dynamic/godunov_flux_bimaterial.{hpp,cpp}` ported **byte-identical** to
+    hrs-ref (req 1: `BuildGodunovStateFaceLocal` / `BuildPerFaceFluxMatricesGlobal`
+    / `ApplyPerFaceFlux`; SeisSol positive-stress convention).
+  - `tests/unit/test_godunov_flux_bimaterial.cpp` (ported from hrs-ref
+    `test_phaser_bimaterial_flux`): **21/21 pass**.  R.1.T-1 is the
+    homogeneous-limit byte-exact reduction to `GodunovFlux::Interior`
+    (1e-10 rel) = **AC #2 + the near-equal-material edge case**; plus P/S
+    transmission, rotation covariance, role-swap symmetry,
+    partition-of-identity, and the acoustic/size/nor-unit guards.
+  - `Makefile`: `GODUNOV_FLUX_BIMATERIAL_{SRC,OBJ}` + test obj rules + target
+    + build-group + aggregate `test:`.
+  - Note: safs already had the **Stage-1 scaffolding** (the heterogeneous
+    `WaveOperator(mesh,order,MaterialField,bc)` ctor, `owned_flux_pool_`,
+    `BuildGodunovFluxPool_`, `ExchangeBiMaterialNeighbours_`, `per_elem_lmr_`/
+    `per_elem_h_`/`shared_face_neighbour_material_` members) from a prior
+    partial port — so reqs 2 (ctor) and the pool build/exchange are present.
+
+- **Stage B — DEFERRED (next focused session).**  Remaining work:
+  - `wave_operator.{hpp,inl}`: add `per_face_bimaterial_flux_` member +
+    `BuildPerFaceBimaterialFluxMatrices_()` (req 3, ~280 lines, hrs-ref
+    `wave_operator.inl:839–1115`) and `ApplyJacobianPerElementDOF_` (req 4
+    ADER CK, hrs-ref `:1856+`); call `BuildPerFaceBimaterialFluxMatrices_()`
+    from the het ctor after `ExchangeBiMaterialNeighbours_()`.
+  - Wire the **7 gated `else if (owned_flux_pool_)` dispatch sites**
+    (hrs-ref `wave_operator.inl` ~:1947, :2077 CK; :3585, :4179, :5188, :5753
+    Mult/ADER interior-face; :2200 mixed-flux guard) → `BimaterialFlux::
+    ApplyPerFaceFlux` for matrix, else the existing scalar/mixed path.
+    **Byte-exact scalar AC is preserved by construction** (scalar ctor leaves
+    `owned_flux_pool_ == nullptr` → no new branch executes).
+  - Driver (req 6): convert to `std::unique_ptr<WaveOperator>` scalar/matrix
+    branch; **update the Phase-8 R-001 guard** (`InteriorFluxSupported`) to
+    ALLOW `matrix` once wired; build `MaterialField` from `[material]`.
+  - Makefile (req 7): add `GODUNOV_FLUX_BIMATERIAL_OBJ` to the link line of
+    **every** target that includes `wave_operator.inl` (spatial driver +
+    native tpv drivers + `test_wave_operator` …) once the `.inl` references
+    `BimaterialFlux`.
+  - **Caution:** safs's `wave_operator.inl` has diverged from hrs-ref (1015+/
+    838−, 40 hunks) — Stage B is a per-site manual integration, NOT a patch.
+  - Verification: build; byte-exact scalar (TPV/SAFS dry-run construction +
+    dt unchanged); the 2-block bimaterial unit test (done); **np>1 parity
+    (AC #3) needs a heterogeneous-mesh multi-rank run — run-session.**
+
 ## Phase 10 — TPV31 (depth-heterogeneous LSW) verification case (PORT from hrs-ref)
 
 ### Goal
