@@ -2,7 +2,7 @@
 #SBATCH -J safs_partition_250m
 #SBATCH -o safs_partition_250m_%j.out
 #SBATCH -e safs_partition_250m_%j.err
-#SBATCH -p development
+#SBATCH -p flex
 #SBATCH -N 40
 #SBATCH -n 400
 #SBATCH -t 00:30:00
