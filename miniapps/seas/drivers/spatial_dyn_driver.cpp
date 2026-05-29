@@ -384,6 +384,7 @@ void AdvanceADERWithSubStep_Spatial(
    Vector &Q_new,
    const std::function<void(real_t, real_t)> &nuc_callback)
 {
+   MFEM_PERF_SCOPE("seas::spatial_dyn::AdvanceADERWithSubStep");
    MFEM_VERIFY(dt_step > 0.0,
                "AdvanceADERWithSubStep_Spatial: dt_step must be > 0, got "
                << dt_step);
@@ -446,6 +447,7 @@ void AdvanceADERWithSubStep_Spatial(
 
    if (n_total_fault_qps > 0)
    {
+      MFEM_PERF_BEGIN("seas::spatial_dyn::friction_substep");
       iterator.Advance(dof_data, fault_coords,
                        Q_pointwise_plus,
                        Q_pointwise_minus,
@@ -453,6 +455,7 @@ void AdvanceADERWithSubStep_Spatial(
                        I_imp_plus_flat.data(),
                        I_imp_minus_flat.data(),
                        nuc_callback);
+      MFEM_PERF_END("seas::spatial_dyn::friction_substep");
    }
 
    struct ImposedGuard
@@ -2726,6 +2729,7 @@ int main(int argc, char *argv[])
    int last_completed_step = step0;
    for (int step = step0; step < nsteps; ++step)
    {
+      MFEM_PERF_SCOPE("seas::spatial_dyn::step");
       const real_t dt_step = std::min(dt_now, cfg.time.tfinal - t);
       if (dt_step <= 0.0) { break; }
       wave.SetTime(t);
