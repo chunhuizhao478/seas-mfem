@@ -715,6 +715,7 @@ void WaveOperator<MeshType>::UsePrecomputedFaceFluxes(bool enable)
 template <typename MeshType>
 void WaveOperator<MeshType>::Mult(const Vector &Q, Vector &dQdt) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::Mult");
    MFEM_VERIFY(Q.Size() == height,
                "Q size mismatch: " << Q.Size() << " vs " << height);
 
@@ -803,6 +804,7 @@ void WaveOperator<MeshType>::Mult(const Vector &Q, Vector &dQdt) const
 template <typename MeshType>
 void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeVolumeRHS");
    const real_t *Q_data = Q.GetData();
 
    for (int e = 0; e < ne_; e++)
@@ -891,6 +893,7 @@ void WaveOperator<MeshType>::ApplySpatialDerivative(int dir,
                                                     const Vector &Q,
                                                     Vector &dQ_dxdir) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ApplySpatialDerivative");
    MFEM_VERIFY(dir >= 0 && dir < 3,
                "ApplySpatialDerivative: dir must be in {0,1,2}, got " << dir);
    MFEM_VERIFY(Q.Size() == NUM_STATE * ndof_total_,
@@ -1200,6 +1203,7 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
    const std::vector<real_t> &tau_nodes,
    std::vector<Vector> &Q_per_node) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERSubStepStates");
    MFEM_VERIFY(order >= 2 && order <= 4,
                "ComputeADERSubStepStates: order must be in {2,3,4}, got "
                << order);
@@ -2257,6 +2261,7 @@ template <typename MeshType>
 void WaveOperator<MeshType>::ComputeADERVolumeUpdate(const Vector &I,
                                                      Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERVolumeUpdate");
    MFEM_VERIFY(I.Size() == NUM_STATE * ndof_total_,
                "ComputeADERVolumeUpdate: I size "
                << I.Size() << " != NUM_STATE * ndof_total_ = "
@@ -2283,6 +2288,7 @@ void WaveOperator<MeshType>::ComputeADERVolumeUpdate(const Vector &I,
 template <typename MeshType>
 void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeFaceFluxRHS");
    const real_t *Q_data = Q.GetData();
 
    // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
@@ -2934,6 +2940,7 @@ template <typename MeshType>
 void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
    const Vector &Q, Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeSharedFaceFluxRHS");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       return;  // No shared faces in serial
@@ -3462,6 +3469,7 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                                     real_t dt,
                                                     Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERFaceFluxRHS");
    MFEM_VERIFY(dt > 0.0,
                "ComputeADERFaceFluxRHS: dt must be > 0, got " << dt);
    MFEM_VERIFY(I.Size() == NUM_STATE * ndof_total_,
@@ -4482,6 +4490,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                                                           real_t dt,
                                                           Vector &rhs) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERSharedFaceFluxRHS");
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       return;
@@ -5283,6 +5292,7 @@ template <typename MeshType>
 void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
                                          int order, Vector &Q_new) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::AdvanceADER");
    MFEM_VERIFY(dt > 0.0,
                "AdvanceADER: dt must be > 0, got " << dt);
    MFEM_VERIFY(order >= 2 && order <= 4,
@@ -5529,6 +5539,7 @@ void WaveOperator<MeshType>::AssembleElementMassInverse()
 template <typename MeshType>
 real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
 {
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeMaxDt");
    // R-1403 + R-1502: central flux is non-dissipative; the CFL stability
    // factor depends on the FRACTION of faces using central vs upwind,
    // not just whether mixed-flux is engaged.  Zhang 2023 §3.3 cites

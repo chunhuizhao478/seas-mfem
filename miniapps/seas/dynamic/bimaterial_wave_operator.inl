@@ -514,6 +514,7 @@ void BimaterialWaveOperator<MeshType>::ApplyElementJacobian_(
 template <typename MeshType>
 real_t BimaterialWaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
 {
+   MFEM_PERF_SCOPE("seas::BimaterialWaveOperator::ComputeMaxDt");
    // Mixed flux is disabled on the matrix path (SetMixedFluxMode aborts on
    // non-None), so mixed_flux_mode_ is always None here and the factor is 1;
    // the switch is kept for parity with the scalar base implementation.
