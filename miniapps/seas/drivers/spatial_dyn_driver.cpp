@@ -1716,8 +1716,13 @@ int main(int argc, char *argv[])
       if (rank == 0)
       {
          auto on = [&](int bit) { return (face_mask & bit) ? "on" : "off"; };
+         // R-002: pml_target_R is the INPUT R_0; the cubic profile uses the
+         // n=2 prefactor (pml_layer.cpp Eq.17), so the REALIZED reflection is
+         // R_eff = R_0^(3/4).  Print both so the knob is not read as R_eff.
          std::cout << "[spatial_dyn] PML: ACTIVE (L=" << L_pml << " m"
-                   << ", R_eff=" << cfg.numerics.pml_target_R
+                   << ", R_input=" << cfg.numerics.pml_target_R
+                   << " (R_eff~=" << std::pow(cfg.numerics.pml_target_R, 0.75)
+                   << ")"
                    << ", d_max=" << pml_layer->GetDmax() << " 1/s, faces="
                    << "x_lo:" << on(PMLLayer::FaceXLo)
                    << " x_hi:" << on(PMLLayer::FaceXHi)

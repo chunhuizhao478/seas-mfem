@@ -87,11 +87,15 @@ sigma_xz_pa = 0.0
 ader_order = 2
 mixed_flux = "adjacent"
 cfl        = 0.5
-# R-025: use_pml is NOT wired into seas_spatial_dyn_driver (it never calls
-# WaveOperator::SetPML); setting it true would only silence the reflection
-# warning WITHOUT absorbing anything.  The box exterior uses first-order
-# ABSORBING BCs (.geo attrs 103/104).  Keep tfinal within the reflection-free
-# window (see [time]); leave use_pml=false until a real PML layer is wired.
+# Phase 12: use_pml IS now wired into seas_spatial_dyn_driver (it constructs a
+# PMLLayer and calls WaveOperator::SetPML on the interior_flux="scalar" path).
+# When true it absorbs outgoing waves on x +/-, y +/-, and z-min (the free
+# surface z=z_max stays undamped); enable with use_pml=true (or --pml) plus
+# pml_cells / pml_target_R / pml_damp_bottom (or pml_thickness_m).  Kept false
+# here so tfinal stays within the box reflection-free window (see [time]); the
+# box exterior otherwise uses first-order ABSORBING BCs (.geo attrs 103/104),
+# which only partially damp reflections.  Flip to true (and extend tfinal) to
+# use PML.
 use_pml    = false
 
 [time]

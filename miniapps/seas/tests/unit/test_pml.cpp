@@ -507,6 +507,136 @@ void TestPMLFreeSurfacePulseStable()
    delete mesh;
 }
 
+// ===== R-001: PML damping on the ADER-corrector path (the SAFS production
+// path).  The six tests above all step via RK4 -> wave.Mult(), exercising
+// only the predictor/Mult PML branch (wave_operator.inl:735).  SAFS runs
+// ader_order=2, so the corrector PML branch (wave_operator.inl:5329-5393)
+// is the path that actually runs in production, yet was untested.
+//
+// This test steps via wave.AdvanceADER with a NON-ZERO uniform background.
+// The corrector damps (I - dt*Q_bg); with the dt factor present the radiated
+// fluctuation is absorbed and the fluctuation energy decays.  If the dt
+// factor were ever dropped (subtracting Q_bg ~1e6 instead of dt*Q_bg ~10
+// from the integrated state I ~ dt*Q ~ 10), the branch would inject a huge
+// spurious source and the fluctuation energy would blow up / NaN — caught
+// by the finiteness + decay asserts below. =====
+void TestPMLEnergyDecayADER()
+{
+   std::cout << "Test 21b: TestPMLEnergyDecayADER\n";
+
+   // Same geometry as TestPMLEnergyDecay: 8x1x1, x-PML thickness 0.3.
+   auto *mesh = new Mesh(Mesh::MakeCartesian3D(8, 1, 1, Element::HEXAHEDRON,
+                                                1.0, 0.125, 0.125));
+   int order = 1;
+   real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   real_t cp = std::sqrt((lambda + 2.0*mu) / rho);
+   real_t lp = lambda + 2.0*mu;
+
+   BoundaryConfig bc;
+   for (int i = 1; i <= 6; i++) { bc.absorbing_attrs.insert(i); }
+   bc.fault_attr = 0;
+
+   WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+
+   // NON-ZERO uniform background pre-stress (isotropic compression).  A
+   // uniform Q_bg is a steady state of the elastic operator and is also the
+   // absorbing-BC ghost, so the background neither radiates nor reflects;
+   // only the fluctuation evolves.  The non-zero bg is what makes the
+   // corrector's dt*Q_bg target matter (a dropped dt would corrupt it).
+   real_t bg[NUM_STATE] = {0};
+   bg[SXX] = -1.0e6;
+   bg[SYY] = -1.0e6;
+   bg[SZZ] = -1.0e6;
+   wave.SetAbsorbingBackground(bg);
+
+   Vector xmin(3), xmax(3);
+   xmin = 0.0; xmax(0) = 1.0; xmax(1) = 0.125; xmax(2) = 0.125;
+   PMLLayer pml(xmin, xmax, 0.3, cp);
+   wave.SetPML(&pml);
+
+   int ndof_total = wave.GetScalarNDof();
+   int size = wave.Height();
+
+   // Background field (uniform per component) — used to extract the
+   // fluctuation energy = Energy(Q - Q_bg).
+   Vector bg_field(size);
+   bg_field = 0.0;
+   const FiniteElementSpace &fes = wave.GetFESpace();
+   for (int e = 0; e < wave.NumElements(); e++)
+   {
+      int ndof = fes.GetFE(e)->GetDof();
+      int offset = e * wave.GetNDof();
+      for (int c = 0; c < NUM_STATE; c++)
+         for (int i = 0; i < ndof; i++)
+            bg_field[c * ndof_total + offset + i] = bg[c];
+   }
+
+   // Q = background + a +x-propagating P-pulse fluctuation centred at x=0.5.
+   Vector Q(bg_field);
+   for (int e = 0; e < wave.NumElements(); e++)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      int ndof = fe->GetDof();
+      int offset = e * wave.GetNDof();
+      DenseMatrix coords;
+      Tr->Transform(fe->GetNodes(), coords);
+      for (int i = 0; i < ndof; i++)
+      {
+         real_t x = coords(0, i);
+         real_t amp = std::exp(-200.0 * (x - 0.5) * (x - 0.5));
+         Q[SXX * ndof_total + offset + i] += -lp * amp;
+         Q[SYY * ndof_total + offset + i] += -lambda * amp;
+         Q[SZZ * ndof_total + offset + i] += -lambda * amp;
+         Q[VX  * ndof_total + offset + i] += cp * amp;
+      }
+   }
+
+   // Fluctuation energy helper: Energy(Q - bg_field).
+   auto fluct_energy = [&](const Vector &Qfull)
+   {
+      Vector q(Qfull); q -= bg_field;
+      return ComputeEnergy(wave, q, lambda, mu, rho);
+   };
+
+   real_t E0 = fluct_energy(Q);
+
+   real_t cfl = 1.0 / (3.0 * (2.0 * order + 1));
+   real_t dt = wave.ComputeMaxDt(cfl);
+
+   // Step via the ADER corrector (order 2 = the SAFS production order).
+   real_t E_prev = E0;
+   bool finite = true, monotonic = true;
+   Vector Qn(size);
+   for (int step = 0; step < 50; step++)
+   {
+      wave.AdvanceADER(Q, dt, /*order=*/2, Qn);   // corrector path (inl:5329)
+      Q = Qn;
+      for (int i = 0; i < size; i++)
+         if (!std::isfinite(Q(i))) { finite = false; break; }
+      if (!finite) { break; }
+      real_t E_curr = fluct_energy(Q);
+      if (E_curr > E_prev * 1.001) { monotonic = false; break; }
+      E_prev = E_curr;
+   }
+   real_t E_final = fluct_energy(Q);
+
+   TEST_ASSERT(finite,
+               "PML ADER corrector: finite for 50 steps (no NaN)");
+   TEST_ASSERT(monotonic,
+               "PML ADER corrector: fluctuation energy monotonically decreasing");
+   // The radiated fluctuation is absorbed by the x-PML; with the correct
+   // dt*Q_bg target the interior relaxes toward the background, so the
+   // fluctuation energy falls well below its initial value.  A dropped-dt
+   // regression injects energy and fails finite/monotonic above.
+   TEST_ASSERT(E_final < 0.5 * E0,
+               "PML ADER corrector: fluctuation energy decays (E_final/E0 = " +
+               std::to_string(E_final / E0) + ")");
+
+   wave.SetPML(nullptr);
+   delete mesh;
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -519,6 +649,7 @@ int main()
    TestPMLCorner();
    TestPMLFreeSurfaceTopUndamped();
    TestPMLFreeSurfacePulseStable();
+   TestPMLEnergyDecayADER();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";
