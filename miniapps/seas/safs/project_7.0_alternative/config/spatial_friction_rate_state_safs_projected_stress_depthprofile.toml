@@ -80,8 +80,11 @@ sigma_xz_pa = 0.0
 ader_order = 2
 mixed_flux = "adjacent"
 cfl        = 0.5
-# R-025: use_pml is NOT wired into seas_spatial_dyn_driver; keep tfinal within
-# the reflection-free window (see [time]).  Box exterior uses absorbing BCs.
+# Phase 12: use_pml IS now wired (driver builds a PMLLayer + WaveOperator::SetPML
+# on the interior_flux="scalar" path).  Kept false here so tfinal stays within the
+# reflection-free window (see [time]); enable with use_pml=true (or --pml) plus
+# pml_cells / pml_target_R / pml_damp_bottom (or pml_thickness_m) and extend
+# tfinal.  Box exterior otherwise uses first-order absorbing BCs.
 use_pml    = false
 
 [time]

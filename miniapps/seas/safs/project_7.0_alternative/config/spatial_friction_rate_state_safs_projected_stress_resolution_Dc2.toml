@@ -80,19 +80,21 @@ sigma_xz_pa = 0.0
 ader_order = 2
 mixed_flux = "adjacent"
 cfl        = 0.5
-# R-025: use_pml is NOT wired into seas_spatial_dyn_driver (it never calls
-# WaveOperator::SetPML); setting it true would only silence the reflection
-# warning WITHOUT absorbing anything.  The box exterior uses first-order
-# ABSORBING BCs (.geo attrs 103/104), so reflections are partially (not
-# perfectly) damped.  To keep every saved snapshot physical, tfinal is bounded
-# by the box reflection time min_box_dim/cp_max (~6.94 s for this 500 m mesh +
-# cp=5996 m/s).  Leave use_pml=false until a real PML layer is wired.
+# Phase 12: use_pml IS now wired into seas_spatial_dyn_driver (it constructs a
+# PMLLayer and calls WaveOperator::SetPML on the interior_flux="scalar" path).
+# When true it absorbs outgoing waves on x +/-, y +/-, and z-min (the free
+# surface z=z_max stays undamped); enable with use_pml=true (or --pml) plus
+# pml_cells / pml_target_R / pml_damp_bottom (or pml_thickness_m).  Kept false
+# here so this config's tfinal stays within the box reflection-free window
+# min_box_dim/cp_max (~6.94 s for this 500 m mesh + cp=5996 m/s).  The box
+# exterior otherwise uses first-order ABSORBING BCs (.geo attrs 103/104), which
+# only partially damp reflections.  Flip to true (and extend tfinal) to use PML.
 use_pml    = false
 
 [time]
 # R-025: <= the ~6.94 s reflection-free window (min_box_dim/cp) for this mesh.
 # Beyond it, reflections off the box contaminate the rupture.  (Was 100 s with
-# use_pml=false, which the driver warned about; PML is not wired — see [numerics].)
+# use_pml=false, which the driver warned about; PML is available — see [numerics].)
 tfinal     = "6s"
 t_initial  = 0.0
 dt_initial = "auto"
