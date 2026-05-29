@@ -851,6 +851,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_phaseh_godunov_flux_pool \
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
+               seas_test_friction_depth_profile \
                seas_test_spatial_nucleation \
                seas_test_nucleation_factory \
                seas_test_rk_time_stepper \
