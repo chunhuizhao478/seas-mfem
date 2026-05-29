@@ -110,6 +110,13 @@ void Tpv205SubStepIterator::StepOneQP_(DOFData &d,
    // The trailing arg is the σ_n strength floor (sliver-blowup plan
    // 2026-05-26): disabled (sentinel < 0) maps to 0.0 ⇒ byte-exact
    // `max(σ_n,0)`; this is the SAFS LSW blow-up path the floor targets.
+   // NOTE (Phase 10): this standalone iterator is the byte-exact TPV205
+   // oracle, where the LSW cohesion C0 is ALWAYS 0 — so it intentionally
+   // does NOT pass `d.lsw_cohesion` (SolveLSW_TPV205's cohesion arg defaults
+   // to 0.0).  The TPV31 cohesion path runs through the unified
+   // LinearSlipWeakeningIterator (friction_substep_iterator.cpp), which DOES
+   // pass d.lsw_cohesion.  Keep these in sync only if this oracle is ever
+   // reused for a cohesive case.
    SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
                    s.tau1_total, s.tau2_total,
                    s.sigma_n_total, d.eta_s,

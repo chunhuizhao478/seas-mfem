@@ -356,7 +356,8 @@ InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
    const InstantaneousOverstressCircularSpec& spec,
    bool                                       enabled,
    const Vector&                              dof_coords_3d,
-   const DenseMatrix&                         dof_basis)
+   const DenseMatrix&                         dof_basis,
+   const std::function<real_t(real_t, real_t, real_t)>& mu_at_xyz)
 {
    InstantaneousOverstressPerDOFParams p;   // zero-sized by default
    if (!enabled) { return p; }
@@ -376,6 +377,13 @@ InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
                "ResolveInstantaneousOverstressCircular: spec.taper_m must be "
                ">= 0; got " << spec.taper_m);
 
+   // Phase 10 (TPV31 spec p. 7): per-DOF mu(depth)/mu_ref amplitude scaling,
+   // active only when a reference modulus is set AND a mu lookup is supplied.
+   // Otherwise the scale is a uniform 1.0 (byte-identical to the pre-Phase-10
+   // path, and to every non-TPV31 config that omits mu_ref_pa).
+   const bool mu_scaled =
+      (spec.mu_ref_pa > 0.0) && static_cast<bool>(mu_at_xyz);
+
    p.amplitude_strike.SetSize(N);
    const real_t center[3] = { spec.center_x_m, spec.center_y_m, spec.center_z_m };
    for (int i = 0; i < N; ++i)
@@ -385,8 +393,19 @@ InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
       const real_t* basis_strike = &dof_basis(6, i);
       const real_t  r = InFaultPlaneRadius(dof_xyz, center, basis_dip,
                                            basis_strike);
+      real_t mu_scale = 1.0;
+      if (mu_scaled)
+      {
+         const real_t mu_local = mu_at_xyz(dof_xyz[0], dof_xyz[1], dof_xyz[2]);
+         MFEM_VERIFY(mu_local > 0.0,
+                     "ResolveInstantaneousOverstressCircular: mu_at_xyz("
+                     << dof_xyz[0] << ", " << dof_xyz[1] << ", " << dof_xyz[2]
+                     << ") returned " << mu_local << " (must be > 0).");
+         mu_scale = mu_local / spec.mu_ref_pa;
+      }
       p.amplitude_strike(i) =
-         CosineTaperFactor(r, spec.radius_m, spec.taper_m) * spec.delta_tau_pa;
+         CosineTaperFactor(r, spec.radius_m, spec.taper_m)
+         * spec.delta_tau_pa * mu_scale;
    }
    return p;
 }

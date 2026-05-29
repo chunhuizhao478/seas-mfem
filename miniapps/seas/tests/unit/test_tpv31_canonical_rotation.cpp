@@ -248,6 +248,73 @@ static void T7_numerics_opt_ins()
                "interior_flux = matrix (TPV31 heterogeneous material)");
 }
 
+// ---------------------------------------------------------------------
+// T-8  Depth-proportional pre-stress projects to a RIGHT-LATERAL-POSITIVE
+//      on-fault strike traction (R-001).  The TOML stores sigma_xy_per_mu in
+//      the right-lateral-POSITIVE convention; safs uses the no-flip projection
+//      (tau2 = +t2·(S·n) = -S_xy on the canonical y=0 fault), so the driver
+//      must NEGATE sigma_xy at construction (mirroring the constant_tensor
+//      D3.1 path) for the on-fault strike to come out positive.  Build the
+//      source exactly as the driver does (negated sigma_xy) and project.
+// ---------------------------------------------------------------------
+static void T8_depth_proportional_strike_sign()
+{
+   std::cout << "\n[T-8] depth_proportional projects to right-lateral-POSITIVE "
+                "tau_strike (R-001)\n";
+   const std::string path = find_tpv31_toml();
+   if (path.empty()) { std::cerr << "  SKIP\n"; return; }
+   SpatialFrictionConfig cfg = LoadSpatialFrictionConfig(path);
+   const auto& dp = cfg.stress.depth_proportional;
+
+   // mu == mu_ref ⇒ scale 1 (factor out the depth dependence).
+   const real_t mu_ref = dp.mu_ref_pa;
+   auto mu_at = [mu_ref](real_t, real_t, real_t) { return mu_ref; };
+
+   // Build the source AS THE DRIVER DOES: negate sigma_xy (the R-001 fix).
+   DepthProportionalToShearModulusStressSource src(
+      dp.sigma_xx_per_mu, dp.sigma_yy_per_mu, dp.sigma_zz_per_mu,
+      -dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
+      mu_ref, mu_at);
+
+   const mfem::DenseMatrix S = src.Evaluate(0.0, 0.0, -7500.0);
+
+   // Canonical y=0 fault: n=(0,-1,0), strike t2=(+1,0,0).  No-flip rule.
+   const real_t n[3]  = { 0.0, -1.0, 0.0 };
+   const real_t t2[3] = { 1.0,  0.0, 0.0 };
+   real_t Sn[3];
+   for (int r = 0; r < 3; ++r)
+   {
+      Sn[r] = S(r,0)*n[0] + S(r,1)*n[1] + S(r,2)*n[2];
+   }
+   const real_t sigma_n = n[0]*Sn[0] + n[1]*Sn[1] + n[2]*Sn[2];
+   const real_t tau2    = t2[0]*Sn[0] + t2[1]*Sn[1] + t2[2]*Sn[2];
+
+   TEST_NEAR(sigma_n, +60.0e6, 1.0,
+             "sigma_n = +S_yy = +60 MPa (compression positive)");
+   TEST_ASSERT(tau2 > 0.0,
+               "on-fault strike traction is right-lateral POSITIVE");
+   TEST_NEAR(tau2, +30.0e6, 1.0,
+             "tau_strike = +30 MPa (== the negated-sigma_xy constant_tensor path)");
+
+   // Guard the convention: WITHOUT the driver's negation (raw +sigma_xy) the
+   // same no-flip projection yields the WRONG (left-lateral) sign — this is the
+   // R-001 bug, locked here so a fix-removal regresses loudly.
+   DepthProportionalToShearModulusStressSource src_bug(
+      dp.sigma_xx_per_mu, dp.sigma_yy_per_mu, dp.sigma_zz_per_mu,
+      +dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
+      mu_ref, mu_at);
+   const mfem::DenseMatrix Sb = src_bug.Evaluate(0.0, 0.0, -7500.0);
+   real_t Snb[3];
+   for (int r = 0; r < 3; ++r)
+   {
+      Snb[r] = Sb(r,0)*n[0] + Sb(r,1)*n[1] + Sb(r,2)*n[2];
+   }
+   const real_t tau2_bug = t2[0]*Snb[0] + t2[1]*Snb[1] + t2[2]*Snb[2];
+   TEST_ASSERT(tau2_bug < 0.0,
+               "un-negated sigma_xy → LEFT-lateral (the R-001 bug) — negation "
+               "is required");
+}
+
 int main(int, char**)
 {
    std::cout << "Running test_tpv31_canonical_rotation "
@@ -259,6 +326,7 @@ int main(int, char**)
    T5_cohesion_taper_canonical();
    T6_nucleation_center_rotated();
    T7_numerics_opt_ins();
+   T8_depth_proportional_strike_sign();
    std::cout << "\n========================================\n";
    std::cout << "test_tpv31_canonical_rotation: "
              << num_passed << " / " << num_tests

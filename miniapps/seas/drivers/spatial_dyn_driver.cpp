@@ -79,6 +79,7 @@
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/nucleation_factory.hpp"   // Phase 7: MakeNucleation
 #include "../dynamic/rk_time_stepper.hpp"      // Phase 14: RK4/RK45 coupled stepper
+#include "../dynamic/tpv31_stations.hpp"       // Phase 10: TPV31 SCEC station writer
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -1421,9 +1422,20 @@ int main(int argc, char *argv[])
                     "sidecar_hdf5 is not yet implemented.");
       }
       const auto &dp = cfg.stress.depth_proportional;
+      // D3.1 sign convention (SAME as the constant_tensor path at the negation
+      // above): the TOML stores stress in the right-lateral-POSITIVE convention,
+      // but safs uses the no-flip on-fault projection (fault_geometry_safs_
+      // templated.inl:104: tau2 = +t2·(S·n) = -S_xy for the canonical y=0
+      // fault).  To map a positive (right-lateral) sigma_xy INPUT to a positive
+      // (right-lateral) on-fault tau_strike, negate the xy off-diagonal at
+      // construction — exactly as ConstantTensorStressSource is built with
+      // -cfg.stress.sigma_xy_pa above.  Normals (compression-positive) and the
+      // dip yz/xz shears (rotation coefficient +1) keep their sign.  Without
+      // this negation TPV31 would project to a LEFT-lateral background that
+      // opposes the (positive) instantaneous nucleation overstress.
       spatial::DepthProportionalToShearModulusStressSource src(
          dp.sigma_xx_per_mu, dp.sigma_yy_per_mu, dp.sigma_zz_per_mu,
-         dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
+         -dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
          dp.mu_ref_pa, std::move(mu_at_xyz));
       geom.ComputeParams(src,
                          cfg.stress.pore_pressure.P_p_pa,
@@ -1484,8 +1496,31 @@ int main(int argc, char *argv[])
    //     replaces the per-sub-step nuc_cb; `nuc->ApplyOnce` (after init/restart)
    //     seeds the one-shot instantaneous patch (no-op for Gaussian/static).
    // -----------------------------------------------------------------
+   // Phase 10 (TPV31 spec p. 7): per-point shear-modulus lookup so the
+   // instantaneous-circular nucleation amplitude is scaled by mu(depth)/mu_ref
+   // (the SAME depth-dependent mu that scales the depth-proportional background
+   // stress).  Empty unless a coordinate-only mu is available; MakeNucleation
+   // forwards it only to the instantaneous resolver and only when its
+   // mu_ref_pa > 0, so every other config/path is byte-unchanged.
+   std::function<real_t(real_t, real_t, real_t)> nuc_mu_at_xyz;
+   if (material.mode == MaterialField::Mode::Constant)
+   {
+      const real_t mu_const = material.mu_const;
+      nuc_mu_at_xyz = [mu_const](real_t, real_t, real_t) { return mu_const; };
+   }
+   else if (depth_profile_wrapper != nullptr &&
+            static_cast<bool>(depth_profile_wrapper->eval_at_xyz))
+   {
+      auto &eval = depth_profile_wrapper->eval_at_xyz;
+      nuc_mu_at_xyz = [&eval](real_t x, real_t y, real_t z) -> real_t
+      {
+         real_t lam, mu, rho;
+         eval(x, y, z, lam, mu, rho);
+         return mu;
+      };
+   }
    std::unique_ptr<INucleationMethod> nuc =
-      MakeNucleation(cfg, dof_coords_3d, dof_basis);
+      MakeNucleation(cfg, dof_coords_3d, dof_basis, nuc_mu_at_xyz);
 
    // The PrintDerivedAndCheck* diagnostics + the static ParaView nucleation
    // fields read the resolved per-DOF amplitudes/radial.  Source them from the
@@ -2596,6 +2631,31 @@ int main(int argc, char *argv[])
       paraview_write(0, cfg.time.t_initial, 0.0);
    }
 
+   // Phase 10 (TPV31): SCEC on-fault station traces (one `.dat` per station) —
+   // the verification artifact consumed by tpv31/visualize_results.py.  The
+   // spatial driver otherwise emits only ParaView/HDF5 fault output; the
+   // per-station writer is TPV31-specific (LSW μ_eff + the 30-station SCEC
+   // grid), so gate on the TPV31 problem tag.  `fault_coords` is sized
+   // num_fault_total with the same (interior-then-shared) DOF ordering as
+   // `dof_data`; the writer resolves cross-rank station ownership internally.
+   std::unique_ptr<TPV31StationWriter> tpv31_stations;
+   if (cfg.problem.tag == "tpv31")
+   {
+      tpv31_stations = std::make_unique<TPV31StationWriter>();
+      const std::vector<TPV31Station> stations = DefaultStations_TPV31();
+#ifdef MFEM_USE_MPI
+      tpv31_stations->Open(cfg.output.output_dir, "tpv31", stations,
+                           fault_coords, num_fault_total, comm);
+#else
+      tpv31_stations->Open(cfg.output.output_dir, "tpv31", stations,
+                           fault_coords, num_fault_total);
+#endif
+      if (restart_prefix.empty())
+      {
+         tpv31_stations->WriteStep(cfg.time.t_initial, dof_data);
+      }
+   }
+
    // -----------------------------------------------------------------
    // 20. Time loop.
    // -----------------------------------------------------------------
@@ -2843,6 +2903,10 @@ int main(int argc, char *argv[])
 
       paraview_write(step + 1, t, V_max_step);
 
+      // Phase 10 (TPV31): append the post-step state to each SCEC station
+      // trace (every step — 30 stations × ~80 B/row).  No-op unless TPV31.
+      if (tpv31_stations) { tpv31_stations->WriteStep(t, dof_data); }
+
       // ------------------------------------------------------------------
       // MPI shared-fault consistency tripwire.  Follows tpv104_driver.cpp
       // (:2636-2639) and tpv205_driver.cpp (:2442-2445), both of which call
@@ -2942,6 +3006,11 @@ int main(int argc, char *argv[])
                    << "  V_max = " << V_max_step << " m/s\n";
       }
    }
+
+   // Phase 10 (TPV31): flush + close the SCEC station traces (no-op unless the
+   // writer was opened).  Files are flushed every WriteStep, so this is belt-
+   // and-suspenders before the (RAII) close at scope exit.
+   if (tpv31_stations) { tpv31_stations->Close(); }
 
    // -----------------------------------------------------------------
    // 21. Final checkpoint.

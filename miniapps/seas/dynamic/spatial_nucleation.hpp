@@ -277,6 +277,14 @@ struct InstantaneousOverstressCircularSpec
    real_t radius_m     = 0.0;   ///< R; > 0 required when enabled
    real_t taper_m      = 0.0;   ///< cosine taper width [m] (>= 0)
    real_t delta_tau_pa = 0.0;   ///< overstress amplitude [Pa]
+   /// Phase 10 (TPV31, spec p. 7): per-DOF amplitude scaling by
+   /// `mu(point)/mu_ref` (the same depth-dependent shear modulus that scales
+   /// the depth-proportional background stress).  `<= 0` (the default, and the
+   /// value for every non-TPV31 config that omits the key) DISABLES the
+   /// scaling — `amplitude_strike` is then the uniform `delta_tau_pa`, exactly
+   /// as before.  The `mu(point)` lookup is supplied by the resolver's optional
+   /// `mu_at_xyz` callback (the driver passes the depth-profile evaluator).
+   real_t mu_ref_pa    = 0.0;
 };
 
 /// @brief Cosine-tapered radial factor for the one-shot patch (TPV31):
@@ -300,11 +308,17 @@ struct InstantaneousOverstressPerDOFParams
 /// seeded ONCE at t=0 by the caller (see `INucleationMethod::ApplyOnce`), which
 /// adds `amplitude_strike(i)` to `DOFData::tau2_nuc`.  Returns zero-sized when
 /// `!enabled`.
+///
+/// `mu_at_xyz` (optional): when non-empty AND `spec.mu_ref_pa > 0`, each DOF's
+/// amplitude is scaled by `mu_at_xyz(x,y,z)/spec.mu_ref_pa` (TPV31 spec p. 7
+/// per-DOF mu(depth)/mu_0 scaling).  Empty callback or `mu_ref_pa <= 0` ⇒ no
+/// scaling (uniform `delta_tau_pa`), byte-identical to the pre-Phase-10 path.
 InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
    const InstantaneousOverstressCircularSpec& spec,
    bool                                       enabled,
    const Vector&                              dof_coords_3d,
-   const DenseMatrix&                         dof_basis);
+   const DenseMatrix&                         dof_basis,
+   const std::function<real_t(real_t, real_t, real_t)>& mu_at_xyz = {});
 
 }  // namespace spatial
 }  // namespace seas
