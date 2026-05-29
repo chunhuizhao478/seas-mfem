@@ -27,6 +27,13 @@
 #   # ... etc. for the dev / triq run jobs.
 #
 # Override: BUILD_JOBS (parallel make jobs; default 48).
+#           BUILD_CLEAN=1 — run `make clean` before building (default 0).  Use
+#           after a cross-codebase change (e.g. a `git reset --hard` that swapped
+#           the source tree, or a shared-header edit): the Makefile has NO header
+#           deps, so an unchanged .cpp that includes a CHANGED header keeps its
+#           stale .o and ABI-mismatches the new sources (silent SIGABRT at run
+#           time).  A clean build is the safe fix; leave 0 for routine builds.
+#             sbatch --export=ALL,BUILD_CLEAN=1 .../spatial_dyn_build_safs.sbatch
 
 export LC_ALL=C
 export LANG=C
@@ -68,12 +75,24 @@ grep -q '^MFEM_USE_HDF5 *= YES'   config/config.mk || { echo "ERROR: no HDF5"; e
 grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || { echo "ERROR: no H5Z_ZFP"; exit 1; }
 
 BUILD_JOBS="${BUILD_JOBS:-48}"
+BUILD_CLEAN="${BUILD_CLEAN:-0}"
 
 cd miniapps/seas
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Building:    seas_spatial_dyn_driver seas_partition_mesh  (make -j${BUILD_JOBS})"
 echo "In:          $(pwd)"
+echo "Clean first: ${BUILD_CLEAN}  (BUILD_CLEAN=1 -> make clean before build)"
+
+# BUILD_CLEAN=1: purge stale objects before building.  Needed after a
+# cross-codebase change (a git reset that swapped the tree, or a shared-header
+# edit) because the Makefile has no header deps — an unchanged .cpp that
+# includes a changed header keeps its stale .o and ABI-mismatches the new
+# sources (silent SIGABRT at run time).  `make clean` is just rm; no relink race.
+if [[ "${BUILD_CLEAN}" == "1" ]]; then
+    echo "BUILD_CLEAN=1 -> make clean"
+    make clean || { echo "make clean FAILED"; exit 1; }
+fi
 
 # seas_partition_mesh is the pre-split tool (R-OOM): it partitions a large
 # serial .msh into per-rank files so production with --mesh-mode presplit avoids
