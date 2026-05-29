@@ -577,6 +577,53 @@ void TestR003MatrixMixedFluxAborts()
    delete mesh;
 }
 
+// ===== Test 16 (REVIEW R-006): matrix × precomputed-face-flux mutual exclusion
+// UsePrecomputedFaceFluxes(true) on a heterogeneous operator must abort via the
+// BimaterialWaveOperator override — the precomputed tables would otherwise be
+// built from the inherited (1,1,1) sentinel flux_ and the precomputed dispatch
+// bypasses the per-face bi-material InteriorFaceFlux_.  The override fires
+// BEFORE the base reaches PrecomputedFaceFluxes::Init, so this works on any
+// mesh.  Disable (enable=false) must NOT abort (teardown path stays valid).
+//
+// We do NOT assert the scalar control here: the base PrecomputedFaceFluxes
+// path is tet-only (Init MFEM_VERIFYs el_faces.Size()==4 / Tet::FaceVert) while
+// CreateTestMesh() is a hex Cartesian mesh, so the scalar enable would abort
+// for an unrelated tet-only precondition.  The scalar (matrix-free) behaviour
+// of UsePrecomputedFaceFluxes is exercised on tet meshes by test_arm1 /
+// test_arm2 / test_adjacent_triangle_fault_first_step_audit.
+void TestR006MatrixPrecomputedFluxAborts()
+{
+   std::cout << "Test 16: TestR006MatrixPrecomputedFluxAborts "
+                "(matrix x precomputed-flux)\n";
+   auto *mesh = CreateTestMesh();
+   const int order = 2;
+   const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   BoundaryConfig bc = MakeAbsorbingBC();
+
+   BimaterialWaveOperator wave_het(*mesh, order,
+                         MaterialField::MakeConstant(lambda, mu, rho), bc);
+   TEST_ASSERT(wave_het.UsesGodunovFluxPool() == true,
+               "precondition: heterogeneous operator (per-element pool set)");
+
+   const bool aborted = RunAbortsInChild([&]() {
+      wave_het.UsePrecomputedFaceFluxes(true);
+   });
+   TEST_ASSERT(aborted,
+               "UsePrecomputedFaceFluxes(true) on a matrix operator aborts "
+               "(R-006)");
+
+   // Disable must be a no-op (no abort) on the matrix operator — proves the
+   // override gates specifically on enable==true, not a blanket abort.
+   const bool disable_aborted = RunAbortsInChild([&]() {
+      wave_het.UsePrecomputedFaceFluxes(false);
+   });
+   TEST_ASSERT(!disable_aborted,
+               "UsePrecomputedFaceFluxes(false) on a matrix operator does NOT "
+               "abort (disable is a no-op)");
+
+   delete mesh;
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -591,6 +638,7 @@ int main()
    TestQuiescentState();
    TestSEASDynamicOperator();
    TestR003MatrixMixedFluxAborts();
+   TestR006MatrixPrecomputedFluxAborts();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";
