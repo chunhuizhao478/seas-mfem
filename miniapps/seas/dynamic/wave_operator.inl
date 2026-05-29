@@ -2614,9 +2614,34 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                   //    Q_bg is consumed only by Absorbing/FreeSurface/
                   //    PML BC branches, which carry their own guards.
                   real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
-                  fault_flux_->Evaluate(fdata,
-                                        Q_plus_local, Q_minus_local,
-                                        Q_imp_plus, Q_imp_minus);
+                  // Phase 14 (RK+LSW): the Mult-path fault solve dispatches on
+                  // the friction-law tag.  LSW (TPV205) uses the instantaneous
+                  // EvaluateLSW; rate-and-state uses Evaluate (unchanged
+                  // default).  LSW_ForcedRupture has no instantaneous solve on
+                  // the Mult/RK path (only EvaluateADER_LSW_ForcedRupture, for
+                  // ADER) — abort rather than silently mis-step.
+                  if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                  {
+                     fault_flux_->EvaluateLSW(fdata,
+                                              Q_plus_local, Q_minus_local,
+                                              Q_imp_plus, Q_imp_minus);
+                  }
+                  else if (fault_friction_law_ ==
+                           FaultFrictionLaw::LSW_ForcedRupture)
+                  {
+                     MFEM_ABORT("WaveOperator::Mult: FaultFrictionLaw::"
+                                "LSW_ForcedRupture has no instantaneous solve on "
+                                "the Mult/RK path (only EvaluateADER_LSW_"
+                                "ForcedRupture exists, for ADER).  Use "
+                                "--time-integrator ader for forced-rupture "
+                                "configs.");
+                  }
+                  else
+                  {
+                     fault_flux_->Evaluate(fdata,
+                                           Q_plus_local, Q_minus_local,
+                                           Q_imp_plus, Q_imp_minus);
+                  }
 
                   // 3. Rotate imposed states back to global via T_can.
                   real_t Q_imp_plus_g[NUM_STATE], Q_imp_minus_g[NUM_STATE];
@@ -3257,9 +3282,32 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   // v9.4.0 Commit 3: fluctuation-Q dispatch.  REVIEW
                   // R-003: no has_bulk_bg_ guard — fault dispatch does
                   // not consume Q_bg.
-                  fault_flux_->Evaluate(fdata,
-                                        Q_plus_local, Q_minus_local,
-                                        Q_imp_plus, Q_imp_minus);
+                  // Phase 14 (RK+LSW): shared-fault Mult-path solve dispatches
+                  // on the friction-law tag, identical to the interior-fault
+                  // site above (LSW -> instantaneous EvaluateLSW; RS ->
+                  // Evaluate; LSW_ForcedRupture -> abort).
+                  if (fault_friction_law_ == FaultFrictionLaw::LSW)
+                  {
+                     fault_flux_->EvaluateLSW(fdata,
+                                              Q_plus_local, Q_minus_local,
+                                              Q_imp_plus, Q_imp_minus);
+                  }
+                  else if (fault_friction_law_ ==
+                           FaultFrictionLaw::LSW_ForcedRupture)
+                  {
+                     MFEM_ABORT("WaveOperator::Mult (shared fault): "
+                                "FaultFrictionLaw::LSW_ForcedRupture has no "
+                                "instantaneous solve on the Mult/RK path (only "
+                                "EvaluateADER_LSW_ForcedRupture exists, for "
+                                "ADER).  Use --time-integrator ader for "
+                                "forced-rupture configs.");
+                  }
+                  else
+                  {
+                     fault_flux_->Evaluate(fdata,
+                                           Q_plus_local, Q_minus_local,
+                                           Q_imp_plus, Q_imp_minus);
+                  }
 
                   // Rotate imposed states back to global via T_can (same
                   // on both ranks).  Q_imp_plus_g, Q_imp_minus_g are

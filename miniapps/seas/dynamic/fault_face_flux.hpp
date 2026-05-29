@@ -260,6 +260,31 @@ public:
                  real_t *Q_imp_plus, real_t *Q_imp_minus,
                  FrictionSolver::Method method = FrictionSolver::Method::Brent) const;
 
+   /// @brief Instantaneous LSW counterpart to `Evaluate` — the `dt→0` limit of
+   /// `EvaluateADER_LSW` (no I-form, no `dt`): operates directly on the bulk
+   /// states `Q_plus`/`Q_minus` (fault-local, NUM_STATE components).
+   ///
+   /// Reads ONLY the LSW-native fields `data.lsw_mu_s / lsw_mu_d / lsw_d_c /
+   /// lsw_cohesion`; `data.a / psi / Dc` are NOT consumed.  SLIP-STATELESS: reads
+   /// `data.slip1 / slip2` to form δ = √(slip1²+slip2²) for μ(δ), but NEVER writes
+   /// them — the coupled-RK-on-slip stepper (`AdvanceRKCoupledLSW_Spatial`)
+   /// integrates slip.  This mirrors `Evaluate` being ψ-stateless (the R-V92-H07
+   /// invariant) and `EvaluateADER_LSW`'s R-001 slip-invariant.
+   ///
+   /// Writes `data.{slip_rate,V1,V2,tau1_corr,tau2_corr,sigma_n_corr}` (the
+   /// tau*_corr / sigma_n_corr fields carry TOTAL physical traction per
+   /// `WriteBackState`).  Closed-form physics is the SCEC TPV5 §7-11 solve via
+   /// `LSWFrictionCoefficient_TPV205` + `SolveLSW_TPV205` (no Brent iteration).
+   ///
+   /// @param[in,out] data         Per-DOF state (slip_rate/V/tau*_corr updated).
+   /// @param[in]  Q_plus          State on + side (fault-local, NUM_STATE).
+   /// @param[in]  Q_minus         State on − side (fault-local, NUM_STATE).
+   /// @param[out] Q_imp_plus      Imposed state on + side (NUM_STATE).
+   /// @param[out] Q_imp_minus     Imposed state on − side (NUM_STATE).
+   void EvaluateLSW(DOFData &data,
+                    const real_t *Q_plus, const real_t *Q_minus,
+                    real_t *Q_imp_plus, real_t *Q_imp_minus) const;
+
    /// Round-12 Patch 1 stage helpers — split the body of `Evaluate` into
    /// reusable pieces so face-averaging experiments in
    /// `wave_operator.inl` can substitute per-QP stage values with face
