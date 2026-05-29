@@ -372,6 +372,17 @@ static void T_5_4_coefficient_mode_round_trip()
    TEST_ASSERT(m.mu_coef     == &mu_c,     "T-5-4 mu_coef stored");
    TEST_ASSERT(m.rho_coef    == &rho_c,    "T-5-4 rho_coef stored");
 
+   // REVIEW R-002 (Phase 13): MakeCoefficient sets ONLY the Coefficient
+   // pointers; the scalar shortcut fields lambda_const/mu_const/rho_const stay
+   // at their 0 defaults.  Deriving material (e.g. cp = sqrt((lam+2*mu)/rho))
+   // from these on a Coefficient field is the trap that produced the bogus
+   // matrix-path reflection-time warning (cp = sqrt(0/0) = NaN).  Material MUST
+   // come from EvalAt / At, never from the *_const fields.
+   TEST_ASSERT(m.lambda_const == 0.0 && m.mu_const == 0.0
+               && m.rho_const == 0.0,
+               "T-5-4 R-002: Coefficient-mode *_const fields are unset (0); "
+               "deriving material from them yields cp=sqrt(0/0)=NaN");
+
    // Need an ElementTransformation + IntegrationPoint to evaluate.
    auto mesh = make_single_hex_mesh();
    mfem::ElementTransformation* T = mesh->GetElementTransformation(0);

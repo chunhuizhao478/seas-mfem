@@ -2,6 +2,7 @@
 
 #include "mfem.hpp"
 #include "../../dynamic/wave_operator.hpp"
+#include "../../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix subclass
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/seas_dynamic_operator.hpp"
 #include "../../dynamic/heterogeneous_material.hpp"
@@ -551,10 +552,10 @@ void TestR003MatrixMixedFluxAborts()
    const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
    BoundaryConfig bc = MakeAbsorbingBC();
 
-   WaveOperator wave_het(*mesh, order,
+   BimaterialWaveOperator wave_het(*mesh, order,
                          MaterialField::MakeConstant(lambda, mu, rho), bc);
    TEST_ASSERT(wave_het.UsesGodunovFluxPool() == true,
-               "precondition: heterogeneous operator (owned_flux_pool_ set)");
+               "precondition: heterogeneous operator (per-element pool set)");
 
    const bool aborted = RunAbortsInChild([&]() {
       wave_het.SetMixedFluxMode(MixedFluxMode::AllContinuous);

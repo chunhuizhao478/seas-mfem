@@ -48,6 +48,7 @@
 
 #include "../dynamic/wave_state.hpp"
 #include "../dynamic/wave_operator.hpp"
+#include "../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix (bimaterial) operator
 #include "../dynamic/fault_face_flux.hpp"
 #include "../dynamic/friction_solver.hpp"
 #include "../dynamic/tpv205_friction.hpp"
@@ -77,6 +78,7 @@
 
 #include "../dynamic/spatial_nucleation.hpp"
 #include "../dynamic/nucleation_factory.hpp"   // Phase 7: MakeNucleation
+#include "../dynamic/rk_time_stepper.hpp"      // Phase 14: RK4/RK45 coupled stepper
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -528,9 +530,20 @@ int main(int argc, char *argv[])
    const real_t cli_tfinal     = GetRealArg(argc, argv, "--tfinal", -1.0);
    const real_t cli_cfl        = GetRealArg(argc, argv, "--cfl", -1.0);
    const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
+   // Phase 14: --time-integrator ader|rk4|rk45 (mirror --ader-order; empty ⇒
+   // keep the TOML/default).  Validated in the config-override block below.
+   const std::string cli_time_integrator =
+      GetStringArg(argc, argv, "--time-integrator", "");
    const std::string cli_mixed_flux =
       GetStringArg(argc, argv, "--mixed-flux", "");
    const bool   cli_pml        = HasFlag(argc, argv, "--pml");
+   // Phase 12.2: PML overrides (CLI wins over [numerics]); sentinels mean
+   // "not given on the CLI" so the TOML / struct default is kept.
+   const real_t cli_pml_thickness = GetRealArg(argc, argv, "--pml-thickness", -1.0);
+   const real_t cli_pml_target_R  = GetRealArg(argc, argv, "--pml-target-R",  -1.0);
+   const int    cli_pml_cells     = GetIntArg (argc, argv, "--pml-cells",     -1);
+   const int    cli_pml_damp_bot  = GetIntArg (argc, argv, "--pml-damp-bottom", -1);
+   const int    cli_pml_damp_top  = GetIntArg (argc, argv, "--pml-damp-top",    -1);
 
    const std::string cli_output_dir =
       GetStringArg(argc, argv, "--output-dir", "");
@@ -621,8 +634,27 @@ int main(int argc, char *argv[])
    if (cli_tfinal > 0.0)             { cfg.time.tfinal = cli_tfinal; }
    if (cli_cfl > 0.0)                { cfg.numerics.cfl = cli_cfl; }
    if (cli_ader_order > 0)           { cfg.numerics.ader_order = cli_ader_order; }
+   if (!cli_time_integrator.empty())
+   {
+      if      (cli_time_integrator == "ader")
+      { cfg.numerics.time_integrator = spatial::TimeIntegratorKind::ADER; }
+      else if (cli_time_integrator == "rk4")
+      { cfg.numerics.time_integrator = spatial::TimeIntegratorKind::RK4; }
+      else if (cli_time_integrator == "rk45")
+      { cfg.numerics.time_integrator = spatial::TimeIntegratorKind::RK45; }
+      else
+      {
+         MFEM_ABORT("--time-integrator: unknown value '" << cli_time_integrator
+                    << "'.  Accepted: ader | rk4 | rk45.");
+      }
+   }
    if (!cli_mixed_flux.empty())      { cfg.numerics.mixed_flux = cli_mixed_flux; }
    if (cli_pml)                      { cfg.numerics.use_pml = true; }
+   if (cli_pml_thickness > 0.0)      { cfg.numerics.pml_thickness_m = cli_pml_thickness; }
+   if (cli_pml_target_R  > 0.0)      { cfg.numerics.pml_target_R    = cli_pml_target_R; }
+   if (cli_pml_cells     > 0)        { cfg.numerics.pml_cells       = cli_pml_cells; }
+   if (cli_pml_damp_bot  >= 0)       { cfg.numerics.pml_damp_bottom = (cli_pml_damp_bot != 0); }
+   if (cli_pml_damp_top  >= 0)       { cfg.numerics.pml_damp_top    = (cli_pml_damp_top != 0); }
    if (!cli_output_dir.empty())      { cfg.output.output_dir = cli_output_dir; }
    if (!cli_pv_volume.empty())       { cfg.output.paraview_volume = cli_pv_volume; }
    if (!cli_pv_bulk.empty())         { cfg.output.paraview_bulk   = cli_pv_bulk; }
@@ -724,6 +756,31 @@ int main(int argc, char *argv[])
    // below resolves RS params, seeds equilibrium psi, and selects the aging
    // iterator via MakeFrictionIterator).
 
+   // Phase 14: the explicit-RK time integrator is an additive, CLI-gated
+   // alternative to ADER (default).  Its preconditions (plan §14.1/§14.4):
+   //   (a) rate_state only — the Mult-path instantaneous fault solve is the RS
+   //       Evaluate; there is NO instantaneous LSW solve on the Mult path
+   //       (only EvaluateADER_LSW exists, for the ADER path), so rk* + LSW
+   //       must abort with a clear message rather than silently mis-step;
+   //   (b) scalar interior flux only — mixed/central flux (the reason for RK)
+   //       is a scalar-path feature and is already mutually exclusive with the
+   //       matrix/bimaterial path.  rk* + matrix aborts.
+   const bool is_rk =
+      (cfg.numerics.time_integrator != spatial::TimeIntegratorKind::ADER);
+   MFEM_VERIFY(!is_rk || !is_lsw,
+               "spatial_dyn_driver: --time-integrator rk4|rk45 requires "
+               "[meta].law=\"rate_state\".  The explicit-RK Mult path runs the "
+               "rate-and-state fault Riemann solve (Evaluate); there is no "
+               "instantaneous LSW solve on the Mult path (LSW-on-RK is a "
+               "documented follow-up that needs a new instantaneous "
+               "EvaluateLSW).  Use --time-integrator ader for slip_weakening.");
+   MFEM_VERIFY(!is_rk
+               || cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar,
+               "spatial_dyn_driver: --time-integrator rk4|rk45 requires "
+               "[numerics].interior_flux=\"scalar\".  Mixed/central flux (the "
+               "feature the RK path enables) is scalar-only and mutually "
+               "exclusive with the matrix/bimaterial path.");
+
    // σ_n strength floor banner string (sliver-blowup plan 2026-05-26):
    // "DISABLED" for the negative sentinel, else the value in MPa.
    std::string sigma_n_floor_banner;
@@ -756,6 +813,12 @@ int main(int argc, char *argv[])
                 << "tfinal:           " << cfg.time.tfinal << " s\n"
                 << "cfl:              " << cfg.numerics.cfl << "\n"
                 << "ader order:       " << cfg.numerics.ader_order << "\n"
+                << "time integrator:  "
+                << (cfg.numerics.time_integrator
+                       == spatial::TimeIntegratorKind::ADER ? "ader"
+                    : cfg.numerics.time_integrator
+                       == spatial::TimeIntegratorKind::RK4  ? "rk4"
+                                                            : "rk45") << "\n"
                 << "mixed flux:       " << cfg.numerics.mixed_flux << "\n"
                 << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
                 << "\n"
@@ -876,6 +939,10 @@ int main(int argc, char *argv[])
    // declared here, before `wave_ptr` (constructed ~120 lines below), so C++
    // destroys them AFTER `wave_ptr`; keep this ordering.
    std::unique_ptr<spatial::SpatialVelocityBundle> vel_bundle;
+   // Phase 10 (TPV31): owns the three FunctionCoefficients that the
+   // depth-profile MaterialField points at; MUST outlive `wave_ptr` and
+   // `material` (same lifetime contract as `vel_bundle`).
+   std::unique_ptr<DepthProfile1DMaterial> depth_profile_wrapper;
    MaterialField material = MaterialField::MakeConstant(mat_lambda,
                                                         mat_mu, mat_rho);
 
@@ -883,7 +950,8 @@ int main(int argc, char *argv[])
    // override.  The CLI flag always wins (it can force the constant
    // path even when the TOML asks for a sidecar load).
    const bool sidecar_requested =
-      cfg.velocity.use_sidecar && !no_sidecar_material;
+      cfg.velocity.use_sidecar && !no_sidecar_material
+      && cfg.material.kind != spatial::MaterialKind::DepthProfile1D;
 
    // REVIEW R-002: the stale "Phase H gap (D-1)" abort that used to reject
    // every sidecar_requested run was REMOVED here — Phase 9 (Stage B) wired
@@ -892,7 +960,33 @@ int main(int argc, char *argv[])
    // valid input on the interior_flux="matrix" path.  The remaining guards
    // cover both paths: the scalar path forces Mode::Constant (the
    // material.mode guard below), and the matrix branch forces non-Constant.
-   if (sidecar_requested)
+   if (cfg.material.kind == spatial::MaterialKind::DepthProfile1D)
+   {
+      // Phase 10 (TPV31): build the depth-profile (Mode::Coefficient)
+      // MaterialField.  `material` borrows the wrapper's FunctionCoefficients
+      // (the wrapper outlives both `material` and `wave_ptr`).  The matrix
+      // (bimaterial) interior-flux path consumes it.
+      depth_profile_wrapper = MakeDepthProfile1DMaterial(
+         cfg.material.profile_layers, cfg.material.depth_axis);
+      material = depth_profile_wrapper->field;
+      if (rank == 0)
+      {
+         std::cout << "[material] kind=depth_profile_1d (axis='"
+                   << cfg.material.depth_axis << "', "
+                   << cfg.material.profile_layers.size()
+                   << " layers)\n";
+         for (std::size_t i = 0; i < cfg.material.profile_layers.size(); ++i)
+         {
+            const auto &L = cfg.material.profile_layers[i];
+            std::cout << "  layer " << i
+                      << ": depth=[" << L.depth_top_m << ", "
+                      << L.depth_bot_m << "] m  vp=" << L.vp_ms
+                      << " vs=" << L.vs_ms << " rho=" << L.rho_kgm3
+                      << " interp=" << L.interp << "\n";
+         }
+      }
+   }
+   else if (sidecar_requested)
    {
       try
       {
@@ -985,50 +1079,67 @@ int main(int argc, char *argv[])
       // requires material.kind != Constant); guard loudly so a mis-built
       // homogeneous material cannot silently run as "matrix".
       //
-      // REVIEW R-008: [material].kind is parsed but the driver builds its
-      // MaterialField from [velocity] (sidecar) / [material_constant_fallback],
-      // NOT from [material].kind — so kind="depth_profile_1d" passes the parser
-      // yet produces a Constant fallback here.  Catch that disconnect with an
-      // explicit, accurate abort (Phase 10 wires the DepthProfile1D builder)
-      // rather than the generic "Mode::Constant" message below.
-      MFEM_VERIFY(cfg.material.kind != spatial::MaterialKind::DepthProfile1D,
-                  "spatial_dyn_driver: [material].kind=\"depth_profile_1d\" with "
-                  "interior_flux=\"matrix\" is not yet wired in this driver — "
-                  "the DepthProfile1D MaterialField builder is a Phase-10 "
-                  "deliverable (TPV31).  Use a CVM velocity sidecar "
-                  "(Mode::Coefficient) material until then.");
+      // Phase 10 (TPV31): [material].kind=\"depth_profile_1d\" is now wired
+      // above (depth_profile_wrapper → Mode::Coefficient `material`).  The
+      // matrix path requires a non-Constant material; depth_profile_1d and a
+      // CVM velocity sidecar both satisfy it.
       MFEM_VERIFY(material.mode != MaterialField::Mode::Constant,
                   "spatial_dyn_driver: interior_flux=\"matrix\" requires a "
                   "non-Constant MaterialField, but the constructed material is "
-                  "Mode::Constant.  The depth-profile (DepthProfile1D) material "
-                  "for [material].kind=\"depth_profile_1d\" is built in Phase 10 "
-                  "and is not yet wired into this driver; a CVM velocity sidecar "
-                  "(Mode::Coefficient) material needs [velocity].use_sidecar=true "
-                  "(and --no-sidecar-material OFF).");
-      wave_ptr = std::make_unique<WaveOperator<ParMesh>>(
+                  "Mode::Constant.  Use [material].kind=\"depth_profile_1d\" "
+                  "(with [[material_profile.layer]]) or a CVM velocity sidecar "
+                  "([velocity].use_sidecar=true, --no-sidecar-material OFF).");
+      // Phase 13: the matrix path constructs the separate
+      // BimaterialWaveOperator<ParMesh> (held as a base WaveOperator<ParMesh>
+      // unique_ptr).  All 18 `wave.*` driver calls dispatch through the base;
+      // the material-dependent ones (FluxForElem_/InteriorFaceFlux_/
+      // ApplyElementJacobian_/ComputeMaxDt/SetMixedFluxMode) resolve virtually
+      // to the per-element bimaterial overrides.
+      wave_ptr = std::make_unique<BimaterialWaveOperator<ParMesh>>(
                     pmesh, cfg.mesh.order, material, bc);
    }
    WaveOperator<ParMesh> &wave = *wave_ptr;
 
-   // R-107 reflection-time warning: compute min_box_dim / cp_max from
-   // mesh bounding box + scalar material.
+   // R-107 reflection-time warning + Phase 12.2 PML geometry.
+   //
+   // GetBoundingBox is per-rank LOCAL, so reduce to the GLOBAL box; both the
+   // reflection warning's min_box_dim and the PML shell placement (built far
+   // below, after SetAbsorbingBackground) need the global extent, and on a
+   // partitioned ParMesh no single rank owns the whole box.  These three
+   // values are hoisted to outer scope so the PML construction site can reuse
+   // them without recomputing.
+   Vector pml_box_lo(3), pml_box_hi(3);
+   pmesh.GetBoundingBox(pml_box_lo, pml_box_hi, 1);
+#ifdef MFEM_USE_MPI
    {
-      const real_t cp = std::sqrt((material.lambda_const
-                                   + 2.0 * material.mu_const)
-                                   / material.rho_const);
-      Vector lo(3), hi(3);
-      pmesh.GetBoundingBox(lo, hi, 1);
-      real_t min_box_dim_local = std::numeric_limits<real_t>::infinity();
+      real_t loc[3], glob[3];
+      for (int d = 0; d < 3; ++d) { loc[d] = pml_box_lo(d); }
+      MPI_Allreduce(loc, glob, 3, MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+      for (int d = 0; d < 3; ++d) { pml_box_lo(d) = glob[d]; }
+      for (int d = 0; d < 3; ++d) { loc[d] = pml_box_hi(d); }
+      MPI_Allreduce(loc, glob, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+      for (int d = 0; d < 3; ++d) { pml_box_hi(d) = glob[d]; }
+   }
+#endif
+   real_t pml_cp = -1.0;   // <0 sentinel = "unknown" (non-Constant material)
+
+   // Phase 13 (REVIEW R-002): the reflection warning (and PML) are valid ONLY
+   // on the scalar (Constant) path.  On the matrix path `material` is
+   // Mode::Coefficient, whose lambda_const/mu_const/rho_const are 0
+   // (MakeCoefficient sets only the Coefficient pointers), so cp = sqrt(0/0)
+   // = NaN and the warning would fire bogusly ("cp_max (0 s)").  Skip it for
+   // non-Constant materials; a per-element cp_max estimate is a follow-up.
+   if (material.mode == MaterialField::Mode::Constant)
+   {
+      pml_cp = std::sqrt((material.lambda_const
+                          + 2.0 * material.mu_const)
+                         / material.rho_const);
+      real_t min_box_dim = std::numeric_limits<real_t>::infinity();
       for (int d = 0; d < 3; ++d)
       {
-         min_box_dim_local = std::min(min_box_dim_local, hi(d) - lo(d));
+         min_box_dim = std::min(min_box_dim, pml_box_hi(d) - pml_box_lo(d));
       }
-      real_t min_box_dim = min_box_dim_local;
-#ifdef MFEM_USE_MPI
-      MPI_Allreduce(&min_box_dim_local, &min_box_dim, 1,
-                    MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
-#endif
-      const real_t t_reflect = (cp > 0.0) ? min_box_dim / cp : 0.0;
+      const real_t t_reflect = (pml_cp > 0.0) ? min_box_dim / pml_cp : 0.0;
       if (rank == 0 && t_reflect < cfg.time.tfinal && !cfg.numerics.use_pml)
       {
          std::cout << "[spatial_dyn] WARNING: tfinal (" << cfg.time.tfinal
@@ -1273,6 +1384,52 @@ int main(int argc, char *argv[])
             });
       }
    }
+   else if (cfg.stress.kind ==
+            spatial::StressSourceKind::DepthProportionalToShearModulus)
+   {
+      // Phase 10 (TPV31): depth-proportional pre-stress
+      //   sigma(x,y,z) = sigma_*_per_mu * mu(x,y,z) / mu_ref
+      // mu(x,y,z) comes from the current material.  Today the coordinate-only
+      // mu is produced by `depth_profile_1d` (DepthProfile1DMaterial::
+      // eval_at_xyz) or a Constant material; sidecar_hdf5 has no coordinate-
+      // only lookup yet.
+      spatial::DepthProportionalToShearModulusStressSource::MuAtFn mu_at_xyz;
+      if (material.mode == MaterialField::Mode::Constant)
+      {
+         const real_t mu_const = material.mu_const;
+         mu_at_xyz = [mu_const](real_t /*x*/, real_t /*y*/, real_t /*z*/)
+                     { return mu_const; };
+      }
+      else if (depth_profile_wrapper != nullptr)
+      {
+         MFEM_VERIFY(static_cast<bool>(depth_profile_wrapper->eval_at_xyz),
+                     "spatial_dyn_driver: depth-profile material has no "
+                     "eval_at_xyz callback (heterogeneous_material wiring lost?).");
+         auto &eval = depth_profile_wrapper->eval_at_xyz;
+         mu_at_xyz = [&eval](real_t x, real_t y, real_t z) -> real_t
+         {
+            real_t lam, mu, rho;
+            eval(x, y, z, lam, mu, rho);
+            return mu;
+         };
+      }
+      else
+      {
+         MFEM_ABORT("spatial_dyn_driver: [stress] kind=\"depth_proportional\" "
+                    "requires [material] kind=\"constant\" or "
+                    "\"depth_profile_1d\".  Coordinate-only mu lookup for "
+                    "sidecar_hdf5 is not yet implemented.");
+      }
+      const auto &dp = cfg.stress.depth_proportional;
+      spatial::DepthProportionalToShearModulusStressSource src(
+         dp.sigma_xx_per_mu, dp.sigma_yy_per_mu, dp.sigma_zz_per_mu,
+         dp.sigma_xy_per_mu, dp.sigma_yz_per_mu, dp.sigma_xz_per_mu,
+         dp.mu_ref_pa, std::move(mu_at_xyz));
+      geom.ComputeParams(src,
+                         cfg.stress.pore_pressure.P_p_pa,
+                         cfg.stress.pore_pressure.P_p_grad_pa_per_m,
+                         cfg.stress.pore_pressure.min_sigma_n_pa);
+   }
    else
    {
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
@@ -1444,6 +1601,157 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------
+   // 14b. Phase 12.2 — optional absorbing PML on the box walls.
+   //
+   //   Gated on cfg.numerics.use_pml; when off, NO PMLLayer is built and the
+   //   run is byte-identical to the pre-PML driver.  Constructed AFTER
+   //   SetAbsorbingBackground (the total-Q background is a hard prerequisite:
+   //   the ADER corrector damps the fluctuation Q - Q_bg, not Q itself) and
+   //   held in a unique_ptr at driver scope so it outlives the time loop.  PML
+   //   is integrator-agnostic — both the ADER corrector and the RK Mult path
+   //   call ApplyPMLDamping internally once wave.SetPML(...) is set.  On a
+   //   restart PML is stateless: bbox/cp recompute identically.
+   // -----------------------------------------------------------------
+   std::unique_ptr<PMLLayer> pml_layer;
+   if (cfg.numerics.use_pml)
+   {
+      MFEM_VERIFY(wave.GetAbsorbingBackground() != nullptr,
+                  "PML requires a total-Q background; call "
+                  "SetAbsorbingBackground(Q_bg) before SetPML.");
+      MFEM_VERIFY(pml_cp > 0.0,
+                  "PML needs a scalar (Constant) material to derive c_p; the "
+                  "matrix interior-flux path exposes no single c_p.  Run the "
+                  "SAFS PML on interior_flux=\"scalar\".");
+
+      // (1) Thickness: explicit pml_thickness_m wins; else pml_cells*lc_far.
+      real_t L_pml = cfg.numerics.pml_thickness_m;
+      if (L_pml <= 0.0)
+      {
+         MFEM_VERIFY(cfg.mesh.lc_far_m > 0.0,
+                     "PML thickness must be derived (pml_cells * "
+                     "[mesh].lc_far_m) but [mesh].lc_far_m is unset.  Set it, "
+                     "or pass --pml-thickness / [numerics].pml_thickness_m.  "
+                     "(Refusing to hardcode a cell size in C++.)");
+         L_pml = cfg.numerics.pml_cells * cfg.mesh.lc_far_m;
+      }
+      MFEM_VERIFY(L_pml > 0.0, "PML thickness resolved to a non-positive value");
+
+      // (2) Half-face mask: damp x±, y±, and z_min if pml_damp_bottom; the
+      //     free surface at z=z_max stays undamped unless pml_damp_top.
+      int face_mask = PMLLayer::FaceXLo | PMLLayer::FaceXHi
+                    | PMLLayer::FaceYLo | PMLLayer::FaceYHi;
+      if (cfg.numerics.pml_damp_bottom) { face_mask |= PMLLayer::FaceZLo; }
+      if (cfg.numerics.pml_damp_top)    { face_mask |= PMLLayer::FaceZHi; }
+      if (cfg.numerics.pml_damp_top && rank == 0)
+      {
+         std::cout << "[spatial_dyn] WARNING: pml_damp_top=true damps the free "
+                      "surface at z=z_max — unphysical for a half-space SAFS "
+                      "run.  Leave it false unless you know why.\n";
+      }
+
+      // (3) Fault->PML clearance guard.  dof_coords_3d holds this rank's fault
+      //     DOF coords (3*i+d); reduce to the GLOBAL fault bbox and require
+      //     every DAMPED inner edge to clear it (else the PML would arrest
+      //     slip).  Empty-fault ranks contribute the infinite sentinels.
+      const real_t INF = std::numeric_limits<real_t>::infinity();
+      real_t f_lo[3] = { INF, INF, INF }, f_hi[3] = { -INF, -INF, -INF };
+      const int n_fault_dofs = dof_coords_3d.Size() / 3;
+      for (int i = 0; i < n_fault_dofs; ++i)
+      {
+         for (int d = 0; d < 3; ++d)
+         {
+            const real_t v = dof_coords_3d(3 * i + d);
+            f_lo[d] = std::min(f_lo[d], v);
+            f_hi[d] = std::max(f_hi[d], v);
+         }
+      }
+#ifdef MFEM_USE_MPI
+      {
+         real_t g[3];
+         MPI_Allreduce(f_lo, g, 3, MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+         for (int d = 0; d < 3; ++d) { f_lo[d] = g[d]; }
+         MPI_Allreduce(f_hi, g, 3, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+         for (int d = 0; d < 3; ++d) { f_hi[d] = g[d]; }
+      }
+#endif
+      const bool have_fault = std::isfinite(f_lo[0]) && (f_hi[0] >= f_lo[0]);
+
+      // Per-damped-face clearance from the fault to the PML inner edge.
+      struct FaceClear { const char *name; int bit; real_t clearance; };
+      const FaceClear faces[6] = {
+         {"x_lo", PMLLayer::FaceXLo, f_lo[0] - (pml_box_lo(0) + L_pml)},
+         {"x_hi", PMLLayer::FaceXHi, (pml_box_hi(0) - L_pml) - f_hi[0]},
+         {"y_lo", PMLLayer::FaceYLo, f_lo[1] - (pml_box_lo(1) + L_pml)},
+         {"y_hi", PMLLayer::FaceYHi, (pml_box_hi(1) - L_pml) - f_hi[1]},
+         {"z_lo", PMLLayer::FaceZLo, f_lo[2] - (pml_box_lo(2) + L_pml)},
+         {"z_hi", PMLLayer::FaceZHi, (pml_box_hi(2) - L_pml) - f_hi[2]},
+      };
+      if (have_fault)
+      {
+         for (const auto &fc : faces)
+         {
+            if (!(face_mask & fc.bit)) { continue; }
+            MFEM_VERIFY(fc.clearance > 0.0,
+                        "PML shell reaches the fault on the " << fc.name
+                        << " wall (clearance " << fc.clearance << " m <= 0). "
+                        "The PML would arrest slip.  Reduce pml_cells / "
+                        "pml_thickness_m, disable that face, or remesh with a "
+                        "larger buffer.");
+         }
+      }
+      else if (rank == 0)
+      {
+         std::cout << "[spatial_dyn] WARNING: PML clearance check skipped — no "
+                      "fault DOFs found globally.\n";
+      }
+
+      // (4) Construct + wire.  dirs=7 is ignored (an explicit mask is passed);
+      //     pml_target_R is the EFFECTIVE reflection (see pml_layer.cpp Eq.17).
+      pml_layer = std::make_unique<PMLLayer>(
+                     pml_box_lo, pml_box_hi, L_pml, pml_cp,
+                     cfg.numerics.pml_target_R, 7, face_mask);
+      wave.SetPML(pml_layer.get());
+
+      // (5) Banner — greppable "PML: ACTIVE" token for the sbatch guard.
+      if (rank == 0)
+      {
+         auto on = [&](int bit) { return (face_mask & bit) ? "on" : "off"; };
+         std::cout << "[spatial_dyn] PML: ACTIVE (L=" << L_pml << " m"
+                   << ", R_eff=" << cfg.numerics.pml_target_R
+                   << ", d_max=" << pml_layer->GetDmax() << " 1/s, faces="
+                   << "x_lo:" << on(PMLLayer::FaceXLo)
+                   << " x_hi:" << on(PMLLayer::FaceXHi)
+                   << " y_lo:" << on(PMLLayer::FaceYLo)
+                   << " y_hi:" << on(PMLLayer::FaceYHi)
+                   << " z_lo:" << on(PMLLayer::FaceZLo)
+                   << " z_hi:" << on(PMLLayer::FaceZHi) << ")\n";
+         std::cout << "             box=[" << pml_box_lo(0) << "," << pml_box_hi(0)
+                   << "]x[" << pml_box_lo(1) << "," << pml_box_hi(1)
+                   << "]x[" << pml_box_lo(2) << "," << pml_box_hi(2) << "] m\n";
+         std::cout << "             inner edges: x[" << pml_box_lo(0) + L_pml
+                   << "," << pml_box_hi(0) - L_pml << "] y["
+                   << pml_box_lo(1) + L_pml << "," << pml_box_hi(1) - L_pml
+                   << "] z[" << pml_box_lo(2) + L_pml << ","
+                   << pml_box_hi(2) - L_pml << "]\n";
+         if (have_fault)
+         {
+            std::cout << "             fault->PML clearances [m]:";
+            for (const auto &fc : faces)
+            {
+               if (face_mask & fc.bit)
+               { std::cout << " " << fc.name << "=" << fc.clearance; }
+            }
+            std::cout << "\n";
+         }
+         if (!(face_mask & PMLLayer::FaceZHi))
+         {
+            std::cout << "             free surface z=" << pml_box_hi(2)
+                      << " UNDAMPED (half-space).\n";
+         }
+      }
+   }
+
+   // -----------------------------------------------------------------
    // 15. CFL / Δt and derived numbers.  ComputeMaxDt is the scalar-
    //     material implementation (deviation D-1).
    //
@@ -1460,8 +1768,17 @@ int main(int argc, char *argv[])
    //     "dg" (byte-identical to the previous unconditional hardcode and to
    //     the gold) and 1.0 for "raw" (experimental escape hatch).
    // -----------------------------------------------------------------
+   // Phase 14.4: the RK path replaces the ADER 1/(3(2N+1)) de-rating with the
+   // RK imaginary-axis stability bound (spatial::RkCflFactor) and flips the
+   // operator's CFL switch to the RK-calibrated mixed-flux factors
+   // (SetCflRkAware).  The ADER branch is byte-unchanged (CflSafetyFactor +
+   // the default cfl_rk_aware_=false), so `--time-integrator ader` keeps the
+   // pre-Phase-14 dt to the bit.
+   if (is_rk) { wave.SetCflRkAware(true); }
    const real_t dt_cfl =
-      wave.ComputeMaxDt(cfg.numerics.cfl * spatial::CflSafetyFactor(cfg));
+      is_rk
+      ? wave.ComputeMaxDt(cfg.numerics.cfl * spatial::RkCflFactor(cfg))
+      : wave.ComputeMaxDt(cfg.numerics.cfl * spatial::CflSafetyFactor(cfg));
    real_t dt = (cfg.time.dt_initial > 0.0)
                 ? cfg.time.dt_initial : dt_cfl;
    // R-006: warn if the user override exceeds the explicit CFL bound.
@@ -2151,6 +2468,27 @@ int main(int argc, char *argv[])
       nuc_cb = [](real_t, real_t) {};
    }
 
+   // Phase 14: select the RK Butcher tableau ONCE (only consumed on the RK
+   // branch of the time loop).  ADER ignores it.  The RS config block is
+   // required for the RK ψ coupling (PsiRate); guard it for the RK path.
+   RKTableau rk_tab;
+   if (is_rk)
+   {
+      MFEM_VERIFY(cfg.rate_state.has_value(),
+                  "spatial_dyn_driver: --time-integrator rk4|rk45 requires a "
+                  "[friction.rate_state] block (the RK ψ coupling reads it).");
+      rk_tab = (cfg.numerics.time_integrator
+                == spatial::TimeIntegratorKind::RK45)
+               ? MakeDormandPrinceRK45Tableau()
+               : MakeRK4Tableau();
+      ValidateTableau(rk_tab);
+      if (rank == 0)
+      {
+         std::cout << "[time-integrator] RK tableau = " << rk_tab.name
+                   << " (" << rk_tab.stages << " stages)\n";
+      }
+   }
+
    // ParaView snapshot writer (Parity Phases 1-6).  Updates the 5 BP5
    // fault projection GFs + writes the primary / bulk collections.
    // Splits writes into "fault collection wants" (primary pv_out) and
@@ -2288,10 +2626,25 @@ int main(int argc, char *argv[])
       // does not sample (step%100!=0, V<10) is still captured at the next
       // print.  slip_rate_substep_max keeps its per-macro-step reset above.
 
-      AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
-                                     fault_coords, Q, dt_step,
-                                     cfg.numerics.ader_order, t, Q_new,
-                                     nuc_cb);
+      // Phase 14: ONLY change to the stepping control is this branch; the
+      // Q.Swap(Q_new) and t += dt_step below are shared with the ADER branch.
+      if (is_rk)
+      {
+         // RK4 / RK45 coupled stepper: drives wave.Mult directly, couples
+         // (Q, ψ, slip) with the tableau weights, and applies §14.3 absolute
+         // nucleation at each stage time (nuc_cb / the substep iterator are
+         // NOT used).  RS-only + scalar-flux (guarded at setup).  The per-stage
+         // max-|V| is reduced into slip_rate_substep_max (§14.5).
+         AdvanceRKCoupled_Spatial(wave, dof_data, *cfg.rate_state, rs,
+                                  Q, dt_step, t, Q_new, rk_tab, nuc.get());
+      }
+      else
+      {
+         AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
+                                        fault_coords, Q, dt_step,
+                                        cfg.numerics.ader_order, t, Q_new,
+                                        nuc_cb);
+      }
       Q.Swap(Q_new);
       t += dt_step;
       last_completed_step = step + 1;

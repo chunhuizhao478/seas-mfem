@@ -30,7 +30,7 @@ const int PMLLayer::Dz[NUM_STATE] = {0,  0,  1,  0,  1,  1,  0, 0, 1};
 // ---------------------------------------------------------------------------
 PMLLayer::PMLLayer(const Vector &x_min, const Vector &x_max,
                    real_t thickness, real_t cp,
-                   real_t target_R, int dirs)
+                   real_t target_R, int dirs, int half_face_mask)
    : x_min_(x_min), x_max_(x_max), L_pml_(thickness), dirs_(dirs)
 {
    MFEM_VERIFY(thickness > 0, "PML thickness must be positive, got " << thickness);
@@ -40,7 +40,31 @@ PMLLayer::PMLLayer(const Vector &x_min, const Vector &x_max,
    MFEM_VERIFY(x_min.Size() == 3 && x_max.Size() == 3,
                "Domain bounds must be 3D vectors");
 
+   // Phase 12.1: resolve the 6-bit half-face mask.  half_face_mask == -1
+   // means "derive from dirs", reproducing the pre-Phase-12 symmetric
+   // behavior (both half-faces of every selected direction) byte-for-byte,
+   // so existing call sites that pass only `dirs` are unchanged.
+   if (half_face_mask == -1)
+   {
+      face_mask_ = 0;
+      if (dirs & 1) { face_mask_ |= FaceXLo | FaceXHi; }
+      if (dirs & 2) { face_mask_ |= FaceYLo | FaceYHi; }
+      if (dirs & 4) { face_mask_ |= FaceZLo | FaceZHi; }
+   }
+   else
+   {
+      face_mask_ = half_face_mask & FaceAll;
+   }
+
    // d_max = (3 * cp) / (2 * L_pml) * ln(1/R_0)   (Eq. 17)
+   //
+   // Phase 12.1 precision note (plan §12.1 req 4 / Eq.17 caveat): the
+   // consistent constant for a cubic (n=3) profile is (n+1)/2 = 2; the
+   // 3/2 prefactor below is the n=2 value.  DECISION: keep 3/2 (so the 4
+   // pre-existing test_pml.cpp tests stay byte-identical) and treat the
+   // `target_R` knob as the EFFECTIVE reflection R_eff = R_0^(3/4), not the
+   // nominal R_0.  The Phase-12.3 metrics measure the true reflection
+   // regardless, so this only relabels the input.
    d_max_ = (3.0 * cp) / (2.0 * L_pml_) * std::log(1.0 / target_R);
 }
 
@@ -63,31 +87,45 @@ void PMLLayer::ComputeDamping(real_t x, real_t y, real_t z,
 {
    dx = dy = dz = 0.0;
 
-   // x-direction PML (near x_min and x_max boundaries)
-   if (dirs_ & 1)
+   // Phase 12.1: gate each of the six half-faces on its own mask bit.
+   // A point inside a DISABLED half-face's shell returns 0 for that
+   // direction even though it is geometrically inside the layer — this is
+   // how the free surface at z = z_max is left undamped (FaceZHi cleared).
+
+   // x-direction half-faces
+   if (face_mask_ & FaceXLo)
    {
-      real_t dist_lo = (x_min_(0) + L_pml_) - x;  // distance INTO PML from inner boundary
-      real_t dist_hi = x - (x_max_(0) - L_pml_);
-      if (dist_lo > 0) { dx = DampingProfile(dist_lo); }
-      if (dist_hi > 0) { dx = std::max(dx, DampingProfile(dist_hi)); }
+      real_t d = (x_min_(0) + L_pml_) - x;  // penetration from the inner edge
+      if (d > 0) { dx = DampingProfile(d); }
+   }
+   if (face_mask_ & FaceXHi)
+   {
+      real_t d = x - (x_max_(0) - L_pml_);
+      if (d > 0) { dx = std::max(dx, DampingProfile(d)); }
    }
 
-   // y-direction PML
-   if (dirs_ & 2)
+   // y-direction half-faces
+   if (face_mask_ & FaceYLo)
    {
-      real_t dist_lo = (x_min_(1) + L_pml_) - y;
-      real_t dist_hi = y - (x_max_(1) - L_pml_);
-      if (dist_lo > 0) { dy = DampingProfile(dist_lo); }
-      if (dist_hi > 0) { dy = std::max(dy, DampingProfile(dist_hi)); }
+      real_t d = (x_min_(1) + L_pml_) - y;
+      if (d > 0) { dy = DampingProfile(d); }
+   }
+   if (face_mask_ & FaceYHi)
+   {
+      real_t d = y - (x_max_(1) - L_pml_);
+      if (d > 0) { dy = std::max(dy, DampingProfile(d)); }
    }
 
-   // z-direction PML
-   if (dirs_ & 4)
+   // z-direction half-faces
+   if (face_mask_ & FaceZLo)
    {
-      real_t dist_lo = (x_min_(2) + L_pml_) - z;
-      real_t dist_hi = z - (x_max_(2) - L_pml_);
-      if (dist_lo > 0) { dz = DampingProfile(dist_lo); }
-      if (dist_hi > 0) { dz = std::max(dz, DampingProfile(dist_hi)); }
+      real_t d = (x_min_(2) + L_pml_) - z;
+      if (d > 0) { dz = DampingProfile(d); }
+   }
+   if (face_mask_ & FaceZHi)
+   {
+      real_t d = z - (x_max_(2) - L_pml_);
+      if (d > 0) { dz = std::max(dz, DampingProfile(d)); }
    }
 }
 

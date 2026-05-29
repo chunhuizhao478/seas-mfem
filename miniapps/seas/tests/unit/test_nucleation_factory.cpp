@@ -217,6 +217,71 @@ static void F5_gaussian_path_byte_identical()
                "non-trivial: tau2_nuc accumulated at the bell centre");
 }
 
+// Mirror of the driver's diagnostic re-sourcing (spatial_dyn_driver.cpp ~:1247):
+// pull the resolved per-DOF amplitudes/radial out of whichever concrete method
+// MakeNucleation built, into the GradualOverstressPerDOFParams the ParaView /
+// derived-quantity consumers read.  Kept in lockstep with the driver so this
+// test guards exactly that glue.
+static GradualOverstressPerDOFParams ExtractDiagParams(INucleationMethod& nuc)
+{
+   GradualOverstressPerDOFParams diag;
+   if (auto* g = dynamic_cast<GaussianGradualOverstress*>(&nuc))
+   {
+      diag = g->Params();
+   }
+   else if (auto* c = dynamic_cast<CompactCircularGradualOverstress*>(&nuc))
+   {
+      diag.amplitude_strike = c->Params().amplitude_strike;
+      diag.radial           = c->Params().radial;
+   }
+   else if (auto* inst = dynamic_cast<InstantaneousOverstressCircular*>(&nuc))
+   {
+      diag.amplitude_strike = inst->Params().amplitude_strike;
+   }
+   return diag;
+}
+
+// F-6 (R-002): the driver's nucleation diagnostics / ParaView fields must NOT be
+// silently zeroed for the non-Gaussian kinds.  Before the fix the driver only
+// dynamic_cast<GaussianGradualOverstress*>, so compact-circular / instantaneous
+// runs wrote 0.0 to nuc_amplitude / nuc_radial_factor for every DOF.  This test
+// fails under that old code (empty diag) and passes with the cast-ladder fix.
+static void F6_non_gaussian_diag_not_zeroed()
+{
+   std::cout << "\n[F-6] non-Gaussian kinds expose radial/amplitude to diag (R-002)\n";
+   Vector coords; DenseMatrix basis; MakeFixture(coords, basis);
+   const int N = coords.Size() / 3;
+
+   // Compact-circular: both radial and amplitude_strike must be populated.
+   {
+      SpatialFrictionConfig cfg = MakeCfg();
+      cfg.nucleation.enabled = true;
+      cfg.nucleation.kind = NucleationKind::GradualOverstressCompactCircular;
+      auto nuc = MakeNucleation(cfg, coords, basis);
+      auto diag = ExtractDiagParams(*nuc);
+      TEST_ASSERT(diag.radial.Size() == N,
+                  "compact-circular: radial sized to fault-DOF count (not 0)");
+      TEST_ASSERT(diag.amplitude_strike.Size() == N,
+                  "compact-circular: amplitude_strike sized (not 0)");
+      TEST_ASSERT(diag.radial.Max() > 0.0,
+                  "compact-circular: radial non-zero at the bell centre");
+      TEST_ASSERT(diag.amplitude_strike.Max() > 0.0,
+                  "compact-circular: amplitude_strike non-zero");
+   }
+   // Instantaneous-circular: amplitude_strike populated (no radial field).
+   {
+      SpatialFrictionConfig cfg = MakeCfg();
+      cfg.nucleation.enabled = true;
+      cfg.nucleation.kind = NucleationKind::InstantaneousOverstressCircular;
+      auto nuc = MakeNucleation(cfg, coords, basis);
+      auto diag = ExtractDiagParams(*nuc);
+      TEST_ASSERT(diag.amplitude_strike.Size() == N,
+                  "instantaneous: amplitude_strike sized to fault-DOF count");
+      TEST_ASSERT(diag.amplitude_strike.Max() > 0.0,
+                  "instantaneous: amplitude_strike non-zero at r=0");
+   }
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase 7 test_nucleation_factory\n";
@@ -225,6 +290,7 @@ int main(int /*argc*/, char** /*argv*/)
    F3_compact_circular();
    F4_instantaneous();
    F5_gaussian_path_byte_identical();
+   F6_non_gaussian_diag_not_zeroed();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 7 test_nucleation_factory: "

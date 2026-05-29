@@ -30,6 +30,7 @@
 #include "mfem.hpp"
 
 #include "../../dynamic/wave_operator.hpp"
+#include "../../dynamic/bimaterial_wave_operator.hpp"  // Phase 13: matrix subclass
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/heterogeneous_material.hpp"
 #include "../../domain/boundary_config.hpp"
@@ -133,7 +134,7 @@ static void C_1_mult_parity_serial()
    const BoundaryConfig bc = MakeAbsorbingBC();
 
    WaveOperator<Mesh> wave_scalar(smesh, k_order, k_lambda, k_mu, k_rho, bc);
-   WaveOperator<Mesh> wave_hetero(smesh, k_order,
+   BimaterialWaveOperator<Mesh> wave_hetero(smesh, k_order,
                                   MaterialField::MakeConstant(k_lambda,
                                                               k_mu, k_rho),
                                   bc);
@@ -210,7 +211,7 @@ static void C_2_mult_parity_parallel()
 
    WaveOperator<ParMesh> wave_scalar(pmesh, k_order,
                                      k_lambda, k_mu, k_rho, bc);
-   WaveOperator<ParMesh> wave_hetero(pmesh, k_order,
+   BimaterialWaveOperator<ParMesh> wave_hetero(pmesh, k_order,
                                      MaterialField::MakeConstant(k_lambda,
                                                                  k_mu, k_rho),
                                      bc);
@@ -292,7 +293,7 @@ static void C_3_compute_max_dt_parity()
 
    WaveOperator<ParMesh> wave_scalar(pmesh, k_order,
                                      k_lambda, k_mu, k_rho, bc);
-   WaveOperator<ParMesh> wave_hetero(pmesh, k_order,
+   BimaterialWaveOperator<ParMesh> wave_hetero(pmesh, k_order,
                                      MaterialField::MakeConstant(k_lambda,
                                                                  k_mu, k_rho),
                                      bc);
@@ -322,7 +323,7 @@ static void C_4_pool_invariants_on_constant()
    smesh.Clear();
    const BoundaryConfig bc = MakeAbsorbingBC();
 
-   WaveOperator<ParMesh> wave(pmesh, k_order,
+   BimaterialWaveOperator<ParMesh> wave(pmesh, k_order,
                               MaterialField::MakeConstant(k_lambda,
                                                           k_mu, k_rho),
                               bc);
@@ -396,7 +397,7 @@ static void C_5_coefficient_mode_parity()
 
    ConstantCoefficient lam_c(k_lambda), mu_c(k_mu), rho_c(k_rho);
    WaveOperator<Mesh> wave_scalar(smesh, k_order, k_lambda, k_mu, k_rho, bc);
-   WaveOperator<Mesh> wave_coef(smesh, k_order,
+   BimaterialWaveOperator<Mesh> wave_coef(smesh, k_order,
                                 MaterialField::MakeCoefficient(&lam_c, &mu_c,
                                                                &rho_c),
                                 bc);

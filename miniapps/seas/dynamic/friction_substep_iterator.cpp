@@ -181,7 +181,8 @@ void LinearSlipWeakeningIterator::StepOneQP_(DOFData &d,
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
                    s.tau1_corr, s.tau2_corr,
-                   flux_.SigmaNStrengthFloorForLSW());
+                   flux_.SigmaNStrengthFloorForLSW(),
+                   d.lsw_cohesion);   // Phase 10 (TPV31) additive C0 (0 ⇒ byte-exact)
 
    s.sigma_n_corr = s.sigma_n_trial;
 

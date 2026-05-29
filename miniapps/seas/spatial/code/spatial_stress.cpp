@@ -104,6 +104,52 @@ mfem::DenseMatrix ConstantTensorStressSource::Evaluate(real_t /*x*/,
    return sigma_;
 }
 
+// =====================================================================
+//  Phase 10 (TPV31): DepthProportionalToShearModulusStressSource
+// =====================================================================
+
+DepthProportionalToShearModulusStressSource::
+DepthProportionalToShearModulusStressSource(
+   real_t sxx_per_mu, real_t syy_per_mu, real_t szz_per_mu,
+   real_t sxy_per_mu, real_t syz_per_mu, real_t sxz_per_mu,
+   real_t mu_ref_pa,
+   MuAtFn mu_at_xyz)
+   : sxx_per_mu_(sxx_per_mu), syy_per_mu_(syy_per_mu),
+     szz_per_mu_(szz_per_mu),
+     sxy_per_mu_(sxy_per_mu), syz_per_mu_(syz_per_mu),
+     sxz_per_mu_(sxz_per_mu),
+     mu_ref_pa_(mu_ref_pa),
+     mu_at_xyz_(std::move(mu_at_xyz))
+{
+   MFEM_VERIFY(mu_ref_pa_ > 0.0,
+               "DepthProportionalToShearModulusStressSource: mu_ref_pa "
+               "must be > 0; got " << mu_ref_pa_);
+   MFEM_VERIFY(static_cast<bool>(mu_at_xyz_),
+               "DepthProportionalToShearModulusStressSource: mu_at_xyz "
+               "callback must be non-null.");
+   constexpr real_t inf = std::numeric_limits<real_t>::infinity();
+   bbox_ = { -inf, inf, -inf, inf, -inf, inf };
+}
+
+mfem::DenseMatrix DepthProportionalToShearModulusStressSource::Evaluate(
+   real_t x, real_t y, real_t z) const
+{
+   const real_t mu_local = mu_at_xyz_(x, y, z);
+   MFEM_VERIFY(mu_local > 0.0,
+               "DepthProportionalToShearModulusStressSource: mu_at_xyz("
+               << x << ", " << y << ", " << z << ") returned "
+               << mu_local << " (must be > 0).");
+   const real_t scale = mu_local / mu_ref_pa_;
+   mfem::DenseMatrix sigma(3, 3);
+   sigma(0, 0) = sxx_per_mu_ * scale;
+   sigma(1, 1) = syy_per_mu_ * scale;
+   sigma(2, 2) = szz_per_mu_ * scale;
+   sigma(0, 1) = sxy_per_mu_ * scale;  sigma(1, 0) = sigma(0, 1);
+   sigma(1, 2) = syz_per_mu_ * scale;  sigma(2, 1) = sigma(1, 2);
+   sigma(0, 2) = sxz_per_mu_ * scale;  sigma(2, 0) = sigma(0, 2);
+   return sigma;
+}
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

@@ -1,298 +1,169 @@
-# Code Review: Phase 8 — TPV205/102/104 benchmarks (configs, tests, driver wiring) — 2026-05-28
+# Code Review: Phase 13 — Split scalar / matrix into separate WaveOperator classes (2026-05-28, fresh adversarial pass)
 
 ## Review Scope
-- Plan: `miniapps/seas/document/fullelasticity_dev/PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md`
-  (Phase 8 §1727; status note §1770).
-- Files reviewed (Phase 8 deliverables, uncommitted in the working tree):
-  - `tpv205/configs/tpv205_spatial.toml`, `tpv102/configs/tpv102_spatial.toml`,
-    `tpv104/configs/tpv104_spatial.toml`
-  - `tests/unit/test_tpv_config_parse.cpp`, `tests/unit/test_tpv_toml_stress_sign.cpp`,
-    `tests/unit/test_planar_tpv_basis.cpp`
-  - `drivers/spatial_dyn_driver.cpp` (Phase-8 `[boundary]` wiring + the CFL/selector paths)
-  - `Makefile` (new test targets)
-- Oracles cross-checked: `config/tpv{205,102,104}_params.hpp`,
-  `dynamic/tpv{205,102,104}_setup.hpp`, `drivers/tpv205_driver.cpp`.
-- Domain context: `CLAUDE.md` (z<0=depth, frame conventions, byte-exact contract), the
-  mesh z-ranges (probed: both meshes z∈[−60000,0]), the Phase-8 status note's documented deviations.
+- Plan: `document/fullelasticity_dev/PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md` §Phase 13
+- Files reviewed:
+  - `dynamic/wave_operator.hpp`, `dynamic/wave_operator.inl` (hooks, R-001 fault-site routing, bi-material extraction → scalar-only)
+  - `dynamic/bimaterial_wave_operator.hpp`, `dynamic/bimaterial_wave_operator.inl` (new subclass)
+  - `drivers/spatial_dyn_driver.cpp` (matrix-branch construction)
+  - `tests/unit/test_bimaterial_wave_operator_parity.cpp` (new C-6), `tests/unit/test_phaseh_wave_operator_constant_parity.cpp`, `tests/unit/test_wave_operator.cpp` (repointed)
+  - `Makefile`
+- Domain context: `CLAUDE.md` (sign conventions, byte-exact contract, "no local full-mesh runs"), git tag `hrs-ref` (reference single-class impl), memory notes (GodunovFluxPool dedup floor; placeholder-leak class).
 
-## What was verified correct (so the fix agent does not "fix" it)
-- **All physics constants match the byte-exact oracle.** TPV205: μ_s=0.677, μ_d=0.525, d_c=0.40,
-  τ_back=70/τ_nuc=81.6/τ_left=78@−7.5km/τ_right=62@+7.5km MPa, half=1.5km, depth 7.5km, rupture
-  region |x|<15 ∧ depth<15. TPV102: a_vw=0.008/a_vs=0.016, b=0.012, Dc=0.02, τ_ini=75, V_ini=1e-12,
-  nuc Δτ=25 MPa, R=3km. TPV104: a_in=0.01/a_out=0.02, V_w_in=0.1/V_w_out=1.0, b=0.014, L=0.4, f_w=0.2,
-  τ_ini=40, V_ini=1e-16, nuc Δτ=45 MPa. Material μ/λ/ρ identical across all three.
-- **Sign / depth convention correct.** Both meshes are z∈[−60000,0] (z<0 downward); the native uses
-  `down_dip=|z|`; the TOMLs' `center_z=−7500` and box `z_max=−15000` are consistent.
-- **VW hard-box geometry matches the native core** (|x|<15km ∧ depth<15km); box predicate
-  `z≥z_min ∧ z≤z_max` with ±inf defaults is correct.
-- **Stress dispatch (R-001 from the prior review) is intact**: `FaultLocalPrestress` →
-  `ComputeParamsFaultLocal` + patch override (last-match-wins). The three new tests build and pass
-  (config-parse 60/60, stress-sign 32/32, planar-basis 77/77); Makefile targets registered.
+## What was verified correct (the fix agent should NOT touch this)
+- **All 8 fault imposed-state sites** route through `FluxForElem_(elem_plus/elem_minus/e1/qa.local_elem)` and are byte-faithful to hrs-ref (`git diff hrs-ref HEAD -- wave_operator.inl` shows no `flux_.Interior(can_n` divergence). Each per-side **deposit** is materially consistent: `F_h_plus` is computed with `elem_plus`'s material AND deposited to the plus-side DOFs (symmetric for minus). No swap.
+- **`(1,1,1)` sentinel containment:** the only bare-`flux_` material uses left in `wave_operator.inl` are the scalar-only hook bodies (`InteriorFaceFlux_`/`SharedInteriorFaceFlux_`/`ApplyElementJacobian_`, all overridden on the subclass), the dead `Ax_/Ay_/Az_` ctor `BuildJacobian` (referenced only in comments), and the scalar `ComputeMaxDt` return (overridden). **No virtual hook is invoked during base construction** (verified across the whole ctor, lines 24–587), so the `(1,1,1)` seed never reaches a cached/used quantity.
+- **`GetFlux()`** is read only in `test_adjacent_triangle_fault_first_step_audit.cpp`, which uses a scalar `WaveOperator` — no matrix object exposes the poisoned `flux_`.
+- **Acceptance grep** on `wave_operator.{hpp,inl}` returns only the mandated `UsesGodunovFluxPool()` accessor — the scalar class is bi-material-free.
+- **Tripwire validated:** temporarily re-leaking one fault site to bare `flux_` made C-6a fail at field-scale rel 0.999 (finite, not NaN); reverted cleanly.
 
 ## Findings
 
-### [R-001] MODERATE — [spatial_dyn_driver.cpp (stress→WaveOperator ctor / interior-flux dispatch)] — `interior_flux` selector is never consumed and there is no guard against `matrix`
-
-**Category:** DEVIATION / BUG (latent)
-
-**Description:**
-`cfg.numerics.interior_flux` (Scalar/Matrix) is parsed (`spatial_friction.cpp`), guarded at parse
-time (matrix+mixed_flux aborts; matrix requires non-Constant material), set in all three TPV TOMLs
-(`interior_flux="scalar"`), and asserted by `test_tpv_config_parse` — but `grep interior_flux drivers/spatial_dyn_driver.cpp`
-returns **zero** uses. The driver unconditionally constructs the scalar `WaveOperator`. A config
-that requests `interior_flux="matrix"` with a non-Constant material (which *passes* the parser
-guards) would then **silently run the scalar path** with no error.
-
-**Trigger:** any future config with `interior_flux="matrix"` + `material.kind="DepthProfile1D"`
-(or any non-Constant) and no `mixed_flux`.
-
-**Actual behavior:** driver silently builds the scalar `WaveOperator`; the matrix request is ignored.
-
-**Expected behavior:** until Phase 9 ports the matrix path, the driver must **abort** on
-`interior_flux==Matrix` (fail loud, not silent-wrong-physics). All three Phase-8 TPV configs are
-`scalar`, so this does not affect them today — it is a robustness hole that turns a Phase-9-not-done
-state into a silent wrong result.
-
-**Suggested fix:** add an explicit guard right before the `WaveOperator` is constructed:
-```diff
-+  // Phase 9 (matrix/bimaterial Riemann) is not yet wired into this driver.
-+  // Fail loud rather than silently running the scalar path on a matrix request.
-+  MFEM_VERIFY(cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar,
-+              "spatial_dyn_driver: interior_flux=\"matrix\" is not yet supported "
-+              "(Phase 9 port pending); use interior_flux=\"scalar\".");
-   // ... existing scalar WaveOperator construction ...
-```
-
-**Test case:**
-```cpp
-// tests/unit/test_tpv_config_parse.cpp (or a driver-guard test)
-void test_R001_matrix_flux_is_rejected_until_phase9() {
-   // A config that passes the parser's matrix guards (matrix + non-Constant material,
-   // no mixed_flux) must still be rejected by the driver until Phase 9 lands.
-   SpatialFrictionConfig cfg = MakeMinimalCfg();
-   cfg.numerics.interior_flux = InteriorFlux::Matrix;
-   cfg.material.kind = MaterialKind::DepthProfile1D;   // passes parse guard
-   // The driver's interior-flux decision (extract into a helper SelectWaveOperatorKind)
-   // must throw/abort for Matrix.
-   ASSERT_ABORTS(SelectWaveOperatorKind(cfg));
-}
-```
-
----
-
-### [R-002] MODERATE — [spatial_dyn_driver.cpp:1419-1420] — `cfl_safety` selector is never consumed; the DG factor is applied unconditionally
+### [R-001] [MODERATE] [Makefile / `test:` target] — C-6 test is built but never run by `make test`
 
 **Category:** DEVIATION
 
 **Description:**
-Plan D2 (§186) specifies `cfl_safety ∈ {raw, dg}` as an **opt-in**: `"dg"` applies the
-`1/(3·(2p+1))` factor, `"raw"` does not. The driver hardcodes the factor regardless of the selector:
-```cpp
-const real_t dt_cfl = wave.ComputeMaxDt(
-   cfg.numerics.cfl / (3.0 * (2.0 * cfg.mesh.order + 1.0)));   // always "dg"
-```
-`grep cfl_safety drivers/spatial_dyn_driver.cpp` returns only comments. So `cfl_safety="raw"`
-silently produces the dg-factored dt. (Same root cause as R-001/R-003: the `[numerics]` selectors
-are parsed + tested but not wired into the driver. Note: at least two SAFS configs also set
-`cfl_safety`, so the no-op is not TPV-only.)
+Phase 13.2 ("Files to Modify: Makefile … link the new test; add to the aggregate `test:`") requires the C-6 parity test in the suite. The run rule `test-bimaterial-wave-operator-parity` (~Makefile:3856) and the build target (added to `SEQ_MINIAPPS`, ~864) exist, but the `make test` prerequisite chain (`test:` at line 3547) lists the sibling `test-phaseh-wave-operator-constant-parity` (line 3575) and `test-wave-operator` (3561) — it does NOT list `test-bimaterial-wave-operator-parity`. So `make all` builds C-6 but `make test` never executes it; the leak-class tripwire silently rots.
 
-**Trigger:** any config with `cfl_safety="raw"`.
+**Trigger:** `make test` (suite run) — C-6 is absent from the executed targets.
 
-**Actual behavior:** dt is dg-factored regardless; `"raw"` is a silent no-op.
+**Actual behavior:** C-6 built by `make all` (via `SEQ_MINIAPPS`) but not run by `make test`.
 
-**Expected behavior:** branch the factor on the selector. The `"dg"` path must remain
-byte-identical to the current hardcode (it matches `tpv205_driver.cpp:1242`, the gold), so all
-Phase-8 TOMLs (`cfl_safety="dg"`) are unaffected — only the experimental `"raw"` escape hatch is
-restored.
+**Expected behavior:** `make test` runs `test-bimaterial-wave-operator-parity` with the other wave-operator tests.
 
-**Suggested fix:**
+**Suggested fix:** add the run target to the `test:` prerequisite list next to its sibling (in the `test:` block around line 3575):
 ```diff
--  const real_t dt_cfl = wave.ComputeMaxDt(
--     cfg.numerics.cfl / (3.0 * (2.0 * cfg.mesh.order + 1.0)));
-+  const real_t dg_factor =
-+     (cfg.numerics.cfl_safety == spatial::CflSafety::Dg)
-+        ? (1.0 / (3.0 * (2.0 * cfg.mesh.order + 1.0)))
-+        : 1.0;   // "raw": no DG safety factor (D2)
-+  const real_t dt_cfl = wave.ComputeMaxDt(cfg.numerics.cfl * dg_factor);
+       test-phaseh-wave-operator-constant-parity \
++      test-bimaterial-wave-operator-parity \
 ```
 
 **Test case:**
-```cpp
-void test_R002_cfl_safety_raw_vs_dg_differ() {
-   // Extract the dt-factor decision into a pure helper CflFactor(cfg) for testability.
-   SpatialFrictionConfig cfg; cfg.mesh.order = 1; cfg.numerics.cfl = 0.25;
-   cfg.numerics.cfl_safety = CflSafety::Dg;
-   const real_t dg  = CflFactor(cfg);          // == 1/(3*3) = 1/9
-   cfg.numerics.cfl_safety = CflSafety::Raw;
-   const real_t raw = CflFactor(cfg);          // == 1.0
-   ASSERT_NE(dg, raw);                          // currently EQUAL (bug)
-   ASSERT_NEAR(dg, 1.0/9.0, 1e-15);
-   ASSERT_NEAR(raw, 1.0, 1e-15);
-}
+```python
+def test_R001_c6_in_make_test_chain():
+    import re, pathlib
+    mk = pathlib.Path("miniapps/seas/Makefile").read_text()
+    block = re.search(r"\ntest:(.*?)(?=\n\t)", mk, re.S).group(1)   # line-continued prereq block
+    assert "test-bimaterial-wave-operator-parity" in block, \
+        "C-6 run target missing from the 'make test' chain"
 ```
 
 ---
 
-### [R-003] MODERATE — [spatial_dyn_driver.cpp:2072] — `fault_iterator` selector is never consumed; TPV205 `"one-shot"` is silently ignored
+### [R-002] [MODERATE] [POSSIBLE] [spatial_dyn_driver.cpp:~1020 reflection-time warning] — matrix path computes `cp = sqrt(0/0) = NaN`
 
-**Category:** DEVIATION
-
-**Description:**
-`cfg.numerics.fault_iterator` (OneShot/Substep) is parsed, set in all three TOMLs (TPV205
-`"one-shot"` per plan req 1a; TPV102/104 `"substep"`), and asserted by `test_tpv_config_parse` — but
-the driver never reads it. Substep count is fixed at `const int O = std::max(1, cfg.numerics.ader_order)`
-(=2 for all three), and the friction iterator is always the substep `LinearSlipWeakeningIterator`/RS
-iterator via `RunSubSteps_`. So `fault_iterator` is a silent no-op. (Same root cause as R-001/R-002.)
-
-There is also a **plan/gold inconsistency**: req 1a asks TPV205 to be `"one-shot"`, but the Phase-8
-status note states the TPV205 gold is `*_mfadj_p1_O2` (= O2 **substep**). The driver doing O2-substep
-matches the gold; the TOML's `"one-shot"` label is therefore misleading and unenforced.
-
-**Trigger:** any config toggling `fault_iterator`; specifically TPV205 set to `"one-shot"`.
-
-**Actual behavior:** always O=`ader_order` substep, regardless of the selector.
-
-**Expected behavior:** the selector must either take effect or be rejected — a parsed,
-documented, test-asserted knob that does nothing is a trap. Because honoring `"one-shot"` (O=1)
-would *break* the O2 gold match, the safe resolution is to (a) make the selector honest and
-(b) align the TPV205 TOML with its gold.
-
-**Suggested fix (two parts):**
-```diff
-   // (a) driver: reject the unsupported value rather than silently ignoring it
-+  MFEM_VERIFY(cfg.numerics.fault_iterator == spatial::FaultIteratorKind::Substep,
-+              "spatial_dyn_driver: fault_iterator=\"one-shot\" is not implemented "
-+              "in the spatial driver (it always sub-steps with O=ader_order); "
-+              "use fault_iterator=\"substep\".");
-```
-```diff
-   # (b) tpv205/configs/tpv205_spatial.toml — match the O2-substep gold
--  fault_iterator = "one-shot" # Phase 8 req 1a: TPV205 one-shot LSW
-+  fault_iterator = "substep"  # gold is *_p1_O2 (O2 substep); the driver
-+                              # always sub-steps. (Plan req 1a's "one-shot"
-+                              # is not supported by the spatial driver.)
-```
-And update `test_tpv_config_parse.cpp:96-97` to expect `Substep`.
-(If instead the team wants real one-shot support, that is a driver feature, not a mechanical fix —
-flag back to the planner; the gold would also need regenerating.)
-
-**Test case:**
-```cpp
-void test_R003_fault_iterator_one_shot_rejected() {
-   SpatialFrictionConfig cfg = MakeMinimalLswCfg();
-   cfg.numerics.fault_iterator = FaultIteratorKind::OneShot;
-   ASSERT_ABORTS(ValidateFaultIteratorSupported(cfg));  // extract a helper
-   cfg.numerics.fault_iterator = FaultIteratorKind::Substep;
-   ValidateFaultIteratorSupported(cfg);                 // no throw
-}
-```
-
----
-
-### [R-004] MODERATE — [tpv102/tpv104 configs `[friction.rate_state.spatial]`] — hard `box` VW/V_w transition breaks the byte-exact contract for TPV102/104
-
-**Category:** DEVIATION (documented, but the byte-exact Phase-8 AC is consequently unmet)
+**Category:** BUG
 
 **Description:**
-The native TPV102/104 use SCEC Eq.(4)/(5): `a = a_vs + (a_vw−a_vs)·B_strike·B_dip` with a **C∞ tanh
-boxcar** `B` of 3 km transition width (`config/tpv102_params.hpp:73-94`, `tpv104_params.hpp:119-160`),
-and the same for `V_w`. The TOMLs approximate this with **hard `box` rules** (step at exactly 15 km),
-because the resolver rejects `boxcar_taper` rules (Phase 6 made the kind config-only). The VW *core*
-is correct, but the 15–18 km transition annulus is `a_vs`/`V_w_out` in the TOML where the native
-ramps smoothly. This is documented in both TOML headers and the status note ("the smooth boxcar
-V_w/a taper should be wired before claiming byte-exact TPV102/104 gold parity").
+The R-107 reflection-time warning (just below the wave-operator construction) computes
+`cp = sqrt((material.lambda_const + 2*material.mu_const) / material.rho_const)`.
+On the **matrix** path `material` is `Mode::Coefficient` (the driver `MFEM_VERIFY`s `material.mode != Constant`). `MaterialField::MakeCoefficient` (`heterogeneous_material.cpp:21`) sets only the `*_coef` pointers and leaves `lambda_const = mu_const = rho_const = 0.0` (struct defaults, `heterogeneous_material.hpp:74-76`). So `cp = sqrt((0+0)/0) = sqrt(NaN) = NaN`; `(cp>0.0)` is false → `t_reflect = 0.0`; `0.0 < tfinal` fires the warning with a bogus `cp_max (0 s)`. The reflection warning is therefore always wrong ("0 s") on matrix runs.
 
-This is not a hidden bug, but it means **Phase 8 AC "TPV station traces match gold within tolerance"
-cannot be met for TPV102/104** as configured — the rupture-edge tapering differs. It is recorded here
-so the fix agent does NOT attempt a mechanical fix (it requires implementing `boxcar_taper` resolver
-consumption, a deferred feature) and so the deferral is tracked against the AC.
+**Pre-existing** (introduced with the Phase-9 matrix branch); Phase 13 only swapped the constructed type. **Diagnostic only** — no physics impact (`dt` comes from the virtual `wave.ComputeMaxDt`, which is correct). Flagged because the matrix branch is Phase 13's finalized surface and the warning is silently useless there.
 
-**Trigger:** TPV102/104 gold-trace comparison near the VW/VS border (|x|≈15–18 km, depth≈15–18 km).
+**Trigger:** any `interior_flux="matrix"` run.
 
-**Actual behavior:** `a`/`V_w` step at 15 km; the 3 km smooth transition is absent.
+**Actual behavior:** prints `cp_max (0 s)` and warns nonsensically regardless of the true reflection time.
 
-**Expected behavior:** smooth tanh transition (matches `Boxcar`/`Boxcar_TPV104`).
+**Expected behavior:** compute `cp` from the actual matrix material, or skip the warning when `material.mode != Constant`.
 
-**Suggested fix:** DO NOT auto-fix. This requires wiring `boxcar_taper` consumption into
-`SpatialFrictionResolver::ResolveRateState` (currently rejected at `spatial_friction.cpp:1686`) and
-re-authoring the TPV102/104 `[friction.rate_state.spatial]` blocks as `boxcar_taper` rules. Track as
-a Phase-8 follow-up / Phase-(8.5) feature, not a review fix.
-
-**Test case:**
-```cpp
-// Demonstrates the gap (not a regression guard for a mechanical fix):
-void test_R004_hardbox_vs_native_transition() {
-   // Native a at x=16.5 km (mid-transition), depth 7.5 km: strictly between a_vw and a_vs.
-   const real_t a_native = ComputeA(/*along_strike=*/16.5e3, /*down_dip=*/7.5e3); // ~0.012
-   ASSERT_GT(a_native, 0.008); ASSERT_LT(a_native, 0.016);
-   // Hard-box resolver result at the same point: jumps straight to a_vs.
-   // (resolve the TPV102 cfg over a 1-DOF fault at (16.5e3, 0, -7.5e3))
-   const real_t a_box = ResolveSingleDofA(tpv102_cfg, 16.5e3, 0.0, -7.5e3);  // == 0.016
-   ASSERT_NEAR(a_box, 0.016, 1e-12);
-   ASSERT_NE(a_box, a_native);   // documents the byte-exactness gap
-}
-```
-
----
-
-### [R-005] LOW — [tpv102/tpv104 configs] — `σ_n` double-source: `[friction.rate_state].sigma_n_default` and `[stress].sigma_n_pa` both set independently
-
-**Category:** ASSUMPTION
-
-**Description:**
-Both TPV102 and TPV104 set `sigma_n_pa = 120e6` in `[stress]` (used by `ComputeParamsFaultLocal`
-to seed `geom.sigma_n_per_dof`) **and** `sigma_n_default = 120e6` in `[friction.rate_state]`. These
-are two independent inputs for the same physical quantity. They agree here (and P_p=0), so there is
-no current error, but a future edit that changes one and not the other would silently desynchronize
-the seeded effective normal stress from the value the RS resolver/initial-ψ seed uses.
-
-**Trigger:** editing one `σ_n` field but not the other.
-
-**Actual behavior:** two sources of truth for σ_n; no cross-check.
-
-**Expected behavior:** single source, or a parse-time consistency assert.
-
-**Suggested fix:** add a consistency guard in the parser when both are present:
+**Suggested fix:** guard the warning on Constant material (minimal, safe):
 ```diff
-   // After parsing [stress] and [friction.rate_state]:
-+  if (cfg.stress.kind == StressSourceKind::FaultLocalPrestress &&
-+      cfg.rate_state.has_value())
+   // R-107 reflection-time warning: compute min_box_dim / cp_max from
+   // mesh bounding box + scalar material.
+-  {
++  if (material.mode == MaterialField::Mode::Constant)
 +  {
-+     MFEM_VERIFY(std::abs(cfg.rate_state->sigma_n_default
-+                          - (cfg.stress.sigma_n_pa - cfg.stress.pore_pressure.P_p_pa))
-+                 <= 1e-6 * cfg.stress.sigma_n_pa,
-+        "[friction.rate_state].sigma_n_default must equal "
-+        "[stress].sigma_n_pa - P_p for a fault_local_prestress RS config "
-+        "(double-source consistency).");
-+  }
+      const real_t cp = std::sqrt((material.lambda_const
+                                   + 2.0 * material.mu_const)
+                                   / material.rho_const);
+      ...
+   }
 ```
+
+**Test case:**
+```python
+def test_R002_coefficient_material_const_fields_are_zero():
+    # C++ unit (pseudocode): MakeCoefficient leaves *_const = 0, so the driver
+    # must NOT derive cp from them on the matrix path.
+    #   ConstantCoefficient l(3e10), m(3e10), r(2670);
+    #   MaterialField f = MaterialField::MakeCoefficient(&l,&m,&r);
+    #   assert f.lambda_const == 0.0 && f.rho_const == 0.0;          # current defaults
+    #   real_t cp = std::sqrt((f.lambda_const+2*f.mu_const)/f.rho_const);
+    #   assert std::isnan(cp);                                       # demonstrates the bug
+    pass
+```
+
+---
+
+### [R-003] [MODERATE] [test_bimaterial_wave_operator_parity.cpp:MaxRelDiff] — C-6 uses a field-scale metric, not the plan's per-component "to 1e-9"
+
+**Category:** DEVIATION
+
+**Description:**
+Plan §Phase 13 Acceptance C-6 says "matches the scalar `WaveOperator` `Mult`/ADER **to 1e-9**", and C-5 uses a per-component metric `|a-b| / max(|a_i|,|b_i|,1.0)`. C-6 instead uses a **field-scale** metric `|a-b| / max_i(|a_i|,|b_i|)`. This is a deliberate, documented deviation: `GodunovFluxPool` stores `round_sig(·,6)` material (godunov_flux_pool.cpp:101-106), so the matrix path differs from scalar by ~1 ULP per element, which at near-equilibrium fault DOFs (`dQ/dt≈0` computed as a near-cancellation of O(1e8) terms) is a large *per-component* relative error but ~3e-10 (Mult)/~3e-8 (ADER) of the field magnitude. The per-component metric would false-fail; the field-scale metric is the correct measure for a mixed-magnitude field and still catches a `(1,1,1)` leak (field-scale rel ≈ 1, validated).
+
+Justified and tripwire-validated, but a real departure from the plan's stated acceptance metric that must be recorded. Residual risk: the looser metric could mask a *subtle, small-magnitude* matrix-path error that only a true-bimaterial test (R-004) would expose.
+
+**Trigger:** comparing C-6's metric to the plan's literal "to 1e-9 per component".
+
+**Actual behavior:** field-scale-relative tolerance 1e-9 (passes at 3e-10/3e-8).
+
+**Expected behavior (plan literal):** per-component 1e-9 (not achievable on 1e10-scale moduli due to the dedup floor — hence the justified deviation).
+
+**Suggested fix:** No functional change required. Keep the field-scale metric; ensure the plan §Phase 13 Acceptance line is annotated that C-6 uses a field-scale metric with the round_sig rationale (the test header already documents it). Do NOT revert to the per-component metric — it would false-fail.
+
+**Test case:**
+```python
+def test_R003_field_scale_metric_separates_leak_from_floor():
+    # Already realized as the validated tripwire: poisoning one fault site to
+    # bare flux_ gives field-scale rel ~0.999 (FAIL); correct code ~3e-10 (PASS).
+    pass
+```
+
+---
+
+### [R-004] [LOW] [test_bimaterial_wave_operator_parity.cpp] — homogeneous C-6 cannot detect a per-side / bimaterial fault-flux error
+
+**Category:** EDGE_CASE
+
+**Description:**
+C-6 builds the bimaterial operator from a **homogeneous** Coefficient material. With equal material on both fault-adjacent elements, `FluxForElem_(elem_plus) == FluxForElem_(elem_minus)`, so the R-001 per-side selection (`elem1_on_plus ? e1 : e2`) is a **no-op** and is NOT exercised: an `e1`/`e2` swap or a genuine bimaterial asymmetry would pass C-6. Per-side correctness is currently guaranteed only by hrs-ref faithfulness (`git diff`), not by a test. This matches the plan's note that the per-side treatment is "the scaffold a bi-material fault would use" — an accepted gap, not a defect.
+
+**Trigger:** a true bimaterial fault (different `(λ,μ,ρ)` across the fault) — no current test exercises it.
+
+**Suggested fix (follow-up, non-blocking):** document the homogeneous scope in the C-6 header:
+```diff
+ // adds the fault.
++// NOTE: homogeneous material → the per-side elem_plus/elem_minus selection is a
++// no-op here; its correctness is verified by faithfulness to hrs-ref, not by C-6.
+```
+
+**Test case:** N/A (coverage/documentation note; LOW).
+
+---
+
+### [R-005] [LOW] [coverage] — substep fault-flux sites (4, 5) on the matrix path are not unit-tested
+
+**Category:** EDGE_CASE
+
+**Description:**
+C-6 exercises `Mult` (fault site 1) and `AdvanceADER` (site 3) on a **serial** mesh. The substep dispatch path — site 4 (`ComputeADERFaceFluxRHS` per-QP, `elem_plus_qq`) and site 5 (`ComputeADERSharedFaceFluxRHS`, `qa.local_elem`, parallel-only) — is not exercised on the matrix operator by any unit test; site 5 also requires np>1. The R-001 routing there is verified by hrs-ref faithfulness and inspection only.
+
+**Suggested fix (follow-up, non-blocking):** note the gap; a np>1 bimaterial substep regression case would close it.
+
+**Test case:** N/A (coverage note; LOW).
 
 ---
 
 ## Summary
 - Critical issues: 0
-- Moderate issues: 4 (R-001 interior_flux unguarded matrix fallthrough; R-002 cfl_safety no-op;
-  R-003 fault_iterator no-op + TPV205 one-shot/gold inconsistency; R-004 hard-box byte-exact gap —
-  documented deferral)
-- Low issues: 1 (R-005 σ_n double-source)
-- Plan compliance: PARTIAL. The deterministic Phase-8 deliverables are present and the **physics
-  values, signs, depth convention, and VW-core geometry are all byte-correct against the oracles**;
-  the three new tests pass and are wired into the Makefile. However: (a) the three `[numerics]`
-  method selectors the TOMLs rely on are parsed/tested but **not consumed by the driver**
-  (R-001/R-002/R-003) — for the current configs they coincide with the hardcoded behavior so no
-  wrong result occurs *today*, but they are dead knobs and one (interior_flux) is a silent-wrong
-  fallthrough; (b) the byte-exact TPV102/104 AC is **unmet** because of the documented hard-box
-  approximation (R-004); (c) per the status note, the 8-rank smoke, gold/SCEC tolerance match, and
-  np=2 parity are deferred to a run session.
-- Verdict: PASS WITH FIXES. R-001 (matrix guard) and R-002/R-003 (wire or reject the dead selectors)
-  are quick, mechanical, and should land before any non-default `[numerics]` config is run. R-004 is
-  a tracked feature deferral (do not auto-fix). R-005 is a hardening nicety.
+- Moderate issues: 3 (R-001 C-6 not run by `make test`; R-002 matrix reflection-warning NaN [pre-existing, diagnostic]; R-003 C-6 metric deviation [justified, validated])
+- Low issues: 2 (R-004 homogeneous-only fault coverage; R-005 substep matrix path untested)
+- Plan compliance: FULL — every Phase-13 requirement is implemented; R-003 is a justified deviation; scalar byte-exactness is construction-guaranteed (FluxForElem_==flux_, scalar hook bodies verbatim, identical `ComputeMaxDt` return) but not run-verified locally (per the "no local full-mesh runs" rule).
+- Verdict: **PASS WITH FIXES** — the core split (fault-site routing, `(1,1,1)` containment, class extraction, byte-exactness) is correct and tripwire-validated. Fix R-001 (one line) so the tripwire runs in the suite; fix/guard R-002 (one line) so the matrix path stops emitting a NaN reflection warning; record R-003.
 
 ## Unreviewed Areas
-- End-to-end behavior (8-rank `tfinal=0.2s` smoke writing SCEC `.dat`, gold/SCEC trace tolerance,
-  np=2 cross-rank parity) — deferred to a run session per the status note; not executable in this
-  review (heavy multi-rank compute + tolerance judgment).
-- The RS initial-ψ equilibrium seed for TPV104's `V_init=1e-16` / `a=0.01` (numerical-stability of
-  the logsinh form) — Phase 1–3 code, exercised only at runtime; not re-derived here.
-- `mesh.order=1` + `ader_order=2` interaction with the actual TPV meshes at runtime (construction
-  succeeds per the status note; stability/accuracy is a run-session concern).
+- **Scalar TPV205/102/104 + BP5 byte-identical station/benchmark traces** — requires full-mesh runs (forbidden locally per CLAUDE.md / memory). Byte-exactness is preserved by construction but NOT run-verified; confirm on Frontera against a pre-Phase-13 checkpoint before production sign-off.
+- **True heterogeneous (non-homogeneous-Coefficient) matrix correctness** (TPV31 / depth profile) — Phase 10 deliverable, out of Phase-13 scope.
+- **np>1 matrix path** (`ExchangeBiMaterialNeighbours_` is a local-side stub, moved-not-fixed per the plan) — lateral-heterogeneous parallel runs are explicitly deferred.

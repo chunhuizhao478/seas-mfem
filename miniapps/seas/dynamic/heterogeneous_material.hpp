@@ -52,7 +52,10 @@
 
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <memory>
+#include <string>
+#include <vector>
 
 namespace mfem
 {
@@ -212,6 +215,85 @@ struct MaterialField
    real_t MaxCpInElement(int elem,
                          mfem::ElementTransformation* T = nullptr) const;
 };
+
+// ===========================================================================
+// Phase 10 (TPV31): 1-D depth-profile material.  Ported verbatim from
+// hrs-ref `dynamic/heterogeneous_material.{hpp,cpp}`.
+// ===========================================================================
+
+/// One layer of a piecewise-1D depth-varying velocity model.  Depths are
+/// POSITIVE (spec convention); `MakeDepthProfile1DMaterial` converts the mesh
+/// axis value to positive depth (for `depth_axis='z'`: depth = max(0, -z)).
+///
+/// `interp = "linear"` linearly interpolates (vp, vs, rho) between this
+/// layer's TOP values and the NEXT layer's top values; "constant" holds
+/// the layer's values across the whole [depth_top_m, depth_bot_m] range.
+struct DepthProfileLayer
+{
+   real_t      depth_top_m  = 0.0;
+   real_t      depth_bot_m  = 0.0;
+   real_t      vp_ms        = 0.0;
+   real_t      vs_ms        = 0.0;
+   real_t      rho_kgm3     = 0.0;
+   std::string interp;          // "constant" | "linear"
+};
+
+/// Wrapper that owns three `mfem::FunctionCoefficient` instances and
+/// bundles them into a `MaterialField` (Mode::Coefficient).
+///
+/// Use the wrapper's `field` member at all callsites; do NOT extract
+/// the raw coefficient pointers separately — their lifetimes are tied
+/// to the wrapper's destruction.
+///
+/// Jump tie-break (REVIEW R-007): at exactly the boundary `y = y_jump`
+/// between two layers, the DEEPER layer (larger depth_top_m) claims the
+/// point.  Enforced in the lookup via `if (depth < layer.depth_top_m)
+/// continue;`.  This rule MUST be matched by the analogous cohesion
+/// `C_0(y)` evaluation so a single y_jump DOF receives consistent
+/// material + friction values.
+struct DepthProfile1DMaterial
+{
+   std::unique_ptr<mfem::FunctionCoefficient> lambda;
+   std::unique_ptr<mfem::FunctionCoefficient> mu;
+   std::unique_ptr<mfem::FunctionCoefficient> rho;
+   MaterialField                              field;
+
+   /// Coordinate-only evaluator: (x, y, z) → (lambda, mu, rho).  Reuses
+   /// the same layer walk + axis-to-depth conversion that drives the
+   /// three `FunctionCoefficient` instances above.  Provided for
+   /// callsites that need per-point material without an
+   /// `ElementTransformation` (e.g., a depth-proportional stress source).
+   /// Populated by `MakeDepthProfile1DMaterial`; safe to call from any
+   /// thread.
+   std::function<void(real_t x, real_t y, real_t z,
+                      real_t& lambda_out,
+                      real_t& mu_out,
+                      real_t& rho_out)>     eval_at_xyz;
+
+   // Non-copyable, non-movable (the MaterialField stores raw Coefficient*
+   // pointers to the unique_ptr-owned members; moving would invalidate
+   // them).
+   DepthProfile1DMaterial() = default;
+   DepthProfile1DMaterial(const DepthProfile1DMaterial&) = delete;
+   DepthProfile1DMaterial& operator=(const DepthProfile1DMaterial&) = delete;
+   DepthProfile1DMaterial(DepthProfile1DMaterial&&) = delete;
+   DepthProfile1DMaterial& operator=(DepthProfile1DMaterial&&) = delete;
+};
+
+/// Build a piecewise-1D depth-varying material profile.
+///
+/// @param layers       Shallow-to-deep ordered list (non-empty).
+/// @param depth_axis   One of 'x', 'y', 'z' — selects which physical
+///                     coordinate is the depth coordinate.  Canonical SEAS
+///                     TPV31 uses 'z' (depth = max(0, -z); z = 0 at surface,
+///                     z < 0 below).
+///
+/// Aborts on invalid input: empty `layers`, non-monotonic ordering,
+/// non-contiguous layers, non-positive (vp, vs, rho), vp < sqrt(2)*vs,
+/// invalid `interp`, invalid `depth_axis`.
+std::unique_ptr<DepthProfile1DMaterial> MakeDepthProfile1DMaterial(
+   const std::vector<DepthProfileLayer>& layers,
+   char depth_axis);
 
 } // namespace seas
 } // namespace mfem

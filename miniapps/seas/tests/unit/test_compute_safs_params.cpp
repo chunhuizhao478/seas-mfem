@@ -23,6 +23,7 @@
 #include "../../domain/elasticity_operator.hpp"
 #include "../../domain/boundary_config.hpp"
 #include "../../config/bp5_params.hpp"
+#include "../../spatial/code/spatial_friction.hpp"   // spatial::FaultLocalPatch (R-001)
 
 #include <cmath>
 #include <iostream>
@@ -363,6 +364,53 @@ static void T_67_strike_prestress_override(Fixture &fix)
              "override-none preserves the background strike (70 MPa)");
 }
 
+// T-68 (R-001): the driver glue for kind="fault_local_prestress" — build the
+// last-match-wins override lambda from the parsed config patch list (the real
+// spatial::FaultLocalPatch type) and drive ApplyStrikePreStressOverride exactly
+// as spatial_dyn_driver.cpp now does.  Before R-001 the driver routed this kind
+// to ApplyCsmStressSidecar (hard abort) and never applied the background seed or
+// the patches at all; this test pins the composition that fix introduced.
+static void T_68_fault_local_patch_list_driver_glue(Fixture &fix)
+{
+   std::cout << "\n[T-68] fault_local_prestress patch-list driver glue (R-001)\n";
+
+   FaultGeometry<Mesh> fg(*fix.domain_op, fix.params);
+   // Background seed (driver step for FaultLocalPrestress).
+   fg.ComputeParamsFaultLocal(/*tau_strike=*/70.0e6, /*tau_dip=*/0.0,
+                              /*sigma_n=*/120.0e6, /*P_p=*/0.0);
+
+   // Two patches covering the whole fault (all-default => unconstrained axes),
+   // later one wins: net background strike must become 62 MPa, NOT 78 or 70.
+   std::vector<spatial::FaultLocalPatch> patches(2);
+   patches[0].tau_strike_pa = 78.0e6;   // earlier
+   patches[1].tau_strike_pa = 62.0e6;   // later -> last-match-wins
+
+   // The exact lambda the driver builds.
+   const auto &p_ref = patches;
+   fg.ApplyStrikePreStressOverride(
+      [&p_ref](real_t x, real_t y, real_t z, real_t &tau_strike_out) -> bool
+      {
+         bool matched = false;
+         for (const auto &p : p_ref)
+         {
+            if (p.inside(x, y, z)) { tau_strike_out = p.tau_strike_pa; matched = true; }
+         }
+         return matched;
+      });
+
+   const Vector &tau = fg.GetTauPre();
+   real_t max_dev_strike = 0, max_dev_dip = 0;
+   for (int i = 0; i < fix.nf; ++i)
+   {
+      max_dev_strike = std::max(max_dev_strike, std::abs(tau(2 * i + 1) - 62.0e6));
+      max_dev_dip    = std::max(max_dev_dip,    std::abs(tau(2 * i)     - 0.0));
+   }
+   TEST_NEAR(max_dev_strike, 0.0, 1e-9,
+             "patch-list last-match-wins -> strike == 62 MPa (later patch wins)");
+   TEST_NEAR(max_dev_dip, 0.0, 1e-9,
+             "patch override leaves the dip slot untouched");
+}
+
 int main(int, char**)
 {
    std::cout << "Running Phase 6 §5 ComputeParams tests\n";
@@ -381,6 +429,7 @@ int main(int, char**)
    T_65_5_match_standalone_projection(*fix);
    T_66_fault_local_prestress_seed(*fix);
    T_67_strike_prestress_override(*fix);
+   T_68_fault_local_patch_list_driver_glue(*fix);
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 6 §5: " << num_passed << " / " << num_tests

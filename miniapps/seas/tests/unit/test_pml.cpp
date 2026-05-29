@@ -365,16 +365,160 @@ void TestPMLCorner()
    delete mesh;
 }
 
+// ===== Phase 12.1 Test A: free surface (z_max) left undamped by mask =====
+// Pure geometric check of ComputeDamping with the SAFS half-face mask
+// (XLo|XHi|YLo|YHi|ZLo, NOT ZHi).  No mesh / time-stepping needed.
+void TestPMLFreeSurfaceTopUndamped()
+{
+   std::cout << "Test 19b: TestPMLFreeSurfaceTopUndamped\n";
+
+   Vector xmin(3), xmax(3);
+   xmin = 0.0;
+   xmax(0) = 10.0; xmax(1) = 10.0; xmax(2) = 10.0;
+   const real_t L = 2.0, cp = 6000.0;
+
+   // SAFS mask: damp x±, y±, z-min; leave the z-max free surface alone.
+   const int safs_mask = PMLLayer::FaceXLo | PMLLayer::FaceXHi
+                       | PMLLayer::FaceYLo | PMLLayer::FaceYHi
+                       | PMLLayer::FaceZLo;
+   PMLLayer pml(xmin, xmax, L, cp, 1e-3, 7, safs_mask);
+
+   TEST_ASSERT(pml.GetFaceMask() == safs_mask,
+               "free-surface mask stored verbatim (no ZHi bit)");
+
+   real_t dx, dy, dz;
+
+   // Point within L of z_max (z = 9.0, i.e. 1.0 inside the top shell):
+   // ZHi disabled => dz must be exactly 0.
+   pml.ComputeDamping(5.0, 5.0, 9.0, dx, dy, dz);
+   TEST_ASSERT(dz == 0.0,
+               "dz == 0 within L_pml of z_max (free surface undamped)");
+
+   // Point within L of z_min (z = 1.0): ZLo enabled => dz > 0.
+   pml.ComputeDamping(5.0, 5.0, 1.0, dx, dy, dz);
+   TEST_ASSERT(dz > 0.0, "dz > 0 within L_pml of z_min (bottom absorbs)");
+
+   // The lateral half-faces still absorb (sanity: mask didn't disable them).
+   pml.ComputeDamping(1.0, 5.0, 5.0, dx, dy, dz);
+   TEST_ASSERT(dx > 0.0, "dx > 0 within L_pml of x_min");
+   pml.ComputeDamping(9.0, 5.0, 5.0, dx, dy, dz);
+   TEST_ASSERT(dx > 0.0, "dx > 0 within L_pml of x_max");
+   pml.ComputeDamping(5.0, 1.0, 5.0, dx, dy, dz);
+   TEST_ASSERT(dy > 0.0, "dy > 0 within L_pml of y_min");
+
+   // Regression: the DEFAULT mask (half_face_mask == -1, derived from
+   // dirs = 7) DOES damp z_max — proving the free-surface behavior is opt-in
+   // and the legacy symmetric default is unchanged.
+   PMLLayer pml_sym(xmin, xmax, L, cp, 1e-3, 7);  // default mask
+   TEST_ASSERT(pml_sym.GetFaceMask() == PMLLayer::FaceAll,
+               "default mask (dirs=7) resolves to FaceAll (symmetric)");
+   pml_sym.ComputeDamping(5.0, 5.0, 9.0, dx, dy, dz);
+   TEST_ASSERT(dz > 0.0, "symmetric default still damps z_max");
+}
+
+// ===== Phase 12.1 Test B: free-surface reflection stays finite; bottom PML
+// absorbs (interior energy decays). =====
+void TestPMLFreeSurfacePulseStable()
+{
+   std::cout << "Test 20b: TestPMLFreeSurfacePulseStable\n";
+
+   // Tall thin column: z = [0, 1].  Free surface (natural BC) at z_max =
+   // attr 6; absorbing everywhere else.  PML damps the bottom (z_min) only.
+   // MFEM Make3D attrs: 1=z_min, 6=z_max, 2/4=y±, 3/5=x±.
+   const real_t sx = 0.0625, sy = 0.0625, sz = 1.0;
+   auto *mesh = new Mesh(Mesh::MakeCartesian3D(1, 1, 32, Element::HEXAHEDRON,
+                                                sx, sy, sz));
+   int order = 1;
+   real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   real_t cp = std::sqrt((lambda + 2.0*mu) / rho);
+   real_t lp = lambda + 2.0*mu;
+
+   BoundaryConfig bc;
+   bc.natural_attrs.insert(6);                 // z_max: free surface (reflects)
+   bc.absorbing_attrs.insert(1);               // z_min: absorbing + PML
+   for (int i = 2; i <= 5; i++) { bc.absorbing_attrs.insert(i); }  // x±, y±
+   bc.fault_attr = 0;
+
+   WaveOperator wave(*mesh, order, lambda, mu, rho, bc);
+   { real_t zero_bg[NUM_STATE] = {0}; wave.SetAbsorbingBackground(zero_bg); }
+
+   // PML on the bottom half-face ONLY (free surface at z_max undamped).
+   Vector xmin(3), xmax(3);
+   xmin = 0.0; xmax(0) = sx; xmax(1) = sy; xmax(2) = sz;
+   PMLLayer pml(xmin, xmax, 0.3, cp, 1e-3, 7, PMLLayer::FaceZLo);
+   wave.SetPML(&pml);
+
+   int ndof_total = wave.GetScalarNDof();
+   int size = wave.Height();
+
+   // +z-propagating P-pulse centred at z = 0.7 (heads toward free surface).
+   Vector Q(size);
+   Q = 0.0;
+   const FiniteElementSpace &fes = wave.GetFESpace();
+   for (int e = 0; e < wave.NumElements(); e++)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      int ndof = fe->GetDof();
+      int offset = e * wave.GetNDof();
+      DenseMatrix coords;
+      Tr->Transform(fe->GetNodes(), coords);
+      for (int i = 0; i < ndof; i++)
+      {
+         real_t z = coords(2, i);
+         real_t amp = std::exp(-200.0 * (z - 0.7) * (z - 0.7));
+         Q[SZZ * ndof_total + offset + i] = -lp * amp;
+         Q[SXX * ndof_total + offset + i] = -lambda * amp;
+         Q[SYY * ndof_total + offset + i] = -lambda * amp;
+         Q[VZ  * ndof_total + offset + i] = cp * amp;
+      }
+   }
+
+   real_t E0 = ComputeEnergy(wave, Q, lambda, mu, rho);
+
+   real_t cfl = 1.0 / (3.0 * (2.0 * order + 1));
+   real_t dt = wave.ComputeMaxDt(cfl);
+
+   bool finite = true;
+   for (int step = 0; step < 1000; step++)
+   {
+      RK4Step(wave, Q, dt);
+      if (step % 50 == 49)
+      {
+         for (int i = 0; i < size; i++)
+         {
+            if (!std::isfinite(Q(i))) { finite = false; break; }
+         }
+         if (!finite) { break; }
+      }
+   }
+   real_t E_final = ComputeEnergy(wave, Q, lambda, mu, rho);
+
+   TEST_ASSERT(finite,
+               "PML free-surface: finite for 1000 steps (no NaN)");
+   // Free surface conserves energy; the z_min PML drains it.  After the
+   // pulse reflects and returns to the bottom shell, interior energy must
+   // have decayed well below its initial value.
+   TEST_ASSERT(E_final < 0.5 * E0,
+               "PML free-surface: interior energy decays (z_min absorbs), "
+               "E_final/E0 = " + std::to_string(E_final / E0));
+
+   wave.SetPML(nullptr);
+   delete mesh;
+}
+
 int main()
 {
    std::cout << "========================================\n";
-   std::cout << "PML Unit Tests (Phase 2b)\n";
+   std::cout << "PML Unit Tests (Phase 2b + Phase 12.1)\n";
    std::cout << "========================================\n\n";
 
    TestPMLNormalReflection();
    TestPMLObliqueReflection();
    TestPMLEnergyDecay();
    TestPMLCorner();
+   TestPMLFreeSurfaceTopUndamped();
+   TestPMLFreeSurfacePulseStable();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";

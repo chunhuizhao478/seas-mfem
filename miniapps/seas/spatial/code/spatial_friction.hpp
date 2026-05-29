@@ -88,6 +88,12 @@ struct MeshSpec
 {
    std::string path;
    int         order = 1;
+   /// Far-field characteristic cell size [m] (the mesher's `lc_far`).  Used
+   /// ONLY to derive the PML thickness (`pml_cells * lc_far_m`) when neither
+   /// `[numerics].pml_thickness_m` nor `--pml-thickness` is given (Phase 12.2).
+   /// `<0` sentinel = "unset"; the driver aborts rather than hardcode a cell
+   /// size if PML thickness must be derived and this is unset.
+   real_t      lc_far_m = -1.0;
 };
 
 /// Phase 6 req 3 selectors.
@@ -108,15 +114,40 @@ enum class CflSafety        { Raw, Dg };
 enum class FaultIteratorKind { OneShot, Substep };
 enum class InteriorFlux     { Scalar, Matrix };
 
+/// Phase 14: time-integrator selector for the SAFS dynamic-rupture driver.
+///   ADER  -> the existing ADER-DG sub-step predictor/corrector (default;
+///            byte-exact for every TPV / BP5 / scalar-SAFS run).
+///   RK4   -> classical 4-stage Runge–Kutta (the validated stepping-stone).
+///   RK45  -> fixed-step Dormand–Prince RK45 (5th-order row).
+/// RK4/RK45 are explicit method-of-lines steppers that drive WaveOperator::Mult
+/// directly and couple the rate-and-state fault state (ψ, slip) through the
+/// same Butcher weights — the alternative path that runs mixed/central flux
+/// stably at p=1 (the central-flux modes need the RK imaginary-axis stability
+/// region; see RkCflFactor below).  RK requires [meta].law="rate_state" and
+/// [numerics].interior_flux="scalar" (the driver MFEM_VERIFYs both at setup).
+enum class TimeIntegratorKind { ADER, RK4, RK45 };
+
 struct NumericsSpec
 {
-   int               ader_order     = 2;
-   std::string       mixed_flux     = "none";
-   real_t            cfl            = 0.5;
-   bool              use_pml        = false;
-   CflSafety         cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
-   FaultIteratorKind fault_iterator = FaultIteratorKind::Substep;  // R-001 default
-   InteriorFlux      interior_flux  = InteriorFlux::Scalar;
+   int                 ader_order     = 2;
+   std::string         mixed_flux     = "none";
+   real_t              cfl            = 0.5;
+   bool                use_pml        = false;
+   CflSafety           cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
+   FaultIteratorKind   fault_iterator = FaultIteratorKind::Substep;  // R-001 default
+   InteriorFlux        interior_flux  = InteriorFlux::Scalar;
+   TimeIntegratorKind  time_integrator = TimeIntegratorKind::ADER;   // Phase 14 (default ADER)
+
+   // Phase 12.2 — absorbing PML knobs.  Consulted ONLY when use_pml; when
+   // use_pml is false the driver constructs no PMLLayer and behavior is
+   // byte-identical to the pre-PML driver.  Defaults: derive the thickness
+   // from pml_cells*lc_far, target R_eff=1e-3, damp the box bottom but NEVER
+   // the free surface at z=z_max (pml_damp_top MUST stay false for SAFS).
+   real_t pml_thickness_m = -1.0;  // <0 ⇒ derive (pml_cells * mesh.lc_far_m)
+   real_t pml_target_R    = 1.0e-3; // effective reflection R_eff (see pml_layer.cpp Eq.17 note)
+   int    pml_cells       = 4;      // far-field cells in the derived thickness
+   bool   pml_damp_bottom = true;   // damp z_min wall (FaceZLo)
+   bool   pml_damp_top    = false;  // damp z_max wall (FaceZHi) — false for a half-space
 };
 
 struct TimeSpec
@@ -172,7 +203,28 @@ struct VelocitySpec
    bool          use_sidecar = true;
 };
 
-enum class StressSourceKind { ConstantTensor, SidecarHDF5, FaultLocalPrestress };
+enum class StressSourceKind
+{
+   ConstantTensor,
+   SidecarHDF5,
+   FaultLocalPrestress,
+   DepthProportionalToShearModulus   ///< Phase 10 (TPV31): mu(depth)-scaled tensor
+};
+
+/// Phase 10 (TPV31): depth-proportional pre-stress.  A constant Cauchy tensor
+/// specified at a reference shear modulus `mu_ref_pa`, scaled at each point by
+/// `mu(point) / mu_ref` (per SCEC TPV31 spec p. 6).  Components are entered in
+/// MPa in the TOML and converted to Pa during parsing.
+struct DepthProportionalStressSpec
+{
+   real_t sigma_xx_per_mu = 0.0;   // Pa (TOML value in MPa, *1e6 at parse)
+   real_t sigma_yy_per_mu = 0.0;
+   real_t sigma_zz_per_mu = 0.0;
+   real_t sigma_xy_per_mu = 0.0;
+   real_t sigma_yz_per_mu = 0.0;
+   real_t sigma_xz_per_mu = 0.0;
+   real_t mu_ref_pa       = 32.03812032e9;  // TPV31 spec reference modulus
+};
 
 /// Rectangular `tau_strike` patch for the FaultLocalPrestress source (D3.2,
 /// Phase 6 req 2).  Inside the box `|coord - center| <= half` (per axis), the
@@ -227,6 +279,8 @@ struct StressSpec
    // Optional rectangular tau_strike patches (last-match-wins), layered on
    // the uniform background by FaultGeometry::ApplyFaultLocalStrikePatches.
    std::vector<FaultLocalPatch> fault_local_patches;
+   // DepthProportionalToShearModulus (Phase 10 / TPV31):
+   DepthProportionalStressSpec depth_proportional;
    // Common:
    PorePressureSpec pore_pressure;
 };
@@ -309,6 +363,22 @@ struct SpatialRule
    // Kind enum note) rather than apply them without the taper.
    real_t cohesion_inner = std::numeric_limits<real_t>::quiet_NaN();
    real_t cohesion_outer = std::numeric_limits<real_t>::quiet_NaN();
+
+   // Phase 10 (TPV31): depth-linear cohesion taper.  When
+   // `cohesion_grad_pa_per_m` is finite, the resolver sets
+   //   C0(p) = max(cohesion_floor_pa,
+   //               cohesion_floor_pa + grad * (ref_depth - depth(p)))
+   // where depth(p) is taken along `cohesion_taper_axis`
+   // ('z' ⇒ depth = max(0,-z), like the material profile).  TPV31 spec:
+   //   C0(depth) = 0.000425 MPa/m * max(0, 2400 - depth)
+   //   ⇒ grad = 0.000425e6 Pa/m, ref_depth = 2400 m, floor = 0.
+   // NaN `cohesion_grad_pa_per_m` disables the taper (the constant
+   // `cohesion` override above, or cohesion_default, is used instead) so
+   // TPV205 / other LSW configs are byte-unchanged.
+   real_t cohesion_grad_pa_per_m = std::numeric_limits<real_t>::quiet_NaN();
+   real_t cohesion_ref_depth_m   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t cohesion_floor_pa      = 0.0;
+   char   cohesion_taper_axis    = 'z';   // 'x' | 'y' | 'z'
 
    /// `matches` semantics per §Phase 1 Detailed Req. 4:
    ///   Depth            : only z bounds checked.
@@ -489,8 +559,14 @@ enum class MaterialKind { Constant, DepthProfile1D, SidecarHDF5 };
 struct MaterialSpec
 {
    MaterialKind kind = MaterialKind::Constant;
-   std::string  profile_csv;    ///< DepthProfile1D path (built in Phase 10)
+   std::string  profile_csv;    ///< (unused; layers are inline, see below)
    std::string  sidecar_path;   ///< SidecarHDF5 velocity-model path
+   // Phase 10 (TPV31): inline depth-profile layers (only when
+   // kind == DepthProfile1D), parsed from [[material_profile.layer]].
+   std::vector<DepthProfileLayer> profile_layers;
+   // Depth axis for the profile.  Canonical SEAS TPV31 uses 'z'
+   // (depth = max(0, -z)); 'x'/'y' use the raw coordinate as depth.
+   char         depth_axis = 'z';
 };
 
 struct SpatialFrictionConfig
@@ -545,6 +621,27 @@ inline real_t CflSafetyFactor(const SpatialFrictionConfig& cfg)
    return (cfg.numerics.cfl_safety == CflSafety::Dg)
           ? (1.0 / (3.0 * (2.0 * cfg.mesh.order + 1.0)))
           : 1.0;
+}
+
+/// Phase 14.4: the CFL safety factor for the explicit-RK path (rk4 / rk45),
+/// the analogue of `CflSafetyFactor`'s ADER `1/(3(2N+1))` de-rating.  The ADER
+/// branch above is UNTOUCHED — an `--time-integrator ader` run gets the exact
+/// pre-Phase-14 dt.
+///
+/// Derivation (BUILD §5.4).  The semi-discrete DG operator's spectral radius
+/// scales like max|λ| ≈ C·(2N+1)·c_p/h (N = mesh order).  An explicit RK4 /
+/// RK4-class DP45 is stable on the imaginary axis for |λ|·dt < y_max ≈ 2√2 ≈
+/// 2.83.  The pure-upwind RK base CFL was tuned at P1 (N=1); the order
+/// de-rating relative to N=1 is `(2·1+1)/(2N+1) = 3/(2N+1)`.  The central-face
+/// density factor (the imaginary-axis tightening for mixed flux) is applied
+/// separately by `WaveOperator::ComputeMaxDt`'s RK-aware switch
+/// (cfl_rk_aware_); the product of the two with `[numerics].cfl` lands the
+/// effective CFL at the DRDG3D-anchored empirical targets (None≈0.5,
+/// Adjacent≈0.3, AllContinuous≈0.3–0.4) at the default cfl=0.5, N=1.  These are
+/// a starting calibration; the production validation is the §14.5 Frontera run.
+inline real_t RkCflFactor(const SpatialFrictionConfig& cfg)
+{
+   return 3.0 / (2.0 * cfg.mesh.order + 1.0);
 }
 
 // (Phase 9: the former `InteriorFluxSupported` Phase-8 stopgap — which

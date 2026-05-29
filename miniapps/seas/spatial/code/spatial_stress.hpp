@@ -39,6 +39,7 @@
 #include "spatial_friction.hpp"   // StressSpec, PorePressureSpec
 
 #include <array>
+#include <functional>
 #include <limits>
 
 namespace mfem
@@ -112,6 +113,53 @@ public:
 
 private:
    mfem::DenseMatrix sigma_;   // 3x3, populated in ctor.
+   std::array<real_t, 6> bbox_;
+};
+
+// =====================================================================
+//  Phase 10 (TPV31): DepthProportionalToShearModulusStressSource
+// =====================================================================
+
+/// TPV31-style pre-stress: a constant Cauchy tensor (specified at a
+/// reference shear modulus `mu_ref_pa`) scaled at each spatial point by
+/// `mu(point) / mu_ref`, where `mu(point)` is evaluated by the
+/// `mu_at_xyz` callback (the driver builds it from a
+/// `DepthProfile1DMaterial::eval_at_xyz`).  Per SCEC TPV31 spec p. 6.
+///
+/// Components are stored in Pa (already converted from the TOML MPa
+/// input by the parser, see DepthProportionalStressSpec).  Satisfies the
+/// StressSource3D concept: Evaluate / BBox (±inf) / ContainsBBox (true).
+class DepthProportionalToShearModulusStressSource
+{
+public:
+   using MuAtFn = std::function<real_t(real_t, real_t, real_t)>;
+
+   /// @param sxx_per_mu...sxz_per_mu  Six scaled components in Pa.
+   /// @param mu_ref_pa                Reference shear modulus (Pa).
+   /// @param mu_at_xyz                Callback: returns mu(x,y,z) in Pa.
+   DepthProportionalToShearModulusStressSource(
+      real_t sxx_per_mu, real_t syy_per_mu, real_t szz_per_mu,
+      real_t sxy_per_mu, real_t syz_per_mu, real_t sxz_per_mu,
+      real_t mu_ref_pa,
+      MuAtFn mu_at_xyz);
+
+   /// Per-point Cauchy tensor (3x3), EAST-NORTH-UP, compression POSITIVE.
+   mfem::DenseMatrix Evaluate(real_t x, real_t y, real_t z) const;
+
+   const std::array<real_t, 6>& BBox() const { return bbox_; }
+
+   bool ContainsBBox(real_t /*xmin*/, real_t /*xmax*/,
+                     real_t /*ymin*/, real_t /*ymax*/,
+                     real_t /*zmin*/, real_t /*zmax*/,
+                     real_t /*eps*/ = 0.0) const { return true; }
+
+   real_t MuRefPa() const { return mu_ref_pa_; }
+
+private:
+   real_t sxx_per_mu_, syy_per_mu_, szz_per_mu_;
+   real_t sxy_per_mu_, syz_per_mu_, sxz_per_mu_;
+   real_t mu_ref_pa_;
+   MuAtFn mu_at_xyz_;
    std::array<real_t, 6> bbox_;
 };
 

@@ -34,6 +34,23 @@ namespace seas
 class PMLLayer
 {
 public:
+   /// @name Half-face selection bits (Phase 12.1)
+   ///
+   /// A 6-bit mask selecting which of the box's six half-faces absorb.
+   /// This refines the older 3-bit `dirs` (which always paired the two
+   /// half-faces of a direction).  The SAFS half-space damps every wall
+   /// EXCEPT the free surface at z = z_max, i.e.
+   /// `FaceXLo|FaceXHi|FaceYLo|FaceYHi|FaceZLo` (no `FaceZHi`).
+   ///@{
+   static constexpr int FaceXLo = 1;
+   static constexpr int FaceXHi = 2;
+   static constexpr int FaceYLo = 4;
+   static constexpr int FaceYHi = 8;
+   static constexpr int FaceZLo = 16;
+   static constexpr int FaceZHi = 32;
+   static constexpr int FaceAll = 0x3F;
+   ///@}
+
    /// @brief Construct a PML layer.
    ///
    /// @param[in] x_min  Lower corner of the computational domain.
@@ -42,10 +59,18 @@ public:
    /// @param[in] cp  P-wave speed [m/s] (for computing d_max).
    /// @param[in] target_R  Target reflection coefficient (default 1e-3).
    /// @param[in] dirs  Which directions to apply PML (bitmask: 1=x, 2=y, 4=z).
-   ///                  Default 7 = all directions.
+   ///                  Default 7 = all directions.  Used only when
+   ///                  `half_face_mask == -1`.
+   /// @param[in] half_face_mask  Optional 6-bit half-face mask
+   ///                  (`FaceXLo|...|FaceZHi`).  Default `-1` derives the
+   ///                  mask from `dirs` (`XLO|XHI` if `dirs&1`, `YLO|YHI`
+   ///                  if `dirs&2`, `ZLO|ZHI` if `dirs&4`), reproducing the
+   ///                  pre-Phase-12 symmetric behavior byte-for-byte.  Pass
+   ///                  an explicit mask (e.g. `FaceAll & ~FaceZHi`) to leave
+   ///                  the free surface undamped.
    PMLLayer(const Vector &x_min, const Vector &x_max,
             real_t thickness, real_t cp,
-            real_t target_R = 1e-3, int dirs = 7);
+            real_t target_R = 1e-3, int dirs = 7, int half_face_mask = -1);
 
    /// @brief Compute the PML damping at a physical point.
    ///
@@ -63,6 +88,8 @@ public:
    ///@{
    real_t GetThickness() const { return L_pml_; }
    real_t GetDmax() const { return d_max_; }
+   /// Resolved 6-bit half-face mask (see Face* constants).
+   int GetFaceMask() const { return face_mask_; }
    ///@}
 
    /// Damping direction matrices D_x, D_y, D_z.
@@ -78,6 +105,7 @@ private:
    real_t L_pml_;
    real_t d_max_;
    int dirs_;
+   int face_mask_;   ///< resolved 6-bit half-face mask (Phase 12.1)
 
    /// Cubic damping profile: d(s) = d_max * (s / L_pml)^3
    /// where s = distance from inner PML boundary.

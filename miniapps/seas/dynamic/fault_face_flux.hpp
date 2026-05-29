@@ -103,6 +103,9 @@ struct DOFData
    real_t lsw_mu_s = 0.0;   ///< LSW static friction μ_s (≥ mu_s_barrier ⇒ barrier QP)
    real_t lsw_mu_d = 0.0;   ///< LSW dynamic friction μ_d
    real_t lsw_d_c  = 0.0;   ///< LSW slip-weakening critical distance d_c [m]
+   real_t lsw_cohesion = 0.0;  ///< Phase 10 (TPV31): LSW cohesion C0 [Pa],
+                               ///< ADDITIVE to the strength (mu_eff·σ_n + C0).
+                               ///< Default 0 ⇒ byte-exact for TPV205 / other LSW.
 
    // Phase H.7 of spatial_dynamic_rupture_plan.md (rev-3): TPV26/27
    // gradual forced-rupture fields.  In-class defaults are designed so

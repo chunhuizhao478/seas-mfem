@@ -501,3 +501,5 @@ miniapps/seas/seas_mms_antiplane_parallel
 # Local skill/tooling directory (not part of the MFEM tree)
 /claude-skills/
 /.claude/
+# Claude Code agent worktrees (already covered by /.claude/ above; explicit)
+.claude/worktree/

@@ -587,475 +587,6 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
 template <typename MeshType>
 WaveOperator<MeshType>::~WaveOperator() = default;
 
-// ---------------------------------------------------------------------------
-// Phase H.1 (Stage 1) — heterogeneous-material ctor.
-//
-// Delegates to the scalar ctor above with the constants extracted from
-// the MaterialField, so the resulting `flux_` member is byte-identical
-// to the scalar-ctor path on Mode::Constant input.  Then builds the
-// per-element flux pool (H.1), the per-element CFL length cache
-// (H.3 input), and the bi-material shared-face neighbour map stub
-// (H.4 Stage 1 in-place fill; real cross-rank exchange in Stage 2).
-//
-// Phase 9 (Stage B): Mode::Coefficient is now SUPPORTED — the per-element
-// flux dispatch is wired at every interior non-fault flux site (the gated
-// `if (owned_flux_pool_)` branches) and the ADER CK recursion
-// (ApplyJacobianPerElementDOF_), plus the per-face bi-material flux
-// precompute (BuildPerFaceBimaterialFluxMatrices_), so the scalar `flux_`
-// placeholder seed is never consulted on the heterogeneous path.
-// GridFunction mode remains rejected (no centroid evaluation).
-//
-// In Mode::Constant the new ctor's per-face bi-material flux collapses to
-// the scalar Godunov flux to LU-rounding precision (~1e-10 relative), so
-// `test_phaseh_wave_operator_constant_parity` (np=1 + np=4) now checks
-// agreement at 1e-10 rather than bit-equality (matching hrs-ref Phase R.2).
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
-                                     const MaterialField &material,
-                                     const BoundaryConfig &bc)
-   : WaveOperator(mesh, order,
-                  material.mode == MaterialField::Mode::Constant
-                     ? material.lambda_const : real_t(1.0),
-                  material.mode == MaterialField::Mode::Constant
-                     ? material.mu_const     : real_t(1.0),
-                  material.mode == MaterialField::Mode::Constant
-                     ? material.rho_const    : real_t(1.0),
-                  bc)
-{
-   MFEM_VERIFY(material.mode == MaterialField::Mode::Constant
-               || material.mode == MaterialField::Mode::Coefficient,
-               "WaveOperator(MaterialField): material.mode must be "
-               "Constant or Coefficient; got Mode::GridFunction ("
-               << static_cast<int>(material.mode) << ").  GridFunction "
-               "mode is consumed via At(elem, dof, ...), which has no "
-               "well-defined centroid evaluation needed by the per-"
-               "element flux pool.");
-
-   // Phase 9 (Stage B): Mode::Coefficient is now SUPPORTED.  The per-element
-   // flux dispatch is wired at every interior non-fault flux site (the gated
-   // `if (owned_flux_pool_)` branches in ComputeFaceFluxRHS /
-   // ComputeSharedFaceFluxRHS / ComputeADERFaceFluxRHS /
-   // ComputeADERSharedFaceFluxRHS) and the ADER CK recursion
-   // (ApplyJacobianPerElementDOF_), so the scalar `flux_` placeholder seed is
-   // no longer consulted on the heterogeneous path.  The Stage-1
-   // Mode::Constant-only abort is therefore removed; GridFunction mode is
-   // still rejected by the guard above.
-
-   material_ = &material;
-
-   BuildGodunovFluxPool_(material);
-   ExchangeBiMaterialNeighbours_();
-   BuildPerFaceBimaterialFluxMatrices_();   // Phase 9 (Stage B)
-}
-
-// ---------------------------------------------------------------------------
-// Phase H.1 helper — fill per_elem_lmr_ / per_elem_h_, then Build()
-// the owned flux pool.
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-void WaveOperator<MeshType>::BuildGodunovFluxPool_(
-   const MaterialField &material)
-{
-   per_elem_lmr_.assign(static_cast<size_t>(ne_), std::array<real_t, 3>{0, 0, 0});
-   per_elem_h_.assign(static_cast<size_t>(ne_), real_t(0));
-
-   for (int e = 0; e < ne_; ++e)
-   {
-      ElementTransformation *T = mesh_.GetElementTransformation(e);
-      const Geometry::Type   gtype = mesh_.GetElementBaseGeometry(e);
-      const IntegrationPoint &ip   = Geometries.GetCenter(gtype);
-      real_t lam, mu, rho;
-      material.EvalAt(e, *T, ip, lam, mu, rho);
-      MFEM_VERIFY(rho > 0.0,
-                  "WaveOperator(MaterialField): rho (" << rho
-                  << ") must be > 0 at element " << e);
-      MFEM_VERIFY(lam + 2.0 * mu > 0.0,
-                  "WaveOperator(MaterialField): (lambda + 2*mu) ("
-                  << (lam + 2.0 * mu) << ") must be > 0 at element "
-                  << e << " (lambda=" << lam << ", mu=" << mu << ").");
-      per_elem_lmr_[e] = {lam, mu, rho};
-
-      // Mirror the scalar ctor's per-element CFL-length formula
-      // (inscribed diameter for tets, vol^{1/dim} for non-tets).
-      // Byte-exact equality with the scalar ctor's `h_min_` loop on
-      // Mode::Constant input.
-      const real_t vol = mesh_.GetElementVolume(e);
-      real_t h;
-      if (gtype == Geometry::TETRAHEDRON)
-      {
-         Array<int> vert;
-         mesh_.GetElementVertices(e, vert);
-         Vector v0(mesh_.GetVertex(vert[0]), 3);
-         Vector v1(mesh_.GetVertex(vert[1]), 3);
-         Vector v2(mesh_.GetVertex(vert[2]), 3);
-         Vector v3(mesh_.GetVertex(vert[3]), 3);
-         auto tri_area = [](const Vector &a, const Vector &b,
-                            const Vector &c) -> real_t {
-            real_t e1[3] = {b(0)-a(0), b(1)-a(1), b(2)-a(2)};
-            real_t e2[3] = {c(0)-a(0), c(1)-a(1), c(2)-a(2)};
-            real_t cx = e1[1]*e2[2] - e1[2]*e2[1];
-            real_t cy = e1[2]*e2[0] - e1[0]*e2[2];
-            real_t cz = e1[0]*e2[1] - e1[1]*e2[0];
-            return 0.5 * std::sqrt(cx*cx + cy*cy + cz*cz);
-         };
-         const real_t A_total = tri_area(v0, v1, v2) + tri_area(v0, v2, v3)
-                              + tri_area(v0, v3, v1) + tri_area(v1, v2, v3);
-         h = (A_total > 0) ? 6.0 * vol / A_total
-                           : std::pow(vol, 1.0 / 3.0);
-      }
-      else
-      {
-         h = std::pow(vol, 1.0 / mesh_.Dimension());
-      }
-      per_elem_h_[e] = h;
-   }
-
-   owned_flux_pool_ = std::make_unique<GodunovFluxPool>();
-   owned_flux_pool_->Build(ne_, per_elem_lmr_, /*dedup_sig_figs=*/6);
-}
-
-// ---------------------------------------------------------------------------
-// Phase H.4 helper — populate shared_face_neighbour_material_.
-//
-// REVIEW R-004 (stale-comment correction): Mode::Coefficient is now REACHABLE
-// (Phase 9 wired the matrix path + removed the ctor abort), so the old "only
-// Mode::Constant is reachable" contract is no longer true.  This body is still
-// a LOCAL-SIDE STUB — it stores the local element's own material as the
-// neighbour's (no MPI exchange).  That is correct ONLY when the neighbour's
-// material equals the local material at the seam:
-//   - Mode::Constant: always (every element shares the constants).
-//   - Mode::Coefficient that is seam-continuous (e.g. depth-only, TPV31): the
-//     centroid material agrees across the seam, so the stub is correct.
-//   - Mode::Coefficient with LATERAL variation across a partition seam: WRONG
-//     — the genuine peer-rank neighbour material is needed.  A real
-//     MPI_Allgatherv exchange (key shared faces, pair, store the peer's
-//     per_elem_lmr_) is unimplemented; the het ctor WARNs (below) for the
-//     Coefficient + shared-faces case so a parallel laterally-heterogeneous
-//     run does not silently use the wrong seam material.
-//   - On serial Mesh this is a no-op (no shared faces).
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-void WaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
-{
-   shared_face_neighbour_material_.clear();
-   if constexpr (!IsParallelMesh<MeshType>::value)
-   {
-      return;
-   }
-#ifdef MFEM_USE_MPI
-   if constexpr (IsParallelMesh<MeshType>::value)
-   {
-      auto &pmesh = static_cast<ParMesh &>(mesh_);
-      const int n_shared = pmesh.GetNSharedFaces();
-      for (int sf = 0; sf < n_shared; ++sf)
-      {
-         FaceElementTransformations *ftr =
-            pmesh.GetSharedFaceTransformations(sf);
-         if (!ftr) { continue; }
-         const int local_elem = ftr->Elem1No;
-         MFEM_ASSERT(local_elem >= 0 && local_elem < ne_,
-                     "ExchangeBiMaterialNeighbours_: shared face " << sf
-                     << " has Elem1No=" << local_elem
-                     << " outside [0, " << ne_ << ").");
-         shared_face_neighbour_material_[sf] = per_elem_lmr_[local_elem];
-      }
-
-      // REVIEW R-004: warn once (rank 0) if a genuinely heterogeneous
-      // (Coefficient) material is used in parallel — the local-side stub
-      // above uses the WRONG neighbour material at a partition seam where the
-      // material varies laterally (it is correct only for seam-continuous /
-      // depth-only materials like TPV31).  The real cross-rank exchange is
-      // unimplemented.
-      if (material_ != nullptr
-          && material_->mode == MaterialField::Mode::Coefficient
-          && n_shared > 0)
-      {
-         int rank = 0;
-         MPI_Comm_rank(pmesh.GetComm(), &rank);
-         if (rank == 0)
-         {
-            mfem::out << "[wave_operator] WARNING: ExchangeBiMaterialNeighbours_"
-                         " is a LOCAL-SIDE stub — a parallel run with a "
-                         "laterally-varying (Coefficient) material will use the "
-                         "WRONG neighbour material at partition seams (correct "
-                         "only for depth-only / seam-continuous materials like "
-                         "TPV31).  The real cross-rank exchange is not yet "
-                         "implemented.\n";
-         }
-      }
-   }
-#endif
-}
-
-// ---------------------------------------------------------------------------
-// Phase 9 (Stage B) — per-element CK Jacobian apply (ported from hrs-ref).
-// Loops elements, fetches FluxForElem_(e).GetReferenceStarMatrix(dir), and
-// applies it ONLY to element e's ndof_per_el_ DOFs.  Bit-identical to the
-// scalar ApplyJacobianPerDOF on Mode::Constant (same A on every element).
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-void WaveOperator<MeshType>::ApplyJacobianPerElementDOF_(
-   int dir, const Vector &X, Vector &Y, real_t sign) const
-{
-   MFEM_ASSERT(dir >= 0 && dir < 3,
-               "ApplyJacobianPerElementDOF_: dir must be in {0,1,2}, got "
-               << dir);
-   MFEM_ASSERT(X.Size() == NUM_STATE * ndof_total_,
-               "ApplyJacobianPerElementDOF_: X size mismatch");
-   MFEM_ASSERT(Y.Size() == NUM_STATE * ndof_total_,
-               "ApplyJacobianPerElementDOF_: Y size mismatch");
-
-   const real_t *Xd = X.GetData();
-   real_t *Yd = Y.GetData();
-
-   for (int e = 0; e < ne_; ++e)
-   {
-      const DenseMatrix &A = FluxForElem_(e).GetReferenceStarMatrix(dir);
-      const int base = e * ndof_per_el_;
-      for (int c = 0; c < NUM_STATE; ++c)
-      {
-         real_t *Yc = Yd + c * ndof_total_ + base;
-         for (int cp = 0; cp < NUM_STATE; ++cp)
-         {
-            const real_t a = A(c, cp);
-            if (a == 0.0) { continue; }
-            const real_t w = sign * a;
-            const real_t *Xcp = Xd + cp * ndof_total_ + base;
-            for (int i = 0; i < ndof_per_el_; ++i)
-            {
-               Yc[i] += w * Xcp[i];
-            }
-         }
-      }
-   }
-}
-
-// ---------------------------------------------------------------------------
-// Phase 9 (Stage B) — precompute per-(face, side) bi-material flux matrices
-// (ported from hrs-ref).  Skips fault and boundary faces.  Fully-local
-// interior faces populate BOTH sides; shared faces populate ONLY side=0.
-// ---------------------------------------------------------------------------
-template <typename MeshType>
-void WaveOperator<MeshType>::BuildPerFaceBimaterialFluxMatrices_()
-{
-   MFEM_VERIFY(owned_flux_pool_,
-               "BuildPerFaceBimaterialFluxMatrices_: owned_flux_pool_ "
-               "must be built first (call BuildGodunovFluxPool_).");
-
-   const int n_faces = mesh_.GetNumFaces();
-   per_face_bimaterial_flux_.assign(
-      static_cast<size_t>(n_faces),
-      std::array<std::array<DenseMatrix, 2>, 2>{});
-
-   // Build the union of fault face sets so we skip fault faces without
-   // depending on per-face boundary-attribute lookups (which may be 0
-   // on a 2-sided interior fault face that lives entirely within the
-   // mesh).
-   std::set<int> fault_face_idx_set;
-   for (int i = 0; i < fault_interior_faces_.Size(); ++i)
-   {
-      fault_face_idx_set.insert(fault_interior_faces_[i]);
-   }
-
-   // The per-(face, side) matrices share a single bi-material Riemann
-   // state Q* per face.  Q* is defined by (n̂, L=Elem1, R=Elem2) and does
-   // NOT depend on whose POV we compute from.  Both Elem1 and Elem2 apply
-   // their OWN Jacobian A_self to the SAME Q*; side 0 has A_e1 baked in,
-   // side 1 has A_e2.  The runtime apply on BOTH sides consumes
-   // (Q_self=Q_e1, Q_nbr=Q_e2) — NOT swapped.  In the homogeneous limit
-   // A_e1 = A_e2 so the two sides match `flux_.Interior(...)` to LU rounding.
-   auto build_face_matrices = [&](const real_t *nor_unit,
-                                  const GodunovFlux &flux_L,
-                                  const GodunovFlux &flux_R,
-                                  std::array<DenseMatrix, 2> &out_side0,
-                                  std::array<DenseMatrix, 2> &out_side1)
-   {
-      const real_t n2 = nor_unit[0]*nor_unit[0] + nor_unit[1]*nor_unit[1]
-                      + nor_unit[2]*nor_unit[2];
-      MFEM_VERIFY(std::abs(n2 - 1.0) < 1e-10,
-                  "BuildPerFaceBimaterialFluxMatrices_: face normal not "
-                  "unit (|nor|^2 = " << n2 << ").");
-
-      real_t t1[3], t2[3];
-      GodunovFlux::BuildFrame(nor_unit, t1, t2);
-      DenseMatrix T(NUM_STATE, NUM_STATE);
-      DenseMatrix Tinv(NUM_STATE, NUM_STATE);
-      GodunovFlux::BuildRotation(nor_unit, t1, t2, T);
-      GodunovFlux::BuildRotationInverse(nor_unit, t1, t2, Tinv);
-
-      DenseMatrix qGodL_FL, qGodN_FL;
-      BimaterialFlux::BuildGodunovStateFaceLocal(
-         flux_L.GetLambda(), flux_L.GetMu(), flux_L.GetRho(),
-         flux_R.GetLambda(), flux_R.GetMu(), flux_R.GetRho(),
-         qGodL_FL, qGodN_FL);
-
-      auto compose_side = [&](const DenseMatrix &A_self_FL,
-                              std::array<DenseMatrix, 2> &out_pair)
-      {
-         DenseMatrix tmp1(NUM_STATE, NUM_STATE);
-         DenseMatrix tmp2(NUM_STATE, NUM_STATE);
-
-         mfem::Mult(A_self_FL, qGodL_FL, tmp1);
-         mfem::Mult(T, tmp1, tmp2);
-         out_pair[0].SetSize(NUM_STATE, NUM_STATE);
-         mfem::Mult(tmp2, Tinv, out_pair[0]);
-
-         mfem::Mult(A_self_FL, qGodN_FL, tmp1);
-         mfem::Mult(T, tmp1, tmp2);
-         out_pair[1].SetSize(NUM_STATE, NUM_STATE);
-         mfem::Mult(tmp2, Tinv, out_pair[1]);
-      };
-
-      compose_side(flux_L.GetAx(), out_side0);   // Elem1's POV (A_self = A_L)
-      compose_side(flux_R.GetAx(), out_side1);   // Elem2's POV (A_self = A_R)
-   };
-
-   auto build_shared_face_side0 = [&](const real_t *nor_unit,
-                                      const GodunovFlux &flux_local,
-                                      const GodunovFlux &flux_nbr,
-                                      std::array<DenseMatrix, 2> &out_pair)
-   {
-      BimaterialFlux::BuildPerFaceFluxMatricesGlobal(
-         nor_unit, flux_local, flux_nbr,
-         out_pair[0],   // fluxLocal (multiplier of Q_local)
-         out_pair[1]);  // fluxNeighbor (multiplier of Q_nbr)
-   };
-
-   auto compute_centroid_unit_normal = [](FaceElementTransformations *ftr,
-                                          real_t out_n[3])
-   {
-      const Geometry::Type gtype = ftr->GetGeometryType();
-      const IntegrationPoint &ip0 = Geometries.GetCenter(gtype);
-      ftr->SetAllIntPoints(&ip0);
-      Vector nor_vec(3);
-      CalcOrtho(ftr->Face->Jacobian(), nor_vec);
-      const real_t nor_len = nor_vec.Norml2();
-      MFEM_VERIFY(nor_len > 0,
-                  "BuildPerFaceBimaterialFluxMatrices_: face has zero "
-                  "Jacobian normal at centroid.");
-      nor_vec /= nor_len;
-      out_n[0] = nor_vec(0);
-      out_n[1] = nor_vec(1);
-      out_n[2] = nor_vec(2);
-   };
-
-   std::size_t n_int_built = 0;   // fully-local 2-sided interior faces
-   std::size_t n_shr_built = 0;   // shared (ParMesh) interior faces
-
-   // --- Pass 1: fully-local interior faces ---------------------------------
-   for (int f = 0; f < n_faces; ++f)
-   {
-      if (fault_face_idx_set.count(f) > 0) { continue; }
-
-      FaceElementTransformations *ftr =
-         mesh_.GetFaceElementTransformations(f);
-      if (!ftr) { continue; }
-
-      const int e1 = ftr->Elem1No;
-      const int e2 = ftr->Elem2No;
-
-      if (e2 < 0) { continue; }                  // 1-sided (boundary / seam)
-      if (face_bdr_attr_[f] != 0) { continue; }  // non-fault boundary face
-
-      real_t nor[3];
-      compute_centroid_unit_normal(ftr, nor);
-
-      const GodunovFlux &flux_e1 = owned_flux_pool_->At(e1);
-      const GodunovFlux &flux_e2 = owned_flux_pool_->At(e2);
-
-      build_face_matrices(nor, flux_e1, flux_e2,
-                          per_face_bimaterial_flux_[f][0],
-                          per_face_bimaterial_flux_[f][1]);
-
-      ++n_int_built;
-   }
-
-   // --- Pass 2: shared (cross-rank) faces, ParMesh only --------------------
-   if constexpr (IsParallelMesh<MeshType>::value)
-   {
-#ifdef MFEM_USE_MPI
-      auto &pmesh = static_cast<ParMesh &>(mesh_);
-      const int n_shared = pmesh.GetNSharedFaces();
-      for (int sf = 0; sf < n_shared; ++sf)
-      {
-         FaceElementTransformations *ftr =
-            pmesh.GetSharedFaceTransformations(sf);
-         if (!ftr) { continue; }
-
-         const int mesh_face_idx = pmesh.GetSharedFace(sf);
-         MFEM_VERIFY(mesh_face_idx >= 0 && mesh_face_idx < n_faces,
-                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
-                     << sf << " -> mesh face " << mesh_face_idx
-                     << " out of [0, " << n_faces << ").");
-
-         const bool sf_fault =
-            (sf < static_cast<int>(shared_face_bdr_attr_.size()))
-            && (shared_face_bdr_attr_[sf] == bc_.fault_attr)
-            && (bc_.fault_attr > 0);
-         if (sf_fault) { continue; }
-
-         const int local_elem = ftr->Elem1No;
-         MFEM_ASSERT(local_elem >= 0 && local_elem < ne_,
-                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
-                     << sf << " Elem1No=" << local_elem
-                     << " outside [0, " << ne_ << ").");
-
-         auto nbr_it = shared_face_neighbour_material_.find(sf);
-         MFEM_VERIFY(nbr_it != shared_face_neighbour_material_.end(),
-                     "BuildPerFaceBimaterialFluxMatrices_: shared face "
-                     << sf << " missing entry in "
-                     "shared_face_neighbour_material_.");
-         const auto &lmr_nbr = nbr_it->second;
-         GodunovFlux flux_nbr(lmr_nbr[0], lmr_nbr[1], lmr_nbr[2]);
-
-         real_t nor[3];
-         compute_centroid_unit_normal(ftr, nor);
-
-         const GodunovFlux &flux_local = owned_flux_pool_->At(local_elem);
-
-         build_shared_face_side0(nor, flux_local, flux_nbr,
-                                 per_face_bimaterial_flux_[mesh_face_idx][0]);
-
-         ++n_shr_built;
-      }
-#endif
-   }
-
-   const std::size_t per_face_per_side_bytes =
-      2 * NUM_STATE * NUM_STATE * sizeof(real_t);
-   const std::size_t total_bytes =
-      (2 * n_int_built + n_shr_built) * per_face_per_side_bytes;
-
-   int print_rank = 0;
-#ifdef MFEM_USE_MPI
-   if constexpr (IsParallelMesh<MeshType>::value)
-   {
-      auto &pmesh = static_cast<ParMesh &>(mesh_);
-      MPI_Comm_rank(pmesh.GetComm(), &print_rank);
-   }
-#endif
-   if (print_rank == 0)
-   {
-      mfem::out << "[wave_operator] BimaterialFlux precomputation:\n"
-                << "  interior faces processed = " << n_int_built
-                << "   (2 sides each)\n"
-                << "  shared faces processed   = " << n_shr_built
-                << "   (1 side each, Elem1 = local)\n"
-                << "  total bytes              = " << total_bytes
-                << " (per-rank)\n";
-
-      constexpr std::size_t kSoftCapBytes = 4ULL * 1024 * 1024 * 1024;
-      if (total_bytes > kSoftCapBytes)
-      {
-         mfem::out << "[wave_operator] WARNING: per-rank BimaterialFlux "
-                   << "precomputation = " << total_bytes
-                   << " bytes (> " << kSoftCapBytes
-                   << " soft cap).  Partition more aggressively or "
-                   << "enable a runtime-recompute fallback.\n";
-      }
-   }
-}
 
 // ---------------------------------------------------------------------------
 // TPV102 "Topology-Based Precomputed Face-Rotation" plan 2026-04-23
@@ -1510,6 +1041,58 @@ static inline void ApplyJacobianPerDOF(const DenseMatrix &A,
 }
 
 // ---------------------------------------------------------------------------
+// Phase 13 material-dispatch hooks — SCALAR WaveOperator bodies.
+//
+// These are the pure-scalar default bodies.  `BimaterialWaveOperator`
+// (dynamic/bimaterial_wave_operator.{hpp,inl}) overrides all three to use the
+// per-element flux pool / per-face bi-material matrices.  The scalar bodies
+// here are byte-identical to the pre-Phase-13 single-class code (the
+// per-element-pool branch was moved out to the subclass).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::InteriorFaceFlux_(
+   int mesh_face, const real_t *Q_self, const real_t *Q_nbr,
+   const real_t *nor, real_t *F_h_e1, real_t *F_h_e2) const
+{
+   // A single Godunov (or mixed-flux central) result is deposited to BOTH
+   // sides — byte-identical to the pre-Phase-13 single-`F_h` deposit.
+   // `mf_on_` is the cached member (the call sites used a per-function
+   // `mf_on` alias of it before Phase 13).
+   if (mf_on_ && central_flux_face_set_.count(mesh_face) > 0)
+   {
+      flux_.Central(nor, Q_self, Q_nbr, F_h_e1);
+   }
+   else
+   {
+      flux_.Interior(nor, Q_self, Q_nbr, F_h_e1);
+   }
+   for (int c = 0; c < NUM_STATE; c++) { F_h_e2[c] = F_h_e1[c]; }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::SharedInteriorFaceFlux_(
+   int mesh_face, const real_t *Q_self, const real_t *Q_nbr,
+   const real_t *nor, real_t *F_h) const
+{
+   if (mf_on_ && central_flux_face_set_.count(mesh_face) > 0)
+   {
+      flux_.Central(nor, Q_self, Q_nbr, F_h);
+   }
+   else
+   {
+      flux_.Interior(nor, Q_self, Q_nbr, F_h);
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ApplyElementJacobian_(
+   int dir, const Vector &X, Vector &Y, real_t sign) const
+{
+   const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(dir);
+   ApplyJacobianPerDOF(A_d, X, Y, ndof_total_, sign);
+}
+
+// ---------------------------------------------------------------------------
 // ADER I-05 Phase 3: Cauchy-Kovalevskaya time-integrated state predictor.
 // ---------------------------------------------------------------------------
 template <typename MeshType>
@@ -1564,18 +1147,10 @@ void WaveOperator<MeshType>::ComputeADERTimeIntegrated(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         if (owned_flux_pool_)
-         {
-            // Phase 9 (Stage B): per-element star matrices for the
-            // heterogeneous ctor.  Bit-identical to the scalar branch on
-            // Mode::Constant (same A on every element).
-            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
-         }
-         else
-         {
-            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
-         }
+         // Phase 13: per-element (matrix) or single reference-star-matrix
+         // (scalar) Jacobian apply, via the virtual hook.  Scalar body is
+         // byte-identical to the pre-Phase-13 ApplyJacobianPerDOF path.
+         ApplyElementJacobian_(d, dQ_dxd, D_next, /*sign=*/-1.0);
       }
 
       // Advance factorial factor: fac *= dt / (k+2).
@@ -1693,18 +1268,10 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
       for (int d = 0; d < 3; d++)
       {
          ApplySpatialDerivative(d, D_curr, dQ_dxd);
-         if (owned_flux_pool_)
-         {
-            // Phase 9 (Stage B): per-element star matrices for the
-            // heterogeneous ctor.  Bit-identical to the scalar branch on
-            // Mode::Constant (same A on every element).
-            ApplyJacobianPerElementDOF_(d, dQ_dxd, D_next, /*sign=*/-1.0);
-         }
-         else
-         {
-            const DenseMatrix &A_d = flux_.GetReferenceStarMatrix(d);
-            ApplyJacobianPerDOF(A_d, dQ_dxd, D_next, ndof_total_, /*sign=*/-1.0);
-         }
+         // Phase 13: per-element (matrix) or single reference-star-matrix
+         // (scalar) Jacobian apply, via the virtual hook.  Scalar body is
+         // byte-identical to the pre-Phase-13 ApplyJacobianPerDOF path.
+         ApplyElementJacobian_(d, dQ_dxd, D_next, /*sign=*/-1.0);
       }
 
       // Update factorial factors and accumulate D(k+1) into each node.
@@ -1810,24 +1377,10 @@ void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
                  "Disable precomputed flux first.");
    }
 
-   // REVIEW R-003: matrix (bimaterial) × mixed-flux mutual exclusion (restores
-   // the hrs-ref guard Phase 9 dropped).  The heterogeneous interior_flux=
-   // "matrix" path (owned_flux_pool_ set) replaces the interior-face flux with
-   // the bimaterial Riemann solve; mixed-flux ALSO replaces it (central vs
-   // upwind per face).  The two are incompatible — with owned_flux_pool_ set,
-   // the gated `if (owned_flux_pool_)` dispatch is taken at every interior
-   // face and the mixed-flux central logic (in the unreachable scalar else)
-   // would be silently ignored.  Abort loudly rather than silently drop it.
-   if (m != MixedFluxMode::None && owned_flux_pool_ != nullptr)
-   {
-      MFEM_ABORT("SetMixedFluxMode("
-                 << (m == MixedFluxMode::Adjacent ? "Adjacent"
-                                                  : "AllContinuous")
-                 << "): mixed flux is incompatible with the heterogeneous "
-                 "(bimaterial) interior_flux=\"matrix\" path; the bimaterial "
-                 "Riemann solve already replaces the interior-face flux.  Use "
-                 "interior_flux=\"scalar\" for mixed flux.");
-   }
+   // Phase 13: the matrix (bimaterial) × mixed-flux mutual exclusion (REVIEW
+   // R-003) is now STRUCTURAL — this scalar `WaveOperator` has no per-element
+   // flux pool, and `BimaterialWaveOperator::SetMixedFluxMode` overrides this
+   // method to abort on any non-None mode.  So no pool guard is needed here.
 
    // R-1205: Adjacent mode requires fault attribute and a populated fault
    // face list.  AllContinuous works even without a fault.
@@ -2732,11 +2285,9 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
 {
    const real_t *Q_data = Q.GetData();
 
-   // Round-11 Mixed-Flux dispatch flag (R-1206 short-circuit): hoisted
-   // ONCE per Mult call so the per-face dispatch can short-circuit the
-   // unordered_set lookup when mode == None.  Bit-identical to pre-
-   // Mixed-Flux path AND zero per-face overhead in default mode.
-   const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
+   // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
+   // SharedInteriorFaceFlux_ (which read the `mf_on_` member directly);
+   // the per-function `mf_on` alias is no longer needed here.
 
    // R-204: hoist the R-002 fault-bookkeeping guard out of the per-QP
    // loop.  If bc_.fault_attr > 0 the mesh has a fault, and the
@@ -3147,11 +2698,21 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                   // Using `can_n` (canonical, rank-invariant) rather
                   // than MFEM's local `nor` removes the L/R routing
                   // step and matches the shared-fault convention.
+                  //
+                  // Phase 13 (R-001): each side applies its OWN
+                  // fault-adjacent element's A_n via FluxForElem_.  The
+                  // plus side is e1 when elem1_on_plus, else e2; minus is
+                  // the other.  On the scalar WaveOperator FluxForElem_(e)
+                  // == flux_, so this is byte-identical; on
+                  // BimaterialWaveOperator it returns the per-element pool
+                  // flux (correct for a depth-varying medium).
+                  const int elem_plus  = elem1_on_plus ? e1 : e2;
+                  const int elem_minus = elem1_on_plus ? e2 : e1;
                   real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
-                  flux_.Interior(can_n, Q_imp_plus_g,  Q_imp_plus_g,
-                                 F_h_plus);
-                  flux_.Interior(can_n, Q_imp_minus_g, Q_imp_minus_g,
-                                 F_h_minus);
+                  FluxForElem_(elem_plus).Interior(can_n, Q_imp_plus_g,
+                                                   Q_imp_plus_g, F_h_plus);
+                  FluxForElem_(elem_minus).Interior(can_n, Q_imp_minus_g,
+                                                    Q_imp_minus_g, F_h_minus);
 
 #ifdef SEAS_DIAG_FAULT_FLUX
                   // C-2 FLUX: print Elem1's own-side flux in the GLOBAL
@@ -3280,26 +2841,15 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                      shape2.GetData(), ndof, dof_offset2, ndof_total_,
                      rhs);
                }
-               else if (owned_flux_pool_)
+               else
                {
-                  // Phase 9 (Stage B): heterogeneous WaveOperator path.
-                  // Both sides apply their OWN A_self to the SAME bi-material
-                  // Riemann state Q* (built once per face from L=Elem1,
-                  // R=Elem2 materials).  Side 0 has A_e1 baked in; side 1 has
-                  // A_e2.  BOTH consume (Q_self=Q_e1, Q_nbr=Q_e2) — NOT
-                  // swapped.  In the homogeneous limit A_e1 = A_e2 so
-                  // F_h_e1 == F_h_e2 to LU-rounding precision (R.1.T-1).
-                  const auto &mat_e1_local = per_face_bimaterial_flux_[f][0][0];
-                  const auto &mat_e1_nbr   = per_face_bimaterial_flux_[f][0][1];
-                  const auto &mat_e2_local = per_face_bimaterial_flux_[f][1][0];
-                  const auto &mat_e2_nbr   = per_face_bimaterial_flux_[f][1][1];
-
+                  // Phase 13: per-element (matrix) or single Godunov/central
+                  // (scalar) interior-face flux, via the virtual hook.  On the
+                  // scalar class F_h_e1 == F_h_e2 == the single pre-Phase-13
+                  // F_h, so the per-side deposit below is byte-identical.
                   real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
-                  BimaterialFlux::ApplyPerFaceFlux(
-                     mat_e1_local, mat_e1_nbr, Q_self, Q_nbr, F_h_e1);
-                  BimaterialFlux::ApplyPerFaceFlux(
-                     mat_e2_local, mat_e2_nbr, Q_self, Q_nbr, F_h_e2);
-                  phaser_dispatch_count_ += 2;
+                  InteriorFaceFlux_(f, Q_self, Q_nbr, nor, F_h_e1, F_h_e2);
+
                   for (int c = 0; c < NUM_STATE; c++)
                   {
                      for (int i = 0; i < ndof; i++)
@@ -3308,33 +2858,6 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                            w * shape1(i) * F_h_e1[c];
                         rhs[c * ndof_total_ + dof_offset2 + i] +=
                            w * shape2(i) * F_h_e2[c];
-                     }
-                  }
-               }
-               else
-               {
-                  // Round-11 Mixed-Flux dispatch (R-1206 short-circuit):
-                  // when mixed-flux mode is None (default), the mf_on
-                  // boolean is false and `count(f)` is never evaluated —
-                  // bit-identical AND zero-cost vs pre-Mixed-Flux path.
-                  if (mf_on && central_flux_face_set_.count(f) > 0)
-                  {
-                     flux_.Central(nor, Q_self, Q_nbr, F_h);
-                  }
-                  else
-                  {
-                     // Regular interior face: standard Godunov flux
-                     flux_.Interior(nor, Q_self, Q_nbr, F_h);
-                  }
-
-                  for (int c = 0; c < NUM_STATE; c++)
-                  {
-                     for (int i = 0; i < ndof; i++)
-                     {
-                        rhs[c * ndof_total_ + dof_offset1 + i] -=
-                           w * shape1(i) * F_h[c];
-                        rhs[c * ndof_total_ + dof_offset2 + i] +=
-                           w * shape2(i) * F_h[c];
                      }
                   }
 
@@ -3391,9 +2914,9 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                            "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
                            "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
                            g_seas_my_rank, f,
-                           F_h[SXX], F_h[SYY], F_h[SZZ],
-                           F_h[SXY], F_h[SYZ], F_h[SXZ],
-                           F_h[VX],  F_h[VY],  F_h[VZ]);
+                           F_h_e1[SXX], F_h_e1[SYY], F_h_e1[SZZ],
+                           F_h_e1[SXY], F_h_e1[SYZ], F_h_e1[SXZ],
+                           F_h_e1[VX],  F_h_e1[VY],  F_h_e1[VZ]);
                      }
                   }
 #endif
@@ -3421,8 +2944,9 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
 
-      // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-      const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
+      // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
+      // SharedInteriorFaceFlux_ (which read the `mf_on_` member directly);
+      // the per-function `mf_on` alias is no longer needed here.
 
       auto &pmesh = static_cast<const ParMesh &>(mesh_);
       int n_shared = pmesh.GetNSharedFaces();
@@ -3821,7 +3345,11 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   const real_t *Q_imp_side = elem1_on_plus
                                              ? Q_imp_plus_g
                                              : Q_imp_minus_g;
-                  flux_.Interior(can_n, Q_imp_side, Q_imp_side, F_h_side);
+                  // Phase 13 (R-001): this rank owns Elem1 (e1) only; apply
+                  // its per-element flux via FluxForElem_ (== flux_ on the
+                  // scalar class; pool flux on BimaterialWaveOperator).
+                  FluxForElem_(e1).Interior(can_n, Q_imp_side, Q_imp_side,
+                                            F_h_side);
 
                   const real_t assemble_sign = elem1_on_plus ? -1.0 : +1.0;
                   for (int c = 0; c < NUM_STATE; c++)
@@ -3864,25 +3392,13 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                   ndof, dof_offset1, ndof_total_, rhs);
                continue;
             }
-            else if (owned_flux_pool_)
-            {
-               // Phase 9 (Stage B): heterogeneous WaveOperator path on a
-               // shared non-fault interior face.  Local element is Elem1 by
-               // MFEM convention; only side=0 of per_face_bimaterial_flux_
-               // is populated (see BuildPerFaceBimaterialFluxMatrices_).  The
-               // local-only accumulation below consumes F_h identically to
-               // the scalar branch.
-               const auto &mat_local =
-                  per_face_bimaterial_flux_[mesh_face_idx][0][0];
-               const auto &mat_nbr =
-                  per_face_bimaterial_flux_[mesh_face_idx][0][1];
-               BimaterialFlux::ApplyPerFaceFlux(mat_local, mat_nbr,
-                                                Q_self, Q_nbr, F_h);
-               phaser_dispatch_count_ += 1;
-            }
             else
             {
-               // Non-fault shared face: standard welded Godunov flux.
+               // Non-fault shared face: standard welded Godunov flux (scalar
+               // class) or per-face bi-material flux (BimaterialWaveOperator),
+               // via the virtual hook.  Local element is Elem1 by MFEM
+               // convention; the local-only accumulation below consumes the
+               // single F_h identically for both classes.
                //
                // I-04 invariant (addresses REVIEW.md R-I04-005): a shared
                // face in MFEM's ParMesh model always has elements on BOTH
@@ -3896,17 +3412,9 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
                // will be silently ignored here — add a symmetric branch
                // or a loud MFEM_VERIFY at that time.
                //
-               // Round-11 Mixed-Flux dispatch (R-1206 short-circuit + R-1207
-               // shared-seam membership): when mf_on, check the central
-               // set keyed by global mesh face index.
-               if (mf_on && central_flux_face_set_.count(mesh_face_idx) > 0)
-               {
-                  flux_.Central(nor, Q_self, Q_nbr, F_h);
-               }
-               else
-               {
-                  flux_.Interior(nor, Q_self, Q_nbr, F_h);
-               }
+               // Round-11 Mixed-Flux dispatch (R-1206/R-1207) is handled
+               // inside the scalar hook body (keyed by global mesh face idx).
+               SharedInteriorFaceFlux_(mesh_face_idx, Q_self, Q_nbr, nor, F_h);
             }
 
             // Accumulate into local element only (no ghost writes).
@@ -4005,8 +3513,9 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
       bulk_bg_scaled[c] = dt * bulk_bg_[c];
    }
 
-   // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-   const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
+   // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
+   // SharedInteriorFaceFlux_ (which read the `mf_on_` member directly);
+   // the per-function `mf_on` alias is no longer needed here.
 
    if (bc_.fault_attr > 0)
    {
@@ -4412,11 +3921,16 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   }
 #endif
 
+                  // Phase 13 (R-001): per-side fault-adjacent element flux
+                  // via FluxForElem_ (== flux_ on the scalar class;
+                  // per-element on BimaterialWaveOperator).
+                  const int elem_plus  = elem1_on_plus ? e1 : e2;
+                  const int elem_minus = elem1_on_plus ? e2 : e1;
                   real_t F_h_plus[NUM_STATE], F_h_minus[NUM_STATE];
-                  flux_.Interior(can_n, I_imp_plus_g,  I_imp_plus_g,
-                                 F_h_plus);
-                  flux_.Interior(can_n, I_imp_minus_g, I_imp_minus_g,
-                                 F_h_minus);
+                  FluxForElem_(elem_plus).Interior(can_n, I_imp_plus_g,
+                                                   I_imp_plus_g, F_h_plus);
+                  FluxForElem_(elem_minus).Interior(can_n, I_imp_minus_g,
+                                                    I_imp_minus_g, F_h_minus);
 
                   if (elem1_on_plus)
                   {
@@ -4741,14 +4255,20 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      }
                   }
 
+                  // Phase 13 (R-001): per-QP per-side fault-adjacent element
+                  // flux via FluxForElem_ (== flux_ on the scalar class).
+                  const int elem_plus_qq  =
+                     elem1_on_plus_per_qp[qq] ? e1 : e2;
+                  const int elem_minus_qq =
+                     elem1_on_plus_per_qp[qq] ? e2 : e1;
                   real_t F_h_plus_qq[NUM_STATE];
                   real_t F_h_minus_qq[NUM_STATE];
-                  flux_.Interior(can_n_per_qp[qq].data(),
-                                  I_imp_plus_g_qq, I_imp_plus_g_qq,
-                                  F_h_plus_qq);
-                  flux_.Interior(can_n_per_qp[qq].data(),
-                                  I_imp_minus_g_qq, I_imp_minus_g_qq,
-                                  F_h_minus_qq);
+                  FluxForElem_(elem_plus_qq).Interior(
+                     can_n_per_qp[qq].data(),
+                     I_imp_plus_g_qq, I_imp_plus_g_qq, F_h_plus_qq);
+                  FluxForElem_(elem_minus_qq).Interior(
+                     can_n_per_qp[qq].data(),
+                     I_imp_minus_g_qq, I_imp_minus_g_qq, F_h_minus_qq);
 
                   const Vector &sh1_qq = shape1_per_qp[qq];
                   const Vector &sh2_qq = shape2_per_qp[qq];
@@ -4868,23 +4388,16 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                }
             }
          }
-         else if (owned_flux_pool_)
+         else
          {
-            // Phase 9 (Stage B): heterogeneous WaveOperator path (ADER
-            // variant of the RK4 local site).  Both sides apply their OWN
-            // A_self to the SAME bi-material Riemann state Q*; BOTH dispatch
-            // consume (I_e1, I_e2) — NOT swapped.
-            const auto &mat_e1_local = per_face_bimaterial_flux_[f][0][0];
-            const auto &mat_e1_nbr   = per_face_bimaterial_flux_[f][0][1];
-            const auto &mat_e2_local = per_face_bimaterial_flux_[f][1][0];
-            const auto &mat_e2_nbr   = per_face_bimaterial_flux_[f][1][1];
-
+            // Phase 13: per-element (matrix) or single Godunov/central
+            // (scalar) interior-face flux on the time-integrated state I,
+            // via the virtual hook.  On the scalar class F_h_e1 == F_h_e2 ==
+            // the single pre-Phase-13 F_h, so the per-side deposit below is
+            // byte-identical.
             real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
-            BimaterialFlux::ApplyPerFaceFlux(
-               mat_e1_local, mat_e1_nbr, I_self, I_nbr, F_h_e1);
-            BimaterialFlux::ApplyPerFaceFlux(
-               mat_e2_local, mat_e2_nbr, I_self, I_nbr, F_h_e2);
-            phaser_dispatch_count_ += 2;
+            InteriorFaceFlux_(f, I_self, I_nbr, nor, F_h_e1, F_h_e2);
+
             for (int c = 0; c < NUM_STATE; c++)
             {
                for (int i = 0; i < ndof; i++)
@@ -4893,42 +4406,6 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      w * shape1(i) * F_h_e1[c];
                   rhs[c * ndof_total_ + dof_offset2 + i] +=
                      w * shape2(i) * F_h_e2[c];
-               }
-            }
-         }
-         else
-         {
-            // Runtime interior dispatch — lifted VERBATIM from the
-            // pre-patch `else { flux_.Interior(nor, I_self, I_nbr, F_h); ... }`
-            // block (non-fault interior fallback; R2-008 discipline).
-            // Round-13C Patch 1 wraps with optional n↔-n,L↔R symmetrization
-            // (SEAS_TEST_NONFAULT_BOTH_SYM=1); unset → byte-identical.
-            //
-            // Round-11 Mixed-Flux dispatch (R-1206): pick Central or
-            // Interior based on the central-flux face set.  Both
-            // symmetrization branches honor the mode.
-            const bool use_central_here =
-               (mf_on && central_flux_face_set_.count(f) > 0);
-            auto interior_or_central = [&](const real_t *n_arg,
-                                           const real_t *Q_a,
-                                           const real_t *Q_b,
-                                           real_t *F_out)
-            {
-               if (use_central_here) { flux_.Central(n_arg, Q_a, Q_b, F_out); }
-               else                  { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
-            };
-
-            // R-1411: nonfault_both_sym dead else-branch removed.
-            interior_or_central(nor, I_self, I_nbr, F_h);
-
-            for (int c = 0; c < NUM_STATE; c++)
-            {
-               for (int i = 0; i < ndof; i++)
-               {
-                  rhs[c * ndof_total_ + dof_offset1 + i] -=
-                     w * shape1(i) * F_h[c];
-                  rhs[c * ndof_total_ + dof_offset2 + i] +=
-                     w * shape2(i) * F_h[c];
                }
             }
 
@@ -4982,9 +4459,9 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      "SXY=%+.4e SYZ=%+.4e SXZ=%+.4e "
                      "VX=%+.4e VY=%+.4e VZ=%+.4e\n",
                      g_seas_my_rank, f,
-                     F_h[SXX], F_h[SYY], F_h[SZZ],
-                     F_h[SXY], F_h[SYZ], F_h[SXZ],
-                     F_h[VX],  F_h[VY],  F_h[VZ]);
+                     F_h_e1[SXX], F_h_e1[SYY], F_h_e1[SZZ],
+                     F_h_e1[SXY], F_h_e1[SYZ], F_h_e1[SXZ],
+                     F_h_e1[VX],  F_h_e1[VY],  F_h_e1[VZ]);
                }
             }
 #endif
@@ -5017,8 +4494,9 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
       MFEM_VERIFY(I.Size() == NUM_STATE * ndof_total_,
                   "ComputeADERSharedFaceFluxRHS: I size mismatch");
 
-      // Round-11 Mixed-Flux short-circuit (R-1206): hoist once per call.
-      const bool mf_on = mf_on_;  // R-1208: cached member, kept in sync by SetMixedFluxMode
+      // Phase 13: mixed-flux dispatch now lives in InteriorFaceFlux_ /
+      // SharedInteriorFaceFlux_ (which read the `mf_on_` member directly);
+      // the per-function `mf_on` alias is no longer needed here.
 
       auto *pfes = dynamic_cast<ParFiniteElementSpace*>(fes_.get());
       MFEM_VERIFY(pfes, "FESpace must be ParFiniteElementSpace for ParMesh");
@@ -5130,6 +4608,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          int  dof_offset1   = 0;
          int  ndof          = 0;
          int  dof_idx       = -1;
+         int  local_elem    = -1;   // Phase 13 (R-001): Elem1 index for FluxForElem_
          bool elem1_on_plus = false;
          real_t w = 0.0;
          real_t can_n[3]  = {0, 0, 0};
@@ -5620,6 +5099,7 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   qa.dof_offset1   = dof_offset1;
                   qa.ndof          = ndof;
                   qa.dof_idx       = dof_idx;
+                  qa.local_elem    = e1;   // Phase 13 (R-001)
                   qa.elem1_on_plus = elem1_on_plus;
                   qa.w             = w;
                   for (int d = 0; d < 3; d++)
@@ -5664,48 +5144,15 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   ndof, dof_offset1, ndof_total_, rhs);
                continue;
             }
-            else if (owned_flux_pool_)
-            {
-               // Phase 9 (Stage B): heterogeneous WaveOperator path on a
-               // shared non-fault interior face (ADER variant).  Local
-               // element is Elem1 by MFEM convention; only side=0 of
-               // per_face_bimaterial_flux_ is populated.  The local-only
-               // accumulation below consumes F_h identically to scalar.
-               const auto &mat_local =
-                  per_face_bimaterial_flux_[mesh_face_idx][0][0];
-               const auto &mat_nbr =
-                  per_face_bimaterial_flux_[mesh_face_idx][0][1];
-               BimaterialFlux::ApplyPerFaceFlux(mat_local, mat_nbr,
-                                                I_self, I_nbr, F_h);
-               phaser_dispatch_count_ += 1;
-            }
             else
             {
-               // Round-14C: optional n↔-n symmetrization for shared
-               // non-fault faces, parallel to the Round-13C hook in
-               // ComputeADERFaceFluxRHS.  Env unset → verbatim
-               // pre-patch path.
-               //
-               // Round-11 Mixed-Flux dispatch (R-1206 + R-1207): central
-               // flux on shared non-fault faces if their global mesh face
-               // index is in central_flux_face_set_ (the set construction
-               // honors shared seams via shared_mesh_face_set_).
-               const bool use_central_here_shared =
-                  (mf_on && central_flux_face_set_.count(mesh_face_idx) > 0);
-               auto interior_or_central_shared = [&](const real_t *n_arg,
-                                                     const real_t *Q_a,
-                                                     const real_t *Q_b,
-                                                     real_t *F_out)
-               {
-                  if (use_central_here_shared)
-                     { flux_.Central(n_arg, Q_a, Q_b, F_out); }
-                  else
-                     { flux_.Interior(n_arg, Q_a, Q_b, F_out); }
-               };
-
-               // R-1411: nonfault_both_sym dead else-branch removed
-               // (shared-face mirror of the local-face cleanup).
-               interior_or_central_shared(nor, I_self, I_nbr, F_h);
+               // Phase 13: per-element (matrix) or single Godunov/central
+               // (scalar) interior-face flux on the time-integrated state I,
+               // for a SHARED face — local (Elem1) contribution only, via the
+               // virtual hook.  Round-11 Mixed-Flux dispatch (R-1206/R-1207)
+               // is handled inside the scalar hook body (keyed by global mesh
+               // face index, honouring shared seams via shared_mesh_face_set_).
+               SharedInteriorFaceFlux_(mesh_face_idx, I_self, I_nbr, nor, F_h);
             }
 
             for (int c = 0; c < NUM_STATE; c++)
@@ -5803,7 +5250,11 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             const real_t *I_imp_side = qa.elem1_on_plus ? I_imp_plus_g
                                                         : I_imp_minus_g;
             real_t F_h_side[NUM_STATE];
-            flux_.Interior(qa.can_n, I_imp_side, I_imp_side, F_h_side);
+            // Phase 13 (R-001): this rank owns Elem1 (qa.local_elem) only;
+            // apply its per-element flux via FluxForElem_ (== flux_ on the
+            // scalar class; pool flux on BimaterialWaveOperator).
+            FluxForElem_(qa.local_elem).Interior(qa.can_n, I_imp_side,
+                                                 I_imp_side, F_h_side);
             const real_t assemble_sign = qa.elem1_on_plus ? -1.0 : +1.0;
             for (int c = 0; c < NUM_STATE; c++)
             {
@@ -6092,15 +5543,41 @@ real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
    //                                    significantly tighter.  0.4×
    //                                    is close to Zhang's 0.3-equiv.
    //
-   // These factors are interim placeholders pending a multi-step
+   // The ADER factors are interim placeholders pending a multi-step
    // stability calibration on the production fixture.  Drivers that
    // calibrate CFL externally can compensate via the `cfl` argument.
+   //
+   // Phase 14.4 — RK-aware branch (cfl_rk_aware_, set by the spatial driver's
+   // --time-integrator rk4|rk45 path; default false ⇒ ADER, byte-exact):
+   //
+   //   Central flux (GodunovFlux::Central, used on the mixed-flux faces) is
+   //   non-dissipative, so the fault-adjacent eigenvalues λ = iω sit on the
+   //   imaginary axis.  An explicit RK of order ≥ 3 has a stability region
+   //   that contains a segment of the imaginary axis (RK4 / RK4-class DP45:
+   //   |λ|·dt < y_max ≈ 2√2 ≈ 2.83); ADER-O2's R(z)=1+z+z²/2 does NOT, which
+   //   is exactly why mixed/central flux ran away under ADER (BUILD §5.4/§6.3)
+   //   and needs the RK integrator.  The DRDG3D-anchored empirical mixed-flux
+   //   target is an effective CFL ≈ 0.3 for Adjacent (≈0.3–0.4 AllContinuous).
+   //
+   //   These RK factors are applied here as the central-face-density de-rating
+   //   relative to the pure-upwind RK base; the spatial driver supplies the
+   //   DG-order de-rating (spatial::RkCflFactor = 3/(2N+1)) through the `cfl`
+   //   argument.  At N=1, cfg.numerics.cfl=0.5 the product lands the effective
+   //   CFL at None→0.5, Adjacent→0.30, AllContinuous→0.35 (in the empirical
+   //   targets).  Starting calibration: the production validation of the RK
+   //   stability is the §14.5 Frontera run, not a local unit test.
    real_t cfl_mixed_flux_factor = 1.0;
    switch (mixed_flux_mode_)
    {
-      case MixedFluxMode::None:          cfl_mixed_flux_factor = 1.0; break;
-      case MixedFluxMode::Adjacent:      cfl_mixed_flux_factor = 0.9; break;
-      case MixedFluxMode::AllContinuous: cfl_mixed_flux_factor = 0.4; break;
+      case MixedFluxMode::None:
+         cfl_mixed_flux_factor = 1.0;
+         break;
+      case MixedFluxMode::Adjacent:
+         cfl_mixed_flux_factor = cfl_rk_aware_ ? 0.6 : 0.9;
+         break;
+      case MixedFluxMode::AllContinuous:
+         cfl_mixed_flux_factor = cfl_rk_aware_ ? 0.7 : 0.4;
+         break;
       default:
          // R-1600: any future MixedFluxMode value reaches this default
          // and ABORTS — silent fall-through (with cfl_factor=1.0, i.e.,
@@ -6114,51 +5591,11 @@ real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
                     "CFL factor in this switch.");
    }
 
-   // Phase H.3 (Stage 1): heterogeneous-CFL path.  When the
-   // heterogeneous ctor populated `per_elem_h_` / `per_elem_lmr_`,
-   // walk every owned element to compute
-   //   dt_e = cfl_factor * cfl * h_e / c_p,e
-   // and `MPI_Allreduce(MIN)` across ranks.
-   //
-   // For Mode::Constant input (Stage 1's only supported mode) every
-   // element shares the same (lambda, mu, rho), so c_p,e is constant
-   // and the local min over `cfl_factor * cfl * h_e / c_p` is exactly
-   // `cfl_factor * cfl * (min_e h_e) / c_p`.  The MPI MIN reduction
-   // over these per-rank locals matches the legacy path's reduction
-   // on `h_min_` (which was reduced over the same per-element `h_e`
-   // set in the scalar ctor).  So this branch is BYTE-IDENTICAL to
-   // the scalar formula below — proven by
-   // `test_phaseh_wave_operator_constant_parity` Test C-3.
-   if (!per_elem_h_.empty())
-   {
-      MFEM_ASSERT(per_elem_h_.size() == static_cast<size_t>(ne_)
-                  && per_elem_lmr_.size() == static_cast<size_t>(ne_),
-                  "ComputeMaxDt: per_elem_h_ / per_elem_lmr_ sizes ("
-                  << per_elem_h_.size() << ", " << per_elem_lmr_.size()
-                  << ") must equal ne_ (" << ne_ << ").");
-      real_t local_dt_min = std::numeric_limits<real_t>::infinity();
-      for (int e = 0; e < ne_; ++e)
-      {
-         const real_t lam = per_elem_lmr_[e][0];
-         const real_t mu  = per_elem_lmr_[e][1];
-         const real_t rho = per_elem_lmr_[e][2];
-         const real_t cp_e = std::sqrt((lam + 2.0 * mu) / rho);
-         const real_t h_e  = per_elem_h_[e];
-         const real_t dt_e = cfl_mixed_flux_factor * cfl * h_e / cp_e;
-         local_dt_min = std::min(local_dt_min, dt_e);
-      }
-      real_t dt_global = local_dt_min;
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         MPI_Allreduce(&local_dt_min, &dt_global, 1,
-                       MPITypeMap<real_t>::mpi_type, MPI_MIN,
-                       static_cast<ParMesh &>(mesh_).GetComm());
-#endif
-      }
-      return dt_global;
-   }
-
+   // Scalar (homogeneous) CFL.  Phase 13 moved the per-element
+   // heterogeneous walk (per_elem_h_ / per_elem_lmr_ + MPI_Allreduce(MIN))
+   // to BimaterialWaveOperator::ComputeMaxDt; this scalar class uses the
+   // single material `flux_` and the geometric `h_min_` directly — the
+   // pre-Phase-9 byte-exact formula for every TPV / BP5 / scalar-SAFS run.
    return cfl_mixed_flux_factor * cfl * h_min_ / flux_.GetCp();
 }
 

@@ -107,7 +107,8 @@ inline void SolveLSW_TPV205(real_t tau1_trial, real_t tau2_trial,
                             real_t mu_eff,
                             real_t &V_abs, real_t &V1, real_t &V2,
                             real_t &tau1_corr, real_t &tau2_corr,
-                            real_t sigma_n_floor = 0.0)
+                            real_t sigma_n_floor = 0.0,
+                            real_t cohesion = 0.0)
 {
    MFEM_ASSERT(eta_s > 0.0,
                "SolveLSW_TPV205: eta_s must be positive; got " << eta_s);
@@ -171,7 +172,9 @@ inline void SolveLSW_TPV205(real_t tau1_trial, real_t tau2_trial,
    // floor, breaking the tensile free-slip runaway (sliver-blowup plan
    // 2026-05-26 §2c).
    const real_t sigma_n_pos = std::max<real_t>(sigma_n_total, sigma_n_floor);
-   const real_t tau_strength = mu_eff * sigma_n_pos;
+   // Phase 10 (TPV31): additive cohesion C0 (default 0 ⇒ byte-exact for
+   // TPV205 / all existing LSW configs).  τ_strength = μ(δ)·σ_n + C0.
+   const real_t tau_strength = mu_eff * sigma_n_pos + cohesion;
 
    // Closed-form V_abs from radiation damping balance.
    if (tau_abs > tau_strength)

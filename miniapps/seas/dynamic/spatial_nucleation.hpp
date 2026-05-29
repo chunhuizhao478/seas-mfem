@@ -173,6 +173,25 @@ void ApplyGradualOverstressIncrement(
    real_t                                 t_substep_end,
    real_t                                 dt_substep);
 
+/// @brief Phase 14.3 — ABSOLUTE (set, not accumulate) gradual-overstress
+/// forcing at stage time `t`: writes
+///   dof_data[i].tau1_nuc = SmoothStep(t, T_nuc_s) · amplitude_dip(i)
+///   dof_data[i].tau2_nuc = SmoothStep(t, T_nuc_s) · amplitude_strike(i)
+///
+/// This is the RK-stage analogue of `ApplyGradualOverstressIncrement`: the
+/// per-sub-step telescoped increment `SmoothStep(t) − SmoothStep(t−dt)` would
+/// DOUBLE-APPLY across RK stages that revisit a sub-interval (e.g. RK4 stages 2
+/// and 3 both at t+dt/2), so the RK stepper sets the absolute target each stage
+/// instead.  Summed/sampled at any partition of `[0, T_nuc_s]` the absolute
+/// value equals the telescoped total (no double-apply).  `sigma_n_nuc` is left
+/// at 0 (this mechanism does not perturb σ_n).  Early-returns when nucleation
+/// is disabled (zero-sized params).
+void ApplyGradualOverstressAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const GradualOverstressPerDOFParams&   params,
+   real_t                                 T_nuc_s,
+   real_t                                 t);
+
 // =====================================================================
 // Phase 7 — compact-circular gradual overstress (TPV102/104).
 // =====================================================================
@@ -231,6 +250,17 @@ void ApplyGradualOverstressCompactCircularIncrement(
    real_t                                 T_nuc_s,
    real_t                                 t_substep_end,
    real_t                                 dt_substep);
+
+/// @brief Phase 14.3 — ABSOLUTE (set, not accumulate) compact-circular forcing
+/// at stage time `t`: writes
+///   dof_data[i].tau2_nuc = SmoothStep(t, T_nuc_s) · amplitude_strike(i)
+/// (pure strike-slip; tau1_nuc / sigma_n_nuc left at 0).  Same RK-stage
+/// rationale as `ApplyGradualOverstressAbsolute`.  Early-returns when disabled.
+void ApplyGradualOverstressCompactCircularAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t);
 
 // =====================================================================
 // Phase 7 — instantaneous circular overstress (TPV31, one-shot).

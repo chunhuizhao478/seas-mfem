@@ -123,6 +123,11 @@ protected:
             who_s + ": dt_macro must be finite and positive; got "
             + std::to_string(dt_macro));
       }
+      // R-006: this finiteness guard is shared by every path.  The TPV102/104
+      // oracles have it; the TPV205 (LSW) oracle does NOT.  Keeping it on the
+      // LSW path is a deliberate hardening, not a parity regression: it fires
+      // only on a non-finite t_macro_start, which never occurs in a real run,
+      // so the byte-exact LSW results on valid (finite) input are unchanged.
       if (!std::isfinite(t_macro_start))
       {
          throw std::runtime_error(

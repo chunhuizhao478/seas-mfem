@@ -827,7 +827,8 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
                    s.tau1_corr, s.tau2_corr,
-                   SigmaNStrengthFloorForLSW());
+                   SigmaNStrengthFloorForLSW(),
+                   data.lsw_cohesion);   // Phase 10 (TPV31) additive C0 (0 ⇒ byte-exact)
 
    // σ_n is unaffected by friction — TRIAL-scale value matches the
    // rate-and-state path's CompleteFromVabs convention.
@@ -947,7 +948,8 @@ void FaultFaceFlux::EvaluateADER_LSW_ForcedRupture(
                    mu_eff,
                    s.V_abs, s.V1, s.V2,
                    s.tau1_corr, s.tau2_corr,
-                   SigmaNStrengthFloorForLSW());
+                   SigmaNStrengthFloorForLSW(),
+                   data.lsw_cohesion);   // Phase 10 (TPV31) additive C0 (0 ⇒ byte-exact)
 
    s.sigma_n_corr = s.sigma_n_trial;
 

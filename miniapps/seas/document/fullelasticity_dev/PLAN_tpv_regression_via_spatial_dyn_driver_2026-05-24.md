@@ -2722,6 +2722,635 @@ question for the SAFS LSW/RS runs).
 | **Two CSVs on different depth grids (Phase 11b)** | LOW | `a` and `a−b` files have different depth samples (0/14.9/52.7 vs 0/13.7/60 km). Mitigation: interpolate each independently and subtract at query time (`FrictionDepthProfile1D::b`), never pre-merge onto one grid; resolver test covers it |
 | **Profile CSV path resolution / missing file (Phase 11b)** | LOW | `param_*_csv` paths are CWD-relative like `[mesh].path`; read at PARSE time so a bad path aborts at config-load with a precise message, not mid-run |
 
+## Phase 13 — Split scalar / matrix into separate WaveOperator classes (kill the `flux_` placeholder leak class)
+
+### Overview
+Phases 9 folded the heterogeneous (bimaterial / `interior_flux="matrix"`) path into the **same**
+`WaveOperator` class as the scalar (homogeneous) path, using a single `flux_` member that is the
+real material on the scalar ctor and a **`(1,1,1)` placeholder** on the matrix ctor. Every site that
+reads material via bare `flux_` instead of the per-element accessor `FluxForElem_(e)` is therefore
+correct on scalar but silently `(1,1,1)`-wrong on matrix — a leak class that recurred across three
+review rounds (boundary faces, the bulk volume RHS, the fault imposed-state flux; see REVIEW.md
+rounds 3–4). Phase 13 makes the two paths **physically separate classes** so the leak is impossible
+by construction:
+
+- **`WaveOperator<MeshType>` stays the SCALAR operator** — the exact class the standalone
+  `tpv{102,104,205}_driver.cpp` and `seas_bp5_full` instantiate, and the `interior_flux="scalar"`
+  branch of `spatial_dyn_driver.cpp`. Its scalar numerics are **byte-unchanged**; the TPV/BP5
+  byte-exactness oracle is preserved trivially. All bimaterial members and the het ctor are
+  **removed** from it.
+- **`BimaterialWaveOperator<MeshType> : public WaveOperator<MeshType>`** is a NEW, separate class
+  (new files) that holds the per-element flux pool + bimaterial flux matrices + cross-rank exchange,
+  and **overrides** the handful of material-/flux-dependent virtual hooks to use per-element material
+  at every site. It contains no scalar placeholder logic, so a missed site cannot silently run
+  `(1,1,1)` — and the inherited `flux_` is **poisoned** so any stray use fails loud.
+
+This is the user-chosen "two separate options" (2026-05-28): scalar == the TPV-driver operator,
+matrix == a separate class.
+
+### Constraints
+- **Scalar byte-exactness (non-negotiable).** `WaveOperator`'s scalar output must be bit-identical
+  before/after this phase: `tpv{102,104,205}` station traces, the BP5 path, and the scalar SAFS
+  runs. The only permitted changes to `WaveOperator` are (a) removing bimaterial members/methods,
+  (b) adding `protected virtual` hooks whose **default bodies are the current scalar code verbatim**,
+  and (c) routing the bare-`flux_` material sites through `FluxForElem_(e)` (which on the scalar
+  class returns `flux_` — byte-identical).
+- **TPV/BP5 drivers must not change.** They construct `WaveOperator<Mesh>`; that type, its public
+  API, and its behavior stay identical. (Making a few methods `virtual` does not change scalar
+  numerics; `FluxForElem_(e)` is per-element/per-face, not in the innermost QP loop, so the
+  virtual-call overhead is negligible.)
+- **No duplication of the ~7000-line DG/ADER skeleton.** The skeleton (`Mult`, `AdvanceADER`,
+  `ComputeADER*`, `ComputeVolumeRHS`, `ComputeFaceFluxRHS`, …) lives ONCE in `WaveOperator` and is
+  inherited by `BimaterialWaveOperator`, which runs the same skeleton with material behavior injected
+  through the overridden virtuals. (A full duplicate class was the rejected alternative — a 2×
+  maintenance burden.)
+- **Reference is hrs-ref.** Every per-element override body must reproduce the hrs-ref
+  implementation (`git show hrs-ref:miniapps/seas/dynamic/wave_operator.inl`), which uses
+  `FluxForElem_(...)` at every material site.
+- **Driver-facing base interface unchanged.** The 18 `wave.*` calls in `spatial_dyn_driver.cpp`
+  (`AdvanceADER`, `ComputeADERSubStepStates`, `ComputeMaxDt`, `EvaluateBulkAtFaultQPsCanonical`,
+  `GetCentralFluxFaceSet`, `GetFaultInteriorFaces`, `GetFaultSharedFaces`, `GetNumLocalFaultQPs`,
+  `GetNumTotalFaultQPs`, `GetScalarNDof`, `SetAbsorbingBackground`, `SetFaultDOFData`,
+  `SetFaultFlux`, `SetFaultFrictionLaw`, `SetMixedFluxMode`, `SetSubStepFaultImposedStates`,
+  `SetTime`, `VerifySharedFaultDOFDataConsistency`) must remain on the `WaveOperator` base so the
+  driver can hold a `std::unique_ptr<WaveOperator<ParMesh>>` and call through it for both paths.
+
+### Chosen class structure (precise)
+```cpp
+// dynamic/wave_operator.{hpp,inl}  — SCALAR (unchanged behavior; TPV/BP5/scalar-SAFS operator)
+template <typename MeshType = Mesh>
+class WaveOperator : public TimeDependentOperator {
+  // ... all existing scalar state + the DG/ADER skeleton (Mult/AdvanceADER/ComputeADER*/...) ...
+  GodunovFlux flux_;                       // scalar material (KEPT)
+protected:
+  // --- material/flux dispatch hooks (NEW; defaults == current scalar code) ---
+  virtual const GodunovFlux& FluxForElem_(int e) const { return flux_; }
+  virtual void InteriorFaceFlux_(/* see §13 hook 2 */) const;     // scalar: flux_.Interior / mixed-flux
+  virtual void ApplyElementJacobian_(int dir, const Vector& X, Vector& Y,
+                                     real_t sign) const;          // scalar: ApplyJacobianPerDOF(flux_.GetReferenceStarMatrix(dir),…)
+public:
+  virtual real_t ComputeMaxDt(real_t cfl) const;                  // scalar: cfl_mixed_flux_factor*cfl*h_min_/flux_.GetCp()
+  virtual void   SetMixedFluxMode(MixedFluxMode m);               // scalar: as today
+  // ... UsesGodunovFluxPool() returns false here ...
+};
+
+// dynamic/bimaterial_wave_operator.{hpp,inl}  — MATRIX (separate, new)
+template <typename MeshType = Mesh>
+class BimaterialWaveOperator : public WaveOperator<MeshType> {
+  std::unique_ptr<GodunovFluxPool> pool_;                         // per-element flux
+  const MaterialField* material_ = nullptr;                       // non-owning
+  std::vector<std::array<real_t,3>>  per_elem_lmr_;
+  std::vector<real_t>                per_elem_h_;
+  std::unordered_map<int,std::array<real_t,3>> shared_face_neighbour_material_;
+  std::vector<std::array<std::array<DenseMatrix,2>,2>> per_face_bimaterial_flux_;
+  mutable std::size_t phaser_dispatch_count_ = 0;
+public:
+  BimaterialWaveOperator(MeshType& mesh, int order, const MaterialField& material,
+                         const BoundaryConfig& bc);               // builds pool + matrices + exchange
+protected:
+  const GodunovFlux& FluxForElem_(int e) const override { return pool_->At(e); }
+  void InteriorFaceFlux_(/* … */) const override;                // BimaterialFlux::ApplyPerFaceFlux(per_face_bimaterial_flux_[f][s][0/1],…)
+  void ApplyElementJacobian_(int dir, const Vector& X, Vector& Y,
+                             real_t sign) const override;          // ApplyJacobianPerElementDOF_
+public:
+  real_t ComputeMaxDt(real_t cfl) const override;                 // per-element per_elem_lmr_ walk
+  void   SetMixedFluxMode(MixedFluxMode m) override;              // aborts on m != None
+  // UsesGodunovFluxPool() returns true here
+};
+```
+**Why inheritance (not a third base class):** it leaves `WaveOperator`'s scalar code in place (only
+adds `virtual` keywords + sheds bimaterial members), best honoring "keep scalar the same as the TPV
+driver". The cost is that `BimaterialWaveOperator` inherits an unused `flux_`; this is neutralized by
+poisoning it (§13.2 req 4). A sibling-with-abstract-base design (cleaner inheritance, no inherited
+`flux_`) was rejected because extracting a base from the 7000-line class disturbs the scalar oracle
+more than adding hooks.
+
+### Files to Create
+- `dynamic/bimaterial_wave_operator.hpp` — the `BimaterialWaveOperator<MeshType>` class declaration
+  (members + overrides + ctor), `#include "wave_operator.hpp"` and
+  `#include "godunov_flux_bimaterial.hpp"`.
+- `dynamic/bimaterial_wave_operator.inl` — the override bodies + ctor (the bimaterial machinery moved
+  out of `wave_operator.inl`).
+- `tests/unit/test_bimaterial_wave_operator_parity.cpp` — the fault-bearing Coefficient-vs-scalar
+  parity test (C-6, §Testing).
+
+### Files to Modify
+- `dynamic/wave_operator.hpp` — remove the bimaterial member declarations (`owned_flux_pool_`,
+  `material_`, `per_elem_lmr_`, `per_elem_h_`, `shared_face_neighbour_material_`,
+  `per_face_bimaterial_flux_`, `phaser_dispatch_count_`) and the het-ctor / het-method declarations
+  (`BuildGodunovFluxPool_`, `ExchangeBiMaterialNeighbours_`, `BuildPerFaceBimaterialFluxMatrices_`,
+  `ApplyJacobianPerElementDOF_`); add the `protected virtual` hook declarations; make `FluxForElem_`,
+  `ComputeMaxDt`, `SetMixedFluxMode` virtual; `UsesGodunovFluxPool()` returns `false`.
+- `dynamic/wave_operator.inl` — remove the het ctor + the four `BuildGodunovFluxPool_` /
+  `ExchangeBiMaterialNeighbours_` / `BuildPerFaceBimaterialFluxMatrices_` / `ApplyJacobianPerElementDOF_`
+  bodies; replace every `if (owned_flux_pool_) { bimaterial } else { scalar }` dispatch with a single
+  call to the virtual hook (the scalar branch becomes the hook's default body); route the
+  volume / boundary / fault-imposed-state material sites through `FluxForElem_(e)` (fixing REVIEW
+  round-4 R-001 in the shared skeleton). The CFL het branch (`if(!per_elem_h_.empty())`) moves to the
+  override.
+- `drivers/spatial_dyn_driver.cpp` — the matrix branch constructs
+  `std::make_unique<BimaterialWaveOperator<ParMesh>>(pmesh, order, material, bc)` (held as
+  `unique_ptr<WaveOperator<ParMesh>>`); the scalar branch is unchanged. Remove the now-obsolete
+  `material.mode != Constant` guard placement comment if it no longer applies; keep the
+  Phase-10/DepthProfile1D guard.
+- `Makefile` — add `BIMATERIAL_WAVE_OPERATOR_{SRC,OBJ}` (header-only `.inl`, so likely just a test
+  obj rule + the new parity-test target); link the new test; add to the aggregate `test:`.
+- `tests/unit/test_phaseh_wave_operator_constant_parity.cpp` — repoint the C-5 Coefficient-mode
+  construction from `WaveOperator` to `BimaterialWaveOperator`; keep the parity assertion.
+
+### Detailed Requirements
+
+#### The four virtual hooks (exact intent; defaults == current scalar code, verbatim)
+1. **`virtual const GodunovFlux& FluxForElem_(int e) const`** — per-element material for the bulk
+   volume Jacobian, the boundary-face flux, and the fault imposed-state flux.
+   - `WaveOperator` (scalar): `return flux_;`
+   - `BimaterialWaveOperator`: `return pool_->At(e);`
+   - **Consumers in the shared skeleton (route ALL through this hook):** `ComputeVolumeRHS`
+     (`wave_operator.inl:1294` per-element `Ax_e/Ay_e/Az_e`); the 8 boundary-flux sites
+     (`flux_.{AbsorbingTotal,FreeSurfaceGodunovTotal,FreeSurfaceTotal}` → `FluxForElem_(e1).…`,
+     `:2846,:2859,:2864,:2900,:4821,:4826,:4831,:4841`); the 8 fault imposed-state sites
+     (`flux_.Interior(can_n…, Q_imp/I_imp…)` → `FluxForElem_(elem_plus/elem_minus/e1).Interior(…)`,
+     `:3151,:3153,:3824,:4416,:4418,:4746,:4749,:5806`). **The fault sites are REVIEW round-4 R-001
+     — fix them here** by porting hrs-ref's per-side element selection
+     (`elem_plus = elem1_on_plus ? e1 : e2; elem_minus = elem1_on_plus ? e2 : e1;` and the per-QP
+     `elem1_on_plus_per_qp[qq]` variants — hrs lines 3453/3455/4135/4730/4732/5056/5059/5713). On the
+     scalar class `FluxForElem_(e)==flux_`, so this is byte-identical for scalar.
+2. **`virtual void InteriorFaceFlux_(int face, int side, const real_t* Q_self, const real_t* Q_nbr,
+   const real_t* nor, real_t* F_h) const`** — the interior NON-fault face flux. (The implementer
+   extracts the existing `if(owned_flux_pool_){…}else{…}` interior branches into this hook; the exact
+   parameter list is whatever the four call sites need — pass the per-site locals. The 4 sites:
+   `ComputeFaceFluxRHS` ~`:3223`, `ComputeSharedFaceFluxRHS` ~`:3807`, `ComputeADERFaceFluxRHS`
+   ~`:4811`, `ComputeADERSharedFaceFluxRHS` ~`:5607`.)
+   - `WaveOperator` (scalar): the current `else` body — `flux_.Interior(...)` plus the
+     mixed-flux central-vs-interior per-face choice (`central_flux_face_set_` / `flux_.Central`).
+   - `BimaterialWaveOperator`: the current `if(owned_flux_pool_)` body —
+     `BimaterialFlux::ApplyPerFaceFlux(per_face_bimaterial_flux_[face][side][0], […][1], Q_self,
+     Q_nbr, F_h)`.
+3. **`virtual void ApplyElementJacobian_(int dir, const Vector& X, Vector& Y, real_t sign) const`** —
+   the ADER CK-recursion element Jacobian (2 sites: `:1526`, `:1655`).
+   - `WaveOperator` (scalar): `ApplyJacobianPerDOF(flux_.GetReferenceStarMatrix(dir), X, Y,
+     ndof_total_, sign);`
+   - `BimaterialWaveOperator`: `ApplyJacobianPerElementDOF_(dir, X, Y, sign);` (the moved method).
+4. **`virtual real_t ComputeMaxDt(real_t cfl) const`** — CFL (`:6121`–`:6151`).
+   - `WaveOperator` (scalar): `return cfl_mixed_flux_factor * cfl * h_min_ / flux_.GetCp();` (drop
+     the `if(!per_elem_h_.empty())` branch — that was the het path).
+   - `BimaterialWaveOperator`: the per-element walk over `per_elem_lmr_` /`per_elem_h_` with the
+     `MPI_Allreduce(MIN)` (the current `:6121`–`:6148` body).
+
+#### Member / method relocation (wave_operator → bimaterial_wave_operator)
+Move verbatim into `BimaterialWaveOperator`: members `owned_flux_pool_`(→`pool_`), `material_`,
+`per_elem_lmr_`, `per_elem_h_`, `shared_face_neighbour_material_`, `per_face_bimaterial_flux_`,
+`phaser_dispatch_count_`; methods `BuildGodunovFluxPool_`, `ExchangeBiMaterialNeighbours_`,
+`BuildPerFaceBimaterialFluxMatrices_`, `ApplyJacobianPerElementDOF_`. The het ctor body
+(`material_=&material; BuildGodunovFluxPool_; ExchangeBiMaterialNeighbours_;
+BuildPerFaceBimaterialFluxMatrices_`) becomes `BimaterialWaveOperator`'s ctor, run AFTER delegating to
+the scalar base ctor (§13.2 req 4).
+
+#### Phase 13.1a — Virtualize the dispatch in `WaveOperator` (pure refactor; matrix path still in-place)
+- Add the four hooks as `protected virtual` with the scalar default = current `else`/scalar code.
+- Replace each `if(owned_flux_pool_){bimaterial}else{scalar}` with a call to the hook, and TEMPORARILY
+  keep the bimaterial members + a `WaveOperator`-internal override-equivalent so the het constant-parity
+  test still builds (i.e., during 13.1a the bimaterial branch bodies move INTO the default hook bodies
+  guarded by `owned_flux_pool_`, an interim form). Route the volume/boundary/fault material sites
+  through `FluxForElem_(e)` (fixes R-001 for both paths).
+- **Acceptance:** zero behavior change — scalar TPV/BP5 byte-exact AND the existing
+  `test_phaseh_wave_operator_constant_parity` (C-1..C-5) still passes bit-for-bit. This is the
+  "make the seam virtual" step.
+
+#### Phase 13.1b — Extract `BimaterialWaveOperator`; make `WaveOperator` pure scalar
+- Create `dynamic/bimaterial_wave_operator.{hpp,inl}`; move the bimaterial members + the four het
+  methods + the het-ctor body into it as the ctor + hook overrides.
+- Delete the bimaterial members, het ctor, het methods, and the `owned_flux_pool_` guards from
+  `WaveOperator`; the scalar hook bodies become unconditional scalar code (no `owned_flux_pool_`).
+- `WaveOperator::SetMixedFluxMode` keeps the scalar/mixed-flux logic; `BimaterialWaveOperator::
+  SetMixedFluxMode` overrides to `MFEM_ABORT` on `m != None` (the R-003 guard, now structural).
+- **Acceptance:** `WaveOperator` has zero references to `owned_flux_pool_`/`per_face_bimaterial_`/
+  `GodunovFluxPool`/`BimaterialFlux` (grep == 0); scalar TPV/BP5 byte-exact; the constant-parity test
+  (repointed to `BimaterialWaveOperator`) passes.
+
+#### Phase 13.2 — Driver dispatch, fault-flux correctness, tripwire, parity test
+1. `spatial_dyn_driver.cpp` matrix branch: `wave_ptr =
+   std::make_unique<BimaterialWaveOperator<ParMesh>>(pmesh, cfg.mesh.order, material, bc);` (scalar
+   branch unchanged). `WaveOperator<ParMesh>& wave = *wave_ptr;` still binds the base; all `wave.*`
+   calls dispatch virtually.
+2. Confirm the 8 fault imposed-state sites (R-001) use `FluxForElem_(elem_plus/elem_minus/e1)` (done
+   in 13.1a, now correct on the matrix path because the override returns `pool_->At(e)`).
+3. `BimaterialWaveOperator::SetMixedFluxMode` aborts on non-None (R-003 mutual exclusion, structural).
+4. **Sentinel-poison the inherited `flux_` + parity tripwire (NaN is infeasible — verified).**
+   `BimaterialWaveOperator`'s ctor delegates to the scalar base ctor with the **valid sentinel triple
+   `(λ,μ,ρ) = (1,1,1)`** (NOT NaN). On the matrix object `flux_` must be dead (every material access
+   goes through the overridden `FluxForElem_(e) → pool_`); the sentinel value is deliberately
+   unphysical so a leak is numerically visible (see the tripwire below).
+   - **Why not NaN:** `GodunovFlux::GodunovFlux` asserts `MFEM_VERIFY(mu>0); MFEM_VERIFY(rho>0);
+     MFEM_VERIFY(lambda+2·mu>0)` (`godunov_flux.cpp:30-33`). Since `NaN > 0` is `false`, the base
+     ctor's `flux_(NaN,NaN,NaN)` would **abort construction of every matrix run**, not just buggy
+     ones — so NaN cannot be used as the poison. `(1,1,1)` passes the asserts (`1>0`, `3>0`).
+   - **Precondition (verified):** the scalar base ctor consumes `flux_` ONLY via the member-init
+     `flux_(λ,μ,ρ)` and `flux_.BuildJacobian(0/1/2, Ax_/Ay_/Az_)` (`wave_operator.inl:30,55-57`),
+     whose outputs `Ax_/Ay_/Az_` are dead after the volume RHS routes through
+     `FluxForElem_(e).GetReferenceStarMatrix` (REVIEW round-4 R-002/R-003). `h_min_` is geometric
+     (from `mesh_`), NOT from `flux_`, so the `(1,1,1)` sentinel does not perturb any shared
+     quantity. No other base-ctor `flux_` use exists.
+   - **The tripwire is the C-6 fault-bearing parity test run with a REAL material (≠ (1,1,1)).** Any
+     skeleton site that bare-uses `flux_` (= the `(1,1,1)` sentinel) instead of the overridden
+     `FluxForElem_(e)` produces a contribution that differs from the scalar reference (which uses the
+     real per-element material) → C-6 fails at the offending DOFs and names them. So a missed
+     material site becomes a hard parity failure, never silent wrong physics.
+   - **Optional CI guard:** a grep that the shared skeleton (`wave_operator.inl`) has zero bare
+     `flux_.{Interior,AbsorbingTotal,FreeSurfaceGodunovTotal,FreeSurfaceTotal,GetCp,
+     GetReferenceStarMatrix}` on any material-dependent path (all must be `FluxForElem_(e)` or a
+     virtual hook), plus `git diff hrs-ref HEAD -- wave_operator.inl` for residual `flux_`-vs-
+     `FluxForElem_` divergence (the one-pass class-closer from REVIEW round-4).
+5. Add the fault-bearing parity test (§Testing C-6).
+
+### Edge Cases to Handle
+- **Scalar with mixed-flux (the SAFS production case `interior_flux="scalar"`,
+  `mixed_flux="adjacent"`):** stays entirely on `WaveOperator`; `InteriorFaceFlux_` default body keeps
+  the central-vs-interior per-face choice. Byte-exact.
+- **Matrix + mixed-flux:** `BimaterialWaveOperator::SetMixedFluxMode(non-None)` aborts (R-003).
+- **`BimaterialWaveOperator` with a homogeneous Coefficient material:** must reduce to the scalar
+  Godunov flux to LU rounding at every site (interior + boundary + volume + CK + **fault**) — the C-6
+  parity test (a mesh WITH a fault).
+- **Serial `Mesh` (no shared faces):** `ExchangeBiMaterialNeighbours_` is a no-op (as today); the
+  `MPI_Comm_rank` warning path is `#ifdef MFEM_USE_MPI` and only on `n_shared>0`.
+- **`UsesGodunovFluxPool()` callers:** returns `false` from `WaveOperator`, `true` from
+  `BimaterialWaveOperator` (virtual) — check the driver/tests still read it through the base pointer.
+
+### Acceptance Criteria
+- [ ] `tpv102_driver`, `tpv104_driver`, `tpv205_driver`, `seas_bp5_full` compile **unchanged** and
+      their station/benchmark outputs are byte-identical to a pre-Phase-13 checkpoint.
+- [ ] Scalar `spatial_dyn_driver` runs (the 8 SAFS configs + the scalar TPV TOMLs) are byte-identical;
+      `dt_cfl` unchanged (TPV102 `0.00066147`).
+- [ ] `grep -nE "owned_flux_pool_|per_face_bimaterial_|GodunovFluxPool|BimaterialFlux|FluxForElem_.*pool"
+      dynamic/wave_operator.{hpp,inl}` returns **zero** (scalar class is bimaterial-free).
+- [ ] `test_phaseh_wave_operator_constant_parity` passes (repointed to `BimaterialWaveOperator`),
+      np=1 and np=4.
+- [x] **C-6 (new):** `BimaterialWaveOperator` with a homogeneous Coefficient material on a
+      **fault-bearing** mesh matches the scalar `WaveOperator` `Mult`/ADER to 1e-9 — this exercises the
+      fault imposed-state flux (R-001), the boundary flux, the volume RHS, interior faces, and CK.
+      **Implementation note (REVIEW R-003):** the "to 1e-9" is measured with a **field-scale**
+      relative metric `|a−b| / max_i(|a_i|,|b_i|)`, NOT the per-component floor-of-1.0 metric C-5
+      uses.  The `GodunovFluxPool` stores `round_sig(·,6)` material, so at realistic ~1e10-scale
+      moduli the matrix path differs from scalar by ~1 ULP per element; at near-equilibrium fault
+      DOFs (where `dQ/dt≈0` is a near-cancellation of O(1e8) terms) that is a large per-component
+      relative error but ~3e-10 (Mult) / ~3e-8 (ADER) of the field magnitude.  The field-scale
+      metric passes at 1e-9 while a `(1,1,1)` sentinel leak gives field-scale rel ≈ 1
+      (tripwire-validated).  Achieves the per-component bit-1e-9 only with O(1) round_sig-exact
+      moduli, which the fault friction solve cannot use.
+- [ ] `seas_test_godunov_flux_bimaterial` (21/21) and `seas_test_wave_operator` still pass.
+- [ ] A NaN-poisoned `flux_` in `BimaterialWaveOperator` does NOT produce NaN in any `Mult`/ADER
+      output on the homogeneous-Coefficient fixture (proves no stray bare-`flux_` path survives).
+
+### Dependencies
+- Depends on: Phase 9 (the bimaterial machinery being moved). Required by: Phase 10 (TPV31 now
+  constructs `BimaterialWaveOperator`), and any future parallel-heterogeneous run.
+- **Note:** the cross-rank `ExchangeBiMaterialNeighbours_` local-side stub (REVIEW round-3 R-003 /
+  round-4 informational) is MOVED, not fixed, by Phase 13; the real `MPI_Allgatherv` exchange remains a
+  separate deferred item (lateral-het np>1 only; TPV31 is depth-only/seam-continuous).
+
+### Testing Strategy (Phase 13)
+- **Byte-exact scalar gate (every phase):** run the TPV/BP5 unit + dry-run suite and diff against a
+  pre-Phase-13 tag; this is the primary guard that `WaveOperator` is untouched behaviorally.
+- **13.1a:** the existing C-1..C-5 constant-parity test must pass bit-for-bit (pure refactor).
+- **13.1b:** repoint C-5 to `BimaterialWaveOperator`; re-run np=1 + np=4.
+- **13.2 / C-6:** the fault-bearing homogeneous-Coefficient parity test — the test the round-4 review
+  flagged as missing; it is the one that catches the whole `flux_`-placeholder leak class
+  (fault + boundary + volume) in one shot. Build a small split-box mesh with one interior fault face,
+  seed a fault-imposed state, and assert `BimaterialWaveOperator` (homogeneous Coefficient) ==
+  `WaveOperator` (scalar) `Mult`/ADER to 1e-9.
+
+### Risk Assessment (Phase 13)
+| Risk | Severity | Mitigation |
+|---|---|---|
+| ~~NaN-poison corrupts shared base-ctor setup~~ → RESOLVED: NaN is infeasible (GodunovFlux ctor asserts `mu>0/rho>0`; `NaN>0`==false → aborts construction) | LOW | Use the valid `(1,1,1)` sentinel (passes the asserts, dead on the matrix path) + the C-6 fault-bearing real-material parity test as the tripwire (req 4). Verified: base ctor uses `flux_` only via the dead `Ax_/Ay_/Az_`; `h_min_` is geometric |
+| Extracting the `InteriorFaceFlux_` hook from the deep assembly perturbs the scalar path | HIGH | Lift the existing `else` (scalar) branch **verbatim** into the default body; gate on the byte-exact scalar suite + C-1..C-5 after 13.1a (before any extraction in 13.1b) |
+| Virtual `FluxForElem_`/`ComputeMaxDt` regress scalar performance | LOW | hooks are per-element/per-face (not per-QP); hrs-ref already used a non-virtual `FluxForElem_` at these sites with no perf issue; measure TPV102 wall-time if concerned |
+| A material-dependent site is missed and only shows on the matrix path | MED | The NaN-poison tripwire (req 4) + the fault-bearing C-6 parity test convert any miss from silent-wrong to a hard NaN/parity failure; also run `git diff hrs-ref HEAD -- wave_operator.inl` grep for residual `flux_.`-vs-`FluxForElem_` divergence (the one-pass class closer from REVIEW round-4) |
+| `BimaterialWaveOperator` inherits scalar-only baggage (`flux_`, `Ax_`, mixed-flux state) | LOW | Acceptable; `flux_` poisoned, mixed-flux disabled via the `SetMixedFluxMode` override; documented as the inheritance trade-off vs base-extraction |
+
+## Phase 14 — Explicit Runge–Kutta (RK45) time-integrator option for mixed (central) flux
+
+### Overview
+Add an explicit method-of-lines **Runge–Kutta** time integrator — headline target **Dormand–Prince
+RK45** (and classical **RK4** as the validated stepping-stone) — as a **runtime-selectable
+alternative** to ADER, so that **mixed/central flux can run stably at `p=1`**. The companion
+design study `document/mixed_flux_dev/BUILD_mixed_flux_rk_dynamic_rupture_2026-05-28.md` (and its
+root-cause analysis `drdg3d_mixed_flux_comparison_2026-04-28.{md,pdf}`) is the authoritative source
+for this phase; this section turns it into the executable contract.
+
+**Why RK, why order ≥ 3 (condensed):** central flux (`GodunovFlux::Central`,
+`Interior − Central = +½|A_n|(Q_self−Q_nbr)`) deletes the upwind dissipation, so fault-adjacent
+modes become purely imaginary `λ=iω`. ADER-O2's stability function `R(z)=1+z+z²/2` has
+`|R(iy)|²=1+y⁴/4>1` for all `y>0` → unconditional growth, and at `p=1` the Cauchy–Kovalevskaya predictor is
+**locked to O2** (`O ≤ p+1`; `D(k≥2)≡0` for a degree-1 field), so the instability is unfixable
+inside ADER. An explicit RK of order ≥ 3 has a stability region that **contains a segment of the
+imaginary axis** (RK4: `|λ|dt ≤ 2√2 ≈ 2.83`; DP45: RK4-class), which is exactly what central flux
+needs. DRDG3D runs central flux + RK54 stably at CFL ≈ 0.3.
+
+**Why the machinery already exists (assembly, not from-scratch):** `WaveOperator::Mult`
+(`wave_operator.inl:1185`) is a complete method-of-lines RHS `dQ/dt = M⁻¹(−Face+Vol)` that already
+(a) does the mixed-flux dispatch `if (mf_on && central_flux_face_set_.count(f)) flux_.Central else
+flux_.Interior` (`ComputeFaceFluxRHS:3320`, `ComputeSharedFaceFluxRHS:~3425`), and (b) runs the
+**instantaneous, ψ-stateless** fault Riemann solve `fault_flux_->Evaluate(...)` on fault faces
+(`ComputeFaceFluxRHS:3066`, `ComputeSharedFaceFluxRHS:3736`). `FaultFaceFlux::Evaluate`
+(`fault_face_flux.cpp:328`) writes `V1/V2/slip_rate/tau*_corr/sigma_n_corr` but **never** `psi`/
+`slip1`/`slip2` (debug-guarded at `:341`/`:428`, comment R-V92-H07) — by design, so a coupled RK on
+the augmented state `(Q, ψ, slip)` is clean. The proven template is the pre-ADER TPV102 coupled RK4
+loop at `git show 8461c67:./drivers/tpv102_driver.cpp` (~lines 783–965), and the bulk-only RK4 idiom
+is `DoRK4Step` in `tests/unit/test_rk4_conservation.cpp:68`. The Phase-9 bimaterial changes did
+**not** touch the Mult/fault/mixed-flux path on the scalar branch (`owned_flux_pool_==nullptr`).
+
+### Scope (read before implementing)
+- **Rate-and-state ONLY.** The Mult-path instantaneous `Evaluate` is the RATE-AND-STATE solve. There
+  is **no instantaneous LSW solve** on the Mult path — only `EvaluateADER_LSW`
+  (`fault_face_flux.cpp:746`) exists, for the ADER path. So the RK integrator supports
+  `[meta].law="rate_state"` (SAFS slip-law-SRW + aging) only; an `[meta].law="slip_weakening"`
+  (TPV205) run with `--time-integrator rk*` must **abort with a clear message** (LSW-on-RK is a
+  documented follow-up that needs a new instantaneous `EvaluateLSW`). This matches the BUILD doc's
+  SAFS/RS focus and the configuration where the `p=1` mixed-flux benefit was measured.
+- **Scalar interior flux ONLY.** Mixed flux is a scalar-path feature; `interior_flux="matrix"`
+  already mutually-excludes `mixed_flux` (`SetMixedFluxMode` abort `wave_operator.inl:1821`, parser
+  guard `spatial_friction.cpp:~1050`). The RK path uses `interior_flux="scalar"` (the default).
+- **ADER is untouched.** The RK stepper is an **additive, CLI-gated** alternative path. It does NOT
+  use `IFrictionIterator`, `EvaluateADER`, `EvaluateADER_LSW`, `ComputeADERSubStepStates`, the
+  substep iterators, or the `substep_I_imp_*` side-channels. The TPV*/BP5/SAFS ADER byte-exactness
+  contract (`make test`) stays green; the RK path is reachable only via `--time-integrator rk*`
+  (default `ader`).
+
+### Constraints
+- **No interface change to `WaveOperator::Mult`, `FaultFaceFlux::Evaluate`, or `DOFData`** — the RK
+  stepper consumes them as-is. In particular `Evaluate` MUST remain ψ-stateless (its `:428` guard is
+  the tripwire; do not add a `data.psi` write).
+- **`ψ`/`slip` live in `DOFData`, not the MFEM `Vector`** — therefore a stock `mfem::ODESolver`
+  (e.g. `mfem::DormandPrinceRK45`) **cannot** drive the coupled system directly (it only integrates
+  the `Vector`). The integrator is a **hand-written coupled RK loop** over `(Q, ψ, slip)`. (Option B
+  — repack `ψ/slip` into the `Vector` to reuse the stock adaptive solver — is explicitly out of
+  scope; it touches the fault-flux plumbing broadly. See BUILD §5.0.)
+- **Match existing conventions:** CLI parsing via `GetStringArg/HasFlag`; config via `NumericsSpec`
+  + the `spatial_friction.cpp` parser + a `MFEM_VERIFY` validator; the friction-method default Brent
+  (CLAUDE.md). Per-DOF `a/b/Dc/V_w` sourced exactly as the substep iterator
+  (`tpv104_substep_iterator.cpp`) / the resolver (`RateStatePerDOFParams`).
+- **Numerical:** explicit RK on `ψ` is only *conditionally* stable (local timescale
+  `~Dc/(b·V0·e^{ψ/a})`); for a dynamic event the wave-CFL `dt` is far below it (TPV102: `dt/τ~3e-3`),
+  so it is safe — but keep the ψ tripwire and the analytic `UpdateStateAnalyticSlipLawSRW` as an
+  operator-split fallback if a future stiff regime is hit (BUILD §5.4, R-V92-H06).
+
+### Phase 14.0 — Decision record (no code)
+- **Schemes shipped:** classical **RK4** (validation; reuse the `8461c67`/`DoRK4Step` idiom) and
+  **Dormand–Prince RK45** (the user-requested integrator). Both via one tableau-driven loop.
+- **Adaptive vs fixed step:** ship **fixed-step** first (DP45 5th-order weights, `dt` from the RK
+  CFL of §14.4) — for a CFL-bound hyperbolic system the embedded step-size control is largely wasted.
+  Adaptive embedded 4(5) error control on the bulk `Q` is an **optional** sub-phase (§14.6), off by
+  default.
+- **`Adjacent` is the default mixed-flux mode for RK** (central only on fault-adjacent faces, Zhang
+  Fig 4b); `AllContinuous` is available at a tighter CFL.
+
+### Phase 14.1 — Integrator selector + coupled RK stepper scaffold (RK4, bulk validation)
+**Goal:** `--time-integrator rk4` runs a coupled RK4 stepper through `wave.Mult` that is bit-for-bit
+the `DoRK4Step` idiom on the bulk and matches ADER-O2 to O(dt²) on a frictionless linear problem;
+ADER remains the default and is byte-unchanged.
+
+**Files to Create**
+- `dynamic/rk_time_stepper.{hpp,cpp}` — the `RKTableau` struct + tableau factories + the coupled
+  stepper `AdvanceRKCoupled_Spatial(...)`.
+- `tests/unit/test_rk_time_stepper.cpp` — tableau-correctness + bulk RK4-vs-ADER-O2 convergence.
+
+**Files to Modify**
+- `spatial/code/spatial_friction.hpp` — add `enum class TimeIntegratorKind { ADER, RK4, RK45 };` and
+  `TimeIntegratorKind time_integrator = TimeIntegratorKind::ADER;` to `NumericsSpec` (after
+  `interior_flux`, `:119`).
+- `spatial/code/spatial_friction.cpp` — parse `[numerics].time_integrator ∈ {"ader","rk4","rk45"}`
+  (default `"ader"`) next to the `fault_iterator`/`interior_flux` selectors (`~:1018`); `MFEM_ABORT`
+  on any other string.
+- `drivers/spatial_dyn_driver.cpp` — `--time-integrator <s>` CLI override (mirror `--ader-order`,
+  `:530/:623`); branch the time loop (`:2280–2310`): `ADER → AdvanceADERWithSubStep_Spatial` (current,
+  `:2291`); `RK4/RK45 → AdvanceRKCoupled_Spatial`. Reject `rk*` + `law=="slip_weakening"` and
+  `rk*` + `interior_flux=="matrix"` at setup with a clear `MFEM_VERIFY`.
+- `miniapps/seas/Makefile` — `RK_TIME_STEPPER_{SRC,OBJ}`; link into `seas_spatial_dyn_driver`; add the
+  test target + `test:` aggregate.
+
+**Detailed Requirements**
+1. `struct RKTableau { int stages; std::vector<std::vector<real_t>> a; std::vector<real_t> b;
+   std::vector<real_t> bhat; std::vector<real_t> c; bool has_embedded; const char* name; };`
+   (explicit ⇒ strictly-lower-triangular `a`). Factories:
+   `RKTableau MakeRK4Tableau();` — classical 4-stage:
+   `c=(0,½,½,1)`, `b=(1,2,2,1)/6`, `a` = the standard lower-triangular `(½),(0,½),(0,0,1)`;
+   `has_embedded=false`. `RKTableau MakeDormandPrinceRK45Tableau();` — the 7-stage Dormand–Prince
+   `c=(0,1/5,3/10,4/5,8/9,1,1)`, `b` = the 5th-order row, `bhat` = the 4th-order row, FSAL
+   (verbatim coefficients from the DP(4,5) table); `has_embedded=true`. A `ValidateTableau` helper
+   asserts `Σ b = 1`, `Σ bhat = 1`, `c_i = Σ_j a_ij`, and strict-lower-triangularity.
+2. `void AdvanceRKCoupled_Spatial(WaveOperator<ParMesh>& wave, std::vector<DOFData>& dof_data,
+   const spatial::RateStateBlock& rs_cfg, const spatial::RateStatePerDOFParams& rs,
+   const mfem::Vector& Q, real_t dt_step, real_t t_step_start, mfem::Vector& Q_new,
+   const RKTableau& tab, INucleationMethod* nuc);` — one macro-step. Allocates `s` stage-rate
+   `Vector`s `k[0..stages-1]` (size `height`) + per-DOF stage arrays `psi_k`, `sr_k`. For each stage
+   `i`: build `Q^(i) = Q + dt·Σ_{j<i} a_ij k_j`; (§14.3) nucleation at `t_step_start + c_i·dt`; set
+   each `dof_data[m].psi` to its stage value `ψ_n[m] + dt·Σ_{j<i} a_ij psi_k[j][m]`; call
+   `wave.Mult(Q^(i), k[i])` (does mixed-flux + instantaneous `Evaluate` at `(Q^(i),ψ^(i))`, writes
+   `dof_data[m].slip_rate/V1/V2`); capture `sr_k[i][m]=dof_data[m].slip_rate` and
+   `psi_k[i][m]=PsiRate(rs_cfg, dof_data[m], sr_k[i][m], rs, m)` (§14.2). **Final combine** with `b`:
+   `Q_new = Q + dt·Σ_i b_i k[i]`; `dof_data[m].psi = ψ_n[m] + dt·Σ_i b_i psi_k[i][m]`;
+   `dof_data[m].slip1 += dt·Σ_i b_i (V1 at stage i)`, `slip2` likewise (RK-consistent
+   `dslip/dt = V`; capture per-stage `V1/V2` alongside `sr_k`).  **14.1 stub:** with no RS coupling
+   yet, integrate `Q` only (`psi_k≡0`) so the scaffold validates against the bulk `DoRK4Step`.
+3. Driver time-loop branch is the ONLY change to the stepping control; `Q ← Q_new` swap and `t += dt`
+   are shared with the ADER branch.
+
+**Interfaces:** the stepper takes `WaveOperator&` (calls `Mult`), `DOFData` (reads `slip_rate/V*`,
+writes `psi/slip*`), and `RKTableau`; it returns nothing (writes `Q_new` + `dof_data`).
+
+**Edge cases:** `tab.stages` mismatch with allocated arrays → `MFEM_VERIFY`; `dt_step ≤ 0` → abort;
+`law != rate_state` reaching the stepper → abort (guarded earlier); a stage `Q^(i)` with NaN (blown
+up) → the existing `Mult`/`Evaluate` guards fire.
+
+**Acceptance Criteria**
+- [ ] `--time-integrator` parses (`ader`/`rk4`/`rk45`); default `ader`; unknown string aborts.
+- [ ] `test_rk_time_stepper`: `MakeRK4Tableau`/`MakeDormandPrinceRK45Tableau` pass `ValidateTableau`;
+      on a frictionless linear bulk problem RK4 matches `DoRK4Step` **bit-for-bit** and matches
+      ADER-O2 to O(dt²) (energy drift bounded — the `test_rk4_conservation.cpp` pattern).
+- [ ] ADER path byte-unchanged: `make test` green; a scalar TPV/SAFS `--dry-run` with the default
+      (`ader`) is bit-identical to pre-Phase-14 (dt + dispatch banner unchanged).
+
+**Dependencies:** Depends on Phase 9 (mixed-flux dispatch + `Mult` path) + Phase 3 (RS resolver).
+Required by 14.2–14.6.
+
+### Phase 14.2 — Couple the rate-and-state fault state into the RK stages
+**Goal:** the RK stepper integrates `ψ` and `slip` together with `Q` (same tableau weights), so an
+`rk4`/`rk45` SAFS run with `mixed_flux=none` reproduces the ADER-O2 **upwind** SAFS baseline within
+time-integration tolerance.
+
+**Files to Modify:** `dynamic/rk_time_stepper.cpp` (implement `PsiRate`); `tests/unit/test_rk_time_stepper.cpp`.
+
+**Detailed Requirements**
+1. `real_t PsiRate(const spatial::RateStateBlock& rs_cfg, const DOFData& d, real_t V,
+   const spatial::RateStatePerDOFParams& rs, int m);` dispatches on `rs_cfg.state_evolution`:
+   - `AgingLaw` → `AgingLawPsi::Rate(V, d.psi, d.Dc)` = `1 − V·d.psi/d.Dc`
+     (`friction/state_evolution.hpp:190`).
+   - `SlipLawStrongRateWeakening` → `SlipLawSRWPsi::Rate_SRW(V, d.psi, d.Dc, rs.V_w(m), rs.a(m))`
+     (`friction/slip_law_srw_psi.hpp:260`), with the law built in production mode
+     (`SetProductionMode()`, R-001) and per-QP `V_w(m)/a(m)` from the resolved `rs` (same source as
+     `tpv104_substep_iterator.cpp:864`). The bare `Rate(...)` MUST NOT be used (it aborts in
+     production).
+2. Capture per-stage `V1/V2` (not just `|V|`) for the slip accumulation; slip uses the SAME `b`
+   weights as `Q`/`ψ`.
+3. The stage-`ψ` write-then-`Mult` ordering of §14.1 req 2 is mandatory: `Evaluate` reads
+   `dof_data[m].psi` as the stage-local `ψ^(i)` and must see the correct staged value.
+
+**Edge cases:** `d.Dc ≤ 0` → abort (resolver already guards); `V` huge (event) — `Rate` is finite;
+ψ-rate stiffness — see §14.4 caveat (tripwire + analytic fallback noted, not implemented here).
+
+**Acceptance Criteria**
+- [ ] With `interior_flux=scalar`, `mixed_flux=none`, `--time-integrator rk4`, the SAFS slip-law-SRW
+      run reproduces the ADER-O2 upwind baseline (BUILD §6.2: job 7751974, `V_max ≈ 10.5 m/s`) within
+      integration-order tolerance (document the tolerance).
+- [ ] Aging-law (TPV102-type) RS config: RK ψ-evolution matches a fine-`dt` ADER reference to
+      O(dt^q).
+
+**Dependencies:** Depends on 14.1. Required by 14.3–14.6.
+
+### Phase 14.3 — Nucleation at stage times (absolute form)
+**Goal:** nucleation forcing is applied as an **absolute** overstress at each RK stage time, not the
+ADER telescoped per-substep increment (which would **double-apply** across RK stages that revisit a
+sub-interval, e.g. RK4 stages 2 and 3 both at `t+dt/2`).
+
+**Files to Modify:** `dynamic/nucleation_method.hpp` (+ the concretes in `nucleation_factory.cpp`),
+`dynamic/spatial_nucleation.{hpp,cpp}`, `dynamic/rk_time_stepper.cpp`.
+
+**Detailed Requirements**
+1. Add `virtual void INucleationMethod::ApplyAbsolute(std::vector<DOFData>& dof, real_t t) = 0;`
+   that **sets** (not accumulates) `dof[i].tau1_nuc/tau2_nuc = SmoothStep(t, T_nuc)·F(r_i)·Δτ_{dip/strike}`
+   — the absolute SCEC ramp at time `t`. Implement for `GaussianGradualOverstress`,
+   `CompactCircularGradualOverstress` (write the strike channel); `StaticOverstress` and
+   `InstantaneousOverstressCircular` set their (time-independent / `ApplyOnce`) value and ignore `t`.
+   Back it with free fns `ApplyGradualOverstressAbsolute(...)` /
+   `ApplyGradualOverstressCompactCircularAbsolute(...)` (mirror the existing `*Increment` fns,
+   `spatial_nucleation.cpp:135`, but absolute `SmoothStep(t)` instead of
+   `SmoothStep(t)−SmoothStep(t−dt)`).
+2. The RK stepper calls `nuc->ApplyAbsolute(dof_data, t_step_start + c_i·dt)` at the start of each
+   stage (§14.1 req 2). The ADER path keeps using `ApplyIncrement` via `nuc_cb` — **unchanged**.
+
+**Edge cases:** `t ≤ 0` → `SmoothStep = 0` (no forcing); `t ≥ T_nuc` → `SmoothStep = 1` (full,
+constant — the absolute form is a no-op-equivalent steady value, correct under RK); `ApplyOnce` kinds
+must not re-seed per stage (idempotent absolute value).
+
+**Acceptance Criteria**
+- [ ] `ApplyAbsolute` at `t=0`→0, `t=T_nuc`→full target, monotone in between (unit test on `tau*_nuc`).
+- [ ] The RK-stage-summed effective forcing over `[0,T_nuc]` matches the ADER telescoped total to
+      round-off (no double-apply).
+
+**Dependencies:** Depends on 14.1, Phase 7 (`INucleationMethod`). Required by 14.5.
+
+### Phase 14.4 — Dormand–Prince RK45 + RK CFL recalibration
+**Goal:** `--time-integrator rk45` runs the fixed-step DP45 5th-order stepper, with `dt` set by an
+**RK** stability bound (not the ADER `1/(3(2N+1))` de-rating).
+
+**Files to Modify:** `dynamic/rk_time_stepper.cpp` (DP45 already added in 14.1 req 1 — here it is
+selected + validated); `drivers/spatial_dyn_driver.cpp` (the `dt` computation, `:1464`);
+`dynamic/wave_operator.inl` (`ComputeMaxDt:6079` — make the CFL factor RK-aware, see below).
+
+**Detailed Requirements (the math is load-bearing — see BUILD §5.4)**
+1. Current `dt = cfl_mixed_flux_factor · cfl · h / c_p` (`ComputeMaxDt:6079`,
+   `c_p=√((λ+2μ)/ρ)`, `h`=inscribed diameter; `cfl_mixed_flux_factor ∈ {None 1.0, Adjacent 0.9,
+   AllContinuous 0.4}`, flagged "interim placeholder", `:6095`) — then the **driver** multiplies by
+   `CflSafetyFactor(cfg)` which for ADER is the `1/(3(2N+1))` TPV205-derived de-rating
+   (`spatial_dyn_driver.cpp:1464` → `spatial_friction.hpp::CflSafetyFactor`).
+2. For the RK path, replace the ADER `1/(3(2N+1))` de-rating with the RK imaginary-axis stability
+   bound `max|λ|·dt < y_max` (`y_max ≈ 2.83` RK4, RK4-class DP45). Concretely: add an
+   integrator-aware factor (a new `RkCflFactor(cfg)` branch or a `time_integrator` arm in
+   `CflSafetyFactor`) so the ADER branch is **bit-unchanged** and the RK branch uses the
+   DRDG3D-anchored empirical mixed-flux target **CFL ≈ 0.3** for `Adjacent` (and the tighter ≈0.3–0.4
+   for `AllContinuous`). Re-tune `cfl_mixed_flux_factor` against the RK stability region (document
+   the chosen numbers + their derivation in-source, replacing the "interim placeholder" note).
+3. Selecting `rk45` uses `MakeDormandPrinceRK45Tableau()` + the 5th-order `b` row.
+
+**Edge cases:** `interior_flux=matrix` (forbidden with RK+mixed) — already guarded; `cfl` outside
+`(0,1)` — parser guard; an `h/c_p` that makes `nsteps` enormous — log it (existing `[time] nsteps`).
+
+**Acceptance Criteria**
+- [ ] `rk45` selected → DP45 tableau used (`tab.name=="DormandPrinceRK45"`, 7 stages, `Σb=1`).
+- [ ] On a frictionless linear problem DP45 shows ≥ 4th-order temporal convergence.
+- [ ] The ADER `dt` is bit-unchanged when `--time-integrator ader` (the CflSafetyFactor branch for
+      ADER is untouched).
+
+**Dependencies:** Depends on 14.1. Required by 14.5.
+
+### Phase 14.5 — Enable mixed flux on the RK path + central-flux stability
+**Goal:** the central-flux SAFS configuration that **ran away under ADER** (BUILD §6.3, job 7751975)
+runs to `t_final` with bounded `V_max` under `rk45 + mixed_flux=adjacent`, and reproduces the `p=1`
+mixed-flux accuracy benefit.
+
+**Files to Modify:** `drivers/spatial_dyn_driver.cpp` (it already calls
+`wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux))`, `:1064` — no change needed beyond
+confirming it runs on the RK branch; the per-stage `Mult` honors `mf_on_` automatically). Define the
+RK-stage analogue of the ADER-specific `slip_rate_substep_max` diagnostic (`spatial_dyn_driver.cpp:
+~2230`) — per-stage max `|V|`, or the final-stage value.
+
+**Detailed Requirements**
+1. No flux-code change: `wave.SetMixedFluxMode(MixedFluxMode::Adjacent)` (from `mixed_flux="adjacent"`)
+   makes every per-stage `Mult` use central flux on `central_flux_face_set_`; the RK stability region
+   (§14.4) keeps the imaginary fault-adjacent modes bounded.
+2. Replace the substep `slip_rate_substep_max` reset/peak (ADER-substep-specific) with an RK-stage
+   max-`|V|` reduction on the RK branch (ADER branch unchanged).
+
+**Edge cases:** `mixed_flux="all_continuous"` — allowed, needs the tighter CFL (§14.4); MPI: the
+shared-fault Mult path uses `Evaluate` directly (`:3736`), so the ADER R-1600/R-1601 frame
+workaround does **not** transfer — multi-rank fault correctness on the RK path MUST be tested (below).
+
+**Acceptance Criteria**
+- [ ] `rk45 + mixed_flux=adjacent` on the previously-divergent central-flux SAFS config runs to
+      `t_final` with bounded `V_max` (no run-away).
+- [ ] np>1: a fault crossing a rank seam is conservation-consistent across the seam on the RK path
+      (the Mult `Evaluate` shared-fault path), verified explicitly (not inherited from ADER).
+- [ ] The measured `p=1` mixed-flux accuracy improvement is reproduced, now stable.
+
+**Dependencies:** Depends on 14.2, 14.3, 14.4.
+
+### Phase 14.6 (optional) — Adaptive step-size control (embedded DP 4(5) on the bulk)
+**Goal:** optional `--rk-adaptive` that uses the DP45 embedded `bhat` (4th-order) estimate on the
+bulk `Q` to control `dt`; `ψ/slip` advance with the accepted 5th-order step.
+**Note:** off by default — for a CFL-bound hyperbolic system the adaptivity is largely wasted
+(BUILD §5.0/Phase 0). Error norm on `Q` only (the wave field is CFL-limiting); standard PI controller.
+**Acceptance:** with a loose tolerance the controller reproduces the fixed-step `rk45` result; not on
+the default path. **Dependencies:** Depends on 14.4; independent of 14.5.
+
+### Testing strategy (Phase 14)
+1. **Tableau correctness (14.1):** `ValidateTableau` on RK4 + DP45 (`Σb=1`, `Σbhat=1`, `c=Σa`,
+   strict-lower-triangular).
+2. **Bulk linear conservation/convergence (14.1/14.4):** RK4 ≡ `DoRK4Step` bit-for-bit; RK4 vs
+   ADER-O2 O(dt²); DP45 ≥ 4th-order — the `test_rk4_conservation.cpp` harness.
+3. **Upwind RS equivalence (14.2):** `rk* + mixed=none` reproduces the ADER-O2 upwind SAFS baseline.
+4. **Nucleation total (14.3):** absolute stage-sum == ADER telescoped total to round-off.
+5. **Central-flux stability (14.5):** the ADER-divergent config is bounded under RK.
+6. **MPI fault (14.5):** multi-rank seam-crossing fault conservation on the RK path.
+7. **ADER byte-exact contract (all):** `make test` green; default `ader` runs bit-identical.
+
+### File-touch summary (Phase 14)
+- **Create:** `dynamic/rk_time_stepper.{hpp,cpp}`, `tests/unit/test_rk_time_stepper.cpp`.
+- **Modify:** `spatial/code/spatial_friction.{hpp,cpp}` (the `TimeIntegratorKind` selector),
+  `drivers/spatial_dyn_driver.cpp` (CLI + time-loop branch + dt + RK diagnostic + the
+  RS-only/scalar-only guards), `dynamic/wave_operator.inl` (`ComputeMaxDt` RK-aware factor only —
+  no flux change), `dynamic/nucleation_method.hpp` + `nucleation_factory.cpp` +
+  `dynamic/spatial_nucleation.{hpp,cpp}` (the absolute `ApplyAbsolute`), `miniapps/seas/Makefile`.
+- **Untouched (must stay byte-exact):** all `*_substep_iterator.*`, `EvaluateADER*`,
+  `ComputeADERSubStepStates`, `AdvanceADERWithSubStep_Spatial`, the IFrictionIterator family, and the
+  standalone `tpv*`/`bp5` drivers.
+
+### Risk assessment (Phase 14)
+| Risk | Severity | Mitigation |
+|---|---|---|
+| Explicit RK on `ψ` hits a stiff regime (low ψ / high V on the full SAFS envelope) → ψ instability | MED | Wave-CFL `dt ≪ ψ timescale` for dynamic events (TPV102 `dt/τ~3e-3`); keep the `8461c67` ψ tripwire; keep analytic `UpdateStateAnalyticSlipLawSRW` as an operator-split fallback for flagged stiff QPs (do NOT remove it) |
+| RK CFL factors mis-tuned → either unstable (too big) or wasteful (too small) | MED | Anchor to DRDG3D's empirical CFL≈0.3 (`Adjacent`); validate on the §14.5 central-flux config; document the RK stability bound `y_max` in-source |
+| Per-stage `Mult` does N face-neighbour MPI exchanges/step (vs ADER predictor-once) | LOW | Profile TPV102/SAFS wall-time; accept the extra exchanges for the central-flux capability; it is the price of method-of-lines |
+| A `data.psi` write sneaks into `Evaluate` and double-integrates ψ | LOW | The `:428` `MFEM_ASSERT(data.psi==psi_at_entry)` tripwire already guards it; the RK stepper relies on it |
+| LSW user accidentally runs `--time-integrator rk*` | LOW | Setup `MFEM_VERIFY` aborts (RS-only scope) with a clear message |
+| `matrix` + RK + mixed-flux | LOW | Already mutually-excluded (parser + `SetMixedFluxMode` guards); add a setup `MFEM_VERIFY` for the explicit combination |
+
+### Dependencies
+Depends on: Phase 3 (RS resolver / `RateStatePerDOFParams`), Phase 7 (`INucleationMethod`),
+Phase 9 (`Mult`-path mixed-flux dispatch). Required by: nothing (additive, CLI-gated). Independent of
+Phases 10–13 (TPV31 / depth-profile / PML / class-split) — but if Phase 13 lands first, the RK
+stepper drives the **scalar** `WaveOperator` class unchanged (it never needs the bimaterial operator).
+
 # Appendix
 
 - **PDF build:** `./document/parts_dev/_assets/md2pdf.sh

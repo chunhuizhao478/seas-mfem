@@ -177,6 +177,35 @@ void ApplyGradualOverstressIncrement(
    }
 }
 
+void ApplyGradualOverstressAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const GradualOverstressPerDOFParams&   params,
+   real_t                                 T_nuc_s,
+   real_t                                 t)
+{
+   // Disabled (resolver returned zero-sized) or this rank has no fault DOFs.
+   if (params.amplitude_dip.Size() == 0) { return; }
+
+   const int n = static_cast<int>(dof_data.size());
+   MFEM_VERIFY(params.amplitude_dip.Size()    == n
+               && params.amplitude_strike.Size() == n,
+               "ApplyGradualOverstressAbsolute: params.amplitude_* size ("
+               << params.amplitude_dip.Size()
+               << ") != dof_data.size() (" << n << ")");
+
+   // SET (not accumulate) the absolute SCEC ramp value at stage time t.
+   // SmoothStep is 0 for t<=0, 1 for t>=T_nuc_s, monotone in between — so this
+   // is the no-op-equivalent steady target after the ramp and is idempotent
+   // under repeated RK-stage evaluation (no double-apply).
+   const real_t S = SmoothStep(t, T_nuc_s);
+   for (int i = 0; i < n; ++i)
+   {
+      dof_data[i].tau1_nuc = S * params.amplitude_dip(i);
+      dof_data[i].tau2_nuc = S * params.amplitude_strike(i);
+      // sigma_n_nuc is intentionally not updated.
+   }
+}
+
 // =====================================================================
 // Phase 7 — shared in-fault-plane radial distance helper
 // =====================================================================
@@ -283,6 +312,29 @@ void ApplyGradualOverstressCompactCircularIncrement(
    for (int i = 0; i < n; ++i)
    {
       dof_data[i].tau2_nuc += dS * params.amplitude_strike(i);
+      // tau1_nuc / sigma_n_nuc intentionally not updated (pure strike-slip).
+   }
+}
+
+void ApplyGradualOverstressCompactCircularAbsolute(
+   std::vector<DOFData>&                  dof_data,
+   const CompactCircularPerDOFParams&     params,
+   real_t                                 T_nuc_s,
+   real_t                                 t)
+{
+   if (params.amplitude_strike.Size() == 0) { return; }
+
+   const int n = static_cast<int>(dof_data.size());
+   MFEM_VERIFY(params.amplitude_strike.Size() == n,
+               "ApplyGradualOverstressCompactCircularAbsolute: "
+               "params.amplitude_strike size ("
+               << params.amplitude_strike.Size()
+               << ") != dof_data.size() (" << n << ")");
+
+   const real_t S = SmoothStep(t, T_nuc_s);
+   for (int i = 0; i < n; ++i)
+   {
+      dof_data[i].tau2_nuc = S * params.amplitude_strike(i);
       // tau1_nuc / sigma_n_nuc intentionally not updated (pure strike-slip).
    }
 }

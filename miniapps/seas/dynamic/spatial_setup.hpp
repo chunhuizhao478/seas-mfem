@@ -160,6 +160,7 @@ inline void copy_lsw_and_forced_rupture_fields(
    d.lsw_mu_s = lsw.mu_s(i);
    d.lsw_mu_d = lsw.mu_d(i);
    d.lsw_d_c  = lsw.d_c(i);
+   d.lsw_cohesion = lsw.cohesion(i);   // Phase 10 (TPV31): per-DOF C0 [Pa]
 
    d.T_forced_rupture = T_forced_s;
    d.t0_decay_forced  = t0_decay_s;

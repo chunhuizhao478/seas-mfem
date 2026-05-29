@@ -421,8 +421,9 @@ StressSourceKind parse_stress_kind(const std::string& s)
    if (s == "constant_tensor")      { return StressSourceKind::ConstantTensor; }
    if (s == "sidecar_hdf5")         { return StressSourceKind::SidecarHDF5; }
    if (s == "fault_local_prestress"){ return StressSourceKind::FaultLocalPrestress; }
+   if (s == "depth_proportional")   { return StressSourceKind::DepthProportionalToShearModulus; }
    MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5, "
-              "fault_local_prestress}; got '" << s << "'");
+              "fault_local_prestress, depth_proportional}; got '" << s << "'");
    return StressSourceKind::ConstantTensor;
 }
 
@@ -529,6 +530,27 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
       // Phase 6 req 5: cohesion-taper endpoints for a BoxcarTaper LSW rule.
       out.cohesion_inner = toml_real(rule_tbl, "cohesion_inner", nan);
       out.cohesion_outer = toml_real(rule_tbl, "cohesion_outer", nan);
+      // Phase 10 (TPV31): depth-linear cohesion taper (additive, NaN-disabled).
+      out.cohesion_grad_pa_per_m =
+         toml_real(rule_tbl, "cohesion_grad_pa_per_m", nan);
+      out.cohesion_ref_depth_m =
+         toml_real(rule_tbl, "cohesion_ref_depth_m", nan);
+      out.cohesion_floor_pa = toml_real(rule_tbl, "cohesion_floor_pa", 0.0);
+      {
+         const std::string axis_s =
+            toml_str(rule_tbl, "cohesion_taper_axis", "z");
+         MFEM_VERIFY(axis_s.size() == 1 &&
+                     (axis_s[0] == 'x' || axis_s[0] == 'y' || axis_s[0] == 'z'),
+                     "[[friction.slip_weakening.spatial]] cohesion_taper_axis "
+                     "must be 'x', 'y', or 'z'; got '" << axis_s << "'");
+         out.cohesion_taper_axis = axis_s[0];
+      }
+      // A finite grad requires a finite ref_depth (the taper origin).
+      MFEM_VERIFY(std::isnan(out.cohesion_grad_pa_per_m)
+                  || !std::isnan(out.cohesion_ref_depth_m),
+                  "[[friction.slip_weakening.spatial]] cohesion_grad_pa_per_m "
+                  "is set but cohesion_ref_depth_m is missing (the depth-linear "
+                  "cohesion taper needs both).");
 
       // R-114: barrier-sentinel guard.  Reject any user-supplied
       // mu_s > 1e5 in a spatial-rule override.  Barrier kind is the
@@ -852,6 +874,7 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const auto& m = root.at("mesh");
       cfg.mesh.path  = toml_str(m, "path", std::string());
       cfg.mesh.order = toml_int(m, "order", 1);
+      cfg.mesh.lc_far_m = toml_real(m, "lc_far_m", -1.0);   // Phase 12.2 (PML thickness derivation)
    }
    MFEM_VERIFY(!cfg.mesh.path.empty(), "[mesh].path must be non-empty");
    MFEM_VERIFY(cfg.mesh.order >= 1,    "[mesh].order must be >= 1");
@@ -882,8 +905,8 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const auto& s = root.at("stress");
       MFEM_VERIFY(s.contains("kind"),
                   "[stress].kind is required; must be "
-                  "\"constant_tensor\", \"sidecar_hdf5\", or "
-                  "\"fault_local_prestress\"");
+                  "\"constant_tensor\", \"sidecar_hdf5\", "
+                  "\"fault_local_prestress\", or \"depth_proportional\"");
       cfg.stress.kind = parse_stress_kind(toml_str(s, "kind", "constant_tensor"));
 
       const bool has_sxx = s.contains("sigma_xx_pa");
@@ -980,6 +1003,38 @@ SpatialFrictionConfig parse_root(const toml::value& root)
             }
          }
       }
+      else if (cfg.stress.kind ==
+               StressSourceKind::DepthProportionalToShearModulus)
+      {
+         // Phase 10 (TPV31): depth-proportional Cauchy tensor, scaled per-point
+         // by mu(point)/mu_ref.  Components are entered in MPa in the
+         // [stress.depth_proportional] sub-table and converted to Pa here.
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
+                     && !has_sxy && !has_syz && !has_sxz,
+                     "[stress] kind=\"depth_proportional\" must NOT set the "
+                     "Cauchy sigma_*_pa keys (use [stress.depth_proportional] "
+                     "with sigma_*_per_mu in MPa instead)");
+         MFEM_VERIFY(!has_path && !has_flp,
+                     "[stress] kind=\"depth_proportional\" must NOT set "
+                     "sidecar_path or tau_*_pa/sigma_n_pa keys");
+         MFEM_VERIFY(s.contains("depth_proportional"),
+                     "[stress] kind=\"depth_proportional\" requires a "
+                     "[stress.depth_proportional] sub-table with the six "
+                     "sigma_*_per_mu components (MPa) + mu_ref_pa");
+         const auto& dp = s.at("depth_proportional");
+         const real_t mpa = 1.0e6;   // TOML values are in MPa
+         auto& d = cfg.stress.depth_proportional;
+         d.sigma_xx_per_mu = mpa * toml_real(dp, "sigma_xx_per_mu", 0.0);
+         d.sigma_yy_per_mu = mpa * toml_real(dp, "sigma_yy_per_mu", 0.0);
+         d.sigma_zz_per_mu = mpa * toml_real(dp, "sigma_zz_per_mu", 0.0);
+         d.sigma_xy_per_mu = mpa * toml_real(dp, "sigma_xy_per_mu", 0.0);
+         d.sigma_yz_per_mu = mpa * toml_real(dp, "sigma_yz_per_mu", 0.0);
+         d.sigma_xz_per_mu = mpa * toml_real(dp, "sigma_xz_per_mu", 0.0);
+         d.mu_ref_pa       = toml_real(dp, "mu_ref_pa", 32.03812032e9);
+         MFEM_VERIFY(d.mu_ref_pa > 0.0,
+                     "[stress.depth_proportional].mu_ref_pa must be > 0; got "
+                     << d.mu_ref_pa);
+      }
       else
       {
          MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
@@ -1034,6 +1089,27 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       else if (ifx == "matrix") { cfg.numerics.interior_flux = InteriorFlux::Matrix; }
       else { MFEM_ABORT("[numerics].interior_flux must be \"scalar\" or "
                         "\"matrix\"; got '" << ifx << "'"); }
+
+      // Phase 14: time-integrator selector (default "ader" — byte-exact for
+      // every existing config, which omits the key).  rk4 / rk45 select the
+      // explicit coupled Runge–Kutta stepper (the driver enforces the
+      // rate_state + scalar-interior-flux preconditions at setup).
+      const std::string ti = toml_str(n, "time_integrator", "ader");
+      if      (ti == "ader") { cfg.numerics.time_integrator = TimeIntegratorKind::ADER; }
+      else if (ti == "rk4")  { cfg.numerics.time_integrator = TimeIntegratorKind::RK4; }
+      else if (ti == "rk45") { cfg.numerics.time_integrator = TimeIntegratorKind::RK45; }
+      else { MFEM_ABORT("[numerics].time_integrator must be one of "
+                        "{ader, rk4, rk45}; got '" << ti << "'"); }
+
+      // Phase 12.2: PML knobs (only consulted when use_pml; defaults derive
+      // the thickness from pml_cells*lc_far and damp the bottom but not the
+      // free surface).  Every existing config omits these — the defaults
+      // reproduce a sensible SAFS half-space PML.
+      cfg.numerics.pml_thickness_m = toml_real(n, "pml_thickness_m", -1.0);
+      cfg.numerics.pml_target_R    = toml_real(n, "pml_target_R",    1.0e-3);
+      cfg.numerics.pml_cells       = toml_int (n, "pml_cells",       4);
+      cfg.numerics.pml_damp_bottom = toml_bool(n, "pml_damp_bottom", true);
+      cfg.numerics.pml_damp_top    = toml_bool(n, "pml_damp_top",    false);
    }
    MFEM_VERIFY(cfg.numerics.ader_order >= 1,
                "[numerics].ader_order must be >= 1");
@@ -1056,6 +1132,20 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    // NOTE: the companion guard "interior_flux=matrix requires material.kind !=
    // Constant" is enforced after the [material] block is parsed below (it
    // needs cfg.material.kind, which is read further down in parse_root).
+
+   // Phase 12.2: PML knob validators.  These hold unconditionally (the
+   // defaults pass); the driver additionally aborts at construction if PML
+   // is enabled but the thickness cannot be derived (lc_far_m unset and no
+   // explicit thickness) or the shell would reach the fault.
+   MFEM_VERIFY(cfg.numerics.pml_target_R > 0.0 && cfg.numerics.pml_target_R < 1.0,
+               "[numerics].pml_target_R must be in (0,1); got "
+               << cfg.numerics.pml_target_R);
+   MFEM_VERIFY(cfg.numerics.pml_cells >= 1,
+               "[numerics].pml_cells must be >= 1; got " << cfg.numerics.pml_cells);
+   MFEM_VERIFY(cfg.numerics.pml_thickness_m < 0.0
+               || cfg.numerics.pml_thickness_m > 0.0,
+               "[numerics].pml_thickness_m must be > 0 (or < 0 to derive it "
+               "from pml_cells*lc_far_m); got " << cfg.numerics.pml_thickness_m);
 
    if (root.contains("time"))
    {
@@ -1506,9 +1596,52 @@ SpatialFrictionConfig parse_root(const toml::value& root)
 
       if (cfg.material.kind == MaterialKind::DepthProfile1D)
       {
-         MFEM_VERIFY(!cfg.material.profile_csv.empty(),
-                     "[material] kind=\"depth_profile_1d\" requires a non-empty "
-                     "profile_csv");
+         // Phase 10 (TPV31): inline depth-profile layers + depth axis.
+         {
+            const std::string axis_s = toml_str(m, "depth_axis", "z");
+            MFEM_VERIFY(axis_s.size() == 1 &&
+                        (axis_s[0] == 'x' || axis_s[0] == 'y' || axis_s[0] == 'z'),
+                        "[material].depth_axis must be 'x', 'y', or 'z'; got '"
+                        << axis_s << "'");
+            cfg.material.depth_axis = axis_s[0];
+         }
+         MFEM_VERIFY(root.contains("material_profile"),
+                     "[material].kind=\"depth_profile_1d\" requires a "
+                     "[[material_profile.layer]] array of layer tables");
+         const auto& mp = root.at("material_profile");
+         MFEM_VERIFY(mp.contains("layer"),
+                     "[material_profile] must contain a `layer` array "
+                     "(TOML syntax `[[material_profile.layer]]`)");
+         const auto& layers_arr = mp.at("layer").as_array();
+         MFEM_VERIFY(!layers_arr.empty(),
+                     "[material_profile.layer] must have at least one entry");
+         cfg.material.profile_layers.clear();
+         cfg.material.profile_layers.reserve(layers_arr.size());
+         for (std::size_t i = 0; i < layers_arr.size(); ++i)
+         {
+            const auto& L = layers_arr[i];
+            DepthProfileLayer dpl;
+            dpl.depth_top_m = toml_real(L, "depth_top_m", 0.0);
+            dpl.depth_bot_m = toml_real(L, "depth_bot_m", 0.0);
+            dpl.vp_ms       = toml_real(L, "vp_ms",       0.0);
+            dpl.vs_ms       = toml_real(L, "vs_ms",       0.0);
+            dpl.rho_kgm3    = toml_real(L, "rho_kgm3",    0.0);
+            dpl.interp      = toml_str (L, "interp",      "constant");
+            MFEM_VERIFY(dpl.vp_ms > 0.0,
+                        "[[material_profile.layer]] " << i
+                        << ".vp_ms must be > 0; got " << dpl.vp_ms);
+            MFEM_VERIFY(dpl.vs_ms > 0.0,
+                        "[[material_profile.layer]] " << i
+                        << ".vs_ms must be > 0; got " << dpl.vs_ms);
+            MFEM_VERIFY(dpl.rho_kgm3 > 0.0,
+                        "[[material_profile.layer]] " << i
+                        << ".rho_kgm3 must be > 0; got " << dpl.rho_kgm3);
+            MFEM_VERIFY(dpl.interp == "constant" || dpl.interp == "linear",
+                        "[[material_profile.layer]] " << i
+                        << ".interp must be 'constant' or 'linear'; got '"
+                        << dpl.interp << "'");
+            cfg.material.profile_layers.push_back(dpl);
+         }
       }
       if (cfg.material.kind == MaterialKind::SidecarHDF5)
       {
@@ -1664,6 +1797,33 @@ SlipWeakeningPerDOFParams SpatialFrictionResolver::ResolveSlipWeakening(
          if (!std::isnan(r.mu_d))     { mu_d_i = r.mu_d; }
          if (!std::isnan(r.d_c))      { d_c_i  = r.d_c; }
          if (!std::isnan(r.cohesion)) { coh_i  = r.cohesion; }
+         // Phase 10 (TPV31): depth-linear cohesion taper.  Takes precedence
+         // over any constant `cohesion` set above; clamped from below by
+         // `cohesion_floor_pa` (typically 0).  NaN grad ⇒ disabled (other
+         // LSW configs unchanged).  Ported verbatim from hrs-ref.
+         if (!std::isnan(r.cohesion_grad_pa_per_m))
+         {
+            MFEM_VERIFY(!std::isnan(r.cohesion_ref_depth_m),
+                        "ResolveSlipWeakening: cohesion_grad_pa_per_m set "
+                        "but cohesion_ref_depth_m missing in spatial rule");
+            // For axis 'z' (canonical SEAS), interpret the axis value as
+            // POSITIVE depth (depth = max(0, -z)) so the taper formula
+            // `cohesion = floor + grad * (ref_depth - depth)` can be
+            // written with POSITIVE `ref_depth`/`grad` regardless of mesh-z
+            // sign — matches MakeDepthProfile1DMaterial.  Axes 'x'/'y' keep
+            // the literal "axis_val is used directly" semantic.
+            real_t axis_val = (r.cohesion_taper_axis == 'x') ? x :
+                              (r.cohesion_taper_axis == 'z') ? z : y;
+            if (r.cohesion_taper_axis == 'z')
+            {
+               const real_t d = -axis_val;
+               axis_val = (d > 0.0) ? d : 0.0;
+            }
+            const real_t raw = r.cohesion_floor_pa
+               + r.cohesion_grad_pa_per_m
+                 * (r.cohesion_ref_depth_m - axis_val);
+            coh_i = (raw > r.cohesion_floor_pa) ? raw : r.cohesion_floor_pa;
+         }
       }
 
       // Per-DOF validator.  Barrier DOFs have mu_s = 1e6 ≫ mu_d, so

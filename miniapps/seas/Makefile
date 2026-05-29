@@ -168,6 +168,13 @@ TEST_RESOLVE_RATE_STATE_GUARDS_SRC   = tests/unit/test_resolve_rate_state_guards
 TEST_RESOLVE_RATE_STATE_GUARDS_OBJ   = $(TEST_RESOLVE_RATE_STATE_GUARDS_SRC:.cpp=.o)
 TEST_CONSTANT_TENSOR_SIGN_SRC        = tests/unit/test_constant_tensor_sign.cpp
 TEST_CONSTANT_TENSOR_SIGN_OBJ        = $(TEST_CONSTANT_TENSOR_SIGN_SRC:.cpp=.o)
+# Phase 10 (TPV31) unit tests.
+TEST_TPV31_CANONICAL_ROTATION_SRC    = tests/unit/test_tpv31_canonical_rotation.cpp
+TEST_TPV31_CANONICAL_ROTATION_OBJ    = $(TEST_TPV31_CANONICAL_ROTATION_SRC:.cpp=.o)
+TEST_TPV31_NUCLEATION_AND_COHESION_SRC = tests/unit/test_tpv31_nucleation_and_cohesion.cpp
+TEST_TPV31_NUCLEATION_AND_COHESION_OBJ = $(TEST_TPV31_NUCLEATION_AND_COHESION_SRC:.cpp=.o)
+TEST_TPV31_STATION_WRITER_SRC        = tests/unit/test_tpv31_station_writer.cpp
+TEST_TPV31_STATION_WRITER_OBJ        = $(TEST_TPV31_STATION_WRITER_SRC:.cpp=.o)
 TEST_PARAVIEW_STATE_CHANNEL_RS_SRC   = tests/unit/test_paraview_state_channel_rs.cpp
 TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ   = $(TEST_PARAVIEW_STATE_CHANNEL_RS_SRC:.cpp=.o)
 # TPV-via-spatial-driver Phase 8 (TPV205/102/104 benchmark configs + tests).
@@ -206,9 +213,18 @@ TEST_PHASEH_LSW_FORCED_RUPTURE_OBJ   = $(TEST_PHASEH_LSW_FORCED_RUPTURE_SRC:.cpp
 # (MaterialField, BoundaryConfig) ctor (H.1 + H.3 + H.4).
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC = tests/unit/test_phaseh_wave_operator_constant_parity.cpp
 TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ = $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_SRC:.cpp=.o)
+# Phase 13 C-6: fault-bearing BimaterialWaveOperator-vs-scalar parity (the
+# flux_-placeholder leak-class tripwire; the class is header-only — no new .o).
+TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_SRC = tests/unit/test_bimaterial_wave_operator_parity.cpp
+TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_OBJ = $(TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_SRC:.cpp=.o)
 # Phase 4 of spatial_dynamic_rupture_plan.md (rev-3): generic dynamic-rupture driver.
 SPATIAL_DYN_DRIVER_SRC               = drivers/spatial_dyn_driver.cpp
 SPATIAL_DYN_DRIVER_OBJ               = $(SPATIAL_DYN_DRIVER_SRC:.cpp=.o)
+# Phase 14: explicit coupled-RK time integrator (RK4 / Dormand-Prince RK45).
+RK_TIME_STEPPER_SRC                  = dynamic/rk_time_stepper.cpp
+RK_TIME_STEPPER_OBJ                  = $(RK_TIME_STEPPER_SRC:.cpp=.o)
+TEST_RK_TIME_STEPPER_SRC             = tests/unit/test_rk_time_stepper.cpp
+TEST_RK_TIME_STEPPER_OBJ             = $(TEST_RK_TIME_STEPPER_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -837,6 +853,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_friction_resolver \
                seas_test_spatial_nucleation \
                seas_test_nucleation_factory \
+               seas_test_rk_time_stepper \
                seas_test_tpv102_nuc_callback_parity \
                seas_test_seed_equilibrium_psi_rs \
                seas_test_friction_iterator_factory \
@@ -844,6 +861,9 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_advance_interface_compiles \
                seas_test_resolve_rate_state_guards \
                seas_test_constant_tensor_sign \
+               seas_test_tpv31_canonical_rotation \
+               seas_test_tpv31_nucleation_and_cohesion \
+               seas_test_tpv31_station_writer \
                seas_test_tpv_toml_stress_sign \
                seas_test_planar_tpv_basis \
                seas_test_tpv_config_parse \
@@ -857,6 +877,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_phaseh_lsw_forced_rupture \
                seas_test_tpv205_friction \
                seas_test_phaseh_wave_operator_constant_parity \
+               seas_test_bimaterial_wave_operator_parity \
                seas_test_wave_operator \
                seas_test_wave_bc \
                seas_test_pml \
@@ -1421,6 +1442,34 @@ seas_test_phaseh_wave_operator_constant_parity: \
                   $(SPATIAL_FRICTION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 13 C-6: fault-bearing BimaterialWaveOperator-vs-scalar parity (the
+# flux_-placeholder leak-class tripwire).  Serial; same object set as the
+# constant-parity target (BimaterialWaveOperator + FaultFaceFlux + friction).
+seas_test_bimaterial_wave_operator_parity: \
+                  $(TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
 	    $(GODUNOV_FLUX_OBJ) \
 	    $(GODUNOV_FLUX_POOL_OBJ) \
@@ -2060,6 +2109,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(SPATIAL_FRICTION_OBJ) \
                           $(SPATIAL_NUCLEATION_OBJ) \
                           $(NUCLEATION_FACTORY_OBJ) \
+                          $(RK_TIME_STEPPER_OBJ) \
                           $(SPATIAL_PRINT_DERIVED_OBJ) \
                           $(SPATIAL_VELOCITY_OBJ) \
                           $(SPATIAL_STRESS_OBJ) \
@@ -2082,6 +2132,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(SPATIAL_NUCLEATION_OBJ) \
 	    $(NUCLEATION_FACTORY_OBJ) \
+	    $(RK_TIME_STEPPER_OBJ) \
 	    $(SPATIAL_PRINT_DERIVED_OBJ) \
 	    $(SPATIAL_VELOCITY_OBJ) \
 	    $(SPATIAL_STRESS_OBJ) \
@@ -2092,6 +2143,56 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(FIELD_COEFFICIENT_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 14: rk_time_stepper object.  Includes spatial_friction.hpp (gate with
+# TOML_FLAGS like nucleation_factory) + wave_operator.hpp (SEAS_EXTRA_CPPFLAGS,
+# so a DOFData diag build stays ABI-consistent with the other fault objects).
+$(RK_TIME_STEPPER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+# Phase 14: RK time-stepper unit test (tableau / order / bulk-parity / PsiRate /
+# ApplyAbsolute).  Links the scalar wave-operator object set (the test
+# instantiates AdvanceRKCoupled_Spatial<Mesh>) + the spatial friction /
+# nucleation objects PsiRate / ApplyAbsolute resolve against.
+$(TEST_RK_TIME_STEPPER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_rk_time_stepper: $(TEST_RK_TIME_STEPPER_OBJ) \
+                           $(RK_TIME_STEPPER_OBJ) \
+                           $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                           $(GODUNOV_FLUX_OBJ) \
+                           $(GODUNOV_FLUX_POOL_OBJ) \
+                           $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                           $(PML_LAYER_OBJ) \
+                           $(HETEROGENEOUS_MATERIAL_OBJ) \
+                           $(FAULT_FACE_FLUX_OBJ) \
+                           $(FRICTION_SOLVER_OBJ) \
+                           $(SPATIAL_NUCLEATION_OBJ) \
+                           $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_RK_TIME_STEPPER_OBJ) \
+	    $(RK_TIME_STEPPER_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-rk-time-stepper: seas_test_rk_time_stepper
+	./seas_test_rk_time_stepper
 
 # Phase N: spatial_nucleation object compile rule.
 $(SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
@@ -2418,6 +2519,89 @@ seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
 
 test-constant-tensor-sign: seas_test_constant_tensor_sign
 	./seas_test_constant_tensor_sign
+
+# =====================================================================
+#  Phase 10 (TPV31) unit tests
+# =====================================================================
+$(TEST_TPV31_CANONICAL_ROTATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                           spatial/code/spatial_stress.hpp \
+                                           spatial/code/spatial_friction.hpp \
+                                           dynamic/heterogeneous_material.hpp \
+                                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_TPV31_NUCLEATION_AND_COHESION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                                spatial/code/spatial_friction.hpp \
+                                                dynamic/spatial_nucleation.hpp \
+                                                $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+$(TEST_TPV31_STATION_WRITER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/tpv31_stations.hpp \
+                                       dynamic/fault_face_flux.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
+seas_test_tpv31_canonical_rotation: $(TEST_TPV31_CANONICAL_ROTATION_OBJ) \
+                                    $(SPATIAL_STRESS_OBJ) \
+                                    $(SPATIAL_FRICTION_OBJ) \
+                                    $(STRESS_FIELD_3D_OBJ) \
+                                    $(DATA_FIELD_3D_OBJ) \
+                                    $(FIELD_COEFFICIENT_OBJ) \
+                                    $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                    $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_CANONICAL_ROTATION_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_tpv31_nucleation_and_cohesion: \
+                              $(TEST_TPV31_NUCLEATION_AND_COHESION_OBJ) \
+                              $(SPATIAL_NUCLEATION_OBJ) \
+                              $(SPATIAL_FRICTION_OBJ) \
+                              $(FAULT_FACE_FLUX_OBJ) \
+                              $(FRICTION_SOLVER_OBJ) \
+                              $(HETEROGENEOUS_MATERIAL_OBJ) \
+                              $(TPV205_SUBSTEP_ITERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_NUCLEATION_AND_COHESION_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_tpv31_station_writer: $(TEST_TPV31_STATION_WRITER_OBJ) \
+                                $(FAULT_FACE_FLUX_OBJ) \
+                                $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV31_STATION_WRITER_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv31-canonical-rotation: seas_test_tpv31_canonical_rotation
+	./seas_test_tpv31_canonical_rotation
+
+test-tpv31-nucleation-and-cohesion: seas_test_tpv31_nucleation_and_cohesion
+	./seas_test_tpv31_nucleation_and_cohesion
+
+test-tpv31-station-writer: seas_test_tpv31_station_writer
+	./seas_test_tpv31_station_writer
 
 # =====================================================================
 #  Phase 8 — TPV205/102/104 benchmark config + sign/basis tests.
@@ -2940,6 +3124,22 @@ $(TEST_PHASEH_WAVE_OPERATOR_CONSTANT_PARITY_OBJ): %.o: $(SRC)%.cpp \
                                                        dynamic/godunov_flux_pool.hpp \
                                                        dynamic/heterogeneous_material.hpp \
                                                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Phase 13 C-6: depends on BOTH wave_operator and the new bimaterial subclass
+# headers so editing either re-triggers this compile (the Makefile has no
+# auto header deps — see the stale-.o hazard note).
+$(TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_OBJ): %.o: $(SRC)%.cpp \
+                                                  dynamic/wave_operator.hpp \
+                                                  dynamic/wave_operator.inl \
+                                                  dynamic/bimaterial_wave_operator.hpp \
+                                                  dynamic/bimaterial_wave_operator.inl \
+                                                  dynamic/godunov_flux_pool.hpp \
+                                                  dynamic/godunov_flux_bimaterial.hpp \
+                                                  dynamic/heterogeneous_material.hpp \
+                                                  dynamic/fault_face_flux.hpp \
+                                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -3517,6 +3717,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-tpv102-nuc-callback-parity test-seed-equilibrium-psi-rs \
       test-friction-iterator-factory test-advance-interface-compiles \
       test-resolve-rate-state-guards test-constant-tensor-sign \
+      test-tpv31-canonical-rotation test-tpv31-nucleation-and-cohesion \
+      test-tpv31-station-writer \
       test-tpv-toml-stress-sign test-planar-tpv-basis test-tpv-config-parse \
       test-paraview-state-channel-rs \
       test-spatial-velocity-bundle \
@@ -3524,6 +3726,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-spatial-setup \
       test-phaseh-lsw-forced-rupture \
       test-phaseh-wave-operator-constant-parity \
+      test-bimaterial-wave-operator-parity \
+      test-rk-time-stepper \
       test-wave-bc test-pml \
       test-fault-face-flux test-friction-solver \
       test-tpv102-setup test-tpv102-local \
@@ -3819,6 +4023,10 @@ test-tpv205-friction: seas_test_tpv205_friction
 test-phaseh-wave-operator-constant-parity: seas_test_phaseh_wave_operator_constant_parity
 	./seas_test_phaseh_wave_operator_constant_parity
 	mpirun -np 4 ./seas_test_phaseh_wave_operator_constant_parity
+
+# Phase 13 C-6 fault-bearing parity (flux_-placeholder leak-class tripwire); serial.
+test-bimaterial-wave-operator-parity: seas_test_bimaterial_wave_operator_parity
+	./seas_test_bimaterial_wave_operator_parity
 
 test-wave-operator: seas_test_wave_operator
 	./seas_test_wave_operator
