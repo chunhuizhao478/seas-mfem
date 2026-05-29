@@ -586,6 +586,18 @@ TEST_TPV102_SETUP_OBJ = $(TEST_TPV102_SETUP_SRC:.cpp=.o)
 TPV102_DRIVER_OBJ = $(TPV102_DRIVER_SRC:.cpp=.o)
 TPV102_SUBSTEP_ITERATOR_OBJ = $(TPV102_SUBSTEP_ITERATOR_SRC:.cpp=.o)
 
+# TPV104 substep-iterator SRC/OBJ are HOISTED here (out of the TPV104
+# integration block further down) because seas_spatial_dyn_driver and
+# seas_test_friction_iterator_factory list $(TPV104_SUBSTEP_ITERATOR_OBJ) as a
+# PREREQUISITE (~line 2050).  make expands prerequisites IMMEDIATELY when the
+# rule is read (recipe expansion is deferred), so a variable defined after the
+# rule expands to empty in the prereq list — the object is silently dropped as
+# a dependency and never built, while the deferred link recipe still names it,
+# producing a "no such file" / "undefined reference" link failure on a clean
+# build.  Keep these definitions ABOVE the first such rule.
+TPV104_SUBSTEP_ITERATOR_SRC = dynamic/tpv104_substep_iterator.cpp
+TPV104_SUBSTEP_ITERATOR_OBJ = $(TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+
 # TPV102 driver rebuilt against the TPV104 code flow — depends on the new
 # tpv102_friction_solver / tpv102_nucleation / tpv102_substep_iterator
 # headers and the existing tpv102_setup / tpv102_params headers.
@@ -4415,6 +4427,7 @@ clean: clean-build clean-exec
 clean-build:
 	rm -f *.o *~ $(SEQ_MINIAPPS) $(PAR_MINIAPPS) $(PAR_LONG)
 	rm -f drivers/*.o tests/unit/*.o tests/verification/*.o tests/parallel/*.o
+	rm -f dynamic/*.o spatial/code/*.o io/*.o tools/*.o
 	rm -rf *.dSYM *.TVD.*breakpoints
 
 clean-exec:
@@ -4465,7 +4478,8 @@ TEST_MIXED_FLUX_FACE_SET_SRC       = tests/unit/test_mixed_flux_face_set.cpp
 TEST_MIXED_FLUX_DISPATCH_NONE_SRC  = tests/unit/test_mixed_flux_dispatch_none.cpp
 
 TPV104_DRIVER_SRC                    = drivers/tpv104_driver.cpp
-TPV104_SUBSTEP_ITERATOR_SRC          = dynamic/tpv104_substep_iterator.cpp
+# TPV104_SUBSTEP_ITERATOR_SRC is defined earlier (near TPV102_SUBSTEP_ITERATOR_OBJ)
+# so it is available when seas_spatial_dyn_driver lists the OBJ as a prerequisite.
 
 # ---- objects ----
 TEST_TPV104_PARAMS_OBJ               = $(TEST_TPV104_PARAMS_SRC:.cpp=.o)
@@ -4490,7 +4504,8 @@ TEST_MIXED_FLUX_FACE_SET_OBJ       = $(TEST_MIXED_FLUX_FACE_SET_SRC:.cpp=.o)
 TEST_MIXED_FLUX_DISPATCH_NONE_OBJ  = $(TEST_MIXED_FLUX_DISPATCH_NONE_SRC:.cpp=.o)
 
 TPV104_DRIVER_OBJ                    = $(TPV104_DRIVER_SRC:.cpp=.o)
-TPV104_SUBSTEP_ITERATOR_OBJ          = $(TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.o)
+# TPV104_SUBSTEP_ITERATOR_OBJ is defined earlier (near TPV102_SUBSTEP_ITERATOR_OBJ)
+# — see the hoist comment there.  Must precede the seas_spatial_dyn_driver rule.
 
 # Object dependencies for tests/drivers that call into the substep iterator
 # cpp + fault_face_flux + friction_solver.  Reuse the existing build rules
