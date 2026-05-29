@@ -64,16 +64,21 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
             MFEM_VERIFY(rs->V_w.Size() > 0,
                         "MakeFrictionIterator: SRW needs a non-empty rs->V_w "
                         "(thread it through ResolveRateState).");
+            // REVIEW R-007: put the law in production mode before wiring it
+            // into the iterator.  The R-001 guard in SlipLawSRWPsi aborts if a
+            // base virtual is invoked with the scalar V_w_default_/a_ instead
+            // of per-QP values; without SetProductionMode() that guard is dead,
+            // so a future call to law_.Rate(...)/SteadyState(...) would
+            // silently use the scalar (VW-core) V_w for every QP.
+            SlipLawSRWPsi srw(cfg.rate_state->a_default,
+                              cfg.rate_state->b_default,
+                              cfg.rate_state->V_0_default,
+                              cfg.rate_state->f_0_default,
+                              cfg.rate_state->f_w_default,
+                              cfg.rate_state->V_w_default);
+            srw.SetProductionMode();
             return std::make_unique<RateStateSlipLawSrwIterator>(
-               flux,
-               SlipLawSRWPsi(cfg.rate_state->a_default,
-                             cfg.rate_state->b_default,
-                             cfg.rate_state->V_0_default,
-                             cfg.rate_state->f_0_default,
-                             cfg.rate_state->f_w_default,
-                             cfg.rate_state->V_w_default),
-               FrictionSolver::Method::Brent,
-               &rs->V_w);
+               flux, std::move(srw), FrictionSolver::Method::Brent, &rs->V_w);
          }
 
          // Aging (default; TPV102 / SAFS).  The unified RateStateAgingIterator

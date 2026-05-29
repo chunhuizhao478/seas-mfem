@@ -369,6 +369,65 @@ static void C_4_pool_invariants_on_constant()
 }
 
 // =========================================================================
+// C-5  (REVIEW R-002): Coefficient-mode het ctor CONSTRUCTS (no Stage-1 abort).
+// The het ctor previously ABORTED on Mode::Coefficient (the Phase-H Stage-1
+// gap) and the driver's stale sidecar-abort blocked the only Coefficient
+// source; Phase 9 + the R-002 driver fix make the Coefficient path reachable.
+// This asserts the operator-level deliverable R-002 unblocks: a Coefficient
+// material builds the per-element flux pool + the per-face bimaterial flux
+// matrices without aborting.
+//
+// NOTE (documented limitation, NOT asserted here): full Mult parity vs the
+// scalar ctor is NOT checked for a Coefficient material.  The het ctor
+// delegates the scalar `flux_` member to the (1,1,1) PLACEHOLDER for
+// non-Constant mode (wave_operator.inl ctor initializer — IDENTICAL to
+// hrs-ref).  Interior non-fault faces + the CK volume term route through the
+// per-element pool (correct — proven by C-1 on the identical homogeneous
+// material), but BOUNDARY faces (absorbing / free-surface) still consume
+// `flux_`, so a Coefficient material's boundary-face flux uses the placeholder.
+// This is an inherited (hrs-ref-identical) limitation of the heterogeneous BC
+// path, exercised end-to-end only by a real heterogeneous run (TPV31 / Phase
+// 10) — out of scope for this fix.  See the fix report's "new finding (N-1)".
+// =========================================================================
+static void C_5_coefficient_mode_constructs()
+{
+   if (g_rank == 0)
+   { std::cout << "\n[C-5] Coefficient-mode het ctor constructs (R-002)\n"; }
+#ifdef MFEM_USE_MPI
+   if (g_rank != 0) { return; }
+#endif
+   Mesh smesh = MakeBoxMesh(2, 2, 2);
+   const BoundaryConfig bc = MakeAbsorbingBC();
+
+   ConstantCoefficient lam_c(k_lambda), mu_c(k_mu), rho_c(k_rho);
+   WaveOperator<Mesh> wave_coef(smesh, k_order,
+                                MaterialField::MakeCoefficient(&lam_c, &mu_c,
+                                                               &rho_c),
+                                bc);
+   TEST_ASSERT(wave_coef.UsesGodunovFluxPool() == true,
+               "Coefficient-mode het ctor: pool present (no Stage-1 abort)");
+   TEST_ASSERT(!wave_coef.GetPerFaceBimaterialFlux().empty(),
+               "Coefficient-mode het ctor: per-face bimaterial matrices built");
+   // The per-element pool must reflect the (homogeneous here) Coefficient
+   // material — confirms EvalAt drives BuildGodunovFluxPool_ correctly.
+   const auto &lmr = wave_coef.GetPerElementMaterial();
+   bool all_match = !lmr.empty();
+   for (const auto &t : lmr)
+   {
+      if (t[0] != k_lambda || t[1] != k_mu || t[2] != k_rho)
+      { all_match = false; break; }
+   }
+   TEST_ASSERT(all_match,
+               "Coefficient (ConstantCoefficient) per-elem pool == (lam,mu,rho)");
+}
+
+// (REVIEW R-003 abort test lives in test_wave_operator.cpp — that suite is
+// serial / non-MPI, so MFEM_ABORT calls plain abort() and a fork-based check
+// is safe.  Here, under the MPI build, MFEM_ABORT calls MPI_Abort, which is
+// unusable from a forked child, and this MFEM build lacks MFEM_USE_EXCEPTIONS
+// for the throw-and-catch path.)
+
+// =========================================================================
 // main
 // =========================================================================
 int main(int argc, char *argv[])
@@ -392,6 +451,7 @@ int main(int argc, char *argv[])
    C_2_mult_parity_parallel();
    C_3_compute_max_dt_parity();
    C_4_pool_invariants_on_constant();
+   C_5_coefficient_mode_constructs();
 
 #ifdef MFEM_USE_MPI
    int total = 0, passed = 0, failed = 0;

@@ -1093,11 +1093,65 @@ cohesion_default=0
                "fault_iterator=substep");
    TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Matrix,
                "interior_flux=matrix");
-   // Defaults (dg / one-shot / scalar) are exercised by every other config
+   // Defaults (dg / substep / scalar) are exercised by every other config
    // test in this file (none of which set these keys) — those still pass,
-   // proving the new selectors default to current behaviour (no regression).
-   // (REVIEW R-002: cfl_safety defaults to "dg", matching the driver's
-   // always-DG-factored behavior; "raw" is an explicit opt-in.)
+   // proving the new selectors default to the SUPPORTED behaviour (no
+   // regression).  (REVIEW R-002: cfl_safety defaults "dg"; REVIEW R-001:
+   // fault_iterator defaults "substep" — the spatial driver always sub-steps,
+   // so a config that omits the key must default to the supported mode rather
+   // than abort the driver's FaultIteratorSupported guard.)
+}
+
+// NUM-1b (REVIEW R-001): a config that omits [numerics].fault_iterator (and
+// cfl_safety / interior_flux) — like all 8 SAFS production configs — must
+// default to the SUPPORTED selectors (substep / dg / scalar), NOT to a mode
+// the driver rejects.  Before R-001 the default was OneShot, which the driver
+// MFEM_VERIFY(FaultIteratorSupported) aborted on -> every SAFS run died at
+// startup.
+static void T_numerics_defaults_omitted_keys()
+{
+   std::cout << "\n[NUM-1b] omitted [numerics] selectors default to supported\n";
+   const std::string toml = R"TOML(
+[meta]
+schema_version = 1
+law = "slip_weakening"
+[material_constant_fallback]
+lambda=32e9
+mu=32e9
+rho=2670
+[pore_pressure]
+P_p_pa=0
+[mesh]
+path="/dev/null"
+order=1
+[velocity]
+use_sidecar=false
+[stress]
+kind = "fault_local_prestress"
+tau_strike_pa = 70.0e6
+sigma_n_pa = 120.0e6
+[numerics]
+ader_order=2
+cfl=0.25
+[time]
+tfinal="12s"
+[output]
+output_dir="out"
+[friction.slip_weakening]
+mu_s_default=0.677
+mu_d_default=0.525
+d_c_default=0.40
+cohesion_default=0
+)TOML";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.numerics.fault_iterator == FaultIteratorKind::Substep,
+               "omitted fault_iterator defaults to Substep (R-001)");
+   TEST_ASSERT(FaultIteratorSupported(cfg),
+               "omitted fault_iterator passes FaultIteratorSupported (R-001)");
+   TEST_ASSERT(cfg.numerics.cfl_safety == CflSafety::Dg,
+               "omitted cfl_safety defaults to Dg (R-002)");
+   TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Scalar,
+               "omitted interior_flux defaults to Scalar");
 }
 
 // NUM-2 (Phase 6 req 3): interior_flux="matrix" + mixed_flux != "none" aborts.
@@ -1601,6 +1655,7 @@ int main(int, char**)
    T_22_fault_local_patches_parse();
    T_fault_local_rs_sigma_n_consistency();
    T_23_numerics_selectors_parse();
+   T_numerics_defaults_omitted_keys();
    T_24_matrix_mixed_flux_aborts();
    T_25_nucleation_compact_circular_parses();
    T_26_nucleation_instantaneous_circular_parses();

@@ -629,7 +629,12 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
 
    // Phase 6 req 4: state-evolution selector + SRW scalars.  Default
    // "aging_law" keeps existing RS configs byte-identical.
-   out.f_w_default     = toml_real(rs_tbl, "f_w_default",     0.1);
+   // REVIEW R-006: f_w_default = 0.2 (SCEC TPV104 spec, post-2026-04-24 audit;
+   // the old 0.1 was half the spec value and contributed to the 1.7-2.7x
+   // V_strike over-shoot — see config/tpv104_params.hpp:58).  Fed straight to
+   // SlipLawSRWPsi as muW by the factory, so an SRW config that omits the key
+   // must default to the corrected value.
+   out.f_w_default     = toml_real(rs_tbl, "f_w_default",     0.2);
    out.V_w_default     = toml_real(rs_tbl, "V_w_default",     0.1);
    {
       const std::string se = toml_str(rs_tbl, "state_evolution", "aging_law");
@@ -1015,7 +1020,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       else { MFEM_ABORT("[numerics].cfl_safety must be \"raw\" or \"dg\"; got '"
                         << cs << "'"); }
 
-      const std::string fi = toml_str(n, "fault_iterator", "one-shot");
+      // REVIEW R-001: default "substep" (NOT "one-shot") — the spatial driver
+      // always sub-steps and MFEM_VERIFYs against "one-shot", so a config that
+      // omits the key (all 8 SAFS configs) must default to the supported mode.
+      const std::string fi = toml_str(n, "fault_iterator", "substep");
       if      (fi == "one-shot") { cfg.numerics.fault_iterator = FaultIteratorKind::OneShot; }
       else if (fi == "substep")  { cfg.numerics.fault_iterator = FaultIteratorKind::Substep; }
       else { MFEM_ABORT("[numerics].fault_iterator must be \"one-shot\" or "

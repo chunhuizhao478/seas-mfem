@@ -4,10 +4,16 @@
 #include "../../dynamic/wave_operator.hpp"
 #include "../../dynamic/wave_state.hpp"
 #include "../../dynamic/seas_dynamic_operator.hpp"
+#include "../../dynamic/heterogeneous_material.hpp"
 #include "../../domain/boundary_config.hpp"
 #include <iostream>
 #include <cmath>
 #include <cstdlib>
+#include <cerrno>
+#include <functional>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -509,6 +515,67 @@ void TestSEASDynamicOperator()
    delete mesh;
 }
 
+// Run `body` in a forked child; return true iff the child aborted (any
+// non-zero exit or signal).  Child stderr silenced.  This suite is serial
+// (no MPI), so MFEM_ABORT calls plain abort() and fork is safe.
+static bool RunAbortsInChild(const std::function<void()> &body)
+{
+   std::fflush(stdout);
+   std::fflush(stderr);
+   const pid_t pid = ::fork();
+   if (pid < 0) { return false; }
+   if (pid == 0)
+   {
+      std::freopen("/dev/null", "w", stderr);
+      body();          // expected to MFEM_ABORT (abort() / SIGABRT)
+      ::_exit(0);      // reached only if no abort
+   }
+   int status = 0;
+   while (::waitpid(pid, &status, 0) < 0 && errno == EINTR) { /* retry */ }
+   if (WIFEXITED(status))   { return WEXITSTATUS(status) != 0; }
+   if (WIFSIGNALED(status)) { return true; }
+   return true;
+}
+
+// ===== Test 15 (REVIEW R-003): matrix × mixed_flux mutual exclusion =====
+// SetMixedFluxMode on a heterogeneous operator (owned_flux_pool_ set) with a
+// non-None mode must abort — the bimaterial Riemann solve already replaces
+// the interior-face flux, so mixed-flux would be silently dropped.
+// AllContinuous isolates the R-003 guard (it skips the Adjacent fault-attr
+// check), so the only abort source is the matrix×mixed-flux guard.
+void TestR003MatrixMixedFluxAborts()
+{
+   std::cout << "Test 15: TestR003MatrixMixedFluxAborts (matrix x mixed_flux)\n";
+   auto *mesh = CreateTestMesh();
+   const int order = 2;
+   const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+   BoundaryConfig bc = MakeAbsorbingBC();
+
+   WaveOperator wave_het(*mesh, order,
+                         MaterialField::MakeConstant(lambda, mu, rho), bc);
+   TEST_ASSERT(wave_het.UsesGodunovFluxPool() == true,
+               "precondition: heterogeneous operator (owned_flux_pool_ set)");
+
+   const bool aborted = RunAbortsInChild([&]() {
+      wave_het.SetMixedFluxMode(MixedFluxMode::AllContinuous);
+   });
+   TEST_ASSERT(aborted,
+               "SetMixedFluxMode(AllContinuous) on a matrix operator aborts "
+               "(R-003)");
+
+   // Control: a non-None mixed flux on the SCALAR operator does NOT abort
+   // (owned_flux_pool_ null) — proves the guard is matrix-specific.
+   WaveOperator wave_scalar(*mesh, order, lambda, mu, rho, bc);
+   const bool scalar_aborted = RunAbortsInChild([&]() {
+      wave_scalar.SetMixedFluxMode(MixedFluxMode::AllContinuous);
+   });
+   TEST_ASSERT(!scalar_aborted,
+               "SetMixedFluxMode(AllContinuous) on a scalar operator does NOT "
+               "abort (guard is matrix-specific)");
+
+   delete mesh;
+}
+
 int main()
 {
    std::cout << "========================================\n";
@@ -522,6 +589,7 @@ int main()
    TestEnergyConservation();
    TestQuiescentState();
    TestSEASDynamicOperator();
+   TestR003MatrixMixedFluxAborts();
 
    std::cout << "\n========================================\n";
    std::cout << "Total:  " << num_tests << "\n";

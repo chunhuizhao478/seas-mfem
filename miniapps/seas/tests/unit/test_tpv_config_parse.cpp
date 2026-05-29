@@ -262,6 +262,13 @@ static void T_numerics_dispatch_helpers()
    spatial::SpatialFrictionConfig def;
    TEST_ASSERT(def.numerics.cfl_safety == spatial::CflSafety::Dg,
                "cfl_safety struct default == Dg (R-002: no SAFS regression)");
+   // R-001 SAFS-safe default: a config that omits fault_iterator must default
+   // to the SUPPORTED mode (Substep), else the driver's FaultIteratorSupported
+   // guard aborts every SAFS run.
+   TEST_ASSERT(def.numerics.fault_iterator == spatial::FaultIteratorKind::Substep,
+               "fault_iterator struct default == Substep (R-001: no SAFS abort)");
+   TEST_ASSERT(spatial::FaultIteratorSupported(def),
+               "default-constructed config passes FaultIteratorSupported (R-001)");
 }
 
 int main(int, char**)

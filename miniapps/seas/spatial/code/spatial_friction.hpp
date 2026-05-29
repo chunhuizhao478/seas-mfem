@@ -97,7 +97,11 @@ struct MeshSpec
 ///   preserve the long-standing always-DG-factored behavior; "raw" is the
 ///   explicit experimental escape hatch).
 /// fault_iterator: OneShot = single EvaluateADER per macro-step; Substep =
-///   the ADER sub-step iterator.  Default OneShot.
+///   the ADER sub-step iterator.  Default Substep (REVIEW R-001: the spatial
+///   driver ALWAYS sub-steps — "one-shot" is not implemented and the driver
+///   MFEM_VERIFYs against it — so the default must be the supported mode;
+///   every existing config omits the key.  Mirrors the cfl_safety raw→dg
+///   default flip for the same omit-the-key-must-work reason.)
 /// interior_flux: Scalar = homogeneous Godunov (mixed_flux allowed); Matrix =
 ///   heterogeneous/bimaterial Riemann (mixed_flux forbidden).  Default Scalar.
 enum class CflSafety        { Raw, Dg };
@@ -111,7 +115,7 @@ struct NumericsSpec
    real_t            cfl            = 0.5;
    bool              use_pml        = false;
    CflSafety         cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
-   FaultIteratorKind fault_iterator = FaultIteratorKind::OneShot;
+   FaultIteratorKind fault_iterator = FaultIteratorKind::Substep;  // R-001 default
    InteriorFlux      interior_flux  = InteriorFlux::Scalar;
 };
 

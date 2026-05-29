@@ -869,6 +869,12 @@ int main(int argc, char *argv[])
    real_t mat_mu     = cfg.material_fallback.mu;
    real_t mat_rho    = cfg.material_fallback.rho;
 
+   // REVIEW R-008 (lifetime): `vel_bundle` (owns the Coefficient objects the
+   // sidecar MaterialField points at) and `material` MUST outlive `wave_ptr`
+   // — the matrix-path het ctor stores a non-owning `material_ = &material`,
+   // and a Coefficient `material` borrows the bundle's coefficients.  They are
+   // declared here, before `wave_ptr` (constructed ~120 lines below), so C++
+   // destroys them AFTER `wave_ptr`; keep this ordering.
    std::unique_ptr<spatial::SpatialVelocityBundle> vel_bundle;
    MaterialField material = MaterialField::MakeConstant(mat_lambda,
                                                         mat_mu, mat_rho);
@@ -879,31 +885,13 @@ int main(int argc, char *argv[])
    const bool sidecar_requested =
       cfg.velocity.use_sidecar && !no_sidecar_material;
 
-   // R-010 / D-1: heterogeneous WaveOperator(MaterialField) ctor +
-   // per-element flux dispatch is not yet wired (see
-   // dynamic/wave_operator.hpp:215).  A successful sidecar load would
-   // produce a non-Constant MaterialField that the scalar-material
-   // ctor below cannot consume.  Abort BEFORE the multi-minute HDF5
-   // read so the user does not burn a Frontera dev-queue allocation
-   // discovering this after the fact.
-   if (sidecar_requested)
-   {
-      if (rank == 0)
-      {
-         std::cerr << "ERROR: spatial_dyn_driver Phase H gap (D-1): the "
-                   << "heterogeneous WaveOperator(MaterialField) ctor + "
-                   << "per-element flux dispatch is NOT yet wired (see "
-                   << "dynamic/wave_operator.hpp:215).  Re-run with "
-                   << "--no-sidecar-material (or set "
-                   << "[velocity].use_sidecar = false in the TOML) to "
-                   << "use the [material_constant_fallback] block.\n";
-      }
-#ifdef MFEM_USE_MPI
-      MPI_Finalize();
-#endif
-      return 4;
-   }
-
+   // REVIEW R-002: the stale "Phase H gap (D-1)" abort that used to reject
+   // every sidecar_requested run was REMOVED here — Phase 9 (Stage B) wired
+   // the heterogeneous WaveOperator(MaterialField) ctor + per-element flux
+   // dispatch, so a non-Constant (Mode::Coefficient) sidecar material is now a
+   // valid input on the interior_flux="matrix" path.  The remaining guards
+   // cover both paths: the scalar path forces Mode::Constant (the
+   // material.mode guard below), and the matrix branch forces non-Constant.
    if (sidecar_requested)
    {
       try
@@ -996,6 +984,19 @@ int main(int argc, char *argv[])
       // would collapse to scalar and is forbidden by the parser (matrix
       // requires material.kind != Constant); guard loudly so a mis-built
       // homogeneous material cannot silently run as "matrix".
+      //
+      // REVIEW R-008: [material].kind is parsed but the driver builds its
+      // MaterialField from [velocity] (sidecar) / [material_constant_fallback],
+      // NOT from [material].kind — so kind="depth_profile_1d" passes the parser
+      // yet produces a Constant fallback here.  Catch that disconnect with an
+      // explicit, accurate abort (Phase 10 wires the DepthProfile1D builder)
+      // rather than the generic "Mode::Constant" message below.
+      MFEM_VERIFY(cfg.material.kind != spatial::MaterialKind::DepthProfile1D,
+                  "spatial_dyn_driver: [material].kind=\"depth_profile_1d\" with "
+                  "interior_flux=\"matrix\" is not yet wired in this driver — "
+                  "the DepthProfile1D MaterialField builder is a Phase-10 "
+                  "deliverable (TPV31).  Use a CVM velocity sidecar "
+                  "(Mode::Coefficient) material until then.");
       MFEM_VERIFY(material.mode != MaterialField::Mode::Constant,
                   "spatial_dyn_driver: interior_flux=\"matrix\" requires a "
                   "non-Constant MaterialField, but the constructed material is "
@@ -1659,8 +1660,10 @@ int main(int argc, char *argv[])
                 << "[verify-dispatch] nucleation    : "
                 << (cfg.nucleation.enabled ? "gradual_overstress (enabled)"
                                            : "none (disabled)") << "\n"
-                << "[verify-dispatch] interior flux : scalar (homogeneous "
-                   "WaveOperator; matrix is Phase 9)\n";
+                << "[verify-dispatch] interior flux : "
+                << (cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix
+                       ? "matrix (heterogeneous bimaterial Riemann)\n"
+                       : "scalar (homogeneous Godunov)\n");
    }
 
    // -----------------------------------------------------------------

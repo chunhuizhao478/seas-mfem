@@ -718,16 +718,22 @@ void WaveOperator<MeshType>::BuildGodunovFluxPool_(
 // ---------------------------------------------------------------------------
 // Phase H.4 helper — populate shared_face_neighbour_material_.
 //
-// Stage 1 contract:
-//   - Mode::Constant input is the only reachable path (the ctor
-//     MFEM_VERIFY above aborts Coefficient mode).
-//   - In Mode::Constant every neighbour's per-element material is, by
-//     construction, equal to the local material.  We therefore fill
-//     the map with the LOCAL-side (lambda, mu, rho) for every shared
-//     face on this rank — no MPI is performed.
+// REVIEW R-004 (stale-comment correction): Mode::Coefficient is now REACHABLE
+// (Phase 9 wired the matrix path + removed the ctor abort), so the old "only
+// Mode::Constant is reachable" contract is no longer true.  This body is still
+// a LOCAL-SIDE STUB — it stores the local element's own material as the
+// neighbour's (no MPI exchange).  That is correct ONLY when the neighbour's
+// material equals the local material at the seam:
+//   - Mode::Constant: always (every element shares the constants).
+//   - Mode::Coefficient that is seam-continuous (e.g. depth-only, TPV31): the
+//     centroid material agrees across the seam, so the stub is correct.
+//   - Mode::Coefficient with LATERAL variation across a partition seam: WRONG
+//     — the genuine peer-rank neighbour material is needed.  A real
+//     MPI_Allgatherv exchange (key shared faces, pair, store the peer's
+//     per_elem_lmr_) is unimplemented; the het ctor WARNs (below) for the
+//     Coefficient + shared-faces case so a parallel laterally-heterogeneous
+//     run does not silently use the wrong seam material.
 //   - On serial Mesh this is a no-op (no shared faces).
-//
-// Stage 2 will replace this body with the real MPI_Allgatherv exchange.
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void WaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
@@ -753,6 +759,30 @@ void WaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
                      << " has Elem1No=" << local_elem
                      << " outside [0, " << ne_ << ").");
          shared_face_neighbour_material_[sf] = per_elem_lmr_[local_elem];
+      }
+
+      // REVIEW R-004: warn once (rank 0) if a genuinely heterogeneous
+      // (Coefficient) material is used in parallel — the local-side stub
+      // above uses the WRONG neighbour material at a partition seam where the
+      // material varies laterally (it is correct only for seam-continuous /
+      // depth-only materials like TPV31).  The real cross-rank exchange is
+      // unimplemented.
+      if (material_ != nullptr
+          && material_->mode == MaterialField::Mode::Coefficient
+          && n_shared > 0)
+      {
+         int rank = 0;
+         MPI_Comm_rank(pmesh.GetComm(), &rank);
+         if (rank == 0)
+         {
+            mfem::out << "[wave_operator] WARNING: ExchangeBiMaterialNeighbours_"
+                         " is a LOCAL-SIDE stub — a parallel run with a "
+                         "laterally-varying (Coefficient) material will use the "
+                         "WRONG neighbour material at partition seams (correct "
+                         "only for depth-only / seam-continuous materials like "
+                         "TPV31).  The real cross-rank exchange is not yet "
+                         "implemented.\n";
+         }
       }
    }
 #endif
@@ -1767,6 +1797,25 @@ void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
                  << "): mutually exclusive with precomputed face flux "
                  "(UsePrecomputedFaceFluxes is currently true).  "
                  "Disable precomputed flux first.");
+   }
+
+   // REVIEW R-003: matrix (bimaterial) × mixed-flux mutual exclusion (restores
+   // the hrs-ref guard Phase 9 dropped).  The heterogeneous interior_flux=
+   // "matrix" path (owned_flux_pool_ set) replaces the interior-face flux with
+   // the bimaterial Riemann solve; mixed-flux ALSO replaces it (central vs
+   // upwind per face).  The two are incompatible — with owned_flux_pool_ set,
+   // the gated `if (owned_flux_pool_)` dispatch is taken at every interior
+   // face and the mixed-flux central logic (in the unreachable scalar else)
+   // would be silently ignored.  Abort loudly rather than silently drop it.
+   if (m != MixedFluxMode::None && owned_flux_pool_ != nullptr)
+   {
+      MFEM_ABORT("SetMixedFluxMode("
+                 << (m == MixedFluxMode::Adjacent ? "Adjacent"
+                                                  : "AllContinuous")
+                 << "): mixed flux is incompatible with the heterogeneous "
+                 "(bimaterial) interior_flux=\"matrix\" path; the bimaterial "
+                 "Riemann solve already replaces the interior-face flux.  Use "
+                 "interior_flux=\"scalar\" for mixed flux.");
    }
 
    // R-1205: Adjacent mode requires fault attribute and a populated fault
