@@ -1,165 +1,206 @@
-# Code Review: Phase 13 — Split scalar / matrix into separate WaveOperator classes (Round 2, 2026-05-29, fresh adversarial pass + full local test run)
+# Code Review: RK45 + LSW + mixed-flux IMPLEMENTATION (adversarial audit, 2026-05-29)
+
+> Reviews the implemented code (not the plan). The earlier plan review is archived
+> at `REVIEW_rk45_lsw_plan_2026-05-29.md`; the Phase-13 review at
+> `REVIEW_phase13_round2_2026-05-29.md`.
 
 ## Review Scope
-- Plan: `document/fullelasticity_dev/PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md` §Phase 13 (lines 2725–3030)
-- Files reviewed (this round, re-read from scratch):
-  - `dynamic/wave_operator.hpp`, `dynamic/wave_operator.inl` — the four virtual hooks, all dispatch/deposit sites, the scalar default bodies, the 8 R-001 fault imposed-state sites, `ComputeMaxDt`, `SetMixedFluxMode`, ctor.
-  - `dynamic/bimaterial_wave_operator.hpp`, `dynamic/bimaterial_wave_operator.inl` — the new subclass (ctor delegation + `(1,1,1)` poison, the four overrides, the moved builders).
-  - `drivers/spatial_dyn_driver.cpp` — the scalar/matrix `wave_ptr` branch (1062–1101), the R-107 reflection/PML guard, the `cp_seed`/`FaultFaceFlux` seed (1544).
-  - `tests/unit/test_bimaterial_wave_operator_parity.cpp` (C-6, new), `tests/unit/test_phaseh_wave_operator_constant_parity.cpp` (C-5, repointed), `tests/unit/test_wave_operator.cpp` (repointed).
-  - `Makefile` — build targets + the `make test` run chain.
-- Domain context: `CLAUDE.md` (byte-exact contract; "no local full-mesh runs"), memory notes (GodunovFluxPool dedup floor; placeholder-leak class; Phase-13 subclass split), git `HEAD~1` (the pre-split single-class form, used as the faithfulness oracle).
+- Plan: `document/mixed_flux_dev/PLAN_rk45_lsw_mixed_flux_2026-05-29.md` (Phases 1–5).
+- Files reviewed (the diff vs HEAD + new files):
+  - `dynamic/fault_face_flux.{hpp,cpp}` — `EvaluateLSW`
+  - `dynamic/wave_operator.inl` — Mult-path LSW dispatch (interior `:~2617`, shared `:~3260`)
+  - `dynamic/rk_time_stepper.hpp` — `AdvanceRKCoupledLSW_Spatial` + symmetric RS guard
+  - `drivers/spatial_dyn_driver.cpp` — guard relax, gated rate_state guard, 3-way dispatch, banner
+  - `tests/unit/test_lsw_rk_mixed_flux.cpp` (L1–L7), `tests/unit/test_lsw_rk_shared_fault_mpi.cpp` (L8)
+  - `tpv205/configs/tpv205_spatial_rk45_mixedflux.toml`, `jobs/tpv205/tpv205_p1_rk45_mixedflux.sbatch`, `Makefile`
+- Domain context: `miniapps/seas/CLAUDE.md` (sign/frame, no-local-full-mesh), the BUILD doc, the implementation report, memory (`preexisting-worktree-test-failures-2026-05`).
 
-## Method (what is new in this round)
-1. **Re-executed all three review passes from scratch** on the changed files (skill rule #10).
-2. **Verified the "moved verbatim" claim mechanically:** `diff -w` of the bimaterial bodies extracted from `HEAD~1:wave_operator.inl` against `bimaterial_wave_operator.inl` (class-qualifier normalised) → **identical** (only the added `template<>` lines differ). The old inline interior-face dispatch + deposit (`HEAD~1` ComputeFaceFluxRHS 3283–3360) matches the new scalar-default + bimaterial-override split byte-for-byte, including the per-side deposit (`-F_h_e1`→Elem1, `+F_h_e2`→Elem2) and the bimaterial flux args (`Q_self=Q_e1, Q_nbr=Q_e2`, not swapped).
-3. **Built and RAN the full Phase-13 acceptance suite locally** (`mfem-dev`, MFEM lib from the main checkout; sources from this worktree). All unit-level acceptance criteria pass — see "Test evidence" below. (The byte-exact full-mesh TPV/BP5 gate remains out of local scope per CLAUDE.md.)
+**Pass-1 (plan compliance):** all 5 phases implemented as specified; the R-002 (`=` not `+=`) and R-003 (symmetric guard) plan-fixes are present in code and exercised. **Pass-2 (correctness):** the algorithm is correct — verified by L1 (bit-exact `EvaluateLSW` vs `EvaluateADER_LSW`), L5 (bit-exact bulk RK4), L6 (absolute-combine vs `+=` discrimination), L8 (shared==interior==analytic), and the byte-exact guard suite (`rk_time_stepper` 22/22, `fault_face_flux_ader_equivalence` 11/11, `bimaterial_wave_operator_parity` 22/22). **No CRITICAL correctness bug found.** The findings below are real **coverage gaps** (untested production paths) and minor quality items — the kind that hide a *future* bug, not a present wrong result.
 
-## Test evidence (run this round)
-| Test | Result |
-|---|---|
-| `seas_test_bimaterial_wave_operator_parity` (C-6, fault-bearing) | **9/9 PASS** (Mult, AdvanceADER, ComputeMaxDt; finite, field-scale rel < 1e-9) |
-| `seas_test_phaseh_wave_operator_constant_parity` (C-5) np=1 | **19/19 PASS** |
-| `seas_test_phaseh_wave_operator_constant_parity` (C-5) np=4 | **52/52 PASS** (exercises the shared-face bimaterial interior path) |
-| `seas_test_wave_operator` | **20/20 PASS** (incl. R-003 matrix×mixed-flux abort) |
-| `seas_test_godunov_flux_bimaterial` | **21/21 PASS** |
-
-## What was verified correct (the fix agent should NOT touch this)
-- **Scalar byte-exactness is construction-guaranteed.** `ComputeVolumeRHS` reads `FluxForElem_(e).GetReferenceStarMatrix(d)`; on the scalar class `FluxForElem_(e)==flux_` and `GetReferenceStarMatrix(d)` returns `ref_star_[d]` which is built by the *same* `GodunovFlux::BuildJacobian(d,·)` that fills the cached `Ax_/Ay_/Az_` — bit-identical. The scalar hook bodies (`InteriorFaceFlux_`/`SharedInteriorFaceFlux_`/`ApplyElementJacobian_`) and the scalar `ComputeMaxDt` are verbatim the pre-split code (mixed-flux per-face choice via `mf_on_ && central_flux_face_set_.count(face)` preserved).
-- **`(1,1,1)` poison is provably dead on the matrix path.** The inherited `flux_` is read in the base ctor *only* via `flux_(λ,μ,ρ)` + `flux_.BuildJacobian(0/1/2, Ax_/Ay_/Az_)`; those `Ax_/Ay_/Az_` are then dead (every consumer routes through `FluxForElem_`), and `h_min_` is geometric (from `mesh_`). No virtual hook is invoked during base construction. Confirmed by full grep: the only bare-`flux_` material uses left in `wave_operator.inl` are the overridden scalar hook bodies + the dead ctor `BuildJacobian` + the overridden scalar `ComputeMaxDt`.
-- **All 8 R-001 fault imposed-state sites** route through `FluxForElem_(elem_plus/elem_minus/e1/qa.local_elem)` with the correct per-side selection (`elem1_on_plus ? e1 : e2`) and per-side deposit. Faithful to `HEAD~1`.
-- **Driver matrix branch** constructs `std::make_unique<BimaterialWaveOperator<ParMesh>>(...)` held as `unique_ptr<WaveOperator<ParMesh>>`; base dtor is virtual (via `TimeDependentOperator`), so the subclass dtor frees `owned_flux_pool_` — no leak.
-- **No compile stragglers:** the removed het ctor (`WaveOperator(.,.,MaterialField,.)`) and the moved accessors (`GetPerElementMaterial`, …) are referenced only on `BimaterialWaveOperator` objects (C-5/test_wave_operator, repointed). The scalar class is `MaterialField`-free.
+---
 
 ## Findings
 
-### [R-001] [MODERATE] [Makefile / `test:` target] — C-6 not run by `make test` — **RESOLVED (verified this round)**
+### [R-001] [MODERATE] [test_lsw_rk_shared_fault_mpi.cpp] — L8 only exercises the shared-fault LSW dispatch AT REST (Q=0); the cross-rank Q± exchange is never tested with a non-trivial jump
 
-**Status:** FIXED in the reviewed commit. `test-bimaterial-wave-operator-parity` is now in the `make test` prerequisite chain at **Makefile:3729** (immediately after `test-phaseh-wave-operator-constant-parity:3728`), and its run rule is at Makefile:4028. No action.
-
----
-
-### [R-002] [MODERATE] [spatial_dyn_driver.cpp reflection/PML cp] — matrix path computed `cp = sqrt(0/0) = NaN` — **RESOLVED (verified this round)**
-
-**Status:** FIXED. The R-107 reflection warning + PML `pml_cp` are now guarded by `if (material.mode == MaterialField::Mode::Constant)` at **spatial_dyn_driver.cpp:1132** (comment cites "Phase 13 (REVIEW R-002)"). The matrix path no longer emits the bogus `cp_max (0 s)` warning. No action. (See R-007 for a remaining sibling of this same NaN class that is harmless but unguarded.)
-
----
-
-### [R-003] [MODERATE→RESOLVED] [test C-6 metric] — field-scale vs per-component "to 1e-9" — **RECONCILED IN PLAN**
-
-**Status:** RECONCILED. The plan's C-6 acceptance line (PLAN §Phase 13, lines 2988–2999) now carries the field-scale-metric rationale (round_sig(·,6) dedup floor) as the documented acceptance, and the test header documents it. The deviation is recorded in both the plan and the test, which is exactly what the prior finding required. The metric was tripwire-validated and the test passes at 3e-10 (Mult). No action; do NOT revert to per-component (it would false-fail at ~1e10-scale moduli).
-
----
-
-### [R-004] [LOW] [test_bimaterial_wave_operator_parity.cpp] — homogeneous C-6 cannot detect a per-side / true-bimaterial fault-flux error
-
-**Category:** EDGE_CASE — **STILL OPEN (accepted)**
+**Category:** EDGE_CASE (the parallel path R-004-of-the-plan exists to guard is only half-covered)
 
 **Description:**
-C-6 (and C-5) use a **homogeneous** material, so `FluxForElem_(elem_plus) == FluxForElem_(elem_minus)` and the per-side selection / per-side bi-material flux asymmetry (`side0` vs `side1`, `A_e1` vs `A_e2`) is never exercised. A genuine bimaterial fault error (or an `e1`/`e2` swap) would pass. Per-side correctness rests on faithfulness to `HEAD~1`/hrs-ref (verified by diff this round), not on a test. The C-6 header (lines 28–38) already documents this scope. Note: the underlying bimaterial flux composition was ported in Phase 9 and is out of Phase-13 scope; Phase 13 only relocated it (move verified byte-faithful).
+L8 sets `Q = 0.0` on both the serial and the parallel run (lines 234 and 279). With
+`Q = 0`, the trial traction is identically 0 on every fault QP, so the LSW slip-rate
+`V = (τ_nuc − μ_s·σ_n)/η_s` is the SAME closed-form value at every QP — interior and
+shared alike — driven purely by the per-DOF prestress in `DOFData`. The test therefore
+proves the `:3260` arm *runs* and yields correct *at-rest* physics, but it does NOT
+exercise the cross-rank Q± exchange: there is no velocity/stress jump for the shared-face
+ghost exchange to carry, so a bug in the shared-fault Q± plumbing feeding `EvaluateLSW`
+(e.g. swapped +/− sides, a missing rotation, or a stale ghost) would still pass — both
+sides see Q=0. This is exactly the failure mode the plan's R-004/risk-2 wanted covered.
 
-**Suggested fix (follow-up, non-blocking):** a true-bimaterial regression fixture (different `(λ,μ,ρ)` across the fault, with a hand-checked or hrs-ref-anchored expected flux) would close the gap. Not required for Phase-13 sign-off.
+**Trigger:** any production run is dynamic (non-zero Q across the seam); L8 never is.
 
-**Test case:** N/A (coverage note; LOW).
+**Actual behavior:** L8 passes whether or not the shared-fault Q± pairing is correct,
+because Q=0 removes the only signal that pairing affects.
 
----
+**Expected behavior:** drive a one-sided Q perturbation (a VX kick on the −y side only,
+as the sibling `test_interior_vs_shared_branch_live.cpp::SetOneSidedQ` does) so the
+shared QPs see a real jump, then assert parallel-shared `V/τ*_corr` == serial-interior to
+round-off.
 
-### [R-005] [LOW] [coverage] — substep fault-flux sites (per-QP `elem_plus_qq` at `wave_operator.inl:4266`; shared `qa.local_elem` at `:5256`) untested on the matrix path
-
-**Category:** EDGE_CASE — **STILL OPEN (accepted)**
-
-**Description:**
-C-6 exercises `Mult` (interior-fault site, :2712) and `AdvanceADER` inline-fault (:3930) on a serial mesh. The per-substep dispatch sites — `ComputeADERFaceFluxRHS` per-QP averaged branch (:4266, reached only when `substep_I_imp_*` is set) and `ComputeADERSharedFaceFluxRHS` (:5256, parallel-only) — are not exercised on a bimaterial operator by any unit test. Routing was verified correct by inspection (per-side `FluxForElem_` selection identical to the tested sites) and by faithfulness to `HEAD~1`. The C-6 header documents this.
-
-**Suggested fix (follow-up, non-blocking):** an np>1 bimaterial substep regression case.
-
-**Test case:** N/A (coverage note; LOW).
-
----
-
-### [R-006] [LOW] [bimaterial_wave_operator.{hpp,inl} / wave_operator UsePrecomputedFaceFluxes] — `UsePrecomputedFaceFluxes` is a material-dependent site NOT closed by the Phase-13 "by construction" invariant
-
-**Category:** ASSUMPTION / BUG (latent) — **NEW this round**
-
-**Description:**
-`WaveOperator::UsePrecomputedFaceFluxes(true)` passes the inherited `flux_` to `PrecomputedFaceFluxes::Init(... flux_ ...)` and `InitSharedFaces(... flux_ ...)` (`wave_operator.inl:683, :702`). It is **not** `virtual` and is **not** overridden on `BimaterialWaveOperator`. On a bimaterial object `flux_` is the `(1,1,1)` poison, so enabling precomputed face fluxes would build interior-face flux matrices from `(1,1,1)` — a silent placeholder leak of exactly the class Phase 13 claims to make "impossible by construction." It also bypasses `InteriorFaceFlux_` at runtime (the precomputed branch at `:2833`/`:3389` deposits directly), so the C-6 tripwire would NOT catch it. Precomputed face fluxes is mathematically a scalar-only (single-material) optimisation and is conceptually incompatible with the matrix path, exactly like mixed flux (which IS structurally blocked via the `SetMixedFluxMode` override, R-003).
-
-**Severity rationale (LOW, not higher):** currently **unreachable** — the spatial driver never calls `UsePrecomputedFaceFluxes`, and every test caller (`test_arm1_*`, `test_arm2_*`, `test_adjacent_triangle_*`) uses a scalar `WaveOperator`. So there is no live wrong-physics path today. It is a defense-in-depth gap that contradicts the plan's stated invariant.
-
-**Trigger:** `BimaterialWaveOperator<…> w(...); w.UsePrecomputedFaceFluxes(true);` then any `Mult`/`AdvanceADER`.
-
-**Actual behavior:** silently builds/uses precomputed interior-face flux matrices from the `(1,1,1)` poison `flux_`; the per-face bimaterial matrices are ignored on the precomputed path.
-
-**Expected behavior:** abort loudly (mirror `SetMixedFluxMode`), since the matrix path replaces the interior-face flux with the bi-material Riemann solve.
-
-**Suggested fix:** make the base method virtual and override on the subclass to abort.
-```diff
-// dynamic/wave_operator.hpp
--   void UsePrecomputedFaceFluxes(bool enable);
-+   virtual void UsePrecomputedFaceFluxes(bool enable);
-```
-```diff
-// dynamic/bimaterial_wave_operator.hpp  (public section, next to SetMixedFluxMode)
-+   void UsePrecomputedFaceFluxes(bool enable) override
-+   {
-+      MFEM_VERIFY(!enable,
-+                  "BimaterialWaveOperator::UsePrecomputedFaceFluxes: "
-+                  "precomputed face fluxes are scalar-only; ...");
-+   }
-```
-
-**Test case:**
+**Suggested fix (extend L8):** add a one-sided Q kick before each `wave.Mult`, applied to
+the element on the −y side, identical in the serial and parallel builds:
 ```cpp
-// tests/unit/test_wave_operator.cpp (next to the R-003 sibling)
-void TestR006MatrixPrecomputedFluxAborts()
-{
-   BimaterialWaveOperator wave_het(*mesh, order,
-      MaterialField::MakeConstant(lambda,mu,rho), bc);
-   // EXPECT: wave_het.UsePrecomputedFaceFluxes(true) aborts (RunAbortsInChild);
-   //         wave_het.UsePrecomputedFaceFluxes(false) does NOT abort.
+// after `Vector Q(wave.Height()); Q = 0.0;` in BOTH the serial and parallel blocks:
+const auto &fes = wave.GetFESpace();
+const int ndof = fes.GetNDofs();
+for (int e = 0; e < mesh.GetNE(); e++) {           // `mesh` = the (par)mesh in scope
+   real_t cy = 0; Array<int> ev; mesh.GetElementVertices(e, ev);
+   for (int v = 0; v < ev.Size(); v++) cy += mesh.GetVertex(ev[v])[1];
+   if (cy / ev.Size() >= 0.0) continue;            // −y side only
+   Array<int> ed; fes.GetElementDofs(e, ed);
+   for (int j = 0; j < ed.Size(); j++) Q(VX * ndof + ed[j]) += 1.0e-5;
 }
 ```
+This makes V at the fault depend on the cross-rank jump, so the existing
+`parallel == serial` assertion now actually tests the `:3260` Q± pairing.
+
+**Test case:** the extension above is the test — with the kick, flipping the +/− side
+selection in the `:3260` dispatch (or the ghost pairing) must make
+`V_parallel != V_serial`, which the assertion `|V_parallel − V_serial| ≤ 1e-9·…` catches.
 
 ---
 
-### [R-007] [LOW] [spatial_dyn_driver.cpp:1544 cp_seed/FaultFaceFlux] — matrix path builds `FaultFaceFlux(0, NaN, NaN)` (harmless, but the same NaN class R-002 was fixed for)
+### [R-002] [MODERATE] [POSSIBLE] [drivers/spatial_dyn_driver.cpp] — the end-to-end rk45+LSW driver path past mesh-load is unverified locally
 
-**Category:** QUALITY / robustness — **NEW this round**
+**Category:** ASSUMPTION (coverage gap on the integration path)
 
 **Description:**
-On the matrix path `material` is `Mode::Coefficient`, so `material.{lambda,mu,rho}_const == 0` (`heterogeneous_material.hpp:77-79`, `MakeCoefficient` leaves them at the struct default). The seed impedances at `spatial_dyn_driver.cpp:1544-1548` therefore compute `cp_seed = sqrt((0+0)/0) = NaN`, `cs_seed = NaN`, and construct `FaultFaceFlux fault_flux(0.0, NaN, NaN)`. This is the **same NaN-from-zero-const class** that R-002 fixed for the reflection/PML cp — but here it was not guarded.
+Local verification of the driver stops at the `--dry-run --verify-dispatch` banner, which
+prints BEFORE the wave-operator assembly and aborts at mesh-load (the 101 MB TPV205 mesh
+is absent and is a "full-mesh" op the project rule forbids locally). The unit tests (L1–L8)
+drive `EvaluateLSW` / `AdvanceRKCoupledLSW_Spatial` / `Mult` DIRECTLY — they never go
+through `spatial_dyn_driver`'s setup between mesh-load and the time loop. So the
+driver-integration wiring for `is_rk && is_lsw` is unexercised locally:
+  - `MakeFrictionIterator(cfg, fault_flux, /*rs=*/nullptr)` is still constructed for the
+    LSW-RK path (`:~2515`) and then unused — if that construction asserts for a
+    `time_integrator=rk45` LSW config, the run dies before the time loop, and nothing
+    local catches it;
+  - the 3-way dispatch actually selecting `AdvanceRKCoupledLSW_Spatial` (vs the RS arm)
+    is only covered by code-reading, not execution.
 
-**Why it is LOW, not a live bug:** `FaultFaceFlux`'s ctor does not assert (`fault_face_flux.cpp:36-41`), so there is no abort; and its scalar members `rho_/cp_/cs_/Zp_/Zs_` are **write-only** — set in the ctor, declared `private` with no getter, and **never read** anywhere (the physics consumes the per-DOF `DOFData.{Zp_plus,eta_p,…}` set by `InitializeFaultDOFs_Spatial`). Verified by grep: the only references to `Zp_/Zs_/cp_/cs_/rho_` are the ctor assignments and the private declarations. So the NaN dead-ends. The seed is genuinely "overwritten by InitializeFaultDOFs_Spatial" as the comment claims.
+**Trigger:** the first real `seas_spatial_dyn_driver … --time-integrator rk45 --mixed-flux
+adjacent` run (Frontera).
 
-**Trigger:** any `interior_flux="matrix"` run with a fault (e.g. TPV31).
+**Actual behavior:** unknown past mesh-load locally; relies on the Frontera sbatch.
 
-**Actual behavior:** `FaultFaceFlux` holds NaN seed impedances (never consumed).
+**Expected behavior:** at least one execution that reaches the time loop on the LSW-RK
+path before production reliance.
 
-**Expected behavior:** for cleanliness / to avoid a future trap if any code starts reading the scalar seed, derive the seed from a representative element or guard on Constant.
+**Suggested fix:** the `jobs/tpv205/tpv205_p1_rk45_mixedflux.sbatch` preflight already runs
+`--dry-run --verify-dispatch --mesh <200m>` on Frontera, which DOES exercise mesh-load +
+iterator construction + dispatch resolution. Make that the documented gate (it is), and —
+to shrink the gap — add a coarse idev smoke: mesh `tpv2053d_200m.geo` at a coarse
+characteristic length on an idev node (conda `pythonenv`) and run the same dry-run, OR add
+a 1–2-step `--tfinal 1e-4` run on that coarse mesh to confirm the time loop enters the LSW
+stepper. Document in the sbatch header that "scheme resolves locally; full driver path is
+idev/Frontera-gated per the no-local-full-mesh rule."
 
-**Suggested fix (defensive, non-blocking):** derive `lam_seed/mu_seed/rho_seed` from element 0 via `material.EvalAt(0, *T0, ip0, …)` on the non-Constant path (same pattern `BuildGodunovFluxPool_` uses); keep `material.*_const` on the Constant path (byte-identical).
+**Test case:** N/A as a unit test (the driver is not unit-testable without a mesh); the
+gate is the idev/Frontera dry-run. Acceptance: the dry-run on a real (coarse) mesh exits 0
+with the `[time-integrator] … [LSW coupled-RK on (Q, slip)]` banner line printed.
 
-**Test case:** pseudocode — `MakeCoefficient` leaves `*_const == 0`, so the naive `sqrt((0+0)/0)` is NaN; after the fix the seed is finite (`EvalAt(elem0)` → `cp_seed > 0 && isfinite`).
+---
+
+### [R-003] [LOW] [fault_face_flux.cpp:EvaluateLSW] — `s.Theta` is computed but never used
+
+**Category:** QUALITY
+
+**Description:**
+`EvaluateLSW` computes `s.Theta = sqrt(tau1_total² + tau2_total²)` (Step 2), but nothing
+downstream reads it: `SolveLSW_TPV205` recomputes `tau_abs` from `tau{1,2}_total`
+internally. It is dead arithmetic (one `sqrt` per fault QP per RK stage). It mirrors the
+same dead line in `EvaluateADER_LSW`, so this is a pre-existing pattern, not a new defect —
+but it is dead in the new code too.
+
+**Trigger:** every `EvaluateLSW` call.
+
+**Actual/Expected:** harmless; a wasted `sqrt`. Drop for clarity (or leave for parity with
+`EvaluateADER_LSW`).
+
+**Suggested fix:**
+```diff
+-   s.Theta         = std::sqrt(s.tau1_total * s.tau1_total
+-                              + s.tau2_total * s.tau2_total);
++   // (No s.Theta needed: SolveLSW_TPV205 recomputes |tau_total| internally.)
+```
+(No test — dead-code removal, behaviour-neutral.)
+
+---
+
+### [R-004] [LOW] [fault_face_flux.cpp:EvaluateLSW] — no `SEAS_DIAG_FAULT_FLUX` diagnostic block on the LSW Mult path
+
+**Category:** QUALITY
+
+**Description:**
+The rate-and-state `Evaluate` carries a `#ifdef SEAS_DIAG_FAULT_FLUX` hypocenter-QP trace
+(the C-1/C-1n checkpoints). `EvaluateLSW` (like `EvaluateADER_LSW`) has none, so a
+`SEAS_DIAG_FAULT_FLUX` build debugging an LSW-RK rupture gets zero fault-flux diagnostics
+on the Mult path — the C-1 bisection tooling is silently unavailable for LSW. Consistent
+with `EvaluateADER_LSW` (which also omits it), so not a regression; flagged so the gap is
+on record if an LSW-RK rupture ever needs the C-1 trace.
+
+**Trigger:** a `SEAS_DIAG_FAULT_FLUX` build running LSW + RK.
+
+**Actual/Expected:** no diag output vs the RS path's per-QP trace. Optional: add a guarded
+diag block mirroring `Evaluate`'s if/when LSW-RK needs bisection debugging.
+
+**Suggested fix:** defer unless needed; if added, mirror `Evaluate`'s
+`#ifdef SEAS_DIAG_FAULT_FLUX … if (data.diag_print) { … }` block after `ComputeTrialTraction`.
+(No test — diagnostics only.)
+
+---
+
+### [R-005] [LOW] [test_lsw_rk_mixed_flux.cpp:L6 / DoLSWRK4Reference] — the L6 reference re-implements the stepper, so a shared conceptual error would pass
+
+**Category:** QUALITY (test robustness)
+
+**Description:**
+L6's `DoLSWRK4Reference` reproduces the same coupled-(Q,slip) RK4 logic as
+`AdvanceRKCoupledLSW_Spatial` (stage-local slip staging + absolute combine). If BOTH shared
+the same conceptual error (e.g. both staged slip from the wrong stage subset), the
+`stepper == reference` assertion would pass falsely. The test mitigates this with (a) the
+discrimination assertion (`slip_abs != slip_bug`, which a `+=` regression fails) and (b) L1
+anchoring the per-QP physics — so the residual risk is low, but the "matches reference"
+check alone is not an independent oracle.
+
+**Trigger:** a refactor that changes the staging convention in both stepper and reference.
+
+**Actual/Expected:** the reference is faithful-by-construction, not independent. Acceptable
+given the discrimination + L1 anchor, but worth noting.
+
+**Suggested fix:** strengthen the independent anchor — assert L6's per-QP `V1/V2` after the
+final stage matches the analytic LSW closed form `(|τ_total| − μ(δ)·σ_n)/η_s` at the
+post-step `(Q_new, slip_new)` for at least one sliding QP (an oracle that does NOT depend
+on the stepper's internal structure). (No code-under-test change; test-only hardening.)
 
 ---
 
 ## Summary
-- Critical issues: **0**
-- Moderate issues: **0 open** (R-001, R-002 verified FIXED this round; R-003 reconciled in the plan)
-- Low issues: **4** — R-004 (homogeneous-only fault coverage, accepted), R-005 (substep matrix sites untested, accepted), R-006 (NEW: `UsePrecomputedFaceFluxes` defense-in-depth gap, unreachable today), R-007 (NEW: matrix-path `FaultFaceFlux(0,NaN,NaN)` seed, harmless/dead members)
-- Plan compliance: **FULL** — every Phase-13 requirement is implemented and faithful: scalar/matrix class split, four virtual hooks with verbatim scalar defaults, 8 R-001 fault sites routed per-element, `(1,1,1)` poison contained, mixed-flux structurally blocked on the matrix path, driver dispatch, C-6 added + repointed C-5/test_wave_operator, Makefile wired (build + `make test`). The "moved verbatim" claim was mechanically verified (diff vs `HEAD~1`). Scalar byte-exactness is construction-guaranteed but NOT full-mesh-run-verified locally (forbidden per CLAUDE.md) — confirm on Frontera against a pre-Phase-13 checkpoint before production sign-off.
-- Verdict: **PASS** — the core split is correct, faithful, and fully green on the local acceptance suite (C-5 19/19 + 52/52 np=4, C-6 9/9, test_wave_operator 20/20, godunov_flux_bimaterial 21/21). The two prior MODERATE findings are fixed. R-006 and R-007 are optional LOW defensive hardening (neither is a live wrong-physics path today); R-004/R-005 are accepted coverage gaps for a future true-bimaterial / np>1 substep regression test.
+- Critical issues: 0
+- Moderate issues: 2 (R-001 shared-fault-at-rest-only; R-002 driver-path-unverified-locally)
+- Low issues: 3 (R-003 dead Theta; R-004 no LSW diag block; R-005 L6 reference not independent)
+- Plan compliance: **FULL** — all 5 phases implemented as specified; the plan's own
+  review-fixes (`=` combine, symmetric guard, L1/L6/L8 tests) are present and pass.
+- Verdict: **PASS WITH FIXES** — the implementation is correct and well-tested (L1–L8 +
+  byte-exact guards green; the 5 `make test` failures are pre-existing, in files the diff
+  touches 0 lines of). Apply R-001 (give L8 a real cross-rank jump) and R-002 (an
+  idev/Frontera driver smoke past mesh-load) to close the two production-path coverage gaps
+  before relying on the feature in production; R-003/R-004/R-005 are fix-when-convenient.
 
 ## Unreviewed Areas
-- **Scalar TPV205/102/104 + BP5 byte-identical station/benchmark traces** — requires full-mesh runs (forbidden locally per CLAUDE.md / memory). Byte-exactness is construction-guaranteed (FluxForElem_==flux_, GetReferenceStarMatrix==Ax_, verbatim hook bodies) but not run-verified; confirm on Frontera before production sign-off.
-- **True heterogeneous (non-homogeneous-Coefficient) matrix correctness** (TPV31 / depth profile) — the bimaterial flux composition is Phase-9 physics (moved-not-changed by Phase 13; move verified byte-faithful); its end-to-end correctness is a Phase-10 deliverable, out of Phase-13 scope.
-- **np>1 matrix path** — `ExchangeBiMaterialNeighbours_` is a local-side stub (moved-not-fixed per the plan; warns for laterally-heterogeneous Coefficient + shared faces). Lateral-heterogeneous parallel runs are explicitly deferred; TPV31 is depth-only/seam-continuous so the stub is correct there.
-
----
-
-## Round-2 fix status (applied by /code-fix, 2026-05-29)
-- **R-006 — FIXED** in this worktree: `WaveOperator::UsePrecomputedFaceFluxes` made `virtual` (`wave_operator.hpp`); `BimaterialWaveOperator` overrides it to `MFEM_VERIFY(!enable, …)` (`bimaterial_wave_operator.hpp`); new `TestR006MatrixPrecomputedFluxAborts` in `test_wave_operator.cpp` (matrix enable aborts; matrix disable is a no-op; scalar control omitted because the base precomputed-flux path is tet-only and the test mesh is hex). `seas_test_wave_operator` 23/23.
-- **R-007 — FIXED** in this worktree: matrix-path seed now derived from element 0 via `material.EvalAt` (finite); scalar path keeps `*_const` byte-identically (`spatial_dyn_driver.cpp`). Driver object recompiles clean.
-- **R-001/R-002/R-003** — already resolved/reconciled in the reviewed commit (no action).
-- **R-004/R-005** — accepted coverage gaps; already documented in the C-6 test header (no code change).
-- Regression after fixes: C-6 9/9, C-5 19/19 (np=1) + 52/52 (np=4), test_wave_operator 23/23, all green.
+- **CFL stability of RK45 + central flux at p1 on the real TPV205 mesh** — empirical,
+  Frontera-only (the sbatch reads the stable dt off the dev smoke); cannot be assessed
+  statically.
+- **SCEC TPV205 physics correctness end-to-end** — post-merge Frontera benchmark vs the
+  overlays; out of scope for a static code review.
+- **`LSW_ForcedRupture` Mult abort** — reviewed (defensive, unreachable from the current
+  driver since `is_lsw → LSW`); correct as a fail-loud guard.

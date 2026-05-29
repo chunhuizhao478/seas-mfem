@@ -225,6 +225,11 @@ RK_TIME_STEPPER_SRC                  = dynamic/rk_time_stepper.cpp
 RK_TIME_STEPPER_OBJ                  = $(RK_TIME_STEPPER_SRC:.cpp=.o)
 TEST_RK_TIME_STEPPER_SRC             = tests/unit/test_rk_time_stepper.cpp
 TEST_RK_TIME_STEPPER_OBJ             = $(TEST_RK_TIME_STEPPER_SRC:.cpp=.o)
+# Phase 14 (RK + LSW + mixed flux): instantaneous EvaluateLSW + LSW coupled-RK.
+TEST_LSW_RK_MIXED_FLUX_SRC           = tests/unit/test_lsw_rk_mixed_flux.cpp
+TEST_LSW_RK_MIXED_FLUX_OBJ           = $(TEST_LSW_RK_MIXED_FLUX_SRC:.cpp=.o)
+TEST_LSW_RK_SHARED_FAULT_MPI_SRC     = tests/unit/test_lsw_rk_shared_fault_mpi.cpp
+TEST_LSW_RK_SHARED_FAULT_MPI_OBJ     = $(TEST_LSW_RK_SHARED_FAULT_MPI_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
 TEST_WAVE_OPERATOR_SRC = tests/unit/test_wave_operator.cpp
 PML_LAYER_SRC = dynamic/pml_layer.cpp
@@ -855,6 +860,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_spatial_nucleation \
                seas_test_nucleation_factory \
                seas_test_rk_time_stepper \
+               seas_test_lsw_rk_mixed_flux \
                seas_test_tpv102_nuc_callback_parity \
                seas_test_seed_equilibrium_psi_rs \
                seas_test_friction_iterator_factory \
@@ -2194,6 +2200,87 @@ seas_test_rk_time_stepper: $(TEST_RK_TIME_STEPPER_OBJ) \
 
 test-rk-time-stepper: seas_test_rk_time_stepper
 	./seas_test_rk_time_stepper
+
+# Phase 14 (RK + LSW + mixed flux): EvaluateLSW + AdvanceRKCoupledLSW_Spatial
+# unit tests (L1–L7).  Same object set as seas_test_rk_time_stepper (the test
+# instantiates AdvanceRKCoupledLSW_Spatial<Mesh> + drives WaveOperator::Mult on
+# a fault mesh).  $(TOML_FLAGS) keeps the DOFData/ABI consistent with the rest.
+$(TEST_LSW_RK_MIXED_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                    $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_lsw_rk_mixed_flux: $(TEST_LSW_RK_MIXED_FLUX_OBJ) \
+                             $(RK_TIME_STEPPER_OBJ) \
+                             $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                             $(GODUNOV_FLUX_OBJ) \
+                             $(GODUNOV_FLUX_POOL_OBJ) \
+                             $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                             $(PML_LAYER_OBJ) \
+                             $(HETEROGENEOUS_MATERIAL_OBJ) \
+                             $(FAULT_FACE_FLUX_OBJ) \
+                             $(FRICTION_SOLVER_OBJ) \
+                             $(SPATIAL_NUCLEATION_OBJ) \
+                             $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_LSW_RK_MIXED_FLUX_OBJ) \
+	    $(RK_TIME_STEPPER_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-lsw-rk-mixed-flux: seas_test_lsw_rk_mixed_flux
+	./seas_test_lsw_rk_mixed_flux
+
+# Phase 14 (RK + LSW): MPI shared-fault dispatch parity (L8) — the ONLY coverage
+# of the parallel shared-fault Mult dispatch (wave_operator.inl shared-fault
+# EvaluateLSW arm).  Run with: mpirun -np 2 ./seas_test_lsw_rk_shared_fault_mpi.
+$(TEST_LSW_RK_SHARED_FAULT_MPI_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_lsw_rk_shared_fault_mpi: $(TEST_LSW_RK_SHARED_FAULT_MPI_OBJ) \
+                             $(RK_TIME_STEPPER_OBJ) \
+                             $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                             $(GODUNOV_FLUX_OBJ) \
+                             $(GODUNOV_FLUX_POOL_OBJ) \
+                             $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                             $(PML_LAYER_OBJ) \
+                             $(HETEROGENEOUS_MATERIAL_OBJ) \
+                             $(FAULT_FACE_FLUX_OBJ) \
+                             $(FRICTION_SOLVER_OBJ) \
+                             $(SPATIAL_NUCLEATION_OBJ) \
+                             $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_LSW_RK_SHARED_FAULT_MPI_OBJ) \
+	    $(RK_TIME_STEPPER_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-lsw-rk-shared-fault-mpi: seas_test_lsw_rk_shared_fault_mpi
+	mpirun -np 2 ./seas_test_lsw_rk_shared_fault_mpi
 
 # Phase N: spatial_nucleation object compile rule.
 $(SPATIAL_NUCLEATION_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \

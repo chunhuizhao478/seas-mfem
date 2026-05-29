@@ -195,6 +195,17 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
                "AdvanceRKCoupled_Spatial: dt_step must be > 0, got " << dt_step);
    ValidateTableau(tab);
 
+   // Symmetric friction-law guard (Phase 14 RK+LSW, plan §Phase 3 req 4): this
+   // stepper integrates ψ via the rate-and-state PsiRate, and the Mult-path
+   // fault dispatch keys on wave.GetFaultFrictionLaw().  If the operator is
+   // LSW-flagged, Mult would run EvaluateLSW (slip-stateless) while this loop
+   // integrates a ψ the fault solve ignores — silent wrong physics.  Fail loud.
+   // Additive MFEM_VERIFY (no arithmetic) ⇒ byte-exact RS-RK behaviour preserved.
+   MFEM_VERIFY(wave.GetFaultFrictionLaw() == FaultFrictionLaw::RateAndState,
+               "AdvanceRKCoupled_Spatial integrates psi, but the WaveOperator's "
+               "fault_friction_law_ is not RateAndState; Mult would run the wrong "
+               "fault kernel.  Use AdvanceRKCoupledLSW_Spatial for slip_weakening.");
+
    const int s      = tab.stages;
    const int height = Q.Size();
    const int n      = static_cast<int>(dof_data.size());
@@ -296,6 +307,194 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
    // is FSAL ⇒ its final stage already evaluated here ⇒ skipped.  ψ/slip
    // accumulators above are untouched (Evaluate is ψ-stateless and never writes
    // slip1/slip2); dof_data[m].psi already holds psi_new.
+   bool last_stage_is_endpoint = true;
+   for (int j = 0; j < s; ++j)
+   {
+      if (tab.a[s - 1][j] != tab.b[j]) { last_stage_is_endpoint = false; break; }
+   }
+   if (n > 0 && !last_stage_is_endpoint)
+   {
+      if (nuc) { nuc->ApplyAbsolute(dof_data, t_step_start + dt_step); }
+      Vector k_endpoint(height);
+      wave.Mult(Q_new, k_endpoint);
+      for (int m = 0; m < n; ++m)
+      {
+         if (dof_data[m].slip_rate > dof_data[m].slip_rate_substep_max)
+         {
+            dof_data[m].slip_rate_substep_max = dof_data[m].slip_rate;
+         }
+      }
+   }
+}
+
+// =====================================================================
+// Coupled RK macro-step for LINEAR SLIP-WEAKENING (plan §Phase 3)
+// =====================================================================
+
+/// @brief Advance (Q, slip) by ONE macro-step `dt_step` with the Butcher
+/// tableau `tab`, coupling the bulk wave field and the LSW fault slip through
+/// the SAME weights.  This is the LSW sibling of `AdvanceRKCoupled_Spatial`.
+///
+/// LSW has NO ψ state variable; the stepped fault state is the accumulated slip
+/// δ (the friction coefficient μ(δ) depends on it).  Slip is therefore BOTH the
+/// stage input AND the integrated output, so the stage-local slip is written
+/// into `dof_data` BEFORE each `wave.Mult` — the LSW analogue of
+/// `AdvanceRKCoupled_Spatial`'s stage-local ψ write.  `Mult`'s instantaneous,
+/// slip-stateless `EvaluateLSW` reads that staged δ.
+///
+/// For each stage i:
+///   Q^(i)              = Q + dt·Σ_{j<i} a_ij k_j
+///   dof_data[m].slip{1,2} = slip{1,2}_n[m] + dt·Σ_{j<i} a_ij V{1,2}_k[j][m]
+///                                                       (stage-local, before Mult)
+///   nuc->ApplyAbsolute(dof_data, t_step_start + c_i·dt)        (no-op for TPV205)
+///   wave.Mult(Q^(i), k_i)   — runs the slip-stateless EvaluateLSW at slip^(i),
+///                             writing dof_data[m].{slip_rate,V1,V2}
+///   capture V{1,2}_k[i][m] = dof_data[m].V{1,2}
+/// Final combine (b row):
+///   Q_new                 = Q + dt·Σ_i b_i k_i
+///   dof_data[m].slip{1,2} = slip{1,2}_n[m] + dt·Σ_i b_i V{1,2}_k[i][m]
+///
+/// COMBINE OVERWRITES, DOES NOT ACCUMULATE: because the stage loop overwrites
+/// dof_data[m].slip{1,2} every stage, at combine time those fields hold the LAST
+/// stage's staged slip — NOT slip*_n.  The combine therefore writes the ABSOLUTE
+/// value from the step-start snapshot `slip*_n` (NOT `+=`, unlike the RS sibling
+/// at the analogous site, where slip is unstaged so `+=` is correct).
+///
+/// `dof_data[m].slip_rate_substep_max` is the RK-stage max-|V| reduction (the
+/// driver resets it to 0 before the step).  `nuc` may be nullptr.  Requires
+/// `wave.GetFaultFrictionLaw() == FaultFrictionLaw::LSW`.
+///
+/// Templated on `MeshType` so it serves both the serial-`Mesh` unit tests and
+/// the production `ParMesh` driver.  Writes `Q_new` + `dof_data`; returns void.
+template <typename MeshType>
+void AdvanceRKCoupledLSW_Spatial(WaveOperator<MeshType>& wave,
+                                 std::vector<DOFData>&   dof_data,
+                                 const Vector&           Q,
+                                 real_t                  dt_step,
+                                 real_t                  t_step_start,
+                                 Vector&                 Q_new,
+                                 const RKTableau&        tab,
+                                 INucleationMethod*      nuc)
+{
+   MFEM_VERIFY(dt_step > 0.0,
+               "AdvanceRKCoupledLSW_Spatial: dt_step must be > 0, got "
+               << dt_step);
+   ValidateTableau(tab);
+
+   // Symmetric friction-law guard (plan §Phase 3 req 4): this stepper integrates
+   // slip and relies on Mult dispatching to the slip-stateless EvaluateLSW.  If
+   // the operator is RateAndState-flagged, Mult would run the RS `Evaluate` on
+   // LSW DOFData (reads data.psi/data.b defaults → NaN) while this loop stages
+   // slip the RS solve ignores — silent wrong physics.  Fail loud.
+   MFEM_VERIFY(wave.GetFaultFrictionLaw() == FaultFrictionLaw::LSW,
+               "AdvanceRKCoupledLSW_Spatial integrates slip and dispatches to "
+               "EvaluateLSW, but the WaveOperator's fault_friction_law_ is not "
+               "LSW.  Use AdvanceRKCoupled_Spatial for rate_state.");
+
+   const int s      = tab.stages;
+   const int height = Q.Size();
+   const int n      = static_cast<int>(dof_data.size());
+
+   Q_new.SetSize(height);
+
+   // Stage-height bulk RHS samples k_0..k_{s-1} and the working stage state.
+   std::vector<Vector> k(s);
+   for (int i = 0; i < s; ++i) { k[i].SetSize(height); }
+   Vector Q_stage(height);
+
+   // Per-DOF slip snapshot at step start + per-stage (V1, V2) samples.  NO ψ.
+   std::vector<real_t>              slip1_n(n), slip2_n(n);
+   std::vector<std::vector<real_t>> V1_k(s, std::vector<real_t>(n, 0.0));
+   std::vector<std::vector<real_t>> V2_k(s, std::vector<real_t>(n, 0.0));
+   for (int m = 0; m < n; ++m)
+   {
+      slip1_n[m] = dof_data[m].slip1;
+      slip2_n[m] = dof_data[m].slip2;
+   }
+
+   for (int i = 0; i < s; ++i)
+   {
+      // Q^(i) = Q + dt·Σ_{j<i} a_ij k_j.
+      Q_stage = Q;
+      for (int j = 0; j < i; ++j)
+      {
+         const real_t aij = tab.a[i][j];
+         if (aij != 0.0) { Q_stage.Add(dt_step * aij, k[j]); }
+      }
+
+      // Stage-local slip = slip_n + dt·Σ_{j<i} a_ij V_k[j]; written BEFORE Mult
+      // so the slip-stateless EvaluateLSW sees the staged δ (μ(δ) is evaluated
+      // at the stage slip).  This is the LSW analogue of the RS stepper's
+      // stage-local ψ write.
+      for (int m = 0; m < n; ++m)
+      {
+         real_t slip1_stage = slip1_n[m];
+         real_t slip2_stage = slip2_n[m];
+         for (int j = 0; j < i; ++j)
+         {
+            const real_t aij = tab.a[i][j];
+            slip1_stage += dt_step * aij * V1_k[j][m];
+            slip2_stage += dt_step * aij * V2_k[j][m];
+         }
+         dof_data[m].slip1 = slip1_stage;
+         dof_data[m].slip2 = slip2_stage;
+      }
+
+      // §14.3: absolute nucleation forcing at this stage's time (no-op for
+      // TPV205, which has no [nucleation] block).
+      if (nuc) { nuc->ApplyAbsolute(dof_data, t_step_start + tab.c[i] * dt_step); }
+
+      wave.Mult(Q_stage, k[i]);
+
+      // Capture per-stage fault slip-rate samples.
+      for (int m = 0; m < n; ++m)
+      {
+         V1_k[i][m] = dof_data[m].V1;
+         V2_k[i][m] = dof_data[m].V2;
+         // RK-stage max-|V| reduction (driver reset this to 0 pre-step).
+         if (dof_data[m].slip_rate > dof_data[m].slip_rate_substep_max)
+         {
+            dof_data[m].slip_rate_substep_max = dof_data[m].slip_rate;
+         }
+      }
+   }
+
+   // Final combine with the primary (b) row.
+   Q_new = Q;
+   for (int i = 0; i < s; ++i)
+   {
+      const real_t bi = tab.b[i];
+      if (bi != 0.0) { Q_new.Add(dt_step * bi, k[i]); }
+   }
+
+   // Slip combine: ABSOLUTE from the step-start snapshot (NOT `+=`).  The stage
+   // loop overwrote dof_data[m].slip{1,2}, so they no longer hold slip*_n; a
+   // `+=` here would double-count the last stage's partial staged sum.
+   for (int m = 0; m < n; ++m)
+   {
+      real_t slip1_new = slip1_n[m];
+      real_t slip2_new = slip2_n[m];
+      for (int i = 0; i < s; ++i)
+      {
+         const real_t bi = tab.b[i];
+         slip1_new += dt_step * bi * V1_k[i][m];
+         slip2_new += dt_step * bi * V2_k[i][m];
+      }
+      dof_data[m].slip1 = slip1_new;
+      dof_data[m].slip2 = slip2_new;
+   }
+
+   // Endpoint re-evaluation of the instantaneous fault observables (mirrors the
+   // RS sibling).  Only an FSAL tableau (final a-row == b row) evaluates its
+   // last stage AT the step endpoint; for a non-FSAL tableau (classical RK4) the
+   // final stage is the predictor Q + dt·k_{s-2}, NOT Q_new, so dof_data[m].
+   // {slip_rate,V1,V2,tau*_corr,sigma_n_corr} would be phase-lagged from
+   // Q(t+dt).  Re-run the slip-stateless EvaluateLSW once at the true endpoint
+   // (Q_new, slip_new, nuc(t+dt)) so the driver's V_max diagnostic + ParaView
+   // read self-consistent end-of-step values.  The slip combine above already
+   // set dof_data[m].slip{1,2} = slip*_new, so EvaluateLSW sees δ at t+dt; being
+   // slip-stateless it does not disturb the integrated slip.  DP45 is FSAL ⇒ its
+   // final stage already evaluated at the endpoint ⇒ skipped.
    bool last_stage_is_endpoint = true;
    for (int j = 0; j < s; ++j)
    {

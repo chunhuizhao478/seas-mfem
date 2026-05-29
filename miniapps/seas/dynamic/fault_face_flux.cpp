@@ -863,6 +863,129 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
 }
 
 // ---------------------------------------------------------------------------
+// Instantaneous LSW Riemann solve — the dt->0 limit of EvaluateADER_LSW (no
+// I/dt wrap; operates directly on the bulk states Q_plus / Q_minus).  This is
+// the LSW analogue of the rate-and-state instantaneous `Evaluate`, used by the
+// coupled-RK (Mult-path) time integrator: each RK stage solves the friction
+// Riemann problem at the instantaneous stage state.  SLIP-STATELESS: reads
+// data.slip1/slip2 to form delta for mu(delta), never writes them — the RK
+// stepper integrates slip with the Butcher weights.  Reads ONLY the LSW-native
+// fields data.lsw_mu_s / lsw_mu_d / lsw_d_c; data.a / psi / Dc are not consumed.
+// ---------------------------------------------------------------------------
+void FaultFaceFlux::EvaluateLSW(DOFData &data,
+                                const real_t *Q_plus,
+                                const real_t *Q_minus,
+                                real_t *Q_imp_plus,
+                                real_t *Q_imp_minus) const
+{
+   // R-001 (this plan): slip must be pristine for the coupled-RK-on-slip
+   // integrator to be correct — the stepper writes the stage-local slip BEFORE
+   // this call and relies on it being UNCHANGED on return (it integrates slip
+   // itself with the RK weights).  Mirrors Evaluate's psi-invariance guard.
+#ifndef NDEBUG
+   const real_t slip1_at_entry = data.slip1;
+   const real_t slip2_at_entry = data.slip2;
+#endif
+
+   // Misuse guard: every TPV205 QP populates at least one LSW field strictly
+   // > 0 (mu_s_barrier >= 10000 outside rupture area, mu_s = 0.677 inside;
+   // mu_d = 0.525; d_c = 0.4).  All-zero fields means the caller routed a
+   // non-LSW DOFData here — abort loudly rather than silently computing
+   // strength = 0 => unconstrained sliding.  Identical to EvaluateADER_LSW.
+   MFEM_VERIFY(data.lsw_mu_s > 0.0 || data.lsw_mu_d > 0.0
+               || data.lsw_d_c > 0.0,
+               "FaultFaceFlux::EvaluateLSW: all LSW-native fields are zero "
+               "(lsw_mu_s=" << data.lsw_mu_s
+               << " lsw_mu_d=" << data.lsw_mu_d
+               << " lsw_d_c=" << data.lsw_d_c
+               << ").  This DOFData was not initialized by "
+               "InitializeFaultDOFs_TPV205; the wave operator dispatched the "
+               "LSW path on rate-and-state data.");
+
+   // Homogeneous-material check (mirrors Evaluate / EvaluateADER_LSW).
+   // v9.0.0 Pelties-9 per-side flux assumes A_plus == A_minus.
+   auto homog_ok = [](real_t a, real_t b)
+   {
+      return std::abs(a - b) <=
+             static_cast<real_t>(1e-12) * std::max(std::abs(a), std::abs(b));
+   };
+   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
+               homog_ok(data.Zs_plus, data.Zs_minus),
+               "FaultFaceFlux::EvaluateLSW: bimaterial fault face "
+               "(Zp_plus=" << data.Zp_plus << " Zp_minus=" << data.Zp_minus
+               << " Zs_plus=" << data.Zs_plus << " Zs_minus=" << data.Zs_minus
+               << ").  Extend per-side handling before running this "
+               "configuration.");
+
+   // Step 1: trial traction (pure helper) — directly from the bulk Q (no
+   // Q-bar = I/dt averaging, unlike EvaluateADER_LSW).
+   EvalStageState s;
+   ComputeTrialTraction(data, Q_plus, Q_minus,
+                        s.sigma_n_trial, s.tau1_trial, s.tau2_trial);
+
+   // Step 2: total traction.  TPV205 has zero nucleation channels
+   // (sigma_n_nuc / tau*_nuc kept at init defaults of 0); pre-stress
+   // (sigma_n0 / tau*_0) lives in DOFData.
+   s.sigma_n_total = data.sigma_n0 + data.sigma_n_nuc + s.sigma_n_trial;
+   s.tau1_total    = data.tau1_0   + data.tau1_nuc    + s.tau1_trial;
+   s.tau2_total    = data.tau2_0   + data.tau2_nuc    + s.tau2_trial;
+   // (No s.Theta needed here: SolveLSW_TPV205 recomputes |tau_total| internally;
+   // R-003.)
+
+   // Step 3: mu_eff(delta) at the slip magnitude carried in DOFData.  Reads
+   // ONLY the LSW-native fields; the strength-barrier short-circuit (R-002)
+   // lives inside the helper.
+   const real_t delta = std::sqrt(data.slip1 * data.slip1
+                                  + data.slip2 * data.slip2);
+   const real_t mu_eff = LSWFrictionCoefficient_TPV205(delta,
+                                                       data.lsw_mu_s,
+                                                       data.lsw_mu_d,
+                                                       data.lsw_d_c);
+
+   // Step 4: closed-form LSW solve.  Sets s.V_abs, s.V{1,2}, s.tau{1,2}_corr.
+   // R-003 barrier short-circuit (V = 0 in the barrier zone regardless of
+   // sigma_n sign) lives inside the helper.  Trailing arg = sigma_n strength
+   // floor (sliver-blowup plan 2026-05-26); disabled (sentinel < 0) maps to
+   // 0.0 => byte-exact max(sigma_n,0).
+   SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
+                   s.tau1_total, s.tau2_total,
+                   s.sigma_n_total, data.eta_s,
+                   mu_eff,
+                   s.V_abs, s.V1, s.V2,
+                   s.tau1_corr, s.tau2_corr,
+                   SigmaNStrengthFloorForLSW(),
+                   data.lsw_cohesion);   // Phase 10 (TPV31) additive C0 (0 => byte-exact)
+
+   // sigma_n is unaffected by friction — TRIAL-scale value matches the
+   // rate-and-state path's CompleteFromVabs convention.
+   s.sigma_n_corr = s.sigma_n_trial;
+
+   // No slip update (R-001 invariant): slip evolution is owned by the coupled
+   // RK stepper.  This kernel only computes V / tau_corr / sigma_n_corr and the
+   // imposed Q-state at the instantaneous stage state.
+
+   // Step 5: imposed Q-state (Eq. 11-12), written DIRECTLY into the outputs
+   // (no I_imp = dt * Q_imp rescale, unlike EvaluateADER_LSW).
+   BuildImposedState(data, s, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus);
+
+   // Step 6: write back V / slip_rate / tau*_corr / sigma_n_corr to DOFData
+   // (TOTAL physical traction — pre + nuc + trial-scale corrected).
+   WriteBackState(data, s);
+
+#ifndef NDEBUG
+   // R-001: slip must be pristine for the coupled-RK-on-slip integrator.
+   // Bit-exact equality is the right check — no arithmetic on slip happens
+   // between entry and exit (the helpers only READ slip1/slip2 for delta).
+   MFEM_ASSERT(data.slip1 == slip1_at_entry && data.slip2 == slip2_at_entry,
+               "FaultFaceFlux::EvaluateLSW mutated data.slip{1,2} "
+               "(slip1 before = " << slip1_at_entry << ", after = " << data.slip1
+               << "; slip2 before = " << slip2_at_entry << ", after = "
+               << data.slip2 << ").  The coupled-RK-on-slip integrator assumes "
+               "this kernel is slip-stateless.");
+#endif
+}
+
+// ---------------------------------------------------------------------------
 // Phase H.6 of spatial_dynamic_rupture_plan.md (rev-3): LSW Riemann solve
 // with the TPV26/27 time-dependent forced-rupture friction coefficient.
 //

@@ -761,23 +761,22 @@ int main(int argc, char *argv[])
    // iterator via MakeFrictionIterator).
 
    // Phase 14: the explicit-RK time integrator is an additive, CLI-gated
-   // alternative to ADER (default).  Its preconditions (plan §14.1/§14.4):
-   //   (a) rate_state only — the Mult-path instantaneous fault solve is the RS
-   //       Evaluate; there is NO instantaneous LSW solve on the Mult path
-   //       (only EvaluateADER_LSW exists, for the ADER path), so rk* + LSW
-   //       must abort with a clear message rather than silently mis-step;
+   // alternative to ADER (default).  Its preconditions:
+   //   (a) friction law — BOTH rate_state and slip_weakening (LSW) are now
+   //       supported on the RK/Mult path.  RS uses the instantaneous `Evaluate`
+   //       + the coupled-RK-on-(Q,ψ,slip) stepper `AdvanceRKCoupled_Spatial`;
+   //       LSW uses the instantaneous `EvaluateLSW` (the dt→0 limit of
+   //       EvaluateADER_LSW) + the coupled-RK-on-(Q,slip) stepper
+   //       `AdvanceRKCoupledLSW_Spatial`.  The ONLY LSW sub-case still rejected
+   //       is forced rupture (TPV26/27): is_lsw maps to FaultFrictionLaw::LSW
+   //       (never LSW_ForcedRupture) at the SetFaultFrictionLaw call below, and
+   //       the Mult-path dispatch aborts on LSW_ForcedRupture, so there is no
+   //       reachable forced-rupture RK path here today;
    //   (b) scalar interior flux only — mixed/central flux (the reason for RK)
    //       is a scalar-path feature and is already mutually exclusive with the
-   //       matrix/bimaterial path.  rk* + matrix aborts.
+   //       matrix/bimaterial path.  rk* + matrix aborts (guard kept below).
    const bool is_rk =
       (cfg.numerics.time_integrator != spatial::TimeIntegratorKind::ADER);
-   MFEM_VERIFY(!is_rk || !is_lsw,
-               "spatial_dyn_driver: --time-integrator rk4|rk45 requires "
-               "[meta].law=\"rate_state\".  The explicit-RK Mult path runs the "
-               "rate-and-state fault Riemann solve (Evaluate); there is no "
-               "instantaneous LSW solve on the Mult path (LSW-on-RK is a "
-               "documented follow-up that needs a new instantaneous "
-               "EvaluateLSW).  Use --time-integrator ader for slip_weakening.");
    MFEM_VERIFY(!is_rk
                || cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar,
                "spatial_dyn_driver: --time-integrator rk4|rk45 requires "
@@ -2566,14 +2565,21 @@ int main(int argc, char *argv[])
    }
 
    // Phase 14: select the RK Butcher tableau ONCE (only consumed on the RK
-   // branch of the time loop).  ADER ignores it.  The RS config block is
-   // required for the RK ψ coupling (PsiRate); guard it for the RK path.
+   // branch of the time loop).  ADER ignores it.  Both laws use the SAME
+   // tableaus; only the rate_state RK path reads the [friction.rate_state]
+   // block (for the PsiRate ψ coupling), so that requirement is gated under
+   // !is_lsw — the LSW RK path (AdvanceRKCoupledLSW_Spatial) integrates slip,
+   // not ψ, and needs no rate_state block.
    RKTableau rk_tab;
    if (is_rk)
    {
-      MFEM_VERIFY(cfg.rate_state.has_value(),
-                  "spatial_dyn_driver: --time-integrator rk4|rk45 requires a "
-                  "[friction.rate_state] block (the RK ψ coupling reads it).");
+      if (!is_lsw)
+      {
+         MFEM_VERIFY(cfg.rate_state.has_value(),
+                     "spatial_dyn_driver: --time-integrator rk4|rk45 with "
+                     "[meta].law=\"rate_state\" requires a [friction.rate_state] "
+                     "block (the RK ψ coupling reads it).");
+      }
       rk_tab = (cfg.numerics.time_integrator
                 == spatial::TimeIntegratorKind::RK45)
                ? MakeDormandPrinceRK45Tableau()
@@ -2582,7 +2588,10 @@ int main(int argc, char *argv[])
       if (rank == 0)
       {
          std::cout << "[time-integrator] RK tableau = " << rk_tab.name
-                   << " (" << rk_tab.stages << " stages)\n";
+                   << " (" << rk_tab.stages << " stages)"
+                   << (is_lsw ? "  [LSW coupled-RK on (Q, slip)]"
+                              : "  [rate-state coupled-RK on (Q, ψ, slip)]")
+                   << "\n";
       }
    }
 
@@ -2751,13 +2760,25 @@ int main(int argc, char *argv[])
 
       // Phase 14: ONLY change to the stepping control is this branch; the
       // Q.Swap(Q_new) and t += dt_step below are shared with the ADER branch.
-      if (is_rk)
+      if (is_rk && is_lsw)
       {
-         // RK4 / RK45 coupled stepper: drives wave.Mult directly, couples
-         // (Q, ψ, slip) with the tableau weights, and applies §14.3 absolute
-         // nucleation at each stage time (nuc_cb / the substep iterator are
-         // NOT used).  RS-only + scalar-flux (guarded at setup).  The per-stage
-         // max-|V| is reduced into slip_rate_substep_max (§14.5).
+         // LSW coupled-RK stepper: drives wave.Mult directly, couples (Q, slip)
+         // with the tableau weights (no ψ — LSW's μ(δ) depends on accumulated
+         // slip, which is staged before each Mult), and applies absolute
+         // nucleation at each stage time (no-op for TPV205).  Scalar-flux
+         // (guarded at setup).  The per-stage max-|V| is reduced into
+         // slip_rate_substep_max.  Mult dispatches to the slip-stateless
+         // EvaluateLSW because fault_friction_law_ == LSW (set above).
+         AdvanceRKCoupledLSW_Spatial(wave, dof_data, Q, dt_step, t, Q_new,
+                                     rk_tab, nuc.get());
+      }
+      else if (is_rk)
+      {
+         // Rate-state RK4 / RK45 coupled stepper: drives wave.Mult directly,
+         // couples (Q, ψ, slip) with the tableau weights, and applies §14.3
+         // absolute nucleation at each stage time (nuc_cb / the substep
+         // iterator are NOT used).  Scalar-flux (guarded at setup).  The
+         // per-stage max-|V| is reduced into slip_rate_substep_max (§14.5).
          AdvanceRKCoupled_Spatial(wave, dof_data, *cfg.rate_state, rs,
                                   Q, dt_step, t, Q_new, rk_tab, nuc.get());
       }
