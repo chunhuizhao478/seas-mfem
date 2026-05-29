@@ -1329,12 +1329,20 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          ic.radius_m     = toml_real(g, "radius_m",     0.0);
          ic.taper_m      = toml_real(g, "taper_m",      0.0);
          ic.delta_tau_pa = toml_real(g, "delta_tau_pa", 0.0);
+         // Phase 10 (TPV31 spec p. 7): optional per-DOF mu(depth)/mu_ref
+         // amplitude scaling.  Default 0.0 ⇒ disabled (uniform delta_tau_pa);
+         // TPV31 sets it to the spec reference modulus mu_0.
+         ic.mu_ref_pa    = toml_real(g, "mu_ref_pa",    0.0);
          MFEM_VERIFY(ic.radius_m > 0.0,
                      "[nucleation.instantaneous_overstress_circular].radius_m "
                      "must be > 0; got " << ic.radius_m);
          MFEM_VERIFY(ic.taper_m >= 0.0,
                      "[nucleation.instantaneous_overstress_circular].taper_m "
                      "must be >= 0; got " << ic.taper_m);
+         MFEM_VERIFY(ic.mu_ref_pa >= 0.0,
+                     "[nucleation.instantaneous_overstress_circular].mu_ref_pa "
+                     "must be >= 0 (0 disables mu-scaling); got "
+                     << ic.mu_ref_pa);
       }
       else
       {

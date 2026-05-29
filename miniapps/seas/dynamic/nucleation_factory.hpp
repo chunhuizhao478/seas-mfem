@@ -15,6 +15,7 @@
 #include "nucleation_method.hpp"
 #include "../spatial/code/spatial_friction.hpp"   // SpatialFrictionConfig
 
+#include <functional>
 #include <memory>
 
 namespace mfem
@@ -37,10 +38,17 @@ namespace seas
 /// column-major `DenseMatrix dof_basis` (rows 0..2 normal, 3..5 dip, 6..8
 /// strike).  We use those concrete types so MakeNucleation forwards directly
 /// to the existing `Resolve*` overloads with no conversion.
+///
+/// `mu_at_xyz` (optional): per-point shear-modulus lookup, forwarded ONLY to
+/// the InstantaneousOverstressCircular resolver for the TPV31 spec-p.7
+/// mu(depth)/mu_ref amplitude scaling.  Empty (the default) ⇒ no scaling; the
+/// Gaussian / compact-circular / static paths ignore it entirely, so every
+/// existing call site is byte-unchanged.
 std::unique_ptr<INucleationMethod> MakeNucleation(
    const spatial::SpatialFrictionConfig& cfg,
    const Vector&                         dof_coords_3d,
-   const DenseMatrix&                    dof_basis);
+   const DenseMatrix&                    dof_basis,
+   const std::function<real_t(real_t, real_t, real_t)>& mu_at_xyz = {});
 
 } // namespace seas
 } // namespace mfem

@@ -12,7 +12,8 @@ namespace seas
 std::unique_ptr<INucleationMethod> MakeNucleation(
    const spatial::SpatialFrictionConfig& cfg,
    const Vector&                         dof_coords_3d,
-   const DenseMatrix&                    dof_basis)
+   const DenseMatrix&                    dof_basis,
+   const std::function<real_t(real_t, real_t, real_t)>& mu_at_xyz)
 {
    // Absent [nucleation] (enabled == false) → static (TPV205 path): the
    // pre-stress / patches already live in tau_pre_; nothing to perturb.
@@ -40,10 +41,13 @@ std::unique_ptr<INucleationMethod> MakeNucleation(
             cfg.nucleation.compact_circular.T_nuc_s);
 
       case spatial::NucleationKind::InstantaneousOverstressCircular:
+         // Phase 10 (TPV31): forward the per-point mu lookup so the spec-p.7
+         // mu(depth)/mu_ref amplitude scaling is applied (no-op when the
+         // callback is empty or mu_ref_pa <= 0).
          return std::make_unique<InstantaneousOverstressCircular>(
             spatial::ResolveInstantaneousOverstressCircular(
                cfg.nucleation.instantaneous_circular, /*enabled=*/true,
-               dof_coords_3d, dof_basis));
+               dof_coords_3d, dof_basis, mu_at_xyz));
    }
 
    MFEM_ABORT("MakeNucleation: unhandled cfg.nucleation.kind = "

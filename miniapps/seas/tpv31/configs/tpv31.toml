@@ -314,9 +314,8 @@ center_z_m   = -7500.0
 radius_m     = 1400.0     # full-amplitude radius (spec radius_inner)
 taper_m      = 600.0      # cosine taper width (spec radius_outer - radius_inner)
 delta_tau_pa = 4.95e6     # spec Δτ_peak = 4.95 MPa
-# NOTE (known limitation, see PLAN §Phase 10 req 2): the spatial driver's
-# instantaneous-circular nucleation applies delta_tau_pa UNIFORMLY; the spec's
-# per-DOF µ(depth)/µ_0 amplitude scaling is NOT yet applied (safs's
-# InstantaneousOverstressCircularSpec has no mu_ref_pa).  Near the hypocenter
-# depth µ(depth) ≈ µ_0 so the correction is small, but the production cluster
-# run should add µ-scaling for spec-exactness.
+# Spec p. 7: the instantaneous overstress is scaled per-DOF by µ(depth)/µ_0
+# (the same depth-dependent shear modulus that scales the background stress).
+# mu_ref_pa = µ_0 enables that scaling; the resolver evaluates µ(depth) from the
+# depth_profile_1d material at each fault DOF.  (mu_ref_pa = 0 would disable it.)
+mu_ref_pa    = 32.03812032e9   # spec µ_0 (= [stress.depth_proportional].mu_ref_pa)
