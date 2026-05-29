@@ -369,30 +369,25 @@ static void C_4_pool_invariants_on_constant()
 }
 
 // =========================================================================
-// C-5  (REVIEW R-002): Coefficient-mode het ctor CONSTRUCTS (no Stage-1 abort).
-// The het ctor previously ABORTED on Mode::Coefficient (the Phase-H Stage-1
-// gap) and the driver's stale sidecar-abort blocked the only Coefficient
-// source; Phase 9 + the R-002 driver fix make the Coefficient path reachable.
-// This asserts the operator-level deliverable R-002 unblocks: a Coefficient
-// material builds the per-element flux pool + the per-face bimaterial flux
-// matrices without aborting.
+// C-5  (REVIEW R-001/R-002): full Coefficient-vs-scalar Mult parity.
+// The het ctor previously ABORTED on Mode::Coefficient (Phase-H Stage-1 gap)
+// and the driver's stale sidecar-abort blocked the only Coefficient source;
+// Phase 9 + R-002 make the Coefficient path reachable.  A homogeneous
+// Coefficient (ConstantCoefficient triple) must (a) build the per-element
+// pool + per-face bimaterial matrices, and (b) Mult-match the scalar ctor on
+// the SAME material to LU rounding — the plan's homogeneous-limit AC (§1907).
 //
-// NOTE (documented limitation, NOT asserted here): full Mult parity vs the
-// scalar ctor is NOT checked for a Coefficient material.  The het ctor
-// delegates the scalar `flux_` member to the (1,1,1) PLACEHOLDER for
-// non-Constant mode (wave_operator.inl ctor initializer — IDENTICAL to
-// hrs-ref).  Interior non-fault faces + the CK volume term route through the
-// per-element pool (correct — proven by C-1 on the identical homogeneous
-// material), but BOUNDARY faces (absorbing / free-surface) still consume
-// `flux_`, so a Coefficient material's boundary-face flux uses the placeholder.
-// This is an inherited (hrs-ref-identical) limitation of the heterogeneous BC
-// path, exercised end-to-end only by a real heterogeneous run (TPV31 / Phase
-// 10) — out of scope for this fix.  See the fix report's "new finding (N-1)".
+// This is the parity test the round-3 review asked for: it exercises EVERY
+// het flux site on the Coefficient path — interior faces, the CK recursion,
+// the boundary faces (round-3 R-001), AND the bulk volume integral (round-3
+// R-002).  Before those fixes it failed (max rel ≈ 2) because boundary +
+// volume used the (1,1,1) placeholder material; now all sites route through
+// FluxForElem_(e), so it matches the scalar ctor.
 // =========================================================================
-static void C_5_coefficient_mode_constructs()
+static void C_5_coefficient_mode_parity()
 {
    if (g_rank == 0)
-   { std::cout << "\n[C-5] Coefficient-mode het ctor constructs (R-002)\n"; }
+   { std::cout << "\n[C-5] Coefficient-vs-scalar Mult parity (R-001/R-002)\n"; }
 #ifdef MFEM_USE_MPI
    if (g_rank != 0) { return; }
 #endif
@@ -400,16 +395,20 @@ static void C_5_coefficient_mode_constructs()
    const BoundaryConfig bc = MakeAbsorbingBC();
 
    ConstantCoefficient lam_c(k_lambda), mu_c(k_mu), rho_c(k_rho);
+   WaveOperator<Mesh> wave_scalar(smesh, k_order, k_lambda, k_mu, k_rho, bc);
    WaveOperator<Mesh> wave_coef(smesh, k_order,
                                 MaterialField::MakeCoefficient(&lam_c, &mu_c,
                                                                &rho_c),
                                 bc);
+   {
+      real_t Q_bg[NUM_STATE] = {0};
+      wave_scalar.SetAbsorbingBackground(Q_bg);
+      wave_coef.SetAbsorbingBackground(Q_bg);
+   }
    TEST_ASSERT(wave_coef.UsesGodunovFluxPool() == true,
                "Coefficient-mode het ctor: pool present (no Stage-1 abort)");
    TEST_ASSERT(!wave_coef.GetPerFaceBimaterialFlux().empty(),
                "Coefficient-mode het ctor: per-face bimaterial matrices built");
-   // The per-element pool must reflect the (homogeneous here) Coefficient
-   // material — confirms EvalAt drives BuildGodunovFluxPool_ correctly.
    const auto &lmr = wave_coef.GetPerElementMaterial();
    bool all_match = !lmr.empty();
    for (const auto &t : lmr)
@@ -419,6 +418,33 @@ static void C_5_coefficient_mode_constructs()
    }
    TEST_ASSERT(all_match,
                "Coefficient (ConstantCoefficient) per-elem pool == (lam,mu,rho)");
+
+   // Full Mult parity (interior + boundary + volume + CK) to LU rounding.
+   const int n = NUM_STATE * wave_scalar.GetScalarNDof();
+   Vector Q(n);
+   FillQDeterministic(Q);
+   Vector dQdt_scalar(n), dQdt_coef(n);
+   wave_scalar.Mult(Q, dQdt_scalar);
+   wave_coef.Mult(Q, dQdt_coef);
+   const real_t k_rel_tol = 1e-9;
+   int n_diff = 0;
+   real_t max_rel = 0.0;
+   for (int i = 0; i < n; ++i)
+   {
+      const real_t a = dQdt_scalar(i), b = dQdt_coef(i);
+      const real_t rel = std::abs(a - b)
+         / std::max(std::abs(a), std::max(std::abs(b), real_t(1.0)));
+      max_rel = std::max(max_rel, rel);
+      if (rel > k_rel_tol) { ++n_diff; }
+   }
+   if (n_diff != 0 && g_rank == 0)
+   {
+      std::cerr << "  DIFF SUMMARY: " << n_diff << " / " << n
+                << " over tol; max rel = " << max_rel << "\n";
+   }
+   TEST_ASSERT(n_diff == 0,
+               "Coefficient (homogeneous) Mult matches scalar to 1e-9 "
+               "(boundary R-001 + volume R-002 + interior + CK)");
 }
 
 // (REVIEW R-003 abort test lives in test_wave_operator.cpp — that suite is
@@ -451,7 +477,7 @@ int main(int argc, char *argv[])
    C_2_mult_parity_parallel();
    C_3_compute_max_dt_parity();
    C_4_pool_invariants_on_constant();
-   C_5_coefficient_mode_constructs();
+   C_5_coefficient_mode_parity();
 
 #ifdef MFEM_USE_MPI
    int total = 0, passed = 0, failed = 0;

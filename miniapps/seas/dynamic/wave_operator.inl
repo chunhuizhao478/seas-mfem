@@ -1285,6 +1285,17 @@ void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) cons
 
       int dof_offset = e * ndof_per_el_;
 
+      // REVIEW R-002: per-element bulk Jacobian (heterogeneous matrix path).
+      // On the scalar path FluxForElem_(e) == flux_, and
+      // GetReferenceStarMatrix(d) == BuildJacobian(d) == the cached Ax_/Ay_/Az_,
+      // so this is BYTE-IDENTICAL there (no regression).  On the matrix path
+      // each element uses its OWN material instead of the (1,1,1) placeholder
+      // baked into the cached Ax_/Ay_/Az_.  Matches hrs-ref.
+      const GodunovFlux &flux_e = FluxForElem_(e);
+      const DenseMatrix &Ax_e = flux_e.GetReferenceStarMatrix(0);
+      const DenseMatrix &Ay_e = flux_e.GetReferenceStarMatrix(1);
+      const DenseMatrix &Az_e = flux_e.GetReferenceStarMatrix(2);
+
       Vector shape(ndof);
       DenseMatrix dshape(ndof, 3);
 
@@ -1313,9 +1324,9 @@ void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) cons
             F[0][c] = 0.0; F[1][c] = 0.0; F[2][c] = 0.0;
             for (int k = 0; k < NUM_STATE; k++)
             {
-               F[0][c] += Ax_(c, k) * Q_qp[k];
-               F[1][c] += Ay_(c, k) * Q_qp[k];
-               F[2][c] += Az_(c, k) * Q_qp[k];
+               F[0][c] += Ax_e(c, k) * Q_qp[k];
+               F[1][c] += Ay_e(c, k) * Q_qp[k];
+               F[2][c] += Az_e(c, k) * Q_qp[k];
             }
          }
 
@@ -2843,7 +2854,7 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "wave.Mult(): SetAbsorbingBackground(Q_bg) "
                               "must be called before Absorbing BC dispatch "
                               "(Q_bg = 0 is valid under fluctuation-Q).");
-                  flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
+                  FluxForElem_(e1).AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
                case FaceBC::FreeSurface:
                   // v9.4.0 (REVIEW R-007): updated stale "Total-Q only"
@@ -2856,12 +2867,12 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "dispatch (Q_bg = 0 is valid).");
                   if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
                   {
-                     flux_.FreeSurfaceGodunovTotal(nor, Q_self,
+                     FluxForElem_(e1).FreeSurfaceGodunovTotal(nor, Q_self,
                                                    bulk_bg_, F_h);
                   }
                   else
                   {
-                     flux_.FreeSurfaceTotal(nor, Q_self, bulk_bg_, F_h);
+                     FluxForElem_(e1).FreeSurfaceTotal(nor, Q_self, bulk_bg_, F_h);
                   }
                   break;
                case FaceBC::Fault:
@@ -2897,7 +2908,7 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
                               "wave.Mult(): SetAbsorbingBackground(Q_bg) "
                               "must be called before the default BC "
                               "dispatch (Q_bg = 0 is valid).");
-                  flux_.AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
+                  FluxForElem_(e1).AbsorbingTotal(nor, Q_self, bulk_bg_, F_h);
                   break;
             }
 
@@ -4818,17 +4829,17 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                switch (bc_type)
                {
                   case FaceBC::Absorbing:
-                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     FluxForElem_(e1).AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
                      break;
                   case FaceBC::FreeSurface:
                      if (free_surface_bc_mode_ == FreeSurfaceBCMode::Godunov)
                      {
-                        flux_.FreeSurfaceGodunovTotal(nvec, I_self,
+                        FluxForElem_(e1).FreeSurfaceGodunovTotal(nvec, I_self,
                                                       bulk_bg_scaled, F_out);
                      }
                      else
                      {
-                        flux_.FreeSurfaceTotal(nvec, I_self,
+                        FluxForElem_(e1).FreeSurfaceTotal(nvec, I_self,
                                                bulk_bg_scaled, F_out);
                      }
                      break;
@@ -4838,7 +4849,7 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                 "must be 2-sided interior faces.");
                      break;
                   default:
-                     flux_.AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
+                     FluxForElem_(e1).AbsorbingTotal(nvec, I_self, bulk_bg_scaled, F_out);
                      break;
                }
             };
