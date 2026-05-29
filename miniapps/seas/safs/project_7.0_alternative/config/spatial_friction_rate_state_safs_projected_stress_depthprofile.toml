@@ -23,9 +23,11 @@
 #
 # NOTE on coverage: the 500 m mesh fault reaches ~16.6 km depth, while the CSVs
 # sample to ~52-60 km; the profile is flat-clamped below the deeper sampled
-# depth.  With the committed CSVs the (a-b)=0 VW->VS transition is at ~16.7 km,
-# just below the fault bottom, so the meshed fault is (barely) entirely
-# velocity-weakening — the --print-derived depth-profile summary reports this.
+# depth.  With the *_vwvs11km.csv profiles the (a-b)=0 VW->VS transition is at
+# ~11 km, so the meshed fault is velocity-WEAKENING from 0-~11 km and velocity-
+# STRENGTHENING from ~11-16.6 km.  The nucleation patch (center_z_m ~= -5 km)
+# sits in the VW core, so it is super-critical.  The --print-derived depth-
+# profile summary reports the resolved VW->VS transition depth.
 #
 # Run (from miniapps/seas; np=8 example):
 #   mpirun -np 8 ./seas_spatial_dyn_driver \

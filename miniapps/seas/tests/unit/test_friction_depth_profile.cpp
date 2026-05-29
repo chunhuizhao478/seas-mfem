@@ -233,6 +233,19 @@ static void D5_loader_rejections_and_tolerant_parse()
    });
    TEST_ASSERT(three_fields, "loader aborts on a 3-field row");
 
+   // R-003 (Phase 11 review): a trailing NON-numeric token must also abort
+   // (the guard reads the leftover as a string, not a real_t, so "0.010 0 junk"
+   // is rejected just like a numeric 3rd field — enforces "exactly 2 fields").
+   const bool trailing_junk = RunInChild([]() {
+      FrictionDepthProfileSpec spec;
+      spec.param_a_csv = write_file(tmp_path("a_junk.csv"),
+                                    "0.010 0 junk\n0.030 10\n");
+      spec.param_a_minus_b_csv = write_file(tmp_path("amb_junk.csv"),
+                                            "-0.009 0\n0.130 60\n");
+      (void) LoadFrictionDepthProfileCSVs(spec);
+   });
+   TEST_ASSERT(trailing_junk, "loader aborts on a trailing non-numeric token (R-003)");
+
    // Tolerant parse: comments, blank lines, unsorted rows.
    FrictionDepthProfileSpec spec;
    spec.param_a_csv = write_file(tmp_path("a_tol.csv"),

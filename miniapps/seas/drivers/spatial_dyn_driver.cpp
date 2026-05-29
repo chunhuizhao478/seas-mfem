@@ -1886,6 +1886,28 @@ int main(int argc, char *argv[])
          MPI_Allreduce(&fault_depth_max_local, &fault_depth_max, 1,
                        MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
 #endif
+         // R-005 (Phase 11 review): reduce the RESOLVED per-DOF a/b range across
+         // ranks so the summary reports the actual seeded a/b, not just the CSV
+         // depth extents.  Collective — runs on every rank before the rank-0
+         // print (empty-fault ranks contribute +inf/-inf, harmless for MIN/MAX).
+         real_t a_min_l =  std::numeric_limits<real_t>::infinity();
+         real_t a_max_l = -std::numeric_limits<real_t>::infinity();
+         real_t b_min_l =  std::numeric_limits<real_t>::infinity();
+         real_t b_max_l = -std::numeric_limits<real_t>::infinity();
+         for (int i = 0; i < rs.a.Size(); ++i)
+         {
+            a_min_l = std::min(a_min_l, rs.a(i));
+            a_max_l = std::max(a_max_l, rs.a(i));
+            b_min_l = std::min(b_min_l, rs.b(i));
+            b_max_l = std::max(b_max_l, rs.b(i));
+         }
+         real_t a_min = a_min_l, a_max = a_max_l, b_min = b_min_l, b_max = b_max_l;
+#ifdef MFEM_USE_MPI
+         MPI_Allreduce(&a_min_l, &a_min, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+         MPI_Allreduce(&a_max_l, &a_max, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+         MPI_Allreduce(&b_min_l, &b_min, 1, MPITypeMap<real_t>::mpi_type, MPI_MIN, comm);
+         MPI_Allreduce(&b_max_l, &b_max, 1, MPITypeMap<real_t>::mpi_type, MPI_MAX, comm);
+#endif
          if (rank == 0)
          {
             const auto& acv = dp.profile.a_of_depth;
@@ -1901,6 +1923,22 @@ int main(int argc, char *argv[])
                       << amb.x.back() << "] m\n"
                       << "[derived]   fault max depth (mesh) = " << fault_depth_max
                       << " m  (profile flat-clamped beyond its sampled range)\n";
+            // R-005 (Phase 11 review): the CSV sample tables + the resolved a/b
+            // range over the fault DOFs (the plan §11c summary requirement).
+            std::cout << "[derived]   a(depth_m) knots    :";
+            for (std::size_t k = 0; k < acv.x.size(); ++k)
+            {
+               std::cout << " (" << acv.x[k] << "->" << acv.y[k] << ")";
+            }
+            std::cout << "\n[derived]   (a-b)(depth_m) knots:";
+            for (std::size_t k = 0; k < amb.x.size(); ++k)
+            {
+               std::cout << " (" << amb.x[k] << "->" << amb.y[k] << ")";
+            }
+            std::cout << "\n[derived]   resolved a over fault DOFs in ["
+                      << a_min << ", " << a_max << "]\n"
+                      << "[derived]   resolved b over fault DOFs in ["
+                      << b_min << ", " << b_max << "]\n";
             // R-029: a(z) and (a-b)(z) flat-clamp on their OWN depth grids.  If
             // the fault reaches deeper than the shallower CSV's last sample,
             // b = a - (a-b) there mixes a flat-clamped (constant) curve with a
