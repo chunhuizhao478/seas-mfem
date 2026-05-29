@@ -148,39 +148,16 @@ real_t PsiRate(const spatial::RateStateBlock&       rs_cfg,
                const spatial::RateStatePerDOFParams& rs,
                int                                   m)
 {
-   switch (rs_cfg.state_evolution)
-   {
-      case spatial::StateEvolutionKind::AgingLaw:
-      {
-         // ψ-space aging rate dψ/dt = (b·V0/Dc)·(exp((f0−ψ)/b) − V/V0).
-         // Global b/V0/f0 from the config block (the production aging substep
-         // iterator builds AgingLawPsi the same way:
-         // friction_iterator_factory.cpp:90); per-QP ψ/Dc from the DOFData.
-         const AgingLawPsi law(rs_cfg.b_default, rs_cfg.V_0_default,
-                               rs_cfg.f_0_default);
-         return law.Rate(V, d.psi, d.Dc);
-      }
-      case spatial::StateEvolutionKind::SlipLawStrongRateWeakening:
-      {
-         // SRW slip-law (TPV104).  Global scalars (b, V0, f0, muW=f_w_default)
-         // from the config; per-QP V_w(m)/a(m) from the resolved rs — the same
-         // side-channel source as the production iterator
-         // (friction_iterator_factory.cpp:73-81).  Production mode forbids the
-         // scalar-V_w base virtual (R-001); Rate_SRW takes per-QP V_w + a.
-         MFEM_VERIFY(rs.V_w.Size() > m && rs.a.Size() > m,
-                     "PsiRate(SRW): rs.V_w / rs.a must be sized to the fault "
-                     "DOF count; got V_w.Size()=" << rs.V_w.Size()
-                     << ", a.Size()=" << rs.a.Size() << ", m=" << m);
-         SlipLawSRWPsi law(rs_cfg.a_default, rs_cfg.b_default,
-                           rs_cfg.V_0_default, rs_cfg.f_0_default,
-                           rs_cfg.f_w_default, rs_cfg.V_w_default);
-         law.SetProductionMode();
-         return law.Rate_SRW(V, d.psi, d.Dc, rs.V_w(m), rs.a(m));
-      }
-   }
-   MFEM_ABORT("PsiRate: unhandled state_evolution = "
-              << static_cast<int>(rs_cfg.state_evolution));
-   return 0.0;
+   // Delegates to PsiRateEvaluator (rk_time_stepper.hpp) so the per-arm
+   // dispatch + dψ/dt formulae live in exactly one place.  Retained as a free
+   // function for the unit tests; the hot path (AdvanceRKCoupled_Spatial)
+   // constructs ONE evaluator per macro-step and reuses it across every
+   // (stage, DOF) instead of rebuilding the law per call — see R-002.
+   //   AgingLaw                   -> AgingLawPsi::Rate (ψ-space aging rate,
+   //                                 state_evolution.hpp:190).
+   //   SlipLawStrongRateWeakening -> SlipLawSRWPsi::Rate_SRW (production mode,
+   //                                 per-QP V_w(m)/a(m), slip_law_srw_psi.hpp).
+   return PsiRateEvaluator(rs_cfg, rs)(d, V, m);
 }
 
 } // namespace seas

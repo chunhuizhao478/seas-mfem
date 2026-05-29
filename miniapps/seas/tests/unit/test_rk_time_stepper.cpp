@@ -20,6 +20,10 @@
 //   T5  ApplyAbsolute nucleation (§14.3): t=0→0, t=T_nuc→full, monotone; and the
 //       absolute value at any t equals the ADER telescoped increment sum (no
 //       double-apply).
+//   T6  R-001 endpoint predicate: the final RK stage's state equals the combined
+//       endpoint ONLY for an FSAL tableau (DP45), NOT for non-FSAL RK4 — this is
+//       the FSAL test AdvanceRKCoupled_Spatial uses to decide whether to do the
+//       endpoint re-evaluation of the reported fault observables.
 //
 // Usage:  ./seas_test_rk_time_stepper   (serial, < 5 s)
 
@@ -129,6 +133,32 @@ static real_t OscillatorOrder(const RKTableau& tab, real_t omega, real_t T)
    const real_t e1 = integrate(N);
    const real_t e2 = integrate(2 * N);
    return std::log2(e1 / e2);   // ≈ method order p
+}
+
+// Root-cause check for R-001: the FINAL RK stage's INPUT state equals the
+// combined endpoint Q_new ONLY for an FSAL tableau (DP45, a[s-1]==b), NOT for a
+// non-FSAL tableau (classical RK4, whose last stage is the predictor
+// Q+dt·k_{s-2}).  So the post-step dof_data fault observables are end-of-step
+// only when this returns true; AdvanceRKCoupled_Spatial does an endpoint
+// re-eval (extra Mult at Q_new) exactly when it returns false.  Verified here
+// on a scalar linear ODE y'=λy with the same (a,b) stage arithmetic the stepper
+// uses, so the result is attributable to the tableau alone.
+static bool LastStageIsEndpoint(const RKTableau& tab)
+{
+   const real_t lambda = -0.7, dt = 0.1, y0 = 1.0;
+   const int s = tab.stages;
+   std::vector<real_t> k(s, 0.0);
+   real_t last_stage = y0;
+   for (int i = 0; i < s; ++i)
+   {
+      real_t ys = y0;
+      for (int j = 0; j < i; ++j) { ys += dt * tab.a[i][j] * k[j]; }
+      k[i] = lambda * ys;                 // f(y_stage)
+      if (i == s - 1) { last_stage = ys; }
+   }
+   real_t y_end = y0;
+   for (int i = 0; i < s; ++i) { y_end += dt * tab.b[i] * k[i]; }
+   return std::abs(last_stage - y_end) <= 1e-12 * std::abs(y_end);
 }
 
 int main(int argc, char* argv[])
@@ -411,6 +441,37 @@ int main(int argc, char* argv[])
                    "GaussianGradualOverstress::ApplyAbsolute dispatches to full target");
       }
    }
+
+   // =======================================================================
+   // T6 — R-001: final-stage state vs endpoint (drives the endpoint re-eval).
+   // =======================================================================
+   std::cout << "\n-- T6: final RK stage state == endpoint? (R-001) --\n";
+   {
+      const bool rk4_endpt  = LastStageIsEndpoint(MakeRK4Tableau());
+      const bool dp45_endpt =
+         LastStageIsEndpoint(MakeDormandPrinceRK45Tableau());
+      std::cout << "    RK4 last-stage==endpoint? " << (rk4_endpt ? "yes" : "no")
+                << "   DP45 last-stage==endpoint? " << (dp45_endpt ? "yes" : "no")
+                << "\n";
+      // RK4 is NON-FSAL: its last stage is the predictor Q+dt·k_{s-2}, so the
+      // stepper MUST endpoint-re-eval the fault observables (R-001 fix).
+      TEST_TRUE(!rk4_endpt,
+                "RK4 last stage is NOT the endpoint (stepper must endpoint-re-eval)");
+      // DP45 is FSAL: a[6]==b ⇒ last stage already at Q_new ⇒ re-eval skipped.
+      TEST_TRUE(dp45_endpt,
+                "DP45 last stage IS the endpoint (FSAL; re-eval correctly skipped)");
+   }
+
+   // NOTE (R-001 / R-003): a fail-without-fix runtime test of the endpoint
+   // re-eval would need the fault observables to VARY across the RK stages
+   // within one step.  On a serial single-fault fixture the fault response is
+   // saturated by the static imposed shear, so the last-stage state and the
+   // endpoint coincide to machine precision (the difference is O((λ·dt)³) and
+   // ~0 for a saturating fault) — such a test passes with OR without the fix
+   // and is therefore vacuous.  Exercising the re-eval requires a propagating
+   // multi-element wave reaching the fault, deferred to the Frontera SAFS
+   // validation (plan §14.5).  T6 above locks the FSAL predicate the fix relies
+   // on (RK4 non-FSAL ⇒ re-eval runs; DP45 FSAL ⇒ skipped).
 
    std::cout << "\n========================================\n";
    std::cout << "  Results: " << num_passed << " passed, "
