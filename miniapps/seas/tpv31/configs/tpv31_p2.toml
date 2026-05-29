@@ -53,10 +53,20 @@
 # 30 km along strike × 15 km deep (z ∈ [-15000, 0]).  Hypocenter at
 # (0, 0, -7500) m (spec depth 7.5 km on the y = 0 plane).
 
+# =========================================================================
+# p2 / ADER-O3 VARIANT of tpv31.toml.  Identical PHYSICS to tpv31.toml — the
+# ONLY differences are the two numerical-resolution knobs:
+#     [mesh].order        = 2   (p2; config-only, no CLI override)
+#     [numerics].ader_order = 3 (ADER-O3; the sbatch also pins --ader-order 3)
+# KEEP THIS FILE IN SYNC with tpv31.toml on every PHYSICS change (material,
+# stress, friction, nucleation, boundary, geometry).  Only order/ader_order
+# (and, optionally, output cadence) may legitimately differ.
+# =========================================================================
+
 [meta]
 schema_version = 1
 law            = "slip_weakening"
-description    = "SCEC TPV31 — discontinuous 1D bi-material, depth-proportional pre-stress, instantaneous circular overstress nucleation (rotated into canonical SEAS frame)."
+description    = "SCEC TPV31 (p2 / ADER-O3 variant) — discontinuous 1D bi-material, depth-proportional pre-stress, instantaneous circular overstress nucleation (rotated into canonical SEAS frame)."
 
 [problem]
 tag = "tpv31"
@@ -184,7 +194,10 @@ dataset_root = ""
 # (The .geo file was rotated alongside this TOML; the new mesh must be
 # regenerated before running TPV31.)
 path  = "tpv31/mesh/tpv31_50m.msh"
-order = 1
+# p2 variant: quadratic FE space on the same linear (straight-tet) 50 m mesh.
+# The CFL safety factor auto-scales with this order: CflSafetyFactor =
+# 1/(3·(2p+1)) = 1/15 at p=2 (vs 1/9 at p=1) — see spatial_friction.hpp:619.
+order = 2
 
 [stress]
 # Spec p. 6: depth-proportional Cauchy tensor, components scaled at
@@ -223,7 +236,7 @@ sigma_xz_per_mu =  0.0
 mu_ref_pa       = 32.03812032e9   # TPV5/TPV31 spec p. 6
 
 [numerics]
-ader_order     = 2
+ader_order     = 3          # ADER-O3 (allowed range {2,3,4}); sbatch pins --ader-order 3
 mixed_flux     = "none"
 cfl            = 0.5
 use_pml        = false
@@ -231,7 +244,7 @@ use_pml        = false
 cfl_safety     = "dg"        # cfl /= (3*(2p+1)) — matches native TPV drivers
 # spatial schema (Phase 10 adaptation): the spatial driver ALWAYS sub-steps
 # ("one-shot" is rejected — FaultIteratorSupported), so use "substep" with
-# O = ader_order = 2.
+# O = ader_order = 3.
 fault_iterator = "substep"
 # interior_flux = "matrix": the depth_profile_1d material is Mode::Coefficient,
 # which is mutually exclusive with the scalar Godunov ctor; the matrix

@@ -502,4 +502,4 @@ miniapps/seas/seas_mms_antiplane_parallel
 /claude-skills/
 /.claude/
 # Claude Code agent worktrees (already covered by /.claude/ above; explicit)
-.claude/worktree/
+.claude/worktrees/
