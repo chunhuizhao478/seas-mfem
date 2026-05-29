@@ -68,6 +68,21 @@
 #                               # USE_GMSH=NO skips the build.
 #   GMSH_VERSION=4.13.1         # gmsh release tag to build from source.
 #   JOBS=8                      # Parallel build jobs
+#   USE_CALIPER=YES             # Build MFEM + the seas driver with Caliper
+#                                 (MFEM_USE_CALIPER=YES) to activate the
+#                                 MFEM_PERF_SCOPE perfgraph annotations in the
+#                                 dynamic-rupture hot path.  Default NO.  When
+#                                 YES, the seas build is force-cleaned (the
+#                                 Makefile has no header deps, so a stale no-op
+#                                 object would yield an empty perfgraph).  See
+#                                 miniapps/seas/document/caliper_perfgraph_dev/
+#                                 README_caliper_build_and_run.md.
+#   CALIPER_DIR=...             # Caliper install prefix (REQUIRED when
+#                                 USE_CALIPER=YES).  Falls back to the loaded
+#                                 module's TACC_CALIPER_DIR, then to
+#                                 `spack location -i caliper`.
+#   ADIAK_DIR=...               # Optional Adiak prefix (adds run metadata to
+#                                 the Caliper output).
 
 set -euo pipefail
 
@@ -82,6 +97,9 @@ FORCE_REBUILD="${FORCE_REBUILD:-0}"
 USE_GMSH="${USE_GMSH:-YES}"
 GMSH_VERSION="${GMSH_VERSION:-4.13.1}"
 JOBS="${JOBS:-8}"
+USE_CALIPER="${USE_CALIPER:-NO}"
+CALIPER_DIR="${CALIPER_DIR:-}"
+ADIAK_DIR="${ADIAK_DIR:-}"
 
 # FORCE_REBUILD=1 wins over QUICK=1: clear caches and rebuild from source.
 if [ "${FORCE_REBUILD}" = "1" ] || [ "${FORCE_REBUILD}" = "YES" ] || [ "${FORCE_REBUILD}" = "yes" ]; then
@@ -594,6 +612,35 @@ else
     echo "  WARNING: toml11 submodule not available. TOML driver will not build."
 fi
 
+# Caliper profiling (perfgraph) for the dynamic-rupture hot path.
+# MFEM_USE_CALIPER=NO is the committed default (config/defaults.mk:181).
+# Enable with USE_CALIPER=YES to link libcaliper and activate the
+# MFEM_PERF_SCOPE annotations already present in the seas dynamic-rupture
+# code (dynamic/wave_operator.inl, dynamic/bimaterial_wave_operator.inl,
+# drivers/spatial_dyn_driver.cpp).  Provide the Caliper install prefix via
+# CALIPER_DIR (or a loaded module's TACC_CALIPER_DIR, or spack).
+# Recipe: miniapps/seas/document/caliper_perfgraph_dev/README_caliper_build_and_run.md
+USE_CALIPER_RESOLVED="NO"
+if [ "${USE_CALIPER}" = "YES" ] || [ "${USE_CALIPER}" = "1" ] || [ "${USE_CALIPER}" = "yes" ]; then
+    USE_CALIPER_RESOLVED="YES"
+    if [ -z "${CALIPER_DIR}" ] && [ -n "${TACC_CALIPER_DIR:-}" ]; then
+        CALIPER_DIR="${TACC_CALIPER_DIR}"
+    fi
+    if [ -z "${CALIPER_DIR}" ] && command -v spack >/dev/null 2>&1; then
+        CALIPER_DIR="$(spack location -i caliper 2>/dev/null || true)"
+    fi
+    if [ -z "${CALIPER_DIR}" ] || [ ! -f "${CALIPER_DIR}/include/caliper/cali.h" ]; then
+        echo "ERROR: USE_CALIPER=YES but CALIPER_DIR is unset or invalid"
+        echo "       (looked for \${CALIPER_DIR}/include/caliper/cali.h)."
+        echo "  Provide a Caliper install prefix, e.g.:"
+        echo "    spack install caliper +adiak && export CALIPER_DIR=\$(spack location -i caliper)"
+        echo "  or 'module load caliper' (sets TACC_CALIPER_DIR), then re-run with USE_CALIPER=YES."
+        exit 1
+    fi
+    echo "  CALIPER_DIR  = ${CALIPER_DIR}"
+    if [ -n "${ADIAK_DIR}" ]; then echo "  ADIAK_DIR    = ${ADIAK_DIR}"; fi
+fi
+
 echo ""
 echo "=== Configuring MFEM ==="
 CONFIG_ARGS=(
@@ -633,6 +680,18 @@ if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
     )
 fi
 
+# Caliper: MFEM_USE_CALIPER=YES activates the MFEM_PERF_SCOPE annotations in
+# the dynamic-rupture hot path and links libcaliper.  CALIPER_OPT/CALIPER_LIB
+# derive from CALIPER_DIR (config/defaults.mk:544-555); ADIAK_DIR is optional
+# (run metadata).  The committed default is OFF — this only fires when
+# USE_CALIPER=YES.
+if [ "${USE_CALIPER_RESOLVED}" = "YES" ]; then
+    CONFIG_ARGS+=( MFEM_USE_CALIPER=YES CALIPER_DIR="${CALIPER_DIR}" )
+    if [ -n "${ADIAK_DIR}" ]; then
+        CONFIG_ARGS+=( ADIAK_DIR="${ADIAK_DIR}" )
+    fi
+fi
+
 make config "${CONFIG_ARGS[@]}"
 
 echo ""
@@ -642,6 +701,15 @@ make -j"${JOBS}"
 echo ""
 echo "=== Building SEAS miniapps ==="
 cd miniapps/seas
+# Caliper: the seas Makefile has NO header dependencies, so flipping
+# MFEM_USE_CALIPER and rebuilding incrementally would relink STALE objects
+# that compiled every MFEM_PERF_* as a no-op -> libcaliper links but ZERO
+# seas regions appear (empty perfgraph, no error).  Force-clean when Caliper
+# is enabled (README "Build recipe" step 3).
+if [ "${USE_CALIPER_RESOLVED}" = "YES" ]; then
+    echo "  Caliper build: 'make clean' in miniapps/seas (no-header-deps stale-object trap)"
+    make clean
+fi
 # Build target list:
 #   - Everything `make all` would build (MINIAPPS = SEQ_MINIAPPS +
 #     PAR_MINIAPPS + SEQ_LONG + PAR_LONG, see Makefile:570-700) ...
@@ -736,6 +804,15 @@ if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
     echo "   Phase 6 sbatch in miniapps/seas/jobs/{bp5,tpv*}/*phase6*"
     echo "   already point at \${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin,"
     echo "   so no manual override is needed if you submit from this checkout.)"
+fi
+if [ "${USE_CALIPER_RESOLVED}" = "YES" ]; then
+    echo ""
+    echo "Caliper perfgraph:"
+    echo "  Built with MFEM_USE_CALIPER=YES (CALIPER_DIR=${CALIPER_DIR})."
+    echo "  Emit a per-region timing tree at runtime via CALI_CONFIG, e.g.:"
+    echo "    export CALI_CONFIG=\"runtime-report(calc.inclusive=true)\""
+    echo "  Region names + Hatchet JSON recipe: miniapps/seas/document/"
+    echo "    caliper_perfgraph_dev/README_caliper_build_and_run.md"
 fi
 echo ""
 echo "Run examples:"
