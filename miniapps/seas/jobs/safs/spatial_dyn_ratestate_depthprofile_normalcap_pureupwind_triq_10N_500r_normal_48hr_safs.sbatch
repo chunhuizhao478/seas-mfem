@@ -8,9 +8,9 @@
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
-# SAFS RATE-AND-STATE (aging, depth-varying a(z)/b(z)) + sigma_n CAP, PURE UPWIND
-# (mixed_flux=none), on the SLIVER-REPAIRED (triq) MESH — normal-queue full run
-# (10N/500r/48h, tfinal 100 s).
+# SAFS RATE-AND-STATE — SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103,
+# depth-varying a(z)/b(z)) + sigma_n CAP, PURE UPWIND (mixed_flux=none), on the
+# 500 m _triq MESH — normal-queue full run (10N/500r/48 h; tfinal 100 s).
 # =========================================================================
 # NO MIXED FLUX: central/mixed flux is the confirmed SAFS LSW blow-up driver
 # (clean triq-nocap isolation: pure-upwind 7751974 STABLE, identical
@@ -19,20 +19,26 @@
 # apples-to-apples comparison.  Analysis:
 #   safs/project_7.0_alternative/debug_document/spatial_dynamic_rupture_mixed_flux_analysis_2026-05-26.md
 #
-# Same physics/config as the dev triq sibling
-#   spatial_dyn_ratestate_depthprofile_normalcap_triq_8N_400r_dev_2hr_safs.sbatch
-# but on the NORMAL queue at 10N/500r/48h with tfinal 100 s, on the
-# re-triangulated (TMOP/retriangulated) mesh
+# This NORMAL-QUEUE job runs the SLIP-LAW + STRONG-RATE-WEAKENING (TPV104 FL=103)
+# config on the 500 m _triq mesh: state_evolution="slip_srw", f_w=0.2, V_w=0.1
+# m/s, Dc=0.10, a=0.0127, b=0.0261, 8 km-DIAMETER nucleation — see CONFIG_TOML /
+# TRIQ_MESH below.  The proven Dc/a/b set the nucleation forcing; f_w/V_w add the
+# TPV104-style fast dynamic weakening.  The DEV sibling (8N/400r/2 h) runs the
+# IDENTICAL physics; the aging Dc010 normal-queue file is UNCHANGED.  NORMAL
+# queue at 10N/500r/48 h, on the shape-preserving _triq mesh
 #   experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh
 # (overrides the config's [mesh].path via the driver's --mesh flag).
 #
 # Config (floor enabled):
-#   config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml
-#   ([friction].sigma_n_strength_floor_pa = 10.0e6; a(z) <- param_a_vwvs11km.csv,
-#    (a-b)(z) <- param_a_minus_b_vwvs11km.csv (VW->VS transition ~11 km);
-#    gradual_overstress nucleation).
-# => CONFLATES the cap + the repaired mesh.  To isolate the MESH effect alone,
-#    rerun cap-OFF via SAFS_CONFIG (a config without sigma_n_strength_floor_pa).
+#   config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml
+#   ([friction].sigma_n_strength_floor_pa = 10.0e6; state_evolution="slip_srw",
+#    f_w=0.2, V_w=0.1 m/s; Dc=0.10; a(z) <- param_a_500m_strongvw.csv,
+#    (a-b)(z) <- param_a_minus_b_500m_strongvw.csv (VW->VS transition ~11 km;
+#    CAVEAT R-002: under SRW f_ss->f_w at V>>V_w regardless of (b-a) sign, so the
+#    a>b region does NOT guarantee aging-style down-dip arrest — MONITOR extent);
+#    gradual_overstress nucleation, 8 km-DIAMETER patch / 4 km e-fold radius).
+# => CONFLATES the cap + the SRW law.  To isolate, rerun cap-OFF via SAFS_CONFIG
+#    (a config without sigma_n_strength_floor_pa).
 #
 # CAP CAVEAT (REVIEW R-002): on the RS path the floor touches only the post-solve
 # slip-rate DECOMPOSITION strength; the Brent solve setting |V| still uses the
@@ -49,9 +55,8 @@
 # all-normal-queue=100s directive), so RS seismic fields after ~7 s are
 # reflection-CONTAMINATED — treat this as a long cap/stability monitor (does
 # V_max stay bounded?), NOT a physical long rupture.  For physical RS fields use
-# the dev triq sibling's 6 s window (or wire a real PML layer).  The 48 h wall
-# will not reach 100 s in one allocation; the job checkpoints and resumes via
-# SAFS_RESTART.
+# a 6 s window (or wire a real PML layer).  The 48 h wall will not reach 100 s in
+# one allocation; the job checkpoints and resumes via SAFS_RESTART.
 #
 # Flux: PURE UPWIND (--mixed-flux none) by DEFAULT (header note);
 # override with SAFS_MIXED_FLUX={none|adjacent|all_continuous}.
@@ -133,9 +138,13 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-# Default = the depth-varying rate-and-state variant (two-CSV a(z)/b(z)) WITH
-# [friction].sigma_n_strength_floor_pa = 10.0e6.
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml}"
+# Default = the SLIP-LAW + STRONG-RATE-WEAKENING (TPV104 FL=103) variant on the
+# 500 m _triq mesh: state_evolution="slip_srw", f_w=0.2, V_w=0.1 m/s, Dc=0.10,
+# a=0.0127, b=0.0261 (depth-varying a(z)/b(z), two-CSV), WITH
+# [friction].sigma_n_strength_floor_pa = 10.0e6.  DEDICATED config (the aging
+# Dc010 sibling and the dev-queue sibling share it).  Plan:
+#   debug_document/spatial_dynamic_rupture_slip_law_srw_plan_2026-05-28.md
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml}"
 
 # PRE-FLIGHT: this is the CAP run — fail loudly if the config does not enable the
 # floor.  (For a cap-OFF mesh-isolation run, set SAFS_CONFIG to a no-floor config.)
@@ -146,23 +155,57 @@ if ! grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOM
     exit 1
 fi
 
-# Mesh: DEFAULT = the sliver-repaired (triq) mesh; override with SAFS_MESH.
+# Mesh: DEFAULT = the 500 m shape-preserving _triq mesh (1.16 M tets); override
+# with SAFS_MESH.  Resolves L_b(dip)=2.51 km at ~5 cells @ 500 m for Dc=0.10.
 TRIQ_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
-MESH="${SAFS_MESH:-${TRIQ_MESH}}"
-if [[ ! -f "${MESH}" ]]; then
-    echo "ERROR: triq mesh not found:"
-    echo "         $(pwd)/${MESH}"
-    echo "       The .msh is gitignored and is NOT pulled with the repo."
-    echo "       scp the re-triangulated mesh to the path above before submitting"
-    echo "       (it lives under ${SAFS_ROOT}/experimental_mesh_refinement/)."
-    exit 1
+
+# Mesh INPUT MODE (R-OOM).  The 500 m _triq mesh has ~1.16 M elements; a serial
+# read replicates it on every rank but fits comfortably at 10N/500r, so this job
+# DEFAULTS to serial (no presplit needed — unlike the 16 M-tet 250 m mesh):
+#   SAFS_MESH_MODE=serial   (DEFAULT) --mesh <.msh>; read + in-memory METIS on
+#                           all ranks.  OOM-safe for the 500 m mesh.
+#   SAFS_MESH_MODE=presplit           --mesh <prefix>; each rank reads ONLY its
+#                           own seas_partition_mesh file (no replication).  Only
+#                           needed for much larger meshes; requires pre-built
+#                           per-rank files at THIS task count.
+SAFS_MESH_MODE="${SAFS_MESH_MODE:-serial}"
+case "${SAFS_MESH_MODE}" in
+    serial|presplit) : ;;
+    *) echo "ERROR: SAFS_MESH_MODE='${SAFS_MESH_MODE}' invalid (serial|presplit)"; exit 1 ;;
+esac
+
+# presplit prefix default is keyed by task count so a stale partition set built
+# for a different np cannot be silently consumed (the driver re-checks too).
+PRESPLIT_PREFIX="${SAFS_MESH_PREFIX:-${SAFS_ROOT}/experimental_mesh_refinement/presplit/safs_500m_triq_np${SLURM_NTASKS}}"
+
+if [[ "${SAFS_MESH_MODE}" == "presplit" ]]; then
+    MESH="${SAFS_MESH:-${PRESPLIT_PREFIX}}"
+    if [[ ! -f "${MESH}.np" ]]; then
+        echo "ERROR: pre-split manifest not found: $(pwd)/${MESH}.np"
+        echo "       The 500 m mesh is OOM-safe in SERIAL mode (the default) — just unset"
+        echo "       SAFS_MESH_MODE, or run: sbatch --export=ALL,SAFS_MESH_MODE=serial ..."
+        echo "       (presplit is only needed for much larger meshes; build per-rank files"
+        echo "        at -n ${SLURM_NTASKS} and set SAFS_MESH_PREFIX if you really want it)."
+        exit 1
+    fi
+else
+    MESH="${SAFS_MESH:-${TRIQ_MESH}}"
+    if [[ ! -f "${MESH}" ]]; then
+        echo "ERROR: triq mesh not found:"
+        echo "         $(pwd)/${MESH}"
+        echo "       The .msh is gitignored and is NOT pulled with the repo."
+        echo "       scp the re-triangulated mesh to the path above before submitting"
+        echo "       (it lives under ${SAFS_ROOT}/experimental_mesh_refinement/)."
+        exit 1
+    fi
 fi
+MESHMODE_ARG="--mesh-mode ${SAFS_MESH_MODE}"
 
 # Depth-profile CSVs (read at config-load time by the parser).  Fail early here
 # with a clearer message than a mid-parse abort.
 for _csv in \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a_vwvs11km.csv" \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b_vwvs11km.csv"; do
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_500m_strongvw.csv" \
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b_500m_strongvw.csv"; do
     if [[ ! -f "${_csv}" ]]; then
         echo "ERROR: depth-profile CSV not found: $(pwd)/${_csv}"
         exit 1
@@ -200,12 +243,13 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Queue/size:  normal, 10N x 500r, 48 h"
-echo "EXPERIMENT:  RS depth-profile + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
-echo "             on the SLIVER-REPAIRED (triq) mesh (no central flux; full run tfinal 100 s; cap largely INERT on RS — see R-002)"
+echo "EXPERIMENT:  RS SLIP-LAW + STRONG RATE WEAKENING (TPV104 FL=103: f_w=0.2, V_w=0.1 m/s) + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
+echo "             on the 500 m _triq mesh, Dc=0.10, a=0.0127, b=0.0261, 8 km-dia nucleation (no central flux; full run, tfinal 100 s; cap largely INERT on RS — see R-002)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
-echo "Mesh:        ${MESH}  (triq / sliver-repaired)"
-echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); floor=10 MPa)"
+echo "Mesh:        ${MESH}  (500 m _triq, 1.16 M tets)"
+echo "Mesh mode:   ${SAFS_MESH_MODE}  (serial=read+partition on every rank; presplit=per-rank files, no replication)"
+echo "Config:      ${CONFIG_TOML}   (RS slip-law SRW; depth-varying a(z)/b(z); Dc=0.10; 8 km-dia nuc; f_w=0.2, V_w=0.1; floor=10 MPa)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX} (pure upwind; CFL factor 1.0)"
@@ -216,6 +260,7 @@ echo "Restart:     ${SAFS_RESTART:-<none — fresh start from t=0>}"
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
+    ${MESHMODE_ARG} \
     --no-sidecar-material \
     ${MIXFLUX_ARG} \
     --tfinal "${TFINAL}" \
@@ -223,7 +268,7 @@ ibrun ./seas_spatial_dyn_driver \
     ${RESTART_ARG} \
     --paraview \
     --paraview-fault-vtu \
-    --paraview-fault-dt 1.0 \
+    --paraview-fault-dt 0.5 \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
