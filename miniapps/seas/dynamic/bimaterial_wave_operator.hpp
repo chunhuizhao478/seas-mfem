@@ -121,6 +121,23 @@ public:
    /// Mixed flux is scalar-only (R-003): abort on any non-None mode.
    void SetMixedFluxMode(MixedFluxMode m) override;
 
+   /// Precomputed (scalar Godunov) face fluxes are incompatible with the
+   /// bi-material interior-face Riemann solve (REVIEW R-006): `Init` would
+   /// build per-face flux tables from the inherited `(1,1,1)` sentinel `flux_`
+   /// AND the precomputed dispatch bypasses the per-face bi-material
+   /// `InteriorFaceFlux_`.  Abort on enable (mirrors `SetMixedFluxMode`); a
+   /// no-op disable is allowed so generic teardown paths stay valid.
+   void UsePrecomputedFaceFluxes(bool enable) override
+   {
+      MFEM_VERIFY(!enable,
+                  "BimaterialWaveOperator::UsePrecomputedFaceFluxes: "
+                  "precomputed face fluxes are scalar-only; the heterogeneous "
+                  "interior_flux=\"matrix\" path already replaces the "
+                  "interior-face flux with the bi-material Riemann solve.  Use "
+                  "interior_flux=\"scalar\" (WaveOperator) for precomputed "
+                  "face fluxes.");
+   }
+
 protected:
    /// Per-element material for the volume Jacobian, the boundary-face flux,
    /// and the fault imposed-state flux.

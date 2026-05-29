@@ -289,7 +289,16 @@ public:
    /// `GetPrecomputedFaceFluxes()` is a test-only accessor used by
    /// `test_R5_002_fault_face_set_populated_at_init_time` to verify that
    /// `fault_face_set_` faces are absent from `face_elem_to_entry_`.
-   void UsePrecomputedFaceFluxes(bool enable);
+   ///
+   /// Phase 13 (REVIEW R-006): `virtual` so `BimaterialWaveOperator` overrides
+   /// it to abort.  `Init`/`InitSharedFaces` build per-face flux tables from
+   /// the scalar `flux_`, which on the matrix subclass is the `(1,1,1)`
+   /// sentinel — enabling precomputed fluxes there would silently leak the
+   /// placeholder AND bypass the per-face bi-material `InteriorFaceFlux_`.  The
+   /// override (mirroring `SetMixedFluxMode`) makes that mutual exclusion
+   /// structural, closing the last hole in the "leak impossible by
+   /// construction" invariant.
+   virtual void UsePrecomputedFaceFluxes(bool enable);
    bool UsingPrecomputedFaceFluxes() const { return use_precomputed_face_fluxes_; }
    const PrecomputedFaceFluxes &GetPrecomputedFaceFluxes() const
    { return precomputed_face_fluxes_; }

@@ -1541,11 +1541,27 @@ int main(int argc, char *argv[])
    // 13. Construct FaultFaceFlux with seed scalar impedances; the
    //     per-DOF impedances are overwritten by InitializeFaultDOFs_Spatial.
    // -----------------------------------------------------------------
-   const real_t cp_seed = std::sqrt((material.lambda_const
-                                     + 2.0 * material.mu_const)
-                                     / material.rho_const);
-   const real_t cs_seed = std::sqrt(material.mu_const / material.rho_const);
-   FaultFaceFlux fault_flux(material.rho_const, cp_seed, cs_seed);
+   // The seed impedances are immediately overwritten per-DOF by
+   // InitializeFaultDOFs_Spatial (and FaultFaceFlux's scalar rho_/cp_/cs_/Zp_/
+   // Zs_ members are write-only — never read in the physics).  On the matrix
+   // path `material` is Mode::Coefficient, so material.*_const == 0 and the
+   // naive sqrt((0 + 0) / 0) would seed NaN (REVIEW R-007).  Derive a finite
+   // representative seed from element 0 (the same EvalAt pattern the bi-material
+   // flux-pool builder uses); the scalar (Constant) path keeps the *_const
+   // values byte-identically.
+   real_t lam_seed = material.lambda_const;
+   real_t mu_seed  = material.mu_const;
+   real_t rho_seed = material.rho_const;
+   if (material.mode != MaterialField::Mode::Constant && pmesh.GetNE() > 0)
+   {
+      ElementTransformation *T0 = pmesh.GetElementTransformation(0);
+      const IntegrationPoint &ip0 =
+         Geometries.GetCenter(pmesh.GetElementBaseGeometry(0));
+      material.EvalAt(0, *T0, ip0, lam_seed, mu_seed, rho_seed);
+   }
+   const real_t cp_seed = std::sqrt((lam_seed + 2.0 * mu_seed) / rho_seed);
+   const real_t cs_seed = std::sqrt(mu_seed / rho_seed);
+   FaultFaceFlux fault_flux(rho_seed, cp_seed, cs_seed);
    // σ_n strength floor (sliver-blowup plan 2026-05-26).  Sentinel < 0 ⇒
    // disabled (each law keeps its exact current strength expression ⇒
    // byte-exact for the TPV/BP5 regressions); >= 0 floors the σ_n that
