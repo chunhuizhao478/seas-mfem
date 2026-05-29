@@ -34,6 +34,8 @@
 #include "fault_face_flux.hpp"                    // DOFData
 #include "nucleation_method.hpp"                  // INucleationMethod
 #include "../spatial/code/spatial_friction.hpp"   // spatial::RateState*
+#include "../friction/state_evolution.hpp"        // AgingLawPsi (PsiRateEvaluator)
+#include "../friction/slip_law_srw_psi.hpp"       // SlipLawSRWPsi (PsiRateEvaluator)
 
 #include <vector>
 
@@ -99,6 +101,58 @@ real_t PsiRate(const spatial::RateStateBlock&       rs_cfg,
                const spatial::RateStatePerDOFParams& rs,
                int                                   m);
 
+/// @brief Caches the rate-and-state law object(s) so `AdvanceRKCoupled_Spatial`
+/// can evaluate dψ/dt per fault DOF per RK stage WITHOUT reconstructing the law
+/// on every call (R-002).  The law is a stateless value-holder over the global
+/// config scalars, so ONE instance built at the top of the macro-step serves
+/// every (stage, DOF) — mirroring the git:8461c67 reference idiom that builds
+/// `AgingLawPsi` once outside the time loop.  The semantics are identical to
+/// the free `PsiRate` above, which delegates to this evaluator so the dispatch
+/// lives in exactly one place.  Holds references to `rs_cfg`/`rs`; do not let
+/// it outlive them.
+class PsiRateEvaluator
+{
+public:
+   PsiRateEvaluator(const spatial::RateStateBlock&        rs_cfg,
+                    const spatial::RateStatePerDOFParams& rs)
+      : rs_cfg_(rs_cfg), rs_(rs),
+        aging_(rs_cfg.b_default, rs_cfg.V_0_default, rs_cfg.f_0_default),
+        srw_(rs_cfg.a_default, rs_cfg.b_default, rs_cfg.V_0_default,
+             rs_cfg.f_0_default, rs_cfg.f_w_default, rs_cfg.V_w_default)
+   {
+      // Production mode forbids the scalar-V_w base virtual (R-001); the SRW
+      // arm uses the per-QP Rate_SRW overload.
+      srw_.SetProductionMode();
+   }
+
+   /// dψ/dt at fault DOF `m`; `V` is the stage slip-rate magnitude
+   /// (`dof_data[m].slip_rate` from the stage `Mult`).  See `PsiRate` for the
+   /// per-arm formula citations.
+   real_t operator()(const DOFData& d, real_t V, int m) const
+   {
+      switch (rs_cfg_.state_evolution)
+      {
+         case spatial::StateEvolutionKind::AgingLaw:
+            return aging_.Rate(V, d.psi, d.Dc);
+         case spatial::StateEvolutionKind::SlipLawStrongRateWeakening:
+            MFEM_VERIFY(rs_.V_w.Size() > m && rs_.a.Size() > m,
+                        "PsiRateEvaluator(SRW): rs.V_w / rs.a must be sized to "
+                        "the fault DOF count; got V_w.Size()=" << rs_.V_w.Size()
+                        << ", a.Size()=" << rs_.a.Size() << ", m=" << m);
+            return srw_.Rate_SRW(V, d.psi, d.Dc, rs_.V_w(m), rs_.a(m));
+      }
+      MFEM_ABORT("PsiRateEvaluator: unhandled state_evolution = "
+                 << static_cast<int>(rs_cfg_.state_evolution));
+      return 0.0;
+   }
+
+private:
+   const spatial::RateStateBlock&        rs_cfg_;
+   const spatial::RateStatePerDOFParams& rs_;
+   AgingLawPsi                           aging_;
+   SlipLawSRWPsi                         srw_;
+};
+
 // =====================================================================
 // Coupled RK macro-step (plan §14.1/§14.2/§14.3/§14.5)
 // =====================================================================
@@ -159,6 +213,10 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
    std::vector<std::vector<real_t>>  V2_k(s, std::vector<real_t>(n, 0.0));
    for (int m = 0; m < n; ++m) { psi_n[m] = dof_data[m].psi; }
 
+   // R-002: build the ψ-rate law ONCE per macro-step (stateless over the
+   // global config scalars) instead of reconstructing it per DOF per stage.
+   const PsiRateEvaluator psi_rate(rs_cfg, rs);
+
    for (int i = 0; i < s; ++i)
    {
       // Q^(i) = Q + dt·Σ_{j<i} a_ij k_j.
@@ -192,7 +250,7 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
          const DOFData& d = dof_data[m];
          V1_k[i][m]  = d.V1;
          V2_k[i][m]  = d.V2;
-         psi_k[i][m] = PsiRate(rs_cfg, d, d.slip_rate, rs, m);
+         psi_k[i][m] = psi_rate(d, d.slip_rate, m);
          // §14.5: RK-stage max-|V| reduction (driver reset this to 0 pre-step).
          if (d.slip_rate > dof_data[m].slip_rate_substep_max)
          {
@@ -224,9 +282,37 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
       dof_data[m].psi    = psi_new;
       dof_data[m].slip1 += slip1_inc;
       dof_data[m].slip2 += slip2_inc;
-      // dof_data[m].{slip_rate,V1,V2,tau*_corr,sigma_n_corr} retain the final
-      // stage's values (c_{s-1}=1 for both RK4 and FSAL DP45 ⇒ endpoint), so
-      // the driver's V_max diagnostic + ParaView read end-of-step observables.
+   }
+
+   // Endpoint re-evaluation of the instantaneous fault observables (R-001).
+   // Only an FSAL tableau (final a-row == b row) evaluates its last stage AT
+   // the step endpoint; for a non-FSAL tableau (classical RK4) the final stage
+   // is the predictor Q + dt·k_{s-2}, NOT Q_new, so dof_data[m].{slip_rate,V1,
+   // V2,tau*_corr,sigma_n_corr} would be phase-lagged from Q(t+dt) (the
+   // git:8461c67 R-V92-K01 half-step-lag bug, which that reference fixed with
+   // exactly this endpoint re-eval).  Re-run the ψ-stateless fault Riemann
+   // solve once at the true endpoint (Q_new, psi_new, nuc(t+dt)) so the driver's
+   // V_max diagnostic + ParaView read self-consistent end-of-step values.  DP45
+   // is FSAL ⇒ its final stage already evaluated here ⇒ skipped.  ψ/slip
+   // accumulators above are untouched (Evaluate is ψ-stateless and never writes
+   // slip1/slip2); dof_data[m].psi already holds psi_new.
+   bool last_stage_is_endpoint = true;
+   for (int j = 0; j < s; ++j)
+   {
+      if (tab.a[s - 1][j] != tab.b[j]) { last_stage_is_endpoint = false; break; }
+   }
+   if (n > 0 && !last_stage_is_endpoint)
+   {
+      if (nuc) { nuc->ApplyAbsolute(dof_data, t_step_start + dt_step); }
+      Vector k_endpoint(height);
+      wave.Mult(Q_new, k_endpoint);
+      for (int m = 0; m < n; ++m)
+      {
+         if (dof_data[m].slip_rate > dof_data[m].slip_rate_substep_max)
+         {
+            dof_data[m].slip_rate_substep_max = dof_data[m].slip_rate;
+         }
+      }
    }
 }
 
