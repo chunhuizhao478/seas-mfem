@@ -120,18 +120,29 @@ TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across
 # --- optional Caliper "perfgraph" (MFEM's profiling facility) -------------
 # MFEM's performance-graph facility is Caliper: general/annotation.hpp defines
 # MFEM_PERF_FUNCTION / MFEM_PERF_SCOPE / MFEM_PERF_BEGIN/END, which are no-ops
-# UNLESS MFEM is built with MFEM_USE_CALIPER=YES (config/config.mk currently
-# has it = NO) and linked against libcaliper.  A region-timing TREE (the
-# "perfgraph") is then produced at runtime via the CALI_CONFIG env var.
+# UNLESS MFEM is built with MFEM_USE_CALIPER=YES and linked against libcaliper.
+# A region-timing TREE (the "perfgraph") is then produced at runtime via the
+# CALI_CONFIG env var.
 #
-# TWO PREREQUISITES (NEITHER met today — this block is INERT until both are):
-#   (1) Rebuild MFEM + this driver with MFEM_USE_CALIPER=YES (+ libcaliper).
-#   (2) Annotate the dynamic-rupture hot loops with MFEM_PERF_SCOPE(...)
-#       (Mult / AdvanceADER / ComputeADERSubStepStates / fault solve).  The
-#       seas driver + wave operator currently carry NO annotations, so without
-#       (2) only annotated MFEM-library internals (some linalg/fem) would show.
+# PREREQUISITES:
+#   (1) Build with MFEM_USE_CALIPER=YES (+ libcaliper).  NOT the default yet
+#       (config/config.mk has MFEM_USE_CALIPER=NO).  Build it with:
+#         USE_CALIPER=YES CALIPER_DIR=<prefix> bash build_frontera.sh
+#       (force-cleans the seas build so the annotations below compile in).
+#   (2) MFEM_PERF_SCOPE annotations in the dynamic-rupture hot loops —
+#       DONE as of the caliper-perfgraph merge (seas:: regions in
+#       dynamic/wave_operator.inl, bimaterial_wave_operator.inl, and
+#       drivers/spatial_dyn_driver.cpp).  Recipe + full region list:
+#       document/caliper_perfgraph_dev/README_caliper_build_and_run.md.
 #
-# When both hold, run with TPV31_PERFGRAPH=1:
+# So on a default (MFEM_USE_CALIPER=NO) binary this block is INERT (the
+# annotations are no-ops, CALI_CONFIG is ignored); on a Caliper build it emits
+# the perfgraph.  NOTE: this is an ADER job, so the ADER-path regions fire
+# (ComputeADER{SubStepStates,VolumeUpdate,FaceFluxRHS,SharedFaceFluxRHS},
+# AdvanceADER, friction_substep, step); the Mult / Compute{,Shared}FaceFluxRHS
+# regions are RK-only and are correctly ABSENT here.
+#
+# Run with TPV31_PERFGRAPH=1:
 if [[ "${TPV31_PERFGRAPH:-0}" == "1" ]]; then
     # runtime-report      -> human-readable inclusive/exclusive timing tree to stderr (.err)
     # hatchet-region-profile -> JSON for a rendered call-graph via the `hatchet` Python pkg
