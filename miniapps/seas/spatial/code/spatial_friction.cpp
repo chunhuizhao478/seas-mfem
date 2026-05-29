@@ -608,6 +608,35 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
          LoadFrictionDepthProfileCSVs(out.depth_profile);
    }
 
+   // Phase 5 (slip-law SRW): state-evolution selector + SRW globals.  Default
+   // "aging" keeps the historical behaviour byte-for-byte (no key required).
+   {
+      const std::string sev = toml_str(rs_tbl, "state_evolution",
+                                       std::string("aging"));
+      if      (sev == "aging")    { out.state_evolution = StateEvolutionKind::Aging; }
+      else if (sev == "slip_srw") { out.state_evolution = StateEvolutionKind::SlipSRW; }
+      else
+      {
+         MFEM_ABORT("[friction.rate_state] state_evolution must be 'aging' or "
+                    "'slip_srw'; got '" << sev << "'");
+      }
+      // f_w (fully-weakened friction, muW) and V_w (weakening velocity) are
+      // consumed only on the SRW path (TPV104 FL=103).  Parse with the schema
+      // defaults; enforce the SRW invariants only when SlipSRW is selected.
+      out.f_w_default = toml_real(rs_tbl, "f_w", 0.2);
+      out.V_w_default = toml_real(rs_tbl, "V_w", 0.1);
+      if (out.state_evolution == StateEvolutionKind::SlipSRW)
+      {
+         MFEM_VERIFY(out.f_w_default > 0.0 && out.f_w_default < out.f_0_default,
+                     "[friction.rate_state] f_w (" << out.f_w_default
+                     << ") must satisfy 0 < f_w < f_0_default ("
+                     << out.f_0_default << ") for state_evolution='slip_srw'");
+         MFEM_VERIFY(out.V_w_default > 0.0,
+                     "[friction.rate_state] V_w (" << out.V_w_default
+                     << ") must be > 0 for state_evolution='slip_srw'");
+      }
+   }
+
    // Defaults validator.
    MFEM_VERIFY(out.a_default > 0.0,
                "[friction.rate_state] a_default must be > 0; got "
@@ -1340,6 +1369,16 @@ RateStatePerDOFParams resolve_rs_impl(
       p.f_0(i) = f0_i; p.V_0(i) = V0_i;
       p.eta(i) = eta_i;
       p.sigma_n_eff(i) = sigma_n_eff;
+   }
+
+   // Phase 5 (slip-law SRW): per-DOF weakening velocity V_w.  Decision (plan
+   // §9 #2): a single constant V_w_default over the whole fault for this first
+   // SRW run (no spatial V_w rule yet).  Left EMPTY (Size()==0) on the aging
+   // path so nothing downstream reads it.
+   if (cfg.state_evolution == StateEvolutionKind::SlipSRW)
+   {
+      p.V_w.SetSize(N);
+      p.V_w = cfg.V_w_default;   // mfem::Vector::operator=(real_t) fills all N
    }
 
    return p;

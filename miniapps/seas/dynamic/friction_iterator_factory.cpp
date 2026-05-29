@@ -18,10 +18,11 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
    FaultFaceFlux &flux,
    const spatial::RateStatePerDOFParams *rs /*nullptr for LSW*/)
 {
-   // `rs` is reserved for the Phase-3 driver wiring and the future
-   // slip-law-SRW path; the aging adapter reads only the scalar
-   // RateStateBlock from cfg.rate_state, so rs is unused here today.
-   (void) rs;
+   // `rs` (resolved per-DOF params) is consumed by the slip-law-SRW branch
+   // below — it carries the per-DOF V_w injected into the SRW iterator.  The
+   // aging adapter reads only the scalar RateStateBlock from cfg.rate_state, so
+   // on the aging / LSW paths `rs` is legitimately unread (no (void) needed: it
+   // is referenced in the SRW branch, so there is no unused-parameter warning).
 
    switch (cfg.law)
    {
@@ -45,14 +46,43 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
                      << FrictionSolver::V0
                      << "); the force solve hardcodes V0.");
 
-         // Aging is the only RS law wired in Phases 1-3.  The slip-law
-         // strong-rate-weakening (SRW) variant lands in Phase 5, gated on
-         // a future [friction.rate_state] state_evolution field; until that
-         // field exists there is no SRW config to abort on here.  When it
-         // is added, branch on it and MFEM_ABORT("slip-law SRW lands in
-         // Phase 5") before this return.
-         return std::make_unique<RateStateAgingFrictionIterator>(
-            flux, *cfg.rate_state);
+         // State-evolution dispatch (slip-law-SRW plan §4.5).  The V_0 guard
+         // above applies to BOTH laws (the force solve hardcodes V0 either way).
+         switch (cfg.rate_state->state_evolution)
+         {
+            case spatial::StateEvolutionKind::Aging:
+               return std::make_unique<RateStateAgingFrictionIterator>(
+                  flux, *cfg.rate_state);
+
+            case spatial::StateEvolutionKind::SlipSRW:
+            {
+               // The SRW iterator needs the resolved per-DOF V_w (ResolveRateState
+               // fills rs->V_w only when state_evolution==SlipSRW).
+               MFEM_VERIFY(rs != nullptr,
+                           "MakeFrictionIterator: state_evolution='slip_srw' "
+                           "requires resolved per-DOF params (rs); got nullptr.");
+               // R-001: do NOT require Size() > 0 — ranks that own no fault DOFs
+               // legitimately have N == 0 (rs.a.Size() == rs.V_w.Size() == 0), and
+               // this factory is called on EVERY rank (the iterator is needed for
+               // SetSubSteps even where Advance is later skipped).  Requiring > 0
+               // would MFEM_VERIFY-abort the whole MPI job on far-field ranks.  The
+               // "==" check still catches a SlipSRW config whose V_w was left
+               // unfilled (Size()==0 while a.Size()==N>0).
+               MFEM_VERIFY(rs->V_w.Size() == rs->a.Size(),
+                           "MakeFrictionIterator: rs->V_w (size " << rs->V_w.Size()
+                           << ") must equal the per-DOF count (rs->a size "
+                           << rs->a.Size() << ") for slip_srw; ResolveRateState "
+                           "fills V_w to N (possibly 0) when state_evolution==SlipSRW.");
+               auto iter = std::make_unique<SlipLawSRWFrictionIterator>(
+                  flux, *cfg.rate_state);
+               iter->SetVw(std::vector<real_t>(
+                  rs->V_w.GetData(), rs->V_w.GetData() + rs->V_w.Size()));
+               return iter;
+            }
+         }
+         MFEM_ABORT("MakeFrictionIterator: unhandled state_evolution = "
+                    << static_cast<int>(cfg.rate_state->state_evolution));
+         return nullptr;
       }
    }
 

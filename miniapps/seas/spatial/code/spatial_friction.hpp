@@ -283,6 +283,16 @@ struct FrictionDepthProfileSpec
 /// rows, a duplicate depth, a non-finite field, or a non-positive `a` value.
 FrictionDepthProfile1D LoadFrictionDepthProfileCSVs(const FrictionDepthProfileSpec& spec);
 
+/// State-evolution law for the rate-and-state path (plan §4.1, Phase 5).
+///   Aging   — Dieterich aging law (`AgingLawPsi` via the Tpv102 sub-step
+///             iterator).  Historical default; behaviour unchanged.
+///   SlipSRW — slip law with strong rate weakening (SCEC TPV104 FL=103,
+///             "Fast Velocity Weakening") via the Tpv104 sub-step iterator;
+///             adds the global f_w (muW) and per-DOF V_w.  The ψ-update sources
+///             a, b, Dc PER-DOF from DOFData (the scalar a/b in `SlipLawSRWPsi`
+///             are placeholders) — see the slip-law-SRW plan §4.4 (R-001).
+enum class StateEvolutionKind { Aging, SlipSRW };
+
 struct RateStateBlock
 {
    real_t f_0_default        = 0.6;
@@ -294,6 +304,16 @@ struct RateStateBlock
    real_t Dc_default         = 0.004;
    real_t V_init_default     = 1.0e-9;
    real_t sigma_n_default    = 50.0e6;
+
+   // State-evolution selector (plan §4.1; Phase 5 slip-law SRW).  Parsed from
+   // [friction.rate_state].state_evolution = "aging" | "slip_srw".  The f_w /
+   // V_w defaults below are consumed ONLY when state_evolution == SlipSRW; on
+   // the aging path they are ignored (the resolver leaves
+   // RateStatePerDOFParams.V_w empty).
+   StateEvolutionKind state_evolution = StateEvolutionKind::Aging;
+   real_t f_w_default        = 0.2;     // SRW fully-weakened friction (muW); slip_srw only
+   real_t V_w_default        = 0.1;     // SRW weakening velocity [m/s];      slip_srw only
+
    std::vector<SpatialRule>  spatial;
    FrictionDepthProfileSpec  depth_profile;   // Phase 11b: depth-varying a/b (optional)
 };
@@ -348,6 +368,10 @@ struct SlipWeakeningPerDOFParams
 struct RateStatePerDOFParams
 {
    Vector a, b, Dc, V_init, f_0, V_0, eta, sigma_n_eff;
+   // SRW weakening velocity (state_evolution == SlipSRW only).  Empty
+   // (Size()==0) on the aging path; sized to ndof and filled with V_w_default
+   // by ResolveRateState when SlipSRW is selected (plan §4.2).
+   Vector V_w;
 };
 
 class SpatialFrictionResolver

@@ -128,6 +128,17 @@ std::string MinimalRSBlock()
       "sigma_n_default = 50.0e6\n");
 }
 
+// RS block + slip-law-SRW keys (state_evolution / f_w / V_w).
+std::string RSBlockSRW(const std::string& state_evo, real_t f_w, real_t V_w)
+{
+   std::ostringstream oss;
+   oss << MinimalRSBlock()
+       << "state_evolution = \"" << state_evo << "\"\n"
+       << "f_w = " << f_w << "\n"
+       << "V_w = " << V_w << "\n";
+   return oss.str();
+}
+
 }  // namespace
 
 // T-1  minimal valid LSW config parses (geoffrey2010 values survive D-3)
@@ -821,6 +832,61 @@ cohesion_default=0
    TEST_ASSERT(ParseAbortsInChild(toml), "mu <= 0 must abort");
 }
 
+// =====================================================================
+// T-SRW-1..5  slip-law strong-rate-weakening parse + validation
+// (state_evolution / f_w / V_w under [friction.rate_state]).  Plan §4.2.
+// =====================================================================
+static void T_SRW_1_slip_srw_parses()
+{
+   std::cout << "\n[T-SRW-1] state_evolution=slip_srw + f_w/V_w round-trip\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state")
+                            + RSBlockSRW("slip_srw", 0.2, 0.1);
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.law == FrictionLawKind::RateState, "law == rate_state");
+   TEST_ASSERT(cfg.rate_state.has_value(), "rate_state present");
+   TEST_ASSERT(cfg.rate_state->state_evolution == StateEvolutionKind::SlipSRW,
+               "state_evolution parses as SlipSRW");
+   TEST_ASSERT(cfg.rate_state->f_w_default == 0.2, "f_w_default == 0.2");
+   TEST_ASSERT(cfg.rate_state->V_w_default == 0.1, "V_w_default == 0.1");
+}
+
+static void T_SRW_2_default_is_aging()
+{
+   std::cout << "\n[T-SRW-2] no state_evolution key -> Aging (backward compat)\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.rate_state.has_value(), "rate_state present");
+   TEST_ASSERT(cfg.rate_state->state_evolution == StateEvolutionKind::Aging,
+               "state_evolution defaults to Aging when the key is absent");
+}
+
+static void T_SRW_3_bad_state_evolution_aborts()
+{
+   std::cout << "\n[T-SRW-3] state_evolution='bogus' aborts\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state")
+                            + RSBlockSRW("bogus", 0.2, 0.1);
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "state_evolution='bogus' must abort");
+}
+
+static void T_SRW_4_fw_ge_f0_aborts()
+{
+   std::cout << "\n[T-SRW-4] slip_srw with f_w >= f_0_default aborts\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state")
+                            + RSBlockSRW("slip_srw", 0.7, 0.1);  // f_w 0.7 > f_0 0.6
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "slip_srw with f_w >= f_0_default must abort");
+}
+
+static void T_SRW_5_vw_nonpositive_aborts()
+{
+   std::cout << "\n[T-SRW-5] slip_srw with V_w <= 0 aborts\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state")
+                            + RSBlockSRW("slip_srw", 0.2, 0.0);
+   TEST_ASSERT(ParseAbortsInChild(toml),
+               "slip_srw with V_w <= 0 must abort");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -860,6 +926,11 @@ int main(int, char**)
    T_30_sigma_n_strength_floor_negative_aborts();
    T_31_sigma_n_strength_floor_zero_allowed();
    T_32_sigma_n_floor_misnested_aborts();
+   T_SRW_1_slip_srw_parses();
+   T_SRW_2_default_is_aging();
+   T_SRW_3_bad_state_evolution_aborts();
+   T_SRW_4_fw_ge_f0_aborts();
+   T_SRW_5_vw_nonpositive_aborts();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

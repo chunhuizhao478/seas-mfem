@@ -34,6 +34,7 @@
 #include "wave_operator.hpp"                      // FaultFrictionLaw
 #include "tpv205_substep_iterator.hpp"
 #include "tpv102_substep_iterator.hpp"
+#include "tpv104_substep_iterator.hpp"            // SlipLawSRWPsi + SRW iterator
 #include "../friction/state_evolution.hpp"        // AgingLawPsi
 #include "../spatial/code/spatial_friction.hpp"   // spatial::RateStateBlock
 
@@ -215,6 +216,104 @@ private:
    // MUST be declared (and thus constructed) BEFORE it_.
    AgingLawPsi           law_;
    Tpv102SubStepIterator it_;
+};
+
+/// Slip-law strong-rate-weakening (SCEC TPV104 FL=103) adapter over the
+/// existing `Tpv104SubStepIterator` (slip-law-SRW plan §4.3).  Selected by the
+/// spatial driver when `[friction.rate_state].state_evolution == "slip_srw"`.
+///
+/// Reuses the proven SRW physics.  The per-QP weakening velocity `V_w` is
+/// injected once via `SetVw(...)` before the time loop (the IFrictionIterator
+/// interface carries no V_w), and `Advance` forwards to the Tpv104 iterator's
+/// nuc_callback overload with `FrictionSolver::Method::Brent` (CLAUDE.md — NOT
+/// the Tpv104 default NewtonRaphsonStable).  That overload sources a, b (=d.b),
+/// Dc PER-QP from DOFData, so the depth-varying b(z) profile is honored
+/// (R-001); the scalar a/b passed to the owned `SlipLawSRWPsi` are unused
+/// placeholders (only V0/f0/muW are read).
+class SlipLawSRWFrictionIterator : public IFrictionIterator
+{
+public:
+   SlipLawSRWFrictionIterator(FaultFaceFlux &flux,
+                              const spatial::RateStateBlock &blk)
+      : state_evo_(blk.a_default, blk.b_default, blk.V_0_default,
+                   blk.f_0_default, blk.f_w_default, blk.V_w_default),
+        it_(flux, state_evo_)
+   {
+      // Harmless safety net (plan §4.3 / R-005): the iterator evolves ψ via the
+      // free UpdateStateAnalyticSlipLawSRW + non-virtual getters and never calls
+      // the base virtuals — but flip production mode so a future edit that
+      // routes through one aborts loudly instead of silently using a scalar.
+      state_evo_.SetProductionMode();
+   }
+
+   // it_ holds a `const SlipLawSRWPsi&` bound to state_evo_; a member-wise
+   // copy/move would dangle the copy's reference.  Held via unique_ptr by the
+   // factory, so forbid copy/move to make the footgun a compile error.
+   SlipLawSRWFrictionIterator(const SlipLawSRWFrictionIterator&) = delete;
+   SlipLawSRWFrictionIterator&
+      operator=(const SlipLawSRWFrictionIterator&) = delete;
+   SlipLawSRWFrictionIterator(SlipLawSRWFrictionIterator&&) = delete;
+   SlipLawSRWFrictionIterator&
+      operator=(SlipLawSRWFrictionIterator&&) = delete;
+
+   /// Inject the resolved per-DOF weakening velocity (sized to dof_data).  MUST
+   /// be called before the first Advance (the interface Advance carries no V_w).
+   void SetVw(std::vector<real_t> V_w) { V_w_ = std::move(V_w); }
+
+   void SetSubSteps(std::vector<real_t> deltaT,
+                    std::vector<real_t> time_weights) override
+   { it_.SetSubSteps(std::move(deltaT), std::move(time_weights)); }
+
+   const std::vector<real_t> &GetDeltaT() const override
+   { return it_.GetDeltaT(); }
+   const std::vector<real_t> &GetTimeWeights() const override
+   { return it_.GetTimeWeights(); }
+
+   void Advance(std::vector<DOFData> &dof_data,
+                const std::vector<Vector> &fault_coords,
+                const std::vector<std::vector<real_t>> &Q_pointwise_plus,
+                const std::vector<std::vector<real_t>> &Q_pointwise_minus,
+                real_t dt_macro,
+                real_t t_macro_start,
+                real_t *I_imp_plus_flat,
+                real_t *I_imp_minus_flat,
+                const std::function<void(real_t, real_t)> &nuc_callback)
+      override
+   {
+      if (!nuc_callback)
+      {
+         throw std::runtime_error(
+            "SlipLawSRWFrictionIterator::Advance: nuc_callback is empty; pass "
+            "a no-op [](real_t,real_t){} to opt out of nucleation.");
+      }
+      MFEM_VERIFY(V_w_.size() == dof_data.size(),
+                  "SlipLawSRWFrictionIterator::Advance: per-QP V_w (size "
+                  << V_w_.size() << ") must equal dof_data.size() ("
+                  << dof_data.size() << "); call SetVw(...) with the resolved "
+                  "per-DOF V_w before the time loop.");
+      it_.AdvanceWithSubStepStates(dof_data, fault_coords, V_w_,
+                                   Q_pointwise_plus, Q_pointwise_minus,
+                                   dt_macro, t_macro_start,
+                                   I_imp_plus_flat, I_imp_minus_flat,
+                                   FrictionSolver::Method::Brent,
+                                   nuc_callback);
+   }
+
+   // Tpv104SubStepIterator has no [SLIP] is_shared diag hook (unlike Tpv102/
+   // Tpv205); store for symmetry but it is otherwise unused.
+   void SetDiagNumLocalFaultQPs(int n) override
+   { diag_num_local_fault_qps_ = n; }
+
+   FaultFrictionLaw WaveOpLaw() const override
+   { return FaultFrictionLaw::RateAndState; }
+
+private:
+   // Member-init order matters: it_ holds a `const SlipLawSRWPsi&`, so
+   // state_evo_ MUST be declared (and thus constructed) BEFORE it_.
+   SlipLawSRWPsi          state_evo_;
+   Tpv104SubStepIterator  it_;
+   std::vector<real_t>    V_w_;
+   int                    diag_num_local_fault_qps_ = 0;
 };
 
 } // namespace seas

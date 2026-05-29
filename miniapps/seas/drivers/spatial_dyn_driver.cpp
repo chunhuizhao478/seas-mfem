@@ -815,7 +815,15 @@ int main(int argc, char *argv[])
                     ? " (per-rank prefix; no serial replication)" : "") << "\n"
                 << "fe order:         " << cfg.mesh.order << "\n"
                 << "law:              "
-                << (is_lsw ? "slip_weakening" : "rate_state") << "\n"
+                << (is_lsw ? "slip_weakening" : "rate_state")
+                << (is_lsw
+                       ? ""
+                    : (cfg.rate_state.has_value()
+                       && cfg.rate_state->state_evolution
+                            == spatial::StateEvolutionKind::SlipSRW)
+                       ? "  [state_evolution: slip_srw — TPV104 FL=103 SRW]"
+                       : "  [state_evolution: aging]")
+                << "\n"
                 << "stress kind:      "
                 << (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor
                     ? "constant_tensor" : "sidecar_hdf5") << "\n"
@@ -836,6 +844,16 @@ int main(int argc, char *argv[])
                 << "dry-run:          " << (dry_run ? "yes" : "no") << "\n"
                 << "ranks:            " << nprocs << "\n"
                 << "================================================\n";
+      if (!is_lsw && cfg.rate_state.has_value()
+          && cfg.rate_state->state_evolution
+               == spatial::StateEvolutionKind::SlipSRW)
+      {
+         std::cout << "SRW params:       f_w=" << cfg.rate_state->f_w_default
+                   << ", V_w=" << cfg.rate_state->V_w_default
+                   << " m/s (constant); f_0=" << cfg.rate_state->f_0_default
+                   << "; friction solver=Brent\n"
+                   << "================================================\n";
+      }
    }
 
    // -----------------------------------------------------------------
@@ -1601,12 +1619,18 @@ int main(int argc, char *argv[])
    // loop.  Diagnostic only (gated on the flag; no behaviour change off).
    if (verify_dispatch && rank == 0)
    {
+      const bool is_srw = (!is_lsw) && cfg.rate_state.has_value()
+         && cfg.rate_state->state_evolution
+              == spatial::StateEvolutionKind::SlipSRW;
       std::cout << "[verify-dispatch] friction law  : "
                 << (is_lsw ? "LSW (slip-weakening)"
-                           : "RateAndState (aging)") << "\n"
+                   : is_srw ? "RateAndState (slip-law SRW, TPV104 FL=103)"
+                            : "RateAndState (aging)") << "\n"
                 << "[verify-dispatch] friction iter : "
                 << (is_lsw
                        ? "LswFrictionIterator (Tpv205 closed-form)"
+                   : is_srw
+                       ? "SlipLawSRWFrictionIterator (Tpv104 SRW, Brent)"
                        : "RateStateAgingFrictionIterator (Tpv102 aging, Brent)")
                 << "\n"
                 << "[verify-dispatch] nucleation    : "

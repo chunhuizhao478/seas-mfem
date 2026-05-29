@@ -39,6 +39,7 @@
 #include "tpv104_nucleation.hpp"
 #include "../friction/slip_law_srw_psi.hpp"
 
+#include <functional>
 #include <vector>
 
 namespace mfem
@@ -196,6 +197,36 @@ public:
       real_t *I_imp_minus_flat,
       FrictionSolver::Method method
          = FrictionSolver::Method::NewtonRaphsonStable);
+
+   /// SAFS slip-law-SRW variant of `AdvanceWithSubStepStates` (slip-law-SRW
+   /// plan §4.4, R-001).  Identical to the method above with TWO deliberate
+   /// differences for the spatial driver's `gradual_overstress` + depth-profile
+   /// path:
+   ///   1. the per-sub-step nucleation increment is delegated to
+   ///      `nuc_callback(t_sub_end, dt_sub)` instead of the hard-coded
+   ///      `ApplyNucleationIncremental_TPV104` (mirrors the Tpv102 R-013
+   ///      callback overload); and
+   ///   2. the ψ-update sources `b` PER-QP from `DOFData.b`, NOT the scalar
+   ///      `SlipLawSRWPsi::GetB()`, so a depth-varying b(z) profile is honored.
+   /// The original method above is UNTOUCHED, so the TPV104 byte-exact
+   /// regression is preserved (this overload is reached only from the SAFS
+   /// `SlipLawSRWFrictionIterator` adapter).  `nuc_callback` must be non-empty
+   /// (pass a no-op `[](real_t,real_t){}` to opt out); every `DOFData.b` must
+   /// be finite and > 0 (set by `InitializeFaultDOFs_*_RS`).  `method` has no
+   /// default here (the trailing callback follows it); the adapter passes
+   /// `FrictionSolver::Method::Brent` (CLAUDE.md).
+   void AdvanceWithSubStepStates(
+      std::vector<DOFData> &dof_data,
+      const std::vector<Vector> &fault_coords,
+      const std::vector<real_t> &V_w,
+      const std::vector<std::vector<real_t>> &Q_pointwise_plus_per_substep,
+      const std::vector<std::vector<real_t>> &Q_pointwise_minus_per_substep,
+      real_t dt_macro,
+      real_t t_macro_start,
+      real_t *I_imp_plus_flat,
+      real_t *I_imp_minus_flat,
+      FrictionSolver::Method method,
+      const std::function<void(real_t, real_t)> &nuc_callback);
 
    /// Accessor for the configured sub-step sizes (test hook).
    const std::vector<real_t> &GetDeltaT() const { return deltaT_; }

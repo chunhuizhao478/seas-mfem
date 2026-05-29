@@ -2047,6 +2047,7 @@ $(SPATIAL_DYN_DRIVER_OBJ): %.o: $(SRC)%.cpp \
 seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
                           $(TPV205_SHARED_OBJS) \
                           $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                          $(TPV104_SUBSTEP_ITERATOR_OBJ) \
                           $(FRICTION_ITERATOR_FACTORY_OBJ) \
                           $(WAVE_OPERATOR_OBJ) \
                           $(PRECOMPUTED_FACE_FLUXES_OBJ) \
@@ -2067,6 +2068,7 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(TPV205_SHARED_OBJS) \
 	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV104_SUBSTEP_ITERATOR_OBJ) \
 	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
 	    $(WAVE_OPERATOR_OBJ) \
 	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
@@ -2226,6 +2228,7 @@ seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
                                      $(FRICTION_ITERATOR_FACTORY_OBJ) \
                                      $(TPV205_SUBSTEP_ITERATOR_OBJ) \
                                      $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+                                     $(TPV104_SUBSTEP_ITERATOR_OBJ) \
                                      $(FAULT_FACE_FLUX_OBJ) \
                                      $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
@@ -2233,6 +2236,7 @@ seas_test_friction_iterator_factory: $(TEST_FRICTION_ITERATOR_FACTORY_OBJ) \
 	    $(FRICTION_ITERATOR_FACTORY_OBJ) \
 	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
 	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV104_SUBSTEP_ITERATOR_OBJ) \
 	    $(FAULT_FACE_FLUX_OBJ) \
 	    $(FRICTION_SOLVER_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS)
