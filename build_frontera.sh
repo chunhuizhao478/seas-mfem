@@ -68,19 +68,21 @@
 #                               # USE_GMSH=NO skips the build.
 #   GMSH_VERSION=4.13.1         # gmsh release tag to build from source.
 #   JOBS=8                      # Parallel build jobs
-#   USE_CALIPER=YES             # Build MFEM + the seas driver with Caliper
-#                                 (MFEM_USE_CALIPER=YES) to activate the
+#   USE_CALIPER=NO              # Default YES: build MFEM + the seas driver with
+#                                 Caliper (MFEM_USE_CALIPER=YES) to activate the
 #                                 MFEM_PERF_SCOPE perfgraph annotations in the
-#                                 dynamic-rupture hot path.  Default NO.  When
-#                                 YES, the seas build is force-cleaned (the
-#                                 Makefile has no header deps, so a stale no-op
-#                                 object would yield an empty perfgraph).  See
+#                                 dynamic-rupture hot path, and force-clean the
+#                                 seas build (the Makefile has no header deps, so
+#                                 a stale no-op object would yield an empty
+#                                 perfgraph).  USE_CALIPER=NO skips it.  See
 #                                 miniapps/seas/document/caliper_perfgraph_dev/
 #                                 README_caliper_build_and_run.md.
-#   CALIPER_DIR=...             # Caliper install prefix (REQUIRED when
-#                                 USE_CALIPER=YES).  Falls back to the loaded
-#                                 module's TACC_CALIPER_DIR, then to
-#                                 `spack location -i caliper`.
+#   CALIPER_DIR=...             # Caliper install prefix.  If unset, resolved
+#                                 from a loaded module (TACC_CALIPER_DIR) or
+#                                 spack, else BUILT FROM SOURCE into
+#                                 extern/caliper/install.  Non-fatal: if all
+#                                 fail, the build continues without Caliper.
+#   CALIPER_VERSION=v2.11.0     # Caliper release tag to build from source.
 #   ADIAK_DIR=...               # Optional Adiak prefix (adds run metadata to
 #                                 the Caliper output).
 
@@ -97,8 +99,9 @@ FORCE_REBUILD="${FORCE_REBUILD:-0}"
 USE_GMSH="${USE_GMSH:-YES}"
 GMSH_VERSION="${GMSH_VERSION:-4.13.1}"
 JOBS="${JOBS:-8}"
-USE_CALIPER="${USE_CALIPER:-NO}"
+USE_CALIPER="${USE_CALIPER:-YES}"
 CALIPER_DIR="${CALIPER_DIR:-}"
+CALIPER_VERSION="${CALIPER_VERSION:-v2.11.0}"
 ADIAK_DIR="${ADIAK_DIR:-}"
 
 # FORCE_REBUILD=1 wins over QUICK=1: clear caches and rebuild from source.
@@ -275,6 +278,93 @@ HDF5_PREFIX="${HDF5_PREFIX:-${SCRIPT_DIR}/extern/hdf5/install}"
 ZFP_PREFIX="${ZFP_PREFIX:-${SCRIPT_DIR}/extern/zfp/install}"
 H5Z_ZFP_PREFIX="${H5Z_ZFP_PREFIX:-${SCRIPT_DIR}/extern/h5z-zfp/install}"
 GMSH_PREFIX="${GMSH_PREFIX:-${SCRIPT_DIR}/extern/gmsh}"
+CALIPER_PREFIX="${CALIPER_PREFIX:-${SCRIPT_DIR}/extern/caliper/install}"
+
+# Build Caliper ${CALIPER_VERSION} from source into ${CALIPER_PREFIX} so a
+# default `bash build_frontera.sh` produces a Caliper-enabled binary with NO
+# external module/spack prerequisite (mirrors the hdf5/zfp/gmsh from-source
+# builds).  libcaliper is LINKED into MFEM + the seas driver, so it MUST use
+# the SAME intel/19 + impi/19 toolchain (mpicc/mpicxx) as the rest of the build
+# — unlike gmsh (a standalone CLI built with gcc), an ABI mismatch here would
+# corrupt the linked binary.  An explicit CALIPER_DIR (env / module / spack)
+# takes precedence and skips this build; USE_CALIPER=NO skips it entirely.
+# Non-fatal: on any failure it WARNs and returns 1 so the caller continues
+# WITHOUT Caliper (you still get a working production binary) rather than
+# aborting the whole build.
+build_caliper() {
+    if [ "${USE_CALIPER}" != "YES" ] && [ "${USE_CALIPER}" != "1" ] && [ "${USE_CALIPER}" != "yes" ]; then
+        echo ""
+        echo "=== Skipping Caliper build (USE_CALIPER=${USE_CALIPER}) ==="
+        return 0
+    fi
+    # An externally provided / module / spack Caliper wins — do not build.
+    if [ -n "${CALIPER_DIR}" ] && [ -f "${CALIPER_DIR}/include/caliper/cali.h" ]; then
+        echo ""
+        echo "=== Using provided Caliper at ${CALIPER_DIR} (not building from source) ==="
+        return 0
+    fi
+
+    local cali_so="${CALIPER_PREFIX}/lib64/libcaliper.so"
+    local cali_so_alt="${CALIPER_PREFIX}/lib/libcaliper.so"
+    local cali_hdr="${CALIPER_PREFIX}/include/caliper/cali.h"
+    if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
+        if { [ -f "${cali_so}" ] || [ -f "${cali_so_alt}" ]; } && [ -f "${cali_hdr}" ]; then
+            echo ""
+            echo "=== Reusing existing Caliper at ${CALIPER_PREFIX} ==="
+            echo "    (set FORCE_REBUILD=1 to clear and rebuild)"
+            CALIPER_DIR="${CALIPER_PREFIX}"
+            return 0
+        fi
+        echo ""
+        echo "=== Cache miss: Caliper install incomplete — building ==="
+    fi
+
+    echo ""
+    echo "=== Building Caliper ${CALIPER_VERSION} from source (intel/19 + impi/19) ==="
+    mkdir -p "${SCRIPT_DIR}/extern/caliper"
+    local cali_src="${SCRIPT_DIR}/extern/caliper/src"
+    if [ ! -d "${cali_src}/.git" ]; then
+        rm -rf "${cali_src}"
+        if ! git clone --quiet --depth 1 --branch "${CALIPER_VERSION}" \
+                https://github.com/LLNL/Caliper.git "${cali_src}"; then
+            echo "WARNING: Caliper clone (${CALIPER_VERSION}) failed — continuing WITHOUT Caliper."
+            return 1
+        fi
+    fi
+    if ! (
+        cd "${cali_src}"
+        git fetch --tags --quiet || true
+        git checkout --quiet "${CALIPER_VERSION}" 2>/dev/null \
+            || git checkout --quiet "tags/${CALIPER_VERSION}" 2>/dev/null || true
+        rm -rf "build_${CALIPER_VERSION}"
+        mkdir -p "build_${CALIPER_VERSION}"
+        cd "build_${CALIPER_VERSION}"
+        # SAME toolchain as MFEM (ABI), MPI-aware, shared lib, minimal.
+        cmake .. \
+            -DCMAKE_INSTALL_PREFIX="${CALIPER_PREFIX}" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_C_COMPILER="$(which mpicc)" \
+            -DCMAKE_CXX_COMPILER="$(which mpicxx)" \
+            -DBUILD_SHARED_LIBS=ON \
+            -DWITH_MPI=ON \
+            -DWITH_TESTS=OFF \
+            -DWITH_FORTRAN=OFF \
+            -DWITH_DOCS=OFF \
+            -DBUILD_TESTING=OFF
+        make -j"${JOBS}"
+        make install
+    ); then
+        echo "WARNING: Caliper build failed — continuing WITHOUT Caliper."
+        return 1
+    fi
+
+    if [ ! -f "${cali_hdr}" ] || { [ ! -f "${cali_so}" ] && [ ! -f "${cali_so_alt}" ]; }; then
+        echo "WARNING: Caliper build finished but cali.h / libcaliper missing — continuing WITHOUT Caliper."
+        return 1
+    fi
+    CALIPER_DIR="${CALIPER_PREFIX}"
+    echo "  Caliper ${CALIPER_VERSION} installed at ${CALIPER_PREFIX}"
+}
 
 # Build HDF5 ${HDF5_VERSION} from source, configured with --enable-parallel
 # against the loaded intel/19 + impi/19 stack.  HDF5 1.14.x is required by
@@ -612,33 +702,37 @@ else
     echo "  WARNING: toml11 submodule not available. TOML driver will not build."
 fi
 
-# Caliper profiling (perfgraph) for the dynamic-rupture hot path.
-# MFEM_USE_CALIPER=NO is the committed default (config/defaults.mk:181).
-# Enable with USE_CALIPER=YES to link libcaliper and activate the
-# MFEM_PERF_SCOPE annotations already present in the seas dynamic-rupture
-# code (dynamic/wave_operator.inl, dynamic/bimaterial_wave_operator.inl,
-# drivers/spatial_dyn_driver.cpp).  Provide the Caliper install prefix via
-# CALIPER_DIR (or a loaded module's TACC_CALIPER_DIR, or spack).
+# Caliper profiling (perfgraph) for the dynamic-rupture hot path.  Default ON
+# (USE_CALIPER=YES) so a plain `bash build_frontera.sh` produces a
+# Caliper-enabled binary that activates the MFEM_PERF_SCOPE annotations in the
+# seas dynamic-rupture code (dynamic/wave_operator.inl,
+# dynamic/bimaterial_wave_operator.inl, drivers/spatial_dyn_driver.cpp).
+# CALIPER_DIR is resolved as: explicit env > loaded module (TACC_CALIPER_DIR) >
+# spack > built-from-source (build_caliper, into ${CALIPER_PREFIX}).
+# Non-fatal: if none resolve and the source build fails, WARN and continue
+# WITHOUT Caliper (the build still succeeds; perfgraph annotations stay no-ops).
+# Set USE_CALIPER=NO to skip entirely.
 # Recipe: miniapps/seas/document/caliper_perfgraph_dev/README_caliper_build_and_run.md
 USE_CALIPER_RESOLVED="NO"
 if [ "${USE_CALIPER}" = "YES" ] || [ "${USE_CALIPER}" = "1" ] || [ "${USE_CALIPER}" = "yes" ]; then
-    USE_CALIPER_RESOLVED="YES"
     if [ -z "${CALIPER_DIR}" ] && [ -n "${TACC_CALIPER_DIR:-}" ]; then
         CALIPER_DIR="${TACC_CALIPER_DIR}"
     fi
     if [ -z "${CALIPER_DIR}" ] && command -v spack >/dev/null 2>&1; then
         CALIPER_DIR="$(spack location -i caliper 2>/dev/null || true)"
     fi
-    if [ -z "${CALIPER_DIR}" ] || [ ! -f "${CALIPER_DIR}/include/caliper/cali.h" ]; then
-        echo "ERROR: USE_CALIPER=YES but CALIPER_DIR is unset or invalid"
-        echo "       (looked for \${CALIPER_DIR}/include/caliper/cali.h)."
-        echo "  Provide a Caliper install prefix, e.g.:"
-        echo "    spack install caliper +adiak && export CALIPER_DIR=\$(spack location -i caliper)"
-        echo "  or 'module load caliper' (sets TACC_CALIPER_DIR), then re-run with USE_CALIPER=YES."
-        exit 1
+    # Build from source if still unresolved (self-contained default).
+    build_caliper || true
+    if [ -n "${CALIPER_DIR}" ] && [ -f "${CALIPER_DIR}/include/caliper/cali.h" ]; then
+        USE_CALIPER_RESOLVED="YES"
+        echo "  CALIPER_DIR  = ${CALIPER_DIR}"
+        if [ -n "${ADIAK_DIR}" ]; then echo "  ADIAK_DIR    = ${ADIAK_DIR}"; fi
+    else
+        echo "  WARNING: USE_CALIPER=YES but no usable Caliper (module/spack resolve +"
+        echo "           source build all failed) — continuing WITHOUT Caliper (perfgraph"
+        echo "           annotations stay no-ops).  Provide CALIPER_DIR=<prefix>,"
+        echo "           'module load caliper', or fix the extern/caliper build, then re-run."
     fi
-    echo "  CALIPER_DIR  = ${CALIPER_DIR}"
-    if [ -n "${ADIAK_DIR}" ]; then echo "  ADIAK_DIR    = ${ADIAK_DIR}"; fi
 fi
 
 echo ""
