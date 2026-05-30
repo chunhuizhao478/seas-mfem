@@ -74,7 +74,7 @@ module load petsc/3.15
 module load fftw3/3.3.8
 
 # --- locate the repo root (walk up to the dir containing miniapps/seas) ----
-_walk_up_dir="$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")"
+_walk_up_dir="${SEAS_MFEM_ROOT:-${SLURM_SUBMIT_DIR:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")}}"
 while [[ "${_walk_up_dir}" != "/" && ! -d "${_walk_up_dir}/miniapps/seas" ]]; do
     _walk_up_dir="$(dirname "${_walk_up_dir}")"
 done
