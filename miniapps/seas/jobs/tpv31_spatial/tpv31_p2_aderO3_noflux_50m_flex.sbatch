@@ -2,10 +2,10 @@
 #SBATCH -J tpv31_p2_aderO3
 #SBATCH -o tpv31_p2_aderO3_%j.out
 #SBATCH -e tpv31_p2_aderO3_%j.err
-#SBATCH -p flex
-#SBATCH -N 16
-#SBATCH -n 800
-#SBATCH -t 48:00:00
+#SBATCH -p development
+#SBATCH -N 8
+#SBATCH -n 400
+#SBATCH -t 00:30:00
 #SBATCH -A EAR20006
 
 # =========================================================================
