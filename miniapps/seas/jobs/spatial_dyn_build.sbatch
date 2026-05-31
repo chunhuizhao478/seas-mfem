@@ -39,6 +39,20 @@
 # reintroduces the relink race this job exists to avoid).
 #
 # Override: BUILD_JOBS (parallel make jobs; default 48).
+#           CLEAN=1   force a CLEAN rebuild of the seas objects first (default
+#                     0 = incremental).  Submit with:
+#                       sbatch --export=ALL,CLEAN=1 .../spatial_dyn_build.sbatch
+#                     Use after a `git pull` to be CERTAIN no stale object
+#                     survives: the seas Makefile has NO header-dependency
+#                     tracking, so an incremental `make` can silently reuse an
+#                     out-of-date .o (e.g. a spatial_friction.o predating a
+#                     signature/logic change -> ABI/logic mismatch or a wrong
+#                     run-time abort).  NOTE: the Makefile's own `make clean` is
+#                     INCOMPLETE (clean-build removes only *.o / drivers/ /
+#                     tests/, NOT dynamic/ spatial/code/ io/ — where most of the
+#                     driver's objects live), so this job removes the driver's
+#                     object dirs explicitly.  extern/ (HDF5/ZFP/Caliper/gmsh)
+#                     is never touched, so a clean build stays a few minutes.
 
 export LC_ALL=C
 export LANG=C
@@ -84,12 +98,34 @@ grep -q '^MFEM_USE_HDF5 *= YES'    config/config.mk || echo "WARNING: MFEM_USE_H
 grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || echo "WARNING: MFEM_USE_H5Z_ZFP != YES — ZFP-compressed fault output (--paraview-fault-zfp-tol) will be unavailable; VTU jobs are fine."
 
 BUILD_JOBS="${BUILD_JOBS:-48}"
+CLEAN="${CLEAN:-0}"
 
 cd miniapps/seas
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Building:    seas_spatial_dyn_driver  (make -j${BUILD_JOBS})"
 echo "In:          $(pwd)"
+
+# --- optional clean step (CLEAN=1) ---------------------------------------
+# Remove every object that links into seas_spatial_dyn_driver so each one
+# recompiles from the current source.  This works AROUND the incomplete
+# Makefile `clean` target (which misses dynamic/ spatial/code/ io/), and is
+# scoped to the seas source tree — extern/ (HDF5/ZFP/Caliper/gmsh) and the
+# parent libmfem.a are NOT touched, so the clean build is still ~minutes.
+case "${CLEAN}" in
+    1|YES|yes|true|TRUE|on|ON)
+        echo "Clean build (CLEAN=${CLEAN}): removing the driver's object files"
+        echo "             (root + drivers/ dynamic/ spatial/code/ io/ config/"
+        echo "             friction/) so every translation unit recompiles."
+        rm -f ./*.o drivers/*.o dynamic/*.o spatial/code/*.o io/*.o \
+              config/*.o friction/*.o
+        ;;
+    *)
+        echo "Incremental build (CLEAN=${CLEAN}).  Re-submit with"
+        echo "             'sbatch --export=ALL,CLEAN=1 ...' to force a clean"
+        echo "             rebuild (recommended after a git pull)."
+        ;;
+esac
 
 make seas_spatial_dyn_driver -j"${BUILD_JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
