@@ -127,8 +127,30 @@ fi
 # above already fail-fast on a drifted interior_flux / [mesh].order pre-launch.
 
 OUT="${TPV31_OUT:-tpv31/out_p2_${SLURM_JOB_ID:-local}}"
-TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across
-                               # the flex wall limit)
+
+# --- perfgraph profiling mode: `sbatch <thisscript> perfgraph` ------------
+# To find where the time goes, submit with the single word `perfgraph`:
+#     sbatch tpv31_p2_aderO3_noflux_50m_flex.sbatch perfgraph
+# It turns Caliper ON and runs a SHORT slice (default ~100 steps) so the run
+# REACHES a clean exit and the Caliper runtime-report actually flushes.  A
+# wall-clock-killed run (CANCELLED ... DUE TO TIME LIMIT) emits NO report —
+# which is why a full 15 s (or even a 0.4 s) run gives you nothing.  We already
+# reach step ~500 inside the wall, so setup + ~100 steps completes with margin.
+# Slice-length override: TPV31_PERFGRAPH_TFINAL (s).  p2 dt ~ 3.74e-5 s, so
+# 0.004 s ~ 107 steps, 0.008 s ~ 214 steps.
+PERFGRAPH_MODE=0
+if [[ "${1:-}" == "perfgraph" ]]; then
+    PERFGRAPH_MODE=1
+    TPV31_PERFGRAPH=1
+fi
+
+if [[ "${PERFGRAPH_MODE}" == "1" ]]; then
+    TFINAL="${TPV31_TFINAL:-${TPV31_PERFGRAPH_TFINAL:-0.004}}"   # short -> finishes -> report flushes
+    echo "[tpv31-p2] PERFGRAPH MODE: profiling slice tfinal=${TFINAL} s (p2 dt ~ 3.74e-5 s)."
+    echo "           Runs to a CLEAN exit so the Caliper report flushes; the full run is tfinal=15 s."
+else
+    TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across the flex wall limit)
+fi
 
 # --- optional Caliper "perfgraph" (MFEM's profiling facility) -------------
 # MFEM's performance-graph facility is Caliper: general/annotation.hpp defines
