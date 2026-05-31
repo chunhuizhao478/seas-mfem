@@ -812,7 +812,10 @@ int main(int argc, char *argv[])
                 << (cfg.stress.kind == spatial::StressSourceKind::ConstantTensor
                     ? "constant_tensor"
                     : cfg.stress.kind == spatial::StressSourceKind::FaultLocalPrestress
-                      ? "fault_local_prestress" : "sidecar_hdf5") << "\n"
+                      ? "fault_local_prestress"
+                    : cfg.stress.kind ==
+                      spatial::StressSourceKind::DepthProportionalToShearModulus
+                      ? "depth_proportional" : "sidecar_hdf5") << "\n"
                 << "tfinal:           " << cfg.time.tfinal << " s\n"
                 << "cfl:              " << cfg.numerics.cfl << "\n"
                 << "ader order:       " << cfg.numerics.ader_order << "\n"
@@ -2195,14 +2198,24 @@ int main(int argc, char *argv[])
       { pv_out->GetSchedule().dt_interseismic = cfg.output.paraview_interseismic_dt; }
 
 #ifdef MFEM_USE_HDF5
-      if (cfg.output.paraview_volume_zfp_tol > 0.0
+      // Only set HDF5 chunk compression (and probe the H5Z-ZFP plugin) when the
+      // volume collection is ACTUALLY being written.  ParseVolumeMode("off")
+      // leaves volume_mode at the build default (Hdf5) while disabling saving,
+      // so without the volume_pv_enabled guard a paraview_volume="off" config
+      // that still carries a stale paraview_volume_zfp_tol would call
+      // SetVolumeHDFCompression(ZfpAccuracy) -> ProbeH5ZZfpPluginOrAbort and
+      // abort a run that emits no volume HDF5 at all.  Mirrors the
+      // fault_pv_enabled guard on the fault path below.
+      if (volume_pv_enabled
+          && cfg.output.paraview_volume_zfp_tol > 0.0
           && volume_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
       {
          pv_out->SetVolumeHDFCompression(
             mfem::ParaViewHDFDataCollection::HDFCompression::ZfpAccuracy,
             cfg.output.paraview_volume_zfp_tol);
       }
-      else if (cfg.output.paraview_volume_deflate_level >= 0
+      else if (volume_pv_enabled
+               && cfg.output.paraview_volume_deflate_level >= 0
                && volume_mode == ParaViewOutput<ParMesh>::VolumeOutputMode::Hdf5)
       {
          pv_out->SetVolumeHDFCompression(
