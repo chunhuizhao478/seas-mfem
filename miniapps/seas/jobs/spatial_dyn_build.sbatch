@@ -2,7 +2,7 @@
 #SBATCH -J spdyn_build
 #SBATCH -o spdyn_build_%j.out
 #SBATCH -e spdyn_build_%j.err
-#SBATCH -p development
+#SBATCH -p flex
 #SBATCH -N 1
 #SBATCH -n 1
 #SBATCH -t 00:30:00
