@@ -2,10 +2,10 @@
 #SBATCH -J tpv102_p1_rk45_mf
 #SBATCH -o tpv102_p1_rk45_mf_%j.out
 #SBATCH -e tpv102_p1_rk45_mf_%j.err
-#SBATCH -p development
-#SBATCH -N 8
-#SBATCH -n 400
-#SBATCH -t 02:00:00
+#SBATCH -p flex
+#SBATCH -N 16
+#SBATCH -n 800
+#SBATCH -t 01:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
