@@ -227,10 +227,11 @@ static void F6_rate_state_srw()
       spatial::StateEvolutionKind::SlipLawStrongRateWeakening;
    cfg.rate_state->V_w_default = 0.1;
    cfg.rate_state->f_w_default = 0.1;
-   // The SRW dispatch needs the resolved per-DOF V_w (mfem::Vector).
+   // The SRW dispatch needs the resolved per-DOF V_w (mfem::Vector), sized to
+   // the same per-DOF fault count as the other resolved arrays (rs->a).
    spatial::RateStatePerDOFParams rs;
-   rs.V_w.SetSize(1);
-   rs.V_w = 0.1;
+   rs.a.SetSize(1);    rs.a   = 0.01;
+   rs.V_w.SetSize(1);  rs.V_w = 0.1;
    std::unique_ptr<IFrictionIterator> fr =
       MakeFrictionIterator(cfg, flux, &rs);
    TEST_ASSERT(fr != nullptr, "factory returns a non-null SRW iterator");
@@ -247,6 +248,46 @@ static void F6_rate_state_srw()
    });
    TEST_ASSERT(srw_no_rs_aborts,
                "SRW dispatch without rs (per-DOF V_w) aborts");
+
+   // A V_w sized inconsistently with rs->a (the genuine "forgot to thread V_w
+   // through ResolveRateState" bug) must still abort.
+   const bool srw_vw_mismatch_aborts = RunInChild_([&]() {
+      FaultFaceFlux f2(kRho, kCp, kCs);
+      spatial::RateStatePerDOFParams bad_rs;
+      bad_rs.a.SetSize(4);     bad_rs.a   = 0.01;   // 4 fault DOFs resolved...
+      bad_rs.V_w.SetSize(0);                        // ...but V_w never filled.
+      auto bad = MakeFrictionIterator(cfg, f2, &bad_rs);
+      (void) bad;
+   });
+   TEST_ASSERT(srw_vw_mismatch_aborts,
+               "SRW dispatch with V_w size != a size aborts");
+}
+
+// =====================================================================
+// F7 (np>1 fault-less rank regression): an MPI rank that owns no local
+//     fault DOF resolves N==0 -> empty rs.a AND empty rs.V_w.  The SRW
+//     factory MUST accept this (the iterator's ValidateExtra checks
+//     Size()==dof_data.size(), i.e. 0==0, and the empty QP loop never
+//     indexes V_w).  A `Size() > 0` guard aborted TPV104 at np=800 on
+//     every fault-less rank.
+// =====================================================================
+static void F7_rate_state_srw_faultless_rank()
+{
+   std::cout << "\n[F7] RateState + SRW, fault-less rank (N==0) accepted\n";
+   FaultFaceFlux flux(kRho, kCp, kCs);
+   spatial::SpatialFrictionConfig cfg = MakeRateStateConfig(FrictionSolver::V0);
+   cfg.rate_state->state_evolution =
+      spatial::StateEvolutionKind::SlipLawStrongRateWeakening;
+   cfg.rate_state->V_w_default = 0.1;
+   cfg.rate_state->f_w_default = 0.1;
+   // Fault-less rank: ResolveRateState SetSize(0)s every per-DOF array.
+   spatial::RateStatePerDOFParams rs;   // a, V_w both default-empty (Size()==0)
+   std::unique_ptr<IFrictionIterator> fr =
+      MakeFrictionIterator(cfg, flux, &rs);
+   TEST_ASSERT(fr != nullptr,
+               "SRW factory accepts an empty rs (fault-less rank, N==0)");
+   TEST_ASSERT(dynamic_cast<RateStateSlipLawSrwIterator*>(fr.get()) != nullptr,
+               "fault-less-rank SRW still dispatches to the SRW iterator");
 }
 
 int main(int /*argc*/, char** /*argv*/)
@@ -258,6 +299,7 @@ int main(int /*argc*/, char** /*argv*/)
    F4_v0_guard();
    F5_lsw_empty_callback_rejected();
    F6_rate_state_srw();
+   F7_rate_state_srw_faultless_rank();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 2 test_friction_iterator_factory: "

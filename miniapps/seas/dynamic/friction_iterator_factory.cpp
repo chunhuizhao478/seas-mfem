@@ -61,9 +61,22 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
                         "MakeFrictionIterator: state_evolution=slip_law_strong_"
                         "rate_weakening requires resolved per-DOF params (rs) "
                         "for the V_w side-channel.");
-            MFEM_VERIFY(rs->V_w.Size() > 0,
-                        "MakeFrictionIterator: SRW needs a non-empty rs->V_w "
-                        "(thread it through ResolveRateState).");
+            // V_w must be resolved to the SAME per-DOF fault count as the other
+            // rate-state arrays (ResolveRateState SetSize(N)s them together).
+            // Do NOT require Size() > 0: at np>1 the fault is partitioned across
+            // ranks, so a rank that owns no local fault face has N==0 and a
+            // legitimately empty V_w (== empty rs->a).  The SRW iterator already
+            // tolerates this — RateStateSlipLawSrwPolicy::ValidateExtra checks
+            // Size()==dof_data.size() (0==0) and the empty QP loop never indexes
+            // (*V_w)(i).  A `> 0` guard here aborted TPV104 (SRW) on every
+            // fault-less rank at np=800 while aging (TPV102, no guard) ran fine.
+            MFEM_VERIFY(rs->V_w.Size() == rs->a.Size(),
+                        "MakeFrictionIterator: SRW per-DOF V_w (size "
+                        << rs->V_w.Size() << ") must be resolved to the same "
+                        "fault-DOF count as the other rate-state arrays (rs->a "
+                        "size " << rs->a.Size() << "); thread V_w through "
+                        "ResolveRateState.  (An empty V_w is valid only when "
+                        "rs->a is also empty — a rank that owns no fault DOFs.)");
             // REVIEW R-007: put the law in production mode before wiring it
             // into the iterator.  The R-001 guard in SlipLawSRWPsi aborts if a
             // base virtual is invoked with the scalar V_w_default_/a_ instead
