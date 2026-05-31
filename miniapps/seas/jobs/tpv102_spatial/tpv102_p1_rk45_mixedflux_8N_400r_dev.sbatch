@@ -133,15 +133,17 @@ if [[ ! -f "${MESH}" ]]; then
     fi
 fi
 
-# --- dispatch dry-run (verify scalar + rate_state + RK45 + mixed-flux) -----
-echo "[tpv102-rk45] --dry-run --verify-dispatch (scheme: p1 / adjacent / rk45 / scalar):"
-./seas_spatial_dyn_driver \
-    --config "${CONFIG_TOML}" \
-    --mesh   "${MESH}" \
-    --time-integrator rk45 \
-    --mixed-flux adjacent \
-    --dry-run --verify-dispatch || {
-    echo "ERROR: TPV102 RK45/mixed-flux config failed the dispatch dry-run."; exit 3; }
+# --- NO separate serial --dry-run pre-flight (intentional; removed) --------
+# The spatial driver's --dry-run reads the full mesh + builds the entire
+# WaveOperator + fault tables BEFORE its dry-run exit (spatial_dyn_driver.cpp),
+# so launched WITHOUT ibrun (a single rank) it eats the wall and can be
+# SLURM-killed before the real run ever starts (this is why the tpv31 jobs
+# dropped it, commit 6ef7daf).  The ibrun run below does the SAME construction
+# + the SAME C++ dispatch guards in parallel and carries --verify-dispatch,
+# which PRINTS the resolved scheme (grep the *.out for "time integrator:",
+# "mixed flux:", "law:", "interior flux:") and then CONTINUES into the full
+# run — it does NOT exit the way --dry-run does.  The TOML greps above already
+# fail-fast on a drifted interior_flux / [mesh].order.
 
 OUT="${TPV102_OUT:-tpv102/out_rk45_mf_${SLURM_JOB_ID:-local}}"
 TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 2 h dev wall
@@ -160,7 +162,8 @@ ibrun ./seas_spatial_dyn_driver \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
-    --output-dir "${OUT}"
+    --output-dir "${OUT}" \
+    --verify-dispatch
 
 echo "[tpv102-rk45] done. On-fault traces in ${OUT}; compare vs the SCEC TPV102"
 echo "              reference.  Confirm V_max is BOUNDED (no ADER-p1-central-flux"
