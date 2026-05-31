@@ -76,10 +76,16 @@ if [[ ! -f "${MESH}" ]]; then
     fi
 fi
 
-# --- dispatch dry-run (verify matrix + depth_profile_1d + tpv31_lsw + nuc) -
-echo "[tpv31] --dry-run --verify-dispatch:"
-./seas_spatial_dyn_driver --config "${CONFIG_TOML}" --dry-run --verify-dispatch || {
-    echo "ERROR: TPV31 config failed the dispatch dry-run."; exit 3; }
+# --- NO separate serial --dry-run pre-flight (intentional; removed) --------
+# The spatial driver's --dry-run does NOT short-circuit at CLI-parse time the
+# way tpv102/104 do (tpv102_driver.cpp:1000 exits BEFORE the mesh read at 1017):
+# it reads the full ~6M-tet 50 m mesh and builds the entire BimaterialWaveOperator
+# + fault tables before its dry-run exit (spatial_dyn_driver.cpp:2085).  Launched
+# WITHOUT ibrun (a single rank) that construction never finishes inside the wall
+# — the p2 sibling (job 7757861) was SLURM-killed at the 2 h TIME LIMIT mid-dry-
+# run.  The ibrun run below does the SAME construction + the SAME C++ config
+# guards (FaultIteratorSupported, material-vs-interior_flux) in parallel and
+# carries --verify-dispatch, so the resolved scheme is still printed.
 
 OUT="${TPV31_OUT:-tpv31/out_${SLURM_JOB_ID:-local}}"
 TFINAL="${TPV31_TFINAL:-15s}"   # spec p. 9 (2 h dev wall reaches a fraction; use restart for the rest)
@@ -94,7 +100,8 @@ ibrun ./seas_spatial_dyn_driver \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
-    --output-dir "${OUT}"
+    --output-dir "${OUT}" \
+    --verify-dispatch
 
 echo "[tpv31] done. On-fault station traces in ${OUT}; compare vs"
 echo "        tpv31/benchmark_data/scec_{eqdyna,seisol}/ via tpv31/visualize_results.py."

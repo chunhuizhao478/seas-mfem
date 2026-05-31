@@ -102,16 +102,17 @@ if [[ ! -f "${MESH}" ]]; then
     fi
 fi
 
-# --- dispatch dry-run (verify matrix + depth_profile_1d + tpv31_lsw + nuc +
-#     the pinned p2 / ADER-O3 / mixed-flux=none scheme) --------------------
-echo "[tpv31-p2] --dry-run --verify-dispatch (scheme: p2 / none / ADER-O3 / matrix):"
-./seas_spatial_dyn_driver \
-    --config "${CONFIG_TOML}" \
-    --ader-order 3 \
-    --time-integrator ader \
-    --mixed-flux none \
-    --dry-run --verify-dispatch || {
-    echo "ERROR: TPV31 p2/O3 config failed the dispatch dry-run."; exit 3; }
+# --- NO separate serial --dry-run pre-flight (intentional; removed) --------
+# The spatial driver's --dry-run does NOT short-circuit at CLI-parse time the
+# way tpv102/104 do (tpv102_driver.cpp:1000 exits BEFORE the mesh read at 1017):
+# it reads the full ~6M-tet 50 m mesh and builds the entire BimaterialWaveOperator
+# + fault tables before its dry-run exit (spatial_dyn_driver.cpp:2085).  Launched
+# WITHOUT ibrun (a single rank) that construction never finishes inside the wall
+# — this job (7757861) was SLURM-killed at the 2 h TIME LIMIT mid-dry-run.  The
+# ibrun run below does the SAME construction + the SAME C++ config guards
+# (FaultIteratorSupported, material-vs-interior_flux) in parallel and carries
+# --verify-dispatch, so the resolved scheme is still printed.  The TOML greps
+# above already fail-fast on a drifted interior_flux / [mesh].order pre-launch.
 
 OUT="${TPV31_OUT:-tpv31/out_p2_${SLURM_JOB_ID:-local}}"
 TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across
@@ -168,7 +169,8 @@ ibrun ./seas_spatial_dyn_driver \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
-    --output-dir "${OUT}"
+    --output-dir "${OUT}" \
+    --verify-dispatch
 
 echo "[tpv31-p2] done. On-fault station traces in ${OUT}; compare vs"
 echo "           tpv31/benchmark_data/scec_{eqdyna,seisol}/ via tpv31/visualize_results.py."
