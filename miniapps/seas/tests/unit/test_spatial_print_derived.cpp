@@ -585,6 +585,178 @@ static void T_RS05_patch_all_vs_fails()
                "velocity-strengthening diagnosis printed for an a>b patch");
 }
 
+// =====================================================================
+// T-D11: INSTANTANEOUS-CIRCULAR nucleation (TPV31) regression.
+//   The diagnostic used to read the patch centre/radius unconditionally
+//   from nuc.gradual_overstress (zero defaults for this kind ⇒ r_threshold
+//   = 0, centre = origin) AND gate the in-patch loop on
+//   amplitude_dip.Size()==N (never true — the instantaneous kind resolves
+//   amplitude_STRIKE only).  Either bug alone made a correctly-configured
+//   TPV31 patch look EMPTY and falsely MFEM_ABORT at --print-derived.  The
+//   lone DOF sits at the instantaneous centre (0,0,-7500); with the fix the
+//   patch is non-empty and the peak equals delta_tau_pa (CosineTaper(0)=1).
+//   Warn-only so a regression fails the assertion cleanly (no process abort).
+// =====================================================================
+static void T_D11_instantaneous_circular_patch_not_empty()
+{
+   std::cout << "\n[T-D11] instantaneous_overstress_circular (TPV31): "
+                "kind-aware centre/radius + strike-only amplitude\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+
+   const real_t cx = 0.0, cy = 0.0, cz = -7500.0;   // TPV31 hypocentre
+
+   SlipWeakeningPerDOFParams lsw;
+   lsw.mu_s.SetSize(1); lsw.mu_d.SetSize(1); lsw.d_c.SetSize(1);
+   lsw.cohesion.SetSize(1);
+   lsw.mu_s(0) = 0.65; lsw.mu_d(0) = 0.30; lsw.d_c(0) = 1.0;
+   lsw.cohesion(0) = 0.0;
+
+   Vector tau_pre(2); tau_pre(0) = 0.0; tau_pre(1) = 32.5e6;   // strike
+   Vector sn(1);      sn(0) = 71.5e6;
+   Vector coords(3);  coords(0) = cx; coords(1) = cy; coords(2) = cz;
+
+   NucleationSpec nuc;
+   nuc.enabled = true;
+   nuc.kind    = NucleationKind::InstantaneousOverstressCircular;
+   nuc.instantaneous_circular.center_x_m   = cx;
+   nuc.instantaneous_circular.center_y_m   = cy;
+   nuc.instantaneous_circular.center_z_m   = cz;
+   nuc.instantaneous_circular.radius_m     = 1400.0;
+   nuc.instantaneous_circular.taper_m      = 600.0;
+   nuc.instantaneous_circular.delta_tau_pa = 25.0e6;
+
+   DenseMatrix basis(9, 1); basis = 0.0;
+   basis(0, 0) = 1.0;   // normal +x
+   basis(4, 0) = 1.0;   // dip    +y
+   basis(8, 0) = 1.0;   // strike +z
+
+   // Mirror the driver: the instantaneous kind populates amplitude_STRIKE
+   // only; amplitude_dip is left zero-sized (spatial_dyn_driver.cpp).
+   GradualOverstressPerDOFParams nuc_params;
+   nuc_params.amplitude_strike =
+      ResolveInstantaneousOverstressCircular(
+         nuc.instantaneous_circular, /*enabled=*/true, coords, basis)
+      .amplitude_strike;
+
+   PrintDerivedConfig pd_cfg;
+   pd_cfg.enabled               = true;
+   pd_cfg.abort_on_failure      = false;   // warn-only: never abort the test
+   pd_cfg.outside_safety_factor = 3.0;
+
+   std::ostringstream oss;
+   unsetenv("SEAS_SKIP_EQUILIBRIUM_GATE");
+   (void)PrintDerivedAndCheck(
+      pd_cfg, lsw, tau_pre, sn, coords, nuc, nuc_params, s,
+      /*mu_bulk=*/32.0e9, /*cp=*/4877.0, /*cs=*/3458.0,
+      /*h_min=*/1000.0, /*dt_cfl=*/6.84e-5, /*tfinal=*/12.0,
+      /*num_fault_global=*/1, /*num_zero_normal_fallbacks=*/0,
+#ifdef MFEM_USE_MPI
+      MPI_COMM_WORLD,
+#endif
+      /*rank=*/0, oss);
+   const std::string captured = oss.str();
+
+   TEST_ASSERT(captured.find("fault DOFs are inside the nucleation patch")
+               == std::string::npos,
+               "patch NOT falsely reported empty (the TPV31 regression)");
+   TEST_ASSERT(captured.find("most-overstressed DOF at") != std::string::npos,
+               "non-empty-patch branch taken (peak DOF reported)");
+   const real_t peak = ParseAfter(captured,
+                                  "nucleation peak |F(r) * delta_tau| = ");
+   TEST_NEAR(peak, 25.0e6, 1.0e3,
+             "peak |F(r)*delta_tau| == delta_tau_pa at the patch centre");
+   TEST_ASSERT(captured.find("(sufficient)") != std::string::npos,
+               "trigger overshoot computed from the strike amplitude "
+               "(sufficient)");
+}
+
+// =====================================================================
+// T-D12: COMPACT-CIRCULAR nucleation (TPV102/104) regression — same
+//   diagnostic gap as T-D11 (strike-only amplitude + non-gradual centre/
+//   radius sub-struct).  DOF at the compact-bell centre; with the fix the
+//   patch is non-empty and the peak equals delta_tau_pa (CompactBell(0)=1).
+// =====================================================================
+static void T_D12_compact_circular_patch_not_empty()
+{
+   std::cout << "\n[T-D12] gradual_overstress_compact_circular (TPV102/104): "
+                "patch detected via kind-aware geometry\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+
+   const real_t cx = 1000.0, cy = 0.0, cz = -3000.0;
+
+   SlipWeakeningPerDOFParams lsw;
+   lsw.mu_s.SetSize(1); lsw.mu_d.SetSize(1); lsw.d_c.SetSize(1);
+   lsw.cohesion.SetSize(1);
+   lsw.mu_s(0) = 0.65; lsw.mu_d(0) = 0.30; lsw.d_c(0) = 1.0;
+   lsw.cohesion(0) = 0.0;
+
+   Vector tau_pre(2); tau_pre(0) = 0.0; tau_pre(1) = 32.5e6;
+   Vector sn(1);      sn(0) = 71.5e6;
+   Vector coords(3);  coords(0) = cx; coords(1) = cy; coords(2) = cz;
+
+   NucleationSpec nuc;
+   nuc.enabled = true;
+   nuc.kind    = NucleationKind::GradualOverstressCompactCircular;
+   nuc.compact_circular.center_x_m   = cx;
+   nuc.compact_circular.center_y_m   = cy;
+   nuc.compact_circular.center_z_m   = cz;
+   nuc.compact_circular.radius_m     = 3000.0;
+   nuc.compact_circular.delta_tau_pa = 25.0e6;
+   nuc.compact_circular.T_nuc_s      = 1.0;
+
+   DenseMatrix basis(9, 1); basis = 0.0;
+   basis(0, 0) = 1.0; basis(4, 0) = 1.0; basis(8, 0) = 1.0;
+
+   // Mirror the driver: compact-circular populates amplitude_strike + radial.
+   GradualOverstressPerDOFParams nuc_params;
+   {
+      const auto cp = ResolveGradualOverstressCompactCircular(
+         nuc.compact_circular, /*enabled=*/true, coords, basis);
+      nuc_params.amplitude_strike = cp.amplitude_strike;
+      nuc_params.radial           = cp.radial;
+   }
+
+   PrintDerivedConfig pd_cfg;
+   pd_cfg.enabled               = true;
+   pd_cfg.abort_on_failure      = false;
+   pd_cfg.outside_safety_factor = 3.0;
+
+   std::ostringstream oss;
+   unsetenv("SEAS_SKIP_EQUILIBRIUM_GATE");
+   (void)PrintDerivedAndCheck(
+      pd_cfg, lsw, tau_pre, sn, coords, nuc, nuc_params, s,
+      /*mu_bulk=*/32.0e9, /*cp=*/4877.0, /*cs=*/3458.0,
+      /*h_min=*/1000.0, /*dt_cfl=*/6.84e-5, /*tfinal=*/12.0,
+      /*num_fault_global=*/1, /*num_zero_normal_fallbacks=*/0,
+#ifdef MFEM_USE_MPI
+      MPI_COMM_WORLD,
+#endif
+      /*rank=*/0, oss);
+   const std::string captured = oss.str();
+
+   TEST_ASSERT(captured.find("fault DOFs are inside the nucleation patch")
+               == std::string::npos,
+               "compact-circular patch NOT falsely reported empty");
+   const real_t peak = ParseAfter(captured,
+                                  "nucleation peak |F(r) * delta_tau| = ");
+   TEST_NEAR(peak, 25.0e6, 1.0e3,
+             "compact-bell peak == delta_tau_pa at the centre");
+   TEST_ASSERT(captured.find("(sufficient)") != std::string::npos,
+               "trigger overshoot computed from the strike amplitude "
+               "(sufficient)");
+}
+
+// NOTE on the unhandled-kind `default: MFEM_ABORT` guards (both overloads):
+// they are deliberately NOT unit-tested here.  An in-process death test would
+// fork() and trigger MFEM_ABORT in the child, but this test's main() calls
+// MPI_Init, so MFEM_ABORT routes through MPI_Abort (general/error.cpp:182),
+// which HANGS in a forked child of an MPI process (the child is not a real
+// rank).  The serial fork death-tests elsewhere (e.g. test_spatial_friction_
+// config.cpp) work only because their main() never initialises MPI.  The
+// guard mirrors the identical, also-untested contract in MakeNucleation
+// (nucleation_factory.cpp:53); the three REAL kinds are covered positively by
+// T-D11 (instantaneous), T-D12 (compact), and the gradual cases above.
+
 int main(int argc, char** argv)
 {
 #ifdef MFEM_USE_MPI
@@ -607,6 +779,8 @@ int main(int argc, char** argv)
    T_RS03_all_velocity_strengthening();
    T_RS04_vw_nucleation_passes();
    T_RS05_patch_all_vs_fails();
+   T_D11_instantaneous_circular_patch_not_empty();
+   T_D12_compact_circular_patch_not_empty();
    std::cout << "\n========================================\n";
    std::cout << "Phase D test_spatial_print_derived: "
              << num_passed << " / " << num_tests

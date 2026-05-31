@@ -201,16 +201,52 @@ real_t PrintDerivedAndCheck(
    // -----------------------------------------------------------------
    real_t outside_max_local = 0.0;
    int    outside_argmax_local = -1;
+   // Patch geometry is kind-specific.  GradualOverstress is a Gaussian whose
+   // tail never reaches 0 (use outside_safety_factor · e-fold radius), while
+   // the compact-circular and instantaneous-circular kinds have FINITE support
+   // (the SCEC bell is 0 at r >= radius_m; the cosine-tapered patch is 0 at
+   // r >= radius_m + taper_m).  Reading center/radius unconditionally from the
+   // gradual_overstress sub-struct (left at its zero defaults for the
+   // non-Gaussian kinds) collapses the patch to r_threshold = 0 and falsely
+   // reports an empty patch, so dispatch on nuc.kind.
+   real_t cx = 0.0, cy = 0.0, cz = 0.0;
    real_t r_threshold = 0.0;
    if (nuc.enabled)
    {
-      r_threshold = cfg.outside_safety_factor *
-                    std::max(nuc.gradual_overstress.radius_dip_m,
-                             nuc.gradual_overstress.radius_strike_m);
+      switch (nuc.kind)
+      {
+         case NucleationKind::GradualOverstress:
+            cx = nuc.gradual_overstress.center_x_m;
+            cy = nuc.gradual_overstress.center_y_m;
+            cz = nuc.gradual_overstress.center_z_m;
+            r_threshold = cfg.outside_safety_factor *
+                          std::max(nuc.gradual_overstress.radius_dip_m,
+                                   nuc.gradual_overstress.radius_strike_m);
+            break;
+         case NucleationKind::GradualOverstressCompactCircular:
+            cx = nuc.compact_circular.center_x_m;
+            cy = nuc.compact_circular.center_y_m;
+            cz = nuc.compact_circular.center_z_m;
+            r_threshold = nuc.compact_circular.radius_m;
+            break;
+         case NucleationKind::InstantaneousOverstressCircular:
+            cx = nuc.instantaneous_circular.center_x_m;
+            cy = nuc.instantaneous_circular.center_y_m;
+            cz = nuc.instantaneous_circular.center_z_m;
+            r_threshold = nuc.instantaneous_circular.radius_m +
+                          nuc.instantaneous_circular.taper_m;
+            break;
+         default:
+            // Same contract as MakeNucleation (nucleation_factory.cpp): a kind
+            // the diagnostic cannot place is a programming error.  Fail LOUDLY
+            // here rather than silently leaving r_threshold = 0 and
+            // false-reporting an empty patch.  Unconditional — NOT gated by
+            // abort_on_failure: this is a missing-case bug, not a physics gate.
+            MFEM_ABORT("PrintDerivedAndCheck: unhandled nucleation kind "
+                       << static_cast<int>(nuc.kind)
+                       << " — add a case to the patch-geometry switch.");
+      }
    }
-   const real_t cx = nuc.gradual_overstress.center_x_m;
-   const real_t cy = nuc.gradual_overstress.center_y_m;
-   const real_t cz = nuc.gradual_overstress.center_z_m;
    for (int i = 0; i < N; ++i)
    {
       if (lsw.mu_s(i) >= kBarrierHalfThreshold) { continue; }
@@ -280,7 +316,14 @@ real_t PrintDerivedAndCheck(
    real_t nuc_peak_local         = 0.0;
    real_t static_ratio_local_max = 0.0;                                     // (2)
    real_t dyn_ratio_local_min    = std::numeric_limits<real_t>::infinity(); // (3)
-   if (nuc.enabled && nuc_params.amplitude_dip.Size() == N)
+   // Strike-only kinds (compact-circular, instantaneous-circular) populate
+   // ONLY nuc_params.amplitude_strike — amplitude_dip is left zero-sized (see
+   // spatial_dyn_driver.cpp).  Gate on EITHER component so the in-patch
+   // well-posedness loop runs for those kinds too, and index each component
+   // only when it is sized N (a zero-sized amplitude_dip ⇒ ad = 0).
+   const bool have_dip    = (nuc_params.amplitude_dip.Size()    == N);
+   const bool have_strike = (nuc_params.amplitude_strike.Size() == N);
+   if (nuc.enabled && (have_dip || have_strike))
    {
       for (int i = 0; i < N; ++i)
       {
@@ -292,8 +335,8 @@ real_t PrintDerivedAndCheck(
          if (r > r_threshold) { continue; }
          const real_t tau1 = tau_pre_per_dof(2*i + 0);
          const real_t tau2 = tau_pre_per_dof(2*i + 1);
-         const real_t ad   = nuc_params.amplitude_dip(i);
-         const real_t as   = nuc_params.amplitude_strike(i);
+         const real_t ad   = have_dip    ? nuc_params.amplitude_dip(i)    : 0.0;
+         const real_t as   = have_strike ? nuc_params.amplitude_strike(i) : 0.0;
          const real_t A    = std::sqrt(ad*ad + as*as);
          const real_t tau_pre_mag = std::sqrt(tau1*tau1 + tau2*tau2);
          const real_t strength_s  = lsw.mu_s(i) * sigma_n_eff_per_dof(i);
@@ -353,8 +396,8 @@ real_t PrintDerivedAndCheck(
    if (nuc.enabled && overshoot_owner == rank && overshoot_local_arg >= 0)
    {
       const int i = overshoot_local_arg;
-      const real_t ad = nuc_params.amplitude_dip(i);
-      const real_t as = nuc_params.amplitude_strike(i);
+      const real_t ad = have_dip    ? nuc_params.amplitude_dip(i)    : 0.0;
+      const real_t as = have_strike ? nuc_params.amplitude_strike(i) : 0.0;
       A_at_argmax = std::sqrt(ad*ad + as*as);
       coord_at_argmax[0] = dof_coords_3d(3*i + 0);
       coord_at_argmax[1] = dof_coords_3d(3*i + 1);
@@ -537,8 +580,9 @@ real_t PrintDerivedAndCheck(
       if (nuc_patch_empty)
       {
          fail("[derived] FAIL: nucleation enabled but ZERO fault DOFs are "
-              "inside the patch (3·max(radius_*)).  Check that the "
-              "nucleation centre is on the fault.");
+              "inside the nucleation patch.  Check that the nucleation "
+              "centre lies on the fault and that the mesh resolves the "
+              "patch radius.");
       }
       else
       {
@@ -716,16 +760,48 @@ real_t PrintDerivedAndCheckRS(
    // -----------------------------------------------------------------
    real_t outside_max_local    = 0.0;
    int    outside_argmax_local = -1;
-   real_t r_threshold = 0.0;
+   // Kind-aware patch geometry (see the LSW overload).  `patch_radius` is the
+   // full-amplitude radius (reused by the R-021 sub-critical-patch warning
+   // below); `r_threshold` is the outside / in-patch boundary.
+   real_t cx = 0.0, cy = 0.0, cz = 0.0;
+   real_t patch_radius = 0.0;
+   real_t r_threshold  = 0.0;
    if (nuc.enabled)
    {
-      r_threshold = cfg.outside_safety_factor *
-                    std::max(nuc.gradual_overstress.radius_dip_m,
-                             nuc.gradual_overstress.radius_strike_m);
+      switch (nuc.kind)
+      {
+         case NucleationKind::GradualOverstress:
+            cx = nuc.gradual_overstress.center_x_m;
+            cy = nuc.gradual_overstress.center_y_m;
+            cz = nuc.gradual_overstress.center_z_m;
+            patch_radius = std::max(nuc.gradual_overstress.radius_dip_m,
+                                    nuc.gradual_overstress.radius_strike_m);
+            r_threshold  = cfg.outside_safety_factor * patch_radius;
+            break;
+         case NucleationKind::GradualOverstressCompactCircular:
+            cx = nuc.compact_circular.center_x_m;
+            cy = nuc.compact_circular.center_y_m;
+            cz = nuc.compact_circular.center_z_m;
+            patch_radius = nuc.compact_circular.radius_m;
+            r_threshold  = nuc.compact_circular.radius_m;
+            break;
+         case NucleationKind::InstantaneousOverstressCircular:
+            cx = nuc.instantaneous_circular.center_x_m;
+            cy = nuc.instantaneous_circular.center_y_m;
+            cz = nuc.instantaneous_circular.center_z_m;
+            patch_radius = nuc.instantaneous_circular.radius_m;
+            r_threshold  = nuc.instantaneous_circular.radius_m +
+                           nuc.instantaneous_circular.taper_m;
+            break;
+         default:
+            // Same contract as the LSW overload / MakeNucleation: an unknown
+            // kind is a missing-case bug — fail loudly instead of silently
+            // collapsing the patch.  Unconditional (not gated by abort_on_failure).
+            MFEM_ABORT("PrintDerivedAndCheckRS: unhandled nucleation kind "
+                       << static_cast<int>(nuc.kind)
+                       << " — add a case to the patch-geometry switch.");
+      }
    }
-   const real_t cx = nuc.gradual_overstress.center_x_m;
-   const real_t cy = nuc.gradual_overstress.center_y_m;
-   const real_t cz = nuc.gradual_overstress.center_z_m;
    for (int i = 0; i < N; ++i)
    {
       if (rs.b(i) - rs.a(i) <= 0.0) { continue; }   // skip velocity-strengthening
@@ -791,7 +867,10 @@ real_t PrintDerivedAndCheckRS(
    real_t nuc_peak_local       = 0.0;
    real_t drive_local_max      = 0.0;
    int    vw_in_patch_local    = 0;
-   if (nuc.enabled && nuc_params.amplitude_dip.Size() == N)
+   // Strike-only kinds populate only amplitude_strike (see the LSW overload).
+   const bool have_dip    = (nuc_params.amplitude_dip.Size()    == N);
+   const bool have_strike = (nuc_params.amplitude_strike.Size() == N);
+   if (nuc.enabled && (have_dip || have_strike))
    {
       for (int i = 0; i < N; ++i)
       {
@@ -800,8 +879,8 @@ real_t PrintDerivedAndCheckRS(
          const real_t dz = dof_coords_3d(3*i + 2) - cz;
          const real_t r  = std::sqrt(dx*dx + dy*dy + dz*dz);
          if (r > r_threshold) { continue; }
-         const real_t ad = nuc_params.amplitude_dip(i);
-         const real_t as = nuc_params.amplitude_strike(i);
+         const real_t ad = have_dip    ? nuc_params.amplitude_dip(i)    : 0.0;
+         const real_t as = have_strike ? nuc_params.amplitude_strike(i) : 0.0;
          const real_t A  = std::sqrt(ad*ad + as*as);
          nuc_peak_local  = std::max(nuc_peak_local, A);
 
@@ -872,8 +951,8 @@ real_t PrintDerivedAndCheckRS(
    if (nuc.enabled && overshoot_owner == rank && overshoot_local_arg >= 0)
    {
       const int i = overshoot_local_arg;
-      const real_t ad = nuc_params.amplitude_dip(i);
-      const real_t as = nuc_params.amplitude_strike(i);
+      const real_t ad = have_dip    ? nuc_params.amplitude_dip(i)    : 0.0;
+      const real_t as = have_strike ? nuc_params.amplitude_strike(i) : 0.0;
       A_at_argmax = std::sqrt(ad*ad + as*as);
       coord_at_argmax[0] = dof_coords_3d(3*i + 0);
       coord_at_argmax[1] = dof_coords_3d(3*i + 1);
@@ -1049,8 +1128,9 @@ real_t PrintDerivedAndCheckRS(
       if (nuc_patch_empty)
       {
          fail("[derived] FAIL: nucleation enabled but ZERO fault DOFs are "
-              "inside the patch (3·max(radius_*)).  Check that the "
-              "nucleation centre is on the fault.");
+              "inside the nucleation patch.  Check that the nucleation "
+              "centre lies on the fault and that the mesh resolves the "
+              "patch radius.");
       }
       else if (nuc_patch_all_vs)
       {
@@ -1098,9 +1178,7 @@ real_t PrintDerivedAndCheckRS(
    if (nuc.enabled && !all_vs && !nuc_patch_empty && !nuc_patch_all_vs
        && rank == 0)
    {
-      const real_t patch_radius =
-         std::max(nuc.gradual_overstress.radius_dip_m,
-                  nuc.gradual_overstress.radius_strike_m);
+      // `patch_radius` (full-amplitude radius) is computed kind-aware above.
       if (Lnuc_min > patch_radius)
       {
          out << "[derived] WARNING: in-patch L_nuc (min " << Lnuc_min
