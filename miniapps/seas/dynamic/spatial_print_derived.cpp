@@ -520,7 +520,11 @@ real_t PrintDerivedAndCheck(
    // -----------------------------------------------------------------
    // 6.  Gating.  Aborts (or warns) on:
    //    (a) all barriers,
-   //    (b) outside_max >= 1.0 (background supercritical),
+   //    (b) nuc ENABLED and outside_max >= 1.0 (background OUTSIDE the patch is
+   //        supercritical).  NOT applied when nuc is disabled: a config that
+   //        nucleates via a static overstress patch (no [nucleation] block,
+   //        e.g. TPV205) is SUPPOSED to have outside_max >= 1 — that is its
+   //        nucleation mechanism, gated instead by (e).
    //    (c) nuc enabled and TRIGGER fails: overshoot < 0, i.e. the peak
    //        |tau_pre + delta_tau| never reaches mu_s·sigma_n_eff,
    //    (d) nuc enabled and STRESS-DROP fails: in-patch min
@@ -555,7 +559,7 @@ real_t PrintDerivedAndCheck(
    {
       fail("[derived] all fault DOFs are barriers; nothing will rupture.");
    }
-   else if (outside_max >= 1.0)
+   else if (nuc.enabled && outside_max >= 1.0)
    {
       std::ostringstream m;
       m << "[derived] FAIL: max OUTSIDE asperity = " << outside_max
@@ -566,7 +570,7 @@ real_t PrintDerivedAndCheck(
            "Reduce |tau_pre| or increase mu_s.";
       fail(m.str());
    }
-   else if (outside_max >= 0.9)
+   else if (nuc.enabled && outside_max >= 0.9)
    {
       if (rank == 0)
       {
@@ -644,7 +648,13 @@ real_t PrintDerivedAndCheck(
    const bool nuc_well_posed = !nuc_patch_empty
                                && overshoot_best >= 0.0
                                && inpatch_dyn_ratio_min > 1.0;
-   if (rank == 0 && !warn_only && outside_max < 1.0
+   // A [nucleation] config needs a SUBcritical background (outside_max < 1); a
+   // static-overstress config (no [nucleation] block, e.g. TPV205) instead
+   // needs a SUPERcritical DOF (outside_max >= 1) to nucleate at all (gate e
+   // aborts the < 1 case).
+   const bool background_feasible =
+      nuc.enabled ? (outside_max < 1.0) : (outside_max >= 1.0);
+   if (rank == 0 && !warn_only && background_feasible
        && (!nuc.enabled || all_barriers || nuc_well_posed))
    {
       out << "[derived] PASS: initial conditions are well-posed.\n";

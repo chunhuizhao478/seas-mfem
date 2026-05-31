@@ -219,10 +219,15 @@ static void T_D05_LITE_env_skip_gate_honored()
    gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
    gspec.T_nuc_s = 1.0;
    std::string captured;
+   // Gate (b) is now nuc.enabled-only, so trip it with a NUCLEATION config
+   // whose lone DOF sits OUTSIDE the patch (dof_x = 1e5 >> 3*radius) and is
+   // supercritical — the "background outside the patch supercritical" failure
+   // the env var downgrades.
    const real_t ratio = RunPrinter(
       s, 0.4, 0.3, 0.5, 30.0e6, 0.0, 3.0e8,
-      /*nuc_enabled=*/false, gspec, 32.0e9,
-      captured, /*abort_on_failure=*/true, /*warn_only_env=*/true);
+      /*nuc_enabled=*/true, gspec, 32.0e9,
+      captured, /*abort_on_failure=*/true, /*warn_only_env=*/true,
+      /*dof_x=*/1.0e5, /*dof_y=*/0.0, /*dof_z=*/0.0);
    TEST_ASSERT(ratio >= 1.0, "supercritical setup still returns the ratio");
    TEST_ASSERT(captured.find("WARNING") != std::string::npos
                || captured.find("gate downgraded") != std::string::npos,
@@ -247,13 +252,16 @@ static void T_D03_REASON_warn_prefix_attribution()
    gspec.T_nuc_s = 1.0;
    std::string captured;
    // abort_on_failure=false but env var NOT set: should attribute the
-   // API caller's choice, NOT the env var.
+   // API caller's choice, NOT the env var.  Gate (b) is nuc.enabled-only, so
+   // use a nucleation config with the lone DOF OUTSIDE the patch (dof_x = 1e5)
+   // and supercritical to trip it.
    (void)RunPrinter(s, /*mu_s=*/0.4, /*mu_d=*/0.3, /*d_c=*/0.5,
                     /*sigma_n=*/30.0e6, /*tau_dip=*/0.0,
                     /*tau_strike=*/3.0e8,
-                    /*nuc_enabled=*/false, gspec, /*mu_bulk=*/32.0e9,
+                    /*nuc_enabled=*/true, gspec, /*mu_bulk=*/32.0e9,
                     captured, /*abort_on_failure=*/false,
-                    /*warn_only_env=*/false);
+                    /*warn_only_env=*/false,
+                    /*dof_x=*/1.0e5, /*dof_y=*/0.0, /*dof_z=*/0.0);
    TEST_ASSERT(captured.find("cfg.abort_on_failure=false") != std::string::npos,
                "WARN prefix mentions cfg.abort_on_failure=false");
    TEST_ASSERT(captured.find("SEAS_SKIP_EQUILIBRIUM_GATE") == std::string::npos,
@@ -277,10 +285,13 @@ static void T_D02_COORDS_outside_message_includes_xyz()
    // Place the lone DOF at a distinctive (x, y, z).  Use unique
    // numeric values so the substring search is unambiguous.
    const real_t dx = 12345.0, dy = 67890.0, dz = -54321.0;
+   // nuc.enabled (gate (b) is nuc.enabled-only); the distinctive DOF is far
+   // outside the patch (|r| >> 3*radius) and supercritical, so gate (b) fires
+   // with that DOF's coords.
    (void)RunPrinter(s, /*mu_s=*/0.4, /*mu_d=*/0.3, /*d_c=*/0.5,
                     /*sigma_n=*/30.0e6, /*tau_dip=*/0.0,
                     /*tau_strike=*/3.0e8,
-                    /*nuc_enabled=*/false, gspec,
+                    /*nuc_enabled=*/true, gspec,
                     /*mu_bulk=*/32.0e9, captured,
                     /*abort_on_failure=*/false,
                     /*warn_only_env=*/false,
@@ -757,6 +768,38 @@ static void T_D12_compact_circular_patch_not_empty()
 // (nucleation_factory.cpp:53); the three REAL kinds are covered positively by
 // T-D11 (instantaneous), T-D12 (compact), and the gradual cases above.
 
+// =====================================================================
+// T-D14: STATIC-OVERSTRESS nucleation (TPV205) — no [nucleation] block.
+//   TPV205 nucleates by a statically OVERstressed patch (|tau_pre| >
+//   mu_s*sigma_n there); that is the mechanism, NOT a "background
+//   supercritical" failure.  Gate (b) must NOT fire when nuc is disabled,
+//   and the config must PASS.  Mirrors TPV205 patch #1: tau = 81.6 MPa vs
+//   mu_s*sigma_n = 0.677*120 = 81.24 MPa (ratio 1.0044, exactly the value
+//   the real run aborted on).  abort_on_failure=true so a regression (gate
+//   (b) still firing) would MFEM_ABORT the test rather than fail soft.
+// =====================================================================
+static void T_D14_static_overstress_no_nucleation_passes()
+{
+   std::cout << "\n[T-D14] static-overstress nucleation (no [nucleation], "
+                "TPV205) does NOT trip the background-supercritical gate\n";
+   StressSpec s; s.kind = StressSourceKind::ConstantTensor;
+   GradualOverstressSpec gspec;   // unused (nuc disabled)
+   std::string captured;
+   const real_t ratio = RunPrinter(
+      s, /*mu_s=*/0.677, /*mu_d=*/0.525, /*d_c=*/0.4,
+      /*sigma_n=*/120.0e6, /*tau_dip=*/0.0, /*tau_strike=*/81.6e6,
+      /*nuc_enabled=*/false, gspec, /*mu_bulk=*/32.0e9, captured,
+      /*abort_on_failure=*/true);
+   TEST_ASSERT(ratio >= 1.0,
+               "static-overstress ratio >= 1 (it nucleates via the patch)");
+   TEST_ASSERT(captured.find("FAIL: max OUTSIDE asperity") == std::string::npos,
+               "gate (b) does NOT fire for a nuc-disabled static-overstress "
+               "config (the TPV205 regression)");
+   TEST_ASSERT(captured.find("PASS: initial conditions are well-posed")
+               != std::string::npos,
+               "static-overstress config PASSes (TPV205 nucleation mechanism)");
+}
+
 int main(int argc, char** argv)
 {
 #ifdef MFEM_USE_MPI
@@ -781,6 +824,7 @@ int main(int argc, char** argv)
    T_RS05_patch_all_vs_fails();
    T_D11_instantaneous_circular_patch_not_empty();
    T_D12_compact_circular_patch_not_empty();
+   T_D14_static_overstress_no_nucleation_passes();
    std::cout << "\n========================================\n";
    std::cout << "Phase D test_spatial_print_derived: "
              << num_passed << " / " << num_tests
