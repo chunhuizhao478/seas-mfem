@@ -49,6 +49,18 @@ module load parmetis
 module load petsc/3.15
 module load fftw3/3.3.8
 
+# --- pin the hypre/2.31.0 runtime libHYPRE.so (REQUIRED) -------------------
+# petsc/3.15 + mumps/5.3 (the old PETSc-3.15 tree) prepend a PRE-2.31 libHYPRE
+# to LD_LIBRARY_PATH *after* hypre/2.31.0 is loaded.  The driver was compiled
+# against hypre/2.31.0 headers, where HYPRE_Init() is a macro for the renamed
+# HYPRE_Initialize(); the binary therefore references symbol HYPRE_Initialize,
+# which exists only in hypre >= 2.31.0.  Because the binary uses DT_RUNPATH
+# (searched AFTER LD_LIBRARY_PATH), the older PETSc/MUMPS libHYPRE shadows the
+# 2.31.0 one at run time -> "symbol lookup error: undefined symbol:
+# HYPRE_Initialize" and MPI exit code 127.  Re-assert the 2.31.0 lib dir at the
+# FRONT of the search path (matches every bp1_*/bp5_* job in this repo).
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH:-}"
+
 # --- locate the repo root (walk up to the dir containing miniapps/seas) ----
 _walk_up_dir="${SEAS_MFEM_ROOT:-${SLURM_SUBMIT_DIR:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")}}"
 while [[ "${_walk_up_dir}" != "/" && ! -d "${_walk_up_dir}/miniapps/seas" ]]; do
