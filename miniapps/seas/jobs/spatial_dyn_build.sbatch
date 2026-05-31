@@ -25,7 +25,7 @@
 # race; the run jobs only check the binary exists.
 #
 # RECOMMENDED submission (chain so run jobs wait for a clean build):
-#   bid=$(sbatch --parsable miniapps/seas/jobs/spatial_dyn_build.sbatch)
+#   bid=$(sbatch --parsable miniapps/seas/jobs/spatial_dyn_build.sbatch clean-rebuild)
 #   # then any run job from any spatial folder waits on the build:
 #   sbatch --dependency=afterok:${bid} miniapps/seas/jobs/tpv102_spatial/tpv102_p1_rk45_mixedflux_8N_400r_dev.sbatch
 #   sbatch --dependency=afterok:${bid} miniapps/seas/jobs/tpv104_spatial/tpv104_p1_rk45_mixedflux_8N_400r_dev.sbatch
@@ -39,20 +39,21 @@
 # reintroduces the relink race this job exists to avoid).
 #
 # Override: BUILD_JOBS (parallel make jobs; default 48).
-#           CLEAN=1   force a CLEAN rebuild of the seas objects first (default
-#                     0 = incremental).  Submit with:
-#                       sbatch --export=ALL,CLEAN=1 .../spatial_dyn_build.sbatch
-#                     Use after a `git pull` to be CERTAIN no stale object
-#                     survives: the seas Makefile has NO header-dependency
-#                     tracking, so an incremental `make` can silently reuse an
-#                     out-of-date .o (e.g. a spatial_friction.o predating a
-#                     signature/logic change -> ABI/logic mismatch or a wrong
-#                     run-time abort).  NOTE: the Makefile's own `make clean` is
-#                     INCOMPLETE (clean-build removes only *.o / drivers/ /
-#                     tests/, NOT dynamic/ spatial/code/ io/ — where most of the
-#                     driver's objects live), so this job removes the driver's
-#                     object dirs explicitly.  extern/ (HDF5/ZFP/Caliper/gmsh)
-#                     is never touched, so a clean build stays a few minutes.
+#
+# CLEAN REBUILD ----------------------------------------------------------------
+# By DEFAULT this job does a fast INCREMENTAL build.  To force a full CLEAN
+# rebuild (recompile every object so NO stale .o can survive — do this after a
+# `git pull`), just add the word `clean-rebuild` after the script name:
+#
+#       sbatch spatial_dyn_build.sbatch clean-rebuild     <-- CLEAN rebuild
+#       sbatch spatial_dyn_build.sbatch                   <-- incremental (default)
+#
+# Why it matters: the seas Makefile has no header-dependency tracking, so an
+# incremental `make` can silently reuse an out-of-date object (the run-time
+# aborts we have chased).  The clean step removes the driver's object dirs
+# explicitly because the Makefile's own `make clean` is INCOMPLETE (it misses
+# dynamic/ spatial/code/ io/).  extern/ (HDF5/ZFP/Caliper/gmsh) is never touched,
+# so a clean build is still only a few minutes.
 
 export LC_ALL=C
 export LANG=C
@@ -98,7 +99,12 @@ grep -q '^MFEM_USE_HDF5 *= YES'    config/config.mk || echo "WARNING: MFEM_USE_H
 grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || echo "WARNING: MFEM_USE_H5Z_ZFP != YES — ZFP-compressed fault output (--paraview-fault-zfp-tol) will be unavailable; VTU jobs are fine."
 
 BUILD_JOBS="${BUILD_JOBS:-48}"
+# `clean-rebuild` flag: sbatch passes any word after the script name to the job
+# as $1, so `sbatch spatial_dyn_build.sbatch clean-rebuild` -> clean build,
+# `sbatch spatial_dyn_build.sbatch` (no arg) -> incremental (default).
+# (CLEAN=1 via --export is also still honoured.)
 CLEAN="${CLEAN:-0}"
+if [[ "${1:-}" == "clean-rebuild" || "${1:-}" == "clean" ]]; then CLEAN=1; fi
 
 cd miniapps/seas
 echo "Git commit:  $(git rev-parse HEAD)"
@@ -121,9 +127,8 @@ case "${CLEAN}" in
               config/*.o friction/*.o
         ;;
     *)
-        echo "Incremental build (CLEAN=${CLEAN}).  Re-submit with"
-        echo "             'sbatch --export=ALL,CLEAN=1 ...' to force a clean"
-        echo "             rebuild (recommended after a git pull)."
+        echo "Incremental build (default).  For a full CLEAN rebuild, submit:"
+        echo "             sbatch spatial_dyn_build.sbatch clean-rebuild"
         ;;
 esac
 
