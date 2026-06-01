@@ -1,0 +1,195 @@
+# =========================================================================
+# SAFS + RATE-AND-STATE with the SLIP LAW + STRONG RATE WEAKENING (SCEC
+# TPV104 FL=103, "Fast Velocity Weakening") and DEPTH-VARYING a(z)/b(z).
+# Dc=0.10 / 8 km-DIAMETER nucleation patch / 500 m _triq mesh VARIANT.
+# =========================================================================
+# Dedicated SEPARATE case (2026-05-28) that switches the friction STATE
+# EVOLUTION from the aging law to the slip law with strong rate weakening
+# (state_evolution = "slip_srw"), while keeping the nucleation-proven length
+# scales (Dc=0.10, a=0.0127, b=0.0261, 8 km-DIAMETER gradual_overstress patch)
+# on the CHEAP 500 m _triq mesh
+#   experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh
+# (1.16 M tets -> serial mesh read is OOM-safe; no presplit needed).
+#
+# Implementation plan / review / fixes:
+#   debug_document/spatial_dynamic_rupture_slip_law_srw_plan_2026-05-28.md
+#   debug_document/REVIEW_slip_law_srw_plan_2026-05-28.md
+#
+# Run sbatch (dev / restart):
+#   jobs/safs/spatial_dyn_ratestate_depthprofile_normalcap_pureupwind_triq_8N_400r_dev_2hr_safs.sbatch
+#   jobs/safs/spatial_dyn_ratestate_depthprofile_normalcap_pureupwind_triq_8N_400r_dev_2hr_restart_safs.sbatch
+#
+# WHAT CHANGED vs the aging-law sibling
+# (spatial_friction_rate_state_safs_projected_stress_depthprofile_Dc010_nuc8km_500m.toml):
+#   [friction.rate_state].state_evolution   "aging" (implicit) -> "slip_srw"
+#   [friction.rate_state].f_w               (new)   = 0.2   fully-weakened friction (muW)
+#   [friction.rate_state].V_w               (new)   = 0.1   weakening velocity [m/s], constant
+#   [numerics].mixed_flux                    "adjacent" -> "none" (pure upwind; central/mixed
+#                                            flux is the confirmed SAFS blow-up driver — the
+#                                            run sbatch also forces --mixed-flux none)
+# Everything else (stress tensor, mesh, depth-profile CSVs, nucleation, floor,
+# Dc/a/b) is UNCHANGED from the aging-law Dc010 config.
+#
+# WHY slip law + SRW: the aging-law (b-a) slowness effect alone gives a mild
+# dynamic stress drop; the strong-rate-weakening term (f_w, V_w) provides a
+# TPV104-style fast dynamic weakening at seismic slip rates, which drives more
+# energetic spontaneous propagation once the gradual_overstress patch nucleates.
+# The proven Dc/a/b set the nucleation forcing; f_w/V_w set the dynamic drop.
+# NOTE: the slip law has no finite aging-law L_inf instability, so the FORCED
+# gradual_overstress patch (not a spontaneous aging-law nucleus) seeds rupture;
+# treat the first run as a propagation/stability smoke test (see the plan §3).
+#
+# LENGTH-SCALE DESIGN (sigma_n = 48.9 MPa MEASURED at the patch from the
+# hz1671_psi37_az351 fault-stress projection; mu=32.04 GPa; nu=0.25), retained
+# from the aging sibling so the nucleation forcing is identical:
+#   L_b(dip, mode III) = mu*Dc/(b*sigma_n)      = 2.51 km = 5.0 cells @ 500 m
+#   8 km-dia patch (R=4000 m): depth span [0.97, 8.97] km, inside VW 0-11 km.
+#
+# Schema reference:
+#   safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SAFS rate-and-state SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103; state_evolution='slip_srw', f_w=0.2, V_w=0.1 m/s) with DEPTH-VARYING a(z)/b(z) from param_a_500m_strongvw.csv + param_a_minus_b_500m_strongvw.csv (b = a - (a-b); VW->VS ~11 km); Dc=0.10, 8 km-DIAMETER gradual_overstress nucleation, on the 500 m z0embed _triq mesh.  Pure upwind (mixed_flux='none')."
+
+[material_constant_fallback]
+# Equal lambda = mu => Poisson ratio = 0.25 (typical crust).  cp ~= 5996 m/s.
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# sigma_n_eff = sigma_n_total - P_p.  NOTE: the rate-state path passes a ZERO
+# PorePressureSpec to ResolveRateState (geom.sigma_n_per_dof() is already
+# effective); this P_p is still consumed by the regional stress projection.
+P_p_pa            = 16.0e6    # 16 MPa
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # 1 MPa floor
+
+[mesh]
+# 500 m near-fault z0embed mesh, shape-preserving _triq STL remesh (commit
+# da3cc80 family).  1.16 M tets -> serial mesh read is OOM-safe at 8N/400r (no
+# presplit needed).  NB the run sbatch overrides this via --mesh; this path
+# keeps the config self-consistent for standalone runs.
+path  = "safs/project_7.0_alternative/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+# Regional H&Z tensor projected per-DOF (compression POSITIVE, EAST-NORTH-UP);
+# this is the hz1671_psi37_az351 projection (SHmax=113/Shmin=49/Sv=45/P_p=16 MPa,
+# SHmax_az=351 deg).  D3.1: sigma_xy_pa is RIGHT-LATERAL-POSITIVE (negated at the
+# source factory).  Gives sigma_n_eff ~48.9 MPa at the nucleation patch.
+kind        = "constant_tensor"
+sigma_xx_pa = 5.056619147855508e+07
+sigma_yy_pa = 1.1143380852144492e+08
+sigma_zz_pa = 4.50e+07
+sigma_xy_pa = +9.888543819998317e+06   # D3.1: right-lateral-POSITIVE
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+ader_order = 2
+# Pure upwind: central/mixed flux is the confirmed SAFS blow-up driver
+# (debug_document/spatial_dynamic_rupture_mixed_flux_analysis_2026-05-26.md).
+# The run sbatch also forces --mixed-flux none (which overrides this value).
+mixed_flux = "none"
+cfl        = 0.5
+# R-025: use_pml is NOT wired into seas_spatial_dyn_driver; keep tfinal within
+# the reflection-free window (see [time]).  Box exterior uses absorbing BCs.
+use_pml    = false
+
+[time]
+# tfinal 100 s per the all-normal-queue directive (the run sbatch also passes
+# --tfinal 100s, which overrides this value).  R-025: this is PAST the ~6.94 s
+# reflection-free window (box geometry unchanged; cp=5996), so seismic fields
+# after ~7 s are reflection-CONTAMINATED — treat the long tail as a
+# cap/stability monitor, not a physical rupture.
+tfinal     = "100s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+output_dir              = "output_safs_dyn_srw_Dc010_nuc8km_500m_6s"
+restart_prefix          = "cp"
+paraview_volume         = "hdf5"
+paraview_bulk           = "hdf5"
+paraview_fault          = "hdf5"
+paraview_volume_dt      = "0.1s"      # ~60 snapshots over 6 s
+paraview_bulk_dt        = "0.1s"      # ~60 snapshots over 6 s
+paraview_fault_dt       = "0.02s"     # ~300 snapshots over 6 s
+paraview_volume_zfp_tol = 1.0e-3
+paraview_bulk_zfp_tol   = 1.0e-3
+paraview_fault_zfp_tol  = 1.0e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+# Time-domain nucleation: smoothStep-ramped Gaussian Δτ.  Law-agnostic — the
+# gradual_overstress accumulator writes tau{1,2}_nuc, folded into the total
+# traction by ComputeStageState for BOTH aging and slip-SRW.
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+# radius_*: e-fold Gaussian radii = 4000 m (8 km-DIAMETER patch; isotropic).
+# Patch (centre -4965.62 m, R 4000 m) spans depth [0.97, 8.97] km, inside the
+# VW zone (0-11 km) and clear of the z=0 free surface.
+radius_dip_m        =     4000.0
+radius_strike_m     =     4000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     30.0e6   # seed; SRW dynamic weakening carries propagation
+T_nuc_s             =        1.0
+
+[friction]
+# sigma_n strength floor [Pa] (sliver-blowup plan 2026-05-26).  REQUIRED by the
+# *_normalcap_* run sbatch (pre-flight greps for this key).
+sigma_n_strength_floor_pa = 10.0e6
+
+[friction.rate_state]
+# SLIP LAW + STRONG RATE WEAKENING (state_evolution = "slip_srw").  The ψ-update
+# uses the SCEC TPV104 FL=103 steady state
+#   f_ss(V) = f_w + (f_LV(V) - f_w) / (1 + (V/V_w)^8)^(1/8),
+#   f_LV(V) = max(0, f_0 - (b - a)*ln(V/V_0)),
+# with a, b, Dc taken PER-DOF (depth profile below) and f_0/V_0/f_w/V_w global.
+# PORTED from seas-mfem-safs to this repo's [friction.rate_state] schema
+# (2026-06-01): state_evolution token "slip_srw" -> "slip_law_srw" (this repo's
+# parser accepts "slip_law_srw"/"slip_law_strong_rate_weakening" and HARD-ABORTS
+# on "slip_srw"); f_w/V_w -> f_w_default/V_w_default (the top-level keys this
+# repo reads).  VALUES ARE UNCHANGED -> identical SRW physics.
+state_evolution = "slip_law_srw"
+f_w_default     = 0.2        # fully-weakened friction (muW).  0 < f_w < f_0.
+V_w_default     = 0.1        # weakening velocity [m/s], CONSTANT over the fault.
+
+# Depth-varying a(z) / b(z) (Phase 11b).  a_default / b_default are the scalar
+# FALLBACK used only when [friction.rate_state.depth_profile] is ABSENT; with
+# the profile enabled they are unused for a/b.  R-009: V_0_default MUST equal
+# FrictionSolver::V0 (= 1e-6).
+a_default       = 0.010      # unused (depth profile active); fallback only
+b_default       = 0.015      # unused (depth profile active); fallback only
+Dc_default      = 0.10       # m.  L_b = mu*Dc/(b*sigma_n) = 2.51 km = 5.0 cells @ 500 m.
+V_0_default     = 1.0e-6     # MUST equal FrictionSolver::V0 (R-009)
+f_0_default     = 0.6        # reference friction (scalar); f_w < f_0 required
+V_init_default  = 1.0e-12    # quasi-static initial slip rate (scalar)
+sigma_n_default = 120.0e6    # fallback only; driver uses geom.sigma_n_per_dof()
+eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF
+
+[friction.rate_state.depth_profile]
+# Two-CSV depth profile (Phase 11b).  Each row is `value, depth_km` (value
+# FIRST).  b(z) = a(z) - (a-b)(z).  At the patch: a=0.0127, b=0.0261, b-a=0.0134.
+# VW->VS (a-b=0) pinned at 11 km so b stays > 0 to the 16.6 km fault bottom.
+# CAVEAT (SRW, R-002): unlike the AGING law, the slip-law SRW steady state
+# f_ss -> f_w at V >> V_w REGARDLESS of the (b-a) sign, so the a>b region below
+# ~11 km does NOT guarantee the aging-style down-dip arrest.  This profile sets
+# the direct-effect a(z) structure; treat down-dip extent as something to
+# MONITOR in the run, not a built-in stop.
+# Same CSVs as the aging-law Dc010 sibling (the nucleation forcing is identical).
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_500m_strongvw.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_500m_strongvw.csv"
+depth_units         = "km"

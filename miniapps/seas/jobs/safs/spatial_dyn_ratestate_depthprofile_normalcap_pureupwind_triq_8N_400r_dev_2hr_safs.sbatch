@@ -8,9 +8,11 @@
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# SAFS RATE-AND-STATE (aging, depth-varying a(z)/b(z)) + sigma_n CAP, PURE UPWIND
-# (mixed_flux=none), on the SLIVER-REPAIRED (triq) MESH — DEV SMOKE
+# SAFS RATE-AND-STATE — SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103,
+# depth-varying a(z)/b(z), f_w=0.2 / V_w=0.1 m/s) + sigma_n CAP, PURE UPWIND
+# (mixed_flux=none), on the 500 m _triq MESH — DEV SMOKE
 # (development queue, 8N/400r/2 h; tfinal 100 s, checkpoints early).
+# [Ported from seas-mfem-safs 2026-06-01; SRW sibling of the normal-queue job.]
 # =========================================================================
 # NO MIXED FLUX: central/mixed flux is the confirmed SAFS LSW blow-up driver
 # (clean triq-nocap isolation: pure-upwind 7751974 STABLE, identical
@@ -27,12 +29,13 @@
 # (overrides the config's [mesh].path via the driver's --mesh flag).
 #
 # Config (floor enabled):
-#   config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml
-#   ([friction].sigma_n_strength_floor_pa = 10.0e6; a(z) <- param_a_vwvs11km.csv,
-#    (a-b)(z) <- param_a_minus_b_vwvs11km.csv (VW->VS transition ~11 km);
-#    gradual_overstress nucleation).
-# => CONFLATES the cap + the repaired mesh.  To isolate the MESH effect alone,
-#    rerun cap-OFF via SAFS_CONFIG (a config without sigma_n_strength_floor_pa).
+#   config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml
+#   ([friction].sigma_n_strength_floor_pa = 10.0e6; state_evolution="slip_law_srw",
+#    f_w_default=0.2, V_w_default=0.1 m/s; Dc=0.10; a(z) <- param_a_500m_strongvw.csv,
+#    (a-b)(z) <- param_a_minus_b_500m_strongvw.csv (VW->VS transition ~11 km);
+#    gradual_overstress nucleation, 8 km-DIAMETER patch / 4 km e-fold radius).
+# => CONFLATES the cap + the SRW law.  To isolate, rerun cap-OFF via SAFS_CONFIG
+#    (a config without sigma_n_strength_floor_pa).
 #
 # CAP CAVEAT (REVIEW R-002): on the RS path the floor touches only the post-solve
 # slip-rate DECOMPOSITION strength; the Brent solve setting |V| still uses the
@@ -133,9 +136,11 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-# Default = the depth-varying rate-and-state variant (two-CSV a(z)/b(z)) WITH
+# Default = the SLIP-LAW + STRONG-RATE-WEAKENING (TPV104 FL=103) depth-varying
+# rate-and-state variant (two-CSV a(z)/b(z); state_evolution="slip_law_srw",
+# f_w_default=0.2, V_w_default=0.1, Dc=0.10) WITH
 # [friction].sigma_n_strength_floor_pa = 10.0e6.
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_depthprofile.toml}"
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml}"
 
 # PRE-FLIGHT: this is the CAP run — fail loudly if the config does not enable the
 # floor.  (For a cap-OFF mesh-isolation run, set SAFS_CONFIG to a no-floor config.)
@@ -161,8 +166,8 @@ fi
 # Depth-profile CSVs (read at config-load time by the parser).  Fail early here
 # with a clearer message than a mid-parse abort.
 for _csv in \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a_vwvs11km.csv" \
-    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b_vwvs11km.csv"; do
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_500m_strongvw.csv" \
+    "${SAFS_ROOT}/friction/rate-and-state/param_a_minus_b_500m_strongvw.csv"; do
     if [[ ! -f "${_csv}" ]]; then
         echo "ERROR: depth-profile CSV not found: $(pwd)/${_csv}"
         exit 1
@@ -200,12 +205,12 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Queue/size:  development, 8N x 400r, 2 h"
-echo "EXPERIMENT:  RS depth-profile + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
-echo "             on the SLIVER-REPAIRED (triq) mesh (no central flux; DEV smoke, tfinal 100 s; cap largely INERT on RS — see R-002)"
+echo "EXPERIMENT:  RS SLIP-LAW + STRONG RATE WEAKENING (TPV104 FL=103: f_w=0.2, V_w=0.1 m/s) + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
+echo "             on the 500 m _triq mesh, Dc=0.10, 8 km-dia nucleation (no central flux; DEV smoke, tfinal 100 s; cap largely INERT on RS — see R-002)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}  (triq / sliver-repaired)"
-echo "Config:      ${CONFIG_TOML}   (RS aging; depth-varying a(z)/b(z); floor=10 MPa)"
+echo "Config:      ${CONFIG_TOML}   (RS slip-law SRW; depth-varying a(z)/b(z); Dc=0.10; f_w=0.2, V_w=0.1; floor=10 MPa)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX} (pure upwind; CFL factor 1.0)"
