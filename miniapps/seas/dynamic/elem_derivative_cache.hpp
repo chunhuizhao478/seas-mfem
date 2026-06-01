@@ -115,8 +115,75 @@ inline void BuildElementDerivativeOperators(
    }
 }
 
+/// @brief Build per-element volume-RHS operators S_d^e for d = 0,1,2 (Lever 3).
+///
+/// S_d^e[i,m] = Σ_q w_q ∂_{x_d}φ_i(x_q) φ_m(x_q)  — the GEOMETRY-ONLY weak
+/// derivative stiffness (the transpose of K_d^e from BuildElementDerivativeOperators).
+/// WaveOperator::ComputeVolumeRHS's strong-form volume term
+///   rhs_c[i] = Σ_q w_q Σ_d ∂_dφ_i(x_q) Σ_k A_d(c,k) Σ_m φ_m(x_q) Q_k(m)
+/// is then reproduced (to round-off re-association) as
+///   rhs_c[i] += Σ_d Σ_k A_d^e(c,k) (S_d^e Q_k)[i],
+/// with NO per-call CalcShape/CalcPhysDShape/quadrature.  The per-element flux
+/// matrices A_d^e (FluxForElem_(e)) are applied at run time, so one cache serves
+/// the scalar and bimaterial operators.
+///
+/// @param fes         Homogeneous-order L2 FE space.
+/// @param quad_order  Integration-rule order; pass `2 * fe_order` to match the
+///                    on-the-fly ComputeVolumeRHS rule exactly.
+/// @param[out] out    out[e][d] = the ndof×ndof matrix S_d^e.
+inline void BuildElementVolumeOperators(
+   const FiniteElementSpace &fes,
+   int quad_order,
+   std::vector<std::array<DenseMatrix, 3>> &out)
+{
+   const int ne = fes.GetNE();
+   out.resize(ne);
+
+   for (int e = 0; e < ne; e++)
+   {
+      const FiniteElement *fe = fes.GetFE(e);
+      ElementTransformation *Tr = fes.GetElementTransformation(e);
+      const int ndof = fe->GetDof();
+
+      const IntegrationRule &ir = IntRules.Get(fe->GetGeomType(), quad_order);
+      const int nqp = ir.GetNPoints();
+
+      DenseMatrix Sd[3];
+      for (int d = 0; d < 3; d++) { Sd[d].SetSize(ndof); Sd[d] = 0.0; }
+
+      Vector shape(ndof);
+      DenseMatrix dshape(ndof, 3);
+
+      for (int q = 0; q < nqp; q++)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         Tr->SetIntPoint(&ip);
+         const real_t w = ip.weight * Tr->Weight();
+
+         fe->CalcShape(ip, shape);
+         fe->CalcPhysDShape(*Tr, dshape);
+
+         for (int i = 0; i < ndof; i++)
+         {
+            for (int d = 0; d < 3; d++)
+            {
+               const real_t w_dshape = w * dshape(i, d);
+               for (int m = 0; m < ndof; m++)
+               {
+                  Sd[d](i, m) += w_dshape * shape(m);
+               }
+            }
+         }
+      }
+
+      for (int d = 0; d < 3; d++) { out[e][d] = Sd[d]; }
+   }
+}
+
 /// @brief Bytes one rank's D_d^e cache occupies: 3 · ne · ndof² · sizeof(real_t).
-/// Used by the R-004 budget guard before building the cache.
+/// Used by the R-004 budget guard before building the cache.  The volume-RHS
+/// cache S_d^e (Lever 3) has the SAME footprint, so the combined Cached-mode
+/// cache is 2× this.
 inline std::size_t ElementDerivativeCacheBytes(int ne, int ndof_per_el)
 {
    return static_cast<std::size_t>(3)

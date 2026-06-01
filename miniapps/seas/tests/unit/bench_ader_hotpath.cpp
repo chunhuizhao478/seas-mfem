@@ -146,11 +146,16 @@ int main(int argc, char *argv[])
    // asd/sss/adv: the per-region times.  two_rec = sss+adv (the default
    // two-recursion macro-step).  merged = the Lever-2 single-recursion
    // macro-step (ComputeADERSubStepStatesAndIntegral + AdvanceADER(...,&I)).
-   struct Timing { double asd, sss, adv, merged; };
+   // vol = ComputeVolumeRHS alone (Lever 3 — part of the corrector).
+   struct Timing { double asd, sss, adv, merged, vol; };
    Vector I_pre;
+   Vector rhs_vol(N);
    auto measure = [&](DerivMode mode) -> Timing
    {
       wave.SetDerivMode(mode);
+      // R-005: ComputeVolumeRHS accumulates (+=); zero per measure so it does
+      // not grow unboundedly across reps / both modes.
+      rhs_vol = 0.0;
       for (int w = 0; w < 3; w++)
       {
          wave.ApplySpatialDerivative(0, Q, dQ);
@@ -177,6 +182,9 @@ int main(int argc, char *argv[])
                                                        tau_nodes, Q_per_node, I_pre);
               wave.AdvanceADER(Q, dt, ader_order, Q_new, &I_pre); },
          reps_arg, kMinSec, &used);
+      t.vol = TimeBlock(
+         [&]{ wave.ComputeVolumeRHS_ForTest(Q, rhs_vol); },
+         reps_arg, kMinSec, &used);
       return t;
    };
 
@@ -195,6 +203,7 @@ int main(int argc, char *argv[])
                "------------------\n");
    row("ApplySpatialDerivative (x3 dirs)",            otf.asd, cac.asd);
    row("ComputeADERSubStepStates (CK rec#1)",         otf.sss, cac.sss);
+   row("ComputeVolumeRHS (corrector, Lever 3)",       otf.vol, cac.vol);
    row("AdvanceADER (CK rec#2 + corrector)",          otf.adv, cac.adv);
    std::printf("---------------------------------------------------------------"
                "------------------\n");
@@ -217,6 +226,7 @@ int main(int argc, char *argv[])
    real_t sink = dQ.Size() ? dQ[0] : 0.0;
    sink += Q_new.Size() ? Q_new[Q_new.Size() - 1] : 0.0;
    if (Q_per_node.size() && Q_per_node[0].Size()) { sink += Q_per_node[0][0]; }
+   sink += rhs_vol.Size() ? rhs_vol[0] : 0.0;   // R-005: keep ComputeVolumeRHS live
    std::printf("(checksum %.3e — ignore)\n", static_cast<double>(sink));
    return 0;
 }

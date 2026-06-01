@@ -236,6 +236,33 @@ static double RecursionCachedVsOnTheFlyMaxRelErr(Op &wave, int N, int order,
    return std::max(e_adv, e_sss);
 }
 
+// Lever 3 / REVIEW R-002: the Cached ComputeVolumeRHS (S_d^e precomputed) must
+// match the OnTheFly quadrature volume integral to <= 1e-12 relative.  Uses the
+// public ComputeVolumeRHS_ForTest accessor; covers WaveOperator + Bimaterial.
+template <typename Op>
+static double VolumeRHSCachedVsOnTheFlyMaxRelErr(Op &wave, int N, unsigned seed)
+{
+   Vector Q(N);
+   FillRandomQ(Q, seed);
+   wave.SetDerivMode(DerivMode::OnTheFly);
+   Vector rhs_otf(N);
+   rhs_otf = 0.0;
+   wave.ComputeVolumeRHS_ForTest(Q, rhs_otf);
+   wave.SetDerivMode(DerivMode::Cached);
+   Vector rhs_cac(N);
+   rhs_cac = 0.0;
+   wave.ComputeVolumeRHS_ForTest(Q, rhs_cac);
+   wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
+
+   double maxref = 0.0, maxdiff = 0.0;
+   for (int i = 0; i < N; i++)
+   {
+      maxref  = std::max(maxref,  std::abs(rhs_otf[i]));
+      maxdiff = std::max(maxdiff, std::abs(rhs_otf[i] - rhs_cac[i]));
+   }
+   return maxdiff / (maxref + 1e-300);
+}
+
 // Lever 1 / REVIEW R-002: the Cached (precomputed D_d^e mat-vec) kernel must
 // match the OnTheFly quadrature kernel to <= 1e-12 relative (NOT bit-exact — the
 // setup M^{-1}K_d product re-associates round-off).  Covers WaveOperator AND
@@ -288,6 +315,62 @@ static void TestCachedEquivalence()
           << "onthefly, order=" << order << " (max rel)";
       TEST_LE(rrelb, tol, m2r.str());
 
+      // --- Lever 3: ComputeVolumeRHS cached vs onthefly ---
+      double vrel = VolumeRHSCachedVsOnTheFlyMaxRelErr(wave, N, 5151u + order);
+      std::ostringstream m1v;
+      m1v << "scalar volume RHS (Lever 3): cached == onthefly, order=" << order
+          << " (max rel)";
+      TEST_LE(vrel, tol, m1v.str());
+
+      double vrelb = VolumeRHSCachedVsOnTheFlyMaxRelErr(wb, Nb, 6262u + order);
+      std::ostringstream m2v;
+      m2v << "bimaterial volume RHS (Lever 3): cached == onthefly, order="
+          << order << " (max rel)";
+      TEST_LE(vrelb, tol, m2v.str());
+
+      // --- R-001: HETEROGENEOUS material — position-varying coefficients give a
+      //     per-element-varying A_d^e (as TPV31's depth_profile_1d does), so the
+      //     cached path's per-element flux application is exercised, not just the
+      //     constant-material case above. ---
+      FunctionCoefficient lam_v(
+         [](const Vector &x) { return 32.04e9 * (1.0 + 0.5 * x(0)); });
+      FunctionCoefficient mu_v(
+         [](const Vector &x) { return 32.04e9 * (1.0 + 0.3 * x(1)); });
+      ConstantCoefficient rho_v(2670.0);
+      BimaterialWaveOperator<Mesh> wh(
+         mesh, order, MaterialField::MakeCoefficient(&lam_v, &mu_v, &rho_v), bc);
+      const int Nh = NUM_STATE * wh.GetFESpace().GetNDofs();
+      double vrelh = VolumeRHSCachedVsOnTheFlyMaxRelErr(wh, Nh, 8484u + order);
+      std::ostringstream m3v;
+      m3v << "heterogeneous volume RHS (varying A_d): cached == onthefly, order="
+          << order << " (max rel)";
+      TEST_LE(vrelh, tol, m3v.str());
+
+      // --- R-002: Mult (RK path) cached vs onthefly — ComputeVolumeRHS is also
+      //     reached through Mult, which the ADER tests above do not exercise. ---
+      real_t Q_bg2[NUM_STATE];
+      for (int c = 0; c < NUM_STATE; c++) { Q_bg2[c] = 0.0; }
+      wave.SetAbsorbingBackground(Q_bg2);
+      Vector Qm(N);
+      FillRandomQ(Qm, 3030u + order);
+      wave.SetDerivMode(DerivMode::OnTheFly);
+      Vector dq_otf(N);
+      wave.Mult(Qm, dq_otf);
+      wave.SetDerivMode(DerivMode::Cached);
+      Vector dq_cac(N);
+      wave.Mult(Qm, dq_cac);
+      wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
+      double mref = 0.0, mdiff = 0.0;
+      for (int i = 0; i < N; i++)
+      {
+         mref  = std::max(mref,  std::abs(dq_otf[i]));
+         mdiff = std::max(mdiff, std::abs(dq_otf[i] - dq_cac[i]));
+      }
+      std::ostringstream mm;
+      mm << "scalar Mult (RK path): cached == onthefly, order=" << order
+         << " (max rel)";
+      TEST_LE(mdiff / (mref + 1e-300), tol, mm.str());
+
       // --- R-004: cache byte count is exactly 3*ne*ndof^2*sizeof(real_t) ---
       const int ne   = wave.GetFESpace().GetNE();
       const int ndof = wave.GetFESpace().GetFE(0)->GetDof();
@@ -299,6 +382,18 @@ static void TestCachedEquivalence()
       std::ostringstream m3;
       m3 << "R-004 cache bytes = 3*ne*ndof^2*8, order=" << order;
       TEST_LE(byte_err, 0.0, m3.str());
+
+      // --- R-003: Cached mode holds TWO caches (D_d^e + S_d^e) = 2x the single
+      //     size; confirm SetDerivMode(Cached) succeeds at exactly that budget
+      //     (a too-low guard would MFEM_ABORT before this line). ---
+      const std::size_t combined =
+         std::size_t(2) * ElementDerivativeCacheBytes(ne, ndof);
+      wave.SetDerivCacheBudgetBytes(combined);
+      wave.SetDerivMode(DerivMode::Cached);
+      wave.SetDerivMode(DerivMode::OnTheFly);
+      std::ostringstream m4;
+      m4 << "R-003 SetDerivMode(Cached) ok at combined 2x budget, order=" << order;
+      TEST_LE(0.0, 0.0, m4.str());
    }
 }
 

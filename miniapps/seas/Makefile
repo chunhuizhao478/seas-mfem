@@ -953,6 +953,9 @@ TEST_PARALLEL_ELAST_OBJ = $(TEST_PARALLEL_ELAST_SRC:.cpp=.o)
 # Parallel wave operator tests (dynamic rupture)
 TEST_PARALLEL_WAVE_SRC = tests/parallel/test_parallel_wave_operator.cpp
 TEST_PARALLEL_WAVE_OBJ = $(TEST_PARALLEL_WAVE_SRC:.cpp=.o)
+# Lever 1/3 (REVIEW R-002): parallel DerivMode Cached==OnTheFly equivalence.
+TEST_PARALLEL_CACHED_WAVE_SRC = tests/parallel/test_wave_operator_cached_parallel.cpp
+TEST_PARALLEL_CACHED_WAVE_OBJ = $(TEST_PARALLEL_CACHED_WAVE_SRC:.cpp=.o)
 
 # BP5 parallel smoke test
 TEST_BP5_SMOKE_SRC = tests/parallel/test_bp5_parallel_smoke.cpp
@@ -4770,6 +4773,18 @@ $(TEST_PARALLEL_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) 
 
 test-parallel-wave-operator: seas_test_parallel_wave_operator
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_wave_operator
+
+# Lever 1/3 (REVIEW R-002): parallel DerivMode Cached==OnTheFly equivalence.
+seas_test_wave_operator_cached_parallel: $(TEST_PARALLEL_CACHED_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_CACHED_WAVE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_PARALLEL_CACHED_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-wave-operator-cached-parallel: seas_test_wave_operator_cached_parallel
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_wave_operator_cached_parallel
 
 # R-101 shared-fault DOFData consistency test (2-rank MPI regression)
 seas_test_r101_shared_fault: $(TEST_R101_SHARED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)

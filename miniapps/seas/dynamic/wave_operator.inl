@@ -807,6 +807,64 @@ void WaveOperator<MeshType>::ComputeVolumeRHS(const Vector &Q, Vector &rhs) cons
    MFEM_PERF_SCOPE("seas::WaveOperator::ComputeVolumeRHS");
    const real_t *Q_data = Q.GetData();
 
+   // Lever 3: cached path — rhs_c += Σ_d A_d^e · (S_d^e Q) per element, using the
+   // precomputed geometry operator S_d^e (elem_volume_op_).  Reproduces the math
+   // of the OnTheFly quadrature loop below up to round-off re-association (REVIEW
+   // R-002); no CalcShape/CalcPhysDShape/Jacobian/quadrature.  ACCUMULATES into
+   // rhs (+=), same contract as OnTheFly.  Built by SetDerivMode(Cached).
+   if (deriv_mode_ == DerivMode::Cached)
+   {
+      MFEM_VERIFY(static_cast<int>(elem_volume_op_.size()) == ne_,
+                  "ComputeVolumeRHS(Cached): volume cache has "
+                  << elem_volume_op_.size() << " elements, expected ne_ = "
+                  << ne_ << " (call SetDerivMode(Cached) after construction).");
+      real_t *rhs_data = rhs.GetData();
+      DenseMatrix SdQ(NUM_STATE, ndof_per_el_);   // SdQ(k,i) = (S_d^e Q_k)[i]
+      for (int e = 0; e < ne_; e++)
+      {
+         const int dof_offset = e * ndof_per_el_;
+         // Per-element bulk flux matrices A_d^e (scalar: global flux_; matrix:
+         // per-element material) — same source as the OnTheFly path below.
+         const GodunovFlux &flux_e = FluxForElem_(e);
+         for (int d = 0; d < 3; d++)
+         {
+            const DenseMatrix &S = elem_volume_op_[e][d];
+            const int ndof = S.Height();
+            // R-004: same homogeneous-order assumption as the OnTheFly kernel
+            // (dof_offset = e * ndof_per_el_ stride).  Fail loud on a
+            // heterogeneous-order mesh rather than corrupt DOFs.
+            MFEM_VERIFY(ndof == ndof_per_el_,
+                        "ComputeVolumeRHS(Cached) assumes homogeneous elements: "
+                        "elem=" << e << " ndof=" << ndof
+                        << " != ndof_per_el_=" << ndof_per_el_);
+            const DenseMatrix &A = flux_e.GetReferenceStarMatrix(d);
+            // SdQ(k, :) = S_d^e · Q_k^e  (one mat-vec per state component).
+            for (int k = 0; k < NUM_STATE; k++)
+            {
+               const real_t *Qk = Q_data + k * ndof_total_ + dof_offset;
+               for (int i = 0; i < ndof; i++)
+               {
+                  real_t s = 0.0;
+                  for (int m = 0; m < ndof; m++) { s += S(i, m) * Qk[m]; }
+                  SdQ(k, i) = s;
+               }
+            }
+            // rhs_c[i] += Σ_k A_d^e(c,k) · SdQ(k,i)  (accumulates over d).
+            for (int c = 0; c < NUM_STATE; c++)
+            {
+               real_t *rc = rhs_data + c * ndof_total_ + dof_offset;
+               for (int i = 0; i < ndof; i++)
+               {
+                  real_t acc = 0.0;
+                  for (int k = 0; k < NUM_STATE; k++) { acc += A(c, k) * SdQ(k, i); }
+                  rc[i] += acc;
+               }
+            }
+         }
+      }
+      return;
+   }
+
    for (int e = 0; e < ne_; e++)
    {
       const FiniteElement *fe = fes_->GetFE(e);
@@ -924,6 +982,13 @@ void WaveOperator<MeshType>::ApplySpatialDerivative(int dir,
       {
          const DenseMatrix &D = elem_deriv_op_[e][dir];
          const int ndof = D.Height();
+         // R-004: same homogeneous-order assumption as the OnTheFly kernel; the
+         // dof_offset = e * ndof_per_el_ stride is only valid when every element
+         // has ndof_per_el_ DOFs.  Fail loud rather than read/write wrong DOFs.
+         MFEM_VERIFY(ndof == ndof_per_el_,
+                     "ApplySpatialDerivative(Cached) assumes homogeneous "
+                     "elements: elem=" << e << " ndof=" << ndof
+                     << " != ndof_per_el_=" << ndof_per_el_);
          const int dof_offset = e * ndof_per_el_;
          for (int c = 0; c < NUM_STATE; c++)
          {
@@ -1039,25 +1104,31 @@ void WaveOperator<MeshType>::SetDerivMode(DerivMode m)
    {
       // R-004: fail loud BEFORE allocating if the cache exceeds the per-rank
       // budget (p4 / dense partitions can OOM a node).  Keep DerivMode::OnTheFly
-      // or raise SetDerivCacheBudgetBytes if this trips.
+      // or raise SetDerivCacheBudgetBytes if this trips.  Cached mode holds TWO
+      // geometry caches: D_d^e (Lever 1, ApplySpatialDerivative) and S_d^e
+      // (Lever 3, ComputeVolumeRHS), each 3·ne·ndof²·8 B.
       const std::size_t bytes =
-         ElementDerivativeCacheBytes(ne_, ndof_per_el_);
+         std::size_t(2) * ElementDerivativeCacheBytes(ne_, ndof_per_el_);
       MFEM_VERIFY(bytes <= deriv_cache_budget_bytes_,
-                  "WaveOperator::SetDerivMode(Cached): the D_d^e cache would use "
+                  "WaveOperator::SetDerivMode(Cached): the D_d^e + S_d^e caches "
+                  "would use "
                   << (static_cast<double>(bytes) / 1048576.0)
                   << " MB/rank > budget "
                   << (static_cast<double>(deriv_cache_budget_bytes_) / 1048576.0)
                   << " MB.  Raise SetDerivCacheBudgetBytes(...) or keep "
                   "DerivMode::OnTheFly.");
       // elem_mass_inv_ is assembled in the ctor, so it is ready here.  Use the
-      // SAME quadrature order (2*order_) as the OnTheFly kernel for equivalence.
+      // SAME quadrature order (2*order_) as the OnTheFly kernels for equivalence.
       BuildElementDerivativeOperators(*fes_, 2 * order_, elem_mass_inv_,
                                       elem_deriv_op_);
+      BuildElementVolumeOperators(*fes_, 2 * order_, elem_volume_op_);
    }
    else
    {
       elem_deriv_op_.clear();
       elem_deriv_op_.shrink_to_fit();
+      elem_volume_op_.clear();
+      elem_volume_op_.shrink_to_fit();
    }
    deriv_mode_ = m;
 }

@@ -813,6 +813,11 @@ protected:
    // under the default OnTheFly mode, so default builds are byte-unchanged.
    DerivMode deriv_mode_ = DerivMode::OnTheFly;
    std::vector<std::array<DenseMatrix, 3>> elem_deriv_op_;
+   // Lever 3 (ADER hot-path): per-element volume-RHS operators
+   // S_d^e[i,m] = Σ_q w_q ∂_dφ_i φ_m (elem_volume_op_[e][d]), built alongside
+   // elem_deriv_op_ by SetDerivMode(Cached) and read by the Cached branch of
+   // ComputeVolumeRHS.  Empty under the default OnTheFly mode.
+   std::vector<std::array<DenseMatrix, 3>> elem_volume_op_;
    std::size_t deriv_cache_budget_bytes_ = std::size_t(1) << 30;  // 1 GiB/rank
 
    std::unique_ptr<FaultBasis> fault_basis_;
