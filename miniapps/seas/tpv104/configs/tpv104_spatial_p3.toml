@@ -1,0 +1,164 @@
+# =====================================================================
+#  SCEC TPV104 — rate-and-state friction, slip law with strong rate
+#  weakening (FVW), run through the SAFS spatial dynamic-rupture driver
+#  (seas_spatial_dyn_driver).
+#
+#  Plan: PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md, Phase 8.
+#  Physics oracle: drivers/tpv104_driver.cpp + config/tpv104_params.hpp.
+#
+#  Stress convention (D3.2): kind = "fault_local_prestress" (direct seed,
+#  right-lateral / compression POSITIVE; no Cauchy projection).
+#
+#  VW-zone a(x,z) and V_w(x,z): native TPV104 uses SCEC Eq.(4)-(5) with a
+#  smooth boxcar B (tanh transition) interpolating a_in/a_out and
+#  V_w_in/V_w_out.  The spatial resolver REJECTS boxcar_taper rules
+#  (Phase 6 config-only; "use kind=box/depth").  So the VW core is a HARD
+#  box (a=a_in, V_w=V_w_in inside; a_out, V_w_out outside); the smooth
+#  tanh transition is DEFERRED.  Documented Phase 8 approximation.
+#
+#  Boundary attributes: this TPV104 mesh uses fault=3, free=1, absorbing=5
+#  (Physical Surface 1/3/5; see [boundary] below).  The driver reads
+#  [boundary] (Phase 8 wired cfg.boundary into spatial_dyn_driver with a
+#  SAFS fallback when [boundary] is absent).
+# =====================================================================
+
+# =========================================================================
+# p3 / ADER-O4 VARIANT of tpv104_spatial.toml.  Identical PHYSICS to
+# tpv104_spatial.toml — the ONLY differences are the two numerical-resolution
+# knobs:
+#     [mesh].order        = 3   (p3; config-only, no CLI override)
+#     [numerics].ader_order = 4 (ADER-O4; the sbatch also pins --ader-order 4)
+# KEEP THIS FILE IN SYNC with tpv104_spatial.toml on every PHYSICS change
+# (material, stress, friction, nucleation, boundary, geometry).  Only
+# order/ader_order (and, optionally, output cadence) may legitimately differ.
+# =========================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV104 (p3 / ADER-O4 variant; RS slip-law SRW) via spatial_dyn_driver — fault-local prestress, scalar Riemann."
+
+[problem]
+tag = "tpv104"   # selects the SCEC TPV104 on-fault station writer in spatial_dyn_driver
+
+# Material: homogeneous, native TPV104Params (identical to TPV102/205).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Smallest available TPV104 mesh (1000 m fault resolution, ~10 MB).  The
+# normal-queue sbatch overrides [mesh].path via --mesh (200 m production mesh);
+# this default is only used when --mesh is omitted.
+# p3 variant: cubic FE space on the same linear (straight-tet) mesh.
+# The CFL safety factor auto-scales with this order: CflSafetyFactor =
+# 1/(3·(2p+1)) = 1/21 at p=3 (vs 1/15 at p=2, 1/9 at p=1) — see
+# spatial_friction.hpp:619.
+path  = "tpv104/mesh/tpv104_1000m.msh"
+order = 3
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 40.0e6     # native TPV104 tau_ini (+ right-lateral)
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[numerics]
+ader_order     = 4          # ADER-O4 (allowed range {2,3,4}); sbatch pins --ader-order 4
+mixed_flux     = "adjacent"
+cfl            = 0.25
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.2s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv104_spatial"
+restart_prefix = "cp"
+paraview_fault = "hdf5"
+paraview_fault_dt = "0.01s"
+
+# Rate-and-state, slip law with strong rate weakening (FVW; native TPV104).
+#   VW core (velocity-weakening):      a = a_in  = 0.01,  V_w = V_w_in  = 0.1  (DEFAULT)
+#   border  (velocity-strengthening):  a = a_out = 0.02,  V_w = V_w_out = 1.0  (box rules)
+#   b = 0.014, Dc(L) = 0.4 m, f_0 = 0.6, V_0 = 1e-6, V_init = 1e-16, f_w(muW) = 0.2.
+#
+# Expressed INSIDE-OUT (VW core as the default, VS trimmed at the borders)
+# so a_default = a_in < b_default passes the parser's scalar a<b guard;
+# the resolver allows per-DOF a>b (a_out) at the border (R-011).  Net
+# per-DOF a / V_w fields match the native "VS background + VW core" form.
+[friction.rate_state]
+a_default       = 0.01
+b_default       = 0.014
+Dc_default      = 0.4
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-16
+sigma_n_default = 120.0e6
+state_evolution = "slip_law_strong_rate_weakening"
+f_w_default     = 0.2
+V_w_default     = 0.1
+eta             = "auto"
+
+# VS borders (a = a_out = 0.02, V_w = V_w_out = 1.0).
+[[friction.rate_state.spatial]]
+kind    = "box"
+x_max_m = -15000.0
+a       = 0.02
+V_w     = 1.0
+
+[[friction.rate_state.spatial]]
+kind    = "box"
+x_min_m = 15000.0
+a       = 0.02
+V_w     = 1.0
+
+[[friction.rate_state.spatial]]
+kind    = "box"
+z_max_m = -15000.0
+a       = 0.02
+V_w     = 1.0
+
+# Nucleation: SCEC compact-bell gradual overstress (TPV104), strike-only.
+#   delta_tau0 = 45 MPa (vs 25 for TPV102), R = 3 km, T_nuc = 1 s.
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 45.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0
