@@ -23,7 +23,7 @@
 # amplifier") + §Phase 4 (the sigma_n strength floor).
 #
 # Two fixes for the job-7748818 LSW Dc2 blow-up are active TOGETHER here:
-#   (1) the sigma_n strength floor (10 MPa), baked into
+#   (1) the sigma_n strength floor (5 MPa), baked into
 #       config/spatial_friction_slip_weakening_safs_projected_stress_resolution_Dc2.toml;
 #   (2) the re-triangulated (TMOP/retriangulated) mesh
 #       experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh,
@@ -93,23 +93,8 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
 fi
 cd "${SEAS_MFEM_ROOT}"
 
-# ZFP HDF5 filter plugin (libh5zzfp.so), required at runtime for
-# --paraview-*-zfp-tol.
-H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
-if [[ -e "${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so" ]]; then
-    export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin:${HDF5_PLUGIN_PATH:-}"
-else
-    echo "ERROR: ZFP plugin not found at"
-    echo "         ${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so"
-    echo "       Build it on Frontera with:  bash build_frontera.sh"
-    echo "       (or omit --paraview-*-zfp-tol from the driver invocation)."
-    exit 1
-fi
-
 grep -q '^MFEM_USE_PETSC *= YES'  config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
 grep -q '^MFEM_USE_MUMPS *= YES'  config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
-grep -q '^MFEM_USE_HDF5 *= YES'   config/config.mk || { echo "ERROR: no HDF5"; exit 1; }
-grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || { echo "ERROR: no H5Z_ZFP"; exit 1; }
 
 cd miniapps/seas
 # This run job does NOT build — the binary must be pre-built (by
@@ -126,7 +111,7 @@ fi
 
 SAFS_ROOT=safs/project_7.0_alternative
 # Same config as the 7748818 blow-up (D_c=2.0 / radius=4000 / cfl=0.5) — with
-# [friction].sigma_n_strength_floor_pa = 10.0e6.
+# [friction].sigma_n_strength_floor_pa = 5.0e6.
 CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_slip_weakening_safs_projected_stress_resolution_Dc2.toml}"
 
 # PRE-FLIGHT: this is the CAP run — fail loudly if the config does not enable the
@@ -183,12 +168,12 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Queue/size:  normal, 10N x 500r, 48 h"
-echo "EXPERIMENT:  LSW Dc2 + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
+echo "EXPERIMENT:  LSW Dc2 + sigma_n floor (5 MPa), PURE UPWIND (mixed_flux=none),"
 echo "             on the SLIVER-REPAIRED (triq) mesh (cap + mesh repair + no central flux; tfinal 100 s)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}  (triq / sliver-repaired)"
-echo "Config:      ${CONFIG_TOML}   (D_c=2.0 / radius=4000 / floor=10 MPa)"
+echo "Config:      ${CONFIG_TOML}   (D_c=2.0 / radius=4000 / floor=5 MPa)"
 echo "Diag:        SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} (V_max/[DIAG-ONSET] trace ON)"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX} (pure upwind; CFL factor 1.0)"
 echo "tfinal:      ${TFINAL}  (48 h wall reaches ~35 s; checkpoint + SAFS_RESTART for the rest)"
@@ -204,8 +189,8 @@ ibrun ./seas_spatial_dyn_driver \
     ${CFL_ARG} \
     ${RESTART_ARG} \
     --paraview \
-    --paraview-fault-hdf5 \
-    --paraview-fault-zfp-tol 1.0e-12 \
+    --paraview-fault-vtu \
+    --paraview-volume-vtu \
     --paraview-max-snapshots 200 \
     --print-derived \
     --checkpoint-every 2000 \
@@ -214,10 +199,10 @@ ibrun ./seas_spatial_dyn_driver \
 RC=$?
 
 # Confirm the floor was actually active (banner echo).
-if grep -qE 'sigma_n strength floor:[[:space:]]*10[[:space:]]*MPa' "${LOG}"; then
-    echo "floor: ACTIVE (banner reports 10 MPa)"
+if grep -qE 'sigma_n strength floor:[[:space:]]*5[[:space:]]*MPa' "${LOG}"; then
+    echo "floor: ACTIVE (banner reports 5 MPa)"
 else
-    echo "WARNING: did not find 'sigma_n strength floor: 10 MPa' in the banner —"
+    echo "WARNING: did not find 'sigma_n strength floor: 5 MPa' in the banner —"
     echo "         the floor may be DISABLED.  Inspect ${LOG} before trusting the result."
 fi
 

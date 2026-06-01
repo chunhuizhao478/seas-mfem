@@ -22,7 +22,7 @@
 # WHAT CHANGED vs the aging-law sibling
 # (spatial_friction_rate_state_safs_projected_stress_depthprofile_Dc010_nuc8km_500m.toml):
 #   [friction.rate_state].state_evolution   "aging" (implicit) -> "slip_srw"
-#   [friction.rate_state].f_w               (new)   = 0.2   fully-weakened friction (muW)
+#   [friction.rate_state].f_w               (new)   = 0.3   fully-weakened friction (muW)
 #   [friction.rate_state].V_w               (new)   = 0.1   weakening velocity [m/s], constant
 #   [numerics].mixed_flux                    "adjacent" -> "none" (pure upwind; central/mixed
 #                                            flux is the confirmed SAFS blow-up driver — the
@@ -51,7 +51,7 @@
 [meta]
 schema_version = 1
 law            = "rate_state"
-description    = "SAFS rate-and-state SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103; state_evolution='slip_srw', f_w=0.2, V_w=0.1 m/s) with DEPTH-VARYING a(z)/b(z) from param_a_500m_strongvw.csv + param_a_minus_b_500m_strongvw.csv (b = a - (a-b); VW->VS ~11 km); Dc=0.10, 8 km-DIAMETER gradual_overstress nucleation, on the 500 m z0embed _triq mesh.  Pure upwind (mixed_flux='none')."
+description    = "SAFS rate-and-state SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103; state_evolution='slip_srw', f_w=0.3, V_w=0.1 m/s) with DEPTH-VARYING a(z)/b(z) from param_a_500m_strongvw.csv + param_a_minus_b_500m_strongvw.csv (b = a - (a-b); VW->VS ~11 km); Dc=0.10, 8 km-DIAMETER gradual_overstress nucleation, on the 500 m z0embed _triq mesh.  Pure upwind (mixed_flux='none')."
 
 [material_constant_fallback]
 # Equal lambda = mu => Poisson ratio = 0.25 (typical crust).  cp ~= 5996 m/s.
@@ -164,7 +164,9 @@ sigma_n_strength_floor_pa = 10.0e6
 # on "slip_srw"); f_w/V_w -> f_w_default/V_w_default (the top-level keys this
 # repo reads).  VALUES ARE UNCHANGED -> identical SRW physics.
 state_evolution = "slip_law_srw"
-f_w_default     = 0.2        # fully-weakened friction (muW).  0 < f_w < f_0.
+f_w_default     = 0.3        # fully-weakened friction (muW); 0 < f_w < f_0=0.6.
+                             # Raised 0.2 -> 0.3 (2026-06-01) to REDUCE dynamic slip
+                             # rate: dynamic drop ~ (f_0-f_w)*sigma_n shrinks 0.40 -> 0.30 (-25%).
 V_w_default     = 0.1        # weakening velocity [m/s], CONSTANT over the fault.
 
 # Depth-varying a(z) / b(z) (Phase 11b).  a_default / b_default are the scalar

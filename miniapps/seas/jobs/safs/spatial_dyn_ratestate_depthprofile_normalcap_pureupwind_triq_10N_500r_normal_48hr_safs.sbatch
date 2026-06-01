@@ -9,7 +9,7 @@
 #SBATCH -A EAR20006
 
 # SAFS RATE-AND-STATE — SLIP LAW + STRONG RATE WEAKENING (TPV104 FL=103,
-# depth-varying a(z)/b(z), f_w=0.2 / V_w=0.1 m/s) + sigma_n CAP, PURE UPWIND
+# depth-varying a(z)/b(z), f_w=0.3 / V_w=0.1 m/s) + sigma_n CAP, PURE UPWIND
 # (mixed_flux=none), on the 500 m _triq MESH — normal-queue full run
 # (10N/500r/48h, tfinal 100 s).  [Ported from seas-mfem-safs 2026-06-01.]
 # =========================================================================
@@ -33,7 +33,7 @@
 # Config (floor enabled):
 #   config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml
 #   ([friction].sigma_n_strength_floor_pa = 10.0e6; state_evolution="slip_law_srw",
-#    f_w_default=0.2, V_w_default=0.1 m/s; Dc=0.10; a(z) <- param_a_500m_strongvw.csv,
+#    f_w_default=0.3, V_w_default=0.1 m/s; Dc=0.10; a(z) <- param_a_500m_strongvw.csv,
 #    (a-b)(z) <- param_a_minus_b_500m_strongvw.csv (VW->VS transition ~11 km);
 #    gradual_overstress nucleation, 8 km-DIAMETER patch / 4 km e-fold radius).
 #    CAVEAT R-002: under SRW f_ss->f_w at V>>V_w regardless of (b-a) sign, so the
@@ -108,23 +108,8 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
 fi
 cd "${SEAS_MFEM_ROOT}"
 
-# ZFP HDF5 filter plugin (libh5zzfp.so), required at runtime for
-# --paraview-*-zfp-tol.
-H5Z_ZFP_BUILT_DIR="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install"
-if [[ -e "${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so" ]]; then
-    export HDF5_PLUGIN_PATH="${H5Z_ZFP_BUILT_DIR}/plugin:${HDF5_PLUGIN_PATH:-}"
-else
-    echo "ERROR: ZFP plugin not found at"
-    echo "         ${H5Z_ZFP_BUILT_DIR}/plugin/libh5zzfp.so"
-    echo "       Build it on Frontera with:  bash build_frontera.sh"
-    echo "       (or omit --paraview-*-zfp-tol from the driver invocation)."
-    exit 1
-fi
-
 grep -q '^MFEM_USE_PETSC *= YES'  config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
 grep -q '^MFEM_USE_MUMPS *= YES'  config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
-grep -q '^MFEM_USE_HDF5 *= YES'   config/config.mk || { echo "ERROR: no HDF5"; exit 1; }
-grep -q '^MFEM_USE_H5Z_ZFP *= YES' config/config.mk || { echo "ERROR: no H5Z_ZFP"; exit 1; }
 
 cd miniapps/seas
 # This run job does NOT build — the binary must be pre-built (by
@@ -142,7 +127,7 @@ fi
 SAFS_ROOT=safs/project_7.0_alternative
 # Default = the SLIP-LAW + STRONG-RATE-WEAKENING (TPV104 FL=103) depth-varying
 # rate-and-state variant (two-CSV a(z)/b(z); state_evolution="slip_law_srw",
-# f_w_default=0.2, V_w_default=0.1, Dc=0.10) WITH
+# f_w_default=0.3, V_w_default=0.1, Dc=0.10) WITH
 # [friction].sigma_n_strength_floor_pa = 10.0e6.
 CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml}"
 
@@ -209,12 +194,12 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Queue/size:  normal, 10N x 500r, 48 h"
-echo "EXPERIMENT:  RS SLIP-LAW + STRONG RATE WEAKENING (TPV104 FL=103: f_w=0.2, V_w=0.1 m/s) + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
+echo "EXPERIMENT:  RS SLIP-LAW + STRONG RATE WEAKENING (TPV104 FL=103: f_w=0.3, V_w=0.1 m/s) + sigma_n floor (10 MPa), PURE UPWIND (mixed_flux=none),"
 echo "             on the 500 m _triq mesh, Dc=0.10, 8 km-dia nucleation (no central flux; full run tfinal 100 s; cap largely INERT on RS — see R-002)"
 echo "Output dir:  ${OUT}"
 echo "Log file:    ${LOG}"
 echo "Mesh:        ${MESH}  (triq / sliver-repaired)"
-echo "Config:      ${CONFIG_TOML}   (RS slip-law SRW; depth-varying a(z)/b(z); Dc=0.10; f_w=0.2, V_w=0.1; floor=10 MPa)"
+echo "Config:      ${CONFIG_TOML}   (RS slip-law SRW; depth-varying a(z)/b(z); Dc=0.10; f_w=0.3, V_w=0.1; floor=10 MPa)"
 echo "Diag:        SEAS_DIAG_SLIP=${SEAS_DIAG_SLIP} VTHR=${SEAS_DIAG_SLIP_VTHR} SEAS_DIAG_BLOWUP=${SEAS_DIAG_BLOWUP} SEAS_NOOPENING=${SEAS_NOOPENING}"
 echo "Diag(frame): SEAS_DIAG_FRAME=${SEAS_DIAG_FRAME} XYZ=${SEAS_DIAG_FRAME_XYZ} R=${SEAS_DIAG_FRAME_R} SEAS_DIAG_MACRO=${SEAS_DIAG_MACRO}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX} (pure upwind; CFL factor 1.0)"
@@ -231,8 +216,8 @@ ibrun ./seas_spatial_dyn_driver \
     ${CFL_ARG} \
     ${RESTART_ARG} \
     --paraview \
-    --paraview-fault-hdf5 \
-    --paraview-fault-zfp-tol 1.0e-12 \
+    --paraview-fault-vtu \
+    --paraview-volume-vtu \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \

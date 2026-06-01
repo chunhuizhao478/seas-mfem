@@ -196,7 +196,7 @@ T_nuc_s             =        1.0
 # breaks the late tensile-runaway blow-up (job 7748818, doc 2c).  Applies
 # to both laws.  Omit / set < 0 to disable (byte-exact with the historical
 # LSW max(sigma_n, 0)).
-sigma_n_strength_floor_pa = 10.0e6
+sigma_n_strength_floor_pa = 5.0e6    # 2026-06-01: lowered 10 -> 5 MPa (LSW cases)
 
 [friction.slip_weakening]
 # Uniform LSW friction across the active fault (no spatial overrides
