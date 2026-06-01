@@ -1902,39 +1902,16 @@ RateStatePerDOFParams resolve_rs_impl(
                   "for now.");
    }
 
-   // R-001 (Phase 11 review, CRITICAL): per-DOF b is wired through the AGING
-   // iterator (Tpv102SubStepIterator / RateStateAgingPolicy read d.b) and the
-   // equilibrium seed (SeedEquilibriumPsi_RS uses rs.b(ii)) ONLY.  The slip-law
-   // strong-rate-weakening (SRW) policy evolves psi with the SCALAR L.GetB()
-   // (= blk.b_default; tpv104 left untouched, friction/state_policies.hpp).  If
-   // a non-scalar b reaches the SRW path, the seed uses per-DOF b while the
-   // dynamics use scalar b -> the fault is seeded OUT of the SRW iterator's
-   // equilibrium at t=0 (silent disequilibrium / spurious transient).  Pre-
-   // Phase-11 the seed used the scalar b too, so this is a Phase-11-introduced
-   // regression that only bites once b is non-scalar.  Reject the combination
-   // loudly until SRW is given a per-DOF b (out of Phase-11 scope, per the plan
-   // §11a step 2 / §Constraints).  Aging is unaffected (it honours d.b).
-   if (cfg.state_evolution == StateEvolutionKind::SlipLawStrongRateWeakening)
-   {
-      MFEM_VERIFY(!cfg.depth_profile.enabled,
-                  "ResolveRateState: [friction.rate_state.depth_profile] "
-                  "(per-DOF b) is NOT supported with state_evolution="
-                  "slip_law_strong_rate_weakening; the SRW iterator evolves psi "
-                  "with the scalar b_default (Phase 11 wired per-DOF b through "
-                  "the aging iterator only), so a per-DOF b would seed psi out "
-                  "of the SRW iterator's equilibrium at t=0.  Use the aging law, "
-                  "or remove the depth profile and use a scalar b.");
-      for (const auto& r : cfg.spatial)
-      {
-         MFEM_VERIFY(std::isnan(r.b),
-                     "ResolveRateState: a per-DOF 'b' spatial override is NOT "
-                     "supported with state_evolution="
-                     "slip_law_strong_rate_weakening (the SRW iterator uses the "
-                     "scalar b_default; per-DOF b is aging-law only).  Remove "
-                     "the 'b' override from the spatial rule, or use the aging "
-                     "law.");
-      }
-   }
+   // 2026-06-01 (depth-profile-SRW, supersedes the Phase-11 R-001 guard):
+   // per-DOF b is now threaded through BOTH the equilibrium seed
+   // (SeedEquilibriumPsi_RS uses rs.b) AND the SRW psi-update
+   // (RateStateSlipLawSrwPolicy::UpdatePsi reads d.b, friction/state_policies.hpp),
+   // exactly as the aging path already does.  A depth-varying b therefore seeds
+   // the fault IN equilibrium at t=0 for slip-law-SRW just as for aging, so the
+   // former guard (which rejected SRW + depth_profile / per-DOF b because the
+   // SRW dynamics used the scalar b_default while the seed used per-DOF b ->
+   // t=0 disequilibrium) is no longer needed.  Scalar TPV104 is unaffected
+   // (d.b == b_default).
 
    RateStatePerDOFParams p;
    p.a.SetSize(N);   p.b.SetSize(N);   p.Dc.SetSize(N);

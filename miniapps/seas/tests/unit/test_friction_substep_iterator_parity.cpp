@@ -116,6 +116,10 @@ DOFData MakeSrwDOF(real_t pert)
    d.tau1_0   = 0.0;
    d.tau2_0   = 29.38e6 + pert * 1.0e6;
    d.a   = 0.008 + pert * 0.0001;
+   d.b   = 0.012;                 // 2026-06-01: SRW policy now reads per-DOF d.b
+                                  // (depth-profile fix); set = the law's scalar b
+                                  // (b=0.012 below) so the unified iterator's d.b
+                                  // matches the standalone's GetB() -> bit-parity.
    d.Dc  = 0.40;
    d.psi = 0.564 + pert * 0.01;
    return d;

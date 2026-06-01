@@ -16,12 +16,16 @@
 // coupling sits with the friction code, per plan §5.1.
 //
 // === Deviations from the plan's §5.1 snippet (recorded; verified at impl time) ===
-//  (a) Aging `UpdatePsi` reads the PER-DOF `d.b`, NOT `Law::GetB()`.  Phase 11a
-//      made `b` per-DOF on the aging path; the live oracle
-//      `tpv102_substep_iterator.cpp:189` passes `d.b`.  Using `L.GetB()` here
-//      (as the plan snippet did, pre-Phase-11a) would break bit-exactness on a
-//      depth-profile run.  TPV104 was NOT touched by Phase 11a, so the SRW
-//      policy keeps the SCALAR `L.GetB()` (matches tpv104_substep_iterator.cpp:416).
+//  (a) BOTH `UpdatePsi` policies read the PER-DOF `d.b`, NOT `Law::GetB()`.
+//      Phase 11a made `b` per-DOF on the aging path (live oracle
+//      `tpv102_substep_iterator.cpp:189` passes `d.b`); the 2026-06-01
+//      depth-profile-SRW fix extends the SAME per-DOF `d.b` to the SRW policy
+//      so a depth-varying `b` evolves ψ consistently with the equilibrium seed
+//      (`SeedEquilibriumPsi_RS` already uses per-DOF `rs.b`).  For scalar TPV104
+//      `d.b == b_default == L.GetB()`, so both policies stay byte-identical to
+//      the standalone `tpv102_substep_iterator.cpp:189` / `tpv104_..._.cpp:416`
+//      (the native-TPV104-only SRW standalone keeps the scalar `GetB()`; it is
+//      always scalar `b`).
 //  (b) `Extra` for SRW is `const mfem::Vector*` (non-owning), NOT
 //      `std::span<const real_t>`: the toolchain is pre-C++20 and `std::span` is
 //      unavailable, and an `mfem::Vector` matches the resolver's
@@ -66,11 +70,14 @@ struct RateStateAgingPolicy
    static void ValidateExtra(const Extra & /*unused*/, int /*n*/) {}
 };
 
-/// Slip-law with strong rate weakening — TPV104.  The per-QP ψ-update uses
-/// the per-QP weakening velocity `V_w[i]` (the `Extra` side-channel) and the
-/// per-QP direct-effect `d.a`, plus the scalar globals carried by the law
-/// (`b`, `V0`, `f0`, `muW`).  Reproduces `tpv104_substep_iterator.cpp:413-419`.
-/// `b` stays SCALAR (`L.GetB()`) — TPV104 was not touched by Phase 11a.
+/// Slip-law with strong rate weakening — TPV104 / SAFS.  The per-QP ψ-update
+/// uses the per-QP weakening velocity `V_w[i]` (the `Extra` side-channel), the
+/// per-QP direct-effect `d.a`, AND the per-QP state-evolution `d.b` (depth
+/// profile), plus the scalar globals `V0/f0/muW` carried by the law.  The
+/// per-DOF `d.b` matches the equilibrium seed (`SeedEquilibriumPsi_RS` uses
+/// `rs.b`), so a depth-varying `b` seeds the fault IN equilibrium at t=0.  For
+/// scalar TPV104 `d.b == b_default == L.GetB()`, so this stays byte-identical to
+/// `tpv104_substep_iterator.cpp:413-419` (which uses the scalar `GetB()`).
 struct RateStateSlipLawSrwPolicy
 {
    using Law   = SlipLawSRWPsi;
@@ -84,7 +91,7 @@ struct RateStateSlipLawSrwPolicy
    {
       return UpdateStateAnalyticSlipLawSRW(d.psi, V, d.Dc, dt,
                                            (*Vw)(i), d.a,
-                                           L.GetB(), L.GetV0(),
+                                           d.b, L.GetV0(),
                                            L.GetF0(), L.GetMuW());
    }
 

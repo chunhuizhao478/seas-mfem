@@ -241,71 +241,58 @@ static void G_R011_allows_velocity_strengthening()
 }
 
 // =====================================================================
-// R-001 (Phase 11 review, CRITICAL): per-DOF b is wired through the AGING
-// iterator + equilibrium seed only.  The SRW policy evolves psi with the
-// scalar b_default, so a non-scalar b (depth_profile or a per-DOF b spatial
-// rule) under state_evolution=slip_law_strong_rate_weakening must be rejected
-// loudly — otherwise the seed uses per-DOF b while the dynamics use scalar b
-// (silent t=0 disequilibrium).  Scalar-b SRW must still resolve.
+// R-001 (Phase 11 review) SUPERSEDED 2026-06-01 (depth-profile-SRW): per-DOF b
+// is now threaded through BOTH the equilibrium seed (SeedEquilibriumPsi_RS uses
+// rs.b) AND the SRW psi-update (RateStateSlipLawSrwPolicy::UpdatePsi reads d.b),
+// exactly as the aging path already does.  Seed and dynamics therefore agree on
+// a depth-varying b -> the fault is in equilibrium at t=0 -> the former guard
+// (which rejected SRW + per-DOF b) is removed.  SRW + per-DOF b must now RESOLVE
+// with the per-DOF b; scalar-b SRW (TPV104) is unchanged (b == b_default).
 // =====================================================================
-static void G_R001_srw_rejects_per_dof_b()
+static void G_R001_srw_accepts_per_dof_b()
 {
-   std::cout << "\n[R-001] SRW + per-DOF b aborts; scalar-b SRW resolves\n";
+   std::cout << "\n[R-001] SRW + per-DOF b now resolves (seed + dynamics both read d.b)\n";
    const int N = 1;
    Vector coords; Array<int> attr, elem;
    make_dofs(N, coords, attr, elem);
-
-   // SRW + depth_profile -> abort (the guard fires before any profile eval).
-   const bool profile_aborts = RunInChild([&]() {
-      TinyMeshHolder mh;
-      SpatialFrictionResolver R;
-      RateStateBlock cfg;
-      cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
-      cfg.depth_profile.enabled = true;          // per-DOF b source
-      auto mat = MaterialField::MakeConstant(32.0e9, 32.0e9, 2670.0);
-      Vector sn_total(N); sn_total(0) = 49.27e6;
-      (void) R.ResolveRateState(cfg, coords, elem, attr, mat, mh.mesh(),
-                                PorePressureSpec{}, sn_total);
-   });
-   TEST_ASSERT(profile_aborts, "SRW + depth_profile aborts (R-001)");
-
-   // SRW + a per-DOF b spatial rule -> abort.
-   const bool rule_aborts = RunInChild([&]() {
-      TinyMeshHolder mh;
-      SpatialFrictionResolver R;
-      RateStateBlock cfg;
-      cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
-      SpatialRule rule;
-      rule.kind = SpatialRule::Kind::Depth;
-      rule.b    = 0.020;                          // per-DOF b override
-      cfg.spatial.push_back(rule);
-      auto mat = MaterialField::MakeConstant(32.0e9, 32.0e9, 2670.0);
-      Vector sn_total(N); sn_total(0) = 49.27e6;
-      (void) R.ResolveRateState(cfg, coords, elem, attr, mat, mh.mesh(),
-                                PorePressureSpec{}, sn_total);
-   });
-   TEST_ASSERT(rule_aborts, "SRW + per-DOF b spatial rule aborts (R-001)");
-
-   // Control: SRW with SCALAR b (no profile, no b rule) must still resolve, and
-   // a per-DOF a / Dc rule (NOT b) is still allowed under SRW.
-   TinyMeshHolder mh;
-   SpatialFrictionResolver R;
-   RateStateBlock cfg;
-   cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
-   cfg.V_w_default = 0.1;                          // SRW per-DOF loop needs V_w>0
-   SpatialRule rule;
-   rule.kind = SpatialRule::Kind::Depth;
-   rule.a    = 0.012;                              // per-DOF a is fine under SRW
-   cfg.spatial.push_back(rule);
    auto mat = MaterialField::MakeConstant(32.0e9, 32.0e9, 2670.0);
    Vector sn_total(N); sn_total(0) = 49.27e6;
-   RateStatePerDOFParams p =
-      R.ResolveRateState(cfg, coords, elem, attr, mat, mh.mesh(),
-                         PorePressureSpec{}, sn_total);
-   TEST_NEAR(p.b(0), cfg.b_default, 1e-15,
-             "scalar-b SRW resolves; b == b_default (guard does not over-reject)");
-   TEST_NEAR(p.a(0), 0.012, 1e-15,
-             "per-DOF a override still allowed under SRW (only b is rejected)");
+
+   // SRW + a per-DOF b spatial rule now RESOLVES; the resolved b is the per-DOF
+   // override (no longer rejected) and flows to both seed and SRW psi-update.
+   {
+      TinyMeshHolder mh;
+      SpatialFrictionResolver R;
+      RateStateBlock cfg;
+      cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
+      cfg.V_w_default = 0.1;                          // SRW per-DOF loop needs V_w>0
+      SpatialRule rule;
+      rule.kind = SpatialRule::Kind::Depth;
+      rule.a    = 0.012;                              // per-DOF a
+      rule.b    = 0.020;                              // per-DOF b (was rejected pre-2026-06-01)
+      cfg.spatial.push_back(rule);
+      RateStatePerDOFParams p =
+         R.ResolveRateState(cfg, coords, elem, attr, mat, mh.mesh(),
+                            PorePressureSpec{}, sn_total);
+      TEST_NEAR(p.b(0), 0.020, 1e-15,
+                "SRW + per-DOF b resolves; rs.b == the per-DOF rule b");
+      TEST_NEAR(p.a(0), 0.012, 1e-15,
+                "per-DOF a override under SRW");
+   }
+
+   // Control: SRW with SCALAR b (no per-DOF b) still resolves with b == b_default.
+   {
+      TinyMeshHolder mh;
+      SpatialFrictionResolver R;
+      RateStateBlock cfg;
+      cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
+      cfg.V_w_default = 0.1;
+      RateStatePerDOFParams p =
+         R.ResolveRateState(cfg, coords, elem, attr, mat, mh.mesh(),
+                            PorePressureSpec{}, sn_total);
+      TEST_NEAR(p.b(0), cfg.b_default, 1e-15,
+                "scalar-b SRW still resolves; b == b_default");
+   }
 }
 
 int main(int /*argc*/, char** /*argv*/)
@@ -314,7 +301,7 @@ int main(int /*argc*/, char** /*argv*/)
    G_R003_no_double_pp();
    G_R006_per_dof_b_accepted_f0_v0_rejected();
    G_R011_allows_velocity_strengthening();
-   G_R001_srw_rejects_per_dof_b();
+   G_R001_srw_accepts_per_dof_b();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 3 test_resolve_rate_state_guards: "
