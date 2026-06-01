@@ -15,6 +15,12 @@
 #include "mfem.hpp"
 #include "wave_state.hpp"
 #include "godunov_flux.hpp"
+#include "elem_derivative_cache.hpp"   // Lever 1: D_d^e = M^{-1}K_d cache builder
+                                       // (file-scope include — opens its own
+                                       // namespace; the .inl cannot #include it)
+
+#include <array>
+#include <cstddef>
 // Phase 13: this scalar operator is bi-material-free.  The per-element flux
 // pool, the bi-material per-face flux dispatch, and the MaterialField ctor
 // moved to the BimaterialWaveOperator subclass (dynamic/bimaterial_wave_-
@@ -64,6 +70,17 @@ enum class FreeSurfaceBCMode : int { Gamma = 0, Godunov = 1 };
 /// Controlled at runtime via WaveOperator::SetMixedFluxMode.  Mutually
 /// exclusive with `UsePrecomputedFaceFluxes(true)` (R-1203).
 enum class MixedFluxMode : int { None = 0, Adjacent = 1, AllContinuous = 2 };
+
+/// Lever 1 (ADER hot-path optimization): selects how the element-local
+/// L2-projected spatial derivative (`ApplySpatialDerivative`) is evaluated.
+///   `OnTheFly` — re-derive `M^{-1} K_d` by quadrature every call (the original
+///               kernel; the default, so every byte-exact regression is
+///               unchanged until the flag is flipped).
+///   `Cached`   — apply the per-element precomputed `D_d^e = M_e^{-1} K_d^e`
+///               as a dense mat-vec (no CalcShape/CalcPhysDShape/Jacobian).
+/// Controlled at runtime via WaveOperator::SetDerivMode.  NOT bit-identical to
+/// OnTheFly (round-off re-association, REVIEW R-002); equivalence is ≤1e-12.
+enum class DerivMode : int { OnTheFly = 0, Cached = 1 };
 
 /// REVIEW R-016: friction-law tag the driver sets at init so the wave
 /// operator's fault dispatch (interior + R-1600 shared-fault fallback)
@@ -204,6 +221,17 @@ public:
    int GetNumFaultDOFs() const { return num_fault_dofs_; }
 
    const DenseMatrix &GetElementMassInverse(int e) const { return elem_mass_inv_[e]; }
+
+   /// Lever 1: select the spatial-derivative kernel.  `Cached` builds the
+   /// per-element `D_d^e = M_e^{-1} K_d^e` cache once (R-004 budget-guarded) and
+   /// switches `ApplySpatialDerivative` to a dense mat-vec; `OnTheFly` (default)
+   /// frees the cache and uses the original quadrature kernel.  Must be called
+   /// after construction (mass inverses already assembled).  Idempotent.
+   void SetDerivMode(DerivMode m);
+   DerivMode GetDerivMode() const { return deriv_mode_; }
+   /// R-004: per-rank byte budget for the `Cached` cache; SetDerivMode(Cached)
+   /// aborts fail-loud above it (default 1 GiB).  Set before SetDerivMode.
+   void SetDerivCacheBudgetBytes(std::size_t b) { deriv_cache_budget_bytes_ = b; }
 
    void SetPML(PMLLayer *pml) { pml_layer_ = pml; }
    const PMLLayer *GetPML() const { return pml_layer_; }
@@ -434,6 +462,30 @@ public:
                                  const std::vector<real_t> &tau_nodes,
                                  std::vector<Vector> &Q_per_node) const;
 
+   /// Lever 2 (ADER hot-path): run the Cauchy-Kovalevskaya recursion
+   /// `D(k+1) = -Σ_d A_d ∂_{x_d} D(k)` ONCE and accumulate BOTH outputs of
+   /// `ComputeADERSubStepStates` (the nodal Taylor states, weights τ^k/k!) AND
+   /// `ComputeADERTimeIntegrated` (the time integral I, weights dt^{k+1}/(k+1)!).
+   /// The two recursions are otherwise computed independently (one per call) at
+   /// the driver's substep site; sharing the `D(k)` sequence removes the second
+   /// `ApplySpatialDerivative` subtree (~⅓ of step time).
+   ///
+   /// Byte-identical to calling `ComputeADERSubStepStates(...)` and
+   /// `ComputeADERTimeIntegrated(...)` separately at a fixed DerivMode (same
+   /// `D(k)`, same per-output weights — REVIEW R-003: the two factorial phases
+   /// are kept distinct, NOT unified).  Element-local (no MPI), so it is safe to
+   /// call unconditionally on every rank (REVIEW R-001).
+   ///
+   /// @param[out] Q_per_node  as in ComputeADERSubStepStates.
+   /// @param[out] I           as in ComputeADERTimeIntegrated (must differ from Q).
+   void ComputeADERSubStepStatesAndIntegral(
+      const Vector &Q,
+      real_t dt,
+      int order,
+      const std::vector<real_t> &tau_nodes,
+      std::vector<Vector> &Q_per_node,
+      Vector &I) const;
+
    /// Sub-step iterator side-channel: when the pointer pair is set, the
    /// fault branch of `ComputeADERFaceFluxRHS` consumes the pre-computed
    /// per-substep imposed states (in canonical fault-local frame, layout
@@ -555,8 +607,16 @@ public:
    /// @param[out] Q_new  State at t + dt.  Resized if empty.  Must be
    ///                    DISTINCT from Q (same aliasing constraint as
    ///                    `ComputeADERTimeIntegrated`).
+   /// @param[in]  I_precomputed  Lever 2 (optional): if non-null, the time
+   ///                    integral I is taken from this buffer (must be sized
+   ///                    NUM_STATE*ndof_total_) instead of being recomputed via
+   ///                    `ComputeADERTimeIntegrated` — used by the driver after
+   ///                    `ComputeADERSubStepStatesAndIntegral` to avoid the
+   ///                    redundant second CK recursion.  Default null = the
+   ///                    original self-contained predictor (byte-identical).
    void AdvanceADER(const Vector &Q, real_t dt, int order,
-                    Vector &Q_new) const;
+                    Vector &Q_new,
+                    const Vector *I_precomputed = nullptr) const;
 
    /// @name Fault-face geometry (single source of truth, matches BP5 pattern)
    ///
@@ -746,6 +806,14 @@ protected:
 
    DenseMatrix Ax_, Ay_, Az_;
    std::vector<DenseMatrix> elem_mass_inv_;
+
+   // Lever 1 (ADER hot-path): per-element fused derivative operators
+   // D_d^e = M_e^{-1} K_d^e (elem_deriv_op_[e][d]), built by SetDerivMode(Cached)
+   // and read by the Cached branch of ApplySpatialDerivative.  Empty (no memory)
+   // under the default OnTheFly mode, so default builds are byte-unchanged.
+   DerivMode deriv_mode_ = DerivMode::OnTheFly;
+   std::vector<std::array<DenseMatrix, 3>> elem_deriv_op_;
+   std::size_t deriv_cache_budget_bytes_ = std::size_t(1) << 30;  // 1 GiB/rank
 
    std::unique_ptr<FaultBasis> fault_basis_;
    int num_fault_dofs_ = 0;

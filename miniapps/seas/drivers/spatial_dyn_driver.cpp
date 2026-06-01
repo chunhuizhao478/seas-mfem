@@ -382,7 +382,8 @@ void AdvanceADERWithSubStep_Spatial(
    int ader_order,
    real_t t_step_start,
    Vector &Q_new,
-   const std::function<void(real_t, real_t)> &nuc_callback)
+   const std::function<void(real_t, real_t)> &nuc_callback,
+   bool use_shared_ck)
 {
    MFEM_PERF_SCOPE("seas::spatial_dyn::AdvanceADERWithSubStep");
    MFEM_VERIFY(dt_step > 0.0,
@@ -424,8 +425,23 @@ void AdvanceADERWithSubStep_Spatial(
    }
 
    std::vector<Vector> Q_per_node;
-   wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes,
-                                 Q_per_node);
+   // Lever 2: when enabled, ONE CK recursion produces both Q_per_node and the
+   // time integral shared_I (passed to AdvanceADER below), removing the second
+   // recursion.  Runs on ALL ranks (use_shared_ck is the same CLI value
+   // everywhere) so Q_per_node still feeds the per-substep ExchangeFaceNbrData
+   // collective in EvaluateBulkAtFaultQPsCanonical — REVIEW R-001.  Default
+   // (use_shared_ck=false) is the original two-recursion path, byte-identical.
+   Vector shared_I;
+   if (use_shared_ck)
+   {
+      wave.ComputeADERSubStepStatesAndIntegral(Q, dt_step, ader_order, tau_nodes,
+                                               Q_per_node, shared_I);
+   }
+   else
+   {
+      wave.ComputeADERSubStepStates(Q, dt_step, ader_order, tau_nodes,
+                                    Q_per_node);
+   }
    MFEM_VERIFY(static_cast<int>(Q_per_node.size()) == O,
                "AdvanceADERWithSubStep_Spatial: ComputeADERSubStepStates "
                "returned " << Q_per_node.size() << " nodes, expected " << O);
@@ -470,7 +486,8 @@ void AdvanceADERWithSubStep_Spatial(
       n_total_fault_qps);
    ImposedGuard guard(wave);
 
-   wave.AdvanceADER(Q, dt_step, ader_order, Q_new);
+   wave.AdvanceADER(Q, dt_step, ader_order, Q_new,
+                    use_shared_ck ? &shared_I : nullptr);
 }
 
 }  // namespace
@@ -1105,6 +1122,39 @@ int main(int argc, char *argv[])
                     pmesh, cfg.mesh.order, material, bc);
    }
    WaveOperator<ParMesh> &wave = *wave_ptr;
+
+   // Lever 1 (ADER hot-path optimization) opt-in.  --deriv-cache precomputes the
+   // per-element D_d^e = M_e^{-1} K_d^e and switches ApplySpatialDerivative to a
+   // dense mat-vec (the dominant ~2/3 of step time; 4-5x on the macro-step
+   // aggregate locally).  DEFAULT (flag absent) stays DerivMode::OnTheFly, so
+   // every TPV*/BP5 run is byte-identical; with the flag the result changes at
+   // round-off only (REVIEW R-002 — machine-eps, not bit-exact).  Works for both
+   // the scalar and bimaterial (matrix) operators (the cache is geometry-only).
+   // R-004: SetDerivMode aborts fail-loud if the cache exceeds the per-rank
+   // budget (default 1 GiB; p2 ~18 MB/rank, p3 ~72 MB/rank for TPV31).
+   const bool use_deriv_cache = HasFlag(argc, argv, "--deriv-cache");
+   if (use_deriv_cache)
+   {
+      wave.SetDerivMode(DerivMode::Cached);
+      if (rank == 0)
+      {
+         std::cout << "[deriv] DerivMode::Cached enabled "
+                      "(precomputed D_d^e = M^-1 K_d; --deriv-cache)\n";
+      }
+   }
+
+   // Lever 2 (ADER hot-path optimization) opt-in.  --shared-ck-recursion makes
+   // the substep dispatch compute the Cauchy-Kovalevskaya recursion ONCE per
+   // macro-step (producing both the substep nodal states and the time integral)
+   // instead of twice, removing the second ApplySpatialDerivative subtree.
+   // Byte-identical to the default two-recursion path at a fixed DerivMode
+   // (REVIEW R-002/R-003); default OFF preserves the current behaviour.
+   const bool use_shared_ck = HasFlag(argc, argv, "--shared-ck-recursion");
+   if (use_shared_ck && rank == 0)
+   {
+      std::cout << "[deriv] shared CK recursion enabled "
+                   "(one predictor recursion/step; --shared-ck-recursion)\n";
+   }
 
    // R-107 reflection-time warning + Phase 12.2 PML geometry.
    //
@@ -2800,7 +2850,7 @@ int main(int argc, char *argv[])
          AdvanceADERWithSubStep_Spatial(wave, substep_iterator, dof_data,
                                         fault_coords, Q, dt_step,
                                         cfg.numerics.ader_order, t, Q_new,
-                                        nuc_cb);
+                                        nuc_cb, use_shared_ck);
       }
       Q.Swap(Q_new);
       t += dt_step;

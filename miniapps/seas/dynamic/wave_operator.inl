@@ -909,6 +909,37 @@ void WaveOperator<MeshType>::ApplySpatialDerivative(int dir,
    const real_t *Q_data = Q.GetData();
    real_t *dQ_data = dQ_dxdir.GetData();
 
+   // Lever 1: cached path — apply the precomputed D_d^e = M_e^{-1} K_d^e as a
+   // dense mat-vec per element per component.  Reproduces the math of the
+   // OnTheFly kernel below up to round-off re-association (REVIEW R-002); no
+   // CalcShape/CalcPhysDShape/Jacobian/quadrature.  elem_deriv_op_ is built by
+   // SetDerivMode(Cached); the default OnTheFly mode never reaches this branch.
+   if (deriv_mode_ == DerivMode::Cached)
+   {
+      MFEM_VERIFY(static_cast<int>(elem_deriv_op_.size()) == ne_,
+                  "ApplySpatialDerivative(Cached): derivative cache has "
+                  << elem_deriv_op_.size() << " elements, expected ne_ = "
+                  << ne_ << " (call SetDerivMode(Cached) after construction).");
+      for (int e = 0; e < ne_; e++)
+      {
+         const DenseMatrix &D = elem_deriv_op_[e][dir];
+         const int ndof = D.Height();
+         const int dof_offset = e * ndof_per_el_;
+         for (int c = 0; c < NUM_STATE; c++)
+         {
+            const real_t *Qc  = Q_data  + c * ndof_total_ + dof_offset;
+            real_t       *dQc = dQ_data + c * ndof_total_ + dof_offset;
+            for (int i = 0; i < ndof; i++)
+            {
+               real_t s = 0.0;
+               for (int j = 0; j < ndof; j++) { s += D(i, j) * Qc[j]; }
+               dQc[i] = s;
+            }
+         }
+      }
+      return;
+   }
+
    // Scratch: K_d^e * Q_c accumulator, shape [NUM_STATE, ndof].  Reused per
    // element.  Size follows ndof_per_el_ which is constant across elements
    // for a homogeneous-order L2 space.
@@ -994,6 +1025,41 @@ void WaveOperator<MeshType>::ApplySpatialDerivative(int dir,
          }
       }
    }
+}
+
+// ---------------------------------------------------------------------------
+// Lever 1 (ADER hot-path): DerivMode selector — build/free the per-element
+// D_d^e = M_e^{-1} K_d^e cache.  Default OnTheFly leaves the cache empty so
+// every byte-exact regression is unchanged.  Idempotent.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::SetDerivMode(DerivMode m)
+{
+   if (m == DerivMode::Cached)
+   {
+      // R-004: fail loud BEFORE allocating if the cache exceeds the per-rank
+      // budget (p4 / dense partitions can OOM a node).  Keep DerivMode::OnTheFly
+      // or raise SetDerivCacheBudgetBytes if this trips.
+      const std::size_t bytes =
+         ElementDerivativeCacheBytes(ne_, ndof_per_el_);
+      MFEM_VERIFY(bytes <= deriv_cache_budget_bytes_,
+                  "WaveOperator::SetDerivMode(Cached): the D_d^e cache would use "
+                  << (static_cast<double>(bytes) / 1048576.0)
+                  << " MB/rank > budget "
+                  << (static_cast<double>(deriv_cache_budget_bytes_) / 1048576.0)
+                  << " MB.  Raise SetDerivCacheBudgetBytes(...) or keep "
+                  "DerivMode::OnTheFly.");
+      // elem_mass_inv_ is assembled in the ctor, so it is ready here.  Use the
+      // SAME quadrature order (2*order_) as the OnTheFly kernel for equivalence.
+      BuildElementDerivativeOperators(*fes_, 2 * order_, elem_mass_inv_,
+                                      elem_deriv_op_);
+   }
+   else
+   {
+      elem_deriv_op_.clear();
+      elem_deriv_op_.shrink_to_fit();
+   }
+   deriv_mode_ = m;
 }
 
 // ---------------------------------------------------------------------------
@@ -1302,6 +1368,108 @@ void WaveOperator<MeshType>::ComputeADERSubStepStates(
       }
 
       // Swap buffers: D_curr <- D_next for the next iteration.
+      mfem::Swap(D_curr, D_next);
+   }
+}
+
+// ---------------------------------------------------------------------------
+// Lever 2 (ADER hot-path): ComputeADERSubStepStatesAndIntegral — run the CK
+// recursion ONCE and produce BOTH the sub-step nodal Taylor states (as
+// ComputeADERSubStepStates) AND the time integral I (as ComputeADERTimeIntegrated).
+// Byte-identical to the two separate calls at a fixed DerivMode: the D(k)
+// sequence is the same operations in the same order, and each output keeps its
+// OWN factorial phase (R-003 — substep denom=k+1, integral denom=k+2; NOT
+// unified).  Element-local; safe to call unconditionally on all ranks (R-001).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeADERSubStepStatesAndIntegral(
+   const Vector &Q, real_t dt, int order,
+   const std::vector<real_t> &tau_nodes,
+   std::vector<Vector> &Q_per_node, Vector &I) const
+{
+   MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERSubStepStatesAndIntegral");
+   MFEM_VERIFY(order >= 2 && order <= 4,
+               "ComputeADERSubStepStatesAndIntegral: order must be in {2,3,4}, "
+               "got " << order);
+   MFEM_VERIFY(dt > 0.0,
+               "ComputeADERSubStepStatesAndIntegral: dt must be > 0, got " << dt);
+   MFEM_VERIFY(Q.Size() == NUM_STATE * ndof_total_,
+               "ComputeADERSubStepStatesAndIntegral: Q size " << Q.Size()
+               << " != NUM_STATE * ndof_total_ = " << NUM_STATE * ndof_total_);
+   // Same aliasing guard as ComputeADERTimeIntegrated (I = 0.0 below would zero
+   // Q before the CK copy if they alias).  Q_per_node is a vector of distinct
+   // Vectors and cannot alias Q.
+   MFEM_VERIFY(&Q != &I,
+               "ComputeADERSubStepStatesAndIntegral: Q and I must be distinct "
+               "Vectors (aliasing would zero the input before the CK copy)");
+   const int O_nodes = static_cast<int>(tau_nodes.size());
+   MFEM_VERIFY(O_nodes >= 1,
+               "ComputeADERSubStepStatesAndIntegral: tau_nodes must be non-empty");
+   for (int o = 0; o < O_nodes; o++)
+   {
+      MFEM_VERIFY(std::isfinite(tau_nodes[o]),
+                  "ComputeADERSubStepStatesAndIntegral: tau_nodes[" << o
+                  << "] must be finite, got " << tau_nodes[o]);
+      MFEM_VERIFY(tau_nodes[o] >= 0.0 && tau_nodes[o] <= dt,
+                  "ComputeADERSubStepStatesAndIntegral: tau_nodes[" << o
+                  << "] = " << tau_nodes[o]
+                  << " is out of [0, dt] = [0, " << dt << "]");
+   }
+
+   // Size + zero both outputs (matches ComputeADERSubStepStates / TimeIntegrated).
+   I.SetSize(NUM_STATE * ndof_total_);
+   I = 0.0;
+   Q_per_node.resize(O_nodes);
+   for (int o = 0; o < O_nodes; o++)
+   {
+      Q_per_node[o].SetSize(NUM_STATE * ndof_total_);
+      Q_per_node[o] = 0.0;
+   }
+
+   if (ndof_total_ == 0) { return; }
+
+   // Reuse the substep CK scratch buffers (this routine subsumes the substep
+   // predictor); they hold the D(k) sequence and are fully overwritten per call.
+   const int N = NUM_STATE * ndof_total_;
+   if (ck_substep_D_curr_buf_.Size() != N) { ck_substep_D_curr_buf_.SetSize(N); }
+   if (ck_substep_D_next_buf_.Size() != N) { ck_substep_D_next_buf_.SetSize(N); }
+   if (ck_substep_dQ_dxd_buf_.Size() != N) { ck_substep_dQ_dxd_buf_.SetSize(N); }
+   Vector &D_curr = ck_substep_D_curr_buf_;
+   Vector &D_next = ck_substep_D_next_buf_;
+   Vector &dQ_dxd = ck_substep_dQ_dxd_buf_;
+   D_curr = Q;                                    // D(0) = Q
+
+   // k = 0 contributions — each output with its OWN weight (R-003):
+   //   substep: (τ^0/0!)·D(0) = D(0)  (unscaled);   integral: dt^1/1!·D(0).
+   for (int o = 0; o < O_nodes; o++) { Q_per_node[o].Add(1.0, D_curr); }
+   real_t facI = dt;
+   I.Add(facI, D_curr);
+
+   std::vector<real_t> facS(O_nodes, 1.0);        // substep nodal factors τ^k/k!
+
+   for (int k = 0; k < order - 1; k++)
+   {
+      // Shared recursion D(k+1) = -Σ_d A_d ∂_{x_d} D(k) — computed ONCE.
+      // Identical op sequence to both originals -> bit-identical D(k+1).
+      D_next = 0.0;
+      for (int d = 0; d < 3; d++)
+      {
+         ApplySpatialDerivative(d, D_curr, dQ_dxd);
+         ApplyElementJacobian_(d, dQ_dxd, D_next, /*sign=*/-1.0);
+      }
+
+      // R-1503 / R-003: two DISTINCT factorial phases — DO NOT unify.
+      // Substep nodes: denom = k+1, weight τ^{k+1}/(k+1)!  (== ComputeADERSubStepStates).
+      const real_t denomS = static_cast<real_t>(k + 1);
+      for (int o = 0; o < O_nodes; o++)
+      {
+         facS[o] *= tau_nodes[o] / denomS;
+         Q_per_node[o].Add(facS[o], D_next);
+      }
+      // Time integral: denom = k+2, weight dt^{k+2}/(k+2)!  (== ComputeADERTimeIntegrated).
+      facI *= dt / static_cast<real_t>(k + 2);
+      I.Add(facI, D_next);
+
       mfem::Swap(D_curr, D_next);
    }
 }
@@ -5338,7 +5506,8 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
-                                         int order, Vector &Q_new) const
+                                         int order, Vector &Q_new,
+                                         const Vector *I_precomputed) const
 {
    MFEM_PERF_SCOPE("seas::WaveOperator::AdvanceADER");
    MFEM_VERIFY(dt > 0.0,
@@ -5370,8 +5539,20 @@ void WaveOperator<MeshType>::AdvanceADER(const Vector &Q, real_t dt,
    Vector &I   = ader_I_buf_;
    Vector &rhs = ader_rhs_buf_;
 
-   // 1. CK predictor.
-   ComputeADERTimeIntegrated(Q, dt, order, I);
+   // 1. CK predictor.  Lever 2: reuse a precomputed I (from
+   // ComputeADERSubStepStatesAndIntegral) when supplied, skipping the redundant
+   // second CK recursion; else compute it self-contained (byte-identical).
+   if (I_precomputed != nullptr)
+   {
+      MFEM_VERIFY(I_precomputed->Size() == N,
+                  "AdvanceADER: I_precomputed size " << I_precomputed->Size()
+                  << " != NUM_STATE * ndof_total_ = " << N);
+      I = *I_precomputed;
+   }
+   else
+   {
+      ComputeADERTimeIntegrated(Q, dt, order, I);
+   }
 
    // 2. Corrector RHS accumulation.
    rhs = 0.0;

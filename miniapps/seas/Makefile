@@ -463,6 +463,8 @@ TEST_TPV102_PEPPER_SRC                     = tests/unit/test_tpv102_pepper_repro
 TEST_FREE_SURFACE_TOTAL_DIRECT_SRC         = tests/unit/test_free_surface_total_direct.cpp
 # ADER I-05 Phase 1: polynomial-exactness test for ApplySpatialDerivative
 TEST_WAVE_OP_SPATIAL_DERIV_SRC             = tests/unit/test_wave_operator_spatial_derivative.cpp
+# ADER hot-path optimization: micro-benchmark for the dominant kernels
+BENCH_ADER_HOTPATH_SRC                     = tests/unit/bench_ader_hotpath.cpp
 # ADER I-05 Phase 3: CK predictor plane-wave convergence
 TEST_ADER_CK_PREDICTOR_SRC                 = tests/unit/test_ader_ck_predictor.cpp
 # ADER I-05 Phase 5: EvaluateADER / EvaluateADERTotal equivalence
@@ -738,6 +740,7 @@ TEST_PERSISTENT_NUC_PRESTRESS_OBJ          = $(TEST_PERSISTENT_NUC_PRESTRESS_SRC
 TEST_TPV102_PEPPER_OBJ                     = $(TEST_TPV102_PEPPER_SRC:.cpp=.o)
 TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ         = $(TEST_FREE_SURFACE_TOTAL_DIRECT_SRC:.cpp=.o)
 TEST_WAVE_OP_SPATIAL_DERIV_OBJ             = $(TEST_WAVE_OP_SPATIAL_DERIV_SRC:.cpp=.o)
+BENCH_ADER_HOTPATH_OBJ                     = $(BENCH_ADER_HOTPATH_SRC:.cpp=.o)
 TEST_ADER_CK_PREDICTOR_OBJ                 = $(TEST_ADER_CK_PREDICTOR_SRC:.cpp=.o)
 TEST_ADER_FAULT_FLUX_EQUIV_OBJ             = $(TEST_ADER_FAULT_FLUX_EQUIV_SRC:.cpp=.o)
 TEST_ADER_LINEAR_WAVE_EQUIV_OBJ            = $(TEST_ADER_LINEAR_WAVE_EQUIV_SRC:.cpp=.o)
@@ -2006,8 +2009,18 @@ seas_test_free_surface_total_direct: $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ) $(GOD
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # ADER I-05 Phase 1: polynomial-exactness test for ApplySpatialDerivative
-seas_test_wave_operator_spatial_derivative: $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
-	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+# (Lever 1: also the DerivMode Cached/OnTheFly equivalence test — adds the
+#  bimaterial deps GODUNOV_FLUX_POOL / HETEROGENEOUS_MATERIAL / SPATIAL_FRICTION
+#  for the BimaterialWaveOperator pass.)
+seas_test_wave_operator_spatial_derivative: $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(SPATIAL_FRICTION_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# ADER hot-path optimization: micro-benchmark (timing tool; `make bench`)
+.PHONY: bench
+bench: seas_bench_ader_hotpath
+seas_bench_ader_hotpath: $(BENCH_ADER_HOTPATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(BENCH_ADER_HOTPATH_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # ADER I-05 Phase 3: CK predictor plane-wave convergence test
@@ -3702,6 +3715,11 @@ $(TEST_FREE_SURFACE_TOTAL_DIRECT_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFE
 
 # ADER I-05 Phase 1: ApplySpatialDerivative polynomial-exactness test
 $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# ADER hot-path optimization: micro-benchmark object
+$(BENCH_ADER_HOTPATH_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 

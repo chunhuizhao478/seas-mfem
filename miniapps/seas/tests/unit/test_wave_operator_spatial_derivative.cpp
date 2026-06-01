@@ -9,6 +9,8 @@
 
 #include "mfem.hpp"
 #include "../../dynamic/wave_operator.hpp"
+#include "../../dynamic/bimaterial_wave_operator.hpp"   // Lever 1 bimaterial pass
+#include "../../dynamic/heterogeneous_material.hpp"     // MaterialField::MakeCoefficient
 #include "../../dynamic/wave_state.hpp"
 #include "../../domain/boundary_config.hpp"
 
@@ -131,6 +133,252 @@ static real_t MaxAbs(const FiniteElementSpace &fes,
    return m;
 }
 
+// LCG fill — deterministic, reproducible random state vector.
+static void FillRandomQ(Vector &Q, unsigned seed)
+{
+   unsigned s = seed ? seed : 1u;
+   for (int i = 0; i < Q.Size(); i++)
+   {
+      s = 1664525u * s + 1013904223u;
+      Q[i] = (static_cast<double>(s) / 4294967296.0) - 0.5;
+   }
+}
+
+// Max relative error between OnTheFly and Cached ApplySpatialDerivative over all
+// three directions, for an already-constructed operator (templated so it serves
+// both WaveOperator and BimaterialWaveOperator).
+template <typename Op>
+static double CachedVsOnTheFlyMaxRelErr(Op &wave, int N, unsigned seed)
+{
+   Vector Q(N);
+   FillRandomQ(Q, seed);
+   double worst = 0.0;
+   for (int dir = 0; dir < 3; dir++)
+   {
+      wave.SetDerivMode(DerivMode::OnTheFly);
+      Vector dref;
+      wave.ApplySpatialDerivative(dir, Q, dref);
+      wave.SetDerivMode(DerivMode::Cached);
+      Vector dcac;
+      wave.ApplySpatialDerivative(dir, Q, dcac);
+      wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
+
+      double maxref = 0.0, maxdiff = 0.0;
+      for (int i = 0; i < N; i++)
+      {
+         maxref  = std::max(maxref,  std::abs(dref[i]));
+         maxdiff = std::max(maxdiff, std::abs(dref[i] - dcac[i]));
+      }
+      worst = std::max(worst, maxdiff / (maxref + 1e-300));
+   }
+   return worst;
+}
+
+// REVIEW R-001: the PRODUCTION consumers are the CK recursion — AdvanceADER and
+// ComputeADERSubStepStates — which call ApplySpatialDerivative internally
+// (order-1)x3 times.  The single-call check above does NOT exercise that path.
+// Assert the recursion outputs agree between Cached and OnTheFly to <= 1e-12
+// relative (machine-eps accumulated over the applications; R-002 — not bit-exact).
+template <typename Op>
+static double RecursionCachedVsOnTheFlyMaxRelErr(Op &wave, int N, int order,
+                                                 unsigned seed)
+{
+   // AdvanceADER's corrector requires the absorbing background (has_bulk_bg_);
+   // Q_bg = 0 is valid.
+   real_t Q_bg[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++) { Q_bg[c] = 0.0; }
+   wave.SetAbsorbingBackground(Q_bg);
+
+   Vector Q(N);
+   FillRandomQ(Q, seed);
+   const real_t dt = 1e-4;
+   std::vector<real_t> tau_nodes(order);
+   for (int o = 0; o < order; o++)
+   {
+      tau_nodes[o] = dt * (static_cast<real_t>(o) + 0.5)
+                   / static_cast<real_t>(order);
+   }
+
+   auto relerr = [](const Vector &a, const Vector &b)
+   {
+      double mr = 0.0, md = 0.0;
+      for (int i = 0; i < a.Size(); i++)
+      {
+         mr = std::max(mr, std::abs(a[i]));
+         md = std::max(md, std::abs(a[i] - b[i]));
+      }
+      return md / (mr + 1e-300);
+   };
+
+   // AdvanceADER (predictor + corrector).
+   wave.SetDerivMode(DerivMode::OnTheFly);
+   Vector qn_otf;
+   wave.AdvanceADER(Q, dt, order, qn_otf);
+   wave.SetDerivMode(DerivMode::Cached);
+   Vector qn_cac;
+   wave.AdvanceADER(Q, dt, order, qn_cac);
+   const double e_adv = relerr(qn_otf, qn_cac);
+
+   // ComputeADERSubStepStates (the friction-coupling predictor).
+   wave.SetDerivMode(DerivMode::OnTheFly);
+   std::vector<Vector> qpn_otf;
+   wave.ComputeADERSubStepStates(Q, dt, order, tau_nodes, qpn_otf);
+   wave.SetDerivMode(DerivMode::Cached);
+   std::vector<Vector> qpn_cac;
+   wave.ComputeADERSubStepStates(Q, dt, order, tau_nodes, qpn_cac);
+   double e_sss = 0.0;
+   for (std::size_t o = 0; o < qpn_otf.size(); o++)
+   {
+      e_sss = std::max(e_sss, relerr(qpn_otf[o], qpn_cac[o]));
+   }
+
+   wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
+   return std::max(e_adv, e_sss);
+}
+
+// Lever 1 / REVIEW R-002: the Cached (precomputed D_d^e mat-vec) kernel must
+// match the OnTheFly quadrature kernel to <= 1e-12 relative (NOT bit-exact — the
+// setup M^{-1}K_d product re-associates round-off).  Covers WaveOperator AND
+// BimaterialWaveOperator, which inherits the base kernel + cache unchanged.
+static void TestCachedEquivalence()
+{
+   std::cout << "\n=== Lever 1: DerivMode::Cached vs OnTheFly equivalence "
+             << "(R-002) ===\n";
+   const double tol = 1e-12;
+
+   for (int order = 2; order <= 3; order++)
+   {
+      Mesh mesh = Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON,
+                                        1.0, 1.0, 1.0);
+      const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+      BoundaryConfig bc;
+      for (int i = 1; i <= 6; i++) { bc.absorbing_attrs.insert(i); }
+      bc.fault_attr = 0;
+
+      // --- scalar WaveOperator ---
+      WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
+      const int N = NUM_STATE * wave.GetFESpace().GetNDofs();
+      double rel = CachedVsOnTheFlyMaxRelErr(wave, N, 12345u + order);
+      std::ostringstream m1;
+      m1 << "scalar: cached == onthefly, order=" << order << " (max rel)";
+      TEST_LE(rel, tol, m1.str());
+
+      // --- BimaterialWaveOperator (homogeneous material; same geometry) ---
+      ConstantCoefficient lam_c(lambda), mu_c(mu), rho_c(rho);
+      BimaterialWaveOperator<Mesh> wb(
+         mesh, order, MaterialField::MakeCoefficient(&lam_c, &mu_c, &rho_c), bc);
+      const int Nb = NUM_STATE * wb.GetFESpace().GetNDofs();
+      double relb = CachedVsOnTheFlyMaxRelErr(wb, Nb, 999u + order);
+      std::ostringstream m2;
+      m2 << "bimaterial: cached == onthefly, order=" << order << " (max rel)";
+      TEST_LE(relb, tol, m2.str());
+
+      // --- R-001: recursion-level equivalence (the production path) ---
+      double rrel = RecursionCachedVsOnTheFlyMaxRelErr(wave, N, order,
+                                                       4242u + order);
+      std::ostringstream m1r;
+      m1r << "scalar recursion (AdvanceADER+SubStepStates): cached == onthefly, "
+          << "order=" << order << " (max rel)";
+      TEST_LE(rrel, tol, m1r.str());
+
+      double rrelb = RecursionCachedVsOnTheFlyMaxRelErr(wb, Nb, order,
+                                                        7777u + order);
+      std::ostringstream m2r;
+      m2r << "bimaterial recursion (AdvanceADER+SubStepStates): cached == "
+          << "onthefly, order=" << order << " (max rel)";
+      TEST_LE(rrelb, tol, m2r.str());
+
+      // --- R-004: cache byte count is exactly 3*ne*ndof^2*sizeof(real_t) ---
+      const int ne   = wave.GetFESpace().GetNE();
+      const int ndof = wave.GetFESpace().GetFE(0)->GetDof();
+      const std::size_t expect =
+         static_cast<std::size_t>(3) * ne * ndof * ndof * sizeof(real_t);
+      const double byte_err = std::abs(
+         static_cast<double>(ElementDerivativeCacheBytes(ne, ndof))
+         - static_cast<double>(expect));
+      std::ostringstream m3;
+      m3 << "R-004 cache bytes = 3*ne*ndof^2*8, order=" << order;
+      TEST_LE(byte_err, 0.0, m3.str());
+   }
+}
+
+// Lever 2 / plan §5: the shared-CK-recursion path
+// (ComputeADERSubStepStatesAndIntegral + AdvanceADER(...,&I)) must produce
+// Q_per_node AND Q_new BIT-FOR-BIT identical to the separate
+// ComputeADERSubStepStates + AdvanceADER, at a FIXED DerivMode (R-002: baseline
+// against the same DerivMode, OnTheFly and Cached).  Orders {2,3,4}.
+static void TestSharedCKParity()
+{
+   std::cout << "\n=== Lever 2: shared-CK-recursion bit-exact parity "
+             << "(R-002/R-003) ===\n";
+   for (int order = 2; order <= 4; order++)
+   {
+      Mesh mesh = Mesh::MakeCartesian3D(3, 3, 3, Element::TETRAHEDRON,
+                                        1.0, 1.0, 1.0);
+      const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
+      BoundaryConfig bc;
+      for (int i = 1; i <= 6; i++) { bc.absorbing_attrs.insert(i); }
+      bc.fault_attr = 0;
+      WaveOperator<Mesh> wave(mesh, order, lambda, mu, rho, bc);
+      real_t Q_bg[NUM_STATE];
+      for (int c = 0; c < NUM_STATE; c++) { Q_bg[c] = 0.0; }
+      wave.SetAbsorbingBackground(Q_bg);
+
+      const int N = NUM_STATE * wave.GetFESpace().GetNDofs();
+      const real_t dt = 1e-4;
+      std::vector<real_t> tau_nodes(order);
+      for (int o = 0; o < order; o++)
+      {
+         tau_nodes[o] = dt * (static_cast<real_t>(o) + 0.5)
+                      / static_cast<real_t>(order);
+      }
+
+      for (int mode_i = 0; mode_i < 2; mode_i++)
+      {
+         const DerivMode mode =
+            (mode_i == 0) ? DerivMode::OnTheFly : DerivMode::Cached;
+         wave.SetDerivMode(mode);
+         Vector Q(N);
+         FillRandomQ(Q, 31415u + order + 100u * mode_i);
+
+         // Separate path (two recursions).
+         std::vector<Vector> qpn_sep;
+         wave.ComputeADERSubStepStates(Q, dt, order, tau_nodes, qpn_sep);
+         Vector qn_sep;
+         wave.AdvanceADER(Q, dt, order, qn_sep);
+
+         // Merged path (one recursion + the I_precomputed overload).
+         std::vector<Vector> qpn_m;
+         Vector I_m;
+         wave.ComputeADERSubStepStatesAndIntegral(Q, dt, order, tau_nodes,
+                                                  qpn_m, I_m);
+         Vector qn_m;
+         wave.AdvanceADER(Q, dt, order, qn_m, &I_m);
+
+         // Bit-for-bit: max abs difference must be EXACTLY zero.
+         double dmax = 0.0;
+         for (std::size_t o = 0; o < qpn_sep.size(); o++)
+         {
+            for (int i = 0; i < N; i++)
+            {
+               dmax = std::max(dmax, std::abs(qpn_sep[o][i] - qpn_m[o][i]));
+            }
+         }
+         for (int i = 0; i < N; i++)
+         {
+            dmax = std::max(dmax, std::abs(qn_sep[i] - qn_m[i]));
+         }
+
+         std::ostringstream msg;
+         msg << "merged == separate (bit-exact), order=" << order
+             << ", DerivMode=" << (mode == DerivMode::OnTheFly ? "OnTheFly"
+                                                               : "Cached");
+         TEST_LE(dmax, 0.0, msg.str());
+      }
+      wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
+   }
+}
+
 int main()
 {
    std::cout << "\n=== ADER I-05 Phase 1: ApplySpatialDerivative "
@@ -207,6 +455,12 @@ int main()
       real_t m = MaxAbs(fes, SXX, dQ);
       TEST_LE(m, tol, "∂_x(0) = 0");
    }
+
+   // Lever 1: cached-derivative-operator equivalence (R-002) + R-004 byte count.
+   TestCachedEquivalence();
+
+   // Lever 2: shared-CK-recursion bit-exact parity (both DerivModes).
+   TestSharedCKParity();
 
    std::cout << "\n========================================\n";
    std::cout << "  Results: " << num_passed << " passed, "

@@ -138,11 +138,19 @@ OUT="${TPV31_OUT:-tpv31/out_p2_${SLURM_JOB_ID:-local}}"
 # reach step ~500 inside the wall, so setup + ~100 steps completes with margin.
 # Slice-length override: TPV31_PERFGRAPH_TFINAL (s).  p2 dt ~ 3.74e-5 s, so
 # 0.004 s ~ 107 steps, 0.008 s ~ 214 steps.
+# Positional args (any order): `perfgraph` (Caliper short slice) and/or `opt`
+# (enable the Lever 1/2 ADER hot-path optimization — see DERIV_OPT_FLAGS below).
+#   baseline perfgraph : sbatch <thisscript> perfgraph
+#   optimized perfgraph: sbatch <thisscript> perfgraph opt
 PERFGRAPH_MODE=0
-if [[ "${1:-}" == "perfgraph" ]]; then
-    PERFGRAPH_MODE=1
-    TPV31_PERFGRAPH=1
-fi
+DERIV_OPT=0
+for _arg in "$@"; do
+    case "${_arg}" in
+        perfgraph)     PERFGRAPH_MODE=1; TPV31_PERFGRAPH=1 ;;
+        opt|deriv-opt) DERIV_OPT=1 ;;
+        *) echo "[tpv31-p2] WARNING: ignoring unknown arg '${_arg}' (expected 'perfgraph' and/or 'opt')." ;;
+    esac
+done
 
 if [[ "${PERFGRAPH_MODE}" == "1" ]]; then
     TFINAL="${TPV31_TFINAL:-${TPV31_PERFGRAPH_TFINAL:-0.004}}"   # short -> finishes -> report flushes
@@ -150,6 +158,39 @@ if [[ "${PERFGRAPH_MODE}" == "1" ]]; then
     echo "           Runs to a CLEAN exit so the Caliper report flushes; the full run is tfinal=15 s."
 else
     TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across the flex wall limit)
+fi
+
+# --- Lever 1/2 ADER hot-path optimization opt-in (`opt` positional) --------
+# Appends two flags to the run:
+#   --deriv-cache         : precompute per-element D_d^e = M^-1 K_d and apply it as
+#                           a dense mat-vec (DerivMode::Cached).  Changes results at
+#                           ROUND-OFF only (machine-eps, NOT bit-exact) — verified by
+#                           the equivalence unit test, not the byte-exact contract.
+#   --shared-ck-recursion : run the Cauchy-Kovalevskaya predictor recursion ONCE per
+#                           macro-step instead of twice.  BYTE-IDENTICAL at fixed mode.
+# Local micro-benchmark (no-fault): ~4-5x on the predictor macro-step (Lever 1
+# dominates; Lever 2 adds ~15% once cached).  The corrector (ComputeVolumeRHS +
+# ComputeADERFaceFluxRHS) is UNTOUCHED, so the end-to-end gain depends on the
+# predictor-vs-corrector split (re-profile to confirm).
+#
+# A/B perfgraph workflow:
+#   1. REBUILD after pulling this branch:  make clean && make seas_spatial_dyn_driver
+#      (the WaveOperator templates changed; the no-header-deps Makefile needs a clean).
+#   2. Baseline : sbatch tpv31_p2_aderO3_noflux_50m_flex.sbatch perfgraph
+#   3. Optimized: sbatch tpv31_p2_aderO3_noflux_50m_flex.sbatch perfgraph opt
+#   4. Diff the two runtime-report region trees from the *.err:
+#        scripts/perfgraph_speedup.py <baseline>.err <optimized>.err
+#      (NOTE: with `opt`, `ComputeADERSubStepStates` is replaced by
+#       `ComputeADERSubStepStatesAndIntegral` and the second `ApplySpatialDerivative`
+#       subtree under `AdvanceADER` disappears, so those rows are name-mismatched in
+#       the diff; the `step` total and the summed `ApplySpatialDerivative` are the
+#       apples-to-apples numbers.)  The driver prints "[deriv] ... enabled" on rank 0
+#       when the flags take effect — grep the *.out to confirm.
+DERIV_OPT_FLAGS=""
+if [[ "${DERIV_OPT}" == "1" ]]; then
+    DERIV_OPT_FLAGS="--deriv-cache --shared-ck-recursion"
+    echo "[tpv31-p2] ADER hot-path optimization ENABLED (${DERIV_OPT_FLAGS})."
+    echo "           Compare this run's perfgraph against a baseline (no 'opt') run."
 fi
 
 # --- optional Caliper "perfgraph" (MFEM's profiling facility) -------------
@@ -204,6 +245,7 @@ ibrun ./seas_spatial_dyn_driver \
     --print-derived \
     --checkpoint-every 2000 \
     --output-dir "${OUT}" \
+    ${DERIV_OPT_FLAGS} \
     --verify-dispatch
 
 echo "[tpv31-p2] done. On-fault station traces in ${OUT}; compare vs"
