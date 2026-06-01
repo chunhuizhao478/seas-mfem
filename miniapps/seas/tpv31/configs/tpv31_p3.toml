@@ -1,0 +1,338 @@
+# SCEC TPV31 — spec-exact config for seas_spatial_dyn_driver.
+#
+# Reference: tpv31/benchmark_document/TPV31_32_Description_v03.pdf
+#            (January 21, 2015).
+#
+# This config encodes every TPV31 parameter byte-exact per the spec
+# AFTER ROTATING into the canonical SEAS frame so TPV31 runs through
+# `seas_spatial_dyn_driver` with the same FaultBasis convention as
+# TPV102 / TPV104 / TPV205 (see `miniapps/seas/CLAUDE.md`
+# "Canonical Coordinate System").
+#
+# Spec → canonical rotation:  (x_s, y_s, z_s) → (x_s, z_s, -y_s)
+#
+#   spec x = along-strike           → canonical x (same)
+#   spec y = depth (positive down)  → canonical -z (depth = |z| in mesh)
+#   spec z = fault-normal           → canonical y (fault is now y = 0)
+#
+# Every spec coordinate / stress-tensor component below was transformed
+# by this rotation.  The PHYSICS is identical to the spec (rotation
+# leaves it invariant); only the labels change.
+#
+#   • Material   — discontinuous 1D velocity (spec p. 4 Table) with
+#                  linear interpolation 2400 → 5000 m depth and step
+#                  discontinuities at depth = 2400, 5000, 10000 m.
+#                  In canonical: depth_axis = "z" with depth = max(0,
+#                  -z) computed inside `MakeDepthProfile1DMaterial`.
+#   • Stress     — depth-proportional Cauchy tensor (spec p. 6),
+#                  components rotated.  Signs are SEAS convention
+#                  (compression POSITIVE), matching the proven TPV102 /
+#                  TPV104 / TPV205 native drivers.
+#                    spec σ_xx_per_µ = +60 → canonical σ_xx_per_µ = +60
+#                    spec σ_yy_per_µ =   0 → canonical σ_zz_per_µ =   0
+#                    spec σ_zz_per_µ = +60 → canonical σ_yy_per_µ = +60
+#                    spec σ_xz_per_µ = +30 → canonical σ_xy_per_µ = +30
+#                  (Compression sign was already flipped from the
+#                  spec's compression-negative convention to SEAS's
+#                  compression-positive convention before rotation;
+#                  see CLAUDE.md memory "SEAS compression-positive
+#                  convention".)
+#   • Friction   — μ_s = 0.580, μ_d = 0.450, d_c = 0.18 m;
+#                  depth-linear cohesion C₀(depth) = 0.000425 MPa/m ·
+#                  max(0, 2400 - depth).  In canonical: applied via
+#                  cohesion_taper_axis = "z" with the resolver
+#                  computing depth = max(0, -z).
+#   • Nucleation — INSTANTANEOUS circular cosine-tapered overstress
+#                  centred at the hypocenter (spec p. 7), radius 1400
+#                  m at full amplitude, taper to 0 at r = 2000 m, Δτ
+#                  peak = 4.95 MPa scaled by µ(depth)/µ_0.  Pure
+#                  right-lateral (strike-direction only, on the y = 0
+#                  fault → strike-direction = +x).
+#
+# Fault (canonical): vertical, y = 0 plane (right-lateral, strike-slip),
+# 30 km along strike × 15 km deep (z ∈ [-15000, 0]).  Hypocenter at
+# (0, 0, -7500) m (spec depth 7.5 km on the y = 0 plane).
+
+# =========================================================================
+# p3 / ADER-O4 VARIANT of tpv31.toml.  Identical PHYSICS to tpv31.toml — the
+# ONLY differences are the two numerical-resolution knobs:
+#     [mesh].order        = 3   (p3; config-only, no CLI override)
+#     [numerics].ader_order = 4 (ADER-O4; the sbatch also pins --ader-order 4)
+# KEEP THIS FILE IN SYNC with tpv31.toml on every PHYSICS change (material,
+# stress, friction, nucleation, boundary, geometry).  Only order/ader_order
+# (and, optionally, output cadence) may legitimately differ.
+# =========================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV31 (p3 / ADER-O4 variant) — discontinuous 1D bi-material, depth-proportional pre-stress, instantaneous circular overstress nucleation (rotated into canonical SEAS frame)."
+
+[problem]
+tag = "tpv31"
+
+[boundary]
+# Per tpv31/mesh/tpv31_50m.geo lines 158-164 (rotated).
+fault_attr      = 101
+natural_attrs   = [102]
+absorbing_attrs = [103, 104]
+
+[fault_geometry]
+# Vertical y = 0 fault.  ref_normal / up inherit the canonical SEAS
+# Tandem convention (0, -1, 0) / (0, 0, 1) from the schema default —
+# see `miniapps/seas/CLAUDE.md` "Canonical Coordinate System".  Same
+# convention as TPV102 / TPV104 / TPV205.  Derived FaultBasis:
+#   tangent1 = dip    = (0, 0, -1)  → down-dip = -z (deeper)  ✓
+#   tangent2 = strike = (+1, 0, 0)  → strike   = +x           ✓
+kind = "tpv31_lsw"
+
+[hypocenter]
+# Spec p. 3: hypocenter at along-strike = 0, depth = 7.5 km.
+# Canonical: (0, 0, -7500).  z is in MESH coords (z < 0 below surface).
+# Spatial schema keys carry the `_m` suffix.
+x_m = 0.0
+y_m = 0.0
+z_m = -7500.0
+# Documentation only — actual nucleation is encoded in the
+# [nucleation.instantaneous_overstress_circular] block below.
+nucleation_radius_m = 1400.0
+nucleation_taper_m  = 600.0
+
+[material]
+# Spec uses positive depth as the profile axis.  In canonical, depth is
+# `max(0, -z)`; `MakeDepthProfile1DMaterial` does this conversion
+# internally when depth_axis = "z" so the layer table below uses the
+# spec's POSITIVE depth values (`depth_top_m` / `depth_bot_m`) without
+# any sign flip.
+kind       = "depth_profile_1d"
+depth_axis = "z"
+
+# Spec p. 4 Table.  The discontinuity at depth = 2400 jumps from
+# (vp=4050, vs=2250, ρ=2580) at depth = 2400- to (vp=4450, vs=2550, ρ=2600)
+# at depth = 2400+, then LINEARLY interpolates to (vp=5200, vs=3050, ρ=2620)
+# at depth = 5000-, then jumps to (vp=5750, vs=3450, ρ=2720) at depth = 5000+,
+# stays constant to depth = 10000-, then jumps to (vp=6500, vs=3800, ρ=3000)
+# at depth = 10000+ and stays constant for all greater depths.
+#
+# Encoding: 5 layers.  Tie-break (R-007): at a depth = depth_jump boundary
+# the DEEPER (later-listed) layer claims the point.  Layer 2 is a zero-
+# thickness "endpoint" layer at depth = 5000 that serves as the target
+# of Layer 1's linear interp (it is never the chosen layer because
+# Layer 3 also has depth_top_m = 5000 and is listed later).
+[[material_profile.layer]]
+depth_top_m = 0.0
+depth_bot_m = 2400.0
+vp_ms       = 4050.0
+vs_ms       = 2250.0
+rho_kgm3    = 2580.0
+interp      = "constant"
+
+[[material_profile.layer]]
+# depth ∈ [2400+, 5000-]: linearly interpolated from (4450, 2550, 2600) to
+# (5200, 3050, 2620).  The interp targets Layer 2's TOP values.
+depth_top_m = 2400.0
+depth_bot_m = 5000.0
+vp_ms       = 4450.0
+vs_ms       = 2550.0
+rho_kgm3    = 2600.0
+interp      = "linear"
+
+[[material_profile.layer]]
+# Zero-thickness endpoint layer at depth = 5000.  Carries the "5000-"
+# values of the spec (target of Layer 1's linear interp).  Never the
+# chosen layer at any depth (Layer 3 always wins via R-007 tie-break).
+depth_top_m = 5000.0
+depth_bot_m = 5000.0
+vp_ms       = 5200.0
+vs_ms       = 3050.0
+rho_kgm3    = 2620.0
+interp      = "constant"
+
+[[material_profile.layer]]
+# depth ∈ [5000+, 10000-]: constant (5750, 3450, 2720).
+depth_top_m = 5000.0
+depth_bot_m = 10000.0
+vp_ms       = 5750.0
+vs_ms       = 3450.0
+rho_kgm3    = 2720.0
+interp      = "constant"
+
+[[material_profile.layer]]
+# depth ∈ [10000+, ∞]: constant (6500, 3800, 3000).  bot is set far below
+# the box to cover any depth the mesh reaches.
+depth_top_m = 10000.0
+depth_bot_m = 30000.0
+vp_ms       = 6500.0
+vs_ms       = 3800.0
+rho_kgm3    = 3000.0
+interp      = "constant"
+
+[material_constant_fallback]
+# Required by the parser even when kind != constant.  Use µ_0 from the
+# spec (32.03812032 GPa) as a reasonable mid-range value.
+lambda = 32.03812032e9
+mu     = 32.03812032e9
+rho    = 2670.0
+
+[pore_pressure]
+# TPV31 spec: no pore pressure (P_p = 0 everywhere).
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[velocity]
+# Required top-level block in the spatial schema, but UNUSED by TPV31: the
+# material comes from [material] kind="depth_profile_1d" (an inline layer
+# table), not a CVM velocity sidecar.  use_sidecar=false disables the sidecar
+# load entirely (model/dataset_root are then ignored).
+use_sidecar  = false
+model        = "cvmh"
+dataset_root = ""
+
+[mesh]
+# Built via:  gmsh -format msh22 -3 tpv31/mesh/tpv31_50m.geo -o tpv31/mesh/tpv31_50m.msh
+# (The .geo file was rotated alongside this TOML; the new mesh must be
+# regenerated before running TPV31.)
+path  = "tpv31/mesh/tpv31_50m.msh"
+# p3 variant: cubic FE space on the same linear (straight-tet) 50 m mesh.
+# The CFL safety factor auto-scales with this order: CflSafetyFactor =
+# 1/(3·(2p+1)) = 1/21 at p=3 (vs 1/15 at p=2, 1/9 at p=1) — see spatial_friction.hpp:619.
+order = 3
+
+[stress]
+# Spec p. 6: depth-proportional Cauchy tensor, components scaled at
+# each fault DOF by µ(depth)/µ_ref where µ_ref = 32.03812032 GPa.
+#
+# Rotation from spec to canonical: Cauchy tensor transforms via
+# σ_canon = R · σ_spec · R^T with R = (x_s,y_s,z_s) → (x_s,z_s,-y_s).
+# Component-by-component:
+#   spec σ_11_per_µ = +60 (compression on x-face)          → canonical σ_xx = +60
+#   spec σ_22_per_µ =   0 (compression on depth-face)      → canonical σ_zz =  0
+#   spec σ_33_per_µ = +60 (compression on fault-normal)    → canonical σ_yy = +60
+#   spec σ_12_per_µ =   0                                  → canonical σ_xz =  0
+#   spec σ_13_per_µ = +30 (right-lateral shear on fault)   → canonical σ_xy = +30
+#   spec σ_23_per_µ =   0                                  → canonical σ_yz =  0
+#
+# Cross-check: in canonical, σ_yy is the FAULT-NORMAL compression
+# (fault is y=0 ⇒ normal is ±y), matching σ_33_spec which was the
+# fault-normal compression in the spec.  σ_xy is the right-lateral
+# strike-shear ON the fault (= σ_13_spec in the spec frame).  Trace
+# tr(σ) = 60 + 60 + 0 = 120 invariant under rotation.
+#
+# Sign convention: SEAS uses **compression POSITIVE** (matches the
+# proven TPV102 / TPV104 / TPV205 native drivers).  The spec's
+# literal compression-negative σ values were flipped to positive
+# BEFORE rotation (handled implicitly because both transformations
+# commute for the diagonal components used here).
+kind = "depth_proportional"
+
+[stress.depth_proportional]
+sigma_xx_per_mu = 60.0     # spec σ_11 (compression on the strike-direction face)
+sigma_yy_per_mu = 60.0     # canonical σ_yy = spec σ_33 (fault-normal compression)
+sigma_zz_per_mu =  0.0     # canonical σ_zz = spec σ_22 (depth-axis compression = 0)
+sigma_xy_per_mu = 30.0     # canonical σ_xy = spec σ_13 (right-lateral shear on fault)
+sigma_yz_per_mu =  0.0
+sigma_xz_per_mu =  0.0
+mu_ref_pa       = 32.03812032e9   # TPV5/TPV31 spec p. 6
+
+[numerics]
+ader_order     = 4          # ADER-O4 (allowed range {2,3,4}); sbatch pins --ader-order 4
+mixed_flux     = "none"
+cfl            = 0.5
+use_pml        = false
+# REVIEW R-004 / R-005: native-driver dispatch parity (CFL safety + iterator).
+cfl_safety     = "dg"        # cfl /= (3*(2p+1)) — matches native TPV drivers
+# spatial schema (Phase 10 adaptation): the spatial driver ALWAYS sub-steps
+# ("one-shot" is rejected — FaultIteratorSupported), so use "substep" with
+# O = ader_order = 4.
+fault_iterator = "substep"
+# interior_flux = "matrix": the depth_profile_1d material is Mode::Coefficient,
+# which is mutually exclusive with the scalar Godunov ctor; the matrix
+# (bimaterial) Riemann path is the only viable interior-flux path for TPV31.
+# (In the spatial schema the value is "matrix", not hrs-ref's "bimaterial".)
+interior_flux  = "matrix"
+
+[time]
+tfinal     = "15s"          # spec p. 9
+t_initial  = 0.0            # spatial schema: t_initial is a plain number (s)
+dt_initial = "auto"
+dt_max     = "0.01s"
+
+[output]
+output_dir              = "tpv31/out"
+restart_prefix          = "cp"
+# Master gate (REVIEW R-004): paraview_enabled MUST be true for the
+# per-collection mode strings below to take effect.
+paraview_enabled        = true
+paraview_volume         = "off"
+paraview_bulk           = "off"
+# Fault back end: "vtu" → per-cycle binary .vtu files indexed by a .pvd
+# collection (works on non-HDF5 builds).  paraview_fault_zfp_tol below is
+# INERT in vtu mode (ZFP applies only to the hdf5 back end; see
+# spatial_dyn_driver.cpp:2215).
+paraview_fault          = "vtu"
+paraview_volume_dt      = "0.05s"
+paraview_bulk_dt        = "0.05s"
+paraview_fault_dt       = "0.1s"
+paraview_volume_zfp_tol = 1e-3
+paraview_bulk_zfp_tol   = 1e-3
+paraview_fault_zfp_tol  = 1e-12
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[friction.slip_weakening]
+# Spec p. 7: μ_s = 0.580, μ_d = 0.450, d_0 = 0.18 m.
+mu_s_default     = 0.580
+mu_d_default     = 0.450
+d_c_default      = 0.18
+cohesion_default = 0.0      # used only outside the cohesion-taper region
+
+# Depth-linear cohesion C_0(depth) = 0.000425 MPa/m · max(0, 2400 - depth).
+# At depth = 0: C_0 = 1.02 MPa.  At depth >= 2400: C_0 = 0.
+#
+# In canonical, depth maps to z via depth = max(0, -z) (the resolver
+# computes this internally when cohesion_taper_axis = "z").  Rule
+# matches at z ∈ [-2400, 0] (depth ∈ [0, 2400]); outside this range
+# the default cohesion = 0 applies (which equals the floor anyway).
+#
+# Spec formula: cohesion = floor + grad * (ref_depth - depth).  With
+# the resolver's depth = max(0, -z) substitution:
+#   at z =  0 (depth = 0):    0 + 425 * (2400 - 0)    = 1.02e6
+#   at z = -2400 (d = 2400):  0 + 425 * (2400 - 2400) = 0
+#   at z < -2400 (d > 2400):  ... < 0, clamped to floor = 0
+[[friction.slip_weakening.spatial]]
+kind                     = "depth"
+z_min_m                  = -2400.0
+z_max_m                  =     0.0
+cohesion_taper_axis      = "z"
+cohesion_ref_depth_m     = 2400.0
+cohesion_grad_pa_per_m   = 425.0    # 0.000425 MPa/m
+cohesion_floor_pa        = 0.0
+
+[nucleation]
+# Spec p. 7 §"Nucleation Shear Stress": instantaneous (t = 0+)
+# additional shear stress in a circular zone around the hypocenter,
+# with cosine taper from r = 1400 m to r = 2000 m and per-DOF µ-scaling.
+# Pure right-lateral (strike-direction only).
+kind = "instantaneous_overstress_circular"
+
+[nucleation.instantaneous_overstress_circular]
+# Canonical: hypocenter at (0, 0, -7500) (was (0, 7500, 0) in spec).
+# Spatial schema (Phase 10 adaptation): the spatial driver's
+# InstantaneousOverstressCircular uses (radius_m, taper_m) for the cosine
+# taper — radius_m is the full-amplitude radius (spec radius_inner = 1400 m)
+# and taper_m is the cosine taper WIDTH (spec radius_outer - radius_inner =
+# 2000 - 1400 = 600 m), reproducing the spec's r=1400→2000 taper exactly.
+# delta_tau_pa is the strike-direction overstress (pure right-lateral on the
+# y=0 fault → strike = +x).
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 1400.0     # full-amplitude radius (spec radius_inner)
+taper_m      = 600.0      # cosine taper width (spec radius_outer - radius_inner)
+delta_tau_pa = 4.95e6     # spec Δτ_peak = 4.95 MPa
+# Spec p. 7: the instantaneous overstress is scaled per-DOF by µ(depth)/µ_0
+# (the same depth-dependent shear modulus that scales the background stress).
+# mu_ref_pa = µ_0 enables that scaling; the resolver evaluates µ(depth) from the
+# depth_profile_1d material at each fault DOF.  (mu_ref_pa = 0 would disable it.)
+mu_ref_pa    = 32.03812032e9   # spec µ_0 (= [stress.depth_proportional].mu_ref_pa)

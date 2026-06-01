@@ -1,25 +1,18 @@
 #!/bin/bash
-#SBATCH -J tpv31_p2_aderO3_flex
-#SBATCH -o tpv31_p2_aderO3_flex_%j.out
-#SBATCH -e tpv31_p2_aderO3_flex_%j.err
-#SBATCH -p flex
+#SBATCH -J tpv31_p2_aderO3_n
+#SBATCH -o tpv31_p2_aderO3_n_%j.out
+#SBATCH -e tpv31_p2_aderO3_n_%j.err
+#SBATCH -p normal
 #SBATCH -N 12
 #SBATCH -n 600
-#SBATCH -t 01:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
-# SCEC TPV31 — SMOKE / VALIDATION run:  p2 · ADER-O3 · pure upwind · matrix Riemann
-# Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).
-#
-# PURPOSE -----------------------------------------------------------------
-#   A SHORT, CHEAP (flex, 1 h, 2 s sim) dry-run that exercises the EXACT
-#   production configuration of the long normal-queue jobs
-#   (tpv31_p2_aderO3_noflux_50m_normal.sbatch — same scheme, same scale
-#   12 N / 600 r, same optimization + perfgraph flags) so we confirm the job
-#   starts, dispatches, takes the opt path, and writes output BEFORE
-#   committing 48 h normal-queue hours.  Once this passes, submit the normal
-#   jobs unchanged except queue/wall/tfinal.
+# SCEC TPV31 — JOB [2] (PRODUCTION):  p2 · ADER-O3 · pure upwind · matrix Riemann
+# Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).  Normal-queue,
+# full-15 s sibling of tpv31_p2_aderO3_noflux_50m_flex.sbatch (same physics +
+# scheme; flex/dev → normal queue, full run, optimization + perfgraph always on).
 #
 # NUMERICAL SCHEME (the four knobs that define this job) ------------------
 #   * p2            : [mesh].order = 2            (quadratic FE space on the
@@ -37,16 +30,17 @@
 #   Config: tpv31/configs/tpv31_p2.toml (p2 / ADER-O3 variant of tpv31.toml).
 #
 # QUEUE / SCALE -----------------------------------------------------------
-#   flex queue, 12 nodes, 600 MPI ranks (50 ranks/node on Frontera CLX 56-core
-#   nodes — SAME scale as the normal-queue p2 production job).  flex =
-#   discounted/opportunistic scheduling; 1 h wall is plenty for the 2 s slice.
-#   tfinal = 2 s here (SMOKE), vs the full 15 s spec run in the normal job.
+#   normal queue, 12 nodes, 600 MPI ranks (50 ranks/node on Frontera CLX
+#   56-core nodes).  Wall = 48 h (normal-queue maximum).  p2/O3 is heavier
+#   than p1/O2 (more DOFs/elem + ~1.7× more steps from the tighter CFL + O3
+#   work), so the 15 s spec run will span multiple 48 h segments — rely on
+#   checkpoint/restart (see RESTART below).
 #
-# ADER HOT-PATH OPTIMIZATION (ALWAYS ON here — same as the production job) --
-#   Always passes the Lever 1/2/3 optimization flags (--deriv-cache
-#   --shared-ck-recursion); see "OPTIMIZATION" below.  Result differs from the
-#   bit-exact default at ROUND-OFF only (machine-eps; verified by the
-#   equivalence unit test, NOT the byte-exact regression contract).
+# ADER HOT-PATH OPTIMIZATION (ALWAYS ON here) -----------------------------
+#   This production job ALWAYS passes the Lever 1/2/3 optimization flags
+#   (--deriv-cache --shared-ck-recursion); see "OPTIMIZATION" below.  Result
+#   differs from the bit-exact default at ROUND-OFF only (machine-eps; verified
+#   by the equivalence unit test, NOT the byte-exact regression contract).
 #   ⇒ The binary MUST be (re)built from this branch (it carries the merged
 #     elem_derivative_cache.hpp / DerivMode::Cached code).  A binary built
 #     before the merge IGNORES these flags SILENTLY (HasFlag argv-scan) and
@@ -129,7 +123,7 @@ fi
 # node (conda activate pythonenv) so the compute job does not spend wall time
 # meshing.
 if [[ ! -f "${MESH}" ]]; then
-    echo "[tpv31-p2-flex] mesh ${MESH} missing — generating from the .geo (Gmsh v2.2)..."
+    echo "[tpv31-p2] mesh ${MESH} missing — generating from the .geo (Gmsh v2.2)..."
     if command -v gmsh >/dev/null 2>&1; then
         gmsh -format msh22 -3 tpv31/mesh/tpv31_50m.geo -o "${MESH}"
     else
@@ -141,34 +135,33 @@ if [[ ! -f "${MESH}" ]]; then
 fi
 
 # --- positional arg: `perfgraph` (Caliper short slice that flushes) --------
-# Submit with the single word `perfgraph` to run an EVEN shorter slice
-# (default ~0.004 s ≈ 107 steps at p2 dt ~ 3.74e-5 s) that REACHES a clean exit
-# so the Caliper runtime-report definitely flushes:
-#     sbatch tpv31_p2_aderO3_noflux_50m_flex.sbatch perfgraph
-# (The default 2 s smoke slice may or may not finish inside the 1 h flex wall;
-# a wall-clock-killed run emits NO Caliper report.  Use `perfgraph` for a
-# guaranteed, representative region tree.)
+# Submit with the single word `perfgraph` to run a SHORT slice (default
+# ~0.004 s ≈ 107 steps at p2 dt ~ 3.74e-5 s) that REACHES a clean exit so the
+# Caliper runtime-report actually flushes:
+#     sbatch tpv31_p2_aderO3_noflux_50m_normal.sbatch perfgraph
+# A wall-clock-killed run (CANCELLED ... DUE TO TIME LIMIT) emits NO report,
+# so the full 15 s run's Caliper data only covers whichever restart segment
+# reaches t=tfinal cleanly — use this short slice for a representative tree.
 # Slice-length override: TPV31_PERFGRAPH_TFINAL (s).
 PERFGRAPH_MODE=0
 for _arg in "$@"; do
     case "${_arg}" in
         perfgraph) PERFGRAPH_MODE=1 ;;
-        *) echo "[tpv31-p2-flex] WARNING: ignoring unknown arg '${_arg}' (expected 'perfgraph')." ;;
+        *) echo "[tpv31-p2] WARNING: ignoring unknown arg '${_arg}' (expected 'perfgraph')." ;;
     esac
 done
 
-OUT="${TPV31_OUT:-tpv31/out_p2_aderO3_flex_smoke_${SLURM_JOB_ID:-local}}"
+OUT="${TPV31_OUT:-tpv31/out_p2_aderO3_normal_${SLURM_JOB_ID:-local}}"
 
 if [[ "${PERFGRAPH_MODE}" == "1" ]]; then
     TFINAL="${TPV31_TFINAL:-${TPV31_PERFGRAPH_TFINAL:-0.004}}"   # short -> finishes -> report flushes
-    echo "[tpv31-p2-flex] PERFGRAPH MODE: profiling slice tfinal=${TFINAL} s (p2 dt ~ 3.74e-5 s)."
-    echo "                Runs to a CLEAN exit so the Caliper report flushes."
+    echo "[tpv31-p2] PERFGRAPH MODE: profiling slice tfinal=${TFINAL} s (p2 dt ~ 3.74e-5 s)."
+    echo "           Runs to a CLEAN exit so the Caliper report flushes; the full run is tfinal=15 s."
 else
-    TFINAL="${TPV31_TFINAL:-2}"   # SMOKE: 2 s validation slice (full spec run is 15 s in the normal job)
-    echo "[tpv31-p2-flex] SMOKE MODE: tfinal=${TFINAL} s validation slice (full spec run is 15 s)."
+    TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across the 48 h wall)
 fi
 
-# --- ADER hot-path optimization (ALWAYS ON — mirrors the production job) ---
+# --- ADER hot-path optimization (ALWAYS ON in this production job) ---------
 # --deriv-cache         : precompute per-element D_d^e = M^-1 K_d (Lever 1) and
 #                         the volume-RHS operator S_d^e (Lever 3); apply as a
 #                         dense mat-vec instead of per-QP quadrature
@@ -183,17 +176,19 @@ fi
 # — grep the *.out to confirm the binary actually carries the optimization.
 DERIV_OPT_FLAGS="--deriv-cache --shared-ck-recursion"
 
-# --- restart (opt-in via TPV31_RESTART; rarely needed for a 2 s smoke) -----
+# --- restart across the 48 h wall (opt-in via TPV31_RESTART) ---------------
 # The driver ABORTS (return 3) if --output-dir resolves to the SAME directory
 # as the PARENT of --restart, so a restart segment MUST write to a DIFFERENT
-# --output-dir than the checkpoint it reads.  OUT defaults to a per-job-ID dir,
-# so each segment is naturally distinct.  To resume:
+# --output-dir than the checkpoint it reads.  Because OUT defaults to a
+# per-job-ID directory, each segment is naturally distinct.  To resume:
 #       TPV31_RESTART="<previous-segment-OUT>/cp" sbatch <thisscript>
+# (point it at the cp prefix inside the PREVIOUS job's output dir).  This
+# segment then checkpoints into its own fresh OUT for the next link.
 RESTART_FLAGS=""
 if [[ -n "${TPV31_RESTART:-}" ]]; then
     RESTART_FLAGS="--restart ${TPV31_RESTART}"
-    echo "[tpv31-p2-flex] RESTART: resuming from checkpoint prefix '${TPV31_RESTART}'"
-    echo "                (this segment writes a fresh output dir: ${OUT})."
+    echo "[tpv31-p2] RESTART: resuming from checkpoint prefix '${TPV31_RESTART}'"
+    echo "           (this segment writes a fresh output dir: ${OUT})."
 fi
 
 # --- Caliper "perfgraph" (MFEM profiling facility); ON by default ----------
@@ -214,8 +209,8 @@ if [[ "${TPV31_PERFGRAPH:-1}" == "1" ]]; then
     # runtime-report         -> human-readable inclusive/exclusive timing tree to stderr (.err)
     # hatchet-region-profile -> JSON for a rendered call-graph via the `hatchet` Python pkg
     export CALI_CONFIG="${CALI_CONFIG:-runtime-report(calc.inclusive=true),hatchet-region-profile(output=${OUT}/caliper_perfgraph.json)}"
-    echo "[tpv31-p2-flex] Caliper perfgraph ON (CALI_CONFIG=${CALI_CONFIG})."
-    echo "                Produces data ONLY on an MFEM_USE_CALIPER=YES build."
+    echo "[tpv31-p2] Caliper perfgraph ON (CALI_CONFIG=${CALI_CONFIG})."
+    echo "           Produces data ONLY on an MFEM_USE_CALIPER=YES build."
 fi
 
 # --- run -----------------------------------------------------------------
@@ -239,7 +234,18 @@ ibrun ./seas_spatial_dyn_driver \
     ${RESTART_FLAGS} \
     --verify-dispatch
 
-echo "[tpv31-p2-flex] done. SMOKE output in ${OUT}.  If the scheme banner shows"
-echo "                'ader order: 3 / time integrator: ader / mixed flux: none',"
-echo "                '[deriv] ... enabled' appears, and fault VTUs were written,"
-echo "                the production normal-queue jobs are good to submit."
+echo "[tpv31-p2] done. On-fault station traces in ${OUT}; compare vs"
+echo "           tpv31/benchmark_data/scec_{eqdyna,seisol}/ via tpv31/visualize_results.py."
+
+# =========================================================================
+# RESTART CHAIN (full 15 s spans multiple 48 h normal-queue segments)
+# -------------------------------------------------------------------------
+# The run checkpoints every 2000 steps (--checkpoint-every 2000) into ${OUT}
+# as cp_checkpoint_r<rank>.txt.  To continue after a wall-limit truncation,
+# re-submit pointing TPV31_RESTART at the PREVIOUS segment's cp prefix:
+#       TPV31_RESTART="tpv31/out_p2_aderO3_normal_<prevjobid>/cp" \
+#           sbatch tpv31_p2_aderO3_noflux_50m_normal.sbatch
+# Each segment gets its OWN job-ID output dir (REQUIRED: the driver refuses a
+# restart whose --output-dir equals the checkpoint's parent dir).  Read the
+# steps/hour off the *.out to size the number of segments.
+# =========================================================================
