@@ -175,6 +175,8 @@ TEST_TPV31_NUCLEATION_AND_COHESION_SRC = tests/unit/test_tpv31_nucleation_and_co
 TEST_TPV31_NUCLEATION_AND_COHESION_OBJ = $(TEST_TPV31_NUCLEATION_AND_COHESION_SRC:.cpp=.o)
 TEST_TPV31_STATION_WRITER_SRC        = tests/unit/test_tpv31_station_writer.cpp
 TEST_TPV31_STATION_WRITER_OBJ        = $(TEST_TPV31_STATION_WRITER_SRC:.cpp=.o)
+TEST_SPATIAL_STATION_DISPATCH_SRC    = tests/unit/test_spatial_station_dispatch.cpp
+TEST_SPATIAL_STATION_DISPATCH_OBJ    = $(TEST_SPATIAL_STATION_DISPATCH_SRC:.cpp=.o)
 TEST_PARAVIEW_STATE_CHANNEL_RS_SRC   = tests/unit/test_paraview_state_channel_rs.cpp
 TEST_PARAVIEW_STATE_CHANNEL_RS_OBJ   = $(TEST_PARAVIEW_STATE_CHANNEL_RS_SRC:.cpp=.o)
 # TPV-via-spatial-driver Phase 8 (TPV205/102/104 benchmark configs + tests).
@@ -871,6 +873,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_tpv31_canonical_rotation \
                seas_test_tpv31_nucleation_and_cohesion \
                seas_test_tpv31_station_writer \
+               seas_test_spatial_station_dispatch \
                seas_test_tpv_toml_stress_sign \
                seas_test_planar_tpv_basis \
                seas_test_tpv_config_parse \
@@ -2633,6 +2636,15 @@ $(TEST_TPV31_STATION_WRITER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
+$(TEST_SPATIAL_STATION_DISPATCH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/tpv205_stations.hpp \
+                                       dynamic/tpv104_stations.hpp \
+                                       dynamic/tpv102_stations.hpp \
+                                       dynamic/fault_face_flux.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
+
 seas_test_tpv31_canonical_rotation: $(TEST_TPV31_CANONICAL_ROTATION_OBJ) \
                                     $(SPATIAL_STRESS_OBJ) \
                                     $(SPATIAL_FRICTION_OBJ) \
@@ -2690,6 +2702,19 @@ test-tpv31-nucleation-and-cohesion: seas_test_tpv31_nucleation_and_cohesion
 
 test-tpv31-station-writer: seas_test_tpv31_station_writer
 	./seas_test_tpv31_station_writer
+
+seas_test_spatial_station_dispatch: $(TEST_SPATIAL_STATION_DISPATCH_OBJ) \
+                                    $(FAULT_FACE_FLUX_OBJ) \
+                                    $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_STATION_DISPATCH_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-spatial-station-dispatch: seas_test_spatial_station_dispatch
+	./seas_test_spatial_station_dispatch
 
 # =====================================================================
 #  Phase 8 — TPV205/102/104 benchmark config + sign/basis tests.

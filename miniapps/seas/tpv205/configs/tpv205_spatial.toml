@@ -22,6 +22,9 @@ schema_version = 1
 law            = "slip_weakening"
 description    = "SCEC TPV205 (LSW) via spatial_dyn_driver — fault-local prestress, scalar Riemann."
 
+[problem]
+tag = "tpv205"   # selects the SCEC TPV205 on-fault station writer in spatial_dyn_driver
+
 # Material: homogeneous, native TPV205Params (rho*cs^2 / rho*cp^2-2mu).
 #   rho = 2670, cs = 3464, cp = 6000  ->
 #   mu     = rho*cs^2          = 32_038_120_320 Pa

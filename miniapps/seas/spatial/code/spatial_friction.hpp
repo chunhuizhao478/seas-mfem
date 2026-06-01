@@ -516,7 +516,10 @@ struct RateStateBlock
 //  behaviour); req-7 guards validate them when present.
 // =====================================================================
 
-/// Descriptive problem tag (informational only; no code branches on it).
+/// Descriptive problem tag.  Selects the SCEC on-fault station-trace writer
+/// in spatial_dyn_driver ("tpv31"/"tpv102"/"tpv104"/"tpv205" -> the matching
+/// benchmark-format writer; empty / unrecognised -> no station output, e.g.
+/// SAFS).  No other code branches on it.
 struct ProblemSpec { std::string tag; };
 
 /// Boundary-attribute assignment.  `fault_attr` is the mesh attribute of the
