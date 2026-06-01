@@ -80,6 +80,9 @@
 #include "../dynamic/nucleation_factory.hpp"   // Phase 7: MakeNucleation
 #include "../dynamic/rk_time_stepper.hpp"      // Phase 14: RK4/RK45 coupled stepper
 #include "../dynamic/tpv31_stations.hpp"       // Phase 10: TPV31 SCEC station writer
+#include "../dynamic/tpv102_stations.hpp"      // SCEC TPV102 station writer (rate-state)
+#include "../dynamic/tpv104_stations.hpp"      // SCEC TPV104 station writer (rate-state)
+#include "../dynamic/tpv205_stations.hpp"      // SCEC TPV205 station writer (LSW)
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -96,7 +99,9 @@
 #include <iomanip>
 #include <iostream>
 #include <limits>
+#include <functional>
 #include <memory>
+#include <type_traits>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -2765,29 +2770,53 @@ int main(int argc, char *argv[])
       paraview_write(0, cfg.time.t_initial, 0.0);
    }
 
-   // Phase 10 (TPV31): SCEC on-fault station traces (one `.dat` per station) —
-   // the verification artifact consumed by tpv31/visualize_results.py.  The
-   // spatial driver otherwise emits only ParaView/HDF5 fault output; the
-   // per-station writer is TPV31-specific (LSW μ_eff + the 30-station SCEC
-   // grid), so gate on the TPV31 problem tag.  `fault_coords` is sized
-   // num_fault_total with the same (interior-then-shared) DOF ordering as
-   // `dof_data`; the writer resolves cross-rank station ownership internally.
-   std::unique_ptr<TPV31StationWriter> tpv31_stations;
-   if (cfg.problem.tag == "tpv31")
+   // SCEC on-fault station traces (one `.dat` per station) — the verification
+   // artifact consumed by tpv{31,102,104,205}/visualize_results.py.  The
+   // spatial driver otherwise emits only ParaView/HDF5 fault output.  Each
+   // problem reuses the SAME benchmark-format writer the native driver uses
+   // (extracted to the lean dynamic/tpv*_stations.hpp), selected by the
+   // [meta].tag, so the columns are byte-for-byte the SCEC layout:
+   //   tpv31  -> TPV31StationWriter   (LSW μ_eff, 30-station grid)
+   //   tpv102 -> TPV102StationWriter  (rate-state, log10_theta)
+   //   tpv104 -> TPV104StationWriter  (rate-state, psi)
+   //   tpv205 -> TPV205StationWriter  (LSW μ_eff, 16-station grid)
+   // `fault_coords` is sized num_fault_total with the same (interior-then-
+   // shared) DOF ordering as `dof_data`; each writer resolves cross-rank
+   // station ownership internally.  The four writers are distinct types that
+   // share one interface (Open(...,comm) / WriteStep(t,dof_data) / Close()),
+   // so WriteStep/Close are type-erased into std::function closures over a
+   // shared owner — at most one is wired (no [meta].tag match -> none, e.g.
+   // SAFS, which has no SCEC station grid).
+   std::shared_ptr<void> stations_owner;
+   std::function<void(real_t, const std::vector<DOFData> &)> stations_write;
+   std::function<void()> stations_close;
    {
-      tpv31_stations = std::make_unique<TPV31StationWriter>();
-      const std::vector<TPV31Station> stations = DefaultStations_TPV31();
-#ifdef MFEM_USE_MPI
-      tpv31_stations->Open(cfg.output.output_dir, "tpv31", stations,
-                           fault_coords, num_fault_total, comm);
-#else
-      tpv31_stations->Open(cfg.output.output_dir, "tpv31", stations,
-                           fault_coords, num_fault_total);
-#endif
-      if (restart_prefix.empty())
+      auto wire_stations = [&](auto *writer_tag, const auto &stations)
       {
-         tpv31_stations->WriteStep(cfg.time.t_initial, dof_data);
-      }
+         using WriterT = std::remove_pointer_t<decltype(writer_tag)>;
+         auto w = std::make_shared<WriterT>();
+#ifdef MFEM_USE_MPI
+         w->Open(cfg.output.output_dir, cfg.problem.tag, stations,
+                 fault_coords, num_fault_total, comm);
+#else
+         w->Open(cfg.output.output_dir, cfg.problem.tag, stations,
+                 fault_coords, num_fault_total);
+#endif
+         if (restart_prefix.empty())
+         {
+            w->WriteStep(cfg.time.t_initial, dof_data);
+         }
+         stations_owner = w;
+         stations_write = [w](real_t tt, const std::vector<DOFData> &dd)
+         { w->WriteStep(tt, dd); };
+         stations_close = [w]() { w->Close(); };
+      };
+
+      const std::string &tag = cfg.problem.tag;
+      if      (tag == "tpv31")  { wire_stations((TPV31StationWriter  *)nullptr, DefaultStations_TPV31()); }
+      else if (tag == "tpv102") { wire_stations((TPV102StationWriter *)nullptr, DefaultStations()); }
+      else if (tag == "tpv104") { wire_stations((TPV104StationWriter *)nullptr, DefaultStations_TPV104()); }
+      else if (tag == "tpv205") { wire_stations((TPV205StationWriter *)nullptr, DefaultStations_TPV205()); }
    }
 
    // -----------------------------------------------------------------
@@ -3050,9 +3079,10 @@ int main(int argc, char *argv[])
 
       paraview_write(step + 1, t, V_max_step);
 
-      // Phase 10 (TPV31): append the post-step state to each SCEC station
-      // trace (every step — 30 stations × ~80 B/row).  No-op unless TPV31.
-      if (tpv31_stations) { tpv31_stations->WriteStep(t, dof_data); }
+      // Append the post-step state to each SCEC station trace (every step;
+      // each station is ~80 B/row).  No-op unless a [meta].tag-matched writer
+      // was wired above (tpv31/102/104/205).
+      if (stations_write) { stations_write(t, dof_data); }
 
       // ------------------------------------------------------------------
       // MPI shared-fault consistency tripwire.  Follows tpv104_driver.cpp
@@ -3154,10 +3184,10 @@ int main(int argc, char *argv[])
       }
    }
 
-   // Phase 10 (TPV31): flush + close the SCEC station traces (no-op unless the
-   // writer was opened).  Files are flushed every WriteStep, so this is belt-
-   // and-suspenders before the (RAII) close at scope exit.
-   if (tpv31_stations) { tpv31_stations->Close(); }
+   // Flush + close the SCEC station traces (no-op unless a writer was wired).
+   // Files are flushed every WriteStep, so this is belt-and-suspenders before
+   // the (RAII) close at scope exit.
+   if (stations_close) { stations_close(); }
 
    // -----------------------------------------------------------------
    // 21. Final checkpoint.

@@ -173,7 +173,7 @@ ibrun ./seas_spatial_dyn_driver \
     --output-dir "${OUT}" \
     --verify-dispatch
 
-echo "[tpv205-rk45] done. On-fault traces in ${OUT}; compare vs the SCEC TPV205"
+echo "[tpv205-rk45] done. On-fault SCEC station traces: ${OUT}/tpv205_station_*.dat (16 stations); compare vs the SCEC TPV205"
 echo "              reference.  Confirm V_max is BOUNDED (the ADER-p1-central"
 echo "              flux run-away does NOT occur) and read the empirical stable"
 echo "              dt off this *.out before committing normal-queue hours."
