@@ -191,6 +191,7 @@ ibrun ./seas_spatial_dyn_driver \
     --paraview \
     --paraview-fault-vtu \
     --paraview-volume-vtu \
+    --paraview-bulk-vtu \
     --paraview-max-snapshots 200 \
     --print-derived \
     --checkpoint-every 2000 \

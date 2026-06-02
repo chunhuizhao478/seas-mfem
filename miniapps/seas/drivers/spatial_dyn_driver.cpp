@@ -595,6 +595,8 @@ int main(int argc, char *argv[])
    const int    cli_pv_bulk_deflate      = GetIntArg (argc, argv, "--paraview-bulk-deflate-level",  -1);
    const bool   cli_pv_force_vol_vtu     = HasFlag(argc, argv, "--paraview-volume-vtu");
    const bool   cli_pv_force_vol_hdf5    = HasFlag(argc, argv, "--paraview-volume-hdf5");
+   const bool   cli_pv_force_bulk_vtu    = HasFlag(argc, argv, "--paraview-bulk-vtu");
+   const bool   cli_pv_force_bulk_hdf5   = HasFlag(argc, argv, "--paraview-bulk-hdf5");
    const int    cli_pv_volume_deflate    = GetIntArg (argc, argv, "--paraview-volume-deflate-level", -1);
    const real_t cli_pv_coseismic_dt      = GetRealArg(argc, argv, "--paraview-coseismic-dt",    -1.0);
    const real_t cli_pv_nucleation_dt     = GetRealArg(argc, argv, "--paraview-nucleation-dt",   -1.0);
@@ -712,6 +714,8 @@ int main(int argc, char *argv[])
    if (cli_pv_force_fault_hdf5)           { cfg.output.paraview_fault  = "hdf5"; }
    if (cli_pv_force_vol_vtu)              { cfg.output.paraview_volume = "vtu";  }
    if (cli_pv_force_vol_hdf5)             { cfg.output.paraview_volume = "hdf5"; }
+   if (cli_pv_force_bulk_vtu)             { cfg.output.paraview_bulk   = "vtu";  }
+   if (cli_pv_force_bulk_hdf5)            { cfg.output.paraview_bulk   = "hdf5"; }
    if (cli_pv_legacy_ascii)               { cfg.output.paraview_fault_legacy_ascii = true;
                                             cfg.output.paraview_fault = "vtu"; }
 
@@ -732,6 +736,11 @@ int main(int argc, char *argv[])
       MFEM_ABORT("--paraview-volume-vtu and --paraview-volume-hdf5 are "
                  "mutually exclusive.");
    }
+   if (cli_pv_force_bulk_vtu && cli_pv_force_bulk_hdf5)
+   {
+      MFEM_ABORT("--paraview-bulk-vtu and --paraview-bulk-hdf5 are "
+                 "mutually exclusive.");
+   }
    // ZFP + deflate combos are mutually exclusive per collection.
    if (cli_pv_vol_zfp > 0.0 && cli_pv_volume_deflate >= 0)
    {
@@ -749,7 +758,7 @@ int main(int argc, char *argv[])
                  "are mutually exclusive.");
    }
 #ifndef MFEM_USE_HDF5
-   if (cli_pv_force_fault_hdf5 || cli_pv_force_vol_hdf5
+   if (cli_pv_force_fault_hdf5 || cli_pv_force_vol_hdf5 || cli_pv_force_bulk_hdf5
        || cli_pv_vol_zfp > 0.0 || cli_pv_bulk_zfp > 0.0 || cli_pv_fault_zfp > 0.0
        || cli_pv_fault_deflate >= 0 || cli_pv_bulk_deflate >= 0
        || cli_pv_volume_deflate >= 0

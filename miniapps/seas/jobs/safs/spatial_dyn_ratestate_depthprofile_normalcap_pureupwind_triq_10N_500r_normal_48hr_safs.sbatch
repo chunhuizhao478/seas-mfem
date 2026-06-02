@@ -25,10 +25,12 @@
 # 10N/500r/48h with tfinal 100 s, on the 500 m shape-preserving _triq mesh
 #   experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh
 # (overrides the config's [mesh].path via the driver's --mesh flag).  ADAPTATIONS
-# for this repo: keep HDF5+ZFP fault output; the driver has NO --mesh-mode flag
-# (the 1.16 M-tet 500 m mesh is OOM-safe in a serial read), so the source's
-# presplit switch is omitted; config token "slip_srw"->"slip_law_srw" and
-# f_w/V_w->f_w_default/V_w_default (values unchanged -> identical SRW physics).
+# for this repo: ParaView fault/volume/bulk output is VTU (--paraview-*-vtu; no
+# HDF5/ZFP — the H5Z-ZFP plugin is absent on Frontera compute nodes); the driver
+# has NO --mesh-mode flag (the 1.16 M-tet 500 m mesh is OOM-safe in a serial
+# read), so the source's presplit switch is omitted; config token "slip_srw"->
+# "slip_law_srw" and f_w/V_w->f_w_default/V_w_default (values unchanged ->
+# identical SRW physics).
 #
 # Config (floor enabled):
 #   config/spatial_friction_rate_state_safs_projected_stress_srw_Dc010_nuc8km_500m.toml
@@ -218,6 +220,7 @@ ibrun ./seas_spatial_dyn_driver \
     --paraview \
     --paraview-fault-vtu \
     --paraview-volume-vtu \
+    --paraview-bulk-vtu \
     --paraview-max-snapshots 300 \
     --print-derived \
     --checkpoint-every 2000 \
