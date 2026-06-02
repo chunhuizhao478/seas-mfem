@@ -1,0 +1,180 @@
+# =====================================================================
+#  SCEC TPV102 — rate-and-state friction (aging law), p1, SCALAR mixed
+#  (central) flux + explicit RK45, run through the SAFS spatial
+#  dynamic-rupture driver (seas_spatial_dyn_driver).
+#
+#  This is the RK45 + mixed-flux variant of tpv102_spatial.toml.  The ONLY
+#  difference from the ADER config is [numerics].time_integrator = "rk45"
+#  (+ this header): at p1 the central (mixed) flux is unstable under
+#  ADER-O2 (the predictor is locked to O2 and amplifies the imaginary-axis
+#  modes central flux creates); an explicit RK of order >= 3 (RK45) has
+#  imaginary-axis coverage and is stable.  See
+#  document/mixed_flux_dev/BUILD_mixed_flux_rk_dynamic_rupture_2026-05-28.md.
+#
+#  Rate-state RK path: the coupled RK-on-(Q, psi, slip) stepper
+#  AdvanceRKCoupled_Spatial drives wave.Mult, whose fault face runs the
+#  instantaneous FaultFaceFlux::Evaluate (the same RS Riemann solve as the
+#  ADER substep).  fault_iterator below is ADER-only and is IGNORED on the
+#  RK path (kept for parity with the ADER config).
+#
+#  Plan: PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md, Phase 8
+#        + PLAN_rk45_lsw_mixed_flux_2026-05-29.md, Phase 14 (RS RK path).
+#  Physics oracle: drivers/tpv102_driver.cpp + config/tpv102_params.hpp.
+#
+#  Stress convention (D3.2): kind = "fault_local_prestress" seeds the
+#  per-DOF pre-stress directly (tau2_0 = tau_strike, sigma_n0 = sigma_n
+#  - P_p), right-lateral / compression POSITIVE — NO Cauchy projection.
+#
+#  VW-zone a(x,z): native TPV102 uses SCEC Eq.(4) a = a_vs + (a_vw-a_vs)
+#  * B_strike * B_dip with a smooth SCEC boxcar B (tanh transition).  The
+#  spatial resolver REJECTS boxcar_taper rules (Phase 6 made the kind
+#  config-only; its message directs "use kind=box/depth").  So the VW
+#  core is expressed here as a HARD box (a = a_vw inside, a_vs outside);
+#  the smooth tanh transition is DEFERRED (documented Phase 8 approximation,
+#  identical to the ADER baseline; affects edge tapering, not core physics).
+#
+#  Boundary attributes: this TPV102 mesh uses fault=3, free=1, absorbing=5
+#  (Physical Surface 1/3/5; see [boundary] below).
+# =====================================================================
+
+# =========================================================================
+# p2 VARIANT of tpv102_spatial_rk45_mixedflux.toml.  IDENTICAL physics +
+# scheme — the ONLY difference is the resolution knob [mesh].order = 2 (p2;
+# config-only, no CLI override).  The RK CFL de-rating auto-scales with
+# order (RkCflFactor = 3/(2p+1) = 0.6 at p=2 vs 1.0 at p=1), so the stable
+# dt shrinks accordingly (spatial_friction.hpp).  KEEP THIS FILE IN SYNC
+# with the p1 mixed-flux config on every PHYSICS change (material, stress,
+# friction, nucleation, boundary, geometry); only [mesh].order may differ.
+# =========================================================================
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SCEC TPV102 (RS aging) via spatial_dyn_driver — p2, scalar Riemann, mixed (adjacent central) flux, explicit RK45."
+
+[problem]
+tag = "tpv102"   # selects the SCEC TPV102 on-fault station writer in spatial_dyn_driver
+
+# Material: homogeneous, native TPV102Params (identical to TPV205).
+#   mu = 32_038_120_320 Pa, lambda = 32_043_759_360 Pa, rho = 2670.
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Smallest available TPV102 mesh (1000 m fault resolution, ~10 MB) — the
+# default for a quick parse.  The 8N/400r dev sbatch PINS the 200 m mesh
+# (tpv102/mesh/tpv102_200m.msh) via --mesh for a 400-rank-sized run.
+path  = "tpv102/mesh/tpv102_1000m.msh"
+order = 2
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 75.0e6     # native TPV102 tau_ini (+ right-lateral)
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[numerics]
+time_integrator = "rk45"     # Phase 14: explicit Dormand-Prince RK45 (NOT ADER).
+                             #   Required for stable central/mixed flux at p1.
+ader_order     = 2          # ignored on the RK path (kept for ADER parity).
+mixed_flux     = "adjacent" # central flux on fault-adjacent faces (scalar path).
+cfl            = 0.25       # RK-aware Adjacent factor (0.6) applied internally;
+                            #   STARTING calibration — confirm empirical stable
+                            #   dt from the first dev-queue smoke (BUILD doc §5.4).
+cfl_safety     = "dg"       # apply the DG /(2p+1)*(1/3) safety factor
+interior_flux  = "scalar"   # homogeneous Godunov (TPV102 is homogeneous); the
+                            #   RK path is scalar-only (matrix/bimaterial rejected).
+fault_iterator = "substep"  # ADER-only; IGNORED on the RK path (kept for parity).
+use_pml        = false
+
+[time]
+tfinal     = "0.2s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv102_spatial"
+restart_prefix = "cp"
+paraview_fault = "hdf5"
+paraview_fault_dt = "0.01s"
+
+# Rate-and-state, aging law (native TPV102Params).
+#   VW core   (velocity-weakening):       a = a_vw = 0.008  (DEFAULT)
+#   border    (velocity-strengthening):   a = a_vs = 0.016  (box rules)
+#   b = 0.012, Dc(L) = 0.02 m, f_0 = 0.6, V_0 = 1e-6, V_init = 1e-12.
+#
+# Expressed INSIDE-OUT (VW core as the default, VS trimmed at the borders)
+# so a_default = a_vw < b_default passes the parser's scalar a<b guard
+# (spatial_friction.cpp:755).  The resolver allows per-DOF a>b at the
+# border (R-011, :1813-1816).  Net per-DOF a field is IDENTICAL to the
+# native "VS background + VW core" form: VW for |x|<15 km AND depth<15 km,
+# VS outside.  (Hard boxcar; the native smooth SCEC tanh transition is
+# deferred — boxcar_taper is resolver-rejected this phase; see header.)
+[friction.rate_state]
+a_default       = 0.008
+b_default       = 0.012
+Dc_default      = 0.02
+V_0_default     = 1.0e-6
+f_0_default     = 0.6
+V_init_default  = 1.0e-12
+sigma_n_default = 120.0e6
+state_evolution = "aging_law"
+eta             = "auto"
+
+# VS borders (a = a_vs = 0.016): along-strike beyond +/-15 km, and deeper
+# than 15 km.  Unspecified box bounds default to +/-inf.
+[[friction.rate_state.spatial]]
+kind    = "box"
+x_max_m = -15000.0
+a       = 0.016
+
+[[friction.rate_state.spatial]]
+kind    = "box"
+x_min_m = 15000.0
+a       = 0.016
+
+[[friction.rate_state.spatial]]
+kind    = "box"
+z_max_m = -15000.0
+a       = 0.016
+
+# Nucleation: SCEC compact-bell gradual overstress (TPV102), strike-only.
+#   F(r) = exp(r^2/(r^2 - R^2)) * smoothStep(t, T_nuc), R = 3 km.
+#   delta_tau0 = 25 MPa, T_nuc = 1 s; centre at the hypocenter (z=-7500).
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+center_x_m   = 0.0
+center_y_m   = 0.0
+center_z_m   = -7500.0
+radius_m     = 3000.0
+delta_tau_pa = 25.0e6
+T_nuc_s      = "1.0s"
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+absorbing_attrs = [5]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 3000.0

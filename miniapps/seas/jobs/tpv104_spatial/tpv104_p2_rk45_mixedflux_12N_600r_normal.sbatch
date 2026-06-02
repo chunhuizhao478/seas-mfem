@@ -1,24 +1,28 @@
 #!/bin/bash
-#SBATCH -J tpv102_p1_rk45_mf
-#SBATCH -o tpv102_p1_rk45_mf_%j.out
-#SBATCH -e tpv102_p1_rk45_mf_%j.err
-#SBATCH -p flex
-#SBATCH -N 16
-#SBATCH -n 800
-#SBATCH -t 01:00:00
+#SBATCH -J tpv104_p2_rk45_mf
+#SBATCH -o tpv104_p2_rk45_mf_%j.out
+#SBATCH -e tpv104_p2_rk45_mf_%j.err
+#SBATCH -p normal
+#SBATCH -N 12
+#SBATCH -n 600
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
-# SCEC TPV102 — p1 · SCALAR mixed (central) flux · explicit RK45
+# SCEC TPV104 — p2 · SCALAR mixed (central) flux · explicit RK45
 # Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).
-# DEV SMOKE: development queue, 8N/400r/2 h.
+# PRODUCTION: normal queue, 12 nodes / 600 MPI ranks (50 ranks/node on
+# Frontera CLX 56-core nodes), 48 h wall (normal-queue maximum).
 #
 # NUMERICAL SCHEME (the four knobs that define this job) ------------------
-#   * p1            : [mesh].order = 1            (config-only, asserted below).
+#   * p2            : [mesh].order = 2            (quadratic FE on the same
+#                     200 m mesh; config-only, asserted below).  The RK CFL
+#                     de-rating auto-scales: RkCflFactor = 3/(2p+1) = 0.6 at
+#                     p=2 (vs 1.0 at p=1), so the stable dt shrinks.
 #   * mixed flux    : --mixed-flux adjacent       (central flux on the
 #                     fault-adjacent faces; scalar Godunov elsewhere).
 #   * RK45          : --time-integrator rk45       (Dormand-Prince RK45; NOT
-#                     ADER).  At p1 the central flux is UNSTABLE under ADER-O2
+#                     ADER).  The central flux is UNSTABLE under ADER-O2 (any p)
 #                     (predictor locked to O2 amplifies the imaginary-axis
 #                     modes central flux creates); an explicit RK of order >= 3
 #                     has imaginary-axis coverage and is stable.  See
@@ -28,29 +32,28 @@
 #                     asserted below).  MANDATORY for the RK path (mixed/central
 #                     flux is scalar-only; matrix/bimaterial is rejected).
 #
-#   The CLI flags re-assert what tpv102_spatial_rk45_mixedflux.toml already
+#   The CLI flags re-assert what tpv104_spatial_p2_rk45_mixedflux.toml already
 #   sets, so the resolved scheme is printed in the driver's startup banner
 #   (grep the *.out for "time integrator:", "mixed flux:", "law:") and cannot
 #   silently drift from the config.  [mesh].order and [numerics].interior_flux
 #   have NO CLI override, so they are pre-flight-asserted against the TOML.
 #
-# TPV102 physics ---------------------------------------------------------
-#   * [meta].law = "rate_state" (Dieterich-Ruina, AGING law).  The RK path
-#     runs the coupled RK-on-(Q, psi, slip) stepper AdvanceRKCoupled_Spatial,
-#     whose wave.Mult fault face uses the instantaneous FaultFaceFlux::Evaluate
-#     (same RS Riemann solve as the ADER substep).
-#   * [stress] kind = "fault_local_prestress": tau_strike = 75 MPa,
-#     sigma_n = 120 MPa.  VW core a=0.008<b=0.012 inside 30x15 km, VS (a=0.016)
-#     outside.  Dc = 0.02 m.
-#   * Nucleation: compact-bell gradual overstress, delta_tau = 25 MPa, T_nuc = 1 s.
+# TPV104 physics ---------------------------------------------------------
+#   * [meta].law = "rate_state" (Dieterich-Ruina, SLIP law with strong rate
+#     weakening / FVW).  The RK path runs the coupled RK-on-(Q, psi, slip)
+#     stepper AdvanceRKCoupled_Spatial, whose wave.Mult fault face uses the
+#     instantaneous FaultFaceFlux::Evaluate (same RS Riemann solve as ADER).
+#   * [stress] kind = "fault_local_prestress": tau_strike = 40 MPa,
+#     sigma_n = 120 MPa.  VW core a=0.01<b=0.014, V_w=0.1 inside 30x15 km;
+#     VS (a=0.02, V_w=1.0) outside.  Dc = 0.4 m, f_w = 0.2.
+#   * Nucleation: compact-bell gradual overstress, delta_tau = 45 MPa, T_nuc = 1 s.
 #   * Homogeneous material -> interior_flux = "scalar".
 #
-# Reference overlays: tpv102 benchmark + drivers/tpv102_driver.cpp.
+# Reference overlays: tpv104 benchmark + drivers/tpv104_driver.cpp.
 #
 # CFL is a STARTING calibration (RK-aware Adjacent factor 0.6 x cfl 0.25);
-# read the empirical stable dt off this job's *.out BEFORE committing
-# normal-queue hours.  To promote to a production run see "PRODUCTION
-# PROMOTION" below.
+# read the empirical stable dt off this run's *.out and the steps/hour to
+# size the restart chain (see RESTART CHAIN below).
 #
 # LOCAL VERIFICATION SCOPE -----------------------------------------------
 #   The RK code is verified locally by compile + unit tests
@@ -99,18 +102,18 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/tpv102_spatial_rk45_mixedflux.toml}"
+CONFIG_TOML="${TPV104_CONFIG:-tpv104/configs/tpv104_spatial_p2_rk45_mixedflux.toml}"
 # 200 m mesh (real work for 400 ranks; the TOML default is the 1000 m mesh).
-MESH="${TPV102_MESH:-tpv102/mesh/tpv102_200m.msh}"
-GEO="${TPV102_GEO:-tpv102/mesh/tpv102_200m.geo}"
+MESH="${TPV104_MESH:-tpv104/mesh/tpv104_200m.msh}"
+GEO="${TPV104_GEO:-tpv104/mesh/tpv104_200m.geo}"
 
 if [[ ! -f "${CONFIG_TOML}" ]]; then
     echo "ERROR: config ${CONFIG_TOML} not found (cwd $(pwd))."; exit 1
 fi
 
 # --- pre-flight: assert the two CONFIG-ONLY knobs (no CLI override) --------
-if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "${CONFIG_TOML}"; then
-    echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 1 (this job is p1)."
+if ! grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*2([[:space:]]|$)' "${CONFIG_TOML}"; then
+    echo "ERROR: ${CONFIG_TOML} does not set [mesh].order = 2 (this job is p2)."
     exit 4
 fi
 if ! grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"scalar"' "${CONFIG_TOML}"; then
@@ -123,7 +126,7 @@ fi
 # MFEM's reader is Gmsh v2.2 only (see miniapps/seas/CLAUDE.md "Known
 # limitation — Gmsh .msh format"); the `-format msh22` flag is MANDATORY.
 if [[ ! -f "${MESH}" ]]; then
-    echo "[tpv102-rk45] mesh ${MESH} missing — generating from ${GEO} (Gmsh v2.2)..."
+    echo "[tpv104-rk45] mesh ${MESH} missing — generating from ${GEO} (Gmsh v2.2)..."
     if command -v gmsh >/dev/null 2>&1; then
         gmsh -format msh22 -3 "${GEO}" -o "${MESH}"
     else
@@ -145,9 +148,22 @@ fi
 # run — it does NOT exit the way --dry-run does.  The TOML greps above already
 # fail-fast on a drifted interior_flux / [mesh].order.
 
-OUT="${TPV102_OUT:-tpv102/out_rk45_mf_${SLURM_JOB_ID:-local}}"
-TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 2 h dev wall
-                                # reaches a fraction — restart for the rest.
+OUT="${TPV104_OUT:-tpv104/out_p2_rk45_mf_normal_${SLURM_JOB_ID:-local}}"
+TFINAL="${TPV104_TFINAL:-12}"   # SCEC TPV104 window 0-12 s; the 48 h wall may
+                                # not finish 12 s at p2 — restart for the rest.
+
+# --- restart across the 48 h wall (opt-in via TPV104_RESTART) ----------------------
+# The driver ABORTS (return 3) if --output-dir resolves to the SAME directory
+# as the PARENT of --restart, so a restart segment MUST write to a DIFFERENT
+# --output-dir than the checkpoint it reads.  OUT defaults to a per-job-ID
+# directory, so each segment is naturally distinct.  To resume:
+#       TPV104_RESTART="<previous-segment-OUT>/cp" sbatch <thisscript>
+RESTART_FLAGS=""
+if [[ -n "${TPV104_RESTART:-}" ]]; then
+    RESTART_FLAGS="--restart ${TPV104_RESTART}"
+    echo "[tpv104-rk45] RESTART: resuming from checkpoint prefix '${TPV104_RESTART}'"
+    echo "              (this segment writes a fresh output dir: ${OUT})."
+fi
 
 # --- run -----------------------------------------------------------------
 # OPTIMIZED CODE (ADER hot-path Lever 1 + Lever 3): --deriv-cache precomputes
@@ -174,22 +190,27 @@ ibrun ./seas_spatial_dyn_driver \
     --print-derived \
     --checkpoint-every 2000 \
     --output-dir "${OUT}" \
+    ${RESTART_FLAGS} \
     --verify-dispatch
 
-echo "[tpv102-rk45] done. On-fault SCEC station traces: ${OUT}/tpv102_station_*.dat (9 stations); compare vs the SCEC TPV102"
-echo "              reference.  Confirm V_max is BOUNDED (no ADER-p1-central-flux"
-echo "              run-away) and read the empirical stable dt off this *.out"
-echo "              before committing normal-queue hours."
+echo "[tpv104-rk45] done. On-fault SCEC station traces: ${OUT}/tpv104_station_*.dat (9 stations); compare vs the SCEC TPV104"
+echo "              reference.  Confirm V_max is BOUNDED (no ADER-central-flux"
+echo "              run-away) and read the steps/hour off this *.out to size"
+echo "              the restart chain (see RESTART CHAIN below)."
 
 # =========================================================================
-# PRODUCTION PROMOTION (12 s to completion)
+# RESTART CHAIN (full 12 s spans multiple 48 h normal-queue segments)
 # -------------------------------------------------------------------------
-#   1. Swap the queue + wall:  #SBATCH -p normal ;  #SBATCH -t 24:00:00
-#      (scale -N/-n as needed; Frontera CLX = 56 cores/node).
-#   2. Chain restarts across the wall limit: the run checkpoints every 2000
-#      steps to ${OUT}.  Resume with:  --restart "${OUT}/cp".
-#   3. Pre-build the mesh ONCE on a login/idev node (conda activate pythonenv;
-#      gmsh -format msh22 -3 ${GEO} -o ${MESH}) so the compute job does not mesh.
-#   4. Recalibrate dt from the dev smoke's empirical steps/hour (the RK-aware
-#      mixed-flux CFL factor 0.6 for Adjacent is an interim placeholder).
+# The run checkpoints every 2000 steps (--checkpoint-every 2000) into ${OUT}.
+# To continue after a wall-limit truncation, re-submit pointing TPV104_RESTART
+# at the PREVIOUS segment's cp prefix:
+#       TPV104_RESTART="tpv104/out_p2_rk45_mf_normal_<prevjobid>/cp" \
+#           sbatch tpv104_p2_rk45_mixedflux_12N_600r_normal.sbatch
+# Each segment gets its OWN job-ID output dir (REQUIRED: the driver refuses a
+# restart whose --output-dir equals the checkpoint's parent dir).
+#
+# Pre-build the mesh ONCE on a login/idev node (conda activate pythonenv;
+# gmsh -format msh22 -3 ${GEO} -o ${MESH}) so the compute job does not mesh.
+# Recalibrate dt from the empirical steps/hour (the RK-aware mixed-flux CFL
+# factor 0.6 for Adjacent is a STARTING calibration).
 # =========================================================================

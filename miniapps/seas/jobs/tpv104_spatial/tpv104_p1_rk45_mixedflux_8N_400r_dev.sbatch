@@ -150,11 +150,22 @@ TFINAL="${TPV104_TFINAL:-12}"   # SCEC TPV104 window 0-12 s; the 2 h dev wall
                                 # reaches a fraction — restart for the rest.
 
 # --- run -----------------------------------------------------------------
+# OPTIMIZED CODE (ADER hot-path Lever 1 + Lever 3): --deriv-cache precomputes
+# the per-element D_d^e = M^-1 K_d and the volume-RHS operator S_d^e, switching
+# ComputeVolumeRHS / ApplySpatialDerivative to a dense mat-vec (the dominant
+# ~2/3 of step time).  It IS exercised by the RK45 path: the coupled
+# AdvanceRKCoupled*_Spatial steppers call wave.Mult -> ComputeVolumeRHS on every
+# stage (rk_time_stepper.hpp).  Result changes at round-off only (REVIEW R-002);
+# safe on this scalar/homogeneous TPV operator (spatial_dyn_driver.cpp:1146).
+# Lever 2 (--shared-ck-recursion) is ADER-predictor-only (consumed solely by
+# AdvanceADERWithSubStep_Spatial) and is DELIBERATELY OMITTED — it is a silent
+# no-op on the RK45 path.
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
     --time-integrator rk45 \
     --mixed-flux adjacent \
+    --deriv-cache \
     --tfinal "${TFINAL}" \
     --paraview \
     --paraview-fault-vtu \

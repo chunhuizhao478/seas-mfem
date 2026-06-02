@@ -1,0 +1,186 @@
+# =====================================================================
+#  SCEC TPV205 — linear slip weakening (LSW), p1, SCALAR mixed (central)
+#  flux + explicit RK45, run through the SAFS spatial dynamic-rupture
+#  driver (seas_spatial_dyn_driver).
+#
+#  This is the RK45 + mixed-flux variant of tpv205_spatial.toml (Phase 14
+#  of PLAN_rk45_lsw_mixed_flux_2026-05-29.md).  The ONLY difference from
+#  the ADER config is [numerics].time_integrator = "rk45": at p1 the
+#  central (mixed) flux is unstable under ADER-O2 (imaginary-axis modes),
+#  so the explicit RK45 integrator (imaginary-axis coverage) is required.
+#  The LSW fault solve runs through the instantaneous FaultFaceFlux::
+#  EvaluateLSW on the Mult path + the coupled-RK-on-(Q,slip) stepper
+#  AdvanceRKCoupledLSW_Spatial.  fault_iterator below is ADER-only and is
+#  IGNORED on the RK path (kept for parity with the ADER config).
+#
+#  Plan: PLAN_tpv_regression_via_spatial_dyn_driver_2026-05-24.md, Phase 8
+#        + PLAN_rk45_lsw_mixed_flux_2026-05-29.md, Phase 5.
+#  Physics oracle: drivers/tpv205_driver.cpp + config/tpv205_params.hpp.
+#
+#  Stress convention (D3.2): kind = "fault_local_prestress" seeds the
+#  per-DOF pre-stress DIRECTLY in the canonical fault-local frame
+#  (tau2_0 = tau_strike, tau1_0 = tau_dip, sigma_n0 = sigma_n_pa - P_p),
+#  right-lateral / compression POSITIVE — NO Cauchy projection.  This is
+#  byte-exact to the native driver's direct seed (tpv205_setup).
+#
+#  Boundary attributes: this TPV205 mesh uses fault=103, free=101,
+#  absorbing=105 (see [boundary] below; differs from TPV102/104's 1/3/5).
+#  The driver now reads [boundary] (Phase 8 wired cfg.boundary into
+#  spatial_dyn_driver with a SAFS fallback when [boundary] is absent).
+# =====================================================================
+
+# =========================================================================
+# p2 VARIANT of tpv205_spatial_rk45_mixedflux.toml.  IDENTICAL physics +
+# scheme — the ONLY difference is the resolution knob [mesh].order = 2 (p2;
+# config-only, no CLI override).  The RK CFL de-rating auto-scales with
+# order (RkCflFactor = 3/(2p+1) = 0.6 at p=2 vs 1.0 at p=1), so the stable
+# dt shrinks accordingly (spatial_friction.hpp).  KEEP THIS FILE IN SYNC
+# with the p1 mixed-flux config on every PHYSICS change (material, stress,
+# friction, nucleation, boundary, geometry); only [mesh].order may differ.
+# =========================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV205 (p2 / LSW) via spatial_dyn_driver — fault-local prestress, scalar Riemann."
+
+[problem]
+tag = "tpv205"   # selects the SCEC TPV205 on-fault station writer in spatial_dyn_driver
+
+# Material: homogeneous, native TPV205Params (rho*cs^2 / rho*cp^2-2mu).
+#   rho = 2670, cs = 3464, cp = 6000  ->
+#   mu     = rho*cs^2          = 32_038_120_320 Pa
+#   lambda = rho*cp^2 - 2*mu   = 32_043_759_360 Pa
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# TPV benchmarks have no pore pressure.
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Smallest available TPV205 mesh (200 m fault resolution, ~97 MB).
+# Finer meshes (tpv2053d_100m.msh) are for production/convergence.
+path  = "tpv205/mesh/tpv2053d_200m.msh"
+order = 2
+
+[velocity]
+# Homogeneous material from [material_constant_fallback]; no CVM sidecar.
+use_sidecar = false
+
+# Fault-local prestress (D3.2): background + three SCEC patches.
+# Background tau_strike = +70 MPa (right-lateral), sigma_n = 120 MPa.
+# Patches (3 km x 3 km, half = 1.5 km) at 7.5 km depth (z = -7500 m, the
+# spatial driver's z<0 = depth convention; native uses depth-positive):
+#   nucleation (centre x=0)      : +81.6 MPa  (exceeds static yield -> triggers)
+#   left       (centre x=-7.5km) : +78.0 MPa
+#   right      (centre x=+7.5km) : +62.0 MPa
+# (last-match-wins; the three boxes are disjoint so order is immaterial.)
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 70.0e6
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[[stress.patch]]
+center_x_m    = 0.0
+center_z_m    = -7500.0
+half_x_m      = 1500.0
+half_z_m      = 1500.0
+tau_strike_pa = 81.6e6
+
+[[stress.patch]]
+center_x_m    = -7500.0
+center_z_m    = -7500.0
+half_x_m      = 1500.0
+half_z_m      = 1500.0
+tau_strike_pa = 78.0e6
+
+[[stress.patch]]
+center_x_m    = 7500.0
+center_z_m    = -7500.0
+half_x_m      = 1500.0
+half_z_m      = 1500.0
+tau_strike_pa = 62.0e6
+
+[numerics]
+time_integrator = "rk45"     # Phase 14: explicit Dormand-Prince RK45 (NOT ADER).
+                             #   Required for stable central/mixed flux at p1.
+ader_order     = 2          # ignored on the RK path (kept for ADER parity).
+mixed_flux     = "adjacent" # central flux on fault-adjacent faces (scalar path).
+cfl            = 0.25       # RK-aware Adjacent factor (0.6) applied internally;
+                            #   STARTING calibration — confirm empirical stable
+                            #   dt from the first dev-queue smoke (BUILD doc §5.4).
+cfl_safety     = "dg"       # D2: apply the DG /(2p+1)*(1/3) safety factor
+interior_flux  = "scalar"   # homogeneous Godunov (TPV205 is homogeneous); the
+                            #   RK path is scalar-only (matrix/bimaterial rejected).
+# Gold is *_p1_O2 (O2 substep) and the spatial driver always sub-steps
+# (O = ader_order).  Plan req 1a's "one-shot" is NOT implemented by the
+# spatial driver (REVIEW R-003) — use "substep" to match the gold.
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.2s"   # short smoke window (Phase 8 AC); raise for full run
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir     = "output_tpv205_spatial"
+restart_prefix = "cp"
+paraview_fault = "hdf5"
+paraview_fault_dt = "0.01s"
+
+# LSW friction (native TPV205Params: mu_s=0.677, mu_d=0.525, d_c=0.40 m).
+# Barrier rules lock the fault outside the 30 km x 15 km active region
+# (resolver assigns mu_s = 1e6 internally for kind="barrier"; see R-114).
+#   - deeper than 15 km (z < -15000)
+#   - along-strike beyond +/-15 km (|x| > 15000)
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_min_m = 15000.0
+
+# No [nucleation] block: TPV205 nucleates via the static stress patches
+# above (the +81.6 MPa nucleation patch), not a time-varying perturbation.
+
+# TPV205 mesh boundary convention (tpv2053d_*.geo / TPV205Params):
+#   Physical Surface 101 = free surface (top, z=0)  -> natural
+#   Physical Surface 103 = fault ({100,200,300,400})
+#   Physical Surface 105 = absorbing outer box (sides + bottom)
+# (Differs from TPV102/104's 1/3/5; matches native tpv205_driver defaults
+#  bc_free=101, bc_fault=103, bc_absorb=105.)  Now honored by the driver
+# (Phase 8: spatial_dyn_driver reads [boundary] with a SAFS fallback).
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                = 0.0
+y_m                = 0.0
+z_m                = -7500.0
+nucleation_radius_m = 1500.0
