@@ -146,6 +146,21 @@ OUT="${TPV205_OUT:-tpv205/out_rk45_mf_${SLURM_JOB_ID:-local}}"
 TFINAL="${TPV205_TFINAL:-12}"   # SCEC TPV205 window 0-12 s; the 2 h dev wall
                                 # reaches a fraction — restart for the rest.
 
+# --- restart from a checkpoint (opt-in via TPV205_RESTART) -----------------
+# The run checkpoints every 2000 steps to ${OUT}/cp_checkpoint_r<rank>.txt.
+# To resume, point TPV205_RESTART at the PREVIOUS segment's "cp" prefix; the
+# driver appends _checkpoint_r<rank>.txt per rank.  Two requirements:
+#   * same rank count that wrote the checkpoint (this job = -n 800), and
+#   * a DIFFERENT --output-dir than the checkpoint's dir (the driver aborts,
+#     return 3, if --output-dir == the parent of --restart).  OUT defaults to
+#     a per-job-ID dir, so a fresh submit is naturally distinct.
+RESTART_FLAGS=""
+if [[ -n "${TPV205_RESTART:-}" ]]; then
+    RESTART_FLAGS="--restart ${TPV205_RESTART}"
+    echo "[tpv205-rk45] RESTART: resuming from checkpoint prefix '${TPV205_RESTART}'"
+    echo "              (this segment writes a fresh output dir: ${OUT})."
+fi
+
 # --- run -----------------------------------------------------------------
 # OPTIMIZED CODE (ADER hot-path Lever 1 + Lever 3): --deriv-cache precomputes
 # the per-element D_d^e = M^-1 K_d and the volume-RHS operator S_d^e, switching
@@ -171,6 +186,7 @@ ibrun ./seas_spatial_dyn_driver \
     --print-derived \
     --checkpoint-every 2000 \
     --output-dir "${OUT}" \
+    ${RESTART_FLAGS} \
     --verify-dispatch
 
 echo "[tpv205-rk45] done. On-fault SCEC station traces: ${OUT}/tpv205_station_*.dat (16 stations); compare vs the SCEC TPV205"
