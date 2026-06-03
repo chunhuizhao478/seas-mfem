@@ -16,6 +16,11 @@
 
 #include "../../spatial/code/spatial_friction.hpp"
 #include "../../dynamic/heterogeneous_material.hpp"
+// Native (oracle) SCEC smooth-taper a(x,z) / V_w(x,z) — R-11/R-12 assert the
+// resolver's boxcar_taper field reproduces these EXACTLY (strictly-follows-
+// benchmark check; replaces the pre-fix "boxcar_taper rejected" test).
+#include "../../config/tpv102_params.hpp"
+#include "../../config/tpv104_params.hpp"
 
 #include <cerrno>
 #include <cmath>
@@ -657,38 +662,134 @@ static void R_5_rs_validator_aborts()
 #endif
 }
 
-// R-11  (R-001) a boxcar_taper rule is REJECTED by the RS resolver — same
-// config-only deferral as the LSW path (B-3).
-static void R_11_boxcar_taper_rejected()
+// R-11  (Phase 8 taper consumption) a boxcar_taper RS rule is now CONSUMED:
+// the resolver blends per-DOF a / V_w from the *_inner/*_outer endpoints via
+// the SCEC boxcar, reproducing the native ComputeA_TPV104 / ComputeVw_TPV104
+// smooth taper EXACTLY (the "strictly follows benchmark" contract).  This
+// replaces the pre-fix R_11 that asserted the resolver REJECTED boxcar_taper.
+static void R_11_boxcar_taper_blend_matches_native_tpv104()
 {
-   std::cout << "\n[R-11] boxcar_taper RS rule aborts at resolve (R-001)\n";
+   std::cout << "\n[R-11] boxcar_taper RS rule blends a / V_w == native "
+                "ComputeA_TPV104 / ComputeVw_TPV104 (smooth taper)\n";
 #ifdef MFEM_USE_MPI
-   const bool aborted = RunInChild([]()
+   // Sample points spanning VW core, the 3 km transition margin, and the VS
+   // exterior, in (along-strike x [m], depth [m]); z = -depth below surface.
+   struct P { real_t x, depth; };
+   const std::vector<P> pts = {
+      {0.0,      7500.0},   // core centre
+      {12000.0,  3000.0},   // core
+      {-9000.0,  7500.0},   // core
+      {12000.0, 12000.0},   // core (near corner, still B=1)
+      {16500.0,  7500.0},   // strike transition (mid-ramp -> B_strike=0.5)
+      {18000.0,  7500.0},   // beyond strike taper (VS plateau)
+      {0.0,     16500.0},   // dip transition (mid-ramp)
+      {0.0,     18000.0},   // beyond dip taper (VS plateau)
+      {16500.0, 16500.0},   // corner: both axes mid-ramp (product 0.25)
+   };
+   const int N = static_cast<int>(pts.size());
+   Vector dofs(3*N); Array<int> attr(N), elem(N);
+   for (int i = 0; i < N; ++i)
    {
-      const int N = 2;
-      Vector dofs; Array<int> attr, elem;
-      make_synthetic_dofs(N, 4000.0, dofs, attr, elem);
-      Vector sn_total(N); sn_total = 50e6;
-      RateStateBlock cfg;
-      cfg.a_default = 0.010; cfg.b_default = 0.015;
-      cfg.Dc_default = 0.004; cfg.V_init_default = 1e-9;
-      cfg.f_0_default = 0.6;  cfg.V_0_default = 1e-6;
-      cfg.sigma_n_default = 50e6;
-      cfg.eta_auto = false; cfg.eta_default = 5e6;
-      SpatialRule r;
-      r.kind = SpatialRule::Kind::BoxcarTaper;
-      r.boxcar_half_z_m = 7500.0;
-      cfg.spatial.push_back(r);
-      auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
-      TinyMeshHolder mh;
-      PorePressureSpec pp;
-      mfem::Mesh& srl = mh.mesh();
-      SpatialFrictionResolver R;
-      (void)R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
-   });
-   TEST_ASSERT(aborted,
-               "boxcar_taper RS rule must abort at resolve (config-only this "
-               "phase)");
+      dofs(3*i+0) = pts[i].x;
+      dofs(3*i+1) = 0.0;
+      dofs(3*i+2) = -pts[i].depth;   // z<0 below the free surface
+      attr[i] = 101; elem[i] = 0;
+   }
+   Vector sn_total(N); sn_total = 120.0e6;
+
+   RateStateBlock cfg;
+   cfg.a_default = 0.01; cfg.b_default = 0.014;
+   cfg.Dc_default = 0.4; cfg.V_init_default = 1e-16;
+   cfg.f_0_default = 0.6; cfg.V_0_default = 1e-6;
+   cfg.sigma_n_default = 120.0e6;
+   cfg.V_w_default = 0.1; cfg.f_w_default = 0.2;
+   cfg.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
+   cfg.eta_auto = false; cfg.eta_default = 5e6;
+
+   // One boxcar_taper rule reproducing native ComputeA_TPV104/ComputeVw_TPV104:
+   // VW core |x|<=Ls=15 km AND |down_dip-7.5 km|<=W/2=7.5 km, 3 km tanh margin.
+   SpatialRule r;
+   r.kind = SpatialRule::Kind::BoxcarTaper;
+   r.a_inner = 0.01;  r.a_outer = 0.02;
+   r.V_w_inner = 0.1; r.V_w_outer = 1.0;
+   r.boxcar_center_x_m = 0.0;     r.boxcar_half_x_m = 15000.0; r.boxcar_trans_x_m = 3000.0;
+   r.boxcar_center_z_m = -7500.0; r.boxcar_half_z_m = 7500.0;  r.boxcar_trans_z_m = 3000.0;
+   cfg.spatial.push_back(r);
+
+   auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
+   TinyMeshHolder mh;
+   PorePressureSpec pp;
+   mfem::Mesh& srl = mh.mesh();
+   SpatialFrictionResolver R;
+   auto p = R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t a_ref  = ComputeA_TPV104(pts[i].x, pts[i].depth);
+      const real_t vw_ref = ComputeVw_TPV104(pts[i].x, pts[i].depth);
+      const std::string at = "(x=" + std::to_string((int)(pts[i].x/1000)) +
+                             "km,z=" + std::to_string((int)(pts[i].depth/1000)) + "km)";
+      TEST_NEAR(p.a(i),   a_ref,  1e-12, "a "  + at + " == native ComputeA_TPV104");
+      TEST_NEAR(p.V_w(i), vw_ref, 1e-12, "V_w " + at + " == native ComputeVw_TPV104");
+   }
+   // Explicit anchor: at the strike-transition midpoint the field is the SMOOTH
+   // blend (a=0.015, V_w=0.55), NOT the pre-fix hard step (a=0.02, V_w=1.0).
+   TEST_NEAR(p.a(4),   0.015, 1e-12, "strike-transition midpoint a=0.015 (smooth, not 0.02)");
+   TEST_NEAR(p.V_w(4), 0.55,  1e-12, "strike-transition midpoint V_w=0.55 (smooth, not 1.0)");
+#endif
+}
+
+// R-12  TPV102 (aging law, no V_w channel): the boxcar_taper a blend reproduces
+// native ComputeA(x,z) EXACTLY (a ramps a_vw=0.008 -> a_vs=0.016).
+static void R_12_boxcar_taper_blend_matches_native_tpv102()
+{
+   std::cout << "\n[R-12] boxcar_taper RS rule blends a == native TPV102 "
+                "ComputeA (aging law, smooth taper)\n";
+#ifdef MFEM_USE_MPI
+   struct P { real_t x, depth; };
+   const std::vector<P> pts = {
+      {0.0,      7500.0}, {12000.0, 3000.0}, {-9000.0, 7500.0},
+      {16500.0,  7500.0}, {18000.0, 7500.0}, {0.0, 16500.0}, {0.0, 18000.0},
+   };
+   const int N = static_cast<int>(pts.size());
+   Vector dofs(3*N); Array<int> attr(N), elem(N);
+   for (int i = 0; i < N; ++i)
+   {
+      dofs(3*i+0) = pts[i].x; dofs(3*i+1) = 0.0; dofs(3*i+2) = -pts[i].depth;
+      attr[i] = 101; elem[i] = 0;
+   }
+   Vector sn_total(N); sn_total = 120.0e6;
+
+   RateStateBlock cfg;
+   cfg.a_default = 0.008; cfg.b_default = 0.012;
+   cfg.Dc_default = 0.02; cfg.V_init_default = 1e-12;
+   cfg.f_0_default = 0.6; cfg.V_0_default = 1e-6;
+   cfg.sigma_n_default = 120.0e6;
+   cfg.state_evolution = StateEvolutionKind::AgingLaw;
+   cfg.eta_auto = false; cfg.eta_default = 5e6;
+
+   SpatialRule r;
+   r.kind = SpatialRule::Kind::BoxcarTaper;
+   r.a_inner = 0.008; r.a_outer = 0.016;
+   r.boxcar_center_x_m = 0.0;     r.boxcar_half_x_m = 15000.0; r.boxcar_trans_x_m = 3000.0;
+   r.boxcar_center_z_m = -7500.0; r.boxcar_half_z_m = 7500.0;  r.boxcar_trans_z_m = 3000.0;
+   cfg.spatial.push_back(r);
+
+   auto mat = MaterialField::MakeConstant(32e9, 32e9, 2670.0);
+   TinyMeshHolder mh;
+   PorePressureSpec pp;
+   mfem::Mesh& srl = mh.mesh();
+   SpatialFrictionResolver R;
+   auto p = R.ResolveRateState(cfg, dofs, elem, attr, mat, srl, pp, sn_total);
+
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t a_ref = ComputeA(pts[i].x, pts[i].depth);   // TPV102 native
+      const std::string at = "(x=" + std::to_string((int)(pts[i].x/1000)) +
+                             "km,z=" + std::to_string((int)(pts[i].depth/1000)) + "km)";
+      TEST_NEAR(p.a(i), a_ref, 1e-12, "a " + at + " == native TPV102 ComputeA");
+   }
+   TEST_NEAR(p.a(3), 0.012, 1e-12, "strike-transition midpoint a=0.012 (smooth, not 0.016)");
 #endif
 }
 
@@ -1304,7 +1405,8 @@ int main(int argc, char** argv)
    R_7_rs_negative_sigma_n_aborts();
    R_8_rs_eta_auto_collision();
    R_10_rs_depth_profile_csv();
-   R_11_boxcar_taper_rejected();   // R-001 (Phase 6 req-5 deferral)
+   R_11_boxcar_taper_blend_matches_native_tpv104();  // Phase 8 taper consumption
+   R_12_boxcar_taper_blend_matches_native_tpv102();
 
    // Forced rupture / Overstress — REMOVED in Phase N (the spatial
    // driver no longer dispatches into ResolveForcedRupture /

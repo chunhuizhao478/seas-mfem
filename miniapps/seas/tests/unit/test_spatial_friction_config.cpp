@@ -19,6 +19,7 @@
 
 #include <cstdlib>
 #include <exception>
+#include <fstream>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -1611,6 +1612,115 @@ static void T_50_boxcar_taper_geometry_guards()
                "boxcar_taper with negative half must abort");
 }
 
+// BOX-5: the actual TPV102/104 spatial configs being run on Frontera carry a
+// single rate-state boxcar_taper rule with the native SCEC endpoints (Phase 8
+// taper consumption).  Parses the real config files (text -> parser; the mesh
+// path is not touched) and asserts the per-benchmark a / V_w endpoints + the
+// VW-core boxcar geometry.  This is the config-side "strictly follows
+// benchmark" gate (the resolver-side gate is R-11/R-12 in the resolver test).
+static void T_53_resubmit_configs_smooth_taper()
+{
+   std::cout << "\n[BOX-5] real TPV102/104 spatial configs carry the SCEC "
+                "boxcar_taper rule with native endpoints\n";
+   struct Cfg { const char* path; bool is104; };
+   const Cfg cfgs[] = {
+      {"tpv102/configs/tpv102_spatial.toml", false},
+      {"tpv102/configs/tpv102_spatial_p2.toml", false},
+      {"tpv102/configs/tpv102_spatial_p3.toml", false},
+      {"tpv102/configs/tpv102_spatial_rk45_mixedflux.toml", false},
+      {"tpv102/configs/tpv102_spatial_p2_rk45_mixedflux.toml", false},
+      {"tpv102/configs/tpv102_spatial_p3_rk45_mixedflux.toml", false},
+      {"tpv104/configs/tpv104_spatial.toml", true},
+      {"tpv104/configs/tpv104_spatial_p2.toml", true},
+      {"tpv104/configs/tpv104_spatial_p3.toml", true},
+      {"tpv104/configs/tpv104_spatial_rk45_mixedflux.toml", true},
+      {"tpv104/configs/tpv104_spatial_p2_rk45_mixedflux.toml", true},
+      {"tpv104/configs/tpv104_spatial_p3_rk45_mixedflux.toml", true},
+   };
+   for (const auto& c : cfgs)
+   {
+      std::ifstream f(c.path);
+      if (!f.good())
+      {
+         std::cout << "  SKIPPED (not found from CWD): " << c.path << "\n";
+         continue;
+      }
+      std::stringstream ss; ss << f.rdbuf();
+      const auto cfg = ParseSpatialFrictionConfigString(ss.str());
+      const std::string tag = std::string(c.path);
+      TEST_ASSERT(cfg.rate_state.has_value(), "rate_state present: " + tag);
+      if (!cfg.rate_state) { continue; }
+      int ntaper = 0; const SpatialRule* tr = nullptr;
+      for (const auto& r : cfg.rate_state->spatial)
+         if (r.kind == SpatialRule::Kind::BoxcarTaper) { ++ntaper; tr = &r; }
+      TEST_ASSERT(ntaper == 1, "exactly one boxcar_taper rule: " + tag);
+      if (ntaper != 1) { continue; }
+      // VW-core geometry: Ls=15 km strike, W/2=7.5 km dip centred at -7.5 km,
+      // 3 km transition on each axis.
+      TEST_ASSERT(tr->boxcar_half_x_m == 15000.0, "boxcar_half_x_m=15 km: "  + tag);
+      TEST_ASSERT(tr->boxcar_trans_x_m == 3000.0, "boxcar_trans_x_m=3 km: "  + tag);
+      TEST_ASSERT(tr->boxcar_center_z_m == -7500.0, "boxcar_center_z_m=-7.5 km: " + tag);
+      TEST_ASSERT(tr->boxcar_half_z_m == 7500.0, "boxcar_half_z_m=7.5 km: " + tag);
+      TEST_ASSERT(tr->boxcar_trans_z_m == 3000.0, "boxcar_trans_z_m=3 km: "  + tag);
+      if (c.is104)
+      {
+         TEST_ASSERT(tr->a_inner == 0.01, "TPV104 a_inner=a_in=0.01: "   + tag);
+         TEST_ASSERT(tr->a_outer == 0.02, "TPV104 a_outer=a_out=0.02: "  + tag);
+         TEST_ASSERT(tr->V_w_inner == 0.1, "TPV104 V_w_inner=0.1: "       + tag);
+         TEST_ASSERT(tr->V_w_outer == 1.0, "TPV104 V_w_outer=1.0: "       + tag);
+      }
+      else
+      {
+         TEST_ASSERT(tr->a_inner == 0.008, "TPV102 a_inner=a_vw=0.008: " + tag);
+         TEST_ASSERT(tr->a_outer == 0.016, "TPV102 a_outer=a_vs=0.016: " + tag);
+      }
+   }
+}
+
+// BOX-6: RS boxcar_taper endpoint parsing round-trips, and the pair guard fires
+// when a_inner is set without a_outer (or V_w_inner without V_w_outer).
+static void T_54_boxcar_taper_rs_endpoint_pair_guard()
+{
+   std::cout << "\n[BOX-6] RS boxcar_taper a/V_w endpoint round-trip + pair guard\n";
+   const std::string base = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock();
+   // Positive: both endpoints set -> parses, round-trips.
+   {
+      const std::string toml = base +
+         "[[friction.rate_state.spatial]]\n"
+         "kind=\"boxcar_taper\"\n"
+         "a_inner=0.01\na_outer=0.02\n"
+         "V_w_inner=0.1\nV_w_outer=1.0\n"
+         "boxcar_half_x_m=15000.0\nboxcar_trans_x_m=3000.0\n";
+      const auto cfg = ParseSpatialFrictionConfigString(toml);
+      TEST_ASSERT(cfg.rate_state.has_value() &&
+                  cfg.rate_state->spatial.size() == 1, "RS taper rule parses");
+      const auto& r = cfg.rate_state->spatial.front();
+      TEST_ASSERT(r.a_inner == 0.01, "a_inner round-trip");
+      TEST_ASSERT(r.a_outer == 0.02, "a_outer round-trip");
+      TEST_ASSERT(r.V_w_inner == 0.1, "V_w_inner round-trip");
+      TEST_ASSERT(r.V_w_outer == 1.0, "V_w_outer round-trip");
+   }
+   // Negative: a_inner without a_outer must abort (pair guard).
+   {
+      const std::string toml = base +
+         "[[friction.rate_state.spatial]]\n"
+         "kind=\"boxcar_taper\"\n"
+         "a_inner=0.01\n"
+         "boxcar_half_x_m=15000.0\n";
+      TEST_ASSERT(ParseAbortsInChild(toml),
+                  "a_inner without a_outer must abort (pair guard)");
+   }
+   // Negative: endpoints on a non-taper kind must abort.
+   {
+      const std::string toml = base +
+         "[[friction.rate_state.spatial]]\n"
+         "kind=\"box\"\nx_min_m=15000.0\n"
+         "a_inner=0.01\na_outer=0.02\n";
+      TEST_ASSERT(ParseAbortsInChild(toml),
+                  "a_inner/a_outer on a kind=box rule must abort");
+   }
+}
+
 // CFG1-8 (R-003): a non-unit / hand-rounded [fault_geometry] direction vector
 // is normalized on read (NOT rejected); the stored frame is unit-norm.
 static void T_52_fault_geometry_normalize_on_read()
@@ -1640,6 +1750,10 @@ int main(int, char**)
    return 0;
 #else
    std::cout << "Running Phase 1 test_spatial_friction_config\n";
+   // Phase 8 smooth-taper consumption (run first so they precede any
+   // pre-existing failure later in the suite).
+   T_53_resubmit_configs_smooth_taper();
+   T_54_boxcar_taper_rs_endpoint_pair_guard();
    T_1_minimal_lsw_parses_geoffrey2010();
    T_2_schema_version_mismatch_aborts();
    T_3_missing_law_aborts();

@@ -309,13 +309,12 @@ struct SpatialRule
 {
    // Phase 6 req 5: `BoxcarTaper` is a smooth 3-D taper region (SCEC boxcar
    // product); unlike the hard Box/Depth kinds it returns a factor in [0,1]
-   // (see BoxcarTaperFactor), intended to enable cohesion / parameter tapers.
-   // CONFIG-ONLY this phase (R-001): the kind + SCECBoxcar/BoxcarTaperFactor
-   // parse and are unit-tested, but the resolver does NOT yet consume the
-   // taper — `SpatialFrictionResolver::Resolve{SlipWeakening,RateState}`
-   // explicitly REJECT a boxcar_taper rule rather than silently apply it as a
-   // hard region.  The per-DOF taper-blend semantics are wired in a later
-   // phase (matching req 6's config-only nucleation kinds).
+   // (see BoxcarTaperFactor), enabling cohesion / parameter tapers.
+   // RATE-STATE consumption is WIRED (Phase 8 completion): `ResolveRateState`
+   // blends per-DOF a / V_w from the `*_inner`/`*_outer` endpoints via
+   // BoxcarTaperFactor, reproducing the native SCEC ComputeA_TPV* smooth taper.
+   // LSW cohesion-taper consumption (`cohesion_inner`/`cohesion_outer` in
+   // `ResolveSlipWeakening`) is STILL config-only and rejected there.
    enum class Kind { Depth, Box, RegionAttribute, Barrier, BoxcarTaper };
    Kind kind = Kind::Depth;
 
@@ -342,6 +341,18 @@ struct SpatialRule
    real_t sigma_n = std::numeric_limits<real_t>::quiet_NaN();
    real_t eta     = std::numeric_limits<real_t>::quiet_NaN();
    real_t V_w     = std::numeric_limits<real_t>::quiet_NaN();  // Phase 6 req 4 (SRW per-QP V_w)
+
+   // Phase 8 completion (smooth SCEC taper): a / V_w endpoints for a
+   // `boxcar_taper` rate-state rule.  The parameter ramps from `*_inner`
+   // (boxcar plateau, factor 1 = VW core) to `*_outer` (factor 0 = VS border)
+   // via BoxcarTaperFactor, reproducing the native ComputeA_TPV* /
+   // ComputeVw_TPV104 field EXACTLY: param = outer + (inner - outer) * B.
+   // NaN = "this parameter is not tapered by this rule".  Consumed by
+   // ResolveRateState; only meaningful on a BoxcarTaper rule.
+   real_t a_inner   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t a_outer   = std::numeric_limits<real_t>::quiet_NaN();
+   real_t V_w_inner = std::numeric_limits<real_t>::quiet_NaN();
+   real_t V_w_outer = std::numeric_limits<real_t>::quiet_NaN();
 
    // Phase 6 req 5: BoxcarTaper geometry.  Per-axis plateau half-width
    // boxcar_half_* and tanh transition boxcar_trans_*, centred at

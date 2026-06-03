@@ -578,6 +578,38 @@ void parse_spatial_rule(const toml::value& rule_tbl, SpatialRule& out,
       out.sigma_n = toml_real(rule_tbl, "sigma_n", nan);
       out.eta     = toml_real(rule_tbl, "eta",     nan);
       out.V_w     = toml_real(rule_tbl, "V_w",     nan);  // Phase 6 req 4 (SRW per-QP V_w)
+
+      // Phase 8 completion: smooth-taper a / V_w endpoints for a boxcar_taper
+      // RS rule (native SCEC ComputeA_TPV* / ComputeVw_TPV104 reproduction).
+      out.a_inner   = toml_real(rule_tbl, "a_inner",   nan);
+      out.a_outer   = toml_real(rule_tbl, "a_outer",   nan);
+      out.V_w_inner = toml_real(rule_tbl, "V_w_inner", nan);
+      out.V_w_outer = toml_real(rule_tbl, "V_w_outer", nan);
+
+      const bool has_a_endpts =
+         !std::isnan(out.a_inner) || !std::isnan(out.a_outer);
+      const bool has_vw_endpts =
+         !std::isnan(out.V_w_inner) || !std::isnan(out.V_w_outer);
+      if (has_a_endpts || has_vw_endpts)
+      {
+         MFEM_VERIFY(out.kind == SpatialRule::Kind::BoxcarTaper,
+                     "[[friction.rate_state.spatial]] a_inner/a_outer/V_w_inner/"
+                     "V_w_outer are only valid on a kind=\"boxcar_taper\" rule.");
+      }
+      MFEM_VERIFY(std::isnan(out.a_inner) == std::isnan(out.a_outer),
+                  "[[friction.rate_state.spatial]] boxcar_taper: a_inner and "
+                  "a_outer must BOTH be set (or neither).");
+      MFEM_VERIFY(std::isnan(out.V_w_inner) == std::isnan(out.V_w_outer),
+                  "[[friction.rate_state.spatial]] boxcar_taper: V_w_inner and "
+                  "V_w_outer must BOTH be set (or neither).");
+      // A boxcar_taper RS rule must taper at least one parameter.
+      if (out.kind == SpatialRule::Kind::BoxcarTaper)
+      {
+         MFEM_VERIFY(has_a_endpts || has_vw_endpts,
+                     "[[friction.rate_state.spatial]] kind=\"boxcar_taper\" rule "
+                     "sets no a_inner/a_outer or V_w_inner/V_w_outer endpoints — "
+                     "it would do nothing.  Add endpoints or use kind=\"box\".");
+      }
    }
 }
 
@@ -1886,21 +1918,14 @@ RateStatePerDOFParams resolve_rs_impl(
    MFEM_VERIFY(sigma_n_total_per_dof.Size() == N || sigma_n_total_per_dof.Size() == 0,
                "ResolveRateState: sigma_n_total_per_dof.Size() must be 0 or N");
 
-   // R-001 (Phase 6 req-5 deferral, justified): boxcar_taper is config-only
-   // this phase (see the same guard in ResolveSlipWeakening).  The per-DOF loop
-   // below would silently apply a matching boxcar_taper rule's a/b/Dc/... as a
-   // HARD region over the whole boxcar+transition footprint; reject it until
-   // the consumption phase wires the taper.
-   for (const auto& r : cfg.spatial)
-   {
-      MFEM_VERIFY(r.kind != SpatialRule::Kind::BoxcarTaper,
-                  "ResolveRateState: a 'boxcar_taper' spatial rule is not yet "
-                  "consumed by the resolver (Phase 6 req 5 is config-only — the "
-                  "kind + SCECBoxcar/BoxcarTaperFactor exist and parse, but the "
-                  "per-DOF parameter taper blend is wired in a later phase).  "
-                  "Remove the boxcar_taper rule or use kind=\"box\"/\"depth\" "
-                  "for now.");
-   }
+   // Phase 8 completion: boxcar_taper rate-state rules ARE now consumed (the
+   // per-DOF loop below blends a / V_w from the rule's *_inner/*_outer endpoints
+   // via BoxcarTaperFactor, reproducing the native SCEC ComputeA_TPV* smooth
+   // taper).  The former R-001 deferral guard (which rejected boxcar_taper for
+   // RS) is removed.  Hard `box`/`depth` rules are unchanged (still apply the
+   // per-DOF value as a hard region), so existing box-rule configs are
+   // byte-identical.  ResolveSlipWeakening still rejects boxcar_taper (its
+   // cohesion-taper consumption remains deferred).
 
    // 2026-06-01 (depth-profile-SRW, supersedes the Phase-11 R-001 guard):
    // per-DOF b is now threaded through BOTH the equilibrium seed
@@ -1955,6 +1980,26 @@ RateStatePerDOFParams resolve_rs_impl(
 
       for (const auto& r : cfg.spatial)
       {
+         // Phase 8 completion: a smooth SCEC boxcar taper.  Unlike the hard
+         // region kinds, it does NOT gate on matches(): the taper factor is
+         // computed at EVERY DOF (factor 0 beyond the transition -> *_outer
+         // value), so the field is continuous and reproduces the native
+         // ComputeA_TPV* / ComputeVw_TPV104:  param = outer + (inner-outer)*B,
+         // with B = BoxcarTaperFactor (per-axis SCEC boxcar product) in [0,1].
+         if (r.kind == SpatialRule::Kind::BoxcarTaper)
+         {
+            const real_t f = r.BoxcarTaperFactor(x, y, z);   // [0,1]
+            if (!std::isnan(r.a_inner))
+            {
+               a_i = r.a_outer + (r.a_inner - r.a_outer) * f;
+            }
+            if (!std::isnan(r.V_w_inner))
+            {
+               V_w_i = r.V_w_outer + (r.V_w_inner - r.V_w_outer) * f;
+            }
+            continue;
+         }
+
          if (!r.matches(x, y, z, dof_to_attr[i])) { continue; }
          // RS resolver ignores Barrier (LSW-only concept).
          if (r.kind == SpatialRule::Kind::Barrier) { continue; }
