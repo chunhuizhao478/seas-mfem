@@ -56,6 +56,16 @@ OUT="tpv102/out_p1_aderO2_pu_overint${FAULT_OVERINT}_200m_${SLURM_JOB_ID:-local}
 echo "[ab] OVER-INT  FAULT_OVERINT=${FAULT_OVERINT}  mesh=${MESH}  tfinal=${TFINAL}  out=${OUT}"
 echo "[ab] Git: $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
 
+# Restart across the 48 h wall (0-12 s on the 200 m mesh may not fit one
+# segment).  Checkpoints land in ${OUT}/cp every 2000 steps; to resume, resubmit
+# with TPV102_RESTART=<previous-out>/cp (each segment writes a fresh OUT, which
+# the driver requires — output-dir must differ from the checkpoint's parent).
+RESTART_FLAGS=""
+if [[ -n "${TPV102_RESTART:-}" ]]; then
+    RESTART_FLAGS="--restart ${TPV102_RESTART}"
+    echo "[ab] RESTART from ${TPV102_RESTART} (this segment writes ${OUT})."
+fi
+
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
@@ -72,6 +82,7 @@ ibrun ./seas_spatial_dyn_driver \
     --checkpoint-every 2000 \
     --output-dir "${OUT}" \
     --deriv-cache --shared-ck-recursion \
+    ${RESTART_FLAGS} \
     --verify-dispatch
 
 echo "[ab] done (over-int, 200 m).  sigma_n station traces: ${OUT}/tpv102_station_*.dat"
