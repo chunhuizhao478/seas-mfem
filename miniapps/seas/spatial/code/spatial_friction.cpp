@@ -1200,6 +1200,11 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.output.paraview_coseismic_dt         = toml_time_seconds(o, "paraview_coseismic_dt",    -1.0);
       cfg.output.paraview_nucleation_dt        = toml_time_seconds(o, "paraview_nucleation_dt",   -1.0);
       cfg.output.paraview_interseismic_dt      = toml_time_seconds(o, "paraview_interseismic_dt", -1.0);
+
+      // Free-surface slice (default ON; independent of the paraview master gate).
+      cfg.output.paraview_free_surface    = toml_str(o, "paraview_free_surface", "vtu");
+      cfg.output.paraview_free_surface_dt = toml_time_seconds(o, "paraview_free_surface_dt", 0.05);
+      toml_int_array(o, "paraview_free_surface_attrs", cfg.output.paraview_free_surface_attrs);
    }
    MFEM_VERIFY(!cfg.output.output_dir.empty(),
                "[output].output_dir must be non-empty");
@@ -1208,7 +1213,9 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    for (const auto& mode_name : {
         std::pair<std::string, std::string>{"paraview_volume", cfg.output.paraview_volume},
         std::pair<std::string, std::string>{"paraview_bulk",   cfg.output.paraview_bulk},
-        std::pair<std::string, std::string>{"paraview_fault",  cfg.output.paraview_fault}})
+        std::pair<std::string, std::string>{"paraview_fault",  cfg.output.paraview_fault},
+        std::pair<std::string, std::string>{"paraview_free_surface",
+                                            cfg.output.paraview_free_surface}})
    {
       MFEM_VERIFY(mode_name.second == "hdf5"
                   || mode_name.second == "vtu"
@@ -1229,6 +1236,17 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    MFEM_VERIFY(cfg.output.paraview_fault_dt > 0.0,
                "[output].paraview_fault_dt must be > 0; got "
                << cfg.output.paraview_fault_dt);
+   MFEM_VERIFY(cfg.output.paraview_free_surface_dt > 0.0,
+               "[output].paraview_free_surface_dt must be > 0; got "
+               << cfg.output.paraview_free_surface_dt);
+   // Mirror the [boundary] attribute positivity check (L1504): any explicit
+   // free-surface attribute override must be a positive mesh attribute.
+   for (int a : cfg.output.paraview_free_surface_attrs)
+   {
+      MFEM_VERIFY(a > 0,
+                  "[output].paraview_free_surface_attrs entries must be "
+                  "positive mesh attributes; got " << a);
+   }
    MFEM_VERIFY(cfg.output.max_snapshots >= 1,
                "[output].max_snapshots must be >= 1");
    MFEM_VERIFY(cfg.output.checkpoint_every_steps >= 1,

@@ -128,6 +128,17 @@ std::string MinimalRSBlock()
       "sigma_n_default = 50.0e6\n");
 }
 
+// Build a minimal valid LSW config and inject extra key=value lines into its
+// [output] table (used by the free-surface slice parse tests).
+std::string LSWWithOutputExtra(const std::string& extra_output_keys)
+{
+   std::string toml = MinimalLSWHeader() + MinimalLSWBlock();
+   const std::string anchor = "[output]\n";
+   const auto pos = toml.find(anchor);   // always present in MinimalLSWHeader
+   return toml.substr(0, pos + anchor.size()) + extra_output_keys
+          + toml.substr(pos + anchor.size());
+}
+
 }  // namespace
 
 // T-1  minimal valid LSW config parses (geoffrey2010 values survive D-3)
@@ -1633,6 +1644,61 @@ static void T_52_fault_geometry_normalize_on_read()
                "ref_normal direction preserved ([0,-2,0] -> [0,-1,0])");
 }
 
+// =====================================================================
+//  Phase 4 of PLAN_free_surface_slice.md — free-surface slice config keys
+// =====================================================================
+
+// FS-1  defaults: slice ON ("vtu"), 0.05 s cadence, no attr override.
+static void T_FS_1_free_surface_defaults()
+{
+   std::cout << "\n[T-FS-1] free-surface slice defaults (vtu, 0.05s, no attrs)\n";
+   const auto cfg = ParseSpatialFrictionConfigString(
+                       MinimalLSWHeader() + MinimalLSWBlock());
+   TEST_ASSERT(cfg.output.paraview_free_surface == "vtu",
+               "paraview_free_surface default == \"vtu\" (ON)");
+   TEST_ASSERT(std::abs(cfg.output.paraview_free_surface_dt - 0.05) < 1e-12,
+               "paraview_free_surface_dt default == 0.05 s");
+   TEST_ASSERT(cfg.output.paraview_free_surface_attrs.empty(),
+               "paraview_free_surface_attrs default empty (use natural_attrs)");
+}
+
+// FS-2  "off" round-trips through the parser.
+static void T_FS_2_free_surface_off_roundtrips()
+{
+   std::cout << "\n[T-FS-2] paraview_free_surface=\"off\" round-trips\n";
+   const auto cfg = ParseSpatialFrictionConfigString(
+                       LSWWithOutputExtra("paraview_free_surface=\"off\"\n"));
+   TEST_ASSERT(cfg.output.paraview_free_surface == "off",
+               "paraview_free_surface == \"off\" survives parse");
+}
+
+// FS-3  an out-of-set mode value aborts (validator catches it).
+static void T_FS_3_free_surface_illegal_value_aborts()
+{
+   std::cout << "\n[T-FS-3] illegal paraview_free_surface value aborts\n";
+   TEST_ASSERT(ParseAbortsInChild(
+                  LSWWithOutputExtra("paraview_free_surface=\"bogus\"\n")),
+               "paraview_free_surface=\"bogus\" must abort");
+}
+
+// FS-4  a non-positive cadence aborts.
+static void T_FS_4_free_surface_dt_nonpositive_aborts()
+{
+   std::cout << "\n[T-FS-4] paraview_free_surface_dt<=0 aborts\n";
+   TEST_ASSERT(ParseAbortsInChild(
+                  LSWWithOutputExtra("paraview_free_surface_dt=\"0s\"\n")),
+               "paraview_free_surface_dt=\"0s\" must abort");
+}
+
+// FS-5  a non-positive attribute override aborts (mirrors boundary positivity).
+static void T_FS_5_free_surface_negative_attr_aborts()
+{
+   std::cout << "\n[T-FS-5] negative paraview_free_surface_attrs entry aborts\n";
+   TEST_ASSERT(ParseAbortsInChild(
+                  LSWWithOutputExtra("paraview_free_surface_attrs=[-1]\n")),
+               "paraview_free_surface_attrs=[-1] must abort");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1695,6 +1761,12 @@ int main(int, char**)
    T_49_boxcar_taper_r114_guard();
    T_50_boxcar_taper_geometry_guards();
    T_52_fault_geometry_normalize_on_read();   // R-003
+   // Phase 4 of PLAN_free_surface_slice.md — free-surface slice config keys.
+   T_FS_1_free_surface_defaults();
+   T_FS_2_free_surface_off_roundtrips();
+   T_FS_3_free_surface_illegal_value_aborts();
+   T_FS_4_free_surface_dt_nonpositive_aborts();
+   T_FS_5_free_surface_negative_attr_aborts();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests
