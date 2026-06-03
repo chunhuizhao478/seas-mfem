@@ -397,6 +397,10 @@ TEST_BULK_PLANE_WAVE_SRC                   = tests/unit/test_bulk_plane_wave_rec
 TEST_INTERIOR_VS_SHARED_LIVE_SRC           = tests/unit/test_interior_vs_shared_branch_live.cpp
 # Pepper-bug: MULTI-STEP rupture-regime serial-vs-parallel cross-check
 TEST_RUPTURE_MULTISTEP_SRC                 = tests/unit/test_rupture_multistep_serial_vs_parallel.cpp
+# Phase 0 fault-dealiasing reproduction harness (planar-fault sigma_n drift)
+TEST_FAULT_PLANAR_SERIAL_SRC               = tests/unit/test_fault_planar_serial.cpp
+# Phase 1 fault-flux over-integration unit test (tiny 2-tet fixture)
+TEST_FAULT_OVERINT_SRC                     = tests/unit/test_fault_overint.cpp
 TEST_RUPTURE_TILTED_SRC                    = tests/unit/test_rupture_tilted_fault_serial_vs_parallel.cpp
 TEST_RUPTURE_RAKE_SWEEP_SRC                = tests/unit/test_rupture_rake_sweep_cross_rank.cpp
 TEST_RECONCILE_XRANK_SRC                   = tests/unit/test_shared_fault_reconcile_cross_rank.cpp
@@ -703,6 +707,8 @@ TEST_SHARED_FAULT_FLUX_PATH_ANA_OBJ        = $(TEST_SHARED_FAULT_FLUX_PATH_ANA_S
 TEST_BULK_PLANE_WAVE_OBJ                   = $(TEST_BULK_PLANE_WAVE_SRC:.cpp=.o)
 TEST_INTERIOR_VS_SHARED_LIVE_OBJ           = $(TEST_INTERIOR_VS_SHARED_LIVE_SRC:.cpp=.o)
 TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.o)
+TEST_FAULT_PLANAR_SERIAL_OBJ               = $(TEST_FAULT_PLANAR_SERIAL_SRC:.cpp=.o)
+TEST_FAULT_OVERINT_OBJ                     = $(TEST_FAULT_OVERINT_SRC:.cpp=.o)
 TEST_RUPTURE_TILTED_OBJ                    = $(TEST_RUPTURE_TILTED_SRC:.cpp=.o)
 TEST_RUPTURE_RAKE_SWEEP_OBJ                = $(TEST_RUPTURE_RAKE_SWEEP_SRC:.cpp=.o)
 TEST_RECONCILE_XRANK_OBJ                   = $(TEST_RECONCILE_XRANK_SRC:.cpp=.o)
@@ -1843,6 +1849,14 @@ seas_test_bulk_plane_wave_recovery: $(TEST_BULK_PLANE_WAVE_OBJ) $(WAVE_OPERATOR_
 # internal bookkeeping (getters gated by that macro in wave_operator.hpp).
 seas_test_rupture_multistep_serial_vs_parallel: $(TEST_RUPTURE_MULTISTEP_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_MULTISTEP_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+
+seas_test_fault_planar_serial: $(TEST_FAULT_PLANAR_SERIAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_PLANAR_SERIAL_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+seas_test_fault_overint: $(TEST_FAULT_OVERINT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_OVERINT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 seas_test_rupture_tilted_fault_serial_vs_parallel: $(TEST_RUPTURE_TILTED_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_RUPTURE_TILTED_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)
@@ -3588,6 +3602,14 @@ $(TEST_RUPTURE_MULTISTEP_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADE
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
+$(TEST_FAULT_PLANAR_SERIAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_FAULT_OVERINT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_RUPTURE_TILTED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
@@ -4356,6 +4378,23 @@ test-interior-vs-shared-branch-live: seas_test_interior_vs_shared_branch_live
 # Pepper-bug: MULTI-STEP rupture-regime serial-vs-parallel cross-check
 test-rupture-multistep-serial-vs-parallel: seas_test_rupture_multistep_serial_vs_parallel
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_multistep_serial_vs_parallel
+
+# Phase 0 fault-dealiasing reproduction harness.  Serial run is the acceptance
+# path; run `mpirun -np 8 ./seas_test_fault_planar_serial --nx 16 --nz 16` for a
+# bigger reproduction.  This full run is heavy (~16k ADER-2 macro-steps over the
+# main + symmetry-probe slabs); it is NOT part of the fast `test` aggregate.
+test-fault-planar-serial: seas_test_fault_planar_serial
+	./seas_test_fault_planar_serial
+
+# CI-fast smoke (REVIEW R-005): a short serial run, no symmetry probe, just
+# enough to confirm the harness builds, nucleates, and exits cleanly.  Does NOT
+# assert the secular-drift acceptance (that needs the full step budget above).
+test-fault-planar-serial-fast: seas_test_fault_planar_serial
+	./seas_test_fault_planar_serial --nx 6 --nz 6 --nsteps 2000 --no-symmetry-probe
+
+# Phase 1: fault-flux over-integration unit test (tiny 2-tet fixture, fast).
+test-fault-overint: seas_test_fault_overint
+	./seas_test_fault_overint
 
 test-rupture-tilted-fault-serial-vs-parallel: seas_test_rupture_tilted_fault_serial_vs_parallel
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_tilted_fault_serial_vs_parallel

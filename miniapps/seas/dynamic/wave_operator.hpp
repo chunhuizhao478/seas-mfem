@@ -642,6 +642,34 @@ public:
    { return GetNumLocalFaultQPs() + GetNumSharedFaultQPs(); }
    ///@}
 
+   /// @name Phase 1 (fault-dealiasing): fault-flux over-integration
+   ///
+   /// Raises the quadrature degree used for the FAULT faces only — the
+   /// friction solve and the flux-assembly integral ∫_F φ_i F_h — from the
+   /// minimal `2*order_` (mass-matrix) rule to `2*(order_+k)`, decoupled from
+   /// the bulk/non-fault `2*order_` rule.  Bulk interior faces, boundary
+   /// faces, and element-volume integrals are untouched.  This is the
+   /// per-step "speckle lever" (plan §4.1): with enough Gauss points the
+   /// resolved fault-flux coefficients are the true L2 values, so the
+   /// non-polynomial friction output no longer aliases its >N content onto the
+   /// top mode.  Friction parameters are assigned per over-integration GP by
+   /// the driver/harness (DOFData is sized to the grown per-face QP count).
+   ///
+   /// k = 0 (default) ⇒ degree `2*order_` ⇒ BYTE-IDENTICAL to pre-Phase-1.
+   /// `SetFaultOverint` rebuilds `nbf_per_face_` and the per-QP FaultBasis;
+   /// call it AFTER construction and BEFORE `SetFaultDOFData` (whose QP-count
+   /// check must see the grown `nbf_per_face_`).  Not yet compatible with the
+   /// mixed-flux / precomputed-face-flux paths (Phase 1 scope) — aborts if
+   /// combined with a non-zero `k`.
+   ///@{
+   void SetFaultOverint(int k);
+   int GetFaultOverint() const { return fault_overint_k_; }
+   /// Fault-face quadrature exactness degree (`2*(order_+fault_overint_k_)`).
+   /// When `fault_overint_k_ == 0` this is exactly `2*order_`, so every
+   /// fault-quadrature site is byte-identical to the pre-Phase-1 code.
+   int FaultFaceQuadDegree() const { return 2 * (order_ + fault_overint_k_); }
+   ///@}
+
    /// R-801 fix: look up the FaultBasis index for an interior fault face by
    /// its mesh face index.  Returns -1 if the face is not an interior fault
    /// face (i.e., not in fault_interior_faces_).
@@ -823,6 +851,11 @@ protected:
    std::unique_ptr<FaultBasis> fault_basis_;
    int num_fault_dofs_ = 0;
 
+   /// Phase 1 fault-flux over-integration factor.  0 ⇒ off (fault quadrature
+   /// degree = 2*order_, byte-identical to pre-Phase-1).  Set via
+   /// SetFaultOverint, which rebuilds nbf_per_face_ + the FaultBasis QP data.
+   int fault_overint_k_ = 0;
+
    real_t h_min_;
    std::vector<int> face_bdr_attr_;
 
@@ -896,6 +929,12 @@ protected:
    /// Phase 3 helper: populate `central_flux_face_set_` per the mode.
    /// Called from `SetMixedFluxMode`.  Clears the set first.
    void BuildCentralFluxFaceSet_();
+
+   /// Phase 1 helper: (re)compute `nbf_per_face_` and the per-QP FaultBasis
+   /// from the current `FaultFaceQuadDegree()`.  Called once by the ctor (with
+   /// k=0 ⇒ degree 2*order_, byte-identical) and again by `SetFaultOverint`.
+   /// Self-guarded: a no-op when there are no fault faces on this rank.
+   void RebuildFaultQuadrature_();
 
    /// Phase 13 material-dispatch hooks (virtual).  The scalar default
    /// bodies reproduce the pre-Phase-13 code verbatim; the separate
