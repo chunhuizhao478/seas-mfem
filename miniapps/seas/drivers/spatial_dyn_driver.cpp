@@ -199,11 +199,14 @@ ParaViewOutput<ParMesh>::FaultOutputMode ParseFaultMode(
               << s << "'.  Accepted: hdf5 | vtu | off.");
 }
 
-// Compute the count of fault QPs per face using the same probe logic as
-// drivers/tpv205_driver.cpp:1265-1284: peek at the first interior or
-// shared fault face on this rank, then MPI_Allreduce(MAX) so every
-// rank agrees.
-int ProbeNbfPerFace(ParMesh &pmesh, int order,
+// Compute the count of fault QPs per face for a given fault-face quadrature
+// exactness degree.  Peek at the first interior or shared fault face on this
+// rank, then MPI_Allreduce(MAX) so every rank agrees.
+//
+// Phase 4: callers pass `wave.FaultFaceQuadDegree()` (= 2*order with
+// over-integration off, so this is byte-identical to the prior `2*order`
+// probe; = 2*(order+k) with `--fault-overint k`).
+int ProbeNbfPerFace(ParMesh &pmesh, int fault_quad_degree,
                     const Array<int> &fault_int_faces,
                     const Array<int> &fault_shr_faces,
                     MPI_Comm comm)
@@ -214,7 +217,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
       FaceElementTransformations *ftr =
          pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
       MFEM_VERIFY(ftr, "spatial_dyn: fault interior face has null FTR");
-      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+      nbf = IntRules.Get(ftr->GetGeometryType(), fault_quad_degree).GetNPoints();
    }
 #ifdef MFEM_USE_MPI
    else if (fault_shr_faces.Size() > 0)
@@ -222,7 +225,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
       FaceElementTransformations *ftr =
          pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
       MFEM_VERIFY(ftr, "spatial_dyn: fault shared face has null FTR");
-      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+      nbf = IntRules.Get(ftr->GetGeometryType(), fault_quad_degree).GetNPoints();
    }
    {
       int local_nbf = nbf;
@@ -249,7 +252,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
 //     (FaultGeometry::fault_dof_ip cache; consumed by
 //     spatial_setup.hpp's IP-aware overload).
 void BuildPerDOFFaultTables(ParMesh &pmesh,
-                            int order,
+                            int fault_quad_degree,
                             int fault_attr,
                             const FaultBasis &fbasis,
                             const Array<int> &fault_int_faces,
@@ -327,7 +330,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
          pmesh.GetInteriorFaceTransformations(face);
       MFEM_VERIFY(ftr, "spatial_dyn: interior fault face has null FTR");
       const IntegrationRule &ir =
-         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+         IntRules.Get(ftr->GetGeometryType(), fault_quad_degree);
       MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
                   "spatial_dyn: interior fault face has " << ir.GetNPoints()
                   << " QPs, expected " << nbf_per_face);
@@ -345,7 +348,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
          pmesh.GetSharedFaceTransformations(sf);
       MFEM_VERIFY(ftr, "spatial_dyn: shared fault face has null FTR");
       const IntegrationRule &ir =
-         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+         IntRules.Get(ftr->GetGeometryType(), fault_quad_degree);
       MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
                   "spatial_dyn: shared fault face has " << ir.GetNPoints()
                   << " QPs, expected " << nbf_per_face);
@@ -556,6 +559,10 @@ int main(int argc, char *argv[])
    const real_t cli_tfinal     = GetRealArg(argc, argv, "--tfinal", -1.0);
    const real_t cli_cfl        = GetRealArg(argc, argv, "--cfl", -1.0);
    const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
+   // Phase 4: --fault-overint K — fault-flux over-integration factor (0 = off,
+   // byte-exact).  Applied via WaveOperator::SetFaultOverint after the operator
+   // is built (below).  --fault-resample is NOT implemented yet (Phase 2/3).
+   const int    cli_fault_overint = GetIntArg(argc, argv, "--fault-overint", 0);
    // Phase 14: --time-integrator ader|rk4|rk45 (mirror --ader-order; empty ⇒
    // keep the TOML/default).  Validated in the config-override block below.
    const std::string cli_time_integrator =
@@ -1273,6 +1280,32 @@ int main(int argc, char *argv[])
       }
    }
 
+   // Phase 4 (fault-dealiasing §6): fault-flux over-integration.
+   // --fault-overint K (default 0 = off = byte-exact) raises the FAULT-face
+   // quadrature to degree 2*(order+K) for the friction solve + flux assembly,
+   // decoupled from the bulk 2*order rule.  Placed AFTER SetMixedFluxMode so
+   // SetFaultOverint's guard sees the real mixed-flux mode, and BEFORE the
+   // fault-table setup below — it grows nbf_per_face_, which ProbeNbfPerFace /
+   // the FaultBasis QP probe / BuildPerDOFFaultTables / SetFaultDOFData all
+   // read via wave.FaultFaceQuadDegree() / wave.GetNbfPerFace().  Honoured on
+   // both the scalar and matrix (BimaterialWaveOperator) paths (the fault-flux
+   // routines live in the base WaveOperator).
+   MFEM_VERIFY(cli_fault_overint >= 0,
+               "--fault-overint: factor K must be >= 0, got "
+               << cli_fault_overint);
+   if (cli_fault_overint > 0)
+   {
+      wave.SetFaultOverint(cli_fault_overint);
+      if (rank == 0)
+      {
+         std::cout << "[fault] over-integration ON (--fault-overint "
+                   << cli_fault_overint << "): fault-face quad degree "
+                   << wave.FaultFaceQuadDegree() << " (baseline "
+                   << 2 * cfg.mesh.order << "); QPs/face "
+                   << wave.GetNbfPerFace() << "\n";
+      }
+   }
+
    wave.SetTime(cfg.time.t_initial);
 
    // -----------------------------------------------------------------
@@ -1284,7 +1317,7 @@ int main(int argc, char *argv[])
    // MFEM_USE_MPI is unconditional in this driver (#error at L682
    // requires it), so the comm arg can be passed without the
    // #ifdef-in-argument-list dance (R-607 round-6).
-   const int nbf_per_face = ProbeNbfPerFace(pmesh, cfg.mesh.order,
+   const int nbf_per_face = ProbeNbfPerFace(pmesh, wave.FaultFaceQuadDegree(),
                                             fault_int_faces,
                                             fault_shr_faces, comm);
 
@@ -1330,8 +1363,11 @@ int main(int argc, char *argv[])
 #endif
       if (ftr_probe)
       {
+         // Phase 4: match WaveOperator's internal fault basis exactly — use the
+         // same (possibly over-integrated) fault-face quadrature degree.
          const IntegrationRule &qp_ir =
-            IntRules.Get(ftr_probe->GetGeometryType(), 2 * cfg.mesh.order);
+            IntRules.Get(ftr_probe->GetGeometryType(),
+                         wave.FaultFaceQuadDegree());
          fbasis.ComputeQPBasis(pmesh, fault_int_faces,
                                ref_normal, up_vec, qp_ir);
 #ifdef MFEM_USE_MPI
@@ -1348,7 +1384,7 @@ int main(int argc, char *argv[])
    Array<int>                   dof_to_elem;
    Array<int>                   dof_to_attr;
    std::vector<IntegrationPoint> dof_ips;
-   BuildPerDOFFaultTables(pmesh, cfg.mesh.order, bc.fault_attr,
+   BuildPerDOFFaultTables(pmesh, wave.FaultFaceQuadDegree(), bc.fault_attr,
                           fbasis, fault_int_faces, fault_shr_faces,
                           nbf_per_face,
                           fault_coords, dof_coords_3d, dof_basis,
