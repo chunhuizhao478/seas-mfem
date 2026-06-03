@@ -35,11 +35,17 @@ else
     echo "[ab] PRODUCTION A/B: 200 m mesh, normal, 10 nodes / 500 ranks, tfinal=${TPV102_TFINAL:-12}."
 fi
 
+# Frontera's `sbatch` is wrapped with a verification banner printed to stdout,
+# which pollutes `$(sbatch --parsable ...)`.  Keep ONLY the trailing bare-number
+# job id (robust whether the banner lands on stdout, stderr, or the tty).
+submit_id() { sbatch --parsable "$@" 2>&1 | grep -xE '[0-9]+' | tail -n1 || true; }
+
 # --- (1) build -------------------------------------------------------------
 DEP=()
 if [[ "${NO_BUILD:-0}" != "1" ]]; then
     echo "[ab] submitting build (clean-rebuild) ..."
-    BID="$(sbatch --parsable "${BUILD_SBATCH}" clean-rebuild)"
+    BID="$(submit_id "${BUILD_SBATCH}" clean-rebuild)"
+    [[ -n "${BID}" ]] || { echo "[ab] ERROR: build job submission failed (no job id parsed)."; exit 1; }
     echo "[ab]   build job id = ${BID}"
     DEP=(--dependency="afterok:${BID}")
 else
@@ -47,13 +53,15 @@ else
 fi
 
 # --- (2) baseline (FAULT_OVERINT=0) ---------------------------------------
-OFF_ID="$(sbatch --parsable ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
+OFF_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
     --export="ALL,FAULT_OVERINT=0,${RUN_ENV}" "${RUN_SBATCH}")"
+[[ -n "${OFF_ID}" ]] || { echo "[ab] ERROR: baseline run submission failed."; exit 1; }
 echo "[ab] baseline  (FAULT_OVERINT=0) job id = ${OFF_ID}"
 
 # --- (3) over-int (FAULT_OVERINT=2) ---------------------------------------
-ON_ID="$(sbatch --parsable ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
+ON_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
     --export="ALL,FAULT_OVERINT=2,${RUN_ENV}" "${RUN_SBATCH}")"
+[[ -n "${ON_ID}" ]] || { echo "[ab] ERROR: over-int run submission failed."; exit 1; }
 echo "[ab] over-int  (FAULT_OVERINT=2) job id = ${ON_ID}"
 
 echo ""
