@@ -1298,11 +1298,16 @@ int main(int argc, char *argv[])
       wave.SetFaultOverint(cli_fault_overint);
       if (rank == 0)
       {
+         // NB: do NOT print wave.GetNbfPerFace() here — it is the PER-RANK
+         // local fault-QP count, which is 0 on a rank that owns no fault faces
+         // (e.g. rank 0 in most partitions).  The authoritative global per-face
+         // count is the Allreduce'd "[fault] QPs per face = N" line printed
+         // after ProbeNbfPerFace below.
          std::cout << "[fault] over-integration ON (--fault-overint "
                    << cli_fault_overint << "): fault-face quad degree "
-                   << wave.FaultFaceQuadDegree() << " (baseline "
-                   << 2 * cfg.mesh.order << "); QPs/face "
-                   << wave.GetNbfPerFace() << "\n";
+                   << wave.FaultFaceQuadDegree() << " vs baseline "
+                   << 2 * cfg.mesh.order << " (per-face QP count reported "
+                   "below as '[fault] QPs per face').\n";
       }
    }
 
