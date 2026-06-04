@@ -23,9 +23,13 @@ namespace seas
 
 /// @brief Build the friction sub-step iterator selected by `cfg.law`.
 ///
-///   cfg.law == SlipWeakening -> LswFrictionIterator (WaveOpLaw()==LSW)
-///   cfg.law == RateState     -> RateStateAgingFrictionIterator
-///                               (WaveOpLaw()==RateAndState; aging law)
+/// Returns the unified Phase-5 iterators (dynamic/friction_substep_iterator.hpp),
+/// which honour `SetFaultResample` (the deprecated `*FrictionIterator` adapters
+/// in friction_iterator.hpp do NOT — do not wire those on the production path):
+///   cfg.law == SlipWeakening -> LinearSlipWeakeningIterator (WaveOpLaw()==LSW)
+///   cfg.law == RateState     -> RateStateSlipLawSrwIterator  (slip-law SRW), or
+///                               RateStateAgingIterator       (aging; default)
+///                               (WaveOpLaw()==RateAndState)
 ///
 /// Aborts (MFEM_VERIFY) on the RateState branch if `cfg.rate_state` is
 /// unset, or if its `V_0_default` disagrees with the force solve's

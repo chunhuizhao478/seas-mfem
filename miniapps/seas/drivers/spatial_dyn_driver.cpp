@@ -1428,18 +1428,17 @@ int main(int argc, char *argv[])
    if (cli_fault_resample)
    {
       Geometry::Type face_geom = Geometry::TRIANGLE;
+      FaceElementTransformations *probe_ftr = nullptr;
       if (fault_int_faces.Size() > 0)
       {
-         FaceElementTransformations *ftr =
-            pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
-         if (ftr) { face_geom = ftr->GetGeometryType(); }
+         probe_ftr = pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
+         if (probe_ftr) { face_geom = probe_ftr->GetGeometryType(); }
       }
 #ifdef MFEM_USE_MPI
       else if (fault_shr_faces.Size() > 0)
       {
-         FaceElementTransformations *ftr =
-            pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
-         if (ftr) { face_geom = ftr->GetGeometryType(); }
+         probe_ftr = pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
+         if (probe_ftr) { face_geom = probe_ftr->GetGeometryType(); }
       }
 #endif
       const IntegrationRule &rs_ir =
@@ -1448,16 +1447,41 @@ int main(int argc, char *argv[])
                   "spatial_dyn: resample rule has " << rs_ir.GetNPoints()
                   << " QPs but nbf_per_face = " << nbf_per_face
                   << " — the resample rule must match the fault QP rule.");
+
+      // R-003: the single reference R assumes AFFINE fault faces (|J_F| constant
+      // over the face ⇒ the geometric scale cancels in the projector,
+      // dynamic/fault_resample.hpp).  On a curved (isoparametric) face |J_F|
+      // varies within the face and the reference-measure R is NOT the
+      // physical-L2(dA) projector of plan Eq. (4.2).  Verify on the probe face
+      // by sampling |J_F| at the rule's QPs (all current targets use straight-
+      // sided tets ⇒ flat faces ⇒ this passes trivially).
+      if (probe_ftr)
+      {
+         real_t jmin = std::numeric_limits<real_t>::max(), jmax = 0.0;
+         for (int q = 0; q < rs_ir.GetNPoints(); ++q)
+         {
+            probe_ftr->SetAllIntPoints(&rs_ir.IntPoint(q));
+            const real_t jw = probe_ftr->Face->Weight();   // |J_F| at this QP
+            jmin = std::min(jmin, jw);
+            jmax = std::max(jmax, jw);
+         }
+         MFEM_VERIFY(jmax - jmin <= 1e-10 * jmax,
+                     "spatial_dyn: --fault-resample requires AFFINE (straight-"
+                     "sided) fault faces; |J_F| varies by "
+                     << (jmax - jmin) / jmax << " on the probe face, so the "
+                     "single reference resample R is invalid (curved fault face). "
+                     "Build R per face with per-QP |J_F| weighting to support it.");
+      }
+
       BuildFaultResampleMatrix(face_geom, cfg.mesh.order, rs_ir, fault_resample_R);
       if (rank == 0)
       {
-         const int ndof_face = (cfg.mesh.order + 1) * (cfg.mesh.order + 2) / 2;
          std::cout << "[fault] resample ON (--fault-resample): degree-"
                    << cfg.mesh.order << " L2 projector, " << nbf_per_face
                    << " QPs/face"
-                   << (nbf_per_face == ndof_face
-                       ? "  (#QP==#DOF => R=I, a no-op without --fault-overint)"
-                       : "")
+                   << (cli_fault_overint > 0
+                       ? ""
+                       : "  (INACTIVE without --fault-overint: a true no-op)")
                    << "\n";
       }
    }
@@ -2707,21 +2731,51 @@ int main(int argc, char *argv[])
    // vs interior (dof_data is laid out interior [0,n_local) then shared).
    substep_iterator.SetDiagNumLocalFaultQPs(wave.GetNumLocalFaultQPs());
 
-   // Phase 3: wire the secular Δψ resample onto the iterator.  Rate-state only —
-   // LSW resample needs a slip-magnitude accumulator (prior plan review R-001),
-   // not yet implemented, so fail loud rather than silently no-op on an LSW run.
-   MFEM_VERIFY(!(cli_fault_resample && is_lsw),
-               "--fault-resample is not implemented for LSW (TPV31/TPV205): it "
-               "needs a resample-able slip-magnitude accumulator (Phase 3 LSW). "
-               "Use --fault-resample only on rate-state runs (TPV102/104).");
-   // Resample is inert when R = I (a unisolvent fault rule, #QP == #DOF — i.e.
-   // no over-integration at p<=2): disable it there so --fault-resample alone is
-   // a TRUE no-op (byte-exact), not merely round-off-exact through the
-   // psi_before + R·Δψ reassociation.  (At p>=3 the minimal rule is
-   // over-determined, R != I, so --fault-resample alone DOES act — review R-002.)
-   const int ndof_per_face = (cfg.mesh.order + 1) * (cfg.mesh.order + 2) / 2;
-   const bool resample_active =
-      cli_fault_resample && (nbf_per_face != ndof_per_face);
+   // Phase 3: wire the secular slip/state resample onto the iterator.  Both laws
+   // are now supported (R-001 fix, 2026-06-04):
+   //   - rate-state (TPV102/104): resamples the per-macro-step Δψ increment.
+   //   - LSW (TPV205/TPV31): resamples the per-macro-step accumulated-slip-
+   //     MAGNITUDE increment (path length Σ|V|·dt, plan §4.2/§6 Phase 3) and
+   //     rescales the directional slip (slip1,slip2) to the dealiased magnitude,
+   //     preserving direction.  τ_corr / the slip-rate stay from the un-resampled
+   //     friction solve (plan §6 Phase 3 — "do not rebuild τ_corr from a
+   //     resampled quantity").
+   // R-002: the resample is the SECULAR layer applied ON TOP OF over-integration
+   // (plan §4.2: "resample is a no-op without over-integration; over-integration
+   // is the prerequisite").  Gate it on over-integration being ON, NOT on the
+   // per-face head-count: on a TRIANGLE face the minimal 2*order rule is
+   // over-determined for p>=3 (#QP > #DOF ⇒ R != I), so keying off (#QP != #DOF)
+   // would make --fault-resample ALONE act at p>=3, violating the §Acceptance
+   // "resample alone ⇒ byte-exact" contract.  With over-integration off,
+   // resample_active is false at EVERY order ⇒ a TRUE no-op (byte-exact).
+   const bool resample_active = cli_fault_resample && (cli_fault_overint > 0);
+
+   // R-004 (plan §4.2 / §Phase 4 step 2): the resample must be OFF across a
+   // genuine fault-normal material contrast (SeisSol's BiMaterialFault —
+   // "resampling introduces artificial oscillations").  The spatial setup sets
+   // Zp_plus==Zp_minus / Zs_plus==Zs_minus per DOF (the matrix path is
+   // depth-heterogeneity, equal across the fault at each QP), so this never
+   // trips today; it guards a future genuine-contrast configuration.
+   if (resample_active)
+   {
+      int local_contrast = 0;
+      for (const DOFData &d : dof_data)
+      {
+         if (d.Zp_plus != d.Zp_minus || d.Zs_plus != d.Zs_minus)
+         { local_contrast = 1; break; }
+      }
+      int global_contrast = local_contrast;
+#ifdef MFEM_USE_MPI
+      MPI_Allreduce(&local_contrast, &global_contrast, 1, MPI_INT, MPI_MAX, comm);
+#endif
+      MFEM_VERIFY(!global_contrast,
+                  "--fault-resample is invalid across a genuine fault-normal "
+                  "material contrast (Zp_plus != Zp_minus or Zs_plus != Zs_minus): "
+                  "resampling introduces artificial oscillations (SeisSol "
+                  "BiMaterialFault, plan §4.2).  Disable --fault-resample for "
+                  "that configuration.");
+   }
+
    substep_iterator.SetFaultResample(
       resample_active ? &fault_resample_R : nullptr,
       nbf_per_face, resample_active);

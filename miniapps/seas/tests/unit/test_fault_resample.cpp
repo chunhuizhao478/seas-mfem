@@ -110,6 +110,28 @@ void RunCase(int order, int quad_deg)
    R.Mult(g, Rg); Rg -= g;
    CHECK(Rg.Normlinf() < 1e-10, "reproduces any degree-N field exactly");
 
+   // (R-005) Conservation: R is the W-orthogonal projector onto a space that
+   // contains constants, so (a) a uniform field is reproduced exactly and
+   // (b) the W-weighted mean of ANY field is preserved — the secular resample
+   // injects no net drift into the slip/state increment (plan §4.2).
+   {
+      Vector c(nq); c = 0.37;
+      Vector Rc(nq); R.Mult(c, Rc); Rc -= c;
+      CHECK(Rc.Normlinf() < 1e-10, "reproduces a uniform field exactly (constant kept)");
+
+      Vector v(nq);
+      for (int q = 0; q < nq; q++) { v(q) = std::sin(0.9 * q + 0.2) + 0.4 * q; }
+      Vector Rv(nq); R.Mult(v, Rv);
+      real_t mv = 0.0, mRv = 0.0;
+      for (int q = 0; q < nq; q++)
+      {
+         mv  += ir.IntPoint(q).weight * v(q);
+         mRv += ir.IntPoint(q).weight * Rv(q);
+      }
+      CHECK(std::abs(mv - mRv) < 1e-10 * (std::abs(mv) + 1.0),
+            "R preserves the W-weighted mean (conservation; no net drift)");
+   }
+
    // (iv) / (ii)
    DenseMatrix I(nq, nq); I = 0.0; for (int i = 0; i < nq; i++) { I(i, i) = 1.0; }
    DenseMatrix RmI(R); RmI -= I;
