@@ -56,6 +56,7 @@
 #include "../dynamic/tpv205_substep_iterator.hpp"
 #include "../dynamic/friction_iterator.hpp"           // Phase 2: IFrictionIterator + adapters
 #include "../dynamic/friction_iterator_factory.hpp"   // Phase 3: MakeFrictionIterator
+#include "../dynamic/fault_resample.hpp"              // Phase 3: BuildFaultResampleMatrix
 #include "../dynamic/heterogeneous_material.hpp"
 #include "../dynamic/spatial_setup.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
@@ -561,8 +562,13 @@ int main(int argc, char *argv[])
    const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
    // Phase 4: --fault-overint K — fault-flux over-integration factor (0 = off,
    // byte-exact).  Applied via WaveOperator::SetFaultOverint after the operator
-   // is built (below).  --fault-resample is NOT implemented yet (Phase 2/3).
+   // is built (below).
    const int    cli_fault_overint = GetIntArg(argc, argv, "--fault-overint", 0);
+   // Phase 3: --fault-resample — secular resample of the rate-state Δψ increment
+   // (degree-N L2 projection per fault face).  Default off ⇒ byte-exact.  A
+   // no-op without over-integration at a unisolvent rule (R = I); rate-state
+   // only (LSW resample is not implemented — see the guard below).
+   const bool   cli_fault_resample = HasFlag(argc, argv, "--fault-resample");
    // Phase 14: --time-integrator ader|rk4|rk45 (mirror --ader-order; empty ⇒
    // keep the TOML/default).  Validated in the config-override block below.
    const std::string cli_time_integrator =
@@ -1409,6 +1415,51 @@ int main(int argc, char *argv[])
                 << ", num_fault_global = " << num_fault_global
                 << " (local = " << num_fault_local
                 << ", shared = " << num_shared_fault << ")\n";
+   }
+
+   // Phase 3: build the per-face resample projector R once (degree-`order` L2
+   // projection on the fault-face over-integration GP set).  Affine faces share
+   // one reference R (the |J_F| scale cancels), so it is built from the
+   // reference rule on the fault-face geometry at wave.FaultFaceQuadDegree() —
+   // the SAME rule that defines the fault QPs (nbf_per_face).  Built on every
+   // rank (consistent geometry + rule ⇒ identical R, required for shared-face
+   // consistency); harmlessly unused on a rank with no fault QPs.
+   DenseMatrix fault_resample_R;
+   if (cli_fault_resample)
+   {
+      Geometry::Type face_geom = Geometry::TRIANGLE;
+      if (fault_int_faces.Size() > 0)
+      {
+         FaceElementTransformations *ftr =
+            pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
+         if (ftr) { face_geom = ftr->GetGeometryType(); }
+      }
+#ifdef MFEM_USE_MPI
+      else if (fault_shr_faces.Size() > 0)
+      {
+         FaceElementTransformations *ftr =
+            pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
+         if (ftr) { face_geom = ftr->GetGeometryType(); }
+      }
+#endif
+      const IntegrationRule &rs_ir =
+         IntRules.Get(face_geom, wave.FaultFaceQuadDegree());
+      MFEM_VERIFY(rs_ir.GetNPoints() == nbf_per_face,
+                  "spatial_dyn: resample rule has " << rs_ir.GetNPoints()
+                  << " QPs but nbf_per_face = " << nbf_per_face
+                  << " — the resample rule must match the fault QP rule.");
+      BuildFaultResampleMatrix(face_geom, cfg.mesh.order, rs_ir, fault_resample_R);
+      if (rank == 0)
+      {
+         const int ndof_face = (cfg.mesh.order + 1) * (cfg.mesh.order + 2) / 2;
+         std::cout << "[fault] resample ON (--fault-resample): degree-"
+                   << cfg.mesh.order << " L2 projector, " << nbf_per_face
+                   << " QPs/face"
+                   << (nbf_per_face == ndof_face
+                       ? "  (#QP==#DOF => R=I, a no-op without --fault-overint)"
+                       : "")
+                   << "\n";
+      }
    }
 
    // -----------------------------------------------------------------
@@ -2655,6 +2706,25 @@ int main(int argc, char *argv[])
    // are LOCAL/interior so the env-gated [SLIP] trace can tag each QP shared
    // vs interior (dof_data is laid out interior [0,n_local) then shared).
    substep_iterator.SetDiagNumLocalFaultQPs(wave.GetNumLocalFaultQPs());
+
+   // Phase 3: wire the secular Δψ resample onto the iterator.  Rate-state only —
+   // LSW resample needs a slip-magnitude accumulator (prior plan review R-001),
+   // not yet implemented, so fail loud rather than silently no-op on an LSW run.
+   MFEM_VERIFY(!(cli_fault_resample && is_lsw),
+               "--fault-resample is not implemented for LSW (TPV31/TPV205): it "
+               "needs a resample-able slip-magnitude accumulator (Phase 3 LSW). "
+               "Use --fault-resample only on rate-state runs (TPV102/104).");
+   // Resample is inert when R = I (a unisolvent fault rule, #QP == #DOF — i.e.
+   // no over-integration at p<=2): disable it there so --fault-resample alone is
+   // a TRUE no-op (byte-exact), not merely round-off-exact through the
+   // psi_before + R·Δψ reassociation.  (At p>=3 the minimal rule is
+   // over-determined, R != I, so --fault-resample alone DOES act — review R-002.)
+   const int ndof_per_face = (cfg.mesh.order + 1) * (cfg.mesh.order + 2) / 2;
+   const bool resample_active =
+      cli_fault_resample && (nbf_per_face != ndof_per_face);
+   substep_iterator.SetFaultResample(
+      resample_active ? &fault_resample_R : nullptr,
+      nbf_per_face, resample_active);
 
    // Phase 7: per-sub-step nucleation hook, dispatched through the
    // INucleationMethod strategy.  Fires once per ADER sub-step BEFORE the

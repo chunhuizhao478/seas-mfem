@@ -19,6 +19,7 @@
 
 #include "tpv205_friction.hpp"   // LSWFrictionCoefficient_TPV205, SolveLSW_TPV205
 #include "wave_state.hpp"        // QIndex (VX, SXX) for the [SLIP] decomposition
+#include "fault_resample.hpp"    // Phase 3: ApplyFaultResample (rate-state Δψ resample)
 
 #include <algorithm>
 #include <cmath>
@@ -109,6 +110,23 @@ void RateStateSubStepIterator<StatePolicy>::Advance(
    // the loop dereferences extra_[i].
    StatePolicy::ValidateExtra(extra_, static_cast<int>(dof_data.size()));
 
+   // Phase 3 (fault-dealiasing §6): rate-state resamples the per-MACRO-step
+   // state-variable increment Δψ onto the degree-N space.  Snapshot ψ before
+   // the sub-steps; the sub-step friction solve below runs EXACTLY as today
+   // (it produces I_imp / τ_corr from the un-resampled rate — no resampled
+   // quantity feeds the flux), then the net Δψ over the macro step is projected
+   // per face and re-applied.  Inactive (resample disabled, or R == I because
+   // there is no over-integration) ⇒ byte-exact with today.
+   const bool do_resample = resample_enabled_ && resample_R_ != nullptr
+                            && resample_nbf_per_face_ > 0 && !dof_data.empty();
+   std::vector<real_t> psi_before;
+   if (do_resample)
+   {
+      psi_before.resize(dof_data.size());
+      for (size_t i = 0; i < dof_data.size(); ++i)
+      { psi_before[i] = dof_data[i].psi; }
+   }
+
    RunSubSteps_(
       "RateStateSubStepIterator::Advance",
       dof_data, fault_coords, Q_pointwise_plus, Q_pointwise_minus,
@@ -135,6 +153,37 @@ void RateStateSubStepIterator<StatePolicy>::Advance(
             flux_.WriteBackState(d, s);
          }
       });
+
+   // Phase 3: project the net Δψ over this macro step onto the degree-N space,
+   // per fault face, and re-apply it.  R = I (no over-integration) makes this a
+   // no-op; do_resample == false skips it entirely — both byte-exact.  The
+   // per-face QP blocks are contiguous (interior faces then shared faces, each
+   // nbf QPs in the rule's order — matching the R built from that same rule).
+   if (do_resample)
+   {
+      const DenseMatrix &R = *resample_R_;
+      const int nbf  = resample_nbf_per_face_;
+      const int ndof = static_cast<int>(dof_data.size());
+      MFEM_VERIFY(R.Height() == nbf && R.Width() == nbf,
+                  "RateStateSubStepIterator::Advance: resample R is "
+                  << R.Height() << "x" << R.Width() << ", expected "
+                  << nbf << "x" << nbf << " (nbf_per_face).");
+      MFEM_VERIFY(ndof % nbf == 0,
+                  "RateStateSubStepIterator::Advance: fault QP count " << ndof
+                  << " is not a multiple of nbf_per_face " << nbf
+                  << " — per-face QP blocks are not contiguous.");
+      const int nfaces = ndof / nbf;
+      std::vector<real_t> dpsi(nbf), proj(nbf);
+      for (int f = 0; f < nfaces; ++f)
+      {
+         const int b = f * nbf;
+         for (int q = 0; q < nbf; ++q)
+         { dpsi[q] = dof_data[b + q].psi - psi_before[b + q]; }
+         ApplyFaultResample(R, dpsi.data(), proj.data());   // proj = R · Δψ
+         for (int q = 0; q < nbf; ++q)
+         { dof_data[b + q].psi = psi_before[b + q] + proj[q]; }
+      }
+   }
 }
 
 // Explicit instantiations — both rate-and-state policies.

@@ -403,6 +403,8 @@ TEST_FAULT_PLANAR_SERIAL_SRC               = tests/unit/test_fault_planar_serial
 TEST_FAULT_OVERINT_SRC                     = tests/unit/test_fault_overint.cpp
 # Phase 2 fault-face resample operator R unit test (reference-element only)
 TEST_FAULT_RESAMPLE_SRC                    = tests/unit/test_fault_resample.cpp
+# Phase 3 rate-state Δψ resample apply unit test (iterator-level)
+TEST_FAULT_RESAMPLE_APPLY_SRC             = tests/unit/test_fault_resample_apply.cpp
 TEST_RUPTURE_TILTED_SRC                    = tests/unit/test_rupture_tilted_fault_serial_vs_parallel.cpp
 TEST_RUPTURE_RAKE_SWEEP_SRC                = tests/unit/test_rupture_rake_sweep_cross_rank.cpp
 TEST_RECONCILE_XRANK_SRC                   = tests/unit/test_shared_fault_reconcile_cross_rank.cpp
@@ -712,6 +714,7 @@ TEST_RUPTURE_MULTISTEP_OBJ                 = $(TEST_RUPTURE_MULTISTEP_SRC:.cpp=.
 TEST_FAULT_PLANAR_SERIAL_OBJ               = $(TEST_FAULT_PLANAR_SERIAL_SRC:.cpp=.o)
 TEST_FAULT_OVERINT_OBJ                     = $(TEST_FAULT_OVERINT_SRC:.cpp=.o)
 TEST_FAULT_RESAMPLE_OBJ                    = $(TEST_FAULT_RESAMPLE_SRC:.cpp=.o)
+TEST_FAULT_RESAMPLE_APPLY_OBJ             = $(TEST_FAULT_RESAMPLE_APPLY_SRC:.cpp=.o)
 TEST_RUPTURE_TILTED_OBJ                    = $(TEST_RUPTURE_TILTED_SRC:.cpp=.o)
 TEST_RUPTURE_RAKE_SWEEP_OBJ                = $(TEST_RUPTURE_RAKE_SWEEP_SRC:.cpp=.o)
 TEST_RECONCILE_XRANK_OBJ                   = $(TEST_RECONCILE_XRANK_SRC:.cpp=.o)
@@ -1865,6 +1868,27 @@ seas_test_fault_overint: $(TEST_FAULT_OVERINT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNO
 # so the test links against MFEM alone (no other seas objects).
 seas_test_fault_resample: $(TEST_FAULT_RESAMPLE_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_RESAMPLE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 3: rate-state Δψ resample apply — same link surface as the iterator
+# parity test (drives the unified RateStateAgingIterator).
+seas_test_fault_resample_apply: \
+        $(TEST_FAULT_RESAMPLE_APPLY_OBJ) \
+        $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+        $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+        $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+        dynamic/tpv104_substep_iterator.o \
+        $(FAULT_FACE_FLUX_OBJ) \
+        $(FRICTION_SOLVER_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FAULT_RESAMPLE_APPLY_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(TPV102_SUBSTEP_ITERATOR_OBJ) \
+	    dynamic/tpv104_substep_iterator.o \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 seas_test_rupture_tilted_fault_serial_vs_parallel: $(TEST_RUPTURE_TILTED_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -3623,6 +3647,10 @@ $(TEST_FAULT_RESAMPLE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
 
+$(TEST_FAULT_RESAMPLE_APPLY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
+
 $(TEST_RUPTURE_TILTED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -DSEAS_USE_MPI -c $< -o $@
@@ -4412,6 +4440,10 @@ test-fault-overint: seas_test_fault_overint
 # Phase 2: fault-face resample operator R unit test (reference-element, fast).
 test-fault-resample: seas_test_fault_resample
 	./seas_test_fault_resample
+
+# Phase 3: rate-state Δψ resample apply unit test (iterator-level, fast).
+test-fault-resample-apply: seas_test_fault_resample_apply
+	./seas_test_fault_resample_apply
 
 test-rupture-tilted-fault-serial-vs-parallel: seas_test_rupture_tilted_fault_serial_vs_parallel
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_rupture_tilted_fault_serial_vs_parallel
