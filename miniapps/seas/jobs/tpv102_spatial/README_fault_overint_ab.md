@@ -107,6 +107,42 @@ per-step speckle (`max_F |σ_n − σ_n0|` sharply down, checkerboard gone); **C
 additionally suppresses the residual secular creep (flattest σ_n, the `C/A`
 reduction ≥ `B/A`).  Also sanity-check `V_max` is **bounded** in all three.
 
+## 5. Order convergence (p2) — plan acceptance #3
+
+Plan acceptance #3: *"p1 vs p2, both knobs on → the residual σ_n error now
+**decreases** with order."*  The p2 A/B/C trio mirrors p1 but at
+`[mesh].order=2` / `--ader-order 3`, config `tpv102_spatial_p2.toml`, and
+**normal / 12 nodes / 600 cores** (flex's 2 h cap cannot reach tfinal=12 at p2):
+
+```
+ab_overint0_p2_200m_normal.sbatch            # A  --fault-overint 0
+ab_overint2_p2_200m_normal.sbatch            # B  --fault-overint 2
+ab_overint2_resample_p2_200m_normal.sbatch   # C  --fault-overint 2 --fault-resample
+```
+At p2, over-int 2 raises the fault rule to degree 8 (#QP > 6 = #DOF), so R ≠ I
+and the resample is active.
+
+Run (build once, then the three arms `afterok`):
+```
+BID=$(sbatch --parsable miniapps/seas/jobs/spatial_dyn_build.sbatch clean-rebuild | grep -xE '[0-9]+' | tail -1)
+for A in ab_overint0_p2 ab_overint2_p2 ab_overint2_resample_p2; do
+    sbatch --dependency=afterok:${BID} jobs/tpv102_spatial/${A}_200m_normal.sbatch
+done
+# (or just the C arm if you only need the both-knobs-on residual)
+```
+The convergence check is the **C-arm drift at p1 vs p2** (treat p1-C as A, p2-C
+as B in the 2-arg compare — the "reduction" column is the p1→p2 order factor):
+```
+python3 jobs/tpv102_spatial/compare_sigma_n.py \
+  tpv102/out_p1_aderO2_pu_overint2_resample_<p1C_jobid> \
+  tpv102/out_p2_aderO3_pu_overint2_resample_<p2C_jobid>
+```
+Expect the p2-C residual **smaller** than p1-C.  (`L_nuc/h_min` is element-based
+and order-independent, so it is unchanged from p1 at the same mesh; what improves
+at p2 is the **per-element resolution** — effective node spacing `h/(N+1)` is ~1.5×
+finer — so the friction/Δψ field the resample projects is better resolved, which
+is exactly where the 1000 m run was weak.)
+
 ## Notes / caveats
 
 - **Pure upwind only.** `--fault-overint K>0` aborts if combined with mixed flux
