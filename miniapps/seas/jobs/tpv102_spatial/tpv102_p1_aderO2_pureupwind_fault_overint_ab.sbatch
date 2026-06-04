@@ -84,11 +84,25 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
     exit 1
 fi
 
-# --- the ONE A/B knob -----------------------------------------------------
+# --- the A/B knob (over-integration factor) -------------------------------
 FAULT_OVERINT="${FAULT_OVERINT:-0}"
 if ! [[ "${FAULT_OVERINT}" =~ ^[0-9]+$ ]]; then
     echo "ERROR: FAULT_OVERINT must be a non-negative integer, got '${FAULT_OVERINT}'."
     exit 4
+fi
+
+# --- optional SECOND knob: the secular Δψ resample (arm C of the A/B/C) ----
+# FAULT_RESAMPLE=1 adds --fault-resample.  It is the SECULAR dealiasing layer
+# and a NO-OP without over-integration (the driver disables it unless
+# FAULT_OVERINT>0), so it is only meaningful with over-integration on.
+FAULT_RESAMPLE="${FAULT_RESAMPLE:-0}"
+if ! [[ "${FAULT_RESAMPLE}" =~ ^[01]$ ]]; then
+    echo "ERROR: FAULT_RESAMPLE must be 0 or 1, got '${FAULT_RESAMPLE}'."
+    exit 4
+fi
+if [[ "${FAULT_RESAMPLE}" == "1" && "${FAULT_OVERINT}" == "0" ]]; then
+    echo "[overint-ab] WARN: FAULT_RESAMPLE=1 with FAULT_OVERINT=0 is a NO-OP"
+    echo "             (resample needs over-integration; the driver disables it)."
 fi
 
 CONFIG_TOML="${TPV102_CONFIG:-tpv102/configs/tpv102_spatial.toml}"
@@ -126,14 +140,18 @@ if [[ ! -f "${MESH}" ]]; then
     fi
 fi
 
-# Output dir auto-encodes the over-int factor so OFF/ON never collide.
-OUT="${TPV102_OUT:-tpv102/out_p1_aderO2_pu_overint${FAULT_OVERINT}_${SLURM_JOB_ID:-local}}"
+# Output dir auto-encodes the over-int factor (and the resample tag) so the
+# three arms never collide.
+RS_TAG=""; [[ "${FAULT_RESAMPLE}" == "1" ]] && RS_TAG="_resample"
+OUT="${TPV102_OUT:-tpv102/out_p1_aderO2_pu_overint${FAULT_OVERINT}${RS_TAG}_${SLURM_JOB_ID:-local}}"
 TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s
 
-# --- the over-int CLI flag (the A/B knob) ---------------------------------
+# --- the dealiasing CLI flags (the A/B/C knobs) ---------------------------
 # FAULT_OVERINT=0 -> pass --fault-overint 0 (explicit baseline; the driver
 # skips SetFaultOverint at K=0, so this is byte-exact with omitting the flag).
 FAULT_OVERINT_FLAG="--fault-overint ${FAULT_OVERINT}"
+FAULT_RESAMPLE_FLAG=""
+[[ "${FAULT_RESAMPLE}" == "1" ]] && FAULT_RESAMPLE_FLAG="--fault-resample"
 
 # --- ADER hot-path optimization (ON in BOTH A/B runs => not a confound) ----
 DERIV_OPT_FLAGS="--deriv-cache --shared-ck-recursion"
@@ -145,7 +163,7 @@ if [[ -n "${TPV102_RESTART:-}" ]]; then
     echo "[overint-ab] RESTART: resuming from '${TPV102_RESTART}' (this segment writes ${OUT})."
 fi
 
-echo "[overint-ab] FAULT_OVERINT=${FAULT_OVERINT}  config=${CONFIG_TOML}  mesh=${MESH}"
+echo "[overint-ab] FAULT_OVERINT=${FAULT_OVERINT}  FAULT_RESAMPLE=${FAULT_RESAMPLE}  config=${CONFIG_TOML}  mesh=${MESH}"
 echo "[overint-ab] tfinal=${TFINAL}  output=${OUT}"
 echo "[overint-ab] Git: $(git rev-parse --abbrev-ref HEAD 2>/dev/null) $(git rev-parse --short HEAD 2>/dev/null)"
 
@@ -157,6 +175,7 @@ ibrun ./seas_spatial_dyn_driver \
     --time-integrator ader \
     --mixed-flux none \
     ${FAULT_OVERINT_FLAG} \
+    ${FAULT_RESAMPLE_FLAG} \
     --tfinal "${TFINAL}" \
     --paraview \
     --paraview-fault-vtu \

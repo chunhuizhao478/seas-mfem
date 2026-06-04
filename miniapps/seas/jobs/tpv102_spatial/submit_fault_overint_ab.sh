@@ -1,17 +1,22 @@
 #!/bin/bash
-# Submit the TPV102 fault-flux over-integration A/B on Frontera:
+# Submit the TPV102 fault-dealiasing A/B/C on Frontera:
 #   (1) build seas_spatial_dyn_driver from the current branch (clean-rebuild),
-#   (2) FAULT_OVERINT=0 baseline run  (afterok build),
-#   (3) FAULT_OVERINT=2 over-int run  (afterok build).
-# The two runs differ in EXACTLY the --fault-overint factor.
+#   (2) FAULT_OVERINT=0                    baseline           (afterok build),
+#   (3) FAULT_OVERINT=2                    over-int           (afterok build),
+#   (4) FAULT_OVERINT=2 FAULT_RESAMPLE=1   over-int+resample  (afterok build).
+# The three runs differ in EXACTLY the two dealiasing knobs (fault-flux
+# over-integration, and the secular Δψ resample).  Set AB_NO_RESAMPLE=1 to
+# submit only the original 2-arm (off vs over-int) test.
 #
-# PREREQ: be on the feat branch with the Phase 1+4 code:
+# PREREQ: be on the feat branch with the Phase 1-4 code:
 #     git fetch origin && git checkout feat/fault-overint-resample
 #
 # USAGE (from anywhere in the repo):
 #     bash miniapps/seas/jobs/tpv102_spatial/submit_fault_overint_ab.sh          # production: 200 m, normal, tfinal=12
 #     CHEAP=1 bash .../submit_fault_overint_ab.sh                                 # cheap 1st pass: 1000 m, flex, tfinal=5
 #     NO_BUILD=1 bash .../submit_fault_overint_ab.sh                             # skip the build step (binary already built)
+#     AB_NO_RESAMPLE=1 bash .../submit_fault_overint_ab.sh                        # original 2-arm only (no resample)
+#     AB_ONLY_RESAMPLE=1 bash .../submit_fault_overint_ab.sh                       # ONLY arm C (build -> over-int+resample); reuse existing A/B
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -52,21 +57,51 @@ else
     echo "[ab] NO_BUILD=1 — skipping build (assuming ./seas_spatial_dyn_driver already built)."
 fi
 
-# --- (2) baseline (FAULT_OVERINT=0) ---------------------------------------
-OFF_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
-    --export="ALL,FAULT_OVERINT=0,${RUN_ENV}" "${RUN_SBATCH}")"
-[[ -n "${OFF_ID}" ]] || { echo "[ab] ERROR: baseline run submission failed."; exit 1; }
-echo "[ab] baseline  (FAULT_OVERINT=0) job id = ${OFF_ID}"
+# AB_ONLY_RESAMPLE=1 => the baseline (A) and over-int (B) results already exist
+# on the cluster; submit ONLY arm C (build -> over-int+resample).
+OFF_ID=""; ON_ID=""
+if [[ "${AB_ONLY_RESAMPLE:-0}" == "1" ]]; then
+    echo "[ab] AB_ONLY_RESAMPLE=1 — submitting ONLY arm C (over-int+resample);"
+    echo "     skipping A (baseline) and B (over-int) — reuse the existing results."
+else
+    # --- (2) baseline (FAULT_OVERINT=0) -----------------------------------
+    OFF_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
+        --export="ALL,FAULT_OVERINT=0,${RUN_ENV}" "${RUN_SBATCH}")"
+    [[ -n "${OFF_ID}" ]] || { echo "[ab] ERROR: baseline run submission failed."; exit 1; }
+    echo "[ab] baseline  (FAULT_OVERINT=0) job id = ${OFF_ID}"
 
-# --- (3) over-int (FAULT_OVERINT=2) ---------------------------------------
-ON_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
-    --export="ALL,FAULT_OVERINT=2,${RUN_ENV}" "${RUN_SBATCH}")"
-[[ -n "${ON_ID}" ]] || { echo "[ab] ERROR: over-int run submission failed."; exit 1; }
-echo "[ab] over-int  (FAULT_OVERINT=2) job id = ${ON_ID}"
+    # --- (3) over-int (FAULT_OVERINT=2) -----------------------------------
+    ON_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
+        --export="ALL,FAULT_OVERINT=2,${RUN_ENV}" "${RUN_SBATCH}")"
+    [[ -n "${ON_ID}" ]] || { echo "[ab] ERROR: over-int run submission failed."; exit 1; }
+    echo "[ab] over-int  (FAULT_OVERINT=2) job id = ${ON_ID}"
+fi
+
+# --- (4) over-int + resample (FAULT_OVERINT=2, FAULT_RESAMPLE=1) -----------
+RS_ID=""
+if [[ "${AB_NO_RESAMPLE:-0}" != "1" ]]; then
+    RS_ID="$(submit_id ${DEP[@]+"${DEP[@]}"} ${SBATCH_SCALE[@]+"${SBATCH_SCALE[@]}"} \
+        --export="ALL,FAULT_OVERINT=2,FAULT_RESAMPLE=1,${RUN_ENV}" "${RUN_SBATCH}")"
+    [[ -n "${RS_ID}" ]] || { echo "[ab] ERROR: over-int+resample run submission failed."; exit 1; }
+    echo "[ab] resample  (FAULT_OVERINT=2,FAULT_RESAMPLE=1) job id = ${RS_ID}"
+else
+    echo "[ab] AB_NO_RESAMPLE=1 — skipping arm C (over-int+resample)."
+fi
 
 echo ""
-echo "[ab] submitted.  When both finish, compare the on-fault sigma_n station"
-echo "     traces (the out dirs auto-encode the factor):"
-echo "       tpv102/out_p1_aderO2_pu_overint0_${OFF_ID}/tpv102_station_*.dat   (baseline: drifts)"
-echo "       tpv102/out_p1_aderO2_pu_overint2_${ON_ID}/tpv102_station_*.dat    (over-int: should stay ~120 MPa)"
-echo "     Confirm the ON run applied it:  grep -h '\\[fault\\] over-integration ON' tpv102_overint_ab_${ON_ID}.out"
+echo "[ab] submitted.  When the runs finish, compare the on-fault sigma_n station"
+echo "     traces (the out dirs auto-encode the knobs):"
+[[ -n "${OFF_ID}" ]] && \
+echo "       tpv102/out_p1_aderO2_pu_overint0_${OFF_ID}/tpv102_station_*.dat            (A baseline: drifts)"
+[[ -n "${ON_ID}" ]] && \
+echo "       tpv102/out_p1_aderO2_pu_overint2_${ON_ID}/tpv102_station_*.dat             (B over-int: per-step speckle gone)"
+[[ -n "${RS_ID}" ]] && \
+echo "       tpv102/out_p1_aderO2_pu_overint2_resample_${RS_ID}/tpv102_station_*.dat   (C +resample: secular drift gone)"
+[[ -n "${RS_ID}" ]] && {
+echo "     Confirm BOTH knobs fired in arm C:"
+echo "       grep -h '\\[fault\\] over-integration ON' tpv102_overint_ab_${RS_ID}.out"
+echo "       grep -h '\\[fault\\] resample ON'          tpv102_overint_ab_${RS_ID}.out"
+}
+echo "     3-way compare (reuse your existing A/B dirs):"
+echo "       python3 jobs/tpv102_spatial/compare_sigma_n.py <A_dir> <B_dir> \\"
+echo "         ${RS_ID:+tpv102/out_p1_aderO2_pu_overint2_resample_${RS_ID}} --plot"
