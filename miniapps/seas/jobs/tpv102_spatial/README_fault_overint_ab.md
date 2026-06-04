@@ -107,41 +107,50 @@ per-step speckle (`max_F |σ_n − σ_n0|` sharply down, checkerboard gone); **C
 additionally suppresses the residual secular creep (flattest σ_n, the `C/A`
 reduction ≥ `B/A`).  Also sanity-check `V_max` is **bounded** in all three.
 
-## 5. Order convergence (p2) — plan acceptance #3
+## 5. Order convergence (p2, p3) — plan acceptance #3
 
 Plan acceptance #3: *"p1 vs p2, both knobs on → the residual σ_n error now
-**decreases** with order."*  The p2 A/B/C trio mirrors p1 but at
-`[mesh].order=2` / `--ader-order 3`, config `tpv102_spatial_p2.toml`, and
-**normal / 12 nodes / 600 cores** (flex's 2 h cap cannot reach tfinal=12 at p2):
+**decreases** with order."*  The p2 and p3 A/B/C trios mirror p1 at higher
+order; same 200 m mesh, same knobs, all on **normal** (flex's 2 h cap cannot
+reach tfinal=12 above p1):
 
-```
-ab_overint0_p2_200m_normal.sbatch            # A  --fault-overint 0
-ab_overint2_p2_200m_normal.sbatch            # B  --fault-overint 2
-ab_overint2_resample_p2_200m_normal.sbatch   # C  --fault-overint 2 --fault-resample
-```
-At p2, over-int 2 raises the fault rule to degree 8 (#QP > 6 = #DOF), so R ≠ I
-and the resample is active.
+| order | config | ader | over-int rule (K=2) | #DOF | scale | files |
+|-------|--------|------|---------------------|------|-------|-------|
+| p1 | `tpv102_spatial.toml`    | O2 | deg 6  (12 QP) | 3  | 10N/500r | `ab_*_200m_normal.sbatch` |
+| p2 | `tpv102_spatial_p2.toml` | O3 | deg 8          | 6  | 12N/600r | `ab_*_p2_200m_normal.sbatch` |
+| p3 | `tpv102_spatial_p3.toml` | O4 | deg 10         | 10 | 16N/800r | `ab_*_p3_200m_normal.sbatch` |
 
-Run (build once, then the three arms `afterok`):
+At every order over-int 2 gives #QP > #DOF, so R ≠ I and arm C resamples.  **NB
+at p3 the minimal fault rule is already over-determined (#QP > 10 DOF), but arms
+A/B do NOT resample** — R-002 gates the resample on `--fault-overint > 0`, so the
+baseline stays byte-exact.
+
+Run a trio (build once, then the three arms `afterok`; substitute `p2`→`p3`):
 ```
 BID=$(sbatch --parsable miniapps/seas/jobs/spatial_dyn_build.sbatch clean-rebuild | grep -xE '[0-9]+' | tail -1)
 for A in ab_overint0_p2 ab_overint2_p2 ab_overint2_resample_p2; do
     sbatch --dependency=afterok:${BID} jobs/tpv102_spatial/${A}_200m_normal.sbatch
 done
-# (or just the C arm if you only need the both-knobs-on residual)
+# (or just the C arm per order if you only need the both-knobs-on residual)
+# NB: a rebuild is only needed when the C++ changed; reuse an existing binary
+# (same commit) and skip the build to save the queue.
 ```
-The convergence check is the **C-arm drift at p1 vs p2** (treat p1-C as A, p2-C
-as B in the 2-arg compare — the "reduction" column is the p1→p2 order factor):
+The convergence curve is the **C-arm drift at p1 → p2 → p3** (treat the lower
+order as "A", higher as "B" in the 2-arg compare — the "reduction" column is the
+order factor):
 ```
 python3 jobs/tpv102_spatial/compare_sigma_n.py \
-  tpv102/out_p1_aderO2_pu_overint2_resample_<p1C_jobid> \
-  tpv102/out_p2_aderO3_pu_overint2_resample_<p2C_jobid>
+  tpv102/out_p1_aderO2_pu_overint2_resample_<p1C> \
+  tpv102/out_p2_aderO3_pu_overint2_resample_<p2C>     # p1->p2
+python3 jobs/tpv102_spatial/compare_sigma_n.py \
+  tpv102/out_p2_aderO3_pu_overint2_resample_<p2C> \
+  tpv102/out_p3_aderO4_pu_overint2_resample_<p3C>     # p2->p3
 ```
-Expect the p2-C residual **smaller** than p1-C.  (`L_nuc/h_min` is element-based
-and order-independent, so it is unchanged from p1 at the same mesh; what improves
-at p2 is the **per-element resolution** — effective node spacing `h/(N+1)` is ~1.5×
-finer — so the friction/Δψ field the resample projects is better resolved, which
-is exactly where the 1000 m run was weak.)
+Expect the both-knobs-on residual to **shrink** at each step.  (`L_nuc/h_min` is
+element-based and order-independent — unchanged across orders at the same mesh;
+what improves with order is the **per-element resolution**, effective node spacing
+`h/(N+1)`, so the friction/Δψ field the resample projects is better resolved at
+higher order — exactly where the 1000 m p1 run was weak.)
 
 ## Notes / caveats
 
