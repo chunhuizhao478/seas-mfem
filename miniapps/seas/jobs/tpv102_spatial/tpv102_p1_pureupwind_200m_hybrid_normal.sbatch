@@ -5,7 +5,7 @@
 #SBATCH -p normal
 #SBATCH -N 10
 #SBATCH -n 500
-#SBATCH -t 12:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # TPV102 HYBRID-MESH control — p1 / ADER-O2 / pure upwind / scalar, 200 m,
@@ -19,7 +19,7 @@
 # alone flattens sigma_n, the speckle is mesh-asymmetry-driven (independent of
 # the over-int/resample dealiasing route).
 # Standalone: build seas_spatial_dyn_driver first (spatial_dyn_build.sbatch).
-# NOTE: 12 h may still not reach 12 s on this (larger) hybrid mesh — it
+# NOTE: even 48 h may not reach 12 s on this (larger) hybrid mesh — it
 # checkpoints every 2000 steps; the station traces append every step, so partial
 # output is already enough to see the early-rupture speckle.  Resubmit with
 # TPV102_RESTART=<out>/cp to continue.
