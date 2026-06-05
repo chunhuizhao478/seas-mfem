@@ -1,0 +1,53 @@
+  !! Q1 FAIL: tet_emin=3.62 m < 100 m floor
+  !! Q2 FAIL: eta_min=0.0000 <= 0.10 floor (224163 sliver tet(s))
+
+========== SAFtopo_test1km.inp ==========
+nodes      : 7,721,033
+bulk tets  : 46,990,244
+z range    : [-32329.4, 3139.4] m
+
+-- bulk tetrahedra --
+edge [m]   : min 3.62   median 1019.12   max 43572.07
+Joe-Liu eta: min 0.0000   median 0.8547   mean 0.8266
+eta hist   : <0.1:224,163  0.1-0.3:407,286  0.3-0.5:459,777  0.5-0.7:4,007,590  >0.7:41,891,428
+Q1 (emin >= 100 m) : FAIL
+Q2 (eta_min > 0.10)   : FAIL   (224,163 tet(s) <= floor)
+
+-- per *SURFACE (triangles) --
+| surface | n_tri | edge min [m] | edge med [m] | q_min | q_med | q_mean |
+|---|---:|---:|---:|---:|---:|---:|
+| NE120_ribbon | 156 | 1972.40 | 9621.49 | 0.2733 | 0.9635 | 0.9368 |
+| NE30_ribbon | 683 | 1277.80 | 6877.87 | 0.7164 | 0.9761 | 0.9548 |
+| NW150_ribbon | 717 | 1261.35 | 5528.31 | 0.5061 | 0.9703 | 0.9516 |
+| NW60_ribbon | 220 | 2384.49 | 6587.97 | 0.5081 | 0.9694 | 0.9457 |
+| SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus | 2,380 | 8.89 | 2677.95 | 0.0104 | 0.9699 | 0.9424 |
+| SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus | 2,553 | 5.04 | 2594.40 | 0.0104 | 0.9654 | 0.8902 |
+| SAFS-SAFZ-MULT-Banning_fault-CFM6_minus | 341 | 46.58 | 1259.84 | 0.0475 | 0.9563 | 0.8965 |
+| SAFS-SAFZ-MULT-Banning_fault-CFM6_plus | 364 | 5.19 | 1224.10 | 0.0053 | 0.9524 | 0.8425 |
+| SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus | 1,639 | 18.27 | 1428.93 | 0.0194 | 0.9740 | 0.9457 |
+| SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus | 1,822 | 7.97 | 1378.54 | 0.0077 | 0.9689 | 0.8824 |
+| SAFS-SAFZ-SBMT-Mill_Creek_fault_strand-CFM4_minus | 182 | 124.99 | 1505.73 | 0.2349 | 0.9677 | 0.9032 |
+| SAFS-SAFZ-SBMT-Mill_Creek_fault_strand-CFM4_plus | 220 | 3.62 | 1335.61 | 0.0119 | 0.9364 | 0.7534 |
+| SAFS-SAFZ-SBMT-Mission_Creek_fault_strand-CFM4_minus | 507 | 54.19 | 1626.07 | 0.0877 | 0.9569 | 0.8864 |
+| SAFS-SAFZ-SBMT-Mission_Creek_fault_strand-CFM4_plus | 627 | 4.43 | 1365.90 | 0.0076 | 0.9277 | 0.7245 |
+| bottom | 2,111 | 4338.80 | 12655.74 | 0.6922 | 0.9817 | 0.9680 |
+| dem_usgs250k_9seconds | 27,254 | 8.89 | 2540.02 | 0.0102 | 0.9615 | 0.9362 |
+| ALL surfaces | 41,776 | 3.62 | 2524.29 | 0.0053 | 0.9647 | 0.9280 |
+      182.58 real       175.43 user         6.07 sys
+         13100646400  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             3279460  page reclaims
+                  37  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   0  signals received
+                   9  voluntary context switches
+               16915  involuntary context switches
+       2120628255962  instructions retired
+        691469728766  cycles elapsed
+         20214381064  peak memory footprint

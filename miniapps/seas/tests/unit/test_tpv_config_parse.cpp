@@ -171,24 +171,33 @@ static void T_TPV102(const std::string& path)
    {
       const auto& rs = *cfg.rate_state;
       // Inside-out: VW value (a_vw=0.008) is the default; VS border (0.016)
-      // via box rules.  a_default < b_default satisfies the parser guard.
+      // via the boxcar_taper rule below.  a_default < b_default satisfies the
+      // parser guard.
       TEST_NEAR(rs.a_default,  0.008, 1e-12, "a_default == 0.008 (a_vw, VW core)");
       TEST_NEAR(rs.b_default,  0.012, 1e-12, "b_default == 0.012");
       TEST_NEAR(rs.Dc_default, 0.02,  1e-12, "Dc_default == 0.02 m");
       TEST_NEAR(rs.V_0_default, 1.0e-6, 1e-18, "V_0_default == 1e-6");
       TEST_ASSERT(rs.state_evolution == spatial::StateEvolutionKind::AgingLaw,
                   "state_evolution == aging_law");
-      // VS border box rules set a = a_vs = 0.016 (> b: velocity-strengthening).
-      int n_vs = 0;
+      // Phase 8 (smooth SCEC taper): the velocity-strengthening border is the
+      // single kind="boxcar_taper" rate-state rule (a ramps a_inner=a_vw ->
+      // a_outer=a_vs over the 3 km tanh margin), NOT the removed hard Box rules.
+      // Assert exactly one BoxcarTaper rule carrying the VS-border (a_outer)
+      // and VW-core (a_inner) endpoints.
+      int n_taper = 0;
       for (const auto& r : rs.spatial)
       {
-         if (r.kind == spatial::SpatialRule::Kind::Box && !std::isnan(r.a))
+         if (r.kind == spatial::SpatialRule::Kind::BoxcarTaper &&
+             !std::isnan(r.a_outer))
          {
-            ++n_vs;
-            TEST_NEAR(r.a, 0.016, 1e-12, "VS-border box a == 0.016 (a_vs)");
+            ++n_taper;
+            TEST_NEAR(r.a_outer, 0.016, 1e-12,
+                      "boxcar_taper a_outer == 0.016 (a_vs, VS border)");
+            TEST_NEAR(r.a_inner, 0.008, 1e-12,
+                      "boxcar_taper a_inner == 0.008 (a_vw, VW core)");
          }
       }
-      TEST_ASSERT(n_vs == 3, "3 VS-border box rules present");
+      TEST_ASSERT(n_taper == 1, "1 VS-border boxcar_taper rule present");
    }
 
    TEST_ASSERT(cfg.nucleation.enabled, "nucleation enabled");
@@ -219,24 +228,36 @@ static void T_TPV104(const std::string& path)
       TEST_ASSERT(rs.state_evolution ==
                   spatial::StateEvolutionKind::SlipLawStrongRateWeakening,
                   "state_evolution == slip_law_strong_rate_weakening");
-      // Inside-out: VW core (a_in=0.01, V_w_in=0.1) default; VS border via box.
+      // Inside-out: VW core (a_in=0.01, V_w_in=0.1) default; VS border via the
+      // boxcar_taper rule below.
       TEST_NEAR(rs.a_default,   0.01,  1e-12, "a_default == 0.01 (a_in, VW core)");
       TEST_NEAR(rs.b_default,   0.014, 1e-12, "b_default == 0.014");
       TEST_NEAR(rs.Dc_default,  0.4,   1e-12, "Dc_default == 0.4 m (L)");
       TEST_NEAR(rs.f_w_default, 0.2,   1e-12, "f_w_default == 0.2 (muW)");
       TEST_NEAR(rs.V_w_default, 0.1,   1e-12, "V_w_default == 0.1 (V_w_in, VW core)");
-      // VS border box rules: a = a_out = 0.02, V_w = V_w_out = 1.0.
-      int n_vs = 0;
+      // Phase 8 (smooth SCEC taper): the velocity-strengthening border is the
+      // single kind="boxcar_taper" rate-state rule (a ramps a_in -> a_out and
+      // V_w ramps V_w_in -> V_w_out over the 3 km tanh margin), NOT the removed
+      // hard Box rules.  Assert exactly one BoxcarTaper rule carrying the a /
+      // V_w endpoints.
+      int n_taper = 0;
       for (const auto& r : rs.spatial)
       {
-         if (r.kind == spatial::SpatialRule::Kind::Box && !std::isnan(r.a))
+         if (r.kind == spatial::SpatialRule::Kind::BoxcarTaper &&
+             !std::isnan(r.a_outer))
          {
-            ++n_vs;
-            TEST_NEAR(r.a,   0.02, 1e-12, "VS-border box a == 0.02 (a_out)");
-            TEST_NEAR(r.V_w, 1.0,  1e-12, "VS-border box V_w == 1.0 (V_w_out)");
+            ++n_taper;
+            TEST_NEAR(r.a_outer,   0.02, 1e-12,
+                      "boxcar_taper a_outer == 0.02 (a_out, VS border)");
+            TEST_NEAR(r.a_inner,   0.01, 1e-12,
+                      "boxcar_taper a_inner == 0.01 (a_in, VW core)");
+            TEST_NEAR(r.V_w_outer, 1.0,  1e-12,
+                      "boxcar_taper V_w_outer == 1.0 (V_w_out)");
+            TEST_NEAR(r.V_w_inner, 0.1,  1e-12,
+                      "boxcar_taper V_w_inner == 0.1 (V_w_in)");
          }
       }
-      TEST_ASSERT(n_vs == 3, "3 VS-border box rules present");
+      TEST_ASSERT(n_taper == 1, "1 VS-border boxcar_taper rule present");
    }
 
    TEST_ASSERT(cfg.nucleation.kind ==

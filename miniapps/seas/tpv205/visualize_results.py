@@ -194,21 +194,32 @@ PANELS = [
     ("V_dip",       "Slip Rate V_dip (m/s)",          False),
     ("slip_dip",    "Slip Dip (m)",                   False),
     ("tau_dip",     "Shear Stress τ_dip (MPa)",  False),
+    # Normal stress: MFEM-only channel (DRDG3D's 7-column TPV5 trace does
+    # not report σ_n, so its sigma_n is all-NaN and is skipped by the
+    # all-NaN guard in plot_station — this panel shows only the MFEM run).
+    ("sigma_n",     "Normal Stress σ_n (MPa)",       False),
 ]
 
 
 def plot_station(datasets, station_label, x2_km, x3_km, save_path=None,
                  t_max=None):
-    """Plot 6-panel station comparison.
+    """Plot the per-station panel comparison (one panel per PANELS entry).
 
-    Normal-stress and LSW μ_eff panels are intentionally omitted: the
-    DRDG3D TPV5 reference does not provide either channel (7-column
-    file), so those panels would show only the MFEM trace and serve no
-    cross-code-comparison purpose.
+    Panels: V/slip/τ for the strike and dip components, plus normal
+    stress σ_n.  σ_n is an MFEM-only channel — the DRDG3D TPV5 reference
+    is a 7-column file with no σ_n, so its trace is all-NaN and skipped
+    by the all-NaN guard below (the σ_n panel shows only the MFEM run).
+    The LSW μ_eff channel remains omitted for the same reason (DRDG3D
+    does not report it and it adds no cross-code comparison).
+
+    The grid is sized to hold len(PANELS) panels in 2 columns; any unused
+    trailing cell is hidden.
     """
     import matplotlib.pyplot as plt
 
-    fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+    ncols = 2
+    nrows = (len(PANELS) + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(14, 4 * nrows))
     title = (f"TPV205: {station_label}  "
              f"(x2={x2_km} km, x3={x3_km} km)")
     if t_max is not None:
@@ -238,6 +249,11 @@ def plot_station(datasets, station_label, x2_km, x3_km, save_path=None,
             ax.set_xlim(0, t_max)
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
+
+    # Hide any trailing cells not backed by a PANELS entry (e.g. the 8th
+    # cell when there are 7 panels in a 4x2 grid).
+    for ax in axes.flat[len(PANELS):]:
+        ax.axis("off")
 
     plt.tight_layout()
     if save_path:
