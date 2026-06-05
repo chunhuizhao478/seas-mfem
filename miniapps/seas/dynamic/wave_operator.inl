@@ -369,48 +369,13 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
 #endif
       }
 
-      // Determine face geometry + per-QP count from the first available
-      // fault face.  Ranks may have only shared, only interior, or both.
-      Geometry::Type face_geom = Geometry::TRIANGLE;
-      if (fault_interior_faces_.Size() > 0)
-      {
-         auto *ftr0 = mesh_.GetInteriorFaceTransformations(
-            fault_interior_faces_[0]);
-         if (ftr0) { face_geom = ftr0->GetGeometryType(); }
-      }
-      else if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         if (fault_shared_faces_.Size() > 0)
-         {
-            auto &pmesh = static_cast<ParMesh &>(mesh_);
-            auto *ftr0 = pmesh.GetSharedFaceTransformations(
-               fault_shared_faces_[0]);
-            if (ftr0) { face_geom = ftr0->GetGeometryType(); }
-         }
-#endif
-      }
-      const IntegrationRule &face_ir = IntRules.Get(face_geom, 2*order_);
-      nbf_per_face_ = face_ir.GetNPoints();
-
-      if (fault_interior_faces_.Size() > 0)
-      {
-         fault_basis_->ComputeQPBasis(static_cast<Mesh &>(mesh_),
-                                      fault_interior_faces_,
-                                      ref_normal, up, face_ir);
-      }
-      if constexpr (IsParallelMesh<MeshType>::value)
-      {
-#ifdef MFEM_USE_MPI
-         if (fault_shared_faces_.Size() > 0)
-         {
-            fault_basis_->ComputeQPBasisShared(
-               static_cast<ParMesh &>(mesh_),
-               fault_shared_faces_, ref_normal, up, face_ir,
-               fault_interior_faces_.Size());
-         }
-#endif
-      }
+      // Phase 1: build nbf_per_face_ + the per-QP FaultBasis from
+      // FaultFaceQuadDegree() (= 2*order_ at construction, since
+      // fault_overint_k_ == 0 ⇒ byte-identical to pre-Phase-1).  Factored into
+      // RebuildFaultQuadrature_ so SetFaultOverint can re-run it at a higher
+      // degree; ref_normal / up are reconstructed inside the helper (same
+      // canonical TPV/BP5 frame used by Compute / AppendSharedFaces above).
+      RebuildFaultQuadrature_();
 
       // R-101: per-interior-fault-face elem1_on_plus computed from
       // geometry (element centroid vs face centroid projected onto
@@ -586,6 +551,95 @@ WaveOperator<MeshType>::WaveOperator(MeshType &mesh, int order,
 
 template <typename MeshType>
 WaveOperator<MeshType>::~WaveOperator() = default;
+
+
+// ---------------------------------------------------------------------------
+// Phase 1 (fault-dealiasing): fault-flux over-integration.
+// RebuildFaultQuadrature_ recomputes nbf_per_face_ and the per-QP FaultBasis
+// from FaultFaceQuadDegree().  With fault_overint_k_ == 0 it uses degree
+// 2*order_ (byte-identical to pre-Phase-1).  SetFaultOverint bumps k and
+// re-runs it.  ref_normal / up are the same canonical TPV/BP5 frame the ctor
+// uses for FaultBasis::Compute / AppendSharedFaces.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::RebuildFaultQuadrature_()
+{
+   if (!fault_basis_) { return; }   // no fault on this rank/config
+   if (!(bc_.fault_attr > 0 &&
+         (fault_interior_faces_.Size() > 0 || fault_shared_faces_.Size() > 0)))
+   {
+      return;
+   }
+
+   Vector ref_normal(3); ref_normal = 0.0; ref_normal(1) = -1.0;
+   Vector up(3);         up = 0.0;         up(2) = 1.0;
+
+   // Determine face geometry from the first available fault face.  Ranks may
+   // have only shared, only interior, or both.
+   Geometry::Type face_geom = Geometry::TRIANGLE;
+   if (fault_interior_faces_.Size() > 0)
+   {
+      auto *ftr0 = mesh_.GetInteriorFaceTransformations(fault_interior_faces_[0]);
+      if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+   }
+   else if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      if (fault_shared_faces_.Size() > 0)
+      {
+         auto &pmesh = static_cast<ParMesh &>(mesh_);
+         auto *ftr0 = pmesh.GetSharedFaceTransformations(fault_shared_faces_[0]);
+         if (ftr0) { face_geom = ftr0->GetGeometryType(); }
+      }
+#endif
+   }
+
+   const IntegrationRule &face_ir = IntRules.Get(face_geom, FaultFaceQuadDegree());
+   nbf_per_face_ = face_ir.GetNPoints();
+
+   if (fault_interior_faces_.Size() > 0)
+   {
+      fault_basis_->ComputeQPBasis(static_cast<Mesh &>(mesh_),
+                                   fault_interior_faces_,
+                                   ref_normal, up, face_ir);
+   }
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      if (fault_shared_faces_.Size() > 0)
+      {
+         fault_basis_->ComputeQPBasisShared(
+            static_cast<ParMesh &>(mesh_),
+            fault_shared_faces_, ref_normal, up, face_ir,
+            fault_interior_faces_.Size());
+      }
+#endif
+   }
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::SetFaultOverint(int k)
+{
+   MFEM_VERIFY(k >= 0, "SetFaultOverint: over-integration factor must be >= 0");
+   // Must run before DOFData is registered: it changes nbf_per_face_, which
+   // would silently mis-size already-registered DOFData (SetFaultDOFData's
+   // nqp==nbf_per_face_ check would then fail, or worse, pass on stale data).
+   MFEM_VERIFY(fault_dof_data_ == nullptr,
+               "SetFaultOverint must be called BEFORE SetFaultDOFData "
+               "(it resizes the per-face fault QP count).");
+   // Phase 1 scope: the over-integrated fault rule is honoured only on the
+   // pure-upwind Godunov fault path.  The mixed-flux and precomputed-face-flux
+   // paths cache face data at the 2*order_ rule and would silently desync from
+   // the grown nbf_per_face_; forbid the combination with a non-trivial k.
+   MFEM_VERIFY(k == 0 ||
+               (mixed_flux_mode_ == MixedFluxMode::None &&
+                !use_precomputed_face_fluxes_),
+               "SetFaultOverint: fault over-integration (k>0) is not compatible "
+               "with the mixed-flux or precomputed-face-flux paths (Phase 1 "
+               "scope).  Set k=0 or disable those paths.");
+   fault_overint_k_ = k;
+   RebuildFaultQuadrature_();
+}
 
 
 // ---------------------------------------------------------------------------
@@ -2012,8 +2066,10 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
       const int dof_offset1 = e1 * ndof_per_el_;
       const int dof_offset2 = e2 * ndof_per_el_;
 
+      // Phase 1: these are fault QPs — use the (possibly over-integrated)
+      // fault rule so the count matches nbf_per_face_.
       const IntegrationRule &ir = IntRules.Get(
-         ftr->GetGeometryType(), 2 * order_);
+         ftr->GetGeometryType(), FaultFaceQuadDegree());
       const int nqp = ir.GetNPoints();
       MFEM_VERIFY(nqp == nbf_per_face_,
                   "EvaluateBulkAtFaultQPsCanonical: face nqp "
@@ -2263,8 +2319,9 @@ void WaveOperator<MeshType>::EvaluateBulkAtFaultQPsCanonical(
                         << nbr_vdofs.Size() << " != NUM_STATE * ndof2 = "
                         << NUM_STATE * ndof2 << " (R-004 byNODES map).");
 
+            // Phase 1: fault QPs — use the (possibly over-integrated) fault rule.
             const IntegrationRule &ir = IntRules.Get(
-               ftr->GetGeometryType(), 2 * order_);
+               ftr->GetGeometryType(), FaultFaceQuadDegree());
             const int nqp = ir.GetNPoints();
             MFEM_VERIFY(nqp == nbf_per_face_,
                         "EvaluateBulkAtFaultQPsCanonical (shared): face "
@@ -2582,8 +2639,14 @@ void WaveOperator<MeshType>::ComputeFaceFluxRHS(const Vector &Q, Vector &rhs) co
       int ndof = fe1->GetDof();
       int dof_offset1 = e1 * ndof_per_el_;
 
+      // Phase 1: over-integrate the FAULT-face flux only (bulk/boundary faces
+      // stay at 2*order_).  fault_overint_k_ == 0 ⇒ FaultFaceQuadDegree() ==
+      // 2*order_, so the branch is byte-identical to pre-Phase-1.
+      const bool face_is_fault = !is_boundary &&
+         (bdr_attr == bc_.fault_attr) && (bc_.fault_attr > 0);
       const IntegrationRule &ir = IntRules.Get(
-         ftr->GetGeometryType(), 2*order_);
+         ftr->GetGeometryType(),
+         face_is_fault ? FaultFaceQuadDegree() : 2*order_);
       int nqp = ir.GetNPoints();
 
       for (int q = 0; q < nqp; q++)
@@ -3359,15 +3422,19 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
          const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
          int ndof2 = fe2->GetDof();
 
-         const IntegrationRule &ir = IntRules.Get(
-            ftr->GetGeometryType(), 2*order_);
-
+         // Phase 1: over-integrate the FAULT shared-face flux only.  Hoisted
+         // above `ir` so the rule degree matches the fault-handling branch
+         // (k==0 ⇒ FaultFaceQuadDegree() == 2*order_, byte-identical).
          const bool sf_fault =
             fault_active && (sf < static_cast<int>(shared_face_bdr_attr_.size()))
             && (shared_face_bdr_attr_[sf] == bc_.fault_attr)
             && (bc_.fault_attr > 0)
             && (sf_to_basis_idx[sf] >= 0);
          const int basis_idx = sf_fault ? sf_to_basis_idx[sf] : -1;
+
+         const IntegrationRule &ir = IntRules.Get(
+            ftr->GetGeometryType(),
+            sf_fault ? FaultFaceQuadDegree() : 2*order_);
 
          // R-001 (v9.5.0): mesh face index for the precomputed-table
          // lookup.  `sf` is the shared-face index; the precomputed-face
@@ -3893,8 +3960,14 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
       int ndof = fe1->GetDof();
       int dof_offset1 = e1 * ndof_per_el_;
 
+      // Phase 1: over-integrate the FAULT-face flux only (bulk/boundary faces
+      // stay at 2*order_).  fault_overint_k_ == 0 ⇒ FaultFaceQuadDegree() ==
+      // 2*order_, so the branch is byte-identical to pre-Phase-1.
+      const bool face_is_fault = !is_boundary &&
+         (bdr_attr == bc_.fault_attr) && (bc_.fault_attr > 0);
       const IntegrationRule &ir = IntRules.Get(
-         ftr->GetGeometryType(), 2*order_);
+         ftr->GetGeometryType(),
+         face_is_fault ? FaultFaceQuadDegree() : 2*order_);
       int nqp = ir.GetNPoints();
 
       for (int q = 0; q < nqp; q++)
@@ -4931,15 +5004,19 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
          const FiniteElement *fe2 = pfes->GetFaceNbrFE(nbr_idx);
          int ndof2 = fe2->GetDof();
 
-         const IntegrationRule &ir = IntRules.Get(
-            ftr->GetGeometryType(), 2*order_);
-
+         // Phase 1: over-integrate the FAULT shared-face flux only.  Hoisted
+         // above `ir` so the rule degree matches the fault-handling branch
+         // (k==0 ⇒ FaultFaceQuadDegree() == 2*order_, byte-identical).
          const bool sf_fault =
             fault_active && (sf < static_cast<int>(shared_face_bdr_attr_.size()))
             && (shared_face_bdr_attr_[sf] == bc_.fault_attr)
             && (bc_.fault_attr > 0)
             && (sf_to_basis_idx[sf] >= 0);
          const int basis_idx = sf_fault ? sf_to_basis_idx[sf] : -1;
+
+         const IntegrationRule &ir = IntRules.Get(
+            ftr->GetGeometryType(),
+            sf_fault ? FaultFaceQuadDegree() : 2*order_);
 
          // Phase 2b (§7.2): mesh face index for the precomputed-table
          // lookup.  `sf` is the shared-face index; the key for
@@ -6061,8 +6138,8 @@ int WaveOperator<MeshType>::ExchangeAndPairSharedFaultQPs(
          dynamic::FaceVertexKey key =
             dynamic::MakeFaceKey(local_face, gvi, pmesh);
 
-         const IntegrationRule &ir =
-            IntRules.Get(ftr->GetGeometryType(), 2*order_);
+         const IntegrationRule &ir =   // Phase 1: fault QPs use the fault rule
+            IntRules.Get(ftr->GetGeometryType(), FaultFaceQuadDegree());
          for (int q = 0; q < ir.GetNPoints(); q++)
          {
             const IntegrationPoint &ip = ir.IntPoint(q);
@@ -6315,8 +6392,8 @@ void WaveOperator<MeshType>::VerifySharedFaultDOFDataConsistency(
          dynamic::FaceVertexKey key =
             dynamic::MakeFaceKey(local_face, gvi, pmesh);
 
-         const IntegrationRule &ir =
-            IntRules.Get(ftr->GetGeometryType(), 2*order_);
+         const IntegrationRule &ir =   // Phase 1: fault QPs use the fault rule
+            IntRules.Get(ftr->GetGeometryType(), FaultFaceQuadDegree());
          for (int q = 0; q < ir.GetNPoints(); q++)
          {
             const IntegrationPoint &ip = ir.IntPoint(q);

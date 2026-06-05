@@ -71,6 +71,17 @@ public:
 
    void SetDiagNumLocalFaultQPs(int n) override { diag_num_local_fault_qps_ = n; }
 
+   /// Phase 3: store the per-face resample projector + gate (see
+   /// IFrictionIterator::SetFaultResample).  Consumed by the rate-state
+   /// iterator's Δψ resample; default state (nullptr / 0 / false) ⇒ no resample.
+   void SetFaultResample(const DenseMatrix *R, int nbf_per_face,
+                         bool enabled) override
+   {
+      resample_R_            = R;
+      resample_nbf_per_face_ = nbf_per_face;
+      resample_enabled_      = enabled;
+   }
+
 protected:
    /// The common per-macro-step envelope.  `step_fn` does ALL per-QP work
    /// (slip accumulation, friction/state solve, diag writes, WriteBackState)
@@ -240,6 +251,13 @@ protected:
    std::vector<real_t> deltaT_;
    std::vector<real_t> time_weights_;
    int                 diag_num_local_fault_qps_ = -1;
+
+   /// Phase 3 fault-dealiasing resample config.  `resample_R_` is owned by the
+   /// driver (raw pointer; must outlive the iterator's use).  Inactive by
+   /// default ⇒ byte-exact.
+   const DenseMatrix  *resample_R_            = nullptr;
+   int                 resample_nbf_per_face_ = 0;
+   bool                resample_enabled_      = false;
 };
 
 /// @brief Unified rate-and-state sub-step iterator, parameterized by a

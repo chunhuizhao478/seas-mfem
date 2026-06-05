@@ -56,6 +56,7 @@
 #include "../dynamic/tpv205_substep_iterator.hpp"
 #include "../dynamic/friction_iterator.hpp"           // Phase 2: IFrictionIterator + adapters
 #include "../dynamic/friction_iterator_factory.hpp"   // Phase 3: MakeFrictionIterator
+#include "../dynamic/fault_resample.hpp"              // Phase 3: BuildFaultResampleMatrix
 #include "../dynamic/heterogeneous_material.hpp"
 #include "../dynamic/spatial_setup.hpp"
 #include "../dynamic/seas_diag_rank.hpp"
@@ -199,11 +200,14 @@ ParaViewOutput<ParMesh>::FaultOutputMode ParseFaultMode(
               << s << "'.  Accepted: hdf5 | vtu | off.");
 }
 
-// Compute the count of fault QPs per face using the same probe logic as
-// drivers/tpv205_driver.cpp:1265-1284: peek at the first interior or
-// shared fault face on this rank, then MPI_Allreduce(MAX) so every
-// rank agrees.
-int ProbeNbfPerFace(ParMesh &pmesh, int order,
+// Compute the count of fault QPs per face for a given fault-face quadrature
+// exactness degree.  Peek at the first interior or shared fault face on this
+// rank, then MPI_Allreduce(MAX) so every rank agrees.
+//
+// Phase 4: callers pass `wave.FaultFaceQuadDegree()` (= 2*order with
+// over-integration off, so this is byte-identical to the prior `2*order`
+// probe; = 2*(order+k) with `--fault-overint k`).
+int ProbeNbfPerFace(ParMesh &pmesh, int fault_quad_degree,
                     const Array<int> &fault_int_faces,
                     const Array<int> &fault_shr_faces,
                     MPI_Comm comm)
@@ -214,7 +218,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
       FaceElementTransformations *ftr =
          pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
       MFEM_VERIFY(ftr, "spatial_dyn: fault interior face has null FTR");
-      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+      nbf = IntRules.Get(ftr->GetGeometryType(), fault_quad_degree).GetNPoints();
    }
 #ifdef MFEM_USE_MPI
    else if (fault_shr_faces.Size() > 0)
@@ -222,7 +226,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
       FaceElementTransformations *ftr =
          pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
       MFEM_VERIFY(ftr, "spatial_dyn: fault shared face has null FTR");
-      nbf = IntRules.Get(ftr->GetGeometryType(), 2 * order).GetNPoints();
+      nbf = IntRules.Get(ftr->GetGeometryType(), fault_quad_degree).GetNPoints();
    }
    {
       int local_nbf = nbf;
@@ -249,7 +253,7 @@ int ProbeNbfPerFace(ParMesh &pmesh, int order,
 //     (FaultGeometry::fault_dof_ip cache; consumed by
 //     spatial_setup.hpp's IP-aware overload).
 void BuildPerDOFFaultTables(ParMesh &pmesh,
-                            int order,
+                            int fault_quad_degree,
                             int fault_attr,
                             const FaultBasis &fbasis,
                             const Array<int> &fault_int_faces,
@@ -327,7 +331,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
          pmesh.GetInteriorFaceTransformations(face);
       MFEM_VERIFY(ftr, "spatial_dyn: interior fault face has null FTR");
       const IntegrationRule &ir =
-         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+         IntRules.Get(ftr->GetGeometryType(), fault_quad_degree);
       MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
                   "spatial_dyn: interior fault face has " << ir.GetNPoints()
                   << " QPs, expected " << nbf_per_face);
@@ -345,7 +349,7 @@ void BuildPerDOFFaultTables(ParMesh &pmesh,
          pmesh.GetSharedFaceTransformations(sf);
       MFEM_VERIFY(ftr, "spatial_dyn: shared fault face has null FTR");
       const IntegrationRule &ir =
-         IntRules.Get(ftr->GetGeometryType(), 2 * order);
+         IntRules.Get(ftr->GetGeometryType(), fault_quad_degree);
       MFEM_VERIFY(ir.GetNPoints() == nbf_per_face,
                   "spatial_dyn: shared fault face has " << ir.GetNPoints()
                   << " QPs, expected " << nbf_per_face);
@@ -556,6 +560,15 @@ int main(int argc, char *argv[])
    const real_t cli_tfinal     = GetRealArg(argc, argv, "--tfinal", -1.0);
    const real_t cli_cfl        = GetRealArg(argc, argv, "--cfl", -1.0);
    const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
+   // Phase 4: --fault-overint K — fault-flux over-integration factor (0 = off,
+   // byte-exact).  Applied via WaveOperator::SetFaultOverint after the operator
+   // is built (below).
+   const int    cli_fault_overint = GetIntArg(argc, argv, "--fault-overint", 0);
+   // Phase 3: --fault-resample — secular resample of the rate-state Δψ increment
+   // (degree-N L2 projection per fault face).  Default off ⇒ byte-exact.  A
+   // no-op without over-integration at a unisolvent rule (R = I); rate-state
+   // only (LSW resample is not implemented — see the guard below).
+   const bool   cli_fault_resample = HasFlag(argc, argv, "--fault-resample");
    // Phase 14: --time-integrator ader|rk4|rk45 (mirror --ader-order; empty ⇒
    // keep the TOML/default).  Validated in the config-override block below.
    const std::string cli_time_integrator =
@@ -1273,6 +1286,37 @@ int main(int argc, char *argv[])
       }
    }
 
+   // Phase 4 (fault-dealiasing §6): fault-flux over-integration.
+   // --fault-overint K (default 0 = off = byte-exact) raises the FAULT-face
+   // quadrature to degree 2*(order+K) for the friction solve + flux assembly,
+   // decoupled from the bulk 2*order rule.  Placed AFTER SetMixedFluxMode so
+   // SetFaultOverint's guard sees the real mixed-flux mode, and BEFORE the
+   // fault-table setup below — it grows nbf_per_face_, which ProbeNbfPerFace /
+   // the FaultBasis QP probe / BuildPerDOFFaultTables / SetFaultDOFData all
+   // read via wave.FaultFaceQuadDegree() / wave.GetNbfPerFace().  Honoured on
+   // both the scalar and matrix (BimaterialWaveOperator) paths (the fault-flux
+   // routines live in the base WaveOperator).
+   MFEM_VERIFY(cli_fault_overint >= 0,
+               "--fault-overint: factor K must be >= 0, got "
+               << cli_fault_overint);
+   if (cli_fault_overint > 0)
+   {
+      wave.SetFaultOverint(cli_fault_overint);
+      if (rank == 0)
+      {
+         // NB: do NOT print wave.GetNbfPerFace() here — it is the PER-RANK
+         // local fault-QP count, which is 0 on a rank that owns no fault faces
+         // (e.g. rank 0 in most partitions).  The authoritative global per-face
+         // count is the Allreduce'd "[fault] QPs per face = N" line printed
+         // after ProbeNbfPerFace below.
+         std::cout << "[fault] over-integration ON (--fault-overint "
+                   << cli_fault_overint << "): fault-face quad degree "
+                   << wave.FaultFaceQuadDegree() << " vs baseline "
+                   << 2 * cfg.mesh.order << " (per-face QP count reported "
+                   "below as '[fault] QPs per face').\n";
+      }
+   }
+
    wave.SetTime(cfg.time.t_initial);
 
    // -----------------------------------------------------------------
@@ -1284,7 +1328,7 @@ int main(int argc, char *argv[])
    // MFEM_USE_MPI is unconditional in this driver (#error at L682
    // requires it), so the comm arg can be passed without the
    // #ifdef-in-argument-list dance (R-607 round-6).
-   const int nbf_per_face = ProbeNbfPerFace(pmesh, cfg.mesh.order,
+   const int nbf_per_face = ProbeNbfPerFace(pmesh, wave.FaultFaceQuadDegree(),
                                             fault_int_faces,
                                             fault_shr_faces, comm);
 
@@ -1330,8 +1374,11 @@ int main(int argc, char *argv[])
 #endif
       if (ftr_probe)
       {
+         // Phase 4: match WaveOperator's internal fault basis exactly — use the
+         // same (possibly over-integrated) fault-face quadrature degree.
          const IntegrationRule &qp_ir =
-            IntRules.Get(ftr_probe->GetGeometryType(), 2 * cfg.mesh.order);
+            IntRules.Get(ftr_probe->GetGeometryType(),
+                         wave.FaultFaceQuadDegree());
          fbasis.ComputeQPBasis(pmesh, fault_int_faces,
                                ref_normal, up_vec, qp_ir);
 #ifdef MFEM_USE_MPI
@@ -1348,7 +1395,7 @@ int main(int argc, char *argv[])
    Array<int>                   dof_to_elem;
    Array<int>                   dof_to_attr;
    std::vector<IntegrationPoint> dof_ips;
-   BuildPerDOFFaultTables(pmesh, cfg.mesh.order, bc.fault_attr,
+   BuildPerDOFFaultTables(pmesh, wave.FaultFaceQuadDegree(), bc.fault_attr,
                           fbasis, fault_int_faces, fault_shr_faces,
                           nbf_per_face,
                           fault_coords, dof_coords_3d, dof_basis,
@@ -1368,6 +1415,75 @@ int main(int argc, char *argv[])
                 << ", num_fault_global = " << num_fault_global
                 << " (local = " << num_fault_local
                 << ", shared = " << num_shared_fault << ")\n";
+   }
+
+   // Phase 3: build the per-face resample projector R once (degree-`order` L2
+   // projection on the fault-face over-integration GP set).  Affine faces share
+   // one reference R (the |J_F| scale cancels), so it is built from the
+   // reference rule on the fault-face geometry at wave.FaultFaceQuadDegree() —
+   // the SAME rule that defines the fault QPs (nbf_per_face).  Built on every
+   // rank (consistent geometry + rule ⇒ identical R, required for shared-face
+   // consistency); harmlessly unused on a rank with no fault QPs.
+   DenseMatrix fault_resample_R;
+   if (cli_fault_resample)
+   {
+      Geometry::Type face_geom = Geometry::TRIANGLE;
+      FaceElementTransformations *probe_ftr = nullptr;
+      if (fault_int_faces.Size() > 0)
+      {
+         probe_ftr = pmesh.GetInteriorFaceTransformations(fault_int_faces[0]);
+         if (probe_ftr) { face_geom = probe_ftr->GetGeometryType(); }
+      }
+#ifdef MFEM_USE_MPI
+      else if (fault_shr_faces.Size() > 0)
+      {
+         probe_ftr = pmesh.GetSharedFaceTransformations(fault_shr_faces[0]);
+         if (probe_ftr) { face_geom = probe_ftr->GetGeometryType(); }
+      }
+#endif
+      const IntegrationRule &rs_ir =
+         IntRules.Get(face_geom, wave.FaultFaceQuadDegree());
+      MFEM_VERIFY(rs_ir.GetNPoints() == nbf_per_face,
+                  "spatial_dyn: resample rule has " << rs_ir.GetNPoints()
+                  << " QPs but nbf_per_face = " << nbf_per_face
+                  << " — the resample rule must match the fault QP rule.");
+
+      // R-003: the single reference R assumes AFFINE fault faces (|J_F| constant
+      // over the face ⇒ the geometric scale cancels in the projector,
+      // dynamic/fault_resample.hpp).  On a curved (isoparametric) face |J_F|
+      // varies within the face and the reference-measure R is NOT the
+      // physical-L2(dA) projector of plan Eq. (4.2).  Verify on the probe face
+      // by sampling |J_F| at the rule's QPs (all current targets use straight-
+      // sided tets ⇒ flat faces ⇒ this passes trivially).
+      if (probe_ftr)
+      {
+         real_t jmin = std::numeric_limits<real_t>::max(), jmax = 0.0;
+         for (int q = 0; q < rs_ir.GetNPoints(); ++q)
+         {
+            probe_ftr->SetAllIntPoints(&rs_ir.IntPoint(q));
+            const real_t jw = probe_ftr->Face->Weight();   // |J_F| at this QP
+            jmin = std::min(jmin, jw);
+            jmax = std::max(jmax, jw);
+         }
+         MFEM_VERIFY(jmax - jmin <= 1e-10 * jmax,
+                     "spatial_dyn: --fault-resample requires AFFINE (straight-"
+                     "sided) fault faces; |J_F| varies by "
+                     << (jmax - jmin) / jmax << " on the probe face, so the "
+                     "single reference resample R is invalid (curved fault face). "
+                     "Build R per face with per-QP |J_F| weighting to support it.");
+      }
+
+      BuildFaultResampleMatrix(face_geom, cfg.mesh.order, rs_ir, fault_resample_R);
+      if (rank == 0)
+      {
+         std::cout << "[fault] resample ON (--fault-resample): degree-"
+                   << cfg.mesh.order << " L2 projector, " << nbf_per_face
+                   << " QPs/face"
+                   << (cli_fault_overint > 0
+                       ? ""
+                       : "  (INACTIVE without --fault-overint: a true no-op)")
+                   << "\n";
+      }
    }
 
    // -----------------------------------------------------------------
@@ -2614,6 +2730,55 @@ int main(int argc, char *argv[])
    // are LOCAL/interior so the env-gated [SLIP] trace can tag each QP shared
    // vs interior (dof_data is laid out interior [0,n_local) then shared).
    substep_iterator.SetDiagNumLocalFaultQPs(wave.GetNumLocalFaultQPs());
+
+   // Phase 3: wire the secular slip/state resample onto the iterator.  Both laws
+   // are now supported (R-001 fix, 2026-06-04):
+   //   - rate-state (TPV102/104): resamples the per-macro-step Δψ increment.
+   //   - LSW (TPV205/TPV31): resamples the per-macro-step accumulated-slip-
+   //     MAGNITUDE increment (path length Σ|V|·dt, plan §4.2/§6 Phase 3) and
+   //     rescales the directional slip (slip1,slip2) to the dealiased magnitude,
+   //     preserving direction.  τ_corr / the slip-rate stay from the un-resampled
+   //     friction solve (plan §6 Phase 3 — "do not rebuild τ_corr from a
+   //     resampled quantity").
+   // R-002: the resample is the SECULAR layer applied ON TOP OF over-integration
+   // (plan §4.2: "resample is a no-op without over-integration; over-integration
+   // is the prerequisite").  Gate it on over-integration being ON, NOT on the
+   // per-face head-count: on a TRIANGLE face the minimal 2*order rule is
+   // over-determined for p>=3 (#QP > #DOF ⇒ R != I), so keying off (#QP != #DOF)
+   // would make --fault-resample ALONE act at p>=3, violating the §Acceptance
+   // "resample alone ⇒ byte-exact" contract.  With over-integration off,
+   // resample_active is false at EVERY order ⇒ a TRUE no-op (byte-exact).
+   const bool resample_active = cli_fault_resample && (cli_fault_overint > 0);
+
+   // R-004 (plan §4.2 / §Phase 4 step 2): the resample must be OFF across a
+   // genuine fault-normal material contrast (SeisSol's BiMaterialFault —
+   // "resampling introduces artificial oscillations").  The spatial setup sets
+   // Zp_plus==Zp_minus / Zs_plus==Zs_minus per DOF (the matrix path is
+   // depth-heterogeneity, equal across the fault at each QP), so this never
+   // trips today; it guards a future genuine-contrast configuration.
+   if (resample_active)
+   {
+      int local_contrast = 0;
+      for (const DOFData &d : dof_data)
+      {
+         if (d.Zp_plus != d.Zp_minus || d.Zs_plus != d.Zs_minus)
+         { local_contrast = 1; break; }
+      }
+      int global_contrast = local_contrast;
+#ifdef MFEM_USE_MPI
+      MPI_Allreduce(&local_contrast, &global_contrast, 1, MPI_INT, MPI_MAX, comm);
+#endif
+      MFEM_VERIFY(!global_contrast,
+                  "--fault-resample is invalid across a genuine fault-normal "
+                  "material contrast (Zp_plus != Zp_minus or Zs_plus != Zs_minus): "
+                  "resampling introduces artificial oscillations (SeisSol "
+                  "BiMaterialFault, plan §4.2).  Disable --fault-resample for "
+                  "that configuration.");
+   }
+
+   substep_iterator.SetFaultResample(
+      resample_active ? &fault_resample_R : nullptr,
+      nbf_per_face, resample_active);
 
    // Phase 7: per-sub-step nucleation hook, dispatched through the
    // INucleationMethod strategy.  Fires once per ADER sub-step BEFORE the

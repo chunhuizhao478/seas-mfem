@@ -84,6 +84,18 @@ public:
    /// Diagnostic [SLIP] is_shared hook (forwarded; no-op for TPV102).
    virtual void SetDiagNumLocalFaultQPs(int n) = 0;
 
+   /// Phase 3 (fault-dealiasing §6): configure the secular RESAMPLE of the
+   /// accumulated state increment.  `R` is the per-face degree-N L2 projector
+   /// (dynamic/fault_resample.hpp), `nbf_per_face` the QP count per fault face,
+   /// `enabled` the `--fault-resample` gate.  Rate-state iterators resample the
+   /// per-macro-step Δψ; iterators that do not support resample ignore this.
+   /// `R` must outlive every Advance() call.  When `enabled` is false the
+   /// resample is skipped (byte-exact); when R is the identity (no
+   /// over-integration ⇒ a unisolvent rule) it is a no-op (also byte-exact).
+   /// Default no-op so the deprecated Phase-2 adapters need no change.
+   virtual void SetFaultResample(const DenseMatrix * /*R*/,
+                                 int /*nbf_per_face*/, bool /*enabled*/) {}
+
    /// The wave-operator fault friction law this iterator drives.  The
    /// driver passes it to `wave.SetFaultFrictionLaw(...)`.
    virtual FaultFrictionLaw WaveOpLaw() const = 0;
