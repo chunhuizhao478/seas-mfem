@@ -1674,10 +1674,13 @@ void WaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
                  "Disable precomputed flux first.");
    }
 
-   // Phase 13: the matrix (bimaterial) × mixed-flux mutual exclusion (REVIEW
-   // R-003) is now STRUCTURAL — this scalar `WaveOperator` has no per-element
-   // flux pool, and `BimaterialWaveOperator::SetMixedFluxMode` overrides this
-   // method to abort on any non-None mode.  So no pool guard is needed here.
+   // (Mixed-flux + bi-material, Phase 3) The REVIEW R-003 matrix x mixed-flux
+   // mutual exclusion has been LIFTED: `BimaterialWaveOperator::SetMixedFluxMode`
+   // now delegates to THIS base method (for validation, the rank-consistency
+   // mode check, and BuildCentralFluxFaceSet_) and then precomputes per-face
+   // CENTRAL matrices, dispatching the bi-material central flux alongside the
+   // bi-material Godunov upwind.  This scalar `WaveOperator` still has no
+   // per-element flux pool, so no pool guard is needed here.
 
    // R-1205: Adjacent mode requires fault attribute and a populated fault
    // face list.  AllContinuous works even without a fault.
@@ -5911,80 +5914,66 @@ void WaveOperator<MeshType>::AssembleElementMassInverse()
 }
 
 // ---------------------------------------------------------------------------
-// CFL time step
+// (Phase 4, BUG-2) Mixed-flux CFL de-rating factor — the SINGLE source of truth
+// shared by the scalar ComputeMaxDt and BimaterialWaveOperator::ComputeMaxDt
+// (so the matrix path can no longer diverge from the scalar path).
+//
+// R-1403 + R-1502: central flux is non-dissipative; the CFL stability factor
+// depends on the FRACTION of faces using central vs upwind.  Zhang 2023 §3.3
+// cites CFL≈0.3 for mixed-flux vs 0.5 for pure upwind; the per-mode ratio:
+//   Adjacent      (~5-10% central): dominantly upwind  → 0.9× ADER guard band.
+//   AllContinuous (~95% central):   nearly non-dissipative → 0.4× ADER.
+// Phase 14.4 RK-aware branch (cfl_rk_aware_, set by the --time-integrator
+// rk4|rk45 driver branch; default false ⇒ ADER factors, byte-exact): central
+// flux's fault-adjacent eigenvalues λ=iω sit on the imaginary axis, which an
+// explicit RK of order ≥3 covers (|λ|·dt < y_max≈2.83) but ADER-O2's
+// R(z)=1+z+z²/2 does NOT — hence the RK requirement (BUILD §5.4/§6.3).  The
+// driver supplies the DG-order de-rating (RkCflFactor=3/(2N+1)) via `cfl`.
+// These factors are a starting calibration; RK stability is validated on the
+// §14.5 Frontera run, not a local unit test.
 // ---------------------------------------------------------------------------
+template <typename MeshType>
+real_t WaveOperator<MeshType>::MixedFluxCflFactor_() const
+{
+   switch (mixed_flux_mode_)
+   {
+      case MixedFluxMode::None:          return 1.0;
+      case MixedFluxMode::Adjacent:      return cfl_rk_aware_ ? 0.6 : 0.9;
+      case MixedFluxMode::AllContinuous: return cfl_rk_aware_ ? 0.7 : 0.4;
+      default:
+         // R-1600: a new MixedFluxMode reaches this default and ABORTS — a
+         // silent fall-through (factor 1.0, full upwind CFL) would destabilize
+         // multi-step production.  Adding a mode REQUIRES adding its factor.
+         MFEM_ABORT("MixedFluxCflFactor_: unknown MixedFluxMode "
+                    << static_cast<int>(mixed_flux_mode_)
+                    << " (R-1600 fall-through guard).  Adding a new "
+                    "MixedFluxMode REQUIRES adding the corresponding CFL "
+                    "factor here.");
+   }
+   return 1.0;   // unreachable: MFEM_ABORT is [[noreturn]].  Kept for clarity.
+}
+
 template <typename MeshType>
 real_t WaveOperator<MeshType>::ComputeMaxDt(real_t cfl) const
 {
    MFEM_PERF_SCOPE("seas::WaveOperator::ComputeMaxDt");
-   // R-1403 + R-1502: central flux is non-dissipative; the CFL stability
-   // factor depends on the FRACTION of faces using central vs upwind,
-   // not just whether mixed-flux is engaged.  Zhang 2023 §3.3 cites
-   // CFL=0.3 for mixed-flux runs vs CFL=0.5 for pure upwind; the ratio
-   // that applies to a given mode depends on its central-face density:
-   //
-   //   Adjacent      (~5-10% central): operator dominantly upwind →
-   //                                    CFL near pure upwind.  0.9×
-   //                                    is a slight guard band.
-   //   AllContinuous (~95% central):    operator nearly non-dissipative
-   //                                    → explicit RK4/ADER stability
-   //                                    significantly tighter.  0.4×
-   //                                    is close to Zhang's 0.3-equiv.
-   //
-   // The ADER factors are interim placeholders pending a multi-step
-   // stability calibration on the production fixture.  Drivers that
-   // calibrate CFL externally can compensate via the `cfl` argument.
-   //
-   // Phase 14.4 — RK-aware branch (cfl_rk_aware_, set by the spatial driver's
-   // --time-integrator rk4|rk45 path; default false ⇒ ADER, byte-exact):
-   //
-   //   Central flux (GodunovFlux::Central, used on the mixed-flux faces) is
-   //   non-dissipative, so the fault-adjacent eigenvalues λ = iω sit on the
-   //   imaginary axis.  An explicit RK of order ≥ 3 has a stability region
-   //   that contains a segment of the imaginary axis (RK4 / RK4-class DP45:
-   //   |λ|·dt < y_max ≈ 2√2 ≈ 2.83); ADER-O2's R(z)=1+z+z²/2 does NOT, which
-   //   is exactly why mixed/central flux ran away under ADER (BUILD §5.4/§6.3)
-   //   and needs the RK integrator.  The DRDG3D-anchored empirical mixed-flux
-   //   target is an effective CFL ≈ 0.3 for Adjacent (≈0.3–0.4 AllContinuous).
-   //
-   //   These RK factors are applied here as the central-face-density de-rating
-   //   relative to the pure-upwind RK base; the spatial driver supplies the
-   //   DG-order de-rating (spatial::RkCflFactor = 3/(2N+1)) through the `cfl`
-   //   argument.  At N=1, cfg.numerics.cfl=0.5 the product lands the effective
-   //   CFL at None→0.5, Adjacent→0.30, AllContinuous→0.35 (in the empirical
-   //   targets).  Starting calibration: the production validation of the RK
-   //   stability is the §14.5 Frontera run, not a local unit test.
-   real_t cfl_mixed_flux_factor = 1.0;
-   switch (mixed_flux_mode_)
-   {
-      case MixedFluxMode::None:
-         cfl_mixed_flux_factor = 1.0;
-         break;
-      case MixedFluxMode::Adjacent:
-         cfl_mixed_flux_factor = cfl_rk_aware_ ? 0.6 : 0.9;
-         break;
-      case MixedFluxMode::AllContinuous:
-         cfl_mixed_flux_factor = cfl_rk_aware_ ? 0.7 : 0.4;
-         break;
-      default:
-         // R-1600: any future MixedFluxMode value reaches this default
-         // and ABORTS — silent fall-through (with cfl_factor=1.0, i.e.,
-         // full upwind CFL) would destabilize multi-step production.
-         // Adding a new mode REQUIRES adding the corresponding factor
-         // here.
-         MFEM_ABORT("ComputeMaxDt: unknown MixedFluxMode "
-                    << static_cast<int>(mixed_flux_mode_)
-                    << " (R-1600 fall-through guard).  Adding a new "
-                    "MixedFluxMode REQUIRES adding the corresponding "
-                    "CFL factor in this switch.");
-   }
+   // (Phase 4) Central flux is non-dissipative ⇒ unstable under ADER; it
+   // REQUIRES an explicit RK integrator.  Guard central+ADER on BOTH operators
+   // (same condition + message as BimaterialWaveOperator::ComputeMaxDt and the
+   // Phase-5 driver guard), so neither can run it.  No-op for mixed_flux=none
+   // (the byte-exact ADER / TPV / BP5 / scalar-SAFS contract).
+   MFEM_VERIFY(mixed_flux_mode_ == MixedFluxMode::None || cfl_rk_aware_,
+               "WaveOperator::ComputeMaxDt: mixed (central) flux is "
+               "non-dissipative and UNSTABLE under ADER; it requires an RK "
+               "integrator (SetCflRkAware(true), set by the --time-integrator "
+               "rk4|rk45 driver branch).  Use mixed_flux=\"none\" under ADER.");
 
-   // Scalar (homogeneous) CFL.  Phase 13 moved the per-element
-   // heterogeneous walk (per_elem_h_ / per_elem_lmr_ + MPI_Allreduce(MIN))
-   // to BimaterialWaveOperator::ComputeMaxDt; this scalar class uses the
-   // single material `flux_` and the geometric `h_min_` directly — the
+   // Scalar (homogeneous) CFL: factor * cfl * h_min_ / cp.  Factor from the
+   // shared MixedFluxCflFactor_() (Phase 4 BUG-2).  Phase 13 moved the
+   // per-element heterogeneous walk to BimaterialWaveOperator::ComputeMaxDt;
+   // this scalar class uses h_min_ + the single `flux_` directly — the
    // pre-Phase-9 byte-exact formula for every TPV / BP5 / scalar-SAFS run.
-   return cfl_mixed_flux_factor * cfl * h_min_ / flux_.GetCp();
+   return MixedFluxCflFactor_() * cfl * h_min_ / flux_.GetCp();
 }
 
 // ---------------------------------------------------------------------------

@@ -18,7 +18,11 @@
 #include "../../spatial/code/spatial_friction.hpp"
 
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 #include <sys/stat.h>
 
@@ -54,6 +58,27 @@ std::string FindConfig(const std::string& rel)
       if (FileExists(p)) { return p; }
    }
    return "";
+}
+
+std::string ReadFile(const std::string& p)
+{
+   std::ifstream in(p, std::ios::binary);
+   std::ostringstream ss; ss << in.rdbuf();
+   return ss.str();
+}
+void WriteFile(const std::string& p, const std::string& s)
+{
+   std::ofstream out(p, std::ios::binary | std::ios::trunc);
+   out << s;
+}
+// Replace the FIRST occurrence of `from` with `to`; returns false if `from`
+// was not present (so a test can fail loud rather than silently no-op).
+bool ReplaceFirst(std::string& s, const std::string& from, const std::string& to)
+{
+   const std::size_t pos = s.find(from);
+   if (pos == std::string::npos) { return false; }
+   s.replace(pos, from.size(), to);
+   return true;
 }
 } // anon
 
@@ -271,12 +296,153 @@ static void T_numerics_dispatch_helpers()
                "default-constructed config passes FaultIteratorSupported (R-001)");
 }
 
+// ---------------------------------------------------------------------
+// (Phase 5, BUG-21/22) TPV31 (matrix + depth_profile_1d) parser regression.
+// Test 5.3c: the additive seam_continuous parse + the G1 relaxation must not
+// perturb the existing TPV31 config fields, and seam_continuous defaults false.
+// ---------------------------------------------------------------------
+static void T_TPV31_Regression(const std::string& path)
+{
+   std::cout << "\n[TPV31 regression] parse " << path << "\n";
+   spatial::SpatialFrictionConfig cfg = spatial::LoadSpatialFrictionConfig(path);
+
+   // Key fields the Phase-5 parser edits sit adjacent to — unchanged.
+   TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+               "tpv31 interior_flux == matrix (unchanged)");
+   TEST_ASSERT(cfg.numerics.mixed_flux == "none",
+               "tpv31 mixed_flux == none (unchanged; G1 relaxation did not flip it)");
+   TEST_ASSERT(cfg.material.kind == spatial::MaterialKind::DepthProfile1D,
+               "tpv31 material.kind == depth_profile_1d (unchanged)");
+   TEST_ASSERT(cfg.material.depth_axis == 'z',
+               "tpv31 material.depth_axis == 'z' (unchanged)");
+   TEST_ASSERT(!cfg.material.profile_layers.empty(),
+               "tpv31 material profile layers parsed (unchanged)");
+   // The additive field: absent in the TOML ⇒ defaults false.
+   TEST_ASSERT(cfg.material.seam_continuous == false,
+               "tpv31 material.seam_continuous defaults false (key omitted)");
+}
+
+// ---------------------------------------------------------------------
+// Test 5.3a + 5.3b: derive a matrix + adjacent + seam_continuous=true config
+// from the real TPV31 TOML (string-mutated copy; the parser stores referenced
+// paths as strings without resolving them, so an in-place temp copy parses
+// identically).  Asserts G1 no longer aborts on matrix+adjacent and that
+// seam_continuous round-trips into MaterialSpec.
+// ---------------------------------------------------------------------
+static void T_TPV31_MatrixAdjacentSeam(const std::string& path)
+{
+   std::cout << "\n[TPV31 matrix+adjacent+seam] derive from " << path << "\n";
+   std::string toml = ReadFile(path);
+   const bool r1 = ReplaceFirst(toml, "mixed_flux     = \"none\"",
+                                       "mixed_flux     = \"adjacent\"");
+   // Newline-anchored so we hit the standalone `[material]` config line, NOT
+   // the `In canonical: depth_axis = "z" ...` comment earlier in the file.
+   const bool r2 = ReplaceFirst(toml, "\ndepth_axis = \"z\"\n",
+                                       "\ndepth_axis = \"z\"\nseam_continuous = true\n");
+   TEST_ASSERT(r1, "5.3a: located + flipped mixed_flux none->adjacent in TPV31 TOML");
+   TEST_ASSERT(r2, "5.3b: located the depth_axis config line to inject seam_continuous=true");
+
+   // (P5-3) Write to TMPDIR, NOT the source tree: LoadSpatialFrictionConfig
+   // MFEM_ABORTs (does not throw) on a parse failure, so a post-parse remove
+   // would leak the file into the repo on failure.  TMPDIR keeps any leak out
+   // of the tracked tree.  The parser stores referenced paths as strings
+   // without resolving them, so the temp location is irrelevant to parsing.
+   const char* td = std::getenv("TMPDIR");
+   const std::string tmpdir = (td && *td) ? std::string(td) : std::string("/tmp");
+   const std::string tmp = tmpdir + "/seas_tpv31_matrixadj_TESTGEN.toml";
+   WriteFile(tmp, toml);
+   // G1 (spatial_friction.cpp:1162) would have aborted here pre-Phase-5.
+   spatial::SpatialFrictionConfig cfg = spatial::LoadSpatialFrictionConfig(tmp);
+   std::remove(tmp.c_str());
+
+   TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+               "5.3a: interior_flux == matrix");
+   TEST_ASSERT(cfg.numerics.mixed_flux == "adjacent",
+               "5.3a: matrix + mixed_flux=adjacent parses WITHOUT G1 abort (BUG-21)");
+   TEST_ASSERT(cfg.material.seam_continuous == true,
+               "5.3b: [material].seam_continuous=true round-trips into MaterialSpec (BUG-22)");
+}
+
+// ---------------------------------------------------------------------
+// (Phase 7) The shipped tpv31_rk_mixedflux.toml ARTIFACT parses past G1 and the
+// G2 decision is correct: matrix + adjacent + seam_continuous, REJECTED under
+// the TOML's default ADER, ALLOWED under the job's --time-integrator rk45.
+// ---------------------------------------------------------------------
+static void T_TPV31_RkMixedFlux(const std::string& path)
+{
+   std::cout << "\n[TPV31 rk_mixedflux artifact] parse " << path << "\n";
+   spatial::SpatialFrictionConfig cfg = spatial::LoadSpatialFrictionConfig(path);
+   TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+               "tpv31_rk_mixedflux interior_flux == matrix (preserved)");
+   TEST_ASSERT(cfg.numerics.mixed_flux == "adjacent",
+               "tpv31_rk_mixedflux mixed_flux == adjacent (parses past G1)");
+   TEST_ASSERT(cfg.material.seam_continuous == true,
+               "tpv31_rk_mixedflux [material].seam_continuous == true");
+   TEST_ASSERT(cfg.material.kind == spatial::MaterialKind::DepthProfile1D,
+               "tpv31_rk_mixedflux material.kind == depth_profile_1d (unchanged)");
+   // G2: under the TOML default (ADER) the driver would REJECT; the job's CLI
+   // --time-integrator rk45 (applied before G2) flips it to ALLOWED.
+   TEST_ASSERT(spatial::MatrixMixedFluxUnderAder(cfg),
+               "tpv31_rk_mixedflux: G2 REJECTS under ADER (the TOML default)");
+   cfg.numerics.time_integrator = spatial::TimeIntegratorKind::RK45;
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(cfg),
+               "tpv31_rk_mixedflux: G2 ALLOWS under --time-integrator rk45 (the job CLI)");
+}
+
+// ---------------------------------------------------------------------
+// (Phase 5, Tests 5.1/5.2) Driver G2 decision — table-test the PURE predicate
+// spatial::MatrixMixedFluxUnderAder that the driver's G2 MFEM_VERIFY uses
+// verbatim.  Covers the exact guard decision (matrix+mixed+ADER -> reject;
+// matrix+mixed+RK -> allow; matrix+none -> allow; scalar -> allow) WITHOUT
+// building the driver/operator/mesh.  No files needed.
+// ---------------------------------------------------------------------
+static void T_G2_MatrixMixedFluxUnderAder()
+{
+   std::cout << "\n[Phase 5 G2] MatrixMixedFluxUnderAder truth table\n";
+   using spatial::InteriorFlux;
+   using spatial::TimeIntegratorKind;
+   auto make = [](InteriorFlux ifx, const std::string& mf, TimeIntegratorKind ti)
+   {
+      spatial::SpatialFrictionConfig c;
+      c.numerics.interior_flux   = ifx;
+      c.numerics.mixed_flux      = mf;
+      c.numerics.time_integrator = ti;
+      return c;
+   };
+   // Test 5.2: matrix + mixed + ADER -> G2 rejects (predicate true).
+   TEST_ASSERT(spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "adjacent", TimeIntegratorKind::ADER)),
+               "5.2: matrix + adjacent + ADER -> G2 rejects (predicate true)");
+   TEST_ASSERT(spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "all_continuous", TimeIntegratorKind::ADER)),
+               "5.2: matrix + all_continuous + ADER -> G2 rejects");
+   // Test 5.1: matrix + mixed + RK -> G2 allows (predicate false).
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "adjacent", TimeIntegratorKind::RK4)),
+               "5.1: matrix + adjacent + RK4 -> G2 allows (predicate false)");
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "adjacent", TimeIntegratorKind::RK45)),
+               "5.1: matrix + adjacent + RK45 -> G2 allows");
+   // matrix + none -> allowed under either integrator (bi-material Godunov upwind).
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "none", TimeIntegratorKind::ADER)),
+               "matrix + none + ADER -> G2 allows (the existing TPV31 path)");
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Matrix, "none", TimeIntegratorKind::RK4)),
+               "matrix + none + RK4 -> G2 allows");
+   // scalar -> G2 never constrains (scalar mixed+ADER caught downstream by ComputeMaxDt).
+   TEST_ASSERT(!spatial::MatrixMixedFluxUnderAder(
+                  make(InteriorFlux::Scalar, "adjacent", TimeIntegratorKind::ADER)),
+               "scalar + adjacent + ADER -> G2 allows (scalar not constrained by G2)");
+}
+
 int main(int, char**)
 {
    std::cout << "Running Phase 8 TPV config-parse tests\n";
 
    // Numerics-selector helper tests run unconditionally (no files needed).
    T_numerics_dispatch_helpers();
+   T_G2_MatrixMixedFluxUnderAder();   // Phase 5 Tests 5.1/5.2 (no files needed)
 
    const std::string p205 = FindConfig("tpv205/configs/tpv205_spatial.toml");
    const std::string p102 = FindConfig("tpv102/configs/tpv102_spatial.toml");
@@ -294,6 +460,52 @@ int main(int, char**)
    T_TPV205(p205);
    T_TPV102(p102);
    T_TPV104(p104);
+
+   // (Phase 5, Test 5.3) TPV31 (matrix + depth_profile_1d): regression + the
+   // new matrix+adjacent+seam_continuous parse.
+   const std::string p31    = FindConfig("tpv31/configs/tpv31.toml");
+   const std::string p31_p2 = FindConfig("tpv31/configs/tpv31_p2.toml");
+   const std::string p31_p3 = FindConfig("tpv31/configs/tpv31_p3.toml");
+   const std::string p31_rkmf = FindConfig("tpv31/configs/tpv31_rk_mixedflux.toml");
+   const std::string p31_p2_rkmf = FindConfig("tpv31/configs/tpv31_p2_rk_mixedflux.toml");
+   if (!p31.empty())
+   {
+      T_TPV31_Regression(p31);          // 5.3c
+      T_TPV31_MatrixAdjacentSeam(p31);  // 5.3a + 5.3b
+      if (!p31_rkmf.empty()) { T_TPV31_RkMixedFlux(p31_rkmf); }  // Phase 7 artifact (p1)
+      // Phase 7 p2 artifact: same matrix+adjacent+seam_continuous + order=2.
+      if (!p31_p2_rkmf.empty())
+      {
+         std::cout << "\n[TPV31 p2 rk_mixedflux artifact] parse " << p31_p2_rkmf << "\n";
+         spatial::SpatialFrictionConfig cfg =
+            spatial::LoadSpatialFrictionConfig(p31_p2_rkmf);
+         TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+                     "tpv31_p2_rk_mixedflux interior_flux == matrix");
+         TEST_ASSERT(cfg.numerics.mixed_flux == "adjacent",
+                     "tpv31_p2_rk_mixedflux mixed_flux == adjacent (parses past G1)");
+         TEST_ASSERT(cfg.material.seam_continuous == true,
+                     "tpv31_p2_rk_mixedflux [material].seam_continuous == true");
+         TEST_ASSERT(cfg.mesh.order == 2,
+                     "tpv31_p2_rk_mixedflux [mesh].order == 2 (p2)");
+      }
+      // p2/p3 share the parser; assert only the additive field's default
+      // (their other fields are not part of the previously-asserted corpus).
+      for (const std::string& pv : {p31_p2, p31_p3})
+      {
+         if (pv.empty()) { continue; }
+         std::cout << "\n[TPV31 p-variant] parse " << pv << "\n";
+         spatial::SpatialFrictionConfig cfg = spatial::LoadSpatialFrictionConfig(pv);
+         TEST_ASSERT(cfg.material.seam_continuous == false,
+                     "tpv31 p-variant seam_continuous defaults false (key omitted)");
+         TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+                     "tpv31 p-variant interior_flux == matrix (unchanged)");
+      }
+   }
+   else
+   {
+      std::cout << "(tpv31.toml not found relative to CWD; TPV31 parse tests "
+                   "skipped)\n";
+   }
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 8 config-parse: " << num_passed << " / " << num_tests

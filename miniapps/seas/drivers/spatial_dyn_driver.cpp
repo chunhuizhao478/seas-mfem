@@ -816,17 +816,29 @@ int main(int argc, char *argv[])
    //       (never LSW_ForcedRupture) at the SetFaultFrictionLaw call below, and
    //       the Mult-path dispatch aborts on LSW_ForcedRupture, so there is no
    //       reachable forced-rupture RK path here today;
-   //   (b) scalar interior flux only — mixed/central flux (the reason for RK)
-   //       is a scalar-path feature and is already mutually exclusive with the
-   //       matrix/bimaterial path.  rk* + matrix aborts (guard kept below).
+   //   (b) (Phase 5, BUG-4) interior flux — central/mixed flux is now SUPPORTED
+   //       on the matrix (bi-material) path too (PLAN_mixed_flux_hetero_riemann.md
+   //       Phases 1-4), but central flux is non-dissipative and UNSTABLE under
+   //       ADER, so `matrix + mixed_flux != none` REQUIRES RK (guard below,
+   //       mirroring WaveOperator::ComputeMaxDt).  `matrix + mixed_flux == none`
+   //       (bi-material Godunov upwind, dissipative) runs under either
+   //       integrator; `scalar` is unaffected here (scalar mixed+ADER is caught
+   //       downstream by ComputeMaxDt, P4-1).
    const bool is_rk =
       (cfg.numerics.time_integrator != spatial::TimeIntegratorKind::ADER);
-   MFEM_VERIFY(!is_rk
-               || cfg.numerics.interior_flux == spatial::InteriorFlux::Scalar,
-               "spatial_dyn_driver: --time-integrator rk4|rk45 requires "
-               "[numerics].interior_flux=\"scalar\".  Mixed/central flux (the "
-               "feature the RK path enables) is scalar-only and mutually "
-               "exclusive with the matrix/bimaterial path.");
+   const bool matrix_mixed =
+      (cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix
+       && cfg.numerics.mixed_flux != "none");
+   // G2 (BUG-4): central flux is non-dissipative ⇒ unstable under ADER.  Use
+   // the shared pure predicate (== the old `matrix_mixed && !is_rk`) so the
+   // EXACT driver guard decision is table-testable without a mesh (Tests
+   // 5.1/5.2 via spatial::MatrixMixedFluxUnderAder).
+   MFEM_VERIFY(!spatial::MatrixMixedFluxUnderAder(cfg),
+               "spatial_dyn_driver: interior_flux=\"matrix\" + mixed_flux=\""
+               << cfg.numerics.mixed_flux << "\" uses the non-dissipative "
+               "central flux, which is UNSTABLE under ADER; it requires an RK "
+               "integrator.  Set --time-integrator rk4|rk45, or use "
+               "mixed_flux=\"none\" under ADER.");
 
    // σ_n strength floor banner string (sliver-blowup plan 2026-05-26):
    // "DISABLED" for the negative sentinel, else the value in MPa.
@@ -1147,6 +1159,12 @@ int main(int argc, char *argv[])
       // to the per-element bimaterial overrides.
       wave_ptr = std::make_unique<BimaterialWaveOperator<ParMesh>>(
                     pmesh, cfg.mesh.order, material, bc);
+      // (Phase 5, BUG-22) Propagate [material].seam_continuous to the operator
+      // BEFORE SetMixedFluxMode (below), so BuildPerFaceCentralFluxMatrices_
+      // reads the configured value (not the default false) when gating the
+      // bi-material central flux on Mode::Coefficient SHARED faces at np>1.
+      static_cast<BimaterialWaveOperator<ParMesh>&>(*wave_ptr)
+         .SetSeamContinuous(cfg.material.seam_continuous);
    }
    WaveOperator<ParMesh> &wave = *wave_ptr;
 
@@ -1256,6 +1274,16 @@ int main(int argc, char *argv[])
                    "PRELIMINARY.\n";
    }
    wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
+
+   // (Phase 5, req 4) Headline banner for the combination this feature enables:
+   // the bi-material (matrix) operator dispatching central flux per-face.
+   if (rank == 0 && matrix_mixed)
+   {
+      std::cout << "[mixed-flux] matrix (bi-material) + "
+                << cfg.numerics.mixed_flux << " central flux enabled "
+                << "(seam_continuous=" << (cfg.material.seam_continuous
+                                           ? "true" : "false") << ")\n";
+   }
 
    // Prove the mixed-flux mode is NOT a silent no-op: report the GLOBAL
    // count of central-flux faces actually populated by
@@ -2012,9 +2040,16 @@ int main(int argc, char *argv[])
    // Phase 14.4: the RK path replaces the ADER 1/(3(2N+1)) de-rating with the
    // RK imaginary-axis stability bound (spatial::RkCflFactor) and flips the
    // operator's CFL switch to the RK-calibrated mixed-flux factors
-   // (SetCflRkAware).  The ADER branch is byte-unchanged (CflSafetyFactor +
-   // the default cfl_rk_aware_=false), so `--time-integrator ader` keeps the
-   // pre-Phase-14 dt to the bit.
+   // (SetCflRkAware).  For mixed_flux=none the ADER branch is byte-unchanged
+   // (CflSafetyFactor + the default cfl_rk_aware_=false), so `--time-integrator
+   // ader` keeps the pre-Phase-14 dt to the bit.
+   // (Phase 4, P4-1) For mixed_flux != none, ComputeMaxDt now ABORTS under ADER
+   // (central flux is non-dissipative => unstable under ADER's stability
+   // region) — central/mixed flux REQUIRES an RK integrator.  A bare ADER run
+   // of a mixed_flux=adjacent config (e.g. the spec-default tpv102/205_spatial
+   // TOMLs, which real jobs CLI-override to rk45 or --mixed-flux none)
+   // therefore fails loud with an actionable message rather than running an
+   // unstable scheme.
    if (is_rk) { wave.SetCflRkAware(true); }
    const real_t dt_cfl =
       is_rk

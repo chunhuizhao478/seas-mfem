@@ -202,6 +202,250 @@ def reference_filename(bench_dir, code, ref_label):
     return os.path.join(bench_dir, fname)
 
 
+# ---------------------------------------------------------------------------
+# Quantitative pass/fail gate (BUG-11/17/18/19/23): MFEM vs SCEC reference.
+#
+# Invoked by `--tol-rms` / `--tol-peak`.  Reuses the readers above; does NOT
+# rewrite them.  The metric is peak-normalized (BUG-17), gated by named
+# channels (BUG-18), interpolated onto the reference samples that fall inside
+# the explicit [t0,t1] overlap window (BUG-19), and guarded by a minimum
+# coverage fraction so a wall-truncated MFEM run cannot masquerade as
+# agreement (BUG-23).
+# ---------------------------------------------------------------------------
+
+#: Minimum fraction of the reference time span that the MFEM/reference overlap
+#: window must cover.  A run that overlaps less than this FAILS the coverage
+#: guard (BUG-23) — a wall-truncated / restart-failed MFEM run must not look
+#: like agreement over a tiny early window.
+MIN_COVERAGE_FRAC = 0.90
+
+#: Small absolute denominator floor for the peak-normalized metric (BUG-17),
+#: so pre-nucleation zero-crossings (where the reference amplitude is ~0) do
+#: not blow the relative error up.  Channels are in mixed units (m, m/s, MPa);
+#: this floor is a generic guard, not a physical scale.
+METRIC_FLOOR = 1.0e-6
+
+#: Floor on the peak |reference dip motion| below which a station's `_dip`
+#: channels are treated as trivial and skipped (BUG-18).  TPV31 is
+#: right-lateral strike-slip, so most stations have ~0 dip motion; gating an
+#: all-~0 dip channel would only compare numerical noise.
+DIP_MOTION_FLOOR = 1.0e-3
+
+#: SCEC on-fault channels that are ALWAYS gated (BUG-18).  `mu_eff` is
+#: deliberately EXCLUDED everywhere (its reference is all-NaN, so a NaN
+#: comparison is false and would SILENTLY pass).
+STRIKE_GATE_CHANNELS = ("V_strike", "slip_strike", "tau_strike", "sigma_n")
+
+#: Dip channels gated ONLY when a station has non-trivial dip motion.
+DIP_GATE_CHANNELS = ("V_dip", "slip_dip", "tau_dip")
+
+
+def _finite_pair(t, y):
+    """Return (t, y) restricted to samples where BOTH are finite.
+
+    Defensive: the reference `mu_eff` is all-NaN, and a partially written
+    file could carry NaNs; np.interp / the metric would otherwise poison the
+    whole channel.
+    """
+    t = np.asarray(t, dtype=float)
+    y = np.asarray(y, dtype=float)
+    mask = np.isfinite(t) & np.isfinite(y)
+    return t[mask], y[mask]
+
+
+def gate_channel(mfem_t, mfem_y, ref_t, ref_y, floor=METRIC_FLOOR,
+                 min_coverage_frac=MIN_COVERAGE_FRAC):
+    """Compute the peak-normalized gate metric for ONE channel.
+
+    Restricts both series to the overlap window
+    ``[t0, t1] = [max(mfem_t[0], ref_t[0]), min(mfem_t[-1], ref_t[-1])]``,
+    interpolates the MFEM channel onto the REFERENCE samples that fall inside
+    ``[t0, t1]`` (NOT the full reference grid — np.interp clamps out-of-range
+    to the endpoints, which would flat-line a truncated run's tail), then
+    differences.
+
+    Returns ``(peak_rel, rms_rel, covered)`` where:
+      * ``peak_rel = max_t|mfem - ref| / max(max_t|ref|, floor)``
+      * ``rms_rel  = sqrt(mean_t (mfem-ref)^2) / max(sqrt(mean_t ref^2), floor)``
+      * ``covered``  is True iff the overlap span is at least
+        ``min_coverage_frac`` of the reference span (BUG-23).
+
+    On a degenerate/empty channel (all-NaN reference, no finite samples, or no
+    reference samples inside the overlap window) returns ``(nan, nan, False)``
+    so the caller skips/fails it explicitly rather than silently passing.
+    """
+    mfem_t, mfem_y = _finite_pair(mfem_t, mfem_y)
+    ref_t, ref_y = _finite_pair(ref_t, ref_y)
+
+    if mfem_t.size == 0 or ref_t.size == 0:
+        return float("nan"), float("nan"), False
+
+    ref_span = ref_t[-1] - ref_t[0]
+
+    t0 = max(mfem_t[0], ref_t[0])
+    t1 = min(mfem_t[-1], ref_t[-1])
+
+    # Coverage guard (BUG-23): the overlap window must span at least
+    # `min_coverage_frac` of the reference span.  A non-positive overlap
+    # (no temporal intersection) is trivially uncovered.
+    overlap = t1 - t0
+    if ref_span > 0.0:
+        covered = bool(overlap >= (min_coverage_frac * ref_span))
+    else:
+        covered = bool(overlap >= 0.0)
+
+    # Reference samples that fall inside the overlap window.  Interpolate the
+    # MFEM channel onto THESE samples only (BUG-19).
+    in_window = (ref_t >= t0) & (ref_t <= t1)
+    ref_t_w = ref_t[in_window]
+    ref_y_w = ref_y[in_window]
+    if ref_t_w.size == 0:
+        return float("nan"), float("nan"), covered
+
+    # np.interp requires increasing xp; the MFEM grid is monotone in time but
+    # sort defensively in case of any duplicate-time artefact.
+    order = np.argsort(mfem_t)
+    mfem_interp = np.interp(ref_t_w, mfem_t[order], mfem_y[order])
+
+    diff = mfem_interp - ref_y_w
+    peak_abs = float(np.max(np.abs(diff)))
+    rms_abs = float(np.sqrt(np.mean(diff * diff)))
+
+    peak_ref = max(float(np.max(np.abs(ref_y_w))), floor)
+    rms_ref = max(float(np.sqrt(np.mean(ref_y_w * ref_y_w))), floor)
+
+    peak_rel = peak_abs / peak_ref
+    rms_rel = rms_abs / rms_ref
+    return peak_rel, rms_rel, covered
+
+
+def gated_channels_for_station(ref_data, dip_motion_floor=DIP_MOTION_FLOOR):
+    """Return the ordered list of channel keys to gate for ONE station.
+
+    Always gates the strike + normal-stress channels (BUG-18); adds the dip
+    channels ONLY when the reference shows non-trivial dip motion
+    (``max|ref V_dip| > dip_motion_floor``).  Never gates ``mu_eff``.
+    """
+    channels = list(STRIKE_GATE_CHANNELS)
+    v_dip = np.asarray(ref_data.get("V_dip"), dtype=float)
+    v_dip = v_dip[np.isfinite(v_dip)]
+    if v_dip.size and float(np.max(np.abs(v_dip))) > dip_motion_floor:
+        channels.extend(DIP_GATE_CHANNELS)
+    return channels
+
+
+def _is_all_nan_or_empty(y):
+    y = np.asarray(y, dtype=float)
+    return y.size == 0 or np.all(np.isnan(y))
+
+
+def run_tolerance_gate(station_pairs, tol_peak, tol_rms,
+                       floor=METRIC_FLOOR,
+                       min_coverage_frac=MIN_COVERAGE_FRAC,
+                       dip_motion_floor=DIP_MOTION_FLOOR,
+                       printer=print):
+    """Run the pass/fail gate over a list of (label, mfem_data, ref_data).
+
+    `mfem_data` / `ref_data` are the dicts returned by `load_mfem_file` /
+    `load_reference_file`.  Either tolerance may be ``None`` (that side is not
+    enforced), but at least one must be set by the caller.
+
+    Prints a per-station x per-channel table and a summary.  Returns the
+    process exit code: ``0`` if every gated channel of every station passes
+    BOTH active tolerances AND clears the coverage guard; ``1`` otherwise.
+    """
+    peak_cap = float("inf") if tol_peak is None else tol_peak
+    rms_cap = float("inf") if tol_rms is None else tol_rms
+
+    any_fail = False
+    n_stations_checked = 0
+    n_channels_checked = 0
+
+    header = (f"{'station':<18} {'channel':<12} "
+              f"{'peak_rel':>10} {'rms_rel':>10}  result")
+    printer("=" * 60)
+    printer("TPV31 quantitative gate (MFEM vs SCEC reference)")
+    tol_desc = []
+    if tol_peak is not None:
+        tol_desc.append(f"--tol-peak={tol_peak:g}")
+    if tol_rms is not None:
+        tol_desc.append(f"--tol-rms={tol_rms:g}")
+    printer(f"  tolerances: {', '.join(tol_desc) if tol_desc else '(none)'}")
+    printer(f"  min coverage fraction: {min_coverage_frac:g}")
+    printer("=" * 60)
+    printer(header)
+    printer("-" * len(header))
+
+    for label, mfem_data, ref_data in station_pairs:
+        if mfem_data is None or ref_data is None:
+            printer(f"{label:<18} {'(missing)':<12} "
+                    f"{'--':>10} {'--':>10}  SKIP (no data)")
+            continue
+
+        n_stations_checked += 1
+        channels = gated_channels_for_station(
+            ref_data, dip_motion_floor=dip_motion_floor)
+        station_fail = False
+        ref_t = ref_data["time_s"]
+        mfem_t = mfem_data["time_s"]
+
+        for key in channels:
+            ref_y = ref_data.get(key)
+            mfem_y = mfem_data.get(key)
+            # Defensive skip: a channel whose reference is all-NaN/empty
+            # cannot be gated meaningfully.  (mu_eff is never in `channels`,
+            # but guard generically.)
+            if ref_y is None or _is_all_nan_or_empty(ref_y):
+                printer(f"{label:<18} {key:<12} "
+                        f"{'--':>10} {'--':>10}  SKIP (ref all-NaN)")
+                continue
+
+            peak_rel, rms_rel, covered = gate_channel(
+                mfem_t, mfem_y, ref_t, ref_y,
+                floor=floor, min_coverage_frac=min_coverage_frac)
+            n_channels_checked += 1
+
+            if not covered:
+                station_fail = True
+                printer(f"{label:<18} {key:<12} "
+                        f"{'--':>10} {'--':>10}  "
+                        f"FAIL (insufficient coverage)")
+                continue
+
+            channel_fail = (peak_rel > peak_cap) or (rms_rel > rms_cap)
+            if channel_fail:
+                station_fail = True
+            result = "PASS" if not channel_fail else "FAIL"
+            printer(f"{label:<18} {key:<12} "
+                    f"{peak_rel:>10.4f} {rms_rel:>10.4f}  {result}")
+
+        if station_fail:
+            any_fail = True
+
+    printer("-" * len(header))
+    if n_stations_checked == 0:
+        printer("SUMMARY: GATE FAILED — no station had both MFEM and "
+                "reference data to compare.")
+        return 1
+    # (F-1) Stations were found but NO gatable channel had comparable
+    # (non-NaN) reference data — a gate over ZERO channels is not a pass
+    # (symmetric to the BUG-18 mu_eff all-NaN silent-pass class).
+    if n_channels_checked == 0:
+        printer("SUMMARY: GATE FAILED — stations were found but no gatable "
+                "channel had comparable (non-NaN) reference data; a gate over "
+                "zero channels is not agreement.")
+        return 1
+    if any_fail:
+        printer(f"SUMMARY: GATE FAILED — {n_stations_checked} station(s), "
+                f"{n_channels_checked} channel(s) checked; at least one "
+                f"exceeded the tolerance band or failed coverage.")
+        return 1
+    printer(f"SUMMARY: GATE PASSED — {n_stations_checked} station(s), "
+            f"{n_channels_checked} channel(s) within band "
+            f"(peak<= {peak_cap:g}, rms<= {rms_cap:g}).")
+    return 0
+
+
 PANELS = [
     ("V_strike",    "Slip Rate V_strike (m/s)"),
     ("slip_strike", "Slip Strike (m)"),
@@ -435,6 +679,23 @@ def main():
         "--closeup-t", type=float, default=None,
         help="Additionally produce a close-up plot truncated to this time [s]",
     )
+    parser.add_argument(
+        "--tol-peak", type=float, default=None,
+        help="Run the quantitative pass/fail gate instead of plotting: "
+             "fail (exit non-zero) if ANY gated channel of ANY station has "
+             "peak-normalized error max_t|mfem-ref|/max(max_t|ref|,floor) "
+             "above this fraction (e.g. 0.10 = 10%%).  May be combined with "
+             "--tol-rms.  Compares MFEM stations vs the SCEC reference; "
+             "interpolates onto the reference samples inside the [t0,t1] "
+             "overlap window; runs headless (no matplotlib needed).",
+    )
+    parser.add_argument(
+        "--tol-rms", type=float, default=None,
+        help="Run the quantitative gate (see --tol-peak): fail if any gated "
+             "channel's RMS-normalized error "
+             "sqrt(mean (mfem-ref)^2)/max(sqrt(mean ref^2),floor) exceeds "
+             "this fraction.  May be combined with --tol-peak.",
+    )
 
     args = parser.parse_args()
 
@@ -494,13 +755,20 @@ def main():
             "--eqdyna / --seisol / --both."
         )
 
-    try:
-        import matplotlib
-        if args.save:
-            matplotlib.use("Agg")
-    except ImportError:
-        print("Error: matplotlib required. Install with: pip install matplotlib")
-        return 1
+    # Gate mode: EITHER --tol-peak or --tol-rms runs the quantitative
+    # pass/fail gate INSTEAD of plotting, and must work headless (BUG-11) —
+    # do NOT require matplotlib or a display.
+    gate_mode = (args.tol_peak is not None) or (args.tol_rms is not None)
+
+    if not gate_mode:
+        try:
+            import matplotlib
+            if args.save:
+                matplotlib.use("Agg")
+        except ImportError:
+            print("Error: matplotlib required. "
+                  "Install with: pip install matplotlib")
+            return 1
 
     # Resolve benchmark directory.
     data_dir = os.path.join(
@@ -519,6 +787,52 @@ def main():
         ]
     else:
         stations = SCEC_STATIONS
+
+    # ---- Quantitative gate (BUG-11) -----------------------------------
+    # When --tol-peak / --tol-rms is set, run the pass/fail gate INSTEAD of
+    # plotting and return its exit code.  Reuses the SAME station iteration
+    # and file-resolution helpers the plot path uses: MFEM stations resolved
+    # exactly like the plot sources (positional + --mfem, @PREFIX /
+    # auto-detect / --mfem-prefix), compared against the SCEC SeisSol
+    # reference (code="seisol").
+    if gate_mode:
+        # Collect MFEM (directory, prefix) sources in typed order.
+        mfem_sources = []
+        for stype, spec in ordered_sources:
+            if stype != "mfem":
+                continue
+            label, directory, prefix = parse_mfem_spec(spec)
+            if label is None:
+                label = os.path.basename(os.path.normpath(directory))
+            if prefix is None:
+                prefix = detect_mfem_prefix(directory)
+            if prefix is None:
+                prefix = args.mfem_prefix
+            mfem_sources.append((label, directory, prefix))
+
+        if not mfem_sources:
+            print("Error: --tol-peak/--tol-rms requires at least one --mfem "
+                  "results directory to gate against the SCEC reference.")
+            return 1
+
+        gate_pairs = []
+        for label, directory, prefix in mfem_sources:
+            for mfem_name, ref_label, _s_km, _d_km in stations:
+                mfem_path = mfem_filename(directory, prefix, mfem_name)
+                ref_path = reference_filename(seisol_dir, "seisol", ref_label)
+                mfem_data = (load_mfem_file(mfem_path)
+                             if os.path.exists(mfem_path) else None)
+                ref_data = (load_reference_file(ref_path)
+                            if os.path.exists(ref_path) else None)
+                if mfem_data is None and ref_data is None:
+                    # Neither side present: not part of this run's station set.
+                    continue
+                pair_label = (mfem_name if len(mfem_sources) == 1
+                              else f"{label}:{mfem_name}")
+                gate_pairs.append((pair_label, mfem_data, ref_data))
+
+        return run_tolerance_gate(
+            gate_pairs, tol_peak=args.tol_peak, tol_rms=args.tol_rms)
 
     # Build the typed-source list with colors and line styles.
     benchmark_types = {"eqdyna", "seisol"}

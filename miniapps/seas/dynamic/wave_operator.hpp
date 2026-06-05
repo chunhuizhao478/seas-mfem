@@ -212,8 +212,10 @@ public:
    /// the spatial driver's RK branch (`--time-integrator rk4|rk45`) to switch
    /// to the explicit-RK imaginary-axis mixed-flux factors (central flux is
    /// non-dissipative, so fault-adjacent modes sit on the imaginary axis and
-   /// the RK4-class stability bound `max|λ|·dt < y_max ≈ 2.83` governs).  Only
-   /// the scalar path is affected (RK forbids the matrix/bimaterial path).
+   /// the RK4-class stability bound `max|λ|·dt < y_max ≈ 2.83` governs).
+   /// (Phase 3/5) Both the scalar AND the matrix/bimaterial path use this: mixed
+   /// flux on the matrix path REQUIRES RK (`ComputeMaxDt` aborts central+ADER on
+   /// both operators), and the driver sets it true on the RK branch.
    void SetCflRkAware(bool v) { cfl_rk_aware_ = v; }
    bool GetCflRkAware() const { return cfl_rk_aware_; }
 
@@ -808,6 +810,21 @@ protected:
    // shared DG/geometry state (mesh_, ne_, ndof_*, flux_, bc_, h_min_,
    // fault/face lists, mixed-flux state) when overriding the material
    // dispatch hooks.  No scalar behaviour changes.
+
+   /// (Phase 4, BUG-2) Mixed-flux CFL de-rating factor — the SINGLE source of
+   /// truth shared by the scalar `ComputeMaxDt` and the `BimaterialWaveOperator`
+   /// override (so the matrix path can no longer diverge from the scalar path):
+   ///   None -> 1.0; Adjacent -> cfl_rk_aware_ ? 0.6 : 0.9;
+   ///   AllContinuous -> cfl_rk_aware_ ? 0.7 : 0.4; default -> MFEM_ABORT (R-1600).
+   /// Reads the CURRENT mixed_flux_mode_ + cfl_rk_aware_ (the caller sets them
+   /// via SetMixedFluxMode / SetCflRkAware before ComputeMaxDt).  Side-effect-
+   /// free and aborts ONLY on the R-1600 unknown-mode fall-through — the
+   /// central+ADER instability guard lives in each `ComputeMaxDt`, NOT here, so
+   /// this stays a clean factor lookup (probed directly by test_bimaterial_
+   /// mixed_flux_cfl Test 4.1, which must reach the !cfl_rk_aware_ 0.9/0.4
+   /// factors without the abort firing).
+   real_t MixedFluxCflFactor_() const;
+
    MeshType &mesh_;
    int order_;
    int ndof_per_el_;
