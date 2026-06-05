@@ -581,6 +581,15 @@ struct MaterialSpec
    // Depth axis for the profile.  Canonical SEAS TPV31 uses 'z'
    // (depth = max(0, -z)); 'x'/'y' use the raw coordinate as depth.
    char         depth_axis = 'z';
+   // (Phase 5, BUG-22) Asserts the material is CONTINUOUS across every
+   // partition seam (the neighbour material equals the local material at a
+   // shared face).  Required to enable the bi-material central flux on
+   // Mode::Coefficient SHARED faces at np>1 (BimaterialWaveOperator's R-004
+   // local-side neighbour-material stub is correct only under this assumption;
+   // depth-only profiles such as TPV31 satisfy it, lateral variation across a
+   // seam does not).  Default false ⇒ existing configs (which omit the key)
+   // are byte-unchanged.
+   bool         seam_continuous = false;
 };
 
 struct SpatialFrictionConfig
@@ -672,6 +681,20 @@ inline real_t RkCflFactor(const SpatialFrictionConfig& cfg)
 inline bool FaultIteratorSupported(const SpatialFrictionConfig& cfg)
 {
    return cfg.numerics.fault_iterator == FaultIteratorKind::Substep;
+}
+
+/// (Phase 5, BUG-4) True iff this config would run the non-dissipative
+/// bi-material CENTRAL flux (interior_flux="matrix" + mixed_flux != "none")
+/// under ADER — which is UNSTABLE and must be rejected (driver G2, mirroring
+/// WaveOperator::ComputeMaxDt's central+ADER abort).  A pure function of the
+/// parsed config (evaluated AFTER the CLI --time-integrator override), so the
+/// driver's G2 decision is table-testable without a mesh (Tests 5.1/5.2).
+/// Equivalent to the old inline `!(!matrix_mixed || is_rk)`.
+inline bool MatrixMixedFluxUnderAder(const SpatialFrictionConfig& cfg)
+{
+   return cfg.numerics.interior_flux == InteriorFlux::Matrix
+          && cfg.numerics.mixed_flux != "none"
+          && cfg.numerics.time_integrator == TimeIntegratorKind::ADER;
 }
 
 /// Parse + validate a TOML config.  Aborts on any schema violation with

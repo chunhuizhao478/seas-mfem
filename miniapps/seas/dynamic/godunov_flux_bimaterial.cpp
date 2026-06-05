@@ -296,6 +296,91 @@ namespace seas
 }
 
 // ---------------------------------------------------------------------------
+// BuildPerFaceCentralMatricesGlobal — PLAN_mixed_flux_hetero_riemann.md Phase 1.
+//
+// Bi-material CENTRAL flux for fault-adjacent faces.  Produces the two
+// per-face matrices ½·A_self and ½·A_nbr (global frame) so that
+//   F* = ½·A_self·Q_self + ½·A_nbr·Q_nbr
+// is single-valued (deposited identically to both sides — see the header
+// doc + PLAN BUG-3).  Mirrors BuildPerFaceFluxMatricesGlobal's rotation +
+// scratch-matrix machinery, but composes ½·T·(AxPlus+AxMinus)·T^{-1} per
+// side (the FULL face-normal Jacobian, exactly as GodunovFlux::Central)
+// instead of the upwind T·A·qGod·T^{-1}.  There is NO bi-material
+// characteristic projection here: the central flux is the average of the
+// two physical fluxes and carries no shared Riemann state.
+// ---------------------------------------------------------------------------
+/* static */ void BimaterialFlux::BuildPerFaceCentralMatricesGlobal(
+   const real_t* nor,
+   const GodunovFlux& flux_self,
+   const GodunovFlux& flux_nbr,
+   DenseMatrix& centralSelf,
+   DenseMatrix& centralNbr)
+{
+   // Precondition: `nor` is unit (same contract + rationale as
+   // BuildPerFaceFluxMatricesGlobal — an un-normalised normal silently
+   // produces non-orthonormal T/Tinv and corrupts the flux composition).
+   const real_t n2 = nor[0]*nor[0] + nor[1]*nor[1] + nor[2]*nor[2];
+   MFEM_VERIFY(std::abs(n2 - 1.0) < 1e-10,
+               "BimaterialFlux::BuildPerFaceCentralMatricesGlobal: `nor` "
+               "must be a unit vector (got |nor|^2 = " << n2 << ").");
+
+   // Acoustic-input guard (PLAN Phase 1 Edge Case / BUG-9).  Unlike the
+   // upwind builder, the central path does NOT route through
+   // BuildGodunovStateFaceLocal, so it inherits no acoustic check — add one
+   // explicitly with the SAME mu_eps = 1e-12 contract used there (SAFS has
+   // no acoustic regions; the acoustic branch is a documented follow-up).
+   const real_t mu_eps = 1e-12;
+   MFEM_VERIFY(flux_self.GetMu() > mu_eps && flux_nbr.GetMu() > mu_eps,
+               "BimaterialFlux::BuildPerFaceCentralMatricesGlobal: acoustic "
+               "input (mu_self=" << flux_self.GetMu() << ", mu_nbr="
+               << flux_nbr.GetMu() << ") not supported; SAFS does not have "
+               "acoustic regions.  Add the acoustic branch from "
+               "SeisSol/src/Equations/elastic/Model/ElasticSetup.h:92-139 "
+               "to enable.");
+
+   // 1. Orthonormal frame + rotation matrices — the SAME helpers (and hence
+   //    the SAME frame convention) used by BuildPerFaceFluxMatricesGlobal
+   //    and GodunovFlux::Central, so the central and Godunov per-face
+   //    contributions stay mutually consistent.
+   real_t t1[3], t2[3];
+   GodunovFlux::BuildFrame(nor, t1, t2);
+
+   DenseMatrix T(NUM_STATE, NUM_STATE);
+   DenseMatrix Tinv(NUM_STATE, NUM_STATE);
+   GodunovFlux::BuildRotation(nor, t1, t2, T);
+   GodunovFlux::BuildRotationInverse(nor, t1, t2, Tinv);
+
+   // 2. Per side, build the GLOBAL-frame ½·A_side.
+   //    A_side_facelocal = AxPlus_side + AxMinus_side  is the FULL
+   //    face-normal Jacobian — IDENTICAL to GodunovFlux::Central's
+   //    (Ax_plus_ + Ax_minus_) construction (godunov_flux.cpp), NOT GetAx()
+   //    (built by a separate path; would only agree to the ~1e-9
+   //    sum-of-splits floor).  centralSide = ½ · T · A_side_facelocal · T^{-1}.
+   //    Two distinct scratch matrices (Asum, tmp); SetSize ONLY the output
+   //    (mfem::Mult requires a separate, correctly-sized output — never
+   //    alias the output with a scratch).  The ½ is applied to the output
+   //    via `*= 0.5` AFTER the rotations.
+   DenseMatrix Asum(NUM_STATE, NUM_STATE);
+   DenseMatrix tmp(NUM_STATE, NUM_STATE);
+
+   // --- self side: centralSelf = ½ · T · (AxPlus_self + AxMinus_self) · T^{-1}
+   Asum  = flux_self.GetAxPlus();
+   Asum += flux_self.GetAxMinus();
+   mfem::Mult(T, Asum, tmp);
+   centralSelf.SetSize(NUM_STATE, NUM_STATE);
+   mfem::Mult(tmp, Tinv, centralSelf);
+   centralSelf *= 0.5;
+
+   // --- neighbour side: centralNbr = ½ · T · (AxPlus_nbr + AxMinus_nbr) · T^{-1}
+   Asum  = flux_nbr.GetAxPlus();
+   Asum += flux_nbr.GetAxMinus();
+   mfem::Mult(T, Asum, tmp);
+   centralNbr.SetSize(NUM_STATE, NUM_STATE);
+   mfem::Mult(tmp, Tinv, centralNbr);
+   centralNbr *= 0.5;
+}
+
+// ---------------------------------------------------------------------------
 // ApplyPerFaceFlux — plan §R.1 step 4.
 // ---------------------------------------------------------------------------
 /* static */ void BimaterialFlux::ApplyPerFaceFlux(

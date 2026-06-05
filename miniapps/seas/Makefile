@@ -3844,6 +3844,9 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-boundary-classification \
       test-logging test-config-bridge test-config-parser \
       test-godunov-flux test-godunov-flux-bimaterial test-wave-operator \
+      test-bimaterial-central-flux test-bimaterial-mixed-flux-dispatch \
+      test-bimaterial-mixed-flux-cfl \
+      test-bimaterial-mixed-flux-homog-equivalence \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
       test-tpv205-friction \
@@ -5012,6 +5015,11 @@ TEST_TPV104_SUBSTEP_DISPATCH_PARITY_SRC = tests/unit/test_tpv104_substep_dispatc
 TEST_GODUNOV_CENTRAL_FLUX_SRC      = tests/unit/test_godunov_central_flux.cpp
 TEST_MIXED_FLUX_FACE_SET_SRC       = tests/unit/test_mixed_flux_face_set.cpp
 TEST_MIXED_FLUX_DISPATCH_NONE_SRC  = tests/unit/test_mixed_flux_dispatch_none.cpp
+TEST_BIMATERIAL_CENTRAL_FLUX_SRC   = tests/unit/test_bimaterial_central_flux.cpp
+TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_SRC = tests/unit/test_bimaterial_mixed_flux_dispatch.cpp
+TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC = tests/parallel/test_bimaterial_mixed_flux_shared.cpp
+TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC = tests/unit/test_bimaterial_mixed_flux_cfl.cpp
+TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC = tests/unit/test_bimaterial_mixed_flux_homog_equivalence.cpp
 
 TPV104_DRIVER_SRC                    = drivers/tpv104_driver.cpp
 TPV104_SUBSTEP_ITERATOR_SRC          = dynamic/tpv104_substep_iterator.cpp
@@ -5037,6 +5045,11 @@ TEST_TPV104_SUBSTEP_DISPATCH_PARITY_OBJ  = $(TEST_TPV104_SUBSTEP_DISPATCH_PARITY
 TEST_GODUNOV_CENTRAL_FLUX_OBJ      = $(TEST_GODUNOV_CENTRAL_FLUX_SRC:.cpp=.o)
 TEST_MIXED_FLUX_FACE_SET_OBJ       = $(TEST_MIXED_FLUX_FACE_SET_SRC:.cpp=.o)
 TEST_MIXED_FLUX_DISPATCH_NONE_OBJ  = $(TEST_MIXED_FLUX_DISPATCH_NONE_SRC:.cpp=.o)
+TEST_BIMATERIAL_CENTRAL_FLUX_OBJ   = $(TEST_BIMATERIAL_CENTRAL_FLUX_SRC:.cpp=.o)
+TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_SRC:.cpp=.o)
+TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC:.cpp=.o)
+TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC:.cpp=.o)
+TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC:.cpp=.o)
 
 TPV104_DRIVER_OBJ                    = $(TPV104_DRIVER_SRC:.cpp=.o)
 TPV104_SUBSTEP_ITERATOR_OBJ          = $(TPV104_SUBSTEP_ITERATOR_SRC:.cpp=.o)
@@ -5119,6 +5132,26 @@ $(TEST_TPV104_SUBSTEP_DISPATCH_PARITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(T
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_GODUNOV_CENTRAL_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_CENTRAL_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -5248,6 +5281,138 @@ seas_test_tpv205_friction: $(TEST_TPV205_FRICTION_OBJ)
 seas_test_godunov_central_flux: $(TEST_GODUNOV_CENTRAL_FLUX_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_GODUNOV_CENTRAL_FLUX_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 1 (PLAN_mixed_flux_hetero_riemann.md): bi-material central-flux
+# primitive.  Primitive-level deps only (cf. seas_test_godunov_central_flux):
+# the bi-material object + the GodunovFlux object.
+seas_test_bimaterial_central_flux: $(TEST_BIMATERIAL_CENTRAL_FLUX_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BIMATERIAL_CENTRAL_FLUX_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-central-flux: seas_test_bimaterial_central_flux
+	./seas_test_bimaterial_central_flux
+
+# Phase 3 (PLAN_mixed_flux_hetero_riemann.md): per-face mixed-flux dispatch on
+# the bi-material operator.  Operator-level deps (mirror seas_test_bimaterial_
+# wave_operator_parity).
+seas_test_bimaterial_mixed_flux_dispatch: \
+                  $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-mixed-flux-dispatch: seas_test_bimaterial_mixed_flux_dispatch
+	./seas_test_bimaterial_mixed_flux_dispatch
+
+# Phase 3 P3-1: MPI (np=2) shared central-face dispatch (operator-level deps,
+# mirrors seas_test_bimaterial_wave_operator_parity's object list).  NOT in the
+# serial `test:` group — parallel tests run separately.
+seas_test_bimaterial_mixed_flux_shared: \
+                  $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-mixed-flux-shared: seas_test_bimaterial_mixed_flux_shared
+	mpirun -np 2 ./seas_test_bimaterial_mixed_flux_shared
+
+# Phase 4 (PLAN_mixed_flux_hetero_riemann.md): mixed-flux CFL shared-factor +
+# central+ADER guard (operator-level deps; serial -> in the `test:` group).
+seas_test_bimaterial_mixed_flux_cfl: \
+                  $(TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-mixed-flux-cfl: seas_test_bimaterial_mixed_flux_cfl
+	./seas_test_bimaterial_mixed_flux_cfl
+
+# Phase 6 (PLAN_mixed_flux_hetero_riemann.md): homogeneous-equivalence GATE
+# (operator-level deps; mirror seas_test_bimaterial_wave_operator_parity).
+seas_test_bimaterial_mixed_flux_homog_equivalence: \
+                  $(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-mixed-flux-homog-equivalence: seas_test_bimaterial_mixed_flux_homog_equivalence
+	./seas_test_bimaterial_mixed_flux_homog_equivalence
 
 seas_test_mixed_flux_face_set: $(TEST_MIXED_FLUX_FACE_SET_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_MIXED_FLUX_FACE_SET_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(MFEM_LIBS)

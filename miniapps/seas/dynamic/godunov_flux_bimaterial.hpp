@@ -147,6 +147,56 @@ public:
       mfem::DenseMatrix& fluxLocal,        ///< 9×9 output
       mfem::DenseMatrix& fluxNeighbor);    ///< 9×9 output
 
+   /// @brief Build the per-face CENTRAL-flux matrices in the GLOBAL frame
+   /// — the mixed-flux companion to the upwind `BuildPerFaceFluxMatrices-
+   /// Global`, used on fault-adjacent faces.  On output:
+   ///
+   ///   centralSelf = ½ · T · (AxPlus_self + AxMinus_self) · T^{-1}  (= ½·A_self)
+   ///   centralNbr  = ½ · T · (AxPlus_nbr  + AxMinus_nbr ) · T^{-1}  (= ½·A_nbr)
+   ///
+   /// where `A_side` is that side's face-normal Jacobian in the GLOBAL
+   /// frame.  At runtime the single-valued central flux is computed via
+   /// the SAME `ApplyPerFaceFlux` used by the upwind path:
+   ///
+   ///   F* = centralSelf · Q_self + centralNbr · Q_nbr
+   ///      = ½ ( A_self · Q_self + A_nbr · Q_nbr ).
+   ///
+   /// SINGLE-VALUEDNESS / CONSERVATION (the central-flux pitfall): the
+   /// central flux has NO shared interface state — it is the literal
+   /// average of the two PHYSICAL fluxes and is IDENTICAL on both sides of
+   /// the face.  Each state is multiplied by ITS OWN side's Jacobian
+   /// (`½ A_self·Q_self + ½ A_nbr·Q_nbr`).  Do **NOT** use
+   /// `½ A_self·(Q_self + Q_nbr)` (one Jacobian for both states — e.g.
+   /// `GodunovFlux::Central` applied per side) under heterogeneity: that is
+   /// a DIFFERENT, non-single-valued flux when `A_self ≠ A_nbr` and
+   /// silently breaks conservation.  In the homogeneous limit
+   /// `A_self == A_nbr == A` both forms reduce to `½ A·(Q_self + Q_nbr)`
+   /// == `GodunovFlux::Central` (verified to LU rounding by
+   /// tests/unit/test_bimaterial_central_flux.cpp Test 1.1).
+   ///
+   /// The face-local full Jacobian per side is `GetAxPlus() + GetAxMinus()`
+   /// — the SAME construction `GodunovFlux::Central` uses
+   /// (godunov_flux.cpp) — so the homogeneous limit reproduces `Central`
+   /// to ≤1e-11 relative, rather than via the separately-built `GetAx()`.
+   ///
+   /// Pre-condition: neither material is acoustic (`mu > 1e-12`).  Aborts
+   /// otherwise (SAFS has no acoustic regions — same contract as
+   /// `BuildGodunovStateFaceLocal`; the acoustic branch is a documented
+   /// follow-up).  `nor` must be a unit vector.  Each matrix is sized 9×9
+   /// via `SetSize`; the caller need not pre-size.
+   ///
+   /// @param[in]  nor         Unit face normal (global frame).
+   /// @param[in]  flux_self   LOCAL-side material.
+   /// @param[in]  flux_nbr    NEIGHBOUR-side material.
+   /// @param[out] centralSelf 9×9 output: ½·A_self (global frame).
+   /// @param[out] centralNbr  9×9 output: ½·A_nbr  (global frame).
+   static void BuildPerFaceCentralMatricesGlobal(
+      const real_t* nor,
+      const GodunovFlux& flux_self,
+      const GodunovFlux& flux_nbr,
+      mfem::DenseMatrix& centralSelf,      ///< 9×9 output: ½·A_self (global)
+      mfem::DenseMatrix& centralNbr);      ///< 9×9 output: ½·A_nbr  (global)
+
    /// @brief Runtime per-QP apply:
    /// `F_h_self = fluxLocal · Q_self + fluxNeighbor · Q_nbr`.
    ///

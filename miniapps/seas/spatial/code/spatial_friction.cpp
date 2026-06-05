@@ -1157,14 +1157,14 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                << cfg.numerics.mixed_flux << "'");
    MFEM_VERIFY(cfg.numerics.cfl > 0.0 && cfg.numerics.cfl < 1.0,
                "[numerics].cfl must be in (0, 1)");
-   // Phase 6 req 3 mutual-exclusion (R-1203 sibling): mixed-flux is a
-   // scalar-path-only optimization, so interior_flux="matrix" forbids it.
-   MFEM_VERIFY(cfg.numerics.interior_flux == InteriorFlux::Scalar
-               || cfg.numerics.mixed_flux == "none",
-               "[numerics] interior_flux=\"matrix\" is incompatible with "
-               "mixed_flux=\"" << cfg.numerics.mixed_flux << "\" (mixed-flux "
-               "is valid only on the scalar interior-flux path); set "
-               "mixed_flux=\"none\" when using matrix.");
+   // (Phase 5, BUG-21) The former "mixed flux is scalar-path-only" mutual
+   // exclusion (interior_flux="matrix" forbids mixed_flux!="none") is LIFTED:
+   // the bi-material (matrix) operator now dispatches the central flux per-face
+   // alongside the bi-material Godunov upwind (PLAN_mixed_flux_hetero_riemann.md
+   // Phases 1-4).  Intentionally NO integrator gate here — the final integrator
+   // is unknown until the CLI override (driver --time-integrator); the
+   // central+ADER instability is enforced downstream (driver G2 +
+   // WaveOperator::ComputeMaxDt).
    // NOTE: the companion guard "interior_flux=matrix requires material.kind !=
    // Constant" is enforced after the [material] block is parsed below (it
    // needs cfg.material.kind, which is read further down in parse_root).
@@ -1637,6 +1637,11 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       }
       cfg.material.profile_csv  = toml_str(m, "profile_csv",  std::string());
       cfg.material.sidecar_path = toml_str(m, "sidecar_path", std::string());
+      // (Phase 5, BUG-22) Seam-continuity assertion gating the bi-material
+      // central flux on Mode::Coefficient SHARED faces at np>1 (see
+      // MaterialSpec::seam_continuous).  Applies to any material kind; default
+      // false ⇒ configs that omit the key are unchanged.
+      cfg.material.seam_continuous = toml_bool(m, "seam_continuous", false);
 
       if (cfg.material.kind == MaterialKind::DepthProfile1D)
       {

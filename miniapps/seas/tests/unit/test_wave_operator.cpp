@@ -539,14 +539,17 @@ static bool RunAbortsInChild(const std::function<void()> &body)
 }
 
 // ===== Test 15 (REVIEW R-003): matrix × mixed_flux mutual exclusion =====
-// SetMixedFluxMode on a heterogeneous operator (owned_flux_pool_ set) with a
-// non-None mode must abort — the bimaterial Riemann solve already replaces
-// the interior-face flux, so mixed-flux would be silently dropped.
-// AllContinuous isolates the R-003 guard (it skips the Adjacent fault-attr
-// check), so the only abort source is the matrix×mixed-flux guard.
-void TestR003MatrixMixedFluxAborts()
+// (PLAN_mixed_flux_hetero_riemann.md Phase 3) The R-003 matrix x mixed-flux
+// mutual exclusion is LIFTED: SetMixedFluxMode on a heterogeneous (matrix)
+// operator now ENABLES the bi-material CENTRAL flux — it delegates to the base
+// (BuildCentralFluxFaceSet_, set mf_on_/mixed_flux_mode_) then precomputes
+// per_face_central_flux_, and dispatches the central flux per-face alongside
+// the bi-material Godunov upwind (drdg3d get_flux structure).  AllContinuous
+// isolates the path (it skips the Adjacent fault-attr check and works without
+// a fault).  This test replaces the former R-003 abort death-test.
+void TestMatrixMixedFluxEnabled()
 {
-   std::cout << "Test 15: TestR003MatrixMixedFluxAborts (matrix x mixed_flux)\n";
+   std::cout << "Test 15: TestMatrixMixedFluxEnabled (matrix x mixed_flux, R-003 lifted)\n";
    auto *mesh = CreateTestMesh();
    const int order = 2;
    const real_t lambda = 32.04e9, mu = 32.04e9, rho = 2670.0;
@@ -557,22 +560,33 @@ void TestR003MatrixMixedFluxAborts()
    TEST_ASSERT(wave_het.UsesGodunovFluxPool() == true,
                "precondition: heterogeneous operator (per-element pool set)");
 
+   // (Phase 3) No longer aborts — it enables central flux on the matrix path.
    const bool aborted = RunAbortsInChild([&]() {
       wave_het.SetMixedFluxMode(MixedFluxMode::AllContinuous);
    });
-   TEST_ASSERT(aborted,
-               "SetMixedFluxMode(AllContinuous) on a matrix operator aborts "
-               "(R-003)");
+   TEST_ASSERT(!aborted,
+               "SetMixedFluxMode(AllContinuous) on a matrix operator no longer "
+               "aborts (Phase 3 lifted R-003)");
 
-   // Control: a non-None mixed flux on the SCALAR operator does NOT abort
-   // (owned_flux_pool_ null) — proves the guard is matrix-specific.
+   // In-process: the call succeeds and builds exactly one central matrix pair
+   // per central-set face (the IMPL-8 lifecycle invariant).  The 8-hex mesh has
+   // interior faces, so AllContinuous yields a non-empty central set.
+   wave_het.SetMixedFluxMode(MixedFluxMode::AllContinuous);
+   TEST_ASSERT(!wave_het.GetCentralFluxFaceSet().empty(),
+               "matrix operator AllContinuous populates a non-empty central set");
+   TEST_ASSERT(wave_het.GetPerFaceCentralFlux().size()
+               == wave_het.GetCentralFluxFaceSet().size(),
+               "central matrices built for every central-set face "
+               "(per_face_central_flux_ size == central set size)");
+
+   // Control: the SCALAR operator also accepts AllContinuous (unchanged).
    WaveOperator wave_scalar(*mesh, order, lambda, mu, rho, bc);
    const bool scalar_aborted = RunAbortsInChild([&]() {
       wave_scalar.SetMixedFluxMode(MixedFluxMode::AllContinuous);
    });
    TEST_ASSERT(!scalar_aborted,
                "SetMixedFluxMode(AllContinuous) on a scalar operator does NOT "
-               "abort (guard is matrix-specific)");
+               "abort");
 
    delete mesh;
 }
@@ -637,7 +651,7 @@ int main()
    TestEnergyConservation();
    TestQuiescentState();
    TestSEASDynamicOperator();
-   TestR003MatrixMixedFluxAborts();
+   TestMatrixMixedFluxEnabled();
    TestR006MatrixPrecomputedFluxAborts();
 
    std::cout << "\n========================================\n";
