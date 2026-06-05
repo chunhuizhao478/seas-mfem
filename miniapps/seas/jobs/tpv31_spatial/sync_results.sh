@@ -36,6 +36,9 @@
 #   ./sync_results.sh --dest /Volumes/SSD/seas/tpv31_spatial
 #   ./sync_results.sh --host zhaochun@frontera.tacc.utexas.edu
 #   ./sync_results.sh --remote-root /scratch2/.../miniapps/seas/tpv31    # non-default checkout
+#   ./sync_results.sh --foresample                   # pull from the PREVIOUS branch
+#       (seas-mfem-fault-overint-resample checkout; lands in <dest>/tpv31_spatial_foresample)
+#   ./sync_results.sh --foresample 7768               # only that job, from the previous branch
 #
 # If --host is not given, $FRONTERA_HOST is used, falling back to the ssh
 # alias `frontera` (configure in ~/.ssh/config).
@@ -54,8 +57,13 @@ set -u
 export LC_ALL=C LANG=C
 
 BENCH="tpv31"
-REMOTE_ROOT="/scratch2/10024/zhaochun/seas-project/seas-mfem-spatial-dyn-driver/miniapps/seas/${BENCH}"
-DEFAULT_DEST="$HOME/Downloads/seas-mfem/${BENCH}_spatial"
+# Known Frontera checkouts (each is a <checkout>/miniapps/seas dir).  Default is
+# the current spatial_dyn_driver checkout; `--foresample` pulls from the previous
+# fault-overint-resample checkout instead (results land in a distinct local dir).
+SEAS_SPATIAL_DYN="/scratch2/10024/zhaochun/seas-project/seas-mfem-spatial-dyn-driver/miniapps/seas"
+SEAS_FORESAMPLE="/scratch2/10024/zhaochun/seas-project/seas-mfem-fault-overint-resample/miniapps/seas"
+REMOTE_SEAS="$SEAS_SPATIAL_DYN"     # overridden by --foresample
+DEST_SUFFIX=""                       # set to _foresample by --foresample (no dir collision)
 REMOTE_GLOB="out_*"
 
 # --- parse args ---
@@ -75,13 +83,18 @@ while [[ $# -gt 0 ]]; do
         --host=*)         REMOTE="${1#--host=}"; shift ;;
         --remote-root)    ROOT_ARG="$2"; shift 2 ;;
         --remote-root=*)  ROOT_ARG="${1#--remote-root=}"; shift ;;
+        --foresample|--fault-overint-resample)
+                          REMOTE_SEAS="$SEAS_FORESAMPLE"; DEST_SUFFIX="_foresample"; shift ;;
         -h|--help)        awk 'NR>1 && /^#/{print} NR>1 && !/^#/{exit}' "$0"; exit 0 ;;
         *)                JOB_FILTERS+=("$1"); shift ;;
     esac
 done
 REMOTE="${REMOTE:-${FRONTERA_HOST:-frontera}}"
+DEFAULT_DEST="$HOME/Downloads/seas-mfem/${BENCH}_spatial${DEST_SUFFIX}"
 LOCAL_DEST="${DEST_ARG:-${LOCAL_DEST:-$DEFAULT_DEST}}"
-REMOTE_ROOT="${ROOT_ARG:-$REMOTE_ROOT}"
+# Remote root = <checkout>/miniapps/seas/tpv31 (REMOTE_SEAS picks the checkout;
+# --remote-root still overrides the whole path).
+REMOTE_ROOT="${ROOT_ARG:-${REMOTE_SEAS}/${BENCH}}"
 
 # Refuse to write under /Volumes if the drive is not mounted.
 if [[ "$LOCAL_DEST" == /Volumes/* ]]; then
