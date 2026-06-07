@@ -599,6 +599,22 @@ int main(int, char**)
    if (!p7.empty()) { T_TPV6(p7, "TPV7 config",  5000.0); }  // far = low-contrast
    else { std::cout << "(tpv7/configs/tpv7.toml not found; TPV7 parse skipped)\n"; }
 
+   // p2 variants (order=2, ADER-O3): same bi-material-fault contract, [mesh].order=2.
+   const std::string p6_p2 = FindConfig("tpv6/configs/tpv6_p2.toml");
+   const std::string p7_p2 = FindConfig("tpv7/configs/tpv7_p2.toml");
+   if (!p6_p2.empty())
+   {
+      T_TPV6(p6_p2, "TPV6 p2 config", 3750.0);
+      spatial::SpatialFrictionConfig c = spatial::LoadSpatialFrictionConfig(p6_p2);
+      TEST_ASSERT(c.mesh.order == 2, "tpv6_p2 [mesh].order == 2");
+   }
+   if (!p7_p2.empty())
+   {
+      T_TPV6(p7_p2, "TPV7 p2 config", 5000.0);
+      spatial::SpatialFrictionConfig c = spatial::LoadSpatialFrictionConfig(p7_p2);
+      TEST_ASSERT(c.mesh.order == 2, "tpv7_p2 [mesh].order == 2");
+   }
+
    std::cout << "\n========================================\n";
    std::cout << "Phase 8 config-parse: " << num_passed << " / " << num_tests
              << " passed, " << num_failed << " failed\n";
