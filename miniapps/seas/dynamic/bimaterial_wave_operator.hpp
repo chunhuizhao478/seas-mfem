@@ -82,7 +82,13 @@ class BimaterialWaveOperator : public WaveOperator<MeshType>
 
 public:
    /// @brief Construct the heterogeneous operator from a `MaterialField`
-   /// (Mode::Constant or Mode::Coefficient; GridFunction rejected).
+   /// (Mode::Constant, Mode::Coefficient, or Mode::GridFunction).
+   ///
+   /// (Cross-rank Phase 1) GridFunction mode is now accepted: every material
+   /// read routes through the uniform `MaterialAtLocal_`/`MaterialAtNbr_`
+   /// accessors, whose GridFunction branch reads the source GFs (`GetValue`
+   /// locally, shape×`FaceNbrData` across a seam) — so the per-element flux
+   /// pool has a well-defined centroid evaluation in all three modes.
    ///
    /// Delegates to the SCALAR base ctor with the **valid sentinel triple
    /// `(lambda, mu, rho) = (1, 1, 1)`** (NOT NaN — `GodunovFlux` asserts
@@ -125,6 +131,20 @@ public:
    std::size_t GetPhaserDispatchCount() const { return phaser_dispatch_count_; }
    void ResetPhaserDispatchCount() const { phaser_dispatch_count_ = 0; }
 
+   /// (Cross-rank Phase 1) Number of MATERIAL `ParGridFunction::ExchangeFaceNbrData`
+   /// collectives performed at construction: 3 in Mode::GridFunction (one per
+   /// source GF), 0 in Mode::Constant / Mode::Coefficient (globally evaluable —
+   /// NO material MPI).  Consumed by the `accessor_coeff_no_material_mpi` gate.
+   std::size_t GetMaterialGfExchangeCount() const
+   { return material_gf_exchange_count_; }
+
+   /// (Cross-rank Phase 3) Number of SHARED (cross-rank) central faces this rank
+   /// reclassified central -> upwind in the last `BuildPerFaceCentralFluxMatrices_`
+   /// (the contrast guard).  Per-rank: a seam face shared by two ranks is counted
+   /// by BOTH (the guard predicate is symmetric, so both agree).  0 when the guard
+   /// is off (tol<0) or no shared corridor face has a strong contrast.
+   std::size_t GetNReclassShared() const { return n_reclass_shared_; }
+
    /// CFL via the per-element `per_elem_h_` / `per_elem_lmr_` walk +
    /// `MPI_Allreduce(MIN)` (overrides the scalar `h_min_ / flux_.GetCp()`).
    real_t ComputeMaxDt(real_t cfl) const override;
@@ -158,13 +178,15 @@ public:
    void AssignFaultSidePerMaterialImpedances(
       std::vector<DOFData> &dof_data) const override;
 
-   /// (PLAN Phase 2, BUG-6/BUG-10) Affirm the material is seam-continuous
-   /// across partition seams (Constant or depth-only), permitting the central
-   /// (mixed) flux to be built on fault-adjacent SHARED faces despite the
-   /// local-side neighbour-material stub (R-004).  Read from
-   /// `[material].seam_continuous` and set by the driver BEFORE
-   /// `SetMixedFluxMode` (Phase 5).  Default false ⇒ a non-Constant material
-   /// with a central shared face aborts in `BuildPerFaceCentralFluxMatrices_`.
+   /// DEPRECATED (Cross-rank Phase 5) — NO BEHAVIORAL EFFECT.  Formerly affirmed
+   /// the material is seam-continuous to permit the central (mixed) flux on a
+   /// SHARED face despite the local-side neighbour-material stub (R-004).  The
+   /// cross-rank exchange (Phase 2) now reads the TRUE peer material, so the
+   /// central build no longer needs (or consults) this affirmation — the abort it
+   /// used to gate is gone.  The setter is retained ONLY for `[material].
+   /// seam_continuous` config back-compat (the flag is stored but never read);
+   /// strong-contrast safety is handled by the contrast guard
+   /// (`mixed_flux_contrast_tol >= 0`), not this flag.
    void SetSeamContinuous(bool v) { seam_continuous_ = v; }
 
    /// Precomputed (scalar Godunov) face fluxes are incompatible with the
@@ -205,10 +227,63 @@ protected:
    void ApplyElementJacobian_(int dir, const Vector &X, Vector &Y,
                               real_t sign) const override;
 
+   // -----------------------------------------------------------------------
+   // (Cross-rank Phase 1) ONE uniform material accessor, read by the flux
+   // pool, the shared-face neighbour material, and (Phase 4) the per-side
+   // fault — uniformly, locally AND across a partition seam.  Its ONLY
+   // internal branch is the material REPRESENTATION (Constant / Coefficient /
+   // GridFunction), never the problem.  No projection anywhere.  `protected`
+   // so the np=2 gate (`tests/parallel/test_bimaterial_seam_material_np2.cpp`)
+   // can expose them through a `TestableBimat` `using`-shim.
+   // -----------------------------------------------------------------------
+
+   /// Material `(lambda, mu, rho)` at a LOCAL element + reference IP.
+   ///   - Constant / Coefficient: byte-exact with `MaterialField::EvalAt` at the
+   ///     CALLER-supplied element transform `T` (the legacy read).
+   ///   - GridFunction: `gf->GetValue(elem, ip)` per component (source GF; no
+   ///     projection; `T` unused).
+   /// (P1-001) The caller passes its OWN `ElementTransformation &T` (e.g. the
+   /// flux-pool loop's per-element transform, or a held `ftr->Elem1`) so the
+   /// accessor NEVER touches `Mesh::GetElementTransformation`'s shared scratch —
+   /// which `ParMesh::GetSharedFaceTransformations` aliases as `ftr->Elem1`.  This
+   /// keeps the accessor composable with a live `FaceElementTransformations`
+   /// (the Phase 2/4 shared loops) and matches the existing fault-loop pattern
+   /// `material_->EvalAt(Elem1No, *ftr->Elem1, ip, ...)`.
+   /// Asserts `material_` set and the result is physical (rho>0, lambda+2mu>0).
+   void MaterialAtLocal_(int elem, mfem::ElementTransformation &T,
+                         const mfem::IntegrationPoint &ip,
+                         real_t &lam, real_t &mu, real_t &rho) const;
+
+   /// Material `(lambda, mu, rho)` on the PEER (face-neighbour, `ftr->Elem2`)
+   /// side of a SHARED face, at the peer reference IP `ip_peer`.
+   ///   - Constant / Coefficient: same Eval at the peer's face-neighbour
+   ///     element transform (`ftr->Elem2`) — globally evaluable, NO material MPI.
+   ///   - GridFunction: shape×`FaceNbrData` interpolation of the source GFs'
+   ///     face-neighbour ghost layer (exchanged once at construction).
+   /// Asserts `ftr`/`ftr->Elem2` non-null and the result is physical.
+   void MaterialAtNbr_(mfem::FaceElementTransformations *ftr,
+                       const mfem::IntegrationPoint &ip_peer,
+                       real_t &lam, real_t &mu, real_t &rho) const;
+
 private:
-   /// Walk every local element, evaluate `material.EvalAt` at the reference
-   /// centroid, fill `per_elem_lmr_` / `per_elem_h_`, and `Build()` the pool.
-   void BuildGodunovFluxPool_(const MaterialField &material);
+   /// Walk every local element, evaluate the material at the reference centroid
+   /// via `MaterialAtLocal_` (reads `material_`), fill `per_elem_lmr_` /
+   /// `per_elem_h_`, and `Build()` the pool.  (Cross-rank Phase 1) Routed through
+   /// the accessor so the pool is well-defined in all three material modes
+   /// (GridFunction included); the Constant/Coefficient result is byte-exact with
+   /// the legacy `material.EvalAt`.  (P1-006) No `MaterialField` parameter — the
+   /// member `material_` is the single source of truth (set in the ctor first).
+   void BuildGodunovFluxPool_();
+
+   /// (Cross-rank Phase 1) One-time face-neighbour exchange setup (parallel
+   /// only, collective on ALL ranks): refresh the mesh geometry peer transforms
+   /// (idempotent — the base ctor already did it) and, in Mode::GridFunction
+   /// ONLY, `ExchangeFaceNbrData` the three source material GFs so
+   /// `MaterialAtNbr_` can read their face-neighbour ghost layer.  Bumps
+   /// `material_gf_exchange_count_` once per GF exchanged (0 for Constant /
+   /// Coefficient).  Must run BEFORE `BuildGodunovFluxPool_` /
+   /// `ExchangeBiMaterialNeighbours_`.
+   void SetupMaterialFaceNbrExchange_();
 
    /// Populate `shared_face_neighbour_material_` with each shared face's
    /// neighbour-side material (LOCAL-side stub; correct for seam-continuous /
@@ -258,6 +333,16 @@ private:
    /// Non-owning pointer to the MaterialField (caller owns it; must outlive).
    const MaterialField *material_ = nullptr;
 
+   /// (Cross-rank Phase 1) Count of MATERIAL GridFunction face-nbr exchanges
+   /// performed at construction (3 in GridFunction mode, 0 otherwise).  Set once
+   /// by `SetupMaterialFaceNbrExchange_`; read by `GetMaterialGfExchangeCount`.
+   std::size_t material_gf_exchange_count_ = 0;
+
+   /// (Cross-rank Phase 3) Per-rank count of SHARED central faces reclassified to
+   /// upwind by the contrast guard in the last `BuildPerFaceCentralFluxMatrices_`.
+   /// Set by that method; read by `GetNReclassShared`.
+   std::size_t n_reclass_shared_ = 0;
+
    /// Owned per-element flux cache (the bi-material pool).
    std::unique_ptr<GodunovFluxPool> owned_flux_pool_;
 
@@ -283,10 +368,10 @@ private:
    std::unordered_map<int, std::array<mfem::DenseMatrix, 2>>
       per_face_central_flux_;
 
-   /// (PLAN Phase 2, BUG-6/BUG-10) User affirmation (from
-   /// `[material].seam_continuous`) that the material is seam-continuous across
-   /// partition seams; gates the central build on `Mode::Coefficient` SHARED
-   /// faces.  Default false.
+   /// DEPRECATED (Cross-rank Phase 5) — stored but NEVER READ.  Formerly gated the
+   /// central build on `Mode::Coefficient` SHARED faces (R-004 stub era); the
+   /// cross-rank exchange (Phase 2) removed its only consumer.  Kept for
+   /// `[material].seam_continuous` config back-compat.  Default false.
    bool seam_continuous_ = false;
 
    /// Diagnostic: count of bi-material per-face flux applies.  `mutable`

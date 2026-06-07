@@ -1202,10 +1202,11 @@ int main(int argc, char *argv[])
       // to the per-element bimaterial overrides.
       wave_ptr = std::make_unique<BimaterialWaveOperator<ParMesh>>(
                     pmesh, cfg.mesh.order, material, bc);
-      // (Phase 5, BUG-22) Propagate [material].seam_continuous to the operator
-      // BEFORE SetMixedFluxMode (below), so BuildPerFaceCentralFluxMatrices_
-      // reads the configured value (not the default false) when gating the
-      // bi-material central flux on Mode::Coefficient SHARED faces at np>1.
+      // (Cross-rank Phase 5) DEPRECATED: [material].seam_continuous now has NO
+      // effect — the cross-rank exchange reads the TRUE peer material, so the
+      // central build no longer gates on this affirmation (the abort it guarded is
+      // gone).  The call is kept for config back-compat (the flag is stored, never
+      // read); strong-contrast safety is the contrast guard (mixed_flux_contrast_tol).
       static_cast<BimaterialWaveOperator<ParMesh>&>(*wave_ptr)
          .SetSeamContinuous(cfg.material.seam_continuous);
    }
@@ -1331,7 +1332,9 @@ int main(int argc, char *argv[])
       std::cout << "[mixed-flux] matrix (bi-material) + "
                 << cfg.numerics.mixed_flux << " central flux enabled "
                 << "(seam_continuous=" << (cfg.material.seam_continuous
-                                           ? "true" : "false") << ")\n";
+                                           ? "true" : "false")
+                << "; DEPRECATED, no effect — cross-rank seam material uses the "
+                   "TRUE peer)\n";
    }
 
    // Prove the mixed-flux mode is NOT a silent no-op: report the GLOBAL

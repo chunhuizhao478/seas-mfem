@@ -1644,10 +1644,9 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       }
       cfg.material.profile_csv  = toml_str(m, "profile_csv",  std::string());
       cfg.material.sidecar_path = toml_str(m, "sidecar_path", std::string());
-      // (Phase 5, BUG-22) Seam-continuity assertion gating the bi-material
-      // central flux on Mode::Coefficient SHARED faces at np>1 (see
-      // MaterialSpec::seam_continuous).  Applies to any material kind; default
-      // false ⇒ configs that omit the key are unchanged.
+      // DEPRECATED (Cross-rank Phase 5): parsed for back-compat but no longer has
+      // any effect — the cross-rank exchange reads the true peer material (see
+      // MaterialSpec::seam_continuous).  Default false; key may be omitted.
       cfg.material.seam_continuous = toml_bool(m, "seam_continuous", false);
 
       if (cfg.material.kind == MaterialKind::DepthProfile1D)
