@@ -5,13 +5,13 @@
 #SBATCH -p normal
 #SBATCH -N 10
 #SBATCH -n 500
-#SBATCH -t 06:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
 # SCEC TPV102 — p1 · SCALAR mixed (central) flux · explicit RK45
 # Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).
-# NORMAL QUEUE: 10 nodes / 500 ranks (-N 10 -n 500) / 6 h wall.
+# NORMAL QUEUE: 10 nodes / 500 ranks (-N 10 -n 500) / 48 h wall.
 #
 # NUMERICAL SCHEME (the four knobs that define this job) ------------------
 #   * p1            : [mesh].order = 1            (config-only, asserted below).
@@ -146,7 +146,7 @@ fi
 # fail-fast on a drifted interior_flux / [mesh].order.
 
 OUT="${TPV102_OUT:-tpv102/out_rk45_mf_${SLURM_JOB_ID:-local}}"
-TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 6 h normal wall
+TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 48 h normal wall
                                 # reaches a fraction — restart for the rest.
 
 # --- restart from a checkpoint (opt-in via TPV102_RESTART) -----------------
@@ -195,7 +195,7 @@ ibrun ./seas_spatial_dyn_driver \
 echo "[tpv102-rk45] done. On-fault SCEC station traces: ${OUT}/tpv102_station_*.dat (9 stations); compare vs the SCEC TPV102"
 echo "              reference.  Confirm V_max is BOUNDED (no ADER-p1-central-flux"
 echo "              run-away) and read the empirical stable dt off this *.out"
-echo "              to size the restart chain across the 6 h wall."
+echo "              to size the restart chain across the 48 h wall."
 
 # =========================================================================
 # PRODUCTION PROMOTION (12 s to completion)

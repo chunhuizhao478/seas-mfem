@@ -3,9 +3,9 @@
 #SBATCH -o tpv6_p2_rk_mf_%j.out
 #SBATCH -e tpv6_p2_rk_mf_%j.err
 #SBATCH -p normal
-#SBATCH -N 8
-#SBATCH -n 448
-#SBATCH -t 24:00:00
+#SBATCH -N 12
+#SBATCH -n 600
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV6 — ARM 2: BI-MATERIAL FAULT, p2 / RK45 / MIXED (central) flux / matrix
@@ -29,7 +29,7 @@
 #   * contrast guard: --mixed-flux-contrast-tol 0.05.
 #   * matrix Riemann: [numerics].interior_flux="matrix" (per-side fault; asserted).
 #   Config: tpv6/configs/tpv6_p2.toml.  sigma_n is PHYSICALLY non-constant — not a leak.
-# NB: p2 dt is smaller than p1 — even 24 h may not reach tfinal; checkpoints every
+# NB: p2 dt is smaller than p1 — even 48 h may not reach tfinal; checkpoints every
 # 2000 steps, resubmit with TPV6_RESTART=<out>/cp.
 #
 # CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------

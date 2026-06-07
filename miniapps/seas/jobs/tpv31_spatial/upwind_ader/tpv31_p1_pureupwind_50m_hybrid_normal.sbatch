@@ -3,8 +3,8 @@
 #SBATCH -o tpv31_p1_pu_hybrid_%j.out
 #SBATCH -e tpv31_p1_pu_hybrid_%j.err
 #SBATCH -p normal
-#SBATCH -N 12
-#SBATCH -n 600
+#SBATCH -N 10
+#SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 

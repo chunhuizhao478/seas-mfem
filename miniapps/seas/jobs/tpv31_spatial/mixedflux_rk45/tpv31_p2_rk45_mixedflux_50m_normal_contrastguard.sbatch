@@ -3,15 +3,15 @@
 #SBATCH -o tpv31_p2_rk45_mf_n_%j.out
 #SBATCH -e tpv31_p2_rk45_mf_n_%j.err
 #SBATCH -p normal
-#SBATCH -N 16
-#SBATCH -n 800
+#SBATCH -N 12
+#SBATCH -n 600
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
 # SCEC TPV31 — p2 · MATRIX (bi-material) Riemann · mixed (central) flux · RK45
 # Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).  Normal-queue,
-# 16 nodes / 800 ranks (50 ranks/node on Frontera CLX 56-core nodes) / 48 h wall.
+# 12 nodes / 600 ranks (50 ranks/node on Frontera CLX 56-core nodes) / 48 h wall.
 #
 # *** p2 (order=2) production-scale sibling of tpv31_p1_rk45_mixedflux_50m_normal:
 #     matrix-bimaterial + central flux + RK45 — the path Phases 1-6 build
@@ -208,7 +208,7 @@ TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across the
 # per-job-ID directory, each segment is naturally distinct.  To resume:
 #       TPV31_RESTART="<previous-segment-OUT>/cp" sbatch <thisscript>
 # (point it at the cp prefix inside the PREVIOUS job's output dir).  Restart
-# requires the SAME rank count that wrote the checkpoint (this job = -n 800).
+# requires the SAME rank count that wrote the checkpoint (this job = -n 600).
 RESTART_FLAGS=""
 if [[ -n "${TPV31_RESTART:-}" ]]; then
     RESTART_FLAGS="--restart ${TPV31_RESTART}"

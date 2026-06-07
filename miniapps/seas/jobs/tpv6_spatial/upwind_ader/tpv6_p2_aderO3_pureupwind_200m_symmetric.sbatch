@@ -3,9 +3,9 @@
 #SBATCH -o tpv6_p2_ader_sym_%j.out
 #SBATCH -e tpv6_p2_ader_sym_%j.err
 #SBATCH -p normal
-#SBATCH -N 8
-#SBATCH -n 448
-#SBATCH -t 24:00:00
+#SBATCH -N 12
+#SBATCH -n 600
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV6 — ARM 1: BI-MATERIAL FAULT, p2 / ADER-O3 / PURE UPWIND / matrix
@@ -36,7 +36,7 @@
 #   against a fresh np>1 run on this branch.
 # Standalone: build seas_spatial_dyn_driver first (from THIS branch — Part B
 # per-side fault + B3 halfspace material).  NB: p2 dt is smaller than p1 — even
-# 24 h likely won't reach tfinal; checkpoints every 2000 steps, resubmit with
+# 48 h likely won't reach tfinal; checkpoints every 2000 steps, resubmit with
 # TPV6_RESTART=<out>/cp to continue.
 set -euo pipefail
 
