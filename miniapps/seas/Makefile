@@ -373,6 +373,8 @@ TEST_PARAVIEW_RANK0_WARNING_GATE_SRC       = tests/unit/test_paraview_rank0_warn
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_SRC         = tests/unit/test_godunov_rotation_identity.cpp
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC = tests/unit/test_canonical_rotation_pure_strikeslip.cpp
+TEST_FRAME_DIP_LEAK_PROBE_SRC              = tests/unit/test_frame_dip_leak_probe.cpp
+TEST_OFFFAULT_FRAME_SYMMETRY_SRC          = tests/unit/test_offfault_frame_symmetry.cpp
 TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC     = tests/unit/test_fault_basis_qp_orthonormality.cpp
 TEST_PER_QP_VS_CENTROID_BASIS_SRC          = tests/unit/test_per_qp_vs_centroid_basis_planar_1el.cpp
 # PLAN_frame_orthonormality_diag_2026-05-23 §Phase 1 AC#3 — [FRAME] dv_n identity
@@ -697,6 +699,8 @@ TEST_PARAVIEW_RANK0_WARNING_GATE_OBJ       = $(TEST_PARAVIEW_RANK0_WARNING_GATE_
 # v9.2.0 plan §4.1-§4.4 regression gates
 TEST_GODUNOV_ROTATION_IDENTITY_OBJ         = $(TEST_GODUNOV_ROTATION_IDENTITY_SRC:.cpp=.o)
 TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ = $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_SRC:.cpp=.o)
+TEST_FRAME_DIP_LEAK_PROBE_OBJ              = $(TEST_FRAME_DIP_LEAK_PROBE_SRC:.cpp=.o)
+TEST_OFFFAULT_FRAME_SYMMETRY_OBJ          = $(TEST_OFFFAULT_FRAME_SYMMETRY_SRC:.cpp=.o)
 TEST_FAULT_BASIS_QP_ORTHONORMALITY_OBJ     = $(TEST_FAULT_BASIS_QP_ORTHONORMALITY_SRC:.cpp=.o)
 TEST_PER_QP_VS_CENTROID_BASIS_OBJ          = $(TEST_PER_QP_VS_CENTROID_BASIS_SRC:.cpp=.o)
 TEST_FRAME_DIAG_PROJECTION_IDENTITY_OBJ    = $(TEST_FRAME_DIAG_PROJECTION_IDENTITY_SRC:.cpp=.o)
@@ -1803,6 +1807,16 @@ seas_test_macro_diag_decomposition_identity: $(TEST_MACRO_DIAG_DECOMPOSITION_IDE
 # v9.2.0 plan §4.2 — canonical rotation pure strike-slip Tinv probe
 seas_test_canonical_rotation_pure_strikeslip: $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# dip-drift investigation probe (2026-06-06): frame-leak check vs BuildRotationInverse
+seas_test_frame_dip_leak_probe: $(TEST_FRAME_DIP_LEAK_PROBE_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FRAME_DIP_LEAK_PROBE_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# dip-drift investigation probe (2026-06-06): off-fault upwind frame y-symmetry
+seas_test_offfault_frame_symmetry: $(TEST_OFFFAULT_FRAME_SYMMETRY_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_OFFFAULT_FRAME_SYMMETRY_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # v9.2.0 plan §4.3 — per-QP fault basis orthonormality
@@ -3584,6 +3598,14 @@ $(TEST_MACRO_DIAG_DECOMPOSITION_IDENTITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) 
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_CANONICAL_ROTATION_PURE_STRIKESLIP_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_FRAME_DIP_LEAK_PROBE_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_OFFFAULT_FRAME_SYMMETRY_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
