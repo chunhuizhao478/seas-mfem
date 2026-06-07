@@ -38,10 +38,12 @@ report, on EACH side of the fault, the absolute **displacement** and **velocity*
 ## What this run produces (to compare against `scec_drdg3d/`)
 - Fault output (ParaView, `--paraview-fault-*`): slip-rate contours — ALWAYS produced.
 - Per-side on-fault station traces (per-side disp/vel + traction): produced by the
-  per-side station writer `dynamic/tpv6_stations.hpp` — the documented-deferred Part-C
-  remainder (additive; the run is functional without it).  When it lands it must emit
-  the strong side as "nearside", the weak side as "farside", and flip n-stress to
-  compression-positive for a direct overlay (see `tpv6/visualize_results.py`).
+  per-side station writer `dynamic/tpv6_stations.hpp` (LANDED — wired in the spatial
+  driver under `[problem] tag = "tpv6"`).  It emits `<prefix>_{nearside,farside}_<id>.dat`
+  with the same columns/units as the drdg3d files; nearside = the STRONG side (resolved
+  per DOF from Zp), n-stress compression-positive (the viz flips the drdg3d reference to
+  match).  Per-side velocity = the imposed split-node Godunov velocity; displacement =
+  the trapezoidal time integral.
 
 ## TPV7
 TPV7 is the SCEC ILL-POSED low-contrast case (grid-dependent BY DESIGN); compare to

@@ -85,6 +85,16 @@ struct DOFData
    real_t tau1_corr = 0, tau2_corr = 0;  ///< Corrected tangential traction [Pa]
    real_t sigma_n_corr = 0;              ///< Corrected normal traction [Pa]
 
+   // (Part C, TPV6/7) Per-side IMPOSED (split-node) particle velocity in the
+   // fault-local frame: [0] = normal (VX), [1] = dip (VY), [2] = strike (VZ).
+   // The two sides differ (bi-material): v_imp_plus - v_imp_minus = slip rate.
+   // Written by Evaluate / EvaluateLSW / EvaluateADER_LSW (the imposed Godunov
+   // state — the per-side velocity an on-fault SCEC TPV6 station reports); read
+   // by the TPV6 per-side station writer (dynamic/tpv6_stations.hpp).  Default 0
+   // => byte-exact for every non-TPV6 problem (other writers never read them).
+   real_t v_imp_plus[3]  = {0.0, 0.0, 0.0};
+   real_t v_imp_minus[3] = {0.0, 0.0, 0.0};
+
    // -----------------------------------------------------------------------
    // Linear slip-weakening (LSW) parameters — separate slot from the
    // rate-and-state `a / psi / Dc` so that:
@@ -536,6 +546,22 @@ public:
    /// ONLY by the matrix operator.
    void SetPerSideFluxApplied(bool v) { per_side_flux_applied_ = v; }
    bool GetPerSideFluxApplied() const { return per_side_flux_applied_; }
+
+   /// (Part C, TPV6) Capture the per-side imposed (split-node) velocity into
+   /// DOFData for the TPV6 per-side station writer.  Maps the fault-local
+   /// velocity components of the imposed Godunov states into
+   /// DOFData::v_imp_{plus,minus} = [normal(VX), dip(VY), strike(VZ)].  Called
+   /// by the Evaluate variants after they build Q_imp_{plus,minus}; pure store,
+   /// no effect on the flux (other writers never read these fields).
+   static void StoreImposedVelocity_(DOFData &d,
+                                     const real_t *Q_imp_plus,
+                                     const real_t *Q_imp_minus)
+   {
+      d.v_imp_plus[0]  = Q_imp_plus[VX];  d.v_imp_plus[1]  = Q_imp_plus[VY];
+      d.v_imp_plus[2]  = Q_imp_plus[VZ];
+      d.v_imp_minus[0] = Q_imp_minus[VX]; d.v_imp_minus[1] = Q_imp_minus[VY];
+      d.v_imp_minus[2] = Q_imp_minus[VZ];
+   }
 
 private:
    real_t rho_, cp_, cs_;

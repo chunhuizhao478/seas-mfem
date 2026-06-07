@@ -428,6 +428,7 @@ void FaultFaceFlux::Evaluate(DOFData &data,
 #endif
 
    BuildImposedState(data, s, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus);
+   StoreImposedVelocity_(data, Q_imp_plus, Q_imp_minus);  // (Part C) per-side v for TPV6 stations
    WriteBackState(data, s);
 
 #ifndef NDEBUG
@@ -860,6 +861,8 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
    real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
    BuildImposedState(data, s, Q_avg_plus, Q_avg_minus,
                      Q_imp_plus, Q_imp_minus);
+   // (Part C) per-side imposed velocity for TPV6 stations (ADER: sub-step-averaged).
+   StoreImposedVelocity_(data, Q_imp_plus, Q_imp_minus);
 
    // Step 7: write back V/slip_rate/τ*_corr/σ_n_corr to DOFData (TOTAL
    // physical traction — pre + nuc + trial-scale corrected).

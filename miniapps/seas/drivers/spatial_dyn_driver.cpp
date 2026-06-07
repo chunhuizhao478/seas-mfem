@@ -84,6 +84,7 @@
 #include "../dynamic/tpv102_stations.hpp"      // SCEC TPV102 station writer (rate-state)
 #include "../dynamic/tpv104_stations.hpp"      // SCEC TPV104 station writer (rate-state)
 #include "../dynamic/tpv205_stations.hpp"      // SCEC TPV205 station writer (LSW)
+#include "../dynamic/tpv6_stations.hpp"        // Part C: TPV6/7 per-side on-fault station writer
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -3122,6 +3123,7 @@ int main(int argc, char *argv[])
       else if (tag == "tpv102") { wire_stations((TPV102StationWriter *)nullptr, DefaultStations()); }
       else if (tag == "tpv104") { wire_stations((TPV104StationWriter *)nullptr, DefaultStations_TPV104()); }
       else if (tag == "tpv205") { wire_stations((TPV205StationWriter *)nullptr, DefaultStations_TPV205()); }
+      else if (tag == "tpv6")   { wire_stations((TPV6StationWriter   *)nullptr, DefaultStations_TPV6()); }
    }
 
    // -----------------------------------------------------------------

@@ -15,9 +15,9 @@ DRDG3D reference file columns (MKS; one file per station per side):
     NOTE: drdg3d n-stress is COMPRESSION-NEGATIVE; this repo is COMPRESSION-POSITIVE.
 
 This run's per-side station traces come from the per-side station writer
-`dynamic/tpv6_stations.hpp` (the documented-deferred Part-C remainder).  Until it
-lands, this script plots the DRDG3D reference (so the comparison contract is fixed)
-and overlays the run output if matching files are present (--out).
+`dynamic/tpv6_stations.hpp` (LANDED; emitted in the output dir as
+`<tag>_{nearside,farside}_<id>.dat`).  Pass --out <run_dir> to overlay them on the
+DRDG3D reference; with no --out this just plots the reference.
 
 Usage:
     python3 visualize_results.py --ref benchmark_data/scec_drdg3d [--out <run_dir>]

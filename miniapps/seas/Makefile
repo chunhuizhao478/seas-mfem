@@ -337,6 +337,7 @@ TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC = tests/unit/test_godunov_interior_equal_s
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC = tests/unit/test_fault_face_flux_per_side_assembly.cpp
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC  = tests/unit/test_fault_face_flux_bimaterial_guard.cpp
 TEST_BIMATERIAL_FAULT_RIEMANN_SRC          = tests/unit/test_bimaterial_fault_riemann.cpp
+TEST_TPV6_STATIONS_SRC                     = tests/unit/test_tpv6_stations.cpp
 # v9.1.0 Pelties-9 follow-through: post-R-001 VTU continuity + post-R-003 basis symmetry
 TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC      = tests/unit/test_fault_surface_vtu_continuity.cpp
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_strike_symmetry.cpp
@@ -675,6 +676,7 @@ TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ = $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC:
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ = $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ  = $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC:.cpp=.o)
 TEST_BIMATERIAL_FAULT_RIEMANN_OBJ          = $(TEST_BIMATERIAL_FAULT_RIEMANN_SRC:.cpp=.o)
+TEST_TPV6_STATIONS_OBJ                     = $(TEST_TPV6_STATIONS_SRC:.cpp=.o)
 # v9.1.0 Pelties-9 follow-through
 TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ      = $(TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC:.cpp=.o)
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC:.cpp=.o)
@@ -1701,6 +1703,14 @@ seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GU
 seas_test_bimaterial_fault_riemann: $(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Part C / C2: TPV6 per-side on-fault station writer (header-only; DOFData-driven).
+seas_test_tpv6_stations: $(TEST_TPV6_STATIONS_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_TPV6_STATIONS_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv6-stations: seas_test_tpv6_stations
+	./seas_test_tpv6_stations
 
 test-bimaterial-fault-riemann: seas_test_bimaterial_fault_riemann
 	./seas_test_bimaterial_fault_riemann
@@ -3504,6 +3514,10 @@ $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_TPV6_STATIONS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
