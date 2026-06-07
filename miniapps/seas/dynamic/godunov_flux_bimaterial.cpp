@@ -54,6 +54,7 @@
 
 #include "godunov_flux_bimaterial.hpp"
 
+#include <algorithm>
 #include <cmath>
 #include <sstream>
 
@@ -411,6 +412,33 @@ namespace seas
       }
       F_h_self[i] = s;
    }
+}
+
+// ---------------------------------------------------------------------------
+// IsStrongContrast — central-flux corridor guard predicate (Part A, R-007).
+// Returns true iff tol >= 0 and the relative impedance jump exceeds tol,
+// measured as max(|Zp jump|/maxZp, |Zs jump|/maxZs).  tol < 0 disables; a
+// non-positive max impedance (acoustic / unset) returns false.
+// ---------------------------------------------------------------------------
+/* static */ real_t BimaterialFlux::ContrastValue(const GodunovFlux& a,
+                                                  const GodunovFlux& b)
+{
+   const real_t zp_a = a.GetZp(), zp_b = b.GetZp();
+   const real_t zs_a = a.GetZs(), zs_b = b.GetZs();
+   const real_t max_zp = std::max(zp_a, zp_b);
+   const real_t max_zs = std::max(zs_a, zs_b);
+   if (max_zp <= 0.0 || max_zs <= 0.0) { return -1.0; }   // acoustic / unset
+   const real_t c_zp = std::abs(zp_a - zp_b) / max_zp;
+   const real_t c_zs = std::abs(zs_a - zs_b) / max_zs;
+   return std::max(c_zp, c_zs);
+}
+
+/* static */ bool BimaterialFlux::IsStrongContrast(const GodunovFlux& a,
+                                                   const GodunovFlux& b,
+                                                   real_t tol)
+{
+   if (tol < 0.0) { return false; }
+   return ContrastValue(a, b) > tol;   // ContrastValue == -1 (acoustic) => false
 }
 
 }  // namespace seas

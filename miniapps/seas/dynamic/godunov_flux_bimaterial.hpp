@@ -208,6 +208,32 @@ public:
                                 const real_t* Q_self,
                                 const real_t* Q_nbr,
                                 real_t* F_h_self);
+
+   /// @brief (Unified bi-material plan, Part A) Strong-impedance-contrast predicate
+   /// for the central-flux corridor guard.
+   ///
+   /// Returns true iff `tol >= 0` AND the relative impedance jump between the two
+   /// materials exceeds `tol`, measured as
+   ///   max( |Zp_a - Zp_b| / max(Zp_a, Zp_b),  |Zs_a - Zs_b| / max(Zs_a, Zs_b) ) > tol
+   /// where `Z = rho*c`.  Thresholding `max(cZp, cZs)` is deliberate: it catches ANY
+   /// impedance contrast a non-dissipative central flux would mishandle (not only the
+   /// P channel) — do NOT reduce to Zp-only (R-007).  `tol < 0` => disabled (false);
+   /// a non-positive max impedance (acoustic / unset) => false.
+   ///
+   /// @param[in] a    one element's flux (provides Zp/Zs via GetZp()/GetZs()).
+   /// @param[in] b    the other element's flux.
+   /// @param[in] tol  relative tolerance; `< 0` disables (returns false).
+   static bool IsStrongContrast(const GodunovFlux& a, const GodunovFlux& b,
+                                real_t tol);
+
+   /// @brief The relative impedance-contrast metric used by `IsStrongContrast`
+   /// (and by the corridor-guard histogram), independent of any tolerance:
+   ///   max( |Zp_a-Zp_b|/max(Zp_a,Zp_b), |Zs_a-Zs_b|/max(Zs_a,Zs_b) ).
+   /// Returns a value in `[0, 1)` for valid materials, or `-1.0` if either max
+   /// impedance is non-positive (acoustic / unset).  `IsStrongContrast(a,b,tol)`
+   /// == `(tol >= 0 && ContrastValue(a,b) > tol)` — single source of truth so the
+   /// histogram bin and the reclassification decision cannot diverge.
+   static real_t ContrastValue(const GodunovFlux& a, const GodunovFlux& b);
 };
 
 }  // namespace seas

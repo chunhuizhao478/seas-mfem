@@ -219,6 +219,18 @@ public:
    void SetCflRkAware(bool v) { cfl_rk_aware_ = v; }
    bool GetCflRkAware() const { return cfl_rk_aware_; }
 
+   /// (Unified bi-material plan, Part A) Relative impedance-contrast tolerance for
+   /// the central-flux corridor guard.  When `>= 0`, a fault-adjacent corridor face
+   /// whose two elements differ in impedance by more than this (relative) amount is
+   /// dropped from `central_flux_face_set_` and dispatches the (dissipative)
+   /// bi-material upwind instead of the non-dissipative central flux.  Default `-1`
+   /// (DISABLED) => byte-exact: no face is ever reclassified, even on a bi-material
+   /// mesh.  Only the matrix (`BimaterialWaveOperator`) path acts on this; the scalar
+   /// path is homogeneous so the contrast is always 0.  See
+   /// `BimaterialFlux::IsStrongContrast`.
+   void SetMixedFluxContrastTol(real_t tol) { mixed_flux_contrast_tol_ = tol; }
+   real_t GetMixedFluxContrastTol() const { return mixed_flux_contrast_tol_; }
+
    const FaultBasis *GetFaultBasis() const { return fault_basis_.get(); }
    int GetNumFaultDOFs() const { return num_fault_dofs_; }
 
@@ -239,8 +251,25 @@ public:
    const PMLLayer *GetPML() const { return pml_layer_; }
 
    /// Set/get FaultFaceFlux for fault face dispatch (R-002 fix).
-   void SetFaultFlux(FaultFaceFlux *ff) { fault_flux_ = ff; }
+   /// Virtual (Part B / B2): the BimaterialWaveOperator overrides this to also
+   /// affirm `FaultFaceFlux::SetPerSideFluxApplied(true)` (the matrix operator
+   /// converts the imposed state to bulk flux with per-side A), so the
+   /// bi-material-fault homogeneity guards may be relaxed.  The scalar base keeps
+   /// the flag false ⇒ a bimaterial fault on the scalar path still aborts.
+   virtual void SetFaultFlux(FaultFaceFlux *ff) { fault_flux_ = ff; }
    FaultFaceFlux *GetFaultFlux() { return fault_flux_; }
+
+   /// (Unified bi-material plan, Part B / B1) Overwrite each fault DOF's per-side
+   /// impedances (Zp_plus/Zp_minus, Zs_plus/Zs_minus, eta_p/eta_s) with the material
+   /// just INSIDE each side of the fault, via the eps-offset rule.  Default no-op on
+   /// the scalar (homogeneous) base — the driver's `InitializeFaultDOFs_Spatial`
+   /// already set both sides to the single material.  The matrix
+   /// `BimaterialWaveOperator` overrides this to evaluate the per-side material
+   /// (so a bi-material fault gets Zp_plus != Zp_minus; a fault-symmetric material
+   /// gets Zp_plus == Zp_minus to round-off => byte-exact).  Call AFTER
+   /// InitializeFaultDOFs_Spatial and BEFORE the time loop.
+   virtual void AssignFaultSidePerMaterialImpedances(
+      std::vector<DOFData> & /*dof_data*/) const {}
 
    /// REVIEW R-016: select the ADER fault dispatch.  Default
    /// `FaultFrictionLaw::RateAndState` runs `fault_flux_->EvaluateADER`
@@ -941,6 +970,9 @@ protected:
    /// false (ADER); only the spatial driver's RK branch flips it via
    /// `SetCflRkAware`.  See the in-body derivation comment in ComputeMaxDt.
    bool cfl_rk_aware_ = false;
+   /// (Unified bi-material plan, Part A) central-flux corridor contrast guard
+   /// tolerance; `< 0` => disabled (byte-exact).  Set via SetMixedFluxContrastTol.
+   real_t mixed_flux_contrast_tol_ = -1.0;
    std::unordered_set<int> central_flux_face_set_;
 
    /// Phase 3 helper: populate `central_flux_face_set_` per the mode.

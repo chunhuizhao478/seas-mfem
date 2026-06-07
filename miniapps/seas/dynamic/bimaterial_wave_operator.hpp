@@ -78,6 +78,7 @@ class BimaterialWaveOperator : public WaveOperator<MeshType>
    using Base::central_flux_face_set_;   // Phase 2: central-flux build iterates it
    using Base::mf_on_;                   // Phase 3: per-face central dispatch gate
    using Base::cfl_rk_aware_;            // P3-4: interim central+ADER abort guard
+   using Base::mixed_flux_contrast_tol_; // Part A: central-flux contrast guard tol
 
 public:
    /// @brief Construct the heterogeneous operator from a `MaterialField`
@@ -136,6 +137,26 @@ public:
    /// dispatched per-face on the central-set faces alongside the bi-material
    /// Godunov upwind elsewhere (drdg3d `get_flux` structure).
    void SetMixedFluxMode(MixedFluxMode m) override;
+
+   /// (Part B / B2) Attach the fault flux AND affirm per-side-A conversion.  The
+   /// matrix operator converts the per-side imposed state to the bulk flux with
+   /// per-side A (FluxForElem_(elem_plus/elem_minus) at the fault conversion sites
+   /// wave_operator.inl:3048 (Mult), :4301 (ADER), :3715 (shared)), so the
+   /// bi-material-fault homogeneity guards in FaultFaceFlux are safe to relax.
+   /// Verified: B0 (seas_test_bimaterial_fault_riemann +
+   /// debug_document/tpv6_debug_document/bimaterial_fault_verification_2026-06-06.md).
+   void SetFaultFlux(FaultFaceFlux *ff) override
+   {
+      Base::SetFaultFlux(ff);
+      if (ff != nullptr) { ff->SetPerSideFluxApplied(true); }
+   }
+
+   /// (Part B / B1) Overwrite each fault DOF's per-side impedances with the material
+   /// just inside each side of the fault (eps-offset rule, R-001/R-102).  Local
+   /// 2-sided fault faces only; SHARED (cross-rank) fault faces keep the
+   /// driver-seeded single-material values (R-101 peer eps-offset exchange deferred).
+   void AssignFaultSidePerMaterialImpedances(
+      std::vector<DOFData> &dof_data) const override;
 
    /// (PLAN Phase 2, BUG-6/BUG-10) Affirm the material is seam-continuous
    /// across partition seams (Constant or depth-only), permitting the central

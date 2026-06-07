@@ -356,15 +356,20 @@ void FaultFaceFlux::Evaluate(DOFData &data,
       return std::abs(a - b) <=
              1e-12 * std::max(std::abs(a), std::abs(b));
    };
-   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
-               homog_ok(data.Zs_plus, data.Zs_minus),
+   MFEM_VERIFY(per_side_flux_applied_ ||
+               (homog_ok(data.Zp_plus, data.Zp_minus) &&
+                homog_ok(data.Zs_plus, data.Zs_minus)),
                "Bimaterial fault face detected (Zp_plus=" << data.Zp_plus
                << " Zp_minus=" << data.Zp_minus
                << " Zs_plus=" << data.Zs_plus
                << " Zs_minus=" << data.Zs_minus
-               << ").  v9.0.0 Pelties-9 per-side flux assumes "
-               "homogeneous material.  Extend GodunovFlux to per-side A "
-               "before running this configuration.");
+               << ").  v9.0.0 Pelties-9 per-side flux is correct for unequal "
+               "impedance (verified: seas_test_bimaterial_fault_riemann); this "
+               "guard fires only when the CALLER did not affirm per-side-A "
+               "conversion.  Run on the matrix interior-flux path "
+               "(BimaterialWaveOperator sets SetPerSideFluxApplied) — the "
+               "supported bi-material-fault path.  The scalar path applies a "
+               "single A to both sides.");
 
    // Round-12 Patch 1: compose the stage helpers.  Byte-identical to
    // the pre-refactor inline implementation.
@@ -496,15 +501,18 @@ void FaultFaceFlux::EvaluateTotal(DOFData &data,
       return std::abs(a - b) <=
              1e-12 * std::max(std::abs(a), std::abs(b));
    };
-   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
-               homog_ok(data.Zs_plus, data.Zs_minus),
+   MFEM_VERIFY(per_side_flux_applied_ ||
+               (homog_ok(data.Zp_plus, data.Zp_minus) &&
+                homog_ok(data.Zs_plus, data.Zs_minus)),
                "Bimaterial fault face detected (Zp_plus=" << data.Zp_plus
                << " Zp_minus=" << data.Zp_minus
                << " Zs_plus=" << data.Zs_plus
                << " Zs_minus=" << data.Zs_minus
-               << ").  EvaluateTotal assumes homogeneous material.  "
-               "Extend GodunovFlux / FaultFaceFlux to per-side A before "
-               "running this configuration.");
+               << ").  EvaluateTotal's per-side flux is correct for unequal "
+               "impedance; this guard fires only when the CALLER did not affirm "
+               "per-side-A conversion.  Run on the matrix interior-flux path "
+               "(BimaterialWaveOperator sets SetPerSideFluxApplied).  The scalar "
+               "path applies a single A to both sides.");
 
    // Step 1: Trial traction from bulk Q.  Under total-Q, bulk Q
    //         carries the static background prestress, so this trial is
@@ -775,13 +783,16 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
       return std::abs(a - b) <=
              static_cast<real_t>(1e-12) * std::max(std::abs(a), std::abs(b));
    };
-   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
-               homog_ok(data.Zs_plus, data.Zs_minus),
+   MFEM_VERIFY(per_side_flux_applied_ ||
+               (homog_ok(data.Zp_plus, data.Zp_minus) &&
+                homog_ok(data.Zs_plus, data.Zs_minus)),
                "FaultFaceFlux::EvaluateADER_LSW: bimaterial fault face "
                "(Zp_plus=" << data.Zp_plus << " Zp_minus=" << data.Zp_minus
                << " Zs_plus=" << data.Zs_plus << " Zs_minus=" << data.Zs_minus
-               << ").  Extend per-side handling before running this "
-               "configuration.");
+               << ").  Run this configuration on the matrix interior-flux path: "
+               "BimaterialWaveOperator affirms per-side A via "
+               "SetPerSideFluxApplied (the supported bi-material-fault path).  "
+               "The scalar path applies a single A to both sides.");
 
    // Step 0: Q̄± = I±/dt.
    real_t Q_avg_plus[NUM_STATE], Q_avg_minus[NUM_STATE];
@@ -909,13 +920,16 @@ void FaultFaceFlux::EvaluateLSW(DOFData &data,
       return std::abs(a - b) <=
              static_cast<real_t>(1e-12) * std::max(std::abs(a), std::abs(b));
    };
-   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
-               homog_ok(data.Zs_plus, data.Zs_minus),
+   MFEM_VERIFY(per_side_flux_applied_ ||
+               (homog_ok(data.Zp_plus, data.Zp_minus) &&
+                homog_ok(data.Zs_plus, data.Zs_minus)),
                "FaultFaceFlux::EvaluateLSW: bimaterial fault face "
                "(Zp_plus=" << data.Zp_plus << " Zp_minus=" << data.Zp_minus
                << " Zs_plus=" << data.Zs_plus << " Zs_minus=" << data.Zs_minus
-               << ").  Extend per-side handling before running this "
-               "configuration.");
+               << ").  Run this configuration on the matrix interior-flux path: "
+               "BimaterialWaveOperator affirms per-side A via "
+               "SetPerSideFluxApplied (the supported bi-material-fault path).  "
+               "The scalar path applies a single A to both sides.");
 
    // Step 1: trial traction (pure helper) — directly from the bulk Q (no
    // Q-bar = I/dt averaging, unlike EvaluateADER_LSW).
@@ -1027,15 +1041,18 @@ void FaultFaceFlux::EvaluateADER_LSW_ForcedRupture(
       return std::abs(a - b) <=
              static_cast<real_t>(1e-12) * std::max(std::abs(a), std::abs(b));
    };
-   MFEM_VERIFY(homog_ok(data.Zp_plus, data.Zp_minus) &&
-               homog_ok(data.Zs_plus, data.Zs_minus),
+   MFEM_VERIFY(per_side_flux_applied_ ||
+               (homog_ok(data.Zp_plus, data.Zp_minus) &&
+                homog_ok(data.Zs_plus, data.Zs_minus)),
                "FaultFaceFlux::EvaluateADER_LSW_ForcedRupture: bimaterial "
                "fault face (Zp_plus=" << data.Zp_plus
                << " Zp_minus=" << data.Zp_minus
                << " Zs_plus=" << data.Zs_plus
                << " Zs_minus=" << data.Zs_minus
-               << ").  Extend per-side handling before running this "
-               "configuration.");
+               << ").  Run this configuration on the matrix interior-flux path: "
+               "BimaterialWaveOperator affirms per-side A via "
+               "SetPerSideFluxApplied (the supported bi-material-fault path).  "
+               "The scalar path applies a single A to both sides.");
 
    real_t Q_avg_plus[NUM_STATE], Q_avg_minus[NUM_STATE];
    const real_t inv_dt = static_cast<real_t>(1.0) / dt;

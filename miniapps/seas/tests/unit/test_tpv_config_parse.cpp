@@ -308,6 +308,11 @@ static void T_numerics_dispatch_helpers()
    spatial::SpatialFrictionConfig def;
    TEST_ASSERT(def.numerics.cfl_safety == spatial::CflSafety::Dg,
                "cfl_safety struct default == Dg (R-002: no SAFS regression)");
+   // (Unified bi-material plan, Part A) the central-flux contrast guard defaults to
+   // DISABLED (< 0): a config that omits mixed_flux_contrast_tol is byte-exact.
+   TEST_ASSERT(def.numerics.mixed_flux_contrast_tol < 0.0,
+               "mixed_flux_contrast_tol struct default < 0 (Part A: guard disabled "
+               "by default -> byte-exact)");
    // R-001 SAFS-safe default: a config that omits fault_iterator must default
    // to the SUPPORTED mode (Substep), else the driver's FaultIteratorSupported
    // guard aborts every SAFS run.
@@ -457,6 +462,64 @@ static void T_G2_MatrixMixedFluxUnderAder()
                "scalar + adjacent + ADER -> G2 allows (scalar not constrained by G2)");
 }
 
+// ---------------------------------------------------------------------
+// Part C / C2 (TPV6/TPV7): the bi-material-fault config artifact parses —
+// halfspace_across_fault material + matrix flux + the TPV205-style static
+// stress-patch nucleation (NO [nucleation] block) + LSW + barriers.
+// ---------------------------------------------------------------------
+static void T_TPV6(const std::string& path, const char* label,
+                   double vp_far_expected)
+{
+   std::cout << "\n[" << label << "] parse " << path << "\n";
+   spatial::SpatialFrictionConfig cfg = spatial::LoadSpatialFrictionConfig(path);
+
+   // Bi-material across the fault + per-side Riemann (matrix).
+   TEST_ASSERT(cfg.material.kind == spatial::MaterialKind::HalfspaceAcrossFault,
+               "material.kind == halfspace_across_fault");
+   TEST_NEAR(cfg.material.halfspace.vp_near, 6000.0, 1.0,
+             "halfspace vp_near == 6000 (fast/near side)");
+   TEST_NEAR(cfg.material.halfspace.vp_far, vp_far_expected, 1.0,
+             "halfspace vp_far (per problem)");
+   TEST_NEAR(cfg.material.halfspace.normal[1], -1.0, 1e-12,
+             "halfspace n_y == -1 (matches ref_normal)");
+   TEST_ASSERT(cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix,
+               "interior_flux == matrix (REQUIRED for per-side fault Riemann)");
+
+   // Nucleation = TPV205-style STATIC stress patch, NOT a time-varying driver.
+   TEST_ASSERT(!cfg.nucleation.enabled,
+               "no [nucleation] block (static stress-patch nucleation, like TPV205)");
+   TEST_ASSERT(cfg.stress.kind == spatial::StressSourceKind::FaultLocalPrestress,
+               "stress.kind == fault_local_prestress");
+   TEST_NEAR(cfg.stress.tau_strike_pa, 70.0e6, 1.0, "background tau_strike == 70 MPa");
+   TEST_NEAR(cfg.stress.sigma_n_pa, 120.0e6, 1.0, "sigma_n == 120 MPa");
+   TEST_ASSERT(cfg.stress.fault_local_patches.size() == 1u,
+               "exactly 1 stress patch (the nucleation square)");
+   if (cfg.stress.fault_local_patches.size() == 1u)
+   {
+      const auto& pch = cfg.stress.fault_local_patches[0];
+      TEST_NEAR(pch.tau_strike_pa, 81.6e6, 1.0,
+                "nucleation patch tau_strike == 81.6 MPa (> yield 0.677*120 = 81.24)");
+      TEST_NEAR(pch.center_x_m, 0.0, 1e-6, "patch center_x == 0 (config frame)");
+      TEST_NEAR(pch.center_z_m, -7500.0, 1e-6, "patch center_z == -7500");
+      TEST_NEAR(pch.half_x_m, 1500.0, 1e-6, "patch half_x == 1500 (3000 m square)");
+      TEST_NEAR(pch.half_z_m, 1500.0, 1e-6, "patch half_z == 1500");
+   }
+
+   // LSW friction + barriers.
+   TEST_ASSERT(cfg.law == spatial::FrictionLawKind::SlipWeakening,
+               "law == slip_weakening");
+   TEST_ASSERT(cfg.slip_weakening.has_value(),
+               "[friction.slip_weakening] block present");
+   if (cfg.slip_weakening.has_value())
+   {
+      TEST_NEAR(cfg.slip_weakening->mu_s_default, 0.677, 1e-9, "mu_s == 0.677");
+      TEST_NEAR(cfg.slip_weakening->mu_d_default, 0.525, 1e-9, "mu_d == 0.525");
+      TEST_NEAR(cfg.slip_weakening->d_c_default, 0.40, 1e-9, "d_c == 0.40");
+      TEST_ASSERT(cfg.slip_weakening->spatial.size() == 3u,
+                  "3 barrier rules (deep + 2 strike; free surface on top, no barrier)");
+   }
+}
+
 int main(int, char**)
 {
    std::cout << "Running Phase 8 TPV config-parse tests\n";
@@ -527,6 +590,14 @@ int main(int, char**)
       std::cout << "(tpv31.toml not found relative to CWD; TPV31 parse tests "
                    "skipped)\n";
    }
+
+   // Part C / C2: TPV6 / TPV7 bi-material-fault config artifacts.
+   const std::string p6 = FindConfig("tpv6/configs/tpv6.toml");
+   const std::string p7 = FindConfig("tpv7/configs/tpv7.toml");
+   if (!p6.empty()) { T_TPV6(p6, "TPV6 config",  3750.0); }  // far = slow (high contrast)
+   else { std::cout << "(tpv6/configs/tpv6.toml not found; TPV6 parse skipped)\n"; }
+   if (!p7.empty()) { T_TPV6(p7, "TPV7 config",  5000.0); }  // far = low-contrast
+   else { std::cout << "(tpv7/configs/tpv7.toml not found; TPV7 parse skipped)\n"; }
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 8 config-parse: " << num_passed << " / " << num_tests

@@ -338,5 +338,84 @@ std::unique_ptr<DepthProfile1DMaterial> MakeDepthProfile1DMaterial(
    return wrapper;
 }
 
+// ===========================================================================
+// Part B / B3 (TPV6): MakeHalfspaceAcrossFaultMaterial.
+// ===========================================================================
+std::unique_ptr<HalfspaceAcrossFaultMaterial> MakeHalfspaceAcrossFaultMaterial(
+   real_t vp_near, real_t vs_near, real_t rho_near,
+   real_t vp_far,  real_t vs_far,  real_t rho_far,
+   const real_t x0[3], const real_t n[3])
+{
+   auto check_side = [](const char* side, real_t vp, real_t vs, real_t rho)
+   {
+      MFEM_VERIFY(vs > 0.0 && rho > 0.0,
+                  "MakeHalfspaceAcrossFaultMaterial: " << side
+                  << " side requires vs>0 and rho>0 (elastic; no acoustic side).");
+      // Same Poisson-ratio sanity check as the depth profile: vp >= sqrt(2)*vs
+      // catches the common vp/vs swap with a clear message.
+      MFEM_VERIFY(vp >= std::sqrt(2.0) * vs,
+                  "MakeHalfspaceAcrossFaultMaterial: " << side << " side has vp="
+                  << vp << " < sqrt(2)*vs=" << (std::sqrt(2.0) * vs)
+                  << " (Poisson ratio < 0; almost certainly a vp/vs swap).");
+   };
+   check_side("near", vp_near, vs_near, rho_near);
+   check_side("far",  vp_far,  vs_far,  rho_far);
+   const real_t nlen2 = n[0]*n[0] + n[1]*n[1] + n[2]*n[2];
+   MFEM_VERIFY(nlen2 > 0.0,
+               "MakeHalfspaceAcrossFaultMaterial: plane normal must be nonzero.");
+
+   const real_t mu_near  = rho_near * vs_near * vs_near;
+   const real_t lam_near = rho_near * (vp_near * vp_near - 2.0 * vs_near * vs_near);
+   const real_t mu_far   = rho_far * vs_far * vs_far;
+   const real_t lam_far  = rho_far * (vp_far * vp_far - 2.0 * vs_far * vs_far);
+
+   auto wrapper = std::unique_ptr<HalfspaceAcrossFaultMaterial>(
+      new HalfspaceAcrossFaultMaterial());
+
+   const real_t x0c[3] = { x0[0], x0[1], x0[2] };
+   const real_t nc[3]  = { n[0],  n[1],  n[2]  };
+
+   // Side test: sign((x - x0).n) >= 0 -> NEAR (the +Q side under ref_normal),
+   // else FAR.  component: 0=lambda, 1=mu, 2=rho.
+   auto eval = [x0c, nc, lam_near, mu_near, rho_near, lam_far, mu_far, rho_far]
+               (real_t x, real_t y, real_t z, int component) -> real_t
+   {
+      const real_t s = (x - x0c[0]) * nc[0] + (y - x0c[1]) * nc[1]
+                       + (z - x0c[2]) * nc[2];
+      const bool nearside = (s >= 0.0);
+      switch (component)
+      {
+         case 0: return nearside ? lam_near : lam_far;
+         case 1: return nearside ? mu_near  : mu_far;
+         case 2: return nearside ? rho_near : rho_far;
+         default:
+            MFEM_ABORT("HalfspaceAcrossFaultMaterial: invalid component "
+                       << component << " (expected 0=lambda, 1=mu, 2=rho).");
+      }
+      return 0.0;  // unreachable
+   };
+
+   wrapper->lambda = std::make_unique<mfem::FunctionCoefficient>(
+      [eval](const mfem::Vector& x) -> real_t { return eval(x(0), x(1), x(2), 0); });
+   wrapper->mu = std::make_unique<mfem::FunctionCoefficient>(
+      [eval](const mfem::Vector& x) -> real_t { return eval(x(0), x(1), x(2), 1); });
+   wrapper->rho = std::make_unique<mfem::FunctionCoefficient>(
+      [eval](const mfem::Vector& x) -> real_t { return eval(x(0), x(1), x(2), 2); });
+
+   wrapper->eval_at_xyz =
+      [eval](real_t x, real_t y, real_t z,
+             real_t& lambda_out, real_t& mu_out, real_t& rho_out) -> void
+      {
+         lambda_out = eval(x, y, z, 0);
+         mu_out     = eval(x, y, z, 1);
+         rho_out    = eval(x, y, z, 2);
+      };
+
+   wrapper->field = MaterialField::MakeCoefficient(
+      wrapper->lambda.get(), wrapper->mu.get(), wrapper->rho.get());
+
+   return wrapper;
+}
+
 } // namespace seas
 } // namespace mfem

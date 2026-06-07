@@ -1094,6 +1094,10 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       const auto& n = root.at("numerics");
       cfg.numerics.ader_order = toml_int(n, "ader_order", 2);
       cfg.numerics.mixed_flux = toml_str(n, "mixed_flux", "none");
+      // (Unified bi-material plan, Part A) central-flux corridor contrast guard;
+      // < 0 (default) => disabled / byte-exact.
+      cfg.numerics.mixed_flux_contrast_tol =
+         toml_real(n, "mixed_flux_contrast_tol", -1.0);
       cfg.numerics.cfl        = toml_real(n, "cfl", 0.5);
       cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
 
@@ -1630,10 +1634,13 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       if      (mk == "constant")         { cfg.material.kind = MaterialKind::Constant; }
       else if (mk == "depth_profile_1d") { cfg.material.kind = MaterialKind::DepthProfile1D; }
       else if (mk == "sidecar_hdf5")     { cfg.material.kind = MaterialKind::SidecarHDF5; }
+      else if (mk == "halfspace_across_fault")
+      { cfg.material.kind = MaterialKind::HalfspaceAcrossFault; }
       else
       {
          MFEM_ABORT("[material].kind must be one of {constant, "
-                    "depth_profile_1d, sidecar_hdf5}; got '" << mk << "'");
+                    "depth_profile_1d, sidecar_hdf5, halfspace_across_fault}; "
+                    "got '" << mk << "'");
       }
       cfg.material.profile_csv  = toml_str(m, "profile_csv",  std::string());
       cfg.material.sidecar_path = toml_str(m, "sidecar_path", std::string());
@@ -1697,6 +1704,39 @@ SpatialFrictionConfig parse_root(const toml::value& root)
          MFEM_VERIFY(!cfg.material.sidecar_path.empty(),
                      "[material] kind=\"sidecar_hdf5\" requires a non-empty "
                      "sidecar_path");
+      }
+
+      if (cfg.material.kind == MaterialKind::HalfspaceAcrossFault)
+      {
+         // (Part B / B3) two uniform halfspaces from [material.halfspace_across_fault].
+         MFEM_VERIFY(m.contains("halfspace_across_fault"),
+                     "[material].kind=\"halfspace_across_fault\" requires a "
+                     "[material.halfspace_across_fault] sub-table with vp/vs/rho "
+                     "for the near and far sides.");
+         const auto& h = m.at("halfspace_across_fault");
+         auto& hs = cfg.material.halfspace;
+         hs.vp_near  = toml_real(h, "vp_near",  0.0);
+         hs.vs_near  = toml_real(h, "vs_near",  0.0);
+         hs.rho_near = toml_real(h, "rho_near", 0.0);
+         hs.vp_far   = toml_real(h, "vp_far",   0.0);
+         hs.vs_far   = toml_real(h, "vs_far",   0.0);
+         hs.rho_far  = toml_real(h, "rho_far",  0.0);
+         // Splitting plane (defaults: through origin, normal (0,-1,0) = TPV6).
+         hs.x0[0]     = toml_real(h, "x0_x", 0.0);
+         hs.x0[1]     = toml_real(h, "x0_y", 0.0);
+         hs.x0[2]     = toml_real(h, "x0_z", 0.0);
+         hs.normal[0] = toml_real(h, "n_x",  0.0);
+         hs.normal[1] = toml_real(h, "n_y", -1.0);
+         hs.normal[2] = toml_real(h, "n_z",  0.0);
+         MFEM_VERIFY(hs.vs_near > 0.0 && hs.rho_near > 0.0 &&
+                     hs.vs_far  > 0.0 && hs.rho_far  > 0.0,
+                     "[material.halfspace_across_fault] requires vs/rho > 0 on "
+                     "both sides (elastic; no acoustic side).");
+         const real_t nlen2 = hs.normal[0]*hs.normal[0] + hs.normal[1]*hs.normal[1]
+                            + hs.normal[2]*hs.normal[2];
+         MFEM_VERIFY(nlen2 > 0.0,
+                     "[material.halfspace_across_fault] plane normal (n_x,n_y,n_z) "
+                     "must be nonzero.");
       }
    }
 

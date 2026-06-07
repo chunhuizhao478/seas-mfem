@@ -336,6 +336,7 @@ TEST_FAULT_FLUX_BRANCH_EQUIV_SRC = tests/unit/test_fault_flux_interior_vs_shared
 TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC = tests/unit/test_godunov_interior_equal_sides_identity.cpp
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC = tests/unit/test_fault_face_flux_per_side_assembly.cpp
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC  = tests/unit/test_fault_face_flux_bimaterial_guard.cpp
+TEST_BIMATERIAL_FAULT_RIEMANN_SRC          = tests/unit/test_bimaterial_fault_riemann.cpp
 # v9.1.0 Pelties-9 follow-through: post-R-001 VTU continuity + post-R-003 basis symmetry
 TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC      = tests/unit/test_fault_surface_vtu_continuity.cpp
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC   = tests/unit/test_fault_basis_dip_strike_symmetry.cpp
@@ -673,6 +674,7 @@ TEST_FAULT_FLUX_BRANCH_EQUIV_OBJ = $(TEST_FAULT_FLUX_BRANCH_EQUIV_SRC:.cpp=.o)
 TEST_GODUNOV_INTERIOR_EQUAL_SIDES_OBJ = $(TEST_GODUNOV_INTERIOR_EQUAL_SIDES_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_OBJ = $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASSEMBLY_SRC:.cpp=.o)
 TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ  = $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_SRC:.cpp=.o)
+TEST_BIMATERIAL_FAULT_RIEMANN_OBJ          = $(TEST_BIMATERIAL_FAULT_RIEMANN_SRC:.cpp=.o)
 # v9.1.0 Pelties-9 follow-through
 TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ      = $(TEST_FAULT_SURFACE_VTU_CONTINUITY_SRC:.cpp=.o)
 TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_OBJ   = $(TEST_FAULT_BASIS_DIP_STRIKE_SYMMETRY_SRC:.cpp=.o)
@@ -1694,6 +1696,14 @@ seas_test_fault_face_flux_per_side_assembly: $(TEST_FAULT_FACE_FLUX_PER_SIDE_ASS
 seas_test_fault_face_flux_bimaterial_guard: $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Part B / B0 (GATE): per-side bi-material fault Riemann (locked-limit welded R/T).
+seas_test_bimaterial_fault_riemann: $(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(GODUNOV_FLUX_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-fault-riemann: seas_test_bimaterial_fault_riemann
+	./seas_test_bimaterial_fault_riemann
 
 # v9.1.0 plan §4.1 — fault-surface VTU CellData contract (post-R-001)
 seas_test_fault_surface_vtu_continuity: $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ)
@@ -3493,6 +3503,10 @@ $(TEST_FAULT_FACE_FLUX_BIMATERIAL_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_BIMATERIAL_FAULT_RIEMANN_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 # v9.1.0 plan §4.1 / §4.2 — Pelties-9 follow-through tests
 $(TEST_FAULT_SURFACE_VTU_CONTINUITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -5105,6 +5119,8 @@ TEST_MIXED_FLUX_FACE_SET_SRC       = tests/unit/test_mixed_flux_face_set.cpp
 TEST_MIXED_FLUX_DISPATCH_NONE_SRC  = tests/unit/test_mixed_flux_dispatch_none.cpp
 TEST_BIMATERIAL_CENTRAL_FLUX_SRC   = tests/unit/test_bimaterial_central_flux.cpp
 TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_SRC = tests/unit/test_bimaterial_mixed_flux_dispatch.cpp
+TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_SRC = tests/unit/test_bimaterial_fault_perside_material.cpp
+TEST_BIMATERIAL_CONTRAST_GUARD_SRC = tests/unit/test_bimaterial_contrast_guard.cpp
 TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC = tests/parallel/test_bimaterial_mixed_flux_shared.cpp
 TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC = tests/unit/test_bimaterial_mixed_flux_cfl.cpp
 TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC = tests/unit/test_bimaterial_mixed_flux_homog_equivalence.cpp
@@ -5135,6 +5151,8 @@ TEST_MIXED_FLUX_FACE_SET_OBJ       = $(TEST_MIXED_FLUX_FACE_SET_SRC:.cpp=.o)
 TEST_MIXED_FLUX_DISPATCH_NONE_OBJ  = $(TEST_MIXED_FLUX_DISPATCH_NONE_SRC:.cpp=.o)
 TEST_BIMATERIAL_CENTRAL_FLUX_OBJ   = $(TEST_BIMATERIAL_CENTRAL_FLUX_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_SRC:.cpp=.o)
+TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_OBJ = $(TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_SRC:.cpp=.o)
+TEST_BIMATERIAL_CONTRAST_GUARD_OBJ = $(TEST_BIMATERIAL_CONTRAST_GUARD_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC:.cpp=.o)
@@ -5228,6 +5246,14 @@ $(TEST_BIMATERIAL_CENTRAL_FLUX_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_CONTRAST_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -5409,7 +5435,66 @@ seas_test_bimaterial_mixed_flux_dispatch: \
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 test-bimaterial-mixed-flux-dispatch: seas_test_bimaterial_mixed_flux_dispatch
+
+# Part B / B1: per-side fault impedance assignment (eps-offset rule).
+seas_test_bimaterial_fault_perside_material: \
+                  $(TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-fault-perside-material: seas_test_bimaterial_fault_perside_material
+	./seas_test_bimaterial_fault_perside_material
 	./seas_test_bimaterial_mixed_flux_dispatch
+
+# Part A: central-flux contrast guard (predicate + face-set membership + two-sided
+# dissipation mechanism).  Same operator-level object list as the dispatch test.
+seas_test_bimaterial_contrast_guard: \
+                  $(TEST_BIMATERIAL_CONTRAST_GUARD_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_CONTRAST_GUARD_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-contrast-guard: seas_test_bimaterial_contrast_guard
+	./seas_test_bimaterial_contrast_guard
 
 # Phase 3 P3-1: MPI (np=2) shared central-face dispatch (operator-level deps,
 # mirrors seas_test_bimaterial_wave_operator_parity's object list).  NOT in the

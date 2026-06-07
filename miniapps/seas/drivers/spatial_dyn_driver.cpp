@@ -575,6 +575,13 @@ int main(int argc, char *argv[])
       GetStringArg(argc, argv, "--time-integrator", "");
    const std::string cli_mixed_flux =
       GetStringArg(argc, argv, "--mixed-flux", "");
+   // (Unified bi-material plan, Part A) central-flux corridor contrast guard.
+   // Sentinel -1e30 = "not given on the CLI" (keep TOML/default); any value >= that
+   // sentinel was given and overrides the config (CLI wins).  A negative given value
+   // explicitly DISABLES the guard (so the CLI can override an enabling TOML).
+   constexpr real_t kContrastTolUnset = -1.0e30;
+   const real_t cli_contrast_tol =
+      GetRealArg(argc, argv, "--mixed-flux-contrast-tol", kContrastTolUnset);
    const bool   cli_pml        = HasFlag(argc, argv, "--pml");
    // Phase 12.2: PML overrides (CLI wins over [numerics]); sentinels mean
    // "not given on the CLI" so the TOML / struct default is kept.
@@ -690,6 +697,10 @@ int main(int argc, char *argv[])
       }
    }
    if (!cli_mixed_flux.empty())      { cfg.numerics.mixed_flux = cli_mixed_flux; }
+   if (cli_contrast_tol > kContrastTolUnset)
+   {
+      cfg.numerics.mixed_flux_contrast_tol = cli_contrast_tol;
+   }
    if (cli_pml)                      { cfg.numerics.use_pml = true; }
    if (cli_pml_thickness > 0.0)      { cfg.numerics.pml_thickness_m = cli_pml_thickness; }
    if (cli_pml_target_R  > 0.0)      { cfg.numerics.pml_target_R    = cli_pml_target_R; }
@@ -882,6 +893,10 @@ int main(int argc, char *argv[])
                        == spatial::TimeIntegratorKind::RK4  ? "rk4"
                                                             : "rk45") << "\n"
                 << "mixed flux:       " << cfg.numerics.mixed_flux << "\n"
+                << "mixed flux contrast tol: "
+                << cfg.numerics.mixed_flux_contrast_tol
+                << (cfg.numerics.mixed_flux_contrast_tol < 0.0
+                    ? " (disabled)" : "") << "\n"
                 << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
                 << "\n"
                 << "sigma_n strength floor: " << sigma_n_floor_banner << "\n"
@@ -1005,6 +1020,9 @@ int main(int argc, char *argv[])
    // depth-profile MaterialField points at; MUST outlive `wave_ptr` and
    // `material` (same lifetime contract as `vel_bundle`).
    std::unique_ptr<DepthProfile1DMaterial> depth_profile_wrapper;
+   // (Part B / B3) across-fault halfspace wrapper; same lifetime contract as
+   // depth_profile_wrapper (the MaterialField borrows its FunctionCoefficients).
+   std::unique_ptr<HalfspaceAcrossFaultMaterial> halfspace_wrapper;
    MaterialField material = MaterialField::MakeConstant(mat_lambda,
                                                         mat_mu, mat_rho);
 
@@ -1046,6 +1064,30 @@ int main(int argc, char *argv[])
                       << " vs=" << L.vs_ms << " rho=" << L.rho_kgm3
                       << " interp=" << L.interp << "\n";
          }
+      }
+   }
+   else if (cfg.material.kind == spatial::MaterialKind::HalfspaceAcrossFault)
+   {
+      // (Part B / B3, TPV6) build the across-fault halfspace (Mode::Coefficient)
+      // MaterialField.  `material` borrows the wrapper's FunctionCoefficients
+      // (the wrapper outlives both `material` and `wave_ptr`).  The matrix
+      // (bimaterial) interior-flux path + B1 per-side fault assignment consume it.
+      const auto &hs = cfg.material.halfspace;
+      halfspace_wrapper = MakeHalfspaceAcrossFaultMaterial(
+         hs.vp_near, hs.vs_near, hs.rho_near,
+         hs.vp_far,  hs.vs_far,  hs.rho_far,
+         hs.x0, hs.normal);
+      material = halfspace_wrapper->field;
+      if (rank == 0)
+      {
+         std::cout << "[material] kind=halfspace_across_fault\n"
+                   << "  near (sign((x-x0).n)>=0): vp=" << hs.vp_near
+                   << " vs=" << hs.vs_near << " rho=" << hs.rho_near << "\n"
+                   << "  far                     : vp=" << hs.vp_far
+                   << " vs=" << hs.vs_far << " rho=" << hs.rho_far << "\n"
+                   << "  plane x0=(" << hs.x0[0] << "," << hs.x0[1] << ","
+                   << hs.x0[2] << ") n=(" << hs.normal[0] << "," << hs.normal[1]
+                   << "," << hs.normal[2] << ")\n";
       }
    }
    else if (sidecar_requested)
@@ -1273,6 +1315,12 @@ int main(int argc, char *argv[])
                    "is not yet validated.  Treat parallel RS results as "
                    "PRELIMINARY.\n";
    }
+   // (Unified bi-material plan, Part A) Set the central-flux contrast-guard
+   // tolerance BEFORE SetMixedFluxMode: the bi-material SetMixedFluxMode override
+   // rebuilds central_flux_face_set_ + the per-face central matrices via
+   // BuildPerFaceCentralFluxMatrices_, which reads mixed_flux_contrast_tol_ to drop
+   // strong-contrast corridor faces.  Order matters (R-006).  tol < 0 = disabled.
+   wave.SetMixedFluxContrastTol(cfg.numerics.mixed_flux_contrast_tol);
    wave.SetMixedFluxMode(ParseMixedFlux(cfg.numerics.mixed_flux));
 
    // (Phase 5, req 4) Headline banner for the combination this feature enables:
@@ -1858,6 +1906,14 @@ int main(int argc, char *argv[])
    }
    wave.SetFaultDOFData(&dof_data, nbf_per_face);
 
+   // (Part B / B1) Overwrite per-side fault impedances with the material just
+   // inside each side (eps-offset rule).  No-op on the scalar operator and on a
+   // fault-symmetric material (Zp_plus == Zp_minus to round-off => byte-exact);
+   // gives the bi-material-fault contrast for an across-fault material (TPV6).
+   // MUST run AFTER SetFaultDOFData (needs fault_face_dof_offset_) and after
+   // InitializeFaultDOFs_Spatial (which seeded the single-material default).
+   wave.AssignFaultSidePerMaterialImpedances(dof_data);
+
    // Fluctuation-Q dispatch (matches TPV205): Q_bg = 0.
    {
       real_t Q_bg[NUM_STATE] = {0};
@@ -2295,6 +2351,46 @@ int main(int argc, char *argv[])
                 << (cfg.numerics.interior_flux == spatial::InteriorFlux::Matrix
                        ? "matrix (heterogeneous bimaterial Riemann)\n"
                        : "scalar (homogeneous Godunov)\n");
+   }
+
+   // (Part C / B1, R-001) Per-side fault impedance summary: confirms whether the
+   // fault is BI-MATERIAL (Zp_plus != Zp_minus, e.g. TPV6/7) or symmetric
+   // (Zp_plus == Zp_minus, e.g. TPV31/TPV205).  Scans the constructed dof_data
+   // (after AssignFaultSidePerMaterialImpedances).  GLOBAL: all ranks accumulate
+   // their local fault DOFs and MPI_Reduce to rank 0 (verify_dispatch is
+   // rank-uniform), so the banner is correct under MPI (not rank-0-local).
+   if (verify_dispatch)
+   {
+      long long n_bimat_l = 0, n_dof_l = static_cast<long long>(dof_data.size());
+      real_t zpmn_l = std::numeric_limits<real_t>::max(), zpmx_l = 0.0;
+      real_t zmmn_l = std::numeric_limits<real_t>::max(), zmmx_l = 0.0;
+      for (const auto &d : dof_data)
+      {
+         zpmn_l = std::min(zpmn_l, d.Zp_plus);  zpmx_l = std::max(zpmx_l, d.Zp_plus);
+         zmmn_l = std::min(zmmn_l, d.Zp_minus); zmmx_l = std::max(zmmx_l, d.Zp_minus);
+         const real_t denom = std::max(real_t(1.0),
+                                       std::max(std::abs(d.Zp_plus), std::abs(d.Zp_minus)));
+         if (std::abs(d.Zp_plus - d.Zp_minus) > 1.0e-9 * denom) { ++n_bimat_l; }
+      }
+      long long n_bimat = n_bimat_l, n_dof = n_dof_l;
+      real_t zpmn = zpmn_l, zpmx = zpmx_l, zmmn = zmmn_l, zmmx = zmmx_l;
+#ifdef MFEM_USE_MPI
+      MPI_Reduce(&n_bimat_l, &n_bimat, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+      MPI_Reduce(&n_dof_l,   &n_dof,   1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+      MPI_Reduce(&zpmn_l, &zpmn, 1, MPI_DOUBLE, MPI_MIN, 0, comm);
+      MPI_Reduce(&zpmx_l, &zpmx, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+      MPI_Reduce(&zmmn_l, &zmmn, 1, MPI_DOUBLE, MPI_MIN, 0, comm);
+      MPI_Reduce(&zmmx_l, &zmmx, 1, MPI_DOUBLE, MPI_MAX, 0, comm);
+#endif
+      if (rank == 0 && n_dof > 0)
+      {
+         std::cout << "[verify-dispatch] fault per-side : "
+                   << (n_bimat > 0 ? "BI-MATERIAL fault" : "symmetric fault")
+                   << " (" << n_bimat << "/" << n_dof
+                   << " DOFs with Zp_plus != Zp_minus); Zp_plus in ["
+                   << zpmn << ", " << zpmx << "], Zp_minus in ["
+                   << zmmn << ", " << zmmx << "]\n";
+      }
    }
 
    // -----------------------------------------------------------------

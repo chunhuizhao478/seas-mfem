@@ -1,0 +1,132 @@
+# =====================================================================
+#  SCEC TPV7 — BI-MATERIAL FAULT (lower contrast than TPV6), LSW, via the
+#  SAFS spatial dynamic-rupture driver (seas_spatial_dyn_driver).
+#
+#  IDENTICAL to tpv6.toml EXCEPT the FAR-side material triple (the contrast
+#  is smaller).  TPV7 is the SCEC "ill-posed" bi-material case: the problem
+#  is grid-dependent BY DESIGN — exact convergence is NOT expected; compare
+#  to the SCEC ensemble spread, not a single reference.
+#
+#  See tpv6.toml for the full convention / nucleation / run-arm notes (all
+#  identical here).  Spec: 2007RuthRalphletter2.pdf.
+#
+#  Nucleation = TPV205-style static stress patch (NO [nucleation] block).
+#  sigma_n is PHYSICALLY non-constant (bi-material) — not a leak.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV7 (bi-material fault, low contrast / LSW) via spatial_dyn_driver — per-side fault Riemann, matrix flux."
+
+[problem]
+tag = "tpv6"   # reuse the TPV6 (per-side) on-fault station writer.
+
+# MATERIAL: bi-material across the fault (B3 halfspace_across_fault).
+#   NEAR side (y<0): FAST rock  vp=6000, vs=3464, rho=2670 (same as TPV6).
+#   FAR  side (y>0): vp=5000, vs=2887, rho=2670 (TPV7 lower-contrast far side).
+[material]
+kind = "halfspace_across_fault"
+
+[material.halfspace_across_fault]
+vp_near  = 6000.0
+vs_near  = 3464.0
+rho_near = 2670.0
+vp_far   = 5000.0
+vs_far   = 2887.0
+rho_far  = 2670.0
+x0_x     = 0.0
+x0_y     = 0.0
+x0_z     = 0.0
+n_x      = 0.0
+n_y      = -1.0
+n_z      = 0.0
+
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# REUSE the TPV6 mesh — the geometry is identical; the bi-material split is
+# assigned by [material.halfspace_across_fault] per element (B3), NOT by the mesh.
+# 200 m first-pass (Arm 2 sbatch overrides --mesh to tpv6/mesh/tpv6_200m.msh).
+path  = "tpv6/mesh/tpv6_200m_symmetric.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 70.0e6
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[[stress.patch]]
+center_x_m    = 0.0
+center_z_m    = -7500.0
+half_x_m      = 1500.0
+half_z_m      = 1500.0
+tau_strike_pa = 81.6e6
+
+[numerics]
+time_integrator = "ader"
+ader_order      = 2
+mixed_flux      = "none"
+interior_flux   = "matrix"
+cfl             = 0.25
+cfl_safety      = "dg"
+fault_iterator  = "substep"
+use_pml         = false
+
+[time]
+tfinal     = "8.0s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir        = "output_tpv7"
+restart_prefix    = "cp"
+paraview_fault    = "hdf5"
+paraview_fault_dt = "0.05s"
+
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_min_m = 15000.0
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 1500.0

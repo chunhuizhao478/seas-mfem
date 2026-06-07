@@ -523,6 +523,20 @@ public:
    real_t SigmaNStrengthFloorForLSW() const
    { return sigma_n_strength_floor_ >= 0.0 ? sigma_n_strength_floor_ : 0.0; }
 
+   /// (Unified bi-material plan, Part B / B2) Affirm that the CALLER converts the
+   /// per-side imposed state to the bulk flux with PER-SIDE A (i.e. applies A_plus
+   /// to Q_imp_plus and A_minus to Q_imp_minus — the matrix `BimaterialWaveOperator`
+   /// does this via `FluxForElem_`).  The fault-flux MATH (ComputeTrialTraction /
+   /// BuildImposedState) is already per-side-correct for unequal impedance (verified:
+   /// `seas_test_bimaterial_fault_riemann`, B0 verdict
+   /// debug_document/tpv6_debug_document/bimaterial_fault_verification_2026-06-06.md);
+   /// the ONLY thing the homogeneity guards protected was a single-A conversion site.
+   /// Default FALSE => the guards still abort on a bimaterial face (the scalar
+   /// `WaveOperator` never sets this), so byte-exact behavior is preserved.  Set TRUE
+   /// ONLY by the matrix operator.
+   void SetPerSideFluxApplied(bool v) { per_side_flux_applied_ = v; }
+   bool GetPerSideFluxApplied() const { return per_side_flux_applied_; }
+
 private:
    real_t rho_, cp_, cs_;
    real_t Zp_, Zs_;  ///< Impedances (homogeneous)
@@ -530,6 +544,9 @@ private:
    /// Compressive σ_n strength floor [Pa].  `< 0` ⇒ disabled (current
    /// behavior).  See SetSigmaNStrengthFloor.
    real_t sigma_n_strength_floor_ = -1.0;
+   /// (Part B / B2) caller-applies-per-side-A affirmation; default false ⇒ the
+   /// bimaterial-fault homogeneity guards abort.  See SetPerSideFluxApplied.
+   bool per_side_flux_applied_ = false;
 };
 
 } // namespace seas

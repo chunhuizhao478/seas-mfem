@@ -131,6 +131,12 @@ struct NumericsSpec
 {
    int                 ader_order     = 2;
    std::string         mixed_flux     = "none";
+   // (Unified bi-material plan, Part A) Relative impedance-contrast tolerance for
+   // the central-flux corridor guard.  `< 0` (default) => DISABLED (byte-exact: no
+   // fault-adjacent face is reclassified).  `>= 0` => corridor faces spanning a
+   // contrast > this (relative, max of Zp/Zs jumps) use the bi-material upwind
+   // instead of the non-dissipative central flux.  Inert on the scalar path.
+   real_t              mixed_flux_contrast_tol = -1.0;
    real_t              cfl            = 0.5;
    bool                use_pml        = false;
    CflSafety           cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
@@ -568,11 +574,24 @@ struct HypocenterSpec
 ///   Constant       -> [material_constant_fallback] (lambda, mu, rho)
 ///   DepthProfile1D  -> a 1-D depth profile (TPV31; built in Phase 10)
 ///   SidecarHDF5     -> CVM-H/CVM-S velocity sidecar
-enum class MaterialKind { Constant, DepthProfile1D, SidecarHDF5 };
+enum class MaterialKind { Constant, DepthProfile1D, SidecarHDF5, HalfspaceAcrossFault };
+
+/// (Part B / B3, TPV6) across-fault halfspace: two uniform sides split by the
+/// plane through `x0` with normal `n`.  NEAR side = sign((x-x0).n) >= 0 (the +Q
+/// side under ref_normal); FAR side = < 0.
+struct HalfspaceAcrossFaultSpec
+{
+   real_t vp_near = 0.0, vs_near = 0.0, rho_near = 0.0;
+   real_t vp_far  = 0.0, vs_far  = 0.0, rho_far  = 0.0;
+   real_t x0[3]     = {0.0,  0.0, 0.0};
+   real_t normal[3] = {0.0, -1.0, 0.0};   // TPV6 ref_normal default (y=0 fault)
+};
 
 struct MaterialSpec
 {
    MaterialKind kind = MaterialKind::Constant;
+   // (Part B / B3) populated only when kind == HalfspaceAcrossFault.
+   HalfspaceAcrossFaultSpec halfspace;
    std::string  profile_csv;    ///< (unused; layers are inline, see below)
    std::string  sidecar_path;   ///< SidecarHDF5 velocity-model path
    // Phase 10 (TPV31): inline depth-profile layers (only when

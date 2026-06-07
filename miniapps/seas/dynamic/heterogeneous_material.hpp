@@ -295,6 +295,46 @@ std::unique_ptr<DepthProfile1DMaterial> MakeDepthProfile1DMaterial(
    const std::vector<DepthProfileLayer>& layers,
    char depth_axis);
 
+// ===========================================================================
+// Part B / B3 (TPV6): across-fault halfspace material.  Two uniform halfspaces
+// split by the plane through `x0` with normal `n`: the NEAR side is
+// sign((x - x0) . n) >= 0 (the +Q side under ref_normal), the FAR side is < 0.
+// Builds a Mode::Coefficient MaterialField (sampled per QP); the per-side fault
+// impedance assignment (BimaterialWaveOperator::AssignFaultSidePerMaterialImpedances,
+// B1) reads it just inside each side via the eps-offset, so the on-fault sign(0)
+// ambiguity never matters.  rho>0, vs>0 required (elastic; no acoustic side).
+// ===========================================================================
+struct HalfspaceAcrossFaultMaterial
+{
+   std::unique_ptr<mfem::FunctionCoefficient> lambda;
+   std::unique_ptr<mfem::FunctionCoefficient> mu;
+   std::unique_ptr<mfem::FunctionCoefficient> rho;
+   MaterialField                              field;
+
+   /// Coordinate-only evaluator (x,y,z) -> (lambda, mu, rho); same side test as
+   /// the three FunctionCoefficients.  For callsites without an
+   /// ElementTransformation (e.g. a stress source).
+   std::function<void(real_t x, real_t y, real_t z,
+                      real_t& lambda_out, real_t& mu_out, real_t& rho_out)>
+      eval_at_xyz;
+
+   // Non-copyable, non-movable: the MaterialField stores raw Coefficient*
+   // pointers to the unique_ptr-owned members (moving would invalidate them).
+   HalfspaceAcrossFaultMaterial() = default;
+   HalfspaceAcrossFaultMaterial(const HalfspaceAcrossFaultMaterial&) = delete;
+   HalfspaceAcrossFaultMaterial& operator=(const HalfspaceAcrossFaultMaterial&) = delete;
+   HalfspaceAcrossFaultMaterial(HalfspaceAcrossFaultMaterial&&) = delete;
+   HalfspaceAcrossFaultMaterial& operator=(HalfspaceAcrossFaultMaterial&&) = delete;
+};
+
+/// Build an across-fault halfspace material.  (vp,vs,rho) are P/S speeds and
+/// density on each side; `x0` a point on the splitting plane, `n` its normal
+/// (need not be unit).  side_near = sign((x-x0).n) >= 0.
+std::unique_ptr<HalfspaceAcrossFaultMaterial> MakeHalfspaceAcrossFaultMaterial(
+   real_t vp_near, real_t vs_near, real_t rho_near,
+   real_t vp_far,  real_t vs_far,  real_t rho_far,
+   const real_t x0[3], const real_t n[3]);
+
 } // namespace seas
 } // namespace mfem
 

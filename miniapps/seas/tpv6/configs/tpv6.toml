@@ -1,0 +1,195 @@
+# =====================================================================
+#  SCEC TPV6 — BI-MATERIAL FAULT, linear slip weakening (LSW), run through
+#  the SAFS spatial dynamic-rupture driver (seas_spatial_dyn_driver).
+#
+#  Spec: Harris/Day et al. 2007 (2007RuthRalphletter2.pdf), MKS.
+#  Vertical right-lateral strike-slip fault reaching the FREE SURFACE.
+#  The material JUMPS ACROSS THE FAULT (bi-material) — this is what makes
+#  TPV6 distinct from the (material-symmetric) TPV205 / TPV31.
+#
+#  ---------------------------------------------------------------------
+#  NUCLEATION = SAME MECHANISM AS TPV205 (NOT a time-varying driver).
+#  ---------------------------------------------------------------------
+#  TPV6 (like TPV3/TPV205) nucleates by a STATIC elevated initial shear
+#  stress in a square patch: tau_strike = 81.6 MPa inside, 70 MPa outside.
+#  81.6 MPa > static yield mu_s*sigma_n = 0.677*120 = 81.24 MPa, so the
+#  patch slips at t=0 (instantaneous, like TPV3).  This is seeded by the
+#  [[stress.patch]] BOX below (kind="fault_local_prestress"), exactly as
+#  TPV205 does it — there is NO [nucleation] block (StaticOverstress).
+#
+#  ---------------------------------------------------------------------
+#  RUN ARMS (the sbatch pins the scheme via CLI; this config defaults to
+#  Arm 1).  BOTH use interior_flux="matrix" + the per-side bi-material
+#  fault Riemann (unified-bimaterial plan Part B):
+#    Arm 1 (default here): mixed_flux="none" + ADER (upwind everywhere) on
+#      the y-mirror-SYMMETRIC mesh — removes the +y/-y dissipation seed.
+#    Arm 2 (CLI override): --mixed-flux adjacent --time-integrator rk45 on
+#      the standard mesh — central corridor + per-side fault.  The contrast
+#      guard is INERT for TPV6 (each half-space is uniform; no corridor face
+#      crosses a contrast) -> startup histogram reports "reclassified 0/M".
+#
+#  ---------------------------------------------------------------------
+#  sigma_n IS PHYSICALLY NON-CONSTANT for TPV6 (bi-material coupling).
+#  Do NOT treat on-fault sigma_n change as a leak (opposite of TPV31).
+#  ---------------------------------------------------------------------
+#
+#  Coordinate / sign convention (canonical, matches TPV205/TPV31):
+#    fault plane y = 0; strike = +x; depth = -z (free surface z = 0);
+#    ref_normal = (0,-1,0); right-lateral / compression POSITIVE.
+#    The nucleation patch is centered on the fault at config-frame
+#    x0 = 0, z0 = -7500 (the spec's strike=15000 is its own frame).
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "SCEC TPV6 (bi-material fault / LSW) via spatial_dyn_driver — per-side fault Riemann, matrix flux."
+
+[problem]
+tag = "tpv6"   # selects the (per-side) TPV6 on-fault station writer; see note below.
+
+# ---------------------------------------------------------------------
+# MATERIAL: bi-material across the fault (B3 halfspace_across_fault).
+#   CONFIRMED by spec p.3 (2007RuthRalphletter2.pdf) AND the DRDG3D reference
+#   (benchmark_data/scec_drdg3d, where the far side moves ~3-4x faster):
+#     NEAR side = STRONG/FAST: vp2=6000, vs2=3464, rho2=2670  (spec "material 2").
+#     FAR  side = WEAK/SLOW   : vp1=3750, vs1=2165, rho1=2225  (spec "material 1").
+#   Side test: near = sign((x-x0).n) >= 0.  With n=(0,-1,0), x0=0 => near (STRONG)
+#   is the y<0 side, far (WEAK) the y>0 side.  B1 reads each side just inside the
+#   fault (eps-offset) so on the fault Zp_minus (near/strong) = 1.602e7 != Zp_plus
+#   (far/weak) = 8.34e6 (--verify-dispatch prints this).
+#
+#   HANDEDNESS (validate on Frontera): spec p.3 fixes near=strong/far=weak but NOT
+#   which PHYSICAL y-side.  The bi-material rupture is asymmetric along strike (the
+#   +/-12 km stations differ), so if the rupture is strike-MIRRORED vs drdg3d, flip
+#   n_y to +1 below (swaps the strong/weak y-sides).  The x2=0 hypocenter station is
+#   symmetric and matches either way.  See benchmark_data/README.md.
+# ---------------------------------------------------------------------
+[material]
+kind = "halfspace_across_fault"
+
+[material.halfspace_across_fault]
+vp_near  = 6000.0
+vs_near  = 3464.0
+rho_near = 2670.0
+vp_far   = 3750.0
+vs_far   = 2165.0
+rho_far  = 2225.0
+x0_x     = 0.0
+x0_y     = 0.0
+x0_z     = 0.0
+n_x      = 0.0
+n_y      = -1.0
+n_z      = 0.0
+
+# Fallback constant (used only if the halfspace build is bypassed; set to the
+# near/fast side so any fallback is physical).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# TPV benchmarks have no pore pressure.
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# 200 m TPV6 mesh (FIRST-PASS; switch to tpv6_100m_*.msh for production).  Arm 1
+# (this default) uses the y-mirror-SYMMETRIC mesh; the Arm 2 sbatch overrides
+# --mesh to tpv6_200m.msh (asymmetric).  Meshes are gitignored (*.msh); generate
+# from tpv6/mesh/*.geo with `gmsh ... -format msh22` (Gmsh v2.2).
+path  = "tpv6/mesh/tpv6_200m_symmetric.msh"
+order = 1
+
+[velocity]
+use_sidecar = false   # material from [material.halfspace_across_fault], not a CVM sidecar.
+
+# ---------------------------------------------------------------------
+# STRESS (TPV205-style fault_local_prestress) + the nucleation patch.
+#   background: tau_strike = +70 MPa (right-lateral), sigma_n = 120 MPa.
+#   nucleation patch (the SQUARE 3000x3000 m centred on the fault):
+#     tau_strike = 81.6 MPa  (> yield 81.24 -> triggers at t=0).
+#   This IS the nucleation (no [nucleation] block).
+# ---------------------------------------------------------------------
+[stress]
+kind          = "fault_local_prestress"
+tau_strike_pa = 70.0e6
+tau_dip_pa    = 0.0
+sigma_n_pa    = 120.0e6
+
+[[stress.patch]]
+center_x_m    = 0.0        # config-frame fault center (spec strike=15000)
+center_z_m    = -7500.0    # 7.5 km depth
+half_x_m      = 1500.0     # 3000 m square (L/2)
+half_z_m      = 1500.0
+tau_strike_pa = 81.6e6     # 70 + 11.6 MPa overstress
+
+[numerics]
+# Default = Arm 1: matrix + UPWIND (mixed_flux=none) under ADER.  The sbatch
+# overrides --mixed-flux adjacent --time-integrator rk45 for Arm 2.
+time_integrator = "ader"
+ader_order      = 2
+mixed_flux      = "none"
+interior_flux   = "matrix"   # REQUIRED: per-side bi-material fault Riemann.
+cfl             = 0.25
+cfl_safety      = "dg"
+fault_iterator  = "substep"
+use_pml         = false
+
+[time]
+tfinal     = "8.0s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.05s"
+
+[output]
+output_dir        = "output_tpv6"
+restart_prefix    = "cp"
+paraview_fault    = "hdf5"
+paraview_fault_dt = "0.05s"
+
+# LSW friction (spec: mu_s=0.677, mu_d=0.525, d_c=0.40 m).  Barriers lock the
+# fault outside the 30 km (strike) x 15 km (depth) active box (mu_s set high
+# internally for kind="barrier"):
+#   - deeper than 15 km (z < -15000)
+#   - along-strike beyond +/-15 km (|x| > 15000)
+# The TOP is the FREE SURFACE (no barrier there) — TPV6 ruptures to z=0.
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_max_m = -15000.0
+
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+x_min_m = 15000.0
+
+# TPV6 mesh boundary convention (tpv6_100m*.geo):
+#   Physical Surface 101 = free surface (top, z=0)  -> natural
+#   Physical Surface 103 = fault (y=0)
+#   Physical Surface 105 = absorbing outer box (sides + bottom)
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"
+
+[hypocenter]
+x_m                 = 0.0
+y_m                 = 0.0
+z_m                 = -7500.0
+nucleation_radius_m = 1500.0

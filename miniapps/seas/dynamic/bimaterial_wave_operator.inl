@@ -545,6 +545,28 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
    std::size_t n_int_built = 0;   // fully-local 2-sided central faces
    std::size_t n_shr_built = 0;   // shared (cross-rank) central faces
 
+   // (Unified bi-material plan, Part A) Central-flux CONTRAST GUARD.  When
+   // mixed_flux_contrast_tol_ >= 0, a fault-adjacent corridor face whose two
+   // elements span a STRONG impedance contrast is DROPPED from
+   // central_flux_face_set_ so it dispatches the (dissipative) bi-material upwind
+   // (per_face_bimaterial_flux_, built for every non-fault interior face in the
+   // ctor) instead of the non-dissipative central flux.  tol < 0 (default) => the
+   // whole guard is inert => byte-exact (no reclassification, no histogram, no new
+   // MPI call).  The single `guard_on` flag is rank-uniform (tol is a config/CLI
+   // scalar set identically on all ranks before SetMixedFluxMode), so the
+   // MPI_Reduce histogram below is collective-safe (R-006).
+   const real_t contrast_tol = mixed_flux_contrast_tol_;
+   const bool   guard_on     = (contrast_tol >= 0.0);
+   std::vector<int> reclassified;       // mesh faces moved central -> upwind
+   // Histogram of the contrast metric over the PRE-filter LOCAL (2-sided) corridor
+   // faces only: those are disjoint across ranks, so MPI_Reduce(SUM) has NO double-
+   // count (R-005).  Shared faces are excluded from the histogram (their neighbour
+   // material is the local-side seam-continuous stub; see the shared loop).
+   long long hist[5] = {0, 0, 0, 0, 0};   // bins: [0,1) [1,5) [5,10) [10,20) [>=20] %
+   long long n_local_hist   = 0;          // local corridor faces histogrammed
+   long long n_reclass_local = 0;         // LOCAL faces reclassified (disjoint across
+                                          // ranks => no MPI double-count; R-002)
+
    // --- Interior (fully-local 2-sided) central faces -----------------------
    for (int mesh_face : central_flux_face_set_)
    {
@@ -560,6 +582,28 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
       if (!ResolveFaceFluxOperands_(mesh_face, flux_e1, flux_e2, nor))
       {
          continue;
+      }
+      if (guard_on)
+      {
+         const real_t contrast =
+            BimaterialFlux::ContrastValue(*flux_e1, *flux_e2);
+         if (contrast >= 0.0)            // histogram valid (non-acoustic) faces
+         {
+            const real_t pct = 100.0 * contrast;
+            const int bin = (pct < 1.0)  ? 0 : (pct < 5.0)  ? 1
+                          : (pct < 10.0) ? 2 : (pct < 20.0) ? 3 : 4;
+            ++hist[bin];
+            ++n_local_hist;
+         }
+         if (BimaterialFlux::IsStrongContrast(*flux_e1, *flux_e2, contrast_tol))
+         {
+            // Drop this face from the central corridor -> it dispatches the
+            // bi-material upwind (per_face_bimaterial_flux_).  Defer the erase
+            // (we are iterating central_flux_face_set_); skip the central build.
+            reclassified.push_back(mesh_face);
+            ++n_reclass_local;
+            continue;
+         }
       }
       auto &pair = per_face_central_flux_[mesh_face];
       BimaterialFlux::BuildPerFaceCentralMatricesGlobal(
@@ -664,6 +708,19 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
 
          const GodunovFlux &flux_local = owned_flux_pool_->At(local_elem);
 
+         if (guard_on &&
+             BimaterialFlux::IsStrongContrast(flux_local, flux_nbr, contrast_tol))
+         {
+            // Strong contrast on a SHARED corridor face -> dispatch upwind.  NOTE:
+            // under the local-side stub (ExchangeBiMaterialNeighbours_, R-004)
+            // flux_nbr == flux_local for seam-continuous materials, so this never
+            // fires today; it activates automatically if/when the real cross-rank
+            // material exchange lands.  Shared faces are NOT histogrammed (avoids
+            // the MPI double-count, R-005).
+            reclassified.push_back(mesh_face_idx);
+            continue;
+         }
+
          // Side-0 pair (0.5*A_local, 0.5*A_nbr) — same self/nbr ordering as the
          // Godunov shared build, so the Phase-3 SharedInteriorFaceFlux_ deposit
          // 0.5*A_local.Q_self + 0.5*A_nbr.Q_nbr is consistent.
@@ -673,6 +730,69 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
          ++n_shr_built;
       }
 #endif
+   }
+
+   // (Part A) Apply the contrast-guard reclassification: drop the strong-contrast
+   // faces from central_flux_face_set_ so the dispatch (InteriorFaceFlux_ /
+   // SharedInteriorFaceFlux_, which test central_flux_face_set_.count) routes them
+   // to the existing bi-material upwind.  R-002: assert the upwind fallback exists
+   // for each reclassified face BEFORE erasing (the ctor builds
+   // per_face_bimaterial_flux_ for every non-fault interior face; a missing one
+   // would be a silent garbage dispatch).  This keeps the IMPL-8 size invariant
+   // (per_face_central_flux_.size() == central_flux_face_set_.size()) at
+   // SetMixedFluxMode: reclassified faces are in NEITHER container.
+   for (int f : reclassified)
+   {
+      MFEM_VERIFY(f >= 0
+                  && f < static_cast<int>(per_face_bimaterial_flux_.size())
+                  && per_face_bimaterial_flux_[f][0][0].Height() == NUM_STATE
+                  && per_face_bimaterial_flux_[f][0][0].Width()  == NUM_STATE,
+                  "BuildPerFaceCentralFluxMatrices_: contrast-guard reclassified "
+                  "face " << f << " to upwind, but its bi-material upwind matrices "
+                  "(per_face_bimaterial_flux_) are not built — no fallback flux to "
+                  "dispatch.  The ctor must build the upwind matrices for every "
+                  "non-fault interior face.");
+      central_flux_face_set_.erase(f);
+   }
+
+   // (Part A) Rank-0 contrast histogram + reclassification count.  ENTIRELY gated
+   // on guard_on (rank-uniform), so tol<0 adds no statements and no collective
+   // call (byte-exact); when on, the MPI_Reduce is called by all ranks (R-006).
+   if (guard_on)
+   {
+      long long hist_g[5];
+      for (int b = 0; b < 5; ++b) { hist_g[b] = hist[b]; }
+      long long n_local_g  = n_local_hist;
+      // R-002: sum LOCAL reclassified only (disjoint across ranks => no double-count;
+      // shared reclassification is inert under the seam-continuous stub).
+      long long n_reclass  = n_reclass_local;
+      long long n_reclass_g = n_reclass;
+      int hrank = 0;
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         auto &pmesh = static_cast<ParMesh &>(mesh_);
+         MPI_Comm comm = pmesh.GetComm();
+         MPI_Reduce(hist, hist_g, 5, MPI_LONG_LONG, MPI_SUM, 0, comm);
+         MPI_Reduce(&n_local_hist, &n_local_g, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+         MPI_Reduce(&n_reclass, &n_reclass_g, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+         MPI_Comm_rank(comm, &hrank);
+      }
+#endif
+      // R-003: the MPI_Reduce above is UNCONDITIONAL under guard_on (collective-safe,
+      // rank-uniform); only the rank-0 PRINT is gated on a nonzero global total, so a
+      // matrix + mixed_flux=none + tol>=0 run does not emit a noise "0/0" line.
+      if (hrank == 0 && (n_local_g > 0 || n_reclass_g > 0))
+      {
+         mfem::out << "[wave_operator] central-flux CONTRAST GUARD (tol="
+                   << contrast_tol << "):\n"
+                   << "  local corridor faces histogrammed = " << n_local_g << "\n"
+                   << "  contrast bins %% [0,1) [1,5) [5,10) [10,20) [>=20] = "
+                   << hist_g[0] << " " << hist_g[1] << " " << hist_g[2] << " "
+                   << hist_g[3] << " " << hist_g[4] << "\n"
+                   << "  reclassified central -> upwind = " << n_reclass_g
+                   << " (local+shared; shared excluded from the histogram)\n";
+      }
    }
 
    // Account the central-matrix bytes (mirror the Godunov precompute log + the
@@ -880,4 +1000,141 @@ void BimaterialWaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
                "central_flux_face_set_ size (" << central_flux_face_set_.size()
                << ") after BuildPerFaceCentralFluxMatrices_ — central set not "
                "populated before the build, or a central face was skipped.");
+}
+
+// ---------------------------------------------------------------------------
+// (Part B / B1) Per-side fault impedance assignment via the EPS-OFFSET rule.
+//
+// For each LOCAL 2-sided interior fault face, evaluate the material just INSIDE
+// each side (the fault QP physical point displaced a small eps PERPENDICULAR to
+// the fault into that element) and write Zp_plus/Zp_minus, Zs_plus/Zs_minus,
+// eta_p/eta_s into the matching DOFData slot (fault_face_dof_offset_[f] + q).
+//
+// Why perpendicular (not toward the centroid, not at the face point):
+//   - a fault-symmetric material (depth-only, TPV31): +/- eps along the fault
+//     normal leaves the depth unchanged => both sides evaluate to the SAME
+//     material => Zp_plus == Zp_minus (byte-exact; no spurious contrast on an
+//     asymmetric mesh, the R-001 trap that centroid evaluation falls into);
+//   - an across-fault material (halfspace, TPV6): +eps -> near side, -eps -> far
+//     side => the correct per-side contrast (evaluating exactly at the face point
+//     is ambiguous for a sign(.) coefficient).
+// SHARED (cross-rank) fault faces are left at the driver-seeded single-material
+// values: the peer side's eps-offset impedance needs an MPI exchange (R-101,
+// deferred) — correct under fault-locality partitioning / serial.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void BimaterialWaveOperator<MeshType>::AssignFaultSidePerMaterialImpedances(
+   std::vector<DOFData> &dof_data) const
+{
+   if (material_ == nullptr) { return; }
+   // GridFunction-mode material has no QP-evaluable per-side eps-offset (EvalAt
+   // aborts in that mode); skip and keep the driver-seeded values.  No current
+   // driver path produces a GridFunction material on the matrix path (depth-
+   // profile/halfspace/sidecar are Mode::Coefficient), so this is defensive.
+   if (material_->mode == MaterialField::Mode::GridFunction) { return; }
+   // Protected base members (the public getters are SEAS_TEST_INTERNAL-only):
+   // interior_fault_elem1_on_plus_ is computed at ctor time; fault_face_dof_offset_
+   // is populated by SetFaultDOFData (both done before the driver calls this).
+   const std::vector<bool> &elem1_on_plus = this->interior_fault_elem1_on_plus_;
+   const std::map<int, int> &dof_off_map = this->fault_face_dof_offset_;
+   const int qdeg = this->FaultFaceQuadDegree();
+   const int nbf  = this->GetNbfPerFace();
+   const real_t eps_ref = 1.0e-3;   // small reference-space perpendicular offset
+
+   // Perturb a face-QP reference IP a small eps along the (signed) physical fault
+   // normal mapped into the element's reference frame (J^{-1}); affine (straight)
+   // elements transform the offset point exactly, so no in-element clamp is needed.
+   auto offset_ip = [&](ElementTransformation &T, const IntegrationPoint &ip,
+                        const real_t nin[3]) -> IntegrationPoint
+   {
+      T.SetIntPoint(&ip);
+      DenseMatrixInverse Jinv(T.Jacobian());
+      Vector np(3), nr(T.GetDimension());
+      np(0) = nin[0]; np(1) = nin[1]; np(2) = nin[2];
+      Jinv.Mult(np, nr);
+      const real_t rl = nr.Norml2();
+      if (rl > 0.0) { nr /= rl; }
+      IntegrationPoint out = ip;
+      out.x = ip.x + eps_ref * nr(0);
+      if (nr.Size() > 1) { out.y = ip.y + eps_ref * nr(1); }
+      if (nr.Size() > 2) { out.z = ip.z + eps_ref * nr(2); }
+      return out;
+   };
+
+   for (int fi = 0; fi < fault_interior_faces_.Size(); ++fi)
+   {
+      const int f = fault_interior_faces_[fi];
+      FaceElementTransformations *ftr =
+         const_cast<MeshType &>(mesh_).GetInteriorFaceTransformations(f);
+      if (!ftr || ftr->Elem2No < 0) { continue; }   // need a 2-sided local face
+      const int fb_idx = this->LookupInteriorFaultBasisIndex(f);
+      if (fb_idx < 0 || fb_idx >= static_cast<int>(elem1_on_plus.size()))
+      { continue; }
+      const bool e1_plus = elem1_on_plus[fb_idx];
+      auto off_it = dof_off_map.find(f);
+      if (off_it == dof_off_map.end()) { continue; }
+      const int dof_off = off_it->second;
+
+      // Element centroids (physical) — used to orient the into-element direction
+      // robustly (independent of CalcOrtho's face-normal sign convention).
+      Vector c1(3), c2(3);
+      ElementTransformation &T1c = *ftr->Elem1;
+      ElementTransformation &T2c = *ftr->Elem2;
+      T1c.Transform(Geometries.GetCenter(T1c.GetGeometryType()), c1);
+      T2c.Transform(Geometries.GetCenter(T2c.GetGeometryType()), c2);
+
+      const IntegrationRule &ir = IntRules.Get(ftr->GetGeometryType(), qdeg);
+      MFEM_VERIFY(ir.GetNPoints() == nbf,
+                  "AssignFaultSidePerMaterialImpedances: fault face " << f
+                  << " has " << ir.GetNPoints() << " QPs, expected nbf_per_face="
+                  << nbf << " — integration rule does not match the DOFData "
+                  "layout (would mis-index the per-side impedances).");
+
+      for (int q = 0; q < nbf; ++q)
+      {
+         const IntegrationPoint &ip = ir.IntPoint(q);
+         ftr->SetAllIntPoints(&ip);
+
+         Vector xf(3);
+         ftr->Face->Transform(ip, xf);
+         Vector nvec(3);
+         CalcOrtho(ftr->Face->Jacobian(), nvec);
+         const real_t nlen = nvec.Norml2();
+         if (nlen > 0.0) { nvec /= nlen; }
+
+         // Into-Elem1 = sign((c1 - xf).n) * n ; Into-Elem2 = the opposite.
+         real_t d1 = 0.0;
+         for (int d = 0; d < 3; ++d) { d1 += (c1(d) - xf(d)) * nvec(d); }
+         const real_t s1 = (d1 >= 0.0) ? 1.0 : -1.0;
+         const real_t in1[3] = { s1 * nvec(0), s1 * nvec(1), s1 * nvec(2) };
+         const real_t in2[3] = { -in1[0], -in1[1], -in1[2] };
+
+         const IntegrationPoint ip1 =
+            offset_ip(*ftr->Elem1, ftr->GetElement1IntPoint(), in1);
+         const IntegrationPoint ip2 =
+            offset_ip(*ftr->Elem2, ftr->GetElement2IntPoint(), in2);
+
+         real_t lam1, mu1, rho1, lam2, mu2, rho2;
+         material_->EvalAt(ftr->Elem1No, *ftr->Elem1, ip1, lam1, mu1, rho1);
+         material_->EvalAt(ftr->Elem2No, *ftr->Elem2, ip2, lam2, mu2, rho2);
+         MFEM_VERIFY(mu1 > 0.0 && rho1 > 0.0 && mu2 > 0.0 && rho2 > 0.0,
+                     "AssignFaultSidePerMaterialImpedances: non-physical "
+                     "material at fault face " << f << " QP " << q);
+
+         const real_t Zp1 = std::sqrt((lam1 + 2.0 * mu1) * rho1);
+         const real_t Zs1 = std::sqrt(mu1 * rho1);
+         const real_t Zp2 = std::sqrt((lam2 + 2.0 * mu2) * rho2);
+         const real_t Zs2 = std::sqrt(mu2 * rho2);
+
+         const int idx = dof_off + q;
+         if (idx < 0 || idx >= static_cast<int>(dof_data.size())) { continue; }
+         DOFData &d = dof_data[idx];
+         if (e1_plus)
+         { d.Zp_plus = Zp1; d.Zs_plus = Zs1; d.Zp_minus = Zp2; d.Zs_minus = Zs2; }
+         else
+         { d.Zp_plus = Zp2; d.Zs_plus = Zs2; d.Zp_minus = Zp1; d.Zs_minus = Zs1; }
+         d.eta_p = d.Zp_plus * d.Zp_minus / (d.Zp_plus + d.Zp_minus);
+         d.eta_s = d.Zs_plus * d.Zs_minus / (d.Zs_plus + d.Zs_minus);
+      }
+   }
 }
