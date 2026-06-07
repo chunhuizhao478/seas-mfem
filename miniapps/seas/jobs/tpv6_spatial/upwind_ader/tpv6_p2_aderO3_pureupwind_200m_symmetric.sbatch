@@ -25,6 +25,15 @@
 #           is the STATIC stress patch tau_strike=81.6 MPa, like TPV205 — no
 #           [nucleation] block).  sigma_n is PHYSICALLY non-constant (bi-material)
 #           — do NOT treat its on-fault variation as a leak.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   halfspace_across_fault jumps across the WHOLE y=0 plane (not only the fault
+#   rectangle).  At np>1 a partition seam that crosses y=0 away from the fault now
+#   reads the TRUE peer element's (other-half) material via the cross-rank
+#   exchange, replacing the old local-side stub; the bulk UPWIND seam there is
+#   RE-BASELINED to the correct 2-sided value (== serial).  Byte-exact only for
+#   partitions that do not cut across y=0.  ⇒ re-baseline the Frontera gold
+#   against a fresh np>1 run on this branch.
 # Standalone: build seas_spatial_dyn_driver first (from THIS branch — Part B
 # per-side fault + B3 halfspace material).  NB: p2 dt is smaller than p1 — even
 # 24 h likely won't reach tfinal; checkpoints every 2000 steps, resubmit with

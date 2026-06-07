@@ -26,6 +26,17 @@
 #                     depth_profile_1d bi-material; config-only, asserted below).
 #   Config: tpv31/configs/tpv31.toml.
 #
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   This job runs the bi-material Godunov UPWIND seam (mixed_flux=none) on the
+#   depth_profile_1d material.  At np>1 ParMETIS can cut the depth profile across
+#   a partition seam; the cross-rank material exchange now reads the TRUE peer
+#   element's material there (replacing the old local-side stub).  At a seam that
+#   crosses a depth discontinuity (2400/5000/10000 m) the upwind seam flux is
+#   RE-BASELINED to the correct 2-sided value (== serial / a seam-vertical
+#   partition); byte-exact only for partitions that do NOT cut across a depth
+#   jump.  ⇒ re-baseline the Frontera gold for this job against a fresh np>1 run
+#   on this branch (only cross-depth seams change; the bulk interior is identical).
+#
 # MESH (no .geo — built by the rv pipeline; stage it or rebuild on a login node):
 #   conda activate pythonenv
 #   cd miniapps/seas/safs/project_7.0_alternative/experimental_mesh_refinement

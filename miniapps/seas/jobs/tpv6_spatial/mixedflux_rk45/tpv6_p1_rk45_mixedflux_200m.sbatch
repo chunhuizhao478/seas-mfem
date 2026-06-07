@@ -26,6 +26,15 @@
 #   * contrast guard: --mixed-flux-contrast-tol 0.05.
 #   * matrix Riemann: [numerics].interior_flux="matrix" (per-side fault; asserted).
 #   Config: tpv6/configs/tpv6.toml.  sigma_n is PHYSICALLY non-constant — not a leak.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   PRE-FIX this job would ABORT at np>1: the bi-material CENTRAL flux on a
+#   fault-adjacent SHARED face under the non-Constant halfspace_across_fault
+#   material required [material].seam_continuous=true, which tpv6.toml does NOT
+#   set.  The cross-rank material exchange REMOVES that guard and reads the TRUE
+#   peer element's material across every partition seam (central corridor AND
+#   bulk upwind), so this job now runs at np>1 with the correct 2-sided seam
+#   material.  ⇒ re-baseline the Frontera gold against a fresh np>1 run.
 set -euo pipefail
 
 MESH="tpv6/mesh/tpv6_200m.msh"                      # asymmetric (standard) mesh
