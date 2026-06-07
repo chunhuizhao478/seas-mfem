@@ -73,6 +73,9 @@ __pycache__/
 
 # Archive
 archive/
+# ...except the curated per-case spatial-job archives (kept in git: sbatch + README)
+!jobs/*_spatial/archive/
+!jobs/*_spatial/archive/**
 
 # Diagnostic artifacts
 face_audit_r*.csv
