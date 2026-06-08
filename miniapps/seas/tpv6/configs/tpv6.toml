@@ -139,7 +139,7 @@ fault_iterator  = "substep"
 use_pml         = false
 
 [time]
-tfinal     = "8.0s"
+tfinal     = "12.0s"      # 0-12 s — matches the drdg3d reference window
 t_initial  = 0.0
 dt_initial = "auto"
 dt_max     = "0.05s"
