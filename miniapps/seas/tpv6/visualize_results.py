@@ -25,14 +25,16 @@ Both share columns (MKS-on-fault; stresses in **MPa**):
     t  h-disp  h-vel  h-stress  v-disp  v-vel  v-stress  n-disp  n-vel  n-stress
     h = along-strike, v = along-dip (down-dip), n = fault-normal.
 
-Convention reconciliation for overlay (Signconvention3d.pdf: the split-node
-normal convention is "positive = extension", i.e. n-stress COMPRESSION-NEGATIVE):
+Sign reconciliation for overlay (COMPARISON ONLY — the DRDG3D reference is NEVER
+modified; OUR MFEM data is sign-matched to the benchmark frame, see MFEM_SIGN):
   * MFEM and DRDG3D share units (m, m/s, MPa) — NO scale factor.
-  * The DRDG3D reference is shown UNMODIFIED (the benchmark data / convention).
-  * MFEM n-stress is COMPRESSION-POSITIVE, so OUR n-stress is NEGATED to the
-    benchmark's compression-negative convention — we match the benchmark, not
-    the other way around.  (h-stress / shear already share a sign — both start
-    at +70 MPa and drop to ~63 — so only n-stress is flipped.)
+  * MFEM's per-side particle motion is opposite-signed to the benchmark frame, so
+    the KINEMATIC channels (displacement + velocity, h/v/n) are NEGATED.
+  * The STRESS channels are LEFT UNCHANGED: h-stress already matches (both start
+    at +70 MPa and drop to ~63) and the NORMAL STRESS sign is kept as-is — so
+    MFEM n-stress stays compression-POSITIVE while the DRDG3D reference is
+    compression-NEGATIVE (Signconvention3d.pdf: normal "+ = extension").  Set
+    sigma_n = -1 in MFEM_SIGN if you also want n-stress overlaid.
 
 Usage:
     # Single MFEM run vs the DRDG3D reference (default), save PNGs:
@@ -88,6 +90,19 @@ DRDG3D_STATIONS = _build_stations()
 SIDES = ("nearside", "farside")
 SIDE_LABEL = {"nearside": "near (STRONG)", "farside": "far (WEAK)"}
 
+#: Per-channel sign applied to MFEM data so it overlays the benchmark frame
+#: (COMPARISON ONLY; the DRDG3D reference is never touched).  MFEM's per-side
+#: particle motion is opposite-signed to the benchmark, so the KINEMATIC channels
+#: (displacement + velocity) are flipped; the STRESS channels are NOT — h-stress
+#: already matches and the normal stress sign is kept as-is.  Edit to taste (e.g.
+#: set sigma_n = -1.0 to also overlay n-stress).
+MFEM_SIGN = {
+    "h_disp": -1.0, "h_vel": -1.0,   # strike (along-strike)
+    "v_disp": -1.0, "v_vel": -1.0,   # dip (down-dip)
+    "n_disp": -1.0, "n_vel": -1.0,   # fault-normal
+    "h_stress": 1.0, "v_stress": 1.0, "sigma_n": 1.0,   # stresses: unchanged
+}
+
 
 def _parse_numeric_table(filepath, min_cols):
     """Load a whitespace-delimited numeric table, skipping comments and the
@@ -113,21 +128,19 @@ def _parse_numeric_table(filepath, min_cols):
     return np.array(rows)
 
 
-def _load_station_file(filepath, flip_nstress):
+def _load_station_file(filepath, sign=None):
     """Load a TPV6/7 per-side station file (MFEM or DRDG3D — same 10 columns).
 
     Columns (MKS-on-fault; stresses in MPa):
       0:t 1:h-disp 2:h-vel 3:h-stress 4:v-disp 5:v-vel 6:v-stress
       7:n-disp 8:n-vel 9:n-stress
-    ``flip_nstress`` negates n-stress to convert MFEM's compression-POSITIVE
-    convention to the benchmark's compression-NEGATIVE (extension-positive)
-    convention, so MFEM overlays the UNMODIFIED DRDG3D reference.
+    ``sign`` is an optional per-channel multiplier (see MFEM_SIGN) applied to OUR
+    data so it overlays the UNMODIFIED benchmark; ``None`` = as-is (the reference).
     """
     arr = _parse_numeric_table(filepath, min_cols=10)
     if arr is None:
         return None
-    sigma_n = -arr[:, 9] if flip_nstress else arr[:, 9]
-    return {
+    data = {
         "time_s":   arr[:, 0],
         "h_disp":   arr[:, 1],
         "h_vel":    arr[:, 2],
@@ -137,22 +150,25 @@ def _load_station_file(filepath, flip_nstress):
         "v_stress": arr[:, 6],
         "n_disp":   arr[:, 7],
         "n_vel":    arr[:, 8],
-        "sigma_n":  sigma_n,
+        "sigma_n":  arr[:, 9],
     }
+    if sign:
+        for key, mult in sign.items():
+            if key in data:
+                data[key] = data[key] * mult
+    return data
 
 
 def load_mfem_file(filepath):
-    """MFEM per-side station file.
-
-    MFEM n-stress is COMPRESSION-POSITIVE; negate it to the benchmark's
-    compression-NEGATIVE convention so OUR data matches the DRDG3D reference.
+    """MFEM per-side station file, sign-matched to the benchmark frame (MFEM_SIGN):
+    kinematic channels flipped, stresses (incl. normal stress) unchanged.
     """
-    return _load_station_file(filepath, flip_nstress=True)
+    return _load_station_file(filepath, sign=MFEM_SIGN)
 
 
 def load_reference_file(filepath):
-    """DRDG3D per-side reference file — shown AS-IS (benchmark convention)."""
-    return _load_station_file(filepath, flip_nstress=False)
+    """DRDG3D per-side reference file — shown AS-IS (benchmark, never modified)."""
+    return _load_station_file(filepath, sign=None)
 
 
 def mfem_filename(results_dir, prefix, side, station):
@@ -345,7 +361,7 @@ PANELS = [
     ("h_stress", "h-stress (strike) [MPa]"),
     ("v_vel",    "v-vel (dip) [m/s]"),
     ("v_disp",   "v-disp (dip) [m]"),
-    ("sigma_n",  "n-stress [MPa, compression -] (benchmark)"),
+    ("sigma_n",  "n-stress [MPa] (MFEM comp+ / ref comp-)"),
 ]
 
 
