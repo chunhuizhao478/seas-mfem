@@ -25,10 +25,14 @@ Both share columns (MKS-on-fault; stresses in **MPa**):
     t  h-disp  h-vel  h-stress  v-disp  v-vel  v-stress  n-disp  n-vel  n-stress
     h = along-strike, v = along-dip (down-dip), n = fault-normal.
 
-Convention reconciliation for overlay:
+Convention reconciliation for overlay (Signconvention3d.pdf: the split-node
+normal convention is "positive = extension", i.e. n-stress COMPRESSION-NEGATIVE):
   * MFEM and DRDG3D share units (m, m/s, MPa) — NO scale factor.
-  * MFEM n-stress is COMPRESSION-POSITIVE; the DRDG3D reference is
-    COMPRESSION-NEGATIVE, so the reference n-stress is NEGATED to overlay.
+  * The DRDG3D reference is shown UNMODIFIED (the benchmark data / convention).
+  * MFEM n-stress is COMPRESSION-POSITIVE, so OUR n-stress is NEGATED to the
+    benchmark's compression-negative convention — we match the benchmark, not
+    the other way around.  (h-stress / shear already share a sign — both start
+    at +70 MPa and drop to ~63 — so only n-stress is flipped.)
 
 Usage:
     # Single MFEM run vs the DRDG3D reference (default), save PNGs:
@@ -115,8 +119,9 @@ def _load_station_file(filepath, flip_nstress):
     Columns (MKS-on-fault; stresses in MPa):
       0:t 1:h-disp 2:h-vel 3:h-stress 4:v-disp 5:v-vel 6:v-stress
       7:n-disp 8:n-vel 9:n-stress
-    ``flip_nstress`` negates n-stress (DRDG3D is compression-NEGATIVE; MFEM is
-    compression-POSITIVE) so the two overlay.
+    ``flip_nstress`` negates n-stress to convert MFEM's compression-POSITIVE
+    convention to the benchmark's compression-NEGATIVE (extension-positive)
+    convention, so MFEM overlays the UNMODIFIED DRDG3D reference.
     """
     arr = _parse_numeric_table(filepath, min_cols=10)
     if arr is None:
@@ -137,13 +142,17 @@ def _load_station_file(filepath, flip_nstress):
 
 
 def load_mfem_file(filepath):
-    """MFEM per-side station file (n-stress already compression-positive)."""
-    return _load_station_file(filepath, flip_nstress=False)
+    """MFEM per-side station file.
+
+    MFEM n-stress is COMPRESSION-POSITIVE; negate it to the benchmark's
+    compression-NEGATIVE convention so OUR data matches the DRDG3D reference.
+    """
+    return _load_station_file(filepath, flip_nstress=True)
 
 
 def load_reference_file(filepath):
-    """DRDG3D per-side reference file (flip compression-negative n-stress)."""
-    return _load_station_file(filepath, flip_nstress=True)
+    """DRDG3D per-side reference file — shown AS-IS (benchmark convention)."""
+    return _load_station_file(filepath, flip_nstress=False)
 
 
 def mfem_filename(results_dir, prefix, side, station):
@@ -336,7 +345,7 @@ PANELS = [
     ("h_stress", "h-stress (strike) [MPa]"),
     ("v_vel",    "v-vel (dip) [m/s]"),
     ("v_disp",   "v-disp (dip) [m]"),
-    ("sigma_n",  "n-stress [MPa, compression +]"),
+    ("sigma_n",  "n-stress [MPa, compression -] (benchmark)"),
 ]
 
 
