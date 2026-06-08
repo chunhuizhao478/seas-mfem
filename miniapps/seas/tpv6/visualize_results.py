@@ -30,11 +30,12 @@ modified; OUR MFEM data is sign-matched to the benchmark frame, see MFEM_SIGN):
   * MFEM and DRDG3D share units (m, m/s, MPa) — NO scale factor.
   * MFEM's per-side particle motion is opposite-signed to the benchmark frame, so
     the KINEMATIC channels (displacement + velocity, h/v/n) are NEGATED.
-  * The STRESS channels are LEFT UNCHANGED: h-stress already matches (both start
-    at +70 MPa and drop to ~63) and the NORMAL STRESS sign is kept as-is — so
-    MFEM n-stress stays compression-POSITIVE while the DRDG3D reference is
-    compression-NEGATIVE (Signconvention3d.pdf: normal "+ = extension").  Set
-    sigma_n = -1 in MFEM_SIGN if you also want n-stress overlaid.
+  * The SHEAR stress channels are LEFT UNCHANGED: h-stress already matches (both
+    start at +70 MPa and drop to ~63), and v-stress likewise.
+  * The NORMAL stress is NEGATED: MFEM is compression-POSITIVE (geology
+    convention) while the DRDG3D reference is compression-NEGATIVE
+    (Signconvention3d.pdf: normal "+ = extension"), so MFEM sigma_n is flipped
+    (sigma_n = -1) to overlay the untouched reference in its own frame.
 
 Usage:
     # Single MFEM run vs the DRDG3D reference (default), save PNGs:
@@ -93,14 +94,15 @@ SIDE_LABEL = {"nearside": "near (STRONG)", "farside": "far (WEAK)"}
 #: Per-channel sign applied to MFEM data so it overlays the benchmark frame
 #: (COMPARISON ONLY; the DRDG3D reference is never touched).  MFEM's per-side
 #: particle motion is opposite-signed to the benchmark, so the KINEMATIC channels
-#: (displacement + velocity) are flipped; the STRESS channels are NOT — h-stress
-#: already matches and the normal stress sign is kept as-is.  Edit to taste (e.g.
-#: set sigma_n = -1.0 to also overlay n-stress).
+#: (displacement + velocity) are flipped.  The SHEAR stresses match as-is; the
+#: NORMAL stress is flipped because MFEM is compression-POSITIVE (geology) while
+#: DRDG3D is compression-NEGATIVE (Signconvention3d.pdf: normal "+ = extension").
 MFEM_SIGN = {
     "h_disp": -1.0, "h_vel": -1.0,   # strike (along-strike)
     "v_disp": -1.0, "v_vel": -1.0,   # dip (down-dip)
     "n_disp": -1.0, "n_vel": -1.0,   # fault-normal
-    "h_stress": 1.0, "v_stress": 1.0, "sigma_n": 1.0,   # stresses: unchanged
+    "h_stress": 1.0, "v_stress": 1.0,   # shear stresses: unchanged
+    "sigma_n": -1.0,   # normal stress: comp-POSITIVE (MFEM) -> comp-NEGATIVE (ref)
 }
 
 
@@ -361,7 +363,7 @@ PANELS = [
     ("h_stress", "h-stress (strike) [MPa]"),
     ("v_vel",    "v-vel (dip) [m/s]"),
     ("v_disp",   "v-disp (dip) [m]"),
-    ("sigma_n",  "n-stress [MPa] (MFEM comp+ / ref comp-)"),
+    ("sigma_n",  "n-stress [MPa] (comp-negative frame)"),
 ]
 
 

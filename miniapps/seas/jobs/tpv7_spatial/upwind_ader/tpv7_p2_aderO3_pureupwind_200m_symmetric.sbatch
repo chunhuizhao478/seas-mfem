@@ -33,7 +33,7 @@ set -euo pipefail
 
 FAULT_OVERINT=0
 MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
-TFINAL="${TPV7_TFINAL:-8.0}"                        # TPV6 rupture ~ a few s
+TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv7/configs/tpv7_p2.toml"
 
 module load intel/19.1.1

@@ -29,7 +29,7 @@
 set -euo pipefail
 
 MESH="tpv6/mesh/tpv6_200m.msh"                      # asymmetric (standard) mesh
-TFINAL="${TPV7_TFINAL:-8.0}"
+TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv7/configs/tpv7.toml"
 
 module load intel/19.1.1
