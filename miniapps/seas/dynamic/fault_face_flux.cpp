@@ -984,6 +984,12 @@ void FaultFaceFlux::EvaluateLSW(DOFData &data,
    // Step 5: imposed Q-state (Eq. 11-12), written DIRECTLY into the outputs
    // (no I_imp = dt * Q_imp rescale, unlike EvaluateADER_LSW).
    BuildImposedState(data, s, Q_plus, Q_minus, Q_imp_plus, Q_imp_minus);
+   // (Part C) per-side imposed velocity for the TPV6/7 station writer.  Mirrors
+   // EvaluateADER_LSW / Evaluate; Q_imp_{plus,minus} here is the un-rescaled
+   // imposed state (this kernel does no dt rescale), so its VX/VY/VZ are the
+   // actual per-side particle velocity.  v_imp_{plus,minus} is read ONLY by
+   // tpv6_stations.hpp — a pure store with no effect on the flux / physics.
+   StoreImposedVelocity_(data, Q_imp_plus, Q_imp_minus);
 
    // Step 6: write back V / slip_rate / tau*_corr / sigma_n_corr to DOFData
    // (TOTAL physical traction — pre + nuc + trial-scale corrected).
