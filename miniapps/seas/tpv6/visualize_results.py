@@ -78,11 +78,11 @@ def _build_stations():
 DRDG3D_STATIONS = _build_stations()
 
 #: Per-side keys + human labels.  nearside = STRONG (larger Zp), far = WEAK.
+#: nearside and farside are plotted in SEPARATE figures (never overlapped) — one
+#: figure per (station, side) = 5 x 2 = 10 figures.  Within each figure, color +
+#: linestyle distinguish the SOURCE (MFEM solid, DRDG3D dashed).
 SIDES = ("nearside", "farside")
 SIDE_LABEL = {"nearside": "near (STRONG)", "farside": "far (WEAK)"}
-#: linestyle encodes the SIDE (near = solid, far = dashed); color encodes the
-#: SOURCE (each --mfem run + the reference), so multiple runs stay distinct.
-SIDE_LINESTYLE = {"nearside": "-", "farside": "--"}
 
 
 def _parse_numeric_table(filepath, min_cols):
@@ -340,15 +340,19 @@ PANELS = [
 ]
 
 
-def plot_station(datasets, station_name, strike_km, depth_km, problem,
-                 save_path=None, t_max=None):
-    """6-panel per-side station comparison (near=solid, far=dashed)."""
+def plot_station(datasets, station_name, side_label, strike_km, depth_km,
+                 problem, save_path=None, t_max=None):
+    """6-panel single-side station comparison (MFEM vs DRDG3D).
+
+    One figure per (station, side): nearside and farside are NEVER overlapped.
+    Within the figure, color + linestyle distinguish the source (MFEM solid,
+    DRDG3D dashed).
+    """
     import matplotlib.pyplot as plt
 
     fig, axes = plt.subplots(3, 2, figsize=(14, 13))
-    title = (f"{problem.upper()} on-fault {station_name}  "
-             f"(strike={strike_km:g} km, depth={depth_km:g} km)  "
-             f"near=STRONG, far=WEAK")
+    title = (f"{problem.upper()} on-fault {station_name} — {side_label}  "
+             f"(strike={strike_km:g} km, depth={depth_km:g} km)")
     if t_max is not None:
         title += f"   [0-{t_max:g} s close-up]"
     fig.suptitle(title, fontsize=14, fontweight="bold")
@@ -376,38 +380,6 @@ def plot_station(datasets, station_name, strike_km, depth_km, problem,
         ax.legend(fontsize=8, loc="best")
         ax.grid(True, alpha=0.3)
 
-    plt.tight_layout()
-    if save_path:
-        plt.savefig(save_path, dpi=150, bbox_inches="tight")
-        print(f"  Saved: {save_path}")
-    else:
-        plt.show()
-    plt.close()
-
-
-def plot_overview(all_results, problem, save_path=None):
-    """Plot h-vel (far/WEAK side) at all stations on one axis."""
-    import matplotlib.pyplot as plt
-
-    fig, ax = plt.subplots(1, 1, figsize=(14, 6))
-    fig.suptitle(f"{problem.upper()}: h-vel (far/WEAK side) at All Stations",
-                 fontsize=14, fontweight="bold")
-    cmap = plt.cm.tab10
-    n = len(all_results)
-    for i, res in enumerate(all_results):
-        name = res["station_name"]
-        color = cmap(i / max(n - 1, 1))
-        first = True
-        for label, data, _c, ls in res["datasets"]:
-            if data is None or "far" not in label:
-                continue
-            ax.plot(data["time_s"], data["h_vel"], ls, color=color,
-                    linewidth=0.7, label=(name if first else None))
-            first = False
-    ax.set_xlabel("Time (s)")
-    ax.set_ylabel("h-vel (m/s)")
-    ax.legend(fontsize=7, ncol=3, loc="best")
-    ax.grid(True, alpha=0.3)
     plt.tight_layout()
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
@@ -669,11 +641,14 @@ def main():
     print(f"  Stations: {len(stations)}")
     print()
 
-    all_results = []
+    # One figure PER (station, side) — nearside and farside are NEVER
+    # overlapped.  5 stations x 2 sides = 10 figures.  Each figure overlays
+    # only the SOURCES (MFEM vs DRDG3D) for that single side.
+    n_figs = 0
     for station, strike_km, depth_km in stations:
-        datasets = []
-        for label, stype, info, color in sources:
-            for side in SIDES:
+        for side in SIDES:
+            datasets = []
+            for label, stype, info, color in sources:
                 data = None
                 if stype == "drdg3d":
                     bench_dir, problem = info
@@ -685,51 +660,42 @@ def main():
                     path = mfem_filename(directory, prefix, side, station)
                     if os.path.exists(path):
                         data = load_mfem_file(path)
-                datasets.append((f"{label} {SIDE_LABEL[side]}", data, color,
-                                 SIDE_LINESTYLE[side]))
+                ls = "-" if stype == "mfem" else "--"
+                datasets.append((label, data, color, ls))
 
-        if all(d is None for _, d, _, _ in datasets):
-            print(f"  {station}: no data found")
-            continue
+            if all(d is None for _, d, _, _ in datasets):
+                print(f"  {station} {SIDE_LABEL[side]}: no data found")
+                continue
 
-        pts = [f"{lbl}: {len(d['time_s'])} pts ({d['time_s'][-1]:.2f} s)"
-               for lbl, d, _c, _ls in datasets if d is not None]
-        print(f"  {station} (strike={strike_km:g}, depth={depth_km:g}): "
-              f"{', '.join(pts)}")
-        all_results.append({
-            "station_name": station,
-            "strike_km": strike_km,
-            "depth_km": depth_km,
-            "datasets": datasets,
-        })
+            pts = [f"{lbl}: {len(d['time_s'])} pts ({d['time_s'][-1]:.2f} s)"
+                   for lbl, d, _c, _ls in datasets if d is not None]
+            print(f"  {station} {SIDE_LABEL[side]} "
+                  f"(strike={strike_km:g}, depth={depth_km:g}): "
+                  f"{', '.join(pts)}")
 
-        if args.save:
-            os.makedirs(args.output_dir, exist_ok=True)
-            fname = os.path.join(args.output_dir,
-                                 f"{args.problem}_{station}.png")
-            plot_station(datasets, station, strike_km, depth_km, args.problem,
-                         save_path=fname)
-            if args.closeup_t is not None:
-                fname_c = os.path.join(
-                    args.output_dir, f"{args.problem}_{station}_closeup.png")
-                plot_station(datasets, station, strike_km, depth_km,
-                             args.problem, save_path=fname_c,
-                             t_max=args.closeup_t)
-        else:
-            plot_station(datasets, station, strike_km, depth_km, args.problem)
-            if args.closeup_t is not None:
-                plot_station(datasets, station, strike_km, depth_km,
-                             args.problem, t_max=args.closeup_t)
+            if args.save:
+                os.makedirs(args.output_dir, exist_ok=True)
+                fname = os.path.join(
+                    args.output_dir, f"{args.problem}_{station}_{side}.png")
+                plot_station(datasets, station, SIDE_LABEL[side], strike_km,
+                             depth_km, args.problem, save_path=fname)
+                if args.closeup_t is not None:
+                    fname_c = os.path.join(
+                        args.output_dir,
+                        f"{args.problem}_{station}_{side}_closeup.png")
+                    plot_station(datasets, station, SIDE_LABEL[side], strike_km,
+                                 depth_km, args.problem, save_path=fname_c,
+                                 t_max=args.closeup_t)
+            else:
+                plot_station(datasets, station, SIDE_LABEL[side], strike_km,
+                             depth_km, args.problem)
+                if args.closeup_t is not None:
+                    plot_station(datasets, station, SIDE_LABEL[side], strike_km,
+                                 depth_km, args.problem, t_max=args.closeup_t)
+            n_figs += 1
 
-    if len(all_results) > 1:
-        if args.save:
-            fname = os.path.join(args.output_dir,
-                                 f"{args.problem}_overview.png")
-            plot_overview(all_results, args.problem, save_path=fname)
-        else:
-            plot_overview(all_results, args.problem)
-
-    print(f"\nPlotted {len(all_results)} stations.")
+    print(f"\nPlotted {n_figs} figures "
+          f"({len(stations)} station(s) x {len(SIDES)} sides).")
     return 0
 
 
