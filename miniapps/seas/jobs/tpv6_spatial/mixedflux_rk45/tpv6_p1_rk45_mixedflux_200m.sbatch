@@ -3,9 +3,9 @@
 #SBATCH -o tpv6_p1_rk_mf_%j.out
 #SBATCH -e tpv6_p1_rk_mf_%j.err
 #SBATCH -p normal
-#SBATCH -N 4
-#SBATCH -n 224
-#SBATCH -t 12:00:00
+#SBATCH -N 8
+#SBATCH -n 400
+#SBATCH -t 24:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV6 — ARM 2: BI-MATERIAL FAULT, p1 / RK45 / MIXED (central) flux / matrix
@@ -76,6 +76,7 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
+    --partition-fault-locality \
     --time-integrator rk45 \
     --mixed-flux adjacent \
     --mixed-flux-contrast-tol 0.05 \

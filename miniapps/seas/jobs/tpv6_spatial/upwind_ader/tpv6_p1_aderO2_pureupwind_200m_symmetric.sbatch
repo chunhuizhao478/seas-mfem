@@ -3,9 +3,9 @@
 #SBATCH -o tpv6_p1_ader_sym_%j.out
 #SBATCH -e tpv6_p1_ader_sym_%j.err
 #SBATCH -p normal
-#SBATCH -N 4
-#SBATCH -n 224
-#SBATCH -t 12:00:00
+#SBATCH -N 8
+#SBATCH -n 400
+#SBATCH -t 24:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV6 — ARM 1: BI-MATERIAL FAULT, p1 / ADER-O2 / PURE UPWIND / matrix
@@ -78,6 +78,7 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
+    --partition-fault-locality \
     --ader-order 2 \
     --time-integrator ader \
     --mixed-flux none \

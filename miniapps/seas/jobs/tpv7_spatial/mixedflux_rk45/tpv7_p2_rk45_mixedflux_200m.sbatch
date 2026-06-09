@@ -3,9 +3,9 @@
 #SBATCH -o tpv7_p2_rk_mf_%j.out
 #SBATCH -e tpv7_p2_rk_mf_%j.err
 #SBATCH -p normal
-#SBATCH -N 8
-#SBATCH -n 448
-#SBATCH -t 24:00:00
+#SBATCH -N 10
+#SBATCH -n 500
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV7 (low-contrast bi-material) — ARM 2: BI-MATERIAL FAULT, p2 / RK45 / MIXED (central) flux / matrix
@@ -81,6 +81,7 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
+    --partition-fault-locality \
     --time-integrator rk45 \
     --mixed-flux adjacent \
     --mixed-flux-contrast-tol 0.05 \

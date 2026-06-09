@@ -85,6 +85,7 @@
 #include "../dynamic/tpv104_stations.hpp"      // SCEC TPV104 station writer (rate-state)
 #include "../dynamic/tpv205_stations.hpp"      // SCEC TPV205 station writer (LSW)
 #include "../dynamic/tpv6_stations.hpp"        // Part C: TPV6/7 per-side on-fault station writer
+#include "../dynamic/fault_locality_partition.hpp"  // keep fault element-pairs co-resident (np>1)
 #include "../dynamic/spatial_print_derived.hpp"
 
 #include "../spatial/code/spatial_friction.hpp"
@@ -970,7 +971,42 @@ int main(int argc, char *argv[])
                << dim);
 
 #ifdef MFEM_USE_MPI
-   ParMesh pmesh(comm, smesh);
+   // Fault-locality partition (opt-in via --partition-fault-locality; default OFF
+   // => byte-exact for existing spatial runs).  Forces both elements of every
+   // fault face to be co-resident on one rank so the y=0 fault/material interface
+   // is NOT cut across ranks.  REQUIRED for a BI-MATERIAL fault (TPV6/7) at np>1:
+   // without it ParMETIS cuts the fault, creating SHARED fault/corridor faces that
+   // hit the cross-rank neighbour-material exchange (a local-side stub, R-004) —
+   // mixed flux then aborts the seam_continuous guard, and the per-side fault
+   // material is wrong on shared fault faces.  Same helper the native TPV drivers
+   // use (dynamic/fault_locality_partition.hpp).  smesh must stay alive until the
+   // ParMesh ctor; fl_part must outlive it (MFEM may store the pointer).
+   Array<int> fl_part;
+   int *part_data = nullptr;
+   if (HasFlag(argc, argv, "--partition-fault-locality"))
+   {
+      const int fault_attr_part = (cfg.boundary.fault_attr > 0)
+                                  ? cfg.boundary.fault_attr : 101;
+      Array<int> fault_faces;
+      seas::FindFaultFaceIndices(smesh, fault_attr_part, fault_faces);
+      int n_relocated = 0;
+      seas::BuildFaultLocalityPartitioning(smesh, fault_faces, nprocs,
+                                           fl_part, &n_relocated);
+      const int violations =
+         seas::VerifyFaultLocality(smesh, fault_faces, fl_part);
+      MFEM_VERIFY(violations == 0,
+                  "spatial_dyn: fault-locality partition has " << violations
+                  << " violations (partitioning logic bug).");
+      if (rank == 0)
+      {
+         std::cout << "[partition] fault-locality ENABLED (fault_attr="
+                   << fault_attr_part << "): " << fault_faces.Size()
+                   << " fault faces, " << n_relocated << " elements relocated, "
+                   << violations << " violations\n";
+      }
+      part_data = fl_part.GetData();
+   }
+   ParMesh pmesh(comm, smesh, part_data);
 #else
 #  error "spatial_dyn_driver requires MFEM_USE_MPI=YES."
 #endif

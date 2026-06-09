@@ -413,15 +413,20 @@ real_t EvalComp(const FES &fes, const Vector &Q, int ndof_total, int comp,
    return val;
 }
 
-// Genuine fault-normal velocity jump max_F |v_y(+) - v_y(-)| over interior
-// fault faces (the planar fault normal is +/- y_hat).  Complete in serial;
-// covers the interior subset under MPI (shared faces are skipped — the sigma_n
-// metric still covers every QP via DOFData).
+// Genuine across-fault velocity jump max_F |v_comp(+) - v_comp(-)| over interior
+// fault faces, for a chosen GLOBAL velocity component (VX/VY/VZ).  The planar
+// fault normal is +/- y_hat, so the three components are exactly the fault-local
+// channels for this axis-aligned slab:
+//   VY -> [[v_n]]     (fault-normal jump; drives delta sigma_n = eta_p*[[v_n]])
+//   VZ -> [[v_dip]]   (dip-tangential jump; drives tau1_trial = eta_s*[[v_dip]]
+//                      -> the spurious DIP SLIP.  Analytically ZERO for an ideal
+//                      x-directed strike-slip rupture, so any value is leak.)
+//   VX -> [[v_strike]](strike-tangential jump; the REAL rupture, ~O(slip rate))
+// Complete in serial; covers the interior subset under MPI (shared faces skipped).
 template <typename MeshT>
-real_t MaxVnJumpInterior(WaveOperator<MeshT> &wave, MeshT &mesh,
-                         const Vector &Q, int order)
+real_t MaxVCompJumpInterior(WaveOperator<MeshT> &wave, MeshT &mesh,
+                            const Vector &Q, int comp)
 {
-   (void)order;  // fault QP rule now from wave.FaultFaceQuadDegree()
    const auto &fes = wave.GetFESpace();
    const int ndof_total = fes.GetNDofs();
    const Array<int> &int_faces = wave.GetFaultInteriorFaces();
@@ -446,9 +451,9 @@ real_t MaxVnJumpInterior(WaveOperator<MeshT> &wave, MeshT &mesh,
          const IntegrationPoint &eip2 = ftr->GetElement2IntPoint();
          const IntegrationPoint &eip_plus  = (e_plus  == ftr->Elem1No) ? eip1 : eip2;
          const IntegrationPoint &eip_minus = (e_minus == ftr->Elem1No) ? eip1 : eip2;
-         const real_t vyp = EvalComp(fes, Q, ndof_total, VY, e_plus,  eip_plus);
-         const real_t vym = EvalComp(fes, Q, ndof_total, VY, e_minus, eip_minus);
-         worst = std::max(worst, std::abs(vyp - vym));
+         const real_t vp = EvalComp(fes, Q, ndof_total, comp, e_plus,  eip_plus);
+         const real_t vm = EvalComp(fes, Q, ndof_total, comp, e_minus, eip_minus);
+         worst = std::max(worst, std::abs(vp - vm));
       }
    }
    return worst;
@@ -471,7 +476,10 @@ struct RunResult {
    real_t excursion_early = 0.0;   // max_F |sigma_n - sigma_n0| at first print
    real_t excursion_final = 0.0;   // ... at the last step
    real_t excursion_peak  = 0.0;   // ... peak over the run
-   real_t vn_jump_final   = 0.0;   // max_F |[[v_n]]| at the last step
+   real_t vn_jump_final   = 0.0;   // max_F |[[v_n]]|    (normal) at the last step
+   real_t vdip_jump_final = 0.0;   // max_F |[[v_dip]]|  (dip)    at the last step
+   real_t vdip_jump_peak  = 0.0;   // max_F |[[v_dip]]|  peak over the run
+   real_t vstr_jump_final = 0.0;   // max_F |[[v_strike]]| (strike) at the last step
    real_t peak_slip_rate  = 0.0;   // confirms a rupture actually happened
 };
 
@@ -565,6 +573,7 @@ RunResult RunRupture(MeshT &mesh, const Options &o, int nsteps,
       std::cout << std::setw(8) << "step" << std::setw(10) << "t[s]"
                 << std::setw(16) << "max|dSigN|[Pa]"
                 << std::setw(16) << "max|[[v_n]]|"
+                << std::setw(16) << "max|[[v_dip]]|"
                 << std::setw(16) << "peakV[m/s]" << "\n";
    }
 
@@ -590,6 +599,16 @@ RunResult RunRupture(MeshT &mesh, const Options &o, int nsteps,
       R.excursion_peak = std::max(R.excursion_peak, dsn);
       R.peak_slip_rate = std::max(R.peak_slip_rate, pkV);
 
+      // The DIP-tangential velocity jump [[v_dip]] (= [[v_z]] on this y-normal
+      // slab) is the seed of the spurious dip slip (tau1_trial = eta_s*[[v_dip]]).
+      // It is analytically ZERO for the x-directed strike-slip rupture, so any
+      // value is pure leak.  Tracked EVERY step (its peak rides the rupture
+      // front, which the print cadence — set to nsteps for the probe — would
+      // otherwise miss).
+      const real_t vdip_step =
+         GlobalMax(MaxVCompJumpInterior(wave, mesh, Q, VZ));
+      R.vdip_jump_peak = std::max(R.vdip_jump_peak, vdip_step);
+
       // "early" baseline for the secular-growth check: sampled at ~10% of the
       // run (NOT step 0, where the excursion is identically 0), so the growth
       // ratio final/early is a meaningful measure of accumulation.
@@ -600,15 +619,19 @@ RunResult RunRupture(MeshT &mesh, const Options &o, int nsteps,
       const bool do_print = verbose &&
          ((step % o.print_every) == 0 || step == nsteps - 1);
       if (do_print || step == nsteps - 1) {
-         const real_t vnj = GlobalMax(MaxVnJumpInterior(wave, mesh, Q, o.order));
+         const real_t vnj  = GlobalMax(MaxVCompJumpInterior(wave, mesh, Q, VY));
+         const real_t vstr = GlobalMax(MaxVCompJumpInterior(wave, mesh, Q, VX));
          R.excursion_final  = dsn;
          R.vn_jump_final    = vnj;
+         R.vdip_jump_final  = vdip_step;
+         R.vstr_jump_final  = vstr;
          if (do_print && g_rank == 0) {
             std::cout << std::setw(8) << step
                       << std::setw(10) << std::fixed << std::setprecision(4)
                       << (step + 1) * o.dt
                       << std::setw(16) << std::scientific << std::setprecision(4) << dsn
                       << std::setw(16) << vnj
+                      << std::setw(16) << vdip_step
                       << std::setw(16) << pkV << "\n";
          }
       }
@@ -692,7 +715,11 @@ int main(int argc, char *argv[])
                 << "  peak="  << main_run.excursion_peak << " Pa\n"
                 << "  [main] peak slip rate = " << main_run.peak_slip_rate
                 << " m/s   final |[[v_n]]| = " << main_run.vn_jump_final
-                << " m/s\n";
+                << " m/s\n"
+                << "  [main] DIP leak: peak |[[v_dip]]| = "
+                << main_run.vdip_jump_peak << " m/s   final |[[v_dip]]| = "
+                << main_run.vdip_jump_final << " m/s   (vs strike rupture |[[v_str]]| = "
+                << main_run.vstr_jump_final << " m/s)\n";
    }
 
    // A rupture must actually have happened (otherwise the test is vacuous).
@@ -744,11 +771,23 @@ int main(int argc, char *argv[])
       }
 #endif
       if (g_rank == 0) {
-         std::cout << "\n  [probe] asymmetric peak |dSigN| = " << std::scientific
+         std::cout << "\n  [probe] NORMAL leak (sigma_n channel, [[v_n]]):\n"
+                   << "          asymmetric peak |dSigN| = " << std::scientific
                    << std::setprecision(4) << ra.excursion_peak
                    << " Pa   symmetric peak |dSigN| = " << rs.excursion_peak
                    << " Pa   ratio(asym/sym) = "
                    << (rs.excursion_peak > 0 ? ra.excursion_peak / rs.excursion_peak
+                                             : 0.0) << "\n";
+         // The DIP channel is the TPV31 question: does the y-mirror mesh (which
+         // kills the normal/[[v_n]] leak) ALSO kill the dip/[[v_dip]] leak?  The
+         // y-mirror does NOT remove the z-direction Kuhn-dicing asymmetry, so the
+         // prediction (matching TPV31's y-symmetric hybrid mesh keeping dip slip)
+         // is that [[v_dip]] does NOT collapse the way [[v_n]]/sigma_n does.
+         std::cout << "  [probe] DIP leak (slip_dip channel, [[v_dip]]):\n"
+                   << "          asymmetric peak |[[v_dip]]| = "
+                   << ra.vdip_jump_peak << " m/s   symmetric peak |[[v_dip]]| = "
+                   << rs.vdip_jump_peak << " m/s   ratio(asym/sym) = "
+                   << (rs.vdip_jump_peak > 0 ? ra.vdip_jump_peak / rs.vdip_jump_peak
                                              : 0.0) << "\n";
       }
       // Sensitivity exists: the two stencils produce measurably different drift
@@ -759,6 +798,23 @@ int main(int argc, char *argv[])
       TEST_TRUE(rel_diff > 1.0e-3,
                 "near-fault stencil symmetry measurably changes the drift "
                 "(asym vs sym differ > 0.1%)");
+
+      // THE TPV31 DIP-SLIP FINDING, codified (2026-06-06).  The y-mirror mesh
+      // annihilates the NORMAL leak ([[v_n]] -> sigma_n; ratio asym/sym ~1e12
+      // above) but does NOT annihilate the DIP leak [[v_dip]] (= [[v_z]] on this
+      // y-normal slab; ratio asym/sym ~O(1)).  The dip channel is z-tangential —
+      // the y-mirror does not constrain it.  This is precisely why TPV31's
+      // y-symmetric hybrid mesh flattened on-fault sigma_n yet left the spurious
+      // dip slip: two DISTINCT antisymmetric-mode channels, only one fixed by the
+      // y-mirror.  Guard BOTH halves of the contrast so a regression that
+      // accidentally couples / decouples them trips here.
+      TEST_TRUE(ra.vdip_jump_peak > 1.0e-3,
+                "DIP leak [[v_dip]] is present on the asymmetric mesh "
+                "(>1e-3 m/s, far above round-off) — the seed of the dip slip");
+      TEST_TRUE(rs.vdip_jump_peak > 0.1 * ra.vdip_jump_peak,
+                "y-mirror symmetry does NOT suppress the DIP leak "
+                "(sym > 0.1*asym), UNLIKE the normal/sigma_n leak it "
+                "annihilates (~1e12x) — the TPV31 hybrid-mesh paradox reproduced");
    }
 
    if (g_rank == 0) {
