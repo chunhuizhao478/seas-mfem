@@ -3,15 +3,15 @@
 #SBATCH -o tpv31_p1_rk45_mf_n_%j.out
 #SBATCH -e tpv31_p1_rk45_mf_n_%j.err
 #SBATCH -p normal
-#SBATCH -N 12
-#SBATCH -n 600
+#SBATCH -N 10
+#SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
 # SCEC TPV31 — p1 · MATRIX (bi-material) Riemann · mixed (central) flux · RK45
 # Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).  Normal-queue,
-# 12 nodes / 600 ranks (50 ranks/node on Frontera CLX 56-core nodes) / 48 h wall.
+# 10 nodes / 500 ranks (50 ranks/node on Frontera CLX 56-core nodes) / 48 h wall.
 #
 # *** FIRST job to combine matrix-bimaterial + central flux + RK45 — the exact
 #     path PLAN_mixed_flux_hetero_riemann.md Phases 1-6 build (Phase 7 final). ***
@@ -34,8 +34,9 @@
 #                     under ADER, so this scheme MUST be RK (Phases 4-5).  See
 #                     document/mixed_flux_dev/
 #                     BUILD_mixed_flux_rk_dynamic_rupture_2026-05-28.md.
-#   Config: tpv31/configs/tpv31_rk_mixedflux.toml (Phase-7 variant of tpv31.toml:
-#           ONLY mixed_flux none->adjacent + [material].seam_continuous=true).
+#   Config: tpv31/configs/tpv31_rk_mixedflux.toml (variant of tpv31.toml: ONLY
+#           mixed_flux none->adjacent; [material].seam_continuous=true is RETAINED
+#           but is now a DEPRECATED no-op — see PARALLEL SEAM MATERIAL below).
 #
 #   *** CONTRAST-GUARD VARIANT (unified bi-material plan, Part A) ***
 #   Adds --mixed-flux-contrast-tol 0.05: fault-adjacent corridor faces that cross a
@@ -63,14 +64,27 @@
 #   stable dt off `--print-derived` + the *.out, and if V_max runs away or
 #   dt->0, recalibrate `cfl` / the Phase-4 factor on Frontera (NOT a local gate).
 #
-# PARALLEL SEAM MATERIAL (seam_continuous=true) --------------------------
-#   TPV31's depth_profile_1d is depth-only (the profile varies with z, not
-#   laterally across a partition seam), so the operator's local-side
-#   neighbour-material stub is correct at the seam — the SAME approximation the
-#   existing parallel TPV31 ADER bimaterial job runs under.  The merged config
-#   sets [material].seam_continuous=true, which satisfies the Phase-2 DECLARATIVE
-#   guard.  There is NO runtime material probe (it would false-abort at the
-#   2400/5000/10000 m depth discontinuities).  Local guards: Tests 3.4b/3.4c (np=2).
+# PARALLEL SEAM MATERIAL (cross-rank true-peer read) ---------------------
+#   At np>1 ParMETIS cuts the depth_profile_1d bi-material across partition
+#   seams.  The cross-rank material exchange (branch fix-cross-rank-material-
+#   exchange) reads the TRUE peer element's material at every seam — for the
+#   bi-material CENTRAL flux on fault-adjacent SHARED faces AND the bulk
+#   bi-material Godunov UPWIND seam.  This REPLACES the old local-side
+#   neighbour-material stub (which reused the LOCAL element's material as the
+#   neighbour's — valid only for a depth-only profile on a seam-vertical
+#   partition).  Consequences:
+#     (1) [material].seam_continuous is now a DEPRECATED no-op (kept only so the
+#         config still parses; the guard it cleared is GONE — the startup banner
+#         prints "seam_continuous=...; DEPRECATED, no effect").
+#     (2) The seam flux at the 2400/5000/10000 m depth discontinuities is
+#         RE-BASELINED to the correct 2-sided peer material (== serial); it is
+#         byte-exact ONLY for seam-vertical partitions, so the Frontera gold for
+#         this job MUST be re-baselined against a fresh np>1 run on this branch.
+#   This _contrastguard variant ALSO passes --mixed-flux-contrast-tol 0.05, which
+#   drops the strong-contrast corridor faces to upwind (see the CONTRAST-GUARD
+#   block above) — that is the strong-contrast safety, NOT seam_continuous.
+#   Local guards: tests/parallel/test_bimaterial_seam_material_np2 (135/135) +
+#   test_bimaterial_seam_fault_np2 (24/24).
 #
 # --deriv-cache OMITTED for this FIRST run (deliberate — NOT because unsafe) -
 #   The deriv cache works for BOTH the scalar and bimaterial (matrix) operators
@@ -191,7 +205,7 @@ TFINAL="${TPV31_TFINAL:-15}"   # spec p. 9 = 15 s (checkpoint/restart across the
 # per-job-ID directory, each segment is naturally distinct.  To resume:
 #       TPV31_RESTART="<previous-segment-OUT>/cp" sbatch <thisscript>
 # (point it at the cp prefix inside the PREVIOUS job's output dir).  Restart
-# requires the SAME rank count that wrote the checkpoint (this job = -n 600).
+# requires the SAME rank count that wrote the checkpoint (this job = -n 500).
 RESTART_FLAGS=""
 if [[ -n "${TPV31_RESTART:-}" ]]; then
     RESTART_FLAGS="--restart ${TPV31_RESTART}"

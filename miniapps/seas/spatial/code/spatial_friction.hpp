@@ -600,14 +600,14 @@ struct MaterialSpec
    // Depth axis for the profile.  Canonical SEAS TPV31 uses 'z'
    // (depth = max(0, -z)); 'x'/'y' use the raw coordinate as depth.
    char         depth_axis = 'z';
-   // (Phase 5, BUG-22) Asserts the material is CONTINUOUS across every
-   // partition seam (the neighbour material equals the local material at a
-   // shared face).  Required to enable the bi-material central flux on
-   // Mode::Coefficient SHARED faces at np>1 (BimaterialWaveOperator's R-004
-   // local-side neighbour-material stub is correct only under this assumption;
-   // depth-only profiles such as TPV31 satisfy it, lateral variation across a
-   // seam does not).  Default false ⇒ existing configs (which omit the key)
-   // are byte-unchanged.
+   // DEPRECATED (Cross-rank Phase 5) — parsed for back-compat but has NO effect.
+   // Formerly asserted the material is continuous across every partition seam, to
+   // enable the bi-material central flux on Mode::Coefficient SHARED faces at np>1
+   // despite the R-004 local-side neighbour stub.  The cross-rank material
+   // exchange now reads the TRUE peer material at every seam (bulk AND fault), so
+   // this affirmation is unnecessary and is no longer consulted; strong-contrast
+   // safety is the contrast guard (numerics.mixed_flux_contrast_tol >= 0).
+   // Default false; the key may be omitted.
    bool         seam_continuous = false;
 };
 

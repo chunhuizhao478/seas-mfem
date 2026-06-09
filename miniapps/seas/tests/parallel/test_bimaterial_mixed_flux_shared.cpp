@@ -12,30 +12,29 @@
 //   Test 3.4a (Dispatch_SharedCentralFace_Build):
 //     On an np=2 ParMesh where a fault-adjacent non-fault interior face is split
 //     across the partition seam (a SHARED central face), SetMixedFluxMode(Adjacent)
-//     with a het Mode::Coefficient material + SetSeamContinuous(true) builds the
-//     side-0 shared central matrices and SharedInteriorFaceFlux_ dispatches the
-//     central F* (== ApplyPerFaceFlux(per_face_central_flux_[mf], ...) bit-for-bit,
-//     == an independent BuildPerFaceCentralMatricesGlobal(local, nbr-stub) anchor).
+//     with a het Mode::Coefficient material builds the side-0 shared central
+//     matrices and SharedInteriorFaceFlux_ dispatches the central F*
+//     (== ApplyPerFaceFlux(per_face_central_flux_[mf], ...) bit-for-bit).  Since
+//     cross-rank Phase 2 the matrices are built from the TRUE peer material, so
+//     check (c) asserts c[0] != c[1] for a lateral mu(x) (see below).
+//     (SetSeamContinuous(true) is still called but is now a NO-OP — deprecated.)
 //
 //   Test 3.4c (Dispatch_DepthProfile_NoFalseAbort):
-//     A depth-only (mu(z)) Mode::Coefficient material + SetSeamContinuous(true) on a
-//     2D (x,z) grid whose partition seam carries a fault-adjacent z-normal central
-//     SHARED face — and whose material genuinely varies in depth across that seam —
-//     BUILDS with no false abort.  The declarative seam-continuity gate does NOT
-//     conflate legitimate depth variation with unsupported lateral variation.
-//     (The fault itself is x-normal so the FaultBasis strike/dip frame, which uses
-//     up=(0,0,1), is well defined; only the seam/central face is z-normal.)
+//     A depth-only (mu(z)) Mode::Coefficient material on a 2D (x,z) grid whose
+//     partition seam carries a fault-adjacent z-normal central SHARED face — and
+//     whose material genuinely varies in depth across that seam — BUILDS with no
+//     abort.  Cross-rank Phase 2 REMOVED the seam-continuity affirmation guard
+//     entirely (the neighbour material is the true peer), so this builds for ANY
+//     material, depth-varying or lateral.  (The fault itself is x-normal so the
+//     FaultBasis strike/dip frame, up=(0,0,1), is well defined; the seam face is
+//     z-normal.)
 //
-//   Test 3.4b (Dispatch_SharedCentralFace_RequiresSeamContinuous) — OMITTED from
-//     the automated assertions.  The guard is the single MFEM_VERIFY in the shared
-//     arm of BuildPerFaceCentralFluxMatrices_ (mode==Constant || seam_continuous_).
-//     Under the MPI build MFEM_VERIFY calls MPI_Abort, which terminates the whole
-//     job and cannot be caught in-process (this MFEM build has no
-//     MFEM_USE_EXCEPTIONS, and a fork-based death test is unusable after MPI_Init).
-//     Per the P3-1 fix instruction we DO NOT fake it or weaken the production guard;
-//     the abort is construction-verified (the negative of 3.4a/3.4c: WITHOUT
-//     SetSeamContinuous(true) the same Mode::Coefficient shared central face hits
-//     the verify) and covered by inspection.  Revisit if death-test infra lands.
+//   Test 3.4b (Dispatch_SharedCentralFace_RequiresSeamContinuous) — OBSOLETE.
+//     The former guard (MFEM_VERIFY(mode==Constant || seam_continuous_) in the
+//     shared arm of BuildPerFaceCentralFluxMatrices_) was REMOVED in cross-rank
+//     Phase 2: the central build now reads the TRUE peer material, so no
+//     seam-continuity affirmation is needed and there is no abort to test.
+//     `seam_continuous` is deprecated (parsed for back-compat, never read).
 //
 // Determinism (ParMETIS is nondeterministic): we build a small serial mesh and
 // pass an EXPLICIT partition array to ParMesh so a chosen fault-adjacent interior
@@ -229,9 +228,10 @@ std::vector<StatePair> MakeStatePairs()
 // Drive the shared central-face path on an explicitly-partitioned ParMesh.
 // `seam_axis` selects the partition direction (0=x, 2=z); `seam_pos` is the
 // coordinate of the interior face placed ON the rank seam.  Building the
-// operator with Adjacent + seam_continuous=true exercises the shared central
-// arm; when `value_check` is set the dispatched side-0 F* is checked against the
-// central store + an independent BuildPerFaceCentralMatricesGlobal anchor.
+// operator with Adjacent exercises the shared central arm (SetSeamContinuous is a
+// deprecated no-op since cross-rank Phase 2); when `value_check` is set the
+// dispatched side-0 F* is checked against the central store, and the stored halves
+// c[0] != c[1] reflect the TRUE peer material.
 //
 // Returns the number of SHARED central faces found across ranks.
 // =========================================================================
@@ -268,7 +268,9 @@ static int RunSharedCentralCase(const char *label, Mesh &&smesh_in,
 
    const int order = 1;
    TestableBimat<ParMesh> op(pmesh, order, mat, bc);
-   op.SetSeamContinuous(true);                       // affirm seam-continuity
+   op.SetSeamContinuous(true);                       // NO-OP since cross-rank Phase 2
+                                                     // (deprecated; the central
+                                                     // build reads the TRUE peer)
    op.SetMixedFluxMode(MixedFluxMode::Adjacent);     // builds central matrices
 
    // Lifecycle invariant (IMPL-8): map size == set size.
@@ -327,28 +329,34 @@ static int RunSharedCentralCase(const char *label, Mesh &&smesh_in,
                   std::string(label) + ": shared central dispatch == "
                   "ApplyPerFaceFlux(per_face_central_flux_[mf], ...) bit-for-bit");
 
-      // (b) The shared face must carry a neighbour-material stub entry (R-004:
-      // ExchangeBiMaterialNeighbours_ stores local-as-neighbour, keyed by sf).
+      // (b) The shared face must carry a neighbour-material entry — now the TRUE
+      // peer (Cross-rank Phase 2: ExchangeBiMaterialNeighbours_ reads it via
+      // MaterialAtNbr_, keyed by sf), not the former R-004 local-side stub.
       const auto &nbr_map = op.GetSharedFaceNeighbourMaterial();
       auto nbr_it = nbr_map.find(sf_central);
       TEST_ASSERT(nbr_it != nbr_map.end(),
                   std::string(label) + ": shared face has a neighbour-material "
-                  "stub entry");
+                  "entry");
 
-      // (c) Independent anchor on the STORED central matrices — normal-free, so
-      // it does not depend on re-deriving the (orientation-fragile) shared-face
-      // normal from a reused FaceElementTransformations.  Because the R-004 stub
-      // makes the neighbour material identical to the local material on a shared
-      // face, BuildPerFaceCentralMatricesGlobal builds c[0]=½A_local and
-      // c[1]=½A_nbr from the SAME GodunovFlux and the SAME normal => the two
-      // stored half-Jacobians must be EQUAL entrywise (to LU rounding).  This
-      // independently confirms the shared arm built both halves from the stub
-      // material (NEW-I.4's "== BuildPerFaceCentralMatricesGlobal(local, nbr)"
-      // content check) and that the central flux is single-valued by
-      // construction.  The bit-exact store-route proof is check (a).
+      // (c) Cross-rank Phase 2 content check.  This case's material is a LATERAL
+      // mu(x) (== lam(x)) that varies ACROSS the seam, so the TRUE peer-centroid
+      // material differs from the local-centroid material.  The former local-side
+      // stub forced neighbour==local (=> c[0]==c[1]); with the real exchange the
+      // two stored half-Jacobians c[0]=½A_local and c[1]=½A_peer must now DIFFER,
+      // proving the central build consumed the genuine cross-rank peer material.
+      if (nbr_it != nbr_map.end())
       {
+         const auto &nbrmat = nbr_it->second;                 // true peer (l,m,r)
+         const auto &locmat = op.GetPerElementMaterial()[local_elem];
+         const real_t dmat = std::max({ std::abs(nbrmat[0] - locmat[0]),
+                                        std::abs(nbrmat[1] - locmat[1]),
+                                        std::abs(nbrmat[2] - locmat[2]) });
+         TEST_ASSERT(dmat > 0.0,
+                     std::string(label) + ": peer material != local (real "
+                     "cross-rank exchange, not the local-side stub)");
+
          const DenseMatrix &c0 = c[0];   // ½A_local
-         const DenseMatrix &c1 = c[1];   // ½A_nbr (stub == local material)
+         const DenseMatrix &c1 = c[1];   // ½A_peer (true peer material)
          real_t scale = 0.0, worst = 0.0;
          for (int i = 0; i < NUM_STATE; ++i)
             for (int j = 0; j < NUM_STATE; ++j)
@@ -362,11 +370,10 @@ static int RunSharedCentralCase(const char *label, Mesh &&smesh_in,
                worst = std::max(worst, std::abs(c0(i, j) - c1(i, j)));
             }
          const real_t rel = (scale > 0.0) ? worst / scale : worst;
-         TEST_ASSERT(rel <= 1.0e-9,
+         TEST_ASSERT(rel > 1.0e-9,
                      std::string(label) + ": stored shared central halves "
-                     "c[0]==c[1] entrywise (<= 1e-9 rel) — both built from the "
-                     "R-004 stub material via BuildPerFaceCentralMatricesGlobal; "
-                     "central flux single-valued by construction");
+                     "c[0] != c[1] (built from the TRUE peer material via the "
+                     "cross-rank exchange; rel " + std::to_string(rel) + ")");
       }
    }
 
@@ -401,9 +408,10 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------------
-   // Test 3.4a: het mu(x) Mode::Coefficient + seam_continuous=true.  5-hex row
-   // along x; fault at x=3 (between elems 2,3); seam at x=4 (between elems 3,4)
-   // => the fault-adjacent non-fault face (3,4) is a SHARED central face.
+   // Test 3.4a: het mu(x) Mode::Coefficient (lateral).  5-hex row along x; fault
+   // at x=3 (between elems 2,3); seam at x=4 (between elems 3,4) => the
+   // fault-adjacent non-fault face (3,4) is a SHARED central face.  Cross-rank
+   // Phase 2: the central halves are built from the TRUE peer (c[0] != c[1]).
    // -----------------------------------------------------------------------
    {
       auto lam_fn = [](const Vector &x) -> real_t
@@ -412,7 +420,7 @@ int main(int argc, char *argv[])
       { return 30.0e9 * (1.0 + 0.2 * x(0)); };
       FunctionCoefficient lam_c(lam_fn), mu_c(mu_fn);
       ConstantCoefficient rho_c(2670.0);
-      RunSharedCentralCase("Test 3.4a (lateral mu(x), seam_continuous=true)",
+      RunSharedCentralCase("Test 3.4a (lateral mu(x), true-peer central)",
                            BuildHexRowFaultMesh(/*n=*/5, /*fault_x=*/3),
                            /*seam_axis=*/0, /*seam_pos=*/4.0,
                            MaterialField::MakeCoefficient(&lam_c, &mu_c, &rho_c),
@@ -420,12 +428,11 @@ int main(int argc, char *argv[])
    }
 
    // -----------------------------------------------------------------------
-   // Test 3.4c: depth-only mu(z) Mode::Coefficient + seam_continuous=true on a
-   // 2-by-5 (x,z) grid.  Fault is the x-normal face at x=1 (well-defined frame);
-   // the seam splits along z at z=3, so a fault-adjacent z-normal interior face
-   // is a SHARED central face whose neighbouring elements have DISTINCT depth
-   // materials.  Must BUILD with no false abort (the gate is the declarative
-   // seam_continuous flag, not a depth-vs-lateral probe).
+   // Test 3.4c: depth-only mu(z) Mode::Coefficient on a 2-by-5 (x,z) grid.  Fault
+   // is the x-normal face at x=1 (well-defined frame); the seam splits along z at
+   // z=3, so a fault-adjacent z-normal interior face is a SHARED central face whose
+   // neighbouring elements have DISTINCT depth materials.  Must BUILD with no abort
+   // (cross-rank Phase 2 removed the seam-continuity guard entirely).
    // -----------------------------------------------------------------------
    {
       auto lam_fn = [](const Vector &x) -> real_t
@@ -434,8 +441,7 @@ int main(int argc, char *argv[])
       { return 30.0e9 * (1.0 + 0.2 * x(2)); };
       FunctionCoefficient lam_c(lam_fn), mu_c(mu_fn);
       ConstantCoefficient rho_c(2670.0);
-      RunSharedCentralCase("Test 3.4c (depth-only mu(z), seam_continuous=true, "
-                           "no false abort)",
+      RunSharedCentralCase("Test 3.4c (depth-only mu(z), no abort)",
                            BuildHexGridXZFaultMesh(/*nx=*/2, /*nz=*/5,
                                                    /*fault_x=*/1),
                            /*seam_axis=*/2, /*seam_pos=*/3.0,
@@ -443,9 +449,9 @@ int main(int argc, char *argv[])
                            /*value_check=*/false);
    }
 
-   // Test 3.4b is OMITTED (abort-on-missing-seam_continuous): MFEM_VERIFY calls
-   // MPI_Abort under the MPI build and cannot be caught in-process — see the file
-   // header.  Construction-verified + covered by inspection.
+   // Test 3.4b is OBSOLETE: cross-rank Phase 2 removed the seam-continuity abort
+   // entirely (the central build reads the TRUE peer material) — there is no
+   // abort to test.  See the file header.
 
    int total = 0, passed = 0, failed = 0;
    MPI_Allreduce(&g_num_tests, &total,  1, MPI_INT, MPI_SUM, MPI_COMM_WORLD);

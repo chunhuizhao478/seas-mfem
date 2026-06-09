@@ -3,9 +3,9 @@
 #SBATCH -o tpv7_p1_rk_mf_%j.out
 #SBATCH -e tpv7_p1_rk_mf_%j.err
 #SBATCH -p normal
-#SBATCH -N 8
-#SBATCH -n 400
-#SBATCH -t 24:00:00
+#SBATCH -N 4
+#SBATCH -n 224
+#SBATCH -t 12:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV7 (low-contrast bi-material) — ARM 2: BI-MATERIAL FAULT, p1 / RK45 / MIXED (central) flux / matrix
@@ -29,7 +29,7 @@
 set -euo pipefail
 
 MESH="tpv6/mesh/tpv6_200m.msh"                      # asymmetric (standard) mesh
-TFINAL="${TPV7_TFINAL:-8.0}"
+TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv7/configs/tpv7.toml"
 
 module load intel/19.1.1
@@ -76,7 +76,6 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
-    --partition-fault-locality \
     --time-integrator rk45 \
     --mixed-flux adjacent \
     --mixed-flux-contrast-tol 0.05 \

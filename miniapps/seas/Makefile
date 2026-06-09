@@ -5158,6 +5158,8 @@ TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_SRC = tests/unit/test_bimaterial_mixed_flux_
 TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_SRC = tests/unit/test_bimaterial_fault_perside_material.cpp
 TEST_BIMATERIAL_CONTRAST_GUARD_SRC = tests/unit/test_bimaterial_contrast_guard.cpp
 TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC = tests/parallel/test_bimaterial_mixed_flux_shared.cpp
+TEST_BIMATERIAL_SEAM_MATERIAL_NP2_SRC = tests/parallel/test_bimaterial_seam_material_np2.cpp
+TEST_BIMATERIAL_SEAM_FAULT_NP2_SRC = tests/parallel/test_bimaterial_seam_fault_np2.cpp
 TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC = tests/unit/test_bimaterial_mixed_flux_cfl.cpp
 TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC = tests/unit/test_bimaterial_mixed_flux_homog_equivalence.cpp
 
@@ -5190,6 +5192,8 @@ TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_DISPATCH_
 TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_OBJ = $(TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_SRC:.cpp=.o)
 TEST_BIMATERIAL_CONTRAST_GUARD_OBJ = $(TEST_BIMATERIAL_CONTRAST_GUARD_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC:.cpp=.o)
+TEST_BIMATERIAL_SEAM_MATERIAL_NP2_OBJ = $(TEST_BIMATERIAL_SEAM_MATERIAL_NP2_SRC:.cpp=.o)
+TEST_BIMATERIAL_SEAM_FAULT_NP2_OBJ = $(TEST_BIMATERIAL_SEAM_FAULT_NP2_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_CFL_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC:.cpp=.o)
 TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_OBJ = $(TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC:.cpp=.o)
 
@@ -5294,6 +5298,14 @@ $(TEST_BIMATERIAL_CONTRAST_GUARD_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_L
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
 $(TEST_BIMATERIAL_MIXED_FLUX_SHARED_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_SEAM_MATERIAL_NP2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_BIMATERIAL_SEAM_FAULT_NP2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
@@ -5562,6 +5574,64 @@ seas_test_bimaterial_mixed_flux_shared: \
 
 test-bimaterial-mixed-flux-shared: seas_test_bimaterial_mixed_flux_shared
 	mpirun -np 2 ./seas_test_bimaterial_mixed_flux_shared
+
+# Cross-rank material exchange — Phase 1 gate (uniform material accessor np=2).
+seas_test_bimaterial_seam_material_np2: \
+                  $(TEST_BIMATERIAL_SEAM_MATERIAL_NP2_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_SEAM_MATERIAL_NP2_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-seam-material-np2: seas_test_bimaterial_seam_material_np2
+	mpirun -np 2 ./seas_test_bimaterial_seam_material_np2
+
+# Cross-rank material exchange — Phase 4 gate (per-side fault across a seam, np=2).
+seas_test_bimaterial_seam_fault_np2: \
+                  $(TEST_BIMATERIAL_SEAM_FAULT_NP2_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_BIMATERIAL_SEAM_FAULT_NP2_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-bimaterial-seam-fault-np2: seas_test_bimaterial_seam_fault_np2
+	mpirun -np 2 ./seas_test_bimaterial_seam_fault_np2
 
 # Phase 4 (PLAN_mixed_flux_hetero_riemann.md): mixed-flux CFL shared-factor +
 # central+ADER guard (operator-level deps; serial -> in the `test:` group).

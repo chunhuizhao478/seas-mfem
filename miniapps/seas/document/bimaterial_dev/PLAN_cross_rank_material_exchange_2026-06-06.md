@@ -63,11 +63,19 @@ The 3-way switch lives ONLY inside the accessor (the material representation, no
 ## Constraints
 - **One uniform accessor; no per-problem branching.**  The flux pool, neighbour, and fault all
   call `MaterialAtLocal_`/`MaterialAtNbr_`.
-- **Byte-exact for Constant + Coefficient** (TPV205/BP5/TPV6/TPV31/TPV102): the accessor's local
-  path IS the current `At`/`EvalAt`; the peer path is the same eval at the peer's
-  transform/IP (consistent).  Fault stays exactly symmetric (eps-offset, both sides at the same
-  fault QP) on ANY mesh.  Bulk neighbour for a depth profile changes from local-centroid (stub) to
-  peer-centroid (correct) — a small re-baseline at seams ONLY in the BULK (the fault is unchanged).
+- **Byte-exact for Constant always; for Coefficient ONLY where the partition seam is
+  material-continuous across it** (TPV205/BP5 Constant: always; TPV6/TPV31/TPV102 Coefficient: only
+  when the seam does NOT separate elements with different material).  The accessor's local path IS
+  the current `At`/`EvalAt`; the peer path is the same eval at the peer's transform/IP.  Fault stays
+  exactly symmetric (eps-offset, both sides at the same fault QP) on ANY mesh.
+  **(P2-001) Re-baseline caveat:** the shared neighbour material feeds BOTH the central build AND the
+  bulk UPWIND shared Riemann (`per_face_bimaterial_flux_`, the `interior_flux=matrix, mixed_flux=none`
+  path TPV31/TPV102 production uses).  A depth profile whose ParMETIS seam cuts ACROSS depth changes
+  the bulk shared upwind matrix from the old homogeneous stub (`neighbour==local`) to the TRUE
+  (depth) bi-material flux — an O(grad·h) correctness re-baseline at seams, in the BULK only (the
+  fault per-side impedances are unchanged).  Gated by `shared_upwind_matches_serial_*` (the np=2
+  shared upwind matrix == the serial 2-sided matrix); TPV31/TPV102 parallel gold to be re-baselined
+  on Frontera and the shift documented.
 - **GridFunction (CVM) first-class**: NEW capability (currently aborts); gated.
 - **`--partition-fault-locality` AVAILABLE, NOT REQUIRED.**
 - **No silent fallback / no silent wrong material**: a missing face-nbr entry aborts loudly.
@@ -200,8 +208,9 @@ stays EXACTLY symmetric on any mesh; GridFunction faults supported.
       PEER side:  `MaterialAtNbr_(ftr, ip2, ...)`  (Coefficient: coeff at the peer eps-offset via
       `ftr->Elem2`; GridFunction: face-nbr GF interp at ip2).
     - **Index spaces (explicit, R-204):** `e1_plus = shared_fault_elem1_on_plus_[si]` (POSITION);
-      `base = shared_fault_dof_offset_.at(sf)` (RAW-sf); assign `+`/`-` from `e1_plus`; write into
-      `dof_data[base+q]` as interior does.
+      `base = shared_fault_dof_offset_.find(sf)->second` (RAW-sf; use `find()+continue`, not `.at()`,
+      to skip a face with no offset entry rather than throw — matches the interior loop); assign
+      `+`/`-` from `e1_plus`; write into `dof_data[base+q]` as interior does.
 
 ### Acceptance Criteria
 - [ ] **Gate (np=2) `shared_fault_symmetric_depthprofile`**: depth-profile (f(z)) fault on a seam,

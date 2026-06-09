@@ -3,8 +3,8 @@
 #SBATCH -o tpv7_p1_ader_sym_%j.out
 #SBATCH -e tpv7_p1_ader_sym_%j.err
 #SBATCH -p normal
-#SBATCH -N 8
-#SBATCH -n 400
+#SBATCH -N 4
+#SBATCH -n 224
 #SBATCH -t 12:00:00
 #SBATCH -A EAR20006
 
@@ -30,7 +30,7 @@ set -euo pipefail
 
 FAULT_OVERINT=0
 MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
-TFINAL="${TPV7_TFINAL:-8.0}"                        # TPV6 rupture ~ a few s
+TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv7/configs/tpv7.toml"
 
 module load intel/19.1.1
@@ -78,7 +78,6 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
-    --partition-fault-locality \
     --ader-order 2 \
     --time-integrator ader \
     --mixed-flux none \

@@ -974,13 +974,15 @@ int main(int argc, char *argv[])
    // Fault-locality partition (opt-in via --partition-fault-locality; default OFF
    // => byte-exact for existing spatial runs).  Forces both elements of every
    // fault face to be co-resident on one rank so the y=0 fault/material interface
-   // is NOT cut across ranks.  REQUIRED for a BI-MATERIAL fault (TPV6/7) at np>1:
-   // without it ParMETIS cuts the fault, creating SHARED fault/corridor faces that
-   // hit the cross-rank neighbour-material exchange (a local-side stub, R-004) —
-   // mixed flux then aborts the seam_continuous guard, and the per-side fault
-   // material is wrong on shared fault faces.  Same helper the native TPV drivers
-   // use (dynamic/fault_locality_partition.hpp).  smesh must stay alive until the
-   // ParMesh ctor; fl_part must outlive it (MFEM may store the pointer).
+   // is NOT cut across ranks.  OPTIONAL for a BI-MATERIAL fault (TPV6/7) at np>1:
+   // the cross-rank neighbour-material exchange now reads the TRUE peer element's
+   // material (merged from fix-cross-rank-material-exchange), so a ParMETIS-cut
+   // fault is handled correctly — the per-side fault material and the mixed-flux
+   // seam are right on SHARED fault faces without this partition.  Enabling it is
+   // still useful: it keeps every fault face LOCAL, removing the per-face
+   // cross-rank exchange on the fault altogether (this is what the native TPV
+   // drivers do, dynamic/fault_locality_partition.hpp).  smesh must stay alive
+   // until the ParMesh ctor; fl_part must outlive it (MFEM may store the pointer).
    Array<int> fl_part;
    int *part_data = nullptr;
    if (HasFlag(argc, argv, "--partition-fault-locality"))
@@ -1238,10 +1240,11 @@ int main(int argc, char *argv[])
       // to the per-element bimaterial overrides.
       wave_ptr = std::make_unique<BimaterialWaveOperator<ParMesh>>(
                     pmesh, cfg.mesh.order, material, bc);
-      // (Phase 5, BUG-22) Propagate [material].seam_continuous to the operator
-      // BEFORE SetMixedFluxMode (below), so BuildPerFaceCentralFluxMatrices_
-      // reads the configured value (not the default false) when gating the
-      // bi-material central flux on Mode::Coefficient SHARED faces at np>1.
+      // (Cross-rank Phase 5) DEPRECATED: [material].seam_continuous now has NO
+      // effect — the cross-rank exchange reads the TRUE peer material, so the
+      // central build no longer gates on this affirmation (the abort it guarded is
+      // gone).  The call is kept for config back-compat (the flag is stored, never
+      // read); strong-contrast safety is the contrast guard (mixed_flux_contrast_tol).
       static_cast<BimaterialWaveOperator<ParMesh>&>(*wave_ptr)
          .SetSeamContinuous(cfg.material.seam_continuous);
    }
@@ -1367,7 +1370,9 @@ int main(int argc, char *argv[])
       std::cout << "[mixed-flux] matrix (bi-material) + "
                 << cfg.numerics.mixed_flux << " central flux enabled "
                 << "(seam_continuous=" << (cfg.material.seam_continuous
-                                           ? "true" : "false") << ")\n";
+                                           ? "true" : "false")
+                << "; DEPRECATED, no effect — cross-rank seam material uses the "
+                   "TRUE peer)\n";
    }
 
    // Prove the mixed-flux mode is NOT a silent no-op: report the GLOBAL

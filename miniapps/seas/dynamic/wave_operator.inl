@@ -4179,6 +4179,31 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                         I_imp_plus[c]  = src_p[c];
                         I_imp_minus[c] = src_m[c];
                      }
+                     // (Part C, TPV6/7) The substep-buffer path bypasses the
+                     // inline EvaluateADER_LSW below — and therefore that
+                     // routine's StoreImposedVelocity_ — so without this the
+                     // per-side imposed velocity (read by TPV6StationWriter)
+                     // stays at zero and the ADER station traces show flat
+                     // v/disp while stress is correct (the RK/mixed-flux path
+                     // calls EvaluateLSW directly and is unaffected).  Recover
+                     // it here: the accumulated I_imp is the macro-step time-
+                     // integral of the canonical-frame imposed Q-state, so
+                     // I_imp/dt is the time-averaged imposed (split-node)
+                     // velocity — exactly what StoreImposedVelocity_ captures
+                     // from the inline solve.  LSW only (RS never stores v_imp;
+                     // mirrors the inline dispatch).  Pure side-channel — the
+                     // flux is unaffected (only the TPV6/7 writer reads v_imp_*).
+                     if (fault_friction_law_ == FaultFrictionLaw::LSW ||
+                         fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
+                     {
+                        const real_t inv_dt_vimp = static_cast<real_t>(1.0) / dt;
+                        fdata.v_imp_plus[0]  = I_imp_plus[VX]  * inv_dt_vimp;
+                        fdata.v_imp_plus[1]  = I_imp_plus[VY]  * inv_dt_vimp;
+                        fdata.v_imp_plus[2]  = I_imp_plus[VZ]  * inv_dt_vimp;
+                        fdata.v_imp_minus[0] = I_imp_minus[VX] * inv_dt_vimp;
+                        fdata.v_imp_minus[1] = I_imp_minus[VY] * inv_dt_vimp;
+                        fdata.v_imp_minus[2] = I_imp_minus[VZ] * inv_dt_vimp;
+                     }
                   }
                   else
                   {

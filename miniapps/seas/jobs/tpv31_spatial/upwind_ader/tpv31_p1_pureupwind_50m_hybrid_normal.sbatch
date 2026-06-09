@@ -3,8 +3,8 @@
 #SBATCH -o tpv31_p1_pu_hybrid_%j.out
 #SBATCH -e tpv31_p1_pu_hybrid_%j.err
 #SBATCH -p normal
-#SBATCH -N 12
-#SBATCH -n 600
+#SBATCH -N 10
+#SBATCH -n 500
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
@@ -23,6 +23,17 @@
 #   * matrix Riemann: [numerics].interior_flux = "matrix"  (MANDATORY for TPV31's
 #                     depth_profile_1d bi-material; config-only, asserted below).
 #   Config: tpv31/configs/tpv31.toml.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   This job runs the bi-material Godunov UPWIND seam (mixed_flux=none) on the
+#   depth_profile_1d material.  At np>1 ParMETIS can cut the depth profile across
+#   a partition seam; the cross-rank material exchange now reads the TRUE peer
+#   element's material there (replacing the old local-side stub).  At a seam that
+#   crosses a depth discontinuity (2400/5000/10000 m) the upwind seam flux is
+#   RE-BASELINED to the correct 2-sided value (== serial / a seam-vertical
+#   partition); byte-exact only for partitions that do NOT cut across a depth
+#   jump.  ⇒ re-baseline the Frontera gold for this job against a fresh np>1 run
+#   on this branch (only cross-depth seams change; the bulk interior is identical).
 # Standalone: build seas_spatial_dyn_driver first (from THIS branch — carries the
 # ADER deriv-cache + the over-int/resample code).
 # NOTE: even 48 h likely won't reach 15 s — checkpoints every 2000 steps; resubmit

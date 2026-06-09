@@ -3,9 +3,9 @@
 #SBATCH -o tpv7_p2_ader_sym_%j.out
 #SBATCH -e tpv7_p2_ader_sym_%j.err
 #SBATCH -p normal
-#SBATCH -N 10
-#SBATCH -n 500
-#SBATCH -t 48:00:00
+#SBATCH -N 8
+#SBATCH -n 448
+#SBATCH -t 24:00:00
 #SBATCH -A EAR20006
 
 # SCEC TPV7 (low-contrast bi-material) — ARM 1: BI-MATERIAL FAULT, p2 / ADER-O3 / PURE UPWIND / matrix
@@ -33,7 +33,7 @@ set -euo pipefail
 
 FAULT_OVERINT=0
 MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
-TFINAL="${TPV7_TFINAL:-8.0}"                        # TPV6 rupture ~ a few s
+TFINAL="${TPV7_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv7/configs/tpv7_p2.toml"
 
 module load intel/19.1.1
@@ -81,7 +81,6 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
-    --partition-fault-locality \
     --ader-order 3 \
     --time-integrator ader \
     --mixed-flux none \

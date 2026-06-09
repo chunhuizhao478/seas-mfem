@@ -5,14 +5,14 @@
 #SBATCH -p normal
 #SBATCH -N 10
 #SBATCH -n 500
-#SBATCH -t 06:00:00
+#SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
 # =========================================================================
 # SCEC TPV102 — p1 · SCALAR mixed (central) flux · explicit RK45
 #   *** STRIKE-SYMMETRIC MESH arm of the dip-slip-drift fix A/B ***
 # Driver: seas_spatial_dyn_driver (spatial dynamic-rupture).
-# NORMAL QUEUE: 10 nodes / 500 ranks (-N 10 -n 500) / 6 h wall.
+# NORMAL QUEUE: 10 nodes / 500 ranks (-N 10 -n 500) / 48 h wall.
 #
 # WHY THIS JOB ------------------------------------------------------------
 #   The on-fault DIP slip drifts (anti-symmetric in along-strike x, ~10
@@ -149,7 +149,7 @@ if [[ ! -f "${MESH}" ]]; then
 fi
 
 OUT="${TPV102_OUT:-tpv102/out_rk45_mf_xsym_${SLURM_JOB_ID:-local}}"
-TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 6 h normal wall
+TFINAL="${TPV102_TFINAL:-12}"   # SCEC TPV102 window 0-12 s; the 48 h normal wall
                                 # reaches a fraction — restart for the rest.
 
 # --- restart from a checkpoint (opt-in via TPV102_RESTART) -----------------
@@ -193,7 +193,7 @@ echo "    strike slip / strike stress / sigma_n are unchanged, and V_max is BOUN
 # =========================================================================
 # PRODUCTION PROMOTION (12 s to completion)
 # -------------------------------------------------------------------------
-#   1. Swap the wall:  #SBATCH -t 24:00:00  (scale -N/-n; Frontera CLX = 56/node).
+#   1. The 48 h normal wall is the queue cap; to finish 12 s, chain restarts (2).
 #   2. Chain restarts across the wall: checkpoints every 2000 steps to ${OUT};
 #      resume with  --restart "${OUT}/cp".
 #   3. Pre-build the mesh ONCE on a login/idev node (conda activate pythonenv;

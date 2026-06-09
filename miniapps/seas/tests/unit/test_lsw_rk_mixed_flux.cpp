@@ -241,6 +241,7 @@ void L1_EvaluateLSW_vs_ADER()
 
    const real_t pow2_dts[] = {1.0, 0.5, 0.25};
    bool all_pow2_exact = true;
+   bool vimp_pow2_ok = true;  // (regression) EvaluateLSW must store v_imp (TPV6 stations)
    for (real_t dt : pow2_dts)
    {
       DOFData a = make(), b = make();
@@ -259,9 +260,26 @@ void L1_EvaluateLSW_vs_ADER()
          if (qip[c] != iip[c] / dt || qim[c] != iim[c] / dt) { imp_exact = false; }
       }
       if (!(fields_exact && imp_exact)) { all_pow2_exact = false; }
+
+      // (regression) EvaluateLSW must POPULATE DOFData::v_imp_{plus,minus} — the
+      // TPV6/7 per-side station writer reads ONLY these.  They must be non-zero on
+      // a sliding QP AND bit-exact equal to EvaluateADER_LSW's per-side store (the
+      // ADER path was already correct).  Before the fix these stayed {0,0,0}, so the
+      // station traces had zero velocity/displacement while stress was right.
+      bool vimp_nonzero = false, vimp_match = true;
+      for (int k = 0; k < 3; ++k)
+      {
+         if (a.v_imp_plus[k] != 0.0 || a.v_imp_minus[k] != 0.0) { vimp_nonzero = true; }
+         if (a.v_imp_plus[k]  != b.v_imp_plus[k] ||
+             a.v_imp_minus[k] != b.v_imp_minus[k]) { vimp_match = false; }
+      }
+      if (!(vimp_nonzero && vimp_match)) { vimp_pow2_ok = false; }
    }
    TEST_TRUE(all_pow2_exact,
              "bit-exact DOFData + Q_imp==I_imp/dt for dt in {1, 0.5, 0.25}");
+   TEST_TRUE(vimp_pow2_ok,
+             "EvaluateLSW populates DOFData::v_imp_{plus,minus} (non-zero, == "
+             "EvaluateADER_LSW store) — TPV6/7 station zero-velocity regression");
 
    // General dt: rtol 1e-12 (the (Q·dt)·(1/dt) round-trip is ~1 ULP off).
    {

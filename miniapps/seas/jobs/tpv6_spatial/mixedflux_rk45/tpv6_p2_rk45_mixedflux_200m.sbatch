@@ -3,8 +3,8 @@
 #SBATCH -o tpv6_p2_rk_mf_%j.out
 #SBATCH -e tpv6_p2_rk_mf_%j.err
 #SBATCH -p normal
-#SBATCH -N 10
-#SBATCH -n 500
+#SBATCH -N 12
+#SBATCH -n 600
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
@@ -29,12 +29,21 @@
 #   * contrast guard: --mixed-flux-contrast-tol 0.05.
 #   * matrix Riemann: [numerics].interior_flux="matrix" (per-side fault; asserted).
 #   Config: tpv6/configs/tpv6_p2.toml.  sigma_n is PHYSICALLY non-constant — not a leak.
-# NB: p2 dt is smaller than p1 — even 24 h may not reach tfinal; checkpoints every
+# NB: p2 dt is smaller than p1 — even 48 h may not reach tfinal; checkpoints every
 # 2000 steps, resubmit with TPV6_RESTART=<out>/cp.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   PRE-FIX this job would ABORT at np>1: the bi-material CENTRAL flux on a
+#   fault-adjacent SHARED face under the non-Constant halfspace_across_fault
+#   material required [material].seam_continuous=true, which tpv6_p2.toml does NOT
+#   set.  The cross-rank material exchange REMOVES that guard and reads the TRUE
+#   peer element's material across every partition seam (central corridor AND
+#   bulk upwind), so this job now runs at np>1 with the correct 2-sided seam
+#   material.  ⇒ re-baseline the Frontera gold against a fresh np>1 run.
 set -euo pipefail
 
 MESH="tpv6/mesh/tpv6_200m.msh"                      # asymmetric (standard) mesh
-TFINAL="${TPV6_TFINAL:-8.0}"
+TFINAL="${TPV6_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv6/configs/tpv6_p2.toml"
 
 module load intel/19.1.1
@@ -81,7 +90,6 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
-    --partition-fault-locality \
     --time-integrator rk45 \
     --mixed-flux adjacent \
     --mixed-flux-contrast-tol 0.05 \

@@ -3,8 +3,8 @@
 #SBATCH -o tpv6_p2_ader_sym_%j.out
 #SBATCH -e tpv6_p2_ader_sym_%j.err
 #SBATCH -p normal
-#SBATCH -N 10
-#SBATCH -n 500
+#SBATCH -N 12
+#SBATCH -n 600
 #SBATCH -t 48:00:00
 #SBATCH -A EAR20006
 
@@ -25,15 +25,24 @@
 #           is the STATIC stress patch tau_strike=81.6 MPa, like TPV205 — no
 #           [nucleation] block).  sigma_n is PHYSICALLY non-constant (bi-material)
 #           — do NOT treat its on-fault variation as a leak.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   halfspace_across_fault jumps across the WHOLE y=0 plane (not only the fault
+#   rectangle).  At np>1 a partition seam that crosses y=0 away from the fault now
+#   reads the TRUE peer element's (other-half) material via the cross-rank
+#   exchange, replacing the old local-side stub; the bulk UPWIND seam there is
+#   RE-BASELINED to the correct 2-sided value (== serial).  Byte-exact only for
+#   partitions that do not cut across y=0.  ⇒ re-baseline the Frontera gold
+#   against a fresh np>1 run on this branch.
 # Standalone: build seas_spatial_dyn_driver first (from THIS branch — Part B
 # per-side fault + B3 halfspace material).  NB: p2 dt is smaller than p1 — even
-# 24 h likely won't reach tfinal; checkpoints every 2000 steps, resubmit with
+# 48 h likely won't reach tfinal; checkpoints every 2000 steps, resubmit with
 # TPV6_RESTART=<out>/cp to continue.
 set -euo pipefail
 
 FAULT_OVERINT=0
 MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
-TFINAL="${TPV6_TFINAL:-8.0}"                        # TPV6 rupture ~ a few s
+TFINAL="${TPV6_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
 CONFIG_TOML="tpv6/configs/tpv6_p2.toml"
 
 module load intel/19.1.1
@@ -81,7 +90,6 @@ fi
 ibrun ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
-    --partition-fault-locality \
     --ader-order 3 \
     --time-integrator ader \
     --mixed-flux none \

@@ -34,20 +34,183 @@ BimaterialWaveOperator<MeshType>::BimaterialWaveOperator(
    const BoundaryConfig &bc)
    : Base(mesh, order, real_t(1.0), real_t(1.0), real_t(1.0), bc)
 {
+   // (Cross-rank Phase 1) All three material representations are accepted:
+   // every material read routes through MaterialAtLocal_/MaterialAtNbr_, whose
+   // GridFunction branch reads the source GFs natively (GetValue locally,
+   // shape×FaceNbrData across a seam) — so the per-element flux pool's centroid
+   // evaluation is well defined in every mode.  The enum is a fixed 3-value set;
+   // assert it is one of them (guards against an uninitialised/garbage mode).
    MFEM_VERIFY(material.mode == MaterialField::Mode::Constant
-               || material.mode == MaterialField::Mode::Coefficient,
-               "BimaterialWaveOperator(MaterialField): material.mode must be "
-               "Constant or Coefficient; got Mode::GridFunction ("
-               << static_cast<int>(material.mode) << ").  GridFunction "
-               "mode is consumed via At(elem, dof, ...), which has no "
-               "well-defined centroid evaluation needed by the per-"
-               "element flux pool.");
+               || material.mode == MaterialField::Mode::Coefficient
+               || material.mode == MaterialField::Mode::GridFunction,
+               "BimaterialWaveOperator(MaterialField): unrecognised material.mode ("
+               << static_cast<int>(material.mode) << ").");
 
    material_ = &material;
 
-   BuildGodunovFluxPool_(material);
+   // Face-neighbour exchange (geometry + GridFunction material GFs) BEFORE the
+   // pool / neighbour builds, so MaterialAtNbr_ peer reads are valid (R-6 ctor
+   // order; R-5 collective symmetry — runs on ALL ranks).
+   SetupMaterialFaceNbrExchange_();
+
+   BuildGodunovFluxPool_();
    ExchangeBiMaterialNeighbours_();
    BuildPerFaceBimaterialFluxMatrices_();
+}
+
+// ---------------------------------------------------------------------------
+// (Cross-rank Phase 1) One-time face-neighbour exchange setup.  Parallel only;
+// collective on ALL ranks (no per-rank-conditional exchange — R-5/R-209).
+//   - Geometry: pmesh.ExchangeFaceNbrData() (idempotent — the base WaveOperator
+//     ctor already called it; ParMesh guards on have_face_nbr_data).  Required
+//     for GetSharedFaceTransformations(sf)->Elem2 (the peer ElementTransformation
+//     MaterialAtNbr_ reads in Coefficient mode).
+//   - Material MPI: ONLY Mode::GridFunction needs it — the peer read interpolates
+//     the source GFs' face-neighbour ghost layer (FaceNbrData()).  Constant /
+//     Coefficient are globally evaluable, so they exchange NOTHING (asserted by
+//     the accessor_coeff_no_material_mpi gate via material_gf_exchange_count_==0).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void BimaterialWaveOperator<MeshType>::SetupMaterialFaceNbrExchange_()
+{
+   material_gf_exchange_count_ = 0;
+   if constexpr (!IsParallelMesh<MeshType>::value)
+   {
+      return;   // serial: no peers; MaterialAtNbr_ is never called
+   }
+#ifdef MFEM_USE_MPI
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      pmesh.ExchangeFaceNbrData();   // idempotent; ensures peer transforms exist
+
+      if (material_ != nullptr
+          && material_->mode == MaterialField::Mode::GridFunction)
+      {
+         MFEM_VERIFY(material_->lambda_gf && material_->mu_gf && material_->rho_gf,
+                     "SetupMaterialFaceNbrExchange_: GridFunction mode requires "
+                     "all three source GFs to be non-null.");
+         // R-402 / P1-003: material GFs MUST be scalar (vdim==1) — GetValue reads
+         // a single scalar component (vdim>1 would read a per-component subvector).
+         // The order MUST equal the state/wave order p (the plan's "scalar
+         // L2(order p)" contract; a different-order GF samples the material at a
+         // mismatched polynomial resolution).  Checked per GF (each reads through
+         // its OWN ParFESpace — P1-002/P1-004: MaterialAtNbr_ uses the library
+         // GetValue(Elem2No, ip) per GF, so the three GFs need NOT share a space).
+         const int state_order = this->GetFESpace().GetMaxElementOrder();
+         auto check_gf = [&](const mfem::ParGridFunction *gf, const char *name)
+         {
+            mfem::ParFiniteElementSpace *sp = gf->ParFESpace();
+            MFEM_VERIFY(sp->GetVDim() == 1,
+                        "SetupMaterialFaceNbrExchange_: material GridFunction '"
+                        << name << "' must be scalar (vdim==1); got vdim="
+                        << sp->GetVDim() << ".");
+            MFEM_VERIFY(sp->GetMaxElementOrder() == state_order,
+                        "SetupMaterialFaceNbrExchange_: material GridFunction '"
+                        << name << "' order " << sp->GetMaxElementOrder()
+                        << " != state order " << state_order << ".");
+         };
+         check_gf(material_->lambda_gf.get(), "lambda");
+         check_gf(material_->mu_gf.get(),     "mu");
+         check_gf(material_->rho_gf.get(),    "rho");
+         // shared_ptr operator-> yields a non-const ParGridFunction* even through
+         // the const MaterialField*, so these non-const exchanges are well-formed.
+         material_->lambda_gf->ExchangeFaceNbrData(); ++material_gf_exchange_count_;
+         material_->mu_gf->ExchangeFaceNbrData();     ++material_gf_exchange_count_;
+         material_->rho_gf->ExchangeFaceNbrData();    ++material_gf_exchange_count_;
+      }
+   }
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// (Cross-rank Phase 1) Uniform material accessors — local and peer.  The ONLY
+// branch is the material representation; the consumers never ask "which problem?".
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void BimaterialWaveOperator<MeshType>::MaterialAtLocal_(
+   int elem, ElementTransformation &T, const IntegrationPoint &ip,
+   real_t &lam, real_t &mu, real_t &rho) const
+{
+   MFEM_ASSERT(material_ != nullptr, "MaterialAtLocal_: material_ not set.");
+   if (material_->mode == MaterialField::Mode::GridFunction)
+   {
+      MFEM_ASSERT(material_->lambda_gf && material_->mu_gf && material_->rho_gf,
+                  "MaterialAtLocal_: GridFunction mode requires three GFs.");
+      lam = material_->lambda_gf->GetValue(elem, ip);
+      mu  = material_->mu_gf->GetValue(elem, ip);
+      rho = material_->rho_gf->GetValue(elem, ip);
+   }
+   else
+   {
+      // Constant + Coefficient: byte-exact with the legacy read — this IS
+      // MaterialField::EvalAt at the CALLER-supplied element transform.  (P1-001)
+      // No internal GetElementTransformation: the accessor never touches the mesh
+      // shared scratch, so it composes with a live FaceElementTransformations.
+      // (P2-005) Set the int point before EvalAt: byte-exact for the explicit-ip
+      // FunctionCoefficients used today, but required for any coefficient that
+      // reads T.GetIntPoint() (matches MaxCpInElement; closes the silent
+      // wrong-material footgun for an analytic-CVM coefficient).
+      T.SetIntPoint(&ip);
+      material_->EvalAt(elem, T, ip, lam, mu, rho);
+   }
+   MFEM_ASSERT(rho > 0.0 && (lam + 2.0 * mu) > 0.0,
+               "MaterialAtLocal_: non-physical material at element " << elem
+               << " (rho=" << rho << ", lambda+2mu=" << (lam + 2.0 * mu) << ").");
+}
+
+template <typename MeshType>
+void BimaterialWaveOperator<MeshType>::MaterialAtNbr_(
+   FaceElementTransformations *ftr, const IntegrationPoint &ip_peer,
+   real_t &lam, real_t &mu, real_t &rho) const
+{
+   MFEM_ASSERT(material_ != nullptr, "MaterialAtNbr_: material_ not set.");
+   MFEM_ASSERT(ftr != nullptr && ftr->Elem2 != nullptr,
+               "MaterialAtNbr_: null face transform or peer (Elem2) transform.");
+   if (material_->mode == MaterialField::Mode::GridFunction)
+   {
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         MFEM_ASSERT(material_->lambda_gf && material_->mu_gf && material_->rho_gf,
+                     "MaterialAtNbr_: GridFunction mode requires three GFs.");
+         // Shared-face peer index: Elem2No = ne_ + nbr_idx (ParMesh convention).
+         const int nbr_idx = ftr->Elem2No - ne_;
+         MFEM_VERIFY(nbr_idx >= 0,
+                     "MaterialAtNbr_: Elem2No=" << ftr->Elem2No
+                     << " (- ne_=" << ne_ << " => " << nbr_idx << " < 0) is not a "
+                     "face-neighbour; MaterialAtNbr_ is for SHARED faces only.");
+         // (P1-002/P1-003/P1-004) Read each GF through its OWN space via the MFEM
+         // library face-neighbour path: ParGridFunction::GetValue(i, ip) treats
+         // i >= GetNE() (here Elem2No) as a face-nbr element — it does the
+         // GetFaceNbrElementVDofs + GetFaceNbrFE + face_nbr_data interpolation,
+         // applies the proper DofTransformation (InvTransformPrimal) and map type.
+         // The three GFs therefore need NOT share one ParFiniteElementSpace.
+         lam = material_->lambda_gf->GetValue(ftr->Elem2No, ip_peer);
+         mu  = material_->mu_gf->GetValue(ftr->Elem2No, ip_peer);
+         rho = material_->rho_gf->GetValue(ftr->Elem2No, ip_peer);
+      }
+      else
+#endif
+      {
+         MFEM_ABORT("MaterialAtNbr_: GridFunction peer read requires a parallel "
+                    "mesh build (MFEM_USE_MPI + ParMesh).");
+      }
+   }
+   else
+   {
+      // Constant + Coefficient: globally evaluable — the SAME Eval at the peer's
+      // face-neighbour element transform (ftr->Elem2).  No material MPI.  EvalAt
+      // ignores the element index argument in these modes.  (P2-005) Set the peer
+      // int point before EvalAt (the peer transform's stored ip may be stale from
+      // the last GetSharedFaceTransformations/SetAllIntPoints): byte-exact for the
+      // explicit-ip FunctionCoefficients, required for a GetIntPoint-reading one.
+      ftr->Elem2->SetIntPoint(&ip_peer);
+      material_->EvalAt(ftr->Elem2No, *ftr->Elem2, ip_peer, lam, mu, rho);
+   }
+   MFEM_ASSERT(rho > 0.0 && (lam + 2.0 * mu) > 0.0,
+               "MaterialAtNbr_: non-physical peer material (rho=" << rho
+               << ", lambda+2mu=" << (lam + 2.0 * mu) << ").");
 }
 
 // ---------------------------------------------------------------------------
@@ -55,8 +218,7 @@ BimaterialWaveOperator<MeshType>::BimaterialWaveOperator(
 // the owned flux pool.
 // ---------------------------------------------------------------------------
 template <typename MeshType>
-void BimaterialWaveOperator<MeshType>::BuildGodunovFluxPool_(
-   const MaterialField &material)
+void BimaterialWaveOperator<MeshType>::BuildGodunovFluxPool_()
 {
    per_elem_lmr_.assign(static_cast<size_t>(ne_), std::array<real_t, 3>{0, 0, 0});
    per_elem_h_.assign(static_cast<size_t>(ne_), real_t(0));
@@ -67,7 +229,14 @@ void BimaterialWaveOperator<MeshType>::BuildGodunovFluxPool_(
       const Geometry::Type   gtype = mesh_.GetElementBaseGeometry(e);
       const IntegrationPoint &ip   = Geometries.GetCenter(gtype);
       real_t lam, mu, rho;
-      material.EvalAt(e, *T, ip, lam, mu, rho);
+      // (Cross-rank Phase 1) Route through MaterialAtLocal_ so the pool is well
+      // defined in ALL three modes (GridFunction included).  Byte-exact with the
+      // legacy `material.EvalAt(e, *T, ip, ...)` for Constant/Coefficient: the
+      // accessor's local branch IS that same EvalAt at the same element transform
+      // (the loop's own `T`, not a held face transform) and centroid IP.  This
+      // loop holds no FaceElementTransformations, so reusing the mesh scratch via
+      // GetElementTransformation here is safe (P1-001 concerns held-ftr callers).
+      MaterialAtLocal_(e, *T, ip, lam, mu, rho);
       MFEM_VERIFY(rho > 0.0,
                   "WaveOperator(MaterialField): rho (" << rho
                   << ") must be > 0 at element " << e);
@@ -117,24 +286,22 @@ void BimaterialWaveOperator<MeshType>::BuildGodunovFluxPool_(
 }
 
 // ---------------------------------------------------------------------------
-// Phase H.4 helper — populate shared_face_neighbour_material_.
+// (Cross-rank Phase 2) Populate shared_face_neighbour_material_ with each shared
+// face's TRUE peer (face-neighbour) material.
 //
-// REVIEW R-004 (stale-comment correction): Mode::Coefficient is now REACHABLE
-// (Phase 9 wired the matrix path + removed the ctor abort), so the old "only
-// Mode::Constant is reachable" contract is no longer true.  This body is still
-// a LOCAL-SIDE STUB — it stores the local element's own material as the
-// neighbour's (no MPI exchange).  That is correct ONLY when the neighbour's
-// material equals the local material at the seam:
-//   - Mode::Constant: always (every element shares the constants).
-//   - Mode::Coefficient that is seam-continuous (e.g. depth-only, TPV31): the
-//     centroid material agrees across the seam, so the stub is correct.
-//   - Mode::Coefficient with LATERAL variation across a partition seam: WRONG
-//     — the genuine peer-rank neighbour material is needed.  A real
-//     MPI_Allgatherv exchange (key shared faces, pair, store the peer's
-//     per_elem_lmr_) is unimplemented; the het ctor WARNs (below) for the
-//     Coefficient + shared-faces case so a parallel laterally-heterogeneous
-//     run does not silently use the wrong seam material.
-//   - On serial Mesh this is a no-op (no shared faces).
+// Replaces the former LOCAL-SIDE STUB (R-004), which stored the local element's
+// own material as the neighbour's — correct only for seam-continuous (depth-only)
+// materials, and the reason the central build needed the seam_continuous
+// affirmation.  We now read the genuine peer material through the uniform
+// accessor MaterialAtNbr_ at the PEER element's reference centroid:
+//   - Mode::Constant: the constant (byte-exact with the stub).
+//   - Mode::Coefficient: coeff->Eval at ftr->Elem2's centroid — globally
+//     evaluable, NO material MPI.  Byte-exact with the stub wherever the material
+//     is seam-continuous (peer centroid material == local centroid material);
+//     CORRECT (was wrong) wherever it varies laterally across the seam.
+//   - Mode::GridFunction: the source GFs' face-neighbour ghost layer (exchanged
+//     once at construction), via ParGridFunction::GetValue(Elem2No, centroid).
+// On serial Mesh this is a no-op (no shared faces).
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void BimaterialWaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
@@ -159,30 +326,35 @@ void BimaterialWaveOperator<MeshType>::ExchangeBiMaterialNeighbours_()
                      "ExchangeBiMaterialNeighbours_: shared face " << sf
                      << " has Elem1No=" << local_elem
                      << " outside [0, " << ne_ << ").");
-         shared_face_neighbour_material_[sf] = per_elem_lmr_[local_elem];
+         MFEM_ASSERT(ftr->Elem2 != nullptr,
+                     "ExchangeBiMaterialNeighbours_: shared face " << sf
+                     << " has no peer (Elem2) transform; ExchangeFaceNbrData "
+                     "(SetupMaterialFaceNbrExchange_) must run first.");
+         // TRUE peer material at the peer element's reference centroid.
+         const IntegrationPoint &cpeer =
+            Geometries.GetCenter(ftr->Elem2->GetGeometryType());
+         real_t lam, mu, rho;
+         MaterialAtNbr_(ftr, cpeer, lam, mu, rho);
+         shared_face_neighbour_material_[sf] = {lam, mu, rho};
       }
 
-      // REVIEW R-004: warn once (rank 0) if a genuinely heterogeneous
-      // (Coefficient) material is used in parallel — the local-side stub
-      // above uses the WRONG neighbour material at a partition seam where the
-      // material varies laterally (it is correct only for seam-continuous /
-      // depth-only materials like TPV31).  The real cross-rank exchange is
-      // unimplemented.
+      // (P2-002) Informational rank-0 banner (NOT a warning — this is the correct
+      // behavior).  A non-Constant material's seam neighbour is now the TRUE peer
+      // (was a local-side stub); at a depth-/lateral-varying seam this re-baselines
+      // the bulk shared Riemann vs the pre-2026-06 binary, so a parallel run may
+      // differ at seams from an old gold by an O(grad·h) correction.
       if (material_ != nullptr
-          && material_->mode == MaterialField::Mode::Coefficient
+          && material_->mode != MaterialField::Mode::Constant
           && n_shared > 0)
       {
          int rank = 0;
          MPI_Comm_rank(pmesh.GetComm(), &rank);
          if (rank == 0)
          {
-            mfem::out << "[wave_operator] WARNING: ExchangeBiMaterialNeighbours_"
-                         " is a LOCAL-SIDE stub — a parallel run with a "
-                         "laterally-varying (Coefficient) material will use the "
-                         "WRONG neighbour material at partition seams (correct "
-                         "only for depth-only / seam-continuous materials like "
-                         "TPV31).  The real cross-rank exchange is not yet "
-                         "implemented.\n";
+            mfem::out << "[wave_operator] cross-rank seam material = TRUE peer "
+                         "(MaterialAtNbr_); bulk shared Riemann re-baselined at "
+                         "material-varying seams vs the pre-2026-06 local-side "
+                         "stub.\n";
          }
       }
    }
@@ -557,15 +729,50 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
    // MPI_Reduce histogram below is collective-safe (R-006).
    const real_t contrast_tol = mixed_flux_contrast_tol_;
    const bool   guard_on     = (contrast_tol >= 0.0);
+
+   // (P2-003) The seam-continuity ABORT is gone (Phase 2).  When the guard is ALSO
+   // off (default tol<0) and the material is non-Constant, a strong impedance
+   // contrast on a central corridor face — local OR shared — builds a
+   // non-dissipative central flux silently (no abort, no reclassify).  Emit a
+   // one-time rank-0 WARNING so the absent safety net is visible until the contrast
+   // guard is enabled (mixed_flux_contrast_tol >= 0).  (Consistent with the local
+   // 2-sided central path, which has always built central across contrasts when the
+   // guard is off; the warning now covers shared faces too.)
+   if (!guard_on && material_ != nullptr
+       && material_->mode != MaterialField::Mode::Constant
+       && !central_flux_face_set_.empty())
+   {
+      int rank = 0;
+#ifdef MFEM_USE_MPI
+      if constexpr (IsParallelMesh<MeshType>::value)
+      { MPI_Comm_rank(static_cast<ParMesh &>(mesh_).GetComm(), &rank); }
+#endif
+      if (rank == 0)
+      {
+         mfem::out << "[wave_operator] WARNING: mixed (central) flux on a "
+                      "non-Constant material with the contrast guard DISABLED "
+                      "(mixed_flux_contrast_tol < 0): a strong impedance contrast "
+                      "on a corridor face builds a NON-dissipative central flux.  "
+                      "Set mixed_flux_contrast_tol >= 0 to reclassify "
+                      "strong-contrast faces to upwind.\n";
+      }
+   }
+
    std::vector<int> reclassified;       // mesh faces moved central -> upwind
    // Histogram of the contrast metric over the PRE-filter LOCAL (2-sided) corridor
    // faces only: those are disjoint across ranks, so MPI_Reduce(SUM) has NO double-
-   // count (R-005).  Shared faces are excluded from the histogram (their neighbour
-   // material is the local-side seam-continuous stub; see the shared loop).
+   // count (R-005).  Shared faces are excluded from the HISTOGRAM to avoid the MPI
+   // double-count across the seam (both ranks see the same shared face); their
+   // neighbour material is now the TRUE peer (Cross-rank Phase 2), so a shared face
+   // CAN reclassify — the Phase-3 tally counts those separately (see the shared loop).
    long long hist[5] = {0, 0, 0, 0, 0};   // bins: [0,1) [1,5) [5,10) [10,20) [>=20] %
    long long n_local_hist   = 0;          // local corridor faces histogrammed
    long long n_reclass_local = 0;         // LOCAL faces reclassified (disjoint across
                                           // ranks => no MPI double-count; R-002)
+   long long n_reclass_shared = 0;        // (Phase 3) SHARED faces reclassified on
+                                          // THIS rank (a seam face is seen by both
+                                          // adjacent ranks => the MPI_SUM below
+                                          // counts it once per adjacent rank; R-005)
 
    // --- Interior (fully-local 2-sided) central faces -----------------------
    for (int mesh_face : central_flux_face_set_)
@@ -665,31 +872,14 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
             && (bc_.fault_attr > 0);
          if (sf_fault) { continue; }
 
-         // (PLAN BUG-6/BUG-10/BUG-15/BUG-16) Lateral-heterogeneity guard.  The
-         // cross-rank neighbour material is a LOCAL-side stub
-         // (ExchangeBiMaterialNeighbours_ stores local-as-neighbour, R-004);
-         // for a non-Constant material on a partition seam the stub's A_nbr may
-         // be wrong, and there is no communication-free way to detect lateral
-         // variation (the field has no arbitrary-point evaluator the operator
-         // can reach; an along-normal probe conflates depth with lateral
-         // variation).  So a central shared face under a non-Constant material
-         // requires the user to AFFIRM seam-continuity via
-         // [material].seam_continuous=true.  This guard fires ONLY here, on a
-         // central-set SHARED face, so mixed_flux=none (empty set) is unaffected.
-         MFEM_VERIFY(material_->mode == MaterialField::Mode::Constant
-                     || seam_continuous_,
-                     "BimaterialWaveOperator::BuildPerFaceCentralFluxMatrices_: "
-                     "central (mixed) flux on a fault-adjacent SHARED face "
-                     "(shared face " << sf << " -> mesh face " << mesh_face_idx
-                     << ") with a non-Constant [material] requires "
-                     "[material].seam_continuous=true.  The cross-rank "
-                     "neighbour-material exchange is a local-side stub (R-004): "
-                     "it uses the LOCAL element's material as the neighbour's, "
-                     "which is correct only for seam-continuous (e.g. depth-only) "
-                     "materials.  Set seam_continuous=true to affirm the material "
-                     "is seam-continuous, or wait for the cross-rank "
-                     "MPI_Allgatherv exchange (deferred).");
-
+         // (Cross-rank Phase 2) The former seam-continuity AFFIRMATION guard
+         // (MFEM_VERIFY mode==Constant || seam_continuous_) is REMOVED: the
+         // cross-rank neighbour material is now the TRUE peer material
+         // (ExchangeBiMaterialNeighbours_ reads it via MaterialAtNbr_), so a
+         // central (mixed) flux on a fault-adjacent SHARED face is correct for
+         // ANY material (Constant, depth-only, lateral/CVM) without the user
+         // affirming seam-continuity.  Strong lateral contrast on such a face is
+         // handled below by the contrast guard (reclassify to upwind).
          const int local_elem = ftr->Elem1No;
          MFEM_ASSERT(local_elem >= 0 && local_elem < ne_,
                      "BuildPerFaceCentralFluxMatrices_: shared face " << sf
@@ -711,13 +901,15 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
          if (guard_on &&
              BimaterialFlux::IsStrongContrast(flux_local, flux_nbr, contrast_tol))
          {
-            // Strong contrast on a SHARED corridor face -> dispatch upwind.  NOTE:
-            // under the local-side stub (ExchangeBiMaterialNeighbours_, R-004)
-            // flux_nbr == flux_local for seam-continuous materials, so this never
-            // fires today; it activates automatically if/when the real cross-rank
-            // material exchange lands.  Shared faces are NOT histogrammed (avoids
-            // the MPI double-count, R-005).
+            // Strong contrast on a SHARED corridor face -> dispatch upwind.
+            // (Cross-rank Phase 2) flux_nbr is now the TRUE peer material
+            // (ExchangeBiMaterialNeighbours_ via MaterialAtNbr_), so for a real
+            // lateral contrast across the seam this fires correctly; it stays
+            // inert (flux_nbr == flux_local) for seam-continuous materials.
+            // Shared faces are NOT histogrammed (avoids the MPI double-count,
+            // R-005); the Phase-3 tally counts the per-rank reclassification.
             reclassified.push_back(mesh_face_idx);
+            ++n_reclass_shared;
             continue;
          }
 
@@ -755,6 +947,10 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
       central_flux_face_set_.erase(f);
    }
 
+   // (Phase 3) Publish this rank's shared reclassify count (0 if the guard is off,
+   // since n_reclass_shared is only incremented in the guarded shared branch).
+   n_reclass_shared_ = static_cast<std::size_t>(n_reclass_shared);
+
    // (Part A) Rank-0 contrast histogram + reclassification count.  ENTIRELY gated
    // on guard_on (rank-uniform), so tol<0 adds no statements and no collective
    // call (byte-exact); when on, the MPI_Reduce is called by all ranks (R-006).
@@ -763,10 +959,14 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
       long long hist_g[5];
       for (int b = 0; b < 5; ++b) { hist_g[b] = hist[b]; }
       long long n_local_g  = n_local_hist;
-      // R-002: sum LOCAL reclassified only (disjoint across ranks => no double-count;
-      // shared reclassification is inert under the seam-continuous stub).
+      // R-002: LOCAL reclassified are disjoint across ranks => MPI_SUM is exact.
+      // (Phase 3) SHARED reclassified are counted per-rank: a seam face is seen by
+      // both adjacent ranks, so MPI_SUM(n_reclass_shared) counts each such face
+      // ONCE PER ADJACENT RANK (2 for a 2-rank seam) — reported separately and
+      // labelled, NOT folded into the exact local count (R-005).
       long long n_reclass  = n_reclass_local;
       long long n_reclass_g = n_reclass;
+      long long n_reclass_shared_g = n_reclass_shared;
       int hrank = 0;
 #ifdef MFEM_USE_MPI
       if constexpr (IsParallelMesh<MeshType>::value)
@@ -776,13 +976,15 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
          MPI_Reduce(hist, hist_g, 5, MPI_LONG_LONG, MPI_SUM, 0, comm);
          MPI_Reduce(&n_local_hist, &n_local_g, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
          MPI_Reduce(&n_reclass, &n_reclass_g, 1, MPI_LONG_LONG, MPI_SUM, 0, comm);
+         MPI_Reduce(&n_reclass_shared, &n_reclass_shared_g, 1, MPI_LONG_LONG,
+                    MPI_SUM, 0, comm);
          MPI_Comm_rank(comm, &hrank);
       }
 #endif
       // R-003: the MPI_Reduce above is UNCONDITIONAL under guard_on (collective-safe,
       // rank-uniform); only the rank-0 PRINT is gated on a nonzero global total, so a
       // matrix + mixed_flux=none + tol>=0 run does not emit a noise "0/0" line.
-      if (hrank == 0 && (n_local_g > 0 || n_reclass_g > 0))
+      if (hrank == 0 && (n_local_g > 0 || n_reclass_g > 0 || n_reclass_shared_g > 0))
       {
          mfem::out << "[wave_operator] central-flux CONTRAST GUARD (tol="
                    << contrast_tol << "):\n"
@@ -790,8 +992,9 @@ void BimaterialWaveOperator<MeshType>::BuildPerFaceCentralFluxMatrices_()
                    << "  contrast bins %% [0,1) [1,5) [5,10) [10,20) [>=20] = "
                    << hist_g[0] << " " << hist_g[1] << " " << hist_g[2] << " "
                    << hist_g[3] << " " << hist_g[4] << "\n"
-                   << "  reclassified central -> upwind = " << n_reclass_g
-                   << " (local+shared; shared excluded from the histogram)\n";
+                   << "  reclassified central -> upwind: local = " << n_reclass_g
+                   << ", shared = " << n_reclass_shared_g
+                   << " (shared = per-rank sum; a 2-rank seam face counts twice)\n";
       }
    }
 
@@ -1018,20 +1221,21 @@ void BimaterialWaveOperator<MeshType>::SetMixedFluxMode(MixedFluxMode m)
 //   - an across-fault material (halfspace, TPV6): +eps -> near side, -eps -> far
 //     side => the correct per-side contrast (evaluating exactly at the face point
 //     is ambiguous for a sign(.) coefficient).
-// SHARED (cross-rank) fault faces are left at the driver-seeded single-material
-// values: the peer side's eps-offset impedance needs an MPI exchange (R-101,
-// deferred) — correct under fault-locality partitioning / serial.
+// (Cross-rank Phase 4) SHARED (cross-rank) fault faces are now handled too: the
+// LOCAL side is read with MaterialAtLocal_ and the PEER side across the seam with
+// MaterialAtNbr_, BOTH at the eps-offset fault QP (in2 = -in1 ⇒ the SAME fault QP,
+// opposite normal ⇒ exact symmetry on ANY mesh for a depth profile; correct
+// per-side contrast for a halfspace; GridFunction supported).  Replaces the former
+// "leave shared faces at the driver-seeded single-material values" stub (R-101).
 // ---------------------------------------------------------------------------
 template <typename MeshType>
 void BimaterialWaveOperator<MeshType>::AssignFaultSidePerMaterialImpedances(
    std::vector<DOFData> &dof_data) const
 {
    if (material_ == nullptr) { return; }
-   // GridFunction-mode material has no QP-evaluable per-side eps-offset (EvalAt
-   // aborts in that mode); skip and keep the driver-seeded values.  No current
-   // driver path produces a GridFunction material on the matrix path (depth-
-   // profile/halfspace/sidecar are Mode::Coefficient), so this is defensive.
-   if (material_->mode == MaterialField::Mode::GridFunction) { return; }
+   // (Cross-rank Phase 4) All three modes are handled: the per-side reads route
+   // through MaterialAtLocal_/MaterialAtNbr_, whose GridFunction branch uses
+   // GetValue (no abort).  The former GridFunction early-return is removed.
    // Protected base members (the public getters are SEAS_TEST_INTERNAL-only):
    // interior_fault_elem1_on_plus_ is computed at ctor time; fault_face_dof_offset_
    // is populated by SetFaultDOFData (both done before the driver calls this).
@@ -1115,8 +1319,11 @@ void BimaterialWaveOperator<MeshType>::AssignFaultSidePerMaterialImpedances(
             offset_ip(*ftr->Elem2, ftr->GetElement2IntPoint(), in2);
 
          real_t lam1, mu1, rho1, lam2, mu2, rho2;
-         material_->EvalAt(ftr->Elem1No, *ftr->Elem1, ip1, lam1, mu1, rho1);
-         material_->EvalAt(ftr->Elem2No, *ftr->Elem2, ip2, lam2, mu2, rho2);
+         // (Cross-rank Phase 4) Both sides are LOCAL for an interior fault face;
+         // route through MaterialAtLocal_ (byte-exact with EvalAt for
+         // Constant/Coefficient; GridFunction now supported via GetValue).
+         MaterialAtLocal_(ftr->Elem1No, *ftr->Elem1, ip1, lam1, mu1, rho1);
+         MaterialAtLocal_(ftr->Elem2No, *ftr->Elem2, ip2, lam2, mu2, rho2);
          MFEM_VERIFY(mu1 > 0.0 && rho1 > 0.0 && mu2 > 0.0 && rho2 > 0.0,
                      "AssignFaultSidePerMaterialImpedances: non-physical "
                      "material at fault face " << f << " QP " << q);
@@ -1137,4 +1344,94 @@ void BimaterialWaveOperator<MeshType>::AssignFaultSidePerMaterialImpedances(
          d.eta_s = d.Zs_plus * d.Zs_minus / (d.Zs_plus + d.Zs_minus);
       }
    }
+
+   // --- (Cross-rank Phase 4) SHARED (cross-rank) fault faces ----------------
+   // Same eps-offset rule as the interior loop; the LOCAL side (Elem1) reads via
+   // MaterialAtLocal_ and the PEER side (Elem2 = face-neighbour) via
+   // MaterialAtNbr_.  in2 = -in1 ⇒ both sides at the SAME fault QP, offset ±eps
+   // along the fault normal ⇒ EXACT symmetry for a depth profile on ANY mesh
+   // (R-001/R-302), correct per-side contrast for a halfspace, GridFunction
+   // supported.  Index spaces (R-204): shared_fault_elem1_on_plus_ is indexed by
+   // POSITION si in fault_shared_faces_; shared_fault_dof_offset_ is keyed by the
+   // RAW shared-face index sf (mirrors EvaluateBulkAtFaultQPsCanonical).
+#ifdef MFEM_USE_MPI
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+      auto &pmesh = static_cast<ParMesh &>(mesh_);
+      const std::vector<bool> &sh_e1_plus = this->shared_fault_elem1_on_plus_;
+      const std::map<int, int> &sh_dof_off = this->shared_fault_dof_offset_;
+      for (int si = 0; si < fault_shared_faces_.Size(); ++si)
+      {
+         const int sf = fault_shared_faces_[si];
+         FaceElementTransformations *ftr = pmesh.GetSharedFaceTransformations(sf);
+         if (!ftr || ftr->Elem2 == nullptr) { continue; }
+         if (si >= static_cast<int>(sh_e1_plus.size())) { continue; }
+         const bool e1_plus = sh_e1_plus[si];
+         auto off_it = sh_dof_off.find(sf);
+         if (off_it == sh_dof_off.end()) { continue; }
+         const int dof_off = off_it->second;
+
+         // Physical centroids to orient the into-element direction (Elem1 local,
+         // Elem2 the face-neighbour element transform — valid after the ctor's
+         // ExchangeFaceNbrData).
+         Vector c1(3), c2(3);
+         ftr->Elem1->Transform(
+            Geometries.GetCenter(ftr->Elem1->GetGeometryType()), c1);
+         ftr->Elem2->Transform(
+            Geometries.GetCenter(ftr->Elem2->GetGeometryType()), c2);
+
+         const IntegrationRule &ir = IntRules.Get(ftr->GetGeometryType(), qdeg);
+         MFEM_VERIFY(ir.GetNPoints() == nbf,
+                     "AssignFaultSidePerMaterialImpedances (shared): fault face sf="
+                     << sf << " has " << ir.GetNPoints() << " QPs, expected "
+                     "nbf_per_face=" << nbf << ".");
+
+         for (int q = 0; q < nbf; ++q)
+         {
+            const IntegrationPoint &ip = ir.IntPoint(q);
+            ftr->SetAllIntPoints(&ip);
+
+            Vector xf(3);
+            ftr->Face->Transform(ip, xf);
+            Vector nvec(3);
+            CalcOrtho(ftr->Face->Jacobian(), nvec);
+            const real_t nlen = nvec.Norml2();
+            if (nlen > 0.0) { nvec /= nlen; }
+
+            real_t d1 = 0.0;
+            for (int d = 0; d < 3; ++d) { d1 += (c1(d) - xf(d)) * nvec(d); }
+            const real_t s1 = (d1 >= 0.0) ? 1.0 : -1.0;
+            const real_t in1[3] = { s1 * nvec(0), s1 * nvec(1), s1 * nvec(2) };
+            const real_t in2[3] = { -in1[0], -in1[1], -in1[2] };
+
+            const IntegrationPoint ip1 =
+               offset_ip(*ftr->Elem1, ftr->GetElement1IntPoint(), in1);
+            const IntegrationPoint ip2 =
+               offset_ip(*ftr->Elem2, ftr->GetElement2IntPoint(), in2);
+
+            real_t lam1, mu1, rho1, lam2, mu2, rho2;
+            MaterialAtLocal_(ftr->Elem1No, *ftr->Elem1, ip1, lam1, mu1, rho1);
+            MaterialAtNbr_(ftr, ip2, lam2, mu2, rho2);
+            MFEM_VERIFY(mu1 > 0.0 && rho1 > 0.0 && mu2 > 0.0 && rho2 > 0.0,
+                        "AssignFaultSidePerMaterialImpedances (shared): "
+                        "non-physical material at fault sf=" << sf << " QP " << q);
+
+            const real_t Zp1 = std::sqrt((lam1 + 2.0 * mu1) * rho1);
+            const real_t Zs1 = std::sqrt(mu1 * rho1);
+            const real_t Zp2 = std::sqrt((lam2 + 2.0 * mu2) * rho2);
+            const real_t Zs2 = std::sqrt(mu2 * rho2);
+
+            const int idx = dof_off + q;
+            if (idx < 0 || idx >= static_cast<int>(dof_data.size())) { continue; }
+            DOFData &d = dof_data[idx];
+            if (e1_plus)
+            { d.Zp_plus = Zp1; d.Zs_plus = Zs1; d.Zp_minus = Zp2; d.Zs_minus = Zs2; }
+            else
+            { d.Zp_plus = Zp2; d.Zs_plus = Zs2; d.Zp_minus = Zp1; d.Zs_minus = Zs1; }
+            d.eta_p = d.Zp_plus * d.Zp_minus / (d.Zp_plus + d.Zp_minus);
+            d.eta_s = d.Zs_plus * d.Zs_minus / (d.Zs_plus + d.Zs_minus);
+         }
+      }
+   }
+#endif
 }

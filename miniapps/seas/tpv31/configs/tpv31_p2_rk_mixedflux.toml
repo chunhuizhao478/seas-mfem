@@ -1,11 +1,12 @@
 # SCEC TPV31 — spec-exact config for seas_spatial_dyn_driver.
-# (Phase 7 p2 variant of tpv31_p2.toml, PLAN_mixed_flux_hetero_riemann.md) —
-# interior_flux="matrix" + mixed_flux="adjacent" + [material].seam_continuous=true:
-# the bi-material CENTRAL-FLUX path at p2 ([mesh].order=2), run with
-# `--time-integrator rk45` (central flux is non-dissipative and requires RK).
-# Diff vs tpv31_p2.toml: ONLY mixed_flux none->adjacent and the added
-# seam_continuous=true; all physics (mesh, material profile, stress, friction,
-# nucleation, tfinal=15s, cfl=0.5, cfl_safety="dg") is identical.
+# (p2 variant of tpv31_p2.toml, PLAN_mixed_flux_hetero_riemann.md) —
+# interior_flux="matrix" + mixed_flux="adjacent": the bi-material CENTRAL-FLUX
+# path at p2 ([mesh].order=2), run with `--time-integrator rk45` (central flux
+# is non-dissipative and requires RK).  Diff vs tpv31_p2.toml: ONLY mixed_flux
+# none->adjacent.  ([material].seam_continuous=true below is RETAINED for back-
+# compat but is now a DEPRECATED no-op — the cross-rank fix reads the true peer
+# material; see the [material] note.)  All other physics (mesh, material profile,
+# stress, friction, nucleation, tfinal=15s, cfl=0.5, cfl_safety="dg") is identical.
 #
 # Reference: tpv31/benchmark_document/TPV31_32_Description_v03.pdf
 #            (January 21, 2015).
@@ -113,13 +114,15 @@ nucleation_taper_m  = 600.0
 # any sign flip.
 kind       = "depth_profile_1d"
 depth_axis = "z"
-# (Phase 7, BUG-22) Enables the bi-material central flux on Mode::Coefficient
-# SHARED faces at np>1.  TPV31 is depth-only (the profile varies with z, not
-# laterally across a partition seam), so the operator's local-side
-# neighbour-material stub is correct at the seam — the SAME approximation the
-# existing parallel TPV31 ADER bimaterial job already runs under.  There is NO
-# runtime material probe (it would false-abort at the 2400/5000/10000 m depth
-# discontinuities).  Default is false; set true here explicitly.
+# DEPRECATED no-op (branch fix-cross-rank-material-exchange).  Originally this
+# affirmed seam-continuity so the OLD bi-material central-flux build would not
+# abort on a Mode::Coefficient SHARED face at np>1 (the operator then reused the
+# LOCAL element's material as the neighbour's — a stub valid only for a depth-
+# only profile on a seam-vertical partition).  The cross-rank material exchange
+# now reads the TRUE peer element's material across every seam, so this flag has
+# NO effect; it is kept only so existing configs still parse (the startup banner
+# prints "seam_continuous=...; DEPRECATED, no effect").  Strong-contrast safety
+# is the volume contrast guard (--mixed-flux-contrast-tol), not this flag.
 seam_continuous = true
 
 # Spec p. 4 Table.  The discontinuity at depth = 2400 jumps from
