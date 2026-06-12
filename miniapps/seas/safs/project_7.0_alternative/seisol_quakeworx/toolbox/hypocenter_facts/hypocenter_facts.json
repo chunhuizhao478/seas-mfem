@@ -1,0 +1,71 @@
+{
+  "hypocenter": [
+    606971.0,
+    3707270.0,
+    -4965.62
+  ],
+  "note": "Note: Nucleation must occur near the south-east end of the fault; that is the only hard constraint on its location. You may vary the hypocenter freely within that region, but expect to adjust the friction parameters to achieve nucleation under the Section 5 constraints, since both the velocity and stress fields are heterogeneous along strike and with depth.",
+  "stress": {
+    "facet_index": 60408,
+    "facet_centroid": [
+      607030.1075790661,
+      3707288.794439493,
+      -5054.256230107339
+    ],
+    "facet_distance_m": 108.18187531447616,
+    "sigma_n_eff_MPa": 63.92925989680903,
+    "sigma_n_total_MPa": 83.92925989680903,
+    "tau_magnitude_MPa": 21.155843972047972,
+    "tau_strike_MPa": 11.047377293510927,
+    "tau_dip_MPa": -18.0423166224423,
+    "rake_deg": -58.52071001589975,
+    "mu_apparent": 0.33092583906331047
+  },
+  "material_sampling": "trilinear",
+  "material": {
+    "rho": 2541.0010040014968,
+    "mu": 22905769506.12074,
+    "lambda": 28678922606.83594
+  },
+  "material_grid": {
+    "ix": 202,
+    "iy": 63,
+    "iz": 160,
+    "mode": "trilinear",
+    "tx": 0.6473333333333333,
+    "ty": 0.5133333333333333,
+    "tz": 0.13752000000000045
+  },
+  "derived": {
+    "Vs_m_s": 3002.410185945355,
+    "Vp_m_s": 5414.369797998036,
+    "shear_modulus_GPa": 22.905769506120738,
+    "lambda_GPa": 28.67892260683594,
+    "rho_kg_m3": 2541.0010040014968,
+    "poisson_ratio": 0.27797900338376325
+  },
+  "derived_nearest": {
+    "Vs_m_s": 3031.6247254885075,
+    "Vp_m_s": 5477.118150259022,
+    "shear_modulus_GPa": 23.427024896,
+    "lambda_GPa": 29.612320768,
+    "rho_kg_m3": 2548.97900390625,
+    "poisson_ratio": 0.27915428063151154
+  },
+  "spec_sheet": {
+    "sigma_n_eff_MPa": 63.8,
+    "tau_magnitude_MPa": 21.2,
+    "mu_apparent": 0.332,
+    "Vs_m_s": 3032.0,
+    "rho_kg_m3": 2551.0,
+    "shear_modulus_GPa": 23.5,
+    "poisson_ratio": 0.275
+  },
+  "inputs": {
+    "stress_yaml": "safs_seisol_v2_0_0_RSSRW/safs_initial_stress.yaml",
+    "mesh": "safs_seisol_v2_0_0_RSSRW/safs_mesh.puml.h5",
+    "material_nc": "safs_seisol_v2_0_0_RSSRW/safs_material_cvm.nc",
+    "P_p_MPa": 20.0,
+    "strike_hint_az_deg": 314.0
+  }
+}

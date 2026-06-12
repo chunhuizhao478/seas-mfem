@@ -1,0 +1,111 @@
+&equations
+!yaml file defining spatial dependence of material properties
+!CVM (multiscale_statewise) via ASAGI; revert to 'safs_material.yaml' for the
+!verified constant-medium baseline (A/B switch — this is the only line to change)
+MaterialFileName = 'safs_material_cvm.yaml'
+!off-fault plasticity disabled (MFEM SAFS used no plasticity)
+Plasticity = 0
+numflux = 'godunov'          ! 'godunov' = upwind (MFEM pure upwind); or 'rusanov'
+numfluxnearfault = 'godunov' ! flux for cells adjacent to the fault (excluding DR faces)
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+! linear slip-weakening friction
+FL = 16                                        ! Friction law
+!yaml file defining spatial dependence of fault properties
+ModelFileName = 'safs_fault.yaml'
+
+! nucleation: Tnuc_s over-stress ramped over [s_0, s_0+t_0] (= MFEM gradual_overstress, T_nuc=1s)
+s_0 = 0.0
+t_0 = 1.0
+
+!reference vector for defining strike and dip direction
+!VALIDATE on first run (curved fault) — see README_port.md and REVIEW.md R-001
+XRef = 0.0
+YRef = -1.0
+ZRef = 0.0
+refPointMethod = 1
+
+OutputPointType = 4
+/
+
+!see: https://seissol.readthedocs.io/en/latest/fault-output.html
+!parameterize paraview file output
+&Elementwise
+printtimeinterval_sec = 5.0                    ! Time interval at which output will be written
+!            |SRs/SRd                          ! 1=slip rate, 6=slip (Sls/Sld); all else off
+!            |         |Sls/Sld                ! (2=T_s/T_d/P_n 3=u_n 4=Mud/StV 5=Ts0/Td0/Pn0 7=Vr 8=ASl 9=PSR 10=RT 11=DS 12=P_f/Tmp)
+OutputMask = 1 0 0 0 0 1 0 0 0 0 0 0           ! 12 groups, per SeisSol src/DynamicRupture/Output/DataTypes.h VariableLabels
+refinement_strategy = 2
+refinement = 1
+!vtkorder = 3
+/
+
+!parameterize ascii fault file outputs
+&Pickpoint
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+! PUML mesh — produce from the SAFS gmsh mesh with pumgen + boundary retag
+! (101->3 fault, 102->1 free surface, 103/104->5 absorbing).  See README_port.md.
+MeshFile = 'safs_mesh.puml.h5'
+meshgenerator = 'PUML'                         ! Name of meshgenerator (Gambit3D-fast, Netcdf or PUML)
+/
+
+&Discretization
+CFL = 0.5                                      ! CFL number (<=1.0)
+ClusteredLTS = 2                               ! Enable local time-stepping
+FixTimeStep = 0.1                              ! manual max time step [s] (matches MFEM dt_max)
+/
+
+&Output
+OutputFile = 'output/safs'
+Format = 10                                    ! 6 = hdf5 wavefield output; 10 = no volume output (use for the large SAFS mesh)
+                                               ! 2026-06-10: set to 10 — Format=6 + refinement=1 (9.3M refined cells, 200 ranks)
+                                               ! stalled >20 min in XDMF/HDF5 writer init on Expanse Lustre before timestepping.
+                                               ! Fault &Elementwise + free-surface + energy outputs are unaffected.
+!             |stress     |vel
+iOutputMask = 0 0 0 0 0 0 1 1 1
+!                 |strain     |eta
+iPlasticityMask = 0 0 0 0 0 0 1
+TimeInterval = 5.0                             ! wavefield output interval [s] (moot while Format=10)
+refinement = 1
+
+! Free surface output
+SurfaceOutput = 1
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 5.0
+surfacevtkorder = 2
+
+! xdmfWriterBackend = 'posix' ! (optional) backend for fault/wavefield/free-surface output.
+! HDF5 backend only supported when SeisSol is compiled with HDF5 support.
+
+EnergyOutput = 1 ! Computation of energy, written in csv file
+EnergyTerminalOutput = 1 ! Write energy to standard output
+EnergyOutputInterval = 0.5
+
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 200.0                                ! candidate D (mu_d=0.12): supershear expected; ~40 s to clear the
+                                               ! s=40-70 km corridor + ~235 km NW at >=3 km/s => ~120-150 s for full
+                                               ! propagation; 200 s gives margin. (Candidate C arrested at +42 km,
+                                               ! t~40 s, moment plateau — see safs_fault.yaml History.)
+                                               ! ABC reflections leak after ~7s regardless.
+/
+
+&Analysis
+/
+
+&Debugging
+/

@@ -1,0 +1,107 @@
+#!/bin/bash
+#SBATCH -J tpv6_p1_ader_sym
+#SBATCH -o tpv6_p1_ader_sym_%j.out
+#SBATCH -e tpv6_p1_ader_sym_%j.err
+#SBATCH -p normal
+#SBATCH -N 10
+#SBATCH -n 500
+#SBATCH -t 48:00:00
+#SBATCH -A EAR20006
+
+# SCEC TPV6 — ARM 1: BI-MATERIAL FAULT, p1 / ADER-O2 / PURE UPWIND / matrix
+#   Riemann, 200 m (first-pass), y-mirror SYMMETRIC mesh.
+#
+# Arm 1 validates that matrix + upwind + the PER-SIDE bi-material fault Riemann
+# (unified-bimaterial plan Part B) runs under ADER on a symmetric mesh.  The
+# symmetric near-fault prism strip removes the +y/-y upwind-dissipation asymmetry;
+# the per-side fault Riemann carries the (physical) bi-material coupling.
+#   * p1            : [mesh].order = 1            (config-only; asserted below).
+#   * ADER-O2       : --ader-order 2 --time-integrator ader (the config default).
+#   * pure upwind   : --mixed-flux none --fault-overint 0 (no central flux).
+#   * matrix Riemann: [numerics].interior_flux = "matrix" (MANDATORY for the
+#                     per-side bi-material fault; config-only, asserted below).
+#   Config: tpv6/configs/tpv6.toml ([material] halfspace_across_fault; nucleation
+#           is the STATIC stress patch tau_strike=81.6 MPa, like TPV205 — no
+#           [nucleation] block).  sigma_n is PHYSICALLY non-constant (bi-material)
+#           — do NOT treat its on-fault variation as a leak.
+#
+# CROSS-RANK SEAM (np>1, branch fix-cross-rank-material-exchange) ----------
+#   halfspace_across_fault jumps across the WHOLE y=0 plane (not only the fault
+#   rectangle).  At np>1 a partition seam that crosses y=0 away from the fault now
+#   reads the TRUE peer element's (other-half) material via the cross-rank
+#   exchange, replacing the old local-side stub; the bulk UPWIND seam there is
+#   RE-BASELINED to the correct 2-sided value (== serial).  Byte-exact only for
+#   partitions that do not cut across y=0.  ⇒ re-baseline the Frontera gold
+#   against a fresh np>1 run on this branch.
+# Standalone: build seas_spatial_dyn_driver first (from THIS branch — Part B
+# per-side fault + B3 halfspace material).
+set -euo pipefail
+
+FAULT_OVERINT=0
+MESH="tpv6/mesh/tpv6_200m_symmetric.msh"
+TFINAL="${TPV6_TFINAL:-12.0}"                       # 0-12 s (matches the drdg3d reference window)
+CONFIG_TOML="tpv6/configs/tpv6.toml"
+
+module load intel/19.1.1
+module load impi/19.0.9
+module load hypre/2.31.0
+module load mumps/5.3
+module load parmetis
+module load petsc/3.15
+module load fftw3/3.3.8
+# Pin hypre/2.31.0 at the FRONT (petsc/3.15 + mumps/5.3 shadow HYPRE_Initialize).
+export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${LD_LIBRARY_PATH:-}"
+
+_d="${SEAS_MFEM_ROOT:-${SLURM_SUBMIT_DIR:-$(dirname "$(readlink -f "${BASH_SOURCE[0]:-$0}")")}}"
+while [[ "${_d}" != "/" && ! -d "${_d}/miniapps/seas" ]]; do _d="$(dirname "${_d}")"; done
+cd "${_d}/miniapps/seas"
+
+if [[ ! -x ./seas_spatial_dyn_driver ]]; then
+    echo "ERROR: ./seas_spatial_dyn_driver not built.  Build it first:"
+    echo "       sbatch miniapps/seas/jobs/spatial_dyn_build.sbatch clean-rebuild"
+    exit 1
+fi
+[[ -f "${CONFIG_TOML}" ]] || { echo "ERROR: ${CONFIG_TOML} not found."; exit 1; }
+grep -Eq '^[[:space:]]*interior_flux[[:space:]]*=[[:space:]]*"matrix"' "${CONFIG_TOML}" \
+    || { echo "ERROR: ${CONFIG_TOML} is not interior_flux=\"matrix\" (TPV6 needs the per-side bi-material fault)."; exit 4; }
+grep -Eq '^[[:space:]]*order[[:space:]]*=[[:space:]]*1([[:space:]]|$)' "${CONFIG_TOML}" \
+    || { echo "ERROR: ${CONFIG_TOML} is not [mesh].order=1 (this job is p1)."; exit 4; }
+
+# .msh is gitignored — generate from the .geo (Gmsh v2.2) on a login node if absent.
+if [[ ! -f "${MESH}" ]]; then
+    echo "[tpv6] mesh ${MESH} missing — generating from ${MESH%.msh}.geo (Gmsh v2.2)..."
+    command -v gmsh >/dev/null 2>&1 || { echo "ERROR: gmsh not on PATH; pre-build: gmsh -format msh22 -3 ${MESH%.msh}.geo -o ${MESH}"; exit 2; }
+    gmsh -format msh22 -3 "${MESH%.msh}.geo" -o "${MESH}"
+fi
+
+OUT="tpv6/out_p1_aderO2_upwind_200m_symmetric_${SLURM_JOB_ID:-local}"
+echo "[tpv6] ARM 1 (matrix + upwind + per-side fault, ADER)  mesh=${MESH}  tfinal=${TFINAL}  out=${OUT}"
+echo "[tpv6] Git: $(git rev-parse --abbrev-ref HEAD) $(git rev-parse --short HEAD)"
+
+RESTART_FLAGS=""
+if [[ -n "${TPV6_RESTART:-}" ]]; then
+    RESTART_FLAGS="--restart ${TPV6_RESTART}"
+    echo "[tpv6] RESTART from ${TPV6_RESTART} (this segment writes ${OUT})."
+fi
+
+ibrun ./seas_spatial_dyn_driver \
+    --config "${CONFIG_TOML}" \
+    --mesh   "${MESH}" \
+    --ader-order 2 \
+    --time-integrator ader \
+    --mixed-flux none \
+    --fault-overint ${FAULT_OVERINT} \
+    --tfinal "${TFINAL}" \
+    --paraview \
+    --paraview-fault-vtu \
+    --paraview-fault-dt 0.05 \
+    --paraview-max-snapshots 300 \
+    --print-derived \
+    --checkpoint-every 2000 \
+    --output-dir "${OUT}" \
+    --deriv-cache --shared-ck-recursion \
+    ${RESTART_FLAGS} \
+    --verify-dispatch
+
+echo "[tpv6] done (ARM 1: matrix + upwind + per-side fault, ADER, symmetric mesh)."
+echo "[tpv6] verify-dispatch banner must show 'BI-MATERIAL fault' (Zp_plus != Zp_minus)."

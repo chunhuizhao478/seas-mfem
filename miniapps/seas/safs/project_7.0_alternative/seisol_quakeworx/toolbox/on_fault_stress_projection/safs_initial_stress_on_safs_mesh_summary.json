@@ -1,0 +1,115 @@
+{
+  "input_stress_yaml": "safs_seisol_v2_0_0_RSSRW/safs_initial_stress.yaml",
+  "input_mesh": "safs_seisol_v2_0_0_RSSRW/safs_mesh.puml.h5",
+  "fault_n_cells": 60658,
+  "fault_n_degenerate_basis": 0,
+  "bulk_n_cells": 1164469,
+  "params": {
+    "P_p_MPa": 20.0,
+    "fault_strike_azimuth_hint_deg": 314.0,
+    "rake_sense": "right-lateral",
+    "harmonisation_normal_global": [
+      -0.6946583704589973,
+      -0.7193398003386512,
+      0.0
+    ],
+    "source_convention": "SeisSol easi ConstantMap, compression-NEGATIVE Pa, EFFECTIVE (P_p baked in); converted here via sigma_seas_eff = -sigma/1e6"
+  },
+  "sigma_eff_global_MPa": [
+    [
+      46.10683259082,
+      14.386796006773,
+      -0.0
+    ],
+    [
+      14.386796006773,
+      73.89316740918,
+      -0.0
+    ],
+    [
+      -0.0,
+      -0.0,
+      35.0
+    ]
+  ],
+  "sigma_total_global_MPa": [
+    [
+      66.10683259082,
+      14.386796006773,
+      0.0
+    ],
+    [
+      14.386796006773,
+      93.89316740918,
+      0.0
+    ],
+    [
+      0.0,
+      0.0,
+      55.0
+    ]
+  ],
+  "stats": {
+    "sigma_n_total_MPa": {
+      "min": 57.501009290373915,
+      "median": 86.03985982825654,
+      "max": 99.99994228303257,
+      "nan_count": 0
+    },
+    "sigma_n_eff_MPa": {
+      "min": 37.501009290373915,
+      "median": 66.03985982825654,
+      "max": 79.99994228303257,
+      "nan_count": 0
+    },
+    "tau_strike_MPa": {
+      "min": -19.666825387930032,
+      "median": 2.343016683912621,
+      "max": 17.550590700303843,
+      "nan_count": 0
+    },
+    "tau_dip_MPa": {
+      "min": -22.499990841467707,
+      "median": -17.634840102883793,
+      "max": 7.570683658569499,
+      "nan_count": 0
+    },
+    "tau_magnitude_MPa": {
+      "min": 0.050442466423192285,
+      "median": 20.239718360504412,
+      "max": 22.49999200699089,
+      "nan_count": 0
+    },
+    "rake_deg": {
+      "min": -179.89421095548735,
+      "median": -76.73811318159224,
+      "max": 179.7451445383697,
+      "nan_count": 0
+    },
+    "mu_apparent": {
+      "min": 0.0006305312851943242,
+      "median": 0.31089038526181795,
+      "max": 0.4250878408186596,
+      "nan_count": 0
+    }
+  },
+  "convention": "compression POSITIVE (SEAS internal); P_p positive; sigma_n_eff = sigma_n_total - P_p; tau_strike + = right-lateral (under Tandem fault basis s = up x n, d = s x n); frame (east, north, up) UTM Zone 11N; units MPa",
+  "hypocenter_check": {
+    "requested_xyz": [
+      606971.0,
+      3707270.0,
+      -4965.62
+    ],
+    "nearest_facet_centroid": [
+      607030.1075790661,
+      3707288.794439493,
+      -5054.256230107339
+    ],
+    "distance_m": 108.18187531447616,
+    "sigma_n_eff_MPa": 63.92925989680903,
+    "tau_magnitude_MPa": 21.155843972047972,
+    "tau_strike_MPa": 11.047377293510927,
+    "tau_dip_MPa": -18.0423166224423,
+    "mu_apparent": 0.33092583906331047
+  }
+}

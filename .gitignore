@@ -503,3 +503,7 @@ miniapps/seas/seas_mms_antiplane_parallel
 /.claude/
 # Claude Code agent worktrees (already covered by /.claude/ above; explicit)
 .claude/worktrees/
+
+# Local pre-merge / pre-phase backup files (session-local, never commit)
+*.prephase6bak
+*.local-predmerge-bak

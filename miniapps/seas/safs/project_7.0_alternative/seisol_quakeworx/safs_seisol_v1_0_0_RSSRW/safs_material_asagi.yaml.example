@@ -1,0 +1,22 @@
+# EXAMPLE — heterogeneous material (CVM velocity model) read from a file via easi !ASAGI.
+# NOT active: our MFEM config uses constant material (use_sidecar=false), so the live
+# material file is the !ConstantMap safs_material.yaml.  Use this ONLY to switch SeisSol to
+# the Southern-California CVM (the model MFEM SAFS loads when use_sidecar=true).
+#
+# Prerequisites:
+#   1. Build SeisSol with ASAGI=ON (docs/asagi.rst).
+#   2. Produce a NetCDF grid of rho/mu/lambda over the mesh bbox (UTM 11N, z=Up).
+#      - asagiconv (preprocessing/science/asagiconv) queries the 3D Velocity Model for
+#        Southern California and exports NetCDF — same CVM family as MFEM's sidecar.
+#      - or generate with preprocessing/science/generating_ASAGI_file.py (netCDF4).
+#      NetCDF must be COARDS (compound material{rho;mu;lambda} on structured x,y,z).
+#   3. Point MaterialFileName at this file (rename to safs_material.yaml) and set the .nc path.
+#
+# ASAGI reads NetCDF (not HDF5); MFEM's CVM sidecar is HDF5 → regenerate as NetCDF.
+
+!Switch
+[rho, mu, lambda]: !ASAGI
+  file: safs_velocity.nc            # COARDS NetCDF grid (asagiconv / generating_ASAGI_file.py)
+  parameters: [rho, mu, lambda]     # compound 'material' members in the file
+  var: data                         # NetCDF variable name (see ncdump -h)
+  interpolation: nearest            # or 'linear'

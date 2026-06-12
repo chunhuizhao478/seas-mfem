@@ -1,0 +1,87 @@
+=== gocad_inp_to_vtu: model_SAFv4_mesh_2km_topo.inp ===
+bulk -> model_SAFv4_mesh_2km_topo_bulk.vtu  (637.1 MB, 31,303,297 tets)
+
+extracting 12 surface(s):
+  NE120_ribbon                                                      345 tris  ( 0.01 MB)
+  NE30_ribbon                                                       827 tris  ( 0.02 MB)
+  NW150_ribbon                                                      329 tris  ( 0.01 MB)
+  NW60_ribbon                                                       274 tris  ( 0.01 MB)
+  SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus                     2,564 tris  ( 0.06 MB)
+  SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus                      3,037 tris  ( 0.07 MB)
+  SAFS-SAFZ-MULT-Banning_fault-CFM6_minus                           352 tris  ( 0.01 MB)
+  SAFS-SAFZ-MULT-Banning_fault-CFM6_plus                            449 tris  ( 0.01 MB)
+  SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus                     2,400 tris  ( 0.05 MB)
+  SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus                      2,643 tris  ( 0.06 MB)
+  bottom                                                          4,378 tris  ( 0.08 MB)
+  dem_usgs250k_9seconds                                          30,110 tris  ( 0.65 MB)
+      155.12 real       147.77 user         5.83 sys
+          8213413888  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             2827891  page reclaims
+                  81  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   3  signals received
+                 478  voluntary context switches
+               30881  involuntary context switches
+          2212346304  instructions retired
+           886906578  cycles elapsed
+            45204272  peak memory footprint
+
+=== check_mesh_quality: model_SAFv4_mesh_2km_topo.inp ===
+  !! Q1 FAIL: tet_emin=1.54 m < 100 m floor
+  !! Q2 FAIL: eta_min=0.0001 <= 0.10 floor (214359 sliver tet(s))
+
+========== model_SAFv4_mesh_2km_topo.inp ==========
+nodes      : 5,162,109
+bulk tets  : 31,303,297
+z range    : [-19329.4, 3116.2] m
+
+-- bulk tetrahedra --
+edge [m]   : min 1.54   median 1022.46   max 43613.47
+Joe-Liu eta: min 0.0001   median 0.8530   mean 0.8193
+eta hist   : <0.1:214,359  0.1-0.3:405,971  0.3-0.5:438,761  0.5-0.7:2,792,456  >0.7:27,451,750
+Q1 (emin >= 100 m) : FAIL
+Q2 (eta_min > 0.10)   : FAIL   (214,359 tet(s) <= floor)
+
+-- per *SURFACE (triangles) --
+| surface | n_tri | edge min [m] | edge med [m] | q_min | q_med | q_mean |
+|---|---:|---:|---:|---:|---:|---:|
+| NE120_ribbon | 345 | 829.10 | 4223.52 | 0.7458 | 0.9727 | 0.9523 |
+| NE30_ribbon | 827 | 937.41 | 4658.53 | 0.6979 | 0.9767 | 0.9523 |
+| NW150_ribbon | 329 | 1018.93 | 5420.08 | 0.3425 | 0.9666 | 0.9407 |
+| NW60_ribbon | 274 | 916.19 | 4500.42 | 0.3016 | 0.9785 | 0.9510 |
+| SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus | 2,564 | 17.06 | 2116.53 | 0.0272 | 0.9656 | 0.9180 |
+| SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus | 3,037 | 2.18 | 1868.91 | 0.0070 | 0.9518 | 0.7860 |
+| SAFS-SAFZ-MULT-Banning_fault-CFM6_minus | 352 | 42.26 | 1169.11 | 0.0676 | 0.9567 | 0.8738 |
+| SAFS-SAFZ-MULT-Banning_fault-CFM6_plus | 449 | 6.90 | 1095.16 | 0.0097 | 0.9292 | 0.6969 |
+| SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus | 2,400 | 10.06 | 1276.78 | 0.0210 | 0.9677 | 0.9201 |
+| SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus | 2,643 | 1.54 | 1225.85 | 0.0070 | 0.9611 | 0.8392 |
+| bottom | 4,378 | 1447.76 | 8758.26 | 0.7293 | 0.9798 | 0.9667 |
+| dem_usgs250k_9seconds | 30,110 | 10.06 | 2473.70 | 0.0164 | 0.9606 | 0.9294 |
+| ALL surfaces | 47,708 | 1.54 | 2424.75 | 0.0070 | 0.9638 | 0.9158 |
+ERROR conda.cli.main_run:execute(142): `conda run python code/check_mesh_quality.py model_SAFv4_mesh_2km_topo.inp` failed. (See above for error)
+      122.31 real       116.40 user         5.49 sys
+          7559643136  maximum resident set size
+                   0  average shared memory size
+                   0  average unshared data size
+                   0  average unshared stack size
+             1937320  page reclaims
+                  78  page faults
+                   0  swaps
+                   0  block input operations
+                   0  block output operations
+                   0  messages sent
+                   0  messages received
+                   3  signals received
+                1151  voluntary context switches
+               12699  involuntary context switches
+          2241507460  instructions retired
+           878608470  cycles elapsed
+            44565368  peak memory footprint
+quality_exit=1

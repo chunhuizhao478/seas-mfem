@@ -1,0 +1,182 @@
+[
+  {
+    "field_name": "sigma_xx_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": 66106832.59082006,
+    "observed_max": 66106832.59082006,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_yy_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": 93893167.40917996,
+    "observed_max": 93893167.40917996,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_zz_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": 55000000.0,
+    "observed_max": 55000000.0,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_xy_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": 14386796.006773023,
+    "observed_max": 14386796.006773023,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_yz_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": -0.0,
+    "observed_max": -0.0,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_xz_MPa [\u2192 Pa]",
+    "l_inf_err": 0.0,
+    "l_inf_loc": [
+      551344.9572783811,
+      3749616.774810767,
+      -2505.4502900195143
+    ],
+    "l2_err": 0.0,
+    "observed_min": -0.0,
+    "observed_max": -0.0,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_n_total_MPa_cell [Pa]",
+    "l_inf_err": 4.470348358154297e-08,
+    "l_inf_loc": [
+      378184.8147219333,
+      3832777.3570608054,
+      -74.71910030894163
+    ],
+    "l2_err": 1.1062394177548343e-08,
+    "observed_min": 57501009.29037392,
+    "observed_max": 99999942.28303257,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "tau_strike_MPa_cell [Pa]",
+    "l_inf_err": 2.8870999813079834e-08,
+    "l_inf_loc": [
+      547296.8265043037,
+      3753585.8073814153,
+      -5325.273198533018
+    ],
+    "l2_err": 6.16727794504629e-09,
+    "observed_min": -19666825.387930024,
+    "observed_max": 17550590.700303808,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "tau_dip_MPa_cell [Pa]",
+    "l_inf_err": 2.2351741790771484e-08,
+    "l_inf_loc": [
+      473053.3905948082,
+      3789232.0226746257,
+      -6974.7857834092
+    ],
+    "l2_err": 4.393106304623258e-09,
+    "observed_min": -22499990.841467705,
+    "observed_max": 7570683.65856949,
+    "passed": true,
+    "tol_abs": 1.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "sigma_n_total_MPa [Pa]",
+    "l_inf_err": 5.960464477539063e-08,
+    "l_inf_loc": [
+      417387.5335453551,
+      3813760.981802423,
+      -4380.681855125381
+    ],
+    "l2_err": 1.3211953314625325e-08,
+    "observed_min": 58004664.40619686,
+    "observed_max": 99996552.46347414,
+    "passed": true,
+    "tol_abs": 1000.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "tau_strike_MPa [Pa]",
+    "l_inf_err": 1.6763806343078613e-08,
+    "l_inf_loc": [
+      591613.5,
+      3725443.0,
+      -10180.64
+    ],
+    "l2_err": 3.51169376888572e-09,
+    "observed_min": -19480015.022514515,
+    "observed_max": 17547524.10623562,
+    "passed": true,
+    "tol_abs": 1000.0,
+    "tol_rel": 1e-06
+  },
+  {
+    "field_name": "tau_dip_MPa [Pa]",
+    "l_inf_err": 1.4901161193847656e-08,
+    "l_inf_loc": [
+      503063.4842888649,
+      3779250.794474489,
+      -8274.097798119385
+    ],
+    "l2_err": 3.2042803149917438e-09,
+    "observed_min": -22498809.823137768,
+    "observed_max": 2083318.114597414,
+    "passed": true,
+    "tol_abs": 1000.0,
+    "tol_rel": 1e-06
+  }
+]

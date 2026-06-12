@@ -1,0 +1,27 @@
+# Conda environment for ALL toolbox/ python tools.
+#
+#   conda env create -f environment.yml
+#   conda activate pythonenv
+#
+# Versions are pinned to the environment the shipped artifacts were
+# produced and verified with (macOS arm64, 2026-06-11).  Exact pins
+# matter most for generate_velocity_nc_from_raw: reproducing
+# safs_material_cvm.nc BIT-identically requires the same scipy
+# (Delaunay/Qhull triangulation) and pyproj (EPSG:4326 -> 32611
+# transform) versions; with other versions the output is still correct,
+# just not guaranteed byte-equal.  If the solver cannot satisfy a pin
+# on your platform, relax it to the major.minor (e.g. scipy=1.16).
+name: pythonenv
+channels:
+  - conda-forge
+dependencies:
+  - python=3.13.7
+  - numpy=2.3.3        # all tools
+  - h5py=3.15.1        # all tools (.h5 / .puml.h5 / netCDF4-as-HDF5 reads)
+  - scipy=1.16.2       # generate_velocity_nc_from_raw (LinearNDInterpolator)
+  - pyproj=3.7.2       # generate_velocity_nc_from_raw (EPSG:4326 -> 32611)
+  - netcdf4=1.7.2      # generate_velocity_nc_from_raw (compound-type write)
+  # Optional — only for independently verifying generated VTUs
+  # (the same reader classes ParaView uses, and a second VTU parser):
+  # - vtk=9.6.1
+  # - meshio=5.3.5

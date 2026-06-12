@@ -1,0 +1,45 @@
+# Heterogeneous material: multiscale_statewise CVM via easi !ASAGI.
+#
+# Source dataset : seas-mfem .../velocity/results/multiscale_statewise_cvm/velocity_safs.h5
+#                  (schema data_projection_v1, created 2026-05-17T21:51:41Z)
+# Converted by   : convert_cvm_to_asagi.py --sidecar .../velocity_safs.h5 --out safs_material_cvm.nc
+#                  --dz 250  (z in [-45000, 0] m @ dz = 250 m, float32, no vs-floor)
+# Grid           : 264 x 195 x 181 (111.8 MB), x/y spacing 1500 m, UTM 11N
+#                  (EPSG:32611), z = elevation (z<0 below sea level);
+#                  rho kg/m^3, mu/lambda Pa.
+# dz=250 note    : shrunk from the original dz=50 (903 levels, 558 MB) on
+#                  2026-06-10 after the ASAGI MPI-window RMA crash on Expanse
+#                  (ucx "Remote access" in MPIWinFull::transfer, 200 ranks).
+#                  dz=250 keeps every source z-level except the 4 shallowest
+#                  (-100..-400 m): verified float32-exact (max rel err 5e-8)
+#                  below 500 m depth; top 400 m linearly z-smoothed (worst
+#                  28% on mu in the weathered zone) — sub-element for the
+#                  500 m mesh.  Converter self-check FAILs solely from that
+#                  band (median rel err 9.4e-9).
+# Moduli         : mu = rho*Vs^2, lambda = rho*(Vp^2 - 2*Vs^2), computed at the
+#                  source grid nodes before z-resampling.
+#
+# interpolation: linear matches the trilinear sampling the MFEM SAFS driver
+# used for the same sidecar.  The !ConstantMap fallback is the verified
+# constant medium (safs_material.yaml); mesh containment makes it unreachable
+# in practice — it exists so a future mesh tweak degrades gracefully instead
+# of relying on ASAGI's clamp-to-boundary.  Syntax of !Any follows
+# SeisSol/tests/Initializer/TimeStepping/material.yaml and the Kaikoura
+# QuakeWorx training case (NZ_rhomulambda_large.yaml).
+#
+# Requires SeisSol built with ASAGI (the QuakeWorx SeisSol app has it — the
+# Kaikoura training case runs !ASAGI NetCDF material on the gateway).
+# Keep safs_material_cvm.nc next to this file in the case folder.
+!Switch
+[rho, mu, lambda]: !Any
+  components:
+    - !ASAGI
+      file: safs_material_cvm.nc
+      parameters: [rho, mu, lambda]
+      var: data
+      interpolation: linear
+    - !ConstantMap
+      map:
+        rho:    2670.0
+        mu:     3.2e10
+        lambda: 3.2e10
