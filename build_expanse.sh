@@ -89,6 +89,16 @@
 #   PETSC_VERSION=v3.15.5       # pinned for Frontera parity (petsc/3.15
 #                               #   + mumps 5.3.x); if it fights the
 #                               #   gcc-10 toolchain try v3.21.6
+#   PETSC_EXTRA_ARGS="..."      # appended verbatim to the PETSc
+#                               #   configure (word-split), e.g.
+#                               #   "--download-fblaslapack" to swap BLAS
+#                               # NOTE: BLAS comes from PETSc's
+#                               #   --download-openblas (LP64).  The
+#                               #   Expanse openblas MODULE is ILP64 and
+#                               #   was rejected by configure ("Cannot
+#                               #   use scalapack with 64 bit BLAS/
+#                               #   Lapack indices") — OPENBLAS_MODULES
+#                               #   is only consulted when USE_PETSC=NO.
 #   USE_HDF5=YES                # NO disables HDF5 + H5Z-ZFP integration
 #   HDF5_VERSION=1.14.6
 #   HYPRE_VERSION=v2.31.0       # hypre tag to build from source
@@ -121,6 +131,7 @@ USE_LAPACK="${USE_LAPACK:-YES}"
 USE_MUMPS="${USE_MUMPS:-YES}"
 USE_PETSC="${USE_PETSC:-YES}"
 PETSC_VERSION="${PETSC_VERSION:-v3.15.5}"
+PETSC_EXTRA_ARGS="${PETSC_EXTRA_ARGS:-}"
 PYTHON_MODULES="${PYTHON_MODULES:-python/3.8.12 python}"
 USE_HDF5="${USE_HDF5:-YES}"
 HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
@@ -252,11 +263,27 @@ prefix_from_module_show() {
 }
 
 # ---------------------------------------------------------------------------
-# LAPACK via openblas module (optional — warn-and-continue without it).
+# BLAS/LAPACK.
+#
+# VERIFIED ON THE MACHINE (first build attempt, 2026-06): Expanse's
+# openblas module under cpu/0.17.3b + gcc/10.2.0 is built ILP64
+# (64-bit integer indices) — PETSc's configure rejected it with
+#   "Cannot use scalapack with 64 bit BLAS/Lapack indices".
+# An ILP64 BLAS is also silently incompatible with MFEM's LAPACK
+# interface (32-bit ints), so it must not be linked ANYWHERE in this
+# build.  When PETSc is on (the default) we therefore skip the module
+# probe entirely and let PETSc --download-openblas build a standard
+# LP64 copy that ScaLAPACK, MUMPS, and MFEM's LAPACK all share.
+# The module probe below only runs in a USE_PETSC=NO configuration —
+# and may hand MFEM an ILP64 library; verify before trusting results.
 # ---------------------------------------------------------------------------
 USE_LAPACK_RESOLVED="NO"
 LAPACK_LIBDIR_RESOLVED=""
-if is_yes "${USE_LAPACK}"; then
+if is_yes "${USE_PETSC}"; then
+    echo "  LAPACK   : deferred to PETSc --download-openblas (LP64);"
+    echo "             Expanse's openblas module is ILP64 and rejected"
+    echo "             by ScaLAPACK/MFEM (see comment in this script)."
+elif is_yes "${USE_LAPACK}"; then
     # shellcheck disable=SC2086
     if load_first_of "openblas" ${OPENBLAS_MODULES}; then
         OPENBLAS_MODULE_RESOLVED="${LOADED_MODULE}"
@@ -446,15 +473,16 @@ build_petsc() {
             https://github.com/petsc/petsc.git "${petsc_src}"
     fi
 
-    local blas_args=()
-    if [ -n "${LAPACK_LIBDIR_RESOLVED}" ]; then
-        blas_args=( "--with-blaslapack-lib=-L${LAPACK_LIBDIR_RESOLVED} -lopenblas" )
-    else
-        blas_args=( "--download-openblas" )
-    fi
     local mumps_args=()
     if is_yes "${USE_MUMPS}"; then
         mumps_args=( "--download-mumps" "--download-scalapack" )
+    fi
+    # Free-form extra configure args for on-machine iteration, e.g.
+    #   PETSC_EXTRA_ARGS="--download-fblaslapack" (swap the BLAS)
+    local extra_args=()
+    if [ -n "${PETSC_EXTRA_ARGS}" ]; then
+        # shellcheck disable=SC2206
+        extra_args=( ${PETSC_EXTRA_ARGS} )
     fi
 
     local arch="arch-expanse-opt"
@@ -464,6 +492,14 @@ build_petsc() {
         git checkout --quiet "${PETSC_VERSION}" 2>/dev/null \
             || git checkout --quiet "tags/${PETSC_VERSION}" 2>/dev/null || true
         rm -rf "${arch}"
+        # The spack openmpi module exports F77/F90/FC/CC/CXX; PETSc's
+        # configure warns about them and we pass --with-cc/cxx/fc
+        # explicitly anyway — drop them to keep the probe deterministic.
+        unset CC CXX FC F77 F90 || true
+        # --download-openblas: standard LP64 OpenBLAS shared by
+        # ScaLAPACK/MUMPS/MFEM.  Do NOT substitute Expanse's openblas
+        # module — it is ILP64 and configure aborts with "Cannot use
+        # scalapack with 64 bit BLAS/Lapack indices".
         ./configure PETSC_ARCH="${arch}" \
             --prefix="${PETSC_PREFIX}" \
             --with-debugging=0 \
@@ -474,10 +510,11 @@ build_petsc() {
             --with-shared-libraries=0 \
             --with-fortran-bindings=0 \
             --with-x=0 \
-            "${blas_args[@]}" \
+            --download-openblas \
             --download-metis \
             --download-parmetis \
-            "${mumps_args[@]}"
+            "${mumps_args[@]}" \
+            "${extra_args[@]}"
         make PETSC_DIR="${petsc_src}" PETSC_ARCH="${arch}" all -j"${JOBS}"
         make PETSC_DIR="${petsc_src}" PETSC_ARCH="${arch}" install
     )
@@ -830,9 +867,9 @@ fi
 build_hypre
 build_petsc
 
-# If PETSc downloaded OpenBLAS (no openblas module resolved), reuse that
-# copy for MFEM's LAPACK and the MUMPS link line.  Runs here (not inside
-# build_petsc) so QUICK cache-hit re-runs resolve it too.
+# Reuse PETSc's --download-openblas copy (LP64) for MFEM's LAPACK and
+# the MUMPS link line.  Runs here (not inside build_petsc) so QUICK
+# cache-hit re-runs resolve it too.
 if [ "${USE_PETSC_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ] && \
    { [ -f "${PETSC_PREFIX}/lib/libopenblas.a" ] || [ -f "${PETSC_PREFIX}/lib/libopenblas.so" ]; }; then
     LAPACK_LIBDIR_RESOLVED="${PETSC_PREFIX}/lib"
