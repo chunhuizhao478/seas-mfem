@@ -507,3 +507,8 @@ miniapps/seas/seas_mms_antiplane_parallel
 # Local pre-merge / pre-phase backup files (session-local, never commit)
 *.prephase6bak
 *.local-predmerge-bak
+
+# Build-script dependency trees (build_frontera.sh / build_expanse.sh clone
+# hypre/petsc/hdf5/zfp/gmsh/caliper sources + installs here; regenerable).
+# Anchored: does NOT affect the tracked miniapps/seas/extern/toml11 submodule.
+/extern/

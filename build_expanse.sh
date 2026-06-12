@@ -22,17 +22,23 @@
 #     Static libs + explicit -L/-rpath — this also structurally avoids
 #     the Frontera "undefined symbol: HYPRE_Initialize" class of
 #     LD_LIBRARY_PATH shadowing failures.
-#   * MUMPS / PETSc: default OFF on Expanse (no compatible modules on
-#     the gcc stack).  Both are #ifdef-guarded in the seas code:
-#       - QD elasticity falls back to CG + HypreILU (see
-#         domain/antiplane_operator.hpp:503 and
-#         domain/elasticity_operator_assembly.inl:315).
-#       - seas_bp5_full builds fine; only `--petsc-ts` is unavailable.
-#     Iteration 2 (if QD BP5 production on Expanse needs MUMPS): build
-#     PETSc from source with --download-mumps --download-scalapack and
-#     wire PETSC_DIR/MUMPS the way build_frontera.sh does.
-#     USE_MUMPS=YES / USE_PETSC=YES currently ABORT with this message
-#     rather than silently producing a different build.
+#   * MUMPS / PETSc: default ON (the QD solvers need MUMPS), but
+#     Expanse has NO mumps/petsc modules on the gcc stack — so PETSc
+#     ${PETSC_VERSION} is built from source with
+#         --download-mumps --download-scalapack
+#         --download-metis --download-parmetis
+#     which delivers MUMPS + its whole dependency chain in one
+#     validated configure.  This mirrors the Frontera architecture
+#     (TACC's mumps/5.3 module lives inside the same PETSc 3.15 tree);
+#     the default v3.15.5 pins MUMPS at 5.3.x = Frontera parity.
+#     PETSc is built STATIC (--with-shared-libraries=0) so the
+#     Frontera "libHYPRE shadowing" class of LD_LIBRARY_PATH failures
+#     cannot recur.  When PETSc is on, MFEM's METIS comes from the
+#     PETSc prefix too (one metis copy, not two).
+#     NOTE: `./configure --download-*` fetches tarballs — Expanse
+#     compute nodes have outbound internet, but if a fetch fails run
+#     the script once on a login node up through the PETSc configure
+#     (or pre-stage with --with-packages-download-dir).
 #   * HDF5: built from source (1.14.6), same reason as Frontera — MFEM
 #     mesh/vtkhdf.cpp needs HDF5 >= 1.14 (H5S_BLOCK etc.) and Expanse's
 #     hdf5 modules are 1.10.x.
@@ -74,8 +80,15 @@
 #   CMAKE_MODULES="cmake/3.21.4 cmake"
 #   OPENBLAS_MODULES="openblas/0.3.18 openblas/0.3.17 openblas"
 #   USE_LAPACK=YES              # NO skips the openblas/LAPACK probe
-#   USE_MUMPS=NO                # YES currently aborts (see header)
-#   USE_PETSC=NO                # YES currently aborts (see header)
+#   USE_MUMPS=YES               # MUMPS direct solver for the QD drivers;
+#                               #   delivered by the PETSc source build
+#                               #   (requires USE_PETSC=YES)
+#   USE_PETSC=YES               # build PETSc from source (also provides
+#                               #   MUMPS/ScaLAPACK/METIS/ParMETIS and
+#                               #   enables seas_bp5_full --petsc-ts)
+#   PETSC_VERSION=v3.15.5       # pinned for Frontera parity (petsc/3.15
+#                               #   + mumps 5.3.x); if it fights the
+#                               #   gcc-10 toolchain try v3.21.6
 #   USE_HDF5=YES                # NO disables HDF5 + H5Z-ZFP integration
 #   HDF5_VERSION=1.14.6
 #   HYPRE_VERSION=v2.31.0       # hypre tag to build from source
@@ -105,8 +118,10 @@ OPENMPI_MODULES="${OPENMPI_MODULES:-openmpi/4.1.5 openmpi/4.1.3 openmpi/4.1.1 op
 CMAKE_MODULES="${CMAKE_MODULES:-cmake/3.21.4 cmake}"
 OPENBLAS_MODULES="${OPENBLAS_MODULES:-openblas/0.3.18 openblas/0.3.17 openblas}"
 USE_LAPACK="${USE_LAPACK:-YES}"
-USE_MUMPS="${USE_MUMPS:-NO}"
-USE_PETSC="${USE_PETSC:-NO}"
+USE_MUMPS="${USE_MUMPS:-YES}"
+USE_PETSC="${USE_PETSC:-YES}"
+PETSC_VERSION="${PETSC_VERSION:-v3.15.5}"
+PYTHON_MODULES="${PYTHON_MODULES:-python/3.8.12 python}"
 USE_HDF5="${USE_HDF5:-YES}"
 HDF5_VERSION="${HDF5_VERSION:-1.14.6}"
 HYPRE_VERSION="${HYPRE_VERSION:-v2.31.0}"
@@ -136,15 +151,12 @@ is_yes() {
     esac
 }
 
-# Guard against the silently-different-build trap: these need real
-# porting work (PETSc-from-source with --download-mumps), not a flag.
-if is_yes "${USE_MUMPS}" || is_yes "${USE_PETSC}"; then
-    echo "ERROR: USE_MUMPS/USE_PETSC are not wired on Expanse yet."
-    echo "  Expanse's gcc/10.2.0 stack has no compatible mumps/petsc modules."
-    echo "  Iteration 2 plan: build PETSc from source with"
-    echo "    --download-mumps --download-scalapack --download-metis"
-    echo "  and pass PETSC_DIR / MUMPS_* the way build_frontera.sh does."
-    echo "  Until then the QD solvers use the CG + HypreILU fallback paths."
+# MUMPS is delivered by the PETSc source build (--download-mumps); a
+# standalone MUMPS would need its own ScaLAPACK/orderings stack.
+if is_yes "${USE_MUMPS}" && ! is_yes "${USE_PETSC}"; then
+    echo "ERROR: USE_MUMPS=YES requires USE_PETSC=YES on Expanse."
+    echo "  MUMPS is built via the PETSc configure (--download-mumps"
+    echo "  --download-scalapack); there is no standalone MUMPS path here."
     exit 1
 fi
 
@@ -204,9 +216,25 @@ if ! load_first_of "cmake" ${CMAKE_MODULES}; then
     exit 1
 fi
 
+# python3 for the PETSc configure (Rocky 8's system /usr/bin/python3
+# also works — the module is a nice-to-have, so failure is non-fatal).
+if is_yes "${USE_PETSC}"; then
+    # shellcheck disable=SC2086
+    load_first_of "python" ${PYTHON_MODULES} || true
+    if ! command -v python3 >/dev/null 2>&1; then
+        echo "ERROR: no python3 available — PETSc configure needs it."
+        exit 1
+    fi
+fi
+
 echo "  cpu stack: ${CPU_MODULE}"
 echo "  compiler : ${GCC_MODULE} ($(gcc -dumpversion 2>/dev/null || echo '?'))"
-for tool in mpicc mpicxx cmake; do
+REQUIRED_TOOLS=(mpicc mpicxx cmake)
+if is_yes "${USE_MUMPS}"; then
+    # MUMPS is Fortran — the PETSc build needs the Fortran MPI wrapper.
+    REQUIRED_TOOLS+=(mpif90)
+fi
+for tool in "${REQUIRED_TOOLS[@]}"; do
     if ! command -v "${tool}" >/dev/null 2>&1; then
         echo "ERROR: ${tool} not on PATH after module loads."
         exit 1
@@ -256,6 +284,7 @@ cd "${SCRIPT_DIR}"
 
 HYPRE_PREFIX="${HYPRE_PREFIX:-${SCRIPT_DIR}/extern/hypre/install}"
 METIS_PREFIX="${METIS_PREFIX:-${SCRIPT_DIR}/extern/metis/install}"
+PETSC_PREFIX="${PETSC_PREFIX:-${SCRIPT_DIR}/extern/petsc/install}"
 HDF5_PREFIX="${HDF5_PREFIX:-${SCRIPT_DIR}/extern/hdf5/install}"
 ZFP_PREFIX="${ZFP_PREFIX:-${SCRIPT_DIR}/extern/zfp/install}"
 H5Z_ZFP_PREFIX="${H5Z_ZFP_PREFIX:-${SCRIPT_DIR}/extern/h5z-zfp/install}"
@@ -367,6 +396,102 @@ build_metis() {
         exit 1
     fi
     echo "  metis ${METIS_VERSION} installed at ${METIS_PREFIX}"
+}
+
+# ---------------------------------------------------------------------------
+# PETSc ${PETSC_VERSION} from source — the MUMPS delivery vehicle.
+# --download-mumps --download-scalapack --download-metis
+# --download-parmetis builds the whole direct-solver chain with the same
+# mpicc/mpicxx/mpif90 toolchain in one configure.  Static
+# (--with-shared-libraries=0): every dependent lib is linked into the
+# final binaries, so no LD_LIBRARY_PATH ordering can break them.
+# BLAS/LAPACK: the openblas module when resolved, else
+# --download-openblas (and MFEM's LAPACK then reuses that copy).
+# NO --download-hypre: MFEM links our own extern hypre 2.31.0; a second
+# hypre inside PETSc is exactly the Frontera shadowing-bug setup.
+# ---------------------------------------------------------------------------
+build_petsc() {
+    if [ "${USE_PETSC_RESOLVED}" != "YES" ]; then
+        echo ""
+        echo "=== Skipping PETSc build (USE_PETSC=${USE_PETSC}) ==="
+        return 0
+    fi
+
+    local petsc_conf="${PETSC_PREFIX}/lib/petsc/conf/petscvariables"
+    local mumps_lib="${PETSC_PREFIX}/lib/libdmumps.a"
+    if [ "${QUICK}" = "1" ] || [ "${QUICK}" = "YES" ]; then
+        local cache_ok=1
+        [ -f "${petsc_conf}" ] || cache_ok=0
+        [ -f "${PETSC_PREFIX}/include/petscversion.h" ] || cache_ok=0
+        if is_yes "${USE_MUMPS}"; then
+            [ -f "${mumps_lib}" ] || cache_ok=0
+        fi
+        if [ "${cache_ok}" = "1" ]; then
+            echo ""
+            echo "=== Reusing existing PETSc at ${PETSC_PREFIX} ==="
+            echo "    (set FORCE_REBUILD=1 to clear and rebuild)"
+            return 0
+        fi
+        echo ""
+        echo "=== Cache miss: PETSc install incomplete — building ==="
+    fi
+
+    echo ""
+    echo "=== Building PETSc ${PETSC_VERSION} from source (+MUMPS/ScaLAPACK/ParMETIS) ==="
+    mkdir -p "${SCRIPT_DIR}/extern/petsc"
+    local petsc_src="${SCRIPT_DIR}/extern/petsc/src"
+    if [ ! -d "${petsc_src}/.git" ]; then
+        rm -rf "${petsc_src}"
+        git clone --quiet --depth 1 --branch "${PETSC_VERSION}" \
+            https://github.com/petsc/petsc.git "${petsc_src}"
+    fi
+
+    local blas_args=()
+    if [ -n "${LAPACK_LIBDIR_RESOLVED}" ]; then
+        blas_args=( "--with-blaslapack-lib=-L${LAPACK_LIBDIR_RESOLVED} -lopenblas" )
+    else
+        blas_args=( "--download-openblas" )
+    fi
+    local mumps_args=()
+    if is_yes "${USE_MUMPS}"; then
+        mumps_args=( "--download-mumps" "--download-scalapack" )
+    fi
+
+    local arch="arch-expanse-opt"
+    (
+        cd "${petsc_src}"
+        git fetch --tags --quiet || true
+        git checkout --quiet "${PETSC_VERSION}" 2>/dev/null \
+            || git checkout --quiet "tags/${PETSC_VERSION}" 2>/dev/null || true
+        rm -rf "${arch}"
+        ./configure PETSC_ARCH="${arch}" \
+            --prefix="${PETSC_PREFIX}" \
+            --with-debugging=0 \
+            --with-cc=mpicc --with-cxx=mpicxx --with-fc=mpif90 \
+            COPTFLAGS="-O2 ${MARCH_FLAG}" \
+            CXXOPTFLAGS="-O2 ${MARCH_FLAG}" \
+            FOPTFLAGS="-O2 ${MARCH_FLAG}" \
+            --with-shared-libraries=0 \
+            --with-fortran-bindings=0 \
+            --with-x=0 \
+            "${blas_args[@]}" \
+            --download-metis \
+            --download-parmetis \
+            "${mumps_args[@]}"
+        make PETSC_DIR="${petsc_src}" PETSC_ARCH="${arch}" all -j"${JOBS}"
+        make PETSC_DIR="${petsc_src}" PETSC_ARCH="${arch}" install
+    )
+
+    if [ ! -f "${petsc_conf}" ] || [ ! -f "${PETSC_PREFIX}/include/petscversion.h" ]; then
+        echo "ERROR: PETSc build finished but ${petsc_conf} or petscversion.h is missing."
+        exit 1
+    fi
+    if is_yes "${USE_MUMPS}" && [ ! -f "${mumps_lib}" ]; then
+        echo "ERROR: PETSc installed but ${mumps_lib} is missing — check the"
+        echo "       --download-mumps step in ${petsc_src}/${arch}/lib/petsc/conf/configure.log"
+        exit 1
+    fi
+    echo "  PETSc ${PETSC_VERSION} installed at ${PETSC_PREFIX}"
 }
 
 # ---------------------------------------------------------------------------
@@ -691,9 +816,56 @@ if is_yes "${USE_HDF5}"; then
 else
     USE_HDF5_RESOLVED="NO"
 fi
+if is_yes "${USE_PETSC}"; then
+    USE_PETSC_RESOLVED="YES"
+else
+    USE_PETSC_RESOLVED="NO"
+fi
+if is_yes "${USE_MUMPS}"; then
+    USE_MUMPS_RESOLVED="YES"
+else
+    USE_MUMPS_RESOLVED="NO"
+fi
 
 build_hypre
-build_metis
+build_petsc
+
+# If PETSc downloaded OpenBLAS (no openblas module resolved), reuse that
+# copy for MFEM's LAPACK and the MUMPS link line.  Runs here (not inside
+# build_petsc) so QUICK cache-hit re-runs resolve it too.
+if [ "${USE_PETSC_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ] && \
+   { [ -f "${PETSC_PREFIX}/lib/libopenblas.a" ] || [ -f "${PETSC_PREFIX}/lib/libopenblas.so" ]; }; then
+    LAPACK_LIBDIR_RESOLVED="${PETSC_PREFIX}/lib"
+    USE_LAPACK_RESOLVED="YES"
+    echo "  LAPACK   : PETSc-downloaded openblas at ${LAPACK_LIBDIR_RESOLVED}"
+fi
+if [ "${USE_MUMPS_RESOLVED}" = "YES" ] && [ -z "${LAPACK_LIBDIR_RESOLVED}" ]; then
+    echo "ERROR: MUMPS is enabled but no BLAS/LAPACK resolved (no openblas"
+    echo "       module and no PETSc-downloaded openblas) — the MUMPS link"
+    echo "       line would be incomplete.  Check the PETSc build."
+    exit 1
+fi
+
+# METIS for MFEM: when PETSc is on, its --download-metis/--download-parmetis
+# install into ${PETSC_PREFIX} — use that single copy (linking a second
+# extern metis alongside MUMPS' would risk mixed-version symbols).
+if [ "${USE_PETSC_RESOLVED}" = "YES" ]; then
+    METIS_INC_RESOLVED="${PETSC_PREFIX}/include"
+    METIS_LIBDIR_RESOLVED="${PETSC_PREFIX}/lib"
+    METIS_LIB_RESOLVED="-L${METIS_LIBDIR_RESOLVED} -lparmetis -lmetis"
+    if [ ! -f "${METIS_INC_RESOLVED}/metis.h" ]; then
+        echo "ERROR: ${METIS_INC_RESOLVED}/metis.h missing — PETSc was expected"
+        echo "       to install METIS (--download-metis).  Check configure.log."
+        exit 1
+    fi
+    echo "  METIS    : from PETSc prefix (${METIS_LIBDIR_RESOLVED})"
+else
+    build_metis
+    METIS_INC_RESOLVED="${METIS_PREFIX}/include"
+    METIS_LIBDIR_RESOLVED="${METIS_PREFIX}/lib"
+    METIS_LIB_RESOLVED="-L${METIS_LIBDIR_RESOLVED} -lmetis"
+fi
+
 build_hdf5
 build_zfp_and_h5z_zfp
 build_gmsh
@@ -750,12 +922,12 @@ CONFIG_ARGS=(
   MFEM_USE_METIS=YES
   MFEM_USE_METIS_5=YES
   MFEM_USE_LAPACK="${USE_LAPACK_RESOLVED}"
-  MFEM_USE_MUMPS=NO
-  MFEM_USE_PETSC=NO
+  MFEM_USE_MUMPS="${USE_MUMPS_RESOLVED}"
+  MFEM_USE_PETSC="${USE_PETSC_RESOLVED}"
   HYPRE_OPT="-I${HYPRE_PREFIX}/include"
   HYPRE_LIB="-L${HYPRE_PREFIX}/lib -lHYPRE"
-  METIS_OPT="-I${METIS_PREFIX}/include"
-  METIS_LIB="-L${METIS_PREFIX}/lib -lmetis"
+  METIS_OPT="-I${METIS_INC_RESOLVED}"
+  METIS_LIB="${METIS_LIB_RESOLVED}"
   OPTIM_FLAGS="-O3 ${MARCH_FLAG} -std=c++17"
 )
 
@@ -763,6 +935,31 @@ if [ "${USE_LAPACK_RESOLVED}" = "YES" ]; then
     CONFIG_ARGS+=(
       LAPACK_OPT=""
       LAPACK_LIB="-L${LAPACK_LIBDIR_RESOLVED} -Wl,-rpath,${LAPACK_LIBDIR_RESOLVED} -lopenblas"
+    )
+fi
+
+if [ "${USE_PETSC_RESOLVED}" = "YES" ]; then
+    # Prefix install: MFEM reads ${PETSC_DIR}/lib/petsc/conf/petscvariables
+    # directly (no PETSC_ARCH), same as the Frontera TACC module layout.
+    CONFIG_ARGS+=(
+      PETSC_DIR="${PETSC_PREFIX}"
+      PETSC_OPT="-I${PETSC_PREFIX}/include"
+    )
+fi
+
+if [ "${USE_MUMPS_RESOLVED}" = "YES" ]; then
+    # Mirrors MFEM's own MUMPS_LIB recipe (config/defaults.mk:357-364):
+    # dmumps + mumps_common + pord + ScaLAPACK + LAPACK + MPI-Fortran.
+    # parmetis/metis are MUMPS' ordering libs (PETSc built it with them);
+    # -lmpi_mpifh is OpenMPI 4.x's Fortran MPI library and -lgfortran the
+    # GNU Fortran runtime (MUMPS is Fortran, the final link is mpicxx).
+    MUMPS_LAPACK_PART=""
+    if [ -n "${LAPACK_LIBDIR_RESOLVED}" ]; then
+        MUMPS_LAPACK_PART="-L${LAPACK_LIBDIR_RESOLVED} -Wl,-rpath,${LAPACK_LIBDIR_RESOLVED} -lopenblas"
+    fi
+    CONFIG_ARGS+=(
+      MUMPS_OPT="-I${PETSC_PREFIX}/include"
+      MUMPS_LIB="-L${PETSC_PREFIX}/lib -ldmumps -lmumps_common -lpord -lscalapack -lparmetis -lmetis ${MUMPS_LAPACK_PART} -lgfortran -lmpi_mpifh -lpthread"
     )
 fi
 
@@ -869,9 +1066,15 @@ echo "  ./seas_spatial_dyn_driver                  # SAFS dynamic-rupture driver
 echo "  ./seas_tpv102_driver"
 echo "  ./seas_tpv104_driver"
 echo "  ./seas_tpv205_driver"
-echo "  ./seas_bp5_full                            # builds WITHOUT MUMPS/PETSc:"
-echo "                                             #   QD solve = CG + HypreILU,"
-echo "                                             #   --petsc-ts unavailable"
+if [ "${USE_MUMPS_RESOLVED}" = "YES" ]; then
+    echo "  ./seas_bp5_full                            # MUMPS direct solver enabled"
+    if [ "${USE_PETSC_RESOLVED}" = "YES" ]; then
+        echo "                                             #   (--petsc-ts available)"
+    fi
+else
+    echo "  ./seas_bp5_full                            # NO MUMPS: QD solve falls"
+    echo "                                             #   back to CG + HypreILU"
+fi
 echo "  ./seas_test_parallel_elasticity            # (and ~50 other unit tests)"
 if [ "${DRIVER_BUILT}" = "1" ]; then
     echo "  $(pwd)/seas_driver          (TOML-based)"
