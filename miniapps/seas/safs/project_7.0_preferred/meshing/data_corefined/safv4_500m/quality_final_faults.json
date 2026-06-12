@@ -1,0 +1,62 @@
+{
+ "[final] fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": true,
+   "p99_le_750": true,
+   "q_min_ge_0.30": false
+  },
+  "stats": {
+   "edge_max_m": 766.5062681037374,
+   "edge_med_m": 455.79032481240705,
+   "edge_min_m": 100.0057534704089,
+   "edge_p99_m": 622.24632790829,
+   "n_edges_below_100m": 0,
+   "n_q_below_0.30": 6,
+   "n_tri": 100912,
+   "q_mean": 0.9650008728199252,
+   "q_med": 0.9808934873445441,
+   "q_min": 0.0019152879589605307
+  }
+ },
+ "[final] fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": true,
+   "p99_le_750": true,
+   "q_min_ge_0.30": true
+  },
+  "stats": {
+   "edge_max_m": 744.4846150444704,
+   "edge_med_m": 461.8278628771054,
+   "edge_min_m": 100.50716644264972,
+   "edge_p99_m": 642.2522048762708,
+   "n_edges_below_100m": 0,
+   "n_q_below_0.30": 0,
+   "n_tri": 2614,
+   "q_mean": 0.9445679175816457,
+   "q_med": 0.9781462782331309,
+   "q_min": 0.31917990497920257
+  }
+ },
+ "[final] fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": true,
+   "p99_le_750": true,
+   "q_min_ge_0.30": false
+  },
+  "stats": {
+   "edge_max_m": 744.4846150444704,
+   "edge_med_m": 467.30660670963584,
+   "edge_min_m": 101.15516907630675,
+   "edge_p99_m": 627.0770977579303,
+   "n_edges_below_100m": 0,
+   "n_q_below_0.30": 2,
+   "n_tri": 28900,
+   "q_mean": 0.9705008242083676,
+   "q_med": 0.9865574847818865,
+   "q_min": 9.266978976493112e-05
+  }
+ }
+}

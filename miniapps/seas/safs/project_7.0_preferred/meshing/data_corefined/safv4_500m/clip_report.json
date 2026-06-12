@@ -1,0 +1,59 @@
+{
+ "cap_flips": 77,
+ "clip_a_outside_shell": 11579,
+ "clip_b_junction": {
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
+   "n_components": 2,
+   "n_cut_edges": 21,
+   "n_dropped": 107
+  },
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+   "n_components": 2,
+   "n_cut_edges": 60,
+   "n_dropped": 192
+  },
+  "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6 -> fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+   "n_components": 2,
+   "n_cut_edges": 249,
+   "n_dropped": 793
+  }
+ },
+ "fault_border_classes": {
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_ext": {
+   "junction": 64,
+   "near_shell_tip": 2,
+   "on_boundary_shell": 2358,
+   "tip": 182
+  },
+  "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6_ext": {
+   "junction": 175,
+   "on_boundary_shell": 244,
+   "tip": 21
+  },
+  "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_ext": {
+   "near_shell_tip": 1,
+   "on_boundary_shell": 566,
+   "tip": 337
+  }
+ },
+ "gate_boundary_open_edges": 0,
+ "gate_boundary_overshared_edges": 0,
+ "gate_dup_groups_at_tol": 0,
+ "gate_edges_below_floor": 0,
+ "gate_fault_outside_shell_after_clip": 0,
+ "gate_min_edge_m": 100.0057534704089,
+ "n_boundary": 126892,
+ "n_degen_dropped_at_weld": 10,
+ "n_fault_in": 145446,
+ "n_fault_out": 132426,
+ "n_tris_in": 272338,
+ "n_tris_out": 259318,
+ "pass": true,
+ "ribbon_degen_dropped": 74,
+ "ribbon_snapped_vertices": 38,
+ "short_edge_contraction": {
+  "rounds": 1,
+  "vertices_merged": 92
+ },
+ "warn_near_shell_tip_edges": 3
+}

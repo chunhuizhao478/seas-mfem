@@ -57,9 +57,46 @@ struct Stats {
     std::size_t n_iterations          = 0;
     std::size_t n_collapses_done      = 0;
     std::size_t n_residual_short      = 0;
+    std::size_t n_precondition_skips  = 0;  // border-ear configs (see below)
     double      residual_min_length   = 0.0;
     double      residual_max_below    = 0.0;  // (min_edge - residual_min_length)
 };
+
+// Release-mode safety check for CGAL::Euler::collapse_edge.  Its
+// preconditions are compiled out under NDEBUG; the unchecked case that
+// SILENTLY CORRUPTS the mesh (measured 2026-06-12: SIGBUS / mega-degree
+// umbrella spins on the SAFv4 fault x bottom border polyline) is an
+// incident triangle whose third edge is ALSO a border edge (an "ear" at
+// a patch border): collapse_edge then calls remove_face on a border
+// halfedge.  Mirror the preconditions at lines 1590/1617 of
+// CGAL/boost/graph/Euler_operations.h.
+template <class Mesh, class EdgeDesc>
+inline bool collapse_preconditions_ok(const Mesh& m, EdgeDesc ed) {
+    auto pq = halfedge(ed, m);
+    auto qp = opposite(pq, m);
+    const bool edge_on_border = is_border(pq, m) || is_border(qp, m);
+    if (!is_border(pq, m) && CGAL::is_triangle(pq, m)) {
+        auto pt = opposite(prev(pq, m), m);
+        if (is_border(opposite(pt, m), m)) return false;
+    }
+    if (!is_border(qp, m) && CGAL::is_triangle(qp, m)) {
+        auto qb = opposite(prev(qp, m), m);
+        if (is_border(opposite(qb, m), m)) return false;
+    }
+    // Pinch guard: collapsing an INTERIOR edge whose endpoints BOTH lie on
+    // the border merges two border curves through the interior -> a
+    // non-manifold vertex.  Surface_mesh tolerates the pinch silently and
+    // later halfedge walks corrupt or spin (measured 2026-06-12 on the
+    // SAFv4 fault x bottom polylines: SIGBUS in a later collapse_edge /
+    // mega-degree umbrella).  Border-edge collapses remain allowed (their
+    // midpoint stays on the border curve), as do interior-edge collapses
+    // with at most one border endpoint (the May fixture relies on them).
+    if (!edge_on_border) {
+        if (CGAL::is_border(source(pq, m), m)
+            && CGAL::is_border(target(pq, m), m)) return false;
+    }
+    return true;
+}
 
 // Canonical edge key: two endpoint coords, integer-quantized to coord_tol
 // and lex-sorted so (a,b) and (b,a) map to the same key.
@@ -169,6 +206,10 @@ Stats collapse_short_polyline_edges_pairwise(
                 if (!CGAL::Euler::does_satisfy_link_condition(ed, meshes[i])) {
                     all_ok = false; break;
                 }
+                if (!collapse_preconditions_ok(meshes[i], ed)) {
+                    ++result.n_precondition_skips;
+                    all_ok = false; break;
+                }
                 if (!found_midpoint) {
                     midpoint = Point((a.x() + b.x()) / 2.0,
                                      (a.y() + b.y()) / 2.0,
@@ -181,8 +222,29 @@ Stats collapse_short_polyline_edges_pairwise(
             if (!all_ok || !found_midpoint) continue;
             if (live.size() != edges_in_meshes.size()) continue;
 
+            // Same coordinate edge appearing TWICE in one mesh (duplicated
+            // pinch wedges from a soup-orient load): collapsing the first
+            // invalidates the second descriptor mid-loop.  Skip such
+            // candidates entirely (measured 2026-06-12: stale-descriptor
+            // SIGBUS via Euler_operations.h:1567 on the SAFv4 inputs).
+            {
+                std::vector<std::size_t> mesh_ids;
+                bool dup_same_mesh = false;
+                for (const auto& [i, ed] : live) {
+                    if (std::find(mesh_ids.begin(), mesh_ids.end(), i)
+                        != mesh_ids.end()) { dup_same_mesh = true; break; }
+                    mesh_ids.push_back(i);
+                }
+                if (dup_same_mesh) { ++result.n_precondition_skips; continue; }
+            }
+
             // Collapse in all containing meshes; place at midpoint.
             for (const auto& [i, ed] : live) {
+                // Just-in-time revalidation: a collapse earlier in this
+                // loop (other mesh) cannot invalidate `ed`, but stay
+                // defensive — a removed/invalid descriptor here would
+                // corrupt the mesh silently in Release builds.
+                if (meshes[i].is_removed(ed)) { continue; }
                 auto h = meshes[i].halfedge(ed);
                 Point a = meshes[i].point(meshes[i].source(h));
                 Point b = meshes[i].point(meshes[i].target(h));
@@ -380,6 +442,8 @@ ClusterStats snap_cross_polyline_clusters_pairwise(
                                 if (!epair.second) continue;
                                 EdgeDesc e = epair.first;
                                 if (!CGAL::Euler::does_satisfy_link_condition(e, meshes[mi]))
+                                    continue;
+                                if (!collapse_preconditions_ok(meshes[mi], e))
                                     continue;
                                 VertexDesc kept =
                                     CGAL::Euler::collapse_edge(e, meshes[mi]);

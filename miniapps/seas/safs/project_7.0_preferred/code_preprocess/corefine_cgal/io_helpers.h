@@ -11,13 +11,18 @@
 // Geometry.Tolerance = 1e-3.
 
 #include <CGAL/IO/polygon_mesh_io.h>
+#include <CGAL/IO/polygon_soup_io.h>
 #include <CGAL/Polygon_mesh_processing/IO/polygon_mesh_io.h>
+#include <CGAL/Polygon_mesh_processing/orient_polygon_soup.h>
+#include <CGAL/Polygon_mesh_processing/polygon_soup_to_polygon_mesh.h>
+#include <CGAL/Polygon_mesh_processing/repair_polygon_soup.h>
 #include <CGAL/Surface_mesh.h>
 
 #include <algorithm>
 #include <cstdio>
 #include <fstream>
 #include <iomanip>
+#include <iostream>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -35,9 +40,25 @@ inline std::string ext_lower(const std::string& path) {
 }
 
 // Read OFF/STL/PLY/OBJ — auto-detected by extension.  Returns true on success.
+// Fallback: if the direct polygon-mesh load fails (e.g. non-manifold pinch
+// vertices at strip corners of extended fault patches), load as a polygon
+// soup, repair + orient (duplicating non-manifold vertices — coincident
+// duplicates are re-merged by the downstream soup dedup), then convert.
 template <class Mesh>
 bool read_polygon_mesh_any(const std::string& path, Mesh& m) {
-    return CGAL::IO::read_polygon_mesh(path, m);
+    if (CGAL::IO::read_polygon_mesh(path, m)) return true;
+    namespace PMP = CGAL::Polygon_mesh_processing;
+    m.clear();
+    std::vector<typename Mesh::Point> pts;
+    std::vector<std::vector<std::size_t>> polys;
+    if (!CGAL::IO::read_polygon_soup(path, pts, polys)) return false;
+    PMP::repair_polygon_soup(pts, polys);
+    PMP::orient_polygon_soup(pts, polys);
+    if (!PMP::is_polygon_soup_a_polygon_mesh(polys)) return false;
+    PMP::polygon_soup_to_polygon_mesh(pts, polys, m);
+    std::cerr << "  [io_helpers] " << path
+              << ": loaded via soup repair/orient fallback\n";
+    return true;
 }
 
 // Write OFF at 15 significant digits.  CGAL's default OFF writer uses

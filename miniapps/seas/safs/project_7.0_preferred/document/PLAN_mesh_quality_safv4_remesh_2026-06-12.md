@@ -48,6 +48,16 @@ Goal-1 evidence (fault sizing):
   all 1,106 sub-100 m-edge tets touch fault nodes (1,104) and DEM nodes (1,088)
   -> they sit at the fault-trace/DEM junction.
 
+Fault border topology (measured 2026-06-12, coordinate coincidence at 1 mm on meshing/vtu/*.vtu):
+  SAF (MJVS) x bottom : 53 coincident nodes (fault z_min = -19,329.4 m = the bottom plane)
+  Garnet (SBMT) x bottom : 5 coincident nodes
+  fault-fault junctions : MJVS x MULT 9, MJVS x SBMT 21, MULT x SBMT 68 coincident nodes
+  no fault touches a ribbon; ribbons planar to < 1 m max plane-fit deviation;
+  bottom exactly planar (0.000 m); boundary shell rims coincide at 1 mm
+  (DEM x ribbons 47-142 nodes, ribbons x bottom 24-69, ribbon-ribbon corners 3-4)
+  -> the shell welds watertight at tol 1e-3; faults are trimmed at the BOTTOM and at
+  EACH OTHER (sealed model), not only at the DEM. Border handling must cover all classes.
+
 Systematic, not one-off: the earlier GOCAD export SAFtopo_test1km.inp (meshing/code/run_quality.log,
 2026-06-04, 47 M tets, 4 faults) shows the identical signature (224,163 slivers, min edge 3.62 m,
 plus/minus tri-count mismatch). Fixing inside GOCAD is therefore not pursued: the split fault is
@@ -77,15 +87,16 @@ meshing/model_SAFv4_mesh_2km_topo.inp        (SKUA-GOCAD; geometry source, froze
 [P2] meshing/code/extract_safv4_surfaces.py   weld duplicate nodes (1e-3 m), emit canonical STLs:
         |                                     3 faults (minus side), dem, bottom, 4 ribbons + manifest
         v
-[P3] meshing/code/extend_fault_above_dem.py   extrude fault top border +z so fault/DEM intersection
-        |                                     is transversal
+[P3] meshing/code/extend_fault_borders.py     extrude fault borders past their contacted entities
+        |                                     (trace +z above DEM; bottom -z; junctions in-plane)
 [P3] code_preprocess/corefine_faults.py       remesh faults @ 500 m; remesh DEM (graded, rim
         |  + corefine_cgal binaries           protected); corefine fault-fault and fault-DEM;
         |                                     polyline cleanup; min-edge enforcement
         v
 [P4] code_preprocess/corefine_cgal/autorefine_merged
-        |                                     merge dem+bottom+ribbons+faults soup; resolve residual
-        |                                     intersections; clip fault above DEM; markers JSON
+        |                                     merge dem+bottom+ribbons+faults soup; safety-net
+        |                                     autorefine; clip fault overhangs (outside shell /
+        |                                     past host faults); markers JSON
         v
 [P5] code_preprocess/tetgen_mesh.py           tetgen (plc, nobisect, quality, graded bgmesh);
         |                                     output dedup; quality gates
@@ -120,7 +131,14 @@ meshing/model_SAFv4_mesh_2km_topo.inp        (SKUA-GOCAD; geometry source, froze
   call gmsh).
 - The archived pipeline is recovered from commit `577646e` ("safs: archive project_7.0_preferred
   (CGAL-corefine multi-fault pipeline)") — restore via
-  `git checkout 577646e -- miniapps/seas/safs/project_7.0_preferred/code_preprocess`.
+  ```
+  git checkout 577646e -- miniapps/seas/safs/project_7.0_preferred/code_preprocess \
+      miniapps/seas/safs/project_7.0_preferred/raw_data \
+      miniapps/seas/safs/project_7.0_preferred/data_corefined
+  ```
+  (`raw_data/` holds the CFM `.ts` inputs the flat-box regression fixture is regenerated from;
+  the commit message excludes the corefined STLs as "regenerable", so the fixture MUST be
+  regenerated — `data_corefined/` restores only the manifests.)
 - Large artifacts (`*.stl`, `*.msh`, `*.vtu`, `*.inp`) are NOT committed (consistent with the
   existing `.gitignore` handling of 500 m meshes); manifests, scripts, and logs are committed.
 
@@ -147,6 +165,13 @@ Hard gates on the final volume mesh (Phase 5):
                        mesh-wide (faults, trace, everywhere).
 - G3b (embedding):     every fault triangle is the shared face of exactly 2 tets.
 - G3c (trace):         every fault-trace node IS a DEM-surface node (same node ID).
+                       Operational definition on .msh (no trace marker exists there): compute
+                       fault border edges (exactly 1 incident fault-tagged triangle, per fault
+                       tag); classify each — shared with a top(201) triangle edge -> trace; with
+                       bottom(202)/sides(203) -> termination; shared with another fault tag ->
+                       junction; else tip. G3c passes iff every border edge is classified (no
+                       orphans) AND trace-edge endpoints appear in top-surface triangles with
+                       the SAME node IDs. Report per-class counts per fault.
 - G1f (fault sizing):  per fault patch: edge median in [425, 600] m; p99 <= 750 m; min >= 100 m.
 - G0 (coverage):       500/500 random domain-interior points inside a tet (no cavities).
 
@@ -173,8 +198,14 @@ exists again on disk and compiles, unmodified.
 
 ### Files to Create
 - None new; restored from git:
-  `git checkout 577646e -- miniapps/seas/safs/project_7.0_preferred/code_preprocess`
-  This restores (29 files; raw_data and document/ excluded from the checkout pathspec):
+  ```
+  git checkout 577646e -- miniapps/seas/safs/project_7.0_preferred/code_preprocess \
+      miniapps/seas/safs/project_7.0_preferred/raw_data \
+      miniapps/seas/safs/project_7.0_preferred/data_corefined
+  ```
+  (`raw_data/` = the CFM `.ts` regression inputs; `data_corefined/` = archived manifests only —
+  the corefined STLs were excluded from the archive and are regenerated below.)
+  The code_preprocess pathspec restores (29 files; document/ excluded):
   - `code_preprocess/corefine_cgal/{CMakeLists.txt, corefine_pair.cpp, corefine_set.cpp,
      autorefine_merged.cpp, check_self_intersect.cpp, mesh_volume.cpp, distance_sizing_field.h,
      intersection_graph.h, io_helpers.h, polyline_cleanup.h, polyline_resample.h, quality_repair.h}`
@@ -199,6 +230,10 @@ exists again on disk and compiles, unmodified.
    (`mesh_volume` may be built too but is fallback-only; do not wire it into the new pipeline.)
 3. Verify the Python entry points run: `python code_preprocess/corefine_faults.py --help`,
    `python code_preprocess/tetgen_mesh.py --help` (env `pythonenv`).
+3b. Regenerate the flat-box regression fixture:
+   `python code_preprocess/corefine_faults.py --res 2000`; record its output manifest as THE
+   regression reference for Phases 4-5, and diff it against the restored archived manifest —
+   any drift (CGAL env changes since 2026-05) is reported here, before any new code exists.
 4. Restored-tool CLI reference (verified against the archived source in `577646e`):
    - `corefine_faults.py --in-dir D --out-dir D --res N --mesh-edge-size M --min-edge M
       --polyline-spacing M --features-angle-bound DEG --cgal-bin P --workdir D
@@ -217,6 +252,9 @@ exists again on disk and compiles, unmodified.
 - [ ] All 4 C++ targets build with zero errors in `cgal-61`.
 - [ ] `corefine_faults.py --help` and `tetgen_mesh.py --help` exit 0 in `pythonenv`.
 - [ ] `python -c "import tetgen, meshio, scipy"` exits 0 in `pythonenv`.
+- [ ] `ls raw_data/*.ts` non-empty (regression inputs restored).
+- [ ] 2000 m fixture regenerated; manifest diff vs the archived manifest committed to the run
+      log (drift reported, not silently absorbed).
 
 ### Dependencies
 - Depends on: nothing.
@@ -263,7 +301,12 @@ mesh.
        # (exactly the quantities in the Diagnosis baseline table above)
 
    def fault_embedding(model: SurfaceModel, fault_name: str) -> dict
-       # builds a face->tet incidence map (sorted-triple key over all 4*M tet faces, chunked);
+       # builds the key set of FAULT triangles only (sorted node triples, ~1e4-1e5 entries),
+       # then streams tets in 2e6 chunks: form each chunk's 4 face triples (vectorized np.sort
+       # on the (4*chunk, 3) index array), pack each triple into a single int64 key, and count
+       # matches against the fault key set (np.isin); accumulate per-fault-triangle incidence.
+       # Memory O(n_fault_tri + chunk), never O(n_tet) — a global face->tet map over all
+       # 4*31.3e6 faces would exceed 12 GB and is forbidden.
        # returns {n_tri, n_interior (==2 incident tets), n_boundary (==1), n_orphan (==0)}
 
    def sliver_report(model: SurfaceModel, eta_floor: float = 0.1) -> dict
@@ -305,7 +348,9 @@ mesh.
 - [ ] Baseline JSON committed and bit-stable across two runs.
 - [ ] Tool exits nonzero on `model_SAFv4_mesh_2km_topo.inp` (it is a known-bad mesh).
 - [ ] `check_mesh_quality.py` on a `.msh` produces the same bulk metrics as on the equivalent
-      `.vtu` (cross-check on any small fixture, e.g. a Phase 5 smoke output).
+      `.vtu` (cross-check on an existing v2.2 fixture already in the repo, e.g. a tpv205/tpv102
+      `.msh` under miniapps/seas/, converted to `.vtu` via meshio — NOT a Phase 5 artifact;
+      Phase 1 must be acceptable before Phase 5 exists).
 
 ### Dependencies
 - Depends on: nothing (parallel with Phase 0).
@@ -348,9 +393,15 @@ split fault collapsed to a single triangulation per fault and the trace welded t
    count and report; expected ~0 because plus/minus duplicates never appear in the same triangle.
 5. Per-surface STL output, binary STL via meshio, points pruned to used set per file.
 6. `manifest.json` (committed): per surface — basename, n_tri, n_vertices, bbox, edge-length
-   (min/med/max), and for each fault the **trace polyline**: ordered border-edge chains whose
-   both endpoints are (post-weld) shared with the DEM node set. Also record the weld stats
-   (n_groups_merged = expected 2,939-vs-baseline check) and the minus/plus match counts.
+   (min/med/max), and for each fault a **border classification**: every border edge assigned to
+   exactly one of {dem (trace), bottom, ribbon_<name>, fault_<basename> (junction),
+   interior_tip}, by post-weld shared-node test against each candidate surface (both endpoints
+   shared -> contact). Emit ordered chains per class. For junction chains, record host/guest:
+   the fault whose border lies ON the other's interior is the guest. Also record the weld stats,
+   split by class: `n_groups_total` (informational; expected > 2,939 because boundary rims are
+   also coincident — measured: DEM x ribbons 47-142 nodes, ribbons x bottom 24-69), and
+   `n_groups_fault_subset` (groups containing >= 1 fault-surface node), which MUST equal the
+   baseline 2,939 at tol = 1e-3 m. Plus the minus/plus match counts.
 7. Determinism: byte-stable manifest across re-runs (sorted keys, fixed float formatting,
    no timestamps inside; meshio binary STL is deterministic for identical input).
 
@@ -369,6 +420,9 @@ split fault collapsed to a single triangulation per fault and the trace welded t
 ### Acceptance Criteria
 - [ ] Phase 1 tool on the welded surface set: 0 duplicate groups among all used nodes.
 - [ ] Fault STL triangle counts equal the baseline minus counts (2,564 / 352 / 2,400).
+- [ ] Border classification reproduces the measured contacts (1 mm tol): SAF-bottom 53 nodes,
+      Garnet-bottom 5, MJVS-MULT 9, MJVS-SBMT 21, MULT-SBMT 68, zero fault-ribbon contact.
+- [ ] Weld stats: `n_groups_fault_subset` == 2,939; `n_groups_total` > 2,939.
 - [ ] Every fault trace node ID is in the DEM node-ID set (G3c at surface level).
 - [ ] Boundary watertightness: every non-fault surface edge shared by exactly 2 boundary
       triangles (closed shell of dem+ribbons+bottom).
@@ -383,12 +437,24 @@ split fault collapsed to a single triangulation per fault and the trace welded t
 ## Phase 3: fault remesh at 500 m, DEM graded remesh, corefine, cleanup
 
 ### Goal
-Fault patches are uniform-500 m triangulations extended transversally above the DEM; the DEM is
-remeshed graded (fine near traces, coarse far); all fault-fault and fault-DEM intersections are
-corefined conformal with cleaned polylines; every surface edge >= 100 m.
+Fault patches are uniform-500 m triangulations extended transversally past EVERY contacted
+entity (DEM above, bottom below, host faults at junctions); the DEM is remeshed graded (fine near
+traces, coarse far); all fault-fault and fault-DEM intersections are corefined conformal with
+cleaned polylines; every surface edge >= 100 m.
 
 ### Files to Create
-- `meshing/code/extend_fault_above_dem.py`
+- `meshing/code/extend_fault_borders.py`
+- `code_preprocess/corefine_cgal/remesh_graded.cpp` — graded isotropic remeshing of one surface:
+  ```
+  remesh_graded IN.stl OUT.stl --trace-polylines manifest.json --h-near 500 --h-far 2500
+      --d-near 1000 --d-far 9000 [--protect-border] [--verbose]
+  ```
+  Implements `h(d) = h_near + (h_far - h_near) * clamp((d - d_near)/(d_far - d_near), 0, 1)` as a
+  model of PMPSizingField for the `PMP::isotropic_remeshing` sizing-field overload (CGAL >= 5.6;
+  present in 6.1), with distance d to the trace polyline vertices via a CGAL KD/AABB query.
+  Border edges constrained (`edge_is_constrained_map`, `protect_constraints = true`) and border
+  vertices fixed (`vertex_is_constrained_map`) — the rim vertex set must be byte-identical
+  pre/post. Add the target to `corefine_cgal/CMakeLists.txt`.
 - Working artifacts (gitignored): `meshing/data_corefined/safv4_<R>m/...` + updated manifest.
 
 ### Files to Modify
@@ -396,20 +462,31 @@ corefined conformal with cleaned polylines; every surface edge >= 100 m.
   `--manifest` (Phase 2 output) listing fault STLs AND the DEM as a corefine participant, instead
   of the original `--in-dir` raw-CFM `.ts` scan. The corefine/remesh core (corefine_set
   invocation, manifest pairs/polylines emission) is reused as-is.
-- `code_preprocess/corefine_cgal/corefine_set.cpp` — only if needed: per-input remesh target
-  sizes (fault: 500 m uniform; DEM: sizing field). If the archived CLI already supports per-mesh
-  edge sizes, no change; otherwise add `--mesh-edge-size-per-input a.stl=500,dem.stl=field`.
-  Investigate before coding; report which path was taken.
+- `code_preprocess/corefine_cgal/corefine_set.cpp` — only if needed: the DEM's graded remesh is
+  owned by the NEW `remesh_graded` tool (runs before corefine), so corefine_set must be able to
+  take the DEM as a corefine participant WITHOUT re-remeshing it (and faults at 500 m uniform).
+  If the archived CLI already supports per-mesh edge sizes / a no-remesh flag, no change;
+  otherwise add `--mesh-edge-size-per-input a.stl=500,dem.stl=keep`. Investigate before coding;
+  report which path was taken.
 
 ### Detailed Requirements
-1. **Extension** (`extend_fault_above_dem.py`), runs BEFORE remeshing:
-   - Input: fault STL + manifest trace chains + dem STL.
-   - For each trace chain: extrude each trace vertex by `+z h_ext` (default `--h-ext 1500`),
-     build the quad strip between consecutive trace vertices, split each quad into 2 triangles,
-     weld strip base to the fault border.
-   - Verification (hard): sample the strip top polyline at 100 m spacing; every sample must be
-     STRICTLY above the DEM surface (point-location KDTree on DEM triangles + barycentric z).
-     If violated, raise `--h-ext` automatically to `max_violation + 500` and re-emit, then report.
+1. **Extension** (`extend_fault_borders.py`), runs BEFORE remeshing. Input: fault STL + Phase 2
+   manifest border classification + dem STL. For each border chain, extrude by class (quad strip
+   between consecutive border vertices, each quad split into 2 triangles, strip base welded to
+   the fault border):
+   - `dem` (trace): extrude `+z` by `--h-ext` (default 1500 m). Verification (hard): sample the
+     strip top polyline at 100 m spacing; every sample must be STRICTLY above the DEM surface
+     (point-location KDTree on DEM triangles + barycentric z). If violated, raise `--h-ext`
+     automatically to `max_violation + 500` and re-emit, then report.
+   - `bottom`: extrude `-z` by `--h-ext-bot` (default 500 m) below `z_bottom = -19329.4 m`
+     (the bottom is exactly planar, max plane-fit deviation 0.000 m, measured).
+   - `fault junction` (guest side only, from the manifest host/guest assignment): extrude along
+     the local fault-plane outward direction (average of border-edge in-plane normals) by
+     `--h-ext-junc` (default 750 m), so the extended patch crosses the host fault transversally.
+     The HOST fault is NOT extended at the shared junction.
+   - `interior_tip`: no extension.
+   - `ribbon`: none observed in SAFv4 — assert; abort with a report if the Phase 2
+     classification produced one.
    - Output: `fault_<basename>_ext.stl`.
 2. **Remeshing + corefine** via the restored pipeline on the set
    {3 extended faults, dem} (+ ribbons/bottom NOT remeshed and NOT corefined here — they stay
@@ -417,22 +494,25 @@ corefined conformal with cleaned polylines; every surface edge >= 100 m.
    - Faults: CGAL isotropic_remeshing, `mesh_edge_size = 500`, `min_edge = 100`,
      `polyline_spacing = 250` (resampling of intersection polylines; half the target edge),
      `features_angle_bound = 60` (archived defaults otherwise).
-   - DEM: graded sizing — target `h(d) = 500 + (2500 - 500) * clamp((d - 1000) / (9000 - 1000), 0, 1)`
-     where `d` = distance to the nearest (pre-corefine, Phase 2 manifest) trace polyline vertex;
-     this is the `distance_sizing_field.h` pattern. DEM **rim border edges are protection-
-     constrained** (edge_is_constrained_map) so the welded ribbon contact is untouched.
+   - DEM: graded remesh via the NEW `remesh_graded` tool (see Files to Create) with
+     `--h-near 500 --h-far 2500 --d-near 1000 --d-far 9000`, distance measured to the
+     (pre-corefine, Phase 2 manifest) trace polyline vertices; rim border edges and vertices
+     constrained so the welded ribbon contact is untouched (rim byte-identical pre/post).
      DEM rationale: current DEM median 2.47 km next to a 500 m fault forces the trace-junction
      slivers; grading bounds the neighbor-size ratio near the trace to ~1.
    - Corefine pairs: all pairs with overlapping bboxes among {faults} x {faults} and
-     {faults} x {dem}. Fault-fault contact is expected (baseline multiplicity-4 junction).
+     {faults} x {dem}. The three junction pairs (MJVS-MULT, MJVS-SBMT, MULT-SBMT — all measured
+     in contact today) are transversal crossings AFTER the junction extension; the corefined
+     intersection polyline replaces the old trimmed junction, exactly as the trace replaces the
+     welded fault-DEM contact.
    - Polyline cleanup + cross-polyline snap + min-edge enforcement: archived
      `polyline_cleanup.h` machinery, unchanged semantics (this is what achieved
      `max_diff_m = 0` and >= 96 m edges on the 6-fault fixture).
 3. **Trace replaces the weld**: after corefine, the fault/DEM intersection polyline is the new
    trace (it will be within ~remesh-displacement of the old welded trace). The Phase 2 welded
    trace is only used for the DEM sizing field and the extension step.
-4. Order of operations (normative): extract(P2) -> extend(3.1) -> remesh+corefine+cleanup(3.2)
-   -> [Phase 4: merge/autorefine/clip].
+4. Order of operations (normative): extract(P2) -> extend(3.1) -> remesh_graded on the DEM ->
+   fault remesh + corefine + cleanup(3.2) -> [Phase 4: merge/autorefine/clip].
 5. Outputs: corefined STLs + `manifest.json` with `pairs[]` (conformality + polylines), same
    schema as the archived `data_corefined/manifest.json`.
 
@@ -460,7 +540,9 @@ corefined conformal with cleaned polylines; every surface edge >= 100 m.
       trace and >= 1500 m beyond 9 km.
 - [ ] All corefined pairs: `max_diff_m = 0` in the manifest (bit-conformal shared polylines).
 - [ ] `check_self_intersect` clean on every output STL.
-- [ ] Extension strips strictly above DEM (verification step log committed).
+- [ ] Extension strips strictly past their contacted entity (above the DEM / below the bottom
+      plane / across the host fault at junctions; verification step log committed).
+- [ ] DEM rim vertex set byte-identical pre/post remesh_graded.
 
 ### Dependencies
 - Depends on: Phases 0, 2.
@@ -468,14 +550,15 @@ corefined conformal with cleaned polylines; every surface edge >= 100 m.
 
 ---
 
-## Phase 4: merged soup, autorefine, DEM clip, closed PLC
+## Phase 4: merged soup, autorefine, overhang clip, closed PLC
 
 ### Goal
 One non-manifold conforming triangle soup (boundary shell dem+ribbons+bottom, faults embedded,
-fault parts above the DEM removed), with per-triangle provenance markers, ready for tetgen.
+fault overhangs — above the DEM, below the bottom, past host faults — removed), with
+per-triangle provenance markers, ready for tetgen.
 
 ### Files to Create
-- `meshing/code/clip_fault_at_dem.py`
+- `meshing/code/clip_fault_overhangs.py`
 
 ### Files to Modify
 - `code_preprocess/corefine_cgal/autorefine_merged.cpp` — replace the generated flat box with
@@ -492,29 +575,42 @@ fault parts above the DEM removed), with per-triangle provenance markers, ready 
 ### Detailed Requirements
 1. Soup assembly order: boundary surfaces first (markers 100+i in CLI order), then faults in
    alphabetical-basename order (markers 1..N) — matches the archived convention.
-2. `PMP::autorefine_triangle_soup` resolves residual intersections (e.g. extension strip x DEM,
-   strip x ribbon) with marker propagation — the mechanism already proven to fix
-   "1 duplicate triangle + 8 segment-facet intersections -> 0" on the fixture.
-3. **Clip** (`clip_fault_at_dem.py`): drop every fault-marked triangle whose centroid is above
-   the DEM: above-test = centroid z > z_DEM(x, y) + 1e-6, z_DEM via KDTree point-location +
-   barycentric interpolation on DEM-marked triangles. Ambiguity guard: triangles with any vertex
-   within 1e-6 of the DEM and centroid above are dropped; report counts per fault. The strip is
-   engineering scaffolding — everything above the DEM must go.
+2. `PMP::autorefine_triangle_soup` with marker propagation is a SAFETY NET: all fault x fault
+   and fault x DEM (incl. extension strips) intersections are already corefined + cleaned in
+   Phase 3. Expected residual work here: strip x ribbon clamps and exact-duplicate removal only
+   (the mechanism proven to fix "1 duplicate triangle + 8 segment-facet intersections -> 0" on
+   the fixture). Gate: autorefine's resolved-intersection count involving any FAULT marker must
+   be 0; if > 0, STOP and report which Phase 3 pair leaked (a Phase 3 bug — not something to
+   absorb here).
+3. **Clip** (`clip_fault_overhangs.py`), applied per fault patch AFTER autorefine:
+   - (a) shell containment: drop every fault-marked triangle whose centroid is OUTSIDE the
+     closed boundary shell. Test = ray parity (+z ray from centroid, count crossings against
+     boundary-marked triangles; outside if even). The DEM-heightfield shortcut
+     (centroid z > z_DEM(x, y)) is valid for the top only and misses below-bottom overhangs —
+     do NOT use it as the sole predicate.
+   - (b) junction overhang: for each junction pair from the Phase 2 classification, flood-fill
+     the extended (guest) fault's triangles from its extension strip across shared edges,
+     stopping at the corefined intersection polyline; drop the filled (overhang) component.
+   - (c) ambiguity guard at the polylines: 1e-6 margin; triangles with any vertex within 1e-6 of
+     the bounding surface and centroid on the drop side are dropped; report counts per fault and
+     per class. The strips are engineering scaffolding — every overhang must go.
 4. Post-clip weld + validation (in the same script): re-run the quantized dedup at 1e-3 m
    (autorefine may emit exact-duplicate points), then:
    - boundary closure: every boundary-marked edge incident to exactly 2 boundary triangles;
    - fault borders: every fault-marked border edge (1 incident fault tri) must lie on the DEM
-     (trace), on a ribbon, or be a tip border — classify and count each;
-   - all edges >= 100 m (after Phase 3 cleanup nothing new should violate; autorefine
-     splinters along the strip-DEM line are removed by the clip).
+     (trace), on the bottom plane, on a corefined junction polyline, on a ribbon clamp, or be a
+     tip border — classify and count each; orphans = hard failure;
+   - all edges >= 100 m (after Phase 3 cleanup and the item-2 autorefine gate, nothing new
+     should violate).
 5. Output: `meshing/data_corefined/safv4_<R>m/safv4_merged_<R>m.stl` + `_markers.json`.
 
 ### Interfaces
 - Output pair feeds `tetgen_mesh.py --merged-stl ... --markers-json ...` (existing interface).
 
 ### Edge Cases to Handle
-- Autorefine splitting a fault triangle across the trace (part above, part below): the clip
-  operates on post-autorefine triangles, so the split pieces are correctly kept/dropped.
+- Fault triangles split along the trace/junction polylines (done by Phase 3 corefine; autorefine
+  must find nothing new there per the item-2 gate): the clip operates on post-autorefine
+  triangles, so pieces are correctly kept/dropped by predicates (a)/(b).
 - A clipped fault leaving a sliver triangle just below the DEM (height < 100 m between trace and
   first interior vertex): detected by the edge >= 100 m check; if found, collapse via
   quality_repair.h pass or report (same stop-and-report rule).
@@ -523,11 +619,15 @@ fault parts above the DEM removed), with per-triangle provenance markers, ready 
   centroid-above -> drop" rule resolves it deterministically.
 
 ### Acceptance Criteria
-- [ ] `--box` regression: re-running the archived 2000 m flat-box fixture through the modified
-      binary reproduces the STATUS_tetgen_pipeline.md soup (same triangle count 8,202 +- the
-      8 documented dedup losses downstream; markers identical).
+- [ ] `--box` regression (structural — the archived corefined STLs were excluded from the
+      archive and the fixture is REGENERATED in Phase 0, so exact-count equality is not
+      verifiable): merged soup self-intersection-free; 6 fault markers present; per-marker
+      triangle counts within 2% of the regenerated fixture's corefine output.
+- [ ] Autorefine resolved-intersection count involving any fault marker == 0.
 - [ ] Boundary shell closed (0 open boundary edges).
-- [ ] 0 fault triangles above the DEM (re-scan after clip).
+- [ ] 0 fault triangles outside the closed shell (ray-parity re-scan after clip) AND 0 above
+      the DEM.
+- [ ] Every junction border edge lies on its corefined junction polyline.
 - [ ] `check_self_intersect` clean on the merged soup.
 - [ ] All edges >= 100 m.
 
@@ -553,14 +653,10 @@ uniformly ~500 m, slivers within the bar, and zero duplicated nodes.
      box marker; the fault-aware sliver filter must treat ONLY fault markers as protected).
   2. Add `.msh` v2.2 output: `write_gmsh22(out_path, points, tets, fault_tris_by_patch,
      boundary_tris_by_name, tag_map)` using `meshio.write(..., file_format="gmsh22")`
-     with `gmsh:physical`/`gmsh:geometrical` cell-data. Tag map (default, configurable via
-     `--tag-map JSON`):
-     ```
-     rock volume                  = 1
-     fault_SAF (MJVS)             = 101   (alphabetical basename order: Banning, Garnet, SAF
-     fault_Banning                = 102    -> Banning=101? NO — fix the map explicitly:)
-     ```
-     Normative default tag map (alphabetical, stable):
+     with `gmsh:physical`/`gmsh:geometrical` cell-data. Tag map: default below, configurable via
+     `--tag-map JSON`.
+     Normative default tag map (faults ordered alphabetically by FULL CFM basename:
+     `SAFS-SAFZ-MJVS-...` < `SAFS-SAFZ-MULT-...` < `SAFS-SAFZ-SBMT-...`):
      ```
      volume rock = 1
      Physical Surface 101 = SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6
@@ -586,7 +682,15 @@ uniformly ~500 m, slivers within the bar, and zero duplicated nodes.
       STATUS_tetgen_pipeline.md within noise (n_tets ~33.6 k, embedding 100%, coverage 100/100).
    b. **1-fault smoke**: Banning only (smallest, 352 tris) + dem/ribbons/bottom, target 2000 m.
    c. **3-fault coarse**: full SAFv4 at 2000 m fault target.
+      Rung (c) is also the G2 calibration point: record count(eta<=0.05) and count(eta<=0.1)
+      with the Phase-1 localization report. If count(eta<=0.05) > 0, STOP and present the report
+      with a recommendation (retune Phase-3 sizing vs accept-localized) BEFORE rung (d); G2a
+      applies to rung (d) as agreed at that decision point. G2a remains the default target.
    d. **Production**: 500 m fault target.
+   All resolution-dependent knobs are functions of the rung target R (so coarse rungs exercise
+   the same code paths they de-risk): fault mesh_edge_size = R, polyline_spacing = R/2,
+   DEM h_near = R / h_far = 5R (d-window unchanged), tetgen lc-near = R / lc-far = 10R,
+   G1f bands scaled by R/500. Record the resolved values in each rung's gate JSON.
 5. Gates on (c) and (d): run `check_mesh_quality.py` (G1, G2a/b, fault sizing table) and
    `check_fault_conformity.py` (G3a/b/c, G0 coverage via 500-point sampling — add the point-in-tet
    sample to the conformity tool if simpler than a separate script; STATUS doc already had this

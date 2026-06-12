@@ -192,13 +192,19 @@ def check_inp_mesh_quality(
     min_edge_floor_m: float = 100.0,
     min_eta_floor: float = 0.1,
     chunk: int = 2_000_000,
+    fault_tags: list[int] | None = None,
 ) -> dict:
-    """Structured bulk + per-surface quality report for a GOCAD .inp mesh.
+    """Structured bulk + per-surface quality report for a GOCAD .inp mesh,
+    a Gmsh .msh, or a .vtu (additive format support; metric definitions
+    unchanged).  For .msh/.vtu the "surfaces" are triangle sets grouped by
+    `gmsh:physical` tag (display name `tag_<N>`, or `fault_<N>` when N is
+    listed in `fault_tags`).
 
     Parameters
     ----------
     inp_path : Path
-        Path to the Abaqus .inp (C3D4 tets, *SURFACE element-side sets).
+        Path to the Abaqus .inp (C3D4 tets, *SURFACE element-side sets),
+        or a .msh/.vtu volume mesh with physical-tagged triangles.
     min_edge_floor_m : float
         Q1 floor: minimum bulk tet edge length must be >= this (default 100 m).
     min_eta_floor : float
@@ -258,12 +264,37 @@ def check_inp_mesh_quality(
     eta_hist, _ = np.histogram(eta_all, bins=QBINS)
     n_below = int((eta_all <= float(min_eta_floor)).sum())
 
-    # --- per-*SURFACE triangle metrics --------------------------------
-    offsets = _build_block_offsets(m)
+    # --- per-surface triangle metrics ----------------------------------
+    # .inp: *SURFACE element-side sets (original behavior, unchanged).
+    # .msh/.vtu: triangle blocks grouped by gmsh:physical tag (additive).
+    if p.suffix.lower() == ".inp":
+        offsets = _build_block_offsets(m)
+        named_tris = [(name, _extract_surface_triangles(m, offsets,
+                                                        all_tetra, name))
+                      for name in _surface_names(m)]
+    else:
+        ftags = set(fault_tags or [])
+        by_tag = {}
+        for blk_i, cb in enumerate(m.cells):
+            if cb.type != "triangle":
+                continue
+            blk = np.asarray(cb.data, dtype=np.int64)
+            tags = (np.asarray(m.cell_data["gmsh:physical"][blk_i])
+                    if "gmsh:physical" in m.cell_data else None)
+            if tags is None:
+                by_tag.setdefault("untagged", []).append(blk)
+                continue
+            for tag in np.unique(tags):
+                by_tag.setdefault(int(tag), []).append(blk[tags == tag])
+        named_tris = []
+        for tag in sorted(by_tag, key=str):
+            name = (f"fault_{tag}" if tag in ftags else f"tag_{tag}") \
+                if isinstance(tag, int) else str(tag)
+            named_tris.append((name, np.concatenate(by_tag[tag], axis=0)))
+
     surfaces = []
     all_surf_tris = []
-    for name in _surface_names(m):
-        tris = _extract_surface_triangles(m, offsets, all_tetra, name)
+    for name, tris in named_tris:
         if tris is None or len(tris) == 0:
             continue
         tri_e, _tri_a, tri_q = _tri_metrics(tris, pts)
@@ -379,13 +410,19 @@ def main(argv: list[str] | None = None) -> int:
                     help="Q2 floor on Joe-Liu eta (default: %(default)s)")
     ap.add_argument("--chunk", type=int, default=2_000_000,
                     help="tetra processed per metric chunk (default: %(default)s)")
+    ap.add_argument("--fault-tags", type=str, default=None,
+                    help="comma-separated gmsh physical tags labeled as "
+                         "faults in the report (.msh/.vtu inputs only)")
     args = ap.parse_args(argv)
+    fault_tags = ([int(x) for x in args.fault_tags.split(",")]
+                  if args.fault_tags else None)
 
     rc = 0
     for p in args.meshes:
         try:
             r = check_inp_mesh_quality(p, args.min_edge_floor_m,
-                                       args.min_eta_floor, args.chunk)
+                                       args.min_eta_floor, args.chunk,
+                                       fault_tags=fault_tags)
         except (FileNotFoundError, ValueError) as exc:
             print(f"ERROR: {p}: {exc}", file=sys.stderr)
             rc = 1

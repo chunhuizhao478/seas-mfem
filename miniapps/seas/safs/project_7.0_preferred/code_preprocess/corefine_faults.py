@@ -103,6 +103,23 @@ def main() -> int:
                     help="default: <here>/work/<R>m")
     ap.add_argument("--keep-intermediate", action="store_true",
                     help="keep workdir after run (else removed)")
+    ap.add_argument("--inputs", type=Path, nargs="+", default=None,
+                    help="explicit STL inputs (Phase 3 manifest mode: "
+                         "extended faults + dem + bottom); overrides the "
+                         "--in-dir *_clean_clip.stl scan")
+    ap.add_argument("--graded", action="append", default=[],
+                    help="corefine_set graded-remesh mesh (substring of "
+                         "basename), optionally NAME:h_near:h_far:d_near:"
+                         "d_far; repeatable")
+    ap.add_argument("--keep", action="append", default=[],
+                    help="corefine_set no-remesh mesh (substring); repeatable")
+    ap.add_argument("--h-near", type=float, default=None)
+    ap.add_argument("--h-far", type=float, default=None)
+    ap.add_argument("--d-near", type=float, default=None)
+    ap.add_argument("--d-far", type=float, default=None)
+    ap.add_argument("--allow-residual-short", type=int, default=None,
+                    help="passthrough to corefine_set (residual sub-floor "
+                         "polyline edges tolerated; Phase 4 gate decides)")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
 
@@ -114,13 +131,22 @@ def main() -> int:
         args.polyline_spacing = args.min_edge
 
     # Locate inputs.
-    inputs = sorted(args.in_dir.glob(f"*_{args.res}m_clean_clip.stl"))
-    if not inputs:
-        print(f"error: no inputs in {args.in_dir} for res={args.res}m",
-              file=sys.stderr)
-        return 1
-    if args.verbose:
-        print(f"found {len(inputs)} input STL(s) at {args.res}m")
+    if args.inputs:
+        inputs = [p for p in args.inputs]
+        missing = [p for p in inputs if not p.is_file()]
+        if missing:
+            print(f"error: missing input STL(s): {missing}", file=sys.stderr)
+            return 1
+        if args.verbose:
+            print(f"explicit inputs: {[p.name for p in inputs]}")
+    else:
+        inputs = sorted(args.in_dir.glob(f"*_{args.res}m_clean_clip.stl"))
+        if not inputs:
+            print(f"error: no inputs in {args.in_dir} for res={args.res}m",
+                  file=sys.stderr)
+            return 1
+        if args.verbose:
+            print(f"found {len(inputs)} input STL(s) at {args.res}m")
 
     # Verify cgal-bin.
     if not args.cgal_bin.is_file():
@@ -143,7 +169,8 @@ def main() -> int:
 
     # Convert STL -> OFF in workdir/in.
     for stl in inputs:
-        base = stl.name.replace("_clean_clip.stl", "")
+        base = (stl.stem if args.inputs
+                else stl.name.replace("_clean_clip.stl", ""))
         off = in_subdir / f"{base}.off"
         nv, nt = _stl_to_off(stl, off)
         if args.verbose:
@@ -157,6 +184,15 @@ def main() -> int:
            "--polyline-spacing", str(args.polyline_spacing),
            "--features-angle-bound", str(args.features_angle_bound),
            "--manifest", str(out_subdir / "manifest.json")]
+    for g in args.graded:
+        cmd += ["--graded", g]
+    for k in args.keep:
+        cmd += ["--keep", k]
+    for flag, val in (("--h-near", args.h_near), ("--h-far", args.h_far),
+                      ("--d-near", args.d_near), ("--d-far", args.d_far),
+                      ("--allow-residual-short", args.allow_residual_short)):
+        if val is not None:
+            cmd += [flag, str(val)]
     if args.verbose:
         cmd.append("--verbose")
         print("running:", " ".join(cmd))

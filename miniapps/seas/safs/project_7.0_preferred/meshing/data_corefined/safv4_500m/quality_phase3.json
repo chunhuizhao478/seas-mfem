@@ -1,0 +1,93 @@
+{
+ "bottom_corefined": {
+  "stats": {
+   "edge_max_m": 39831.48696610902,
+   "edge_med_m": 795.5182366269594,
+   "edge_min_m": 100.80616977427286,
+   "edge_p99_m": 9571.206596961805,
+   "n_edges_below_100m": 0,
+   "n_q_below_0.30": 4,
+   "n_tri": 23386,
+   "q_mean": 0.9391811656870995,
+   "q_med": 0.9628718914920207,
+   "q_min": 0.23255202765435884
+  }
+ },
+ "dem_graded_corefined": {
+  "stats": {
+   "edge_max_m": 43613.46825119508,
+   "edge_med_m": 2136.6566188651154,
+   "edge_min_m": 100.0057534704089,
+   "edge_p99_m": 3082.9122105883825,
+   "n_edges_below_100m": 0,
+   "n_q_below_0.30": 64,
+   "n_tri": 101731,
+   "q_mean": 0.9522609366675377,
+   "q_med": 0.9756050427276421,
+   "q_min": 0.18350030858281735
+  }
+ },
+ "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": false,
+   "p99_le_750": true,
+   "q_min_ge_0.30": false
+  },
+  "stats": {
+   "edge_max_m": 766.5062681037374,
+   "edge_med_m": 455.79134363518705,
+   "edge_min_m": 0.0,
+   "edge_p99_m": 622.3551542076881,
+   "n_edges_below_100m": 8,
+   "n_q_below_0.30": 19,
+   "n_scaffold_excluded": 7413,
+   "n_tri": 101163,
+   "q_mean": 0.9648826726287608,
+   "q_med": 0.980884847476535,
+   "q_min": 0.0
+  }
+ },
+ "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": false,
+   "p99_le_750": true,
+   "q_min_ge_0.30": false
+  },
+  "stats": {
+   "edge_max_m": 1133.6397706386035,
+   "edge_med_m": 457.3551854773947,
+   "edge_min_m": 0.0,
+   "edge_p99_m": 657.7761598798164,
+   "n_edges_below_100m": 10,
+   "n_q_below_0.30": 9,
+   "n_scaffold_excluded": 1329,
+   "n_tri": 3299,
+   "q_mean": 0.9462472806324194,
+   "q_med": 0.979600226689878,
+   "q_min": 0.0
+  }
+ },
+ "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+  "gates": {
+   "median_in_[425,600]": true,
+   "min_ge_100": false,
+   "p99_le_750": true,
+   "q_min_ge_0.30": false
+  },
+  "stats": {
+   "edge_max_m": 744.4846150444704,
+   "edge_med_m": 467.42674882142506,
+   "edge_min_m": 0.0,
+   "edge_p99_m": 627.1535491635317,
+   "n_edges_below_100m": 6,
+   "n_q_below_0.30": 9,
+   "n_scaffold_excluded": 2859,
+   "n_tri": 28873,
+   "q_mean": 0.9708500099981441,
+   "q_med": 0.9866001778514946,
+   "q_min": 0.0
+  }
+ }
+}

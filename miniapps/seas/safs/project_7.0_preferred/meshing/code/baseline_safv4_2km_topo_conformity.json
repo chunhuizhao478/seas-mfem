@@ -1,0 +1,163 @@
+{
+ "dem_name": "dem_usgs250k_9seconds",
+ "dup_groups_fault_subset": 2939,
+ "dup_groups_total": 2939,
+ "dup_max_multiplicity": 4,
+ "embedding": {
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus": {
+   "n_boundary": 2563,
+   "n_interior": 1,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 2564,
+   "n_unique_tri": 2564
+  },
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus": {
+   "n_boundary": 3036,
+   "n_interior": 1,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 3037,
+   "n_unique_tri": 3037
+  },
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_minus": {
+   "n_boundary": 352,
+   "n_interior": 0,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 352,
+   "n_unique_tri": 352
+  },
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_plus": {
+   "n_boundary": 449,
+   "n_interior": 0,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 449,
+   "n_unique_tri": 449
+  },
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus": {
+   "n_boundary": 2399,
+   "n_interior": 1,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 2400,
+   "n_unique_tri": 2400
+  },
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus": {
+   "n_boundary": 2642,
+   "n_interior": 1,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 2643,
+   "n_unique_tri": 2643
+  }
+ },
+ "fault_names": [
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus",
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus",
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_minus",
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_plus",
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus",
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus"
+ ],
+ "mesh": "../model_SAFv4_mesh_2km_topo.inp",
+ "n_fault_surface_nodes": 6490,
+ "n_nodes": 5162109,
+ "n_tets": 31303297,
+ "pairs": {
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus | SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus": {
+   "centroid_matches": 2558,
+   "coincident_coord_pairs": 1527,
+   "duplicated_pairs": 1417,
+   "extra_a": 6,
+   "extra_b": 479,
+   "n_nodes_a": 1527,
+   "n_nodes_b": 1872,
+   "n_tri_a": 2564,
+   "n_tri_b": 3037,
+   "shared_node_ids": 135
+  },
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_minus | SAFS-SAFZ-MULT-Banning_fault-CFM6_plus": {
+   "centroid_matches": 352,
+   "coincident_coord_pairs": 263,
+   "duplicated_pairs": 226,
+   "extra_a": 0,
+   "extra_b": 97,
+   "n_nodes_a": 263,
+   "n_nodes_b": 360,
+   "n_tri_a": 352,
+   "n_tri_b": 449,
+   "shared_node_ids": 51
+  },
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus | SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus": {
+   "centroid_matches": 2400,
+   "coincident_coord_pairs": 1360,
+   "duplicated_pairs": 1182,
+   "extra_a": 0,
+   "extra_b": 243,
+   "n_nodes_a": 1446,
+   "n_nodes_b": 1608,
+   "n_tri_a": 2400,
+   "n_tri_b": 2643,
+   "shared_node_ids": 206
+  }
+ },
+ "pass": false,
+ "slivers": {
+  "eta_floor": 0.1,
+  "min_edge_floor_m": 100.0,
+  "n_short_edge_tets": 1106,
+  "n_slivers": 214359,
+  "short_touch_dem_ge1": 1088,
+  "short_touch_fault_ge1": 1104,
+  "sliver_dist_to_fault_m": {
+   "p05": 11829.884991330486,
+   "p25": 44475.659866302914,
+   "p50": 78832.61197837962,
+   "p75": 114559.73992875079,
+   "p95": 157966.77039327094
+  },
+  "sliver_frac_within_1km_of_fault": 0.004441147794121077,
+  "sliver_touch_dem_ge1": 53384,
+  "sliver_touch_dem_ge3": 7437,
+  "sliver_touch_fault_ge1": 3961,
+  "sliver_touch_fault_ge3": 854,
+  "sliver_z_hist": {
+   "counts": [
+    124638,
+    6138,
+    5327,
+    5756,
+    6570,
+    26562,
+    39368
+   ],
+   "edges_m": [
+    -20000.0,
+    -15000.0,
+    -10000.0,
+    -5000.0,
+    -2500.0,
+    -1000.0,
+    0.0,
+    4000.0
+   ]
+  }
+ },
+ "surfaces": {
+  "NE120_ribbon": 345,
+  "NE30_ribbon": 827,
+  "NW150_ribbon": 329,
+  "NW60_ribbon": 274,
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_minus": 2564,
+  "SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_plus": 3037,
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_minus": 352,
+  "SAFS-SAFZ-MULT-Banning_fault-CFM6_plus": 449,
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_minus": 2400,
+  "SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_plus": 2643,
+  "bottom": 4378,
+  "dem_usgs250k_9seconds": 30110
+ },
+ "tol_m": 0.001
+}

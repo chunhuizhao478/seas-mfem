@@ -1,0 +1,46 @@
+{
+ "border_split": 750.0,
+ "faults": {
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6": {
+   "bottom_contact_kept_inplane": 684,
+   "classes": {
+    "bottom": 684,
+    "dem": 783,
+    "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": 16,
+    "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": 42,
+    "interior_tip": 184
+   },
+   "h_ext_used": 1500.0,
+   "junction_extruded_fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": 16,
+   "junction_extruded_fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": 42,
+   "n_border_split": 1221,
+   "n_strip_tris": 1682
+  },
+  "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
+   "classes": {
+    "dem": 158,
+    "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": 166,
+    "interior_tip": 24
+   },
+   "h_ext_used": 1500.0,
+   "junction_extruded_fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": 166,
+   "n_border_split": 176,
+   "n_strip_tris": 648
+  },
+  "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+   "bottom_contact_kept_inplane": 18,
+   "classes": {
+    "bottom": 18,
+    "dem": 358,
+    "interior_tip": 338
+   },
+   "h_ext_used": 1500.0,
+   "n_border_split": 396,
+   "n_strip_tris": 716
+  }
+ },
+ "h_ext": 1500.0,
+ "h_ext_bot": 500.0,
+ "h_ext_junc": 750.0,
+ "z_bottom": -19329.35156
+}

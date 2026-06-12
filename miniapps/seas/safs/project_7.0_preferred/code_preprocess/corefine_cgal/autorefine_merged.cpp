@@ -70,6 +70,8 @@ using Point   = K::Point_3;
 struct Marker_propagating_visitor {
     const std::vector<int>* in;   // input markers
     std::vector<int>*       out;  // output markers (sized in callback)
+    int n_faults = 0;             // markers 1..n_faults are faults
+    std::size_t n_fault_subtriangles = 0;   // fault-marked splits (gate)
 
     void number_of_output_triangles(std::size_t n) { out->assign(n, -1); }
     void verbatim_triangle_copy(std::size_t tgt, std::size_t src) {
@@ -77,6 +79,8 @@ struct Marker_propagating_visitor {
     }
     void new_subtriangle(std::size_t tgt, std::size_t src) {
         (*out)[tgt] = (*in)[src];
+        const int m = (*in)[src];
+        if (m >= 1 && m <= n_faults) ++n_fault_subtriangles;
     }
     void delete_triangle(std::size_t /*src*/) {}
 };
@@ -137,6 +141,15 @@ struct Args {
     std::string manifest_path;
     std::string out_stl;
     std::string out_markers_json;
+    // Boundary mode (default when any --boundary is given): the box is
+    // replaced by user-supplied boundary surfaces (markers 100+i in CLI
+    // order).  --box restores the flat-box fixture path.  --fault-prefix
+    // filters manifest entries: only basenames starting with the prefix
+    // are loaded as faults (the SAFv4 corefine manifest also lists the
+    // dem/bottom participants).
+    std::vector<std::string> boundary_paths;
+    bool box_mode = false;
+    std::string fault_prefix;
     // pad_top = 0 by default so the box top coincides with the geological
     // free surface (z=0) where every input fault outcrops.  With pad_top
     // > 0 the fault tops would sit INSIDE the bulk, breaking free-surface
@@ -156,8 +169,13 @@ struct Args {
 static int usage(const char* argv0, int code) {
     std::cerr << "usage: " << argv0
               << " MANIFEST OUTPUT_STL OUTPUT_MARKERS_JSON"
+              << " [--boundary FILE]... [--box] [--fault-prefix STR]"
               << " [--pad-xy M] [--pad-top M] [--pad-bottom M]"
-              << " [--box-edge-size M] [--box-marker N] [--verbose]\n";
+              << " [--box-edge-size M] [--box-marker N] [--verbose]\n"
+              << "  boundary mode (any --boundary given): the box is replaced"
+              << " by the listed boundary surfaces (markers 100+i, CLI"
+              << " order); faults = manifest entries whose basename starts"
+              << " with --fault-prefix (markers 1..N, alphabetical).\n";
     return code;
 }
 
@@ -179,6 +197,15 @@ static int parse(int argc, char** argv, Args& a) {
         else if (s == "--pad-bottom") need_double(i, a.pad_bottom, s);
         else if (s == "--box-edge-size") need_double(i, a.box_edge_size, s);
         else if (s == "--box-marker") need_int(i, a.box_marker, s);
+        else if (s == "--boundary") {
+            if (++i >= argc) { std::cerr << "missing value for --boundary\n"; std::exit(2); }
+            a.boundary_paths.push_back(argv[i]);
+        }
+        else if (s == "--box")        a.box_mode = true;
+        else if (s == "--fault-prefix") {
+            if (++i >= argc) { std::cerr << "missing value for --fault-prefix\n"; std::exit(2); }
+            a.fault_prefix = argv[i];
+        }
         else if (s == "--verbose")    a.verbose = true;
         else pos.push_back(s);
     }
@@ -197,6 +224,18 @@ int main(int argc, char** argv) {
     fs::path manifest_p(a.manifest_path);
     fs::path corefined_dir = manifest_p.parent_path();
     auto entries = load_manifest_entries(a.manifest_path);
+    if (a.boundary_paths.empty()) a.box_mode = true;   // backward compat
+    if (!a.fault_prefix.empty()) {
+        entries.erase(std::remove_if(entries.begin(), entries.end(),
+            [&](const ManifestEntry& e) {
+                return e.basename.rfind(a.fault_prefix, 0) != 0;
+            }), entries.end());
+        if (entries.empty()) {
+            std::cerr << "no manifest entries match --fault-prefix "
+                      << a.fault_prefix << "\n";
+            return 2;
+        }
+    }
 
     // Compute box bounds (union of fault bboxes + paddings).
     double xlo = entries[0].xlo, xhi = entries[0].xhi;
@@ -293,13 +332,47 @@ int main(int argc, char** argv) {
             }
         }
     };
-    // axis indices: 0=x, 1=y, 2=z
-    add_face(2, zmin, 0, xmin, xmax, 1, ymin, ymax, -1);  // bottom (-z)
-    add_face(2, zmax, 0, xmin, xmax, 1, ymin, ymax, +1);  // top    (+z)  ← free surface
-    add_face(1, ymin, 0, xmin, xmax, 2, zmin, zmax, -1);  // front  (-y)
-    add_face(1, ymax, 0, xmin, xmax, 2, zmin, zmax, +1);  // back   (+y)
-    add_face(0, xmin, 1, ymin, ymax, 2, zmin, zmax, -1);  // left   (-x)
-    add_face(0, xmax, 1, ymin, ymax, 2, zmin, zmax, +1);  // right  (+x)
+    std::vector<std::string> boundary_names;
+    if (a.box_mode) {
+        // axis indices: 0=x, 1=y, 2=z
+        add_face(2, zmin, 0, xmin, xmax, 1, ymin, ymax, -1);  // bottom (-z)
+        add_face(2, zmax, 0, xmin, xmax, 1, ymin, ymax, +1);  // top    (+z)  ← free surface
+        add_face(1, ymin, 0, xmin, xmax, 2, zmin, zmax, -1);  // front  (-y)
+        add_face(1, ymax, 0, xmin, xmax, 2, zmin, zmax, +1);  // back   (+y)
+        add_face(0, xmin, 1, ymin, ymax, 2, zmin, zmax, -1);  // left   (-x)
+        add_face(0, xmax, 1, ymin, ymax, 2, zmin, zmax, +1);  // right  (+x)
+    } else {
+        // Boundary mode: user-supplied shell surfaces, marker 100+i in
+        // CLI order, interned through the same 1e-6 dedup so the welded
+        // rims share vertices.
+        for (std::size_t bi = 0; bi < a.boundary_paths.size(); ++bi) {
+            const std::string& bp = a.boundary_paths[bi];
+            std::vector<Point> bpts;
+            std::vector<std::vector<std::size_t>> bpolys;
+            if (!CGAL::IO::read_polygon_soup(bp, bpts, bpolys)) {
+                std::cerr << "cannot read boundary STL: " << bp << "\n";
+                return 3;
+            }
+            const int marker = a.box_marker + static_cast<int>(bi);
+            std::size_t n_tri = 0;
+            for (const auto& poly : bpolys) {
+                if (poly.size() != 3) continue;
+                const std::size_t i0 = intern(bpts[poly[0]]);
+                const std::size_t i1 = intern(bpts[poly[1]]);
+                const std::size_t i2 = intern(bpts[poly[2]]);
+                if (i0 == i1 || i1 == i2 || i0 == i2) continue;
+                triangles.push_back({i0, i1, i2});
+                markers.push_back(marker);
+                ++n_tri;
+            }
+            boundary_names.push_back(fs::path(bp).stem().string());
+            if (a.verbose) {
+                std::cerr << "  boundary marker " << marker << ": "
+                          << fs::path(bp).filename().string()
+                          << "  F=" << n_tri << "\n";
+            }
+        }
+    }
 
     // Faults in alphabetical order.
     for (std::size_t fi = 0; fi < entries.size(); ++fi) {
@@ -309,12 +382,23 @@ int main(int argc, char** argv) {
         if (!CGAL::IO::read_STL(stl_p.string(), fpts, fpolys)) {
             std::cerr << "cannot read STL: " << stl_p << "\n"; return 3;
         }
+        std::size_t n_degen = 0;
         for (const auto& poly : fpolys) {
             if (poly.size() != 3) continue;
-            triangles.push_back({intern(fpts[poly[0]]),
-                                 intern(fpts[poly[1]]),
-                                 intern(fpts[poly[2]])});
+            const std::size_t i0 = intern(fpts[poly[0]]);
+            const std::size_t i1 = intern(fpts[poly[1]]);
+            const std::size_t i2 = intern(fpts[poly[2]]);
+            // The 1e-6 intern can merge coincident duplicated vertices
+            // (pinch corners, 0-length constrained edges): drop the
+            // resulting degenerate triangles instead of feeding them to
+            // autorefine.
+            if (i0 == i1 || i1 == i2 || i0 == i2) { ++n_degen; continue; }
+            triangles.push_back({i0, i1, i2});
             markers.push_back(static_cast<int>(fi + 1));
+        }
+        if (a.verbose && n_degen > 0) {
+            std::cerr << "    dropped " << n_degen
+                      << " degenerate triangle(s) after intern dedup\n";
         }
         if (a.verbose) {
             std::cerr << "  loaded " << stl_p.filename().string()
@@ -330,7 +414,10 @@ int main(int argc, char** argv) {
 
     // Run autorefine_triangle_soup with marker-propagating visitor.
     std::vector<int> markers_out;
-    Marker_propagating_visitor visitor{&markers, &markers_out};
+    Marker_propagating_visitor visitor;
+    visitor.in = &markers;
+    visitor.out = &markers_out;
+    visitor.n_faults = static_cast<int>(entries.size());
 
     if (a.verbose) {
         std::cerr << "running PMP::autorefine_triangle_soup ...\n";
@@ -347,6 +434,14 @@ int main(int argc, char** argv) {
         std::cerr << "internal error: markers_out.size() = " << markers_out.size()
                   << " != triangles.size() = " << triangles.size() << "\n";
         return 4;
+    }
+    // Phase 4 gate: in boundary mode all fault x fault and fault x DEM
+    // intersections were corefined in Phase 3 — autorefine must not have
+    // had to split any fault-marked triangle.  (Expected residual work:
+    // boundary-side splits and exact-duplicate removal only.)
+    if (a.verbose || visitor.n_fault_subtriangles > 0) {
+        std::cerr << "fault-marked new_subtriangle count: "
+                  << visitor.n_fault_subtriangles << "\n";
     }
     // Verify all markers were assigned.
     std::size_t n_unassigned = 0;
@@ -402,6 +497,13 @@ int main(int argc, char** argv) {
         if (!f) { std::cerr << "cannot write " << a.out_markers_json << "\n"; return 6; }
         f << "{\n";
         f << "  \"box_marker\": " << a.box_marker << ",\n";
+        f << "  \"mode\": \"" << (a.box_mode ? "box" : "boundary") << "\",\n";
+        f << "  \"boundary_names\": [";
+        for (std::size_t i = 0; i < boundary_names.size(); ++i) {
+            if (i > 0) f << ", ";
+            f << "\"" << boundary_names[i] << "\"";
+        }
+        f << "],\n";
         f << "  \"fault_basenames\": [";
         for (std::size_t i = 0; i < entries.size(); ++i) {
             if (i > 0) f << ", ";
@@ -410,6 +512,8 @@ int main(int argc, char** argv) {
         f << "],\n";
         f << "  \"n_input_faults\": " << entries.size() << ",\n";
         f << "  \"n_box_triangles_input\": 12,\n";
+        f << "  \"n_fault_new_subtriangles\": "
+          << visitor.n_fault_subtriangles << ",\n";
         f << "  \"n_output_triangles\": " << triangles.size() << ",\n";
         f << "  \"n_output_vertices\": "  << points.size()    << ",\n";
         f << "  \"markers\": [";
@@ -422,5 +526,12 @@ int main(int argc, char** argv) {
         if (a.verbose) std::cerr << "wrote " << a.out_markers_json << "\n";
     }
 
+    if (!a.box_mode && visitor.n_fault_subtriangles > 0) {
+        std::cerr << "ERROR: autorefine split " << visitor.n_fault_subtriangles
+                  << " fault-marked triangle(s) — a Phase 3 corefine pair "
+                     "leaked an unresolved intersection.  Outputs were "
+                     "written for inspection; STOP and report.\n";
+        return 9;
+    }
     return 0;
 }

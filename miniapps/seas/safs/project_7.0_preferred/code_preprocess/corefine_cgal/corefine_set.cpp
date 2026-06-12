@@ -43,6 +43,7 @@
 #include "quality_repair.h"
 #include "intersection_graph.h"
 #include "polyline_cleanup.h"
+#include "graded_sizing_field.h"
 
 #include <array>
 #include <functional>
@@ -65,8 +66,58 @@ struct Args {
     double min_edge       = 100.0;
     double polyline_spacing = -1.0;
     double features_angle_bound = 60.0;
+    // Per-mesh remesh modes (Phase 3, SAFv4): a basename containing a
+    // graded spec's name gets a distance-graded remesh (sites = its own
+    // corefined polylines), with optional per-name h/d overrides via
+    // "NAME:h_near:h_far:d_near:d_far"; one containing `keep_names` is
+    // NOT remeshed.  All others get the original uniform remesh at
+    // mesh_edge_size.
+    struct GradedSpec {
+        std::string name;
+        double h_near = -1.0, h_far = -1.0, d_near = -1.0, d_far = -1.0;
+    };
+    std::vector<GradedSpec> graded_specs;
+    std::vector<std::string> keep_names;
+    double h_near = -1.0;     // default: mesh_edge_size
+    double h_far  = -1.0;     // default: 5 * mesh_edge_size
+    double d_near = 1000.0;
+    double d_far  = 9000.0;
+    // Residual sub-floor polyline edges tolerated before the hard abort.
+    // Residuals on extension-strip scaffolding are removed by the Phase 4
+    // clip; the FINAL min-edge gate lives on the clipped merged soup.
+    unsigned allow_residual_short = 0;
     bool verbose = false;
 };
+
+enum class RemeshMode { Uniform, Graded, Keep };
+
+static RemeshMode mode_of(const std::string& basename, const Args& a,
+                          const Args::GradedSpec** spec_out = nullptr) {
+    for (const auto& g : a.graded_specs) {
+        if (basename.find(g.name) != std::string::npos) {
+            if (spec_out) *spec_out = &g;
+            return RemeshMode::Graded;
+        }
+    }
+    for (const auto& n : a.keep_names)
+        if (basename.find(n) != std::string::npos) return RemeshMode::Keep;
+    return RemeshMode::Uniform;
+}
+
+static Args::GradedSpec parse_graded_spec(const std::string& s) {
+    Args::GradedSpec g;
+    std::vector<std::string> parts;
+    std::stringstream ss(s);
+    std::string item;
+    while (std::getline(ss, item, ':')) parts.push_back(item);
+    if (parts.empty()) { std::cerr << "empty --graded spec\n"; std::exit(2); }
+    g.name = parts[0];
+    double* fields[4] = {&g.h_near, &g.h_far, &g.d_near, &g.d_far};
+    for (std::size_t k = 1; k < parts.size() && k <= 4; ++k) {
+        *fields[k - 1] = std::strtod(parts[k].c_str(), nullptr);
+    }
+    return g;
+}
 
 static int usage(const char* argv0, int code) {
     std::cerr << "usage: " << argv0 << " IN_DIR OUT_DIR"
@@ -100,6 +151,16 @@ static int parse(int argc, char** argv, Args& a) {
         else if (s == "--polyline-spacing") need_double(i, a.polyline_spacing, s);
         else if (s == "--features-angle-bound") need_double(i, a.features_angle_bound, s);
         else if (s == "--manifest")         need_str(i, a.manifest_path, s);
+        else if (s == "--graded") { std::string v; need_str(i, v, s); a.graded_specs.push_back(parse_graded_spec(v)); }
+        else if (s == "--keep")   { std::string v; need_str(i, v, s); a.keep_names.push_back(v); }
+        else if (s == "--h-near") need_double(i, a.h_near, s);
+        else if (s == "--h-far")  need_double(i, a.h_far, s);
+        else if (s == "--d-near") need_double(i, a.d_near, s);
+        else if (s == "--d-far")  need_double(i, a.d_far, s);
+        else if (s == "--allow-residual-short") {
+            double v; need_double(i, v, s);
+            a.allow_residual_short = static_cast<unsigned>(v);
+        }
         else if (s == "--verbose")          a.verbose = true;
         else pos.push_back(s);
     }
@@ -110,6 +171,8 @@ static int parse(int argc, char** argv, Args& a) {
     } else if (a.polyline_spacing < a.min_edge) {
         a.polyline_spacing = a.min_edge;
     }
+    if (a.h_near < 0.0) a.h_near = a.mesh_edge_size;
+    if (a.h_far  < 0.0) a.h_far  = 5.0 * a.mesh_edge_size;
     if (a.manifest_path.empty()) {
         a.manifest_path = (fs::path(a.out_dir) / "manifest.json").string();
     }
@@ -153,19 +216,40 @@ static auto build_polyline_ecm(Mesh& m,
 // shared subset directly.
 static std::pair<std::size_t, double>
 count_shared_vertices(const Mesh& m_a, const Mesh& m_b, double tol_match) {
-    std::vector<Point> b_pts;
-    b_pts.reserve(m_b.number_of_vertices());
-    for (auto u : m_b.vertices()) b_pts.push_back(m_b.point(u));
+    // Grid-accelerated version of the original O(|A| x |B|) brute force
+    // (identical semantics: count A vertices with a B vertex within
+    // tol_match; report the max matched distance).  The brute force was
+    // fine at fixture scale (~1e3 verts) but is hours at SAFv4 production
+    // scale (DEM ~1e5 x fault ~1e4).  Cell size = tol_match; a match can
+    // only live in the 27 neighboring cells.
     const double tol2 = tol_match * tol_match;
+    const double cell = tol_match;
+    auto key_of = [&](const Point& p) {
+        return std::tuple<long long, long long, long long>{
+            static_cast<long long>(std::floor(p.x() / cell)),
+            static_cast<long long>(std::floor(p.y() / cell)),
+            static_cast<long long>(std::floor(p.z() / cell))};
+    };
+    std::map<std::tuple<long long, long long, long long>,
+             std::vector<Point>> grid;
+    for (auto u : m_b.vertices()) {
+        grid[key_of(m_b.point(u))].push_back(m_b.point(u));
+    }
     std::size_t shared = 0;
     double max_match_diff = 0.0;
     for (auto v : m_a.vertices()) {
         const auto& pa = m_a.point(v);
+        const auto [kx, ky, kz] = key_of(pa);
         double best2 = std::numeric_limits<double>::infinity();
-        for (const auto& pb : b_pts) {
-            const double d2 = CGAL::squared_distance(pa, pb);
-            if (d2 < best2) best2 = d2;
-            if (d2 <= tol2) break;
+        for (long long dx = -1; dx <= 1; ++dx)
+        for (long long dy = -1; dy <= 1; ++dy)
+        for (long long dz = -1; dz <= 1; ++dz) {
+            auto it = grid.find({kx + dx, ky + dy, kz + dz});
+            if (it == grid.end()) continue;
+            for (const auto& pb : it->second) {
+                const double d2 = CGAL::squared_distance(pa, pb);
+                if (d2 < best2) best2 = d2;
+            }
         }
         if (best2 <= tol2) {
             ++shared;
@@ -411,14 +495,43 @@ int main(int argc, char** argv) {
         std::cerr << "\n";
     }
     if (cleanup.n_residual_short > 0) {
-        std::cerr << "ERROR: " << cleanup.n_residual_short
-                  << " polyline edge(s) below min_edge=" << a.min_edge
-                  << " m could not be collapsed (link condition failed in"
-                     " at least one mesh of the pair).  Shortest residual: "
-                  << cleanup.residual_min_length << " m. Aborting to"
-                     " preserve the hard-constraint contract — a sliver-"
-                     "tolerant pipeline must use a smaller min_edge.\n";
-        return 8;
+        // Report residual locations so the caller can verify they lie on
+        // extension-strip scaffolding (removed by the Phase 4 clip).
+        std::size_t printed = 0;
+        for (std::size_t i = 0; i < meshes.size() && printed < 12; ++i) {
+            for (auto e : meshes[i].edges()) {
+                if (printed >= 12) break;
+                if (meshes[i].is_removed(e) || !get(ecm_maps[i], e)) continue;
+                auto h = meshes[i].halfedge(e);
+                const auto& p = meshes[i].point(meshes[i].source(h));
+                const auto& q = meshes[i].point(meshes[i].target(h));
+                const double L2 = CGAL::to_double(CGAL::squared_distance(p, q));
+                if (L2 >= a.min_edge * a.min_edge) continue;
+                std::cerr << "  residual[" << printed << "] mesh "
+                          << basenames[i] << "  L=" << std::sqrt(L2)
+                          << " m  mid=(" << std::setprecision(10)
+                          << (p.x() + q.x()) / 2 << ", "
+                          << (p.y() + q.y()) / 2 << ", "
+                          << (p.z() + q.z()) / 2 << ")\n";
+                ++printed;
+            }
+        }
+        if (cleanup.n_residual_short > a.allow_residual_short) {
+            std::cerr << "ERROR: " << cleanup.n_residual_short
+                      << " polyline edge(s) below min_edge=" << a.min_edge
+                      << " m could not be collapsed (link condition failed in"
+                         " at least one mesh of the pair).  Shortest residual: "
+                      << cleanup.residual_min_length << " m. Aborting to"
+                         " preserve the hard-constraint contract (raise"
+                         " --allow-residual-short only when the residuals are"
+                         " on clip-destined scaffolding).\n";
+            return 8;
+        }
+        std::cerr << "WARNING: " << cleanup.n_residual_short
+                  << " residual sub-floor polyline edge(s) tolerated by"
+                     " --allow-residual-short=" << a.allow_residual_short
+                  << "; the Phase 4 post-clip min-edge gate must confirm"
+                     " none survive.\n";
     }
 
     // 5.6. Cross-polyline cluster snap.  Phase 1 (cleanup above) handles
@@ -508,10 +621,17 @@ int main(int argc, char** argv) {
     }
 
     std::vector<Mesh> output_meshes(meshes.size());
+    std::vector<RemeshMode> modes(meshes.size(), RemeshMode::Uniform);
     for (std::size_t i = 0; i < meshes.size(); ++i) {
+        modes[i] = mode_of(basenames[i], a);
         if (per_mesh_polylines[i].empty()) {
             output_meshes[i] = meshes[i];
             if (a.verbose) std::cerr << "[" << i << "] no intersections; no remesh\n";
+            continue;
+        }
+        if (modes[i] == RemeshMode::Keep) {
+            output_meshes[i] = std::move(meshes[i]);
+            if (a.verbose) std::cerr << "[" << i << "] mode=keep; no remesh\n";
             continue;
         }
 
@@ -539,19 +659,49 @@ int main(int argc, char** argv) {
         for (auto v : meshes[i].vertices()) if (get(vc_map, v)) ++n_constrained_v;
 
         if (a.verbose) {
-            std::cerr << "[" << i << "] isotropic_remeshing target="
-                      << a.mesh_edge_size << "m  constrained_edges="
+            std::cerr << "[" << i << "] isotropic_remeshing mode="
+                      << (modes[i] == RemeshMode::Graded ? "graded" : "uniform")
+                      << " target=" << a.mesh_edge_size
+                      << "m  constrained_edges="
                       << n_constrained_e << "  constrained_verts=" << n_constrained_v
                       << "  polylines=" << per_mesh_polylines[i].size() << "\n";
         }
-        PMP::isotropic_remeshing(
-            faces(meshes[i]),
-            a.mesh_edge_size,
-            meshes[i],
-            pp::edge_is_constrained_map(ecm_maps[i])
-              .vertex_is_constrained_map(vc_map)
-              .protect_constraints(true)
-              .number_of_iterations(5));
+        if (modes[i] == RemeshMode::Graded) {
+            // Distance-graded target: sites = this mesh's own corefined
+            // polyline vertices (the true traces/junctions on this mesh).
+            const Args::GradedSpec* spec = nullptr;
+            mode_of(basenames[i], a, &spec);
+            const double hn = (spec && spec->h_near > 0) ? spec->h_near : a.h_near;
+            const double hf = (spec && spec->h_far  > 0) ? spec->h_far  : a.h_far;
+            const double dn = (spec && spec->d_near > 0) ? spec->d_near : a.d_near;
+            const double df = (spec && spec->d_far  > 0) ? spec->d_far  : a.d_far;
+            if (a.verbose) {
+                std::cerr << "    graded h=[" << hn << ", " << hf
+                          << "] d=[" << dn << ", " << df << "]\n";
+            }
+            std::vector<Point> sites;
+            for (const auto& pl : per_mesh_polylines[i])
+                for (const auto& p : pl) sites.push_back(p);
+            Graded_polyline_sizing_field<Mesh> field(
+                hn, hf, dn, df, sites, meshes[i]);
+            PMP::isotropic_remeshing(
+                faces(meshes[i]),
+                field,
+                meshes[i],
+                pp::edge_is_constrained_map(ecm_maps[i])
+                  .vertex_is_constrained_map(vc_map)
+                  .protect_constraints(true)
+                  .number_of_iterations(5));
+        } else {
+            PMP::isotropic_remeshing(
+                faces(meshes[i]),
+                a.mesh_edge_size,
+                meshes[i],
+                pp::edge_is_constrained_map(ecm_maps[i])
+                  .vertex_is_constrained_map(vc_map)
+                  .protect_constraints(true)
+                  .number_of_iterations(5));
+        }
         output_meshes[i] = std::move(meshes[i]);
     }
 
@@ -569,11 +719,17 @@ int main(int argc, char** argv) {
     std::vector<quality_repair::Stats> stats(meshes.size());
     for (std::size_t i = 0; i < meshes.size(); ++i) {
         if (per_mesh_polylines[i].empty()) {
-            // No intersections: no polyline to protect.  Use empty maps.
+            // No intersections: no polyline to protect.  Use empty maps
+            // (plus rim protection for graded/keep meshes).
             auto vcm_empty = quality_repair::make_empty_vcm(output_meshes[i]);
             auto ecm_empty = get(CGAL::dynamic_edge_property_t<bool>(),
                                  output_meshes[i]);
             for (auto e : output_meshes[i].edges()) put(ecm_empty, e, false);
+            if (modes[i] != RemeshMode::Uniform) {
+                for (auto h : output_meshes[i].halfedges())
+                    if (output_meshes[i].is_border(h))
+                        put(vcm_empty, output_meshes[i].target(h), true);
+            }
             stats[i] = quality_repair::run(output_meshes[i], ecm_empty,
                                             vcm_empty, a.min_edge);
             continue;
@@ -593,6 +749,14 @@ int main(int argc, char** argv) {
             auto h = output_meshes[i].halfedge(e);
             put(vcm_out, output_meshes[i].source(h), true);
             put(vcm_out, output_meshes[i].target(h), true);
+        }
+        // Graded/keep meshes (DEM, bottom): the rim must remain
+        // byte-identical for the boundary-shell weld — protect border
+        // vertices from quality_repair collapses too.
+        if (modes[i] != RemeshMode::Uniform) {
+            for (auto h : output_meshes[i].halfedges())
+                if (output_meshes[i].is_border(h))
+                    put(vcm_out, output_meshes[i].target(h), true);
         }
         stats[i] = quality_repair::run(output_meshes[i], ecm_out, vcm_out,
                                         a.min_edge);
@@ -657,7 +821,7 @@ int main(int argc, char** argv) {
             }
         }
     }
-    if (total_below > 0) {
+    if (total_below > 0 && total_below > a.allow_residual_short) {
         std::cerr << "ERROR: " << total_below
                   << " output edge(s) below min_edge=" << a.min_edge
                   << " m after cleanup + isotropic_remeshing + quality_"
@@ -668,6 +832,13 @@ int main(int argc, char** argv) {
                      "The current shared-polyline cleanup does not snap "
                      "across-polyline vertex clusters. Aborting.\n";
         return 8;
+    }
+    if (total_below > 0) {
+        std::cerr << "WARNING: " << total_below
+                  << " output edge(s) below the floor tolerated by"
+                     " --allow-residual-short (worst " << worst << " m in "
+                  << basenames[worst_mesh] << "); the Phase 4 post-clip"
+                     " min-edge gate must confirm none survive.\n";
     }
 
     // 9. Write outputs and the manifest.
