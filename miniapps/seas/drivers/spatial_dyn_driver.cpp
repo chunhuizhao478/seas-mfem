@@ -72,6 +72,7 @@
 #include "../common/mpi_context.hpp"
 
 #include "../io/paraview_output.hpp"
+#include "../io/free_surface_output.hpp"
 #include "../io/tpv104_checkpoint.hpp"
 #include "../io/data_field_3d.hpp"
 #include "../io/stress_field_3d.hpp"
@@ -199,6 +200,18 @@ ParaViewOutput<ParMesh>::FaultOutputMode ParseFaultMode(
    if (s == "vtu")  { return ParaViewOutput<ParMesh>::FaultOutputMode::Vtu; }
    if (s == "hdf5") { return ParaViewOutput<ParMesh>::FaultOutputMode::Hdf5; }
    MFEM_ABORT("spatial_dyn_driver: paraview_fault: unknown value '"
+              << s << "'.  Accepted: hdf5 | vtu | off.");
+}
+
+// Phase 3: free-surface slice mode (mirror ParseVolumeMode/ParseFaultMode).
+seas::FreeSurfaceOutput::Mode ParseFreeSurfaceMode(
+   const std::string &s, bool &enabled)
+{
+   if (s == "off") { enabled = false; return seas::FreeSurfaceOutput::Mode::Vtu; }
+   enabled = true;
+   if (s == "vtu")  { return seas::FreeSurfaceOutput::Mode::Vtu; }
+   if (s == "hdf5") { return seas::FreeSurfaceOutput::Mode::Hdf5; }
+   MFEM_ABORT("spatial_dyn_driver: paraview_free_surface: unknown value '"
               << s << "'.  Accepted: hdf5 | vtu | off.");
 }
 
@@ -623,6 +636,9 @@ int main(int argc, char *argv[])
    const real_t cli_pv_coseismic_dt      = GetRealArg(argc, argv, "--paraview-coseismic-dt",    -1.0);
    const real_t cli_pv_nucleation_dt     = GetRealArg(argc, argv, "--paraview-nucleation-dt",   -1.0);
    const real_t cli_pv_interseismic_dt   = GetRealArg(argc, argv, "--paraview-interseismic-dt", -1.0);
+   // Phase 3: free-surface slice CLI overrides.
+   const std::string cli_pv_free_surface = GetStringArg(argc, argv, "--paraview-free-surface", "");
+   const real_t cli_pv_free_surface_dt   = GetRealArg(argc, argv, "--paraview-free-surface-dt", -1.0);
 
    const std::string restart_prefix =
       GetStringArg(argc, argv, "--restart", "");
@@ -736,6 +752,9 @@ int main(int argc, char *argv[])
    if (cli_pv_coseismic_dt    > 0.0)      { cfg.output.paraview_coseismic_dt    = cli_pv_coseismic_dt; }
    if (cli_pv_nucleation_dt   > 0.0)      { cfg.output.paraview_nucleation_dt   = cli_pv_nucleation_dt; }
    if (cli_pv_interseismic_dt > 0.0)      { cfg.output.paraview_interseismic_dt = cli_pv_interseismic_dt; }
+   // Phase 3: free-surface slice overrides (specific value/dt win over TOML).
+   if (!cli_pv_free_surface.empty())      { cfg.output.paraview_free_surface = cli_pv_free_surface; }
+   if (cli_pv_free_surface_dt > 0.0)      { cfg.output.paraview_free_surface_dt = cli_pv_free_surface_dt; }
    if (cli_pv_force_fault_vtu)            { cfg.output.paraview_fault  = "vtu";  }
    if (cli_pv_force_fault_hdf5)           { cfg.output.paraview_fault  = "hdf5"; }
    if (cli_pv_force_vol_vtu)              { cfg.output.paraview_volume = "vtu";  }
@@ -1039,6 +1058,24 @@ int main(int argc, char *argv[])
       bc.fault_attr      = 101;
       bc.natural_attrs   = {102};
       bc.absorbing_attrs = {103, 104};
+   }
+
+   // -----------------------------------------------------------------
+   // 5b. Free-surface slice attributes (Phase 3).  Resolve against the
+   //     RESOLVED `bc.natural_attrs` (a std::set<int> that already includes
+   //     the SAFS {102} fallback) — NOT the raw `cfg.boundary.natural_attrs`,
+   //     which is empty for every SAFS config (no [boundary] block) and would
+   //     silently disable the slice on its primary target (R-001).  An
+   //     explicit [output].paraview_free_surface_attrs override wins.
+   // -----------------------------------------------------------------
+   Array<int> fs_attrs;
+   if (!cfg.output.paraview_free_surface_attrs.empty())
+   {
+      for (int a : cfg.output.paraview_free_surface_attrs) { fs_attrs.Append(a); }
+   }
+   else
+   {
+      for (int a : bc.natural_attrs) { fs_attrs.Append(a); }
    }
 
    // -----------------------------------------------------------------
@@ -2729,6 +2766,57 @@ int main(int argc, char *argv[])
 #endif
    }
 
+   // Phase 3: free-surface slice writer (default-ON; independent of the
+   // any_pv_requested master gate).  Constructed HERE — after the volume/bulk
+   // collections, BEFORE the banner (which reports it) — because the ctor needs
+   // only pmesh / fs_attrs / order / rank / dt, NOT ndof_total (R-004).
+   bool fs_enabled = false;
+   auto fs_mode = ParseFreeSurfaceMode(cfg.output.paraview_free_surface, fs_enabled);
+   std::unique_ptr<seas::FreeSurfaceOutput> fs_out;
+   if (fs_enabled)
+   {
+      if (fs_attrs.Size() == 0)
+      {
+         if (rank == 0)
+         {
+            std::cerr << "[free-surface] WARNING: paraview_free_surface on but "
+                         "no free-surface attributes ([boundary].natural_attrs "
+                         "/ [output].paraview_free_surface_attrs both empty); "
+                         "slice disabled.\n";
+         }
+      }
+      else
+      {
+         const std::string fs_dir =
+            cfg.output.output_dir + "/ParaView_free_surface";
+         if (rank == 0) { std::filesystem::create_directories(fs_dir); }
+#ifdef MFEM_USE_MPI
+         MPI_Barrier(comm);
+#endif
+         // Collective: make_unique<FreeSurfaceOutput> calls CreateFromBoundary,
+         // which is MPI-collective — ALL ranks must reach it.  The guards
+         // (fs_enabled, fs_attrs.Size()) are rank-invariant, so they do.
+         fs_out = std::make_unique<seas::FreeSurfaceOutput>(
+                     fs_dir, pmesh, fs_attrs, cfg.mesh.order, rank,
+                     cfg.output.paraview_free_surface_dt, "free_surface",
+                     fs_mode);
+         if (fs_out->GlobalNE() == 0)
+         {
+            if (rank == 0)
+            {
+               std::cerr << "[free-surface] WARNING: 0 surface elements matched "
+                            "the resolved free-surface attributes; slice "
+                            "DISABLED. Check [boundary].natural_attrs / "
+                            "[output].paraview_free_surface_attrs.\n";
+            }
+            // R-303: GlobalNE() is MPI_Allreduce'd, so "== 0" is identical on
+            // every rank; all ranks drop fs_out together (collective-safe — no
+            // half-disabled state, no per-step empty Save for the whole run).
+            fs_out.reset();
+         }
+      }
+   }
+
    // Parity Phase 3: rank-0 banner.
    if (rank == 0)
    {
@@ -2774,6 +2862,23 @@ int main(int argc, char *argv[])
       else
       {
          std::cout << "ParaView output: OFF\n";
+      }
+      // Phase 3: the free-surface slice is independent of the master gate, so
+      // report it AFTER the any_pv_requested if/else — even when volume/bulk/
+      // fault are all off (any_pv_requested == false), the slice still writes
+      // and must be banner-visible (R-006).
+      if (fs_out)
+      {
+         // R-302: echo the RESOLVED attributes so silent over-inclusion (e.g. a
+         // bottom zero-traction face tagged natural) is visible in the banner.
+         std::cout << "  FreeSurf: " << cfg.output.paraview_free_surface
+                   << " (dt=" << cfg.output.paraview_free_surface_dt << " s, "
+                   << fs_out->GlobalNE() << " surf elems, attrs {";
+         for (int i = 0; i < fs_attrs.Size(); ++i)
+         {
+            std::cout << (i ? "," : "") << fs_attrs[i];
+         }
+         std::cout << "})\n";
       }
    }
 
@@ -3020,7 +3125,18 @@ int main(int argc, char *argv[])
                               && pv_out->PeekShouldWrite(step_num, time, V_max);
       const bool bulk_wants  = pv_bulk_out
                               && pv_bulk_out->PeekShouldWrite(step_num, time, V_max);
-      if (!fault_wants && !bulk_wants) { return; }
+      const bool fs_wants    = fs_out && fs_out->ShouldWrite(time);
+      if (!fault_wants && !bulk_wants && !fs_wants) { return; }
+
+      // Free surface: independent of fault/bulk AND of the
+      // `if (!fault_wants) return;` guard below — must be written HERE, before
+      // the bulk block and that guard, NOT at the end of the lambda (R-002).
+      // Reuses the same Q velocity block the volume path memcpys below.
+      if (fs_wants)
+      {
+         fs_out->UpdateVelocity(Q.GetData() + VX * ndof_total, ndof_total);
+         fs_out->Save(step_num, time);
+      }
 
       // Parity Phase 4: publish 6 stress components to pv_bulk_out.
       if (bulk_wants)

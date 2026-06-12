@@ -135,6 +135,66 @@ def _enumerate_field_groups(h5py, fault_h5):
     return found
 
 
+def _check_free_surface_slice(out_dir: Path) -> tuple[bool, str]:
+    """Phase 4 of PLAN_free_surface_slice.md.
+
+    The free-surface slice is default-ON and writes
+    ``<out_dir>/ParaView_free_surface/free_surface.pvd`` (VTU mode) or
+    ``free_surface.vtkhdf`` (HDF5 mode), carrying the ``velocity`` and
+    ``mpi_rank`` arrays.  Returns (passed, message).
+
+    A missing ``ParaView_free_surface/`` directory is a non-fatal skip: the
+    slice may be ``"off"`` or have matched 0 surface elements (the driver
+    disables it then), so this check only asserts when the directory exists.
+    """
+    fs_dir = None
+    for base in (out_dir, out_dir.parent):
+        cand = base / "ParaView_free_surface"
+        if cand.is_dir():
+            fs_dir = cand
+            break
+    if fs_dir is None:
+        return True, "no ParaView_free_surface/ (slice off or 0 elems) — skipped"
+
+    pvd = fs_dir / "free_surface.pvd"
+    if not pvd.exists():
+        pvds = sorted(fs_dir.glob("*.pvd"))
+        if not pvds:
+            # HDF5 mode writes a single .vtkhdf instead of .pvd/.vtu.
+            hdfs = sorted(fs_dir.rglob("*.vtkhdf"))
+            if hdfs:
+                return True, f"{hdfs[0].name} present (hdf5 mode) — basic check"
+            return False, f"{fs_dir} exists but contains no .pvd or .vtkhdf"
+        pvd = pvds[0]
+
+    try:
+        import xml.etree.ElementTree as ET
+        datasets = ET.parse(pvd).getroot().findall(".//DataSet")
+    except Exception as e:   # noqa: BLE001 — report any parse failure
+        return False, f"cannot parse {pvd}: {e}"
+    if len(datasets) < 1:
+        return False, f"{pvd} has 0 <DataSet> entries"
+
+    # The velocity / mpi_rank array names live in the ASCII XML header of the
+    # referenced .vtu/.pvtu pieces (even in binary-appended mode), so a header
+    # byte-scan is sufficient and avoids loading the binary payloads.
+    header = b""
+    for piece in list(fs_dir.rglob("*.pvtu")) + list(fs_dir.rglob("*.vtu")):
+        try:
+            header += piece.read_bytes()[:65536]
+        except OSError:
+            continue
+    have_vel = b'Name="velocity"' in header
+    have_rank = b'Name="mpi_rank"' in header
+    if not (have_vel and have_rank):
+        missing = [n for n, ok in
+                   (("velocity", have_vel), ("mpi_rank", have_rank)) if not ok]
+        return False, (f"{pvd.name}: {len(datasets)} dataset(s) but missing "
+                       f"array(s): {', '.join(missing)}")
+    return True, (f"{pvd.name}: {len(datasets)} dataset(s), velocity + "
+                  f"mpi_rank present")
+
+
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--fault-vtkhdf", required=True, type=Path,
@@ -258,6 +318,10 @@ def main() -> int:
                         f"'[derived] PASS' "
                         f"{'found' if derived_pass else 'NOT FOUND'} "
                         f"in {args.log}"))
+
+    # Check F: free-surface slice (default-ON) — PLAN_free_surface_slice.md.
+    fs_ok, fs_msg = _check_free_surface_slice(args.fault_vtkhdf.parent)
+    results.append(("F", fs_ok, fs_msg))
 
     # Write summary.
     lines = ["verify_spatial_dyn_smoke_safs.py",

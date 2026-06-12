@@ -349,6 +349,8 @@ TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC    = tests/unit/test_fault_surface_vtu_f
 # VTU writer: serial bit-exactness + np=4 gather correctness
 TEST_FAULT_SURFACE_VTU_BINARY_SRC          = tests/unit/test_fault_surface_vtu_binary.cpp
 TEST_FAULT_SURFACE_VTU_GATHER_MPI_SRC      = tests/unit/test_fault_surface_vtu_gather_mpi.cpp
+# Phase 4 of PLAN_free_surface_slice.md — free-surface slice class test (MPI)
+TEST_FREE_SURFACE_SLICE_SRC                = tests/unit/test_free_surface_slice.cpp
 # Phase 2a/2b of PLAN_paraview_compaction_2026-04-28 — VTKHDF single-file
 # fault output.  Conditional on MFEM_USE_HDF5 in the test sources.
 TEST_PARAVIEW_HDF_SMOKE_SRC                = tests/unit/test_paraview_hdf_smoke.cpp
@@ -688,6 +690,7 @@ TEST_FAULT_SURFACE_VTU_K4_OBJ              = $(TEST_FAULT_SURFACE_VTU_K4_SRC:.cp
 TEST_FAULT_SURFACE_VTU_FIELD_FILTER_OBJ    = $(TEST_FAULT_SURFACE_VTU_FIELD_FILTER_SRC:.cpp=.o)
 TEST_FAULT_SURFACE_VTU_BINARY_OBJ          = $(TEST_FAULT_SURFACE_VTU_BINARY_SRC:.cpp=.o)
 TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ      = $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_SRC:.cpp=.o)
+TEST_FREE_SURFACE_SLICE_OBJ                = $(TEST_FREE_SURFACE_SLICE_SRC:.cpp=.o)
 TEST_PARAVIEW_HDF_SMOKE_OBJ                = $(TEST_PARAVIEW_HDF_SMOKE_SRC:.cpp=.o)
 TEST_FAULT_SURFACE_VTKHDF_OBJ              = $(TEST_FAULT_SURFACE_VTKHDF_SRC:.cpp=.o)
 TEST_FAULT_SURFACE_VTKHDF_MPI_OBJ          = $(TEST_FAULT_SURFACE_VTKHDF_MPI_SRC:.cpp=.o)
@@ -825,7 +828,8 @@ SOLVER_HEADERS = solver/seas_operator.hpp \
 # Phase 5: I/O
 IO_HEADERS = io/probe_output.hpp \
              io/benchmark_output.hpp \
-             io/paraview_output.hpp
+             io/paraview_output.hpp \
+             io/free_surface_output.hpp
 
 # Checkpoint I/O
 CHECKPOINT_HEADERS = io/checkpoint.hpp
@@ -1742,6 +1746,11 @@ seas_test_fault_surface_vtu_binary: $(TEST_FAULT_SURFACE_VTU_BINARY_OBJ)
 # Phase 1 PLAN_paraview_compaction_2026-04-28 — np=4 gather correctness
 seas_test_fault_surface_vtu_gather_mpi: $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 4 PLAN_free_surface_slice.md — header-only writer; links only MFEM.
+seas_test_free_surface_slice: $(TEST_FREE_SURFACE_SLICE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FREE_SURFACE_SLICE_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 2a PLAN_paraview_compaction_2026-04-28 — VTKHDF build smoke gate
@@ -3559,6 +3568,12 @@ $(TEST_FAULT_SURFACE_VTU_GATHER_MPI_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFE
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+# free_surface_output.hpp is header-only and listed in IO_HEADERS (via
+# SEAS_HEADERS), so editing it force-rebuilds this object.
+$(TEST_FREE_SURFACE_SLICE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 # Phase 2 PLAN_paraview_compaction_2026-04-28 — VTKHDF tests
 $(TEST_PARAVIEW_HDF_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
@@ -4328,6 +4343,12 @@ test-fault-surface-vtu-binary: seas_test_fault_surface_vtu_binary
 # Phase 1 PLAN_paraview_compaction_2026-04-28 — np=4 gather correctness
 test-fault-surface-vtu-gather-mpi: seas_test_fault_surface_vtu_gather_mpi
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_fault_surface_vtu_gather_mpi
+
+# Phase 4 PLAN_free_surface_slice.md — free-surface slice (serial + np=2:
+# np=2 exercises empty-local-submesh ranks + collective transfer/Save).
+test-free-surface-slice: seas_test_free_surface_slice
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 1 ./seas_test_free_surface_slice
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_free_surface_slice
 
 # Phase 2a PLAN_paraview_compaction_2026-04-28 — VTKHDF build prerequisite
 # Plan §2a.6: run serial AND mpirun -np 4.  The test self-skips on builds

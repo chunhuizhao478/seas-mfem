@@ -1,289 +1,176 @@
-# Code Review: [DIAG-SIGN] speckle instrumentation (LSW triq-mesh test) — 2026-05-26
+# Code Review (Round 4 — post-fix, post-Phase-4): Free-Surface Slice — 2026-06-02
 
-> Supersedes the prior σ_n-strength-floor review (recoverable via git history).
-> Scope is the speckle diagnostic added in commit 5909cfe.
+> Rounds 1–2 reviewed the **plan**; Round 3 reviewed the **written Phases 1–3** and flagged
+> the entirely-missing Phase 4 (R-301) plus that the trace-equivalence and collective paths
+> were *unverified by execution*. This round audits the **fix + Phase-4 implementation** and,
+> crucially, the changes were **built and run** (np=1 and np=2) — which surfaced a CRITICAL
+> latent bug that no amount of static review had caught. Finding IDs continue at R-401+.
+> Rounds 1–3 are superseded (git history retains them).
 
 ## Review Scope
-- Plan: no formal PLAN.md; spec is the conversational debug task + commit
-  `5909cfe` ("instrument the diagnostics ... capture the bug location") and
-  `safs/project_7.0_alternative/debug_document/spatial_dynamic_rupture_sliver_blowup_2026-05-25.md`.
-- Files reviewed (commit 5909cfe):
-  - `miniapps/seas/drivers/spatial_dyn_driver.cpp` ([DIAG-SIGN] block + reset)
-  - `miniapps/seas/dynamic/fault_face_flux.hpp` (DOFData.sigma_n_substep_min)
-  - `miniapps/seas/dynamic/tpv205_substep_iterator.cpp` (LSW sub-step update)
-  - `miniapps/seas/dynamic/wave_operator.inl` (shared-fault sub-step update)
-  - `miniapps/seas/jobs/safs/spatial_dyn_slipweakening_nocap_triq_8N_400r_dev_2hr_safs.sbatch`
-- Domain context: `miniapps/seas/CLAUDE.md` (σ_n>0 compression; no hardcoded
-  constants), memory `project_safs_vn_leak_not_frame.md` (speckle locus =
-  per-sub-step predictor/ghost `[[v_n]]` leak, R-1303/R-1601).
-
-## Verified correct (not findings)
-- Scale consistency: `data.sigma_n_corr` (`fault_face_flux.cpp:322`) and
-  `s.sigma_n_total` (`:91`/`:182`) are both `σ_n0 + σ_n_nuc + trial` → the
-  end-of-step vs sub-step comparison is like-for-like.
-- `sigma_n_total` IS populated on both the LSW iterator and the shared-fault
-  RS-style path (`fault_face_flux.cpp:182`), so shared QPs do not feed a
-  spurious `0` into the `min` (first hypothesis tested — refuted).
-- Sign: tracking `min` σ_n (most negative = most tensile) and `< floor` is the
-  correct engagement test; nocap (`floor<0`) correctly reports DISABLED and
-  skips `n_below_floor` while still counting `n_tensile`.
+- Files reviewed (final state, all built):
+  - `io/free_surface_output.hpp` (Phase 1 + the R-401 fix)
+  - `drivers/spatial_dyn_driver.cpp` (R-302/R-303 fixes from Round 3)
+  - `tests/unit/test_free_surface_slice.cpp` (new, Phase 4 — MPI class test)
+  - `tests/unit/test_spatial_friction_config.cpp` (+5 Phase-4 parse tests)
+  - `Makefile` (target wiring), `verify_spatial_dyn_smoke_safs.py` (Check F)
+- Verification performed (worktree build: `MFEM_DIR=../.. MFEM_BUILD_DIR=$MAIN
+  MFEM_INC_DIR=$MAIN MFEM_LIB_DIR=$MAIN`, `conda activate mfem-dev`):
+  - `seas_test_free_surface_slice`: **PASS at np=1 AND np=2** (Dimension==2, GlobalNE==4,
+    trace ≤ 1e-12, schedule, file writes).
+  - `seas_test_spatial_friction_config` (5 new FS tests): **PASS** (defaults, off round-trip,
+    illegal-value/dt≤0/negative-attr aborts).
+  - `seas_spatial_dyn_driver`: **compiles** with all fixes.
+  - `verify_spatial_dyn_smoke_safs.py`: `py_compile` OK.
 
 ## Findings
 
-### [R-001] [MODERATE] spatial_dyn_driver.cpp:[DIAG-SIGN] — only ONE speckle spot localized per step
+### [R-401] [CRITICAL — FOUND & FIXED] `io/free_surface_output.hpp` — sub-space `L2_FECollection` built with the parent dimension (3) instead of the submesh dimension (2) → SIGSEGV in every run
 
-**Category:** BUG (capture-completeness)
+**Category:** BUG (plan defect, inherited by the implementation)
 
 **Description:**
-The screenshot shows 3–4 simultaneous speckle clusters, but `[DIAG-SIGN-DOF]`
-reports only the single GLOBAL most-tensile DOF (`MPI_MINLOC` → one rank, one
-`argmin_ss_local`). Other concurrent spots are invisible (counted in
-`n_tensile`, never localized). The stated goal is to "capture the bug
-location"; with multiple spots this captures at most one location per step.
+Phase 1 §3 step 4 (and the original code) built the **submesh** velocity/rank
+`L2_FECollection` with `dim = 3` (the parent's spatial dimension). The submesh is codim-1
+(2D). MFEM's boundary→submesh L2 transfer (`SubMeshUtils::BuildVdofToVdofMap`, reached from
+the `ParTransferMap` ctor) requires the sub collection's dimension to be the **submesh**
+dimension; a `dim=3` collection produces inconsistent trace bookkeeping and **dereferences a
+null pointer**. Because the slice is **default-ON** and the driver always builds the velocity
+`ParTransferMap` at construction, this would have **SIGSEGV'd at startup on every TPV/SAFS
+run** — including the committed Frontera production jobs. Static review (Rounds 1–3) could not
+catch it; only building + running did. MFEM's own boundary-transfer unit test
+(`tests/unit/mesh/test_submesh.cpp` via `create_fec(..., submesh->Dimension())`) confirms the
+correct dimension.
 
-**Trigger:** ≥2 fault DOFs tensile in the same macro-step (the observed case).
+**Trigger:** constructing `FreeSurfaceOutput` on any 3D parent (i.e. every run).
 
-**Actual behavior:** one `[DIAG-SIGN-DOF]` line (global worst) per diag step.
+**Actual behavior (pre-fix):** `Signal 11 (SIGSEGV)` in
+`mfem::SubMeshUtils::BuildVdofToVdofMap` ← `ParTransferMap::ParTransferMap` ←
+`FreeSurfaceOutput` ctor, reproduced at np=1 and np=2.
 
-**Expected behavior:** localize all (or top-K) tensile DOFs so every speckle
-cluster's coordinates are recorded.
+**Expected behavior:** the transfer map builds; the sliced velocity equals the analytic trace.
 
-**Suggested fix:** every rank dumps its local tensile DOFs (capped), instead of
-only the global MINLOC winner.
+**Fix applied:**
 ```diff
--         if (rank == ss_out.r && argmin_ss_local >= 0)
--         {
--            const DOFData &d = dof_data[argmin_ss_local];
--            ... single global-worst dump ...
--         }
-+         // Dump EVERY local DOF whose sub-step σ_n is tensile/below floor,
-+         // capped, so all concurrent speckle spots are localized.
-+         {
-+            const real_t sign_thr = (sn_floor >= 0.0) ? sn_floor : 0.0;
-+            int dumped = 0;
-+            for (int i = 0; i < num_fault_total && dumped < 32; ++i)
-+            {
-+               const DOFData &d = dof_data[i];
-+               if (d.sigma_n_substep_min < 1.0e299 &&
-+                   d.sigma_n_substep_min < sign_thr)
-+               {
-+                  std::cout << "[DIAG-SIGN-DOF] rank " << rank << " dof " << i
-+                            << " xyz=(" << dof_coords_3d(3*i) << ","
-+                            << dof_coords_3d(3*i+1) << ","
-+                            << dof_coords_3d(3*i+2) << ")"
-+                            << " sigma_n_substep_min=" << d.sigma_n_substep_min
-+                            << " sigma_n_corr(end)=" << d.sigma_n_corr
-+                            << " V_substep_max=" << d.slip_rate_substep_max
-+                            << "\n";
-+                  ++dumped;
-+               }
-+            }
-+         }
+-      sub_vel_fec_ = std::make_unique<L2_FECollection>(order, 3, BasisType::GaussLobatto);
+-      sub_rank_fec_ = std::make_unique<L2_FECollection>(0, 3, BasisType::GaussLobatto);
++      const int sub_dim = submesh_.Dimension();   // codim-1: parent_dim - 1
++      sub_vel_fec_  = std::make_unique<L2_FECollection>(order, sub_dim, BasisType::GaussLobatto);
++      sub_rank_fec_ = std::make_unique<L2_FECollection>(0,     sub_dim, BasisType::GaussLobatto);
 ```
+(vdim stays 3 — a 3-component velocity living on the 2D surface. The **parent** spaces keep
+`dim=3`, which is correct.)
 
-**Test case:**
-```python
-def test_R001_all_tensile_spots_localized():
-    # 2 engineered tensile DOFs (or parse a known multi-spot log).
-    lines = [l for l in run_log
-             if l.startswith("[DIAG-SIGN-DOF]") and at_step(l, "t=3.")]
-    assert len({xyz_of(l) for l in lines}) >= n_known_tensile_spots
+**Test that now covers it:** `test_free_surface_slice.cpp` — constructs the writer on a
+2×2×2 box and asserts `Dimension()==2`, `GlobalNE()==4`, and trace ≤ 1e-12. It SIGSEGV'd
+before the fix and passes after (np=1 and np=2). This is the regression guard.
+
+---
+
+### [R-402] [LOW — HARDENED] `io/free_surface_output.hpp` — `FreeSurfaceOutput` was implicitly movable while holding an interior pointer
+
+**Category:** EDGE_CASE / ROBUSTNESS
+
+**Description:**
+The fix changed `submesh_` from `unique_ptr<ParSubMesh>` to a **value member** (so the
+submesh is built by guaranteed copy elision, avoiding any reliance on MFEM's incomplete
+`ParSubMesh` move — a risk the plan itself flagged). Side effect: `pv_dc_` and the sub FE
+spaces store interior pointers into `submesh_`, so the class must not relocate — yet it was
+left implicitly movable. The driver holds it via `unique_ptr<FreeSurfaceOutput>` and never
+moves the object, so no live bug, but the latent footgun was closed.
+
+**Fix applied:** deleted copy and move:
+```cpp
+   FreeSurfaceOutput(const FreeSurfaceOutput &)            = delete;
+   FreeSurfaceOutput &operator=(const FreeSurfaceOutput &) = delete;
+   FreeSurfaceOutput(FreeSurfaceOutput &&)                 = delete;
+   FreeSurfaceOutput &operator=(FreeSurfaceOutput &&)      = delete;
+```
+Confirmed the driver (`std::make_unique<FreeSurfaceOutput>(...)`, `fs_out.reset()`) still
+builds — make_unique constructs in place and the `unique_ptr` move moves the pointer, not the
+object.
+
+---
+
+### [R-403] [LOW] [POSSIBLE] `test_free_surface_slice.cpp` — the np=2 case may not exercise a *truly* empty-local-submesh rank
+
+**Category:** ASSUMPTION (test coverage)
+
+**Description:**
+The production motivation for the `-np 2` test is to exercise ranks that own **zero** local
+free-surface faces (interior ranks, the common case at scale). On a 2×2×2 box partitioned in
+two, METIS most likely splits by a plane and gives **both** ranks some top quads — so the
+genuinely empty-local path (local `submesh.GetNE()==0`, then collective `Transfer`/`Save`) may
+not actually be hit. The code is correct by MFEM's design (`ParSubMesh::Dimension()` is a
+topological property = parent_dim−1, valid even with 0 local elements, so `sub_dim==2` on
+every rank), and np=2 *did* exercise the collective transfer across a partition — but the
+zero-local-faces rank is not provably covered.
+
+**Trigger:** an interior rank with no `kTop` faces.
+
+**Suggested follow-up (not blocking):** add an np=3 or np=4 case, or a taller box
+(`MakeCartesian3D(1,1,4)`) tagged only on the very top, so at least one rank is guaranteed
+top-face-free; assert it still returns `GlobalNE()==expected` and trace ≤ 1e-12. Frontera at
+production np is the ultimate coverage.
+
+**Test case (sketch):**
+```cpp
+// MakeCartesian3D(1,1,4) tagged kTop only on z==z_max under -np 4 ⇒ ≥1 rank owns no top
+// face; assert GlobalNE()==1 on all ranks and the global trace error ≤ 1e-12.
 ```
 
 ---
 
-### [R-002] [MODERATE] sbatch + [DIAG-SIGN] — captures WHERE σ_n is tensile but not WHY (opening vs bulk); `SEAS_DIAG_SLIP=0`
+### [R-404] [MODERATE] [PRE-EXISTING, UNRELATED] `test_spatial_friction_config.cpp` aborts at the `depth_profile_1d` material test — blocks the full parse suite on TOML builds
 
-**Category:** DEVIATION / capture-completeness
-
-**Description:**
-The documented mechanism is the per-sub-step `[[v_n]]` OPENING leak; the
-existing slip trace decomposes `sigma_n_trial = sn_vjump + sn_sterm` (opening
-velocity jump vs bulk normal stress, `tpv205_substep_iterator.cpp:~427`).
-`[DIAG-SIGN]` tracks only the aggregate `sigma_n_total` min — it localizes the
-tensile DOF but cannot say whether the cause is `sn_vjump` (predictor/ghost
-opening) or `sn_sterm` (bulk). The new nocap sbatch leaves that trace OFF
-(`SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-0}"`), so the run will not capture the
-root-cause split at the located DOF.
-
-**Trigger:** running the nocap sbatch as committed.
-
-**Actual behavior:** localizes tensile DOFs; `sn_vjump`/`sn_sterm` never print.
-
-**Expected behavior:** also emit the opening-vs-bulk decomposition at/near the
-located speckle DOFs.
-
-**Suggested fix:** enable the slip diagnostic with a threshold below the ~13 m/s
-front peak so it fires on the speckle, not just the blow-up:
-```diff
--export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-0}"
--export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-10.0}"
-+export SEAS_DIAG_SLIP="${SEAS_DIAG_SLIP:-1}"
-+export SEAS_DIAG_SLIP_VTHR="${SEAS_DIAG_SLIP_VTHR:-15.0}"
-```
-(Alternative: fold `sn_vjump`/`sn_sterm` into `[DIAG-SIGN-DOF]` so the split
-prints at the located DOF without the full per-QP slip trace.)
-
-**Test case:**
-```python
-def test_R002_causal_decomposition_emitted():
-    assert any("sn_vjump" in l and "sn_sterm" in l for l in run_log)
-```
-
----
-
-### [R-003] [MODERATE] [POSSIBLE] spatial_dyn_driver.cpp:2136 — sub-step min reset every macro-step but read only at step%100 ‖ V>10
-
-**Category:** BUG (capture-completeness)
+**Category:** BUG (pre-existing; NOT caused by this change)
 
 **Description:**
-`sigma_n_substep_min` is reset to `1e300` at the TOP of **every** macro-step
-(:2136), but `[DIAG-SIGN]` reads it only when
-`step % 100 == 0 || V_max_step > 10.0`. For ~99/100 macro-steps the sub-step
-minimum is computed then overwritten unread. A tensile sub-step transient while
-global `V_max < 10` (the speckle's FIRST onset) on a non-%100 step is invisible
-— exactly the "did a sub-step go tensile before the output recovered?" regime.
-POSSIBLE because once the front reaches V≈13 (~t=3 s) every step is sampled, so
-the *sustained* window is covered; only the earliest pre-front onset is at risk.
+With `SEAS_USE_TOML` enabled, `seas_test_spatial_friction_config` aborts (SIGABRT) in
+`T_45_material_kinds` at `[material].kind="depth_profile_1d"` + `profile_csv=...`: the test
+expects a direct parse to **succeed**, but the parser (`spatial_friction.cpp:1640`) now
+**requires** a `[[material_profile.layer]]` array and aborts. This is a test/parser mismatch
+that predates this branch's free-surface work (my diff adds only output-block keys and 5
+end-of-suite FS tests — neither touches material parsing). It was masked in the worktree
+because the vendored `extern/toml11` header is absent there, so the suite was compiled with
+TOML **disabled** and `main()` early-returned ("SEAS_USE_TOML not defined — skipping").
 
-**Trigger:** tensile sub-step at a step with `step%100!=0 && V_max<=10`.
+**Impact:** the 5 new FS parse tests are correct and **pass** (verified by temporarily moving
+them ahead of `T_45`), but the *full* `make test-spatial-friction-config` cannot run green on
+a TOML build until `T_45` (or the parser) is reconciled.
 
-**Actual behavior:** that step's min is reset away before any diag reads it.
+**Recommendation (separate from free-surface; needs owner decision per CLAUDE.md "don't fix
+unrelated"):** either update `T_45` to supply a `[[material_profile.layer]]` block (if the
+parser requirement is intended) or relax the parser (if `profile_csv` alone should suffice).
+Not fixed here.
 
-**Expected behavior:** the tensile minimum should persist across the diag
-interval (or be scanned every step).
-
-**Suggested fix:** keep a driver-scope running interval-min, reset only after a
-print (not every macro-step). Update it each macro-step from
-`dof_data[i].sigma_n_substep_min`; report+reset in the `[DIAG-SIGN]` print.
-```diff
-   for (int i = 0; i < num_fault_total; ++i)
-   {
-      dof_data[i].slip_rate_substep_max = 0.0;
-      dof_data[i].sigma_n_substep_min = 1.0e300;
-   }
-+  // (declared once, outside the time loop)
-+  //   static real_t diag_iv_sn_min = 1.0e300; static int diag_iv_argmin = -1;
-+  // updated every macro-step from dof_data[i].sigma_n_substep_min, reported
-+  // and reset inside the rank-0 [DIAG-SIGN] print.
-```
-(If the maintainer accepts the V>10 gate covers the window of interest,
-downgrade to LOW and document the pre-onset gap.)
-
-**Test case:**
-```python
-def test_R003_transient_on_unsampled_step_captured():
-    # Inject tensile sub-step at step 1050 (not %100, V<10), recover by 1051.
-    assert diag_sign_at(1100).interval_sn_min <= injected_tensile_value
-```
-
----
-
-### [R-004] [LOW] multiple files — magic sentinel `1.0e300`/`1.0e299` instead of `std::numeric_limits`
-
-**Category:** QUALITY / ASSUMPTION
-
-**Description:**
-`1.0e300` (DOFData default in `fault_face_flux.hpp`, driver reset `:2136`, loop
-inits) and the guard `< 1.0e299` are hardcoded magic numbers — CLAUDE.md forbids
-them; codebase idiom is `std::numeric_limits<real_t>::max()` (e.g. ComputeMaxDt).
-Also fragile under `MFEM_USE_SINGLE` (`float` max ≈ 3.4e38): `1.0e300f` → `+inf`,
-which works only by inf semantics.
-
-**Suggested fix:**
-```diff
--   real_t sigma_n_substep_min = 1.0e300;
-+   real_t sigma_n_substep_min = std::numeric_limits<real_t>::max();
-```
-```diff
--         dof_data[i].sigma_n_substep_min = 1.0e300;  // [DIAG-SIGN] tensile tracker
-+         dof_data[i].sigma_n_substep_min =
-+            std::numeric_limits<real_t>::max();  // [DIAG-SIGN] tensile tracker
-```
-```diff
--            if (snss < 1.0e299)   // a sub-step value was recorded this macro step
-+            if (snss < std::numeric_limits<real_t>::max())  // value recorded
-```
-(plus the matching driver `1.0e300` inits; ensure `<limits>` is included in
-`fault_face_flux.hpp`).
-
-**Test case:** N/A (covered by a single-precision build pass).
-
----
-
-### [R-005] [LOW] [POSSIBLE] wave_operator.inl:4328 — shared-QP `sigma_n_total` is pre-average
-
-**Category:** EDGE_CASE
-
-**Description:**
-On the shared-fault path `ComputeStageState` sets `sigma_n_total` from the
-rank-LOCAL trial (`:182`), then the code averages `sigma_n_trial`
-(`states[qq].sigma_n_trial = sn_avg`) WITHOUT recomputing `sigma_n_total`. So
-`:4328` min-tracks the pre-average `sigma_n_total`, while end-of-step
-`data.sigma_n_corr` for shared QPs uses the averaged path — slightly different
-bases. Shared QPs are ~0.089 % of DOFs (162/182055), so negligible aggregate,
-but a shared-QP speckle is reported with a marginally off σ_n.
-
-**Suggested fix:**
-```diff
-+                  const real_t sn_tot_avg = fdata_qq.sigma_n0
-+                                          + fdata_qq.sigma_n_nuc
-+                                          + states[qq].sigma_n_trial;
-                   fdata_qq.sigma_n_substep_min =
--                     std::min(fdata_qq.sigma_n_substep_min,
--                              states[qq].sigma_n_total);
-+                     std::min(fdata_qq.sigma_n_substep_min, sn_tot_avg);
-```
-(Confirm `states[qq].sigma_n_trial` is the averaged value at this line.)
-
-**Test case:**
-```python
-def test_R005_shared_qp_consistency():
-    # On a >=2-rank run, quiescent shared-fault DOF:
-    assert abs(shared_dof.sigma_n_substep_min - shared_dof.sigma_n_corr) < tol
-```
-
----
-
-### [R-006] [LOW] spatial_dyn_driver.cpp:[DIAG-SIGN] — every-step printing after V>10 bloats the log
-
-**Category:** QUALITY
-
-**Description:**
-Once `V_max_step>10` (~t=3 s) the diag block fires every step through the event
-(~30k steps), adding ≥2 `[DIAG-SIGN]*` lines/step (more with R-001's fix) atop
-`[DIAG]`/`[DIAG-ONSET]`. The 7751832 log was already 8.9 MB with slip off; this
-can multiply it and bury the signal.
-
-**Suggested fix:** print the aggregate line on a coarser cadence or only when
-tensile:
-```diff
--         if (rank == 0)
-+         if (rank == 0 && (step % 100 == 0 || n_ss_tensile_g > 0))
-            { std::cout << "[DIAG-SIGN] step " << step << ... }
-```
-
-**Test case:** N/A (log-volume/quality).
+**Environment note:** a fresh git worktree does not receive the gitignored `extern/toml11`
+vendored header; it was symlinked from the main checkout to build/run the parse tests locally.
+Document this in the worktree setup, or the config suite silently no-ops.
 
 ---
 
 ## Summary
-- Critical issues: 0
-- Moderate issues: 3 (R-001 multi-spot; R-002 no opening/bulk decomposition +
-  slip diag off; R-003 pre-onset sampling gap)
-- Low issues: 3 (R-004 magic sentinel; R-005 shared-QP scale; R-006 log volume)
-- Plan compliance: PARTIAL — the instrument correctly/consistently tracks
-  per-sub-step tensile σ_n and floor engagement (scale + population checks
-  pass) and WILL localize the worst tensile DOF once V>10. But "capture the bug
-  location" is only partly met: one spot/step (R-001), no opening-vs-bulk cause
-  (R-002), possible pre-front onset miss (R-003).
-- Verdict: PASS WITH FIXES — usable to confirm tensile σ_n and locate the worst
-  spot; apply R-001/R-002 (and decide R-003) before relying on it to fully
-  localize/diagnose the speckle.
+- Critical issues: 1 — **R-401, found by execution and fixed** (sub-FEC dimension; would have
+  SIGSEGV'd every default-ON run). This is the headline: it validates Round 3's insistence
+  that Phase 4 (build+run) was the only way to catch trace/collective defects.
+- Moderate issues: 1 — R-404, **pre-existing and unrelated** (material `depth_profile_1d`
+  test/parser mismatch blocking the full TOML parse suite). Noted, not fixed.
+- Low issues: 2 — R-402 (movability hardened), R-403 (empty-local-rank coverage gap; code
+  correct by design, follow-up test suggested).
+- Plan compliance: **FULL** for Phases 1–4 as built and tested; the plan's prescribed sub-FEC
+  `dim=3` was a defect corrected here (R-401).
+- Verdict: **PASS.** All free-surface code builds; the class test passes at np=1 and np=2
+  (trace ≤ 1e-12), the 5 parse tests pass, the driver compiles, the smoke script is wired.
+  Two non-blocking follow-ups remain: R-403 (stronger empty-local coverage) and R-404
+  (pre-existing material-test reconciliation — owner decision).
 
 ## Unreviewed Areas
-- Live-run numerical behavior (Frontera unreachable; not executed). R-001/R-003
-  capture claims should be re-checked against the first nocap+diag run.
-- `tpv102`/`tpv104` byte-exact regression not re-run; the new field is
-  transient/non-serialized and only min-updated, so byte-exactness is expected
-  but unverified — confirm with `make test`.
+- **Live Frontera behavior** at production np (hundreds of ranks; genuinely interior,
+  top-face-free ranks): out of scope per `feedback-no-local-mesh-runs`; the np=2 run + R-401
+  fix substantially de-risk it, but R-403's stronger coverage or a Frontera smoke is the final
+  check before scale-up.
+- **HDF5 (`Mode::Hdf5`) back end** of the slice: not exercised (VTU is the default and the
+  tested path); the branch mirrors the volume writer and is `MFEM_USE_HDF5`-guarded.
+- The smoke-script Check F's `velocity`/`mpi_rank` array detection was validated by logic +
+  `py_compile`, not against a real run's `.vtu` (no production run locally, per policy).

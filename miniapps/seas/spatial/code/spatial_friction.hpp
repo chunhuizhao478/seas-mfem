@@ -192,6 +192,11 @@ struct OutputSpec
    real_t      paraview_coseismic_dt         = -1.0;   ///< -1 = unset
    real_t      paraview_nucleation_dt        = -1.0;
    real_t      paraview_interseismic_dt      = -1.0;
+
+   // Free-surface slice (default ON; independent of the paraview master gate).
+   std::string paraview_free_surface    = "vtu";   ///< "off" | "vtu" | "hdf5"
+   real_t      paraview_free_surface_dt = 0.05;     ///< seconds; fixed cadence
+   std::vector<int> paraview_free_surface_attrs;    ///< optional override; empty ⇒ use [boundary].natural_attrs
 };
 
 enum class VelocityModel { CVMH, CVMS_4_26_M01, MultiscaleStatewise };
