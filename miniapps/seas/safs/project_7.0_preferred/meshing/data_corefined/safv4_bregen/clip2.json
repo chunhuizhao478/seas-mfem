@@ -1,5 +1,5 @@
 {
- "cap_flips": 0,
+ "cap_flips": 5,
  "clip_a_outside_shell": 0,
  "clip_b_junction": {
   "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {

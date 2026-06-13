@@ -543,13 +543,23 @@ def main(argv: list[str] | None = None) -> int:
             d1, d2 = np.linalg.norm(n1), np.linalg.norm(n2)
             if d1 == 0 or d2 == 0:
                 continue
-            if np.dot(n1, n2) / (d1 * d2) < np.cos(np.radians(30)):
-                continue
+            coplanar = np.dot(n1, n2) / (d1 * d2) >= np.cos(np.radians(30))
             old_q = min(tri_q(tris_k[[ti]])[0], tri_q(tris_k[[tj]])[0])
             cand1 = np.array([[w1, w2, int(v)]])
             cand2 = np.array([[w2, w1, int(u)]])
             new_q = min(tri_q(cand1)[0], tri_q(cand2)[0])
             new_min_edge = np.linalg.norm(pts[w1] - pts[w2])
+            # Relaxed flip for FOLD-artifact slivers on a fault: at the
+            # fault-fault junctions the eps-detach + corefine leave very
+            # thin triangles straddling a non-physical fold (dihedral 70-
+            # 170 deg).  A flip that turns min-q ~0 into a well-shaped pair
+            # (> 0.4) removes the fold; the post-flip fault crossing gate
+            # (gate_fault_crossing_pairs) is the safety net against a flip
+            # that would self-intersect.
+            is_fault = 1 <= int(markers_k[ti]) <= n_faults
+            relaxed = is_fault and old_q < 0.15 and new_q > 0.30
+            if not (coplanar or relaxed):
+                continue
             if new_q <= old_q or new_min_edge < args.min_edge:
                 continue
             tris_k[ti] = [int(u), w2, w1]

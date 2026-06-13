@@ -496,3 +496,34 @@ now uniformly ~2.5 km, no 43 km triangles), `final_{all,faults,boundary,
 fault_1/2/3_*}.vtu`, and `safv4_deep_500m_opt_bulk_eta.vtu` (color by
 `eta` to see the quality distribution; the worst are at the fault, the
 boundary is clean).
+
+---
+
+## Phase 5d — fault-trace/junction sliver removal (user goal 2026-06-12)
+
+The residual fault-surface thin triangles (5 with q < 0.1, q_min 0.0006)
+were localized: NOT at the DEM trace but at the fault-fault JUNCTIONS
+(SAF x Garnet, Banning x Garnet) at z = -5 to -11 km.  Each is a sliver
+straddling a non-physical FOLD in the fault surface (dihedral 70-170 deg,
+some normals nearly anti-parallel) left by the eps-detach extension +
+corefine.  The clip's cap-flip skipped them because of its 30-deg
+coplanarity guard.
+
+Fix: `clip_fault_overhangs.py` cap-flip now allows a RELAXED flip for a
+very-thin (q < 0.15) FAULT triangle when the flip yields a well-shaped
+pair (new min-q > 0.30) and a >= floor new edge — this un-folds the
+artifact.  The post-flip `gate_fault_crossing_pairs == 0` is the safety
+net against a flip that would self-intersect (verified clean: 5 flips, 0
+crossings).
+
+Result (both meshes rebuilt):
+- Fault surface q_min: **0.0006 -> 0.1988**; q<0.1: **5 -> 0**; q<0.3: 7 -> 2.
+- Volume eta_min: **0.0023 -> 0.0628** (opt) / 0.0591 (base).
+- Volume eta<=0.05: **2 -> 0** (opt) and **3 -> 0** (base) — G2a now PASSES.
+- eta<=0.1: 199 -> 173 (opt, 1.2e-4) / 232 -> 245 (base).
+- All gates still PASS: min edge 100.18 m, 100% fault embedding, 0
+  duplicate groups, MFEM loads both (1,416,939 / 1,180,159 tets).
+
+`meshing/results/safv4_deep_500m_opt.msh` is the PRIMARY mesh; with G2a
+clean (0 tets eta<=0.05) it meets every hard gate in the plan's
+acceptance contract.
