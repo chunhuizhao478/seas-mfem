@@ -1,0 +1,91 @@
+{
+ "dem_name": "tag_201",
+ "dup_groups_fault_subset": 0,
+ "dup_groups_total": 0,
+ "dup_max_multiplicity": 1,
+ "embedding": {
+  "tag_101": {
+   "n_boundary": 0,
+   "n_interior": 100768,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 100768,
+   "n_unique_tri": 100768
+  },
+  "tag_102": {
+   "n_boundary": 0,
+   "n_interior": 2613,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 2613,
+   "n_unique_tri": 2613
+  },
+  "tag_103": {
+   "n_boundary": 0,
+   "n_interior": 28896,
+   "n_orphan": 0,
+   "n_over": 0,
+   "n_tri": 28896,
+   "n_unique_tri": 28896
+  }
+ },
+ "fault_names": [
+  "tag_101",
+  "tag_102",
+  "tag_103"
+ ],
+ "mesh": "/Users/chunhuizhao/projects/seas-mfem-spatial-dyn-driver/miniapps/seas/safs/project_7.0_preferred/meshing/results/safv4_deep_500m.msh",
+ "n_fault_surface_nodes": 67806,
+ "n_nodes": 124826,
+ "n_tets": 647494,
+ "pairs": {},
+ "pass": true,
+ "slivers": {
+  "eta_floor": 0.1,
+  "min_edge_floor_m": 100.0,
+  "n_short_edge_tets": 0,
+  "n_slivers": 138,
+  "sliver_dist_to_fault_m": {
+   "p05": 147.3373989470954,
+   "p25": 264.979203586713,
+   "p50": 310.71317695570485,
+   "p75": 384.1686237049172,
+   "p95": 5943.922312788956
+  },
+  "sliver_frac_within_1km_of_fault": 0.8985507246376812,
+  "sliver_touch_dem_ge1": 25,
+  "sliver_touch_dem_ge3": 7,
+  "sliver_touch_fault_ge1": 121,
+  "sliver_touch_fault_ge3": 22,
+  "sliver_z_hist": {
+   "counts": [
+    22,
+    39,
+    26,
+    8,
+    14,
+    7,
+    22
+   ],
+   "edges_m": [
+    -28554.959025434815,
+    -15000.0,
+    -10000.0,
+    -5000.0,
+    -2500.0,
+    -1000.0,
+    0.0,
+    4000.0
+   ]
+  }
+ },
+ "surfaces": {
+  "tag_101": 100768,
+  "tag_102": 2613,
+  "tag_103": 28896,
+  "tag_201": 41669,
+  "tag_202": 4378,
+  "tag_203": 2099
+ },
+ "tol_m": 0.001
+}

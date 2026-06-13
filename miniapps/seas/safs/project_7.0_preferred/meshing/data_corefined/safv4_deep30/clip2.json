@@ -1,0 +1,67 @@
+{
+ "cap_flips": 0,
+ "clip_a_outside_shell": 1,
+ "clip_b_junction": {
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
+   "n_components": 1,
+   "n_cut_edges": 17,
+   "n_dropped": 0
+  },
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+   "n_components": 1,
+   "n_cut_edges": 47,
+   "n_dropped": 0
+  },
+  "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6 -> fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6": {
+   "n_components": 1,
+   "n_cut_edges": 175,
+   "n_dropped": 0
+  }
+ },
+ "cross_fault_facet_pushed": 0,
+ "cross_fault_prox_pushed": 0,
+ "crossing_repair": {
+  "crossings_left": 0,
+  "vertices_pushed": 0
+ },
+ "fault_border_classes": {
+  "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_ext": {
+   "junction": 64,
+   "on_boundary_shell": 1538,
+   "tip": 866
+  },
+  "fault_SAFS-SAFZ-MULT-Banning_fault-CFM6_ext": {
+   "junction": 175,
+   "on_boundary_shell": 243,
+   "tip": 21
+  },
+  "fault_SAFS-SAFZ-SBMT-Garnet_Hill_fault-CFM6_ext": {
+   "on_boundary_shell": 548,
+   "tip": 356
+  }
+ },
+ "final_outside_dropped": 0,
+ "gate_boundary_open_edges": 0,
+ "gate_boundary_overshared_edges": 0,
+ "gate_dup_groups_at_tol": 0,
+ "gate_edges_below_floor": 0,
+ "gate_fault_crossing_pairs": 0,
+ "gate_fault_outside_shell_after_clip": 0,
+ "gate_min_edge_m": 100.07715912765826,
+ "n_boundary": 48148,
+ "n_degen_dropped_at_weld": 0,
+ "n_fault_in": 132278,
+ "n_fault_out": 132277,
+ "n_tris_in": 180426,
+ "n_tris_out": 180423,
+ "near_shell_sags_snapped": 0,
+ "pass": true,
+ "ribbon_degen_dropped": 0,
+ "ribbon_snapped_vertices": 0,
+ "short_edge_contraction": {
+  "rounds": 1,
+  "vertices_merged": 1
+ },
+ "thin_tri_smoothed": 0,
+ "warn_near_shell_tip_edges": 0
+}

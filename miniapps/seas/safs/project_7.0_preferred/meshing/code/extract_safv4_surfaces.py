@@ -175,6 +175,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--out-dir", type=Path, required=True)
     ap.add_argument("--tol", type=float, default=1e-3)
     ap.add_argument("--fault-side", choices=("minus", "plus"), default="minus")
+    ap.add_argument("--deepen-bottom", type=float, default=0.0,
+                    help="translate the bottom surface down by this many "
+                         "metres and extrude the ribbon walls to meet it, "
+                         "so fault bottom borders end INSIDE the volume "
+                         "(interior tips) instead of on the boundary")
     args = ap.parse_args(argv)
 
     if not args.inp.is_file():
@@ -369,6 +374,54 @@ def main(argv: list[str] | None = None) -> int:
         "n_rim_edges_preserved": int(rim_edges.shape[0]),
     }
 
+    # ---- bottom deepening (fault bottoms become interior tips) -----------
+    deepen_info = {"applied": False}
+    if args.deepen_bottom > 0.0:
+        dz = float(args.deepen_bottom)
+        bot = surf["bottom"]
+        bot_used = np.unique(bot.ravel())
+        # translated copies of every bottom vertex
+        new_ids = {}
+        new_pts = []
+        base = pts.shape[0]
+        for k2, v in enumerate(bot_used):
+            new_ids[int(v)] = base + k2
+            p = pts[v].copy()
+            p[2] -= dz
+            new_pts.append(p)
+        pts = np.vstack([pts, np.asarray(new_pts)])
+        remap_b = np.vectorize(lambda v: new_ids[int(v)])
+        surf["bottom"] = remap_b(bot).astype(np.int64)
+        # extrude each ribbon's bottom border chain down to the new bottom
+        n_strip = 0
+        for rn in [n for n in surf if n.startswith("ribbon_")]:
+            rt = surf[rn]
+            rb = border_edges(rt)
+            # bottom-border edges: both endpoints on the OLD bottom plane
+            z_old = float(pts[new_ids[int(bot_used[0])]][2] + dz)
+            zb = np.array([abs(pts[u][2] - z_old) < 1.0
+                           and abs(pts[v][2] - z_old) < 1.0
+                           for u, v in rb])
+            strips = []
+            for u, v in rb[zb]:
+                u, v = int(u), int(v)
+                tu, tv = new_ids.get(u), new_ids.get(v)
+                if tu is None or tv is None:
+                    print(f"ABORT: ribbon {rn} bottom-border node not in "
+                          f"bottom vertex set (rim weld mismatch).",
+                          file=sys.stderr)
+                    return 2
+                strips.append((u, v, tv))
+                strips.append((u, tv, tu))
+            if strips:
+                surf[rn] = np.vstack([rt, np.asarray(strips, dtype=np.int64)])
+                n_strip += len(strips)
+        deepen_info = {"applied": True, "dz_m": dz,
+                       "n_bottom_verts_translated": int(bot_used.size),
+                       "n_ribbon_strip_tris": n_strip}
+        print(f"  bottom deepened by {dz:.0f} m "
+              f"(+{n_strip} ribbon strip tris)", flush=True)
+
     node_set = {n: set(np.unique(t.ravel()).tolist())
                 for n, t in surf.items()}
 
@@ -458,6 +511,7 @@ def main(argv: list[str] | None = None) -> int:
         },
         "minus_plus_match": match_report,
         "dem_retriangulation": dem_retri_info,
+        "bottom_deepening": deepen_info,
         "boundary_shell": {
             "names": boundary_names,
             "n_edges": int(uniq_e.shape[0]),

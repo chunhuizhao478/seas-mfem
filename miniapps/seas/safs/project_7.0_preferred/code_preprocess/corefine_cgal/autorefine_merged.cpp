@@ -150,6 +150,10 @@ struct Args {
     std::vector<std::string> boundary_paths;
     bool box_mode = false;
     std::string fault_prefix;
+    // Soup mode: re-autorefine an EXISTING soup STL + per-triangle marker
+    // JSON (e.g. the clipped merged soup after geometry edits), skipping
+    // assembly entirely.  MANIFEST is still required for fault basenames.
+    std::string soup_in, soup_markers;
     // pad_top = 0 by default so the box top coincides with the geological
     // free surface (z=0) where every input fault outcrops.  With pad_top
     // > 0 the fault tops would sit INSIDE the bulk, breaking free-surface
@@ -205,6 +209,14 @@ static int parse(int argc, char** argv, Args& a) {
         else if (s == "--fault-prefix") {
             if (++i >= argc) { std::cerr << "missing value for --fault-prefix\n"; std::exit(2); }
             a.fault_prefix = argv[i];
+        }
+        else if (s == "--soup-in") {
+            if (++i >= argc) { std::cerr << "missing value for --soup-in\n"; std::exit(2); }
+            a.soup_in = argv[i];
+        }
+        else if (s == "--soup-markers") {
+            if (++i >= argc) { std::cerr << "missing value for --soup-markers\n"; std::exit(2); }
+            a.soup_markers = argv[i];
         }
         else if (s == "--verbose")    a.verbose = true;
         else pos.push_back(s);
@@ -333,7 +345,88 @@ int main(int argc, char** argv) {
         }
     };
     std::vector<std::string> boundary_names;
-    if (a.box_mode) {
+    if (!a.soup_in.empty()) {
+        // Soup mode: load an existing soup + markers verbatim.
+        if (a.soup_markers.empty()) {
+            std::cerr << "--soup-in requires --soup-markers\n"; return 2;
+        }
+        std::vector<Point> spts;
+        std::vector<std::vector<std::size_t>> spolys;
+        if (!CGAL::IO::read_polygon_soup(a.soup_in, spts, spolys)) {
+            std::cerr << "cannot read soup STL: " << a.soup_in << "\n";
+            return 3;
+        }
+        std::ifstream mf(a.soup_markers);
+        std::string mcontent((std::istreambuf_iterator<char>(mf)),
+                             std::istreambuf_iterator<char>());
+        auto mp = mcontent.find("\"markers\"");
+        mp = mcontent.find('[', mp);
+        std::vector<int> smarks;
+        const char* c = mcontent.c_str() + mp + 1;
+        while (*c && *c != ']') {
+            while (*c == ' ' || *c == ',' || *c == '\n') ++c;
+            if (*c == ']' || !*c) break;
+            smarks.push_back(std::atoi(c));
+            while (*c && *c != ',' && *c != ']') ++c;
+        }
+        if (smarks.size() != spolys.size()) {
+            std::cerr << "soup markers (" << smarks.size()
+                      << ") != soup tris (" << spolys.size() << ")\n";
+            return 4;
+        }
+        // Carry the fault basenames verbatim from the input soup markers
+        // (the soup's marker semantics are already fixed; regenerating
+        // from the unfiltered manifest would mislabel marker 1 as the
+        // first ALPHABETICAL mesh, e.g. dem_graded).
+        {
+            auto fbp = mcontent.find("\"fault_basenames\"");
+            if (fbp != std::string::npos) {
+                auto lb = mcontent.find('[', fbp);
+                auto rb = mcontent.find(']', lb);
+                std::string arr = mcontent.substr(lb + 1, rb - lb - 1);
+                std::vector<ManifestEntry> fent;
+                std::size_t q0 = 0;
+                while ((q0 = arr.find('"', q0)) != std::string::npos) {
+                    auto q1 = arr.find('"', q0 + 1);
+                    if (q1 == std::string::npos) break;
+                    ManifestEntry e;
+                    e.basename = arr.substr(q0 + 1, q1 - q0 - 1);
+                    fent.push_back(e);
+                    q0 = q1 + 1;
+                }
+                if (!fent.empty()) entries = fent;
+            }
+        }
+        // Carry boundary_names through (the .msh writer needs them).
+        auto bnp = mcontent.find("\"boundary_names\"");
+        if (bnp != std::string::npos) {
+            auto lb = mcontent.find('[', bnp);
+            auto rb = mcontent.find(']', lb);
+            std::string arr = mcontent.substr(lb + 1, rb - lb - 1);
+            std::size_t q0 = 0;
+            while ((q0 = arr.find('"', q0)) != std::string::npos) {
+                auto q1 = arr.find('"', q0 + 1);
+                if (q1 == std::string::npos) break;
+                boundary_names.push_back(arr.substr(q0 + 1, q1 - q0 - 1));
+                q0 = q1 + 1;
+            }
+        }
+        std::size_t n_degen2 = 0;
+        for (std::size_t pi2 = 0; pi2 < spolys.size(); ++pi2) {
+            const auto& poly = spolys[pi2];
+            if (poly.size() != 3) continue;
+            const std::size_t i0 = intern(spts[poly[0]]);
+            const std::size_t i1 = intern(spts[poly[1]]);
+            const std::size_t i2 = intern(spts[poly[2]]);
+            if (i0 == i1 || i1 == i2 || i0 == i2) { ++n_degen2; continue; }
+            triangles.push_back({i0, i1, i2});
+            markers.push_back(smarks[pi2]);
+        }
+        if (a.verbose) {
+            std::cerr << "  soup mode: " << triangles.size() << " tris ("
+                      << n_degen2 << " degenerate dropped)\n";
+        }
+    } else if (a.box_mode) {
         // axis indices: 0=x, 1=y, 2=z
         add_face(2, zmin, 0, xmin, xmax, 1, ymin, ymax, -1);  // bottom (-z)
         add_face(2, zmax, 0, xmin, xmax, 1, ymin, ymax, +1);  // top    (+z)  ← free surface
@@ -374,8 +467,8 @@ int main(int argc, char** argv) {
         }
     }
 
-    // Faults in alphabetical order.
-    for (std::size_t fi = 0; fi < entries.size(); ++fi) {
+    // Faults in alphabetical order (skipped in soup mode: already inside).
+    for (std::size_t fi = 0; a.soup_in.empty() && fi < entries.size(); ++fi) {
         fs::path stl_p = corefined_dir / (entries[fi].basename + "_corefined.stl");
         std::vector<Point> fpts;
         std::vector<std::vector<std::size_t>> fpolys;
@@ -526,12 +619,13 @@ int main(int argc, char** argv) {
         if (a.verbose) std::cerr << "wrote " << a.out_markers_json << "\n";
     }
 
-    if (!a.box_mode && visitor.n_fault_subtriangles > 0) {
+    if (!a.box_mode && a.soup_in.empty() && visitor.n_fault_subtriangles > 0) {
         std::cerr << "ERROR: autorefine split " << visitor.n_fault_subtriangles
                   << " fault-marked triangle(s) — a Phase 3 corefine pair "
                      "leaked an unresolved intersection.  Outputs were "
                      "written for inspection; STOP and report.\n";
         return 9;
     }
+    // Soup mode is a REPAIR pass: fault splits are the point; report only.
     return 0;
 }

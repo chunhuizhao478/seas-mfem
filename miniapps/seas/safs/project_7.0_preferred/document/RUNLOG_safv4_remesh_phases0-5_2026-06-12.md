@@ -330,3 +330,87 @@ Two meshes delivered (`meshing/results/`):
 - `meshing/results/safv4_500m_topo{,_opt}_{bulk,fault}.vtu` — ParaView
   (bulk: cell data `q_iso`, `edge_min`; fault: `patch` 1..3)
 - `meshing/results/gate_conformity_500m{,_opt}.json` (committed)
+
+---
+
+## Phase 5b — deepened bottom + coarsened boundary + sliver reduction (user feedback 2026-06-12)
+
+User feedback on the Phase 5 mesh (ParaView screenshot): (1) the volume
+boundary did not coarsen away from the fault; (2) the fault bottom borders
+terminated ON the domain bottom rather than inside the volume.  Plus a
+renewed request to drive slivers down.
+
+### (1) Deepened bottom — fault bottoms become interior tips
+
+`extract_safv4_surfaces.py --deepen-bottom 20000`: translate the `bottom`
+surface down 20 km and extrude the four ribbon walls to meet it.  The
+SAF/Garnet bottom borders (previously a `bottom` contact class, R-001)
+now classify as `interior_tip` — verified: SAF/Garnet fault z_min =
+-19,329 m sit 20 km above the new domain bottom at -39,329 m; Banning
+27.8 km above.  No fault facet touches the boundary shell.  This also
+REMOVES the bottom from the corefine participant set (4 inputs: 3 faults
++ DEM), eliminating the fault x bottom tangential-contact handling.
+
+### (2) Coarsened boundary
+
+- DEM regraded `--h-far 10000 --d-far 40000` (was 2500 / 9000): top
+  surface now 100 m at the trace -> 43.6 km far-field (was capped at
+  2.5 km).  DEM tris 98,477 -> 39,579.
+- Bulk far-field `--lc-far 10000 --dist-outer 40000` (was 5000 / 20000):
+  bulk edge median 502 -> 706 m, max 44.6 km.
+- Boundary surface tris 126,892 -> 48,146.  Measured surface edge medians:
+  DEM 654 m, bottom 8,758 m, sides 5,417 m (faults stay 456-467 m).
+
+### (3) Sliver reduction — the eps-detach lesson
+
+First deep attempt used eps-detach = 120 m (carried over from mid-iteration)
+and gave eta<=0.05 = 25 (regression vs Phase 5's 3).  Root cause: the
+larger junction-border detachment produced 9 thin fault triangles
+(q_min 0.0019) ON the constrained trace/junction lines, which force thin
+tets; a tetgen mindihedral sweep (14/18/20) plateaued at ~18 — surface
+quality, not bulk optimization, was the bottleneck.  A constrained
+in-plane Laplacian smoothing pass (`clip_fault_overhangs.py` b4b, free
+interior fault vertices only) cannot touch trace/junction-constrained
+vertices, so it does not help these.
+
+Fix: revert eps-detach to the Phase-5-proven **30 m**.  The junction
+geometry is then identical to Phase 5 and the thin triangles vanish.
+
+### New PLC-repair machinery (this iteration)
+
+The geometry edits the deepening + coarsening required surfaced new
+degeneracies tetgen rejects; all are now handled in the clip + a repair pass:
+- `autorefine_merged --soup-in/--soup-markers`: re-autorefine an EXISTING
+  clipped soup (the clip's pushes/snaps can leave coplanar fan folds that
+  share a junction vertex — a vertex-in-facet PLC violation, measured
+  2.6 cm deep — that the assembly-time autorefine never saw).  Carries
+  fault basenames + boundary names verbatim from the input markers.
+- clip fold-aware crossing scan: fan pairs sharing ONE junction vertex are
+  tested through the shared corner (a healthy fan grazes only at the
+  vertex; a folded fan penetrates strictly inside).  Push clearance
+  reduced 20 -> 5 m (20 m over-pushed shared line vertices into folds).
+- clip cross-fault facet-clearance push (vertex within metres of another
+  fault's facet INTERIOR), near-shell sag snap, boundary-edge contraction
+  (autorefine splinters ON the shell, anchored to a trace vertex when one
+  is present), and a final shell-containment drop.
+
+### Final deliverables (replace the Phase 5 meshes)
+
+`meshing/results/`:
+
+| mesh | tets | nodes | eta_med | eta<=0.1 | eta<=0.05 | min edge | bulk med edge |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| `safv4_deep_500m_opt.msh` (PRIMARY; mindihedral 18, opt x15) | 1,066,297 | 189,550 | 0.813 | **85** (8.0e-5) | 3 | 100.08 m | 706 m |
+| `safv4_deep_500m.msh` (baseline knobs) | 647,494 | 124,826 | 0.702 | 138 (2.1e-4) | 2 | 100.08 m | 466 m |
+
+- All gates PASS (G0 500/500; G1 100.08 m, 0 below floor; G2b 8.0e-5 ≤
+  5e-4; G3a 0 duplicate groups; G3b 132,277 fault tris all interior =
+  100% embedding; G1f fault medians 456/462/467 m).  G2a = 3 (at
+  z -10.4 to -5.4 km, deep; accept-with-report).  MFEM loads both
+  (bdr attrs 101,102,103,201,202,203).
+- vs Phase 5 (`safv4_500m_topo_opt`): SAME eta<=0.05 (3), BETTER eta<=0.1
+  (85 vs 96), coarser boundary, fault bottoms now interior.
+- ParaView: `meshing/vtu_safv4_deep/final_{all,faults,boundary,fault_1_*,
+  fault_2_*,fault_3_*}.vtu` + `boundary_surface.vtu` (color by `edge_max`
+  to see the coarsening), and `meshing/results/safv4_deep_500m{,_opt}_
+  {bulk,fault}.vtu`.

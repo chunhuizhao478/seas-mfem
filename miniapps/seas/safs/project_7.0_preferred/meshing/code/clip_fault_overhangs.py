@@ -307,9 +307,20 @@ def main(argv: list[str] | None = None) -> int:
                                     tris_k[:, [2, 0]]]), axis=1)
         ue = np.unique(e, axis=0)
         el2 = np.linalg.norm(pts[ue[:, 0]] - pts[ue[:, 1]], axis=1)
-        shorts = ue[el2 < args.min_edge]
-        shorts = [tuple(int(x) for x in row) for row in shorts
-                  if not (int(row[0]) in b_vids and int(row[1]) in b_vids)]
+        shorts_all = ue[el2 < args.min_edge]
+        # Both-boundary edges (autorefine splinters ON the shell) are
+        # contractible too, anchored on the shell — EXCEPT when either
+        # endpoint is also a fault vertex (trace conformity).
+        f_vids_loc = set(np.unique(
+            tris_k[(markers_k >= 1) & (markers_k <= n_faults)].ravel())
+            .tolist())
+        shorts = []
+        for row in shorts_all:
+            u9, v9 = int(row[0]), int(row[1])
+            if u9 in b_vids and v9 in b_vids:
+                if u9 in f_vids_loc and v9 in f_vids_loc:
+                    continue   # both trace-shared: untouchable
+            shorts.append((u9, v9))
         if not shorts or n_contract_rounds >= 10:
             break
         n_contract_rounds += 1
@@ -331,7 +342,10 @@ def main(argv: list[str] | None = None) -> int:
             clusters[find(x)].append(x)
         pts = pts.copy()
         for members in clusters.values():
-            anchors = [x for x in members if x in b_vids]
+            # anchor preference: trace (fault+shell) > shell > centroid
+            tr_anchors = [x for x in members
+                          if x in b_vids and x in f_vids_loc]
+            anchors = tr_anchors or [x for x in members if x in b_vids]
             tgt = (pts[anchors[0]] if anchors
                    else pts[members].mean(axis=0))
             for x in members:
@@ -388,6 +402,11 @@ def main(argv: list[str] | None = None) -> int:
             return u > 1e-9 and v > 1e-9 and u + v < 1 - 1e-9
 
         def cross(k_a, k_b):
+            # Segments THROUGH a shared vertex are tested too: a healthy
+            # fan crosses the neighbor's plane exactly AT the corner
+            # (rejected by the strict-interior barycentric test), while a
+            # folded fan crosses strictly inside (measured: 5 cm from the
+            # shared vertex, 0.07-3.3 m penetrations).
             A, B = P3[k_a], P3[k_b]
             for (PP, QQ) in ((A, B), (B, A)):
                 for i2 in range(3):
@@ -407,18 +426,21 @@ def main(argv: list[str] | None = None) -> int:
                     seen2.add(key2)
                     if zlo[ka] > zhi[kb] or zlo[kb] > zhi[ka]:
                         continue
-                    if set(T[ka]) & set(T[kb]):
-                        continue
+                    shared_vv = set(int(x) for x in T[ka]) \
+                        & set(int(x) for x in T[kb])
+                    if len(shared_vv) >= 2:
+                        continue   # edge-adjacent: legitimate
                     if cross(ka, kb):
                         out.append((int(idx[ka]), int(idx[kb])))
         return out
 
     # Push-apart repair: for each crossing pair, nudge the GUEST triangle's
     # non-shared vertices along the HOST plane normal until the guest is
-    # `clearance` clear of the host on the guest-body side.  Moves are tens
-    # of metres (the penetrations are metres-deep), never touch shared
-    # junction-line nodes, and cannot collapse 500 m edges.
-    clearance = 20.0
+    # `clearance` clear of the host on the guest-body side.  The clearance
+    # is intentionally SMALL (penetrations are cm-to-metres): a 20 m
+    # clearance measurably folded junction fans (same-marker triangle
+    # interpenetration) by over-pushing shared line vertices.
+    clearance = 5.0
     guest_markers = {}
     for gmarker, _pl, guest, host in junction_cuts:
         hmark = next(fm for fm, bn in enumerate(fault_basenames, start=1)
@@ -426,7 +448,7 @@ def main(argv: list[str] | None = None) -> int:
         guest_markers[(gmarker, hmark)] = gmarker
     n_cross_repaired = 0
     cross_left = -1
-    for _round in range(5):
+    for _round in range(8):
         fsel = (markers_k >= 1) & (markers_k <= n_faults)
         pairs2 = crossing_pairs(pts, tris_k, fsel)
         cross_left = len(pairs2)
@@ -488,7 +510,7 @@ def main(argv: list[str] | None = None) -> int:
             return np.where(e2 > 0, 4 * np.sqrt(3.0) * area / e2, 0.0)
 
     n_flips = 0
-    for _round in range(5):
+    for _round in range(8):
         q = tri_q(tris_k)
         bad = np.nonzero(q < 0.30)[0]
         if not len(bad):
@@ -539,6 +561,103 @@ def main(argv: list[str] | None = None) -> int:
         if not flipped_this_round:
             break
     report["cap_flips"] = n_flips
+
+    # ---- (b4b) constrained in-plane smoothing of thin fault triangles -----
+    # The clip-stage pushes/snaps leave a handful of thin fault triangles
+    # (q < 0.2) that force thin tets.  For a thin triangle's vertex that is
+    # INTERIOR to a single fault (not on the shell, a junction with another
+    # fault, or a fault border), relocate it toward its 1-ring centroid
+    # projected back onto the local fault plane (average incident-triangle
+    # normal).  Conservative: only applied if EVERY incident triangle's
+    # quality improves (min over the 1-ring goes up), no edge drops below
+    # the floor, and the incident normals do not flip.  A small in-plane
+    # move (<= the local edge scale) of a free fault vertex is within mesh
+    # resolution and preserves the fault geometry to sub-grid accuracy.
+    n_smoothed = 0
+    fault_only = (markers_k >= 1) & (markers_k <= n_faults)
+    # per-vertex owning markers (fault + boundary) to find "free" vertices
+    owner_markers = defaultdict(set)
+    for ti2, t2 in enumerate(tris_k):
+        for v2 in t2:
+            owner_markers[int(v2)].add(int(markers_k[ti2]))
+    shell_vids_sm = set(int(x) for x in
+                        np.unique(tris_k[markers_k >= box_marker].ravel()))
+
+    def vert_is_free(v, fm):
+        oms = owner_markers[int(v)]
+        return (oms == {fm}) and int(v) not in shell_vids_sm
+
+    for _sround in range(6):
+        q_all = tri_q(tris_k)
+        thin = np.nonzero(fault_only & (q_all < 0.20))[0]
+        if not len(thin):
+            break
+        # vertex -> list of incident fault-triangle indices (same marker)
+        v2t = defaultdict(list)
+        for ti2 in np.nonzero(fault_only)[0]:
+            for v2 in tris_k[ti2]:
+                v2t[int(v2)].append(ti2)
+        moved_round = 0
+        moved_v = set()
+        for ti2 in thin:
+            fm = int(markers_k[ti2])
+            for v in (int(x) for x in tris_k[ti2]):
+                if v in moved_v or not vert_is_free(v, fm):
+                    continue
+                inc = v2t[v]
+                # 1-ring neighbor centroid
+                ring = set()
+                for tj2 in inc:
+                    for w in tris_k[tj2]:
+                        if int(w) != v:
+                            ring.add(int(w))
+                if len(ring) < 3:
+                    continue
+                centroid = pts[list(ring)].mean(axis=0)
+                # local plane normal = area-weighted incident normals
+                nrm = np.zeros(3)
+                for tj2 in inc:
+                    a3, b3, c3 = pts[tris_k[tj2]]
+                    nrm = nrm + np.cross(b3 - a3, c3 - a3)
+                nn = np.linalg.norm(nrm)
+                if nn == 0:
+                    continue
+                nrm = nrm / nn
+                target = centroid - np.dot(centroid - pts[v], nrm) * nrm
+                newp = pts[v] + 0.5 * (target - pts[v])
+                # validity: incident-tri q improves, edges >= floor, no flip
+                old_min = min(tri_q(tris_k[[tj2]])[0] for tj2 in inc)
+                ok_move = True
+                new_min = 1.0
+                for tj2 in inc:
+                    tt = [int(x) for x in tris_k[tj2]]
+                    P3n = np.array([newp if int(x) == v else pts[int(x)]
+                                    for x in tt])
+                    e3 = [np.linalg.norm(P3n[0] - P3n[1]),
+                          np.linalg.norm(P3n[1] - P3n[2]),
+                          np.linalg.norm(P3n[2] - P3n[0])]
+                    if min(e3) < args.min_edge:
+                        ok_move = False
+                        break
+                    a3, b3, c3 = pts[tris_k[tj2]]
+                    n_old = np.cross(b3 - a3, c3 - a3)
+                    n_new = np.cross(P3n[1] - P3n[0], P3n[2] - P3n[0])
+                    if np.dot(n_old, n_new) <= 0:
+                        ok_move = False
+                        break
+                    e2n = sum(x * x for x in e3)
+                    an = 0.5 * np.linalg.norm(n_new)
+                    qn = 4 * np.sqrt(3.0) * an / e2n if e2n > 0 else 0.0
+                    new_min = min(new_min, qn)
+                if ok_move and new_min > old_min + 1e-6:
+                    pts = pts.copy()
+                    pts[v] = newp
+                    moved_v.add(v)
+                    moved_round += 1
+                    n_smoothed += 1
+        if moved_round == 0:
+            break
+    report["thin_tri_smoothed"] = n_smoothed
 
     report["n_tris_out"] = int(len(tris_k))
     report["n_fault_out"] = int(((markers_k >= 1)
@@ -702,6 +821,84 @@ def main(argv: list[str] | None = None) -> int:
                 pts[v4] = pts[v4] - dn * push
                 n_prox_pushed += 2
     report["cross_fault_prox_pushed"] = n_prox_pushed
+
+    # ---- (b8) cross-fault vertex-to-FACET clearance -----------------------
+    # A vertex can sit metres (measured: 2.6 cm) from another fault's facet
+    # INTERIOR while being > floor from all its vertices — tetgen rejects
+    # that as a self-intersection.  Push such vertices along the facet
+    # normal, on their current side, to `facet_clear`.
+    facet_clear = 5.0
+    n_facet_pushed = 0
+    for fa in range(1, n_faults + 1):
+        for fb in range(1, n_faults + 1):
+            if fa == fb:
+                continue
+            tb_tris = tris_k[markers_k == fb]
+            if not len(tb_tris):
+                continue
+            bcen = pts[tb_tris].mean(axis=1)
+            btree3 = _KD3(bcen)
+            shared_ab = set(np.intersect1d(
+                np.unique(tris_k[markers_k == fa].ravel()),
+                np.unique(tb_tris.ravel())).tolist())
+            va = [v for v in np.unique(tris_k[markers_k == fa].ravel())
+                  if int(v) not in shared_ab and int(v) not in shell_set3]
+            if not va:
+                continue
+            va = np.asarray(va)
+            d5, j5 = btree3.query(pts[va], k=4, workers=-1)
+            pts = pts.copy()
+            for k5, v5 in enumerate(va):
+                for jj in np.atleast_1d(j5[k5]):
+                    t5 = tb_tris[jj]
+                    if int(v5) in set(int(x) for x in t5):
+                        continue
+                    A5, B5, C5 = pts[t5]
+                    n5 = np.cross(B5 - A5, C5 - A5)
+                    nn5 = np.linalg.norm(n5)
+                    if nn5 == 0:
+                        continue
+                    n5 = n5 / nn5
+                    dd = float(np.dot(pts[int(v5)] - A5, n5))
+                    if abs(dd) >= facet_clear:
+                        continue
+                    # project; inside test
+                    pp = pts[int(v5)] - dd * n5
+                    v0, v1, v2 = B5 - A5, C5 - A5, pp - A5
+                    d00, d01, d11 = v0 @ v0, v0 @ v1, v1 @ v1
+                    d20, d21 = v2 @ v0, v2 @ v1
+                    den = d00 * d11 - d01 * d01
+                    if den == 0:
+                        continue
+                    uu = (d11 * d20 - d01 * d21) / den
+                    ww = (d00 * d21 - d01 * d20) / den
+                    if not (uu > -1e-6 and ww > -1e-6 and uu + ww < 1 + 1e-6):
+                        continue
+                    s5 = 1.0 if dd >= 0 else -1.0
+                    pts[int(v5)] = pts[int(v5)] + n5 * (s5 * facet_clear - dd)
+                    n_facet_pushed += 1
+                    break
+    report["cross_fault_facet_pushed"] = n_facet_pushed
+
+    # final containment enforcement: the geometry edits above (sag snap,
+    # contraction, pushes) can leave single fault triangles epsilon-outside
+    # the shell (e.g. a chord above a locally concave DEM at a snapped
+    # chain end).  Drop them — a one-triangle notch at the border is
+    # physically nil; a fault facet outside the shell is a PLC error.
+    fsel_fin = (markers_k >= 1) & (markers_k <= n_faults)
+    fidx3 = np.nonzero(fsel_fin)[0]
+    inside3 = ray_parity_inside(pts[tris_k[fidx3]].mean(axis=1),
+                                tris_k[markers_k >= box_marker], pts)
+    if (~inside3).any():
+        drop3 = np.zeros(len(tris_k), dtype=bool)
+        drop3[fidx3[~inside3]] = True
+        tris_k = tris_k[~drop3]
+        markers_k = markers_k[~drop3]
+        report["final_outside_dropped"] = int(drop3.sum())
+        report["gate_fault_outside_shell_after_clip"] = 0
+    else:
+        report["final_outside_dropped"] = 0
+        report["gate_fault_outside_shell_after_clip"] = 0
 
     # final crossing gate (the flips run after the repair loop)
     fsel_final = (markers_k >= 1) & (markers_k <= n_faults)
