@@ -348,6 +348,72 @@ def _read_merged_stl_with_dedup(stl_path: Path,
             out_markers)
 
 
+def write_gmsh22(out_path, points, tets, fault_tris_by_patch,
+                 boundary_tris_by_name, tag_map):
+    """Write a Gmsh v2.2 ASCII .msh (MFEM's reader is v2.2-only).
+
+    Normative Phase 5 tag map (PLAN_mesh_quality_safv4_remesh):
+        volume rock = 1
+        Physical Surface 101..(100+N) = faults (alphabetical CFM basename)
+        Physical Surface 201 = top (dem), 202 = bottom, 203 = sides
+
+    points: (N,3); tets: (M,4) — ALL tets (no drops; interior cavities
+    would become spurious free surfaces in MFEM).
+    fault_tris_by_patch: list of (patch_index_1based, (K,3) tris).
+    boundary_tris_by_name: list of (kind in {top,bottom,sides}, (K,3) tris).
+    Unused points are pruned; all blocks share one node array (G3a/G3b).
+    """
+    points = np.asarray(points, dtype=np.float64)
+    cells = []
+    physical = []
+    geometrical = []
+    if len(tets):
+        cells.append(("tetra", np.asarray(tets, dtype=np.int64)))
+        physical.append(np.full(len(tets), tag_map["volume"], dtype=int))
+        geometrical.append(np.full(len(tets), tag_map["volume"], dtype=int))
+    for patch_1b, tris in fault_tris_by_patch:
+        if not len(tris):
+            continue
+        tag = tag_map["fault_base"] + patch_1b - 1
+        cells.append(("triangle", np.asarray(tris, dtype=np.int64)))
+        physical.append(np.full(len(tris), tag, dtype=int))
+        geometrical.append(np.full(len(tris), tag, dtype=int))
+    for kind, tris in boundary_tris_by_name:
+        if not len(tris):
+            continue
+        tag = tag_map[kind]
+        cells.append(("triangle", np.asarray(tris, dtype=np.int64)))
+        physical.append(np.full(len(tris), tag, dtype=int))
+        geometrical.append(np.full(len(tris), tag, dtype=int))
+
+    used = np.unique(np.concatenate([c[1].ravel() for c in cells]))
+    remap = -np.ones(points.shape[0], dtype=np.int64)
+    remap[used] = np.arange(used.size)
+    cells = [(t, remap[c]) for t, c in cells]
+
+    mesh = meshio.Mesh(points=points[used], cells=cells,
+                       cell_data={"gmsh:physical": physical,
+                                  "gmsh:geometrical": geometrical})
+    meshio.write(str(out_path), mesh, file_format="gmsh22", binary=False)
+    return used.size
+
+
+DEFAULT_TAG_MAP = {"volume": 1, "fault_base": 101,
+                   "top": 201, "bottom": 202, "sides": 203}
+
+
+def boundary_kind_of(name: str) -> str:
+    """Map a Phase 4 boundary surface name to its tag-map kind."""
+    low = name.lower()
+    if "dem" in low:
+        return "top"
+    if "bottom" in low:
+        return "bottom"
+    if "ribbon" in low:
+        return "sides"
+    raise ValueError(f"cannot classify boundary surface name: {name}")
+
+
 def main() -> int:
     here = Path(__file__).resolve().parent
     project = here.parent
@@ -406,6 +472,25 @@ def main() -> int:
                          "these pairs removes the slivers; setting tol just "
                          "below the input min-edge does not destroy real "
                          "geological structure (input STL min edge is ≥ 100 m).")
+    ap.add_argument("--msh-out", type=Path, default=None,
+                    help="write a Gmsh v2.2 ASCII .msh (MFEM contract) with "
+                         "the Phase 5 tag map.  Contains ALL tets (no "
+                         "quality-filter drops — holes would become spurious "
+                         "free surfaces in MFEM) + fault and boundary "
+                         "triangles sharing the same node IDs.")
+    ap.add_argument("--tag-map", type=Path, default=None,
+                    help="JSON overriding the normative tag map "
+                         "{volume, fault_base (101), top, bottom, sides}")
+    ap.add_argument("--mindihedral", type=float, default=0.0,
+                    help="tetgen -q minimum dihedral angle [deg] "
+                         "(0 = off; 10-14 attacks sliver tets)")
+    ap.add_argument("--opt-iterations", type=int, default=3,
+                    help="tetgen mesh-optimization iterations (default 3)")
+    ap.add_argument("--opt-scheme", type=int, default=7,
+                    help="tetgen optimization scheme bitmask (default 7 = "
+                         "flips + smoothing + contraction)")
+    ap.add_argument("--coverage-samples", type=int, default=100,
+                    help="random points for the coverage smoke test")
     ap.add_argument("--mmg-cleanup", action="store_true", default=False,
                     help="run MMG3D nosurf+optim+noinsert as a final pass.  "
                          "DEFAULT OFF: MMG3D drops surface triangles on non-"
@@ -501,6 +586,9 @@ def main() -> int:
         nobisect=True,
         quality=True,
         minratio=args.minratio,
+        mindihedral=args.mindihedral,
+        opt_iterations=args.opt_iterations,
+        opt_scheme=args.opt_scheme,
         maxvolume=maxvolume,
         verbose=2 if args.verbose else 0,
     )
@@ -552,12 +640,21 @@ def main() -> int:
         # added first), so root motion is minimal.
         n_dropped_tets = 0
         new_elems = []
+        seen_tets = set()
         for tet in elems:
             new_tet = sorted(int(remap[v]) for v in tet)
-            if len(set(new_tet)) == 4:
-                new_elems.append(new_tet)
-            else:
+            if len(set(new_tet)) != 4:
                 n_dropped_tets += 1
+                continue
+            k = tuple(new_tet)
+            if k in seen_tets:
+                # Twin tets: a collapsed sliver maps two tets onto the
+                # same vertex set; keeping both gives faces shared by >2
+                # tets and MFEM rejects the topology.
+                n_dropped_tets += 1
+                continue
+            seen_tets.add(k)
+            new_elems.append(new_tet)
         elems = np.asarray(new_elems, dtype=np.int32)
         # Remap trifaces too.
         new_tris = []
@@ -577,6 +674,96 @@ def main() -> int:
     else:
         tgen_trifaces_dedup = tgen.trifaces
         tgen_triface_marks_dedup = tgen.triface_markers
+
+    # ----- safe short-edge collapse (G1 repair) -----
+    # tetgen's bulk Steiner insertion can leave a handful of edges below
+    # the 100 m floor (measured: 17 of ~4.7M at 52-99 m).  A blind vertex
+    # weld at 99 m folds tets inside-out (measured: negative volumes,
+    # faces shared by >2 tets, MFEM rejects).  Instead collapse each
+    # sub-floor edge ONLY when (a) the removed endpoint is a Steiner
+    # vertex (input/fault/boundary vertices are never moved) and (b) every
+    # incident tet of the removed vertex stays positive-volume and unique
+    # after the move.  Unrepairable edges are reported.
+    from scipy.spatial import cKDTree as _ck
+    d_in, idx_in = _ck(nodes).query(pts_arr, k=1)
+    input_vert_ids = set(int(i) for i in np.asarray(idx_in).ravel())
+    for _collapse_round in range(3):
+        P = nodes[elems]
+        e6 = np.stack([P[:, a] - P[:, b] for a, b in
+                       ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))],
+                      axis=1)
+        L6 = np.linalg.norm(e6, axis=2)
+        pairs6 = ((0, 1), (0, 2), (0, 3), (1, 2), (1, 3), (2, 3))
+        short_set = set()
+        for ti, tj in zip(*np.nonzero(L6 < args.bulk_min_edge)):
+            a, b = pairs6[tj]
+            u, v = int(elems[ti][a]), int(elems[ti][b])
+            short_set.add((min(u, v), max(u, v)))
+        if not short_set:
+            break
+        vert_tets = {}
+        for ti, t in enumerate(elems):
+            for v in t:
+                vert_tets.setdefault(int(v), []).append(ti)
+        tet_keys = set(map(tuple, np.sort(elems, axis=1).tolist()))
+        n_fixed = 0
+        n_unrepairable = 0
+        removed_tets = set()
+        for u, v in sorted(short_set):
+            cands = []
+            if v not in input_vert_ids:
+                cands.append((u, v))   # keep u, remove v
+            if u not in input_vert_ids:
+                cands.append((v, u))
+            ok_applied = False
+            for keep, rem in cands:
+                inc = [ti for ti in vert_tets.get(rem, [])
+                       if ti not in removed_tets]
+                new_tets = []
+                valid = True
+                for ti in inc:
+                    t = [keep if int(x) == rem else int(x) for x in elems[ti]]
+                    if len(set(t)) != 4:
+                        new_tets.append((ti, None))     # degenerates: drop
+                        continue
+                    a2, b2, c2, d2 = nodes[t]
+                    Vt = np.dot(b2 - a2, np.cross(c2 - a2, d2 - a2))
+                    if Vt <= 1e-3:                       # folded: reject
+                        valid = False
+                        break
+                    k2 = tuple(sorted(t))
+                    if k2 in tet_keys:
+                        valid = False
+                        break
+                    new_tets.append((ti, t))
+                if not valid:
+                    continue
+                for ti, t in new_tets:
+                    old_k = tuple(sorted(int(x) for x in elems[ti]))
+                    tet_keys.discard(old_k)
+                    if t is None:
+                        removed_tets.add(ti)
+                    else:
+                        elems[ti] = t
+                        tet_keys.add(tuple(sorted(t)))
+                        for x in t:
+                            lst = vert_tets.setdefault(int(x), [])
+                            if ti not in lst:
+                                lst.append(ti)
+                n_fixed += 1
+                ok_applied = True
+                break
+            if not ok_applied:
+                n_unrepairable += 1
+        if removed_tets:
+            keep_mask = np.ones(len(elems), dtype=bool)
+            keep_mask[list(removed_tets)] = False
+            elems = elems[keep_mask]
+        print(f"\nshort-edge collapse round {_collapse_round + 1}: "
+              f"{len(short_set)} sub-floor edge(s), {n_fixed} collapsed, "
+              f"{n_unrepairable} unrepairable")
+        if n_unrepairable == len(short_set):
+            break
 
     # ----- bulk: all tets, single 'rock' attribute -----
     P = nodes[elems]
@@ -615,7 +802,11 @@ def main() -> int:
     for ti, t in enumerate(elems):
         for face in [(t[0],t[1],t[2]),(t[0],t[1],t[3]),(t[0],t[2],t[3]),(t[1],t[2],t[3])]:
             face_to_tets[tuple(sorted(int(v) for v in face))].append(ti)
-    fault_facet_mask_out = tgen_triface_marks_dedup != box_marker
+    # Fault = markers 1..n_input_faults.  (`!= box_marker` is WRONG for the
+    # Phase 4 boundary layout, where boundary surfaces carry 100..100+K and
+    # would be misclassified as faults.)
+    fault_facet_mask_out = ((tgen_triface_marks_dedup >= 1)
+                            & (tgen_triface_marks_dedup <= n_input_faults))
     fault_trifaces_out   = tgen_trifaces_dedup[fault_facet_mask_out]
     fault_protected_tets = set()
     for ft in fault_trifaces_out:
@@ -771,9 +962,9 @@ def main() -> int:
                 try: p.unlink()
                 except: pass
 
-    # ----- fault surface: trifaces with marker != BOX_MARKER -----
+    # ----- fault surface: trifaces with marker in 1..n_input_faults -----
     triface_marks = tgen_triface_marks_dedup
-    fault_mask = triface_marks != box_marker
+    fault_mask = (triface_marks >= 1) & (triface_marks <= n_input_faults)
     fault_tris  = tgen_trifaces_dedup[fault_mask]
     fault_marks = triface_marks[fault_mask]
 
@@ -785,7 +976,8 @@ def main() -> int:
 
     # Compare to input fault triangle count (markers after our cleanup).
     in_counts = Counter(markers.tolist())
-    expected_fault_count = sum(c for m, c in in_counts.items() if m != box_marker)
+    expected_fault_count = sum(c for m, c in in_counts.items()
+                               if 1 <= m <= n_input_faults)
     print(f"  expected (sum of input fault tris): {expected_fault_count}")
     if len(fault_tris) != expected_fault_count:
         print(f"  WARNING: count mismatch ({len(fault_tris)} vs "
@@ -796,12 +988,45 @@ def main() -> int:
     fault.write(str(fault_path), binary=True)
     print(f"wrote {fault_path}")
 
+    # ----- Gmsh v2.2 .msh output (MFEM contract; Phase 5 tag map) -----
+    if args.msh_out is not None:
+        tag_map = dict(DEFAULT_TAG_MAP)
+        if args.tag_map is not None:
+            tag_map.update(json.loads(args.tag_map.read_text()))
+        boundary_names = mj.get("boundary_names", [])
+        if not boundary_names:
+            print("error: --msh-out requires Phase 4 boundary-mode markers "
+                  "JSON (boundary_names); the flat-box fixture has none.",
+                  file=sys.stderr)
+            return 3
+        fault_groups = [(int(pm), fault_tris[fault_marks == pm])
+                        for pm in sorted(set(fault_marks.tolist()))]
+        boundary_groups = []
+        for bi, bname in enumerate(boundary_names):
+            bm = box_marker + bi
+            sel = triface_marks == bm
+            boundary_groups.append((boundary_kind_of(bname),
+                                    tgen_trifaces_dedup[sel]))
+        args.msh_out.parent.mkdir(parents=True, exist_ok=True)
+        # ALL tets — no quality-filter drops in the .msh (interior holes
+        # would become spurious free surfaces in MFEM).
+        n_used = write_gmsh22(args.msh_out, nodes, elems, fault_groups,
+                              boundary_groups, tag_map)
+        print(f"\nwrote {args.msh_out}  (Gmsh v2.2 ASCII: {n_used:,} nodes, "
+              f"{len(elems):,} tets, "
+              f"{sum(len(t) for _, t in fault_groups):,} fault tris, "
+              f"{sum(len(t) for _, t in boundary_groups):,} boundary tris)")
+        print(f"  tag map: volume={tag_map['volume']}  faults="
+              f"{[tag_map['fault_base'] + g[0] - 1 for g in fault_groups]}  "
+              f"top={tag_map['top']} bottom={tag_map['bottom']} "
+              f"sides={tag_map['sides']}")
+
     # ----- coverage smoke test (using FILTERED tets, not raw) -----
     # Compute box bounds from input verts.
     xmin, ymin, zmin = pts_arr.min(axis=0)
     xmax, ymax, zmax = pts_arr.max(axis=0)
     rng = np.random.RandomState(42)
-    n_test = 100
+    n_test = args.coverage_samples
     samples = rng.uniform([xmin, ymin, zmin], [xmax, ymax, zmax], (n_test, 3))
     P_kept = nodes[elems_k]
     bbox_min = P_kept.min(axis=1)

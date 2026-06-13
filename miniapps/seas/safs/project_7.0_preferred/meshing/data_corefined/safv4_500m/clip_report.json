@@ -1,5 +1,5 @@
 {
- "cap_flips": 77,
+ "cap_flips": 76,
  "clip_a_outside_shell": 11579,
  "clip_b_junction": {
   "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6 -> fault_SAFS-SAFZ-MULT-Banning_fault-CFM6": {
@@ -17,6 +17,11 @@
    "n_cut_edges": 249,
    "n_dropped": 793
   }
+ },
+ "cross_fault_prox_pushed": 2,
+ "crossing_repair": {
+  "crossings_left": 0,
+  "vertices_pushed": 5
  },
  "fault_border_classes": {
   "fault_SAFS-SAFZ-MJVS-San_Andreas_fault-CFM6_ext": {
@@ -40,6 +45,7 @@
  "gate_boundary_overshared_edges": 0,
  "gate_dup_groups_at_tol": 0,
  "gate_edges_below_floor": 0,
+ "gate_fault_crossing_pairs": 0,
  "gate_fault_outside_shell_after_clip": 0,
  "gate_min_edge_m": 100.0057534704089,
  "n_boundary": 126892,
@@ -48,6 +54,7 @@
  "n_fault_out": 132426,
  "n_tris_in": 272338,
  "n_tris_out": 259318,
+ "near_shell_sags_snapped": 2,
  "pass": true,
  "ribbon_degen_dropped": 74,
  "ribbon_snapped_vertices": 38,

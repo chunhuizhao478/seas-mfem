@@ -346,6 +346,133 @@ def main(argv: list[str] | None = None) -> int:
     report["short_edge_contraction"] = {
         "rounds": n_contract_rounds, "vertices_merged": n_contracted}
 
+    # ---- (b5) crossing repair --------------------------------------------
+    # The ribbon snap / contraction move vertices by up to ~100 m in zones
+    # where the OTHER fault passes ~eps (30 m) away — measured: 2 SAF x
+    # Garnet triangle crossings entered the soup and tetgen rejects the
+    # PLC.  Repair: snap every vertex of a crossing pair that lies within
+    # --crossing-snap of the junction line ONTO its nearest junction node
+    # (coincident surfaces share edges, which is PLC-legal), re-weld, and
+    # rescan.  Crossings away from any junction line are a hard error.
+    def crossing_pairs(pts_, tris_, sel_mask):
+        idx = np.nonzero(sel_mask)[0]
+        T = tris_[idx]
+        P3 = pts_[T]
+        mins = P3.min(axis=1)[:, :2]
+        maxs = P3.max(axis=1)[:, :2]
+        zlo, zhi = P3.min(axis=1)[:, 2], P3.max(axis=1)[:, 2]
+        cell = 2000.0
+        grid2: dict = defaultdict(list)
+        for k2, ti in enumerate(idx):
+            lo = np.floor(mins[k2] / cell).astype(int)
+            hi = np.floor(maxs[k2] / cell).astype(int)
+            for cx in range(lo[0], hi[0] + 1):
+                for cy in range(lo[1], hi[1] + 1):
+                    grid2[(cx, cy)].append(k2)
+
+        def seg_tri(p, q, a, b, c):
+            n = np.cross(b - a, c - a)
+            dp, dq = np.dot(p - a, n), np.dot(q - a, n)
+            if dp * dq >= -1e-18:
+                return False
+            t = dp / (dp - dq)
+            x = p + t * (q - p)
+            v0, v1, v2 = b - a, c - a, x - a
+            d00, d01, d11 = v0 @ v0, v0 @ v1, v1 @ v1
+            d20, d21 = v2 @ v0, v2 @ v1
+            den = d00 * d11 - d01 * d01
+            if den == 0:
+                return False
+            u = (d11 * d20 - d01 * d21) / den
+            v = (d00 * d21 - d01 * d20) / den
+            return u > 1e-9 and v > 1e-9 and u + v < 1 - 1e-9
+
+        def cross(k_a, k_b):
+            A, B = P3[k_a], P3[k_b]
+            for (PP, QQ) in ((A, B), (B, A)):
+                for i2 in range(3):
+                    if seg_tri(PP[i2], PP[(i2 + 1) % 3], QQ[0], QQ[1], QQ[2]):
+                        return True
+            return False
+
+        seen2: set = set()
+        out = []
+        for cl in grid2.values():
+            for a_i in range(len(cl)):
+                for b_i in range(a_i + 1, len(cl)):
+                    ka, kb = cl[a_i], cl[b_i]
+                    key2 = (min(ka, kb), max(ka, kb))
+                    if key2 in seen2:
+                        continue
+                    seen2.add(key2)
+                    if zlo[ka] > zhi[kb] or zlo[kb] > zhi[ka]:
+                        continue
+                    if set(T[ka]) & set(T[kb]):
+                        continue
+                    if cross(ka, kb):
+                        out.append((int(idx[ka]), int(idx[kb])))
+        return out
+
+    # Push-apart repair: for each crossing pair, nudge the GUEST triangle's
+    # non-shared vertices along the HOST plane normal until the guest is
+    # `clearance` clear of the host on the guest-body side.  Moves are tens
+    # of metres (the penetrations are metres-deep), never touch shared
+    # junction-line nodes, and cannot collapse 500 m edges.
+    clearance = 20.0
+    guest_markers = {}
+    for gmarker, _pl, guest, host in junction_cuts:
+        hmark = next(fm for fm, bn in enumerate(fault_basenames, start=1)
+                     if bn.startswith(host))
+        guest_markers[(gmarker, hmark)] = gmarker
+    n_cross_repaired = 0
+    cross_left = -1
+    for _round in range(5):
+        fsel = (markers_k >= 1) & (markers_k <= n_faults)
+        pairs2 = crossing_pairs(pts, tris_k, fsel)
+        cross_left = len(pairs2)
+        if not pairs2:
+            break
+        pts = pts.copy()
+        shell_vids = set(np.unique(tris_k[markers_k >= box_marker].ravel())
+                         .tolist())
+        moved = 0
+        for ti, tj in pairs2:
+            mi, mj = int(markers_k[ti]), int(markers_k[tj])
+            if (mi, mj) in guest_markers:
+                g_t, h_t = ti, tj
+            elif (mj, mi) in guest_markers:
+                g_t, h_t = tj, ti
+            else:
+                g_t, h_t = (ti, tj) if mi < mj else (tj, ti)
+            ht = tris_k[h_t]
+            n_h = np.cross(pts[ht[1]] - pts[ht[0]], pts[ht[2]] - pts[ht[0]])
+            nm = np.linalg.norm(n_h)
+            if nm == 0:
+                continue
+            n_h /= nm
+            h0 = pts[ht[0]]
+            gverts = [int(x) for x in tris_k[g_t]]
+            signed = {v: float(np.dot(pts[v] - h0, n_h)) for v in gverts}
+            # guest-body side = sign of the farthest vertex
+            far = max(signed.values(), key=abs)
+            s = 1.0 if far > 0 else -1.0
+            # Shared junction-line nodes MAY move (a single welded node
+            # deforms both surfaces consistently — conformality is
+            # preserved); shell-shared nodes must not.
+            for v in gverts:
+                if v in shell_vids:
+                    continue
+                if s * signed[v] < clearance:
+                    pts[v] = pts[v] + n_h * (s * clearance - signed[v])
+                    moved += 1
+        if moved == 0:
+            print(f"ERROR: {len(pairs2)} fault crossing pair(s) could not "
+                  f"be pushed apart (all vertices shared).", file=sys.stderr)
+            break
+        n_cross_repaired += moved
+    report["crossing_repair"] = {"vertices_pushed": n_cross_repaired,
+                                 "crossings_left": cross_left}
+
     # ---- (b4) cap-triangle flip pass ------------------------------------
     # The contractions can leave near-collinear "cap" triangles (q < 0.3,
     # all edges >= floor).  Flip the cap's longest edge when the edge is
@@ -505,10 +632,87 @@ def main(argv: list[str] | None = None) -> int:
     report["fault_border_classes"] = cls_counts
     report["warn_near_shell_tip_edges"] = orphans
 
+    # ---- (b6) close near-shell tip sags -----------------------------------
+    # Fault border vertices a few tens of metres off the shell (chain-end
+    # sags) leave 50-100 m tet edges in the volume mesh (tetgen bridges
+    # them to the adjacent shell vertices) — measured: exactly the 3
+    # warned near_shell_tip sites.  Snap each such vertex onto its nearest
+    # shell vertex (exact conformity; the sag crack closes), re-weld.
+    from scipy.spatial import cKDTree as _KD3
+    shell_vids2 = np.unique(tris_k[markers_k >= box_marker].ravel())
+    shell_set2 = set(int(x) for x in shell_vids2)
+    stree = _KD3(pts[shell_vids2])
+    n_sag_snapped = 0
+    fsel2 = (markers_k >= 1) & (markers_k <= n_faults)
+    fvids = np.unique(tris_k[fsel2].ravel())
+    fv_off = np.array([v for v in fvids if int(v) not in shell_set2])
+    if fv_off.size:
+        dsh, jsh = stree.query(pts[fv_off], workers=-1)
+        sel_sag = (dsh > 1e-6) & (dsh < args.min_edge)
+        if sel_sag.any():
+            pts = pts.copy()
+            for v, j3 in zip(fv_off[sel_sag], jsh[sel_sag]):
+                pts[int(v)] = pts[shell_vids2[j3]]
+                n_sag_snapped += 1
+            pts, tris_k = _weld_exact(pts, tris_k)
+            dg3 = ((tris_k[:, 0] == tris_k[:, 1])
+                   | (tris_k[:, 1] == tris_k[:, 2])
+                   | (tris_k[:, 0] == tris_k[:, 2]))
+            tris_k = tris_k[~dg3]
+            markers_k = markers_k[~dg3]
+    report["near_shell_sags_snapped"] = n_sag_snapped
+
+    # ---- (b7) cross-fault proximity push ----------------------------------
+    # In the 13.4 deg SAF-Garnet wedge the first off-line vertex rows of
+    # the two surfaces sit ~80 m apart; tetgen then bridges them with a
+    # sub-floor edge.  Push every non-shared cross-fault vertex pair below
+    # the floor apart symmetrically along their connecting direction to
+    # floor + 5 m (increasing separation cannot create crossings).
+    n_prox_pushed = 0
+    shell_set3 = set(int(x)
+                     for x in np.unique(tris_k[markers_k >= box_marker]
+                                        .ravel()))
+    fault_vsets = {fm: np.unique(tris_k[markers_k == fm].ravel())
+                   for fm in range(1, n_faults + 1)}
+    pts = pts.copy()
+    for fa in range(1, n_faults + 1):
+        for fb in range(fa + 1, n_faults + 1):
+            va = np.array([v for v in fault_vsets[fa]
+                           if int(v) not in shell_set3])
+            vb = np.array([v for v in fault_vsets[fb]
+                           if int(v) not in shell_set3])
+            if not va.size or not vb.size:
+                continue
+            shared_ab = set(np.intersect1d(fault_vsets[fa],
+                                           fault_vsets[fb]).tolist())
+            tb = _KD3(pts[vb])
+            d4, j4 = tb.query(pts[va], distance_upper_bound=args.min_edge,
+                              workers=-1)
+            for k4 in np.nonzero(np.isfinite(d4) & (d4 > 1e-6))[0]:
+                u4, v4 = int(va[k4]), int(vb[j4[k4]])
+                if u4 in shared_ab or v4 in shared_ab:
+                    continue
+                delta = pts[u4] - pts[v4]
+                dist = np.linalg.norm(delta)
+                if dist >= args.min_edge or dist <= 1e-6:
+                    continue
+                push = (args.min_edge + 5.0 - dist) / 2.0
+                dn = delta / dist
+                pts[u4] = pts[u4] + dn * push
+                pts[v4] = pts[v4] - dn * push
+                n_prox_pushed += 2
+    report["cross_fault_prox_pushed"] = n_prox_pushed
+
+    # final crossing gate (the flips run after the repair loop)
+    fsel_final = (markers_k >= 1) & (markers_k <= n_faults)
+    final_crossings = crossing_pairs(pts, tris_k, fsel_final)
+    report["gate_fault_crossing_pairs"] = len(final_crossings)
+
     ok = (report["gate_fault_outside_shell_after_clip"] == 0
           and report["gate_boundary_open_edges"] == 0
           and report["gate_dup_groups_at_tol"] == 0
-          and report["gate_edges_below_floor"] == 0)
+          and report["gate_edges_below_floor"] == 0
+          and report["gate_fault_crossing_pairs"] == 0)
     report["pass"] = bool(ok)
 
     # ---- outputs ----------------------------------------------------------

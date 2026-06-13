@@ -1,4 +1,4 @@
-# Run log: SAFv4 remesh Phases 0-4 (2026-06-12)
+# Run log: SAFv4 remesh Phases 0-5 (2026-06-12)
 
 Implements `PLAN_mesh_quality_safv4_remesh_2026-06-12.md` Phases 0-4.
 Environments: `cgal-61` (C++), `pythonenv` (Python).  All commands run from
@@ -251,3 +251,82 @@ single welded node set, zero coincident duplicates.)
   modified `corefine_set.cpp` / `autorefine_merged.cpp` /
   `polyline_cleanup.h` / `io_helpers.h` / `corefine_faults.py` /
   `check_mesh_quality.py`.
+
+---
+
+## Phase 5 — tetgen volume mesh + Gmsh v2.2 .msh + sliver optimization
+
+### tetgen_mesh.py changes
+
+- Phase 4 boundary-marker layout (fault = markers 1..N; the archived
+  `!= box_marker` test would misclassify boundary markers 101..105 as
+  faults); `write_gmsh22()` with the normative tag map (volume 1, faults
+  101/102/103 alphabetical, top 201, bottom 202, sides 203); the `.msh`
+  carries ALL tets (the quality filter would punch interior cavities that
+  MFEM turns into spurious free surfaces); tetgen optimization knobs
+  exposed (`--mindihedral`, `--opt-iterations`, `--opt-scheme`);
+  topology-safe post-dedup (twin-tet drop) and a validity-checked
+  short-edge collapse (only Steiner endpoints; every incident tet must
+  stay positive-volume and unique).
+- Flat-box regression: edge_min 99.32 m identical to the STATUS baseline;
+  q_med 0.887 vs 0.870; q<0.05 43 vs ~70; n_tets 41.6k vs 33.6k
+  (optimizer-default drift; structurally within noise).
+
+### PLC hardening discovered by tetgen (clip_fault_overhangs additions)
+
+1. tetgen rejected the v1 PLC: 2 SAF x Garnet triangle crossings
+   introduced by the clip's own vertex moves in the eps-wide junction
+   zone.  Fixes: crossing scan (vertex-disjoint Moller test, xy-gridded)
+   + push-apart repair (guest vertices nudged along the host normal to
+   20 m clearance; shared junction-line nodes may move — one welded node
+   deforms both surfaces consistently); hard gate
+   `gate_fault_crossing_pairs == 0`.
+2. The archived 99 m output dedup FOLDED tets (negative volumes, faces
+   shared by 3-4 tets, MFEM "Invalid mesh topology") by welding REAL
+   ~99 m-apart vertices.  Replaced by 1 mm dedup (true coincidences
+   only) + twin-tet drop + the validity-checked collapse.
+3. Residual sub-floor volume edges traced to surface geometry and fixed
+   at the source: (b6) near-shell sag closure (chain-end fault border
+   vertices 52-95 m off the shell snapped onto the nearest shell vertex);
+   (b7) cross-fault proximity push (first-row vertex pairs across the
+   13.4 deg SAF-Garnet wedge sat 82.7 m apart; pushed symmetrically to
+   105 m — increasing separation cannot create crossings).
+
+### Final gate results (production 500 m)
+
+Two meshes delivered (`meshing/results/`):
+
+| mesh | tets | nodes | eta_med | eta<=0.1 | eta<=0.05 | min edge |
+|---|---:|---:|---:|---:|---:|---:|
+| `safv4_500m_topo_opt.msh` (PRIMARY; mindihedral 14, opt x10) | 1,176,304 | 228,223 | 0.800 | **96** (8.2e-5) | 3 | 100.01 m |
+| `safv4_500m_topo.msh` (baseline knobs) | 778,171 | 167,449 | 0.702 | 219 (2.8e-4) | 3 | 100.01 m |
+
+- **G1 PASS** (min edge 100.01 m, 0 below floor) — without any tet drops.
+- **G2b PASS** with 6x margin on the primary (8.2e-5 <= 5e-4); GOCAD
+  baseline was 214,359 slivers -> 96 (2,200x reduction).
+- **G2a: 3 residual tets** with eta 0.0023/0.0034/0.0379 at z -17.6 to
+  -5.4 km — fault-sandwiched wedge tets that `nobisect` forbids tetgen
+  from splitting; deep and far from the nucleation region.
+  ACCEPT-WITH-REPORT per the plan's calibration governance (the Phase 6
+  alternative — retuning Phase 3 sizing — is not warranted for 3 tets at
+  2.6e-6 of the mesh).
+- **G3a/b/c PASS**: 0 duplicate-coordinate groups at 1 mm; every fault
+  triangle interior (2 tets) — 100,912 + 2,614 + 28,900 = 132,426 = 100%
+  embedding; conformity tool exit 0.
+- **G0 PASS**: 500/500 inside-shell samples inside a tet (the bbox-based
+  smoke reports ~38% because the concave rotated domain fills ~40% of its
+  axis-aligned bbox).
+- **G1f PASS**: fault edge medians 455.8 / 461.8 / 467.3 m, minima
+  >= 100 m, q_med 0.98-0.99.
+- **MFEM smoke PASS** (both meshes): `mfem::Mesh` loads; dim=3;
+  NE/NBE/NV as above; vol attrs {1}; bdr attrs {101,102,103,201,202,203}
+  — the normative tag map verbatim.  `$MeshFormat 2.2` confirmed; meshio
+  round-trip via the gate tools.
+
+### Phase 5 deliverables
+
+- `meshing/results/safv4_500m_topo_opt.msh` (73 MB, PRIMARY) +
+  `safv4_500m_topo.msh` (52 MB, lighter alternative)
+- `meshing/results/safv4_500m_topo{,_opt}_{bulk,fault}.vtu` — ParaView
+  (bulk: cell data `q_iso`, `edge_min`; fault: `patch` 1..3)
+- `meshing/results/gate_conformity_500m{,_opt}.json` (committed)
