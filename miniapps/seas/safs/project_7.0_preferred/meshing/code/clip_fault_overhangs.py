@@ -314,13 +314,12 @@ def main(argv: list[str] | None = None) -> int:
         f_vids_loc = set(np.unique(
             tris_k[(markers_k >= 1) & (markers_k <= n_faults)].ravel())
             .tolist())
-        shorts = []
-        for row in shorts_all:
-            u9, v9 = int(row[0]), int(row[1])
-            if u9 in b_vids and v9 in b_vids:
-                if u9 in f_vids_loc and v9 in f_vids_loc:
-                    continue   # both trace-shared: untouchable
-            shorts.append((u9, v9))
+        # Every sub-floor edge is contractible: it merges onto a trace
+        # anchor when one is present (preference order below), so a
+        # both-trace edge collapses two adjacent trace nodes into one that
+        # stays exactly on the trace -> the fault/DEM conformity is kept
+        # (one shared soup node set), the trace just coarsens locally.
+        shorts = [(int(row[0]), int(row[1])) for row in shorts_all]
         if not shorts or n_contract_rounds >= 10:
             break
         n_contract_rounds += 1

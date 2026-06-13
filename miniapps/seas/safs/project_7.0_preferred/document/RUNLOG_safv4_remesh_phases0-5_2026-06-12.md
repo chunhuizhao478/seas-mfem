@@ -414,3 +414,85 @@ degeneracies tetgen rejects; all are now handled in the clip + a repair pass:
   fault_2_*,fault_3_*}.vtu` + `boundary_surface.vtu` (color by `edge_max`
   to see the coarsening), and `meshing/results/safv4_deep_500m{,_opt}_
   {bulk,fault}.vtu`.
+
+---
+
+## Phase 5c — regenerated boundary shell (user feedback 2026-06-12, evening)
+
+User feedback on the Phase 5b mesh (3 ParaView screenshots): bad-shaped
+boundary tets at the domain edges/corners; "you don't need to coarsen this
+much at the boundary, reduce the mesh size and maintain a better tet
+quality"; sliver tets remaining on the top (DEM) and on the fault near the
+trace.
+
+Root cause (measured): the graded DEM remesh left 1,889 far-field
+triangles over 10 km (max 43.6 km) and the raw GOCAD bottom/ribbons were
+6-10 km median, q_med ~0.86 (right-triangles).  Those coarse, high-aspect
+boundary surfaces drove the bad boundary tets.  Confirmed that lc-far /
+bgmesh gradient changes do NOT alter the mesh (identical tet count for
+lc-far 2000 vs 2500): with `nobisect`, the bulk size is pinned by the
+SURFACE density, so the boundary SURFACE quality is the lever.
+
+### New tool: `meshing/code/regenerate_boundary.py`
+
+Rebuilds the closed boundary shell (DEM heightfield, flat bottom, 4
+vertical side walls) at a moderate, well-shaped ~2.5 km resolution,
+watertight by construction:
+- ONE footprint polygon (the DEM rim, resampled to 2.5 km, 4 corners
+  detected) drives the DEM rim, bottom rim, and ribbon tops/bottoms, so
+  every shared edge is identical on both incident surfaces.
+- DEM: constrained Delaunay (Shewchuk `triangle`, `pq28Y`) over the
+  footprint + blue-noise interior graded 500 m (within `d_near` of the
+  trace) -> 2.5 km far; z from the original DEM heightfield.  The DEM is
+  corefine-coupled, so the fault trace is re-established downstream.
+- Bottom + ribbons: quality-meshed (`pq30aY`) in 2-D (the bottom in xy,
+  each ribbon in its own along-wall/depth plane, mapped back along the
+  actual side polyline by arc-length so the ribbon top matches the DEM rim
+  node-for-node).  `Y` keeps the footprint rim un-split -> watertight.
+
+### Before -> after (boundary)
+
+| surface | Phase 5b edge med / max | q_med | -> 5c edge med / max | q_med |
+|---|---|---|---|---|
+| TOP (DEM)  | 723 m / 43,613 m | 0.965 | 1,750 m / 3,299 m | 0.957 |
+| BOTTOM     | 9,668 m / 39,831 m | 0.866 | 2,530 m / 3,693 m | 0.931 |
+| SIDES      | 6,009 m / 44,571 m | 0.861 | 2,511 m / 3,663 m | 0.935 |
+
+The 43.6 km DEM triangles are gone (max now 3.3 km); the bottom/sides
+right-triangles (q 0.86) are now near-equilateral (q 0.93).
+
+### Volume mesh result (replaces the Phase 5b meshes)
+
+PRIMARY `meshing/results/safv4_deep_500m_opt.msh`: 1,416,795 tets,
+189,550... (nodes 314,284), min edge 100.18 m, eta_med 0.752, eta<=0.1 199
+(1.4e-4), eta<=0.05 2.  Lighter `safv4_deep_500m.msh`: 1,179,510 tets.
+
+- **Boundary tets are now well-shaped**: tets with a face on the bottom or
+  sides have eta_med 0.74, aspect (edge_max/edge_min) median 1.8, and
+  **0 slivers (eta<=0.2)**.  The top has 47 eta<=0.2 (the fault-trace
+  wedge).  The Phase 5b 43-km-driven bad boundary tets are eliminated.
+- The overall eta_med is 0.752 (vs 5b's 0.813) only because the mesh is
+  finer and more uniform (1.42 M vs 1.07 M tets): the histogram is 66 %
+  > 0.7, 96 % > 0.5, 0.8 % < 0.3 — a high-quality mesh whose worst tets
+  are now at the fault, not the boundary.
+- Fault-trace thin triangles (the "fault top boundary slivers") dropped
+  9 -> 5 of 132,337 (the quality DEM near the trace).  These 5 sit on the
+  constrained fault-DEM trace polyline; a documented minor residual.
+- Gates: G0 499/500 (one near-boundary numerical miss), G1 100.18 m (0
+  below floor), G2b 1.4e-4 ≤ 5e-4, G3a 0 duplicate groups, G3b 100 %
+  fault embedding, MFEM loads both (bdr attrs 101-103/201-203).
+
+### New PLC-repair (this iteration)
+
+clip `short_edge_contraction` now also collapses both-trace sub-floor
+edges (anchored to a trace node, so the merged node stays on the trace and
+fault/DEM conformity is preserved) — a single 94.9 m far-NW trace edge the
+corefine could not collapse.
+
+### ParaView
+
+`meshing/vtu_safv4_deep/`: `boundary_surface.vtu` (color by `edge_max` —
+now uniformly ~2.5 km, no 43 km triangles), `final_{all,faults,boundary,
+fault_1/2/3_*}.vtu`, and `safv4_deep_500m_opt_bulk_eta.vtu` (color by
+`eta` to see the quality distribution; the worst are at the fault, the
+boundary is clean).

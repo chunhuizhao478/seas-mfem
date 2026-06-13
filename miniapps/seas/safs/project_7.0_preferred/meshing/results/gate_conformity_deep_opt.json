@@ -6,27 +6,27 @@
  "embedding": {
   "tag_101": {
    "n_boundary": 0,
-   "n_interior": 100768,
+   "n_interior": 100721,
    "n_orphan": 0,
    "n_over": 0,
-   "n_tri": 100768,
-   "n_unique_tri": 100768
+   "n_tri": 100721,
+   "n_unique_tri": 100721
   },
   "tag_102": {
    "n_boundary": 0,
-   "n_interior": 2613,
+   "n_interior": 2680,
    "n_orphan": 0,
    "n_over": 0,
-   "n_tri": 2613,
-   "n_unique_tri": 2613
+   "n_tri": 2680,
+   "n_unique_tri": 2680
   },
   "tag_103": {
    "n_boundary": 0,
-   "n_interior": 28896,
+   "n_interior": 28932,
    "n_orphan": 0,
    "n_over": 0,
-   "n_tri": 28896,
-   "n_unique_tri": 28896
+   "n_tri": 28932,
+   "n_unique_tri": 28932
   }
  },
  "fault_names": [
@@ -35,40 +35,40 @@
   "tag_103"
  ],
  "mesh": "/Users/chunhuizhao/projects/seas-mfem-spatial-dyn-driver/miniapps/seas/safs/project_7.0_preferred/meshing/results/safv4_deep_500m_opt.msh",
- "n_fault_surface_nodes": 67806,
- "n_nodes": 189550,
- "n_tets": 1066297,
+ "n_fault_surface_nodes": 67867,
+ "n_nodes": 314284,
+ "n_tets": 1416795,
  "pairs": {},
  "pass": true,
  "slivers": {
   "eta_floor": 0.1,
   "min_edge_floor_m": 100.0,
   "n_short_edge_tets": 0,
-  "n_slivers": 85,
+  "n_slivers": 199,
   "sliver_dist_to_fault_m": {
-   "p05": 124.15838266934438,
-   "p25": 244.22287280996397,
-   "p50": 297.7377243720448,
-   "p75": 463.36173791070155,
-   "p95": 99035.39986597678
+   "p05": 176.59290550401874,
+   "p25": 294.7921429865247,
+   "p50": 400.081383009509,
+   "p75": 25941.676018545877,
+   "p95": 144327.98505783227
   },
-  "sliver_frac_within_1km_of_fault": 0.8352941176470589,
-  "sliver_touch_dem_ge1": 22,
-  "sliver_touch_dem_ge3": 6,
-  "sliver_touch_fault_ge1": 64,
-  "sliver_touch_fault_ge3": 21,
+  "sliver_frac_within_1km_of_fault": 0.6331658291457286,
+  "sliver_touch_dem_ge1": 59,
+  "sliver_touch_dem_ge3": 4,
+  "sliver_touch_fault_ge1": 117,
+  "sliver_touch_fault_ge3": 24,
   "sliver_z_hist": {
    "counts": [
-    16,
-    20,
-    13,
-    5,
-    10,
-    3,
-    18
+    47,
+    30,
+    31,
+    15,
+    17,
+    22,
+    37
    ],
    "edges_m": [
-    -20000.0,
+    -38653.872506913925,
     -15000.0,
     -10000.0,
     -5000.0,
@@ -80,12 +80,12 @@
   }
  },
  "surfaces": {
-  "tag_101": 100768,
-  "tag_102": 2613,
-  "tag_103": 28896,
-  "tag_201": 41669,
-  "tag_202": 4378,
-  "tag_203": 2099
+  "tag_101": 100721,
+  "tag_102": 2680,
+  "tag_103": 28932,
+  "tag_201": 175033,
+  "tag_202": 86583,
+  "tag_203": 36010
  },
  "tol_m": 0.001
 }
