@@ -1,0 +1,150 @@
+!Switch
+# =====================================================================
+# SAFS rate-and-state (slip law) + STRONG VELOCITY WEAKENING fault model,
+# SeisSol FL=103 (SCEC TPV103/104 formulation).  Replaces the LSW (FL=16)
+# model; the initial stress, CVM material, mesh, and nucleation MACHINERY
+# are UNCHANGED from safs_seisol_v2_0_0_LSW (only the friction blocks and
+# the nucleation AMPLITUDE differ).
+# Layout follows the tpv104 reference example (seisol_exmaples/tpv104):
+# stress !Include first, then spatial RS parameters, then nucleation.
+# Frame: x=East, y=North, z=Up (UTM 11N). SeisSol convention:
+#   compression NEGATIVE, strike-traction right-lateral POSITIVE.
+#
+# Design + all length-scale calculations (2026-06-10):
+#   CALC_rssw_friction_lengthscales_2026-06-10.md  (this directory)
+# Parameter set:
+#   f_0 = 0.6, V0 = 1e-6 m/s, V_init = 1e-12 m/s   (parameters.par)
+#   a(z), b(z): Allison & Dunham (2021) JGR 10.1029/2020JB021394, Fig 3a
+#   Dc (rs_sl0) = 0.10 m
+#   f_w (RS_muW) = 0.1, V_w (rs_srW) = 0.1 m/s
+#     (2026-06-11: f_w 0.2 -> 0.1 after the TEST2 arrest at +43 km NE.
+#      The 40-70 km corridor has mu_app ~0.25 -> drop only 3.4 MPa at
+#      f_w=0.2 vs G_c ~2.9 MJ/m2; f_w=0.1 raises it to 10.5 MPa.
+#      History: LSW B mu_d=0.25 arrested 22.8 km; RSSW f_w=0.2 arrested
+#      43 km.  Field is tractionless beyond ~190 km (mu_app ~0.02-0.04):
+#      arrest THERE is the stress field, not friction.)
+# =====================================================================
+
+# --- Initial effective stress tensor (UNCHANGED from LSW) ---
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Include safs_initial_stress.yaml
+
+# --- Spatial RS parameters: a(z), b(z), V_w(z) ---
+# d = depth [km] = -z/1000 (z up-positive, fault top embedded at z=0).
+# a(d): piecewise-linear Allison & Dunham Fig 3a digitization (identical
+#   breakpoints to friction/rate-and-state/param_a_500m_strongvw.csv):
+#     (0 km, 0.0062769) -> (14.8924 km, 0.0255077) -> (52.6829 km, 0.1452192)
+# (a-b)(d): DEEP-BARRIER STRENGTHENED 2026-06-15 (was Allison -0.004 to 10 km,
+#   crossing 0 at 15 km, +0.004 at 20 km).  That weak barrier let the supershear
+#   f_w=0.1 rupture break DOWN-DIP into the steeply-dipping, depth-constant-stress
+#   UNDER-COMPRESSED 13-19 km cells, whose dynamic sigma_n went tensile -> NaN at
+#   t=35 s (deep-mesh run; t=35 fault output: NaN at 95-121 km along-strike, depth
+#   median -13 km, facet dip 53 deg).  New ramp moves the VW->VS crossing UP to
+#   12 km and strengthens it hard so the down-dip rupture ARRESTS at ~12 km BEFORE
+#   loading those cells:
+#     d <= 8 km   : a-b = -0.004                 (VW, shallow seismogenic, unchanged)
+#     8 -> 12 km  : a-b ramps -0.004 -> 0        (VW -> neutral)
+#     12 -> 16 km : a-b ramps 0 -> +0.015        (STRONG velocity-strengthening)
+#     d > 16 km   : a-b = +0.015                 (capped strong VS)
+#   Seismogenic VW band is now 0-12 km (hypocenter 5 km unaffected -> nucleation
+#   identical).  TRADEOFF: down-dip rupture width ~15 -> ~12 km (moment ~ -20%);
+#   this is a PARTIAL mitigation -- it removes the slip-driven deep tensile cells
+#   but cannot add compression (use the V3 depth-dependent CSM stress for that) or
+#   tame the along-strike supershear.  Revert: restore the Allison ramp below.
+# rs_srW (V_w): ramped 0.1 -> 1.0 m/s over 10 -> 14 km (was 15 -> 20 km) so STRONG
+#   rate weakening is disabled INSIDE the new shallower barrier -- without this the
+#   deep cells still weaken to f_w=0.1 before a-b can arrest them.
+# Spot values: d=0: a=0.0063, b=0.0103 | d=5.05 (hypocenter): a=0.0128, b=0.0168
+#   (unchanged) | d=12: a=0.0218, b=0.0218 (neutral) | d=15: a=0.0258, b=0.0146 (VS)
+#   | d=16: a=0.0290, b=0.0140 (VS) | d=20: a=0.0417, b=0.0267 (VS).
+#
+# NOTE: spatial rs_b requires a SeisSol new enough to read rs_b from easi
+# (RateAndStateInitializer::addAdditionalParameters, insertIfPresent).
+# VERIFY in the run log:
+#   "RS parameter source (1 == from parameter file, 0 == from easi file):
+#    f0 1 - muW 1 - b 0"          <- b MUST print 0 (easi).
+# On older builds rs_b silently falls back to the constant RS_b in
+# parameters.par (set there to the hypocenter value 0.0168 as a fallback,
+# which is WRONG away from the hypocenter — do not run production that way).
+[rs_a, rs_b, rs_srW]: !LuaMap
+  returns: [rs_a, rs_b, rs_srW]
+  function: |
+    function f (x)
+      local d = -x["z"] / 1000.0
+      if (d < 0.0) then d = 0.0 end
+      local a
+      if (d <= 14.892395982783356) then
+        a = 0.0062769230769231
+            + (0.0255076923076923 - 0.0062769230769231) * d / 14.892395982783356
+      else
+        a = 0.0255076923076923
+            + (0.14521923076923074 - 0.0255076923076923)
+            * (d - 14.892395982783356) / (52.6829268292683 - 14.892395982783356)
+      end
+      -- a-b: VW 0-8 km, ramp to neutral by 12 km, STRONG VS (+0.015) by 16 km.
+      -- Deep arrest barrier (2026-06-15) to stop the down-dip rupture before the
+      -- under-compressed, steeply-dipping 13-19 km cells that went tensile -> NaN.
+      local amb
+      if (d <= 8.0) then
+        amb = -0.004
+      elseif (d <= 12.0) then
+        amb = -0.004 + 0.004 * (d - 8.0) / 4.0
+      else
+        amb = 0.015 * math.min((d - 12.0) / 4.0, 1.0)
+      end
+      -- V_w: ramp 0.1 -> 1.0 m/s over 10 -> 14 km (disable strong rate weakening
+      -- inside the new shallower deep barrier; was 15 -> 20 km).
+      local srw
+      if (d <= 10.0) then
+        srw = 0.1
+      elseif (d >= 14.0) then
+        srw = 1.0
+      else
+        srw = 0.1 + 0.9 * (d - 10.0) / 4.0
+      end
+      return { rs_a = a, rs_b = a - amb, rs_srW = srw }
+    end
+
+# --- State-evolution distance Dc (rs_sl0) ---
+# Dc = 0.10 m: hypocenter (mu=23.4 GPa CVM, sn_eff=63.9 MPa, b=0.0168)
+#   L_b = mu*Dc/(b*sn) = 2.18 km = 4.4 elements @ 500 m (fault median 4.9);
+#   L_nuc = mu*Dc/((b-a)*sn) = 9.1 km <= 12 km patch diameter (1.31x) and
+#   <= 15 km VW extent.  See CALC doc sections 3-5.
+[rs_sl0]: !ConstantMap
+  map:
+    rs_sl0: 0.10
+
+# --- Nucleation over-stress (strike direction), applied as Tnuc_s ---
+# Gaussian dtau_strike = 24 MPa, e-fold radius R = 6000 m, centered at the
+# hypocenter (606971, 3707270, -4965.62); ramped in time by SeisSol's
+# smoothStep over [s_0, s_0+t_0] = [0, 1] s (parameters.par).
+# RS sizing (CALC doc sections 6b + 6b.1) — the LSW dtau = 10 MPa would
+# NOT nucleate rate-and-state (the barrier alone is 22.6 MPa):
+#   direct-effect barrier SE = a*sn*ln(V_dyn/V_init)
+#     = 0.0128*63.9 MPa*ln(1e12) = 22.6 MPa     (V_dyn = 1 m/s)
+#   dtau = 24 MPa = 1.06*SE  (TPV103: 45/44.2 = 1.02; and dtau/sn = 0.376
+#     vs TPV103's 0.375)
+#   overstressed footprint r_os = R*sqrt(ln(24/22.6)) = 1471 m
+#   SRW critical half-length a_c = 0.579*mu*Dc/((1-nu)*(f_peak-f_ss)*sn)
+#     = 65 m  ->  onset ratio r_os/a_c = 22.6
+#   (calibration: TPV103's own design scores 2.2 on this check; the LSW
+#    criterion passed at 1.80.  r_os < L_nuc/2 = 4574 m is EXPECTED and
+#    harmless for forced SRW nucleation — TPV103 sits at 396 m vs 13.3 km.)
+[Tnuc_s]: !LuaMap
+  returns: [Tnuc_s]
+  function: |
+    function f (x)
+      local dx = x["x"] - 606971.0
+      local dy = x["y"] - 3707270.0
+      local dz = x["z"] + 4965.62
+      local r2 = dx*dx + dy*dy + dz*dz
+      local R  = 6000.0
+      return { Tnuc_s = 24.0e6 * math.exp(-r2 / (R*R)) }
+    end
+
+# --- Remaining nucleation tractions: strike-only ---
+# (forced_rupture_time removed: it is an FL=16 LSW parameter; FL=103 does
+#  not read it — nucleation is purely the Tnuc_s ramp.)
+[Tnuc_n, Tnuc_d]: !ConstantMap
+  map:
+    Tnuc_n: 0.0
+    Tnuc_d: 0.0

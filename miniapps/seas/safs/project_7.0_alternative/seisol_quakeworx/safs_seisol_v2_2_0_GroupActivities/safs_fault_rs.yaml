@@ -1,0 +1,64 @@
+!Switch
+# SAFS rate-and-state fault model WITHOUT strong velocity weakening.
+# Use with FL=3 (aging) OR FL=4 (slip): this yaml is identical for both laws;
+# only parameters.par's FL line differs. Derived from safs_seisol_v2_1_0_RSSRW
+# by REMOVING the strong-rate-weakening field rs_srW (and RS_muW from the deck).
+# Frame: x=East, y=North, z=Up (UTM 11N). Compression NEGATIVE, right-lateral POSITIVE.
+
+# --- Initial effective stress tensor (regional Hickman-Zoback, P_p=20 MPa baked in) ---
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Include safs_initial_stress.yaml
+
+# --- Spatial RS parameters a(z), b(z): Allison & Dunham (2021) Fig 3a a(d);
+#     a-b: VW (-0.004) for d<=8 km, ramp to neutral by 12 km, strong VS (+0.015) by 16 km
+#     (deep arrest barrier). d = depth km = -z/1000.
+[rs_a, rs_b]: !LuaMap
+  returns: [rs_a, rs_b]
+  function: |
+    function f (x)
+      local d = -x["z"] / 1000.0
+      if (d < 0.0) then d = 0.0 end
+      local a
+      if (d <= 14.892395982783356) then
+        a = 0.0062769230769231
+            + (0.0255076923076923 - 0.0062769230769231) * d / 14.892395982783356
+      else
+        a = 0.0255076923076923
+            + (0.14521923076923074 - 0.0255076923076923)
+            * (d - 14.892395982783356) / (52.6829268292683 - 14.892395982783356)
+      end
+      local amb
+      if (d <= 8.0) then
+        amb = -0.004
+      elseif (d <= 12.0) then
+        amb = -0.004 + 0.004 * (d - 8.0) / 4.0
+      else
+        amb = 0.015 * math.min((d - 12.0) / 4.0, 1.0)
+      end
+      return { rs_a = a, rs_b = a - amb }
+    end
+
+# --- State-evolution distance Dc (rs_sl0) ---
+[rs_sl0]: !ConstantMap
+  map:
+    rs_sl0: 0.10
+
+# --- Nucleation: Gaussian strike overstress at the hypocenter, smoothStep over [0, t_0] ---
+# Enlarged vs the SRW source (R 6000->8000, dtau 24->30 MPa): plain RS (FL=3/4) has a large
+# nucleation length L_nuc ~ 9-12.5 km, so a bigger forced patch is needed to PROPAGATE.
+# CONFIRM by the smoke test (run on QuakeWorx); tune further if it still arrests.
+[Tnuc_s]: !LuaMap
+  returns: [Tnuc_s]
+  function: |
+    function f (x)
+      local dx = x["x"] - 606971.0
+      local dy = x["y"] - 3707270.0
+      local dz = x["z"] + 4965.62
+      local r2 = dx*dx + dy*dy + dz*dz
+      local R  = 8000.0
+      return { Tnuc_s = 30.0e6 * math.exp(-r2 / (R*R)) }
+    end
+
+[Tnuc_n, Tnuc_d]: !ConstantMap
+  map:
+    Tnuc_n: 0.0
+    Tnuc_d: 0.0

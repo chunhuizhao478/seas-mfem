@@ -1,0 +1,67 @@
+{
+  "mesh": "/Users/chunhuizhao/projects/seas-mfem-spatial-dyn-driver/miniapps/seas/safs/project_7.0_alternative/seisol_quakeworx/safs_seisol_v2_1_0_RSSRW/preprocess/safs_mesh_deep.msh",
+  "fault_tag": 103,
+  "n_facets": 132333,
+  "k_ratio": 2.39,
+  "mu_s": 0.47,
+  "mu_d": 0.1,
+  "strike_s_range_km": [
+    -18.859951676898685,
+    467.7643834626713
+  ],
+  "mu_app_seismogenic_median": 0.298039323475624,
+  "pure_barrier_facets": 4476,
+  "detected_gates_s_km": [
+    [
+      -19.0,
+      -14.0,
+      99.10112359550561
+    ],
+    [
+      46.0,
+      71.0,
+      100.0
+    ],
+    [
+      181.0,
+      186.0,
+      99.29328621908127
+    ],
+    [
+      221.0,
+      246.0,
+      100.0
+    ],
+    [
+      266.0,
+      271.0,
+      100.0
+    ]
+  ],
+  "v3_reference_gates_s_km": [
+    [
+      -20,
+      -10,
+      "SE-tip",
+      94
+    ],
+    [
+      45,
+      65,
+      "San Gorgonio",
+      95
+    ],
+    [
+      180,
+      190,
+      "",
+      81
+    ],
+    [
+      220,
+      245,
+      "",
+      94
+    ]
+  ]
+}

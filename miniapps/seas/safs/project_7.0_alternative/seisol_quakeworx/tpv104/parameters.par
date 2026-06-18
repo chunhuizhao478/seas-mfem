@@ -1,0 +1,110 @@
+&equations
+!yaml file defining spatial dependence of material properties
+MaterialFileName = 'tpv104_material.yaml'
+!TPV104 is purely elastic (no off-fault plasticity)
+Plasticity = 0
+numflux = 'godunov'          ! upwind/Godunov flux (SeisSol default for TPV104)
+numfluxnearfault = 'godunov' ! flux for cells adjacent to the fault (excluding DR faces)
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+! rate-and-state friction, slip law + STRONG velocity weakening (SCEC TPV104)
+FL = 103                                       ! Friction law (103: rate-state + strong velocity weakening)
+!yaml file defining spatial dependence of fault properties
+!(rs_a, rs_srW spatial via LuaMap; rs_sl0 = 0.4 m; stress + nucleation inline)
+ModelFileName = 'tpv104_fault.yaml'
+GPwise = 1                                     ! evaluate fault parameters Gauss-point-wise
+                                               ! (needed so the smooth a(x,z)/V_w(x,z) tanh
+                                               !  boxcar is resolved within elements)
+
+! Rate-and-state constants (SCEC TPV104; spatial rs_a, rs_srW come from the yaml)
+RS_f0  = 0.6
+RS_sr0 = 1d-6
+RS_b   = 0.014
+RS_muW = 0.2                                   ! f_w (fully-weakened friction coefficient)
+RS_iniSlipRate1 = 1d-16                        ! V_init magnitude (sets psi_ini)
+RS_iniSlipRate2 = 0.0
+
+!characteristic time of the forced (smoothStep) nucleation overstress nuc_xy
+t_0 = 0.5
+
+!reference point for defining strike and dip direction (vertical strike-slip fault)
+XRef = 0.0
+YRef = -1.0e5
+ZRef = 0.0
+
+OutputPointType = 4                            ! 4 = elementwise (2D) fault output only; on-fault
+                                               !     receivers disabled (no tpv104_faultreceivers.dat needed)
+/
+
+!see: https://seissol.readthedocs.io/en/latest/fault-output.html
+!parameterize the fault paraview (elementwise) output
+&Elementwise
+printtimeinterval_sec = 0.5                    ! Time interval at which fault output is written
+OutputMask = 1 1 1 1 1 1 1 1 1 1 1             ! turn on all fault outputs
+                                               ! pos: 1=SRs/SRd 2=T_s/T_d/P_n 3=u_n 4=Mud/StV
+                                               !      5=Ts0/Td0/Pn0 6=Sls/Sld 7=Vr 8=ASl 9=PSR 10=RT 11=DS
+refinement_strategy = 2
+refinement = 1
+/
+
+!on-fault ascii receiver (pickpoint) output DISABLED (block intentionally empty;
+! OutputPointType=4 above does not read it). To re-enable the 9 SCEC on-fault
+! stations, set OutputPointType=5 and restore PPFileName='tpv104_faultreceivers.dat'.
+&Pickpoint
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+MeshFile = 'tpv104.puml.h5'
+meshgenerator = 'PUML'                         ! Name of meshgenerator (Gambit3D-fast, Netcdf or PUML)
+/
+
+&Discretization
+CFL = 0.5                                      ! CFL number (<=1.0)
+ClusteredLTS = 2                               ! Enable rate-2 local time-stepping
+/
+
+&Output
+OutputFile = 'output/tpv104'
+Format = 10                                    ! 10 = no volume wavefield output (full 200 m mesh -> huge).
+                                               ! Fault &Elementwise + free-surface + energy output are unaffected.
+                                               ! Set to 6 (hdf5) only if you really need volume snapshots.
+!             |stress     |vel
+iOutputMask = 0 0 0 0 0 0 1 1 1                ! (moot while Format=10)
+TimeInterval =  0.5                            ! wavefield output interval [s] (moot while Format=10)
+refinement = 1
+
+! Free surface output (coseismic ground deformation)
+SurfaceOutput = 1
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 0.5
+surfacevtkorder = 2
+
+! off-fault (free-surface) receivers DISABLED (no tpv104_receivers.dat needed).
+! To re-enable, restore: pickdt = 0.005  and  RFileName = 'tpv104_receivers.dat'
+
+EnergyOutput = 1                               ! Computation of energy, written in csv file
+EnergyTerminalOutput = 1                       ! Write energy to standard output
+EnergyOutputInterval = 0.5
+
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 12.0                                 ! extended past the SCEC TPV104 standard 10 s
+/
+
+&Analysis
+/
+
+&Debugging
+/

@@ -1,0 +1,46 @@
+# SeisSol QuakeWorx setups — commit SOURCE/CONFIG/DOCS only.
+#
+# Solution (simulation output) files, large regenerable binary inputs, the
+# cloned gmpe-smtk tool, and caches are NOT committed (regenerable from each
+# setup dir's own generators; several exceed GitHub's 100 MB hard limit).
+# Tracked: *.par *.yaml *.py *.sh *.md *.json *.ipynb *.pdf *.png *.txt and the
+# small input receiver lists (e.g. *_receivers.dat).
+
+# --- SeisSol solution / run output -------------------------------------------
+*.xdmf
+*-fault_cell/
+*-fault_vertex/
+*-surface_cell/
+*-surface_vertex/
+*_output/
+output/
+*-energy.csv
+*-flops.csv
+*-threadPinning.csv
+*-receiver-*.dat
+*-EnF*.dat
+
+# --- large binary inputs/outputs (regenerable; > GitHub limits) --------------
+# meshes (*.msh/*.vtu/*.vtk already covered by miniapps/seas/.gitignore),
+# ASAGI/material/stress NetCDF, PUML/HDF5 meshes, ADIOS2 BP, raw binary.
+*.nc
+*.bp
+*.h5
+*.hdf5
+*.bin
+*.msh
+*.vtu
+*.vtk
+
+# --- cloned external tool (carries its own nested .git) ----------------------
+gmpe-smtk/
+
+# --- caches / OS / archive ---------------------------------------------------
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+archive/
+
+# --- accidental self-nested duplicate of the setup dir (clean up on disk) ----
+safs_seisol_v2_2_0_LSW/safs_seisol_v2_2_0_LSW/

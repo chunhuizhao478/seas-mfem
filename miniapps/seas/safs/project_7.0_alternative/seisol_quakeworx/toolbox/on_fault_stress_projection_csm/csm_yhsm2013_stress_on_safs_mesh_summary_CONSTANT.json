@@ -1,0 +1,123 @@
+{
+  "input_csm_csv": "raw_data/yang_and_hauksson/CSM_data_1781290479811.csv",
+  "input_mesh": "safs_seisol_v2_0_0_RSSRW/safs_mesh.puml.h5",
+  "fault_n_cells": 60658,
+  "fault_n_degenerate_basis": 0,
+  "csm_n_samples": 22131,
+  "params": {
+    "sigma1_eff_MPa": 80.0,
+    "sigma2_eff_MPa": 40.0,
+    "sigma3_eff_MPa": 35.0,
+    "magnitude_provenance": "previous constant-tensor run (on_fault_stress_projection: eff principals 80/40/35, P_p 20); CSM magnitudes are orientation-only and NOT used \u2014 adjust via --sigma{1,2,3}-eff-MPa",
+    "P_p_MPa": 20.0,
+    "fault_strike_azimuth_hint_deg": 314.0,
+    "rake_sense": "right-lateral",
+    "harmonisation_normal_global": [
+      -0.6946583704589973,
+      -0.7193398003386512,
+      0.0
+    ],
+    "source_convention": "CSM YHSM-2013 csv (Yang & Hauksson), tension-positive MPa (e,n,u), ORIENTATION ONLY, depth-invariant; principal axes kept, effective magnitudes prescribed (compression-positive); lon/lat -> UTM via EPSG:4326->32611 always_xy; grid convergence neglected"
+  },
+  "sampling": {
+    "method": "nearest neighbour in UTM (x, y); depth ignored (model depth-invariant)",
+    "nn_dist_km": {
+      "min": 0.004171160492854898,
+      "median": 0.7959936842131715,
+      "max": 1.4156666672081408,
+      "nan_count": 0
+    },
+    "n_facets_beyond_max_nn_dist": 0,
+    "csm_eig_gap_sampled": {
+      "min": 0.06199420751244045,
+      "median": 0.4579771196257141,
+      "max": 1.099468401588476,
+      "nan_count": 0
+    }
+  },
+  "orientation_validation": {
+    "eigvec_dot_V3_compressional": {
+      "min": 0.9992667235958586,
+      "median": 0.9999948634647751,
+      "max": 1.000677265029665,
+      "nan_count": 0
+    },
+    "eigvec_dot_V1_tensional": {
+      "min": 0.9992887080333401,
+      "median": 0.9999888051097872,
+      "max": 1.0006837653576905,
+      "nan_count": 0
+    },
+    "shmax_recon_vs_model_deg": {
+      "min": 0.00019091148903127575,
+      "median": 0.3658550562388143,
+      "max": 27.00538895888127,
+      "nan_count": 0
+    }
+  },
+  "stats": {
+    "sigma_n_total_MPa": {
+      "min": 57.81858383339718,
+      "median": 81.66066130792987,
+      "max": 99.96561510218768,
+      "nan_count": 0
+    },
+    "sigma_n_eff_MPa": {
+      "min": 37.81858383339718,
+      "median": 61.66066130792986,
+      "max": 79.96561510218768,
+      "nan_count": 0
+    },
+    "tau_strike_MPa": {
+      "min": -3.0456532882465552,
+      "median": 15.662207489546272,
+      "max": 22.465631953821195,
+      "nan_count": 0
+    },
+    "tau_dip_MPa": {
+      "min": -20.29307713118125,
+      "median": -8.197649553865329,
+      "max": 21.270059254147792,
+      "nan_count": 0
+    },
+    "tau_magnitude_MPa": {
+      "min": 1.0693788455282602,
+      "median": 20.225684816055885,
+      "max": 22.49999213046093,
+      "nan_count": 0
+    },
+    "rake_deg": {
+      "min": -133.44605739154454,
+      "median": -25.230879418451508,
+      "max": 173.64125101986568,
+      "nan_count": 0
+    },
+    "mu_apparent": {
+      "min": 0.014779817909458266,
+      "median": 0.3385165755716961,
+      "max": 0.42520165138944715,
+      "nan_count": 0
+    }
+  },
+  "convention": "compression POSITIVE (SEAS internal); P_p positive; sigma_n_eff = sigma_n_total - P_p; tau_strike + = right-lateral (under Tandem fault basis s = up x n, d = s x n); frame (east, north, up) UTM Zone 11N; units MPa",
+  "hypocenter_check": {
+    "requested_xyz": [
+      606971.0,
+      3707270.0,
+      -4965.62
+    ],
+    "nearest_facet_centroid": [
+      607030.1075790661,
+      3707288.794439493,
+      -5054.256230107339
+    ],
+    "distance_m": 108.18187531447616,
+    "sigma_n_eff_MPa": 55.53802582545212,
+    "tau_magnitude_MPa": 21.009953976259315,
+    "tau_strike_MPa": 10.551983037994003,
+    "tau_dip_MPa": 18.16793384098537,
+    "mu_apparent": 0.37829853805553915,
+    "csm_SHmax_deg": 12.2,
+    "csm_nn_dist_km": 0.8283878403493239
+  }
+}

@@ -1,0 +1,96 @@
+!Switch
+# =====================================================================
+# SAFS V3 linear-slip-weakening fault model.
+# Stress: SPATIALLY VARYING CSM C1 k=2.39 field (safs_initial_stress.yaml,
+#   easi !ASAGI).  Friction: CONSTANT mu_s / mu_d / d_c (user directive
+#   2026-06-15: a facet-varying mu_s cannot be physically justified, so use
+#   constant values).  Frame x=E, y=N, z=Up (UTM 11N); SeisSol convention:
+#   compression NEGATIVE, strike-traction right-lateral POSITIVE, cohesion<=0.
+#
+# DESIGN NOTE (expected behaviour).  With the CSM stress the apparent friction
+# mu_app = tau/sigma_n varies 0.014 .. 0.449 along the fault; a CONSTANT mu_s
+# must exceed the fault-wide max (0.449) to avoid t=0 pre-slip, so the
+# strength excess is large in the low-mu_app corridors.  The San Gorgonio /
+# Banning gate (s = 40-60 km, mu_app ~ 0.14, SHmax ~ 78 deg to strike) and a
+# second gate (s = 220-240 km, mu_app ~ 0.18) therefore have S-ratio
+# S = (mu_s-mu_app)/(mu_app-mu_d) well above the ~1.77 propagation limit
+# (S = 14.5 at the first gate even at mu_d = 0.12; the gate is a full-depth
+# wall ~24 km long at the free surface, widening to ~44 km at depth).  So a
+# SE-nucleated rupture is EXPECTED TO ARREST at the San Gorgonio gate rather
+# than reach the NW end.  This is the faithful, physically realistic outcome
+# of constant friction + the CSM stress (the SAF segments at San Gorgonio);
+# it does NOT achieve full SE->NW propagation.  See
+# safs_seisol_v3_0_0_LSW/PLAN.md and csm_S_ratio_const_mu_*.{vtu,png}.
+# =====================================================================
+
+# --- Initial effective stress tensor (spatially varying, !ASAGI) ---
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Include safs_initial_stress.yaml
+
+# --- Friction (CONSTANT mu_d, d_c, cohesion) ---
+# Chosen from the C1-field facts (hypocenter sigma_n_eff 70.1 MPa, mu_app 0.296,
+# mu = 23.5 GPa) and the fault-wide mu_app range (max 0.449):
+#   mu_s = 0.47  : > fault-wide max mu_app 0.449 (also > nc-interpolated max
+#                  0.448) -> no t=0 pre-slip, with a 0.021 margin for ASAGI
+#                  interpolation.  Set as a LuaMap below (with the deep barrier).
+#   mu_d = 0.10  : SAF weak-fault dynamic friction (Lachenbruch & Sass heat-flow
+#                  bound; Hardebeck & Hauksson 2001).  Note mu_d > mu_app on the
+#                  ~3% lowest-mu_app facets (mu_app < 0.10, the gate cores + a
+#                  few shallow patches) -> those never weaken (pure barriers).
+#   d_c  = 2.5 m : process zone Lb = mu*d_c/((mu_s-mu_d)*sigma_n)
+#                  = 23.5e9*2.5/(0.37*70.1e6) = 2265 m at the hypocenter
+#                  (~4.5 elements @ ~500 m mesh).  Lb ~ 1320 m at the gate
+#                  (sigma_n 120, ~2.6 elements) and ~530 m near the deep barrier
+#                  (sigma_n 300) -> marginal at depth only (adjacent to the
+#                  locked band); raise d_c if a convergence check fails.
+[mu_d, d_c, cohesion]: !ConstantMap
+  map:
+    mu_d:     0.10
+    d_c:      2.5
+    cohesion: 0.0
+
+# --- Static friction (constant 0.47) with the deep barrier ---
+# mu_s = 0.47 everywhere, except the locked deep band z in (-20000, -15000) m,
+# where mu_s = 1.0e6 so the strength is effectively infinite (V2 barrier).
+[mu_s]: !LuaMap
+  returns: [mu_s]
+  function: |
+    function f (x)
+      if (x["z"] < -15000.0 and x["z"] > -20000.0) then
+        return { mu_s = 1.0e6 }
+      else
+        return { mu_s = 0.47 }
+      end
+    end
+
+# --- Nucleation over-stress (strike direction), applied as Tnuc_s ---
+# Gaussian patch dtau_strike = 20 MPa, e-fold radius R = 6000 m, centered at
+# the hypocenter (606971, 3707270, -4965.62) — the SE high-mu_app region
+# (mu_app ~ 0.30-0.35), the easiest place to nucleate.  Ramped in time by
+# SeisSol's smoothStep over [s_0, s_0+t_0] = [0, 1] s (parameters.par).
+# Checks (C1 field hypocenter: sigma_n_eff 70.1 MPa, tau_0 20.8 MPa,
+# mu_app 0.296; mu = 23.5 GPa, nu 0.275):
+#   tau_s = mu_s*sigma_n = 0.47*70.1 = 32.9 MPa; SE = tau_s - tau_0 = 12.1 MPa
+#   dtau_nuc(min for 1.1*tau_s) = 1.1*32.9 - 20.8 = 15.4 MPa -> choose 20 MPa
+#   over-stressed footprint r_os = R*sqrt(ln(20/12.1)) = 4256 m
+#   Uenishi-Rice Lnuc = 1.158*mu*d_c/((1-nu)(mu_s-mu_d)sigma_n) = 3617 m
+#     -> r_os = 4256 > Lnuc/2 = 1808 m (onset ratio 2.35) -> nucleates.
+[Tnuc_s]: !LuaMap
+  returns: [Tnuc_s]
+  function: |
+    function f (x)
+      local dx = x["x"] - 606971.0
+      local dy = x["y"] - 3707270.0
+      local dz = x["z"] + 4965.62
+      local r2 = dx*dx + dy*dy + dz*dz
+      local R  = 6000.0
+      return { Tnuc_s = 20.0e6 * math.exp(-r2 / (R*R)) }
+    end
+
+# --- Remaining nucleation tractions + forced-rupture (disabled) ---
+# Tnuc_n/Tnuc_d = 0 (strike-only nucleation); forced_rupture_time = 1e10
+# disables the forced-rupture path, so nucleation is purely the Tnuc_s ramp.
+[Tnuc_n, Tnuc_d, forced_rupture_time]: !ConstantMap
+  map:
+    Tnuc_n:              0.0
+    Tnuc_d:              0.0
+    forced_rupture_time: 1e10

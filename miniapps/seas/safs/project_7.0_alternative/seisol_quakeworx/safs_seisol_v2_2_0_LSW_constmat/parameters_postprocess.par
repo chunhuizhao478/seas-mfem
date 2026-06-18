@@ -1,0 +1,110 @@
+! ============================================================================
+! SAFS v2_2_0_LSW — COMBINED POST-PROCESSING ACTIVITY deck (one run feeds all
+! of 6.1 PGA/PGV/PGD, 6.2 potency/moment, 6.3 Vr/slip-rate/particle-velocity,
+! 6.4 seismogram). Physics identical to parameters.par (FL=16 candidate D);
+! only the OUTPUT set is expanded and off-fault receivers + on-fault pickpoints
+! are added. Submit as ONE QuakeWorx job. Keep parameters.par / _kinematics.par.
+!
+! MATERIAL: defaults to the CONSTANT medium (M0 = 3.2e10*P0 exactly verifiable,
+!   single Vp/Vs for the arrival-time and supershear checks). For the CVM case,
+!   change the ONE line below to MaterialFileName = 'safs_material_cvm.yaml'.
+! DOWNLOAD-SIZE budget: see POSTPROCESS_ACTIVITY_PLAN.md Phase 1 (~0.77 GB double
+!   at EndTime=100 s; all paths legacy/compact, refinement=0). Under 1 GB.
+! ============================================================================
+&equations
+MaterialFileName = 'safs_material.yaml'        ! CONSTANT first. CVM: 'safs_material_cvm.yaml'
+Plasticity = 0
+numflux = 'godunov'
+numfluxnearfault = 'godunov'
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+FL = 16                                         ! linear slip-weakening (candidate D)
+ModelFileName = 'safs_fault.yaml'
+s_0 = 0.0
+t_0 = 1.0                                        ! nucleation ramp [s]
+XRef = 0.0
+YRef = -1.0
+ZRef = 0.0
+refPointMethod = 1
+OutputPointType = 5                              ! 5 = elementwise AND pickpoint output (4 = elementwise
+                                                 ! ONLY -> the &Pickpoint block is ignored, no on-fault
+                                                 ! files). MUST be 5 for safs_pickpoints.dat to be written.
+/
+
+! --- Fault surface maps: slip rate (front), Vr, ASl (slip), PSR, RT ---
+&Elementwise
+printtimeinterval_sec = 2.0                      ! 2 s = good slip-rate front movie for 6.3
+! 1=SRs/SRd 7=Vr 8=ASl 9=PSR 10=RT selected (Vr/ASl/PSR/RT are end-state fields):
+OutputMask = 1 0 0 0 0 0 1 1 1 1 0 0
+refinement_strategy = 2
+refinement = 0                                   ! 1 value/facet. KEEP 0 for <1 GB.
+/
+
+! --- On-fault PICKPOINTS: local slip-rate / traction / slip time series (6.3, 6.4) ---
+&Pickpoint
+PPFileName = 'safs_pickpoints.dat'
+printtimeinterval = 10                           ! every 10 timesteps (~10-50 ms effective)
+! 1=SRs/SRd 2=Ts/Td/Pn 6=Sls/Sld selected (on-fault source-time series):
+OutputMask = 1 1 0 0 0 1 0 0 0 0 0 0
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+MeshFile = 'safs_mesh.puml.h5'
+meshgenerator = 'PUML'
+/
+
+&Discretization
+CFL = 0.5
+ClusteredLTS = 2
+FixTimeStep = 0.1
+/
+
+&Output
+OutputFile = 'output/safs'
+Format = 10                                      ! no volume wavefield output (large mesh)
+iOutputMask = 0 0 0 0 0 0 1 1 1
+iPlasticityMask = 0 0 0 0 0 0 1
+TimeInterval = 5.0                               ! moot (Format=10)
+refinement = 1                                   ! VOLUME refinement; moot under Format=10
+
+! --- Free surface (6.1 PGV/PGD map; 6.3 surface particle velocity): legacy compact ---
+SurfaceOutput = 1
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 0.5                       ! v1/v2/v3 (->PGV) + u1/u2/u3 (->PGD)
+surfacevtkorder = -1                             ! MANDATORY -1 (compact). >=0 is multi-GB.
+
+! --- Off-fault RECEIVERS (6.1 PGA via fine pickdt; 6.4 seismograms) ---
+ReceiverOutput = 1
+RFileName = 'safs_receivers.dat'
+pickdt = 0.005                                   ! 0.005 s = 100 Hz Nyquist for PGA (6.1)
+ReceiverOutputInterval = 10.0                    ! flush every 10 s
+
+! --- Energy CSV (6.2 ground truth: potency, seismic_moment) ---
+EnergyOutput = 1
+EnergyTerminalOutput = 1
+EnergyOutputInterval = 0.25
+
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 100.0                                  ! see Constraints: verification is exact at any
+                                                 ! shared snapshot; extend to 150 s (with the
+                                                 ! size levers in Phase 1) for a plateaued M0.
+/
+
+&Analysis
+/
+
+&Debugging
+/

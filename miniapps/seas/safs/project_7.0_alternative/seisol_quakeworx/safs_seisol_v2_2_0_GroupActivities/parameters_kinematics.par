@@ -1,0 +1,141 @@
+! =====================================================================
+! SAFS v2_2_0_LSW — RUPTURE KINEMATICS + SOURCE QUANTITIES variant.
+! Sibling of parameters.par (which is the PGV / free-surface run; KEEP that one).
+! Same physics (equations / fault model / mesh / discretization are IDENTICAL);
+! only the OUTPUT selection differs. Submit this as the parameter file for a
+! separate QuakeWorx job.
+!
+! Purpose — answer three questions, all kept UNDER 1 GB of download:
+!   (1) How fast the rupture advances ........ fault Vr (group 7) + RT (group 10)
+!   (2) Seismic potency ...................... energy CSV column "potency"
+!   (3) Seismic moment ....................... energy CSV column "seismicMoment"
+!       (moment rate / source-time-function = d/dt of seismicMoment(t))
+!
+! DOWNLOAD-SIZE ESTIMATE (verified against SeisSol source):
+!   Fault &Elementwise, legacy XDMF path (geometry written ONCE), refinement=0
+!   => 1 value per fault facet = 121,316 points; 6 scalar components
+!   (SRs,SRd,Vr,ASl,PSR,RT). Per snapshot = 6 * 121,316 * 8 B = 5.8 MB (double),
+!   2.9 MB (single). EndTime 200 s / printtime 5 s = ~41 snapshots:
+!       ~240 MB (double build)  /  ~120 MB (single build)  + ~10 MB geometry.
+!   Energy CSV (0.25 s, ~800 rows): < 1 MB.
+!   NO surface output here (SurfaceOutput = 0) — that was the multi-GB item.
+!   TOTAL ~= 0.25 GB (double) / 0.13 GB (single).  Well under 1 GB.
+!
+!   Levers if you want even smaller: printtimeinterval_sec 5->10 (halves fault
+!   output); or DROP groups 1/9 (slip rate, PSR) leaving Vr+ASl+RT (3 comp).
+!   Lever if you want a smoother Vr MAP for visualization: refinement 0->1
+!   (x4 size -> ~0.85 GB double, still < 1 GB) — adds no new physics, the DG
+!   data is per-facet; refinement only subsamples it.
+! =====================================================================
+
+&equations
+!yaml file defining spatial dependence of material properties
+MaterialFileName = 'safs_material_cvm.yaml'
+Plasticity = 0
+numflux = 'godunov'
+numfluxnearfault = 'godunov'
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+! linear slip-weakening friction (identical to parameters.par)
+FL = 16
+ModelFileName = 'safs_fault.yaml'
+
+! nucleation: Tnuc_s over-stress ramped over [s_0, s_0+t_0]
+s_0 = 0.0
+t_0 = 1.0
+
+!reference vector for defining strike and dip direction
+XRef = 0.0
+YRef = -1.0
+ZRef = 0.0
+refPointMethod = 1
+
+OutputPointType = 4
+/
+
+!parameterize paraview fault file output — KINEMATICS selection
+&Elementwise
+printtimeinterval_sec = 5.0                    ! snapshot cadence (front movie + final maps)
+! OutputMask groups (per SeisSol src/DynamicRupture/Output/DataTypes.h VariableLabels):
+!   1=SRs/SRd  2=T_s/T_d/P_n  3=u_n  4=Mud/StV  5=Ts0/Td0/Pn0  6=Sls/Sld
+!   7=Vr       8=ASl          9=PSR  10=RT       11=DS          12=P_f/Tmp
+! Selected: 1 (slip rate -> front tracking + moment-rate cross-check),
+!           7 (Vr = rupture velocity), 8 (ASl = total slip -> potency/moment map),
+!           9 (PSR = peak slip rate -> supershear diagnostic), 10 (RT = rupture time).
+! Vr, ASl, PSR, RT are END-STATE fields: the FINAL snapshot holds the complete map,
+! so the snapshot cadence only affects the slip-rate movie, not the speed maps.
+OutputMask = 1 0 0 0 0 0 1 1 1 1 0 0
+refinement_strategy = 2
+refinement = 0                                 ! 0 = 1 value/facet (native 500 m res, smallest).
+                                               ! Set to 1 for a 4x-subdivided smoother Vr map.
+!vtkorder = 3
+/
+
+&Pickpoint
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+MeshFile = 'safs_mesh.puml.h5'
+meshgenerator = 'PUML'
+/
+
+&Discretization
+CFL = 0.5
+ClusteredLTS = 2
+FixTimeStep = 0.1
+/
+
+&Output
+OutputFile = 'output/safs'
+Format = 10                                    ! no volume wavefield output (large mesh)
+iOutputMask = 0 0 0 0 0 0 1 1 1
+iPlasticityMask = 0 0 0 0 0 0 1
+TimeInterval = 5.0                             ! moot while Format=10
+refinement = 1
+
+! Free surface output OFF for this run — not needed for rupture speed / moment /
+! potency, and it was the multi-GB item. Use parameters.par for the PGV map.
+SurfaceOutput = 0
+
+! Energy output = source quantities. Writes a CSV time series that INCLUDES
+! seismicMoment and potency (+ frictional work, kinetic/elastic energy).
+!   - Seismic moment  M0(t)      -> last row = final scalar moment; Mw = (2/3)(log10 M0 - 9.05)
+!   - Potency         P0(t)      -> = M0 / mu_avg ; also = integral of slip over fault area
+!   - Moment rate     dM0/dt     -> finite-difference of the seismicMoment column = the STF
+! 0.25 s gives a smooth moment-rate function.
+EnergyOutput = 1
+EnergyTerminalOutput = 1
+EnergyOutputInterval = 0.25
+
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 200.0                                ! run long enough for the moment to PLATEAU
+                                               ! (candidate D supershear full NW propagation
+                                               ! ~120-150 s; 200 s ensures M0/P0 have flattened).
+!
+! OPTIONAL auto-stop once the rupture is over (so M0/P0 are guaranteed plateaued
+! and no snapshots are wasted after the event). DISABLED by default: a wrong
+! threshold can abort during the slow crawl through the San Gorgonio gate, where
+! the moment rate dips low mid-rupture. Enable only after a first run shows the
+! moment-rate curve, then set the threshold ~0.1% of peak dM0/dt.
+! terminatormomentratethreshold = 1.0e16        ! [N*m/s] abort when dM0/dt stays below this
+! terminatormaxtimepostrupture  = 5.0           ! [s] ... for this long
+/
+
+&Analysis
+/
+
+&Debugging
+/

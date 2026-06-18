@@ -1,0 +1,14 @@
+# receivers (annotated; SeisSol reads the coords-only safs_receivers.dat)
+# label                                  x            y            z
+# epicenter                               604801.2000 3705030.0000       0.0000
+# fault_normal_SW_20km                    590745.5748 3690801.8799       0.0000
+# fault_normal_SW_10km                    597773.3874 3697915.9400       0.0000
+# fault_normal_SW_5km                     601287.2937 3701472.9700       0.0000
+# fault_normal_SW_2km                     603395.6375 3703607.1880       0.0000
+# fault_normal_NE_2km                     606206.7625 3706452.8120       0.0000
+# fault_normal_NE_5km                     608315.1063 3708587.0300       0.0000
+# fault_normal_NE_10km                    611829.0126 3712144.0600       0.0000
+# fault_normal_NE_20km                    618856.8252 3719258.1201       0.0000
+# along_strike_NW_10km                    595924.3549 3711699.7544       0.0000
+# along_strike_NW_20km                    588836.3979 3718720.1024       0.0000
+# along_strike_NW_40km                    574324.2424 3732355.1845       0.0000

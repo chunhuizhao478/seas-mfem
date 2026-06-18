@@ -1,0 +1,46 @@
+!Switch
+# SAFS V3 recipe-B initial fault stress — GATE-REMOVED CSM C1 field via easi !ASAGI.
+# STAGED for inspection (PLAN_gate_removal_csm_2026-06-17.md). Promote by pointing
+# safs_fault_B.yaml at this file (it already does) and renaming to production once
+# accepted; the original safs_initial_stress.yaml / safs_stress_csm.nc are untouched.
+#
+# Difference from the production safs_initial_stress.yaml:
+#   closure ratio k : 2.39  ->  1.80   (lever 1: lowers the global mu_app ceiling
+#                     from 0.449 to 0.298 so mu_s can drop to 0.318 without t=0
+#                     pre-slip; Cajon Pass strong-crust k~3 is relaxed toward the
+#                     lower frictional bound).
+#   + fault-local graded overpressure (lever 2): an isotropic DeltaPp(s,z) is
+#     subtracted from the EFFECTIVE tensor at the San Gorgonio (s 40-71 km),
+#     g181 (181-186) and g221 (221-246) gates so mu_app there clears the S<1.7
+#     propagation floor.  Hubbert-Rubey lambda=Pp/Sv capped at 0.9 (sub-litho);
+#     DeltaPp mean ~63 MPa, max ~157 MPa on the gate cores.  Physical basis:
+#     overpressured low-permeability restraining-bend core (Fulton & Saffer 2009).
+#   Built by csm_stress_to_asagi.py --k-ratio 1.8 --overpressure-field
+#     overpressure_B_2026-06-17.npz  ->  safs_stress_csm_B.nc.
+#
+# Pp is isotropic, so baking it into the diagonal is exact under SeisSol's
+# per-facet projection (sigma_n_eff = n.sigma.n; shear/tau unchanged).
+# Self-check (2026-06-17): trilinear samples of safs_stress_csm_B.nc at the
+# 60,371 fault facet centroids reproduce the recipe-B projection VTU's per-facet
+# sigma_n_eff / tau to median rel err 1.2e-3 / 1.6e-3 (p95 2.4%).  End-to-end:
+# sampled on the fault, S<1.7 on >=97% of each gate's seismogenic facets, and
+# max mu_app 0.297 < mu_s 0.318 (no t=0 pre-slip).
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Any
+  components:
+    - !ASAGI
+      file: safs_stress_csm_B.nc
+      parameters: [s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]
+      var: data
+      interpolation: linear
+    # FALLBACK NOTE: the ConstantMap below is V2's k=2.39 hydrostatic regional
+    # tensor; it is INCONSISTENT with the k=1.8 ASAGI field but is unreachable in
+    # practice (the mesh is fully contained in the nc box, verified by the
+    # coverage self-check).  Update only if you intend the fallback to be reached.
+    - !ConstantMap
+      map:
+        s_xx: -46106832.590820
+        s_yy: -73893167.409180
+        s_zz: -35000000.0
+        s_xy: -14386796.006773
+        s_yz:   0.0
+        s_xz:   0.0

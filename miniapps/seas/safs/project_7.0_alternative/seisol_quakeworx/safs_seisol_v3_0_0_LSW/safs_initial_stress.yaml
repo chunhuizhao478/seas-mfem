@@ -1,0 +1,47 @@
+!Switch
+# SAFS V3 initial fault stress — SPATIALLY VARYING CSM C1 k=2.39 field via easi !ASAGI.
+#
+# Unlike V2 (a single ConstantMap regional tensor), V3 adopts the depth-
+# dependent, CSM-orientation on-fault stress projection:
+#   orientation : CSM YHSM-2013 (Yang & Hauksson) principal axes, linear-
+#                 interpolated in (x,y), depth-invariant;
+#   magnitude   : sig2 = Sv_eff(z) = MUSCAL lithostat - HYDROSTATIC P_p,
+#                 sig3 = Sv_eff/((1-R)*k+R), sig1 = k*sig3, closure C1 k=2.39.
+# Built by toolbox/on_fault_stress_projection_csm/csm_stress_to_asagi.py into
+#   safs_stress_csm.nc  (compound data{s_xx,s_yy,s_zz,s_xy,s_yz,s_xz},
+#   dims (z,y,x), Pa, SeisSol compression-NEGATIVE, UTM 11N x=E y=N z=Up,
+#   1000 m x/y, 250 m z; effective tensor = P_p already removed).
+# SeisSol PROJECTS this Cartesian tensor onto each fault facet
+# (BaseDRInitializer rotateStressToFaultCS), exactly as V2 did the constant
+# tensor — do NOT pre-project.  P_p is isotropic so baking it into the
+# diagonal is exact under projection (sigma_n_eff = n.sigma.n; shear unchanged).
+#
+# Converter self-check (2026-06-15): trilinear samples of safs_stress_csm.nc at
+# the 60,394 fault facet centroids reproduce the C1 projection VTU's per-facet
+# sigma_n_eff / tau to median rel err 1.4e-3 / 2.0e-3 (p95 2-3%).  Max
+# nc-interpolated mu_app = 0.448 < mu_s = 0.47 -> no t=0 pre-slip.
+#
+# The !ConstantMap fallback is V2's constant regional tensor (graceful
+# degradation if ASAGI is unavailable or a facet falls outside the nc box;
+# mesh containment makes it unreachable in practice), following the
+# safs_material_cvm.yaml !Any pattern.  Keep safs_stress_csm.nc next to this
+# file in the case folder.  Requires SeisSol built with ASAGI.
+# Restored 2026-06-15: real V3 spatially-varying CSM stress (ASAGI primary,
+# ConstantMap fallback).  The diagnostic A/B (constant-stress run) confirmed the
+# stress nc is NOT the cause of the output-init stall — that stall is a transient
+# Lustre/MPI-IO hiccup that clears on resubmit.
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Any
+  components:
+    - !ASAGI
+      file: safs_stress_csm.nc
+      parameters: [s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]
+      var: data
+      interpolation: linear
+    - !ConstantMap
+      map:
+        s_xx: -46106832.590820
+        s_yy: -73893167.409180
+        s_zz: -35000000.0
+        s_xy: -14386796.006773
+        s_yz:   0.0
+        s_xz:   0.0

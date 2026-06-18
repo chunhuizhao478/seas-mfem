@@ -1,0 +1,34 @@
+!Switch
+# SAFS initial fault stress tensor (separated per the tpv13/QuakeWorx format,
+# !Include'd by safs_fault.yaml for the [s_xx..s_xz] key).
+# Effective Cauchy tensor: regional Hickman & Zoback stress with pore pressure
+# P_p=20 MPa baked into the diagonal, in SeisSol's compression-NEGATIVE convention
+# (whole-tensor negation of the comp-positive SEAS tensor).
+# Frame: x=East, y=North, z=Up (UTM 11N).  See MFEM_to_SeisSol_mapping.md §2.
+#
+# Source (2026-06-10): stress run shmax100_shmin60_sv55_psi69_az23 on the
+# safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq mesh —
+#   SHmax = 100 MPa @ azimuth 23 deg, Shmin = 60 MPa, Sv = 55 MPa, P_p = 20 MPa,
+#   depth-constant.  Tensor = -(sigma_global_at_z0_MPa - P_p*I) from
+#   stress/results/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq_shmax100_shmin60_sv55_psi69_az23/
+#       safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq_shmax100_shmin60_sv55_psi69_az23_summary.json
+#   Verified against the fault-projection VTU at the hypocenter facet:
+#   sigma_n_eff = 63.90 MPa, |tau| = 21.17 MPa (matches VTU 63.90 / 21.16).
+#
+# These are GLOBAL Cartesian components.  SeisSol PROJECTS this tensor onto the
+# fault itself: BaseDRInitializer rotateStressToFaultCS() applies
+# inverseSymmetricTensor2RotationMatrix(normal, tangent1, tangent2) per fault
+# facet, i.e. sigma_n = n.(sigma.n), tau_strike/dip = t.(sigma.n) — the SAME
+# projection MFEM does in FaultGeometry::ComputeSAFSParams.  So on a curved fault
+# the resulting on-fault tractions vary per facet automatically; do NOT pre-project.
+#
+# Our problem is constant-stress (zero depth gradients), so a single ConstantMap
+# replaces tpv13's depth-dependent LuaMap.
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !ConstantMap
+  map:
+    s_xx: -46106832.590820
+    s_yy: -73893167.409180
+    s_zz: -35000000.0
+    s_xy: -14386796.006773
+    s_yz:   0.0
+    s_xz:   0.0

@@ -1,0 +1,9 @@
+recipe,k,mu_s,gate,n_seis,n_need,n_unfix,pct_S<1.7_graded,pct_S<1.7_env,env_feasible,max_mu_after,subcritical
+B,1.8,0.318,SanGorgonio,4360,3935,0,100.0,100.0,False,2.7406,False
+B,1.8,0.318,g181,615,614,0,100.0,100.0,True,0.2978,True
+B,1.8,0.318,g221,2766,2723,0,100.0,100.0,False,0.4533,False
+B,1.8,0.318,g266,0,0,0,nan,nan,False,0.2978,True
+C,1.5,0.225,SanGorgonio,4360,4259,0,100.0,100.0,False,1.4971,False
+C,1.5,0.225,g181,615,615,0,100.0,100.0,True,0.2058,True
+C,1.5,0.225,g221,2766,2766,0,100.0,100.0,False,0.3642,False
+C,1.5,0.225,g266,0,0,0,nan,nan,False,0.2041,True

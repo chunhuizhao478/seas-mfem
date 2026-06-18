@@ -1,0 +1,169 @@
+{
+  "input_csm_csv": "../../raw_data/yang_and_hauksson_orientation/CSM_data_1781290479811.csv",
+  "input_mesh": "../../safs_seisol_v3_0_0_LSW/safs_mesh.puml.h5",
+  "fault_n_cells": 60658,
+  "fault_n_degenerate_basis": 0,
+  "csm_n_samples": 22131,
+  "params": {
+    "magnitude_mode": "depth-R",
+    "magnitude_provenance": "depth-dependent (plan rev 5): sig2 = Sv_eff(z) = MUSCAL lithostatic overburden - hydrostatic P_p; sig1/sig3 closed-form from the closure and per-point CSM shape ratio R (col 13); built on the CSM principal axes (compression-positive)",
+    "fault_strike_azimuth_hint_deg": 314.0,
+    "rake_sense": "right-lateral",
+    "harmonisation_normal_global": [
+      -0.6946583704589973,
+      -0.7193398003386512,
+      0.0
+    ],
+    "source_convention": "orientations from CSM YHSM-2013 csv (tension-positive (e,n,u), depth-invariant); magnitudes depth-dependent (compression-positive); lon/lat -> UTM via EPSG:4326->32611 always_xy; grid convergence neglected",
+    "closure": "ratio",
+    "differential_source": "frictional ratio k = 1.8",
+    "k_ratio": 1.8,
+    "pp_model": "hydrostatic",
+    "density_source": "muscal lateral-mean rho(z) from ../../safs_seisol_v3_0_0_LSW/safs_material_cvm.nc",
+    "axes": "csm",
+    "orientation_sampling": "linear",
+    "orientation_nn_fallback_facets": 0,
+    "cap_k_max": 5.83,
+    "cap_method": "frictional ceiling sig1/sig3 <= cap_k_max (Byerlee/Mohr-Coulomb; D_max = (k-1)*Sv_eff/((1-R)*k+R), -> 0 at the free surface)",
+    "taper_zseis_km": null,
+    "n_capped_facets": 0,
+    "ordering_positivity_ok_all_facets": true,
+    "R_recovery_max_abs_err": 5.2735593669694936e-15,
+    "sigma_zz_eff_minus_Sv_eff_MPa": {
+      "min": -36.42289520488083,
+      "median": 0.06679663598271013,
+      "max": 52.21651201282546,
+      "nan_count": 0
+    },
+    "g_accel_m_s2": 9.81
+  },
+  "sampling": {
+    "method": "nearest neighbour in UTM (x, y); depth ignored (model depth-invariant)",
+    "nn_dist_km": {
+      "min": 0.004171160492854898,
+      "median": 0.7959936842131715,
+      "max": 1.4156666672081408,
+      "nan_count": 0
+    },
+    "n_facets_beyond_max_nn_dist": 0,
+    "csm_eig_gap_sampled": {
+      "min": 0.0068052509125748895,
+      "median": 0.45797711962571425,
+      "max": 1.127297548482034,
+      "nan_count": 0
+    }
+  },
+  "orientation_validation": {
+    "eigvec_dot_V3_compressional": {
+      "min": 0.9992667235958586,
+      "median": 0.9999948634647751,
+      "max": 1.000677265029665,
+      "nan_count": 0
+    },
+    "eigvec_dot_V1_tensional": {
+      "min": 0.9992887080333401,
+      "median": 0.9999888051097872,
+      "max": 1.0006837653576905,
+      "nan_count": 0
+    },
+    "shmax_recon_vs_model_deg": {
+      "min": 0.0,
+      "median": 0.0,
+      "max": 8.526512829121202e-14,
+      "nan_count": 0
+    }
+  },
+  "stats": {
+    "sigma_n_total_MPa": {
+      "min": 0.4074267577803298,
+      "median": 157.8541092470137,
+      "max": 517.9543093135078,
+      "nan_count": 0
+    },
+    "sigma_n_eff_MPa": {
+      "min": 0.20209283125568187,
+      "median": 94.63755105021487,
+      "max": 357.3008316835974,
+      "nan_count": 0
+    },
+    "tau_strike_MPa": {
+      "min": -8.446156292945474,
+      "median": 18.717487737477512,
+      "max": 85.22993607364572,
+      "nan_count": 0
+    },
+    "tau_dip_MPa": {
+      "min": -63.48901558546319,
+      "median": -0.46507123857292454,
+      "max": 39.445589202480775,
+      "nan_count": 0
+    },
+    "tau_magnitude_MPa": {
+      "min": 0.040183013900875975,
+      "median": 20.365946731923586,
+      "max": 95.62419955981761,
+      "nan_count": 0
+    },
+    "rake_deg": {
+      "min": -134.77775747750394,
+      "median": -2.793223660404724,
+      "max": 172.75567584397257,
+      "nan_count": 0
+    },
+    "mu_apparent": {
+      "min": 0.011057412462970347,
+      "median": 0.21831057437977636,
+      "max": 0.2977555508619935,
+      "nan_count": 0
+    }
+  },
+  "convention": "compression POSITIVE (SEAS internal); P_p positive; sigma_n_eff = sigma_n_total - P_p; tau_strike + = right-lateral (under Tandem fault basis s = up x n, d = s x n); frame (east, north, up) UTM Zone 11N; units MPa",
+  "fault_local_overpressure": {
+    "field_npz": "overpressure_B_2026-06-17.npz",
+    "DeltaPp_MPa_stats": {
+      "min": 0.0,
+      "median": 0.0,
+      "max": 156.65140786015164,
+      "nan_count": 0
+    },
+    "field_meta": {
+      "recipe_mu_s": 0.318,
+      "mu_d": 0.1,
+      "s_target": 1.7,
+      "lambda_max": 0.9,
+      "floor": 0.18074074074074073,
+      "core_target_mu_aim": 0.24,
+      "s_taper_km": 1.0,
+      "z_taper_m": 500.0,
+      "sn_floor_mpa": 0.5,
+      "gate_bands_km": [
+        [
+          40.0,
+          71.0
+        ],
+        [
+          181.0,
+          186.0
+        ],
+        [
+          221.0,
+          246.0
+        ]
+      ],
+      "n_hetero_cells_under_raised": 545,
+      "s_bin_km": 1.0,
+      "z_bin_m": 250.0,
+      "DPp_max_MPa": 156.91427719268745,
+      "DPp_mean_nonzero_MPa": 63.23248583664446,
+      "strike_az_deg": 314.0,
+      "hypo_xy": [
+        606971.0,
+        3707270.0
+      ],
+      "recipe": "B",
+      "k_ratio": 1.8,
+      "mesh": "safs_mesh.puml.h5",
+      "gates": "SanGorgonio,g181,g221"
+    }
+  }
+}

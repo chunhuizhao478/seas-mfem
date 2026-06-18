@@ -1,0 +1,96 @@
+!Switch
+# =====================================================================
+# SAFS linear-slip-weakening fault model, ported from MFEM.
+# Layout follows the updated tpv13/QuakeWorx fault.yaml: stress !Include first,
+# then friction, mu_s (Lua), nucleation.  Initial stress lives in the separate
+# safs_initial_stress.yaml.
+# Frame: x=East, y=North, z=Up (UTM 11N). SeisSol convention:
+#   compression NEGATIVE, strike-traction right-lateral POSITIVE, cohesion <= 0.
+# See MFEM_to_SeisSol_mapping.md (§2 stresses, §3 friction, §5 nucleation).
+# =====================================================================
+
+# --- Initial effective stress tensor (separated file, tpv13 updated format) ---
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Include safs_initial_stress.yaml
+
+# --- Friction (mu_d, d_c, cohesion) ---
+# Candidate D for the triq/500m mesh with the shmax100_shmin60_sv55_psi69_az23
+# stress field + multiscale_statewise_cvm velocity model (2026-06-11):
+#   mu_s = 0.43 (> fault-wide max mu_apparent 0.425; hypocenter mu_app = 0.332;
+#                only 0.005 margin -> mu_s cannot come down without t=0 failure)
+#   mu_d = 0.12 (drop at hypocenter 13.5 MPa, S = 0.46 -> supershear expected;
+#                corridor 50-70 km: drop 3.4 -> 9.1 MPa, S 3.9 -> 1.4)
+#   d_c  = 1.8 m -> Lambda_0 = (9pi/32) mu Dc/((mu_s-mu_d) sigma_n) = 1890 m
+#                  = 3.8 elements at the hypocenter (mu=23.5 GPa, sn_eff=63.8 MPa),
+#                  1690 m = 3.4 elements in the corridor (sn_eff=71.4 MPa)
+# History: candidate B (mu_d=0.25, d_c=1.4) nucleated (R=6000 patch) but the
+#   rupture ARRESTED at 22.8 km / t~28 s (Expanse 2026-06-10): mu_apparent
+#   declines 0.33 -> 0.25 along strike, so B's drop went negative at 50-70 km
+#   and fell below the Gc=8 MJ/m2 energy balance by 23 km.
+# History: candidate C (mu_d=0.20, d_c=1.8) ARRESTED at +42 km NW / t~40 s
+#   (Expanse 2026-06-11, output_lsw): per the run's own t=0 tractions the
+#   40-70 km corridor has mu_app 0.246-0.254 (band medians, seismogenic depth)
+#   -> drop only 3.3-3.8 MPa with S = 3.2-4.0 over 30 km; the front was already
+#   decelerating through the 30-40 km band (drop 5.9 MPa, S 1.6: 1.3 -> 0.3
+#   km/s) and crawled at ~0.03 km/s after +40 km (moment plateau 7.9e19 N*m).
+#   SE side completed to the fault end (-17 km).  mu_d=0.15 would only match
+#   the band C barely crawled through (6.9 MPa, S 1.9), hence 0.12: corridor
+#   drop x2.7 while Gc rises only x1.35; nucleation a_c shrinks 2290 -> 1700 m
+#   (more margin at R=6000).  Next lever if D stalls: d_c 1.8 -> 1.4
+#   (-22% Gc, Lambda_0 ~3 elements, borderline).
+[mu_d, d_c, cohesion]: !ConstantMap
+  map:
+    mu_d:     0.12
+    d_c:      1.8
+    cohesion: 0.0
+
+# --- Static friction with the deep barrier ---
+# mu_s = 0.43 everywhere, except the locked deep band z in (-20000, -15000) m,
+# where mu_s = 1.0e6 so the strength is effectively infinite (MFEM barrier).
+[mu_s]: !LuaMap
+  returns: [mu_s]
+  function: |
+    function f (x)
+      if (x["z"] < -15000.0 and x["z"] > -20000.0) then
+        return { mu_s = 1.0e6 }
+      else
+        return { mu_s = 0.43 }
+      end
+    end
+
+# --- Nucleation over-stress (strike direction), applied as Tnuc_s ---
+# Gaussian patch dtau_strike = 10 MPa (peak stress = 1.14 * tau_s at the
+# hypocenter; amplitude justified as ~1.1*tau_s - tau_0 = 8.9 MPa rounded up),
+# e-fold radius 6000 m, centered at the hypocenter (606971, 3707270, -4965.62).
+# Ramped in time by SeisSol's smoothStep over [s_0, s_0+t_0] = [0, 1] s
+# (set in parameters.par).
+# Checks (2026-06-10, hypocenter values mu=23.5 GPa, sn_eff=63.8 MPa,
+# tau_0=21.2 MPa, SE=6.24 MPa):
+#   overstressed footprint r_os = R*sqrt(ln(10/6.24)) = 4118 m
+#   Uenishi-Rice mode-II half-length a_c = 0.579*mu*Dc/((1-nu)(mu_s-mu_d)sn)
+#     = 2289 m  ->  onset ratio r_os/a_c = 1.80
+#   quasi-static escape estimate min K/Kc = 1.36 (mode III) / 1.15 (mode II)
+# History: R=3500 (r_os=2404 m, onset 1.05) FAILED to nucleate on Expanse
+#   2026-06-10 — Tnuc ramp verified applied (Ts0 11.2 -> 20.6 MPa over 1 s);
+#   slip zone stalled at ~1.5 km radius (0.62*r_os), max slip 4 cm << Dc,
+#   settled into ~9 mm/s creep.  Empirical: mobilized zone ~ 0.62*r_os must
+#   exceed a_c -> need R >~ 5400 m; R=6000 adds margin.
+[Tnuc_s]: !LuaMap
+  returns: [Tnuc_s]
+  function: |
+    function f (x)
+      local dx = x["x"] - 606971.0
+      local dy = x["y"] - 3707270.0
+      local dz = x["z"] + 4965.62
+      local r2 = dx*dx + dy*dy + dz*dz
+      local R  = 6000.0
+      return { Tnuc_s = 10.0e6 * math.exp(-r2 / (R*R)) }
+    end
+
+# --- Remaining nucleation tractions + forced-rupture (disabled) ---
+# Tnuc_n/Tnuc_d = 0 (strike-only nucleation); forced_rupture_time = 1e10 disables
+# the forced-rupture path (f2 stays 0), so nucleation is purely the Tnuc_s ramp.
+[Tnuc_n, Tnuc_d, forced_rupture_time]: !ConstantMap
+  map:
+    Tnuc_n:              0.0
+    Tnuc_d:              0.0
+    forced_rupture_time: 1e10

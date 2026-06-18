@@ -1,0 +1,80 @@
+! SAFS GROUP ACTIVITY - Group 2: rate-and-state SLIP law (FL=4), NO strong rate weakening.
+! Aging law (Group 1): see parameters_aging.par (identical except FL = 3).
+! Material: CONSTANT first (M0 = 3.2e10*P0 exactly verifiable); for the CVM case set
+!   MaterialFileName = 'safs_material_cvm.yaml'.
+! NOTE: these decks MUST pass a smoke test (rupture nucleates AND propagates) on QuakeWorx
+!   before distribution - plain RS without strong weakening can produce confined events.
+&equations
+MaterialFileName = 'safs_material.yaml'        ! CONSTANT. CVM case: 'safs_material_cvm.yaml'
+Plasticity = 0
+numflux = 'godunov'
+numfluxnearfault = 'godunov'
+/
+&IniCondition
+/
+&DynamicRupture
+FL = 4                                          ! 4 = slip (Group 2); 3 = aging (Group 1)
+ModelFileName = 'safs_fault_rs.yaml'
+! (GP-wise fault-parameter evaluation is the DEFAULT in SeisSol >= v1.3; no flag needed.
+!  If the target QuakeWorx SeisSol is OLDER and requires it, add: GPwise = 1)
+RS_f0  = 0.6
+RS_sr0 = 1d-6
+RS_b   = 0.0168                                 ! FALLBACK; spatial rs_b(z) from yaml (verify log "b 0")
+RS_iniSlipRate1 = 1d-12                          ! V_init magnitude sets initial state
+RS_iniSlipRate2 = 0.0
+s_0 = 0.0
+t_0 = 1.0                                        ! nucleation ramp duration [s]
+XRef = 0.0
+YRef = -1.0
+ZRef = 0.0
+refPointMethod = 1
+OutputPointType = 4
+/
+&Elementwise
+printtimeinterval_sec = 2.0                      ! fault snapshot cadence (STF + Vr/PSR maps)
+! 1=SRs/SRd 7=Vr 8=ASl 9=PSR 10=RT selected:
+OutputMask = 1 0 0 0 0 0 1 1 1 1 0 0
+refinement_strategy = 2
+refinement = 0                                   ! 1 value/facet. KEEP 0 for <1 GB.
+/
+&Pickpoint
+/
+&SourceType
+/
+&SpongeLayer
+/
+&MeshNml
+MeshFile = 'safs_mesh.puml.h5'
+meshgenerator = 'PUML'
+/
+&Discretization
+CFL = 0.5
+ClusteredLTS = 2
+FixTimeStep = 0.1
+/
+&Output
+OutputFile = 'output/safs'
+Format = 10                                      ! no volume wavefield output
+iOutputMask = 0 0 0 0 0 0 1 1 1
+iPlasticityMask = 0 0 0 0 0 0 1
+TimeInterval = 5.0                               ! moot (Format=10)
+refinement = 1                                   ! VOLUME refinement; moot under Format=10. NOT the
+                                                 ! fault &Elementwise refinement (that is 0, above)
+! --- Free surface output (task 3 PGV): LEGACY COMPACT path (geometry once) ---
+SurfaceOutput = 1
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 1.0                      ! v1/v2/v3 -> PGV via ParaView temporal max
+surfacevtkorder = -1                             ! MANDATORY: -1 = compact. 2 would be multi-GB.
+! --- Energy output (task 2: M0, P0 ground truth) ---
+EnergyOutput = 1
+EnergyTerminalOutput = 1
+EnergyOutputInterval = 0.25
+Checkpoint = 0
+/
+&AbortCriteria
+EndTime = 100.0
+/
+&Analysis
+/
+&Debugging
+/

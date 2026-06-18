@@ -1,0 +1,124 @@
+&equations
+!yaml file defining spatial dependence of material properties
+!CVM (multiscale_statewise) via ASAGI; same MUSCAL material as V2 (unchanged).
+MaterialFileName = 'safs_material_cvm.yaml'
+!off-fault plasticity disabled (MFEM SAFS used no plasticity)
+Plasticity = 0
+numflux = 'godunov'          ! 'godunov' = upwind (MFEM pure upwind); or 'rusanov'
+numfluxnearfault = 'godunov' ! flux for cells adjacent to the fault (excluding DR faces)
+/
+
+&IniCondition
+/
+
+&DynamicRupture
+! linear slip-weakening friction
+FL = 16                                        ! Friction law
+!yaml file defining spatial dependence of fault properties.  V3: stress is the
+!spatially varying CSM C1 k=2.39 field (safs_initial_stress.yaml -> !ASAGI
+!safs_stress_csm.nc); friction is CONSTANT mu_s=0.47/mu_d=0.10/d_c=2.5.
+! NUCLEATION VARIANT (2026-06-15): repointed to the 1.5x-static-strength fault
+! file (Tnuc_s = 28.6 MPa, peak shear 1.50*tau_s at the patch center) instead of
+! safs_fault.yaml (Tnuc_s = 20 MPa, peak 1.24*tau_s).  REMEMBER to upload
+! safs_fault_nuc1p5.yaml to the portal.  Revert: set this back to 'safs_fault.yaml'.
+ModelFileName = 'safs_fault_nuc1p5.yaml'
+
+! nucleation: Tnuc_s over-stress ramped over [s_0, s_0+t_0] (= MFEM gradual_overstress, T_nuc=1s)
+s_0 = 0.0
+t_0 = 1.0
+
+!reference vector for defining strike and dip direction
+!VALIDATE on first run (curved fault) — see README and V2 REVIEW.md R-001
+XRef = 0.0
+YRef = -1.0
+ZRef = 0.0
+refPointMethod = 1
+
+OutputPointType = 4
+/
+
+!see: https://seissol.readthedocs.io/en/latest/fault-output.html
+!parameterize paraview file output
+&Elementwise
+printtimeinterval_sec = 5.0                    ! Time interval at which output will be written
+!            |SRs/SRd                          ! 1=slip rate, 6=slip (Sls/Sld); all else off
+!            |         |Sls/Sld                ! (2=T_s/T_d/P_n 3=u_n 4=Mud/StV 5=Ts0/Td0/Pn0 7=Vr 8=ASl 9=PSR 10=RT 11=DS 12=P_f/Tmp)
+! ISOLATION TEST (2026-06-15): TEMPORARY lean mask (slip-rate + slip only).
+! The CSM-stress (2nd ASAGI grid) version hangs at "Begin init output"; the
+! constant-stress (1 grid) version is borderline (stalled once, worked on a
+! plain resubmit).  TEST10 (40 cores, constant, lean) WORKED; TEST11 (40 cores,
+! ASAGI, FULL mask) STALLED -- but TEST11 changed BOTH the stress and the mask,
+! so it cannot tell us whether the 2nd grid or the heavier 8-field output is the
+! cause.  This run (40 cores, ASAGI, LEAN) is the missing cell: vs TEST10 it
+! changes ONLY the grid; vs TEST11 it changes ONLY the mask.
+!   WORKS  -> the 2nd grid is tolerable, the full mask was the straw; restore the
+!             full diagnostic mask below.
+!   STALLS twice (resubmit once -- the constant case was flaky) -> the 2nd ASAGI
+!             grid itself is the cause -> go analytic (remove the stress grid).
+! Full diagnostic mask to restore once cleared:  1 0 0 0 1 1 0 0 0 1 0 0
+!   (adds 5=Ts0/Td0/Pn0 for the t=0 mu_app check vs the projection VTU, and
+!    10=RT for the arrest front).
+OutputMask = 1 0 0 0 0 1 0 0 0 0 0 0           ! LEAN: slip-rate(1)+slip(6) only; 12 groups per DataTypes.h VariableLabels
+refinement_strategy = 2
+refinement = 1
+/
+
+!parameterize ascii fault file outputs
+&Pickpoint
+/
+
+&SourceType
+/
+
+&SpongeLayer
+/
+
+&MeshNml
+! PUML mesh (same as V2): boundary codes 3=fault, 1=free surface, 5=absorbing.
+MeshFile = 'safs_mesh.puml.h5'
+meshgenerator = 'PUML'                         ! Name of meshgenerator (Gambit3D-fast, Netcdf or PUML)
+/
+
+&Discretization
+CFL = 0.5                                      ! CFL number (<=1.0)
+ClusteredLTS = 2                               ! Enable local time-stepping
+FixTimeStep = 0.1                              ! manual max time step [s] (matches MFEM dt_max)
+/
+
+&Output
+OutputFile = 'output/safs'
+Format = 10                                    ! 10 = no volume output (large SAFS mesh; see V2 note)
+!             |stress     |vel
+iOutputMask = 0 0 0 0 0 0 1 1 1
+!                 |strain     |eta
+iPlasticityMask = 0 0 0 0 0 0 1
+TimeInterval = 5.0                             ! wavefield output interval [s] (moot while Format=10)
+refinement = 1
+
+! Free surface output
+SurfaceOutput = 1
+SurfaceOutputRefinement = 0
+SurfaceOutputInterval = 5.0
+surfacevtkorder = 2
+
+EnergyOutput = 1 ! Computation of energy, written in csv file
+EnergyTerminalOutput = 1 ! Write energy to standard output
+EnergyOutputInterval = 0.5
+
+Checkpoint = 0
+/
+
+&AbortCriteria
+EndTime = 100.0                                ! V3 (constant friction): the SE-nucleated rupture is
+                                               ! EXPECTED TO ARREST at the San Gorgonio gate (s~40-60 km,
+                                               ! ~20-40 s after nucleation at >=3 km/s); the energy/moment
+                                               ! plateau is the arrest signature.  100 s gives ample margin
+                                               ! (ABC reflections leak after ~7 s regardless).  It does NOT
+                                               ! reach the NW end — see safs_fault.yaml DESIGN NOTE.
+/
+
+&Analysis
+/
+
+&Debugging
+/

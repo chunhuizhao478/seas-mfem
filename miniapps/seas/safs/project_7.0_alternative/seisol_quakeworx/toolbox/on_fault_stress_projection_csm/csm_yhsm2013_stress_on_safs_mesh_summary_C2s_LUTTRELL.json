@@ -1,0 +1,148 @@
+{
+  "input_csm_csv": "raw_data/yang_and_hauksson_orientation/CSM_data_1781290479811.csv",
+  "input_mesh": "safs_seisol_v2_0_0_RSSRW/safs_mesh.puml.h5",
+  "fault_n_cells": 60658,
+  "fault_n_degenerate_basis": 0,
+  "csm_n_samples": 22131,
+  "params": {
+    "magnitude_mode": "depth-R",
+    "magnitude_provenance": "depth-dependent (plan rev 5): sig2 = Sv_eff(z) = MUSCAL lithostatic overburden - hydrostatic P_p; sig1/sig3 closed-form from the closure and per-point CSM shape ratio R (col 13); built on the CSM principal axes (compression-positive)",
+    "fault_strike_azimuth_hint_deg": 314.0,
+    "rake_sense": "right-lateral",
+    "harmonisation_normal_global": [
+      -0.6946583704589973,
+      -0.7193398003386512,
+      0.0
+    ],
+    "source_convention": "orientations from CSM YHSM-2013 csv (tension-positive (e,n,u), depth-invariant); magnitudes depth-dependent (compression-positive); lon/lat -> UTM via EPSG:4326->32611 always_xy; grid convergence neglected",
+    "closure": "diff",
+    "differential_source": "Luttrell csv raw_data/luttrell_differential_stress/CSM_data_1781537253009.csv (col 16), nn median 0.796 km",
+    "k_ratio": null,
+    "pp_model": "hydrostatic",
+    "density_source": "muscal lateral-mean rho(z) from safs_seisol_v2_0_0_RSSRW/safs_material_cvm.nc",
+    "axes": "csm",
+    "cap_k_max": 5.83,
+    "cap_method": "frictional ceiling sig1/sig3 <= cap_k_max (Byerlee/Mohr-Coulomb; D_max = (k-1)*Sv_eff/((1-R)*k+R), -> 0 at the free surface)",
+    "taper_zseis_km": null,
+    "n_capped_facets": 5310,
+    "ordering_positivity_ok_all_facets": true,
+    "R_recovery_max_abs_err": 1.3988810110276972e-13,
+    "sigma_zz_eff_minus_Sv_eff_MPa": {
+      "min": -4.385497235091933,
+      "median": 0.03963430177627458,
+      "max": 11.247529401632448,
+      "nan_count": 0
+    },
+    "g_accel_m_s2": 9.81
+  },
+  "sampling": {
+    "method": "nearest neighbour in UTM (x, y); depth ignored (model depth-invariant)",
+    "nn_dist_km": {
+      "min": 0.004171160492854898,
+      "median": 0.7959936842131715,
+      "max": 1.4156666672081408,
+      "nan_count": 0
+    },
+    "n_facets_beyond_max_nn_dist": 0,
+    "csm_eig_gap_sampled": {
+      "min": 0.06199420751244045,
+      "median": 0.4579771196257141,
+      "max": 1.099468401588476,
+      "nan_count": 0
+    }
+  },
+  "orientation_validation": {
+    "eigvec_dot_V3_compressional": {
+      "min": 0.9992667235958586,
+      "median": 0.9999948634647751,
+      "max": 1.000677265029665,
+      "nan_count": 0
+    },
+    "eigvec_dot_V1_tensional": {
+      "min": 0.9992887080333401,
+      "median": 0.9999888051097872,
+      "max": 1.0006837653576905,
+      "nan_count": 0
+    },
+    "shmax_recon_vs_model_deg": {
+      "min": 3.0065723535699362e-05,
+      "median": 0.06876010329247606,
+      "max": 0.16765006557022843,
+      "nan_count": 0
+    }
+  },
+  "stats": {
+    "sigma_n_total_MPa": {
+      "min": 0.4041235129590089,
+      "median": 161.56083038005997,
+      "max": 439.96727372670057,
+      "nan_count": 0
+    },
+    "sigma_n_eff_MPa": {
+      "min": 0.198789586434361,
+      "median": 99.65451494624533,
+      "max": 279.3137960967901,
+      "nan_count": 0
+    },
+    "tau_strike_MPa": {
+      "min": -0.7459435185196437,
+      "median": 6.028912909474552,
+      "max": 23.008244238920305,
+      "nan_count": 0
+    },
+    "tau_dip_MPa": {
+      "min": -13.356597951593745,
+      "median": -0.3580315249073673,
+      "max": 10.043589656916065,
+      "nan_count": 0
+    },
+    "tau_magnitude_MPa": {
+      "min": 0.04273960899123384,
+      "median": 6.754135129958591,
+      "max": 23.052131072056905,
+      "nan_count": 0
+    },
+    "rake_deg": {
+      "min": -134.78920098915367,
+      "median": -3.53468279184501,
+      "max": 172.7484437600321,
+      "nan_count": 0
+    },
+    "mu_apparent": {
+      "min": 0.0013088913623266806,
+      "median": 0.07302056312590628,
+      "max": 0.9208606968754397,
+      "nan_count": 0
+    }
+  },
+  "convention": "compression POSITIVE (SEAS internal); P_p positive; sigma_n_eff = sigma_n_total - P_p; tau_strike + = right-lateral (under Tandem fault basis s = up x n, d = s x n); frame (east, north, up) UTM Zone 11N; units MPa",
+  "input_diff_csv": "raw_data/luttrell_differential_stress/CSM_data_1781537253009.csv",
+  "hypocenter_check": {
+    "requested_xyz": [
+      606971.0,
+      3707270.0,
+      -4965.62
+    ],
+    "nearest_facet_centroid": [
+      607030.1075790661,
+      3707288.794439493,
+      -5054.256230107339
+    ],
+    "distance_m": 108.18187531447616,
+    "sigma_n_eff_MPa": 73.8247181917798,
+    "tau_magnitude_MPa": 4.891425387438414,
+    "tau_strike_MPa": 4.659683904109308,
+    "tau_dip_MPa": 1.4877460249187955,
+    "mu_apparent": 0.06625728492090692,
+    "csm_SHmax_deg": 12.2,
+    "csm_nn_dist_km": 0.8283878403493239,
+    "depth_m": 5054.256230107339,
+    "Sv_eff_MPa": 75.46289147405113,
+    "sigma1_eff_MPa": 77.70095460205113,
+    "sigma2_eff_MPa": 75.46289147405113,
+    "sigma3_eff_MPa": 65.98334660205113,
+    "D_diff_MPa": 11.717608,
+    "D_applied_MPa": 11.717608,
+    "capped": false
+  }
+}

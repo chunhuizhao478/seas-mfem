@@ -1,0 +1,91 @@
+!Switch
+# =====================================================================
+# SAFS V3 recipe-B GATE-REMOVED linear-slip-weakening fault model.
+# STAGED for inspection (PLAN_gate_removal_csm_2026-06-17.md); the production
+# safs_fault.yaml is untouched.  Promote by renaming _B -> production once
+# accepted.  Stress: gate-removed CSM C1 k=1.8 + fault-local overpressure field
+# (safs_initial_stress_B.yaml -> safs_stress_csm_B.nc).  Friction: CONSTANT
+# mu_s / mu_d / d_c.  Frame x=E, y=N, z=Up (UTM 11N); SeisSol convention:
+# compression NEGATIVE, strike-traction right-lateral POSITIVE, cohesion<=0.
+#
+# DESIGN NOTE (expected behaviour) — CHANGED vs the production V3 model.  The
+# production model (k=2.39, mu_s=0.47) was EXPECTED TO ARREST at the San
+# Gorgonio gate.  Recipe B combines two levers to REMOVE the seismogenic gates
+# so a SE-nucleated rupture can propagate SE->NW:
+#   (1) closure k 2.39 -> 1.80: lowers the fault-wide max mu_app 0.449 -> 0.298,
+#       letting mu_s drop to 0.318 (just above the new max; 0.020 margin) so the
+#       strength excess in the low-mu_app corridors is much smaller.
+#   (2) fault-local graded overpressure at the San Gorgonio (s 40-71 km), g181
+#       (181-186) and g221 (221-246) gates (baked into safs_stress_csm_B.nc):
+#       raises mu_app at the gate cores above the S<1.7 floor (0.181).
+# End-to-end check (sampling safs_stress_csm_B.nc on the fault, 2026-06-17):
+#   S = (mu_s-mu_app)/(mu_app-mu_d) < 1.7 on >=97% of each gate's seismogenic
+#   facets (SanGorgonio 18%->98%, g181 0%->97%, g221 2%->100%); pure barriers at
+#   San Gorgonio 158->4; max mu_app 0.297 < mu_s 0.318 (no t=0 pre-slip); min
+#   sigma_n_eff in the seismogenic band 18.4 MPa (> 0, no SeisSol anti-tension
+#   clamp).  A handful of deeply-clamped barrier cores remain (lambda<=0.9 cap);
+#   a SeisSol dynamic-rupture run is the ultimate confirmation the rupture crosses.
+# =====================================================================
+
+# --- Initial effective stress tensor (gate-removed, spatially varying, !ASAGI) ---
+[s_xx, s_yy, s_zz, s_xy, s_yz, s_xz]: !Include safs_initial_stress_B.yaml
+
+# --- Friction (CONSTANT mu_d, d_c, cohesion) ---
+#   mu_d = 0.10  : SAF weak-fault dynamic friction (Lachenbruch & Sass; Hardebeck
+#                  & Hauksson 2001).  Unchanged from production.
+#   d_c  = 2.5 m : process zone Lb = mu*d_c/((mu_s-mu_d)*sigma_n).  With mu_s=0.318
+#                  (mu_s-mu_d=0.218) Lb GROWS vs production (0.37): ~3840 m at the
+#                  hypocenter (sigma_n 71.5, ~7.7 elements @ ~500 m) -> well
+#                  resolved; check convergence at the deep gate edges.
+[mu_d, d_c, cohesion]: !ConstantMap
+  map:
+    mu_d:     0.10
+    d_c:      2.5
+    cohesion: 0.0
+
+# --- Static friction (constant 0.318) with the deep barrier ---
+# mu_s = 0.318 everywhere (> recipe-B fault-wide max mu_app 0.298, incl. the
+# overpressured gate cores 0.297, with a 0.020 margin), except the locked deep
+# band z in (-20000, -15000) m where mu_s = 1.0e6 (effectively infinite, V2 barrier).
+[mu_s]: !LuaMap
+  returns: [mu_s]
+  function: |
+    function f (x)
+      if (x["z"] < -15000.0 and x["z"] > -20000.0) then
+        return { mu_s = 1.0e6 }
+      else
+        return { mu_s = 0.318 }
+      end
+    end
+
+# --- Nucleation over-stress (strike direction), applied as Tnuc_s ---
+# Gaussian patch dtau_strike = 20 MPa, e-fold radius R = 6000 m, centered at the
+# hypocenter (606971, 3707270, -4965.62) — the SE high-mu_app region.  UNCHANGED
+# from production (the hypocenter is outside the gate bands, so the overpressure
+# does not touch it; only k changes its stress).  Recipe-B nucleation check
+# (k=1.8 field at the hypocenter facet, 2026-06-17):
+#   sigma_n_eff 71.5 MPa, tau_0 15.4 MPa, mu_app 0.215; mu = 23.5 GPa, nu 0.275.
+#   tau_s = mu_s*sigma_n = 0.318*71.5 = 22.7 MPa; SE = tau_s - tau_0 = 7.4 MPa
+#   over-stressed footprint r_os = R*sqrt(ln(20/7.4)) = 5998 m
+#   Uenishi-Rice Lnuc = 1.158*mu*d_c/((1-nu)(mu_s-mu_d)sigma_n) = 6017 m
+#     -> r_os = 5998 > Lnuc/2 = 3009 m (onset ratio 1.99) -> NUCLEATES.
+#   (Margin is tighter than production's 2.33 because mu_s-mu_d shrank; still >1.
+#    If a convergence/onset check fails, raise dtau_strike, do NOT shrink the gate.)
+[Tnuc_s]: !LuaMap
+  returns: [Tnuc_s]
+  function: |
+    function f (x)
+      local dx = x["x"] - 606971.0
+      local dy = x["y"] - 3707270.0
+      local dz = x["z"] + 4965.62
+      local r2 = dx*dx + dy*dy + dz*dz
+      local R  = 6000.0
+      return { Tnuc_s = 20.0e6 * math.exp(-r2 / (R*R)) }
+    end
+
+# --- Remaining nucleation tractions + forced-rupture (disabled) ---
+[Tnuc_n, Tnuc_d, forced_rupture_time]: !ConstantMap
+  map:
+    Tnuc_n:              0.0
+    Tnuc_d:              0.0
+    forced_rupture_time: 1e10
