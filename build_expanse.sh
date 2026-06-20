@@ -1009,13 +1009,24 @@ if [ "${USE_MUMPS_RESOLVED}" = "YES" ]; then
     # parmetis/metis are MUMPS' ordering libs (PETSc built it with them);
     # -lmpi_mpifh is OpenMPI 4.x's Fortran MPI library and -lgfortran the
     # GNU Fortran runtime (MUMPS is Fortran, the final link is mpicxx).
+    #
+    # -Wl,--allow-multiple-definition: netlib ScaLAPACK (PETSc
+    # --download-scalapack) BUNDLES a private copy of the LAPACK 3.7+ aux
+    # routine dcombssq (in pdtreecomb.o), which collides with the same symbol
+    # in OpenBLAS's LAPACK (dcombssq.o) at static-link time:
+    #   "multiple definition of `dcombssq_'".  Both are the identical
+    # reference-LAPACK routine, so taking the first is harmless; this flag
+    # (a global ld mode toggle) tells the linker to keep it and drop the
+    # duplicate.  Only needed when MUMPS is on (the sole config that links
+    # BOTH -lscalapack and -lopenblas).  Placed at the FRONT of MUMPS_LIB so
+    # it is present on every MFEM miniapp/test link line.
     MUMPS_LAPACK_PART=""
     if [ -n "${LAPACK_LIBDIR_RESOLVED}" ]; then
         MUMPS_LAPACK_PART="-L${LAPACK_LIBDIR_RESOLVED} -Wl,-rpath,${LAPACK_LIBDIR_RESOLVED} -lopenblas"
     fi
     CONFIG_ARGS+=(
       MUMPS_OPT="-I${PETSC_PREFIX}/include"
-      MUMPS_LIB="-L${PETSC_PREFIX}/lib -ldmumps -lmumps_common -lpord -lscalapack -lparmetis -lmetis ${MUMPS_LAPACK_PART} -lgfortran -lmpi_mpifh -lpthread"
+      MUMPS_LIB="-Wl,--allow-multiple-definition -L${PETSC_PREFIX}/lib -ldmumps -lmumps_common -lpord -lscalapack -lparmetis -lmetis ${MUMPS_LAPACK_PART} -lgfortran -lmpi_mpifh -lpthread"
     )
 fi
 
