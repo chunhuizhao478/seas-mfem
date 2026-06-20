@@ -676,11 +676,19 @@ build_zfp_and_h5z_zfp() {
              ZFP_HOME="${ZFP_PREFIX}" \
              PREFIX="${H5Z_ZFP_PREFIX}" \
              clean || true
+        # SERIAL build (no -j): H5Z-ZFP's Makefile updates libh5zzfp.a via
+        # two separate archive-member rules
+        #   libh5zzfp.a(H5Zzfp_lib.o):   ... ; $(AR) cr libh5zzfp.a $<
+        #   libh5zzfp.a(H5Zzfp_props.o): ... ; $(AR) cr libh5zzfp.a $<
+        # with NO .NOTPARALLEL.  Under -j both `ar cr` run concurrently on
+        # the same archive and race -> "ar: libh5zzfp.a: File format not
+        # recognized" + "unable to copy file ...: No such file or directory".
+        # Only 3 source files, so serial is instant.
         make CC="$(command -v mpicc)" FC= \
              HDF5_HOME="${HDF5_PREFIX}" \
              ZFP_HOME="${ZFP_PREFIX}" \
              PREFIX="${H5Z_ZFP_PREFIX}" \
-             install -j "${JOBS}"
+             install
     )
 
     if [ ! -f "${plugin_so}" ]; then
