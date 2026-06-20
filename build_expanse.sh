@@ -661,11 +661,22 @@ build_zfp_and_h5z_zfp() {
         git fetch --tags --quiet || true
         git checkout --quiet "${H5Z_ZFP_VERSION}" 2>/dev/null \
             || git checkout --quiet "tags/${H5Z_ZFP_VERSION}" 2>/dev/null || true
-        make HDF5_HOME="${HDF5_PREFIX}" \
+        # FC= (empty) DISABLES H5Z-ZFP's optional Fortran interface.
+        # H5Z-ZFP/src/Makefile builds H5Zzfp_props_f.o whenever $(FC) is
+        # non-empty ("ifneq ($(FC),)").  Our HDF5 is built --disable-fortran
+        # (no hdf5.mod), and the Expanse spack openmpi module EXPORTS FC into
+        # the environment — so without this the Fortran object compiles and
+        # dies on "USE HDF5: Cannot open module file 'hdf5.mod'".  It must be
+        # a command-line assignment, NOT `unset FC`: GNU Make's built-in
+        # default is FC=f77, so unsetting the env var would let the gate fire
+        # again with f77.  MFEM consumes only the C plugin (libh5zzfp.so) via
+        # HDF5_PLUGIN_PATH, so the Fortran interface is not needed here.
+        make FC= \
+             HDF5_HOME="${HDF5_PREFIX}" \
              ZFP_HOME="${ZFP_PREFIX}" \
              PREFIX="${H5Z_ZFP_PREFIX}" \
              clean || true
-        make CC="$(command -v mpicc)" \
+        make CC="$(command -v mpicc)" FC= \
              HDF5_HOME="${HDF5_PREFIX}" \
              ZFP_HOME="${ZFP_PREFIX}" \
              PREFIX="${H5Z_ZFP_PREFIX}" \
