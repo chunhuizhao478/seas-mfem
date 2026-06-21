@@ -10,15 +10,15 @@
 #SBATCH -A usc143
 
 # =========================================================================
-# SAFS RATESTATE v3.0.0 PREFERRED (vw002) -- UPWIND (Godunov) + ADER — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
+# SAFS RATESTATE v3.0.0 PREFERRED (vw002) — MFEM port with CVM material + UPWIND (Godunov) + ADER (no central flux).
 # *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
 # RS-SRW vw002 (f_0=0.6, f_w=0.10, Dc=0.10, V_w=0.02->3.0),  multiscale_statewise CVM material (the PRODUCTION material),
-# spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk4
-# (central flux is UNSTABLE under ADER; RK is required).  CFL 0.5 = STARTING
-# calibration for the RK central-flux de-rate (adjacent 0.6x) — sweep via SAFS_CFL.
+# spatially-varying CSM effective stress, mixed_flux=none (Godunov upwind) + time_integrator=ader
+# (Godunov upwind is dissipative + stable under ADER — the SeisSol-faithful combo,
+# central-flux-free).  CFL 0.5 = ADER starting calibration — sweep via SAFS_CFL.
 #
 # ---- EXPANSE contract (matches build_expanse.sh) ----------------------------
 #   * Launcher : srun --mpi=pmi2 -n $SLURM_NTASKS   (there is NO ibrun on Expanse)
@@ -34,10 +34,10 @@
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): RK4 + this mesh will NOT
+# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): ADER + this mesh will NOT
 # reach tfinal=150 s in 2 h — the run advances through nucleation/breakout and
 # CHECKPOINTS.  ACCEPTANCE = clean start, V_max bounded, on-fault sigma_n stable in
-# time (the mixed-flux leak cure), FreeSurf banner active.  Resume toward 150 s with
+# time, FreeSurf banner active.  Resume toward 150 s with
 # the restart sibling (or chain this with SAFS_RESTART).
 #
 # Scale up by OVERRIDING the sbatch headers at submit time, e.g.
@@ -49,13 +49,17 @@
 #   * [velocity].use_sidecar=true + the velocity .h5 present under dataset_root
 #   * the CSM stress .h5 present (gitignored/large; scp to Expanse scratch)
 #
-# Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
-# SAFS_TIME_INTEGRATOR (default rk4), SAFS_TFINAL (default 150s), SAFS_CFL,
-# SAFS_RESTART, SAFS_OUTDIR (Lustre scratch base).
+# Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default none),
+# SAFS_TIME_INTEGRATOR (default ader), SAFS_TFINAL (default 150s), SAFS_CFL,
+# SAFS_DIAG (0/1, default 0 = quiet log), SAFS_RESTART, SAFS_OUTDIR (qstore base).
 
 export LC_ALL=C
 export LANG=C
-export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"   # V_max / sigma_n drift monitor ON
+# Per-step [DIAG]/[DIAG-ONSET] monitor (V_max / sigma_n drift).  OFF by default —
+# once V_max>10 it prints EVERY step (+ per-DOF onset dumps) and floods the log.
+# Set SAFS_DIAG=1 to enable.  (getenv() treats SEAS_DIAG_BLOWUP=0 as "set", so we
+# must UNSET it to disable, not set it to 0.)
+if [[ "${SAFS_DIAG:-0}" == "1" ]]; then export SEAS_DIAG_BLOWUP=1; else unset SEAS_DIAG_BLOWUP; fi
 
 # --- Expanse modules (MUST match build_expanse.sh: cpu/0.17.3b gcc openmpi) ---
 module purge
@@ -133,8 +137,8 @@ done
 # Floor pre-flight (v3 PREFERRED ratestate keeps the 10 MPa MFEM-only sigma_n floor).
 grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOML}" >/dev/null     || { echo "ERROR: ${CONFIG_TOML} has no sigma_n_strength_floor_pa"; exit 1; }
 
-# Flux: MIXED (adjacent) by DEFAULT — the production choice (central-on-fault-
-# adjacent, the sigma_n-leak cure).  Requires RK (set below).
+# Flux: UPWIND/none (Godunov) by DEFAULT — central-flux-free, the SeisSol-faithful
+# fallback.  (Override with SAFS_MIXED_FLUX.)
 SAFS_MIXED_FLUX="${SAFS_MIXED_FLUX:-none}"
 case "${SAFS_MIXED_FLUX}" in
     none|adjacent|all_continuous) : ;;
@@ -142,8 +146,8 @@ case "${SAFS_MIXED_FLUX}" in
 esac
 MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 
-# Time integrator: RK4 by DEFAULT — mixed/central flux is UNSTABLE under ADER
-# (MatrixMixedFluxUnderAder hard guard); RK is mandatory with mixed flux.
+# Time integrator: ADER by DEFAULT — Godunov upwind is dissipative + stable under
+# ADER (no central flux => no RK requirement).  Override with SAFS_TIME_INTEGRATOR.
 SAFS_TIME_INTEGRATOR="${SAFS_TIME_INTEGRATOR:-ader}"
 case "${SAFS_TIME_INTEGRATOR}" in
     ader|rk4|rk45) : ;;

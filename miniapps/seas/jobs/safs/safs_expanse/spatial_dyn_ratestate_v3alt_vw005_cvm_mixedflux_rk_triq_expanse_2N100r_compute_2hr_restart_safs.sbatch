@@ -10,15 +10,16 @@
 #SBATCH -A usc143
 
 # =========================================================================
-# SAFS RATESTATE v3.0.0 ALT (vw005) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
+# SAFS RATESTATE v3.0.0 ALT (vw005) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK45.
 # *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
 # RS-SRW vw005 (f_0=0.6, f_w=0.10, Dc=0.10, V_w=0.05->3.0),  multiscale_statewise CVM material (the PRODUCTION material),
-# spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk4
-# (central flux is UNSTABLE under ADER; RK is required).  CFL 0.5 = STARTING
-# calibration for the RK central-flux de-rate (adjacent 0.6x) — sweep via SAFS_CFL.
+# spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk45
+# (central flux needs an RK integrator — UNSTABLE under ADER; rk45 is FSAL so it
+# avoids the np>1 endpoint-Mult issue rk4 hit).  CFL 0.5 = STARTING calibration for
+# the RK central-flux de-rate (adjacent 0.6x) — sweep via SAFS_CFL.
 #
 # ---- EXPANSE contract (matches build_expanse.sh) ----------------------------
 #   * Launcher : srun --mpi=pmi2 -n $SLURM_NTASKS   (there is NO ibrun on Expanse)
@@ -47,12 +48,16 @@
 #   * the CSM stress .h5 present (gitignored/large; scp to Expanse scratch)
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
-# SAFS_TIME_INTEGRATOR (default rk4), SAFS_TFINAL (default 150s), SAFS_CFL,
-# RESTART_FROM (MANDATORY), SAFS_OUTDIR (Lustre scratch base).
+# SAFS_TIME_INTEGRATOR (default rk45), SAFS_TFINAL (default 150s), SAFS_CFL,
+# SAFS_DIAG (0/1, default 0 = quiet log), RESTART_FROM (MANDATORY), SAFS_OUTDIR (qstore base).
 
 export LC_ALL=C
 export LANG=C
-export SEAS_DIAG_BLOWUP="${SEAS_DIAG_BLOWUP:-1}"   # V_max / sigma_n drift monitor ON
+# Per-step [DIAG]/[DIAG-ONSET] monitor (V_max / sigma_n drift).  OFF by default —
+# once V_max>10 it prints EVERY step (+ per-DOF onset dumps) and floods the log.
+# Set SAFS_DIAG=1 to enable.  (getenv() treats SEAS_DIAG_BLOWUP=0 as "set", so we
+# must UNSET it to disable, not set it to 0.)
+if [[ "${SAFS_DIAG:-0}" == "1" ]]; then export SEAS_DIAG_BLOWUP=1; else unset SEAS_DIAG_BLOWUP; fi
 
 # --- Expanse modules (MUST match build_expanse.sh: cpu/0.17.3b gcc openmpi) ---
 module purge
@@ -139,9 +144,11 @@ case "${SAFS_MIXED_FLUX}" in
 esac
 MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
 
-# Time integrator: RK4 by DEFAULT — mixed/central flux is UNSTABLE under ADER
-# (MatrixMixedFluxUnderAder hard guard); RK is mandatory with mixed flux.
-SAFS_TIME_INTEGRATOR="${SAFS_TIME_INTEGRATOR:-rk4}"
+# Time integrator: RK45 by DEFAULT — mixed/central flux is UNSTABLE under ADER
+# (MatrixMixedFluxUnderAder hard guard); RK is mandatory with mixed flux.  rk45
+# (Dormand-Prince) is FSAL, so it skips the endpoint re-eval Mult that rk4 needed
+# (the np>1 deadlock fix); use rk45 for mixed flux.
+SAFS_TIME_INTEGRATOR="${SAFS_TIME_INTEGRATOR:-rk45}"
 case "${SAFS_TIME_INTEGRATOR}" in
     ader|rk4|rk45) : ;;
     *) echo "ERROR: SAFS_TIME_INTEGRATOR='${SAFS_TIME_INTEGRATOR}' invalid (ader|rk4|rk45)"; exit 1 ;;
