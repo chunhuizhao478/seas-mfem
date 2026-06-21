@@ -7,7 +7,6 @@
 #SBATCH --ntasks-per-node=50
 #SBATCH --time=02:00:00
 #SBATCH --mem=100000M
-#SBATCH --constraint="lustre"
 #SBATCH -A usc143
 
 # =========================================================================
@@ -30,8 +29,8 @@
 #     added to LD_LIBRARY_PATH below; HDF5_PLUGIN_PATH -> the H5Z-ZFP plugin.
 #   * Sizing : compute (exclusive 128-core / 256 GB nodes), 2N x 50r = 100 ranks,
 #     --mem=100000M (100 GB/node = 2 GB/rank), 2 h.  This is the SAME resource
-#     config the SeisSol ALT/PREFERRED cases used on Expanse.  Output MUST sit on
-#     Lustre -> #SBATCH --constraint="lustre".
+#     config the SeisSol ALT/PREFERRED cases used on Expanse.  Output goes UNDER
+#     the repo (qstore): <root>/miniapps/seas/safs (override via SAFS_OUTDIR).
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
@@ -178,8 +177,9 @@ if [[ "${_n_cp}" -ne "${SLURM_NTASKS}" ]]; then
 fi
 RESTART_ARG="--restart ${RESTART_FROM}/cp"
 
-# Output on Lustre scratch (purged 90 d after creation; needs --constraint=lustre).
-OUT_BASE="${SAFS_OUTDIR:-/expanse/lustre/scratch/${USER}/temp_project}"
+# Output UNDER the repo on qstore (same convention as the Frontera jobs); the
+# per-run dir is job-ID-keyed.  Override the base with SAFS_OUTDIR.
+OUT_BASE="${SAFS_OUTDIR:-${SEAS_MFEM_ROOT}/miniapps/seas/safs}"
 OUT="${OUT_BASE}/safs_dyn_sw_prf_rst_${SLURM_JOB_ID}"
 LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
 LOG="${LOG_DIR}/spatial_dyn_sw_prf_rst_${SLURM_JOB_ID}.log"
@@ -198,7 +198,10 @@ echo "Restart:     ${RESTART_ARG:-<none — fresh start from t=0>}"
 echo "Output dir:  ${OUT}"
 
 # NOTE: production invocation deliberately OMITS --no-sidecar-material.
-srun --mpi=pmi2 -n "${SLURM_NTASKS}" ./seas_spatial_dyn_driver \
+# stdbuf -oL -eL line-buffers the driver stdout/stderr so ${LOG} updates LIVE
+# (output-init messages + the per-100-step [DIAG-SIGN] progress) instead of only
+# flushing in ~4 KB blocks — so a stalled run is visible immediately.
+srun --mpi=pmi2 -n "${SLURM_NTASKS}" stdbuf -oL -eL ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
     --mesh   "${MESH}" \
     ${MIXFLUX_ARG} \
