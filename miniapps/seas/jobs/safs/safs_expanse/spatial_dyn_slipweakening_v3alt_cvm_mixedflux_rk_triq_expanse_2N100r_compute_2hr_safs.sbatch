@@ -8,7 +8,7 @@
 #SBATCH --time=02:00:00
 #SBATCH --mem=100000M
 #SBATCH --constraint="lustre"
-#SBATCH -A FILLME_EXPANSE_ALLOCATION
+#SBATCH -A usc143
 
 # =========================================================================
 # SAFS SLIPWEAKENING v3.0.0 ALT — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.

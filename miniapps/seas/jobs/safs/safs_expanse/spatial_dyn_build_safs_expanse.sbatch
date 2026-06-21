@@ -8,7 +8,7 @@
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=64G
 #SBATCH --time=01:00:00
-#SBATCH -A FILLME_EXPANSE_ALLOCATION
+#SBATCH -A usc143
 
 # DEDICATED build job for seas_spatial_dyn_driver on EXPANSE (SDSC).
 # =========================================================================
