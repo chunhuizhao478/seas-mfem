@@ -1,0 +1,160 @@
+# =========================================================================
+# SAFS RSSRW_PREFERRED_vw002 (v3.0.0) — MFEM port of the SeisSol QuakeWorx case
+#   seisol_quakeworx/safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002 (FL=103, ASAGI
+#   CVM material, PREFERRED CSM gate-removed stress) with MFEM mixed-flux + RK.
+#   "Do what SeisSol did, but with mixed flux (SeisSol has none)."
+# Plan: document/PLAN_mixed_flux_seissol_port_2026-06-19.md (Phase 3).
+# =========================================================================
+# PRODUCTION config.  Friction is the vw002 sibling of the MFEM RSSRW_ALT config
+# (which is vw005 — the only MFEM v3 RSSRW ALT toml ported).  The ONLY friction
+# difference vs that MFEM ALT is the seismogenic V_w (rs_srW) inner value:
+#   * V_w_inner 0.05 -> 0.02 m/s  (vw002; deep ceiling 3.0 unchanged)
+# NOTE: the SeisSol-side propagation-PROVEN ALT counterpart of THIS case is
+# safs_seisol_v3_0_0_RSSRW_ALT_vw002 (also V_w=0.02); the V_w_inner=0.02 here is
+# byte-identical to that authoritative SeisSol PREFERRED_vw002 friction LuaMap.
+# Everything else friction-side is byte-identical to RSSRW_ALT_vw005: f_0=0.6,
+# f_w=0.10, Dc=0.10, V_0=1e-6, V_init=1e-12, a(z)/a-b(z) (the SAME v3alt depth
+# CSVs), nucleation dtau_s=27 MPa.  The remaining differences vs ALT are DOMAIN,
+# identical in kind to LSW_PREFERRED:
+#   * mesh    : safv4_deep_500m_opt (safstags; tags 101/102/103/104).
+#   * stress  : the PREFERRED RSSRW CSM d12 effective field (its OWN h5 — the
+#               RSSRW preslip-clamp differs from LSW by up to ~2.1 MPa in the
+#               gate bands).
+#   * velocity: PREFERRED muscal CVM + far_field_clamp (ASAGI-style edge hold
+#               for the safv4_deep far-field box; gated OOBPolicy::Clamp).
+#   * time    : tfinal 200 s (= SeisSol EndTime=200.0).
+# FL=103 mapping, CVM material, sign/P_p conventions: see the RSSRW_ALT header.
+#
+# Run (from miniapps/seas; needs the safstags mesh + BOTH PREFERRED sidecars):
+#   mpirun -np <N> ./seas_spatial_dyn_driver \
+#     --config safs/project_7.0_alternative/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml \
+#     --print-derived
+#
+# Schema: safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "MFEM port of seisol_quakeworx/safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002: RS slip-law SRW (f_0=0.6, f_w=0.10, Dc=0.10 m, V_init=1e-12), Allison a(z)/a-b(z) (v3alt CSVs), V_w=0.02->3.0 (vw002) tanh taper, multiscale_statewise CVM material (interior_flux=matrix, far_field_clamp) + PREFERRED CSM d12 effective stress (sidecar_hdf5, P_p_pa=0), Gaussian dtau_s=27 MPa R=6000 m T_nuc=1 s nucleation, safv4_deep 500 m mesh (safstags), MIXED FLUX (adjacent) + RK4, tfinal 200 s."
+
+[material_constant_fallback]
+# Fallback only (consumed solely with --no-sidecar-material, which production
+# jobs must NOT pass).  The CVM sidecar is the production material.
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# PREFERRED CSM stress sidecar is EFFECTIVE -> P_p_pa MUST be 0.
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # MFEM-internal clamp (no SeisSol equivalent)
+
+[mesh]
+path  = "safs/project_7.0_preferred/meshing/results/safv4_deep_500m_opt_safstags.msh"
+order = 1
+
+[velocity]
+# PREFERRED muscal CVM sidecar + far_field_clamp (see LSW_PREFERRED header).
+use_sidecar     = true
+model           = "multiscale_statewise"
+dataset_root    = "safs/project_7.0_preferred"
+far_field_clamp = true
+
+[material]
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
+
+[stress]
+# PREFERRED RSSRW CSM gate-removed effective stress (its OWN h5; comp-POSITIVE
+# Pa), built by csm_stress_nc_to_mfem_hdf5.py from the RSSRW PREFERRED nc
+# (preslip-clamp differs from LSW).  Hypocenter sxx=47.33 syy=73.17 szz=78.20
+# sxy=6.11 syz=4.00 sxz=-5.59 MPa.  .h5 gitignored/large (~544 MB); scp it.
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/stress/results/csm_d12_rssrw_mfem/safs_stress_csm_d12_mfem.h5"
+
+[numerics]
+# v3 PREFERRED MIXED FLUX: matrix (CVM) + adjacent + RK4 (central flux UNSTABLE
+# under ADER -> rk4 mandatory).  CFL 0.5 = starting calibration.
+ader_order      = 2
+mixed_flux      = "adjacent"
+interior_flux   = "matrix"
+time_integrator = "rk4"
+cfl             = 0.5
+use_pml         = false
+
+[time]
+# = SeisSol v3 PREFERRED EndTime=200.0, FixTimeStep=0.1.
+tfinal     = "200s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+output_dir              = "output_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002"
+restart_prefix          = "cp"
+paraview_volume         = "off"
+paraview_bulk           = "off"
+paraview_fault          = "hdf5"
+paraview_fault_dt       = "5.0s"
+paraview_fault_zfp_tol  = 1.0e-12
+paraview_free_surface   = "vtu"
+paraview_free_surface_dt = "5.0s"
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+# = SeisSol Tnuc_s = 27.0e6 * exp(-r^2/6000^2), smoothStep over [0, 1] s.
+# Hypocenter byte-identical to RSSRW_ALT.
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+radius_dip_m        =     6000.0
+radius_strike_m     =     6000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     27.0e6
+T_nuc_s             =        1.0
+
+[friction]
+# MFEM-ONLY stabilizer (RS cases keep 10 MPa).
+sigma_n_strength_floor_pa = 10.0e6
+
+[friction.rate_state]
+# SeisSol FL=103 == slip law + strong rate weakening.
+state_evolution = "slip_law_srw"
+f_w_default     = 0.1        # = RS_muW
+V_w_default     = 0.02       # = vw002 seismogenic rs_srW; deep ramp via boxcar rule
+a_default       = 0.0128     # FALLBACK ONLY (hypocenter; depth_profile active)
+b_default       = 0.0168     # FALLBACK ONLY
+Dc_default      = 0.10       # = rs_sl0
+V_0_default     = 1.0e-6     # = RS_sr0; R-009: MUST equal FrictionSolver::V0
+f_0_default     = 0.6        # = RS_f0
+V_init_default  = 1.0e-12    # = RS_iniSlipRate1
+sigma_n_default = 63.9e6     # FALLBACK ONLY (live sigma_n is per-DOF from the stress sidecar)
+eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF
+
+[friction.rate_state.depth_profile]
+# v3-ALT a(z)/a-b(z) — SHARED with RSSRW_ALT (depth profiles are mesh-independent;
+# the workflow confirmed the PREFERRED LuaMaps match these CSVs byte-for-byte).
+# a-b: -0.004 (d<=12 km) -> 0 (d=15) -> +0.010 (d>=16.5; deep VS lock).
+# CSV rows are `value, depth_km` (value FIRST, no header).
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_v3alt_500m.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_v3alt_500m.csv"
+depth_units         = "km"
+
+# = SeisSol rs_srW vw002: 0.02 (d<=13 km) ramping to 3.0 (d>=16 km).  Boxcar
+# plateau [center-half, center+half] = [-13000, 0] -> V_w_inner; B=0 for
+# z<=-16000 -> V_w_outer; deep transition band [-16000, -13000].  The transition
+# is TANH (resolver) not the SeisSol linear ramp — identical at the endpoints +
+# midpoint; inside the VS lock so it does not affect propagation.  Only the
+# inner amplitude differs from vw005 (0.05 -> 0.02).
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+V_w_inner         = 0.02
+V_w_outer         = 3.0
+boxcar_center_z_m = -6500.0
+boxcar_half_z_m   =  6500.0
+boxcar_trans_z_m  =  3000.0

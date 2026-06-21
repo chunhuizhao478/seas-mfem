@@ -212,6 +212,13 @@ struct VelocitySpec
    // and may be empty.  Equivalent to passing --no-sidecar-material on
    // the CLI; the CLI flag still wins as an override.
    bool          use_sidecar = true;
+   // When true, material queries whose mesh coordinates fall outside the
+   // velocity sidecar data hull are edge-clamped (ASAGI-style nearest-edge
+   // hold) instead of aborting, and the load-time ContainsBBox gate is
+   // skipped.  Needed for SAFS meshes whose far-field absorbing box extends
+   // beyond the CVM data coverage (e.g. safv4_deep).  Default false keeps
+   // the strict interpolation-only containment contract (TPV/BP5 unchanged).
+   bool          far_field_clamp = false;
 };
 
 enum class StressSourceKind

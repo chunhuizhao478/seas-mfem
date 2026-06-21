@@ -33,12 +33,20 @@ namespace mfem
 namespace seas
 {
 
-/// v1 OOB policy: interpolation-only.  Any query outside the data bbox
-/// aborts.  Reserved enum class to make a future schema bump that
-/// re-introduces a clamp policy a clean API change.
+/// Out-of-bbox query policy for ``DataField3D::Evaluate``.
+///   - Abort (default, schema-v1 interpolation-only contract): any query
+///     outside the data bbox is a hard MFEM_ABORT.
+///   - Clamp (opt-in): the query coordinates are clamped to the nearest
+///     data-axis edge before interpolation, so a mesh that extends beyond
+///     the sidecar data hull (e.g. a large far-field absorbing box) yields
+///     the edge value instead of aborting.  This is the ASAGI nearest-edge
+///     hold behaviour SeisSol uses, reproduced here for SAFS meshes whose
+///     far field exceeds the CVM data coverage.  In-bbox queries are
+///     bit-identical to Abort (clamp only affects out-of-hull points).
 enum class OOBPolicy : int
 {
-   Abort = 0
+   Abort = 0,
+   Clamp = 1
 };
 
 /// In-sidecar interpolation scheme for ``DataField3D::Evaluate``.
@@ -73,7 +81,7 @@ public:
    ///   - dataset shape != (Nx, Ny, Nz)
    ///   - any NaN in dataset
    ///   - any cell outside [min_value, max_value]
-   ///   - oob != OOBPolicy::Abort (only Abort is supported in v1).
+   ///   - oob not in {OOBPolicy::Abort, OOBPolicy::Clamp}.
    DataField3D(const std::string& sidecar_path,
                const std::string& field_name,
                OOBPolicy oob = OOBPolicy::Abort);

@@ -64,32 +64,57 @@ SpatialVelocityBundle load_impl(const VelocitySpec& spec, MeshT& mesh)
                "found at '" << path << "'.  Check `[velocity].model` and "
                "`[velocity].dataset_root` (or `override_path`).");
 
+   // Opt-in ASAGI-style far-field clamp: when the mesh extends beyond the
+   // velocity data hull (e.g. safv4_deep's large absorbing box), edge-clamp
+   // out-of-hull material queries instead of aborting.  Default = Abort
+   // preserves the strict interpolation-only contract (TPV/BP5 unchanged).
+   const OOBPolicy oob = spec.far_field_clamp ? OOBPolicy::Clamp
+                                              : OOBPolicy::Abort;
+
    SpatialVelocityBundle b;
-   b.vp_field  = std::make_unique<DataField3D>(path, "Vp");
-   b.vs_field  = std::make_unique<DataField3D>(path, "Vs");
-   b.rho_field = std::make_unique<DataField3D>(path, "density");
+   b.vp_field  = std::make_unique<DataField3D>(path, "Vp",      oob);
+   b.vs_field  = std::make_unique<DataField3D>(path, "Vs",      oob);
+   b.rho_field = std::make_unique<DataField3D>(path, "density", oob);
 
    real_t mxmin, mxmax, mymin, mymax, mzmin, mzmax;
    compute_bbox(mesh, mxmin, mxmax, mymin, mymax, mzmin, mzmax);
 
-   // ContainsBBox on all three fields.  Delegate to the shared
-   // FieldProjector::AbortContainmentFailure helper so the error
-   // message stays in sync with the rest of the SEAS I/O layer (R-012;
-   // helper exposed as public on field_coefficient.hpp).
-   auto check = [&](const DataField3D& field)
+   if (spec.far_field_clamp)
    {
-      const bool inside = field.ContainsBBox(mxmin, mxmax,
-                                             mymin, mymax,
-                                             mzmin, mzmax);
-      if (!inside)
+      // Far-field clamp ON: the ContainsBBox gate is intentionally skipped
+      // (an out-of-hull mesh is the whole point); report the breach so the
+      // edge-clamp is visible in the run log, mirroring SeisSol/ASAGI.
+      const std::array<real_t, 6>& vb = b.vp_field->BBox();
+      mfem::out << "LoadSpatialVelocityBundle: [velocity].far_field_clamp = "
+                   "true -> ASAGI-style nearest-edge hold for mesh extent "
+                   "outside the velocity data hull (ContainsBBox gate skipped).\n"
+                << "  mesh bbox x[" << mxmin << "," << mxmax << "] y["
+                << mymin << "," << mymax << "] z[" << mzmin << "," << mzmax
+                << "]\n  data bbox x[" << vb[0] << "," << vb[1] << "] y["
+                << vb[2] << "," << vb[3] << "] z[" << vb[4] << "," << vb[5]
+                << "] (Vp; Vs/density share the grid)\n";
+   }
+   else
+   {
+      // ContainsBBox on all three fields.  Delegate to the shared
+      // FieldProjector::AbortContainmentFailure helper so the error
+      // message stays in sync with the rest of the SEAS I/O layer (R-012;
+      // helper exposed as public on field_coefficient.hpp).
+      auto check = [&](const DataField3D& field)
       {
-         FieldProjector::AbortContainmentFailure(
-            field, mxmin, mxmax, mymin, mymax, mzmin, mzmax);
-      }
-   };
-   check(*b.vp_field);
-   check(*b.vs_field);
-   check(*b.rho_field);
+         const bool inside = field.ContainsBBox(mxmin, mxmax,
+                                                mymin, mymax,
+                                                mzmin, mzmax);
+         if (!inside)
+         {
+            FieldProjector::AbortContainmentFailure(
+               field, mxmin, mxmax, mymin, mymax, mzmin, mzmax);
+         }
+      };
+      check(*b.vp_field);
+      check(*b.vs_field);
+      check(*b.rho_field);
+   }
 
    b.lambda_coef = std::make_unique<LambdaFromSidecar>(
                       *b.vp_field, *b.vs_field, *b.rho_field);

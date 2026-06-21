@@ -147,6 +147,14 @@ safs/project_7.0_alternative/velocity/results/multiscale_statewise_cvm/
 safs/project_7.0_alternative/stress/raw/csm_johnson_hearn/
 safs/project_7.0_alternative/stress/results/*.h5
 safs/project_7.0_alternative/stress/results/*.vtr
+
+# SAFS v3 MFEM sidecars (large; regenerate via the toolbox scripts or scp
+# separately — they are NOT committed).  The CSM-stress h5 lives in SUBDIRS
+# (csm_d12*_mfem/) which the top-level *.h5 rule above does NOT cover.
+safs/project_7.0_alternative/stress/results/csm_d12_mfem/
+safs/project_7.0_preferred/stress/results/csm_d12_lsw_mfem/
+safs/project_7.0_preferred/stress/results/csm_d12_rssrw_mfem/
+safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/
 safs/project_7.0_alternative/stress/results/1000m_lcfar3000/
 
 # SAFS mesh STLs (regenerable from .ts via meshing pipeline).

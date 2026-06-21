@@ -1,0 +1,151 @@
+# =========================================================================
+# SAFS LSW_PREFERRED (v3.0.0) — MFEM port of the SeisSol QuakeWorx case
+#   seisol_quakeworx/safs_seisol_v3_0_0_LSW_PREFERRED  (FL=16, ASAGI CVM
+#   material, spatially-varying CSM gate-removed stress) with MFEM mixed-flux
+#   + RK.  "Do what SeisSol did, but with mixed flux (SeisSol has none)."
+# Plan: document/PLAN_mixed_flux_seissol_port_2026-06-19.md (Phase 3, LSW).
+# =========================================================================
+# PRODUCTION config.  Friction + nucleation are BYTE-IDENTICAL to the proven
+# LSW_ALT case (mu_s=0.318, mu_d=0.10, d_c=1.2, deep barrier, dtau_s=20 MPa);
+# the ONLY differences vs LSW_ALT are the DOMAIN:
+#   * mesh    : safv4_deep_500m_opt (NON-flat topography, fault SAF+Banning+
+#               GarnetHill) — boundary tags remapped to the SAFS convention
+#               (101 fault / 102 top / 103 bottom / 104 sides) by
+#               remap_pref_mesh_tags.py -> *_safstags.msh.
+#   * stress  : the PREFERRED CSM d12 effective field (272 MB nc -> 544 MB h5,
+#               grid x[195,628] y[3685,3965] z[-20,3] km), built by
+#               csm_stress_nc_to_mfem_hdf5.py (compression-POSITIVE, P_p baked
+#               in -> P_p_pa=0).  DIFFERS from the RSSRW_PREFERRED stress (the
+#               diffusion preslip-clamp differs by law) -> its own h5.
+#   * velocity: the PREFERRED muscal CVM (safs_material_cvm.nc -> velocity_safs.h5
+#               grid x[189,633] y[3681,3973.5] z[-45,3.25] km).  The safv4_deep
+#               far-field absorbing box extends BEYOND every CVM data hull, so
+#               material queries there are edge-clamped (ASAGI-style) via
+#               [velocity].far_field_clamp = true (gated OOBPolicy::Clamp; this
+#               reproduces exactly what SeisSol's ASAGI does).
+#   * time    : tfinal 200 s (= SeisSol EndTime=200.0; NW transit margin).
+# Numerics, P_p convention, sign flip: see the LSW_ALT header.
+#
+# Run (from miniapps/seas; needs the safstags mesh + BOTH PREFERRED sidecars):
+#   mpirun -np <N> ./seas_spatial_dyn_driver \
+#     --config safs/project_7.0_alternative/config/spatial_friction_safs_seisol_v3_0_0_LSW_PREFERRED.toml \
+#     --print-derived
+#
+# Schema: safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "MFEM port of seisol_quakeworx/safs_seisol_v3_0_0_LSW_PREFERRED: LSW (mu_s=0.318, mu_d=0.10, d_c=1.2 m) + multiscale_statewise CVM material (use_sidecar=true, interior_flux=matrix, far_field_clamp) + PREFERRED CSM d12 effective stress (sidecar_hdf5, P_p_pa=0), Gaussian dtau_s=20 MPa R=6000 m T_nuc=1 s nucleation, deep barrier z in (-20,-15) km, safv4_deep 500 m mesh (safstags), MIXED FLUX (adjacent) + RK4, tfinal 200 s."
+
+[material_constant_fallback]
+# Fallback only (consumed solely with --no-sidecar-material, which production
+# jobs must NOT pass).  The CVM sidecar is the production material.
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# PREFERRED CSM stress sidecar is EFFECTIVE -> P_p_pa MUST be 0 (ProjectFault
+# PreStress subtracts P_p unconditionally; a non-zero value double-subtracts).
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # MFEM-internal clamp (no SeisSol equivalent)
+
+[mesh]
+# safv4_deep_500m_opt with boundary tags remapped to the SAFS convention
+# (fault 101 / top 102 / bottom 103 / sides 104) so the driver's hardcoded
+# fallback consumes it with no [boundary] block (identical to ALT).
+path  = "safs/project_7.0_preferred/meshing/results/safv4_deep_500m_opt_safstags.msh"
+order = 1
+
+[velocity]
+# PREFERRED muscal CVM sidecar (the real material data SeisSol's ASAGI also
+# samples) -> <dataset_root>/velocity/results/multiscale_statewise_cvm/velocity_safs.h5.
+# This block does the ACTUAL material load; [material] below is documentary.
+# far_field_clamp: the safv4_deep absorbing box extends beyond the CVM data
+# hull -> edge-clamp out-of-hull material queries (ASAGI-style) instead of
+# aborting (gated OOBPolicy::Clamp; in-hull values unchanged).
+use_sidecar     = true
+model           = "multiscale_statewise"
+dataset_root    = "safs/project_7.0_preferred"
+far_field_clamp = true
+
+[material]
+# Declares the heterogeneous material KIND so the parse-time guard admits
+# interior_flux="matrix" (a Constant [material] is rejected there).
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
+
+[stress]
+# PREFERRED CSM gate-removed effective stress (compression-POSITIVE Pa), built
+# by csm_stress_nc_to_mfem_hdf5.py from the PREFERRED safs_stress_csm_d12.nc.
+# Hypocenter effective tensor (comp+, MPa): sxx=47.33 syy=73.17 szz=78.20
+# sxy=6.11 syz=4.00 sxz=-5.59.  The .h5 is gitignored/large (~544 MB); scp it.
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/stress/results/csm_d12_lsw_mfem/safs_stress_csm_d12_mfem.h5"
+
+[numerics]
+# v3 PREFERRED MIXED FLUX: interior_flux="matrix" (CVM) + mixed_flux="adjacent"
+# (central-on-fault-adjacent, Zhang 2023) + RK4.  Central flux is UNSTABLE
+# under ADER (MatrixMixedFluxUnderAder hard guard) -> time_integrator MUST be
+# rk4.  ader_order ignored under RK.  CFL 0.5 = starting calibration.
+ader_order      = 2
+mixed_flux      = "adjacent"
+interior_flux   = "matrix"
+time_integrator = "rk4"
+cfl             = 0.5
+use_pml         = false
+
+[time]
+# = SeisSol v3 PREFERRED EndTime=200.0, FixTimeStep=0.1.
+tfinal     = "200s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"
+
+[output]
+output_dir              = "output_safs_seisol_v3_0_0_LSW_PREFERRED"
+restart_prefix          = "cp"
+paraview_volume         = "off"
+paraview_bulk           = "off"
+paraview_fault          = "hdf5"
+paraview_fault_dt       = "5.0s"
+paraview_fault_zfp_tol  = 1.0e-12
+paraview_free_surface   = "vtu"
+paraview_free_surface_dt = "5.0s"
+max_snapshots           = 5000
+checkpoint_every_steps  = 10000
+
+[nucleation]
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+# = SeisSol Tnuc_s = 20.0e6 * exp(-r^2/6000^2), smoothStep over [0, 1] s.
+# Hypocenter byte-identical to LSW_ALT.
+center_x_m          =  606971.0
+center_y_m          = 3707270.0
+center_z_m          =   -4965.62
+radius_dip_m        =     6000.0
+radius_strike_m     =     6000.0
+delta_tau_dip_pa    =        0.0
+delta_tau_strike_pa =     20.0e6
+T_nuc_s             =        1.0
+
+[friction]
+# MFEM-ONLY stabilizer (see v1 LSW header).
+sigma_n_strength_floor_pa = 5.0e6
+
+[friction.slip_weakening]
+# = SeisSol v3 PREFERRED: mu_s=0.318, mu_d=0.10, d_c=1.2 m, cohesion=0
+# (byte-identical to LSW_ALT).
+mu_s_default     = 0.318
+mu_d_default     = 0.10
+d_c_default      = 1.2
+cohesion_default = 0.0
+
+# = SeisSol deep barrier: mu_s = 1.0e6 for -20000 < z < -15000.
+[[friction.slip_weakening.spatial]]
+kind    = "barrier"
+z_min_m = -20000.0
+z_max_m = -15000.0

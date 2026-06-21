@@ -196,11 +196,11 @@ DataField3D::DataField3D(const std::string& sidecar_path,
    , max_value_(0.0)
    , oob_policy_(oob)
 {
-   if (oob != OOBPolicy::Abort)
+   if (oob != OOBPolicy::Abort && oob != OOBPolicy::Clamp)
    {
-      MFEM_ABORT("DataField3D: only OOBPolicy::Abort is supported in "
-                 "schema-v1 (interpolation-only contract); got policy "
-                 "value " << static_cast<int>(oob));
+      MFEM_ABORT("DataField3D: unsupported OOBPolicy value "
+                 << static_cast<int>(oob)
+                 << " (supported: Abort=0, Clamp=1)");
    }
 
    hid_t file = H5Fopen(sidecar_path.c_str(), H5F_ACC_RDONLY, H5P_DEFAULT);
@@ -387,8 +387,27 @@ bool DataField3D::ContainsBBox(real_t xmin, real_t xmax,
           && (zmin >= bbox_[4] - eps) && (zmax <= bbox_[5] + eps);
 }
 
+// Nearest-edge clamp of a single coordinate onto [axis.front(), axis.back()]
+// (used only under OOBPolicy::Clamp; ASAGI-style far-field hold).
+static inline real_t clamp_to_axis(const std::vector<real_t>& axis, real_t v)
+{
+   if (v < axis.front()) { return axis.front(); }
+   if (v > axis.back())  { return axis.back();  }
+   return v;
+}
+
 real_t DataField3D::Evaluate(real_t x, real_t y, real_t z) const
 {
+   // Under the opt-in Clamp policy, hold out-of-hull query coordinates at
+   // the nearest data edge BEFORE interpolation, so the result is exactly
+   // the edge value (no extrapolation) and in-bbox queries are unchanged.
+   if (oob_policy_ == OOBPolicy::Clamp)
+   {
+      x = clamp_to_axis(x_, x);
+      y = clamp_to_axis(y_, y);
+      z = clamp_to_axis(z_, z);
+   }
+
    switch (interp_mode_)
    {
       case InterpMode::Trilinear:

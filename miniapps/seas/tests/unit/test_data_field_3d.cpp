@@ -414,6 +414,43 @@ static void T_3_12_T_3_13_find_index_edges()
 }
 
 
+static void T_3_14_oob_clamp()
+{
+   std::cout << "\n[T-3-14] OOBPolicy::Clamp edge-holds out-of-bbox queries\n";
+   // f(x,y,z) = x + y + z on grid x{0,1,2} y{-1,0,1} z{-2,-1,0}.
+   const std::string path = make_linear_sidecar(1.0, 1.0, 1.0, 0.0,
+                                                -100, 100);
+
+   // Ctor with Clamp must NOT abort (T-3-8 shows default Abort still aborts).
+   DataField3D clamp_field(path, "F", OOBPolicy::Clamp);
+   DataField3D abort_field(path, "F");   // default Abort
+
+   // (a) In-bbox queries are bit-identical to the default (Abort) field —
+   //     clamp only changes out-of-hull points.
+   TEST_NEAR(clamp_field.Evaluate(0.5, -0.5, -0.5),
+             abort_field.Evaluate(0.5, -0.5, -0.5), 0.0,
+             "T-3-14a Clamp leaves in-bbox values bit-identical");
+
+   // (b) x just past xmax -> clamp x to 2 -> f(2,0,-1) = 1.
+   TEST_NEAR(clamp_field.Evaluate(2.0 + 1.0e-3, 0.0, -1.0), 1.0, 1.0e-12,
+             "T-3-14b clamp x>xmax holds the +x edge value");
+
+   // (c) x below xmin -> clamp x to 0 -> f(0,0,-1) = -1.
+   TEST_NEAR(clamp_field.Evaluate(-0.5, 0.0, -1.0), -1.0, 1.0e-12,
+             "T-3-14c clamp x<xmin holds the -x edge value");
+
+   // (d) far corner (all axes out) -> clamp to (2,1,0) -> f = 3.
+   TEST_NEAR(clamp_field.Evaluate(1.0e6, 1.0e6, 1.0e6), 3.0, 1.0e-12,
+             "T-3-14d clamp holds the (xmax,ymax,zmax) corner value");
+
+   // (e) far corner the other way -> clamp to (0,-1,-2) -> f = -3.
+   TEST_NEAR(clamp_field.Evaluate(-1.0e6, -1.0e6, -1.0e6), -3.0, 1.0e-12,
+             "T-3-14e clamp holds the (xmin,ymin,zmin) corner value");
+
+   ::unlink(path.c_str());
+}
+
+
 // ----------------------------------------------------------------------
 // Main
 // ----------------------------------------------------------------------
@@ -434,6 +471,7 @@ int main(int /*argc*/, char* /*argv*/[])
    T_3_8_oob_aborts();
    T_3_9_T_3_10_T_3_11_contains_bbox();
    T_3_12_T_3_13_find_index_edges();
+   T_3_14_oob_clamp();
 
    std::cout << "\n===========================================\n";
    std::cout << "Total tests: " << num_tests << "\n";

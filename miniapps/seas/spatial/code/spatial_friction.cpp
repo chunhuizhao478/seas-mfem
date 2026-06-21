@@ -923,6 +923,8 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.velocity.dataset_root = toml_str(v, "dataset_root", std::string());
       cfg.velocity.override_path = toml_str(v, "override_path", std::string());
       cfg.velocity.use_sidecar  = toml_bool(v, "use_sidecar", true);
+      cfg.velocity.far_field_clamp =
+         toml_bool(v, "far_field_clamp", false);
    }
    // When use_sidecar = false the driver consumes [material_constant_fallback]
    // and never reads model/dataset_root/override_path; relax the non-empty
