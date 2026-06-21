@@ -1,92 +1,86 @@
 #!/bin/bash
 # =============================================================================
-# Pull SAFS spatial-dynamic-rupture result files from Frontera into a local
-# archive tree for ParaView inspection.
+# Pull SAFS SPATIAL dynamic-rupture result files from EXPANSE (SDSC) into a
+# local archive tree for ParaView inspection.  (Follows the tpv6/tpv7_spatial
+# sync_results.sh pattern, adapted for Expanse + the safs_expanse VTU jobs.)
 #
-# Run this on your LOCAL machine (Mac), not on Frontera.
+# Run this on your LOCAL machine (Mac), not on Expanse.
 #
 # Two things are transferred:
 #
-#   (1) ParaView artefacts (*.vtkhdf): auto-detects every `safs_dyn_*`
-#       directory under <REMOTE_ROOT> and rsync's each to a same-named local
-#       subdir.  This covers the smoke runs (safs_dyn_smoke_<jobid>), the
-#       mixed-flux A/B runs (safs_dyn_{none,adjacent,all_continuous}_<jobid>),
-#       the resolution sweep (safs_dyn_resDc2_<jobid>), and the dip-prestress
-#       diagnostic (safs_dyn_{control,zerodip}_<jobid>).  By DEFAULT only
-#       `fault.vtkhdf` is transferred; use --all for volume + bulk too.
+#   (1) ParaView artefacts (VTU): the safs_expanse run jobs
+#       (jobs/safs/safs_expanse/*.sbatch) use --paraview-fault-vtu +
+#       --paraview-free-surface vtu, writing ONE output dir per run UNDER the
+#       repo on qstore:
+#         <REMOTE_ROOT>/safs_dyn_<case>_<jobid>/
+#       e.g.  safs_dyn_sw_alt_exp_51210086     (slipweakening ALT, mixed flux)
+#             safs_dyn_rs_alt_exp_51210073     (ratestate   ALT, mixed flux)
+#             safs_dyn_sw_alt_uw_exp_51211002  (slipweakening ALT, upwind+ADER)
+#       This auto-detects every `safs_dyn_*` dir and rsync's each to a same-named
+#       local subdir.  By DEFAULT the on-fault VTU (FaultSurface/fault_surface_
+#       c<cycle>.vtu) + free-surface VTU + the *.pvd collections are transferred;
+#       use --all to also grab any volume *.vtu / *.vtkhdf (SAFS runs
+#       paraview_volume="off", so there usually is none).  SAFS has no
+#       [problem].tag, so there are NO per-side on-fault station .dat traces
+#       (unlike TPV6/7) — the on-fault VTU IS the rupture record.
 #
 #   (2) Diagnostic logs (default ON): the driver log
-#       `spatial_dyn_<tag>_<jobid>.log` plus the SLURM `<name>_<jobid>.{out,err}`
-#       from <REMOTE_LOG_DIR> (the cluster's miniapps/seas/jobs/safs), into a
-#       local `logs/` subdir.  The scalar diagnostics (V_max + [DIAG] +
-#       [R-101 nonfatal] lines) live in the .log; the fault.vtkhdf carries the
-#       slip-rate field for ParaView.  Use --no-logs to skip the logs, or
-#       --logs-only to grab just the .log/.out/.err and skip the (possibly
-#       large) fault.vtkhdf.
+#       `spatial_dyn_<tag>_<jobid>.log` (V_max / [DIAG] / [R-101] lines) plus the
+#       SLURM `*_<jobid>.{out,err}` from <REMOTE_LOG_DIR> (the cluster's
+#       jobs/safs/safs_expanse), into a local `logs/` subdir.  Use --no-logs to
+#       skip them, or --logs-only to grab just the .log/.out/.err and skip the
+#       (possibly large) VTU.
 #
 # Default destination:
-#   $HOME/Downloads/seas-mfem/safs   ( *.vtkhdf in <dest>/<dir>/, logs in <dest>/logs/ )
+#   $HOME/Downloads/seas-mfem/safs_expanse  ( VTU in <dest>/<dir>/, logs in <dest>/logs/ )
 # Override with --dest <path> or the LOCAL_DEST environment variable.
 #
 # Usage:
-#   ./sync_results.sh                                # fault.vtkhdf (all dirs) + logs
-#   ./sync_results.sh 7738686                        # only matching job(s)
-#   ./sync_results.sh 7738686 7738999                # multiple
-#   ./sync_results.sh none                           # mixed-flux A/B: --mixed-flux none run(s)
-#   ./sync_results.sh adjacent                       # mixed-flux A/B: adjacent run(s)
-#   ./sync_results.sh zerodip                         # dip diagnostic: zerodip run(s)
-#   ./sync_results.sh control                         # dip diagnostic: control run(s)
-#   ./sync_results.sh --logs-only zerodip            # just the .log/.out/.err (skip fault.vtkhdf)
-#   ./sync_results.sh --no-logs                       # vtkhdf only, skip logs
-#   ./sync_results.sh --all                          # fault + volume + bulk (+ logs)
+#   ./sync_results.sh                                # fault+free-surface VTU (all dirs) + logs
+#   ./sync_results.sh 51210086                       # only matching job id(s)
+#   ./sync_results.sh sw_alt                          # only the slipweakening ALT run(s)
+#   ./sync_results.sh _uw_                            # only the upwind+ADER run(s)
+#   ./sync_results.sh --logs-only sw_alt             # just the .log/.out/.err (skip VTU)
+#   ./sync_results.sh --no-logs                       # VTU only, skip logs
+#   ./sync_results.sh --all                          # + volume/vtkhdf (if any) (+ logs)
 #   ./sync_results.sh --dry-run                      # preview, transfer nothing
-#   ./sync_results.sh --dest /Volumes/SSD/seas/safs
-#   ./sync_results.sh --host zhaochun@frontera.tacc.utexas.edu
-#   ./sync_results.sh --remote-root /scratch2/.../<JOBNAME>      # production run on $SCRATCH
-#   ./sync_results.sh --remote-log-dir /path/to/jobs/safs        # logs from a non-default checkout
+#   ./sync_results.sh --dest /Volumes/SSD/seas/safs_expanse
+#   ./sync_results.sh --host czhao1@login.expanse.sdsc.edu
+#   ./sync_results.sh --remote-root /expanse/.../seas-mfem/miniapps/seas/safs
+#   ./sync_results.sh --remote-log-dir /path/to/jobs/safs/safs_expanse
 #
-# Note on filters: a JOB ID is the most reliable filter — it appears in every
-# artefact name (safs_dyn_*_<jobid>, spatial_dyn_*_<jobid>.log, *_<jobid>.out).
-# A tag like `control` matches the .log but NOT the SLURM .out/.err for the
-# zerodip job (whose -o is fixed at safs_zerodip_<jobid> regardless of tag).
+# A JOB ID is the most reliable filter — it appears in every artefact name
+# (safs_dyn_*_<jobid>, spatial_dyn_*_<jobid>.log, *_<jobid>.out).
 #
-# If --host is not given, $FRONTERA_HOST is used, falling back to the ssh
-# alias `frontera` (configure in ~/.ssh/config).
+# If --host is not given, $EXPANSE_HOST is used, falling back to the explicit
+# czhao1@login.expanse.sdsc.edu (set up an ssh alias `expanse` in ~/.ssh/config
+# and pass --host expanse to avoid typing the full login).
 #
-# Whitelist (default): fault.vtkhdf  + spatial_dyn_*.log + SLURM *.out/*.err
-# Whitelist (--all):   *.vtkhdf      + the same logs  (fault, volume, bulk/stress)
-# Never transferred:   cp_* checkpoints, .msh meshes, *.sbatch, this script, source.
+# Whitelist (default): fault_surface*.vtu + free_surface*.vtu + *.pvtu + *.pvd
+#                      + spatial_dyn_*.log + SLURM *.out/*.err
+# Whitelist (--all):   + *.vtu + *.vtkhdf  (adds the volume field, if any)
+# Never transferred:   cp_checkpoint_r*.txt, .msh meshes, *.sbatch, this script, source.
 # =============================================================================
 
 set -u
 
 # Silence the "perl: warning: Setting locale failed ... LANG = C.UTF-8" spam:
-# macOS ssh forwards the local LANG/LC_* (SendEnv LANG LC_* in the default
-# ssh_config), but Frontera's Perl-based login shell (Lmod) has no C.UTF-8
-# locale, so every ssh/rsync connection prints the warning.  Forcing a locale
-# the remote DOES have (plain C) for this script's children makes the forwarded
-# value valid -> no warning.  ASCII-only artefact names, so C is safe.
+# macOS ssh forwards LANG/LC_*, but Expanse's Lmod login shell has no C.UTF-8
+# locale, so every ssh/rsync prints the warning.  Force plain C (ASCII-only
+# artefact names, so it is safe) for this script's children.
 export LC_ALL=C LANG=C
 
-# Output tree.  All dev-queue sbatches write under
-#   ${SEAS_MFEM_ROOT}/miniapps/seas/safs/ :
-#   - spatial_dyn_smoke_*_safs.sbatch          -> safs_dyn_smoke_${SLURM_JOB_ID}
-#   - spatial_dyn_smoke_nomixedflux_*.sbatch   -> safs_dyn_${MIXED_FLUX}_${SLURM_JOB_ID}
-#       (MIXED_FLUX = none | adjacent | all_continuous)
-#   - spatial_dyn_resolution_Dc2_*.sbatch      -> safs_dyn_resDc2_${SLURM_JOB_ID}
-#   - spatial_dyn_zerodip_*.sbatch             -> safs_dyn_${TAG}_${SLURM_JOB_ID}
-#       (TAG = control | zerodip; writes fault.vtkhdf like the smoke job)
-# and ALL of them write the driver log + SLURM out/err to
-#   ${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/ .
-# The glob `safs_dyn_*` matches every vtkhdf family.  For a PRODUCTION run
-# (output on $SCRATCH/<JOBNAME>), pass --remote-root.
-REMOTE_ROOT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs"
+# Expanse checkout (a <checkout>/miniapps/seas/safs dir).  The safs_expanse run
+# jobs write OUT here (OUT_BASE = <root>/miniapps/seas/safs).  --remote-root
+# overrides the whole path.
+REMOTE_ROOT="/expanse/projects/qstore/usc143/qwxdev/apps/expanse/rocky8.8/mfem_seas_versions/seas-mfem/miniapps/seas/safs"
 REMOTE_GLOB="safs_dyn_*"
-# Logs always live in the repo's jobs/safs (independent of where vtkhdf go);
-# default is the sibling of the default REMOTE_ROOT.  Override --remote-log-dir.
-REMOTE_LOG_DIR_DEFAULT="${REMOTE_ROOT%/safs}/jobs/safs"
+# Driver .log + SLURM .out/.err live in the safs_expanse job dir (LOG_DIR there).
+# Default = <checkout>/miniapps/seas/jobs/safs/safs_expanse.  Override
+# --remote-log-dir.
+REMOTE_LOG_DIR_DEFAULT="${REMOTE_ROOT%/safs}/jobs/safs/safs_expanse"
 LOG_GLOB="spatial_dyn_*.log"
-DEFAULT_DEST="$HOME/Downloads/seas-mfem/safs"
+DEFAULT_DEST="$HOME/Downloads/seas-mfem/safs_expanse"
 
 # --- parse args ---
 REMOTE=""
@@ -101,7 +95,7 @@ JOB_FILTERS=()
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --dry-run)          DRY="--dry-run"; shift ;;
-        --all)              GRAB_ALL="1"; shift ;;
+        --all|--volume)     GRAB_ALL="1"; shift ;;
         --no-logs)          SKIP_LOGS="1"; shift ;;
         --logs-only)        LOGS_ONLY="1"; shift ;;
         --dest)             DEST_ARG="$2"; shift 2 ;;
@@ -116,7 +110,7 @@ while [[ $# -gt 0 ]]; do
         *)                  JOB_FILTERS+=("$1"); shift ;;
     esac
 done
-REMOTE="${REMOTE:-${FRONTERA_HOST:-frontera}}"
+REMOTE="${REMOTE:-${EXPANSE_HOST:-czhao1@login.expanse.sdsc.edu}}"
 LOCAL_DEST="${DEST_ARG:-${LOCAL_DEST:-$DEFAULT_DEST}}"
 REMOTE_ROOT="${ROOT_ARG:-$REMOTE_ROOT}"
 REMOTE_LOG_DIR="${LOGDIR_ARG:-$REMOTE_LOG_DIR_DEFAULT}"
@@ -137,12 +131,11 @@ mkdir -p "$LOCAL_DEST" || {
 }
 
 # =============================================================================
-# (1) ParaView vtkhdf artefacts (skipped entirely with --logs-only).
+# (1) ParaView VTU artefacts (skipped entirely with --logs-only).
 # =============================================================================
 SUBDIRS=()
 if [[ -z "$LOGS_ONLY" ]]; then
-    # Enumerate result dirs on the cluster (bare names, no path).
-    echo "Querying cluster for ${REMOTE_GLOB} directories under ${REMOTE_ROOT}..."
+    echo "Querying Expanse for ${REMOTE_GLOB} directories under ${REMOTE_ROOT}..."
     ALL_SUBDIRS=()
     while IFS= read -r _line; do
         [[ -n "$_line" ]] && ALL_SUBDIRS+=("$_line")
@@ -151,7 +144,8 @@ if [[ -z "$LOGS_ONLY" ]]; then
     )
     if [[ ${#ALL_SUBDIRS[@]} -eq 0 ]]; then
         echo "No ${REMOTE_GLOB} dirs found under $REMOTE:$REMOTE_ROOT" >&2
-        echo "(no vtkhdf yet -- job may have aborted before the first snapshot; try --logs-only)" >&2
+        echo "(no VTU yet -- job may not have reached the first snapshot; try --logs-only." >&2
+        echo " wrong checkout? --remote-root <path>/miniapps/seas/safs ; wrong host? --host ...)" >&2
         [[ -n "$SKIP_LOGS" ]] && exit 1
     else
         # Filter to matching jobs if positional args were given.
@@ -174,13 +168,21 @@ if [[ -z "$LOGS_ONLY" ]]; then
     fi
 fi
 
-# Build the rsync include set for vtkhdf.
+# Build the rsync include set for VTU.  Fault + free surface always; the large
+# volume field only with --all.
+FILE_INCLUDES=(
+    --include='fault_surface*.vtu'   # on-fault VTU (slip/slip_rate/traction/sigma_n)
+    --include='free_surface*.vtu'    # free-surface VTU (ground-motion velocity)
+    --include='*.pvtu'               # per-cycle parallel index, if used
+    --include='*.pvd'                # collection files (fault_surface.pvd, free_surface.pvd; tiny)
+)
+WHAT="on-fault VTU + free-surface VTU + PVD (use --all for volume)"
 if [[ -n "$GRAB_ALL" ]]; then
-    FILE_INCLUDES=( --include='*.vtkhdf' )
-    WHAT="all *.vtkhdf (fault + volume + bulk)"
-else
-    FILE_INCLUDES=( --include='fault.vtkhdf' )
-    WHAT="fault.vtkhdf only (use --all for volume + bulk)"
+    FILE_INCLUDES+=(
+        --include='*.vtu'            # any remaining volume pieces
+        --include='*.vtkhdf'
+    )
+    WHAT="all VTU/VTKHDF (fault + free surface + volume)"
 fi
 
 echo "Remote:  $REMOTE:$REMOTE_ROOT"
