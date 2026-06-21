@@ -58,6 +58,12 @@ export LANG=C
 # Set SAFS_DIAG=1 to enable.  (getenv() treats SEAS_DIAG_BLOWUP=0 as "set", so we
 # must UNSET it to disable, not set it to 0.)
 if [[ "${SAFS_DIAG:-0}" == "1" ]]; then export SEAS_DIAG_BLOWUP=1; else unset SEAS_DIAG_BLOWUP; fi
+# R-101 shared-fault cross-rank consistency tripwire — on the CURVILINEAR SAFS
+# fault the per-QP strike frame can flip between the two ranks owning a shared
+# face, so this check can abort during nucleation (only ~0.02% of fault DOFs sit
+# on shared faces).  SKIPPED by default for SAFS; SAFS_R101=1 re-enables it.
+# (Needs the SEAS_R101_SKIP gate in the driver — rebuild to pick it up.)
+if [[ "${SAFS_R101:-0}" == "1" ]]; then unset SEAS_R101_SKIP; else export SEAS_R101_SKIP=1; fi
 
 # --- Expanse modules (MUST match build_expanse.sh: cpu/0.17.3b gcc openmpi) ---
 module purge

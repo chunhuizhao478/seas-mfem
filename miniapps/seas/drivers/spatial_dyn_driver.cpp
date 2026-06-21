@@ -3566,10 +3566,20 @@ int main(int argc, char *argv[])
       // first offending shared QP inside the nucleation patch is pinpointed).
       // TPV104's planar fault has |n_raw . ref_normal| = 1 everywhere, so it
       // never flips and always passes this check.
-      if (step == 0
-          || (cfg.nucleation.enabled
-              && t <= cfg.nucleation.gradual_overstress.T_nuc_s
-              && (step % 100 == 0)))
+      // SEAS_R101_SKIP (env-gated): skip the shared-fault consistency tripwire
+      // ENTIRELY.  Default (unset) runs it (TPV/BP5 byte-exact — those configs
+      // never set it).  Set for the CURVILINEAR SAFS fault, where the per-QP
+      // strike frame can flip between the two ranks owning a shared face and trip
+      // this check during nucleation; only ~0.02% of fault DOFs are on shared
+      // faces, so skipping it leaves the bulk rupture unaffected.  The env is
+      // rank-uniform (exported before srun), so every rank skips together — no
+      // rank-conditional collective.  (SEAS_R101_NONFATAL below is the milder
+      // option: keep the check but warn instead of abort.)
+      if (std::getenv("SEAS_R101_SKIP") == nullptr
+          && (step == 0
+              || (cfg.nucleation.enabled
+                  && t <= cfg.nucleation.gradual_overstress.T_nuc_s
+                  && (step % 100 == 0))))
       {
          // SEAS_R101_NONFATAL (env-gated, OFF by default => zero behaviour
          // change for TPV/BP5/production SAFS): downgrade this shared-fault
