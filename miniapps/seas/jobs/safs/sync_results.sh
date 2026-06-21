@@ -56,8 +56,8 @@
 # czhao1@login.expanse.sdsc.edu (set up an ssh alias `expanse` in ~/.ssh/config
 # and pass --host expanse to avoid typing the full login).
 #
-# Whitelist (default): fault_surface*.vtu + free_surface*.vtu + *.pvtu + *.pvd
-#                      + spatial_dyn_*.log + SLURM *.out/*.err
+# Whitelist (default): fault_surface*.vtu + proc*.vtu (free-surface pieces) + *.pvtu
+#                      + *.pvd + spatial_dyn_*.log + SLURM *.out/*.err
 # Whitelist (--all):   + *.vtu + *.vtkhdf  (adds the volume field, if any)
 # Never transferred:   cp_checkpoint_r*.txt, .msh meshes, *.sbatch, this script, source.
 # =============================================================================
@@ -171,9 +171,13 @@ fi
 # Build the rsync include set for VTU.  Fault + free surface always; the large
 # volume field only with --all.
 FILE_INCLUDES=(
-    --include='fault_surface*.vtu'   # on-fault VTU (slip/slip_rate/traction/sigma_n)
-    --include='free_surface*.vtu'    # free-surface VTU (ground-motion velocity)
-    --include='*.pvtu'               # per-cycle parallel index, if used
+    --include='fault_surface*.vtu'   # on-fault VTU (custom BP5 writer: slip/slip_rate/traction/sigma_n)
+    --include='proc*.vtu'            # free-surface per-rank VTU DATA pieces -- the MFEM
+                                     #   ParaViewDataCollection layout is <coll>/Cycle*/proc<rank>.vtu;
+                                     #   the .pvd/.pvtu only INDEX these, so they MUST be pulled too.
+                                     #   (SAFS volume is off, so proc*.vtu = free surface only; --all
+                                     #   would also pull volume proc*.vtu.)
+    --include='*.pvtu'               # per-cycle parallel index (Cycle*/data.pvtu)
     --include='*.pvd'                # collection files (fault_surface.pvd, free_surface.pvd; tiny)
 )
 WHAT="on-fault VTU + free-surface VTU + PVD (use --all for volume)"
