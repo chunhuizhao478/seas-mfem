@@ -16,7 +16,10 @@
 //      velocity equals the analytic trace to < 1e-12 at every sub node
 //      (GaussLobatto nodal coincidence; linear field is interpolated exactly);
 //   3. the fixed-dt schedule (ShouldWrite) honours the 0.99 tolerance;
-//   4. Save writes a non-empty .pvd + a non-empty .vtu/.pvtu.
+//   4. Save writes ONE consolidated fs_c<cycle>.vtu + fs.pvd (like the fault
+//      output) — content-checked (8 triangles, 3-component velocity, PVD
+//      reference) with NO per-rank proc*.vtu;
+//   5. the standalone fsvtu:: writer emits correct point/cell counts + values.
 
 #include "mfem.hpp"
 #include "../../io/free_surface_output.hpp"
@@ -24,7 +27,9 @@
 #include <cmath>
 #include <cstdio>
 #include <filesystem>
+#include <fstream>
 #include <iostream>
+#include <sstream>
 #include <string>
 
 #ifdef MFEM_USE_MPI
@@ -65,6 +70,26 @@ Mesh MakeTaggedBox(int kTop)
    return mesh;
 }
 
+// Read an entire file into a string (binary-safe; we only grep the ASCII XML
+// header of the VTU, which precedes any appended binary block).
+std::string Slurp(const std::string &path)
+{
+   std::ifstream f(path, std::ios::binary);
+   std::stringstream ss; ss << f.rdbuf();
+   return ss.str();
+}
+
+// Parse an integer XML attribute value, e.g. AttrInt(s, "NumberOfCells").
+int AttrInt(const std::string &s, const std::string &key)
+{
+   const std::string m = key + "=\"";
+   const auto p = s.find(m);
+   if (p == std::string::npos) { return -1; }
+   const auto q = s.find('"', p + m.size());
+   if (q == std::string::npos) { return -1; }
+   return std::stoi(s.substr(p + m.size(), q - (p + m.size())));
+}
+
 }  // namespace
 
 int main(int argc, char *argv[])
@@ -93,6 +118,43 @@ int main(int argc, char *argv[])
       std::filesystem::create_directories(tmpdir, ec);
    }
    MPI_Barrier(MPI_COMM_WORLD);
+
+   // --- 0. Direct writer (serial pack -> VTU -> value check) --------------
+   // Two triangles with constant per-triangle velocity: verify point/cell
+   // counts, the 3-component PointData velocity (with values), the CellData
+   // mpi_rank, and that BINARY uses the fault-identical raw-appended UInt64.
+   if (rank == 0)
+   {
+      seas::fsvtu::LocalSurfacePack pk;
+      pk.vertices  = { {0,0,0},{1,0,0},{0,1,0}, {1,1,0},{2,1,0},{1,2,0} };
+      pk.velocity  = { {1,2,3},{1,2,3},{1,2,3}, {4,5,6},{4,5,6},{4,5,6} };
+      pk.rank_cell = { 0.0, 0.0 };
+      seas::fsvtu::GatheredSurfacePack gg =
+         seas::fsvtu::GatherSurfacePackToRoot(pk, 0, 1);
+      TEST_ASSERT(gg.ntri() == 2 && gg.vertices.size() == 6,
+                  "serial gather identity: 2 triangles / 6 points");
+
+      const std::string ap = tmpdir + "/direct_ascii.vtu";
+      seas::fsvtu::WriteSurfacePackVTU(ap, gg, VTKFormat::ASCII);
+      const std::string a = Slurp(ap);
+      TEST_ASSERT(AttrInt(a, "NumberOfPoints") == 6, "ASCII VTU NumberOfPoints==6");
+      TEST_ASSERT(AttrInt(a, "NumberOfCells")  == 2, "ASCII VTU NumberOfCells==2");
+      TEST_ASSERT(a.find("Name=\"velocity\"") != std::string::npos &&
+                  a.find("NumberOfComponents=\"3\"") != std::string::npos,
+                  "velocity is a 3-component PointData array");
+      TEST_ASSERT(a.find("4 5 6") != std::string::npos,
+                  "tri-1 velocity value (4 5 6) written to PointData");
+      TEST_ASSERT(a.find("Name=\"mpi_rank\"") != std::string::npos,
+                  "mpi_rank CellData present");
+
+      const std::string bp = tmpdir + "/direct_bin.vtu";
+      seas::fsvtu::WriteSurfacePackVTU(bp, gg, VTKFormat::BINARY);
+      const std::string b = Slurp(bp);
+      TEST_ASSERT(b.find("AppendedData encoding=\"raw\"") != std::string::npos &&
+                  b.find("header_type=\"UInt64\"") != std::string::npos,
+                  "BINARY VTU uses raw-appended UInt64 (fault-identical)");
+      TEST_ASSERT(AttrInt(b, "NumberOfCells") == 2, "BINARY VTU NumberOfCells==2");
+   }
 
    Mesh mesh = MakeTaggedBox(kTop);
    ParMesh pmesh(MPI_COMM_WORLD, mesh);
@@ -176,6 +238,36 @@ int main(int argc, char *argv[])
       }
       TEST_ASSERT(found_pvd, "Save wrote a non-empty .pvd");
       TEST_ASSERT(found_vtu, "Save wrote a non-empty .vtu/.pvtu");
+
+      // 4b. Single CONSOLIDATED VTU (flat fs_c0.vtu), PVD points at it, and
+      //     NO per-rank proc*.vtu — the whole point of this writer.
+      const std::string vtu_c0 = tmpdir + "/fs_c0.vtu";
+      const std::string pvd_c0 = tmpdir + "/fs.pvd";
+      TEST_ASSERT(std::filesystem::exists(vtu_c0),
+                  "single consolidated fs_c0.vtu written (flat, like the fault)");
+      bool any_proc = false;
+      std::error_code ec2;
+      for (const auto &p :
+           std::filesystem::recursive_directory_iterator(tmpdir, ec2))
+      {
+         if (p.is_regular_file() &&
+             p.path().filename().string().rfind("proc", 0) == 0)
+         { any_proc = true; }
+      }
+      TEST_ASSERT(!any_proc, "NO per-rank proc*.vtu emitted (single-file writer)");
+      if (std::filesystem::exists(vtu_c0))
+      {
+         const std::string vc = Slurp(vtu_c0);
+         // 4 top quads x 2 triangles = 8, gathered across all ranks.
+         TEST_ASSERT(AttrInt(vc, "NumberOfCells") == 8,
+                     "fs_c0.vtu has 8 triangles (4 top quads x 2 tris, gathered)");
+         TEST_ASSERT(vc.find("Name=\"velocity\"") != std::string::npos &&
+                     vc.find("NumberOfComponents=\"3\"") != std::string::npos,
+                     "fs_c0.vtu carries a 3-component velocity vector");
+      }
+      const std::string pc = Slurp(pvd_c0);
+      TEST_ASSERT(pc.find("file=\"fs_c0.vtu\"") != std::string::npos,
+                  "fs.pvd references fs_c0.vtu");
    }
 
    // Cleanup (rank 0 only, after all ranks finished reading/writing).

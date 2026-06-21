@@ -13,10 +13,17 @@
 #define MFEM_SEAS_FREE_SURFACE_OUTPUT_HPP
 
 #include "mfem.hpp"
+#include "free_surface_vtu_binary.hpp"  // fsvtu:: single-file VTU writer (Vtu mode)
 #include <string>
 #include <memory>
 #include <filesystem>
 #include <cstring>   // std::memcpy (UpdateVelocity); not relied on transitively
+#include <cstdio>    // std::rename (atomic PVD rewrite, Vtu mode)
+#include <sys/stat.h> // ::mkdir (rank-0 Vtu output dir)
+#include <vector>
+#include <utility>   // std::pair (PVD entries)
+#include <fstream>   // std::ofstream (PVD)
+#include <iomanip>   // std::setprecision (PVD)
 
 #ifdef MFEM_USE_MPI
 
@@ -139,28 +146,38 @@ public:
       // 6. The rank field is static — transfer it once now.
       rank_map_->Transfer(*parent_rank_gf_, *sub_rank_gf_);
 
-      // 7. Data collection on the SUBMESH (stored via the abstract base so both
-      //    back ends share the SetCycle/SetTime/Save call site).
+      // 7. Output back end.
+      //    Mode::Hdf5 — MFEM ParaViewHDFDataCollection (single .vtkhdf/run).
+      //    Mode::Vtu  — our consolidating single-file writer: ONE
+      //                 `<collection>_c<cycle>.vtu` + a cumulative
+      //                 `<collection>.pvd` per cycle (rank-0 gather), exactly
+      //                 like the fault `fault_surface_c<cycle>.vtu` output —
+      //                 NO per-rank `proc*.vtu` explosion.  pv_dc_ stays null in
+      //                 Vtu mode; Save() drives WriteVtuCycle() instead.
+      prefix_          = prefix;
+      collection_name_ = collection_name;
+      rank_            = rank;
+      mode_            = mode;
+#ifdef MFEM_USE_MPI
+      comm_ = parent.GetComm();
+      MPI_Comm_size(comm_, &nranks_);
+#endif
       if (mode == Mode::Hdf5)
       {
 #ifdef MFEM_USE_HDF5
          pv_dc_ = std::make_unique<ParaViewHDFDataCollection>(
                      collection_name, &submesh_);
+         pv_dc_->SetPrefixPath(prefix);
+         pv_dc_->SetDataFormat(VTKFormat::BINARY);
+         pv_dc_->SetHighOrderOutput(true);
+         pv_dc_->SetLevelsOfDetail(order);
+         pv_dc_->RegisterField("velocity", sub_vel_gf_.get());
+         pv_dc_->RegisterField("mpi_rank", sub_rank_gf_.get());
 #else
          MFEM_ABORT("FreeSurfaceOutput Mode::Hdf5 needs MFEM_USE_HDF5=YES");
 #endif
       }
-      else
-      {
-         pv_dc_ = std::make_unique<ParaViewDataCollection>(
-                     collection_name, &submesh_);
-      }
-      pv_dc_->SetPrefixPath(prefix);
-      pv_dc_->SetDataFormat(VTKFormat::BINARY);
-      pv_dc_->SetHighOrderOutput(true);
-      pv_dc_->SetLevelsOfDetail(order);
-      pv_dc_->RegisterField("velocity", sub_vel_gf_.get());
-      pv_dc_->RegisterField("mpi_rank", sub_rank_gf_.get());
+      // Mode::Vtu: no DataCollection — WriteVtuCycle() handles it in Save().
 
       // 8. Schedule state.
       fixed_dt_        = fixed_dt;
@@ -198,13 +215,21 @@ public:
       vel_map_->Transfer(*parent_vel_gf_, *sub_vel_gf_);
    }
 
-   /// Write the current slice at (cycle, time).  Collective (Save is collective).
+   /// Write the current slice at (cycle, time).  Collective (the Vtu-mode gather
+   /// and the Hdf5-mode Save are both MPI-collective — every rank must call).
    void Save(int cycle, real_t time)
    {
-      MFEM_VERIFY(pv_dc_, "FreeSurfaceOutput::Save: null collection");
-      pv_dc_->SetCycle(cycle);
-      pv_dc_->SetTime(time);
-      pv_dc_->Save();
+      if (mode_ == Mode::Vtu)
+      {
+         WriteVtuCycle(cycle, time);     // single <coll>_c<cycle>.vtu + PVD
+      }
+      else
+      {
+         MFEM_VERIFY(pv_dc_, "FreeSurfaceOutput::Save: null collection");
+         pv_dc_->SetCycle(cycle);
+         pv_dc_->SetTime(time);
+         pv_dc_->Save();
+      }
       last_write_time_ = time;
    }
 
@@ -233,6 +258,98 @@ private:
                   "FreeSurfaceOutput: free_surface_attrs must be non-empty "
                   "(caller must resolve + guard before construction)");
       return ParSubMesh::CreateFromBoundary(parent, free_surface_attrs);
+   }
+
+   // ---- Vtu mode (single consolidated VTU + PVD per cycle) -----------------
+
+   // Extract this rank's free-surface triangles + per-vertex velocity from the
+   // submesh and the sliced velocity GF.  Quad faces are split into two
+   // triangles; geometry comes from the element transformation and velocity
+   // from `sub_vel_gf_` sampled at each triangle's corner reference points
+   // (exact for the order-1 fields these runs use; a linear sampling of a
+   // higher-order field otherwise).
+   fsvtu::LocalSurfacePack BuildLocalPack()
+   {
+      fsvtu::LocalSurfacePack p;
+      // Corner reference coords, pre-split into triangles per face geometry.
+      static const double kTri [1][3][2] = { { {0,0}, {1,0}, {0,1} } };
+      static const double kQuad[2][3][2] = { { {0,0}, {1,0}, {1,1} },
+                                             { {0,0}, {1,1}, {0,1} } };
+      const int ne = submesh_.GetNE();
+      for (int e = 0; e < ne; ++e)
+      {
+         const Geometry::Type geom = submesh_.GetElementBaseGeometry(e);
+         int n_sub = 0;
+         const double (*tris)[3][2] = nullptr;
+         if      (geom == Geometry::TRIANGLE) { n_sub = 1; tris = kTri;  }
+         else if (geom == Geometry::SQUARE)   { n_sub = 2; tris = kQuad; }
+         else
+         {
+            MFEM_ABORT("FreeSurfaceOutput Vtu writer: unsupported free-surface "
+                       "face geometry " << geom << " (expected TRIANGLE/SQUARE)");
+         }
+         ElementTransformation *T = submesh_.GetElementTransformation(e);
+         for (int t = 0; t < n_sub; ++t)
+         {
+            for (int j = 0; j < 3; ++j)
+            {
+               IntegrationPoint ip;
+               ip.Set2(tris[t][j][0], tris[t][j][1]);
+               T->SetIntPoint(&ip);
+               Vector x(3); T->Transform(ip, x);
+               Vector v;    sub_vel_gf_->GetVectorValue(e, ip, v);
+               p.vertices.push_back({x(0), x(1), x(2)});
+               p.velocity.push_back({v(0), v(1), v(2)});
+            }
+            p.rank_cell.push_back(static_cast<double>(rank_));
+         }
+      }
+      return p;
+   }
+
+   // Collective: gather the local pack to rank 0, which writes ONE VTU for this
+   // cycle + rewrites the cumulative PVD.  Only rank 0 does I/O after the gather
+   // (no trailing barrier — matches the fault binary path).
+   void WriteVtuCycle(int cycle, real_t time)
+   {
+      fsvtu::LocalSurfacePack pack = BuildLocalPack();
+#ifdef MFEM_USE_MPI
+      fsvtu::GatheredSurfacePack g =
+         fsvtu::GatherSurfacePackToRoot(pack, rank_, nranks_, comm_);
+#else
+      fsvtu::GatheredSurfacePack g =
+         fsvtu::GatherSurfacePackToRoot(pack, rank_, 1);
+#endif
+      if (rank_ == 0)
+      {
+         ::mkdir(prefix_.c_str(), 0755);   // ignore EEXIST
+         const std::string vtu_rel =
+            collection_name_ + "_c" + std::to_string(cycle) + ".vtu";
+         fsvtu::WriteSurfacePackVTU(prefix_ + "/" + vtu_rel, g,
+                                    VTKFormat::BINARY);
+         pvd_entries_.push_back({time, vtu_rel});
+         WritePVD();
+      }
+   }
+
+   // Rewrite the cumulative collection PVD (rank 0).  Atomic via .partial +
+   // rename so a job killed mid-write never leaves a truncated PVD.
+   void WritePVD() const
+   {
+      const std::string pvd_name = prefix_ + "/" + collection_name_ + ".pvd";
+      const std::string tmp_name = pvd_name + ".partial";
+      std::ofstream pvd(tmp_name, std::ios::trunc);
+      pvd << std::setprecision(17);
+      pvd << "<?xml version=\"1.0\"?>\n";
+      pvd << "<VTKFile type=\"Collection\" version=\"0.1\">\n<Collection>\n";
+      for (const auto &e : pvd_entries_)
+      {
+         pvd << "<DataSet timestep=\"" << e.first
+             << "\" file=\"" << e.second << "\"/>\n";
+      }
+      pvd << "</Collection>\n</VTKFile>\n";
+      pvd.close();
+      std::rename(tmp_name.c_str(), pvd_name.c_str());   // atomic on POSIX
    }
 
    // Declaration order == construction order; destruction is reverse order, so
@@ -264,6 +381,17 @@ private:
    real_t    fixed_dt_        = 0.0;
    real_t    last_write_time_ = -1e30;
    long long global_ne_       = 0;
+
+   // Vtu-mode single-file writer state (unused in Hdf5 mode).
+   Mode        mode_ = Mode::Vtu;
+   std::string prefix_;
+   std::string collection_name_;
+   int         rank_   = 0;
+#ifdef MFEM_USE_MPI
+   MPI_Comm    comm_   = MPI_COMM_NULL;
+   int         nranks_ = 1;
+#endif
+   std::vector<std::pair<real_t, std::string>> pvd_entries_;
 };
 
 } // namespace seas
