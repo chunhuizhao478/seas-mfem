@@ -601,7 +601,17 @@ real_t PrintDerivedAndCheck(
                  "delta_tau_*_pa or reduce mu_s in the nucleation patch.";
             fail(m.str());
          }
-         // (d) STRESS-DROP: positive dynamic stress drop everywhere in-patch.
+         // (d) STRESS-DROP: positive dynamic stress drop in-patch.
+         //     CONSTANT (homogeneous) stress -> HARD gate (its original purpose,
+         //     commit 8449c46 / test T-D09: catch mu_d so high the whole patch
+         //     re-locks).  HETEROGENEOUS sidecar stress (e.g. the CSM field on a
+         //     real fault) -> WARNING only: `inpatch_dyn_ratio_min` is a per-DOF
+         //     MINIMUM over the full 3-radius patch, which is dominated by local
+         //     low-stress pockets / patch-edge DOFs where a negative drop is
+         //     PHYSICALLY NORMAL.  The rupture nucleates from the overstressed
+         //     core (the TRIGGER gate (c) above) and need not have positive drop
+         //     at every in-patch DOF, so a whole-patch minimum is not a valid
+         //     go/no-go for heterogeneous stress.
          if (inpatch_dyn_ratio_min <= 1.0)
          {
             std::ostringstream m;
@@ -610,7 +620,20 @@ real_t PrintDerivedAndCheck(
                  "(tau_pre <= mu_d*sigma_n_eff somewhere in the nucleation "
                  "patch), so the rupture re-locks once the forcing ends.  "
                  "Lower mu_d or raise tau_pre in the nucleation patch.";
-            fail(m.str());
+            if (stress_const)
+            {
+               fail(m.str());
+            }
+            else if (rank == 0)
+            {
+               out << "[derived] WARNING (heterogeneous sidecar stress — gate (d) "
+                      "advisory, not enforced): " << m.str()
+                   << "  The minimum is over the FULL 3-radius patch; with "
+                      "spatially-varying CSM stress, local low-stress pockets "
+                      "re-lock while the rupture nucleates from the overstressed "
+                      "core (the TRIGGER check above).  VERIFY the run: V_max "
+                      "should grow through nucleation/breakout.\n";
+            }
          }
          // LOCKED: warn (never abort) if the patch is already at static yield.
          if (inpatch_static_ratio_max >= 1.0 && rank == 0)
@@ -645,9 +668,12 @@ real_t PrintDerivedAndCheck(
    // PASS iff the background is subcritical AND (no nuc, OR all barriers,
    // OR the nucleation is well-posed: triggers AND has a positive dynamic
    // stress drop).  The LOCKED check is warn-only, so it does not gate PASS.
+   // For sidecar (heterogeneous) stress the whole-patch positive-drop
+   // requirement is advisory (see gate (d)) and does NOT gate PASS — the
+   // governing nucleation criterion there is the overstressed-core TRIGGER.
    const bool nuc_well_posed = !nuc_patch_empty
                                && overshoot_best >= 0.0
-                               && inpatch_dyn_ratio_min > 1.0;
+                               && (inpatch_dyn_ratio_min > 1.0 || !stress_const);
    // A [nucleation] config needs a SUBcritical background (outside_max < 1); a
    // static-overstress config (no [nucleation] block, e.g. TPV205) instead
    // needs a SUPERcritical DOF (outside_max >= 1) to nucleate at all (gate e

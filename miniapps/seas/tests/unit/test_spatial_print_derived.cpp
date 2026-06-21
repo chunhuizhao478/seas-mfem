@@ -402,6 +402,45 @@ static void T_D10_insufficient_trigger_caught()
 }
 
 // =====================================================================
+// T-D12: HETEROGENEOUS sidecar stress does NOT hard-abort on a negative
+//        in-patch dynamic stress drop — gate (d) is advisory there (the
+//        per-DOF minimum over the full 3-radius patch is dominated by local
+//        low-stress pockets that are physically normal for a CSM field).
+//        Same prestress/overstress as T-D09 (dyn ratio 0.909 < 1) BUT
+//        StressSourceKind::SidecarHDF5 and abort_on_failure = TRUE (the
+//        production default): the run must NOT MFEM_ABORT, must print the
+//        sidecar WARNING, and must still PASS (the overstressed-core TRIGGER
+//        governs nucleation, not the whole-patch minimum).
+// =====================================================================
+static void T_D12_sidecar_negative_drop_is_warning()
+{
+   std::cout << "\n[T-D12] heterogeneous sidecar stress: negative in-patch "
+                "drop is a WARNING (not abort) and still PASSes\n";
+   StressSpec s; s.kind = StressSourceKind::SidecarHDF5;
+   GradualOverstressSpec gspec;
+   gspec.radius_dip_m = gspec.radius_strike_m = 1000.0;
+   gspec.delta_tau_strike_pa = 25.0e6;
+   gspec.T_nuc_s = 1.0;
+   std::string captured;
+   // abort_on_failure defaults to TRUE (production mode): had the sidecar path
+   // wrongly aborted, this RunPrinter call would MFEM_ABORT and crash the test.
+   (void)RunPrinter(s, /*mu_s=*/0.65, /*mu_d=*/0.50, /*d_c=*/1.0,
+                    /*sigma_n=*/71.5e6, /*tau_dip=*/0.0,
+                    /*tau_strike=*/32.5e6,
+                    /*nuc_enabled=*/true, gspec,
+                    /*mu_bulk=*/32.0e9, captured);
+   TEST_ASSERT(captured.find("heterogeneous sidecar stress") != std::string::npos,
+               "sidecar stress-drop downgraded to a WARNING");
+   TEST_ASSERT(captured.find("NEGATIVE dynamic stress drop") != std::string::npos,
+               "the underlying diagnostic is still printed");
+   TEST_ASSERT(captured.find("gate downgraded via") == std::string::npos,
+               "NOT the warn-only env path — this is the sidecar-specific branch");
+   TEST_ASSERT(captured.find("PASS: initial conditions are well-posed")
+               != std::string::npos,
+               "sidecar config with an overstressed core still PASSes");
+}
+
+// =====================================================================
 // RATE-AND-STATE overload (PrintDerivedAndCheckRS) — PLAN DEVIATION.
 // The Phase-3 plan does not spec an RS --print-derived path; the RS
 // overload is added so the SAFS-RS sbatch (which passes --print-derived)
@@ -817,6 +856,7 @@ int main(int argc, char** argv)
    T_D08_overshoot_uses_initiation_criterion();
    T_D09_negative_stress_drop_caught();
    T_D10_insufficient_trigger_caught();
+   T_D12_sidecar_negative_drop_is_warning();
    T_RS01_steady_state_friction();
    T_RS02_nucleation_length();
    T_RS03_all_velocity_strengthening();
