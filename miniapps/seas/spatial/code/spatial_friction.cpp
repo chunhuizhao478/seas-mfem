@@ -9,6 +9,15 @@
 
 #include "spatial_friction.hpp"
 
+// Phase 1 (QD): the full definition of `mfem::seas::SolverType` (forward-
+// declared in spatial_friction.hpp) is needed here to define
+// ParseQDSolverType.  Included ONLY in this .cpp — never the header — so the
+// heavy elasticity-operator include does not propagate to the many TUs that
+// include spatial_friction.hpp (incl. spatial_dyn_driver).  Read-only use of
+// the SolverType enum; no ODR-use of any elasticity-operator symbol, so the
+// minimal link set (spatial_friction.o + MFEM_LIBS) is preserved.
+#include "../../domain/elasticity_operator.hpp"
+
 #include <algorithm>
 #include <cctype>
 #include <cmath>
@@ -285,6 +294,24 @@ real_t toml_real(const toml::value& tbl, const std::string& key,
    {
       return static_cast<real_t>(v.as_integer());
    }
+   MFEM_ABORT("TOML key '" << key << "' must be a number (float or int)");
+   return default_val;
+}
+
+// Like toml_real but returns/keeps `double` regardless of MFEM's real_t.
+// Used for the QD [time] knobs whose struct fields are `double` ON PURPOSE
+// (rk45_rtol=1e-50 underflows single precision); routing them through
+// toml_real would narrow the `double` default through a `real_t` parameter
+// and, on a single-precision build, underflow it to 0 before it reached the
+// field — tripping the rk45_rtol>0 guard for every config (R-101).  Accepts
+// both float and int literals, mirroring toml_real.
+double toml_double(const toml::value& tbl, const std::string& key,
+                   double default_val)
+{
+   if (!tbl.contains(key)) { return default_val; }
+   const auto& v = tbl.at(key);
+   if (v.is_floating()) { return v.as_floating(); }
+   if (v.is_integer())  { return static_cast<double>(v.as_integer()); }
    MFEM_ABORT("TOML key '" << key << "' must be a number (float or int)");
    return default_val;
 }
@@ -652,6 +679,8 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
    out.Dc_default      = toml_real(rs_tbl, "Dc_default",      0.004);
    out.V_init_default  = toml_real(rs_tbl, "V_init_default",  1.0e-9);
    out.sigma_n_default = toml_real(rs_tbl, "sigma_n_default", 50.0e6);
+   // QD Phase 7 (R-007): BP5-native per-DOF rate-state fill (bypasses resolver).
+   out.bp5_analytic    = toml_bool(rs_tbl, "bp5_analytic",    false);
 
    // Phase 6 req 4: state-evolution selector + SRW scalars.  Default
    // "aging_law" keeps existing RS configs byte-identical.
@@ -912,6 +941,8 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                   "\"constant_tensor\", \"sidecar_hdf5\", "
                   "\"fault_local_prestress\", or \"depth_proportional\"");
       cfg.stress.kind = parse_stress_kind(toml_str(s, "kind", "constant_tensor"));
+      // QD-only (R-002): BP5-analytic per-DOF prestress flag (no enum change).
+      cfg.stress.bp5_analytic = toml_bool(s, "bp5_analytic", false);
 
       const bool has_sxx = s.contains("sigma_xx_pa");
       const bool has_syy = s.contains("sigma_yy_pa");
@@ -928,10 +959,14 @@ SpatialFrictionConfig parse_root(const toml::value& root)
 
       if (cfg.stress.kind == StressSourceKind::ConstantTensor)
       {
-         MFEM_VERIFY(has_sxx && has_syy && has_szz
-                     && has_sxy && has_syz && has_sxz,
+         // bp5_analytic builds its own per-DOF Cauchy tensor from bp5_params
+         // (tau0_vec + effective sigma_n) in the driver; the six sigma_*_pa
+         // keys are provably unused on that path, so do not require them.
+         MFEM_VERIFY(cfg.stress.bp5_analytic
+                     || (has_sxx && has_syy && has_szz
+                         && has_sxy && has_syz && has_sxz),
                      "[stress] kind=\"constant_tensor\" requires all six "
-                     "sigma_*_pa keys to be present");
+                     "sigma_*_pa keys to be present (unless bp5_analytic=true)");
          MFEM_VERIFY(!has_path,
                      "[stress] kind=\"constant_tensor\" must NOT set "
                      "sidecar_path (it is for kind=\"sidecar_hdf5\" only)");
@@ -1158,6 +1193,19 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.time.t_initial  = toml_real        (t, "t_initial",  0.0);
       cfg.time.dt_initial = parse_dt_initial (t);
       cfg.time.dt_max     = toml_time_seconds(t, "dt_max",     0.1);
+
+      // Phase 1 (QD) knobs — read only by the spatial_seas (quasi-dynamic)
+      // driver; absent keys keep the struct defaults.  Plain numbers (no
+      // unit-string parsing) per the plan: dt_init [s], dt_max_years [yr],
+      // plate_rate_vp [m/s], rk45_{atol,rtol}; use_petsc_ts bool.  Read via
+      // toml_double (NOT toml_real) so the double defaults survive on a
+      // single-precision MFEM build (R-101 — rk45_rtol=1e-50 < float min).
+      cfg.time.rk45_atol     = toml_double(t, "rk45_atol",     cfg.time.rk45_atol);
+      cfg.time.rk45_rtol     = toml_double(t, "rk45_rtol",     cfg.time.rk45_rtol);
+      cfg.time.dt_init       = toml_double(t, "dt_init",       cfg.time.dt_init);
+      cfg.time.dt_max_years  = toml_double(t, "dt_max_years",  cfg.time.dt_max_years);
+      cfg.time.plate_rate_vp = toml_double(t, "plate_rate_vp", cfg.time.plate_rate_vp);
+      cfg.time.use_petsc_ts  = toml_bool  (t, "use_petsc_ts",  cfg.time.use_petsc_ts);
    }
    MFEM_VERIFY(cfg.time.tfinal > 0.0,
                "[time].tfinal must be > 0; got " << cfg.time.tfinal);
@@ -1168,6 +1216,55 @@ SpatialFrictionConfig parse_root(const toml::value& root)
    // (dt_initial is fully validated inside parse_dt_initial — it is
    // either > 0 or exactly the -1 "auto" sentinel set by the literal
    // string "auto".  Literal numeric -1.0 is rejected per R-202.)
+   // QD knob validation (Phase 1).  dt_init / plate_rate_vp use a <0
+   // "derive at runtime" sentinel, so only their POSITIVE range matters;
+   // the tolerances and dt ceiling must be strictly positive.
+   MFEM_VERIFY(cfg.time.rk45_atol > 0.0,
+               "[time].rk45_atol must be > 0; got " << cfg.time.rk45_atol);
+   MFEM_VERIFY(cfg.time.rk45_rtol > 0.0,
+               "[time].rk45_rtol must be > 0; got " << cfg.time.rk45_rtol);
+   MFEM_VERIFY(cfg.time.dt_max_years > 0.0,
+               "[time].dt_max_years must be > 0; got " << cfg.time.dt_max_years);
+
+   // Phase 1 (QD): optional [solver] block (linear solver + AMG/KSP knobs).
+   // Read only by the spatial_seas (quasi-dynamic) driver; a missing block
+   // keeps the SolverSpec defaults (type="cg_amg").  Additive — the dynamic
+   // driver does not read [solver].
+   if (root.contains("solver"))
+   {
+      const auto& s = root.at("solver");
+      cfg.solver.type                   = toml_str (s, "type",                   cfg.solver.type);
+      cfg.solver.ksp_rtol               = toml_real(s, "ksp_rtol",               cfg.solver.ksp_rtol);
+      cfg.solver.ksp_atol               = toml_real(s, "ksp_atol",               cfg.solver.ksp_atol);
+      cfg.solver.ksp_maxit              = toml_int (s, "ksp_maxit",              cfg.solver.ksp_maxit);
+      cfg.solver.amg_elasticity_options = toml_bool(s, "amg_elasticity_options", cfg.solver.amg_elasticity_options);
+      cfg.solver.amg_relax_type         = toml_int (s, "amg_relax_type",         cfg.solver.amg_relax_type);
+      cfg.solver.amg_aggressive_levels  = toml_int (s, "amg_aggressive_levels",  cfg.solver.amg_aggressive_levels);
+      cfg.solver.amg_print_level        = toml_int (s, "amg_print_level",        cfg.solver.amg_print_level);
+      cfg.solver.blr_tol                = toml_real(s, "blr_tol",                cfg.solver.blr_tol);
+      cfg.solver.residual_check         = toml_bool(s, "residual_check",         cfg.solver.residual_check);
+   }
+   // Validate solver.type at parse (Edge Case: unknown ⇒ hard error, never
+   // silently defaulted).  ParseQDSolverType aborts on an unrecognized value;
+   // this runs even when [solver] is absent so the default "cg_amg" is
+   // confirmed valid.
+   //
+   // R-102: this is INTENTIONAL shared-parser validation.  It executes for
+   // every spatial config, including the dynamic-rupture driver's, but is
+   // dyn-safe: no spatial-schema config carries a [solver] table (the BP5
+   // [solver] tables are the seas_driver schema, parsed elsewhere, and use
+   // the key `solver_type`, not `type`), so cfg.solver.type is always the
+   // default "cg_amg" there and never aborts.  Kept in the parser (not the QD
+   // driver) because the plan's Edge Case mandates the hard error AT PARSE.
+   (void)ParseQDSolverType(cfg.solver.type);
+   MFEM_VERIFY(cfg.solver.ksp_rtol >= 0.0,
+               "[solver].ksp_rtol must be >= 0; got " << cfg.solver.ksp_rtol);
+   MFEM_VERIFY(cfg.solver.ksp_atol >= 0.0,
+               "[solver].ksp_atol must be >= 0; got " << cfg.solver.ksp_atol);
+   MFEM_VERIFY(cfg.solver.ksp_maxit >= 1,
+               "[solver].ksp_maxit must be >= 1; got " << cfg.solver.ksp_maxit);
+   MFEM_VERIFY(cfg.solver.blr_tol >= 0.0,
+               "[solver].blr_tol must be >= 0; got " << cfg.solver.blr_tol);
 
    if (root.contains("output"))
    {
@@ -1188,6 +1285,7 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.output.paraview_fault_zfp_tol  = toml_real(o, "paraview_fault_zfp_tol",  1e-12);
       cfg.output.max_snapshots           = toml_int (o, "max_snapshots",           5000);
       cfg.output.checkpoint_every_steps  = toml_int (o, "checkpoint_every_steps",  10000);
+      cfg.output.bp5_stations            = toml_bool(o, "bp5_stations",            false);
 
       // Parity Phase 2: 9 new fields (master gate + every-step + legacy
       // ASCII + per-collection deflate levels + regime-adaptive cadences).
@@ -1490,6 +1588,17 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.boundary.fault_attr = toml_int(b, "fault_attr", -1);
       toml_int_array(b, "natural_attrs",   cfg.boundary.natural_attrs);
       toml_int_array(b, "absorbing_attrs", cfg.boundary.absorbing_attrs);
+      // Phase 2 (QD): far-field Dirichlet plate-loading walls (optional;
+      // read only by the quasi-dynamic driver).  Additive — absent key ⇒
+      // empty, so dynamic-rupture configs are unaffected.
+      toml_int_array(b, "dirichlet_attrs", cfg.boundary.dirichlet_attrs);
+      // QD far-field plate-loading function (quasi-dynamic driver only).
+      cfg.boundary.plate_loading = toml_str(b, "plate_loading", "bp5");
+      MFEM_VERIFY(cfg.boundary.plate_loading == "bp5" ||
+                  cfg.boundary.plate_loading == "saf_recenter_y",
+                  "[boundary].plate_loading must be \"bp5\" or "
+                  "\"saf_recenter_y\"; got '"
+                  << cfg.boundary.plate_loading << "'");
 
       // req-7 guards.  fault_attr must be a positive mesh attribute (0 is
       // the "interior" sentinel in MFEM; a missing/negative fault_attr would
@@ -1507,6 +1616,7 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       };
       require_positive(cfg.boundary.natural_attrs,   "natural_attrs");
       require_positive(cfg.boundary.absorbing_attrs, "absorbing_attrs");
+      require_positive(cfg.boundary.dirichlet_attrs, "dirichlet_attrs");
 
       // Disjointness: an attribute assigned to two different roles (e.g. both
       // natural and absorbing, or fault and natural) is an unresolvable BC
@@ -1514,13 +1624,24 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       auto has = [](const std::vector<int>& v, int a)
       { return std::find(v.begin(), v.end(), a) != v.end(); };
       MFEM_VERIFY(!has(cfg.boundary.natural_attrs,   cfg.boundary.fault_attr)
-                  && !has(cfg.boundary.absorbing_attrs, cfg.boundary.fault_attr),
+                  && !has(cfg.boundary.absorbing_attrs, cfg.boundary.fault_attr)
+                  && !has(cfg.boundary.dirichlet_attrs, cfg.boundary.fault_attr),
                   "[boundary].fault_attr (" << cfg.boundary.fault_attr
-                  << ") must not also appear in natural_attrs/absorbing_attrs");
+                  << ") must not also appear in natural_attrs/absorbing_attrs/"
+                  "dirichlet_attrs");
       for (int a : cfg.boundary.natural_attrs)
       {
          MFEM_VERIFY(!has(cfg.boundary.absorbing_attrs, a),
                      "[boundary] natural_attrs and absorbing_attrs must be "
+                     "disjoint; attribute " << a << " appears in both");
+         MFEM_VERIFY(!has(cfg.boundary.dirichlet_attrs, a),
+                     "[boundary] natural_attrs and dirichlet_attrs must be "
+                     "disjoint; attribute " << a << " appears in both");
+      }
+      for (int a : cfg.boundary.absorbing_attrs)
+      {
+         MFEM_VERIFY(!has(cfg.boundary.dirichlet_attrs, a),
+                     "[boundary] absorbing_attrs and dirichlet_attrs must be "
                      "disjoint; attribute " << a << " appears in both");
       }
    }
@@ -1728,6 +1849,28 @@ SpatialFrictionConfig ParseSpatialFrictionConfigString(const std::string& toml_t
    MFEM_ABORT("ParseSpatialFrictionConfigString: SEAS_USE_TOML not defined.");
    return {};
 #endif
+}
+
+// =====================================================================
+//  ParseQDSolverType  (Phase 1, QD)
+// =====================================================================
+// Maps a [solver].type string to mfem::seas::SolverType.  No TOML needed,
+// so it is defined unconditionally (outside the SEAS_USE_TOML guard).  An
+// unrecognized value is a hard error — the QD config schema must never
+// silently fall back to a solver the user did not request.
+mfem::seas::SolverType ParseQDSolverType(const std::string& type)
+{
+   if (type == "cg_amg")    { return SolverType::CG_AMG; }
+   if (type == "gmres_amg") { return SolverType::GMRES_AMG; }
+   if (type == "gmres_ilu") { return SolverType::GMRES_BlockILU; }
+   if (type == "mumps")     { return SolverType::MUMPS; }
+   if (type == "mumps_blr") { return SolverType::MUMPS_BLR; }
+   if (type == "superlu")   { return SolverType::SUPERLU; }
+   if (type == "strumpack") { return SolverType::STRUMPACK; }
+   MFEM_ABORT("ParseQDSolverType: unknown [solver].type '" << type
+              << "'.  Accepted: cg_amg | gmres_amg | gmres_ilu | mumps | "
+                 "mumps_blr | superlu | strumpack.");
+   return SolverType::CG_AMG;  // unreachable (MFEM_ABORT does not return)
 }
 
 // =====================================================================

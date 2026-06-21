@@ -1,0 +1,85 @@
+# =========================================================================
+# Phase 7 — BP5 benchmark parity gate (spatial_seas QD driver, MUMPS variant).
+# =========================================================================
+# Frontera-only (project memory: no local production-mesh runs).  Encodes the
+# BP5 problem so spatial_seas_driver reproduces seas_driver.cpp station output
+# to the golden tolerance, proving the spatial→QD wiring is physically correct.
+#
+# BP5-native sourcing (R-007): the rate-state a/Dc/eta/V_init/sigma_n AND the
+# prestress tau_pre/sigma_n are filled DIRECTLY from bp5_params (a_of_x2_x3,
+# Dc_of_x2_x3, tau0_vec, V_init_vec) at the owned fault coords — EXACTLY
+# mirroring FaultGeometry::ComputeBP5Params (the golden path).  The spatial-rule
+# resolver cannot express BP5's a(x2,x3) smooth transition, so BOTH flags are set:
+#   [friction.rate_state].bp5_analytic = true   (a/Dc/eta/V_init/sigma_n)
+#   [stress].bp5_analytic              = true   (tau_pre/sigma_n)
+#
+# Run (Frontera, 50-step parity window):
+#   ibrun ./seas_spatial_seas_driver --config <this> --max-steps 50
+# then diff the station traces vs the seas_driver golden with
+#   tests/verification/compare_bp5_parity.py  (see that script).
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "BP5 parity gate (MUMPS): bp5_analytic a + prestress, BP5 mesh."
+
+[material_constant_fallback]
+lambda = 32.038120320e9   # Pa  (BP5: lambda = mu => nu = 0.25)
+mu     = 32.038120320e9   # Pa
+rho    = 2670.0           # kg/m^3
+
+[mesh]
+path  = "bp5/mesh/reference/bp5_tandem_exact_meters.msh"
+order = 1
+
+[velocity]
+use_sidecar = false       # constant BP5 material
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[stress]
+# bp5_analytic overrides kind (kept constant_tensor to avoid the override
+# warning); fills per-DOF tau_pre/sigma_n from bp5_params::tau0_vec.
+kind          = "constant_tensor"
+bp5_analytic  = true
+
+[numerics]
+# (none)
+
+[time]
+tfinal        = 3.15e11   # large; the --max-steps 50 cap stops the parity run
+rk45_atol     = 1.0e-7    # BP5 (CLAUDE.md)
+rk45_rtol     = 1.0e-50
+dt_init       = -1.0      # <0 ⇒ derive
+dt_max_years  = 0.1       # BP5 (0.1 yr ceiling)
+plate_rate_vp = 1.0e-9    # BP5 Vp (Dirichlet plate loading — matches seas_driver)
+
+[solver]
+type            = "mumps"   # exact direct cross-check (golden solver)
+residual_check  = true
+
+[output]
+output_dir   = "."
+bp5_stations = true        # 10 BP5 SCEC station traces + global V_max probe
+
+[boundary]
+fault_attr      = 3        # bp5_tandem_exact: 1=Natural, 3=Fault, 5=Dirichlet
+natural_attrs   = [1]
+dirichlet_attrs = [5]
+
+[friction.rate_state]
+# bp5_analytic=true ⇒ a/Dc/eta/V_init/sigma_n come from bp5_params (the values
+# below are the BP5 scalars, documented; a_default/Dc_default are unused because
+# a(x2,x3)/Dc(x2,x3) are heterogeneous).
+bp5_analytic    = true
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+eta             = "auto"   # 0.5*sqrt(mu*rho) == bp5_params.eta()
+a_default       = 0.004    # BP5 a0 (VW core); spatial a from bp5_params
+b_default       = 0.03     # BP5 b
+Dc_default      = 0.14     # BP5 L0; spatial Dc from bp5_params (0.13 nucleation)
+V_init_default  = 1.0e-9   # BP5 V_init
+sigma_n_default = 25.0e6   # BP5 sigma_n

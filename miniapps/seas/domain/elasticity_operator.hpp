@@ -36,6 +36,7 @@
 #include <fstream>
 #include <iomanip>
 #include <sstream>
+#include <vector>
 
 namespace mfem
 {
@@ -63,6 +64,58 @@ enum class BCMode
    XOnly,
    /// Legacy: Dirichlet on all attrs 1-6 (previous wrong implementation)
    AllDirichlet
+};
+
+/// @brief Material-parameter coefficient for the elasticity operator (Phase 2b).
+///
+/// Adapter that is either a CONSTANT (homogeneous path — bit-for-bit identical
+/// to the previous `ConstantCoefficient` member: `Eval` ignores `T`/`ip` and
+/// returns the stored constant) or a non-owning DELEGATE to an external
+/// `mfem::Coefficient` (heterogeneous path — depth-profile or velocity-sidecar
+/// λ,μ, evaluated per quadrature point).  Because it IS-A `mfem::Coefficient`,
+/// it is passed by reference into the DG elasticity integrators unchanged
+/// (their signatures already take `Coefficient&`), so the constant assembly
+/// path is untouched.
+///
+/// The external coefficient (when set) is NON-OWNING and MUST outlive the
+/// operator — own it in the driver scope (PLAN §Phase 2b Edge Cases).
+class MaterialCoefficient : public Coefficient
+{
+public:
+   MaterialCoefficient(real_t constant = 0.0) : const_(constant) {}
+
+   /// Homogeneous: `Eval` returns `c` regardless of (T, ip).
+   void SetConstant(real_t c) { external_ = nullptr; const_ = c; }
+
+   /// Heterogeneous: `Eval` delegates to `c` (non-owning; must outlive this).
+   void SetExternal(Coefficient *c)
+   {
+      MFEM_VERIFY(c != nullptr,
+                  "MaterialCoefficient::SetExternal: null coefficient");
+      external_ = c;
+   }
+
+   /// True when in constant (homogeneous) mode.
+   bool IsConstant() const { return external_ == nullptr; }
+
+   /// Forward time to the external coefficient so a (hypothetical)
+   /// time-dependent λ,μ stays in sync (material is time-independent today;
+   /// defensive completeness of the delegation — R-405).
+   void SetTime(real_t t) override
+   {
+      Coefficient::SetTime(t);
+      if (external_) { external_->SetTime(t); }
+   }
+
+   real_t Eval(ElementTransformation &T,
+               const IntegrationPoint &ip) override
+   {
+      return external_ ? external_->Eval(T, ip) : const_;
+   }
+
+private:
+   Coefficient *external_ = nullptr;   // non-owning; nullptr ⇒ constant mode
+   real_t       const_    = 0.0;
 };
 
 /// @brief DG Elasticity domain operator for 3D vector elasticity (BP5)
@@ -123,14 +176,99 @@ public:
         face_basis_type_(config.face_basis_type),
         penalty_factor_(config.penalty_factor),
         blr_tol_(config.blr_tol),
+        ksp_rtol_(config.ksp_rtol), ksp_atol_(config.ksp_atol),
+        ksp_maxit_(config.ksp_maxit), amg_print_level_(config.amg_print_level),
+        amg_elasticity_options_(config.amg_elasticity_options),
+        amg_relax_type_(config.amg_relax_type),
+        amg_aggressive_levels_(config.amg_aggressive_levels),
         match_quad_order_(config.match_quad_order)
    {
       const auto *le = dynamic_cast<const LinearElastic *>(model_);
       MFEM_VERIFY(le, "ElasticityDomainOperator currently requires LinearElastic");
       lambda_val_ = le->GetLambda();
       mu_val_ = le->GetMu();
-      lambda_coeff_.constant = lambda_val_;
-      mu_coeff_.constant = mu_val_;
+      lambda_coeff_.SetConstant(lambda_val_);
+      mu_coeff_.SetConstant(mu_val_);
+
+      InitOperator();
+   }
+
+   /// @brief Construct with spatially-varying λ,μ Coefficients (Phase 2b).
+   ///
+   /// **IP method only** (`method == DGMethod::BR2` aborts — see the guard in
+   /// the body): on the IP path `lambda_c` / `mu_c` are evaluated at each
+   /// quadrature point, per element side, by the DG integrators (volume +
+   /// slip/Dirichlet RHS + traction recovery), so heterogeneous material is
+   /// per-qp accurate.  The BR2 path's hand-rolled traction/RHS assembly is not
+   /// yet generalized to per-qp coefficients (further work).  Both coefficients
+   /// are NON-OWNING and MUST outlive this operator (own them in the driver
+   /// scope — PLAN §Phase 2b Edge Cases).  Shares the SAME assembly path as the
+   /// constant ctors (the constant ctors wrap λ,μ in `MaterialCoefficient`
+   /// constant mode; this one delegates to the external coefficients) — no
+   /// duplicated assembly (PLAN §Phase 2b Detailed Req. 1).
+   ///
+   /// `GetLambda()` / `GetShearModulus()` / `GetModel()` are INVALID in this
+   /// mode (scalar λ,μ are undefined for heterogeneous material): the scalar
+   /// getters return NaN sentinels (archived heterogeneous_material_plan.md
+   /// R-002), and `model_` is null.  The QD friction path seeds η from the
+   /// resolver's `MaterialField`, not these getters (R-003).
+   ElasticityDomainOperator(MeshType &mesh, int order,
+                             Coefficient &lambda_c, Coefficient &mu_c,
+                             real_t Vp, real_t Wf, real_t lf,
+                             const BoundaryConfig &bdr_config,
+                             DGMethod method = DGMethod::IP,
+                             SolverType solver_type = SolverType::MUMPS_BLR,
+                             const DomainConfig &config = {})
+      : mesh_(mesh), order_(order),
+        model_(nullptr),
+        bdr_config_(bdr_config),
+        Vp_(Vp), Wf_(Wf), lf_(lf),
+        method_(method), solver_type_(solver_type),
+        bc_mode_(BCMode::FarField),
+        check_residual_(config.check_residual),
+        mass_inv_computed_(false),
+        fault_depths_computed_(false),
+        fault_coords_computed_(false),
+        face_basis_type_(config.face_basis_type),
+        penalty_factor_(config.penalty_factor),
+        blr_tol_(config.blr_tol),
+        ksp_rtol_(config.ksp_rtol), ksp_atol_(config.ksp_atol),
+        ksp_maxit_(config.ksp_maxit), amg_print_level_(config.amg_print_level),
+        amg_elasticity_options_(config.amg_elasticity_options),
+        amg_relax_type_(config.amg_relax_type),
+        amg_aggressive_levels_(config.amg_aggressive_levels),
+        match_quad_order_(config.match_quad_order)
+   {
+      // Heterogeneous λ,μ: evaluate the caller-supplied coefficients per
+      // quadrature point (integrators + traction recovery).  Non-owning.
+      lambda_coeff_.SetExternal(&lambda_c);
+      mu_coeff_.SetExternal(&mu_c);
+
+      // Scalar λ,μ are undefined for heterogeneous material → NaN sentinels so
+      // any accidental scalar-getter consumer NaN-propagates rather than
+      // silently using a wrong, location-independent value (R-002 / R-003).
+      lambda_val_ = std::numeric_limits<real_t>::quiet_NaN();
+      mu_val_     = std::numeric_limits<real_t>::quiet_NaN();
+
+      // Phase 2b Stage 1b — heterogeneous material is supported on the IP
+      // method ONLY.  On the IP path every λ,μ use flows through the DG
+      // integrators (ElasticityIntegrator for the volume; the
+      // DGElasticityIPCombinedIntegrator for the slip / Dirichlet RHS and the
+      // traction recovery), which evaluate lambda_coeff_/mu_coeff_ per
+      // quadrature point, per element side — now delegating to the external
+      // coefficients.  The BR2 method instead has hand-rolled scalar
+      // lambda_val_/mu_val_ (NaN here) in AssembleSlipContributionBR2 /
+      // AssembleSlipContributionBR2Shared, the AssembleDirichletLoading BR2
+      // branch, and the ComputeTractionImpl BR2 branch; generalizing those to
+      // per-qp coefficients is left as FURTHER WORK.  Refuse heterogeneous BR2
+      // loudly rather than silently evaluate NaN material.
+      MFEM_VERIFY(method_ == DGMethod::IP,
+                  "ElasticityDomainOperator heterogeneous (Coefficient) ctor: "
+                  "spatially-varying material is only supported with "
+                  "DGMethod::IP (the per-qp integrator path). DGMethod::BR2 "
+                  "heterogeneous support is not yet implemented — its traction/"
+                  "RHS assembly still uses scalar lambda_val_/mu_val_. Use IP, "
+                  "or generalize the BR2 path to per-qp coefficients first.");
 
       InitOperator();
    }
@@ -244,6 +382,8 @@ public:
    MeshType &GetMesh() override { return mesh_; }
    const MeshType &GetMesh() const override { return mesh_; }
 
+   /// Scalar shear modulus. Returns NaN in the heterogeneous (coefficient)
+   /// ctor — use the per-qp coefficient / MaterialField instead (Phase 2b).
    real_t GetShearModulus() const override { return mu_val_; }
 
    int GetNumFaultDOFs() const override { return num_fault_dofs_; }
@@ -265,6 +405,28 @@ public:
                                 Vector &local_data,
                                 int comps_per_dof = 1) const override;
 
+   /// Phase 3 (QD): OWNED-order per-fault-DOF tables for the spatial
+   /// rate-state resolver.  Each walks the SAME faces as GetFaultDOFCoords3D
+   /// (interior faces then shared faces, nbf_per_face_ nodal QPs per face),
+   /// then restricts to the OWNED set via owned_fault_dof_to_local_dof_ — so
+   /// the length is GetNumOwnedFaultDOFs() and the ordering matches
+   /// FaultGeometry's owned i = 0..N-1 (R-002: the existing
+   /// GetFaultDOFCoords3D/GetFaultDOFBasis are LOCAL and must be passed
+   /// through RestrictToOwnedFault before being paired with these).  Additive,
+   /// non-virtual: no existing call site uses them and the DomainOperator base
+   /// interface is unchanged.
+   ///   - GetFaultDOFToElem: Elem1No (the local bulk element) per owned DOF.
+   ///   - GetFaultDOFToAttr: the fault boundary attribute (bdr_config_.fault_attr)
+   ///     per owned DOF — every owned fault DOF lies on the fault, matching the
+   ///     dynamic driver's dof_to_attr convention.
+   ///   - GetFaultDOFIntegrationPoints: the reference IntegrationPoint in
+   ///     Elem1's frame (FTr->GetElement1IntPoint()) at each owned DOF's nodal
+   ///     QP, evaluated with the SAME nodal rule as GetFaultDOFCoords3D.
+   void GetFaultDOFToElem(Array<int> &dof_to_elem) const;
+   void GetFaultDOFToAttr(Array<int> &dof_to_attr) const;
+   void GetFaultDOFIntegrationPoints(
+      std::vector<IntegrationPoint> &dof_ips) const;
+
    const Array<int> &GetFaultDOFs() const override { return fault_dofs_; }
 
    const FaultBasis *GetFaultBasis() const override { return &fault_basis_; }
@@ -276,10 +438,15 @@ public:
    int GetNumOwnedFaultFaces() const { return num_owned_fault_faces_; }
 
    DGMethod GetMethod() const { return method_; }
+   /// Number of stiffness assemblies (== AMG/solver setups).  Stays 1 over an
+   /// N-solve sequence: K and the preconditioner are built once and reused.
+   int NumStiffnessAssemblies() const { return num_stiffness_assemblies_; }
    int GetOrder() const { return order_; }
    real_t GetPlateRate() const { return Vp_; }
    real_t GetFaultDepthLimit() const { return Wf_; }
    real_t GetFaultLength() const { return lf_; }
+   /// Scalar first Lamé parameter. Returns NaN in the heterogeneous
+   /// (coefficient) ctor — use the per-qp coefficient instead (Phase 2b).
    real_t GetLambda() const { return lambda_val_; }
    BCMode GetBCMode() const { return bc_mode_; }
 
@@ -288,7 +455,15 @@ public:
    const FaceQuadrature *GetFaceQuadrature() const { return face_quad_.get(); }
 
    /// Access the constitutive model.
-   const ConstitutiveModel &GetModel() const { return *model_; }
+   /// Aborts in the heterogeneous (Coefficient) ctor mode, where there is no
+   /// scalar ConstitutiveModel (model_ == nullptr) — use the coefficients.
+   const ConstitutiveModel &GetModel() const
+   {
+      MFEM_VERIFY(model_ != nullptr,
+                  "GetModel(): no scalar ConstitutiveModel in the heterogeneous "
+                  "(Coefficient) operator mode — use the per-qp coefficients.");
+      return *model_;
+   }
 
    // Legacy setters (deprecated — use DomainConfig in the new constructor).
    // Kept for backward compatibility with existing drivers/tests.
@@ -397,6 +572,17 @@ private:
    BCMode bc_mode_;  // Legacy — kept for backward compatibility
    bool check_residual_;  // Post-solve residual check
    real_t blr_tol_ = 1e-12;  // MUMPS-BLR factorization tolerance (v48: tightened from 1e-10)
+   // Phase 4: Krylov/AMG knobs for the CG_AMG / GMRES_AMG iterative paths.
+   // In-class defaults reproduce the pre-Phase-4 hardcoded dispatch (so the
+   // legacy scalar ctor, which has no DomainConfig, is unchanged); the
+   // DomainConfig ctors override them from config.
+   real_t ksp_rtol_ = 1e-10;
+   real_t ksp_atol_ = 0.0;
+   int    ksp_maxit_ = 10000;
+   int    amg_print_level_ = 0;
+   bool   amg_elasticity_options_ = true;  // CG_AMG: SetElasticityOptions on/off
+   int    amg_relax_type_ = 8;             // BoomerAMG smoother (l1-sym-GS)
+   int    amg_aggressive_levels_ = 0;      // aggressive coarsening OFF (stagnates DG elasticity)
 
    // Reference normal for skeleton Dirichlet orientation sign.
    // Matches Tandem's ref_normal from bp5.toml (default (0,-1,0) for BP5).
@@ -452,8 +638,10 @@ private:
 
    real_t epsilon_;  // SIPG sign = -1
 
-   // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const)
-   mutable ConstantCoefficient lambda_coeff_, mu_coeff_;
+   // Coefficients (mutable: used in const assembly methods, MFEM Coefficient::Eval is non-const).
+   // MaterialCoefficient (Phase 2b): constant mode for the homogeneous path
+   // (bit-for-bit), external-delegate mode for heterogeneous λ,μ.
+   mutable MaterialCoefficient lambda_coeff_, mu_coeff_;
 
    // FE spaces
    std::unique_ptr<DG_FECollection> fec_;
@@ -466,6 +654,10 @@ private:
 
    // Stiffness matrix
    mutable bool stiffness_assembled_ = false;
+   // Phase 4 (R-402): counts AssembleStiffness runs (== AMG/solver setups).
+   // Must stay 1 over an N-solve sequence (K + preconditioner built once,
+   // guarded by stiffness_assembled_ at the Solve call site).
+   mutable int num_stiffness_assemblies_ = 0;
    mutable std::unique_ptr<BilinFormType> cached_a_;
    mutable OperatorHandle cached_Ah_;
    mutable std::unique_ptr<Solver> cached_prec_;

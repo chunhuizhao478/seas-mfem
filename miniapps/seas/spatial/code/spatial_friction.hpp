@@ -44,6 +44,18 @@ namespace mfem
 {
 namespace seas
 {
+
+// Forward declaration of the elasticity linear-solver-type enum.  The full
+// definition lives in domain/elasticity_operator.hpp (a heavy header).  It is
+// forward-declared here so the QD config parser can expose
+// `ParseQDSolverType` returning `mfem::seas::SolverType` WITHOUT this
+// widely-included config header (also pulled in by spatial_dyn_driver and many
+// tests) dragging in the elasticity operator.  Phase 1 of
+// PLAN_spatial_seas_quasidynamic_driver_2026-05-31.md.  (Scoped enums are
+// int-backed by default, so this matches the `enum class SolverType {…}`
+// definition.)
+enum class SolverType;
+
 namespace spatial
 {
 
@@ -154,8 +166,50 @@ struct TimeSpec
 {
    real_t tfinal     = 12.0;
    real_t t_initial  = 0.0;
-   real_t dt_initial = -1.0;     // -1 sentinel ⇒ "auto"
-   real_t dt_max     = 0.1;
+   real_t dt_initial = -1.0;     // -1 sentinel ⇒ "auto"  (dynamic-rupture driver)
+   real_t dt_max     = 0.1;      // seconds              (dynamic-rupture driver)
+
+   // ---- Quasi-dynamic (spatial_seas) driver knobs (Phase 1). ----------------
+   // These are read ONLY by the QD driver; the dynamic-rupture driver
+   // (spatial_dyn_driver) never reads them, so adding them is additive and
+   // does not change its behavior.  NB on the dt_* overlap with the dynamic
+   // fields above (R-004): QD uses dt_init [s] + dt_max_years [yr]; the
+   // dynamic driver keeps dt_initial [s] + dt_max [s].  `double` (not real_t)
+   // is deliberate — rk45_rtol=1e-50 underflows single precision.
+   double rk45_atol     = 1e-7;   ///< RK45 absolute tolerance
+   double rk45_rtol     = 1e-50;  ///< RK45 relative tolerance (effectively atol-only)
+   double dt_init       = -1.0;   ///< QD initial dt [s]; <0 ⇒ derive 0.01*L_nuc/V_nuc
+   double dt_max_years  = 0.1;    ///< QD dt ceiling [years]
+   double plate_rate_vp = -1.0;   ///< plate-loading rate [m/s]; <0 ⇒ from rate_state
+   bool   use_petsc_ts  = false;  ///< use a PETSc TS integrator instead of RK45
+};
+
+/// Phase 1 (QD): linear-solver + AMG/KSP knobs for the elasticity domain
+/// operator.  Read ONLY by the QD driver (spatial_seas_driver); additive for
+/// the dynamic-rupture driver.  `type` is validated at parse time against the
+/// SolverType enum (unknown ⇒ hard error); `ParseQDSolverType` maps it to the
+/// enum the ElasticityDomainOperator ctor consumes.
+struct SolverSpec
+{
+   std::string type                 = "cg_amg";  ///< cg_amg|gmres_amg|gmres_ilu|mumps|mumps_blr|superlu|strumpack
+   double      ksp_rtol             = 1e-8;      ///< Krylov relative tolerance
+   double      ksp_atol             = 0.0;       ///< Krylov absolute tolerance
+   int         ksp_maxit            = 2000;      ///< Krylov max iterations (DG elasticity + AMG needs ~500/solve)
+   bool        amg_elasticity_options = true;    ///< call AMG SetElasticityOptions
+   // BoomerAMG tuning for the DG matrix (CG_AMG/GMRES_AMG).
+   //   amg_relax_type=8 (l1-symmetric-GS) is fully parallel; the HYPRE default
+   //   hybrid-GS (3) stalls at np>1.  KEEP this.
+   //   amg_aggressive_levels: distance-2 coarsening makes V-cycles cheaper BUT
+   //   the coarse grid cannot represent the near-null-space of the ill-conditioned
+   //   DG-elasticity operator, so CG STAGNATES (~1e-7, never reaching ksp_rtol)
+   //   on a loaded solve -> near-null-space-contaminated solution -> garbage
+   //   traction -> friction NaN.  DEFAULT 0 (correctness).  Only enable (1-2) on
+   //   well-conditioned problems where CG already converges fast.
+   int         amg_relax_type       = 8;         ///< HYPRE relax type (8=l1-sym-GS, 16=Chebyshev, 3=hybrid-GS default, 18=l1-Jacobi)
+   int         amg_aggressive_levels = 0;        ///< aggressive (distance-2) coarsening levels; 0=off (DEFAULT, see note)
+   int         amg_print_level      = 0;         ///< AMG/KSP print verbosity
+   double      blr_tol              = 1e-10;     ///< MUMPS-BLR low-rank tolerance
+   bool        residual_check       = true;      ///< verify convergence (R-006; AMG must check)
 };
 
 struct OutputSpec
@@ -175,6 +229,11 @@ struct OutputSpec
    real_t      paraview_fault_zfp_tol  = 1e-12;
    int         max_snapshots          = 5000;
    int         checkpoint_every_steps = 10000;
+   // QD Phase 6: when true, the quasi-dynamic driver writes the 10 BP5 SCEC
+   // station traces + a global V_max probe via ParallelBP5BenchmarkOutput
+   // (BP5-parity runs).  SAF runs leave this false (a generic station list is
+   // future work).  Ignored by the dynamic driver.
+   bool        bp5_stations           = false;
 
    // Parity Phase 2 additions (9 new fields).
    bool        paraview_enabled              = false;  ///< master gate
@@ -260,6 +319,12 @@ struct FaultLocalPatch
 struct StressSpec
 {
    StressSourceKind kind = StressSourceKind::ConstantTensor;
+   // QD-only (R-002 / Phase 3c): when true, the quasi-dynamic driver reaches
+   // the per-DOF BP5-analytic prestress (Bp5AnalyticStressSource) WITHOUT
+   // extending StressSourceKind — so the dynamic driver's catch-all dispatch is
+   // unchanged.  Ignored by the dynamic driver.  Reproduces BP5's a(x2,x3)-
+   // heterogeneous tau0 + nucleation delta_tau for the Phase-7 parity gate.
+   bool bp5_analytic = false;
    // ConstantTensor (Phase 3b):
    real_t sigma_xx_pa = 0.0;
    real_t sigma_yy_pa = 0.0;
@@ -501,6 +566,14 @@ struct RateStateBlock
    real_t Dc_default         = 0.004;
    real_t V_init_default     = 1.0e-9;
    real_t sigma_n_default    = 50.0e6;
+   // QD Phase 7 (R-007): when true, the quasi-dynamic driver fills the per-DOF
+   // rate-state a/Dc/eta/V_init/sigma_n DIRECTLY from bp5_params (a_of_x2_x3,
+   // Dc_of_x2_x3, V_init_vec, eta) at the owned fault coords, EXACTLY mirroring
+   // FaultGeometry::ComputeBP5Params and BYPASSING the spatial-rule resolver
+   // (which cannot express BP5's a(x2,x3) smooth transition).  Pair with
+   // [stress].bp5_analytic=true for the BP5 parity gate.  Ignored by the
+   // dynamic driver.
+   bool   bp5_analytic       = false;
    // Phase 6 req 4: SRW state-evolution.  Defaults keep existing RS configs
    // byte-identical (AgingLaw ignores f_w_default / V_w_default).
    StateEvolutionKind state_evolution = StateEvolutionKind::AgingLaw;
@@ -531,6 +604,19 @@ struct BoundarySpec
    int              fault_attr = -1;
    std::vector<int> natural_attrs;
    std::vector<int> absorbing_attrs;
+   // Phase 2 (QD): far-field Dirichlet (plate-loading) wall attributes.
+   // Read ONLY by the quasi-dynamic driver — the dynamic-rupture driver uses
+   // absorbing far-field BCs and never reads this, so it is additive and
+   // dyn-safe.  Required because the elasticity operator aborts when a fault
+   // exists without any Dirichlet faces (elasticity_operator_setup.inl:86).
+   std::vector<int> dirichlet_attrs;
+   // QD far-field plate-loading function (quasi-dynamic driver only):
+   //   "bp5"           : u_X = sgn(y)*Vp*t/2 about ABSOLUTE y=0 (BP5; default,
+   //                     byte-identical) — valid only for an origin-centred fault.
+   //   "saf_recenter_y": u_X antisymmetric about the mesh y mid-plane y0
+   //                     (= 0.5*(ymin+ymax)) — for a UTM/non-origin SAF box where
+   //                     "bp5" degenerates to uniform loading (REVIEW R-001).
+   std::string plate_loading = "bp5";
 };
 
 /// Fault-local frame: `ref_normal` / `up` define the canonical
@@ -592,6 +678,7 @@ struct SpatialFrictionConfig
    StressSpec                          stress;
    NumericsSpec                        numerics;
    TimeSpec                            time;
+   SolverSpec                          solver;   // Phase 1 (QD); additive
    OutputSpec                          output;
    NucleationSpec                      nucleation;       // D-4
    std::optional<SlipWeakeningBlock>   slip_weakening;
@@ -674,6 +761,18 @@ SpatialFrictionConfig LoadSpatialFrictionConfig(const std::string& toml_path);
 /// Same parsing logic but reads from an in-memory TOML string.  Used by
 /// the unit tests so they do not depend on any on-disk file path.
 SpatialFrictionConfig ParseSpatialFrictionConfigString(const std::string& toml_text);
+
+/// Phase 1 (QD): map a `[solver].type` string to the elasticity solver enum
+/// (`mfem::seas::SolverType`, defined in domain/elasticity_operator.hpp).
+/// Mapping: cg_amg→CG_AMG, gmres_amg→GMRES_AMG, gmres_ilu→GMRES_BlockILU,
+/// mumps→MUMPS, mumps_blr→MUMPS_BLR, superlu→SUPERLU, strumpack→STRUMPACK.
+/// The default solver (`SolverSpec::type="cg_amg"`) maps to CG_AMG; an
+/// UNKNOWN string is a hard error (MFEM_ABORT — never silently defaulted).
+/// Returns the enum (not a string) so Phase 2 can pass it straight into the
+/// ElasticityDomainOperator ctor's SolverType parameter (R-008).  The
+/// `mfem::seas::` qualification is required: `SolverType` is forward-declared
+/// at namespace scope above and resolved to the enclosing `mfem::seas`.
+mfem::seas::SolverType ParseQDSolverType(const std::string& type);
 
 // =====================================================================
 //  Resolved per-DOF parameter vectors

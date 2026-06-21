@@ -1,0 +1,141 @@
+# =========================================================================
+# Phase 8 — SAF quasi-dynamic problem on the 500 m mesh.  *** SKELETON ***
+# =========================================================================
+# Frontera-only (project memory: no local production-mesh runs).
+#
+# !!! PHYSICS-DESIGN PLACEHOLDERS — DO NOT RUN IN PRODUCTION AS-IS !!!
+# The plan (§Phase 8 Detailed Requirements) flags four items as needing the
+# SCEC SAF setup / user confirmation.  Each is marked  [PLACEHOLDER]  below with
+# the decision still owed:
+#
+#   (1) BOUNDARY LOADING — BLOCKING.  The QD driver currently imposes BP5's
+#       planar loading u_X = sgn(Y)*Vp*t/2 (MakeBP5DirichletFunc).  The SAF fault
+#       is CURVED/non-planar, so sgn(Y) is WRONG — the far-field Dirichlet must
+#       impose the regional plate motion consistent with the fault strike (a
+#       uniform far-field velocity gradient).  This needs a NEW driver-level SAF
+#       loading function; the config alone cannot fix it.  Until then a SAF run
+#       here uses BP5 loading and is PHYSICALLY INCORRECT.
+#   (2) VELOCITY MODEL — [PLACEHOLDER] depth profile below is a 2-layer BP5-like
+#       stand-in; replace with the SAF crustal velocity model (or a sidecar).
+#   (3) NUCLEATION — [PLACEHOLDER] no IC perturbation is specified; choose the
+#       patch location + elevated V_init / reduced (a-b) on the SAF surface.
+#   (4) SIGMA_N — [PLACEHOLDER] depth-proportional + pore-pressure values below
+#       are placeholders; set from the SAF effective-normal-stress model.
+#
+# Stress + material kinds ARE wired (Phase 8): depth_proportional + sidecar_hdf5
+# now project per-DOF tau_pre/σ_n.  Only the VALUES + the loading function await
+# the SAF specs.
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SAF QD 500m SKELETON — physics-design fields are placeholders."
+
+[mesh]
+# Named 500 m SAF mesh (plan §Phase 8 Files-to-Create).
+path  = "safs/project_7.0_alternative/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+order = 1
+
+[material_constant_fallback]
+lambda = 32.038120320e9   # Pa  (used only if [material] is absent)
+mu     = 32.038120320e9   # Pa
+rho    = 2670.0           # kg/m^3
+
+[material]
+# (2) [PLACEHOLDER] SAF velocity model.  Heterogeneous λ,μ via a 1-D depth
+#     profile (Phase 2b).  Replace these BP5-like layers with the SAF crustal
+#     model (or switch to a velocity sidecar via [velocity]).
+kind       = "depth_profile_1d"
+depth_axis = "z"
+
+[[material_profile.layer]]
+depth_top_m = 0.0
+depth_bot_m = 10000.0
+vp_ms       = 6000.0
+vs_ms       = 3464.0
+rho_kgm3    = 2670.0
+interp      = "constant"
+
+[[material_profile.layer]]
+depth_top_m = 10000.0
+depth_bot_m = 60000.0
+vp_ms       = 7000.0
+vs_ms       = 4041.0
+rho_kgm3    = 2900.0
+interp      = "constant"
+
+[velocity]
+use_sidecar = false
+
+[stress]
+# (4) [PLACEHOLDER] depth-proportional effective normal stress + shear.
+#     Components are entered in MPa (converted to Pa at parse) at mu_ref.
+kind = "depth_proportional"
+
+[stress.depth_proportional]
+sigma_xx_per_mu = 0.0     # [PLACEHOLDER] MPa @ mu_ref
+sigma_yy_per_mu = 0.0     # [PLACEHOLDER]
+sigma_zz_per_mu = 0.0     # [PLACEHOLDER]
+sigma_xy_per_mu = 0.0     # [PLACEHOLDER] right-lateral-positive (driver negates)
+sigma_yz_per_mu = 0.0     # [PLACEHOLDER]
+sigma_xz_per_mu = 0.0     # [PLACEHOLDER]
+mu_ref_pa       = 32.03812032e9
+
+# NOTE: [pore_pressure] is a TOP-LEVEL block (required by the parser), NOT
+# nested under [stress].
+[pore_pressure]
+P_p_pa            = 0.0    # [PLACEHOLDER]
+P_p_grad_pa_per_m = 0.0    # [PLACEHOLDER] hydrostatic gradient
+min_sigma_n_pa    = 1.0e6  # [PLACEHOLDER] effective-σ_n floor
+
+[numerics]
+# (none)
+
+[time]
+tfinal        = 3.15e11    # large; dev/production cap via --max-steps / tfinal
+rk45_atol     = 1.0e-7
+rk45_rtol     = 1.0e-50
+dt_init       = -1.0
+dt_max_years  = 0.1        # SCEC output cadence ceiling
+plate_rate_vp = 1.0e-9     # (1) [PLACEHOLDER] SAF plate rate (note: the LOADING
+                           #     FUNCTION is still BP5 sgn(Y) — see header item 1)
+
+[solver]
+type            = "cg_amg" # scalable iterative solver (Phase 4)
+ksp_rtol        = 1.0e-8
+amg_print_level = 0
+residual_check  = true
+
+[output]
+output_dir     = "."
+paraview_fault = "vtu"     # plan §Phase 6: VTU fault output (NOT vtkhdf) for QD
+paraview_volume = "off"    # volume off by default (R-313)
+bp5_stations   = false     # SAF uses a generic station list (deferred); not BP5
+
+[boundary]
+# (1) [PLACEHOLDER] SAF far-field Dirichlet walls + z=0 Natural free surface.
+#     Confirm the mesh's physical tags.  NOTE: even with correct tags, the
+#     loading FUNCTION on the Dirichlet walls is BP5 sgn(Y) (header item 1).
+fault_attr      = 3        # [PLACEHOLDER] confirm SAF mesh fault tag
+natural_attrs   = [1]      # [PLACEHOLDER] z=0 free surface (+ any others)
+dirichlet_attrs = [5]      # [PLACEHOLDER] far-field walls
+
+[friction.rate_state]
+# (2)/(3) [PLACEHOLDER] SAF rate-state.  Background VS (a>b) with a VW core via
+#     a spatial Box/Depth rule (a<b), and a nucleation patch (elevated V_init /
+#     reduced a-b).  Spatial rules are config-only here — wire the SAF a(z)/core
+#     once the SCEC SAF friction model is specified.
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+eta             = "auto"
+# [PLACEHOLDER] SAF a/b.  DESIGN TENSION: the parser requires a_default <
+# b_default (it assumes the DEFAULT is the VW core).  But SAF wants a VS
+# BACKGROUND (a>b) with a VW CORE — which the default-scalar form cannot express.
+# Resolving this needs the SAF a(z)/a(x2,x3) via resolver spatial rules (and/or
+# relaxing the parser's a<b assertion).  The a<b values below are a stand-in to
+# pass parsing; they do NOT represent the SAF VS/VW structure.
+a_default       = 0.010    # [PLACEHOLDER] (a<b to satisfy the parser; see above)
+b_default       = 0.015
+Dc_default      = 0.008    # [PLACEHOLDER]
+V_init_default  = 1.0e-9   # [PLACEHOLDER]
+sigma_n_default = 50.0e6   # [PLACEHOLDER] effective σ_n (must match [stress])

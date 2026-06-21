@@ -1186,11 +1186,15 @@
       }
       else
       {
+         // Serial CG (test/reference path).  Phase 4 (R-403): honor the
+         // DomainConfig Krylov knobs instead of hardcoding, so the serial path
+         // is consistent with the parallel dispatch.  Defaults (ksp_rtol_=1e-10)
+         // keep a tight solve; the QD/SAF production path is parallel.
          auto *cg = new CGSolver();
-         cg->SetRelTol(1e-12);
-         cg->SetAbsTol(0.0);
-         cg->SetMaxIter(10000);
-         cg->SetPrintLevel(0);
+         cg->SetRelTol(ksp_rtol_);
+         cg->SetAbsTol(ksp_atol_);
+         cg->SetMaxIter(ksp_maxit_);
+         cg->SetPrintLevel(amg_print_level_);
          solver_.reset(cg);
       }
    }

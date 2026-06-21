@@ -391,6 +391,103 @@ void ElasticityDomainOperator<MeshType>::ExpandOwnedToLocalFault(
 }
 
 template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GetFaultDOFToElem(
+   Array<int> &dof_to_elem) const
+{
+   // LOCAL-order Elem1No (same face walk as GetFaultDOFCoords3D), then
+   // restricted to the OWNED set via owned_fault_dof_to_local_dof_.
+   Array<int> local(num_fault_dofs_);
+   local = -1;
+   const int nbf = nbf_per_face_;
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      FaceElementTransformations *FTr =
+         mesh_.GetInteriorFaceTransformations(fault_interior_faces_[i]);
+      if (FTr == nullptr) { continue; }
+      for (int kk = 0; kk < nbf; kk++) { local[i * nbf + kk] = FTr->Elem1No; }
+   }
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(fault_shared_faces_[i]);
+         if (FTr == nullptr) { continue; }
+         const int face_idx = fault_interior_faces_.Size() + i;
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            local[face_idx * nbf + kk] = FTr->Elem1No;
+         }
+      }
+#endif
+   }
+   dof_to_elem.SetSize(num_owned_fault_dofs_);
+   for (int od = 0; od < num_owned_fault_dofs_; od++)
+   {
+      dof_to_elem[od] = local[owned_fault_dof_to_local_dof_[od]];
+   }
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GetFaultDOFToAttr(
+   Array<int> &dof_to_attr) const
+{
+   // Every owned fault DOF lies on the fault interface, so its attribute is
+   // the fault boundary attribute (matching spatial_dyn_driver's dof_to_attr).
+   dof_to_attr.SetSize(num_owned_fault_dofs_);
+   dof_to_attr = bdr_config_.fault_attr;
+}
+
+template <typename MeshType>
+void ElasticityDomainOperator<MeshType>::GetFaultDOFIntegrationPoints(
+   std::vector<IntegrationPoint> &dof_ips) const
+{
+   // LOCAL-order reference IPs in Elem1's frame (same nodal rule + face walk
+   // as GetFaultDOFCoords3D), then restricted to the OWNED set.
+   std::vector<IntegrationPoint> local(num_fault_dofs_);
+   if (num_fault_dofs_ == 0) { dof_ips.clear(); return; }
+
+   const IntegrationRule &nir = face_quad_->GetNodalRule();
+   const int nbf = nbf_per_face_;
+   for (int i = 0; i < fault_interior_faces_.Size(); i++)
+   {
+      FaceElementTransformations *FTr =
+         mesh_.GetInteriorFaceTransformations(fault_interior_faces_[i]);
+      if (FTr == nullptr) { continue; }
+      for (int kk = 0; kk < nbf; kk++)
+      {
+         const IntegrationPoint &nip = nir.IntPoint(kk);
+         FTr->SetAllIntPoints(&nip);
+         local[i * nbf + kk] = FTr->GetElement1IntPoint();
+      }
+   }
+   if constexpr (IsParallelMesh<MeshType>::value)
+   {
+#ifdef MFEM_USE_MPI
+      for (int i = 0; i < fault_shared_faces_.Size(); i++)
+      {
+         FaceElementTransformations *FTr =
+            mesh_.GetSharedFaceTransformations(fault_shared_faces_[i]);
+         if (FTr == nullptr) { continue; }
+         const int face_idx = fault_interior_faces_.Size() + i;
+         for (int kk = 0; kk < nbf; kk++)
+         {
+            const IntegrationPoint &nip = nir.IntPoint(kk);
+            FTr->SetAllIntPoints(&nip);
+            local[face_idx * nbf + kk] = FTr->GetElement1IntPoint();
+         }
+      }
+#endif
+   }
+   dof_ips.resize(num_owned_fault_dofs_);
+   for (int od = 0; od < num_owned_fault_dofs_; od++)
+   {
+      dof_ips[od] = local[owned_fault_dof_to_local_dof_[od]];
+   }
+}
+
+template <typename MeshType>
 void ElasticityDomainOperator<MeshType>::Solve(
    real_t time, const Vector &slip_bc, GridFuncType &displacement)
 {
@@ -441,10 +538,18 @@ void ElasticityDomainOperator<MeshType>::Solve(
 
    solver_->Mult(B_, X_);
 
-   // Post-solve residual check: ||K*x - b|| / ||b|| (global norms)
+   // Post-solve residual check: ||K*x - b|| / ||b|| (global norms).  Phase 4:
+   // mandatory on the AMG paths (cfg.solver.residual_check defaults true) — a
+   // silently non-converged Krylov solve corrupts traction -> friction ->
+   // blowup.  Threshold tied to the Krylov tolerance (10*ksp_rtol); warn LOUDLY
+   // with the iteration count (iterative solvers only; -1 for direct).
    if (check_residual_)
    {
       Vector R_(B_.Size());
+      const real_t res_threshold = 10.0 * ksp_rtol_;
+      auto *itsolver = dynamic_cast<IterativeSolver *>(solver_.get());
+      const int  ksp_iters = itsolver ? itsolver->GetNumIterations() : -1;
+      const bool ksp_conv  = itsolver ? itsolver->GetConverged() : true;
       if constexpr (IsParallelMesh<MeshType>::value)
       {
 #ifdef MFEM_USE_MPI
@@ -461,10 +566,13 @@ void ElasticityDomainOperator<MeshType>::Solve(
          real_t rel_res = (global_rhs > 0.0) ? global_res / global_rhs : global_res;
          int rank = 0;
          MPI_Comm_rank(mesh_.GetComm(), &rank);
-         if (rel_res > 1e-8 && rank == 0)
+         if (rel_res > res_threshold && rank == 0)
          {
             mfem::err << "RESIDUAL WARNING: global ||K*x-b||/||b|| = " << rel_res
-                      << " (threshold 1e-8)\n";
+                      << " > " << res_threshold << " (10*ksp_rtol); Krylov iters="
+                      << ksp_iters
+                      << (ksp_conv ? "" : " (DID NOT CONVERGE)")
+                      << " — non-converged solve corrupts traction.\n";
          }
 #endif
       }
@@ -475,10 +583,12 @@ void ElasticityDomainOperator<MeshType>::Solve(
          real_t res_norm = R_.Norml2();
          real_t rhs_norm = B_.Norml2();
          real_t rel_res = (rhs_norm > 0.0) ? res_norm / rhs_norm : res_norm;
-         if (rel_res > 1e-8)
+         if (rel_res > res_threshold)
          {
             mfem::err << "RESIDUAL WARNING: ||K*x-b||/||b|| = " << rel_res
-                      << " (threshold 1e-8)\n";
+                      << " > " << res_threshold << " (10*ksp_rtol); Krylov iters="
+                      << ksp_iters
+                      << (ksp_conv ? "" : " (DID NOT CONVERGE)") << "\n";
          }
       }
    }
@@ -1655,18 +1765,31 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
 #endif
    }
 
-   // Diagnostic: check for traction blowup
+   // Absolute traction sanity guard.  The post-solve relative residual check
+   // (||K x-b||/||b||) CANNOT catch a near-null-space-contaminated solution: a
+   // contaminated x = x_true + c*v (K v ~ eps*v, eps tiny) keeps ||K x-b|| small
+   // while c blows up, so the relative residual passes but the traction (which
+   // depends on grad(x), amplified by the DG penalty) is enormous.  A loaded CG
+   // solve that STAGNATES on the ill-conditioned DG operator (e.g. with
+   // aggressive coarsening) lands exactly here and would otherwise feed garbage
+   // (|tau| ~ 1e18, sigma_n_eff ~ 1e17) silently into the friction solver as a
+   // bare NaN.  Abort here, at the source, with diagnostics.  Physical QD
+   // traction is O(sigma_n) ~ 1e8 Pa; 1e12 (~1e4x) is a safe non-physical ceiling
+   // (above any legitimate imposed-slip transient, far below garbage ~1e18).
 #ifdef MFEM_USE_MPI
    if constexpr (IsParallelMesh<MeshType>::value)
    {
       int rank;
       MPI_Comm_rank(mesh_.GetComm(), &rank);
       const int num_interior_faces = fault_interior_faces_.Size();
+      real_t local_max_tau = 0.0;
       for (int i = 0; i < num_fault_dofs_; i++)
       {
          real_t tau_mag = std::sqrt(traction(2*i)*traction(2*i) +
                                     traction(2*i+1)*traction(2*i+1));
-         if (tau_mag > 1e9 || std::isnan(tau_mag))
+         if (std::isfinite(tau_mag)) { local_max_tau = std::max(local_max_tau, tau_mag); }
+         else                        { local_max_tau = 1e300; } // sentinel >> 1e9 for NaN/Inf
+         if (tau_mag > 1e12 || std::isnan(tau_mag))
          {
             // Convert DOF index to face index (nbf_per_face_ DOFs per face)
             int face_i = i / nbf_per_face_;
@@ -1713,6 +1836,18 @@ void ElasticityDomainOperator<MeshType>::ComputeTractionImpl(
                       << slip_bc(2*i+1) << ")\n";
          }
       }
+      // Collective abort if ANY rank saw a non-physical traction.  All ranks
+      // reduce so the MFEM_VERIFY fires consistently (avoids a one-rank hang).
+      real_t global_max_tau = local_max_tau;
+      MPI_Allreduce(MPI_IN_PLACE, &global_max_tau, 1, MPI_DOUBLE,
+                    MPI_MAX, mesh_.GetComm());
+      MFEM_VERIFY(global_max_tau <= 1e12,
+                  "Domain solve produced non-physical fault traction (max |tau| = "
+                  << global_max_tau << " Pa >> O(sigma_n) ~ 1e8).  This is a "
+                  "near-null-space-contaminated / non-converged elasticity solve "
+                  "(the relative residual check cannot detect it).  Use a stronger "
+                  "preconditioner: set [solver].amg_aggressive_levels=0 (default), "
+                  "raise ksp_maxit, or use a direct solver (mumps).");
    }
 #endif
 

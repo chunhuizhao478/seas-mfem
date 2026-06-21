@@ -1,0 +1,84 @@
+# =========================================================================
+# Phase 2 construction smoke — spatial_seas (quasi-dynamic) driver.
+# =========================================================================
+# Minimal SpatialFrictionConfig-schema config on the coarse BP5 (1000 m)
+# reference mesh.  Exercises the Phase 2 path: parallel mesh load →
+# BoundaryConfig (Dirichlet plate loading) → homogeneous LinearElastic →
+# ElasticityDomainOperator construction (stiffness assembly + cg_amg setup).
+# NOT a physics run — there is no time loop yet (Phases 3-9).
+#
+# Run (from miniapps/seas):
+#   ./seas_spatial_seas_driver --config config/safs_qd/bp5_phase2_smoke.toml --dry-run
+#   mpirun -np 4 ./seas_spatial_seas_driver --config config/safs_qd/bp5_phase2_smoke.toml --dry-run
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "Phase 2 construction smoke: BP5 1000 m mesh, homogeneous LinearElastic, cg_amg. No time loop."
+
+[material_constant_fallback]
+# BP5 elastic moduli (lambda = mu => nu = 0.25).
+lambda = 32.038120320e9   # Pa
+mu     = 32.038120320e9   # Pa
+rho    = 2670.0           # kg/m^3
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Coarse BP5 verification mesh (Tandem convention: fault=3, natural=1, dirichlet=5).
+path  = "bp5/mesh/reference/bp5_tandem_exact_meters.msh"
+order = 1
+
+[velocity]
+# Homogeneous Phase 2 path: no velocity sidecar (heterogeneous is Phase 2b).
+use_sidecar = false
+
+[stress]
+# Unused in Phase 2 (no friction/stress source yet); a valid block is required.
+kind        = "constant_tensor"
+sigma_xx_pa = 0.0
+sigma_yy_pa = 0.0
+sigma_zz_pa = 0.0
+sigma_xy_pa = 0.0
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[numerics]
+# Required block.  Intentionally carries NONE of the dynamic-only keys
+# (ader_order / mixed_flux / interior_flux / use_pml / time_integrator) so the
+# Phase 2 smoke output stays clean (those would trip the QD "ignored" warning).
+
+[time]
+# Values are irrelevant in Phase 2 (no time loop); kept positive for the
+# parser guards.  QD knobs use their defaults.
+tfinal = 3.15e9   # ~100 yr [s]
+dt_max = 1.0e6
+
+[solver]
+# Iterative solver (cheaper than mumps for the local construction smoke).
+type        = "cg_amg"
+ksp_rtol    = 1.0e-8
+amg_print_level = 0
+
+[output]
+output_dir = "."
+
+[boundary]
+# BP5 / Tandem convention.
+fault_attr      = 3
+natural_attrs   = [1]
+dirichlet_attrs = [5]
+
+[friction.rate_state]
+# Minimal valid rate-state block (unused in Phase 2; required for law=rate_state).
+f_0_default     = 0.6
+V_0_default     = 1.0e-6   # MUST equal FrictionSolver::V0 (R-009)
+eta             = "auto"
+a_default       = 0.010
+b_default       = 0.015
+Dc_default      = 0.004
+V_init_default  = 1.0e-9
+sigma_n_default = 50.0e6

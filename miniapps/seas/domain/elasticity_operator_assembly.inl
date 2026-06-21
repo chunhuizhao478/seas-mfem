@@ -391,19 +391,34 @@
             //   - CG+AMG fails because AMG is non-SPD for DG matrices
             // GMRES tolerates non-SPD preconditioners while still benefiting
             // from AMG's multilevel global coarse-grid correction.
+            // Phase 4: built ONCE here (guarded by stiffness_assembled_) and
+            // reused for every solver_->Mult; tolerances from DomainConfig.
+            MFEM_PERF_SCOPE("seas::elasticity::SetupSolver::GMRES_AMG");
             auto *gmres = new GMRESSolver(mesh_.GetComm());
-            gmres->SetRelTol(1e-10);
-            gmres->SetAbsTol(0.0);
-            gmres->SetMaxIter(2000);
+            gmres->SetRelTol(ksp_rtol_);
+            gmres->SetAbsTol(ksp_atol_);
+            gmres->SetMaxIter(ksp_maxit_);
             gmres->SetKDim(100);
-            gmres->SetPrintLevel(1);
+            gmres->SetPrintLevel(amg_print_level_);
 
             auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
-            amg->SetPrintLevel(0);
-            // Skip SetElasticityOptions for DG — the near-null-space
-            // setup assumes continuous FEM DOF connectivity and can
-            // produce incorrect coarsening for DG sparsity patterns.
-            // Plain AMG still provides effective multilevel preconditioning.
+            // DG vector space is Ordering::byNODES (elasticity_operator_setup.inl);
+            // map the 3 vector components to AMG DOF-functions accordingly.
+            MFEM_VERIFY(fes_->GetOrdering() == Ordering::byNODES,
+                        "GMRES_AMG: SetSystemsOptions assumes byNODES ordering "
+                        "(elasticity DG space is byNODES)");
+            amg->SetSystemsOptions(3, /*order_bynodes=*/true);
+            // Skip SetElasticityOptions for the non-CG path — DG sparsity breaks
+            // the CFEM rigid-body near-null-space assumption (R-006).
+            // Same DG perf tuning as CG_AMG (parallel smoother + aggressive
+            // coarsening; see the CG_AMG path).
+            if (amg_relax_type_ >= 0) { amg->SetRelaxType(amg_relax_type_); }
+            if (amg_aggressive_levels_ > 0)
+            {
+               HYPRE_BoomerAMGSetAggNumLevels(
+                  static_cast<HYPRE_Solver>(*amg), amg_aggressive_levels_);
+            }
+            amg->SetPrintLevel(amg_print_level_);
             cached_prec_.reset(amg);
 
             gmres->SetPreconditioner(*cached_prec_);
@@ -412,15 +427,47 @@
          }
          else
          {
+            // CG + BoomerAMG (SPD).  Phase 4: built ONCE here, reused per solve;
+            // tolerances from DomainConfig.
+            MFEM_PERF_SCOPE("seas::elasticity::SetupSolver::CG_AMG");
             auto *cg = new CGSolver(mesh_.GetComm());
-            cg->SetRelTol(1e-10);
-            cg->SetAbsTol(0.0);
-            cg->SetMaxIter(10000);
-            cg->SetPrintLevel(0);
+            cg->SetRelTol(ksp_rtol_);
+            cg->SetAbsTol(ksp_atol_);
+            cg->SetMaxIter(ksp_maxit_);
+            cg->SetPrintLevel(amg_print_level_);
 
             auto *amg = new HypreBoomerAMG(*cached_Ah_.As<HypreParMatrix>());
-            amg->SetElasticityOptions(dynamic_cast<ParFiniteElementSpace*>(fes_.get()));
-            amg->SetPrintLevel(0);
+            MFEM_VERIFY(fes_->GetOrdering() == Ordering::byNODES,
+                        "CG_AMG: SetSystemsOptions assumes byNODES ordering "
+                        "(elasticity DG space is byNODES)");
+            amg->SetSystemsOptions(3, /*order_bynodes=*/true);
+            // R-006: rigid-body near-null-space modes for the SPD CG path.
+            // Unproven for DG (MFEM ex17p does not use it) and bloats the AMG
+            // hierarchy there (slow V-cycles); gated by amg_elasticity_options_
+            // ([solver].amg_elasticity_options, default true for back-compat).
+            // Set false on DG to use SetSystemsOptions only (the GMRES_AMG path,
+            // which the iterative-vs-direct test verifies converges).  The
+            // mandatory post-solve residual check guards a non-converged solve.
+            if (amg_elasticity_options_)
+            {
+               amg->SetElasticityOptions(
+                  dynamic_cast<ParFiniteElementSpace*>(fes_.get()));
+            }
+            // PERF (DG): the default hierarchy has operator complexity ~4.5 ->
+            // expensive V-cycles, and the default hybrid-GS smoother (relax type
+            // 3) couples sequentially across ranks -> np>1 stalls.  Config knobs
+            // [solver].amg_relax_type (default 8 = l1-symmetric-GS, fully
+            // parallel + SPD-robust) and amg_aggressive_levels (default 1 =
+            // distance-2 coarsening on the top level -> complexity ~4.5->2.1,
+            // ~2x cheaper V-cycles).  Measured ~10x faster init on the BP5 mesh;
+            // iterative-vs-direct verifies it still converges to 1e-7.
+            if (amg_relax_type_ >= 0) { amg->SetRelaxType(amg_relax_type_); }
+            if (amg_aggressive_levels_ > 0)
+            {
+               HYPRE_BoomerAMGSetAggNumLevels(
+                  static_cast<HYPRE_Solver>(*amg), amg_aggressive_levels_);
+            }
+            amg->SetPrintLevel(amg_print_level_);
             cached_prec_.reset(amg);
 
             cg->SetPreconditioner(*cached_prec_);
@@ -438,6 +485,7 @@
       }
 
       stiffness_assembled_ = true;
+      ++num_stiffness_assemblies_;   // Phase 4 (R-402): reuse counter
    }
 
    // ========================================================================

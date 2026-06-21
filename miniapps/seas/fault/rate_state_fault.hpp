@@ -17,6 +17,7 @@
 #include "../friction/friction_law.hpp"
 #include "../friction/dieterich_ruina.hpp"
 #include "../friction/state_evolution.hpp"
+#include "../friction/slip_law_srw_psi.hpp"
 #include "../config/bp2_params.hpp"
 #include "../config/bp5_params.hpp"
 #include "../common/mpi_context.hpp"
@@ -169,6 +170,28 @@ public:
          Dc_values_ = geom_->GetDcValues();
          tau_pre_ = geom_->GetTauPre();
          V_init_values_ = geom_->GetVInit();
+
+         // SRW (TPV104 strong-rate-weakening) detection.  If the state law is
+         // SlipLawSRWPsi, the QD vector path evolves psi through its per-DOF
+         // _SRW route (StateRate_/StateSteady_), reusing the ONE existing SRW
+         // law; the base virtuals stay unused (they throw in production mode).
+         // Aging-law and every other law leave srw_evo_ null -> byte-identical.
+         // Per-DOF a/V_w come from geom, filled by SetRateStatePerDOF BEFORE
+         // this ctor (R-001 order), so they are already populated here.
+         srw_evo_ = dynamic_cast<const SlipLawSRWPsi*>(evolution_);
+         if (srw_evo_)
+         {
+            MFEM_VERIFY(geom_->GetVwValues().Size() == num_nodes_,
+                        "RateStateFaultOperator: SlipLawSRWPsi selected but "
+                        "per-DOF V_w (geom.GetVwValues().Size()="
+                        << geom_->GetVwValues().Size() << ") != num_nodes_ ("
+                        << num_nodes_ << ").  Fill it via SetRateStatePerDOF "
+                        "(resolver SRW V_w / boxcar_taper) BEFORE the ctor.");
+            MFEM_VERIFY(geom_->GetAValues().Size() == num_nodes_,
+                        "RateStateFaultOperator: SlipLawSRWPsi needs per-DOF a "
+                        "sized num_nodes_ (got "
+                        << geom_->GetAValues().Size() << ").");
+         }
       }
    }
 
@@ -314,13 +337,13 @@ public:
          }
          else
          {
-            // BP5: always psi-space
+            // BP5: always psi-space.  StateSteady_ routes SRW (per-DOF V_w/a)
+            // vs aging (Dc) through the single dispatch helper.
             real_t V_abs_init = std::sqrt(
                V_init_values_(2*i) * V_init_values_(2*i) +
                V_init_values_(2*i+1) * V_init_values_(2*i+1));
-            real_t Dc = Dc_values_(i);
             state(i * StatePerNode + PsiIndex) =
-               evolution_->SteadyState(std::max(V_abs_init, 1e-30), Dc);
+               StateSteady_(i, std::max(V_abs_init, 1e-30));
          }
       }
    }
@@ -612,8 +635,10 @@ public:
 
             rate(i * StatePerNode + 0) = V_vec[0];
             rate(i * StatePerNode + 1) = V_vec[1];
+            // StateRate_ routes SRW (per-DOF V_w/a) vs aging (Dc) through the
+            // single dispatch helper.
             rate(i * StatePerNode + PsiIndex) =
-               evolution_->Rate(V_abs, psi, Dc);
+               StateRate_(i, V_abs, psi);
 
             slip_rate_(2*i) = V_vec[0];
             slip_rate_(2*i+1) = V_vec[1];
@@ -1136,9 +1161,43 @@ public:
    }
 
 private:
+   // ----------------------------------------------------------------------
+   // State-evolution dispatch — the SINGLE place the aging-law-vs-SRW choice
+   // is made (one path; minimal change).  When srw_evo_ != null the QD vector
+   // path (SlipComponents == 2) evolves psi via SlipLawSRWPsi's per-DOF _SRW
+   // route with per-DOF V_w / a from geom; otherwise the base-virtual aging
+   // path runs verbatim (the else arms reproduce the original calls exactly,
+   // so non-SRW runs are byte-identical).  Only the two vector-path call sites
+   // route through these; the BP2 (SlipComponents == 1) path is untouched.
+   // ----------------------------------------------------------------------
+   real_t StateRate_(int i, real_t V_abs, real_t psi) const
+   {
+      if (srw_evo_)
+      {
+         return srw_evo_->Rate_SRW(V_abs, psi, Dc_values_(i),
+                                   geom_->GetVwValues()(i),
+                                   geom_->GetAValues()(i));
+      }
+      return evolution_->Rate(V_abs, psi, Dc_values_(i));
+   }
+
+   real_t StateSteady_(int i, real_t V_abs) const
+   {
+      if (srw_evo_)
+      {
+         return srw_evo_->SteadyState_SRW(V_abs, geom_->GetVwValues()(i),
+                                          geom_->GetAValues()(i));
+      }
+      return evolution_->SteadyState(V_abs, Dc_values_(i));
+   }
+
    FaultGeometry<MeshType> *geom_;
    FrictionLaw *friction_;
    StateEvolution *evolution_;
+   // Non-null iff `evolution_` is a SlipLawSRWPsi (strong rate weakening).  Set
+   // once in the BP5 ctor; selects the per-DOF _SRW route in StateRate_/
+   // StateSteady_.  Reuses the SINGLE existing SRW law — no second SRW path.
+   const SlipLawSRWPsi *srw_evo_ = nullptr;
    MPIContext *mpi_ctx_ = nullptr;
 
    int num_nodes_;      ///< Number of fault DOFs

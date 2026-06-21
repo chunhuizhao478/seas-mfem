@@ -193,6 +193,19 @@ TEST_SPATIAL_PRINT_DERIVED_SRC       = tests/unit/test_spatial_print_derived.cpp
 TEST_SPATIAL_PRINT_DERIVED_OBJ       = $(TEST_SPATIAL_PRINT_DERIVED_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.cpp
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
+# Phase 1 of PLAN_spatial_seas_quasidynamic_driver_2026-05-31.md: QD config
+# schema ([solver] + QD [time] knobs + ParseQDSolverType).
+TEST_SPATIAL_SEAS_CONFIG_SRC         = tests/unit/test_spatial_seas_config.cpp
+TEST_SPATIAL_SEAS_CONFIG_OBJ         = $(TEST_SPATIAL_SEAS_CONFIG_SRC:.cpp=.o)
+# Phase 3: fault-geometry + spatial per-DOF rate-state parity on the BP5 mesh.
+TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_SRC = tests/unit/test_spatial_seas_faultgeom_parity.cpp
+TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_OBJ = $(TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_SRC:.cpp=.o)
+# Phase 3c: BP5-analytic prestress parity (Bp5AnalyticStressSource, R-007).
+TEST_SPATIAL_SEAS_BP5_ANALYTIC_SRC   = tests/unit/test_spatial_seas_bp5_analytic_prestress.cpp
+TEST_SPATIAL_SEAS_BP5_ANALYTIC_OBJ   = $(TEST_SPATIAL_SEAS_BP5_ANALYTIC_SRC:.cpp=.o)
+# SRW-in-QD: per-DOF SlipLawSRWPsi dispatch in RateStateFaultOperator (S1+S2).
+TEST_SPATIAL_SEAS_SRW_DISPATCH_SRC   = tests/unit/test_spatial_seas_srw_dispatch.cpp
+TEST_SPATIAL_SEAS_SRW_DISPATCH_OBJ   = $(TEST_SPATIAL_SEAS_SRW_DISPATCH_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
 
@@ -222,6 +235,11 @@ TEST_BIMATERIAL_WAVE_OPERATOR_PARITY_OBJ = $(TEST_BIMATERIAL_WAVE_OPERATOR_PARIT
 # Phase 4 of spatial_dynamic_rupture_plan.md (rev-3): generic dynamic-rupture driver.
 SPATIAL_DYN_DRIVER_SRC               = drivers/spatial_dyn_driver.cpp
 SPATIAL_DYN_DRIVER_OBJ               = $(SPATIAL_DYN_DRIVER_SRC:.cpp=.o)
+# Phase 0 of PLAN_spatial_seas_quasidynamic_driver_2026-05-31.md: generic
+# quasi-dynamic (QD) SEAS driver.  Shares the spatial config schema but NONE
+# of the dynamic/ wave stack (no wave/Godunov/PML/ADER objects).
+SPATIAL_SEAS_DRIVER_SRC              = drivers/spatial_seas_driver.cpp
+SPATIAL_SEAS_DRIVER_OBJ              = $(SPATIAL_SEAS_DRIVER_SRC:.cpp=.o)
 # Phase 14: explicit coupled-RK time integrator (RK4 / Dormand-Prince RK45).
 RK_TIME_STEPPER_SRC                  = dynamic/rk_time_stepper.cpp
 RK_TIME_STEPPER_OBJ                  = $(RK_TIME_STEPPER_SRC:.cpp=.o)
@@ -576,6 +594,21 @@ TEST_VECTOR_FRICTION_OBJ = $(TEST_VECTOR_FRICTION_SRC:.cpp=.o)
 TEST_FAULT_BASIS_OBJ = $(TEST_FAULT_BASIS_SRC:.cpp=.o)
 TEST_ELASTICITY_BR2_OBJ = $(TEST_ELASTICITY_BR2_SRC:.cpp=.o)
 TEST_ELASTICITY_OPERATOR_OBJ = $(TEST_ELASTICITY_OPERATOR_SRC:.cpp=.o)
+# Phase 2b Stage 1b: heterogeneous (Coefficient&) ctor == constant ctor parity.
+TEST_ELASTICITY_HET_CTOR_SRC = tests/unit/test_elasticity_heterogeneous_ctor.cpp
+TEST_ELASTICITY_HET_CTOR_OBJ = $(TEST_ELASTICITY_HET_CTOR_SRC:.cpp=.o)
+# Phase 2b Stage 3: heterogeneous depth-profile slab analytic-traction test.
+TEST_ELASTICITY_HET_SLAB_SRC = tests/unit/test_elasticity_heterogeneous_slab.cpp
+TEST_ELASTICITY_HET_SLAB_OBJ = $(TEST_ELASTICITY_HET_SLAB_SRC:.cpp=.o)
+# Phase 4: CG-AMG vs MUMPS solver-equivalence (parallel).
+TEST_SPATIAL_SEAS_ITER_VS_DIRECT_SRC = tests/unit/test_spatial_seas_iterative_vs_direct.cpp
+TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ = $(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_SRC:.cpp=.o)
+# Phase 5: QD coupling smoke (construct + 4-phase init + a few RK45 steps).
+TEST_SPATIAL_SEAS_QD_SMOKE_SRC = tests/unit/test_spatial_seas_qd_coupling_smoke.cpp
+TEST_SPATIAL_SEAS_QD_SMOKE_OBJ = $(TEST_SPATIAL_SEAS_QD_SMOKE_SRC:.cpp=.o)
+# Phase 6: QD checkpoint serialization round-trip (serial, no mesh/MPI).
+TEST_SEAS_QD_CHECKPOINT_SRC = tests/unit/test_seas_qd_checkpoint.cpp
+TEST_SEAS_QD_CHECKPOINT_OBJ = $(TEST_SEAS_QD_CHECKPOINT_SRC:.cpp=.o)
 TEST_BP5_FAULT_OPERATOR_OBJ = $(TEST_BP5_FAULT_OPERATOR_SRC:.cpp=.o)
 # Phase 6.A: FaultGeometry per-DOF coordinate / basis accessor test
 TEST_FAULT_DOF_BASIS_SRC = tests/unit/test_fault_dof_basis.cpp
@@ -1176,6 +1209,46 @@ seas_test_elasticity_operator: $(TEST_ELASTICITY_OPERATOR_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ELASTICITY_OPERATOR_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+seas_test_elasticity_heterogeneous_ctor: $(TEST_ELASTICITY_HET_CTOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_ELASTICITY_HET_CTOR_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Links HETEROGENEOUS_MATERIAL_OBJ for MakeDepthProfile1DMaterial +
+# MaterialField::MakeCoefficient (the depth profile is self-contained — no
+# sidecar/HDF5 dependency).
+seas_test_elasticity_heterogeneous_slab: $(TEST_ELASTICITY_HET_SLAB_OBJ) \
+                                         $(HETEROGENEOUS_MATERIAL_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_ELASTICITY_HET_SLAB_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 4: parallel CG-AMG vs MUMPS equivalence.  Header-only operator + MUMPS
+# via MFEM_LIBS — no extra objects.
+seas_test_spatial_seas_iterative_vs_direct: $(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 5 QD coupling smoke: the full geom→fault-op→seas-op→RK45 stack
+# (header-only) + SPATIAL_FRICTION_OBJ for the RateStatePerDOFParams header deps.
+seas_test_spatial_seas_qd_coupling_smoke: $(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ) \
+                                          $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 6: QD checkpoint round-trip (serial, header-only io/seas_qd_checkpoint.hpp).
+seas_test_seas_qd_checkpoint: $(TEST_SEAS_QD_CHECKPOINT_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SEAS_QD_CHECKPOINT_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # BP5 Phase 3: BP5 fault operator tests
 seas_test_bp5_fault_operator: $(TEST_BP5_FAULT_OPERATOR_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_BP5_FAULT_OPERATOR_OBJ) $(MFEM_LIBS)
@@ -1299,6 +1372,55 @@ seas_test_spatial_friction_config: $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
                                     $(SPATIAL_FRICTION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_SPATIAL_FRICTION_CONFIG_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 1 (QD): [solver] + QD [time] schema + ParseQDSolverType.  Same minimal
+# link set as the friction-config test (only $(SPATIAL_FRICTION_OBJ)); the test
+# TU includes domain/elasticity_operator.hpp for the SolverType enum but ODR-
+# uses only the enum, so no elasticity object is needed.
+seas_test_spatial_seas_config: $(TEST_SPATIAL_SEAS_CONFIG_OBJ) \
+                               $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_CONFIG_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 3 (QD): fault-geometry + per-DOF rate-state parity on the BP5 mesh.
+# ElasticityDomainOperator + FaultGeometry are header-only (seas_driver links
+# only its own object), so the link set is just $(SPATIAL_FRICTION_OBJ) (for
+# ResolveRateState + MaterialField).  No wave/Godunov/PML objects.
+seas_test_spatial_seas_faultgeom_parity: \
+                               $(TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_OBJ) \
+                               $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 3c (QD): BP5-analytic prestress parity.  Header-only operator/geometry
+# + the header-inline Bp5AnalyticStressSource; same link set as the parity test
+# (SPATIAL_FRICTION_OBJ for the headers pulled via spatial_stress.hpp).
+seas_test_spatial_seas_bp5_analytic: \
+                               $(TEST_SPATIAL_SEAS_BP5_ANALYTIC_OBJ) \
+                               $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_BP5_ANALYTIC_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# SRW-in-QD per-DOF dispatch (S1+S2).  Same link set as the parity test
+# (elasticity_operator + fault_geometry + rate_state_fault headers; spatial
+# friction for RateStatePerDOFParams).
+seas_test_spatial_seas_srw_dispatch: \
+                               $(TEST_SPATIAL_SEAS_SRW_DISPATCH_OBJ) \
+                               $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_SRW_DISPATCH_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
@@ -2154,6 +2276,44 @@ seas_spatial_dyn_driver: $(SPATIAL_DYN_DRIVER_OBJ) \
 	    $(MFEM_LIBS) $(HDF5_LIBS) $(SEAS_FS_LIB)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# seas_spatial_seas_driver — generic quasi-dynamic (QD) SEAS driver
+# (Phase 0 skeleton of PLAN_spatial_seas_quasidynamic_driver_2026-05-31.md).
+# Object compilation needs TOML_FLAGS (the driver calls
+# LoadSpatialFrictionConfig) and -DSEAS_USE_MPI.  The QD driver shares the
+# spatial config schema with spatial_dyn_driver but pulls in NONE of the
+# dynamic/ wave stack; the only out-of-TU symbol it references is
+# LoadSpatialFrictionConfig (in spatial_friction.cpp), so the link set is just
+# $(SPATIAL_FRICTION_OBJ) — the same minimal set proven by
+# seas_test_spatial_friction_config.  NO wave / Godunov / PML / ADER objects.
+$(SPATIAL_SEAS_DRIVER_OBJ): %.o: $(SRC)%.cpp \
+                                 $(SEAS_HEADERS) \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+seas_spatial_seas_driver: $(SPATIAL_SEAS_DRIVER_OBJ) \
+                          $(SPATIAL_FRICTION_OBJ) \
+                          $(HETEROGENEOUS_MATERIAL_OBJ) \
+                          $(SPATIAL_VELOCITY_OBJ) \
+                          $(MATERIAL_COEFFICIENTS_OBJ) \
+                          $(FIELD_COEFFICIENT_OBJ) \
+                          $(DATA_FIELD_3D_OBJ) \
+                          $(STRESS_FIELD_3D_OBJ) \
+                          $(SPATIAL_STRESS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(SPATIAL_SEAS_DRIVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(SPATIAL_VELOCITY_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
 # Phase 14: rk_time_stepper object.  Includes spatial_friction.hpp (gate with
 # TOML_FLAGS like nucleation_factory) + wave_operator.hpp (SEAS_EXTRA_CPPFLAGS,
 # so a DOFData diag build stays ABI-consistent with the other fault objects).
@@ -2852,6 +3012,21 @@ test-spatial-dyn-driver: seas_spatial_dyn_driver
 	    --no-sidecar-material \
 	    --dry-run
 
+# Phase 1 (QD) R-103: driver-level smoke for the dynamic-only [numerics] key
+# warning.  The rate_state SAFS config carries [numerics].ader_order /
+# mixed_flux / use_pml; --dry-run echoes the config without constructing a
+# mesh/operator, so this runs locally.  Assert the warning reaches stderr.
+test-spatial-seas-warning: seas_spatial_seas_driver
+	@out=$$(./seas_spatial_seas_driver \
+	    --config safs/project_7.0_alternative/config/spatial_friction_rate_state_safs_projected_stress_resolution_Dc2.toml \
+	    --dry-run 2>&1); \
+	if echo "$$out" | grep -q "ignored by spatial_seas"; then \
+	    echo "PASS: dynamic-only [numerics] key warning emitted"; \
+	else \
+	    echo "FAIL: expected 'ignored by spatial_seas' warning on stderr"; \
+	    echo "$$out"; exit 1; \
+	fi
+
 # R-001 / R-002 / R-003 regression smoke: run a short (<= 0.01s) rupture
 # with --paraview, then verify that the fault VTU was written AND that
 # the volume VTU registered the dynamic fault projection fields.  VTU
@@ -3022,6 +3197,40 @@ $(TEST_ELASTICITY_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FIL
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
+$(TEST_ELASTICITY_HET_CTOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 tests/unit/fault_mesh_fixture.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+$(TEST_ELASTICITY_HET_SLAB_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 $(HETEROGENEOUS_MATERIAL_HEADERS) \
+                                 tests/unit/fault_mesh_fixture.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+# Phase 4 iterative-vs-direct: parallel (ParMesh + MUMPS), so -DSEAS_USE_MPI +
+# the HDF5/TOML include flags pulled by elasticity_operator.hpp.
+$(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 tests/unit/fault_mesh_fixture.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 tests/unit/fault_mesh_fixture.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_SEAS_QD_CHECKPOINT_OBJ): %.o: $(SRC)%.cpp io/seas_qd_checkpoint.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
 $(TEST_BP5_FAULT_OPERATOR_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
@@ -3157,6 +3366,50 @@ $(TEST_SPATIAL_FRICTION_CONFIG_OBJ): %.o: $(SRC)%.cpp \
                                           $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+# Phase 1 (QD) config test.  Includes domain/elasticity_operator.hpp for the
+# SolverType enum; compiled with the SAME flags as $(SPATIAL_FRICTION_OBJ)
+# (no -DSEAS_USE_MPI) so the elasticity-operator inline code is ABI-consistent
+# across the two objects linked together.
+$(TEST_SPATIAL_SEAS_CONFIG_OBJ): %.o: $(SRC)%.cpp \
+                                      spatial/code/spatial_friction.hpp \
+                                      domain/elasticity_operator.hpp \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
+
+# Phase 3 (QD) fault-geometry parity test.  Constructs a parallel
+# ElasticityDomainOperator + FaultGeometry, so it needs -DSEAS_USE_MPI (the
+# real MPIContext is gated on it) + HDF5/TOML include flags for the headers it
+# pulls in (elasticity_operator + spatial_friction).
+$(TEST_SPATIAL_SEAS_FAULTGEOM_PARITY_OBJ): %.o: $(SRC)%.cpp \
+                                      $(SEAS_HEADERS) \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+# SRW-in-QD dispatch test: same header/flag set as the parity test.
+$(TEST_SPATIAL_SEAS_SRW_DISPATCH_OBJ): %.o: $(SRC)%.cpp \
+                                      $(SEAS_HEADERS) \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+# Phase 3c BP5-analytic prestress test: includes elasticity_operator +
+# fault_geometry (+ the templated ComputeParams<StressSource> .inl) + spatial_stress
+# (Bp5AnalyticStressSource), so it needs the same HDF5/TOML/MPI flags as the
+# parity test.
+$(TEST_SPATIAL_SEAS_BP5_ANALYTIC_OBJ): %.o: $(SRC)%.cpp \
+                                      $(SEAS_HEADERS) \
+                                      spatial/code/spatial_stress.hpp \
+                                      fault/fault_geometry_safs_templated.inl \
+                                      config/bp5_params.hpp \
+                                      $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
 
 $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ): %.o: $(SRC)%.cpp \
                                             spatial/code/spatial_friction.hpp \

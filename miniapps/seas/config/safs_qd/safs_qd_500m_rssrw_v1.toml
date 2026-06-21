@@ -1,0 +1,210 @@
+# =========================================================================
+# SAF QUASI-DYNAMIC cycle model on the 500 m fault-box mesh, with STRONG
+# RATE-WEAKENING (SCEC FL=103) friction adopted from the SeisSol case
+#   seisol_quakeworx/safs_seisol_v1_0_0_RSSRW   (FL=103, constant medium)
+# =========================================================================
+# Driver : seas_spatial_seas_driver  (the QD/cycle driver — quasi-static
+#          elasticity + radiation damping eta*V, adaptive RK45; NO wave
+#          propagation).  Phase 8 of
+#          document/spatial_seas_dev/PLAN_spatial_seas_quasidynamic_driver_2026-05-31.md
+#
+# This is the QUASI-DYNAMIC SEQUENCE-OF-EVENTS sibling of the single-event
+# DYNAMIC-rupture mirror
+#   safs/project_7.0_alternative/config/spatial_friction_safs_seisol_v1_0_0_RSSRW.toml
+# It re-uses that case's *friction* and *stress* numbers verbatim (they are
+# depth/coordinate functions, code-independent) but recasts the problem as a
+# multi-earthquake-cycle QD run: plate loading over many years, spontaneous
+# nucleation, no imposed dynamic overstress.  Every number's provenance:
+#   safs_seisol_v1_0_0_RSSRW/safs_fault.yaml + parameters.par RS constants
+#                              -> [friction.rate_state] (+ depth-profile CSVs)
+#   safs_seisol_v1_0_0_RSSRW/safs_initial_stress.yaml  -> [stress] + [pore_pressure]
+#   safs_seisol_v1_0_0_RSSRW/safs_material.yaml        -> [material_constant_fallback]
+#
+# -------------------------------------------------------------------------
+# !!! REQUIRES THE SRW-IN-QD WIRING (NOT YET IMPLEMENTED) !!!
+# -------------------------------------------------------------------------
+# `state_evolution = "slip_law_srw"` selects the TPV104 strong-rate-weakening
+# state law (friction/slip_law_srw_psi.hpp::SlipLawSRWPsi).  The shared config
+# parser accepts it AND the resolver already fills per-DOF V_w from the
+# boxcar_taper rule below — BUT the QD fault operator
+# (fault/rate_state_fault.hpp::RateStateFaultOperator) currently calls only the
+# base-virtual StateEvolution::Rate()/SteadyState(); it does NOT call the
+# SlipLawSRWPsi::Rate_SRW(V,psi,L,V_w[i],a[i]) per-DOF overloads.  So this case
+# cannot RUN until that wiring lands.  Plan + guard:
+#   document/spatial_seas_dev/PLAN_spatial_seas_srw_qd_2026-06-20.md
+# Until then the driver ABORTS on this config (no silent fall-back to aging-law
+# rate-and-state — CLAUDE.md).  The aging-law sibling
+#   safs_qd_500m_aging.toml  (TODO, optional)
+# would run today as a standard rate-and-state cycle model on the same mesh.
+# -------------------------------------------------------------------------
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "SAF QD cycle model, STRONG rate weakening (FL=103) from safs_seisol_v1_0_0_RSSRW: f_0=0.6, f_w=0.1, V_0=1e-6, V_w=0.1->1.0 across 15-20 km, Dc=0.10 m, V_init=1e-12, Allison a(z)/b(z) VW->VS at 15 km; constant medium (mu=lambda=32 GPa); constant shmax100/shmin60/sv55 stress (P_p=20 MPa); plate loading Vp/2=1e-9 m/s on front/back walls; spontaneous nucleation (NO imposed overstress)."
+
+[material_constant_fallback]
+# = SeisSol safs_material.yaml !ConstantMap (v1 = constant medium).  No
+# heterogeneous [material]/[velocity] block -> the driver builds a constant
+# LinearElastic(lambda, mu).  (Phase 2b heterogeneous material is available but
+# the v1.0.0 reference is a constant medium, so we stay constant here.)
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[velocity]
+use_sidecar = false
+
+[mesh]
+# Named 500 m SAF fault-box mesh (Gmsh v2.2 ASCII; gitignored / Frontera-only).
+# SAME mesh the dynamic v1.0.0 case runs.  Physical tags (project memory
+# safs-seisol-faultbox-uniref-no-slivers): rock=1, fault=101, top=102,
+# bottom=103, sides=104.
+path  = "safs/project_7.0_alternative/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+order = 1
+
+[stress]
+# CONSTANT regional tensor, MFEM compression-POSITIVE TOTAL stress (the
+# [pore_pressure] block below subtracts P_p=20 MPa to get the effective tensor
+# SeisSol stores).  Identical numbers to the dynamic v1.0.0 mirror; see its
+# header for the D3.1 sigma_xy sign note.  -( [stress] - 20e6*I ) reproduces
+# safs_initial_stress.yaml (s_xx=-46.1, s_yy=-73.9, s_zz=-35.0, s_xy=-14.4 MPa).
+kind        = "constant_tensor"
+sigma_xx_pa = 6.610683259082006e+07
+sigma_yy_pa = 9.389316740917995e+07
+sigma_zz_pa = 5.50e+07
+sigma_xy_pa = -1.4386796006773023e+07
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[pore_pressure]
+# SeisSol bakes P_p=20 MPa into the stress diagonal; MFEM subtracts it here.
+P_p_pa            = 20.0e6
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 1.0e6     # effective-sigma_n floor (MFEM-internal)
+
+[numerics]
+# Required by the parser (may be empty).  The QD driver ignores any dynamic-only
+# keys (ader_order/mixed_flux/interior_flux/use_pml/time_integrator) with a
+# rank-0 warning, so none are set here.
+
+[time]
+# QUASI-DYNAMIC cycle time (YEARS, not the dynamic-rupture 100 s window).
+# tfinal is large; dev/production cap the run via --max-steps / --tfinal.
+# RK45 tolerances + dt cadence per CLAUDE.md (atol=1e-7, rtol=1e-50,
+# dt_max=0.1 yr for SCEC output compliance).
+tfinal        = 3.15e11    # s (~10 kyr ceiling); real runs use --max-steps / --tfinal
+rk45_atol     = 1.0e-7
+rk45_rtol     = 1.0e-50
+dt_init       = -1.0       # <0 -> derive 0.01*L_nuc/V_nuc
+dt_max_years  = 0.1
+# Plate loading: per the user, Vp/2 = +/-1e-9 m/s imposed on the front/back
+# far-field walls.  The QD driver's Dirichlet loading is u_X = sgn(Y)*Vp*t/2,
+# so the PER-SIDE velocity is plate_rate_vp/2.  plate_rate_vp = 2e-9 gives
+# +/-1e-9 m/s per side (= Vp/2 as requested; full relative plate rate Vp=2e-9
+# m/s ~ 63 mm/yr).  >>> If you meant the SCEC convention Vp=1e-9 m/s
+# (per-side +/-0.5e-9), set plate_rate_vp = 1.0e-9. <<<
+plate_rate_vp = 2.0e-9
+
+[solver]
+# Scalable iterative solve (Phase 4): assembled-once stiffness K + CG
+# preconditioned by HypreBoomerAMG.  This is the "matrix-free"-equivalent /
+# GPU-future-proof path (Decision A); MUMPS does not scale to the ~10^7-DOF SAF
+# mesh.  residual_check guards a silently non-converged solve.
+type            = "cg_amg"
+ksp_rtol        = 1.0e-8
+ksp_atol        = 0.0
+ksp_maxit       = 2000   # DG elasticity + AMG needs ~500 iters/solve to converge
+amg_print_level = 0
+residual_check  = true
+# BoomerAMG tuning for the DG matrix.  relax 8 (l1-symmetric-GS) is fully parallel
+# (the HYPRE default hybrid-GS smoother DEADLOCKS/stalls at np>1).  Aggressive
+# coarsening is OFF: it makes V-cycles cheaper but the coarse grid cannot resolve
+# the near-null-space of the ill-conditioned DG-elasticity operator, so CG
+# STAGNATES (~1e-7, below ksp_rtol) on a loaded solve -> garbage traction -> NaN.
+# For production prefer a direct solver (type="mumps") on Frontera; cg_amg is the
+# scalable iterative fallback.
+amg_relax_type        = 8   # l1-symmetric-GS (fully parallel); 16=Chebyshev, 3=hybrid-GS, 18=l1-Jacobi
+amg_aggressive_levels = 0   # OFF (1-2 stagnates ill-conditioned DG elasticity -> NaN)
+
+[output]
+output_dir      = "output_safs_qd_v1_0_0_RSSRW"
+paraview_fault  = "vtu"    # Phase 6: VTU fault output (NOT vtkhdf) for QD
+paraview_volume = "off"    # volume off by default (R-313)
+bp5_stations    = false    # SAF uses a generic station list (deferred); not BP5
+
+[boundary]
+# SAF fault-box tags (project memory): fault=101, top free surface=102,
+# bottom=103, sides=104.  Dirichlet far-field loading on the side walls,
+# Natural (traction-free) on the z=0 top and the bottom.
+#
+# plate_loading = "saf_recenter_y" (REVIEW R-001 fix): this SAF mesh is in UTM
+# 11N (y ~ 3.7e6 m).  The default BP5 loading keys +/-Vp/2 off the ABSOLUTE y
+# (y>1000 -> +Vp/2), which on a UTM mesh is uniformly +Vp/2 -> NO antisymmetric
+# plate motion.  "saf_recenter_y" recentres the antisymmetry on the mesh y
+# mid-plane y0 = 0.5*(ymin+ymax) (computed from the mesh at load), so the "front"
+# (y>y0) and "back" (y<y0) side walls get +/-Vp/2 = +/-1e-9 m/s as requested.
+# Planar approximation: loads u_X, which is fault-strike-parallel only if the box
+# x-axis ~ strike (accepted for this setup).  If the mesh tags differ the driver
+# aborts listing the present attributes.
+fault_attr      = 101
+natural_attrs   = [102, 103]
+dirichlet_attrs = [104]
+plate_loading   = "saf_recenter_y"
+
+[friction.rate_state]
+# SeisSol FL=103 == this repo's slip law + STRONG rate weakening (TPV104 form):
+#   f_ss(V) = f_w + (f_LV(V) - f_w) / (1 + (V/V_w)^8)^(1/8),
+#   f_LV(V) = max(0, f_0 - (b-a)*ln(V/V_0))
+# per-DOF a/b from the depth profile, per-DOF V_w from the boxcar_taper rule.
+state_evolution = "slip_law_srw"   # <-- requires the SRW-in-QD wiring (see header)
+f_w_default     = 0.1        # = RS_muW
+V_w_default     = 0.1        # = rs_srW in the VW band; deep ramp via the rule below
+a_default       = 0.0128     # FALLBACK ONLY (hypocenter spot; depth profile active)
+b_default       = 0.0168     # FALLBACK ONLY (mirrors SeisSol RS_b=0.0168 fallback)
+Dc_default      = 0.10       # = rs_sl0.  L_b = 2.18 km ~ 4.4 elems @ 500 m
+V_0_default     = 1.0e-6     # = RS_sr0 (must equal FrictionSolver::V0)
+f_0_default     = 0.6        # = RS_f0
+V_init_default  = 1.0e-12    # = RS_iniSlipRate1 (magnitude seeds psi_ini)
+sigma_n_default = 63.9e6     # FALLBACK ONLY (hypocenter sigma_n_eff); driver uses
+                             # the per-DOF projected [stress] tensor
+eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF (radiation damping)
+
+[friction.rate_state.depth_profile]
+# Two-CSV port of the SeisSol [rs_a, rs_b] LuaMap (b = a - (a-b)) — BYTE-FOR-BYTE
+# the same CSVs the dynamic v1.0.0 mirror uses:
+#   a(d):     param_a_500m_strongvw.csv (Allison & Dunham 2021; breakpoints
+#             0->0.0062769, 14.8924->0.0255077, 52.6829->0.1452192).
+#   (a-b)(d): param_a_minus_b_500m_allison_vw15km.csv (-0.004 for d<=10 km,
+#             +0.0008/km above, ZERO at d=15 km = the VW->VS barrier top).
+# Spot checks (= SeisSol yaml): d=0 a=0.0063 b=0.0103; d=5.05 a=0.0128 b=0.0168;
+# d=15 a=b=0.0258; d=20 a=0.0417 b=0.0377 (velocity-strengthening barrier).
+param_a_csv         = "safs/project_7.0_alternative/friction/rate-and-state/param_a_500m_strongvw.csv"
+param_a_minus_b_csv = "safs/project_7.0_alternative/friction/rate-and-state/param_a_minus_b_500m_allison_vw15km.csv"
+depth_units         = "km"
+
+# = SeisSol rs_srW: V_w = 0.1 m/s for depth <= 15 km, ramped to 1.0 m/s by
+# 20 km so strong rate weakening is also disabled inside the velocity-
+# strengthening barrier.  Depth-only SCEC boxcar taper: plateau over |z+7500|
+# <= 7500 (0-15 km depth, V_w_inner=0.1), 5000 m tanh transition to
+# V_w_outer=1.0 at 20 km.  EXACT at d<=15 and d>=20; C-inf tanh (not SeisSol's
+# linear) across 15-20 km (only the bottom ~1.6 km, already a>b VS, differs).
+[[friction.rate_state.spatial]]
+kind              = "boxcar_taper"
+V_w_inner         = 0.1
+V_w_outer         = 1.0
+boxcar_center_z_m = -7500.0
+boxcar_half_z_m   =  7500.0
+boxcar_trans_z_m  =  5000.0
+
+# -------------------------------------------------------------------------
+# NUCLEATION — none imposed.  The QD cycle model SPONTANEOUSLY nucleates: the
+# VW core (a-b<0, depth < 15 km) accumulates stress under plate loading until
+# it ruptures, then the sequence is self-sustaining.  The v1.0.0 SeisSol case's
+# 24 MPa Gaussian overstress (Tnuc_s) is a SINGLE-EVENT dynamic-rupture seed and
+# is intentionally NOT carried over (the QD driver has no gradual_overstress
+# mechanism; plan Phase 5).  To force the FIRST event at the SeisSol hypocenter
+# (606971, 3707270, -4965.62) instead of letting the friction structure pick
+# it, add a Phase-8 IC perturbation patch (elevated V_init / reduced a-b);
+# deferred until requested.
+# -------------------------------------------------------------------------

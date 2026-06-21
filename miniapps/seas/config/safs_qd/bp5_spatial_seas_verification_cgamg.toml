@@ -1,0 +1,73 @@
+# =========================================================================
+# Phase 7 — BP5 benchmark parity gate (spatial_seas QD driver, CG-AMG variant).
+# =========================================================================
+# Sibling of bp5_spatial_seas_verification.toml — IDENTICAL physics, only the
+# [solver] differs (cg_amg instead of mumps).  Acceptance: this must match the
+# MUMPS variant's station traces to < 1e-6 (relative), validating the scalable
+# iterative solver against the direct solver on the real BP5 problem (this is
+# the Phase-4 R-401 CG-AMG-vs-MUMPS-direct comparison, on the production mesh).
+#
+# Run (Frontera):
+#   ibrun ./seas_spatial_seas_driver --config <this> --max-steps 50
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "BP5 parity gate (CG-AMG): bp5_analytic a + prestress, BP5 mesh."
+
+[material_constant_fallback]
+lambda = 32.038120320e9   # Pa
+mu     = 32.038120320e9   # Pa
+rho    = 2670.0           # kg/m^3
+
+[mesh]
+path  = "bp5/mesh/reference/bp5_tandem_exact_meters.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[stress]
+kind          = "constant_tensor"
+bp5_analytic  = true
+
+[numerics]
+
+[time]
+tfinal        = 3.15e11
+rk45_atol     = 1.0e-7
+rk45_rtol     = 1.0e-50
+dt_init       = -1.0
+dt_max_years  = 0.1
+plate_rate_vp = 1.0e-9
+
+[solver]
+type            = "cg_amg"
+ksp_rtol        = 1.0e-10   # tight, so the iterative solve matches MUMPS to <1e-6
+amg_print_level = 0
+residual_check  = true
+
+[output]
+output_dir   = "."
+bp5_stations = true
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+dirichlet_attrs = [5]
+
+[friction.rate_state]
+bp5_analytic    = true
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+eta             = "auto"
+a_default       = 0.004
+b_default       = 0.03
+Dc_default      = 0.14
+V_init_default  = 1.0e-9
+sigma_n_default = 25.0e6

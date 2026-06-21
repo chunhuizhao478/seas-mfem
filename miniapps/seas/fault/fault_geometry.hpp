@@ -159,6 +159,65 @@ public:
       ComputeBP5Params();
    }
 
+   /// @brief Phase 3 (QD) of PLAN_spatial_seas_quasidynamic_driver: domain-op
+   /// ctor that SKIPS the analytic BP5 per-DOF params when
+   /// `compute_bp5_params == false`.
+   ///
+   /// Builds the SAME owned per-DOF coords (coords_x2_/coords_x3_/depths_) and
+   /// per-DOF 3-D coords + (n,t1,t2) basis as the
+   /// `(DomainOperator&, const BP5Params&, MPIContext*)` ctor above, but leaves
+   /// `a_values_`/`dc_values_`/`eta_values_`/`V_init_vec_`/`tau_pre_`/
+   /// `sigma_n_per_dof_` UNSET for later fill — by `SetRateStatePerDOF`
+   /// (a/dc/eta/V_init) and the stress source `ComputeParams*`
+   /// (tau_pre/sigma_n).  This guarantees the owned<->local DOF layout is
+   /// identical to the BP5 path (no seam), so the spatial rate-state resolver
+   /// runs on exactly the BP5 owned-DOF ordering.
+   ///
+   /// `seed` supplies only c_s/μ (→ η scaling) and the BP5 fault dimensions;
+   /// no analytic a/Dc/τ0 is read when `compute_bp5_params == false`.  When
+   /// `compute_bp5_params == true` this is behaviourally identical to the
+   /// legacy `(domain, params, mpi)` ctor above (preserved verbatim).
+   ///
+   /// Distinct from that 3-argument ctor by the required trailing `bool`
+   /// (a 3-arg call still selects the legacy ctor; a 4-arg call selects this).
+   FaultGeometry(DomainOperator<MeshType> &domain_op, const BP5Params &seed,
+                 MPIContext *mpi_ctx, bool compute_bp5_params)
+      : bp5_params_(seed), mpi_ctx_(mpi_ctx), is_bp5_(true)
+   {
+      num_fault_dofs_ = domain_op.GetNumOwnedFaultDOFs();
+      nbf_per_face_ = domain_op.GetNbfPerFace();
+      num_fault_faces_ = (nbf_per_face_ > 0) ? num_fault_dofs_ / nbf_per_face_ : 0;
+      num_local_fault_dofs_ = num_fault_dofs_;
+      num_global_fault_dofs_ = num_fault_dofs_;
+
+      if constexpr (IsParallelMesh<MeshType>::value)
+      {
+         if (mpi_ctx_)
+         {
+            num_global_fault_dofs_ = mpi_ctx_->GlobalSumInt(num_local_fault_dofs_);
+            ComputeGatherInfo();
+         }
+      }
+
+      if (num_fault_dofs_ == 0) { return; }
+
+      // Owned 2-D fault coordinates (same as the legacy ctor).
+      Vector local_x2, local_x3;
+      domain_op.GetFaultCoords2D(local_x2, local_x3);
+      domain_op.RestrictToOwnedFault(local_x2, coords_x2_);
+      domain_op.RestrictToOwnedFault(local_x3, coords_x3_);
+
+      depths_.SetSize(num_fault_dofs_);
+      for (int i = 0; i < num_fault_dofs_; i++)
+      {
+         depths_(i) = coords_x3_(i);
+      }
+
+      ComputePerDOFCoordsAndBasis_(domain_op);
+
+      if (compute_bp5_params) { ComputeBP5Params(); }
+   }
+
    /// @brief Phase 5a of spatial_dynamic_rupture_plan.md (rev-3): NEW BP5
    /// ctor overload that accepts pre-built per-DOF arrays directly,
    /// avoiding the need to instantiate a throw-away
@@ -454,6 +513,12 @@ public:
    /// @brief Get critical slip distance (Dc/L) at each fault DOF.
    const Vector &GetDcValues() const { return dc_values_; }
 
+   /// @brief Get per-DOF SRW weakening velocity V_w at each fault DOF.
+   /// Empty (size 0) unless SetRateStatePerDOF received a size-N rs.V_w
+   /// (i.e. a strong-rate-weakening config).  Consumed by the QD fault
+   /// operator's SlipLawSRWPsi dispatch (_SRW route).
+   const Vector &GetVwValues() const { return V_w_values_; }
+
    /// @brief Get pre-stress vector at fault DOFs [2*NumFaultDOFs].
    /// Layout: [tau_dip_0, tau_strike_0, tau_dip_1, tau_strike_1, ...]
    const Vector &GetTauPre() const { return tau_pre_; }
@@ -581,6 +646,93 @@ public:
 
    /// @brief Whether ComputeParams has been invoked successfully.
    bool HasParams() const { return params_computed_; }
+
+   /// @brief Phase 3 (QD): fill the per-DOF rate-state arrays from the spatial
+   /// resolver output, in the OWNED DOF order.
+   ///
+   /// Fills `a_values_`, `dc_values_`, `eta_values_` (size N) and `V_init_vec_`
+   /// (size 2N), and — ONLY if a stress source has not already populated it —
+   /// `sigma_n_per_dof_` (size N) from `rs.sigma_n_eff`.
+   ///
+   /// V_init expansion (R-010): `rs.V_init` is a size-N scalar magnitude (one
+   /// per owned DOF); the fault operator needs a size-2N `V_init_vec_`.  The
+   /// magnitude is decomposed into (dip, strike) ALONG `init_vel_dir` (the
+   /// prescribed initial-velocity / plate-loading unit direction):
+   ///   V_init_vec_(2i)   = rs.V_init(i) * init_vel_dir(0)   // dip
+   ///   V_init_vec_(2i+1) = rs.V_init(i) * init_vel_dir(1)   // strike
+   /// matching bp5_params::V_init_vec's layout (BP5 is pure strike, so
+   /// init_vel_dir = (0, 1)).  The split is NOT based on `tau_pre_`, which is
+   /// still NaN here (ComputeParams* runs later — R-001 construction order).
+   ///
+   /// MUST run BEFORE the RateStateFaultOperator ctor (which caches
+   /// Dc_values_/V_init_values_) and MUST NOT set `params_computed_` (the ctor
+   /// asserts `!HasParams()`; the stress source sets it later).  (R-001)
+   ///
+   /// `RSParams` is `mfem::seas::spatial::RateStatePerDOFParams`.  It is a
+   /// template parameter (not a hard `#include`) so the heavy
+   /// spatial_friction.hpp dependency stays out of this header, which every
+   /// BP5/BP2/TPV driver includes (extreme-care file).  The accessed members
+   /// (`a`, `Dc`, `eta`, `V_init`, `sigma_n_eff`, all `mfem::Vector`) resolve
+   /// at the call site, where the complete type is visible.
+   template <typename RSParams>
+   void SetRateStatePerDOF(const RSParams &rs, const Vector &init_vel_dir)
+   {
+      MFEM_VERIFY(init_vel_dir.Size() == 2,
+                  "SetRateStatePerDOF: init_vel_dir must be size 2 "
+                  "(dip, strike); got " << init_vel_dir.Size());
+      if (num_fault_dofs_ == 0) { return; }   // this rank holds no fault DOFs
+
+      const int N = num_fault_dofs_;
+      MFEM_VERIFY(rs.a.Size() == N,
+                  "SetRateStatePerDOF: rs.a.Size() (" << rs.a.Size()
+                  << ") must equal NumFaultDOFs() (owned) (" << N << ")");
+      MFEM_VERIFY(rs.Dc.Size() == N,
+                  "SetRateStatePerDOF: rs.Dc.Size() (" << rs.Dc.Size()
+                  << ") must equal " << N);
+      MFEM_VERIFY(rs.eta.Size() == N,
+                  "SetRateStatePerDOF: rs.eta.Size() (" << rs.eta.Size()
+                  << ") must equal " << N);
+      MFEM_VERIFY(rs.V_init.Size() == N,
+                  "SetRateStatePerDOF: rs.V_init.Size() (" << rs.V_init.Size()
+                  << ") must equal " << N << " (a size-N scalar magnitude)");
+
+      a_values_   = rs.a;
+      dc_values_  = rs.Dc;
+      eta_values_ = rs.eta;
+
+      V_init_vec_.SetSize(2 * N);
+      for (int i = 0; i < N; ++i)
+      {
+         const real_t mag = rs.V_init(i);
+         V_init_vec_(2 * i)     = mag * init_vel_dir(0);  // dip
+         V_init_vec_(2 * i + 1) = mag * init_vel_dir(1);  // strike
+      }
+
+      // Per-DOF SRW weakening velocity V_w (strong-rate-weakening only).  The
+      // resolver fills rs.V_w to size N for slip_law_srw configs and leaves it
+      // empty otherwise (aging-law / bp5_analytic).  Mirror that here: copy a
+      // size-N V_w, else leave V_w_values_ empty (the operator only reads it
+      // when the state law is SlipLawSRWPsi, and asserts size == N then).
+      MFEM_VERIFY(rs.V_w.Size() == 0 || rs.V_w.Size() == N,
+                  "SetRateStatePerDOF: rs.V_w.Size() (" << rs.V_w.Size()
+                  << ") must be 0 (non-SRW) or " << N << " (per-DOF SRW V_w)");
+      if (rs.V_w.Size() == N) { V_w_values_ = rs.V_w; }
+      else                    { V_w_values_.SetSize(0); }
+
+      // Seed effective σ_n only if a stress source has not already set it
+      // (ComputeParams* writes sigma_n_per_dof_ to size N).  At the R-001
+      // construction point this runs first, so it seeds σ_n from the resolver;
+      // a later ComputeParams* (Phase 5) overwrites it when a stress source is
+      // configured.
+      if (sigma_n_per_dof_.Size() != N)
+      {
+         MFEM_VERIFY(rs.sigma_n_eff.Size() == N,
+                     "SetRateStatePerDOF: rs.sigma_n_eff.Size() ("
+                     << rs.sigma_n_eff.Size() << ") must equal " << N);
+         sigma_n_per_dof_ = rs.sigma_n_eff;
+      }
+      // Intentionally does NOT set params_computed_ (R-001).
+   }
 
    /// @brief Phase 6 §5 — SAFS-mode pre-stress initialisation.
    ///
@@ -869,6 +1021,8 @@ private:
    Vector a_values_;    // a for each DOF (from depth in BP2, from (x2,x3) in BP5)
    Vector eta_values_;  // η for each DOF
    Vector dc_values_;   // Dc/L for each DOF (BP5: spatially varying)
+   Vector V_w_values_;  // per-DOF SRW weakening velocity V_w (SRW only; empty
+                        // unless SetRateStatePerDOF received a size-N rs.V_w)
    Vector tau_pre_;     // Pre-stress [2*N for BP5, N for BP2]
    Vector V_init_vec_;  // Initial velocity [2*N for BP5]
    Vector coords_x2_;   // Along-strike coordinate

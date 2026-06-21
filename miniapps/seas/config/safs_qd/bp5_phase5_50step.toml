@@ -1,0 +1,87 @@
+# =========================================================================
+# Phase 5 acceptance — spatial_seas (quasi-dynamic) driver, 50-step BP5 run.
+# =========================================================================
+# Frontera-only (project memory: no local production-mesh runs).  Exercises the
+# full Phase-5 coupling: parallel mesh load → ElasticityDomainOperator (cg_amg)
+# → per-DOF rate-state (resolver) → RateStateFaultOperator → ComputeParams
+# (FaultLocalPrestress) → SetSAFSMode → PBP5SEASOp → 4-phase SetInitialCondition
+# (equilibrium < 1e-6) → adaptive RK45.
+#
+# UNIFORM friction (a/b/Dc) + a reference-state-consistent FaultLocalPrestress
+# (tau_strike ≈ sigma_n*f0) so the 4-phase psi solve equilibrates.  This is NOT
+# BP5 station parity (that needs BP5's a(x2,x3)-heterogeneous prestress via
+# [stress].bp5_analytic=true + a matching [friction.rate_state] spatial rule —
+# Phase 7).  It validates the Phase-5 time-loop acceptance:
+#   - SetInitialCondition reports equilibrium residual < 1e-6, and
+#   - the 50-step run advances with V_max finite (CLAUDE.md regression list).
+#
+# Run (Frontera):
+#   ibrun ./seas_spatial_seas_driver --config <this> --max-steps 50
+#   (see jobs/safs_qd/spatial_seas_bp5_50step.sbatch)
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "Phase 5 50-step BP5 run: uniform friction, fault-local prestress, cg_amg."
+
+[material_constant_fallback]
+lambda = 32.038120320e9   # Pa  (BP5: lambda = mu => nu = 0.25)
+mu     = 32.038120320e9   # Pa
+rho    = 2670.0           # kg/m^3
+
+[mesh]
+path  = "bp5/mesh/reference/bp5_tandem_exact_meters.msh"
+order = 1
+
+[velocity]
+use_sidecar = false       # constant material (BP5)
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[stress]
+# Reference-state-consistent uniform fault-local prestress.  sigma_n_pa MUST
+# equal [friction.rate_state].sigma_n_default (the σ_n the resolver used, R-003);
+# tau_strike_pa ≈ sigma_n * f0 (the rate-state reference traction) so the
+# 4-phase psi solve equilibrates.
+kind          = "fault_local_prestress"
+sigma_n_pa    = 50.0e6
+tau_strike_pa = 3.0e7     # ≈ sigma_n * f0 (50e6 * 0.6)
+tau_dip_pa    = 0.0
+
+[numerics]
+# (none — the QD driver carries no dynamic-only numerics keys)
+
+[time]
+tfinal        = 3.15e11   # ~10 kyr [s] (the --max-steps 50 cap stops the run first)
+rk45_atol     = 1.0e-7
+rk45_rtol     = 1.0e-50
+dt_init       = -1.0      # <0 ⇒ derive 0.01*Dc/V_init
+dt_max_years  = 0.1
+
+[solver]
+type            = "cg_amg"
+ksp_rtol        = 1.0e-8
+amg_print_level = 0
+residual_check  = true    # mandatory AMG-path residual check (R-006)
+
+[output]
+output_dir   = "."
+bp5_stations = true       # write the 10 BP5 SCEC station traces + global V_max probe
+
+[boundary]
+fault_attr      = 3
+natural_attrs   = [1]
+dirichlet_attrs = [5]
+
+[friction.rate_state]
+f_0_default     = 0.6
+V_0_default     = 1.0e-6
+eta             = "auto"  # 0.5*sqrt(mu*rho)
+a_default       = 0.010
+b_default       = 0.015
+Dc_default      = 0.004
+V_init_default  = 1.0e-9
+sigma_n_default = 50.0e6   # MUST equal [stress].sigma_n_pa (R-003)

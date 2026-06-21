@@ -77,6 +77,37 @@ inline DirichletFunc MakeBP5DirichletFunc(real_t Vp)
    };
 }
 
+/// Create the SAF far-field plate-loading function for a fault box whose
+/// y-coordinates are NOT centred on 0 (e.g. a UTM mesh, y ~ 3.7e6 m).
+///
+/// The BP5 function above keys the +/-Vp/2 antisymmetry off the ABSOLUTE y with
+/// a +/-1000 m threshold (BP5's fault sits at y=0).  On a non-origin-centred
+/// mesh every y exceeds +1000, so BP5 degenerates to UNIFORM +Vp/2 -> no
+/// differential plate motion (REVIEW R-001).  This function instead measures y
+/// relative to the box mid-plane y0 and imposes an antisymmetric strike-parallel
+/// (x-component) displacement:
+///   yr = y - y0 >= 0 ("front") : u_D = ( Vp*t/2, 0, 0)
+///   yr = y - y0 <  0 ("back")  : u_D = (-Vp*t/2, 0, 0)
+/// i.e. per-side +/-Vp/2, relative plate rate Vp across the box.
+///
+/// Planar approximation: this loads u_X, which equals fault-strike-parallel
+/// motion only when the box x-axis is (approximately) the fault strike — the
+/// assumption the user accepted for this SAF setup.  Vp and y0 are captured by
+/// value (y0 = box mid-plane, computed from the mesh bounding box by the caller).
+inline DirichletFunc MakeSAFDirichletFunc(real_t Vp, real_t y0)
+{
+   return [Vp, y0](const Vector &x, real_t t, Vector &u)
+   {
+      u.SetSize(3);
+      u = 0.0;
+      const real_t yr = x(1) - y0;
+      real_t Vh = Vp * t;
+      if (yr >= 0.0) { Vh *= 0.5; }
+      else           { Vh *= -0.5; }
+      u(0) = Vh;
+   };
+}
+
 } // namespace seas
 } // namespace mfem
 
