@@ -312,7 +312,14 @@ void AdvanceRKCoupled_Spatial(WaveOperator<MeshType>&               wave,
    {
       if (tab.a[s - 1][j] != tab.b[j]) { last_stage_is_endpoint = false; break; }
    }
-   if (n > 0 && !last_stage_is_endpoint)
+   // PARALLEL-DEADLOCK FIX (np>1): gate ONLY on the tableau, NOT on `n > 0`.  See
+   // the identical fix in the LSW sibling below for the full rationale — fault
+   // ranks calling this endpoint wave.Mult (pairwise ExchangeFaceNbrData) while
+   // pure-bulk ranks (n==0) skip it and reach the driver's unconditional
+   // MPI_Allreduce(V_max) cross-deadlocks on step 0.  Body is n==0-safe.  (DP45 is
+   // FSAL so last_stage_is_endpoint is true and this block is skipped uniformly;
+   // only classical RK4 reaches it.)
+   if (!last_stage_is_endpoint)
    {
       if (nuc) { nuc->ApplyAbsolute(dof_data, t_step_start + dt_step); }
       Vector k_endpoint(height);
@@ -500,7 +507,17 @@ void AdvanceRKCoupledLSW_Spatial(WaveOperator<MeshType>& wave,
    {
       if (tab.a[s - 1][j] != tab.b[j]) { last_stage_is_endpoint = false; break; }
    }
-   if (n > 0 && !last_stage_is_endpoint)
+   // PARALLEL-DEADLOCK FIX (np>1): gate ONLY on the tableau, NOT on `n > 0` (this
+   // rank's fault-DOF count).  wave.Mult does a pairwise ExchangeFaceNbrData over
+   // the partition seams; if fault-bearing ranks (n>0) call this endpoint Mult
+   // while pure-bulk ranks (n==0) skip it and race to the UNCONDITIONAL
+   // MPI_Allreduce(V_max) in the driver, the two cross-deadlock on step 0 (the
+   // R-1600 bug class already cured in the ADER path).  The body is n==0-safe:
+   // empty dof_data => ApplyAbsolute and the `for m<n` loop are no-ops, the
+   // bulk-rank Mult only participates in the ghost exchange (no fault writes), and
+   // k_endpoint sizes off the bulk-state `height`.  np=1 / all-fault-rank runs are
+   // byte-unchanged (n>0 there, so the branch fired before too).
+   if (!last_stage_is_endpoint)
    {
       if (nuc) { nuc->ApplyAbsolute(dof_data, t_step_start + dt_step); }
       Vector k_endpoint(height);
