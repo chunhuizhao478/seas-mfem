@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J safs_sw_prf_rst
-#SBATCH -o safs_sw_prf_rst_%j.out
-#SBATCH -e safs_sw_prf_rst_%j.err
+#SBATCH -J safs_sw_prf_exp
+#SBATCH -o safs_sw_prf_exp_%j.out
+#SBATCH -e safs_sw_prf_exp_%j.err
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
@@ -35,8 +35,11 @@
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# RESTART/CONTINUATION (compute, 2N x 50r = 100 ranks, 2 h): resumes a 100-rank
-# checkpoint (RESTART_FROM) toward tfinal=150 s.  Chain as many of these as needed.
+# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): RK4 + this mesh will NOT
+# reach tfinal=150 s in 2 h — the run advances through nucleation/breakout and
+# CHECKPOINTS.  ACCEPTANCE = clean start, V_max bounded, on-fault sigma_n stable in
+# time (the mixed-flux leak cure), FreeSurf banner active.  Resume toward 150 s with
+# the restart sibling (or chain this with SAFS_RESTART).
 #
 # Scale up by OVERRIDING the sbatch headers at submit time, e.g.
 #   sbatch --nodes=8 --ntasks-per-node=64 --time=48:00:00 <this file>
@@ -49,7 +52,7 @@
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
 # SAFS_TIME_INTEGRATOR (default rk4), SAFS_TFINAL (default 150s), SAFS_CFL,
-# RESTART_FROM (MANDATORY), SAFS_OUTDIR (Lustre scratch base).
+# SAFS_RESTART, SAFS_OUTDIR (Lustre scratch base).
 
 export LC_ALL=C
 export LANG=C
@@ -156,33 +159,17 @@ TFINAL="${SAFS_TFINAL:-150s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
-# Restart (MANDATORY for this job): continue RESTART_FROM's checkpoint set.  Set
-# RESTART_FROM to the run dir holding cp_checkpoint_r*.txt (one per rank):
-#   sbatch --export=ALL,RESTART_FROM=/expanse/lustre/.../run_dir <this file>
-# A checkpoint can ONLY resume at the SAME rank count it was written at (the driver
-# hard-checks num_ranks; this job is 100 ranks).  The restart OUTPUT dir is distinct
-# (job-ID-keyed), so the driver does not abort (restart != output parent).
-RESTART_FROM="${RESTART_FROM:-}"
-if [[ -z "${RESTART_FROM}" ]]; then
-    echo "ERROR: RESTART_FROM is empty.  Set it to the run dir holding cp_checkpoint_r*.txt:"
-    echo "         sbatch --export=ALL,RESTART_FROM=/expanse/lustre/.../run_dir <this file>"
-    exit 1
-fi
-RESTART_FROM="${RESTART_FROM%/}"
-if [[ ! -f "${RESTART_FROM}/cp_checkpoint_r0.txt" ]]; then
-    echo "ERROR: no checkpoint at ${RESTART_FROM}/cp_checkpoint_r0.txt"; exit 1
-fi
-_n_cp=$(ls "${RESTART_FROM}"/cp_checkpoint_r*.txt 2>/dev/null | wc -l)
-if [[ "${_n_cp}" -ne "${SLURM_NTASKS}" ]]; then
-    echo "ERROR: found ${_n_cp} checkpoint files in ${RESTART_FROM} (expected ${SLURM_NTASKS} = this job's rank count)."; exit 1
-fi
-RESTART_ARG="--restart ${RESTART_FROM}/cp"
+# Restart hook (optional): resume past the wall toward tfinal.  Set SAFS_RESTART to
+# the PREVIOUS run's checkpoint PREFIX (driver writes "<output-dir>/cp"); the new
+# --output-dir is distinct (job-ID-keyed), so the driver does not abort.
+RESTART_ARG=""
+[[ -n "${SAFS_RESTART:-}" ]] && RESTART_ARG="--restart ${SAFS_RESTART}"
 
 # Output on Lustre scratch (purged 90 d after creation; needs --constraint=lustre).
 OUT_BASE="${SAFS_OUTDIR:-/expanse/lustre/scratch/${USER}/temp_project}"
-OUT="${OUT_BASE}/safs_dyn_sw_prf_rst_${SLURM_JOB_ID}"
-LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
-LOG="${LOG_DIR}/spatial_dyn_sw_prf_rst_${SLURM_JOB_ID}.log"
+OUT="${OUT_BASE}/safs_dyn_sw_prf_exp_${SLURM_JOB_ID}"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
+LOG="${LOG_DIR}/spatial_dyn_sw_prf_exp_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"

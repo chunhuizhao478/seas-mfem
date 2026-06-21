@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J safs_sw_alt_exp
-#SBATCH -o safs_sw_alt_exp_%j.out
-#SBATCH -e safs_sw_alt_exp_%j.err
+#SBATCH -J safs_rs_prf_rst
+#SBATCH -o safs_rs_prf_rst_%j.out
+#SBATCH -e safs_rs_prf_rst_%j.err
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
@@ -11,12 +11,12 @@
 #SBATCH -A FILLME_EXPANSE_ALLOCATION
 
 # =========================================================================
-# SAFS SLIPWEAKENING v3.0.0 ALT — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
+# SAFS RATESTATE v3.0.0 PREFERRED (vw002) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
 # *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
-# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_ALT.toml
+# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
-# LSW (mu_s=0.318, mu_d=0.10, d_c=1.2),  multiscale_statewise CVM material (the PRODUCTION material),
+# RS-SRW vw002 (f_0=0.6, f_w=0.10, Dc=0.10, V_w=0.02->3.0),  multiscale_statewise CVM material (the PRODUCTION material),
 # spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk4
 # (central flux is UNSTABLE under ADER; RK is required).  CFL 0.5 = STARTING
 # calibration for the RK central-flux de-rate (adjacent 0.6x) — sweep via SAFS_CFL.
@@ -35,11 +35,8 @@
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): RK4 + this mesh will NOT
-# reach tfinal=150 s in 2 h — the run advances through nucleation/breakout and
-# CHECKPOINTS.  ACCEPTANCE = clean start, V_max bounded, on-fault sigma_n stable in
-# time (the mixed-flux leak cure), FreeSurf banner active.  Resume toward 150 s with
-# the restart sibling (or chain this with SAFS_RESTART).
+# RESTART/CONTINUATION (compute, 2N x 50r = 100 ranks, 2 h): resumes a 100-rank
+# checkpoint (RESTART_FROM) toward tfinal=150 s.  Chain as many of these as needed.
 #
 # Scale up by OVERRIDING the sbatch headers at submit time, e.g.
 #   sbatch --nodes=8 --ntasks-per-node=64 --time=48:00:00 <this file>
@@ -52,7 +49,7 @@
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
 # SAFS_TIME_INTEGRATOR (default rk4), SAFS_TFINAL (default 150s), SAFS_CFL,
-# SAFS_RESTART, SAFS_OUTDIR (Lustre scratch base).
+# RESTART_FROM (MANDATORY), SAFS_OUTDIR (Lustre scratch base).
 
 export LC_ALL=C
 export LANG=C
@@ -108,19 +105,19 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_ALT.toml}"
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml}"
 
-# Mesh: DEFAULT = the sliver-repaired (triq) 500 m mesh (flat z=0 top); override with SAFS_MESH.
-DEFAULT_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+# Mesh: DEFAULT = the safv4_deep 500 m mesh (safstags tags 101/102/103/104, non-flat topo); override with SAFS_MESH.
+DEFAULT_MESH="safs/project_7.0_preferred/meshing/results/safv4_deep_500m_opt_safstags.msh"
 MESH="${SAFS_MESH:-${DEFAULT_MESH}}"
 if [[ ! -f "${MESH}" ]]; then
-    echo "ERROR: mesh not found: $(pwd)/${MESH}  (gitignored — scp it first)"; exit 1
+    echo "ERROR: mesh not found: $(pwd)/${MESH}  (gitignored/large — scp it first)"; exit 1
 fi
 
 # PRODUCTION SIDECAR PRE-FLIGHT — this run uses CVM material + the CSM stress
 # field; BOTH .h5 sidecars are gitignored/large and MUST be present (scp'd).
-VEL_H5="${SAFS_ROOT}/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
-STR_H5="${SAFS_ROOT}/stress/results/csm_d12_mfem/safs_stress_csm_d12_mfem.h5"
+VEL_H5="safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
+STR_H5="safs/project_7.0_preferred/stress/results/csm_d12_rssrw_mfem/safs_stress_csm_d12_mfem.h5"
 for _h5 in "${VEL_H5}" "${STR_H5}"; do
     if [[ ! -f "${_h5}" ]]; then
         echo "ERROR: required sidecar missing: $(pwd)/${_h5}"
@@ -131,7 +128,7 @@ for _h5 in "${VEL_H5}" "${STR_H5}"; do
     fi
 done
 
-# Floor pre-flight (v3 slipweakening keeps the 5 MPa MFEM-only sigma_n floor).
+# Floor pre-flight (v3 PREFERRED ratestate keeps the 10 MPa MFEM-only sigma_n floor).
 grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOML}" >/dev/null     || { echo "ERROR: ${CONFIG_TOML} has no sigma_n_strength_floor_pa"; exit 1; }
 
 # Flux: MIXED (adjacent) by DEFAULT — the production choice (central-on-fault-
@@ -159,23 +156,39 @@ TFINAL="${SAFS_TFINAL:-150s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
-# Restart hook (optional): resume past the wall toward tfinal.  Set SAFS_RESTART to
-# the PREVIOUS run's checkpoint PREFIX (driver writes "<output-dir>/cp"); the new
-# --output-dir is distinct (job-ID-keyed), so the driver does not abort.
-RESTART_ARG=""
-[[ -n "${SAFS_RESTART:-}" ]] && RESTART_ARG="--restart ${SAFS_RESTART}"
+# Restart (MANDATORY for this job): continue RESTART_FROM's checkpoint set.  Set
+# RESTART_FROM to the run dir holding cp_checkpoint_r*.txt (one per rank):
+#   sbatch --export=ALL,RESTART_FROM=/expanse/lustre/.../run_dir <this file>
+# A checkpoint can ONLY resume at the SAME rank count it was written at (the driver
+# hard-checks num_ranks; this job is 100 ranks).  The restart OUTPUT dir is distinct
+# (job-ID-keyed), so the driver does not abort (restart != output parent).
+RESTART_FROM="${RESTART_FROM:-}"
+if [[ -z "${RESTART_FROM}" ]]; then
+    echo "ERROR: RESTART_FROM is empty.  Set it to the run dir holding cp_checkpoint_r*.txt:"
+    echo "         sbatch --export=ALL,RESTART_FROM=/expanse/lustre/.../run_dir <this file>"
+    exit 1
+fi
+RESTART_FROM="${RESTART_FROM%/}"
+if [[ ! -f "${RESTART_FROM}/cp_checkpoint_r0.txt" ]]; then
+    echo "ERROR: no checkpoint at ${RESTART_FROM}/cp_checkpoint_r0.txt"; exit 1
+fi
+_n_cp=$(ls "${RESTART_FROM}"/cp_checkpoint_r*.txt 2>/dev/null | wc -l)
+if [[ "${_n_cp}" -ne "${SLURM_NTASKS}" ]]; then
+    echo "ERROR: found ${_n_cp} checkpoint files in ${RESTART_FROM} (expected ${SLURM_NTASKS} = this job's rank count)."; exit 1
+fi
+RESTART_ARG="--restart ${RESTART_FROM}/cp"
 
 # Output on Lustre scratch (purged 90 d after creation; needs --constraint=lustre).
 OUT_BASE="${SAFS_OUTDIR:-/expanse/lustre/scratch/${USER}/temp_project}"
-OUT="${OUT_BASE}/safs_dyn_sw_alt_exp_${SLURM_JOB_ID}"
-LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
-LOG="${LOG_DIR}/spatial_dyn_sw_alt_exp_${SLURM_JOB_ID}.log"
+OUT="${OUT_BASE}/safs_dyn_rs_prf_rst_${SLURM_JOB_ID}"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
+LOG="${LOG_DIR}/spatial_dyn_rs_prf_rst_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
 echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00"
-echo "EXPERIMENT:  slipweakening v3 ALT, CVM material + CSM stress, MIXED FLUX + RK"
+echo "EXPERIMENT:  ratestate v3 PREFERRED (vw002), CVM material + CSM stress, MIXED FLUX + RK"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
 echo "Sidecars:    vel=${VEL_H5}  stress=${STR_H5}"

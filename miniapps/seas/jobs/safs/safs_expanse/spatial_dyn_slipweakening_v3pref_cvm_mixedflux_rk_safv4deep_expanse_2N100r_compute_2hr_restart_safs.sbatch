@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH -J safs_rs_prf_rst
-#SBATCH -o safs_rs_prf_rst_%j.out
-#SBATCH -e safs_rs_prf_rst_%j.err
+#SBATCH -J safs_sw_prf_rst
+#SBATCH -o safs_sw_prf_rst_%j.out
+#SBATCH -e safs_sw_prf_rst_%j.err
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
@@ -11,12 +11,12 @@
 #SBATCH -A FILLME_EXPANSE_ALLOCATION
 
 # =========================================================================
-# SAFS RATESTATE v3.0.0 PREFERRED (vw002) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
+# SAFS SLIPWEAKENING v3.0.0 PREFERRED — MFEM port with CVM material + MIXED FLUX (adjacent) + RK4.
 # *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
-# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml
+# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_PREFERRED.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
-# RS-SRW vw002 (f_0=0.6, f_w=0.10, Dc=0.10, V_w=0.02->3.0),  multiscale_statewise CVM material (the PRODUCTION material),
+# LSW (mu_s=0.318, mu_d=0.10, d_c=1.2),  multiscale_statewise CVM material (the PRODUCTION material),
 # spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk4
 # (central flux is UNSTABLE under ADER; RK is required).  CFL 0.5 = STARTING
 # calibration for the RK central-flux de-rate (adjacent 0.6x) — sweep via SAFS_CFL.
@@ -105,7 +105,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_PREFERRED_vw002.toml}"
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_PREFERRED.toml}"
 
 # Mesh: DEFAULT = the safv4_deep 500 m mesh (safstags tags 101/102/103/104, non-flat topo); override with SAFS_MESH.
 DEFAULT_MESH="safs/project_7.0_preferred/meshing/results/safv4_deep_500m_opt_safstags.msh"
@@ -117,7 +117,7 @@ fi
 # PRODUCTION SIDECAR PRE-FLIGHT — this run uses CVM material + the CSM stress
 # field; BOTH .h5 sidecars are gitignored/large and MUST be present (scp'd).
 VEL_H5="safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
-STR_H5="safs/project_7.0_preferred/stress/results/csm_d12_rssrw_mfem/safs_stress_csm_d12_mfem.h5"
+STR_H5="safs/project_7.0_preferred/stress/results/csm_d12_lsw_mfem/safs_stress_csm_d12_mfem.h5"
 for _h5 in "${VEL_H5}" "${STR_H5}"; do
     if [[ ! -f "${_h5}" ]]; then
         echo "ERROR: required sidecar missing: $(pwd)/${_h5}"
@@ -128,7 +128,7 @@ for _h5 in "${VEL_H5}" "${STR_H5}"; do
     fi
 done
 
-# Floor pre-flight (v3 PREFERRED ratestate keeps the 10 MPa MFEM-only sigma_n floor).
+# Floor pre-flight (v3 PREFERRED slipweakening keeps the 5 MPa MFEM-only sigma_n floor).
 grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOML}" >/dev/null     || { echo "ERROR: ${CONFIG_TOML} has no sigma_n_strength_floor_pa"; exit 1; }
 
 # Flux: MIXED (adjacent) by DEFAULT — the production choice (central-on-fault-
@@ -180,15 +180,15 @@ RESTART_ARG="--restart ${RESTART_FROM}/cp"
 
 # Output on Lustre scratch (purged 90 d after creation; needs --constraint=lustre).
 OUT_BASE="${SAFS_OUTDIR:-/expanse/lustre/scratch/${USER}/temp_project}"
-OUT="${OUT_BASE}/safs_dyn_rs_prf_rst_${SLURM_JOB_ID}"
-LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
-LOG="${LOG_DIR}/spatial_dyn_rs_prf_rst_${SLURM_JOB_ID}.log"
+OUT="${OUT_BASE}/safs_dyn_sw_prf_rst_${SLURM_JOB_ID}"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
+LOG="${LOG_DIR}/spatial_dyn_sw_prf_rst_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
 echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00"
-echo "EXPERIMENT:  ratestate v3 PREFERRED (vw002), CVM material + CSM stress, MIXED FLUX + RK"
+echo "EXPERIMENT:  slipweakening v3 PREFERRED, CVM material + CSM stress, MIXED FLUX + RK"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
 echo "Sidecars:    vel=${VEL_H5}  stress=${STR_H5}"

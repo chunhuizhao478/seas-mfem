@@ -181,7 +181,7 @@ RESTART_ARG="--restart ${RESTART_FROM}/cp"
 # Output on Lustre scratch (purged 90 d after creation; needs --constraint=lustre).
 OUT_BASE="${SAFS_OUTDIR:-/expanse/lustre/scratch/${USER}/temp_project}"
 OUT="${OUT_BASE}/safs_dyn_rs_alt_rst_${SLURM_JOB_ID}"
-LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
 LOG="${LOG_DIR}/spatial_dyn_rs_alt_rst_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
