@@ -1,0 +1,245 @@
+#!/bin/bash
+#SBATCH -J safs_rs_alt_cali
+#SBATCH -o safs_rs_alt_cali_%j.out
+#SBATCH -e safs_rs_alt_cali_%j.err
+#SBATCH --partition=compute
+#SBATCH --nodes=2
+#SBATCH --ntasks-per-node=50
+#SBATCH --time=02:00:00
+#SBATCH --mem=100000M
+#SBATCH -A usc143
+
+# =========================================================================
+# SAFS RATESTATE v3.0.0 ALT (vw005) — CALIPER PROFILING run (mixed flux + RK45).
+# *** EXPANSE (SDSC) job — 2N x 50r = 100 ranks / 2 h / 100 GB / tfinal=12 s. ***
+# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
+# Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
+# =========================================================================
+# A SHORT run (tfinal=12 s, 2 h wall) whose ONLY purpose is a PER-COMPONENT SPEED
+# BREAKDOWN of the solver via Caliper.  Identical physics to the 48 h production
+# job (same config / mesh / sidecars / mixed flux + RK45) — just short + profiled.
+#
+# === HOW THE PROFILE IS PRODUCED ==========================================
+# The solver is already instrumented with MFEM_PERF_SCOPE / MFEM_PERF_BEGIN
+# regions (general/annotation.hpp -> Caliper CALI_CXX_MARK_SCOPE when
+# MFEM_USE_CALIPER=YES, else a NO-OP).  Per-component regions include:
+#   seas::spatial_dyn::step                 (one whole time step)
+#   seas::WaveOperator::Mult                (RHS eval; called per RK stage)
+#     -> seas::WaveOperator::ComputeVolumeRHS         (volume/interior derivative)
+#     -> seas::WaveOperator::ComputeFaceFluxRHS       (interior face flux)
+#     -> seas::WaveOperator::ComputeSharedFaceFluxRHS (rank-seam face flux)
+#   seas::spatial_dyn::friction_substep     (rate-state / LSW friction solve)
+#   seas::WaveOperator::ComputeMaxDt        (CFL dt reduction)
+#   (+ the ADER regions, unused on the RK45 path)
+# Caliper is driven ENTIRELY by the CALI_CONFIG env var (read at init) — there is
+# NO driver flag.  This job sets a detailed CALI_CONFIG below.
+#
+# *** REQUIRES A CALIPER-ENABLED BINARY *** (MFEM_USE_CALIPER=YES).  On Expanse:
+#     USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh
+# build_expanse.sh ships Caliper v2.11.0 but USE_CALIPER defaults to NO, so the
+# normal binary has the regions COMPILED OUT (empty report).  This job hard-checks
+# the libcaliper link before running (override with SAFS_SKIP_CALI_CHECK=1).
+#
+# === CALIPER CONFIG RECIPES (what Caliper can offer) =======================
+# CALI_CONFIG takes a comma-separated list of built-in "config recipes"; each
+# becomes an output channel.  The most useful for this solver:
+#   runtime-report            per-region time TABLE (this run's default output).
+#                             options (key[=val], comma-separated inside the (...)):
+#                               calc.inclusive     also show inclusive (subtree) time
+#                               region.count       show per-region call counts
+#                               profile.mpi        break out MPI time per region
+#                               mem.highwatermark  per-region peak resident memory
+#                               output=<file>      where to write (else stdout)
+#                               max_column_width=N widen the region-name column
+#   hatchet-region-profile    .json for Python Hatchet (scriptable region tree).
+#   spot                      .cali for the LLNL Spot web UI + Hatchet (richest).
+#   mpi-report                standalone MPI-function breakdown (calls + time).
+#   callpath-sample-report    SAMPLING profile (low overhead, no instrumentation).
+#   loop-report               per-iteration timing of marked loops.
+# Discover the full list + options at runtime:  CALI_CONFIG=help ./<any cali app>
+# (or see Caliper's "Builtin configurations" docs).  Tuning knobs:
+#   CALI_LOG_VERBOSITY=1   CALI_CONFIG_PROFILE   CALI_AGGREGATE_KEY=...
+#
+# Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
+# SAFS_TIME_INTEGRATOR (default rk45), SAFS_TFINAL (default 12s — SHORT profile),
+# SAFS_CFL, SAFS_DIAG (0/1, default 0), SAFS_CALI_CONFIG (override CALI_CONFIG),
+# SAFS_SKIP_CALI_CHECK (1 = run even if the binary lacks Caliper), SAFS_OUTDIR.
+
+export LC_ALL=C
+export LANG=C
+# Per-step [DIAG]/[DIAG-ONSET] monitor: OFF by default (it floods once V_max>10).
+# Leave it OFF for profiling — the DIAG prints would distort the I/O timing.
+if [[ "${SAFS_DIAG:-0}" == "1" ]]; then export SEAS_DIAG_BLOWUP=1; else unset SEAS_DIAG_BLOWUP; fi
+# R-101 shared-fault tripwire SKIPPED by default for SAFS; SAFS_R101=1 re-enables.
+if [[ "${SAFS_R101:-0}" == "1" ]]; then unset SEAS_R101_SKIP; else export SEAS_R101_SKIP=1; fi
+
+# --- Expanse modules (MUST match build_expanse.sh: cpu/0.17.3b gcc openmpi) ---
+module purge
+module load slurm 2>/dev/null || true
+module load cpu/0.17.3b
+module load gcc/10.2.0
+for _mpi in openmpi/4.1.5 openmpi/4.1.3 openmpi/4.1.1 openmpi; do
+    if module load "${_mpi}" 2>/dev/null && module is-loaded "${_mpi}" 2>/dev/null; then
+        echo "OpenMPI module: ${_mpi}"; break
+    fi
+done
+
+# Resolve seas-mfem root (walk UP to miniapps/seas/Makefile) BEFORE the lib paths.
+SEAS_MFEM_ROOT="${SEAS_MFEM_ROOT:-${SLURM_SUBMIT_DIR}}"
+_walk_up_dir="${SEAS_MFEM_ROOT}"
+for _ in 0 1 2 3 4 5; do
+    if [[ -f "${_walk_up_dir}/miniapps/seas/Makefile" ]]; then
+        SEAS_MFEM_ROOT="$(cd "${_walk_up_dir}" && pwd)"; break
+    fi
+    _walk_up_dir="${_walk_up_dir}/.."
+done
+if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
+    echo "ERROR: cannot locate seas-mfem root from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR}."
+    echo "  Set SEAS_MFEM_ROOT via sbatch --export=ALL,SEAS_MFEM_ROOT=/path/to/seas-mfem ..."
+    exit 1
+fi
+
+# Runtime shared libs.  libcaliper.so FIRST (this job profiles); then the usual
+# hdf5/zfp/petsc from build_expanse.sh's from-source deps.
+export LD_LIBRARY_PATH="${SEAS_MFEM_ROOT}/extern/caliper/install/lib64:${SEAS_MFEM_ROOT}/extern/caliper/install/lib:${SEAS_MFEM_ROOT}/extern/hdf5/install/lib:${SEAS_MFEM_ROOT}/extern/zfp/install/lib64:${SEAS_MFEM_ROOT}/extern/zfp/install/lib:${SEAS_MFEM_ROOT}/extern/petsc/install/lib:${LD_LIBRARY_PATH}"
+export HDF5_PLUGIN_PATH="${SEAS_MFEM_ROOT}/extern/h5z-zfp/install/plugin"
+
+cd "${SEAS_MFEM_ROOT}"
+grep -q '^MFEM_USE_PETSC *= YES'  config/config.mk || { echo "ERROR: no PETSc"; exit 1; }
+grep -q '^MFEM_USE_MUMPS *= YES'  config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
+
+cd miniapps/seas
+if [[ ! -x ./seas_spatial_dyn_driver ]]; then
+    echo "ERROR: ./seas_spatial_dyn_driver not found.  Build it FIRST on Expanse"
+    echo "  (with Caliper, for this job):  USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
+    exit 1
+fi
+
+# --- Caliper pre-flight: the binary MUST be linked against libcaliper, else the
+# MFEM_PERF_SCOPE regions are compiled out and the report is EMPTY. -------------
+if ! ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -qi 'libcaliper'; then
+    echo "ERROR: ./seas_spatial_dyn_driver is NOT linked against libcaliper"
+    echo "       (MFEM_USE_CALIPER=NO -> the MFEM_PERF_SCOPE regions are no-ops,"
+    echo "        so Caliper would produce an EMPTY breakdown)."
+    echo "  Rebuild WITH Caliper:  USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
+    echo "  (build_expanse.sh ships Caliper v2.11.0; USE_CALIPER just defaults to NO.)"
+    echo "  To run anyway (e.g. to time the bulk without per-region data):"
+    echo "        sbatch --export=ALL,SAFS_SKIP_CALI_CHECK=1 <this file>"
+    [[ "${SAFS_SKIP_CALI_CHECK:-0}" == "1" ]] || exit 1
+    echo "  SAFS_SKIP_CALI_CHECK=1 set — continuing without Caliper (empty report)."
+fi
+
+SAFS_ROOT=safs/project_7.0_alternative
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml}"
+
+# Mesh: DEFAULT = the sliver-repaired (triq) 500 m mesh (flat z=0 top); override with SAFS_MESH.
+DEFAULT_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
+MESH="${SAFS_MESH:-${DEFAULT_MESH}}"
+if [[ ! -f "${MESH}" ]]; then
+    echo "ERROR: mesh not found: $(pwd)/${MESH}  (gitignored — scp it first)"; exit 1
+fi
+
+# PRODUCTION SIDECAR PRE-FLIGHT (CVM material + CSM stress; both .h5 required).
+VEL_H5="${SAFS_ROOT}/velocity/results/multiscale_statewise_cvm/velocity_safs.h5"
+STR_H5="${SAFS_ROOT}/stress/results/csm_d12_mfem/safs_stress_csm_d12_mfem.h5"
+for _h5 in "${VEL_H5}" "${STR_H5}"; do
+    if [[ ! -f "${_h5}" ]]; then
+        echo "ERROR: required sidecar missing: $(pwd)/${_h5}"
+        echo "       It is gitignored/large; scp it to Expanse before submitting."
+        exit 1
+    fi
+done
+
+# Floor pre-flight (v3 ratestate keeps the 10 MPa MFEM-only sigma_n floor).
+grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOML}" >/dev/null     || { echo "ERROR: ${CONFIG_TOML} has no sigma_n_strength_floor_pa"; exit 1; }
+
+# Flux: MIXED (adjacent) by DEFAULT.  Requires RK (set below).
+SAFS_MIXED_FLUX="${SAFS_MIXED_FLUX:-adjacent}"
+case "${SAFS_MIXED_FLUX}" in
+    none|adjacent|all_continuous) : ;;
+    *) echo "ERROR: SAFS_MIXED_FLUX='${SAFS_MIXED_FLUX}' invalid"; exit 1 ;;
+esac
+MIXFLUX_ARG="--mixed-flux ${SAFS_MIXED_FLUX}"
+
+# Time integrator: RK45 by DEFAULT (FSAL; the np>1-deadlock-safe mixed-flux choice).
+SAFS_TIME_INTEGRATOR="${SAFS_TIME_INTEGRATOR:-rk45}"
+case "${SAFS_TIME_INTEGRATOR}" in
+    ader|rk4|rk45) : ;;
+    *) echo "ERROR: SAFS_TIME_INTEGRATOR='${SAFS_TIME_INTEGRATOR}' invalid (ader|rk4|rk45)"; exit 1 ;;
+esac
+if [[ "${SAFS_MIXED_FLUX}" != "none" && "${SAFS_TIME_INTEGRATOR}" == "ader" ]]; then
+    echo "ERROR: mixed_flux=${SAFS_MIXED_FLUX} + ADER is UNSTABLE (driver aborts). Use rk4/rk45."; exit 1
+fi
+TI_ARG="--time-integrator ${SAFS_TIME_INTEGRATOR}"
+
+# SHORT profiling horizon: tfinal=12 s by default (just enough to cover
+# init -> nucleation -> early breakout so every component is exercised).
+TFINAL="${SAFS_TFINAL:-12s}"
+CFL_ARG=""
+[[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
+
+OUT_BASE="${SAFS_OUTDIR:-${SEAS_MFEM_ROOT}/miniapps/seas/safs}"
+OUT="${OUT_BASE}/safs_dyn_rs_alt_cali_${SLURM_JOB_ID}"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
+LOG="${LOG_DIR}/spatial_dyn_rs_alt_cali_${SLURM_JOB_ID}.log"
+mkdir -p "${OUT}" "${LOG_DIR}"
+
+# === Caliper config (the per-component speed breakdown) =====================
+# DEFAULT (detailed): a runtime-report (inclusive+exclusive time + call counts +
+# per-region MPI time, aggregated across ranks min/avg/max) to a .txt, AND a
+# Hatchet .json for offline analysis.  Override the whole string with
+# SAFS_CALI_CONFIG (e.g. add ',spot(output=...)' for the Spot UI).
+CALI_RUNTIME_TXT="${LOG%.log}.cali-runtime-report.txt"
+CALI_PROFILE_JSON="${LOG%.log}.cali-region-profile.json"
+DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_RUNTIME_TXT}),hatchet-region-profile(output=${CALI_PROFILE_JSON})"
+export CALI_CONFIG="${SAFS_CALI_CONFIG:-${DEFAULT_CALI_CONFIG}}"
+
+echo "Git commit:  $(git rev-parse HEAD)"
+echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
+echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00  (CALIPER PROFILE)"
+echo "EXPERIMENT:  ratestate v3 ALT, CVM + CSM, MIXED FLUX + RK45 — Caliper per-component profile"
+echo "Config:      ${CONFIG_TOML}"
+echo "Mesh:        ${MESH}"
+echo "Mixed flux:  ${SAFS_MIXED_FLUX}    Integrator: ${SAFS_TIME_INTEGRATOR}"
+echo "tfinal:      ${TFINAL}  (SHORT profile)   CFL: ${CFL_ARG:-<config default 0.5>}"
+echo "Caliper:     ldd $(ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -m1 -i libcaliper | awk '{print $1" -> "$3}')"
+echo "CALI_CONFIG: ${CALI_CONFIG}"
+echo "Output dir:  ${OUT}"
+
+# NOTE: --paraview-max-snapshots 5 keeps I/O tiny so it does not dominate the
+# 12 s profile (production uses 300).  Checkpointing is disabled (-every 0) for
+# the same reason — this is a throwaway profiling run.
+srun --mpi=pmi2 -n "${SLURM_NTASKS}" stdbuf -oL -eL ./seas_spatial_dyn_driver \
+    --config "${CONFIG_TOML}" \
+    --mesh   "${MESH}" \
+    ${MIXFLUX_ARG} \
+    ${TI_ARG} \
+    --tfinal "${TFINAL}" \
+    ${CFL_ARG} \
+    --paraview \
+    --paraview-fault-vtu \
+    --paraview-free-surface vtu \
+    --paraview-max-snapshots 5 \
+    --print-derived \
+    --checkpoint-every 0 \
+    --output-dir "${OUT}" \
+    > "${LOG}" 2>&1
+RC=$?
+
+echo
+echo "=== Caliper outputs ==="
+if [[ -f "${CALI_RUNTIME_TXT}" ]]; then
+    echo "runtime-report -> ${CALI_RUNTIME_TXT}"
+    echo "--- top regions (Inclusive time) ---"
+    head -40 "${CALI_RUNTIME_TXT}"
+else
+    echo "WARNING: ${CALI_RUNTIME_TXT} not written — check CALI errors in ${LOG}"
+    grep -iE 'cali|caliper' "${LOG}" | head
+fi
+[[ -f "${CALI_PROFILE_JSON}" ]] && echo "hatchet json  -> ${CALI_PROFILE_JSON}  (analyze with Python Hatchet)"
+
+if [[ ${RC} -ne 0 ]]; then
+    echo "driver_rc=${RC} — see ${LOG}."; exit ${RC}
+fi
+echo "driver_rc=${RC} — profiling run done."
+exit ${RC}
