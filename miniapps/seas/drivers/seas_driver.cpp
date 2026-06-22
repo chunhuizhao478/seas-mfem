@@ -45,6 +45,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <filesystem>
 
 using namespace mfem;
 using namespace mfem::seas;
@@ -391,6 +392,22 @@ int main(int argc, char *argv[])
       local_tp_dip(i) = local_tau_pre(2 * i);
       local_tp_strike(i) = local_tau_pre(2 * i + 1);
    }
+
+   // Ensure the output directory exists before any writer opens a file there.
+   // ProbeOutput / ParallelBP5BenchmarkOutput open <output_dir>/<prefix>_*.txt
+   // directly; without this the run aborts ("Cannot open probe output file")
+   // whenever output_dir does not already exist.  Matches spatial_dyn_driver.
+   if (mpi.IsRoot() && !output_dir.empty() && output_dir != ".")
+   {
+      std::error_code ec;
+      std::filesystem::create_directories(output_dir, ec);
+      if (ec)
+      {
+         std::cerr << "ERROR: could not create output_dir '" << output_dir
+                   << "': " << ec.message() << "\n";
+      }
+   }
+   mpi.Barrier();
 
    // Clean up old output files
    if (mpi.IsRoot())

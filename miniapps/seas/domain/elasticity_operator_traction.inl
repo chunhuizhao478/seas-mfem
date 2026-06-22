@@ -606,12 +606,16 @@ void ElasticityDomainOperator<MeshType>::Solve(
       auto *iter_solver = dynamic_cast<IterativeSolver*>(solver_.get());
       if (iter_solver)
       {
-         if (!iter_solver->GetConverged())
-         {
-            mfem::err << "WARNING: iterative solver did not converge after "
-                      << iter_solver->GetNumIterations() << " iterations, final norm = "
-                      << iter_solver->GetFinalNorm() << "\n";
-         }
+         // A stalled-but-finite iterative solve silently corrupts the elastic
+         // displacement -> traction -> friction -> state, so it must fail fast
+         // rather than poison the time loop.  (MUMPS / direct solvers are not
+         // IterativeSolver, so this guard does not apply to them.)
+         MFEM_VERIFY(iter_solver->GetConverged(),
+            "Iterative domain solve did NOT converge after "
+            << iter_solver->GetNumIterations() << " iterations (final norm = "
+            << iter_solver->GetFinalNorm() << ").  This corrupts traction and "
+            "the friction coupling.  Improve the AMG preconditioner, raise "
+            "max_iter, or switch to a direct solver (solver_type=\"mumps\").");
       }
    }
 

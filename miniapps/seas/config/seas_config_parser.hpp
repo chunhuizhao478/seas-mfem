@@ -116,6 +116,7 @@ public:
          else if (key == "mesh.scale") { config.mesh.scale = ParseDouble(key, val); }
          else if (key == "mesh.order") { config.mesh.order = ParseInt(key, val); }
          else if (key == "solver.dg_method") { config.solver.dg_method = val; }
+         else if (key == "solver.solver_type") { config.solver.solver_type = val; }
          else if (key == "output.output_dir") { config.output.output_dir = val; }
          else if (key == "output.output_prefix") { config.output.output_prefix = val; }
          else

@@ -1,0 +1,36 @@
+# Iterative-solver verification gate: CG + BoomerAMG on the production km mesh.
+# Sibling of bp5_verification_50step.toml (MUMPS) — IDENTICAL physics/mesh/steps,
+# only [solver] differs.  Acceptance: station traces match the MUMPS variant to
+# < 1e-6 over 50 steps, every step's CG converges (no non-convergence abort),
+# traction stays ~25 MPa scale (never the 2.99e12 setup-bug value).
+#
+# Run on Frontera at production rank count to exercise the np>1 AMG path:
+#   ibrun ./seas_driver config/bp5_verification_50step_cg.toml
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+scale = 1000
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "cg"        # CG + BoomerAMG (vector-system, l1-GS relax)
+check_residual = true     # hard-fail on non-convergence (RC-4)
+
+[time]
+t_final = 56844000000
+tandem_time_stepping = true
+use_petsc_ts = true
+petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+max_steps = 50
+
+[output]
+output_dir = "bp5/results_verify_50step_cg"
+output_prefix = "bp5_driver_verify_cg"
