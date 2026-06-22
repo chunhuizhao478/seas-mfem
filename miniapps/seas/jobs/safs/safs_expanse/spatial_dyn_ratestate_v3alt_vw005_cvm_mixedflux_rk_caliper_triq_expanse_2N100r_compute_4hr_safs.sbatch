@@ -5,18 +5,18 @@
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
-#SBATCH --time=02:00:00
+#SBATCH --time=04:00:00
 #SBATCH --mem=100000M
 #SBATCH -A usc143
 
 # =========================================================================
 # SAFS RATESTATE v3.0.0 ALT (vw005) — CALIPER PROFILING run (mixed flux + RK45).
-# *** EXPANSE (SDSC) job — 2N x 50r = 100 ranks / 2 h / 100 GB / tfinal=12 s. ***
+# *** EXPANSE (SDSC) job — 2N x 50r = 100 ranks / 4 h / 100 GB / tfinal=12 s. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
-# A SHORT run (tfinal=12 s, 2 h wall) whose ONLY purpose is a PER-COMPONENT SPEED
-# BREAKDOWN of the solver via Caliper.  Identical physics to the 48 h production
+# A SHORT run (tfinal=12 s, 4 h wall) whose ONLY purpose is a PER-COMPONENT SPEED
+# BREAKDOWN of the solver via Caliper.  Identical physics to the production
 # job (same config / mesh / sidecars / mixed flux + RK45) — just short + profiled.
 #
 # === HOW THE PROFILE IS PRODUCED ==========================================
@@ -227,7 +227,7 @@ fi
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00  (CALIPER PROFILE)"
+echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 04:00:00  (CALIPER PROFILE)"
 echo "EXPERIMENT:  ratestate v3 ALT, CVM + CSM, MIXED FLUX + RK45 — Caliper per-component profile"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
