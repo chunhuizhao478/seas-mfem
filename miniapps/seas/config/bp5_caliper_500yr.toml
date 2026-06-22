@@ -1,0 +1,32 @@
+# BP5-QD run for CALIPER profiling — iterative GMRES+AMG, t_final = 500 yr.
+# Same physics/mesh/solver as bp5_production_gmres.toml; shorter horizon so the
+# profile covers init -> first event -> early cycle.  Driven by CALI_CONFIG in
+# the sbatch (no driver flag).
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+scale = 1000
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "gmres"
+check_residual = true
+
+[time]
+t_final = 15778476000     # 500 yr (= 500 * 31556952 s)
+tandem_time_stepping = true
+use_petsc_ts = true
+petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+checkpoint_interval = 0   # profiling run — no checkpoint I/O
+
+[output]
+output_dir = "bp5/results_caliper_500yr"
+output_prefix = "bp5_caliper_500yr"

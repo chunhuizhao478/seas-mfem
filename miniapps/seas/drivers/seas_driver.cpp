@@ -34,7 +34,8 @@
 #include "../config/bp5_mesh_utils.hpp"
 #include "../io/bp5_parallel_output.hpp"
 #include "../io/probe_output.hpp"
-// #include "../io/checkpoint.hpp"  // Full checkpoint needs displacement/traction vectors
+#include "../io/checkpoint.hpp"            // WriteCheckpoint / ReadCheckpoint (V1)
+#include "../io/petsc_ts_checkpoint.hpp"   // PETSc-TS V2 trailing block (dt-next + rejections)
 #include "../common/mpi_context.hpp"
 #include "../constitutive/linear_elastic.hpp"
 
@@ -45,6 +46,7 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
+#include <limits>
 #include <sys/stat.h>   // ::mkdir — POSIX, portable (avoids std::filesystem,
 #include <cerrno>       // which needs -lstdc++fs on GCC < 9, e.g. Frontera 8.3)
 #include <cstring>
@@ -112,6 +114,7 @@ struct DriverMonitorCtx
    real_t V_threshold_seismic;
    real_t V_threshold_interseismic;
    real_t current_dt;
+   int    restart_rejections_carryover;  // cumulative rejects from prior restart segments
 };
 
 /// PETSc TSMonitor callback — called after every accepted step inside TSSolve.
@@ -218,6 +221,40 @@ static PetscErrorCode driver_ts_monitor_callback(
       std::cout.flush();
    }
 
+   // Checkpoint (V1 state + V2 PETSc-TS trailing block) every checkpoint_interval
+   // accepted steps, so a TIMEOUT'd run can resume via --restart.  Mirrors
+   // seas_bp5_full's monitor.  QD: displacement/traction are recomputed on the
+   // first post-restart solve, but the API takes them; FSAL uses empty k0 (PETSc
+   // manages stage state via the V2 dt-next).  seas_driver has no ParaView output,
+   // so the pv_* fields are defaulted/inert.
+   if (mon->checkpoint_interval > 0 && istep % mon->checkpoint_interval == 0)
+   {
+      Vector empty_k0;
+      WriteCheckpoint(mon->full_prefix, time, mon->current_dt, istep,
+                      mon->num_seismic_events, mon->in_seismic_event,
+                      state, mon->seas_op->GetDisplacement(),
+                      mon->seas_op->GetTraction(), mon->fault_op->GetSlipRate(),
+                      false, empty_k0, mon->mpi);
+
+      PetscReal ts_dt_next;
+      PetscInt  ts_step_q, ts_rejections_q;
+      TSGetTimeStep(ts, &ts_dt_next);
+      TSGetStepNumber(ts, &ts_step_q);
+      TSGetStepRejections(ts, &ts_rejections_q);
+      const int cum_rejects = mon->restart_rejections_carryover
+                              + static_cast<int>(ts_rejections_q);
+      seas::WritePetscTSCheckpoint(mon->full_prefix, time, ts_dt_next,
+                                   static_cast<int>(ts_step_q), cum_rejects,
+                                   /*pv_snapshots*/0,
+                                   /*pv_last_write_time*/-1e30,
+                                   /*pv_last_v_max*/0.0,
+                                   /*pv_current_regime*/0,
+                                   /*pv_last_committed_cycle*/
+                                   std::numeric_limits<int>::min(),
+                                   /*pv_last_volume_write_time*/-1e30,
+                                   mon->mpi);
+   }
+
    PetscFunctionReturn(PETSC_SUCCESS);
 }
 
@@ -244,6 +281,7 @@ int main(int argc, char *argv[])
    std::string config_file = argv[1];
    std::vector<std::string> overrides;
    bool write_every_step = false;
+   std::string restart_prefix;   // --restart PREFIX: resume from a checkpoint
 
    for (int i = 2; i < argc; i++)
    {
@@ -255,6 +293,14 @@ int main(int argc, char *argv[])
       else if (arg == "--max-steps" && i + 1 < argc)
       {
          overrides.push_back("time.max_steps=" + std::string(argv[++i]));
+      }
+      else if (arg == "--checkpoint-interval" && i + 1 < argc)
+      {
+         overrides.push_back("time.checkpoint_interval=" + std::string(argv[++i]));
+      }
+      else if (arg == "--restart" && i + 1 < argc)
+      {
+         restart_prefix = argv[++i];
       }
       else if (arg == "--write-every-step")
       {
@@ -400,7 +446,72 @@ int main(int argc, char *argv[])
    seas_op.SetElasticSigmaN(true);
 
    Vector state(fault_op.StateSize());
-   seas_op.SetInitialCondition(state);
+
+   // Restart support: when --restart PREFIX is given, load (state, t, dt, event
+   // counters) from a checkpoint and SKIP the 4-phase SetInitialCondition;
+   // otherwise initialize from scratch.  (QD: displacement/traction are
+   // recomputed on the first post-restart solve, so the loaded copies are
+   // throwaway.)
+   const bool is_restart = !restart_prefix.empty();
+   real_t restart_t = 0.0, restart_dt = -1.0;
+   int    restart_eq = 0;
+   bool   restart_in_eq = false;
+   int    restart_rejections = 0;
+   if (is_restart)
+   {
+      // Clobber guard (string-only; no std::filesystem so the Frontera GCC-8.3
+      // build stays std::filesystem-free): the restart prefix's directory must
+      // differ from output_dir.  Use distinct segment_NNN dirs across a chain.
+      std::string restart_dir = ".";
+      const std::size_t slash = restart_prefix.find_last_of('/');
+      if (slash != std::string::npos) { restart_dir = restart_prefix.substr(0, slash); }
+      if (restart_dir == config.output.output_dir)
+      {
+         if (mpi.IsRoot())
+         {
+            std::cerr << "ERROR: --output-dir (" << config.output.output_dir
+                      << ") is the same directory as --restart (" << restart_dir
+                      << ").\n       The restarted run would clobber the "
+                         "checkpoint it reads.  Use a distinct output dir "
+                         "(e.g. segment_002 reading segment_001/<prefix>).\n";
+         }
+         return 3;
+      }
+
+      Vector u_ck, trac_ck, sr_ck, k0_ck;
+      int  ck_step = 0;
+      bool ck_fsal = false;
+      const bool ok = ReadCheckpoint(restart_prefix, restart_t, restart_dt,
+                                     ck_step, restart_eq, restart_in_eq, state,
+                                     u_ck, trac_ck, sr_ck, ck_fsal, k0_ck, &mpi);
+      MFEM_VERIFY(ok, "Restart: could not read checkpoint '" << restart_prefix
+                  << "' (expected per-rank files <prefix>_<rank>.chk).");
+#ifdef MFEM_USE_PETSC
+      {
+         real_t ck_t = restart_t, ck_dt_next = restart_dt;
+         int    ck_ts_step = 0, ck_rej = 0, ck_pv_snap = 0, ck_pv_regime = 0,
+                ck_pv_commit = 0;
+         real_t ck_pv_lw = 0.0, ck_pv_lvmax = 0.0, ck_pv_lvt = 0.0;
+         if (ReadPetscTSCheckpoint(restart_prefix, ck_t, ck_dt_next, ck_ts_step,
+                                   ck_rej, ck_pv_snap, ck_pv_lw, ck_pv_lvmax,
+                                   ck_pv_regime, ck_pv_commit, ck_pv_lvt, &mpi))
+         {
+            restart_dt = ck_dt_next;   // resume with PETSc's adapted next dt
+            restart_rejections = ck_rej;
+         }
+      }
+#endif
+      if (mpi.IsRoot())
+      {
+         std::cout << "\n  RESTART from '" << restart_prefix << "': t = "
+                   << restart_t / BP5Params::seconds_per_year << " yr, dt = "
+                   << restart_dt << " s, events = " << restart_eq << "\n";
+      }
+   }
+   else
+   {
+      seas_op.SetInitialCondition(state);
+   }
 
    real_t V_init = seas_op.GetMaxSlipRate();
    if (mpi.IsRoot())
@@ -545,11 +656,13 @@ int main(int argc, char *argv[])
       petsc_mon_ctx.print_step_interval = 10;
       petsc_mon_ctx.checkpoint_interval = config.time.checkpoint_interval;
       petsc_mon_ctx.full_prefix = full_prefix;
-      petsc_mon_ctx.num_seismic_events = 0;
-      petsc_mon_ctx.in_seismic_event = false;
+      petsc_mon_ctx.num_seismic_events = is_restart ? restart_eq : 0;
+      petsc_mon_ctx.in_seismic_event = is_restart ? restart_in_eq : false;
       petsc_mon_ctx.V_threshold_seismic = 1e-3;
       petsc_mon_ctx.V_threshold_interseismic = 1e-6;
-      petsc_mon_ctx.current_dt = dt_init;
+      petsc_mon_ctx.current_dt =
+         (is_restart && restart_dt > 0.0) ? restart_dt : dt_init;
+      petsc_mon_ctx.restart_rejections_carryover = restart_rejections;
 
       ierr = TSMonitorSet(ts, driver_ts_monitor_callback, &petsc_mon_ctx,
                           nullptr);
@@ -576,15 +689,15 @@ int main(int argc, char *argv[])
    // =========================================================================
    // Stage 8: Time loop
    // =========================================================================
-   real_t t = 0.0;
+   real_t t = is_restart ? restart_t : 0.0;
    real_t t_final = config.time.t_final;
    int max_steps = config.time.max_steps;
    int step = 0;
-   int eq_count = 0;
-   bool in_event = false;
+   int eq_count = is_restart ? restart_eq : 0;
+   bool in_event = is_restart ? restart_in_eq : false;
    real_t V_max = V_init;
    int step_rejections = 0;
-   real_t current_dt = dt_init;
+   real_t current_dt = (is_restart && restart_dt > 0.0) ? restart_dt : dt_init;
 
    if (mpi.IsRoot())
    {
