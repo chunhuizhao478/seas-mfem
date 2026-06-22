@@ -1,7 +1,10 @@
 #!/bin/bash
 #SBATCH -J bp5_build
-#SBATCH -o jobs/bp5_spatial/rebuild_seas_driver_%j.out
-#SBATCH -e jobs/bp5_spatial/rebuild_seas_driver_%j.err
+# Bare filenames: SLURM writes these relative to the dir you run `sbatch` from,
+# so the logs land there (NOT a nested jobs/bp5_spatial/ if you submit from
+# inside jobs/bp5_spatial/).  Matches the safs_frontera jobs' convention.
+#SBATCH -o rebuild_seas_driver_%j.out
+#SBATCH -e rebuild_seas_driver_%j.err
 #SBATCH -p development
 #SBATCH -N 1
 #SBATCH -n 1

@@ -1,7 +1,9 @@
 #!/bin/bash
 #SBATCH -J bp5_iter
-#SBATCH -o jobs/bp5_spatial/bp5_verify_iterative_dev_2hr_%j.out
-#SBATCH -e jobs/bp5_spatial/bp5_verify_iterative_dev_2hr_%j.err
+# Bare filenames: logs land in the dir you run `sbatch` from (no nested
+# jobs/bp5_spatial/ duplication).  Matches the safs_frontera jobs' convention.
+#SBATCH -o bp5_verify_iterative_dev_2hr_%j.out
+#SBATCH -e bp5_verify_iterative_dev_2hr_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400

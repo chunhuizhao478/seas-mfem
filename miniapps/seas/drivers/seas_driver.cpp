@@ -45,10 +45,47 @@
 #include <vector>
 #include <cmath>
 #include <algorithm>
-#include <filesystem>
+#include <sys/stat.h>   // ::mkdir — POSIX, portable (avoids std::filesystem,
+#include <cerrno>       // which needs -lstdc++fs on GCC < 9, e.g. Frontera 8.3)
+#include <cstring>
 
 using namespace mfem;
 using namespace mfem::seas;
+
+namespace
+{
+// Recursively create a directory (like `mkdir -p`).  POSIX-only on purpose:
+// std::filesystem::create_directories pulls in libstdc++fs, which is a
+// separate link library on GCC < 9 (Frontera's GCC 8.3.0) and was not on the
+// seas_driver link line -> "undefined reference to std::filesystem::...".
+// ::mkdir matches the existing pattern in io/paraview_output.hpp.
+int MakeDirRecursive(const std::string &path)
+{
+   if (path.empty() || path == ".") { return 0; }
+   std::string partial;
+   std::size_t start = 0;
+   if (path[0] == '/') { partial = "/"; start = 1; }
+   while (start <= path.size())
+   {
+      std::size_t slash = path.find('/', start);
+      std::string comp = (slash == std::string::npos)
+                         ? path.substr(start)
+                         : path.substr(start, slash - start);
+      if (!comp.empty())
+      {
+         partial += comp;
+         if (::mkdir(partial.c_str(), 0755) != 0 && errno != EEXIST)
+         {
+            return -1;
+         }
+         partial += "/";
+      }
+      if (slash == std::string::npos) { break; }
+      start = slash + 1;
+   }
+   return 0;
+}
+} // namespace
 
 // ============================================================================
 // PETSc TS monitor context and callback
@@ -399,12 +436,10 @@ int main(int argc, char *argv[])
    // whenever output_dir does not already exist.  Matches spatial_dyn_driver.
    if (mpi.IsRoot() && !output_dir.empty() && output_dir != ".")
    {
-      std::error_code ec;
-      std::filesystem::create_directories(output_dir, ec);
-      if (ec)
+      if (MakeDirRecursive(output_dir) != 0)
       {
          std::cerr << "ERROR: could not create output_dir '" << output_dir
-                   << "': " << ec.message() << "\n";
+                   << "': " << std::strerror(errno) << "\n";
       }
    }
    mpi.Barrier();
