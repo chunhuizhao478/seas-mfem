@@ -57,9 +57,9 @@
 #
 # IMPORTANT — REMOTE_ROOT is the SAFS run jobs' output base on YOUR Frontera
 # checkout (the run jobs resolve SEAS_MFEM_ROOT by walking up from the submit dir,
-# so OUT = <checkout>/miniapps/seas/safs).  The default below is the documented
-# SAFS Frontera checkout; if you cloned this branch elsewhere, pass
-# --remote-root <your-checkout>/miniapps/seas/safs.
+# so OUT = <checkout>/miniapps/seas/safs).  The default below is the
+# seas-mfem-spatial-dyn-driver checkout (matches scp_safs_sidecars_frontera.sh);
+# if you cloned this branch elsewhere, pass --remote-root <checkout>/miniapps/seas/safs.
 #
 # Whitelist (default): fault_surface*.vtu + free_surface*.vtu + *.pvd
 #                      + spatial_dyn_*.log + SLURM *.out/*.err
@@ -78,7 +78,7 @@ export LC_ALL=C LANG=C
 # Frontera checkout (a <checkout>/miniapps/seas/safs dir).  The safs_frontera run
 # jobs write OUT here (OUT_BASE = <root>/miniapps/seas/safs).  --remote-root
 # overrides the whole path (use it if your branch checkout differs).
-REMOTE_ROOT="/scratch2/10024/zhaochun/seas-project/seas-mfem-safs/miniapps/seas/safs"
+REMOTE_ROOT="/scratch2/10024/zhaochun/seas-project/seas-mfem-spatial-dyn-driver/miniapps/seas/safs"
 REMOTE_GLOB="safs_dyn_*"
 # Driver .log + SLURM .out/.err live in the safs_frontera job dir (LOG_DIR there).
 # Default = <checkout>/miniapps/seas/jobs/safs/safs_frontera.  Override
