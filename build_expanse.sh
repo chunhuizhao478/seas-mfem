@@ -838,6 +838,25 @@ build_caliper() {
         rm -rf "build_${CALIPER_VERSION}"
         mkdir -p "build_${CALIPER_VERSION}"
         cd "build_${CALIPER_VERSION}"
+        # Profiling services for the "detailed breakdown" SAFS jobs.  WITH_SAMPLER
+        # (timer PC sampling -> which function is slowest, covers ALL code, even
+        # uninstrumented PETSc/MUMPS/HDF5/MPI) is dependency-free.  callpath
+        # (libunwind, for sample call-trees) is left to Caliper's auto-detect.
+        # WITH_PAPI (hardware counters -> the "why": IPC, L2/L3 cache misses) is
+        # added ONLY if PAPI is found, so a missing PAPI never breaks the
+        # (non-fatal) Caliper build — sampling still works without it.
+        _cali_prof=( -DWITH_SAMPLER=ON )
+        module load papi 2>/dev/null || true
+        _papi_root="${PAPI_HOME:-${PAPI_ROOT:-${PAPI_DIR:-${TACC_PAPI_DIR:-}}}}"
+        if [ -z "${_papi_root}" ] && command -v papi_avail >/dev/null 2>&1; then
+            _papi_root="$(dirname "$(dirname "$(command -v papi_avail)")")"
+        fi
+        if [ -n "${_papi_root}" ] && [ -f "${_papi_root}/include/papi.h" ]; then
+            _cali_prof+=( -DWITH_PAPI=ON -DPAPI_PREFIX="${_papi_root}" )
+            echo "  Caliper: PAPI hardware counters ENABLED (${_papi_root})"
+        else
+            echo "  Caliper: PAPI not found (try 'module load papi') — HW counters OFF; sampling still on."
+        fi
         cmake .. \
             -DCMAKE_INSTALL_PREFIX="${CALIPER_PREFIX}" \
             -DCMAKE_BUILD_TYPE=Release \
@@ -845,6 +864,7 @@ build_caliper() {
             -DCMAKE_CXX_COMPILER="$(command -v mpicxx)" \
             -DBUILD_SHARED_LIBS=ON \
             -DWITH_MPI=ON \
+            "${_cali_prof[@]}" \
             -DWITH_TESTS=OFF \
             -DWITH_FORTRAN=OFF \
             -DWITH_DOCS=OFF \

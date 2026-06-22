@@ -62,8 +62,10 @@
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
 # SAFS_TIME_INTEGRATOR (default rk45), SAFS_TFINAL (default 12s — SHORT profile),
-# SAFS_CFL, SAFS_DIAG (0/1, default 0), SAFS_CALI_CONFIG (override CALI_CONFIG),
-# SAFS_SKIP_CALI_CHECK (1 = run even if the binary lacks Caliper), SAFS_OUTDIR.
+# SAFS_CFL, SAFS_DIAG (0/1, default 0), SAFS_CALI_CONFIG (full CALI_CONFIG override),
+# SAFS_CALI_HZ (sampling rate/rank, default 500), SAFS_CALI_PAPI (1 = HW counters,
+# needs a WITH_PAPI build) + SAFS_CALI_PAPI_COUNTERS, SAFS_SKIP_CALI_CHECK
+# (1 = run even if the binary lacks Caliper), SAFS_OUTDIR.
 
 export LC_ALL=C
 export LANG=C
@@ -184,15 +186,44 @@ LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
 LOG="${LOG_DIR}/spatial_dyn_rs_alt_cali_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
-# === Caliper config (the per-component speed breakdown) =====================
-# DEFAULT (detailed): a runtime-report (inclusive+exclusive time + call counts +
-# per-region MPI time, aggregated across ranks min/avg/max) to a .txt, AND a
-# Hatchet .json for offline analysis.  Override the whole string with
-# SAFS_CALI_CONFIG (e.g. add ',spot(output=...)' for the Spot UI).
-CALI_RUNTIME_TXT="${LOG%.log}.cali-runtime-report.txt"
-CALI_PROFILE_JSON="${LOG%.log}.cali-region-profile.json"
-DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_RUNTIME_TXT}),hatchet-region-profile(output=${CALI_PROFILE_JSON})"
+# === Caliper config — MAXIMAL detail (3 complementary channels) =============
+CALI_REGION_TXT="${LOG%.log}.cali-region-report.txt"   # instrumented region table
+CALI_SPOT="${LOG%.log}.cali"                           # Spot .cali (Hatchet/Thicket, per-rank)
+CALI_SAMPLE_TXT="${LOG%.log}.cali-sample-report.txt"   # SAMPLING: every function, all workflow
+#
+# Channel 1  runtime-report          : time of each INSTRUMENTED region (inclusive
+#                                       + exclusive), call counts, per-region MPI
+#                                       time, aggregated across ranks (Min/Avg/Max
+#                                       — Max>>Avg flags LOAD IMBALANCE, expected
+#                                       here since the fault is on a subset of ranks).
+# Channel 2  spot                    : .cali for the LLNL Spot UI + Python
+#                                       Hatchet/Thicket — the PER-RANK, comparable,
+#                                       deep-analysis artifact (which ranks are slow).
+# Channel 3  callpath-sample-report  : timer SAMPLING of the WHOLE program — every
+#                                       function, instrumented or NOT (init,
+#                                       PETSc/MUMPS, HDF5/VTU I/O, MPI internals,
+#                                       partitioning).  THIS answers "which function
+#                                       is the slowest" across the FULL workflow; the
+#                                       region channels only see the marked regions.
+#                                       Sampler is built-in; call-trees need the
+#                                       Caliper build's callpath/libunwind (degrades
+#                                       to a flat warning if absent — see sample-report).
+export CALI_SAMPLER_FREQUENCY="${SAFS_CALI_HZ:-500}"   # samples/s/rank (higher = finer, more overhead)
+DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT}),callpath-sample-report(output=${CALI_SAMPLE_TXT})"
 export CALI_CONFIG="${SAFS_CALI_CONFIG:-${DEFAULT_CALI_CONFIG}}"
+#
+# The "WHY a function is slow" layer — hardware counters (memory-bound vs
+# compute-bound).  SAFS_CALI_PAPI=1 turns on PAPI: IPC (PAPI_TOT_INS/PAPI_TOT_CYC)
+# + cache misses (L2/L3) attributed per region, written to a separate Hatchet
+# .json.  REQUIRES a Caliper build WITH_PAPI (USE_CALIPER=YES + the papi module;
+# build_expanse.sh now enables it when papi is found).  Expanse is AMD EPYC, so
+# these are RAW PAPI counters, NOT Intel 'topdown'; tune via SAFS_CALI_PAPI_COUNTERS
+# (run 'papi_avail' on a compute node for the supported set).
+if [[ "${SAFS_CALI_PAPI:-0}" == "1" ]]; then
+    export CALI_PAPI_COUNTERS="${SAFS_CALI_PAPI_COUNTERS:-PAPI_TOT_CYC,PAPI_TOT_INS,PAPI_L2_DCM,PAPI_L3_TCM}"
+    export CALI_CONFIG="${CALI_CONFIG},hatchet-region-profile(output=${LOG%.log}.cali-papi-profile.json,use.mpi)"
+    echo "Caliper PAPI: ${CALI_PAPI_COUNTERS}  (needs a WITH_PAPI Caliper build)"
+fi
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
@@ -228,15 +259,27 @@ RC=$?
 
 echo
 echo "=== Caliper outputs ==="
-if [[ -f "${CALI_RUNTIME_TXT}" ]]; then
-    echo "runtime-report -> ${CALI_RUNTIME_TXT}"
-    echo "--- top regions (Inclusive time) ---"
-    head -40 "${CALI_RUNTIME_TXT}"
+if [[ -f "${CALI_REGION_TXT}" ]]; then
+    echo "region report -> ${CALI_REGION_TXT}   (instrumented components; Max>>Avg = imbalance)"
+    echo "--- instrumented regions (slowest first) ---"
+    head -40 "${CALI_REGION_TXT}"
 else
-    echo "WARNING: ${CALI_RUNTIME_TXT} not written — check CALI errors in ${LOG}"
+    echo "WARNING: ${CALI_REGION_TXT} not written — region channel failed; CALI messages:"
     grep -iE 'cali|caliper' "${LOG}" | head
 fi
-[[ -f "${CALI_PROFILE_JSON}" ]] && echo "hatchet json  -> ${CALI_PROFILE_JSON}  (analyze with Python Hatchet)"
+echo
+if [[ -f "${CALI_SAMPLE_TXT}" ]]; then
+    echo "sample report -> ${CALI_SAMPLE_TXT}   (WHICH FUNCTION IS SLOWEST — whole program)"
+    echo "--- top sampled functions (self time) ---"
+    head -40 "${CALI_SAMPLE_TXT}"
+else
+    echo "NOTE: ${CALI_SAMPLE_TXT} not written — the sampler/callpath service is missing"
+    echo "      from this Caliper build (sampler is built-in; call-trees need libunwind)."
+    grep -iE 'sampl|callpath|cali' "${LOG}" | head
+fi
+echo
+[[ -f "${CALI_SPOT}" ]] && echo "spot/.cali    -> ${CALI_SPOT}   (Hatchet/Thicket or Spot UI: PER-RANK detail)"
+[[ -f "${LOG%.log}.cali-papi-profile.json" ]] && echo "papi profile  -> ${LOG%.log}.cali-papi-profile.json   (hardware counters: the 'why')"
 
 if [[ ${RC} -ne 0 ]]; then
     echo "driver_rc=${RC} — see ${LOG}."; exit ${RC}
