@@ -1,21 +1,21 @@
 #!/bin/bash
-#SBATCH -J safs_rs_alt_exp
-#SBATCH -o safs_rs_alt_exp_%j.out
-#SBATCH -e safs_rs_alt_exp_%j.err
+#SBATCH -J safs_sw_alt_exp
+#SBATCH -o safs_sw_alt_exp_%j.out
+#SBATCH -e safs_sw_alt_exp_%j.err
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
-#SBATCH --time=02:00:00
+#SBATCH --time=48:00:00
 #SBATCH --mem=100000M
 #SBATCH -A usc143
 
 # =========================================================================
-# SAFS RATESTATE v3.0.0 ALT (vw005) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK45.
-# *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
-# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
+# SAFS SLIPWEAKENING v3.0.0 ALT — MFEM port with CVM material + MIXED FLUX (adjacent) + RK45.
+# *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 48 h / 100 GB. ***
+# Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_ALT.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
-# RS-SRW vw005 (f_0=0.6, f_w=0.10, Dc=0.10, V_w=0.05->3.0),  multiscale_statewise CVM material (the PRODUCTION material),
+# LSW (mu_s=0.318, mu_d=0.10, d_c=1.2),  multiscale_statewise CVM material (the PRODUCTION material),
 # spatially-varying CSM effective stress, mixed_flux=adjacent + time_integrator=rk45
 # (central flux needs an RK integrator — UNSTABLE under ADER; rk45 is FSAL so it
 # avoids the np>1 endpoint-Mult issue rk4 hit).  CFL 0.5 = STARTING calibration for
@@ -29,14 +29,14 @@
 #   * Runtime libs: libhdf5.so (sidecar reader) + libzfp.so live in extern/*;
 #     added to LD_LIBRARY_PATH below; HDF5_PLUGIN_PATH -> the H5Z-ZFP plugin.
 #   * Sizing : compute (exclusive 128-core / 256 GB nodes), 2N x 50r = 100 ranks,
-#     --mem=100000M (100 GB/node = 2 GB/rank), 2 h.  This is the SAME resource
-#     config the SeisSol ALT/PREFERRED cases used on Expanse.  Output goes UNDER
+#     --mem=100000M (100 GB/node = 2 GB/rank), 48 h.  Same node/rank/memory
+#     layout as the SeisSol ALT/PREFERRED Expanse cases.  Output goes UNDER
 #     the repo (qstore): <root>/miniapps/seas/safs (override via SAFS_OUTDIR).
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): RK45 + this mesh will NOT
-# reach tfinal=150 s in 2 h — the run advances through nucleation/breakout and
+# PRODUCTION RUN (compute, 2N x 50r = 100 ranks, 48 h): RK45 — this mesh may not
+# reach tfinal=150 s even in 48 h — the run advances through nucleation/breakout and
 # CHECKPOINTS.  ACCEPTANCE = clean start, V_max bounded, on-fault sigma_n stable in
 # time (the mixed-flux leak cure), FreeSurf banner active.  Resume toward 150 s with
 # the restart sibling (or chain this with SAFS_RESTART).
@@ -118,7 +118,7 @@ if [[ ! -x ./seas_spatial_dyn_driver ]]; then
 fi
 
 SAFS_ROOT=safs/project_7.0_alternative
-CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml}"
+CONFIG_TOML="${SAFS_CONFIG:-${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_LSW_ALT.toml}"
 
 # Mesh: DEFAULT = the sliver-repaired (triq) 500 m mesh (flat z=0 top); override with SAFS_MESH.
 DEFAULT_MESH="${SAFS_ROOT}/experimental_mesh_refinement/safs_fault_box_nwcut_500m_lcfar3000_z0embed_triq.msh"
@@ -141,7 +141,7 @@ for _h5 in "${VEL_H5}" "${STR_H5}"; do
     fi
 done
 
-# Floor pre-flight (v3 ratestate keeps the 10 MPa MFEM-only sigma_n floor).
+# Floor pre-flight (v3 slipweakening keeps the 5 MPa MFEM-only sigma_n floor).
 grep -E '^[[:space:]]*sigma_n_strength_floor_pa[[:space:]]*=' "${CONFIG_TOML}" >/dev/null     || { echo "ERROR: ${CONFIG_TOML} has no sigma_n_strength_floor_pa"; exit 1; }
 
 # Flux: MIXED (adjacent) by DEFAULT — the production choice (central-on-fault-
@@ -180,15 +180,15 @@ RESTART_ARG=""
 # Output UNDER the repo on qstore (same convention as the Frontera jobs); the
 # per-run dir is job-ID-keyed.  Override the base with SAFS_OUTDIR.
 OUT_BASE="${SAFS_OUTDIR:-${SEAS_MFEM_ROOT}/miniapps/seas/safs}"
-OUT="${OUT_BASE}/safs_dyn_rs_alt_exp_${SLURM_JOB_ID}"
+OUT="${OUT_BASE}/safs_dyn_sw_alt_exp_${SLURM_JOB_ID}"
 LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/safs/safs_expanse"
-LOG="${LOG_DIR}/spatial_dyn_rs_alt_exp_${SLURM_JOB_ID}.log"
+LOG="${LOG_DIR}/spatial_dyn_sw_alt_exp_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00"
-echo "EXPERIMENT:  ratestate v3 ALT, CVM material + CSM stress, MIXED FLUX + RK"
+echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 48:00:00"
+echo "EXPERIMENT:  slipweakening v3 ALT, CVM material + CSM stress, MIXED FLUX + RK"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
 echo "Sidecars:    vel=${VEL_H5}  stress=${STR_H5}"
