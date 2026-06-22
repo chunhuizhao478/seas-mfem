@@ -5,13 +5,13 @@
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
-#SBATCH --time=02:00:00
+#SBATCH --time=48:00:00
 #SBATCH --mem=100000M
 #SBATCH -A usc143
 
 # =========================================================================
 # SAFS RATESTATE v3.0.0 ALT (vw005) — MFEM port with CVM material + MIXED FLUX (adjacent) + RK45.
-# *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
+# *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 48 h / 100 GB. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
@@ -29,13 +29,13 @@
 #   * Runtime libs: libhdf5.so (sidecar reader) + libzfp.so live in extern/*;
 #     added to LD_LIBRARY_PATH below; HDF5_PLUGIN_PATH -> the H5Z-ZFP plugin.
 #   * Sizing : compute (exclusive 128-core / 256 GB nodes), 2N x 50r = 100 ranks,
-#     --mem=100000M (100 GB/node = 2 GB/rank), 2 h.  This is the SAME resource
-#     config the SeisSol ALT/PREFERRED cases used on Expanse.  Output goes UNDER
+#     --mem=100000M (100 GB/node = 2 GB/rank), 48 h.  Same node/rank/memory
+#     layout as the SeisSol ALT/PREFERRED Expanse cases.  Output goes UNDER
 #     the repo (qstore): <root>/miniapps/seas/safs (override via SAFS_OUTDIR).
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# RESTART/CONTINUATION (compute, 2N x 50r = 100 ranks, 2 h): resumes a 100-rank
+# RESTART/CONTINUATION (compute, 2N x 50r = 100 ranks, 48 h): resumes a 100-rank
 # checkpoint (RESTART_FROM) toward tfinal=150 s.  Chain as many of these as needed.
 #
 # Scale up by OVERRIDING the sbatch headers at submit time, e.g.
@@ -200,7 +200,7 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 02:00:00"
+echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 48:00:00"
 echo "EXPERIMENT:  ratestate v3 ALT, CVM material + CSM stress, MIXED FLUX + RK"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
