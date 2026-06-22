@@ -1,17 +1,24 @@
 #!/bin/bash
 #SBATCH -J bp5_iter
-#SBATCH -o jobs/bp5/bp5_verify_iterative_dev_2hr_%j.out
-#SBATCH -e jobs/bp5/bp5_verify_iterative_dev_2hr_%j.err
+#SBATCH -o jobs/bp5_spatial/bp5_verify_iterative_dev_2hr_%j.out
+#SBATCH -e jobs/bp5_spatial/bp5_verify_iterative_dev_2hr_%j.err
 #SBATCH -p development
 #SBATCH -N 8
 #SBATCH -n 400
 #SBATCH -t 02:00:00
 #SBATCH -A EAR20006
 
-# BP5-QD iterative-solver verification gate (seas_driver / new TOML driver).
-# Exercises the np>1 AMG path that was stalling before the SetSystemsOptions +
-# l1-GS-relax fix (RC-2).  Runs CG+AMG then GMRES+AMG, 50 steps each, on the
-# production km mesh.  Compare both against the MUMPS golden to < 1e-6.
+# BP5-QD iterative-solver verification gate (seas_driver — the BP5 TOML driver,
+# NOT seas_spatial_dyn_driver).  Exercises the np>1 AMG path on the production km
+# mesh: runs GMRES+AMG then CG+AMG, 50 steps each.  Compare both against the
+# MUMPS golden to < 1e-6.
+#
+# For a clean, self-verifying build first (recommended after a git pull — the
+# seas Makefile has no header-dependency tracking):
+#   D=miniapps/seas/jobs/bp5_spatial
+#   bid=$(sbatch --parsable ${D}/rebuild_seas_driver_frontera.sbatch)
+#   sbatch --dependency=afterok:${bid} ${D}/bp5_verify_iterative_dev_2hr.sbatch
+# (this job also does a clean in-job relink, so it is safe to submit standalone.)
 #
 # Acceptance per solver:
 #   - every step's iterative solve CONVERGES (no "did NOT converge" abort)
@@ -33,7 +40,23 @@ module load fftw3/3.3.8
 # HYPRE_Init->HYPRE_Initialize rename, see frontera-hypre-initialize memory)
 export LD_LIBRARY_PATH="${TACC_HYPRE_LIB}:${TACC_PARMETIS_LIB}:${TACC_MUMPS_LIB}:${TACC_PETSC_LIB}:${TACC_FFTW3_LIB}:${LD_LIBRARY_PATH}"
 
-cd /scratch2/10024/zhaochun/seas-project/seas-mfem
+# Resolve seas-mfem root by walking UP until miniapps/seas/Makefile is found
+# (works regardless of the Frontera checkout path).
+SEAS_MFEM_ROOT="${SEAS_MFEM_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}"
+_walk_up_dir="${SEAS_MFEM_ROOT}"
+for _ in 0 1 2 3 4 5 6 7; do
+    if [[ -f "${_walk_up_dir}/miniapps/seas/Makefile" ]]; then
+        SEAS_MFEM_ROOT="$(cd "${_walk_up_dir}" && pwd)"
+        break
+    fi
+    _walk_up_dir="${_walk_up_dir}/.."
+done
+if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
+    echo "ERROR: cannot locate seas-mfem root from SLURM_SUBMIT_DIR=${SLURM_SUBMIT_DIR:-<unset>}."
+    echo "  Set it explicitly: sbatch --export=ALL,SEAS_MFEM_ROOT=/path/to/seas-mfem ..."
+    exit 1
+fi
+cd "${SEAS_MFEM_ROOT}"
 
 JOBS=8
 
@@ -41,11 +64,14 @@ grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; e
 
 cd miniapps/seas
 
-# RC-1: ensure toml11 submodule is present (SEAS_USE_TOML gating) on fresh checkouts
+# ensure toml11 submodule is present (SEAS_USE_TOML gating) on fresh checkouts
 test -f extern/toml11/toml.hpp || test -f extern/toml11/include/toml.hpp || \
    git submodule update --init extern/toml11 || \
    { echo "ERROR: toml11 not initialized. Run: git submodule update --init miniapps/seas/extern/toml11"; exit 1; }
 
+# Clean relink of the single driver TU (kills the stale-.o hazard after a pull;
+# rebuild_seas_driver_frontera.sbatch is the fuller pre-flight build).
+rm -f drivers/seas_driver.o
 make seas_driver SEAS_USE_TOML=YES -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
 
 echo "Git commit: $(git rev-parse HEAD)"
