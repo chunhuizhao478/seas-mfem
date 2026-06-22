@@ -1,0 +1,34 @@
+# BP5-QD production run, iterative GMRES+AMG solver, to t_final (~1800 yr).
+# Sibling of bp5_production_new_driver.toml (MUMPS); identical physics/mesh,
+# only [solver] differs.  No max_steps -> runs to t_final (or until walltime).
+# NOTE: seas_driver has NO working checkpoint/restart yet, so this is a single
+# walltime-bounded run; station traces flush every step so partial output is
+# kept if the job times out.
+
+benchmark = "bp5"
+
+[mesh]
+file = "bp5/mesh/reference/bp5_tandem_exact.msh"
+scale = 1000
+order = 1
+
+[boundary]
+dirichlet = [5]
+natural = [1]
+fault = 3
+
+[solver]
+dg_method = "IP"
+solver_type = "gmres"      # GMRES + BoomerAMG (robust DG iterative)
+check_residual = true      # hard-fail on non-convergence (never run on a stalled solve)
+
+[time]
+t_final = 56844000000      # ~1800 yr
+tandem_time_stepping = true
+use_petsc_ts = true
+petsc_ts_options = "tests/verification/petsc_ts_rk45_tandem.cfg"
+checkpoint_interval = 5000
+
+[output]
+output_dir = "bp5/results_production_gmres"
+output_prefix = "bp5_prod_gmres"
