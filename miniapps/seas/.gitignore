@@ -175,10 +175,15 @@ safs/safs_dyn_smoke_*/
 safs/results_*/
 
 # SAFS run logs + post-run verify summaries written next to the sbatch
-# in jobs/safs (the .sbatch files themselves stay tracked).
+# in jobs/safs (the .sbatch files themselves stay tracked).  The */ rules cover
+# the per-cluster subdirs (safs_expanse/, safs_frontera/) where the run jobs
+# write their LOG/.out/.err — keep those out of git, keep the .sbatch tracked.
 jobs/safs/*.out
 jobs/safs/*.err
 jobs/safs/*.log
+jobs/safs/*/*.out
+jobs/safs/*/*.err
+jobs/safs/*/*.log
 jobs/safs/verify_summary_*.txt
 
 # SeisSol QuakeWorx run outputs (large simulation artifacts; the input
