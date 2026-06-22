@@ -13,12 +13,10 @@
 # mesh: runs GMRES+AMG then CG+AMG, 50 steps each.  Compare both against the
 # MUMPS golden to < 1e-6.
 #
-# For a clean, self-verifying build first (recommended after a git pull — the
-# seas Makefile has no header-dependency tracking):
-#   D=miniapps/seas/jobs/bp5_spatial
-#   bid=$(sbatch --parsable ${D}/rebuild_seas_driver_frontera.sbatch)
-#   sbatch --dependency=afterok:${bid} ${D}/bp5_verify_iterative_dev_2hr.sbatch
-# (this job also does a clean in-job relink, so it is safe to submit standalone.)
+# This job does NOT build — it just runs the already-built ./seas_driver.
+# Build the driver ONCE first, then submit this as usual:
+#   sbatch jobs/bp5_spatial/rebuild_seas_driver_frontera.sbatch   # wait for it to finish
+#   sbatch jobs/bp5_spatial/bp5_verify_iterative_dev_2hr.sbatch
 #
 # Acceptance per solver:
 #   - every step's iterative solve CONVERGES (no "did NOT converge" abort)
@@ -56,23 +54,15 @@ if [[ ! -f "${SEAS_MFEM_ROOT}/miniapps/seas/Makefile" ]]; then
     echo "  Set it explicitly: sbatch --export=ALL,SEAS_MFEM_ROOT=/path/to/seas-mfem ..."
     exit 1
 fi
-cd "${SEAS_MFEM_ROOT}"
+cd "${SEAS_MFEM_ROOT}/miniapps/seas"
 
-JOBS=8
-
-grep -q '^MFEM_USE_MUMPS *= YES' config/config.mk || { echo "ERROR: no MUMPS"; exit 1; }
-
-cd miniapps/seas
-
-# ensure toml11 submodule is present (SEAS_USE_TOML gating) on fresh checkouts
-test -f extern/toml11/toml.hpp || test -f extern/toml11/include/toml.hpp || \
-   git submodule update --init extern/toml11 || \
-   { echo "ERROR: toml11 not initialized. Run: git submodule update --init miniapps/seas/extern/toml11"; exit 1; }
-
-# Clean relink of the single driver TU (kills the stale-.o hazard after a pull;
-# rebuild_seas_driver_frontera.sbatch is the fuller pre-flight build).
-rm -f drivers/seas_driver.o
-make seas_driver SEAS_USE_TOML=YES -j"${JOBS}" || { echo "BUILD FAILED"; exit 1; }
+# Use the binary built by rebuild_seas_driver_frontera.sbatch — this job does
+# not build.  If it is missing, submit the rebuild job first.
+if [[ ! -x ./seas_driver ]]; then
+    echo "ERROR: ./seas_driver not found — build it first:"
+    echo "  sbatch jobs/bp5_spatial/rebuild_seas_driver_frontera.sbatch"
+    exit 1
+fi
 
 echo "Git commit: $(git rev-parse HEAD)"
 echo "Git branch: $(git rev-parse --abbrev-ref HEAD)"

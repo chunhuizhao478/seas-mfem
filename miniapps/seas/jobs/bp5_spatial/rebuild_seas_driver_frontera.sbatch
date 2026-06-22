@@ -15,11 +15,10 @@
 # rebuilt by safs/safs_frontera/spatial_dyn_build_safs_frontera.sbatch) — this
 # job builds ONLY seas_driver.
 #
-# Run this BEFORE the bp5_spatial verify/run jobs (or chain via --dependency):
-#   D=miniapps/seas/jobs/bp5_spatial
-#   bid=$(sbatch --parsable ${D}/rebuild_seas_driver_frontera.sbatch)
-#   sbatch --dependency=afterok:${bid} ${D}/bp5_verify_iterative_dev_2hr.sbatch
-#   # afterok means a FAILED build (incl. the HYPRE symbol check) cancels the run.
+# Build the driver ONCE with this job, then submit the run jobs as usual:
+#   sbatch jobs/bp5_spatial/rebuild_seas_driver_frontera.sbatch   # wait for it to finish
+#   sbatch jobs/bp5_spatial/bp5_verify_iterative_dev_2hr.sbatch
+# The run jobs do NOT rebuild — they use the ./seas_driver this job produces.
 #
 # It addresses the build-issue classes this project keeps hitting:
 #   (1) STALE OBJECTS -> CLEAN BUILD BY DEFAULT.  The seas Makefile has NO
