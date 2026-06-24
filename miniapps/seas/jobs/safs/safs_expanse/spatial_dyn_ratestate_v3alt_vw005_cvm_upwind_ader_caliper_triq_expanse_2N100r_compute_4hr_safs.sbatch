@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=50
 #SBATCH --time=04:00:00
 #SBATCH --mem=100000M
-#SBATCH -A usc143
+#SBATCH -A ddp408
 
 # =========================================================================
 # SAFS RATESTATE v3.0.0 ALT (vw005) — CALIPER PROFILING run (UPWIND Godunov + ADER).
