@@ -3848,17 +3848,33 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
    if constexpr (IsParallelMesh<MeshType>::value)
    {
 #ifdef MFEM_USE_MPI
-      auto &pmesh_consensus = static_cast<const ParMesh &>(mesh_);
-      const int my_has = has_bulk_bg_ ? 1 : 0;
-      int min_has = 0;
-      MPI_Allreduce(&my_has, &min_has, 1, MPI_INT, MPI_MIN,
-                    pmesh_consensus.GetComm());
-      MFEM_VERIFY(min_has == 1,
-                  "ComputeADERFaceFluxRHS: SetAbsorbingBackground(Q_bg) was "
-                  "NOT called on every rank (min has_bulk_bg_=" << min_has
-                  << ").  A rank-local missing call would deadlock at the "
-                  "shared corrector's ExchangeFaceNbrData; the collective "
-                  "check fails loud everywhere instead.  See R-1505.");
+      // R-1505 hoist (opt 2026-06-24): run this collective consensus ONCE (the
+      // first corrector call after setup / a background change), then skip the
+      // per-step global barrier.  This site is GATE-FREE — every rank reaches it
+      // each step — so a rank that skipped SetAbsorbingBackground is still
+      // detected on the first step (exactly as the per-step version did, and
+      // unlike moving the check into the setter: a skipping rank would never
+      // reach an in-setter Allreduce, deadlocking the others).
+      // bulk_bg_consensus_done_ flips identically on all ranks (the Allreduce is
+      // collective + uniform here), so steps 2..n skip in lockstep — no partial
+      // participation.  This is also the ONLY collective consensus for the bulk
+      // background; the shared corrector (run immediately after, this step)
+      // relies on it (REVIEW R-001).
+      if (!bulk_bg_consensus_done_)
+      {
+         auto &pmesh_consensus = static_cast<const ParMesh &>(mesh_);
+         const int my_has = has_bulk_bg_ ? 1 : 0;
+         int min_has = 0;
+         MPI_Allreduce(&my_has, &min_has, 1, MPI_INT, MPI_MIN,
+                       pmesh_consensus.GetComm());
+         MFEM_VERIFY(min_has == 1,
+                     "ComputeADERFaceFluxRHS: SetAbsorbingBackground(Q_bg) was "
+                     "NOT called on every rank (min has_bulk_bg_=" << min_has
+                     << ").  A rank-local missing call would deadlock at the "
+                     "shared corrector's ExchangeFaceNbrData; the collective "
+                     "check fails loud everywhere instead.  See R-1505.");
+         bulk_bg_consensus_done_ = true;
+      }
 #endif
    }
    else
@@ -4905,33 +4921,30 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
       // v9.4.0: see ComputeADERFaceFluxRHS top-level note.  REVIEW R-007:
       // updated stale "Total-Q only" wording.
       //
-      // R-1505: COLLECTIVE consensus check (shared corrector mirror).  See
-      // the matching block in ComputeADERFaceFluxRHS for the rationale.
-      // Only the shared corrector's ExchangeFaceNbrData below would
-      // actually deadlock on a rank-local abort, but checking here too
-      // costs ~one Allreduce per AdvanceADER call (negligible) and keeps
-      // the two corrector entry points self-documenting about their
-      // collective contract.
+      // R-1505 / REVIEW R-001: the COLLECTIVE consensus that every rank called
+      // SetAbsorbingBackground lives ONLY in ComputeADERFaceFluxRHS (gate-free,
+      // all-ranks, run immediately before this corrector each AdvanceADER step).
+      // It must NOT be repeated here, because this site is past the
+      // `if (n_shared==0) return;` early return — a full-communicator Allreduce
+      // behind that gate deadlocks a no-shared-face rank (the R-1600 np=10 hang).
       {
-#ifdef MFEM_USE_MPI
-         auto &pmesh_consensus = static_cast<const ParMesh &>(mesh_);
-         const int my_has = has_bulk_bg_ ? 1 : 0;
-         int min_has = 0;
-         MPI_Allreduce(&my_has, &min_has, 1, MPI_INT, MPI_MIN,
-                       pmesh_consensus.GetComm());
-         MFEM_VERIFY(min_has == 1,
-                     "ComputeADERSharedFaceFluxRHS: SetAbsorbingBackground"
-                     "(Q_bg) was NOT called on every rank (min has_bulk_bg_="
-                     << min_has << ").  A rank-local abort here would "
-                     "deadlock the next q_gf.ExchangeFaceNbrData; the "
-                     "collective check fails loud everywhere instead.  "
-                     "See R-1505.");
-#else
+         // REVIEW R-001 (opt 2026-06-24): this corrector sits AFTER the
+         // `if (n_shared==0) return;` above, so a full-communicator MPI_Allreduce
+         // here would deadlock a rank that owns no shared faces (it returns early
+         // and never enters the collective) — the R-1600 np=10 hang shape.  The
+         // collective bulk-background consensus is therefore done ONLY in
+         // ComputeADERFaceFluxRHS, which AdvanceADER calls immediately before
+         // this (wave_operator.inl, the ComputeADERFaceFluxRHS line just above
+         // the ComputeADERSharedFaceFluxRHS call): it is gate-free, runs on all
+         // ranks, and fails loud everywhere before any rank reaches the shared
+         // corrector's ExchangeFaceNbrData.  So a rank-local tripwire suffices
+         // here — by construction has_bulk_bg_ is already true on every rank.
          MFEM_VERIFY(has_bulk_bg_,
-                     "wave.AdvanceADER() requires SetAbsorbingBackground("
-                     "Q_bg) to have been called (Q_bg = 0 is valid under "
-                     "fluctuation-Q dispatch).");
-#endif
+                     "ComputeADERSharedFaceFluxRHS requires "
+                     "SetAbsorbingBackground(Q_bg) (Q_bg = 0 is valid under "
+                     "fluctuation-Q dispatch); the cross-rank consensus is the "
+                     "gate-free check in ComputeADERFaceFluxRHS run immediately "
+                     "before this.  See R-1505 / R-1600 / REVIEW R-001.");
       }
 
       if (bc_.fault_attr > 0)

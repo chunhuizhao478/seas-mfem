@@ -394,6 +394,12 @@ public:
    {
       if (Q_bg == nullptr)
       {
+         // REVIEW R-011: the nullptr-clear re-arms the consensus (below), so the
+         // next AdvanceADER's lazy-once check finds min has_bulk_bg_==0 and
+         // aborts fail-loud on ALL ranks — matching the original per-step
+         // behaviour.  A clear is only well-defined when performed collectively
+         // (all ranks); callers wanting fluctuation-Q should pass a zero-filled
+         // array, not nullptr-clear-then-advance.
          has_bulk_bg_ = false;
          std::fill(bulk_bg_, bulk_bg_ + NUM_STATE, real_t(0));
       }
@@ -402,6 +408,11 @@ public:
          has_bulk_bg_ = true;
          for (int c = 0; c < NUM_STATE; c++) { bulk_bg_[c] = Q_bg[c]; }
       }
+      // R-1505 hoist (opt 2026-06-24): re-arm the one-time collective consensus
+      // so a (collective) mid-run background change is re-verified on the next
+      // AdvanceADER step.  See bulk_bg_consensus_done_ and the gated Allreduce
+      // in ComputeADERFaceFluxRHS.
+      bulk_bg_consensus_done_ = false;
    }
    const real_t *GetAbsorbingBackground() const
    { return has_bulk_bg_ ? bulk_bg_ : nullptr; }
@@ -1058,6 +1069,44 @@ protected:
    /// copies values in, removing any external-buffer lifetime concern.
    bool has_bulk_bg_ = false;
    real_t bulk_bg_[NUM_STATE] = {0};
+   /// R-1505 hoist (opt 2026-06-24; REVIEW R-001/R-002/R-010/R-011): the
+   /// per-step COLLECTIVE consensus that `SetAbsorbingBackground` was called on
+   /// EVERY rank is invariant for the whole run (`has_bulk_bg_` has a single
+   /// writer, called once at setup), so doing the Allreduce in
+   /// `ComputeADERFaceFluxRHS` 1445× per run is a global barrier in the hot loop
+   /// whose cost is almost entirely load-imbalance wait.  We run the consensus
+   /// LAZILY on the first `ComputeADERFaceFluxRHS` call — a GATE-FREE site every
+   /// rank reaches each step, so it keeps the "a rank skipped the setter"
+   /// detection that moving the check INTO the setter would lose AND deadlock on
+   /// (the skipping rank would never reach an in-setter Allreduce) — cache the
+   /// verified result, and skip the Allreduce on later steps.
+   ///
+   /// ONE flag: `ComputeADERSharedFaceFluxRHS` (the only caller of which runs it
+   /// immediately AFTER `ComputeADERFaceFluxRHS` each AdvanceADER step) does NOT
+   /// run a collective here — its `if (n_shared==0) return;` precedes any
+   /// reduction, so a full-comm Allreduce there would deadlock a no-shared-face
+   /// rank (REVIEW R-001 / the R-1600 np=10 hang).  The gate-free local
+   /// consensus already fails loud on all ranks before the shared corrector, so
+   /// the shared site only needs a rank-local tripwire.
+   ///
+   /// COLLECTIVE-CALL CONTRACT (REVIEW R-002, mirrors R-1205 for
+   /// SetMixedFluxMode): `SetAbsorbingBackground` MUST be called collectively
+   /// (all ranks, consistent has/has-not) and is setup-time-only in production
+   /// (sole writer: the driver's one-shot call outside the time loop).  Caching
+   /// the consensus means a NON-collective mid-run change would not be re-caught
+   /// per step as the old code did; that scenario is a programming error already
+   /// disallowed by this contract and is unreachable in any current driver.  A
+   /// per-step rank-local re-check is deliberately NOT added: a rank-local abort
+   /// is exactly the R-1505 deadlock this hoist's gate-free collective avoids.
+   ///
+   /// `mutable`: memoizes a logically-const consensus inside the `const`
+   /// correctors; the cached bool feeds only `MFEM_VERIFY`, never flux numerics,
+   /// so output is byte-preserved.  SINGLE-THREAD assumption (REVIEW R-010): the
+   /// read-modify-write is non-atomic and safe only under the current MPI-only,
+   /// one-WaveOperator-per-rank, no-concurrent-corrector model; promote to
+   /// std::once_flag / atomic if a corrector is ever called from multiple
+   /// threads on the same instance.
+   mutable bool bulk_bg_consensus_done_ = false;
    std::vector<DOFData> *fault_dof_data_ = nullptr;
    std::map<int, int> fault_face_dof_offset_;  ///< face_index → DOFData start index
    std::map<int, int> shared_fault_dof_offset_;  ///< shared_face_index → DOFData start index

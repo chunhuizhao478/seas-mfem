@@ -176,6 +176,28 @@ if [[ "${SAFS_MIXED_FLUX}" != "none" && "${SAFS_TIME_INTEGRATOR}" == "ader" ]]; 
 fi
 TI_ARG="--time-integrator ${SAFS_TIME_INTEGRATOR}"
 
+# === ADER hot-path optimization levers (opt 2026-06-24) =====================
+# CALIPER MEASUREMENT run: levers default ON to profile the OPTIMIZED path
+# (document/code_optimization_dev/action_plan_2026-06-24.md, Phase 0).  Set
+# SAFS_SHARED_CK=0 / SAFS_DERIV_CACHE=0 to A/B against the un-optimized baseline.
+#
+#   --shared-ck-recursion : ONE Cauchy-Kovalewski recursion/step instead of two
+#                           (BIT-EXACT; removes the 2nd ApplySpatialDerivative
+#                           subtree).  ADER-ONLY — a no-op under rk/rk45, so it
+#                           is omitted automatically when integrator != ader.
+#   --deriv-cache         : precomputed D_d^e / S_d^e dense mat-vec instead of
+#                           per-QP quadrature for ApplySpatialDerivative (ADER)
+#                           and ComputeVolumeRHS (ADER + RK) (<=1e-12, NOT
+#                           bit-exact).  Matrix path gated by
+#                           `make test-bimaterial-deriv-cache-parity` (also under
+#                           `make test-parallel`); PRODUCTION SCIENCE runs must
+#                           ALSO pass a SAFS output fingerprint check on Expanse.
+OPT_ARGS=""
+if [[ "${SAFS_TIME_INTEGRATOR}" == "ader" && "${SAFS_SHARED_CK:-1}" == "1" ]]; then
+    OPT_ARGS="${OPT_ARGS} --shared-ck-recursion"
+fi
+[[ "${SAFS_DERIV_CACHE:-1}" == "1" ]] && OPT_ARGS="${OPT_ARGS} --deriv-cache"
+
 # SHORT profiling horizon: tfinal=1 s by default (just enough to cover
 # init -> nucleation -> early breakout so every component is exercised).
 TFINAL="${SAFS_TFINAL:-1s}"
@@ -242,6 +264,7 @@ echo "EXPERIMENT:  slipweakening v3 ALT, CVM + CSM, UPWIND (Godunov) + ADER — 
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX}    Integrator: ${SAFS_TIME_INTEGRATOR}"
+echo "Opt levers:  ${OPT_ARGS:-<none>}  (SAFS_SHARED_CK=${SAFS_SHARED_CK:-1} SAFS_DERIV_CACHE=${SAFS_DERIV_CACHE:-1}; shared-ck is ADER-only)"
 echo "tfinal:      ${TFINAL}  (SHORT profile)   CFL: ${CFL_ARG:-<config default 0.5>}"
 echo "Caliper:     ldd $(ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -m1 -i libcaliper | awk '{print $1" -> "$3}')"
 echo "CALI_CONFIG: ${CALI_CONFIG}"
@@ -255,6 +278,7 @@ srun --mpi=pmi2 -n "${SLURM_NTASKS}" stdbuf -oL -eL ./seas_spatial_dyn_driver \
     --mesh   "${MESH}" \
     ${MIXFLUX_ARG} \
     ${TI_ARG} \
+    ${OPT_ARGS} \
     --tfinal "${TFINAL}" \
     ${CFL_ARG} \
     --paraview \

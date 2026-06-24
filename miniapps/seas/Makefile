@@ -230,6 +230,8 @@ TEST_RK_TIME_STEPPER_OBJ             = $(TEST_RK_TIME_STEPPER_SRC:.cpp=.o)
 # Phase 14 (RK + LSW + mixed flux): instantaneous EvaluateLSW + LSW coupled-RK.
 TEST_LSW_RK_MIXED_FLUX_SRC           = tests/unit/test_lsw_rk_mixed_flux.cpp
 TEST_LSW_RK_MIXED_FLUX_OBJ           = $(TEST_LSW_RK_MIXED_FLUX_SRC:.cpp=.o)
+TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_SRC = tests/unit/test_lsw_rk_mixed_flux_bimaterial.cpp
+TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_OBJ = $(TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_SRC:.cpp=.o)
 TEST_LSW_RK_SHARED_FAULT_MPI_SRC     = tests/unit/test_lsw_rk_shared_fault_mpi.cpp
 TEST_LSW_RK_SHARED_FAULT_MPI_OBJ     = $(TEST_LSW_RK_SHARED_FAULT_MPI_SRC:.cpp=.o)
 TEST_GODUNOV_FLUX_SRC = tests/unit/test_godunov_flux.cpp
@@ -890,6 +892,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_nucleation_factory \
                seas_test_rk_time_stepper \
                seas_test_lsw_rk_mixed_flux \
+               seas_test_lsw_rk_mixed_flux_bimaterial \
                seas_test_tpv102_nuc_callback_parity \
                seas_test_seed_equilibrium_psi_rs \
                seas_test_friction_iterator_factory \
@@ -980,6 +983,10 @@ TEST_PARALLEL_WAVE_OBJ = $(TEST_PARALLEL_WAVE_SRC:.cpp=.o)
 # Lever 1/3 (REVIEW R-002): parallel DerivMode Cached==OnTheFly equivalence.
 TEST_PARALLEL_CACHED_WAVE_SRC = tests/parallel/test_wave_operator_cached_parallel.cpp
 TEST_PARALLEL_CACHED_WAVE_OBJ = $(TEST_PARALLEL_CACHED_WAVE_SRC:.cpp=.o)
+
+# Bimaterial (matrix path) DerivMode + shared-CK parity test (opt 2026-06-24 gate)
+TEST_PARALLEL_BIMAT_CACHE_SRC = tests/parallel/test_bimaterial_deriv_cache_parity.cpp
+TEST_PARALLEL_BIMAT_CACHE_OBJ = $(TEST_PARALLEL_BIMAT_CACHE_SRC:.cpp=.o)
 
 # BP5 parallel smoke test
 TEST_BP5_SMOKE_SRC = tests/parallel/test_bp5_parallel_smoke.cpp
@@ -4854,7 +4861,7 @@ test-parallel-fault: seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_fault
 
-test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel test-parallel-fault test-shared-fault-reconcile-cross-rank
+test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel test-parallel-fault test-shared-fault-reconcile-cross-rank test-bimaterial-deriv-cache-parity
 
 # Phase 9: Verification and scaling targets
 seas_test_serial_parallel_consistency: $(TEST_SERIAL_PARALLEL_OBJ)
@@ -4947,6 +4954,20 @@ $(TEST_PARALLEL_CACHED_WAVE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HE
 
 test-wave-operator-cached-parallel: seas_test_wave_operator_cached_parallel
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_wave_operator_cached_parallel
+
+# Bimaterial (matrix path) DerivMode + shared-CK parity (opt 2026-06-24 gate).
+# Object list mirrors seas_test_bimaterial_wave_operator_parity (needs the flux
+# pool + heterogeneous material + spatial friction) plus the parallel build flag.
+seas_test_bimaterial_deriv_cache_parity: $(TEST_PARALLEL_BIMAT_CACHE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_POOL_OBJ) $(PML_LAYER_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_PARALLEL_BIMAT_CACHE_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_OBJ) $(GODUNOV_FLUX_POOL_OBJ) $(PML_LAYER_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(SPATIAL_FRICTION_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_PARALLEL_BIMAT_CACHE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(PARALLEL_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_USE_MPI -c $< -o $@
+
+test-bimaterial-deriv-cache-parity: seas_test_bimaterial_deriv_cache_parity
+	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_bimaterial_deriv_cache_parity
 
 # R-101 shared-fault DOFData consistency test (2-rank MPI regression)
 seas_test_r101_shared_fault: $(TEST_R101_SHARED_FAULT_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ)
@@ -5796,3 +5817,43 @@ seas_test_friction_solver_stable: $(TEST_FRICTION_SOLVER_STABLE_OBJ) dynamic/fri
 # test and skipped the other 13.  The redeclaration also triggered the
 # "overriding recipe for target `test-tpv104`" warning that users saw
 # in BP5 Phase 6 production builds.
+
+# --- Phase 4 (PLAN_mixed_flux_seissol_port_2026-06-19.md): matrix+RK+LSW bimaterial gate ---
+# Same object set as seas_test_lsw_rk_mixed_flux (already links the bimaterial +
+# heterogeneous objects); BimaterialWaveOperator is header-only (.hpp/.inl).
+$(TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                    $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_lsw_rk_mixed_flux_bimaterial: $(TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_OBJ) \
+                             $(RK_TIME_STEPPER_OBJ) \
+                             $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+                             $(GODUNOV_FLUX_OBJ) \
+                             $(GODUNOV_FLUX_POOL_OBJ) \
+                             $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                             $(PML_LAYER_OBJ) \
+                             $(HETEROGENEOUS_MATERIAL_OBJ) \
+                             $(FAULT_FACE_FLUX_OBJ) \
+                             $(FRICTION_SOLVER_OBJ) \
+                             $(SPATIAL_NUCLEATION_OBJ) \
+                             $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_LSW_RK_MIXED_FLUX_BIMATERIAL_OBJ) \
+	    $(RK_TIME_STEPPER_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-lsw-rk-mixed-flux-bimaterial: seas_test_lsw_rk_mixed_flux_bimaterial
+	./seas_test_lsw_rk_mixed_flux_bimaterial
