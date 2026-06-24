@@ -11,11 +11,11 @@
 
 # =========================================================================
 # SAFS RATESTATE v3.0.0 ALT (vw005) — CALIPER PROFILING run (mixed flux + RK45).
-# *** EXPANSE (SDSC) job — 2N x 50r = 100 ranks / 4 h / 100 GB / tfinal=12 s. ***
+# *** EXPANSE (SDSC) job — 2N x 50r = 100 ranks / 4 h / 100 GB / tfinal=1 s. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_0_0_RSSRW_ALT_vw005.toml
 # Plan:   safs/project_7.0_alternative/document/PLAN_mixed_flux_seissol_port_2026-06-19.md
 # =========================================================================
-# A SHORT run (tfinal=12 s, 4 h wall) whose ONLY purpose is a PER-COMPONENT SPEED
+# A SHORT run (tfinal=1 s, 4 h wall) whose ONLY purpose is a PER-COMPONENT SPEED
 # BREAKDOWN of the solver via Caliper.  Identical physics to the production
 # job (same config / mesh / sidecars / mixed flux + RK45) — just short + profiled.
 #
@@ -61,7 +61,7 @@
 #   CALI_LOG_VERBOSITY=1   CALI_CONFIG_PROFILE   CALI_AGGREGATE_KEY=...
 #
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default adjacent),
-# SAFS_TIME_INTEGRATOR (default rk45), SAFS_TFINAL (default 12s — SHORT profile),
+# SAFS_TIME_INTEGRATOR (default rk45), SAFS_TFINAL (default 1s — SHORT profile),
 # SAFS_CFL, SAFS_DIAG (0/1, default 0), SAFS_CALI_CONFIG (full CALI_CONFIG override),
 # SAFS_CALI_HZ (sampling rate/rank, default 500), SAFS_CALI_SAMPLE (1 = add the
 # whole-program sample-report channel; needs a WITH_LIBDW Caliper build),
@@ -176,9 +176,9 @@ if [[ "${SAFS_MIXED_FLUX}" != "none" && "${SAFS_TIME_INTEGRATOR}" == "ader" ]]; 
 fi
 TI_ARG="--time-integrator ${SAFS_TIME_INTEGRATOR}"
 
-# SHORT profiling horizon: tfinal=12 s by default (just enough to cover
+# SHORT profiling horizon: tfinal=1 s by default (just enough to cover
 # init -> nucleation -> early breakout so every component is exercised).
-TFINAL="${SAFS_TFINAL:-12s}"
+TFINAL="${SAFS_TFINAL:-1s}"
 CFL_ARG=""
 [[ -n "${SAFS_CFL:-}" ]] && CFL_ARG="--cfl ${SAFS_CFL}"
 
@@ -248,7 +248,7 @@ echo "CALI_CONFIG: ${CALI_CONFIG}"
 echo "Output dir:  ${OUT}"
 
 # NOTE: --paraview-max-snapshots 5 keeps I/O tiny so it does not dominate the
-# 12 s profile (production uses 300).  Checkpointing is disabled (-every 0) for
+# 1 s profile (production uses 300).  Checkpointing is disabled (-every 0) for
 # the same reason — this is a throwaway profiling run.
 srun --mpi=pmi2 -n "${SLURM_NTASKS}" stdbuf -oL -eL ./seas_spatial_dyn_driver \
     --config "${CONFIG_TOML}" \
