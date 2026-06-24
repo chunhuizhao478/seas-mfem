@@ -28,17 +28,20 @@
 #                            the dynamic driver, so this table is sparse — the
 #                            sampling channel below is the primary signal here.
 #   spot                   : .cali for the LLNL Spot UI / Python Hatchet (per-rank).
-#   callpath-sample-report : timer SAMPLING of the WHOLE program (every function:
+#   sample-report          : timer SAMPLING of the WHOLE program (every function:
 #                            init, PETSc/HYPRE/MUMPS, GMRES iters, HDF5 I/O, MPI).
 #                            THIS answers "which function is slowest" end-to-end.
+#                            Needs a Caliper built WITH_LIBDW (symbollookup); gated
+#                            behind BP5_CALI_SAMPLE (default ON — see below).
 #
 # *** Caliper writes its report at clean program exit.  A 48 h walltime KILL
 # (SLURM TIMEOUT) may produce NO report — lower [time].t_final in the config if
 # you need a guaranteed profile (the per-region breakdown is similar at 50 yr). ***
 #
 # Overrides: BP5_CONFIG, BP5_CALI_CONFIG (full CALI_CONFIG override),
-# BP5_CALI_HZ (sampling rate/rank, default 200), BP5_SKIP_CALI_CHECK (1 = run even
-# without libcaliper), BP5_OUTDIR.
+# BP5_CALI_HZ (sampling rate/rank, default 200), BP5_CALI_SAMPLE (0 = drop the
+# whole-program sample-report channel; needs a WITH_LIBDW Caliper build, default ON),
+# BP5_SKIP_CALI_CHECK (1 = run even without libcaliper), BP5_OUTDIR.
 
 export LC_ALL=C
 export LANG=C
@@ -102,7 +105,15 @@ CALI_REGION_TXT="bp5_caliper_500yr_${SLURM_JOB_ID}.cali-region-report.txt"
 CALI_SPOT="bp5_caliper_500yr_${SLURM_JOB_ID}.cali"
 CALI_SAMPLE_TXT="bp5_caliper_500yr_${SLURM_JOB_ID}.cali-sample-report.txt"
 export CALI_SAMPLER_FREQUENCY="${BP5_CALI_HZ:-200}"      # samples/s/rank
-DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT}),callpath-sample-report(output=${CALI_SAMPLE_TXT})"
+# sample-report needs Caliper's symbollookup service (sample PC -> function name) =
+# a Caliper built WITH_LIBDW.  ConfigManager aborts the ENTIRE CALI_CONFIG if a
+# channel's required service is missing (taking runtime-report + spot down too).
+# Default ON here because the QD region table is sparse — the sampler is the
+# primary signal; set BP5_CALI_SAMPLE=0 on a Caliper build that lacks libdw.
+DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT})"
+if [[ "${BP5_CALI_SAMPLE:-1}" != "0" ]]; then
+    DEFAULT_CALI_CONFIG="${DEFAULT_CALI_CONFIG},sample-report(output=${CALI_SAMPLE_TXT})"
+fi
 export CALI_CONFIG="${BP5_CALI_CONFIG:-${DEFAULT_CALI_CONFIG}}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
