@@ -760,7 +760,95 @@ void WaveOperator<MeshType>::UsePrecomputedFaceFluxes(bool enable)
          }
       }
    }
+   // REVIEW R-001: mutually exclusive with the face-geometry cache (the cache's
+   // fast-path replicates the InteriorFaceFlux_ branch, NOT this precomputed
+   // AddInteriorFaceRhs branch).
+   MFEM_VERIFY(!(enable && use_face_cache_),
+               "UsePrecomputedFaceFluxes(true) is mutually exclusive with "
+               "SetUseFaceCache(true).  Enable at most one interior-face "
+               "acceleration.");
    use_precomputed_face_fluxes_ = enable;
+}
+
+// ---------------------------------------------------------------------------
+// Opt 2026-06-24: non-fault interior face geometry/shape cache.
+// SetUseFaceCache builds the cache; ComputeADERFaceFluxRHS_CachedInterior_ is
+// the per-face fast-path it reads.  Geometry-only, ≤1e-12 (REVIEW R-001..R-006).
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::SetUseFaceCache(bool enable)
+{
+   if (!enable)
+   {
+      use_face_cache_ = false;
+      face_geom_cache_.clear();
+      return;
+   }
+   // REVIEW R-001: mutual exclusion with precomputed fluxes.
+   MFEM_VERIFY(!use_precomputed_face_fluxes_,
+               "SetUseFaceCache(true) is mutually exclusive with "
+               "UsePrecomputedFaceFluxes(true) (different interior-face "
+               "algorithm).  Enable at most one.");
+   // REVIEW R-003: face_bdr_attr_ is ctor-final; assert it is populated.
+   MFEM_VERIFY(static_cast<int>(face_bdr_attr_.size()) == mesh_.GetNumFaces(),
+               "SetUseFaceCache: face_bdr_attr_ not populated (size "
+               << face_bdr_attr_.size() << " != GetNumFaces "
+               << mesh_.GetNumFaces() << ") — call after construction.");
+   BuildNonFaultInteriorFaceGeomCache(mesh_, *fes_, face_bdr_attr_,
+                                      bc_.fault_attr, shared_mesh_face_set_,
+                                      2 * order_, face_geom_cache_);
+   use_face_cache_ = true;
+}
+
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeADERFaceFluxRHS_CachedInterior_(
+   const FaceGeomEntry &fc, const real_t *I_data, Vector &rhs) const
+{
+   // Algorithm-identical to the on-the-fly interior else-branch
+   // (wave_operator.inl gather L4010-4052, flux L4811, scatter L4814-4822);
+   // only the geometry (nor/w/shape) is read from the cache instead of
+   // recomputed.  Loop/accumulation order preserved so the result is ≤1e-12
+   // (in practice bit-identical) from on-the-fly.
+   const int o1 = fc.e1 * ndof_per_el_;
+   const int o2 = fc.e2 * ndof_per_el_;
+   const int ndof = fc.ndof1;
+   for (int q = 0; q < fc.nqp; q++)
+   {
+      const real_t w = fc.w[q];
+      const Vector &shape1 = fc.shape1[q];
+      const Vector &shape2 = fc.shape2[q];
+
+      real_t I_self[NUM_STATE], I_nbr[NUM_STATE];
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         I_self[c] = 0.0;
+         for (int i = 0; i < ndof; i++)
+         {
+            I_self[c] += shape1(i) * I_data[c * ndof_total_ + o1 + i];
+         }
+      }
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         I_nbr[c] = 0.0;
+         for (int i = 0; i < ndof; i++)
+         {
+            I_nbr[c] += shape2(i) * I_data[c * ndof_total_ + o2 + i];
+         }
+      }
+
+      const real_t nor[3] = { fc.nor[q][0], fc.nor[q][1], fc.nor[q][2] };
+      real_t F_h_e1[NUM_STATE], F_h_e2[NUM_STATE];
+      InteriorFaceFlux_(fc.face_index, I_self, I_nbr, nor, F_h_e1, F_h_e2);
+
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         for (int i = 0; i < ndof; i++)
+         {
+            rhs[c * ndof_total_ + o1 + i] -= w * shape1(i) * F_h_e1[c];
+            rhs[c * ndof_total_ + o2 + i] += w * shape2(i) * F_h_e2[c];
+         }
+      }
+   }
 }
 
 // ---------------------------------------------------------------------------
@@ -3961,6 +4049,22 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 
    for (int f = 0; f < mesh_.GetNumFaces(); f++)
    {
+      // Opt 2026-06-24 (REVIEW R-001/R-006): cached fast-path for interior
+      // non-fault faces — skips GetFaceElementTransformations / CalcOrtho /
+      // CalcShape.  Mutually exclusive with precomputed fluxes; the cache
+      // contains ONLY interior non-fault faces, so fault/boundary/shared faces
+      // are absent and fall through to the on-the-fly path below.  This is the
+      // SOLE reader of face_geom_cache_ (the RK ComputeFaceFluxRHS must not).
+      if (use_face_cache_ && !use_precomputed_face_fluxes_)
+      {
+         auto fc_it = face_geom_cache_.find(f);
+         if (fc_it != face_geom_cache_.end())
+         {
+            ComputeADERFaceFluxRHS_CachedInterior_(fc_it->second, I_data, rhs);
+            continue;
+         }
+      }
+
       FaceElementTransformations *ftr = mesh_.GetFaceElementTransformations(f);
       if (!ftr) { continue; }
 

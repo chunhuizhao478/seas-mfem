@@ -2119,6 +2119,22 @@ seas_test_wave_operator_spatial_derivative: $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_WAVE_OP_SPATIAL_DERIV_OBJ) $(WAVE_OPERATOR_OBJ) $(GODUNOV_FLUX_BIMATERIAL_OBJ) $(GODUNOV_FLUX_POOL_OBJ) $(PRECOMPUTED_FACE_FLUXES_OBJ) $(GODUNOV_FLUX_OBJ) $(PML_LAYER_OBJ) $(HETEROGENEOUS_MATERIAL_OBJ) $(FAULT_FACE_FLUX_OBJ) $(FRICTION_SOLVER_OBJ) $(SPATIAL_FRICTION_OBJ) $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
 
+# FaceGeomCache builder equivalence + fault-exclusion (opt 2026-06-24 Phase 1).
+# Header-only (dynamic/face_geom_cache.hpp) — links MFEM only, no seas objects.
+TEST_FACE_GEOM_CACHE_SRC = tests/unit/test_face_geom_cache.cpp
+TEST_FACE_GEOM_CACHE_OBJ = $(TEST_FACE_GEOM_CACHE_SRC:.cpp=.o)
+
+seas_test_face_geom_cache: $(TEST_FACE_GEOM_CACHE_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ $(TEST_FACE_GEOM_CACHE_OBJ) $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+$(TEST_FACE_GEOM_CACHE_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+test-face-geom-cache: seas_test_face_geom_cache
+	./seas_test_face_geom_cache
+
 # ADER hot-path optimization: micro-benchmark (timing tool; `make bench`)
 .PHONY: bench
 bench: seas_bench_ader_hotpath
@@ -4022,6 +4038,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-tpv102-pepper-reproducer \
       test-free-surface-total-direct \
       test-wave-operator-spatial-derivative \
+      test-face-geom-cache \
       test-ader-ck-predictor \
       test-fault-face-flux-ader-equivalence \
       test-ader-linear-wave-equivalence \

@@ -118,6 +118,7 @@ int main(int argc, char *argv[])
 
    double local_max_cached = 0.0;   // Cached vs OnTheFly (tol 1e-12)
    double local_max_ck     = 0.0;   // fused vs separate (tol 0.0, bit-exact)
+   double local_max_face   = 0.0;   // face-cache on vs off (tol 1e-12)
 
    // REVIEW R-004: sweep the FE order.  P1 (ndof=4, affine tets) is the
    // PRODUCTION stride for --deriv-cache — where OnTheFly inverts the per-QP
@@ -241,17 +242,54 @@ int main(int argc, char *argv[])
             local_max_ck = std::max(local_max_ck, dmax);
          }
       }
+
+      // -- Part D: face-geometry cache parity (bimaterial).  AdvanceADER with
+      //    SetUseFaceCache(true) vs (false) must match ≤1e-12 — the cached
+      //    interior-face geometry replaces the per-step recompute.  Run in
+      //    OnTheFly DerivMode so the face cache is the only varying axis. --
+      {
+         wave.SetDerivMode(DerivMode::OnTheFly);
+         Vector Q0(N); FillQ(Q0, rank, 161803u);
+         wave.SetUseFaceCache(false);
+         Vector qn_off(N); wave.AdvanceADER(Q0, dt, ader_order, qn_off);
+         wave.SetUseFaceCache(true);
+         Vector qn_on(N);  wave.AdvanceADER(Q0, dt, ader_order, qn_on);
+         wave.SetUseFaceCache(false);   // restore default
+         local_max_face = std::max(local_max_face, RelDiff(qn_off, qn_on));
+      }
+
       wave.SetDerivMode(DerivMode::OnTheFly);   // restore default
    }   // fe_order sweep
 
-   double global_max_cached = 0.0, global_max_ck = 0.0;
+   // -- Part E (REVIEW R-004): SCALAR WaveOperator face-cache parity.  The
+   //    scalar InteriorFaceFlux_ CONSUMES the cached normal (the bimaterial one
+   //    ignores it via per-face matrices), so this is the path that validates
+   //    fc.nor.  P1, fault-free, zero background. --
+   {
+      WaveOperator<ParMesh> swave(pmesh, 1, 32.04e9, 32.04e9, 2670.0, bc);
+      real_t Q_bg0[NUM_STATE];
+      for (int c = 0; c < NUM_STATE; c++) { Q_bg0[c] = 0.0; }
+      swave.SetAbsorbingBackground(Q_bg0);
+      const int Ns = swave.Height();
+      const real_t dt = 1e-4;
+      Vector Q0(Ns); FillQ(Q0, rank, 141421u);
+      swave.SetUseFaceCache(false);
+      Vector sn_off(Ns); swave.AdvanceADER(Q0, dt, 2, sn_off);
+      swave.SetUseFaceCache(true);
+      Vector sn_on(Ns);  swave.AdvanceADER(Q0, dt, 2, sn_on);
+      local_max_face = std::max(local_max_face, RelDiff(sn_off, sn_on));
+   }
+
+   double global_max_cached = 0.0, global_max_ck = 0.0, global_max_face = 0.0;
    MPI_Allreduce(&local_max_cached, &global_max_cached, 1, MPI_DOUBLE,
                  MPI_MAX, comm);
    MPI_Allreduce(&local_max_ck, &global_max_ck, 1, MPI_DOUBLE, MPI_MAX, comm);
+   MPI_Allreduce(&local_max_face, &global_max_face, 1, MPI_DOUBLE, MPI_MAX, comm);
 
    const int failed_cached = (global_max_cached <= 1e-12) ? 0 : 1;
    const int failed_ck     = (global_max_ck     <= 0.0)   ? 0 : 1;
-   const int failed = failed_cached | failed_ck;
+   const int failed_face   = (global_max_face   <= 1e-12) ? 0 : 1;
+   const int failed = failed_cached | failed_ck | failed_face;
 
    if (rank == 0)
    {
@@ -262,6 +300,10 @@ int main(int argc, char *argv[])
       std::cout << (failed_ck ? "  FAILED" : "  PASSED")
                 << ": bimaterial shared-CK fused==separate "
                 << "(bit-exact, max abs " << global_max_ck << ", tol 0)\n";
+      std::cout << (failed_face ? "  FAILED" : "  PASSED")
+                << ": face-cache AdvanceADER on==off "
+                << "(bimaterial + scalar, max rel " << global_max_face
+                << ", tol 1e-12)\n";
       std::cout << (failed ? "=== FAILED ===\n" : "=== PASSED ===\n");
    }
 

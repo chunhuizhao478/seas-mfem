@@ -198,6 +198,12 @@ if [[ "${SAFS_TIME_INTEGRATOR}" == "ader" && "${SAFS_SHARED_CK:-1}" == "1" ]]; t
     OPT_ARGS="${OPT_ARGS} --shared-ck-recursion"
 fi
 [[ "${SAFS_DERIV_CACHE:-1}" == "1" ]] && OPT_ARGS="${OPT_ARGS} --deriv-cache"
+# --face-cache (opt 2026-06-24 Phase 2): precomputed interior-face normal/shape;
+# ADER-only (ComputeADERFaceFluxRHS), <=1e-12.  Gated by
+# `make test-bimaterial-deriv-cache-parity` (face-cache axis) + test-face-geom-cache.
+if [[ "${SAFS_TIME_INTEGRATOR}" == "ader" && "${SAFS_FACE_CACHE:-1}" == "1" ]]; then
+    OPT_ARGS="${OPT_ARGS} --face-cache"
+fi
 
 # SHORT profiling horizon: tfinal=1 s by default (just enough to cover
 # init -> nucleation -> early breakout so every component is exercised).
@@ -265,7 +271,7 @@ echo "EXPERIMENT:  ratestate v3 ALT, CVM + CSM, UPWIND (Godunov) + ADER — Cali
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
 echo "Mixed flux:  ${SAFS_MIXED_FLUX}    Integrator: ${SAFS_TIME_INTEGRATOR}"
-echo "Opt levers:  ${OPT_ARGS:-<none>}  (SAFS_SHARED_CK=${SAFS_SHARED_CK:-1} SAFS_DERIV_CACHE=${SAFS_DERIV_CACHE:-1}; shared-ck is ADER-only)"
+echo "Opt levers:  ${OPT_ARGS:-<none>}  (SAFS_SHARED_CK=${SAFS_SHARED_CK:-1} SAFS_DERIV_CACHE=${SAFS_DERIV_CACHE:-1} SAFS_FACE_CACHE=${SAFS_FACE_CACHE:-1}; shared-ck/face-cache are ADER-only)"
 echo "tfinal:      ${TFINAL}  (SHORT profile)   CFL: ${CFL_ARG:-<config default 0.5>}"
 echo "Caliper:     ldd $(ldd ./seas_spatial_dyn_driver 2>/dev/null | grep -m1 -i libcaliper | awk '{print $1" -> "$3}')"
 echo "CALI_CONFIG: ${CALI_CONFIG}"

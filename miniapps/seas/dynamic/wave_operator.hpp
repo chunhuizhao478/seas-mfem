@@ -34,6 +34,7 @@
 #include "../fault/fault_basis.hpp"
 #include "../common/seas_types.hpp"
 #include "seas_diag_rank.hpp"
+#include "face_geom_cache.hpp"
 
 #include <algorithm>
 #include <array>
@@ -243,6 +244,18 @@ public:
    /// after construction (mass inverses already assembled).  Idempotent.
    void SetDerivMode(DerivMode m);
    DerivMode GetDerivMode() const { return deriv_mode_; }
+
+   /// Opt-in non-fault interior face geometry/shape cache (opt 2026-06-24).
+   /// Precomputes per-(interior non-fault face, QP) {unit normal, weight,
+   /// shape1, shape2} so `ComputeADERFaceFluxRHS` reuses them instead of
+   /// recomputing GetFaceElementTransformations / CalcOrtho / CalcShape every
+   /// macro-step.  ≤1e-12 (NOT bit-exact); default OFF preserves the byte-exact
+   /// on-the-fly path.  Lifecycle (REVIEW R-003): reads bc_.fault_attr /
+   /// face_bdr_attr_ / shared_mesh_face_set_, all ctor-final, so may be called
+   /// as early as SetDerivMode.  REVIEW R-001: mutually exclusive with
+   /// UsePrecomputedFaceFluxes (different interior-face algorithm).
+   void SetUseFaceCache(bool enable);
+   bool UsingFaceCache() const { return use_face_cache_; }
    /// R-004: per-rank byte budget for the `Cached` cache; SetDerivMode(Cached)
    /// aborts fail-loud above it (default 1 GiB).  Set before SetDerivMode.
    void SetDerivCacheBudgetBytes(std::size_t b) { deriv_cache_budget_bytes_ = b; }
@@ -1049,6 +1062,13 @@ protected:
    /// `fault_shared_faces_` so `PrecomputedFaceFluxes::Init` can skip
    /// fault faces (they go through `FaultFaceFlux`).
    bool use_precomputed_face_fluxes_ = false;
+   /// Opt 2026-06-24: non-fault interior face geometry/shape cache.  REVIEW
+   /// R-006: read in EXACTLY ONE site (`ComputeADERFaceFluxRHS`); the RK path
+   /// (`ComputeFaceFluxRHS`) and the shared corrector MUST NOT read it (they may
+   /// own central-flux faces the cache does not distinguish).  REVIEW R-001:
+   /// mutually exclusive with `use_precomputed_face_fluxes_`.
+   bool use_face_cache_ = false;
+   std::unordered_map<int, FaceGeomEntry> face_geom_cache_;
    mutable PrecomputedFaceFluxes precomputed_face_fluxes_;
    std::set<int> fault_face_set_;
 
@@ -1217,6 +1237,12 @@ private:
    /// integrated boundary flux.  Additive into `rhs`.
    void ComputeADERFaceFluxRHS(const Vector &I, real_t dt,
                                Vector &rhs) const;
+   /// Opt 2026-06-24: cached fast-path for one interior non-fault face —
+   /// gather I, `InteriorFaceFlux_`, scatter, using `FaceGeomEntry` geometry.
+   /// Algorithm-identical to the on-the-fly interior `else` branch
+   /// (wave_operator.inl:4803-4823); only the geometry source differs.
+   void ComputeADERFaceFluxRHS_CachedInterior_(
+      const FaceGeomEntry &fc, const real_t *I_data, Vector &rhs) const;
    void ComputeADERSharedFaceFluxRHS(const Vector &I, real_t dt,
                                      Vector &rhs) const;
 

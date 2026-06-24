@@ -1307,6 +1307,22 @@ int main(int argc, char *argv[])
       }
    }
 
+   // Opt 2026-06-24 (ADER hot-path).  --face-cache precomputes per-(interior
+   // non-fault face, QP) {normal, weight, shape1, shape2} so ComputeADERFaceFluxRHS
+   // reuses them instead of recomputing GetFaceElementTransformations/CalcOrtho/
+   // CalcShape every macro-step.  ≤1e-12 (NOT bit-exact); default OFF.  Mutually
+   // exclusive with precomputed fluxes (the SAFS driver never enables those).
+   const bool use_face_cache = HasFlag(argc, argv, "--face-cache");
+   if (use_face_cache)
+   {
+      wave.SetUseFaceCache(true);
+      if (rank == 0)
+      {
+         std::cout << "[deriv] face geometry cache enabled "
+                      "(precomputed interior-face normal/shape; --face-cache)\n";
+      }
+   }
+
    // Lever 2 (ADER hot-path optimization) opt-in.  --shared-ck-recursion makes
    // the substep dispatch compute the Cauchy-Kovalevskaya recursion ONCE per
    // macro-step (producing both the substep nodal states and the time integral)
