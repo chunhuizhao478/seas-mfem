@@ -54,7 +54,7 @@
 #   hatchet-region-profile    .json for Python Hatchet (scriptable region tree).
 #   spot                      .cali for the LLNL Spot web UI + Hatchet (richest).
 #   mpi-report                standalone MPI-function breakdown (calls + time).
-#   callpath-sample-report    SAMPLING profile (low overhead, no instrumentation).
+#   sample-report    SAMPLING profile (low overhead, no instrumentation).
 #   loop-report               per-iteration timing of marked loops.
 # Discover the full list + options at runtime:  CALI_CONFIG=help ./<any cali app>
 # (or see Caliper's "Builtin configurations" docs).  Tuning knobs:
@@ -199,7 +199,7 @@ CALI_SAMPLE_TXT="${LOG%.log}.cali-sample-report.txt"   # SAMPLING: every functio
 # Channel 2  spot                    : .cali for the LLNL Spot UI + Python
 #                                       Hatchet/Thicket — the PER-RANK, comparable,
 #                                       deep-analysis artifact (which ranks are slow).
-# Channel 3  callpath-sample-report  : timer SAMPLING of the WHOLE program — every
+# Channel 3  sample-report  : timer SAMPLING of the WHOLE program — every
 #                                       function, instrumented or NOT (init,
 #                                       PETSc/MUMPS, HDF5/VTU I/O, MPI internals,
 #                                       partitioning).  THIS answers "which function
@@ -209,7 +209,7 @@ CALI_SAMPLE_TXT="${LOG%.log}.cali-sample-report.txt"   # SAMPLING: every functio
 #                                       Caliper build's callpath/libunwind (degrades
 #                                       to a flat warning if absent — see sample-report).
 export CALI_SAMPLER_FREQUENCY="${SAFS_CALI_HZ:-500}"   # samples/s/rank (higher = finer, more overhead)
-DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT}),callpath-sample-report(output=${CALI_SAMPLE_TXT})"
+DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT}),sample-report(output=${CALI_SAMPLE_TXT})"
 export CALI_CONFIG="${SAFS_CALI_CONFIG:-${DEFAULT_CALI_CONFIG}}"
 #
 # The "WHY a function is slow" layer — hardware counters (memory-bound vs
