@@ -63,7 +63,9 @@
 # Overrides: SAFS_CONFIG, SAFS_MESH, SAFS_MIXED_FLUX (default none),
 # SAFS_TIME_INTEGRATOR (default ader), SAFS_TFINAL (default 12s — SHORT profile),
 # SAFS_CFL, SAFS_DIAG (0/1, default 0), SAFS_CALI_CONFIG (full CALI_CONFIG override),
-# SAFS_CALI_HZ (sampling rate/rank, default 500), SAFS_CALI_PAPI (1 = HW counters,
+# SAFS_CALI_HZ (sampling rate/rank, default 500), SAFS_CALI_SAMPLE (1 = add the
+# whole-program sample-report channel; needs a WITH_LIBDW Caliper build),
+# SAFS_CALI_PAPI (1 = HW counters,
 # needs a WITH_PAPI build) + SAFS_CALI_PAPI_COUNTERS, SAFS_SKIP_CALI_CHECK
 # (1 = run even if the binary lacks Caliper), SAFS_OUTDIR.
 
@@ -209,7 +211,15 @@ CALI_SAMPLE_TXT="${LOG%.log}.cali-sample-report.txt"   # SAMPLING: every functio
 #                                       Caliper build's callpath/libunwind (degrades
 #                                       to a flat warning if absent — see sample-report).
 export CALI_SAMPLER_FREQUENCY="${SAFS_CALI_HZ:-500}"   # samples/s/rank (higher = finer, more overhead)
-DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT}),sample-report(output=${CALI_SAMPLE_TXT})"
+# Channel 3 (sample-report) needs Caliper's symbollookup service (sample PC ->
+# function NAME) = a Caliper built WITH_LIBDW.  ConfigManager aborts the ENTIRE
+# CALI_CONFIG if any channel's required service is missing (taking runtime-report
+# + spot DOWN with it), so the sampler channel is OFF by default; set
+# SAFS_CALI_SAMPLE=1 once you have a WITH_LIBDW Caliper build (build_expanse.sh).
+DEFAULT_CALI_CONFIG="runtime-report(calc.inclusive,region.count,profile.mpi,max_column_width=60,output=${CALI_REGION_TXT}),spot(output=${CALI_SPOT})"
+if [[ "${SAFS_CALI_SAMPLE:-0}" == "1" ]]; then
+    DEFAULT_CALI_CONFIG="${DEFAULT_CALI_CONFIG},sample-report(output=${CALI_SAMPLE_TXT})"
+fi
 export CALI_CONFIG="${SAFS_CALI_CONFIG:-${DEFAULT_CALI_CONFIG}}"
 #
 # The "WHY a function is slow" layer — hardware counters (memory-bound vs

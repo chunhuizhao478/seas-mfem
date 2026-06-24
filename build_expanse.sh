@@ -840,12 +840,44 @@ build_caliper() {
         cd "build_${CALIPER_VERSION}"
         # Profiling services for the "detailed breakdown" SAFS jobs.  WITH_SAMPLER
         # (timer PC sampling -> which function is slowest, covers ALL code, even
-        # uninstrumented PETSc/MUMPS/HDF5/MPI) is dependency-free.  callpath
-        # (libunwind, for sample call-trees) is left to Caliper's auto-detect.
+        # uninstrumented PETSc/MUMPS/HDF5/MPI) is dependency-free.  WITH_LIBDW adds
+        # the symbollookup service (sample PC -> function NAME) — REQUIRED by the
+        # sample-report recipe; WITH_LIBUNWIND adds callpath (sample call-trees).
+        # Both are added ONLY when the lib is found: the sample-report channel
+        # aborts the whole CALI_CONFIG if symbollookup is missing, but the BUILD
+        # must NOT fail just because libdw is absent (mirror the PAPI conditional).
         # WITH_PAPI (hardware counters -> the "why": IPC, L2/L3 cache misses) is
         # added ONLY if PAPI is found, so a missing PAPI never breaks the
         # (non-fatal) Caliper build — sampling still works without it.
         _cali_prof=( -DWITH_SAMPLER=ON )
+        # symbollookup (sample-report) needs libdw/elfutils; callpath needs libunwind.
+        module load elfutils 2>/dev/null || true
+        module load libunwind 2>/dev/null || true
+        _libdw_root="${ELFUTILS_HOME:-${ELFUTILS_ROOT:-${LIBDW_PREFIX:-}}}"
+        if [ -z "${_libdw_root}" ]; then
+            for _p in "${TACC_ELFUTILS_DIR:-}" /usr; do
+                [ -n "${_p}" ] && [ -f "${_p}/include/elfutils/libdw.h" ] && { _libdw_root="${_p}"; break; }
+            done
+        fi
+        if [ -n "${_libdw_root}" ] && [ -f "${_libdw_root}/include/elfutils/libdw.h" ]; then
+            _cali_prof+=( -DWITH_LIBDW=ON -DLIBDW_PREFIX="${_libdw_root}" )
+            echo "  Caliper: libdw found (${_libdw_root}) — symbollookup ON (sample-report works)"
+        else
+            echo "  Caliper: WARNING libdw/elfutils-devel NOT found — symbollookup OFF;"
+            echo "           the sample-report channel will fail.  'module load elfutils' or install elfutils-devel."
+        fi
+        _libunwind_root="${LIBUNWIND_HOME:-${LIBUNWIND_ROOT:-${LIBUNWIND_PREFIX:-}}}"
+        if [ -z "${_libunwind_root}" ]; then
+            for _p in "${TACC_LIBUNWIND_DIR:-}" /usr; do
+                [ -n "${_p}" ] && [ -f "${_p}/include/libunwind.h" ] && { _libunwind_root="${_p}"; break; }
+            done
+        fi
+        if [ -n "${_libunwind_root}" ] && [ -f "${_libunwind_root}/include/libunwind.h" ]; then
+            _cali_prof+=( -DWITH_LIBUNWIND=ON -DLIBUNWIND_PREFIX="${_libunwind_root}" )
+            echo "  Caliper: libunwind found (${_libunwind_root}) — callpath ON (sample call-trees)"
+        else
+            echo "  Caliper: libunwind not found — callpath OFF (flat sample-report only)."
+        fi
         module load papi 2>/dev/null || true
         _papi_root="${PAPI_HOME:-${PAPI_ROOT:-${PAPI_DIR:-${TACC_PAPI_DIR:-}}}}"
         if [ -z "${_papi_root}" ] && command -v papi_avail >/dev/null 2>&1; then
