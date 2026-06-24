@@ -5,7 +5,7 @@
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=50
-#SBATCH --time=04:00:00
+#SBATCH --time=00:30:00
 #SBATCH --mem=100000M
 #SBATCH -A ddp408
 
@@ -260,7 +260,7 @@ fi
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 04:00:00  (CALIPER PROFILE)"
+echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 100 GB/node, 00:30:00  (CALIPER PROFILE)"
 echo "EXPERIMENT:  ratestate v3 ALT, CVM + CSM, UPWIND (Godunov) + ADER — Caliper per-component profile"
 echo "Config:      ${CONFIG_TOML}"
 echo "Mesh:        ${MESH}"
