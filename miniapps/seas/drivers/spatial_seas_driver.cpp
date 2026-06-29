@@ -1225,25 +1225,24 @@ int main(int argc, char *argv[])
       {
          // 4-phase init; aborts internally if the equilibrium residual > 1e-6.
          seas_op.SetInitialCondition(state);
-         // rs.V_init(0): a fault-free rank has empty rs.V_init — fall back to the
-         // config V_init_default.  dt_seed is only the initial RK45 step guess
-         // (adapted immediately, then reconciled collectively across ranks).
-         const real_t v_init_seed = (rs.V_init.Size() > 0)
-                                    ? rs.V_init(0)
-                                    : (cfg.rate_state.has_value()
-                                       ? cfg.rate_state->V_init_default : real_t(1e-9));
+         // Initial dt = 0.01 * Dc / V_nuc, with V_nuc the GLOBAL max slip rate
+         // AFTER the 4-phase init.  GetMaxSlipRate() is COLLECTIVE (MPI_Allreduce
+         // MAX over the fault V), so it must be called on ALL ranks (calling it
+         // inside `if (rank==0)` deadlocks at np>1) and dt_seed is then identical
+         // on every rank.  Do NOT seed dt from a single per-rank DOF's V_init
+         // (rs.V_init(0)): at high rank counts the partition can place a plate-
+         // rate DOF (V_init=1e-9) at index 0, making dt_seed ~1e6x too large ->
+         // RK45 stage amplification -> first-step traction blowup (CLAUDE.md
+         // "Time Stepping: Initial dt"; debug v7).  V_nuc (~1e-2) gives dt_seed
+         // ~O(0.1 s); the adaptive RK45 then grows it toward dt_max.
+         const real_t init_vmax = seas_op.GetMaxSlipRate();
          dt_seed = (cfg.time.dt_init > 0.0)
                    ? cfg.time.dt_init
-                   : 0.01 * fc.Dc / std::max(v_init_seed, real_t(1e-15));
-         // GetMaxSlipRate() is COLLECTIVE (MPI_Allreduce over the global V_max):
-         // call it on ALL ranks, then print on rank 0.  Calling it inside
-         // `if (rank == 0)` deadlocks at np>1 (rank 0 blocks in the Allreduce
-         // while the other ranks reach the MPI_Barrier below).
-         const real_t init_vmax = seas_op.GetMaxSlipRate();
+                   : 0.01 * fc.Dc / std::max(init_vmax, real_t(1e-15));
          if (rank == 0)
          {
             std::cout << "[spatial_seas] SetInitialCondition done: V_max = "
-                      << init_vmax << " m/s\n";
+                      << init_vmax << " m/s, dt_seed = " << dt_seed << " s\n";
          }
       }
 
