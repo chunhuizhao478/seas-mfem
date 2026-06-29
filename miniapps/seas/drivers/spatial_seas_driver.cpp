@@ -951,9 +951,29 @@ int main(int argc, char *argv[])
       // Scalar friction constants from the Phase-3 asserted-uniform per-DOF
       // vectors (fields are V_0/f_0, Vectors → element 0).  Per-DOF Dc still
       // flows through geom's Dc_values_; fc.Dc is the scalar fallback (R-005).
-      MFEM_VERIFY(rs.b.Size() > 0, "spatial_seas: empty rate-state vectors.");
+      // A rank that owns ZERO fault DOFs (normal at high rank counts — the planar
+      // fault does not reach every volume partition; cf. seas_driver.cpp:431-435,
+      // which always sources fc from config and so runs at 8N×400r) has empty rs.*
+      // here.  On a fault-owning rank read the (assert_uniform-checked, globally
+      // uniform) per-DOF element 0 exactly as before; on a fault-free rank fall
+      // back to the config uniform defaults (== rs.*(0) for every shipped config).
+      // Per-DOF Dc still flows through geom's Dc_values_; fc.Dc is the scalar
+      // fallback (R-005).
       DieterichRuinaFriction::Constants fc;
-      fc.V0 = rs.V_0(0); fc.f0 = rs.f_0(0); fc.b = rs.b(0); fc.Dc = rs.Dc(0);
+      if (rs.b.Size() > 0)
+      {
+         fc.V0 = rs.V_0(0); fc.f0 = rs.f_0(0); fc.b = rs.b(0); fc.Dc = rs.Dc(0);
+      }
+      else
+      {
+         MFEM_VERIFY(cfg.rate_state.has_value(),
+                     "spatial_seas: [friction.rate_state] required to build the "
+                     "Dieterich-Ruina friction constants on a fault-free rank.");
+         fc.V0 = cfg.rate_state->V_0_default;
+         fc.f0 = cfg.rate_state->f_0_default;
+         fc.b  = cfg.rate_state->b_default;
+         fc.Dc = cfg.rate_state->Dc_default;
+      }
       DieterichRuinaFriction friction(fc);
 
       // State-evolution law: aging-law (default) or STRONG rate weakening
@@ -975,7 +995,15 @@ int main(int argc, char *argv[])
       const real_t srw_vw = use_srw ? cfg.rate_state->V_w_default : 0.1;
 
       AgingLawPsi   aging(fc.b, fc.V0, fc.f0);
-      SlipLawSRWPsi srw(rs.a(0), fc.b, fc.V0, fc.f0, srw_fw, srw_vw);
+      // rs.a(0): srw is constructed UNCONDITIONALLY (it must outlive fault_op even
+      // when inert), so guard the element-0 read — a fault-free rank has empty rs.a.
+      // srw only ever DRIVES DOFs when use_srw, and then over 0 DOFs on such a rank,
+      // so any finite a is inert; use the config a_default fallback.
+      const real_t srw_a = (rs.a.Size() > 0)
+                           ? rs.a(0)
+                           : (cfg.rate_state.has_value()
+                              ? cfg.rate_state->a_default : real_t(0.010));
+      SlipLawSRWPsi srw(srw_a, fc.b, fc.V0, fc.f0, srw_fw, srw_vw);
       StateEvolution *evo = &aging;
       if (use_srw)
       {
@@ -1005,9 +1033,6 @@ int main(int argc, char *argv[])
          // + effective σ_n into a Cauchy tensor on the constant planar-BP5 fault
          // basis (col 0 of geom.fault_dof_basis(); ± a global sign flip is
          // projection-invariant — verified in test_spatial_seas_bp5_analytic).
-         MFEM_VERIFY(geom.NumFaultDOFs() > 0,
-                     "spatial_seas: [stress].bp5_analytic with no owned fault "
-                     "DOFs on this rank.");
          // R-606: bp5_analytic takes precedence over [stress].kind — warn once
          // if a non-default kind was also set (it is silently ignored).
          if (rank == 0 && cfg.stress.kind != spatial::StressSourceKind::ConstantTensor)
@@ -1015,24 +1040,36 @@ int main(int argc, char *argv[])
             std::cerr << "[spatial_seas] WARNING: [stress].bp5_analytic=true "
                       << "overrides [stress].kind (the kind is ignored).\n";
          }
-         const DenseMatrix &Bsis = geom.fault_dof_basis();
-         MFEM_VERIFY(Bsis.Height() == 9 && Bsis.Width() == geom.NumFaultDOFs(),
-                     "spatial_seas: unexpected fault_dof_basis shape.");
-         const real_t nrm[3] = { Bsis(0,0), Bsis(1,0), Bsis(2,0) };
-         const real_t t1v[3] = { Bsis(3,0), Bsis(4,0), Bsis(5,0) };
-         const real_t t2v[3] = { Bsis(6,0), Bsis(7,0), Bsis(8,0) };
-         // R-604: bp5_analytic applies this single col-0 basis to ALL DOFs, so
-         // it is valid only for a PLANAR fault.  Assert the columns share the
-         // normal direction (up to sign) instead of silently mis-projecting on
-         // a non-planar fault.
-         const int ncheck = std::min(geom.NumFaultDOFs(), 16);
-         for (int j = 1; j < ncheck; ++j)
+         // Col-0 fault-basis axes for the single planar-BP5 Cauchy tensor.  A rank
+         // owning ZERO fault DOFs (normal at high rank counts — the planar fault
+         // does not reach every volume partition) has a 9x0 basis: use dummy
+         // orthonormal axes (UNUSED — geom.ComputeParams early-returns when
+         // num_fault_dofs_==0) so the source object still constructs.  A
+         // fault-owning rank reads col 0 + runs the planar check exactly as before.
+         real_t nrm[3] = { 1.0, 0.0, 0.0 };
+         real_t t1v[3] = { 0.0, 1.0, 0.0 };
+         real_t t2v[3] = { 0.0, 0.0, 1.0 };
+         if (geom.NumFaultDOFs() > 0)
          {
-            const real_t dot = nrm[0]*Bsis(0,j) + nrm[1]*Bsis(1,j) + nrm[2]*Bsis(2,j);
-            MFEM_VERIFY(std::abs(std::abs(dot) - 1.0) < 1e-9,
-                        "spatial_seas: [stress].bp5_analytic requires a PLANAR "
-                        "fault — column " << j << " normal differs from column 0 "
-                        "(|n_j·n_0|=" << std::abs(dot) << ").");
+            const DenseMatrix &Bsis = geom.fault_dof_basis();
+            MFEM_VERIFY(Bsis.Height() == 9 && Bsis.Width() == geom.NumFaultDOFs(),
+                        "spatial_seas: unexpected fault_dof_basis shape.");
+            nrm[0] = Bsis(0,0); nrm[1] = Bsis(1,0); nrm[2] = Bsis(2,0);
+            t1v[0] = Bsis(3,0); t1v[1] = Bsis(4,0); t1v[2] = Bsis(5,0);
+            t2v[0] = Bsis(6,0); t2v[1] = Bsis(7,0); t2v[2] = Bsis(8,0);
+            // R-604: bp5_analytic applies this single col-0 basis to ALL DOFs, so
+            // it is valid only for a PLANAR fault.  Assert the columns share the
+            // normal direction (up to sign) instead of silently mis-projecting on
+            // a non-planar fault.
+            const int ncheck = std::min(geom.NumFaultDOFs(), 16);
+            for (int j = 1; j < ncheck; ++j)
+            {
+               const real_t dot = nrm[0]*Bsis(0,j) + nrm[1]*Bsis(1,j) + nrm[2]*Bsis(2,j);
+               MFEM_VERIFY(std::abs(std::abs(dot) - 1.0) < 1e-9,
+                           "spatial_seas: [stress].bp5_analytic requires a PLANAR "
+                           "fault — column " << j << " normal differs from column 0 "
+                           "(|n_j·n_0|=" << std::abs(dot) << ").");
+            }
          }
          spatial::Bp5AnalyticStressSource bp5src(seed, nrm, t1v, t2v);
          geom.ComputeParams(bp5src);   // P_p = 0 (BP5 σ_n is effective)
@@ -1188,9 +1225,16 @@ int main(int argc, char *argv[])
       {
          // 4-phase init; aborts internally if the equilibrium residual > 1e-6.
          seas_op.SetInitialCondition(state);
+         // rs.V_init(0): a fault-free rank has empty rs.V_init — fall back to the
+         // config V_init_default.  dt_seed is only the initial RK45 step guess
+         // (adapted immediately, then reconciled collectively across ranks).
+         const real_t v_init_seed = (rs.V_init.Size() > 0)
+                                    ? rs.V_init(0)
+                                    : (cfg.rate_state.has_value()
+                                       ? cfg.rate_state->V_init_default : real_t(1e-9));
          dt_seed = (cfg.time.dt_init > 0.0)
                    ? cfg.time.dt_init
-                   : 0.01 * fc.Dc / std::max(rs.V_init(0), real_t(1e-15));
+                   : 0.01 * fc.Dc / std::max(v_init_seed, real_t(1e-15));
          // GetMaxSlipRate() is COLLECTIVE (MPI_Allreduce over the global V_max):
          // call it on ALL ranks, then print on rank 0.  Calling it inside
          // `if (rank == 0)` deadlocks at np>1 (rank 0 blocks in the Allreduce

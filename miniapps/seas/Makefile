@@ -606,6 +606,11 @@ TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ = $(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_SRC:.c
 # Phase 5: QD coupling smoke (construct + 4-phase init + a few RK45 steps).
 TEST_SPATIAL_SEAS_QD_SMOKE_SRC = tests/unit/test_spatial_seas_qd_coupling_smoke.cpp
 TEST_SPATIAL_SEAS_QD_SMOKE_OBJ = $(TEST_SPATIAL_SEAS_QD_SMOKE_SRC:.cpp=.o)
+# Fault-free-rank regression for the QD driver §5b (np=4): a rank owning zero
+# fault DOFs builds friction constants from config (not rs.*(0)) and survives the
+# construction chain (drivers/spatial_seas_driver.cpp:954 fix).
+TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_SRC = tests/unit/test_spatial_seas_zero_fault_rank.cpp
+TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_OBJ = $(TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_SRC:.cpp=.o)
 # Phase 6: QD checkpoint serialization round-trip (serial, no mesh/MPI).
 TEST_SEAS_QD_CHECKPOINT_SRC = tests/unit/test_seas_qd_checkpoint.cpp
 TEST_SEAS_QD_CHECKPOINT_OBJ = $(TEST_SEAS_QD_CHECKPOINT_SRC:.cpp=.o)
@@ -1238,6 +1243,16 @@ seas_test_spatial_seas_qd_coupling_smoke: $(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ) \
                                           $(SPATIAL_FRICTION_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Fault-free-rank regression: same link set as the QD coupling smoke
+# (SPATIAL_FRICTION_OBJ for the RateStatePerDOFParams header deps).
+seas_test_spatial_seas_zero_fault_rank: $(TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_OBJ) \
+                                        $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(MFEM_LIBS)
 	$(SEAS_POST_LINK_DEDUP_RPATH)
@@ -3220,6 +3235,13 @@ $(TEST_SPATIAL_SEAS_ITER_VS_DIRECT_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
 	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
 
 $(TEST_SPATIAL_SEAS_QD_SMOKE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                 tests/unit/fault_mesh_fixture.hpp \
+                                 $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -DSEAS_USE_MPI -c $< -o $@
+
+$(TEST_SPATIAL_SEAS_ZERO_FAULT_RANK_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
                                  tests/unit/fault_mesh_fixture.hpp \
                                  $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
