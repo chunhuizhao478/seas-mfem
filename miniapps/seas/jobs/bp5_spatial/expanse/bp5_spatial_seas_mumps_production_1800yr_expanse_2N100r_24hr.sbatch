@@ -5,17 +5,17 @@
 #SBATCH --partition=compute
 #SBATCH --nodes=2
 #SBATCH --ntasks-per-node=100
-#SBATCH --time=48:00:00
+#SBATCH --time=24:00:00
 #SBATCH --mem=243G
 #SBATCH -A ddp408
 
 # =========================================================================
 # BP5 SPATIAL quasi-dynamic SEAS — PRODUCTION run, DIRECT (MUMPS) solver.
-# *** EXPANSE (SDSC) job — 2N x 100r = 200 ranks / 48 h / compute / ddp408. ***
+# *** EXPANSE (SDSC) job — 2N x 100r = 200 ranks / 24 h / compute / ddp408. ***
 # Driver:  seas_spatial_seas_driver   (the generic QD SEAS driver, --config flag)
 # Config:  config/safs_qd/bp5_spatial_seas_verification.toml  ([solver].type="mumps")
 # Run:     FULL ~1800-yr BP5-QD seismic cycle, to t_final (NO --max-steps cap),
-#          WITH checkpoint/restart so the cycle spans multiple 48 h segments.
+#          WITH checkpoint/restart so the cycle spans multiple 24 h segments.
 # =========================================================================
 # This is the Expanse, DIRECT-solver, production sibling of:
 #   * jobs/bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch
@@ -56,7 +56,7 @@
 # 31557600 (config/bp5_params.hpp:172,175).  Override with BP5_TFINAL.
 #
 # === OPEN CHECKPOINTS (chained-segment restart) ============================
-# 1800 yr will NOT finish in one 48 h walltime, so checkpointing is REQUIRED to
+# 1800 yr will NOT finish in one 24 h walltime, so checkpointing is REQUIRED to
 # resume.  --checkpoint-every CKPT writes a QD checkpoint every CKPT accepted
 # steps (plus one guaranteed final checkpoint at clean exit) to
 #   <output_dir>/spatial_seas_checkpoint_r<rank>.txt   (one ASCII file per rank).
@@ -69,30 +69,30 @@
 #   #      USE_MUMPS=YES bash build_expanse.sh        # interactive shared session
 #   #      sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch
 #   # 1) cold-start segment 1:
-#   sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
+#   sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_24hr.sbatch
 #   # 2) after it finishes/timeouts, chain the next segment(s):
-#   sbatch --export=ALL,SEGMENT=2 miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
+#   sbatch --export=ALL,SEGMENT=2 miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_24hr.sbatch
 #   sbatch --export=ALL,SEGMENT=3 ...                # until "SEAS Simulation Complete"
 #
 # The restart aborts if the mesh/partition/rank-count changed or if the friction
 # params drift > 1e-9 vs the checkpoint (config-drift guard) — keep the same
 # config, node/rank layout, and mesh across segments.  A run that reaches t_final
-# exits 0; a 48 h walltime kill is a SLURM TIMEOUT (resume via the next segment).
+# exits 0; a 24 h walltime kill is a SLURM TIMEOUT (resume via the next segment).
 # Station traces are written per-segment under BASE/segment_NNN — stitch them in
 # post-processing.
 #
 # *** RESUME CAVEATS (read before relying on the chain) ***
 #  (1) Checkpoint cadence is STEP-based, and the driver has NO SIGTERM handler:
-#      a 48 h TIMEOUT is a SIGKILL, so the guaranteed post-loop "final" checkpoint
+#      a 24 h TIMEOUT is a SIGKILL, so the guaranteed post-loop "final" checkpoint
 #      (spatial_seas_driver.cpp:1330) does NOT fire on a kill.  A segment therefore
 #      leaves a resumable checkpoint ONLY if it completed >= CKPT accepted steps
 #      before the kill.  Pick CKPT comfortably below the worst-case step count a
-#      segment can reach in 48 h.  This matters MOST for SEGMENT=1: a segment-1
+#      segment can reach in 24 h.  This matters MOST for SEGMENT=1: a segment-1
 #      timeout that did < CKPT steps leaves NOTHING to resume and the chain must
 #      restart from scratch.  The default below (250) is deliberately small (the
 #      QD checkpoint is a tiny per-rank ASCII file; the MFEM stiffness matrix is
 #      factorized ONCE and reused, so accepted steps are cheap back-solves and
-#      thousands typically fit in 48 h — frequent checkpoints cost ~nothing).
+#      thousands typically fit in 24 h — frequent checkpoints cost ~nothing).
 #      Lower CKPT further if a segment risks a slow/short window.
 #  (2) Each segment keeps only ONE checkpoint set (fixed prefix, overwritten in
 #      place; the write is not atomic — io/seas_qd_checkpoint.hpp).  A SIGKILL
@@ -240,7 +240,7 @@ fi
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Git branch:  $(git rev-parse --abbrev-ref HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 100r = ${SLURM_NTASKS} ranks, 48:00:00  (-A ddp408)"
+echo "Queue/size:  compute, 2N x 100r = ${SLURM_NTASKS} ranks, 24:00:00  (-A ddp408)"
 echo "EXPERIMENT:  BP5 spatial QUASI-DYNAMIC, MUMPS DIRECT solver, FULL ~1800 yr"
 echo "Config:      ${CONFIG_TOML}   (solver=${SOLVER_TYPE})"
 echo "Mesh:        ${MESH:-<from config>} ${MESH_ARG:+(CLI override)}"
@@ -249,7 +249,7 @@ echo "Checkpoint:  every ${CKPT} accepted steps -> ${OUT}/spatial_seas_checkpoin
 echo "BASE=${BASE}  SEGMENT=${SEGMENT}  OUT=${OUT}"
 
 # Full run to t_final (NO --max-steps).  --checkpoint-every keeps periodic
-# checkpoints so a 48 h TIMEOUT can resume from the next segment.  ParaView is
+# checkpoints so a 24 h TIMEOUT can resume from the next segment.  ParaView is
 # forced off defensively (the QD driver does not emit volume/fault PV in its time
 # loop today; only checkpoints + BP5 station traces are written).
 srun --mpi=pmi2 -n "${SLURM_NTASKS}" stdbuf -oL -eL ./seas_spatial_seas_driver \
@@ -272,6 +272,6 @@ if [[ ${RC} -eq 0 ]]; then
     echo "  If the log does NOT say 'Complete', it stopped early — submit the next segment."
 else
     echo "driver_rc=${RC} — segment ${SEGMENT} ended non-zero (TIMEOUT or error); see the .out/.err."
-    echo "  On a 48 h TIMEOUT, resume:  sbatch --export=ALL,SEGMENT=$((SEGMENT+1)) <this file>"
+    echo "  On a 24 h TIMEOUT, resume:  sbatch --export=ALL,SEGMENT=$((SEGMENT+1)) <this file>"
 fi
 exit ${RC}
