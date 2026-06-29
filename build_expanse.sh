@@ -1166,8 +1166,21 @@ make ${FILTERED_TARGETS} \
 
 if [ -f extern/toml11/toml.hpp ] || [ -f extern/toml11/include/toml.hpp ]; then
     echo ""
-    echo "=== Building TOML driver ==="
-    make seas_driver -j"${JOBS}"
+    echo "=== Building TOML drivers (seas_driver + seas_spatial_seas_driver) ==="
+    # Both are TOML-config-driven and call the spatial/SEAS config loader
+    # (LoadSpatialFrictionConfig), so they ONLY build with the toml11 submodule
+    # present (SEAS_USE_TOML auto-resolves to YES from extern/toml11/toml.hpp):
+    #   * seas_driver               — the BP5-QD TOML driver (config/bp5_*.toml).
+    #   * seas_spatial_seas_driver  — the generic spatial QUASI-DYNAMIC SEAS
+    #                                 driver (BP5-spatial + SAFS-QD); the binary
+    #                                 the bp5_spatial/expanse jobs profile with
+    #                                 Caliper.  It is NOT in MINIAPPS and is NOT
+    #                                 built by the main make above, so it must be
+    #                                 named explicitly here or it is silently
+    #                                 absent on Expanse.  When USE_CALIPER=YES the
+    #                                 'make clean' above already ran, so this is a
+    #                                 fresh, Caliper-linked build.
+    make seas_driver seas_spatial_seas_driver -j"${JOBS}"
     DRIVER_BUILT=1
 else
     DRIVER_BUILT=0
@@ -1196,7 +1209,12 @@ else
 fi
 echo "  ./seas_test_parallel_elasticity            # (and ~50 other unit tests)"
 if [ "${DRIVER_BUILT}" = "1" ]; then
-    echo "  $(pwd)/seas_driver          (TOML-based)"
+    echo "  $(pwd)/seas_driver                 # BP5-QD TOML driver"
+    echo "  $(pwd)/seas_spatial_seas_driver    # spatial QUASI-DYNAMIC SEAS driver"
+    echo "                                             #   (BP5-spatial + SAFS-QD; --config <toml>)"
+    if [ "${USE_CALIPER_RESOLVED}" = "YES" ]; then
+        echo "                                             #   Caliper-linked (profile via CALI_CONFIG)"
+    fi
 fi
 if [ "${USE_HDF5_RESOLVED}" = "YES" ]; then
     echo ""
