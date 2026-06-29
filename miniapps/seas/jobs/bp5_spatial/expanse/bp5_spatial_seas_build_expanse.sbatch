@@ -17,10 +17,10 @@
 # then sanity-checks the binary.  This is the fast, incremental path: you do NOT
 # need to re-run build_expanse.sh after a SEAS source change.
 #
-# It is the bp5_spatial/expanse sibling of
+# It is the jobs/bp5_spatial/expanse sibling of
 #   jobs/safs/safs_expanse/spatial_dyn_build_safs_expanse.sbatch
 # (which builds the seas_spatial_DYN_driver).  This one builds the QD driver
-# that the bp5_spatial/expanse Caliper run job profiles.
+# that the jobs/bp5_spatial/expanse Caliper run job profiles.
 #
 # WHEN TO USE WHICH:
 #   * bash build_expanse.sh    -> FIRST time on Expanse, or when MFEM itself /
@@ -60,8 +60,8 @@
 # binary, so no LD_LIBRARY_PATH ordering can break them (build_expanse.sh §hypre).
 #
 # Submit (chain the run job after a verified build):
-#   bid=$(sbatch --parsable miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch)
-#   sbatch --dependency=afterok:${bid} miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch
+#   bid=$(sbatch --parsable miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch)
+#   sbatch --dependency=afterok:${bid} miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch
 #   # --dependency=afterok means a FAILED build cancels the run job.
 #
 # Edit -A above or submit with: sbatch --account=<your_expanse_alloc> ...
@@ -193,4 +193,4 @@ echo "  no unresolved symbols."
 echo "BUILD OK: $(pwd)/seas_spatial_seas_driver"
 ls -la ./seas_spatial_seas_driver
 echo "Now submit the run job (it does NOT rebuild):"
-echo "  sbatch bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch"
+echo "  sbatch jobs/bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch"

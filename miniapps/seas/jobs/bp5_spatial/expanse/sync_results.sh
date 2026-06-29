@@ -2,7 +2,7 @@
 # =============================================================================
 # Pull BP5-SPATIAL quasi-dynamic (seas_spatial_seas_driver) result files from
 # EXPANSE (SDSC) into a local archive tree for inspection.  Sibling of
-# jobs/safs/safs_expanse/sync_results.sh, adapted for the bp5_spatial/expanse
+# jobs/safs/safs_expanse/sync_results.sh, adapted for the jobs/bp5_spatial/expanse
 # Caliper jobs (seas_spatial_seas_driver, CG-AMG, --max-steps 100).
 #
 # Run this on your LOCAL machine (Mac), not on Expanse.
@@ -18,7 +18,7 @@
 #       Caliper job runs ParaView "off" by default, so there usually is none).
 #
 #   (2) CALIPER REPORTS + DIAGNOSTIC LOGS (default ON): from the run job's
-#       LOG_DIR (the cluster's miniapps/seas/bp5_spatial/expanse):
+#       LOG_DIR (the cluster's miniapps/seas/jobs/bp5_spatial/expanse):
 #         bp5_spatial_seas_cgamg_cali_<jobid>.log         (driver stdout/stderr)
 #         bp5_spatial_seas_cgamg_cali_<jobid>.cali-region-report.txt   (sparse)
 #         bp5_spatial_seas_cgamg_cali_<jobid>.cali-sample-report.txt   (PRIMARY)
@@ -43,7 +43,7 @@
 #   ./sync_results.sh --dest /Volumes/SSD/seas/bp5_spatial_expanse
 #   ./sync_results.sh --host czhao1@login.expanse.sdsc.edu
 #   ./sync_results.sh --remote-root /path/to/seas-mfem/miniapps/seas/bp5/spatial_seas_expanse
-#   ./sync_results.sh --remote-log-dir /path/to/seas-mfem/miniapps/seas/bp5_spatial/expanse
+#   ./sync_results.sh --remote-log-dir /path/to/seas-mfem/miniapps/seas/jobs/bp5_spatial/expanse
 #
 # A JOB ID is the most reliable filter — it appears in every artefact name
 # (bp5_seas_*_<jobid>, bp5_spatial_seas_*_<jobid>.log, bp5seas_cg_cali_<jobid>.out).
@@ -66,11 +66,11 @@ export LC_ALL=C LANG=C
 
 # Expanse checkout root (the dir that contains miniapps/seas/...).  The run job
 # writes station traces under <checkout>/miniapps/seas/bp5/spatial_seas_expanse
-# and the .log/.cali reports under <checkout>/miniapps/seas/bp5_spatial/expanse.
+# and the .log/.cali reports under <checkout>/miniapps/seas/jobs/bp5_spatial/expanse.
 REMOTE_CHECKOUT="/expanse/projects/qstore/usc143/qwxdev/apps/expanse/rocky8.8/mfem_seas_versions/seas-mfem"
 REMOTE_ROOT="${REMOTE_CHECKOUT}/miniapps/seas/bp5/spatial_seas_expanse"
 REMOTE_GLOB="bp5_seas_*"
-REMOTE_LOG_DIR_DEFAULT="${REMOTE_CHECKOUT}/miniapps/seas/bp5_spatial/expanse"
+REMOTE_LOG_DIR_DEFAULT="${REMOTE_CHECKOUT}/miniapps/seas/jobs/bp5_spatial/expanse"
 LOG_GLOB="bp5_spatial_seas_*.log"
 DEFAULT_DEST="$HOME/Downloads/seas-mfem/bp5_spatial_expanse"
 

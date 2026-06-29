@@ -1173,7 +1173,7 @@ if [ -f extern/toml11/toml.hpp ] || [ -f extern/toml11/include/toml.hpp ]; then
     #   * seas_driver               — the BP5-QD TOML driver (config/bp5_*.toml).
     #   * seas_spatial_seas_driver  — the generic spatial QUASI-DYNAMIC SEAS
     #                                 driver (BP5-spatial + SAFS-QD); the binary
-    #                                 the bp5_spatial/expanse jobs profile with
+    #                                 the jobs/bp5_spatial/expanse jobs profile with
     #                                 Caliper.  It is NOT in MINIAPPS and is NOT
     #                                 built by the main make above, so it must be
     #                                 named explicitly here or it is silently

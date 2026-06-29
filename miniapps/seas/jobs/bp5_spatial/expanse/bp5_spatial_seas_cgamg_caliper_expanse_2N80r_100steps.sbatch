@@ -46,7 +46,7 @@
 # *** REQUIRES A CALIPER-ENABLED BINARY *** (MFEM_USE_CALIPER=YES).  On Expanse:
 #     USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh        # full build
 #   then (after later source edits) the fast incremental rebuild:
-#     sbatch miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch
+#     sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch
 # build_expanse.sh ships Caliper v2.11.0 (WITH_SAMPLER always; WITH_LIBDW when
 # elfutils is found -> sample-report works).  USE_CALIPER defaults to NO, so the
 # NORMAL binary has the regions compiled out (empty report); this job hard-checks
@@ -101,7 +101,7 @@ cd miniapps/seas
 if [[ ! -x ./seas_spatial_seas_driver ]]; then
     echo "ERROR: ./seas_spatial_seas_driver not found.  Build it FIRST on Expanse:"
     echo "  (full, with Caliper)  USE_CALIPER=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
-    echo "  (fast incremental)    sbatch bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch"
+    echo "  (fast incremental)    sbatch jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch"
     exit 1
 fi
 
@@ -158,7 +158,7 @@ PV_FAULT="${BP5_PV_FAULT:-off}"      #   (BP5 station traces still written via b
 
 OUT_BASE="${BP5_OUTDIR:-${SEAS_MFEM_ROOT}/miniapps/seas/bp5/spatial_seas_expanse}"
 OUT="${OUT_BASE}/bp5_seas_cgamg_cali_${SLURM_JOB_ID}"
-LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/bp5_spatial/expanse"
+LOG_DIR="${SEAS_MFEM_ROOT}/miniapps/seas/jobs/bp5_spatial/expanse"
 LOG="${LOG_DIR}/bp5_spatial_seas_cgamg_cali_${SLURM_JOB_ID}.log"
 mkdir -p "${OUT}" "${LOG_DIR}"
 

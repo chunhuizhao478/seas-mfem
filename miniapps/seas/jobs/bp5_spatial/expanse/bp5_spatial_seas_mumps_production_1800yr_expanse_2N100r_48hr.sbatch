@@ -18,7 +18,7 @@
 #          WITH checkpoint/restart so the cycle spans multiple 48 h segments.
 # =========================================================================
 # This is the Expanse, DIRECT-solver, production sibling of:
-#   * bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch
+#   * jobs/bp5_spatial/expanse/bp5_spatial_seas_cgamg_caliper_expanse_2N80r_100steps.sbatch
 #       (Expanse, iterative CG-AMG, Caliper PROFILE, first 100 steps) — same
 #       modules / launcher / root-resolution scaffold, inverted solver gate.
 #   * bp5_spatial/bp5_production_gmres_restart_normal_48hr.sbatch
@@ -67,11 +67,11 @@
 #
 #   # 0) build the QD driver ONCE on Expanse (full build, then fast rebuilds):
 #   #      USE_MUMPS=YES bash build_expanse.sh        # interactive shared session
-#   #      sbatch miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch
+#   #      sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch
 #   # 1) cold-start segment 1:
-#   sbatch miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
+#   sbatch miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
 #   # 2) after it finishes/timeouts, chain the next segment(s):
-#   sbatch --export=ALL,SEGMENT=2 miniapps/seas/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
+#   sbatch --export=ALL,SEGMENT=2 miniapps/seas/jobs/bp5_spatial/expanse/bp5_spatial_seas_mumps_production_1800yr_expanse_2N100r_48hr.sbatch
 #   sbatch --export=ALL,SEGMENT=3 ...                # until "SEAS Simulation Complete"
 #
 # The restart aborts if the mesh/partition/rank-count changed or if the friction
@@ -162,7 +162,7 @@ cd miniapps/seas
 if [[ ! -x ./seas_spatial_seas_driver ]]; then
     echo "ERROR: ./seas_spatial_seas_driver not found.  Build it FIRST on Expanse:"
     echo "  (full, with MUMPS)  USE_MUMPS=YES bash ${SEAS_MFEM_ROOT}/build_expanse.sh"
-    echo "  (fast incremental)  sbatch bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch"
+    echo "  (fast incremental)  sbatch jobs/bp5_spatial/expanse/bp5_spatial_seas_build_expanse.sbatch"
     exit 1
 fi
 
