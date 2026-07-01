@@ -1101,6 +1101,16 @@ SpatialFrictionConfig parse_root(const toml::value& root)
       cfg.numerics.mixed_flux_contrast_tol =
          toml_real(n, "mixed_flux_contrast_tol", -1.0);
       cfg.numerics.cfl        = toml_real(n, "cfl", 0.5);
+      // Lever A (2026-06-30): the removable EXTRA DG safety factor beyond the
+      // mandatory order factor 1/(2N+1).  Default 3.0 == historical hard-code
+      // (byte-exact); 1.0 == SeisSol-equivalent step (dt×3).  Below 1.0 pushes
+      // past SeisSol's order-factor floor into instability — reject it.  The ×3
+      // lever lives HERE; `cfl` (the Courant number) stays ≤ 1 and is not raised.
+      cfg.numerics.cfl_dg_safety = toml_real(n, "cfl_dg_safety", 3.0);
+      MFEM_VERIFY(cfg.numerics.cfl_dg_safety >= 1.0,
+                  "[numerics].cfl_dg_safety must be >= 1.0 (1.0 = SeisSol's "
+                  "order-factor floor 1/(2N+1); below it the explicit DG step is "
+                  "unstable); got " << cfg.numerics.cfl_dg_safety);
       cfg.numerics.use_pml    = toml_bool(n, "use_pml", false);
 
       // Phase 6 req 3: cfl_safety / fault_iterator / interior_flux selectors.

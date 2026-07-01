@@ -574,6 +574,11 @@ int main(int argc, char *argv[])
 
    const real_t cli_tfinal     = GetRealArg(argc, argv, "--tfinal", -1.0);
    const real_t cli_cfl        = GetRealArg(argc, argv, "--cfl", -1.0);
+   // Lever A (2026-07-01): CLI override for the extra DG safety margin
+   // [numerics].cfl_dg_safety (default 3.0 = today; 1.0 = SeisSol-equivalent,
+   // dt×3).  Sweep knob — makes a cfl_dg_safety A/B one flag, no config dupes.
+   // The Courant number `cfl` is a SEPARATE knob and stays ≤ 1.
+   const real_t cli_cfl_dg_safety = GetRealArg(argc, argv, "--cfl-dg-safety", -1.0);
    const int    cli_ader_order = GetIntArg(argc, argv, "--ader-order", -1);
    // Phase 4: --fault-overint K — fault-flux over-integration factor (0 = off,
    // byte-exact).  Applied via WaveOperator::SetFaultOverint after the operator
@@ -699,6 +704,15 @@ int main(int argc, char *argv[])
    if (!cli_stress_sidecar.empty())  { cfg.stress.sidecar_path = cli_stress_sidecar; }
    if (cli_tfinal > 0.0)             { cfg.time.tfinal = cli_tfinal; }
    if (cli_cfl > 0.0)                { cfg.numerics.cfl = cli_cfl; }
+   if (cli_cfl_dg_safety > 0.0)
+   {
+      // Re-validate here: the parser's >=1.0 guard ran before this override.
+      MFEM_VERIFY(cli_cfl_dg_safety >= 1.0,
+                  "--cfl-dg-safety must be >= 1.0 (1.0 = SeisSol's order-factor "
+                  "floor 1/(2N+1); below it the explicit DG step is unstable); "
+                  "got " << cli_cfl_dg_safety);
+      cfg.numerics.cfl_dg_safety = cli_cfl_dg_safety;
+   }
    if (cli_ader_order > 0)           { cfg.numerics.ader_order = cli_ader_order; }
    if (!cli_time_integrator.empty())
    {
@@ -2239,6 +2253,20 @@ int main(int argc, char *argv[])
       std::cout << "[time] dt_cfl = " << dt_cfl << " s\n"
                 << "[time] dt     = " << dt     << " s\n"
                 << "[time] nsteps = " << nsteps << "\n";
+      // Lever A (2026-06-30): make the CFL safety breakdown legible so a
+      // cfl_dg_safety sweep is auditable in the log.  Dg/ADER path only.
+      if (!is_rk && cfg.numerics.cfl_safety == spatial::CflSafety::Dg)
+      {
+         // dt scales as 1/cfl_dg_safety, so the cfl_dg_safety=1.0 (SeisSol)
+         // step is the current dt_cfl times the current cfl_dg_safety.
+         const real_t seissol_equiv = dt_cfl * cfg.numerics.cfl_dg_safety;
+         std::cout << "[time] cfl = " << cfg.numerics.cfl
+                   << " (Courant number, <= 1); cfl_dg_safety = "
+                   << cfg.numerics.cfl_dg_safety
+                   << " (extra DG margin; 1.0 = SeisSol-equivalent)\n"
+                   << "[time]   SeisSol-equivalent dt_cfl (cfl_dg_safety=1.0) = "
+                   << seissol_equiv << " s\n";
+      }
    }
 
    if (print_derived)

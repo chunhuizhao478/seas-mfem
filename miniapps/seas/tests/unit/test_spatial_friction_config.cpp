@@ -1081,11 +1081,18 @@ ader_order=2
 mixed_flux="none"
 cfl=0.5
 cfl_safety="dg"
+cfl_dg_safety=1.5
 fault_iterator="substep"
 interior_flux="matrix"
 [material]
 kind="depth_profile_1d"
-profile_csv="/tmp/profile.csv"
+[[material_profile.layer]]
+depth_top_m=0
+depth_bot_m=-10000
+vp_ms=6000
+vs_ms=3464
+rho_kgm3=2670
+interp="constant"
 [time]
 tfinal="12s"
 [output]
@@ -1098,9 +1105,17 @@ cohesion_default=0
 )TOML";
    // NOTE: interior_flux="matrix" now requires a non-Constant [material]
    // (Phase 6 req-3 guard, completed with req 1); the depth_profile_1d block
-   // above satisfies it.
+   // above satisfies it.  (2026-07-01) The Phase-10/TPV31 parser requires an
+   // inline `[[material_profile.layer]]` array for kind="depth_profile_1d" and
+   // ignores the old `profile_csv` key — this config previously used the stale
+   // `profile_csv="/tmp/profile.csv"` form and so aborted parse_root at
+   // spatial_friction.cpp:1693, taking down the whole binary.  Replaced with a
+   // minimal one-layer profile so the parse succeeds and this test (plus every
+   // test after it in main()) runs.
    const auto cfg = ParseSpatialFrictionConfigString(toml);
    TEST_ASSERT(cfg.numerics.cfl_safety == CflSafety::Dg, "cfl_safety=dg");
+   TEST_ASSERT(cfg.numerics.cfl_dg_safety == 1.5,
+               "cfl_dg_safety=1.5 parsed (Lever A extra DG margin)");
    TEST_ASSERT(cfg.numerics.fault_iterator == FaultIteratorKind::Substep,
                "fault_iterator=substep");
    TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Matrix,
@@ -1162,6 +1177,8 @@ cohesion_default=0
                "omitted fault_iterator passes FaultIteratorSupported (R-001)");
    TEST_ASSERT(cfg.numerics.cfl_safety == CflSafety::Dg,
                "omitted cfl_safety defaults to Dg (R-002)");
+   TEST_ASSERT(cfg.numerics.cfl_dg_safety == 3.0,
+               "omitted cfl_dg_safety defaults to 3.0 (Lever A byte-exact today)");
    TEST_ASSERT(cfg.numerics.interior_flux == InteriorFlux::Scalar,
                "omitted interior_flux defaults to Scalar");
 }
@@ -1453,8 +1470,19 @@ static void T_44_hypocenter_positive_z_aborts()
 static void T_45_material_kinds()
 {
    std::cout << "\n[CFG1-6] material kind selectors\n";
+   // (2026-07-01) kind="depth_profile_1d" now REQUIRES an inline
+   // `[[material_profile.layer]]` array (Phase-10/TPV31); the old `profile_csv`
+   // key is still parsed + round-tripped but is UNUSED (spatial_friction.hpp:615
+   // "layers are inline").  This config previously supplied only profile_csv and
+   // no material_profile, so ParseSpatialFrictionConfigString aborted parse_root
+   // (spatial_friction.cpp:1693) and took down the whole test binary.  Add a
+   // minimal one-layer profile so the parse succeeds; keep the profile_csv
+   // round-trip assertion (that key is still read into the struct).
    const std::string dp = MinimalLSWHeader() + MinimalLSWBlock()
-      + "[material]\nkind=\"depth_profile_1d\"\nprofile_csv=\"/tmp/p.csv\"\n";
+      + "[material]\nkind=\"depth_profile_1d\"\nprofile_csv=\"/tmp/p.csv\"\n"
+        "[[material_profile.layer]]\n"
+        "depth_top_m=0\ndepth_bot_m=-10000\nvp_ms=6000\nvs_ms=3464\n"
+        "rho_kgm3=2670\ninterp=\"constant\"\n";
    const auto cfg = ParseSpatialFrictionConfigString(dp);
    TEST_ASSERT(cfg.material.kind == MaterialKind::DepthProfile1D,
                "kind=depth_profile_1d");
@@ -1464,10 +1492,10 @@ static void T_45_material_kinds()
       + "[material]\nkind=\"bogus\"\n";
    TEST_ASSERT(ParseAbortsInChild(bad), "bad material.kind must abort");
 
-   const std::string dp_no_csv = MinimalLSWHeader() + MinimalLSWBlock()
+   const std::string dp_no_profile = MinimalLSWHeader() + MinimalLSWBlock()
       + "[material]\nkind=\"depth_profile_1d\"\n";
-   TEST_ASSERT(ParseAbortsInChild(dp_no_csv),
-               "depth_profile_1d without profile_csv must abort");
+   TEST_ASSERT(ParseAbortsInChild(dp_no_profile),
+               "depth_profile_1d without material_profile must abort");
 
    const std::string sc_no_path = MinimalLSWHeader() + MinimalLSWBlock()
       + "[material]\nkind=\"sidecar_hdf5\"\n";

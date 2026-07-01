@@ -138,6 +138,14 @@ struct NumericsSpec
    // instead of the non-dissipative central flux.  Inert on the scalar path.
    real_t              mixed_flux_contrast_tol = -1.0;
    real_t              cfl            = 0.5;
+   // Lever A (2026-06-30): the EXTRA DG de-rating factor on the Dg path, on top
+   // of the mandatory Cockburn–Shu order factor 1/(2N+1).  CflSafetyFactor(Dg)
+   // = 1/(cfl_dg_safety·(2N+1)).  Default 3.0 == the historical hard-coded value
+   // (byte-exact).  1.0 == SeisSol's validated default (GlobalTimestep.cpp:46:
+   // dt = cfl·2r/((2N+1)·cp)), i.e. dt×3.  Must be >= 1.0: below 1.0 drops below
+   // SeisSol's order-factor floor into instability.  This is the removable
+   // margin — the ×3 lever lives HERE, never in `cfl` (the Courant number, ≤ 1).
+   real_t              cfl_dg_safety  = 3.0;
    bool                use_pml        = false;
    CflSafety           cfl_safety     = CflSafety::Dg;             // Phase 6 req 3; R-002 default
    FaultIteratorKind   fault_iterator = FaultIteratorKind::Substep;  // R-001 default
@@ -665,15 +673,22 @@ struct SpatialFrictionConfig
 // =====================================================================
 
 /// R-002 / D2: the CFL safety factor applied to `[numerics].cfl`.
-///   Dg  -> the DG `1/(3·(2p+1))` factor (p = mesh order); matches the
-///          byte-exact native driver (tpv205_driver.cpp:1242).
-///   Raw -> 1.0 (no safety factor; experimental escape hatch).
-/// The driver multiplies `cfl` by this; the Dg branch is byte-identical
-/// to the previous unconditional hardcode.
+///   Dg  -> the DG `1/(cfl_dg_safety·(2p+1))` factor (p = mesh order).  With the
+///          default cfl_dg_safety=3.0 this is `1/(3·(2p+1))`, byte-identical to
+///          the previous unconditional hardcode and the native driver
+///          (tpv205_driver.cpp:1242).  Lever A (2026-06-30) exposes the leading
+///          `3` as `[numerics].cfl_dg_safety`: the mandatory Cockburn–Shu order
+///          factor is `1/(2p+1)`; the extra `×cfl_dg_safety` is SAFS's removable
+///          safety margin.  Setting it to 1.0 recovers SeisSol's validated
+///          default step (GlobalTimestep.cpp:46), i.e. dt×3, with `cfl` still
+///          ≤ 1.  The ×3 lever lives here, NEVER in `cfl` (the Courant number).
+///   Raw -> 1.0 (no safety factor — drops the WHOLE order factor; experimental
+///          escape hatch, NOT the CFL lever; see the driver stability comment).
+/// The driver multiplies `cfl` by this.
 inline real_t CflSafetyFactor(const SpatialFrictionConfig& cfg)
 {
    return (cfg.numerics.cfl_safety == CflSafety::Dg)
-          ? (1.0 / (3.0 * (2.0 * cfg.mesh.order + 1.0)))
+          ? (1.0 / (cfg.numerics.cfl_dg_safety * (2.0 * cfg.mesh.order + 1.0)))
           : 1.0;
 }
 

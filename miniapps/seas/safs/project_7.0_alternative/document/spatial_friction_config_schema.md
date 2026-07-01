@@ -149,7 +149,8 @@ convention, matches `stress/code/hickman_and_zoback_*`).
 |--------------|------|---------|----------------------------------------------|
 | `ader_order` | int  | `2`     | `>= 1`                                       |
 | `mixed_flux` | str  | `"none"`| `"none"`, `"adjacent"`, `"all_continuous"`   |
-| `cfl`        | real | `0.5`   | `> 0`, `< 1`                                 |
+| `cfl`        | real | `0.5`   | `> 0`, `< 1` (Courant number — never raise to get bigger steps) |
+| `cfl_dg_safety` | real | `3.0` | `>= 1.0` (extra DG margin; `1.0` = SeisSol-equivalent, `dt×3`) |
 | `use_pml`    | bool | `false` | none                                         |
 
 ---
@@ -445,8 +446,10 @@ max depth, and the VW↔VS transition depth (where `a − b = 0`).
 10. **Time:** `tfinal > 0`, `dt_max > 0`.  `tfinal` parses successfully
     via `spatial_time_parser` (otherwise MFEM_ABORT with the offending
     string).
-11. **Numerics:** `cfl > 0`, `cfl < 1`; `ader_order >= 1`; `mixed_flux`
-    is one of the three accepted strings.
+11. **Numerics:** `cfl > 0`, `cfl < 1`; `cfl_dg_safety >= 1.0` (the extra
+    DG safety margin beyond the mandatory order factor `1/(2N+1)`; `1.0` =
+    SeisSol's validated step); `ader_order >= 1`; `mixed_flux` is one of the
+    three accepted strings.
 12. **Output:** `output_dir` non-empty; `paraview_*` modes are one of
     `hdf5`/`vtu`/`off`; ZFP tolerances `>= 0`; `max_snapshots >= 1`;
     `checkpoint_every_steps >= 1`.

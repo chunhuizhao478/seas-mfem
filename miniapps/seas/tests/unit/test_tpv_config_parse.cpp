@@ -291,6 +291,41 @@ static void T_numerics_dispatch_helpers()
    TEST_NEAR(spatial::CflSafetyFactor(cfg), 1.0 / 15.0, 1e-15,
              "CflSafetyFactor(Dg, p=2) == 1/(3*5) = 1/15");
 
+   // Lever A (2026-06-30): cfl_dg_safety exposes the extra DG margin.  Default
+   // 3.0 reproduces the historical 1/(3(2p+1)); 1.0 == SeisSol-equivalent
+   // 1/(2p+1) (dt x3); 2.0 == 1/(2(2p+1)) (dt x1.5).  cfl untouched throughout.
+   cfg.mesh.order = 1;
+   cfg.numerics.cfl_safety = spatial::CflSafety::Dg;
+   cfg.numerics.cfl_dg_safety = 3.0;
+   const real_t f_default = spatial::CflSafetyFactor(cfg);
+   TEST_NEAR(f_default, 1.0 / 9.0, 1e-15,
+             "CflSafetyFactor(cfl_dg_safety=3.0, p=1) == 1/9 (byte-exact today)");
+   cfg.numerics.cfl_dg_safety = 1.0;
+   const real_t f_seissol = spatial::CflSafetyFactor(cfg);
+   TEST_NEAR(f_seissol, 1.0 / 3.0, 1e-15,
+             "CflSafetyFactor(cfl_dg_safety=1.0, p=1) == 1/3 == SeisSol order "
+             "factor 1/(2N+1)");
+   TEST_NEAR(f_seissol / f_default, 3.0, 1e-13,
+             "cfl_dg_safety 3.0->1.0 is exactly dt x3 (SeisSol-equivalent step)");
+   cfg.numerics.cfl_dg_safety = 2.0;
+   TEST_NEAR(spatial::CflSafetyFactor(cfg), 1.0 / 6.0, 1e-15,
+             "CflSafetyFactor(cfl_dg_safety=2.0, p=1) == 1/6 (dt x1.5)");
+   // Cross-check against SeisSol's exact formula on a shared tet: with the
+   // SAFS length scale h == 2r (insphere diameter) and cfl 0.5, the SeisSol
+   // step dt = cfl*2r/((2N+1)*cp) equals cfl*CflSafetyFactor(1.0)*h/cp.
+   {
+      const real_t cfl = 0.5, twor = 137.0, cp = 6000.0, N = 1.0;
+      cfg.numerics.cfl_dg_safety = 1.0;
+      const real_t dt_safs =
+         cfl * spatial::CflSafetyFactor(cfg) * twor / cp;
+      const real_t dt_seissol = cfl * twor / ((2.0 * N + 1.0) * cp);
+      TEST_NEAR(dt_safs, dt_seissol, 1e-15,
+                "SAFS dt(cfl_dg_safety=1.0) == SeisSol GlobalTimestep.cpp:46 "
+                "formula on a shared tet");
+   }
+   cfg.mesh.order = 2;                       // restore for any later use
+   cfg.numerics.cfl_dg_safety = 3.0;
+
    // (Phase 9: the InteriorFluxSupported Phase-8 stopgap is removed — the
    // driver now branches on interior_flux to build the scalar or matrix
    // WaveOperator ctor, so matrix is supported.)
