@@ -7,7 +7,7 @@
 #SBATCH --ntasks-per-node=100
 #SBATCH --time=02:00:00
 #SBATCH --mem=200000M
-#SBATCH -A ddp408
+#SBATCH -A lbl107
 
 # =========================================================================
 # SAFS RATESTATE v3.0.0 ALT (vw005) — A/B "SEISSOL-CFL" FINGERPRINT (Lever A).
