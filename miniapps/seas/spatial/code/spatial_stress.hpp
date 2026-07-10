@@ -163,6 +163,76 @@ private:
    std::array<real_t, 6> bbox_;
 };
 
+// =====================================================================
+//  Phase 1 (TPV26/27): Tpv2627DepthStressSource
+// =====================================================================
+
+/// SCEC TPV26/27 depth-dependent initial stress (spec Part 3, condensed
+/// in PLAN_TPV26_27 §1.2).  Returns, at each point, the analytic Cauchy
+/// tensor built from the spec depth profile:
+///
+///   depth   = max(0, -z)                    (code frame: z<0 is down)
+///   Pf      = water_density * g * depth      (hydrostatic fluid pressure)
+///   sigma22 = -rho * g * depth               (vertical / lithostatic; spec
+///                                             tension-positive => negative)
+///   Omega   = 1                       , depth <= omega_top_m
+///           = (omega_bot_m - depth)/(omega_bot_m - omega_top_m),
+///                                       omega_top_m < depth < omega_bot_m
+///           = 0                       , depth >= omega_bot_m
+///   sigma11 = Omega*(b11*(sigma22+Pf) - Pf) + (1-Omega)*sigma22  (strike)
+///   sigma33 = Omega*(b33*(sigma22+Pf) - Pf) + (1-Omega)*sigma22  (fault-normal)
+///   sigma13 = Omega*(b13*(sigma22+Pf))                          (on-fault shear)
+///
+/// FRAME REMAP (spec -> code, PLAN §2.4): the spec's (axis1=strike,
+/// axis2=vertical-down, axis3=fault-normal) maps to the code's
+/// (x=strike, y=fault-normal, z=up).  Hence the code-frame components are
+///   sigma_xx = sigma11 (strike), sigma_yy = sigma33 (fault-normal),
+///   sigma_zz = sigma22 (vertical), sigma_xy = sigma13 (on-fault shear),
+///   sigma_yz = sigma_xz = 0.
+///
+/// SIGN: the StressSource3D concept requires the returned tensor in the
+/// SEAS **compression-POSITIVE** convention, whereas the spec formulas
+/// above are tension-positive.  Evaluate therefore returns the NEGATED
+/// tensor (compression-positive).  Combined with FaultGeometry::
+/// ComputeParams' plain projection onto the canonical fault basis
+/// (n=(0,-1,0), t1=(0,0,-1)=dip, t2=(1,0,0)=strike; NO external sigma_xy
+/// flip — see the driver arm), this yields at 10 km depth (Omega=1):
+///   sigma_n_total = -sigma33 = +273.64 MPa (compression-positive),
+///   sigma_n_eff   = sigma_n_total - Pf = +175.64 MPa,
+///   tau_strike    = -sigma_xy = +sigma13 = +27.66 MPa (right-lateral +),
+///   tau_dip       = 0.
+/// (Verified by tests/unit/test_tpv2627_stress_source.cpp.)
+///
+/// Unlike ConstantTensorStressSource / DepthProportional..., the on-fault
+/// shear sigma13 is computed INSIDE Evaluate, so the driver arm must NOT
+/// apply the "-sigma_xy" construction-time negation (that only fixes a
+/// config-supplied sigma_xy for the other two kinds).
+///
+/// BBox is +/-infinity in every direction; ContainsBBox is always true.
+class Tpv2627DepthStressSource
+{
+public:
+   Tpv2627DepthStressSource(real_t rho, real_t g, real_t water_density,
+                            real_t b11, real_t b33, real_t b13,
+                            real_t omega_top_m, real_t omega_bot_m);
+
+   /// Per-point Cauchy tensor (3x3), code frame, compression POSITIVE.
+   mfem::DenseMatrix Evaluate(real_t x, real_t y, real_t z) const;
+
+   const std::array<real_t, 6>& BBox() const { return bbox_; }
+
+   bool ContainsBBox(real_t /*xmin*/, real_t /*xmax*/,
+                     real_t /*ymin*/, real_t /*ymax*/,
+                     real_t /*zmin*/, real_t /*zmax*/,
+                     real_t /*eps*/ = 0.0) const { return true; }
+
+private:
+   real_t rho_, g_, wd_;
+   real_t b11_, b33_, b13_;
+   real_t omega_top_, omega_bot_;
+   std::array<real_t, 6> bbox_;
+};
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

@@ -23,6 +23,7 @@
 
 #include "mfem.hpp"
 #include "fault_face_flux.hpp"            // DOFData
+#include "station_nearest_tiebreak.hpp"   // FindNearestFaultDOFLex / ResolveStationOwnerLex
 #include "../config/tpv102_params.hpp"    // TPV102Params (psi -> theta)
 
 #include <algorithm>
@@ -71,27 +72,17 @@ inline std::vector<TPV102Station> DefaultStations()
 /// @param[in] fault_coords  Fault DOF coordinates.
 /// @param[in] ndof  Number of fault DOFs.
 /// @return Index of the nearest DOF, or -1 if no DOFs.
+/// Delegates to `FindNearestFaultDOFLex` (station_nearest_tiebreak.hpp):
+/// same distance metric as the historical scan, plus the deterministic
+/// lexicographic (x, z, y) tie-break for stations equidistant from several
+/// QPs (np4_attractor_root_cause_2026-07-10.md).  Non-tied stations
+/// resolve to the identical QP as before.
 inline int FindNearestDOF(const TPV102Station &station,
                           const std::vector<Vector> &fault_coords,
                           int ndof)
 {
-   if (ndof <= 0) { return -1; }
-
-   int best = 0;
-   real_t best_dist = std::numeric_limits<real_t>::max();
-
-   for (int i = 0; i < ndof; i++)
-   {
-      real_t dx = fault_coords[i](0) - station.along_strike;
-      real_t dz = std::abs(fault_coords[i](2)) - station.down_dip;
-      real_t dist2 = dx*dx + dz*dz;
-      if (dist2 < best_dist)
-      {
-         best_dist = dist2;
-         best = i;
-      }
-   }
-   return best;
+   return FindNearestFaultDOFLex(fault_coords, ndof,
+                                 station.along_strike, station.down_dip);
 }
 
 /// @brief Station output writer for TPV102 fault data.
@@ -171,11 +162,28 @@ public:
       MPI_Comm_size(comm, &nprocs_loc);
       for (int s = 0; s < nstations; s++)
       {
-         bool is_candidate = std::abs(local_dist[s] - global_min_dist[s]) < 1e-10;
-         int candidate_rank = is_candidate ? my_rank : nprocs_loc;
-         int winning_rank;
-         MPI_Allreduce(&candidate_rank, &winning_rank, 1, MPI_INT, MPI_MIN, comm);
-         if (is_candidate && my_rank == winning_rank)
+         // R-201 anchored re-scan (REVIEW_station_tiebreak_2026-07-10.md):
+         // candidates ≡ ranks owning a QP within the gate tolerance of the
+         // GLOBAL minimum distance; the submitted pick is the local
+         // lexicographic minimum over exactly that set.  NOTE: this writer
+         // keeps its historical ABSOLUTE 1e-10 candidate gate (passed as
+         // window_tol); only the tie-break/owner resolution changed.
+         const int lex_dof = FindNearestFaultDOFLex(
+            fault_coords, ndof, stations[s].along_strike,
+            stations[s].down_dip, global_min_dist[s],
+            static_cast<real_t>(1e-10));
+         if (lex_dof >= 0) { station_dof_[s] = lex_dof; }
+         const bool is_candidate = lex_dof >= 0;
+         const real_t RMAX = std::numeric_limits<real_t>::max();
+         const real_t bx = is_candidate ? fault_coords[station_dof_[s]](0)
+                                        : RMAX;
+         const real_t bz = is_candidate ? fault_coords[station_dof_[s]](2)
+                                        : RMAX;
+         const real_t by = is_candidate ? fault_coords[station_dof_[s]](1)
+                                        : RMAX;
+         if (ResolveStationOwnerLex(comm, is_candidate, bx, bz, by,
+                                    "TPV102StationWriter",
+                                    stations[s].name))
          {
             station_owns_[s] = true;
             OpenStationFile(s, output_dir, prefix);

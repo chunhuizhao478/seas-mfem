@@ -1,0 +1,105 @@
+# =====================================================================
+#  TPV26 Phase-0 SMOKE config — proves the tpv26 plumbing runs through
+#  the EXISTING seas_spatial_dyn_driver pipeline before any TPV26/27
+#  physics lands.  Uses constant_tensor stress + gradual_overstress
+#  nucleation + LSW friction, tag = "tpv205" (so the existing on-fault
+#  station writer wires).  NOT physics-faithful — the SCEC depth stress
+#  (kind="tpv2627_depth", Phase 1), forced-rupture nucleation (Phase 2),
+#  depth cohesion (Phase 3) and the tpv26/27 tag+writers (Phase 4) arrive
+#  in later phases.  See PLAN_TPV26_27_spatial_dyn_driver_2026-06-28.md §5.
+#
+#  Mesh: the TINY surface-breaking smoke mesh (tpv26/mesh/tpv26_smoke.geo);
+#  build with  gmsh -format msh22 -3 tpv26_smoke.geo -o tpv26_smoke.msh.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "TPV26 Phase-0 smoke (constant_tensor + gradual_overstress + LSW) via spatial_dyn_driver."
+
+[problem]
+tag = "tpv205"   # reuse the existing TPV205 on-fault station writer (Phase 0)
+
+# Homogeneous half-space (TPV205Params values; rho=2670, cs=3464, cp=6000).
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "tpv26/mesh/tpv26_smoke.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# Constant Cauchy pre-stress (Phase-0 placeholder).  Normal components are
+# compression-POSITIVE; sigma_xy_pa is right-lateral-POSITIVE (the driver
+# negates it at construction).  tau_strike/sigma_n = 20/60 = 0.33 < mu_s
+# (0.677), so the fault is locked until the gradual_overstress nucleation
+# ramps it over threshold.
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 30.0e6
+sigma_yy_pa = 60.0e6
+sigma_zz_pa = 30.0e6
+sigma_xy_pa = 20.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+# Gaussian gradual overstress centred at mid-fault (SAFS nucleation path).
+[nucleation]
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+center_x_m          = 0.0
+center_y_m          = 0.0
+center_z_m          = -750.0
+radius_dip_m        = 500.0
+radius_strike_m     = 500.0
+delta_tau_strike_pa = 30.0e6
+delta_tau_dip_pa    = 0.0
+T_nuc_s             = 0.1
+
+# LSW friction (TPV205Params; mu_d < mu_s required).
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[numerics]
+ader_order     = 2
+# Homogeneous half-space + ADER => no mixed/central flux (it is
+# non-dissipative and unstable under ADER; central flux needs an RK
+# integrator).  "none" is the correct homogeneous ADER path.
+mixed_flux     = "none"
+cfl            = 0.25
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.05s"   # short smoke window (advances well over 5 steps)
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.02s"
+
+[output]
+output_dir = "output_tpv26_smoke"
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"

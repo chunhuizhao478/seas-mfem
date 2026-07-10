@@ -35,6 +35,13 @@
 
 Hypo coordinates: x2 = 0 km along strike, x3 = 7.5 km down-dip. Column legend per `tpv104/visualize_results.py`: t / h-slip / h-slip-rate / h-shear-stress / **v-slip (=dip drift)** / v-slip-rate / v-shear-stress / n-stress / psi.
 
+> **CONFOUNDING CAVEAT (2026-07-10, `np4_attractor_root_cause_2026-07-10.md`):** the hypocenter
+> station at x2 = 0 sits exactly equidistant between the fault QPs at x = −166.7 m and
+> x = +166.7 m on this mesh, and (pre-tie-break-fix) the writer's pick was partition- and
+> run-layout-dependent.  The hypo strike-slip / dip-drift columns above may therefore mix TWO
+> different physical sample points across rows — cross-row deltas at this station are not pure
+> iterator/order effects.  V_max and non-x2=0 stations are unaffected.
+
 ## Chart — |hypo dip drift| at t=2s (m, log10 magnitude per P)
 
 ```

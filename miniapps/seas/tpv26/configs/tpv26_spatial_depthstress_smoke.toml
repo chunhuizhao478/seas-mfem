@@ -1,0 +1,115 @@
+# =====================================================================
+#  TPV26 Phase-1 smoke — exercises the NEW SCEC depth-dependent stress
+#  source end-to-end through the driver: [stress] kind="tpv2627_depth"
+#  (spatial::Tpv2627DepthStressSource) + the [pore_pressure] gradient
+#  (P_p_grad = water_density*g = 9800 Pa/m) so ComputeParams yields the
+#  effective normal sigma_n - Pf.  Proves the Phase-1 driver arm loads,
+#  seeds the fault, and HasParams() == true.  (The Phase-0 smoke used
+#  constant_tensor; this variant swaps in the depth profile.)
+#
+#  Everything else matches tpv26_spatial_smoke.toml (tiny shared mesh,
+#  LSW, gradual_overstress, tag tpv205, ADER, mixed_flux="none").
+#  Nucleation delta_tau is modest here because the tiny (1.5 km) fault's
+#  effective normal stress is only ~13 MPa at mid-depth.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "TPV26 Phase-1 smoke (tpv2627_depth stress) via spatial_dyn_driver."
+
+[problem]
+tag = "tpv205"
+
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# Effective-stress pore pressure: P_p_grad = water_density*g = 1000*9.8.
+# ComputeParams subtracts P_p = 9800*depth so sigma_n reported is
+# effective (sigma_n_total - Pf), matching the SCEC "n-stress".
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 9800.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "tpv26/mesh/tpv26_smoke.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+# SCEC TPV26/27 depth-dependent Cauchy prestress (Phase 1).  A bare
+# kind="tpv2627_depth" already carries all spec defaults (rho=2670, g=9.8,
+# water_density=1000, b11/b33/b13, omega_top=15000, omega_bot=20000).
+[stress]
+kind = "tpv2627_depth"
+
+[nucleation]
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+center_x_m          = 0.0
+center_y_m          = 0.0
+center_z_m          = -750.0
+radius_dip_m        = 500.0
+radius_strike_m     = 500.0
+delta_tau_strike_pa = 5.0e6
+delta_tau_dip_pa    = 0.0
+T_nuc_s             = 0.1
+
+# TPV26/27 spec Part 4 LSW parameters + the Phase-3 depth-dependent
+# frictional cohesion:
+#   C0(depth) = 0.40 MPa + 0.00072 MPa/m * (5000 - depth),  depth <= 5000 m
+#             = 0.40 MPa,                                   depth >  5000 m
+# i.e. 4.0 MPa at the free surface -> 0.40 MPa at/below 5 km (the spec adds
+# this to suppress free-surface effects).
+#
+# [CORR vs PLAN §5 Phase 3]: the four taper keys are properties of a
+# SpatialRule, so they must live in a [[friction.slip_weakening.spatial]]
+# rule — NOT in the top-level [friction.slip_weakening] block (where they
+# would be silently ignored, leaving a constant cohesion_default).  The
+# `kind="depth"` rule below has default +/-inf bounds, so it matches every
+# fault DOF.  Verified by seas_test_tpv2627_cohesion_taper.
+[friction.slip_weakening]
+mu_s_default     = 0.18
+mu_d_default     = 0.12
+d_c_default      = 0.30
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind                   = "depth"
+cohesion_floor_pa      = 0.40e6
+cohesion_grad_pa_per_m = 720.0
+cohesion_ref_depth_m   = 5000.0
+cohesion_taper_axis    = "z"
+
+[numerics]
+ader_order     = 2
+mixed_flux     = "none"
+cfl            = 0.25
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.03s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.02s"
+
+[output]
+output_dir = "output_tpv26_depthstress_smoke"
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"

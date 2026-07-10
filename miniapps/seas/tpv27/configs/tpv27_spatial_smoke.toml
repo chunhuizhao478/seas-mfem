@@ -1,0 +1,108 @@
+# =====================================================================
+#  TPV27 Phase-0 SMOKE config — identical to the TPV26 smoke (TPV26 and
+#  TPV27 share one mesh and, at Phase 0, one config skeleton).  The only
+#  TPV27-specific piece — the off-fault Drucker-Prager viscoplasticity
+#  [rheology] block — is DELIBERATELY ABSENT here; it arrives in Phase 5b,
+#  where TPV27 selects kind="drucker_prager".  With [rheology] absent the
+#  bulk stays linear-elastic, so this smoke is byte-identical to the TPV26
+#  smoke (proves the plumbing only).  See PLAN §5 Phase 0 / Phase 5b.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "TPV27 Phase-0 smoke (constant_tensor + gradual_overstress + LSW; rheology deferred) via spatial_dyn_driver."
+
+[problem]
+tag = "tpv205"   # reuse the existing TPV205 on-fault station writer (Phase 0)
+
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+# Shared with TPV26 (PLAN §4.5 "one mesh for both").
+path  = "tpv26/mesh/tpv26_smoke.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind        = "constant_tensor"
+sigma_xx_pa = 30.0e6
+sigma_yy_pa = 60.0e6
+sigma_zz_pa = 30.0e6
+sigma_xy_pa = 20.0e6
+sigma_yz_pa = 0.0
+sigma_xz_pa = 0.0
+
+[nucleation]
+kind = "gradual_overstress"
+
+[nucleation.gradual_overstress]
+center_x_m          = 0.0
+center_y_m          = 0.0
+center_z_m          = -750.0
+radius_dip_m        = 500.0
+radius_strike_m     = 500.0
+delta_tau_strike_pa = 30.0e6
+delta_tau_dip_pa    = 0.0
+T_nuc_s             = 0.1
+
+# LSW friction (TPV205Params values for the Phase-0 skeleton) + the Phase-3
+# depth-dependent frictional cohesion, identical to the TPV26 config:
+#   C0(depth) = 0.40 MPa + 0.00072 MPa/m * (5000 - depth),  depth <= 5000 m
+#             = 0.40 MPa,                                   depth >  5000 m
+# [CORR vs PLAN §5 Phase 3]: the four taper keys are SpatialRule properties and
+# must live in a [[friction.slip_weakening.spatial]] rule, not the top-level
+# block (where they would be silently ignored).  The `kind="depth"` rule has
+# default +/-inf bounds, so it matches every fault DOF.
+[friction.slip_weakening]
+mu_s_default     = 0.677
+mu_d_default     = 0.525
+d_c_default      = 0.40
+cohesion_default = 0.0
+
+[[friction.slip_weakening.spatial]]
+kind                   = "depth"
+cohesion_floor_pa      = 0.40e6
+cohesion_grad_pa_per_m = 720.0
+cohesion_ref_depth_m   = 5000.0
+cohesion_taper_axis    = "z"
+
+[numerics]
+ader_order     = 2
+# Homogeneous half-space + ADER => no mixed/central flux (see the tpv26
+# smoke config: central flux is unstable under ADER; use "none").
+mixed_flux     = "none"
+cfl            = 0.25
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.05s"
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.02s"
+
+[output]
+output_dir = "output_tpv27_smoke"
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"

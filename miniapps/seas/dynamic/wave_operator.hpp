@@ -560,6 +560,14 @@ public:
    /// `n_local_fault_qps` (interior only) and the shared branch always ran
    /// inline `EvaluateADER`, producing inconsistent ADER semantics across
    /// partition seams; the driver aborted at np>1 to fail-loud.
+   ///
+   /// History: R-1601 temporarily reverted the SHARED branch to the inline
+   /// one-shot fallback after an np=10 overflow.  That overflow was
+   /// root-caused to the (since-fixed) R-1600-class ghost-exchange input
+   /// bugs, NOT to buffer consumption — see
+   /// debug_document/tpv104_debug_document/R1601_root_cause_2026-07-10.md.
+   /// The unified behavior documented above is production again; the
+   /// inline dispatch remains only as the no-buffer (ADER one-shot) path.
    void SetSubStepFaultImposedStates(const real_t *I_imp_plus_flat,
                                      const real_t *I_imp_minus_flat,
                                      int n_total_fault_qps) const;
@@ -567,6 +575,17 @@ public:
    /// Pair to `SetSubStepFaultImposedStates`; clears the pointers so the
    /// inline EvaluateADER path is restored on subsequent calls.
    void ResetSubStepFaultImposedStates() const;
+
+   /// Phase 3 (PLAN_unify_interior_shared_fault_substep): tolerance for the
+   /// shared-fault reconcile assertion (max relative per-field disagreement
+   /// between the two ranks' copies of a shared fault QP before MFEM_ABORT).
+   /// Default 1e-10.  Tests may tighten it; production leaves the default.
+   void SetSharedFaultReconcileTol(real_t tol)
+   {
+      MFEM_VERIFY(tol > 0.0,
+                  "SetSharedFaultReconcileTol: tol must be > 0; got " << tol);
+      shared_fault_reconcile_tol_ = tol;
+   }
 
    /// SubStep helper: evaluate bulk Q at every fault QP (interior AND
    /// shared, R-1003) and rotate into the canonical fault-local frame,
@@ -954,6 +973,14 @@ protected:
    /// with `fault_interior_faces_.Size() * nbf_per_face_` baked in.
    mutable int substep_n_total_fault_qps_ = 0;
 
+   /// Phase 3 (PLAN_unify_interior_shared_fault_substep): tolerance for the
+   /// shared-fault reconcile ASSERTION.  With the unified substep path both
+   /// ranks of a shared fault QP compute identical DOFData + I_imp, so any
+   /// relative disagreement above this bound is a real cross-rank bug and
+   /// aborts loudly instead of being silently overwritten by the boss.
+   /// The boss-wins overwrite itself is retained (bitwise determinism).
+   real_t shared_fault_reconcile_tol_ = 1e-10;
+
    /// R-1501: ADER scratch buffers, lazy-initialised on first
    /// `AdvanceADER` / `ComputeADERTimeIntegrated` call and reused across
    /// macro-steps.  Pre-R-1501 these were stack-allocated `Vector`s on
@@ -1237,6 +1264,45 @@ private:
    /// integrated boundary flux.  Additive into `rhs`.
    void ComputeADERFaceFluxRHS(const Vector &I, real_t dt,
                                Vector &rhs) const;
+
+   /// Phase 5 (PLAN_unify_interior_shared_fault_substep): the ONE per-QP
+   /// fault kernel shared by the ADER corrector's interior and shared-face
+   /// branches.  Builds the canonical frame from `qpd` under
+   /// `should_negate_frame`, rotates the time-integrated states into it,
+   /// routes self/neighbor into the +/- slots by `elem1_on_plus`, then either
+   /// consumes the friction iterator's substep buffer (when installed; incl.
+   /// the LSW v_imp recovery) or runs the inline one-shot `EvaluateADER*`
+   /// dispatch.  Outputs the frame (for the caller's T_can rotation /
+   /// QP-buffer store), the routed canonical +/- inputs (consumed by the
+   /// env-gated diagnostics at both call sites), and the canonical imposed
+   /// states.  Private: callers must perform the fault-branch guards
+   /// (dof-offset lookup, R-101 flag check) before dispatching here.
+   ///
+   /// FRAME BIT CONTRACT (Phase-0 census, tests/parallel/
+   /// test_fault_frame_bit_census.cpp): `should_negate_frame` MUST be
+   /// `!elem1_on_plus` for interior faces and `qpd.sign_flipped` for shared
+   /// faces.  The two are NOT interchangeable — `elem1_on_plus` is rank-local
+   /// (opposite on the two ranks of a shared face) while `sign_flipped` is
+   /// rank-independent; swapping them on shared faces gives the two ranks
+   /// opposite canonical frames (the antiparallel-traction blow-up class).
+   /// That is why the bit is a parameter and not unified.
+   void ComputeFaultQPImposedStatesCanonical_(
+      const FaultBasisQPData &qpd,
+      bool                    should_negate_frame,
+      bool                    elem1_on_plus,
+      int                     dof_idx,
+      const real_t           *I_self,
+      const real_t           *I_nbr,
+      real_t                  dt,
+      DOFData                &fdata,
+      real_t                  can_n[3],
+      real_t                  can_t1[3],
+      real_t                  can_t2[3],
+      real_t                  I_plus_can[NUM_STATE],
+      real_t                  I_minus_can[NUM_STATE],
+      real_t                  I_imp_plus[NUM_STATE],
+      real_t                  I_imp_minus[NUM_STATE]) const;
+
    /// Opt 2026-06-24: cached fast-path for one interior non-fault face —
    /// gather I, `InteriorFaceFlux_`, scatter, using `FaceGeomEntry` geometry.
    /// Algorithm-identical to the on-the-fly interior `else` branch

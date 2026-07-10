@@ -261,6 +261,19 @@ LegResult RunLeg(FaultFrictionLaw law, int rank, int nsteps,
 
    WaveOperator<ParMesh> wave(pmesh, kOrder, lambda, mu, rho, bc);
    wave.SetFaultFrictionLaw(law);
+   // Unify-plan Phase 3 (PLAN_unify_interior_shared_fault_substep_2026-07-09):
+   // the reconcile now ASSERTS cross-rank agreement (tol 1e-10) BEFORE the
+   // boss-wins overwrite.  This test deliberately INJECTS an O(1) cross-rank
+   // seed (the SEAS_TEST_INTERNAL ComputeTrialTraction hook below) to verify
+   // the overwrite's healing determinism, so the production tolerance would
+   // (correctly) abort on the manufactured mismatch.  Raise the tolerance
+   // above the injected seed for this test only (the check's relative
+   // measure |a-b|/max(|a|,|b|,1) is bounded by 2 for any finite pair, so
+   // tol=10 provably disables it for every payload field) — the
+   // assertion-fires guard
+   // for REAL cross-rank bugs lives in test_shared_fault_substep_parity_np2's
+   // negative control (SEAS_TEST_RECONCILE_NEGATIVE).
+   wave.SetSharedFaultReconcileTol(static_cast<real_t>(10.0));
 
    FaultFaceFlux ff(rho, cp, cs);
    wave.SetFaultFlux(&ff);

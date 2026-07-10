@@ -832,6 +832,36 @@ int main(int argc, char *argv[])
                "RateState; got " << static_cast<int>(cfg.law));
    const bool is_lsw =
       (cfg.law == spatial::FrictionLawKind::SlipWeakening);
+   // Phase 2 (TPV26/27): forced rupture is a TIME-weakening nucleation that
+   // rides the LSW friction law (it adds no tau_nuc).  It selects the wave
+   // operator's LSW_ForcedRupture flux dispatch AND the time-aware interior
+   // mu in LinearSlipWeakeningIterator (the "round-6" fix).  The f_2(t) term
+   // lives only in the LSW friction coefficient, so reject it loudly under
+   // rate-and-state rather than silently ignoring it.
+   const bool wants_forced_rupture =
+      cfg.nucleation.enabled
+      && cfg.nucleation.kind == spatial::NucleationKind::ForcedRupture;
+   MFEM_VERIFY(!wants_forced_rupture || is_lsw,
+               "spatial_dyn_driver: [nucleation] kind=\"forced_rupture\" "
+               "requires law=\"slip_weakening\" — the forced-rupture f_2(t) "
+               "term exists only in the LSW friction coefficient.");
+   const bool is_forced_rupture = wants_forced_rupture && is_lsw;
+   // R-003: the LSW_ForcedRupture flux dispatch exists ONLY on the ADER path
+   // (FaultFaceFlux::EvaluateADER_LSW_ForcedRupture).  WaveOperator::Mult (the
+   // RK path) aborts on it.  Fail fast here rather than after mesh load,
+   // partition, stress projection and DOF init.
+   MFEM_VERIFY(!is_forced_rupture
+               || cfg.numerics.time_integrator
+                     == spatial::TimeIntegratorKind::ADER,
+               "spatial_dyn_driver: [nucleation] kind=\"forced_rupture\" "
+               "requires the ADER time integrator — LSW_ForcedRupture has no "
+               "instantaneous solve on the Mult/RK path.  Use "
+               "--time-integrator ader.");
+   // (The former R-002 seam-clock guard — t0_s > 0 required on MPI runs —
+   // was removed by unify-plan Phase 4: since Phase 2, shared fault QPs
+   // consume the iterator's substep buffer, so seam and interior evaluate
+   // mu(delta, t) at the identical t_sub_end and a step ramp is safe at any
+   // rank count.  The parser's t0_s >= 0 validation remains.)
    // Phase 3: both slip_weakening and rate_state are wired (the RS branch
    // below resolves RS params, seeds equilibrium psi, and selects the aging
    // iterator via MakeFrictionIterator).
@@ -886,6 +916,27 @@ int main(int argc, char *argv[])
       sigma_n_floor_banner = oss.str();
    }
 
+   // Banner label for the active nucleation kind.  (Before Phase 2 this line
+   // hard-coded "gradual_overstress" for every enabled kind, which mislabelled
+   // the compact-circular / instantaneous / forced-rupture configs.)
+   std::string nucleation_banner = "DISABLED";
+   if (cfg.nucleation.enabled)
+   {
+      switch (cfg.nucleation.kind)
+      {
+         case spatial::NucleationKind::GradualOverstress:
+            nucleation_banner = "gradual_overstress (enabled)"; break;
+         case spatial::NucleationKind::GradualOverstressCompactCircular:
+            nucleation_banner =
+               "gradual_overstress_compact_circular (enabled)"; break;
+         case spatial::NucleationKind::InstantaneousOverstressCircular:
+            nucleation_banner =
+               "instantaneous_overstress_circular (enabled)"; break;
+         case spatial::NucleationKind::ForcedRupture:
+            nucleation_banner = "forced_rupture (enabled)"; break;
+      }
+   }
+
    if (rank == 0)
    {
       std::cout << "================================================\n"
@@ -903,7 +954,9 @@ int main(int argc, char *argv[])
                       ? "fault_local_prestress"
                     : cfg.stress.kind ==
                       spatial::StressSourceKind::DepthProportionalToShearModulus
-                      ? "depth_proportional" : "sidecar_hdf5") << "\n"
+                      ? "depth_proportional"
+                    : cfg.stress.kind == spatial::StressSourceKind::Tpv2627Depth
+                      ? "tpv2627_depth" : "sidecar_hdf5") << "\n"
                 << "tfinal:           " << cfg.time.tfinal << " s\n"
                 << "cfl:              " << cfg.numerics.cfl << "\n"
                 << "ader order:       " << cfg.numerics.ader_order << "\n"
@@ -921,11 +974,7 @@ int main(int argc, char *argv[])
                 << "use pml:          " << (cfg.numerics.use_pml ? "yes" : "no")
                 << "\n"
                 << "sigma_n strength floor: " << sigma_n_floor_banner << "\n"
-                << "nucleation:       "
-                << (cfg.nucleation.enabled
-                    ? "gradual_overstress (enabled)"
-                    : "DISABLED")
-                << "\n"
+                << "nucleation:       " << nucleation_banner << "\n"
                 << "no-sidecar mat:   " << (no_sidecar_material ? "yes" : "no")
                 << "\n"
                 << "dry-run:          " << (dry_run ? "yes" : "no") << "\n"
@@ -1388,14 +1437,19 @@ int main(int argc, char *argv[])
 
    // Phase N: the spatial driver supports exactly one nucleation kind
    // (`gradual_overstress`) — the friction law is always plain LSW.
-   // The gradual_overstress accumulator writes time-domain perturbations
-   // into DOFData::tau{1,2}_nuc; the LSW solver consumes them via
-   // s.tau{1,2}_total = tau{1,2}_0 + tau{1,2}_nuc + trial.  The obsolete
-   // LSW_ForcedRupture dispatch arm + f_2(t) per-DOF friction reduction
-   // are NOT used.  Native TPV* drivers continue to set
-   // FaultFrictionLaw::LSW_ForcedRupture verbatim.
-   wave.SetFaultFrictionLaw(is_lsw ? FaultFrictionLaw::LSW
-                                   : FaultFrictionLaw::RateAndState);
+   // The overstress accumulators write time-domain perturbations into
+   // DOFData::tau{1,2}_nuc; the LSW solver consumes them via
+   // s.tau{1,2}_total = tau{1,2}_0 + tau{1,2}_nuc + trial.
+   //
+   // Phase 2 (TPV26/27): `[nucleation] kind="forced_rupture"` instead selects
+   // the LSW_ForcedRupture dispatch arm, which applies the f_2(t) per-DOF
+   // friction reduction (no tau_nuc).  The iterator's WaveOpLaw() mirrors this
+   // choice and is cross-checked below, so the seam (inline flux) and interior
+   // (iterator) paths evaluate the same mu(delta, t).
+   wave.SetFaultFrictionLaw(
+      is_lsw ? (is_forced_rupture ? FaultFrictionLaw::LSW_ForcedRupture
+                                  : FaultFrictionLaw::LSW)
+             : FaultFrictionLaw::RateAndState);
    // R-020: at np>1 the shared (rank-seam) fault QPs run inline EvaluateADER at
    // macro dt with END-OF-STEP psi (1st-order at ader_order>=2; the R-1601
    // fallback), and the plan-mandated np=2 psi-consistency gate (R-004) is not
@@ -1798,6 +1852,27 @@ int main(int argc, char *argv[])
                          cfg.stress.pore_pressure.P_p_grad_pa_per_m,
                          cfg.stress.pore_pressure.min_sigma_n_pa);
    }
+   else if (cfg.stress.kind == spatial::StressSourceKind::Tpv2627Depth)
+   {
+      // Phase 1 (TPV26/27): SCEC depth-dependent Cauchy prestress, assembled
+      // analytically per-point (spec Part 3 / PLAN §1.2).  Unlike the
+      // constant_tensor / depth_proportional arms above, the on-fault shear
+      // sigma13 is computed INSIDE the source's Evaluate, which already
+      // returns the compression-positive tensor with the right-lateral-
+      // positive sign baked in (see Tpv2627DepthStressSource header).  So
+      // there is NO "-sigma_xy" construction-time negation here — applying
+      // one would flip the background to LEFT-lateral.  ComputeParams'
+      // plain projection then yields sigma_n_eff = sigma_n - Pf (via the
+      // [pore_pressure] gradient) and a right-lateral-positive tau_strike.
+      const auto& d = cfg.stress.tpv2627_depth;
+      spatial::Tpv2627DepthStressSource src(d.rho, d.g, d.water_density,
+                                            d.b11, d.b33, d.b13,
+                                            d.omega_top_m, d.omega_bot_m);
+      geom.ComputeParams(src,
+                         cfg.stress.pore_pressure.P_p_pa,
+                         cfg.stress.pore_pressure.P_p_grad_pa_per_m,
+                         cfg.stress.pore_pressure.min_sigma_n_pa);
+   }
    else
    {
       spatial::ApplyCsmStressSidecar(cfg.stress, geom);
@@ -1905,27 +1980,29 @@ int main(int argc, char *argv[])
       nuc_params.amplitude_strike = inst->Params().amplitude_strike;
    }
 
-   // R-008: warn when a non-trivial fraction of fault DOFs live on
-   // shared faces.  The wave operator's shared-face EvaluateADER_LSW
-   // call reads DOFData::tau{1,2}_nuc AFTER the Phase N per-substep
-   // iterator has accumulated the full smoothStep increment for the
-   // macrostep, so those DOFs see the perturbation as an end-of-
-   // macrostep step rather than a smooth ramp (1st-order time-
-   // accuracy degradation).  Quantify and warn so the user can
-   // tighten dt or accept the trade-off.
+   // R-008 (HISTORY): pre-unify (R-1601 fallback era) shared fault QPs ran
+   // an inline one-shot over the macro dt AFTER the per-substep iterator,
+   // so they saw nucleation perturbations as an end-of-macrostep step
+   // (1st-order time-accuracy degradation).  Unify-plan Phase 2
+   // (PLAN_unify_interior_shared_fault_substep_2026-07-09.md) retired that:
+   // shared QPs consume the iterator's per-substep buffer and see the
+   // identical per-substep ramp as interior QPs.  Keep an INFORMATIONAL
+   // shared-DOF count (useful for partition diagnostics); the accuracy
+   // warning no longer applies on the substep path
+   // (REVIEW_phase4_5_unify_2026-07-10.md R-102).
    if (cfg.nucleation.enabled && num_shared_global > 0 && rank == 0)
    {
       const real_t shared_frac = (num_fault_global > 0)
          ? (static_cast<real_t>(num_shared_global)
             / static_cast<real_t>(num_fault_global))
          : 0.0;
-      std::cout << "[spatial_dyn] WARNING: " << num_shared_global
+      std::cout << "[spatial_dyn] INFO: " << num_shared_global
                 << " of " << num_fault_global << " fault DOFs ("
-                << (100.0 * shared_frac) << "%) live on shared faces "
-                << "and will see the gradual_overstress perturbation as "
-                << "an end-of-macrostep step rather than a smooth ramp.  "
-                << "Tighten dt (smaller macrostep) to reduce the "
-                << "1st-order time-accuracy error on shared faces.\n";
+                << (100.0 * shared_frac) << "%) live on shared (rank-"
+                << "boundary) faces.  Since unify-plan Phase 2 these "
+                << "consume the same per-substep friction buffer as "
+                << "interior DOFs (identical nucleation ramp; no "
+                << "end-of-macrostep step).\n";
    }
 
    // -----------------------------------------------------------------
@@ -1971,8 +2048,25 @@ int main(int argc, char *argv[])
    //     the "never forced" sentinel so the size validator passes.  The
    //     dummy values are inert by construction.
    // -----------------------------------------------------------------
-   Vector dummy_T_forced(num_fault_total);  dummy_T_forced = 1.0e9;
-   Vector dummy_t0_decay(num_fault_total);  dummy_t0_decay = 0.0;
+   //     Phase 2 (TPV26/27): when `[nucleation] kind="forced_rupture"` is
+   //     selected these carry the REAL per-DOF SCEC T(r) / t0 (spec Part 5);
+   //     `ResolveForcedRupture` returns zero-sized Vectors when disabled, in
+   //     which case the "never forced" sentinel below is used unchanged.
+   Vector T_forced_s(num_fault_total);  T_forced_s = 1.0e9;
+   Vector t0_decay_s(num_fault_total);  t0_decay_s = 0.0;
+   if (is_forced_rupture)
+   {
+      const spatial::ForcedRupturePerDOFParams fr =
+         spatial::ResolveForcedRupture(cfg.nucleation.forced_rupture,
+                                       /*enabled=*/true, dof_coords_3d);
+      MFEM_VERIFY(fr.T_forced_s.Size() == num_fault_total
+                  && fr.t0_decay_s.Size() == num_fault_total,
+                  "spatial_dyn_driver: ResolveForcedRupture returned "
+                  << fr.T_forced_s.Size() << " per-DOF times but the fault has "
+                  << num_fault_total << " DOFs.");
+      T_forced_s = fr.T_forced_s;
+      t0_decay_s = fr.t0_decay_s;
+   }
 
    std::vector<DOFData> dof_data;
    if (num_fault_total > 0)
@@ -1982,7 +2076,7 @@ int main(int argc, char *argv[])
          spatial::InitializeFaultDOFs_Spatial<ParMesh>(
             dof_data, num_fault_total, dof_to_elem, material, pmesh,
             lsw, geom.GetTauPre(), geom.sigma_n_per_dof(),
-            dummy_T_forced, dummy_t0_decay,
+            T_forced_s, t0_decay_s,
             dof_ips);
       }
       else
@@ -3009,11 +3103,14 @@ int main(int argc, char *argv[])
    // iterator the factory built agrees with it rather than leaving WaveOpLaw()
    // dead surface area.
    MFEM_VERIFY(substep_iterator.WaveOpLaw() ==
-               (is_lsw ? FaultFrictionLaw::LSW : FaultFrictionLaw::RateAndState),
+               (is_lsw ? (is_forced_rupture ? FaultFrictionLaw::LSW_ForcedRupture
+                                            : FaultFrictionLaw::LSW)
+                       : FaultFrictionLaw::RateAndState),
                "spatial_dyn_driver: friction iterator WaveOpLaw() ("
                << static_cast<int>(substep_iterator.WaveOpLaw())
                << ") disagrees with the wave-operator fault law set from "
-                  "is_lsw — friction dispatch is inconsistent.");
+                  "is_lsw / is_forced_rupture — friction dispatch is "
+                  "inconsistent.");
    {
       const int O = std::max(1, cfg.numerics.ader_order);
       std::vector<real_t> deltaT(O, dt / static_cast<real_t>(O));

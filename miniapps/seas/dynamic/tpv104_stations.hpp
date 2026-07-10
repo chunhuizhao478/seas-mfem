@@ -21,6 +21,7 @@
 
 #include "mfem.hpp"
 #include "fault_face_flux.hpp"            // DOFData
+#include "station_nearest_tiebreak.hpp"   // FindNearestFaultDOFLex / ResolveStationOwnerLex
 #include "../config/tpv104_params.hpp"    // kStationsTPV104
 
 #include <cmath>
@@ -63,7 +64,11 @@ inline std::vector<TPV104Station> DefaultStations_TPV104()
 
 /// @brief Find the nearest fault DOF index to a given station location.
 ///
-/// Linear scan over `fault_coords`; matches the TPV102 pattern.
+/// Delegates to `FindNearestFaultDOFLex` (station_nearest_tiebreak.hpp):
+/// same distance metric as the historical scan, plus the deterministic
+/// lexicographic (x, z, y) tie-break for stations equidistant from
+/// several QPs (np4_attractor_root_cause_2026-07-10.md).  Non-tied
+/// stations resolve to the identical QP as before.
 ///
 /// @param[in] station       Station coordinates (along_strike, down_dip).
 /// @param[in] fault_coords  Per-QP physical coordinates.
@@ -73,22 +78,8 @@ inline int FindNearestDOF_TPV104(const TPV104Station &station,
                                  const std::vector<Vector> &fault_coords,
                                  int ndof)
 {
-   if (ndof <= 0) { return -1; }
-
-   int best = 0;
-   real_t best_dist = std::numeric_limits<real_t>::max();
-   for (int i = 0; i < ndof; ++i)
-   {
-      const real_t dx = fault_coords[i](0) - station.along_strike;
-      const real_t dz = std::abs(fault_coords[i](2)) - station.down_dip;
-      const real_t dist2 = dx * dx + dz * dz;
-      if (dist2 < best_dist)
-      {
-         best_dist = dist2;
-         best = i;
-      }
-   }
-   return best;
+   return FindNearestFaultDOFLex(fault_coords, ndof,
+                                 station.along_strike, station.down_dip);
 }
 
 /// @brief Station output writer for TPV104 fault-trace data.
@@ -174,22 +165,29 @@ public:
             std::max<real_t>(static_cast<real_t>(1e-10),
                              static_cast<real_t>(1e-9)
                                * std::max<real_t>(global_min_dist[s], 1.0));
-         const bool is_candidate = std::abs(local_dist[s]
-                                            - global_min_dist[s]) < tie_tol;
-         const int candidate_rank = is_candidate ? my_rank : nprocs_loc;
-         int winning_rank;
-         MPI_Allreduce(&candidate_rank, &winning_rank, 1, MPI_INT,
-                       MPI_MIN, comm);
-         // R4-007: MFEM_VERIFY that SOME rank won — otherwise the
-         // station is silently dropped and the trace file never opens,
-         // which only shows up at Phase-3 diff time.
-         MFEM_VERIFY(winning_rank < nprocs_loc,
-                     "TPV104StationWriter::Open: station "
-                     << stations[s].name
-                     << " has no winning rank (tie-break tolerance "
-                     << tie_tol << " dropped every candidate). "
-                     "Check global_min_dist = " << global_min_dist[s]);
-         if (is_candidate && my_rank == winning_rank)
+         // R-201 anchored re-scan (REVIEW_station_tiebreak_2026-07-10.md):
+         // candidates ≡ ranks owning a QP within tie_tol of the GLOBAL
+         // minimum distance; the submitted pick is the local lexicographic
+         // minimum over exactly that set — partition-invariant even in the
+         // osculating band at the window edge.  Owner = rank holding the
+         // lexicographically smallest candidate COORDINATE
+         // (np4_attractor_root_cause_2026-07-10.md; the fail-loud
+         // winning-rank VERIFY lives inside ResolveStationOwnerLex).
+         const int lex_dof = FindNearestFaultDOFLex(
+            fault_coords, ndof, stations[s].along_strike,
+            stations[s].down_dip, global_min_dist[s], tie_tol);
+         if (lex_dof >= 0) { station_dof_[s] = lex_dof; }
+         const bool is_candidate = lex_dof >= 0;
+         const real_t RMAX = std::numeric_limits<real_t>::max();
+         const real_t bx = is_candidate ? fault_coords[station_dof_[s]](0)
+                                        : RMAX;
+         const real_t bz = is_candidate ? fault_coords[station_dof_[s]](2)
+                                        : RMAX;
+         const real_t by = is_candidate ? fault_coords[station_dof_[s]](1)
+                                        : RMAX;
+         if (ResolveStationOwnerLex(comm, is_candidate, bx, bz, by,
+                                    "TPV104StationWriter",
+                                    stations[s].name))
          {
             station_owns_[s] = true;
             OpenStationFile(s, output_dir, prefix);

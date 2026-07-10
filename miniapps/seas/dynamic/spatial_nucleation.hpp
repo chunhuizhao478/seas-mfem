@@ -320,6 +320,85 @@ InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
    const DenseMatrix&                         dof_basis,
    const std::function<real_t(real_t, real_t, real_t)>& mu_at_xyz = {});
 
+// =====================================================================
+// Phase 2 (TPV26/27) — forced-rupture (time-weakening) nucleation.
+// =====================================================================
+
+/// @brief `[nucleation.forced_rupture]` TOML sub-block (SCEC TPV26/27
+/// spec Part 5; PLAN_TPV26_27 §1.4).
+///
+/// Forced rupture is a **friction-weakening** mechanism, NOT a stress
+/// perturbation: it adds NO `tau{1,2}_nuc` increment.  Instead it assigns
+/// each fault DOF a forced-rupture time `T(r)` and a decay window `t0_s`,
+/// which the LSW friction coefficient consumes through
+/// `spatial::LSWFrictionCoefficient_ForcedRupture`'s `f_2(t)` term:
+///
+///   mu = mu_s + (mu_d - mu_s) * max(f_1(delta), f_2(t))
+///
+/// The spec is explicit (Part 1 p.3) that nucleation must NOT raise the
+/// near-hypocenter shear stress (that would be inconsistent with the
+/// prescribed volumetric stress) — hence the time-weakening route.
+///
+/// `rcrit_m`, `vs`, `vr_factor` MUST be > 0 and `t0_s` >= 0 when the
+/// `[nucleation]` block selects this kind (parser + resolver validated).
+struct ForcedRuptureSpec
+{
+   real_t hypocenter_x_m = 0.0;
+   /// Fault-normal coordinate of the hypocenter.  `r` is measured in the
+   /// (x, z) plane, so this value is not part of the radius; it defines the
+   /// fault plane that `ResolveForcedRupture` VERIFIES every DOF lies on
+   /// (R-004) — a curved / offset fault is rejected rather than mis-placed.
+   real_t hypocenter_y_m = 0.0;
+   real_t hypocenter_z_m = 0.0;
+   real_t rcrit_m        = 0.0;   ///< > 0 required; r >= rcrit ⇒ never forced
+   real_t vs             = 0.0;   ///< shear-wave speed [m/s]; > 0 required
+   real_t vr_factor      = 0.7;   ///< forced-front speed = vr_factor * vs
+   real_t t0_s           = 0.0;   ///< f_2 decay window [s]; >= 0
+};
+
+/// @brief Per-DOF resolved forced-rupture times.
+///
+///   T_forced_s(i) = T(r_i)   (1e9 sentinel where r_i >= rcrit_m)
+///   t0_decay_s(i) = t0_s     (uniform)
+///
+/// Both Vectors have size `dof_coords_3d.Size() / 3`.  They are consumed
+/// by `InitializeFaultDOFs_Spatial`, which copies them into
+/// `DOFData::T_forced_rupture` / `DOFData::t0_decay_forced`.
+struct ForcedRupturePerDOFParams
+{
+   Vector T_forced_s;
+   Vector t0_decay_s;
+};
+
+/// @brief The SCEC TPV26/27 forced-rupture time (spec Part 5):
+///
+///   T(r) = r / (vr_factor * vs)
+///        + 0.081 * rcrit / (vr_factor * vs) * (1 / (1 - (r/rcrit)^2) - 1)
+///                                                        for r <  rcrit
+///        = 1e9  ("never forced" sentinel)                for r >= rcrit
+///
+/// `T(0) = 0`; the forced-front speed decreases from `vr_factor * vs` near
+/// the hypocenter to 0 at `rcrit`.  Monotonically increasing on `[0, rcrit)`.
+/// `rcrit`, `vs`, `vr_factor` MUST be > 0 (`MFEM_ASSERT`).  A value that
+/// would exceed the 1e9 sentinel (r asymptotically close to rcrit) is
+/// clamped to 1e9 so the DOF is simply "never forced" rather than
+/// producing a non-finite time.
+real_t ForcedRuptureTime(real_t r, real_t rcrit, real_t vs, real_t vr_factor);
+
+/// @brief Build per-DOF forced-rupture times from the spec + per-DOF coords.
+///
+/// `r_i` is the in-fault-plane distance to the hypocenter measured in the
+/// canonical `(x = along-strike, z = vertical)` plane of the planar `y = 0`
+/// TPV26/27 fault:  `r = sqrt((x - x_hyp)^2 + (z - z_hyp)^2)`.  (The other
+/// resolvers use the per-DOF (dip, strike) basis because SAFS faults are
+/// curved; TPV26/27's fault is planar and vertical, so the direct (x, z)
+/// measure is exact and needs no basis.)
+///
+/// Returns zero-sized Vectors when `!enabled` (mirrors the sibling resolvers).
+ForcedRupturePerDOFParams ResolveForcedRupture(const ForcedRuptureSpec& spec,
+                                               bool                     enabled,
+                                               const Vector& dof_coords_3d);
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

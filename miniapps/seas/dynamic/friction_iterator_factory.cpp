@@ -26,10 +26,20 @@ std::unique_ptr<IFrictionIterator> MakeFrictionIterator(
    switch (cfg.law)
    {
       case spatial::FrictionLawKind::SlipWeakening:
+      {
          // Phase 5: the unified LinearSlipWeakeningIterator (reproduces the
          // standalone Tpv205SubStepIterator bit-for-bit — see
          // test_friction_substep_iterator_parity).
-         return std::make_unique<LinearSlipWeakeningIterator>(flux);
+         //
+         // Phase 2 (TPV26/27) round-6 fix: enable the time-aware forced-rupture
+         // mu on INTERIOR fault QPs when the config selects forced rupture.
+         // Every other LSW config passes false ⇒ byte-exact with pre-Phase-2.
+         const bool forced_rupture =
+            cfg.nucleation.enabled
+            && cfg.nucleation.kind == spatial::NucleationKind::ForcedRupture;
+         return std::make_unique<LinearSlipWeakeningIterator>(flux,
+                                                              forced_rupture);
+      }
 
       case spatial::FrictionLawKind::RateState:
       {

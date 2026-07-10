@@ -18,6 +18,8 @@
 #include "friction_substep_iterator.hpp"
 
 #include "tpv205_friction.hpp"   // LSWFrictionCoefficient_TPV205, SolveLSW_TPV205
+// Phase 2 (TPV26/27) round-6 fix: the time-aware forced-rupture mu helper.
+#include "../spatial/code/spatial_friction.hpp"  // LSWFrictionCoefficient_ForcedRupture
 #include "wave_state.hpp"        // QIndex (VX, SXX) for the [SLIP] decomposition
 #include "fault_resample.hpp"    // Phase 3: ApplyFaultResample (rate-state Δψ resample)
 
@@ -198,6 +200,7 @@ void LinearSlipWeakeningIterator::StepOneQP_(DOFData &d,
                                              const real_t *Q_plus,
                                              const real_t *Q_minus,
                                              real_t dt_sub,
+                                             real_t t_sub_end,
                                              bool last_sub_step,
                                              EvalStageState &s,
                                              real_t *Q_imp_plus,
@@ -218,10 +221,33 @@ void LinearSlipWeakeningIterator::StepOneQP_(DOFData &d,
 
    // Step 3: LSW μ(δ) at current slip magnitude δ = sqrt(slip1² + slip2²).
    const real_t delta = std::sqrt(d.slip1 * d.slip1 + d.slip2 * d.slip2);
-   const real_t mu_eff = LSWFrictionCoefficient_TPV205(delta,
-                                                       d.lsw_mu_s,
-                                                       d.lsw_mu_d,
-                                                       d.lsw_d_c);
+   // Phase 2 (TPV26/27) "round-6" fix: when forced rupture is active, INTERIOR
+   // fault QPs must evaluate the same time-aware μ(δ,t) that the seam/inline
+   // LSW_ForcedRupture flux path already applies (fault_face_flux.cpp:1088) —
+   // otherwise interior QPs (the bulk of the fault, incl. the hypocenter)
+   // would silently get plain LSW and the forced front would exist only on
+   // MPI seams.  The branch is GATED so the plain-LSW call below is textually
+   // and byte-for-byte the pre-Phase-2 code; the forced-rupture helper itself
+   // reduces byte-identically to it at the T_forced >= 1e8 "never forced"
+   // sentinel (test_forced_rupture_iterator_parity).
+   real_t mu_eff;
+   if (forced_rupture_)
+   {
+      mu_eff = spatial::LSWFrictionCoefficient_ForcedRupture(delta,
+                                                             d.lsw_mu_s,
+                                                             d.lsw_mu_d,
+                                                             d.lsw_d_c,
+                                                             t_sub_end,
+                                                             d.T_forced_rupture,
+                                                             d.t0_decay_forced);
+   }
+   else
+   {
+      mu_eff = LSWFrictionCoefficient_TPV205(delta,
+                                             d.lsw_mu_s,
+                                             d.lsw_mu_d,
+                                             d.lsw_d_c);
+   }
 
    // Step 4: closed-form LSW solve.
    SolveLSW_TPV205(s.tau1_trial, s.tau2_trial,
@@ -318,7 +344,10 @@ void LinearSlipWeakeningIterator::Advance(
          real_t *Q_imp_plus, real_t *Q_imp_minus)
       {
          EvalStageState s;
-         StepOneQP_(d, Qp_i, Qm_i, dt_sub, last_sub_step, s,
+         // Phase 2 round-6 fix: forward the sub-step ABSOLUTE end time (already
+         // computed by RunSubSteps_; previously discarded here) so the
+         // forced-rupture f_2(t) term can be evaluated on interior QPs.
+         StepOneQP_(d, Qp_i, Qm_i, dt_sub, t_sub_end, last_sub_step, s,
                     Q_imp_plus, Q_imp_minus);
 
          // LSW-only unconditional diag writes (tpv205:413/417): honest

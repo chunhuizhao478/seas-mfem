@@ -1,0 +1,103 @@
+# =====================================================================
+#  TPV26 Phase-2 smoke — exercises FORCED-RUPTURE nucleation end-to-end:
+#    * [nucleation] kind = "forced_rupture"  (SCEC spec Part 5)
+#    * selects FaultFrictionLaw::LSW_ForcedRupture on the wave operator
+#    * exercises the "round-6" fix: INTERIOR fault QPs evaluate the
+#      time-aware mu(delta, t) via LinearSlipWeakeningIterator, not just
+#      MPI-seam faces.
+#
+#  Physics: the TPV26 depth stress gives tau/sigma_n_eff = 0.1575 at every
+#  depth, strictly between mu_d = 0.12 and mu_s = 0.18.  The fault is
+#  therefore LOCKED until the forced-rupture f_2(t) term drives mu below
+#  0.1575, at which point it slips and the rupture self-sustains — exactly
+#  the TPV26 nucleation mechanism (no shear-stress perturbation is added).
+#
+#  SCALED TO THE TINY SMOKE MESH (fault is 3 km x 1.5 km, not 40 x 20 km):
+#  hypocenter at mid-fault, rcrit = 600 m (not 4000 m), t0 = 0.05 s.  The
+#  production spec values live in the Phase-4 tpv26 production configs.
+#
+#  NOTE: cohesion is 0 here.  The spec's depth-dependent cohesion (4 MPa at
+#  the surface, Phase 3) would lock this shallow 1.5 km fault entirely; it is
+#  exercised by tpv26_spatial_depthstress_smoke.toml + the
+#  seas_test_tpv2627_cohesion_taper unit test.
+# =====================================================================
+
+[meta]
+schema_version = 1
+law            = "slip_weakening"
+description    = "TPV26 Phase-2 smoke (tpv2627_depth stress + forced_rupture nucleation)."
+
+[problem]
+tag = "tpv205"
+
+[material_constant_fallback]
+lambda = 32043759360.0
+mu     = 32038120320.0
+rho    = 2670.0
+
+# Effective normal stress: P_p_grad = water_density*g = 1000*9.8.
+[pore_pressure]
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 9800.0
+min_sigma_n_pa    = 0.0
+
+[mesh]
+path  = "tpv26/mesh/tpv26_smoke.msh"
+order = 1
+
+[velocity]
+use_sidecar = false
+
+[stress]
+kind = "tpv2627_depth"
+
+# Forced rupture (SCEC spec Part 5).  Adds NO tau_nuc; it assigns each fault
+# DOF a forced-rupture time T(r) that the LSW f_2(t) term consumes.
+#   T(r) = r/(vr*vs) + 0.081*rcrit/(vr*vs) * (1/(1-(r/rcrit)^2) - 1),  r < rcrit
+#   T(r) = 1e9 (never forced),                                        r >= rcrit
+[nucleation]
+kind = "forced_rupture"
+
+[nucleation.forced_rupture]
+hypocenter_x_m = 0.0
+hypocenter_y_m = 0.0
+hypocenter_z_m = -750.0    # mid-depth of the 1.5 km smoke fault
+rcrit_m        = 600.0     # spec: 4000 (scaled for the tiny mesh)
+vs             = 3464.0
+vr_factor      = 0.7
+t0_s           = 0.05      # spec: 0.5 (scaled)
+
+# TPV26/27 spec Part 4 LSW parameters.  cohesion_default = 0 (see header note).
+[friction.slip_weakening]
+mu_s_default     = 0.18
+mu_d_default     = 0.12
+d_c_default      = 0.30
+cohesion_default = 0.0
+
+[numerics]
+ader_order     = 2
+mixed_flux     = "none"
+cfl            = 0.25
+cfl_safety     = "dg"
+interior_flux  = "scalar"
+fault_iterator = "substep"
+use_pml        = false
+
+[time]
+tfinal     = "0.3s"   # long enough for the forced front to cross most of rcrit
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.02s"
+
+[output]
+output_dir = "output_tpv26_forcedrupture_smoke"
+
+[boundary]
+fault_attr      = 103
+natural_attrs   = [101]
+absorbing_attrs = [105]
+
+[fault_geometry]
+ref_normal = [0.0, -1.0, 0.0]
+up         = [0.0,  0.0, 1.0]
+kind       = "vertical_strike_slip"

@@ -48,6 +48,16 @@ std::unique_ptr<INucleationMethod> MakeNucleation(
             spatial::ResolveInstantaneousOverstressCircular(
                cfg.nucleation.instantaneous_circular, /*enabled=*/true,
                dof_coords_3d, dof_basis, mu_at_xyz));
+
+      case spatial::NucleationKind::ForcedRupture:
+         // Phase 2 (TPV26/27): forced rupture is a FRICTION-weakening
+         // mechanism, not a stress perturbation — it adds no tau{1,2}_nuc.
+         // The per-DOF T(r) / t0 are resolved separately by
+         // spatial::ResolveForcedRupture and threaded into DOFData by
+         // InitializeFaultDOFs_Spatial; the friction coefficient consumes
+         // them via LSWFrictionCoefficient_ForcedRupture's f_2(t) term.
+         // Hence the nucleation *method* here is the static (no-op) one.
+         return std::make_unique<StaticOverstress>();
    }
 
    MFEM_ABORT("MakeNucleation: unhandled cfg.nucleation.kind = "

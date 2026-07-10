@@ -290,6 +290,45 @@ static void F7_rate_state_srw_faultless_rank()
                "fault-less-rank SRW still dispatches to the SRW iterator");
 }
 
+// =====================================================================
+// F8 (R-005): TPV26/27 Phase 2 round-6 wiring.  The factory must set the
+// LinearSlipWeakeningIterator's forced_rupture_ flag from
+// cfg.nucleation.kind, and the iterator must then report
+// WaveOpLaw() == LSW_ForcedRupture (the driver asserts agreement with the
+// law it set on the wave operator).  Without this test, a factory that
+// silently dropped the flag would leave interior QPs on plain LSW and no
+// unit test would notice.
+// =====================================================================
+static void F8_forced_rupture_flips_waveoplaw()
+{
+   std::cout << "\n[F8] forced_rupture -> WaveOpLaw() == LSW_ForcedRupture\n";
+   FaultFaceFlux flux(kRho, kCp, kCs);
+
+   spatial::SpatialFrictionConfig cfg = MakeLswConfig();
+   cfg.nucleation.enabled = true;
+   cfg.nucleation.kind = spatial::NucleationKind::ForcedRupture;
+   std::unique_ptr<IFrictionIterator> fr =
+      MakeFrictionIterator(cfg, flux, /*rs=*/nullptr);
+   TEST_ASSERT(fr != nullptr, "factory returns an iterator for forced_rupture");
+   TEST_ASSERT(fr->WaveOpLaw() == FaultFrictionLaw::LSW_ForcedRupture,
+               "forced_rupture iterator WaveOpLaw() == LSW_ForcedRupture");
+
+   // Byte-exact gate: every OTHER LSW config must stay on plain LSW.
+   cfg.nucleation.kind = spatial::NucleationKind::GradualOverstress;
+   std::unique_ptr<IFrictionIterator> fr2 =
+      MakeFrictionIterator(cfg, flux, /*rs=*/nullptr);
+   TEST_ASSERT(fr2->WaveOpLaw() == FaultFrictionLaw::LSW,
+               "gradual_overstress LSW iterator WaveOpLaw() == LSW");
+
+   // Nucleation disabled (TPV205) must also stay on plain LSW.
+   cfg.nucleation.enabled = false;
+   cfg.nucleation.kind = spatial::NucleationKind::ForcedRupture;
+   std::unique_ptr<IFrictionIterator> fr3 =
+      MakeFrictionIterator(cfg, flux, /*rs=*/nullptr);
+   TEST_ASSERT(fr3->WaveOpLaw() == FaultFrictionLaw::LSW,
+               "nucleation disabled -> plain LSW even if kind==ForcedRupture");
+}
+
 int main(int /*argc*/, char** /*argv*/)
 {
    std::cout << "Running Phase 2 test_friction_iterator_factory\n";
@@ -300,6 +339,7 @@ int main(int /*argc*/, char** /*argv*/)
    F5_lsw_empty_callback_rejected();
    F6_rate_state_srw();
    F7_rate_state_srw_faultless_rank();
+   F8_forced_rupture_flips_waveoplaw();
 
    std::cout << "\n========================================\n";
    std::cout << "Phase 2 test_friction_iterator_factory: "

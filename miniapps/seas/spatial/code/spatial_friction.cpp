@@ -426,8 +426,10 @@ StressSourceKind parse_stress_kind(const std::string& s)
    if (s == "sidecar_hdf5")         { return StressSourceKind::SidecarHDF5; }
    if (s == "fault_local_prestress"){ return StressSourceKind::FaultLocalPrestress; }
    if (s == "depth_proportional")   { return StressSourceKind::DepthProportionalToShearModulus; }
+   if (s == "tpv2627_depth")        { return StressSourceKind::Tpv2627Depth; }
    MFEM_ABORT("stress.kind must be one of {constant_tensor, sidecar_hdf5, "
-              "fault_local_prestress, depth_proportional}; got '" << s << "'");
+              "fault_local_prestress, depth_proportional, tpv2627_depth}; "
+              "got '" << s << "'");
    return StressSourceKind::ConstantTensor;
 }
 
@@ -1073,6 +1075,64 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                      "[stress.depth_proportional].mu_ref_pa must be > 0; got "
                      << d.mu_ref_pa);
       }
+      else if (cfg.stress.kind == StressSourceKind::Tpv2627Depth)
+      {
+         // Phase 1 (TPV26/27): SCEC depth-dependent Cauchy tensor, assembled
+         // analytically per-point by spatial::Tpv2627DepthStressSource.  All
+         // parameters are read directly from [stress] with spec defaults, so
+         // a bare `kind="tpv2627_depth"` yields the full spec profile.  No
+         // Cauchy sigma_*_pa / fault-local / sidecar keys are allowed here.
+         MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
+                     && !has_sxy && !has_syz && !has_sxz,
+                     "[stress] kind=\"tpv2627_depth\" must NOT set the Cauchy "
+                     "sigma_*_pa keys (the tensor is computed from the depth "
+                     "profile: rho/g/b11/b33/b13/omega_top_m/omega_bot_m)");
+         MFEM_VERIFY(!has_path && !has_flp,
+                     "[stress] kind=\"tpv2627_depth\" must NOT set "
+                     "sidecar_path or tau_*_pa/sigma_n_pa keys");
+         auto& d = cfg.stress.tpv2627_depth;
+         d.rho           = toml_real(s, "rho",           2670.0);
+         d.g             = toml_real(s, "g",             9.8);
+         d.water_density = toml_real(s, "water_density", 1000.0);
+         d.b11           = toml_real(s, "b11",           0.926793);
+         d.b33           = toml_real(s, "b33",           1.073206);
+         d.b13           = toml_real(s, "b13",          -0.169029);
+         d.omega_top_m   = toml_real(s, "omega_top_m",   15000.0);
+         d.omega_bot_m   = toml_real(s, "omega_bot_m",   20000.0);
+         MFEM_VERIFY(d.rho > 0.0,
+                     "[stress] kind=\"tpv2627_depth\" rho must be > 0; got "
+                     << d.rho);
+         MFEM_VERIFY(d.g > 0.0,
+                     "[stress] kind=\"tpv2627_depth\" g must be > 0; got "
+                     << d.g);
+         MFEM_VERIFY(d.omega_bot_m > d.omega_top_m,
+                     "[stress] kind=\"tpv2627_depth\" omega_bot_m ("
+                     << d.omega_bot_m << ") must be > omega_top_m ("
+                     << d.omega_top_m << ")");
+         // R-001: the depth profile builds sigma11/sigma33/sigma13 from the
+         // EFFECTIVE vertical stress (sigma22 + Pf), with
+         // Pf = water_density*g*depth.  FaultGeometry::ComputeParams then
+         // subtracts a SEPARATE pore pressure P_p = P_p_grad*depth.  If the two
+         // disagree, the projected sigma_n is neither the total nor the
+         // effective normal stress, and the on-fault ratio tau/sigma_n silently
+         // leaves the (mu_d, mu_s) window the whole TPV26/27 nucleation
+         // mechanism depends on.  Concretely, omitting P_p_grad (default 0)
+         // gives ratio = 0.1011 < mu_d = 0.12 at 10 km depth: the fault can
+         // NEVER slip, with no error.  Require the two to agree.
+         {
+            const real_t pf_grad = d.water_density * d.g;
+            const real_t got = cfg.stress.pore_pressure.P_p_grad_pa_per_m;
+            const real_t tol =
+               1.0e-6 * std::max(static_cast<real_t>(1.0), pf_grad);
+            MFEM_VERIFY(std::abs(got - pf_grad) <= tol,
+                        "[stress] kind=\"tpv2627_depth\" requires "
+                        "[pore_pressure].P_p_grad_pa_per_m == water_density*g = "
+                        << pf_grad << " Pa/m; got " << got
+                        << ".  Otherwise the projected sigma_n is inconsistent "
+                        "with the depth profile and tau/sigma_n leaves "
+                        "(mu_d, mu_s) — the fault would never slip.");
+         }
+      }
       else
       {
          MFEM_VERIFY(!has_sxx && !has_syy && !has_szz
@@ -1404,11 +1464,43 @@ SpatialFrictionConfig parse_root(const toml::value& root)
                      "must be >= 0 (0 disables mu-scaling); got "
                      << ic.mu_ref_pa);
       }
+      else if (kind_s == "forced_rupture")
+      {
+         // Phase 2 (TPV26/27, spec Part 5).  Time-weakening nucleation: a
+         // per-DOF forced-rupture time T(r) consumed by the f_2(t) term of
+         // LSWFrictionCoefficient_ForcedRupture.  Adds NO tau_nuc stress.
+         cfg.nucleation.kind = NucleationKind::ForcedRupture;
+         MFEM_VERIFY(nuc.contains("forced_rupture"),
+                     "[nucleation] kind=\"forced_rupture\" requires a "
+                     "[nucleation.forced_rupture] sub-block");
+         const auto& g = nuc.at("forced_rupture");
+         auto& fr = cfg.nucleation.forced_rupture;
+         fr.hypocenter_x_m = toml_real(g, "hypocenter_x_m", 0.0);
+         fr.hypocenter_y_m = toml_real(g, "hypocenter_y_m", 0.0);
+         fr.hypocenter_z_m = toml_real(g, "hypocenter_z_m", 0.0);
+         fr.rcrit_m        = toml_real(g, "rcrit_m",        0.0);
+         fr.vs             = toml_real(g, "vs",             0.0);
+         fr.vr_factor      = toml_real(g, "vr_factor",      0.7);
+         fr.t0_s           = toml_time_seconds(g, "t0_s",   0.0);
+         MFEM_VERIFY(fr.rcrit_m > 0.0,
+                     "[nucleation.forced_rupture].rcrit_m must be > 0; got "
+                     << fr.rcrit_m);
+         MFEM_VERIFY(fr.vs > 0.0,
+                     "[nucleation.forced_rupture].vs must be > 0 (shear-wave "
+                     "speed, m/s); got " << fr.vs);
+         MFEM_VERIFY(fr.vr_factor > 0.0,
+                     "[nucleation.forced_rupture].vr_factor must be > 0; got "
+                     << fr.vr_factor);
+         MFEM_VERIFY(fr.t0_s >= 0.0,
+                     "[nucleation.forced_rupture].t0_s must be >= 0; got "
+                     << fr.t0_s);
+      }
       else
       {
          MFEM_ABORT("[nucleation].kind must be one of {gradual_overstress, "
                     "gradual_overstress_compact_circular, "
-                    "instantaneous_overstress_circular}; got '" << kind_s << "'");
+                    "instantaneous_overstress_circular, forced_rupture}; got '"
+                    << kind_s << "'");
       }
    }
    // else: enabled stays false; driver runs without nucleation perturbation.

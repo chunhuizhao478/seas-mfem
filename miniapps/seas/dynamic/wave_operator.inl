@@ -3909,6 +3909,142 @@ void WaveOperator<MeshType>::ComputeSharedFaceFluxRHS(
 // is intentional: `wave_operator.inl` is on the CLAUDE.md "Files Requiring
 // Extreme Care" list and the RK4 path must remain byte-identical.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Phase 5 (PLAN_unify_interior_shared_fault_substep_2026-07-09.md): the ONE
+// per-QP fault kernel for the ADER corrector, extracted verbatim from the
+// formerly-duplicated interior (ComputeADERFaceFluxRHS) and shared
+// (ComputeADERSharedFaceFluxRHS) fault branches so they can never drift
+// apart again.  Frame build -> canonical rotation -> +/- routing ->
+// substep-buffer gate (with LSW v_imp recovery) or inline one-shot
+// EvaluateADER* dispatch.
+//
+// Unified substep dispatch (Phase 2, supersedes the R-1601 inline fallback):
+// when the friction iterator's per-substep buffer is installed
+// (SetSubStepFaultImposedStates), BOTH face classes consume it under the
+// same absolute-index gate, giving identical per-QP numerics on both sides
+// of a partition seam.  R-1601's np=10 overflow was root-caused to the
+// since-fixed R-1600-class ghost-exchange INPUT bugs, not to buffer
+// consumption — evidence chain in debug_document/tpv104_debug_document/
+// R1601_root_cause_2026-07-10.md (the CLAUDE.md-required justification).
+// The inline dispatch remains the NO-BUFFER path (ADER one-shot), keyed on
+// the friction-law tag (REVIEW R-016 + Phase H.6): LSW runs the closed-form
+// solver, LSW_ForcedRupture the time-dependent variant, RateAndState Brent.
+//
+// FRAME BIT: `should_negate_frame` is a PARAMETER on purpose — interior
+// passes `!elem1_on_plus` (rank-local is fine: both elements are local),
+// shared passes `qpd.sign_flipped` (the rank-independent bit).  See the
+// header doc + the Phase-0 census for why they must not be unified.
+// ---------------------------------------------------------------------------
+template <typename MeshType>
+void WaveOperator<MeshType>::ComputeFaultQPImposedStatesCanonical_(
+   const FaultBasisQPData &qpd,
+   bool                    should_negate_frame,
+   bool                    elem1_on_plus,
+   int                     dof_idx,
+   const real_t           *I_self,
+   const real_t           *I_nbr,
+   real_t                  dt,
+   DOFData                &fdata,
+   real_t                  can_n[3],
+   real_t                  can_t1[3],
+   real_t                  can_t2[3],
+   real_t                  I_plus_can[NUM_STATE],
+   real_t                  I_minus_can[NUM_STATE],
+   real_t                  I_imp_plus[NUM_STATE],
+   real_t                  I_imp_minus[NUM_STATE]) const
+{
+   MFEM_ASSERT(dt > 0.0,
+               "ComputeFaultQPImposedStatesCanonical_: dt must be > 0; got "
+               << dt);
+   MFEM_ASSERT(fault_dof_data_ != nullptr && dof_idx >= 0 &&
+               dof_idx < static_cast<int>(fault_dof_data_->size()),
+               "ComputeFaultQPImposedStatesCanonical_: dof_idx " << dof_idx
+               << " out of range");
+
+   for (int d = 0; d < 3; d++)
+   {
+      can_n[d]  = should_negate_frame ? -qpd.normal[d]   : qpd.normal[d];
+      can_t1[d] = should_negate_frame ? -qpd.tangent1[d] : qpd.tangent1[d];
+      can_t2[d] = should_negate_frame ? -qpd.tangent2[d] : qpd.tangent2[d];
+   }
+
+   DenseMatrix Tinv_can(NUM_STATE);
+   GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2, Tinv_can);
+
+   real_t I_self_can[NUM_STATE], I_nbr_can[NUM_STATE];
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      I_self_can[c] = 0.0; I_nbr_can[c] = 0.0;
+      for (int k = 0; k < NUM_STATE; k++)
+      {
+         I_self_can[c] += Tinv_can(c, k) * I_self[k];
+         I_nbr_can[c]  += Tinv_can(c, k) * I_nbr[k];
+      }
+   }
+
+   // Route self/neighbor into the physical +/- slots.  `elem1_on_plus` is the
+   // right key on BOTH face classes: it is rank-local, so on a shared face
+   // each rank maps ITS OWN element consistently to the same physical side.
+   const real_t *ip = elem1_on_plus ? I_self_can : I_nbr_can;
+   const real_t *im = elem1_on_plus ? I_nbr_can  : I_self_can;
+   for (int c = 0; c < NUM_STATE; c++)
+   {
+      I_plus_can[c]  = ip[c];
+      I_minus_can[c] = im[c];
+   }
+
+   if (substep_I_imp_plus_flat_ != nullptr &&
+       substep_I_imp_minus_flat_ != nullptr &&
+       dof_idx >= 0 &&
+       dof_idx < substep_n_total_fault_qps_)
+   {
+      const real_t *src_p = substep_I_imp_plus_flat_ + dof_idx * NUM_STATE;
+      const real_t *src_m = substep_I_imp_minus_flat_ + dof_idx * NUM_STATE;
+      for (int c = 0; c < NUM_STATE; c++)
+      {
+         I_imp_plus[c]  = src_p[c];
+         I_imp_minus[c] = src_m[c];
+      }
+      // (Part C, TPV6/7) The buffer path bypasses the inline solve's
+      // StoreImposedVelocity_; recover the time-averaged imposed (split-node)
+      // velocity as I_imp/dt for the TPV6/7 station writers.  LSW-family only
+      // (RS never stores v_imp; mirrors the inline dispatch).  Pure
+      // side-channel — the flux is unaffected.
+      if (fault_friction_law_ == FaultFrictionLaw::LSW ||
+          fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
+      {
+         const real_t inv_dt_vimp = static_cast<real_t>(1.0) / dt;
+         fdata.v_imp_plus[0]  = I_imp_plus[VX]  * inv_dt_vimp;
+         fdata.v_imp_plus[1]  = I_imp_plus[VY]  * inv_dt_vimp;
+         fdata.v_imp_plus[2]  = I_imp_plus[VZ]  * inv_dt_vimp;
+         fdata.v_imp_minus[0] = I_imp_minus[VX] * inv_dt_vimp;
+         fdata.v_imp_minus[1] = I_imp_minus[VY] * inv_dt_vimp;
+         fdata.v_imp_minus[2] = I_imp_minus[VZ] * inv_dt_vimp;
+      }
+   }
+   else if (fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
+   {
+      // R-401 / R-502 guard: time_was_set_ is per-WaveOperator-call; the
+      // one-shot path reads GetTime() (the substep path never does).
+      WaveOperator<MeshType>::VerifyForcedRuptureTimeReady(
+         time_was_set_, fdata.T_forced_rupture);
+      fault_flux_->EvaluateADER_LSW_ForcedRupture(
+         fdata, I_plus_can, I_minus_can, dt, GetTime(),
+         I_imp_plus, I_imp_minus);
+   }
+   else if (fault_friction_law_ == FaultFrictionLaw::LSW)
+   {
+      fault_flux_->EvaluateADER_LSW(
+         fdata, I_plus_can, I_minus_can, dt, I_imp_plus, I_imp_minus);
+   }
+   else
+   {
+      fault_flux_->EvaluateADER(
+         fdata, I_plus_can, I_minus_can, dt, I_imp_plus, I_imp_minus);
+   }
+}
+
 template <typename MeshType>
 void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                                                     real_t dt,
@@ -4214,22 +4350,22 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                      interior_fault_elem1_on_plus_[fb_idx];
 
                   const FaultBasisQPData &qpd = *qpd_ptr;
-                  const bool should_negate_frame = !elem1_on_plus;
+                  // Phase 5: the per-QP fault kernel is the single shared
+                  // helper (frame build, canonical rotation, +/- routing,
+                  // substep-buffer gate / inline one-shot dispatch).
+                  // Interior frame bit = !elem1_on_plus (rank-local is fine
+                  // here: both elements are on this rank).
                   real_t can_n[3], can_t1[3], can_t2[3];
-                  for (int d = 0; d < 3; d++)
-                  {
-                     can_n[d]  = should_negate_frame ? -qpd.normal[d]
-                                                     :  qpd.normal[d];
-                     can_t1[d] = should_negate_frame ? -qpd.tangent1[d]
-                                                     :  qpd.tangent1[d];
-                     can_t2[d] = should_negate_frame ? -qpd.tangent2[d]
-                                                     :  qpd.tangent2[d];
-                  }
+                  real_t I_plus_can[NUM_STATE], I_minus_can[NUM_STATE];
+                  real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
+                  ComputeFaultQPImposedStatesCanonical_(
+                     qpd, /*should_negate_frame=*/!elem1_on_plus,
+                     elem1_on_plus, dof_idx, I_self, I_nbr, dt, fdata,
+                     can_n, can_t1, can_t2,
+                     I_plus_can, I_minus_can, I_imp_plus, I_imp_minus);
 
-                  DenseMatrix T_can(NUM_STATE), Tinv_can(NUM_STATE);
+                  DenseMatrix T_can(NUM_STATE);
                   GodunovFlux::BuildRotation(can_n, can_t1, can_t2, T_can);
-                  GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
-                                                    Tinv_can);
 
 #ifdef SEAS_DIAG_TPV104_FAULT_BASIS
                   // D1 instrumentation (TPV104 σ_n perturbation diagnostic).
@@ -4257,114 +4393,6 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
                   }
 #endif
 
-                  real_t I_self_can[NUM_STATE], I_nbr_can[NUM_STATE];
-                  for (int c = 0; c < NUM_STATE; c++)
-                  {
-                     I_self_can[c] = 0.0; I_nbr_can[c] = 0.0;
-                     for (int k = 0; k < NUM_STATE; k++)
-                     {
-                        I_self_can[c] += Tinv_can(c, k) * I_self[k];
-                        I_nbr_can[c]  += Tinv_can(c, k) * I_nbr[k];
-                     }
-                  }
-
-                  const real_t *I_plus_local  = elem1_on_plus ? I_self_can
-                                                              : I_nbr_can;
-                  const real_t *I_minus_local = elem1_on_plus ? I_nbr_can
-                                                              : I_self_can;
-
-                  real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // R-602/R-603 substep dispatch:  if the driver has
-                  // pre-computed per-substep imposed states via
-                  // Tpv104SubStepIterator::AdvanceWithSubStepStates and
-                  // installed them via SetSubStepFaultImposedStates, consume
-                  // them here in lieu of running EvaluateADER inline.  Layout:
-                  //   substep_I_imp_*_flat_[dof_idx * NUM_STATE + c]
-                  // Both arrays are in the canonical fault-local frame —
-                  // SAME frame as EvaluateADER's outputs — so the downstream
-                  // T_can rotation back to global is unchanged.  When the
-                  // pointers are null (default), the inline EvaluateADER
-                  // path runs unchanged (bit-identical to pre-change).
-                  if (substep_I_imp_plus_flat_ != nullptr &&
-                      substep_I_imp_minus_flat_ != nullptr &&
-                      dof_idx >= 0 &&
-                      dof_idx < substep_n_total_fault_qps_)
-                  {
-                     const real_t *src_p =
-                        substep_I_imp_plus_flat_ + dof_idx * NUM_STATE;
-                     const real_t *src_m =
-                        substep_I_imp_minus_flat_ + dof_idx * NUM_STATE;
-                     for (int c = 0; c < NUM_STATE; c++)
-                     {
-                        I_imp_plus[c]  = src_p[c];
-                        I_imp_minus[c] = src_m[c];
-                     }
-                     // (Part C, TPV6/7) The substep-buffer path bypasses the
-                     // inline EvaluateADER_LSW below — and therefore that
-                     // routine's StoreImposedVelocity_ — so without this the
-                     // per-side imposed velocity (read by TPV6StationWriter)
-                     // stays at zero and the ADER station traces show flat
-                     // v/disp while stress is correct (the RK/mixed-flux path
-                     // calls EvaluateLSW directly and is unaffected).  Recover
-                     // it here: the accumulated I_imp is the macro-step time-
-                     // integral of the canonical-frame imposed Q-state, so
-                     // I_imp/dt is the time-averaged imposed (split-node)
-                     // velocity — exactly what StoreImposedVelocity_ captures
-                     // from the inline solve.  LSW only (RS never stores v_imp;
-                     // mirrors the inline dispatch).  Pure side-channel — the
-                     // flux is unaffected (only the TPV6/7 writer reads v_imp_*).
-                     if (fault_friction_law_ == FaultFrictionLaw::LSW ||
-                         fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
-                     {
-                        const real_t inv_dt_vimp = static_cast<real_t>(1.0) / dt;
-                        fdata.v_imp_plus[0]  = I_imp_plus[VX]  * inv_dt_vimp;
-                        fdata.v_imp_plus[1]  = I_imp_plus[VY]  * inv_dt_vimp;
-                        fdata.v_imp_plus[2]  = I_imp_plus[VZ]  * inv_dt_vimp;
-                        fdata.v_imp_minus[0] = I_imp_minus[VX] * inv_dt_vimp;
-                        fdata.v_imp_minus[1] = I_imp_minus[VY] * inv_dt_vimp;
-                        fdata.v_imp_minus[2] = I_imp_minus[VZ] * inv_dt_vimp;
-                     }
-                  }
-                  else
-                  {
-                     // v9.4.0 Commit 3: fluctuation-Q ADER dispatch;
-                     // has_bulk_bg_ already asserted at the top of
-                     // ComputeADERFaceFluxRHS (Q_bg = 0 is valid).
-                     // REVIEW R-016 + Phase H.6 (rev-3): route LSW callers
-                     // (TPV205) through EvaluateADER_LSW; LSW_ForcedRupture
-                     // callers (SAFS dynamic-rupture driver, D-4 nucleation)
-                     // through the time-dependent variant; the default
-                     // RateAndState path is byte-identical to pre-change.
-                     if (fault_friction_law_ ==
-                         FaultFrictionLaw::LSW_ForcedRupture)
-                     {
-                        // R-401 / R-502 guard hoisted out of the per-DOF
-                        // loop: time_was_set_ is per-WaveOperator-call.
-                        WaveOperator<MeshType>::VerifyForcedRuptureTimeReady(
-                           time_was_set_, fdata.T_forced_rupture);
-                        fault_flux_->EvaluateADER_LSW_ForcedRupture(
-                           fdata,
-                           I_plus_local, I_minus_local,
-                           dt,
-                           GetTime(),
-                           I_imp_plus, I_imp_minus);
-                     }
-                     else if (fault_friction_law_ == FaultFrictionLaw::LSW)
-                     {
-                        fault_flux_->EvaluateADER_LSW(
-                           fdata,
-                           I_plus_local, I_minus_local,
-                           dt,
-                           I_imp_plus, I_imp_minus);
-                     }
-                     else
-                     {
-                        fault_flux_->EvaluateADER(fdata,
-                                                  I_plus_local, I_minus_local,
-                                                  dt,
-                                                  I_imp_plus, I_imp_minus);
-                     }
-                  }
 
                   real_t I_imp_plus_g[NUM_STATE], I_imp_minus_g[NUM_STATE];
                   for (int c = 0; c < NUM_STATE; c++)
@@ -4428,8 +4456,8 @@ void WaveOperator<MeshType>::ComputeADERFaceFluxRHS(const Vector &I,
 
                      _c1s_print("GLOB-IN+",  I_glob_p);
                      _c1s_print("GLOB-IN-",  I_glob_m);
-                     _c1s_print("LOC-IN+",   I_plus_local);
-                     _c1s_print("LOC-IN-",   I_minus_local);
+                     _c1s_print("LOC-IN+",   I_plus_can);
+                     _c1s_print("LOC-IN-",   I_minus_can);
                      _c1s_print("LOC-IMP+",  I_imp_plus);
                      _c1s_print("LOC-IMP-",  I_imp_minus);
                      _c1s_print("GLOB-OUT+", I_imp_plus_g);
@@ -4999,6 +5027,11 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                                                           Vector &rhs) const
 {
    MFEM_PERF_SCOPE("seas::WaveOperator::ComputeADERSharedFaceFluxRHS");
+   // R-005: the substep-buffer v_imp recovery divides by dt with no inline
+   // EvaluateADER* verify on that path; assert once at entry (the interior
+   // sibling ComputeADERFaceFluxRHS carries the same check).
+   MFEM_VERIFY(dt > 0.0,
+               "ComputeADERSharedFaceFluxRHS: dt must be > 0, got " << dt);
    if constexpr (!IsParallelMesh<MeshType>::value)
    {
       return;
@@ -5246,100 +5279,22 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                               "fault face");
                   const FaultBasisQPData &qpd = bd.qp_data[q];
 
-                  real_t can_n[3], can_t1[3], can_t2[3];
-                  for (int d = 0; d < 3; d++)
-                  {
-                     can_n[d]  = qpd.sign_flipped ? -qpd.normal[d]
-                                                  :  qpd.normal[d];
-                     can_t1[d] = qpd.sign_flipped ? -qpd.tangent1[d]
-                                                  :  qpd.tangent1[d];
-                     can_t2[d] = qpd.sign_flipped ? -qpd.tangent2[d]
-                                                  :  qpd.tangent2[d];
-                  }
-
-                  // Pass 1 needs only the inverse rotation (bulk ->
-                  // canonical); T_can (canonical -> global) is rebuilt
-                  // per QP in Pass 2 after the reconcile.
-                  DenseMatrix Tinv_can(NUM_STATE);
-                  GodunovFlux::BuildRotationInverse(can_n, can_t1, can_t2,
-                                                    Tinv_can);
-
-                  real_t I_self_can[NUM_STATE], I_nbr_can[NUM_STATE];
-                  for (int c = 0; c < NUM_STATE; c++)
-                  {
-                     I_self_can[c] = 0.0; I_nbr_can[c] = 0.0;
-                     for (int k = 0; k < NUM_STATE; k++)
-                     {
-                        I_self_can[c] += Tinv_can(c, k) * I_self[k];
-                        I_nbr_can[c]  += Tinv_can(c, k) * I_nbr[k];
-                     }
-                  }
-
-                  const real_t *I_plus_local  = elem1_on_plus ? I_self_can
-                                                              : I_nbr_can;
-                  const real_t *I_minus_local = elem1_on_plus ? I_nbr_can
-                                                              : I_self_can;
-
                   DOFData &fdata = (*fault_dof_data_)[dof_idx];
+                  // Phase 5: the per-QP fault kernel is the single shared
+                  // helper (see ComputeFaultQPImposedStatesCanonical_ for the
+                  // Phase-2 unified-substep-dispatch rationale + the R-1601
+                  // supersession citation).  Shared frame bit =
+                  // qpd.sign_flipped, the RANK-INDEPENDENT bit (census).
+                  // Pass 1 needs no T_can: it is rebuilt per QP in Pass 2
+                  // after the reconcile, from the buffered frame below.
+                  real_t can_n[3], can_t1[3], can_t2[3];
+                  real_t I_plus_can[NUM_STATE], I_minus_can[NUM_STATE];
                   real_t I_imp_plus[NUM_STATE], I_imp_minus[NUM_STATE];
-                  // R-1601 (np>1 substep stability fix): the shared-fault
-                  // substep dispatch was producing rank-dependent
-                  // canonical-frame mismatches that overflowed Q within
-                  // ~7 macro-steps at np=10 (tau=4e28 fed into Brent →
-                  // SIGABRT; reproduced on symmirror_1000m.msh).  The
-                  // root cause is that R-101 `elem1_on_plus` is rank-
-                  // local (rank A's Elem1 = rank B's Elem2 → opposite
-                  // canonical frames on the same physical face) while
-                  // `qpd.sign_flipped` is rank-independent.  Until the
-                  // iterator's per-shared-QP physics is reconciled with
-                  // the corrector's frame convention, fall back to
-                  // inline EvaluateADER on SHARED QPs only — INTERIOR
-                  // QPs continue to use the substep buffer.  This keeps
-                  // substep semantics where they are well-tested and
-                  // restores np>1 stability at the cost of mixed-mode
-                  // dispatch on shared faces.  See
-                  // SUBSTEP_NP_GT_1_HANG_REVIEW.md (R-1600 + R-1601).
-                  //
-                  // SHARED FALLBACK: this branch always runs the inline
-                  // ADER closure regardless of substep_I_imp_*_flat_
-                  // (R-1600/R-1601 frame-mismatch on shared QPs).
-                  // REVIEW R-016 + Phase H.6 (rev-3): dispatch on the
-                  // friction-law tag.  RateAndState keeps the Brent path
-                  // byte-identical (TPV102/TPV104); LSW (TPV205) runs the
-                  // closed-form solver; LSW_ForcedRupture (SAFS spatial
-                  // dyn-driver, D-4 nucleation) runs the time-dependent
-                  // variant.  Without LSW dispatch, TPV205 shared-fault
-                  // QPs at np > 1 silently consume LSW values via Brent
-                  // and stall the rupture front.
-                  if (fault_friction_law_ == FaultFrictionLaw::LSW_ForcedRupture)
-                  {
-                     WaveOperator<MeshType>::VerifyForcedRuptureTimeReady(
-                        time_was_set_, fdata.T_forced_rupture);
-                     fault_flux_->EvaluateADER_LSW_ForcedRupture(
-                        fdata,
-                        I_plus_local, I_minus_local,
-                        dt,
-                        GetTime(),
-                        I_imp_plus, I_imp_minus);
-                  }
-                  else if (fault_friction_law_ == FaultFrictionLaw::LSW)
-                  {
-                     fault_flux_->EvaluateADER_LSW(
-                        fdata,
-                        I_plus_local, I_minus_local,
-                        dt,
-                        I_imp_plus, I_imp_minus);
-                  }
-                  else
-                  {
-                     fault_flux_->EvaluateADER(fdata,
-                                               I_plus_local, I_minus_local,
-                                               dt,
-                                               I_imp_plus, I_imp_minus);
-                  }
-                  (void)substep_I_imp_plus_flat_;
-                  (void)substep_I_imp_minus_flat_;
-                  (void)substep_n_total_fault_qps_;
+                  ComputeFaultQPImposedStatesCanonical_(
+                     qpd, /*should_negate_frame=*/qpd.sign_flipped,
+                     elem1_on_plus, dof_idx, I_self, I_nbr, dt, fdata,
+                     can_n, can_t1, can_t2,
+                     I_plus_can, I_minus_can, I_imp_plus, I_imp_minus);
 
                   // ----------------------------------------------------------
                   // [MACRO] diagnostic (PLAN_predictor_vs_macro_diag_2026-05-23,
@@ -5347,18 +5302,23 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                   // when unset (gated fprintf only — no computed state touched).
                   // At the SHARED seed QP, prints the macro-dt solve's normal-
                   // traction decomposition on the TIME-INTEGRATED canonical +/-
-                  // state (I_{plus,minus}_local / dt — exactly what EvaluateADER_
-                  // LSW just consumed via ComputeTrialTraction) and the WRITTEN
-                  // output fdata.sigma_n_corr / slip_rate.  Compare against the
+                  // state (I_{plus,minus}_local / dt — what the inline one-shot
+                  // path would consume; on the unified substep path the flux
+                  // came from the iterator's buffer instead) and the WRITTEN
+                  // output fdata.sigma_n_corr / slip_rate (iterator write-back
+                  // on the substep path).  Compare against the
                   // iterator's per-sub-step PREDICTOR [SLIP] sigma_n_tot /
                   // [FRAME] dv_n at the same QP: bounded MACRO + collapsing SLIP
                   // ⇒ the opening is born in the per-sub-step predictor / ghost
                   // path (R-1303/R-1601), settling R-008.  Self-check:
                   // sn_vjump+sn_sterm == sigma_n_trial (ComputeTrialTraction
                   // Eq.7a on I/dt).  Seed locator shared with [FRAME]
-                  // (SEAS_DIAG_FRAME_XYZ/_R).  NB: this shared +/- routing uses
-                  // elem1_on_plus while the iterator uses sign_flipped — compare
-                  // MAGNITUDES/boundedness, not the sign of sn_vjump.
+                  // (SEAS_DIAG_FRAME_XYZ/_R).  Frame/routing note: the Phase-0
+                  // census (tests/parallel/test_fault_frame_bit_census.cpp)
+                  // established that sign_flipped is the rank-independent FRAME
+                  // bit and elem1_on_plus the rank-local ROUTING bit on both the
+                  // producer and consumer sides — compare MAGNITUDES/boundedness
+                  // here, not the sign of sn_vjump.
                   {
                      static const bool macro_diag = []{
                         const char *e = std::getenv("SEAS_DIAG_MACRO");
@@ -5387,10 +5347,10 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                         if (_mdx*_mdx + _mdy*_mdy + _mdz*_mdz <= mrad*mrad)
                         {
                            const real_t inv_dt_m = 1.0 / dt;
-                           const real_t Qp_vx  = I_plus_local[VX]  * inv_dt_m;
-                           const real_t Qm_vx  = I_minus_local[VX] * inv_dt_m;
-                           const real_t Qp_sxx = I_plus_local[SXX]  * inv_dt_m;
-                           const real_t Qm_sxx = I_minus_local[SXX] * inv_dt_m;
+                           const real_t Qp_vx  = I_plus_can[VX]  * inv_dt_m;
+                           const real_t Qm_vx  = I_minus_can[VX] * inv_dt_m;
+                           const real_t Qp_sxx = I_plus_can[SXX]  * inv_dt_m;
+                           const real_t Qm_sxx = I_minus_can[SXX] * inv_dt_m;
                            const real_t sn_vjump_macro =
                               fdata.eta_p * (Qm_vx - Qp_vx);
                            const real_t sn_sterm_macro =
@@ -5473,8 +5433,14 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
                               my_rank_, GetTime(),
                               _phys(0), _phys(1), _phys(2),
                               can_t1[0], can_t1[1], can_t1[2],
-                              I_self_can[SXX], I_self_can[SXY], I_self_can[SXZ],
-                              I_nbr_can[SXX], I_nbr_can[SXY], I_nbr_can[SXZ],
+                              // self/nbr views recovered from the helper's
+                              // routed +/- outputs (identical values).
+                              (elem1_on_plus ? I_plus_can : I_minus_can)[SXX],
+                              (elem1_on_plus ? I_plus_can : I_minus_can)[SXY],
+                              (elem1_on_plus ? I_plus_can : I_minus_can)[SXZ],
+                              (elem1_on_plus ? I_minus_can : I_plus_can)[SXX],
+                              (elem1_on_plus ? I_minus_can : I_plus_can)[SXY],
+                              (elem1_on_plus ? I_minus_can : I_plus_can)[SXZ],
                               fdata.tau1_0, fdata.tau1_nuc,
                               fdata.tau1_corr, fdata.tau2_corr,
                               fdata.V1, fdata.V2,
@@ -5599,8 +5565,8 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 
                      _c1s_print("GLOB-IN+",  I_glob_p);
                      _c1s_print("GLOB-IN-",  I_glob_m);
-                     _c1s_print("LOC-IN+",   I_plus_local);
-                     _c1s_print("LOC-IN-",   I_minus_local);
+                     _c1s_print("LOC-IN+",   I_plus_can);
+                     _c1s_print("LOC-IN-",   I_minus_can);
                      _c1s_print("LOC-IMP+",  I_imp_plus);
                      _c1s_print("LOC-IMP-",  I_imp_minus);
                      _c1s_print("GLOB-OUT+", I_imp_plus_g);
@@ -5701,6 +5667,13 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
 #endif
          {
          constexpr int NPAY = 9 + 2 * NUM_STATE;  // 9 DOFData (incl slip_rate) + I_imp +/-
+         // ORDERING CONTRACT (R-004): this payload is indexed by the reconcile
+         // callback as payload[local_qp * NPAY + k].  `local_qp` is the
+         // exchange builder's record index (ExchangeAndPairSharedFaultQPs),
+         // which iterates fault_shared_faces_ ascending with the SAME skip
+         // conditions (!ftr, missing dof_offset) as the Pass-1 loop that
+         // filled fault_qp_buf — so the two orders coincide.  Any new skip
+         // added to ONE of those loops desynchronises them.
          std::vector<double> payload;
          payload.reserve(fault_qp_buf.size() * NPAY);
          for (const auto &qa : fault_qp_buf)
@@ -5719,15 +5692,62 @@ void WaveOperator<MeshType>::ComputeADERSharedFaceFluxRHS(const Vector &I,
             for (int c = 0; c < NUM_STATE; c++) { payload.push_back(qa.I_imp_minus_can[c]); }
          }
 
-         // We overwrite our copy iff the PEER is the boss (peer_rank < my_rank_):
-         // copy its 8 DOFData fields + both canonical imposed states so our
-         // Pass-2 assembly uses the boss's single-valued answer.
+         // Phase 3 (PLAN_unify_interior_shared_fault_substep): the reconcile
+         // is now an ASSERTION first, an overwrite second.  With the unified
+         // substep path (Phase 2) both ranks compute a shared QP from
+         // identical canonical inputs, so their payloads must agree to
+         // round-off; a disagreement above shared_fault_reconcile_tol_ is a
+         // real cross-rank bug and aborts loudly — pre-Phase-3 the boss
+         // overwrite silently masked exactly such bugs.  The boss-wins
+         // overwrite is RETAINED after the check (bitwise determinism across
+         // FP-ordering noise), but it must no longer buy correctness.
+         //
+         // Comparison: |a-b| <= tol * max(|a|, |b|, 1.0) — relative for
+         // O(1)-and-larger fields (stresses ~1e7 Pa), absolute at `tol` for
+         // near-zero fields (dip components on pure strike-slip faults are
+         // FP dust, where a pure relative test would false-trigger).
+         static const char *kReconcileFieldName[9] = {
+            "tau1_corr", "tau2_corr", "sigma_n_corr", "V1", "V2",
+            "psi", "slip1", "slip2", "slip_rate"
+         };
          int n_paired = ExchangeAndPairSharedFaultQPs(
             NPAY, payload,
             [&](int local_qp, const double *peer, int peer_rank)
             {
                SharedFaultQPAssembly &qa = fault_qp_buf[local_qp];
                DOFData &d = (*fault_dof_data_)[qa.dof_idx];
+               const double *mine = payload.data() +
+                                    static_cast<size_t>(local_qp) * NPAY;
+               MFEM_ASSERT(static_cast<size_t>(local_qp + 1) * NPAY
+                           <= payload.size(),
+                           "reconcile: local_qp " << local_qp
+                           << " out of payload range (see ORDERING CONTRACT)");
+               for (int k = 0; k < NPAY; k++)
+               {
+                  const double a = mine[k], b = peer[k];
+                  const double scale =
+                     std::max(std::max(std::abs(a), std::abs(b)), 1.0);
+                  if (std::abs(a - b) > shared_fault_reconcile_tol_ * scale)
+                  {
+                     const char *fname =
+                        (k < 9) ? kReconcileFieldName[k]
+                        : (k < 9 + NUM_STATE ? "I_imp_plus_can"
+                                             : "I_imp_minus_can");
+                     MFEM_ABORT("ComputeADERSharedFaceFluxRHS reconcile: "
+                                "cross-rank disagreement on shared fault QP "
+                                "(local_qp=" << local_qp << ", dof_idx="
+                                << qa.dof_idx << ", payload field " << k
+                                << " = " << fname << "): local rank "
+                                << my_rank_ << " has " << a << ", peer rank "
+                                << peer_rank << " has " << b
+                                << " (|diff| = " << std::abs(a - b)
+                                << " > tol " << shared_fault_reconcile_tol_
+                                << " * scale " << scale << ").  With the "
+                                "unified substep path both ranks must compute "
+                                "identical shared-QP physics; this is a real "
+                                "cross-rank bug, not FP noise.");
+                  }
+               }
                if (peer_rank >= my_rank_) { return; }   // we are boss: keep ours
                d.tau1_corr    = peer[0];
                d.tau2_corr    = peer[1];

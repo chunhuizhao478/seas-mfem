@@ -168,6 +168,14 @@ TEST_RESOLVE_RATE_STATE_GUARDS_SRC   = tests/unit/test_resolve_rate_state_guards
 TEST_RESOLVE_RATE_STATE_GUARDS_OBJ   = $(TEST_RESOLVE_RATE_STATE_GUARDS_SRC:.cpp=.o)
 TEST_CONSTANT_TENSOR_SIGN_SRC        = tests/unit/test_constant_tensor_sign.cpp
 TEST_CONSTANT_TENSOR_SIGN_OBJ        = $(TEST_CONSTANT_TENSOR_SIGN_SRC:.cpp=.o)
+TEST_TPV2627_STRESS_SOURCE_SRC       = tests/unit/test_tpv2627_stress_source.cpp
+TEST_TPV2627_STRESS_SOURCE_OBJ       = $(TEST_TPV2627_STRESS_SOURCE_SRC:.cpp=.o)
+TEST_FORCED_RUPTURE_RESOLVER_SRC     = tests/unit/test_forced_rupture_resolver.cpp
+TEST_FORCED_RUPTURE_RESOLVER_OBJ     = $(TEST_FORCED_RUPTURE_RESOLVER_SRC:.cpp=.o)
+TEST_FORCED_RUPTURE_PARITY_SRC       = tests/unit/test_forced_rupture_iterator_parity.cpp
+TEST_FORCED_RUPTURE_PARITY_OBJ       = $(TEST_FORCED_RUPTURE_PARITY_SRC:.cpp=.o)
+TEST_TPV2627_COHESION_TAPER_SRC      = tests/unit/test_tpv2627_cohesion_taper.cpp
+TEST_TPV2627_COHESION_TAPER_OBJ      = $(TEST_TPV2627_COHESION_TAPER_SRC:.cpp=.o)
 # Phase 10 (TPV31) unit tests.
 TEST_TPV31_CANONICAL_ROTATION_SRC    = tests/unit/test_tpv31_canonical_rotation.cpp
 TEST_TPV31_CANONICAL_ROTATION_OBJ    = $(TEST_TPV31_CANONICAL_ROTATION_SRC:.cpp=.o)
@@ -847,6 +855,11 @@ DYNAMIC_HEADERS = dynamic/wave_state.hpp \
                   dynamic/precomputed_face_fluxes.hpp \
                   dynamic/seas_dynamic_operator.hpp \
                   dynamic/fault_state_channel.hpp \
+                  dynamic/station_nearest_tiebreak.hpp \
+                  dynamic/tpv102_stations.hpp \
+                  dynamic/tpv104_stations.hpp \
+                  dynamic/tpv205_stations.hpp \
+                  dynamic/tpv31_stations.hpp \
                   dynamic/tpv102_setup.hpp
 
 # All headers
@@ -900,6 +913,10 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_advance_interface_compiles \
                seas_test_resolve_rate_state_guards \
                seas_test_constant_tensor_sign \
+               seas_test_tpv2627_stress_source \
+               seas_test_forced_rupture_resolver \
+               seas_test_forced_rupture_iterator_parity \
+               seas_test_tpv2627_cohesion_taper \
                seas_test_tpv31_canonical_rotation \
                seas_test_tpv31_nucleation_and_cohesion \
                seas_test_tpv31_station_writer \
@@ -2740,6 +2757,118 @@ seas_test_constant_tensor_sign: $(TEST_CONSTANT_TENSOR_SIGN_OBJ) \
 test-constant-tensor-sign: seas_test_constant_tensor_sign
 	./seas_test_constant_tensor_sign
 
+# Phase 1 (TPV26/27): Tpv2627DepthStressSource golden tests
+# (depth profile, frame/sign remap, Omega taper).  Links the spatial
+# stress/friction set, same as constant_tensor_sign.
+$(TEST_TPV2627_STRESS_SOURCE_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       spatial/code/spatial_stress.hpp \
+                                       spatial/code/spatial_friction.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv2627_stress_source: $(TEST_TPV2627_STRESS_SOURCE_OBJ) \
+                                 $(SPATIAL_STRESS_OBJ) \
+                                 $(SPATIAL_FRICTION_OBJ) \
+                                 $(STRESS_FIELD_3D_OBJ) \
+                                 $(DATA_FIELD_3D_OBJ) \
+                                 $(FIELD_COEFFICIENT_OBJ) \
+                                 $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                 $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV2627_STRESS_SOURCE_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv2627-stress-source: seas_test_tpv2627_stress_source
+	./seas_test_tpv2627_stress_source
+
+# Phase 2 (TPV26/27): forced-rupture T(r) resolver golden tests.
+# Mirrors the seas_test_spatial_nucleation link set (ResolveForcedRupture
+# lives in spatial_nucleation.o).
+$(TEST_FORCED_RUPTURE_RESOLVER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                          dynamic/spatial_nucleation.hpp \
+                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_forced_rupture_resolver: $(TEST_FORCED_RUPTURE_RESOLVER_OBJ) \
+                                   $(SPATIAL_NUCLEATION_OBJ) \
+                                   $(FAULT_FACE_FLUX_OBJ) \
+                                   $(FRICTION_SOLVER_OBJ) \
+                                   $(TPV205_SUBSTEP_ITERATOR_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FORCED_RUPTURE_RESOLVER_OBJ) \
+	    $(SPATIAL_NUCLEATION_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(TPV205_SUBSTEP_ITERATOR_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-forced-rupture-resolver: seas_test_forced_rupture_resolver
+	./seas_test_forced_rupture_resolver
+
+# Phase 2 (TPV26/27): round-6 byte-exactness guard.  Both friction
+# coefficients are inline free functions, so this links against MFEM only.
+$(TEST_FORCED_RUPTURE_PARITY_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                        dynamic/tpv205_friction.hpp \
+                                        spatial/code/spatial_friction.hpp \
+                                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_forced_rupture_iterator_parity: $(TEST_FORCED_RUPTURE_PARITY_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FORCED_RUPTURE_PARITY_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-forced-rupture-iterator-parity: seas_test_forced_rupture_iterator_parity
+	./seas_test_forced_rupture_iterator_parity
+
+# Phase 3 (TPV26/27): depth-dependent cohesion taper (config-only).
+# Calls ParseSpatialFrictionConfigString + ResolveSlipWeakening, so it links
+# the spatial set (same as constant_tensor_sign).
+$(TEST_TPV2627_COHESION_TAPER_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                         spatial/code/spatial_friction.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(HDF5_INCFLAGS) \
+	    $(TOML_FLAGS) -c $< -o $@
+
+seas_test_tpv2627_cohesion_taper: $(TEST_TPV2627_COHESION_TAPER_OBJ) \
+                                  $(SPATIAL_FRICTION_OBJ) \
+                                  $(SPATIAL_STRESS_OBJ) \
+                                  $(STRESS_FIELD_3D_OBJ) \
+                                  $(DATA_FIELD_3D_OBJ) \
+                                  $(FIELD_COEFFICIENT_OBJ) \
+                                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                  $(MATERIAL_COEFFICIENTS_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_TPV2627_COHESION_TAPER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(SPATIAL_STRESS_OBJ) \
+	    $(STRESS_FIELD_3D_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(FIELD_COEFFICIENT_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-tpv2627-cohesion-taper: seas_test_tpv2627_cohesion_taper
+	./seas_test_tpv2627_cohesion_taper
+
 # =====================================================================
 #  Phase 10 (TPV31) unit tests
 # =====================================================================
@@ -4005,6 +4134,8 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-tpv102-nuc-callback-parity test-seed-equilibrium-psi-rs \
       test-friction-iterator-factory test-advance-interface-compiles \
       test-resolve-rate-state-guards test-constant-tensor-sign \
+      test-tpv2627-stress-source test-forced-rupture-resolver \
+      test-forced-rupture-iterator-parity test-tpv2627-cohesion-taper \
       test-tpv31-canonical-rotation test-tpv31-nucleation-and-cohesion \
       test-tpv31-station-writer \
       test-tpv-toml-stress-sign test-planar-tpv-basis test-tpv-config-parse \
@@ -4878,7 +5009,10 @@ test-parallel-fault: seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 2 ./seas_test_parallel_fault
 	$(MFEM_MPIEXEC) $(MFEM_MPIEXEC_NP) 4 ./seas_test_parallel_fault
 
-test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel test-parallel-fault test-shared-fault-reconcile-cross-rank test-bimaterial-deriv-cache-parity
+test-parallel: test-mpi-context test-parallel-utils test-parallel-domain test-mms-parallel \
+               test-parallel-fault test-shared-fault-reconcile-cross-rank \
+               test-bimaterial-deriv-cache-parity test-fault-frame-bit-census \
+               test-shared-fault-substep-parity-np2 test-station-tiebreak-np2
 
 # Phase 9: Verification and scaling targets
 seas_test_serial_parallel_consistency: $(TEST_SERIAL_PARALLEL_OBJ)
@@ -5218,6 +5352,12 @@ TEST_BIMATERIAL_FAULT_PERSIDE_MATERIAL_SRC = tests/unit/test_bimaterial_fault_pe
 TEST_BIMATERIAL_CONTRAST_GUARD_SRC = tests/unit/test_bimaterial_contrast_guard.cpp
 TEST_BIMATERIAL_MIXED_FLUX_SHARED_SRC = tests/parallel/test_bimaterial_mixed_flux_shared.cpp
 TEST_BIMATERIAL_SEAM_MATERIAL_NP2_SRC = tests/parallel/test_bimaterial_seam_material_np2.cpp
+TEST_FAULT_FRAME_BIT_CENSUS_SRC   = tests/parallel/test_fault_frame_bit_census.cpp
+TEST_FAULT_FRAME_BIT_CENSUS_OBJ   = $(TEST_FAULT_FRAME_BIT_CENSUS_SRC:.cpp=.o)
+TEST_STATION_TIEBREAK_NP2_SRC     = tests/parallel/test_station_tiebreak_np2.cpp
+TEST_STATION_TIEBREAK_NP2_OBJ     = $(TEST_STATION_TIEBREAK_NP2_SRC:.cpp=.o)
+TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_SRC = tests/parallel/test_shared_fault_substep_parity_np2.cpp
+TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_OBJ = $(TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_SRC:.cpp=.o)
 TEST_BIMATERIAL_SEAM_FAULT_NP2_SRC = tests/parallel/test_bimaterial_seam_fault_np2.cpp
 TEST_BIMATERIAL_MIXED_FLUX_CFL_SRC = tests/unit/test_bimaterial_mixed_flux_cfl.cpp
 TEST_BIMATERIAL_MIXED_FLUX_HOMOG_EQUIV_SRC = tests/unit/test_bimaterial_mixed_flux_homog_equivalence.cpp
@@ -5691,6 +5831,156 @@ seas_test_bimaterial_seam_fault_np2: \
 
 test-bimaterial-seam-fault-np2: seas_test_bimaterial_seam_fault_np2
 	mpirun -np 2 ./seas_test_bimaterial_seam_fault_np2
+
+# Phase 0 STOP GATE of PLAN_unify_interior_shared_fault_substep_2026-07-09.md.
+# Read-only census of the fault canonical-frame bits (sign_flipped vs
+# !elem1_on_plus) at np=1 and np=2.  Decides whether the plan's root cause holds.
+# -DSEAS_TEST_INTERNAL exposes GetInteriorFaultElem1OnPlus /
+# GetSharedFaultElem1OnPlus / GetFaultInteriorFaceToBasisIdx (wave_operator.hpp:817).
+$(TEST_FAULT_FRAME_BIT_CENSUS_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                         dynamic/wave_operator.hpp \
+                                         fault/fault_basis.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_TEST_INTERNAL -c $< -o $@
+
+$(TEST_STATION_TIEBREAK_NP2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                       dynamic/tpv104_stations.hpp \
+                                       dynamic/station_nearest_tiebreak.hpp \
+                                       $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_test_fault_frame_bit_census: \
+                  $(TEST_FAULT_FRAME_BIT_CENSUS_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_FAULT_FRAME_BIT_CENSUS_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Runs at np=1 (fault face is INTERIOR) and np=2 (fault face is SHARED).
+test-fault-frame-bit-census: seas_test_fault_frame_bit_census
+	mpirun -np 1 ./seas_test_fault_frame_bit_census
+	mpirun -np 2 ./seas_test_fault_frame_bit_census
+
+# Station tie-break determinism (np4_attractor_root_cause_2026-07-10.md):
+# stations equidistant from >=2 fault QPs must resolve to the lexicographic
+# (x, z, y) coordinate winner, independent of the partition/rank layout.
+seas_test_station_tiebreak_np2: $(TEST_STATION_TIEBREAK_NP2_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_STATION_TIEBREAK_NP2_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-station-tiebreak-np2: seas_test_station_tiebreak_np2
+	mpirun -np 2 ./seas_test_station_tiebreak_np2
+
+# Phase 0(b)/Phase 2 ORACLE: the ADER corrector must consume the sub-step
+# buffer on BOTH interior and shared fault QPs (unified dispatch; the R-1601
+# discard fallback was retired — see debug_document/tpv104_debug_document/
+# R1601_root_cause_2026-07-10.md).  -DSEAS_TEST_INTERNAL exposes
+# TamperSharedFaultElem1OnPlus for the reconcile-assertion negative control.
+$(TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                                         dynamic/wave_operator.hpp \
+                                         dynamic/fault_face_flux.hpp \
+                                         tests/parallel/shared_fault_fixtures.hpp \
+                                         $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -DSEAS_TEST_INTERNAL -c $< -o $@
+
+seas_test_shared_fault_substep_parity_np2: \
+                  $(TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_TESTINTERNAL_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SHARED_FAULT_SUBSTEP_PARITY_NP2_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_TESTINTERNAL_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+test-shared-fault-substep-parity-np2: seas_test_shared_fault_substep_parity_np2
+	mpirun -np 1 ./seas_test_shared_fault_substep_parity_np2
+	mpirun -np 2 ./seas_test_shared_fault_substep_parity_np2
+	@echo "-- reconcile-assertion negative control (must abort) --"
+	@if SEAS_TEST_RECONCILE_NEGATIVE=1 mpirun -np 2 \
+	      ./seas_test_shared_fault_substep_parity_np2 >/dev/null 2>&1; then \
+	   echo "NEGATIVE CONTROL FAILED: reconcile assertion did not fire"; \
+	   exit 1; \
+	else \
+	   echo "  negative control OK: reconcile assertion fires on a" \
+	        "manufactured cross-rank mismatch"; \
+	fi
+
+# R-1601 root-cause DIAGNOSTIC harness (not a test; in no aggregate).  See
+# debug_document/tpv104_debug_document/R1601_root_cause_2026-07-10.md.
+DIAG_R1601_SRC = tests/parallel/diag_r1601_shared_substep_experiment.cpp
+DIAG_R1601_OBJ = $(DIAG_R1601_SRC:.cpp=.o)
+
+$(DIAG_R1601_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) \
+                        tests/parallel/shared_fault_fixtures.hpp \
+                        $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
+
+seas_diag_r1601_experiment: \
+                  $(DIAG_R1601_OBJ) \
+                  $(WAVE_OPERATOR_OBJ) \
+                  $(GODUNOV_FLUX_OBJ) \
+                  $(GODUNOV_FLUX_POOL_OBJ) \
+                  $(PML_LAYER_OBJ) \
+                  $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+                  $(HETEROGENEOUS_MATERIAL_OBJ) \
+                  $(FAULT_FACE_FLUX_OBJ) \
+                  $(FRICTION_SOLVER_OBJ) \
+                  $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+                  $(SPATIAL_FRICTION_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(DIAG_R1601_OBJ) \
+	    $(WAVE_OPERATOR_OBJ) \
+	    $(GODUNOV_FLUX_OBJ) \
+	    $(GODUNOV_FLUX_POOL_OBJ) \
+	    $(PML_LAYER_OBJ) \
+	    $(PRECOMPUTED_FACE_FLUXES_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(FAULT_FACE_FLUX_OBJ) \
+	    $(FRICTION_SOLVER_OBJ) \
+	    $(FRICTION_SUBSTEP_ITERATOR_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(MFEM_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
 
 # Phase 4 (PLAN_mixed_flux_hetero_riemann.md): mixed-flux CFL shared-factor +
 # central+ADER guard (operator-level deps; serial -> in the `test:` group).

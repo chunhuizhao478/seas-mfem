@@ -410,6 +410,99 @@ InstantaneousOverstressPerDOFParams ResolveInstantaneousOverstressCircular(
    return p;
 }
 
+// =====================================================================
+// Phase 2 (TPV26/27) — forced-rupture (time-weakening) nucleation.
+// =====================================================================
+
+/// "Never forced" sentinel — matches the DOFData::T_forced_rupture default
+/// and the >= 1e8 threshold at which LSWFrictionCoefficient_ForcedRupture
+/// reduces byte-identically to the plain TPV205 LSW formula.
+static constexpr real_t kNeverForcedTime = 1.0e9;
+
+real_t ForcedRuptureTime(real_t r, real_t rcrit, real_t vs, real_t vr_factor)
+{
+   // R-006: MFEM_VERIFY (not MFEM_ASSERT) — this is a public API called
+   // directly by tests, and MFEM_ASSERT compiles out in release builds.
+   MFEM_VERIFY(rcrit > 0.0,
+               "ForcedRuptureTime: rcrit must be > 0; got " << rcrit);
+   MFEM_VERIFY(vs > 0.0, "ForcedRuptureTime: vs must be > 0; got " << vs);
+   MFEM_VERIFY(vr_factor > 0.0,
+               "ForcedRuptureTime: vr_factor must be > 0; got " << vr_factor);
+
+   if (!(r < rcrit)) { return kNeverForcedTime; }   // also catches NaN r
+
+   const real_t v_front = vr_factor * vs;           // forced-front speed
+   const real_t ratio   = r / rcrit;
+   const real_t denom   = 1.0 - ratio * ratio;      // > 0 because r < rcrit
+
+   const real_t T = r / v_front
+                    + 0.081 * rcrit / v_front * (1.0 / denom - 1.0);
+
+   // Guard the r -> rcrit^- asymptote: an arbitrarily large (or non-finite)
+   // T means "the forced front never arrives", which is exactly the
+   // kNeverForcedTime sentinel.  Values for r well inside rcrit are O(1 s),
+   // so this clamp never perturbs the physical range.
+   if (!std::isfinite(T) || T > kNeverForcedTime) { return kNeverForcedTime; }
+   return T;
+}
+
+ForcedRupturePerDOFParams ResolveForcedRupture(const ForcedRuptureSpec& spec,
+                                               bool                     enabled,
+                                               const Vector& dof_coords_3d)
+{
+   ForcedRupturePerDOFParams p;
+   if (!enabled) { return p; }   // zero-sized Vectors (sibling-resolver contract)
+
+   MFEM_VERIFY(spec.rcrit_m > 0.0,
+               "ResolveForcedRupture: rcrit_m must be > 0; got "
+               << spec.rcrit_m);
+   MFEM_VERIFY(spec.vs > 0.0,
+               "ResolveForcedRupture: vs must be > 0; got " << spec.vs);
+   MFEM_VERIFY(spec.vr_factor > 0.0,
+               "ResolveForcedRupture: vr_factor must be > 0; got "
+               << spec.vr_factor);
+   MFEM_VERIFY(spec.t0_s >= 0.0,
+               "ResolveForcedRupture: t0_s must be >= 0; got " << spec.t0_s);
+   MFEM_VERIFY(dof_coords_3d.Size() % 3 == 0,
+               "ResolveForcedRupture: dof_coords_3d.Size() ("
+               << dof_coords_3d.Size() << ") must be a multiple of 3");
+
+   const int N = dof_coords_3d.Size() / 3;
+   p.T_forced_s.SetSize(N);
+   p.t0_decay_s.SetSize(N);
+
+   // R-004: `r` is measured in the (x, z) plane, which is exact ONLY for the
+   // planar, vertical y = 0 fault of TPV26/27.  The sibling resolvers project
+   // through the per-DOF (dip, strike) basis precisely because SAFS faults are
+   // curved.  Reject a curved / fault-normal-offset fault loudly rather than
+   // silently mis-placing the entire forced-rupture front.
+   constexpr real_t kPlanarTolM = 1.0;
+   for (int i = 0; i < N; ++i)
+   {
+      const real_t dy = dof_coords_3d(3 * i + 1) - spec.hypocenter_y_m;
+      MFEM_VERIFY(std::abs(dy) <= kPlanarTolM,
+                  "ResolveForcedRupture: fault DOF " << i << " lies " << dy
+                  << " m off the hypocenter's fault-normal (y) plane.  The "
+                  "(x, z) radius measure is valid only for the planar vertical "
+                  "y = 0 TPV26/27 fault; a curved fault needs a basis-projected "
+                  "radius (cf. ResolveGradualOverstressCompactCircular).");
+   }
+
+   for (int i = 0; i < N; ++i)
+   {
+      // In-fault-plane distance for the planar, vertical y = 0 fault:
+      // x = along-strike, z = vertical (depth = -z).  See header note.
+      const real_t dx = dof_coords_3d(3 * i + 0) - spec.hypocenter_x_m;
+      const real_t dz = dof_coords_3d(3 * i + 2) - spec.hypocenter_z_m;
+      const real_t r  = std::sqrt(dx * dx + dz * dz);
+
+      p.T_forced_s(i) =
+         ForcedRuptureTime(r, spec.rcrit_m, spec.vs, spec.vr_factor);
+      p.t0_decay_s(i) = spec.t0_s;
+   }
+   return p;
+}
+
 }  // namespace spatial
 }  // namespace seas
 }  // namespace mfem

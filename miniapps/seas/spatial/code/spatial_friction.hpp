@@ -226,7 +226,8 @@ enum class StressSourceKind
    ConstantTensor,
    SidecarHDF5,
    FaultLocalPrestress,
-   DepthProportionalToShearModulus   ///< Phase 10 (TPV31): mu(depth)-scaled tensor
+   DepthProportionalToShearModulus,  ///< Phase 10 (TPV31): mu(depth)-scaled tensor
+   Tpv2627Depth                      ///< Phase 1 (TPV26/27): SCEC depth-profile Cauchy tensor
 };
 
 /// Phase 10 (TPV31): depth-proportional pre-stress.  A constant Cauchy tensor
@@ -242,6 +243,24 @@ struct DepthProportionalStressSpec
    real_t sigma_yz_per_mu = 0.0;
    real_t sigma_xz_per_mu = 0.0;
    real_t mu_ref_pa       = 32.03812032e9;  // TPV31 spec reference modulus
+};
+
+/// Phase 1 (TPV26/27): SCEC depth-dependent initial stress (spec Part 3,
+/// PLAN_TPV26_27 §1.2).  Defaults are the spec values; a config need only
+/// set `[stress] kind="tpv2627_depth"` to get the full spec profile.  The
+/// tensor is assembled analytically at each point by
+/// spatial::Tpv2627DepthStressSource (no MPa->Pa conversion: rho/g are SI,
+/// the b-coefficients are dimensionless).
+struct Tpv2627DepthStressSpec
+{
+   real_t rho           = 2670.0;      // kg/m^3
+   real_t g             = 9.8;         // m/s^2 (spec: exactly 9.8)
+   real_t water_density = 1000.0;      // kg/m^3 (hydrostatic Pf)
+   real_t b11           = 0.926793;    // fault-parallel coefficient
+   real_t b33           = 1.073206;    // fault-perpendicular coefficient
+   real_t b13           = -0.169029;   // on-fault shear coefficient
+   real_t omega_top_m   = 15000.0;     // Omega=1 above this depth
+   real_t omega_bot_m   = 20000.0;     // Omega=0 below this depth
 };
 
 /// Rectangular `tau_strike` patch for the FaultLocalPrestress source (D3.2,
@@ -299,6 +318,8 @@ struct StressSpec
    std::vector<FaultLocalPatch> fault_local_patches;
    // DepthProportionalToShearModulus (Phase 10 / TPV31):
    DepthProportionalStressSpec depth_proportional;
+   // Tpv2627Depth (Phase 1 / TPV26/27):
+   Tpv2627DepthStressSpec tpv2627_depth;
    // Common:
    PorePressureSpec pore_pressure;
 };
@@ -438,7 +459,13 @@ enum class NucleationKind
 {
    GradualOverstress,                  ///< Gaussian gradual overstress (SAFS)
    GradualOverstressCompactCircular,   ///< SCEC compact bell (TPV102/104)
-   InstantaneousOverstressCircular     ///< one-shot cosine-tapered patch (TPV31)
+   InstantaneousOverstressCircular,    ///< one-shot cosine-tapered patch (TPV31)
+   /// Phase 2 (TPV26/27): SCEC forced rupture (spec Part 5).  A per-DOF
+   /// forced-rupture TIME T(r), consumed by the f_2(t) term of
+   /// `LSWFrictionCoefficient_ForcedRupture`.  Unlike every other kind it
+   /// adds NO tau{1,2}_nuc stress increment — it weakens friction in time.
+   /// Selects `FaultFrictionLaw::LSW_ForcedRupture` on the wave operator.
+   ForcedRupture
 };
 
 // `GradualOverstressCompactCircularSpec` (TPV102/104 SCEC bell) and
@@ -458,6 +485,7 @@ struct NucleationSpec
    GradualOverstressSpec gradual_overstress;
    GradualOverstressCompactCircularSpec compact_circular;        // Phase 6 req 6
    InstantaneousOverstressCircularSpec  instantaneous_circular;  // Phase 6 req 6
+   ForcedRuptureSpec                    forced_rupture;          // Phase 2 (TPV26/27)
 };
 
 struct SlipWeakeningBlock

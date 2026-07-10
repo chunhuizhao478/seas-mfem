@@ -237,6 +237,76 @@ void MakeQField(int n, int O, std::vector<std::vector<real_t>> &Qp,
 
 } // anonymous namespace
 
+// =====================================================================
+// R-005(b) — TPV26/27 Phase 2 "round-6" plumbing.
+//
+// LinearSlipWeakeningIterator::StepOneQP_ must receive the SUB-STEP ABSOLUTE
+// END TIME `t_sub_end`, not `dt_sub` (the two are adjacent `real_t` params).
+// A transposition would evaluate f_2(t) at ~3e-5 s instead of ~1 s and the
+// forced front would never fire — yet every other unit test would still pass.
+//
+// Fixture: zero Q => trial traction is exactly 0, so the total traction is
+// exactly (sigma_n0, tau2_0).  With sigma_n0 = 120 MPa and tau2_0 = 70 MPa:
+//     mu_s * sigma_n = 0.677 * 120 = 81.24 MPa  > 70  -> LOCKED at mu_s
+//     mu_d * sigma_n = 0.525 * 120 = 63.00 MPa  < 70  -> SLIPS at mu_d
+// so "did it slip?" is a clean readout of whether f_2(t) fired.
+// =====================================================================
+static void R005b_forced_rupture_uses_t_sub_end()
+{
+   std::cout << "\n-- R-005b: round-6 forwards t_sub_end (not dt_sub) --\n";
+
+   const int    n = 1, O = 3;
+   const real_t dt_macro = 1.0e-4;
+   const real_t t_macro_start = 1.0;   // >> dt_macro/O = 3.3e-5
+
+   FaultFaceFlux flux(kRho, kCp, kCs);
+   std::vector<Vector> coords(n, Vector(3));
+   coords[0] = 0.0;
+   coords[0](2) = -7500.0;
+
+   std::vector<real_t> deltaT, weights;
+   MakeQuadrature(O, dt_macro, deltaT, weights);
+
+   const size_t flat = static_cast<size_t>(NUM_STATE) * n;
+   std::vector<std::vector<real_t>> Qp(O, std::vector<real_t>(flat, 0.0));
+   std::vector<std::vector<real_t>> Qm = Qp;
+
+   auto make_dof = [](real_t T_forced)
+   {
+      DOFData d = MakeLswDOF(0);
+      d.tau2_0 = 70.0e6;              // between mu_d*sigma_n and mu_s*sigma_n
+      d.T_forced_rupture = T_forced;
+      d.t0_decay_forced  = 0.0;       // step ramp exactly at T_forced
+      return std::vector<DOFData>{d};
+   };
+   const auto nuc_noop = [](real_t, real_t) {};
+
+   auto run = [&](real_t T_forced, bool forced_rupture)
+   {
+      std::vector<DOFData> dof = make_dof(T_forced);
+      std::vector<real_t> Ip(flat, 0.0), Im(flat, 0.0);
+      LinearSlipWeakeningIterator it(flux, forced_rupture);
+      it.SetSubSteps(deltaT, weights);
+      it.Advance(dof, coords, Qp, Qm, dt_macro, t_macro_start,
+                 Ip.data(), Im.data(), nuc_noop);
+      return dof[0].slip2;
+   };
+
+   // (i) Forced at T = t_macro_start: every t_sub_end > T => f_2 = 1 => mu_d.
+   //     Had dt_sub been forwarded (3.3e-5 << T = 1.0), f_2 = 0 => locked.
+   TEST_ASSERT(std::abs(run(t_macro_start, /*forced_rupture=*/true)) > 0.0,
+               "R-005b: t_sub_end forwarded -> forced DOF weakens to mu_d and "
+               "slips (forwarding dt_sub would leave it locked)");
+
+   // (ii) Never-forced control (T = 1e9 sentinel): stays at mu_s => locked.
+   TEST_ASSERT(run(1.0e9, /*forced_rupture=*/true) == 0.0,
+               "R-005b: never-forced DOF (T=1e9) stays locked at mu_s");
+
+   // (iii) Gate: forced_rupture_ == false must ignore T_forced entirely.
+   TEST_ASSERT(run(t_macro_start, /*forced_rupture=*/false) == 0.0,
+               "R-005b: forced_rupture_=false ignores T_forced (plain-LSW gate)");
+}
+
 int main()
 {
    std::cout << "\n=== Phase 5: unified vs standalone sub-step iterator parity ===\n";
@@ -391,6 +461,8 @@ int main()
                      "SRW fixture exercises a non-trivial friction/state solve");
       }
    }
+
+   R005b_forced_rupture_uses_t_sub_end();
 
    std::cout << "\n========================================\n";
    std::cout << "  Phase 5 substep-iterator parity: " << num_passed

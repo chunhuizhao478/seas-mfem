@@ -322,7 +322,18 @@ using RateStateSlipLawSrwIterator = RateStateSubStepIterator<RateStateSlipLawSrw
 class LinearSlipWeakeningIterator : public SubStepIteratorBase
 {
 public:
-   explicit LinearSlipWeakeningIterator(FaultFaceFlux &flux) : flux_(flux) {}
+   /// @param forced_rupture  Phase 2 (TPV26/27) "round-6" fix.  When true the
+   /// per-QP mu(delta) is replaced by the TIME-AWARE
+   /// `spatial::LSWFrictionCoefficient_ForcedRupture(delta, ..., t_sub_end,
+   /// d.T_forced_rupture, d.t0_decay_forced)`, so INTERIOR fault QPs get the
+   /// forced-rupture f_2(t) term (previously only shared/seam faces did, via
+   /// the wave operator's inline LSW_ForcedRupture flux path).  Defaults to
+   /// false so every existing caller keeps the plain-LSW path textually and
+   /// byte-for-byte unchanged.  The factory sets it from
+   /// `cfg.nucleation.kind == ForcedRupture`.
+   explicit LinearSlipWeakeningIterator(FaultFaceFlux &flux,
+                                        bool forced_rupture = false)
+      : flux_(flux), forced_rupture_(forced_rupture) {}
 
    LinearSlipWeakeningIterator(const LinearSlipWeakeningIterator &) = delete;
    LinearSlipWeakeningIterator &operator=(const LinearSlipWeakeningIterator &) = delete;
@@ -340,8 +351,21 @@ public:
                 const std::function<void(real_t, real_t)> &nuc_callback)
       override;
 
+   /// Must agree with the law the driver set on the wave operator (the driver
+   /// asserts this cross-check).  Forced rupture selects the wave operator's
+   /// LSW_ForcedRupture flux dispatch.
+   ///
+   /// Seam/interior time consistency (unify plan Phase 2+4, supersedes the
+   /// former R-002 caveat): on the ADER substep path BOTH interior and shared
+   /// fault QPs consume this iterator's per-substep buffer, so seam and
+   /// interior evaluate the identical mu(delta, t) at the identical
+   /// `t_sub_end` — one clock, no seam lag.  `GetTime()` survives only on the
+   /// inline one-shot (no-buffer) path.
    FaultFrictionLaw WaveOpLaw() const override
-   { return FaultFrictionLaw::LSW; }
+   {
+      return forced_rupture_ ? FaultFrictionLaw::LSW_ForcedRupture
+                             : FaultFrictionLaw::LSW;
+   }
 
 private:
    /// Per-QP closed-form LSW pipeline — lifted verbatim from
@@ -349,16 +373,25 @@ private:
    /// trial traction -> total traction -> LSW μ(δ) -> SolveLSW_TPV205 ->
    /// sigma_n_corr -> slip accumulation -> BuildImposedState ->
    /// WriteBackState on the last sub-step.
+   ///
+   /// `t_sub_end` is the ABSOLUTE simulation time at the end of this sub-step
+   /// (computed by `RunSubSteps_`).  It is consumed only when
+   /// `forced_rupture_` is true; the plain-LSW path ignores it and remains
+   /// byte-exact.
    void StepOneQP_(DOFData &d,
                    const real_t *Q_plus,
                    const real_t *Q_minus,
                    real_t dt_sub,
+                   real_t t_sub_end,
                    bool last_sub_step,
                    EvalStageState &s,
                    real_t *Q_imp_plus,
                    real_t *Q_imp_minus);
 
    FaultFaceFlux &flux_;
+   /// Phase 2 (TPV26/27): gates the time-aware forced-rupture mu.  false ⇒
+   /// the plain TPV205 LSW call path, textually unchanged.
+   bool forced_rupture_ = false;
 };
 
 } // namespace seas

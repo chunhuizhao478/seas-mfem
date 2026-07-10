@@ -448,12 +448,14 @@ public:
    /// R-001 (final review): `data.slip{1,2}` is NOT touched by this
    /// call — slip evolution is owned exclusively by
    /// `Tpv205SubStepIterator::StepOneQP_`, which integrates `slip{1,2}
-   /// += V{1,2} * dt_sub` once per sub-step over every fault QP.  The
-   /// wave operator's R-1601 shared-fault fallback re-invokes
-   /// `EvaluateADER_LSW` AFTER the iterator on shared QPs; if this
-   /// function also accumulated slip, shared-fault QPs at np > 1 would
-   /// double-count slip and the rupture front would accelerate
-   /// artificially across MPI rank boundaries.  See REVIEW R-001.
+   /// += V{1,2} * dt_sub` once per sub-step over every fault QP.
+   /// HISTORY: under the retired R-1601 shared-fault fallback
+   /// (superseded by unify-plan Phase 2; see debug_document/
+   /// tpv104_debug_document/R1601_root_cause_2026-07-10.md) this
+   /// function ran AFTER the iterator on shared QPs, so accumulating
+   /// slip here double-counted at np > 1.  The rule REMAINS
+   /// load-bearing on the one-shot (no-buffer) path and preserves the
+   /// iterator's exclusive ownership of slip.  See REVIEW R-001.
    ///
    /// @param[in,out] data   Per-DOF state.
    /// @param[in]  I_plus    Time-integrated + side state (NUM_STATE).

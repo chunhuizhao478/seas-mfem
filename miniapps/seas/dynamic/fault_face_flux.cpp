@@ -849,13 +849,15 @@ void FaultFaceFlux::EvaluateADER_LSW(DOFData &data,
    // R-001 (final review): slip accumulation is the iterator's
    // responsibility (Tpv205SubStepIterator::StepOneQP_ updates
    // data.slip{1,2} once per sub-step for every dof_data entry,
-   // including shared QPs).  The wave-operator dispatch (interior +
-   // R-1601 shared-fault fallback) calls EvaluateADER_LSW AFTER the
+   // including shared QPs).  HISTORY: under the retired R-1601
+   // shared-fault fallback (superseded by unify-plan Phase 2; see
+   // debug_document/tpv104_debug_document/R1601_root_cause_2026-07-10.md)
+   // the wave-operator dispatch called EvaluateADER_LSW AFTER the
    // iterator on shared QPs, so adding `data.slip{1,2} += V*dt` here
-   // would double-count slip on shared faces and break the rupture
-   // physics at np > 1.  EvaluateADER_LSW now only computes I_imp /
-   // V / τ_corr / σ_n_corr; slip evolution is owned exclusively by
-   // the iterator.
+   // double-counted slip on shared faces at np > 1.  The rule REMAINS
+   // load-bearing on the one-shot (no-buffer) path: EvaluateADER_LSW
+   // only computes I_imp / V / τ_corr / σ_n_corr; slip evolution is
+   // owned exclusively by the iterator.
 
    // Step 6: imposed Q-state (Eq. 11-12 of the FaultFaceFlux pipeline).
    real_t Q_imp_plus[NUM_STATE], Q_imp_minus[NUM_STATE];
