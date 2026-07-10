@@ -24,6 +24,22 @@ This is **not** a bit-for-bit reproduction: SeisSol runs ADER-DG order 4 (p=3) w
 pure Godunov flux; MFEM runs p=1 global time stepping with a central flux on fault-adjacent faces. The
 *inputs* transfer exactly; the *discretization* is the experimental variable.
 
+### The experiment (user directive, 2026-07-09): mixed flux on the large-rv mesh
+
+Two deliberate deviations from the pristine v3.4.1 deck, both in service of one question — **can MFEM's
+mixed (adjacent-central) flux numerically tolerate a large-rv mesh that SeisSol had to fix
+geometrically?**
+
+- **Mesh: keep the un-fixed deep19km mesh** (`safv4_deep19km_sub500m_flattop_nwtrim_fixed_opt`), **not**
+  the v3_5_3 rvfix4 mesh. Large rv (Zhang 2023 rv>3) drives a tensile flip → zero strength → runaway under
+  pure upwind; SeisSol's answer was a geometry fix (rvfix4). Mixed flux is the Zhang-2023 σ_n-leak cure at
+  the *numerical* level, so the point is to run it on the un-fixed mesh and see whether it holds.
+- **Stress: k=1.5 + freeze500m** (the SeisSol-verified v3_5_3 field, a mesh-independent grid), swapped in
+  for the deck's k=1.8 so shallow free-surface facets can't free-slip at near-zero normal stress
+  (`freeze500m`). See Phase 5.
+
+So: **deep19km (large-rv) mesh + v3_5_3 k=1.5-freeze500m stress + mixed flux.** Do not swap in rvfix4.
+
 ### Headline
 
 **Four of the six input channels already work.** The mesh is already in the repo in MFEM-readable form and
@@ -527,32 +543,45 @@ Source nc: `safs_material_cvm.nc` from the deck directory (452 × 361 × 194; th
 ## Phase 5 — Convert the Andersonian stress field (G4)
 
 ### Goal
-`safs_stress_andersonian_k1.8.nc` → schema-v1 HDF5, compression-**positive**, effective Pa.
+Andersonian effective stress → schema-v1 HDF5, compression-**positive**, effective Pa.
 
-### Command
+### STRESS REVISION (2026-07-09, user directive): k=1.5 + freeze500m
+
+The original port converted the deck's `safs_stress_andersonian_k1.8.nc`. The stress source was then
+**changed to the SeisSol-verified v3_5_3 field `safs_stress_andersonian_k1.5_freeze500m.nc`** so that shallow
+free-surface facets cannot free-slip at near-zero normal stress (`freeze500m`: every node shallower than
+500 m carries its column's stress at 500 m depth). This deviates from the deck's k=1.8 — it is the same
+Andersonian construction at a lower differential-stress ratio (k=1.5) with the frozen shallow cap.
+
 ```
 python3 safs/seisol_quakeworx/toolbox/on_fault_stress_projection_csm/csm_stress_nc_to_mfem_hdf5.py \
-  --in  ~/Downloads/seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2/safs_stress_andersonian_k1.8.nc \
-  --out safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/safs_stress_andersonian_k1.8_mfem.h5
+  --pad-m 3000 \
+  --in  safs/seisol_quakeworx/v3_under_construction/toolbox/combined_workflow/outputs/safs_stress_andersonian_k1.5_freeze500m.nc \
+  --out safs/project_7.0_preferred/stress/results/andersonian_k1p5_freeze500m_mfem/safs_stress_andersonian_k1.5_freeze500m_mfem.h5 \
+  --hypo 609062.8722 3709528.1324 -10000
 ```
 
-The script needs no modification: the member names are already `s_xx..s_xz`, and its `min<max` nudge
-already covers `s_yz ≡ s_xz ≡ 0`.
+The script needs no modification: members are `s_xx..s_xz`, the `min<max` nudge covers `s_yz ≡ s_xz ≡ 0`.
 
 ### Cautions
-- The script's `HYPO_DEFAULT = (606971.0, 3707270.0, -4965.62)` is the **v3.0.0** hypocentre used only for
-  a diagnostic print. Pass the v3.4.1 on-fault hypocentre `(609062.8722, 3709528.1324, -10000.0)` if the
-  script exposes a flag; otherwise ignore the print (it is not used in the output).
-- **`[pore_pressure] P_p_pa = 0.0`.** The nc is already effective (its own `convention` attribute says so).
-  A non-zero `P_p_pa` would double-subtract in `ProjectFaultPreStress`.
-- Grid `z[−20000,+3000]` and `x[195,628]k / y[3685,3965]k` contain the fault bbox
-  `x[363.5,626.7]k y[3692.0,3839.0]k z[−19329,+26]`, so the default `OOBPolicy::Abort` in
-  `ApplyCsmStressSidecar` is fine — stress is only projected onto **fault** DOFs.
+- **`--pad-m 3000` is REQUIRED.** The freeze500m nc caps at z=0, but the deep19km flat-top fault daylights
+  its trace to z≈+25.8 m. `pad_grid` edge-replicates the z=0 (frozen) slice up to z=+3000, so the
+  daylighting facets stay inside the strict-Abort stress hull and read the frozen top stress. (The old
+  k=1.8 nc already extended to +3000; this reproduces that.) Without it, `ApplyCsmStressSidecar`
+  (`OOBPolicy::Abort`) aborts on the trace facets.
+- **`[pore_pressure] P_p_pa = 0.0`.** The nc is already effective; a non-zero `P_p_pa` double-subtracts.
+- The script's `HYPO_DEFAULT` is the v3.0.0 hypocentre (diagnostic print only); pass `--hypo` with the
+  v3.4.1 on-fault point.
 
-### Acceptance
-- Sampled at the hypocentre facet: `σ_n = 169.83 MPa`, `mu_app ≤ 0.2931`, `τ_0 ≥ 0.006 MPa` — the numbers
-  the deck header records for this fault.
-- `min σ_n` over fault DOFs `≈ 2.15 MPa`, 0 non-finite.
+### Acceptance (measured on the deep19km fault, 2026-07-09)
+- Hypocentre facet (144 m from the centre, z = −9932 m): `σ_n = 167.26 MPa`, `|τ_0| = 21.35 MPa`,
+  `mu_app = 0.128 < f_0`.
+- `min σ_n` over the fault = **5.39 MPa** (was 2.15 at k=1.8) — freeze500m raised the shallow floor 2.5×;
+  40 shallowest facets 5.4–8.5 MPa, no near-zero. 0 non-finite. 0 fault facets outside the padded hull.
+- **Nucleation consequence (flagged):** the binding static excess `(f_0 − mu_app)·σ_n` ROSE to **79.0 MPa**
+  (from 72.1 at k=1.8), because lower k dropped `mu_app` more than `σ_n`. The **75 MPa bump is now below it
+  (×0.949) → will not nucleate.** The v3_5_3 decks that ran this exact stress used **85 MPa** (×1.076). This
+  is Gate-4 decision territory (Phase 8); the bump was NOT changed automatically.
 
 ---
 
@@ -763,44 +792,37 @@ Sidecars to `scp` to Expanse alongside the mesh (all gitignored, ~700 MB total):
    `min/max V_w = 0.05/1000`. Compare against `build_friction_nc_thermal.py`'s G2/G4 gates.
 3. **Stress gate.** `σ_n(hypo facet) = 169.83 MPa`; `min σ_n` over fault DOFs ≈ 2.15 MPa; `max mu_app`
    ≈ 0.2931 `< f_0` ⇒ **no t=0 pre-slip**.
-4. **Nucleation gate. — FAILED at 75 MPa (2026-07-09). DECISION REQUIRED.**
+4. **Nucleation gate. — RESOLVED (2026-07-09): 85 MPa on the k=1.5 + freeze500m stress.**
 
-   The deck's own margins are thin: barrier `S_E = a·σ_n·ln(V_dyn/V_init) = 0.015 · 169.83e6 · 27.631
-   = 70.39 MPa` (75/70.39 = ×1.065) and static excess `(f_0 − mu_app)·σ_n = 72.11 MPa` (×1.040, binding).
+   History (k=1.8 stress): the deck's 75 MPa bump cleared the static excess by ×1.040 but MFEM's stricter
+   `f_ss·σ_n` criterion in `--print-derived` gave `nucleation overshoot = −6.86 MPa` — it would not
+   nucleate. (MFEM compares `|τ_pre + Δτ|` against the *steady-state* strength `f_ss·σ_n`, not `f_0·σ_n`.)
 
-   MFEM's `--print-derived` applies a **stricter** criterion — it compares `|τ_pre + Δτ|` against the
-   *steady-state* strength `f_ss·σ_n` rather than against `f_0·σ_n` — and on the production config it
-   reports:
+   Stress revised to **k=1.5 + freeze500m** (Phase 5), which raised the binding static excess to **79.0 MPa**
+   (lower k dropped `mu_app` more than `σ_n`), so the 75 MPa bump fell to ×0.949. Per the **user directive
+   (2026-07-09)** the bump was **raised to 85 MPa** in both configs — matching the SeisSol-run v3_5_3
+   PREFERRED CASE2 deck for this exact stress:
 
-   ```
-   [derived] nucleation peak |F(r) * delta_tau|       = 7.49448e+07 Pa
-   [derived] velocity-weakening DOFs inside patch      = 851
-   [derived] most-overstressed VW DOF at (608882, 3.70954e+06, -9810.02)
-   [derived] amplitude |delta_tau| at that DOF         = 7.36938e+07 Pa
-   [derived] nucleation overshoot                      = -6.85895 MPa   (BELOW steady-state strength)
-   [derived] WARNING: ... the patch only creeps faster and may not nucleate within tfinal.
-                      Increase delta_tau_*_pa.
-   ```
-
-   Scaling the amplitude (only `Δτ` moves; `τ_pre` and `f_ss·σ_n` are fixed, and the bell factor at that
-   DOF is `F = 0.9826`):
-
-   | `delta_tau_pa` | overshoot | verdict |
+   | criterion (k=1.5 hypocentre facet) | 75 MPa | **85 MPa** |
    |---|---|---|
-   | 75 MPa (deck value) | **−6.86 MPa** | will not nucleate |
-   | 80 MPa | −1.95 MPa | still below strength |
-   | **85 MPa** (the plan's escalation) | **+2.97 MPa** | nucleates |
-   | 90 MPa | +7.88 MPa | nucleates |
+   | RS barrier `S_E = 69.32 MPa` | ×1.082 | **×1.226** |
+   | SeisSol static excess `(f_0−mu_app)·σ_n = 79.0 MPa` | ×0.949 (below) | **×1.076** |
 
-   **This is a physics decision, not a bug.** Two options, and they answer different questions:
-   - **Keep 75 MPa** — a *faithful* port. SeisSol's own criterion says it nucleates (×1.040 static
-     excess); MFEM's stricter `f_ss` criterion says it does not. Running it settles which criterion is
-     right for this fault, at the cost of possibly burning the job.
-   - **Raise to 85 MPa** — the plan's pre-authorized escalation. Guarantees nucleation on both criteria,
-     but the run is then no longer the *same* forcing SeisSol used, so rupture-front timing is not
-     directly comparable.
+   **Caveat — MFEM's gate is stricter than SeisSol's, and 85 MPa is marginal by it.** The np=4 dry-run on
+   the revised config (2026-07-09) reports:
 
-   Do **not** touch `radius_m` or the hypocentre either way.
+   ```
+   [derived] nucleation overshoot (|tau_pre + delta_tau| - f_ss*sigma_n) = -3.56 MPa (below steady-state strength)
+   [derived] PASS: rate-and-state initial conditions are well-posed.
+   ```
+
+   MFEM compares `|τ_pre + Δτ|` against the *steady-state* strength `f_ss·σ_n`, and at `V_init = 1e-12` the
+   rate/direct effect lifts `f_ss ≈ 0.655 > f_0 = 0.6`, so MFEM's threshold is ~8 MPa above SeisSol's static
+   excess. That is the whole discrepancy: 85 MPa clears SeisSol's criterion (×1.076, and SeisSol *did*
+   nucleate) but sits −3.56 MPa under MFEM's. **User decision (2026-07-09): keep 85 MPa** — match the
+   SeisSol-run forcing and treat the overshoot line as the conservative static heuristic it is (the driver
+   still reports well-posed; only the time-stepping settles nucleation). MFEM's own gate breaks even near
+   89 MPa (slope 0.987 MPa/MPa) if a later run shows only creep. Do **not** touch `radius_m` or the hypocentre.
 
    Also quantify G10 here: report `max |r_MFEM − r_3D|` over bump-support DOFs; if it exceeds ~1% of `R`,
    the effective bump is measurably wider than SeisSol's.

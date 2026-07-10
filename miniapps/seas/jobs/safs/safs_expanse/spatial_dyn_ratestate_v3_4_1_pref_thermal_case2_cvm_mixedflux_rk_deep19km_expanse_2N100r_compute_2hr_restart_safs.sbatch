@@ -163,7 +163,7 @@ fi
 # PRODUCTION SIDECAR PRE-FLIGHT — THREE .h5 sidecars, all gitignored/large.
 # The friction sidecar is NEW in v3_4_1 (the CTM temperature zoning).
 VEL_H5="safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/velocity_safs.h5"
-STR_H5="safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/safs_stress_andersonian_k1.8_mfem.h5"
+STR_H5="safs/project_7.0_preferred/stress/results/andersonian_k1p5_freeze500m_mfem/safs_stress_andersonian_k1.5_freeze500m_mfem.h5"
 FRI_H5="safs/project_7.0_preferred/friction/results/thermal_case2_mfem/friction_safs.h5"
 for _h5 in "${VEL_H5}" "${STR_H5}" "${FRI_H5}"; do
     if [[ ! -f "${_h5}" ]]; then
@@ -171,7 +171,7 @@ for _h5 in "${VEL_H5}" "${STR_H5}" "${FRI_H5}"; do
         echo "       It is gitignored/large; scp it to Expanse before submitting."
         echo "       Rebuild recipes:"
         echo "         vel : safs/project_7.0_preferred/velocity/code/build_pref_velocity_sidecar.py --in safs_material_cvm.nc --out ${VEL_H5}"
-        echo "         str : safs/seisol_quakeworx/toolbox/on_fault_stress_projection_csm/csm_stress_nc_to_mfem_hdf5.py --in safs_stress_andersonian_k1.8.nc --out ${STR_H5}"
+        echo "         str : csm_stress_nc_to_mfem_hdf5.py --pad-m 3000 --in <combined_workflow>/outputs/safs_stress_andersonian_k1.5_freeze500m.nc --out ${STR_H5}"
         echo "         fri : safs/project_7.0_preferred/friction/code/build_pref_friction_sidecar.py --in safs_friction_thermal_case2.nc --out ${FRI_H5}"
         echo "       (Do NOT work around this with --no-sidecar-material — that forces the"
         echo "        constant fallback, which aborts on the matrix path.)"

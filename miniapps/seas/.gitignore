@@ -163,6 +163,7 @@ safs/project_7.0_alternative/stress/results/1000m_lcfar3000/
 # and friction/code/build_pref_friction_sidecar.py — or scp them).
 safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/
 safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/
+safs/project_7.0_preferred/stress/results/andersonian_k1p5_freeze500m_mfem/
 safs/project_7.0_preferred/friction/results/
 
 # SAFS mesh STLs (regenerable from .ts via meshing pipeline).

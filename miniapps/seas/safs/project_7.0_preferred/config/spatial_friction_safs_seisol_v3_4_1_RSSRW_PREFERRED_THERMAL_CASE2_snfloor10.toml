@@ -1,8 +1,11 @@
 # =========================================================================
 # SAFS v3_4_1 RSSRW PREFERRED THERMAL CASE2 — MFEM port of the SeisSol deck
 #   ~/Downloads/seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2
-#   (FL=103, CTM temperature-zoned rs_a/rs_srW via ASAGI, f_w=0, Andersonian
-#   k=1.8 effective stress, statewide CVM) run with MFEM mixed-flux + RK.
+#   (FL=103, CTM temperature-zoned rs_a/rs_srW via ASAGI, f_w=0, statewide CVM)
+#   run with MFEM mixed-flux + RK.
+#   STRESS DEVIATION from the deck: the deck ships Andersonian C1 k=1.8; this
+#   config uses k=1.5 + freeze500m (the SeisSol-verified v3_5_3 field) so shallow
+#   free-surface facets cannot free-slip at near-zero normal stress.
 #   "Do what SeisSol did, but with mixed flux (SeisSol has none)."
 #
 # Plan: safs/project_7.0_preferred/document/
@@ -40,7 +43,8 @@
 # Sidecars (all gitignored; regenerate or scp):
 #   velocity : velocity/code/build_pref_velocity_sidecar.py  --in safs_material_cvm.nc
 #   stress   : seisol_quakeworx/toolbox/on_fault_stress_projection_csm/
-#              csm_stress_nc_to_mfem_hdf5.py --in safs_stress_andersonian_k1.8.nc
+#              csm_stress_nc_to_mfem_hdf5.py --pad-m 3000 \
+#                --in <combined_workflow>/outputs/safs_stress_andersonian_k1.5_freeze500m.nc
 #   friction : friction/code/build_pref_friction_sidecar.py --in safs_friction_thermal_case2.nc
 #
 # Schema: safs/project_7.0_alternative/document/spatial_friction_config_schema.md
@@ -48,7 +52,7 @@
 [meta]
 schema_version = 1
 law            = "rate_state"
-description    = "MFEM port of seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2: FL=103 (RS slip law + strong rate weakening), CTM temperature-zoned rs_a/rs_srW via [friction.rate_state.sidecar], f_w=0, Dc=0.10 m, b=0.019, V_init=1e-12; Andersonian C1 k=1.8 effective stress (sidecar_hdf5, P_p_pa=0); statewide muscal CVM (interior_flux=matrix, far_field_clamp); SCEC compact-bell nucleation dtau_s=75 MPa R=2000 m T_nuc=1 s at the on-fault 10 km hypocentre; deep19km safstags mesh; MIXED FLUX (adjacent) + RK4; tfinal 150 s.  Fallback arm: sigma_n strength floor = 10 MPa."
+description    = "MFEM port of seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2: FL=103 (RS slip law + strong rate weakening), CTM temperature-zoned rs_a/rs_srW via [friction.rate_state.sidecar], f_w=0, Dc=0.10 m, b=0.019, V_init=1e-12; Andersonian C1 k=1.5 + freeze500m effective stress (sidecar_hdf5, P_p_pa=0); statewide muscal CVM (interior_flux=matrix, far_field_clamp); SCEC compact-bell nucleation dtau_s=85 MPa R=2000 m T_nuc=1 s at the on-fault 10 km hypocentre; deep19km safstags mesh; MIXED FLUX (adjacent) + RK4; tfinal 150 s.  Fallback arm: sigma_n strength floor = 10 MPa."
 
 [material_constant_fallback]
 # Fallback only (consumed solely with --no-sidecar-material, which production
@@ -65,7 +69,8 @@ rho    = 2670.0   # kg/m^3
 P_p_pa            = 0.0
 P_p_grad_pa_per_m = 0.0
 # MFEM-internal clamp on sigma_n_eff (no SeisSol equivalent).  INERT on this
-# fault: the minimum sigma_n over all 172,593 fault facets is 2.15 MPa.
+# fault: with freeze500m the minimum sigma_n over the 172,593 fault facets is
+# 5.39 MPa (was 2.15 at k=1.8 without freeze).
 min_sigma_n_pa    = 1.0e6
 
 [mesh]
@@ -100,14 +105,29 @@ kind         = "sidecar_hdf5"
 sidecar_path = "safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/velocity_safs.h5"
 
 [stress]
-# Andersonian C1 k=1.8, hydrostatic Pp removed, NO overpressure; converted from
-# the deck's safs_stress_andersonian_k1.8.nc with a global sign flip to MFEM's
-# compression-POSITIVE convention.  Verified at the hypocentre facet (143.7 m
-# from the centre, z = -9932 m): sigma_n = 169.83 MPa, mu_app = 0.175 < f_0.
+# Andersonian C1 k=1.5 + freeze500m, hydrostatic Pp removed, NO overpressure.
+# freeze500m: every node shallower than 500 m carries its column's stress AT
+# 500 m depth, so shallow free-surface facets keep a healthy sigma_n and cannot
+# free-slip (the SeisSol-verified v3_5_3 field; replaces the sigma_n floor as the
+# shallow-runaway cure).  Source: combined_workflow/outputs/
+# safs_stress_andersonian_k1.5_freeze500m.nc, converted by csm_stress_nc_to_mfem_hdf5.py
+# with --pad-m 3000 (edge-replicate the z=0 frozen slice up to z=+3000 so the
+# deep19km flat-top fault trace stays inside the strict-Abort stress hull) and a
+# global sign flip to MFEM's compression-POSITIVE convention.  Verified at the
+# hypocentre facet (144 m from the centre, z = -9932 m): sigma_n = 167.26 MPa,
+# mu_app = 0.128 < f_0; min sigma_n over the fault = 5.39 MPa; 0 non-finite.
 kind         = "sidecar_hdf5"
-sidecar_path = "safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/safs_stress_andersonian_k1.8_mfem.h5"
+sidecar_path = "safs/project_7.0_preferred/stress/results/andersonian_k1p5_freeze500m_mfem/safs_stress_andersonian_k1.5_freeze500m_mfem.h5"
 
 [numerics]
+# EXPERIMENT RATIONALE (user, 2026-07-09): this deck deliberately keeps the
+# UN-fixed deep19km mesh (large rv: Zhang-2023 rv>3 => tensile-flip => strength=0
+# => runaway under pure upwind).  SeisSol needed a geometry fix (the v3_5_3 rvfix4
+# mesh) to run this.  The point here is to test whether MFEM's MIXED (adjacent
+# central) FLUX -- the Zhang-2023 sigma_n-leak cure -- can tolerate the large-rv
+# mesh NUMERICALLY, without the mesh fix.  So: deep19km mesh (this file), v3_5_3
+# STRESS (a mesh-independent field), mixed flux.  Do NOT swap in the rvfix4 mesh.
+#
 # MIXED FLUX: matrix (heterogeneous CVM) + adjacent central flux + RK4.
 # Central flux is non-dissipative and UNSTABLE under ADER -> rk4/rk45 mandatory
 # (ComputeMaxDt and the driver's MatrixMixedFluxUnderAder guard both abort).
@@ -142,23 +162,31 @@ checkpoint_every_steps   = 10000
 kind = "gradual_overstress_compact_circular"
 
 [nucleation.gradual_overstress_compact_circular]
-# = SeisSol Tnuc_s = 75e6 * exp(r^2/(r^2 - R^2)) for r < R, 0 otherwise;
-#   smoothStep ramp over [s_0, s_0 + t_0] = [0, 1] s.  Strike-only
-#   (Tnuc_n = Tnuc_d = 0), which is what CompactCircularGradualOverstress does.
+# Tnuc_s = 85e6 * exp(r^2/(r^2 - R^2)) for r < R, 0 otherwise; smoothStep ramp
+#   over [s_0, s_0 + t_0] = [0, 1] s.  Strike-only (Tnuc_n = Tnuc_d = 0), which
+#   is what CompactCircularGradualOverstress does.
 # Centre = the on-fault point at EXACTLY 10 km depth closest to the
 #   deck-lineage geographic target (609062.8722, 3709528.1324, -10000.0).
 #
-# MARGINS ARE THIN (the deck header flags this):
-#   barrier   S_E = a*sigma_n*ln(V_dyn/V_init) = 0.015 * 169.83e6 * 27.631
-#                 = 70.39 MPa  -> 75/70.39 = x1.065
-#   static excess (f_0 - mu_app)*sigma_n      = 72.11 MPa -> x1.040 (BINDING)
-# If nucleation is sluggish, raise delta_tau_pa to 85.0e6 (x1.21 / x1.18)
-# BEFORE touching radius_m or the hypocentre.
+# 85 MPa (raised from the deck's 75 MPa, user directive 2026-07-09) because the
+# k=1.5 + freeze500m stress raised the BINDING static excess to 79.0 MPa:
+#   barrier   S_E = a*sigma_n*ln(V_dyn/V_init) = 0.015 * 167.26e6 * 27.631
+#                 = 69.32 MPa  -> 85/69.32 = x1.226
+#   static excess (f_0 - mu_app)*sigma_n      = 79.00 MPa -> 85/79.0 = x1.076 (BINDING)
+# (At 75 MPa the static excess was x0.949 -> would NOT nucleate.  Lower k dropped
+#  mu_app more than sigma_n, so the excess ROSE vs k=1.8.)  This 85 MPa matches the
+# SeisSol-run v3_5_3 PREFERRED CASE2 deck for this exact stress.
+# NOTE MFEM's --print-derived gate is STRICTER than SeisSol's: it tests against
+#  f_ss*sigma_n, and at V_init=1e-12 the direct effect lifts f_ss~0.655 > f_0=0.6
+#  (~8 MPa above the static excess).  So the np=4 dry-run overshoot at 85 MPa is
+#  -3.56 MPa (marginal by MFEM's heuristic; SeisSol nucleated at 85).  KEPT at 85
+#  (user, 2026-07-09) to match the SeisSol forcing; MFEM breaks even ~89 MPa if a
+#  run only creeps.  Raise BEFORE touching radius_m or the hypocentre.
 center_x_m   =  609062.8722
 center_y_m   = 3709528.1324
 center_z_m   =  -10000.0
 radius_m     =    2000.0
-delta_tau_pa =      75.0e6
+delta_tau_pa =      85.0e6
 T_nuc_s      = "1.0s"
 
 [friction]
