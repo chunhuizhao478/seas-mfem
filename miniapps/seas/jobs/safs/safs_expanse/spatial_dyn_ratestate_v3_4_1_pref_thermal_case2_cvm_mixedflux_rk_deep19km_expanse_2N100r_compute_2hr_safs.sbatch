@@ -12,7 +12,7 @@
 # =========================================================================
 # SAFS v3_4_1 RSSRW PREFERRED THERMAL CASE2 — MFEM port of the SeisSol deck, with
 # CVM material + MIXED FLUX (adjacent) + RK.
-# *** EXPANSE (SDSC) job — uniform 2N x 50r = 100 ranks / 2 h / 100 GB. ***
+# *** EXPANSE (SDSC) job — uniform 2N x 100r = 200 ranks / 6 h / 200 GB. ***
 # Config: ${SAFS_ROOT}/config/spatial_friction_safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2.toml
 # Plan:   safs/project_7.0_preferred/document/PLAN_thermal_case2_mixedflux_port_2026-07-08.md
 # =========================================================================
@@ -54,11 +54,11 @@
 #     <root>/extern/*/install by build_expanse.sh — NOT loaded as modules.
 #   * Runtime libs: libhdf5.so (sidecar reader) + libzfp.so live in extern/*;
 #     added to LD_LIBRARY_PATH below; HDF5_PLUGIN_PATH -> the H5Z-ZFP plugin.
-#   * Sizing : compute (exclusive 128-core / 256 GB nodes), 2N x 50r = 100 ranks,
-#     --mem=200000M (200 GB/node = 4 GB/rank), 2 h.
+#   * Sizing : compute (exclusive 128-core / 256 GB nodes), 2N x 100r = 200 ranks,
+#     --mem=200000M (200 GB/node = 2 GB/rank), 6 h.
 #     RAISED from the v3.0.0 job's 100000M.  io/data_field_3d.cpp REPLICATES each
 #     sidecar on EVERY rank (full H5Dread into a per-rank vector), and v3_4_1's
-#     three sidecars total ~1330 MB/rank -- 66% of a 2 GB/rank budget, before the
+#     three sidecars total ~1130 MB/rank (k=1.5) -- 56% of a 2 GB/rank budget, before the
 #     mesh, wave operator and RK stage vectors.  compute nodes are exclusive and
 #     charged whole-node, so the extra memory is free.  The pre-flight below
 #     re-checks this against whatever sizing you actually submit with.
@@ -67,7 +67,7 @@
 #   * Account : EDIT the -A line above, or submit with
 #       sbatch --account=<your_expanse_alloc> <this file>
 #
-# FIRST/SMOKE RUN (compute, 2N x 50r = 100 ranks, 2 h): RK45 + this mesh will NOT
+# FIRST/SMOKE RUN (compute, 2N x 100r = 200 ranks, 6 h): RK4 + this mesh will NOT
 # reach tfinal=150 s in 2 h — the run advances through nucleation/breakout and
 # CHECKPOINTS.  ACCEPTANCE = clean start, V_max bounded, on-fault sigma_n stable in
 # time (the mixed-flux leak cure), FreeSurf banner active.  Resume toward 150 s with
@@ -299,7 +299,7 @@ mkdir -p "${OUT}" "${LOG_DIR}"
 
 echo "Git commit:  $(git rev-parse HEAD)"
 echo "Cluster:     Expanse (SDSC)   Launcher: srun --mpi=pmi2"
-echo "Queue/size:  compute, 2N x 50r = ${SLURM_NTASKS} ranks, 200 GB/node, 02:00:00"
+echo "Queue/size:  compute, 2N x 100r = ${SLURM_NTASKS} ranks, 200 GB/node, 06:00:00"
 echo "EXPERIMENT:  v3_4_1 RSSRW PREFERRED THERMAL CASE2, CVM + Andersonian k1.8 + CTM friction sidecar, MIXED FLUX + RK"
 echo "Arm:         ${SAFS_ARM}"
 echo "Config:      ${CONFIG_TOML}"
