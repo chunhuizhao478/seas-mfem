@@ -514,6 +514,230 @@ void AdvanceADERWithSubStep_Spatial(
                     use_shared_ck ? &shared_I : nullptr);
 }
 
+// -------------------------------------------------------------------------
+// Phase 3 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md.
+//
+// Open the `[friction.rate_state.sidecar]` HDF5 readers and type-erase them
+// into the `RateStateSidecarFields` callables the resolver consumes.  The
+// `DataField3D` readers are held by `shared_ptr` CAPTURED BY VALUE inside each
+// lambda, so they outlive the resolver and the returned struct owns them
+// transitively -- no dangling reference if the caller drops its own handle.
+//
+// `far_field_clamp` maps to `OOBPolicy::Clamp` (ASAGI nearest-edge hold): the
+// SCEC CTM hull covers the SAFS fault but not the far-field absorbing box.
+// With `false` an out-of-hull query is a hard abort (the schema-v1 default).
+//
+// Returns nullptr when the block is absent, which `SpatialFrictionResolver`
+// accepts as "no sidecar" -- so the call site needs no branch.
+// -------------------------------------------------------------------------
+std::shared_ptr<const seas::spatial::RateStateSidecarFields>
+MakeRateStateSidecarFields(const seas::spatial::FrictionSidecarSpec &spec)
+{
+   using seas::spatial::RateStateSidecarFields;
+   if (!spec.enabled) { return nullptr; }
+
+   const seas::OOBPolicy oob = spec.far_field_clamp
+                               ? seas::OOBPolicy::Clamp
+                               : seas::OOBPolicy::Abort;
+
+   // One reader per field.  Each ctor validates the schema-v1 invariants
+   // (schema_version / crs / z_positive / monotone axes / no NaN / bounds)
+   // and aborts with a precise message on a bad file, so a missing dataset
+   // fails HERE, at setup, not mid-time-loop.
+   auto open_reader = [&spec, oob](const std::string &field)
+   {
+      return std::make_shared<seas::DataField3D>(spec.path, field, oob);
+   };
+   // Type-erase a reader into the resolver's callable.  The shared_ptr is
+   // CAPTURED BY VALUE, so the reader outlives every handle the caller drops.
+   auto bind = [](std::shared_ptr<seas::DataField3D> reader)
+   {
+      return RateStateSidecarFields::FieldFn(
+                [reader](real_t x, real_t y, real_t z)
+                { return reader->Evaluate(x, y, z); });
+   };
+
+   auto fields = std::make_shared<RateStateSidecarFields>();
+
+   // R-001: record the data hull so `--print-derived` can refuse to sample a
+   // point outside it.  Every field of one schema-v1 sidecar shares the same
+   // /grid, so the `a` reader's bbox describes them all (StressField3D asserts
+   // this invariant for its own six components).
+   auto a_reader = open_reader(spec.a_field);
+   fields->bbox               = a_reader->BBox();
+   fields->clamps_out_of_hull = spec.far_field_clamp;
+   fields->a                  = bind(a_reader);
+
+   fields->V_w = bind(open_reader(spec.V_w_field));
+   if (!spec.b_field.empty())  { fields->b  = bind(open_reader(spec.b_field)); }
+   if (!spec.Dc_field.empty()) { fields->Dc = bind(open_reader(spec.Dc_field)); }
+   return fields;
+}
+
+// -------------------------------------------------------------------------
+// `--print-derived` diagnostic for the friction sidecar (Phase 3 acceptance).
+//
+// Reports, over ALL fault DOFs on ALL ranks: min / max / mean of the resolved
+// `a` and `V_w`, the velocity-weakening DOF count (a - b < 0), and the sampled
+// sidecar values at the nucleation centre (the hypocentre for this problem).
+// This is the online counterpart of `build_pref_friction_sidecar.py`'s own G2
+// (range) and G4 (hypocentre anchor) gates -- if the two disagree, the mesh,
+// the sidecar, or the CRS is wrong.
+//
+// Collective: every rank must call it.  Prints on rank 0 only.
+// -------------------------------------------------------------------------
+void PrintFrictionSidecarSummary(
+   const seas::spatial::RateStatePerDOFParams &rs,
+   const seas::spatial::RateStateSidecarFields &fields,
+   const seas::spatial::HypocenterSpec &hypo,
+   const seas::spatial::NucleationSpec &nuc,
+#ifdef MFEM_USE_MPI
+   MPI_Comm comm,
+#endif
+   int rank)
+{
+   const int N = rs.a.Size();
+
+   real_t a_min = std::numeric_limits<real_t>::infinity();
+   real_t a_max = -std::numeric_limits<real_t>::infinity();
+   real_t v_min = std::numeric_limits<real_t>::infinity();
+   real_t v_max = -std::numeric_limits<real_t>::infinity();
+   real_t a_sum = 0.0, v_sum = 0.0;
+   long   n_vw  = 0;   // a - b < 0  (velocity-weakening)
+
+   for (int i = 0; i < N; ++i)
+   {
+      a_min = std::min(a_min, rs.a(i));
+      a_max = std::max(a_max, rs.a(i));
+      v_min = std::min(v_min, rs.V_w(i));
+      v_max = std::max(v_max, rs.V_w(i));
+      a_sum += rs.a(i);
+      v_sum += rs.V_w(i);
+      if (rs.a(i) - rs.b(i) < 0.0) { ++n_vw; }
+   }
+
+   long n_tot = N;
+#ifdef MFEM_USE_MPI
+   auto all_min = [comm](real_t v)
+   { real_t o; MPI_Allreduce(&v, &o, 1, MPITypeMap<real_t>::mpi_type,
+                             MPI_MIN, comm); return o; };
+   auto all_max = [comm](real_t v)
+   { real_t o; MPI_Allreduce(&v, &o, 1, MPITypeMap<real_t>::mpi_type,
+                             MPI_MAX, comm); return o; };
+   auto all_sum_r = [comm](real_t v)
+   { real_t o; MPI_Allreduce(&v, &o, 1, MPITypeMap<real_t>::mpi_type,
+                             MPI_SUM, comm); return o; };
+   auto all_sum_l = [comm](long v)
+   { long o; MPI_Allreduce(&v, &o, 1, MPI_LONG, MPI_SUM, comm); return o; };
+
+   a_min = all_min(a_min);  a_max = all_max(a_max);
+   v_min = all_min(v_min);  v_max = all_max(v_max);
+   a_sum = all_sum_r(a_sum); v_sum = all_sum_r(v_sum);
+   n_vw  = all_sum_l(n_vw);  n_tot = all_sum_l(n_tot);
+#endif
+
+   if (rank != 0) { return; }
+
+   // A rank with zero fault DOFs leaves min/max at +-inf; a GLOBAL n_tot of 0
+   // means the fault carries no DOFs at all, which is already fatal upstream.
+   MFEM_VERIFY(n_tot > 0,
+               "PrintFrictionSidecarSummary: zero fault DOFs globally.");
+
+   std::cout << "\n[print-derived] friction sidecar (a, V_w)\n"
+             << "  fault DOFs (global) : " << n_tot << "\n"
+             << "  a      min/mean/max : " << a_min << " / "
+             << (a_sum / static_cast<real_t>(n_tot)) << " / " << a_max << "\n"
+             << "  V_w    min/mean/max : " << v_min << " / "
+             << (v_sum / static_cast<real_t>(n_tot)) << " / " << v_max
+             << " m/s\n"
+             << "  velocity-weakening  : " << n_vw << " / " << n_tot
+             << " DOFs with a - b < 0  ("
+             << (100.0 * static_cast<real_t>(n_vw)
+                 / static_cast<real_t>(n_tot)) << " %)\n";
+
+   // Sample the sidecar at the nucleation centre when nucleation is enabled
+   // (that IS the hypocentre for the SAFS decks); otherwise fall back to the
+   // [hypocenter] block.  Both are plain coordinate lookups into the same
+   // field the resolver used, so they cross-check the offline G4 gate.
+   real_t hx = hypo.x_m, hy = hypo.y_m, hz = hypo.z_m;
+   const char *origin = "[hypocenter]";
+   bool have_point = (hx != 0.0 || hy != 0.0 || hz != 0.0);
+   if (nuc.enabled)
+   {
+      // R-007: `have_point` is cleared here and re-set INSIDE each case.  No
+      // `default:` label, so `-Wswitch` still flags a newly-added NucleationKind
+      // at compile time; and if one slips through anyway, the diagnostic
+      // degrades to "skipped" rather than silently sampling the [hypocenter]
+      // default of (0, 0, 0).
+      have_point = false;
+      switch (nuc.kind)
+      {
+         case seas::spatial::NucleationKind::GradualOverstress:
+            hx = nuc.gradual_overstress.center_x_m;
+            hy = nuc.gradual_overstress.center_y_m;
+            hz = nuc.gradual_overstress.center_z_m;
+            origin = "[nucleation.gradual_overstress] centre";
+            have_point = true;
+            break;
+         case seas::spatial::NucleationKind::GradualOverstressCompactCircular:
+            hx = nuc.compact_circular.center_x_m;
+            hy = nuc.compact_circular.center_y_m;
+            hz = nuc.compact_circular.center_z_m;
+            origin = "[nucleation.gradual_overstress_compact_circular] centre";
+            have_point = true;
+            break;
+         case seas::spatial::NucleationKind::InstantaneousOverstressCircular:
+            hx = nuc.instantaneous_circular.center_x_m;
+            hy = nuc.instantaneous_circular.center_y_m;
+            hz = nuc.instantaneous_circular.center_z_m;
+            origin = "[nucleation.instantaneous_overstress_circular] centre";
+            have_point = true;
+            break;
+      }
+   }
+
+   // Skip the point sample when neither a nucleation centre nor an explicit
+   // [hypocenter] was given: the (0,0,0) default is outside any UTM 11 N hull.
+   if (!have_point)
+   {
+      std::cout << "  sidecar point sample : skipped (no [nucleation] centre "
+                   "and no [hypocenter])\n" << std::flush;
+      return;
+   }
+
+   // R-001: NEVER evaluate outside the data hull.
+   //   * Under OOBPolicy::Clamp the read returns a nearest-edge value that is
+   //     indistinguishable from a real sample.  For the SCEC CTM CASE2 field the
+   //     edge values are EXACTLY the hypocentre anchors (a = 0.015, V_w = 0.05)
+   //     this diagnostic exists to verify, so an out-of-hull point would print a
+   //     perfect "pass" — the gate could never fail.
+   //   * Under OOBPolicy::Abort the read aborts, killing the run from inside a
+   //     diagnostic.
+   // Report the miss instead; it is far more informative than either.
+   if (!fields.InHull(hx, hy, hz))
+   {
+      std::cout << "  sidecar at " << origin << " (" << hx << ", " << hy << ", "
+                << hz << "): OUTSIDE the sidecar hull "
+                << "x[" << fields.bbox[0] << ", " << fields.bbox[1] << "] "
+                << "y[" << fields.bbox[2] << ", " << fields.bbox[3] << "] "
+                << "z[" << fields.bbox[4] << ", " << fields.bbox[5] << "]\n"
+                << "      NOT SAMPLED — an out-of-hull read would "
+                << (fields.clamps_out_of_hull
+                    ? "silently clamp to an edge value (a false PASS)."
+                    : "abort the run.")
+                << "\n" << std::flush;
+      return;
+   }
+
+   std::cout << "  sidecar at " << origin << " (" << hx << ", " << hy << ", "
+             << hz << ")  [in hull]:\n"
+             << "      a   = " << fields.a(hx, hy, hz) << "\n"
+             << "      V_w = " << fields.V_w(hx, hy, hz) << " m/s\n";
+   if (fields.b)  { std::cout << "      b   = " << fields.b(hx, hy, hz) << "\n"; }
+   if (fields.Dc) { std::cout << "      Dc  = " << fields.Dc(hx, hy, hz) << " m\n"; }
+   std::cout << std::flush;
+}
+
 }  // namespace
 
 // =========================================================================
@@ -1824,7 +2048,28 @@ int main(int argc, char *argv[])
    //     structs live at outer scope so the DOF-init below sees whichever
    //     the law selected; exactly one is filled.
    // -----------------------------------------------------------------
-   spatial::SpatialFrictionResolver     resolver;
+   // Phase 3 (thermal port): open the optional 3-D friction sidecar BEFORE the
+   // resolver so its readers are validated at setup.  Null when the
+   // [friction.rate_state.sidecar] block is absent -- and null is exactly what
+   // the resolver's legacy path expects, so no branch is needed here.
+   // LSW configs carry no [friction.rate_state] block at all.
+   std::shared_ptr<const spatial::RateStateSidecarFields> rs_sidecar;
+   if (!is_lsw && cfg.rate_state.has_value())
+   {
+      rs_sidecar = MakeRateStateSidecarFields(cfg.rate_state->sidecar);
+      if (rs_sidecar && rank == 0)
+      {
+         std::cout << "[spatial_dyn] friction sidecar: "
+                   << cfg.rate_state->sidecar.path << " (a='"
+                   << cfg.rate_state->sidecar.a_field << "', V_w='"
+                   << cfg.rate_state->sidecar.V_w_field << "', "
+                   << (cfg.rate_state->sidecar.far_field_clamp
+                       ? "clamp" : "abort")
+                   << " out-of-hull)\n";
+      }
+   }
+
+   spatial::SpatialFrictionResolver     resolver(rs_sidecar);
    spatial::SlipWeakeningPerDOFParams   lsw;  // filled iff is_lsw
    spatial::RateStatePerDOFParams       rs;   // filled iff !is_lsw
    if (is_lsw)
@@ -2410,6 +2655,19 @@ int main(int argc, char *argv[])
             }
          }
       }
+      // Phase 3 (thermal port): the sidecar-sourced a / V_w summary.  Collective
+      // (MPI_Allreduce inside), so it must sit OUTSIDE any rank==0 branch and
+      // every rank must reach it.  `rs` is only filled on the !is_lsw path.
+      if (!is_lsw && rs_sidecar)
+      {
+         PrintFrictionSidecarSummary(rs, *rs_sidecar, cfg.hypocenter,
+                                     cfg.nucleation
+#ifdef MFEM_USE_MPI
+                                     , comm
+#endif
+                                     , rank);
+      }
+
       // PLAN DEVIATION (documented): PrintDerivedAndCheck is LSW-only (it reads
       // lsw.mu_s/mu_d/d_c) and would abort on an RS run; the RS overload
       // PrintDerivedAndCheckRS prints RS-grounded derived quantities (L_nuc =

@@ -35,7 +35,9 @@
 
 #include <array>
 #include <cmath>     // std::abs/std::tanh in inline SCECBoxcar (req 5)
+#include <functional>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -522,6 +524,46 @@ struct FrictionDepthProfileSpec
 /// rows, a duplicate depth, a non-finite field, or a non-positive `a` value.
 FrictionDepthProfile1D LoadFrictionDepthProfileCSVs(const FrictionDepthProfileSpec& spec);
 
+/// `[friction.rate_state.sidecar]` block — per-DOF `a` and `V_w` (and,
+/// optionally, `b` / `Dc`) sampled from a 3-D `data_projection_v1` HDF5
+/// sidecar, exactly as `[stress]` and `[velocity]` already do.
+/// (PLAN_thermal_case2_mixedflux_port_2026-07-08.md Phase 3.)
+///
+/// Motivation: the SAFS v3_4_x THERMAL decks carry temperature-zoned
+/// `rs_a(x,y,z)` / `rs_srW(x,y,z)` fields derived from the SCEC Community
+/// Thermal Model.  Those are 3-D fields; neither the scalar defaults, the
+/// 1-D `depth_profile` CSVs, nor the `boxcar_taper` rules can express them.
+/// SeisSol reads the very same two fields through ASAGI, so MFEM and SeisSol
+/// sample identical friction.
+///
+/// Mutually exclusive with `[friction.rate_state.depth_profile]` — both seed
+/// `a`/`b`, so a config that sets both is ambiguous and the parser aborts.
+///
+/// Absent block ⇒ `enabled == false` ⇒ the resolver is byte-identical to the
+/// pre-sidecar path (the TPV / BP5 / existing-SAFS regression contract).
+struct FrictionSidecarSpec
+{
+   bool        enabled         = false;
+   std::string path;                        ///< required when the block is present
+   std::string a_field         = "rs_a";    ///< dataset under /fields
+   std::string V_w_field       = "rs_srW";
+   std::string b_field;                     ///< "" ⇒ keep the resolved b
+   std::string Dc_field;                    ///< "" ⇒ keep the resolved Dc
+   /// true ⇒ `OOBPolicy::Clamp` (ASAGI nearest-edge hold) for queries outside
+   /// the sidecar hull; false ⇒ `OOBPolicy::Abort`.
+   ///
+   /// R-002: defaults to FALSE, matching `VelocitySpec::far_field_clamp` and
+   /// `DataField3D`'s own `OOBPolicy::Abort` (the schema-v1 interpolation-only
+   /// contract).  Friction is resolved ONLY at fault DOFs — unlike the velocity
+   /// sidecar, which is queried across the whole mesh including the far-field
+   /// absorbing box that genuinely pokes outside the CVM hull.  A friction
+   /// sidecar that covers the fault therefore never needs clamping; one that
+   /// triggers clamping does NOT cover the fault, and that must abort loudly
+   /// rather than silently edge-hold `a` / `V_w` on the uncovered facets.
+   /// The SAFS configs set it explicitly.
+   bool        far_field_clamp = false;
+};
+
 /// Rate-and-state evolution-law selector (Phase 6 req 4).  Default AgingLaw
 /// (TPV102 / SAFS).  SlipLawStrongRateWeakening is TPV104 (FVW): per-QP V_w +
 /// the weakening friction f_w (= muW) feed the slip-law-SRW analytic step.
@@ -545,6 +587,7 @@ struct RateStateBlock
    real_t V_w_default        = 0.1;   ///< SRW weakening velocity (TPV104 V_w_in); SRW only
    std::vector<SpatialRule>  spatial;
    FrictionDepthProfileSpec  depth_profile;   // Phase 11b: depth-varying a/b (optional)
+   FrictionSidecarSpec       sidecar;         // Phase 3 (thermal port): 3-D a/V_w (optional)
 };
 
 // =====================================================================
@@ -771,9 +814,82 @@ struct RateStatePerDOFParams
                  ///< filled to V_w_default / per-rule V_w like `a`).
 };
 
+/// Loaded 3-D friction fields for `[friction.rate_state.sidecar]`, handed to
+/// `SpatialFrictionResolver` by the driver.
+/// (PLAN_thermal_case2_mixedflux_port_2026-07-08.md Phase 3.)
+///
+/// DEVIATION D-A from the plan text: the plan wrote these members as
+/// `std::unique_ptr<DataField3D>`.  Storing the reader type here would force
+/// `spatial_friction.cpp` to include `io/data_field_3d.hpp` and therefore to
+/// link `DATA_FIELD_3D_OBJ` + `HDF5_LIBS` into every one of the ~15 Makefile
+/// targets that link `SPATIAL_FRICTION_OBJ` (e.g. `seas_test_spatial_friction_
+/// config`, which links neither).  Type-erasing behind `std::function` keeps
+/// the friction TU free of HDF5 while preserving every semantic the plan
+/// specifies — including `if (fields->b)`, since `std::function` and
+/// `unique_ptr` share the same explicit-bool contract.  The idiom matches
+/// `DepthProfile1DMaterial::eval_at_xyz` (dynamic/heterogeneous_material.hpp)
+/// and `DepthProportionalToShearModulusStressSource::MuAtFn`
+/// (spatial/code/spatial_stress.hpp).
+///
+/// The driver owns the underlying `DataField3D` readers (captured by value in
+/// the callables via `shared_ptr`), so the evaluators outlive the resolver.
+struct RateStateSidecarFields
+{
+   /// (x, y, z) in canonical CRS (UTM 11 N, metres) -> field value.
+   using FieldFn = std::function<real_t(real_t, real_t, real_t)>;
+
+   FieldFn a;     ///< REQUIRED when the struct is supplied
+   FieldFn V_w;   ///< REQUIRED when the struct is supplied
+   FieldFn b;     ///< optional; empty ⇒ keep the already-resolved b
+   FieldFn Dc;    ///< optional; empty ⇒ keep the already-resolved Dc
+
+   /// Inclusive data hull `{xmin, xmax, ymin, ymax, zmin, zmax}` of the
+   /// underlying sidecar, copied from `DataField3D::BBox()` at load time.
+   /// All fields of one schema-v1 sidecar share a grid, so one bbox covers all.
+   ///
+   /// R-001: DIAGNOSTICS MUST CONSULT THIS BEFORE SAMPLING.  Under
+   /// `OOBPolicy::Clamp` an out-of-hull query silently returns a nearest-edge
+   /// value, and for the SCEC CTM CASE2 field those edge values are EXACTLY the
+   /// hypocentre anchors (`a = 0.015`, `V_w = 0.05`) that the acceptance gate
+   /// checks — so an out-of-hull sample reads as a pass.  Under
+   /// `OOBPolicy::Abort` the same query would kill the run from inside a
+   /// diagnostic.  Neither is acceptable; gate on `InHull` instead.
+   ///
+   /// The default (all zeros) makes `InHull` reject essentially everything,
+   /// which is the conservative direction: a caller that forgets to set the
+   /// bbox gets "outside the hull", never a spurious pass.
+   std::array<real_t, 6> bbox = {{0.0, 0.0, 0.0, 0.0, 0.0, 0.0}};
+
+   /// true ⇒ the evaluators clamp out-of-hull queries (`OOBPolicy::Clamp`);
+   /// false ⇒ they abort.  Recorded so diagnostics can say WHY they refused.
+   bool clamps_out_of_hull = false;
+
+   /// True iff `(x, y, z)` lies inside `bbox` (inclusive on every face).
+   bool InHull(real_t x, real_t y, real_t z) const
+   {
+      return x >= bbox[0] && x <= bbox[1]
+             && y >= bbox[2] && y <= bbox[3]
+             && z >= bbox[4] && z <= bbox[5];
+   }
+};
+
 class SpatialFrictionResolver
 {
 public:
+   /// Legacy / TPV / BP5 path: no sidecar.  Byte-identical to the
+   /// pre-Phase-3 resolver.
+   SpatialFrictionResolver() = default;
+
+   /// Sidecar path: `sidecar` supplies per-DOF `a` and `V_w` (and optionally
+   /// `b` / `Dc`) sampled at each fault DOF's coordinates.  A null pointer is
+   /// accepted and is equivalent to the default constructor, so the driver can
+   /// pass an unconditionally-built `shared_ptr` that is null when the
+   /// `[friction.rate_state.sidecar]` block is absent.
+   ///
+   /// Aborts if a non-null `sidecar` is missing either required evaluator.
+   explicit SpatialFrictionResolver(
+      std::shared_ptr<const RateStateSidecarFields> sidecar);
+
    SlipWeakeningPerDOFParams ResolveSlipWeakening(
       const SlipWeakeningBlock& cfg,
       const Vector&             dof_coords_3d,
@@ -800,6 +916,11 @@ public:
       mfem::Mesh&               mesh,
       const PorePressureSpec&   pp,
       const Vector&             sigma_n_total_per_dof) const;
+
+private:
+   /// Null ⇒ no sidecar (the legacy path).  Const-qualified because
+   /// `ResolveRateState` is const and only reads the evaluators.
+   std::shared_ptr<const RateStateSidecarFields> sidecar_;
 };
 
 // =====================================================================

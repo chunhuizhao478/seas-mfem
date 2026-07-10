@@ -1,0 +1,204 @@
+# =========================================================================
+# SAFS v3_4_1 RSSRW PREFERRED THERMAL CASE2 — MFEM port of the SeisSol deck
+#   ~/Downloads/seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2
+#   (FL=103, CTM temperature-zoned rs_a/rs_srW via ASAGI, f_w=0, Andersonian
+#   k=1.8 effective stress, statewide CVM) run with MFEM mixed-flux + RK.
+#   "Do what SeisSol did, but with mixed flux (SeisSol has none)."
+#
+# Plan: safs/project_7.0_preferred/document/
+#         PLAN_thermal_case2_mixedflux_port_2026-07-08.md
+# =========================================================================
+# PARITY ARM (decision D1).  The MFEM-only sigma_n strength floor is DISABLED by
+# OMITTING `sigma_n_strength_floor_pa` (the parser REJECTS an explicit negative
+# value; absent == disabled).  The floor has NO SeisSol analogue and is NOT inert
+# on this fault: the Andersonian field's min sigma_n is 2.15 MPa, so the usual
+# 10 MPa floor would make shallow facets STRONGER than SeisSol's.
+#
+# If the run shows the shallow trace-cell runaway documented in the PRE_k_2_5
+# CASE2 post-mortem (isolated cells at sigma_n 0.1-5 MPa sliding ~4 m/s
+# indefinitely, visible in the first fault snapshots), switch to the sibling
+# ..._THERMAL_CASE2_snfloor10.toml, which differs ONLY in that key and in
+# [output].output_dir.
+#
+# This is NOT a bit-for-bit reproduction of SeisSol: SeisSol runs ADER-DG
+# order 4 (p=3) with clustered LTS and a pure Godunov flux; this config runs
+# p=1 global time stepping with a central flux on fault-adjacent faces.  The
+# INPUTS transfer exactly; the DISCRETIZATION is the experimental variable.
+#
+# Run (from miniapps/seas; needs the safstags mesh + all THREE sidecars):
+#   mpirun -np <N> ./seas_spatial_dyn_driver \
+#     --config safs/project_7.0_preferred/config/spatial_friction_safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2.toml \
+#     --print-derived
+#
+# Sidecars (all gitignored; regenerate or scp):
+#   velocity : velocity/code/build_pref_velocity_sidecar.py  --in safs_material_cvm.nc
+#   stress   : seisol_quakeworx/toolbox/on_fault_stress_projection_csm/
+#              csm_stress_nc_to_mfem_hdf5.py --in safs_stress_andersonian_k1.8.nc
+#   friction : friction/code/build_pref_friction_sidecar.py --in safs_friction_thermal_case2.nc
+#
+# Schema: safs/project_7.0_alternative/document/spatial_friction_config_schema.md
+
+[meta]
+schema_version = 1
+law            = "rate_state"
+description    = "MFEM port of seisol_quakeworx/safs_seisol_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2: FL=103 (RS slip law + strong rate weakening), CTM temperature-zoned rs_a/rs_srW via [friction.rate_state.sidecar], f_w=0, Dc=0.10 m, b=0.019, V_init=1e-12; Andersonian C1 k=1.8 effective stress (sidecar_hdf5, P_p_pa=0); statewide muscal CVM (interior_flux=matrix, far_field_clamp); SCEC compact-bell nucleation dtau_s=75 MPa R=2000 m T_nuc=1 s at the on-fault 10 km hypocentre; deep19km safstags mesh; MIXED FLUX (adjacent) + RK4; tfinal 150 s.  Parity arm: sigma_n strength floor DISABLED."
+
+[material_constant_fallback]
+# Fallback only (consumed solely with --no-sidecar-material, which production
+# jobs must NOT pass).  The CVM sidecar is the production material.
+lambda = 32.0e9   # Pa
+mu     = 32.0e9   # Pa
+rho    = 2670.0   # kg/m^3
+
+[pore_pressure]
+# The Andersonian nc is ALREADY EFFECTIVE — its own global attribute reads
+# "SeisSol compression-NEGATIVE; effective (hydrostatic P_p removed)".
+# ProjectFaultPreStress subtracts P_p UNCONDITIONALLY, so a non-zero P_p_pa
+# here would double-subtract.
+P_p_pa            = 0.0
+P_p_grad_pa_per_m = 0.0
+# MFEM-internal clamp on sigma_n_eff (no SeisSol equivalent).  INERT on this
+# fault: the minimum sigma_n over all 172,593 fault facets is 2.15 MPa.
+min_sigma_n_pa    = 1.0e6
+
+[mesh]
+# safv4_deep19km_sub500m_flattop_nwtrim_fixed_opt, gmsh v2.2 ASCII, safstags
+# (fault=101, top=102, bottom=103, sides=104).  Its .puml.h5 sibling is
+# sha256-identical to the deck's mesh_preferred.puml.h5, so MFEM and SeisSol
+# run the SAME mesh: 250,588 nodes, 1,241,419 tets, 172,593 fault facets.
+path  = "safs/project_7.0_preferred/meshing_deep19km/results/safv4_deep19km_sub500m_flattop_nwtrim_fixed_opt_safstags.msh"
+order = 1                                  # DECISION D2 (SeisSol runs p3)
+
+[velocity]
+# Statewide muscal CVM, rebuilt from the deck's own safs_material_cvm.nc
+# (452 x 361 x 194).  far_field_clamp is MANDATORY: the mesh's far-field
+# absorbing corners poke outside the CVM hull by <= 6.2 km (x high) and
+# <= 10.3 km (y low), exactly as SeisSol relies on ASAGI's edge clamp.
+use_sidecar     = true
+model           = "multiscale_statewise"
+dataset_root    = "safs/project_7.0_preferred"
+override_path   = "safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/velocity_safs.h5"
+far_field_clamp = true
+
+[material]
+# `kind` is a GATE ONLY: interior_flux="matrix" forbids [material].kind="constant".
+#
+# R-003: `sidecar_path` below is parsed and checked non-empty, then DISCARDED.
+# NOTHING opens it (grep cfg.material.sidecar_path: parsed at
+# spatial_friction.cpp parse_material, verified non-empty, never read).  The
+# heterogeneous material is loaded ENTIRELY from the [velocity] block above.
+# To change the material, change [velocity].override_path — editing the path
+# below has NO effect on the run.
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/velocity_safs.h5"
+
+[stress]
+# Andersonian C1 k=1.8, hydrostatic Pp removed, NO overpressure; converted from
+# the deck's safs_stress_andersonian_k1.8.nc with a global sign flip to MFEM's
+# compression-POSITIVE convention.  Verified at the hypocentre facet (143.7 m
+# from the centre, z = -9932 m): sigma_n = 169.83 MPa, mu_app = 0.175 < f_0.
+kind         = "sidecar_hdf5"
+sidecar_path = "safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/safs_stress_andersonian_k1.8_mfem.h5"
+
+[numerics]
+# MIXED FLUX: matrix (heterogeneous CVM) + adjacent central flux + RK4.
+# Central flux is non-dissipative and UNSTABLE under ADER -> rk4/rk45 mandatory
+# (ComputeMaxDt and the driver's MatrixMixedFluxUnderAder guard both abort).
+# NOTE: --cfl-dg-safety is INERT on the RK path (RkCflFactor governs).
+ader_order      = 2                        # ignored on the RK path
+mixed_flux      = "adjacent"
+interior_flux   = "matrix"
+time_integrator = "rk4"                    # DECISION D3
+cfl             = 0.5                      # = SeisSol CFL
+use_pml         = false
+
+[time]
+tfinal     = "150s"                        # = SeisSol EndTime
+t_initial  = 0.0
+dt_initial = "auto"
+dt_max     = "0.1s"                        # = SeisSol FixTimeStep
+
+[output]
+output_dir               = "output_safs_v3_4_1_RSSRW_PREFERRED_THERMAL_CASE2"
+restart_prefix           = "cp"
+paraview_volume          = "off"
+paraview_bulk            = "off"
+paraview_fault           = "hdf5"
+paraview_fault_dt        = "4.0s"          # = SeisSol Elementwise printtimeinterval_sec
+paraview_fault_zfp_tol   = 1.0e-12
+paraview_free_surface    = "vtu"
+paraview_free_surface_dt = "4.0s"          # = SeisSol SurfaceOutputInterval
+max_snapshots            = 5000
+checkpoint_every_steps   = 10000
+
+[nucleation]
+kind = "gradual_overstress_compact_circular"
+
+[nucleation.gradual_overstress_compact_circular]
+# = SeisSol Tnuc_s = 75e6 * exp(r^2/(r^2 - R^2)) for r < R, 0 otherwise;
+#   smoothStep ramp over [s_0, s_0 + t_0] = [0, 1] s.  Strike-only
+#   (Tnuc_n = Tnuc_d = 0), which is what CompactCircularGradualOverstress does.
+# Centre = the on-fault point at EXACTLY 10 km depth closest to the
+#   deck-lineage geographic target (609062.8722, 3709528.1324, -10000.0).
+#
+# MARGINS ARE THIN (the deck header flags this):
+#   barrier   S_E = a*sigma_n*ln(V_dyn/V_init) = 0.015 * 169.83e6 * 27.631
+#                 = 70.39 MPa  -> 75/70.39 = x1.065
+#   static excess (f_0 - mu_app)*sigma_n      = 72.11 MPa -> x1.040 (BINDING)
+# If nucleation is sluggish, raise delta_tau_pa to 85.0e6 (x1.21 / x1.18)
+# BEFORE touching radius_m or the hypocentre.
+center_x_m   =  609062.8722
+center_y_m   = 3709528.1324
+center_z_m   =  -10000.0
+radius_m     =    2000.0
+delta_tau_pa =      75.0e6
+T_nuc_s      = "1.0s"
+
+[friction]
+# DECISION D1 — PARITY ARM: the sigma_n strength floor is DISABLED.
+#
+# The disabled sentinel is expressed by OMITTING `sigma_n_strength_floor_pa`,
+# NOT by setting it negative: the parser rejects an explicit negative value
+# (spatial_friction.cpp parse_root; test T-30).  Leaving the key out yields the
+# struct default of -1.0, which each friction law reads as "keep my exact
+# pre-floor expression".
+#
+# See the header for the fallback arm (..._snfloor10.toml, 10 MPa).
+
+[friction.rate_state]
+state_evolution = "slip_law_strong_rate_weakening"   # = SeisSol FL=103
+f_w_default     = 0.0        # = RS_muW (zero residual friction; needs Phase 2)
+V_w_default     = 0.05       # FALLBACK ONLY (the sidecar governs every fault DOF)
+a_default       = 0.015      # FALLBACK ONLY; must stay < b_default for the parser
+b_default       = 0.019      # = RS_b   (constant; v1.1.3 reads no spatial rs_b)
+Dc_default      = 0.10       # = rs_sl0 (constant)
+V_0_default     = 1.0e-6     # = RS_sr0
+f_0_default     = 0.6        # = RS_f0
+V_init_default  = 1.0e-12    # = RS_iniSlipRate1
+sigma_n_default = 169.83e6   # FALLBACK ONLY (live sigma_n is per-DOF from the stress sidecar)
+eta             = "auto"     # 0.5*sqrt(mu*rho) per DOF == SeisSol radiation damping
+
+[friction.rate_state.sidecar]
+# SCEC CTM (shinevar2024) temperature zoning, CASE2: a-b = -0.004 for T <= 300 C
+# and rising to the zero crossing at exactly 350 C; V_w = 0.05 m/s below 350 C,
+# linear to 1000 m/s over 350-400 C.  NO shallow VS cap (that is CASE1).
+# Same two baked fields SeisSol reads through ASAGI, converted to the same
+# data_projection_v1 HDF5 the [velocity] sidecar uses (decision D5).
+#
+# b and Dc are CONSTANT in this deck (SeisSol v1.1.3 reads no spatial rs_b /
+# rs_muw), so b_field / Dc_field are intentionally omitted -> b_default and
+# Dc_default above govern.
+#
+# far_field_clamp: the CTM hull covers the fault bbox but not the far field.
+# Fault DOFs are all inside; off-fault queries edge-hold, matching the SeisSol
+# yaml's `!Any -> !ConstantMap` graceful degradation.
+path            = "safs/project_7.0_preferred/friction/results/thermal_case2_mfem/friction_safs.h5"
+a_field         = "rs_a"
+V_w_field       = "rs_srW"
+far_field_clamp = true
+
+# No [boundary] block: the driver falls back to fault=101, natural={102},
+#   absorbing={103,104}, which is exactly what the safstags mesh uses.
+# No [fault_geometry] block: defaults ref_normal=[0,-1,0], up=[0,0,1], which
+#   equals the deck's XRef/YRef/ZRef=(0,-1,0) with refPointMethod=1.
+# No [friction.rate_state.depth_profile]: mutually exclusive with [.sidecar].

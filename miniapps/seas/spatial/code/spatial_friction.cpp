@@ -703,6 +703,8 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
       else if (se == "slip_law_strong_rate_weakening" || se == "slip_law_srw")
       {
          out.state_evolution = StateEvolutionKind::SlipLawStrongRateWeakening;
+         // V_w > 0 is the LOAD-BEARING guard on this path: SlipLawSRWPsi
+         // forms (V/V_w)^8, so V_w = 0 divides by zero.  Never relax it.
          MFEM_VERIFY(out.V_w_default > 0.0,
                      "[friction.rate_state] state_evolution=slip_law_strong_"
                      "rate_weakening requires V_w_default > 0; got "
@@ -710,9 +712,22 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
          // R-004: f_w_default (the weakening friction muW) feeds
          // SlipLawSRWPsi directly; a non-physical value silently produces a
          // bad steady-state friction.  Guard the SRW path (aging ignores it).
-         MFEM_VERIFY(out.f_w_default > 0.0 && out.f_w_default < 1.0,
+         //
+         // f_w = 0 IS ADMISSIBLE (SAFS v3_2_0+ RSSRW decks; SeisSol RS_muW=0,
+         // the rate-state analogue of LSW mu_d = 0 -- zero residual friction,
+         // an energy-max idealization below Lachenbruch & Sass mu_d ~ 0.10).
+         // Why it is numerically safe: f_w enters ONLY additively,
+         //   f_ss(V) = f_w + (f_LV(V) - f_w) / (1 + (V/V_w)^8)^(1/8),
+         // so there is no division by f_w and no log(f_w).  The one thing
+         // psi_ss = a*ln((2 V_0/V)*sinh(f_ss/a)) needs is f_ss > 0.  With
+         // f_w = 0, f_ss = f_LV / (1+(V/V_w)^8)^(1/8) and
+         // f_LV = max(0, f_0 - (b-a) ln(V/V_0)) only reaches 0 at
+         // V = V_0 * exp(f_0/(b-a)) (= 1e-6 * e^150 for the SAFS scalars),
+         // which is unreachable.  Hence f_ss > 0 strictly and psi_ss is
+         // finite.  Negative f_w and f_w >= 1 remain rejected.
+         MFEM_VERIFY(out.f_w_default >= 0.0 && out.f_w_default < 1.0,
                      "[friction.rate_state] state_evolution=slip_law_strong_"
-                     "rate_weakening requires f_w_default in (0,1); got "
+                     "rate_weakening requires f_w_default in [0,1); got "
                      << out.f_w_default);
       }
       else
@@ -773,6 +788,18 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
       }
    }
 
+   // The 1-D `depth_profile` CSVs and the 3-D `sidecar` HDF5 both seed per-DOF
+   // a (and b).  A config that supplies both is ambiguous, so reject it HERE --
+   // before `depth_profile` opens its CSVs -- otherwise a bad-CSV abort would
+   // mask the real error and a *good*-CSV config would abort with a misleading
+   // message from the wrong guard.  Presence of the table is exactly the
+   // `enabled` condition both parsers below use.
+   MFEM_VERIFY(!(rs_tbl.contains("sidecar")
+                 && rs_tbl.contains("depth_profile")),
+               "[friction.rate_state] '[friction.rate_state.sidecar]' and "
+               "'[friction.rate_state.depth_profile]' are mutually exclusive: "
+               "both seed per-DOF a (and b).  Remove one.");
+
    // Phase 11b: optional depth profile for a(z) / b(z) from two CSV files.
    // When present, the resolver seeds per-DOF a/b from the profile and the
    // scalar a_default/b_default become an unused fallback (the a<b default
@@ -802,6 +829,40 @@ void parse_rate_state(const toml::value& rs_tbl, RateStateBlock& out)
       out.depth_profile.profile =
          LoadFrictionDepthProfileCSVs(out.depth_profile);
    }
+
+   // Phase 3 (PLAN_thermal_case2_mixedflux_port_2026-07-08.md): optional 3-D
+   // `data_projection_v1` HDF5 sidecar for per-DOF a / V_w (and optionally
+   // b / Dc).  Only the SPEC is parsed here; the HDF5 readers are opened by
+   // the driver (which owns them) and handed to SpatialFrictionResolver.
+   // Unlike depth_profile there is no parse-time file read: the file may be
+   // hundreds of MB and the resolver-side load already aborts on a bad file.
+   if (rs_tbl.contains("sidecar"))
+   {
+      const auto& sc = rs_tbl.at("sidecar");
+      out.sidecar.enabled   = true;
+      out.sidecar.path      = toml_str(sc, "path", std::string());
+      out.sidecar.a_field   = toml_str(sc, "a_field",   std::string("rs_a"));
+      out.sidecar.V_w_field = toml_str(sc, "V_w_field", std::string("rs_srW"));
+      out.sidecar.b_field   = toml_str(sc, "b_field",   std::string());
+      out.sidecar.Dc_field  = toml_str(sc, "Dc_field",  std::string());
+      // R-002: strict by default (OOBPolicy::Abort), matching [velocity] and the
+      // schema-v1 contract.  See FrictionSidecarSpec::far_field_clamp.
+      out.sidecar.far_field_clamp = toml_bool(sc, "far_field_clamp", false);
+
+      MFEM_VERIFY(!out.sidecar.path.empty(),
+                  "[friction.rate_state.sidecar] 'path' is required and must "
+                  "be non-empty (a data_projection_v1 HDF5 sidecar)");
+      MFEM_VERIFY(!out.sidecar.a_field.empty(),
+                  "[friction.rate_state.sidecar] 'a_field' must be non-empty");
+      MFEM_VERIFY(!out.sidecar.V_w_field.empty(),
+                  "[friction.rate_state.sidecar] 'V_w_field' must be non-empty");
+   }
+
+   // (R-005: the table-presence guard above rejected the ambiguous pair before
+   // any file was opened.  `ResolveRateState` re-checks it with a live
+   // MFEM_VERIFY for callers that build a RateStateBlock by hand, bypassing the
+   // parser.  A second MFEM_ASSERT here would compile away in release builds and
+   // give a false sense of coverage, so there is deliberately none.)
 
    // Defaults validator.
    MFEM_VERIFY(out.a_default > 0.0,
@@ -1980,7 +2041,8 @@ RateStatePerDOFParams resolve_rs_impl(
    const MaterialField&      material,
    MeshT&                    mesh,
    const PorePressureSpec&   pp,
-   const Vector&             sigma_n_total_per_dof)
+   const Vector&             sigma_n_total_per_dof,
+   const RateStateSidecarFields* sidecar)
 {
    const int N = dof_coords_3d.Size() / 3;
    MFEM_VERIFY(dof_coords_3d.Size() == 3 * N,
@@ -1991,6 +2053,13 @@ RateStatePerDOFParams resolve_rs_impl(
                "ResolveRateState: dof_to_attr.Size() != N");
    MFEM_VERIFY(sigma_n_total_per_dof.Size() == N || sigma_n_total_per_dof.Size() == 0,
                "ResolveRateState: sigma_n_total_per_dof.Size() must be 0 or N");
+   // The parser rejects the ambiguous pair, but the resolver is a PUBLIC entry
+   // point (unit tests and any future caller construct RateStateBlock directly).
+   // Re-assert here so a hand-built config cannot silently get "depth profile
+   // seeds a/b, then the sidecar overwrites them".
+   MFEM_VERIFY(!(sidecar && cfg.depth_profile.enabled),
+               "ResolveRateState: a friction sidecar and a depth profile were "
+               "BOTH supplied; they are mutually exclusive (both seed a/b).");
 
    // Phase 8 completion: boxcar_taper rate-state rules ARE now consumed (the
    // per-DOF loop below blends a / V_w from the rule's *_inner/*_outer endpoints
@@ -2049,6 +2118,19 @@ RateStatePerDOFParams resolve_rs_impl(
       real_t eta_i    = cfg.eta_default;
       real_t sn_i     = cfg.sigma_n_default;
       real_t V_w_i    = cfg.V_w_default;   // Phase 6 req 4 (SRW)
+
+      // Phase 3 (thermal port): the 3-D `data_projection_v1` sidecar overrides
+      // the scalar/depth-profile seed for a and V_w (and, when supplied, b and
+      // Dc).  Placed AFTER the seed and BEFORE the spatial-rule loop so an
+      // explicit `box` / `depth` / `boxcar_taper` rule still wins locally.
+      // `sidecar == nullptr` is the legacy path: nothing below changes.
+      if (sidecar)
+      {
+         a_i   = sidecar->a  (x, y, z);
+         V_w_i = sidecar->V_w(x, y, z);
+         if (sidecar->b)  { b_i  = sidecar->b (x, y, z); }
+         if (sidecar->Dc) { Dc_i = sidecar->Dc(x, y, z); }
+      }
 
       bool   eta_rule_set = false;
 
@@ -2184,6 +2266,26 @@ RateStatePerDOFParams resolve_rs_impl(
 
 }  // namespace
 
+SpatialFrictionResolver::SpatialFrictionResolver(
+   std::shared_ptr<const RateStateSidecarFields> sidecar)
+   : sidecar_(std::move(sidecar))
+{
+   // A supplied sidecar MUST carry both required evaluators.  A half-built
+   // struct would silently fall back to the scalar default for the missing
+   // field -- the exact silent-wrong-physics failure this guard exists to stop.
+   if (sidecar_)
+   {
+      MFEM_VERIFY(static_cast<bool>(sidecar_->a),
+                  "SpatialFrictionResolver: RateStateSidecarFields::a is "
+                  "empty; the 'a' evaluator is required when a sidecar is "
+                  "supplied.");
+      MFEM_VERIFY(static_cast<bool>(sidecar_->V_w),
+                  "SpatialFrictionResolver: RateStateSidecarFields::V_w is "
+                  "empty; the 'V_w' evaluator is required when a sidecar is "
+                  "supplied.");
+   }
+}
+
 RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
    const RateStateBlock&     cfg,
    const Vector&             dof_coords_3d,
@@ -2196,7 +2298,7 @@ RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
 {
    return resolve_rs_impl<ParMesh>(cfg, dof_coords_3d, dof_to_elem,
                                    dof_to_attr, material, pmesh, pp,
-                                   sigma_n_total_per_dof);
+                                   sigma_n_total_per_dof, sidecar_.get());
 }
 
 RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
@@ -2211,7 +2313,7 @@ RateStatePerDOFParams SpatialFrictionResolver::ResolveRateState(
 {
    return resolve_rs_impl<mfem::Mesh>(cfg, dof_coords_3d, dof_to_elem,
                                       dof_to_attr, material, mesh, pp,
-                                      sigma_n_total_per_dof);
+                                      sigma_n_total_per_dof, sidecar_.get());
 }
 
 }  // namespace spatial

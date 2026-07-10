@@ -523,6 +523,116 @@ void TestClassicalSlipLawLimit()
    TEST_ASSERT(ok == total, "All classical-slip-law-limit cases < 1e-10 rel");
 }
 
+// ---------------------------------------------------------------------------
+// PLAN_thermal_case2_mixedflux_port_2026-07-08.md Phase 2 (gap G2).
+//
+// muW (f_w) = 0 is the zero-residual-friction idealization used by the SAFS
+// v3_2_0+ RSSRW decks (SeisSol RS_muW = 0).  It must be numerically safe:
+// muW enters f_ss only additively, so there is no division by muW and no
+// log(muW).  What psi_ss = a*logsinh(2V0/V, f_ss/a) needs is f_ss > 0, which
+// holds because f_LV = max(0, f0 - (b-a) ln(V/V0)) only reaches 0 at the
+// unreachable V = V0*exp(f0/(b-a)).
+//
+// SAFS v3_4_1 THERMAL CASE2 scalars (VW plateau).
+// ---------------------------------------------------------------------------
+static constexpr real_t kA_SAFS  = 0.015;
+static constexpr real_t kB_SAFS  = 0.019;
+static constexpr real_t kV0_SAFS = 1.0e-6;
+static constexpr real_t kF0_SAFS = 0.6;
+static constexpr real_t kVw_SAFS = 0.05;
+
+void TestFwZeroPsiSSFiniteAndMonotone()
+{
+   std::cout << "\n[FW0-1] muW = 0: psi_ss finite + strictly decreasing in V\n";
+
+   // Log-spaced sweep over the plan's V in [1e-12, 10] m/s.
+   const int    n     = 400;
+   const real_t lo    = -12.0;   // log10(1e-12)
+   const real_t hi    = 1.0;     // log10(10)
+   int  finite_ok     = 0;
+   int  monotone_ok   = 0;
+   int  fss_positive  = 0;
+   real_t prev_psi    = 0.0;
+
+   for (int i = 0; i < n; ++i)
+   {
+      const real_t V = std::pow(10.0, lo + (hi - lo) * i / (n - 1));
+      const real_t psi = SlipLawSRWPsi::PsiSS_SRW(V, kVw_SAFS, kA_SAFS,
+                                                  kB_SAFS, kV0_SAFS,
+                                                  kF0_SAFS, /*muW=*/0.0);
+      if (std::isfinite(psi)) { ++finite_ok; }
+      if (i > 0 && psi < prev_psi) { ++monotone_ok; }
+      prev_psi = psi;
+
+      // f_ss > 0 is the property that keeps logsinh's argument positive.
+      const real_t f_LV = std::max(static_cast<real_t>(0),
+                                   kF0_SAFS - (kB_SAFS - kA_SAFS)
+                                   * std::log(V / kV0_SAFS));
+      const real_t r    = V / kVw_SAFS;
+      const real_t den  = std::pow(1.0 + IntegerPow8(r),
+                                   static_cast<real_t>(1.0 / 8.0));
+      const real_t f_ss = 0.0 + (f_LV - 0.0) / den;
+      if (f_ss > 0.0) { ++fss_positive; }
+   }
+
+   TEST_ASSERT(finite_ok == n,      "psi_ss finite at every V (muW = 0)");
+   TEST_ASSERT(monotone_ok == n - 1, "psi_ss strictly decreasing in V (muW = 0)");
+   TEST_ASSERT(fss_positive == n,   "f_ss > 0 at every V (muW = 0)");
+}
+
+void TestFwZeroMatchesReference()
+{
+   std::cout << "\n[FW0-2] muW = 0: PsiSS_SRW byte-matches the standalone reference\n";
+   int ok = 0, total = 0;
+   for (int i = 0; i < 60; ++i)
+   {
+      const real_t V = std::pow(10.0, -12.0 + 13.0 * i / 59.0);
+      const real_t got = SlipLawSRWPsi::PsiSS_SRW(V, kVw_SAFS, kA_SAFS, kB_SAFS,
+                                                  kV0_SAFS, kF0_SAFS, 0.0);
+      const real_t ref = reference_psi_ss(V, kVw_SAFS, kA_SAFS, kB_SAFS,
+                                          kV0_SAFS, kF0_SAFS, 0.0);
+      ++total;
+      if (BitIdentical(got, ref) || BothNonFinite(got, ref)) { ++ok; }
+   }
+   TEST_ASSERT(ok == total, "All muW = 0 psi_ss values bit-match the reference");
+}
+
+void TestFwZeroConsumesMuW()
+{
+   std::cout << "\n[FW0-3] muW = 0 is actually consumed (differs from muW = 0.1)\n";
+   // At V >> V_w the (V/V_w)^-8 denominator collapses f_ss toward muW, so the
+   // two settings must diverge.  A silent "muW ignored" bug would make them equal.
+   const real_t V = 1.0;   // 20 x V_w
+   const real_t psi_0 = SlipLawSRWPsi::PsiSS_SRW(V, kVw_SAFS, kA_SAFS, kB_SAFS,
+                                                 kV0_SAFS, kF0_SAFS, 0.0);
+   const real_t psi_1 = SlipLawSRWPsi::PsiSS_SRW(V, kVw_SAFS, kA_SAFS, kB_SAFS,
+                                                 kV0_SAFS, kF0_SAFS, 0.1);
+   TEST_ASSERT(std::isfinite(psi_0) && std::isfinite(psi_1),
+               "both psi_ss finite at V = 1 m/s");
+   TEST_ASSERT(psi_0 < psi_1,
+               "muW = 0 gives a lower psi_ss than muW = 0.1 (weaker steady state)");
+}
+
+void TestFwZeroAnalyticStepFinite()
+{
+   std::cout << "\n[FW0-4] muW = 0: analytic psi step stays finite over a sweep\n";
+   const real_t L = 0.10;   // SAFS Dc
+   int ok = 0, total = 0;
+   for (int i = 0; i < 40; ++i)
+   {
+      const real_t V   = std::pow(10.0, -12.0 + 13.0 * i / 39.0);
+      const real_t dt  = 1.0e-4;
+      const real_t psi0 = 0.86;   // ~psi_ini at V_init = 1e-12
+      const real_t psi = UpdateStateAnalyticSlipLawSRW(psi0, V, L, dt,
+                                                       kVw_SAFS, kA_SAFS,
+                                                       kB_SAFS, kV0_SAFS,
+                                                       kF0_SAFS, /*muW=*/0.0);
+      ++total;
+      if (std::isfinite(psi)) { ++ok; }
+   }
+   TEST_ASSERT(ok == total, "analytic step finite at every V (muW = 0)");
+}
+
 int main(int argc, char *argv[])
 {
    TestPsiSSEquation();
@@ -536,6 +646,11 @@ int main(int argc, char *argv[])
    TestNoVsafeClamp();
    TestIntegerPowerUnrolled();
    TestClassicalSlipLawLimit();
+   // Phase 2 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md — muW (f_w) = 0.
+   TestFwZeroPsiSSFiniteAndMonotone();
+   TestFwZeroMatchesReference();
+   TestFwZeroConsumesMuW();
+   TestFwZeroAnalyticStepFinite();
 
    TEST_PRINT_RESULTS();
    return (num_failed == 0) ? EXIT_SUCCESS : EXIT_FAILURE;

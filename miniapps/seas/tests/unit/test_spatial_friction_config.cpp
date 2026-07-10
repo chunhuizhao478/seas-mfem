@@ -1837,6 +1837,210 @@ static void T_FS_5_free_surface_negative_attr_aborts()
                "paraview_free_surface_attrs=[-1] must abort");
 }
 
+// ---------------------------------------------------------------------------
+// PLAN_thermal_case2_mixedflux_port_2026-07-08.md Phase 2 (gap G2).
+// The SRW f_w_default admissible interval is [0, 1), NOT (0, 1): the SAFS
+// v3_2_0+ RSSRW decks (and the SeisSol FL=103 deck this ports) set
+// RS_muW = 0.  V_w_default > 0 stays load-bearing.
+// ---------------------------------------------------------------------------
+
+// Build an SRW rate-state block with explicit f_w / V_w.  `f_w_lit` is emitted
+// verbatim so a test can inject "0.0" / "-0.1" / "1.0" without float
+// round-tripping.
+static std::string SRWBlock(const std::string& f_w_lit,
+                            const std::string& V_w_lit = "0.05")
+{
+   return std::string(
+      "[friction.rate_state]\n"
+      "state_evolution = \"slip_law_strong_rate_weakening\"\n"
+      "f_0_default = 0.6\n"
+      "V_0_default = 1.0e-6\n"
+      "eta = \"auto\"\n"
+      "a_default = 0.015\n"
+      "b_default = 0.019\n"
+      "Dc_default = 0.10\n"
+      "V_init_default = 1.0e-12\n"
+      "sigma_n_default = 169.83e6\n"
+      "f_w_default = ") + f_w_lit + "\n"
+      "V_w_default = " + V_w_lit + "\n";
+}
+
+static void T_60_srw_f_w_zero_parses()
+{
+   std::cout << "\n[T-60] SRW f_w_default = 0.0 parses (SeisSol RS_muW = 0)\n";
+   const std::string toml =
+      MinimalLSWHeader(1, "rate_state") + SRWBlock("0.0");
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.rate_state.has_value(), "rate_state block present");
+   TEST_ASSERT(cfg.rate_state->state_evolution ==
+               StateEvolutionKind::SlipLawStrongRateWeakening,
+               "state_evolution = slip_law_strong_rate_weakening");
+   TEST_ASSERT(cfg.rate_state->f_w_default == 0.0, "f_w_default = 0.0 round-trip");
+   TEST_ASSERT(cfg.rate_state->V_w_default == 0.05, "V_w_default = 0.05 round-trip");
+}
+
+static void T_61_srw_f_w_out_of_range_aborts()
+{
+   std::cout << "\n[T-61] SRW f_w_default outside [0,1) aborts\n";
+   TEST_ASSERT(ParseAbortsInChild(MinimalLSWHeader(1, "rate_state")
+                                  + SRWBlock("-0.1")),
+               "f_w_default = -0.1 must abort");
+   TEST_ASSERT(ParseAbortsInChild(MinimalLSWHeader(1, "rate_state")
+                                  + SRWBlock("1.0")),
+               "f_w_default = 1.0 must abort");
+}
+
+static void T_62_srw_V_w_zero_still_aborts()
+{
+   std::cout << "\n[T-62] SRW V_w_default = 0 still aborts (load-bearing guard)\n";
+   TEST_ASSERT(ParseAbortsInChild(MinimalLSWHeader(1, "rate_state")
+                                  + SRWBlock("0.0", "0.0")),
+               "V_w_default = 0 must abort even when f_w_default = 0");
+}
+
+static void T_63_aging_law_ignores_f_w()
+{
+   std::cout << "\n[T-63] aging_law does not police f_w_default\n";
+   // The aging path never reads f_w; a nonsense value must NOT abort there.
+   // Guards the "gate the check on the SRW branch" contract.
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock()
+                            + "f_w_default = -5.0\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.rate_state->state_evolution == StateEvolutionKind::AgingLaw,
+               "aging_law selected");
+   TEST_ASSERT(cfg.rate_state->f_w_default == -5.0,
+               "f_w_default passes through unchecked on the aging path");
+}
+
+// ---------------------------------------------------------------------------
+// PLAN_thermal_case2_mixedflux_port_2026-07-08.md Phase 3 (gap G1).
+// [friction.rate_state.sidecar] — spec parsing + the two guards.  The PATH IS
+// NOT OPENED at parse time (the sidecar is hundreds of MB in production), so
+// these tests can name a file that does not exist.
+// ---------------------------------------------------------------------------
+
+static void T_70_sidecar_parses_with_defaults()
+{
+   std::cout << "\n[T-70] [friction.rate_state.sidecar] parses; field defaults\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock()
+      + "[friction.rate_state.sidecar]\n"
+        "path = \"/nonexistent/friction_safs.h5\"\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   const auto& sc = cfg.rate_state->sidecar;
+   TEST_ASSERT(sc.enabled, "sidecar enabled by block presence");
+   TEST_ASSERT(sc.path == "/nonexistent/friction_safs.h5", "path round-trip");
+   TEST_ASSERT(sc.a_field   == "rs_a",   "a_field defaults to rs_a");
+   TEST_ASSERT(sc.V_w_field == "rs_srW", "V_w_field defaults to rs_srW");
+   TEST_ASSERT(sc.b_field.empty(),  "b_field defaults to empty (keep b_default)");
+   TEST_ASSERT(sc.Dc_field.empty(), "Dc_field defaults to empty (keep Dc_default)");
+   // R-002: strict by default, matching [velocity] and DataField3D's own
+   // OOBPolicy::Abort.  A friction sidecar is sampled ONLY at fault DOFs, so one
+   // that needs clamping does not cover the fault and must abort, not edge-hold.
+   TEST_ASSERT(!sc.far_field_clamp,
+               "far_field_clamp defaults to FALSE (strict, like [velocity])");
+}
+
+static void T_76_sidecar_far_field_clamp_matches_velocity_default()
+{
+   std::cout << "\n[T-76] sidecar far_field_clamp default == [velocity] default\n";
+   // Guards the R-002 invariant: the two schema-v1 consumers must not disagree
+   // about what an out-of-hull query means.
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock()
+      + "[friction.rate_state.sidecar]\npath = \"f.h5\"\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.rate_state->sidecar.far_field_clamp == cfg.velocity.far_field_clamp,
+               "[friction.rate_state.sidecar] and [velocity] share the "
+               "far_field_clamp default");
+   TEST_ASSERT(!cfg.velocity.far_field_clamp,
+               "[velocity].far_field_clamp is the strict default (false)");
+}
+
+static void T_71_sidecar_absent_disabled()
+{
+   std::cout << "\n[T-71] absent [.sidecar] block -> enabled = false\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock();
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(!cfg.rate_state->sidecar.enabled,
+               "sidecar disabled when the block is absent");
+}
+
+static void T_72_sidecar_overrides_round_trip()
+{
+   std::cout << "\n[T-72] sidecar field-name + clamp overrides round-trip\n";
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock()
+      + "[friction.rate_state.sidecar]\n"
+        "path = \"f.h5\"\n"
+        "a_field = \"A\"\n"
+        "V_w_field = \"VW\"\n"
+        "b_field = \"B\"\n"
+        "Dc_field = \"DC\"\n"
+        "far_field_clamp = false\n";
+   const auto& sc = ParseSpatialFrictionConfigString(toml).rate_state->sidecar;
+   TEST_ASSERT(sc.a_field == "A" && sc.V_w_field == "VW",
+               "a_field / V_w_field overrides");
+   TEST_ASSERT(sc.b_field == "B" && sc.Dc_field == "DC",
+               "b_field / Dc_field overrides");
+   TEST_ASSERT(!sc.far_field_clamp, "far_field_clamp = false round-trip");
+}
+
+static void T_73_sidecar_missing_path_aborts()
+{
+   std::cout << "\n[T-73] sidecar without 'path' (or with an empty one) aborts\n";
+   const std::string base = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock();
+   TEST_ASSERT(ParseAbortsInChild(base + "[friction.rate_state.sidecar]\n"),
+               "sidecar block with no 'path' must abort");
+   TEST_ASSERT(ParseAbortsInChild(base + "[friction.rate_state.sidecar]\n"
+                                         "path = \"\"\n"),
+               "sidecar block with an empty 'path' must abort");
+   TEST_ASSERT(ParseAbortsInChild(base + "[friction.rate_state.sidecar]\n"
+                                         "path = \"f.h5\"\na_field = \"\"\n"),
+               "sidecar with an empty 'a_field' must abort");
+   TEST_ASSERT(ParseAbortsInChild(base + "[friction.rate_state.sidecar]\n"
+                                         "path = \"f.h5\"\nV_w_field = \"\"\n"),
+               "sidecar with an empty 'V_w_field' must abort");
+}
+
+static void T_74_sidecar_and_depth_profile_mutually_exclusive()
+{
+   std::cout << "\n[T-74] [.sidecar] + [.depth_profile] together must abort\n";
+   // Both seed a/b, so the pair is ambiguous.  The guard is keyed on TABLE
+   // PRESENCE and fires BEFORE depth_profile opens its CSVs — which is what
+   // makes this test honest: the CSV paths below do not exist, yet the abort
+   // cannot be attributed to the CSV loader, because `depth_profile` alone
+   // with the same missing CSVs aborts too.  The discriminator is T-75: a
+   // sidecar-only config with a nonexistent HDF5 path must NOT abort (no file
+   // is opened at parse time), so only the pair triggers this guard.
+   const std::string base = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock();
+   const std::string dp =
+      "[friction.rate_state.depth_profile]\n"
+      "param_a_csv = \"/nonexistent/a.csv\"\n"
+      "param_a_minus_b_csv = \"/nonexistent/amb.csv\"\n"
+      "depth_units = \"km\"\n";
+   const std::string sc =
+      "[friction.rate_state.sidecar]\n"
+      "path = \"f.h5\"\n";
+
+   TEST_ASSERT(ParseAbortsInChild(base + dp + sc),
+               "depth_profile + sidecar must abort");
+   TEST_ASSERT(ParseAbortsInChild(base + sc + dp),
+               "sidecar + depth_profile must abort (order-independent)");
+}
+
+static void T_75_sidecar_path_not_opened_at_parse_time()
+{
+   std::cout << "\n[T-75] sidecar 'path' is NOT opened at parse time\n";
+   // The production sidecar is hundreds of MB; only the driver opens it.  A
+   // nonexistent path must therefore parse cleanly.  This is also the
+   // discriminator that makes T-74's abort attributable to the pair guard and
+   // not to a file-read failure.
+   const std::string toml = MinimalLSWHeader(1, "rate_state") + MinimalRSBlock()
+      + "[friction.rate_state.sidecar]\n"
+        "path = \"/definitely/does/not/exist/friction_safs.h5\"\n";
+   const auto cfg = ParseSpatialFrictionConfigString(toml);
+   TEST_ASSERT(cfg.rate_state->sidecar.enabled,
+               "sidecar with a nonexistent path parses (no parse-time open)");
+}
+
 int main(int, char**)
 {
 #ifndef SEAS_USE_TOML
@@ -1909,6 +2113,19 @@ int main(int, char**)
    T_FS_3_free_surface_illegal_value_aborts();
    T_FS_4_free_surface_dt_nonpositive_aborts();
    T_FS_5_free_surface_negative_attr_aborts();
+   // Phase 2 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md — SRW f_w = 0.
+   T_60_srw_f_w_zero_parses();
+   T_61_srw_f_w_out_of_range_aborts();
+   T_62_srw_V_w_zero_still_aborts();
+   T_63_aging_law_ignores_f_w();
+   // Phase 3 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md — friction sidecar.
+   T_70_sidecar_parses_with_defaults();
+   T_71_sidecar_absent_disabled();
+   T_72_sidecar_overrides_round_trip();
+   T_73_sidecar_missing_path_aborts();
+   T_74_sidecar_and_depth_profile_mutually_exclusive();
+   T_75_sidecar_path_not_opened_at_parse_time();
+   T_76_sidecar_far_field_clamp_matches_velocity_default();
    std::cout << "\n========================================\n";
    std::cout << "Phase 1 test_spatial_friction_config: "
              << num_passed << " / " << num_tests

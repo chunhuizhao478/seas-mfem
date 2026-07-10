@@ -25,11 +25,15 @@ document must be edited in the same commit.
 [time]                         # mandatory
 [output]                       # mandatory
 [nucleation]                   # optional (when absent, no nucleation perturbation)
-[nucleation.gradual_overstress]       # required when [nucleation].kind = "gradual_overstress"
+[nucleation.<kind>]                   # required; <kind> = gradual_overstress
+                                      #   | gradual_overstress_compact_circular
+                                      #   | instantaneous_overstress_circular
 [friction]                     # optional table; holds the law-agnostic sigma_n strength floor
 [friction.slip_weakening]      # required when [meta].law = "slip_weakening"
 [[friction.slip_weakening.spatial]]   # zero or more
 [friction.rate_state]          # required when [meta].law = "rate_state"
+[friction.rate_state.depth_profile]   # optional; XOR with [.sidecar]
+[friction.rate_state.sidecar]         # optional; XOR with [.depth_profile]
 [[friction.rate_state.spatial]]       # zero or more
 ```
 
@@ -253,9 +257,19 @@ for `0 < t < t₀`, and `1` for `t ≥ t₀` (where `τ = t − t₀`).  At any
 `t ≥ T_nuc_s` the perturbation has telescoped to its full value
 `F(r) · |Δτ|` and the accumulator is a no-op for the rest of the run.
 
-Rate-and-state runs (`law = "rate_state"`) ignore the `[nucleation]`
-block entirely — nucleation in the rate-state path is achieved via
-the `V_init` field, not via a stress accumulator.
+**Nucleation kinds.** `[nucleation] kind` selects one of three:
+`gradual_overstress` (Gaussian, above), `gradual_overstress_compact_circular`
+(SCEC compact bell `F = exp(r²/(r²−R²))`, strike-only) and
+`instantaneous_overstress_circular` (one-shot cosine-tapered patch at `t = 0`).
+Each requires the matching `[nucleation.<kind>]` sub-block.
+
+**Rate-and-state runs DO consume `[nucleation]`.**  An earlier revision of this
+document claimed `law = "rate_state"` ignores the block and that nucleation
+happens only through `V_init`.  That is wrong: `tpv104/configs/tpv104_spatial.toml`
+is `law = "rate_state"` + `kind = "gradual_overstress_compact_circular"` and is a
+validated SCEC benchmark, and the SAFS v3_4_1 THERMAL CASE2 config uses the same
+pairing.  `V_init` sets the *initial* slip rate (and hence `ψ_ini`); the
+`[nucleation]` accumulator is what drives the fault to failure.
 
 ---
 
@@ -373,9 +387,11 @@ Per-key overrides (NaN sentinel = "do not override"):
 - `f_0`, `V_0` — **rejected** (scalar aging-law globals; `V_0` is pinned to
   `FrictionSolver::V0` by the R-009 guard). Set them only in the defaults above.
 
-Rate-and-state nucleation is achieved through the `V_init` field, NOT
-through `[nucleation]` (the `[nucleation]` block is for LSW
-`gradual_overstress` only and is ignored when `law = "rate_state"`).
+`V_init` sets the initial slip rate (and hence the equilibrium `ψ_ini`).  It is
+NOT the nucleation mechanism: rate-and-state configs drive the fault to failure
+through the `[nucleation]` block, exactly as slip-weakening configs do.  (An
+earlier revision of this document said the opposite; see the `[nucleation]`
+section.)
 
 ### `[friction.rate_state.depth_profile]` (optional; Phase 11b)
 
@@ -410,6 +426,49 @@ deeper re-mesh needs no profile change). The resulting per-DOF `b > 0` is
 enforced by the resolver (`a − (a−b) ≤ 0` aborts, naming `param_a_minus_b.csv`).
 `--print-derived` echoes the CSV paths, the sampled depth ranges, the mesh fault
 max depth, and the VW↔VS transition depth (where `a − b = 0`).
+
+**Mutually exclusive with `[friction.rate_state.sidecar]`** (both seed `a`/`b`).
+The parser aborts, naming both tables, before either opens a file.
+
+### `[friction.rate_state.sidecar]` (optional; thermal port Phase 3)
+
+Per-DOF `a` and `V_w` (and, optionally, `b` and `Dc`) sampled from a 3-D
+`data_projection_v1` HDF5 sidecar — the same format `[stress]` and `[velocity]`
+use.  This is how the SAFS THERMAL decks carry their SCEC-CTM temperature zoning,
+which is a genuine 3-D field that neither the scalars, the 1-D `depth_profile`,
+nor a `boxcar_taper` rule can express.  SeisSol reads the very same two baked
+fields (`rs_a`, `rs_srW`) through ASAGI, so both codes sample identical friction.
+
+| Key               | Type | Default    | Validation                                     |
+|-------------------|------|------------|------------------------------------------------|
+| `path`            | str  | —          | required, non-empty.  **Not opened at parse time** (production files are hundreds of MB); the driver opens it at setup. |
+| `a_field`         | str  | `"rs_a"`   | non-empty; dataset name under `/fields`        |
+| `V_w_field`       | str  | `"rs_srW"` | non-empty; dataset name under `/fields`        |
+| `b_field`         | str  | `""`       | `""` ⇒ keep the resolved `b` (i.e. `b_default`) |
+| `Dc_field`        | str  | `""`       | `""` ⇒ keep the resolved `Dc`                  |
+| `far_field_clamp` | bool | `false`    | `true` ⇒ `OOBPolicy::Clamp` (ASAGI nearest-edge hold); `false` ⇒ out-of-hull query aborts. **Strict by default**, matching `[velocity].far_field_clamp` and `DataField3D`'s own `OOBPolicy::Abort`: friction is sampled only at fault DOFs, so a sidecar that needs clamping does not cover the fault and must fail loudly. SAFS sets it explicitly. |
+
+Precedence: the sidecar overrides the scalar seed, and `[[…spatial]]` rules
+override the sidecar.  So a `box` rule that sets `V_w` wins inside its box while
+the sidecar governs everywhere else.
+
+The per-DOF `a > b` allowance (R-011) covers the velocity-strengthening zone: the
+CTM `rs_a` reaches 0.0332 while `b_default` is 0.019.
+
+`--print-derived` reports, over all fault DOFs on all ranks, `min/mean/max` of
+`a` and `V_w`, the velocity-weakening DOF count (`a − b < 0`), and the sidecar
+values sampled at the nucleation centre (or `[hypocenter]`) — the online
+counterpart of the offline builder's range and hypocentre-anchor gates.
+
+The point sample is gated on the sidecar's data hull. If the sample point lies
+outside it, the diagnostic prints the hull and refuses to read, because under
+`far_field_clamp = true` a clamped read returns a nearest-edge value that is
+indistinguishable from a real sample — and for the CTM CASE2 field those edge
+values are exactly the anchors (`a = 0.015`, `V_w = 0.05`) the gate checks, so an
+out-of-hull point would read as a perfect pass.
+
+Absent block ⇒ the resolver is byte-identical to the pre-sidecar path.  Builder:
+`safs/project_7.0_preferred/friction/code/build_pref_friction_sidecar.py`.
 
 ---
 

@@ -195,6 +195,10 @@ TEST_SPATIAL_FRICTION_CONFIG_SRC     = tests/unit/test_spatial_friction_config.c
 TEST_SPATIAL_FRICTION_CONFIG_OBJ     = $(TEST_SPATIAL_FRICTION_CONFIG_SRC:.cpp=.o)
 TEST_SPATIAL_FRICTION_RESOLVER_SRC   = tests/unit/test_spatial_friction_resolver.cpp
 TEST_SPATIAL_FRICTION_RESOLVER_OBJ   = $(TEST_SPATIAL_FRICTION_RESOLVER_SRC:.cpp=.o)
+# Phase 3 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md:
+# [friction.rate_state.sidecar] — per-DOF a / V_w from a data_projection_v1 HDF5.
+TEST_SPATIAL_FRICTION_SIDECAR_SRC    = tests/unit/test_spatial_friction_sidecar.cpp
+TEST_SPATIAL_FRICTION_SIDECAR_OBJ    = $(TEST_SPATIAL_FRICTION_SIDECAR_SRC:.cpp=.o)
 
 # Phase 11b: depth-varying a(z)/b(z) two-CSV profile (interpolant + loader).
 TEST_FRICTION_DEPTH_PROFILE_SRC      = tests/unit/test_friction_depth_profile.cpp
@@ -849,8 +853,21 @@ DYNAMIC_HEADERS = dynamic/wave_state.hpp \
                   dynamic/fault_state_channel.hpp \
                   dynamic/tpv102_setup.hpp
 
+# Spatial (SAFS) headers.  spatial_friction.hpp defines SpatialFrictionConfig /
+# RateStateBlock / NucleationSpec, which nucleation_factory.o, spatial_nucleation.o,
+# spatial_print_derived.o, fault_face_flux.o and the spatial driver all embed BY
+# VALUE.  It was absent from SEAS_HEADERS, so a layout change to any of those
+# structs did NOT trigger a rebuild of those objects -- an incremental
+# `make <target>` then linked mixed-ABI objects and produced a binary that
+# segfaulted or silently mis-dispatched (observed 2026-07-09 on
+# seas_test_nucleation_factory after adding RateStateBlock::sidecar).
+# There is no auto-dependency generation in this Makefile, so list them.
+SPATIAL_HEADERS = spatial/code/spatial_friction.hpp \
+                  spatial/code/spatial_stress.hpp \
+                  spatial/code/spatial_velocity.hpp
+
 # All headers
-SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS)
+SEAS_HEADERS = $(FRICTION_HEADERS) $(DOMAIN_HEADERS) $(FAULT_HEADERS) $(SOLVER_HEADERS) $(IO_HEADERS) $(CHECKPOINT_HEADERS) $(CONSTITUTIVE_HEADERS) $(CONFIG_HEADERS) $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS)
 
 # Mesh generation tool
 GENERATE_MESH_SRC = tools/generate_bp2_mesh.cpp
@@ -887,6 +904,7 @@ SEQ_MINIAPPS = seas_test_friction_law seas_test_state_evolution seas_test_antipl
                seas_test_phaseh_godunov_flux_pool \
                seas_test_spatial_friction_config \
                seas_test_spatial_friction_resolver \
+               seas_test_spatial_friction_sidecar \
                seas_test_friction_depth_profile \
                seas_test_spatial_nucleation \
                seas_test_nucleation_factory \
@@ -1347,6 +1365,24 @@ seas_test_spatial_friction_resolver: $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
                                       $(DATA_FIELD_3D_OBJ)
 	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
 	    $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ) \
+	    $(SPATIAL_FRICTION_OBJ) \
+	    $(HETEROGENEOUS_MATERIAL_OBJ) \
+	    $(MATERIAL_COEFFICIENTS_OBJ) \
+	    $(DATA_FIELD_3D_OBJ) \
+	    $(MFEM_LIBS) $(HDF5_LIBS)
+	$(SEAS_POST_LINK_DEDUP_RPATH)
+
+# Phase 3 of PLAN_thermal_case2_mixedflux_port_2026-07-08.md: the
+# [friction.rate_state.sidecar] resolver path.  Same link set as the resolver
+# test -- the test builds DataField3D readers directly to mirror the driver's
+# MakeRateStateSidecarFields.
+seas_test_spatial_friction_sidecar: $(TEST_SPATIAL_FRICTION_SIDECAR_OBJ) \
+                                     $(SPATIAL_FRICTION_OBJ) \
+                                     $(HETEROGENEOUS_MATERIAL_OBJ) \
+                                     $(MATERIAL_COEFFICIENTS_OBJ) \
+                                     $(DATA_FIELD_3D_OBJ)
+	$(MFEM_CXX) $(MFEM_LINK_FLAGS) -o $@ \
+	    $(TEST_SPATIAL_FRICTION_SIDECAR_OBJ) \
 	    $(SPATIAL_FRICTION_OBJ) \
 	    $(HETEROGENEOUS_MATERIAL_OBJ) \
 	    $(MATERIAL_COEFFICIENTS_OBJ) \
@@ -3293,6 +3329,13 @@ $(TEST_SPATIAL_FRICTION_RESOLVER_OBJ): %.o: $(SRC)%.cpp \
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) -c $< -o $@
 
+$(TEST_SPATIAL_FRICTION_SIDECAR_OBJ): %.o: $(SRC)%.cpp \
+                                           spatial/code/spatial_friction.hpp \
+                                           io/data_field_3d.hpp \
+                                           $(MFEM_LIB_FILE) $(CONFIG_MK)
+	@mkdir -p $(@D)
+	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(TOML_FLAGS) $(HDF5_INCFLAGS) -c $< -o $@
+
 $(TEST_FRICTION_DEPTH_PROFILE_OBJ): %.o: $(SRC)%.cpp \
                                          spatial/code/spatial_friction.hpp \
                                          $(MFEM_LIB_FILE) $(CONFIG_MK)
@@ -3409,7 +3452,11 @@ $(TEST_PML_OBJ): %.o: $(SRC)%.cpp $(SEAS_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) -c $< -o $@
 
-$(FAULT_FACE_FLUX_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(MFEM_LIB_FILE) $(CONFIG_MK)
+# fault_face_flux.cpp includes spatial/code/spatial_friction.hpp, so it must
+# rebuild when that header changes (see the SPATIAL_HEADERS note above); the
+# $(DYNAMIC_HEADERS) list alone does not cover it.
+$(FAULT_FACE_FLUX_OBJ): %.o: $(SRC)%.cpp $(DYNAMIC_HEADERS) $(SPATIAL_HEADERS) \
+                             $(MFEM_LIB_FILE) $(CONFIG_MK)
 	@mkdir -p $(@D)
 	$(MFEM_CXX) $(MFEM_FLAGS) $(SEAS_INCLUDES) $(SEAS_EXTRA_CPPFLAGS) -c $< -o $@
 
@@ -4000,6 +4047,7 @@ test: test-friction test-state-evolution test-antiplane test-fault-operator \
       test-bimaterial-mixed-flux-homog-equivalence \
       test-phaseh-godunov-flux-pool \
       test-spatial-friction-config test-spatial-friction-resolver \
+      test-spatial-friction-sidecar \
       test-tpv205-friction \
       test-friction-depth-profile \
       test-tpv102-nuc-callback-parity test-seed-equilibrium-psi-rs \
@@ -4277,6 +4325,10 @@ test-spatial-friction-config: seas_test_spatial_friction_config
 
 test-spatial-friction-resolver: seas_test_spatial_friction_resolver
 	./seas_test_spatial_friction_resolver
+
+# Phase 3 (PLAN_thermal_case2): [friction.rate_state.sidecar] resolver path.
+test-spatial-friction-sidecar: seas_test_spatial_friction_sidecar
+	./seas_test_spatial_friction_sidecar
 
 test-friction-depth-profile: seas_test_friction_depth_profile
 	./seas_test_friction_depth_profile

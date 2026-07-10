@@ -157,6 +157,14 @@ safs/project_7.0_preferred/stress/results/csm_d12_rssrw_mfem/
 safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm/
 safs/project_7.0_alternative/stress/results/1000m_lcfar3000/
 
+# SAFS v3_4_1 THERMAL CASE2 MFEM sidecars (~1.3 GB total; regenerate with
+# velocity/code/build_pref_velocity_sidecar.py,
+# seisol_quakeworx/toolbox/on_fault_stress_projection_csm/csm_stress_nc_to_mfem_hdf5.py,
+# and friction/code/build_pref_friction_sidecar.py — or scp them).
+safs/project_7.0_preferred/velocity/results/multiscale_statewise_cvm_v3_4_1/
+safs/project_7.0_preferred/stress/results/andersonian_k1p8_mfem/
+safs/project_7.0_preferred/friction/results/
+
 # SAFS mesh STLs (regenerable from .ts via meshing pipeline).
 safs/project_7.0_alternative/meshing/results/stl_nwcut/
 

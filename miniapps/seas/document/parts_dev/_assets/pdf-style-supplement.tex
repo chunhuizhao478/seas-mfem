@@ -1,0 +1,88 @@
+% pdf-style-supplement.tex — extra Unicode->glyph maps for the TPV26/27 plan.
+% Loaded AFTER _assets/pdf-style.tex (which already maps · θ μ τ σ Δ ± ∓ ° ⊥ ⟂
+% ∈ ≈ ≡ ≤ ≥ ≠ ≪ ≫ × − → ↔ ⇒ ∞ √ ✓ ✗ ⁰ ⁻ ⁿ ⚠).  This file adds the Greek
+% letters, super/subscripts, vulgar fractions, integral, section sign and the
+% ž that the plan uses but the base header does not cover.
+%
+% Why \AtBeginDocument: pandoc's xelatex template loads `unicode-math`, which at
+% \begin{document} makes several of these codepoints (notably the vulgar
+% fractions ½ ⅓ ⅔ ¼, and the super/subscripts) catcode-ACTIVE math characters,
+% clobbering a plain preamble \newunicodechar and causing "Missing $ inserted"
+% when they appear in text (prose OR inside \texttt code spans).  Declaring our
+% maps in \AtBeginDocument — after unicode-math is loaded — runs them AFTER
+% unicode-math's own \begin{document} hook, so ours win.  (The base header's
+% Greek/relation maps survive because unicode-math sets only their mathcode, not
+% catcode, so they don't need this treatment — but wrapping everything is safe.)
+\usepackage{newunicodechar}   % harmless no-op if already loaded
+
+\AtBeginDocument{%
+  % ---- lowercase Greek ----
+  \newunicodechar{α}{\ensuremath{\alpha}}%
+  \newunicodechar{β}{\ensuremath{\beta}}%
+  \newunicodechar{γ}{\ensuremath{\gamma}}%
+  \newunicodechar{δ}{\ensuremath{\delta}}%
+  \newunicodechar{ε}{\ensuremath{\varepsilon}}%
+  \newunicodechar{η}{\ensuremath{\eta}}%
+  \newunicodechar{λ}{\ensuremath{\lambda}}%
+  \newunicodechar{ν}{\ensuremath{\nu}}%
+  \newunicodechar{ξ}{\ensuremath{\xi}}%
+  \newunicodechar{π}{\ensuremath{\pi}}%
+  \newunicodechar{ρ}{\ensuremath{\rho}}%
+  \newunicodechar{φ}{\ensuremath{\varphi}}%
+  \newunicodechar{ω}{\ensuremath{\omega}}%
+  \newunicodechar{ψ}{\ensuremath{\psi}}%
+  % ---- uppercase Greek ----
+  \newunicodechar{Ω}{\ensuremath{\Omega}}%
+  \newunicodechar{Σ}{\ensuremath{\Sigma}}%
+  \newunicodechar{Φ}{\ensuremath{\Phi}}%
+  % ---- superscripts / subscripts (base header maps only ⁰ ⁻ ⁿ) ----
+  \newunicodechar{²}{\ensuremath{{}^{2}}}%
+  \newunicodechar{³}{\ensuremath{{}^{3}}}%
+  \newunicodechar{₀}{\ensuremath{{}_{0}}}%
+  \newunicodechar{₁}{\ensuremath{{}_{1}}}%
+  \newunicodechar{₂}{\ensuremath{{}_{2}}}%
+  \newunicodechar{₃}{\ensuremath{{}_{3}}}%
+  \newunicodechar{⁸}{\ensuremath{{}^{8}}}%
+  % ---- vulgar fractions: plain ASCII text (unicode-math makes these active;
+  %      and \tfrac/\genfrac is fragile inside \texttt / code blocks anyway) ----
+  \newunicodechar{½}{1/2}%
+  \newunicodechar{⅓}{1/3}%
+  \newunicodechar{⅔}{2/3}%
+  \newunicodechar{¼}{1/4}%
+  % NB: use \intop, NOT \int — under unicode-math \int is \let to the active
+  % char ∫, so \newunicodechar{∫}{...\int...} recurses infinitely (a real hang).
+  \newunicodechar{∫}{\ensuremath{\intop}}%
+  % ---- misc text glyphs ----
+  \newunicodechar{§}{\S}%
+  \newunicodechar{←}{\ensuremath{\leftarrow}}%
+  \newunicodechar{ž}{\v{z}}%
+}
+
+% ---- Robust code-box: override pdf-style.tex's breakable tcolorbox `Shaded`.
+% This plan has long fenced code blocks that must break across pages; the
+% breakable tcolorbox loops on "Infinite glue shrinkage found in box being
+% split" and never finishes.  framed's `snugshade` (already loaded via
+% \usepackage{framed}, and pandoc's own default) page-breaks cleanly.  A second
+% \AtBeginDocument declared AFTER pdf-style.tex's runs later, so this wins. ----
+\usepackage{framed}
+\definecolor{shadecolor}{HTML}{F6F8FA}
+\AtBeginDocument{%
+  \ifcsname Shaded\endcsname
+    \renewenvironment{Shaded}{\begin{snugshade}}{\end{snugshade}}%
+  \fi
+}
+
+% ---- Wrap long lines inside code blocks instead of overflowing the margin.
+% Plan docs are full of 100+ char repo paths and CLI invocations; without this
+% every such line is an Overfull \hbox that runs off the page.  fvextra's
+% breaklines/breakanywhere covers BOTH pandoc's highlighted `Highlighting`
+% environment (a fancyvrb Verbatim) and untagged ``` fences (plain `verbatim`).
+% Must be loaded AFTER pandoc's own \DefineVerbatimEnvironment{Highlighting},
+% which the template emits near the top of the preamble — any -H header
+% qualifies.  The continuation hook (fvextra's default breaksymbolleft) marks
+% wrapped lines so a broken path is not mistaken for two paths.
+\usepackage{fvextra}
+\DefineVerbatimEnvironment{Highlighting}{Verbatim}%
+  {breaklines,breakanywhere,commandchars=\\\{\}}
+\RecustomVerbatimEnvironment{verbatim}{Verbatim}%
+  {breaklines,breakanywhere}

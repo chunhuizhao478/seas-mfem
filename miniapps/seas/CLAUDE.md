@@ -242,12 +242,34 @@ Tests: `pytest miniapps/seas/scripts/test_estimate_output_size.py` (28 currently
 
 ## Spatial driver nucleation mechanism
 
-`seas_spatial_dyn_driver` (the SAFS dynamic-rupture driver) supports a single nucleation kind: **`gradual_overstress`**.  It is a per-DOF shear-stress accumulator that ramps smoothly from 0 to a full-amplitude target `Δτ · F(r)` over `[0, T_nuc_s]`:
+`seas_spatial_dyn_driver` (the SAFS dynamic-rupture driver) supports **three** nucleation kinds, selected by `[nucleation] kind`:
+
+| `kind` | shape | used by |
+|--------|-------|---------|
+| `gradual_overstress` | Gaussian in (dip, strike), smoothStep ramp | SAFS v3.0.0 |
+| `gradual_overstress_compact_circular` | SCEC compact bell `F = exp(r²/(r²−R²))`, strike-only, smoothStep ramp | TPV102 / TPV104 / SAFS v3_4_1 |
+| `instantaneous_overstress_circular` | one-shot cosine-tapered patch at `t = 0` | TPV31 |
+
+Parser: `spatial/code/spatial_friction.cpp` (`parse_root`, the `[nucleation]` block).  Dispatch: `MakeNucleation` (`dynamic/nucleation_factory.cpp`) behind `INucleationMethod`.
+
+**Rate-state runs DO use `[nucleation]`.**  An earlier version of this file, and `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`, claimed the spatial driver had only `gradual_overstress` and that `law = "rate_state"` ignores the `[nucleation]` block.  Both claims are false: `tpv104/configs/tpv104_spatial.toml` is `law = "rate_state"` + `kind = "gradual_overstress_compact_circular"` and is a validated SCEC benchmark.
+
+`gradual_overstress` is a per-DOF shear-stress accumulator that ramps smoothly from 0 to a full-amplitude target `Δτ · F(r)` over `[0, T_nuc_s]`:
 
 - **Spatial factor** `F(r)`: Gaussian centred on `(center_x_m, center_y_m, center_z_m)` with e-fold radii `radius_dip_m` (down-dip) and `radius_strike_m` (along-strike).  `F = 1` at the centre; numerically zero outside `~3 · radius_*`.
 - **Temporal factor**: SCEC smoothStep function `smoothStep(t, t0) = 0` for `t ≤ 0`, `exp(τ²/(t·(t − 2·t0)))` for `0 < t < t0` (where `τ = t − t0`), `1` for `t ≥ t0`.  `C∞` everywhere except `t = 0`; no step discontinuity unlike one-shot overstress.
 - **Per-sub-step apply**: the resolver writes `ΔS(t, Δt) · F(r) · Δτ` into `DOFData[i].tau1_nuc` (dip) and `DOFData[i].tau2_nuc` (strike) every sub-step; summed over `[0, T_nuc_s]` the increments telescope to the full target.  At `t ≥ T_nuc_s` the accumulator is a no-op.
 
-User-facing schema: `[nucleation] kind = "gradual_overstress"` + `[nucleation.gradual_overstress]` sub-block.  Schema doc: `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`.  Workflow runbook: `safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md`.
+User-facing schema: `[nucleation] kind = "..."` + the matching `[nucleation.<kind>]` sub-block.  Schema doc: `safs/project_7.0_alternative/document/spatial_friction_config_schema.md`.  Workflow runbook: `safs/project_7.0_alternative/debug_document/spatial_workflow_safs_runbook_2026-05-18.md`.
 
-The native TPV104 (rate-state) and TPV205 (instantaneous-overstress LSW) drivers continue to use their own nucleation paths verbatim — `gradual_overstress` is the spatial-driver-specific choice and does NOT touch the TPV*/BP5 byte-exact regression contract.
+The native TPV104 (rate-state) and TPV205 (instantaneous-overstress LSW) *standalone* drivers continue to use their own nucleation paths verbatim — the spatial driver's `[nucleation]` block does NOT touch the TPV*/BP5 byte-exact regression contract.
+
+## Spatial driver friction sources
+
+`[friction.rate_state]` seeds per-DOF `a` / `b` / `V_w` from, in increasing precedence:
+
+1. the scalar `*_default` keys;
+2. **either** `[friction.rate_state.depth_profile]` (1-D `a(z)`, `(a−b)(z)` from two CSVs) **or** `[friction.rate_state.sidecar]` (3-D `a`, `V_w`, optionally `b`, `Dc` from a `data_projection_v1` HDF5) — the two are **mutually exclusive** and the parser aborts if both tables are present;
+3. `[[friction.rate_state.spatial]]` rules (`box` / `depth` / `region_attribute` / `boxcar_taper`), which override whatever the source above produced.
+
+The `sidecar` block exists for the SAFS THERMAL decks, whose `rs_a` / `rs_srW` are zoned by temperature (SCEC Community Thermal Model) and are therefore genuine 3-D fields.  SeisSol reads the same two baked fields through ASAGI.  MFEM reads **no NetCDF anywhere**: the driver links HDF5 only, and every gridded sidecar (material, stress, friction) is `data_projection_v1` HDF5.  See `safs/project_7.0_preferred/document/PLAN_thermal_case2_mixedflux_port_2026-07-08.md`.
